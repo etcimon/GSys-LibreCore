@@ -37,6 +37,12 @@ pub enum ObjectKind {
     Array,
     /// A DOM `Event` interned for listener re-entry (`clientX`/`preventDefault`).
     Event,
+    /// `HWEvent` from `g6b-hw`, interned on the same path as a `MouseEvent`.
+    HwEvent,
+    /// Live `platform.hw` (g6b-hw), chained like `window.document`. Shell only.
+    Hw,
+    /// Shell `platform` root. Not interned in iframe sessions.
+    Platform,
     /// Interned `window.pglite` factory (`PgLite()` / `attempt(dataDir)`).
     StoreFactory,
     /// Open store instance (`query` / `exec` / tx / close).

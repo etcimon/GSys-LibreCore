@@ -116,6 +116,12 @@ impl BoardSpec {
             ("http2", self.kernel.http.http2),
             ("proxy_js", self.kernel.http.proxy_js),
             ("http_serve", self.kernel.http.serve),
+            ("http_outbound", self.kernel.http.outbound),
+            ("hw", self.kernel.hw.enable),
+            ("hw_virtio_net", self.kernel.hw.virtio_net),
+            ("hw_ethernet", self.kernel.hw.ethernet),
+            ("hw_wifi", self.kernel.hw.wifi),
+            ("cli", self.kernel.cli.enable),
             ("wasm", self.kernel.wasm.enable),
             ("wasm_jit", self.kernel.wasm.jit),
             ("ui_svelte", self.kernel.ui == "svelte-d"),
@@ -192,6 +198,8 @@ fn apply_embedded(spec: &mut BoardSpec) {
     spec.kernel.display = "html-js".into();
     spec.kernel.js = "aot".into();
     spec.kernel.gr.enable = false;
+    spec.kernel.cli.enable = true;
+    spec.kernel.cli.boot = "cli".into();
     spec.kernel.proxy.enable = false;
     spec.kernel.proxy.gl = false;
     spec.kernel.wasm = Wasm::default();
@@ -202,6 +210,7 @@ fn apply_embedded(spec: &mut BoardSpec) {
         http2: false,
         proxy_js: false,
         serve: false,
+        outbound: false,
         files: HttpFiles::default(),
     };
     spec.kernel.params = BiosParams {
@@ -280,6 +289,7 @@ fn apply_appliance(spec: &mut BoardSpec) {
         http2: true,
         proxy_js: true,
         serve: true,
+        outbound: true,
         files: files_https_ui(false),
     };
     spec.kernel.params.clocks = true;
@@ -309,6 +319,8 @@ fn apply_appliance(spec: &mut BoardSpec) {
     spec.net_expose.mode = NetExposeMode::UntilDelegate;
     spec.net_expose.web = true;
     spec.loopback.enable = true;
+    spec.kernel.hw.enable = true;
+    spec.kernel.hw.virtio_net = true;
 }
 
 fn apply_desktop(spec: &mut BoardSpec) {
@@ -316,6 +328,8 @@ fn apply_desktop(spec: &mut BoardSpec) {
     spec.kernel.ui = "svelte-d".into();
     spec.kernel.gr.enable = true;
     spec.kernel.gr.backend = "virtio-gpu".into();
+    spec.kernel.cli.enable = true;
+    spec.kernel.cli.boot = "auto".into();
     spec.kernel.proxy.enable = true;
     spec.kernel.proxy.gl = true;
     spec.kernel.wasm = Wasm {
@@ -336,6 +350,7 @@ fn apply_desktop(spec: &mut BoardSpec) {
         http2: true,
         proxy_js: true,
         serve: true,
+        outbound: true,
         files: files_https_ui(true),
     };
     spec.kernel.params = BiosParams {
@@ -371,6 +386,8 @@ fn apply_desktop(spec: &mut BoardSpec) {
     spec.net_expose.web = true;
     spec.net_expose.ssh_holyc = true;
     spec.loopback.enable = true;
+    spec.kernel.hw.enable = true;
+    spec.kernel.hw.virtio_net = true;
 }
 
 fn apply_full_extras(spec: &mut BoardSpec) {

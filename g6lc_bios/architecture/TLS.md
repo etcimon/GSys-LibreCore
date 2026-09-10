@@ -16,7 +16,8 @@ crypto IR.
 | TLS 1.2 ClientHello | `g6b-tls::client_hello` | suites `c02b` ECDHE-ECDSA-AES128-GCM, `c02f` ECDHE-RSA-GCM, `003c` RSA-AES128-SHA256 |
 
 HolyC: `TlsHandshake`, `TlsClientHello`, `TlsServerHello`, `HttpsGet`,
-`HttpsServe`, `RsaVerify`, `EcdsaVerify`, `CertParse`, `NetOpenPort`.
+`HttpGet` (kernel path, plaintext GET on hw TCP), `HttpsServe`,
+`RsaVerify`, `EcdsaVerify`, `CertParse`, `NetOpenPort`.
 
 ServerHello (TLS 1.2 record, suites `c02f`/`c02b`/`003c`, stub certificate
 CN=`g6lc-bios`) is compiled when `kernel.tls.serve` or `http.files.https`.
@@ -28,3 +29,10 @@ Adapter ports (pre-`NET-DELEGATE` only): `net_expose.bios_https_port` (443) and
 
 Refuse: linking Botan/OpenSSL; compiling `kernel-spec/botan`; a BIOS netdev
 after Linux owns eth/wifi.
+
+Kernel `HttpsGet` / outbound `https:` **plans** in `g6b-http`, writes a
+`g6b-tls` ClientHello, and lowers the bytes onto `g6b-hw` TCP/IP
+(`via=hw-tcp`). `g6b-hw` does not speak TLS. Guest `HttpsGet` through
+the kernel is that fingerprint until B54. Plain `HttpGet` is the same
+path without ClientHello (HTTP/1.1 GET on the socket). See
+[`g6b-hw.md`](g6b-hw.md).

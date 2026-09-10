@@ -29,6 +29,16 @@ supervisor timer irq 5 with the scause interrupt bit. Every hart sets `sp` and
 geom is payload words; QEMU virt uses `-smp` + `virtio-gpu-device`
 (`virtio-gpu-gl-device` under `proxy.gl`, `--no-gl` fallback, `--vnc`
 frontend; never `-netdev`).
+**B93 `g6b-hw` (landed):** post-boot lazy `HwSession`, interned as
+`platform.hw` (not `window.hw`, not iframes). Isolated NAT / TCP+UDP /
+named host NIC. Display stays **VGA** until an internal probe (PCIe
+linear-fb → HDMI G6DS → virtio-gpu) is announced (`HW-DISP-SEL`). HTTP(S)
+fetch is a **kernel** path (`HttpGet`/`HttpsGet` / `kernel_fetch` / iframe
+outbound): `g6b-http` plans the URL, `g6b-tls` writes ClientHello, sockets
+are hw TCP (`via=hw-tcp`). HTTPS is not in `g6b-hw`. Pointer HID and
+USB-key listings live in `g6b-hw`. **`g6b-zealcli`:** VGA mouse-less
+ZealOS CLI (`kernel.cli.boot=auto` until GPU, then `LoadUI` → browser-ui).
+Docs: `architecture/g6b-hw.md`, `architecture/g6b-zealcli.md`.
 `g6b smoke` runs the S-mode payload on the host (SBI putchar/TIME + UART0 THR)
 until park. Hart 0 `wfi` takes irq 5 once (IRQ_TIMER). Secondary harts WFI after
 `satp`/`sp`/`stvec` with no tick. Unexpected traps print `TRAP-<scause>-<sepc>`

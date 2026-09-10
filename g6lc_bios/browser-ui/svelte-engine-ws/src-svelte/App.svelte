@@ -1,5 +1,10 @@
 <script lang="ts">
-  import { fetchBios, holycEval, registerEndpoint } from "./kernel.ts";
+  import { fetchBios, holycEval, registerEndpoint, onHwEvent } from "./kernel.ts";
+  let winOpen = false;
+  onHwEvent((ev) => {
+    const n = document.getElementById("hw-nat-status");
+    if (n && ev) n.textContent = String(ev.detail || ev.type || "");
+  });
   holycEval('Menu(\"main\")');
   registerEndpoint("/bios/custom", "POST");
   fetchBios("/bios/menu");
@@ -37,9 +42,48 @@
     <a id="tab-settings" class="bios-tab" href="#menu-settings" data-menu-link="settings" role="tab" tabindex="-1" aria-selected="false" on:click="{selectTab}">Settings</a>
   </nav>
   <p id="status" role="status">UI-BOOT</p>
+  <p id="hw-nat-status" role="status"></p>
   <p id="bios-nav">Main CPU Memory Uncore Devices Boot Settings</p>
   <p id="read-only-note">Read-only BoardSpec view. Editing, settings import, and flashing are unavailable here.</p>
   <button id="refresh" type="button" on:click="{refresh}">Refresh values</button>
+  <button id="win-open" type="button" data-window-action="open" on:click="{openWindow}">Open browser</button>
+  {#if winOpen}
+  <div id="bios-window-0" class="bios-window" data-kind="browser" data-location="about:blank">
+    <div id="bios-window-0-titlebar" class="bios-window-titlebar">
+      <span id="bios-window-0-title">browser</span>
+      <button id="bios-window-0-close" type="button" data-window-action="close" data-window="0" on:click="{closeWindow}">Close</button>
+    </div>
+    <div id="bios-window-0-tabs" class="bios-window-tabs" role="tablist" aria-label="Browser tabs">
+      <a id="bios-tab-0" class="bios-tab bios-tab-active" href="#bios-session-0" data-tab-action="select" data-tab="0" role="tab" tabindex="0" aria-selected="true" on:click="{selectBrowserTab}">blank</a>
+      <button id="bios-tab-0-close" type="button" class="bios-tab-x" data-tab-action="close" data-tab="0" on:click="{closeBrowserTab}">x</button>
+      <a id="bios-tab-1" class="bios-tab" href="#bios-session-1" data-tab-action="select" data-tab="1" role="tab" tabindex="-1" aria-selected="false" on:click="{selectBrowserTab}">blank</a>
+      <button id="bios-tab-1-close" type="button" class="bios-tab-x" data-tab-action="close" data-tab="1" on:click="{closeBrowserTab}">x</button>
+      <a id="bios-tab-2" class="bios-tab" href="#bios-session-2" data-tab-action="select" data-tab="2" role="tab" tabindex="-1" aria-selected="false" on:click="{selectBrowserTab}">blank</a>
+      <button id="bios-tab-2-close" type="button" class="bios-tab-x" data-tab-action="close" data-tab="2" on:click="{closeBrowserTab}">x</button>
+      <a id="bios-tab-3" class="bios-tab" href="#bios-session-3" data-tab-action="select" data-tab="3" role="tab" tabindex="-1" aria-selected="false" on:click="{selectBrowserTab}">blank</a>
+      <button id="bios-tab-3-close" type="button" class="bios-tab-x" data-tab-action="close" data-tab="3" on:click="{closeBrowserTab}">x</button>
+      <a id="bios-tab-4" class="bios-tab" href="#bios-session-4" data-tab-action="select" data-tab="4" role="tab" tabindex="-1" aria-selected="false" on:click="{selectBrowserTab}">blank</a>
+      <button id="bios-tab-4-close" type="button" class="bios-tab-x" data-tab-action="close" data-tab="4" on:click="{closeBrowserTab}">x</button>
+      <a id="bios-tab-5" class="bios-tab" href="#bios-session-5" data-tab-action="select" data-tab="5" role="tab" tabindex="-1" aria-selected="false" on:click="{selectBrowserTab}">blank</a>
+      <button id="bios-tab-5-close" type="button" class="bios-tab-x" data-tab-action="close" data-tab="5" on:click="{closeBrowserTab}">x</button>
+      <a id="bios-tab-6" class="bios-tab" href="#bios-session-6" data-tab-action="select" data-tab="6" role="tab" tabindex="-1" aria-selected="false" on:click="{selectBrowserTab}">blank</a>
+      <button id="bios-tab-6-close" type="button" class="bios-tab-x" data-tab-action="close" data-tab="6" on:click="{closeBrowserTab}">x</button>
+      <a id="bios-tab-7" class="bios-tab" href="#bios-session-7" data-tab-action="select" data-tab="7" role="tab" tabindex="-1" aria-selected="false" on:click="{selectBrowserTab}">blank</a>
+      <button id="bios-tab-7-close" type="button" class="bios-tab-x" data-tab-action="close" data-tab="7" on:click="{closeBrowserTab}">x</button>
+      <button id="bios-tab-new" type="button" data-tab-action="new" on:click="{newBrowserTab}">New tab</button>
+    </div>
+    <div id="bios-window-0-stage" class="bios-window-stage">
+      <p id="bios-session-0" class="bios-session">about:blank</p>
+      <p id="bios-session-1" class="bios-session">about:blank</p>
+      <p id="bios-session-2" class="bios-session">about:blank</p>
+      <p id="bios-session-3" class="bios-session">about:blank</p>
+      <p id="bios-session-4" class="bios-session">about:blank</p>
+      <p id="bios-session-5" class="bios-session">about:blank</p>
+      <p id="bios-session-6" class="bios-session">about:blank</p>
+      <p id="bios-session-7" class="bios-session">about:blank</p>
+    </div>
+  </div>
+  {/if}
 
   <section id="menu-main" data-menu="main" aria-labelledby="main-title">
     <h2 id="main-title">Main</h2>
@@ -133,6 +177,16 @@ button{font:inherit}
 #bios-nav{color:#3f7f92;font-size:13px;margin:4px 0}
 #read-only-note{color:#7fd4e8;font-size:14px;margin:6px 0}
 #refresh{display:inline-block;padding:6px 12px;margin:4px 0;background-color:#0d2136;color:#8fe3f5;border:1px solid #1d4d63;border-radius:5px}
+#win-open{display:inline-block;padding:6px 12px;margin:4px 8px 4px 0;background-color:#0d2136;color:#8fe3f5;border:1px solid #1d4d63;border-radius:5px}
+#bios-window-0{position:absolute;top:56px;left:24px;width:480px;height:320px;background-color:#0a1626;color:#c9e9f5;border:1px solid #22d3ee;border-radius:6px}
+#bios-window-0-titlebar{display:block;padding:4px 8px;background-color:#0b7f96;color:#eaffff;height:28px}
+#bios-window-0-title{color:#eaffff}
+#bios-window-0-close{position:absolute;top:4px;right:8px;width:8ch;height:22px;background-color:#0d2136;color:#8fe3f5;border:1px solid #1d4d63;border-radius:4px}
+#bios-window-0-tabs{display:block;padding:2px 4px;height:28px;background-color:#08111f;border-bottom:1px solid #1d4d63}
+#bios-tab-new{display:inline-block;padding:4px 8px;margin:0 4px;width:8ch;height:22px;background-color:#0d2136;color:#8fe3f5;border:1px solid #1d4d63;border-radius:4px}
+.bios-tab-x{display:inline-block;padding:0;margin:0 8px 0 0;width:3ch;height:22px;background-color:#0d2136;color:#8fe3f5;border:1px solid #1d4d63;border-radius:4px}
+#bios-window-0-stage{padding:8px;height:240px}
+.bios-session{color:#7fd4e8;margin:0}
 section{margin:10px 0;padding:2px 12px 10px 12px;background-color:#08111f;border:1px solid #17394b;border-radius:6px}
 table{width:100%;margin:6px 0}
 th{text-align:left;padding:5px 10px;background-color:#0a1a28;color:#8fe3f5;border-bottom:1px solid #10263a}
@@ -149,7 +203,7 @@ footer{margin:10px 0 0 0;padding:6px 10px;background-color:#0b7f96;color:#eaffff
 .bios-tab:hover { background-color: #12405a; color: #eaffff; }
 .bios-tab:focus-visible { outline: 2px solid #ffd166; outline-offset: 1px; }
 .bios-tab-active:hover { background-color: #0b7f96; }
-#refresh:hover, #disp-toggle:hover { background-color: #12405a; cursor: pointer; }
+#refresh:hover, #disp-toggle:hover, #win-open:hover, #bios-window-0-close:hover, #bios-tab-new:hover, .bios-tab-x:hover { background-color: #12405a; cursor: pointer; }
 
 #bios-fx { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0; pointer-events: none; }
 #bios-ui { position: relative; z-index: 1; }

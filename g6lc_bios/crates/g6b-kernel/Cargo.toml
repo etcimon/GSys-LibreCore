@@ -13,6 +13,7 @@ description = "BIOS kernel host path: HolyC + HTML+JS + Gr rewrite"
 [dependencies]
 g6b-html = { workspace = true }
 g6b-dom = { workspace = true }
+g6b-iframe = { workspace = true }
 g6b-spec = { workspace = true }
 g6b-design = { workspace = true }
 g6b-holyc = { workspace = true }
@@ -26,6 +27,8 @@ g6b-webidl = { workspace = true }
 g6b-asm = { workspace = true }
 g6b-css = { workspace = true }
 g6b-pglite = { workspace = true }
+g6b-hw = { workspace = true }
+g6b-zealcli = { workspace = true }
 
 [lints]
 workspace = true

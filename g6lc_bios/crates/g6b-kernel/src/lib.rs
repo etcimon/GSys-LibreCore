@@ -22,8 +22,19 @@ pub mod task_services;
 pub mod tasks;
 pub mod timers;
 pub use browser::{RouterPort, WasmUi};
+pub use g6b_iframe::{
+    FilesAppView, FrameEngine, HostNeed, IframeSession, SessionCaps, SessionContext,
+    SessionDocument, SessionIntern, SessionLoad, SessionVar, SessionVars, MAX_HISTORY,
+    MAX_SESSIONS, MAX_TABS_PER_WINDOW, MAX_WINDOWS, SHELL_CONTEXT_ID,
+};
+pub use g6b_zealcli::{Action as ZealAction, Session as ZealCli, PROMPT as ZEAL_PROMPT};
 pub use task_services::{TaskServices, Work, WorkResponse};
 pub use timers::{frame_period_ns, TimerHeap};
+
+/// VGA zealcli boots first; GPU announce + `LoadUI` hand off to browser-ui.
+pub fn wants_zealcli(spec: &BoardSpec, gpu_ready: bool) -> bool {
+    spec.wants_zealcli(gpu_ready)
+}
 
 /// Banner OpenSBI-next-stage QEMU eval greps for (`--expect G6LC-BIOS`).
 pub const BANNER: &str = "G6LC-BIOS";
@@ -92,6 +103,17 @@ struct KernelHost<'a> {
     now_ns: u64,
     /// Named D delegates from `libwasm_set__function` (`exportDelegate`).
     named_delegates: BTreeMap<String, (i32, i32)>,
+    /// Post-boot `g6b-hw` session. None during `_start` (hw stays lazy).
+    hw: Option<&'a mut g6b_hw::HwSession>,
+    /// Interned `platform` (ObjectKind::Platform). Shell only; not iframe.
+    platform_handle: Option<i32>,
+    /// Interned `platform.hw` (ObjectKind::Hw). Lazy; intern does not listen.
+    hw_handle: Option<i32>,
+    hw_net_handle: Option<i32>,
+    hw_display_handle: Option<i32>,
+    hw_tcp_handle: Option<i32>,
+    hw_udp_handle: Option<i32>,
+    hw_gl_handle: Option<i32>,
 }
 
 fn event_type_from_handler_prop(prop: &str) -> &str {
@@ -112,7 +134,7 @@ fn is_input_event_type(ty: &str) -> bool {
             | "pointerdown"
             | "pointerup"
             | "pointerclick"
-    )
+    ) || g6b_hw::is_hw_event_type(ty)
 }
 
 fn named_delegate_matches_event(name: &str, event_type: &str) -> bool {
@@ -393,6 +415,18 @@ where
     Ok(())
 }
 
+fn session_slot_on_path(dom: &Node, path: &[usize]) -> Option<usize> {
+    let mut n = dom;
+    let mut slot = None;
+    for &i in path {
+        n = n.children.get(i)?;
+        if let Some(s) = n.id.as_deref().and_then(g6b_iframe::session_stage_slot) {
+            slot = Some(s);
+        }
+    }
+    slot
+}
+
 fn find_node_by_id<'a>(node: &'a Node, id: &str) -> Option<&'a Node> {
     if node.id.as_deref() == Some(id) {
         return Some(node);
@@ -646,6 +680,14 @@ impl<'a> KernelHost<'a> {
             timers,
             now_ns,
             named_delegates: persist.named_delegates,
+            hw: None,
+            platform_handle: None,
+            hw_handle: None,
+            hw_net_handle: None,
+            hw_display_handle: None,
+            hw_tcp_handle: None,
+            hw_udp_handle: None,
+            hw_gl_handle: None,
         }
     }
 
@@ -811,10 +853,18 @@ impl<'a> KernelHost<'a> {
     }
 
     /// Intern a live DOM `Event` for wasm listener re-entry.
+    /// `hw*` types intern as [`ObjectKind::HwEvent`] (BIOS UI, like MouseEvent).
     fn intern_event(&mut self, event: &Event) -> Result<i32, String> {
         self.last_prevent_default = event.default_prevented;
+        let hw = g6b_hw::is_hw_event_type(&event.event_type);
+        let kind = if hw {
+            ObjectKind::HwEvent
+        } else {
+            ObjectKind::Event
+        };
+        let ctor = if hw { "HWEvent" } else { "Event" };
         self.intern_value(LibwasmValue::Object {
-            kind: ObjectKind::Event,
+            kind,
             props: [
                 (
                     "type".into(),
@@ -833,6 +883,7 @@ impl<'a> KernelHost<'a> {
                     LibwasmValue::Bool(event.default_prevented),
                 ),
                 ("bubbles".into(), LibwasmValue::Bool(event.bubbles)),
+                ("constructor".into(), LibwasmValue::String(ctor.into())),
             ]
             .into(),
         })
@@ -1337,9 +1388,18 @@ impl<'a> KernelHost<'a> {
                         value.clone_prop(name)
                     }
                 }
+                "platform" => value.clone_prop("platform"),
                 "location" | "origin" => Ok(LibwasmValue::String("bios://g6lc".into())),
                 _ => value.clone_prop(name),
             },
+            LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Hw => {
+                let role = Self::hw_role(value);
+                if let Some(v) = self.hw_live_str(role, name) {
+                    Ok(v)
+                } else {
+                    value.clone_prop(name)
+                }
+            }
             LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Document => match name {
                 "defaultView" => Ok(self
                     .window_handle
@@ -1947,26 +2007,139 @@ impl<'a> KernelHost<'a> {
         args: &[LibwasmValue],
     ) -> Result<LibwasmValue, String> {
         match &value {
-            LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Event => match method {
-                "preventDefault" => {
-                    self.last_prevent_default = true;
-                    if let LibwasmValue::Object { props, .. } = self.objects.get_mut(handle)? {
-                        props.insert("defaultPrevented".into(), LibwasmValue::Bool(true));
+            LibwasmValue::Object { kind, .. }
+                if *kind == ObjectKind::Event || *kind == ObjectKind::HwEvent =>
+            {
+                match method {
+                    "preventDefault" => {
+                        self.last_prevent_default = true;
+                        if let LibwasmValue::Object { props, .. } = self.objects.get_mut(handle)? {
+                            props.insert("defaultPrevented".into(), LibwasmValue::Bool(true));
+                        }
+                        self.diagnostics.push("WASM-EVENT-PREVENT-DEFAULT".into());
+                        return Ok(LibwasmValue::None);
                     }
-                    self.diagnostics.push("WASM-EVENT-PREVENT-DEFAULT".into());
-                    return Ok(LibwasmValue::None);
+                    "stopPropagation" | "stopImmediatePropagation" => {
+                        self.diagnostics.push(format!("WASM-EVENT-{method}"));
+                        return Ok(LibwasmValue::None);
+                    }
+                    _ => {}
                 }
-                "stopPropagation" | "stopImmediatePropagation" => {
-                    self.diagnostics.push(format!("WASM-EVENT-{method}"));
-                    return Ok(LibwasmValue::None);
-                }
-                _ => {}
-            },
+            }
             LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Window => {
                 if method == "fetch" {
                     let url = args.first().map(|v| v.to_js_string()).unwrap_or_default();
                     let handle = self.fetch(&url)?;
                     return Ok(LibwasmValue::I32(handle));
+                }
+            }
+            LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Hw => {
+                let role = Self::hw_role(&value);
+                let mut argv: Vec<String> = args.iter().map(|v| v.to_js_string()).collect();
+                let needs_id = matches!(
+                    (role, method),
+                    (
+                        "net",
+                        "ifconfig"
+                            | "route"
+                            | "link"
+                            | "dns"
+                            | "proto"
+                            | "inetStat"
+                            | "tcpListen"
+                            | "tcpConnect"
+                            | "udpBind"
+                            | "hostApply"
+                    ) | ("tcp", "listen" | "connect" | "tcpListen" | "tcpConnect")
+                        | ("udp", "bind" | "udpBind")
+                );
+                if needs_id {
+                    let id = self
+                        .hw
+                        .as_deref()
+                        .and_then(|s| s.spec.primary_net())
+                        .map(|a| a.id.clone())
+                        .unwrap_or_else(|| "net0".into());
+                    argv.insert(0, id);
+                }
+                let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+                let name = match (role, method) {
+                    ("root", "stat") => "hwStat",
+                    ("root", "listen") => "hwListen",
+                    ("root", "wake") => "hwWake",
+                    ("root", "cable") => "hwCable",
+                    ("root", "config") => "hwConfig",
+                    ("root", "natMode" | "setNat") => "hwNat",
+                    ("root", "hostList") => "hwHostList",
+                    ("root", "hostRevert") => "hwHostRevert",
+                    ("root" | "net", "ifconfig") => "hwIfconfig",
+                    ("root" | "net", "route") => "hwRoute",
+                    ("root" | "net", "link") => "hwLink",
+                    ("root" | "net", "dns") => "hwDns",
+                    ("root" | "net", "proto") => "hwProto",
+                    ("root" | "net", "inetStat") => "hwInetStat",
+                    ("root" | "net", "hostApply") => "hwHostApply",
+                    ("root", "tcpListen") => "hwTcpListen",
+                    ("net" | "tcp", "tcpListen" | "listen") => "hwTcpListen",
+                    ("root", "tcpConnect") => "hwTcpConnect",
+                    ("net" | "tcp", "tcpConnect" | "connect") => "hwTcpConnect",
+                    ("root", "tcpAccept") => "hwTcpAccept",
+                    ("tcp", "tcpAccept" | "accept") => "hwTcpAccept",
+                    ("root", "tcpSend") => "hwTcpSend",
+                    ("tcp", "tcpSend" | "send") => "hwTcpSend",
+                    ("root", "tcpRecv") => "hwTcpRecv",
+                    ("tcp", "tcpRecv" | "recv") => "hwTcpRecv",
+                    ("root", "udpBind") => "hwUdpBind",
+                    ("net" | "udp", "udpBind" | "bind") => "hwUdpBind",
+                    ("root", "udpSend") => "hwUdpSend",
+                    ("udp", "udpSend" | "send") => "hwUdpSend",
+                    ("root", "udpRecv") => "hwUdpRecv",
+                    ("udp", "udpRecv" | "recv") => "hwUdpRecv",
+                    ("root", "sockClose") => "hwSockClose",
+                    ("tcp" | "udp", "close" | "sockClose") => "hwSockClose",
+                    ("root", "dispStat") => "hwDispStat",
+                    ("display", "stat" | "dispStat") => "hwDispStat",
+                    ("root", "dispLink") => "hwDispLink",
+                    ("display", "link" | "dispLink") => "hwDispLink",
+                    ("root" | "display", "dispMode" | "mode") => "hwDispMode",
+                    ("root" | "display", "dispSurface") => "hwDispSurface",
+                    ("root" | "display", "gl") => "hwGl",
+                    ("gl", "mode") => "hwGl",
+                    ("root", "glList") => "hwGlList",
+                    ("gl", "list") => "hwGlList",
+                    ("root", "glApply") => "hwGlApply",
+                    ("gl", "apply") => "hwGlApply",
+                    ("root", "glRevert") => "hwGlRevert",
+                    ("gl", "revert") => "hwGlRevert",
+                    _ => "",
+                };
+                if !name.is_empty() {
+                    if matches!(
+                        name,
+                        "hwStat"
+                            | "hwListen"
+                            | "hwInetStat"
+                            | "hwHostList"
+                            | "hwTcpRecv"
+                            | "hwUdpRecv"
+                            | "hwDispStat"
+                            | "hwGlList"
+                    ) {
+                        let hw = self.hw_session()?;
+                        let body = g6b_hw::call_instant(hw, name, &refs);
+                        return Ok(LibwasmValue::String(body));
+                    }
+                    let hw = self.hw_session()?;
+                    match g6b_hw::call(hw, name, &refs) {
+                        Ok(body) => {
+                            self.record_await_from_string(body.clone(), false);
+                            return Ok(LibwasmValue::String(body));
+                        }
+                        Err(e) => {
+                            self.record_await_from_string(e.message.clone(), true);
+                            return Err(e.message);
+                        }
+                    }
                 }
             }
             LibwasmValue::Object { kind, .. }
@@ -2611,6 +2784,10 @@ impl<'a> KernelHost<'a> {
             g6b_wasm::JsExportKind::HolycEval => {
                 let line = args.first().map(|v| v.to_js_string()).unwrap_or_default();
                 self.diagnostics.push(format!("WASM-JS-HOLYC {line}"));
+                if g6b_hw::is_hw_invoke(&line) {
+                    let hw = self.hw_session()?;
+                    return Ok(JsValue::Str(g6b_hw::eval_instant(hw, &line)));
+                }
                 Ok(JsValue::Str(String::new()))
             }
             g6b_wasm::JsExportKind::RegisterEndpoint => {
@@ -2622,6 +2799,368 @@ impl<'a> KernelHost<'a> {
                 self.diagnostics
                     .push(format!("WASM-JS-REGISTER {method} {path}"));
                 Ok(JsValue::Undefined)
+            }
+            g6b_wasm::JsExportKind::HwStat => self.hw_js_instant("hwStat", args),
+            g6b_wasm::JsExportKind::HwListen => self.hw_js_instant("hwListen", args),
+            g6b_wasm::JsExportKind::HwWake => self.hw_js_await("hwWake", args),
+            g6b_wasm::JsExportKind::HwCable => self.hw_js_await("hwCable", args),
+            g6b_wasm::JsExportKind::HwConfig => self.hw_js_await("hwConfig", args),
+        }
+    }
+
+    fn hw_js_args(args: &[JsValue]) -> Vec<String> {
+        args.iter().map(|v| v.to_js_string()).collect()
+    }
+
+    fn hw_session(&mut self) -> Result<&mut g6b_hw::HwSession, String> {
+        self.hw
+            .as_deref_mut()
+            .ok_or_else(|| "hw session unavailable during _start".into())
+    }
+
+    /// Intern `platform` on the shell window. Never an iframe global.
+    fn ensure_platform_global(&mut self) -> Result<i32, String> {
+        if let Some(h) = self.platform_handle {
+            return Ok(h);
+        }
+        if let Some(w) = self.window_handle {
+            if let Ok(LibwasmValue::I32(h)) =
+                self.get_object(w).and_then(|v| v.clone_prop("platform"))
+            {
+                self.platform_handle = Some(h);
+                return Ok(h);
+            }
+        }
+        let h = self.intern_value(LibwasmValue::empty(ObjectKind::Platform))?;
+        self.platform_handle = Some(h);
+        if let Some(w) = self.window_handle {
+            if let Ok(obj) = self.objects.get_mut(w) {
+                let _ = obj.set_prop("platform", LibwasmValue::I32(h));
+            }
+        }
+        self.diagnostics
+            .push(format!("WASM-JS-GLOBAL platform -> {h}"));
+        Ok(h)
+    }
+
+    /// Intern `platform.hw` without starting the listen worker.
+    fn ensure_hw_global(&mut self) -> Result<i32, String> {
+        if let Some(h) = self.hw_handle {
+            return Ok(h);
+        }
+        let platform = self.ensure_platform_global()?;
+        if let Ok(LibwasmValue::I32(h)) = self.get_object(platform).and_then(|v| v.clone_prop("hw"))
+        {
+            self.hw_handle = Some(h);
+            return Ok(h);
+        }
+        let h = self.intern_value(
+            LibwasmValue::empty(ObjectKind::Hw)
+                .with_prop("__role", LibwasmValue::String("root".into())),
+        )?;
+        self.hw_handle = Some(h);
+        if let Ok(obj) = self.objects.get_mut(platform) {
+            let _ = obj.set_prop("hw", LibwasmValue::I32(h));
+        }
+        self.diagnostics
+            .push(format!("WASM-JS-GLOBAL platform.hw -> {h}"));
+        Ok(h)
+    }
+
+    fn ensure_hw_child(&mut self, role: &str) -> Result<i32, String> {
+        let existing = match role {
+            "net" => self.hw_net_handle,
+            "display" => self.hw_display_handle,
+            "tcp" => self.hw_tcp_handle,
+            "udp" => self.hw_udp_handle,
+            "gl" => self.hw_gl_handle,
+            other => return Err(format!("unknown hw child {other}")),
+        };
+        if let Some(h) = existing {
+            return Ok(h);
+        }
+        let parent = if role == "tcp" || role == "udp" {
+            self.ensure_hw_child("net")?
+        } else if role == "gl" {
+            self.ensure_hw_child("display")?
+        } else {
+            self.ensure_hw_global()?
+        };
+        if let Ok(LibwasmValue::I32(h)) = self.get_object(parent).and_then(|v| v.clone_prop(role)) {
+            match role {
+                "net" => self.hw_net_handle = Some(h),
+                "display" => self.hw_display_handle = Some(h),
+                "tcp" => self.hw_tcp_handle = Some(h),
+                "udp" => self.hw_udp_handle = Some(h),
+                "gl" => self.hw_gl_handle = Some(h),
+                _ => {}
+            }
+            return Ok(h);
+        }
+        let h = self.intern_value(
+            LibwasmValue::empty(ObjectKind::Hw)
+                .with_prop("__role", LibwasmValue::String(role.into())),
+        )?;
+        match role {
+            "net" => self.hw_net_handle = Some(h),
+            "display" => self.hw_display_handle = Some(h),
+            "tcp" => self.hw_tcp_handle = Some(h),
+            "udp" => self.hw_udp_handle = Some(h),
+            "gl" => self.hw_gl_handle = Some(h),
+            _ => {}
+        }
+        if let Ok(obj) = self.objects.get_mut(parent) {
+            let _ = obj.set_prop(role, LibwasmValue::I32(h));
+        }
+        Ok(h)
+    }
+
+    fn hw_role(value: &LibwasmValue) -> &'static str {
+        match value.clone_prop("__role") {
+            Ok(LibwasmValue::String(s)) if s == "net" => "net",
+            Ok(LibwasmValue::String(s)) if s == "display" => "display",
+            Ok(LibwasmValue::String(s)) if s == "tcp" => "tcp",
+            Ok(LibwasmValue::String(s)) if s == "udp" => "udp",
+            Ok(LibwasmValue::String(s)) if s == "gl" => "gl",
+            _ => "root",
+        }
+    }
+
+    fn hw_live_str(&self, role: &str, name: &str) -> Option<LibwasmValue> {
+        let spec = g6b_hw::HwSpec::from_board(self.spec);
+        let (listening, idle, nat, phase, cable, src, queued, line, env, scanout) =
+            if let Some(s) = self.hw.as_deref() {
+                (
+                    s.listening(),
+                    s.idle(),
+                    s.mode().as_str().to_string(),
+                    s.phase().as_str().to_string(),
+                    s.cable().as_str().to_string(),
+                    s.status_line(),
+                    s.queued() as u32,
+                    s.status_line(),
+                    s.env_untouched(),
+                    s.scanout().to_string(),
+                )
+            } else {
+                (
+                    false,
+                    true,
+                    "minimal".into(),
+                    "idle".into(),
+                    "unplugged".into(),
+                    "hw nat=minimal phase=idle cable=unplugged src=idle q=0 env=untouched".into(),
+                    0,
+                    "hw nat=minimal phase=idle cable=unplugged src=idle q=0 env=untouched".into(),
+                    true,
+                    "vga".into(),
+                )
+            };
+        let net = if let Some(s) = self.hw.as_deref() {
+            s.spec.primary_net().map(|a| {
+                let cfg = s.device(&a.id).cloned().unwrap_or_default();
+                (
+                    a.id.clone(),
+                    a.kind.as_str().to_string(),
+                    cfg.addressing.as_str().to_string(),
+                    cfg.ip,
+                )
+            })
+        } else {
+            spec.primary_net().map(|a| {
+                (
+                    a.id.clone(),
+                    a.kind.as_str().to_string(),
+                    "nat".into(),
+                    String::new(),
+                )
+            })
+        };
+        let disp = if let Some(s) = self.hw.as_deref() {
+            s.spec
+                .adapters
+                .iter()
+                .find(|a| a.class == g6b_hw::AdapterClass::Display)
+                .map(|a| (a.id.clone(), a.kind.as_str().to_string()))
+        } else {
+            spec.adapters
+                .iter()
+                .find(|a| a.class == g6b_hw::AdapterClass::Display)
+                .map(|a| (a.id.clone(), a.kind.as_str().to_string()))
+        };
+        match (role, name) {
+            ("root", "nat") => Some(LibwasmValue::String(nat)),
+            ("root", "phase") => Some(LibwasmValue::String(phase)),
+            ("root", "cable") => Some(LibwasmValue::String(cable)),
+            ("root", "src") => Some(LibwasmValue::String(src)),
+            ("root", "line") => Some(LibwasmValue::String(line)),
+            ("root", "listening") => Some(LibwasmValue::Bool(listening)),
+            ("root", "idle") => Some(LibwasmValue::Bool(idle)),
+            ("root", "env_untouched") => Some(LibwasmValue::Bool(env)),
+            ("root", "host_adapter") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .map(|s| s.host_adapter().to_string())
+                    .unwrap_or_default(),
+            )),
+            ("root", "socks") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .map(|s| s.socks_json())
+                    .unwrap_or_else(|| "[]".into()),
+            )),
+            ("root", "queued") => Some(LibwasmValue::U32(queued)),
+            ("root", "stat") => Some(LibwasmValue::String(if let Some(s) = self.hw.as_deref() {
+                s.stat_json()
+            } else {
+                "{\"ready\":true,\"listening\":false,\"env_untouched\":true}".into()
+            })),
+            ("net", "id") => Some(LibwasmValue::String(
+                net.as_ref().map(|n| n.0.clone()).unwrap_or_default(),
+            )),
+            ("net", "kind") => Some(LibwasmValue::String(
+                net.as_ref().map(|n| n.1.clone()).unwrap_or_default(),
+            )),
+            ("net", "addressing") => Some(LibwasmValue::String(
+                net.as_ref()
+                    .map(|n| n.2.clone())
+                    .unwrap_or_else(|| "nat".into()),
+            )),
+            ("net", "ip") => Some(LibwasmValue::String(
+                net.as_ref().map(|n| n.3.clone()).unwrap_or_default(),
+            )),
+            ("net", "addr") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .and_then(|s| s.spec.primary_net().and_then(|a| s.device(&a.id)))
+                    .map(|c| c.inet.addr.clone())
+                    .unwrap_or_default(),
+            )),
+            ("net", "prefix") => Some(LibwasmValue::U32(
+                self.hw
+                    .as_deref()
+                    .and_then(|s| s.spec.primary_net().and_then(|a| s.device(&a.id)))
+                    .map(|c| u32::from(c.inet.prefix))
+                    .unwrap_or(24),
+            )),
+            ("net", "gateway") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .and_then(|s| s.spec.primary_net().and_then(|a| s.device(&a.id)))
+                    .map(|c| c.inet.gateway.clone())
+                    .unwrap_or_default(),
+            )),
+            ("net", "mtu") => Some(LibwasmValue::U32(
+                self.hw
+                    .as_deref()
+                    .and_then(|s| s.spec.primary_net().and_then(|a| s.device(&a.id)))
+                    .map(|c| u32::from(c.inet.mtu))
+                    .unwrap_or(1500),
+            )),
+            ("net", "link") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .and_then(|s| s.spec.primary_net().and_then(|a| s.device(&a.id)))
+                    .map(|c| c.inet.link.as_str().to_string())
+                    .unwrap_or_else(|| "down".into()),
+            )),
+            ("tcp", "enabled") => Some(LibwasmValue::Bool(
+                self.hw
+                    .as_deref()
+                    .and_then(|s| s.spec.primary_net().and_then(|a| s.device(&a.id)))
+                    .map(|c| c.inet.tcp.enabled)
+                    .unwrap_or(true),
+            )),
+            ("udp", "enabled") => Some(LibwasmValue::Bool(
+                self.hw
+                    .as_deref()
+                    .and_then(|s| s.spec.primary_net().and_then(|a| s.device(&a.id)))
+                    .map(|c| c.inet.udp.enabled)
+                    .unwrap_or(true),
+            )),
+            ("display", "id") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .map(|s| s.disp().winner_id.clone())
+                    .or_else(|| disp.as_ref().map(|d| d.0.clone()))
+                    .unwrap_or_default(),
+            )),
+            ("display", "kind") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .map(|s| s.disp().winner_kind.clone())
+                    .or_else(|| disp.as_ref().map(|d| d.1.clone()))
+                    .unwrap_or_else(|| "vga".into()),
+            )),
+            ("display", "surface") => Some(LibwasmValue::String(scanout)),
+            ("display", "probed") => Some(LibwasmValue::Bool(
+                self.hw.as_deref().map(|s| s.disp().probed).unwrap_or(false),
+            )),
+            ("display", "present") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .map(|s| s.disp().present.as_str().to_string())
+                    .unwrap_or_else(|| "none".into()),
+            )),
+            ("display", "vendor") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .map(|s| s.disp().vendor.clone())
+                    .unwrap_or_default(),
+            )),
+            ("display", "link") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .map(|s| s.disp().link.as_str().to_string())
+                    .unwrap_or_else(|| "down".into()),
+            )),
+            ("display", "w") => Some(LibwasmValue::U32(
+                self.hw.as_deref().map(|s| s.disp().w).unwrap_or(640),
+            )),
+            ("display", "h") => Some(LibwasmValue::U32(
+                self.hw.as_deref().map(|s| s.disp().h).unwrap_or(480),
+            )),
+            ("gl", "enabled") => Some(LibwasmValue::Bool(
+                self.hw
+                    .as_deref()
+                    .map(|s| s.disp().gl != g6b_hw::GlMode::Off)
+                    .unwrap_or(false),
+            )),
+            ("gl", "mode") => Some(LibwasmValue::String(
+                self.hw
+                    .as_deref()
+                    .map(|s| s.disp().gl.as_str().to_string())
+                    .unwrap_or_else(|| "off".into()),
+            )),
+            _ => None,
+        }
+    }
+
+    /// HolyC-style instant snapshot (status getters).
+    fn hw_js_instant(&mut self, name: &str, args: &[JsValue]) -> Result<JsValue, String> {
+        let argv = Self::hw_js_args(args);
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let hw = self.hw_session()?;
+        let body = g6b_hw::call_instant(hw, name, &refs);
+        self.diagnostics.push(format!("WASM-JS-HW {name}"));
+        Ok(JsValue::Str(body))
+    }
+
+    /// JS/wasm await: throw [`g6b_hw::HwError`] without exiting the worker.
+    fn hw_js_await(&mut self, name: &str, args: &[JsValue]) -> Result<JsValue, String> {
+        let argv = Self::hw_js_args(args);
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        let hw = self.hw_session()?;
+        match g6b_hw::call(hw, name, &refs) {
+            Ok(body) => {
+                self.record_await_from_string(body.clone(), false);
+                self.diagnostics.push(format!("WASM-JS-HW {name}"));
+                Ok(JsValue::Str(body))
+            }
+            Err(e) => {
+                self.record_await_from_string(e.message.clone(), true);
+                self.diagnostics.push(format!("WASM-JS-HW-THROW {name}"));
+                Err(e.message)
             }
         }
     }
@@ -2648,6 +3187,12 @@ impl HostDispatch for KernelHost<'_> {
                 }
                 Ok(JsValue::Handle(self.ensure_pglite_factory()?))
             }
+            "window.platform" | "platform" => Ok(JsValue::Handle(
+                self.ensure_platform_global().map_err(LodashError::Thrown)?,
+            )),
+            "window.hw" | "hw" => Err(LodashError::EvalRefused(
+                "hw is platform.hw, not a window global".into(),
+            )),
             "moment" | "window.moment" => Err(LodashError::UnsupportedMethod(name.into())),
             other => Err(LodashError::EvalRefused(other.into())),
         }
@@ -2952,6 +3497,16 @@ impl Host for KernelHost<'_> {
                 .push(format!("WASM-JS-GLOBAL pglite -> {h}"));
             return Ok(h);
         }
+        if name == "hw" {
+            self.diagnostics
+                .push("WASM-JS-GLOBAL-UNAVAILABLE hw (use platform.hw)".into());
+            return Ok(0);
+        }
+        if name == "platform" {
+            let _ = self.ensure_js_globals();
+            let h = self.ensure_platform_global()?;
+            return Ok(h);
+        }
         let (window, document, console) = self.ensure_js_globals()?;
         let handle = match name {
             "window" => window,
@@ -3232,7 +3787,47 @@ impl Host for KernelHost<'_> {
         match self.resolve_receiver(handle)? {
             LibwasmReceiver::Dom(h) => self.dom_getter(h, name),
             LibwasmReceiver::Proxy(h, role) => self.dom_proxy_getter(h, &role, name),
-            LibwasmReceiver::Value(v) => self.value_getter(&v, name),
+            LibwasmReceiver::Value(v) => {
+                if matches!(
+                    &v,
+                    LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Window
+                ) && name == "platform"
+                {
+                    return Ok(LibwasmValue::I32(self.ensure_platform_global()?));
+                }
+                if matches!(
+                    &v,
+                    LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Platform
+                ) && name == "hw"
+                {
+                    return Ok(LibwasmValue::I32(self.ensure_hw_global()?));
+                }
+                if matches!(
+                    &v,
+                    LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Hw
+                ) && Self::hw_role(&v) == "root"
+                    && (name == "net" || name == "display")
+                {
+                    return Ok(LibwasmValue::I32(self.ensure_hw_child(name)?));
+                }
+                if matches!(
+                    &v,
+                    LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Hw
+                ) && Self::hw_role(&v) == "net"
+                    && (name == "tcp" || name == "udp")
+                {
+                    return Ok(LibwasmValue::I32(self.ensure_hw_child(name)?));
+                }
+                if matches!(
+                    &v,
+                    LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Hw
+                ) && Self::hw_role(&v) == "display"
+                    && name == "gl"
+                {
+                    return Ok(LibwasmValue::I32(self.ensure_hw_child("gl")?));
+                }
+                self.value_getter(&v, name)
+            }
         }
     }
 
@@ -3449,7 +4044,8 @@ pub enum Listener {
         ctx: i32,
         ptr: i32,
     },
-    /// Cell-owned click (`g6b_listen` with listener 0): tab navigate or refresh.
+    /// Cell-owned click (`g6b_listen` with listener 0): tab navigate,
+    /// refresh, or B92 window/tab chrome.
     Cell,
 }
 
@@ -3518,6 +4114,64 @@ pub struct ScanoutPresent {
     pub listing: String,
 }
 
+/// Guest intern table for one iframe session. Not the shell `WasmUi` table.
+struct FrameGuest {
+    intern: SessionIntern,
+    objects: ObjectTable<LibwasmValue>,
+    window: i32,
+    document: i32,
+    js_exports: g6b_wasm::JsExports,
+}
+
+impl FrameGuest {
+    fn new(intern: SessionIntern, vars: &SessionVars) -> Result<Self, String> {
+        let mut objects = ObjectTable::new();
+        let document = objects.add(LibwasmValue::empty(ObjectKind::Document))?;
+        let mut window = LibwasmValue::empty(ObjectKind::Window)
+            .with_prop("document", LibwasmValue::I32(document))
+            .with_prop(
+                "contextId",
+                LibwasmValue::String(format!("frame-{}-g{}", intern.slot, intern.generation)),
+            );
+        for (name, var) in vars.iter() {
+            if let Some(v) = intern_session_var(var) {
+                window = window.with_prop(name, v);
+            }
+        }
+        let window = objects.add(window)?;
+        let _console = objects.add(LibwasmValue::empty(ObjectKind::Empty))?;
+        Ok(Self {
+            intern,
+            objects,
+            window,
+            document,
+            js_exports: g6b_wasm::JsExports::default(),
+        })
+    }
+
+    fn owns(&self, handle: i32) -> bool {
+        self.objects.get(handle).is_ok()
+    }
+
+    fn window_prop(&self, name: &str) -> Option<&LibwasmValue> {
+        match self.objects.get(self.window).ok()? {
+            LibwasmValue::Object { props, .. } => props.get(name),
+            _ => None,
+        }
+    }
+}
+
+fn intern_session_var(var: &SessionVar) -> Option<LibwasmValue> {
+    match var {
+        SessionVar::Null => Some(LibwasmValue::empty(ObjectKind::Empty)),
+        SessionVar::Bool(b) => Some(LibwasmValue::Bool(*b)),
+        SessionVar::Number(n) | SessionVar::String(n) | SessionVar::Json(n) => {
+            Some(LibwasmValue::String(n.clone()))
+        }
+        SessionVar::Function => None,
+    }
+}
+
 pub struct BrowserSession {
     pub dom: Node,
     pub program: Program,
@@ -3533,6 +4187,13 @@ pub struct BrowserSession {
     /// the `#disp-toggle` control or `DisplaySurface` in the HolyC lane.
     pub surface: g6b_spec::Surface,
     selected_menu: String,
+    /// B92 session pool (`g6b-iframe`). Window/tab chrome is Svelte.
+    /// Kernel registers hooks and fulfills [`HostNeed`] GETs.
+    frames: FrameEngine,
+    /// Test / adapter bodies for armed outbound `http(s):` (never `/bios`).
+    outbound_stubs: BTreeMap<String, (u16, String)>,
+    /// Per-tab guest object tables (B92e). Never the shell `WasmUi` table.
+    frame_guests: [Option<FrameGuest>; MAX_TABS_PER_WINDOW],
     async_scripts: g6b_js::AsyncScheduler,
     spec: BoardSpec,
     /// Live CSS engine. Parsed once; `paint(&Node)` is the raster (B88).
@@ -3546,6 +4207,8 @@ pub struct BrowserSession {
     /// Last virtio-gpu transfer listing (empty tiles → skip-if-clean).
     last_transfer: String,
     last_tiles: Vec<g6b_css::DirtyRegion>,
+    /// Post-boot lazy adapter session. Not started from `_start`.
+    pub hw: g6b_hw::HwSession,
 }
 
 impl BrowserSession {
@@ -3567,8 +4230,30 @@ impl BrowserSession {
             hit_boxes: Vec::new(),
             event_host: BrowserEventHost::default(),
             wasm_ui: None,
-            surface: spec.default_surface(),
+            surface: g6b_spec::Surface::Vga,
             selected_menu: spec.kernel.start_menu.clone(),
+            frames: {
+                let mut frames = FrameEngine::new();
+                if spec.kernel.usb.enable && spec.kernel.usb.key {
+                    let mut vols: Vec<String> = Vec::new();
+                    if spec.kernel.usb.fs_fat32 {
+                        vols.push("fat32".into());
+                    }
+                    if spec.kernel.usb.fs_ntfs {
+                        vols.push("ntfs".into());
+                    }
+                    if spec.kernel.usb.fs_ext4 {
+                        vols.push("ext4".into());
+                    }
+                    frames.register_hook(g6b_iframe::AppHook::files_volumes(vols));
+                }
+                // Outbound stays off until `g6b-hw` announces net support.
+                frames.set_outbound(false);
+                frames
+            },
+            hw: g6b_hw::HwSession::from_board(spec),
+            frame_guests: std::array::from_fn(|_| None),
+            outbound_stubs: BTreeMap::new(),
             async_scripts: g6b_js::AsyncScheduler::default(),
             spec: spec.clone(),
             css: None,
@@ -3681,6 +4366,364 @@ impl BrowserSession {
             .push("WASM-CELL-LISTEN tabs+refresh".into());
     }
 
+    fn paint_status(&mut self, fallback: &str) {
+        if let Some(n) = self.dom.get_element_by_id("status") {
+            n.set_inner_text(fallback);
+        }
+    }
+
+    /// When `g6b-hw` first listens, announce adapters through the kernel:
+    /// net → iframe outbound (if BoardSpec allows); display → GPU priority
+    /// instead of the VGA default. Pending `http(s):` tabs then load.
+    /// BIOS UI paints nodes from [`g6b_hw::HwEvent`]; the kernel does not
+    /// write the DOM by id.
+    fn apply_hw_support(&mut self) {
+        if !self.hw.listening() {
+            return;
+        }
+        if !self.hw.support_announced() {
+            for line in self.hw.support_lines() {
+                self.diagnostics.push(line);
+            }
+            self.hw.mark_announced();
+            if self.hw.has_net() && self.spec.kernel.http.outbound {
+                let was = self.frames.outbound();
+                self.frames.set_outbound(true);
+                if !was {
+                    self.retry_outbound_iframes();
+                }
+            }
+            if self.hw.display_ready() && self.spec.surface_toggle() {
+                let want = g6b_spec::Surface::parse(self.hw.probed_surface())
+                    .unwrap_or(g6b_spec::Surface::Gpu);
+                if self.surface != want {
+                    self.surface = want;
+                    self.diagnostics
+                        .push(format!("DISP-SURFACE {}", want.as_str()));
+                }
+            }
+            self.hw.set_scanout(self.surface.as_str());
+        }
+        self.dispatch_hw_events();
+    }
+
+    /// Dispatch pending `HWEvent`s on the document body, same intern path as
+    /// a pointer `MouseEvent`. No `get_element_by_id` — the BIOS UI owns nodes.
+    fn dispatch_hw_events(&mut self) {
+        let evs = self.hw.take_events();
+        for ev in evs {
+            self.diagnostics.push(format!("HW-EVENT {}", ev.event_type));
+            let _ = self.dispatch_hw_event(&ev);
+        }
+    }
+
+    fn dispatch_hw_event(&mut self, ev: &g6b_hw::HwEvent) -> Result<bool, String> {
+        let body = body_node(&mut self.dom).ok_or("no body node")?;
+        let mut event = Event::new(
+            &ev.event_type,
+            EventInit {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                detail: ev.detail.clone(),
+            },
+        );
+        let allowed = Node::dispatch_event(body, &[], &mut event, &mut self.event_host);
+        let wasm_prevented = self.run_triggered();
+        let named_prevented = self.run_named_input_delegates(&event);
+        Ok(allowed && !wasm_prevented && !named_prevented)
+    }
+
+    fn retry_outbound_iframes(&mut self) {
+        let waiters = self.frames.outbound_waiters();
+        for (slot, url) in waiters {
+            let (need, note) = self.frames.navigate(slot, &url);
+            self.frame_note(note);
+            self.fulfill_host_need(need);
+        }
+    }
+
+    fn frame_note(&mut self, note: g6b_iframe::FrameNote) {
+        self.diagnostics.push(note.text);
+    }
+
+    fn fulfill_host_need(&mut self, need: HostNeed) {
+        match need {
+            HostNeed::None => {}
+            HostNeed::Html { slot, path } => {
+                let resp = self.program.router.fetch_get(&path);
+                let note = self
+                    .frames
+                    .provide_html(slot, &path, resp.status, &resp.body_str());
+                self.frame_note(note);
+            }
+            HostNeed::Files {
+                slot,
+                index,
+                volumes,
+            } => {
+                let listing = self.program.router.fetch_get(&index);
+                if listing.status != 200 {
+                    let note = self.frames.provide_files_error(slot, listing.status);
+                    self.frame_note(note);
+                    return;
+                }
+                let mut vols = Vec::new();
+                for (name, path) in volumes {
+                    let r = self.program.router.fetch_get(&path);
+                    if r.status == 200 {
+                        vols.push(g6b_iframe::FilesVolume {
+                            name,
+                            listing: r.body_str(),
+                        });
+                    }
+                }
+                let note = self.frames.provide_files(slot, listing.body_str(), vols);
+                self.frame_note(note);
+            }
+            HostNeed::RemoteHtml { slot, url } => {
+                let (status, body) = self.outbound_get(&url);
+                let note = self.frames.provide_html(slot, &url, status, &body);
+                self.frame_note(note);
+            }
+        }
+    }
+
+    /// Kernel fetch abstraction. Stubs first; then plan in `g6b-http`,
+    /// TLS fingerprint in `g6b-tls`, sockets in `g6b-hw` TCP/IP.
+    /// Never KernelPort, never `-netdev`, never HTTPS inside `g6b-hw`.
+    fn outbound_get(&mut self, url: &str) -> (u16, String) {
+        if let Some((st, body)) = self.outbound_stubs.get(url) {
+            return (*st, body.clone());
+        }
+        match self.outbound_via_hw_tcp(url) {
+            Ok(v) => v,
+            Err(e) => {
+                self.diagnostics.push(format!("KERNEL-FETCH-ERR {url} {e}"));
+                (502, e)
+            }
+        }
+    }
+
+    fn prepare_hw_tcp(&mut self) -> Result<String, String> {
+        self.hw.ensure();
+        if self.hw.mode() == g6b_hw::NatMode::Minimal {
+            self.hw.apply_nat("isolated")?;
+        }
+        let id = self.hw.primary_net_id();
+        let link_down = self
+            .hw
+            .device(&id)
+            .map(|d| d.inet.link != g6b_hw::LinkState::Up)
+            .unwrap_or(true);
+        if link_down {
+            self.hw.apply_link(&id, "up")?;
+        }
+        Ok(id)
+    }
+
+    fn hw_tcp_send_all(&mut self, sock: u32, data: &[u8]) -> Result<(), String> {
+        let mut off = 0;
+        for _ in 0..80 {
+            if off >= data.len() {
+                return Ok(());
+            }
+            let n = self.hw.tcp_send_bytes(sock, &data[off..])?;
+            off += n;
+            if off >= data.len() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Err("hw tcp send timeout".into())
+    }
+
+    fn hw_tcp_recv_until(&mut self, sock: u32, min: usize, http: bool) -> Result<Vec<u8>, String> {
+        let mut acc = Vec::new();
+        for _ in 0..80 {
+            let chunk = self.hw.tcp_recv_bytes(sock)?;
+            if !chunk.is_empty() {
+                acc.extend_from_slice(&chunk);
+            }
+            if http && acc.windows(4).any(|w| w == b"\r\n\r\n") && acc.len() >= min {
+                return Ok(acc);
+            }
+            if !http && acc.len() >= min {
+                return Ok(acc);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        if acc.is_empty() {
+            Err("hw tcp recv timeout".into())
+        } else {
+            Ok(acc)
+        }
+    }
+
+    fn outbound_via_hw_tcp(&mut self, url: &str) -> Result<(u16, String), String> {
+        let req = g6b_http::outbound::plan(url)?;
+        let id = self.prepare_hw_tcp()?;
+        let sock = self.hw.tcp_connect_sock(&id, &req.host, req.port)?;
+        let scheme = if req.https { "https" } else { "http" };
+        self.diagnostics.push(format!(
+            "KERNEL-FETCH {scheme} {}:{}/ via=hw-tcp sock={sock} dev={id}",
+            req.host, req.port
+        ));
+        let out = if req.https {
+            let hello = g6b_tls::client_hello(&req.host);
+            self.hw_tcp_send_all(sock, &hello)?;
+            let rec = self.hw_tcp_recv_until(sock, 5, false)?;
+            let kind = g6b_tls::tls_record_kind(&rec).unwrap_or("unknown");
+            self.diagnostics
+                .push(format!("KERNEL-FETCH-TLS {kind} via=hw-tcp"));
+            (
+                501,
+                format!("outbound https: adapter TLS (g6b-tls ClientHello) via=hw-tcp tls={kind}"),
+            )
+        } else {
+            let bytes = g6b_http::outbound::http1_get_request(&req);
+            self.hw_tcp_send_all(sock, &bytes)?;
+            let raw = self.hw_tcp_recv_until(sock, 1, true)?;
+            let resp = g6b_http::outbound::parse_http1_response(&raw);
+            self.diagnostics
+                .push(format!("KERNEL-FETCH-HTTP {} via=hw-tcp", resp.status));
+            (resp.status, resp.body_str())
+        };
+        let _ = self.hw.sock_close(sock);
+        Ok(out)
+    }
+
+    /// Install a body for an armed outbound URL (tests / adapter).
+    pub fn stub_outbound(&mut self, url: &str, status: u16, body: impl Into<String>) {
+        self.outbound_stubs
+            .insert(url.to_string(), (status, body.into()));
+    }
+
+    /// Svelte chrome created a mount; allocate the session if needed.
+    pub fn ensure_iframe_session(&mut self, slot: usize) -> Result<(), String> {
+        let note = self.frames.ensure(slot);
+        self.frame_note(note);
+        Ok(())
+    }
+
+    pub fn drop_iframe_session(&mut self, slot: usize) -> Result<(), String> {
+        let note = self.frames.drop(slot);
+        self.frame_note(note);
+        if slot < self.frame_guests.len() {
+            self.frame_guests[slot] = None;
+        }
+        Ok(())
+    }
+
+    pub fn drop_all_iframe_sessions(&mut self) -> Result<(), String> {
+        let note = self.frames.drop_all();
+        self.frame_note(note);
+        self.frame_guests = std::array::from_fn(|_| None);
+        Ok(())
+    }
+
+    /// Parent `vars` map. Data interned on the guest window; functions stay host-side.
+    pub fn set_iframe_vars(&mut self, slot: usize, vars: SessionVars) -> Result<(), String> {
+        let note = self.frames.set_vars(slot, vars);
+        self.frame_note(note);
+        if slot < self.frame_guests.len() {
+            self.frame_guests[slot] = None;
+        }
+        Ok(())
+    }
+
+    pub fn iframe_session(&self, slot: usize) -> Option<&IframeSession> {
+        self.frames.session(slot)
+    }
+
+    fn sync_frame_guest(&mut self, slot: usize) {
+        match self.frames.content_window(slot) {
+            None => self.frame_guests[slot] = None,
+            Some(token) => {
+                let fresh = self.frame_guests[slot]
+                    .as_ref()
+                    .is_none_or(|g| g.intern != token);
+                if fresh {
+                    let vars = self
+                        .frames
+                        .session(slot)
+                        .map(|s| s.vars.clone())
+                        .unwrap_or_default();
+                    self.frame_guests[slot] = FrameGuest::new(token, &vars).ok();
+                }
+            }
+        }
+    }
+
+    /// Interned guest `contentWindow`. None when the session does not exist.
+    pub fn frame_content_window(&mut self, slot: usize) -> Option<i32> {
+        if slot >= MAX_TABS_PER_WINDOW {
+            return None;
+        }
+        self.sync_frame_guest(slot);
+        self.frame_guests[slot].as_ref().map(|g| g.window)
+    }
+
+    /// Interned guest `contentDocument`. None when the session does not exist.
+    pub fn frame_content_document(&mut self, slot: usize) -> Option<i32> {
+        if slot >= MAX_TABS_PER_WINDOW {
+            return None;
+        }
+        self.sync_frame_guest(slot);
+        self.frame_guests[slot].as_ref().map(|g| g.document)
+    }
+
+    /// Guest `window` property interned from parent `vars` (data only).
+    pub fn frame_window_prop(&self, slot: usize, name: &str) -> Option<&LibwasmValue> {
+        self.frame_guests
+            .get(slot)
+            .and_then(|g| g.as_ref())
+            .and_then(|g| g.window_prop(name))
+    }
+
+    /// True when `handle` lives in the guest table, not the shell `WasmUi`.
+    pub fn frame_owns_handle(&self, slot: usize, handle: i32) -> bool {
+        self.frame_guests
+            .get(slot)
+            .and_then(|g| g.as_ref())
+            .is_some_and(|g| g.owns(handle))
+    }
+
+    pub fn frame_js_exports(&self, slot: usize) -> Option<&g6b_wasm::JsExports> {
+        self.frame_guests
+            .get(slot)
+            .and_then(|g| g.as_ref())
+            .map(|g| &g.js_exports)
+    }
+
+    /// Nested cell native import. Fail closed without a cap.
+    pub fn frame_native_import(&self, slot: usize, name: &str) -> Result<(), String> {
+        let caps = self
+            .frames
+            .session(slot)
+            .map(|s| s.caps)
+            .unwrap_or_else(SessionCaps::deny);
+        match g6b_iframe::session_import_reject(name, caps) {
+            Some(msg) => Err(msg.into()),
+            None => Ok(()),
+        }
+    }
+
+    /// Navigate an existing session. Kernel only fulfills [`HostNeed`] GETs.
+    pub fn navigate_browser_tab(&mut self, slot: usize, url: &str) -> Result<(), String> {
+        let (need, note) = self.frames.navigate(slot, url);
+        self.frame_note(note);
+        self.fulfill_host_need(need);
+        Ok(())
+    }
+
+    /// `srcdoc`: no fetch.
+    pub fn srcdoc_browser_tab(&mut self, slot: usize, html: &str) -> Result<(), String> {
+        let note = self.frames.srcdoc(slot, html);
+        self.frame_note(note);
+        Ok(())
+    }
+
     pub fn execute_script(&mut self, source: &str) -> Result<(), String> {
         if self.spec.kernel.js != "aot" {
             return Err("JavaScript is disabled by BoardSpec".into());
@@ -3735,6 +4778,34 @@ impl BrowserSession {
     }
 
     pub fn holyc_request(&mut self, line: &str) -> Result<ReplResult, String> {
+        if g6b_hw::is_hw_invoke(line) {
+            let out = g6b_hw::eval_instant(&mut self.hw, line);
+            self.apply_hw_support();
+            return Ok(ReplResult::Output(out));
+        }
+        if let Some((name, args)) = g6b_hw::parse_invoke(line) {
+            if matches!(name.as_str(), "UsbLs" | "UsbKey" | "UsbFlash") {
+                let hw_name = match name.as_str() {
+                    "UsbLs" => "hwUsbLs",
+                    "UsbKey" => "hwUsbKey",
+                    "UsbFlash" => "hwUsbFlash",
+                    _ => "hwUsbLs",
+                };
+                let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                let out = g6b_hw::call_instant(&mut self.hw, hw_name, &refs);
+                self.apply_hw_support();
+                return Ok(ReplResult::Output(out));
+            }
+            if matches!(
+                name.as_str(),
+                "HttpsGet" | "HttpGet" | "httpsGet" | "httpGet"
+            ) {
+                let url = args.first().cloned().unwrap_or_default();
+                let (st, body) = self.outbound_get(&url);
+                self.apply_hw_support();
+                return Ok(ReplResult::Output(format!("HTTP {st}\n{body}\n")));
+            }
+        }
         if line
             .split('(')
             .next()
@@ -3878,6 +4949,7 @@ impl BrowserSession {
                     timers: &mut self.timers,
                     now_ns,
                     store: Some(&mut self.program.store),
+                    hw: Some(&mut self.hw),
                 },
                 func,
                 &[t.ctx],
@@ -3886,6 +4958,7 @@ impl BrowserSession {
             match fired {
                 Ok(call) => {
                     self.diagnostics.extend(call.diagnostics);
+                    self.apply_hw_support();
                     self.diagnostics.push(format!("TIMER-FIRE id={}", t.id));
                 }
                 Err(e) => self
@@ -4030,6 +5103,16 @@ impl BrowserSession {
     }
 
     fn kernel_fetch(&mut self, method: &str, url: &str) -> g6b_http::Response {
+        if url.starts_with("http://") || url.starts_with("https://") {
+            if !self.spec.kernel.http.outbound {
+                return g6b_http::Response::file(403, "text/plain", "outbound fetch disabled");
+            }
+            if !method.eq_ignore_ascii_case("GET") {
+                return g6b_http::Response::file(405, "text/plain", "outbound GET only");
+            }
+            let (st, body) = self.outbound_get(url);
+            return g6b_http::Response::file(st, "text/plain", body);
+        }
         self.program
             .router
             .fetch_with_body(method, url, &[], Some(&mut self.program.store))
@@ -4064,23 +5147,7 @@ impl BrowserSession {
         }
         let want = self.surface.toggled();
         self.surface = want;
-        let out = self.spec.default_output();
-        if let Some(node) = self.dom.get_element_by_id("disp-status") {
-            node.set_inner_text(&format!(
-                "{} {} {}",
-                out.class.as_str(),
-                want.as_str(),
-                out.id
-            ));
-        }
-        if let Some(node) = self.dom.get_element_by_id("disp-toggle") {
-            node.set_attribute("data-surface", want.as_str())?;
-            node.set_inner_text(if want == g6b_spec::Surface::Gpu {
-                "VGA view"
-            } else {
-                "GPU view"
-            });
-        }
+        self.hw.set_scanout(want.as_str());
         self.diagnostics
             .push(format!("DISP-SURFACE {}", want.as_str()));
         Ok(want)
@@ -4275,13 +5342,16 @@ impl BrowserSession {
         event_type: &str,
         detail: &str,
     ) -> Result<bool, String> {
-        let body = body_node(&mut self.dom).ok_or("no body node")?;
         let hit = self
             .hit_boxes
             .iter()
             .rev()
             .find(|h| x >= h.x && x < h.x + h.w && y >= h.y && y < h.y + h.h)
             .ok_or("no hit target")?;
+        let hover_id = hit.id.clone();
+        let hit_path = hit.path.clone();
+        let session_scope = session_slot_on_path(&self.dom, &hit_path);
+        let body = body_node(&mut self.dom).ok_or("no body node")?;
         let mut event = Event::new(
             event_type,
             EventInit {
@@ -4291,21 +5361,25 @@ impl BrowserSession {
                 detail: detail.into(),
             },
         );
-        event.target = hit.id.clone();
+        event.target = hover_id.clone();
         event.client_x = x;
         event.client_y = y;
-        let hover_id = hit.id.clone();
-        let allowed = Node::dispatch_event(body, &hit.path, &mut event, &mut self.event_host);
+        let allowed = Node::dispatch_event(body, &hit_path, &mut event, &mut self.event_host);
         if event_type == "mousemove"
             || event_type == "mouseover"
             || event_type == "pointermove"
             || event_type == "click"
         {
-            set_hover_attr(&mut self.dom, hover_id.as_deref());
+            set_hover_attr(&mut self.dom, hover_id.as_deref(), session_scope);
         }
         let wasm_prevented = self.run_triggered();
         let named_prevented = self.run_named_input_delegates(&event);
-        if allowed && !wasm_prevented && !named_prevented && event_type == "click" {
+        if allowed
+            && !wasm_prevented
+            && !named_prevented
+            && event_type == "click"
+            && session_scope.is_none()
+        {
             if let Some(menu) = hover_id
                 .as_deref()
                 .and_then(|id| find_node_by_id(&self.dom, id))
@@ -4389,6 +5463,7 @@ impl BrowserSession {
                             timers: &mut self.timers,
                             now_ns: self.now_ns,
                             store: Some(&mut self.program.store),
+                            hw: Some(&mut self.hw),
                         },
                         function_index,
                         handle,
@@ -4396,6 +5471,7 @@ impl BrowserSession {
                     ) {
                         Ok(call) => {
                             self.diagnostics.extend(call.diagnostics);
+                            self.apply_hw_support();
                             self.diagnostics.push(format!(
                                 "EVENT-WASM-TRIGGERED {id} results={}",
                                 call.results.len()
@@ -4425,6 +5501,7 @@ impl BrowserSession {
                             timers: &mut self.timers,
                             now_ns: self.now_ns,
                             store: Some(&mut self.program.store),
+                            hw: Some(&mut self.hw),
                         },
                         ctx,
                         ptr,
@@ -4432,6 +5509,7 @@ impl BrowserSession {
                     ) {
                         Ok(call) => {
                             self.diagnostics.extend(call.diagnostics);
+                            self.apply_hw_support();
                             self.diagnostics
                                 .push(format!("EVENT-DELEGATE-TRIGGERED {id} ctx={ctx} ptr={ptr}"));
                             Ok(call.default_prevented)
@@ -4485,6 +5563,7 @@ impl BrowserSession {
                     timers: &mut self.timers,
                     now_ns: self.now_ns,
                     store: Some(&mut self.program.store),
+                    hw: Some(&mut self.hw),
                 },
                 ctx,
                 ptr,
@@ -4494,6 +5573,7 @@ impl BrowserSession {
             match fired {
                 Ok(call) => {
                     self.diagnostics.extend(call.diagnostics);
+                    self.apply_hw_support();
                     self.diagnostics
                         .push(format!("EVENT-NAMED-DELEGATE {name} ctx={ctx} ptr={ptr}"));
                     prevented |= call.default_prevented;
@@ -4514,9 +5594,7 @@ impl BrowserSession {
         };
         if id == "refresh" {
             self.refresh()?;
-            if let Some(n) = self.dom.get_element_by_id("status") {
-                n.set_inner_text("UI-BOOT: values refreshed; read-only setup");
-            }
+            self.paint_status("UI-BOOT: values refreshed; read-only setup");
             return Ok(());
         }
         let menu = find_node_by_id(&self.dom, id)
@@ -4532,9 +5610,7 @@ impl BrowserSession {
                 paint_response(&mut self.dom, &url, &response.body_str())?;
             }
         }
-        if let Some(n) = self.dom.get_element_by_id("status") {
-            n.set_inner_text(&format!("UI-BOOT: {menu} menu; read-only setup"));
-        }
+        self.paint_status(&format!("UI-BOOT: {menu} menu; read-only setup"));
         Ok(())
     }
 }
@@ -5187,11 +6263,11 @@ fn node_has_id(node: &Node, id: &str) -> bool {
 }
 
 /// Cell `<main>` plus shell chrome the Svelte tree does not own yet
-/// (`#disp-toggle` / `#disp-status`), matching the old HTML wrap.
+/// (`#disp-toggle` / `#disp-status`). Window/tab chrome is Svelte.
 fn live_paint_targets(dom: &Node) -> Vec<&Node> {
     let root = live_paint_root(dom);
     let mut out = vec![root];
-    for id in ["disp-toggle", "disp-status"] {
+    for id in ["disp-toggle", "disp-status", "win-open", "bios-window-0"] {
         if node_has_id(root, id) {
             continue;
         }
@@ -5668,7 +6744,7 @@ fn session_assets(spec: &BoardSpec) -> g6b_css::AssetMap {
 /// goosie hover: one `data-hover="1"` marker the CSS `:hover` matcher reads.
 /// Every node with that `id` is marked so a duplicate static shell + LDC
 /// cell tree both restyle; `Engine::paint` then sees hover on the painted root.
-fn set_hover_attr(root: &mut Node, id: Option<&str>) {
+fn set_hover_attr(root: &mut Node, id: Option<&str>, session_scope: Option<usize>) {
     fn clear(n: &mut Node) {
         if n.attributes.contains_key("data-hover") {
             n.remove_attribute("data-hover");
@@ -5687,8 +6763,28 @@ fn set_hover_attr(root: &mut Node, id: Option<&str>) {
     }
     clear(root);
     if let Some(id) = id {
-        mark(root, id);
+        if let Some(slot) = session_scope {
+            if let Some(stage) = find_node_by_id_mut(root, &format!("bios-session-{slot}")) {
+                mark(stage, id);
+            }
+        } else {
+            mark(root, id);
+        }
     }
+}
+
+fn find_node_by_id_mut<'a>(node: &'a mut Node, id: &str) -> Option<&'a mut Node> {
+    if node.id.as_deref() == Some(id) {
+        return Some(node);
+    }
+    let n = node.children.len();
+    for i in 0..n {
+        // Index then recurse so the borrow of children[i] does not overlap.
+        if find_node_by_id(&node.children[i], id).is_some() {
+            return find_node_by_id_mut(&mut node.children[i], id);
+        }
+    }
+    None
 }
 
 fn extract_style(html: &str) -> String {
@@ -5786,6 +6882,19 @@ mod tests {
     }
 
     #[test]
+    fn qemu_argv_full_outbound_is_not_netdev() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        assert!(spec.kernel.http.outbound);
+        assert!(spec.wants_virtio_net());
+        let argv = qemu_dual_band_argv(&spec).join(" ");
+        assert!(
+            !argv.contains("-netdev"),
+            "outbound fetch is not a QEMU NIC: {argv}"
+        );
+        assert!(!argv.contains("virtio-net"), "{argv}");
+    }
+
+    #[test]
     fn qemu_argv_serial_is_bidirectional_without_dual_band() {
         // The UART0/trap_uart console must accept commands (View/Ui/File/Get)
         // on QEMU for every spec — an output-only backend would strand them.
@@ -5851,6 +6960,60 @@ mod tests {
             v.clone_prop("defaultPrevented").unwrap(),
             LibwasmValue::Bool(true)
         );
+
+        let hw = Event::new("hwcable", EventInit::default());
+        let h = host.intern_event(&hw).unwrap();
+        let v = host.get_libwasm_value(h).unwrap();
+        match v {
+            LibwasmValue::Object { kind, props } => {
+                assert_eq!(kind, ObjectKind::HwEvent);
+                assert_eq!(
+                    props.get("constructor"),
+                    Some(&LibwasmValue::String("HWEvent".into()))
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        host.object_call(h, "preventDefault", &[]).unwrap();
+        assert!(host.last_prevent_default);
+    }
+
+    #[test]
+    fn holyc_hw_returns_instantly_and_does_not_write_dom_ids() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        assert!(!session.hw.listening());
+        assert!(!session.frames.outbound());
+        assert_eq!(session.surface, g6b_spec::Surface::Vga);
+        match session
+            .holyc_request(r#"HwConfig("net0","static","not-an-ip");"#)
+            .unwrap()
+        {
+            ReplResult::Output(s) => {
+                assert!(s.contains("HW-ERR"), "{s}");
+                assert!(s.contains("HW-STAT"), "{s}");
+            }
+            other => panic!("HolyC must return instantly, got {other:?}"),
+        }
+        assert!(session.hw.listening());
+        assert!(
+            session.diagnostics.iter().any(|d| d.contains("VIRTIO-NET")),
+            "{:?}",
+            session.diagnostics
+        );
+        assert!(
+            session.diagnostics.iter().any(|d| d.contains("HW-EVENT")),
+            "{:?}",
+            session.diagnostics
+        );
+        // Kernel announced; it does not paint #hw-nat-status itself.
+        if let Some(n) = session.dom.get_element_by_id("hw-nat-status") {
+            assert!(
+                n.inner_text().is_empty() || n.inner_text() == "hw idle",
+                "{}",
+                n.inner_text()
+            );
+        }
     }
 
     fn jscallback_probe_module() -> g6b_wasm::Module {
@@ -6008,6 +7171,434 @@ mod tests {
     }
 
     #[test]
+    fn b92_svelte_chrome_is_hidden_until_the_cell_opens_it() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let session = BrowserSession::new(&spec).unwrap();
+        let win = find_node_by_id(&session.dom, "bios-window-0").expect("bios-window-0");
+        assert!(win.hidden, "Svelte {{#if winOpen=false}} keeps the desktop");
+        assert!(find_node_by_id(&session.dom, "win-open").is_some());
+        assert_eq!(
+            find_node_by_id(&session.dom, "status")
+                .unwrap()
+                .inner_text(),
+            "UI-BOOT"
+        );
+        assert!(session.iframe_session(0).is_none());
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .all(|d| !d.contains("WASM-WINDOW-LISTEN")),
+            "{:?}",
+            session.diagnostics
+        );
+    }
+
+    #[test]
+    fn b92_session_pool_ensure_drop_is_not_chrome() {
+        assert_eq!(MAX_WINDOWS, 4);
+        assert_eq!(MAX_TABS_PER_WINDOW, 8);
+        assert_eq!(MAX_SESSIONS, 8);
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        session.ensure_iframe_session(0).unwrap();
+        session.ensure_iframe_session(1).unwrap();
+        assert_eq!(session.iframe_session(0).unwrap().location, "about:blank");
+        assert_eq!(session.iframe_session(1).unwrap().location, "about:blank");
+        let win = find_node_by_id(&session.dom, "bios-window-0").unwrap();
+        assert!(win.hidden, "ensure does not open Svelte chrome");
+        session.drop_iframe_session(0).unwrap();
+        assert!(session.iframe_session(0).is_none());
+        assert!(session.iframe_session(1).is_some());
+        session.drop_all_iframe_sessions().unwrap();
+        assert!(session.iframe_session(1).is_none());
+        session.ensure_iframe_session(MAX_SESSIONS).unwrap();
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("SESSION-BUDGET")),
+            "{:?}",
+            session.diagnostics
+        );
+        assert!(session.iframe_session(MAX_SESSIONS).is_none());
+    }
+
+    #[test]
+    fn b92c_navigate_ui_html_200() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        session.ensure_iframe_session(0).unwrap();
+        session.navigate_browser_tab(0, "/ui/help.html").unwrap();
+        let doc = session.iframe_session(0).unwrap().document.clone();
+        match &doc {
+            SessionDocument::Page(p) => {
+                assert_eq!(p.title.as_deref(), Some("Help"));
+                assert!(p.text.contains("G6LC-BIOS help"), "{}", p.text);
+            }
+            other => panic!("expected Page, got {other:?}"),
+        }
+        let s = session.iframe_session(0).unwrap();
+        assert_eq!(s.location, "/ui/help.html");
+        assert_eq!(s.history, vec!["/ui/help.html"]);
+        assert_eq!(s.load, SessionLoad::Http(200));
+        assert!(s.document.paint_text().contains("G6LC-BIOS help"));
+        assert_eq!(s.document.title(), Some("Help"));
+    }
+
+    #[test]
+    fn b92c_srcdoc_skips_fetch_and_refuses_bios_remote() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","kernel":{"http":{"outbound":false}}}"#,
+        )
+        .unwrap();
+        assert!(!spec.kernel.http.outbound);
+        let mut session = BrowserSession::new(&spec).unwrap();
+        session.ensure_iframe_session(0).unwrap();
+        session
+            .srcdoc_browser_tab(0, "<p id=\"x\">srcdoc</p>")
+            .unwrap();
+        assert_eq!(session.iframe_session(0).unwrap().location, "about:srcdoc");
+        assert!(session
+            .iframe_session(0)
+            .unwrap()
+            .document
+            .paint_text()
+            .contains("srcdoc"));
+        session.navigate_browser_tab(0, "/bios/menu/cpu").unwrap();
+        let s = session.iframe_session(0).unwrap();
+        assert!(s.location.contains("/bios/menu/cpu"));
+        assert!(s.load.status_word().contains("iframe cannot load /bios"));
+        session
+            .navigate_browser_tab(0, "https://example/path")
+            .unwrap();
+        let s = session.iframe_session(0).unwrap();
+        assert_eq!(s.location, "https://example/path");
+        assert!(s.load.status_word().contains("outbound fetch disabled"));
+        session
+            .navigate_browser_tab(0, "javascript:alert(1)")
+            .unwrap();
+        assert!(session
+            .iframe_session(0)
+            .unwrap()
+            .load
+            .status_word()
+            .contains("refused"));
+    }
+
+    #[test]
+    fn b92d_app_files_hook_mounts_filemgr_listing() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        session.ensure_iframe_session(0).unwrap();
+        session.navigate_browser_tab(0, "app:files").unwrap();
+        let doc = session.iframe_session(0).unwrap().document.clone();
+        match &doc {
+            SessionDocument::Files(f) => {
+                assert!(!f.listing.is_empty(), "{}", f.listing);
+                assert!(f.volumes.iter().any(|v| v.name == "fat32"));
+            }
+            other => panic!("expected Files, got {other:?}"),
+        }
+        let s = session.iframe_session(0).unwrap();
+        assert_eq!(s.location, "app:files");
+        assert_eq!(s.load, SessionLoad::Ok);
+        assert_eq!(s.document.title(), Some("Files"));
+        session.navigate_browser_tab(0, "/apps/files").unwrap();
+        assert_eq!(session.iframe_session(0).unwrap().location, "app:files");
+        session.navigate_browser_tab(0, "app:ssh").unwrap();
+        assert!(session
+            .iframe_session(0)
+            .unwrap()
+            .load
+            .status_word()
+            .contains("app: hook not registered"));
+        assert!(
+            session.diagnostics.iter().any(|d| d.contains("HOOK-FILES")),
+            "{:?}",
+            session.diagnostics
+        );
+    }
+
+    #[test]
+    fn b92e_guest_intern_is_not_shell() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        assert!(session.frame_content_window(0).is_none());
+        assert!(session.frame_content_document(0).is_none());
+        session.ensure_iframe_session(0).unwrap();
+        let w = session.frame_content_window(0).expect("guest window");
+        let d = session.frame_content_document(0).expect("guest document");
+        assert_ne!(w, d);
+        assert!(session.frame_owns_handle(0, w));
+        assert!(session.frame_owns_handle(0, d));
+        assert!(session
+            .frame_js_exports(0)
+            .unwrap()
+            .lookup("App_svelte.fetchBios")
+            .is_none());
+        assert!(session.wasm_ui.as_ref().unwrap().has_fetch_bios());
+        let ctx = session.iframe_session(0).unwrap().context.id();
+        assert_ne!(ctx, SHELL_CONTEXT_ID);
+        assert!(ctx.starts_with("frame-0-g"), "{ctx}");
+        let g0 = session.iframe_session(0).unwrap().intern();
+        session
+            .srcdoc_browser_tab(0, "<p id=\"x\">srcdoc</p>")
+            .unwrap();
+        let g1 = session.iframe_session(0).unwrap().intern();
+        assert_ne!(g0.generation, g1.generation);
+        assert!(session.frame_native_import(0, "env.holyc").is_err());
+        assert!(session.frame_native_import(0, "registerEndpoint").is_err());
+        session.navigate_browser_tab(0, "app:files").unwrap();
+        assert!(session.iframe_session(0).unwrap().caps.files_get);
+        assert!(session.frame_native_import(0, "env.holyc").is_err());
+        session.drop_all_iframe_sessions().unwrap();
+        assert!(session.frame_content_window(0).is_none());
+        assert!(session.frame_content_document(0).is_none());
+    }
+
+    #[test]
+    fn b92_vars_map_interns_on_guest_window_including_remote_fail() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","kernel":{"http":{"outbound":false}}}"#,
+        )
+        .unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        session.ensure_iframe_session(0).unwrap();
+        let mut vars = SessionVars::new();
+        assert!(vars.insert("greeting".into(), SessionVar::String("hello".into())));
+        assert!(!vars.insert("eval".into(), SessionVar::String("nope".into())));
+        session.set_iframe_vars(0, vars).unwrap();
+        let w = session.frame_content_window(0).expect("guest window");
+        assert!(session.frame_owns_handle(0, w));
+        assert_eq!(
+            session.frame_window_prop(0, "greeting"),
+            Some(&LibwasmValue::String("hello".into()))
+        );
+        assert!(session.frame_window_prop(0, "eval").is_none());
+        session
+            .navigate_browser_tab(0, "https://example/path")
+            .unwrap();
+        assert!(session
+            .iframe_session(0)
+            .unwrap()
+            .load
+            .status_word()
+            .contains("outbound"));
+        assert_eq!(
+            session.iframe_session(0).unwrap().vars.get("greeting"),
+            Some(&SessionVar::String("hello".into()))
+        );
+        let _ = session.frame_content_window(0);
+        assert_eq!(
+            session.frame_window_prop(0, "greeting"),
+            Some(&LibwasmValue::String("hello".into()))
+        );
+    }
+
+    #[test]
+    fn b92g_outbound_stubbed_get_is_page_deny_caps() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        assert!(spec.kernel.http.outbound);
+        let mut session = BrowserSession::new(&spec).unwrap();
+        session.ensure_iframe_session(0).unwrap();
+        let mut vars = SessionVars::new();
+        assert!(vars.insert("greeting".into(), SessionVar::String("hello".into())));
+        session.set_iframe_vars(0, vars).unwrap();
+        session.stub_outbound(
+            "https://example/path",
+            200,
+            "<html><head><title>Ex</title></head><body><p>remote</p></body></html>",
+        );
+        session
+            .navigate_browser_tab(0, "https://example/path")
+            .unwrap();
+        assert!(session
+            .iframe_session(0)
+            .unwrap()
+            .load
+            .status_word()
+            .contains("outbound fetch disabled"));
+        match session.holyc_request("HwStat();").unwrap() {
+            ReplResult::Output(s) => assert!(s.contains("VIRTIO-NET"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(session.frames.outbound());
+        let doc = session.iframe_session(0).unwrap().document.clone();
+        match &doc {
+            SessionDocument::Page(p) => {
+                assert_eq!(p.title.as_deref(), Some("Ex"));
+                assert!(p.text.contains("remote"), "{}", p.text);
+            }
+            other => panic!("expected Page, got {other:?}"),
+        }
+        let s = session.iframe_session(0).unwrap();
+        assert_eq!(s.location, "https://example/path");
+        assert_eq!(s.load, SessionLoad::Http(200));
+        assert!(s.caps.is_deny());
+        assert!(session.frame_native_import(0, "env.holyc").is_err());
+        assert!(session.frame_native_import(0, "registerEndpoint").is_err());
+        let _ = session.frame_content_window(0);
+        assert_eq!(
+            session.frame_window_prop(0, "greeting"),
+            Some(&LibwasmValue::String("hello".into()))
+        );
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("outbound") && d.contains("https://example/path")),
+            "{:?}",
+            session.diagnostics
+        );
+        session
+            .navigate_browser_tab(0, "https://example/app.wasm")
+            .unwrap();
+        assert!(session
+            .iframe_session(0)
+            .unwrap()
+            .load
+            .status_word()
+            .contains("remote wasm"));
+        session.stub_outbound(
+            "https://example/unstubbed",
+            501,
+            "outbound https: adapter TLS (g6b-tls ClientHello)",
+        );
+        session
+            .navigate_browser_tab(0, "https://example/unstubbed")
+            .unwrap();
+        assert!(session
+            .iframe_session(0)
+            .unwrap()
+            .load
+            .status_word()
+            .contains("HTTP 501"));
+        assert!(session.iframe_session(0).unwrap().caps.is_deny());
+        let argv = qemu_dual_band_argv(&spec).join(" ");
+        assert!(!argv.contains("-netdev"), "{argv}");
+        assert!(!argv.contains("virtio-net"), "{argv}");
+    }
+
+    fn serve_once(reply: Vec<u8>) -> (u16, std::thread::JoinHandle<()>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let Ok((mut s, _)) = listener.accept() else {
+                return;
+            };
+            let mut buf = [0u8; 2048];
+            let _ = s.read(&mut buf);
+            let _ = s.write_all(&reply);
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn kernel_http_get_lowers_to_hw_tcp() {
+        let body =
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nhello-hw-tcp";
+        let (port, th) = serve_once(body.to_vec());
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let url = format!("http://127.0.0.1:{port}/hello");
+        match session
+            .holyc_request(&format!(r#"HttpGet("{url}");"#))
+            .unwrap()
+        {
+            ReplResult::Output(s) => {
+                assert!(s.contains("HTTP 200"), "{s}");
+                assert!(s.contains("hello-hw-tcp"), "{s}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("KERNEL-FETCH http") && d.contains("via=hw-tcp")),
+            "{:?}",
+            session.diagnostics
+        );
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("KERNEL-FETCH-HTTP 200")),
+            "{:?}",
+            session.diagnostics
+        );
+        session.ensure_iframe_session(0).unwrap();
+        let (port2, th2) = serve_once(body.to_vec());
+        let url2 = format!("http://127.0.0.1:{port2}/iframe");
+        session.navigate_browser_tab(0, &url2).unwrap();
+        let s = session.iframe_session(0).unwrap();
+        assert_eq!(s.load, SessionLoad::Http(200));
+        assert!(s.document.paint_text().contains("hello-hw-tcp"));
+        let _ = th.join();
+        let _ = th2.join();
+    }
+
+    #[test]
+    fn zealcli_vga_until_gpu_then_loadui() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        assert!(wants_zealcli(&spec, false));
+        assert!(!wants_zealcli(&spec, true));
+        let mut cli = ZealCli::new(&spec);
+        assert!(cli.prompt().ends_with(ZEAL_PROMPT));
+        let (a, _) = cli.eval("LoadUI");
+        assert_eq!(a, ZealAction::LoadUi);
+        match session_usb(&spec) {
+            ReplResult::Output(s) => assert!(s.contains("USB") || s.contains("ok"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn session_usb(spec: &BoardSpec) -> ReplResult {
+        let mut session = BrowserSession::new(spec).unwrap();
+        session.holyc_request(r#"UsbKey("present");"#).unwrap()
+    }
+
+    #[test]
+    fn kernel_https_get_lowers_to_hw_tcp_clienthello() {
+        let rec = vec![0x16, 0x03, 0x03, 0x00, 0x01, 0x00];
+        let (port, th) = serve_once(rec);
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let url = format!("https://127.0.0.1:{port}/secure");
+        match session
+            .holyc_request(&format!(r#"HttpsGet("{url}");"#))
+            .unwrap()
+        {
+            ReplResult::Output(s) => {
+                assert!(s.contains("HTTP 501"), "{s}");
+                assert!(s.contains("via=hw-tcp"), "{s}");
+                assert!(s.contains("tls=handshake"), "{s}");
+                assert!(!s.to_ascii_lowercase().contains("openssl"), "{s}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("KERNEL-FETCH https") && d.contains("via=hw-tcp")),
+            "{:?}",
+            session.diagnostics
+        );
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("KERNEL-FETCH-TLS handshake")),
+            "{:?}",
+            session.diagnostics
+        );
+        let _ = th.join();
+    }
+
+    #[test]
     fn shipped_ldc_cell_emits_g6b_listen_and_jscallback() {
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
         let mut session = BrowserSession::new(&spec).unwrap();
@@ -6094,6 +7685,86 @@ mod tests {
         assert_ne!(window, console);
         assert_eq!(host.libwasm_global("window").unwrap(), window);
         assert_eq!(host.libwasm_global("eval").unwrap(), 0);
+        host.hw = Some(&mut session.hw);
+        assert_eq!(host.libwasm_global("hw").unwrap(), 0);
+        let platform = host.libwasm_global("platform").unwrap();
+        assert!(platform >= g6b_wasm::OBJECT_BASE, "{platform}");
+        assert_eq!(
+            host.object_getter(window, "platform").unwrap(),
+            LibwasmValue::I32(platform)
+        );
+        let hw = match host.object_getter(platform, "hw").unwrap() {
+            LibwasmValue::I32(h) => h,
+            other => panic!("{other:?}"),
+        };
+        assert!(hw >= g6b_wasm::OBJECT_BASE, "{hw}");
+        assert_eq!(
+            host.object_getter(hw, "nat").unwrap(),
+            LibwasmValue::String("minimal".into())
+        );
+        assert_eq!(
+            host.object_getter(hw, "listening").unwrap(),
+            LibwasmValue::Bool(false)
+        );
+        let net = match host.object_getter(hw, "net").unwrap() {
+            LibwasmValue::I32(h) => h,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            host.object_getter(net, "kind").unwrap(),
+            LibwasmValue::String("virtio-net".into())
+        );
+        let tcp = match host.object_getter(net, "tcp").unwrap() {
+            LibwasmValue::I32(h) => h,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            host.object_getter(tcp, "enabled").unwrap(),
+            LibwasmValue::Bool(true)
+        );
+        assert_eq!(
+            host.object_getter(hw, "host_adapter").unwrap(),
+            LibwasmValue::String(String::new())
+        );
+        let disp = match host.object_getter(hw, "display").unwrap() {
+            LibwasmValue::I32(h) => h,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            host.object_getter(disp, "surface").unwrap(),
+            LibwasmValue::String("vga".into())
+        );
+        assert_eq!(
+            host.object_getter(disp, "probed").unwrap(),
+            LibwasmValue::Bool(false)
+        );
+        assert_eq!(
+            host.object_getter(disp, "kind").unwrap(),
+            LibwasmValue::String("vga".into())
+        );
+        assert_eq!(
+            host.object_getter(hw, "listening").unwrap(),
+            LibwasmValue::Bool(false),
+            "interning platform.hw must not listen"
+        );
+        let _ = host.object_call(hw, "stat", &[]).unwrap();
+        assert_eq!(
+            host.object_getter(hw, "listening").unwrap(),
+            LibwasmValue::Bool(true)
+        );
+        assert_eq!(
+            host.object_getter(disp, "probed").unwrap(),
+            LibwasmValue::Bool(true)
+        );
+        assert_eq!(
+            host.object_getter(disp, "kind").unwrap(),
+            LibwasmValue::String("virtio-gpu".into())
+        );
+        assert_eq!(
+            host.object_getter(disp, "surface").unwrap(),
+            LibwasmValue::String("vga".into()),
+            "scanout stays VGA until announce"
+        );
         let root = host.get_root().unwrap();
         assert_eq!(root, 1, "getRoot is the Spa mount, not BoardSpec: {root}");
         let css_h = host.add_css(".bios-tab:hover{color:#fff}").unwrap();
@@ -7655,15 +9326,26 @@ mod tests {
         let spec = gpu_spec();
         assert!(spec.surface_toggle());
         let mut session = BrowserSession::new(&spec).unwrap();
+        // Live surface stays VGA until g6b-hw announces display support.
+        assert_eq!(session.surface, g6b_spec::Surface::Vga);
+        match session.holyc_request("HwStat();").unwrap() {
+            ReplResult::Output(s) => {
+                assert!(s.contains("HW-STAT"), "{s}");
+                assert!(s.contains("HW-DISP"), "{s}");
+            }
+            other => panic!("{other:?}"),
+        }
         assert_eq!(session.surface, g6b_spec::Surface::Gpu);
-        // The control exists and names the surface a click switches *to*.
-        let toggle = session
-            .dom
-            .get_element_by_id("disp-toggle")
-            .expect("toggle button");
-        assert_eq!(toggle.get_attribute("data-surface"), Some("gpu"));
-        assert_eq!(toggle.inner_text(), "VGA view");
-        // And the proxy the host PPM path uses agrees with the session.
+        assert_eq!(session.hw.scanout(), "gpu");
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.starts_with("HW-EVENT")),
+            "{:?}",
+            session.diagnostics
+        );
+        assert!(session.dom.get_element_by_id("disp-toggle").is_some());
         assert_eq!(session.proxy().surface, g6b_spec::Surface::Gpu);
     }
 
@@ -7671,27 +9353,16 @@ mod tests {
     fn toggling_the_surface_updates_dom_router_and_proxy_together() {
         let spec = gpu_spec();
         let mut session = BrowserSession::new(&spec).unwrap();
+        let _ = session.holyc_request("HwStat();").unwrap();
+        assert_eq!(session.surface, g6b_spec::Surface::Gpu);
         let now = session.toggle_surface().unwrap();
         assert_eq!(now, g6b_spec::Surface::Vga);
         assert_eq!(session.surface, g6b_spec::Surface::Vga);
+        assert_eq!(session.hw.scanout(), "vga");
         assert_eq!(session.proxy().surface, g6b_spec::Surface::Vga);
-        assert_eq!(
-            session
-                .dom
-                .get_element_by_id("disp-toggle")
-                .unwrap()
-                .get_attribute("data-surface"),
-            Some("vga")
-        );
-        assert!(session
-            .dom
-            .get_element_by_id("disp-status")
-            .unwrap()
-            .inner_text()
-            .contains("vga"));
         assert!(session.diagnostics.iter().any(|d| d == "DISP-SURFACE vga"));
-        // Flipping back is symmetric.
         assert_eq!(session.toggle_surface().unwrap(), g6b_spec::Surface::Gpu);
+        assert_eq!(session.hw.scanout(), "gpu");
     }
 
     #[test]

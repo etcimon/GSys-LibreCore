@@ -328,9 +328,10 @@ nor a per-hart policy test proves guest all-core saturation.
 ## Browser-UI design notes (flash + file manager)
 
 Two screens share the 640×480 Gr plane and the high-res display-proxy. They
-are **svelte-d NodeDef**, not SvelteKit routes. `fetch` hits the kernel
-router; HolyC `UsbLs` / `UsbFlash` / `UsbKey` is the other KVM face of the
-same table. USB contract: [`USB.md`](USB.md).
+are **svelte-d NodeDef**, not SvelteKit routes. Local `fetch` hits the kernel
+router; remote `http(s):` is the same kernel path lowered onto `g6b-hw` TCP.
+HolyC `UsbLs` / `UsbFlash` / `UsbKey` is the other KVM face of the
+same table. USB contract: [`USB.md`](USB.md). Fetch contract: [`KERNEL-API.md`](KERNEL-API.md).
 
 | Screen | Gate | Layout (640×480) | High-res proxy |
 |---|---|---|---|

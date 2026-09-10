@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "adapters": [
+    {
+      "id": "net0",
+      "class": "net",
+      "kind": "virtio-net",
+      "transport": "virtio-mmio",
+      "device_id": 1,
+      "slot": 5,
+      "features": ["csum", "mac", "status", "version_1"]
+    },
+    {
+      "id": "eth0",
+      "class": "net",
+      "kind": "ethernet",
+      "vendor": "verilog-ethernet",
+      "features": ["rgmii", "1g", "mdio"],
+      "mmio": "0x30000000"
+    },
+    {
+      "id": "wlan0",
+      "class": "net",
+      "kind": "wifi",
+      "vendor": "none",
+      "features": []
+    },
+    {
+      "id": "gpu0",
+      "class": "display",
+      "kind": "virtio-gpu",
+      "transport": "virtio-mmio",
+      "device_id": 16,
+      "slot": 0,
+      "features": ["version_1"]
+    },
+    {
+      "id": "hdmi0",
+      "class": "display",
+      "kind": "hdmi",
+      "vendor": "g6lc-scanout",
+      "features": ["g6ds"]
+    }
+  ]
+}

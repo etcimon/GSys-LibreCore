@@ -28,6 +28,16 @@ pub enum JsExportKind {
     HolycEval,
     /// `registerEndpoint(path, method)`.
     RegisterEndpoint,
+    /// Post-boot lazy `hwConfig(id, addressing, ip)` (g6b-hw). JS/wasm may await.
+    HwConfig,
+    /// `hwStat()` — instant status snapshot.
+    HwStat,
+    /// `hwListen()` — arm the idle listen worker; instant status.
+    HwListen,
+    /// `hwWake()` — BIOS UI wake, equal to a device event.
+    HwWake,
+    /// `hwCable(event)`.
+    HwCable,
 }
 
 /// Bounded `__svelteD.ts` registry. Keys are module-mangled like
@@ -44,6 +54,11 @@ impl JsExports {
         app.insert("fetchBios".into(), JsExportKind::FetchBios);
         app.insert("holycEval".into(), JsExportKind::HolycEval);
         app.insert("registerEndpoint".into(), JsExportKind::RegisterEndpoint);
+        app.insert("hwConfig".into(), JsExportKind::HwConfig);
+        app.insert("hwStat".into(), JsExportKind::HwStat);
+        app.insert("hwListen".into(), JsExportKind::HwListen);
+        app.insert("hwWake".into(), JsExportKind::HwWake);
+        app.insert("hwCable".into(), JsExportKind::HwCable);
         let mut ts = BTreeMap::new();
         ts.insert("App_svelte".into(), app);
         Self { ts }
@@ -73,7 +88,7 @@ impl JsExports {
 
     /// Names `libwasm_global` intern as the live browser instance.
     pub fn is_browser_global(name: &str) -> bool {
-        matches!(name, "window" | "document" | "console")
+        matches!(name, "window" | "document" | "console" | "platform")
     }
 }
 

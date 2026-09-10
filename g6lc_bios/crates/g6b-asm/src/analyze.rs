@@ -20,7 +20,8 @@ use crate::encode::{
     PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID, SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID,
     SBI_TIME_EID, SCAUSE_LOAD_ACCESS, SCAUSE_STORE_ACCESS, SIE_SEIE, SIE_SSIE, SIE_STIE, SP,
     SSTATUS_SIE, T0, T1, T2, T3, T4, T5, T6, TP, UART_IER_RX, UART_IRQ, UART_LSR_DR, UI_MAGIC,
-    VIO_DEV_GPU, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
+    VIO_DEV_GPU, VIO_DEV_NET, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP,
+    VTYPE_E8_M1_TA_MA, X0,
 };
 use crate::{
     gr_bss_len, gr_stride, Addr, Module, Node, Op, Purpose, BIOS_UI_LIBWASM, BIOS_UI_WASM,
@@ -122,6 +123,11 @@ pub fn objects(spec: &BoardSpec) -> Vec<Object> {
             purpose: Purpose::Virtio,
             live: spec.wants_virtio_gpu(),
             why: "virtio-mmio probe 0x10001000+0x200*N for GPU device_id 16 (QEMU virt; queues/scanout open)",
+        },
+        Object {
+            purpose: Purpose::VirtioNet,
+            live: spec.wants_virtio_net(),
+            why: "virtio-mmio probe DeviceID 1 (virtio-net); never QEMU -netdev",
         },
         Object {
             purpose: Purpose::DispScan,
@@ -289,6 +295,7 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     let mut proxy = None;
     let mut gl = None;
     let mut vio = None;
+    let mut vnet = None;
     let mut disp = None;
     let mut pci = None;
     let mut dmux = None;
@@ -314,6 +321,7 @@ pub fn kstart(spec: &BoardSpec) -> Module {
             Purpose::DisplayProxy => proxy = Some(o),
             Purpose::GlAdapter => gl = Some(o),
             Purpose::Virtio => vio = Some(o),
+            Purpose::VirtioNet => vnet = Some(o),
             Purpose::DispScan => disp = Some(o),
             Purpose::PciScan => pci = Some(o),
             Purpose::DisplayMux => dmux = Some(o),
@@ -394,7 +402,7 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     }
     // `__vio` also carries the `DispSel`/`PciProbe` result block, so the mux
     // needs it allocated even on a board with no virtio or display engine.
-    if vio.is_some() || disp.is_some() || dmux.is_some() {
+    if vio.is_some() || vnet.is_some() || disp.is_some() || dmux.is_some() {
         m.vio_bytes = crate::vio::VIO_BSS;
     }
     // The scanout surface itself is only allocated when something actually
@@ -423,6 +431,9 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     }
     if let Some(o) = vio {
         m.push(vio_call_node(o, spec));
+    }
+    if let Some(o) = vnet {
+        m.push(vio_net_call_node(o));
     }
     // PciProbe runs before the mux so its result is available to the top rung,
     // and before VioScan so a failed ECAM read cannot strand the virtio lane.
@@ -532,6 +543,9 @@ pub fn kstart(spec: &BoardSpec) -> Module {
                 m.push(crate::vio::dom_nav_node(o, spec));
             }
         }
+    }
+    if let Some(o) = vnet {
+        m.push(vio_net_probe_node(o));
     }
     if disp.is_some() {
         m.push(crate::vio::disp_paint_node(spec));
@@ -1265,7 +1279,7 @@ fn plic_init_node(o: Object, spec: &BoardSpec) -> Node {
     // QEMU virt: virtio-mmio slot i → PLIC irq 1+i (DTB `interrupts =
     // <1+i>`); enable the whole 8-slot range (1..=8) — unattached slots
     // never drive a line.
-    let vio_irqs = if spec.wants_virtio_gpu() {
+    let vio_irqs = if spec.wants_virtio_gpu() || spec.wants_virtio_net() {
         0xFFi64 << 1
     } else {
         0
@@ -1274,7 +1288,7 @@ fn plic_init_node(o: Object, spec: &BoardSpec) -> Node {
     // A PLIC source with priority 0 never asserts — QEMU reset value is 0,
     // so every enabled source needs an explicit nonzero priority.
     let mut prio: Vec<i64> = vec![uart_irq, mbox_irq];
-    if spec.wants_virtio_gpu() {
+    if spec.wants_virtio_gpu() || spec.wants_virtio_net() {
         prio.extend(1..=8);
     }
     prio.sort_unstable();
@@ -3365,6 +3379,19 @@ fn gl_call_node(o: Object) -> Node {
     }
 }
 
+fn vio_net_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::VirtioNet,
+        ops: vec![
+            Op::Comment(format!("{} — jal VioNetProbe", o.why)),
+            Op::Jal {
+                rd: RA,
+                to: "VioNetProbe".into(),
+            },
+        ],
+    }
+}
+
 fn vio_call_node(o: Object, spec: &BoardSpec) -> Node {
     let mut ops = vec![
         Op::Comment(format!("{} — jal VioProbe / VioInit", o.why)),
@@ -3606,6 +3633,132 @@ fn vio_probe_node(o: Object) -> Node {
     });
     Node {
         purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// Virtio-mmio slot scan for DeviceID 1 (virtio-net). Prints `VIRTIO-NET <slot>`
+/// or `VIRTIO-NET-NONE`. Enumeration only — no virtqueue, no QEMU `-netdev`.
+fn vio_net_probe_node(o: Object) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!("{} — read-only virtio-net slot scan", o.why)),
+        Op::Glob("VioNetProbe".into()),
+        Op::Label("VioNetProbe".into()),
+        Op::La {
+            rd: T0,
+            addr: Addr::Abs(VIO_MMIO_BASE),
+        },
+        Op::Li {
+            rd: T1,
+            imm: VIO_MMIO_SLOTS,
+        },
+        Op::Li {
+            rd: T4,
+            imm: VIO_MMIO_STEP as i64,
+        },
+        Op::Label("vn_slot".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: 0,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_MAGIC),
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_next".into(),
+        },
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_DEV_NET),
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hit".into(),
+        },
+        Op::Label("vn_next".into()),
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T4,
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_slot".into(),
+        },
+    ];
+    for ch in b"VIRTIO-NET-NONE\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Jalr {
+            rd: X0,
+            rs: RA,
+            imm: 0,
+        },
+        Op::Label("vn_hit".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Sw {
+            rs2: T0,
+            rs1: T5,
+            off: crate::vio::VIO_NET_OFF,
+        },
+    ]);
+    for ch in b"VIRTIO-NET " {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Li {
+            rd: T2,
+            imm: VIO_MMIO_SLOTS,
+        },
+        Op::Sub {
+            rd: T2,
+            rs1: T2,
+            rs2: T1,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: i32::from(b'0'),
+        },
+        Op::Addi {
+            rd: A0,
+            rs: T2,
+            imm: 0,
+        },
+        Op::Li {
+            rd: A7,
+            imm: SBI_PUTCHAR,
+        },
+        Op::Ecall,
+    ]);
+    ops.extend(putc_ops(i64::from(b'\n')));
+    ops.push(Op::Jalr {
+        rd: X0,
+        rs: RA,
+        imm: 0,
+    });
+    Node {
+        purpose: Purpose::VirtioNet,
         ops,
     }
 }
@@ -4577,6 +4730,28 @@ mod tests {
             .any(|o| o.purpose == Purpose::Virtio));
         let s_off = kstart(&spec_off).to_asm();
         assert!(!s_off.contains("VioProbe"), "{s_off}");
+    }
+
+    #[test]
+    fn kstart_probes_virtio_net_without_qemu_netdev() {
+        let spec = spec_json(
+            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"hw":{"enable":true,"virtio_net":true}}}"#,
+        );
+        assert!(spec.wants_virtio_net());
+        assert!(live_objects(&spec)
+            .iter()
+            .any(|o| o.purpose == Purpose::VirtioNet));
+        let s = kstart(&spec).to_asm();
+        let jal = s.find("jal\tra, VioNetProbe").unwrap_or(usize::MAX);
+        let park = s.find("\npark:").unwrap_or(0);
+        let body = s.find("\nVioNetProbe:").unwrap_or(0);
+        assert!(jal < park, "VioNetProbe must be called before park:\n{s}");
+        assert!(park < body, "VioNetProbe body must sit after park:\n{s}");
+        assert!(s.contains("0x74726976"), "{s}");
+        let spec_off = spec_json(r#"{"schema_version":1,"isa":{"xlen":64}}"#);
+        assert!(!spec_off.wants_virtio_net());
+        let s_off = kstart(&spec_off).to_asm();
+        assert!(!s_off.contains("VioNetProbe"), "{s_off}");
     }
 
     #[test]

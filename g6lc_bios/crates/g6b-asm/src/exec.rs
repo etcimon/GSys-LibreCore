@@ -504,6 +504,7 @@ fn run_with_kick(
         uart1_base: crate::analyze::uart1_base(spec),
         vio_gpu,
         vio_inp: vio_gpu && spec.wants_virtio_input(),
+        vio_net: spec.wants_virtio_net(),
         vio_base,
         scan_fb_base,
         scan_fb_bytes,
@@ -1013,6 +1014,8 @@ struct Csr {
     vio_last_cmd: u32,
     /// Last response `type` word written into a device-write desc.
     vio_last_resp: u32,
+    /// Modelled virtio-net at slot 5 (DeviceID 1). Not a QEMU `-netdev`.
+    vio_net: bool,
     /// Modelled virtio-input keyboard at slot 1 (`-device
     /// virtio-keyboard-device`; QEMU virt PLIC irq = 1+slot → 2).
     vio_inp: bool,
@@ -1650,6 +1653,7 @@ fn is_vio_mmio(addr: u64) -> bool {
 fn vio_load(csr: &Csr, addr: u64) -> u32 {
     use crate::encode::{
         VIO_DEV_GPU, VIO_DEV_INPUT, VIO_F_VERSION_1, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_STEP,
+        VIO_NET_SLOT,
     };
     let off = addr - VIO_MMIO_BASE;
     let slot = off / VIO_MMIO_STEP;
@@ -1660,6 +1664,9 @@ fn vio_load(csr: &Csr, addr: u64) -> u32 {
     // (`loopback.irq`). Tablet is slot 3 (irq 4).
     if slot == 3 && csr.vio_inp {
         return tab_load(csr, off % VIO_MMIO_STEP, VIO_DEV_INPUT);
+    }
+    if slot == VIO_NET_SLOT && csr.vio_net {
+        return net_load(off % VIO_MMIO_STEP);
     }
     if slot != 0 || !csr.vio_gpu {
         return 0;
@@ -1765,6 +1772,18 @@ fn vio_notify(csr: &mut Csr, ram: &mut [u8], base: u64) {
         // modelled device sits at slot 0 → irq 1 (claimed by trap_vio when
         // PlicInit enabled the 1..=8 range).
         csr.plic_pending |= 1 << 1;
+    }
+}
+
+/// virtio-net identity (DeviceID 1). Probe-only: magic/version/id, no queues.
+fn net_load(reg: u64) -> u32 {
+    use crate::encode::{VIO_DEV_NET, VIO_F_VERSION_1, VIO_MAGIC};
+    match reg {
+        0x00 => VIO_MAGIC,
+        0x04 => 2,
+        0x08 => VIO_DEV_NET,
+        0x10 => VIO_F_VERSION_1, // FEATURES_SEL=1 window is not modelled
+        _ => 0,
     }
 }
 
@@ -3396,6 +3415,22 @@ mod tests {
                 "odd pixel of plane byte {i}"
             );
         }
+    }
+
+    #[test]
+    fn vio_net_probe_finds_modelled_net_at_slot5() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"hw":{"enable":true,"virtio_net":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        assert!(spec.wants_virtio_net());
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("VIRTIO-NET 5"), "{}", s.console);
+        assert!(!s.console.contains("VIRTIO-NET-NONE"), "{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
     }
 
     #[test]

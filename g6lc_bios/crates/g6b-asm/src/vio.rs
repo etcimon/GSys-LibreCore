@@ -113,6 +113,8 @@ pub const VIO_RESP_DISPLAY_INFO: u32 = 408;
 pub const VIO_POLL_MAX: i64 = 1 << 22;
 /// Scratch u32 in `__vio` holding the probed device mmio base for `VioCmd`.
 pub const VIO_DEV_OFF: i32 = 0x3f0;
+/// Scratch u32 holding the probed virtio-net (DeviceID 1) mmio base.
+pub const VIO_NET_OFF: i32 = 0x7c0;
 /// Used-buffer interrupt counter in `__vio`, bumped by `trap_vio` (the SEI
 /// path for the virtio-mmio PLIC source, irq 1+slot on QEMU virt — see the
 /// machine DTB).

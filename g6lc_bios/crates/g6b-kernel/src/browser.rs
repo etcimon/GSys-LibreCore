@@ -94,6 +94,7 @@ impl WasmUi {
             ui.dom, ui.router, ui.spec, persist, ui.timers, ui.now_ns, ui.store,
         );
         host.js_exports = self.js_exports.clone();
+        host.hw = ui.hw;
         let results = g6b_wasm::run_with_fuel_mut(
             &mut self.module,
             function_index,
@@ -125,6 +126,7 @@ impl WasmUi {
             ui.dom, ui.router, ui.spec, persist, ui.timers, ui.now_ns, ui.store,
         );
         host.js_exports = self.js_exports.clone();
+        host.hw = ui.hw;
         let event_handle = host.intern_event(event)?;
         let args = if listener_handle != 0 {
             vec![listener_handle, event_handle]
@@ -162,6 +164,7 @@ impl WasmUi {
             ui.dom, ui.router, ui.spec, persist, ui.timers, ui.now_ns, ui.store,
         );
         host.js_exports = self.js_exports.clone();
+        host.hw = ui.hw;
         let event_handle = host.intern_event(event)?;
         let results = if let Some(idx) = g6b_wasm::export_func(&self.module, "jsCallback") {
             g6b_wasm::run_with_fuel_mut(
@@ -200,6 +203,8 @@ pub(crate) struct UiBorrow<'a> {
     pub timers: &'a mut TimerHeap,
     pub now_ns: u64,
     pub store: Option<&'a mut g6b_pglite::StoreRegistry>,
+    /// Post-boot hw session. None only if a caller has no `BrowserSession`.
+    pub hw: Option<&'a mut g6b_hw::HwSession>,
 }
 
 /// Result of [`WasmUi::call`].

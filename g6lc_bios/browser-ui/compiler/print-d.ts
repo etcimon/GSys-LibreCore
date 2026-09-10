@@ -265,8 +265,14 @@ function printDNode(node: MarkupNode | string, parent: string, ctx: DTreeContext
   }
   if (node.tag === "tbody" && id) ctx.tbody.set(id, varName);
   out.push(`${pad}appendChild(${parent}, ${varName});`);
-  // Cell-owned clicks (B87): tabs (`data-menu-link`) and `#refresh`.
-  if (id && (node.attrs["data-menu-link"] !== undefined || id === "refresh")) {
+  // Cell-owned clicks (B87/B92): setup tabs, `#refresh`, window/tab chrome.
+  if (
+    id &&
+    (node.attrs["data-menu-link"] !== undefined ||
+      node.attrs["data-window-action"] !== undefined ||
+      node.attrs["data-tab-action"] !== undefined ||
+      id === "refresh")
+  ) {
     out.push(`${pad}g6b_listen("${escapeD(id)}", "click");`);
   }
   return out;

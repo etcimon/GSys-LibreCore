@@ -92,7 +92,7 @@ export const jsExports = { env: { fetchBios, holycEval, registerEndpoint } };
         kit: false,
         wasm: "out/bios-ui.wasm",
         constructs: {
-          live: ["NodeDef", "@prop", "@child", "@visible", "_start", "FileMgr", "Menu", "Store"],
+          live: ["NodeDef", "@prop", "@child", "@visible", "_start", "FileMgr", "Menu", "Store", "Window"],
           stub: ["{#each}", "{#await}", "Slot", "@callback"],
           refused: ["router", "$state", "sveltekit"],
         },
@@ -102,6 +102,7 @@ export const jsExports = { env: { fetchBios, holycEval, registerEndpoint } };
           marker("FileMgr"),
           marker("Menu"),
           marker("Store"),
+          marker("Window"),
           marker("{#await}"),
           marker("sveltekit"),
         ],

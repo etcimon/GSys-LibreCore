@@ -89,11 +89,15 @@ Main→CPU→Memory evidence against `ui_ppm32`. **B91:** guest `VioPaint`
 TRANSFERs `__ui_cap` dirty tiles when `WEB_PRESENT` (host-packed Canvas32);
 otherwise it stays a full-frame `FbExpandSel`. QMP tab screendumps stay
 `tools/qemu_tab_shots.sh` on remote g6q (2D `virtio-gpu-device`; WSL2 has
-no DRM render node) — they are not part of `g6b.py check`. The default
-follows the active output's class, so **the low-res plane is never
+no DRM render node) — they are not part of `g6b.py check`. Guest `DispSel`
+still latches the first **present** rung at boot. On the **host
+BrowserSession**, live scanout starts **VGA** until `g6b-hw` probes the
+catalog (PCIe linear-fb → HDMI G6DS → virtio-gpu) **and** the kernel
+announces the winner (`HW-DISP-SEL`); only then does it switch to `gpu`
+when `display_ready()`. After that, **the low-res plane is never
 upscaled onto a GPU-class output unless explicitly asked for**.
 `kernel.proxy.surface` (`vga` \| `gpu`, empty = follow the class) forces it, and
-the display-proxy toggle flips it at runtime. Two consequences on the host path:
+the display-proxy toggle flips it at runtime. See [`g6b-hw.md`](g6b-hw.md). Two consequences on the host path:
 `Proxy::to_ppm_gpu` **refuses** a canvas whose size disagrees with the output
 rather than stretching it, and `bar_h` is `0` on the GPU surface because the
 status is a real DOM node rendered natively — overlaying the synthetic low-res

@@ -19,6 +19,9 @@ members = [
     "crates/g6b-doldoc",
     "crates/g6b-html",
     "crates/g6b-dom",
+    "crates/g6b-iframe",
+    "crates/g6b-hw",
+    "crates/g6b-zealcli",
     "crates/g6b-css",
     "crates/g6b-holyc",
     "crates/g6b-js",
@@ -51,6 +54,9 @@ g6b-design = { path = "crates/g6b-design" }
 g6b-doldoc = { path = "crates/g6b-doldoc" }
 g6b-html = { path = "crates/g6b-html" }
 g6b-dom = { path = "crates/g6b-dom" }
+g6b-iframe = { path = "crates/g6b-iframe" }
+g6b-hw = { path = "crates/g6b-hw" }
+g6b-zealcli = { path = "crates/g6b-zealcli" }
 g6b-css = { path = "crates/g6b-css" }
 g6b-holyc = { path = "crates/g6b-holyc" }
 g6b-js = { path = "crates/g6b-js" }

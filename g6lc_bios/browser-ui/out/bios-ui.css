@@ -19,6 +19,16 @@ button{font:inherit}
 #bios-nav{color:#3f7f92;font-size:13px;margin:4px 0}
 #read-only-note{color:#7fd4e8;font-size:14px;margin:6px 0}
 #refresh{display:inline-block;padding:6px 12px;margin:4px 0;background-color:#0d2136;color:#8fe3f5;border:1px solid #1d4d63;border-radius:5px}
+#win-open{display:inline-block;padding:6px 12px;margin:4px 8px 4px 0;background-color:#0d2136;color:#8fe3f5;border:1px solid #1d4d63;border-radius:5px}
+#bios-window-0{position:absolute;top:56px;left:24px;width:480px;height:320px;background-color:#0a1626;color:#c9e9f5;border:1px solid #22d3ee;border-radius:6px}
+#bios-window-0-titlebar{display:block;padding:4px 8px;background-color:#0b7f96;color:#eaffff;height:28px}
+#bios-window-0-title{color:#eaffff}
+#bios-window-0-close{position:absolute;top:4px;right:8px;width:8ch;height:22px;background-color:#0d2136;color:#8fe3f5;border:1px solid #1d4d63;border-radius:4px}
+#bios-window-0-tabs{display:block;padding:2px 4px;height:28px;background-color:#08111f;border-bottom:1px solid #1d4d63}
+#bios-tab-new{display:inline-block;padding:4px 8px;margin:0 4px;width:8ch;height:22px;background-color:#0d2136;color:#8fe3f5;border:1px solid #1d4d63;border-radius:4px}
+.bios-tab-x{display:inline-block;padding:0;margin:0 8px 0 0;width:3ch;height:22px;background-color:#0d2136;color:#8fe3f5;border:1px solid #1d4d63;border-radius:4px}
+#bios-window-0-stage{padding:8px;height:240px}
+.bios-session{color:#7fd4e8;margin:0}
 section{margin:10px 0;padding:2px 12px 10px 12px;background-color:#08111f;border:1px solid #17394b;border-radius:6px}
 table{width:100%;margin:6px 0}
 th{text-align:left;padding:5px 10px;background-color:#0a1a28;color:#8fe3f5;border-bottom:1px solid #10263a}
@@ -35,7 +45,7 @@ footer{margin:10px 0 0 0;padding:6px 10px;background-color:#0b7f96;color:#eaffff
 .bios-tab:hover { background-color: #12405a; color: #eaffff; }
 .bios-tab:focus-visible { outline: 2px solid #ffd166; outline-offset: 1px; }
 .bios-tab-active:hover { background-color: #0b7f96; }
-#refresh:hover, #disp-toggle:hover { background-color: #12405a; cursor: pointer; }
+#refresh:hover, #disp-toggle:hover, #win-open:hover, #bios-window-0-close:hover, #bios-tab-new:hover, .bios-tab-x:hover { background-color: #12405a; cursor: pointer; }
 
 #bios-fx { position: fixed; inset: 0; width: 100vw; height: 100vh; z-index: 0; pointer-events: none; }
 #bios-ui { position: relative; z-index: 1; }

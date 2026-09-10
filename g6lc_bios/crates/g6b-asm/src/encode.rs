@@ -111,6 +111,12 @@ pub const VIO_MMIO_STEP: u64 = 0x1000;
 pub const VIO_MMIO_SLOTS: i64 = 8;
 pub const VIO_MAGIC: u32 = 0x7472_6976;
 pub const VIO_DEV_GPU: u32 = 16;
+/// virtio-net device id (virtio spec 5.1). Guest `VioNetProbe` enumerates it.
+/// BIOS `qemu-args` never attaches `virtio-net-device` / `-netdev`.
+pub const VIO_DEV_NET: u32 = 1;
+/// Exec-model virtio-mmio slot for virtio-net (irq 1+slot = 6). Slots 0–3
+/// are GPU / keyboard / mailbox-gap / tablet; slot 4 would collide irq 5.
+pub const VIO_NET_SLOT: u64 = 5;
 /// virtio-input device id (virtio spec 5.8) — `virtio-keyboard-device` /
 /// `virtio-tablet-device` attach to their own virtio-mmio slot.
 pub const VIO_DEV_INPUT: u32 = 18;

@@ -630,7 +630,7 @@ def case_disp_scan(_spec: Path) -> None:
         raise RuntimeError(f"missing DISP-OK (display-engine commit): {out!r}")
     if "DISP-FAIL" in out:
         raise RuntimeError(f"display-engine commit failed: {out!r}")
-    if "VIRTIO" in out:
+    if "VIRTIO-GPU" in out:
         raise RuntimeError(f"hdmi board must not emit virtio display: {out!r}")
     # The runtime mux must pick the uncore engine (class 2) with the native
     # gpu surface (1), and must NOT claim hot-plug: contract revision 1 has no

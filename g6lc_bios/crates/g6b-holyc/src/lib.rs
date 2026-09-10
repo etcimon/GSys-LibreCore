@@ -415,64 +415,110 @@ fn prepare_expr(
     })
 }
 
-// These names have precedence over user declarations in the legacy interpreter.
-// Never let a registered declaration disguise a kernel/global builtin as a task.
+/// HolyC names with kernel/global precedence. `g6b-zealcli` help tracks this
+/// list so a VGA CLI stays current without depending on `g6b-hw`.
+pub const HOLYC_BUILTIN_NAMES: &[&str] = &[
+    "Print",
+    "Reboot",
+    "Shutdown",
+    "Wakeup",
+    "LinuxHandoff",
+    "ViewSection",
+    "WriteSection",
+    "TimerInit",
+    "TlsHandshake",
+    "TlsServerHello",
+    "HttpsServe",
+    "FileServe",
+    "HttpFile",
+    "HttpsGet",
+    "HttpGet",
+    "TlsClientHello",
+    "CertParse",
+    "RsaVerify",
+    "EcdsaVerify",
+    "NetOpenPort",
+    "RegisterEndpoint",
+    "HttpHandle",
+    "KernelGet",
+    "DisplaySurface",
+    "SettingsExport",
+    "SettingsImport",
+    "FlashImage",
+    "BiosUpdate",
+    "UsbKey",
+    "UsbLs",
+    "UsbFlash",
+    "Menu",
+    "MenuCpu",
+    "MenuUncore",
+    "MenuMemory",
+    "MenuBoot",
+    "StoreOpen",
+    "StoreSelect",
+    "StoreClose",
+    "StoreDrop",
+    "StoreQuery",
+    "StoreExec",
+    "StoreBegin",
+    "StoreCommit",
+    "StoreRollback",
+    "StoreDump",
+    "StoreLoad",
+    "StoreExport",
+    "StoreImport",
+    "StoreList",
+    "StoreStat",
+    "StoreListen",
+    "StoreUnlisten",
+    "HwListen",
+    "HwStat",
+    "HwWake",
+    "HwCable",
+    "HwConfig",
+    "HwIfconfig",
+    "HwRoute",
+    "HwLink",
+    "HwDns",
+    "HwProto",
+    "HwInetStat",
+    "HwNat",
+    "HwTcpListen",
+    "HwTcpConnect",
+    "HwTcpAccept",
+    "HwTcpSend",
+    "HwTcpRecv",
+    "HwUdpBind",
+    "HwUdpSend",
+    "HwUdpRecv",
+    "HwSockClose",
+    "HwHostList",
+    "HwHostApply",
+    "HwHostRevert",
+    "HwDispStat",
+    "HwDispLink",
+    "HwDispMode",
+    "HwDispSurface",
+    "HwGl",
+    "HwGlList",
+    "HwGlApply",
+    "HwGlRevert",
+    "HwUsbLs",
+    "HwUsbKey",
+    "HwUsbFlash",
+    "HwPointer",
+    "LoadUI",
+];
+
+/// These names have precedence over user declarations in the legacy interpreter.
+/// Never let a registered declaration disguise a kernel/global builtin as a task.
 fn legacy_builtin_name(name: &str) -> bool {
-    matches!(
-        name,
-        "Print"
-            | "Reboot"
-            | "Shutdown"
-            | "Wakeup"
-            | "LinuxHandoff"
-            | "ViewSection"
-            | "WriteSection"
-            | "TimerInit"
-            | "TlsHandshake"
-            | "TlsServerHello"
-            | "HttpsServe"
-            | "FileServe"
-            | "HttpFile"
-            | "HttpsGet"
-            | "TlsClientHello"
-            | "CertParse"
-            | "RsaVerify"
-            | "EcdsaVerify"
-            | "NetOpenPort"
-            | "RegisterEndpoint"
-            | "HttpHandle"
-            | "KernelGet"
-            | "DisplaySurface"
-            | "SettingsExport"
-            | "SettingsImport"
-            | "FlashImage"
-            | "BiosUpdate"
-            | "UsbKey"
-            | "UsbLs"
-            | "UsbFlash"
-            | "Menu"
-            | "MenuCpu"
-            | "MenuUncore"
-            | "MenuMemory"
-            | "MenuBoot"
-            | "StoreOpen"
-            | "StoreSelect"
-            | "StoreClose"
-            | "StoreDrop"
-            | "StoreQuery"
-            | "StoreExec"
-            | "StoreBegin"
-            | "StoreCommit"
-            | "StoreRollback"
-            | "StoreDump"
-            | "StoreLoad"
-            | "StoreExport"
-            | "StoreImport"
-            | "StoreList"
-            | "StoreStat"
-            | "StoreListen"
-            | "StoreUnlisten"
-    )
+    HOLYC_BUILTIN_NAMES.iter().any(|&n| n == name)
+}
+
+/// True when `name` is a registered HolyC builtin (including `LoadUI`).
+pub fn is_holyc_builtin(name: &str) -> bool {
+    legacy_builtin_name(name)
 }
 
 impl Default for Program {
@@ -876,6 +922,7 @@ impl Program {
                 Ok(Some(format!("FLASH-IMAGE {img}\n")))
             }
             "BiosUpdate" => Ok(Some("BIOS-UPDATE self\n".into())),
+            "LoadUI" => Ok(Some("LOAD-UI\n".into())),
             "UsbKey" => {
                 let op = args
                     .first()
@@ -1834,6 +1881,17 @@ U0 WriteSection(U8 *name) { Print("x"); }
         }
         assert_eq!(p.last_power.as_deref(), Some("reboot"));
         assert_eq!(p.repl("Exit;").unwrap(), ReplResult::Exit);
+    }
+
+    #[test]
+    fn load_ui_builtin() {
+        let mut p = Program::default();
+        match p.repl("LoadUI();").unwrap() {
+            ReplResult::Output(s) => assert!(s.contains("LOAD-UI"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+        assert!(crate::is_holyc_builtin("LoadUI"));
+        assert!(crate::HOLYC_BUILTIN_NAMES.contains(&"UsbKey"));
     }
 
     #[test]

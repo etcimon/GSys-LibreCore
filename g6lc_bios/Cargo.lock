@@ -151,6 +151,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "g6b-hw"
+version = "0.1.0"
+dependencies = [
+ "g6b-asm",
+ "g6b-fs",
+ "g6b-spec",
+]
+
+[[package]]
+name = "g6b-iframe"
+version = "0.1.0"
+
+[[package]]
 name = "g6b-img"
 version = "0.1.0"
 dependencies = [
@@ -179,6 +192,8 @@ dependencies = [
  "g6b-holyc",
  "g6b-html",
  "g6b-http",
+ "g6b-hw",
+ "g6b-iframe",
  "g6b-js",
  "g6b-pglite",
  "g6b-spec",
@@ -186,6 +201,7 @@ dependencies = [
  "g6b-ui",
  "g6b-wasm",
  "g6b-webidl",
+ "g6b-zealcli",
 ]
 
 [[package]]
@@ -232,6 +248,14 @@ dependencies = [
 [[package]]
 name = "g6b-webidl"
 version = "0.1.0"
+
+[[package]]
+name = "g6b-zealcli"
+version = "0.1.0"
+dependencies = [
+ "g6b-holyc",
+ "g6b-spec",
+]
 
 [[package]]
 name = "hashbrown"

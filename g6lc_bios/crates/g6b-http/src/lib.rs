@@ -9,6 +9,7 @@
 pub mod files;
 pub mod h1;
 pub mod h2;
+pub mod outbound;
 pub mod router;
 
 pub use files::{live_features_json, load_pglite_dist, StaticFile, MAX_PGLITE_EMBED_BYTES};

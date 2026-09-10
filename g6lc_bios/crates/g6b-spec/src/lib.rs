@@ -376,6 +376,21 @@ pub struct Wasm {
     pub jit: bool,
 }
 
+/// Hardware adapters compiled into the BIOS (`g6b-hw`).
+///
+/// `virtio_net` arms guest `VioNetProbe` (DeviceID 1) and the host adapter
+/// catalog. BIOS `qemu-args` still never emits `-netdev` / `virtio-net`.
+#[derive(Debug, Clone, Default)]
+pub struct Hw {
+    pub enable: bool,
+    /// virtio-net DeviceID 1 probe + host adapter. Not a QEMU NIC.
+    pub virtio_net: bool,
+    /// SoC ethernet MAC (verilog-ethernet / liteeth / …) from HwSpec.
+    pub ethernet: bool,
+    /// SoC wifi (catalog; off until a vendor id is named).
+    pub wifi: bool,
+}
+
 /// Compiled HTTP stack for kernel endpoints (not SvelteKit, not Chromium).
 #[derive(Debug, Clone)]
 pub struct Http {
@@ -386,6 +401,8 @@ pub struct Http {
     pub proxy_js: bool,
     /// Serve HTTP(S) on the adapter (recovery / BIOS UI), not a Linux netdev.
     pub serve: bool,
+    /// Iframe `http(s):` GET. Adapter `HttpsGet` / host `fetch`, never QEMU `-netdev`.
+    pub outbound: bool,
     /// HolyC kernel-backed static files (html/js/wasm).
     pub files: HttpFiles,
 }
@@ -398,6 +415,7 @@ impl Default for Http {
             http2: true,
             proxy_js: true,
             serve: false,
+            outbound: false,
             files: HttpFiles::default(),
         }
     }
@@ -678,6 +696,42 @@ pub struct Kernel {
     pub settings: Settings,
     pub usb: Usb,
     pub store: StoreCfg,
+    /// Host/guest hardware adapters (`g6b-hw`). Not a QEMU `-netdev`.
+    pub hw: Hw,
+    /// VGA mouse-less ZealOS-shaped CLI (`g6b-zealcli`). Boots before browser-ui.
+    pub cli: Cli,
+}
+
+/// VGA CLI (`g6b-zealcli`). Does not require `g6b-hw`.
+#[derive(Debug, Clone)]
+pub struct Cli {
+    /// Compile the CLI (default on).
+    pub enable: bool,
+    /// `cli` always VGA prompt; `ui` skip CLI; `auto` CLI until GPU announced.
+    pub boot: String,
+}
+
+impl Default for Cli {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            boot: "auto".into(),
+        }
+    }
+}
+
+impl BoardSpec {
+    /// VGA zealcli is the face until GPU is announced (`boot=auto`).
+    pub fn wants_zealcli(&self, gpu_ready: bool) -> bool {
+        if !self.kernel.cli.enable {
+            return false;
+        }
+        match self.kernel.cli.boot.as_str() {
+            "ui" => false,
+            "cli" => true,
+            _ => !gpu_ready,
+        }
+    }
 }
 
 impl Default for Kernel {
@@ -700,6 +754,8 @@ impl Default for Kernel {
             settings: Settings::default(),
             usb: Usb::default(),
             store: StoreCfg::default(),
+            hw: Hw::default(),
+            cli: Cli::default(),
         }
     }
 }
@@ -1362,6 +1418,17 @@ impl BoardSpec {
         if self.kernel.http.serve && !self.kernel.http.enable {
             return Err("kernel.http.serve needs kernel.http.enable".into());
         }
+        if self.kernel.http.outbound && !self.kernel.http.enable {
+            return Err("kernel.http.outbound needs kernel.http.enable".into());
+        }
+        if (self.kernel.hw.virtio_net || self.kernel.hw.ethernet || self.kernel.hw.wifi)
+            && !self.kernel.hw.enable
+        {
+            return Err("kernel.hw.virtio_net/ethernet/wifi need kernel.hw.enable".into());
+        }
+        if !matches!(self.kernel.cli.boot.as_str(), "cli" | "ui" | "auto" | "") {
+            return Err("kernel.cli.boot must be cli, ui, or auto".into());
+        }
         if self.kernel.http.files.enable && !self.kernel.http.enable {
             return Err("kernel.http.files needs kernel.http.enable".into());
         }
@@ -1745,6 +1812,11 @@ impl BoardSpec {
         self.wants_virtio_gpu() && self.kernel.wasm.enable
     }
 
+    /// Guest `VioNetProbe` for virtio-net DeviceID 1. **Not** QEMU `-netdev`.
+    pub fn wants_virtio_net(&self) -> bool {
+        self.kernel.hw.enable && self.kernel.hw.virtio_net
+    }
+
     /// Dual-band HolyC TCP host port when that band is live.
     pub fn holyc_tcp_port(&self) -> Option<u16> {
         if self.holyc.dual_band.tcp.enable {
@@ -1888,10 +1960,16 @@ impl BoardSpec {
         if self.kernel.profile != BiosProfile::Custom {
             req.push(format!("BIOS profile {}", self.kernel.profile.as_str()));
         }
+        if self.kernel.hw.enable {
+            req.push(format!(
+                "g6b-hw adapters virtio-net={} ethernet={} wifi={} (VioNetProbe DeviceID 1; never QEMU -netdev)",
+                self.kernel.hw.virtio_net, self.kernel.hw.ethernet, self.kernel.hw.wifi
+            ));
+        }
         if self.kernel.http.enable {
             req.push(format!(
-                "kernel HTTP endpoints http1={} http2={} js-proxy={} serve={} (not SvelteKit, not a netdev)",
-                self.kernel.http.http1, self.kernel.http.http2, self.kernel.http.proxy_js, self.kernel.http.serve
+                "kernel HTTP endpoints http1={} http2={} js-proxy={} serve={} outbound={} (not SvelteKit, not a netdev)",
+                self.kernel.http.http1, self.kernel.http.http2, self.kernel.http.proxy_js, self.kernel.http.serve, self.kernel.http.outbound
             ));
             if self.kernel.http.files.enable {
                 req.push(format!(
@@ -2302,6 +2380,36 @@ fn apply_kernel(k: &mut Kernel, v: &Json) {
     if let Json::Obj(_) = v.get("store") {
         apply_store(&mut k.store, v.get("store"));
     }
+    if let Json::Obj(_) = v.get("hw") {
+        apply_hw(&mut k.hw, v.get("hw"));
+    }
+    if let Json::Obj(_) = v.get("cli") {
+        apply_cli(&mut k.cli, v.get("cli"));
+    }
+}
+
+fn apply_cli(c: &mut Cli, v: &Json) {
+    if let Some(b) = v.get("enable").as_bool() {
+        c.enable = b;
+    }
+    if let Some(s) = v.get("boot").as_str() {
+        c.boot = s.to_string();
+    }
+}
+
+fn apply_hw(h: &mut Hw, v: &Json) {
+    if let Some(b) = v.get("enable").as_bool() {
+        h.enable = b;
+    }
+    if let Some(b) = v.get("virtio_net").as_bool() {
+        h.virtio_net = b;
+    }
+    if let Some(b) = v.get("ethernet").as_bool() {
+        h.ethernet = b;
+    }
+    if let Some(b) = v.get("wifi").as_bool() {
+        h.wifi = b;
+    }
 }
 
 fn apply_store(s: &mut StoreCfg, v: &Json) {
@@ -2409,6 +2517,9 @@ fn apply_http(h: &mut Http, v: &Json) {
     }
     if let Some(b) = v.get("serve").as_bool() {
         h.serve = b;
+    }
+    if let Some(b) = v.get("outbound").as_bool() {
+        h.outbound = b;
     }
     if let Json::Obj(_) = v.get("files") {
         apply_http_files(&mut h.files, v.get("files"));
@@ -2856,11 +2967,24 @@ mod tests {
         assert!(spec.kernel.usb.key && spec.kernel.settings.usb_key);
         assert!(spec.kernel.usb.flash_fat32 && spec.kernel.usb.fs_ntfs && spec.kernel.usb.fs_ext4);
         assert!(spec.kernel.http.serve && spec.kernel.tls.https);
+        assert!(spec.kernel.http.outbound);
+        assert!(spec.kernel.hw.enable && spec.kernel.hw.virtio_net);
+        assert!(spec.wants_virtio_net());
         assert!(spec.kernel.ui == "svelte-d");
         assert!(spec
             .compiled_features()
             .iter()
             .any(|(k, v)| *k == "https_serve" && *v));
+        assert!(spec
+            .compiled_features()
+            .iter()
+            .any(|(k, v)| *k == "http_outbound" && *v));
+        let off = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","kernel":{"http":{"outbound":false}}}"#,
+        )
+        .unwrap();
+        assert!(!off.kernel.http.outbound);
+        assert!(off.kernel.http.enable && off.kernel.http.serve);
     }
 
     #[test]

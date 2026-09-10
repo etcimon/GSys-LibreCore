@@ -6,9 +6,9 @@ validated against LibreCore (`PLAN.md` §0–§3).
 
 | Doc | Role |
 |---|---|
-| `PLAN.md` | Living plan + current state (B0–B59, rewrite-from-spec) |
+| `PLAN.md` | Living plan + current state (B0–B59, B82–B93, rewrite-from-spec) |
 | `plan-endpoint.md` | **Endpoint.** BIOS web engine: one BrowserSession, one LDC cell; B82–B91c landed, B92 later |
-| `plan-iframe.md` | **Later.** Windowing, Firefox-like tabs, iframe sessions; local app path or remote URL (no `-netdev`) |
+| `plan-iframe.md` | Windowing, Firefox-like tabs, iframe sessions; chrome is Svelte, `g6b-iframe` is the session pool; local app path or remote URL (no `-netdev`) |
 | `KERNEL-RV.md` | TempleOS/ZealOS kernel services → RISC-V S-mode / OpenSBI / PLIC |
 | `ZEAL.md` | Spec contracts: keep / rewrite / refuse (`kernel-spec/` forks) |
 | `DESIGN.md` | BoardSpec → analyze IR → HolyC + HTML+JS + ELF |
@@ -17,6 +17,8 @@ validated against LibreCore (`PLAN.md` §0–§3).
 | `BROWSER.md` | Lightweight BIOS browser (WebIDL live/stub, goja/lirx/goosie specs) |
 | `BROWSER-RUNTIME.md` | **Principle.** Interactive UI = browser + loaded LDC cell + UI-thread GL |
 | `TLS.md` | Botan-spec RSA/ECDSA/X.509 + HolyC HTTPS + adapter ports |
+| `g6b-hw.md` | Hardware adapters: virtio-net / ethernet / wifi / display catalog; isolated NAT + TCP/UDP; VGA until probe+announce; USB key + pointer HID; kernel fetch lowers onto hw TCP (HTTPS not in this crate; never `-netdev`) |
+| `g6b-zealcli.md` | VGA mouse-less ZealOS CLI; HolyC builtin list; `LoadUI`; no `g6b-hw` |
 | `WASM.md` | WASM decoder/JIT; LDC cell is the browser *app*, not guest `start_ops` |
 | `LIBWASM-ABI.md` | libwasm host surface; B61–B68 sequence; handle model |
 | `RENDER-VALIDATION.md` | goosie CSS golden-image methodology (not Playwright) |

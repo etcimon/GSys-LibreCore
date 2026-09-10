@@ -547,6 +547,10 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
 
     // Conditional utility panels, display toggle, worker/fx/libwasm chrome.
     let mut conditional = String::new();
+    // BIOS UI owns this node; kernel emits HWEvent, it does not write the id.
+    if !html.contains("id=\"hw-nat-status\"") {
+        conditional.push_str("<p id=\"hw-nat-status\" role=\"status\"></p>\n");
+    }
 
     // Top-right display surface toggle. Only rendered when both surfaces are
     // reachable, so the control can never promise a switch the board cannot do.

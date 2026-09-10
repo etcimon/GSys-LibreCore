@@ -17,10 +17,13 @@ kernel-spec (spec) + LibreCore architecture (conformity)
                                BIOS browser loads the LDC cell (WasmUi);
                                guest WASM-JIT stays the VGA glyph face
                 →  g6b-tls    Botan rewrite: SHA-256 / AES-128 / HMAC / RSA / ECDSA / X.509
-                               HolyC HttpsGet + TlsClientHello; adapter :443 / :2222 until NET-DELEGATE
+                               ClientHello fingerprint; kernel HttpsGet writes it on hw TCP
+                               adapter :443 / :2222 until NET-DELEGATE
                 →  g6b-http   HTTP/1.1 + HTTP/2 parse; JS fetch ≡ HolyC RegisterEndpoint
-                               profiles embedded→full; /bios/flash|settings|update
+                               outbound **plans** here (no sockets); /bios/flash|settings|update
                                file server /ui/{index.html,app.js,ui.wasm} + TLS ServerHello
+                →  g6b-hw     adapter catalog + HwSession (`platform.hw`); isolated NAT / TCP+UDP
+                               kernel fetch lowers onto tcp_connect/send/recv; never `-netdev`
                 →  g6b-fs     USB FAT32 flash listings always; key FileMgr FAT32/NTFS/ext4
                 →  menus      infer CPU/uncore/boot tree; HolycUi.ZC ⊥ svelte-d Menu
                 →  g6b-elf    RV32/64 words from the same Module (tp/sp/stvec)

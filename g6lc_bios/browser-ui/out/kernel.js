@@ -22,6 +22,46 @@ export function registerEndpoint(path, method = "GET") {
   return host.register(path, method);
 }
 
+/** Instant HolyC status snapshot (`HwStat`). */
+export function hwStat() {
+  const host = globalThis.kernel;
+  if (host && typeof host.hwStat === "function") return host.hwStat();
+  return holycEval("HwStat()");
+}
+
+/** JS/wasm may await; HolyC `HwConfig` returns instantly. */
+export function hwConfig(id, addressing, ip) {
+  const host = globalThis.kernel;
+  if (host && typeof host.hwConfig === "function") return host.hwConfig(id, addressing, ip);
+  const ipArg = ip ? `,"${ip}"` : "";
+  return holycEval(`HwConfig("${id}","${addressing}"${ipArg})`);
+}
+
+export function hwWake() {
+  const host = globalThis.kernel;
+  if (host && typeof host.hwWake === "function") return host.hwWake();
+  return holycEval("HwWake()");
+}
+
+export function hwCable(event) {
+  const host = globalThis.kernel;
+  if (host && typeof host.hwCable === "function") return host.hwCable(event);
+  return holycEval(`HwCable("${event}")`);
+}
+
+/**
+ * BIOS UI maps `HWEvent` onto its own nodes (same as a `MouseEvent` listener).
+ * The kernel does not write DOM ids.
+ */
+export function onHwEvent(handler) {
+  const doc = globalThis.document;
+  const target = (doc && doc.body) || doc;
+  if (!target || typeof target.addEventListener !== "function") return;
+  for (const ty of ["hw", "hwcable", "hwnet", "hwdisp", "hwnat", "hwconfig", "hwwake"]) {
+    target.addEventListener(ty, handler);
+  }
+}
+
 /** Open a MENUS.md screen on both faces (fetch + HolyC). */
 export function openMenu(id) {
   if (!["main", "cpu", "memory", "uncore", "devices", "boot", "settings"].includes(id)) {
@@ -35,6 +75,11 @@ export const jsExports = {
     fetchBios,
     holycEval,
     registerEndpoint,
+    hwStat,
+    hwConfig,
+    hwWake,
+    hwCable,
+    onHwEvent,
   },
 };
 
@@ -1528,6 +1573,14 @@ export function createBrowserContext(doc, opts = {}) {
     BINDINGS.pglite = factory;
     if (contextId === "main") pglite = factory;
   }
+  const guestVars = opts.guestVars && typeof opts.guestVars === "object" && !Array.isArray(opts.guestVars) ? opts.guestVars : null;
+  if (guestVars) {
+    for (const name of Object.keys(guestVars)) {
+      if (name === "window" || name === "document" || name === "console" || name === "pglite") continue;
+      BINDINGS[name] = guestVars[name];
+      window_[name] = guestVars[name];
+    }
+  }
 
   return {
     contextId,
@@ -1543,6 +1596,12 @@ export function createBrowserContext(doc, opts = {}) {
     /// so an engine can decide whether an unknown global is fatal.
     global(name) { return Object.prototype.hasOwnProperty.call(BINDINGS, name) ? BINDINGS[name] : undefined; },
     globalNames() { return Object.keys(BINDINGS); },
+    defineGlobal(name, value) {
+      if (typeof name !== "string" || name === "window" || name === "document" || name === "console" || name === "pglite") return false;
+      BINDINGS[name] = value;
+      window_[name] = value;
+      return true;
+    },
 
     /// Poll the console. Returns entries newer than `sinceRevision`, the new
     /// cursor, the lifetime `dropped` count, and `missed` — how many entries
@@ -2046,7 +2105,96 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
   const initial = ui && ui.getAttribute("data-start-menu");
   let selected = menus.some((node) => node.getAttribute("data-menu") === initial) ? initial : "main";
   let started = false;
-  function message(value) { if (status) status.textContent = value; }
+  // Native-host mirror of App.svelte window/tab chrome (`{#if winOpen}`).
+  // Not `g6b-iframe` — that crate is the session pool only.
+  let windowOpen = false;
+  let activeTab = 0;
+  let windowError = "";
+  const MAX_TABS = 8;
+  const tabs = [true, false, false, false, false, false, false, false];
+  const WINDOW_SHELL = ["bios-window-0", "bios-window-0-titlebar", "bios-window-0-title", "bios-window-0-close", "bios-window-0-tabs", "bios-tab-new", "bios-window-0-stage"];
+  function tabStatus() {
+    const loc = "about:blank";
+    const n = activeTab + 1;
+    if (windowError) return "UI-BOOT  win:browser  tab:" + n + "  " + loc + "  error: " + windowError;
+    return "UI-BOOT  win:browser  tab:" + n + "  " + loc + "  ok";
+  }
+  function message(value) {
+    if (status) status.textContent = windowOpen ? tabStatus() : value;
+  }
+  function paintWindow() {
+    for (const id of WINDOW_SHELL) {
+      const node = doc.getElementById(id);
+      if (node) node.hidden = !windowOpen;
+    }
+    const win = doc.getElementById("bios-window-0");
+    if (win) win.setAttribute("data-location", "about:blank");
+    for (let slot = 0; slot < MAX_TABS; slot++) {
+      const occupied = windowOpen && tabs[slot];
+      const active = occupied && slot === activeTab;
+      const tab = doc.getElementById("bios-tab-" + slot);
+      const close = doc.getElementById("bios-tab-" + slot + "-close");
+      const sess = doc.getElementById("bios-session-" + slot);
+      if (tab) {
+        tab.hidden = !occupied;
+        tab.className = active ? "bios-tab bios-tab-active" : "bios-tab";
+        tab.setAttribute("aria-selected", active ? "true" : "false");
+        tab.tabIndex = active ? 0 : -1;
+      }
+      if (close) close.hidden = !occupied;
+      if (sess) sess.hidden = !active;
+    }
+    message("UI-BOOT");
+  }
+  function setWindowOpen(on) {
+    windowOpen = !!on;
+    windowError = "";
+    activeTab = 0;
+    for (let i = 0; i < MAX_TABS; i++) tabs[i] = on && i === 0;
+    paintWindow();
+  }
+  function tabCount() {
+    let n = 0;
+    for (let i = 0; i < MAX_TABS; i++) if (tabs[i]) n++;
+    return n;
+  }
+  function newBrowserTab() {
+    if (!windowOpen) { setWindowOpen(true); return; }
+    if (tabCount() >= MAX_TABS) {
+      windowError = "tab budget";
+      message("UI-BOOT");
+      return;
+    }
+    const slot = tabs.findIndex((on) => !on);
+    if (slot < 0) {
+      windowError = "tab budget";
+      message("UI-BOOT");
+      return;
+    }
+    tabs[slot] = true;
+    activeTab = slot;
+    windowError = "";
+    paintWindow();
+  }
+  function selectBrowserTab(slot) {
+    if (!windowOpen || slot < 0 || slot >= MAX_TABS || !tabs[slot]) return;
+    activeTab = slot;
+    windowError = "";
+    paintWindow();
+  }
+  function closeBrowserTab(slot) {
+    if (!windowOpen || slot < 0 || slot >= MAX_TABS || !tabs[slot]) return;
+    tabs[slot] = false;
+    if (tabCount() === 0) { setWindowOpen(false); return; }
+    if (activeTab === slot) {
+      let next = -1;
+      for (let i = slot - 1; i >= 0; i--) if (tabs[i]) { next = i; break; }
+      if (next < 0) for (let i = slot + 1; i < MAX_TABS; i++) if (tabs[i]) { next = i; break; }
+      activeTab = next < 0 ? 0 : next;
+    }
+    windowError = "";
+    paintWindow();
+  }
   function show(id) {
     if (!menus.some((node) => node.getAttribute("data-menu") === id)) return;
     selected = id;
@@ -2151,6 +2299,20 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
       }
       const button = doc.getElementById("refresh");
       if (button) button.addEventListener("click", refresh);
+      const winOpen = doc.getElementById("win-open");
+      if (winOpen) winOpen.addEventListener("click", (event) => { event.preventDefault(); setWindowOpen(true); });
+      const winClose = doc.getElementById("bios-window-0-close");
+      if (winClose) winClose.addEventListener("click", (event) => { event.preventDefault(); setWindowOpen(false); });
+      for (const node of doc.querySelectorAll("[data-tab-action]")) {
+        node.addEventListener("click", (event) => {
+          event.preventDefault();
+          const action = node.getAttribute("data-tab-action");
+          const slot = Number(node.getAttribute("data-tab"));
+          if (action === "new") newBrowserTab();
+          else if (action === "select") selectBrowserTab(slot);
+          else if (action === "close") closeBrowserTab(slot);
+        });
+      }
       ui.addEventListener("keydown", handleKey);
       const workerButton = doc.getElementById("worker-check");
       workerButton?.addEventListener("click", async () => {

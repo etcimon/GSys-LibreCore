@@ -43,6 +43,20 @@ pub fn tls_hello() -> &'static str {
     "TLS-HELLO"
 }
 
+/// Classify a TLS record header (5 bytes). Used by the kernel after it
+/// reads from an hw TCP socket — this crate does not own the socket.
+pub fn tls_record_kind(hdr: &[u8]) -> Result<&'static str, String> {
+    if hdr.len() < 5 {
+        return Err("tls record truncated".into());
+    }
+    match hdr[0] {
+        0x16 => Ok("handshake"),
+        0x15 => Ok("alert"),
+        0x17 => Ok("appdata"),
+        other => Err(format!("tls: not a TLS record (type {other})")),
+    }
+}
+
 /// HTTPS GET: ClientHello fingerprint + SHA-256 of the URL.
 pub fn https_get(url: &str) -> String {
     let host = url
@@ -119,6 +133,20 @@ mod tests {
         assert!(s.contains("gsys.dev"), "{s}");
         assert!(s.contains("rsa+ecdsa"), "{s}");
         assert!(!s.to_lowercase().contains("openssl"), "{s}");
+    }
+
+    #[test]
+    fn tls_record_kind_handshake_and_alert() {
+        assert_eq!(
+            tls_record_kind(&[0x16, 0x03, 0x03, 0, 1]).unwrap(),
+            "handshake"
+        );
+        assert_eq!(tls_record_kind(&[0x15, 0x03, 0x03, 0, 2]).unwrap(), "alert");
+        assert!(tls_record_kind(&[0x14, 0x03, 0x03, 0, 1]).is_err());
+        assert!(tls_record_kind(&[0x16]).is_err());
+        let hello = client_hello("httpbin.org");
+        assert!(is_web_compatible(&hello));
+        assert!(!hello.is_empty());
     }
 
     #[test]

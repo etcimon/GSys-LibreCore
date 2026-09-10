@@ -45,7 +45,7 @@ those knobs emit is an analyzed IR, not a string template.
 | `DisplayProxy` | `gr-plane→scanout` | `kernel.gr` or `kernel.proxy` | `GrInit` `GR16` + 4bpp plane + 8×8 `G6LC` blit; scale 640×480 to HDMI/DP / host-GL |
 | `GlAdapter` | `gles2` | `kernel.proxy.gl` | KStart `jal ProxyScale`; GLES2 listing; optional `proxy.accel` RVV `vsetvli` or ai-island 16×16 tiles (not mapping GR to `0x40000000`; not libGL) |
 | `Tls` | `sha256+aes128` | `kernel.tls.enable` | first-party crypto |
-| `Https` | `a0=url` | `kernel.tls.https` | HolyC `HttpsGet` |
+| `Https` | `a0=url` | `kernel.tls.https` | HolyC `HttpsGet` via kernel → hw TCP + `g6b-tls` ClientHello |
 | `WasmJit` | `wasm MVP` | `kernel.wasm.enable` | decode + host JIT; KStart `jal WasmJit` `i32.add` leaf when `wasm.jit` |
 | `SvelteUi` | `nodedef` | `kernel.ui=svelte-d` | svelte-d construct catalog |
 | `Rsa` | `a0=n,a1=e,a2=sig` | TLS enable | PKCS#1 limb `mul` |
@@ -66,6 +66,7 @@ those knobs emit is an analyzed IR, not a string template.
 | `FileServe` | `g6ui+html\|js\|wasm` | `kernel.wasm` or `kernel.http.files` | `UiInit` `G6UI` header; `jal FileServe` echoes `\0asm` + `/ui/` listing; HolyC HTTPS file server on the host |
 | `UiDom` | `__ui_dom→__gr_plane` | `kernel.wasm.jit` | `g6b-asm::dom` row store + `WasmStart` (from `g6b-wasm::jit::start_ops`) + `DomPaint` (`DOM| ` serial + `__font` glyphs) |
 | `Virtio` | `vio-mmio` | `wants_virtio_gpu` | `VioProbe` slot scan for GPU DeviceID 16 + `VioInit` handshake/ctrlq/`GET_DISPLAY_INFO` + `VioCmd` submit-one + `VioScan` (`CREATE_2D`/`ATTACH_BACKING`/`SET_SCANOUT`/band-fill/`TRANSFER`/`FLUSH` at the `__disp`-latched output geometry) (`VIRTIO-GPU n`/`NONE`/`OK`/`INFO`/`SCAN`/`FAIL`); `__vio` BSS rings + `__scan_fb` (max-geometry shared surface); host-modelled + QEMU `screendump` captured (1920×1080) |
+| `VirtioNet` | `vio-mmio-net` | `wants_virtio_net` (`kernel.hw.virtio_net`) | `VioNetProbe` DeviceID 1 (`VIRTIO-NET n`/`NONE`). Exec model slot 5. **Never** QEMU `-netdev`. Host TCP/UDP/NAT is `g6b-hw`; HTTP(S) fetch is kernel→hw TCP |
 | `DispScan` | `disp-mmio` | `wants_disp_scan` (`display`-class peripheral) | `FbExpand`/`FbExpand1`/`DomPaint32` (shared blits, `Proxy::to_ppm` semantics, geometry from `__disp` at runtime via `divu`) + `DispPaint` — register-window commit + `G6FB` simplefb handoff at `__vio+0x400` (`architecture/uncore/hdmi-display.md`); `DISP-OK`/`DISP-FAIL` |
 
 ## Crate surface

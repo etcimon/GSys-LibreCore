@@ -20,7 +20,8 @@ export type Construct =
   | "FileMgr"
   | "Menu"
   | "Settings"
-  | "Store";
+  | "Store"
+  | "Window";
 
 export const LIVE: Construct[] = [
   "NodeDef",
@@ -32,6 +33,7 @@ export const LIVE: Construct[] = [
   "Menu",
   "Settings",
   "Store",
+  "Window",
 ];
 
 export const STUB: Construct[] = ["{#each}", "{#await}", "Slot", "@callback"];

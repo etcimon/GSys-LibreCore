@@ -102,9 +102,11 @@ on-guest JIT. Detailed supported/refused boundaries: `BROWSER.md`, `WASM.md`.
 | QEMU | `g6q --loader bios` + UART1 `-serial tcp:127.0.0.1:2222` for the custom board; **stock-virt verified**: `fixtures/g6lc64-qemu.json` + `qemu-args` (`-nographic -smp N -global virtio-mmio.force-legacy=false -device virtio-gpu-device` — or `virtio-gpu-gl-device` + `egl-headless,gl=on` under `proxy.gl`, `--no-gl` fallback, `--vnc N` frontend) boots under OpenSBI 1.5/QEMU 8.2 to `VIRTIO-SCAN`+`VIRTIO-PAINT` with a **1920×1080 QMP screendump** (640×480 DOM/Gr plane ×2 centered — `FbExpand` = `Proxy::to_ppm` semantics). Native uncore HDMI/DP: `display`-class peripheral → `DispPaint` register commit + `G6FB` simplefb handoff (`architecture/uncore/hdmi-display.md`, `fixtures/g6lc64-hdmi.json`, exec-modelled). No `-netdev`. `g6lc64-virt.json` still needs a custom mbox/UART1 device model for QEMU |
 | Post-boot | `until-delegate` NIC then `LOOPBACK-MBOX` + PLIC IRQ 3 @ `0x10100000` → `/dev/g6lc-bios`. Immutable view-only; Reboot/Shutdown/Wakeup |
 | Gr / proxy | `g6b-gr` 640×480×16 plane + display-proxy `fit`/`fill`/`dpi` to HDMI/DP / host-GL (30/60/100/120/144 fps, high DPI, up to 8K). OpenGL-ES2 listing. Docs: `DISPLAY.md` |
-| Browser | `g6b-webidl` + `browser-ui` (svelte-d NodeDef + **FileMgr**, **not SvelteKit**) + `g6b-wasm` JIT on the g6b kernel. Fetch is live via kernel HTTP. B69 adds generic DOM methods (`setAttribute`, `classList`) and a bounded ES6 `Map` host surface. `BROWSER.md` `USB.md` `WASM.md` `KERNEL-API.md` |
-| TLS | `g6b-tls` SHA-256, AES-128, HMAC, RSA PKCS#1, ECDSA P-256, X.509; ClientHello rsa+ecdsa. Botan spec, not linked. `TLS.md` |
-| HTTP / endpoints | `g6b-http` HTTP/1.1 + HTTP/2+HPACK; HolyC/JS register the same router; `/bios/{clocks,edk2,u-boot,bootloader,flash,update,settings,usb,files}` |
+| Browser | `g6b-webidl` + `browser-ui` (svelte-d NodeDef + **FileMgr**, **not SvelteKit**) + `g6b-wasm` JIT on the g6b kernel. Local fetch is the kernel router; remote `http(s):` is the same kernel path lowered onto `g6b-hw` TCP. `BROWSER.md` `USB.md` `WASM.md` `KERNEL-API.md` `g6b-hw.md` |
+| TLS | `g6b-tls` SHA-256, AES-128, HMAC, RSA PKCS#1, ECDSA P-256, X.509; ClientHello rsa+ecdsa. Botan spec, not linked. Kernel `HttpsGet` writes that ClientHello on hw TCP. `TLS.md` |
+| HTTP / endpoints | `g6b-http` HTTP/1.1 + HTTP/2+HPACK; HolyC/JS register the same router; `/bios/{clocks,edk2,u-boot,bootloader,flash,update,settings,usb,files}`. Outbound **plans** here; sockets are kernel→hw TCP. |
+| Hardware | `g6b-hw` catalog + lazy `HwSession` (`platform.hw`). Isolated NAT / TCP+UDP / named host NIC. USB-key + pointer HID. Display VGA until probe+announce. Never `-netdev`. `g6b-hw.md` |
+| VGA CLI | `g6b-zealcli` mouse-less ZealOS prompt; `LoadUI`; `kernel.cli.boot=auto` yields to browser-ui on GPU. No hw dep. `g6b-zealcli.md` |
 | File server | generated `/ui/index.html` `/ui/app.js` `/ui/ui.wasm`; HolyC `FileServe` / `HttpsServe`; TLS ServerHello. `FILE-SERVER.md` |
 | USB | FAT32 flash always (`/bios/usb/ls`, `UsbFlash`); key FileMgr FAT32/NTFS/ext4 when `kernel.usb.key`. `g6b-fs` canned listings. `USB.md` |
 | Profiles | `embedded` / `router` / `appliance` / `desktop` / `full` — compiled feature bundle; JSON overlay wins. `KERNEL-API.md` |
@@ -187,7 +189,8 @@ RTL mailbox / DTS merge into `corev_apu` is an inference recorded in
 | **B89** | UI-thread `Role::Ui` tick; timer heap; fps 100/144; B66 or verifier-refuse | landed (host) |
 | **B90** | Dirty-tile GL + virtio-gpu TRANSFER + QMP tab screendumps | landed (host blit + modelled scan_fb; QMP shots remain remote g6q) |
 | **B91** | Guest libwasm instance; same Host + dirty paint in S-mode | landed (compact persist + dirty-tile `VioPaint`; `start_ops` unchanged) |
-| **B92** | Windowing + tab engine + iframe sessions (local app path or remote URL) | **later** — [`plan-iframe.md`](plan-iframe.md); do not cut B89–B91 |
+| **B92** | Windowing + tab engine + iframe sessions (local app path or remote URL) | **B92g landing** — Svelte chrome; session pool; intern; gated outbound. [`plan-iframe.md`](plan-iframe.md) |
+| **B93** | Hardware adapters + kernel fetch on hw TCP | **landed** — `g6b-hw` catalog/`HwSession`/`platform.hw`; isolated NAT/TCP/UDP; VGA until probe+announce; fetch plans in `g6b-http`, ClientHello in `g6b-tls`, sockets on hw TCP. HTTPS not in `g6b-hw`. [`g6b-hw.md`](g6b-hw.md) |
 | **S0–S5** | First-party registry store `g6b-pglite` + optional Electric dist wasm | **S5 landed** — USB live + `stat` + JOIN/listen; svelte-d `Store.svelte` in App `_start` (memory registry; g6b-js AOT stays fetch+text). Design: [`g6b-pglite.md`](g6b-pglite.md) [`g6b-pglite-svelte.md`](g6b-pglite-svelte.md) [`g6b-store-instances.md`](g6b-store-instances.md) |
 | **B91b** | Guest S-mode LDC cell on the same Host import set as `BrowserSession` | **landed** — `GuestCellLive`/`WebFeed`: UART `Ui` + mailbox `U` + `trap_timer` skip-if-clean + virtio-input `KEY_*` / tablet slot `EV_ABS`+`BTN_LEFT` (`TabInit`/`TabDrain`) / mouse `EV_REL` → svelte-d; GLES2 `u_dom`; **B91b+:** `_start` keeps `asyncify_*` (scratch above D heap, `MAX_MEMORY_PAGES` 64); `start_ops` unchanged |
 | **B91c** | virtio/UI events re-enter D delegates via `jsCallback` | **landed** — `Listener::Delegate` + named `exportDelegate` input names; shipped cell stays `Listener::Cell` until `G6B_DUB_WASM=1`; `start_ops` unchanged |
@@ -316,6 +319,8 @@ QEMU BIOS argv never includes `-netdev` / `virtio-net`.
 | `net_expose.ssh_holyc_port` | SSH+HolyC on the adapter (default 2222) until `NET-DELEGATE` |
 | `kernel.tls.{enable,https,rsa,ecdsa,certificates}` | Botan-shaped web TLS; first-party rewrite, not linked |
 | `kernel.http.{enable,http1,http2,proxy_js}` | compiled HTTP stack + JS fetch proxy |
+| `kernel.http.outbound` | iframe / JS / HolyC `http(s):` GET via kernel → hw TCP; never `-netdev` |
+| `kernel.hw.{enable,virtio_net,ethernet,wifi}` | `g6b-hw` adapters + `HwSession`; guest `VioNetProbe`; never BIOS `-netdev` |
 | `kernel.params.{clocks,edk2,uboot,bootloader}` | BIOS JSON endpoints |
 | `kernel.ui` | `html-js` \| `svelte-d` (**not** `sveltekit`) |
 | `profile` | `embedded` \| `router` \| `appliance` \| `desktop` \| `full` |

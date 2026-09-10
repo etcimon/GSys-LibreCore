@@ -131,6 +131,12 @@ fn mount_with_pglite(spec: &BoardSpec, dist: Option<PgliteDist>) -> BTreeMap<Str
             html.clone(),
         );
         put(&mut out, "/", "text/html; charset=utf-8", html);
+        put(
+            &mut out,
+            &format!("{root}/help.html"),
+            "text/html; charset=utf-8",
+            b"<!DOCTYPE html><html><head><title>Help</title></head><body><p id=\"help-body\">G6LC-BIOS help</p></body></html>".to_vec(),
+        );
     }
     if f.js && spec.kernel.js == "aot" {
         put(

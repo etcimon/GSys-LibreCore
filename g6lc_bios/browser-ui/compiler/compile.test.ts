@@ -5,12 +5,13 @@ import { dirname, join } from "node:path";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { catalogJson, marker, refuseKit } from "./constructs.ts";
-import { compileProject, loadProject, projectHtml } from "./index.ts";
+import { compileProject, loadProject, projectCss, projectHtml } from "./index.ts";
 import { emitWasm } from "./emit-wasm.ts";
 import { printG6bJs, printGeneratedTs } from "./print-ts.ts";
 import { createWasmHost, createBrowserApp, createLibwasmHost, createParticleBackground, createRenderInspector, createBrowserContext, createPgliteWasm } from "../src/kernel.ts";
+import { createIframe, localFrameUrl, canonicalizeAppUrl, planNavigate, parseVarsAttr, filterSessionVars, sessionVarNameAllowed } from "../src/iframe.ts";
 import { isLdc143Text, resolveToolchain } from "./ldc.ts";
-import { parseSvelte } from "./parse.ts";
+import { parseMarkupTree, parseSvelte } from "./parse.ts";
 import { printApp } from "./print-d.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -82,6 +83,7 @@ describe("browser DOM and import ABI", () => {
     const adapter = readFileSync(join(root, "src/kernel.ts"), "utf8");
     expect(() => new Function(adapter.replace(/^export /gm, ""))()).not.toThrow();
     expect(adapter).not.toContain("declare const kernel");
+    expect(adapter).not.toContain("createIframe");
   });
 
   test("generated HTML includes every compiled text target and never loads host AOT", () => {
@@ -1178,6 +1180,208 @@ describe("browser context", () => {
     expect(ctx.bindings()).not.toBe(b);
   });
 
+  test("iframe src navigates /ui html; srcdoc skips fetch; bios and remote fail closed", async () => {
+    expect(localFrameUrl("/ui/help.html")).toBe("/ui/help.html");
+    expect(localFrameUrl("/ui/g6lc.svg")).toBeNull();
+    expect(localFrameUrl("/bios/menu/cpu")).toBeNull();
+    expect(planNavigate("about:blank").kind).toBe("blank");
+    expect(planNavigate("/ui/help.html").kind).toBe("fetchHtml");
+    expect(planNavigate("app:files").kind).toBe("fail");
+    expect(planNavigate("app:files", ["app:files"]).kind).toBe("hook");
+    expect(canonicalizeAppUrl("app:1files")).toBeNull();
+    const calls: string[] = [];
+    const fetchFn = async (url: string) => {
+      calls.push(url);
+      if (url === "/ui/help.html") {
+        return { ok: true, status: 200, text: async () => "<p id=\"help-body\">G6LC-BIOS help</p>" };
+      }
+      if (url === "/bios/files") {
+        return { ok: true, status: 200, text: async () => "{\"volumes\":[\"fat32\"]}" };
+      }
+      return { ok: false, status: 404, text: async () => "" };
+    };
+    const status = new TestNode("status");
+    const doc = testDocument([status]);
+    const iframe = createIframe(doc as any, { fetchFn, contextId: "frame-1", outbound: false });
+    expect(iframe.contentWindow.contextId).toBe("frame-1-g1");
+    expect(iframe.contentWindow.contextId).not.toBe("main");
+    expect(iframe.contentWindow.document.getElementById("status")).toBeNull();
+    iframe.src = "/ui/help.html";
+    await iframe.ready();
+    expect(calls).toEqual(["/ui/help.html"]);
+    expect(iframe.src).toBe("/ui/help.html");
+    expect(iframe.loadState()).toBe("200");
+    expect(iframe.mount.textContent).toContain("G6LC-BIOS help");
+    const w1 = iframe.contentWindow;
+    iframe.srcdoc = "<p id=\"x\">srcdoc</p>";
+    await iframe.ready();
+    expect(calls).toEqual(["/ui/help.html"]);
+    expect(iframe.src).toBe("about:srcdoc");
+    expect(iframe.mount.textContent).toContain("srcdoc");
+    expect(iframe.contentWindow).not.toBe(w1);
+    expect(iframe.contentWindow.contextId).not.toBe(w1.contextId);
+    expect(iframe.contentWindow.document.getElementById("status")).toBeNull();
+    iframe.src = "/bios/menu/cpu";
+    await iframe.ready();
+    expect(calls).toEqual(["/ui/help.html"]);
+    expect(iframe.loadState()).toMatch(/iframe cannot load \/bios/);
+    iframe.src = "https://example/path";
+    await iframe.ready();
+    expect(iframe.src).toBe("https://example/path");
+    expect(iframe.loadState()).toMatch(/outbound fetch disabled/);
+    iframe.src = "javascript:alert(1)";
+    await iframe.ready();
+    expect(iframe.loadState()).toMatch(/refused/);
+    expect(canonicalizeAppUrl("/apps/files")).toBe("app:files");
+    iframe.src = "app:files";
+    await iframe.ready();
+    expect(iframe.loadState()).toMatch(/app: hook not registered/);
+    expect(calls).toEqual(["/ui/help.html"]);
+    const hooked = createIframe(doc as any, { fetchFn, contextId: "frame-files", hooks: ["app:files"] });
+    hooked.src = "app:files";
+    await hooked.ready();
+    expect(calls).toEqual(["/ui/help.html", "/bios/files"]);
+    expect(hooked.src).toBe("app:files");
+    expect(hooked.loadState()).toBe("ok");
+    hooked.src = "app:ssh";
+    await hooked.ready();
+    expect(hooked.loadState()).toMatch(/app: hook not registered/);
+  });
+
+  test("svelte browser window: close, minimize/restore toggle, resize, tabs, url, iframe", async () => {
+    const src = readFileSync(join(root, "compiler/fixtures/browser-window.svelte"), "utf8");
+    const file = parseSvelte("fixtures/browser-window.svelte", src);
+    expect(file.lets.map((l) => l.name)).toEqual(["winOpen", "minimized", "url"]);
+    expect(file.ops).toContainEqual({ kind: "visible", id: "ex-window", on: true });
+    expect(file.ops).toContainEqual({ kind: "visible", id: "ex-chrome", on: true });
+    expect(file.ops).toContainEqual({ kind: "visible", id: "ex-frame", on: true });
+    const html = projectHtml([file]);
+    expect(html).toContain('<iframe id="ex-frame" src="/ui/help.html" width="320" height="180" title="session"></iframe>');
+    expect(html).toContain('id="ex-url"');
+    expect(html).toContain('data-window-action="toggle"');
+    expect(html).toContain('data-window-action="minimize"');
+    expect(html).toContain('data-window-action="close"');
+    expect(html).toContain('data-window-action="widen"');
+    expect(html).toContain('data-tab-action="select"');
+    expect(html).toContain('id="ex-status"');
+    const css = projectCss([file]);
+    expect(css).toContain("position:absolute");
+    expect(css).toContain("width:480px");
+    expect(css).toContain("height:320px");
+    const min = parseSvelte("fixtures/browser-window.svelte", src.replace("let minimized = false", "let minimized = true"));
+    expect(min.ops).toContainEqual({ kind: "visible", id: "ex-window", on: true });
+    expect(min.ops).toContainEqual({ kind: "visible", id: "ex-chrome", on: false });
+    expect(min.ops).toContainEqual({ kind: "visible", id: "ex-frame", on: false });
+    expect(projectHtml([min])).toMatch(/<div id="ex-chrome"[^>]*hidden/);
+    const closed = parseSvelte("fixtures/browser-window.svelte", src.replace("let winOpen = true", "let winOpen = false"));
+    expect(closed.ops).toContainEqual({ kind: "visible", id: "ex-window", on: false });
+    expect(planNavigate("/ui/help.html").kind).toBe("fetchHtml");
+    const fetchFn = async (u: string) => {
+      if (u === "/ui/help.html") return { ok: true, status: 200, text: async () => "<p>G6LC-BIOS help</p>" };
+      return { ok: false, status: 404, text: async () => "" };
+    };
+    const iframe = createIframe(testDocument([]) as any, { fetchFn, contextId: "ex-frame" });
+    iframe.src = "/ui/help.html";
+    await iframe.ready();
+    expect(iframe.loadState()).toBe("200");
+    expect(iframe.mount.textContent).toContain("G6LC-BIOS help");
+  });
+
+  test("svelte iframe between two paragraphs is a session controller sibling", async () => {
+    const src = readFileSync(join(root, "compiler/fixtures/inline-frame.svelte"), "utf8");
+    const file = parseSvelte("fixtures/inline-frame.svelte", src);
+    const tree = parseMarkupTree(src);
+    const main = tree.find((n) => typeof n !== "string" && n.tag === "main") as { tag: string; children: any[] };
+    const kids = main.children.filter((c) => typeof c !== "string");
+    expect(kids.map((c) => c.tag)).toEqual(["p", "iframe", "p"]);
+    expect(kids[0].attrs.id).toBe("ex-before");
+    expect(kids[1].attrs.src).toBe("/ui/help.html");
+    expect(kids[2].attrs.id).toBe("ex-after");
+    const html = projectHtml([file]);
+    expect(html).toContain('id="ex-before"');
+    expect(html).toContain('<iframe id="ex-inline-frame" src="/ui/help.html" width="320" height="120" title="session"></iframe>');
+    expect(html).toContain('id="ex-after"');
+    expect(html.indexOf("ex-before")).toBeLessThan(html.indexOf("ex-inline-frame"));
+    expect(html.indexOf("ex-inline-frame")).toBeLessThan(html.indexOf("ex-after"));
+    const fetchFn = async (u: string) => {
+      if (u === "/ui/help.html") return { ok: true, status: 200, text: async () => "<p>G6LC-BIOS help</p>" };
+      return { ok: false, status: 404, text: async () => "" };
+    };
+    const iframe = createIframe(testDocument([]) as any, { fetchFn, contextId: "ex-inline" });
+    iframe.src = kids[1].attrs.src;
+    await iframe.ready();
+    expect(iframe.loadState()).toBe("200");
+    expect(projectHtml(loadProject(join(root, "src")))).not.toContain("<iframe");
+  });
+
+  test("svelte vars map interned in iframe JS env including remote fail", async () => {
+    expect(sessionVarNameAllowed("greeting")).toBe(true);
+    expect(sessionVarNameAllowed("eval")).toBe(false);
+    expect(parseVarsAttr("{frameVars}")).toEqual({ kind: "binding", name: "frameVars" });
+    expect(parseVarsAttr("{\"greeting\":\"hi\"}").kind).toBe("json");
+    expect(filterSessionVars({ greeting: "hello", eval: "nope", add: (a, b) => a + b }).eval).toBeUndefined();
+    const src = readFileSync(join(root, "compiler/fixtures/vars-frame.svelte"), "utf8");
+    const file = parseSvelte("fixtures/vars-frame.svelte", src);
+    const tree = parseMarkupTree(src);
+    const main = tree.find((n) => typeof n !== "string" && n.tag === "main") as { tag: string; children: any[] };
+    const kids = main.children.filter((c) => typeof c !== "string");
+    expect(kids.map((c) => c.tag)).toEqual(["p", "iframe", "p"]);
+    expect(kids[1].attrs.vars).toBe("{frameVars}");
+    expect(kids[1].attrs.src).toBe("https://example/path");
+    expect(projectHtml([file])).toContain('vars="{frameVars}"');
+    const frameVars = {
+      greeting: "hello",
+      count: 2,
+      meta: { k: "v" },
+      add(a: number, b: number) { return a + b; },
+    };
+    const fetchFn = async () => ({ ok: false, status: 0, text: async () => "" });
+    const iframe = createIframe(testDocument([]) as any, { fetchFn, contextId: "ex-vars", vars: frameVars, outbound: false });
+    expect(iframe.contentWindow.greeting).toBe("hello");
+    expect(iframe.contentWindow.count).toBe(2);
+    expect(iframe.contentWindow.meta.k).toBe("v");
+    expect(iframe.contentWindow.add(2, 3)).toBe(5);
+    expect(iframe.context().global("greeting")).toBe("hello");
+    expect(iframe.contentWindow.eval).toBeUndefined();
+    expect(iframe.contentWindow.holycEval).toBeUndefined();
+    expect(iframe.contentWindow.pglite).toBeUndefined();
+    iframe.src = "https://example/path";
+    await iframe.ready();
+    expect(iframe.loadState()).toMatch(/outbound fetch disabled/);
+    expect(planNavigate("https://example/path").kind).toBe("fail");
+    expect(iframe.contentWindow.greeting).toBe("hello");
+    expect(iframe.contentWindow.add(4, 1)).toBe(5);
+    expect(iframe.context().global("add")(1, 1)).toBe(2);
+    iframe.vars = { greeting: "hello", eval: () => "nope", extra: "ok" };
+    expect(iframe.contentWindow.extra).toBe("ok");
+    expect(iframe.contentWindow.eval).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(iframe.vars, "eval")).toBe(false);
+    const remoteCalls: string[] = [];
+    const armedFetch = async (url: string) => {
+      remoteCalls.push(url);
+      if (url === "https://example/path") {
+        return { ok: true, status: 200, text: async () => "<html><body><p>remote</p></body></html>" };
+      }
+      return { ok: false, status: 404, text: async () => "" };
+    };
+    const armed = createIframe(testDocument([]) as any, { fetchFn: armedFetch, contextId: "ex-vars-out", vars: frameVars });
+    expect(planNavigate("https://example/path", [], true).kind).toBe("fetchRemote");
+    expect(planNavigate("https://example/app.wasm", [], true).error).toMatch(/remote wasm/);
+    armed.src = "https://example/path";
+    await armed.ready();
+    expect(remoteCalls).toEqual(["https://example/path"]);
+    expect(armed.loadState()).toBe("200");
+    expect(armed.mount.textContent).toContain("remote");
+    expect(armed.contentWindow.greeting).toBe("hello");
+    expect(armed.contentWindow.add(1, 2)).toBe(3);
+    expect(armed.contentWindow.holycEval).toBeUndefined();
+    expect(armed.contentWindow.pglite).toBeUndefined();
+    armed.src = "https://example/app.wasm";
+    await armed.ready();
+    expect(armed.loadState()).toMatch(/remote wasm/);
+    expect(remoteCalls).toEqual(["https://example/path"]);
+  });
+
   test("unknown globals are absent rather than fabricated", () => {
     const { ctx } = ctxFixture();
     expect(ctx.global("eval")).toBeUndefined();
@@ -1908,6 +2112,17 @@ let st = await pgliteStat();
     expect(d).toContain('setProperty(bios_mark, "src", "/ui/g6lc.svg")');
     expect(d).toContain('g6b_listen("tab-cpu", "click")');
     expect(d).toContain('g6b_listen("refresh", "click")');
+    expect(d).toContain('g6b_listen("win-open", "click")');
+    expect(d).toContain('g6b_listen("bios-window-0-close", "click")');
+    expect(d).toContain('g6b_listen("bios-tab-new", "click")');
+    expect(d).toContain('g6b_listen("bios-tab-0", "click")');
+    expect(d).toContain('g6b_listen("bios-tab-0-close", "click")');
+    expect(projectHtml(loadProject(join(root, "src")))).toContain('id="bios-window-0"');
+    expect(projectHtml(loadProject(join(root, "src")))).toContain('id="bios-tab-0"');
+    expect(projectHtml(loadProject(join(root, "src")))).toContain('id="bios-session-0"');
+    expect(projectHtml(loadProject(join(root, "src")))).not.toContain("<iframe");
+    expect(projectHtml(loadProject(join(root, "src")))).toContain("hidden");
+    expect(r.catalog).toContain("Window");
     expect(d).toContain("Handle menu_cpu_body = 0;");
     expect(d.indexOf("Handle menu_cpu_body = 0;")).toBeLessThan(d.indexOf("try {"));
     expect(d).toMatch(/menu_cpu_body = createElement\(NodeType\.tbody\)/);
@@ -1917,6 +2132,9 @@ let st = await pgliteStat();
     expect(r.cell?.via).toBe("skip");
     expect(r.catalog).toContain("FileMgr");
     expect(r.catalog).toContain("Store");
+    expect(r.catalog).toContain("Window");
+    expect(r.js).toContain('document.getElementById("bios-window-0").hidden = true');
+    expect(d).toContain('g6b_listen("win-open", "click")');
     expect(marker("NodeDef")).toBe("SVELTE-LIVE NodeDef");
     expect(marker("{#await}")).toBe("SVELTE-STUB {#await}");
     expect(marker("sveltekit")).toBe("SVELTE-REFUSED sveltekit");

@@ -411,9 +411,10 @@ endpoint. B92 is later. Remaining work on *this* axis is §15.
 
 Not B89–B91c. The BIOS UI becomes a small window manager (status bar in
 setup chrome, Firefox-like tabs inside a window, iframe sessions that
-navigate to a **local app path or a remote URL**). Remote loads use
-adapter `HttpsGet` / post-delegate mailbox — never QEMU `-netdev`. Full
-plan: [`plan-iframe.md`](plan-iframe.md).
+navigate to a **local app path or a remote URL**). Remote loads use the
+**kernel** fetch path (plan in `g6b-http`, TLS fingerprint in `g6b-tls`,
+sockets on `g6b-hw` TCP) / post-delegate mailbox — never QEMU `-netdev`.
+Full plan: [`plan-iframe.md`](plan-iframe.md).
 
 ---
 

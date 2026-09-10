@@ -145,7 +145,7 @@ export function projectHtml(files: SvelteFile[]): string {
   }
 
   const escape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  const safeTags = new Set(["section", "div", "nav", "main", "article", "header", "footer", "p", "span", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code", "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "a", "button", "canvas", "template"]);
+  const safeTags = new Set(["section", "div", "nav", "main", "article", "header", "footer", "p", "span", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code", "ul", "ol", "li", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "a", "button", "canvas", "template", "form", "label", "input", "iframe"]);
   const voidTags = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"]);
 
   const stripSvelte = (src: string) =>

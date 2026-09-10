@@ -2,18 +2,24 @@
 
 The BIOS browser does not run SvelteKit. svelte-d `NodeDef` paints UI;
 `fetch` / `XMLHttpRequest` / libwasm `Object_Call_string__Handle` are **proxied
-into the kernel router**. HolyC `RegisterEndpoint` writes the same table.
+into the kernel**. Local `/bios` and `/ui` hit `g6b-http::Router`. Remote
+`http(s):` is the same kernel path lowered onto `g6b-hw` TCP. HolyC
+`RegisterEndpoint` writes the router table; `HttpGet`/`HttpsGet` go through
+`holyc_request`.
 
 ```
-svelte-d / JS  fetch("/bios/clocks")
-        │
-        ▼
-g6b-js Op::Fetch  ──►  g6b-http::Router  ◄──  HolyC RegisterEndpoint
-        │                      │
-        │              HTTP/1.1 parse (RFC 9112)
-        │              HTTP/2 frames + HPACK (RFC 9113 / 7541)
-        ▼                      │
-   DOM / UART            compiled BIOS params
+svelte-d / JS  fetch("/bios/clocks")     fetch("http(s)://…") / HttpGet / HttpsGet
+        │                                         │
+        ▼                                         ▼
+g6b-js Op::Fetch                          kernel_fetch / holyc_request
+        │                                         │
+        ▼                                         ▼
+g6b-http::Router  ◄──  HolyC RegisterEndpoint    g6b-http::plan
+        │                                         │
+        │              HTTP/1.1 parse             ├─ http:  HTTP/1.1 GET bytes
+        │              HTTP/2 + HPACK             └─ https: g6b-tls ClientHello
+        ▼                                         ▼
+   DOM / UART / BIOS params                  g6b-hw TCP (via=hw-tcp)
 ```
 
 ## Practicality (compiled features)
@@ -27,6 +33,8 @@ Each row is a BoardSpec gate. Off ⇒ no `#define`, no route, no IR object.
 | HPACK Huffman | always on with http2 | small decode | **yes** — RFC 7541 Appendix B |
 | Dynamic HPACK / QPACK | — | large | **no** (refused) |
 | JS `fetch` proxy | `kernel.http.proxy_js` | tiny | **yes** |
+| iframe / JS / HolyC outbound GET | `kernel.http.outbound` | small | **yes (B92g+B93)** — kernel abstraction: `g6b-http` plans, `g6b-tls` ClientHello, **hw TCP** (`via=hw-tcp`). Off by default; on appliance/desktop/full. Never `-netdev`; iframe guests never KernelPort. HTTPS is not in `g6b-hw`. |
+| virtio-net / SoC NIC / display catalog | `kernel.hw.*` | small | **yes (B93)** — `g6b-hw` `HwSession` (`platform.hw`); `VioNetProbe` DeviceID 1; isolated NAT + TCP/UDP; VGA until probe+announce. Never BIOS `-netdev`. |
 | `/bios/clocks` | `kernel.params.clocks` | tiny JSON | **yes** |
 | `/bios/edk2` | `kernel.params.edk2` | tiny | **yes** (view-only; EDK2 is a loader) |
 | `/bios/u-boot` | `kernel.params.uboot` | tiny | **yes** (view-only) |
@@ -75,6 +83,8 @@ kernel.register("/bios/custom");      // JS
 fetch("/bios/custom");                // JS / svelte-d / WASM
 HttpHandle("GET /bios/custom HTTP/1.1\r\n\r\n");
 KernelGet("clocks");                  // → /bios/clocks
+HttpGet("http://127.0.0.1/…");        // kernel → hw TCP
+HttpsGet("https://…");                // kernel → hw TCP + ClientHello
 ```
 
 Spec of WASM imports: `kernel-spec/libwasm` (`Object_Call_*`, `fetch`,

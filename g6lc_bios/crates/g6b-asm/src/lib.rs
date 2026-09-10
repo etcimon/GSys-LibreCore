@@ -63,6 +63,8 @@ pub enum Purpose {
     FileServe,
     UiDom,
     Virtio,
+    /// virtio-net DeviceID 1 probe (`VioNetProbe`). Not a QEMU `-netdev`.
+    VirtioNet,
     /// Uncore display-engine scanout (HDMI/DP — `architecture/uncore/hdmi-display.md`).
     DispScan,
     /// Read-only PCIe ECAM scan for a class-0x03 display controller with a
@@ -112,6 +114,7 @@ impl Purpose {
             Self::FileServe => "file-serve",
             Self::UiDom => "ui-dom",
             Self::Virtio => "virtio",
+            Self::VirtioNet => "virtio-net",
             Self::DispScan => "disp-scan",
             Self::PciScan => "pci-scan",
             Self::DisplayMux => "display-mux",
@@ -157,6 +160,7 @@ impl Purpose {
             Self::FileServe => "g6ui+html|js|wasm",
             Self::UiDom => "__ui_dom→__gr_plane",
             Self::Virtio => "vio-mmio",
+            Self::VirtioNet => "vio-mmio-net",
             Self::DispScan => "disp-mmio",
             Self::PciScan => "pcie-ecam",
             Self::DisplayMux => "__disp sel",
