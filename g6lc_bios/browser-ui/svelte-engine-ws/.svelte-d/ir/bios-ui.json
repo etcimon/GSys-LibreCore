@@ -288,6 +288,63 @@
           "value": "ArrowLeft/ArrowRight Select tab   Home/End First/Last   F10 Refresh (not save)   Read-only BoardSpec view"
         }
       ]
+    },
+    {
+      "ident": "Store_svelte",
+      "rel": "src/Store.svelte",
+      "tag": "section",
+      "langTs": false,
+      "ops": [
+        {
+          "kind": "fetch",
+          "url": "/bios/store"
+        },
+        {
+          "kind": "pglite",
+          "method": "open",
+          "arg1": "memory://registry",
+          "arg2": "",
+          "awaited": false
+        },
+        {
+          "kind": "pglite",
+          "method": "waitReady",
+          "arg1": "",
+          "arg2": "",
+          "awaited": true
+        },
+        {
+          "kind": "pglite",
+          "method": "exec",
+          "arg1": "CREATE TABLE IF NOT EXISTS bios_ui (k TEXT PRIMARY KEY, v TEXT)",
+          "arg2": "",
+          "awaited": false
+        },
+        {
+          "kind": "pglite",
+          "method": "queryAsync",
+          "arg1": "SELECT k, v FROM bios_ui",
+          "arg2": "[]",
+          "awaited": true,
+          "bind": "rows"
+        },
+        {
+          "kind": "text",
+          "id": "store",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "store-title",
+          "value": "Store"
+        },
+        {
+          "kind": "text",
+          "id": "store-status",
+          "value": "",
+          "bind": "rows"
+        }
+      ]
     }
   ]
 }

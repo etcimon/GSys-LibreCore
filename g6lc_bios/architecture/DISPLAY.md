@@ -240,7 +240,8 @@ so the case pins the offset independently of the scale. The two
 pixel of each `N`×`N` block at `N=2`, which is what makes them scale assertions
 rather than offset ones, and additionally assert the old 1:1 origin is now clear.
 All three run on RV32 and RV64. The low-res `__gr_plane` / `DomPaint` path
-remains intact for VGA-class output and for the legacy 4bpp UI re-dump.
+remains intact for VGA-class output. Host `ui_ppm` is a 16-colour downsample
+of the live Engine canvas, not a second HTML CSS raster.
 
 ### Refusals, stated rather than implied
 
@@ -294,8 +295,9 @@ and for any font file embedded in the HTML/CSS/WASM/JS payload.
 
 The CSS renderer also emits `HitBox` records (path, bounding rect, `id`/`name`)
 for every block it paints. `BrowserSession` keeps the hit boxes from the most
-recent `ui_ppm_output` and uses them for reverse lookup in `dispatch_pointer`.
-This is how CSS output, DOM nodes, and pointer/keyboard events stay linked.
+recent `Engine::paint` and uses them for reverse lookup in `dispatch_pointer`.
+Track-B `ui_ppm` is a 16-colour downsample of that same canvas. This is how
+CSS output, DOM nodes, and pointer/keyboard events stay linked.
 
 ## Native-browser particle presentation (B53 prerequisite)
 

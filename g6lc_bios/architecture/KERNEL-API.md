@@ -35,12 +35,13 @@ Each row is a BoardSpec gate. Off ⇒ no `#define`, no route, no IR object.
 | `/bios/update` | `kernel.flash.self_update` | small | **yes** — BIOS self-update |
 | `/bios/settings` | `kernel.settings.enable` | tiny JSON | **yes** — export/import |
 | `/bios/settings/usb` | `kernel.settings.usb_key` | small | **yes** — USB key; without USB: UART/mailbox |
-| `/bios/store` `/bios/store/{uuid}/*` | `kernel.store.enable` | small | **later S2** — UUID instances, purpose-based BIOS UI; USB dump import/export when `persist.usb` ([`g6b-store-instances.md`](g6b-store-instances.md)). Default **off**. Not SvelteKit |
+| `/bios/store` `/bios/store/{uuid}/*` | `kernel.store.enable` | small | **yes (S5)** — live `StorePort`; UUID instances; HolyC `Store*` even when HTTP is off. Default **on**. `GET …/stat` polls USB live persist (`ready`/`live`). Not SvelteKit |
 | `/bios/profile` `/bios/features` | `kernel.http.enable` | tiny | **yes** — compiled feature map |
 | `/bios/usb` `/bios/usb/ls` `POST /bios/usb/flash` | `kernel.usb.flash_fat32` | small | **yes** — **always** with USB; FAT32 firmware only |
 | `/bios/files` `/bios/files/{fat32,ntfs,ext4}` | `kernel.usb.key` | small | **yes** — USB-key FileMgr; NTFS/ext4 listing, not flash |
 | HTTPS serve | `kernel.http.serve` ∧ `tls.https` | medium | **yes** on adapter until delegate |
 | `/ui/index.html` `/ui/app.js` `/ui/ui.wasm` | `kernel.http.files.{html,js,wasm}` | small | **yes** — HolyC `FileServe`; HTTPS when `files.https` |
+| `/ui/pglite/{pglite.wasm,initdb.wasm,pglite.data,index.js}` | `kernel.store.pglite.files` (+ `pglite.js` for `index.js`) | FileServe of npm dist | **yes (S4a)** — host `mount()` only when bytes live; guest listing only if `pglite.embed`. Not Electric-in-`g6b-wasm` |
 | `/bios/www` | `kernel.http.files.enable` | tiny JSON | **yes** — listing of mounted UI files |
 | TLS ServerHello | `kernel.tls.serve` | small handshake | **yes** — first-party; not OpenSSL |
 | USB MSC host | `kernel.usb.enable` | small | **yes** — FAT32 flash default on; not a netdev |

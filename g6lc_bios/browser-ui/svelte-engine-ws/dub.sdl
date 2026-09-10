@@ -14,7 +14,7 @@ buildRequirements "allowWarnings"
 configuration "application" {
     targetType "executable"
     dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false"
-    lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
+    lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=jsCallback" "--export=jsCallback0" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
     dependency "libwasm" path="E:/cva6/g6lc_bios/libwasm"
     subConfiguration "libwasm" "g6lc-bios"
 }
@@ -22,7 +22,7 @@ configuration "application" {
 configuration "ldc-master" {
     targetType "executable"
     dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false"
-    lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
+    lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=jsCallback" "--export=jsCallback0" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
     dependency "libwasm" path="E:/cva6/g6lc_bios/libwasm"
     subConfiguration "libwasm" "g6lc-bios"
 }

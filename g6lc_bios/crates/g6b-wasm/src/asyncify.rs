@@ -13,8 +13,8 @@
 //! current top of the asyncify stack and `end` is the limit.  The call-index
 //! and local-save area grows upward from `pos`.
 
-use crate::binary::{Instr, Module};
-use crate::interp::{run_with_fuel_mut, Host, DEFAULT_FUEL};
+use crate::binary::{Instr, Module, MAX_MEMORY_PAGES};
+use crate::interp::{run_with_fuel_mut, Host, DEFAULT_FUEL, MAX_FUEL};
 
 /// Asyncify execution state.
 pub const STATE_NORMAL: i32 = 0;
@@ -108,7 +108,7 @@ impl Asyncify {
         data: u32,
         host: &mut impl Host,
     ) -> Result<Step, String> {
-        let out = run_with_fuel_mut(m, export_idx, args, host, DEFAULT_FUEL)?;
+        let out = run_with_fuel_mut(m, export_idx, args, host, MAX_FUEL)?;
         let state = self.state(m, host)?;
         if state == STATE_NORMAL {
             return Ok(Step::Done(out));
@@ -123,8 +123,12 @@ impl Asyncify {
         Err(format!("unexpected asyncify state {state}"))
     }
 
-    /// Continue after a `Sleeping` step.  `value` is the resolved value for the
-    /// sleeping slot (the slot itself has already been written to by the host).
+    /// Continue after a `Sleeping` step.
+    ///
+    /// Matches `wrapExportFn` in `svelte-engine/src-ts/modules/asyncify.ts`:
+    /// settle the Promise (`resolve_slot`, including reject → `libwasmAwaitFailed`)
+    /// **then** `asyncify_start_rewind` and re-enter the export. Do not throw
+    /// on reject before rewind — wasm-eh landing pads run after it.
     pub fn resume(
         &self,
         m: &mut Module,
@@ -206,6 +210,29 @@ fn second_global_set(body: &[Instr]) -> Option<u32> {
     None
 }
 
+/// Place the Asyncify descriptor above the D heap and leave room for the
+/// interpreter string pool to grow (`MAX_MEMORY_PAGES` is 64).
+pub fn reserve_asyncify_scratch(m: &mut Module, heap_base: u32) -> (u32, u32) {
+    const STACK: u32 = 64 * 1024;
+    const HEAP_ROOM: u32 = 512 * 1024;
+    let orig = m.memory.len() as u32;
+    let mut data = heap_base.max(orig).saturating_add(HEAP_ROOM) & !7;
+    let mut stack_end = data + 8 + STACK;
+    let max_bytes = (MAX_MEMORY_PAGES.saturating_sub(1)) * 65536;
+    if stack_end > max_bytes {
+        data = (max_bytes - 8 - STACK) & !7;
+        stack_end = data + 8 + STACK;
+    }
+    let pages = ((stack_end + 65535) / 65536)
+        .max(m.mem_pages)
+        .min(MAX_MEMORY_PAGES);
+    m.max_mem_pages = Some(MAX_MEMORY_PAGES);
+    m.mem_pages = pages;
+    m.memory.resize(pages as usize * 65536, 0);
+    debug_assert_eq!(m.memory.len(), m.mem_pages as usize * 65536);
+    (data, stack_end)
+}
+
 /// Write the `{ pos, end }` descriptor at `data` in module memory.
 fn write_asyncify_data(mem: &mut [u8], data: u32, pos: u32, end: u32) -> Result<(), String> {
     let base = data as usize;
@@ -217,6 +244,196 @@ fn write_asyncify_data(mem: &mut [u8], data: u32, pos: u32, end: u32) -> Result<
     mem[base + 4..base + 8].copy_from_slice(&end.to_le_bytes());
     Ok(())
 }
+
+/// Locate the etcimon/binaryen `svelte-d` `wasm-opt` (Flatten+`try_table`
+/// asyncify). Same order as `browser-ui/compiler/binaryen.ts`.
+pub fn find_fork_wasm_opt() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    let exe = if cfg!(windows) {
+        "wasm-opt.exe"
+    } else {
+        "wasm-opt"
+    };
+    let mut dirs = Vec::new();
+    for var in ["SVELTE_D_WASM_OPT", "WASM_OPT"] {
+        if let Ok(p) = std::env::var(var) {
+            let p = PathBuf::from(p);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    if let Ok(man) = std::env::var("CARGO_MANIFEST_DIR") {
+        let root = std::path::Path::new(&man)
+            .join("..")
+            .join("..")
+            .canonicalize()
+            .ok();
+        if let Some(root) = root {
+            dirs.push(
+                root.join("browser-ui")
+                    .join("toolchains")
+                    .join("binaryen-svelte-d")
+                    .join("bin"),
+            );
+            dirs.push(root.join("svelte-d").join("binaryen-build").join("bin"));
+            dirs.push(
+                root.join("svelte-d")
+                    .join("binaryen")
+                    .join("build")
+                    .join("bin"),
+            );
+        }
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        dirs.push(
+            std::path::Path::new(&home)
+                .join(".svelte-d")
+                .join("toolchains")
+                .join("binaryen-svelte-d")
+                .join("bin"),
+        );
+    }
+    for dir in dirs {
+        let p = dir.join(exe);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Run the forked `wasm-opt --asyncify` on WAT that uses wasm-eh `try`/`catch`
+/// around `env.libwasm_await__void`. Stock Binaryen Flatten-crashes on this.
+pub fn asyncify_wat(wat: &str) -> Result<Vec<u8>, String> {
+    let opt = find_fork_wasm_opt().ok_or_else(|| {
+        "forked wasm-opt not found (SVELTE_D_WASM_OPT / ~/.svelte-d/toolchains/binaryen-svelte-d)"
+            .to_string()
+    })?;
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "g6b-ay-eh-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let input = dir.join("in.wat");
+    let output = dir.join("out.wasm");
+    std::fs::write(&input, wat).map_err(|e| e.to_string())?;
+    let run = std::process::Command::new(&opt)
+        .args([
+            "--enable-exception-handling",
+            "--enable-bulk-memory",
+            "--enable-reference-types",
+            "--asyncify",
+            "--pass-arg=asyncify-imports@env.libwasm_await__void",
+        ])
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .output()
+        .map_err(|e| e.to_string())?;
+    if !run.status.success() {
+        return Err(format!(
+            "wasm-opt --asyncify failed: {} {}",
+            String::from_utf8_lossy(&run.stdout),
+            String::from_utf8_lossy(&run.stderr)
+        ));
+    }
+    std::fs::read(&output).map_err(|e| e.to_string())
+}
+
+/// UI-thread job vs DOM event.
+///
+/// `$on_click` is the event export: no await, no catch, it only `call`s
+/// `$thrower`. `$thrower` is the callee that actually throws. `$surrounding`
+/// is the UI-thread job — `try { await; on_click(); } catch` — so the throw
+/// is caught outside the event after asyncify rewind delivers it.
+pub const UI_EVENT_THROW_WAT: &str = r#"(module
+  (import "env" "libwasm_await__void" (func $await (param i32)))
+  (tag $e (param i32))
+  (memory (export "memory") 1)
+  (func $thrower
+    i32.const 7
+    throw $e
+  )
+  (export "thrower" (func $thrower))
+  (func $on_click
+    call $thrower
+  )
+  (export "on_click" (func $on_click))
+  (func $surrounding (result i32)
+    (try (result i32)
+      (do
+        (call $await (i32.const 0))
+        (call $on_click)
+        (i32.const 0)
+      )
+      (catch $e
+        (drop)
+        (i32.const 1)
+      )
+    )
+  )
+  (export "surrounding" (func $surrounding))
+)
+"#;
+
+/// Fork Binaryen `try_table` + asyncify (commits `0b66e0b71` Flatten,
+/// `6f3b89e06` / `bd3206287` valued catch dests). Host drive matches
+/// `asyncify.ts` `wrapImportFn` / `wrapExportFn`. `domEvent` is in
+/// `EXPORTED_FROM_D` so the event export is the wrapped entry.
+///
+/// `$throw_in_await` — simple throw after `libwasm_await__void` inside
+/// `try_table`; catch dest is the valued block (payload 7).
+/// `$on_click` / `$domEvent` — async DOM event that awaits, then calls
+/// `$thrower`; catch dest drops the payload and returns 1.
+/// `$await_reject` — wrapExportFn reject still rewinds; D reads
+/// `libwasm_await_failed` after rewind (no wasm-eh).
+pub const TRY_TABLE_AWAIT_WAT: &str = r#"(module
+  (import "env" "libwasm_await__void" (func $await (param i32)))
+  (import "env" "libwasm_await_failed" (func $failed (result i32)))
+  (tag $e (param i32))
+  (memory (export "memory") 1)
+  (func $thrower
+    i32.const 7
+    throw $e
+  )
+  (export "thrower" (func $thrower))
+  (func $throw_in_await (result i32)
+    (block $catch (result i32)
+      (try_table (catch $e $catch)
+        (call $await (i32.const 0))
+        (throw $e (i32.const 7))
+      )
+      (unreachable)
+    )
+  )
+  (export "throw_in_await" (func $throw_in_await))
+  (func $on_click (result i32)
+    (block $done (result i32)
+      (drop
+        (block $catch (result i32)
+          (try_table (catch $e $catch)
+            (call $await (i32.const 0))
+            (call $thrower)
+            (br $done (i32.const 0))
+          )
+          (unreachable)
+        )
+      )
+      (i32.const 1)
+    )
+  )
+  (export "on_click" (func $on_click))
+  (export "domEvent" (func $on_click))
+  (func $await_reject (result i32)
+    (call $await (i32.const 2))
+    (call $failed)
+  )
+  (export "await_reject" (func $await_reject))
+)
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -539,5 +756,208 @@ mod tests {
             Step::Done(v) => assert_eq!(v, vec![42]),
             _ => panic!("expected Done"),
         }
+    }
+
+    fn load_ui_event_throw_module() -> crate::binary::Module {
+        let bytes = crate::asyncify_wat(crate::UI_EVENT_THROW_WAT)
+            .expect("forked wasm-opt --asyncify of try/await/catch WAT");
+        crate::decode(&bytes).expect("decode asyncified event-throw module")
+    }
+
+    fn export_idx(m: &crate::binary::Module, name: &str) -> u32 {
+        m.exports
+            .iter()
+            .find(|e| e.name == name && e.kind == 0)
+            .map(|e| e.idx)
+            .unwrap_or_else(|| panic!("missing export {name}"))
+    }
+
+    #[test]
+    fn ui_dom_event_thrower_is_uncaught_without_surrounding_try() {
+        let mut m = load_ui_event_throw_module();
+        let mut host = TestHost::default();
+        let on_click = export_idx(&m, "on_click");
+        let err = crate::run_with_fuel_mut(&mut m, on_click, &[], &mut host, crate::DEFAULT_FUEL)
+            .expect_err("DOM event export has no catch");
+        assert!(
+            err.contains("unhandled wasm exception"),
+            "event-only throw: {err}"
+        );
+        assert!(
+            host.throw_stack.iter().any(|f| f == "thrower"),
+            "callee of the event: {:?}",
+            host.throw_stack
+        );
+        assert!(
+            host.throw_stack.iter().any(|f| f == "on_click"),
+            "event frame: {:?}",
+            host.throw_stack
+        );
+        assert!(
+            !host.throw_stack.iter().any(|f| f == "surrounding"),
+            "event path must not enter try/await/catch: {:?}",
+            host.throw_stack
+        );
+    }
+
+    #[test]
+    fn ui_try_await_catch_catches_event_throw_after_asyncify_rewind() {
+        let mut m = load_ui_event_throw_module();
+        let a = Asyncify::new(&m).expect("wasm-opt left asyncify exports");
+        let mut host = TestHost::default();
+        let surrounding = export_idx(&m, "surrounding");
+        let data = 1024u32;
+        let stack_end = 4096u32;
+        let step = a
+            .step(&mut m, surrounding, &[], data, stack_end, &mut host)
+            .expect("surrounding await unwinds");
+        let slot = match step {
+            Step::Sleeping { slot, .. } => slot,
+            other => panic!("expected Sleeping from await, got {other:?}"),
+        };
+        // wrapExportFn: settle the Promise then start_rewind.
+        host.resolve_slot(slot).expect("await resolve");
+        let step = a
+            .resume(&mut m, surrounding, &[], data, stack_end, &mut host)
+            .expect("rewind continues into on_click throw, caught outside");
+        match step {
+            Step::Done(v) => assert_eq!(v, vec![1], "catch returns 1"),
+            other => panic!("expected Done(1), got {other:?}"),
+        }
+        assert!(
+            host.throw_stack
+                .windows(3)
+                .any(|w| { w[0] == "thrower" && w[1] == "on_click" && w[2] == "surrounding" })
+                || (host.throw_stack.first().map(String::as_str) == Some("thrower")
+                    && host.throw_stack.iter().any(|f| f == "on_click")
+                    && host.throw_stack.iter().any(|f| f == "surrounding")),
+            "JIT stack at throw (callee first): {:?}",
+            host.throw_stack
+        );
+    }
+
+    fn load_try_table_await_module() -> crate::binary::Module {
+        let bytes = crate::asyncify_wat(crate::TRY_TABLE_AWAIT_WAT)
+            .expect("forked wasm-opt --asyncify of try_table WAT");
+        crate::decode(&bytes).expect("decode asyncified try_table module")
+    }
+
+    #[test]
+    fn try_table_throw_in_await_caught_after_asyncify_rewind() {
+        let mut m = load_try_table_await_module();
+        let a = Asyncify::new(&m).expect("wasm-opt left asyncify exports");
+        let mut host = TestHost::default();
+        let throw_in_await = export_idx(&m, "throw_in_await");
+        let data = 1024u32;
+        let stack_end = 4096u32;
+        let slot = match a
+            .step(&mut m, throw_in_await, &[], data, stack_end, &mut host)
+            .expect("await inside try_table unwinds")
+        {
+            Step::Sleeping { slot, .. } => slot,
+            other => panic!("expected Sleeping, {other:?}"),
+        };
+        host.resolve_slot(slot).expect("wrapExportFn settle");
+        match a
+            .resume(&mut m, throw_in_await, &[], data, stack_end, &mut host)
+            .expect("rewind then throw lands on try_table catch dest")
+        {
+            Step::Done(v) => assert_eq!(v, vec![7], "valued catch dest is the throw payload"),
+            other => panic!("expected Done(7), {other:?}"),
+        }
+        assert!(
+            host.throw_stack.iter().any(|f| f == "throw_in_await"),
+            "JIT stack in catch: {:?}",
+            host.throw_stack
+        );
+        assert!(
+            !host
+                .throw_stack
+                .iter()
+                .any(|f| f == "on_click" || f == "domEvent"),
+            "simple throw-in-await must not enter the event export: {:?}",
+            host.throw_stack
+        );
+    }
+
+    #[test]
+    fn async_dom_event_awaits_then_thrower_caught_with_jit_stack() {
+        let mut m = load_try_table_await_module();
+        let a = Asyncify::new(&m).expect("wasm-opt left asyncify exports");
+        let mut host = TestHost::default();
+        // EXPORTED_FROM_D includes `domEvent`; same body as `on_click`.
+        let dom_event = export_idx(&m, "domEvent");
+        let data = 1024u32;
+        let stack_end = 4096u32;
+        let slot = match a
+            .step(&mut m, dom_event, &[], data, stack_end, &mut host)
+            .expect("async DOM event await unwinds")
+        {
+            Step::Sleeping { slot, .. } => slot,
+            other => panic!("expected Sleeping, {other:?}"),
+        };
+        host.resolve_slot(slot).expect("wrapExportFn settle");
+        match a
+            .resume(&mut m, dom_event, &[], data, stack_end, &mut host)
+            .expect("rewind into thrower, try_table catch dest")
+        {
+            Step::Done(v) => assert_eq!(v, vec![1], "event catch returns 1"),
+            other => panic!("expected Done(1), {other:?}"),
+        }
+        assert!(
+            host.throw_stack.first().map(String::as_str) == Some("thrower")
+                && (host.throw_stack.iter().any(|f| f == "on_click")
+                    || host.throw_stack.iter().any(|f| f == "domEvent")),
+            "JIT stack at throw (callee first): {:?}",
+            host.throw_stack
+        );
+    }
+
+    #[test]
+    fn wrap_export_fn_reject_still_rewinds() {
+        let mut m = load_try_table_await_module();
+        let a = Asyncify::new(&m).expect("wasm-opt left asyncify exports");
+        let mut host = TestHost::default();
+        let await_reject = export_idx(&m, "await_reject");
+        let data = 1024u32;
+        let stack_end = 4096u32;
+        let slot = match a
+            .step(&mut m, await_reject, &[], data, stack_end, &mut host)
+            .expect("await unwind")
+        {
+            Step::Sleeping { slot, .. } => slot,
+            other => panic!("expected Sleeping, {other:?}"),
+        };
+        // wrapExportFn: reject records fail, then start_rewind anyway.
+        host.resolve_result = Some(Err("boom".into()));
+        host.resolve_slot(slot).expect("recordAwaitFail");
+        match a
+            .resume(&mut m, await_reject, &[], data, stack_end, &mut host)
+            .expect("reject still rewinds")
+        {
+            Step::Done(v) => assert_eq!(v, vec![1], "libwasm_await_failed after rewind"),
+            other => panic!("expected Done(1), {other:?}"),
+        }
+        assert!(host.last_await_failed);
+        assert_eq!(host.last_await_error, "boom");
+    }
+
+    #[test]
+    fn reserve_scratch_keeps_memory_valid() {
+        if !crate::bios_ui_libwasm_live() {
+            return;
+        }
+        let mut m = crate::decode(crate::bios_ui_libwasm()).unwrap();
+        crate::validate(&m).expect("before");
+        let (data, end) = reserve_asyncify_scratch(&mut m, 1_112_560);
+        assert!(end > data);
+        crate::validate(&m).unwrap_or_else(|e| {
+            panic!(
+                "after reserve: {e} len={} pages={} max={:?} data={data} end={end}",
+                m.memory.len(),
+                m.mem_pages,
+                m.max_mem_pages
+            )
+        });
     }
 }

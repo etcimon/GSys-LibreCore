@@ -37,6 +37,10 @@ pub enum ObjectKind {
     Array,
     /// A DOM `Event` interned for listener re-entry (`clientX`/`preventDefault`).
     Event,
+    /// Interned `window.pglite` factory (`PgLite()` / `attempt(dataDir)`).
+    StoreFactory,
+    /// Open store instance (`query` / `exec` / tx / close).
+    Store,
 }
 
 /// Payload stored in an [`ObjectTable`] for libwasm object handles.

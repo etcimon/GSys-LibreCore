@@ -6,8 +6,28 @@
 #![allow(missing_docs)]
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use g6b_spec::BoardSpec;
+
+/// Combined uncompressed cap for `pglite.embed` (wasm + initdb + data).
+pub const MAX_PGLITE_EMBED_BYTES: usize = 16 * 1024 * 1024;
+
+/// Extracted Electric dist bytes (`g6b.py pglite-dist` → `.tools/pglite-dist/`).
+#[derive(Debug, Clone)]
+pub struct PgliteDist {
+    pub wasm: Vec<u8>,
+    pub initdb: Vec<u8>,
+    pub data: Vec<u8>,
+    pub js: Vec<u8>,
+}
+
+impl PgliteDist {
+    /// wasm + initdb + data; `index.js` is FileServe-only.
+    pub fn embed_len(&self) -> usize {
+        self.wasm.len() + self.initdb.len() + self.data.len()
+    }
+}
 
 /// One file the HolyC HTTP(S) server may emit.
 #[derive(Debug, Clone)]
@@ -17,8 +37,69 @@ pub struct StaticFile {
     pub body: Vec<u8>,
 }
 
+/// Directory `mount()` reads. `G6B_PGLITE_DIST` overrides (tests / operators).
+pub fn pglite_dist_dir() -> PathBuf {
+    if let Ok(p) = std::env::var("G6B_PGLITE_DIST") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.tools/pglite-dist")
+}
+
+/// Runtime-read the pinned dist. Missing or not `\0asm` → `None` (serve-time omit).
+pub fn load_pglite_dist() -> Option<PgliteDist> {
+    load_pglite_dist_from(&pglite_dist_dir())
+}
+
+/// Load from an explicit directory (fixture tests; never `include_bytes!` `.tools/`).
+pub fn load_pglite_dist_from(dir: &Path) -> Option<PgliteDist> {
+    let wasm = std::fs::read(dir.join("pglite.wasm")).ok()?;
+    let initdb = std::fs::read(dir.join("initdb.wasm")).ok()?;
+    let data = std::fs::read(dir.join("pglite.data")).ok()?;
+    if wasm.len() < 4 || &wasm[..4] != b"\0asm" {
+        return None;
+    }
+    if initdb.len() < 4 || &initdb[..4] != b"\0asm" {
+        return None;
+    }
+    if data.is_empty() {
+        return None;
+    }
+    let js = std::fs::read(dir.join("index.js")).unwrap_or_default();
+    Some(PgliteDist {
+        wasm,
+        initdb,
+        data,
+        js,
+    })
+}
+
+/// `/bios/features` live overlay: `store_pglite_files`/`js` are false when dist is absent.
+pub fn live_features_json(spec: &BoardSpec, dist: Option<&PgliteDist>) -> String {
+    let files_live = spec.kernel.store.pglite_files && dist.is_some();
+    let js_live = spec.kernel.store.pglite_js && dist.is_some_and(|d| !d.js.is_empty());
+    let parts: Vec<String> = spec
+        .compiled_features()
+        .iter()
+        .map(|(k, v)| {
+            let v = match *k {
+                "store_pglite_files" => files_live,
+                "store_pglite_js" => js_live,
+                _ => *v,
+            };
+            format!("\"{k}\":{}", if v { "true" } else { "false" })
+        })
+        .collect();
+    format!("{{{}}}", parts.join(","))
+}
+
 /// Mount UI files for this BoardSpec. Empty when `http.files` is off.
 pub fn mount(spec: &BoardSpec) -> BTreeMap<String, StaticFile> {
+    mount_with_pglite(spec, load_pglite_dist())
+}
+
+fn mount_with_pglite(spec: &BoardSpec, dist: Option<PgliteDist>) -> BTreeMap<String, StaticFile> {
     let f = &spec.kernel.http.files;
     if !f.enable {
         return BTreeMap::new();
@@ -105,6 +186,36 @@ pub fn mount(spec: &BoardSpec) -> BTreeMap<String, StaticFile> {
                 .as_bytes()
                 .to_vec(),
         );
+    }
+    if spec.kernel.store.enable && spec.kernel.store.pglite_files && f.wasm {
+        if let Some(d) = dist {
+            put(
+                &mut out,
+                &format!("{root}/pglite/pglite.wasm"),
+                "application/wasm",
+                d.wasm,
+            );
+            put(
+                &mut out,
+                &format!("{root}/pglite/initdb.wasm"),
+                "application/wasm",
+                d.initdb,
+            );
+            put(
+                &mut out,
+                &format!("{root}/pglite/pglite.data"),
+                "application/octet-stream",
+                d.data,
+            );
+            if spec.kernel.store.pglite_js && f.js && !d.js.is_empty() {
+                put(
+                    &mut out,
+                    &format!("{root}/pglite/index.js"),
+                    "application/javascript; charset=utf-8",
+                    d.js,
+                );
+            }
+        }
     }
     let listing = listing_json(&out);
     let listing_path = if root.is_empty() { "/files.json" } else { root };
@@ -297,5 +408,70 @@ mod tests {
                 "/ui/ui.wasm is the LDC cell when live"
             );
         }
+    }
+
+    fn fixture_dist() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/pglite-dist")
+    }
+
+    fn pglite_files_spec(js: bool) -> BoardSpec {
+        let js_flag = if js { "true" } else { "false" };
+        BoardSpec::from_json_str(&format!(
+            r#"{{"schema_version":1,"profile":"full","kernel":{{"store":{{"pglite":{{"files":true,"js":{js_flag}}}}}}}}}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn pglite_omitted_when_files_gate_off() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        assert!(!spec.kernel.store.pglite_files);
+        let files = mount_with_pglite(&spec, load_pglite_dist_from(&fixture_dist()));
+        assert!(!files.keys().any(|k| k.contains("/pglite/")));
+    }
+
+    #[test]
+    fn pglite_omitted_when_dist_missing() {
+        let spec = pglite_files_spec(false);
+        assert!(spec.kernel.store.pglite_files);
+        let files = mount_with_pglite(&spec, None);
+        assert!(!files.keys().any(|k| k.contains("/pglite/")));
+        let feat = live_features_json(&spec, None);
+        assert!(feat.contains("\"store_pglite_files\":false"), "{feat}");
+        assert!(spec
+            .compiled_features_json()
+            .contains("\"store_pglite_files\":true"));
+    }
+
+    #[test]
+    fn pglite_mounts_fixture_dist_without_js() {
+        let spec = pglite_files_spec(false);
+        let dist = load_pglite_dist_from(&fixture_dist()).expect("committed fixture dist");
+        let files = mount_with_pglite(&spec, Some(dist.clone()));
+        let wasm = &files["/ui/pglite/pglite.wasm"];
+        assert_eq!(wasm.content_type, "application/wasm");
+        assert_eq!(&wasm.body[..4], b"\0asm");
+        assert_eq!(
+            files["/ui/pglite/initdb.wasm"].content_type,
+            "application/wasm"
+        );
+        assert_eq!(
+            files["/ui/pglite/pglite.data"].content_type,
+            "application/octet-stream"
+        );
+        assert!(!files.contains_key("/ui/pglite/index.js"));
+        let feat = live_features_json(&spec, Some(&dist));
+        assert!(feat.contains("\"store_pglite_files\":true"), "{feat}");
+        assert!(feat.contains("\"store_pglite_js\":false"), "{feat}");
+    }
+
+    #[test]
+    fn pglite_js_is_served_only_when_gated() {
+        let spec = pglite_files_spec(true);
+        let dist = load_pglite_dist_from(&fixture_dist()).unwrap();
+        let files = mount_with_pglite(&spec, Some(dist));
+        let js = &files["/ui/pglite/index.js"];
+        assert!(js.content_type.starts_with("application/javascript"));
+        assert!(!js.body.is_empty());
     }
 }

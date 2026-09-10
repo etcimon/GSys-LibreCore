@@ -337,6 +337,7 @@ fn serve_http(spec: &g6b_spec::BoardSpec, args: &[String]) -> ExitCode {
         let _ = err.flush();
     }
     let router = g6b_http::Router::from_spec(spec);
+    let mut store = g6b_pglite::StoreRegistry::from_spec(spec);
     let once = flag_present(args, "--once");
     loop {
         let (stream, _) = match listener.accept() {
@@ -346,7 +347,7 @@ fn serve_http(spec: &g6b_spec::BoardSpec, args: &[String]) -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-        if let Err(e) = handle_http_conn(stream, &router) {
+        if let Err(e) = handle_http_conn(stream, &router, spec, Some(&mut store)) {
             eprintln!("g6b: http: {e}");
         }
         if once {
@@ -363,15 +364,56 @@ fn http_invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn bounded_http_len(len: usize) -> io::Result<Option<usize>> {
-    if len > HTTP_REQUEST_LIMIT {
-        Err(http_invalid("request exceeds 8192 bytes"))
+fn store_http_limit(spec: &g6b_spec::BoardSpec) -> usize {
+    if !spec.kernel.store.enable {
+        return HTTP_REQUEST_LIMIT;
+    }
+    let s = &spec.kernel.store;
+    let body = s
+        .max_sql_bytes
+        .saturating_add(s.max_param_bytes)
+        .max(s.max_result_bytes)
+        .saturating_add(1024) as usize;
+    body.max(HTTP_REQUEST_LIMIT)
+}
+
+fn path_is_store(raw: &[u8]) -> bool {
+    if raw.is_empty() {
+        return false;
+    }
+    if raw.starts_with(g6b_http::h2::PREFACE) || raw[0] == 0 {
+        return raw.windows(12).any(|w| w == b"/bios/store");
+    }
+    let line = raw.split(|&b| b == b'\n').next().unwrap_or(&[]);
+    let s = std::str::from_utf8(line)
+        .unwrap_or("")
+        .trim_end_matches('\r');
+    s.split_whitespace()
+        .nth(1)
+        .is_some_and(|p| p.starts_with("/bios/store"))
+}
+
+fn request_limit(raw: &[u8], spec: Option<&g6b_spec::BoardSpec>) -> usize {
+    match spec {
+        Some(spec) if path_is_store(raw) => store_http_limit(spec),
+        _ => HTTP_REQUEST_LIMIT,
+    }
+}
+
+fn bounded_http_len(len: usize, limit: usize) -> io::Result<Option<usize>> {
+    if len > limit {
+        Err(http_invalid(&format!("request exceeds {limit} bytes")))
     } else {
         Ok(Some(len))
     }
 }
 
+#[cfg(test)]
 fn http_request_len(raw: &[u8]) -> io::Result<Option<usize>> {
+    http_request_len_at(raw, HTTP_REQUEST_LIMIT)
+}
+
+fn http_request_len_at(raw: &[u8], limit: usize) -> io::Result<Option<usize>> {
     if raw.is_empty() {
         return Ok(None);
     }
@@ -382,14 +424,14 @@ fn http_request_len(raw: &[u8]) -> io::Result<Option<usize>> {
         if raw[1] != 3 {
             return Err(http_invalid("unsupported TLS record version"));
         }
-        return bounded_http_len(5 + usize::from(u16::from_be_bytes([raw[3], raw[4]])));
+        return bounded_http_len(5 + usize::from(u16::from_be_bytes([raw[3], raw[4]])), limit);
     }
     let preface = g6b_http::h2::PREFACE;
     if raw.len() < preface.len() && preface.starts_with(raw) {
         return Ok(None);
     }
     if raw.starts_with(preface) || raw[0] == 0 {
-        return http2_request_len(raw);
+        return http2_request_len(raw, limit);
     }
     let Some(end) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
         return Ok(None);
@@ -421,10 +463,10 @@ fn http_request_len(raw: &[u8]) -> io::Result<Option<usize>> {
     let len = (end + 4)
         .checked_add(content_len.unwrap_or(0))
         .ok_or_else(|| http_invalid("content-length overflow"))?;
-    bounded_http_len(len)
+    bounded_http_len(len, limit)
 }
 
-fn http2_request_len(raw: &[u8]) -> io::Result<Option<usize>> {
+fn http2_request_len(raw: &[u8], limit: usize) -> io::Result<Option<usize>> {
     let mut offset = if raw.starts_with(g6b_http::h2::PREFACE) {
         g6b_http::h2::PREFACE.len()
     } else {
@@ -438,7 +480,7 @@ fn http2_request_len(raw: &[u8]) -> io::Result<Option<usize>> {
         let len =
             (usize::from(frame[0]) << 16) | (usize::from(frame[1]) << 8) | usize::from(frame[2]);
         let end = offset + 9 + len;
-        bounded_http_len(end)?;
+        bounded_http_len(end, limit)?;
         if raw.len() < end {
             return Ok(None);
         }
@@ -481,18 +523,28 @@ fn http_time_left(deadline: Instant) -> io::Result<Duration> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::TimedOut, "HTTP I/O deadline exceeded"))
 }
 
-fn read_http_request(stream: &mut TcpStream, timeout: Duration) -> io::Result<Vec<u8>> {
+fn read_http_request(
+    stream: &mut TcpStream,
+    timeout: Duration,
+    spec: Option<&g6b_spec::BoardSpec>,
+) -> io::Result<Vec<u8>> {
     let deadline = Instant::now() + timeout;
-    let mut buf = [0u8; HTTP_REQUEST_LIMIT];
+    let mut cap = HTTP_REQUEST_LIMIT;
+    let mut buf = vec![0u8; cap];
     let mut used = 0;
     loop {
-        if let Some(len) = http_request_len(&buf[..used])? {
+        let limit = request_limit(&buf[..used], spec);
+        if limit > cap {
+            cap = limit;
+            buf.resize(cap, 0);
+        }
+        if let Some(len) = http_request_len_at(&buf[..used], limit)? {
             if used >= len {
                 return Ok(buf[..len].to_vec());
             }
         }
         if used == buf.len() {
-            return Err(http_invalid("request exceeds 8192 bytes"));
+            return Err(http_invalid(&format!("request exceeds {limit} bytes")));
         }
         stream.set_read_timeout(Some(http_time_left(deadline)?))?;
         match stream.read(&mut buf[used..]) {
@@ -532,9 +584,15 @@ fn write_http_response(
     Ok(())
 }
 
-fn handle_http_conn(mut stream: TcpStream, router: &g6b_http::Router) -> Result<(), String> {
-    let request = read_http_request(&mut stream, HTTP_IO_TIMEOUT).map_err(|e| e.to_string())?;
-    let mut response = router.handle_bytes(&request)?;
+fn handle_http_conn(
+    mut stream: TcpStream,
+    router: &g6b_http::Router,
+    spec: &g6b_spec::BoardSpec,
+    store: Option<&mut dyn g6b_pglite::StorePort>,
+) -> Result<(), String> {
+    let request =
+        read_http_request(&mut stream, HTTP_IO_TIMEOUT, Some(spec)).map_err(|e| e.to_string())?;
+    let mut response = router.handle_bytes_store(&request, store)?;
     if response.starts_with(b"HTTP/1.") {
         if let Some(end) = response.windows(2).position(|w| w == b"\r\n") {
             response.splice(end + 2..end + 2, b"Connection: close\r\n".iter().copied());
@@ -920,6 +978,35 @@ mod tests {
     }
 
     #[test]
+    fn store_path_accepts_9kib_query_body() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"http":{"enable":true},"store":{"enable":true}}}"#,
+        )
+        .unwrap();
+        let body = vec![b'x'; 9000];
+        let mut store_req = format!(
+            "POST /bios/store/00000000-0000-4000-8000-000000000001/query HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        store_req.extend_from_slice(&body);
+        let limit = store_http_limit(&spec);
+        assert!(limit > HTTP_REQUEST_LIMIT);
+        assert_eq!(
+            http_request_len_at(&store_req, limit).unwrap(),
+            Some(store_req.len())
+        );
+        let mut menu = format!(
+            "POST /bios/menu HTTP/1.1\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        menu.extend_from_slice(&body);
+        let err = http_request_len(&menu).unwrap_err();
+        assert!(err.to_string().contains("8192"), "{err}");
+    }
+
+    #[test]
     fn standalone_tls_record_lengths_survive_fragmentation() {
         for kind in [0x16, 0x17] {
             let record = [kind, 3, 3, 0, 4, 1, 0, 0, 0];
@@ -974,7 +1061,7 @@ mod tests {
         client.write_all(b"GET /bios/menu HTTP/1.1\r\n").unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
         assert_eq!(
-            read_http_request(&mut server, HTTP_IO_TIMEOUT)
+            read_http_request(&mut server, HTTP_IO_TIMEOUT, None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::UnexpectedEof
@@ -982,7 +1069,7 @@ mod tests {
         let (mut client, mut server) = socket_pair();
         client.write_all(&[b'x'; HTTP_REQUEST_LIMIT]).unwrap();
         assert_eq!(
-            read_http_request(&mut server, HTTP_IO_TIMEOUT)
+            read_http_request(&mut server, HTTP_IO_TIMEOUT, None)
                 .unwrap_err()
                 .kind(),
             io::ErrorKind::InvalidData
@@ -1002,7 +1089,9 @@ mod tests {
     #[test]
     fn idle_socket_has_a_read_deadline() {
         let (_client, mut server) = socket_pair();
-        assert_timeout(read_http_request(&mut server, Duration::from_millis(100)).unwrap_err());
+        assert_timeout(
+            read_http_request(&mut server, Duration::from_millis(100), None).unwrap_err(),
+        );
         assert!(server.read_timeout().unwrap().is_some());
     }
 
@@ -1019,7 +1108,9 @@ mod tests {
             }
         });
         let start = Instant::now();
-        assert_timeout(read_http_request(&mut server, Duration::from_millis(150)).unwrap_err());
+        assert_timeout(
+            read_http_request(&mut server, Duration::from_millis(150), None).unwrap_err(),
+        );
         drop(server);
         sender.join().unwrap();
         assert!(start.elapsed() < Duration::from_secs(1));

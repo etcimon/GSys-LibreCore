@@ -5,7 +5,7 @@
 | **Title** | g6b-pglite: BIOS registry / structured store |
 | **Author** | Etienne Cimon |
 | **Date** | 2026-09-09 |
-| **Status** | Living (S0 / PR1). Identity contract: [`g6b-store-instances.md`](g6b-store-instances.md) |
+| **Status** | Living (S5). `kernel.store.enable` defaults **on**. Identity: [`g6b-store-instances.md`](g6b-store-instances.md). USB live + `stat`/`statAsync`. Svelte: [`g6b-pglite-svelte.md`](g6b-pglite-svelte.md) |
 | **Work tree** | `E:\cva6\g6lc_bios` (git toplevel `E:\cva6`) |
 | **Green command** | `python tools/g6b.py check` (then `bios-regress`; cargo at `C:\Users\etcim\.cargo\bin`) |
 | **License (first-party)** | MIT |
@@ -38,7 +38,7 @@ HolyC (`StoreOpen` / `StoreQuery` / `StoreExec` / `StoreDrop` / `StoreExport` / 
 | Moment | `libwasm/source/libwasm/moment.d` — Lodash wrap of `moment` | the golden host-object pattern |
 | pglite.d skeleton | `svelte-d/svelte-engine/src-d/pglite.d` | `query` only; not in BIOS `svelte-engine-ws/src-d/` (only `app.d`) |
 | KernelPort | fetch / HolyC / register (`crates/g6b-wasm/src/browser.rs:13-20`) | **must not** grow a store method iframes could inherit |
-| Guest WASM | `start_ops` VGA glyphs; `MAX_MODULE_BYTES = 1 MiB` (`binary.rs:37`); `MAX_MEMORY_PAGES = 32` = 2 MiB (`binary.rs:38`) | cannot decode or instantiate emscripten Postgres (module ≫ 1 MiB; Electric initial memory 2048 pages = 128 MiB) |
+| Guest WASM | `start_ops` VGA glyphs; `MAX_MODULE_BYTES = 1 MiB` (`binary.rs:37`); `MAX_MEMORY_PAGES = 64` = 4 MiB (`binary.rs:38`) | cannot decode or instantiate emscripten Postgres (module ≫ 1 MiB; Electric initial memory 2048 pages = 128 MiB) |
 | Router | static JSON + files; `fetch()` zeros the body (`router.rs:441-462`); CLI `HTTP_REQUEST_LIMIT = 8192` (`g6b-cli/src/main.rs:359`) | no live `/bios/store` POST; 8 KiB cap would kill store bodies |
 
 SQLite-in-bun is the analog: a **native** module plus `db.query` / `db.exec` / transactions. PGlite's published JS API is `PGlite.create()`, `.query(sql, params)`, `.exec(sql)`, `.sql` tagged template, `.transaction(fn)`, `.listen`/`.unlisten`, `.close()`, `.waitReady`, `dumpDataDir` / `loadDataDir`. The BIOS cannot pretend `g6b-wasm` is that runtime.
@@ -121,7 +121,7 @@ flowchart TB
 
   PGW["pglite.wasm + initdb.wasm + pglite.data<br/>~3-4 MB gzipped"]
   FS --> PGW
-  PGW -.->|"g6b-wasm MAX_MODULE_BYTES 1 MiB<br/>MAX_MEMORY_PAGES 32 = 2 MiB"| host
+  PGW -.->|"g6b-wasm MAX_MODULE_BYTES 1 MiB<br/>MAX_MEMORY_PAGES 64 = 4 MiB"| host
 ```
 
 | Runtime | Store backend | Electric wasm |
@@ -179,7 +179,7 @@ pub struct Store {
 pub enum PersistMode {
     Memory,                   // default; deletable; dies on drop or reboot
     ElfSeed,                  // hydrated from `__g6b_store_dump`; live copy is Memory
-    UsbLive { volume: String, rel: String }, // reserved; v1 USB is export/import
+    UsbLive, // FileMgr-backed; volume/rel live on `Store`
 }
 
 pub struct QueryResult {
@@ -220,8 +220,10 @@ pub enum StoreError {
 | `export(uuid, volume, rel?)` | write dump on USB **key** FileMgr (`persist.usb`) |
 | `import(volume, rel)` | read dump → Memory instance (same uuid if free) |
 | `list()` | uuid + purpose + persist + row counts |
+| `stat(uuid)` | pollable `{ok,uuid,purpose,persist,live,volume?,path?,bytes,format?,ready}` |
+| `attach_usb(uuid, volume, rel?)` | mark `UsbLive` and auto-flush `.g6bstore` after writes |
 
-`waitReady` is a no-op success on this crate (`{ok:true,ready:true}`). Electric wasm readiness is an S4 native concern.
+`waitReady` on BrowserSession/`KernelHost` returns the same JSON as `stat` (so a dialog can `await waitReady()` / `statAsync()` until `ready`). Native `kernel.ts` keeps a cheap sync `waitReady()` and exposes **`await store.stat()`** for USB polling: a hypothetical dialog loops until `live && ready`. Electric wasm readiness remains an S4 native concern.
 
 #### Registry SQL (PostgreSQL-shaped subset)
 
@@ -271,7 +273,7 @@ pred_atom := '(' pred ')'
            | expr IS [ NOT ] NULL
 ```
 
-No `LIKE`, `IN`, `BETWEEN`, `JOIN`, subqueries.
+No `LIKE`, `IN`, `BETWEEN`, subqueries. **One** `INNER JOIN … ON col = col` (hash join, not cartesian). `JOIN` without `INNER`/`ON` is still a syntax error.
 
 **Select-list** — exactly one of:
 
@@ -287,8 +289,9 @@ DROP TABLE [IF EXISTS] ident
 INSERT INTO ident [ '(' ident { ',' ident }* ')' ] VALUES '(' value { ',' value }* ')' { ',' '(' value { ',' value }* ')' }*
 UPDATE ident SET ident '=' expr { ',' ident '=' expr }* [ WHERE pred ]
 DELETE FROM ident [ WHERE pred ]
-SELECT select_list FROM ident [ WHERE pred ] [ ORDER BY ident [ ASC | DESC ] ] [ LIMIT int | param ] [ OFFSET int | param ]
+SELECT select_list FROM ident [ INNER JOIN ident ON qident '=' qident ] [ WHERE pred ] [ ORDER BY qident [ ASC | DESC ] ] [ LIMIT int | param ] [ OFFSET int | param ]
 BEGIN | COMMIT | ROLLBACK
+LISTEN ident | STAT | UNLISTEN [ ident | '*' ] | NOTIFY ident [ ',' string ]
 ```
 
 `query()` accepts **one** statement (no `;` inside except optional trailing). `exec()` accepts one or more `;`-separated statements and **no** `param` tokens (PGlite contract); any statement failure rolls the whole batch back.
@@ -303,7 +306,7 @@ query(sql, params_json_array)   // attempt("query", sql, "[\"opensbi\"]")
 
 A fourth bound `$4` as a separate Lodash arg would trap. The array may hold up to `max_columns` values (16 default).
 
-**`sql` tagged templates:** refused in D. **`transaction(fn)`:** refused as a JS callback; use `begin`/`commit`/`rollback` or `exec("BEGIN; …; COMMIT")`. **`listen` / `unlisten`:** `NotImplemented("listen")`. No `RETURNING`, CTEs, views, `JOIN`.
+**`sql` tagged templates:** refused in D. **`transaction(fn)`:** refused as a JS callback; use `begin`/`commit`/`rollback` or `exec("BEGIN; …; COMMIT")`. **`listen` / `unlisten` / `NOTIFY`:** per-store queues (not cross-store). **`STAT`:** same JSON as `stat()`. No `RETURNING`, CTEs, views, or cartesian `JOIN`.
 
 #### Budgets (fail closed)
 
@@ -329,9 +332,11 @@ flowchart LR
   OPEN["open(dataDir)"] --> PARSE
   PARSE{"scheme"}
   PARSE -->|"memory://purpose or purpose"| MEM["Memory instance (uuid)"]
-  PARSE -->|"uuid 8-4-4-4-12"| UUID[open_uuid]
+  PARSE -->|"uuid / memory://uuid"| UUID[open_uuid]
   PARSE -->|"elf://purpose"| ELF["hydrate ELF seed → Memory"]
-  PARSE -->|"usb://VOL/rel"| USB["import dump → Memory"]
+  PARSE -->|"usb://VOL or usb://VOL/purpose"| USB["live attach UsbLive"]
+  PARSE -->|"usb://VOL/uuid"| USBUUID["live attach that uuid"]
+  PARSE -->|"usb://VOL/rel.g6bstore"| SNAP["import snapshot"]
   PARSE -->|"idb:// file:// http(s):"| REF[Refuse]
   MEM --> OK
   UUID --> OK
@@ -339,13 +344,15 @@ flowchart LR
   ELF -->|"unarmed"| FAIL[PersistUnarmed]
   USB -->|"persist.usb + usb.key"| OK
   USB -->|"unarmed"| FAIL
+  SNAP -->|"persist.usb + usb.key"| OK
+  SNAP -->|"unarmed"| FAIL
 ```
 
 Identity and USB verbs: [`g6b-store-instances.md`](g6b-store-instances.md).
 
 - **Default Memory.** Volatile across reboot. **Deletable** via `drop(uuid)` without reboot. `close` only unbinds. Always available when `kernel.store.enable`.
 - **`elf://`.** First-party dump JSON compiled into `__g6b_store_dump` (fixture JSON via `g6b.py store-embed` / `g6b-elf`). Hydrates a **Memory** copy (purpose from dump). Unarmed if that blob was not linked. **Independent of `pglite.embed`**.
-- **USB.** Key FileMgr **export/import** of dump JSON (`StoreExport` / `StoreImport`). Default path `{volume}/stores/{purpose}/{uuid}.g6bstore`. **Not** FAT32 flash firmware. Never `file://`. `usb://VOL/rel` as `dataDir` means import, not a live mount (v1).
+- **USB.** Key FileMgr **live** persist (`PersistMode::UsbLive`) plus snapshot export/import. Compressed **G6BS** (first-party LZ77) at `{volume}/stores/{purpose}/{uuid}.g6bstore`. **Not** FAT32 flash firmware. Never `file://`. `usb://VOL` or `usb://VOL/{purpose}` live-attaches (auto-flush after writes). `usb://VOL/rel.g6bstore` imports a snapshot. `persist.volume` (`fat32`/`ntfs`/`ext4`) auto-attaches on `create`/`open_purpose`. A dialog that requires the stick polls **`stat`** until `live && ready`.
 - **`idb://` / OPFS.** Refused on every runtime in v1. IndexedDB is not a BIOS medium; native `kernel.ts` must not silently persist operator data into the desktop browser profile.
 - Fail closed: unarmed persist returns `PersistUnarmed`, does **not** fall back to memory (that would look like a successful USB save).
 
@@ -611,10 +618,10 @@ pub struct StoreCfg {
     pub purposes: Vec<String>,        // empty in Default; filled by apply_store; JSON `names` alias
 }
 
-impl Default for StoreCfg { /* enable=false; persist_memory=true; all other persist/pglite false;
+impl Default for StoreCfg { /* enable=true; persist_memory=true; all other persist/pglite false;
     max_stores/max_instances=4, max_per_purpose=2, max_tables=32, max_columns=16, max_rows=4096,
     max_sql_bytes=64KiB, max_param_bytes=16KiB, max_result_bytes=256KiB,
-    max_tx=1, max_open=4, purposes=vec![] */ }
+    max_tx=1, max_open=4, purposes=["registry"] */ }
 ```
 
 JSON overlay (`apply_store`, sibling of `apply_http_files` at `lib.rs:2194`). Nested JSON maps onto the flat Rust fields:
@@ -666,7 +673,7 @@ Byte presence (not `check()`):
 | `pglite.embed` | `g6b-elf` / `g6b.py elf` link error |
 | `persist.elf` | link error if `store-embed` requested; else `PersistUnarmed` at `StoreOpen("elf://…")` |
 
-Profiles: **all default store off**, including `desktop`/`full`. JSON overlay wins. `/bios/features` grows `store`, `store_persist_{memory,elf,usb}`, `store_pglite_{files,js,embed}`.
+Profiles: **store enable defaults on** (operator overlay `enable: false` to compile it out). `/bios/features` grows `store`, `store_persist_{memory,elf,usb}`, `store_pglite_{files,js,embed}`.
 
 Schema: `schemas/board-spec.schema.json` adds `kernel.store` with `additionalProperties: false` on **the store object** (same local rule as `tasking`). The parent `kernel` object stays open (`http`/`usb`/`settings` are already omitted from the sketch); adding store does not close them.
 
@@ -725,6 +732,8 @@ pub trait StorePort {
 | POST | `/bios/store/{uuid}/commit` | `{}` | `{ok}` |
 | POST | `/bios/store/{uuid}/rollback` | `{}` | `{ok}` |
 | POST | `/bios/store/{uuid}/close` | `{}` | unbind `{ok}` |
+| GET | `/bios/store/{uuid}/stat` | — | `{ok,uuid,purpose,persist,live,volume?,path?,bytes,format?,ready}` |
+| POST | `/bios/store/open` | `{dataDir}` | `{ok,uuid,ready,live}` (`usb://VOL` live-attach) |
 | GET | `/bios/store/{uuid}/dump` | — | dump JSON |
 | PUT | `/bios/store/{uuid}/load` | dump JSON | `{ok}` |
 
@@ -762,6 +771,7 @@ Error / success JSON (both backends, so `execute!JSON()` is stable):
 | `StoreExport` | uuid, volume [, rel] | USB key dump; `STORE-EXPORT {uuid}` |
 | `StoreImport` | volume, rel | `STORE-IMPORT {uuid}` |
 | `StoreList` | — | uuid + purpose + persist + rows |
+| `StoreStat` | uuid-or-purpose | `STORE-STAT {json}` — poll `ready`/`live` |
 
 Disabled store (`!kernel.store.enable`): `STORE-REFUSED` (fail closed), never a fake empty table. HTTP compiled out does **not** refuse HolyC `Store*` — UART dual-band REPL is a separate face (`KERNEL-API.md` is “same table”, not “HTTP must be compiled”). Instruction/output budgets already on `Program` apply. `RegisterEndpoint` remains the way to add *custom* HTTP; store is kernel-owned, not a HolyC-registered canned body.
 
@@ -833,7 +843,22 @@ struct PGLite {
     }
     JSON waitReady()() {
         save();
-        return m_ld.invoke("waitReady").execute!JSON();
+        Handle h = m_ld.invoke("waitReady").execute!Handle();
+        libwasm_await__void(h);
+        return JSON(h);
+    }
+    JSON stat()() { save(); return m_ld.invoke("stat").execute!JSON(); }
+    JSON statAsync()() {
+        save();
+        Handle h = m_ld.invoke("statAsync").execute!Handle();
+        libwasm_await__void(h);
+        return JSON(h);
+    }
+    JSON queryAsync()(string sql, string params_json = "[]") {
+        save();
+        Handle h = m_ld.invoke("queryAsync", sql, params_json).execute!Handle();
+        libwasm_await__void(h);
+        return JSON(h);
     }
     JSON dump()() { save(); return m_ld.invoke("dump").execute!JSON(); }
     JSON load()(string json) { save(); return m_ld.invoke("load", json).execute!JSON(); }
@@ -879,7 +904,7 @@ Do **not** add `store_query` to `KernelPort`. That trait is fetch / HolyC / regi
 
 ### Guest ELF / `start_ops`
 
-Unchanged. `g6b-wasm::jit::start_ops` stays the MVP encoder VGA face (`jit.rs:641`). B91 already forbids growing it to `Object_Call`. PGlite wasm is not an import on that module. `__ui_dom` is not a row store. `g6b-wasm` also cannot run Electric because `MAX_MEMORY_PAGES = 32` (2 MiB) ≪ Electric’s 2048-page / 128 MiB initial memory.
+Unchanged. `g6b-wasm::jit::start_ops` stays the MVP encoder VGA face (`jit.rs:641`). B91 already forbids growing it to `Object_Call`. PGlite wasm is not an import on that module. `__ui_dom` is not a row store. `g6b-wasm` also cannot run Electric because `MAX_MEMORY_PAGES = 64` (4 MiB) ≪ Electric’s 2048-page / 128 MiB initial memory.
 
 ### Verification (`g6b.py check`)
 
@@ -949,7 +974,7 @@ Default schema when `StoreOpen("registry")` on a blank memory store: **no tables
 
 ### 1. Run Electric PGlite wasm in `g6b-wasm`
 
-**Rejected.** Decoder cap is 1 MiB (`MAX_MODULE_BYTES`, `binary.rs:37`). Memory cap is 32 pages = 2 MiB (`MAX_MEMORY_PAGES`, `binary.rs:38`). Interpreter is an i32 machine plus bounded libwasm imports; emscripten Postgres needs a large linear memory (Electric default initial 2048 pages = 128 MiB), WASI/emscripten syscalls, and a second `initdb` wasm since v0.4. Guest `start_ops` must not grow to `Object_Call`. Pretending this works would violate the SoC/firmware honesty rule.
+**Rejected.** Decoder cap is 1 MiB (`MAX_MODULE_BYTES`, `binary.rs:37`). Memory cap is 64 pages = 4 MiB (`MAX_MEMORY_PAGES`, `binary.rs:38`). Interpreter is an i32 machine plus bounded libwasm imports; emscripten Postgres needs a large linear memory (Electric default initial 2048 pages = 128 MiB), WASI/emscripten syscalls, and a second `initdb` wasm since v0.4. Guest `start_ops` must not grow to `Object_Call`. Pretending this works would violate the SoC/firmware honesty rule.
 
 ### 2. New `pglite_*` wasm import family
 
@@ -1009,7 +1034,7 @@ Feature flags = BoardSpec `kernel.store.*` (compile gates, not runtime chrome fl
 | Stage | Contents | Default |
 |---|---|---|
 | **S0** | submodule + pins + skip compile | inert |
-| **S1** | `StoreCfg` + `g6b-pglite` (parser → DML → tx) + tests | enable=false |
+| **S1** | `StoreCfg` + `g6b-pglite` (parser → DML → tx) + tests | **enable=true** (overlay `false` to compile out) |
 | **S2** | `/bios/store` + HTTP cap gate + HolyC builtins | overlay to arm |
 | **S3** | lodash `HostDispatch` + intern + `libwasm.pglite` | D wrap live on **BrowserSession only** |
 | **S4** | FileServe dist (incl. `initdb.wasm`) + optional native Electric | files/embed false |
@@ -1024,8 +1049,8 @@ Feature flags = BoardSpec `kernel.store.*` (compile gates, not runtime chrome fl
 ## Open Questions
 
 1. ~~Native-browser D wrap in S3 vs S4.~~ **Decided:** S3 is BrowserSession-complete. Native `kernel.ts` intern + identity-checked `attempt`/`invoke`; Promise → `NotImplemented("async")`. Native D `execute!JSON` is S5+ (`queryAsync` / B68). lang=ts `fetch` may await `/bios/store` in S4.
-2. **Default overlay on `profile=full`.** Design leaves store **off** so minimal configs and today’s fixtures stay green. A follow-up may arm `g6lc64-virt.json` once tests exist.
-3. ~~`elf://` dump compiler.~~ **Decided:** fixture JSON → `g6b.py store-embed` → `__g6b_store_dump` rodata. Not npm wasm. `persist.elf` is independent of `pglite.embed`. Stub in PR1; real emit in PR3c. Missing dump is ELF/link or `PersistUnarmed`, not `BoardSpec::check()`.
+2. ~~Default overlay on `profile=full`.~~ **Decided:** `kernel.store.enable` defaults **on** (purposes `["registry"]`). Overlay `"store":{"enable":false}` compiles it out. Fixtures stay green because S1 does not yet wire HTTP/HolyC.
+3. ~~`elf://` dump compiler.~~ **Landed (PR3c):** fixture JSON → `g6b.py store-embed` → `__g6b_store_dump` rodata. Not npm wasm. `persist.elf` is independent of `pglite.embed`. Missing dump is `PersistUnarmed` at `elf://` (or ELF/link error if `G6B_STORE_DUMP` is set and absent), not `BoardSpec::check()`.
 4. **HolyC elevation persistence** for `bios.store` is explicitly undetermined in `plan-iframe.md`; this design does not pick `once` vs `session`.
 5. **npm pin 0.5.8** is the live `package.json` at time of writing; freeze SHA-256 when S0 lands. SPDX for the TS package is **Apache-2.0** (not OR). Postgres wasm in dist is PostgreSQL License in NOTICE.
 
@@ -1157,7 +1182,7 @@ Ordered. Each PR stays green with `python tools/g6b.py check`. No LDC rebuild un
 4. **Submodule path `g6lc_bios/pglite` (not kernel-spec).** Dist will be served. TS sources are tier-U **Apache-2.0**. Postgres wasm inside dist is PostgreSQL License in NOTICE, not an SPDX OR. First-party crate is MIT.
 5. **Git submodule cannot fetch dist wasm.** Pin npm `@electric-sql/pglite` tarball SHA-256; extract `pglite.wasm` + **`initdb.wasm`** + `pglite.data` + `index.js` to gitignored `.tools/pglite-dist/`. Never `include_bytes!` a missing git `dist/`.
 6. **`pglite.embed` default off** (Electric wasm+initdb+data, 16 MiB cap). Needs `store.enable` + dist bytes at **link** time, **not** `pglite.files`. FileServe `/ui/pglite/*` is the host serve path. **`persist.elf` is a separate first-party dump blob** (`__g6b_store_dump` via `g6b.py store-embed`); it must not require `pglite.embed`. `check()` never probes files on disk.
-7. **Store BoardSpec default off** on every profile. Overlay to arm. `apply_store` fills `["registry"]` when enable and **purposes** empty. All budget knobs are on `StoreCfg`. `check()` is flag-to-flag only (no disk probe). Minimal configs elaborate.
+7. **Store BoardSpec default on.** Overlay `"enable": false` to compile out. `apply_store` fills `["registry"]` when enable and **purposes** empty. All budget knobs are on `StoreCfg`. `check()` is flag-to-flag only (no disk probe). Minimal configs elaborate.
 8. **Persistence fail closed.** Memory is the working copy and is **deletable** (`drop`). `elf://` hydrates a seed. USB is **key FileMgr import/export** of a uuid dump, not flash firmware. Unarmed → error, no silent memory fallback; no `idb://` / `file://` / netdev. Instances are **UUID-led**; purpose is the BIOS-UI / later-iframe ask. See [`g6b-store-instances.md`](g6b-store-instances.md).
 9. **D API:** implement `query(sql, params_json_array)`, `exec`, `begin`/`commit`/`rollback`, `close`, `waitReady` (sync ready), `dump`/`load`, named `dataDir`. Refuse tagged `sql`, `transaction(fn)`, `listen`/`unlisten` in v1. One JSON array so `MAX_PARAMS=5` holds.
 10. **Sync ldexec.** First-party engine is synchronous. Do not wrap Electric Promises in `execute!JSON()`. Native D wrap that would return a Promise is `NotImplemented("async")`. S3 is BrowserSession-complete only.

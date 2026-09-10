@@ -117,6 +117,12 @@ pub struct Smoke {
     pub vio_fb_h: u32,
     /// `SET_SCANOUT` completed.
     pub vio_scanout: bool,
+    /// Tablet eventq was DRIVER_OK / QUEUE_READY.
+    pub tab_ready: bool,
+    /// Posted tablet event buffers the device still holds.
+    pub tab_bufs: usize,
+    pub tab_qused: u64,
+    pub tab_poked: bool,
     /// `RESOURCE_FLUSH` count.
     pub vio_flushes: u32,
     /// Compact persist magic (`G6CP`) when `__ui_cap` is allocated.
@@ -181,6 +187,43 @@ pub struct DirtyTile {
     pub h: i32,
 }
 
+/// Live svelte-d engine the exec model can ask for a fresh Canvas32 when
+/// the guest UART `Ui` command runs. Implemented in `g6b-kernel` so this
+/// crate does not depend on the browser session.
+pub trait WebFeed {
+    fn initial(&mut self) -> Option<GuestWebPresent>;
+    /// UART `Ui` ≡ UI-hart tick: restyle + GLES2 pack for the next `VioPaint`.
+    fn on_guest_ui(&mut self) -> Option<GuestWebPresent>;
+    /// virtio-input `EV_KEY` (Linux `KEY_*` / `BTN_*` code, press=true).
+    /// Default ignore.
+    fn on_guest_key(&mut self, _code: u16, _pressed: bool) -> Option<GuestWebPresent> {
+        let _ = (_code, _pressed);
+        None
+    }
+    /// virtio-input `EV_ABS` (Linux `ABS_*` axis, tablet 0..=`VIO_ABS_MAX`).
+    /// Default ignore.
+    fn on_guest_abs(&mut self, _axis: u16, _value: u32) -> Option<GuestWebPresent> {
+        let _ = (_axis, _value);
+        None
+    }
+    /// virtio-input `EV_REL` (Linux `REL_*` axis, signed pixel delta).
+    /// Default ignore.
+    fn on_guest_rel(&mut self, _axis: u16, _value: i32) -> Option<GuestWebPresent> {
+        let _ = (_axis, _value);
+        None
+    }
+    /// Tablet ABS pair (`ABS_X`, `ABS_Y`) the exec-model poke may write.
+    /// Default none — dummy (0,0) still drains the tablet eventq.
+    fn hint_abs(&self) -> Option<(u32, u32)> {
+        None
+    }
+    /// Guest `trap_timer` ≡ UI-hart `tick`. Return `None` when skip-if-clean
+    /// (no CSS dirty / no due rAF) so `VioPaint` does not TRANSFER.
+    fn on_guest_tick(&mut self) -> Option<GuestWebPresent> {
+        None
+    }
+}
+
 /// Like [`run_module`] with an optional web-engine present (compact persist).
 pub fn run_module_web(
     spec: &BoardSpec,
@@ -189,6 +232,42 @@ pub fn run_module_web(
     hartid: u64,
     web: Option<&GuestWebPresent>,
 ) -> Result<Smoke, String> {
+    run_module_web_inner(spec, module, entry, hartid, b'V', web, None)
+}
+
+/// Same as [`run_module_web`] but UART `Ui` re-queries [`WebFeed::on_guest_ui`]
+/// and re-injects `__ui_cap` so skip-if-clean is not stuck on the boot frame.
+pub fn run_module_web_feed(
+    spec: &BoardSpec,
+    module: &Module,
+    entry: u64,
+    hartid: u64,
+    feed: &mut dyn WebFeed,
+) -> Result<Smoke, String> {
+    run_module_web_feed_kick(spec, module, entry, hartid, b'V', feed)
+}
+
+/// Same as [`run_module_web_feed`] with a mailbox doorbell byte (`U` = Ui).
+pub fn run_module_web_feed_kick(
+    spec: &BoardSpec,
+    module: &Module,
+    entry: u64,
+    hartid: u64,
+    kick: u8,
+    feed: &mut dyn WebFeed,
+) -> Result<Smoke, String> {
+    run_module_web_inner(spec, module, entry, hartid, kick, None, Some(feed))
+}
+
+fn run_module_web_inner(
+    spec: &BoardSpec,
+    module: &Module,
+    entry: u64,
+    hartid: u64,
+    kick: u8,
+    web: Option<&GuestWebPresent>,
+    feed: Option<&mut dyn WebFeed>,
+) -> Result<Smoke, String> {
     let (insns, rodata) = module.to_words(entry)?;
     let mut image = Vec::with_capacity(insns.len() * 4 + rodata.len());
     for w in insns {
@@ -196,13 +275,15 @@ pub fn run_module_web(
     }
     image.extend_from_slice(&rodata);
     let memsz = payload_memsz(image.len() as u64, module.n_harts(), module.extra_bss());
+    let uart_ui_pc = module.label_addr(entry, "uart_ui").unwrap_or(0);
+    let trap_timer_pc = module.label_addr(entry, "trap_timer").unwrap_or(0);
     run_with_kick(
         spec,
         &image,
         entry,
         memsz,
         hartid,
-        b'V',
+        kick,
         spec.wants_virtio_gpu(),
         true,
         module.vio_bss_addr(entry).unwrap_or(0),
@@ -210,6 +291,9 @@ pub fn run_module_web(
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
         web,
+        feed,
+        uart_ui_pc,
+        trap_timer_pc,
     )
 }
 
@@ -241,6 +325,9 @@ pub fn run_module_kick(
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
         None,
+        None,
+        0,
+        0,
     )
 }
 
@@ -268,6 +355,9 @@ pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Resul
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
         None,
+        None,
+        0,
+        0,
     )
 }
 
@@ -296,6 +386,9 @@ pub fn run_module_bare(spec: &BoardSpec, module: &Module, entry: u64) -> Result<
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
         None,
+        None,
+        0,
+        0,
     )
 }
 
@@ -324,6 +417,9 @@ pub fn run(
         0,
         0,
         None,
+        None,
+        0,
+        0,
     )
 }
 
@@ -346,6 +442,9 @@ fn run_with_kick(
     scan_fb_bytes: u64,
     cap_base: u64,
     web: Option<&GuestWebPresent>,
+    mut feed: Option<&mut dyn WebFeed>,
+    uart_ui_pc: u64,
+    trap_timer_pc: u64,
 ) -> Result<Smoke, String> {
     let xlen = spec.isa.xlen;
     if xlen != 32 && xlen != 64 {
@@ -358,6 +457,10 @@ fn run_with_kick(
     ram[..image.len()].copy_from_slice(image);
     if let Some(web) = web {
         inject_web_present(&mut ram, entry, scan_fb_base, cap_base, web);
+    } else if let Some(feed) = feed.as_mut() {
+        if let Some(present) = feed.initial() {
+            inject_web_present(&mut ram, entry, scan_fb_base, cap_base, &present);
+        }
     }
     let mut x = [0u64; 32];
     x[10] = hartid; // a0 hartid
@@ -527,6 +630,20 @@ fn run_with_kick(
         if take_pending_sei(xlen, &mut pc, &mut csr) {
             continue;
         }
+        if uart_ui_pc != 0 && pc == uart_ui_pc {
+            if let Some(feed) = feed.as_mut() {
+                if let Some(present) = feed.on_guest_ui() {
+                    inject_web_present(&mut ram, entry, scan_fb_base, cap_base, &present);
+                }
+            }
+        }
+        if trap_timer_pc != 0 && pc == trap_timer_pc {
+            if let Some(feed) = feed.as_mut() {
+                if let Some(present) = feed.on_guest_tick() {
+                    inject_web_present(&mut ram, entry, scan_fb_base, cap_base, &present);
+                }
+            }
+        }
         let w = match fetch_u32(&ram, entry, pc) {
             Some(w) => w,
             None => {
@@ -560,9 +677,41 @@ fn run_with_kick(
                 // Input before UART: the canned key lands in INP_KQ early so a
                 // `Keys` command later in the UART sequence finds it queued
                 // (QEMU `sendkey` arrives asynchronously the same way).
-                if host_inp_kick(&mut csr, &mut ram, entry)
-                    && take_pending_sei(xlen, &mut pc, &mut csr)
-                {
+                let evs = host_inp_kick(&mut csr, &mut ram, entry);
+                let had_inp = !evs.is_empty();
+                if had_inp {
+                    if let Some(feed) = feed.as_mut() {
+                        let mut last = None;
+                        for ev in evs {
+                            if let Some(p) = feed_inp(&mut **feed, ev) {
+                                last = Some(p);
+                            }
+                        }
+                        if let Some(p) = last {
+                            inject_web_present(&mut ram, entry, scan_fb_base, cap_base, &p);
+                        }
+                    }
+                }
+                // Same Halt as keys: after InpDrain the guest often stays in
+                // the UART poll loop and never WFI-Halts again for a second
+                // poke. KEY SEQ is unchanged; tablet is EV_ABS only.
+                let hint = feed.as_ref().and_then(|f| f.hint_abs());
+                let tabs = host_inp_tab_kick(&mut csr, &mut ram, entry, hint);
+                let had_tab = !tabs.is_empty();
+                if had_tab {
+                    if let Some(feed) = feed.as_mut() {
+                        let mut last = None;
+                        for ev in tabs {
+                            if let Some(p) = feed_inp(&mut **feed, ev) {
+                                last = Some(p);
+                            }
+                        }
+                        if let Some(p) = last {
+                            inject_web_present(&mut ram, entry, scan_fb_base, cap_base, &p);
+                        }
+                    }
+                }
+                if (had_inp || had_tab) && take_pending_sei(xlen, &mut pc, &mut csr) {
                     continue;
                 }
                 if host_uart_kick(&mut csr) && take_pending_sei(xlen, &mut pc, &mut csr) {
@@ -717,6 +866,10 @@ fn done(
         vio_fb_w: csr.vio_res_w,
         vio_fb_h: csr.vio_res_h,
         vio_scanout: csr.vio_scanout,
+        tab_ready: csr.tab_ready,
+        tab_bufs: csr.tab_bufs.len(),
+        tab_qused: csr.tab_qused,
+        tab_poked: csr.tab_poked,
         vio_flushes: csr.vio_flushes,
         cap_magic: if csr.cap_base != 0 {
             load_u32(ram, base, csr.cap_base).unwrap_or(0)
@@ -882,6 +1035,22 @@ struct Csr {
     inp_bufs: Vec<u16>,
     /// Host event injection latch (one canned EV_KEY per run).
     inp_poked: bool,
+    /// Modelled virtio-tablet at slot 3 (`-device virtio-tablet-device`).
+    /// Slot 2 is unused so PLIC source 3 remains the mailbox. Irq = 1+3 → 4.
+    tab_status: u32,
+    tab_feat_sel: u32,
+    tab_drv_sel: u32,
+    tab_qsel: u32,
+    tab_qnum: u32,
+    tab_qdesc: u64,
+    tab_qavail: u64,
+    tab_qused: u64,
+    tab_ready: bool,
+    tab_isr: u32,
+    tab_used_idx: u16,
+    tab_avail_seen: u16,
+    tab_bufs: Vec<u16>,
+    tab_poked: bool,
     /// Modelled pmode geometry (BoardSpec `kernel.gr.w/h`).
     vio_disp_w: u32,
     vio_disp_h: u32,
@@ -1487,6 +1656,11 @@ fn vio_load(csr: &Csr, addr: u64) -> u32 {
     if slot == 1 && csr.vio_inp {
         return inp_load(csr, off % VIO_MMIO_STEP, VIO_DEV_INPUT);
     }
+    // Slot 2 is left empty so PLIC source 3 stays the mailbox
+    // (`loopback.irq`). Tablet is slot 3 (irq 4).
+    if slot == 3 && csr.vio_inp {
+        return tab_load(csr, off % VIO_MMIO_STEP, VIO_DEV_INPUT);
+    }
     if slot != 0 || !csr.vio_gpu {
         return 0;
     }
@@ -1521,6 +1695,10 @@ fn vio_store(csr: &mut Csr, ram: &mut [u8], base: u64, addr: u64, v: u32) {
     let slot = off / VIO_MMIO_STEP;
     if slot == 1 && csr.vio_inp {
         inp_store(csr, ram, base, off % VIO_MMIO_STEP, v);
+        return;
+    }
+    if slot == 3 && csr.vio_inp {
+        tab_store(csr, ram, base, off % VIO_MMIO_STEP, v);
         return;
     }
     if slot != 0 || !csr.vio_gpu {
@@ -1667,14 +1845,36 @@ fn inp_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
     }
 }
 
+/// One `virtio_input_event` the host poke wrote into a posted buffer.
+#[derive(Clone, Copy, Debug)]
+struct InpEv {
+    ty: u16,
+    code: u16,
+    value: u32,
+}
+
+fn feed_inp(feed: &mut dyn WebFeed, ev: InpEv) -> Option<GuestWebPresent> {
+    use crate::encode::{VIO_INP_EV_ABS, VIO_INP_EV_KEY, VIO_INP_EV_REL};
+    match u32::from(ev.ty) {
+        VIO_INP_EV_KEY => feed.on_guest_key(ev.code, ev.value != 0),
+        VIO_INP_EV_ABS => feed.on_guest_abs(ev.code, ev.value),
+        VIO_INP_EV_REL => feed.on_guest_rel(ev.code, ev.value as i32),
+        _ => None,
+    }
+}
+
 /// Inject a canned `sendkey` burst into the posted eventq buffers — models
 /// QEMU `sendkey a; sendkey down; sendkey ret` at idle (press events only;
 /// QEMU also emits releases, which `InpDrain`/`DomNav` ignore by value).
 /// Fills the desc buffers, publishes used elems and raises PLIC irq
 /// 1+slot(=2) for the virtio-mmio slot.
-fn host_inp_kick(csr: &mut Csr, ram: &mut [u8], base: u64) -> bool {
+///
+/// SEQ is EV_KEY only (VGA `DomNav` tests). Pointer `EV_ABS`/`EV_REL` use
+/// the same `InpEv` / [`WebFeed`] dispatcher when a later poke writes them;
+/// do not append tablet events to this burst.
+fn host_inp_kick(csr: &mut Csr, ram: &mut [u8], base: u64) -> Vec<InpEv> {
     if !csr.vio_inp || csr.inp_poked || !csr.inp_ready || csr.inp_qused == 0 {
-        return false;
+        return Vec::new();
     }
     csr.inp_poked = true;
     // virtio_input_event {u16 type=EV_KEY, u16 code, u32 value}: 'a' (30),
@@ -1682,7 +1882,7 @@ fn host_inp_kick(csr: &mut Csr, ram: &mut [u8], base: u64) -> bool {
     // activation in one burst.
     const SEQ: [(u16, u32); 3] = [(30, 1), (108, 1), (28, 1)];
     let used = csr.inp_qused;
-    let mut pushed = false;
+    let mut out = Vec::new();
     for &(code, val) in &SEQ {
         let Some(head) = csr.inp_bufs.pop() else {
             break;
@@ -1695,14 +1895,156 @@ fn host_inp_kick(csr: &mut Csr, ram: &mut [u8], base: u64) -> bool {
         let _ = store_u32(ram, base, used + 4 + u64::from(ui) * 8, u32::from(head));
         let _ = store_u32(ram, base, used + 8 + u64::from(ui) * 8, 8);
         csr.inp_used_idx = csr.inp_used_idx.wrapping_add(1);
-        pushed = true;
+        out.push(InpEv {
+            ty: 1,
+            code,
+            value: val,
+        });
     }
-    if pushed {
+    if !out.is_empty() {
         let _ = store_u32(ram, base, used, u32::from(csr.inp_used_idx) << 16);
         csr.inp_isr |= 1;
         csr.plic_pending |= 1 << 2;
     }
-    pushed
+    out
+}
+
+fn tab_load(csr: &Csr, reg: u64, dev_id: u32) -> u32 {
+    use crate::encode::{VIO_F_VERSION_1, VIO_MAGIC};
+    match reg {
+        0x00 => VIO_MAGIC,
+        0x04 => 2,
+        0x08 => dev_id,
+        0x10 => {
+            if csr.tab_feat_sel == 1 {
+                VIO_F_VERSION_1
+            } else {
+                0
+            }
+        }
+        0x14 => csr.tab_feat_sel,
+        0x24 => csr.tab_drv_sel,
+        0x30 => csr.tab_qsel,
+        0x34 => 8,
+        0x38 => csr.tab_qnum,
+        0x44 => u32::from(csr.tab_ready),
+        0x60 => csr.tab_isr,
+        0x70 => csr.tab_status,
+        _ => 0,
+    }
+}
+
+fn tab_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
+    match reg {
+        0x14 => csr.tab_feat_sel = v,
+        0x24 => csr.tab_drv_sel = v,
+        0x30 => csr.tab_qsel = v,
+        0x38 => csr.tab_qnum = v,
+        0x44 => csr.tab_ready = v != 0,
+        0x50 => {
+            if csr.tab_ready && csr.tab_qsel == 0 && csr.tab_qdesc != 0 {
+                let avail = csr.tab_qavail;
+                let idx = load_u32(ram, base, avail)
+                    .map(|w| (w >> 16) as u16)
+                    .unwrap_or(0);
+                let mut n = idx.wrapping_sub(csr.tab_avail_seen).min(8);
+                while n > 0 {
+                    n -= 1;
+                    let ri = csr.tab_avail_seen % 8;
+                    let word = load_u32(ram, base, avail + 4 + u64::from(ri & !1) * 2).unwrap_or(0);
+                    let head = ((word >> ((ri & 1) * 16)) & 0xffff) as u16;
+                    csr.tab_bufs.push(head);
+                    csr.tab_avail_seen = csr.tab_avail_seen.wrapping_add(1);
+                }
+            }
+        }
+        0x64 => csr.tab_isr &= !v,
+        0x70 => {
+            csr.tab_status = v;
+            if v == 0 {
+                csr.tab_qnum = 0;
+                csr.tab_ready = false;
+                csr.tab_isr = 0;
+                csr.tab_used_idx = 0;
+                csr.tab_avail_seen = 0;
+                csr.tab_bufs.clear();
+                csr.tab_poked = false;
+            }
+        }
+        0x80 => csr.tab_qdesc = (csr.tab_qdesc & !0xffff_ffff) | u64::from(v),
+        0x84 => csr.tab_qdesc = (csr.tab_qdesc & 0xffff_ffff) | (u64::from(v) << 32),
+        0x90 => csr.tab_qavail = (csr.tab_qavail & !0xffff_ffff) | u64::from(v),
+        0x94 => csr.tab_qavail = (csr.tab_qavail & 0xffff_ffff) | (u64::from(v) << 32),
+        0xa0 => csr.tab_qused = (csr.tab_qused & !0xffff_ffff) | u64::from(v),
+        0xa4 => csr.tab_qused = (csr.tab_qused & 0xffff_ffff) | (u64::from(v) << 32),
+        _ => {}
+    }
+}
+
+/// Inject a canned virtio-tablet packet into the tablet eventq: `ABS_X`,
+/// `ABS_Y`, then `BTN_LEFT` press (QEMU VNC click). Does not change the
+/// keyboard KEY SEQ and does not touch `INP_KQ` (`TabDrain` re-posts).
+/// `abs` is the feed hint (svelte-d tab hit in tablet units) or (0,0).
+fn host_inp_tab_kick(
+    csr: &mut Csr,
+    ram: &mut [u8],
+    base: u64,
+    abs: Option<(u32, u32)>,
+) -> Vec<InpEv> {
+    use crate::encode::{VIO_INP_EV_ABS, VIO_INP_EV_KEY};
+    use crate::vio::{VIO_ABS_X, VIO_ABS_Y, VIO_BTN_LEFT};
+    if !csr.vio_inp || csr.tab_poked || !csr.tab_ready || csr.tab_qused == 0 {
+        return Vec::new();
+    }
+    if csr.tab_bufs.is_empty() {
+        return Vec::new();
+    }
+    csr.tab_poked = true;
+    let (ax, ay) = abs.unwrap_or((0, 0));
+    let seq = [
+        InpEv {
+            ty: VIO_INP_EV_ABS as u16,
+            code: VIO_ABS_X as u16,
+            value: ax,
+        },
+        InpEv {
+            ty: VIO_INP_EV_ABS as u16,
+            code: VIO_ABS_Y as u16,
+            value: ay,
+        },
+        InpEv {
+            ty: VIO_INP_EV_KEY as u16,
+            code: VIO_BTN_LEFT as u16,
+            value: 1,
+        },
+    ];
+    let used = csr.tab_qused;
+    let mut out = Vec::new();
+    for ev in seq {
+        let Some(head) = csr.tab_bufs.pop() else {
+            break;
+        };
+        let daddr =
+            load_u64(ram, base, csr.tab_qdesc.wrapping_add(u64::from(head) * 16)).unwrap_or(0);
+        let _ = store_u32(
+            ram,
+            base,
+            daddr,
+            u32::from(ev.ty) | (u32::from(ev.code) << 16),
+        );
+        let _ = store_u32(ram, base, daddr + 4, ev.value);
+        let ui = csr.tab_used_idx % 8;
+        let _ = store_u32(ram, base, used + 4 + u64::from(ui) * 8, u32::from(head));
+        let _ = store_u32(ram, base, used + 8 + u64::from(ui) * 8, 8);
+        csr.tab_used_idx = csr.tab_used_idx.wrapping_add(1);
+        out.push(ev);
+    }
+    if !out.is_empty() {
+        let _ = store_u32(ram, base, used, u32::from(csr.tab_used_idx) << 16);
+        csr.tab_isr |= 1;
+        csr.plic_pending |= 1 << 4;
+    }
+    out
 }
 
 /// Walk one descriptor chain (≤8): OUT descriptors carry `ctrl_hdr.type`, the
@@ -3802,6 +4144,9 @@ mod tests {
         let s = run_module(&spec, &m, 0x8020_0000).unwrap();
         assert!(s.console.contains("VIRTIO-INPUT-OK"), "{}", s.console);
         assert!(!s.console.contains("VIRTIO-INPUT-FAIL"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-TABLET-OK"), "{}", s.console);
+        assert!(!s.console.contains("VIRTIO-TABLET-FAIL"), "{}", s.console);
+        assert_eq!(s.console.matches("TAB\n").count(), 3, "{}", s.console);
         // The drained EV_KEY event markers — the canned burst is
         // `sendkey a` + `sendkey down` + `sendkey ret` (press only).
         assert_eq!(s.console.matches("INP\n").count(), 3, "{}", s.console);
@@ -3847,6 +4192,22 @@ mod tests {
         );
         assert!(!s.console.contains("TRAP-"), "{}", s.console);
         assert!(matches!(s.halt, Halt::Wfi), "{:?}", s.halt);
+    }
+
+    #[test]
+    fn vio_tablet_eventq_full_profile() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        assert!(spec.wants_virtio_input());
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("VIRTIO-TABLET-OK"), "{}", s.console);
+        assert!(
+            s.tab_poked,
+            "tablet poke ready={} qused={:#x} bufs={} poked={}",
+            s.tab_ready, s.tab_qused, s.tab_bufs, s.tab_poked
+        );
+        assert_eq!(s.console.matches("TAB\n").count(), 3, "{}", s.console);
+        assert_eq!(s.console.matches("INP\n").count(), 3, "{}", s.console);
     }
 
     #[test]

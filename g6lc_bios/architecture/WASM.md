@@ -32,9 +32,12 @@ browser-ui/svelte-engine-ws/     dub.sdl wasm-eh cell
         Host BrowserSession runs the LDC cell only (no MVP fallback)
         /ui/ui.wasm is the same cell the native kernel.ts adapter instantiates
         out/bios-ui.js remains an all-profile compiler demonstration
-        B91b: guest_cell_scanout runs that cell on KernelHost (same Host
-              import set), packs Canvas32 + dirty tiles for guest VioPaint.
+        B91b: GuestCellLive WebFeed — UART Ui + mailbox U + trap_timer
+              (skip-if-clean UI-hart tick) + virtio-input KEY_* / tablet
+              EV_ABS (second DeviceID 18) / EV_REL / BTN_LEFT → svelte-d.
               start_ops stays the VGA glyph face — not Object_Call.
+        B91c: those events re-enter D delegates via jsCallback /
+              Listener::Delegate; shipped cell stays Listener::Cell.
 ```
 
 The local libwasm adaptation is **not** `kernel-spec/libwasm`.

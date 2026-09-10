@@ -23,6 +23,7 @@ g6b-kernel = { workspace = true }
 g6b-holyc = { workspace = true }
 g6b-elf = { workspace = true }
 g6b-http = { workspace = true }
+g6b-pglite = { workspace = true }
 g6b-css = { workspace = true }
 g6b-gr = { workspace = true }
 g6b-img = { workspace = true }

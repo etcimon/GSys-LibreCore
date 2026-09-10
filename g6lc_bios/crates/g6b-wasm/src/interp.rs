@@ -7,7 +7,8 @@
 
 use crate::asyncify::{Asyncify, Step};
 use crate::binary::{
-    analyze, func_type, numeric_is_unary, BodyInfo, Instr, Module, ValType, MAX_MEMORY_PAGES,
+    analyze, func_type, numeric_is_unary, BodyInfo, Instr, Module, TryTableCatch, ValType,
+    MAX_MEMORY_PAGES,
 };
 use crate::{
     LibwasmValue, ObjectTable, IMPORT_ADD_EVENT_LISTENER, IMPORT_APPEND_CHILD, IMPORT_AWAIT,
@@ -148,6 +149,14 @@ pub trait Host {
     fn throw_op(&mut self, slot: i32) -> Result<(), String> {
         let _ = slot;
         Ok(())
+    }
+    /// BIOS UI JIT call stack at a wasm-eh `throw` (callee first).
+    fn note_throw_stack(&mut self, frames: &[String]) {
+        let _ = frames;
+    }
+    /// JS `TypeError` / `DOMException` thrown from an import (WebIDL `[Throws]`).
+    fn note_js_exception(&mut self, err: &str) {
+        let _ = err;
     }
     /// `env.catch` — return 1 if `slot` was rejected (`WasmCatch`
     /// correlate), 0 otherwise. Default always returns 0.
@@ -537,6 +546,41 @@ pub trait Host {
     fn cancel_animation_frame(&mut self, id: i32) -> Result<(), String> {
         self.clear_timeout(id)
     }
+
+    /// `env.libwasm_set__function(name, ctx, ptr)` — named D delegate so JS
+    /// can re-enter via `jsCallback` / `__indirect_function_table.get(ptr)`.
+    fn set_function(&mut self, name: &str, ctx: i32, ptr: i32) -> Result<(), String> {
+        let _ = (name, ctx, ptr);
+        Ok(())
+    }
+    fn unset_function(&mut self, name: &str) -> Result<(), String> {
+        let _ = name;
+        Ok(())
+    }
+    fn get_function(&self, name: &str) -> Option<(i32, i32)> {
+        let _ = name;
+        None
+    }
+
+    /// `env.Object_Call_EventHandler__void(handle, prop, defined, ctx, ptr)`.
+    /// `prop` is `onclick` / `click`; the host stores `(ctx, ptr)` for
+    /// `jsCallback` re-entry. Default no-op.
+    fn set_event_handler(
+        &mut self,
+        handle: i32,
+        prop: &str,
+        defined: bool,
+        ctx: i32,
+        ptr: i32,
+    ) -> Result<(), String> {
+        let _ = (handle, prop, defined, ctx, ptr);
+        Ok(())
+    }
+    /// `env.Object_Getter__EventHandler` readback of a stored `(ctx, ptr)`.
+    fn get_event_handler(&self, handle: i32, prop: &str) -> Option<(i32, i32)> {
+        let _ = (handle, prop);
+        None
+    }
 }
 
 /// DOM host used by the BIOS browser.
@@ -620,9 +664,15 @@ impl Host for DomHost<'_> {
 /// Accepts either `() -> ()` (legacy test modules) or `(i32) -> ()` (libwasm
 /// Spa modules that take the heap base as a pointer). The `i32` argument is
 /// the `__heap_base` global export when present, otherwise 0.
+/// True when a D abort stub (`{unreachable; end}` via `_d_throw`) became an
+/// unhandled wasm-eh throw. `run_start` fail-softs this after asyncify rewind
+/// so Flatten-deleted `catch (Exception e) {}` still lets `_start` finish.
+pub fn is_unhandled_d_abort(err: &str) -> bool {
+    err.starts_with("unhandled wasm exception")
+}
+
 pub fn run_start(m: &Module, host: &mut impl Host) -> Result<(), String> {
-    const ASYNCIFY_STACK_SIZE: u32 = 4096;
-    const ASYNCIFY_STEP_LIMIT: u32 = 4;
+    const ASYNCIFY_STEP_LIMIT: u32 = 256;
 
     let idx = m
         .exports
@@ -649,22 +699,21 @@ pub fn run_start(m: &Module, host: &mut impl Host) -> Result<(), String> {
     };
 
     if let Ok(a) = Asyncify::new(&m) {
-        let data = heap_base as u32;
-        let stack_end = data + ASYNCIFY_STACK_SIZE;
-        let needed = (stack_end as usize).saturating_sub(m.memory.len());
-        if needed > 0 {
-            let pages = ((needed + 65535) / 65536) as u32;
-            m.mem_pages += pages;
-            m.memory
-                .resize(m.memory.len() + (pages as usize) * 65536, 0);
-        }
+        let (data, stack_end) = crate::reserve_asyncify_scratch(&mut m, heap_base as u32);
         let mut step = a.step(&mut m, idx, &args, data, stack_end, host)?;
         for _ in 0..ASYNCIFY_STEP_LIMIT {
             match step {
                 Step::Done(_) => return Ok(()),
                 Step::Sleeping { slot, .. } => {
                     host.resolve_slot(slot)?;
-                    step = a.resume(&mut m, idx, &args, data, stack_end, host)?;
+                    step = match a.resume(&mut m, idx, &args, data, stack_end, host) {
+                        Ok(s) => s,
+                        // Flatten ate ready()'s catch; D abort-on-throw after
+                        // rewind is the empty `catch (Exception e)` that was
+                        // supposed to swallow parseJSON.
+                        Err(e) if is_unhandled_d_abort(&e) => return Ok(()),
+                        Err(e) => return Err(e),
+                    };
                 }
             }
         }
@@ -739,9 +788,11 @@ pub fn run_with_fuel_mut(
         elem_dropped,
         data_dropped,
         caught: None,
+        pending_throw: None,
         asyncify,
         asyncify_data,
         string_pool_next,
+        call_stack: Vec::new(),
     };
     let results = rt.invoke(idx, &value_args, 0)?;
     // Persist mutable globals and memory so asyncify / multi-step calls see
@@ -751,6 +802,10 @@ pub fn run_with_fuel_mut(
     let final_globals = std::mem::take(&mut rt.globals);
     drop(rt);
     m.memory = mem;
+    m.mem_pages = (m.memory.len() / 65536) as u32;
+    if m.max_mem_pages.is_some_and(|max| max < m.mem_pages) {
+        m.max_mem_pages = Some(m.mem_pages.max(MAX_MEMORY_PAGES));
+    }
     for (g, v) in m.globals.iter_mut().zip(final_globals) {
         g.value = v.into_raw();
     }
@@ -800,9 +855,36 @@ struct Runtime<'a, H> {
     elem_dropped: Vec<bool>,
     data_dropped: Vec<bool>,
     caught: Option<Exception>,
+    /// Callee wasm-eh throw with no local landing pad; `Call` retries it here.
+    pending_throw: Option<Exception>,
     asyncify: Option<Asyncify>,
     asyncify_data: u32,
     string_pool_next: u32,
+    /// Function indices of the live UI-JIT call stack (outermost first).
+    call_stack: Vec<u32>,
+}
+
+fn func_label(m: &Module, idx: u32) -> String {
+    m.exports
+        .iter()
+        .find(|e| e.kind == 0 && e.idx == idx)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| format!("f{idx}"))
+}
+
+fn throw_stack_suffix(frames: &[String]) -> String {
+    if frames.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n{}",
+            frames
+                .iter()
+                .map(|f| format!("  at {f}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    }
 }
 
 fn funcref_from_raw(raw: i32, func_count: usize) -> Result<Option<u32>, String> {
@@ -825,8 +907,12 @@ struct Frame {
     end: usize,
     is_loop: bool,
     is_try: bool,
+    /// Set once this `try` has entered `catch`; a new throw must not re-enter it.
+    in_catch: bool,
     catches: Vec<(u32, usize)>,
     catch_all: Option<usize>,
+    /// `try_table` catch dests (`br` labels relative to this frame).
+    table_catches: Vec<TryTableCatch>,
 }
 
 impl Clone for Frame {
@@ -838,8 +924,10 @@ impl Clone for Frame {
             end: self.end,
             is_loop: self.is_loop,
             is_try: self.is_try,
+            in_catch: self.in_catch,
             catches: self.catches.clone(),
             catch_all: self.catch_all,
+            table_catches: self.table_catches.clone(),
         }
     }
 }
@@ -890,7 +978,7 @@ impl<H: Host> Runtime<'_, H> {
                 | Instr::Loop(_)
                 | Instr::If(_)
                 | Instr::Try(_)
-                | Instr::TryTable(_) => depth += 1,
+                | Instr::TryTable { .. } => depth += 1,
                 Instr::End => {
                     if depth == 0 {
                         break;
@@ -914,9 +1002,55 @@ impl<H: Host> Runtime<'_, H> {
         pc: &mut usize,
     ) -> Result<(), String> {
         for i in (0..controls.len()).rev() {
+            if controls[i].in_catch {
+                continue;
+            }
+            if !controls[i].table_catches.is_empty() {
+                let mut dest = None;
+                let mut with_payload = true;
+                for c in &controls[i].table_catches {
+                    match c {
+                        TryTableCatch::Catch { tag: t, label } if *t == tag => {
+                            dest = Some(*label);
+                            with_payload = true;
+                            break;
+                        }
+                        TryTableCatch::CatchAll { label } => {
+                            dest = Some(*label);
+                            with_payload = false;
+                            break;
+                        }
+                        TryTableCatch::CatchRef { tag: t, .. } if *t == tag => {
+                            return Err("try_table catch_ref (exnref) is not executable".into());
+                        }
+                        TryTableCatch::CatchAllRef { .. } => {
+                            return Err("try_table catch_all_ref (exnref) is not executable".into());
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(label) = dest {
+                    // Binaryen writes catch dests with `getBreakIndex` before
+                    // pushing the try_table frame: label 0 is the parent block,
+                    // not the try_table (wasm-stack.cpp visitTryTable).
+                    let Some(target) = i.checked_sub(label as usize + 1) else {
+                        return Err("try_table catch label out of range".into());
+                    };
+                    let frame = controls[target].clone();
+                    stack.truncate(frame.height);
+                    if with_payload {
+                        stack.extend(&values);
+                    }
+                    controls.truncate(target);
+                    *pc = frame.end + 1;
+                    self.caught = Some(Exception { tag, values });
+                    return Ok(());
+                }
+            }
             if let Some(&(_, start)) = controls[i].catches.iter().find(|(t, _)| *t == tag) {
                 let frame = controls[i].clone();
-                controls.truncate(i);
+                controls.truncate(i + 1);
+                controls[i].in_catch = true;
                 stack.truncate(frame.height);
                 stack.extend(&values);
                 *pc = start;
@@ -925,7 +1059,8 @@ impl<H: Host> Runtime<'_, H> {
             }
             if let Some(start) = controls[i].catch_all {
                 let frame = controls[i].clone();
-                controls.truncate(i);
+                controls.truncate(i + 1);
+                controls[i].in_catch = true;
                 stack.truncate(frame.height);
                 stack.extend(&values);
                 *pc = start;
@@ -933,7 +1068,77 @@ impl<H: Host> Runtime<'_, H> {
                 return Ok(());
             }
         }
-        Err("unhandled wasm exception".into())
+        self.pending_throw = Some(Exception { tag, values });
+        Err(format!(
+            "unhandled wasm exception{}",
+            throw_stack_suffix(&self.throw_stack_frames())
+        ))
+    }
+
+    /// JS import throw → wasm-eh `throw` of tag 0 (`env.__cpp_exception`).
+    fn rethrow_js_host(&mut self, err: &str) -> Result<Vec<Value>, String> {
+        self.snapshot_throw_stack();
+        self.host.note_js_exception(err);
+        let payload = crate::js_throw_payload(err);
+        let values = self
+            .m
+            .tags
+            .first()
+            .and_then(|t| self.m.types.get(t.typeidx as usize))
+            .map(|ty| {
+                ty.params
+                    .iter()
+                    .enumerate()
+                    .map(|(i, vt)| match vt {
+                        ValType::I32 => Value::I32(if i == 0 { payload } else { 0 }),
+                        ValType::I64 => Value::I64(0),
+                        ValType::F32 => Value::F32(0),
+                        ValType::F64 => Value::F64(0),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.pending_throw = Some(Exception { tag: 0, values });
+        Err(err.to_string())
+    }
+
+    /// Run `callee`; if it throws wasm-eh with no local `catch`, land in this
+    /// frame's `try`. `true` means the instruction loop should `continue`.
+    fn invoke_call(
+        &mut self,
+        callee: u32,
+        args: &[Value],
+        depth: usize,
+        controls: &mut Vec<Frame>,
+        stack: &mut Vec<Value>,
+        pc: &mut usize,
+    ) -> Result<bool, String> {
+        match self.invoke(callee, args, depth + 1) {
+            Ok(v) => {
+                stack.extend(v);
+                Ok(false)
+            }
+            Err(e) => match self.pending_throw.take() {
+                Some(exn) => {
+                    self.throw_exception(exn.tag, exn.values, controls, stack, pc)?;
+                    Ok(true)
+                }
+                None => Err(e),
+            },
+        }
+    }
+
+    fn throw_stack_frames(&self) -> Vec<String> {
+        self.call_stack
+            .iter()
+            .rev()
+            .map(|idx| func_label(self.m, *idx))
+            .collect()
+    }
+
+    fn snapshot_throw_stack(&mut self) {
+        let frames = self.throw_stack_frames();
+        self.host.note_throw_stack(&frames);
     }
 
     fn grow_memory(&mut self, delta: u32) -> i32 {
@@ -1104,10 +1309,28 @@ impl<H: Host> Runtime<'_, H> {
         if args.len() != ty.params.len() {
             return Err("wasm argument count mismatch".into());
         }
-        let results = ty.results.len();
         if is_import {
-            return self.call_import(idx, args);
+            return match self.call_import(idx, args) {
+                Ok(v) => Ok(v),
+                Err(e) if crate::is_js_host_throw(&e) && !self.m.tags.is_empty() => {
+                    self.rethrow_js_host(&e)
+                }
+                Err(e) => Err(e),
+            };
         }
+        self.call_stack.push(idx);
+        let result = self.invoke_body(idx, args, ty.results.len(), depth);
+        self.call_stack.pop();
+        result
+    }
+
+    fn invoke_body(
+        &mut self,
+        idx: u32,
+        args: &[Value],
+        results: usize,
+        depth: usize,
+    ) -> Result<Vec<Value>, String> {
         let local = idx as usize - self.m.imports.len();
         let mut locals = args.to_vec();
         locals.resize_with(args.len() + self.m.locals[local] as usize, || Value::I32(0));
@@ -1120,8 +1343,10 @@ impl<H: Host> Runtime<'_, H> {
             end: body.len() - 1,
             is_loop: false,
             is_try: false,
+            in_catch: false,
             catches: Vec::new(),
             catch_all: None,
+            table_catches: Vec::new(),
         }];
         let mut pc = 0;
         while pc < body.len() {
@@ -1132,7 +1357,24 @@ impl<H: Host> Runtime<'_, H> {
                     return Err(format!("unsupported wasm opcode 0x{op:02x}"));
                 }
                 Instr::Nop => {}
-                Instr::Unreachable => return Err("wasm unreachable trap".into()),
+                Instr::Unreachable => {
+                    self.snapshot_throw_stack();
+                    // D `_d_throw` abort stubs are `{unreachable; end}`. Flatten
+                    // deleted ready()'s catch around await, so object.Error
+                    // lands here. Turn it into wasm-eh throw so a live `try`
+                    // can catch, and `_start` can fail-soft after rewind.
+                    if self.call_stack.len() > 1
+                        && matches!(body.as_slice(), [Instr::Unreachable, Instr::End])
+                    {
+                        self.throw_exception(0, Vec::new(), &mut controls, &mut stack, &mut pc)?;
+                        continue;
+                    }
+                    return Err(format!(
+                        "wasm unreachable trap at {} pc={pc}{}",
+                        func_label(self.m, idx),
+                        throw_stack_suffix(&self.throw_stack_frames())
+                    ));
+                }
                 Instr::I32Const(v) => stack.push(Value::I32(*v)),
                 Instr::LocalGet(i) => stack.push(locals[*i as usize]),
                 Instr::LocalSet(i) | Instr::LocalTee(i) => {
@@ -1225,7 +1467,16 @@ impl<H: Host> Runtime<'_, H> {
                         .checked_sub(count)
                         .ok_or("call argument underflow")?;
                     let args = stack.split_off(base);
-                    stack.extend(self.invoke(*callee, &args, depth + 1)?);
+                    if self.invoke_call(
+                        *callee,
+                        &args,
+                        depth,
+                        &mut controls,
+                        &mut stack,
+                        &mut pc,
+                    )? {
+                        continue;
+                    }
                 }
                 Instr::Block(result) | Instr::Loop(result) | Instr::If(result) => {
                     let condition = if matches!(ins, Instr::If(_)) {
@@ -1240,8 +1491,10 @@ impl<H: Host> Runtime<'_, H> {
                         end: self.info[local].ends[pc],
                         is_loop: matches!(ins, Instr::Loop(_)),
                         is_try: false,
+                        in_catch: false,
                         catches: Vec::new(),
                         catch_all: None,
+                        table_catches: Vec::new(),
                     });
                     if condition == 0 {
                         pc = self.info[local].alternatives[pc]
@@ -1258,8 +1511,26 @@ impl<H: Host> Runtime<'_, H> {
                         end: self.info[local].ends[pc],
                         is_loop: false,
                         is_try: true,
+                        in_catch: false,
                         catches,
                         catch_all,
+                        table_catches: Vec::new(),
+                    });
+                }
+                Instr::TryTable { result, catches } => {
+                    let result = *result;
+                    let catches = catches.clone();
+                    controls.push(Frame {
+                        height: stack.len(),
+                        results: result.is_some() as usize,
+                        start: pc + 1,
+                        end: self.info[local].ends[pc],
+                        is_loop: false,
+                        is_try: false,
+                        in_catch: false,
+                        catches: Vec::new(),
+                        catch_all: None,
+                        table_catches: catches,
                     });
                 }
                 Instr::Else => {
@@ -1370,7 +1641,9 @@ impl<H: Host> Runtime<'_, H> {
                         .checked_sub(count)
                         .ok_or("call_indirect argument underflow")?;
                     let args = stack.split_off(base);
-                    stack.extend(self.invoke(callee, &args, depth + 1)?);
+                    if self.invoke_call(callee, &args, depth, &mut controls, &mut stack, &mut pc)? {
+                        continue;
+                    }
                 }
                 Instr::MemoryCopy => {
                     let len = pop(&mut stack)?.as_i32()? as u32 as usize;
@@ -1582,6 +1855,7 @@ impl<H: Host> Runtime<'_, H> {
                         values.push(pop(&mut stack)?);
                     }
                     values.reverse();
+                    self.snapshot_throw_stack();
                     self.throw_exception(*tag, values, &mut controls, &mut stack, &mut pc)?;
                     continue;
                 }
@@ -1602,21 +1876,28 @@ impl<H: Host> Runtime<'_, H> {
                         return Err("rethrow label out of range".into());
                     };
                     let mut catch = None;
+                    let mut catch_idx = None;
                     for i in (0..target_idx).rev() {
+                        if controls[i].in_catch {
+                            continue;
+                        }
                         if let Some(&(_, start)) =
                             controls[i].catches.iter().find(|(t, _)| *t == exn.tag)
                         {
                             catch = Some(start);
+                            catch_idx = Some(i);
                             break;
                         }
                         if controls[i].catch_all.is_some() {
                             catch = controls[i].catch_all;
+                            catch_idx = Some(i);
                             break;
                         }
                     }
-                    if let Some(start) = catch {
-                        let frame = controls[target_idx].clone();
-                        controls.truncate(target_idx);
+                    if let (Some(start), Some(i)) = (catch, catch_idx) {
+                        let frame = controls[i].clone();
+                        controls.truncate(i + 1);
+                        controls[i].in_catch = true;
                         stack.truncate(frame.height);
                         stack.extend(&exn.values);
                         pc = start;
@@ -1625,7 +1906,7 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     return Err("unhandled rethrow".into());
                 }
-                Instr::TryTable(_) | Instr::Delegate(_) | Instr::ThrowRef => {
+                Instr::Delegate(_) | Instr::ThrowRef => {
                     return Err(format!("unsupported wasm execution opcode {ins:?}"));
                 }
                 other => {
@@ -2054,9 +2335,70 @@ impl<H: Host> Runtime<'_, H> {
         args: &[Value],
     ) -> Result<Option<Vec<Value>>, String> {
         match name {
-            "libwasm_set__function"
-            | "libwasm_unset__function"
-            | "Object_Call_EventHandler__void" => Ok(Some(Vec::new())),
+            "libwasm_set__function" => {
+                let nlen = args
+                    .first()
+                    .ok_or("libwasm_set__function arity")?
+                    .as_i32()?;
+                let nptr = args.get(1).ok_or("libwasm_set__function arity")?.as_i32()?;
+                let ctx = args.get(2).ok_or("libwasm_set__function arity")?.as_i32()?;
+                let ptr = args.get(3).ok_or("libwasm_set__function arity")?.as_i32()?;
+                if args.len() != 4 {
+                    return Err("libwasm_set__function arity mismatch".into());
+                }
+                let name = mem_str(&self.memory, nptr, nlen)?;
+                self.host.set_function(&name, ctx, ptr)?;
+                Ok(Some(Vec::new()))
+            }
+            "libwasm_unset__function" => {
+                let nlen = args
+                    .first()
+                    .ok_or("libwasm_unset__function arity")?
+                    .as_i32()?;
+                let nptr = args
+                    .get(1)
+                    .ok_or("libwasm_unset__function arity")?
+                    .as_i32()?;
+                if args.len() != 2 {
+                    return Err("libwasm_unset__function arity mismatch".into());
+                }
+                let name = mem_str(&self.memory, nptr, nlen)?;
+                self.host.unset_function(&name)?;
+                Ok(Some(Vec::new()))
+            }
+            "Object_Call_EventHandler__void" => {
+                let handle = args
+                    .first()
+                    .ok_or("Object_Call_EventHandler__void arity")?
+                    .as_i32()?;
+                let nlen = args
+                    .get(1)
+                    .ok_or("Object_Call_EventHandler__void arity")?
+                    .as_i32()?;
+                let nptr = args
+                    .get(2)
+                    .ok_or("Object_Call_EventHandler__void arity")?
+                    .as_i32()?;
+                let defined = args
+                    .get(3)
+                    .ok_or("Object_Call_EventHandler__void arity")?
+                    .as_i32()?;
+                let ctx = args
+                    .get(4)
+                    .ok_or("Object_Call_EventHandler__void arity")?
+                    .as_i32()?;
+                let ptr = args
+                    .get(5)
+                    .ok_or("Object_Call_EventHandler__void arity")?
+                    .as_i32()?;
+                if args.len() != 6 {
+                    return Err("Object_Call_EventHandler__void arity mismatch".into());
+                }
+                let prop = mem_str(&self.memory, nptr, nlen)?;
+                self.host
+                    .set_event_handler(handle, &prop, defined != 0, ctx, ptr)?;
+                Ok(Some(Vec::new()))
+            }
             "setTimeout" => {
                 let ctx = args.first().ok_or("setTimeout arity")?.as_i32()?;
                 let ptr = args.get(1).ok_or("setTimeout arity")?.as_i32()?;
@@ -2101,11 +2443,32 @@ impl<H: Host> Runtime<'_, H> {
                     .first()
                     .ok_or("Object_Getter__EventHandler arity")?
                     .as_i32()?;
+                let handle = args
+                    .get(1)
+                    .ok_or("Object_Getter__EventHandler arity")?
+                    .as_i32()?;
+                let nlen = args
+                    .get(2)
+                    .ok_or("Object_Getter__EventHandler arity")?
+                    .as_i32()?;
+                let nptr = args
+                    .get(3)
+                    .ok_or("Object_Getter__EventHandler arity")?
+                    .as_i32()?;
+                if args.len() != 4 {
+                    return Err("Object_Getter__EventHandler arity mismatch".into());
+                }
                 let _ = memory_range(self.memory.len(), raw, 0, 12)?;
+                let prop = mem_str(&self.memory, nptr, nlen)?;
+                let stored = self.host.get_event_handler(handle, &prop);
                 let base = raw as u32 as usize;
-                self.memory[base..base + 4].copy_from_slice(&0u32.to_le_bytes());
-                self.memory[base + 4..base + 8].copy_from_slice(&0u32.to_le_bytes());
-                self.memory[base + 8] = 0;
+                let (ctx, ptr, defined) = match stored {
+                    Some((c, p)) => (c as u32, p as u32, 1u8),
+                    None => (0, 0, 0),
+                };
+                self.memory[base..base + 4].copy_from_slice(&ctx.to_le_bytes());
+                self.memory[base + 4..base + 8].copy_from_slice(&ptr.to_le_bytes());
+                self.memory[base + 8] = defined;
                 Ok(Some(Vec::new()))
             }
             _ => Ok(None),
@@ -2284,10 +2647,26 @@ impl<H: Host> Runtime<'_, H> {
                 return Ok(vec![Value::I32(self.host.await_op()?)])
             }
             (name, [slot]) if name == IMPORT_LIBWASM_AWAIT_VOID => {
-                self.host.libwasm_await_void(*slot)?;
-                if let Some(ref a) = self.asyncify {
-                    self.globals[a.state_global as usize] = Value::I32(crate::STATE_UNWINDING);
-                    self.globals[a.data_global as usize] = Value::I32(self.asyncify_data as i32);
+                // JS wrapImportFn: rewind → stop_rewind and skip; normal →
+                // run the import then start_unwind. Leaving state==REWINDING
+                // after the skip falls into Binaryen's trailing unreachable
+                // instead of the `if (normal) { on_click }` that follows await.
+                let state = self.asyncify.as_ref().and_then(|a| {
+                    self.globals
+                        .get(a.state_global as usize)
+                        .and_then(|v| v.as_i32().ok())
+                });
+                if state == Some(crate::STATE_REWINDING) {
+                    if let Some(ref a) = self.asyncify {
+                        self.globals[a.state_global as usize] = Value::I32(crate::STATE_NORMAL);
+                    }
+                } else {
+                    self.host.libwasm_await_void(*slot)?;
+                    if let Some(ref a) = self.asyncify {
+                        self.globals[a.state_global as usize] = Value::I32(crate::STATE_UNWINDING);
+                        self.globals[a.data_global as usize] =
+                            Value::I32(self.asyncify_data as i32);
+                    }
                 }
             }
             (name, [slot]) if name == IMPORT_THROW => self.host.throw_op(*slot)?,
@@ -2395,18 +2774,20 @@ impl<H: Host> Runtime<'_, H> {
                 )]);
             }
             (name, [t_ptr, t_len, ty_ptr, ty_len, listener, cap])
-                if name == IMPORT_ADD_EVENT_LISTENER =>
+                if name == IMPORT_ADD_EVENT_LISTENER || name == "add_event_listener" =>
             {
                 let target = mem_str(&self.memory, *t_ptr, *t_len)?;
                 let ty = mem_str(&self.memory, *ty_ptr, *ty_len)?;
                 self.host
                     .add_event_listener(&target, &ty, *listener as u64, *cap != 0)?;
             }
-            (name, [listener]) if name == IMPORT_REMOVE_EVENT_LISTENER => {
+            (name, [listener])
+                if name == IMPORT_REMOVE_EVENT_LISTENER || name == "remove_event_listener" =>
+            {
                 self.host.remove_event_listener(*listener as u64)?;
             }
             (name, [t_ptr, t_len, ty_ptr, ty_len, d_ptr, d_len])
-                if name == IMPORT_DISPATCH_EVENT =>
+                if name == IMPORT_DISPATCH_EVENT || name == "dispatch_event" =>
             {
                 let target = mem_str(&self.memory, *t_ptr, *t_len)?;
                 let ty = mem_str(&self.memory, *ty_ptr, *ty_len)?;
@@ -2574,6 +2955,14 @@ fn node_type_tag(ty: i32) -> Option<&'static str> {
         1024 => "root",
         _ => return None,
     })
+}
+
+/// Function-export index (`kind == 0`), if present.
+pub fn export_func(m: &Module, name: &str) -> Option<u32> {
+    m.exports
+        .iter()
+        .find(|e| e.name == name && e.kind == 0)
+        .map(|e| e.idx)
 }
 
 /// Resolve a libwasm delegate `ptr` (indirect-table index) to a function
@@ -2940,11 +3329,23 @@ pub(crate) mod tests {
     pub(crate) struct TestHost {
         pub(crate) count: usize,
         pub(crate) slot: Option<i32>,
+        pub(crate) throw_stack: Vec<String>,
         pub(crate) objects: ObjectTable<LibwasmValue>,
         pub(crate) last_await_failed: bool,
         pub(crate) last_await_error: String,
         pub(crate) last_await_value: String,
         pub(crate) resolve_result: Option<Result<String, String>>,
+        /// When set, `fetch` returns this body instead of the URL. `"[]"` lets
+        /// LDC `parseJSON` succeed so unstripped `_start` can rewind.
+        pub(crate) fetch_body: Option<String>,
+        /// When set, `fetch` throws this JS exception (`TypeError:` / `DOMException:`).
+        pub(crate) js_throw: Option<String>,
+        /// Enforce WebIDL `[Throws]` on fetch / appendChild / createElement.
+        pub(crate) webidl_throws: bool,
+        pub(crate) last_js_exception: String,
+        pub(crate) delegates: std::collections::BTreeMap<String, (i32, i32)>,
+        pub(crate) event_handlers: std::collections::BTreeMap<(i32, String), (i32, i32)>,
+        pub(crate) object_calls: Vec<(i32, String, Vec<LibwasmValue>)>,
     }
     impl TestHost {
         fn set_await_ok(&mut self, value: String) {
@@ -2990,7 +3391,66 @@ pub(crate) mod tests {
             self.count += 1;
         }
         fn fetch(&mut self, url: &str) -> Result<i32, String> {
-            self.add_string(url)
+            if let Some(e) = self.js_throw.clone() {
+                return Err(e);
+            }
+            if self.webidl_throws && !crate::is_valid_request_url(url) {
+                return Err(crate::request_type_error());
+            }
+            match self.fetch_body.clone() {
+                Some(body) => self.add_string(&body),
+                None => self.add_string(url),
+            }
+        }
+        fn create_element(&mut self, tag: &str) -> Result<i32, String> {
+            if self.webidl_throws && !crate::is_valid_element_name(tag) {
+                return Err(crate::invalid_character_create_element(tag));
+            }
+            Ok(0)
+        }
+        fn append_child(&mut self, parent: i32, child: i32) -> Result<(), String> {
+            if self.webidl_throws && (parent == child || parent == 0 || child == 0) {
+                return Err(crate::hierarchy_request_append_child());
+            }
+            Ok(())
+        }
+        fn note_js_exception(&mut self, err: &str) {
+            self.last_js_exception = err.to_string();
+        }
+        fn note_throw_stack(&mut self, frames: &[String]) {
+            self.throw_stack = frames.to_vec();
+        }
+        fn set_function(&mut self, name: &str, ctx: i32, ptr: i32) -> Result<(), String> {
+            self.delegates.insert(name.to_string(), (ctx, ptr));
+            Ok(())
+        }
+        fn unset_function(&mut self, name: &str) -> Result<(), String> {
+            self.delegates.remove(name);
+            Ok(())
+        }
+        fn get_function(&self, name: &str) -> Option<(i32, i32)> {
+            self.delegates.get(name).copied()
+        }
+        fn set_event_handler(
+            &mut self,
+            handle: i32,
+            prop: &str,
+            defined: bool,
+            ctx: i32,
+            ptr: i32,
+        ) -> Result<(), String> {
+            if defined {
+                self.event_handlers
+                    .insert((handle, prop.to_string()), (ctx, ptr));
+            } else {
+                self.event_handlers.remove(&(handle, prop.to_string()));
+            }
+            Ok(())
+        }
+        fn get_event_handler(&self, handle: i32, prop: &str) -> Option<(i32, i32)> {
+            self.event_handlers
+                .get(&(handle, prop.to_string()))
+                .copied()
         }
         fn libwasm_await_void(&mut self, slot: i32) -> Result<(), String> {
             self.slot = Some(slot);
@@ -3031,10 +3491,32 @@ pub(crate) mod tests {
         }
         fn object_call(
             &mut self,
-            _handle: i32,
+            handle: i32,
             method: &str,
             args: &[LibwasmValue],
         ) -> Result<LibwasmValue, String> {
+            self.object_calls
+                .push((handle, method.to_string(), args.to_vec()));
+            if self.webidl_throws {
+                match method {
+                    "createElement" => {
+                        let name = args.first().ok_or("createElement arg")?.as_string()?;
+                        let h = self.create_element(name)?;
+                        return Ok(LibwasmValue::I32(h));
+                    }
+                    "appendChild" => {
+                        let child = args.first().ok_or("appendChild arg")?.to_i32();
+                        self.append_child(handle, child)?;
+                        return Ok(LibwasmValue::I32(child));
+                    }
+                    "fetch" => {
+                        let url = args.first().ok_or("fetch arg")?.as_string()?;
+                        let h = self.fetch(url)?;
+                        return Ok(LibwasmValue::I32(h));
+                    }
+                    _ => {}
+                }
+            }
             match method {
                 "double" => {
                     let n = args.first().ok_or("double arg")?.to_i32();
@@ -3065,6 +3547,10 @@ pub(crate) mod tests {
                     } else {
                         Ok(v.clone())
                     }
+                }
+                "log" | "textContent" | "nodeValue" | "ID" => Ok(LibwasmValue::None),
+                "insertBefore" | "replaceChild" => {
+                    Ok(args.first().cloned().unwrap_or(LibwasmValue::None))
                 }
                 other => Err(format!("TestHost object_call unknown method {other}")),
             }
@@ -4112,6 +4598,656 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn throw_from_callee_is_caught_in_caller_try() {
+        use crate::binary::{Export, Module};
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![],
+            func_types: vec![0, 1],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![
+                Export {
+                    name: "thrower".into(),
+                    kind: 0,
+                    idx: 0,
+                },
+                Export {
+                    name: "caller".into(),
+                    kind: 0,
+                    idx: 1,
+                },
+            ],
+            bodies: vec![
+                vec![Instr::I32Const(7), Instr::Throw(0), Instr::End],
+                vec![
+                    Instr::Try(Some(ValType::I32)),
+                    Instr::Call(0),
+                    Instr::I32Const(0),
+                    Instr::Catch(0),
+                    Instr::Drop,
+                    Instr::I32Const(1),
+                    Instr::End,
+                    Instr::End,
+                ],
+            ],
+            memory: vec![],
+            locals: vec![0, 0],
+            has_memory: false,
+            tags: vec![Tag { typeidx: 2 }],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        assert_eq!(run(&m, 1, &[], &mut host).unwrap(), [1]);
+        assert_eq!(
+            host.throw_stack,
+            vec!["thrower".to_string(), "caller".to_string()]
+        );
+        let err = run(&m, 0, &[], &mut TestHost::default()).unwrap_err();
+        assert!(err.contains("unhandled wasm exception"), "{err}");
+    }
+
+    fn import_try_catch_module(
+        import_name: &str,
+        import_params: Vec<ValType>,
+        import_results: Vec<ValType>,
+        call_args: Vec<Instr>,
+    ) -> Module {
+        use crate::binary::{Export, Import, Module};
+        let returns_i32 = import_results == [ValType::I32];
+        let mut body = vec![Instr::Try(Some(ValType::I32))];
+        body.extend(call_args);
+        body.push(Instr::Call(0));
+        if returns_i32 {
+            body.push(Instr::Drop);
+        }
+        body.extend([
+            Instr::I32Const(0),
+            Instr::Catch(0),
+            Instr::Drop,
+            Instr::I32Const(1),
+            Instr::End,
+            Instr::End,
+        ]);
+        Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: import_params,
+                    results: import_results,
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![Import {
+                module: "env".into(),
+                name: import_name.into(),
+                typeidx: 1,
+            }],
+            func_types: vec![0],
+            mem_pages: 1,
+            max_mem_pages: Some(1),
+            exports: vec![Export {
+                name: "catch_js".into(),
+                kind: 0,
+                idx: 1,
+            }],
+            bodies: vec![body],
+            memory: vec![0; 65536],
+            locals: vec![0],
+            has_memory: true,
+            tags: vec![Tag { typeidx: 2 }],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        }
+    }
+
+    #[test]
+    fn js_throw_from_host_import_is_caught_in_wasm_try() {
+        // JS `throw` from an import becomes wasm-eh tag 0; wasm `catch` lands.
+        let m = import_try_catch_module(
+            crate::IMPORT_FETCH,
+            vec![ValType::I32, ValType::I32],
+            vec![ValType::I32],
+            vec![Instr::I32Const(0), Instr::I32Const(0)],
+        );
+        let mut host = TestHost {
+            js_throw: Some(crate::type_error("boom from JS")),
+            ..TestHost::default()
+        };
+        assert_eq!(run(&m, 1, &[], &mut host).unwrap(), [1]);
+        assert!(
+            host.last_js_exception.starts_with("TypeError:"),
+            "{}",
+            host.last_js_exception
+        );
+        assert!(
+            !host.throw_stack.is_empty(),
+            "JS throw snapshots the wasm caller: {:?}",
+            host.throw_stack
+        );
+    }
+
+    #[test]
+    fn wasm_throw_is_caught_by_js_host() {
+        // Unhandled wasm `throw` is `WebAssembly.Exception` at the JS boundary.
+        use crate::binary::{Export, Module};
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![],
+            func_types: vec![0],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![Export {
+                name: "thrower".into(),
+                kind: 0,
+                idx: 0,
+            }],
+            bodies: vec![vec![Instr::I32Const(7), Instr::Throw(0), Instr::End]],
+            memory: vec![],
+            locals: vec![0],
+            has_memory: false,
+            tags: vec![Tag { typeidx: 1 }],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        let err = run(&m, 0, &[], &mut host).unwrap_err();
+        assert!(
+            err.contains("unhandled wasm exception"),
+            "JS host catch (WebAssembly.Exception): {err}"
+        );
+        assert_eq!(
+            host.throw_stack.first().map(String::as_str),
+            Some("thrower")
+        );
+    }
+
+    #[test]
+    fn webidl_fetch_and_dom_throws_are_caught_in_wasm() {
+        // libwasm WebIDL: Request constructor TypeError; Node.appendChild
+        // HierarchyRequestError; Document.createElement InvalidCharacterError.
+        let mut host = TestHost {
+            webidl_throws: true,
+            ..TestHost::default()
+        };
+        let fetch_m = import_try_catch_module(
+            crate::IMPORT_FETCH,
+            vec![ValType::I32, ValType::I32],
+            vec![ValType::I32],
+            vec![Instr::I32Const(0), Instr::I32Const(0)],
+        );
+        assert_eq!(run(&fetch_m, 1, &[], &mut host).unwrap(), [1]);
+        assert!(
+            host.last_js_exception.starts_with("TypeError:"),
+            "Fetch/Request: {}",
+            host.last_js_exception
+        );
+        assert_eq!(crate::js_throw_payload(&host.last_js_exception), 0);
+
+        let append_m = import_try_catch_module(
+            crate::IMPORT_APPEND_CHILD,
+            vec![ValType::I32, ValType::I32],
+            vec![],
+            vec![Instr::I32Const(1), Instr::I32Const(1)],
+        );
+        assert_eq!(run(&append_m, 1, &[], &mut host).unwrap(), [1]);
+        assert!(
+            host.last_js_exception.contains("HierarchyRequestError"),
+            "Node.appendChild: {}",
+            host.last_js_exception
+        );
+        assert_eq!(
+            crate::js_throw_payload(&host.last_js_exception),
+            i32::from(crate::HIERARCHY_REQUEST_ERR)
+        );
+
+        // Document.createElement is Object_Call_string__Handle in bindings/Document.d.
+        let mut mem = vec![0u8; 65536];
+        mem[0..13].copy_from_slice(b"createElement");
+        mem[16..18].copy_from_slice(b"<>");
+        let mut create_m = import_try_catch_module(
+            crate::IMPORT_OBJECT_CALL,
+            vec![
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+                ValType::I32,
+            ],
+            vec![ValType::I32],
+            vec![
+                Instr::I32Const(1),
+                Instr::I32Const(13),
+                Instr::I32Const(0),
+                Instr::I32Const(2),
+                Instr::I32Const(16),
+            ],
+        );
+        create_m.memory = mem;
+        assert_eq!(run(&create_m, 1, &[], &mut host).unwrap(), [1]);
+        assert!(
+            host.last_js_exception.contains("InvalidCharacterError"),
+            "Document.createElement: {}",
+            host.last_js_exception
+        );
+        assert_eq!(
+            crate::js_throw_payload(&host.last_js_exception),
+            i32::from(crate::INVALID_CHARACTER_ERR)
+        );
+    }
+
+    #[test]
+    fn start_registers_d_delegate_and_vararg_calls_js_native() {
+        // `_start` (libwasm Spa boot) registers a D delegate via
+        // `libwasm_set__function` so JS can call it, and drives
+        // `Object_VarArgCall__void` with the tuple-JSON + argsdef shapes from
+        // `libwasm/source/libwasm/bindings/{Console,Node}.d`.
+        use crate::binary::{Element, Export, Import, Module, Table};
+        let mut mem = vec![0u8; 65536];
+        let mut at = 256usize;
+        let mut put = |s: &str| {
+            let ptr = at as i32;
+            let b = s.as_bytes();
+            mem[at..at + b.len()].copy_from_slice(b);
+            at = (at + b.len() + 8) & !7;
+            (b.len() as i32, ptr)
+        };
+        let on_ready = put("onReady");
+        let log = put("log");
+        let log_def = put("string");
+        let log_json = put(r#"["hello from D"]"#);
+        let text_content = put("textContent");
+        let opt_str = put("Optional!(string)");
+        let opt_json = put(r#"[1,"bios"]"#);
+        let insert = put("insertBefore");
+        let insert_def = put("Handle;Optional!Handle");
+        let insert_json = put("[2,0,0]");
+        let id = put("ID");
+        let sum_def = put("SumType!(uint,string)");
+        let sum_json = put(r#"[0,7,""]"#);
+
+        let vararg = |handle: i32, m: (i32, i32), d: (i32, i32), a: (i32, i32)| {
+            vec![
+                Instr::I32Const(handle),
+                Instr::I32Const(m.0),
+                Instr::I32Const(m.1),
+                Instr::I32Const(d.0),
+                Instr::I32Const(d.1),
+                Instr::I32Const(a.0),
+                Instr::I32Const(a.1),
+                Instr::Call(1),
+            ]
+        };
+        let mut start = vec![
+            Instr::I32Const(on_ready.0),
+            Instr::I32Const(on_ready.1),
+            Instr::I32Const(99),
+            Instr::I32Const(1),
+            Instr::Call(0),
+        ];
+        start.extend(vararg(2, log, log_def, log_json));
+        start.extend(vararg(3, text_content, opt_str, opt_json));
+        start.extend(vararg(4, insert, insert_def, insert_json));
+        start.extend(vararg(2, id, sum_def, sum_json));
+        start.push(Instr::End);
+
+        let mut m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![ValType::I32, ValType::I32, ValType::I32, ValType::I32],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![ValType::I32; 7],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![ValType::I32, ValType::I32],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![ValType::I32, ValType::I32, ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![
+                Import {
+                    module: "env".into(),
+                    name: "libwasm_set__function".into(),
+                    typeidx: 0,
+                },
+                Import {
+                    module: "env".into(),
+                    name: "Object_VarArgCall__void".into(),
+                    typeidx: 1,
+                },
+            ],
+            func_types: vec![2, 3, 4],
+            mem_pages: 1,
+            max_mem_pages: Some(1),
+            exports: vec![
+                Export {
+                    name: "_start".into(),
+                    kind: 0,
+                    idx: 3,
+                },
+                Export {
+                    name: "jsCallback".into(),
+                    kind: 0,
+                    idx: 4,
+                },
+            ],
+            bodies: vec![
+                vec![
+                    Instr::I32Const(1024),
+                    Instr::I32Const(1),
+                    Instr::I32Store {
+                        align: 2,
+                        offset: 0,
+                    },
+                    Instr::End,
+                ],
+                start,
+                vec![
+                    Instr::LocalGet(0),
+                    Instr::LocalGet(2),
+                    Instr::Call(2),
+                    Instr::End,
+                ],
+            ],
+            memory: mem,
+            locals: vec![0, 0, 0],
+            has_memory: true,
+            tags: vec![],
+            globals: vec![],
+            tables: vec![Table {
+                min: 2,
+                max: Some(2),
+            }],
+            elements: vec![Element {
+                offset: 1,
+                funcs: vec![2],
+            }],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        crate::run_with_fuel_mut(&mut m, 3, &[], &mut host, crate::MAX_FUEL)
+            .expect("libwasm _start");
+        assert_eq!(
+            host.get_function("onReady"),
+            Some((99, 1)),
+            "exportDelegate → libwasm_set__function"
+        );
+        let methods: Vec<&str> = host.object_calls.iter().map(|c| c.1.as_str()).collect();
+        assert!(
+            methods.contains(&"log")
+                && methods.contains(&"textContent")
+                && methods.contains(&"insertBefore")
+                && methods.contains(&"ID"),
+            "Object_VarArgCall__void variations: {methods:?}"
+        );
+        assert!(
+            host.object_calls.iter().any(|c| {
+                c.1 == "log"
+                    && matches!(c.2.first(), Some(LibwasmValue::String(s)) if s == "hello from D")
+            }),
+            "Console.log string tuple: {:?}",
+            host.object_calls
+        );
+        assert!(
+            host.object_calls.iter().any(|c| {
+                c.1 == "textContent"
+                    && matches!(c.2.first(), Some(LibwasmValue::String(s)) if s == "bios")
+            }),
+            "Node.textContent Optional!(string): {:?}",
+            host.object_calls
+        );
+        assert!(
+            host.object_calls.iter().any(|c| {
+                c.1 == "insertBefore"
+                    && c.2.len() == 2
+                    && c.2[0] == LibwasmValue::U32(2)
+                    && c.2[1] == LibwasmValue::None
+            }),
+            "Node.insertBefore Handle;Optional!Handle: {:?}",
+            host.object_calls
+        );
+        assert!(
+            host.object_calls
+                .iter()
+                .any(|c| { c.1 == "ID" && matches!(c.2.first(), Some(LibwasmValue::U32(7))) }),
+            "ConsoleEvent.ID SumType!(uint,string): {:?}",
+            host.object_calls
+        );
+
+        // JS calls the D delegate: table.get(ptr)(ctx, handle) as jsCallback.
+        let callee = crate::table_funcref(&m, 1).expect("table[1] = D delegate");
+        crate::run_with_fuel_mut(&mut m, callee, &[99, 7], &mut host, crate::MAX_FUEL)
+            .expect("JS → D wasm delegate");
+        let flag = i32::from_le_bytes(m.memory[1024..1028].try_into().unwrap());
+        assert_eq!(flag, 1, "D delegate ran");
+        crate::run_with_fuel_mut(&mut m, 4, &[99, 1, 7], &mut host, crate::MAX_FUEL)
+            .expect("jsCallback(ctx, fun, handle)");
+    }
+
+    #[test]
+    fn virtio_like_host_event_reenters_jscallback_after_start() {
+        // B91c: after `_start` registers `exportDelegate("click")` and
+        // `Object_Call_EventHandler__void(onclick)`, a host/virtio event
+        // re-enters through the `jsCallback` export (types.d:336-358).
+        use crate::binary::{Element, Export, Import, Module, Table};
+        let mut mem = vec![0u8; 65536];
+        mem[0..5].copy_from_slice(b"click");
+        mem[16..23].copy_from_slice(b"onclick");
+        let mut m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![ValType::I32; 4],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![ValType::I32; 6],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![ValType::I32, ValType::I32],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![ValType::I32; 3],
+                    results: vec![],
+                },
+            ],
+            imports: vec![
+                Import {
+                    module: "env".into(),
+                    name: "libwasm_set__function".into(),
+                    typeidx: 0,
+                },
+                Import {
+                    module: "env".into(),
+                    name: "Object_Call_EventHandler__void".into(),
+                    typeidx: 1,
+                },
+            ],
+            func_types: vec![2, 3, 4],
+            mem_pages: 1,
+            max_mem_pages: Some(1),
+            exports: vec![
+                Export {
+                    name: "_start".into(),
+                    kind: 0,
+                    idx: 3,
+                },
+                Export {
+                    name: "jsCallback".into(),
+                    kind: 0,
+                    idx: 4,
+                },
+            ],
+            bodies: vec![
+                vec![
+                    Instr::I32Const(1024),
+                    Instr::I32Const(1),
+                    Instr::I32Store {
+                        align: 2,
+                        offset: 0,
+                    },
+                    Instr::End,
+                ],
+                vec![
+                    Instr::I32Const(5),
+                    Instr::I32Const(0),
+                    Instr::I32Const(99),
+                    Instr::I32Const(1),
+                    Instr::Call(0),
+                    Instr::I32Const(1),
+                    Instr::I32Const(7),
+                    Instr::I32Const(16),
+                    Instr::I32Const(1),
+                    Instr::I32Const(99),
+                    Instr::I32Const(1),
+                    Instr::Call(1),
+                    Instr::End,
+                ],
+                vec![
+                    Instr::LocalGet(0),
+                    Instr::LocalGet(2),
+                    Instr::LocalGet(1),
+                    Instr::CallIndirect {
+                        typeidx: 2,
+                        tableidx: 0,
+                    },
+                    Instr::End,
+                ],
+            ],
+            memory: mem,
+            locals: vec![0, 0, 0],
+            has_memory: true,
+            tags: vec![],
+            globals: vec![],
+            tables: vec![Table {
+                min: 2,
+                max: Some(2),
+            }],
+            elements: vec![Element {
+                offset: 1,
+                funcs: vec![2],
+            }],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        crate::run_with_fuel_mut(&mut m, 3, &[], &mut host, crate::MAX_FUEL)
+            .expect("libwasm _start");
+        assert_eq!(host.get_function("click"), Some((99, 1)));
+        assert_eq!(host.get_event_handler(1, "onclick"), Some((99, 1)));
+        let js = crate::export_func(&m, "jsCallback").expect("jsCallback export");
+        crate::run_with_fuel_mut(&mut m, js, &[99, 1, 7], &mut host, crate::MAX_FUEL)
+            .expect("virtio-like jsCallback re-entry");
+        let flag = i32::from_le_bytes(m.memory[1024..1028].try_into().unwrap());
+        assert_eq!(flag, 1, "D delegate ran through jsCallback");
+    }
+
+    #[test]
+    fn throw_try_table_catch_dest_returns_payload() {
+        use crate::binary::{Export, Module, TryTableCatch};
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![],
+            func_types: vec![0],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![Export {
+                name: "throw_in_await".into(),
+                kind: 0,
+                idx: 0,
+            }],
+            bodies: vec![vec![
+                Instr::Block(Some(ValType::I32)),
+                Instr::TryTable {
+                    result: None,
+                    catches: vec![TryTableCatch::Catch { tag: 0, label: 0 }],
+                },
+                Instr::I32Const(7),
+                Instr::Throw(0),
+                Instr::End,
+                Instr::Unreachable,
+                Instr::End,
+                Instr::End,
+            ]],
+            memory: vec![],
+            locals: vec![0],
+            has_memory: false,
+            tags: vec![Tag { typeidx: 1 }],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        assert_eq!(run(&m, 0, &[], &mut host).unwrap(), [7]);
+        assert_eq!(host.throw_stack, vec!["throw_in_await".to_string()]);
+    }
+
+    #[test]
     fn memory_copy_and_fill_operate_on_linear_memory() {
         let copy_ops = [
             0x41, 10, // dest = 10
@@ -4226,9 +5362,11 @@ pub(crate) mod tests {
                     elem_dropped,
                     data_dropped,
                     caught: None,
+                    pending_throw: None,
                     asyncify: None,
                     asyncify_data: 0,
                     string_pool_next: m.memory.len() as u32,
+                    call_stack: Vec::new(),
                 };
                 assert!(runtime
                     .invoke(0, &[], 0)
@@ -4249,12 +5387,12 @@ pub(crate) mod tests {
             (1, Some(2), 0, 1),
             (1, Some(2), 1, 1),
             (1, Some(2), 2, -1),
-            (1, None, 31, 1),
-            (1, None, 32, -1),
-            (1, Some(65536), 31, 1),
-            (1, Some(65536), 32, -1),
-            (32, None, 0, 32),
-            (32, None, 1, -1),
+            (1, None, 63, 1),
+            (1, None, 64, -1),
+            (1, Some(65536), 63, 1),
+            (1, Some(65536), 64, -1),
+            (64, None, 0, 64),
+            (64, None, 1, -1),
             (1, None, -1, -1),
             (1, None, i32::MIN, -1),
         ] {
@@ -4300,9 +5438,11 @@ pub(crate) mod tests {
             elem_dropped,
             data_dropped,
             caught: None,
+            pending_throw: None,
             asyncify: None,
             asyncify_data: 0,
             string_pool_next: m.memory.len() as u32,
+            call_stack: Vec::new(),
         };
         assert_eq!(runtime.invoke(0, &[], 0).unwrap(), [Value::I32(0)]);
         assert_eq!(runtime.memory[0], 42);

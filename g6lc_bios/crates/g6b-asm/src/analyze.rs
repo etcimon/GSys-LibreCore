@@ -521,7 +521,9 @@ pub fn kstart(spec: &BoardSpec) -> Module {
         }
         if spec.wants_virtio_input() {
             m.push(crate::vio::inp_init_node(o));
+            m.push(crate::vio::tab_init_node(o));
             m.push(crate::vio::inp_drain_node(o));
+            m.push(crate::vio::tab_drain_node(o));
             m.push(crate::vio::inp_poll_node(o, spec));
             if spec.kernel.wasm.jit {
                 // DOM-input bridge — `WasmDomText` exists only under the
@@ -1605,14 +1607,51 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
             },
         ]);
         if spec.wants_virtio_input() {
-            // Same irq = 1+slot mapping for the virtio-input device; its
-            // base is at __vio+VIO_INP_OFF (0 when no keyboard attached).
+            // Same irq = 1+slot mapping for virtio-input devices; keyboard
+            // base is at __vio+VIO_INP_OFF, tablet at VIO_TAB_OFF (0 when
+            // that slot was not probed).
             ops.extend([
-                Op::Comment("virtio-input PLIC source: irq 1 + input slot".into()),
+                Op::Comment("virtio-input PLIC source: irq 1 + keyboard slot".into()),
                 Op::Lw {
                     rd: T1,
                     rs: T0,
                     off: crate::vio::VIO_INP_OFF,
+                },
+                Op::Beq {
+                    rs1: T1,
+                    rs2: X0,
+                    to: "trap_tab_chk".into(),
+                },
+                Op::Li {
+                    rd: A2,
+                    imm: VIO_MMIO_BASE as i64,
+                },
+                Op::Sub {
+                    rd: T1,
+                    rs1: T1,
+                    rs2: A2,
+                },
+                Op::Srli {
+                    rd: T1,
+                    rs: T1,
+                    shamt: 12,
+                },
+                Op::Addi {
+                    rd: T1,
+                    rs: T1,
+                    imm: crate::vio::VIO_IRQ_BASE as i32,
+                },
+                Op::Beq {
+                    rs1: T2,
+                    rs2: T1,
+                    to: "trap_inp".into(),
+                },
+                Op::Label("trap_tab_chk".into()),
+                Op::Comment("virtio-tablet PLIC source: irq 1 + tablet slot".into()),
+                Op::Lw {
+                    rd: T1,
+                    rs: T0,
+                    off: crate::vio::VIO_TAB_OFF,
                 },
                 Op::Beq {
                     rs1: T1,
@@ -1641,7 +1680,7 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 Op::Beq {
                     rs1: T2,
                     rs2: T1,
-                    to: "trap_inp".into(),
+                    to: "trap_tab".into(),
                 },
             ]);
         }
@@ -1745,6 +1784,32 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 rd: X0,
                 to: "trap_done".into(),
             });
+            ops.extend([
+                Op::Label("trap_tab".into()),
+                Op::Lw {
+                    rd: T1,
+                    rs: T0,
+                    off: crate::vio::VIO_TAB_OFF,
+                },
+                Op::Lw {
+                    rd: A0,
+                    rs: T1,
+                    off: crate::encode::VIO_REG_ISR_STATUS,
+                },
+                Op::Sw {
+                    rs2: A0,
+                    rs1: T1,
+                    off: crate::encode::VIO_REG_ISR_ACK,
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "TabDrain".into(),
+                },
+                Op::Jal {
+                    rd: X0,
+                    to: "trap_done".into(),
+                },
+            ]);
         }
     }
     ops.extend([
@@ -2851,9 +2916,14 @@ fn trap_mbox_ops(spec: &BoardSpec) -> Vec<Op> {
             rs1: T0,
             off: MBOX_OFF_STATUS as i32,
         },
+        Op::Comment(
+            "Mailbox Ui is the same operator dump as UART Ui (svelte-d WebFeed \
+             + VioPaint), then trap_done."
+                .into(),
+        ),
         Op::Jal {
             rd: X0,
-            to: "trap_done".into(),
+            to: "uart_ui".into(),
         },
         Op::Label("mbox_reboot".into()),
         Op::Li {
@@ -3315,6 +3385,13 @@ fn vio_call_node(o: Object, spec: &BoardSpec) -> Node {
             rd: RA,
             to: "InpInit".into(),
         });
+        ops.push(Op::Comment(
+            "TabInit — virtio-tablet eventq (second DeviceID 18)".into(),
+        ));
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "TabInit".into(),
+        });
     }
     Node {
         purpose: Purpose::Virtio,
@@ -3608,6 +3685,18 @@ fn ui_file_paths(spec: &BoardSpec) -> Vec<&'static str> {
     }
     if spec.kernel.wasm.enable || spec.kernel.http.files.wasm {
         p.push("/ui/ui.wasm");
+    }
+    // Host FileServe (`g6b-http::files::mount`) may list `/ui/pglite/*` when
+    // `pglite.files` and dist bytes are live. The guest advert is hardcoded
+    // here and grows only for `pglite.embed` (bytes already in `.rodata`).
+    // Do not call `mount()` — that would bake host `.tools/` into every ELF.
+    if spec.kernel.store.pglite_embed {
+        p.push("/ui/pglite/pglite.wasm");
+        p.push("/ui/pglite/initdb.wasm");
+        p.push("/ui/pglite/pglite.data");
+        if spec.kernel.store.pglite_js {
+            p.push("/ui/pglite/index.js");
+        }
     }
     p
 }
@@ -4573,6 +4662,14 @@ mod tests {
         assert!(s.contains("__ui_wasm"), "{s}");
         assert_eq!(m.ui_bytes, UI_HEADER_BYTES);
         assert_eq!(m.ui_wasm, ui_wasm_bytes(&spec));
+        assert!(!s.contains("/ui/pglite/pglite.wasm"), "{s}");
+        let embed = spec_json(
+            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"wasm":{"enable":true},"store":{"pglite":{"embed":true}}}}"#,
+        );
+        let embed_asm = kstart(&embed).to_asm();
+        assert!(embed_asm.contains("/ui/pglite/pglite.wasm"), "{embed_asm}");
+        assert!(embed_asm.contains("/ui/pglite/initdb.wasm"), "{embed_asm}");
+        assert!(!embed_asm.contains("/ui/pglite/index.js"), "{embed_asm}");
         let (_, ro) = payload(&spec, b"x\0").to_words(0x8020_0000).unwrap();
         assert!(
             ro.windows(4).any(|w| w == b"\0asm"),

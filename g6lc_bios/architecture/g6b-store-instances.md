@@ -1,12 +1,12 @@
 # Store instances — UUID identity, purpose, USB import/export
 
-**Status:** living (PR1 / S0). Implementation on **`E:\cva6/g6lc_bios`**.
+**Status:** living (S1). Implementation on **`E:\cva6/g6lc_bios`**.
 Engine, SQL dialect, Lodash intern, and BoardSpec gates stay in
 [`g6b-pglite.md`](g6b-pglite.md). This file is the **identity and
 lifetime** contract those PRs must implement.
 
 Green remains `python tools/g6b.py check`. QEMU argv never `-netdev`.
-Store default **off**. No crate in S0.
+Store default **on** (`kernel.store.enable`). Crate `g6b-pglite` is S1.
 
 ---
 
@@ -79,13 +79,13 @@ pub struct Store {
 pub enum PersistMode {
     Memory, // default; survives close; dies on drop or reboot
     ElfSeed, // hydrated from `__g6b_store_dump`; live copy is then Memory
-    UsbLive { volume: String, rel: String }, // optional later; v1 USB is export/import
+    UsbLive, // live FileMgr dump; volume/rel on Store
 }
 ```
 
-v1 **does not** keep a live FileMgr-backed database. USB is snapshot
-import/export (§5). `UsbLive` is reserved if a later PR wants auto-flush
-on `commit`; it is not required for BIOS UI.
+`UsbLive` is the live FileMgr-backed copy: mutating `query`/`exec`/`commit`/`load`
+auto-flush a compressed `.g6bstore` when not in a transaction. Snapshot
+export/import remains. A setup dialog polls `stat` until `live && ready`.
 
 Dump JSON (versioned, first-party — not PGlite tar):
 
@@ -99,8 +99,11 @@ Dump JSON (versioned, first-party — not PGlite tar):
 }
 ```
 
-`g6b.py store-embed` (PR3c) emits this shape into `__g6b_store_dump`.
-S0 stub only prints usage.
+`python tools/g6b.py store-embed --fixture FILE --out FILE` emits this shape.
+`g6b-elf` packs it as `__g6b_store_dump` when `persist.elf` and the file is
+present (`G6B_STORE_DUMP` or `out/g6b_store_dump.json`). Missing dump is
+`PersistUnarmed` at `elf://` open, not `BoardSpec::check()`. `check()` never
+runs `store-embed`.
 
 ---
 
@@ -214,11 +217,13 @@ PGlite-shaped `dataDir` still exists for `PgLite(dataDir)`. Parse:
 | Input | Meaning |
 |---|---|
 | omitted / `""` / `memory://` | `open_purpose("registry")` Memory |
-| `registry` / `memory://registry` | `open_purpose("registry")` |
+| `registry` / `memory://registry` | `open_purpose("registry")` — **name in the path** |
 | `{purpose}` matching the allow-list | `open_purpose` |
-| `{uuid}` (8-4-4-4-12) | `open_uuid` |
-| `elf://{purpose}` | hydrate `__g6b_store_dump` for that purpose → Memory instance (`persist.elf`) |
-| `usb://VOL/rel` | **import** that path (not a live mount in v1) |
+| `{uuid}` / `memory://{uuid}` | `open_uuid` |
+| `elf://` / `elf://{purpose}` | hydrate `__g6b_store_dump` for that purpose → Memory instance (`persist.elf`) |
+| `usb://VOL` / `usb://VOL/{purpose}` | live-attach `UsbLive` on that key volume (purpose name in the path) |
+| `usb://VOL/{uuid}` | live-attach that uuid on the volume |
+| `usb://VOL/rel.g6bstore` | import that snapshot |
 | `idb://` `file://` `http(s):` | refuse |
 
 HTTP (later PR4; ids are uuid except purpose helpers):
@@ -235,6 +240,8 @@ HTTP (later PR4; ids are uuid except purpose helpers):
 | POST | `/bios/store/{uuid}/query` | `{sql, params:[]}` | rows |
 | POST | `/bios/store/{uuid}/exec` | `{sql}` | results |
 | POST | `/bios/store/{uuid}/begin\|commit\|rollback\|close` | `{}` | `{ok}` |
+| GET | `/bios/store/{uuid}/stat` | — | poll `{ready,live,volume,path,bytes}` |
+| POST | `/bios/store/open` | `{dataDir}` | `usb://VOL` live-attach |
 | GET | `/bios/store/{uuid}/dump` | — | dump JSON |
 | PUT | `/bios/store/{uuid}/load` | dump JSON | replace tables of **that** uuid (purpose must match) |
 
@@ -251,6 +258,7 @@ HolyC (later PR5):
 | `StoreExport` | uuid, volume [, rel] |
 | `StoreImport` | volume, rel |
 | `StoreList` | uuid + purpose + persist + rows |
+| `StoreStat` | uuid-or-purpose → poll `{ready,live}` |
 
 Disabled (`!store.enable`) → `STORE-REFUSED`. HTTP off does **not** refuse
 HolyC. UART gets no new single-letter command in v1.

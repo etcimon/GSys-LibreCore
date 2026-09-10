@@ -35,3 +35,4 @@ export const jsExports = {
   },
 };
 // module App_svelte
+// module Store_svelte

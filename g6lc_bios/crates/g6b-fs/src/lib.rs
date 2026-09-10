@@ -152,16 +152,17 @@ pub fn list_key(spec: &BoardSpec, path: &str, fs: Option<FsKind>) -> Vec<DirEnt>
         }
     };
     let mut out = Vec::new();
+    let persist_usb = spec.kernel.store.persist_usb;
     for k in kinds {
-        out.extend(canned_key(k, path));
+        out.extend(canned_key(k, path, persist_usb));
     }
     out
 }
 
-fn canned_key(fs: FsKind, path: &str) -> Vec<DirEnt> {
+fn canned_key(fs: FsKind, path: &str, persist_usb: bool) -> Vec<DirEnt> {
     let p = path.trim_end_matches('/');
     let p = if p.is_empty() { "/" } else { p };
-    match (fs, p) {
+    let mut out = match (fs, p) {
         (FsKind::Fat32, "/") => vec![
             DirEnt {
                 name: "settings.json".into(),
@@ -217,7 +218,25 @@ fn canned_key(fs: FsKind, path: &str) -> Vec<DirEnt> {
             fs,
         }],
         _ => Vec::new(),
+    };
+    if persist_usb {
+        if p == "/" {
+            out.push(DirEnt {
+                name: "stores".into(),
+                is_dir: true,
+                size: 0,
+                fs,
+            });
+        } else if p == "/stores" {
+            out.push(DirEnt {
+                name: "registry".into(),
+                is_dir: true,
+                size: 0,
+                fs,
+            });
+        }
     }
+    out
 }
 
 fn ent_json(e: &DirEnt) -> String {
@@ -273,5 +292,18 @@ mod tests {
         assert!(nt.iter().any(|e| e.name == "bios-settings.json"));
         let ex = list_key(&spec, "/home", Some(FsKind::Ext4));
         assert!(ex.iter().any(|e| e.name == "config.json"));
+        assert!(!nt.iter().any(|e| e.name == "stores"));
+    }
+
+    #[test]
+    fn persist_usb_lists_stores_on_key_volumes() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","kernel":{"store":{"persist":{"usb":true,"volume":"fat32"}}}}"#,
+        )
+        .unwrap();
+        let fat = list_key(&spec, "/", Some(FsKind::Fat32));
+        assert!(fat.iter().any(|e| e.name == "stores" && e.is_dir));
+        let stores = list_key(&spec, "/stores", Some(FsKind::Fat32));
+        assert!(stores.iter().any(|e| e.name == "registry" && e.is_dir));
     }
 }

@@ -11,6 +11,7 @@
 #![allow(missing_docs)]
 
 use g6b_asm::payload_memsz;
+use g6b_http::files::{load_pglite_dist, MAX_PGLITE_EMBED_BYTES};
 use g6b_spec::BoardSpec;
 
 const EM_RISCV: u16 = 0x00f3;
@@ -69,6 +70,42 @@ fn payload_module(spec: &BoardSpec, msg: &[u8]) -> Result<g6b_asm::Module, Strin
     let mut module = g6b_asm::analyze::payload(spec, msg);
     if spec.kernel.wasm.enable && spec.kernel.wasm.jit {
         g6b_wasm::install_start(&mut module, spec.isa.xlen)?;
+    }
+    if spec.kernel.store.pglite_embed {
+        let dist = load_pglite_dist().ok_or_else(|| {
+            "kernel.store.pglite.embed needs extracted dist (python tools/g6b.py pglite-dist)"
+                .to_string()
+        })?;
+        if dist.embed_len() > MAX_PGLITE_EMBED_BYTES {
+            return Err(format!(
+                "pglite embed {} exceeds {MAX_PGLITE_EMBED_BYTES} bytes",
+                dist.embed_len()
+            ));
+        }
+        module.pglite_wasm = dist.wasm;
+        module.pglite_initdb = dist.initdb;
+        module.pglite_data = dist.data;
+    }
+    if spec.kernel.store.persist_elf {
+        match g6b_pglite::read_host_dump_bytes() {
+            Some(bytes) => {
+                if bytes.len() as u32 > spec.kernel.store.max_result_bytes {
+                    return Err(format!(
+                        "store dump {} exceeds max_result_bytes {}",
+                        bytes.len(),
+                        spec.kernel.store.max_result_bytes
+                    ));
+                }
+                module.store_dump = bytes;
+            }
+            None if g6b_pglite::dump_path_explicit().is_some() => {
+                return Err(
+                    "kernel.store.persist.elf: G6B_STORE_DUMP missing (python tools/g6b.py store-embed)"
+                        .into(),
+                );
+            }
+            None => {}
+        }
     }
     Ok(module)
 }
@@ -179,19 +216,27 @@ pub fn smoke(spec: &BoardSpec) -> Result<g6b_asm::exec::Smoke, String> {
     g6b_asm::exec::run_module(spec, &module, entry)
 }
 
-/// Exec-model S-mode stand-in: LDC cell on the same [`g6b_wasm::Host`] as
-/// `BrowserSession`, packed into `__ui_cap` / `__scan_fb`, then guest
-/// `VioPaint` TRANSFERs dirty tiles. Does not grow `start_ops`. Default
-/// [`smoke`] stays the VGA glyph path so bios-regress is unchanged.
+/// Exec-model S-mode stand-in: svelte-d LDC cell on the same
+/// [`g6b_wasm::Host`] as `BrowserSession` (DOM, CSS, GLES2 `u_dom`, events,
+/// throw/await), packed into `__ui_cap` / `__scan_fb`, then guest `VioPaint`
+/// TRANSFERs dirty tiles. Does not grow `start_ops`. Default [`smoke`] stays
+/// the VGA glyph path so bios-regress is unchanged.
 pub fn smoke_cell(spec: &BoardSpec) -> Result<g6b_asm::exec::Smoke, String> {
-    let cell = g6b_kernel::guest_cell_scanout(spec)?;
-    if !cell.wasm_executed {
-        return Err("smoke_cell: LDC cell did not run on KernelHost".into());
-    }
+    smoke_cell_drive(spec, &[])
+}
+
+/// Like [`smoke_cell`] after BIOS-UI actions on the persistent svelte-d
+/// session (click / key / hover / JS await). Still does not grow `start_ops`.
+pub fn smoke_cell_drive(
+    spec: &BoardSpec,
+    actions: &[g6b_kernel::GuestCellAction<'_>],
+) -> Result<g6b_asm::exec::Smoke, String> {
+    let mut live = g6b_kernel::GuestCellLive::open(spec)?;
+    live.apply(actions)?;
     let entry = load_addr(spec)?;
     let text = payload_text(spec);
     let module = payload_module(spec, &text)?;
-    g6b_asm::exec::run_module_web(spec, &module, entry, 0, Some(&cell.present))
+    g6b_asm::exec::run_module_web_feed(spec, &module, entry, 0, &mut live)
 }
 
 /// Write `g6lc_bios.elf` under `dir` (or `dir` itself if it ends in `.elf`).
@@ -308,6 +353,39 @@ mod tests {
     }
 
     #[test]
+    fn persist_elf_without_dump_still_links() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"store":{"persist":{"elf":true}}}}"#,
+        )
+        .unwrap();
+        if g6b_pglite::dump_path_explicit().is_some() {
+            return;
+        }
+        build(&spec).unwrap();
+    }
+
+    #[test]
+    fn pglite_embed_without_dist_is_a_link_error() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"store":{"pglite":{"embed":true}}}}"#,
+        )
+        .unwrap();
+        match g6b_http::files::load_pglite_dist() {
+            None => {
+                let err = build(&spec).unwrap_err();
+                assert!(err.contains("pglite-dist"), "{err}");
+            }
+            Some(d) => {
+                let elf = build(&spec).unwrap();
+                assert!(
+                    elf.len() >= d.embed_len(),
+                    "embed should pack dist bytes into the ELF"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn wasm_elf_embeds_g6ui_and_ui_wasm() {
         let spec = BoardSpec::from_json_str(
             r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"wasm":{"enable":true,"jit":true}}}"#,
@@ -405,6 +483,9 @@ mod tests {
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
         let cell = g6b_kernel::guest_cell_scanout(&spec).unwrap();
         assert!(cell.wasm_executed);
+        assert!(cell.fetch_bios);
+        assert!(cell.window_interned);
+        assert!(cell.gl_presented);
         assert!(
             cell.diagnostics
                 .iter()
@@ -414,8 +495,50 @@ mod tests {
         );
         let s = smoke_cell(&spec).unwrap();
         assert!(s.console.contains("VIRTIO-PAINT\n"), "{}", s.console);
+        let paints = s.console.matches("VIRTIO-PAINT\n").count();
+        assert!(
+            paints >= 2,
+            "UART Ui must re-inject svelte-d tiles, not only boot SKIP: paints={paints} {}",
+            s.console
+        );
         assert!(s.cap_nodes > 1, "compact persist from live cell DOM");
         assert_eq!(s.cap_tiles, 0);
+    }
+
+    #[test]
+    fn smoke_cell_arrow_right_still_vio_paints() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let s = smoke_cell_drive(&spec, &[g6b_kernel::GuestCellAction::Key("ArrowRight")]).unwrap();
+        assert!(s.console.contains("VIRTIO-PAINT\n"), "{}", s.console);
+        assert!(s.cap_nodes > 1);
+        assert_eq!(s.cap_tiles, 0);
+    }
+
+    #[test]
+    fn smoke_cell_mbox_ui_paints_svelte_d() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut live = g6b_kernel::GuestCellLive::open(&spec).unwrap();
+        let entry = load_addr(&spec).unwrap();
+        let text = payload_text(&spec);
+        let module = payload_module(&spec, &text).unwrap();
+        let s = g6b_asm::exec::run_module_web_feed_kick(&spec, &module, entry, 0, b'U', &mut live)
+            .unwrap();
+        assert_eq!(
+            s.mbox_rsp,
+            g6b_asm::encode::MBOX_RSP_UI,
+            "mailbox Ui RSP {:#x}",
+            s.mbox_rsp
+        );
+        assert!(
+            s.console.contains("VIRTIO-PAINT\n"),
+            "mailbox Ui must pack svelte-d: {}",
+            s.console
+        );
+        assert!(
+            s.console.contains("UI\n") || s.console.contains("UI"),
+            "mailbox Ui shares UART dump: {}",
+            s.console
+        );
     }
 
     #[test]

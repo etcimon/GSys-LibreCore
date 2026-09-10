@@ -40,6 +40,8 @@ impl WasmUi {
                 window_handle: host.window_handle,
                 document_handle: host.document_handle,
                 console_handle: host.console_handle,
+                named_delegates: std::mem::take(&mut host.named_delegates),
+                event_handlers: std::mem::take(&mut host.event_handlers),
             },
         }
     }
@@ -60,6 +62,8 @@ impl WasmUi {
             window_handle: host.window_handle,
             document_handle: host.document_handle,
             console_handle: host.console_handle,
+            named_delegates: std::mem::take(&mut host.named_delegates),
+            event_handlers: std::mem::take(&mut host.event_handlers),
         };
         self.js_exports = host.js_exports.clone();
     }
@@ -86,8 +90,9 @@ impl WasmUi {
         args: &[i32],
     ) -> Result<WasmCall, String> {
         let persist = self.take_persist();
-        let mut host =
-            KernelHost::attach(ui.dom, ui.router, ui.spec, persist, ui.timers, ui.now_ns);
+        let mut host = KernelHost::attach(
+            ui.dom, ui.router, ui.spec, persist, ui.timers, ui.now_ns, ui.store,
+        );
         host.js_exports = self.js_exports.clone();
         let results = g6b_wasm::run_with_fuel_mut(
             &mut self.module,
@@ -116,8 +121,9 @@ impl WasmUi {
         event: &g6b_dom::Event,
     ) -> Result<WasmCall, String> {
         let persist = self.take_persist();
-        let mut host =
-            KernelHost::attach(ui.dom, ui.router, ui.spec, persist, ui.timers, ui.now_ns);
+        let mut host = KernelHost::attach(
+            ui.dom, ui.router, ui.spec, persist, ui.timers, ui.now_ns, ui.store,
+        );
         host.js_exports = self.js_exports.clone();
         let event_handle = host.intern_event(event)?;
         let args = if listener_handle != 0 {
@@ -141,6 +147,49 @@ impl WasmUi {
             diagnostics,
         })
     }
+
+    /// Re-enter a D delegate the way svelte-engine does: export
+    /// `jsCallback(ctx, fun, argHandle)`, else `table.get(ptr)(ctx, handle)`.
+    pub(crate) fn call_js_callback(
+        &mut self,
+        ui: UiBorrow<'_>,
+        ctx: i32,
+        ptr: i32,
+        event: &g6b_dom::Event,
+    ) -> Result<WasmCall, String> {
+        let persist = self.take_persist();
+        let mut host = KernelHost::attach(
+            ui.dom, ui.router, ui.spec, persist, ui.timers, ui.now_ns, ui.store,
+        );
+        host.js_exports = self.js_exports.clone();
+        let event_handle = host.intern_event(event)?;
+        let results = if let Some(idx) = g6b_wasm::export_func(&self.module, "jsCallback") {
+            g6b_wasm::run_with_fuel_mut(
+                &mut self.module,
+                idx,
+                &[ctx, ptr, event_handle],
+                &mut host,
+                g6b_wasm::DEFAULT_FUEL,
+            )
+        } else {
+            let func = g6b_wasm::table_funcref(&self.module, ptr)?;
+            g6b_wasm::run_with_fuel_mut(
+                &mut self.module,
+                func,
+                &[ctx, event_handle],
+                &mut host,
+                g6b_wasm::DEFAULT_FUEL,
+            )
+        };
+        let default_prevented = host.last_prevent_default;
+        let diagnostics = std::mem::take(&mut host.diagnostics);
+        self.restore(&mut host);
+        Ok(WasmCall {
+            results: results?,
+            default_prevented,
+            diagnostics,
+        })
+    }
 }
 
 /// Live session borrows for one wasm re-entry (B89).
@@ -150,6 +199,7 @@ pub(crate) struct UiBorrow<'a> {
     pub spec: &'a BoardSpec,
     pub timers: &'a mut TimerHeap,
     pub now_ns: u64,
+    pub store: Option<&'a mut g6b_pglite::StoreRegistry>,
 }
 
 /// Result of [`WasmUi::call`].
@@ -164,6 +214,7 @@ pub(crate) struct WasmCall {
 pub struct RouterPort<'a> {
     pub router: &'a Router,
     pub spec: &'a BoardSpec,
+    pub store: Option<&'a mut dyn g6b_pglite::StorePort>,
 }
 
 impl KernelPort for RouterPort<'_> {
@@ -182,7 +233,11 @@ impl KernelPort for RouterPort<'_> {
         {
             return Err(format!("disabled or unavailable: {url}"));
         }
-        let resp = self.router.fetch_get(path);
+        let store = self.store.as_mut().map(|s| {
+            let s: &mut dyn g6b_pglite::StorePort = &mut **s;
+            s
+        });
+        let resp = self.router.fetch_with_body("GET", path, &[], store);
         Ok((resp.status, resp.body_str()))
     }
 
@@ -212,6 +267,7 @@ mod tests {
         let mut port = RouterPort {
             router: &router,
             spec: &spec,
+            store: None,
         };
         let (status, body) = port.fetch_text("/ui/bios-ui.css").unwrap();
         assert_eq!(status, 200);

@@ -7,7 +7,7 @@ validated against LibreCore (`PLAN.md` §0–§3).
 | Doc | Role |
 |---|---|
 | `PLAN.md` | Living plan + current state (B0–B59, rewrite-from-spec) |
-| `plan-endpoint.md` | **Endpoint.** BIOS web engine: one BrowserSession, one LDC cell; B82–B91 landed, B92 later |
+| `plan-endpoint.md` | **Endpoint.** BIOS web engine: one BrowserSession, one LDC cell; B82–B91c landed, B92 later |
 | `plan-iframe.md` | **Later.** Windowing, Firefox-like tabs, iframe sessions; local app path or remote URL (no `-netdev`) |
 | `KERNEL-RV.md` | TempleOS/ZealOS kernel services → RISC-V S-mode / OpenSBI / PLIC |
 | `ZEAL.md` | Spec contracts: keep / rewrite / refuse (`kernel-spec/` forks) |
@@ -25,6 +25,7 @@ validated against LibreCore (`PLAN.md` §0–§3).
 | `MENUS.md` | Inferred setup tree; HolyC-UI ⊥ browser-UI; topology + uncore |
 | `FILE-SERVER.md` | HolyC kernel HTTP(S) file server for HTML/JS/WASM |
 | `g6b-pglite.md` | **Design.** First-party registry store + optional Electric PGlite dist wasm; HolyC / `/bios/store` / D `PGLite`. S0 (PR1) submodule + npm pin. |
+| `g6b-pglite-svelte.md` | **Tutorial.** svelte-d `pgliteOpen` / `await pgliteStat` / USB live / SQL; parseSvelte call forms. |
 | `g6b-store-instances.md` | **Identity.** UUID-led instances, purpose-based BIOS UI, deletable memory, USB key import/export; later iframe bind. |
 
 Host pointer: [`../../architecture/g6lc-bios/README.md`](../../architecture/g6lc-bios/README.md).

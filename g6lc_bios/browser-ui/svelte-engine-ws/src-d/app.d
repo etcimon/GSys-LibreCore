@@ -15,8 +15,15 @@ nothrow:
   void onMount() { }
   enum g6bStaticDom = true;
   void ready() {
+    auto root = this.getNamedNode.node;
+    Handle menu_main_body = 0;
+    Handle menu_cpu_body = 0;
+    Handle menu_memory_body = 0;
+    Handle menu_uncore_body = 0;
+    Handle menu_devices_body = 0;
+    Handle menu_boot_body = 0;
+    Handle menu_settings_body = 0;
     try {
-      auto root = this.getNamedNode.node;
       setProperty(root, "id", "bios-ui");
       setProperty(root, "data-start-menu", "main");
       setProperty(root, "data-worker-url", "WORKER_URL_PLACEHOLDER");
@@ -166,7 +173,7 @@ nothrow:
       appendChild(n2, n5);
       appendChild(n1, n2);
       appendChild(n0, n1);
-      auto menu_main_body = createElement(NodeType.tbody);
+      menu_main_body = createElement(NodeType.tbody);
       setProperty(menu_main_body, "id", "menu-main-body");
       appendChild(n0, menu_main_body);
       appendChild(menu_main, n0);
@@ -196,7 +203,7 @@ nothrow:
       appendChild(n8, n11);
       appendChild(n7, n8);
       appendChild(n6, n7);
-      auto menu_cpu_body = createElement(NodeType.tbody);
+      menu_cpu_body = createElement(NodeType.tbody);
       setProperty(menu_cpu_body, "id", "menu-cpu-body");
       appendChild(n6, menu_cpu_body);
       appendChild(menu_cpu, n6);
@@ -226,7 +233,7 @@ nothrow:
       appendChild(n14, n17);
       appendChild(n13, n14);
       appendChild(n12, n13);
-      auto menu_memory_body = createElement(NodeType.tbody);
+      menu_memory_body = createElement(NodeType.tbody);
       setProperty(menu_memory_body, "id", "menu-memory-body");
       appendChild(n12, menu_memory_body);
       appendChild(menu_memory, n12);
@@ -256,7 +263,7 @@ nothrow:
       appendChild(n20, n23);
       appendChild(n19, n20);
       appendChild(n18, n19);
-      auto menu_uncore_body = createElement(NodeType.tbody);
+      menu_uncore_body = createElement(NodeType.tbody);
       setProperty(menu_uncore_body, "id", "menu-uncore-body");
       appendChild(n18, menu_uncore_body);
       appendChild(menu_uncore, n18);
@@ -286,7 +293,7 @@ nothrow:
       appendChild(n26, n29);
       appendChild(n25, n26);
       appendChild(n24, n25);
-      auto menu_devices_body = createElement(NodeType.tbody);
+      menu_devices_body = createElement(NodeType.tbody);
       setProperty(menu_devices_body, "id", "menu-devices-body");
       appendChild(n24, menu_devices_body);
       appendChild(menu_devices, n24);
@@ -316,7 +323,7 @@ nothrow:
       appendChild(n32, n35);
       appendChild(n31, n32);
       appendChild(n30, n31);
-      auto menu_boot_body = createElement(NodeType.tbody);
+      menu_boot_body = createElement(NodeType.tbody);
       setProperty(menu_boot_body, "id", "menu-boot-body");
       appendChild(n30, menu_boot_body);
       appendChild(menu_boot, n30);
@@ -346,7 +353,7 @@ nothrow:
       appendChild(n38, n41);
       appendChild(n37, n38);
       appendChild(n36, n37);
-      auto menu_settings_body = createElement(NodeType.tbody);
+      menu_settings_body = createElement(NodeType.tbody);
       setProperty(menu_settings_body, "id", "menu-settings-body");
       appendChild(n36, menu_settings_body);
       appendChild(menu_settings, n36);
@@ -360,207 +367,237 @@ nothrow:
       setProperty(bios_hint, "innerText", "ArrowLeft/ArrowRight Select tab Home/End First/Last F10 Refresh (not save) Read-only BoardSpec view");
       appendChild(n42, bios_hint);
       appendChild(root, n42);
-      auto p0 = g6b_fetch("/bios/menu");
-      auto p1 = g6b_fetch("/bios/menu/main");
-      auto p2 = g6b_fetch("/bios/menu/cpu");
-      auto p3 = g6b_fetch("/bios/menu/memory");
-      auto p4 = g6b_fetch("/bios/menu/uncore");
-      auto p5 = g6b_fetch("/bios/menu/devices");
-      auto p6 = g6b_fetch("/bios/menu/boot");
-      auto p7 = g6b_fetch("/bios/menu/settings");
-      auto p8 = g6b_fetch("/bios/clocks");
-      auto p9 = g6b_fetch("/bios/bootloader");
-      auto p10 = g6b_fetch("/bios/display");
-      auto p11 = g6b_fetch("/bios/settings");
-      auto p12 = g6b_fetch("/bios/settings/usb");
-      auto p13 = g6b_fetch("/bios/usb/ls");
-      auto p14 = g6b_fetch("/bios/files");
-      auto p15 = g6b_fetch("/bios/files/fat32");
-      auto p16 = g6b_fetch("/bios/files/ntfs");
-      auto p17 = g6b_fetch("/bios/files/ext4");
-      g6b_holyc("Menu(\"main\")");
-      g6b_register("/bios/custom", "POST");
-      if (libwasm_await_supported()) {
-    libwasm_await__void(p1);
-    auto json_p1 = libwasm_await_value();
-    auto j1 = parseJSON!ThreadMemAllocator(json_p1);
-    foreach (_; j1) {
-      string id = "", label = "", value = "";
-      bool writable = false;
-      foreach (key; j1.byKey) {
-        if (key == "id") id = j1.read!string;
-        else if (key == "label") label = j1.read!string;
-        else if (key == "value") value = j1.read!string;
-        else if (key == "writable") writable = j1.read!bool;
-        else j1.skipValue();
-      }
-      auto tr = createElement(NodeType.tr);
-      auto td0 = createElement(NodeType.td);
-      setProperty(td0, "innerText", label);
-      appendChild(tr, td0);
-      auto td1 = createElement(NodeType.td);
-      setProperty(td1, "innerText", value);
-      appendChild(tr, td1);
-      auto td2 = createElement(NodeType.td);
-      setProperty(td2, "innerText", writable ? "RW" : "R");
-      appendChild(tr, td2);
-      appendChild(menu_main_body, tr);
-    }
-    libwasm_await__void(p2);
-    auto json_p2 = libwasm_await_value();
-    auto j2 = parseJSON!ThreadMemAllocator(json_p2);
-    foreach (_; j2) {
-      string id = "", label = "", value = "";
-      bool writable = false;
-      foreach (key; j2.byKey) {
-        if (key == "id") id = j2.read!string;
-        else if (key == "label") label = j2.read!string;
-        else if (key == "value") value = j2.read!string;
-        else if (key == "writable") writable = j2.read!bool;
-        else j2.skipValue();
-      }
-      auto tr = createElement(NodeType.tr);
-      auto td0 = createElement(NodeType.td);
-      setProperty(td0, "innerText", label);
-      appendChild(tr, td0);
-      auto td1 = createElement(NodeType.td);
-      setProperty(td1, "innerText", value);
-      appendChild(tr, td1);
-      auto td2 = createElement(NodeType.td);
-      setProperty(td2, "innerText", writable ? "RW" : "R");
-      appendChild(tr, td2);
-      appendChild(menu_cpu_body, tr);
-    }
-    libwasm_await__void(p3);
-    auto json_p3 = libwasm_await_value();
-    auto j3 = parseJSON!ThreadMemAllocator(json_p3);
-    foreach (_; j3) {
-      string id = "", label = "", value = "";
-      bool writable = false;
-      foreach (key; j3.byKey) {
-        if (key == "id") id = j3.read!string;
-        else if (key == "label") label = j3.read!string;
-        else if (key == "value") value = j3.read!string;
-        else if (key == "writable") writable = j3.read!bool;
-        else j3.skipValue();
-      }
-      auto tr = createElement(NodeType.tr);
-      auto td0 = createElement(NodeType.td);
-      setProperty(td0, "innerText", label);
-      appendChild(tr, td0);
-      auto td1 = createElement(NodeType.td);
-      setProperty(td1, "innerText", value);
-      appendChild(tr, td1);
-      auto td2 = createElement(NodeType.td);
-      setProperty(td2, "innerText", writable ? "RW" : "R");
-      appendChild(tr, td2);
-      appendChild(menu_memory_body, tr);
-    }
-    libwasm_await__void(p4);
-    auto json_p4 = libwasm_await_value();
-    auto j4 = parseJSON!ThreadMemAllocator(json_p4);
-    foreach (_; j4) {
-      string id = "", label = "", value = "";
-      bool writable = false;
-      foreach (key; j4.byKey) {
-        if (key == "id") id = j4.read!string;
-        else if (key == "label") label = j4.read!string;
-        else if (key == "value") value = j4.read!string;
-        else if (key == "writable") writable = j4.read!bool;
-        else j4.skipValue();
-      }
-      auto tr = createElement(NodeType.tr);
-      auto td0 = createElement(NodeType.td);
-      setProperty(td0, "innerText", label);
-      appendChild(tr, td0);
-      auto td1 = createElement(NodeType.td);
-      setProperty(td1, "innerText", value);
-      appendChild(tr, td1);
-      auto td2 = createElement(NodeType.td);
-      setProperty(td2, "innerText", writable ? "RW" : "R");
-      appendChild(tr, td2);
-      appendChild(menu_uncore_body, tr);
-    }
-    libwasm_await__void(p5);
-    auto json_p5 = libwasm_await_value();
-    auto j5 = parseJSON!ThreadMemAllocator(json_p5);
-    foreach (_; j5) {
-      string id = "", label = "", value = "";
-      bool writable = false;
-      foreach (key; j5.byKey) {
-        if (key == "id") id = j5.read!string;
-        else if (key == "label") label = j5.read!string;
-        else if (key == "value") value = j5.read!string;
-        else if (key == "writable") writable = j5.read!bool;
-        else j5.skipValue();
-      }
-      auto tr = createElement(NodeType.tr);
-      auto td0 = createElement(NodeType.td);
-      setProperty(td0, "innerText", label);
-      appendChild(tr, td0);
-      auto td1 = createElement(NodeType.td);
-      setProperty(td1, "innerText", value);
-      appendChild(tr, td1);
-      auto td2 = createElement(NodeType.td);
-      setProperty(td2, "innerText", writable ? "RW" : "R");
-      appendChild(tr, td2);
-      appendChild(menu_devices_body, tr);
-    }
-    libwasm_await__void(p6);
-    auto json_p6 = libwasm_await_value();
-    auto j6 = parseJSON!ThreadMemAllocator(json_p6);
-    foreach (_; j6) {
-      string id = "", label = "", value = "";
-      bool writable = false;
-      foreach (key; j6.byKey) {
-        if (key == "id") id = j6.read!string;
-        else if (key == "label") label = j6.read!string;
-        else if (key == "value") value = j6.read!string;
-        else if (key == "writable") writable = j6.read!bool;
-        else j6.skipValue();
-      }
-      auto tr = createElement(NodeType.tr);
-      auto td0 = createElement(NodeType.td);
-      setProperty(td0, "innerText", label);
-      appendChild(tr, td0);
-      auto td1 = createElement(NodeType.td);
-      setProperty(td1, "innerText", value);
-      appendChild(tr, td1);
-      auto td2 = createElement(NodeType.td);
-      setProperty(td2, "innerText", writable ? "RW" : "R");
-      appendChild(tr, td2);
-      appendChild(menu_boot_body, tr);
-    }
-    libwasm_await__void(p7);
-    auto json_p7 = libwasm_await_value();
-    auto j7 = parseJSON!ThreadMemAllocator(json_p7);
-    foreach (_; j7) {
-      string id = "", label = "", value = "";
-      bool writable = false;
-      foreach (key; j7.byKey) {
-        if (key == "id") id = j7.read!string;
-        else if (key == "label") label = j7.read!string;
-        else if (key == "value") value = j7.read!string;
-        else if (key == "writable") writable = j7.read!bool;
-        else j7.skipValue();
-      }
-      auto tr = createElement(NodeType.tr);
-      auto td0 = createElement(NodeType.td);
-      setProperty(td0, "innerText", label);
-      appendChild(tr, td0);
-      auto td1 = createElement(NodeType.td);
-      setProperty(td1, "innerText", value);
-      appendChild(tr, td1);
-      auto td2 = createElement(NodeType.td);
-      setProperty(td2, "innerText", writable ? "RW" : "R");
-      appendChild(tr, td2);
-      appendChild(menu_settings_body, tr);
-    }
-      }
+      auto store = createElement(NodeType.section);
+      setProperty(store, "id", "store");
+      setProperty(store, "aria-labelledby", "store-title");
+      auto store_title = createElement(NodeType.h2);
+      setProperty(store_title, "id", "store-title");
+      setProperty(store_title, "innerText", "Store");
+      appendChild(store, store_title);
+      auto store_status = createElement(NodeType.p);
+      setProperty(store_status, "id", "store-status");
+      appendChild(store, store_status);
+      appendChild(root, store);
     } catch (Exception e) {
-      // bounded catch: rejection state is exposed through the
-      // libwasm host; the app may inspect or log if it chooses.
+      // bounded catch: DOM construct
     }
+    auto p0 = g6b_fetch("/bios/menu");
+    auto p1 = g6b_fetch("/bios/menu/main");
+    auto p2 = g6b_fetch("/bios/menu/cpu");
+    auto p3 = g6b_fetch("/bios/menu/memory");
+    auto p4 = g6b_fetch("/bios/menu/uncore");
+    auto p5 = g6b_fetch("/bios/menu/devices");
+    auto p6 = g6b_fetch("/bios/menu/boot");
+    auto p7 = g6b_fetch("/bios/menu/settings");
+    auto p8 = g6b_fetch("/bios/clocks");
+    auto p9 = g6b_fetch("/bios/bootloader");
+    auto p10 = g6b_fetch("/bios/display");
+    auto p11 = g6b_fetch("/bios/settings");
+    auto p12 = g6b_fetch("/bios/settings/usb");
+    auto p13 = g6b_fetch("/bios/usb/ls");
+    auto p14 = g6b_fetch("/bios/files");
+    auto p15 = g6b_fetch("/bios/files/fat32");
+    auto p16 = g6b_fetch("/bios/files/ntfs");
+    auto p17 = g6b_fetch("/bios/files/ext4");
+    g6b_holyc("Menu(\"main\")");
+    g6b_register("/bios/custom", "POST");
+    auto p18 = g6b_fetch("/bios/store");
+    if (libwasm_await_supported()) {
+      libwasm_await__void(p1);
+      try {
+        auto json_p1 = libwasm_await_value();
+        auto j1 = parseJSON!ThreadMemAllocator(json_p1);
+        foreach (_; j1) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j1.byKey) {
+            if (key == "id") id = j1.read!string;
+            else if (key == "label") label = j1.read!string;
+            else if (key == "value") value = j1.read!string;
+            else if (key == "writable") writable = j1.read!bool;
+            else j1.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          auto td2 = createElement(NodeType.td);
+          setProperty(td2, "innerText", writable ? "RW" : "R");
+          appendChild(tr, td2);
+          appendChild(menu_main_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p2);
+      try {
+        auto json_p2 = libwasm_await_value();
+        auto j2 = parseJSON!ThreadMemAllocator(json_p2);
+        foreach (_; j2) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j2.byKey) {
+            if (key == "id") id = j2.read!string;
+            else if (key == "label") label = j2.read!string;
+            else if (key == "value") value = j2.read!string;
+            else if (key == "writable") writable = j2.read!bool;
+            else j2.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          auto td2 = createElement(NodeType.td);
+          setProperty(td2, "innerText", writable ? "RW" : "R");
+          appendChild(tr, td2);
+          appendChild(menu_cpu_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p3);
+      try {
+        auto json_p3 = libwasm_await_value();
+        auto j3 = parseJSON!ThreadMemAllocator(json_p3);
+        foreach (_; j3) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j3.byKey) {
+            if (key == "id") id = j3.read!string;
+            else if (key == "label") label = j3.read!string;
+            else if (key == "value") value = j3.read!string;
+            else if (key == "writable") writable = j3.read!bool;
+            else j3.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          auto td2 = createElement(NodeType.td);
+          setProperty(td2, "innerText", writable ? "RW" : "R");
+          appendChild(tr, td2);
+          appendChild(menu_memory_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p4);
+      try {
+        auto json_p4 = libwasm_await_value();
+        auto j4 = parseJSON!ThreadMemAllocator(json_p4);
+        foreach (_; j4) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j4.byKey) {
+            if (key == "id") id = j4.read!string;
+            else if (key == "label") label = j4.read!string;
+            else if (key == "value") value = j4.read!string;
+            else if (key == "writable") writable = j4.read!bool;
+            else j4.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          auto td2 = createElement(NodeType.td);
+          setProperty(td2, "innerText", writable ? "RW" : "R");
+          appendChild(tr, td2);
+          appendChild(menu_uncore_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p5);
+      try {
+        auto json_p5 = libwasm_await_value();
+        auto j5 = parseJSON!ThreadMemAllocator(json_p5);
+        foreach (_; j5) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j5.byKey) {
+            if (key == "id") id = j5.read!string;
+            else if (key == "label") label = j5.read!string;
+            else if (key == "value") value = j5.read!string;
+            else if (key == "writable") writable = j5.read!bool;
+            else j5.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          auto td2 = createElement(NodeType.td);
+          setProperty(td2, "innerText", writable ? "RW" : "R");
+          appendChild(tr, td2);
+          appendChild(menu_devices_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p6);
+      try {
+        auto json_p6 = libwasm_await_value();
+        auto j6 = parseJSON!ThreadMemAllocator(json_p6);
+        foreach (_; j6) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j6.byKey) {
+            if (key == "id") id = j6.read!string;
+            else if (key == "label") label = j6.read!string;
+            else if (key == "value") value = j6.read!string;
+            else if (key == "writable") writable = j6.read!bool;
+            else j6.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          auto td2 = createElement(NodeType.td);
+          setProperty(td2, "innerText", writable ? "RW" : "R");
+          appendChild(tr, td2);
+          appendChild(menu_boot_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p7);
+      try {
+        auto json_p7 = libwasm_await_value();
+        auto j7 = parseJSON!ThreadMemAllocator(json_p7);
+        foreach (_; j7) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j7.byKey) {
+            if (key == "id") id = j7.read!string;
+            else if (key == "label") label = j7.read!string;
+            else if (key == "value") value = j7.read!string;
+            else if (key == "writable") writable = j7.read!bool;
+            else j7.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          auto td2 = createElement(NodeType.td);
+          setProperty(td2, "innerText", writable ? "RW" : "R");
+          appendChild(tr, td2);
+          appendChild(menu_settings_body, tr);
+        }
+      } catch (Exception e) {}
+    }
+    auto db = PgLite("memory://registry");
+    db.waitReady();
+    db.exec("CREATE TABLE IF NOT EXISTS bios_ui (k TEXT PRIMARY KEY, v TEXT)");
+    auto rows = db.queryAsync("SELECT k, v FROM bios_ui", "[]");
+    setProperty(store_status, "innerText", JSON.stringify(rows));
   }
   void onUnmount() { }
 }

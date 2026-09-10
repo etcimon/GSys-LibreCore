@@ -12,9 +12,8 @@ use g6b_dom::{Event, EventHost, EventInit, Node};
 use g6b_holyc::{eval_src, Program, ReplResult};
 use g6b_html::{parse, script_sources, to_uart_lines};
 use g6b_http::Router;
-use g6b_js::JsValue;
-use g6b_js::Op;
-use g6b_spec::BoardSpec;
+use g6b_js::{HostDispatch, JsValue, LodashError, LodashParam, Op};
+use g6b_spec::{parse_json, stringify_json, BoardSpec, Json};
 use g6b_wasm::{Host, Ldexec, LdexecInit, LibwasmValue, ObjectKind, ObjectTable};
 use std::collections::BTreeMap;
 
@@ -45,6 +44,8 @@ pub const LOOPBACK_BANNER: &str = "G6LC-BIOS LOOPBACK-MBOX proto=holyc-repl not_
 struct KernelHost<'a> {
     dom: &'a mut Node,
     router: &'a Router,
+    store: Option<&'a mut g6b_pglite::StoreRegistry>,
+    pglite_handle: Option<i32>,
     spec: &'a BoardSpec,
     diagnostics: Vec<String>,
     handles: Vec<Node>,
@@ -61,11 +62,19 @@ struct KernelHost<'a> {
     /// when the guest indexes into it (see `child_dom_handle`).
     child_handles: BTreeMap<i32, Vec<i32>>,
     pending_slot: Option<i32>,
+    /// Bounded `env.await` / `env.throw` / `env.catch` slots (same Host
+    /// import set as the VGA `start_ops` face). 0 idle, 1 pending, 2 resolved,
+    /// 3 rejected. The LDC cell's D await uses `libwasm_await__void` instead.
+    await_slots: [u8; 4],
     objects: ObjectTable<LibwasmValue>,
     /// Event listeners registered by the libwasm `_start` call and collected
     /// after `run_start` returns so `BrowserSession` can own them.
     pending_event_listeners: Vec<(String, String, u64, bool)>,
     pending_event_removals: Vec<u64>,
+    /// D `Object_Call_EventHandler__void` listeners (`onclick` → `jsCallback`).
+    pending_event_delegates: Vec<(String, String, i32, i32, bool)>,
+    /// `(handle, prop) → (ctx, ptr)` for `Object_Getter__EventHandler`.
+    event_handlers: BTreeMap<(i32, String), (i32, i32)>,
     last_await_failed: bool,
     last_await_error: String,
     last_await_value: String,
@@ -81,6 +90,34 @@ struct KernelHost<'a> {
     last_prevent_default: bool,
     timers: &'a mut crate::timers::TimerHeap,
     now_ns: u64,
+    /// Named D delegates from `libwasm_set__function` (`exportDelegate`).
+    named_delegates: BTreeMap<String, (i32, i32)>,
+}
+
+fn event_type_from_handler_prop(prop: &str) -> &str {
+    prop.strip_prefix("on")
+        .filter(|s| !s.is_empty())
+        .unwrap_or(prop)
+}
+
+fn is_input_event_type(ty: &str) -> bool {
+    matches!(
+        ty,
+        "click"
+            | "keydown"
+            | "keyup"
+            | "mousemove"
+            | "mouseover"
+            | "pointermove"
+            | "pointerdown"
+            | "pointerup"
+            | "pointerclick"
+    )
+}
+
+fn named_delegate_matches_event(name: &str, event_type: &str) -> bool {
+    let ty = event_type_from_handler_prop(name);
+    is_input_event_type(ty) && ty.eq_ignore_ascii_case(event_type)
 }
 
 /// Node at `path` below `root` (each element is a `children` index).
@@ -547,6 +584,8 @@ pub(crate) struct WasmPersist {
     window_handle: Option<i32>,
     document_handle: Option<i32>,
     console_handle: Option<i32>,
+    named_delegates: BTreeMap<String, (i32, i32)>,
+    event_handlers: BTreeMap<(i32, String), (i32, i32)>,
 }
 
 impl Default for WasmPersist {
@@ -561,6 +600,8 @@ impl Default for WasmPersist {
             window_handle: None,
             document_handle: None,
             console_handle: None,
+            named_delegates: BTreeMap::new(),
+            event_handlers: BTreeMap::new(),
         }
     }
 }
@@ -573,10 +614,13 @@ impl<'a> KernelHost<'a> {
         persist: WasmPersist,
         timers: &'a mut crate::timers::TimerHeap,
         now_ns: u64,
+        store: Option<&'a mut g6b_pglite::StoreRegistry>,
     ) -> Self {
         Self {
             dom,
             router,
+            store,
+            pglite_handle: None,
             spec,
             diagnostics: Vec::new(),
             handles: persist.handles,
@@ -584,9 +628,12 @@ impl<'a> KernelHost<'a> {
             placements: persist.placements,
             child_handles: persist.child_handles,
             pending_slot: None,
+            await_slots: [0; 4],
             objects: persist.objects,
             pending_event_listeners: Vec::new(),
             pending_event_removals: Vec::new(),
+            pending_event_delegates: Vec::new(),
+            event_handlers: persist.event_handlers,
             last_await_failed: false,
             last_await_error: String::new(),
             last_await_value: String::new(),
@@ -598,6 +645,7 @@ impl<'a> KernelHost<'a> {
             last_prevent_default: false,
             timers,
             now_ns,
+            named_delegates: persist.named_delegates,
         }
     }
 
@@ -608,6 +656,7 @@ impl<'a> KernelHost<'a> {
         mount_path: Vec<usize>,
         timers: &'a mut crate::timers::TimerHeap,
         now_ns: u64,
+        store: Option<&'a mut g6b_pglite::StoreRegistry>,
     ) -> Self {
         Self::attach(
             dom,
@@ -619,6 +668,7 @@ impl<'a> KernelHost<'a> {
             },
             timers,
             now_ns,
+            store,
         )
     }
 
@@ -890,7 +940,8 @@ impl<'a> KernelHost<'a> {
         index: Option<usize>,
     ) -> Result<usize, String> {
         if child == parent || self.handle_is_ancestor(child, parent) {
-            return Err("WASM invalid DOM hierarchy".into());
+            // Node.webidl appendChild [Throws] → DOMException.HIERARCHY_REQUEST_ERR.
+            return Err(g6b_wasm::hierarchy_request_append_child());
         }
         if self.handles.len() + 2 >= g6b_wasm::MAX_OBJECTS {
             return Err("WASM DOM handle budget exceeded".into());
@@ -2263,6 +2314,229 @@ impl<'a> KernelHost<'a> {
         self.objects.add(value)
     }
 
+    fn ensure_pglite_factory(&mut self) -> Result<i32, LodashError> {
+        if let Some(h) = self.pglite_handle {
+            return Ok(h);
+        }
+        let h = self
+            .intern_value(LibwasmValue::empty(ObjectKind::StoreFactory))
+            .map_err(LodashError::Thrown)?;
+        self.pglite_handle = Some(h);
+        Ok(h)
+    }
+
+    fn intern_store_uuid(&mut self, uuid: g6b_pglite::StoreUuid) -> Result<i32, LodashError> {
+        let mut props = std::collections::HashMap::new();
+        props.insert("uuid".into(), LibwasmValue::String(uuid.hyphenated()));
+        self.intern_value(LibwasmValue::Object {
+            kind: ObjectKind::Store,
+            props,
+        })
+        .map_err(LodashError::Thrown)
+    }
+
+    fn object_kind(&self, handle: i32) -> Option<ObjectKind> {
+        match self.get_object(handle).ok()? {
+            LibwasmValue::Object { kind, .. } => Some(*kind),
+            _ => None,
+        }
+    }
+
+    fn store_uuid_of(&self, handle: i32) -> Result<g6b_pglite::StoreUuid, LodashError> {
+        match self.get_object(handle) {
+            Ok(LibwasmValue::Object {
+                kind: ObjectKind::Store,
+                props,
+            }) => {
+                let s = match props.get("uuid") {
+                    Some(LibwasmValue::String(s)) => s.clone(),
+                    _ => return Err(LodashError::UnsupportedMethod("store".into())),
+                };
+                g6b_pglite::StoreUuid::parse(&s).map_err(|e| LodashError::Thrown(e.to_string()))
+            }
+            _ => Err(LodashError::UnsupportedMethod("store".into())),
+        }
+    }
+
+    fn store_reg(&mut self) -> Result<&mut g6b_pglite::StoreRegistry, LodashError> {
+        self.store
+            .as_deref_mut()
+            .ok_or_else(|| LodashError::EvalRefused("window.pglite".into()))
+    }
+
+    fn param_js_str(params: &[LodashParam], i: usize) -> Option<String> {
+        match params.get(i) {
+            Some(LodashParam::Value(JsValue::Str(s))) => Some(s.clone()),
+            Some(LodashParam::Value(JsValue::Undefined | JsValue::Null)) => None,
+            Some(LodashParam::Value(v)) => Some(v.to_js_string()),
+            _ => None,
+        }
+    }
+
+    fn json_result(j: Json) -> JsValue {
+        JsValue::Str(stringify_json(&j))
+    }
+
+    fn store_err(e: g6b_pglite::StoreError) -> JsValue {
+        Self::json_result(e.to_json())
+    }
+
+    fn store_query_result(r: Result<g6b_pglite::QueryResult, g6b_pglite::StoreError>) -> JsValue {
+        match r {
+            Ok(q) => Self::json_result(q.to_json()),
+            Err(e) => Self::store_err(e),
+        }
+    }
+
+    fn open_store(&mut self, data_dir: Option<&str>) -> Result<JsValue, LodashError> {
+        let opened = match data_dir {
+            None | Some("") => self.store_reg()?.open_purpose("registry"),
+            Some(s) => self.store_reg()?.open(s),
+        };
+        match opened {
+            Ok(u) => Ok(JsValue::Handle(self.intern_store_uuid(u)?)),
+            Err(e) => Ok(Self::store_err(e)),
+        }
+    }
+
+    fn factory_attempt(&mut self, params: &[LodashParam]) -> Result<JsValue, LodashError> {
+        const METHODS: &[&str] = &[
+            "query",
+            "queryAsync",
+            "exec",
+            "begin",
+            "commit",
+            "rollback",
+            "close",
+            "waitReady",
+            "dump",
+            "load",
+            "stat",
+            "statAsync",
+            "listen",
+            "unlisten",
+            "notifies",
+            "export",
+            "sql",
+            "transaction",
+        ];
+        let first = Self::param_js_str(params, 0);
+        let method = first.as_deref();
+        if let Some(m) = method.filter(|m| {
+            METHODS.contains(m)
+                && (params.len() > 1
+                    || matches!(
+                        *m,
+                        "begin"
+                            | "commit"
+                            | "rollback"
+                            | "close"
+                            | "waitReady"
+                            | "dump"
+                            | "stat"
+                            | "statAsync"
+                            | "notifies"
+                    ))
+        }) {
+            let opened = self.open_store(None)?;
+            let JsValue::Handle(h) = opened else {
+                return Ok(opened);
+            };
+            return self.store_method(h, m, &params[1..]);
+        }
+        self.open_store(method)
+    }
+
+    fn store_method(
+        &mut self,
+        handle: i32,
+        method: &str,
+        params: &[LodashParam],
+    ) -> Result<JsValue, LodashError> {
+        let uuid = self.store_uuid_of(handle)?;
+        Ok(match method {
+            "query" | "queryAsync" => {
+                let sql = Self::param_js_str(params, 0).unwrap_or_default();
+                let raw = Self::param_js_str(params, 1).unwrap_or_else(|| "[]".into());
+                let parsed = match parse_json(&raw) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(Self::store_err(g6b_pglite::StoreError::syntax(e))),
+                };
+                let binds = match g6b_pglite::params_from_json(&parsed) {
+                    Ok(b) => b,
+                    Err(e) => return Ok(Self::store_err(e)),
+                };
+                Self::store_query_result(self.store_reg()?.query(uuid, &sql, &binds))
+            }
+            "exec" => {
+                let sql = Self::param_js_str(params, 0).unwrap_or_default();
+                Self::store_query_result(self.store_reg()?.exec(uuid, &sql))
+            }
+            "begin" => Self::store_query_result(self.store_reg()?.begin(uuid)),
+            "commit" => Self::store_query_result(self.store_reg()?.commit(uuid)),
+            "rollback" => Self::store_query_result(self.store_reg()?.rollback(uuid)),
+            "close" => match self.store_reg()?.close(uuid) {
+                Ok(()) => Self::store_query_result(Ok(g6b_pglite::QueryResult::empty())),
+                Err(e) => Self::store_err(e),
+            },
+            "waitReady" | "stat" | "statAsync" => match self.store_reg()?.stat(uuid) {
+                Ok(j) => Self::json_result(j),
+                Err(e) => Self::store_err(e),
+            },
+            "dump" => match self.store_reg()?.dump(uuid) {
+                Ok(j) => Self::json_result(j),
+                Err(e) => Self::store_err(e),
+            },
+            "load" => {
+                let raw = Self::param_js_str(params, 0).unwrap_or_else(|| "null".into());
+                let blob = match parse_json(&raw) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(Self::store_err(g6b_pglite::StoreError::syntax(e))),
+                };
+                match self.store_reg()?.load(uuid, &blob) {
+                    Ok(()) => Self::store_query_result(Ok(g6b_pglite::QueryResult::empty())),
+                    Err(e) => Self::store_err(e),
+                }
+            }
+            "listen" => {
+                let ch = Self::param_js_str(params, 0).unwrap_or_default();
+                Self::store_query_result(self.store_reg()?.listen(uuid, &ch))
+            }
+            "unlisten" => {
+                let ch = Self::param_js_str(params, 0);
+                Self::store_query_result(self.store_reg()?.unlisten(uuid, ch.as_deref()))
+            }
+            "notifies" => match self.store_reg()?.notifies(uuid) {
+                Ok(j) => Self::json_result(j),
+                Err(e) => Self::store_err(e),
+            },
+            "export" => {
+                let volume = Self::param_js_str(params, 0).unwrap_or_default();
+                let rel = Self::param_js_str(params, 1);
+                match self.store_reg()?.export(uuid, &volume, rel.as_deref()) {
+                    Ok(()) => Self::json_result({
+                        let mut m = BTreeMap::new();
+                        m.insert("ok".into(), Json::Bool(true));
+                        m.insert("uuid".into(), Json::Str(uuid.to_string()));
+                        Json::Obj(m)
+                    }),
+                    Err(e) => Self::store_err(e),
+                }
+            }
+            "sql" | "transaction" => {
+                Self::store_err(g6b_pglite::StoreError::NotImplemented("callback"))
+            }
+            _ => return Err(LodashError::UnsupportedMethod(method.into())),
+        })
+    }
+
+    fn acc_store_handle(acc: &JsValue, op: &str) -> Result<i32, LodashError> {
+        match acc {
+            JsValue::Handle(h) if *h != 0 => Ok(*h),
+            _ => Err(LodashError::UnsupportedMethod(op.into())),
+        }
+    }
+
     /// Run one Lodash chain through the first-party JS backend (`g6b-js`).
     ///
     /// The kernel host cannot re-enter the wasm instance to run a D iteratee —
@@ -2303,7 +2577,8 @@ impl<'a> KernelHost<'a> {
                 return Ok(value);
             }
         }
-        let value = g6b_js::lodash_execute(init, &commands, None).map_err(|e| e.to_string())?;
+        let value = g6b_js::lodash_execute_host(init, &commands, None, Some(self))
+            .map_err(|e| e.to_string())?;
         self.diagnostics
             .push(format!("WASM-LODASH {} steps", commands.len()));
         Ok(value)
@@ -2364,14 +2639,57 @@ impl<'a> KernelHost<'a> {
     }
 }
 
+impl HostDispatch for KernelHost<'_> {
+    fn intern_name(&mut self, name: &str) -> Result<JsValue, LodashError> {
+        match name {
+            "window.pglite" | "pglite" => {
+                if !self.spec.kernel.store.enable {
+                    return Err(LodashError::EvalRefused(name.into()));
+                }
+                Ok(JsValue::Handle(self.ensure_pglite_factory()?))
+            }
+            "moment" | "window.moment" => Err(LodashError::UnsupportedMethod(name.into())),
+            other => Err(LodashError::EvalRefused(other.into())),
+        }
+    }
+
+    fn attempt(&mut self, acc: &JsValue, params: &[LodashParam]) -> Result<JsValue, LodashError> {
+        let handle = Self::acc_store_handle(acc, "attempt")?;
+        match self.object_kind(handle) {
+            Some(ObjectKind::StoreFactory) => self.factory_attempt(params),
+            Some(ObjectKind::Store) => {
+                let method = match params.first() {
+                    Some(LodashParam::Value(JsValue::Str(s))) => s.clone(),
+                    _ => return Err(LodashError::UnsupportedMethod("attempt".into())),
+                };
+                self.store_method(handle, &method, &params[1..])
+            }
+            _ => Err(LodashError::UnsupportedMethod("attempt".into())),
+        }
+    }
+
+    fn invoke(
+        &mut self,
+        acc: &JsValue,
+        path: &str,
+        params: &[LodashParam],
+    ) -> Result<JsValue, LodashError> {
+        let handle = Self::acc_store_handle(acc, "invoke")?;
+        match self.object_kind(handle) {
+            Some(ObjectKind::Store) => self.store_method(handle, path, params),
+            _ => Err(LodashError::UnsupportedMethod("invoke".into())),
+        }
+    }
+}
+
 /// Drive a libwasm module's `_start` against `host`. Mirrors
-/// `g6b_wasm::run_start` but keeps a larger bounded Asyncify step budget so
-/// artifacts that still carry the control exports can suspend per awaited
-/// fetch; the shipped kernel module is decoded through `decode_libwasm`,
-/// which strips them, so the lane normally runs `_start` in one
-/// `run_with_fuel_mut` pass with synchronous await resolution.
-fn run_libwasm_start(module: &g6b_wasm::Module, host: &mut KernelHost<'_>) -> Result<(), String> {
-    const ASYNCIFY_STACK_SIZE: u32 = 4096;
+/// `g6b_wasm::run_start`: when `asyncify_*` exports are present, each
+/// `libwasm_await__void` Sleeping is settled (`wrapExportFn`) then rewound.
+/// Scratch lives after live linear memory (not at `__heap_base`).
+fn run_libwasm_start(
+    module: &g6b_wasm::Module,
+    host: &mut KernelHost<'_>,
+) -> Result<g6b_wasm::Module, String> {
     const ASYNCIFY_STEP_LIMIT: u32 = 256;
 
     let idx = module
@@ -2413,29 +2731,26 @@ fn run_libwasm_start(module: &g6b_wasm::Module, host: &mut KernelHost<'_>) -> Re
 
     let mut m = module.clone();
     if let Ok(a) = g6b_wasm::Asyncify::new(&m) {
-        let data = heap_base as u32;
-        let stack_end = data + ASYNCIFY_STACK_SIZE;
-        let needed = (stack_end as usize).saturating_sub(m.memory.len());
-        if needed > 0 {
-            let pages = needed.div_ceil(65536) as u32;
-            m.mem_pages += pages;
-            m.memory
-                .resize(m.memory.len() + (pages as usize) * 65536, 0);
-        }
+        let (data, stack_end) = g6b_wasm::reserve_asyncify_scratch(&mut m, heap_base as u32);
         let mut step = a.step(&mut m, idx, &args, data, stack_end, host)?;
         for _ in 0..ASYNCIFY_STEP_LIMIT {
             match step {
-                g6b_wasm::Step::Done(_) => return Ok(()),
+                g6b_wasm::Step::Done(_) => return Ok(m),
                 g6b_wasm::Step::Sleeping { slot, .. } => {
                     host.resolve_slot(slot)?;
-                    step = a.resume(&mut m, idx, &args, data, stack_end, host)?;
+                    step = match a.resume(&mut m, idx, &args, data, stack_end, host) {
+                        Ok(s) => s,
+                        Err(e) if g6b_wasm::is_unhandled_d_abort(&e) => return Ok(m),
+                        Err(e) => return Err(e),
+                    };
                 }
             }
         }
         return Err("asyncify step limit".into());
     }
 
-    g6b_wasm::run_with_fuel_mut(&mut m, idx, &args, host, g6b_wasm::MAX_FUEL).map(|_| ())
+    g6b_wasm::run_with_fuel_mut(&mut m, idx, &args, host, g6b_wasm::MAX_FUEL)?;
+    Ok(m)
 }
 
 impl Host for KernelHost<'_> {
@@ -2485,6 +2800,10 @@ impl Host for KernelHost<'_> {
             let mut port = crate::browser::RouterPort {
                 router: self.router,
                 spec: self.spec,
+                store: match &mut self.store {
+                    Some(s) => Some(&mut **s),
+                    None => None,
+                },
             };
             g6b_wasm::KernelPort::fetch_text(&mut port, url)
         };
@@ -2594,13 +2913,10 @@ impl Host for KernelHost<'_> {
     fn libwasm_await_void(&mut self, slot: i32) -> Result<(), String> {
         self.diagnostics
             .push(format!("WASM-AWAIT-VOID slot={slot}"));
-        // The kernel lane resolves awaits synchronously: `libwasm_module`
-        // strips the `asyncify_*` exports so the interpreter runs `_start`
-        // in a single pass and never unwinds (the interpreter forces
-        // `STATE_UNWINDING` after every `libwasm_await__void` call, so a
-        // suspend/resolve/resume drive would re-suspend the replayed call
-        // forever).  Settle the slot now; the guest reads the value through
-        // `libwasm_await_value` / `libwasm_await_failed` immediately after.
+        // Record the Promise handle. When asyncify exports are present,
+        // `run_libwasm_start` Sleeping/resume (`wrapExportFn`); the
+        // interpreter stop_rewinds on the replayed import.
+        self.pending_slot = Some(slot);
         self.record_await(slot)
     }
 
@@ -2625,6 +2941,17 @@ impl Host for KernelHost<'_> {
     }
 
     fn libwasm_global(&mut self, name: &str) -> Result<i32, String> {
+        if name == "pglite" {
+            if !self.spec.kernel.store.enable {
+                self.diagnostics
+                    .push("WASM-JS-GLOBAL-UNAVAILABLE pglite".into());
+                return Ok(0);
+            }
+            let h = self.ensure_pglite_factory().map_err(|e| e.to_string())?;
+            self.diagnostics
+                .push(format!("WASM-JS-GLOBAL pglite -> {h}"));
+            return Ok(h);
+        }
         let (window, document, console) = self.ensure_js_globals()?;
         let handle = match name {
             "window" => window,
@@ -2642,13 +2969,9 @@ impl Host for KernelHost<'_> {
     }
 
     fn get_root(&mut self) -> Result<i32, String> {
-        // svelte-engine: addObject(document.querySelector('#root')).
-        // Prefer #libwasm-root (BIOS mount), then #root, else the Spa mount.
-        for id in ["libwasm-root", "root"] {
-            if let Some(p) = path_from_root(self.dom, id) {
-                return self.intern_session_node(p);
-            }
-        }
+        // Handle 1 is the Spa mount `run_libwasm_start` placed under
+        // `#libwasm-root`. Interning `#libwasm-root` itself would parent the
+        // Svelte tree beside that mount (empty handle-1 div).
         Ok(1)
     }
 
@@ -2694,6 +3017,59 @@ impl Host for KernelHost<'_> {
         Ok(())
     }
 
+    fn set_function(&mut self, name: &str, ctx: i32, ptr: i32) -> Result<(), String> {
+        self.named_delegates.insert(name.to_string(), (ctx, ptr));
+        self.diagnostics
+            .push(format!("WASM-SET-FUNCTION {name} ctx={ctx} ptr={ptr}"));
+        Ok(())
+    }
+    fn unset_function(&mut self, name: &str) -> Result<(), String> {
+        self.named_delegates.remove(name);
+        self.diagnostics.push(format!("WASM-UNSET-FUNCTION {name}"));
+        Ok(())
+    }
+    fn get_function(&self, name: &str) -> Option<(i32, i32)> {
+        self.named_delegates.get(name).copied()
+    }
+
+    fn set_event_handler(
+        &mut self,
+        handle: i32,
+        prop: &str,
+        defined: bool,
+        ctx: i32,
+        ptr: i32,
+    ) -> Result<(), String> {
+        let ty = event_type_from_handler_prop(prop).to_string();
+        if defined {
+            self.event_handlers
+                .insert((handle, prop.to_string()), (ctx, ptr));
+            let id = self.node(handle).ok().and_then(|n| n.id.clone());
+            if let Some(id) = id {
+                self.pending_event_delegates
+                    .push((id.clone(), ty, ctx, ptr, false));
+                self.diagnostics.push(format!(
+                    "WASM-EVENT-HANDLER {id} {prop} ctx={ctx} ptr={ptr}"
+                ));
+            } else {
+                self.diagnostics.push(format!(
+                    "WASM-EVENT-HANDLER h={handle} {prop} ctx={ctx} ptr={ptr}"
+                ));
+            }
+        } else {
+            self.event_handlers.remove(&(handle, prop.to_string()));
+            self.diagnostics
+                .push(format!("WASM-EVENT-HANDLER-CLEAR h={handle} {prop}"));
+        }
+        Ok(())
+    }
+
+    fn get_event_handler(&self, handle: i32, prop: &str) -> Option<(i32, i32)> {
+        self.event_handlers
+            .get(&(handle, prop.to_string()))
+            .copied()
+    }
+
     fn set_timeout(&mut self, ctx: i32, ptr: i32, ms: i32) -> Result<i32, String> {
         let id = self.timers.set_timeout(ctx, ptr, ms, self.now_ns)?;
         self.diagnostics
@@ -2722,10 +3098,56 @@ impl Host for KernelHost<'_> {
         Ok(id)
     }
 
-    /// The kernel lane resolves awaits in place (see `decode_libwasm`), so
-    /// the guest's `if (libwasm_await_supported())` blocks run synchronously.
+    /// 1 so `if (libwasm_await_supported())` in App.ready runs. With
+    /// asyncify exports the interpreter reports 1 from the exports.
     fn await_supported(&self) -> i32 {
         1
+    }
+
+    fn await_op(&mut self) -> Result<i32, String> {
+        for (i, slot) in self.await_slots.iter_mut().enumerate() {
+            if *slot == 0 {
+                *slot = 1;
+                self.diagnostics.push(format!("WASM-AWAIT pending {i}"));
+                return Ok(i as i32);
+            }
+        }
+        self.diagnostics.push("WASM-AWAIT-REJ full".into());
+        Ok(-1)
+    }
+
+    fn throw_op(&mut self, slot: i32) -> Result<(), String> {
+        let i = if slot < 0 {
+            self.await_slots.iter().rposition(|&s| s == 1)
+        } else {
+            let u = slot as usize;
+            (u < self.await_slots.len()).then_some(u)
+        };
+        let Some(i) = i else {
+            self.diagnostics.push("WASM-THROW miss".into());
+            return Ok(());
+        };
+        self.await_slots[i] = 3;
+        self.diagnostics.push(format!("WASM-THROW {i}"));
+        Ok(())
+    }
+
+    fn note_throw_stack(&mut self, frames: &[String]) {
+        if frames.is_empty() {
+            return;
+        }
+        self.diagnostics
+            .push(format!("WASM-THROW-STACK {}", frames.join(" <- ")));
+    }
+
+    fn catch_op(&mut self, slot: i32) -> Result<i32, String> {
+        let u = slot as usize;
+        if u >= self.await_slots.len() {
+            return Ok(0);
+        }
+        let rejected = i32::from(self.await_slots[u] == 3);
+        self.diagnostics.push(format!("WASM-CATCH {u}={rejected}"));
+        Ok(rejected)
     }
 
     fn await_failed(&self) -> i32 {
@@ -2995,19 +3417,11 @@ fn session_page_html(spec: &BoardSpec) -> String {
     html.replace("</body>", &format!("<script>{script}</script></body>"))
 }
 
-/// Decode the shipped libwasm cell for the kernel lane. The `asyncify_*`
-/// control exports are stripped: the interpreter forces `STATE_UNWINDING`
-/// after every `libwasm_await__void` call, so a suspend/resolve/resume
-/// drive would re-suspend the replayed import forever (the guest re-issues
-/// the call on rewind and there is no host-visible way to settle it
-/// without another unwind). With the exports gone the runtime reports
-/// `await_supported` from the host and `KernelHost::libwasm_await_void`
-/// settles each promise in place — `_start` then runs to completion in a
-/// single pass.
+/// Decode the shipped libwasm cell. Keep `asyncify_*` so `_start` Sleeping/
+/// resume matches `asyncify.ts` wrapExportFn. Scratch is reserved above the
+/// D heap (`reserve_asyncify_scratch`).
 fn decode_libwasm() -> Result<g6b_wasm::Module, String> {
-    let mut m = g6b_wasm::decode(g6b_wasm::bios_ui_libwasm())?;
-    m.exports.retain(|e| !e.name.starts_with("asyncify_"));
-    Ok(m)
+    g6b_wasm::decode(g6b_wasm::bios_ui_libwasm())
 }
 
 fn optional_ui_id(spec: &BoardSpec, id: &str) -> bool {
@@ -3029,6 +3443,11 @@ pub enum Listener {
     Wasm {
         function_index: u32,
         handle: i32,
+    },
+    /// D `EventHandler` / `exportDelegate`: `jsCallback(ctx, ptr, eventHandle)`.
+    Delegate {
+        ctx: i32,
+        ptr: i32,
     },
     /// Cell-owned click (`g6b_listen` with listener 0): tab navigate or refresh.
     Cell,
@@ -3204,7 +3623,7 @@ impl BrowserSession {
             path.push(root.children.len() - 1);
             path
         };
-        let module = decode_libwasm()?;
+        let decoded = decode_libwasm()?;
         let mut host = KernelHost::attach_fresh(
             &mut self.dom,
             &self.program.router,
@@ -3212,23 +3631,19 @@ impl BrowserSession {
             mount_path,
             &mut self.timers,
             self.now_ns,
+            Some(&mut self.program.store),
         );
-        run_libwasm_start(&module, &mut host)?;
+        let module = run_libwasm_start(&decoded, &mut host)?;
         if spec.kernel.http.files.assets {
-            let css = {
-                let mut port = crate::browser::RouterPort {
-                    router: host.router,
-                    spec: host.spec,
-                };
-                g6b_wasm::KernelPort::fetch_text(&mut port, "/ui/bios-ui.css")
-            };
-            if let Ok((200, body)) = css {
-                let _ = host.add_css(&body);
+            let css = host.router.fetch_get("/ui/bios-ui.css");
+            if css.status == 200 {
+                let _ = host.add_css(&css.body_str());
             }
         }
         let _ = host.ensure_js_globals();
         let diagnostics = std::mem::take(&mut host.diagnostics);
         let pending = std::mem::take(&mut host.pending_event_listeners);
+        let delegates = std::mem::take(&mut host.pending_event_delegates);
         let removals = std::mem::take(&mut host.pending_event_removals);
         self.wasm_ui = Some(WasmUi::from_host(module, &mut host));
         drop(host);
@@ -3239,6 +3654,7 @@ impl BrowserSession {
         }
         self.wasm_executed = true;
         self.apply_pending_wasm_listeners(&pending)?;
+        self.apply_pending_event_delegates(&delegates)?;
         for id in &removals {
             self.remove_event_listener(*id);
         }
@@ -3275,7 +3691,7 @@ impl BrowserSession {
                     if !self.spec.kernel.http.enable || !self.spec.kernel.http.proxy_js {
                         return Err(format!("JS fetch disabled by BoardSpec: {url}"));
                     }
-                    let resp = self.program.router.fetch(&method, &url);
+                    let resp = self.kernel_fetch(&method, &url);
                     self.diagnostics
                         .push(format!("JS-FETCH {url} {}", resp.status));
                     if resp.status != 200 {
@@ -3371,7 +3787,7 @@ impl BrowserSession {
                 {
                     Err(format!("async kernel read unavailable: {url}"))
                 } else {
-                    let response = self.program.router.fetch_get(url);
+                    let response = self.kernel_fetch("GET", url);
                     if response.status == 200 {
                         let limit = self.async_scripts.limits().max_response_bytes;
                         Ok(String::from_utf8_lossy(
@@ -3461,6 +3877,7 @@ impl BrowserSession {
                     spec: &self.spec,
                     timers: &mut self.timers,
                     now_ns,
+                    store: Some(&mut self.program.store),
                 },
                 func,
                 &[t.ctx],
@@ -3612,10 +4029,16 @@ impl BrowserSession {
         Ok(())
     }
 
+    fn kernel_fetch(&mut self, method: &str, url: &str) -> g6b_http::Response {
+        self.program
+            .router
+            .fetch_with_body(method, url, &[], Some(&mut self.program.store))
+    }
+
     pub fn refresh(&mut self) -> Result<(), String> {
         if self.spec.kernel.http.enable && self.spec.kernel.http.proxy_js {
             for url in g6b_ui::setup_reads(&self.spec) {
-                let response = self.program.router.fetch_get(url);
+                let response = self.kernel_fetch("GET", url);
                 if response.status != 200 {
                     return Err(format!("refresh {url}: HTTP {}", response.status));
                 }
@@ -3809,6 +4232,34 @@ impl BrowserSession {
         Ok(())
     }
 
+    /// D `Object_Call_EventHandler__void` → `Listener::Delegate` on the live node.
+    pub fn apply_pending_event_delegates(
+        &mut self,
+        pending: &[(String, String, i32, i32, bool)],
+    ) -> Result<(), String> {
+        for (target_id, event_type, ctx, ptr, capture) in pending {
+            if *ptr <= 0 {
+                continue;
+            }
+            self.add_event_listener_by_id(
+                target_id,
+                event_type,
+                *capture,
+                Listener::Delegate {
+                    ctx: *ctx,
+                    ptr: *ptr,
+                },
+            )
+            .unwrap_or_else(|e| {
+                self.diagnostics.push(format!(
+                    "WASM-DELEGATE-REGISTER-FAILED {target_id} {event_type}: {e}"
+                ));
+                0
+            });
+        }
+        Ok(())
+    }
+
     /// Remove a listener from both the host table and from any DOM node.
     pub fn remove_event_listener(&mut self, id: u64) {
         self.event_host.remove(id);
@@ -3853,7 +4304,8 @@ impl BrowserSession {
             set_hover_attr(&mut self.dom, hover_id.as_deref());
         }
         let wasm_prevented = self.run_triggered();
-        if allowed && !wasm_prevented && event_type == "click" {
+        let named_prevented = self.run_named_input_delegates(&event);
+        if allowed && !wasm_prevented && !named_prevented && event_type == "click" {
             if let Some(menu) = hover_id
                 .as_deref()
                 .and_then(|id| find_node_by_id(&self.dom, id))
@@ -3894,7 +4346,8 @@ impl BrowserSession {
         let path: Vec<usize> = target_path.to_vec();
         let allowed = Node::dispatch_event(body, &path, &mut event, &mut self.event_host);
         let wasm_prevented = self.run_triggered();
-        Ok(allowed && !wasm_prevented)
+        let named_prevented = self.run_named_input_delegates(&event);
+        Ok(allowed && !wasm_prevented && !named_prevented)
     }
 
     fn run_triggered(&mut self) -> bool {
@@ -3935,6 +4388,7 @@ impl BrowserSession {
                             spec: &self.spec,
                             timers: &mut self.timers,
                             now_ns: self.now_ns,
+                            store: Some(&mut self.program.store),
                         },
                         function_index,
                         handle,
@@ -3961,6 +4415,40 @@ impl BrowserSession {
                     Ok(false)
                 }
             },
+            Some(Listener::Delegate { ctx, ptr }) => match self.wasm_ui {
+                Some(ref mut ui) => {
+                    match ui.call_js_callback(
+                        crate::browser::UiBorrow {
+                            dom: &mut self.dom,
+                            router: &self.program.router,
+                            spec: &self.spec,
+                            timers: &mut self.timers,
+                            now_ns: self.now_ns,
+                            store: Some(&mut self.program.store),
+                        },
+                        ctx,
+                        ptr,
+                        &event,
+                    ) {
+                        Ok(call) => {
+                            self.diagnostics.extend(call.diagnostics);
+                            self.diagnostics
+                                .push(format!("EVENT-DELEGATE-TRIGGERED {id} ctx={ctx} ptr={ptr}"));
+                            Ok(call.default_prevented)
+                        }
+                        Err(e) => {
+                            self.diagnostics
+                                .push(format!("EVENT-DELEGATE-ERROR {id}: {e}"));
+                            Ok(false)
+                        }
+                    }
+                }
+                None => {
+                    self.diagnostics
+                        .push(format!("EVENT-DELEGATE-NO-MODULE {id} ctx={ctx} ptr={ptr}"));
+                    Ok(false)
+                }
+            },
             Some(Listener::Cell) => {
                 self.cell_click(&event)?;
                 self.diagnostics.push(format!("EVENT-CELL-TRIGGERED {id}"));
@@ -3968,6 +4456,54 @@ impl BrowserSession {
             }
             None => Ok(false),
         }
+    }
+
+    /// Named `exportDelegate` whose name is an input event (`click`, `onclick`,
+    /// `keydown`, …). virtio-input / UI-hart events re-enter through
+    /// `jsCallback`. Unknown names (`navigate_to`, `onReady`) stay callNative.
+    fn run_named_input_delegates(&mut self, event: &Event) -> bool {
+        let names: Vec<(String, i32, i32)> = match self.wasm_ui.as_ref() {
+            Some(ui) => ui
+                .persist
+                .named_delegates
+                .iter()
+                .filter(|(n, _)| named_delegate_matches_event(n, &event.event_type))
+                .map(|(n, &(ctx, ptr))| (n.clone(), ctx, ptr))
+                .collect(),
+            None => return false,
+        };
+        let mut prevented = false;
+        for (name, ctx, ptr) in names {
+            let Some(mut ui) = self.wasm_ui.take() else {
+                break;
+            };
+            let fired = ui.call_js_callback(
+                crate::browser::UiBorrow {
+                    dom: &mut self.dom,
+                    router: &self.program.router,
+                    spec: &self.spec,
+                    timers: &mut self.timers,
+                    now_ns: self.now_ns,
+                    store: Some(&mut self.program.store),
+                },
+                ctx,
+                ptr,
+                event,
+            );
+            self.wasm_ui = Some(ui);
+            match fired {
+                Ok(call) => {
+                    self.diagnostics.extend(call.diagnostics);
+                    self.diagnostics
+                        .push(format!("EVENT-NAMED-DELEGATE {name} ctx={ctx} ptr={ptr}"));
+                    prevented |= call.default_prevented;
+                }
+                Err(e) => self
+                    .diagnostics
+                    .push(format!("EVENT-NAMED-DELEGATE-ERROR {name}: {e}")),
+            }
+        }
+        prevented
     }
 
     /// Cell protocol for tab/refresh clicks (B87). preventDefault is implied
@@ -4246,6 +4782,12 @@ pub fn qemu_dual_band_argv(spec: &BoardSpec) -> Vec<String> {
             // device prints `VIRTIO-INPUT-NONE`.
             a.push("-device".into());
             a.push("virtio-keyboard-device".into());
+            // Tablet is the next DeviceID 18 after the keyboard (QEMU
+            // pointer / VNC). Guest `InpInit` takes the first slot for VGA
+            // `DomNav`; `TabInit` takes the second. The exec model leaves
+            // virtio-mmio slot 2 empty so PLIC irq 3 stays the mailbox.
+            a.push("-device".into());
+            a.push("virtio-tablet-device".into());
         }
     }
     a
@@ -4295,6 +4837,7 @@ pub fn load_program(spec: &BoardSpec) -> Result<Program, String> {
     p.loopback = spec.loopback.enable;
     p.ssh_holyc = spec.postboot.backends.iter().any(|b| b == "ssh-holyc");
     p.router = Router::from_spec(spec);
+    p.store = g6b_pglite::StoreRegistry::from_spec(spec);
     Ok(p)
 }
 
@@ -4321,6 +4864,7 @@ pub fn boot(spec: &BoardSpec) -> String {
             p.loopback = spec.loopback.enable;
             p.ssh_holyc = spec.postboot.backends.iter().any(|b| b == "ssh-holyc");
             p.router = Router::from_spec(spec);
+            p.store = g6b_pglite::StoreRegistry::from_spec(spec);
             p
         }
         Err(e) => {
@@ -4668,58 +5212,6 @@ fn remap_hit_paths(dom: &Node, hits: &mut [g6b_css::render::HitBox]) {
     }
 }
 
-/// HTML and CSS to feed the CSS raster from a live DOM (the Svelte tree
-/// after `_start` when the libwasm lane is live). Track-B 4bpp `ui_ppm`
-/// still uses this; the 32-bit session path is `Engine::paint(&Node)`.
-fn live_render_html(dom: &Node, spec: &BoardSpec) -> Result<(String, String), String> {
-    let shell = if libwasm_lane(spec) {
-        g6b_ui::setup_html_libwasm(spec, "/ui/ui-libwasm.wasm")
-    } else {
-        g6b_ui::setup_html(spec)
-    };
-    let mut css = extract_style(&shell);
-    if spec.kernel.http.files.enable {
-        let css_path = format!(
-            "{}/bios-ui.css",
-            spec.kernel.http.files.root.trim_end_matches('/')
-        );
-        let resp = g6b_http::Router::from_spec(spec).fetch_get(&css_path);
-        if resp.status == 200 {
-            css.push('\n');
-            css.push_str(&resp.body_str());
-        }
-    }
-    if !libwasm_lane(spec) {
-        return Ok((shell, css));
-    }
-    let spa = find_node_by_id(dom, "libwasm-spa").ok_or("libwasm-spa missing from executed DOM")?;
-    let main =
-        first_descendant_by_name(spa, "main").ok_or("libwasm main missing from libwasm-spa")?;
-    let mut main_html = dom_to_html(main);
-    // Shell chrome that the Svelte tree does not yet own (display toggle)
-    // still has to participate in hit-testing on the live session.
-    for id in ["disp-toggle", "disp-status"] {
-        if main_html.contains(&format!("id=\"{id}\"")) {
-            continue;
-        }
-        if let Some(n) = find_node_by_id(dom, id) {
-            main_html.push_str(&dom_to_html(n));
-        }
-    }
-    let html = format!(
-        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <title>G6LC-BIOS</title><style>{}</style></head><body>{}</body></html>",
-        css, main_html
-    );
-    Ok((html, css))
-}
-
-/// HTML and CSS to feed the CSS raster. Uses the executed `BrowserSession`
-/// DOM so the Svelte tree, not the static shell, is painted.
-fn renderable_setup_html(spec: &BoardSpec) -> Result<(String, String), String> {
-    live_render_html(&rendered_dom(spec), spec)
-}
-
 /// Host PPM of the setup page (SysGrInit rewrite).
 pub fn gr_ppm(spec: &BoardSpec) -> Vec<u8> {
     let mut frame = g6b_gr::Frame::from_spec(spec);
@@ -4728,24 +5220,20 @@ pub fn gr_ppm(spec: &BoardSpec) -> Vec<u8> {
     frame.to_ppm()
 }
 
-/// CSS-raster PPM of the setup page. Parses the stylesheet embedded in the
-/// executed or static HTML and renders the body with colour, background and text.
-/// This is the track-B "real UI" output from architecture/RENDER-VALIDATION.md.
+/// 16-colour PPM of the setup page. Same live [`Engine::paint`] as
+/// [`ui_ppm32`]; RGBA flattens over white then nearest-PALETTE. Not an HTML
+/// serialize/parse CSS lane. `g6b_css::render` stays for `css_golden` fixtures.
 pub fn ui_ppm(spec: &BoardSpec) -> Result<Vec<u8>, String> {
-    let (html, css) = renderable_setup_html(spec)?;
-    let w = spec.kernel.gr.w.max(320);
-    let h = spec.kernel.gr.h.max(200);
-    let out = g6b_css::render::render_ui_to_output(&html, &css, w, h)?;
-    Ok(out.canvas.to_ppm())
+    Ok(ui_ppm_output(spec)?.canvas.to_ppm())
 }
 
-/// CSS-raster output of the setup page including the hit boxes for event
-/// dispatch.
+/// 16-colour raster plus the Engine hit boxes (same ids as the 32-bit path).
 pub fn ui_ppm_output(spec: &BoardSpec) -> Result<g6b_css::render::RenderOutput, String> {
-    let (html, css) = renderable_setup_html(spec)?;
-    let w = spec.kernel.gr.w.max(320);
-    let h = spec.kernel.gr.h.max(200);
-    g6b_css::render::render_ui_to_output(&html, &css, w, h)
+    let out = ui_ppm32_output(spec)?;
+    Ok(g6b_css::render::RenderOutput {
+        canvas: out.canvas.to_canvas(),
+        hit_boxes: out.hit_boxes,
+    })
 }
 
 /// Modern RGBA CSS-raster PPM of the setup page. Uses `g6b_css::render32`
@@ -4758,11 +5246,18 @@ pub fn ui_ppm32(spec: &BoardSpec) -> Result<Vec<u8>, String> {
 
 /// LDC cell ran on the UI-thread [`Host`] (`KernelHost`), then packed for
 /// guest dirty-tile `VioPaint`. Exec-model S-mode stand-in: same import set
-/// as `BrowserSession`, not `start_ops` `Object_Call`.
+/// as `BrowserSession` (DOM, CSS paint, GLES2 `u_dom`, events, throw/await),
+/// not `start_ops` `Object_Call`.
 pub struct GuestCellScanout {
     pub present: g6b_asm::exec::GuestWebPresent,
     pub wasm_executed: bool,
     pub diagnostics: Vec<String>,
+    /// `App_svelte.fetchBios` interned on the persistent `WasmUi`.
+    pub fetch_bios: bool,
+    /// `libwasm_global("window")` survived `_start`.
+    pub window_interned: bool,
+    /// GLES2 `u_dom` composite ran (CPU raster remains truth).
+    pub gl_presented: bool,
 }
 
 /// Pack the live BrowserSession canvas + dirty tiles for guest `__ui_cap`.
@@ -4773,15 +5268,335 @@ pub fn guest_web_present(spec: &BoardSpec) -> Result<g6b_asm::exec::GuestWebPres
     Ok(guest_cell_scanout(spec)?.present)
 }
 
-/// Run the LDC cell through [`KernelHost`] (same `Host` import set as the
-/// UI thread), then pack scanout. Fails if the cell did not execute.
+/// One interactive step on a persistent svelte-d [`BrowserSession`] before
+/// packing for guest `VioPaint`. Keyboard / hover / JS await are the BIOS
+/// UI contract (`kernel.ts` + `App.svelte`); they must not go through
+/// `start_ops`.
+#[derive(Clone, Debug)]
+pub enum GuestCellAction<'a> {
+    Tick(u64),
+    ClickMenu(&'a str),
+    /// Pointer click on a live node id (`#refresh`, `#disp-toggle`, …).
+    ClickId(&'a str),
+    HoverMenu(&'a str),
+    Key(&'a str),
+    /// Bounded JS `await fetch` + `throw`/`catch` on the same session.
+    AwaitFetch(&'a str),
+}
+
+/// Run the svelte-d LDC cell through [`KernelHost`] (same `Host` import set
+/// as the UI thread), drain a UI-hart tick (await / CSS / GLES2 `u_dom`),
+/// then pack scanout. Fails if the cell did not execute.
 pub fn guest_cell_scanout(spec: &BoardSpec) -> Result<GuestCellScanout, String> {
-    let mut session = BrowserSession::new(spec)?;
+    guest_cell_drive(spec, &[])
+}
+
+/// Same as [`guest_cell_scanout`], then a pointer click on `tab-{menu}` so
+/// cell-owned events + JSON + CSS restyle reach guest `VioPaint`.
+pub fn guest_cell_click(spec: &BoardSpec, menu: &str) -> Result<GuestCellScanout, String> {
+    guest_cell_drive(spec, &[GuestCellAction::ClickMenu(menu)])
+}
+
+/// Keyboard (F10 / arrows) on the live svelte-d session, then pack.
+pub fn guest_cell_key(spec: &BoardSpec, key: &str) -> Result<GuestCellScanout, String> {
+    guest_cell_drive(spec, &[GuestCellAction::Key(key)])
+}
+
+/// Persistent svelte-d session the exec model holds across guest UART `Ui`.
+/// Implements [`g6b_asm::exec::WebFeed`]: each `Ui` is a UI-hart tick + pack.
+pub struct GuestCellLive {
+    spec: BoardSpec,
+    session: BrowserSession,
+    now_ns: u64,
+    /// Last tablet/mouse position in CSS canvas pixels (B91b `EV_ABS`/`EV_REL`).
+    ptr_x: i32,
+    ptr_y: i32,
+}
+
+impl GuestCellLive {
+    /// Load the LDC cell on [`KernelHost`]. Fails if `_start` did not run.
+    pub fn open(spec: &BoardSpec) -> Result<Self, String> {
+        let mut session = BrowserSession::new(spec)?;
+        if !session.wasm_executed {
+            return Err("LDC libwasm cell did not run on KernelHost".into());
+        }
+        let _ = session.tick(0)?;
+        Ok(Self {
+            spec: spec.clone(),
+            session,
+            now_ns: 0,
+            ptr_x: 0,
+            ptr_y: 0,
+        })
+    }
+
+    /// Apply BIOS-UI actions on this instance (`_start` is not re-run).
+    pub fn apply(&mut self, actions: &[GuestCellAction<'_>]) -> Result<(), String> {
+        for action in actions {
+            match *action {
+                GuestCellAction::Tick(t) => {
+                    self.now_ns = t;
+                    let _ = self.session.tick(t)?;
+                }
+                GuestCellAction::ClickMenu(menu) => {
+                    let (x, y) = tab_hit(&mut self.session, menu)?;
+                    self.ptr_x = x;
+                    self.ptr_y = y;
+                    let _ = self.session.dispatch_pointer(x, y, "click", menu)?;
+                    self.now_ns = self.now_ns.saturating_add(1);
+                    let _ = self.session.tick(self.now_ns)?;
+                }
+                GuestCellAction::ClickId(id) => {
+                    let (x, y) = id_hit(&mut self.session, id)?;
+                    self.ptr_x = x;
+                    self.ptr_y = y;
+                    let _ = self.session.dispatch_pointer(x, y, "click", "")?;
+                    self.now_ns = self.now_ns.saturating_add(1);
+                    let _ = self.session.tick(self.now_ns)?;
+                }
+                GuestCellAction::HoverMenu(menu) => {
+                    let (x, y) = tab_hit(&mut self.session, menu)?;
+                    self.ptr_x = x;
+                    self.ptr_y = y;
+                    let _ = self.session.dispatch_pointer(x, y, "mousemove", "")?;
+                }
+                GuestCellAction::Key(key) => {
+                    let _ = self.session.handle_key(key)?;
+                    if let Some(path) = path_to_id(
+                        &self.session.dom,
+                        &format!("tab-{}", self.session.selected_menu),
+                    ) {
+                        let _ = self.session.dispatch_key(&path, key, "keydown")?;
+                    }
+                    self.now_ns = self.now_ns.saturating_add(1);
+                    let _ = self.session.tick(self.now_ns)?;
+                }
+                GuestCellAction::AwaitFetch(url) => {
+                    let src = format!(
+                        r#"document.getElementById("status").textContent="pending"; try {{ await fetch("{url}"); document.getElementById("status").textContent="done"; }} catch (e) {{ document.getElementById("status").textContent="caught"; }}"#
+                    );
+                    let _ = self.session.enqueue_async_script(&src)?;
+                    self.now_ns = self.now_ns.saturating_add(1);
+                    let _ = self.session.tick(self.now_ns)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// GLES2 present + pack for guest `__ui_cap`.
+    pub fn finish(&mut self) -> Result<GuestCellScanout, String> {
+        finish_guest_cell(&self.spec, &mut self.session, self.now_ns)
+    }
+
+    fn clamp_ptr(&mut self) {
+        let (w, h) = canvas_wh(&self.spec);
+        self.ptr_x = self.ptr_x.clamp(0, w.saturating_sub(1));
+        self.ptr_y = self.ptr_y.clamp(0, h.saturating_sub(1));
+    }
+
+    fn pointer_move(&mut self) -> Option<g6b_asm::exec::GuestWebPresent> {
+        let _ = self.session.render_hit_boxes();
+        match self
+            .session
+            .dispatch_pointer(self.ptr_x, self.ptr_y, "mousemove", "")
+        {
+            Ok(_) => self.finish().ok().map(|c| c.present),
+            Err(_) => None,
+        }
+    }
+
+    fn pointer_click(&mut self) -> Option<g6b_asm::exec::GuestWebPresent> {
+        let _ = self.session.render_hit_boxes();
+        match self
+            .session
+            .dispatch_pointer(self.ptr_x, self.ptr_y, "click", "")
+        {
+            Ok(_) => {
+                self.now_ns = self.now_ns.saturating_add(1);
+                let _ = self.session.tick(self.now_ns);
+                self.finish().ok().map(|c| c.present)
+            }
+            Err(_) => None,
+        }
+    }
+}
+
+impl g6b_asm::exec::WebFeed for GuestCellLive {
+    fn initial(&mut self) -> Option<g6b_asm::exec::GuestWebPresent> {
+        self.finish().ok().map(|c| c.present)
+    }
+
+    fn on_guest_ui(&mut self) -> Option<g6b_asm::exec::GuestWebPresent> {
+        self.now_ns = self.now_ns.saturating_add(1_000_000);
+        self.finish().ok().map(|c| c.present)
+    }
+
+    fn on_guest_key(&mut self, code: u16, pressed: bool) -> Option<g6b_asm::exec::GuestWebPresent> {
+        if !pressed {
+            return None;
+        }
+        use g6b_asm::vio::{
+            VIO_BTN_LEFT, VIO_KEY_DOWN, VIO_KEY_END, VIO_KEY_ENTER, VIO_KEY_F10, VIO_KEY_HOME,
+            VIO_KEY_LEFT, VIO_KEY_RIGHT, VIO_KEY_UP,
+        };
+        let code = i64::from(code);
+        if code == VIO_BTN_LEFT {
+            return self.pointer_click();
+        }
+        if code == VIO_KEY_ENTER {
+            let menu = self.session.selected_menu.clone();
+            let _ = self.apply(&[GuestCellAction::ClickMenu(&menu)]);
+            return self.finish().ok().map(|c| c.present);
+        }
+        let key = match code {
+            VIO_KEY_LEFT | VIO_KEY_UP => "ArrowLeft",
+            VIO_KEY_RIGHT | VIO_KEY_DOWN => "ArrowRight",
+            VIO_KEY_HOME => "Home",
+            VIO_KEY_END => "End",
+            VIO_KEY_F10 => "F10",
+            _ => return None,
+        };
+        let _ = self.apply(&[GuestCellAction::Key(key)]);
+        self.finish().ok().map(|c| c.present)
+    }
+
+    fn on_guest_abs(&mut self, axis: u16, value: u32) -> Option<g6b_asm::exec::GuestWebPresent> {
+        use g6b_asm::vio::{VIO_ABS_X, VIO_ABS_Y};
+        let (w, h) = canvas_wh(&self.spec);
+        match i64::from(axis) {
+            VIO_ABS_X => self.ptr_x = abs_to_px(value, w),
+            VIO_ABS_Y => self.ptr_y = abs_to_px(value, h),
+            _ => return None,
+        }
+        self.clamp_ptr();
+        self.pointer_move()
+    }
+
+    fn on_guest_rel(&mut self, axis: u16, value: i32) -> Option<g6b_asm::exec::GuestWebPresent> {
+        use g6b_asm::vio::{VIO_REL_X, VIO_REL_Y};
+        match i64::from(axis) {
+            VIO_REL_X => self.ptr_x = self.ptr_x.saturating_add(value),
+            VIO_REL_Y => self.ptr_y = self.ptr_y.saturating_add(value),
+            _ => return None,
+        }
+        self.clamp_ptr();
+        self.pointer_move()
+    }
+
+    fn hint_abs(&self) -> Option<(u32, u32)> {
+        let skip = format!("tab-{}", self.session.selected_menu);
+        let hit = self.session.hit_boxes.iter().find(|h| {
+            h.id.as_deref()
+                .is_some_and(|id| id.starts_with("tab-") && id != skip)
+                && h.w > 0
+                && h.h > 0
+        })?;
+        let (w, h) = canvas_wh(&self.spec);
+        Some((
+            px_to_abs(hit.x + hit.w / 2, w),
+            px_to_abs(hit.y + hit.h / 2, h),
+        ))
+    }
+
+    fn on_guest_tick(&mut self) -> Option<g6b_asm::exec::GuestWebPresent> {
+        self.now_ns = self
+            .now_ns
+            .saturating_add(crate::timers::frame_period_ns(&self.spec));
+        let t = self.session.tick(self.now_ns).ok()?;
+        if !t.dirty {
+            return None;
+        }
+        let _ = self.session.present_gl();
+        let present = pack_guest_present(&self.spec, &self.session);
+        if present.tiles.is_empty() {
+            None
+        } else {
+            Some(present)
+        }
+    }
+}
+
+/// Drive a **persistent** `WasmUi` with BIOS-UI actions, then GLES2 present
+/// + pack. One session: `_start` is not re-run between steps.
+pub fn guest_cell_drive(
+    spec: &BoardSpec,
+    actions: &[GuestCellAction<'_>],
+) -> Result<GuestCellScanout, String> {
+    let mut live = GuestCellLive::open(spec)?;
+    live.apply(actions)?;
+    live.finish()
+}
+
+fn tab_hit(session: &mut BrowserSession, menu: &str) -> Result<(i32, i32), String> {
+    id_hit(session, &format!("tab-{menu}"))
+}
+
+fn id_hit(session: &mut BrowserSession, id: &str) -> Result<(i32, i32), String> {
+    session.render_hit_boxes()?;
+    session
+        .hit_boxes
+        .iter()
+        .find(|h| h.id.as_deref() == Some(id) && h.w > 0 && h.h > 0)
+        .map(|h| (h.x + h.w / 2, h.y + h.h / 2))
+        .ok_or_else(|| format!("no hit box for {id}"))
+}
+
+fn canvas_wh(spec: &BoardSpec) -> (i32, i32) {
+    (
+        spec.kernel.gr.w.max(320) as i32,
+        spec.kernel.gr.h.max(200) as i32,
+    )
+}
+
+/// QEMU tablet: `px = value * (dim-1) / ABS_MAX`.
+fn abs_to_px(value: u32, dim: i32) -> i32 {
+    let span = dim.max(1).saturating_sub(1).max(1) as u32;
+    ((u64::from(value) * u64::from(span)) / u64::from(g6b_asm::vio::VIO_ABS_MAX.max(1))) as i32
+}
+
+fn px_to_abs(px: i32, dim: i32) -> u32 {
+    let span = dim.max(1).saturating_sub(1).max(1) as u32;
+    let px = px.clamp(0, dim.saturating_sub(1)) as u32;
+    ((u64::from(px) * u64::from(g6b_asm::vio::VIO_ABS_MAX)) / u64::from(span)) as u32
+}
+
+fn finish_guest_cell(
+    spec: &BoardSpec,
+    session: &mut BrowserSession,
+    now_ns: u64,
+) -> Result<GuestCellScanout, String> {
     if !session.wasm_executed {
         return Err("LDC libwasm cell did not run on KernelHost".into());
     }
+    let _ = session.tick(now_ns)?;
     let _ = session.paint_css()?;
-    let _ = session.present_scanout()?;
+    let gl = session.present_gl()?;
+    let gl_presented = gl.starts_with(b"P6\n") || gl.starts_with(b"P3\n");
+    let fetch_bios = session
+        .wasm_ui
+        .as_ref()
+        .map(|ui| ui.has_fetch_bios())
+        .unwrap_or(false);
+    let window_interned = session
+        .wasm_ui
+        .as_ref()
+        .and_then(|ui| ui.window())
+        .is_some();
+    Ok(GuestCellScanout {
+        present: pack_guest_present(spec, session),
+        wasm_executed: session.wasm_executed,
+        diagnostics: session.diagnostics.clone(),
+        fetch_bios,
+        window_interned,
+        gl_presented,
+    })
+}
+
+fn pack_guest_present(
+    spec: &BoardSpec,
+    session: &BrowserSession,
+) -> g6b_asm::exec::GuestWebPresent {
     let out = spec.default_output();
     let dw = out.w.max(session.scan_fb_w.max(1));
     let dh = out.h.max(session.scan_fb_h.max(1));
@@ -4796,24 +5611,31 @@ pub fn guest_cell_scanout(spec: &BoardSpec) -> Result<GuestCellScanout, String> 
             packed[dst..dst + n].copy_from_slice(&session.scan_fb[src..src + n]);
         }
     }
-    Ok(GuestCellScanout {
-        present: g6b_asm::exec::GuestWebPresent {
-            scan_fb: packed,
-            tiles: session
-                .last_tiles()
-                .iter()
-                .map(|t| g6b_asm::exec::DirtyTile {
-                    x: t.x,
-                    y: t.y,
-                    w: t.w,
-                    h: t.h,
-                })
-                .collect(),
-            node_count: count_dom_nodes(&session.dom),
-        },
-        wasm_executed: session.wasm_executed,
-        diagnostics: session.diagnostics.clone(),
-    })
+    let mut tiles: Vec<g6b_asm::exec::DirtyTile> = session
+        .last_tiles()
+        .iter()
+        .map(|t| g6b_asm::exec::DirtyTile {
+            x: t.x,
+            y: t.y,
+            w: t.w,
+            h: t.h,
+        })
+        .collect();
+    // Skip-if-clean on the host means no *new* dirty rects. A cold guest
+    // framebuffer still needs one TRANSFER of the live CSS canvas.
+    if tiles.is_empty() && sw > 0 && sh > 0 && packed.iter().any(|&b| b != 0) {
+        tiles.push(g6b_asm::exec::DirtyTile {
+            x: 0,
+            y: 0,
+            w: sw.min(dw) as i32,
+            h: sh.min(dh) as i32,
+        });
+    }
+    g6b_asm::exec::GuestWebPresent {
+        scan_fb: packed,
+        tiles,
+        node_count: count_dom_nodes(&session.dom),
+    }
 }
 
 fn count_dom_nodes(n: &Node) -> u32 {
@@ -5008,6 +5830,7 @@ mod tests {
             Vec::new(),
             &mut session.timers,
             0,
+            Some(&mut session.program.store),
         );
         let mut ev = Event::new("click", EventInit::default());
         ev.client_x = 12;
@@ -5027,6 +5850,206 @@ mod tests {
         assert_eq!(
             v.clone_prop("defaultPrevented").unwrap(),
             LibwasmValue::Bool(true)
+        );
+    }
+
+    fn jscallback_probe_module() -> g6b_wasm::Module {
+        use g6b_wasm::{Element, Export, FuncType, Instr, Module, Table, ValType};
+        let mut mem = vec![0u8; 65536];
+        mem[0..5].copy_from_slice(b"click");
+        Module {
+            types: vec![
+                FuncType {
+                    params: vec![ValType::I32, ValType::I32],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![ValType::I32; 3],
+                    results: vec![],
+                },
+            ],
+            imports: vec![],
+            func_types: vec![0, 1, 2],
+            mem_pages: 1,
+            max_mem_pages: Some(1),
+            exports: vec![Export {
+                name: "jsCallback".into(),
+                kind: 0,
+                idx: 2,
+            }],
+            bodies: vec![
+                vec![
+                    Instr::I32Const(1024),
+                    Instr::I32Const(1),
+                    Instr::I32Store {
+                        align: 2,
+                        offset: 0,
+                    },
+                    Instr::End,
+                ],
+                vec![Instr::End],
+                vec![
+                    Instr::LocalGet(0),
+                    Instr::LocalGet(2),
+                    Instr::LocalGet(1),
+                    Instr::CallIndirect {
+                        typeidx: 0,
+                        tableidx: 0,
+                    },
+                    Instr::End,
+                ],
+            ],
+            memory: mem,
+            locals: vec![0, 0, 0],
+            has_memory: true,
+            tags: vec![],
+            globals: vec![],
+            tables: vec![Table {
+                min: 2,
+                max: Some(2),
+            }],
+            elements: vec![Element {
+                offset: 1,
+                funcs: vec![0],
+            }],
+            data_count: None,
+            data_segments: vec![],
+        }
+    }
+
+    fn install_jscallback_probe(session: &mut BrowserSession, named_click: bool) {
+        let mut persist = session
+            .wasm_ui
+            .as_mut()
+            .map(|ui| ui.take_persist())
+            .unwrap_or_default();
+        if named_click {
+            persist.named_delegates.insert("click".into(), (99, 1));
+        }
+        session.wasm_ui = Some(crate::browser::WasmUi {
+            module: jscallback_probe_module(),
+            js_exports: g6b_wasm::JsExports::bios_app(),
+            persist,
+        });
+    }
+
+    #[test]
+    fn virtio_click_reenters_jscallback_delegate() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        install_jscallback_probe(&mut session, false);
+        session
+            .add_event_listener_by_id(
+                "tab-cpu",
+                "click",
+                false,
+                Listener::Delegate { ctx: 99, ptr: 1 },
+            )
+            .unwrap();
+        let (x, y) = tab_hit(&mut session, "cpu").unwrap();
+        let _ = session.dispatch_pointer(x, y, "click", "cpu").unwrap();
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("EVENT-DELEGATE-TRIGGERED")),
+            "{:?}",
+            session.diagnostics
+        );
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("EVENT-CELL-TRIGGERED")),
+            "Listener::Cell fallback still runs: {:?}",
+            session.diagnostics
+        );
+        let flag = i32::from_le_bytes(
+            session.wasm_ui.as_ref().unwrap().module.memory[1024..1028]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(flag, 1, "jsCallback D delegate stored the event");
+    }
+
+    #[test]
+    fn virtio_click_reenters_named_export_delegate() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        install_jscallback_probe(&mut session, true);
+        let (x, y) = tab_hit(&mut session, "cpu").unwrap();
+        let _ = session.dispatch_pointer(x, y, "click", "cpu").unwrap();
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("EVENT-NAMED-DELEGATE click")),
+            "{:?}",
+            session.diagnostics
+        );
+        let flag = i32::from_le_bytes(
+            session.wasm_ui.as_ref().unwrap().module.memory[1024..1028]
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(flag, 1);
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("EVENT-CELL-TRIGGERED")),
+            "shipped-cell Cell path stays: {:?}",
+            session.diagnostics
+        );
+    }
+
+    #[test]
+    fn shipped_ldc_cell_emits_g6b_listen_and_jscallback() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let ui = session.wasm_ui.as_ref().expect("LDC WasmUi");
+        assert!(
+            g6b_wasm::export_func(&ui.module, "jsCallback").is_some(),
+            "B91d cell exports jsCallback"
+        );
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("getRoot")
+                    || d.contains("WASM-ADD-EVENT-LISTENER tab-cpu click")),
+            "{:?}",
+            session.diagnostics
+        );
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("WASM-ADD-EVENT-LISTENER") && d.contains("tab-cpu")),
+            "cell g6b_listen: {:?}",
+            session.diagnostics
+        );
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .all(|d| !d.contains("WASM-CELL-LISTEN")),
+            "host bind_cell_clicks skipped: {:?}",
+            session.diagnostics
+        );
+        let (x, y) = tab_hit(&mut session, "cpu").unwrap();
+        let _ = session.dispatch_pointer(x, y, "click", "cpu").unwrap();
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d.contains("EVENT-CELL-TRIGGERED")),
+            "g6b_listen listener 0 is Cell: {:?}",
+            session.diagnostics
         );
     }
 
@@ -5061,6 +6084,7 @@ mod tests {
             Vec::new(),
             &mut session.timers,
             0,
+            Some(&mut session.program.store),
         );
         let window = host.libwasm_global("window").unwrap();
         let document = host.libwasm_global("document").unwrap();
@@ -5071,7 +6095,7 @@ mod tests {
         assert_eq!(host.libwasm_global("window").unwrap(), window);
         assert_eq!(host.libwasm_global("eval").unwrap(), 0);
         let root = host.get_root().unwrap();
-        assert!(root >= 2, "getRoot is a new handle, not BoardSpec: {root}");
+        assert_eq!(root, 1, "getRoot is the Spa mount, not BoardSpec: {root}");
         let css_h = host.add_css(".bios-tab:hover{color:#fff}").unwrap();
         assert!(css_h >= 2);
         assert!(host
@@ -5164,9 +6188,62 @@ mod tests {
             session
                 .diagnostics
                 .iter()
-                .any(|d| d.contains("WASM-CELL-LISTEN")),
+                .any(|d| d.contains("WASM-ADD-EVENT-LISTENER") && d.contains("tab-cpu")),
             "cell-owned tab/refresh listeners: {:?}",
             session.diagnostics
+        );
+    }
+
+    #[test]
+    fn libwasm_cell_start_awaits_and_catch_survives_dom_event() {
+        assert!(
+            g6b_wasm::bios_ui_libwasm_live(),
+            "full profile must ship the LDC svelte-d cell"
+        );
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).expect("LDC _start");
+        assert!(
+            session
+                .diagnostics
+                .iter()
+                .any(|d| d == "WASM-INTERPRETER _start"),
+            "{:?}",
+            session.diagnostics
+        );
+        let awaits = session
+            .diagnostics
+            .iter()
+            .filter(|d| d.starts_with("WASM-AWAIT-VOID"))
+            .count();
+        assert!(
+            awaits >= 1,
+            "App.ready libwasm_await__void through _start: {:?}",
+            session.diagnostics
+        );
+        let cpu_body = find_node_by_id(&session.dom, "menu-cpu-body").expect("menu-cpu-body");
+        assert!(
+            !cpu_body.children.is_empty(),
+            "awaited /bios/menu/cpu JSON painted rows; catch must not have swallowed _start: children={}",
+            cpu_body.children.len()
+        );
+        session.select_menu("cpu").unwrap();
+        let cpu = find_node_by_id(&session.dom, "tab-cpu").expect("tab-cpu");
+        assert!(
+            cpu.get_attribute("class")
+                .unwrap_or("")
+                .contains("bios-tab-active"),
+            "DOM event after _start await/catch: {:?}",
+            cpu.get_attribute("class")
+        );
+        let ui = session.wasm_ui.as_ref().expect("WasmUi");
+        let raw = g6b_wasm::decode(g6b_wasm::bios_ui_libwasm()).expect("raw cell");
+        assert!(
+            raw.exports.iter().any(|e| e.name == "asyncify_get_state"),
+            "svelte-engine wasm-opt --asyncify left control exports on the artifact"
+        );
+        assert!(
+            !ui.module.tags.is_empty(),
+            "imported env.__cpp_exception tag for ready() catch"
         );
     }
 
@@ -5195,6 +6272,27 @@ mod tests {
         let body = &body[body.iter().position(|&b| b == b'\n').unwrap() + 1..];
         let body = &body[body.iter().position(|&b| b == b'\n').unwrap() + 1..];
         assert!(body.chunks_exact(3).any(|p| p != [255, 255, 255]));
+    }
+
+    #[test]
+    fn ui_ppm_is_live_engine_downsample() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let ppm = ui_ppm(&spec).unwrap();
+        assert!(ppm.starts_with(b"P6\n"));
+        let header = String::from_utf8_lossy(&ppm[..32]);
+        assert!(header.contains("640 480\n255\n"), "{header}");
+        let out32 = ui_ppm32_output(&spec).unwrap();
+        assert_eq!(out32.canvas.to_canvas().to_ppm(), ppm);
+        let out4 = ui_ppm_output(&spec).unwrap();
+        assert!(out4
+            .hit_boxes
+            .iter()
+            .any(|h| h.id.as_deref() == Some("tab-cpu")));
+        let pal = g6b_gr::canvas::Canvas::from_ppm(&ppm).expect("4bpp ppm is exact PALETTE");
+        assert!(
+            pal.pixels().iter().any(|&p| p != 15),
+            "setup page is not a blank white canvas"
+        );
     }
 
     #[test]
@@ -5369,6 +6467,570 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn guest_cell_scanout_is_interactive_svelte_engine() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let cell = guest_cell_scanout(&spec).unwrap();
+        assert!(cell.wasm_executed);
+        assert!(cell.fetch_bios, "JsExports App_svelte.fetchBios");
+        assert!(cell.window_interned, "libwasm_global window");
+        assert!(cell.gl_presented, "GLES2 u_dom composite");
+        assert!(cell.present.node_count > 1);
+        assert!(
+            !cell.present.tiles.is_empty(),
+            "CSS paint dirties tiles for guest TRANSFER"
+        );
+        assert!(
+            cell.diagnostics
+                .iter()
+                .any(|d| d.contains("WASM-INTERPRETER")),
+            "{:?}",
+            cell.diagnostics
+        );
+        assert!(
+            cell.diagnostics
+                .iter()
+                .any(|d| d.contains("SCAN-TRANSFER") || d.contains("SCAN-SKIP")),
+            "GLES2 present listing: {:?}",
+            cell.diagnostics
+        );
+    }
+
+    #[test]
+    fn guest_cell_click_cpu_transfers_live_css() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let boot = guest_cell_scanout(&spec).unwrap();
+        let cpu = guest_cell_click(&spec, "cpu").unwrap();
+        assert!(cpu.wasm_executed);
+        assert!(cpu.gl_presented);
+        assert_ne!(
+            boot.present.scan_fb, cpu.present.scan_fb,
+            "CPU tab click must change packed Canvas32"
+        );
+        let m = g6b_asm::analyze::kstart(&spec);
+        let s =
+            g6b_asm::exec::run_module_web(&spec, &m, 0x8020_0000, 0, Some(&cpu.present)).unwrap();
+        assert!(
+            s.console.contains("VIRTIO-PAINT\n"),
+            "guest VioPaint after click: {}",
+            s.console
+        );
+        assert_eq!(s.cap_nodes, cpu.present.node_count);
+        for t in &cpu.present.tiles {
+            let x0 = t.x.max(0) as u32;
+            let y0 = t.y.max(0) as u32;
+            let x1 = (t.x + t.w).max(0) as u32;
+            let y1 = (t.y + t.h).max(0) as u32;
+            for y in y0..y1.min(s.vio_fb_h) {
+                for x in x0..x1.min(s.vio_fb_w) {
+                    let i = ((y * s.vio_fb_w + x) * 4) as usize;
+                    if i + 4 <= s.vio_fb.len() && i + 4 <= cpu.present.scan_fb.len() {
+                        assert_eq!(
+                            &s.vio_fb[i..i + 4],
+                            &cpu.present.scan_fb[i..i + 4],
+                            "click tile px ({x},{y})"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn guest_cell_key_arrow_right_transfers_live_css() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let boot = guest_cell_scanout(&spec).unwrap();
+        let keyed = guest_cell_key(&spec, "ArrowRight").unwrap();
+        assert!(keyed.wasm_executed);
+        assert!(keyed.gl_presented);
+        assert_ne!(
+            boot.present.scan_fb, keyed.present.scan_fb,
+            "ArrowRight must restyle the packed svelte-d canvas"
+        );
+        let m = g6b_asm::analyze::kstart(&spec);
+        let s =
+            g6b_asm::exec::run_module_web(&spec, &m, 0x8020_0000, 0, Some(&keyed.present)).unwrap();
+        assert!(
+            s.console.contains("VIRTIO-PAINT\n"),
+            "guest VioPaint after key: {}",
+            s.console
+        );
+    }
+
+    #[test]
+    fn guest_cell_ldc_start_await_catch_then_cpu_click_vio() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let cell = guest_cell_drive(&spec, &[GuestCellAction::ClickMenu("cpu")]).unwrap();
+        assert!(cell.wasm_executed);
+        assert!(
+            cell.diagnostics
+                .iter()
+                .any(|d| d.starts_with("WASM-AWAIT-VOID")),
+            "LDC App.ready awaited through _start: {:?}",
+            cell.diagnostics
+        );
+        assert!(
+            cell.diagnostics
+                .iter()
+                .any(|d| d.contains("EVENT-CELL-TRIGGERED") || d.contains("WASM-CELL-LISTEN")),
+            "DOM event after await/catch: {:?}",
+            cell.diagnostics
+        );
+        assert!(cell.gl_presented);
+        let m = g6b_asm::analyze::kstart(&spec);
+        let s =
+            g6b_asm::exec::run_module_web(&spec, &m, 0x8020_0000, 0, Some(&cell.present)).unwrap();
+        assert!(
+            s.console.contains("VIRTIO-PAINT\n"),
+            "B91b+ guest VioPaint after _start await+click: {}",
+            s.console
+        );
+    }
+
+    #[test]
+    fn guest_cell_virtio_keydown_maps_to_svelte_tabs() {
+        use g6b_asm::exec::WebFeed;
+        use g6b_asm::vio::{VIO_KEY_DOWN, VIO_KEY_ENTER};
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut live = GuestCellLive::open(&spec).unwrap();
+        let boot = live.finish().unwrap();
+        let letter = live.on_guest_key(30, true);
+        assert!(letter.is_none(), "KEY_A is not a tab key");
+        let down = live
+            .on_guest_key(VIO_KEY_DOWN as u16, true)
+            .expect("KEY_DOWN → ArrowRight");
+        assert_ne!(
+            boot.present.scan_fb, down.scan_fb,
+            "virtio KEY_DOWN must restyle the svelte-d canvas"
+        );
+        let enter = live
+            .on_guest_key(VIO_KEY_ENTER as u16, true)
+            .expect("KEY_ENTER → click current tab");
+        assert_ne!(
+            down.scan_fb, enter.scan_fb,
+            "virtio KEY_ENTER must activate the current tab"
+        );
+        let m = g6b_asm::analyze::kstart(&spec);
+        let s = g6b_asm::exec::run_module_web(&spec, &m, 0x8020_0000, 0, Some(&enter)).unwrap();
+        assert!(
+            s.console.contains("VIRTIO-PAINT\n"),
+            "guest VioPaint after INP keys: {}",
+            s.console
+        );
+    }
+
+    #[test]
+    fn guest_cell_virtio_tablet_abs_hovers_then_btn_clicks() {
+        use g6b_asm::exec::WebFeed;
+        use g6b_asm::vio::{VIO_ABS_X, VIO_ABS_Y, VIO_BTN_LEFT};
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let argv = qemu_dual_band_argv(&spec).join(" ");
+        assert!(argv.contains("virtio-keyboard-device"), "{argv}");
+        assert!(
+            argv.contains("virtio-tablet-device"),
+            "qemu-args attaches tablet after keyboard: {argv}"
+        );
+        let mut live = GuestCellLive::open(&spec).unwrap();
+        let boot = live.finish().unwrap();
+        let (x, y) = tab_hit(&mut live.session, "cpu").unwrap();
+        let (w, h) = canvas_wh(&spec);
+        let _ = live.on_guest_abs(VIO_ABS_X as u16, px_to_abs(x, w));
+        let hovered = live
+            .on_guest_abs(VIO_ABS_Y as u16, px_to_abs(y, h))
+            .expect("tablet ABS_Y on tab-cpu");
+        assert_ne!(
+            boot.present.scan_fb, hovered.scan_fb,
+            "virtio-tablet ABS must :hover tab-cpu"
+        );
+        let tab = find_node_by_id(&live.session.dom, "tab-cpu").expect("tab-cpu");
+        assert_eq!(tab.get_attribute("data-hover"), Some("1"));
+        let clicked = live
+            .on_guest_key(VIO_BTN_LEFT as u16, true)
+            .expect("BTN_LEFT click at tablet point");
+        assert_ne!(
+            hovered.scan_fb, clicked.scan_fb,
+            "BTN_LEFT must activate tab-cpu"
+        );
+        let m = g6b_asm::analyze::kstart(&spec);
+        let s = g6b_asm::exec::run_module_web(&spec, &m, 0x8020_0000, 0, Some(&clicked)).unwrap();
+        assert!(
+            s.console.contains("VIRTIO-PAINT\n"),
+            "guest VioPaint after tablet click: {}",
+            s.console
+        );
+    }
+
+    #[test]
+    fn guest_cell_virtio_tablet_clicks_refresh() {
+        use g6b_asm::exec::WebFeed;
+        use g6b_asm::vio::{VIO_ABS_X, VIO_ABS_Y, VIO_BTN_LEFT};
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut live = GuestCellLive::open(&spec).unwrap();
+        let boot = live.finish().unwrap();
+        let status0 = find_node_by_id(&live.session.dom, "status")
+            .map(|n| n.inner_text())
+            .unwrap_or_default();
+        let (x, y) = id_hit(&mut live.session, "refresh").expect("refresh hit box");
+        let (w, h) = canvas_wh(&spec);
+        let _ = live.on_guest_abs(VIO_ABS_X as u16, px_to_abs(x, w));
+        let _ = live.on_guest_abs(VIO_ABS_Y as u16, px_to_abs(y, h));
+        let clicked = live
+            .on_guest_key(VIO_BTN_LEFT as u16, true)
+            .expect("BTN_LEFT on #refresh");
+        assert_ne!(
+            boot.present.scan_fb, clicked.scan_fb,
+            "#refresh click must restyle the packed svelte-d canvas"
+        );
+        let status = find_node_by_id(&live.session.dom, "status")
+            .map(|n| n.inner_text())
+            .unwrap_or_default();
+        assert_ne!(status0, status, "refresh must rewrite #status");
+        assert!(
+            status.contains("refresh") || status.contains("UI-BOOT"),
+            "refresh status: {status}"
+        );
+        let driven = guest_cell_drive(&spec, &[GuestCellAction::ClickId("refresh")]).unwrap();
+        assert!(driven.gl_presented);
+        let m = g6b_asm::analyze::kstart(&spec);
+        let s = g6b_asm::exec::run_module_web(&spec, &m, 0x8020_0000, 0, Some(&clicked)).unwrap();
+        assert!(
+            s.console.contains("VIRTIO-PAINT\n"),
+            "guest VioPaint after refresh click: {}",
+            s.console
+        );
+    }
+
+    #[test]
+    fn guest_cell_virtio_mouse_rel_moves_to_tab() {
+        use g6b_asm::exec::WebFeed;
+        use g6b_asm::vio::{VIO_REL_X, VIO_REL_Y};
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut live = GuestCellLive::open(&spec).unwrap();
+        let boot = live.finish().unwrap();
+        let (x, y) = tab_hit(&mut live.session, "cpu").unwrap();
+        let _ = live.on_guest_rel(VIO_REL_X as u16, x);
+        let moved = live
+            .on_guest_rel(VIO_REL_Y as u16, y)
+            .expect("mouse REL to tab-cpu");
+        assert_ne!(
+            boot.present.scan_fb, moved.scan_fb,
+            "virtio-mouse REL must :hover tab-cpu"
+        );
+        let tab = find_node_by_id(&live.session.dom, "tab-cpu").expect("tab-cpu");
+        assert_eq!(tab.get_attribute("data-hover"), Some("1"));
+        assert!(live.on_guest_abs(99, 0).is_none(), "unknown ABS axis");
+        assert!(live.on_guest_rel(99, 1).is_none(), "unknown REL axis");
+    }
+
+    #[test]
+    fn smoke_cell_tablet_slot_pokes_abs_via_webfeed() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut live = GuestCellLive::open(&spec).unwrap();
+        let _ = live.finish().unwrap();
+        let entry = 0x8020_0000u64;
+        let m = g6b_asm::analyze::kstart(&spec);
+        let s = g6b_asm::exec::run_module_web_feed(&spec, &m, entry, 0, &mut live).unwrap();
+        assert!(s.console.contains("VIRTIO-TABLET-OK"), "{}", s.console);
+        assert!(
+            s.console.matches("TAB\n").count() >= 3,
+            "tablet ABS+BTN poke must drain: {}",
+            s.console
+        );
+        assert!(
+            s.console.contains("VIRTIO-PAINT\n"),
+            "tablet click still VioPaint: {}",
+            s.console
+        );
+        let menus = [
+            "main", "cpu", "memory", "uncore", "devices", "boot", "settings",
+        ];
+        let active: Vec<&str> = menus
+            .iter()
+            .copied()
+            .filter(|menu| {
+                find_node_by_id(&live.session.dom, &format!("tab-{menu}"))
+                    .and_then(|n| n.get_attribute("class").map(str::to_string))
+                    .is_some_and(|c| c.contains("bios-tab-active"))
+            })
+            .collect();
+        assert!(
+            active.iter().any(|m| *m != "cpu"),
+            "tablet BTN_LEFT must select the hinted tab (not stay on cpu after KEY SEQ): {active:?}"
+        );
+    }
+
+    #[test]
+    fn guest_cell_trap_timer_skip_if_clean_then_hover_dirties() {
+        use g6b_asm::exec::WebFeed;
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut live = GuestCellLive::open(&spec).unwrap();
+        let _ = live.finish().unwrap();
+        assert!(
+            live.on_guest_tick().is_none(),
+            "clean UI-hart tick must not inject tiles"
+        );
+        live.apply(&[GuestCellAction::HoverMenu("cpu")]).unwrap();
+        let dirty = live
+            .on_guest_tick()
+            .expect("hover marks CSS dirty for trap_timer VioPaint");
+        assert!(!dirty.tiles.is_empty());
+        let m = g6b_asm::analyze::kstart(&spec);
+        let s = g6b_asm::exec::run_module_web(&spec, &m, 0x8020_0000, 0, Some(&dirty)).unwrap();
+        assert!(
+            s.console.contains("VIRTIO-PAINT\n"),
+            "guest VioPaint after timer tick: {}",
+            s.console
+        );
+    }
+
+    #[test]
+    fn guest_cell_hover_cpu_transfers_live_css() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let boot = guest_cell_scanout(&spec).unwrap();
+        let hovered = guest_cell_drive(&spec, &[GuestCellAction::HoverMenu("cpu")]).unwrap();
+        assert!(hovered.gl_presented);
+        assert_ne!(
+            boot.present.scan_fb, hovered.present.scan_fb,
+            ":hover on tab-cpu must change packed Canvas32"
+        );
+    }
+
+    #[test]
+    fn guest_cell_await_fetch_throw_catch_packs_for_vio() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let cell =
+            guest_cell_drive(&spec, &[GuestCellAction::AwaitFetch("/bios/menu/cpu")]).unwrap();
+        assert!(cell.wasm_executed);
+        assert!(cell.gl_presented);
+        assert!(
+            !cell.present.tiles.is_empty(),
+            "await-resolved DOM still TRANSFERs"
+        );
+        let m = g6b_asm::analyze::kstart(&spec);
+        let s =
+            g6b_asm::exec::run_module_web(&spec, &m, 0x8020_0000, 0, Some(&cell.present)).unwrap();
+        assert!(
+            s.console.contains("VIRTIO-PAINT\n"),
+            "guest VioPaint after JS await: {}",
+            s.console
+        );
+    }
+
+    #[test]
+    fn kernel_host_env_await_throw_catch_are_the_same_import_set() {
+        use g6b_wasm::Host;
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let mut timers = crate::timers::TimerHeap::new();
+        let mut host = KernelHost::attach_fresh(
+            &mut session.dom,
+            &session.program.router,
+            &spec,
+            Vec::new(),
+            &mut timers,
+            0,
+            Some(&mut session.program.store),
+        );
+        assert_eq!(host.await_supported(), 1);
+        let s0 = host.await_op().unwrap();
+        let s1 = host.await_op().unwrap();
+        assert_eq!(s0, 0);
+        assert_eq!(s1, 1);
+        host.throw_op(s0).unwrap();
+        assert_eq!(host.catch_op(s0).unwrap(), 1);
+        assert_eq!(host.catch_op(s1).unwrap(), 0);
+        host.throw_op(-1).unwrap();
+        assert_eq!(host.catch_op(s1).unwrap(), 1);
+        assert!(
+            host.diagnostics
+                .iter()
+                .any(|d| d.contains("WASM-AWAIT pending")),
+            "{:?}",
+            host.diagnostics
+        );
+        assert!(
+            host.diagnostics.iter().any(|d| d.contains("WASM-THROW")),
+            "{:?}",
+            host.diagnostics
+        );
+    }
+
+    #[test]
+    fn ui_thread_dom_event_throws_into_try_await_catch_with_jit_stack() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let bytes = g6b_wasm::asyncify_wat(g6b_wasm::UI_EVENT_THROW_WAT)
+            .expect("forked wasm-opt --asyncify");
+        let mut module = g6b_wasm::decode(&bytes).expect("decode");
+        let on_click = module
+            .exports
+            .iter()
+            .find(|e| e.name == "on_click" && e.kind == 0)
+            .map(|e| e.idx)
+            .unwrap();
+        let surrounding = module
+            .exports
+            .iter()
+            .find(|e| e.name == "surrounding" && e.kind == 0)
+            .map(|e| e.idx)
+            .unwrap();
+        let mut timers = crate::timers::TimerHeap::new();
+        let mut host = KernelHost::attach_fresh(
+            &mut session.dom,
+            &session.program.router,
+            &spec,
+            Vec::new(),
+            &mut timers,
+            0,
+            Some(&mut session.program.store),
+        );
+        let err = g6b_wasm::run_with_fuel_mut(
+            &mut module,
+            on_click,
+            &[],
+            &mut host,
+            g6b_wasm::DEFAULT_FUEL,
+        )
+        .expect_err("DOM event export only throws");
+        assert!(err.contains("unhandled wasm exception"), "{err}");
+        assert!(
+            host.diagnostics
+                .iter()
+                .any(|d| d.contains("WASM-THROW-STACK")
+                    && d.contains("thrower")
+                    && d.contains("on_click")),
+            "event callee stack: {:?}",
+            host.diagnostics
+        );
+
+        host.diagnostics.clear();
+        let ay = g6b_wasm::Asyncify::new(&module).expect("asyncify exports");
+        let data = 1024u32;
+        let slot = match ay
+            .step(&mut module, surrounding, &[], data, 4096, &mut host)
+            .expect("await unwind")
+        {
+            g6b_wasm::Step::Sleeping { slot, .. } => slot,
+            other => panic!("expected Sleeping, {other:?}"),
+        };
+        g6b_wasm::Host::resolve_slot(&mut host, slot).expect("wrapExportFn settle");
+        match ay
+            .resume(&mut module, surrounding, &[], data, 4096, &mut host)
+            .expect("rewind into event throw, caught outside")
+        {
+            g6b_wasm::Step::Done(v) => assert_eq!(v, vec![1], "try/await/catch returns 1"),
+            other => panic!("expected Done(1), {other:?}"),
+        }
+        assert!(
+            host.diagnostics
+                .iter()
+                .any(|d| d.contains("WASM-THROW-STACK")
+                    && d.contains("thrower")
+                    && d.contains("on_click")
+                    && d.contains("surrounding")),
+            "caught outside the event: {:?}",
+            host.diagnostics
+        );
+    }
+
+    fn kernel_host_for_try_table<'a>(
+        session: &'a mut BrowserSession,
+        spec: &'a BoardSpec,
+        timers: &'a mut crate::timers::TimerHeap,
+    ) -> KernelHost<'a> {
+        KernelHost::attach_fresh(
+            &mut session.dom,
+            &session.program.router,
+            spec,
+            Vec::new(),
+            timers,
+            0,
+            Some(&mut session.program.store),
+        )
+    }
+
+    #[test]
+    fn ui_thread_try_table_throw_in_await_has_jit_stack() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let bytes = g6b_wasm::asyncify_wat(g6b_wasm::TRY_TABLE_AWAIT_WAT)
+            .expect("forked wasm-opt --asyncify try_table");
+        let mut module = g6b_wasm::decode(&bytes).expect("decode");
+        let throw_in_await = module
+            .exports
+            .iter()
+            .find(|e| e.name == "throw_in_await" && e.kind == 0)
+            .map(|e| e.idx)
+            .unwrap();
+        let mut timers = crate::timers::TimerHeap::new();
+        let mut host = kernel_host_for_try_table(&mut session, &spec, &mut timers);
+        let ay = g6b_wasm::Asyncify::new(&module).expect("asyncify exports");
+        let slot = match ay
+            .step(&mut module, throw_in_await, &[], 1024, 4096, &mut host)
+            .expect("await unwind")
+        {
+            g6b_wasm::Step::Sleeping { slot, .. } => slot,
+            other => panic!("expected Sleeping, {other:?}"),
+        };
+        g6b_wasm::Host::resolve_slot(&mut host, slot).expect("wrapExportFn settle");
+        match ay
+            .resume(&mut module, throw_in_await, &[], 1024, 4096, &mut host)
+            .expect("rewind then throw lands on try_table dest")
+        {
+            g6b_wasm::Step::Done(v) => assert_eq!(v, vec![7]),
+            other => panic!("expected Done(7), {other:?}"),
+        }
+        assert!(
+            host.diagnostics
+                .iter()
+                .any(|d| d.contains("WASM-THROW-STACK") && d.contains("throw_in_await")),
+            "simple throw in await: {:?}",
+            host.diagnostics
+        );
+    }
+
+    #[test]
+    fn ui_thread_async_dom_event_awaits_then_thrower_caught() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let bytes = g6b_wasm::asyncify_wat(g6b_wasm::TRY_TABLE_AWAIT_WAT)
+            .expect("forked wasm-opt --asyncify try_table");
+        let mut module = g6b_wasm::decode(&bytes).expect("decode");
+        let dom_event = module
+            .exports
+            .iter()
+            .find(|e| e.name == "domEvent" && e.kind == 0)
+            .map(|e| e.idx)
+            .unwrap();
+        let mut timers = crate::timers::TimerHeap::new();
+        let mut host = kernel_host_for_try_table(&mut session, &spec, &mut timers);
+        let ay = g6b_wasm::Asyncify::new(&module).expect("asyncify exports");
+        let slot = match ay
+            .step(&mut module, dom_event, &[], 1024, 4096, &mut host)
+            .expect("domEvent await unwinds")
+        {
+            g6b_wasm::Step::Sleeping { slot, .. } => slot,
+            other => panic!("expected Sleeping, {other:?}"),
+        };
+        g6b_wasm::Host::resolve_slot(&mut host, slot).expect("wrapExportFn settle");
+        match ay
+            .resume(&mut module, dom_event, &[], 1024, 4096, &mut host)
+            .expect("rewind into thrower, caught in event try_table")
+        {
+            g6b_wasm::Step::Done(v) => assert_eq!(v, vec![1]),
+            other => panic!("expected Done(1), {other:?}"),
+        }
+        assert!(
+            host.diagnostics
+                .iter()
+                .any(|d| d.contains("WASM-THROW-STACK")
+                    && d.contains("thrower")
+                    && (d.contains("on_click") || d.contains("domEvent"))),
+            "async DOM event stack: {:?}",
+            host.diagnostics
+        );
     }
 
     #[test]
@@ -6128,6 +7790,7 @@ mod tests {
             Vec::new(),
             &mut session.timers,
             0,
+            Some(&mut session.program.store),
         );
         assert!(host.set_inner_text("not-a-target", "oops").is_err());
         assert!(host.set_visible("not-a-target", false).is_err());
@@ -6206,6 +7869,298 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lodash_pglite_query_hits_the_same_registry() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let uuid = session.program.store.open_purpose("registry").unwrap();
+        session
+            .program
+            .store
+            .exec(uuid, "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT)")
+            .unwrap();
+        session
+            .program
+            .store
+            .exec(uuid, "INSERT INTO kv VALUES ('a', 'b')")
+            .unwrap();
+        let mut host = KernelHost::attach_fresh(
+            &mut session.dom,
+            &session.program.router,
+            &spec,
+            Vec::new(),
+            &mut session.timers,
+            0,
+            Some(&mut session.program.store),
+        );
+        // One-shot D path: defaultTo(=window.pglite) then attempt("query", sql, "[]")
+        // opens the current registry instance and queries it.
+        let cmds = g6b_js::lodash_parse(
+            r#"[{"func":"defaultTo","params":["=window.pglite"]},{"func":"attempt","params":["query","SELECT * FROM kv","[]"]}]"#,
+        )
+        .unwrap();
+        let out = g6b_js::lodash_execute_host(JsValue::Null, &cmds, None, Some(&mut host)).unwrap();
+        let JsValue::Str(s) = out else {
+            panic!("expected JSON string, got {out:?}");
+        };
+        assert!(s.contains("\"ok\":true"), "{s}");
+        assert!(s.contains("\"b\""), "{s}");
+
+        let opened = g6b_js::lodash_parse(
+            r#"[{"func":"defaultTo","params":["=window.pglite"]},{"func":"attempt","params":["=undefined"]}]"#,
+        )
+        .unwrap();
+        let handle =
+            g6b_js::lodash_execute_host(JsValue::Null, &opened, None, Some(&mut host)).unwrap();
+        assert!(matches!(handle, JsValue::Handle(h) if h != 0), "{handle:?}");
+        let exec_cmds = g6b_js::lodash_parse(
+            r#"[{"func":"invoke","params":["exec","INSERT INTO kv VALUES ('c', 'd')"]}]"#,
+        )
+        .unwrap();
+        let exec_out =
+            g6b_js::lodash_execute_host(handle.clone(), &exec_cmds, None, Some(&mut host)).unwrap();
+        let JsValue::Str(es) = exec_out else {
+            panic!("expected JSON string, got {exec_out:?}");
+        };
+        assert!(es.contains("\"ok\":true"), "{es}");
+
+        let stat_cmds = g6b_js::lodash_parse(r#"[{"func":"invoke","params":["stat"]}]"#).unwrap();
+        let stat_out =
+            g6b_js::lodash_execute_host(handle.clone(), &stat_cmds, None, Some(&mut host)).unwrap();
+        let JsValue::Str(ss) = stat_out else {
+            panic!("expected JSON string, got {stat_out:?}");
+        };
+        assert!(ss.contains("\"ready\":true"), "{ss}");
+        let async_cmds =
+            g6b_js::lodash_parse(r#"[{"func":"invoke","params":["statAsync"]}]"#).unwrap();
+        let async_out =
+            g6b_js::lodash_execute_host(handle, &async_cmds, None, Some(&mut host)).unwrap();
+        let JsValue::Str(as_) = async_out else {
+            panic!("expected JSON string, got {async_out:?}");
+        };
+        assert!(as_.contains("\"ready\":true"), "{as_}");
+
+        let alert = g6b_js::lodash_parse(r#"[{"func":"defaultTo","params":["=window.alert"]}]"#)
+            .unwrap_err();
+        assert!(matches!(alert, LodashError::EvalRefused(_)));
+    }
+
+    #[test]
+    fn libwasm_start_awaits_pglite_sql_insert_select() {
+        use g6b_wasm::{Export, FuncType, Import, Instr, Module, ValType};
+
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let open =
+            r#"[{"func":"defaultTo","params":["=window.pglite"]},{"func":"attempt","params":[]}]"#;
+        let exec_sql = "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)";
+        let exec = format!(r#"[{{"func":"invoke","params":["exec","{exec_sql}"]}}]"#);
+        let insert = r#"[{"func":"invoke","params":["query","INSERT INTO t VALUES ($1, $2)","[1,\"alice\"]"]}]"#;
+        let select = r#"[{"func":"invoke","params":["queryAsync","SELECT name FROM t WHERE id = $1","[1]"]}]"#;
+        let status = "status";
+        let marker = "PGLITE-SQL";
+
+        let mut mem = vec![0u8; 65536];
+        let mut at = 256usize;
+        let intern = |mem: &mut [u8], at: &mut usize, s: &str| {
+            let off = *at;
+            mem[off..off + s.len()].copy_from_slice(s.as_bytes());
+            *at = (*at + s.len() + 3) & !3;
+            (off as i32, s.len() as i32)
+        };
+        let (open_ptr, open_len) = intern(&mut mem, &mut at, open);
+        let (exec_ptr, exec_len) = intern(&mut mem, &mut at, &exec);
+        let (ins_ptr, ins_len) = intern(&mut mem, &mut at, insert);
+        let (sel_ptr, sel_len) = intern(&mut mem, &mut at, select);
+        let (st_ptr, st_len) = intern(&mut mem, &mut at, status);
+        let (mk_ptr, mk_len) = intern(&mut mem, &mut at, marker);
+
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![ValType::I32; 7],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: vec![ValType::I32; 8],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![ValType::I32; 4],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![],
+                    results: vec![],
+                },
+            ],
+            imports: vec![
+                Import {
+                    module: "env".into(),
+                    name: "ldexec_Handle__Handle".into(),
+                    typeidx: 0,
+                },
+                Import {
+                    module: "env".into(),
+                    name: "ldexec_Handle__string".into(),
+                    typeidx: 1,
+                },
+                Import {
+                    module: "env".into(),
+                    name: g6b_wasm::IMPORT_LIBWASM_AWAIT_VOID.into(),
+                    typeidx: 2,
+                },
+                Import {
+                    module: "env".into(),
+                    name: g6b_wasm::IMPORT_LIBWASM_AWAIT_VALUE.into(),
+                    typeidx: 2,
+                },
+                Import {
+                    module: "env".into(),
+                    name: g6b_wasm::IMPORT_SET_INNER_TEXT.into(),
+                    typeidx: 3,
+                },
+            ],
+            func_types: vec![4],
+            mem_pages: 1,
+            max_mem_pages: None,
+            exports: vec![Export {
+                name: "_start".into(),
+                kind: 0,
+                idx: 5,
+            }],
+            bodies: vec![vec![
+                Instr::I32Const(0),
+                Instr::I32Const(open_len),
+                Instr::I32Const(open_ptr),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::Call(0),
+                Instr::LocalSet(0),
+                Instr::I32Const(64),
+                Instr::LocalGet(0),
+                Instr::I32Const(exec_len),
+                Instr::I32Const(exec_ptr),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::Call(1),
+                Instr::I32Const(64),
+                Instr::LocalGet(0),
+                Instr::I32Const(ins_len),
+                Instr::I32Const(ins_ptr),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::Call(1),
+                Instr::LocalGet(0),
+                Instr::I32Const(sel_len),
+                Instr::I32Const(sel_ptr),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::I32Const(0),
+                Instr::Call(0),
+                Instr::LocalSet(1),
+                Instr::LocalGet(1),
+                Instr::Call(2),
+                Instr::I32Const(80),
+                Instr::Call(3),
+                Instr::I32Const(st_ptr),
+                Instr::I32Const(st_len),
+                Instr::I32Const(mk_ptr),
+                Instr::I32Const(mk_len),
+                Instr::Call(4),
+                Instr::End,
+            ]],
+            memory: mem,
+            locals: vec![2],
+            has_memory: true,
+            tags: vec![],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut timers = TimerHeap::new();
+        let mut host = KernelHost::attach_fresh(
+            &mut session.dom,
+            &session.program.router,
+            &spec,
+            Vec::new(),
+            &mut timers,
+            0,
+            Some(&mut session.program.store),
+        );
+        run_libwasm_start(&m, &mut host)
+            .unwrap_or_else(|e| panic!("pglite _start: {e}\ndiagnostics: {:?}", host.diagnostics));
+        assert!(
+            host.last_await_value.contains("alice"),
+            "awaited SELECT JSON: {} diagnostics: {:?}",
+            host.last_await_value,
+            host.diagnostics
+        );
+        assert!(
+            host.diagnostics
+                .iter()
+                .any(|d| d.contains("WASM-AWAIT-VOID")),
+            "await was claimed: {:?}",
+            host.diagnostics
+        );
+        drop(host);
+        assert_eq!(
+            session
+                .dom
+                .get_element_by_id("status")
+                .unwrap()
+                .inner_text(),
+            "PGLITE-SQL"
+        );
+        let uuid = session.program.store.open_purpose("registry").unwrap();
+        let out = session
+            .program
+            .store
+            .query(uuid, "SELECT name FROM t WHERE id = $1", &[Json::Int(1)])
+            .unwrap();
+        assert_eq!(out.rows.len(), 1);
+        assert_eq!(out.rows[0].get("name"), Some(&Json::Str("alice".into())));
+    }
+
+    #[test]
+    fn lodash_pglite_refused_when_store_disabled() {
+        let spec =
+            BoardSpec::from_json_str(r#"{"schema_version":1,"kernel":{"store":{"enable":false}}}"#)
+                .unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let mut host = KernelHost::attach_fresh(
+            &mut session.dom,
+            &session.program.router,
+            &spec,
+            Vec::new(),
+            &mut session.timers,
+            0,
+            Some(&mut session.program.store),
+        );
+        let cmds =
+            g6b_js::lodash_parse(r#"[{"func":"defaultTo","params":["=window.pglite"]}]"#).unwrap();
+        let err =
+            g6b_js::lodash_execute_host(JsValue::Null, &cmds, None, Some(&mut host)).unwrap_err();
+        assert!(
+            matches!(err, LodashError::EvalRefused(ref s) if s == "window.pglite"),
+            "{err}"
+        );
+        assert_eq!(host.libwasm_global("pglite").unwrap(), 0);
+    }
+
     fn count_dom(n: &Node) -> usize {
         1 + n.children.iter().map(count_dom).sum::<usize>()
     }
@@ -6218,7 +8173,7 @@ mod tests {
             return;
         }
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
-        let program = load_program(&spec).unwrap();
+        let mut program = load_program(&spec).unwrap();
         let mut dom =
             g6b_html::parse_checked(&g6b_ui::setup_html_libwasm(&spec, "/ui/ui-libwasm.wasm"))
                 .unwrap();
@@ -6243,6 +8198,7 @@ mod tests {
             mount_path.clone(),
             &mut timers,
             0,
+            Some(&mut program.store),
         );
         if let Err(e) = run_libwasm_start(&module, &mut host) {
             panic!(

@@ -14,17 +14,22 @@ mod jit;
 mod json;
 mod objects;
 mod values;
+mod webidl;
 
-pub use asyncify::{Asyncify, Step, STATE_NORMAL, STATE_REWINDING, STATE_UNWINDING};
+pub use asyncify::{
+    asyncify_wat, find_fork_wasm_opt, reserve_asyncify_scratch, Asyncify, Step, STATE_NORMAL,
+    STATE_REWINDING, STATE_UNWINDING, TRY_TABLE_AWAIT_WAT, UI_EVENT_THROW_WAT,
+};
 pub use binary::{
-    decode, encode_empty_ui_module, encode_ui_module, validate, Export, FuncType, Import, Instr,
-    Module, ValType, MAX_CONTROL_DEPTH, MAX_FUNCTIONS, MAX_INSTRUCTIONS, MAX_LOCALS,
+    decode, encode_empty_ui_module, encode_ui_module, validate, Element, Export, FuncType, Import,
+    Instr, Module, Table, ValType, MAX_CONTROL_DEPTH, MAX_FUNCTIONS, MAX_INSTRUCTIONS, MAX_LOCALS,
     MAX_MEMORY_PAGES, MAX_MODULE_BYTES, MAX_STACK,
 };
 pub use browser::{JsExportKind, JsExports, KernelPort};
 pub use interp::{
-    run, run_start, run_with_fuel, run_with_fuel_mut, table_funcref, DomHost, GuestFn, Host,
-    Ldexec, LdexecInit, DEFAULT_FUEL, MAX_CALL_DEPTH, MAX_FUEL,
+    export_func, is_unhandled_d_abort, run, run_start, run_with_fuel, run_with_fuel_mut,
+    table_funcref, DomHost, GuestFn, Host, Ldexec, LdexecInit, DEFAULT_FUEL, MAX_CALL_DEPTH,
+    MAX_FUEL,
 };
 pub use jit::{
     data_image, install_start, jit_add_i32, jit_riscv, start_ops, MAX_JIT_INSTRUCTIONS,
@@ -37,6 +42,11 @@ pub use objects::{
     is_root, ObjectTable, MAX_OBJECTS, OBJECT_BASE, OBJECT_ROOT_DOM, OBJECT_ROOT_SCOPE,
 };
 pub use values::{add_value, string_of, LibwasmValue, ObjectKind};
+pub use webidl::{
+    dom_exception, hierarchy_request_append_child, invalid_character_create_element,
+    is_js_host_throw, is_valid_element_name, is_valid_request_url, js_throw_payload,
+    request_type_error, type_error, HIERARCHY_REQUEST_ERR, INVALID_CHARACTER_ERR,
+};
 
 /// Boot / generated-source marker.
 pub const MARKER: &str = "WASM-JIT";

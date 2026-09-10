@@ -19,7 +19,8 @@ export type Construct =
   | "sveltekit"
   | "FileMgr"
   | "Menu"
-  | "Settings";
+  | "Settings"
+  | "Store";
 
 export const LIVE: Construct[] = [
   "NodeDef",
@@ -30,6 +31,7 @@ export const LIVE: Construct[] = [
   "FileMgr",
   "Menu",
   "Settings",
+  "Store",
 ];
 
 export const STUB: Construct[] = ["{#each}", "{#await}", "Slot", "@callback"];

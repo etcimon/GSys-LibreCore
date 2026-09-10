@@ -38,13 +38,15 @@ use g6b_spec::BoardSpec;
 /// `__vio` BSS: descriptor table (8×16B) @0, avail ring @0x80 (32B — 4+2*8+2
 /// = 22B used), used ring @0xC0 (80B — 4+8*8+4 = 72B used), request area
 /// @0x120 (96B — largest ctrlq req is 56B), response buffer @0x180 (512B),
-/// device-base scratch @0x3f0, irq counter @0x3f4, input-device scratch
+/// device-base scratch @0x3f0, irq counter @0x3f4, keyboard-device scratch
 /// @0x3f8, `G6FB` scanout descriptor @0x400 (28B — the
 /// `simple-framebuffer`-shaped handoff), then the virtio-input eventq block:
 /// desc table @0x440 (8×16B), avail @0x4c0, used @0x4e0 (72B used), event
 /// buffers @0x530 (8×8B `virtio_input_event`), used-idx shadow @0x570,
-/// key-queue head/tail @0x574/0x578, key codes @0x580 (16×4B).
-pub const VIO_BSS: u64 = 0x680;
+/// key-queue head/tail @0x574/0x578, key codes @0x580 (16×4B), tablet-device
+/// scratch @0x5f4, `DispSel` @0x600, tablet eventq @0x680 (desc / avail @0x700 /
+/// used @0x720 / evbuf @0x770 / used-idx @0x7b0).
+pub const VIO_BSS: u64 = 0x800;
 
 /// Compact persist (`__ui_cap`) after `__ui_dom`. Dirty tiles + live node
 /// count for the web engine. Not the 48-row `__ui_dom` table.
@@ -120,7 +122,8 @@ pub const VIO_IRQF_OFF: i32 = 0x3f4;
 /// `simple-framebuffer`/`simpledrm` node inherits, so the same surface
 /// serves the BIOS scanout and the OS.
 pub const DISP_DESC_OFF: i32 = 0x400;
-/// Scratch u32 holding the probed virtio-input (DeviceID 18) mmio base.
+/// Scratch u32 holding the probed virtio-input (DeviceID 18) mmio base
+/// (keyboard — first DeviceID 18 slot).
 pub const VIO_INP_OFF: i32 = 0x3f8;
 /// Input eventq descriptor table (8 descs — one per posted event buffer).
 pub const INP_DESC_OFF: i32 = 0x440;
@@ -157,14 +160,44 @@ pub const NAV_TEXT_OFF: i32 = 0x5e0;
 /// `VioCmd` mid-transaction and corrupt the shared rings (the trap frame
 /// saves registers, but the descriptor chain is shared state, not regs).
 pub const VIO_BUSY_OFF: i32 = 0x5f0;
+/// Scratch u32 holding the virtio-tablet (second DeviceID 18) mmio base.
+/// Sits in the 12B gap between `VIO_BUSY` (0x5f0) and `DispSel` (0x600).
+pub const VIO_TAB_OFF: i32 = 0x5f4;
+/// Tablet eventq — after `DispSel` (0x600..0x62c) and the original 0x680 BSS.
+pub const TAB_DESC_OFF: i32 = 0x680;
+pub const TAB_AVAIL_OFF: i32 = 0x700;
+pub const TAB_USED_OFF: i32 = 0x720;
+/// 8 `virtio_input_event` buffers for the tablet.
+pub const TAB_EVBUF_OFF: i32 = 0x770;
+/// Shadow of the last-consumed tablet used idx.
+pub const TAB_LAST_USED: i32 = 0x7b0;
 /// Linux `EV_KEY` codes the menu navigator consumes (virtio-input carries
 /// the kernel's `KEY_*` codes verbatim — QEMU `sendkey down`/`ret`).
 pub const VIO_KEY_ESC: i64 = 1;
 pub const VIO_KEY_ENTER: i64 = 28;
+pub const VIO_KEY_F10: i64 = 68;
+pub const VIO_KEY_HOME: i64 = 102;
 pub const VIO_KEY_UP: i64 = 103;
 pub const VIO_KEY_LEFT: i64 = 105;
 pub const VIO_KEY_RIGHT: i64 = 106;
+pub const VIO_KEY_END: i64 = 107;
 pub const VIO_KEY_DOWN: i64 = 108;
+/// Linux `BTN_LEFT` (EV_KEY) — virtio-tablet / virtio-mouse primary click.
+pub const VIO_BTN_LEFT: i64 = 0x110;
+/// Linux `BTN_RIGHT`.
+pub const VIO_BTN_RIGHT: i64 = 0x111;
+/// Linux `BTN_MIDDLE`.
+pub const VIO_BTN_MIDDLE: i64 = 0x112;
+/// Linux `ABS_X` / `REL_X` axis code.
+pub const VIO_ABS_X: i64 = 0;
+/// Linux `ABS_Y` / `REL_Y` axis code.
+pub const VIO_ABS_Y: i64 = 1;
+/// Linux `REL_X` (same numeric code as `ABS_X`; distinguished by `EV_*` type).
+pub const VIO_REL_X: i64 = 0;
+/// Linux `REL_Y`.
+pub const VIO_REL_Y: i64 = 1;
+/// QEMU `INPUT_EVENT_ABS_MAX` — virtio-tablet `ABS_X`/`ABS_Y` range.
+pub const VIO_ABS_MAX: u32 = 0x7fff;
 /// Uncore display-engine presence magic (`architecture/uncore/hdmi-display.md`).
 pub const DISP_MAGIC: u32 = u32::from_le_bytes(*b"G6DS");
 /// `G6FB` descriptor magic.
@@ -1231,7 +1264,7 @@ pub fn inp_init_node(o: Object) -> Node {
         Op::Beq {
             rs1: T2,
             rs2: T3,
-            to: "ipi_dev".into(),
+            to: "ipi_claim".into(),
         },
         Op::Label("ipi_next".into()),
         Op::Add {
@@ -1249,10 +1282,43 @@ pub fn inp_init_node(o: Object) -> Node {
             rs2: X0,
             to: "ipi_slot".into(),
         },
+        // Scan done: handshake the keyboard (first DeviceID 18) if any.
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T0, T5, VIO_INP_OFF),
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: "ipi_dev".into(),
+        },
     ];
     putc_str(&mut ops, "VIRTIO-INPUT-NONE\n");
     ops.push(ret());
     ops.extend([
+        Op::Label("ipi_claim".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T2, T5, VIO_INP_OFF),
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "ipi_claim_tab".into(),
+        },
+        sw(T0, T5, VIO_INP_OFF),
+        jump("ipi_next"),
+        Op::Label("ipi_claim_tab".into()),
+        lw(T2, T5, VIO_TAB_OFF),
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "ipi_next".into(),
+        },
+        sw(T0, T5, VIO_TAB_OFF),
+        jump("ipi_next"),
         Op::Label("ipi_dev".into()),
         Op::La {
             rd: T5,
@@ -1452,6 +1518,352 @@ pub fn inp_init_node(o: Object) -> Node {
     ops.push(Op::Label("ipi_fail".into()));
     putc_str(&mut ops, "VIRTIO-INPUT-FAIL\n");
     ops.push(ret());
+    Node {
+        purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// `TabInit` — virtio-tablet (second DeviceID 18) eventq. `InpInit` already
+/// stored the mmio base at `VIO_TAB_OFF` (0 → `VIRTIO-TABLET-NONE`). Same
+/// handshake as the keyboard, rings in `__vio+TAB_*`. VGA `DomNav` does not
+/// consume tablet events; `TabDrain` only re-posts. Leaf.
+pub fn tab_init_node(o: Object) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — tablet eventq handshake + 8 posted event buffers",
+            o.why
+        )),
+        Op::Glob("TabInit".into()),
+        Op::Label("TabInit".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T0, T5, VIO_TAB_OFF),
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: "ipt_dev".into(),
+        },
+    ];
+    putc_str(&mut ops, "VIRTIO-TABLET-NONE\n");
+    ops.push(ret());
+    ops.extend([
+        Op::Label("ipt_dev".into()),
+        Op::Addi {
+            rd: T6,
+            rs: T0,
+            imm: 0,
+        },
+        sw(X0, T6, VIO_REG_STATUS),
+        Op::Li { rd: T4, imm: 4 },
+        Op::Label("ipt_rst".into()),
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "ipt_ack".into(),
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: "ipt_rst".into(),
+        },
+        jump("ipt_fail"),
+        Op::Label("ipt_ack".into()),
+        Op::Li {
+            rd: T2,
+            imm: i64::from(VIO_ST_ACK | VIO_ST_DRIVER),
+        },
+        sw(T2, T6, VIO_REG_STATUS),
+        sw(X0, T6, VIO_REG_FEATURES_SEL),
+        lw(T2, T6, VIO_REG_FEATURES),
+        sw(X0, T6, VIO_REG_DRV_FEATURES_SEL),
+        sw(X0, T6, VIO_REG_DRV_FEATURES),
+        Op::Li { rd: T2, imm: 1 },
+        sw(T2, T6, VIO_REG_FEATURES_SEL),
+        lw(T3, T6, VIO_REG_FEATURES),
+        Op::Andi {
+            rd: T3,
+            rs: T3,
+            imm: VIO_F_VERSION_1 as i32,
+        },
+        Op::Li { rd: T2, imm: 1 },
+        sw(T2, T6, VIO_REG_DRV_FEATURES_SEL),
+        sw(T3, T6, VIO_REG_DRV_FEATURES),
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_FEATURES_OK,
+        },
+        sw(T2, T6, VIO_REG_STATUS),
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Andi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_FEATURES_OK,
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "ipt_fail".into(),
+        },
+        sw(X0, T6, VIO_REG_QUEUE_SEL),
+        lw(T2, T6, VIO_REG_QUEUE_NUM_MAX),
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "ipt_fail".into(),
+        },
+        Op::Li {
+            rd: T3,
+            imm: VIO_QUEUE_NUM,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_NUM),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: TAB_DESC_OFF,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_DESC),
+        sw(X0, T6, VIO_REG_QUEUE_DESC + 4),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: TAB_AVAIL_OFF,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_AVAIL),
+        sw(X0, T6, VIO_REG_QUEUE_AVAIL + 4),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: TAB_USED_OFF,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_USED),
+        sw(X0, T6, VIO_REG_QUEUE_USED + 4),
+        Op::Li { rd: T3, imm: 1 },
+        sw(T3, T6, VIO_REG_QUEUE_READY),
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: TAB_DESC_OFF,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: TAB_EVBUF_OFF,
+        },
+        Op::Li { rd: T4, imm: 8 },
+        Op::Label("ipt_buf".into()),
+        sw(T3, T2, 0),
+        sw(X0, T2, 4),
+        Op::Li { rd: T1, imm: 8 },
+        sw(T1, T2, 8),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_DESC_WRITE),
+        },
+        sw(T1, T2, 12),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: 16,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T3,
+            imm: 8,
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: "ipt_buf".into(),
+        },
+        sw(X0, T5, TAB_AVAIL_OFF),
+        Op::Li {
+            rd: T1,
+            imm: 0x0001_0000,
+        },
+        sw(T1, T5, TAB_AVAIL_OFF + 4),
+        Op::Li {
+            rd: T1,
+            imm: 0x0003_0002,
+        },
+        sw(T1, T5, TAB_AVAIL_OFF + 8),
+        Op::Li {
+            rd: T1,
+            imm: 0x0005_0004,
+        },
+        sw(T1, T5, TAB_AVAIL_OFF + 12),
+        Op::Li {
+            rd: T1,
+            imm: 0x0007_0006,
+        },
+        sw(T1, T5, TAB_AVAIL_OFF + 16),
+        Op::Fence,
+        Op::Li {
+            rd: T1,
+            imm: 0x8_0000,
+        },
+        sw(T1, T5, TAB_AVAIL_OFF),
+        Op::Fence,
+        sw(X0, T6, VIO_REG_QUEUE_NOTIFY),
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_DRIVER_OK,
+        },
+        sw(T2, T6, VIO_REG_STATUS),
+    ]);
+    putc_str(&mut ops, "VIRTIO-TABLET-OK\n");
+    ops.push(Op::Label("ipt_ret".into()));
+    ops.push(ret());
+    ops.push(Op::Label("ipt_fail".into()));
+    putc_str(&mut ops, "VIRTIO-TABLET-FAIL\n");
+    ops.push(ret());
+    Node {
+        purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// `TabDrain` — consume the tablet eventq used ring and re-post every
+/// buffer. Does **not** push `INP_KQ` (VGA `DomNav` is keyboard-only).
+/// Marker `TAB` per consumed event so the exec-model poke is observable.
+pub fn tab_drain_node(o: Object) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — tablet eventq used-ring drain + re-post",
+            o.why
+        )),
+        Op::Glob("TabDrain".into()),
+        Op::Label("TabDrain".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T6, T5, VIO_TAB_OFF),
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: "tpd_ret".into(),
+        },
+        lw(T4, T5, TAB_LAST_USED),
+        Op::Label("tpd_next".into()),
+        lw(T1, T5, TAB_USED_OFF),
+        Op::Srli {
+            rd: T1,
+            rs: T1,
+            shamt: 16,
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: T4,
+            to: "tpd_done".into(),
+        },
+        Op::Andi {
+            rd: T2,
+            rs: T4,
+            imm: 7,
+        },
+        Op::Slli {
+            rd: T2,
+            rs: T2,
+            shamt: 3,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: TAB_USED_OFF + 4,
+        },
+        Op::Add {
+            rd: T2,
+            rs1: T2,
+            rs2: T5,
+        },
+        lw(T3, T2, 0),
+    ];
+    putc_str(&mut ops, "TAB\n");
+    ops.extend([
+        lw(T2, T5, TAB_AVAIL_OFF),
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Andi {
+            rd: T1,
+            rs: T2,
+            imm: 7,
+        },
+        Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: 1,
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: TAB_AVAIL_OFF + 4,
+        },
+        Op::Add {
+            rd: T1,
+            rs1: T1,
+            rs2: T5,
+        },
+        Op::Sb {
+            rs2: T3,
+            rs1: T1,
+            off: 0,
+        },
+        Op::Srli {
+            rd: T3,
+            rs: T3,
+            shamt: 8,
+        },
+        Op::Sb {
+            rs2: T3,
+            rs1: T1,
+            off: 1,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: 1,
+        },
+        Op::Slli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        sw(T2, T5, TAB_AVAIL_OFF),
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: 1,
+        },
+        sw(T4, T5, TAB_LAST_USED),
+        jump("tpd_next"),
+        Op::Label("tpd_done".into()),
+        Op::Fence,
+        sw(X0, T6, VIO_REG_QUEUE_NOTIFY),
+        Op::Label("tpd_ret".into()),
+    ]);
+    ops.push(ret());
+    let _ = o;
     Node {
         purpose: Purpose::Virtio,
         ops,

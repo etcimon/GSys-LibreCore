@@ -43,7 +43,52 @@
             "wasm": { "$ref": "#/$defs/wasm" }
           }
         },
-        "wasm": { "$ref": "#/$defs/wasm" }
+        "wasm": { "$ref": "#/$defs/wasm" },
+        "store": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "enable": { "type": "boolean", "default": true },
+            "persist": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "memory": { "type": "boolean", "default": true },
+                "elf": { "type": "boolean", "default": false },
+                "usb": { "type": "boolean", "default": false },
+                "volume": { "type": "string", "enum": ["fat32", "ntfs", "ext4", ""] }
+              }
+            },
+            "pglite": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "files": { "type": "boolean", "default": false },
+                "js": { "type": "boolean", "default": false },
+                "embed": { "type": "boolean", "default": false }
+              }
+            },
+            "max_stores": { "type": "integer", "minimum": 1, "maximum": 16 },
+            "max_instances": { "type": "integer", "minimum": 1, "maximum": 16 },
+            "max_tables": { "type": "integer", "minimum": 1, "maximum": 64 },
+            "max_columns": { "type": "integer", "minimum": 1, "maximum": 32 },
+            "max_rows": { "type": "integer", "minimum": 1, "maximum": 16384 },
+            "max_sql_bytes": { "type": "integer", "minimum": 1, "maximum": 262144 },
+            "max_param_bytes": { "type": "integer", "minimum": 1, "maximum": 65536 },
+            "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+            "max_tx": { "type": "integer", "const": 1 },
+            "max_open": { "type": "integer", "minimum": 1, "maximum": 8 },
+            "max_per_purpose": { "type": "integer", "minimum": 1, "maximum": 8 },
+            "purposes": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" }
+            },
+            "names": {
+              "type": "array",
+              "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,31}$" }
+            }
+          }
+        }
       }
     },
     "connectors": { "type": "object" },

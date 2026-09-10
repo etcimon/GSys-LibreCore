@@ -591,6 +591,73 @@ impl Tasking {
     }
 }
 
+/// BIOS structured store (`g6b-pglite`). Default **on**; overlay `enable: false`
+/// to compile it out. Identity is UUID; `purposes` is the BIOS-UI allow-list.
+/// See `architecture/g6b-pglite.md` and `architecture/g6b-store-instances.md`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreCfg {
+    pub enable: bool,
+    pub persist_memory: bool,
+    pub persist_elf: bool,
+    pub persist_usb: bool,
+    /// Live USB key volume (`fat32` / `ntfs` / `ext4`). Empty = snapshot export only.
+    pub usb_volume: String,
+    pub pglite_files: bool,
+    pub pglite_js: bool,
+    pub pglite_embed: bool,
+    pub max_stores: u32,
+    pub max_tables: u32,
+    pub max_columns: u32,
+    pub max_rows: u32,
+    pub max_sql_bytes: u32,
+    pub max_param_bytes: u32,
+    pub max_result_bytes: u32,
+    pub max_tx: u32,
+    pub max_open: u32,
+    pub max_per_purpose: u32,
+    /// Allow-listed purposes. JSON `names` is an alias. Filled with
+    /// `["registry"]` when `enable` and empty.
+    pub purposes: Vec<String>,
+}
+
+impl Default for StoreCfg {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            persist_memory: true,
+            persist_elf: false,
+            persist_usb: false,
+            usb_volume: String::new(),
+            pglite_files: false,
+            pglite_js: false,
+            pglite_embed: false,
+            max_stores: 4,
+            max_tables: 32,
+            max_columns: 16,
+            max_rows: 4096,
+            max_sql_bytes: 64 * 1024,
+            max_param_bytes: 16 * 1024,
+            max_result_bytes: 256 * 1024,
+            max_tx: 1,
+            max_open: 4,
+            max_per_purpose: 2,
+            purposes: vec!["registry".into()],
+        }
+    }
+}
+
+/// Purpose alphabet: `^[a-z][a-z0-9_]{0,31}$`.
+pub fn store_purpose_ok(s: &str) -> bool {
+    let b = s.as_bytes();
+    if b.is_empty() || b.len() > 32 {
+        return false;
+    }
+    b[0].is_ascii_lowercase()
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
+}
+
 #[derive(Debug, Clone)]
 pub struct Kernel {
     pub shape: String,
@@ -610,6 +677,7 @@ pub struct Kernel {
     pub flash: Flash,
     pub settings: Settings,
     pub usb: Usb,
+    pub store: StoreCfg,
 }
 
 impl Default for Kernel {
@@ -631,6 +699,7 @@ impl Default for Kernel {
             flash: Flash::default(),
             settings: Settings::default(),
             usb: Usb::default(),
+            store: StoreCfg::default(),
         }
     }
 }
@@ -1330,6 +1399,7 @@ impl BoardSpec {
                 "kernel.usb.enable needs flash_fat32 (always-on FAT32 flash) or key".into(),
             );
         }
+        self.check_store()?;
         if self.kernel.flash.enable {
             match self.kernel.flash.backend.as_str() {
                 "spi-nor" | "mailbox" | "usb" => {}
@@ -1341,6 +1411,72 @@ impl BoardSpec {
             }
             if self.kernel.flash.backend == "usb" && !self.kernel.usb.enable {
                 return Err("flash.backend=usb needs kernel.usb.enable".into());
+            }
+        }
+        Ok(())
+    }
+
+    fn check_store(&self) -> Result<(), String> {
+        let s = &self.kernel.store;
+        let range = |n: u32, lo: u32, hi: u32, name: &str| {
+            if n < lo || n > hi {
+                Err(format!("kernel.store.{name} must be {lo}..={hi}, got {n}"))
+            } else {
+                Ok(())
+            }
+        };
+        range(s.max_stores, 1, 16, "max_stores")?;
+        range(s.max_per_purpose, 1, 8, "max_per_purpose")?;
+        range(s.max_tables, 1, 64, "max_tables")?;
+        range(s.max_columns, 1, 32, "max_columns")?;
+        range(s.max_rows, 1, 16384, "max_rows")?;
+        range(s.max_sql_bytes, 1, 256 * 1024, "max_sql_bytes")?;
+        range(s.max_param_bytes, 1, 64 * 1024, "max_param_bytes")?;
+        range(s.max_result_bytes, 1, 1024 * 1024, "max_result_bytes")?;
+        if s.max_tx != 1 {
+            return Err("kernel.store.max_tx must be 1".into());
+        }
+        range(s.max_open, 1, 8, "max_open")?;
+        if s.pglite_files
+            && !(s.enable && self.kernel.http.files.enable && self.kernel.http.files.wasm)
+        {
+            return Err(
+                "kernel.store.pglite.files needs store.enable, kernel.http.files, and files.wasm"
+                    .into(),
+            );
+        }
+        if s.pglite_js && !(s.pglite_files && self.kernel.http.files.js) {
+            return Err(
+                "kernel.store.pglite.js needs pglite.files and kernel.http.files.js".into(),
+            );
+        }
+        if s.pglite_embed && !s.enable {
+            return Err("kernel.store.pglite.embed needs store.enable".into());
+        }
+        if s.persist_usb && !(s.enable && self.kernel.usb.key) {
+            return Err("kernel.store.persist.usb needs store.enable and kernel.usb.key".into());
+        }
+        if !s.usb_volume.is_empty() {
+            if !s.persist_usb {
+                return Err("kernel.store.persist.volume needs persist.usb".into());
+            }
+            if !matches!(s.usb_volume.as_str(), "fat32" | "ntfs" | "ext4") {
+                return Err("kernel.store.persist.volume must be fat32, ntfs, or ext4".into());
+            }
+        }
+        if s.persist_elf && !s.enable {
+            return Err("kernel.store.persist.elf needs store.enable".into());
+        }
+        if s.enable {
+            if s.purposes.is_empty() || s.purposes.len() as u32 > s.max_stores {
+                return Err(
+                    "kernel.store.purposes must have 1..=max_stores entries when enable".into(),
+                );
+            }
+            for p in &s.purposes {
+                if !store_purpose_ok(p) {
+                    return Err(format!("kernel.store.purpose `{p}` refused"));
+                }
             }
         }
         Ok(())
@@ -1599,10 +1735,12 @@ impl BoardSpec {
                     ))
     }
 
-    /// True when the QEMU argv should attach `virtio-keyboard-device` and the
-    /// guest should probe DeviceID 18 (`InpProbe`/`InpInit`/`InpDrain`). The
-    /// keyboard rides the same virtio-mmio window as the console GPU; the
-    /// probe is fail-closed (`VIRTIO-INPUT-NONE`) when QEMU has no device.
+    /// True when the QEMU argv should attach `virtio-keyboard-device` plus
+    /// `virtio-tablet-device` and the guest should probe DeviceID 18
+    /// (`InpProbe`/`InpInit`/`InpDrain`). Keyboard is the first DeviceID 18
+    /// slot (guest `INP_KQ` / VGA `DomNav`); tablet is the next slot (QEMU
+    /// pointer; B91b WebFeed maps `EV_ABS`/`BTN_*`). The probe is
+    /// fail-closed (`VIRTIO-INPUT-NONE`) when QEMU has no device.
     pub fn wants_virtio_input(&self) -> bool {
         self.wants_virtio_gpu() && self.kernel.wasm.enable
     }
@@ -2161,6 +2299,92 @@ fn apply_kernel(k: &mut Kernel, v: &Json) {
     if let Json::Obj(_) = v.get("usb") {
         apply_usb(&mut k.usb, v.get("usb"));
     }
+    if let Json::Obj(_) = v.get("store") {
+        apply_store(&mut k.store, v.get("store"));
+    }
+}
+
+fn apply_store(s: &mut StoreCfg, v: &Json) {
+    if let Some(b) = v.get("enable").as_bool() {
+        s.enable = b;
+    }
+    if let Json::Obj(_) = v.get("persist") {
+        let p = v.get("persist");
+        if let Some(b) = p.get("memory").as_bool() {
+            s.persist_memory = b;
+        }
+        if let Some(b) = p.get("elf").as_bool() {
+            s.persist_elf = b;
+        }
+        if let Some(b) = p.get("usb").as_bool() {
+            s.persist_usb = b;
+        }
+        if let Some(v) = p.get("volume").as_str() {
+            s.usb_volume = v.to_ascii_lowercase();
+        }
+    }
+    if let Json::Obj(_) = v.get("pglite") {
+        let p = v.get("pglite");
+        if let Some(b) = p.get("files").as_bool() {
+            s.pglite_files = b;
+        }
+        if let Some(b) = p.get("js").as_bool() {
+            s.pglite_js = b;
+        }
+        if let Some(b) = p.get("embed").as_bool() {
+            s.pglite_embed = b;
+        }
+    }
+    if let Some(n) = v
+        .get("max_stores")
+        .as_u32()
+        .or_else(|| v.get("max_instances").as_u32())
+    {
+        s.max_stores = n;
+    }
+    if let Some(n) = v.get("max_tables").as_u32() {
+        s.max_tables = n;
+    }
+    if let Some(n) = v.get("max_columns").as_u32() {
+        s.max_columns = n;
+    }
+    if let Some(n) = v.get("max_rows").as_u32() {
+        s.max_rows = n;
+    }
+    if let Some(n) = v.get("max_sql_bytes").as_u32() {
+        s.max_sql_bytes = n;
+    }
+    if let Some(n) = v.get("max_param_bytes").as_u32() {
+        s.max_param_bytes = n;
+    }
+    if let Some(n) = v.get("max_result_bytes").as_u32() {
+        s.max_result_bytes = n;
+    }
+    if let Some(n) = v.get("max_tx").as_u32() {
+        s.max_tx = n;
+    }
+    if let Some(n) = v.get("max_open").as_u32() {
+        s.max_open = n;
+    }
+    if let Some(n) = v.get("max_per_purpose").as_u32() {
+        s.max_per_purpose = n;
+    }
+    let names = match v.get("purposes") {
+        Json::Arr(a) => Some(a),
+        _ => match v.get("names") {
+            Json::Arr(a) => Some(a),
+            _ => None,
+        },
+    };
+    if let Some(a) = names {
+        s.purposes = a
+            .iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect();
+    }
+    if s.enable && s.purposes.is_empty() {
+        s.purposes.push("registry".into());
+    }
 }
 
 fn apply_wasm(w: &mut Wasm, v: &Json) {
@@ -2713,6 +2937,63 @@ mod tests {
         let err = BoardSpec::from_json_str(r#"{"schema_version":1,"kernel":{"ui":"sveltekit"}}"#)
             .unwrap_err();
         assert!(err.contains("sveltekit"), "{err}");
+    }
+
+    #[test]
+    fn store_defaults_on_with_registry_purpose() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1}"#).unwrap();
+        assert!(spec.kernel.store.enable);
+        assert_eq!(spec.kernel.store.purposes, ["registry"]);
+        assert!(spec.kernel.store.persist_memory);
+        assert!(!spec.kernel.store.pglite_files);
+        let feat = spec.compiled_features_json();
+        assert!(feat.contains("\"store\":true"), "{feat}");
+        let settings = spec.menu("settings").unwrap();
+        assert!(settings
+            .items
+            .iter()
+            .any(|i| i.id == "store" && i.value == "yes"));
+    }
+
+    #[test]
+    fn store_enable_fills_registry_when_purposes_empty() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"store":{"enable":true,"purposes":[]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.kernel.store.purposes, ["registry"]);
+    }
+
+    #[test]
+    fn store_names_alias_and_flag_to_flag_check() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"store":{"enable":true,"names":["setup"],"persist":{"elf":true},"pglite":{"embed":true}}}}"#,
+        )
+        .unwrap();
+        assert_eq!(spec.kernel.store.purposes, ["setup"]);
+        assert!(spec.kernel.store.persist_elf);
+        assert!(spec.kernel.store.pglite_embed);
+        assert!(!spec.kernel.store.pglite_files);
+        let off = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"embedded","kernel":{"store":{"enable":false}}}"#,
+        )
+        .unwrap();
+        assert!(!off.kernel.store.enable);
+        let err = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"usb":{"enable":true,"key":false,"flash_fat32":true},"store":{"persist":{"usb":true}}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("persist.usb"), "{err}");
+        let files = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"store":{"pglite":{"files":true}}}}"#,
+        )
+        .unwrap_err();
+        assert!(files.contains("pglite.files"), "{files}");
+        let bad = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"store":{"enable":true,"purposes":["Registry"]}}}"#,
+        )
+        .unwrap_err();
+        assert!(bad.contains("purpose"), "{bad}");
     }
 
     #[test]

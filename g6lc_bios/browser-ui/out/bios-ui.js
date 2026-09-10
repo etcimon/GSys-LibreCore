@@ -39,3 +39,5 @@ document.getElementById("devices-title").innerText = "Devices";
 document.getElementById("boot-title").innerText = "Boot";
 document.getElementById("settings-title").innerText = "Settings";
 document.getElementById("bios-hint").innerText = "ArrowLeft/ArrowRight Select tab   Home/End First/Last   F10 Refresh (not save)   Read-only BoardSpec view";
+fetch("/bios/store");
+document.getElementById("store-title").innerText = "Store";

@@ -210,7 +210,12 @@ host recognises those by identity and calls the guest's
 `__indirect_function_table` instead — so the predicate runs in wasm. Any other
 `=(…)` payload, and any `VarType.eval` chain seed, is refused. Unlike the
 kernel lane, the browser lane *can* dispatch the iteratee, because it can
-re-enter the instance. The full object/property/event surface the bindings
+re-enter the instance. Allow-listed `=window.pglite` is interned on shell
+`createBrowserContext` BINDINGS only (nested `global("pglite")` is undefined;
+the real DOM `window` is never assigned). D `attempt`/`invoke` that would
+return a Promise stay `NotImplemented("async")`; lang=ts may `await` the
+`/bios/store` facade. Optional Electric instantiate is `createPgliteWasm`,
+not `window.pglite`. The full object/property/event surface the bindings
 expect is [`LIBWASM-ABI.md`](LIBWASM-ABI.md).
 
 Since **B69** the generic `Object_Call`/`Object_Getter` machinery also serves

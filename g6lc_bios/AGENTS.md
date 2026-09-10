@@ -52,7 +52,10 @@ plane with a boot scanline, and an 8×8 `G6LC` blit; QEMU still uses
 wasm (LDC libwasm cell when live) in `.rodata`. UART/mbox `Ui` prints `UI`.
 `FileServe` echoes `\0asm` and prints `/ui/` paths; UART/mbox `File` lists
 them. `GetFile` is GET `/ui/ui.wasm` (mailbox RSP `\0asm`+size; not a
-netdev). Host `BrowserSession` runs that LDC cell and does **not** fall back
+netdev). Host FileServe may add `/ui/pglite/*` when `kernel.store.pglite.files`
+and dist bytes are live; guest listing does so only for `pglite.embed`. Native
+`kernel.ts` `pglite` is a `/bios/store` facade (shell BINDINGS only); optional
+Electric `createPgliteWasm` is not assigned on the real DOM. Host `BrowserSession` runs that LDC cell and does **not** fall back
 to the MVP encoder wasm. `WasmJit` is the numeric `i32.add` worker leaf when
 `kernel.wasm.jit`; `WasmUi` then runs `WasmStart` (MVP straight-line `_start`
 imports) against `__ui_dom` and `DomPaint` (8×8 glyphs) — a VGA/UART text
@@ -96,8 +99,9 @@ ignores the v2 queue registers — `qemu-args` emits it) and the used-ring
 poll is `1<<22` (QueueNotify is iothread-async) — with SEIE armed the
 `VioInit`/`VioCmd` waits `wfi` on the used-buffer irq instead of pure spin
 (bounded by the same budget plus the periodic timer). `InpInit` probes the
-slots for DeviceID 18 (`virtio-keyboard-device` under
-`wants_virtio_input()`), posts 8 `virtio_input_event` buffers on the
+slots for DeviceID 18 (`virtio-keyboard-device` then
+`virtio-tablet-device` under `wants_virtio_input()`; guest takes the
+first slot for VGA `INP_KQ`, `TabInit` the second), posts 8 `virtio_input_event` buffers on the
 eventq, and `trap_inp`→`InpDrain` pushes each `EV_KEY` into the bounded
 `INP_KQ` queue (`INP` marker, buffer re-posted); UART `Keys`/`K` and the
 mailbox `K` doorbell dump it via `InpPoll` (`KEY <8-hex>`; mbox answers

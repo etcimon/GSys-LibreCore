@@ -89,10 +89,10 @@ GL composites `u_dom`.
 
 ## Transitional G6LC_G6B shortcut
 
-The shipped LDC cell still compiles `getRoot() { return 1; }` (Spa mount under
-`#libwasm-root`). Host `get_root()` / `libwasm_global("document"|"window"|"console")`
-already match svelte-engine. DOM handle 2 stays the first `createElement` until
-the next `G6B_DUB_WASM=1` rebuild. That shortcut is **not** BoardSpec.
+B91d cell imports `env.getRoot` (Spa mount under `#libwasm-root`). Host
+`get_root()` / `libwasm_global("document"|"window"|"console")` match
+svelte-engine. DOM handle 2 stays the first `createElement` until
+svelte-engine `{1: document, 2: window}` roots. That is **not** BoardSpec.
 
 Kernel HTTP is a port, not a DOM. JS `fetchBios` / `holycEval` /
 `registerEndpoint` live on `JsExports` (`App_svelte.*`), matching `print-ts.ts`.
@@ -100,6 +100,23 @@ Kernel HTTP is a port, not a DOM. JS `fetchBios` / `holycEval` /
 B82–B91 landed on the host engine (`WasmUi`, cell-owned tabs, live CSS
 `Engine::paint(&Node)`, UI-hart `tick` + timer heap, dirty-tile present
 into modelled `__scan_fb`) and on the guest IR (`__ui_cap` + dirty-tile
-`VioPaint` of that canvas). The LDC cell is still host-interpreted;
-`start_ops` is the VGA face. Windowing is **B92** later
+`VioPaint` of that canvas). **B91b** keeps one persistent svelte-d `WasmUi` (`GuestCellLive`). **B91b+** `_start` keeps Binaryen `asyncify_*` (scratch above the D heap; `MAX_MEMORY_PAGES` 64). **B91b++** abort-stub `unreachable` is wasm-eh throw so Flatten-deleted `ready()` catch fail-softs after rewind. **B91c** virtio/UI-hart events re-enter D `jsCallback` / named `exportDelegate` input names (`Listener::Delegate`); the shipped cell keeps `Listener::Cell`. Guest
+UART `Ui` and mailbox doorbell `U` are a UI-hart tick + pack
+(`WebFeed::on_guest_ui`; `mbox_ui` jal `uart_ui`). Guest
+`trap_timer` is skip-if-clean `tick` (rAF / timers / await). virtio-input
+`EV_KEY` (Linux `KEY_*`, same codes as QEMU `sendkey`) maps to
+`handle_key` / tab click so keyboard restyles CSS, not only VGA `DomNav`.
+Tablet `EV_ABS` (`ABS_X`/`ABS_Y`, QEMU 0..=32767) and mouse `EV_REL` map
+to `dispatch_pointer` `mousemove`; `BTN_LEFT` clicks at the last pointer.
+`qemu-args` attaches `virtio-keyboard-device` then `virtio-tablet-device`.
+Guest `InpInit` claims the first DeviceID 18 for VGA `INP_KQ`; `TabInit`
+claims the second (`VIRTIO-TABLET-OK`). The exec model parks that tablet
+on virtio-mmio slot 3 (PLIC irq 4) so source 3 stays the mailbox.
+`host_inp_tab_kick` writes `EV_ABS` then `BTN_LEFT` into the tablet
+eventq (`TabDrain` re-posts, no `INP_KQ`) so a VNC click activates the
+hinted tab.
+Cell-owned `#refresh` is the same `click` listener as the tabs (`g6b_listen`);
+tablet ABS+`BTN_LEFT` on that hit box refreshes JSON like F10.
+Click/hover/arrows/F10/JS await run on that session. The LDC cell is still
+host-interpreted; `start_ops` is the VGA face. Windowing is **B92** later
 ([`plan-iframe.md`](plan-iframe.md)).

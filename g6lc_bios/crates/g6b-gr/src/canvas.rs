@@ -42,6 +42,16 @@ impl Canvas {
         }
     }
 
+    /// Palette-index surface. Extra pixels are dropped; missing pixels are black.
+    pub fn from_indices(w: u32, h: u32, mut pixels: Vec<u8>) -> Self {
+        let n = (w as usize).saturating_mul(h as usize);
+        pixels.resize(n, BLACK);
+        for p in &mut pixels {
+            *p &= 0x0f;
+        }
+        Self { w, h, pixels }
+    }
+
     fn idx(&self, x: i32, y: i32) -> Option<usize> {
         if x < 0 || y < 0 || x as u32 >= self.w || y as u32 >= self.h {
             return None;
@@ -339,5 +349,14 @@ mod tests {
         assert_eq!(palette_index_for(&[0, 0, 0]), Some(0));
         assert_eq!(palette_index_for(&[255, 255, 255]), Some(15));
         assert_eq!(palette_index_for(&[1, 1, 1]), None);
+    }
+
+    #[test]
+    fn nearest_palette_index_is_exact_on_palette_and_close_off_it() {
+        for (i, &rgb) in crate::PALETTE.iter().enumerate() {
+            assert_eq!(crate::nearest_palette_index(rgb), i as u8);
+        }
+        assert_eq!(crate::nearest_palette_index([1, 1, 1]), 0);
+        assert_eq!(crate::nearest_palette_index([254, 254, 254]), 15);
     }
 }

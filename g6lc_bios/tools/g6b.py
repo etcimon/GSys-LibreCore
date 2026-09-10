@@ -45,30 +45,154 @@ def run_cargo(argv: list[str]) -> int:
     return subprocess.run(cmd, cwd=str(package_root()), env=env).returncode
 
 
-def cmd_pglite_dist(_: argparse.Namespace) -> int:
-    """PR1 stub. Real extract (SHA-256 verify + four files) is PR8."""
-    log("pglite-dist: stub — extract lands in PR8")
-    log(
-        "pin: @electric-sql/pglite@0.5.8 "
-        "sha256=d71088d246d86e946c5d53b152a23c6b79ee65c8bc43dab69670af53b57c788d"
-    )
-    log("tarball: https://registry.npmjs.org/@electric-sql/pglite/-/pglite-0.5.8.tgz")
-    log("extracts: pglite.wasm initdb.wasm pglite.data index.js → .tools/pglite-dist/")
-    log("usage: python tools/g6b.py pglite-dist")
+def _pglite_dist_pin() -> dict:
+    import tomllib
+
+    pins = tomllib.loads((package_root() / "pins.toml").read_text(encoding="utf-8"))
+    return pins["pglite"]["dist"]
+
+
+def cmd_pglite_dist(args: argparse.Namespace) -> int:
+    """Download the pinned npm tarball, SHA-256 verify, extract four dist files.
+
+    Absent bytes are empty, not a compile error. `check()` never calls this.
+    """
+    import hashlib
+    import json
+    import tarfile
+    import urllib.request
+
+    pin = _pglite_dist_pin()
+    root = package_root()
+    dest = (root / pin.get("extract_to", ".tools/pglite-dist")).resolve()
+    try:
+        dest.relative_to(root.resolve())
+    except ValueError:
+        err(f"pglite-dist extract_to escapes the package: {dest}")
+        return 1
+    names = list(pin.get("files") or ["pglite.wasm", "initdb.wasm", "pglite.data", "index.js"])
+    want_sha = str(pin["sha256"]).lower()
+    manifest_path = dest / "manifest.json"
+    if not getattr(args, "force", False) and manifest_path.is_file():
+        try:
+            man = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            man = {}
+        if man.get("tarball_sha256") == want_sha and all((dest / n).is_file() for n in names):
+            log(f"pglite-dist already extracted at {dest} (sha256={want_sha[:12]}…)")
+            return 0
+
+    url = pin["tarball"]
+    log(f"pglite-dist: GET {url}")
+    dest.mkdir(parents=True, exist_ok=True)
+    tgz_path = dest / "pglite.tgz"
+    try:
+        with urllib.request.urlopen(url, timeout=120) as resp:
+            blob = resp.read()
+    except OSError as e:
+        err(f"pglite-dist download failed: {e}")
+        return 1
+    got = hashlib.sha256(blob).hexdigest()
+    if got != want_sha:
+        err(f"pglite-dist sha256 mismatch: got {got} want {want_sha}")
+        return 1
+    tgz_path.write_bytes(blob)
+    extracted: dict[str, int] = {}
+    with tarfile.open(tgz_path, "r:gz") as tar:
+        for name in names:
+            member_name = f"package/dist/{name}"
+            try:
+                member = tar.getmember(member_name)
+            except KeyError:
+                err(f"pglite-dist tarball missing {member_name}")
+                return 1
+            if not member.isfile() or member.size < 1:
+                err(f"pglite-dist {member_name} is not a nonempty file")
+                return 1
+            src = tar.extractfile(member)
+            if src is None:
+                err(f"pglite-dist cannot read {member_name}")
+                return 1
+            data = src.read()
+            if name.endswith(".wasm") and not data.startswith(b"\0asm"):
+                err(f"pglite-dist {name} is not a wasm module")
+                return 1
+            (dest / name).write_bytes(data)
+            extracted[name] = len(data)
+            log(f"  {name} {len(data)} bytes")
+    manifest = {
+        "package": pin.get("package") or pin.get("npm"),
+        "version": pin.get("version"),
+        "tarball": url,
+        "tarball_sha256": got,
+        "files": extracted,
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    tgz_path.unlink(missing_ok=True)
+    log(f"pglite-dist OK → {dest}")
     return 0
 
 
 def cmd_store_embed(args: argparse.Namespace) -> int:
-    """PR1 stub. Real emit of __g6b_store_dump is PR3c.
+    """Emit a first-party dump JSON for `__g6b_store_dump` (not Electric tar).
 
-    Fixture JSON is a uuid-led dump (g6b_store=1, uuid, purpose, tables).
-    See architecture/g6b-store-instances.md.
+    `check()` never runs this and never probes the output file.
     """
-    log("store-embed: stub — emit lands in PR3c")
-    log("dump: {g6b_store:1, uuid, purpose, tables} → __g6b_store_dump")
-    log("usage: python tools/g6b.py store-embed --fixture FILE --out FILE")
-    if args.fixture or args.out:
-        log(f"fixture={args.fixture!s} out={args.out!s} (ignored until PR3c)")
+    import json
+    import re
+
+    if not args.fixture or not args.out:
+        err("usage: python tools/g6b.py store-embed --fixture FILE --out FILE")
+        return 2
+    root = package_root()
+    src = Path(args.fixture)
+    if not src.is_file():
+        err(f"store-embed: fixture not found: {src}")
+        return 1
+    dest = Path(args.out)
+    if not dest.is_absolute():
+        dest = (root / dest).resolve()
+    try:
+        dest.relative_to(root.resolve())
+    except ValueError:
+        err(f"store-embed --out escapes the package: {dest}")
+        return 1
+    try:
+        data = json.loads(src.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        err(f"store-embed: {e}")
+        return 1
+    if not isinstance(data, dict):
+        err("store-embed: fixture must be a JSON object")
+        return 1
+    if data.get("g6b_store") != 1:
+        err("store-embed: g6b_store must be 1")
+        return 1
+    uuid = data.get("uuid")
+    if not isinstance(uuid, str) or not re.fullmatch(
+        r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}",
+        uuid,
+    ):
+        err("store-embed: uuid must be an RFC 4122 hyphenated id")
+        return 1
+    purpose = data.get("purpose")
+    if not isinstance(purpose, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", purpose):
+        err("store-embed: purpose must match ^[a-z][a-z0-9_]{0,31}$")
+        return 1
+    tables = data.get("tables")
+    if tables is None:
+        data["tables"] = {}
+    elif not isinstance(tables, dict):
+        err("store-embed: tables must be an object")
+        return 1
+    compact = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    n = len(compact.encode("utf-8"))
+    if n > 256 * 1024:
+        err(f"store-embed: dump {n} bytes exceeds max_result_bytes default 256KiB")
+        return 1
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(compact + "\n", encoding="utf-8")
+    log(f"store-embed OK {n} bytes → {dest}")
     return 0
 
 
@@ -257,7 +381,12 @@ def main() -> int:
     dpx.add_argument("--out")
     pd = sub.add_parser(
         "pglite-dist",
-        help="extract pinned @electric-sql/pglite dist into .tools/pglite-dist (PR8)",
+        help="extract pinned @electric-sql/pglite dist into .tools/pglite-dist",
+    )
+    pd.add_argument(
+        "--force",
+        action="store_true",
+        help="re-download even when manifest sha256 already matches",
     )
     se = sub.add_parser(
         "store-embed",

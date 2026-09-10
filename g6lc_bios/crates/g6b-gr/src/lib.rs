@@ -41,6 +41,27 @@ pub const PALETTE: [[u8; 3]; 16] = [
     [255, 255, 255],
 ];
 
+/// Nearest [`PALETTE`] entry by Euclidean RGB distance. Exact matches return
+/// that index; Track-B 4bpp downsample uses this after flatten-over-white.
+pub fn nearest_palette_index(rgb: [u8; 3]) -> u8 {
+    let mut best = 0u8;
+    let mut best_d = u32::MAX;
+    for (i, &c) in PALETTE.iter().enumerate() {
+        let dr = (c[0] as i32 - rgb[0] as i32).unsigned_abs();
+        let dg = (c[1] as i32 - rgb[1] as i32).unsigned_abs();
+        let db = (c[2] as i32 - rgb[2] as i32).unsigned_abs();
+        let d = dr * dr + dg * dg + db * db;
+        if d == 0 {
+            return i as u8;
+        }
+        if d < best_d {
+            best_d = d;
+            best = i as u8;
+        }
+    }
+    best
+}
+
 /// CDC-like text plane + pixel size from BoardSpec.
 #[derive(Debug, Clone)]
 pub struct Frame {

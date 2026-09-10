@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use g6b_pglite::StorePort;
 use g6b_spec::BoardSpec;
 
 use crate::{files, parse, Request, Response, Version};
@@ -168,7 +169,7 @@ impl Router {
             "GET",
             "/bios/features",
             "bios",
-            spec.compiled_features_json(),
+            files::live_features_json(spec, files::load_pglite_dist().as_ref()),
         );
         r.insert("GET", "/bios/menu", "bios", spec.menus_index_json());
         r.insert(
@@ -363,9 +364,26 @@ impl Router {
             .get(&(method.to_ascii_uppercase(), path.to_string()))
     }
 
-    /// Dispatch a parsed request.
+    /// Dispatch a parsed request (canned routes + files). Store paths 404
+    /// without a [`StorePort`].
     pub fn handle(&self, req: &Request) -> Response {
+        self.handle_store(req, None)
+    }
+
+    /// Dispatch, threading a live store for `/bios/store/*` before canned routes.
+    pub fn handle_store(&self, req: &Request, store: Option<&mut dyn StorePort>) -> Response {
         let path = req.path.split('?').next().unwrap_or(req.path.as_str());
+        if path == "/bios/store" || path.starts_with("/bios/store/") {
+            if (!self.http1 && !self.http2) || store.is_none() {
+                return Response::json(404, "{\"error\":\"not found\"}");
+            }
+            if let Some(s) = store {
+                return match s.handle(&req.method, path, &req.body) {
+                    Ok((status, body)) => Response::json(status, &body),
+                    Err(e) => Response::json(500, &format!("{{\"error\":\"{e}\"}}")),
+                };
+            }
+        }
         if req.method.eq_ignore_ascii_case("GET") {
             if let Some(f) = self.files.get(path) {
                 return Response::file(200, &f.content_type, f.body.clone());
@@ -411,20 +429,58 @@ impl Router {
     }
 
     fn handle_http_bytes(&self, raw: &[u8]) -> Result<Vec<u8>, String> {
+        self.handle_http_bytes_store(raw, None)
+    }
+
+    fn handle_http_bytes_store(
+        &self,
+        raw: &[u8],
+        store: Option<&mut dyn StorePort>,
+    ) -> Result<Vec<u8>, String> {
         let req = parse(raw)?;
+        let resp = self.handle_store(&req, store);
         match req.version {
             Version::Http11 => {
                 if !self.http1 {
                     return Err("http1 compiled out".into());
                 }
-                Ok(crate::h1::encode(&self.handle(&req)))
+                Ok(crate::h1::encode(&resp))
             }
             Version::Http2 => {
                 if !self.http2 {
                     return Err("http2 compiled out".into());
                 }
-                Ok(crate::h2::encode(&self.handle(&req), 1))
+                Ok(crate::h2::encode(&resp, 1))
             }
+        }
+    }
+
+    /// Parse bytes and dispatch through an optional live store.
+    pub fn handle_bytes_store(
+        &self,
+        raw: &[u8],
+        store: Option<&mut dyn StorePort>,
+    ) -> Result<Vec<u8>, String> {
+        if g6b_tls::is_client_hello(raw) {
+            if !self.https {
+                return Err("https compiled out".into());
+            }
+            return g6b_tls::server_handshake(raw);
+        }
+        let tls = g6b_tls::is_app_record(raw);
+        let inner = if tls {
+            if !self.https {
+                return Err("https compiled out".into());
+            }
+            g6b_tls::unwrap_app(raw)?
+        } else {
+            raw.to_vec()
+        };
+        let http = self.handle_http_bytes_store(&inner, store)?;
+        if tls {
+            Ok(g6b_tls::wrap_app(&http))
+        } else {
+            Ok(http)
         }
     }
 
@@ -439,6 +495,17 @@ impl Router {
     }
 
     pub fn fetch(&self, method: &str, url: &str) -> Response {
+        self.fetch_with_body(method, url, &[], None)
+    }
+
+    /// `fetch` with a request body and optional live store.
+    pub fn fetch_with_body(
+        &self,
+        method: &str,
+        url: &str,
+        body: &[u8],
+        store: Option<&mut dyn StorePort>,
+    ) -> Response {
         if !url.starts_with('/')
             || url.starts_with("//")
             || url.contains('\\')
@@ -453,13 +520,16 @@ impl Router {
         if path.split('/').any(|p| matches!(p, "." | "..")) {
             return Response::json(400, "{\"error\":\"path traversal refused\"}");
         }
-        self.handle(&Request {
-            method: method.to_ascii_uppercase(),
-            path: path.into(),
-            version: Version::Http11,
-            headers: Vec::new(),
-            body: Vec::new(),
-        })
+        self.handle_store(
+            &Request {
+                method: method.to_ascii_uppercase(),
+                path: path.into(),
+                version: Version::Http11,
+                headers: Vec::new(),
+                body: body.to_vec(),
+            },
+            store,
+        )
     }
 }
 
@@ -621,5 +691,46 @@ mod tests {
         let un = r.fetch_get("/bios/menu/uncore");
         assert!(un.body_str().contains("plic"), "{}", un.body_str());
         assert_eq!(r.fetch_get("/bios/cpu").status, 200);
+    }
+
+    #[test]
+    fn store_routes_need_a_live_port_and_http() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"http":{"enable":true,"http1":true}}}"#,
+        )
+        .unwrap();
+        let r = Router::from_spec(&spec);
+        assert_eq!(r.fetch_get("/bios/store").status, 404);
+        let mut store = g6b_pglite::StoreRegistry::from_spec(&spec);
+        let list = r.fetch_with_body("GET", "/bios/store", &[], Some(&mut store));
+        assert_eq!(list.status, 200, "{}", list.body_str());
+        assert!(
+            list.body_str().contains("g6b-pglite"),
+            "{}",
+            list.body_str()
+        );
+        let created = r.fetch_with_body(
+            "POST",
+            "/bios/store",
+            br#"{"purpose":"registry"}"#,
+            Some(&mut store),
+        );
+        assert_eq!(created.status, 200, "{}", created.body_str());
+        assert!(
+            created.body_str().contains("uuid"),
+            "{}",
+            created.body_str()
+        );
+        let off = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"http":{"enable":true},"store":{"enable":false}}}"#,
+        )
+        .unwrap();
+        let r = Router::from_spec(&off);
+        let mut store = g6b_pglite::StoreRegistry::from_spec(&off);
+        assert_eq!(
+            r.fetch_with_body("GET", "/bios/store", &[], Some(&mut store))
+                .status,
+            404
+        );
     }
 }

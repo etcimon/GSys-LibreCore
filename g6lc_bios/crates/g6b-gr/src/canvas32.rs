@@ -322,23 +322,25 @@ impl Canvas32 {
         }
     }
 
+    fn flatten_rgb(px: &[u8], bg: [u8; 3]) -> [u8; 3] {
+        let a = px[3] as u32;
+        if a == 255 {
+            [px[0], px[1], px[2]]
+        } else if a == 0 {
+            bg
+        } else {
+            let f = |s: u8, d: u8| ((s as u32 * a + d as u32 * (255 - a) + 127) / 255) as u8;
+            [f(px[0], bg[0]), f(px[1], bg[1]), f(px[2], bg[2])]
+        }
+    }
+
     /// Binary PPM (P6). PPM has no alpha channel, so translucent pixels are
     /// composited over `bg` — the honest flatten, and what a monitor would
     /// show against that background.
     pub fn to_ppm_over(&self, bg: [u8; 3]) -> Vec<u8> {
         let mut body = Vec::with_capacity((self.w * self.h * 3) as usize);
         for i in self.px.chunks_exact(4) {
-            let a = i[3] as u32;
-            if a == 255 {
-                body.extend_from_slice(&i[..3]);
-            } else if a == 0 {
-                body.extend_from_slice(&bg);
-            } else {
-                for ch in 0..3 {
-                    let v = (i[ch] as u32 * a + bg[ch] as u32 * (255 - a) + 127) / 255;
-                    body.push(v as u8);
-                }
-            }
+            body.extend_from_slice(&Self::flatten_rgb(i, bg));
         }
         let mut out = format!("P6\n{} {}\n255\n", self.w, self.h).into_bytes();
         out.extend_from_slice(&body);
@@ -355,16 +357,26 @@ impl Canvas32 {
     pub fn to_x8r8(&self, bg: [u8; 3]) -> Vec<u8> {
         let mut out = Vec::with_capacity((self.w * self.h * 4) as usize);
         for i in self.px.chunks_exact(4) {
-            let a = i[3] as u32;
-            let (r, g, b) = if a == 255 {
-                (i[0], i[1], i[2])
-            } else {
-                let f = |s: u8, d: u8| ((s as u32 * a + d as u32 * (255 - a) + 127) / 255) as u8;
-                (f(i[0], bg[0]), f(i[1], bg[1]), f(i[2], bg[2]))
-            };
+            let [r, g, b] = Self::flatten_rgb(i, bg);
             out.extend_from_slice(&[b, g, r, 0xff]);
         }
         out
+    }
+
+    /// 16-colour downsample. Translucent pixels flatten over `bg`, then each
+    /// RGB is nearest-[`PALETTE`]. Track-B `ui_ppm` is this conversion of the
+    /// live Engine canvas, not a second HTML CSS raster.
+    pub fn to_canvas_over(&self, bg: [u8; 3]) -> crate::canvas::Canvas {
+        let mut pixels = Vec::with_capacity((self.w as usize).saturating_mul(self.h as usize));
+        for i in self.px.chunks_exact(4) {
+            pixels.push(crate::nearest_palette_index(Self::flatten_rgb(i, bg)));
+        }
+        crate::canvas::Canvas::from_indices(self.w, self.h, pixels)
+    }
+
+    /// [`Self::to_canvas_over`] with white (the page background).
+    pub fn to_canvas(&self) -> crate::canvas::Canvas {
+        self.to_canvas_over([255, 255, 255])
     }
 
     /// Convert a palette [`crate::canvas::Canvas`] to RGBA. Every palette
@@ -448,5 +460,19 @@ mod tests {
         let c = Canvas32::from_canvas(&pal);
         assert_eq!(c.get(0, 0), [0, 0, 170, 255]);
         assert_eq!(c.get(1, 1), [255, 255, 255, 255]);
+        let back = c.to_canvas();
+        assert_eq!(back.get(0, 0), 1);
+        assert_eq!(back.get(1, 1), 15);
+    }
+
+    #[test]
+    fn to_canvas_nearest_palette_after_flatten() {
+        let mut c = Canvas32::new(2, 1);
+        c.set(0, 0, [0, 0, 170, 255]);
+        c.set(1, 0, [255, 0, 0, 128]);
+        let pal = c.to_canvas();
+        assert_eq!(pal.get(0, 0), 1);
+        // Half-red over white → ~[255, 127, 127] → lightred (index 12).
+        assert_eq!(pal.get(1, 0), 12);
     }
 }

@@ -14,9 +14,9 @@ compiled, no Go, no Fyne, no Playwright).
 `g6lc_bios` with cargo on PATH. QEMU BIOS path never `-netdev`. Never Variane.
 
 See also [`BROWSER-RUNTIME.md`](BROWSER-RUNTIME.md) (principle),
-[`AGENTS-todo.md`](../AGENTS-todo.md) (B82–B91 schedule), and
-[`plan-iframe.md`](plan-iframe.md) (later: windows, tab engine, iframe
-sessions, local or remote URL).
+[`AGENTS-todo.md`](../AGENTS-todo.md) (B82–B91d landed; remaining leftovers
+below), and [`plan-iframe.md`](plan-iframe.md) (later: windows, tab engine,
+iframe sessions, local or remote URL).
 
 ---
 
@@ -43,22 +43,25 @@ register). The UI-thread `Host` interned those globals.
 
 ---
 
-## 1. What is true today (after B82–B91)
+## 1. What is true today (after B91c)
 
 | Lane | What actually runs | What the operator sees |
 |---|---|---|
 | Native browser (`kernel.ts`) | `createLibwasmHost` instantiates the LDC cell against a real DOM. `createBrowserApp` registers **click** on `[data-menu-link]`, **click** on `#refresh`, **keydown** for F10/arrows, fetches JSON, paints rows. WebGL particles on `requestAnimationFrame`. | A dynamic tabbed setup page. |
-| Host `BrowserSession` | Interpreter `_start` of the LDC cell builds the tree and fetches JSON. `WasmUi` keeps module + object table + interned `window`/`document` + `JsExports` across `tick` and pointer dispatch. Cell-owned tab/refresh clicks (`Listener::Cell` / `g6b_listen`); Rust `select_menu` is the default action. `Engine::paint(&Node)` rasters the live tree. `Role::Ui` on `ui_hart` runs `tick`; `TimerHeap` fires B66 timers / rAF. goosie `:hover` via `data-hover`. `present_gl` composites GLES2 `u_dom`. Dirty tiles `TRANSFER_TO_HOST_2D`/`FLUSH` into modelled `__scan_fb`. | A PPM / GL composite of the Svelte tree; host-modelled scanout matches `ui_ppm32`. QMP tab shots stay `qemu_tab_shots.sh` / remote g6q. |
-| Guest ELF | `start_ops` lowers straight-line MVP `_start` to `WasmDomText` / `WasmFetch` against `__ui_dom` rows (VGA face). GPU-class `VioPaint` TRANSFERs `__ui_cap` dirty tiles of Canvas32 packed by the host engine (B91). `WasmJit` is `i32.add`. `/ui/ui.wasm` FileServe bytes are the LDC cell. | Glyphs on the VGA face; GPU scanout is the web engine canvas via dirty tiles. LDC cell is still host-interpreted; `start_ops` is not `Object_Call`. |
+| Host `BrowserSession` | Interpreter `_start` of the LDC cell builds the tree and fetches JSON. `WasmUi` keeps module + object table + interned `window`/`document` + `JsExports` across `tick` and pointer dispatch. Cell-owned tab/refresh clicks (`Listener::Cell` / `g6b_listen`); D `EventHandler` / named `exportDelegate` input names re-enter `jsCallback` (B91c). Rust `select_menu` is the default action. `Engine::paint(&Node)` rasters the live tree. `Role::Ui` on `ui_hart` runs `tick`; `TimerHeap` fires B66 timers / rAF. goosie `:hover` via `data-hover`. `present_gl` composites GLES2 `u_dom`. Dirty tiles `TRANSFER_TO_HOST_2D`/`FLUSH` into modelled `__scan_fb`. | A PPM / GL composite of the Svelte tree; host-modelled scanout matches `ui_ppm32`. QMP tab shots stay `qemu_tab_shots.sh` / remote g6q. |
+| Guest ELF | `start_ops` lowers straight-line MVP `_start` to `WasmDomText` / `WasmFetch` against `__ui_dom` rows (VGA face). GPU-class `VioPaint` TRANSFERs `__ui_cap` dirty tiles of Canvas32 packed by the **interactive** host engine (B91b: tick, pointer click, GLES2 `u_dom`, throw/await). `WasmJit` is `i32.add`. `/ui/ui.wasm` FileServe bytes are the LDC cell. | Glyphs on the VGA face; GPU scanout is the svelte-d canvas after events. LDC cell is still host-interpreted; `start_ops` is not `Object_Call`. |
 
 `Role::Ui` / `ui_hart` run `BrowserSession::tick` when `kernel.tasking` is
 enabled (B89).
 
 The LDC `ready()` in `svelte-engine-ws/src-d/app.d` builds tabs and fills
-`tbody` from JSON. `App.svelte` `on:click` lowers to `g6b_listen`; the host
-binds `Listener::Cell` until the next `G6B_DUB_WASM=1` rebuild emits those
-calls. Rust `select_menu` is the default action if the cell did not
-`preventDefault`.
+`tbody` from JSON. `App.svelte` `on:click` already lowers to `g6b_listen`
+in generated D. The **shipped** `bios-ui-libwasm.wasm` is older than that
+source: it does not export `jsCallback`, does not emit `g6b_listen`, and
+still inlines `getRoot() { return 1; }`. The host therefore
+`bind_cell_clicks` (`Listener::Cell`) and treats Rust `select_menu` as the
+default action. B91c is live on the interpreter for a cell that *does*
+export the seam; it is not yet live on the artifact FileServe advertises.
 
 ---
 
@@ -68,7 +71,7 @@ calls. Rust `select_menu` is the default action if the cell did not
 |---|---|---|
 | Silent MVP fallback when LDC `_start` fails | **Delete.** `kernel.ui=svelte-d` requires the cell; failure is `BROWSER-ERROR`. | **landed B82** |
 | ELF / `/ui/ui.wasm` = MVP encoder | Embed **LDC cell** when the svelte-d lane is live. | **landed B82/B83** |
-| `jal WasmJit` = `i32.add` as “the UI” | Document as numeric-worker JIT. UI execution is `WasmUi` / `instance.call`. | **documented B82**; rename leftover still open |
+| `jal WasmJit` = `i32.add` as “the UI” | Document as numeric-worker JIT. UI execution is `WasmUi` / `instance.call`. | **documented B82**; leftover names still open (see §15) |
 | Guest `start_ops` → glyphs as “the UI” | VGA/UART **text face** only. GPU-class scanout presents Canvas32. | **documented B82**; host blit **B90**; guest dirty-tile `VioPaint` **B91** (`start_ops` unchanged) |
 | Hit boxes from static `session_page_html` | Pixels and hits from the **live** Svelte tree. | **landed B82** |
 | `set_property(..., "style")` refused | One style write path. | **landed B82** |
@@ -144,12 +147,25 @@ Guest S-mode: `trap_timer` still `jal`s `VioPaint`. **B91:** `__ui_cap`
 holds dirty tiles + a compact node count; when `WEB_PRESENT` the host exec
 model packs BrowserSession Canvas32 into `__scan_fb` and `VioPaint`
 TRANSFERs those rects (skip-if-clean is `VIRTIO-PAINT-SKIP`). **B91b:**
-`guest_cell_scanout` / `smoke_cell` run the LDC cell on the same
-[`g6b_wasm::Host`] import set as `BrowserSession` (`KernelHost`), then pack
-that canvas for guest `VioPaint`. This is an **exec-model S-mode stand-in**,
-not a RISC-V interpreter of the ~942-function LDC cell and not
-`start_ops` `Object_Call`. Silicon compact paint of a guest interpreter
-remains later.
+`guest_cell_drive` / `GuestCellLive` keep one persistent `WasmUi` and
+apply BIOS-UI actions (tick, click, hover, F10/arrows, JS `await fetch`
++ throw/catch) on the same [`g6b_wasm::Host`] as `BrowserSession`. The
+exec model holds that session as a [`g6b_asm::exec::WebFeed`]: UART `Ui`
+and mailbox doorbell `U` (`mbox_ui` → `uart_ui`) tick it and re-inject
+`__ui_cap`; virtio-input `EV_KEY` (Linux `KEY_*`)
+maps into `handle_key` / tab click so keyboard restyles CSS, not only VGA
+`DomNav`. Tablet `EV_ABS` / mouse `EV_REL` map to `dispatch_pointer`
+(`mousemove`); `BTN_LEFT` clicks at the last pointer. Guest `TabInit`
+brings up the second DeviceID 18 slot; `host_inp_tab_kick` writes
+`ABS_X`/`ABS_Y` then `BTN_LEFT` (feed `hint_abs` aims at a non-selected
+tab). Guest `trap_timer` is a skip-if-clean UI-hart `tick` (rAF /
+`setTimeout` / await drain); dirty frames re-inject `__ui_cap`, clean
+ones leave `VIRTIO-PAINT-SKIP`. Guest `VioPaint` is a UI-hart frame, not
+a stuck boot snapshot.
+This is an **exec-model S-mode
+stand-in**, not a RISC-V interpreter of the ~942-function LDC cell and
+not `start_ops` `Object_Call`. Silicon compact paint of a guest
+interpreter remains later.
 
 ---
 
@@ -183,6 +199,10 @@ Rust `select_menu` is the default action. JSON stays `/bios/menu/<id>`.
 Landed B89: `Role::Ui` on `ui_hart` runs `tick`; `TimerHeap` fires
 `setTimeout` / `setInterval` / `requestAnimationFrame` through `WasmUi::call`
 (never id 0). BoardSpec `fps` admits 100 and 144.
+
+Landed B91c: `Object_Call_EventHandler__void` → `Listener::Delegate`;
+named `exportDelegate` input names re-enter `jsCallback` (table fallback).
+Shipped cell still has no `jsCallback` (§15).
 
 ---
 
@@ -245,12 +265,14 @@ Canvas32 into modelled `__scan_fb`). Check evidence is host-modelled
 `scanout_ppm` vs `ui_ppm32`. QMP tab screendumps (`qemu_tab_shots.sh`) stay
 on remote g6q — WSL2 has no DRM render node.
 
-**B91 (landed, assessed increment):** guest `__ui_cap` compact persist
-(dirty tiles + node count) + `VioPaint` TRANSFER of those rects when the
-host packs Canvas32 (`GuestWebPresent`). VGA `start_ops` / 48-row
-`__ui_dom` unchanged. Same `Host` import set stays on the host
-`BrowserSession`; do not grow `start_ops` to `Object_Call`. A guest
-S-mode interpreter of the LDC cell is still later.
+**B91 / B91b / B91c (landed):** guest `__ui_cap` compact persist (dirty
+tiles + node count) + `VioPaint` TRANSFER of those rects when the host
+packs Canvas32 (`GuestWebPresent`) from the **interactive** svelte-d
+engine (tick, click, GLES2 `u_dom`, throw/await, `jsCallback` re-entry).
+VGA `start_ops` / 48-row `__ui_dom` unchanged. Same `Host` import set
+stays on the host `BrowserSession`; do not grow `start_ops` to
+`Object_Call`. A guest S-mode interpreter of the LDC cell is still later.
+The **shipped** LDC bytes still need `G6B_DUB_WASM=1` (§15).
 
 Numeric `jit_riscv` stays a **worker** for `Job::WasmNumeric`. The LDC cell
 (~942 functions, wasm-EH, Asyncify) is **not** JIT’d whole.
@@ -293,10 +315,12 @@ Work tree: **`E:\cva6/g6lc_bios`**.
 | **B89** | 5 | UI-thread `Role::Ui` tick; timer heap; fps 100/144; B66 or verifier-refuse | **landed** |
 | **B90** | 6 | Dirty-tile GL + virtio-gpu TRANSFER + QMP tab screendumps | **landed** (host blit + modelled scan_fb; QMP shots remain remote g6q) |
 | **B91** | 7 | Guest libwasm instance (later) | **landed** (compact persist + dirty-tile `VioPaint`; `start_ops` not grown) |
-| **B91b** | — | Guest S-mode LDC cell, same Host import set | **landed** (exec-model `guest_cell_scanout` / `smoke_cell`; not a RISC-V interpreter of the cell) |
+| **B91b** | — | Guest S-mode LDC cell, same Host import set | **landed** (persistent svelte-d `guest_cell_drive`: tick, click, hover, arrows/F10, JS await/throw; GLES2 `u_dom`; not a RISC-V interpreter of the cell). **B91b+:** `_start` keeps `asyncify_*`; `MAX_MEMORY_PAGES` 64. **B91b++:** abort-stub `unreachable` → wasm-eh throw; `_start` fail-softs Flatten-deleted `ready()` catch after rewind; `print-d.ts` keeps `.await` off the landing pad |
+| **B91c** | — | virtio/UI → `jsCallback` / named D delegates | **landed** (`Object_Call_EventHandler__void` → `Listener::Delegate`; `exportDelegate` input names on `dispatch_pointer`/`dispatch_key`; table fallback; shipped cell `Listener::Cell`) |
+| **B91d** | — | Rebuild the advertised LDC cell | **landed** — `G6B_DUB_WASM=1 G6B_WASM_ASYNCIFY=1`; `jsCallback` export; `add_event_listener` / `getRoot` imports; cell `g6b_listen` (host `bind_cell_clicks` skipped) |
 
 Do not grow `start_ops` to `Object_Call`. Do not treat B12b–B13 or B54 as this
-endpoint. B92 is later.
+endpoint. B92 is later. Remaining work on *this* axis is §15.
 
 ---
 
@@ -312,8 +336,33 @@ endpoint. B92 is later.
   `vio_probe_finds_modelled_gpu_at_slot0` still expands 4bpp when `__ui_cap`
   is not WEB_PRESENT.
 - B91b check: `smoke_cell_runs_ldc_host_not_start_ops` (`WASM-INTERPRETER`,
-  `VIRTIO-PAINT`, `cap_nodes > 1`). `guest_web_present` now requires the
-  LDC cell to have run on `KernelHost`.
+  `fetch_bios`, `gl_presented`, `VIRTIO-PAINT`, `cap_nodes > 1`);
+  `smoke_cell_arrow_right_still_vio_paints`;
+  `smoke_cell_mbox_ui_paints_svelte_d`;
+  `guest_cell_scanout_is_interactive_svelte_engine`;
+  `guest_cell_click_cpu_transfers_live_css`;
+  `guest_cell_key_arrow_right_transfers_live_css`;
+  `guest_cell_hover_cpu_transfers_live_css`;
+  `guest_cell_await_fetch_throw_catch_packs_for_vio`;
+  `guest_cell_virtio_keydown_maps_to_svelte_tabs`;
+  `guest_cell_virtio_tablet_abs_hovers_then_btn_clicks`;
+  `guest_cell_virtio_tablet_clicks_refresh`;
+  `smoke_cell_tablet_slot_pokes_abs_via_webfeed`;
+  `guest_cell_trap_timer_skip_if_clean_then_hover_dirties`;
+  `kernel_host_env_await_throw_catch_are_the_same_import_set`;
+  `libwasm_cell_start_awaits_and_catch_survives_dom_event`;
+  `guest_cell_ldc_start_await_catch_then_cpu_click_vio`;
+  `libwasm_cell_start_asyncify_await_then_eh_catch`;
+  `libwasm_cell_start_catch_swallows_bad_json_after_rewind`;
+  `js_throw_from_host_import_is_caught_in_wasm_try`;
+  `wasm_throw_is_caught_by_js_host`;
+  `webidl_fetch_and_dom_throws_are_caught_in_wasm`;
+  `start_registers_d_delegate_and_vararg_calls_js_native`;
+  `virtio_like_host_event_reenters_jscallback_after_start`;
+  `virtio_click_reenters_jscallback_delegate`;
+  `virtio_click_reenters_named_export_delegate`;
+  `shipped_ldc_cell_emits_g6b_listen_and_jscallback`.
+  `guest_web_present` requires the LDC cell to have run on `KernelHost`.
 - QEMU QMP (not `g6b.py check`): `tools/qemu_tab_shots.sh` against
   `fixtures/g6lc64-qemu.json` on remote g6q (2D `virtio-gpu-device`).
   Never Variane.
@@ -360,8 +409,33 @@ endpoint. B92 is later.
 
 ## 14. Later: windows and iframe sessions
 
-Not B89–B91. The BIOS UI becomes a small window manager (status bar in
+Not B89–B91c. The BIOS UI becomes a small window manager (status bar in
 setup chrome, Firefox-like tabs inside a window, iframe sessions that
 navigate to a **local app path or a remote URL**). Remote loads use
 adapter `HttpsGet` / post-delegate mailbox — never QEMU `-netdev`. Full
 plan: [`plan-iframe.md`](plan-iframe.md).
+
+---
+
+## 15. Remaining after B91d (this axis only)
+
+B82–B91d built the engine the thesis asked for: one `BrowserSession`, one
+LDC cell as the app, live CSS, UI-hart tick, dirty-tile scanout, GuestCellLive
+on the same Host, virtio/UI events able to re-enter `jsCallback`, FileServe
+advertising a fresh cell, Track-B 4bpp `ui_ppm` a downsample of that raster.
+What remains on this axis is names and QMP shots.
+
+| Next | Serves which decision (§13) | Do |
+|---|---|---|
+| **B91d** `G6B_DUB_WASM=1 G6B_WASM_ASYNCIFY=1 bun scripts/build.ts` | 1 (one app = LDC cell), 5 (Svelte owns tabs/JSON), B86 `getRoot`, B87 `g6b_listen` in the artifact, B91c `jsCallback` export | **landed.** Fresh verified asyncified artifact. `print-d.ts` hoists tbody `Handle`s out of the DOM try. Host `bind_cell_clicks` skipped when `_start` emits `g6b_listen`. `jsCallback` / `jsCallback0` are linker exports. |
+| Track-B 4bpp `ui_ppm` | 3 (goosie on the live `Node`; no HTML round-trip) | **landed.** `ui_ppm` / `ui_ppm_output` downsample live `Engine::paint(&Node)` Canvas32 to nearest PALETTE (flatten over white). `g6b_css::render` remains the palette-lane fixture path (`css_golden`), not the setup-page UI. |
+| `WasmJit` / `WasmStart` names | 7 (glyph UI is not the web engine) | Rename leftover from B82. `jal WasmJit` is the numeric worker + VGA face. Do not rename inside a way that implies the LDC cell runs in S-mode. |
+| QMP tab screendumps | 4 (CPU raster is truth; GL/virtio accelerate) | `tools/qemu_tab_shots.sh` on remote g6q. Not `g6b.py check`. WSL2 has no DRM. |
+| Guest RISC-V interpreter of the ~942-function cell | 7, §8 | **Later.** GuestCellLive is the exec-model stand-in. |
+| **B92** windowing / iframe sessions | §14 | **Later.** [`plan-iframe.md`](plan-iframe.md). |
+| **S1+** `g6b-pglite` crate | storage axis | **Not this endpoint.** [`g6b-pglite.md`](g6b-pglite.md). |
+| B12b–B13, B54 | other axes | Not this endpoint. |
+
+**Do not start B92, PGlite compile, or `start_ops` `Object_Call` instead of
+the leftovers above.** B91d closed the stale-artifact hole. Track-B 4bpp
+`ui_ppm` is a live-Engine downsample, not a second HTML CSS lane.

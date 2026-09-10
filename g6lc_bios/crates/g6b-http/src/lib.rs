@@ -11,7 +11,7 @@ pub mod h1;
 pub mod h2;
 pub mod router;
 
-pub use files::StaticFile;
+pub use files::{live_features_json, load_pglite_dist, StaticFile, MAX_PGLITE_EMBED_BYTES};
 pub use router::{Route, Router};
 
 /// Wire version.

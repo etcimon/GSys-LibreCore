@@ -15,7 +15,7 @@ use crate::{
 };
 use g6b_dom::Node;
 use g6b_gr::canvas::Canvas;
-use g6b_gr::PALETTE;
+use g6b_gr::{nearest_palette_index, PALETTE};
 
 /// Budgets, matching the rest of `g6b-css`.
 pub const MAX_RENDER_NODES: usize = 256;
@@ -205,20 +205,7 @@ pub fn color_to_index(value: &str) -> Option<u8> {
 /// Nearest palette entry by Euclidean distance. For UI raster where the source
 /// palette has 24-bit colours, this is the only honest fallback.
 pub fn nearest_color_index(value: &str) -> Option<u8> {
-    let rgb = parse_color(value)?;
-    let mut best = 0u8;
-    let mut best_d = u32::MAX;
-    for (i, &c) in PALETTE.iter().enumerate() {
-        let dr = (c[0] as i32 - rgb[0] as i32).unsigned_abs();
-        let dg = (c[1] as i32 - rgb[1] as i32).unsigned_abs();
-        let db = (c[2] as i32 - rgb[2] as i32).unsigned_abs();
-        let d = dr * dr + dg * dg + db * db;
-        if d < best_d {
-            best_d = d;
-            best = i as u8;
-        }
-    }
-    Some(best)
+    Some(nearest_palette_index(parse_color(value)?))
 }
 
 fn resolve_color(value: &str, mode: ColorMode) -> Option<u8> {

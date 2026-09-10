@@ -1,0 +1,16 @@
+{
+  "g6b_store": 1,
+  "uuid": "550e8400-e29b-41d4-a716-446655440000",
+  "purpose": "registry",
+  "label": null,
+  "tables": {
+    "kv": {
+      "cols": [
+        {"name": "k", "type": "TEXT", "pk": true},
+        {"name": "v", "type": "TEXT", "pk": false}
+      ],
+      "rows": [["boot.next", "opensbi"]],
+      "serial": 1
+    }
+  }
+}

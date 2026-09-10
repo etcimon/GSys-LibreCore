@@ -35,7 +35,7 @@ pub struct Module {
 }
 
 pub const MAX_MODULE_BYTES: usize = 1 << 20;
-pub const MAX_MEMORY_PAGES: u32 = 32;
+pub const MAX_MEMORY_PAGES: u32 = 64;
 pub const MAX_FUNCTIONS: usize = 1024;
 pub const MAX_LOCALS: usize = 4096;
 pub const MAX_STACK: usize = 256;
@@ -77,6 +77,21 @@ pub struct Export {
 #[derive(Debug, Clone)]
 pub struct Tag {
     pub typeidx: u32,
+}
+
+/// One `try_table` catch clause (wasm exception-handling). Labels are `br`
+/// depths **not counting** the `try_table` itself (label 0 = parent block),
+/// matching Binaryen `visitTryTable`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TryTableCatch {
+    /// `catch $tag $label` — branch with the tag payload.
+    Catch { tag: u32, label: u32 },
+    /// `catch_ref $tag $label` — payload plus exnref (not executed here).
+    CatchRef { tag: u32, label: u32 },
+    /// `catch_all $label`.
+    CatchAll { label: u32 },
+    /// `catch_all_ref $label`.
+    CatchAllRef { label: u32 },
 }
 
 #[derive(Debug, Clone)]
@@ -264,8 +279,11 @@ pub enum Instr {
     CatchAll,
     /// Legacy exception handling: `delegate $label` ends a try by delegating.
     Delegate(u32),
-    /// Legacy exception handling: `try_table` block (blocktype + catch vector).
-    TryTable(Option<ValType>),
+    /// Exception handling: `try_table` (LDC 1.43). Catch dests are `br` labels.
+    TryTable {
+        result: Option<ValType>,
+        catches: Vec<TryTableCatch>,
+    },
     /// Exception handling: `throw_ref` (pops an exnref value).
     ThrowRef,
     /// Indirect call through a table: `call_indirect (type $idx) (table $idx)`.
@@ -389,6 +407,7 @@ pub fn decode(bytes: &[u8]) -> Result<Module, String> {
             10 => decode_code(&mut m, payload)?,
             11 => decode_data(&mut m, payload)?,
             12 => decode_data_count(&mut m, payload)?,
+            13 => decode_tags(&mut m, payload)?,
             _ => return Err(format!("unsupported wasm section {id}")),
         }
         i = end;
@@ -849,7 +868,7 @@ fn validate_body(
             | Instr::Loop(result)
             | Instr::If(result)
             | Instr::Try(result)
-            | Instr::TryTable(result) => {
+            | Instr::TryTable { result, .. } => {
                 if matches!(ins, Instr::If(_)) {
                     pop_type(&mut height, current)?;
                 }
@@ -861,7 +880,7 @@ fn validate_body(
                         Instr::Loop(_) => ControlKind::Loop,
                         Instr::If(_) => ControlKind::If,
                         Instr::Try(_) => ControlKind::Try,
-                        Instr::TryTable(_) => ControlKind::TryTable,
+                        Instr::TryTable { .. } => ControlKind::TryTable,
                         _ => ControlKind::Block,
                     },
                     start: pc,
@@ -1353,6 +1372,22 @@ fn decode_data_count(m: &mut Module, p: &[u8]) -> Result<(), String> {
     finish(p, i)
 }
 
+/// Exception-handling tag section (id 13): vec of `{ 0x00, typeidx }`.
+fn decode_tags(m: &mut Module, p: &[u8]) -> Result<(), String> {
+    let (n, mut i) = count(p, 0, 256)?;
+    for _ in 0..n {
+        let attr = *p.get(i).ok_or("truncated tag attribute")?;
+        i += 1;
+        if attr != 0 {
+            return Err("unsupported tag attribute".into());
+        }
+        let (ty, ni) = uleb(p, i)?;
+        i = ni;
+        m.tags.push(Tag { typeidx: ty });
+    }
+    finish(p, i)
+}
+
 fn decode_init_expr(p: &[u8], mut i: usize) -> Result<(i64, usize), String> {
     let opcode = *p.get(i).ok_or("truncated init expression")?;
     i += 1;
@@ -1557,17 +1592,39 @@ fn decode_expr(types: &[FuncType], p: &[u8]) -> Result<Vec<Instr>, String> {
                 let bt = decode_blocktype(types, p, &mut i)?;
                 let (count, ni) = uleb(p, i)?;
                 i = ni;
+                let mut catches = Vec::with_capacity(count as usize);
                 for _ in 0..count {
                     let kind = *p.get(i).ok_or("truncated try_table catch")?;
                     i += 1;
-                    if kind == 0 || kind == 1 {
-                        let (_, ni) = uleb(p, i)?;
-                        i = ni;
-                    }
-                    let (_, ni) = uleb(p, i)?;
-                    i = ni;
+                    let clause = match kind {
+                        0 | 1 => {
+                            let (tag, ni) = uleb(p, i)?;
+                            i = ni;
+                            let (label, ni) = uleb(p, i)?;
+                            i = ni;
+                            if kind == 0 {
+                                TryTableCatch::Catch { tag, label }
+                            } else {
+                                TryTableCatch::CatchRef { tag, label }
+                            }
+                        }
+                        2 | 3 => {
+                            let (label, ni) = uleb(p, i)?;
+                            i = ni;
+                            if kind == 2 {
+                                TryTableCatch::CatchAll { label }
+                            } else {
+                                TryTableCatch::CatchAllRef { label }
+                            }
+                        }
+                        _ => return Err("bad try_table catch kind".into()),
+                    };
+                    catches.push(clause);
                 }
-                Instr::TryTable(bt)
+                Instr::TryTable {
+                    result: bt,
+                    catches,
+                }
             }
             0x0b => Instr::End,
             0x0c | 0x0d | 0x10 | 0x11 | 0x20..=0x24 => {
@@ -2123,7 +2180,7 @@ pub(crate) mod tests {
             (1, Some(0), false),
             (1, Some(65536), true),
             (1, Some(65537), false),
-            (33, None, false),
+            (65, None, false),
         ] {
             assert_eq!(
                 decode(&numeric_with_memory(0, 0, 0, &[0x0b], Some((min, max)))).is_ok(),
@@ -2258,7 +2315,7 @@ pub(crate) mod tests {
         section(&mut bytes, 1, &[0]);
         assert!(decode(&bytes).is_err());
         let mut bytes = b"\0asm\x01\x00\x00\x00".to_vec();
-        section(&mut bytes, 13, &[0]);
+        section(&mut bytes, 14, &[0]);
         assert!(decode(&bytes).is_err());
         let mut bytes = b"\0asm\x01\x00\x00\x00".to_vec();
         section(&mut bytes, 1, &[0, 0]);
@@ -2278,7 +2335,7 @@ pub(crate) mod tests {
 
     #[test]
     fn resource_limits_and_structural_types_are_enforced() {
-        for memory in [&[1, 0, 33][..], &[1, 3, 1], &[2, 0, 1, 0, 1], &[1, 1, 2, 1]] {
+        for memory in [&[1, 0, 65][..], &[1, 3, 1], &[2, 0, 1, 0, 1], &[1, 1, 2, 1]] {
             let mut bytes = b"\0asm\x01\x00\x00\x00".to_vec();
             section(&mut bytes, 5, memory);
             assert!(decode(&bytes).is_err());
@@ -2393,5 +2450,42 @@ pub(crate) mod tests {
             }
             Err(err) => panic!("unexpected libwasm run error: {err}"),
         }
+    }
+
+    #[test]
+    fn libwasm_cell_start_asyncify_await_then_eh_catch() {
+        if !crate::bios_ui_libwasm_live() {
+            return;
+        }
+        let m = decode(crate::bios_ui_libwasm()).expect("decode LDC cell");
+        assert!(
+            m.exports.iter().any(|e| e.name == "asyncify_get_state"),
+            "svelte-engine wasm-opt --asyncify left control exports"
+        );
+        assert!(
+            !m.tags.is_empty(),
+            "env.__cpp_exception tag import for App.ready catch"
+        );
+        // Empty JSON arrays: parseJSON succeeds so rewind is the happy path
+        // (KernelHost serves real /bios/menu JSON). Do not strip asyncify_*.
+        let mut host = crate::interp::tests::TestHost {
+            fetch_body: Some("[]".into()),
+            ..Default::default()
+        };
+        crate::run_start(&m, &mut host).expect("LDC _start asyncify rewind + App.ready catch");
+    }
+
+    #[test]
+    fn libwasm_cell_start_catch_swallows_bad_json_after_rewind() {
+        if !crate::bios_ui_libwasm_live() {
+            return;
+        }
+        let m = decode(crate::bios_ui_libwasm()).expect("decode LDC cell");
+        // Default TestHost fetch returns the URL, not JSON. Flatten deleted
+        // ready()'s catch around await; abort-stub unreachable becomes wasm-eh
+        // throw and `_start` fail-softs after rewind (empty catch intent).
+        let mut host = crate::interp::tests::TestHost::default();
+        crate::run_start(&m, &mut host)
+            .expect("per-await try around parseJSON swallows a non-JSON fetch body");
     }
 }

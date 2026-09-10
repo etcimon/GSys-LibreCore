@@ -55,7 +55,7 @@ enabled source (QEMU resets them to 0), enables UART/virtio-mmio/mbox, and
 claims/completes SEI — the virtio-mmio source resolves to `irq = 1 + slot`
 from `__vio+VIO_DEV_OFF` → `trap_vio` (ISR read + ACK + `__vio` counter;
 QEMU-verified: `irqf == 8` after boot), and the virtio-input slot (DeviceID
-18, `virtio-keyboard-device` when `wants_virtio_input()`) resolves the same
+18, `virtio-keyboard-device` then `virtio-tablet-device` when `wants_virtio_input()`) resolves the same
 way → `trap_inp` → `InpDrain` pushes `EV_KEY` codes into the bounded
 `INP_KQ` queue (UART `Keys`/`K` dumps them). `VioInit`/`VioCmd` completion
 waits are `wfi`-driven (irq wake + bounded timeout), not pure spins. Hart 0
@@ -188,8 +188,10 @@ RTL mailbox / DTS merge into `corev_apu` is an inference recorded in
 | **B90** | Dirty-tile GL + virtio-gpu TRANSFER + QMP tab screendumps | landed (host blit + modelled scan_fb; QMP shots remain remote g6q) |
 | **B91** | Guest libwasm instance; same Host + dirty paint in S-mode | landed (compact persist + dirty-tile `VioPaint`; `start_ops` unchanged) |
 | **B92** | Windowing + tab engine + iframe sessions (local app path or remote URL) | **later** — [`plan-iframe.md`](plan-iframe.md); do not cut B89–B91 |
-| **S0–S4** | First-party registry store `g6b-pglite` + optional Electric dist wasm | **S0 (PR1)** — submodule + npm dist pin, no compile. UUID instances, purpose-based BIOS UI, deletable memory, USB key import/export (later PRs). Design: [`g6b-pglite.md`](g6b-pglite.md) [`g6b-store-instances.md`](g6b-store-instances.md) |
-| **B91b** | Guest S-mode LDC cell on the same Host import set as `BrowserSession` | **landed** — exec-model `guest_cell_scanout` / `smoke_cell`; `start_ops` unchanged |
+| **S0–S5** | First-party registry store `g6b-pglite` + optional Electric dist wasm | **S5 landed** — USB live + `stat` + JOIN/listen; svelte-d `Store.svelte` in App `_start` (memory registry; g6b-js AOT stays fetch+text). Design: [`g6b-pglite.md`](g6b-pglite.md) [`g6b-pglite-svelte.md`](g6b-pglite-svelte.md) [`g6b-store-instances.md`](g6b-store-instances.md) |
+| **B91b** | Guest S-mode LDC cell on the same Host import set as `BrowserSession` | **landed** — `GuestCellLive`/`WebFeed`: UART `Ui` + mailbox `U` + `trap_timer` skip-if-clean + virtio-input `KEY_*` / tablet slot `EV_ABS`+`BTN_LEFT` (`TabInit`/`TabDrain`) / mouse `EV_REL` → svelte-d; GLES2 `u_dom`; **B91b+:** `_start` keeps `asyncify_*` (scratch above D heap, `MAX_MEMORY_PAGES` 64); `start_ops` unchanged |
+| **B91c** | virtio/UI events re-enter D delegates via `jsCallback` | **landed** — `Listener::Delegate` + named `exportDelegate` input names; shipped cell stays `Listener::Cell` until `G6B_DUB_WASM=1`; `start_ops` unchanged |
+| **B91d** | Rebuild advertised LDC cell (`G6B_DUB_WASM=1`) | **landed** — fresh asyncified artifact; `jsCallback`; cell `g6b_listen`; host `getRoot`; [`plan-endpoint.md`](plan-endpoint.md) §15 leftovers |
 
 Kernel-spec RISC-V map: [`KERNEL-RV.md`](KERNEL-RV.md). Generated `zeal/KStart.S`
 and `zeal/KInts.S` match `g6b-elf` because both lower `g6b-asm` IR
@@ -223,8 +225,8 @@ remain the sole authority; OpenSBI remains M-mode and BIOS stays S-mode.
   (`BrowserSession::wasm_ui`), not a kernel type and not guest `start_ops`.
   Persistent instance + live DOM + `JsExports` + goosie raster + GLES2 `u_dom`
   onto virtio-gpu / HDMI is [`BROWSER-RUNTIME.md`](BROWSER-RUNTIME.md).
-  Remaining web-engine work is **B86–B91** in
-  [`plan-endpoint.md`](plan-endpoint.md). Host `validate`/`run` already
+  Remaining web-engine work after **B91d** is in
+  [`plan-endpoint.md`](plan-endpoint.md) §15 (`WasmJit` names, QMP). Host `validate`/`run` already
   execute i64/f32/f64, `call_indirect`, bulk memory, and `libwasm_await__void`.
 - QEMU display + input are now **verified** (QEMU 8.2.2 + OpenSBI
   fw_dynamic, stock `-M virt`, `fixtures/g6lc64-virt.json`): the

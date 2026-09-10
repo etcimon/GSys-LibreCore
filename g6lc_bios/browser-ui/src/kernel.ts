@@ -126,10 +126,20 @@ export function createWasmHost(doc, allowed, request, log = (message) => console
         addEventListener(tPtr, tLen, tyPtr, tyLen, listener, capture) {
           log("WASM addEventListener " + text(tPtr, tLen) + " " + text(tyPtr, tyLen) + " " + listener + " " + capture);
         },
+        add_event_listener(tPtr, tLen, tyPtr, tyLen, listener, capture) {
+          log("WASM addEventListener " + text(tPtr, tLen) + " " + text(tyPtr, tyLen) + " " + listener + " " + capture);
+        },
         removeEventListener(listener) {
           log("WASM removeEventListener " + listener);
         },
+        remove_event_listener(listener) {
+          log("WASM removeEventListener " + listener);
+        },
         dispatchEvent(tPtr, tLen, tyPtr, tyLen, dPtr, dLen) {
+          log("WASM dispatchEvent " + text(tPtr, tLen) + " " + text(tyPtr, tyLen) + " " + text(dPtr, dLen));
+          return 1;
+        },
+        dispatch_event(tPtr, tLen, tyPtr, tyLen, dPtr, dLen) {
           log("WASM dispatchEvent " + text(tPtr, tLen) + " " + text(tyPtr, tyLen) + " " + text(dPtr, dLen));
           return 1;
         },
@@ -174,6 +184,7 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
   if (!mount || typeof mount.replaceChildren !== "function") throw new Error("libwasm mount unavailable");
   if (!wasmApi || typeof wasmApi.Tag !== "function") throw new Error("WebAssembly exception tags unavailable");
   const asyncify = opts.asyncify ? new LibwasmAsyncify() : null;
+  const log = opts.log || (() => {});
   const fetchFn = opts.fetchFn || (() => { throw new Error("libwasm fetchFn not provided"); });
   // B61 refcounted libwasm object table. `struct JsHandle` frees on destruct
   // and calls copyObjectRef on copy, so entries carry a reference count and a
@@ -208,7 +219,7 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
     const e = objects.get(handle);
     return e ? e.value : undefined;
   }
-  const tags = new Set("a abbr address article aside b bdi bdo blockquote br button caption cite code col colgroup data datalist dd del dfn div dl dt em fieldset figcaption figure footer h1 h2 h3 h4 h5 h6 header hr i input ins kbd label legend li main mark meter nav ol optgroup option output p pre progress q rb rp rt rtc ruby s samp section select small span strong sub sup table tbody td textarea tfoot th thead time tr u ul var wbr".split(" "));
+  const tags = new Set("a abbr address article aside b bdi bdo blockquote br button caption cite code col colgroup data datalist dd del dfn div dl dt em fieldset figcaption figure footer h1 h2 h3 h4 h5 h6 head header hr i img input ins kbd label legend li main mark meter nav ol optgroup option output p pre progress q rb rp rt rtc ruby s samp section select small span strong sub sup table tbody td textarea tfoot th thead time tr u ul var wbr".split(" "));
   const root = doc.createElement("div");
   const handles = new Map([[1, root]]);
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -268,6 +279,9 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
     return handles.get(handle);
   }
   function create(tag) {
+    if (!tag || !/^[A-Za-z][A-Za-z0-9-]*$/.test(tag)) {
+      throw new DOMException("Failed to execute 'createElement' on 'Document': The tag name provided ('" + tag + "') is not a valid name.", "InvalidCharacterError");
+    }
     if (!tags.has(tag)) throw new Error("WASM unsupported DOM tag: " + tag);
     if (handles.size >= 4096) throw new Error("WASM DOM handle budget exceeded");
     const handle = next++;
@@ -276,7 +290,9 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
   }
   function place(parent, child, sibling = 0) {
     const p = node(parent), c = node(child, true), s = sibling === 0 ? null : node(sibling, true);
-    if (c.contains(p) || (s && s.parentNode !== p)) throw new Error("WASM invalid DOM hierarchy");
+    if (c.contains(p) || (s && s.parentNode !== p)) {
+      throw new DOMException("Failed to execute 'appendChild' on 'Node': The new child element contains the parent.", "HierarchyRequestError");
+    }
     let depth = 0;
     for (let n = p; n; n = n.parentNode) depth++;
     const pending = [[c, depth + 1]];
@@ -323,6 +339,7 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
     if (e === "null") return { v: null };
     if (e === "undefined") return { v: undefined };
     if (e === "cb" || CB_BOILERPLATE.has(e)) return { cb: true };
+    if (e === "window.pglite" || e === "pglite" || e === "moment" || e === "window.moment") return { host: e };
     const n = Number(e);
     if (e !== "" && Number.isFinite(n)) return { v: n };
     throw new Error("libwasm lodash refuses host eval of " + JSON.stringify(e));
@@ -378,12 +395,31 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
       const prop = params[0].v;
       return (v) => !!(v && typeof v === "object" && v[prop]);
     };
+    const internParam = (p) => {
+      if (!p || !p.host) return p;
+      const key = p.host === "window.pglite" || p.host === "pglite" ? "pglite"
+        : p.host === "window.moment" || p.host === "moment" ? "moment"
+        : p.host;
+      const g = ctx && typeof ctx.global === "function" ? ctx.global(key) : undefined;
+      if (g === undefined) throw new Error("libwasm lodash refuses host eval of " + JSON.stringify(p.host));
+      return { v: g };
+    };
+    const ASYNC_STORE = JSON.stringify({ ok: false, error: "async", message: "NotImplemented(\"async\")" });
+    const isStoreAcc = (v) => !!(v && (v === (ctx && typeof ctx.global === "function" ? ctx.global("pglite") : undefined) || v.__g6bStore === "factory" || v.__g6bStore === "instance"));
     let acc = init;
     for (const c of commands) {
       if (c.local) continue; // `cb` names the callback; it has no value
-      const p = c.params;
+      const p = (c.params || []).map(internParam);
       switch (c.func) {
         case "identity": break;
+        case "attempt":
+          if (!isStoreAcc(acc)) throw new Error("libwasm lodash method \"attempt\" is not implemented");
+          acc = ASYNC_STORE;
+          break;
+        case "invoke":
+          if (!isStoreAcc(acc)) throw new Error("libwasm lodash method \"invoke\" is not implemented");
+          acc = ASYNC_STORE;
+          break;
         case "defaultTo": acc = acc === null || acc === undefined || Number.isNaN(acc) ? need(p[0], "defaultTo") : acc; break;
         case "toString": acc = jsString(acc); break;
         case "toNumber": acc = Number(acc); break;
@@ -672,10 +708,11 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
     }
     function readVarArg(type, json, at, resolveHandles = true) {
       if (type.startsWith("Optional!")) {
-        const inner = type.slice(9);
+        let inner = type.slice(9);
+        if (inner.startsWith("(") && inner.endsWith(")")) inner = inner.slice(1, -1);
         const defined = !!json[at.i++];
         if (defined) return readVarArg(inner, json, at, resolveHandles);
-        readVarArg(inner, json, at, resolveHandles);
+        readVarArg(inner, json, at, false);
         return undefined;
       }
       if (type.startsWith("SumType!")) {
@@ -743,7 +780,15 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
     const timers = new Map();
     function callDelegate(ptr, ctx, ...args) {
       if (!(ptr > 0)) throw new Error("libwasm delegate pointer invalid");
-      const table = wasmInstance?.exports?.__indirect_function_table;
+      const exp = wasmInstance?.exports;
+      // types.d jsCallback(ctx, fun, handle) / jsCallback0(ctx, fun).
+      if (args.length === 1 && typeof exp?.jsCallback === "function") {
+        return exp.jsCallback(ctx, ptr, args[0]);
+      }
+      if (args.length === 0 && typeof exp?.jsCallback0 === "function") {
+        return exp.jsCallback0(ctx, ptr);
+      }
+      const table = exp?.__indirect_function_table;
       if (!table || typeof table.get !== "function") throw new Error("libwasm indirect function table not available");
       const fn = table.get(ptr);
       if (typeof fn !== "function") throw new Error("libwasm delegate pointer not in table");
@@ -852,6 +897,7 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
     },
     fetch(ptr, len) {
       const url = text(len, ptr);
+      if (!url || url === ":" || /[\s\[\]]/.test(url)) throw new TypeError("Failed to construct 'Request': Invalid URL");
       if (!/^\/(bios|ui)\//.test(url)) throw new Error("libwasm fetch URL not a local /bios/ or /ui/ path: " + url);
       if (!asyncify) return 1;
       const promise = fetchFn(url, { method: "GET", credentials: "same-origin", redirect: "error" }).then((r) => {
@@ -880,6 +926,20 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
       if (asyncify && host && typeof host.register === "function") {
         host.register(path, method);
       }
+    },
+    getRoot() {
+      // Staging Spa mount (handle 1). svelte-engine would addObject(#root).
+      return 1;
+    },
+    addCss(len, ptr) {
+      const css = text(len, ptr);
+      if (handles.size >= 4096) throw new Error("WASM DOM handle budget exceeded");
+      const h = next++;
+      const el = doc.createElement("style");
+      el.textContent = css;
+      handles.set(h, el);
+      place(1, h);
+      return h;
     },
     createElement(tag) {
       if (!Number.isInteger(tag)) throw new Error("WASM invalid DOM tag ordinal");
@@ -1116,31 +1176,52 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
     addClass(handle, len, ptr) { node(handle, true).classList.add(text(len, ptr)); },
     removeClass(handle, len, ptr) { node(handle, true).classList.remove(text(len, ptr)); },
     addEventListener(targetPtr, targetLen, typePtr, typeLen, listener, capture) {
-      log("WASM addEventListener " + text(targetPtr, targetLen) + " " + text(typePtr, typeLen) + " " + listener + " " + capture);
+      log("WASM addEventListener " + text(targetLen, targetPtr) + " " + text(typeLen, typePtr) + " " + listener + " " + capture);
+    },
+    add_event_listener(targetPtr, targetLen, typePtr, typeLen, listener, capture) {
+      log("WASM addEventListener " + text(targetLen, targetPtr) + " " + text(typeLen, typePtr) + " " + listener + " " + capture);
     },
     removeEventListener(listener) {
       log("WASM removeEventListener " + listener);
     },
+    remove_event_listener(listener) {
+      log("WASM removeEventListener " + listener);
+    },
     dispatchEvent(targetPtr, targetLen, typePtr, typeLen, detailPtr, detailLen) {
-      log("WASM dispatchEvent " + text(targetPtr, targetLen) + " " + text(typePtr, typeLen) + " " + text(detailPtr, detailLen));
+      log("WASM dispatchEvent " + text(targetLen, targetPtr) + " " + text(typeLen, typePtr) + " " + text(detailLen, detailPtr));
+      return 1;
+    },
+    dispatch_event(targetPtr, targetLen, typePtr, typeLen, detailPtr, detailLen) {
+      log("WASM dispatchEvent " + text(targetLen, targetPtr) + " " + text(typeLen, typePtr) + " " + text(detailLen, detailPtr));
       return 1;
     },
     ...ldexecImports(),
   };
   const baseFunctions = asyncify ? asyncify.wrapModuleImports(functions) : functions;
+  const cppTag = new wasmApi.Tag({ parameters: ["i32"] });
   const env = Object.fromEntries(Object.entries(baseFunctions).map(([name, fn]) => [name, (...args) => {
     try {
       if (state !== "staging") throw new Error("WASM DOM transaction is " + state);
       if (++calls > 16384) throw new Error("WASM import budget exceeded");
       if (memory) checkMemory(memory);
       return fn(...args);
-    } catch (error) { state = "failed"; throw error; }
+    } catch (error) {
+      if (error instanceof wasmApi.Exception) throw error;
+      const catchable = error instanceof TypeError || (typeof DOMException === "function" && error instanceof DOMException);
+      if (catchable) {
+        const code = error instanceof DOMException && Number.isInteger(error.code) ? error.code : 0;
+        throw new wasmApi.Exception(cppTag, [code]);
+      }
+      state = "failed";
+      throw error;
+    }
   }]));
-  env.__cpp_exception = new wasmApi.Tag({ parameters: ["i32"] });
+  env.__cpp_exception = cppTag;
   const host = {
     imports: { env },
     nodeCount() { return handles.size - 1; },
     bind(value) { checkMemory(value); memory = value; },
+    attach(instance) { wasmInstance = instance; },
     commit() {
       if (state !== "staging") throw new Error("WASM DOM transaction is " + state);
       checkMemory(memory);
@@ -1187,6 +1268,192 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
 // `ConsolePage{contextId, pageRevision, entries, dropped}`. The bounded-ring
 // -that-reports-drops detail is taken from there deliberately: silently losing
 // console output is how a debugging tool lies to you.
+/// Shell-only intern of first-party `pglite` for lang=ts. Never assigned on the real DOM `window`.
+export let pglite = undefined;
+/// Optional Electric instance from [`createPgliteWasm`]. Not `window.pglite`.
+export let pgliteWasm = undefined;
+
+const STORE_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function storeFetchJson(fetchFn, method, url, body) {
+  const init = { method, credentials: "same-origin", redirect: "error", cache: "no-store" };
+  if (body !== undefined) {
+    init.headers = { "content-type": "application/json" };
+    init.body = typeof body === "string" ? body : JSON.stringify(body);
+  }
+  return Promise.resolve(fetchFn(url, init)).then((r) => {
+    if (!r || typeof r.text !== "function") {
+      return { ok: false, error: "http", message: "store fetch returned no body" };
+    }
+    return r.text().then((text) => {
+      let json;
+      try { json = text ? JSON.parse(text) : {}; } catch {
+        json = { ok: false, error: "http", message: String(text).slice(0, 200) };
+      }
+      if (r.ok === false && json && json.ok !== false) {
+        return { ok: false, error: "http", message: json.message || ("HTTP " + r.status), status: r.status };
+      }
+      return json;
+    });
+  });
+}
+
+function newBiosStore(fetchFn, dataDir) {
+  const fn = fetchFn || (() => { throw new Error("pglite fetchFn not provided"); });
+  return {
+    __g6bStore: "instance",
+    dataDir: String(dataDir || "registry"),
+    uuid: null,
+    waitReady() { return { ok: true, ready: true }; },
+    async _open() {
+      if (this.uuid) return { ok: true, uuid: this.uuid };
+      const dir = this.dataDir;
+      if (dir.indexOf("://") >= 0) {
+        const j = await storeFetchJson(fn, "POST", "/bios/store/open", { dataDir: dir });
+        if (j && j.ok && j.uuid) { this.uuid = j.uuid; return { ok: true, uuid: this.uuid, ready: j.ready, live: j.live }; }
+        return j && j.ok === false ? j : { ok: false, error: "open", message: "store open failed" };
+      }
+      if (STORE_UUID.test(dir)) {
+        const j = await storeFetchJson(fn, "POST", "/bios/store/" + dir + "/open", {});
+        if (j && j.ok && j.uuid) { this.uuid = j.uuid; return { ok: true, uuid: this.uuid }; }
+        return j && j.ok === false ? j : { ok: false, error: "open", message: "store open failed" };
+      }
+      const cur = await storeFetchJson(fn, "GET", "/bios/store/purpose/" + encodeURIComponent(dir));
+      if (cur && cur.ok && cur.uuid) { this.uuid = cur.uuid; return { ok: true, uuid: this.uuid }; }
+      const created = await storeFetchJson(fn, "POST", "/bios/store", { purpose: dir });
+      if (created && created.ok && created.uuid) { this.uuid = created.uuid; return { ok: true, uuid: this.uuid }; }
+      return created && created.ok === false ? created : { ok: false, error: "open", message: "store open failed" };
+    },
+    async stat() {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      return storeFetchJson(fn, "GET", "/bios/store/" + opened.uuid + "/stat");
+    },
+    async query(sql, paramsJson) {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      let params = [];
+      try {
+        if (paramsJson !== undefined && paramsJson !== null && paramsJson !== "") {
+          params = typeof paramsJson === "string" ? JSON.parse(paramsJson) : paramsJson;
+        }
+      } catch (e) {
+        return { ok: false, error: "syntax", message: String(e && e.message ? e.message : e) };
+      }
+      if (!Array.isArray(params)) {
+        return { ok: false, error: "syntax", message: "params must be a JSON array" };
+      }
+      return storeFetchJson(fn, "POST", "/bios/store/" + opened.uuid + "/query", { sql, params });
+    },
+    queryAsync(sql, paramsJson) { return this.query(sql, paramsJson); },
+    async exec(sql) {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      return storeFetchJson(fn, "POST", "/bios/store/" + opened.uuid + "/exec", { sql });
+    },
+    async begin() {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      return storeFetchJson(fn, "POST", "/bios/store/" + opened.uuid + "/begin", {});
+    },
+    async commit() {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      return storeFetchJson(fn, "POST", "/bios/store/" + opened.uuid + "/commit", {});
+    },
+    async rollback() {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      return storeFetchJson(fn, "POST", "/bios/store/" + opened.uuid + "/rollback", {});
+    },
+    async close() {
+      if (!this.uuid) return { ok: true };
+      const j = await storeFetchJson(fn, "POST", "/bios/store/" + this.uuid + "/close", {});
+      this.uuid = null;
+      return j;
+    },
+    async dump() {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      return storeFetchJson(fn, "GET", "/bios/store/" + opened.uuid + "/dump");
+    },
+    async load(body) {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      const payload = typeof body === "string" ? body : JSON.stringify(body ?? {});
+      return storeFetchJson(fn, "PUT", "/bios/store/" + opened.uuid + "/load", payload);
+    },
+    async listen(channel) {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      return storeFetchJson(fn, "POST", "/bios/store/" + opened.uuid + "/listen", { channel: String(channel || "") });
+    },
+    async unlisten(channel) {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      return storeFetchJson(fn, "POST", "/bios/store/" + opened.uuid + "/unlisten", { channel: String(channel || "*") });
+    },
+    async exportUsb(volume, rel) {
+      const opened = await this._open();
+      if (!opened.ok) return opened;
+      const body = { volume: String(volume || "") };
+      if (rel) body.rel = String(rel);
+      return storeFetchJson(fn, "POST", "/bios/store/" + opened.uuid + "/export", body);
+    },
+  };
+}
+
+function installPgliteFactory(fetchFn) {
+  const factory = function PgLiteFactory(dataDir) {
+    return newBiosStore(fetchFn, dataDir || "registry");
+  };
+  factory.__g6bStore = "factory";
+  factory.query = (sql, paramsJson) => factory().query(sql, paramsJson);
+  factory.exec = (sql) => factory().exec(sql);
+  factory.stat = () => factory().stat();
+  factory.waitReady = () => ({ ok: true, ready: true });
+  return factory;
+}
+
+/// Optional Electric instantiate. Bytes come from FileServe `/ui/pglite/*`.
+/// The Electric JS client is injected (`opts.PGlite`); kernel.ts does not
+/// bundle `@electric-sql/pglite`. Never assigns the real DOM `window`.
+export async function createPgliteWasm(opts = {}) {
+  const PGlite = opts.PGlite;
+  if (!PGlite || typeof PGlite.create !== "function") {
+    throw new Error("pgliteWasm Electric client not provided");
+  }
+  const fetchFn = opts.fetchFn || (typeof fetch === "function" ? fetch.bind(globalThis) : null);
+  if (!fetchFn) throw new Error("pgliteWasm fetchFn not provided");
+  const wasmApi = opts.wasmApi || globalThis.WebAssembly;
+  const wasmUrl = opts.wasmUrl || "/ui/pglite/pglite.wasm";
+  const initdbUrl = opts.initdbUrl || "/ui/pglite/initdb.wasm";
+  const dataUrl = opts.dataUrl || "/ui/pglite/pglite.data";
+  async function compile(url) {
+    const r = await fetchFn(url, { method: "GET", credentials: "same-origin", redirect: "error" });
+    if (!r || r.ok === false) throw new Error("pgliteWasm missing " + url);
+    if (typeof wasmApi.compileStreaming === "function") {
+      return wasmApi.compileStreaming(r);
+    }
+    const buf = await r.arrayBuffer();
+    return wasmApi.compile(buf);
+  }
+  const pgliteWasmModule = await compile(wasmUrl);
+  const initdbWasmModule = await compile(initdbUrl);
+  const dataResp = await fetchFn(dataUrl, { method: "GET", credentials: "same-origin", redirect: "error" });
+  if (!dataResp || dataResp.ok === false) throw new Error("pgliteWasm missing " + dataUrl);
+  if (typeof dataResp.blob !== "function") throw new Error("pgliteWasm missing " + dataUrl);
+  const fsBundle = await dataResp.blob();
+  const inst = await PGlite.create({
+    pgliteWasmModule,
+    initdbWasmModule,
+    fsBundle,
+    dataDir: opts.dataDir || "memory://",
+  });
+  pgliteWasm = inst;
+  return inst;
+}
+
 export function createBrowserContext(doc, opts = {}) {
   const contextId = String(opts.contextId || "main");
   const LIMIT = Number.isInteger(opts.consoleLimit) ? opts.consoleLimit : 512;
@@ -1255,6 +1522,12 @@ export function createBrowserContext(doc, opts = {}) {
   };
 
   const BINDINGS = { console: console_, window: window_, document: document_ };
+  const storeEnable = opts.store !== false && (opts.store && opts.store.enable) !== false;
+  if (storeEnable && (contextId === "main" || opts.biosStore === true)) {
+    const factory = installPgliteFactory(opts.fetchFn);
+    BINDINGS.pglite = factory;
+    if (contextId === "main") pglite = factory;
+  }
 
   return {
     contextId,
@@ -1903,6 +2176,7 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
           if (bytes.byteLength < 8 || bytes.byteLength > 1024 * 1024) throw new Error("WASM module size budget exceeded");
           const { instance } = await wasmApi.instantiate(bytes, host.imports);
           host.bind(instance.exports.memory);
+          host.attach?.(instance);
           if (typeof instance.exports._start !== "function") throw new Error("WASM _start export missing");
           instance.exports._start();
           await host.drain();
@@ -1935,6 +2209,7 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
           if (bytes.byteLength < 8 || bytes.byteLength > 1024 * 1024) throw new Error("WASM module size budget exceeded");
           const { instance } = await wasmApi.instantiate(bytes, host.imports);
           host.bind(instance.exports.memory);
+          host.attach?.(instance);
           if (typeof instance.exports._start !== "function") throw new Error("WASM _start export missing");
           const heap = instance.exports.__heap_base?.value;
           if (!Number.isInteger(heap) || heap < 0 || heap > instance.exports.memory.buffer.byteLength) {

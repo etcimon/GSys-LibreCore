@@ -6,13 +6,49 @@ import { refuseKit } from "./constructs.ts";
 
 export type Binding = { name: string; value: string; constantBoolean?: boolean };
 
-export type TextOp = { kind: "text"; id: string; value: string };
+export type TextOp = {
+  kind: "text";
+  id: string;
+  value: string;
+  /** Runtime JSON from a pglite bind (`{rows}` / `{st.ready}`). */
+  bind?: string;
+  field?: string;
+};
 export type FetchOp = { kind: "fetch"; url: string };
 export type HolycOp = { kind: "holyc"; line: string };
 export type RegisterOp = { kind: "register"; path: string; method: string };
 export type VisibleOp = { kind: "visible"; id: string; on: boolean };
 export type AwaitOp = { kind: "await" };
-export type UiOp = TextOp | FetchOp | HolycOp | RegisterOp | VisibleOp | AwaitOp;
+export type PgliteMethod =
+  | "open"
+  | "exec"
+  | "query"
+  | "queryAsync"
+  | "stat"
+  | "waitReady"
+  | "listen"
+  | "unlisten"
+  | "notifies"
+  | "begin"
+  | "commit"
+  | "rollback"
+  | "dump"
+  | "load"
+  | "close"
+  | "export";
+
+export type PgliteOp = {
+  kind: "pglite";
+  method: PgliteMethod;
+  /** First string arg: sql, dataDir, channel, volume, or dump JSON. */
+  arg1: string;
+  /** Second string arg: query params JSON or export rel. */
+  arg2: string;
+  awaited: boolean;
+  /** `let rows = await pgliteQuery(...)` — JSON painted via `{rows}` / `{rows.field}`. */
+  bind?: string;
+};
+export type UiOp = TextOp | FetchOp | HolycOp | RegisterOp | VisibleOp | AwaitOp | PgliteOp;
 
 export type SvelteFile = {
   rel: string;
@@ -43,10 +79,15 @@ export function parseSvelte(rel: string, src: string): SvelteFile {
   if (kit) throw new Error(kit);
   const script = extractScript(src);
   const lets = parseLets(script.body);
-  const ops: UiOp[] = [];
-  ops.push(...parseCalls(script.body));
+  const callOps = parseCalls(script.body);
+  const binds = new Set(
+    callOps
+      .filter((o): o is PgliteOp => o.kind === "pglite" && !!o.bind)
+      .map((o) => o.bind!),
+  );
+  const ops: UiOp[] = [...callOps];
   const markup = src.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
-  ops.push(...parseMarkup(markup, lets));
+  ops.push(...parseMarkup(markup, lets, binds));
   ops.push(...parseVisibility(markup, lets));
   const tag = firstTag(src) ?? "div";
   return {
@@ -75,6 +116,13 @@ function parseLets(body: string): Binding[] {
     const m = t.match(/^let\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?);?\s*$/);
     if (!m) continue;
     let val = m[2].trim().replace(/;$/, "");
+    if (
+      /\b(?:await\s+)?pglite(?:Open|Exec|QueryAsync|Query|Stat|WaitReady|Listen|Unlisten|Notifies|Begin|Commit|Rollback|Dump|Load|Close|Export)\s*\(/.test(
+        val,
+      )
+    ) {
+      continue;
+    }
     const constantBoolean = val === "true" ? true : val === "false" ? false : undefined;
     if (val.startsWith('"') && val.endsWith('"') && val.length >= 2) {
       val = val.slice(1, -1);
@@ -103,20 +151,112 @@ function parseCalls(body: string): UiOp[] {
   while ((m = regRe.exec(body))) {
     ops.push({ kind: "register", path: m[2], method: m[4] ?? "GET" });
   }
+  const pgliteRe =
+    /(?:(?:(?:let|const|var)\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*)?(await\s+)?pglite(Open|Exec|QueryAsync|Query|Stat|WaitReady|Listen|Unlisten|Notifies|Begin|Commit|Rollback|Dump|Load|Close|Export)\(\s*(?:(["'])((?:\\.|[^\\'"])*)\4(?:\s*,\s*(["'])((?:\\.|[^\\'"])*)\6)?)?\s*\)/g;
+  const seenBind = new Set<string>();
+  while ((m = pgliteRe.exec(body))) {
+    const bind = m[1] || undefined;
+    const name = m[3];
+    let method = pgliteMethod(name);
+    const awaited =
+      m[2] !== undefined || method === "queryAsync" || method === "waitReady";
+    if (method === "query" && m[2] !== undefined) {
+      method = "queryAsync";
+    }
+    if (bind) {
+      if (method === "open") {
+        throw new Error("pgliteOpen cannot be assigned; it constructs PgLite");
+      }
+      if (PGLITE_BIND_RESERVED.has(bind)) {
+        throw new Error("pglite bind name is reserved: " + bind);
+      }
+      if (seenBind.has(bind)) throw new Error("duplicate pglite bind: " + bind);
+      seenBind.add(bind);
+    }
+    const op: PgliteOp = {
+      kind: "pglite",
+      method,
+      arg1: m[5] !== undefined ? unesc(m[5]) : "",
+      arg2: m[7] !== undefined ? unesc(m[7]) : method === "query" || method === "queryAsync" ? "[]" : "",
+      awaited,
+    };
+    if (bind) op.bind = bind;
+    ops.push(op);
+  }
   return ops;
+}
+
+const PGLITE_BIND_RESERVED = new Set([
+  "db",
+  "root",
+  "this",
+  "module",
+  "init",
+  "JSON",
+  "Handle",
+  "PgLite",
+  "true",
+  "false",
+  "string",
+]);
+
+function pgliteMethod(name: string): PgliteMethod {
+  switch (name) {
+    case "Open":
+      return "open";
+    case "Exec":
+      return "exec";
+    case "QueryAsync":
+      return "queryAsync";
+    case "Query":
+      return "query";
+    case "Stat":
+      return "stat";
+    case "WaitReady":
+      return "waitReady";
+    case "Listen":
+      return "listen";
+    case "Unlisten":
+      return "unlisten";
+    case "Notifies":
+      return "notifies";
+    case "Begin":
+      return "begin";
+    case "Commit":
+      return "commit";
+    case "Rollback":
+      return "rollback";
+    case "Dump":
+      return "dump";
+    case "Load":
+      return "load";
+    case "Close":
+      return "close";
+    case "Export":
+      return "export";
+    default:
+      return "exec";
+  }
 }
 
 function unesc(s: string): string {
   return s.replace(/\\n/g, "\n").replace(/\\t/g, "\t").replace(/\\"/g, '"').replace(/\\'/g, "'");
 }
 
-function parseMarkup(src: string, lets: Binding[]): TextOp[] {
+function parseMarkup(src: string, lets: Binding[], binds: Set<string>): TextOp[] {
   const ops: TextOp[] = [];
   const re = /\bid\s*=\s*(["'])(.*?)\1[^>]*>([^<]*)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(src))) {
     const id = m[2];
     const raw = m[3].replace(/\{(?:#if\s+[^}]+|:else|\/if)\}/g, "").trim();
+    const interpM = raw.match(/^\{([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?\}$/);
+    if (interpM && binds.has(interpM[1])) {
+      const op: TextOp = { kind: "text", id, value: "", bind: interpM[1] };
+      if (interpM[2]) op.field = interpM[2];
+      ops.push(op);
+      continue;
+    }
     ops.push({ kind: "text", id, value: interp(raw, lets) });
   }
   return ops;

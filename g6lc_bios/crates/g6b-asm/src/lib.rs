@@ -396,6 +396,14 @@ pub struct Module {
     pub wasm_data: Vec<u8>,
     /// First-party 8x8 font bytes (`__font`) for `DomPaint` glyph lookup.
     pub font: Vec<u8>,
+    /// Optional Electric dist wasm (`__pglite_wasm`) when `pglite.embed`.
+    pub pglite_wasm: Vec<u8>,
+    /// Optional Electric `initdb.wasm` (`__pglite_initdb`) when `pglite.embed`.
+    pub pglite_initdb: Vec<u8>,
+    /// Optional Electric `pglite.data` (`__pglite_data`) when `pglite.embed`.
+    pub pglite_data: Vec<u8>,
+    /// First-party registry dump (`__g6b_store_dump`) when `persist.elf`.
+    pub store_dump: Vec<u8>,
     /// Bounded guest DOM row table BSS (`__ui_dom`) when `kernel.wasm.jit`.
     pub dom_bytes: u64,
     /// Compact persist BSS (`__ui_cap`) when a scanout path is live (B91).
@@ -468,6 +476,10 @@ impl Module {
             .saturating_add(self.ui_wasm.len() as u64)
             .saturating_add(self.wasm_data.len() as u64)
             .saturating_add(self.font.len() as u64)
+            .saturating_add(self.pglite_wasm.len() as u64)
+            .saturating_add(self.pglite_initdb.len() as u64)
+            .saturating_add(self.pglite_data.len() as u64)
+            .saturating_add(self.store_dump.len() as u64)
     }
 
     pub fn push(&mut self, n: Node) {
@@ -512,6 +524,10 @@ impl Module {
             || !self.ui_wasm.is_empty()
             || !self.wasm_data.is_empty()
             || !self.font.is_empty()
+            || !self.pglite_wasm.is_empty()
+            || !self.pglite_initdb.is_empty()
+            || !self.pglite_data.is_empty()
+            || !self.store_dump.is_empty()
         {
             s.push_str("\n.section .rodata\n");
             if !self.rodata.is_empty() {
@@ -529,6 +545,22 @@ impl Module {
             if !self.font.is_empty() {
                 s.push_str("__font:\n");
                 s.push_str(&rodata_listing(&self.font));
+            }
+            if !self.pglite_wasm.is_empty() {
+                s.push_str("__pglite_wasm:\n");
+                s.push_str(&rodata_listing(&self.pglite_wasm));
+            }
+            if !self.pglite_initdb.is_empty() {
+                s.push_str("__pglite_initdb:\n");
+                s.push_str(&rodata_listing(&self.pglite_initdb));
+            }
+            if !self.pglite_data.is_empty() {
+                s.push_str("__pglite_data:\n");
+                s.push_str(&rodata_listing(&self.pglite_data));
+            }
+            if !self.store_dump.is_empty() {
+                s.push_str("__g6b_store_dump:\n");
+                s.push_str(&rodata_listing(&self.store_dump));
             }
         }
         if self.nodes.iter().any(|n| n.purpose == Purpose::Stack) {
@@ -747,7 +779,28 @@ impl Module {
         rod.extend_from_slice(&self.ui_wasm);
         rod.extend_from_slice(&self.wasm_data);
         rod.extend_from_slice(&self.font);
+        rod.extend_from_slice(&self.pglite_wasm);
+        rod.extend_from_slice(&self.pglite_initdb);
+        rod.extend_from_slice(&self.pglite_data);
+        rod.extend_from_slice(&self.store_dump);
         Ok((words, rod))
+    }
+
+    /// Load address of a code label (`uart_ui`, `VioPaint`, …). `None` if
+    /// the payload never emitted that label.
+    pub fn label_addr(&self, entry: u64, name: &str) -> Option<u64> {
+        let flat: Vec<&Op> = self.nodes.iter().flat_map(|n| n.ops.iter()).collect();
+        let mut idx = 0usize;
+        for op in &flat {
+            match op {
+                Op::Label(l) if l == name => {
+                    return Some(entry.wrapping_add((idx * 4) as u64));
+                }
+                Op::Label(_) | Op::Comment(_) | Op::Glob(_) | Op::Directive(_) => {}
+                other => idx += op_nwords(other),
+            }
+        }
+        None
     }
 }
 

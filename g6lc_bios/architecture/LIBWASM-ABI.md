@@ -193,12 +193,10 @@ ptr)` / `libwasm_unset__function(name)` are the named-callback variant used by
 `exportDelegate`, dispatched through the same `jsCallback` export.
 
 This is the seam that makes libwasm *reactive* rather than
-initialization-only, and it is the single largest gap in the current BIOS host:
-`BROWSER.md` records the contract today as "initialization-only, not a
-callback/reactive object bridge". Closing it requires re-entering the WASM
-instance from a host event, which on the asyncify cell means serializing
-against an in-flight `_start` rewind. That interaction is the risk in this
-whole plan and is called out again in §8.
+initialization-only. **B91c** closes it on the BIOS host: after `_start`,
+virtio-input / UI-hart events re-enter through `jsCallback` (or the
+indirect table). Re-entry still serializes against an in-flight `_start`
+rewind — GuestCellLive only delivers input after `_start` has finished.
 
 ## 5. Lodash and Moment
 
@@ -255,8 +253,9 @@ wasm" means concretely:
 |---|---|
 | a value sigil (`=true`, `=null`, `=42`, `\=literal`, bare string) | decoded to a `JsValue` |
 | one of the five generated iteratee boilerplates, or `=cb` | bound to the guest function table — **executed in wasm** |
+| `=window.pglite` / `=pglite` / `=moment` / `=window.moment` | `Param::HostName` — interned **before** `step` via `HostDispatch::intern_name` (never eval'd). `pglite` is `ObjectKind::StoreFactory` when `kernel.store.enable`; `moment` is still `UnsupportedMethod` |
 | any other `=(…)`, `=name`, or `…;` | **refused** — `LodashError::EvalRefused` |
-| a `VarType.eval` chain seed | **refused** — there is no host evaluator |
+| a `VarType.eval` chain seed | **refused** — there is no host evaluator (`window.__svelteD.ts` is the one special-cased seed) |
 
 `eval` is still absent. What changed is that its absence no longer costs the
 iteratee half of the library.
@@ -488,9 +487,16 @@ while the real libwasm asyncified SPA can schedule. The kernel lane's
 default `Host` still issues a non-zero no-op id. The UI-thread
 `KernelHost` (B89) owns a `TimerHeap` and re-enters through `WasmUi::call`.
 
-The virtio-input queue (`DomKey`/`DomNav`) and `jsCallback` export path remain
-open for later work; the browser event surface is intentionally bounded to the
-libwasm `addEventListener`/`onclick` pattern.
+**B91c (landed):** after `_start`, virtio-input / UI-hart events re-enter
+registered D delegates. `Object_Call_EventHandler__void` stores `(ctx, ptr)`
+and becomes `Listener::Delegate` on the live node id. Delivery is export
+`jsCallback(ctx, fun, eventHandle)` (`types.d:336-358`); if that export is
+absent the host uses `__indirect_function_table.get(ptr)(ctx, handle)`.
+Named `libwasm_set__function` / `exportDelegate` entries whose name is an
+input event (`click`, `onclick`, `keydown`, …) fire on
+`dispatch_pointer` / `dispatch_key` (the GuestCellLive virtio path). The
+shipped LDC cell still has no `jsCallback` and keeps `Listener::Cell` /
+`g6b_listen` until `G6B_DUB_WASM=1`. `start_ops` is not this path.
 
 *Unblocks:* reactive UI — the transition from "initialization-only" to a real
 component bridge.
@@ -500,10 +506,18 @@ component bridge.
 All twelve `ldexec_*` imports are declared, dispatched and ABI-verified.
 `crates/g6b-js/src/lodash.rs` is the backend: a bounded command-buffer parser
 (the sigil convention of `lodash.d:417-475`), a `JsValue` model, and an
-evaluator over the 37 methods in `LODASH_SUPPORTED`. `browser-ui/src/kernel.ts`
-mirrors it, and the two agree on coercions — including that
-`libwasm_add__object` stringifies as `"[object Object]"`, which plain
-`String()` cannot do for a null-prototype object.
+evaluator over the 37 methods in `LODASH_SUPPORTED`. `attempt` / `invoke` are
+**not** in that list: they are fail-closed `HostDispatch` hooks so `g6b-js`
+stays store-ignorant. `KernelHost` implements them against `StoreRegistry`
+(BrowserSession-complete). Native `kernel.ts` identity-checks the interned
+shell BINDINGS `pglite` factory and returns
+`{ok:false,error:"async",message:"NotImplemented(\"async\")"}` rather than a
+Promise. `browser-ui/src/kernel.ts` mirrors the value methods, and the two
+agree on coercions — including that `libwasm_add__object` stringifies as
+`"[object Object]"`, which plain `String()` cannot do for a null-prototype
+object. `libwasm/source/libwasm/pglite.d` is the D wrap (`query(sql, params_json="[]")`,
+`exec` / tx / `close` / `waitReady` / `dump` / `load`); the live LDC cell does
+not contain it until `G6B_DUB_WASM=1`.
 
 Iteratee dispatch differs by lane, and the difference is the honest part:
 
@@ -591,7 +605,7 @@ The core modules pull in a small closure, which bounds the realistic target:
 | `types.d` | `Console`, `EventHandler`, `Window` |
 | `router.d` | `Console`, `Event`, `EventHandler`, `History`, `HTMLLinkElement`, `Location`, `MouseEvent`, `Node`, `Window` |
 | `spa.d`, `promise.d` | `Console` |
-| `node.d`, `event.d`, `lodash.d`, `moment.d`, `bridge.d`, `array.d`, `css.d` | none |
+| `node.d`, `event.d`, `lodash.d`, `moment.d`, `pglite.d`, `bridge.d`, `array.d`, `css.d` | none |
 
 So a compiling, *useful* cell needs roughly a dozen binding modules, not 684.
 The remaining ~670 are reachable only if application D imports them by name,
@@ -620,6 +634,7 @@ No stage is complete without all of:
 `:454-490` `struct JsHandle`; `:182-269` the host import table.
 `libwasm/source/libwasm/bindings/EventHandler.d:37-38` handler aliases.
 `libwasm/source/libwasm/lodash.d:14-26` `VarType`; `:325` `struct Lodash`.
+`libwasm/source/libwasm/pglite.d` S3 D wrap of interned `window.pglite`.
 `libwasm/source/libwasm/g6b_kernel.d` the g6b substitution and stubs.
 `crates/g6b-wasm/src/objects.rs` the B61 refcounted `ObjectTable`.
 `crates/g6b-js/src/lodash.rs` the B67 command parser, `JsValue` and evaluator.

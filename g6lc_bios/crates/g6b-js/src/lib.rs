@@ -12,8 +12,9 @@ use std::collections::BTreeMap;
 
 mod lodash;
 pub use lodash::{
-    execute as lodash_execute, parse_commands as lodash_parse, Command as LodashCommand, Iteratee,
-    JsValue, LodashError, Param as LodashParam, CB_BOILERPLATE, MAX_COLLECTION, MAX_COMMANDS,
+    execute as lodash_execute, execute_with_host as lodash_execute_host,
+    parse_commands as lodash_parse, Command as LodashCommand, HostDispatch, Iteratee, JsValue,
+    LodashError, Param as LodashParam, CB_BOILERPLATE, MAX_COLLECTION, MAX_COMMANDS,
     SUPPORTED as LODASH_SUPPORTED,
 };
 

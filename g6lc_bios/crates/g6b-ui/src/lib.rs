@@ -332,6 +332,9 @@ pub fn setup_reads(spec: &BoardSpec) -> Vec<&'static str> {
     if spec.kernel.settings.enable {
         reads.push("/bios/settings");
     }
+    if spec.kernel.store.enable {
+        reads.push("/bios/store");
+    }
     let usb = &spec.kernel.usb;
     if usb.enable && usb.key {
         for (enabled, path) in [

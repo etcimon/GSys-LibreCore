@@ -114,6 +114,10 @@ export function verifyLibwasmAbi(bytes: Uint8Array, lane: "app" | "fx-probe" = "
     addEventListener: "127,127,127,127,127,127->",
     removeEventListener: "127->",
     dispatchEvent: "127,127,127,127,127,127->127",
+    // G6LC_G6B D names (`g6b_listen` → add_event_listener).
+    add_event_listener: "127,127,127,127,127,127->",
+    remove_event_listener: "127->",
+    dispatch_event: "127,127,127,127,127,127->127",
     libwasm_add__uints: "127,127->127",
 
     libwasm_get__bool: "127->127",
@@ -493,14 +497,14 @@ buildRequirements "allowWarnings"
 configuration "application" {
     targetType "executable"
     dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false"
-    lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
+    lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=jsCallback" "--export=jsCallback0" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
     ${lib}    subConfiguration "libwasm" "g6lc-bios"
 }
 
 configuration "ldc-master" {
     targetType "executable"
     dflags "-link-internally" "-defaultlib=" "--foptimize-nothrow=false"
-    lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
+    lflags "--export=_start" "--export=allocString" "--export=__heap_base" "--export=jsCallback" "--export=jsCallback0" "--export=g6b_fx_data" "--export=g6b_fx_count" "--export=g6b_fx_step" "--export=g6b_fx_logo"
     ${lib}    subConfiguration "libwasm" "g6lc-bios"
 }
 

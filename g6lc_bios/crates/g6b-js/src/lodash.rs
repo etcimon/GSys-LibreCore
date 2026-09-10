@@ -138,6 +138,8 @@ fn format_number(n: f64) -> String {
 pub enum Param {
     Value(JsValue),
     Callback,
+    /// Allow-listed `=window.pglite` / `=moment`. Interned before `step`; never eval'd.
+    HostName(String),
 }
 
 /// One entry of the command buffer.
@@ -433,6 +435,7 @@ fn sigil(raw: &str) -> R<Param> {
         _ if expr.starts_with('(') || expr.contains('(') || expr.ends_with(';') => {
             return Err(LodashError::EvalRefused(expr.to_string()))
         }
+        _ if host_name(expr).is_some() => return Ok(Param::HostName(expr.to_string())),
         _ => match expr.parse::<f64>() {
             Ok(n) => JsValue::Num(n),
             // A bare `=name` is a `_.get(window, name)` lookup in the reference
@@ -449,6 +452,25 @@ pub trait Iteratee {
     /// Call the guest delegate with `(value, key_or_index)`, returning its
     /// boolean result.
     fn call(&mut self, value: &JsValue, key: &JsValue) -> Result<bool, String>;
+}
+
+/// Store/moment intern + `attempt`/`invoke`. `g6b-js` stays store-ignorant.
+pub trait HostDispatch {
+    fn intern_name(&mut self, name: &str) -> Result<JsValue, LodashError>;
+    fn attempt(&mut self, acc: &JsValue, params: &[Param]) -> Result<JsValue, LodashError>;
+    fn invoke(
+        &mut self,
+        acc: &JsValue,
+        path: &str,
+        params: &[Param],
+    ) -> Result<JsValue, LodashError>;
+}
+
+fn host_name(expr: &str) -> Option<&str> {
+    match expr {
+        "window.pglite" | "pglite" | "moment" | "window.moment" => Some(expr),
+        _ => None,
+    }
 }
 
 /// Methods this backend implements. Anything else fails closed by name.
@@ -495,25 +517,54 @@ pub const SUPPORTED: &[&str] = &[
 
 /// Execute a parsed chain over `init`.
 pub fn execute(init: JsValue, commands: &[Command], cb: Option<&mut dyn Iteratee>) -> R<JsValue> {
+    execute_with_host(init, commands, cb, None)
+}
+
+/// Like [`execute`], with intern/`attempt`/`invoke` against a host.
+pub fn execute_with_host(
+    init: JsValue,
+    commands: &[Command],
+    cb: Option<&mut dyn Iteratee>,
+    mut host: Option<&mut dyn HostDispatch>,
+) -> R<JsValue> {
     let mut acc = init;
     let mut locals: BTreeMap<String, JsValue> = BTreeMap::new();
     let mut cb = cb;
     for command in commands {
         match command {
             Command::Local { name, value } => {
-                let v = match value {
-                    Param::Value(v) => v.clone(),
-                    // The `cb` local only names the callback; it has no value.
+                let interned = intern_param(value, &mut host)?;
+                let v = match interned {
+                    Param::Value(v) => v,
                     Param::Callback => continue,
+                    Param::HostName(n) => {
+                        return Err(LodashError::EvalRefused(n));
+                    }
                 };
                 locals.insert(name.clone(), v);
             }
             Command::Func { name, params } => {
-                acc = step(&acc, name, params, &mut cb, &locals)?;
+                let params: Vec<Param> = params
+                    .iter()
+                    .map(|p| intern_param(p, &mut host))
+                    .collect::<R<Vec<_>>>()?;
+                acc = step(&acc, name, &params, &mut cb, &locals, &mut host)?;
             }
         }
     }
     Ok(acc)
+}
+
+fn intern_param(p: &Param, host: &mut Option<&mut dyn HostDispatch>) -> R<Param> {
+    match p {
+        Param::HostName(n) => {
+            let h = host
+                .as_mut()
+                .ok_or_else(|| LodashError::EvalRefused(n.clone()))?;
+            Ok(Param::Value(h.intern_name(n)?))
+        }
+        other => Ok(other.clone()),
+    }
 }
 
 fn as_list(v: &JsValue) -> Vec<JsValue> {
@@ -542,6 +593,7 @@ fn need<'p>(params: &'p [Param], i: usize, m: &str) -> R<&'p JsValue> {
         Some(Param::Callback) => Err(malformed(format!(
             "{m} got a callback where a value is required"
         ))),
+        Some(Param::HostName(n)) => Err(LodashError::EvalRefused(n.clone())),
         None => Err(malformed(format!("{m} is missing parameter {i}"))),
     }
 }
@@ -555,6 +607,7 @@ fn predicate(m: &str, params: &[Param], cb: &mut Option<&mut dyn Iteratee>) -> R
         Some(Param::Value(_)) => Err(malformed(format!(
             "{m} predicate must be an iteratee or a property name"
         ))),
+        Some(Param::HostName(n)) => Err(LodashError::EvalRefused(n.clone())),
     }
 }
 
@@ -591,6 +644,7 @@ fn step(
     params: &[Param],
     cb: &mut Option<&mut dyn Iteratee>,
     locals: &BTreeMap<String, JsValue>,
+    host: &mut Option<&mut dyn HostDispatch>,
 ) -> R<JsValue> {
     let list = || -> R<Vec<JsValue>> {
         let items = as_list(acc);
@@ -604,6 +658,25 @@ fn step(
     };
     Ok(match name {
         "identity" => acc.clone(),
+        "attempt" => {
+            let h = host
+                .as_mut()
+                .ok_or_else(|| LodashError::UnsupportedMethod("attempt".into()))?;
+            h.attempt(acc, params)?
+        }
+        "invoke" => {
+            let path = match params.first() {
+                Some(Param::Value(JsValue::Str(s))) => s.clone(),
+                Some(Param::HostName(n)) => {
+                    return Err(LodashError::EvalRefused(n.clone()));
+                }
+                _ => return Err(malformed("invoke needs a method name")),
+            };
+            let h = host
+                .as_mut()
+                .ok_or_else(|| LodashError::UnsupportedMethod("invoke".into()))?;
+            h.invoke(acc, &path, &params[1..])?
+        }
         "defaultTo" => {
             let fallback = need(params, 0, "defaultTo")?;
             match acc {
@@ -678,6 +751,7 @@ fn step(
                     Param::Value(JsValue::Arr(inner)) => items.extend(inner.clone()),
                     Param::Value(v) => items.push(v.clone()),
                     Param::Callback => return Err(malformed("concat does not take an iteratee")),
+                    Param::HostName(n) => return Err(LodashError::EvalRefused(n.clone())),
                 }
             }
             JsValue::Arr(items)
@@ -877,6 +951,62 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn window_pglite_is_a_hostname_not_eval() {
+        let cmds = parse_commands(
+            r#"[{"func":"defaultTo","params":["=window.pglite"]},{"func":"attempt","params":["query","SELECT 1","[]"]}]"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            cmds[0].clone(),
+            Command::Func { ref params, .. } if matches!(params.first(), Some(Param::HostName(n)) if n == "window.pglite")
+        ));
+        let err = execute(JsValue::Null, &cmds, None).unwrap_err();
+        assert!(
+            matches!(err, LodashError::EvalRefused(ref s) if s == "window.pglite"),
+            "{err}"
+        );
+        struct Stub;
+        impl HostDispatch for Stub {
+            fn intern_name(&mut self, name: &str) -> Result<JsValue, LodashError> {
+                if name == "window.pglite" || name == "pglite" {
+                    Ok(JsValue::Handle(7))
+                } else {
+                    Err(LodashError::EvalRefused(name.into()))
+                }
+            }
+            fn attempt(&mut self, acc: &JsValue, params: &[Param]) -> Result<JsValue, LodashError> {
+                if let Some(Param::Value(JsValue::Str(s))) = params.first() {
+                    if s == "query" && matches!(acc, JsValue::Handle(7 | 8)) {
+                        return Ok(JsValue::Str("{\"ok\":true,\"rows\":[]}".into()));
+                    }
+                }
+                match acc {
+                    JsValue::Handle(7) => Ok(JsValue::Handle(8)),
+                    _ => Err(LodashError::UnsupportedMethod("attempt".into())),
+                }
+            }
+            fn invoke(
+                &mut self,
+                acc: &JsValue,
+                path: &str,
+                params: &[Param],
+            ) -> Result<JsValue, LodashError> {
+                self.attempt(acc, &{
+                    let mut p = vec![Param::Value(JsValue::Str(path.into()))];
+                    p.extend_from_slice(params);
+                    p
+                })
+            }
+        }
+        let mut host = Stub;
+        let out = execute_with_host(JsValue::Null, &cmds, None, Some(&mut host)).unwrap();
+        assert_eq!(out, JsValue::Str("{\"ok\":true,\"rows\":[]}".into()));
+        let alert =
+            parse_commands(r#"[{"func":"defaultTo","params":["=window.alert"]}]"#).unwrap_err();
+        assert!(matches!(alert, LodashError::EvalRefused(_)));
     }
 
     #[test]

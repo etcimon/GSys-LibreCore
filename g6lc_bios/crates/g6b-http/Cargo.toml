@@ -16,6 +16,7 @@ g6b-ui = { workspace = true }
 g6b-fs = { workspace = true }
 g6b-tls = { workspace = true }
 g6b-wasm = { workspace = true }
+g6b-pglite = { workspace = true }
 
 [lints]
 workspace = true

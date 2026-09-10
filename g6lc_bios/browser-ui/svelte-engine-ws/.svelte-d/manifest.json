@@ -11,7 +11,8 @@
       "@visible",
       "_start",
       "FileMgr",
-      "Menu"
+      "Menu",
+      "Store"
     ],
     "stub": [
       "{#each}",
@@ -30,6 +31,7 @@
     "SVELTE-LIVE _start",
     "SVELTE-LIVE FileMgr",
     "SVELTE-LIVE Menu",
+    "SVELTE-LIVE Store",
     "SVELTE-STUB {#await}",
     "SVELTE-REFUSED sveltekit"
   ]

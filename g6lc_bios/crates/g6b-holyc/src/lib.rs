@@ -12,6 +12,8 @@
 use std::collections::BTreeMap;
 
 use g6b_http::Router;
+use g6b_pglite::{StoreError, StoreRegistry, StoreUuid};
+use g6b_spec::{parse_json, stringify_json, BoardSpec, Json};
 
 pub mod isel;
 
@@ -43,6 +45,8 @@ pub struct Program {
     pub ssh_holyc: bool,
     /// Shared kernel HTTP router (HolyC ≡ JS).
     pub router: Router,
+    /// UUID-led structured store. Same catalog as `/bios/store`.
+    pub store: StoreRegistry,
 }
 
 #[derive(Debug, Clone)]
@@ -451,6 +455,23 @@ fn legacy_builtin_name(name: &str) -> bool {
             | "MenuUncore"
             | "MenuMemory"
             | "MenuBoot"
+            | "StoreOpen"
+            | "StoreSelect"
+            | "StoreClose"
+            | "StoreDrop"
+            | "StoreQuery"
+            | "StoreExec"
+            | "StoreBegin"
+            | "StoreCommit"
+            | "StoreRollback"
+            | "StoreDump"
+            | "StoreLoad"
+            | "StoreExport"
+            | "StoreImport"
+            | "StoreList"
+            | "StoreStat"
+            | "StoreListen"
+            | "StoreUnlisten"
     )
 }
 
@@ -466,6 +487,7 @@ impl Default for Program {
             loopback: false,
             ssh_holyc: false,
             router: Router::default(),
+            store: StoreRegistry::from_spec(&BoardSpec::default()),
         }
     }
 }
@@ -893,8 +915,190 @@ impl Program {
                 let resp = self.router.fetch_get(&path);
                 Ok(Some(format!("MENU {} {}\n", resp.status, resp.body_str())))
             }
+            "StoreOpen" | "StoreSelect" | "StoreClose" | "StoreDrop" | "StoreQuery"
+            | "StoreExec" | "StoreBegin" | "StoreCommit" | "StoreRollback" | "StoreDump"
+            | "StoreLoad" | "StoreExport" | "StoreImport" | "StoreList" | "StoreStat"
+            | "StoreListen" | "StoreUnlisten" => self.store_builtin(name, args),
             _ => Ok(None),
         }
+    }
+
+    fn store_refused() -> Result<Option<String>, String> {
+        Ok(Some("STORE-REFUSED\n".into()))
+    }
+
+    fn store_builtin(&mut self, name: &str, args: &[Expr]) -> Result<Option<String>, String> {
+        if !self.store.cfg().enable {
+            return Self::store_refused();
+        }
+        let argv: Vec<String> = args.iter().map(|a| self.eval_str(a)).collect();
+        let arg = |i: usize| argv.get(i).cloned().unwrap_or_default();
+        let map_err = |e: StoreError| {
+            if matches!(e, StoreError::Disabled) {
+                "STORE-REFUSED\n".into()
+            } else {
+                format!("STORE-ERR {e}\n")
+            }
+        };
+        match name {
+            "StoreOpen" => {
+                let purpose = if arg(0).is_empty() {
+                    "registry".into()
+                } else {
+                    arg(0)
+                };
+                let opened = if purpose.contains("://") {
+                    self.store.open(&purpose)
+                } else if args.get(1).is_some() {
+                    self.store.open(&arg(1))
+                } else {
+                    self.store.open_purpose(&purpose)
+                };
+                match opened {
+                    Ok(u) => Ok(Some(format!("STORE-OPEN {u} {purpose}\n"))),
+                    Err(e) => Ok(Some(map_err(e))),
+                }
+            }
+            "StoreSelect" => {
+                let uuid = match StoreUuid::parse(&arg(1)) {
+                    Ok(u) => u,
+                    Err(e) => return Ok(Some(map_err(e))),
+                };
+                match self.store.select(&arg(0), uuid) {
+                    Ok(()) => Ok(Some(format!("STORE-SELECT {} {}\n", arg(0), arg(1)))),
+                    Err(e) => Ok(Some(map_err(e))),
+                }
+            }
+            "StoreClose" => match self.store_resolve(&arg(0)).and_then(|u| {
+                self.store.close(u)?;
+                Ok(u)
+            }) {
+                Ok(u) => Ok(Some(format!("STORE-CLOSE {u}\n"))),
+                Err(e) => Ok(Some(map_err(e))),
+            },
+            "StoreDrop" => match self.store_resolve(&arg(0)).and_then(|u| {
+                self.store.drop(u)?;
+                Ok(u)
+            }) {
+                Ok(u) => Ok(Some(format!("STORE-DROP {u}\n"))),
+                Err(e) => Ok(Some(map_err(e))),
+            },
+            "StoreQuery" => {
+                let sql = arg(1);
+                let params = store_params(&arg(2))?;
+                match self
+                    .store_resolve(&arg(0))
+                    .and_then(|u| self.store.query(u, &sql, &params))
+                {
+                    Ok(out) => Ok(Some(format!(
+                        "STORE-QUERY 200 {}\n",
+                        stringify_json(&out.to_json())
+                    ))),
+                    Err(e) => Ok(Some(map_err(e))),
+                }
+            }
+            "StoreExec" => match self
+                .store_resolve(&arg(0))
+                .and_then(|u| self.store.exec(u, &arg(1)))
+            {
+                Ok(out) => Ok(Some(format!(
+                    "STORE-EXEC 200 {}\n",
+                    stringify_json(&out.to_json())
+                ))),
+                Err(e) => Ok(Some(map_err(e))),
+            },
+            "StoreBegin" => match self
+                .store_resolve(&arg(0))
+                .and_then(|u| self.store.begin(u))
+            {
+                Ok(_) => Ok(Some(format!("STORE-TX BEGIN {}\n", arg(0)))),
+                Err(e) => Ok(Some(map_err(e))),
+            },
+            "StoreCommit" => match self
+                .store_resolve(&arg(0))
+                .and_then(|u| self.store.commit(u))
+            {
+                Ok(_) => Ok(Some(format!("STORE-TX COMMIT {}\n", arg(0)))),
+                Err(e) => Ok(Some(map_err(e))),
+            },
+            "StoreRollback" => {
+                match self
+                    .store_resolve(&arg(0))
+                    .and_then(|u| self.store.rollback(u))
+                {
+                    Ok(_) => Ok(Some(format!("STORE-TX ROLLBACK {}\n", arg(0)))),
+                    Err(e) => Ok(Some(map_err(e))),
+                }
+            }
+            "StoreDump" => match self.store_resolve(&arg(0)).and_then(|u| self.store.dump(u)) {
+                Ok(j) => Ok(Some(format!("STORE-DUMP {}\n", stringify_json(&j)))),
+                Err(e) => Ok(Some(map_err(e))),
+            },
+            "StoreLoad" => {
+                let blob = parse_json(&arg(1)).map_err(|e| format!("STORE-ERR {e}"))?;
+                match self
+                    .store_resolve(&arg(0))
+                    .and_then(|u| self.store.load(u, &blob))
+                {
+                    Ok(()) => Ok(Some(format!("STORE-LOAD {}\n", arg(0)))),
+                    Err(e) => Ok(Some(map_err(e))),
+                }
+            }
+            "StoreExport" => {
+                let rel = if args.len() > 2 { Some(arg(2)) } else { None };
+                match self
+                    .store_resolve(&arg(0))
+                    .and_then(|u| self.store.export(u, &arg(1), rel.as_deref()))
+                {
+                    Ok(()) => Ok(Some(format!("STORE-EXPORT {}\n", arg(0)))),
+                    Err(e) => Ok(Some(map_err(e))),
+                }
+            }
+            "StoreImport" => match self.store.import(&arg(0), &arg(1)) {
+                Ok(u) => Ok(Some(format!("STORE-IMPORT {u}\n"))),
+                Err(e) => Ok(Some(map_err(e))),
+            },
+            "StoreList" => {
+                let mut s = String::from("STORE-LIST\n");
+                for (u, p, persist, rows) in self.store.list() {
+                    s.push_str(&format!("{u} {} {persist:?} rows={rows}\n", p.as_str()));
+                }
+                Ok(Some(s))
+            }
+            "StoreStat" => match self.store_resolve(&arg(0)).and_then(|u| self.store.stat(u)) {
+                Ok(j) => Ok(Some(format!("STORE-STAT {}\n", stringify_json(&j)))),
+                Err(e) => Ok(Some(map_err(e))),
+            },
+            "StoreListen" => match self
+                .store_resolve(&arg(0))
+                .and_then(|u| self.store.listen(u, &arg(1)))
+            {
+                Ok(out) => Ok(Some(format!(
+                    "STORE-LISTEN {}\n",
+                    stringify_json(&out.to_json())
+                ))),
+                Err(e) => Ok(Some(map_err(e))),
+            },
+            "StoreUnlisten" => {
+                let ch = if arg(1).is_empty() {
+                    None
+                } else {
+                    Some(arg(1))
+                };
+                match self
+                    .store_resolve(&arg(0))
+                    .and_then(|u| self.store.unlisten(u, ch.as_deref()))
+                {
+                    Ok(_) => Ok(Some(format!("STORE-UNLISTEN {}\n", arg(0)))),
+                    Err(e) => Ok(Some(map_err(e))),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn store_resolve(&mut self, id: &str) -> Result<StoreUuid, StoreError> {
+        self.store.resolve(id)
     }
 
     fn eval_str(&self, e: &Expr) -> String {
@@ -936,6 +1140,14 @@ impl Program {
         let out = self.call_args(&name, &args)?;
         Ok(ReplResult::Output(out))
     }
+}
+
+fn store_params(s: &str) -> Result<Vec<Json>, String> {
+    if s.is_empty() {
+        return Ok(Vec::new());
+    }
+    let v = parse_json(s).map_err(|e| format!("STORE-ERR {e}"))?;
+    g6b_pglite::params_from_json(&v).map_err(|e| format!("STORE-ERR {e}"))
 }
 
 /// Parse + run generated sources (Adam/KMain).
@@ -1690,6 +1902,62 @@ U0 WriteSection(U8 *name) { Print("x"); }
             .unwrap()
         {
             ReplResult::Output(s) => assert!(s.contains("HTTP-OK"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn store_query_works_without_http_and_refuses_when_disabled() {
+        let mut p = Program::default();
+        match p.repl(r#"StoreOpen("memory://registry");"#).unwrap() {
+            ReplResult::Output(s) => {
+                assert!(s.contains("STORE-OPEN"), "{s}");
+                assert!(s.contains("memory://registry"), "{s}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match p.repl(r#"StoreOpen("registry");"#).unwrap() {
+            ReplResult::Output(s) => assert!(s.contains("STORE-OPEN"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+        match p
+            .repl(r#"StoreExec("registry", "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT)");"#)
+            .unwrap()
+        {
+            ReplResult::Output(s) => assert!(s.contains("STORE-EXEC 200"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+        match p
+            .repl(r#"StoreQuery("registry", "INSERT INTO kv VALUES ($1, $2)", "[\"a\",\"b\"]");"#)
+            .unwrap()
+        {
+            ReplResult::Output(s) => assert!(s.contains("STORE-QUERY 200"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+        match p
+            .repl(r#"StoreQuery("registry", "SELECT * FROM kv");"#)
+            .unwrap()
+        {
+            ReplResult::Output(s) => {
+                assert!(s.contains("STORE-QUERY 200"), "{s}");
+                assert!(s.contains("\"a\""), "{s}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match p.repl(r#"StoreStat("registry");"#).unwrap() {
+            ReplResult::Output(s) => {
+                assert!(s.contains("STORE-STAT"), "{s}");
+                assert!(s.contains("\"ready\":true"), "{s}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"kernel":{"store":{"enable":false},"http":{"enable":true}}}"#,
+        )
+        .unwrap();
+        p.store = StoreRegistry::from_spec(&spec);
+        match p.repl(r#"StoreOpen("registry");"#).unwrap() {
+            ReplResult::Output(s) => assert!(s.contains("STORE-REFUSED"), "{s}"),
             other => panic!("{other:?}"),
         }
     }

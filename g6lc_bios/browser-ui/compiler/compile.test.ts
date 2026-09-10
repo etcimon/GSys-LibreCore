@@ -7,8 +7,8 @@ import { fileURLToPath } from "node:url";
 import { catalogJson, marker, refuseKit } from "./constructs.ts";
 import { compileProject, loadProject, projectHtml } from "./index.ts";
 import { emitWasm } from "./emit-wasm.ts";
-import { printG6bJs } from "./print-ts.ts";
-import { createWasmHost, createBrowserApp, createLibwasmHost, createParticleBackground, createRenderInspector, createBrowserContext } from "../src/kernel.ts";
+import { printG6bJs, printGeneratedTs } from "./print-ts.ts";
+import { createWasmHost, createBrowserApp, createLibwasmHost, createParticleBackground, createRenderInspector, createBrowserContext, createPgliteWasm } from "../src/kernel.ts";
 import { isLdc143Text, resolveToolchain } from "./ldc.ts";
 import { parseSvelte } from "./parse.ts";
 import { printApp } from "./print-d.ts";
@@ -719,6 +719,38 @@ describe("libwasm DOM kernel", () => {
     }
   });
 
+  test("WebIDL fetch TypeError and DOM throws are JS-catchable as WebAssembly.Exception", () => {
+    // libwasm/webidl/definitions/{DOMException,Node,Document,Request,Fetch}.webidl
+    // + bindings. JS TypeError/DOMException at the import boundary become
+    // WebAssembly.Exception on env.__cpp_exception so wasm try can catch them.
+    const { env, string } = fixture();
+    const a = env.createElement(26);
+    const b = env.createElement(26);
+    env.appendChild(a, b);
+    try {
+      env.appendChild(b, a);
+      throw new Error("expected HierarchyRequestError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(WebAssembly.Exception);
+      expect((e as WebAssembly.Exception).getArg(env.__cpp_exception, 0)).toBe(3);
+    }
+    try {
+      env.createCustomElement(...string("<>"));
+      throw new Error("expected InvalidCharacterError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(WebAssembly.Exception);
+      expect((e as WebAssembly.Exception).getArg(env.__cpp_exception, 0)).toBe(5);
+    }
+    try {
+      const [len, ptr] = string(":");
+      env.fetch(ptr, len);
+      throw new Error("expected Request TypeError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(WebAssembly.Exception);
+      expect((e as WebAssembly.Exception).getArg(env.__cpp_exception, 0)).toBe(0);
+    }
+  });
+
   test("validates UTF-8, finite integer pointers, call budgets, and grown memory views", () => {
     for (const pair of [[1, -1], [-1, 0], [1, NaN], [NaN, 0], [1, 0.5], [2, 2097151]]) {
       const { env, string } = fixture();
@@ -1017,6 +1049,101 @@ describe("libwasm DOM kernel", () => {
     expect(u32[raw / 4 + 1]).toBe(0);
     expect(new Uint8Array(memory.buffer)[raw + 8]).toBe(0);
   });
+
+  test("Object_VarArgCall__void drives DOM with binding tuple JSON; set__function names a D delegate", () => {
+    // libwasm/source/libwasm/bindings/Node.d insertBefore / textContent
+    // Serialize_Object_VarArgCall tuples; types.d exportDelegate.
+    const { env, host, string, mount } = fixture();
+    const parent = env.createElement(26);
+    const child = env.createElement(69);
+    env.appendChild(1, parent);
+
+    const [tm, tp] = string("setAttribute");
+    const [td, tdp] = string("string;string");
+    const [ta, tap] = string(`["data-menu","cpu"]`);
+    env.Object_VarArgCall__void(child, tm, tp, td, tdp, ta, tap);
+
+    const [im, ip] = string("insertBefore");
+    const [id, idp] = string("Handle;Optional!Handle");
+    const [ia, iap] = string(`[${child},0,0]`);
+    env.Object_VarArgCall__void(parent, im, ip, id, idp, ia, iap);
+
+    const [n, np] = string("onReady");
+    env.libwasm_set__function(n, np, 11, 1);
+
+    host.commit();
+    expect(mount.children[0].children.length).toBe(1);
+    expect(mount.children[0].children[0].getAttribute("data-menu")).toBe("cpu");
+    expect(mount.children[0].children[0].tagName).toBe("P");
+  });
+
+  test("jsCallback re-enters a D delegate from a DOM click after _start", async () => {
+    // types.d jsCallback(ctx, fun, handle); EventHandler onclick; virtio/UI
+    // click is the same host path as GuestCellLive BTN_LEFT.
+    const { host, mount, env } = fixture();
+    function u32(n: number) {
+      const out: number[] = [];
+      n >>>= 0;
+      while (n > 0x7f) { out.push((n & 0x7f) | 0x80); n >>>= 7; }
+      out.push(n);
+      return out;
+    }
+    function section(id: number, body: number[]) {
+      return [id, ...u32(body.length), ...body];
+    }
+    function name(s: string) {
+      const b = [...new TextEncoder().encode(s)];
+      return [...u32(b.length), ...b];
+    }
+    const bytes = new Uint8Array([
+      0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+      ...section(1, [
+        3,
+        0x60, 2, 0x7f, 0x7f, 0,
+        0x60, 0, 0,
+        0x60, 3, 0x7f, 0x7f, 0x7f, 0,
+      ]),
+      ...section(3, [3, 0, 1, 2]),
+      ...section(4, [1, 0x70, 0x00, 2]),
+      ...section(5, [1, 0x00, 1]),
+      ...section(7, [
+        4,
+        ...name("memory"), 2, 0,
+        ...name("_start"), 0, 1,
+        ...name("jsCallback"), 0, 2,
+        ...name("__indirect_function_table"), 1, 0,
+      ]),
+      ...section(9, [1, 0, 0x41, 1, 0x0b, 1, 0]),
+      ...section(10, [
+        3,
+        ...u32(10), 0, 0x41, 0x80, 0x08, 0x41, 1, 0x36, 2, 0, 0x0b,
+        ...u32(2), 0, 0x0b,
+        ...u32(11), 0, 0x20, 0, 0x20, 2, 0x20, 1, 0x11, 0, 0, 0x0b,
+      ]),
+    ]);
+    expect(WebAssembly.validate(bytes)).toBe(true);
+    const { instance } = await WebAssembly.instantiate(bytes, host.imports);
+    const memory = instance.exports.memory as WebAssembly.Memory;
+    host.bind(memory);
+    host.attach(instance);
+    (instance.exports._start as Function)();
+    const u8 = new Uint8Array(memory.buffer);
+    const put = (s: string, ptr: number): [number, number] => {
+      const b = new TextEncoder().encode(s);
+      u8.set(b, ptr);
+      return [b.length, ptr];
+    };
+    const node = env.createElement(26);
+    env.appendChild(1, node);
+    env.libwasm_set__function(...put("click", 0), 99, 1);
+    env.Object_Call_EventHandler__void(node, ...put("onclick", 16), 1, 99, 1);
+    host.commit();
+    const clicked = mount.children[0];
+    expect(typeof clicked.listeners.get("click")).toBe("function");
+    clicked.listeners.get("click")!({ type: "click" });
+    const flag = new DataView(memory.buffer).getInt32(1024, true);
+    expect(flag).toBe(1);
+  });
 });
 
 describe("browser context", () => {
@@ -1034,7 +1161,7 @@ describe("browser context", () => {
     const { ctx } = ctxFixture();
     ctx.console.log("hello");
     expect(ctx.consolePage().entries[0].data).toBe("hello");
-    expect(ctx.globalNames().sort()).toEqual(["console", "document", "window"]);
+    expect(ctx.globalNames().sort()).toEqual(["console", "document", "pglite", "window"]);
   });
 
   test("exposes console, window and document singletons that are stable", () => {
@@ -1056,6 +1183,130 @@ describe("browser context", () => {
     expect(ctx.global("eval")).toBeUndefined();
     expect(ctx.global("fetch")).toBeUndefined();
     expect(ctx.global("localStorage")).toBeUndefined();
+  });
+
+  test("shell BINDINGS intern pglite; nested context and the real DOM do not", () => {
+    const { ctx: parent, doc } = ctxFixture({ contextId: "main" });
+    const frame = createBrowserContext(doc as any, { contextId: "frame-1" });
+    const off = createBrowserContext(doc as any, { contextId: "main", store: false });
+    expect(parent.global("pglite")).toBeDefined();
+    expect(parent.global("pglite").__g6bStore).toBe("factory");
+    expect(frame.global("pglite")).toBeUndefined();
+    expect(off.global("pglite")).toBeUndefined();
+    expect((globalThis as any).pglite).toBeUndefined();
+    if (typeof window !== "undefined") {
+      expect((window as any).pglite).toBeUndefined();
+      expect((window as any).pgliteWasm).toBeUndefined();
+    }
+  });
+
+  function jsonResp(status: number, obj: unknown) {
+    const text = JSON.stringify(obj);
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      text: async () => text,
+      json: async () => obj,
+    };
+  }
+
+  test("pglite facade opens registry and queries /bios/store", async () => {
+    const calls: { url: string; method: string; body?: string }[] = [];
+    const fetchFn = async (url: string, init: any = {}) => {
+      const method = String(init.method || "GET").toUpperCase();
+      calls.push({ url, method, body: init.body });
+      if (url === "/bios/store/purpose/registry" && method === "GET") {
+        return jsonResp(404, { error: "not found" });
+      }
+      if (url === "/bios/store" && method === "POST") {
+        return jsonResp(200, { ok: true, uuid: "00000000-0000-4000-8000-000000000001", purpose: "registry" });
+      }
+      if (url === "/bios/store/00000000-0000-4000-8000-000000000001/query" && method === "POST") {
+        const body = JSON.parse(String(init.body || "{}"));
+        expect(body.sql).toBe("SELECT 1 AS n");
+        expect(body.params).toEqual([]);
+        return jsonResp(200, { ok: true, rows: [{ n: 1 }], fields: [], affectedRows: 0, ready: true });
+      }
+      return jsonResp(404, { error: "not found" });
+    };
+    const { ctx } = ctxFixture({ fetchFn });
+    const db = ctx.global("pglite")();
+    expect(db.__g6bStore).toBe("instance");
+    expect(db.waitReady()).toEqual({ ok: true, ready: true });
+    const out = await db.query("SELECT 1 AS n", "[]");
+    expect(out.ok).toBe(true);
+    expect(out.rows[0].n).toBe(1);
+    expect(calls.some((c) => c.url === "/bios/store" && c.method === "POST")).toBe(true);
+  });
+
+  test("pglite stat is awaitable for a USB dialog", async () => {
+    const calls: { url: string; method: string; body?: string }[] = [];
+    let live = false;
+    const fetchFn = async (url: string, init: any = {}) => {
+      const method = String(init.method || "GET").toUpperCase();
+      calls.push({ url, method, body: init.body });
+      if (url === "/bios/store/open" && method === "POST") {
+        expect(String(init.body || "")).toContain("usb://fat32/registry");
+        return jsonResp(200, { ok: true, uuid: "00000000-0000-4000-8000-000000000001", ready: true, live: true });
+      }
+      if (url === "/bios/store/00000000-0000-4000-8000-000000000001/stat" && method === "GET") {
+        const body = { ok: true, persist: "usb", live, ready: live, volume: "fat32", bytes: live ? 64 : 0, format: "g6bs" };
+        live = true;
+        return jsonResp(200, body);
+      }
+      return jsonResp(404, { error: "not found" });
+    };
+    const { ctx } = ctxFixture({ fetchFn });
+    const db = ctx.global("pglite")("usb://fat32/registry");
+    let s = await db.stat();
+    if (!(s.live && s.ready)) s = await db.stat();
+    expect(s.ok).toBe(true);
+    expect(s.live).toBe(true);
+    expect(s.ready).toBe(true);
+    expect(s.volume).toBe("fat32");
+    expect(calls.some((c) => c.url === "/bios/store/open")).toBe(true);
+    expect(calls.filter((c) => c.url.endsWith("/stat")).length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("createPgliteWasm uses FileServe bytes and never touches the real DOM", async () => {
+    const fetched: string[] = [];
+    const fetchFn = async (url: string) => {
+      fetched.push(url);
+      return {
+        ok: true,
+        status: 200,
+        arrayBuffer: async () => new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0]).buffer,
+        blob: async () => new Blob([new Uint8Array([1, 2, 3])]),
+        text: async () => "",
+      };
+    };
+    const created: any[] = [];
+    const PGlite = {
+      create: async (opts: any) => {
+        created.push(opts);
+        return { electric: true, dataDir: opts.dataDir };
+      },
+    };
+    const wasmApi = {
+      compileStreaming: async () => ({ module: "wasm" }),
+      compile: async () => ({ module: "wasm" }),
+    };
+    const inst = await createPgliteWasm({ fetchFn, PGlite, wasmApi });
+    expect(inst.electric).toBe(true);
+    expect(inst.dataDir).toBe("memory://");
+    expect(fetched).toEqual(["/ui/pglite/pglite.wasm", "/ui/pglite/initdb.wasm", "/ui/pglite/pglite.data"]);
+    expect(created[0].initdbWasmModule).toEqual({ module: "wasm" });
+    expect((globalThis as any).pgliteWasm).toBeUndefined();
+    if (typeof window !== "undefined") expect((window as any).pgliteWasm).toBeUndefined();
+  });
+
+  test("createPgliteWasm fails closed without Electric client or FileServe bytes", async () => {
+    await expect(createPgliteWasm({})).rejects.toThrow(/Electric client/);
+    const PGlite = { create: async () => ({}) };
+    await expect(createPgliteWasm({
+      PGlite,
+      fetchFn: async (url: string) => ({ ok: false, status: 404, text: async () => "missing " + url }),
+    })).rejects.toThrow(/missing/);
   });
 
   test("all five levels record, and an unknown level is refused", () => {
@@ -1459,6 +1710,153 @@ holycEval("UsbLs(\\"ntfs\\")");
     expect(f.ops.some((o) => o.kind === "holyc" && o.line.includes("UsbLs"))).toBe(true);
   });
 
+  test("pglite SQL _start is awaited insert/select in generated D", () => {
+    const f = parseSvelte(
+      "src/App.svelte",
+      `<script>
+pgliteExec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");
+pgliteQuery("INSERT INTO t VALUES ($1, $2)", "[1,\\"alice\\"]");
+await pgliteQuery("SELECT name FROM t WHERE id = $1", "[1]");
+</script>
+<main id="bios-ui"><p id="status">boot</p></main>
+`,
+    );
+    expect(f.ops.some((o) => o.kind === "pglite" && o.method === "exec" && o.arg1.includes("CREATE TABLE t"))).toBe(true);
+    expect(f.ops.some((o) => o.kind === "pglite" && o.method === "query" && o.arg1.startsWith("INSERT"))).toBe(true);
+    const sel = f.ops.find((o) => o.kind === "pglite" && o.awaited);
+    expect(sel).toBeDefined();
+    expect(sel && sel.kind === "pglite" && sel.method).toBe("queryAsync");
+    const d = printApp([f]);
+    expect(d).toContain("auto db = PgLite();");
+    expect(d).toContain('db.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)");');
+    expect(d).toContain('db.query("INSERT INTO t VALUES ($1, $2)", "[1,\\"alice\\"]");');
+    expect(d).toContain("queryAsync");
+    expect(d).toContain("SELECT name FROM t WHERE id = $1");
+  });
+
+  test("svelte-d parses the store tutorial call forms", () => {
+    const f = parseSvelte(
+      "src/App.svelte",
+      `<script>
+pgliteOpen("usb://fat32/registry");
+await pgliteWaitReady();
+await pgliteStat();
+pgliteExec("CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT)");
+pgliteQuery("INSERT INTO kv VALUES ($1, $2)", "[\\"boot\\",\\"opensbi\\"]");
+await pgliteQuery("SELECT v FROM kv WHERE k = $1", "[\\"boot\\"]");
+pgliteBegin();
+pgliteCommit();
+pgliteListen("ticks");
+pgliteExport("fat32");
+holycEval("StoreStat(\\"registry\\")");
+fetchBios("/bios/store");
+</script>
+<main id="bios-ui"><p id="status">boot</p></main>
+`,
+    );
+    const methods = f.ops.filter((o) => o.kind === "pglite").map((o) => o.kind === "pglite" ? o.method : "");
+    expect(methods).toEqual([
+      "open",
+      "waitReady",
+      "stat",
+      "exec",
+      "query",
+      "queryAsync",
+      "begin",
+      "commit",
+      "listen",
+      "export",
+    ]);
+    expect(f.ops.some((o) => o.kind === "pglite" && o.method === "open" && o.arg1 === "usb://fat32/registry")).toBe(true);
+    expect(f.ops.some((o) => o.kind === "holyc" && o.line.includes("StoreStat"))).toBe(true);
+    expect(f.ops.some((o) => o.kind === "fetch" && o.url === "/bios/store")).toBe(true);
+    const d = printApp([f]);
+    expect(d).toContain('auto db = PgLite("usb://fat32/registry");');
+    expect(d).toContain("db.waitReady()");
+    expect(d).toContain("db.statAsync()");
+    expect(d).toContain("db.exec(");
+    expect(d).toContain("db.queryAsync(");
+    expect(d).toContain("db.listen(");
+    expect(d).toContain('db.exportUsb("fat32")');
+    expect(printG6bJs([f])).toContain('fetch("/bios/store")');
+    expect(printG6bJs([f])).not.toMatch(/\bpglite\s*\(/);
+    expect(d).toContain("g6b_holyc");
+    expect(d).toContain('g6b_fetch("/bios/store")');
+  });
+
+  test("pgliteOpen names the store in the dataDir path", () => {
+    const f = parseSvelte(
+      "src/App.svelte",
+      `<script>
+pgliteOpen("usb://fat32/registry");
+pgliteOpen("memory://registry");
+pgliteOpen("memory://00000000-0000-4000-8000-000000000001");
+</script>
+<main id="bios-ui"><p id="status">boot</p></main>
+`,
+    );
+    const opens = f.ops
+      .filter((o) => o.kind === "pglite" && o.method === "open")
+      .map((o) => (o.kind === "pglite" ? o.arg1 : ""));
+    expect(opens).toEqual([
+      "usb://fat32/registry",
+      "memory://registry",
+      "memory://00000000-0000-4000-8000-000000000001",
+    ]);
+    const d = printApp([f]);
+    expect(d).toContain('auto db = PgLite("memory://00000000-0000-4000-8000-000000000001")');
+    const ts = printGeneratedTs(f);
+    expect(ts).toContain('pglite("memory://00000000-0000-4000-8000-000000000001")');
+  });
+
+  test("pglite JSON binds paint into markup", () => {
+    const f = parseSvelte(
+      "src/App.svelte",
+      `<script>
+let rows = await pgliteQuery("SELECT name FROM t WHERE id = $1", "[1]");
+let st = await pgliteStat();
+</script>
+<main id="bios-ui">
+  <p id="out">{rows}</p>
+  <p id="live">{st.ready}</p>
+</main>
+`,
+    );
+    const q = f.ops.find((o) => o.kind === "pglite" && o.method === "queryAsync");
+    expect(q && q.kind === "pglite" && q.bind).toBe("rows");
+    const st = f.ops.find((o) => o.kind === "pglite" && o.method === "stat");
+    expect(st && st.kind === "pglite" && st.bind).toBe("st");
+    expect(f.ops.some((o) => o.kind === "text" && o.id === "out" && o.bind === "rows")).toBe(true);
+    expect(
+      f.ops.some((o) => o.kind === "text" && o.id === "live" && o.bind === "st" && o.field === "ready"),
+    ).toBe(true);
+    const d = printApp([f]);
+    expect(d).toContain('auto rows = db.queryAsync("SELECT name FROM t WHERE id = $1", "[1]")');
+    expect(d).toContain("auto st = db.statAsync()");
+    expect(d).toContain('setProperty(out, "innerText", JSON.stringify(rows))');
+    expect(d).toContain('st["ready"]');
+    expect(d).toContain("JSON.stringify(pglite_field_0)");
+    expect(d).not.toContain('"{rows}"');
+    const ts = printGeneratedTs(f);
+    expect(ts).toContain('const rows = await db.query("SELECT name FROM t WHERE id = $1", "[1]")');
+    expect(ts).toContain("const st = await db.stat()");
+    expect(ts).toContain('document.getElementById("out").innerText = JSON.stringify(rows)');
+    expect(ts).toContain('document.getElementById("live").innerText = JSON.stringify(st && st.ready)');
+    expect(printG6bJs([f])).not.toMatch(/\bpglite\s*\(/);
+    expect(() =>
+      parseSvelte(
+        "src/App.svelte",
+        `<script>let db = await pgliteQuery("SELECT 1", "[]");</script><p id="x">x</p>`,
+      ),
+    ).toThrow(/reserved/);
+    expect(() =>
+      parseSvelte(
+        "src/App.svelte",
+        `<script>let x = pgliteOpen("registry");</script><p id="x">x</p>`,
+      ),
+    ).toThrow(/cannot be assigned/);
+  });
+
   test("LDC 1.43 is the wasm cell; 1.41/1.42 refused", () => {
     expect(isLdc143Text("LDC - the LLVM D compiler (1.43.0-git-1218a47):")).toBe(true);
     expect(isLdc143Text("LDC - the LLVM D compiler (1.41.0):")).toBe(false);
@@ -1489,16 +1887,36 @@ holycEval("UsbLs(\\"ntfs\\")");
     expect(r.js).toContain('fetch("/bios/menu")');
     expect(r.js).toContain('fetch("/bios/menu/settings")');
     expect(r.js).toContain('fetch("/bios/menu/cpu")');
+    expect(r.js).toContain('fetch("/bios/store")');
+    expect(r.js).toContain('document.getElementById("store-title").innerText = "Store"');
+    expect(r.js).not.toMatch(/\bpglite\s*\(/);
     const d = printApp(loadProject(join(root, "src")));
+    const awaitAt = d.indexOf("libwasm_await__void");
+    const tryAt = d.lastIndexOf("try {", awaitAt);
+    const catchAt = d.indexOf("} catch (Exception e)", tryAt);
+    expect(catchAt).toBeGreaterThan(tryAt);
+    expect(catchAt).toBeLessThan(awaitAt);
+    expect(d.indexOf("try {", awaitAt)).toBeGreaterThan(awaitAt);
     expect(d).toContain('g6b_fetch("/bios/menu")');
     expect(d).toContain('g6b_fetch("/bios/menu/cpu")');
+    expect(d).toContain('g6b_fetch("/bios/store")');
+    expect(d).toContain('auto db = PgLite("memory://registry")');
+    expect(d).toContain("CREATE TABLE IF NOT EXISTS bios_ui");
+    expect(d).toContain("auto rows = db.queryAsync");
+    expect(d).toContain('setProperty(store_status, "innerText", JSON.stringify(rows))');
+    expect(projectHtml(loadProject(join(root, "src")))).toContain('id="store"');
     expect(d).toContain('setProperty(bios_mark, "src", "/ui/g6lc.svg")');
     expect(d).toContain('g6b_listen("tab-cpu", "click")');
     expect(d).toContain('g6b_listen("refresh", "click")');
+    expect(d).toContain("Handle menu_cpu_body = 0;");
+    expect(d.indexOf("Handle menu_cpu_body = 0;")).toBeLessThan(d.indexOf("try {"));
+    expect(d).toMatch(/menu_cpu_body = createElement\(NodeType\.tbody\)/);
+    expect(d).not.toContain("auto menu_cpu_body = createElement");
     expect(d).not.toContain('setProperty(tab_cpu, "on:click"');
     expect(r.catalog).toContain("Settings");
     expect(r.cell?.via).toBe("skip");
     expect(r.catalog).toContain("FileMgr");
+    expect(r.catalog).toContain("Store");
     expect(marker("NodeDef")).toBe("SVELTE-LIVE NodeDef");
     expect(marker("{#await}")).toBe("SVELTE-STUB {#await}");
     expect(marker("sveltekit")).toBe("SVELTE-REFUSED sveltekit");

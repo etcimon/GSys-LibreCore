@@ -2,9 +2,10 @@
 
 Green commands: `python tools/g6b.py check` (independence + Bun tests/build + fmt + clippy + workspace tests), then `python tools/g6b.py regress` (separate BIOS/transport regression).
 
-Web-engine endpoint (one BrowserSession, one LDC cell, remaining B86–B91):
-[`architecture/plan-endpoint.md`](architecture/plan-endpoint.md). Work tree
-**`E:\cva6/g6lc_bios`**.
+Web-engine endpoint (one BrowserSession, one LDC cell; B82–B91d landed —
+[`architecture/plan-endpoint.md`](architecture/plan-endpoint.md) §15 leftovers:
+`WasmJit` names, QMP shots). Track-B 4bpp `ui_ppm` is a live-Engine downsample.
+Work tree **`E:\cva6/g6lc_bios`**.
 
 | Stage | State |
 |---|---|
@@ -79,11 +80,17 @@ Web-engine endpoint (one BrowserSession, one LDC cell, remaining B86–B91):
 | **B85** Interactive UI: browser loads the LDC cell as `WasmUi`; tick/present_gl; live tab classList | landed (host docs + persistent instance) |
 | **B86** Persistent `instance.call` without KernelHost reconstruct; event object coords / preventDefault; LDC `getRoot` host import | landed (host; shipped cell still inlines `getRoot()=1` until `G6B_DUB_WASM=1`) |
 | **B87** Cell-owned tab/refresh/JSON: `on:click` → `g6b_listen`; host `Listener::Cell` preventDefault + fetch/select; Rust `select_menu` is default action only | landed (host; D emit ready, shipped cell uses host bind until `G6B_DUB_WASM=1`) |
-| **B88** Live CSS `Engine::paint(&Node)`; DirtyFlag Style/Layout/Paint; goldens per tab + hover (no HTML round-trip) | landed (host; 4bpp `ui_ppm` still HTML; dirty tiles B90) |
+| **B88** Live CSS `Engine::paint(&Node)`; DirtyFlag Style/Layout/Paint; goldens per tab + hover (no HTML round-trip) | landed (host; 4bpp `ui_ppm` is Canvas32→PALETTE downsample; dirty tiles B90) |
 | **B89** UI-thread `Role::Ui` / `ui_hart` runs `tick`; timer heap; fps 100/144; B66 timers implemented or ABI-verifier refused | landed (host) |
 | **B90** Dirty-tile GLES2 + virtio-gpu TRANSFER/FLUSH; QMP tab screendumps vs `ui_ppm32` goldens; host blit of Canvas32 into modelled `__scan_fb` | landed (host; QMP tab shots remain `qemu_tab_shots.sh` / remote g6q) |
-| **B91** Guest libwasm instance: same Host + compact DOM + dirty paint in S-mode. Do not grow `start_ops` to `Object_Call` | compact persist + dirty-tile `VioPaint` landed; **B91b** exec-model `guest_cell_scanout` / `smoke_cell` (same Host import set) **landed** |
-| **S0** `g6b-pglite` submodule + npm pin; UUID store-instance architecture | landed (PR1; no crate yet). Identity: [`architecture/g6b-store-instances.md`](architecture/g6b-store-instances.md) |
+| **B91** Guest libwasm instance: same Host + compact DOM + dirty paint in S-mode. Do not grow `start_ops` to `Object_Call` | compact persist + dirty-tile `VioPaint` landed; **B91b** `GuestCellLive`/`WebFeed` **landed**; **B91c** virtio/UI events re-enter D delegates via `jsCallback` / `Listener::Delegate` (shipped cell stays `Listener::Cell` until `G6B_DUB_WASM=1`) **landed** |
+| **S0** `g6b-pglite` submodule + npm pin; UUID store-instance architecture | landed (PR1). Identity: [`architecture/g6b-store-instances.md`](architecture/g6b-store-instances.md) |
+| **S1** BoardSpec `kernel.store` + crate `g6b-pglite` (parser/DML/tx) | landed (enable **default on**; overlay `false` to compile out) |
+| **S2** `/bios/store` + HTTP cap + HolyC `Store*` | landed |
+| **S3** Lodash `HostDispatch` + intern `window.pglite` + `libwasm.pglite` | landed (BrowserSession-complete; native D `execute!JSON` is S5+) |
+| **S4** FileServe `/ui/pglite/*` + `g6b.py pglite-dist`; optional Electric instantiate | landed (S4a FileServe + S4b native facade / `createPgliteWasm`) |
+| **PR3c** `g6b.py store-embed` → `__g6b_store_dump`; `elf://` hydrate | landed (`persist.elf`; missing dump is PersistUnarmed / explicit-path link error) |
+| **S5** USB live + G6BS + `stat`/`statAsync` + JOIN/listen | landed. `UsbLive` auto-flush; `GET /bios/store/{uuid}/stat` + HolyC `StoreStat` + D `stat()`/`statAsync()` + `await store.stat()` for a dialog that polls until `live && ready`. `INNER JOIN ON`, `LISTEN`/`NOTIFY` per-store. svelte-d: `Store.svelte` flattened into App `_start`; `let rows = await pgliteQuery` paints `{rows}` / `{st.ready}` via `JSON.stringify`; g6b-js AOT stays fetch+text |
 
 B53 guest-DOM increment (2026-09): `g6b-asm` gained `Purpose::UiDom`,
 `Addr::{WasmData,UiFont,UiDom}`, `Module.{wasm_data,font,dom_bytes}`, the
@@ -1099,7 +1106,9 @@ action only. The shipped LDC cell has not emitted `g6b_listen` yet;
 Svelte tree without HTML serialize/parse. `DirtyFlag` is Style/Layout/Paint
 on `g6b-dom::Node`; skip-if-clean walks `dirty_union`. Goldens:
 `ui_tab_cpu_ppm32`, `ui_tab_hover_ppm32`, `ui_tick_skips_clean_frame`.
-Track-B 4bpp `ui_ppm` still uses `live_render_html`. Dirty tiles landed in B90.
+Track-B 4bpp `ui_ppm` downsamples that Canvas32 to nearest PALETTE (flatten
+over white); `g6b_css::render` stays for `css_golden` fixtures only. Dirty
+tiles landed in B90.
 
 **B89 (2026-09)** — UI hart + timers. When `kernel.tasking` is on,
 `Role::Ui` / `Job::Ui` on `ui_hart` is the `BrowserSession::tick` body.
@@ -1132,16 +1141,26 @@ JIT’d in S-mode; do not grow `start_ops` to `Object_Call`.
 ## Remaining web-engine schedule (plan-endpoint)
 
 Do these on `E:\cva6/g6lc_bios` in this order. Do not grow guest `start_ops`
-into `Object_Call`. B12b–B13 and B54 are a different axis.
+into `Object_Call`. B12b–B13 and B54 are a different axis. Track-B 4bpp
+`ui_ppm` is landed (live Engine downsample). Leftovers: `WasmJit` names, QMP.
 
 | Next | Depends | Work |
 |---|---|---|
 | **B86** | B85 | **landed** — `WasmUi::call` / `call_listener`; Event `clientX`/`clientY`/`preventDefault`; D `getRoot` is a host import. Shipped cell still `return 1` until `G6B_DUB_WASM=1` |
 | **B87** | B86 | **landed** — `on:click` → `g6b_listen`; host `Listener::Cell`; Rust `select_menu` is default action. Shipped cell uses host bind until `G6B_DUB_WASM=1` |
-| **B88** | B86 | **landed** — `g6b-css` `Engine::paint(&Node)`; DirtyFlag Style/Layout/Paint; goldens `ui_tab_cpu_ppm32` / `ui_tab_hover_ppm32` / `ui_tick_skips_clean_frame`; 32-bit session path no longer serializes HTML |
+| **B88** | B86 | **landed** — `g6b-css` `Engine::paint(&Node)`; DirtyFlag Style/Layout/Paint; goldens `ui_tab_cpu_ppm32` / `ui_tab_hover_ppm32` / `ui_tick_skips_clean_frame`; 32-bit session path no longer serializes HTML. Track-B 4bpp `ui_ppm` / `ui_ppm_output` downsample the same canvas (`ui_ppm_is_live_engine_downsample`); `g6b_css::render` is fixture-only |
 | **B89** | B86 | **landed** — `Role::Ui` on `ui_hart` runs `tick`; `TimerHeap` for `setTimeout`/`setInterval`/rAF (id > 0); BoardSpec `fps` 100/144; skip-if-clean |
 | **B90** | B87–B89 | **landed** — dirty-tile GLES2 `u_dom` + virtio-gpu `TRANSFER_TO_HOST_2D`/`FLUSH`; host blit of Canvas32 into modelled `__scan_fb`; check vs `ui_ppm32`. QMP tab shots: `qemu_tab_shots.sh` / remote g6q |
 | **B91** | B90 | **landed** — `__ui_cap` compact persist + dirty-tile `VioPaint` of host-packed Canvas32. `start_ops` not grown. |
-| **B91b** | B91 | **landed** — exec-model S-mode stand-in: `guest_cell_scanout` runs the LDC cell on `KernelHost` (same Host imports as `BrowserSession`), `smoke_cell` packs `__ui_cap`. Not a RISC-V interpreter of the cell; `start_ops` unchanged. |
+| **B91b** | B91 | **landed** — `GuestCellLive` / `WebFeed` … UI-thread WAT throw/await. **B91b+ landed:** `_start` keeps `asyncify_*`; scratch above D heap; `MAX_MEMORY_PAGES` 64. **B91b++:** Flatten deleted `ready()`’s catch around await (abort stub f70 via `_d_throw`). Interpreter maps `{unreachable;end}` abort stubs to wasm-eh throw; `run_start` fail-softs unhandled D abort after rewind (empty `catch (Exception e)` intent). `print-d.ts` splits DOM try from `.await` and wraps `parseJSON` only. Shipped wasm unchanged until `G6B_DUB_WASM=1`. **JS↔wasm EH:** host `TypeError`/`DOMException` (libwasm WebIDL `Node.appendChild` / `Document.createElement` / Request) become wasm-eh tag 0; wasm `throw` is `unhandled wasm exception` at the JS host. `start_ops` unchanged. |
+| **B91c** | B91b | **landed** — after `_start`, virtio-input / UI-hart events re-enter registered D delegates through export `jsCallback(ctx, fun, eventHandle)` (table `get(ptr)(ctx, handle)` if the export is absent). `Object_Call_EventHandler__void` becomes `Listener::Delegate`; `libwasm_set__function` names whose name is an input event (`click` / `onclick` / `keydown`, …) fire on `dispatch_pointer` / `dispatch_key`. Shipped LDC cell has no `jsCallback` and keeps `Listener::Cell` / `g6b_listen` until `G6B_DUB_WASM=1`. `start_ops` unchanged. |
+| **B91d** | B91c | **landed** — `G6B_DUB_WASM=1 G6B_WASM_ASYNCIFY=1` fresh verified cell: `jsCallback` export, `getRoot` + `add_event_listener` imports, `g6b_listen` from `_start` (host `bind_cell_clicks` skipped). `print-d.ts` hoists tbody handles out of the DOM try. `start_ops` unchanged. |
 | **B92** | B88–B89 | **later** — BIOS windowing, Firefox-like tabs, iframe sessions; URL is a local app path (`app:files`, `/ui/…`) or remote `http(s):` (adapter/mailbox, never `-netdev`). New session re-populates JS (no mix with the shell cell / HolyC). Native KernelPort only for the shell and registered local apps; local paths may later elevate via a HolyC-derived BIOS chrome prompt (`once`/`page`/`session`/`origin`/`persistent`). Session may bind a UUID store instance (`drop_on_close` for ephemeral memory). [`architecture/plan-iframe.md`](architecture/plan-iframe.md) [`architecture/g6b-store-instances.md`](architecture/g6b-store-instances.md) |
-| **S0** | — | **landed (PR1)** — `etcimon/pglite` submodule on `main` + npm dist pin; UUID-led store instances, purpose-based BIOS UI, deletable memory, USB key import/export (crate in later PRs). |
+| **S0** | — | **landed (PR1)** — `etcimon/pglite` submodule on `main` + npm dist pin; UUID-led store instances, purpose-based BIOS UI, deletable memory, USB key import/export. |
+| **S1** | S0 | **landed** — `kernel.store` BoardSpec (enable **default on**, purposes `registry`, flag-to-flag `check()`). Crate `g6b-pglite`: UUID catalog, registry SQL, DML, tx, dump JSON; USB/ELF persist `PersistUnarmed`. |
+| **S2** | S1 | **landed** — live `/bios/store` via `StorePort` on `Program`; path-gated HTTP body cap; HolyC `StoreOpen`/`StoreQuery`/…; `STORE-REFUSED` when `!store.enable`. Lodash intern is S3. |
+| **S3** | S2 | **landed** — `Param::HostName` intern-before-`step`; `HostDispatch` `attempt`/`invoke` on `ObjectKind::StoreFactory`/`Store`; `libwasm_global("pglite")` gated (not `is_browser_global`); shell BINDINGS only (nested `global("pglite")` is `undefined`; no real DOM `window.pglite`); native Promise path → `NotImplemented("async")`; `libwasm.pglite` D wrap (no `G6B_DUB_WASM`). |
+| **S4a** | S3 | **landed** — `files::mount` runtime-reads `.tools/pglite-dist/` when `pglite.files`; missing dist omits paths and live `store_pglite_files=false`. `g6b.py pglite-dist` SHA-256-verifies the npm tarball. Guest `ui_file_paths` grows `/ui/pglite/*` only for `pglite.embed`. Embed without dist is an ELF/link error. Not Electric-in-`g6b-wasm`. |
+| **S4b** | S4a | **landed** — native `kernel.ts` `BiosStore` facade → `/bios/store` (lang=ts may `await`); D lodash `attempt`/`invoke` still `NotImplemented("async")`. `createPgliteWasm({PGlite})` only with FileServe bytes + injected Electric client; never real DOM `window.pglite` / `window.pgliteWasm`. |
+| **PR3c** | S1 | **landed** — `g6b.py store-embed --fixture FILE --out FILE` writes compact dump JSON; `hydrate_elf` / `elf://` seeds a deletable Memory copy when `persist.elf`; `g6b-elf` packs `__g6b_store_dump` when the file is present. `check()` does not probe. Independent of `pglite.embed`. |
+| **S5** | S4 / PR3c | **landed** — USB **live** (`UsbLive` auto-flush G6BS on the key FileMgr); `persist.volume`; `stat`/`statAsync`/`GET …/stat`/`StoreStat`/`STAT` for a dialog that polls until `live && ready`; `INNER JOIN ON` hash-join; per-store `LISTEN`/`NOTIFY`; D `queryAsync` via B68 `execute!JSON` + `libwasm_await__void`; svelte-d `let rows = await pgliteQuery` + `{rows}` / `{st.ready}` (`JSON.stringify` onto an `id`); store **name in the path** (`memory://registry`, `usb://fat32/registry`, `memory://{uuid}`); compiled `Store.svelte` flattened into App `_start` (`memory://registry`, not `usb://`); `printG6bJs` keeps fetch+text (g6b-js does not depend on g6b-pglite). |

@@ -148,10 +148,15 @@ pub const VIO_GPU_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 pub const VIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 pub const VIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 pub const VIO_GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
-/// `virtio_input_event` field values: `type` (EV_KEY key/button events)
-/// is what `InpDrain` pushes into `__vio`'s bounded key queue; the statusq
-/// (queue 1) is unused — the guest is a passive consumer.
+/// `virtio_input_event` field values: `type` (Linux `EV_*`).
+/// `InpDrain` queues `EV_KEY` into `__vio`'s bounded key queue (VGA
+/// `DomNav`); `EV_ABS`/`EV_REL` are WebFeed (svelte-d pointer). The
+/// statusq (queue 1) is unused — the guest is a passive consumer.
 pub const VIO_INP_EV_KEY: u32 = 1;
+/// Linux `EV_REL` — virtio-mouse deltas (`REL_X`/`REL_Y`).
+pub const VIO_INP_EV_REL: u32 = 2;
+/// Linux `EV_ABS` — virtio-tablet axes (`ABS_X`/`ABS_Y`, 0..=`VIO_ABS_MAX`).
+pub const VIO_INP_EV_ABS: u32 = 3;
 /// `scause` exception codes for MMIO access faults — `trap_fault` treats
 /// these inside a bounded probe window as "device absent" and resumes.
 pub const SCAUSE_LOAD_ACCESS: u32 = 5;

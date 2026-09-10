@@ -20,5 +20,5 @@ inside the npm dist is **PostgreSQL License** (NOTICE, verbatim). Do not
 relicense, do not edit their LICENSE, do not add `pglite/` to the Cargo
 workspace, do not compile it. Dist bytes are a **gitignored npm pin**
 (`pins.toml` `[pglite.dist]`, `.tools/pglite-dist/`). First-party store
-rewrite is MIT in `crates/g6b-pglite` (later PRs). `.licensing-tiers`:
+rewrite is MIT in `crates/g6b-pglite`. `.licensing-tiers`:
 `U g6lc_bios/pglite/**`.

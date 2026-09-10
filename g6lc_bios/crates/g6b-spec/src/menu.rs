@@ -296,6 +296,22 @@ fn menu_settings(spec: &BoardSpec) -> Menu {
             MenuItem::row("uart", "via UART", yn(spec.kernel.settings.uart)),
             MenuItem::row("mailbox", "via mailbox", yn(spec.kernel.settings.mailbox)),
             MenuItem::row("usb_key", "via USB key", yn(spec.kernel.settings.usb_key)),
+            MenuItem::row("store", "Structured store", yn(spec.kernel.store.enable)),
+            MenuItem::row(
+                "store_memory",
+                "Store memory",
+                yn(spec.kernel.store.persist_memory),
+            ),
+            MenuItem::row(
+                "store_elf",
+                "Store ELF seed",
+                yn(spec.kernel.store.persist_elf),
+            ),
+            MenuItem::row(
+                "store_usb",
+                "Store USB dump",
+                yn(spec.kernel.store.persist_usb),
+            ),
         ],
     }
 }

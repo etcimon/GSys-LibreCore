@@ -56,6 +56,7 @@ dependencies = [
  "g6b-http",
  "g6b-img",
  "g6b-kernel",
+ "g6b-pglite",
  "g6b-spec",
  "g6b-ttf",
 ]
@@ -97,7 +98,9 @@ name = "g6b-elf"
 version = "0.1.0"
 dependencies = [
  "g6b-asm",
+ "g6b-http",
  "g6b-kernel",
+ "g6b-pglite",
  "g6b-spec",
  "g6b-wasm",
 ]
@@ -123,6 +126,8 @@ dependencies = [
  "g6b-asm",
  "g6b-fs",
  "g6b-http",
+ "g6b-pglite",
+ "g6b-spec",
  "g6b-tls",
 ]
 
@@ -138,6 +143,7 @@ name = "g6b-http"
 version = "0.1.0"
 dependencies = [
  "g6b-fs",
+ "g6b-pglite",
  "g6b-spec",
  "g6b-tls",
  "g6b-ui",
@@ -174,11 +180,19 @@ dependencies = [
  "g6b-html",
  "g6b-http",
  "g6b-js",
+ "g6b-pglite",
  "g6b-spec",
  "g6b-tls",
  "g6b-ui",
  "g6b-wasm",
  "g6b-webidl",
+]
+
+[[package]]
+name = "g6b-pglite"
+version = "0.1.0"
+dependencies = [
+ "g6b-spec",
 ]
 
 [[package]]

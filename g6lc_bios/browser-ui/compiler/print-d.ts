@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 /** Print libwasm D IR (mixin NodeDef / @prop / @child). Not LDC. */
 
-import { type MarkupNode, parseMarkupTree, type SvelteFile } from "./parse.ts";
+import { type MarkupNode, parseMarkupTree, type PgliteOp, type SvelteFile, type UiOp } from "./parse.ts";
 
 // Member names that libwasm Spa!/NodeDef consult via __traits(hasMember) or
 // mixin-defined symbols; a @child field may not reuse them.
@@ -69,12 +69,16 @@ export function printModule(file: SvelteFile, children: string[] = []): string {
 
 export function printApp(files: SvelteFile[]): string {
   validateDProject(files);
-  const kids = files.filter((f) => structName(f) !== "App").map((f) => structName(f));
+  const extras = files.filter((f) => structName(f) !== "App");
+  // Store.svelte is flattened into App.ready (ops + markup), not a Spa @child.
+  // Other extras stay @child — flattening them would duplicate markup.
+  const storeExtras = extras.filter((f) => structName(f) === "Store");
+  const kids = extras.filter((f) => structName(f) !== "Store").map((f) => structName(f));
   const app = files.find((f) => structName(f) === "App")!;
   // `ready` keeps libwasm `Spa` off the JS router: without it _start calls
   // router().navigateTo(document().location()…), which needs browser-only
   // Object_Getter imports the g6b cell does not provide.
-  const readyBody = printReady(app);
+  const readyBody = printReady(app, storeExtras);
   const body = printModule(app, kids).replace(
     "  void onMount() { }",
     "  void onMount() { }\n  enum g6bStaticDom = true;\n" + readyBody,
@@ -82,13 +86,33 @@ export function printApp(files: SvelteFile[]): string {
   return body + "mixin Spa!App;\n" + printFxD();
 }
 
-export function printReady(file: SvelteFile): string {
+export function printReady(file: SvelteFile, extras: SvelteFile[] = []): string {
   const lines: string[] = [];
   lines.push("  void ready() {");
-  lines.push("    try {");
-  lines.push("      auto root = this.getNamedNode.node;");
+  // DOM construct may throw; .await must not share that landing pad
+  // (Flatten + wasm-eh: svelte-d/architecture/AGENTS-D-IR-asyncify-wasm-eh.md).
+  lines.push("    auto root = this.getNamedNode.node;");
   const roots = parseMarkupTree(file.src);
-  const ctx: DTreeContext = { vars: new Map(), next: 0, tbody: new Map() };
+  const extraRoots = extras.map((f) => parseMarkupTree(f.src));
+  const allOps = [...file.ops, ...extras.flatMap((f) => f.ops)];
+  const ctx: DTreeContext = {
+    vars: new Map(),
+    next: 0,
+    tbody: new Map(),
+    binds: new Set(
+      allOps.filter((o): o is PgliteOp => o.kind === "pglite" && !!o.bind).map((o) => o.bind!),
+    ),
+  };
+  if (roots[0]) collectTbodyHandles(roots[0], ctx);
+  for (const er of extraRoots) {
+    if (er[0]) collectTbodyHandles(er[0], ctx);
+  }
+  for (const v of ctx.tbody.values()) {
+    // Hoist tbody handles out of the DOM try so await/parseJSON can
+    // append rows after rewind (Flatten deletes a catch that wraps .await).
+    lines.push(`    Handle ${v} = 0;`);
+  }
+  lines.push("    try {");
   const root = roots[0];
   if (root) {
     for (const [name, value] of Object.entries(root.attrs)) {
@@ -98,34 +122,40 @@ export function printReady(file: SvelteFile): string {
       lines.push(...printDNode(c, "root", ctx, 6));
     }
   }
+  for (const er of extraRoots) {
+    for (const c of er) {
+      if (typeof c === "string") continue;
+      lines.push(...printDNode(c, "root", ctx, 6));
+    }
+  }
+  lines.push("    } catch (Exception e) {");
+  lines.push("      // bounded catch: DOM construct");
+  lines.push("    }");
   const fetches: { index: number; url: string; opIndex: number }[] = [];
-  for (let i = 0; i < file.ops.length; i++) {
-    const op = file.ops[i];
+  for (let i = 0; i < allOps.length; i++) {
+    const op = allOps[i];
     if (op.kind === "fetch") {
-      const needsAwait = file.ops[i + 1]?.kind === "await";
+      const needsAwait = allOps[i + 1]?.kind === "await";
       const h = fetches.length;
       fetches.push({ index: h, url: op.url, opIndex: i });
-      lines.push(`      auto p${h} = g6b_fetch("${escapeD(op.url)}");`);
+      lines.push(`    auto p${h} = g6b_fetch("${escapeD(op.url)}");`);
       if (needsAwait) {
-        lines.push(`      libwasm_await__void(p${h});`);
+        lines.push(`    libwasm_await__void(p${h});`);
         i++; // skip the await op
       }
     } else if (op.kind === "holyc") {
-      lines.push(`      g6b_holyc("${escapeD(op.line)}");`);
+      lines.push(`    g6b_holyc("${escapeD(op.line)}");`);
     } else if (op.kind === "register") {
-      lines.push(`      g6b_register("${escapeD(op.path)}", "${escapeD(op.method)}");`);
+      lines.push(`    g6b_register("${escapeD(op.path)}", "${escapeD(op.method)}");`);
     }
   }
   const rows = printRowFetches(fetches, ctx);
   if (rows.length) {
-    lines.push("      if (libwasm_await_supported()) {");
-    lines.push(...rows.map((l) => "    " + l));
-    lines.push("      }");
+    lines.push("    if (libwasm_await_supported()) {");
+    lines.push(...rows.map((l) => "      " + l));
+    lines.push("    }");
   }
-  lines.push("    } catch (Exception e) {");
-  lines.push("      // bounded catch: rejection state is exposed through the");
-  lines.push("      // libwasm host; the app may inspect or log if it chooses.");
-  lines.push("    }");
+  lines.push(...printPgliteReady({ ...file, ops: allOps }, ctx));
   lines.push("  }");
   return lines.join("\n");
 }
@@ -134,17 +164,26 @@ type DTreeContext = {
   vars: Map<string, string>;
   next: number;
   tbody: Map<string, string>;
+  binds: Set<string>;
 };
 
 function dVar(id: string | undefined, ctx: DTreeContext): string {
   if (id) {
     const safe = id.replace(/[^A-Za-z0-9_]/g, "_");
-    if (!ctx.vars.has(safe)) {
-      ctx.vars.set(safe, safe);
-      return safe;
-    }
+    const existing = ctx.vars.get(safe);
+    if (existing) return existing;
+    ctx.vars.set(safe, safe);
+    return safe;
   }
   return `n${ctx.next++}`;
+}
+
+function collectTbodyHandles(node: MarkupNode | string, ctx: DTreeContext): void {
+  if (typeof node === "string") return;
+  if (node.tag === "tbody" && node.attrs.id) {
+    ctx.tbody.set(node.attrs.id, dVar(node.attrs.id, ctx));
+  }
+  for (const c of node.children) collectTbodyHandles(c, ctx);
 }
 
 function nodeTypeTag(tag: string): string {
@@ -168,43 +207,55 @@ function printRowFetches(fetches: { index: number; url: string }[], ctx: DTreeCo
     const h = `p${index}`;
     const j = `j${index}`;
     lines.push(`libwasm_await__void(${h});`);
-    lines.push(`auto json_${h} = libwasm_await_value();`);
-    lines.push(`auto ${j} = parseJSON!ThreadMemAllocator(json_${h});`);
-    lines.push(`foreach (_; ${j}) {`);
-    lines.push(`  string id = "", label = "", value = "";`);
-    lines.push(`  bool writable = false;`);
-    lines.push(`  foreach (key; ${j}.byKey) {`);
-    lines.push(`    if (key == "id") id = ${j}.read!string;`);
-    lines.push(`    else if (key == "label") label = ${j}.read!string;`);
-    lines.push(`    else if (key == "value") value = ${j}.read!string;`);
-    lines.push(`    else if (key == "writable") writable = ${j}.read!bool;`);
-    lines.push(`    else ${j}.skipValue();`);
+    lines.push(`try {`);
+    lines.push(`  auto json_${h} = libwasm_await_value();`);
+    lines.push(`  auto ${j} = parseJSON!ThreadMemAllocator(json_${h});`);
+    lines.push(`  foreach (_; ${j}) {`);
+    lines.push(`    string id = "", label = "", value = "";`);
+    lines.push(`    bool writable = false;`);
+    lines.push(`    foreach (key; ${j}.byKey) {`);
+    lines.push(`      if (key == "id") id = ${j}.read!string;`);
+    lines.push(`      else if (key == "label") label = ${j}.read!string;`);
+    lines.push(`      else if (key == "value") value = ${j}.read!string;`);
+    lines.push(`      else if (key == "writable") writable = ${j}.read!bool;`);
+    lines.push(`      else ${j}.skipValue();`);
+    lines.push(`    }`);
+    lines.push(`    auto tr = createElement(NodeType.tr);`);
+    lines.push(`    auto td0 = createElement(NodeType.td);`);
+    lines.push(`    setProperty(td0, "innerText", label);`);
+    lines.push(`    appendChild(tr, td0);`);
+    lines.push(`    auto td1 = createElement(NodeType.td);`);
+    lines.push(`    setProperty(td1, "innerText", value);`);
+    lines.push(`    appendChild(tr, td1);`);
+    lines.push(`    auto td2 = createElement(NodeType.td);`);
+    lines.push(`    setProperty(td2, "innerText", writable ? "RW" : "R");`);
+    lines.push(`    appendChild(tr, td2);`);
+    lines.push(`    appendChild(${tbody}, tr);`);
     lines.push(`  }`);
-    lines.push(`  auto tr = createElement(NodeType.tr);`);
-    lines.push(`  auto td0 = createElement(NodeType.td);`);
-    lines.push(`  setProperty(td0, "innerText", label);`);
-    lines.push(`  appendChild(tr, td0);`);
-    lines.push(`  auto td1 = createElement(NodeType.td);`);
-    lines.push(`  setProperty(td1, "innerText", value);`);
-    lines.push(`  appendChild(tr, td1);`);
-    lines.push(`  auto td2 = createElement(NodeType.td);`);
-    lines.push(`  setProperty(td2, "innerText", writable ? "RW" : "R");`);
-    lines.push(`  appendChild(tr, td2);`);
-    lines.push(`  appendChild(${tbody}, tr);`);
-    lines.push(`}`);
+    lines.push(`} catch (Exception e) {}`);
   }
   return lines;
+}
+
+function bindInterp(text: string, binds: Set<string>): { bind: string; field?: string } | undefined {
+  const m = text.trim().match(/^\{([A-Za-z_][A-Za-z0-9_]*)(?:\.([A-Za-z_][A-Za-z0-9_]*))?\}$/);
+  if (!m || !binds.has(m[1])) return undefined;
+  return m[2] ? { bind: m[1], field: m[2] } : { bind: m[1] };
 }
 
 function printDNode(node: MarkupNode | string, parent: string, ctx: DTreeContext, indent: number): string[] {
   const pad = " ".repeat(indent);
   if (typeof node === "string") {
+    if (bindInterp(node, ctx.binds)) return [];
     return [`${pad}setProperty(${parent}, "innerText", "${escapeD(node)}");`];
   }
   const id = node.attrs.id;
   const varName = dVar(id, ctx);
   const out: string[] = [];
-  out.push(`${pad}auto ${varName} = createElement(NodeType.${nodeTypeTag(node.tag)});`);
+  const hoisted = node.tag === "tbody" && id !== undefined && ctx.tbody.has(id);
+  out.push(
+    `${pad}${hoisted ? "" : "auto "}${varName} = createElement(NodeType.${nodeTypeTag(node.tag)});`,
+  );
   for (const [name, value] of Object.entries(node.attrs)) {
     if (name.startsWith("on:")) continue;
     out.push(`${pad}setProperty(${varName}, "${escapeD(name)}", "${escapeD(value)}");`);
@@ -326,6 +377,108 @@ export function structName(file: SvelteFile): string {
 
 function dModule(ident: string): string {
   return ident.replace(/_svelte$/, "").toLowerCase();
+}
+
+function printPgliteReady(file: SvelteFile, ctx: DTreeContext): string[] {
+  const ops = file.ops.filter((o): o is PgliteOp => o.kind === "pglite");
+  if (!ops.length) return [];
+  const open = [...ops].reverse().find((o) => o.method === "open");
+  const lines: string[] = [];
+  if (open && open.arg1) {
+    lines.push(`    auto db = PgLite("${escapeD(open.arg1)}");`);
+  } else {
+    lines.push("    auto db = PgLite();");
+  }
+  const emit = (op: PgliteOp, expr: string) => {
+    if (op.bind) {
+      if (ctx.vars.has(op.bind) || op.bind === "db" || op.bind === "root") {
+        throw new Error(`pglite bind collides with DOM id or reserved name: ${op.bind}`);
+      }
+      lines.push(`    auto ${op.bind} = ${expr};`);
+    } else {
+      lines.push(`    ${expr};`);
+    }
+  };
+  for (const op of ops) {
+    switch (op.method) {
+      case "open":
+        break;
+      case "exec":
+        emit(op, `db.exec("${escapeD(op.arg1)}")`);
+        break;
+      case "queryAsync":
+        emit(op, `db.queryAsync("${escapeD(op.arg1)}", "${escapeD(op.arg2 || "[]")}")`);
+        break;
+      case "query":
+        if (op.awaited) {
+          emit(op, `db.queryAsync("${escapeD(op.arg1)}", "${escapeD(op.arg2 || "[]")}")`);
+        } else {
+          emit(op, `db.query("${escapeD(op.arg1)}", "${escapeD(op.arg2 || "[]")}")`);
+        }
+        break;
+      case "stat":
+        emit(op, op.awaited ? "db.statAsync()" : "db.stat()");
+        break;
+      case "waitReady":
+        emit(op, "db.waitReady()");
+        break;
+      case "listen":
+        emit(op, `db.listen("${escapeD(op.arg1)}")`);
+        break;
+      case "unlisten":
+        emit(op, `db.unlisten("${escapeD(op.arg1 || "*")}")`);
+        break;
+      case "notifies":
+        emit(op, "db.notifies()");
+        break;
+      case "begin":
+        emit(op, "db.begin()");
+        break;
+      case "commit":
+        emit(op, "db.commit()");
+        break;
+      case "rollback":
+        emit(op, "db.rollback()");
+        break;
+      case "dump":
+        emit(op, "db.dump()");
+        break;
+      case "load":
+        emit(op, `db.load("${escapeD(op.arg1)}")`);
+        break;
+      case "close":
+        emit(op, "db.close()");
+        break;
+      case "export":
+        emit(
+          op,
+          op.arg2
+            ? `db.exportUsb("${escapeD(op.arg1)}", "${escapeD(op.arg2)}")`
+            : `db.exportUsb("${escapeD(op.arg1)}")`,
+        );
+        break;
+    }
+  }
+  lines.push(...printPgliteBindTexts(file.ops, ctx));
+  return lines;
+}
+
+function printPgliteBindTexts(ops: UiOp[], ctx: DTreeContext): string[] {
+  const lines: string[] = [];
+  let n = 0;
+  for (const op of ops) {
+    if (op.kind !== "text" || !op.bind) continue;
+    const handle = ctx.vars.get(op.id.replace(/[^A-Za-z0-9_]/g, "_"));
+    if (!handle) throw new Error(`pglite bind {${op.bind}} needs a DOM id: ${op.id}`);
+    if (op.field) {
+      const tmp = `pglite_field_${n++}`;
+      lines.push(`    auto ${tmp} = ${op.bind}["${escapeD(op.field)}"];`);
+      lines.push(`    setProperty(${handle}, "innerText", JSON.stringify(${tmp}));`);
+    } else {
+      lines.push(`    setProperty(${handle}, "innerText", JSON.stringify(${op.bind}));`);
+    }
+  }
+  return lines;
 }
 
 function escapeD(s: string): string {

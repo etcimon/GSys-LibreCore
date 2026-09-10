@@ -64,17 +64,20 @@ only with `usb.key`.
 `kernel.usb.key` (profiles `appliance` and `full`, or JSON overlay) adds a
 three-family browser: FAT32 + NTFS + ext4. Settings import/export on the key
 (`kernel.settings.usb_key`) rides the same host; it is not a second USB stack.
-Structured **store** dumps (later `kernel.store.persist.usb`) are a sibling
+Structured **store** dumps (`kernel.store.persist.usb`) are a sibling
 tree `{volume}/stores/{purpose}/{uuid}.g6bstore` on the **key**, never on
-FAT32 flash. Identity: [`g6b-store-instances.md`](g6b-store-instances.md).
+FAT32 flash. Live persist is `UsbLive` (auto-flush G6BS). Poll
+`GET /bios/store/{uuid}/stat` until `live && ready` for a dialog that
+requires the stick. Svelte: [`g6b-pglite-svelte.md`](g6b-pglite-svelte.md).
+Identity: [`g6b-store-instances.md`](g6b-store-instances.md).
 
 Canned trees (`g6b-fs::list_key`):
 
 | FS | `/` | deeper |
 |---|---|---|
-| FAT32 | `settings.json`, `backup/` | `backup/settings.bak`; later `stores/{purpose}/{uuid}.g6bstore` when `persist.usb` |
-| NTFS | `Windows/`, `bios-settings.json` | later `stores/…` when `persist.usb` |
-| ext4 | `home/`, `etc/` | `home/config.json`; later `stores/…` when `persist.usb` |
+| FAT32 | `settings.json`, `backup/` | `backup/settings.bak`; `stores/` when `persist.usb` |
+| NTFS | `Windows/`, `bios-settings.json` | `stores/` when `persist.usb` |
+| ext4 | `home/`, `etc/` | `home/config.json`; `stores/` when `persist.usb` |
 
 ZealOS FileMgr pick-file / pick-dir is the UI contract. The rewrite is
 svelte-d `Construct::FileMgr` + kernel `fetch`, not `kernel-spec` FileMgr.ZC

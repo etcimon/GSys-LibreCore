@@ -142,6 +142,11 @@ pub fn vararg_from_json(argsdef: &str, args_json: &str) -> Result<Vec<LibwasmVal
 
 fn consume_arg(token: &str, it: &mut std::slice::Iter<'_, Json>) -> Result<LibwasmValue, String> {
     if let Some(inner) = token.strip_prefix("Optional!") {
+        // Bindings emit both `Optional!string` and `Optional!(string)`.
+        let inner = inner
+            .strip_prefix('(')
+            .and_then(|s| s.strip_suffix(')'))
+            .unwrap_or(inner);
         let defined = it.next().ok_or("Optional missing defined flag")?;
         if defined.truthy() {
             consume_arg(inner, it)
@@ -273,6 +278,13 @@ mod tests {
         let args = vararg_from_json(argsdef, args_json).unwrap();
         assert_eq!(args[0], LibwasmValue::None);
         assert_eq!(args[1], LibwasmValue::I32(7));
+    }
+
+    #[test]
+    fn vararg_optional_paren_form_matches_bindings() {
+        // Node.d: Serialize_Object_VarArgCall!void(..., "Optional!(string)", ...)
+        let args = vararg_from_json("Optional!(string)", r#"[1,"bios"]"#).unwrap();
+        assert_eq!(args[0], LibwasmValue::String("bios".into()));
     }
 
     #[test]
