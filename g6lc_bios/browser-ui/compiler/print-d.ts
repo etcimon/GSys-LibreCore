@@ -95,6 +95,12 @@ export function printReady(file: SvelteFile, extras: SvelteFile[] = []): string 
   const roots = parseMarkupTree(file.src);
   const extraRoots = extras.map((f) => parseMarkupTree(f.src));
   const allOps = [...file.ops, ...extras.flatMap((f) => f.ops)];
+  // DOM element ids that a pglite bind (`{rows}` / `{rows.field}`) will
+  // paint after the DOM try block. Like tbody handles, these must be
+  // hoisted out of the try so they stay in scope for the bind text emit.
+  const bindTargetIds = new Set(
+    allOps.filter((o): o is TextOp => o.kind === "text" && !!o.bind).map((o) => o.id),
+  );
   const ctx: DTreeContext = {
     vars: new Map(),
     next: 0,
@@ -102,14 +108,16 @@ export function printReady(file: SvelteFile, extras: SvelteFile[] = []): string 
     binds: new Set(
       allOps.filter((o): o is PgliteOp => o.kind === "pglite" && !!o.bind).map((o) => o.bind!),
     ),
+    bindTargetIds,
   };
-  if (roots[0]) collectTbodyHandles(roots[0], ctx);
+  if (roots[0]) collectHoistedHandles(roots[0], ctx);
   for (const er of extraRoots) {
-    if (er[0]) collectTbodyHandles(er[0], ctx);
+    if (er[0]) collectHoistedHandles(er[0], ctx);
   }
   for (const v of ctx.tbody.values()) {
-    // Hoist tbody handles out of the DOM try so await/parseJSON can
-    // append rows after rewind (Flatten deletes a catch that wraps .await).
+    // Hoist tbody + pglite-bind-target handles out of the DOM try so
+    // await/parseJSON can append rows after rewind (Flatten deletes a
+    // catch that wraps .await) and pglite binds can paint the handle.
     lines.push(`    Handle ${v} = 0;`);
   }
   lines.push("    try {");
@@ -165,6 +173,7 @@ type DTreeContext = {
   next: number;
   tbody: Map<string, string>;
   binds: Set<string>;
+  bindTargetIds: Set<string>;
 };
 
 function dVar(id: string | undefined, ctx: DTreeContext): string {
@@ -178,12 +187,16 @@ function dVar(id: string | undefined, ctx: DTreeContext): string {
   return `n${ctx.next++}`;
 }
 
-function collectTbodyHandles(node: MarkupNode | string, ctx: DTreeContext): void {
+function collectHoistedHandles(node: MarkupNode | string, ctx: DTreeContext): void {
   if (typeof node === "string") return;
-  if (node.tag === "tbody" && node.attrs.id) {
-    ctx.tbody.set(node.attrs.id, dVar(node.attrs.id, ctx));
+  if (node.attrs.id) {
+    const isTbody = node.tag === "tbody";
+    const isBindTarget = ctx.bindTargetIds.has(node.attrs.id);
+    if (isTbody || isBindTarget) {
+      ctx.tbody.set(node.attrs.id, dVar(node.attrs.id, ctx));
+    }
   }
-  for (const c of node.children) collectTbodyHandles(c, ctx);
+  for (const c of node.children) collectHoistedHandles(c, ctx);
 }
 
 function nodeTypeTag(tag: string): string {
@@ -252,7 +265,7 @@ function printDNode(node: MarkupNode | string, parent: string, ctx: DTreeContext
   const id = node.attrs.id;
   const varName = dVar(id, ctx);
   const out: string[] = [];
-  const hoisted = node.tag === "tbody" && id !== undefined && ctx.tbody.has(id);
+  const hoisted = id !== undefined && ctx.tbody.has(id);
   out.push(
     `${pad}${hoisted ? "" : "auto "}${varName} = createElement(NodeType.${nodeTypeTag(node.tag)});`,
   );

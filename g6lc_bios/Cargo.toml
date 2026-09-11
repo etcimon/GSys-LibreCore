@@ -33,6 +33,7 @@ members = [
     "crates/g6b-tls",
     "crates/g6b-http",
     "crates/g6b-fs",
+    "crates/g6b-vfs",
     "crates/g6b-pglite",
     "crates/g6b-wasm",
     "crates/g6b-ui",
@@ -67,6 +68,7 @@ g6b-webidl = { path = "crates/g6b-webidl" }
 g6b-tls = { path = "crates/g6b-tls" }
 g6b-http = { path = "crates/g6b-http" }
 g6b-fs = { path = "crates/g6b-fs" }
+g6b-vfs = { path = "crates/g6b-vfs" }
 g6b-pglite = { path = "crates/g6b-pglite" }
 g6b-wasm = { path = "crates/g6b-wasm" }
 g6b-ttf = { path = "crates/g6b-ttf" }

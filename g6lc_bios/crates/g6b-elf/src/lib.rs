@@ -29,11 +29,21 @@ pub fn load_addr(spec: &BoardSpec) -> Result<u64, String> {
 
 /// Build an ET_EXEC RISC-V ELF (32 or 64 from BoardSpec).
 pub fn build(spec: &BoardSpec) -> Result<Vec<u8>, String> {
+    build_with_volumes(spec, None)
+}
+
+/// [`build`] with media attached: the boot picker packed into the image lists
+/// what these volumes actually hold, probed at build time because the guest has
+/// no block reader to probe with.
+pub fn build_with_volumes(
+    spec: &BoardSpec,
+    volumes: Option<g6b_kernel::DirVolumes>,
+) -> Result<Vec<u8>, String> {
     let entry = load_addr(spec)?;
     if spec.isa.xlen == 32 && entry > u32::MAX as u64 {
         return Err("rv32 load address does not fit in 32 bits".into());
     }
-    let text = payload_text(spec);
+    let text = payload_text_with(spec, volumes);
     let (code, nharts, gr_bytes) = assemble(spec, entry, &text)?;
     match spec.isa.xlen {
         32 => pack_elf(false, entry as u32 as u64, &code, nharts, gr_bytes),
@@ -43,6 +53,10 @@ pub fn build(spec: &BoardSpec) -> Result<Vec<u8>, String> {
 }
 
 fn payload_text(spec: &BoardSpec) -> Vec<u8> {
+    payload_text_with(spec, None)
+}
+
+fn payload_text_with(spec: &BoardSpec, volumes: Option<g6b_kernel::DirVolumes>) -> Vec<u8> {
     let mut s = String::from_utf8(g6b_asm::analyze::kstart_msg(spec)).unwrap_or_default();
     while s.ends_with('\0') {
         s.pop();
@@ -55,7 +69,7 @@ fn payload_text(spec: &BoardSpec) -> Vec<u8> {
     } else {
         "ISEL-SCALAR\n"
     });
-    s.push_str(&g6b_kernel::boot(spec));
+    s.push_str(&g6b_kernel::boot_with_volumes(spec, volumes));
     if !s.ends_with('\n') {
         s.push('\n');
     }
@@ -241,7 +255,16 @@ pub fn smoke_cell_drive(
 
 /// Write `g6lc_bios.elf` under `dir` (or `dir` itself if it ends in `.elf`).
 pub fn write_elf(spec: &BoardSpec, path: &std::path::Path) -> Result<(), String> {
-    let bytes = build(spec)?;
+    write_elf_with_volumes(spec, path, None)
+}
+
+/// [`write_elf`] with attached media declared.
+pub fn write_elf_with_volumes(
+    spec: &BoardSpec,
+    path: &std::path::Path,
+    volumes: Option<g6b_kernel::DirVolumes>,
+) -> Result<(), String> {
+    let bytes = build_with_volumes(spec, volumes)?;
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -335,6 +358,11 @@ mod tests {
         assert!(s.contains("KSTART-TIMER"), "{s}");
         assert!(s.contains("KSTART-PROXY"), "{s}");
         assert!(s.contains("KSTART-GR"), "{s}");
+        // A plane plus the default CLI face means the guest carries the text
+        // row store and `DomPaint` — the zealcli container is what gets painted
+        // when no web engine is compiled.
+        assert!(s.contains("KSTART-CLI"), "{s}");
+        assert!(g6b_asm::analyze::wants_cli_face(&spec));
         let (filesz, memsz) = ph64(&elf);
         assert_eq!(
             memsz,
@@ -347,9 +375,238 @@ mod tests {
                     // mux allocates that block on any board with a Gr plane or
                     // display proxy. The scanout surface itself is not
                     // allocated here — no backend commits it on this fixture.
-                    + g6b_asm::vio::VIO_BSS,
+                    + g6b_asm::vio::VIO_BSS
+                    // Bounded text row table for the CLI container.
+                    + g6b_asm::dom::UI_DOM_BYTES,
             )
         );
+    }
+
+    #[test]
+    fn barebone_elf_paints_the_cli_container_and_carries_no_web_stack() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"barebone","isa":{"xlen":64}}"#,
+        )
+        .unwrap();
+        let elf = build(&spec).unwrap();
+        let s = String::from_utf8_lossy(&elf);
+        assert!(s.contains("KSTART-CLI"), "{s}");
+        assert!(
+            s.contains("ZEALCLI-READY"),
+            "the boot log carries the face: {s}"
+        );
+        assert!(s.contains("CLI| "), "and the container rows: {s}");
+        // The engine is absent, all of it.
+        for absent in ["KSTART-WASM-JIT", "KSTART-WASM-UI", "KSTART-DOM", "UI-BOOT"] {
+            assert!(
+                !s.contains(absent),
+                "{absent} must not be in a barebone image"
+            );
+        }
+        assert!(
+            !elf.windows(4).any(|w| w == b"\0asm"),
+            "no wasm module belongs in a barebone image"
+        );
+        // The guest still paints: the row table is allocated and DomPaint runs.
+        let smoked = smoke(&spec).unwrap();
+        assert!(
+            smoked.console.contains("ZEALCLI-PAINT"),
+            "CliInit should publish rows: {}",
+            smoked.console
+        );
+        assert!(
+            smoked.console.contains("DOM| G6LC-BIOS zealcli"),
+            "DomPaint should blit the container: {}",
+            smoked.console
+        );
+        assert!(smoked.dom_rows > 0, "rows published: {}", smoked.console);
+        assert!(
+            smoked.dom_pix0 != 0,
+            "container glyphs painted into the plane: {}",
+            smoked.console
+        );
+        assert_eq!(smoked.faults, 0, "{}", smoked.console);
+    }
+
+    /// The guest container is **interactive**: keys edit the line, Enter
+    /// dispatches, an unknown verb is reported, and a page switch repaints.
+    ///
+    /// Both input bands are exercised: the virtio-input burst types `a` and
+    /// presses Enter, and the UART band (a headless board's console) sends
+    /// `nosuchcmd`, `clear` and `help`.
+    #[test]
+    fn barebone_guest_container_dispatches_typed_lines() {
+        // The boot picker owns the screen at power-on, so this build turns it
+        // off to test the prompt itself; `autoboot_picker_owns_the_boot_screen`
+        // covers the other half.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"barebone","isa":{"xlen":64},"kernel":{"cli":{"autoboot":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let s = smoke(&spec).unwrap();
+        let c = &s.console;
+        // Keyboard: the canned burst is `a`, arrow, Enter.
+        assert!(c.contains("CLI-CMD a\n"), "keyboard reached the line: {c}");
+        // Unknown verbs fail closed, they are not guessed at.
+        assert!(c.contains("CLI-CMD?"), "{c}");
+        assert!(c.contains("CLI-CMD nosuchcmd\n"), "{c}");
+        // `clear` empties the container, `help` switches to the packed page.
+        assert!(c.contains("CLI-CLEAR"), "{c}");
+        assert!(c.contains("CLI-PAGE help"), "{c}");
+        // The page is real text the host rendered from the command table.
+        assert!(
+            c.contains("DOM| help/Help/?") || c.contains("DOM| zealcli - 80x25"),
+            "the help page should be painted: {c}"
+        );
+        assert!(s.dom_rows > 1, "page rows published: {}", s.dom_rows);
+        assert_eq!(s.faults, 0, "{c}");
+        // A reboot verb exists but the run must not have taken it.
+        assert!(!c.contains("CLI-REBOOT"), "{c}");
+    }
+
+    /// The boot picker is the power-on face, and it is *live* in the guest:
+    /// the canned key burst (`a`, arrow-down, Enter) must wrap the selection and
+    /// take an entry, and the countdown must be armed from the compiled timeout.
+    #[test]
+    fn autoboot_picker_owns_the_boot_screen_and_answers_keys() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"barebone","isa":{"xlen":64}}"#,
+        )
+        .unwrap();
+        let s = smoke(&spec).unwrap();
+        let c = &s.console;
+        // The picker is armed with the compiled countdown, in timer ticks.
+        assert!(c.contains("AUTOBOOT-READY"), "{c}");
+        let ready = c
+            .lines()
+            .find(|l| l.starts_with("AUTOBOOT-READY"))
+            .unwrap_or_default();
+        assert!(ready.contains("countdown=120 ticks"), "2s at 60/s: {ready}");
+        // Its frame is what the screen shows first.
+        let first = c
+            .lines()
+            .find_map(|l| l.strip_prefix("DOM| "))
+            .expect("the picker painted");
+        assert!(first.starts_with("AUTOBOOT"), "{first}");
+        assert!(first.contains("order=live-first"), "{first}");
+        assert!(
+            c.contains("DOM| > 1. Setup (this payload)"),
+            "the selection marker is painted: {c}"
+        );
+        // Enter in the burst took the selection.
+        assert!(c.contains("AUTOBOOT-PICK payload"), "{c}");
+        // …and the payload entry drops to the prompt, exactly once.
+        assert_eq!(c.matches("AUTOBOOT-READY").count(), 1, "asked once: {c}");
+        assert!(c.contains("CLI| ") || c.contains("DOM| />"), "{c}");
+        assert_eq!(s.faults, 0, "{c}");
+    }
+
+    /// Rows of the **last** frame the guest painted: the console dumps every
+    /// row of a frame consecutively (`DOM| …`), so the final run of those lines
+    /// is what is on the screen when the run parks.
+    fn last_frame_rows(console: &str) -> Vec<String> {
+        let mut frames: Vec<Vec<String>> = Vec::new();
+        for line in console.lines() {
+            match line.strip_prefix("DOM| ") {
+                Some(row) => {
+                    if frames.last().is_none() {
+                        frames.push(Vec::new());
+                    }
+                    frames.last_mut().unwrap().push(row.to_string());
+                }
+                None => {
+                    if frames.last().is_some_and(|f| !f.is_empty()) {
+                        frames.push(Vec::new());
+                    }
+                }
+            }
+        }
+        frames.retain(|f| !f.is_empty());
+        frames.pop().unwrap_or_default()
+    }
+
+    /// Assert the plane holds `row`'s glyphs at container row `at`.
+    fn assert_row_glyphs(plane: &[u8], at: usize, row: &str) {
+        let stride = g6b_asm::gr_stride(640, 16) as usize;
+        let hdr = g6b_asm::GR_HEADER_BYTES as usize;
+        let y0 = g6b_asm::dom::DOM_Y0 as usize + at * 8;
+        for (col, ch) in row.bytes().enumerate() {
+            let glyph = g6b_asm::font::FONT8X8[g6b_asm::font::glyph_index(ch)];
+            for (gy, bits) in glyph.iter().enumerate() {
+                let off = hdr + (y0 + gy) * stride + col * 4;
+                let word = u32::from_le_bytes(plane[off..off + 4].try_into().unwrap());
+                assert_eq!(
+                    word,
+                    g6b_asm::font::pack_row_4bpp(*bits, 0xF, 0),
+                    "row {at} cell {col} ({:?}) glyph row {gy}",
+                    ch as char
+                );
+            }
+        }
+    }
+
+    /// `sp` is the **top** of the hart's stack slot, so the first push cannot
+    /// land in the image.
+    ///
+    /// This was a live corruption: with `sp` set to the *bottom* of the slot, a
+    /// single-hart image pushed straight into the tail of `.rodata` — the
+    /// `__font` glyph table — and every glyph with a high index (`l` onwards)
+    /// painted garbage. Long mixed-case text is what exposes it, so the guard is
+    /// a full-lowercase row painted glyph-exact.
+    #[test]
+    fn hart_stack_top_does_not_clobber_the_rodata_font() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"barebone","isa":{"xlen":64},"harts":{"count":1}}"#,
+        )
+        .unwrap();
+        let row = "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm";
+        // The band sequence ends on `help`, so the long lowercase row is packed
+        // as that page: the final painted frame is the one under test.
+        let log = format!("G6LC-BIOS\nCLI| banner\nCLI:help| {row}\n\0");
+        let module = g6b_asm::analyze::payload(&spec, log.as_bytes());
+        let s = g6b_asm::exec::run_module(&spec, &module, load_addr(&spec).unwrap()).unwrap();
+        let frame = last_frame_rows(&s.console);
+        assert_eq!(
+            frame.first().map(String::as_str),
+            Some(row),
+            "{}",
+            s.console
+        );
+        assert_row_glyphs(&s.gr_frame, 0, row);
+    }
+
+    /// The container is not just "some ink on the plane": every cell of the
+    /// first row must be the exact glyph for that character, at the exact
+    /// 4bpp word the font packs. This is what "VGA is the output" means.
+    #[test]
+    fn barebone_guest_paints_the_container_glyph_exact() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"barebone","isa":{"xlen":64}}"#,
+        )
+        .unwrap();
+        let s = smoke(&spec).unwrap();
+        let plane = &s.gr_frame;
+        assert!(!plane.is_empty(), "no GR16 plane: {}", s.console);
+        // The boot picker paints first; the container banner follows it once the
+        // picker has had its answer.
+        let first = s
+            .console
+            .lines()
+            .find_map(|l| l.strip_prefix("DOM| "))
+            .expect("DomPaint should have dumped a frame");
+        assert!(first.starts_with("AUTOBOOT"), "{first}");
+        assert!(
+            s.console.contains("DOM| G6LC-BIOS zealcli"),
+            "the container is painted after the picker: {}",
+            s.console
+        );
+        // …and every row of whatever frame is on the screen when the run parks
+        // must be glyph-exact, mixed case and punctuation included.
+        let frame = last_frame_rows(&s.console);
+        assert!(!frame.is_empty(), "no painted frame: {}", s.console);
+        for (at, row) in frame.iter().enumerate() {
+            assert_row_glyphs(plane, at, row);
+        }
     }
 
     #[test]

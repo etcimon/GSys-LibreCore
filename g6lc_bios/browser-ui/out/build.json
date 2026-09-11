@@ -3,11 +3,11 @@
   "files": {
     "bios-ui.wasm": "83d46e1a9dfb091d7219a0f55fdad95e5e6148feca5803bde1d3f35bfa212246",
     "bios-ui.js": "fbc03fb61e20870742ab6a18cc227762fcad53dd38daa0945dc171dc3567f61d",
-    "kernel.js": "a629ce3046e20f89cec2bcb129212373b80954af736f2a3250ea9ee5568976f1",
+    "kernel.js": "783b8acf40914e9c9838d6382a003c7332222144903d7429311e443bf4cdfa77",
     "worker.js": "ae38aa0b7010caca57f2ed751451a080541a75fc043f679d41418f3d5f014fdc",
     "bios-ui.css": "b1b4485a7769bb1be333a6b42584cf32a118b493b448c9bb38e96413a8f09431",
     "index.html": "1b0423b8723cd7537876522b636ebcb4c47f3542e091b7e384ded12179e2c5a4",
-    "bios-ui-libwasm.wasm": "0060c7adb52a3ed38ad0381f6e25d7ef1cb0e91c5982fa272466daac50b0019d"
+    "bios-ui-libwasm.wasm": "8cfea89e6640e8292afaeb6015ee94c71b93a01b4349b08314df50004f4e832c"
   },
   "libwasmAvailable": true
 }

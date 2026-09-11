@@ -21,6 +21,8 @@ pub mod browser;
 pub mod task_services;
 pub mod tasks;
 pub mod timers;
+pub mod vfs;
+pub mod zealcli;
 pub use browser::{RouterPort, WasmUi};
 pub use g6b_iframe::{
     FilesAppView, FrameEngine, HostNeed, IframeSession, SessionCaps, SessionContext,
@@ -30,6 +32,12 @@ pub use g6b_iframe::{
 pub use g6b_zealcli::{Action as ZealAction, Session as ZealCli, PROMPT as ZEAL_PROMPT};
 pub use task_services::{TaskServices, Work, WorkResponse};
 pub use timers::{frame_period_ns, TimerHeap};
+pub use vfs::VfsService;
+pub use zealcli::{
+    ports as zealcli_ports, session as zealcli_session,
+    session_with_volumes as zealcli_session_with_volumes, DirVolumes, KernelFlash, KernelNet,
+    KernelVolumes,
+};
 
 /// VGA zealcli boots first; GPU announce + `LoadUI` hand off to browser-ui.
 pub fn wants_zealcli(spec: &BoardSpec, gpu_ready: bool) -> bool {
@@ -1392,6 +1400,15 @@ impl<'a> KernelHost<'a> {
                 "location" | "origin" => Ok(LibwasmValue::String("bios://g6lc".into())),
                 _ => value.clone_prop(name),
             },
+            LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Platform => {
+                // Board facts resolve live; `hw` (and anything else interned on
+                // the singleton) still comes from the object's own props.
+                if let Some(v) = self.platform_live(name) {
+                    Ok(v)
+                } else {
+                    value.clone_prop(name)
+                }
+            }
             LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Hw => {
                 let role = Self::hw_role(value);
                 if let Some(v) = self.hw_live_str(role, name) {
@@ -2027,10 +2044,28 @@ impl<'a> KernelHost<'a> {
                 }
             }
             LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Window => {
+                // `fetch`/`fetch_post` intern their response; hand the *value*
+                // back so the `__Handle` dispatch boxes the string itself —
+                // a `libwasm_get__string` on the result must see the body.
                 if method == "fetch" {
                     let url = args.first().map(|v| v.to_js_string()).unwrap_or_default();
                     let handle = self.fetch(&url)?;
-                    return Ok(LibwasmValue::I32(handle));
+                    return self.get_libwasm_value(handle);
+                }
+                if method == "fetch_post" {
+                    let url = args.first().map(|v| v.to_js_string()).unwrap_or_default();
+                    let body = args.get(1).map(|v| v.to_js_string()).unwrap_or_default();
+                    let handle = self.fetch_post(&url, &body)?;
+                    return self.get_libwasm_value(handle);
+                }
+            }
+            LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Platform => {
+                // Generated bindings sometimes reach a getter through the call
+                // path; answer from the one table instead of failing closed.
+                if args.is_empty() {
+                    if let Some(field) = self.platform_live(method) {
+                        return Ok(field);
+                    }
                 }
             }
             LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Hw => {
@@ -2843,6 +2878,52 @@ impl<'a> KernelHost<'a> {
         Ok(h)
     }
 
+    /// Board facts on the `platform` singleton, resolved live from BoardSpec.
+    ///
+    /// `platform` used to intern as an *empty* object carrying only `hw`, so
+    /// `platform.product` and friends fell through to `clone_prop` and failed
+    /// closed — the singleton existed but held no data. This is the same shape
+    /// as [`Self::hw_live_str`]: scalars come back typed, and anything
+    /// structured comes back as a **JSON string**, which is the idiom `hw`
+    /// already uses for `stat` / `socks`.
+    ///
+    /// The JSON is the *same* canonical text the HTTP router serves for
+    /// `/bios/menu` and `/bios/menu/{id}` (`BoardSpec::menus_index_json` /
+    /// `Menu::json`), so a Svelte page can read the menu tree off the
+    /// singleton without a fetch, and the two lanes cannot disagree.
+    ///
+    /// `None` means "not a platform field", and the caller falls back to
+    /// `clone_prop` so the interned `hw` handle keeps resolving.
+    fn platform_live(&self, name: &str) -> Option<LibwasmValue> {
+        let spec = self.spec;
+        Some(match name {
+            // Identity
+            "product" => LibwasmValue::String(spec.product.clone()),
+            "profile" => LibwasmValue::String(spec.kernel.profile.as_str().to_string()),
+            "schema" => LibwasmValue::U32(spec.schema_version),
+            // ISA
+            "xlen" => LibwasmValue::U32(spec.isa.xlen),
+            "march" => LibwasmValue::String(spec.isa.march.clone()),
+            "mmu" => LibwasmValue::String(spec.isa.mmu.clone()),
+            // Topology
+            "harts" => LibwasmValue::U32(spec.harts),
+            "cores" => LibwasmValue::U32(spec.cores),
+            "threads" => LibwasmValue::U32(spec.threads),
+            // Memory
+            "dramBase" => LibwasmValue::String(spec.dram_base.clone()),
+            "dramLen" => LibwasmValue::String(spec.dram_len.clone()),
+            "textOffset" => LibwasmValue::String(spec.text_offset.clone()),
+            // Compiled lanes, so a page can ask instead of guessing.
+            "web" => LibwasmValue::Bool(spec.web_stack()),
+            "wasm" => LibwasmValue::Bool(spec.kernel.wasm.enable),
+            "cli" => LibwasmValue::Bool(spec.kernel.cli.enable),
+            "store" => LibwasmValue::Bool(spec.kernel.store.enable),
+            "workers" => LibwasmValue::U32(spec.worker_limit()),
+            "startMenu" => LibwasmValue::String(spec.kernel.start_menu.clone()),
+            _ => return None,
+        })
+    }
+
     /// Intern `platform.hw` without starting the listen worker.
     fn ensure_hw_global(&mut self) -> Result<i32, String> {
         if let Some(h) = self.hw_handle {
@@ -3340,6 +3421,44 @@ impl Host for KernelHost<'_> {
         }
     }
 
+    /// The UI's write side: SQL from a Svelte page reaches the store through here.
+    ///
+    /// Same interning discipline as `fetch` — a refusal returns an interned empty
+    /// string, never handle 0, because the LDC cell treats 0 as a pointer and would
+    /// walk off the wasm memory.
+    fn fetch_post(&mut self, url: &str, body: &str) -> Result<i32, String> {
+        let posted = {
+            let mut port = crate::browser::RouterPort {
+                router: self.router,
+                spec: self.spec,
+                store: match &mut self.store {
+                    Some(s) => Some(&mut **s),
+                    None => None,
+                },
+            };
+            g6b_wasm::KernelPort::fetch_post(&mut port, url, body)
+        };
+        match posted {
+            Ok((status, resp)) => {
+                // A bare `WASM-POST <url> 400` is unactionable: the store
+                // reports *why* in the body, and dropping it meant a failing
+                // export looked identical to a malformed SQL statement. 2xx
+                // lines stay byte-identical because tests match them exactly.
+                if status >= 400 {
+                    self.diagnostics
+                        .push(format!("WASM-POST {url} {status} {resp}"));
+                } else {
+                    self.diagnostics.push(format!("WASM-POST {url} {status}"));
+                }
+                self.intern_value(LibwasmValue::String(resp))
+            }
+            Err(e) => {
+                self.diagnostics.push(format!("WASM-SKIP-POST {url}: {e}"));
+                self.intern_value(LibwasmValue::String(String::new()))
+            }
+        }
+    }
+
     fn fetch(&mut self, url: &str) -> Result<i32, String> {
         let fetched = {
             let mut port = crate::browser::RouterPort {
@@ -3804,6 +3923,14 @@ impl Host for KernelHost<'_> {
                 }
                 if matches!(
                     &v,
+                    LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Platform
+                ) {
+                    if let Some(field) = self.platform_live(name) {
+                        return Ok(field);
+                    }
+                }
+                if matches!(
+                    &v,
                     LibwasmValue::Object { kind, .. } if *kind == ObjectKind::Hw
                 ) && Self::hw_role(&v) == "root"
                     && (name == "net" || name == "display")
@@ -4244,6 +4371,9 @@ impl BrowserSession {
                     }
                     if spec.kernel.usb.fs_ext4 {
                         vols.push("ext4".into());
+                    }
+                    if spec.kernel.usb.fs_btrfs {
+                        vols.push("btrfs".into());
                     }
                     frames.register_hook(g6b_iframe::AppHook::files_volumes(vols));
                 }
@@ -5862,11 +5992,136 @@ pub fn qemu_dual_band_argv(spec: &BoardSpec) -> Vec<String> {
             // pointer / VNC). Guest `InpInit` takes the first slot for VGA
             // `DomNav`; `TabInit` takes the second. The exec model leaves
             // virtio-mmio slot 2 empty so PLIC irq 3 stays the mailbox.
-            a.push("-device".into());
-            a.push("virtio-tablet-device".into());
+            // A keyboard-only build (barebone CLI, `kernel.cli.mouse` off) does
+            // not get a pointer it would never read; the guest probe still runs
+            // and reports `VIRTIO-TABLET-NONE`.
+            if spec.wants_virtio_tablet() {
+                a.push("-device".into());
+                a.push("virtio-tablet-device".into());
+            }
         }
     }
     a
+}
+
+/// Pages the guest container can reach, rendered by the host shell.
+///
+/// Only what fits a fixed cell grid and stays useful as a build-time snapshot:
+/// `help` (the compiled command set), `menu` (the setup index) and one page per
+/// setup screen. Writes still go through the host/HolyC band — a page is a view.
+fn cli_pages(session: &mut ZealCli) -> Vec<(String, Vec<String>)> {
+    let cols = session.spec().kernel.cli.cols as usize;
+    let rows = g6b_asm::cli::MAX_PAGE_ROWS;
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let page = |name: &str, text: &str, out: &mut Vec<(String, Vec<String>)>| {
+        let body: Vec<String> = text
+            .lines()
+            .flat_map(|l| g6b_zealcli::screen::wrap(l, cols))
+            .filter(|l| !l.trim().is_empty())
+            .take(rows)
+            .collect();
+        if !body.is_empty() {
+            out.push((name.to_string(), body));
+        }
+    };
+    let help = session.eval("help").1;
+    page("help", &help, &mut out);
+    let index = session.eval("menu").1;
+    page("menu", &index, &mut out);
+    let ids: Vec<String> = session
+        .spec()
+        .menus()
+        .iter()
+        .map(|m| m.id.to_string())
+        .collect();
+    for id in ids {
+        // `g6b_asm::cli::MAX_PAGES` bounds what the payload can carry; the
+        // first screens are the ones an operator reaches for.
+        if out.len() >= g6b_asm::cli::MAX_PAGES {
+            break;
+        }
+        let body = session.eval(&format!("menu {id}")).1;
+        page(&id, &body, &mut out);
+    }
+    out
+}
+
+/// The boot picker as the payload can carry it.
+///
+/// Probing media needs a block reader the guest does not have, so the *list* is
+/// discovered here — over the volumes this build was given — and packed. What
+/// stays in the guest is the part that must be live: arrows, the countdown, the
+/// decision. The countdown is expressed in **timer ticks**, because that is the
+/// only clock the payload has: `AutoTick` runs once per SBI timer interrupt.
+fn autoboot_lines(spec: &BoardSpec, session: &ZealCli) -> Vec<String> {
+    let ab = &spec.kernel.cli.autoboot;
+    if !spec.kernel.cli.enable || !ab.enable {
+        return Vec::new();
+    }
+    let cols = spec.kernel.cli.cols as usize;
+    let picker = g6b_zealcli::AutoBoot::new(spec, session.ports());
+    let entries = picker.entries();
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    // Ticks: the tick period is the frame period the timer is programmed with,
+    // so the countdown an operator reads is the countdown the hardware keeps.
+    let period_ns = crate::timers::frame_period_ns(spec).max(1);
+    let per_sec = (1_000_000_000u64 / period_ns).max(1) as u32;
+    let ticks = ((u64::from(ab.timeout_ms) * 1_000_000) / period_ns) as u32;
+    out.push(format!("CLI-AB-TICKS| {ticks} {per_sec}"));
+    // A header per whole second, so the guest only swaps text when the digit
+    // changes. Index 0 is what shows once the countdown is gone.
+    let secs = ab.timeout_ms.div_ceil(1000);
+    for s in 0..=secs {
+        let tail = if s == 0 {
+            // Shown both when the countdown never ran and when it has finished:
+            // in either case the machine is no longer deciding.
+            "no countdown - Enter boots, Esc stays".to_string()
+        } else {
+            format!("booting first entry in {s}s")
+        };
+        out.push(format!(
+            "CLI-AB-HEAD| {s} {}",
+            truncate_row(
+                &format!("AUTOBOOT  order={}  {tail}", spec.boot_order().as_str()),
+                cols
+            )
+        ));
+    }
+    for (i, e) in entries.iter().enumerate() {
+        // The row without its marker: the guest packs both spellings.
+        let device = if e.device.is_empty() {
+            String::new()
+        } else {
+            format!("  {}", e.device)
+        };
+        out.push(format!(
+            "CLI-AB-ENTRY| {} {}",
+            e.id,
+            truncate_row(
+                &format!("{}. {:<26} [{}]{device}", i + 1, e.name, e.medium.as_str()),
+                cols.saturating_sub(2)
+            )
+        ));
+    }
+    out.push(format!(
+        "CLI-AB-FOOT| {}",
+        truncate_row(
+            "  up/down wrap, 1-9 pick, Enter boots, Esc stays in setup",
+            cols
+        )
+    ));
+    out
+}
+
+fn truncate_row(s: &str, cols: usize) -> String {
+    s.chars()
+        .take(cols)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
 }
 
 /// Dual-band / SSH+HolyC REPL greeting.
@@ -5919,6 +6174,13 @@ pub fn load_program(spec: &BoardSpec) -> Result<Program, String> {
 
 /// Full host boot: HolyC fast init, then HTML parse + JS AOT, then UART paint.
 pub fn boot(spec: &BoardSpec) -> String {
+    boot_with_volumes(spec, None)
+}
+
+/// [`boot`] with real media attached, so the packed boot picker lists what this
+/// machine was actually given (`g6b … --volume ID=PATH`). Discovery has to happen
+/// here: the guest has no block reader, and a menu of guesses is worse than none.
+pub fn boot_with_volumes(spec: &BoardSpec, volumes: Option<DirVolumes>) -> String {
     let d = g6b_design::compile(spec);
     let holyc_src = format!(
         "{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
@@ -5953,14 +6215,23 @@ pub fn boot(spec: &BoardSpec) -> String {
         .or_else(|_| eval_src(&holyc_src))
         .unwrap_or_else(|e| format!("HOLYC-ERR {e}\n"));
 
-    let session = BrowserSession::from_program(spec, prog);
-    let (dom, diagnostics, wasm_executed) = match session {
-        Ok(session) => (session.dom, session.diagnostics, session.wasm_executed),
-        Err(error) => (
-            parse(&setup_html(spec)),
-            vec![format!("BROWSER-ERROR {error}")],
-            false,
-        ),
+    // The web engine is one bundle and it is *second*. A barebone build never
+    // constructs a BrowserSession at all, and a build that carries the engine
+    // still logs the CLI face first — the same order the guest boots in.
+    let web = spec.web_stack();
+    let (dom, diagnostics, wasm_executed) = if web {
+        match BrowserSession::from_program(spec, prog) {
+            Ok(session) => (session.dom, session.diagnostics, session.wasm_executed),
+            Err(error) => (
+                parse(&setup_html(spec)),
+                vec![format!("BROWSER-ERROR {error}")],
+                false,
+            ),
+        }
+    } else {
+        // An empty document, not a parsed setup page: with the engine excluded
+        // there is no HTML in this image to paint.
+        (parse(""), Vec::new(), false)
     };
 
     let mut lines = Vec::new();
@@ -5974,10 +6245,52 @@ pub fn boot(spec: &BoardSpec) -> String {
         "xlen={} march={} product={}",
         spec.isa.xlen, spec.isa.march, spec.product
     ));
-    lines.extend(to_uart_lines(&dom, 80));
+    let cli_text = if spec.kernel.cli.enable {
+        let cli = &spec.kernel.cli;
+        lines.push(format!(
+            "ZEALCLI-READY {}x{} boot={} scrollback={} mouse={} keyboard={} web={}",
+            cli.cols,
+            cli.rows,
+            cli.boot,
+            cli.scrollback,
+            cli.mouse,
+            spec.keyboard_kind(),
+            if web { "after-loadui" } else { "absent" }
+        ));
+        let mut session = match volumes.clone() {
+            Some(v) => zealcli::session_with_volumes(spec, v),
+            None => zealcli::session(spec),
+        };
+        let frame = session.render();
+        for row in frame.iter().filter(|r| !r.trim().is_empty()) {
+            lines.push(format!("CLI| {row}"));
+        }
+        // Pages the guest container can switch to. They are rendered here, by
+        // the same shell the host runs, and packed into the payload — the guest
+        // has no interpreter, so a setup screen is build-time text plus a live
+        // edit line. `CLI:<name>| <row>` is the tag `g6b_asm::cli` reads.
+        for page in cli_pages(&mut session) {
+            for row in page.1 {
+                lines.push(format!("CLI:{}| {row}", page.0));
+            }
+        }
+        lines.extend(autoboot_lines(spec, &session));
+        Some(frame)
+    } else {
+        None
+    };
+    if web {
+        lines.extend(to_uart_lines(&dom, 80));
+    }
     if spec.kernel.gr.enable {
         let mut frame = g6b_gr::Frame::from_spec(spec);
-        frame.paint_lines(&to_uart_lines(&dom, frame.cols as usize));
+        // Whatever owns the screen is what gets painted: the CLI container on a
+        // barebone build, the DOM once the engine is compiled.
+        let painted = match (&cli_text, web) {
+            (Some(rows), false) => rows.clone(),
+            _ => to_uart_lines(&dom, frame.cols as usize),
+        };
+        frame.paint_lines(&painted);
         lines.push(frame.init_line());
     }
     if spec.entry.timeout_ms > 0 {
@@ -6098,7 +6411,21 @@ pub fn boot(spec: &BoardSpec) -> String {
     if spec.kernel.usb.enable {
         lines.push("USB-FAT32".into());
         if spec.kernel.usb.key {
-            lines.push("USB-FILES fat32/ntfs/ext4".into());
+            // Name the parsers this image actually carries, not the full set.
+            let mut fs: Vec<&str> = Vec::new();
+            if spec.kernel.usb.fs_fat32 {
+                fs.push("fat32");
+            }
+            if spec.kernel.usb.fs_ntfs {
+                fs.push("ntfs");
+            }
+            if spec.kernel.usb.fs_ext4 {
+                fs.push("ext4");
+            }
+            if spec.kernel.usb.fs_btrfs {
+                fs.push("btrfs");
+            }
+            lines.push(format!("USB-FILES {}", fs.join("/")));
         }
     }
     lines.push(format!(
@@ -6249,10 +6576,18 @@ fn collect_style_text(node: &Node, out: &mut String) {
 
 /// Visual root for `Engine::paint`: the LDC cell's `<main>` under
 /// `#libwasm-spa` when present, otherwise the document `<body>`.
+///
+/// Only a **direct child** `<main>` of `#libwasm-spa` counts — the cell mounts
+/// under `#libwasm-root` and its rendered `<main id="bios-ui">` must not
+/// hijack the paint root from the static shell's `<main id="bios-ui">` that
+/// carries the chrome (banner, nav, tabs, status, refresh). The shell owns
+/// the chrome; the cell owns the menu sections inside its mount.
 fn live_paint_root(dom: &Node) -> &Node {
     if let Some(spa) = find_node_by_id(dom, "libwasm-spa") {
-        if let Some(main) = first_descendant_by_name(spa, "main") {
-            return main;
+        for c in &spa.children {
+            if c.name.eq_ignore_ascii_case("main") {
+                return c;
+            }
         }
     }
     first_descendant_by_name(dom, "body").unwrap_or(dom)

@@ -51,7 +51,7 @@ export function hwCable(event) {
 
 /**
  * BIOS UI maps `HWEvent` onto its own nodes (same as a `MouseEvent` listener).
- * The kernel does not write DOM ids.
+ * The kernel does not write DOM ids. Handlers should poll `platform.hw`.
  */
 export function onHwEvent(handler) {
   const doc = globalThis.document;
@@ -60,6 +60,125 @@ export function onHwEvent(handler) {
   for (const ty of ["hw", "hwcable", "hwnet", "hwdisp", "hwnat", "hwconfig", "hwwake"]) {
     target.addEventListener(ty, handler);
   }
+}
+
+function hwStatObject() {
+  try {
+    const raw = hwStat();
+    return typeof raw === "string" ? JSON.parse(raw.replace(/^HW-STAT\s+/, "")) : raw || {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Shell `platform.hw` — HolyC-shaped, same chaining as `window.document`.
+ * Not a window global; iframes must not see this.
+ */
+export function attachPlatformGlobal(target) {
+  const w = target || globalThis;
+  if (w.platform && w.platform.__g6bPlatform) return w.platform;
+  const hw = {
+    __g6bHw: true,
+    get nat() { return hwStatObject().nat || "minimal"; },
+    get phase() { return hwStatObject().phase || "idle"; },
+    get cable() { return hwStatObject().cable || "unplugged"; },
+    get listening() { return !!hwStatObject().listening; },
+    get idle() { return !!hwStatObject().idle; },
+    get line() { return hwStatObject().line || ""; },
+    get env_untouched() { return hwStatObject().env_untouched !== false; },
+    get host_adapter() { return hwStatObject().host_adapter || ""; },
+    get socks() { return hwStatObject().socks || []; },
+    get net() {
+      const a = (hwStatObject().adapters || [])[0] || {};
+      const inet = a.inet || {};
+      return {
+        get id() { return a.id || ""; },
+        get kind() { return a.kind || ""; },
+        get addressing() { return a.addressing || "nat"; },
+        get ip() { return a.ip || ""; },
+        get addr() { return inet.addr || a.ip || ""; },
+        get prefix() { return inet.prefix || 24; },
+        get gateway() { return inet.gateway || ""; },
+        get mtu() { return inet.mtu || 1500; },
+        get link() { return inet.link || "down"; },
+        get tcp() {
+          return {
+            get enabled() { return inet.tcp !== false; },
+            listen(port) { return holycEval("HwTcpListen(\"" + (a.id || "net0") + "\",\"" + port + "\")"); },
+            connect(host, port) { return holycEval("HwTcpConnect(\"" + (a.id || "net0") + "\",\"" + host + "\",\"" + port + "\")"); },
+            accept(sock) { return holycEval("HwTcpAccept(\"" + sock + "\")"); },
+            send(sock, data) { return holycEval("HwTcpSend(\"" + sock + "\",\"" + data + "\")"); },
+            recv(sock) { return holycEval("HwTcpRecv(\"" + sock + "\")"); },
+            close(sock) { return holycEval("HwSockClose(\"" + sock + "\")"); },
+          };
+        },
+        get udp() {
+          return {
+            get enabled() { return inet.udp !== false; },
+            bind(port) { return holycEval("HwUdpBind(\"" + (a.id || "net0") + "\",\"" + port + "\")"); },
+            send(sock, host, port, data) { return holycEval("HwUdpSend(\"" + sock + "\",\"" + host + "\",\"" + port + "\",\"" + data + "\")"); },
+            recv(sock) { return holycEval("HwUdpRecv(\"" + sock + "\")"); },
+            close(sock) { return holycEval("HwSockClose(\"" + sock + "\")"); },
+          };
+        },
+        ifconfig(cidr) { return holycEval("HwIfconfig(\"" + (a.id || "net0") + "\",\"" + cidr + "\")"); },
+        route(dest, via) { return holycEval("HwRoute(\"" + (a.id || "net0") + "\",\"" + dest + "\",\"" + via + "\")"); },
+        link(state) { return holycEval("HwLink(\"" + (a.id || "net0") + "\",\"" + state + "\")"); },
+        dns(ns) { return holycEval("HwDns(\"" + (a.id || "net0") + "\",\"" + ns + "\")"); },
+        proto(p, on) { return holycEval("HwProto(\"" + (a.id || "net0") + "\",\"" + p + "\",\"" + on + "\")"); },
+        hostApply(adapter) { return holycEval("HwHostApply(\"" + (a.id || "net0") + "\",\"" + adapter + "\")"); },
+      };
+    },
+    get display() {
+      const s = hwStatObject();
+      const d = s.display || {};
+      return {
+        get id() { return d.id || ""; },
+        get kind() { return d.kind || ""; },
+        get vendor() { return d.vendor || ""; },
+        get surface() { return d.surface || s.scanout || "vga"; },
+        get probed() { return !!d.probed; },
+        get present() { return d.present || "none"; },
+        get link() { return d.link || "down"; },
+        get w() { return d.w || 640; },
+        get h() { return d.h || 480; },
+        get gl() {
+          return {
+            get enabled() { return d.gl && d.gl !== "off"; },
+            get mode() { return d.gl || "off"; },
+            list() { return holycEval("HwGlList()"); },
+            apply(name) { return holycEval("HwGlApply(\"" + name + "\")"); },
+            revert() { return holycEval("HwGlRevert()"); },
+            setMode(mode) { return holycEval("HwGl(\"" + mode + "\")"); },
+          };
+        },
+        stat() { return holycEval("HwDispStat()"); },
+        linkUp(state) { return holycEval("HwDispLink(\"" + (state || "up") + "\")"); },
+        mode(m) { return holycEval("HwDispMode(\"" + m + "\")"); },
+        setSurface(surface) { return holycEval("HwDispSurface(\"" + surface + "\")"); },
+      };
+    },
+    stat() { return hwStat(); },
+    listen() { return holycEval("HwListen()"); },
+    config(id, addressing, ip) { return hwConfig(id, addressing, ip); },
+    cable(event) { return hwCable(event); },
+    wake() { return hwWake(); },
+    natMode(mode) { return holycEval("HwNat(\"" + mode + "\")"); },
+    hostList() { return holycEval("HwHostList()"); },
+    hostApply(adapter) { return holycEval("HwHostApply(\"net0\",\"" + adapter + "\")"); },
+    hostRevert() { return holycEval("HwHostRevert()"); },
+  };
+  const platform = { __g6bPlatform: true, hw };
+  w.platform = platform;
+  if (w.window && w !== w.window) w.window.platform = platform;
+  if ("hw" in w) delete w.hw;
+  return platform;
+}
+
+/** @deprecated use attachPlatformGlobal — hw is platform.hw */
+export function attachHwGlobal(target) {
+  return attachPlatformGlobal(target).hw;
 }
 
 /** Open a MENUS.md screen on both faces (fetch + HolyC). */
@@ -80,6 +199,8 @@ export const jsExports = {
     hwWake,
     hwCable,
     onHwEvent,
+    attachHwGlobal,
+    attachPlatformGlobal,
   },
 };
 
@@ -450,7 +571,17 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
       return { v: g };
     };
     const ASYNC_STORE = JSON.stringify({ ok: false, error: "async", message: "NotImplemented(\"async\")" });
-    const isStoreAcc = (v) => !!(v && (v === (ctx && typeof ctx.global === "function" ? ctx.global("pglite") : undefined) || v.__g6bStore === "factory" || v.__g6bStore === "instance"));
+    // A store method on the synchronous lodash path degrades to ASYNC_STORE:
+    // `newBiosStore` is async and a lodash chain cannot await. `struct PGLite`
+    // then *interns that result* and starts its next chain from it
+    // (`save()` -> `Lodash(m_saved, handle)`), so every subsequent `exec`/
+    // `query` arrives with the degraded sentinel as the accumulator. Treating
+    // that as "not a store" and throwing would abort `_start` halfway through
+    // a chain the guest wrote correctly, so degradation is idempotent: a
+    // degraded accumulator keeps answering `NotImplemented("async")` and the
+    // cell runs to completion. Real async store work goes through asyncify +
+    // `newBiosStore`, or `createPgliteWasm`, never through this path.
+    const isStoreAcc = (v) => !!(v && (v === (ctx && typeof ctx.global === "function" ? ctx.global("pglite") : undefined) || v.__g6bStore === "factory" || v.__g6bStore === "instance" || v === ASYNC_STORE));
     let acc = init;
     for (const c of commands) {
       if (c.local) continue; // `cb` names the callback; it has no value

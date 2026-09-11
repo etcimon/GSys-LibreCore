@@ -266,6 +266,93 @@ against `getTimeStamp()` and a fixed strftime-shaped formatter. `getTimeStamp`
 itself is the SBI `rdtime`-derived clock in the guest lane and `Date.now()` in
 the browser lane. Neither is implemented yet.
 
+## 5b. The three hosts, and the pglite chain through them
+
+The same cell, the same imports, **three** implementations with deliberately
+different completeness. Most confusion about this ABI is really confusion
+about which host is running, so name it first.
+
+| Host | Where | Store | Completeness |
+|---|---|---|---|
+| `KernelHost` | `g6b-kernel/src/lib.rs` (`impl Host`) — the BIOS, under QEMU | **real** `g6b-pglite` | lodash, pglite and `platform.*` genuinely implemented |
+| `createLibwasmHost` | `browser-ui/src/kernel.ts` — the browser | `fetch` proxy to `/bios/store/*` | DOM real; sync lodash path degrades the store |
+| `verifyLibwasmStartup` | `browser-ui/compiler/wasm-cell.ts` — build time | degraded | minimal **on purpose**: proves ABI + that `_start` completes |
+
+### The `Eval` allow-list is the security boundary
+
+`HostDispatch::intern_name` (`g6b-kernel/src/lib.rs`) resolves a host *name*;
+it never evaluates anything:
+
+| Name | Result |
+|---|---|
+| `window.pglite` \| `pglite` | `ObjectKind::StoreFactory` handle — **only if `spec.kernel.store.enable`**, else `EvalRefused` |
+| `window.platform` \| `platform` | `ObjectKind::Platform` handle |
+| `window.hw` \| `hw` | `EvalRefused("hw is platform.hw, not a window global")` |
+| `moment` \| `window.moment` | `UnsupportedMethod` |
+| anything else | `EvalRefused` |
+
+`platform.*` is a lazily-interned tree memoised onto `window.platform`, and
+it emits a `WASM-JS-GLOBAL platform -> N` diagnostic — the cheapest available
+proof on a serial log that the cell reached the host at all:
+
+```
+platform
+└── hw              (__role="root")
+    ├── net ──┬── tcp
+    │         └── udp
+    └── display ── gl
+```
+
+### The store state machine
+
+`libwasm/source/libwasm/pglite.d` never calls a store method directly. It
+builds a `Lodash` chain and ships it through `ldexec_*`:
+
+```
+PgLite(dataDir)                 -> Lodash(); defaultTo(Eval("window.pglite")); attempt(dataDir)
+   │
+   ├─ intern_name("window.pglite")  ──►  StoreFactory handle
+   ├─ attempt(dataDir)              ──►  factory_attempt  ──► Store handle {uuid}
+   └─ invoke(method, args…)         ──►  store_method     ──► real SQL via StoreRegistry
+```
+
+`store_method` implements `query`/`queryAsync`, `exec`,
+`begin`/`commit`/`rollback`, `close`, `waitReady`/`stat`/`statAsync`, `dump`,
+`load`, `listen`/`unlisten`/`notifies` and `export`. Only `sql` /
+`transaction` return `NotImplemented("callback")`.
+
+Note the re-entry detail, because it caused a real bug: `PGLite.save()`
+*interns the chain result as a handle* and starts the next chain from it
+(`m_ld = Lodash(m_saved, VarType.handle)`). So a degraded result is the
+accumulator for every subsequent call in the same session.
+
+### Degradation must be idempotent
+
+`kernel.ts`'s lodash interpreter is synchronous and `newBiosStore` is async, so
+it cannot service a store call inline. It substitutes a well-formed sentinel:
+
+```js
+const ASYNC_STORE = JSON.stringify({ ok:false, error:"async", message:'NotImplemented("async")' });
+```
+
+Because of the `save()` re-entry above, `isStoreAcc` **must** also accept that
+sentinel. Treating it as "not a store" made the *second* store call in a chain
+throw `libwasm lodash method "invoke" is not implemented`, aborting `_start`
+halfway through a chain the guest had written correctly. Degradation is now
+idempotent: a degraded accumulator keeps answering `NotImplemented("async")`
+and the cell runs to completion. Real async store work goes through Asyncify +
+`newBiosStore`, or `createPgliteWasm`, never through the sync path.
+
+The build-time verifier is subject to exactly the same rule, and must bind a
+context or the cell's `Eval("window.pglite")` is refused outright. It binds
+the **first-party** `createBrowserContext` (which wires `pglite` into
+`bindings()` itself) rather than a mock, with a non-`main` `contextId` so a
+build step never reassigns the module-level `pglite` export, and with no
+`fetchFn` so a reachable fetch fails closed. `libwasm_await__void` is already
+documented as a no-op when Asyncify is off (`kernel.ts`,
+`// build/verification no-op`), which is what lets one cell run in a
+synchronous verification host.
+
 ## 6. ES6 / JavaScript posture
 
 `g6b-js` is a **goja-shaped ES5 subset compiled ahead of time** — bounded

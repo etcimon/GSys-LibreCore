@@ -156,6 +156,25 @@ pub fn load_dump(blob: &Json) -> Result<Dump, StoreError> {
     })
 }
 
+/// Where an armed store's dump actually goes.
+///
+/// The registry used to keep "USB" persistence in a `BTreeMap` in its own memory,
+/// which is a stand-in, not storage: nothing survived the process and nothing was
+/// readable by anything else. This trait is the seam to a **real volume** — the
+/// kernel implements it over the `g6b-vfs` mount table — and it is a trait rather
+/// than a direct dependency so this crate stays a store engine and not a filesystem
+/// client.
+///
+/// The bytes handed over are **JSON text**, deliberately: a dump on an operator's
+/// key should be readable by the OS that key is plugged into, not only by this BIOS.
+/// (`codec::unpack` already accepts raw JSON, so the read path is unchanged.)
+pub trait StoreVolume {
+    /// Write `bytes` to `rel` on `volume`. `volume` is a mount name.
+    fn write(&mut self, volume: &str, rel: &str, bytes: &[u8]) -> Result<(), String>;
+    /// Read `rel` from `volume`; `None` when it is not there yet.
+    fn read(&mut self, volume: &str, rel: &str) -> Result<Option<Vec<u8>>, String>;
+}
+
 pub fn refuse_unarmed(kind: &'static str) -> StoreError {
     StoreError::PersistUnarmed(kind)
 }

@@ -11,6 +11,8 @@ pub mod crypto;
 pub mod dom;
 pub mod encode;
 pub mod exec;
+pub mod ext4file;
+pub mod fatfile;
 pub mod font;
 pub mod task;
 pub mod vio;
@@ -65,6 +67,9 @@ pub enum Purpose {
     Virtio,
     /// virtio-net DeviceID 1 probe (`VioNetProbe`). Not a QEMU `-netdev`.
     VirtioNet,
+    /// virtio-blk DeviceID 2 driver (`BlkInit`/`BlkRead`/`BlkSig`) — the payload
+    /// reading sectors itself, which is what the autoboot handoff waits on.
+    VirtioBlk,
     /// Uncore display-engine scanout (HDMI/DP — `architecture/uncore/hdmi-display.md`).
     DispScan,
     /// Read-only PCIe ECAM scan for a class-0x03 display controller with a
@@ -115,6 +120,7 @@ impl Purpose {
             Self::UiDom => "ui-dom",
             Self::Virtio => "virtio",
             Self::VirtioNet => "virtio-net",
+            Self::VirtioBlk => "virtio-blk",
             Self::DispScan => "disp-scan",
             Self::PciScan => "pci-scan",
             Self::DisplayMux => "display-mux",
@@ -161,6 +167,7 @@ impl Purpose {
             Self::UiDom => "__ui_dom→__gr_plane",
             Self::Virtio => "vio-mmio",
             Self::VirtioNet => "vio-mmio-net",
+            Self::VirtioBlk => "vio-mmio-blk",
             Self::DispScan => "disp-mmio",
             Self::PciScan => "pcie-ecam",
             Self::DisplayMux => "__disp sel",
@@ -448,6 +455,9 @@ pub fn gr_bss_len(w: u32, h: u32, colors: u32) -> u64 {
     GR_HEADER_BYTES.saturating_add(gr_plane_len(w, h, colors))
 }
 
+/// Guest `g6b-zealcli` container: edit line, page dispatch, keymap.
+pub mod cli;
+
 /// UART line: 128 data bytes + u32 length + probe-absent flags.
 pub const UART_LINE_CAP: u32 = 128;
 /// `__uart_line+132` — set by `trap_fault` when an MMIO access fault hits
@@ -455,7 +465,66 @@ pub const UART_LINE_CAP: u32 = 128;
 pub const UART1_DEAD_OFF: u32 = 132;
 /// `__uart_line+133` — set by `trap_fault` for the loopback mailbox window.
 pub const MBOX_DEAD_OFF: u32 = 133;
-pub const UART_LINE_BSS: u64 = 136;
+/// `__uart_line+136` — the `g6b-zealcli` **edit line**: the prompt prefix
+/// followed by what the operator has typed. It is a DOM-row text buffer (the
+/// container's bottom row points at it), so a keystroke changes what the next
+/// paint shows without republishing anything.
+pub const CLI_LINE_OFF: i32 = 136;
+/// Bytes the edit line may hold, prompt prefix included.
+pub const CLI_LINE_CAP: i32 = 120;
+/// `__uart_line+256` — u32 live length of [`CLI_LINE_OFF`] (prefix + typed).
+pub const CLI_LINE_LEN_OFF: i32 = 256;
+/// `__uart_line+260` — u32 edit counter. `CliKey` bumps it; the timer tick
+/// repaints when it moved, so nothing paints from IRQ context.
+pub const CLI_DIRTY_OFF: i32 = 260;
+/// `__uart_line+264` — u32 painted watermark for [`CLI_DIRTY_OFF`].
+pub const CLI_PAINTED_OFF: i32 = 264;
+/// `__uart_line+268` — u32 length of the prompt prefix, so backspace knows
+/// where the typed text starts.
+pub const CLI_PROMPT_LEN_OFF: i32 = 268;
+/// `__uart_line+272` — u32 length of the UART line at the newline. The band
+/// dispatcher zeroes the live length word before it compares commands, so the
+/// CLI hook needs the value stashed to know how much of the line to run.
+pub const CLI_UART_LEN_OFF: i32 = 272;
+/// `__uart_line+276` — u32: the autoboot picker owns the screen (1) or not (0).
+pub const AUTO_ON_OFF: i32 = 276;
+/// `__uart_line+280` — u32 selected entry index.
+pub const AUTO_SEL_OFF: i32 = 280;
+/// `__uart_line+284` — u32 timer ticks left in the countdown; `0` means the
+/// countdown is off (expired, stopped by a keypress, or never armed).
+pub const AUTO_TICKS_OFF: i32 = 284;
+/// `__uart_line+288` — u32 whole seconds left, so the header is only
+/// republished when the digit an operator reads actually changes.
+pub const AUTO_SECS_OFF: i32 = 288;
+/// `__uart_line+292` — u32: the picker already had its turn. The boot menu is a
+/// power-on question, so once it is answered (Enter, Esc, or the countdown) the
+/// prompt must not ask again — `CliInit` is also the "back to the prompt" path.
+pub const AUTO_DONE_OFF: i32 = 292;
+/// `__uart_line+296` — the `DomPaint` re-entrancy guard.
+///
+/// It lives here rather than in `__vio` because **this block always exists**: a
+/// board with no virtio device has no `__vio`, and a guard that writes into
+/// whatever follows an absent block is worse than no guard at all. The trap frame
+/// saves `ra`, `t0..t6` and `a0..a7` but *not* `s0..s5`, which `DomPaint` uses, so
+/// a timer tick landing inside a normal-context paint would repaint with the
+/// interrupted call's registers. The interrupting call returns instead; the next
+/// tick repaints, because the dirty watermark is still ahead of the painted one.
+pub const PAINT_BUSY_OFF: i32 = 296;
+/// `__uart_line+300` — **which face owns the screen**: `0` the zealcli container
+/// (and the boot picker), `1` the web engine.
+///
+/// A build that carries the whole engine still boots the minimally dependent face
+/// first, so both are compiled and one plane is shared. The latch is what keeps
+/// them from fighting over it: while the CLI owns the screen the wasm UI does not
+/// paint and keys edit the prompt; taking the picker's "BIOS UI" entry (or running
+/// `LoadUI`) flips it, and from then on keys are the browser's and the tick paints
+/// the browser's DOM. Without a latch the two faces would publish rows into the
+/// same `__ui_dom` and blit over each other every tick.
+pub const FACE_OWNER_OFF: i32 = 300;
+/// Face codes for [`FACE_OWNER_OFF`].
+pub const FACE_CLI: i64 = 0;
+pub const FACE_WEB: i64 = 1;
+pub const UART_LINE_BSS: u64 = 308;
 /// `G6UI` magic + size + flags + accel + wasm pointer + magic echo + nfiles.
 pub const UI_HEADER_BYTES: u64 = 32;
 

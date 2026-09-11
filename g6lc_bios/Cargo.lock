@@ -59,6 +59,8 @@ dependencies = [
  "g6b-pglite",
  "g6b-spec",
  "g6b-ttf",
+ "g6b-vfs",
+ "g6b-zealcli",
 ]
 
 [[package]]
@@ -188,6 +190,7 @@ dependencies = [
  "g6b-css",
  "g6b-design",
  "g6b-dom",
+ "g6b-fs",
  "g6b-gr",
  "g6b-holyc",
  "g6b-html",
@@ -199,6 +202,7 @@ dependencies = [
  "g6b-spec",
  "g6b-tls",
  "g6b-ui",
+ "g6b-vfs",
  "g6b-wasm",
  "g6b-webidl",
  "g6b-zealcli",
@@ -237,6 +241,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "g6b-vfs"
+version = "0.1.0"
+
+[[package]]
 name = "g6b-wasm"
 version = "0.1.0"
 dependencies = [
@@ -253,8 +261,10 @@ version = "0.1.0"
 name = "g6b-zealcli"
 version = "0.1.0"
 dependencies = [
+ "g6b-asm",
  "g6b-holyc",
  "g6b-spec",
+ "g6b-vfs",
 ]
 
 [[package]]

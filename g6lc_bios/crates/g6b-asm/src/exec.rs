@@ -27,7 +27,14 @@ use crate::{
 /// rest of boot; real QEMU has no such bound.
 /// Host-model step ceiling — raised for the timer-tick background repaint
 /// (DomPaint+VioPaint per dirty tick) plus the await/dom-nav lane.
-const STEP_LIMIT: u32 = 24_000_000;
+///
+/// Raised again for **CLI-first on a complete build**: the container paints its
+/// frame at power-on and the browser paints its own when the picker hands the plane
+/// over, so a full boot now contains two glyph passes over a 640×480 plane plus two
+/// scanout expands. That is real work the firmware does on purpose, not a runaway
+/// loop, and a ceiling that forbids it would only hide the ordering this build is
+/// supposed to have. Real QEMU does the same work in milliseconds.
+const STEP_LIMIT: u32 = 48_000_000;
 const UART0: u64 = 0x1000_0000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +140,9 @@ pub struct Smoke {
     pub cap_tiles: u32,
     /// Used-buffer interrupt assertions (InterruptStatus bit 0 sets).
     pub vio_irqs: u32,
+    /// virtio-blk requests the modelled device completed. A test asserts the
+    /// driver *asked the device* for its sectors rather than reading stale RAM.
+    pub blk_reqs: u32,
     /// Uncore display engine latched a scanout commit (`disp`-class
     /// peripheral; `architecture/uncore/hdmi-display.md`).
     pub disp_committed: bool,
@@ -165,6 +175,54 @@ pub fn run_module_hart(
     hartid: u64,
 ) -> Result<Smoke, String> {
     run_module_web(spec, module, entry, hartid, None)
+}
+
+/// Same as [`run_module`] but with a custom virtio-blk backing image.
+pub fn run_module_with_blk_image(
+    spec: &BoardSpec,
+    module: &Module,
+    entry: u64,
+    blk_image: Vec<u8>,
+) -> Result<Smoke, String> {
+    run_module_hart_with_blk_image(spec, module, entry, 0, blk_image)
+}
+
+/// Same as [`run_module_hart`] but with a custom virtio-blk backing image.
+pub fn run_module_hart_with_blk_image(
+    spec: &BoardSpec,
+    module: &Module,
+    entry: u64,
+    hartid: u64,
+    blk_image: Vec<u8>,
+) -> Result<Smoke, String> {
+    let (insns, rodata) = module.to_words(entry)?;
+    let mut image = Vec::with_capacity(insns.len() * 4 + rodata.len());
+    for w in insns {
+        image.extend_from_slice(&w.to_le_bytes());
+    }
+    image.extend_from_slice(&rodata);
+    let memsz = payload_memsz(image.len() as u64, module.n_harts(), module.extra_bss());
+    let uart_ui_pc = module.label_addr(entry, "uart_ui").unwrap_or(0);
+    let trap_timer_pc = module.label_addr(entry, "trap_timer").unwrap_or(0);
+    run_with_kick(
+        spec,
+        &image,
+        entry,
+        memsz,
+        hartid,
+        b'V',
+        spec.wants_virtio_gpu(),
+        true,
+        module.vio_bss_addr(entry).unwrap_or(0),
+        module.scan_fb_addr(entry).unwrap_or(0),
+        module.vio_fb_bytes,
+        module.cap_addr(entry).unwrap_or(0),
+        None,
+        None,
+        uart_ui_pc,
+        trap_timer_pc,
+        Some(blk_image),
+    )
 }
 
 /// Host-injected Canvas32 + dirty tiles for the guest compact persist (B91).
@@ -294,6 +352,7 @@ fn run_module_web_inner(
         feed,
         uart_ui_pc,
         trap_timer_pc,
+        None,
     )
 }
 
@@ -328,6 +387,7 @@ pub fn run_module_kick(
         None,
         0,
         0,
+        None,
     )
 }
 
@@ -358,6 +418,7 @@ pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Resul
         None,
         0,
         0,
+        None,
     )
 }
 
@@ -389,6 +450,7 @@ pub fn run_module_bare(spec: &BoardSpec, module: &Module, entry: u64) -> Result<
         None,
         0,
         0,
+        None,
     )
 }
 
@@ -420,6 +482,7 @@ pub fn run(
         None,
         0,
         0,
+        None,
     )
 }
 
@@ -445,6 +508,7 @@ fn run_with_kick(
     mut feed: Option<&mut dyn WebFeed>,
     uart_ui_pc: u64,
     trap_timer_pc: u64,
+    blk_image: Option<Vec<u8>>,
 ) -> Result<Smoke, String> {
     let xlen = spec.isa.xlen;
     if xlen != 32 && xlen != 64 {
@@ -505,6 +569,25 @@ fn run_with_kick(
         vio_gpu,
         vio_inp: vio_gpu && spec.wants_virtio_input(),
         vio_net: spec.wants_virtio_net(),
+        vio_blk: spec.wants_virtio_blk(),
+        blk_status: 0,
+        blk_feat_sel: 0,
+        blk_qsel: 0,
+        blk_qnum: 0,
+        blk_qdesc: 0,
+        blk_qavail: 0,
+        blk_qused: 0,
+        blk_ready: false,
+        blk_isr: 0,
+        blk_used_idx: 0,
+        blk_image: if let Some(img) = blk_image {
+            img
+        } else if spec.wants_virtio_blk() {
+            modelled_blk_image()
+        } else {
+            Vec::new()
+        },
+        blk_reqs: 0,
         vio_base,
         scan_fb_base,
         scan_fb_bytes,
@@ -607,16 +690,28 @@ fn run_with_kick(
             } else {
                 0
             };
-            if spec.kernel.wasm.enable && spec.kernel.wasm.jit {
+            // `__ui_blob` only exists when the UI object is live; the row table
+            // follows it. Both the wasm DOM lane and the CLI text face use the
+            // same table, so the probe latches it for either.
+            let ui = if spec.kernel.wasm.enable || spec.kernel.http.files.enable {
+                crate::UI_HEADER_BYTES
+            } else {
+                0
+            };
+            if (spec.kernel.wasm.enable && spec.kernel.wasm.jit)
+                || crate::analyze::wants_cli_face(spec)
+            {
                 stacks
                     .wrapping_add(gr)
                     .wrapping_add(UART_LINE_BSS)
-                    .wrapping_add(crate::UI_HEADER_BYTES)
+                    .wrapping_add(ui)
             } else {
                 0
             }
         },
         disp_base: spec.display_ctrl().unwrap_or(0),
+        jit_lane: spec.kernel.wasm.enable && spec.kernel.wasm.jit,
+        cli_face: crate::analyze::wants_cli_face(spec),
         ..Default::default()
     };
     let mut console = String::new();
@@ -900,6 +995,7 @@ fn done(
             0
         },
         vio_irqs: csr.vio_irqs,
+        blk_reqs: csr.blk_reqs,
         disp_committed: csr.disp_committed,
         disp_desc: (
             csr.disp_regs[3] as u64 | ((csr.disp_regs[4] as u64) << 32),
@@ -993,6 +1089,11 @@ struct Csr {
     dom_base: u64,
     dom_rows: u32,
     dom_pix0: u32,
+    /// `kernel.wasm.jit` — the await/throw UART commands exist only there.
+    jit_lane: bool,
+    /// The guest `g6b-zealcli` container is compiled, so an unmatched band line
+    /// is dispatched by `CliEnter`.
+    cli_face: bool,
     gr_dom_off: u64,
     /// Modelled virtio-mmio GPU at slot 0 (matches `qemu_dual_band_argv`).
     vio_gpu: bool,
@@ -1014,6 +1115,25 @@ struct Csr {
     vio_last_cmd: u32,
     /// Last response `type` word written into a device-write desc.
     vio_last_resp: u32,
+    /// Modelled virtio-blk at [`VIO_BLK_SLOT`] (DeviceID 2) with a real backing
+    /// image: the requestq is serviced, so `BlkRead` reads the bytes the test put
+    /// there. This is what makes the guest driver testable without QEMU.
+    vio_blk: bool,
+    blk_status: u32,
+    blk_feat_sel: u32,
+    blk_qsel: u32,
+    blk_qnum: u32,
+    blk_qdesc: u64,
+    blk_qavail: u64,
+    blk_qused: u64,
+    blk_ready: bool,
+    blk_isr: u32,
+    blk_used_idx: u16,
+    /// Sectors the device serves, 512 bytes each.
+    blk_image: Vec<u8>,
+    /// Requests the device completed — a test asserts the driver asked once, not
+    /// that it spun.
+    blk_reqs: u32,
     /// Modelled virtio-net at slot 5 (DeviceID 1). Not a QEMU `-netdev`.
     vio_net: bool,
     /// Modelled virtio-input keyboard at slot 1 (`-device
@@ -1668,6 +1788,9 @@ fn vio_load(csr: &Csr, addr: u64) -> u32 {
     if slot == VIO_NET_SLOT && csr.vio_net {
         return net_load(off % VIO_MMIO_STEP);
     }
+    if slot == crate::encode::VIO_BLK_SLOT && csr.vio_blk {
+        return blk_load(csr, off % VIO_MMIO_STEP);
+    }
     if slot != 0 || !csr.vio_gpu {
         return 0;
     }
@@ -1706,6 +1829,10 @@ fn vio_store(csr: &mut Csr, ram: &mut [u8], base: u64, addr: u64, v: u32) {
     }
     if slot == 3 && csr.vio_inp {
         tab_store(csr, ram, base, off % VIO_MMIO_STEP, v);
+        return;
+    }
+    if slot == crate::encode::VIO_BLK_SLOT && csr.vio_blk {
+        blk_store(csr, ram, base, off % VIO_MMIO_STEP, v);
         return;
     }
     if slot != 0 || !csr.vio_gpu {
@@ -1772,6 +1899,265 @@ fn vio_notify(csr: &mut Csr, ram: &mut [u8], base: u64) {
         // modelled device sits at slot 0 → irq 1 (claimed by trap_vio when
         // PlicInit enabled the 1..=8 range).
         csr.plic_pending |= 1 << 1;
+    }
+}
+
+/// The medium the modelled virtio-blk device serves: a GPT-shaped disk.
+///
+/// LBA 0 is a protective MBR (`0x55AA` at 510, one `0xEE` entry) and LBA 1 carries
+/// the `"EFI PART"` header signature — the layout every installer writes, and the
+/// one the guest `BlkSig` has to recognize from the bytes rather than from a claim.
+/// 64 sectors is enough for both and keeps the model cheap.
+fn modelled_blk_image() -> Vec<u8> {
+    let mut d = vec![0u8; 64 * 512];
+    d[446 + 4] = 0xEE; // protective MBR entry type
+    d[510] = 0x55;
+    d[511] = 0xAA;
+    d[512..520].copy_from_slice(b"EFI PART");
+    d[512 + 12..512 + 16].copy_from_slice(&92u32.to_le_bytes());
+    d
+}
+
+/// A minimal FAT32 superfloppy for the payload file-read test.
+///
+/// 64 sectors, 512 BPS, 1 SPC, 2 FATs of 1 sector each, root cluster 2, and a
+/// single 8.3 file `HELLO.TXT` in the root whose first cluster holds text.
+#[cfg(test)]
+fn modelled_fat32_image() -> Vec<u8> {
+    let mut d = vec![0u8; 64 * 512];
+    let bps = 512u16;
+    let spc = 1u8;
+    let rsvd = 2u16;
+    let num_fats = 2u8;
+    let fatsz = 1u32;
+    let total = 64u32;
+    let root_clus = 2u32;
+    // BPB at LBA 0.
+    d[0..3].copy_from_slice(&[0xEB, 0x58, 0x90]);
+    d[3..11].copy_from_slice(b"MSDOS5.0");
+    d[0x0B..0x0D].copy_from_slice(&bps.to_le_bytes());
+    d[0x0D] = spc;
+    d[0x0E..0x10].copy_from_slice(&rsvd.to_le_bytes());
+    d[0x10] = num_fats;
+    d[0x11..0x13].fill(0); // root entry count
+    d[0x13..0x15].fill(0); // total sectors 16
+    d[0x15] = 0xF8; // media
+    d[0x16..0x18].fill(0); // fat size 16
+    d[0x18..0x1A].copy_from_slice(&32u16.to_le_bytes()); // sectors per track
+    d[0x1A..0x1C].copy_from_slice(&64u16.to_le_bytes()); // heads
+    d[0x1C..0x20].copy_from_slice(&0u32.to_le_bytes()); // hidden
+    d[0x20..0x24].copy_from_slice(&total.to_le_bytes());
+    d[0x24..0x28].copy_from_slice(&fatsz.to_le_bytes());
+    d[0x28..0x2A].copy_from_slice(&0u16.to_le_bytes()); // ext flags
+    d[0x2A..0x2C].copy_from_slice(&0u16.to_le_bytes()); // version
+    d[0x2C..0x30].copy_from_slice(&root_clus.to_le_bytes());
+    d[0x30..0x32].copy_from_slice(&1u16.to_le_bytes()); // fsinfo sector
+    d[0x32..0x34].copy_from_slice(&6u16.to_le_bytes()); // backup boot sector
+    d[0x40] = 0x80; // drive number
+    d[0x41] = 0;
+    d[0x42] = 0x29; // boot signature
+    d[0x43..0x47].copy_from_slice(&0u32.to_le_bytes()); // volume id
+    d[0x47..0x52].fill(0x20); // volume label spaces
+    d[0x47..0x47 + 9].copy_from_slice(b"NO NAME  "[..9].as_ref());
+    d[0x52..0x5A].copy_from_slice(b"FAT32   ");
+    d[0x1FE] = 0x55;
+    d[0x1FF] = 0xAA;
+    // FAT1 at LBA 2 and FAT2 at LBA 3.
+    for fat in [2usize, 3] {
+        let off = fat * 512;
+        d[off..off + 4].copy_from_slice(&0x0FFFFFF8u32.to_le_bytes()); // entry 0: media
+        d[off + 4..off + 8].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // entry 1: reserved
+        d[off + 8..off + 12].copy_from_slice(&0x0FFFFFF8u32.to_le_bytes()); // entry 2: root EOC
+        d[off + 12..off + 16].copy_from_slice(&0x0FFFFFF8u32.to_le_bytes()); // entry 3: file EOC
+    }
+    // Root directory at LBA 4 (cluster 2).
+    let root = 4 * 512;
+    d[root..root + 11].copy_from_slice(b"HELLO   TXT");
+    d[root + 11] = 0x20; // archive attribute
+    d[root + 0x14..root + 0x16].copy_from_slice(&0u16.to_le_bytes()); // start cluster high
+    d[root + 0x1A..root + 0x1C].copy_from_slice(&3u16.to_le_bytes()); // start cluster low
+    d[root + 0x1C..root + 0x20].copy_from_slice(&15u32.to_le_bytes()); // file size
+                                                                       // File content at LBA 5 (cluster 3).
+    let data = 5 * 512;
+    d[data..data + 15].copy_from_slice(b"hello from fat\n");
+    d
+}
+
+/// A minimal ext4 superfloppy for the payload file-read test.
+///
+/// 64 sectors, 1024-byte blocks (2 sectors/block). The superblock is block 1
+/// (LBA 2), the group-0 descriptor block 2 (LBA 4), the inode table block 3
+/// (LBA 6), the root directory block 4 (LBA 8) holding `hello.txt` → inode 3,
+/// and the file's data block 5 (LBA 10). Inodes are 128 bytes, direct-block
+/// `i_block` only — the layout `Ext4Read` is contracted to understand.
+#[cfg(test)]
+fn modelled_ext4_image() -> Vec<u8> {
+    let mut d = vec![0u8; 64 * 512];
+    // Superblock at byte 1024 (LBA 2).
+    let sb = 1024usize;
+    d[sb..sb + 4].copy_from_slice(&128u32.to_le_bytes()); // s_inodes_count
+    d[sb + 4..sb + 8].copy_from_slice(&32u32.to_le_bytes()); // s_blocks_count_lo
+    d[sb + 20..sb + 24].copy_from_slice(&1u32.to_le_bytes()); // s_first_data_block
+    d[sb + 24..sb + 28].copy_from_slice(&0u32.to_le_bytes()); // s_log_block_size = 1024
+    d[sb + 32..sb + 36].copy_from_slice(&8192u32.to_le_bytes()); // s_blocks_per_group
+    d[sb + 40..sb + 44].copy_from_slice(&128u32.to_le_bytes()); // s_inodes_per_group
+    d[sb + 56..sb + 58].copy_from_slice(&0xEF53u16.to_le_bytes()); // s_magic
+    d[sb + 58..sb + 60].copy_from_slice(&1u16.to_le_bytes()); // s_state clean
+    d[sb + 88..sb + 90].copy_from_slice(&128u16.to_le_bytes()); // s_inode_size
+    d[sb + 96..sb + 100].copy_from_slice(&2u32.to_le_bytes()); // s_feature_incompat = FILETYPE
+                                                               // Group-0 descriptor at block 2 (LBA 4): bg_inode_table_lo = block 3.
+    let gdt = 4 * 512;
+    d[gdt + 8..gdt + 12].copy_from_slice(&3u32.to_le_bytes());
+    // Inode table at block 3 (LBA 6). Inode 2 (root dir) at offset 128,
+    // inode 3 (the file) at offset 256 — both inside the first sector.
+    let itab = 6 * 512;
+    let ino2 = itab + 128;
+    d[ino2..ino2 + 2].copy_from_slice(&0x41EDu16.to_le_bytes()); // i_mode = dir | 0755
+    d[ino2 + 4..ino2 + 8].copy_from_slice(&1024u32.to_le_bytes()); // i_size_lo
+    d[ino2 + 32..ino2 + 36].copy_from_slice(&0u32.to_le_bytes()); // i_flags
+    d[ino2 + 40..ino2 + 44].copy_from_slice(&4u32.to_le_bytes()); // i_block[0] = block 4
+    let ino3 = itab + 256;
+    d[ino3..ino3 + 2].copy_from_slice(&0x81A4u16.to_le_bytes()); // i_mode = reg | 0644
+    d[ino3 + 4..ino3 + 8].copy_from_slice(&16u32.to_le_bytes()); // i_size_lo
+    d[ino3 + 32..ino3 + 36].copy_from_slice(&0u32.to_le_bytes()); // i_flags
+    d[ino3 + 40..ino3 + 44].copy_from_slice(&5u32.to_le_bytes()); // i_block[0] = block 5
+                                                                  // Root directory block 4 (LBA 8): ".", "..", "hello.txt" → inode 3.
+    let dir = 8 * 512;
+    d[dir..dir + 4].copy_from_slice(&2u32.to_le_bytes()); // inode 2
+    d[dir + 4..dir + 6].copy_from_slice(&12u16.to_le_bytes()); // rec_len
+    d[dir + 6] = 1; // name_len
+    d[dir + 7] = 2; // file_type dir
+    d[dir + 8] = b'.';
+    d[dir + 12..dir + 16].copy_from_slice(&2u32.to_le_bytes()); // inode 2
+    d[dir + 16..dir + 18].copy_from_slice(&12u16.to_le_bytes());
+    d[dir + 18] = 2;
+    d[dir + 19] = 2;
+    d[dir + 20..dir + 22].copy_from_slice(b"..");
+    d[dir + 24..dir + 28].copy_from_slice(&3u32.to_le_bytes()); // inode 3
+    d[dir + 28..dir + 30].copy_from_slice(&1000u16.to_le_bytes()); // rec_len to end
+    d[dir + 30] = 9; // name_len
+    d[dir + 31] = 1; // file_type reg
+    d[dir + 32..dir + 41].copy_from_slice(b"hello.txt");
+    // File data block 5 (LBA 10).
+    let data = 10 * 512;
+    d[data..data + 16].copy_from_slice(b"hello from ext4\n");
+    d
+}
+
+/// virtio-blk register reads (DeviceID 2).
+fn blk_load(csr: &Csr, reg: u64) -> u32 {
+    use crate::encode::{VIO_DEV_BLK, VIO_F_VERSION_1, VIO_MAGIC};
+    match reg {
+        0x00 => VIO_MAGIC,
+        0x04 => 2, // modern (virtio 1.x) transport
+        0x08 => VIO_DEV_BLK,
+        0x10 => {
+            if csr.blk_feat_sel == 1 {
+                VIO_F_VERSION_1
+            } else {
+                0
+            }
+        }
+        0x14 => csr.blk_feat_sel,
+        0x30 => csr.blk_qsel,
+        0x34 => 1024, // QueueNumMax
+        0x38 => csr.blk_qnum,
+        0x44 => u32::from(csr.blk_ready),
+        0x60 => csr.blk_isr,
+        0x70 => csr.blk_status,
+        _ => 0,
+    }
+}
+
+/// virtio-blk register writes. A `QUEUE_NOTIFY` services the requestq.
+fn blk_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
+    match reg {
+        0x14 => csr.blk_feat_sel = v,
+        0x20 => {}
+        0x24 => {}
+        0x30 => csr.blk_qsel = v,
+        0x38 => csr.blk_qnum = v,
+        0x44 => csr.blk_ready = v != 0,
+        0x50 => blk_notify(csr, ram, base),
+        0x64 => csr.blk_isr &= !v,
+        0x70 => {
+            csr.blk_status = v;
+            if v == 0 {
+                csr.blk_qnum = 0;
+                csr.blk_ready = false;
+                csr.blk_isr = 0;
+                csr.blk_used_idx = 0;
+            }
+        }
+        0x80 => csr.blk_qdesc = (csr.blk_qdesc & !0xffff_ffff) | u64::from(v),
+        0x84 => csr.blk_qdesc = (csr.blk_qdesc & 0xffff_ffff) | (u64::from(v) << 32),
+        0x90 => csr.blk_qavail = (csr.blk_qavail & !0xffff_ffff) | u64::from(v),
+        0x94 => csr.blk_qavail = (csr.blk_qavail & 0xffff_ffff) | (u64::from(v) << 32),
+        0xa0 => csr.blk_qused = (csr.blk_qused & !0xffff_ffff) | u64::from(v),
+        0xa4 => csr.blk_qused = (csr.blk_qused & 0xffff_ffff) | (u64::from(v) << 32),
+        _ => {}
+    }
+}
+
+/// Service the requestq: walk the three-descriptor chain, copy the requested
+/// sector out of the backing image, write the status byte, publish the used elem.
+///
+/// It follows the descriptor chain rather than assuming the driver's layout — a
+/// model that hard-codes offsets would pass even if the driver built a chain no
+/// real device could follow.
+fn blk_notify(csr: &mut Csr, ram: &mut [u8], base: u64) {
+    if !csr.blk_ready || csr.blk_qsel != 0 || csr.blk_qdesc == 0 {
+        return;
+    }
+    let avail = csr.blk_qavail;
+    let idx = load_u32(ram, base, avail)
+        .map(|w| (w >> 16) as u16)
+        .unwrap_or(0);
+    while csr.blk_used_idx != idx {
+        let ri = csr.blk_used_idx % 8;
+        let word = load_u32(ram, base, avail + 4 + u64::from(ri & !1) * 2).unwrap_or(0);
+        let head = ((word >> ((ri & 1) * 16)) & 0xffff) as u16;
+        // desc0: the 16-byte request header {type, reserved, sector}.
+        let d0 = csr.blk_qdesc + u64::from(head) * 16;
+        let hdr = load_u64(ram, base, d0).unwrap_or(0);
+        let flags0 = load_u32(ram, base, d0 + 12).unwrap_or(0);
+        let ty = load_u32(ram, base, hdr).unwrap_or(u32::MAX);
+        let sector = load_u64(ram, base, hdr + 8).unwrap_or(0);
+        let next1 = u64::from((flags0 >> 16) & 0xffff);
+        // desc1: the data buffer the device fills.
+        let d1 = csr.blk_qdesc + next1 * 16;
+        let data = load_u64(ram, base, d1).unwrap_or(0);
+        let dlen = load_u32(ram, base, d1 + 8).unwrap_or(0);
+        let flags1 = load_u32(ram, base, d1 + 12).unwrap_or(0);
+        let next2 = u64::from((flags1 >> 16) & 0xffff);
+        // desc2: the one-byte status.
+        let d2 = csr.blk_qdesc + next2 * 16;
+        let stat = load_u64(ram, base, d2).unwrap_or(0);
+        // Only reads are modelled; anything else is an honest IOERR (1), which is
+        // also what the driver must notice instead of trusting the used ring.
+        let mut status = 1u8;
+        if ty == 0 {
+            let start = (sector as usize) * 512;
+            let want = dlen.min(512) as usize;
+            if start + want <= csr.blk_image.len() {
+                let bytes: Vec<u8> = csr.blk_image[start..start + want].to_vec();
+                for (i, b) in bytes.iter().enumerate() {
+                    store_u8(ram, base, data + i as u64, *b);
+                }
+                status = 0;
+            }
+        }
+        store_u8(ram, base, stat, status);
+        let used = csr.blk_qused;
+        let ui = csr.blk_used_idx % 8;
+        store_u32(ram, base, used + 4 + u64::from(ui) * 8, u32::from(head));
+        store_u32(ram, base, used + 8 + u64::from(ui) * 8, dlen + 1);
+        csr.blk_used_idx = csr.blk_used_idx.wrapping_add(1);
+        store_u32(ram, base, used, u32::from(csr.blk_used_idx) << 16);
+        csr.blk_isr |= 1;
+        csr.blk_reqs += 1;
+        // QEMU virt raises PLIC source 1+slot for a used-buffer update.
+        csr.plic_pending |= 1 << (1 + crate::encode::VIO_BLK_SLOT);
     }
 }
 
@@ -2498,18 +2884,34 @@ fn host_uart_kick(csr: &mut Csr) -> bool {
     // drains the 3 still-pending slots).
     const SEQ_KEYS: &[u8] = b"Keys\n";
     const SEQ_AWAIT: &[u8] = b"Await\nAwait\nAwait\nAwait\nAwait\nThrow\nUi\n";
+    // With the zealcli face compiled, a line no band command claims belongs to
+    // the container: `help` switches to the packed page, `nosuchcmd` must be
+    // reported (`CLI-CMD?`) rather than guessed at.
+    // Ordered so the run ends on a page: the final painted frame is the `help`
+    // page, which is what a test can assert about the screen.
+    const SEQ_CLI: &[u8] = b"nosuchcmd\nclear\nhelp\n";
+    // With a block device, `Blk` makes the guest read LBA 0/1 itself and name the
+    // medium. It goes *before* the CLI segment so the run still ends on a page.
+    const SEQ_BLK: &[u8] = b"Blk\n";
     let i = csr.uart_seq_i as usize;
     // Segments past SEQ only exist when their lane is live; the AWAIT base
     // skips the KEYS segment on input-less specs.
     let keys_len = if csr.vio_inp { SEQ_KEYS.len() } else { 0 };
     let await_base = SEQ.len() + keys_len;
+    let blk_base = await_base + if csr.jit_lane { SEQ_AWAIT.len() } else { 0 };
+    let cli_base = blk_base + if csr.vio_blk { SEQ_BLK.len() } else { 0 };
     let byte = if i < SEQ.len() {
         SEQ[i]
     } else if i < await_base {
         SEQ_KEYS[i - SEQ.len()]
-    } else if csr.dom_base != 0 && i < await_base + SEQ_AWAIT.len() {
-        // `Await` only exists under the jit DOM lane (dom_base latched).
+    } else if csr.jit_lane && i < blk_base {
+        // `Await` only exists under the jit DOM lane (the CLI text face shares
+        // the row table but has no await slots).
         SEQ_AWAIT[i - await_base]
+    } else if csr.vio_blk && i < cli_base {
+        SEQ_BLK[i - blk_base]
+    } else if csr.cli_face && i < cli_base + SEQ_CLI.len() {
+        SEQ_CLI[i - cli_base]
     } else {
         return false;
     };
@@ -3417,6 +3819,132 @@ mod tests {
         }
     }
 
+    /// The payload reads a disk **itself**: probe, requestq bring-up, a real
+    /// `VIRTIO_BLK_T_IN` request, and the medium identified from LBA 0/1.
+    ///
+    /// This is the capability the autoboot handoff has been waiting on since B97 —
+    /// until now the guest could only list what a host had told it about.
+    #[test]
+    fn the_guest_reads_its_own_sectors_and_names_the_medium() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"storage":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        assert!(
+            spec.wants_virtio_blk(),
+            "storage + cli + virtio → a blk driver"
+        );
+        let m = analyze::kstart(&spec);
+        // `Blk` on the serial line runs `BlkSig`, which is two real reads.
+        // The canned serial sequence includes Blk on a blk-capable board.
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            s.console
+                .contains(&format!("VIRTIO-BLK {}", crate::encode::VIO_BLK_SLOT)),
+            "the slot it found, and its irq is 1+slot: {}",
+            s.console
+        );
+        assert!(s.console.contains("VIRTIO-BLK-OK"), "{}", s.console);
+        assert!(!s.console.contains("VIRTIO-BLK-NONE"), "{}", s.console);
+        assert!(!s.console.contains("VIRTIO-BLK-FAIL"), "{}", s.console);
+        // The medium is named from its own bytes: a protective MBR whose LBA 1
+        // carries "EFI PART" is a GPT disk, not an MBR one.
+        assert!(s.console.contains("BLK-SIG gpt"), "{}", s.console);
+        assert!(!s.console.contains("BLK-TIMEOUT"), "{}", s.console);
+        assert!(!s.console.contains("BLK-ERR"), "{}", s.console);
+        assert!(!s.console.contains("BLK-NODEV"), "{}", s.console);
+        // Real requests reached the device — the bytes were read, not assumed
+        // from RAM that happened to look right. Boot names the medium once and the
+        // Blk verb repeats it, so two reads each. FatRead/Ext4Read gate on the
+        // BlkSig kind latch and cost nothing on a GPT medium.
+        assert_eq!(
+            s.blk_reqs, 4,
+            "LBA 0 + LBA 1, at boot and on Blk: {}",
+            s.console
+        );
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    /// The payload not only identifies a FAT32 medium but reads a file from it.
+    #[test]
+    fn the_guest_reads_a_file_from_fat32() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"storage":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let s = run_module_with_blk_image(&spec, &m, 0x8020_0000, modelled_fat32_image()).unwrap();
+        assert!(s.console.contains("VIRTIO-BLK-OK"), "{}", s.console);
+        assert!(s.console.contains("BLK-SIG fat"), "{}", s.console);
+        assert!(!s.console.contains("BLK-SIG gpt"), "{}", s.console);
+        assert!(!s.console.contains("FILE-NODEV"), "{}", s.console);
+        assert!(
+            s.console.contains("FILE-FOUND hello from fat"),
+            "{}",
+            s.console
+        );
+        // Boot: BlkSig (LBA 0, FAT), FatRead (root + file); Ext4Read gates on the
+        // kind latch and reads nothing. The canned `Blk` verb repeats it.
+        assert!(s.blk_reqs >= 3, "blk_reqs={} {}", s.blk_reqs, s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    /// The payload not only identifies an ext4 medium but reads a file from it:
+    /// superblock → group descriptor → inode table → root directory → file data,
+    /// all through the same BlkRead device path the FAT reader uses.
+    #[test]
+    fn the_guest_reads_a_file_from_ext4() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"storage":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let s = run_module_with_blk_image(&spec, &m, 0x8020_0000, modelled_ext4_image()).unwrap();
+        assert!(s.console.contains("VIRTIO-BLK-OK"), "{}", s.console);
+        assert!(s.console.contains("BLK-SIG ext4"), "{}", s.console);
+        assert!(!s.console.contains("FILE-NODEV"), "{}", s.console);
+        assert!(
+            s.console.contains("FILE-FOUND hello from ext4"),
+            "{}",
+            s.console
+        );
+        // BlkSig (LBA 0 + LBA 2 probe) plus Ext4Read's GDT, two inode-table,
+        // root-dir and file reads — real requests, not RAM that happened to fit.
+        assert!(s.blk_reqs >= 6, "blk_reqs={} {}", s.blk_reqs, s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    /// A board with no storage compiles no driver, and the `Blk` verb does not
+    /// exist — the CLI reports an unknown command rather than a silent no-op.
+    #[test]
+    fn no_storage_means_no_block_driver_at_all() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        assert!(!spec.wants_virtio_blk(), "no uncore.storage → no driver");
+        let m = analyze::kstart(&spec);
+        let asm = m.to_asm();
+        assert!(!asm.contains("BlkInit"), "the driver is not compiled in");
+        assert!(!asm.contains("uart_blk"), "and neither is its verb");
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(!s.console.contains("VIRTIO-BLK"), "{}", s.console);
+        assert_eq!(s.blk_reqs, 0);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
     #[test]
     fn vio_net_probe_finds_modelled_net_at_slot5() {
         let spec = BoardSpec::from_json_str(
@@ -4171,7 +4699,12 @@ mod tests {
         // kick (QEMU `sendkey` stand-in) fills one with EV_KEY KEY_A, raises
         // PLIC irq 2 → trap_inp → InpDrain pushes the key queue + INP marker.
         let spec = BoardSpec::from_json_str(
-            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},"kernel":{"gr":{"enable":true,"backend":"virtio-gpu"},"wasm":{"enable":true,"jit":true}},"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+            // `cli.enable=false` on purpose: this is the **browser-owns-the-plane**
+            // build, where a keystroke is the DOM's. On a build that also carries
+            // the container, the container owns the screen at power-on and the same
+            // key edits the prompt — that path is covered by
+            // `the_container_owns_the_plane_until_the_picker_hands_it_over`.
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},"kernel":{"cli":{"enable":false},"gr":{"enable":true,"backend":"virtio-gpu"},"wasm":{"enable":true,"jit":true}},"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
         )
         .unwrap();
         assert!(spec.wants_virtio_input());

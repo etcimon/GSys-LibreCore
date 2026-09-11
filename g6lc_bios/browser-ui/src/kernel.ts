@@ -72,12 +72,58 @@ function hwStatObject() {
 }
 
 /**
- * Shell `platform.hw` — HolyC-shaped, same chaining as `window.document`.
- * Not a window global; iframes must not see this.
+ * The board facts `g6b-ui` injects into the page as one JSON blob.
+ *
+ * `platform.hw` is *live* and reads through `holycEval`, but the board facts
+ * are fixed at compile time by BoardSpec, so they are emitted once as
+ * `<script type="application/json" id="g6b-platform">` rather than fetched.
+ * Missing or malformed is `{}` — every field then reads as its empty default,
+ * which keeps `platform.product` a string rather than a throw on a page that
+ * was served without the blob.
+ *
+ * Keys are exactly the ones `KernelHost::platform_live` answers in the wasm
+ * lane, so the two lanes cannot drift; `PLATFORM_FACT_KEYS` is the shared list
+ * and `platform_singleton_exposes_the_same_facts_in_both_lanes` asserts it.
  */
-export function attachPlatformGlobal(target) {
+export const PLATFORM_FACT_KEYS = [
+  "product", "profile", "schema",
+  "xlen", "march", "mmu",
+  "harts", "cores", "threads",
+  "dramBase", "dramLen", "textOffset",
+  "web", "wasm", "cli", "store", "workers", "startMenu",
+];
+
+export function readPlatformFacts(target) {
+  const w = target || globalThis;
+  const doc = w.document;
+  if (!doc || typeof doc.getElementById !== "function") return {};
+  const node = doc.getElementById("g6b-platform");
+  if (!node) return {};
+  const raw = typeof node.textContent === "string" ? node.textContent : "";
+  if (!raw.trim()) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    // A malformed blob is a build bug, not a reason to break the page.
+    return {};
+  }
+}
+
+/**
+ * Shell `platform` — board facts plus `platform.hw`, HolyC-shaped, same
+ * chaining as `window.document`. Not a window global; iframes must not see this.
+ *
+ * `facts` overrides the injected blob (tests, and the worker lane which has no
+ * document).
+ */
+export function attachPlatformGlobal(target, facts) {
   const w = target || globalThis;
   if (w.platform && w.platform.__g6bPlatform) return w.platform;
+  const f = facts && typeof facts === "object" ? facts : readPlatformFacts(w);
+  const str = (k) => (typeof f[k] === "string" ? f[k] : "");
+  const num = (k) => (Number.isFinite(f[k]) ? f[k] : 0);
+  const bool = (k) => f[k] === true;
   const hw = {
     __g6bHw: true,
     get nat() { return hwStatObject().nat || "minimal"; },
@@ -169,7 +215,33 @@ export function attachPlatformGlobal(target) {
     hostApply(adapter) { return holycEval("HwHostApply(\"net0\",\"" + adapter + "\")"); },
     hostRevert() { return holycEval("HwHostRevert()"); },
   };
-  const platform = { __g6bPlatform: true, hw };
+  const platform = {
+    __g6bPlatform: true,
+    hw,
+    // Identity
+    get product() { return str("product"); },
+    get profile() { return str("profile"); },
+    get schema() { return num("schema"); },
+    // ISA
+    get xlen() { return num("xlen"); },
+    get march() { return str("march"); },
+    get mmu() { return str("mmu"); },
+    // Topology
+    get harts() { return num("harts"); },
+    get cores() { return num("cores"); },
+    get threads() { return num("threads"); },
+    // Memory
+    get dramBase() { return str("dramBase"); },
+    get dramLen() { return str("dramLen"); },
+    get textOffset() { return str("textOffset"); },
+    // Compiled lanes, so a page can ask instead of guessing.
+    get web() { return bool("web"); },
+    get wasm() { return bool("wasm"); },
+    get cli() { return bool("cli"); },
+    get store() { return bool("store"); },
+    get workers() { return num("workers"); },
+    get startMenu() { return str("startMenu"); },
+  };
   w.platform = platform;
   if (w.window && w !== w.window) w.window.platform = platform;
   if ("hw" in w) delete w.hw;
@@ -571,7 +643,17 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
       return { v: g };
     };
     const ASYNC_STORE = JSON.stringify({ ok: false, error: "async", message: "NotImplemented(\"async\")" });
-    const isStoreAcc = (v) => !!(v && (v === (ctx && typeof ctx.global === "function" ? ctx.global("pglite") : undefined) || v.__g6bStore === "factory" || v.__g6bStore === "instance"));
+    // A store method on the synchronous lodash path degrades to ASYNC_STORE:
+    // `newBiosStore` is async and a lodash chain cannot await. `struct PGLite`
+    // then *interns that result* and starts its next chain from it
+    // (`save()` -> `Lodash(m_saved, handle)`), so every subsequent `exec`/
+    // `query` arrives with the degraded sentinel as the accumulator. Treating
+    // that as "not a store" and throwing would abort `_start` halfway through
+    // a chain the guest wrote correctly, so degradation is idempotent: a
+    // degraded accumulator keeps answering `NotImplemented("async")` and the
+    // cell runs to completion. Real async store work goes through asyncify +
+    // `newBiosStore`, or `createPgliteWasm`, never through this path.
+    const isStoreAcc = (v) => !!(v && (v === (ctx && typeof ctx.global === "function" ? ctx.global("pglite") : undefined) || v.__g6bStore === "factory" || v.__g6bStore === "instance" || v === ASYNC_STORE));
     let acc = init;
     for (const c of commands) {
       if (c.local) continue; // `cb` names the callback; it has no value

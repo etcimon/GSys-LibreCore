@@ -240,9 +240,25 @@ pub fn script_sources(node: &Node) -> Vec<String> {
 
 fn collect_scripts(node: &Node, out: &mut Vec<String>) {
     if node.name == "script" {
-        let t = node.inner_text();
-        if !t.is_empty() {
-            out.push(t);
+        // `<script type="application/json">` (and other non-JS types) are data
+        // blocks, not executable scripts. Skipping them here keeps
+        // `script_sources` / `execute_script` from trying to parse JSON as JS.
+        let is_js = match node.attributes.get("type") {
+            None => true, // no type = classic script
+            Some(t) => {
+                let t = t.to_ascii_lowercase();
+                t == "text/javascript"
+                    || t == "module"
+                    || t == "application/javascript"
+                    || t == "application/ecmascript"
+                    || t.is_empty()
+            }
+        };
+        if is_js {
+            let t = node.inner_text();
+            if !t.is_empty() {
+                out.push(t);
+            }
         }
         return;
     }

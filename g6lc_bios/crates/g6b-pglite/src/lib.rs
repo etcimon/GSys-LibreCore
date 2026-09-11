@@ -22,7 +22,9 @@ pub use catalog::{Store, StoreRegistry};
 pub use error::StoreError;
 pub use http::StorePort;
 pub use names::{DataDir, Purpose, StoreUuid};
-pub use persist::{dump_path, dump_path_explicit, read_host_dump_bytes, Dump, PersistMode};
+pub use persist::{
+    dump_path, dump_path_explicit, read_host_dump_bytes, Dump, PersistMode, StoreVolume,
+};
 pub use results::{Field, QueryResult};
 pub use sql::{parse_exec, parse_query, Stmt};
 

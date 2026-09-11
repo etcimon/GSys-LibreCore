@@ -11,7 +11,8 @@ import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { runtimePreflight, wasmLdcConfig, type Toolchain } from "./ldc.ts";
-import { createLibwasmHost } from "../src/kernel.ts";
+import { resolveWasmOpt } from "./binaryen.ts";
+import { createBrowserContext, createLibwasmHost } from "../src/kernel.ts";
 
 export type WasmCellResult = {
   status: number;
@@ -33,6 +34,18 @@ export type CellProvenance = {
   sha256: string;
   buildType: "debug" | "release";
   compiler: string;
+  /**
+   * The `wasm-opt` that ran the asyncify pass, as `<version> <source>`, or
+   * absent when the artifact was not asyncified.
+   *
+   * Informational, like `compiler`: deliberately **not** part of `inputs` and
+   * not compared by `checkCellArtifact`. A different wasm-opt does change the
+   * output bytes, but those are already pinned exactly by `sha256`, and making
+   * the tool a staleness trigger would report a perfectly good committed
+   * artifact as stale on any machine that has not installed the (gitignored)
+   * toolchain — which is the failure mode this manifest exists to avoid.
+   */
+  asyncifyTool?: string;
   imports: string[];
 };
 
@@ -422,7 +435,20 @@ export function verifyLibwasmStartup(bytes: Uint8Array): void {
     }
   }
   const mount = new Element();
-  const host = createLibwasmHost({ createElement: () => new Element() }, mount);
+  const doc = { createElement: () => new Element() };
+  // The cell's `_start` resolves `window.pglite` through the lodash host-eval
+  // path (`PgLite()` -> `defaultTo(Eval("window.pglite"))`, libwasm/pglite.d).
+  // With no context bound, `internParam` sees `ctx === null` and refuses the
+  // name, so `_start` throws and a perfectly good artifact is reported stale.
+  // Bind the *first-party* context rather than a mock: `createBrowserContext`
+  // is what the browser runtime uses, and it wires `pglite` into `bindings()`
+  // itself. `contextId` is not "main" (so the module-level `pglite` export is
+  // not reassigned by a build step) and `biosStore` opts the factory in
+  // anyway. `fetchFn` is intentionally omitted: the synchronous lodash path
+  // degrades every store method before any request is made, so a reachable
+  // fetch here would be a bug and fails closed.
+  const context = createBrowserContext(doc, { contextId: "libwasm-verify", biosStore: true });
+  const host = createLibwasmHost(doc, mount, globalThis.WebAssembly, { context });
   const instance = new WebAssembly.Instance(new WebAssembly.Module(bytes), host.imports);
   const e = instance.exports as Record<string, any>;
   try {
@@ -486,6 +512,7 @@ description "BIOS-UI wasm cell: libwasm SPA (svelte-d fall-through). Not vibe.0.
 authors "Etienne Cimon"
 copyright "Copyright © 2026, Etienne Cimon"
 license "MIT"
+toolchainRequirements ldc=">=1.43.0-beta1"
 dflags "--wasm-enable-eh" "-mattr=+exception-handling" "-fvisibility=hidden" "-fno-moduleinfo"
 versions "G6LC_G6B"
 targetPath "public"
@@ -646,6 +673,10 @@ export function buildWasmCell(
     imports = verifyLibwasmAbi(bytes, "app");
     verifyLibwasmStartup(bytes);
     const provenance: CellProvenance = { schema: "g6lc-libwasm-artifact/v1", abi: LIBWASM_ABI, inputs, sha256: sha256(bytes), buildType, compiler: tc.versionLine, imports };
+    if (doAsyncify) {
+      const info = resolveWasmOpt();
+      provenance.asyncifyTool = `${info.version || "unknown"} ${info.source}${info.forked ? " (fork)" : " (NOT the fork)"}`;
+    }
     writeFileSync(manifest, JSON.stringify(provenance, null, 2) + "\n");
     return finish(0, doAsyncify ? "verified asyncified LDC artifact (wasm EH + asyncify)" : "verified LDC component-shell artifact (not full Svelte tree)", log, provenance);
   } catch (error) {

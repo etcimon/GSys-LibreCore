@@ -1,10 +1,8 @@
 <script lang="ts">
-  import { fetchBios, holycEval, registerEndpoint, onHwEvent } from "./kernel.ts";
+  import { fetchBios, holycEval, registerEndpoint, attachPlatformGlobal, onHwEvent } from "./kernel.ts";
   let winOpen = false;
-  onHwEvent((ev) => {
-    const n = document.getElementById("hw-nat-status");
-    if (n && ev) n.textContent = String(ev.detail || ev.type || "");
-  });
+  attachPlatformGlobal(globalThis);
+  onHwEvent(() => { attachPlatformGlobal(globalThis); });
   holycEval('Menu(\"main\")');
   registerEndpoint("/bios/custom", "POST");
   fetchBios("/bios/menu");

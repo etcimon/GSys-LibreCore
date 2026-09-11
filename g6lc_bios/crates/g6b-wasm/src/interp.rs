@@ -138,6 +138,20 @@ pub trait Host {
         let _ = url;
         Ok(0)
     }
+    /// `fetch_post(url, body)` — the **write** side of the kernel proxy.
+    ///
+    /// The BIOS UI could only GET, which meant a Svelte page could read settings but
+    /// could not run a statement against the store: creating a table from the UI was
+    /// impossible, whatever the store engine supported. This is that seam. The host
+    /// decides *which* URLs accept a body — the kernel's implementation allows the
+    /// store and nothing else, because a UI that can POST anywhere is a UI that can
+    /// reboot the machine by accident.
+    ///
+    /// Returns a string-object handle with the response body (0 when unavailable).
+    fn fetch_post(&mut self, url: &str, body: &str) -> Result<i32, String> {
+        let _ = (url, body);
+        Ok(0)
+    }
     /// `env.await` — claim a bounded pending-completion slot (the guest
     /// `WasmAwait` correlate). Default is a no-op returning -1 (no slot
     /// tracked); hosts with an async queue (browser `kernel.ts`) override.
@@ -1967,6 +1981,15 @@ impl<H: Host> Runtime<'_, H> {
             };
         }
         if let Some(rest) = name.strip_prefix("libwasm_get__") {
+            // `libwasm_get__string(raw, handle)` carries an sret first — the
+            // object handle is the second argument, unlike the scalar gets.
+            if rest == "string" {
+                let raw = args.first().ok_or("libwasm_get__string arity")?.as_i32()?;
+                let handle = args.get(1).ok_or("libwasm_get__string arity")?.as_i32()?;
+                let s = self.host.get_string(handle)?;
+                self.write_string(raw, &s)?;
+                return Ok(Some(Vec::new()));
+            }
             let handle = args.first().ok_or("libwasm_get__ arity")?.as_i32()?;
             return match rest {
                 "long" | "ulong" | "float" | "double" => {
@@ -3371,6 +3394,11 @@ pub(crate) mod tests {
             }
             Ok(())
         }
+
+        /// Same shape the browser host substitutes when its synchronous lodash
+        /// interpreter meets the asynchronous store (`kernel.ts` `ASYNC_STORE`).
+        const DEGRADED_STORE: &'static str =
+            r#"{"ok":false,"error":"async","message":"NotImplemented(\"async\")"}"#;
     }
     impl Host for TestHost {
         fn libwasm_objects(&self) -> Option<&ObjectTable<LibwasmValue>> {
@@ -3416,6 +3444,31 @@ pub(crate) mod tests {
         }
         fn note_js_exception(&mut self, err: &str) {
             self.last_js_exception = err.to_string();
+        }
+        // The shipped cell's `_start` runs the `PgLite` chain
+        // (`defaultTo(Eval("window.pglite"))` -> `attempt` -> `invoke`), so a
+        // test double that leaves `ldexec_*` at the trait default aborts
+        // `_start` with "libwasm ldexec is not implemented by this host" the
+        // moment the cell decodes far enough to reach it.
+        //
+        // Degrade the same way the browser host does rather than pretending to
+        // run SQL: answer every chain with a well-formed
+        // `NotImplemented("async")` store result. Degradation is *idempotent*
+        // because `PGLite.save()` interns the result and starts the next chain
+        // from it, so a chained `exec`/`query` must keep degrading instead of
+        // failing. Real store semantics are `KernelHost`'s job and are covered
+        // by the `g6b-kernel` store tests.
+        fn ldexec_string(&mut self, _call: Ldexec<'_>) -> Result<String, String> {
+            Ok(Self::DEGRADED_STORE.to_string())
+        }
+        fn ldexec_long(&mut self, _call: Ldexec<'_>) -> Result<i64, String> {
+            Ok(0)
+        }
+        fn ldexec_double(&mut self, _call: Ldexec<'_>) -> Result<f64, String> {
+            Ok(0.0)
+        }
+        fn ldexec_handle(&mut self, _call: Ldexec<'_>) -> Result<i32, String> {
+            self.add_string(Self::DEGRADED_STORE)
         }
         fn note_throw_stack(&mut self, frames: &[String]) {
             self.throw_stack = frames.to_vec();
@@ -3508,6 +3561,19 @@ pub(crate) mod tests {
                         let child = args.first().ok_or("appendChild arg")?.to_i32();
                         self.append_child(handle, child)?;
                         return Ok(LibwasmValue::I32(child));
+                    }
+                    "fetch_post" => {
+                        // `fetch_post(url, body)` — two string arguments, unlike
+                        // `fetch`. A missing body is an empty one, not an error: a
+                        // POST with no payload is a legitimate verb (`begin`,
+                        // `commit`).
+                        let url = args.first().ok_or("fetch_post url")?.as_string()?;
+                        let body = match args.get(1) {
+                            Some(v) => v.as_string()?,
+                            None => "",
+                        };
+                        let h = self.fetch_post(url, body)?;
+                        return Ok(LibwasmValue::I32(h));
                     }
                     "fetch" => {
                         let url = args.first().ok_or("fetch arg")?.as_string()?;

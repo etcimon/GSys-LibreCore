@@ -159,7 +159,7 @@ and the i32/i64/f32/f64 + control-flow execution lanes.
 | Parameters / results | 32 / 0 or 1 |
 | Parameters + locals / operand stack | 4,096 / 256 per function |
 | Control frames / call depth | 64 / 64 |
-| Instructions | 65,536 per module |
+| Decoded instructions | `clamp(code_section_bytes, 131,072, 262,144)` — see below |
 | Execution fuel | 100,000 default; caller-selectable up to 1,000,000 |
 | Numeric JIT | 4,096 instructions; 256 combined slots; ≤1,024-byte aligned frame |
 
@@ -168,9 +168,71 @@ Svelte-to-D lowering began emitting the whole `App.svelte` static tree
 into one generated `ready()`: the real asyncified cell declares 942
 functions and a comparable number of locals in that body. The bounds are
 still fixed, still checked before any effect, and every other budget
-(module bytes, memory pages, operand stack, control depth, instruction
-count and fuel) is unchanged, so a guest cannot use the larger counts to
-escape the byte, memory or time envelope.
+(module bytes, memory pages, operand stack, control depth and fuel) is
+unchanged, so a guest cannot use the larger counts to escape the byte,
+memory or time envelope.
+
+### The decoded-instruction budget is size-proportional, not fixed
+
+`MAX_INSTRUCTIONS` was a flat `65_536`, and that was the wrong *shape* of
+bound rather than merely the wrong number. It was not a property of the
+input at all, so as the BIOS UI grew it silently became the binding
+constraint on the libwasm cell and surfaced as a bare
+`"wasm instruction limit"` from three unrelated `g6b-elf` scanout smoke
+tests — not as "the cell does not fit". It was also inconsistent with its
+own sibling: `MAX_MODULE_BYTES` admits 1 MiB of module, which could never
+decode under 65,536 instructions, so the two bounds disagreed by roughly 8×.
+
+It is now a clamp, `g6b_wasm::instruction_budget(code_bytes)`:
+
+| Constant | Value | Role |
+|---|---|---|
+| `MAX_INSTRUCTIONS` | 131,072 | **Floor.** Every module gets at least this, so small MVP-lane and hand-written test modules keep a flat, size-independent allowance. |
+| `MAX_INSTRUCTIONS_CEIL` | 262,144 | **Ceiling.** The real fence: it bounds the `Vec<Instr>` the decoder materialises, which is the resource that matters on the target (~24 bytes per `Instr`, so a few MiB). |
+
+The proportional middle term is an **exact upper bound, not a heuristic**:
+every wasm instruction consumes at least one body byte (`decode_expr`
+advances past an opcode before pushing at most one `Instr`), so a module can
+never decode to more instructions than its code section has bytes. A budget
+of `code_bytes` therefore cannot reject a module that would otherwise decode.
+That is the point — the limit stops being a guess about how large a
+legitimate cell "should" be and becomes a memory fence derived from input we
+already agreed to accept via `MAX_MODULE_BYTES`.
+
+Stated plainly, because it matters when reading the code: **below the ceiling
+this check cannot fire.** `MAX_INSTRUCTIONS_CEIL` and `MAX_MODULE_BYTES` are
+the operative bounds; the floor is a documented minimum that keeps the
+contract stable if the one-instruction-per-byte relation ever stops holding.
+
+Three call sites, each with the right fence for what it knows:
+
+| Site | Fence | Why |
+|---|---|---|
+| `decode_code` | `instruction_budget(code_section.len())` | The only place the code-section length is known. |
+| `decode_expr` | `MAX_INSTRUCTIONS_CEIL` | One expression cannot out-grow its own byte length. |
+| `validate` | `MAX_INSTRUCTIONS_CEIL` | Defence in depth on an already-decoded `Module`, where the section length is gone. |
+
+### The split: the embedded cell has a named, asserted budget
+
+`BIOS_UI_CELL_BUDGET = instruction_budget(g6b_asm::BIOS_UI_LIBWASM.len())` is
+a `const` pre-compute over the artifact `g6b-asm` embeds with `include_bytes!`.
+This is the trusted half of the bound: the cell is not untrusted input. It is
+compiled in this repository, hash- and ABI-pinned at build time by
+`browser-ui/compiler/wasm-cell.ts`, and embedded in the payload, so its size
+is known at compile time and its budget can be *derived* from it rather than
+guessed.
+
+`binary::tests::cell_budget_covers_the_embedded_bios_ui` is the named fence
+for BIOS-UI growth: it decodes the shipped cell, asserts it fits, and
+additionally requires **2× headroom to the ceiling** so a cell that has crept
+to the edge is visible before it fails. When the Svelte tree outgrows the
+JIT, that one test fails with the actual numbers and a remediation note,
+instead of three scanout smoke tests reporting an opaque limit error.
+
+For reference, the cell measured 62,960 decoded instructions before the
+`App.svelte` growth that triggered this work and 71,480 after — i.e. the old
+flat 65,536 sat *between* those two points, which is exactly how a fixed
+bound calibrated against one snapshot fails.
 
 The import ABI now also covers the libwasm cell:
 `env.createElement(i32) -> i32` (NodeType enum), `env.appendChild(i32,i32)`,

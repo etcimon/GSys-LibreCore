@@ -449,6 +449,24 @@ pub const HOLYC_BUILTIN_NAMES: &[&str] = &[
     "UsbKey",
     "UsbLs",
     "UsbFlash",
+    "Drv",
+    "CliMan",
+    "SettingSet",
+    "BootSelect",
+    "FwUpdate",
+    // The shared mount seam: HolyC reaches the same g6b-vfs drivers the setup
+    // shell and the browser UI do, through the kernel's request band.
+    "Mount",
+    "Mounts",
+    "Drives",
+    "VfsLs",
+    "VfsCat",
+    "VfsWrite",
+    "OsDetect",
+    "FwStatus",
+    "FwPoll",
+    "FwApply",
+    "FwCancel",
     "Menu",
     "MenuCpu",
     "MenuUncore",
@@ -923,6 +941,14 @@ impl Program {
             }
             "BiosUpdate" => Ok(Some("BIOS-UPDATE self\n".into())),
             "LoadUI" => Ok(Some("LOAD-UI\n".into())),
+            // Mount-table builtins. The names are *requests*: the kernel band
+            // answers them against the real drivers, exactly as it does for
+            // HttpsGet and UsbLs, so a HolyC script, the VGA shell and the
+            // browser UI all see one filesystem.
+            "Mount" | "Mounts" | "Drives" | "VfsLs" | "VfsCat" | "VfsWrite" | "OsDetect" => {
+                let a: Vec<String> = args.iter().map(|x| self.eval_str(x)).collect();
+                Ok(Some(format!("VFS-REQUEST {name} {}\n", a.join(" "))))
+            }
             "UsbKey" => {
                 let op = args
                     .first()
@@ -944,6 +970,49 @@ impl Program {
                     .unwrap_or_else(|| "openwrt.bin".into());
                 Ok(Some(format!("USB-FLASH fat32 {name}\n")))
             }
+            // Setup-shell builtins. `g6b-zealcli` intercepts these at the
+            // prompt and runs the real command (drive listing, manual, setting
+            // write, boot selection, firmware state machine); on the bare HolyC
+            // band — where none of those sessions exist — they report the
+            // request instead of pretending to have performed it.
+            "Drv" => Ok(Some("DRV (no CLI session on this band)\n".into())),
+            "CliMan" => {
+                let section = args.first().map(|a| self.eval_str(a)).unwrap_or_default();
+                Ok(Some(format!("CLI-MAN {section}\n")))
+            }
+            "SettingSet" => {
+                let name = args.first().map(|a| self.eval_str(a)).unwrap_or_default();
+                let value = args.get(1).map(|a| self.eval_str(a)).unwrap_or_default();
+                if name.is_empty() {
+                    return Ok(Some("SET-REFUSED empty setting name\n".into()));
+                }
+                Ok(Some(format!("SET-REQUEST {name} = {value}\n")))
+            }
+            "BootSelect" => {
+                let id = args.first().map(|a| self.eval_str(a)).unwrap_or_default();
+                if id.is_empty() {
+                    return Ok(Some("BOOT-SELECT-REFUSED empty target\n".into()));
+                }
+                Ok(Some(format!("BOOT-SELECT-REQUEST {id}\n")))
+            }
+            "FwUpdate" => {
+                let src = args.first().map(|a| self.eval_str(a)).unwrap_or_default();
+                if src.starts_with("http://") {
+                    return Ok(Some(
+                        "FW-REFUSED plain HTTP is not a firmware source; use https://\n".into(),
+                    ));
+                }
+                if src.is_empty() {
+                    return Ok(Some(
+                        "FW-REFUSED expected https:// or DRIVE:/image\n".into(),
+                    ));
+                }
+                Ok(Some(format!("FW-UPDATE-REQUEST {src}\n")))
+            }
+            "FwStatus" => Ok(Some("FW-STATUS idle\n".into())),
+            "FwPoll" => Ok(Some("FW-POLL idle\n".into())),
+            "FwApply" => Ok(Some("FW-APPLY-REFUSED nothing staged\n".into())),
+            "FwCancel" => Ok(Some("FW-CANCEL idle\n".into())),
             "Menu" | "MenuCpu" | "MenuUncore" | "MenuMemory" | "MenuBoot" => {
                 let path = match name {
                     "MenuCpu" => "/bios/menu/cpu".into(),

@@ -28,6 +28,8 @@ g6b-css = { workspace = true }
 g6b-gr = { workspace = true }
 g6b-img = { workspace = true }
 g6b-ttf = { workspace = true }
+g6b-zealcli = { workspace = true }
+g6b-vfs = { workspace = true }
 
 [lints]
 workspace = true

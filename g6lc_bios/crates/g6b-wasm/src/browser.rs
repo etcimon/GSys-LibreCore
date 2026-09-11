@@ -13,6 +13,14 @@ use std::collections::BTreeMap;
 pub trait KernelPort {
     /// GET a local `/bios/` or `/ui/` URL. Status + body text.
     fn fetch_text(&mut self, url: &str) -> Result<(u16, String), String>;
+    /// POST a body to a local URL. The implementation decides which paths accept
+    /// one — a UI that may write to its database is not a UI that may write
+    /// anywhere. The default refuses, so a host without a write side says so instead
+    /// of appearing to succeed.
+    fn fetch_post(&mut self, url: &str, body: &str) -> Result<(u16, String), String> {
+        let _ = body;
+        Err(format!("{url}: this host has no write side"))
+    }
     /// One HolyC REPL line.
     fn holyc(&mut self, line: &str) -> Result<String, String>;
     /// Register a JS/D endpoint under `/bios/custom`.

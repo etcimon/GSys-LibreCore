@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "profile": "barebone",
+  "product": "g6lc64-zealcli",
+  "isa": {
+    "xlen": 64,
+    "march": "rv64imafdc",
+    "mmu": "sv39",
+    "extensions": {
+      "c": "live",
+      "f": "live",
+      "d": "live",
+      "v": "absent"
+    }
+  },
+  "kernel": {
+    "shape": "zeal",
+    "web": { "enable": false },
+    "ui": "cli",
+    "display": "cli",
+    "gr": { "enable": true, "w": 640, "h": 480, "colors": 16, "backend": "virtio-gpu" },
+    "cli": {
+      "enable": true,
+      "boot": "cli",
+      "rows": 25,
+      "cols": 80,
+      "scrollback": 512,
+      "mouse": false,
+      "manual": true,
+      "vi": true,
+      "fs": true,
+      "fw": true
+    },
+    "params": {
+      "clocks": true,
+      "edk2": true,
+      "uboot": true,
+      "bootloader": true,
+      "cpu_hz": 1000000000,
+      "uart_baud": 115200,
+      "next": "opensbi"
+    },
+    "flash": {
+      "enable": true,
+      "self_update": true,
+      "backend": "spi-nor",
+      "image": "bios",
+      "url": "https://fw.gsys.dev/g6lc_bios.elf"
+    },
+    "usb": {
+      "enable": true,
+      "flash_fat32": true,
+      "key": true,
+      "fs_fat32": true,
+      "fs_ntfs": false,
+      "fs_ext4": false
+    },
+    "hw": { "enable": true, "virtio_net": true }
+  },
+  "connectors": {
+    "core": ["sbi", "pmu"],
+    "apu": ["uart", "spi"],
+    "uncore": []
+  },
+  "peripherals": [
+    { "id": "uart0", "class": "uart", "model": "ns16550", "base": "0x10000000" },
+    { "id": "spi0", "class": "blk", "model": "sifive-spi-nor", "base": "0x20000000" }
+  ],
+  "memory": {
+    "dram_base": "0x80000000",
+    "dram_len": "0x40000000",
+    "text_offset": "0x200000"
+  },
+  "harts": { "count": 1, "cores": 1, "threads": 1 },
+  "core": { "issue_ports": 1, "ooo": false, "stream": false },
+  "uncore": { "clint": true, "plic": true },
+  "entry": { "hotkey": "DEL", "timeout_ms": 2000 },
+  "holyc": {
+    "fast_init": true,
+    "dual_band": {
+      "uart": true,
+      "tcp": { "enable": false }
+    }
+  },
+  "postboot": { "enable": "never", "access": "view" },
+  "net_expose": { "mode": "never" },
+  "loopback": { "enable": false }
+}

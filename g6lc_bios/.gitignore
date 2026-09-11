@@ -16,13 +16,15 @@
 **/*.ilk
 **/*.obj
 
-# Generated payload images (sources under out/zeal stay)
-/out/*.elf
-/out/*.ppm
-/out/*.glsl
-/out/*.png
-/out/*.kra
-/out/render/
+# Generated artifacts under out/ — QEMU screenshots, fixture images, media,
+# store dumps, build outputs. Only source files (REQUIREMENTS.md, linker.ld,
+# g6b_qemu_run.sh, linux/ device-tree sources, zeal/ HolyC sources) stay tracked.
+/out/*
+!/out/REQUIREMENTS.md
+!/out/g6b_qemu_run.sh
+!/out/linker.ld
+!/out/linux/
+!/out/zeal/
 
 # The pinned LDC download is ignored by browser-ui/toolchains/.gitignore, which
 # keeps ldc.lock.json as the single checked-in source of truth.

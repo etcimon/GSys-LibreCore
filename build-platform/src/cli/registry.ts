@@ -27,6 +27,7 @@ import { vendorCommand } from "./commands/vendor.ts";
 import { verifyCommand } from "./commands/verify.ts";
 import { remoteCommand } from "./commands/remote.ts";
 import { g6qCommand } from "./commands/g6q.ts";
+import { g6bCommand } from "./commands/g6b.ts";
 
 export const COMMANDS: Command[] = [
   statusCommand,
@@ -48,6 +49,7 @@ export const COMMANDS: Command[] = [
   configCommand,
   remoteCommand,
   g6qCommand,
+  g6bCommand,
 ];
 
 export function findCommand(name: string): Command | undefined {

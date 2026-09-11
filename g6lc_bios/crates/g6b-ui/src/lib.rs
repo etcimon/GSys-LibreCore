@@ -689,6 +689,17 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
     );
 
     if js {
+        // The `platform` singleton's board facts, injected once. `platform.hw`
+        // is live (it reads through HolyC), but these are fixed at compile time
+        // by BoardSpec, so a fetch would be a round trip for data the page
+        // already ships with. `kernel.ts::readPlatformFacts` parses this; the
+        // keys and the embedded JSON text match `KernelHost::platform_live`
+        // exactly so the JS and wasm lanes cannot disagree. Inert-JSON, so a
+        // `js`-off spec must not carry it — nothing would consume it.
+        html = html.replace(
+            "</body>",
+            &format!("{}\n</body>", platform_facts_script(spec)),
+        );
         html = html.replace(
             "</body>",
             &format!("<script type=\"module\" src=\"{root}/app.js\"></script>\n</body>"),
@@ -697,9 +708,124 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
     html
 }
 
+/// `<script type="application/json" id="g6b-platform">` — the board facts the
+/// `platform` singleton exposes in the JS lane.
+///
+/// These are raw board data only (identity, ISA, topology, memory, compiled
+/// lanes). Menu structure is a UI decision and is **not** carried here — Svelte
+/// builds the screens from these facts. Keys match `KernelHost::platform_live`
+/// exactly so the JS and wasm lanes cannot disagree.
+pub fn platform_facts_script(spec: &BoardSpec) -> String {
+    // `</script>` inside a JSON string would end the block early; no field here
+    // can contain it today, but escaping the slash keeps that true by
+    // construction rather than by luck.
+    let body = format!(
+        "{{{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}}}",
+        format_args!("\"product\":{}", g6b_spec::quote_json(&spec.product)),
+        format_args!(
+            "\"profile\":{}",
+            g6b_spec::quote_json(spec.kernel.profile.as_str())
+        ),
+        format_args!("\"schema\":{}", spec.schema_version),
+        format_args!("\"xlen\":{}", spec.isa.xlen),
+        format_args!("\"march\":{}", g6b_spec::quote_json(&spec.isa.march)),
+        format_args!("\"mmu\":{}", g6b_spec::quote_json(&spec.isa.mmu)),
+        format_args!("\"harts\":{}", spec.harts),
+        format_args!("\"cores\":{}", spec.cores),
+        format_args!("\"threads\":{}", spec.threads),
+        format_args!("\"dramBase\":{}", g6b_spec::quote_json(&spec.dram_base)),
+        format_args!("\"dramLen\":{}", g6b_spec::quote_json(&spec.dram_len)),
+        format_args!("\"textOffset\":{}", g6b_spec::quote_json(&spec.text_offset)),
+        format_args!("\"web\":{}", spec.web_stack()),
+        format_args!("\"wasm\":{}", spec.kernel.wasm.enable),
+        format_args!("\"cli\":{}", spec.kernel.cli.enable),
+        format_args!("\"store\":{}", spec.kernel.store.enable),
+        format_args!("\"workers\":{}", spec.worker_limit()),
+        format_args!(
+            "\"startMenu\":{}",
+            g6b_spec::quote_json(&spec.kernel.start_menu)
+        ),
+    );
+    format!(
+        "<script type=\"application/json\" id=\"g6b-platform\">{}</script>",
+        body.replace("</", "<\\/")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `platform` singleton's board facts must be *in* the page, and must
+    /// be the same data the wasm lane's `KernelHost::platform_live` answers —
+    /// otherwise the JS lane and the wasm lane can report different boards for
+    /// the same BoardSpec. Menu structure is a UI decision and is **not**
+    /// carried here; Svelte builds the screens from these facts.
+    #[test]
+    fn platform_facts_script_carries_the_canonical_board_data() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let script = platform_facts_script(&spec);
+        assert!(script.starts_with("<script type=\"application/json\" id=\"g6b-platform\">"));
+        assert!(script.ends_with("</script>"));
+
+        // Every key `kernel.ts::PLATFORM_FACT_KEYS` reads.
+        for key in [
+            "product",
+            "profile",
+            "schema",
+            "xlen",
+            "march",
+            "mmu",
+            "harts",
+            "cores",
+            "threads",
+            "dramBase",
+            "dramLen",
+            "textOffset",
+            "web",
+            "wasm",
+            "cli",
+            "store",
+            "workers",
+            "startMenu",
+        ] {
+            assert!(script.contains(&format!("\"{key}\":")), "missing {key}");
+        }
+
+        // Menus are a UI decision — the blob must not carry them.
+        assert!(!script.contains("\"menus\""));
+        assert!(!script.contains("\"menuJson\""));
+
+        let body = script
+            .trim_start_matches("<script type=\"application/json\" id=\"g6b-platform\">")
+            .trim_end_matches("</script>");
+        let parsed = g6b_spec::parse_json(body).expect("the injected blob must be valid JSON");
+        match &parsed {
+            g6b_spec::Json::Obj(m) => {
+                assert_eq!(m.len(), 18, "exactly the board-fact keys, no menus");
+            }
+            other => panic!("not an object: {other:?}"),
+        }
+
+        // `</script>` can never terminate the block early.
+        assert!(!body.contains("</script"));
+    }
+
+    /// The blob has to survive the page it is injected into, and `#g6b-platform`
+    /// must be reachable by id the way the JS lane looks it up.
+    #[test]
+    fn setup_html_embeds_the_platform_facts_blob() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let html = setup_html(&spec);
+        assert!(
+            html.contains("id=\"g6b-platform\""),
+            "the setup page must carry the platform blob"
+        );
+        // Inside <body>, before it closes, so a parser sees it as a child.
+        let at = html.find("id=\"g6b-platform\"").unwrap();
+        assert!(at < html.rfind("</body>").unwrap());
+        assert!(html.contains(&platform_facts_script(&spec)));
+    }
 
     #[test]
     fn holyc_menu_values_are_escaped_as_one_string_literal() {

@@ -1545,6 +1545,33 @@ fn dom_paint_node(spec: &BoardSpec) -> Node {
         )),
         Op::Glob("DomPaint".into()),
         Op::Label("DomPaint".into()),
+        // Re-entrancy guard, the same shape as `VIO_BUSY`. This function uses
+        // `s0..s5`, and the trap frame saves `ra`, `t0..t6` and `a0..a7` — *not*
+        // the s-registers. So a timer tick landing inside a normal-context paint
+        // (the boot container, the UI boot) would repaint with the interrupted
+        // call's registers and tear the frame. The interrupting call returns
+        // immediately instead; the tick that follows repaints anyway, because the
+        // dirty watermark is still ahead of the painted one.
+        Op::La {
+            rd: T0,
+            addr: Addr::UartLine,
+        },
+        Op::Lw {
+            rd: T1,
+            rs: T0,
+            off: crate::PAINT_BUSY_OFF,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "dom_paint_reenter".into(),
+        },
+        Op::Li { rd: T1, imm: 1 },
+        Op::Sw {
+            rs2: T1,
+            rs1: T0,
+            off: crate::PAINT_BUSY_OFF,
+        },
         Op::Addi {
             rd: SP,
             rs: SP,
@@ -1568,7 +1595,67 @@ fn dom_paint_node(spec: &BoardSpec) -> Node {
         },
         Op::Li { rd: S2, imm: 0 },
         Op::Li { rd: S3, imm: 0 },
-        Op::Label("dom_row".into()),
+    ];
+    if gr_live {
+        // Clear the text band first. A glyph blit only writes the cells it
+        // paints, so without this a shorter row (a backspace, or a page with
+        // fewer/shorter rows) leaves the previous text behind and the screen
+        // shows both at once. One tight loop over `paint_rows*8` scanlines is
+        // cheaper than tracking what each row used to be.
+        let words = paint_rows * 8 * (stride / 4);
+        ops.extend([
+            Op::Comment(format!(
+                "clear the {paint_rows}-row text band ({words} words) — a blit does not erase"
+            )),
+            Op::La {
+                rd: A0,
+                addr: Addr::GrPlane,
+            },
+            Op::Addi {
+                rd: A0,
+                rs: A0,
+                imm: GR_HEADER_BYTES as i32,
+            },
+            Op::Li {
+                rd: A1,
+                imm: DOM_Y0 * stride,
+            },
+            Op::Add {
+                rd: A0,
+                rs1: A0,
+                rs2: A1,
+            },
+            Op::Li { rd: A1, imm: words },
+            Op::Label("dom_clear".into()),
+            Op::Beq {
+                rs1: A1,
+                rs2: X0,
+                to: "dom_clear_done".into(),
+            },
+            Op::Sw {
+                rs2: X0,
+                rs1: A0,
+                off: 0,
+            },
+            Op::Addi {
+                rd: A0,
+                rs: A0,
+                imm: 4,
+            },
+            Op::Addi {
+                rd: A1,
+                rs: A1,
+                imm: -1,
+            },
+            Op::Jal {
+                rd: X0,
+                to: "dom_clear".into(),
+            },
+            Op::Label("dom_clear_done".into()),
+        ]);
+    }
+    ops.extend([Op::Label("dom_row".into())]);
+    ops.extend([
         Op::Beq {
             rs1: S2,
             rs2: S1,
@@ -1617,7 +1704,7 @@ fn dom_paint_node(spec: &BoardSpec) -> Node {
             rs2: T5,
             to: "dom_next".into(),
         },
-    ];
+    ]);
     ops.extend(puts_str("DOM| "));
     ops.extend([
         ld_x(xlen, T4, T3, 8),
@@ -1997,6 +2084,17 @@ fn dom_paint_node(spec: &BoardSpec) -> Node {
             rs: SP,
             imm: 64,
         },
+        // Clear the guard on the way out, then the shared exit.
+        Op::La {
+            rd: T0,
+            addr: Addr::UartLine,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: crate::PAINT_BUSY_OFF,
+        },
+        Op::Label("dom_paint_reenter".into()),
         ret(),
     ]);
     Node {
@@ -2887,5 +2985,22 @@ pub fn attach(module: &mut Module, spec: &BoardSpec) {
     }
     for n in nodes(spec) {
         module.push(n);
+    }
+}
+
+/// Attach only the **text face**: the row table, the font and `DomPaint`.
+///
+/// `__ui_dom` is a bounded store of text rows and `DomPaint` is a glyph blitter;
+/// neither is web machinery. A build with the whole engine excluded still has a
+/// face to paint — the `g6b-zealcli` container — so the paint half is attached
+/// on its own and the wasm import shims (`WasmDomText`, await slots, …) are not.
+pub fn attach_text_face(module: &mut Module, spec: &BoardSpec) {
+    module.dom_bytes = UI_DOM_BYTES;
+    if spec.kernel.gr.enable || spec.kernel.proxy.enable {
+        module.font = crate::font::font_bytes();
+    }
+    module.push(dom_paint_node(spec));
+    if spec.wants_virtio_gpu() || spec.wants_disp_scan() {
+        module.push(dom_paint32_node(spec));
     }
 }

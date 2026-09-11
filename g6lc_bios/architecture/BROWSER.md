@@ -76,7 +76,28 @@ output budgets bound compilation. There is no Go runtime.
 A separate `compile_async` / `AsyncScheduler` handles the bounded await/throw/
 catch subset described in `WASM.md`. It is not silently enabled in static
 `compile`; the LDC/libwasm build path now runs Binaryen Asyncify, but the D
-`await`/`catch` Promise-continuation host driver is still a stub. `BrowserSession` admits scripts
+`await`/`catch` Promise-continuation host driver is still a stub.
+
+> **The Asyncify pass needs a forked `wasm-opt`, and this is a hard
+> requirement rather than a preference.** Stock Binaryen cannot `--asyncify` a
+> module containing `try_table`, which is exactly what LDC 1.43 emits for
+> wasm-EH. The `etcimon/binaryen` `svelte-d` branch carries the Flatten pass
+> that makes `try_table` asyncifiable, so a stock `wasm-opt` on `PATH` *fails*
+> the pass rather than silently producing a broken cell. `wasm-opt` is
+> therefore a **toolchain on the same footing as the compiler**: it is
+> installed into `browser-ui/toolchains/binaryen-svelte-d/` beside
+> `toolchains/ldc2-1.43.0-beta1-*`, resolved from there in preference to
+> anything ambient, and ensured automatically by `tools/build.py` for any
+> libwasm-lane build (`--check`, then download the fork's CI binary, then
+> cmake the `svelte-d/binaryen` submodule). A working out-of-tree fork is
+> *adopted* into `toolchains/` by copy rather than re-downloaded, so the build
+> resolves the same location on every host. `compiler/binaryen.ts` verifies by
+> **behaviour** — the tool must actually asyncify a hand-built `try_table`
+> module — and records version + provider in the cell's provenance
+> (`asyncifyTool`), which is informational and deliberately not a staleness
+> trigger.
+
+`BrowserSession` admits scripts
 only when BoardSpec enables JS, services read-only configured kernel endpoints
 without a network wait, and resumes completed requests on the next poll.
 Left/Right/Home/End menu input stays independent of suspended scripts; navigation

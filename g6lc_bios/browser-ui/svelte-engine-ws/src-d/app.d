@@ -24,6 +24,7 @@ nothrow:
     Handle menu_devices_body = 0;
     Handle menu_boot_body = 0;
     Handle menu_settings_body = 0;
+    Handle store_status = 0;
     try {
       setProperty(root, "id", "bios-ui");
       setProperty(root, "data-start-menu", "main");
@@ -635,7 +636,7 @@ nothrow:
       setProperty(store_title, "id", "store-title");
       setProperty(store_title, "innerText", "Store");
       appendChild(store, store_title);
-      auto store_status = createElement(NodeType.p);
+      store_status = createElement(NodeType.p);
       setProperty(store_status, "id", "store-status");
       appendChild(store, store_status);
       appendChild(root, store);

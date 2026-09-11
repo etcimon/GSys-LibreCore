@@ -21,16 +21,16 @@ use crate::encode::{
     A0, A1, A2, A3, A4, A5, A6, A7, RA, S0, S1, S2, S3, SP, T0, T1, T2, T3, T4, T5, T6, X0,
 };
 use crate::encode::{
-    SBI_PUTCHAR, VIO_DESC_NEXT, VIO_DESC_WRITE, VIO_DEV_GPU, VIO_DEV_INPUT, VIO_F_VERSION_1,
-    VIO_GPU_FMT_B8G8R8X8, VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING,
-    VIO_GPU_RESOURCE_CREATE_2D, VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_OK_DISPLAY_INFO,
-    VIO_GPU_RESP_OK_NODATA, VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_EV_KEY,
-    VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_DRV_FEATURES,
-    VIO_REG_DRV_FEATURES_SEL, VIO_REG_FEATURES, VIO_REG_FEATURES_SEL, VIO_REG_ISR_ACK,
-    VIO_REG_ISR_STATUS, VIO_REG_QUEUE_AVAIL, VIO_REG_QUEUE_DESC, VIO_REG_QUEUE_NOTIFY,
-    VIO_REG_QUEUE_NUM, VIO_REG_QUEUE_NUM_MAX, VIO_REG_QUEUE_READY, VIO_REG_QUEUE_SEL,
-    VIO_REG_QUEUE_USED, VIO_REG_STATUS, VIO_ST_ACK, VIO_ST_DRIVER, VIO_ST_DRIVER_OK,
-    VIO_ST_FEATURES_OK,
+    SBI_PUTCHAR, VIO_BLK_SECTOR, VIO_BLK_S_OK, VIO_BLK_T_IN, VIO_DESC_NEXT, VIO_DESC_WRITE,
+    VIO_DEV_BLK, VIO_DEV_GPU, VIO_DEV_INPUT, VIO_F_VERSION_1, VIO_GPU_FMT_B8G8R8X8,
+    VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING, VIO_GPU_RESOURCE_CREATE_2D,
+    VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_OK_DISPLAY_INFO, VIO_GPU_RESP_OK_NODATA,
+    VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_EV_KEY, VIO_MAGIC, VIO_MMIO_BASE,
+    VIO_MMIO_SLOTS, VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_DRV_FEATURES, VIO_REG_DRV_FEATURES_SEL,
+    VIO_REG_FEATURES, VIO_REG_FEATURES_SEL, VIO_REG_ISR_ACK, VIO_REG_ISR_STATUS,
+    VIO_REG_QUEUE_AVAIL, VIO_REG_QUEUE_DESC, VIO_REG_QUEUE_NOTIFY, VIO_REG_QUEUE_NUM,
+    VIO_REG_QUEUE_NUM_MAX, VIO_REG_QUEUE_READY, VIO_REG_QUEUE_SEL, VIO_REG_QUEUE_USED,
+    VIO_REG_STATUS, VIO_ST_ACK, VIO_ST_DRIVER, VIO_ST_DRIVER_OK, VIO_ST_FEATURES_OK,
 };
 use crate::{Addr, Node, Op, Purpose};
 use g6b_spec::BoardSpec;
@@ -45,8 +45,12 @@ use g6b_spec::BoardSpec;
 /// buffers @0x530 (8×8B `virtio_input_event`), used-idx shadow @0x570,
 /// key-queue head/tail @0x574/0x578, key codes @0x580 (16×4B), tablet-device
 /// scratch @0x5f4, `DispSel` @0x600, tablet eventq @0x680 (desc / avail @0x700 /
-/// used @0x720 / evbuf @0x770 / used-idx @0x7b0).
-pub const VIO_BSS: u64 = 0x800;
+/// used @0x720 / evbuf @0x770 / used-idx @0x7b0), virtio-net scratch @0x7c0,
+/// virtio-blk scratch @0x7c4, then the blk requestq: desc @0x800, avail @0x880,
+/// used @0x8c0, request header @0x920, status @0x930, used-idx @0x934, cached
+/// sector @0x938, and one 512-byte sector buffer @0x940. The FAT file reader
+/// uses an extra 1 KiB scratch at 0xc00, so `__vio` is sized to 0x1000.
+pub const VIO_BSS: u64 = 0x1000;
 
 /// Compact persist (`__ui_cap`) after `__ui_dom`. Dirty tiles + live node
 /// count for the web engine. Not the 48-row `__ui_dom` table.
@@ -165,6 +169,43 @@ pub const VIO_BUSY_OFF: i32 = 0x5f0;
 /// Scratch u32 holding the virtio-tablet (second DeviceID 18) mmio base.
 /// Sits in the 12B gap between `VIO_BUSY` (0x5f0) and `DispSel` (0x600).
 pub const VIO_TAB_OFF: i32 = 0x5f4;
+/// `CLI_SEEN` — `INP_KQ` index watermark for the zealcli edit line, separate
+/// from `NAV_SEEN` so the `Keys` dump and the DOM navigator keep their own
+/// view of the same non-destructive ring.
+pub const CLI_SEEN_OFF: i32 = 0x5f8;
+/// Scratch u32 holding the probed virtio-blk (DeviceID 2) mmio base, at
+/// `__vio+0x7c4`. Reached as [`BLK_DEV`] from the blk base register.
+pub const VIO_BLK_OFF: i32 = 0x7c4;
+/// The blk block starts past the 12-bit immediate reach of `__vio` (0x800 > 2047),
+/// so every routine forms **one base register** for it and uses small offsets from
+/// there. That is cheaper than an address computation per access and it is why the
+/// offsets below are relative rather than absolute.
+pub const BLK_BASE: i64 = 0x800;
+/// Device-base scratch, relative to [`BLK_BASE`] (`0x800 - 0x3c = 0x7c4`).
+pub const BLK_DEV: i32 = -0x3c;
+/// virtio-blk **requestq** (queue 0) — the rings and buffers that let the payload
+/// read a sector itself. A request is a three-descriptor chain, which is the shape
+/// the device requires (virtio spec 5.2.6): a read-only 16-byte header, a
+/// device-writable data buffer, and a one-byte device-writable status.
+/// All offsets are relative to [`BLK_BASE`].
+pub const BLK_DESC_OFF: i32 = 0x000;
+pub const BLK_AVAIL_OFF: i32 = 0x080;
+pub const BLK_USED_OFF: i32 = 0x0c0;
+/// `virtio_blk_req` header: `{u32 type, u32 reserved, u64 sector}`.
+pub const BLK_REQ_OFF: i32 = 0x120;
+/// One status byte the device writes (`VIRTIO_BLK_S_OK` = 0).
+pub const BLK_STATUS_OFF: i32 = 0x130;
+/// Used-ring index shadow for the requestq.
+pub const BLK_LAST_USED: i32 = 0x134;
+/// The sector this buffer currently holds, +1 (0 = nothing read yet), so a reader
+/// can tell a cached sector 0 from an empty buffer.
+pub const BLK_CUR_SECTOR: i32 = 0x138;
+/// The medium signature `BlkSig` latched: 0 none, 1 fat, 2 gpt, 3 mbr, 4 ext4,
+/// 5 raw. `FatRead`/`Ext4Read` gate on this rather than re-parsing the buffer,
+/// because `BLK_CUR_SECTOR` alone cannot say *why* a sector is cached.
+pub const BLK_SIG: i32 = 0x13c;
+/// One 512-byte sector landing zone.
+pub const BLK_DATA_OFF: i32 = 0x140;
 /// Tablet eventq — after `DispSel` (0x600..0x62c) and the original 0x680 BSS.
 pub const TAB_DESC_OFF: i32 = 0x680;
 pub const TAB_AVAIL_OFF: i32 = 0x700;
@@ -1514,7 +1555,76 @@ pub fn inp_init_node(o: Object) -> Node {
         },
         sw(T2, T6, VIO_REG_STATUS),
     ]);
-    putc_str(&mut ops, "VIRTIO-INPUT-OK\n");
+    putc_str(&mut ops, "VIRTIO-INPUT-OK slot=");
+    // The slot is the diagnostic that matters: the PLIC source this keyboard
+    // uses is `1 + slot`, and *which* slot it lands in depends on how many other
+    // virtio-mmio devices the machine was given. Printing it is how a "keys do
+    // not arrive" report becomes a one-line answer instead of a bisection.
+    ops.extend([
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T0, T5, VIO_INP_OFF),
+        Op::Li {
+            rd: T1,
+            imm: VIO_MMIO_BASE as i64,
+        },
+        Op::Sub {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T0,
+            shamt: 12,
+        },
+        // One decimal digit is enough: QEMU virt has 8 virtio-mmio slots.
+        Op::Addi {
+            rd: A0,
+            rs: T0,
+            imm: i32::from(b'0'),
+        },
+        Op::Li {
+            rd: A7,
+            imm: crate::encode::SBI_PUTCHAR,
+        },
+        Op::Ecall,
+    ]);
+    putc_str(&mut ops, " irq=");
+    ops.extend([
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T0, T5, VIO_INP_OFF),
+        Op::Li {
+            rd: T1,
+            imm: VIO_MMIO_BASE as i64,
+        },
+        Op::Sub {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T0,
+            shamt: 12,
+        },
+        Op::Addi {
+            rd: A0,
+            rs: T0,
+            imm: i32::from(b'0') + VIO_IRQ_BASE as i32,
+        },
+        Op::Li {
+            rd: A7,
+            imm: crate::encode::SBI_PUTCHAR,
+        },
+        Op::Ecall,
+    ]);
+    putc_str(&mut ops, "\n");
     ops.push(Op::Label("ipi_ret".into()));
     ops.push(ret());
     ops.push(Op::Label("ipi_fail".into()));
@@ -1522,6 +1632,979 @@ pub fn inp_init_node(o: Object) -> Node {
     ops.push(ret());
     Node {
         purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// `BlkInit` — virtio-blk (DeviceID 2) probe + requestq bring-up.
+///
+/// This is the driver that lets the payload **read a disk itself** rather than be
+/// handed bytes: the boot picker can only *list* a medium without it, which is why
+/// `AUTOBOOT-HANDOFF` has been staged since B97.
+///
+/// Slot scan for DeviceID 2 → the same virtio 1.x status handshake every other
+/// device here performs (reset → ACK|DRIVER → FEATURES_OK readback → queue →
+/// DRIVER_OK), with the requestq (queue 0) rings in `__vio+BLK_*`. No features are
+/// negotiated beyond `VERSION_1`: read-only sector access needs none, and
+/// accepting a feature this driver does not implement is how a device starts
+/// speaking a protocol the driver cannot parse. Prints
+/// `VIRTIO-BLK <slot>`/`VIRTIO-BLK-OK`, or `VIRTIO-BLK-NONE`/`-FAIL`. Leaf.
+pub fn blk_init_node(o: Object) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — slot scan for DeviceID 2, then requestq handshake (payload-side sector reads)",
+            o.why
+        )),
+        Op::Glob("BlkInit".into()),
+        Op::Label("BlkInit".into()),
+        // Scan the virtio-mmio window for a block device.
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        // The blk block is past the 12-bit reach of `__vio`; form its base once.
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        sw(X0, T5, BLK_DEV),
+        Op::Li {
+            rd: T0,
+            imm: VIO_MMIO_BASE as i64,
+        },
+        Op::Li {
+            rd: T4,
+            imm: VIO_MMIO_SLOTS,
+        },
+        Op::Label("blk_scan".into()),
+        Op::Beq {
+            rs1: T4,
+            rs2: X0,
+            to: "blk_none".into(),
+        },
+        lw(T1, T0, 0),
+        Op::Li {
+            rd: T2,
+            imm: i64::from(VIO_MAGIC),
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T2,
+            to: "blk_next".into(),
+        },
+        lw(T1, T0, 0x08),
+        Op::Li {
+            rd: T2,
+            imm: i64::from(VIO_DEV_BLK),
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: T2,
+            to: "blk_found".into(),
+        },
+        Op::Label("blk_next".into()),
+        // The 0x1000 slot stride does not fit a 12-bit immediate.
+        Op::Li {
+            rd: T2,
+            imm: VIO_MMIO_STEP as i64,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T2,
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Jal {
+            rd: X0,
+            to: "blk_scan".into(),
+        },
+        Op::Label("blk_none".into()),
+    ];
+    putc_str(&mut ops, "VIRTIO-BLK-NONE\n");
+    ops.push(ret());
+    ops.extend([
+        Op::Label("blk_found".into()),
+        // Publish the base: `BlkRead` and `trap_sei`'s ack path both need it.
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        // The blk block is past the 12-bit reach of `__vio`; form its base once.
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        sw(T0, T5, BLK_DEV),
+        Op::Addi {
+            rd: T6,
+            rs: T0,
+            imm: 0,
+        },
+    ]);
+    putc_str(&mut ops, "VIRTIO-BLK ");
+    // The slot, as one digit — the same diagnostic the keyboard prints, and for
+    // the same reason: the PLIC source is `1 + slot`.
+    ops.extend([
+        Op::Li {
+            rd: T1,
+            imm: VIO_MMIO_BASE as i64,
+        },
+        Op::Sub {
+            rd: T1,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Srli {
+            rd: T1,
+            rs: T1,
+            shamt: 12,
+        },
+        Op::Addi {
+            rd: A0,
+            rs: T1,
+            imm: i32::from(b'0'),
+        },
+        Op::Li {
+            rd: A7,
+            imm: SBI_PUTCHAR,
+        },
+        Op::Ecall,
+    ]);
+    putc_str(&mut ops, "\n");
+    ops.extend([
+        // reset → bounded readback poll (an absent device never answers 0).
+        sw(X0, T6, VIO_REG_STATUS),
+        Op::Li { rd: T4, imm: 4 },
+        Op::Label("blk_rst".into()),
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "blk_ack".into(),
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: "blk_rst".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "blk_fail".into(),
+        },
+        Op::Label("blk_ack".into()),
+        Op::Li {
+            rd: T2,
+            imm: i64::from(VIO_ST_ACK | VIO_ST_DRIVER),
+        },
+        sw(T2, T6, VIO_REG_STATUS),
+        // Accept VERSION_1 and nothing else: an unimplemented accepted feature
+        // changes the request format under a driver that cannot parse it.
+        sw(X0, T6, VIO_REG_FEATURES_SEL),
+        lw(T2, T6, VIO_REG_FEATURES),
+        sw(X0, T6, VIO_REG_DRV_FEATURES_SEL),
+        sw(X0, T6, VIO_REG_DRV_FEATURES),
+        Op::Li { rd: T2, imm: 1 },
+        sw(T2, T6, VIO_REG_FEATURES_SEL),
+        lw(T3, T6, VIO_REG_FEATURES),
+        Op::Andi {
+            rd: T3,
+            rs: T3,
+            imm: VIO_F_VERSION_1 as i32,
+        },
+        Op::Li { rd: T2, imm: 1 },
+        sw(T2, T6, VIO_REG_DRV_FEATURES_SEL),
+        sw(T3, T6, VIO_REG_DRV_FEATURES),
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_FEATURES_OK,
+        },
+        sw(T2, T6, VIO_REG_STATUS),
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Andi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_FEATURES_OK,
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "blk_fail".into(),
+        },
+        // requestq = queue 0, rings in __vio+BLK_*.
+        sw(X0, T6, VIO_REG_QUEUE_SEL),
+        lw(T2, T6, VIO_REG_QUEUE_NUM_MAX),
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "blk_fail".into(),
+        },
+        Op::Li {
+            rd: T3,
+            imm: VIO_QUEUE_NUM,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_NUM),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_DESC_OFF,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_DESC),
+        sw(X0, T6, VIO_REG_QUEUE_DESC + 4),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_AVAIL_OFF,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_AVAIL),
+        sw(X0, T6, VIO_REG_QUEUE_AVAIL + 4),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_USED_OFF,
+        },
+        sw(T3, T6, VIO_REG_QUEUE_USED),
+        sw(X0, T6, VIO_REG_QUEUE_USED + 4),
+        Op::Li { rd: T3, imm: 1 },
+        sw(T3, T6, VIO_REG_QUEUE_READY),
+        // DRIVER_OK last: the device may service requests from here on.
+        lw(T2, T6, VIO_REG_STATUS),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_DRIVER_OK,
+        },
+        sw(T2, T6, VIO_REG_STATUS),
+        // Nothing has been read yet.
+        sw(X0, T5, BLK_LAST_USED),
+        sw(X0, T5, BLK_CUR_SECTOR),
+    ]);
+    putc_str(&mut ops, "VIRTIO-BLK-OK\n");
+    ops.push(ret());
+    ops.push(Op::Label("blk_fail".into()));
+    putc_str(&mut ops, "VIRTIO-BLK-FAIL\n");
+    ops.push(ret());
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops,
+    }
+}
+
+/// `BlkRead` — read sector `a0` into `__vio+BLK_DATA_OFF`. Returns `a0`=1 on a
+/// device-reported OK, `a0`=0 otherwise.
+///
+/// The chain is the one virtio-blk mandates (spec 5.2.6):
+///
+/// | desc | contents | flags |
+/// |---|---|---|
+/// | 0 | `{type=VIRTIO_BLK_T_IN, reserved=0, sector}` (16B) | `NEXT` |
+/// | 1 | 512-byte landing zone | `WRITE \| NEXT` |
+/// | 2 | one status byte | `WRITE` |
+///
+/// The status byte is what decides success — **not** the fact that the used ring
+/// advanced. A device can complete a request and report `IOERR`, and a reader that
+/// only checks the ring would then parse the previous sector's bytes as if they
+/// were the ones it asked for. The poll is bounded by the same budget as the ctrlq
+/// (`QueueNotify` is serviced asynchronously by QEMU).
+pub fn blk_read_node(o: Object) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — one VIRTIO_BLK_T_IN request: 3-desc chain, bounded used poll, status checked",
+            o.why
+        )),
+        Op::Glob("BlkRead".into()),
+        Op::Label("BlkRead".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        // The blk block is past the 12-bit reach of `__vio`; form its base once.
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        lw(T6, T5, BLK_DEV),
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: "blkr_no".into(),
+        },
+        // ---- request header: type = IN, reserved = 0, sector = a0 ----------
+        Op::Addi {
+            rd: T0,
+            rs: T5,
+            imm: BLK_REQ_OFF,
+        },
+        Op::Li {
+            rd: T1,
+            imm: VIO_BLK_T_IN,
+        },
+        sw(T1, T0, 0),
+        sw(X0, T0, 4),
+        sw(A0, T0, 8),
+        // The sector is a u64 on the wire; this driver reads the low 32 bits of
+        // an LBA, which is 2 TiB of addressable medium — and it writes the high
+        // word explicitly rather than leaving stale bytes there.
+        sw(X0, T0, 12),
+        // Remember what the buffer will hold (+1, so 0 still means "empty").
+        Op::Addi {
+            rd: T1,
+            rs: A0,
+            imm: 1,
+        },
+        sw(T1, T5, BLK_CUR_SECTOR),
+        // Clear the status byte so a device that writes nothing cannot look OK.
+        Op::Li { rd: T1, imm: 0xff },
+        Op::Sb {
+            rs2: T1,
+            rs1: T5,
+            off: BLK_STATUS_OFF,
+        },
+        // ---- desc0: header, read-only, chained -----------------------------
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: BLK_DESC_OFF,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_REQ_OFF,
+        },
+        sw(T3, T2, 0),
+        sw(X0, T2, 4),
+        Op::Li { rd: T1, imm: 16 },
+        sw(T1, T2, 8),
+        // flags(u16) | next(u16) packed in one word: NEXT → desc 1.
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_DESC_NEXT) | (1 << 16),
+        },
+        sw(T1, T2, 12),
+        // ---- desc1: 512-byte data, device-writable, chained ----------------
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_DATA_OFF,
+        },
+        sw(T3, T2, 16),
+        sw(X0, T2, 20),
+        Op::Li {
+            rd: T1,
+            imm: VIO_BLK_SECTOR,
+        },
+        sw(T1, T2, 24),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_DESC_WRITE | VIO_DESC_NEXT) | (2 << 16),
+        },
+        sw(T1, T2, 28),
+        // ---- desc2: status byte, device-writable, end of chain -------------
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_STATUS_OFF,
+        },
+        sw(T3, T2, 32),
+        sw(X0, T2, 36),
+        Op::Li { rd: T1, imm: 1 },
+        sw(T1, T2, 40),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_DESC_WRITE),
+        },
+        sw(T1, T2, 44),
+        // ---- publish: avail.ring[idx % QUEUE_NUM] = 0, then avail.idx ------
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: BLK_AVAIL_OFF,
+        },
+        lw(T1, T2, 0),
+        Op::Srli {
+            rd: T1,
+            rs: T1,
+            shamt: 16,
+        },
+        // ring entries are u16; slot 0 of the word pair is enough for a depth-1
+        // submission pattern (one request in flight, which is what a BIOS needs).
+        sw(X0, T2, 4),
+        Op::Addi {
+            rd: T3,
+            rs: T1,
+            imm: 1,
+        },
+        Op::Slli {
+            rd: T3,
+            rs: T3,
+            shamt: 16,
+        },
+        Op::Fence,
+        sw(T3, T2, 0),
+        Op::Fence,
+        sw(X0, T6, VIO_REG_QUEUE_NOTIFY),
+        // ---- bounded used.idx poll ----------------------------------------
+        //
+        // Against the **shadow**, not against zero. The second request in a run
+        // already sees a nonzero `used.idx` from the first, so a `!= 0` test
+        // returns before the device has written anything — the reader then parses
+        // the previous sector's bytes as the ones it asked for. That is exactly the
+        // bug QEMU showed (`BLK-ERR` on the LBA 1 read of a real GPT disk), and it
+        // is the reason the status byte is cleared to 0xff before submitting.
+        lw(A1, T5, BLK_LAST_USED),
+        Op::Li {
+            rd: T4,
+            imm: VIO_POLL_MAX,
+        },
+        Op::Label("blkr_poll".into()),
+        lw(T2, T5, BLK_USED_OFF),
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: A1,
+            to: "blkr_done".into(),
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: "blkr_poll".into(),
+        },
+    ];
+    putc_str(&mut ops, "BLK-TIMEOUT\n");
+    ops.extend([Op::Li { rd: A0, imm: 0 }, ret()]);
+    ops.extend([
+        Op::Label("blkr_done".into()),
+        // Ack the device's used-buffer interrupt: the line is level-triggered.
+        lw(T3, T6, VIO_REG_ISR_STATUS),
+        sw(T3, T6, VIO_REG_ISR_ACK),
+        sw(T2, T5, BLK_LAST_USED),
+        // The status byte, not the ring, decides.
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_STATUS_OFF,
+        },
+        Op::Li {
+            rd: T2,
+            imm: VIO_BLK_S_OK,
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: T2,
+            to: "blkr_ok".into(),
+        },
+    ]);
+    putc_str(&mut ops, "BLK-ERR\n");
+    ops.extend([
+        Op::Li { rd: A0, imm: 0 },
+        ret(),
+        Op::Label("blkr_ok".into()),
+        Op::Li { rd: A0, imm: 1 },
+        ret(),
+        Op::Label("blkr_no".into()),
+    ]);
+    putc_str(&mut ops, "BLK-NODEV\n");
+    ops.extend([Op::Li { rd: A0, imm: 0 }, ret()]);
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops,
+    }
+}
+
+/// `BlkSig` — read LBA 0 (and LBA 1 when it looks like a GPT) and say what the
+/// medium *is*, from its own bytes.
+///
+/// This is the payload's first act of reading a disk on its own: `BLK-SIG gpt`
+/// when LBA 1 carries `"EFI PART"`, `BLK-SIG mbr` on a `0x55AA` boot signature,
+/// `BLK-SIG fat` on a FAT BPB, and `BLK-SIG raw` when the sector claims nothing.
+/// It deliberately reports what it found rather than guessing a filesystem: the
+/// full table/superblock parse lives in `g6b-vfs` on the host side, and a guest
+/// that pretended otherwise would be the dishonest kind of progress.
+pub fn blk_sig_node(o: Object, xlen: u32) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!("{} — identify the medium from LBA 0/1", o.why)),
+        Op::Glob("BlkSig".into()),
+        Op::Label("BlkSig".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -16,
+        },
+        st_x(xlen, RA, SP, 0),
+        // LBA 0.
+        Op::Li { rd: A0, imm: 0 },
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "blks_out".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T4,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T4,
+        },
+        // A `0x55AA` at 510 is the boot signature both MBR and FAT carry.
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF + 510,
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: BLK_DATA_OFF + 511,
+        },
+        Op::Li { rd: T3, imm: 0x55 },
+        Op::Bne {
+            rs1: T1,
+            rs2: T3,
+            to: "blks_maybe_ext4".into(),
+        },
+        Op::Li { rd: T3, imm: 0xaa },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "blks_maybe_ext4".into(),
+        },
+        // The same boot signature is on a FAT32 BPB. Look for a plausible FAT32
+        // layout before reading LBA 1, so a FAT volume is reported from LBA 0.
+        // bps = u16 at 0x0B; must be 512.
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x0B,
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x0C,
+        },
+        Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: 8,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Li { rd: T1, imm: 512 },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "blks_not_fat".into(),
+        },
+        // spc = u8 at 0x0D; must be non-zero.
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x0D,
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: X0,
+            to: "blks_not_fat".into(),
+        },
+        // root_ent_cnt = u16 at 0x11; must be 0 for FAT32.
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x11,
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x12,
+        },
+        Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: 8,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: "blks_not_fat".into(),
+        },
+        // fatsz16 = u16 at 0x16; must be 0 for FAT32.
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x16,
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x17,
+        },
+        Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: 8,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: "blks_not_fat".into(),
+        },
+        // totsec32 = u32 at 0x20; must be non-zero.
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x20,
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x21,
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x22,
+        },
+        Op::Lbu {
+            rd: T3,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x23,
+        },
+        Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: 8,
+        },
+        Op::Slli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Slli {
+            rd: T3,
+            rs: T3,
+            shamt: 24,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T2,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T3,
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: X0,
+            to: "blks_not_fat".into(),
+        },
+        // fatsz32 = u32 at 0x24; must be non-zero.
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x24,
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x25,
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x26,
+        },
+        Op::Lbu {
+            rd: T3,
+            rs: T5,
+            off: BLK_DATA_OFF + 0x27,
+        },
+        Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: 8,
+        },
+        Op::Slli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Slli {
+            rd: T3,
+            rs: T3,
+            shamt: 24,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T2,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T3,
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: X0,
+            to: "blks_not_fat".into(),
+        },
+        // This looks like a FAT32 volume; report it and keep LBA 0 in the cache.
+        Op::Jal {
+            rd: X0,
+            to: "blks_fat".into(),
+        },
+        Op::Label("blks_not_fat".into()),
+        // A protective MBR points at a GPT: check LBA 1 for "EFI PART" rather
+        // than trusting the 0xEE type byte, which is only a claim.
+        Op::Li { rd: A0, imm: 1 },
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "blks_mbr".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T4,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T4,
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(b'E'),
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T3,
+            to: "blks_mbr".into(),
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF + 1,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(b'F'),
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T3,
+            to: "blks_mbr".into(),
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF + 2,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(b'I'),
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T3,
+            to: "blks_mbr".into(),
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF + 4,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(b'P'),
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T3,
+            to: "blks_mbr".into(),
+        },
+    ];
+    // GPT: LBA 1 carried "EFI PART". Latch the signature kind for the file
+    // readers (kind 2) before reporting.
+    ops.extend([Op::Li { rd: T0, imm: 2 }, sw(T0, T5, BLK_SIG)]);
+    putc_str(&mut ops, "BLK-SIG gpt\n");
+    ops.push(jump("blks_out"));
+    ops.extend([
+        Op::Label("blks_mbr".into()),
+        Op::Li { rd: T0, imm: 3 },
+        sw(T0, T5, BLK_SIG),
+    ]);
+    putc_str(&mut ops, "BLK-SIG mbr\n");
+    ops.push(jump("blks_out"));
+    ops.extend([
+        Op::Label("blks_fat".into()),
+        Op::Li { rd: T0, imm: 1 },
+        sw(T0, T5, BLK_SIG),
+    ]);
+    putc_str(&mut ops, "BLK-SIG fat\n");
+    ops.push(jump("blks_out"));
+    // No boot signature at 510: either a filesystem superfloppy with no MBR
+    // (ext4 keeps its superblock at byte 1024 = LBA 2) or genuinely raw media.
+    // Probe LBA 2 for the ext4 magic before settling for "raw".
+    ops.extend([
+        Op::Label("blks_maybe_ext4".into()),
+        Op::Li { rd: A0, imm: 2 },
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "blks_raw".into(),
+        },
+        // BlkRead re-forms T5 from scratch, so rebuild the base register here.
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T4,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T4,
+        },
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF + 56,
+        },
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_DATA_OFF + 57,
+        },
+        Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: 8,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Li {
+            rd: T1,
+            imm: 0xEF53,
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "blks_raw".into(),
+        },
+        Op::Label("blks_ext4".into()),
+        Op::Li { rd: T0, imm: 4 },
+        sw(T0, T5, BLK_SIG),
+    ]);
+    putc_str(&mut ops, "BLK-SIG ext4\n");
+    ops.push(jump("blks_out"));
+    ops.extend([
+        Op::Label("blks_raw".into()),
+        Op::Li { rd: T0, imm: 5 },
+        sw(T0, T5, BLK_SIG),
+    ]);
+    putc_str(&mut ops, "BLK-SIG raw\n");
+    ops.extend([
+        Op::Label("blks_out".into()),
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::VirtioBlk,
         ops,
     }
 }

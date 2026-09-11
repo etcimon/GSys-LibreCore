@@ -1555,7 +1555,8 @@ mod tests {
                 "gr":{"enable":false},
                 "proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":1,
                          "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":false},
-                "wasm":{"enable":true,"jit":true}
+                "wasm":{"enable":true,"jit":true},
+                "cli":{"enable":false}
             },
             "uncore":{"plic":true,"hdmi":true},
             "peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}],
@@ -1645,7 +1646,8 @@ mod tests {
                 "gr":{"enable":false},
                 "proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":1,
                          "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":false},
-                "wasm":{"enable":true,"jit":true}
+                "wasm":{"enable":true,"jit":true},
+                "cli":{"enable":false}
             },
             "uncore":{"plic":true,"hdmi":true},
             "peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}],
@@ -1792,7 +1794,8 @@ mod tests {
                 "gr":{"enable":false},
                 "proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":1,
                          "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":false},
-                "wasm":{"enable":true,"jit":true}
+                "wasm":{"enable":true,"jit":true},
+                "cli":{"enable":false}
             },
             "uncore":{"plic":true,"hdmi":true},
             "peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}],

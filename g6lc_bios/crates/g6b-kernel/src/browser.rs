@@ -246,6 +246,34 @@ impl KernelPort for RouterPort<'_> {
         Ok((resp.status, resp.body_str()))
     }
 
+    /// The UI's write side, deliberately narrow: **`/bios/store` only**.
+    ///
+    /// A BIOS UI needs to run SQL — create a table, insert a row, export to a key —
+    /// and none of that is expressible as a GET. It does not need to POST to the
+    /// power endpoints, the flash endpoints or a custom handler, so it cannot: the
+    /// prefix is checked here rather than left to the router, because "the UI may
+    /// write to its database" and "the UI may write anywhere" are different
+    /// capabilities and only the first one was asked for.
+    fn fetch_post(&mut self, url: &str, body: &str) -> Result<(u16, String), String> {
+        let path = url.split(['?', '#']).next().unwrap_or(url);
+        if !self.spec.kernel.http.enable || !self.spec.kernel.http.proxy_js {
+            return Err(format!("disabled: {url}"));
+        }
+        if !(path == "/bios/store" || path.starts_with("/bios/store/")) {
+            return Err(format!(
+                "{path}: the BIOS UI may POST to /bios/store only (read the rest with fetch)"
+            ));
+        }
+        let store = self.store.as_mut().map(|s| {
+            let s: &mut dyn g6b_pglite::StorePort = &mut **s;
+            s
+        });
+        let resp = self
+            .router
+            .fetch_with_body("POST", path, body.as_bytes(), store);
+        Ok((resp.status, resp.body_str()))
+    }
+
     fn holyc(&mut self, line: &str) -> Result<String, String> {
         // HolyC REPL is owned by `BrowserSession::holyc_request`. The wasm
         // cell's `holycEval` export is a diagnostic until that re-entry is

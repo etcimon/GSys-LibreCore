@@ -20,8 +20,8 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         eprintln!(
-            "usage: g6b <design-compile|display|boot|tohtml|holyc-eval|holyc-serve|http-serve|loopback|qemu-args|elf|smoke|gr|display-proxy|display-proxy-32|ui-ppm32|css-paint|css-render|ppm-diff> \
-             [--spec FILE] [--out DIR|FILE] [--port N] [--once]"
+            "usage: g6b <design-compile|display|boot|tohtml|holyc-eval|holyc-serve|http-serve|loopback|qemu-args|elf|smoke|gr|display-proxy|display-proxy-32|ui-ppm32|css-paint|css-render|ppm-diff|zealcli|man> \
+             [--spec FILE] [--out DIR|FILE] [--port N] [--once] [--script FILE|-] [--keys CODES] [--frames] [--section NAME] [--cols N]"
         );
         return ExitCode::from(2);
     }
@@ -47,7 +47,14 @@ fn main() -> ExitCode {
         "display" | "boot" => match load_spec(spec_path.as_deref()) {
             Err(c) => c,
             Ok(spec) => {
-                println!("{}", g6b_kernel::boot(&spec));
+                let vols = match attached_volumes(&args) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("g6b: {e}");
+                        return ExitCode::from(2);
+                    }
+                };
+                println!("{}", g6b_kernel::boot_with_volumes(&spec, vols));
                 ExitCode::SUCCESS
             }
         },
@@ -206,6 +213,21 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         },
+        "zealcli" | "cli" => match load_spec(spec_path.as_deref()) {
+            Err(c) => c,
+            Ok(spec) => run_zealcli(&spec, &args),
+        },
+        "man" => match load_spec(spec_path.as_deref()) {
+            Err(c) => c,
+            Ok(spec) => {
+                let cols = flag_value(&args, "--cols")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(spec.kernel.cli.cols as usize);
+                let section = flag_value(&args, "--section").unwrap_or("");
+                print!("{}", g6b_zealcli::man::manual(&spec, cols, section));
+                ExitCode::SUCCESS
+            }
+        },
         "css-paint" => css_paint(&args),
         "css-render" => css_render(&args),
         "ppm-diff" => ppm_diff(&args),
@@ -286,7 +308,14 @@ fn main() -> ExitCode {
                 } else {
                     path.join("g6lc_bios.elf")
                 };
-                match g6b_elf::write_elf(&spec, &path) {
+                let vols = match attached_volumes(&args) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("g6b: {e}");
+                        return ExitCode::from(2);
+                    }
+                };
+                match g6b_elf::write_elf_with_volumes(&spec, &path, vols) {
                     Ok(()) => {
                         eprintln!("g6b: wrote {}", path.display());
                         ExitCode::SUCCESS
@@ -298,6 +327,14 @@ fn main() -> ExitCode {
                 }
             }
         },
+        // Real block devices, partition tables and filesystems — the same
+        // `g6b-vfs` drivers the setup shell and the browser UI use.
+        //   g6b vfs scan  --disk PATH
+        //   g6b vfs ls    --disk PATH [--part N] [--path /etc]
+        //   g6b vfs cat   --disk PATH [--part N] --path /etc/fstab
+        //   g6b vfs write --disk PATH [--part N] --path /etc/fstab --in FILE
+        //   g6b vfs os    --disk PATH [--part N]
+        "vfs" => run_vfs(&args),
         "tohtml" => {
             let src = if let Some(p) = flag_value(&args, "--in") {
                 fs::read_to_string(p).unwrap_or_default()
@@ -313,6 +350,387 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// `g6b zealcli` — drive the setup shell in its container.
+///
+/// The container is the product, so the harness prints it: `--frames` after
+/// every line (what an operator would have seen), otherwise the final frame.
+/// Input is a `--script` file, `-` for stdin, or an interactive stdin; `--keys`
+/// feeds raw Linux keycodes so the USB-keyboard path can be exercised without a
+/// keyboard. Ports come from the kernel, so volumes / net / flash are exactly
+/// what the BoardSpec compiled.
+/// `g6b vfs <scan|ls|cat|write|os>` — drive the real filesystem drivers from the
+/// host, against an image or a raw disk. This is the same code path the BIOS uses,
+/// which is what makes it a useful check: if `g6b vfs ls` cannot read a volume,
+/// neither can the setup shell.
+fn run_vfs(args: &[String]) -> ExitCode {
+    let sub = args.first().map(String::as_str).unwrap_or("scan");
+    // `emit-fs` writes a hand-laid fixture to a file so QEMU can attach it as
+    // a virtio-blk device. No --disk needed. `emit-btrfs` is the original,
+    // btrfs-only spelling and stays as an alias so existing scripts keep
+    // working.
+    if sub == "emit-fs" || sub == "emit-btrfs" {
+        let kinds = g6b_vfs::FIXTURE_KINDS.join("|");
+        let fs_name = match flag_value(args, "--fs") {
+            Some(f) => f,
+            // `emit-btrfs` implies its filesystem; `emit-fs` must be told.
+            None if sub == "emit-btrfs" => "btrfs",
+            None => {
+                eprintln!("g6b: emit-fs: --fs <{kinds}> is required");
+                return ExitCode::from(2);
+            }
+        };
+        // btrfs is the only fixture with a variant, and `--with-data` lays a
+        // regular-extent file. It costs FS-tree leaf space, so it is off by
+        // default: a store export needs that headroom.
+        let with_data = flag_present(args, "--with-data");
+        let img = if fs_name.eq_ignore_ascii_case("btrfs") {
+            Some(g6b_vfs::btrfs::fixture::image(with_data))
+        } else {
+            if with_data {
+                eprintln!("g6b: emit-fs: --with-data applies to btrfs only");
+                return ExitCode::from(2);
+            }
+            g6b_vfs::fixture_image_named(fs_name).map(|(_, b)| b)
+        };
+        let Some(img) = img else {
+            eprintln!("g6b: emit-fs: no fixture for `{fs_name}` (have: {kinds})");
+            return ExitCode::from(2);
+        };
+        let default_out = format!("out/{}-key.img", fs_name.to_ascii_lowercase());
+        let out = flag_value(args, "--out").unwrap_or(&default_out);
+        if let Some(parent) = Path::new(out).parent() {
+            if !parent.as_os_str().is_empty() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+        match fs::write(out, &img) {
+            Ok(()) => {
+                let variant = if fs_name.eq_ignore_ascii_case("btrfs") {
+                    format!(", with_data={with_data}")
+                } else {
+                    String::new()
+                };
+                eprintln!(
+                    "g6b: wrote {} bytes ({fs_name} fixture{variant}) to {out}",
+                    img.len()
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("g6b: {sub}: {e}");
+                ExitCode::from(1)
+            }
+        }
+    } else {
+        run_vfs_disk(args)
+    }
+}
+
+fn run_vfs_disk(args: &[String]) -> ExitCode {
+    use g6b_zealcli::ports::MountPort;
+    let sub = args.first().map(String::as_str).unwrap_or("scan");
+    let Some(disk) = flag_value(args, "--disk") else {
+        eprintln!("g6b: vfs wants --disk PATH (an image file or a raw device)");
+        return ExitCode::from(2);
+    };
+    let rw = flag_present(args, "--rw");
+    let part: Option<u32> = flag_value(args, "--part").and_then(|v| v.parse().ok());
+    let path = flag_value(args, "--path").unwrap_or("/");
+    let mut svc = match g6b_kernel::VfsService::new().add_file("disk0", disk, "host image") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("g6b: vfs: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    // `scan` needs no mount: it is what tells you what could be mounted.
+    if sub == "scan" {
+        for d in svc.drives() {
+            println!("{} {} {} bytes scheme={}", d.id, d.model, d.bytes, d.scheme);
+            for w in &d.warnings {
+                println!("  ! {w}");
+            }
+        }
+        match svc.volumes("disk0") {
+            Ok(vols) => {
+                for v in vols {
+                    println!(
+                        "  {}:{} name={} fs={} label={:?} kind={} bytes={} mountable={}",
+                        v.drive, v.index, v.name, v.fs, v.label, v.kind, v.bytes, v.mountable
+                    );
+                    println!("      evidence: {}", v.evidence);
+                    if let Some(why) = v.write_block {
+                        println!("      read-only: {why}");
+                    }
+                }
+                return ExitCode::SUCCESS;
+            }
+            Err(e) => {
+                eprintln!("g6b: vfs: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    // Everything else works on one volume: the named partition, or the only
+    // mountable one.
+    let index = match part {
+        Some(n) => n,
+        None => match svc.volumes("disk0") {
+            Ok(vols) => {
+                let usable: Vec<_> = vols.iter().filter(|v| v.mountable).collect();
+                match usable.len() {
+                    1 => usable[0].index,
+                    0 => {
+                        eprintln!("g6b: vfs: nothing on {disk} has a driver here (try `vfs scan`)");
+                        return ExitCode::from(1);
+                    }
+                    _ => {
+                        eprintln!("g6b: vfs: {disk} has several volumes; pick one with --part N:");
+                        for v in usable {
+                            eprintln!("  --part {} ({} {})", v.index, v.name, v.fs);
+                        }
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("g6b: vfs: {e}");
+                return ExitCode::from(1);
+            }
+        },
+    };
+    let m = match svc.mount("disk0", index, "vol", rw) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("g6b: vfs: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    eprintln!(
+        "g6b: mounted {}:{} as {} ({}, {}{})",
+        m.drive,
+        m.index,
+        m.fs,
+        if m.label.is_empty() { "-" } else { &m.label },
+        if m.rw { "rw" } else { "ro" },
+        m.why_ro.map(|w| format!(", {w}")).unwrap_or_default()
+    );
+    match sub {
+        "ls" => match svc.list("vol", path) {
+            Ok(ents) => {
+                for e in ents {
+                    println!(
+                        "{} {:>10} {}",
+                        if e.dir { "d" } else { "-" },
+                        e.size,
+                        e.name
+                    );
+                }
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("g6b: vfs: {e}");
+                ExitCode::from(1)
+            }
+        },
+        "cat" => match svc.read("vol", path) {
+            Ok(bytes) => {
+                io::stdout().write_all(&bytes).ok();
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("g6b: vfs: {e}");
+                ExitCode::from(1)
+            }
+        },
+        "write" => {
+            let data = match flag_value(args, "--in") {
+                Some(f) => match fs::read(f) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("g6b: {f}: {e}");
+                        return ExitCode::from(1);
+                    }
+                },
+                None => {
+                    let mut b = Vec::new();
+                    io::stdin().read_to_end(&mut b).ok();
+                    b
+                }
+            };
+            match svc.write("vol", path, &data) {
+                Ok(()) => {
+                    eprintln!("g6b: wrote {} bytes to {path}", data.len());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("g6b: vfs: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        "os" => {
+            match svc.os_info("vol") {
+                Some(os) => println!("{os}"),
+                None => println!("(no installed system identified on this volume)"),
+            }
+            ExitCode::SUCCESS
+        }
+        other => {
+            eprintln!("g6b: vfs: unknown subcommand `{other}` (scan|ls|cat|write|os)");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Every `--disk ID=PATH[:model]` on the command line, as one block service.
+fn attached_disks(args: &[String]) -> Result<Option<g6b_kernel::VfsService>, String> {
+    let mut svc = g6b_kernel::VfsService::new();
+    let mut any = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a != "--disk" {
+            continue;
+        }
+        let spec = it.next().ok_or("--disk wants ID=PATH[:model]")?;
+        let (id, rest) = spec
+            .split_once('=')
+            .ok_or_else(|| format!("--disk wants ID=PATH[:model], got `{spec}`"))?;
+        // Only a `:` past a drive letter separates the model.
+        let (path, model) = match rest.char_indices().find(|(i, c)| *c == ':' && *i > 1) {
+            Some((i, _)) => (&rest[..i], &rest[i + 1..]),
+            None => (rest, ""),
+        };
+        svc = svc.add_file(id, path, model)?;
+        any = true;
+    }
+    Ok(any.then_some(svc))
+}
+
+/// Every `--volume ID=PATH[:role[:vendor]]` on the command line.
+fn attached_volumes(args: &[String]) -> Result<Option<g6b_kernel::DirVolumes>, String> {
+    let mut vols = g6b_kernel::DirVolumes::new();
+    let mut any = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a != "--volume" {
+            continue;
+        }
+        let spec = it.next().ok_or("--volume wants ID=PATH[:role[:vendor]]")?;
+        vols.parse_mount(spec)?;
+        any = true;
+    }
+    Ok(any.then_some(vols))
+}
+
+fn run_zealcli(spec: &g6b_spec::BoardSpec, args: &[String]) -> ExitCode {
+    if !spec.kernel.cli.enable {
+        eprintln!("g6b: kernel.cli.enable is false in this BoardSpec");
+        return ExitCode::from(1);
+    }
+    // `--volume ID=PATH[:role[:vendor]]` declares media the operator (or the
+    // QEMU harness) attached, so the boot picker probes the same bytes the
+    // machine was given instead of a table of hopes.
+    let mut cli = match attached_volumes(args) {
+        Ok(Some(vols)) => g6b_kernel::zealcli_session_with_volumes(spec, vols),
+        Ok(None) => g6b_kernel::zealcli_session(spec),
+        Err(e) => {
+            eprintln!("g6b: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    // `--disk ID=PATH[:model]` attaches a real block device (an image or a raw
+    // disk), so `drv`, `mount`, `cd`, `vi` and `:w` work on actual partitions.
+    match attached_disks(args) {
+        Ok(Some(svc)) => cli.ports_mut().mounts = Some(Box::new(svc)),
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("g6b: {e}");
+            return ExitCode::from(2);
+        }
+    }
+    let frames = flag_present(args, "--frames");
+    let show = |cli: &g6b_kernel::ZealCli| {
+        println!("{}", cli.render().join("\n"));
+        println!();
+    };
+    // `--tick MS` advances the autoboot countdown before anything is typed, so
+    // the unattended path is testable without waiting in real time.
+    if let Some(ms) = flag_value(args, "--tick").and_then(|v| v.parse::<u32>().ok()) {
+        cli.tick_ms(ms);
+        if frames {
+            show(&cli);
+        }
+    }
+    if let Some(codes) = flag_value(args, "--keys") {
+        for code in codes.split(',').filter(|c| !c.trim().is_empty()) {
+            match code.trim().parse::<u16>() {
+                Ok(c) => {
+                    cli.keycode(c, true);
+                    cli.keycode(c, false);
+                }
+                Err(_) => {
+                    eprintln!("g6b: --keys wants Linux keycodes, not `{code}`");
+                    return ExitCode::from(2);
+                }
+            }
+            if frames {
+                show(&cli);
+            }
+        }
+    }
+    let script: Option<Box<dyn BufRead>> = match flag_value(args, "--script") {
+        Some("-") => Some(Box::new(BufReader::new(io::stdin()))),
+        Some(path) => match fs::File::open(path) {
+            Ok(f) => Some(Box::new(BufReader::new(f))),
+            Err(e) => {
+                eprintln!("g6b: {path}: {e}");
+                return ExitCode::from(1);
+            }
+        },
+        None => {
+            if flag_present(args, "--keys") {
+                None
+            } else {
+                Some(Box::new(BufReader::new(io::stdin())))
+            }
+        }
+    };
+    if let Some(reader) = script {
+        for line in reader.lines() {
+            let line = match line {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("g6b: read: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let (action, _) = cli.eval(&line);
+            // Background work (a firmware transfer) advances one bounded step
+            // per line, the way the timer tick advances it in the guest.
+            cli.tick();
+            if frames {
+                show(&cli);
+            }
+            match action {
+                g6b_kernel::ZealAction::Exit => break,
+                g6b_kernel::ZealAction::LoadUi => {
+                    println!("LOAD-UI (browser-ui takes the screen)");
+                    break;
+                }
+                g6b_kernel::ZealAction::Reboot
+                | g6b_kernel::ZealAction::Shutdown
+                | g6b_kernel::ZealAction::LinuxHandoff => break,
+                _ => {}
+            }
+        }
+    }
+    if !frames {
+        show(&cli);
+    }
+    ExitCode::SUCCESS
 }
 
 fn serve_http(spec: &g6b_spec::BoardSpec, args: &[String]) -> ExitCode {

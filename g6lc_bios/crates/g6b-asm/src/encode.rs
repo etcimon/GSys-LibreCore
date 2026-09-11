@@ -120,6 +120,19 @@ pub const VIO_NET_SLOT: u64 = 5;
 /// virtio-input device id (virtio spec 5.8) — `virtio-keyboard-device` /
 /// `virtio-tablet-device` attach to their own virtio-mmio slot.
 pub const VIO_DEV_INPUT: u32 = 18;
+/// virtio-blk device id (virtio spec 5.2). `BlkProbe` enumerates it; this is how
+/// the payload reads sectors *itself* instead of being handed bytes by a host.
+pub const VIO_DEV_BLK: u32 = 2;
+/// Exec-model virtio-mmio slot for the modelled block device (irq 1+slot = 7).
+/// Slots 0–3 are GPU / keyboard / mailbox-gap / tablet and slot 5 is virtio-net.
+pub const VIO_BLK_SLOT: u64 = 6;
+/// `virtio_blk_req.type` — `VIRTIO_BLK_T_IN` is a read *from* the device.
+pub const VIO_BLK_T_IN: i64 = 0;
+/// `virtio_blk_req.status` — `VIRTIO_BLK_S_OK`.
+pub const VIO_BLK_S_OK: i64 = 0;
+/// The unit every virtio-blk request is quoted in: virtio spec 5.2.4 fixes it at
+/// 512 bytes regardless of the device's own block size.
+pub const VIO_BLK_SECTOR: i64 = 512;
 /// virtio-mmio register offsets (modern interface; `Version` = 2).
 pub const VIO_REG_FEATURES: i32 = 0x10;
 pub const VIO_REG_FEATURES_SEL: i32 = 0x14;
@@ -182,6 +195,9 @@ pub const CMD_WAKE: u32 = 0x656b_6157; // "Wake"
 pub const CMD_UI: u32 = 0x0000_6955; // "Ui\0\0"
 pub const CMD_FILE: u32 = 0x656c_6946; // "File"
 pub const CMD_GET: u32 = 0x0074_6547; // "Get\0"
+/// `Blk` — read LBA 0/1 and report what the medium is, from the guest's own
+/// virtio-blk driver rather than from a host-rendered page.
+pub const CMD_BLK: u32 = u32::from_le_bytes(*b"Blk\n");
 pub const CMD_KEYS: u32 = 0x7379_654b; // "Keys" — dump the virtio-input key queue
 pub const CMD_AWAI: u32 = 0x6961_7741; // "Awai" — Await: claim a bounded pending slot
 pub const CMD_THRO: u32 = 0x6f72_6854; // "Thro" — Throw: reject the newest pending await

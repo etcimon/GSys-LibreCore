@@ -40,7 +40,70 @@ pub const MAX_FUNCTIONS: usize = 1024;
 pub const MAX_LOCALS: usize = 4096;
 pub const MAX_STACK: usize = 256;
 pub const MAX_CONTROL_DEPTH: usize = 64;
-pub const MAX_INSTRUCTIONS: usize = 65_536;
+
+/// Floor of the decoded-instruction budget (see [`instruction_budget`]).
+///
+/// Every module is allowed at least this many decoded instructions regardless
+/// of how small its code section is, so a flat default still applies to the
+/// MVP lane and to hand-written test modules.
+///
+/// This was a *fixed* 65_536 and was the wrong shape: it is not a property of
+/// the input at all, so it silently became the binding constraint on the
+/// libwasm cell as the BIOS UI grew, and surfaced as a bare
+/// `"wasm instruction limit"` from unrelated scanout smoke tests rather than
+/// as "the cell does not fit". It is now a floor under a size-proportional
+/// pre-compute.
+pub const MAX_INSTRUCTIONS: usize = 131_072;
+
+/// Hard ceiling on decoded instructions for any one module, independent of its
+/// size. This is the real fence: it bounds the `Vec<Instr>` the decoder
+/// materialises, which is the resource that actually matters on an embedded
+/// target. At roughly 24 bytes per `Instr` this caps decode at a few MiB.
+pub const MAX_INSTRUCTIONS_CEIL: usize = 262_144;
+
+/// Decoded-instruction budget for a code section of `code_bytes`.
+///
+/// `clamp(code_bytes, MAX_INSTRUCTIONS, MAX_INSTRUCTIONS_CEIL)`.
+///
+/// The proportional term is an **exact upper bound, not a heuristic**: every
+/// wasm instruction consumes at least one body byte (`decode_expr` advances
+/// `i` past an opcode before pushing at most one `Instr`), so a module can
+/// never decode to more instructions than its code section has bytes. A budget
+/// of `code_bytes` therefore cannot reject a module that would otherwise
+/// decode, which is the point — the limit stops being a guess about how large
+/// a legitimate cell "should" be and becomes a memory fence derived from input
+/// we already agreed to accept via [`MAX_MODULE_BYTES`].
+///
+/// Consequence worth stating plainly: below the ceiling this check cannot
+/// fire. [`MAX_INSTRUCTIONS_CEIL`] and [`MAX_MODULE_BYTES`] are the operative
+/// bounds; the floor is a documented minimum that keeps the contract stable if
+/// the one-instruction-per-byte relation ever stops holding.
+pub const fn instruction_budget(code_bytes: usize) -> usize {
+    let proportional = if code_bytes > MAX_INSTRUCTIONS {
+        code_bytes
+    } else {
+        MAX_INSTRUCTIONS
+    };
+    if proportional > MAX_INSTRUCTIONS_CEIL {
+        MAX_INSTRUCTIONS_CEIL
+    } else {
+        proportional
+    }
+}
+
+/// Budget the embedded first-party BIOS UI cell is entitled to, pre-computed
+/// from the artifact `g6b-asm` embeds with `include_bytes!`.
+///
+/// This is the "trusted" half of the split bound. The cell is not untrusted
+/// input: it is compiled in this repository, hash- and ABI-pinned at build
+/// time by `browser-ui/compiler/wasm-cell.ts`, and embedded in the payload, so
+/// its size is known at compile time and its budget can be derived from it
+/// rather than guessed. `cell_budget_covers_the_embedded_bios_ui` asserts the
+/// shipped cell actually decodes inside this budget, so growth in the Svelte
+/// tree fails as a clear, single, named test instead of as an opaque limit
+/// error from whichever smoke test happened to run first.
+pub const BIOS_UI_CELL_BUDGET: usize = instruction_budget(g6b_asm::BIOS_UI_LIBWASM.len());
+
 const MAX_NAME_BYTES: usize = 256;
 
 /// WebAssembly value type accepted by the parser. The interpreter/JIT still
@@ -638,8 +701,14 @@ pub(crate) fn analyze(m: &Module) -> Result<Vec<BodyInfo>, String> {
         total = total
             .checked_add(body.len())
             .ok_or("instruction count overflow")?;
-        if total > MAX_INSTRUCTIONS {
-            return Err("wasm instruction limit".into());
+        // Defence in depth: `decode_code` already applied the size-proportional
+        // budget, but a `Module` can be built by other means, and here the code
+        // section length is no longer available. The absolute ceiling is the
+        // only sound bound at this point.
+        if total > MAX_INSTRUCTIONS_CEIL {
+            return Err(format!(
+                "wasm instruction limit: {total} decoded instructions exceed the {MAX_INSTRUCTIONS_CEIL} ceiling"
+            ));
         }
         let ty = func_type(m, (m.imports.len() + idx) as u32)?;
         let locals = (ty.params.len())
@@ -1431,6 +1500,8 @@ fn decode_exports(m: &mut Module, p: &[u8]) -> Result<(), String> {
 
 fn decode_code(m: &mut Module, p: &[u8]) -> Result<(), String> {
     let (n, mut i) = count(p, 0, MAX_FUNCTIONS)?;
+    // Pre-compute the budget from the code section we are about to decode.
+    let budget = instruction_budget(p.len());
     let mut total = 0;
     for fi in 0..n {
         let (size, ni) = uleb(p, i)?;
@@ -1451,8 +1522,11 @@ fn decode_code(m: &mut Module, p: &[u8]) -> Result<(), String> {
         let expr = body.get(j..).ok_or("truncated locals")?;
         let instrs = decode_expr(&m.types, expr).map_err(|e| format!("function {fi}: {e}"))?;
         total += instrs.len();
-        if total > MAX_INSTRUCTIONS {
-            return Err("wasm instruction limit".into());
+        if total > budget {
+            return Err(format!(
+                "wasm instruction limit: {total} decoded instructions exceed the {budget} budget for a {}-byte code section",
+                p.len()
+            ));
         }
         m.bodies.push(instrs);
         m.locals.push(locals);
@@ -1545,8 +1619,12 @@ fn decode_expr(types: &[FuncType], p: &[u8]) -> Result<Vec<Instr>, String> {
     let mut i = 0usize;
     let mut out = Vec::new();
     while i < p.len() {
-        if out.len() == MAX_INSTRUCTIONS {
-            return Err("wasm instruction limit".into());
+        // One expression can never out-grow its own byte length, so the
+        // ceiling (not the proportional budget) is the right fence here.
+        if out.len() == MAX_INSTRUCTIONS_CEIL {
+            return Err(
+                "wasm instruction limit: single expression exceeds the decode ceiling".into(),
+            );
         }
         let op = p[i];
         i += 1;
@@ -2368,6 +2446,82 @@ pub(crate) mod tests {
         let mut oversized = vec![0; MAX_MODULE_BYTES + 1];
         oversized[..8].copy_from_slice(b"\0asm\x01\x00\x00\x00");
         assert!(decode(&oversized).is_err());
+    }
+
+    /// The budget is `clamp(code_bytes, MAX_INSTRUCTIONS, MAX_INSTRUCTIONS_CEIL)`
+    /// and is a `const fn`, so it is usable in a `const` pre-compute.
+    #[test]
+    fn instruction_budget_is_a_clamped_size_proportional_precompute() {
+        // Below the floor, every module gets the same flat allowance.
+        assert_eq!(instruction_budget(0), MAX_INSTRUCTIONS);
+        assert_eq!(instruction_budget(1), MAX_INSTRUCTIONS);
+        assert_eq!(instruction_budget(MAX_INSTRUCTIONS), MAX_INSTRUCTIONS);
+        // Between floor and ceiling it tracks the code section exactly.
+        assert_eq!(
+            instruction_budget(MAX_INSTRUCTIONS + 1),
+            MAX_INSTRUCTIONS + 1
+        );
+        assert_eq!(
+            instruction_budget(MAX_INSTRUCTIONS_CEIL - 1),
+            MAX_INSTRUCTIONS_CEIL - 1
+        );
+        // At and above the ceiling it saturates: this is the memory fence.
+        assert_eq!(
+            instruction_budget(MAX_INSTRUCTIONS_CEIL),
+            MAX_INSTRUCTIONS_CEIL
+        );
+        assert_eq!(
+            instruction_budget(MAX_MODULE_BYTES * 4),
+            MAX_INSTRUCTIONS_CEIL
+        );
+        assert_eq!(instruction_budget(usize::MAX), MAX_INSTRUCTIONS_CEIL);
+        // Monotonic, and never outside [floor, ceiling].
+        let mut prev = 0;
+        for bytes in [0, 1, 1 << 10, 1 << 14, 1 << 17, 1 << 18, 1 << 20, 1 << 24] {
+            let b = instruction_budget(bytes);
+            assert!(b >= prev, "budget must be monotonic in code_bytes");
+            assert!((MAX_INSTRUCTIONS..=MAX_INSTRUCTIONS_CEIL).contains(&b));
+            prev = b;
+        }
+        // Usable as a constant expression.
+        const _: usize = instruction_budget(4096);
+        assert!((MAX_INSTRUCTIONS..=MAX_INSTRUCTIONS_CEIL).contains(&BIOS_UI_CELL_BUDGET));
+    }
+
+    /// The named fence for BIOS-UI growth.
+    ///
+    /// When the Svelte tree grows past what the JIT will decode, this is the
+    /// test that should fail — with the actual numbers — rather than a set of
+    /// unrelated `g6b-elf` / `g6b-kernel` scanout smoke tests reporting a bare
+    /// `"wasm instruction limit"`.
+    #[test]
+    fn cell_budget_covers_the_embedded_bios_ui() {
+        if !crate::bios_ui_libwasm_live() {
+            return;
+        }
+        let bytes = crate::bios_ui_libwasm();
+        let m = decode(bytes).unwrap_or_else(|e| {
+            panic!(
+                "the embedded BIOS UI cell ({} bytes) does not decode: {e}\n\
+                 budget for this artifact = {BIOS_UI_CELL_BUDGET} \
+                 (floor {MAX_INSTRUCTIONS}, ceiling {MAX_INSTRUCTIONS_CEIL}).\n\
+                 Either shrink the Svelte tree or raise MAX_INSTRUCTIONS_CEIL \
+                 deliberately - it bounds decoder memory on the target.",
+                bytes.len()
+            )
+        });
+        let instrs: usize = m.bodies.iter().map(|b| b.len()).sum();
+        assert!(
+            instrs <= BIOS_UI_CELL_BUDGET,
+            "cell decodes to {instrs} instructions, over its {BIOS_UI_CELL_BUDGET} budget"
+        );
+        // Headroom is the point of the proportional term: assert it is real so
+        // a cell that has crept to the edge is visible before it fails.
+        assert!(
+            instrs * 2 <= MAX_INSTRUCTIONS_CEIL,
+            "BIOS UI cell at {instrs} instructions has under 2x headroom to the \
+             {MAX_INSTRUCTIONS_CEIL} ceiling; raise the ceiling deliberately or trim the tree"
+        );
     }
 
     #[test]

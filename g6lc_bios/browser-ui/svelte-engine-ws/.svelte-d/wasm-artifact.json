@@ -1,11 +1,12 @@
 {
   "schema": "g6lc-libwasm-artifact/v1",
   "abi": "g6lc-libwasm-dom-shell-fx/v1",
-  "inputs": "27e8336ad7eb9cbe29b5fd0e8502b5056c85005ac6bef10544a216b6e15d1b92",
-  "sha256": "0060c7adb52a3ed38ad0381f6e25d7ef1cb0e91c5982fa272466daac50b0019d",
+  "inputs": "bb2981b0e7c2100042d838987006cea12d122e901d7e74ca0ebd5fd9df52c23a",
+  "sha256": "8cfea89e6640e8292afaeb6015ee94c71b93a01b4349b08314df50004f4e832c",
   "buildType": "release",
   "compiler": "LDC - the LLVM D compiler (1.43.0-beta1):",
   "imports": [
+    "JSON_stringify",
     "__cpp_exception",
     "add_event_listener",
     "appendChild",
@@ -13,6 +14,9 @@
     "fetch",
     "getRoot",
     "holyc",
+    "ldexec_Handle__Handle",
+    "ldexec_long__Handle",
+    "ldexec_string__Handle",
     "libwasm_add__string",
     "libwasm_await__void",
     "libwasm_await_supported",
@@ -20,5 +24,6 @@
     "libwasm_removeObject",
     "register_endpoint",
     "setProperty"
-  ]
+  ],
+  "asyncifyTool": "132 browser-ui/toolchains (fork)"
 }

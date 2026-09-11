@@ -12,16 +12,16 @@
 use g6b_spec::BoardSpec;
 
 use crate::encode::{
-    A0, A1, A2, A3, A4, A5, A6, A7, CMD_AWAI, CMD_FILE, CMD_GET, CMD_KEYS, CMD_REBO, CMD_SHUT,
-    CMD_THRO, CMD_UI, CMD_VIEW, CMD_WAKE, CSR_SATP, CSR_SCAUSE, CSR_SEPC, CSR_SIE, CSR_SSTATUS,
-    CSR_STVEC, CSR_TIME, GR16_MAGIC, GR_FILL_WORD, MBOX_MAGIC, MBOX_OFF_CMD, MBOX_OFF_DOORBELL,
-    MBOX_OFF_IRQ_EN, MBOX_OFF_LENGTH, MBOX_OFF_RSP, MBOX_OFF_STATUS, MBOX_RSP_FILE, MBOX_RSP_KEYS,
-    MBOX_RSP_UI, MBOX_RSP_VIEW, MBOX_RSP_WAKE, MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE,
-    PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID, SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID,
-    SBI_TIME_EID, SCAUSE_LOAD_ACCESS, SCAUSE_STORE_ACCESS, SIE_SEIE, SIE_SSIE, SIE_STIE, SP,
-    SSTATUS_SIE, T0, T1, T2, T3, T4, T5, T6, TP, UART_IER_RX, UART_IRQ, UART_LSR_DR, UI_MAGIC,
-    VIO_DEV_GPU, VIO_DEV_NET, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP,
-    VTYPE_E8_M1_TA_MA, X0,
+    A0, A1, A2, A3, A4, A5, A6, A7, CMD_AWAI, CMD_BLK, CMD_FILE, CMD_GET, CMD_KEYS, CMD_REBO,
+    CMD_SHUT, CMD_THRO, CMD_UI, CMD_VIEW, CMD_WAKE, CSR_SATP, CSR_SCAUSE, CSR_SEPC, CSR_SIE,
+    CSR_SSTATUS, CSR_STVEC, CSR_TIME, GR16_MAGIC, GR_FILL_WORD, MBOX_MAGIC, MBOX_OFF_CMD,
+    MBOX_OFF_DOORBELL, MBOX_OFF_IRQ_EN, MBOX_OFF_LENGTH, MBOX_OFF_RSP, MBOX_OFF_STATUS,
+    MBOX_RSP_FILE, MBOX_RSP_KEYS, MBOX_RSP_UI, MBOX_RSP_VIEW, MBOX_RSP_WAKE, MBOX_ST_BUSY,
+    MBOX_ST_RSP, PLIC_BASE, PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID, SBI_IPI_EID,
+    SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID, SCAUSE_LOAD_ACCESS, SCAUSE_STORE_ACCESS, SIE_SEIE,
+    SIE_SSIE, SIE_STIE, SP, SSTATUS_SIE, T0, T1, T2, T3, T4, T5, T6, TP, UART_IER_RX, UART_IRQ,
+    UART_LSR_DR, UI_MAGIC, VIO_DEV_GPU, VIO_DEV_NET, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS,
+    VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
 };
 use crate::{
     gr_bss_len, gr_stride, Addr, Module, Node, Op, Purpose, BIOS_UI_LIBWASM, BIOS_UI_WASM,
@@ -128,6 +128,11 @@ pub fn objects(spec: &BoardSpec) -> Vec<Object> {
             purpose: Purpose::VirtioNet,
             live: spec.wants_virtio_net(),
             why: "virtio-mmio probe DeviceID 1 (virtio-net); never QEMU -netdev",
+        },
+        Object {
+            purpose: Purpose::VirtioBlk,
+            live: spec.wants_virtio_blk(),
+            why: "virtio-mmio DeviceID 2 requestq — the payload reads its own sectors (LBA 0/1 identify the medium)",
         },
         Object {
             purpose: Purpose::DispScan,
@@ -268,7 +273,7 @@ pub fn live_objects(spec: &BoardSpec) -> Vec<Object> {
 
 /// Full OpenSBI payload: KStart + optional UART1 + park + trap + MemCpy.
 pub fn payload(spec: &BoardSpec, boot_log: &[u8]) -> Module {
-    let mut m = kstart(spec);
+    let mut m = kstart_inner(spec, Some(boot_log));
     m.rodata = boot_log.to_vec();
     m.push(memcpy_node(spec.isa.xlen, spec.rvv_live()));
     m
@@ -283,6 +288,13 @@ pub fn payload(spec: &BoardSpec, boot_log: &[u8]) -> Module {
 /// / `GrInit` / `ProxyScale` / `UiInit` / `FileServe` / `GetFile` / `WasmJit`, UART1 IER, park WFI. Trap
 /// and init bodies sit after park (QEMU OpenSBI next-stage, all-harts entry).
 pub fn kstart(spec: &BoardSpec) -> Module {
+    kstart_inner(spec, None)
+}
+
+/// `boot_log` is the host boot log when one exists (`payload`), so the guest can
+/// paint the very container the log shows. The listing / exec-model entry has no
+/// log and falls back to the container's own header row.
+fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
     let mut m = Module {
         nharts: spec.harts.max(1),
         line_bytes: UART_LINE_BSS,
@@ -296,6 +308,7 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     let mut gl = None;
     let mut vio = None;
     let mut vnet = None;
+    let mut vblk = None;
     let mut disp = None;
     let mut pci = None;
     let mut dmux = None;
@@ -322,6 +335,7 @@ pub fn kstart(spec: &BoardSpec) -> Module {
             Purpose::GlAdapter => gl = Some(o),
             Purpose::Virtio => vio = Some(o),
             Purpose::VirtioNet => vnet = Some(o),
+            Purpose::VirtioBlk => vblk = Some(o),
             Purpose::DispScan => disp = Some(o),
             Purpose::PciScan => pci = Some(o),
             Purpose::DisplayMux => dmux = Some(o),
@@ -435,6 +449,11 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     if let Some(o) = vnet {
         m.push(vio_net_call_node(o));
     }
+    // The block device is brought up next to the other transports, before
+    // anything that might want to read a medium (the picker, `Blk`).
+    if let Some(o) = vblk {
+        m.push(blk_call_node(o));
+    }
     // PciProbe runs before the mux so its result is available to the top rung,
     // and before VioScan so a failed ECAM read cannot strand the virtio lane.
     if let Some(o) = pci {
@@ -463,7 +482,16 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     }
     if let Some(o) = wasm_jit {
         m.push(wasm_jit_call_node(o));
-        m.push(wasm_ui_call_node(o));
+    }
+    // The CLI is the minimally dependent face, so it paints first — *including* on
+    // a build that carries the web engine, which is what `kernel.cli.boot=auto`
+    // promises. The picker is the power-on screen; the browser takes the plane when
+    // an operator asks for it.
+    if wants_cli_face(spec) {
+        m.push(cli_call_node());
+    }
+    if let Some(o) = wasm_jit {
+        m.push(wasm_ui_call_node(o, spec));
     }
     // The paint pass must run after the last __gr_plane painter (DomPaint
     // inside WasmUi, or GrInit when the DOM lane is absent): FbExpand
@@ -542,10 +570,17 @@ pub fn kstart(spec: &BoardSpec) -> Module {
                 m.push(crate::vio::dom_key_node(o, spec));
                 m.push(crate::vio::dom_nav_node(o, spec));
             }
+            // The CLI face consumes the same queue through its own watermark,
+            // so `Keys` and the DOM navigator keep their view of the ring.
         }
     }
     if let Some(o) = vnet {
         m.push(vio_net_probe_node(o));
+    }
+    if let Some(o) = vblk {
+        m.push(crate::vio::blk_init_node(o));
+        m.push(crate::vio::blk_read_node(o));
+        m.push(crate::vio::blk_sig_node(o, spec.isa.xlen));
     }
     if disp.is_some() {
         m.push(crate::vio::disp_paint_node(spec));
@@ -566,10 +601,67 @@ pub fn kstart(spec: &BoardSpec) -> Module {
     m.push(get_file_node(spec));
     if let Some(o) = wasm_jit {
         m.push(wasm_jit_node(o));
+        // `attach` is a superset of the text face: it brings the same row table,
+        // font and `DomPaint`, plus the wasm import shims.
         crate::dom::attach(&mut m, spec);
+    } else if wants_cli_face(spec) {
+        // Text face only: row table + font + `DomPaint`, no wasm import shims.
+        crate::dom::attach_text_face(&mut m, spec);
+    }
+    if wants_cli_face(spec) {
+        // The interactive container (edit line + page dispatch + the picker) is
+        // compiled either way — a complete build boots it first.
+        for n in crate::cli::nodes(spec, boot_log) {
+            m.push(n);
+        }
+        m.push(crate::cli::sync_node(spec));
     }
     if m.rodata.is_empty() {
         m.rodata = kstart_msg(spec);
+    }
+    // The BSS zero can only be sized once every block is known, and it has to run
+    // *before* the rungs that read those blocks — so it is built last and inserted
+    // right after the boot log, which is the first thing the handoff hart does
+    // alone. (Before the park split it would be every hart's work, and after the
+    // rungs it would wipe what they just set up.)
+    // Two ranges, and the gaps are deliberate:
+    //
+    // * `__uart_line` → `__ui_dom` inclusive **must** be zeroed: these are counts,
+    //   watermarks and latches (`AUTO_ON`, `CLI_DIRTY`, the DOM row count), and a
+    //   stale one changes a decision rather than a pixel.
+    // * `__ui_cap` is **skipped**: it is magic-guarded (`G6CP`) *and* a host may
+    //   legitimately hand the guest a pre-filled compact persist before the payload
+    //   runs (B91), which zeroing would throw away.
+    // * `__vio` must be zeroed for the same reason as the first range — a stale
+    //   `VIO_BUSY` would make every repaint skip, forever.
+    // * The Gr plane body and `__scan_fb` are skipped: megabytes that each frame
+    //   rewrites in full.
+    let head = m
+        .line_bytes
+        .saturating_add(m.ui_bytes)
+        .saturating_add(m.dom_bytes);
+    let mut ranges: Vec<(Addr, u64)> = Vec::new();
+    if head > 0 {
+        ranges.push((Addr::UartLine, head));
+    }
+    if m.vio_bytes > 0 {
+        ranges.push((Addr::VioBss, m.vio_bytes));
+    }
+    if !ranges.is_empty() {
+        let at = m
+            .nodes
+            .iter()
+            .position(|n| n.purpose == Purpose::BootLog)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        m.nodes.insert(at, bss_zero_node(spec.isa.xlen, &ranges));
+    }
+    // `FatRead`/`Ext4Read` are subroutines called from `blk_call_node` and the
+    // `uart_blk` trap path; they live at the end of the image so each `jal`
+    // link address points back to the caller, not into the start of the fn.
+    if let Some(o) = vblk {
+        m.push(crate::fatfile::fat_read_node(o, spec.isa.xlen));
+        m.push(crate::ext4file::ext4_read_node(o, spec.isa.xlen));
     }
     m
 }
@@ -627,6 +719,98 @@ pub fn memcpy(xlen: u32, rvv: bool) -> Module {
     let mut m = Module::default();
     m.push(memcpy_node(xlen, rvv));
     m
+}
+
+/// Zero the payload's BSS — every block after the stacks — before any rung reads
+/// it.
+///
+/// **Nothing did this before**, and everything that assumed zeroed memory was
+/// getting lucky. QEMU's `-kernel` loader writes `p_filesz` bytes and leaves the
+/// `p_memsz` remainder as it found it, which on a real boot is whatever OpenSBI
+/// used the DRAM for. The failure it produced was exact and hard to read from the
+/// outside: the boot picker's `AUTO_ON`/`AUTO_DONE` words at `__uart_line+276/292`
+/// came up non-zero, so `CliInit` decided the picker had already run and skipped it
+/// — the complete build painted its container and never offered a boot menu, while
+/// the host model (which zeroes RAM) showed the picker every time. A model that is
+/// kinder than the machine hides exactly this class of bug.
+///
+/// The span is the **control** blocks: UART line, `G6UI`, DOM rows, compact
+/// persist and the virtio rings — a few kilobytes. Deliberately *not* the Gr plane
+/// body or the scanout surface: those are megabytes that every frame rewrites
+/// wholesale, and zeroing them at boot would cost real time for no correctness
+/// (it also blew the host model's step budget, which is a fair proxy for "this is
+/// too much work to do twice"). Stacks are excluded for the same reason — they are
+/// written before they are read.
+fn bss_zero_node(xlen: u32, ranges: &[(Addr, u64)]) -> Node {
+    let step: u64 = if xlen == 64 { 8 } else { 4 };
+    let mut ops = vec![Op::Comment(format!(
+        "zero {} control BSS range(s) in {step}-byte stores: the ELF loader does not, and a stale \
+         AUTO_ON word once cost the boot picker",
+        ranges.len()
+    ))];
+    for (i, (addr, bytes)) in ranges.iter().enumerate() {
+        let words = bytes / step;
+        let tail = bytes % step;
+        let loop_label = format!("bss_zero{i}");
+        let tail_label = format!("bss_zero{i}_tail");
+        ops.extend([
+            Op::La {
+                rd: T0,
+                addr: addr.clone(),
+            },
+            Op::Li {
+                rd: T1,
+                imm: words as i64,
+            },
+            Op::Label(loop_label.clone()),
+            Op::Beq {
+                rs1: T1,
+                rs2: X0,
+                to: tail_label.clone(),
+            },
+        ]);
+        ops.push(if xlen == 64 {
+            Op::Sd {
+                rs2: X0,
+                rs1: T0,
+                off: 0,
+            }
+        } else {
+            Op::Sw {
+                rs2: X0,
+                rs1: T0,
+                off: 0,
+            }
+        });
+        ops.extend([
+            Op::Addi {
+                rd: T0,
+                rs: T0,
+                imm: step as i32,
+            },
+            Op::Addi {
+                rd: T1,
+                rs: T1,
+                imm: -1,
+            },
+            Op::Jal {
+                rd: X0,
+                to: loop_label,
+            },
+            Op::Label(tail_label),
+        ]);
+        for b in 0..tail as i32 {
+            ops.push(Op::Sb {
+                rs2: X0,
+                rs1: T0,
+                off: b,
+            });
+        }
+    }
+    Node {
+        purpose: Purpose::Stack,
+        ops,
+    }
 }
 
 /// Reboot only (SBI SRST).
@@ -701,6 +885,9 @@ pub fn kstart_msg(spec: &BoardSpec) -> Vec<u8> {
         s.push_str("KSTART-WASM-JIT\n");
         s.push_str("KSTART-WASM-UI\n");
         s.push_str("KSTART-DOM\n");
+    }
+    if wants_cli_face(spec) {
+        s.push_str("KSTART-CLI\n");
     }
     s.push('\0');
     s.into_bytes()
@@ -779,13 +966,24 @@ fn satp_node(o: Object) -> Node {
     }
 }
 
+/// Per-hart stack: `sp = __stacks_end - hartid*STACK_BYTES`.
+///
+/// `sp` must be the **top** of the hart's own slot, so the first push lands
+/// inside that slot and the deepest legal frame stops at `__stacks_end -
+/// nharts*STACK_BYTES`, which is exactly the end of the image. Subtracting one
+/// extra `STACK_BYTES` (giving each hart the *bottom* of its slot) makes the
+/// very first push write **below** the stacks: on a single-hart image that is
+/// the tail of `.rodata` — the `__font` glyph table — so long text painted
+/// garbage for high glyph indices, and on a multi-hart image hart 0 quietly ate
+/// hart 1's stack.
 fn stack_node(o: Object) -> Node {
     Node {
         purpose: Purpose::Stack,
         ops: vec![
             Op::Comment(format!(
-                "{} ({} bytes each; slli hartid, not a shared MEM_ADAM_STK)",
-                o.why, STACK_BYTES
+                "{} ({STACK_BYTES} bytes each; sp = __stacks_end - hartid*{STACK_BYTES} \
+                 (top of this hart's slot))",
+                o.why
             )),
             Op::La {
                 rd: T2,
@@ -795,15 +993,6 @@ fn stack_node(o: Object) -> Node {
                 rd: T1,
                 rs: TP,
                 shamt: STACK_SHIFT,
-            },
-            Op::Li {
-                rd: T0,
-                imm: STACK_BYTES as i64,
-            },
-            Op::Add {
-                rd: T1,
-                rs1: T1,
-                rs2: T0,
             },
             Op::Sub {
                 rd: SP,
@@ -1593,7 +1782,7 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
             Op::Beq {
                 rs1: T1,
                 rs2: X0,
-                to: "trap_done".into(),
+                to: "trap_vio_ack".into(),
             },
             Op::Li {
                 rd: A2,
@@ -1670,7 +1859,7 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 Op::Beq {
                     rs1: T1,
                     rs2: X0,
-                    to: "trap_done".into(),
+                    to: "trap_vio_ack".into(),
                 },
                 Op::Li {
                     rd: A2,
@@ -1698,6 +1887,91 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 },
             ]);
         }
+    }
+    if spec.wants_virtio_gpu() {
+        // An unrecognized source in the **virtio-mmio range** still has to be
+        // acked *at the device*, not only completed at the PLIC.
+        //
+        // This is a real starvation bug, found on QEMU: attach two
+        // `virtio-blk-device`s next to the GPU and keyboard and keystrokes stop
+        // arriving, while both devices still probe `OK`. A virtio-mmio interrupt
+        // is level-triggered — completing the PLIC claim does not lower the
+        // device's line, so a device this BIOS has no driver for re-asserts
+        // immediately and the hart spends every cycle re-entering `trap_sei`.
+        // Reading `InterruptStatus` and writing it back to `InterruptACK` is what
+        // a driver owes the bus, even for a device it does not use.
+        ops.extend([
+            Op::Label("trap_vio_ack".into()),
+            Op::Comment(
+                "unhandled virtio-mmio source: ack the device ISR too, or a \
+                 level-triggered device we have no driver for storms the hart"
+                    .into(),
+            ),
+            // Only the virtio window: irq = VIO_IRQ_BASE..VIO_IRQ_BASE+SLOTS.
+            Op::Addi {
+                rd: T1,
+                rs: T2,
+                imm: -(crate::vio::VIO_IRQ_BASE as i32),
+            },
+            Op::Srli {
+                rd: A2,
+                rs: T1,
+                shamt: xlen.saturating_sub(1),
+            },
+            Op::Bne {
+                rs1: A2,
+                rs2: X0,
+                to: "trap_done".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: VIO_MMIO_SLOTS,
+            },
+            Op::Sub {
+                rd: A2,
+                rs1: T1,
+                rs2: A2,
+            },
+            Op::Srli {
+                rd: A2,
+                rs: A2,
+                shamt: xlen.saturating_sub(1),
+            },
+            Op::Beq {
+                rs1: A2,
+                rs2: X0,
+                to: "trap_done".into(),
+            },
+            // base = VIO_MMIO_BASE + slot * VIO_MMIO_STEP
+            Op::Li {
+                rd: A2,
+                imm: VIO_MMIO_STEP as i64,
+            },
+            Op::Mul {
+                rd: T1,
+                rs1: T1,
+                rs2: A2,
+            },
+            Op::Li {
+                rd: A2,
+                imm: VIO_MMIO_BASE as i64,
+            },
+            Op::Add {
+                rd: T1,
+                rs1: T1,
+                rs2: A2,
+            },
+            Op::Lw {
+                rd: A0,
+                rs: T1,
+                off: crate::encode::VIO_REG_ISR_STATUS,
+            },
+            Op::Sw {
+                rs2: A0,
+                rs1: T1,
+                off: crate::encode::VIO_REG_ISR_ACK,
+            },
+        ]);
     }
     ops.push(Op::Jal {
         rd: X0,
@@ -1785,6 +2059,12 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 // mirrors the newest key into `inp.last`. No repaint in irq
                 // context — the frame is pushed by an explicit Keys/Ui
                 // refresh (like a browser input event vs its next frame).
+                // A keystroke belongs to whichever face owns the screen. Feeding
+                // both would move the picker's marker *and* the browser's menu on
+                // one press — two faces reacting to one key is not a UI.
+                if faces_share_plane(spec) {
+                    ops.extend(face_is(crate::FACE_WEB, "inp_face_cli"));
+                }
                 ops.push(Op::Jal {
                     rd: RA,
                     to: "DomNav".into(),
@@ -1793,6 +2073,25 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                     rd: RA,
                     to: "DomKey".into(),
                 });
+                if faces_share_plane(spec) {
+                    ops.push(Op::Jal {
+                        rd: X0,
+                        to: "inp_face_done".into(),
+                    });
+                    ops.push(Op::Label("inp_face_cli".into()));
+                }
+            }
+            if wants_cli_face(spec) {
+                // zealcli: the keystroke edits the line and may dispatch a
+                // command. Still no paint in irq context — `CliKey` bumps
+                // `CLI_DIRTY` and the timer tick flushes the frame.
+                ops.push(Op::Jal {
+                    rd: RA,
+                    to: "CliKey".into(),
+                });
+            }
+            if faces_share_plane(spec) {
+                ops.push(Op::Label("inp_face_done".into()));
             }
             ops.push(Op::Jal {
                 rd: X0,
@@ -1862,6 +2161,11 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
         // since the last tick-covered paint (the DOM_PAINTED watermark).
         // This is the "doesn't block on DOM events" half: input/mutation
         // stay on their own irqs, frames flush here.
+        if faces_share_plane(spec) {
+            // Whose tick is this? The container's countdown and the browser's
+            // repaint are different work on the same timer.
+            ops.extend(face_is(crate::FACE_WEB, "tick_face_cli"));
+        }
         ops.extend([
             Op::Jal {
                 rd: RA,
@@ -1915,6 +2219,26 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
             });
         }
         ops.push(Op::Label("trap_timer_clean".into()));
+        if faces_share_plane(spec) {
+            // The container's tick as well, taken only while it owns the plane:
+            // the countdown has to run and `CLI_DIRTY` has to flush, or the picker
+            // would be a still image that never boots anything.
+            ops.push(Op::Jal {
+                rd: X0,
+                to: "tick_web_done".into(),
+            });
+            ops.push(Op::Label("tick_face_cli".into()));
+            ops.extend(crate::cli::tick_ops(spec.kernel.cli.autoboot.enable));
+            ops.extend(paint_commit_ops(spec));
+            ops.push(Op::Label(crate::cli::TICK_CLEAN.into()));
+            ops.push(Op::Label("tick_web_done".into()));
+        }
+    } else if wants_cli_face(spec) {
+        // Same split for the CLI face: keys edit the line on their own irq,
+        // the frame is flushed here when `CLI_DIRTY` moved.
+        ops.extend(crate::cli::tick_ops(spec.kernel.cli.autoboot.enable));
+        ops.extend(paint_commit_ops(spec));
+        ops.push(Op::Label(crate::cli::TICK_CLEAN.into()));
     }
     ops.extend([Op::Jal {
         rd: X0,
@@ -2109,6 +2433,11 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             rs: T0,
             off: 0,
         },
+    ]);
+    if wants_cli_face(spec) {
+        ops.extend(crate::cli::stash_uart_len_ops(T0));
+    }
+    ops.extend([
         Op::Sw {
             rs2: X0,
             rs1: T0,
@@ -2254,6 +2583,30 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             },
         ]);
     }
+    if spec.wants_virtio_blk() {
+        // `Blk` — the guest reads LBA 0/1 itself and names the medium. There is
+        // no host page behind this one: the answer comes off the disk.
+        ops.extend([
+            Op::Li {
+                rd: A2,
+                imm: i64::from(CMD_BLK),
+            },
+            Op::Beq {
+                rs1: A1,
+                rs2: A2,
+                to: "uart_blk".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: i64::from(b'B'),
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: A2,
+                to: "uart_blk".into(),
+            },
+        ]);
+    }
     if spec.kernel.wasm.jit {
         ops.extend([
             Op::Li {
@@ -2293,6 +2646,12 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
                 to: "uart_throw".into(),
             },
         ]);
+    }
+    // No band command matched. With the CLI face compiled the line belongs to
+    // the container (typed over serial on a headless board); otherwise the
+    // historical fallthrough into `View` stands.
+    if wants_cli_face(spec) {
+        ops.extend(crate::cli::uart_line_ops(paint_commit_ops(spec)));
     }
     ops.extend([Op::Label("uart_view".into())]);
     for ch in b"VIEW" {
@@ -2410,6 +2769,33 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
     for ch in b"UI\n" {
         ops.extend(putc_ops(i64::from(*ch)));
     }
+    if faces_share_plane(spec) {
+        // `Ui` on the band *is* a request for the browser face — the same request
+        // the picker's "BIOS UI" entry makes with a keystroke. So it claims the
+        // plane rather than dumping the browser's DOM onto the container's frame.
+        ops.push(Op::Comment(
+            "Ui → the browser face claims the plane (FACE_WEB), then paints".into(),
+        ));
+        ops.extend([
+            Op::La {
+                rd: T0,
+                addr: Addr::UartLine,
+            },
+            Op::Li {
+                rd: T1,
+                imm: crate::FACE_WEB,
+            },
+            Op::Sw {
+                rs2: T1,
+                rs1: T0,
+                off: crate::FACE_OWNER_OFF,
+            },
+        ]);
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "WasmUi".into(),
+        });
+    }
     if spec.kernel.wasm.enable && spec.kernel.wasm.jit {
         ops.push(Op::Comment(
             "Ui poll: drain the await slots before the repaint (DomAwait resolves \
@@ -2481,6 +2867,30 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             to: "trap_done".into(),
         },
     ]);
+    if spec.wants_virtio_blk() {
+        // Its own gate: a board can have a disk and no keyboard, or the reverse,
+        // and a label that exists under the wrong condition is a link error.
+        ops.extend([
+            Op::Label("uart_blk".into()),
+            Op::Comment("Blk — jal BlkSig (the guest's own sector read)".into()),
+            Op::Jal {
+                rd: RA,
+                to: "BlkSig".into(),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "FatRead".into(),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "Ext4Read".into(),
+            },
+            Op::Jal {
+                rd: X0,
+                to: "trap_done".into(),
+            },
+        ]);
+    }
     if spec.wants_virtio_input() {
         ops.extend([
             Op::Label("uart_keys".into()),
@@ -3379,6 +3789,36 @@ fn gl_call_node(o: Object) -> Node {
     }
 }
 
+/// Boot-time `jal BlkInit` — probe and bring up the block device.
+fn blk_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops: vec![
+            Op::Comment(format!("{} — jal BlkInit, then name the medium", o.why)),
+            Op::Jal {
+                rd: RA,
+                to: "BlkInit".into(),
+            },
+            // Identify what is attached at power-on: two sector reads, and the
+            // answer belongs in the boot log next to every other probe result.
+            Op::Jal {
+                rd: RA,
+                to: "BlkSig".into(),
+            },
+            // If BlkSig latched a filesystem it knows, a file reader picks it up:
+            // FAT keeps the BPB cached, ext4 keeps the superblock cached.
+            Op::Jal {
+                rd: RA,
+                to: "FatRead".into(),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "Ext4Read".into(),
+            },
+        ],
+    }
+}
+
 fn vio_net_call_node(o: Object) -> Node {
     Node {
         purpose: Purpose::VirtioNet,
@@ -3993,19 +4433,112 @@ fn wasm_jit_call_node(o: Object) -> Node {
     }
 }
 
-fn wasm_ui_call_node(o: Object) -> Node {
+/// True when the guest paints the `g6b-zealcli` container itself: a CLI face and a
+/// plane to paint it on.
+///
+/// **The web engine is not an exclusion.** `kernel.cli.boot=auto` means the
+/// minimally dependent face boots *first* even on a build that carries wasm, JS,
+/// DOM and CSS — the operator gets the boot picker at power-on, and the browser
+/// takes the plane only when the picker's "BIOS UI" entry is taken (or `LoadUI`
+/// runs). Excluding the container under `wasm.jit`, as this predicate used to, meant
+/// a complete build had no picker at all in the guest: the screen went straight to
+/// the web UI and the CLI-first rule held only in the host log.
+/// [`crate::FACE_OWNER_OFF`] is what keeps the two faces off each other's plane.
+pub fn wants_cli_face(spec: &BoardSpec) -> bool {
+    spec.kernel.cli.enable && (spec.kernel.gr.enable || spec.kernel.proxy.enable)
+}
+
+/// True when both faces are compiled, so ownership has to be decided at runtime.
+pub fn faces_share_plane(spec: &BoardSpec) -> bool {
+    wants_cli_face(spec) && spec.kernel.wasm.jit
+}
+
+/// `if FACE_OWNER != want { goto skip }` — the runtime ownership test.
+fn face_is(want: i64, skip: &str) -> Vec<Op> {
+    vec![
+        Op::La {
+            rd: T0,
+            addr: Addr::UartLine,
+        },
+        Op::Lw {
+            rd: T1,
+            rs: T0,
+            off: crate::FACE_OWNER_OFF,
+        },
+        Op::Li { rd: T2, imm: want },
+        Op::Bne {
+            rs1: T1,
+            rs2: T2,
+            to: skip.to_string(),
+        },
+    ]
+}
+
+/// The scanout commits that follow a plane paint: whichever backends this board
+/// actually has. Shared by the timer tick and the band-line path so a frame is
+/// presented the same way however it was triggered.
+fn paint_commit_ops(spec: &BoardSpec) -> Vec<Op> {
+    let plane = spec.kernel.gr.enable || spec.kernel.proxy.enable;
+    let mut ops = Vec::new();
+    if spec.wants_virtio_gpu() && plane {
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "VioPaint".into(),
+        });
+    }
+    if spec.wants_disp_scan() {
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "DispPaint".into(),
+        });
+    }
+    if spec.wants_pci_scan() && plane {
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "PciPaint".into(),
+        });
+    }
+    ops
+}
+
+fn cli_call_node() -> Node {
     Node {
         purpose: Purpose::UiDom,
         ops: vec![
-            Op::Comment(format!(
-                "{} — jal WasmUi (lowered wasm _start → DOM → DomPaint)",
-                o.why
-            )),
+            Op::Comment("zealcli face — jal CliInit (container rows → DomPaint)".into()),
             Op::Jal {
                 rd: RA,
-                to: "WasmUi".into(),
+                to: "CliInit".into(),
             },
         ],
+    }
+}
+
+fn wasm_ui_call_node(o: Object, spec: &BoardSpec) -> Node {
+    let mut ops = vec![Op::Comment(format!(
+        "{} — jal WasmUi (DOM rows + paint)",
+        o.why
+    ))];
+    if faces_share_plane(spec) {
+        // Both faces are compiled: at power-on the container owns the plane, so
+        // this rung does nothing until the picker (or `LoadUI`) flips the latch.
+        // Skipping the *call* rather than the paint keeps `WasmStart` from
+        // publishing rows over the picker's frame.
+        ops.push(Op::Comment(
+            "the container owns the plane at power-on; the browser waits for FACE_WEB".into(),
+        ));
+        ops.extend(face_is(crate::FACE_WEB, "wasm_ui_skip"));
+    }
+    ops.push(Op::Jal {
+        rd: RA,
+        to: "WasmUi".into(),
+    });
+    if faces_share_plane(spec) {
+        ops.push(Op::Label("wasm_ui_skip".into()));
+    }
+    Node {
+        purpose: Purpose::WasmJit,
+        ops,
     }
 }
 
@@ -4292,14 +4825,7 @@ fn font_g6lc() -> [[u8; 8]; 4] {
 
 /// Pack one 8-pixel font row into a little-endian 4bpp word (high nibble = left).
 fn pack_glyph_row_4bpp(bits: u8, fg: u8, bg: u8) -> u32 {
-    let mut w = 0u32;
-    for i in 0..8u32 {
-        let on = ((bits >> (7 - i)) & 1) == 1;
-        let n = if on { fg & 0xf } else { bg & 0xf };
-        let shift = (i / 2) * 8 + if i % 2 == 0 { 4 } else { 0 };
-        w |= u32::from(n) << shift;
-    }
-    w
+    crate::font::pack_row_4bpp(bits, fg, bg)
 }
 
 /// Blit `G6LC` at (0, 8) in colour 15 on black (below the boot scanline).
@@ -4907,6 +5433,54 @@ mod tests {
         assert!(s.contains("trap_uart"), "{s}");
         assert!(s.contains("purpose=timer"), "{s}");
         assert!(!s.contains("EFER") && !s.contains("CR0"));
+    }
+
+    /// An unhandled virtio-mmio source must be acked **at the device**, not only
+    /// completed at the PLIC.
+    ///
+    /// This is a starvation bug that was found on QEMU: with two
+    /// `virtio-blk-device`s next to the GPU and keyboard, keystrokes stopped
+    /// arriving while both devices still probed `OK`. A virtio-mmio interrupt is
+    /// level-triggered, so completing the claim does not lower the line — a device
+    /// this BIOS has no driver for re-asserted immediately and the hart never left
+    /// `trap_sei`.
+    #[test]
+    fn an_unhandled_virtio_source_is_acked_at_the_device() {
+        let spec = spec_json(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},"kernel":{"gr":{"enable":true,"backend":"virtio-gpu"}}}"#,
+        );
+        let s = kints(&spec).to_asm();
+        // The *label*, not the branch that targets it.
+        let ack = s.find("\ntrap_vio_ack").expect(&s);
+        let done = s[ack..]
+            .find("\ntrap_done")
+            .map(|i| i + ack)
+            .unwrap_or(s.len());
+        assert!(
+            ack < done,
+            "the ack path comes before the shared exit:\n{s}"
+        );
+        // It reads InterruptStatus and writes InterruptACK on the *computed*
+        // device base, so a slot with no driver still gets its line lowered.
+        let tail = &s[ack..done];
+        // Offsets are printed in decimal by the listing writer.
+        assert!(
+            tail.contains(&format!("{}(t1)", crate::encode::VIO_REG_ISR_STATUS)),
+            "reads InterruptStatus:\n{tail}"
+        );
+        assert!(
+            tail.contains(&format!("{}(t1)", crate::encode::VIO_REG_ISR_ACK)),
+            "writes InterruptACK:\n{tail}"
+        );
+        assert!(
+            tail.contains("mul"),
+            "derives the device base from the irq:\n{tail}"
+        );
+        // A source outside the virtio window is never poked.
+        assert!(
+            tail.matches("trap_done").count() >= 2,
+            "two range guards leave for trap_done:\n{tail}"
+        );
     }
 
     #[test]

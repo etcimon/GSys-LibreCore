@@ -3,6 +3,7 @@ description "BIOS-UI wasm cell: libwasm SPA (svelte-d fall-through). Not vibe.0.
 authors "Etienne Cimon"
 copyright "Copyright © 2026, Etienne Cimon"
 license "MIT"
+toolchainRequirements ldc=">=1.43.0-beta1"
 dflags "--wasm-enable-eh" "-mattr=+exception-handling" "-fvisibility=hidden" "-fno-moduleinfo"
 versions "G6LC_G6B"
 targetPath "public"

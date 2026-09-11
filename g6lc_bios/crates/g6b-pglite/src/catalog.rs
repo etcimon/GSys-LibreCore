@@ -23,14 +23,34 @@ pub struct Store {
     pub handles: u32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StoreRegistry {
     spec: StoreCfg,
     instances: BTreeMap<StoreUuid, Store>,
     current: BTreeMap<Purpose, StoreUuid>,
     seq: u64,
+    /// In-memory stand-in for a key, used when no real volume is attached. It is
+    /// *not* storage: nothing here survives the process or is readable elsewhere.
     usb: BTreeMap<(String, String), Vec<u8>>,
+    /// A real volume, when the kernel lent one (`g6b-vfs` behind
+    /// [`crate::StoreVolume`]). Present ⇒ a dump lands on the medium as JSON.
+    ///
+    /// Shared rather than owned: a registry gets cloned (the HolyC program carries
+    /// one), and the clones must write to the **same** medium — a second copy of the
+    /// sink would be a second view of one device, and the later writer would be
+    /// working from a stale read.
+    volume: Option<std::rc::Rc<std::cell::RefCell<dyn crate::StoreVolume>>>,
     listening: BTreeMap<(StoreUuid, String), Vec<Json>>,
+}
+
+impl std::fmt::Debug for StoreRegistry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreRegistry")
+            .field("instances", &self.instances.len())
+            .field("usb_cached", &self.usb.len())
+            .field("volume", &self.volume.is_some())
+            .finish()
+    }
 }
 
 impl StoreRegistry {
@@ -41,6 +61,7 @@ impl StoreRegistry {
             current: BTreeMap::new(),
             seq: 0,
             usb: BTreeMap::new(),
+            volume: None,
             listening: BTreeMap::new(),
         }
     }
@@ -408,8 +429,21 @@ impl StoreRegistry {
             return Err(StoreError::Budget("result"));
         }
         let packed = codec::pack(raw.as_bytes());
-        if let Some(prev) = self.usb.get(&(volume.clone(), rel.clone())) {
-            if let Ok(old) = codec::unpack(prev) {
+        // Whose dump is already at this path? The check has to look at the
+        // **medium** when there is one: refusing to overwrite another store's
+        // database is the point, and a check against this process's memory would
+        // miss a file written by an earlier boot — which is precisely the case where
+        // clobbering costs an operator their data.
+        let existing: Option<Vec<u8>> = match self.volume.as_ref() {
+            Some(sink) => sink
+                .borrow_mut()
+                .read(&volume, &rel)
+                .map_err(|e| StoreError::exec(format!("volume read: {e}")))?,
+            None => None,
+        }
+        .or_else(|| self.usb.get(&(volume.clone(), rel.clone())).cloned());
+        if let Some(prev) = existing {
+            if let Ok(old) = codec::unpack(&prev) {
                 if let Ok(j) = parse_json(std::str::from_utf8(&old).unwrap_or("")) {
                     if let Ok(d) = persist::load_dump(&j) {
                         if d.uuid != uuid {
@@ -418,6 +452,14 @@ impl StoreRegistry {
                     }
                 }
             }
+        }
+        // JSON on the medium, packed in the in-memory cache. An export is an
+        // operator saying "put my database on that key", so it has to *land* there;
+        // it used to reach no further than this registry's own map.
+        if let Some(sink) = self.volume.as_ref() {
+            sink.borrow_mut()
+                .write(&volume, &rel, raw.as_bytes())
+                .map_err(|e| StoreError::exec(format!("volume write: {e}")))?;
         }
         self.usb.insert((volume, rel), packed);
         Ok(())
@@ -438,11 +480,21 @@ impl StoreRegistry {
             return Err(persist::refuse_unarmed("usb"));
         }
         let volume = normalize_volume(volume)?;
-        let blob = self
-            .usb
-            .get(&(volume, rel.to_string()))
-            .ok_or_else(|| persist::refuse_unarmed("usb"))?
-            .clone();
+        // The **medium first**, then the in-memory cache. An import is an operator
+        // plugging a key in and asking for what is on it: reading only this
+        // process's map made "import" mean "restore what I already had", which is
+        // the one thing it should not mean.
+        let from_volume = match self.volume.as_ref() {
+            Some(sink) => sink
+                .borrow_mut()
+                .read(&volume, rel)
+                .map_err(|e| StoreError::exec(format!("volume read: {e}")))?,
+            None => None,
+        };
+        let cached = self.usb.get(&(volume, rel.to_string())).cloned();
+        let blob = from_volume
+            .or(cached)
+            .ok_or_else(|| StoreError::exec(format!("{rel}: nothing to import on that volume")))?;
         let raw = codec::unpack(&blob)?;
         let json = parse_json(std::str::from_utf8(&raw).map_err(|_| StoreError::exec("utf8"))?)
             .map_err(StoreError::syntax)?;
@@ -492,7 +544,18 @@ impl StoreRegistry {
                 .filter(|r| !r.is_empty())
                 .unwrap_or_else(|| default_usb_rel(&s.purpose, s.uuid))
         };
-        if let Some(blob) = self.usb.get(&(volume.clone(), rel.clone())).cloned() {
+        // The medium is the source of truth when one is attached: an operator who
+        // plugs a key in expects what is *on it*, not what this process remembers.
+        let from_volume = match self.volume.as_ref() {
+            Some(sink) => sink
+                .borrow_mut()
+                .read(&volume, &rel)
+                .map_err(|e| StoreError::exec(format!("volume read: {e}")))?,
+            None => None,
+        };
+        let cached = self.usb.get(&(volume.clone(), rel.clone())).cloned();
+        let found: Option<Vec<u8>> = from_volume.or(cached);
+        if let Some(blob) = found {
             if let Ok(raw) = codec::unpack(&blob) {
                 if let Ok(json) = parse_json(std::str::from_utf8(&raw).unwrap_or("")) {
                     let dump = persist::load_dump(&json)?;
@@ -539,6 +602,15 @@ impl StoreRegistry {
         let raw = stringify_json(&json);
         if raw.len() as u32 > self.spec.max_result_bytes {
             return Err(StoreError::Budget("result"));
+        }
+        // A real volume takes the **JSON text**: the key has to be readable by the
+        // OS it is plugged into, not only by this BIOS. The packed copy stays in the
+        // in-memory map so `stat` can report a size and a board with no block reader
+        // behaves as before.
+        if let Some(sink) = self.volume.as_ref() {
+            sink.borrow_mut()
+                .write(&volume, &rel, raw.as_bytes())
+                .map_err(|e| StoreError::exec(format!("volume write: {e}")))?;
         }
         self.usb.insert((volume, rel), codec::pack(raw.as_bytes()));
         Ok(())
@@ -681,6 +753,20 @@ impl StoreRegistry {
             .collect()
     }
 
+    /// Persist through a **real volume** from now on (the kernel's mount table).
+    ///
+    /// A dump written here is JSON on the medium, so the key an operator pulls out
+    /// carries something their OS can read — which is the difference between
+    /// persistence and a cache that happens to survive one boot.
+    pub fn attach_volume(&mut self, sink: std::rc::Rc<std::cell::RefCell<dyn crate::StoreVolume>>) {
+        self.volume = Some(sink);
+    }
+
+    /// True when a dump reaches a medium rather than this process's memory.
+    pub fn volume_attached(&self) -> bool {
+        self.volume.is_some()
+    }
+
     pub fn list(&self) -> Vec<(StoreUuid, Purpose, PersistMode, u64)> {
         self.instances
             .values()
@@ -743,6 +829,7 @@ fn normalize_volume(v: &str) -> Result<String, StoreError> {
         "fat32" | "fat" | "vfat" | "key-fat" => "fat32".into(),
         "ntfs" | "key-ntfs" => "ntfs".into(),
         "ext4" | "ext3" | "ext2" | "key-ext4" => "ext4".into(),
+        "btrfs" | "key-btrfs" => "btrfs".into(),
         _ => return Err(StoreError::syntax("usb volume")),
     })
 }

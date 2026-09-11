@@ -6,8 +6,8 @@
 #![allow(missing_docs)]
 
 use crate::{
-    BiosParams, BoardSpec, DualBand, Flash, Holyc, HolycTcp, Http, HttpFiles, NetExpose,
-    NetExposeMode, PostbootMode, Settings, Tls, Usb, Wasm,
+    Autoboot, BiosParams, BoardSpec, Cli, DualBand, Flash, Gr, Holyc, HolycTcp, Http, HttpFiles,
+    NetExpose, NetExposeMode, PostbootMode, Settings, StoreCfg, Tls, Usb, Wasm, Web,
 };
 
 /// Compile-time BIOS shape. JSON overlay still wins on explicit fields.
@@ -16,6 +16,9 @@ pub enum BiosProfile {
     /// No bundle; BoardSpec fields as written.
     #[default]
     Custom,
+    /// No web stack at all: VGA `g6b-zealcli`, kernel, HolyC band, hw network
+    /// adapter, USB key, HTTPS firmware update. The embedded-device BIOS.
+    Barebone,
     /// UART-only, SPI NOR flash, no browser-UI (low-res SoC).
     Embedded,
     /// Embedded + OpenWrt image flash + settings over UART/mailbox.
@@ -33,6 +36,7 @@ impl BiosProfile {
     pub fn parse(s: &str) -> Result<Self, String> {
         Ok(match s {
             "custom" | "" => Self::Custom,
+            "barebone" | "bare" => Self::Barebone,
             "embedded" | "lowres" => Self::Embedded,
             "router" => Self::Router,
             "appliance" => Self::Appliance,
@@ -40,7 +44,8 @@ impl BiosProfile {
             "full" => Self::Full,
             other => {
                 return Err(format!(
-                    "unknown profile `{other}`; use embedded, router, appliance, desktop, or full"
+                    "unknown profile `{other}`; use barebone, embedded, router, appliance, \
+                     desktop, or full"
                 ))
             }
         })
@@ -49,6 +54,7 @@ impl BiosProfile {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Custom => "custom",
+            Self::Barebone => "barebone",
             Self::Embedded => "embedded",
             Self::Router => "router",
             Self::Appliance => "appliance",
@@ -64,6 +70,7 @@ impl BoardSpec {
         self.kernel.profile = p;
         match p {
             BiosProfile::Custom => {}
+            BiosProfile::Barebone => apply_barebone(self),
             BiosProfile::Embedded => apply_embedded(self),
             BiosProfile::Router => {
                 apply_embedded(self);
@@ -122,6 +129,25 @@ impl BoardSpec {
             ("hw_ethernet", self.kernel.hw.ethernet),
             ("hw_wifi", self.kernel.hw.wifi),
             ("cli", self.kernel.cli.enable),
+            ("cli_first", self.cli_before_web()),
+            ("cli_mouse", self.kernel.cli.mouse),
+            (
+                "cli_manual",
+                self.kernel.cli.enable && self.kernel.cli.manual,
+            ),
+            ("cli_vi", self.kernel.cli.enable && self.kernel.cli.vi),
+            ("cli_fs", self.kernel.cli.enable && self.kernel.cli.fs),
+            (
+                "cli_fs_volumes",
+                self.kernel.cli.enable && self.kernel.cli.fs && self.kernel.usb.enable,
+            ),
+            ("cli_fw", self.kernel.cli.enable && self.kernel.cli.fw),
+            // One bundle: wasm+js+dom+render+css ship together or not at all.
+            ("web", self.kernel.web.enable),
+            ("web_dom", self.kernel.web.enable),
+            ("web_render", self.kernel.web.enable),
+            ("web_css", self.kernel.web.enable),
+            ("web_js", self.kernel.web.enable && self.kernel.js == "aot"),
             ("wasm", self.kernel.wasm.enable),
             ("wasm_jit", self.kernel.wasm.jit),
             ("ui_svelte", self.kernel.ui == "svelte-d"),
@@ -151,6 +177,7 @@ impl BoardSpec {
             ("fs_fat32", self.kernel.usb.fs_fat32),
             ("fs_ntfs", self.kernel.usb.fs_ntfs),
             ("fs_ext4", self.kernel.usb.fs_ext4),
+            ("fs_btrfs", self.kernel.usb.fs_btrfs),
             ("dual_band_uart", self.holyc.dual_band.uart),
             ("dual_band_tcp", self.holyc.dual_band.tcp.enable),
             ("postboot", self.postboot.enable != PostbootMode::Never),
@@ -192,6 +219,120 @@ impl BoardSpec {
     }
 }
 
+/// Barebone: the web stack (wasm+js+dom+render+css) is **not** compiled. What
+/// is left is the kernel, the HolyC UART band, the hw network adapter, the USB
+/// key and `g6b-zealcli` on VGA — enough to read settings, browse a key and
+/// pull a firmware image over HTTPS. `virtio-gpu` is the VGA-class surface the
+/// text container is scanned onto; no display proxy, no GL, no browser-UI.
+fn apply_barebone(spec: &mut BoardSpec) {
+    spec.product = "barebone".into();
+    spec.kernel.web = Web { enable: false };
+    spec.kernel.wasm = Wasm {
+        enable: false,
+        jit: false,
+    };
+    spec.kernel.js = "off".into();
+    spec.kernel.ui = "cli".into();
+    spec.kernel.display = "cli".into();
+    spec.kernel.gr = Gr {
+        enable: true,
+        w: 640,
+        h: 480,
+        colors: 16,
+        backend: "virtio-gpu".into(),
+    };
+    spec.kernel.proxy.enable = false;
+    spec.kernel.proxy.gl = false;
+    spec.kernel.cli = Cli {
+        enable: true,
+        boot: "cli".into(),
+        mouse: false,
+        rows: 25,
+        cols: 80,
+        scrollback: 512,
+        manual: true,
+        vi: true,
+        fs: true,
+        fw: true,
+        // A barebone board is the one most likely to be booted from a live USB
+        // to be repaired, so recovery media leads and the BIOS UI is absent.
+        autoboot: Autoboot {
+            enable: true,
+            timeout_ms: 2000,
+            order: "live-first".into(),
+            bios_ui: false,
+        },
+    };
+    // HTTPS client only: the firmware image comes in, nothing is served out.
+    spec.kernel.tls = Tls {
+        enable: true,
+        https: true,
+        serve: false,
+        rsa: true,
+        ecdsa: true,
+        certificates: true,
+    };
+    spec.kernel.http = Http {
+        enable: true,
+        http1: true,
+        http2: false,
+        proxy_js: false,
+        serve: false,
+        outbound: true,
+        files: HttpFiles::default(),
+    };
+    spec.kernel.params = BiosParams {
+        clocks: true,
+        edk2: true,
+        uboot: true,
+        bootloader: true,
+        uart_baud: 115_200,
+        next: "opensbi".into(),
+        ..BiosParams::default()
+    };
+    spec.kernel.flash = Flash {
+        enable: true,
+        openwrt: false,
+        self_update: true,
+        backend: "spi-nor".into(),
+        image: "bios".into(),
+        url: String::new(),
+    };
+    spec.kernel.settings = Settings {
+        enable: true,
+        export: true,
+        import: true,
+        uart: true,
+        mailbox: true,
+        usb_key: true,
+    };
+    spec.kernel.usb = usb_key_barebone();
+    // The structured store is a web-UI facility; a barebone BIOS keeps
+    // settings in the exported JSON, not in pglite.
+    spec.kernel.store = StoreCfg {
+        enable: false,
+        persist_memory: false,
+        purposes: Vec::new(),
+        ..StoreCfg::default()
+    };
+    spec.kernel.hw.enable = true;
+    spec.kernel.hw.virtio_net = true;
+    spec.holyc = Holyc {
+        fast_init: true,
+        dual_band: DualBand {
+            uart: true,
+            tcp: HolycTcp {
+                enable: false,
+                ..HolycTcp::default()
+            },
+        },
+    };
+    spec.postboot.enable = PostbootMode::Never;
+    spec.postboot.backends = vec!["ssh-holyc".into()];
+    spec.net_expose.mode = NetExposeMode::Never;
+    spec.loopback.enable = false;
+}
+
 fn apply_embedded(spec: &mut BoardSpec) {
     spec.product = "iot".into();
     spec.kernel.ui = "html-js".into();
@@ -226,6 +367,7 @@ fn apply_embedded(spec: &mut BoardSpec) {
         self_update: true,
         backend: "spi-nor".into(),
         image: "bios".into(),
+        url: String::new(),
     };
     spec.kernel.settings = Settings {
         enable: true,
@@ -300,6 +442,7 @@ fn apply_appliance(spec: &mut BoardSpec) {
         self_update: true,
         backend: "mailbox".into(),
         image: "bios".into(),
+        url: String::new(),
     };
     spec.kernel.settings = Settings {
         enable: true,
@@ -430,6 +573,21 @@ fn usb_flash_always() -> Usb {
         fs_fat32: true,
         fs_ntfs: false,
         fs_ext4: false,
+        fs_btrfs: false,
+    }
+}
+
+/// Barebone USB: FAT32 firmware stick plus the key file manager (FAT32 only —
+/// NTFS/ext4 stay opt-in so the barebone image keeps one on-disk parser).
+fn usb_key_barebone() -> Usb {
+    Usb {
+        enable: true,
+        flash_fat32: true,
+        key: true,
+        fs_fat32: true,
+        fs_ntfs: false,
+        fs_ext4: false,
+        fs_btrfs: false,
     }
 }
 
@@ -441,5 +599,6 @@ fn usb_key_fm() -> Usb {
         fs_fat32: true,
         fs_ntfs: true,
         fs_ext4: true,
+        fs_btrfs: true,
     }
 }

@@ -348,13 +348,21 @@ fetchBios("/bios/menu/cpu");
 });
 
 describe("libwasm DOM kernel", () => {
-  function fixture() {
+  // `store: true` binds a first-party browser context so the cell's
+  // `Eval("window.pglite")` resolves (libwasm/pglite.d `PgLite()` ->
+  // `defaultTo(Eval("window.pglite"))`). Opt-in, because other tests here
+  // deliberately assert the no-context, fail-closed behaviour of
+  // `libwasm_global` and must keep `ctx === null`.
+  function fixture(opts: { store?: boolean } = {}) {
     const mount = new TestNode("libwasm-root");
     const original = new TestNode("original");
     original.textContent = "static fallback";
     mount.appendChild(original);
     const doc = testDocument([mount]);
-    const host = createLibwasmHost(doc, mount);
+    const context = opts.store
+      ? createBrowserContext(doc as any, { contextId: "libwasm-test", biosStore: true })
+      : undefined;
+    const host = createLibwasmHost(doc, mount, WebAssembly, context ? { context } : {});
     const memory = new WebAssembly.Memory({ initial: 32, maximum: 256 });
     host.bind(memory);
     let offset = 0;
@@ -788,7 +796,7 @@ describe("libwasm DOM kernel", () => {
     const imported = WebAssembly.Module.imports(new WebAssembly.Module(bytes)).map((i) => i.name).sort();
     expect(imported).toContain("createElement");
     for (const name of ["fetch", "holyc", "register_endpoint"]) expect(imported).toContain(name);
-    const { host, mount, original } = fixture();
+    const { host, mount, original } = fixture({ store: true });
     const { instance } = await WebAssembly.instantiate(bytes, host.imports);
     host.bind(instance.exports.memory);
     // Reaching the end of _start means every /bios/ URL and HTTP method the
@@ -819,7 +827,8 @@ describe("libwasm DOM kernel", () => {
       if (!/^\/bios\//.test(url)) throw new Error("unexpected fetch: " + url);
       return { ok: true, text: async () => JSON.stringify(rows) };
     };
-    const host = createLibwasmHost(doc, mount, WebAssembly, { asyncify: true, fetchFn });
+    const context = createBrowserContext(doc as any, { contextId: "libwasm-test", biosStore: true, fetchFn });
+    const host = createLibwasmHost(doc, mount, WebAssembly, { asyncify: true, fetchFn, context });
     const { instance } = await WebAssembly.instantiate(bytes, host.imports);
     host.bind(instance.exports.memory);
     const heap = (instance.exports.__heap_base as WebAssembly.Global).value;

@@ -8,6 +8,7 @@
 | Artifact | Path | Role |
 |---|---|---|
 | This guider | `AGENTS.md` | Invariants + current planning state |
+| Expert guider | `AGENTS-EXPERTS.md` | Whole-project mental model: crate graph, Svelte→D→wasm lanes, libwasm import ABI, the three hosts, store⇄volume seam, worked pglite/btrfs/QEMU test |
 | Live todo | `AGENTS-todo.md` | Stage checklist |
 | Living plan | `architecture/PLAN.md` | Rewrite-from-spec, conformity gate, B0–B52; guest browser/JIT residuals |
 | Licensing | `AGENTS-licensing.md` | MIT first-party; Unlicense `kernel-spec/` |
@@ -36,9 +37,176 @@ linear-fb → HDMI G6DS → virtio-gpu) is announced (`HW-DISP-SEL`). HTTP(S)
 fetch is a **kernel** path (`HttpGet`/`HttpsGet` / `kernel_fetch` / iframe
 outbound): `g6b-http` plans the URL, `g6b-tls` writes ClientHello, sockets
 are hw TCP (`via=hw-tcp`). HTTPS is not in `g6b-hw`. Pointer HID and
-USB-key listings live in `g6b-hw`. **`g6b-zealcli`:** VGA mouse-less
+USB-key listings live in `g6b-hw`. **`g6b-zealcli`:** VGA
 ZealOS CLI (`kernel.cli.boot=auto` until GPU, then `LoadUI` → browser-ui).
 Docs: `architecture/g6b-hw.md`, `architecture/g6b-zealcli.md`.
+**B94–B95 (landed):** the CLI is the *minimally dependent face* — a
+`kernel.cli.{rows,cols,scrollback}` container with the prompt on the bottom
+row, Linux-keycode input (USB HID first, then virtio-keyboard, then UART),
+optional `kernel.cli.mouse`, read-only `vi`, ZealOS drives, a generated
+`man`, a settings overlay that exports a BoardSpec patch (only
+`g6b_spec::menu::WRITABLE` rows), an edk2/u-boot selector with probed
+presence, and a **poll-driven** firmware update (HTTPS or USB key, no worker
+thread; the HTTPS record layer stays B54 and says so). Capabilities arrive as
+`VolumePort`/`NetPort`/`FlashPort` from `g6b-kernel::zealcli`, so the crate
+still takes only `g6b-spec` + `g6b-holyc`. The web engine is **one bundle**:
+`kernel.web.enable` gates wasm+js+dom+render+css together, `profile=barebone`
+excludes all of it (kernel + HolyC band + hw NIC + USB key remain), and
+`cli.boot=ui` is refused while the bundle is compiled because the CLI boots
+first (`CliBoot()` before `UiBoot()`, `ZEALCLI-READY` before `UI-BOOT`). The
+guest paints the container itself through `dom::attach_text_face` + `CliInit`
+(`KSTART-CLI`, `ZEALCLI-PAINT n`).
+**B96 (landed):** that container is **interactive in the ELF**. `g6b-asm::cli`
+carries `CliKey` (own `CLI_SEEN` watermark over `INP_KQ`: printable append,
+backspace, Enter), `CliEnter` (bounded verb table — `clear`/`reboot`/`shutdown`
+plus one per packed page; a miss is `CLI-CMD?`, never a guess), `CliSync` and a
+keymap pinned to `g6b_zealcli::input` by a dev-dep test. The edit line is
+`__uart_line + CLI_LINE_OFF` with the bottom row pointing at it, so a keystroke
+changes the next frame; keys never paint in IRQ context (`CLI_DIRTY` + the timer
+tick), while a serial line no builtin claims dispatches and paints in the trap
+like `Ui`. Pages are **host-rendered** (`CLI:<name>| …` in the boot log: `help`,
+`menu`, one per setup screen) — build-time text plus a live line, which is what a
+guest with no interpreter can honestly offer. `wants_virtio_input` follows the
+text face rather than wasm; `wants_virtio_tablet` keeps the pointer opt-in.
+Three real guest bugs surfaced and were fixed with regression tests: `sp`
+pointed at the **bottom** of a hart's stack slot (single-hart images pushed into
+the `.rodata` `__font` tail), the mirrored font pairs `( ) [ ] { } < > / \` were
+reversed (`/>` printed `\<`), and `DomPaint` never erased (a shorter row or page
+left the previous text on screen). QEMU-verified on
+`fixtures/g6lc64-zealcli.json` (640×480 container, no `UI-BOOT`/`WASM` in the
+image; `help` on serial → `CLI-PAGE help`; `sendkey m e n u` → `/>MENU` on the
+prompt row; `ret` → `CLI-PAGE menu`) and `fixtures/g6lc64-web-hd.json` (CLI
+first, then browser-UI at 1920×1080) via `tools/qemu_zealcli.sh`.
+**B97 (landed):** `autoboot` — the countdown boot picker, and the power-on face
+where it is compiled (`kernel.cli.autoboot.{enable,timeout_ms=2000,order,bios_ui}`,
+orders `live-first`/`os-first`/`payload-first`, writable from setup). Every row
+names its evidence (`g6b-zealcli::detect`: RISC-V `Image` header, ISO 9660 PVD +
+El Torito, `casper/vmlinuz`, `openwrt-*.manifest`, `BOOTRISCV64.EFI`, `bootmgr`);
+anything unrecognized stays `unknown` and a device with no reported vendor shows
+a blank, because a boot menu gets acted on. Arrows **wrap**, `1`-`9` picks, Enter
+boots, Esc stays in setup, and the countdown takes **entry 0** — the unattended
+path — while any navigation stops the clock. The list is discovered on the host
+(`--volume ID=PATH[:role[:vendor]]` → `DirVolumes`) and packed (`CLI-AB-*`), since
+the payload has no block reader; the guest half (`AutoDraw`/`AutoKey`/`AutoTick`/
+`AutoPick`) is live and counts real timer ticks. QEMU, against media built from
+the real OpenWrt artifacts (`tools/mkmedia.sh`, `tools/qemu_openwrt_chain.sh`): a
+genuine xorriso install ISO lists as `> 1. G6LC-OPENWRT-INST [INSTALLER] QEMU
+DVD-ROM`, the OpenWrt key as `OpenWrt … (1~d9340319c6) [firmware]`, the countdown
+runs `20s→19s→18s`, `down/up/up` moves the marker `1→2→1→4` (wraparound), and the
+picked image boots to `Linux 6.6.93 … r28739-d9340319c6` → `procd: - init -`.
+**B99 (landed):** new crate **`g6b-vfs`** — real block devices, partition tables
+and filesystems behind one mount table, shared by the shell, HolyC and the browser
+UI (`architecture/g6b-vfs.md`). GPT (both CRC32s checked) + MBR + whole-disk
+fallback; the *superblock* decides the filesystem, never the table's claim, and
+every answer carries its evidence. **FAT32 read/write** including VFAT long-name
+creation (`\EFI\BOOT\BOOTRISCV64.EFI` has an 11-character basename, so 8.3-only
+could not repair an ESP), with both FAT copies and the FSInfo count kept in step.
+**ext2/3/4 read** (extents and classic indirect) plus a narrow in-place write —
+existing regular file, fits its allocated blocks, clean superblock — with the
+**crc32c inode checksum** (`metadata_csum`), which is what `e2fsck` caught on the
+first attempt. **NTFS read-only** (`$MFT` + fixups + run lists). The shell gets
+`drives`/`mount [-w]`/`umount` and `cd`/`ls`/`cat`/`write`/`rm`/`mkdir` over
+`/mnt/<name>`, `<name>:/path` or relative paths, auto read-only mount on access,
+and `mount` refusing to guess between candidates; `vi` is a real editor where the
+file is writable (`i a o x dd`, `:w`, `:wq`) and the read-only viewer elsewhere
+*with the reason*. OS detection reads the volume. HolyC gains `Mount`/`Drives`/
+`VfsLs`/`VfsCat`/`VfsWrite`/`OsDetect`, and the browser UI gets the same answers as
+JSON. **Verified against the distro's own tools** (`tools/mkfs_fixtures.sh`):
+`mkfs.vfat`/`mkfs.ext4`/`sfdisk` images read *and written*, `e2fsck -fn` clean,
+`debugfs`/`mtools` reading our writes, `fsck.vfat` clean.
+**B100 (landed):** the three carried-over guest hazards, closed with QEMU
+evidence. **The virtio-blk keystroke bug was real starvation**, not a QEMU quirk: a
+virtio-mmio interrupt is *level-triggered*, so completing the PLIC claim does not
+lower the device's line — a `virtio-blk-device` this BIOS has no driver for
+re-asserted forever and the hart never left `trap_sei`. `trap_vio_ack` now reads
+`InterruptStatus` and writes `InterruptACK` on the base derived from the claimed
+irq, for any unhandled source inside the virtio window (two range guards keep it
+off non-virtio addresses). The new `VIRTIO-INPUT-OK slot=N irq=M` marker made the
+diagnosis one line: the guest's own view was already right (`slot=6 irq=7`) with
+one drive or two, so the fault was the bus. With both drives attached the marker
+now moves `> 1.` → `> 2.` → `> 1.` and Enter picks. **`DomPaint` is guarded**
+against the `s0..s5` tear with `PAINT_BUSY` at `__uart_line+296` — in the uart-line
+block because *that block always exists*; the first attempt used `__vio` and a
+board with no virtio device wrote past an absent block (the mbox `GET` test caught
+it). **The picker pages** (`-- 1-6 of 10 (up/down scrolls) --`, wraparound intact).
+The **EDK2/U-Boot selector reads real volumes** (mount read-only, ESPs first, offer
+only what was read, name the source; U-Boot is recognized by
+`extlinux.conf`/`boot.scr` as well as `u-boot.itb`), and FAT32 create records carry
+the FAT epoch rather than a zero date.
+**B101 (landed):** the **guest reads its own sectors** — a real virtio-blk driver in
+the payload (`BlkInit`/`BlkRead`/`BlkSig`, gated by `wants_virtio_blk()` =
+`uncore.storage` + a CLI/picker + the virtio transport). The requestq uses the
+three-descriptor chain the spec mandates, and **the status byte decides success, not
+the used ring** — a device can complete a request and report `IOERR`, and a
+ring-only reader would parse the previous sector as the one it asked for. `BlkSig`
+names the medium from its own bytes (`gpt` on `"EFI PART"` at LBA 1, else `mbr`,
+else `raw`), because the protective `0xEE` type byte is a claim. QEMU with real
+images: `VIRTIO-BLK 5` → `VIRTIO-BLK-OK` → `BLK-SIG gpt` on a real `sfdisk` disk and
+`BLK-SIG mbr` on a real `mkfs.vfat` superfloppy, same ELF. Hardware found two bugs
+the model had not: the used-ring poll compared against zero rather than the shadow
+index (so the *second* read returned before the device answered), and the 0x1000
+slot stride does not fit an `addi` immediate.
+**B102 (landed):** deeper `vi` ↔ filesystem coupling, and the **sparse-file bug** it
+uncovered. `blocks_of` dropped `ee_block`, so a file with a hole came back
+*rearranged* (later blocks pulled into the gap) — worse than missing, because it
+looks like data. The map is now logical→physical, holes read as zeros at their own
+offset, uninitialized extents stay unmapped, and an in-place write past the
+contiguous prefix is refused with the mapping. Checked against a file the **Linux
+kernel** made sparse: byte-exact with Linux (`TAIL` at 12288, not 4096), `e2fsck`
+still clean. New `EditBudget`/`EditTerms`: each driver states its write terms *before*
+an edit (`fat32 rw`, `ext4 rw <=4096B in place`, `ntfs ro` naming `$LogFile`), `vi`
+shows them, `:w` refuses with numbers while the buffer is still open, and every save
+is **read back and compared**. CRLF, a UTF-8 BOM and a missing final newline are
+preserved, because a BIOS edits files other systems wrote; a file over 256 KiB opens
+read-only rather than risk truncating it.
+Still open: the guest can read **sectors** but not **files** — locating
+`/boot/Image` needs a filesystem in the payload (`g6b-vfs` is host Rust, not ASM
+IR), so `AUTOBOOT-HANDOFF` remains staged and the picker's entries still come from
+host-supplied media; ext4 allocation/journal (create and grow) and NTFS write;
+attaching extra `virtio-blk-device`s stops keystrokes reaching the guest even
+though GPU+keyboard probe `OK`; and `s0..s5` are outside the trap frame while
+`DomPaint` uses them, so a tick landing inside a normal-context paint can tear a
+frame.
+**B104 (landed):** the store persists through a **real volume**, and a libwasm
+`_start` drives it. `g6b_pglite::StoreVolume` is the seam: the kernel implements
+it over `SharedVfs` — the *same* mount table the shell's `mount`/`cat` use — so a
+dump the browser UI writes is the file the shell reads, and `attach_volume` swaps
+the registry's in-memory `usb` map for the medium. `export` writes **JSON text**
+to the volume (a pulled key must be readable by the OS it is plugged into;
+`codec::unpack` accepts raw JSON on the way back), checks the *medium* — not the
+cache — for a uuid collision before overwriting, and `import` reads the medium
+first. `resolve_store_mount` maps the spec's filesystem-kind name (`fat32`/`ntfs`/
+`ext4`) to the one mounted instance, refusing when two candidates exist. The UI
+write side is `fetch_post`: `KernelPort::fetch_post` gated to `/bios/store` only
+(the power/flash endpoints are not the UI's), `KernelHost::fetch_post` logs
+`WASM-POST`/`WASM-SKIP-POST` and interns the response, and `Window.fetch_post` —
+plus `fetch`, which had the same latent wrap — returns the interned *value* so the
+`__Handle` dispatch boxes the response string itself (a guest holding
+`I32(handle)` could never `libwasm_get__string` it, which the interpreter also
+grew: `(raw, handle)` sret readback, JS-kernel parity). Tests
+(`crates/g6b-kernel/src/vfs.rs`): a router-level create/insert/query → export →
+fresh-registry import round-trip on a real FAT32 image; the `fetch_post` gate
+refusing every non-store path; and a hand-assembled `_start` running the actual
+import chain — `libwasm_global("window")` → `Object_Call_string_string__Handle`
+→ `libwasm_get__string` → `set_inner_text` — onto the key. QEMU: a writable
+`DISK=` on `tools/qemu_web_autoboot.sh`, `real-fat32.img` attached; the picker
+offers `[payload, bios-ui]` (a non-bootable key adds no row), digit `2` picks
+`bios-ui` → `AUTOBOOT-UI`, 36,212 lit pixels at 1920×1080.
+**B105 (landed):** **btrfs** in `g6b-vfs` — read plus the three leaf-level
+writes a BIOS may honestly perform. Superblock csum-verified, chunk map from
+`sys_chunk_array` + chunk tree, root tree → FS tree + csum tree; every node is
+checked (`bytenr` == the address asked, `crc32c(0, node[32..])` holds) so a
+corrupt tree is reported, never parsed. Writes: in-place inside existing
+extents **with the csum tree refreshed per written sector**, inline-extent
+replace in the leaf (how repeated `store.json` flushes land on one path), and
+create/mkdir via item insert bounded by `max_inline` and the leaf's measured
+free space. Refused and named: extent allocation/backrefs, `remove`,
+multi-device/RAID and zoned/extent-tree-v2/stripe-tree/metadata-uuid volumes.
+`kernel.usb.fs_btrfs` compiles it; `kernel.store.persist.volume` accepts
+`btrfs`; `a_store_round_trips_through_btrfs` runs the pglite export → medium →
+fresh-import round trip on it. `mkfs.btrfs`/`btrfs check` are not on this host
+— the fixture is hand-laid to the on-disk spec and the distro-tool check is the
+named residual.
 `g6b smoke` runs the S-mode payload on the host (SBI putchar/TIME + UART0 THR)
 until park. Hart 0 `wfi` takes irq 5 once (IRQ_TIMER). Secondary harts WFI after
 `satp`/`sp`/`stvec` with no tick. Unexpected traps print `TRAP-<scause>-<sepc>`
@@ -233,6 +401,15 @@ while plain JS and the devtools panel use it directly. Instances are isolated by
 the bounded-ring-that-reports-drops behaviour follow goosie's
 `internal/browsercontrol/types.go`. Details: `RENDER-VALIDATION.md` §6.
 
+**The kernel does not make UI design decisions.** It supplies raw board data
+through the `platform.*` singleton (identity, ISA, topology, memory, compiled
+lanes) and live hardware through `platform.hw`. Menu structure, tab layout,
+hit-box geometry, and everything visible is a Svelte decision built from that
+data. The kernel must not search the DOM by element id to mutate chrome — that
+is the Svelte tree's job. `platform.*` is populated the same way `window.*` and
+`document.*` are: resolved live from `BoardSpec` in the wasm lane, injected as
+an inert JSON blob in the JS lane.
+
 Four facilities, in the order you should reach for them:
 
 1. **`g6b_css::parse_survey`** — *what is missing.* Point it at real-world CSS;
@@ -295,6 +472,231 @@ python tools/g6b.py gr --spec fixtures/g6lc64-virt.json --out out/setup.ppm
 python tools/g6b.py display-proxy --spec fixtures/g6lc64-virt.json --out out/proxy.ppm
 python tools/g6b.py regress
 ```
+
+## libwasm / svelte-d / pglite seam (condensed — full model in `AGENTS-EXPERTS.md`)
+
+**One parse, three lanes.** `browser-ui/compiler/parse.ts` is a *first-party*
+`.svelte` parser (never `svelte/compiler`). It emits a flat `UiOp[]`
+(`text|fetch|holyc|register|visible|await|pglite`), printed into three
+independent lanes:
+
+| Lane | Printer | Artifact | Toolchain |
+|---|---|---|---|
+| A first-party wasm | `emit-wasm.ts` | `out/bios-ui.wasm` | none (MVP encoder) |
+| B libwasm D cell | `print-d.ts` → `src-d/*.d` | `out/bios-ui-libwasm.wasm` | LDC 1.43 + dub |
+| C lang=ts / JS | `print-ts.ts` | src-ts splice, `jsExports`, g6b-js subset | bun |
+
+A new capability is **a new op kind + a printer arm**, not an expression
+evaluator. `pgliteMethod()` (`parse.ts:203`) is the store-verb allow-list.
+Both artifacts are embedded by `g6b-asm` (`include_bytes!`, `lib.rs:532,538`),
+so **browser-ui builds before the Rust build**.
+
+**The ABI is one file.** `types.d` routes `version (G6LC_G6B)` to
+`libwasm/source/libwasm/g6b_kernel.d`, which *is* the g6b import contract:
+g6b-registered (`fetch`/`holyc`/`register_endpoint`/`set_inner_text`), generic
+`Object_Getter__*` / `Object_Call_*__*` / `Object_VarArgCall__*`, scalar
+`libwasm_add__*`/`libwasm_get__*`, refcounted handles
+(`libwasm_{add,remove,copy}Object*`; handles 1–2 are never-freed roots),
+`libwasm_global(name)` (returns 0 = unavailable, fail-closed), the 12
+`ldexec_*` lodash imports, and the asyncify family. Undeclared ⇒ unreachable
+from D. `runtimePreflight` (`compiler/ldc.ts:286`) asserts this seam so a plain
+upstream libwasm checkout fails with a reason, not a link error.
+
+**lodash is one host call.** `struct Lodash` accumulates a JSON command buffer;
+`.execute!T()` ships it through `ldexec_<init>__<ret>`. `Eval("name")` is a
+*host-name* reference, never JS source — the host interns by name and refuses
+the rest (`LodashError::EvalRefused`); `evalTail` is rejected outright. Guest
+iteratees dispatch back through `__indirect_function_table`, so no JS evaluator
+exists on either side. `MAX_PARAMS=5`, which is why binds are packed as one
+JSON array.
+
+**Three hosts, deliberately unequal.** Know which one you are debugging:
+
+1. **Rust `KernelHost`** (`g6b-kernel/src/lib.rs:3318`) — the BIOS/QEMU host.
+   *Real* lodash + pglite + `platform.*`. `intern_name` (`:3199`) allows
+   `window.pglite` only when `spec.kernel.store.enable`, plus
+   `window.platform`; `hw` is refused as "platform.hw, not a window global".
+   Chain: `Eval("window.pglite")` → `StoreFactory` → `attempt(dataDir)` →
+   `Store{uuid}` → `invoke(method)` → `store_method` (`:2640`, genuinely
+   implements query/exec/begin/commit/rollback/close/stat/dump/load/listen/
+   notifies/export; only `sql`/`transaction` are `NotImplemented("callback")`).
+
+   **`platform.*` singleton** carries raw board data the same way `window.*`
+   and `document.*` carry DOM data — resolved live from `BoardSpec` in
+   `platform_live` (`g6b-kernel/src/lib.rs`), never by id-based DOM search.
+   Fields: `product`, `profile`, `schema`, `xlen`, `march`, `mmu`, `harts`,
+   `cores`, `threads`, `dramBase`, `dramLen`, `textOffset`, `web`, `wasm`,
+   `cli`, `store`, `workers`, `startMenu`. Scalars come back typed; there is
+   no structured/menu data on `platform.*` — **menus are a UI decision and are
+   built in Svelte from these facts, not carried by the kernel**. `platform.hw`
+   is the live hardware tree (NAT/display/TCP/UDP), separate from board facts.
+2. **Browser `kernel.ts`** (`createLibwasmHost`, `:349`) — DOM real, store is a
+   `fetch` proxy to `/bios/store/*` (`newBiosStore`, `:1467`). lodash is sync and
+   the store is async, so the sync path substitutes a well-formed
+   `ASYNC_STORE` = `{ok:false,error:"async"}` sentinel (`:573`). Real async work
+   goes through asyncify or `createPgliteWasm`.
+   **`platform.*`** in the JS lane reads the same board facts from a
+   `<script type="application/json" id="g6b-platform">` blob that `g6b-ui`
+   injects once at build time (`platform_facts_script`). `readPlatformFacts`
+   parses it; `PLATFORM_FACT_KEYS` is the shared list. The blob is inert JSON
+   (not executable JS), so `g6b-html`'s `script_sources` skips it. Keys match
+   `KernelHost::platform_live` exactly — the two lanes cannot disagree.
+3. **Build-time verifier** (`wasm-cell.ts`) — `verifyLibwasmAbi` (signatures,
+   one memory, i32 `__heap_base`) + `verifyLibwasmStartup` (`:392`, actually
+   runs `_start`) + `checkCellArtifact` (`:444`).
+
+**"stale libwasm provenance" is a hash statement, not a compiler error.**
+`cellInputHash` (`:358`) covers the workspace sources, `dub.sdl`, the pinned
+`ldc2-wasm.conf`, **all of libwasm + its four sub-packages + the whole carried
+`runtime-v1.43.0`**, every compiler `.ts`, `kernel.ts`, `worker.ts`, and the
+`ldc`/`dub` **binaries**. Any delta flips it; most often the cell was simply
+never built. Diagnose in order: `runtimePreflight(tc)` empty? →
+`dub.sdl` byte-matches `engineDubSdl(tc.libwasm)`? → `G6B_DUB_WASM=1 bun run build`.
+The pin beats an ambient 1.43 on purpose (the hash covers the compiler binary).
+
+**Store ⇄ volume.** `g6b-pglite` declares `StoreVolume`
+(`persist.rs:171`); `g6b-kernel/src/vfs.rs` implements it over `g6b-vfs`, and
+`volume` resolves as a mount name *or* a filesystem kind (`vfs.rs:538-541`).
+All four **can** write; the ceilings differ. Every driver answers
+`edit_budget(path)` up front (B102), so trust `Probe::summary()`, not the `rw`
+request (`rw` is a *request*; the mount reports what it got):
+
+| FS | Terms | Ceiling |
+|---|---|---|
+| fat32 | `fat32 rw` | creates, grows, shrinks; free clusters **counted**, not from the FSInfo hint |
+| ext4 | `ext4 rw` | in-place + tail growth by block allocation; file/dir creation; sparse mid-hole writes refused |
+| btrfs | `btrfs rw` | in place inside existing extents (csum tree refreshed); inline ≤2048 B; 16 MiB fixture, no host `mkfs.btrfs` |
+| ntfs | `ntfs rw <=N B in place` | **resident `$DATA` only**, `can_grow: false`; non-resident/new files refused; needs a clean `$LogFile` |
+
+**NTFS is not read-only.** `ntfs::mount(dev)` takes no `rw` parameter, which
+makes it look read-only beside the other three, but B107 added a real bounded
+write path. Do not infer capability from the mount signature.
+
+So an fs-matrix store test *is* reachable, but expectations must be
+**per-fs**: the store export is a JSON blob, and on NTFS it has to fit the
+existing resident `$DATA` with no growth. Full detail:
+`architecture/g6b-vfs.md` "Editing: the filesystem's terms".
+
+**The cell must fit the JIT decode budget, which is size-proportional.**
+`g6b_wasm::instruction_budget(code_bytes) = clamp(code_bytes, 131_072, 262_144)`.
+The proportional term is an *exact* upper bound (≥1 body byte per instruction),
+so below the ceiling the check cannot fire; `MAX_INSTRUCTIONS_CEIL` (the
+`Vec<Instr>` fence) and `MAX_MODULE_BYTES` (1 MiB) are the operative bounds.
+`BIOS_UI_CELL_BUDGET` is a `const` pre-compute over the embedded artifact — the
+trusted half of the split. When the Svelte tree outgrows the JIT the failing
+test is **`binary::tests::cell_budget_covers_the_embedded_bios_ui`** (reports
+real numbers, demands 2× headroom), not three opaque `g6b-elf` smoke failures.
+See `architecture/WASM.md`.
+
+**`wasm-opt` is a toolchain, not a nicety, and lives beside LDC.** Stock
+Binaryen cannot `--asyncify` the `try_table` LDC 1.43 emits for wasm-EH, so the
+`etcimon/binaryen` `svelte-d` fork is required and a stock tool on PATH *fails*
+the pass. `tools/build.py ensure_wasm_opt()` mirrors `ensure_ldc()` for any
+libwasm build: `--check` → download the fork's CI binary → cmake the
+`svelte-d/binaryen` submodule; a working out-of-tree fork is *adopted by copy*
+into `browser-ui/toolchains/binaryen-svelte-d/`. Verified **by behaviour**
+(`asyncifiesTryTable`), recorded in provenance as `asyncifyTool`
+(informational — not an `inputs`/staleness trigger).
+
+**Serial output is doubled.** Every character is written twice (SBI putchar *and*
+UART0 THR). De-double before matching markers —
+`sed 's/\(.\)\1/\1/g'` / `re.sub(r"(.)\1", r"\1", text)` — or every marker is a
+false negative.
+
+## Top-level build orchestrator
+
+`build.py` / `build.ps1` / `build.sh` at the package root handle all major
+build types with auto-install. The build-platform gateway (`g6b` command in
+`E:\cva6\build-platform`) delegates here.
+
+```
+python tools/build.py zealcli                           # minimal g6b-zealcli VGA (cargo + smoke)
+python tools/build.py browser                            # browser-ui first-party wasm lane (bun run build)
+python tools/build.py libwasm                            # browser-ui + pinned LDC 1.43.0-beta1 libwasm cell
+python tools/build.py full                               # zealcli + browser + libwasm (dual build)
+python tools/build.py check                              # g6b.py check (independence + bun + cargo gates)
+python tools/build.py zealcli --spec fixtures/g6lc64-zealcli.json
+```
+
+### Generic QEMU test command
+
+`build.py test` is a parameterized QEMU smoke test that builds the browser
+UI, builds a BIOS ELF from a selected spec, emits or reuses a filesystem
+fixture image, boots the ELF under QEMU (WSL on Windows), optionally sends
+keystrokes through the QEMU monitor/serial, and scans the de-duplicated
+serial log for markers.
+
+```
+python tools/build.py test --spec fixtures/g6lc64-btrfs-test.json
+python tools/build.py test --spec fixtures/g6lc64-btrfs-test.json --fs btrfs
+python tools/build.py test --spec fixtures/g6lc64-btrfs-test.json \
+    --no-emit-fs --disk out/btrfs-key.img \
+    --keys "drv{ret}" --key-delay 1 --settle 15 \
+    --keywords btrfs,Store,USB-FILES,SVELTE-LIVE,JS-FETCH,ZEALCLI,KSTART,G6LC-BIOS
+```
+
+Parameters:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--spec` | `fixtures/g6lc64-zealcli.json` | BoardSpec JSON |
+| `--fs` | `btrfs` | Filesystem fixture: `fat32\|ext4\|ntfs\|btrfs` |
+| `--libwasm` | off | Also build the LDC 1.43 libwasm cell |
+| `--settle N` | 10 | QEMU settle seconds (boot + post-keystroke) |
+| `--readonly` | off | Attach the disk read-only |
+| `--keywords k1,k2` | btrfs,Store,USB-FILES,SVELTE-LIVE,JS-FETCH,ZEALCLI,KSTART,G6LC-BIOS | Markers to scan for |
+| `--no-emit-fs` | off | Skip emitting the fixture (requires `--disk`) |
+| `--disk PATH` | emitted | Use an existing disk image |
+| `--keys TEXT` | none | Keystrokes after boot; `{esc}`, `{ret}`, `{spc}`, `{tab}`, `{bs}` are special |
+| `--key-delay S` | 0.5 | Delay between keystrokes |
+
+The BIOS payload writes each serial character twice (SBI putchar *and*
+UART0 THR), so the log is de-doubled before scanning — same as
+`tools/qemu_zealcli.sh`. A passing host-side `g6b vfs scan` only proves
+image recognition; the QEMU test proves guest-side boot + store activity.
+
+### The filesystem matrix
+
+```
+g6b vfs emit-fs --fs fat32|ext4|ntfs|btrfs [--out PATH] [--with-data]
+python tools/build.py test --fs fat32 --keys "drv{ret}" --settle 15
+```
+
+One fixture entry point, `g6b_vfs::fixture_image_named(name)` over
+`g6b_vfs::FIXTURE_KINDS`, so a caller does not need to know each driver's
+hand-laid shape. `every_fixture_kind_probes_and_mounts_as_itself` (g6b-vfs) is
+the guard that each still probes and mounts; `emit-btrfs` remains as an alias.
+
+**Expectations are per-filesystem, and that is deliberate** — a matrix
+asserting one outcome for all four would assert something false
+(`the_store_matrix_insert_and_query_per_filesystem`, g6b-kernel):
+
+| FS | Fixture | Store outcome |
+|---|---|---|
+| fat32 | 2 MiB, `G6LCTEST` | full round trip: insert → query → export → fresh registry imports → query |
+| ext4 | 512 KiB, `g6lcroot` (+`/etc/os-release`) | same, within the guarded write path |
+| btrfs | 16 MiB, `G6LCBTRFS` | same; needs 16 KiB-nodesize leaf headroom |
+| **ntfs** | 128 KiB | **refused on the first `CREATE TABLE`** |
+
+The NTFS case is the one worth knowing: with `persist.usb` armed the store
+writes `/stores/<purpose>/<uuid>.g6bstore` on **every statement**, and a driver
+that cannot create files cannot back a persisted store at all — so the refusal
+lands earlier than "export is refused" would suggest. It must be a *named*
+refusal (`volume write: …`), because an unnamed one is indistinguishable from a
+broken store engine.
+
+What the QEMU run proves is guest-side **detection and store liveness** per
+filesystem (`<fs>-OK`, `USB-FILES-OK`, `Store-OK`, `SVELTE-LIVE-OK`,
+`JS-FETCH-OK`). The per-fs *write* semantics above are pinned host-side by the
+Rust tests — do not read a green QEMU matrix as proof that an export succeeded
+inside the guest.
+
+Auto-install: cargo (via build-platform `tools install sim` fall-through),
+bun (printed instruction), pinned LDC 1.43.0-beta1 (`browser-ui/scripts/install-ldc.ts`).
+The optional libwasm cell uses `G6B_DUB_WASM=1 bun run build` through the
+existing `browser-ui/scripts/build.ts` path; the pinned compiler is selected
+via `--compiler=<toolchain>/bin/ldc2.exe` and `cellEnv()` isolates `DC`/`DFLAGS`
+so PATH's LDC 1.41 is never selected.
 
 Navigate: plan of record `architecture/PLAN.md`; web-engine endpoint
 `architecture/plan-endpoint.md` (B82–B91); keep/refuse map `architecture/ZEAL.md`;

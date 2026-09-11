@@ -29,6 +29,8 @@ g6b-css = { workspace = true }
 g6b-pglite = { workspace = true }
 g6b-hw = { workspace = true }
 g6b-zealcli = { workspace = true }
+g6b-fs = { workspace = true }
+g6b-vfs = { workspace = true }
 
 [lints]
 workspace = true

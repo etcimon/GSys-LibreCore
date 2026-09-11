@@ -252,18 +252,62 @@ if (!force && existsSync(dest) && asyncifiesTryTable(dest)) {
   process.exit(0);
 }
 
-// An out-of-tree fork that already works is reused rather than re-downloaded,
-// so `bunx svelte-d setup` and this script do not fight over the same binary.
+// An out-of-tree fork that already works is *adopted* rather than
+// re-downloaded, so `bunx svelte-d setup` and this script do not fight over
+// the same binary and no network round trip is needed.
+//
+// Adopting means copying it to `browser-ui/toolchains/binaryen-svelte-d/`
+// instead of merely pointing at it. wasm-opt is a toolchain on the same
+// footing as the pinned LDC, and the point of the in-tree `toolchains/`
+// directory is that the build resolves the *same* location on every host.
+// Leaving the tool in `~/.svelte-d` makes the environment host-dependent for
+// no benefit, since it is the identical verified binary either way.
 if (!force && !fromSource) {
   const info = resolveWasmOpt();
   if (info.bin && info.forked && asyncifiesTryTable(info.bin)) {
-    console.log(`wasm-opt: reusing existing fork from ${info.source}`);
-    report(info.bin);
+    if (resolve(info.bin) === resolve(dest)) {
+      console.log(`wasm-opt: reusing existing fork from ${info.source}`);
+      report(info.bin);
+      process.exit(0);
+    }
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(info.bin, dest);
+    if (process.platform !== "win32") spawnSync("chmod", ["+x", dest], { shell: false });
+    if (!asyncifiesTryTable(dest)) {
+      rmSync(dest, { force: true });
+      throw new Error(`adopted wasm-opt from ${info.bin} does not work at ${dest}`);
+    }
+    writeReceipt(
+      `adopted:${info.source}:${resolve(info.bin)}`,
+      statSync(info.bin).size,
+      createHash("sha256").update(readFileSync(info.bin)).digest("hex"),
+    );
+    console.log(`wasm-opt: adopted the ${info.source} fork into ${dest}`);
+    report(dest);
     process.exit(0);
   }
 }
 
-const installed = fromSource ? buildFromSource() : download();
+function install(): string {
+  if (fromSource) return buildFromSource();
+  try {
+    return download();
+  } catch (error) {
+    // Seamless fallback. The svelte-d submodule *carries the fork source*, so a
+    // network failure, a rate-limited release, or a host variant with no CI
+    // asset is recoverable here rather than by telling the operator to re-run
+    // with a different flag. Only attempt it when the source is actually
+    // present and identifiable as the fork (`Flatten.cpp`), otherwise the
+    // original download error is the honest one to surface.
+    const src = binaryenSource();
+    if (!src || !isBinaryenSource(src)) throw error;
+    console.error(`wasm-opt: download failed (${String(error).split("\n")[0]})`);
+    console.error(`wasm-opt: falling back to a cmake build of the fork at ${src}`);
+    return buildFromSource();
+  }
+}
+
+const installed = install();
 const version = wasmOptVersion(installed);
 if (version && version < MIN_WASM_OPT_VERSION) {
   rmSync(installed, { force: true });

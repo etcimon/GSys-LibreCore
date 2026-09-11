@@ -21,8 +21,9 @@ pub use asyncify::{
     STATE_REWINDING, STATE_UNWINDING, TRY_TABLE_AWAIT_WAT, UI_EVENT_THROW_WAT,
 };
 pub use binary::{
-    decode, encode_empty_ui_module, encode_ui_module, validate, Element, Export, FuncType, Import,
-    Instr, Module, Table, ValType, MAX_CONTROL_DEPTH, MAX_FUNCTIONS, MAX_INSTRUCTIONS, MAX_LOCALS,
+    decode, encode_empty_ui_module, encode_ui_module, instruction_budget, validate, Element,
+    Export, FuncType, Import, Instr, Module, Table, ValType, BIOS_UI_CELL_BUDGET,
+    MAX_CONTROL_DEPTH, MAX_FUNCTIONS, MAX_INSTRUCTIONS, MAX_INSTRUCTIONS_CEIL, MAX_LOCALS,
     MAX_MEMORY_PAGES, MAX_MODULE_BYTES, MAX_STACK,
 };
 pub use browser::{JsExportKind, JsExports, KernelPort};
@@ -119,6 +120,9 @@ pub const IMPORT_LOG: &str = "console_log";
 pub const IMPORT_SET_VISIBLE: &str = "set_visible";
 /// libwasm `Object_Call_string__Handle` / `fetch` → kernel HTTP router.
 pub const IMPORT_FETCH: &str = "fetch";
+/// libwasm etch_post(url, body) → the kernel router's **write** side. Host-gated:
+/// the kernel accepts a body on /bios/store paths and refuses the rest.
+pub const IMPORT_FETCH_POST: &str = "fetch_post";
 pub const IMPORT_OBJECT_CALL: &str = "Object_Call_string__Handle";
 /// `env.await` — claim a bounded pending slot (`WasmAwait`): the guest-side
 /// correlate of `await <op>` — nonblocking, resolves on the kernel poll.

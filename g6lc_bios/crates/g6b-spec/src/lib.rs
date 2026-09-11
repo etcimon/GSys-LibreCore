@@ -9,11 +9,11 @@
 #![allow(missing_docs)]
 
 mod json;
-mod menu;
+pub mod menu;
 mod profile;
 
 pub use json::{parse_json, quote_json, stringify_json, Json};
-pub use menu::{Menu, MenuItem};
+pub use menu::{Menu, MenuItem, SettingKind, Writable, WRITABLE};
 pub use profile::BiosProfile;
 
 /// How an ISA extension is present in the spec.
@@ -491,6 +491,9 @@ pub struct Flash {
     pub backend: String,
     /// `openwrt` | `bios` | `linux`
     pub image: String,
+    /// Default firmware-update location. **HTTPS only** — a firmware image is
+    /// never taken over plain HTTP. Empty = USB key / operator-supplied URL.
+    pub url: String,
 }
 
 impl Default for Flash {
@@ -501,6 +504,7 @@ impl Default for Flash {
             self_update: false,
             backend: "spi-nor".into(),
             image: "bios".into(),
+            url: String::new(),
         }
     }
 }
@@ -535,11 +539,12 @@ pub struct Usb {
     pub enable: bool,
     /// FAT32 MSC stick for firmware images (always compiled when `enable`).
     pub flash_fat32: bool,
-    /// Elaborate file manager on a USB key (FAT32/NTFS/ext4).
+    /// Elaborate file manager on a USB key (FAT32/NTFS/ext4/btrfs).
     pub key: bool,
     pub fs_fat32: bool,
     pub fs_ntfs: bool,
     pub fs_ext4: bool,
+    pub fs_btrfs: bool,
 }
 
 impl Default for Usb {
@@ -551,6 +556,7 @@ impl Default for Usb {
             fs_fat32: true,
             fs_ntfs: false,
             fs_ext4: false,
+            fs_btrfs: false,
         }
     }
 }
@@ -618,7 +624,7 @@ pub struct StoreCfg {
     pub persist_memory: bool,
     pub persist_elf: bool,
     pub persist_usb: bool,
-    /// Live USB key volume (`fat32` / `ntfs` / `ext4`). Empty = snapshot export only.
+    /// Live USB key volume (`fat32` / `ntfs` / `ext4` / `btrfs`). Empty = snapshot export only.
     pub usb_volume: String,
     pub pglite_files: bool,
     pub pglite_js: bool,
@@ -700,15 +706,57 @@ pub struct Kernel {
     pub hw: Hw,
     /// VGA mouse-less ZealOS-shaped CLI (`g6b-zealcli`). Boots before browser-ui.
     pub cli: Cli,
+    /// The web stack as **one** bundle: WASM + JS + DOM + DOM rendering + CSS.
+    pub web: Web,
 }
+
+/// The BIOS web stack. WASM, JS, the DOM object graph, DOM rendering and CSS
+/// are **one** compile unit: a build either carries the whole engine or none of
+/// it. `check()` refuses splitting the slices (`kernel.wasm` / `kernel.js`
+/// without `kernel.web.enable`), because a half-compiled engine has no face and
+/// no verification story. Excluding it leaves the kernel, the HolyC band, the
+/// hw network adapter and `g6b-zealcli` — the barebone BIOS.
+#[derive(Debug, Clone)]
+pub struct Web {
+    pub enable: bool,
+}
+
+impl Default for Web {
+    fn default() -> Self {
+        Self { enable: true }
+    }
+}
+
+/// Slice names the [`Web`] bundle carries together (never separately).
+pub const WEB_SLICES: &[&str] = &["wasm", "js", "dom", "render", "css"];
 
 /// VGA CLI (`g6b-zealcli`). Does not require `g6b-hw`.
 #[derive(Debug, Clone)]
 pub struct Cli {
     /// Compile the CLI (default on).
     pub enable: bool,
-    /// `cli` always VGA prompt; `ui` skip CLI; `auto` CLI until GPU announced.
+    /// `cli` always VGA prompt; `ui` no CLI at all (needs `enable: false`);
+    /// `auto` CLI first, then browser-ui once a GPU is announced.
     pub boot: String,
+    /// Optional pointer (wheel scroll / click focus) from `g6b-hw` HID.
+    /// Off by default: the CLI is keyboard-complete.
+    pub mouse: bool,
+    /// Container rows, prompt included (VGA text is 25).
+    pub rows: u32,
+    /// Container columns (VGA text is 80).
+    pub cols: u32,
+    /// Scrollback ring lines held above the viewport.
+    pub scrollback: u32,
+    /// `man` — the printed manual generated for this board.
+    pub manual: bool,
+    /// Read-only vi viewer module.
+    pub vi: bool,
+    /// ZealOS-shaped volume/file exploration (USB key included).
+    pub fs: bool,
+    /// Firmware update from HTTPS or a USB key.
+    pub fw: bool,
+    /// `autoboot` — the countdown boot picker.
+    pub autoboot: Autoboot,
 }
 
 impl Default for Cli {
@@ -716,9 +764,82 @@ impl Default for Cli {
         Self {
             enable: true,
             boot: "auto".into(),
+            mouse: false,
+            rows: 25,
+            cols: 80,
+            scrollback: 512,
+            manual: true,
+            vi: true,
+            fs: true,
+            fw: true,
+            autoboot: Autoboot::default(),
         }
     }
 }
+
+/// The countdown boot picker (`autoboot`).
+///
+/// A boot menu is a *policy* decision, so the policy is compiled in and named:
+/// how long to wait, what to try first, and whether the BIOS UI is offered as a
+/// last entry. The list itself is discovered — what is actually on the volumes —
+/// never assumed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Autoboot {
+    /// Compile the picker (default on).
+    pub enable: bool,
+    /// Milliseconds before the first entry is taken. `0` waits forever, which is
+    /// the right choice for a bench board and the wrong one for an appliance.
+    pub timeout_ms: u32,
+    /// [`BootOrder`] spelling.
+    pub order: String,
+    /// Offer "BIOS UI" as the last entry when the web stack is compiled.
+    pub bios_ui: bool,
+}
+
+impl Default for Autoboot {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            timeout_ms: 2000,
+            order: "live-first".into(),
+            bios_ui: true,
+        }
+    }
+}
+
+/// What the picker puts first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BootOrder {
+    /// Recovery / live media first — the order you want when a board is being
+    /// repaired, and the reason a live USB exists.
+    LiveFirst,
+    /// An installed, working OS first; live media stays reachable below it.
+    OsFirst,
+    /// Stay in this payload: setup first, everything else below.
+    PayloadFirst,
+}
+
+impl BootOrder {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "live-first" | "live" | "recovery" => Self::LiveFirst,
+            "os-first" | "os" | "installed" => Self::OsFirst,
+            "payload-first" | "payload" | "setup" => Self::PayloadFirst,
+            _ => return None,
+        })
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LiveFirst => "live-first",
+            Self::OsFirst => "os-first",
+            Self::PayloadFirst => "payload-first",
+        }
+    }
+}
+
+/// Accepted `kernel.cli.autoboot.order` values, for `set` and the manual.
+pub const BOOT_ORDERS: &[&str] = &["live-first", "os-first", "payload-first"];
 
 impl BoardSpec {
     /// VGA zealcli is the face until GPU is announced (`boot=auto`).
@@ -731,6 +852,29 @@ impl BoardSpec {
             "cli" => true,
             _ => !gpu_ready,
         }
+    }
+
+    /// True when the whole web engine (wasm+js+dom+render+css) is compiled.
+    pub fn web_stack(&self) -> bool {
+        self.kernel.web.enable
+    }
+
+    /// The compiled boot-order policy.
+    pub fn boot_order(&self) -> BootOrder {
+        BootOrder::parse(&self.kernel.cli.autoboot.order).unwrap_or(BootOrder::LiveFirst)
+    }
+
+    /// True when the picker offers the browser-UI as its last entry: the web
+    /// stack has to be compiled for there to be a UI to hand over to.
+    pub fn autoboot_offers_bios_ui(&self) -> bool {
+        self.kernel.cli.autoboot.bios_ui && self.web_stack()
+    }
+
+    /// True when the CLI must reach its prompt before the web engine loads.
+    /// Any build that carries the web stack still boots the minimally
+    /// dependent zealcli first; `LoadUI` hands over afterwards.
+    pub fn cli_before_web(&self) -> bool {
+        self.kernel.cli.enable && self.web_stack()
     }
 }
 
@@ -756,6 +900,7 @@ impl Default for Kernel {
             store: StoreCfg::default(),
             hw: Hw::default(),
             cli: Cli::default(),
+            web: Web::default(),
         }
     }
 }
@@ -1369,15 +1514,16 @@ impl BoardSpec {
                     .into(),
             );
         }
-        if self.kernel.ui != "html-js" && self.kernel.ui != "svelte-d" {
+        if !matches!(self.kernel.ui.as_str(), "html-js" | "svelte-d" | "cli") {
             return Err(format!(
-                "kernel.ui `{}` refused; use html-js or svelte-d (not sveltekit)",
+                "kernel.ui `{}` refused; use html-js, svelte-d, or cli (not sveltekit)",
                 self.kernel.ui
             ));
         }
         if !matches!(self.kernel.js.as_str(), "aot" | "off" | "none") {
             return Err("kernel.browser.js must be aot or off (none is an alias)".into());
         }
+        self.check_web()?;
         if self.menu(&self.kernel.start_menu).is_none() {
             return Err(format!(
                 "unknown kernel.browser.start_menu `{}`",
@@ -1426,9 +1572,7 @@ impl BoardSpec {
         {
             return Err("kernel.hw.virtio_net/ethernet/wifi need kernel.hw.enable".into());
         }
-        if !matches!(self.kernel.cli.boot.as_str(), "cli" | "ui" | "auto" | "") {
-            return Err("kernel.cli.boot must be cli, ui, or auto".into());
-        }
+        self.check_cli()?;
         if self.kernel.http.files.enable && !self.kernel.http.enable {
             return Err("kernel.http.files needs kernel.http.enable".into());
         }
@@ -1527,8 +1671,10 @@ impl BoardSpec {
             if !s.persist_usb {
                 return Err("kernel.store.persist.volume needs persist.usb".into());
             }
-            if !matches!(s.usb_volume.as_str(), "fat32" | "ntfs" | "ext4") {
-                return Err("kernel.store.persist.volume must be fat32, ntfs, or ext4".into());
+            if !matches!(s.usb_volume.as_str(), "fat32" | "ntfs" | "ext4" | "btrfs") {
+                return Err(
+                    "kernel.store.persist.volume must be fat32, ntfs, ext4, or btrfs".into(),
+                );
             }
         }
         if s.persist_elf && !s.enable {
@@ -1579,6 +1725,137 @@ impl BoardSpec {
     /// `simpledrm` node consumes (works for the BIOS and Linux).
     pub fn wants_disp_scan(&self) -> bool {
         self.display_ctrl().is_some() && (self.kernel.gr.enable || self.kernel.proxy.enable)
+    }
+
+    /// Web-stack legality. WASM, JS, DOM, DOM rendering and CSS are one
+    /// bundle ([`WEB_SLICES`]): a build carries the engine or it does not.
+    /// With the engine excluded the kernel, HolyC band, hw network adapter
+    /// and `g6b-zealcli` still stand on their own.
+    fn check_web(&self) -> Result<(), String> {
+        let js_live = matches!(self.kernel.js.as_str(), "aot");
+        if self.kernel.web.enable {
+            // The engine never preempts the CLI: a build that carries both
+            // reaches the zealcli prompt first and hands over on `LoadUI`.
+            if self.kernel.cli.enable && self.kernel.cli.boot == "ui" {
+                return Err(
+                    "kernel.cli.boot=ui refused while the web stack is compiled: zealcli boots \
+                     first (use auto, or cli.enable=false to drop the CLI entirely)"
+                        .into(),
+                );
+            }
+            if self.kernel.ui == "cli" {
+                return Err(
+                    "kernel.ui=cli needs kernel.web.enable=false (that is the barebone face)"
+                        .into(),
+                );
+            }
+            return Ok(());
+        }
+        if !self.kernel.cli.enable {
+            return Err(
+                "kernel.web.enable=false leaves no face: kernel.cli.enable must stay on".into(),
+            );
+        }
+        if self.kernel.ui != "cli" {
+            return Err(format!(
+                "kernel.ui `{}` needs the web stack; with kernel.web.enable=false use cli",
+                self.kernel.ui
+            ));
+        }
+        for (slice, live) in [
+            ("wasm", self.kernel.wasm.enable),
+            ("js", js_live),
+            ("dom/render/css", self.kernel.http.files.html),
+        ] {
+            if live {
+                return Err(format!(
+                    "kernel.web.enable=false excludes the whole engine ({}); \
+                     `{slice}` cannot be compiled on its own",
+                    WEB_SLICES.join("+")
+                ));
+            }
+        }
+        if self.kernel.http.files.js || self.kernel.http.files.wasm {
+            return Err("kernel.http.files.js/wasm need the web stack (kernel.web.enable)".into());
+        }
+        if self.kernel.store.pglite_js || self.kernel.store.pglite_embed {
+            return Err("kernel.store.pglite.js/embed need the web stack".into());
+        }
+        // An inert backend list (postboot never) is not a compiled face.
+        if self.postboot.enable != PostbootMode::Never
+            && self.postboot.backends.iter().any(|b| b == "html-js")
+        {
+            return Err(
+                "postboot.backends html-js needs the web stack; barebone keeps ssh-holyc".into(),
+            );
+        }
+        Ok(())
+    }
+
+    /// CLI container legality: boot order, geometry, and the capability gates
+    /// that need a device behind them (pointer, USB, flash).
+    fn check_cli(&self) -> Result<(), String> {
+        let c = &self.kernel.cli;
+        if !matches!(c.boot.as_str(), "cli" | "ui" | "auto" | "") {
+            return Err("kernel.cli.boot must be cli, ui, or auto".into());
+        }
+        if !c.enable {
+            return Ok(());
+        }
+        if !(10..=60).contains(&c.rows) || !(40..=200).contains(&c.cols) {
+            return Err(
+                "kernel.cli.rows must be 10..=60 and cols 40..=200 (VGA text is 25x80)".into(),
+            );
+        }
+        if c.scrollback < c.rows || c.scrollback > 8192 {
+            return Err("kernel.cli.scrollback must be rows..=8192 lines".into());
+        }
+        if c.mouse && !self.kernel.hw.enable {
+            return Err(
+                "kernel.cli.mouse needs kernel.hw.enable (pointer HID lives in g6b-hw)".into(),
+            );
+        }
+        if c.fw && !(self.kernel.usb.flash_fat32 || self.kernel.flash.enable) {
+            return Err(
+                "kernel.cli.fw needs a firmware sink: kernel.usb.flash_fat32 or kernel.flash"
+                    .into(),
+            );
+        }
+        let ab = &c.autoboot;
+        if BootOrder::parse(&ab.order).is_none() {
+            return Err(format!(
+                "kernel.cli.autoboot.order `{}` refused; use {}",
+                ab.order,
+                BOOT_ORDERS.join(", ")
+            ));
+        }
+        if ab.timeout_ms > 60_000 {
+            return Err(
+                "kernel.cli.autoboot.timeout_ms must be 0..=60000 (0 waits for the operator)"
+                    .into(),
+            );
+        }
+        let url = self.kernel.flash.url.as_str();
+        if !url.is_empty() {
+            if !url.starts_with("https://") {
+                return Err(
+                    "kernel.flash.url must be https:// — a firmware image is never taken over \
+                     plain HTTP"
+                        .into(),
+                );
+            }
+            if url.len() > 200
+                || url
+                    .chars()
+                    .any(|ch| ch.is_control() || ch.is_whitespace() || ch == '"' || ch == '\\')
+            {
+                return Err("kernel.flash.url must be a plain URL under 200 chars".into());
+            }
+            if !self.kernel.tls.https {
+                return Err("kernel.flash.url needs kernel.tls.https (HTTPS client)".into());
+            }
+        }
+        Ok(())
     }
 
     /// Display-output legality: surface names, PCIe windows, and the address
@@ -1808,8 +2085,37 @@ impl BoardSpec {
     /// slot (guest `INP_KQ` / VGA `DomNav`); tablet is the next slot (QEMU
     /// pointer; B91b WebFeed maps `EV_ABS`/`BTN_*`). The probe is
     /// fail-closed (`VIRTIO-INPUT-NONE`) when QEMU has no device.
+    /// A text face that consumes keys is what needs the device: the DOM lane
+    /// (`kernel.wasm`) or the `g6b-zealcli` container. A keyboard-first CLI
+    /// needs it *more* than the web UI does, so gating this on wasm alone left
+    /// a barebone build with no way to type.
     pub fn wants_virtio_input(&self) -> bool {
-        self.wants_virtio_gpu() && self.kernel.wasm.enable
+        self.wants_virtio_gpu() && (self.kernel.wasm.enable || self.kernel.cli.enable)
+    }
+
+    /// True when the payload compiles a **virtio-blk** driver, so it can read
+    /// sectors itself instead of asking a host for them.
+    ///
+    /// Two conditions, and both are honest requirements rather than taste:
+    /// `uncore.storage` because a block driver without a storage controller is a
+    /// claim about hardware that is not there, and the boot picker
+    /// (`kernel.cli.autoboot`) because that is what needs to *load* a medium
+    /// rather than merely list one. A board with storage but no picker still gets
+    /// the driver when the CLI is compiled — `drives` on the guest side is the
+    /// same read.
+    pub fn wants_virtio_blk(&self) -> bool {
+        self.uncore.storage
+            && (self.kernel.cli.autoboot.enable || self.kernel.cli.enable)
+            // Same transport question as the GPU: this is the QEMU-virt /
+            // virtio-mmio bus, not a native SATA/NVMe controller.
+            && self.wants_virtio_gpu()
+    }
+
+    /// True when the pointer device should be attached as well. The CLI is
+    /// keyboard-complete, so a tablet is only justified by the web UI or by an
+    /// explicit `kernel.cli.mouse`.
+    pub fn wants_virtio_tablet(&self) -> bool {
+        self.wants_virtio_input() && (self.kernel.wasm.enable || self.kernel.cli.mouse)
     }
 
     /// Guest `VioNetProbe` for virtio-net DeviceID 1. **Not** QEMU `-netdev`.
@@ -2023,11 +2329,12 @@ impl BoardSpec {
         }
         if self.kernel.usb.enable {
             req.push(format!(
-                "USB host MSC FAT32 flash={} key-fm={} ntfs={} ext4={} (not a netdev)",
+                "USB host MSC FAT32 flash={} key-fm={} ntfs={} ext4={} btrfs={} (not a netdev)",
                 self.kernel.usb.flash_fat32,
                 self.kernel.usb.key,
                 self.kernel.usb.fs_ntfs,
-                self.kernel.usb.fs_ext4
+                self.kernel.usb.fs_ext4,
+                self.kernel.usb.fs_btrfs
             ));
         }
         if self.kernel.tls.enable {
@@ -2386,6 +2693,9 @@ fn apply_kernel(k: &mut Kernel, v: &Json) {
     if let Json::Obj(_) = v.get("cli") {
         apply_cli(&mut k.cli, v.get("cli"));
     }
+    if let Json::Obj(_) = v.get("web") {
+        apply_web(&mut k.web, v.get("web"));
+    }
 }
 
 fn apply_cli(c: &mut Cli, v: &Json) {
@@ -2394,6 +2704,58 @@ fn apply_cli(c: &mut Cli, v: &Json) {
     }
     if let Some(s) = v.get("boot").as_str() {
         c.boot = s.to_string();
+    }
+    if let Some(b) = v.get("mouse").as_bool() {
+        c.mouse = b;
+    }
+    if let Some(n) = v.get("rows").as_u32() {
+        c.rows = n;
+    }
+    if let Some(n) = v.get("cols").as_u32() {
+        c.cols = n;
+    }
+    if let Some(n) = v.get("scrollback").as_u32() {
+        c.scrollback = n;
+    }
+    if let Some(b) = v.get("manual").as_bool() {
+        c.manual = b;
+    }
+    if let Some(b) = v.get("vi").as_bool() {
+        c.vi = b;
+    }
+    if let Some(b) = v.get("fs").as_bool() {
+        c.fs = b;
+    }
+    if let Some(b) = v.get("fw").as_bool() {
+        c.fw = b;
+    }
+    if let Json::Obj(_) = v.get("autoboot") {
+        apply_autoboot(&mut c.autoboot, v.get("autoboot"));
+    }
+}
+
+fn apply_autoboot(a: &mut Autoboot, v: &Json) {
+    if let Some(b) = v.get("enable").as_bool() {
+        a.enable = b;
+    }
+    if let Some(n) = v
+        .get("timeout_ms")
+        .as_u32()
+        .or_else(|| v.get("timeout").as_u32())
+    {
+        a.timeout_ms = n;
+    }
+    if let Some(s) = v.get("order").as_str() {
+        a.order = s.to_string();
+    }
+    if let Some(b) = v.get("bios_ui").as_bool() {
+        a.bios_ui = b;
+    }
+}
+
+fn apply_web(w: &mut Web, v: &Json) {
+    if let Some(b) = v.get("enable").as_bool() {
+        w.enable = b;
     }
 }
 
@@ -2607,6 +2969,9 @@ fn apply_flash(f: &mut Flash, v: &Json) {
     if let Some(s) = v.get("image").as_str() {
         f.image = s.to_string();
     }
+    if let Some(s) = v.get("url").as_str() {
+        f.url = s.to_string();
+    }
 }
 
 fn apply_settings(s: &mut Settings, v: &Json) {
@@ -2643,6 +3008,7 @@ fn apply_usb(u: &mut Usb, v: &Json) {
             u.fs_fat32 = true;
             u.fs_ntfs = true;
             u.fs_ext4 = true;
+            u.fs_btrfs = true;
         }
     }
     if let Some(b) = v.get("fs_fat32").as_bool() {
@@ -2653,6 +3019,9 @@ fn apply_usb(u: &mut Usb, v: &Json) {
     }
     if let Some(b) = v.get("fs_ext4").as_bool() {
         u.fs_ext4 = b;
+    }
+    if let Some(b) = v.get("fs_btrfs").as_bool() {
+        u.fs_btrfs = b;
     }
 }
 
@@ -2985,6 +3354,105 @@ mod tests {
         .unwrap();
         assert!(!off.kernel.http.outbound);
         assert!(off.kernel.http.enable && off.kernel.http.serve);
+    }
+
+    #[test]
+    fn barebone_profile_excludes_the_whole_web_stack() {
+        let spec =
+            BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"barebone"}"#).unwrap();
+        assert_eq!(spec.kernel.profile, BiosProfile::Barebone);
+        assert!(!spec.web_stack());
+        assert!(!spec.kernel.wasm.enable && !spec.kernel.wasm.jit);
+        assert_eq!(spec.kernel.js, "off");
+        assert_eq!(spec.kernel.ui, "cli");
+        assert!(!spec.kernel.http.files.enable);
+        assert!(!spec.kernel.store.enable);
+        // What survives: kernel + HolyC band + hw NIC + USB key + HTTPS client.
+        assert!(spec.kernel.http.enable && spec.kernel.http.outbound);
+        assert!(spec.kernel.tls.https && !spec.kernel.tls.serve);
+        assert!(spec.kernel.hw.enable && spec.kernel.hw.virtio_net);
+        assert!(spec.kernel.usb.key && spec.kernel.usb.flash_fat32);
+        assert!(spec.holyc.dual_band.uart);
+        assert!(
+            spec.kernel.gr.enable,
+            "the VGA text container needs a plane"
+        );
+        assert!(!spec.kernel.proxy.enable, "no display proxy on barebone");
+        let feat = spec.compiled_features_json();
+        for off in [
+            "\"web\":false",
+            "\"web_dom\":false",
+            "\"web_render\":false",
+            "\"web_css\":false",
+            "\"web_js\":false",
+            "\"wasm\":false",
+        ] {
+            assert!(feat.contains(off), "{off} in {feat}");
+        }
+        for on in [
+            "\"cli\":true",
+            "\"cli_vi\":true",
+            "\"cli_fw\":true",
+            "\"cli_manual\":true",
+            "\"cli_fs_volumes\":true",
+            "\"hw\":true",
+        ] {
+            assert!(feat.contains(on), "{on} in {feat}");
+        }
+        assert!(!spec.cli_before_web(), "no web stack to come after the CLI");
+    }
+
+    #[test]
+    fn web_slices_are_one_bundle_and_never_preempt_the_cli() {
+        // A slice cannot be compiled without the bundle.
+        for src in [
+            r#"{"schema_version":1,"profile":"barebone","kernel":{"wasm":{"enable":true}}}"#,
+            r#"{"schema_version":1,"profile":"barebone","kernel":{"browser":{"js":"aot"}}}"#,
+            r#"{"schema_version":1,"kernel":{"web":{"enable":false}}}"#,
+            r#"{"schema_version":1,"kernel":{"web":{"enable":false},"ui":"cli","cli":{"enable":false}}}"#,
+        ] {
+            let err = BoardSpec::from_json_str(src).unwrap_err();
+            assert!(
+                err.contains("web") || err.contains("face"),
+                "{src} -> {err}"
+            );
+        }
+        // With the engine compiled, zealcli still reaches its prompt first.
+        let full = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        assert!(full.web_stack() && full.cli_before_web());
+        assert_eq!(full.kernel.cli.boot, "auto");
+        assert!(full.wants_zealcli(false), "CLI is the face until GPU");
+        assert!(!full.wants_zealcli(true), "then LoadUI hands over");
+        let err = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","kernel":{"cli":{"boot":"ui"}}}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("zealcli boots"), "{err}");
+        assert!(full
+            .compiled_features()
+            .iter()
+            .any(|(k, v)| *k == "cli_first" && *v));
+    }
+
+    #[test]
+    fn cli_container_geometry_and_capability_gates() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"full","kernel":{"cli":{"rows":48,"cols":132,"scrollback":2048,"mouse":true}}}"#,
+        )
+        .unwrap();
+        assert_eq!((spec.kernel.cli.rows, spec.kernel.cli.cols), (48, 132));
+        assert_eq!(spec.kernel.cli.scrollback, 2048);
+        assert!(spec.kernel.cli.mouse);
+        for src in [
+            r#"{"schema_version":1,"kernel":{"cli":{"rows":9}}}"#,
+            r#"{"schema_version":1,"kernel":{"cli":{"cols":39}}}"#,
+            r#"{"schema_version":1,"kernel":{"cli":{"scrollback":10}}}"#,
+            r#"{"schema_version":1,"kernel":{"cli":{"scrollback":9000}}}"#,
+            r#"{"schema_version":1,"kernel":{"cli":{"mouse":true}}}"#,
+            r#"{"schema_version":1,"kernel":{"cli":{"fw":true},"usb":{"enable":true,"flash_fat32":false}}}"#,
+        ] {
+            assert!(BoardSpec::from_json_str(src).is_err(), "{src}");
+        }
     }
 
     #[test]

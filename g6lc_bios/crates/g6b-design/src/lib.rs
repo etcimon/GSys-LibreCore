@@ -458,6 +458,39 @@ fn emit_kmain(spec: &BoardSpec) -> String {
              \n",
         )
     };
+    // The face KMain brings up. The CLI is the minimally dependent one, so it
+    // is always first; `UiBoot` only exists when the web stack (wasm+js+dom+
+    // render+css) was compiled, and even then it runs after the prompt.
+    let cli = if spec.kernel.cli.enable {
+        format!(
+            "U0 CliBoot()\n\
+             {{\n\
+             \tPrint(\"ZEALCLI-BOOT {}x{} boot={}\\n\");\n\
+             }}\n\
+             \n",
+            spec.kernel.cli.cols, spec.kernel.cli.rows, spec.kernel.cli.boot
+        )
+    } else {
+        String::new()
+    };
+    let ui = if spec.web_stack() {
+        String::from(
+            "U0 UiBoot()\n\
+             {\n\
+             \tPrint(\"UI-BOOT\\n\");\n\
+             }\n\
+             \n",
+        )
+    } else {
+        String::new()
+    };
+    let mut faces = String::new();
+    if spec.kernel.cli.enable {
+        faces.push_str("\tCliBoot();\n");
+    }
+    if spec.web_stack() {
+        faces.push_str("\tUiBoot();\n");
+    }
     format!(
         "// Generated KMain.ZC — rust g6b-design, do not edit\n\
          // product={} march={} xlen={}\n\
@@ -466,11 +499,8 @@ fn emit_kmain(spec: &BoardSpec) -> String {
          \tPrint(\"HOLYC-READY\\n\");\n\
          }}\n\
          \n\
-         U0 UiBoot()\n\
-         {{\n\
-         \tPrint(\"UI-BOOT\\n\");\n\
-         }}\n\
-         \n\
+         {cli}\
+         {ui}\
          {gr}\
          U0 TimerInit()\n\
          {{\n\
@@ -484,7 +514,7 @@ fn emit_kmain(spec: &BoardSpec) -> String {
          {dual}\
          \tSysGrInit();\n\
          \tTimerInit();\n\
-         \tUiBoot();\n\
+         {faces}\
          }}\n",
         escape_comment_value(&spec.product),
         escape_comment_value(&spec.isa.march),
