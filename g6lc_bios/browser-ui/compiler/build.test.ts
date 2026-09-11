@@ -160,10 +160,12 @@ describe("LDC build integrity", () => {
     const main = parseSvelte("src/Main.svelte", '<p id="main">main</p>');
     const source = printApp([app(), main]);
     expect(childFieldName("Main")).toBe("mainChild");
-    expect(source).toContain("@child Main mainChild;");
+    // Extras flatten into ready(); @child would drop the BIOS raster DOM.
+    expect(source).not.toContain("@child");
+    expect(source).toContain('setProperty(main, "id", "main")');
     expect(source.match(/mixin Spa!App;/g)?.length).toBe(1);
     expect(() => printApp([app(), parseSvelte("src/Spa.svelte", '<p id="spa">spa</p>')])).toThrow(/reserved/);
-    expect(() => printApp([app(), main, parseSvelte("src/MainChild.svelte", '<p id="mc">mc</p>')])).toThrow(/collision/);
+    expect(() => printModule(app(), ["Main", "MainChild"])).toThrow(/collision/);
     expect(() => printModule(parseSvelte("src/Bad.svelte", '<script>let main = "x";</script><p id="b">{main}</p>'))).toThrow(/collision/);
   });
 

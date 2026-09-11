@@ -11,7 +11,6 @@ struct App
 nothrow:
   @trusted:
   mixin NodeDef!"main";
-  @prop!"innerText" string winOpen = "false";
   void construct() @trusted { }
   void onMount() { }
   enum g6bStaticDom = true;
@@ -55,12 +54,12 @@ nothrow:
       appendChild(bios_menu, menu_title);
       auto tab_main = createElement(NodeType.a);
       setProperty(tab_main, "id", "tab-main");
-      setProperty(tab_main, "class", "bios-tab");
+      setProperty(tab_main, "class", "bios-tab bios-tab-active");
       setProperty(tab_main, "href", "#menu-main");
       setProperty(tab_main, "data-menu-link", "main");
       setProperty(tab_main, "role", "tab");
-      setProperty(tab_main, "tabindex", "-1");
-      setProperty(tab_main, "aria-selected", "false");
+      setProperty(tab_main, "tabindex", "0");
+      setProperty(tab_main, "aria-selected", "true");
       setProperty(tab_main, "innerText", "Main");
       appendChild(bios_menu, tab_main);
       g6b_listen("tab-main", "click");
@@ -136,17 +135,17 @@ nothrow:
       setProperty(status, "role", "status");
       setProperty(status, "innerText", "UI-BOOT");
       appendChild(root, status);
+      auto bios_nav = createElement(NodeType.p);
+      setProperty(bios_nav, "id", "bios-nav");
+      setProperty(bios_nav, "hidden", "");
+      appendChild(root, bios_nav);
       auto hw_nat_status = createElement(NodeType.p);
       setProperty(hw_nat_status, "id", "hw-nat-status");
       setProperty(hw_nat_status, "role", "status");
       appendChild(root, hw_nat_status);
-      auto bios_nav = createElement(NodeType.p);
-      setProperty(bios_nav, "id", "bios-nav");
-      setProperty(bios_nav, "innerText", "Main CPU Memory Uncore Devices Boot Settings");
-      appendChild(root, bios_nav);
       auto read_only_note = createElement(NodeType.p);
       setProperty(read_only_note, "id", "read-only-note");
-      setProperty(read_only_note, "innerText", "Read-only BoardSpec view. Editing, settings import, and flashing are unavailable here.");
+      setProperty(read_only_note, "innerText", "Read-only BoardSpec setup. F10 refreshes values. Editing and flash are unavailable here.");
       appendChild(root, read_only_note);
       auto refresh = createElement(NodeType.button);
       setProperty(refresh, "id", "refresh");
@@ -154,262 +153,6 @@ nothrow:
       setProperty(refresh, "innerText", "Refresh values");
       appendChild(root, refresh);
       g6b_listen("refresh", "click");
-      auto win_open = createElement(NodeType.button);
-      setProperty(win_open, "id", "win-open");
-      setProperty(win_open, "type", "button");
-      setProperty(win_open, "data-window-action", "open");
-      setProperty(win_open, "innerText", "Open browser");
-      appendChild(root, win_open);
-      g6b_listen("win-open", "click");
-      setProperty(root, "innerText", "{#if winOpen}");
-      auto bios_window_0 = createElement(NodeType.div);
-      setProperty(bios_window_0, "id", "bios-window-0");
-      setProperty(bios_window_0, "class", "bios-window");
-      setProperty(bios_window_0, "data-kind", "browser");
-      setProperty(bios_window_0, "data-location", "about:blank");
-      auto bios_window_0_titlebar = createElement(NodeType.div);
-      setProperty(bios_window_0_titlebar, "id", "bios-window-0-titlebar");
-      setProperty(bios_window_0_titlebar, "class", "bios-window-titlebar");
-      auto bios_window_0_title = createElement(NodeType.span);
-      setProperty(bios_window_0_title, "id", "bios-window-0-title");
-      setProperty(bios_window_0_title, "innerText", "browser");
-      appendChild(bios_window_0_titlebar, bios_window_0_title);
-      auto bios_window_0_close = createElement(NodeType.button);
-      setProperty(bios_window_0_close, "id", "bios-window-0-close");
-      setProperty(bios_window_0_close, "type", "button");
-      setProperty(bios_window_0_close, "data-window-action", "close");
-      setProperty(bios_window_0_close, "data-window", "0");
-      setProperty(bios_window_0_close, "innerText", "Close");
-      appendChild(bios_window_0_titlebar, bios_window_0_close);
-      g6b_listen("bios-window-0-close", "click");
-      appendChild(bios_window_0, bios_window_0_titlebar);
-      auto bios_window_0_tabs = createElement(NodeType.div);
-      setProperty(bios_window_0_tabs, "id", "bios-window-0-tabs");
-      setProperty(bios_window_0_tabs, "class", "bios-window-tabs");
-      setProperty(bios_window_0_tabs, "role", "tablist");
-      setProperty(bios_window_0_tabs, "aria-label", "Browser tabs");
-      auto bios_tab_0 = createElement(NodeType.a);
-      setProperty(bios_tab_0, "id", "bios-tab-0");
-      setProperty(bios_tab_0, "class", "bios-tab bios-tab-active");
-      setProperty(bios_tab_0, "href", "#bios-session-0");
-      setProperty(bios_tab_0, "data-tab-action", "select");
-      setProperty(bios_tab_0, "data-tab", "0");
-      setProperty(bios_tab_0, "role", "tab");
-      setProperty(bios_tab_0, "tabindex", "0");
-      setProperty(bios_tab_0, "aria-selected", "true");
-      setProperty(bios_tab_0, "innerText", "blank");
-      appendChild(bios_window_0_tabs, bios_tab_0);
-      g6b_listen("bios-tab-0", "click");
-      auto bios_tab_0_close = createElement(NodeType.button);
-      setProperty(bios_tab_0_close, "id", "bios-tab-0-close");
-      setProperty(bios_tab_0_close, "type", "button");
-      setProperty(bios_tab_0_close, "class", "bios-tab-x");
-      setProperty(bios_tab_0_close, "data-tab-action", "close");
-      setProperty(bios_tab_0_close, "data-tab", "0");
-      setProperty(bios_tab_0_close, "innerText", "x");
-      appendChild(bios_window_0_tabs, bios_tab_0_close);
-      g6b_listen("bios-tab-0-close", "click");
-      auto bios_tab_1 = createElement(NodeType.a);
-      setProperty(bios_tab_1, "id", "bios-tab-1");
-      setProperty(bios_tab_1, "class", "bios-tab");
-      setProperty(bios_tab_1, "href", "#bios-session-1");
-      setProperty(bios_tab_1, "data-tab-action", "select");
-      setProperty(bios_tab_1, "data-tab", "1");
-      setProperty(bios_tab_1, "role", "tab");
-      setProperty(bios_tab_1, "tabindex", "-1");
-      setProperty(bios_tab_1, "aria-selected", "false");
-      setProperty(bios_tab_1, "innerText", "blank");
-      appendChild(bios_window_0_tabs, bios_tab_1);
-      g6b_listen("bios-tab-1", "click");
-      auto bios_tab_1_close = createElement(NodeType.button);
-      setProperty(bios_tab_1_close, "id", "bios-tab-1-close");
-      setProperty(bios_tab_1_close, "type", "button");
-      setProperty(bios_tab_1_close, "class", "bios-tab-x");
-      setProperty(bios_tab_1_close, "data-tab-action", "close");
-      setProperty(bios_tab_1_close, "data-tab", "1");
-      setProperty(bios_tab_1_close, "innerText", "x");
-      appendChild(bios_window_0_tabs, bios_tab_1_close);
-      g6b_listen("bios-tab-1-close", "click");
-      auto bios_tab_2 = createElement(NodeType.a);
-      setProperty(bios_tab_2, "id", "bios-tab-2");
-      setProperty(bios_tab_2, "class", "bios-tab");
-      setProperty(bios_tab_2, "href", "#bios-session-2");
-      setProperty(bios_tab_2, "data-tab-action", "select");
-      setProperty(bios_tab_2, "data-tab", "2");
-      setProperty(bios_tab_2, "role", "tab");
-      setProperty(bios_tab_2, "tabindex", "-1");
-      setProperty(bios_tab_2, "aria-selected", "false");
-      setProperty(bios_tab_2, "innerText", "blank");
-      appendChild(bios_window_0_tabs, bios_tab_2);
-      g6b_listen("bios-tab-2", "click");
-      auto bios_tab_2_close = createElement(NodeType.button);
-      setProperty(bios_tab_2_close, "id", "bios-tab-2-close");
-      setProperty(bios_tab_2_close, "type", "button");
-      setProperty(bios_tab_2_close, "class", "bios-tab-x");
-      setProperty(bios_tab_2_close, "data-tab-action", "close");
-      setProperty(bios_tab_2_close, "data-tab", "2");
-      setProperty(bios_tab_2_close, "innerText", "x");
-      appendChild(bios_window_0_tabs, bios_tab_2_close);
-      g6b_listen("bios-tab-2-close", "click");
-      auto bios_tab_3 = createElement(NodeType.a);
-      setProperty(bios_tab_3, "id", "bios-tab-3");
-      setProperty(bios_tab_3, "class", "bios-tab");
-      setProperty(bios_tab_3, "href", "#bios-session-3");
-      setProperty(bios_tab_3, "data-tab-action", "select");
-      setProperty(bios_tab_3, "data-tab", "3");
-      setProperty(bios_tab_3, "role", "tab");
-      setProperty(bios_tab_3, "tabindex", "-1");
-      setProperty(bios_tab_3, "aria-selected", "false");
-      setProperty(bios_tab_3, "innerText", "blank");
-      appendChild(bios_window_0_tabs, bios_tab_3);
-      g6b_listen("bios-tab-3", "click");
-      auto bios_tab_3_close = createElement(NodeType.button);
-      setProperty(bios_tab_3_close, "id", "bios-tab-3-close");
-      setProperty(bios_tab_3_close, "type", "button");
-      setProperty(bios_tab_3_close, "class", "bios-tab-x");
-      setProperty(bios_tab_3_close, "data-tab-action", "close");
-      setProperty(bios_tab_3_close, "data-tab", "3");
-      setProperty(bios_tab_3_close, "innerText", "x");
-      appendChild(bios_window_0_tabs, bios_tab_3_close);
-      g6b_listen("bios-tab-3-close", "click");
-      auto bios_tab_4 = createElement(NodeType.a);
-      setProperty(bios_tab_4, "id", "bios-tab-4");
-      setProperty(bios_tab_4, "class", "bios-tab");
-      setProperty(bios_tab_4, "href", "#bios-session-4");
-      setProperty(bios_tab_4, "data-tab-action", "select");
-      setProperty(bios_tab_4, "data-tab", "4");
-      setProperty(bios_tab_4, "role", "tab");
-      setProperty(bios_tab_4, "tabindex", "-1");
-      setProperty(bios_tab_4, "aria-selected", "false");
-      setProperty(bios_tab_4, "innerText", "blank");
-      appendChild(bios_window_0_tabs, bios_tab_4);
-      g6b_listen("bios-tab-4", "click");
-      auto bios_tab_4_close = createElement(NodeType.button);
-      setProperty(bios_tab_4_close, "id", "bios-tab-4-close");
-      setProperty(bios_tab_4_close, "type", "button");
-      setProperty(bios_tab_4_close, "class", "bios-tab-x");
-      setProperty(bios_tab_4_close, "data-tab-action", "close");
-      setProperty(bios_tab_4_close, "data-tab", "4");
-      setProperty(bios_tab_4_close, "innerText", "x");
-      appendChild(bios_window_0_tabs, bios_tab_4_close);
-      g6b_listen("bios-tab-4-close", "click");
-      auto bios_tab_5 = createElement(NodeType.a);
-      setProperty(bios_tab_5, "id", "bios-tab-5");
-      setProperty(bios_tab_5, "class", "bios-tab");
-      setProperty(bios_tab_5, "href", "#bios-session-5");
-      setProperty(bios_tab_5, "data-tab-action", "select");
-      setProperty(bios_tab_5, "data-tab", "5");
-      setProperty(bios_tab_5, "role", "tab");
-      setProperty(bios_tab_5, "tabindex", "-1");
-      setProperty(bios_tab_5, "aria-selected", "false");
-      setProperty(bios_tab_5, "innerText", "blank");
-      appendChild(bios_window_0_tabs, bios_tab_5);
-      g6b_listen("bios-tab-5", "click");
-      auto bios_tab_5_close = createElement(NodeType.button);
-      setProperty(bios_tab_5_close, "id", "bios-tab-5-close");
-      setProperty(bios_tab_5_close, "type", "button");
-      setProperty(bios_tab_5_close, "class", "bios-tab-x");
-      setProperty(bios_tab_5_close, "data-tab-action", "close");
-      setProperty(bios_tab_5_close, "data-tab", "5");
-      setProperty(bios_tab_5_close, "innerText", "x");
-      appendChild(bios_window_0_tabs, bios_tab_5_close);
-      g6b_listen("bios-tab-5-close", "click");
-      auto bios_tab_6 = createElement(NodeType.a);
-      setProperty(bios_tab_6, "id", "bios-tab-6");
-      setProperty(bios_tab_6, "class", "bios-tab");
-      setProperty(bios_tab_6, "href", "#bios-session-6");
-      setProperty(bios_tab_6, "data-tab-action", "select");
-      setProperty(bios_tab_6, "data-tab", "6");
-      setProperty(bios_tab_6, "role", "tab");
-      setProperty(bios_tab_6, "tabindex", "-1");
-      setProperty(bios_tab_6, "aria-selected", "false");
-      setProperty(bios_tab_6, "innerText", "blank");
-      appendChild(bios_window_0_tabs, bios_tab_6);
-      g6b_listen("bios-tab-6", "click");
-      auto bios_tab_6_close = createElement(NodeType.button);
-      setProperty(bios_tab_6_close, "id", "bios-tab-6-close");
-      setProperty(bios_tab_6_close, "type", "button");
-      setProperty(bios_tab_6_close, "class", "bios-tab-x");
-      setProperty(bios_tab_6_close, "data-tab-action", "close");
-      setProperty(bios_tab_6_close, "data-tab", "6");
-      setProperty(bios_tab_6_close, "innerText", "x");
-      appendChild(bios_window_0_tabs, bios_tab_6_close);
-      g6b_listen("bios-tab-6-close", "click");
-      auto bios_tab_7 = createElement(NodeType.a);
-      setProperty(bios_tab_7, "id", "bios-tab-7");
-      setProperty(bios_tab_7, "class", "bios-tab");
-      setProperty(bios_tab_7, "href", "#bios-session-7");
-      setProperty(bios_tab_7, "data-tab-action", "select");
-      setProperty(bios_tab_7, "data-tab", "7");
-      setProperty(bios_tab_7, "role", "tab");
-      setProperty(bios_tab_7, "tabindex", "-1");
-      setProperty(bios_tab_7, "aria-selected", "false");
-      setProperty(bios_tab_7, "innerText", "blank");
-      appendChild(bios_window_0_tabs, bios_tab_7);
-      g6b_listen("bios-tab-7", "click");
-      auto bios_tab_7_close = createElement(NodeType.button);
-      setProperty(bios_tab_7_close, "id", "bios-tab-7-close");
-      setProperty(bios_tab_7_close, "type", "button");
-      setProperty(bios_tab_7_close, "class", "bios-tab-x");
-      setProperty(bios_tab_7_close, "data-tab-action", "close");
-      setProperty(bios_tab_7_close, "data-tab", "7");
-      setProperty(bios_tab_7_close, "innerText", "x");
-      appendChild(bios_window_0_tabs, bios_tab_7_close);
-      g6b_listen("bios-tab-7-close", "click");
-      auto bios_tab_new = createElement(NodeType.button);
-      setProperty(bios_tab_new, "id", "bios-tab-new");
-      setProperty(bios_tab_new, "type", "button");
-      setProperty(bios_tab_new, "data-tab-action", "new");
-      setProperty(bios_tab_new, "innerText", "New tab");
-      appendChild(bios_window_0_tabs, bios_tab_new);
-      g6b_listen("bios-tab-new", "click");
-      appendChild(bios_window_0, bios_window_0_tabs);
-      auto bios_window_0_stage = createElement(NodeType.div);
-      setProperty(bios_window_0_stage, "id", "bios-window-0-stage");
-      setProperty(bios_window_0_stage, "class", "bios-window-stage");
-      auto bios_session_0 = createElement(NodeType.p);
-      setProperty(bios_session_0, "id", "bios-session-0");
-      setProperty(bios_session_0, "class", "bios-session");
-      setProperty(bios_session_0, "innerText", "about:blank");
-      appendChild(bios_window_0_stage, bios_session_0);
-      auto bios_session_1 = createElement(NodeType.p);
-      setProperty(bios_session_1, "id", "bios-session-1");
-      setProperty(bios_session_1, "class", "bios-session");
-      setProperty(bios_session_1, "innerText", "about:blank");
-      appendChild(bios_window_0_stage, bios_session_1);
-      auto bios_session_2 = createElement(NodeType.p);
-      setProperty(bios_session_2, "id", "bios-session-2");
-      setProperty(bios_session_2, "class", "bios-session");
-      setProperty(bios_session_2, "innerText", "about:blank");
-      appendChild(bios_window_0_stage, bios_session_2);
-      auto bios_session_3 = createElement(NodeType.p);
-      setProperty(bios_session_3, "id", "bios-session-3");
-      setProperty(bios_session_3, "class", "bios-session");
-      setProperty(bios_session_3, "innerText", "about:blank");
-      appendChild(bios_window_0_stage, bios_session_3);
-      auto bios_session_4 = createElement(NodeType.p);
-      setProperty(bios_session_4, "id", "bios-session-4");
-      setProperty(bios_session_4, "class", "bios-session");
-      setProperty(bios_session_4, "innerText", "about:blank");
-      appendChild(bios_window_0_stage, bios_session_4);
-      auto bios_session_5 = createElement(NodeType.p);
-      setProperty(bios_session_5, "id", "bios-session-5");
-      setProperty(bios_session_5, "class", "bios-session");
-      setProperty(bios_session_5, "innerText", "about:blank");
-      appendChild(bios_window_0_stage, bios_session_5);
-      auto bios_session_6 = createElement(NodeType.p);
-      setProperty(bios_session_6, "id", "bios-session-6");
-      setProperty(bios_session_6, "class", "bios-session");
-      setProperty(bios_session_6, "innerText", "about:blank");
-      appendChild(bios_window_0_stage, bios_session_6);
-      auto bios_session_7 = createElement(NodeType.p);
-      setProperty(bios_session_7, "id", "bios-session-7");
-      setProperty(bios_session_7, "class", "bios-session");
-      setProperty(bios_session_7, "innerText", "about:blank");
-      appendChild(bios_window_0_stage, bios_session_7);
-      appendChild(bios_window_0, bios_window_0_stage);
-      appendChild(root, bios_window_0);
-      setProperty(root, "innerText", "{/if}");
       auto menu_main = createElement(NodeType.section);
       setProperty(menu_main, "id", "menu-main");
       setProperty(menu_main, "data-menu", "main");
@@ -444,6 +187,7 @@ nothrow:
       setProperty(menu_cpu, "id", "menu-cpu");
       setProperty(menu_cpu, "data-menu", "cpu");
       setProperty(menu_cpu, "aria-labelledby", "cpu-title");
+      setProperty(menu_cpu, "hidden", "");
       auto cpu_title = createElement(NodeType.h2);
       setProperty(cpu_title, "id", "cpu-title");
       setProperty(cpu_title, "innerText", "CPU");
@@ -474,6 +218,7 @@ nothrow:
       setProperty(menu_memory, "id", "menu-memory");
       setProperty(menu_memory, "data-menu", "memory");
       setProperty(menu_memory, "aria-labelledby", "memory-title");
+      setProperty(menu_memory, "hidden", "");
       auto memory_title = createElement(NodeType.h2);
       setProperty(memory_title, "id", "memory-title");
       setProperty(memory_title, "innerText", "Memory");
@@ -504,6 +249,7 @@ nothrow:
       setProperty(menu_uncore, "id", "menu-uncore");
       setProperty(menu_uncore, "data-menu", "uncore");
       setProperty(menu_uncore, "aria-labelledby", "uncore-title");
+      setProperty(menu_uncore, "hidden", "");
       auto uncore_title = createElement(NodeType.h2);
       setProperty(uncore_title, "id", "uncore-title");
       setProperty(uncore_title, "innerText", "Uncore");
@@ -534,6 +280,7 @@ nothrow:
       setProperty(menu_devices, "id", "menu-devices");
       setProperty(menu_devices, "data-menu", "devices");
       setProperty(menu_devices, "aria-labelledby", "devices-title");
+      setProperty(menu_devices, "hidden", "");
       auto devices_title = createElement(NodeType.h2);
       setProperty(devices_title, "id", "devices-title");
       setProperty(devices_title, "innerText", "Devices");
@@ -564,6 +311,7 @@ nothrow:
       setProperty(menu_boot, "id", "menu-boot");
       setProperty(menu_boot, "data-menu", "boot");
       setProperty(menu_boot, "aria-labelledby", "boot-title");
+      setProperty(menu_boot, "hidden", "");
       auto boot_title = createElement(NodeType.h2);
       setProperty(boot_title, "id", "boot-title");
       setProperty(boot_title, "innerText", "Boot");
@@ -594,6 +342,7 @@ nothrow:
       setProperty(menu_settings, "id", "menu-settings");
       setProperty(menu_settings, "data-menu", "settings");
       setProperty(menu_settings, "aria-labelledby", "settings-title");
+      setProperty(menu_settings, "hidden", "");
       auto settings_title = createElement(NodeType.h2);
       setProperty(settings_title, "id", "settings-title");
       setProperty(settings_title, "innerText", "Settings");
@@ -626,12 +375,14 @@ nothrow:
       auto n42 = createElement(NodeType.footer);
       auto bios_hint = createElement(NodeType.p);
       setProperty(bios_hint, "id", "bios-hint");
-      setProperty(bios_hint, "innerText", "ArrowLeft/ArrowRight Select tab Home/End First/Last F10 Refresh (not save) Read-only BoardSpec view");
+      setProperty(bios_hint, "innerText", "ArrowLeft/ArrowRight Select tab Home/End First/Last F10 Refresh (not save) Esc stays in setup");
       appendChild(n42, bios_hint);
       appendChild(root, n42);
       auto store = createElement(NodeType.section);
       setProperty(store, "id", "store");
+      setProperty(store, "data-menu", "settings");
       setProperty(store, "aria-labelledby", "store-title");
+      setProperty(store, "hidden", "");
       auto store_title = createElement(NodeType.h2);
       setProperty(store_title, "id", "store-title");
       setProperty(store_title, "innerText", "Store");
@@ -645,25 +396,8 @@ nothrow:
     }
     auto p0 = g6b_fetch("/bios/menu");
     auto p1 = g6b_fetch("/bios/menu/main");
-    auto p2 = g6b_fetch("/bios/menu/cpu");
-    auto p3 = g6b_fetch("/bios/menu/memory");
-    auto p4 = g6b_fetch("/bios/menu/uncore");
-    auto p5 = g6b_fetch("/bios/menu/devices");
-    auto p6 = g6b_fetch("/bios/menu/boot");
-    auto p7 = g6b_fetch("/bios/menu/settings");
-    auto p8 = g6b_fetch("/bios/clocks");
-    auto p9 = g6b_fetch("/bios/bootloader");
-    auto p10 = g6b_fetch("/bios/display");
-    auto p11 = g6b_fetch("/bios/settings");
-    auto p12 = g6b_fetch("/bios/settings/usb");
-    auto p13 = g6b_fetch("/bios/usb/ls");
-    auto p14 = g6b_fetch("/bios/files");
-    auto p15 = g6b_fetch("/bios/files/fat32");
-    auto p16 = g6b_fetch("/bios/files/ntfs");
-    auto p17 = g6b_fetch("/bios/files/ext4");
-    g6b_holyc("Menu(\"main\")");
     g6b_register("/bios/custom", "POST");
-    auto p18 = g6b_fetch("/bios/store");
+    auto p2 = g6b_fetch("/bios/store");
     if (libwasm_await_supported()) {
       libwasm_await__void(p1);
       try {
@@ -690,168 +424,6 @@ nothrow:
           setProperty(td2, "innerText", writable ? "RW" : "R");
           appendChild(tr, td2);
           appendChild(menu_main_body, tr);
-        }
-      } catch (Exception e) {}
-      libwasm_await__void(p2);
-      try {
-        auto json_p2 = libwasm_await_value();
-        auto j2 = parseJSON!ThreadMemAllocator(json_p2);
-        foreach (_; j2) {
-          string id = "", label = "", value = "";
-          bool writable = false;
-          foreach (key; j2.byKey) {
-            if (key == "id") id = j2.read!string;
-            else if (key == "label") label = j2.read!string;
-            else if (key == "value") value = j2.read!string;
-            else if (key == "writable") writable = j2.read!bool;
-            else j2.skipValue();
-          }
-          auto tr = createElement(NodeType.tr);
-          auto td0 = createElement(NodeType.td);
-          setProperty(td0, "innerText", label);
-          appendChild(tr, td0);
-          auto td1 = createElement(NodeType.td);
-          setProperty(td1, "innerText", value);
-          appendChild(tr, td1);
-          auto td2 = createElement(NodeType.td);
-          setProperty(td2, "innerText", writable ? "RW" : "R");
-          appendChild(tr, td2);
-          appendChild(menu_cpu_body, tr);
-        }
-      } catch (Exception e) {}
-      libwasm_await__void(p3);
-      try {
-        auto json_p3 = libwasm_await_value();
-        auto j3 = parseJSON!ThreadMemAllocator(json_p3);
-        foreach (_; j3) {
-          string id = "", label = "", value = "";
-          bool writable = false;
-          foreach (key; j3.byKey) {
-            if (key == "id") id = j3.read!string;
-            else if (key == "label") label = j3.read!string;
-            else if (key == "value") value = j3.read!string;
-            else if (key == "writable") writable = j3.read!bool;
-            else j3.skipValue();
-          }
-          auto tr = createElement(NodeType.tr);
-          auto td0 = createElement(NodeType.td);
-          setProperty(td0, "innerText", label);
-          appendChild(tr, td0);
-          auto td1 = createElement(NodeType.td);
-          setProperty(td1, "innerText", value);
-          appendChild(tr, td1);
-          auto td2 = createElement(NodeType.td);
-          setProperty(td2, "innerText", writable ? "RW" : "R");
-          appendChild(tr, td2);
-          appendChild(menu_memory_body, tr);
-        }
-      } catch (Exception e) {}
-      libwasm_await__void(p4);
-      try {
-        auto json_p4 = libwasm_await_value();
-        auto j4 = parseJSON!ThreadMemAllocator(json_p4);
-        foreach (_; j4) {
-          string id = "", label = "", value = "";
-          bool writable = false;
-          foreach (key; j4.byKey) {
-            if (key == "id") id = j4.read!string;
-            else if (key == "label") label = j4.read!string;
-            else if (key == "value") value = j4.read!string;
-            else if (key == "writable") writable = j4.read!bool;
-            else j4.skipValue();
-          }
-          auto tr = createElement(NodeType.tr);
-          auto td0 = createElement(NodeType.td);
-          setProperty(td0, "innerText", label);
-          appendChild(tr, td0);
-          auto td1 = createElement(NodeType.td);
-          setProperty(td1, "innerText", value);
-          appendChild(tr, td1);
-          auto td2 = createElement(NodeType.td);
-          setProperty(td2, "innerText", writable ? "RW" : "R");
-          appendChild(tr, td2);
-          appendChild(menu_uncore_body, tr);
-        }
-      } catch (Exception e) {}
-      libwasm_await__void(p5);
-      try {
-        auto json_p5 = libwasm_await_value();
-        auto j5 = parseJSON!ThreadMemAllocator(json_p5);
-        foreach (_; j5) {
-          string id = "", label = "", value = "";
-          bool writable = false;
-          foreach (key; j5.byKey) {
-            if (key == "id") id = j5.read!string;
-            else if (key == "label") label = j5.read!string;
-            else if (key == "value") value = j5.read!string;
-            else if (key == "writable") writable = j5.read!bool;
-            else j5.skipValue();
-          }
-          auto tr = createElement(NodeType.tr);
-          auto td0 = createElement(NodeType.td);
-          setProperty(td0, "innerText", label);
-          appendChild(tr, td0);
-          auto td1 = createElement(NodeType.td);
-          setProperty(td1, "innerText", value);
-          appendChild(tr, td1);
-          auto td2 = createElement(NodeType.td);
-          setProperty(td2, "innerText", writable ? "RW" : "R");
-          appendChild(tr, td2);
-          appendChild(menu_devices_body, tr);
-        }
-      } catch (Exception e) {}
-      libwasm_await__void(p6);
-      try {
-        auto json_p6 = libwasm_await_value();
-        auto j6 = parseJSON!ThreadMemAllocator(json_p6);
-        foreach (_; j6) {
-          string id = "", label = "", value = "";
-          bool writable = false;
-          foreach (key; j6.byKey) {
-            if (key == "id") id = j6.read!string;
-            else if (key == "label") label = j6.read!string;
-            else if (key == "value") value = j6.read!string;
-            else if (key == "writable") writable = j6.read!bool;
-            else j6.skipValue();
-          }
-          auto tr = createElement(NodeType.tr);
-          auto td0 = createElement(NodeType.td);
-          setProperty(td0, "innerText", label);
-          appendChild(tr, td0);
-          auto td1 = createElement(NodeType.td);
-          setProperty(td1, "innerText", value);
-          appendChild(tr, td1);
-          auto td2 = createElement(NodeType.td);
-          setProperty(td2, "innerText", writable ? "RW" : "R");
-          appendChild(tr, td2);
-          appendChild(menu_boot_body, tr);
-        }
-      } catch (Exception e) {}
-      libwasm_await__void(p7);
-      try {
-        auto json_p7 = libwasm_await_value();
-        auto j7 = parseJSON!ThreadMemAllocator(json_p7);
-        foreach (_; j7) {
-          string id = "", label = "", value = "";
-          bool writable = false;
-          foreach (key; j7.byKey) {
-            if (key == "id") id = j7.read!string;
-            else if (key == "label") label = j7.read!string;
-            else if (key == "value") value = j7.read!string;
-            else if (key == "writable") writable = j7.read!bool;
-            else j7.skipValue();
-          }
-          auto tr = createElement(NodeType.tr);
-          auto td0 = createElement(NodeType.td);
-          setProperty(td0, "innerText", label);
-          appendChild(tr, td0);
-          auto td1 = createElement(NodeType.td);
-          setProperty(td1, "innerText", value);
-          appendChild(tr, td1);
-          auto td2 = createElement(NodeType.td);
-          setProperty(td2, "innerText", writable ? "RW" : "R");
-          appendChild(tr, td2);
-          appendChild(menu_settings_body, tr);
         }
       } catch (Exception e) {}
     }

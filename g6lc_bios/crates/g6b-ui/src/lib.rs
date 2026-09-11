@@ -354,11 +354,9 @@ pub fn setup_script(spec: &BoardSpec) -> String {
     if spec.kernel.js != "aot" {
         return String::new();
     }
-    let mut out = String::from("document.getElementById(\"status\").innerText = \"UI-BOOT\";\n");
-    out.push_str(&format!(
-        "document.getElementById(\"bios-nav\").innerText = {};\n",
-        g6b_spec::quote_json(&nav_label())
-    ));
+    // Fetches only. The BIOS UI (Svelte / LDC cell) owns node text; this
+    // script must not `getElementById(...).innerText =`.
+    let mut out = String::new();
     if spec.kernel.http.proxy_js {
         for path in setup_reads(spec) {
             out.push_str(&format!("fetch({});\n", g6b_spec::quote_json(path)));
@@ -507,19 +505,19 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
             html = html.replace(&tab_inactive, &tab_active);
         }
 
-        html = html.replace(
-            &format!(
-                "<section id=\"menu-{}\" data-menu=\"{}\" aria-labelledby=\"{}-title\">",
-                menu.id, menu.id, menu.id
-            ),
-            &format!(
-                "<section id=\"menu-{}\" data-menu=\"{}\" aria-labelledby=\"{}-title\"{}>",
-                menu.id,
-                menu.id,
-                menu.id,
-                fetch_attr(&format!("/bios/menu/{}", menu.id))
-            ),
-        );
+        let fetch = fetch_attr(&format!("/bios/menu/{}", menu.id));
+        for hidden in ["", " hidden"] {
+            html = html.replace(
+                &format!(
+                    "<section id=\"menu-{}\" data-menu=\"{}\" aria-labelledby=\"{}-title\"{hidden}>",
+                    menu.id, menu.id, menu.id
+                ),
+                &format!(
+                    "<section id=\"menu-{}\" data-menu=\"{}\" aria-labelledby=\"{}-title\"{fetch}{hidden}>",
+                    menu.id, menu.id, menu.id
+                ),
+            );
+        }
 
         let mut rows = String::new();
         for item in &menu.items {

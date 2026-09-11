@@ -2308,107 +2308,42 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
   const initial = ui && ui.getAttribute("data-start-menu");
   let selected = menus.some((node) => node.getAttribute("data-menu") === initial) ? initial : "main";
   let started = false;
-  // Native-host mirror of App.svelte window/tab chrome (`{#if winOpen}`).
-  // Not `g6b-iframe` — that crate is the session pool only.
-  let windowOpen = false;
-  let activeTab = 0;
-  let windowError = "";
-  const MAX_TABS = 8;
-  const tabs = [true, false, false, false, false, false, false, false];
-  const WINDOW_SHELL = ["bios-window-0", "bios-window-0-titlebar", "bios-window-0-title", "bios-window-0-close", "bios-window-0-tabs", "bios-tab-new", "bios-window-0-stage"];
-  function tabStatus() {
-    const loc = "about:blank";
-    const n = activeTab + 1;
-    if (windowError) return "UI-BOOT  win:browser  tab:" + n + "  " + loc + "  error: " + windowError;
-    return "UI-BOOT  win:browser  tab:" + n + "  " + loc + "  ok";
-  }
   function message(value) {
-    if (status) status.textContent = windowOpen ? tabStatus() : value;
+    if (status) status.textContent = value;
   }
-  function paintWindow() {
-    for (const id of WINDOW_SHELL) {
-      const node = doc.getElementById(id);
-      if (node) node.hidden = !windowOpen;
+  function paintChrome() {
+    const w = doc.defaultView || globalThis;
+    const platform = w.platform;
+    const profile = doc.getElementById("profile");
+    if (profile && platform) {
+      const bits = [platform.product, platform.profile, platform.march].filter((s) => typeof s === "string" && s);
+      if (bits.length) profile.textContent = bits.join(" | ");
     }
-    const win = doc.getElementById("bios-window-0");
-    if (win) win.setAttribute("data-location", "about:blank");
-    for (let slot = 0; slot < MAX_TABS; slot++) {
-      const occupied = windowOpen && tabs[slot];
-      const active = occupied && slot === activeTab;
-      const tab = doc.getElementById("bios-tab-" + slot);
-      const close = doc.getElementById("bios-tab-" + slot + "-close");
-      const sess = doc.getElementById("bios-session-" + slot);
-      if (tab) {
-        tab.hidden = !occupied;
-        tab.className = active ? "bios-tab bios-tab-active" : "bios-tab";
-        tab.setAttribute("aria-selected", active ? "true" : "false");
-        tab.tabIndex = active ? 0 : -1;
-      }
-      if (close) close.hidden = !occupied;
-      if (sess) sess.hidden = !active;
+    const nat = doc.getElementById("hw-nat-status");
+    if (nat && platform && platform.hw) {
+      const hw = platform.hw;
+      nat.textContent = ["hw", hw.nat || "", hw.phase || ""].join(" ").trim();
     }
-    message("UI-BOOT");
-  }
-  function setWindowOpen(on) {
-    windowOpen = !!on;
-    windowError = "";
-    activeTab = 0;
-    for (let i = 0; i < MAX_TABS; i++) tabs[i] = on && i === 0;
-    paintWindow();
-  }
-  function tabCount() {
-    let n = 0;
-    for (let i = 0; i < MAX_TABS; i++) if (tabs[i]) n++;
-    return n;
-  }
-  function newBrowserTab() {
-    if (!windowOpen) { setWindowOpen(true); return; }
-    if (tabCount() >= MAX_TABS) {
-      windowError = "tab budget";
-      message("UI-BOOT");
-      return;
-    }
-    const slot = tabs.findIndex((on) => !on);
-    if (slot < 0) {
-      windowError = "tab budget";
-      message("UI-BOOT");
-      return;
-    }
-    tabs[slot] = true;
-    activeTab = slot;
-    windowError = "";
-    paintWindow();
-  }
-  function selectBrowserTab(slot) {
-    if (!windowOpen || slot < 0 || slot >= MAX_TABS || !tabs[slot]) return;
-    activeTab = slot;
-    windowError = "";
-    paintWindow();
-  }
-  function closeBrowserTab(slot) {
-    if (!windowOpen || slot < 0 || slot >= MAX_TABS || !tabs[slot]) return;
-    tabs[slot] = false;
-    if (tabCount() === 0) { setWindowOpen(false); return; }
-    if (activeTab === slot) {
-      let next = -1;
-      for (let i = slot - 1; i >= 0; i--) if (tabs[i]) { next = i; break; }
-      if (next < 0) for (let i = slot + 1; i < MAX_TABS; i++) if (tabs[i]) { next = i; break; }
-      activeTab = next < 0 ? 0 : next;
-    }
-    windowError = "";
-    paintWindow();
   }
   function show(id) {
     if (!menus.some((node) => node.getAttribute("data-menu") === id)) return;
     selected = id;
     for (const menu of menus) menu.hidden = menu.getAttribute("data-menu") !== id;
     for (const link of links) {
-      if (link.getAttribute("data-menu-link") === id) link.setAttribute("aria-current", "page");
-      else link.removeAttribute("aria-current");
+      const on = link.getAttribute("data-menu-link") === id;
+      if (on) {
+        link.setAttribute("aria-current", "page");
+        link.setAttribute("aria-selected", "true");
+        if (link.classList && typeof link.classList.add === "function") link.classList.add("bios-tab-active");
+      } else {
+        link.removeAttribute("aria-current");
+        link.setAttribute("aria-selected", "false");
+        if (link.classList && typeof link.classList.remove === "function") link.classList.remove("bios-tab-active");
+      }
     }
   }
   function fallback(error, context) {
-    for (const menu of menus) menu.hidden = false;
+    show(selected);
     message("Static view: " + context + " failed: " + String(error && error.message || error));
   }
   function paint(url, data) {
@@ -2419,7 +2354,26 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
       if (!data || data.id !== menu || typeof data.title !== "string" || !Array.isArray(data.items)) {
         throw new Error("Invalid menu response: " + url);
       }
-      const rows = Array.from(node.querySelectorAll("[data-item]"));
+      let rows = Array.from(node.querySelectorAll("[data-item]"));
+      if (rows.length === 0 && data.items.length) {
+        const tbody = (typeof node.querySelector === "function" && node.querySelector("tbody")) || node;
+        for (const item of data.items) {
+          if (!item || typeof item.id !== "string") continue;
+          const tr = doc.createElement("tr");
+          tr.setAttribute("data-item", item.id);
+          const tdL = doc.createElement("td");
+          tdL.id = "label-" + menu + "-" + item.id;
+          const tdV = doc.createElement("td");
+          tdV.id = "row-" + menu + "-" + item.id;
+          const tdA = doc.createElement("td");
+          tdA.id = "access-" + menu + "-" + item.id;
+          tr.appendChild(tdL);
+          tr.appendChild(tdV);
+          tr.appendChild(tdA);
+          tbody.appendChild(tr);
+        }
+        rows = Array.from(node.querySelectorAll("[data-item]"));
+      }
       if (data.items.length !== rows.length) throw new Error("Menu row count mismatch: " + menu);
       const seen = new Set();
       for (const item of data.items) {
@@ -2458,8 +2412,16 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
   }
   async function refresh() {
     try {
-      for (const url of targets.keys()) await request(url);
-      message(targets.size ? "UI-BOOT: values refreshed; read-only setup" : "Static view: browser refresh unavailable");
+      const menuUrl = "/bios/menu/" + selected;
+      if (targets.has(menuUrl)) await request(menuUrl);
+      for (const menu of menus) {
+        if (menu.hidden) continue;
+        for (const node of menu.querySelectorAll ? menu.querySelectorAll("[data-fetch]") : []) {
+          const extra = node.getAttribute && node.getAttribute("data-fetch");
+          if (extra && extra !== menuUrl) await request(extra);
+        }
+      }
+      message(targets.has(menuUrl) ? "UI-BOOT: values refreshed; read-only setup" : "Static view: browser refresh unavailable");
     } catch (error) { fallback(error, "Refresh"); }
   }
   async function navigate(id) {
@@ -2502,20 +2464,6 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
       }
       const button = doc.getElementById("refresh");
       if (button) button.addEventListener("click", refresh);
-      const winOpen = doc.getElementById("win-open");
-      if (winOpen) winOpen.addEventListener("click", (event) => { event.preventDefault(); setWindowOpen(true); });
-      const winClose = doc.getElementById("bios-window-0-close");
-      if (winClose) winClose.addEventListener("click", (event) => { event.preventDefault(); setWindowOpen(false); });
-      for (const node of doc.querySelectorAll("[data-tab-action]")) {
-        node.addEventListener("click", (event) => {
-          event.preventDefault();
-          const action = node.getAttribute("data-tab-action");
-          const slot = Number(node.getAttribute("data-tab"));
-          if (action === "new") newBrowserTab();
-          else if (action === "select") selectBrowserTab(slot);
-          else if (action === "close") closeBrowserTab(slot);
-        });
-      }
       ui.addEventListener("keydown", handleKey);
       const workerButton = doc.getElementById("worker-check");
       workerButton?.addEventListener("click", async () => {
@@ -2528,6 +2476,7 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
       });
       doc.defaultView?.addEventListener("pagehide", () => { computePool?.terminate(); computePool = undefined; }, { once: true });
       show(selected);
+      paintChrome();
       const libwasmReady = loadLibwasm();
       const wasmUrl = ui.getAttribute("data-wasm-url");
       if (wasmUrl) {
@@ -2552,7 +2501,7 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
         }
       }
       await libwasmReady;
-      await refresh();
+      await navigate(selected);
       async function loadLibwasm() {
         const libwasmUrl = ui.getAttribute("data-libwasm-url");
         const libwasmRoot = doc.getElementById("libwasm-root");

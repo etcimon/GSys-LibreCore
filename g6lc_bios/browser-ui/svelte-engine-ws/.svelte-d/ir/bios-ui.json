@@ -15,74 +15,6 @@
           "url": "/bios/menu/main"
         },
         {
-          "kind": "fetch",
-          "url": "/bios/menu/cpu"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/memory"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/uncore"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/devices"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/boot"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/menu/settings"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/clocks"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/bootloader"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/display"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/settings"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/settings/usb"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/usb/ls"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/files"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/files/fat32"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/files/ntfs"
-        },
-        {
-          "kind": "fetch",
-          "url": "/bios/files/ext4"
-        },
-        {
-          "kind": "holyc",
-          "line": "Menu(\"main\")"
-        },
-        {
           "kind": "register",
           "path": "/bios/custom",
           "method": "POST"
@@ -159,183 +91,23 @@
         },
         {
           "kind": "text",
+          "id": "bios-nav",
+          "value": ""
+        },
+        {
+          "kind": "text",
           "id": "hw-nat-status",
           "value": ""
         },
         {
           "kind": "text",
-          "id": "bios-nav",
-          "value": "Main CPU Memory Uncore Devices Boot Settings"
-        },
-        {
-          "kind": "text",
           "id": "read-only-note",
-          "value": "Read-only BoardSpec view. Editing, settings import, and flashing are unavailable here."
+          "value": "Read-only BoardSpec setup. F10 refreshes values. Editing and flash are unavailable here."
         },
         {
           "kind": "text",
           "id": "refresh",
           "value": "Refresh values"
-        },
-        {
-          "kind": "text",
-          "id": "win-open",
-          "value": "Open browser"
-        },
-        {
-          "kind": "text",
-          "id": "bios-window-0",
-          "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "bios-window-0-titlebar",
-          "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "bios-window-0-title",
-          "value": "browser"
-        },
-        {
-          "kind": "text",
-          "id": "bios-window-0-close",
-          "value": "Close"
-        },
-        {
-          "kind": "text",
-          "id": "bios-window-0-tabs",
-          "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-0",
-          "value": "blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-0-close",
-          "value": "x"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-1",
-          "value": "blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-1-close",
-          "value": "x"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-2",
-          "value": "blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-2-close",
-          "value": "x"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-3",
-          "value": "blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-3-close",
-          "value": "x"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-4",
-          "value": "blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-4-close",
-          "value": "x"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-5",
-          "value": "blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-5-close",
-          "value": "x"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-6",
-          "value": "blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-6-close",
-          "value": "x"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-7",
-          "value": "blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-7-close",
-          "value": "x"
-        },
-        {
-          "kind": "text",
-          "id": "bios-tab-new",
-          "value": "New tab"
-        },
-        {
-          "kind": "text",
-          "id": "bios-window-0-stage",
-          "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "bios-session-0",
-          "value": "about:blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-session-1",
-          "value": "about:blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-session-2",
-          "value": "about:blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-session-3",
-          "value": "about:blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-session-4",
-          "value": "about:blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-session-5",
-          "value": "about:blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-session-6",
-          "value": "about:blank"
-        },
-        {
-          "kind": "text",
-          "id": "bios-session-7",
-          "value": "about:blank"
         },
         {
           "kind": "text",
@@ -450,161 +222,41 @@
         {
           "kind": "text",
           "id": "bios-hint",
-          "value": "ArrowLeft/ArrowRight Select tab   Home/End First/Last   F10 Refresh (not save)   Read-only BoardSpec view"
+          "value": "ArrowLeft/ArrowRight Select tab   Home/End First/Last   F10 Refresh (not save)   Esc stays in setup"
         },
         {
           "kind": "visible",
-          "id": "bios-window-0",
+          "id": "bios-nav",
           "on": false
         },
         {
           "kind": "visible",
-          "id": "bios-window-0-titlebar",
+          "id": "menu-cpu",
           "on": false
         },
         {
           "kind": "visible",
-          "id": "bios-window-0-title",
+          "id": "menu-memory",
           "on": false
         },
         {
           "kind": "visible",
-          "id": "bios-window-0-close",
+          "id": "menu-uncore",
           "on": false
         },
         {
           "kind": "visible",
-          "id": "bios-window-0-tabs",
+          "id": "menu-devices",
           "on": false
         },
         {
           "kind": "visible",
-          "id": "bios-tab-0",
+          "id": "menu-boot",
           "on": false
         },
         {
           "kind": "visible",
-          "id": "bios-tab-0-close",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-1",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-1-close",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-2",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-2-close",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-3",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-3-close",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-4",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-4-close",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-5",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-5-close",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-6",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-6-close",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-7",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-7-close",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-tab-new",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-window-0-stage",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-session-0",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-session-1",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-session-2",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-session-3",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-session-4",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-session-5",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-session-6",
-          "on": false
-        },
-        {
-          "kind": "visible",
-          "id": "bios-session-7",
+          "id": "menu-settings",
           "on": false
         }
       ]
@@ -663,6 +315,11 @@
           "id": "store-status",
           "value": "",
           "bind": "rows"
+        },
+        {
+          "kind": "visible",
+          "id": "store",
+          "on": false
         }
       ]
     }

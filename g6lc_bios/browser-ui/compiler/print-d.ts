@@ -70,16 +70,15 @@ export function printModule(file: SvelteFile, children: string[] = []): string {
 export function printApp(files: SvelteFile[]): string {
   validateDProject(files);
   const extras = files.filter((f) => structName(f) !== "App");
-  // Store.svelte is flattened into App.ready (ops + markup), not a Spa @child.
-  // Other extras stay @child — flattening them would duplicate markup.
-  const storeExtras = extras.filter((f) => structName(f) === "Store");
-  const kids = extras.filter((f) => structName(f) !== "Store").map((f) => structName(f));
+  // Flatten every extra into App.ready() (markup + ops). Empty @child
+  // NodeDef shells would drop the DOM the BIOS raster paints. Do not
+  // also keep that markup in App.svelte — flattening would then duplicate.
   const app = files.find((f) => structName(f) === "App")!;
   // `ready` keeps libwasm `Spa` off the JS router: without it _start calls
   // router().navigateTo(document().location()…), which needs browser-only
   // Object_Getter imports the g6b cell does not provide.
-  const readyBody = printReady(app, storeExtras);
-  const body = printModule(app, kids).replace(
+  const readyBody = printReady(app, extras);
+  const body = printModule(app, []).replace(
     "  void onMount() { }",
     "  void onMount() { }\n  enum g6bStaticDom = true;\n" + readyBody,
   );
@@ -109,6 +108,9 @@ export function printReady(file: SvelteFile, extras: SvelteFile[] = []): string 
       allOps.filter((o): o is PgliteOp => o.kind === "pglite" && !!o.bind).map((o) => o.bind!),
     ),
     bindTargetIds,
+    visible: new Map(
+      allOps.filter((o) => o.kind === "visible").map((o) => [o.id, o.on] as [string, boolean]),
+    ),
   };
   if (roots[0]) collectHoistedHandles(roots[0], ctx);
   for (const er of extraRoots) {
@@ -174,6 +176,7 @@ type DTreeContext = {
   tbody: Map<string, string>;
   binds: Set<string>;
   bindTargetIds: Set<string>;
+  visible: Map<string, boolean>;
 };
 
 function dVar(id: string | undefined, ctx: DTreeContext): string {
@@ -260,6 +263,8 @@ function printDNode(node: MarkupNode | string, parent: string, ctx: DTreeContext
   const pad = " ".repeat(indent);
   if (typeof node === "string") {
     if (bindInterp(node, ctx.binds)) return [];
+    // `{#if}` / `{:else}` / `{/if}` leak as text if the markup tree is not stripped.
+    if (/^\{\s*[#:/]/.test(node)) return [];
     return [`${pad}setProperty(${parent}, "innerText", "${escapeD(node)}");`];
   }
   const id = node.attrs.id;
@@ -272,6 +277,9 @@ function printDNode(node: MarkupNode | string, parent: string, ctx: DTreeContext
   for (const [name, value] of Object.entries(node.attrs)) {
     if (name.startsWith("on:")) continue;
     out.push(`${pad}setProperty(${varName}, "${escapeD(name)}", "${escapeD(value)}");`);
+  }
+  if (id && ctx.visible.get(id) === false && node.attrs.hidden === undefined) {
+    out.push(`${pad}setProperty(${varName}, "hidden", "true");`);
   }
   for (const c of node.children) {
     out.push(...printDNode(c, varName, ctx, indent));

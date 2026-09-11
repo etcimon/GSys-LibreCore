@@ -178,9 +178,12 @@ export function projectHtml(files: SvelteFile[]): string {
 
   const render = (node: PreviewNode, parentHidden: boolean): string => {
     const id = node.attrs.get("id");
-    let hidden = parentHidden;
-    if (id && visible.has(id) && !visible.get(id)) {
-      hidden = true;
+    // Only the element that owns the visibility op (or a source `hidden`)
+    // gets the attribute. Descendants stay unadorned so g6b-ui tbody/row
+    // injection still matches, and CSS `[hidden]` on the ancestor hides them.
+    let hidden = node.attrs.has("hidden");
+    if (id && visible.has(id)) {
+      hidden = !visible.get(id);
     }
     if (hidden && !node.attrs.has("hidden")) node.attrs.set("hidden", "");
     if (!hidden && node.attrs.has("hidden")) node.attrs.delete("hidden");

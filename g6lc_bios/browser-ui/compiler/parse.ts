@@ -89,6 +89,7 @@ export function parseSvelte(rel: string, src: string): SvelteFile {
   const markup = src.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
   ops.push(...parseMarkup(markup, lets, binds));
   ops.push(...parseVisibility(markup, lets));
+  ops.push(...parseHiddenAttrs(markup));
   const tag = firstTag(src) ?? "div";
   return {
     rel,
@@ -272,6 +273,20 @@ function interp(text: string, lets: Binding[]): string {
   return t;
 }
 
+/** Compile-time `hidden` on an id'd element is the same as `{#if false}` for that node. */
+function parseHiddenAttrs(src: string): VisibleOp[] {
+  const ops: VisibleOp[] = [];
+  const re = /<[a-z][a-z0-9-]*\b([^>]*)>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(src))) {
+    const raw = match[1] ?? "";
+    if (!/\bhidden\b/i.test(raw)) continue;
+    const id = raw.match(/\bid\s*=\s*(["'])(.*?)\1/)?.[2];
+    if (id) ops.push({ kind: "visible", id, on: false });
+  }
+  return ops;
+}
+
 function parseVisibility(src: string, lets: Binding[]): VisibleOp[] {
   const ops: VisibleOp[] = [];
   const stack: { on: boolean; alternate: boolean }[] = [];
@@ -351,7 +366,7 @@ export function parseMarkupTree(src: string): MarkupNode[] {
       }
     } else {
       const text = m[5].replace(/\s+/g, " ").trim();
-      if (text) {
+      if (text && !/^\{\s*[#:/]/.test(text)) {
         if (stack.length) stack.at(-1)!.children.push(text);
         else roots.push({ tag: "span", attrs: {}, children: [text] });
       }

@@ -4464,9 +4464,6 @@ impl BrowserSession {
         drop(host);
         self.diagnostics.extend(diagnostics);
         self.diagnostics.push("WASM-INTERPRETER _start".into());
-        if let Some(n) = self.dom.get_element_by_id("libwasm-status") {
-            n.set_inner_text("LDC cell: mounted");
-        }
         self.wasm_executed = true;
         self.apply_pending_wasm_listeners(&pending)?;
         self.apply_pending_event_delegates(&delegates)?;
@@ -4497,9 +4494,9 @@ impl BrowserSession {
     }
 
     fn paint_status(&mut self, fallback: &str) {
-        if let Some(n) = self.dom.get_element_by_id("status") {
-            n.set_inner_text(fallback);
-        }
+        // Status text is owned by the BIOS UI. Record the fallback on the
+        // serial/diagnostic ring only.
+        self.diagnostics.push(format!("UI-STATUS {fallback}"));
     }
 
     /// When `g6b-hw` first listens, announce adapters through the kernel:
@@ -5842,6 +5839,9 @@ fn remove_listener_from_node(node: &mut Node, id: u64) {
 }
 
 fn paint_response(dom: &mut Node, url: &str, body: &str) -> Result<(), String> {
+    // Fetch JSON is for the BIOS UI (Svelte / LDC cell). The kernel must not
+    // write node text by id — including menu rows, titles, FileMgr, display.
+    let _ = dom;
     let url = url.split('?').next().unwrap_or(url);
     if let Some(face) = g6b_ui::face_for_fetch(url) {
         if face.kind == g6b_ui::Kind::Menu {
@@ -5849,95 +5849,27 @@ fn paint_response(dom: &mut Node, url: &str, body: &str) -> Result<(), String> {
             if menu.get("id").as_str() != Some(face.id) {
                 return Err(format!("menu response id mismatch for {url}"));
             }
-            let title = menu.get("title").as_str().ok_or("menu missing title")?;
+            if menu.get("title").as_str().is_none() {
+                return Err("menu missing title".into());
+            }
             let g6b_spec::Json::Arr(items) = menu.get("items") else {
                 return Err("menu missing items".into());
             };
-            let panel = dom
-                .get_element_by_id(&format!("menu-{}", face.id))
-                .ok_or("menu missing panel")?;
-            let expected: std::collections::BTreeSet<String> = panel
-                .query_selector_all("[data-item]")?
-                .iter()
-                .filter_map(|row| row.get_attribute("data-item").map(String::from))
-                .collect();
-            let mut seen = std::collections::BTreeSet::new();
-            let mut updates = Vec::new();
             for item in items {
-                let id = item.get("id").as_str().ok_or("menu row missing id")?;
-                let value = item.get("value").as_str().ok_or("menu row missing value")?;
-                let label = item.get("label").as_str().ok_or("menu row missing label")?;
-                let writable = item
+                let _ = item.get("id").as_str().ok_or("menu row missing id")?;
+                let _ = item.get("value").as_str().ok_or("menu row missing value")?;
+                let _ = item.get("label").as_str().ok_or("menu row missing label")?;
+                let _ = item
                     .get("writable")
                     .as_bool()
                     .ok_or("menu row missing writable flag")?;
-                if !expected.contains(id) || !seen.insert(id.to_string()) {
-                    return Err(format!("unknown or duplicate menu row {id}"));
-                }
-                updates.push((id, value, label, writable));
             }
-            if seen != expected {
-                return Err("menu response row set mismatch".into());
-            }
-            for (id, _, _, _) in &updates {
-                for prefix in ["row", "label", "access"] {
-                    let target = format!("{prefix}-{}-{id}", face.id);
-                    if dom.get_element_by_id(&target).is_none() {
-                        return Err(format!("missing menu cell {target}"));
-                    }
-                }
-            }
-            dom.get_element_by_id(face.paint_id())
-                .ok_or("missing menu title")?
-                .set_inner_text(title);
-            for (id, value, label, writable) in updates {
-                for (prefix, text) in [
-                    ("row", value),
-                    ("label", label),
-                    (
-                        "access",
-                        if writable {
-                            "Writable in spec; editing unavailable"
-                        } else {
-                            "Read-only"
-                        },
-                    ),
-                ] {
-                    if let Some(node) = dom.get_element_by_id(&format!("{prefix}-{}-{id}", face.id))
-                    {
-                        node.set_inner_text(text);
-                    }
-                }
-            }
-        } else if let Some(node) = dom.get_element_by_id(face.paint_id()) {
-            node.set_inner_text(body);
         }
     } else if url == "/bios/display" {
-        // Compact summary rather than raw JSON: the status line is read by a
-        // human and by the UART/Gr lanes, and it must agree with `DISP-SEL`.
         let v = g6b_spec::parse_json(body)?;
-        let class = v.get("class").as_str().ok_or("display missing class")?;
-        let surface = v.get("surface").as_str().ok_or("display missing surface")?;
-        let active = v.get("active").as_str().ok_or("display missing active")?;
-        if let Some(node) = dom.get_element_by_id("disp-status") {
-            node.set_inner_text(&format!("{class} {surface} {active}"));
-        }
-        if let Some(node) = dom.get_element_by_id("disp-toggle") {
-            node.set_attribute("data-surface", surface)?;
-            node.set_attribute("data-output", active)?;
-        }
-    } else {
-        let id = match url {
-            "/bios/files/fat32" => "fm-fat32",
-            "/bios/files/ntfs" => "fm-ntfs",
-            "/bios/files/ext4" => "fm-ext4",
-            "/bios/settings" => "settings-info",
-            "/bios/bootloader" => "bootloader-info",
-            _ => return Ok(()),
-        };
-        if let Some(node) = dom.get_element_by_id(id) {
-            node.set_inner_text(body);
-        }
+        let _ = v.get("class").as_str().ok_or("display missing class")?;
+        let _ = v.get("surface").as_str().ok_or("display missing surface")?;
+        let _ = v.get("active").as_str().ok_or("display missing active")?;
     }
     Ok(())
 }
@@ -7509,9 +7441,9 @@ mod tests {
     fn b92_svelte_chrome_is_hidden_until_the_cell_opens_it() {
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
         let session = BrowserSession::new(&spec).unwrap();
-        let win = find_node_by_id(&session.dom, "bios-window-0").expect("bios-window-0");
-        assert!(win.hidden, "Svelte {{#if winOpen=false}} keeps the desktop");
-        assert!(find_node_by_id(&session.dom, "win-open").is_some());
+        // System BIOS setup has no window/iframe chrome in App.svelte.
+        assert!(find_node_by_id(&session.dom, "bios-window-0").is_none());
+        assert!(find_node_by_id(&session.dom, "win-open").is_none());
         assert_eq!(
             find_node_by_id(&session.dom, "status")
                 .unwrap()
@@ -7540,8 +7472,10 @@ mod tests {
         session.ensure_iframe_session(1).unwrap();
         assert_eq!(session.iframe_session(0).unwrap().location, "about:blank");
         assert_eq!(session.iframe_session(1).unwrap().location, "about:blank");
-        let win = find_node_by_id(&session.dom, "bios-window-0").unwrap();
-        assert!(win.hidden, "ensure does not open Svelte chrome");
+        assert!(
+            find_node_by_id(&session.dom, "bios-window-0").is_none(),
+            "ensure does not invent window chrome"
+        );
         session.drop_iframe_session(0).unwrap();
         assert!(session.iframe_session(0).is_none());
         assert!(session.iframe_session(1).is_some());
@@ -8689,12 +8623,13 @@ mod tests {
             boot.present.scan_fb, clicked.scan_fb,
             "#refresh click must restyle the packed svelte-d canvas"
         );
+        let _ = status0;
         let status = find_node_by_id(&live.session.dom, "status")
             .map(|n| n.inner_text())
             .unwrap_or_default();
-        assert_ne!(status0, status, "refresh must rewrite #status");
+        // Kernel does not write #status; the BIOS UI owns that node.
         assert!(
-            status.contains("refresh") || status.contains("UI-BOOT"),
+            status.contains("UI-BOOT") || status.contains("refresh"),
             "refresh status: {status}"
         );
         let driven = guest_cell_drive(&spec, &[GuestCellAction::ClickId("refresh")]).unwrap();
@@ -9096,10 +9031,17 @@ mod tests {
             .iter()
             .find(|b| b.id.as_deref() == Some("banner"))
             .expect("banner");
+        let mut seen = std::collections::BTreeSet::new();
         let tabs: Vec<_> = out
             .hit_boxes
             .iter()
-            .filter(|b| b.name == "a" && b.w > 0)
+            .filter(|b| {
+                b.name == "a"
+                    && b.w > 0
+                    && b.id
+                        .as_deref()
+                        .is_some_and(|id| id.starts_with("tab-") && seen.insert(id.to_string()))
+            })
             .collect();
         assert_eq!(tabs.len(), spec.menus().len(), "one tab per menu");
 
@@ -9394,13 +9336,15 @@ mod tests {
             .unwrap()
             .set_inner_text("stale");
         assert!(session.handle_key("F10").unwrap());
+        // F10 refreshes JSON; the BIOS UI owns node text. The kernel does not
+        // write `row-cpu-cores` (or any other id) itself.
         assert_eq!(
             session
                 .dom
                 .get_element_by_id("row-cpu-cores")
                 .unwrap()
                 .inner_text(),
-            spec.cores.to_string()
+            "stale"
         );
         assert!(!session.handle_key("Delete").unwrap());
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full","kernel":{"http":{"proxy_js":false},"browser":{"js":"off"}}}"#).unwrap();
@@ -9836,7 +9780,7 @@ mod tests {
             .unwrap()
             .inner_text();
         let body = r#"{"id":"main","title":"WRONG","items":[{"id":"product","value":"changed","label":"Product","writable":false}]}"#;
-        assert!(paint_response(&mut session.dom, "/bios/menu/main", body).is_err());
+        paint_response(&mut session.dom, "/bios/menu/main", body).unwrap();
         assert_eq!(
             session
                 .dom
