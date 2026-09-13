@@ -10,6 +10,7 @@ mod asyncify;
 mod binary;
 mod browser;
 mod interp;
+mod jcode;
 mod jit;
 mod json;
 mod objects;
@@ -31,6 +32,18 @@ pub use interp::{
     export_func, is_unhandled_d_abort, run, run_start, run_with_fuel, run_with_fuel_mut,
     table_funcref, DomHost, GuestFn, Host, Ldexec, LdexecInit, DEFAULT_FUEL, MAX_CALL_DEPTH,
     MAX_FUEL,
+};
+pub use jcode::{
+    cell_bytes as jcode_cell_bytes, data_offset as jcode_data_offset, encode as jcode_encode,
+    install_guest, test_module as jcode_test_module, EXT_AWAIT, EXT_CATCH, EXT_FETCH, EXT_LOG,
+    EXT_SET_TEXT, EXT_SET_VISIBLE, EXT_THROW, FHDR_BYTES as JCODE_FHDR_BYTES, FHDR_F_IMPORT,
+    HDR_BYTES as JCODE_HDR_BYTES, JIT_STK_BYTES, MAGIC as JCODE_MAGIC, MAX_JIT_CODE_BYTES,
+    MAX_JIT_FUNCS, MAX_JIT_GLOBALS, MAX_JIT_LOCALS, MAX_JIT_MEM_PAGES, MAX_JIT_RECORDS,
+    OFF_DATA_LEN, OFF_ENTRY, OFF_GLOB_LEN, OFF_MEM_PAGES, OFF_NFUNCS, OFF_NIMPORTS, OFF_NRECORDS,
+    REC_BYTES as JCODE_REC_BYTES, R_CALL, R_CMP, R_CONST, R_DROP, R_EXT, R_GGET, R_GSET, R_I32ALU,
+    R_I32DIV, R_I32ROT, R_I64ALU, R_I64DIV, R_I64ROT, R_JMP, R_JNZ, R_JZ, R_LGET, R_LOAD, R_LSET,
+    R_LTEE, R_MEMGROW, R_MEMSIZE, R_NOP, R_RET, R_SELECT, R_STORE, R_TRAP, TRAP_BADFUNC, TRAP_DIV0,
+    TRAP_EXT, TRAP_FUEL, TRAP_OOB, TRAP_STK, TRAP_UNREACH, TRAP_UNSUP, TRAP_XLATE,
 };
 pub use jit::{
     data_image, install_start, jit_add_i32, jit_riscv, start_ops, MAX_JIT_INSTRUCTIONS,
@@ -256,7 +269,8 @@ mod tests {
         assert!(live.iter().any(|s| s.contains("NodeDef")), "{live:?}");
         assert!(live.iter().any(|s| s.contains("Settings")), "{live:?}");
         assert!(BIOS_UI_JS.contains("UI-BOOT"));
-        assert!(BIOS_UI_JS.contains("kernel.holyc"));
+        assert!(!BIOS_UI_JS.contains("kernel.holyc"));
+        assert!(!BIOS_UI_JS.contains("kernel.register"));
         assert!(BIOS_UI_JS.contains("/bios/menu/settings"));
         let mut root = Node::elem("body");
         let mut p = Node::elem("p");
@@ -280,7 +294,7 @@ mod tests {
         run_start(&m, &mut SkipMissing { dom: &mut root }).unwrap();
         assert_eq!(
             root.get_element_by_id("status").unwrap().inner_text(),
-            "UI-BOOT"
+            "UI-BOOT: read-only setup"
         );
     }
 }

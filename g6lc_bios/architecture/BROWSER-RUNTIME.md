@@ -26,6 +26,17 @@ BrowserSession  (UI hart / host UI thread)
         (GPU surface at the output's own geometry; never -netdev)
 ```
 
+## Verification boundary (2026-09-11)
+
+Real QEMU runs the emitted S-mode `WasmUi`/`start_ops` glyph face. The live `BrowserSession` remains a **host** engine; `WebFeed` connects it to the Rust execution model, not to a native QEMU browser runtime. The agreed current pass verifies UI and autoboot independently, not an in-guest web engine.
+
+- `tools/qemu_web_autoboot.sh` captures `picker.{ppm,png}` before input and `screen.{ppm,png}` after `AUTOBOOT-UI`; QMP errors, absent captures, unchanged frames, and blank scanout fail. Use the g6lc_qemu-built binary via `QEMU=...`. Default `up` wraps to the last BIOS UI entry, followed by Enter.
+- `fixtures/g6lc64-web-autoboot.json` is the full-profile 1920x1080 path; `g6lc64-web-autoboot-vga.json` is the full-profile 640x480 VGA-intent surface on virtio-gpu transport. Neither claims legacy PC VGA register support.
+- ELF emission defaults to **no external media**, not the modelled NTFS key. Explicit `--volume` media are still discovered and packed. The guest clears the picker row count before entering the UI face.
+- Host visual review: `cargo run -p g6b-cli -- ui-ppm32 --spec fixtures/g6lc64-web-autoboot.json --width 1280 --height 900 --click tab-cpu --key F10 --out out/cpu.ppm`. Repeat `--key`, `--click`, or `--hover` in command order on one persistent session. `tools/ppm2png.py` converts the result for inspection. These images are host-engine renderings, not QEMU screenshots.
+
+The rendering root is the D cell's actual `main`, with input paths remapped into that subtree. Static fallback HTML is used only before a cell mounts. Svelte declares data sources; the kernel/host adapters perform reads, and both adapters supply the same menu row-array ABI. No RTL, clocks, ISA, DTS, or hardware memory map changes are involved.
+
 ## Principle
 
 | What | Where it lives | What it is not |
@@ -115,8 +126,38 @@ on virtio-mmio slot 3 (PLIC irq 4) so source 3 stays the mailbox.
 `host_inp_tab_kick` writes `EV_ABS` then `BTN_LEFT` into the tablet
 eventq (`TabDrain` re-posts, no `INP_KQ`) so a VNC click activates the
 hinted tab.
+
+**Guest-side DOM raster lane (B111, exec-model verified).** `domt.rs`
+(`Purpose::UiDom`) is a *bounded* stand-in for the shipped engine — not
+the svelte-d cell. It keeps a `__dom` node arena (64 B records) plus a
+`__dom_str` text pool in BSS, and provides `DomtCreate`/`Append`/`Text`/
+`Style`/`Listen`/`Focus`/`Dirty`, a block-flow `DomtLayout`, and
+`DomtRaster`, which paints bg/glyph pixels **directly into `__scan_fb`**
+and records each painted node rect in `__ui_cap` (guest-asserted
+`WEB_PRESENT`). `VioPaint` then takes the `vp_web` path and TRANSFERs
+those dirty tiles — the guest owns the frame; host `inject_web_present`
+stays off, so `guest_dom_raster_fills_scan_fb`/`guest_dom_key_recolors_a_node`
+prove the guest produced the pixels. `DomtKey` drains `INP_KQ` and
+focus-dispatches `KEY_*` to the focused node's listener (`DomtDemo`
+recolors a row), and `trap_timer`'s `__dom` dirty check re-runs
+`DomtLayout`+`DomtRaster`, closing input→listener→mutation→repaint→present.
+
+**The shipped svelte-d cell now lands on this arena (B112, exec model).**
+`kernel.wasm.guest_jit` runs `jitr.rs`'s in-payload JIT, which translates the
+~204 KB LDC/libwasm cell and executes `_start` natively; its `env.*` imports
+route through `jit_ext_tab` to the `Lw*`/`Domt*` bridge. The bridge adapts
+libwasm's handle ABI (`handle = node_index + 1`, `createElement` = `NodeType`
+ordinal, `setProperty` len-before-ptr, `add_event_listener` resolving an
+element-**id** string via `LwFindId` over the `__dom_id` side-table) onto the
+fixed 64 B `__dom` records. Verified: the cell allocates 56 live nodes, sets
+47 element ids, registers the source's 8 `g6b_listen` listeners
+(id→node→`N_LEV`), and `DomtRaster` paints 279K px into `__scan_fb` with no
+`DomtBoot` demo fallback. This is the guest DOM lane — a bounded stand-in for
+the engine, not the full CSS cascade — and it is exec-model verified, not yet
+a QEMU screendump.
 Cell-owned `#refresh` is the same `click` listener as the tabs (`g6b_listen`);
 tablet ABS+`BTN_LEFT` on that hit box refreshes JSON like F10.
-Click/hover/arrows/F10/JS await run on that session. The LDC cell is still
-host-interpreted; `start_ops` is the VGA face. Windowing is **B92** later
-([`plan-iframe.md`](plan-iframe.md)).
+Click/hover/arrows/F10/JS await run on that session. The guest lane runs the
+cell's `_start` but does not yet re-enter it for listener dispatch
+(`listener=0` is the BIOS protocol); `start_ops` is the VGA face. Windowing
+is **B92** later ([`plan-iframe.md`](plan-iframe.md)).

@@ -25,6 +25,10 @@ pub struct Glyph {
     pub coverage: Vec<u8>,
     /// Advance width in pixels.
     pub advance: f32,
+    /// Codepoint this bitmap came from (after `rasterize_for`'s `?` fallback).
+    pub code: u32,
+    /// Size it was rasterized at — the display-list atlas key's other half.
+    pub px: f32,
 }
 
 /// Budgets for the BIOS font display unit.
@@ -94,6 +98,8 @@ impl BiosFont {
             min_y: metrics.ymin,
             coverage,
             advance: metrics.advance_width,
+            code: codepoint as u32,
+            px,
         })
     }
 
@@ -131,6 +137,8 @@ impl BiosFont {
             min_y: 0,
             coverage: Vec::new(),
             advance: px,
+            code: c as u32,
+            px,
         })
     }
 }
@@ -171,13 +179,20 @@ pub fn blit_glyph32(
     fg: g6b_gr::canvas32::Rgba,
 ) {
     let top = baseline_y - glyph.min_y - (glyph.height as i32 - 1);
-    canvas.blend_coverage(
+    canvas.blend_coverage_tagged(
         baseline_x + glyph.min_x,
         top,
         glyph.width,
         glyph.height,
         &glyph.coverage,
         fg,
+        g6b_gr::canvas32::DlGlyph {
+            code: glyph.code,
+            px_x8: (glyph.px * 8.0).round() as u16,
+            min_x: glyph.min_x as i16,
+            min_y: glyph.min_y as i16,
+            adv_x64: (glyph.advance * 64.0).round() as u16,
+        },
     );
 }
 

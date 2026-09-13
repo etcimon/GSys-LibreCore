@@ -80,6 +80,18 @@ export function parseSvelte(rel: string, src: string): SvelteFile {
   const script = extractScript(src);
   const lets = parseLets(script.body);
   const callOps = parseCalls(script.body);
+  const reads = new Set(callOps.filter((op) => op.kind === "fetch").map((op) => op.url));
+  const visit = (node: MarkupNode | string) => {
+    if (typeof node === "string") return;
+    const menu = node.attrs["data-menu"];
+    const url = node.attrs["data-fetch"] ?? (menu ? `/bios/menu/${menu}` : undefined);
+    if (url && !reads.has(url)) {
+      reads.add(url);
+      callOps.push({ kind: "fetch", url });
+    }
+    node.children.forEach(visit);
+  };
+  parseMarkupTree(src).forEach(visit);
   const binds = new Set(
     callOps
       .filter((o): o is PgliteOp => o.kind === "pglite" && !!o.bind)
@@ -339,7 +351,10 @@ const VOID_TAGS = new Set([
 ]);
 
 export function parseMarkupTree(src: string): MarkupNode[] {
-  const markup = src.replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "");
+  const markup = src
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, "")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, "");
   const roots: MarkupNode[] = [];
   const stack: MarkupNode[] = [];
   const tokenRe = /(<(\/?)([a-z][a-z0-9-]*)\b([^>]*)>)|([^<]+)/gi;

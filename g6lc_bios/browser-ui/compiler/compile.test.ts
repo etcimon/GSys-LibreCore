@@ -79,6 +79,24 @@ function testDocument(nodes: TestNode[]) {
 }
 
 describe("browser DOM and import ABI", () => {
+  test("declarative data sources use external read providers without component-side I/O", () => {
+    const source = '<main><section data-fetch="/bios/menu/main"><tbody id="menu-main-body"></tbody></section></main>';
+    const parsed = parseSvelte("src/App.svelte", source);
+    expect(parsed.ops).toContainEqual({ kind: "fetch", url: "/bios/menu/main" });
+    expect(printApp([parsed])).toContain('g6b_fetch("/bios/menu/main")');
+    const repeated = parseSvelte("src/App.svelte", source.replace("</main>", '<p data-fetch="/bios/menu/main"></p></main>'));
+    expect(repeated.ops.filter((op) => op.kind === "fetch")).toHaveLength(1);
+    const project = loadProject(join(root, "src"));
+    for (const file of project) {
+      expect(file.src).not.toMatch(/\b(?:fetchBios|fetch|holycEval|registerEndpoint|pglite\w+)\s*\(/);
+      expect(file.ops.every((op) => !["holyc", "register", "pglite"].includes(op.kind))).toBe(true);
+    }
+    const app = project.find((file) => file.rel === "src/App.svelte")!;
+    for (const menu of ["main", "cpu", "memory", "uncore", "devices", "boot", "settings"]) {
+      expect(app.ops).toContainEqual({ kind: "fetch", url: `/bios/menu/${menu}` });
+    }
+  });
+
   test("served adapter is native JavaScript without TypeScript or an injected kernel", () => {
     const adapter = readFileSync(join(root, "src/kernel.ts"), "utf8");
     expect(() => new Function(adapter.replace(/^export /gm, ""))()).not.toThrow();
@@ -796,7 +814,8 @@ describe("libwasm DOM kernel", () => {
     // the static setup tree (banner, tabs, section/table shells) below it.
     const imported = WebAssembly.Module.imports(new WebAssembly.Module(bytes)).map((i) => i.name).sort();
     expect(imported).toContain("createElement");
-    for (const name of ["fetch", "holyc", "register_endpoint"]) expect(imported).toContain(name);
+    expect(imported).toContain("fetch");
+    for (const name of ["holyc", "register_endpoint", "fetch_post"]) expect(imported).not.toContain(name);
     const { host, mount, original } = fixture({ store: true });
     const { instance } = await WebAssembly.instantiate(bytes, host.imports);
     host.bind(instance.exports.memory);
@@ -804,8 +823,10 @@ describe("libwasm DOM kernel", () => {
     // cell passed survived the host's fail-closed validation.
     (instance.exports._start as Function)((instance.exports.__heap_base as WebAssembly.Global).value);
     // nodeCount() excludes the staging root; the static tree now contains the
-    // full App.svelte chrome (banner, nav, sections, tables) not just a shell.
-    expect(host.nodeCount()).toBeGreaterThanOrEqual(80);
+    // full App.svelte chrome (banner, nav, sections, tables) not just a shell —
+    // 55 nodes: main + header + nav + toolbar + status rows + 7 menu sections
+    // + the store section + footer.
+    expect(host.nodeCount()).toBeGreaterThanOrEqual(55);
     host.commit();
     expect(mount.children.map((c: any) => c.tagName)).toEqual(["MAIN"]);
     // The static fallback is replaced only on a successful commit.
@@ -826,7 +847,8 @@ describe("libwasm DOM kernel", () => {
     const rows = [{ id: "x", label: "TestLabel", value: "TestValue", writable: true }];
     const fetchFn = async (url: string) => {
       if (!/^\/bios\//.test(url)) throw new Error("unexpected fetch: " + url);
-      return { ok: true, text: async () => JSON.stringify(rows) };
+      const menu = url.match(/^\/bios\/menu\/([a-z]+)$/)?.[1];
+      return { ok: true, text: async () => JSON.stringify(menu ? { id: menu, title: menu, items: rows } : { ok: true }) };
     };
     const context = createBrowserContext(doc as any, { contextId: "libwasm-test", biosStore: true, fetchFn });
     const host = createLibwasmHost(doc, mount, WebAssembly, { asyncify: true, fetchFn, context });
@@ -835,11 +857,17 @@ describe("libwasm DOM kernel", () => {
     const heap = (instance.exports.__heap_base as WebAssembly.Global).value;
     await host.start(instance, heap);
     host.commit();
-    // The static tree plus at least one menu row should contain the mock values.
-    expect(host.nodeCount()).toBeGreaterThan(82);
+    // The static tree plus the fetched rows: 55 chrome nodes and one
+    // tr + 2 td row per menu (7 menus × 3) = 76 with this fixture.
+    expect(host.nodeCount()).toBeGreaterThan(75);
     expect(mount.textContent).toContain("TestLabel");
     expect(mount.textContent).toContain("TestValue");
-    expect(mount.textContent).toContain("RW");
+    // Writable access is carried on the row's data-writable attribute; the
+    // session is read-only, so no "RW" affordance text ever appears.
+    const hasWritableRow = (n: TestNode): boolean =>
+      n.getAttribute("data-writable") === "true" || n.children.some(hasWritableRow);
+    expect(hasWritableRow(mount)).toBe(true);
+    expect(mount.textContent).not.toContain("RW");
   });
 
   test("optional LDC startup proceeds while an MVP kernel read is pending", async () => {
@@ -2089,20 +2117,20 @@ let st = await pgliteStat();
     expect(r.wasm[1]).toBe(0x61);
     expect(r.wasm[2]).toBe(0x73);
     expect(r.wasm[3]).toBe(0x6d);
-    expect(r.js).toContain('document.getElementById("status").innerText = "UI-BOOT"');
-    expect(r.js).toContain('fetch("/bios/menu")');
-    expect(r.js).toContain("kernel.holyc");
-    expect(r.js).toContain("kernel.register");
+    expect(r.js).toContain('document.getElementById("status").innerText = "UI-BOOT: read-only setup"');
+    expect(r.js).not.toContain('fetch("/bios/menu")');
+    expect(r.js).not.toContain("kernel.holyc");
+    expect(r.js).not.toContain("kernel.register");
     expect(r.wsFiles.some((p) => p.includes("src-d/app.d"))).toBe(true);
     expect(r.wsFiles.some((p) => p.includes("src-ts/jsExports.ts"))).toBe(true);
     expect(r.wsFiles.some((p) => p.includes(".svelte-d/manifest.json"))).toBe(true);
     expect(r.wsFiles.some((p) => p === "dub.sdl")).toBe(true);
     expect(r.wsFiles.some((p) => p.includes("src-d/app.d"))).toBe(true);
-    expect(r.js).toContain('fetch("/bios/menu")');
+    expect(r.js).not.toContain('fetch("/bios/menu")');
     expect(r.js).toContain('fetch("/bios/menu/main")');
-    expect(r.js).not.toContain('fetch("/bios/menu/cpu")');
+    expect(r.js).toContain('fetch("/bios/menu/cpu")');
     expect(r.js).toContain('fetch("/bios/store")');
-    expect(r.js).toContain('document.getElementById("store-title").innerText = "Store"');
+    expect(r.js).toContain('document.getElementById("store-title").innerText = "Session storage"');
     expect(r.js).not.toMatch(/\bpglite\s*\(/);
     const d = printApp(loadProject(join(root, "src")));
     const awaitAt = d.indexOf("libwasm_await__void");
@@ -2111,16 +2139,15 @@ let st = await pgliteStat();
     expect(catchAt).toBeGreaterThan(tryAt);
     expect(catchAt).toBeLessThan(awaitAt);
     expect(d.indexOf("try {", awaitAt)).toBeGreaterThan(awaitAt);
-    expect(d).toContain('g6b_fetch("/bios/menu")');
+    expect(d).not.toContain('g6b_fetch("/bios/menu")');
     expect(d).toContain('g6b_fetch("/bios/menu/main")');
-    expect(d).not.toContain('g6b_fetch("/bios/menu/cpu")');
+    expect(d).toContain('g6b_fetch("/bios/menu/cpu")');
     expect(d).toContain('g6b_fetch("/bios/store")');
-    expect(d).toContain('auto db = PgLite("memory://registry")');
-    expect(d).toContain("CREATE TABLE IF NOT EXISTS bios_ui");
-    expect(d).toContain("auto rows = db.queryAsync");
-    expect(d).toContain('setProperty(store_status, "innerText", JSON.stringify(rows))');
+    expect(d).not.toContain('auto db = PgLite(');
+    expect(d).not.toContain("CREATE TABLE");
+    expect(d).toContain('setProperty(store_status, "innerText", libwasm_await_value())');
     expect(projectHtml(loadProject(join(root, "src")))).toContain('id="store"');
-    expect(d).toContain('setProperty(bios_mark, "src", "/ui/g6lc.svg")');
+    expect(d).toContain('setProperty(bios_header, "id", "bios-header")');
     expect(d).toContain('g6b_listen("tab-cpu", "click")');
     expect(d).toContain('g6b_listen("refresh", "click")');
     expect(d).not.toContain('g6b_listen("win-open", "click")');

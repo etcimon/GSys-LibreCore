@@ -458,7 +458,8 @@ mod tests {
             "div { width: 10px; float: left; display: flex; gap: 4px; float: right; }",
         )
         .unwrap();
-        assert_eq!(missing, vec!["float", "gap"], "sorted and de-duplicated");
+        // `gap` landed with flexbox; `float` is still refused.
+        assert_eq!(missing, vec!["float"], "sorted and de-duplicated");
         // Supported declarations still land, so layout can be inspected.
         let style = crate::cascade(&sheet, &ElementRef::new("div"));
         assert_eq!(style.get("width"), Some("10px"));

@@ -4314,6 +4314,7 @@ pub struct BrowserSession {
     /// the `#disp-toggle` control or `DisplaySurface` in the HolyC lane.
     pub surface: g6b_spec::Surface,
     selected_menu: String,
+    field_focus: BTreeMap<String, usize>,
     /// B92 session pool (`g6b-iframe`). Window/tab chrome is Svelte.
     /// Kernel registers hooks and fulfills [`HostNeed`] GETs.
     frames: FrameEngine,
@@ -4338,9 +4339,62 @@ pub struct BrowserSession {
     pub hw: g6b_hw::HwSession,
 }
 
+pub fn install_boot_inventory(
+    spec: &BoardSpec,
+    router: &mut Router,
+    volumes: &DirVolumes,
+) -> Result<(), String> {
+    if !spec.kernel.http.enable {
+        return Ok(());
+    }
+    use g6b_spec::Json;
+    let response = router.fetch_get("/bios/menu/boot");
+    let mut menu = g6b_spec::parse_json(&response.body_str())?;
+    let Json::Obj(ref mut fields) = menu else {
+        return Err("boot menu is not an object".into());
+    };
+    let Some(Json::Arr(items)) = fields.get_mut("items") else {
+        return Err("boot menu has no items".into());
+    };
+    for volume in g6b_zealcli::VolumePort::volumes(volumes) {
+        let found = g6b_zealcli::detect::probe_port(volumes, &volume.id);
+        let mut row = BTreeMap::new();
+        row.insert("id".into(), Json::Str(format!("device-{}", volume.id)));
+        row.insert(
+            "label".into(),
+            Json::Str(format!("{} / {}", volume.id, found.name)),
+        );
+        row.insert(
+            "value".into(),
+            Json::Str(format!(
+                "[{}] {} | {}",
+                found.medium.as_str(),
+                volume.vendor,
+                found.evidence
+            )),
+        );
+        row.insert("writable".into(), Json::Bool(false));
+        row.insert("kind".into(), Json::Str("boot-device".into()));
+        items.push(Json::Obj(row));
+    }
+    router.insert(
+        "GET",
+        "/bios/menu/boot",
+        "bios",
+        g6b_spec::stringify_json(&menu),
+    );
+    Ok(())
+}
+
 impl BrowserSession {
     pub fn new(spec: &BoardSpec) -> Result<Self, String> {
-        Self::from_program(spec, load_program(spec)?)
+        Self::with_volumes(spec, DirVolumes::new())
+    }
+
+    pub fn with_volumes(spec: &BoardSpec, volumes: DirVolumes) -> Result<Self, String> {
+        let mut program = load_program(spec)?;
+        install_boot_inventory(spec, &mut program.router, &volumes)?;
+        Self::from_program(spec, program)
     }
 
     fn from_program(spec: &BoardSpec, program: Program) -> Result<Self, String> {
@@ -4359,6 +4413,7 @@ impl BrowserSession {
             wasm_ui: None,
             surface: g6b_spec::Surface::Vga,
             selected_menu: spec.kernel.start_menu.clone(),
+            field_focus: BTreeMap::new(),
             frames: {
                 let mut frames = FrameEngine::new();
                 if spec.kernel.usb.enable && spec.kernel.usb.key {
@@ -5215,6 +5270,39 @@ impl BrowserSession {
         })
     }
 
+    /// [`Self::paint_css_at`] with the `Canvas32` display-list recorder armed
+    /// — the `__web_dl` pack lane (`dl_pack`). The op vec is the paint log
+    /// `DlPaint` replays guest-side; the canvas is the pixel-exact reference
+    /// the packer's `TILEPX` relief diffs against.
+    pub fn paint_css_dl_at(
+        &mut self,
+        w: u32,
+        h: u32,
+    ) -> Result<
+        (
+            g6b_css::render32::Render32Output,
+            Vec<g6b_gr::canvas32::DlOp>,
+        ),
+        String,
+    > {
+        self.ensure_engine(w, h)?;
+        let mut engine = self.css.take().ok_or("css engine missing")?;
+        let targets = live_paint_targets(&self.dom);
+        let painted = engine.paint_nodes_dl(&targets);
+        self.css = Some(engine);
+        let (painted, ops) = painted?;
+        let mut hits = painted.hit_boxes.clone();
+        remap_hit_paths(&self.dom, &mut hits);
+        self.hit_boxes = hits.clone();
+        Ok((
+            g6b_css::render32::Render32Output {
+                canvas: painted.canvas,
+                hit_boxes: hits,
+            },
+            ops,
+        ))
+    }
+
     fn ensure_engine(&mut self, w: u32, h: u32) -> Result<(), String> {
         let w = w.max(320);
         let h = h.max(200);
@@ -5310,6 +5398,7 @@ impl BrowserSession {
         }
         self.selected_menu = id.into();
         self.paint_live_tabs(id)?;
+        self.focus_field(0)?;
         Ok(())
     }
 
@@ -5341,7 +5430,61 @@ impl BrowserSession {
         Ok(())
     }
 
+    fn focus_field(&mut self, delta: i32) -> Result<bool, String> {
+        fn collect(node: &Node, ids: &mut Vec<String>) {
+            if node.hidden {
+                return;
+            }
+            if node.get_attribute("data-field").is_some() {
+                if let Some(id) = &node.id {
+                    ids.push(id.clone());
+                }
+            }
+            for child in &node.children {
+                collect(child, ids);
+            }
+        }
+        let mut fields = Vec::new();
+        if let Some(menu) = find_node_by_id(
+            live_paint_root(&self.dom),
+            &format!("menu-{}", self.selected_menu),
+        ) {
+            collect(menu, &mut fields);
+        }
+        if fields.is_empty() {
+            return Ok(false);
+        }
+        let previous = self
+            .field_focus
+            .get(&self.selected_menu)
+            .copied()
+            .unwrap_or(0);
+        let selected = (previous as i32 + delta).rem_euclid(fields.len() as i32) as usize;
+        self.field_focus
+            .insert(self.selected_menu.clone(), selected);
+        for (index, id) in fields.iter().enumerate() {
+            each_id(&mut self.dom, id, &mut |field| {
+                let on = index == selected;
+                field.set_attribute(
+                    "class",
+                    if on {
+                        "bios-field bios-field-active"
+                    } else {
+                        "bios-field"
+                    },
+                )?;
+                field.set_attribute("tabindex", if on { "0" } else { "-1" })?;
+                field.set_attribute("aria-selected", if on { "true" } else { "false" })?;
+                Ok(())
+            })?;
+        }
+        Ok(true)
+    }
+
     pub fn handle_key(&mut self, key: &str) -> Result<bool, String> {
+        if matches!(key, "ArrowUp" | "ArrowDown" | "Tab") {
+            return self.focus_field(if key == "ArrowUp" { -1 } else { 1 });
+        }
         if key == "F10" {
             self.refresh()?;
             return Ok(true);
@@ -5826,6 +5969,14 @@ fn path_to_id(root: &Node, id: &str) -> Option<Vec<usize>> {
         None
     }
     if let Some(body) = find_body(root, &mut Vec::new()) {
+        if let Some(mut mount_path) = walk(body, "libwasm-root", &mut Vec::new()) {
+            if let Some(mount) = node_at(body, &mount_path) {
+                if let Some(path) = walk(mount, id, &mut Vec::new()) {
+                    mount_path.extend(path);
+                    return Some(mount_path);
+                }
+            }
+        }
         return walk(body, id, &mut Vec::new());
     }
     walk(root, id, &mut Vec::new())
@@ -6509,12 +6660,17 @@ fn collect_style_text(node: &Node, out: &mut String) {
 /// Visual root for `Engine::paint`: the LDC cell's `<main>` under
 /// `#libwasm-spa` when present, otherwise the document `<body>`.
 ///
-/// Only a **direct child** `<main>` of `#libwasm-spa` counts — the cell mounts
-/// under `#libwasm-root` and its rendered `<main id="bios-ui">` must not
-/// hijack the paint root from the static shell's `<main id="bios-ui">` that
-/// carries the chrome (banner, nav, tabs, status, refresh). The shell owns
-/// the chrome; the cell owns the menu sections inside its mount.
+/// The cell mounts under `#libwasm-root` and owns the complete Svelte chrome
+/// and menu rows. Prefer that live tree over the static shell so screenshots
+/// exercise the DOM produced by D/WASM, not the pre-populated HTML fallback.
+/// Before a cell mounts, the direct `<main>` child of `#libwasm-spa` remains
+/// the fallback; a document without that wrapper uses its `<body>`.
 fn live_paint_root(dom: &Node) -> &Node {
+    if let Some(cell) = find_node_by_id(dom, "libwasm-root")
+        .and_then(|mount| first_descendant_by_name(mount, "main"))
+    {
+        return cell;
+    }
     if let Some(spa) = find_node_by_id(dom, "libwasm-spa") {
         for c in &spa.children {
             if c.name.eq_ignore_ascii_case("main") {
@@ -6630,6 +6786,735 @@ pub enum GuestCellAction<'a> {
 /// Run the svelte-d LDC cell through [`KernelHost`] (same `Host` import set
 /// as the UI thread), drain a UI-hart tick (await / CSS / GLES2 `u_dom`),
 /// then pack scanout. Fails if the cell did not execute.
+/// `__web_pk` payload — the host-rendered `BrowserSession` `Canvas32` scene
+/// RLE-packed for the guest `WebBlit` decoder (record format:
+/// `g6b_asm::webp`). Rendered at `spec.default_output()` geometry so the
+/// guest blit lands 1:1 on the output `DispSel` picks.
+///
+/// `Ok(None)` when the packed-present lane is not live: no guest-JIT LDC
+/// cell, the bounded `test` cell, or no scanout backend the pack could land
+/// on. `Err` when the scene cannot stay under `WEB_PK_MAX_BYTES` — a build
+/// failure, never a silent text-face fallback.
+pub fn web_pk_pack(spec: &BoardSpec) -> Result<Option<Vec<u8>>, String> {
+    if !web_pk_lane(spec) {
+        return Ok(None);
+    }
+    let mut live = GuestCellLive::open(spec)?;
+    let out = spec.default_output();
+    let painted = live.session.paint_css_at(out.w, out.h)?;
+    // Flatten over the page navy — transparent pixels would otherwise flash
+    // white where the styled shell expects `DomtRaster`'s 0x00101620.
+    let x8r8 = painted.canvas.to_x8r8([0x10, 0x16, 0x20]);
+    let nodes = count_dom_nodes(&live.session.dom);
+    let pk = encode_web_pk(out.w, out.h, nodes, &x8r8);
+    if pk.len() > g6b_asm::webp::WEB_PK_MAX_BYTES {
+        return Err(format!(
+            "web pack {} exceeds WEB_PK_MAX_BYTES {}",
+            pk.len(),
+            g6b_asm::webp::WEB_PK_MAX_BYTES
+        ));
+    }
+    Ok(Some(pk))
+}
+
+/// The pack only makes sense where a guest-JIT LDC cell produced the scene
+/// *and* a scanout backend can present it: virtio-gpu/uncore directly (their
+/// `__scan_fb` + `__ui_cap` persist), or a pcie linear BAR when `__disp`
+/// exists to carry it (mux live ⇒ `__vio` allocated).
+fn web_pk_lane(spec: &BoardSpec) -> bool {
+    let scanout = spec.wants_virtio_gpu()
+        || spec.wants_disp_scan()
+        || (spec.wants_pci_scan()
+            && (spec.kernel.gr.enable || spec.kernel.proxy.enable || spec.wants_virtio_net()));
+    spec.kernel.wasm.guest_jit
+        && spec.kernel.wasm.jit_cell != "test"
+        && libwasm_lane(spec)
+        && scanout
+}
+
+/// RLE a row-major X8R8 pixel buffer into the `__web_pk` token stream. Runs
+/// of ≥4 identical words become `(count, value)` pairs; everything else goes
+/// verbatim behind a `LITERAL` tag (sign bit set). Tokens never cross a row
+/// boundary so the guest decoder can advance the destination pitch per row
+/// without tracking pixel positions, and a `0` word terminates the stream.
+fn encode_web_pk(w: u32, h: u32, nodes: u32, x8r8: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(x8r8.len() / 2);
+    out.extend_from_slice(&g6b_asm::webp::WEB_PK_MAGIC.to_le_bytes());
+    out.extend_from_slice(&w.to_le_bytes());
+    out.extend_from_slice(&h.to_le_bytes());
+    out.extend_from_slice(&nodes.to_le_bytes());
+    let words: Vec<u32> = x8r8
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    for row in words.chunks(w.max(1) as usize) {
+        let mut i = 0;
+        while i < row.len() {
+            let mut n = 1;
+            while i + n < row.len() && row[i + n] == row[i] {
+                n += 1;
+            }
+            if n >= 4 {
+                out.extend_from_slice(&(n as u32).to_le_bytes());
+                out.extend_from_slice(&row[i].to_le_bytes());
+                i += n;
+            } else {
+                // Literal: consume until a ≥4 run starts or the row ends.
+                let start = i;
+                let mut j = i;
+                while j < row.len() {
+                    let mut m = 1;
+                    while j + m < row.len() && row[j + m] == row[j] {
+                        m += 1;
+                    }
+                    if m >= 4 {
+                        break;
+                    }
+                    j += m;
+                }
+                out.extend_from_slice(&((j - start) as u32 | 0x8000_0000).to_le_bytes());
+                for word in &row[start..j] {
+                    out.extend_from_slice(&word.to_le_bytes());
+                }
+                i = j;
+            }
+        }
+    }
+    out.extend_from_slice(&0u32.to_le_bytes());
+    out
+}
+
+// ---------------------------------------------------------------------------
+// `__web_dl` pack — the display-list carry. The same live `BrowserSession`
+// paint as `__web_pk`, but shipped as the `DlPaint` op stream: fills/rounded
+// shapes/coverage blits replay guest-side, `TEXTREF` records re-render live
+// `__dom` text through the packed atlas, and `TILEPX` relief tiles carry the
+// final pixels for anything the op vocabulary cannot express (the host
+// replay+diff below is what makes that guarantee concrete).
+// ---------------------------------------------------------------------------
+
+/// Menu faces the pack carries as states (bounded; the picker writes
+/// `__dom+H_WST` with an index into this list — stage 3 wiring).
+const DL_MAX_STATES: usize = 12;
+/// `TEXTREF` records per pack (each id'd live-text element costs one).
+const DL_MAX_TREFS: usize = 24;
+/// Pixels the `TEXTREF` clear/inflate pad reaches beyond the element box —
+/// one em, covering glyph overhang of the packed text.
+fn tref_pad(size_x8: u32) -> i32 {
+    (size_x8 / 8).max(4) as i32
+}
+
+/// One recorded state before serialization.
+struct DlState {
+    name: String,
+    ops: Vec<g6b_gr::canvas32::DlOp>,
+    canvas: g6b_gr::canvas32::Canvas32,
+    hits: Vec<g6b_css::render::HitBox>,
+}
+
+/// An accepted `TEXTREF` (serialized fields; string offsets patched at emit).
+struct DlTrefOut {
+    clip: [i32; 4],
+    pen_x: i32,
+    base_y: i32,
+    max_w: i32,
+    size_x8: u32,
+    fg: g6b_gr::canvas32::Rgba,
+    bg_word: u32,
+    id: String,
+    text: String,
+}
+
+/// Atlas + table builder shared by every state's stream.
+#[derive(Default)]
+struct DlAtlas {
+    blobs: Vec<(u32, u32, Vec<u8>)>,
+    blob_index: std::collections::HashMap<u64, u32>,
+    sizes: Vec<u32>,
+    size_index: std::collections::HashMap<u32, u32>,
+    glyphs: Vec<(u32, u32, u32, i32, i32, u32)>, // code,size_idx,blob,mx,my,adv_x64
+    glyph_index: std::collections::HashMap<(u32, u32), u32>,
+    trefs: Vec<DlTrefOut>,
+}
+
+impl DlAtlas {
+    fn blob(&mut self, w: u32, h: u32, cov: &[u8]) -> u32 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut has = DefaultHasher::new();
+        w.hash(&mut has);
+        h.hash(&mut has);
+        cov.hash(&mut has);
+        let key = has.finish();
+        if let Some(&i) = self.blob_index.get(&key) {
+            return i;
+        }
+        let i = self.blobs.len() as u32;
+        self.blobs.push((w, h, cov.to_vec()));
+        self.blob_index.insert(key, i);
+        i
+    }
+
+    fn size(&mut self, px_x8: u32) -> u32 {
+        if let Some(&i) = self.size_index.get(&px_x8) {
+            return i;
+        }
+        let i = self.sizes.len() as u32;
+        self.sizes.push(px_x8);
+        self.size_index.insert(px_x8, i);
+        i
+    }
+
+    /// Glyph table entry for `(code, px_x8)` — rasterizes through `fonts` so
+    /// the packed coverage/metrics are exactly what `blit_glyph32` recorded.
+    fn glyph(&mut self, fonts: &g6b_css::FontSet, code: u32, px_x8: u32) -> Result<u32, String> {
+        let size_idx = self.size(px_x8);
+        if let Some(&i) = self.glyph_index.get(&(code, size_idx)) {
+            return Ok(i);
+        }
+        let ch = char::from_u32(code).unwrap_or('?');
+        let g = fonts
+            .resolve("default")
+            .rasterize_for(ch, px_x8 as f32 / 8.0);
+        let blob = if g.width == 0 || g.height == 0 || g.coverage.is_empty() {
+            u32::MAX // DL_BLOB_NONE — advance-only (space)
+        } else {
+            self.blob(g.width, g.height, &g.coverage)
+        };
+        let i = self.glyphs.len() as u32;
+        self.glyphs.push((
+            code,
+            size_idx,
+            blob,
+            g.min_x,
+            g.min_y,
+            (g.advance * 64.0).round() as u32,
+        ));
+        self.glyph_index.insert((code, size_idx), i);
+        Ok(i)
+    }
+}
+
+fn rgba_word(c: g6b_gr::canvas32::Rgba) -> u32 {
+    (u32::from(c[0]) << 24) | (u32::from(c[1]) << 16) | (u32::from(c[2]) << 8) | u32::from(c[3])
+}
+
+fn put_u32(out: &mut Vec<u8>, v: u32) {
+    out.extend_from_slice(&v.to_le_bytes());
+}
+
+/// `DlPaint`'s char walk over `text`, applied to `cvs` — used both to keep
+/// the host replay canvas faithful and to validate the `TREF` against the
+/// originally painted glyphs before it replaces them.
+#[allow(clippy::too_many_arguments)]
+fn dl_tref_render(
+    cvs: &mut g6b_gr::canvas32::Canvas32,
+    fonts: &g6b_css::FontSet,
+    clip: [i32; 4],
+    bg: g6b_gr::canvas32::Rgba,
+    pen_x: i32,
+    base_y: i32,
+    max_w: i32,
+    size_x8: u32,
+    fg: g6b_gr::canvas32::Rgba,
+    text: &str,
+) {
+    cvs.blend_rect(clip[0], clip[1], clip[2], clip[3], bg);
+    let font = fonts.resolve("default");
+    let px = size_x8 as f32 / 8.0;
+    let mut pen = (pen_x as i64) << 6;
+    for ch in text.chars() {
+        let g = font.rasterize_for(ch, px);
+        if g.width > 0 && g.height > 0 && !g.coverage.is_empty() {
+            let top = base_y - g.min_y - (g.height as i32 - 1);
+            cvs.blend_coverage(
+                (pen >> 6) as i32 + g.min_x,
+                top,
+                g.width,
+                g.height,
+                &g.coverage,
+                fg,
+            );
+        }
+        pen += (g.advance * 64.0).round() as i64;
+        if ((pen >> 6) as i32) - pen_x >= max_w {
+            break;
+        }
+    }
+}
+
+/// `DlOp` replay — the host half of `DlPaint` (same semantics, Rust speed).
+/// Tref handling needs the accepted-key set and the original canvas for the
+/// validate-or-defer decision, so this is a small driver, not a primitive.
+fn dl_state_stream(
+    state: &DlState,
+    fonts: &g6b_css::FontSet,
+    atlas: &mut DlAtlas,
+) -> Result<Vec<u8>, String> {
+    let (w, h) = (state.canvas.w as i32, state.canvas.h as i32);
+    let mut replay = g6b_gr::canvas32::Canvas32::new(state.canvas.w, state.canvas.h);
+    let mut stream: Vec<u8> = Vec::new();
+    let mut accepted: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for op in &state.ops {
+        match op {
+            g6b_gr::canvas32::DlOp::Fill {
+                x,
+                y,
+                w: ww,
+                h: hh,
+                c,
+            } => {
+                put_u32(&mut stream, g6b_asm::dlp::DLOP_FILL as u32);
+                for v in [*x, *y, *ww, *hh] {
+                    put_u32(&mut stream, v as u32);
+                }
+                put_u32(&mut stream, rgba_word(*c));
+                replay.blend_rect(*x, *y, *ww, *hh, *c);
+            }
+            g6b_gr::canvas32::DlOp::FillR {
+                x,
+                y,
+                w: ww,
+                h: hh,
+                r,
+                c,
+            } => {
+                put_u32(&mut stream, g6b_asm::dlp::DLOP_FILLR as u32);
+                for v in [*x, *y, *ww, *hh, *r] {
+                    put_u32(&mut stream, v as u32);
+                }
+                put_u32(&mut stream, rgba_word(*c));
+                replay.fill_rounded_rect(*x, *y, *ww, *hh, *r, *c);
+            }
+            g6b_gr::canvas32::DlOp::StrkR {
+                x,
+                y,
+                w: ww,
+                h: hh,
+                r,
+                bw,
+                c,
+            } => {
+                put_u32(&mut stream, g6b_asm::dlp::DLOP_STRKR as u32);
+                for v in [*x, *y, *ww, *hh, *r, *bw] {
+                    put_u32(&mut stream, v as u32);
+                }
+                put_u32(&mut stream, rgba_word(*c));
+                replay.stroke_rounded_rect(*x, *y, *ww, *hh, *r, *bw, *c);
+            }
+            g6b_gr::canvas32::DlOp::Cov {
+                x,
+                y,
+                w: gw,
+                h: gh,
+                cov,
+                c,
+                tref,
+                ..
+            } => {
+                if tref.is_some_and(|k| accepted.contains(&k)) {
+                    continue; // a live TREF covers this glyph op
+                }
+                let blob = atlas.blob(*gw, *gh, cov);
+                put_u32(&mut stream, g6b_asm::dlp::DLOP_COV as u32);
+                for v in [*x, *y, blob as i32] {
+                    put_u32(&mut stream, v as u32);
+                }
+                put_u32(&mut stream, rgba_word(*c));
+                replay.blend_coverage(*x, *y, *gw, *gh, cov, *c);
+            }
+            g6b_gr::canvas32::DlOp::Tref(meta) => {
+                // Inflated clear rect: one em past the content box covers the
+                // packed text's glyph overhang.
+                let pad = tref_pad(meta.size_x8);
+                let mut clip = [
+                    meta.cx - pad,
+                    meta.cy - pad,
+                    meta.cw + 2 * pad,
+                    meta.ch + 2 * pad,
+                ];
+                let x0 = clip[0].max(0);
+                let y0 = clip[1].max(0);
+                let x1 = (clip[0] + clip[2]).min(w);
+                let y1 = (clip[1] + clip[3]).min(h);
+                clip = [x0, y0, (x1 - x0).max(0), (y1 - y0).max(0)];
+                // Uniform ground? A live re-render can only erase to one colour.
+                let first = replay.get(clip[0], clip[1]);
+                let uniform = clip[2] > 0
+                    && clip[3] > 0
+                    && (clip[1]..clip[1] + clip[3]).all(|yy| {
+                        (clip[0]..clip[0] + clip[2]).all(|xx| replay.get(xx, yy) == first)
+                    });
+                if !uniform {
+                    continue; // marker dropped; the Cov run packs normally
+                }
+                let before = replay.clone();
+                dl_tref_render(
+                    &mut replay,
+                    fonts,
+                    clip,
+                    first,
+                    meta.pen_x,
+                    meta.base_y,
+                    meta.max_w,
+                    meta.size_x8,
+                    meta.fg,
+                    &meta.text,
+                );
+                // Pixel-exact for the packed text? Else frozen glyphs win.
+                let exact = (clip[1]..clip[1] + clip[3]).all(|yy| {
+                    (clip[0]..clip[0] + clip[2])
+                        .all(|xx| replay.get(xx, yy) == state.canvas.get(xx, yy))
+                });
+                if !exact {
+                    replay = before;
+                    continue;
+                }
+                let size_idx = atlas.size(meta.size_x8);
+                // Every char of the packed text needs a glyph-table entry.
+                for ch in meta.text.chars() {
+                    atlas.glyph(fonts, ch as u32, meta.size_x8)?;
+                }
+                atlas.glyph(fonts, ' ' as u32, meta.size_x8)?;
+                let tref_idx = atlas.trefs.len();
+                if tref_idx >= DL_MAX_TREFS {
+                    replay = before;
+                    continue;
+                }
+                accepted.insert(meta.key);
+                atlas.trefs.push(DlTrefOut {
+                    clip,
+                    pen_x: meta.pen_x,
+                    base_y: meta.base_y,
+                    max_w: meta.max_w,
+                    size_x8: size_idx,
+                    fg: meta.fg,
+                    bg_word: 0xFF00_0000
+                        | (u32::from(first[0]) << 16)
+                        | (u32::from(first[1]) << 8)
+                        | u32::from(first[2]),
+                    id: meta.id.clone(),
+                    text: meta.text.clone(),
+                });
+                put_u32(&mut stream, g6b_asm::dlp::DLOP_TREF as u32);
+                put_u32(&mut stream, tref_idx as u32);
+            }
+        }
+    }
+    // ---- TILEPX relief: replay-diff → final pixels for anything the op
+    // stream missed (shadow blur, image blits, direct set/blend calls).
+    let mut diffs: Vec<(i32, i32, u32)> = Vec::new(); // x,y,x8r8 word
+    for yy in 0..h {
+        for xx in 0..w {
+            let a = replay.get(xx, yy);
+            let b = state.canvas.get(xx, yy);
+            if a != b {
+                let word = 0xFF00_0000
+                    | (u32::from(b[0]) << 16)
+                    | (u32::from(b[1]) << 8)
+                    | u32::from(b[2]);
+                diffs.push((xx, yy, word));
+            }
+        }
+    }
+    // Row runs → tiles; merge consecutive rows with identical x-ranges.
+    let mut tiles: Vec<(i32, i32, i32, i32, Vec<u32>)> = Vec::new();
+    let mut i = 0;
+    while i < diffs.len() {
+        let (x0, y0, _) = diffs[i];
+        let mut x1 = x0;
+        let mut px = Vec::new();
+        while i < diffs.len() && diffs[i].1 == y0 && diffs[i].0 == x1 {
+            px.push(diffs[i].2);
+            x1 += 1;
+            i += 1;
+        }
+        // extend downward while the same x-range mismatches
+        let mut hgt = 1;
+        while i < diffs.len()
+            && diffs[i].1 == y0 + hgt
+            && diffs[i].0 == x0
+            && i + (x1 - x0) as usize <= diffs.len()
+            && (0..(x1 - x0) as usize)
+                .all(|k| diffs[i + k].0 == x0 + k as i32 && diffs[i + k].1 == y0 + hgt)
+        {
+            for k in 0..(x1 - x0) as usize {
+                px.push(diffs[i + k].2);
+            }
+            i += (x1 - x0) as usize;
+            hgt += 1;
+        }
+        tiles.push((x0, y0, x1 - x0, hgt, px));
+    }
+    for (x, y, tw, th, px) in tiles {
+        put_u32(&mut stream, g6b_asm::dlp::DLOP_TILEPX as u32);
+        for v in [x, y, tw, th] {
+            put_u32(&mut stream, v as u32);
+        }
+        stream.extend_from_slice(&encode_tilepx(tw, th, &px));
+    }
+    put_u32(&mut stream, g6b_asm::dlp::DLOP_END as u32);
+    Ok(stream)
+}
+
+/// RLE `w*h` X8R8 words, row-bounded, no terminator — the `TILEPX` body the
+/// guest decoder walks (`webp` token format minus the trailing 0).
+fn encode_tilepx(w: i32, h: i32, px: &[u32]) -> Vec<u8> {
+    debug_assert_eq!(px.len() as i32, w * h);
+    let mut out = Vec::new();
+    for row in px.chunks(w.max(1) as usize) {
+        let mut i = 0;
+        while i < row.len() {
+            let mut n = 1;
+            while i + n < row.len() && row[i + n] == row[i] {
+                n += 1;
+            }
+            if n >= 4 {
+                out.extend_from_slice(&(n as u32).to_le_bytes());
+                out.extend_from_slice(&row[i].to_le_bytes());
+                i += n;
+            } else {
+                let start = i;
+                let mut j = i;
+                while j < row.len() {
+                    let mut m = 1;
+                    while j + m < row.len() && row[j + m] == row[j] {
+                        m += 1;
+                    }
+                    if m >= 4 {
+                        break;
+                    }
+                    j += m;
+                }
+                out.extend_from_slice(&((j - start) as u32 | 0x8000_0000).to_le_bytes());
+                for word in &row[start..j] {
+                    out.extend_from_slice(&word.to_le_bytes());
+                }
+                i = j;
+            }
+        }
+    }
+    let _ = h;
+    out
+}
+
+/// Serialize atlas + states into the `__web_dl` image (format:
+/// `g6b_asm::dlp`'s module comment).
+fn encode_web_dl(
+    w: u32,
+    h: u32,
+    atlas: &DlAtlas,
+    states: &[(String, Vec<u8>)],
+    hits: &[g6b_css::render::HitBox],
+) -> Vec<u8> {
+    // String pool: ids + tref texts.
+    let mut strings: Vec<u8> = Vec::new();
+    let str_at = |s: &str, pool: &mut Vec<u8>| -> (u32, u32) {
+        let off = pool.len() as u32;
+        pool.extend_from_slice(s.as_bytes());
+        (off, s.len() as u32)
+    };
+    // We need absolute offsets, which depend on table sizes — lay out the
+    // blob in two passes.
+    let n_state = states.len() as u32;
+    let n_tref = atlas.trefs.len() as u32;
+    let n_size = atlas.sizes.len() as u32;
+    let n_glyph = atlas.glyphs.len() as u32;
+    let n_blob = atlas.blobs.len() as u32;
+    let n_hit = hits.len() as u32;
+    let hdr = g6b_asm::dlp::WEB_DL_HDR as u32;
+    let state_off = hdr;
+    let tref_off = state_off + n_state * g6b_asm::dlp::DL_STATE_REC as u32;
+    let size_off = tref_off + n_tref * g6b_asm::dlp::DL_TREF_REC as u32;
+    let glyph_off = size_off + n_size * 4;
+    let blobtab_off = glyph_off + n_glyph * g6b_asm::dlp::DL_GLYPH_REC as u32;
+    let hit_off = blobtab_off + n_blob * g6b_asm::dlp::DL_BLOB_REC as u32;
+    let str_off = hit_off + n_hit * g6b_asm::dlp::DL_HIT_REC as u32;
+    // Strings first (streams+blobs need their offsets known? no — only recs
+    // carry string offsets; the pools come after).
+    let mut tref_str: Vec<(u32, u32, u32, u32)> = Vec::new(); // id_off,id_len,txt_off,txt_len
+    for t in &atlas.trefs {
+        let (io, il) = str_at(&t.id, &mut strings);
+        let (to, tl) = str_at(&t.text, &mut strings);
+        tref_str.push((io, il, to, tl));
+    }
+    let mut hit_str: Vec<(u32, u32)> = Vec::new();
+    for hb in hits {
+        let (o, l) = str_at(hb.id.as_deref().unwrap_or(""), &mut strings);
+        hit_str.push((o, l));
+    }
+    let str_len = strings.len() as u32;
+    let ops_off = str_off + str_len;
+    let mut ops_at: Vec<(u32, u32)> = Vec::new();
+    let mut cursor = ops_off;
+    for (_, stream) in states {
+        ops_at.push((cursor, stream.len() as u32));
+        cursor += stream.len() as u32;
+    }
+    let blobdata_off = cursor;
+
+    let mut out =
+        Vec::with_capacity(cursor as usize + atlas.blobs.iter().map(|b| b.2.len()).sum::<usize>());
+    // ---- header
+    put_u32(&mut out, g6b_asm::dlp::WEB_DL_MAGIC);
+    put_u32(&mut out, w);
+    put_u32(&mut out, h);
+    put_u32(&mut out, n_state);
+    put_u32(&mut out, n_tref);
+    put_u32(&mut out, n_size);
+    put_u32(&mut out, n_glyph);
+    put_u32(&mut out, n_blob);
+    put_u32(&mut out, n_hit);
+    put_u32(&mut out, state_off);
+    put_u32(&mut out, tref_off);
+    put_u32(&mut out, size_off);
+    put_u32(&mut out, glyph_off);
+    put_u32(&mut out, blobtab_off);
+    put_u32(&mut out, hit_off);
+    put_u32(&mut out, str_off);
+    put_u32(&mut out, str_len);
+    put_u32(&mut out, blobdata_off);
+    // ---- state recs {name8, off, len}
+    for ((name, _), (off, len)) in states.iter().zip(&ops_at) {
+        let mut nb = [0u8; 8];
+        for (i, b) in name.as_bytes().iter().take(8).enumerate() {
+            nb[i] = *b;
+        }
+        out.extend_from_slice(&nb);
+        put_u32(&mut out, *off);
+        put_u32(&mut out, *len);
+    }
+    // ---- tref recs
+    for (t, (io, il, to, tl)) in atlas.trefs.iter().zip(&tref_str) {
+        for v in t.clip {
+            put_u32(&mut out, v as u32);
+        }
+        put_u32(&mut out, t.pen_x as u32);
+        put_u32(&mut out, t.base_y as u32);
+        put_u32(&mut out, t.max_w as u32);
+        put_u32(&mut out, t.size_x8); // already the size index
+        put_u32(&mut out, rgba_word(t.fg));
+        put_u32(&mut out, t.bg_word);
+        put_u32(&mut out, *io);
+        put_u32(&mut out, *il);
+        put_u32(&mut out, *to);
+        put_u32(&mut out, *tl);
+    }
+    // ---- sizes
+    for s in &atlas.sizes {
+        put_u32(&mut out, *s);
+    }
+    // ---- glyphs {code,size_idx,blob,mx,my,adv_x64}
+    for (code, si, blob, mx, my, adv) in &atlas.glyphs {
+        put_u32(&mut out, *code);
+        put_u32(&mut out, *si);
+        put_u32(&mut out, *blob);
+        put_u32(&mut out, *mx as u32);
+        put_u32(&mut out, *my as u32);
+        put_u32(&mut out, *adv);
+    }
+    // ---- blob table {off,w,h,len}
+    let mut bcursor = blobdata_off;
+    for (bw, bh, cov) in &atlas.blobs {
+        put_u32(&mut out, bcursor);
+        put_u32(&mut out, *bw);
+        put_u32(&mut out, *bh);
+        put_u32(&mut out, cov.len() as u32);
+        bcursor += cov.len() as u32;
+    }
+    // ---- hits {id_off,id_len,x,y,w,h}
+    for (hb, (o, l)) in hits.iter().zip(&hit_str) {
+        put_u32(&mut out, *o);
+        put_u32(&mut out, *l);
+        put_u32(&mut out, hb.x as u32);
+        put_u32(&mut out, hb.y as u32);
+        put_u32(&mut out, hb.w as u32);
+        put_u32(&mut out, hb.h as u32);
+    }
+    // ---- strings
+    out.extend_from_slice(&strings);
+    // ---- op streams
+    for (_, stream) in states {
+        out.extend_from_slice(stream);
+    }
+    // ---- blob data
+    for (_, _, cov) in &atlas.blobs {
+        out.extend_from_slice(cov);
+    }
+    out
+}
+
+/// `__web_dl` payload — the live `BrowserSession` scene packed as the
+/// `DlPaint` display list (per-menu states + atlas + `TEXTREF` + `TILEPX`
+/// relief). Same lane gate as [`web_pk_pack`]; `Err` on budget overflow —
+/// a build failure, never a silent text-face fallback.
+pub fn dl_pack(spec: &BoardSpec) -> Result<Option<Vec<u8>>, String> {
+    if !web_pk_lane(spec) {
+        return Ok(None);
+    }
+    let mut live = GuestCellLive::open(spec)?;
+    let out = spec.default_output();
+    let start = spec.kernel.start_menu.clone();
+    // State list: the boot menu first, then every other `menu-{id}` the DOM
+    // carries (bounded — the guest indexes this table through `H_WST`).
+    let mut names = vec![start.clone()];
+    for face in g6b_ui::MENUS {
+        if face.id != start
+            && find_node_by_id(&live.session.dom, &format!("menu-{}", face.id)).is_some()
+        {
+            names.push(face.id.to_string());
+        }
+    }
+    names.truncate(DL_MAX_STATES);
+    let fonts = g6b_css::FontSet::default_set().map_err(|e| format!("{e:?}"))?;
+    let mut atlas = DlAtlas::default();
+    let mut packed_states: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut first_hits: Vec<g6b_css::render::HitBox> = Vec::new();
+    for (i, name) in names.iter().enumerate() {
+        live.session.select_menu(name)?;
+        let (painted, ops) = live.session.paint_css_dl_at(out.w, out.h)?;
+        let state = DlState {
+            name: name.clone(),
+            ops,
+            canvas: painted.canvas,
+            hits: painted.hit_boxes,
+        };
+        if i == 0 {
+            first_hits = state
+                .hits
+                .iter()
+                .filter(|hb| hb.id.is_some())
+                .cloned()
+                .collect();
+        }
+        let stream = dl_state_stream(&state, &fonts, &mut atlas)?;
+        packed_states.push((state.name, stream));
+    }
+    let _ = live.session.select_menu(&start);
+    let dl = encode_web_dl(out.w, out.h, &atlas, &packed_states, &first_hits);
+    if dl.len() > g6b_asm::dlp::WEB_DL_MAX_BYTES {
+        return Err(format!(
+            "web display list {} exceeds WEB_DL_MAX_BYTES {}",
+            dl.len(),
+            g6b_asm::dlp::WEB_DL_MAX_BYTES
+        ));
+    }
+    Ok(Some(dl))
+}
+
+/// `__kget` payload — the `{url → body}` table the guest `KernelGet`/`LwFetch`
+/// resolve `env.fetch` against. Bodies come from `BoardSpec::kget_fetch_entries`
+/// — the same `Menu::json` envelope + `items[]` extraction the live kernel
+/// fetch serves — baked so the guest resolves byte-identical JSON with no
+/// host router. `None`/empty aliases `__kget` onto `boot_log` (non-magic ⇒
+/// `KernelGet` resolves no entry).
+pub fn kget_pack(spec: &BoardSpec) -> Result<Option<Vec<u8>>, String> {
+    if !web_pk_lane(spec) {
+        return Ok(None);
+    }
+    Ok(Some(g6b_asm::kget::build(&spec.kget_fetch_entries())?))
+}
+
 pub fn guest_cell_scanout(spec: &BoardSpec) -> Result<GuestCellScanout, String> {
     guest_cell_drive(spec, &[])
 }
@@ -7094,6 +7979,70 @@ fn rendered_dom(spec: &BoardSpec) -> Node {
 mod tests {
     use super::*;
 
+    /// Reference decoder for the `__web_pk` token stream — the same contract
+    /// `WebBlit` implements in guest assembly (row-bounded RUN/LITERAL
+    /// tokens, `0` stream end).
+    fn decode_web_pk(pk: &[u8]) -> (u32, u32, u32, Vec<u32>) {
+        let word = |o: usize| u32::from_le_bytes(pk[o..o + 4].try_into().unwrap());
+        assert_eq!(word(0), g6b_asm::webp::WEB_PK_MAGIC);
+        let (w, h, nodes) = (word(4), word(8), word(12));
+        let mut out = Vec::new();
+        let mut i = g6b_asm::webp::WEB_PK_HDR as usize / 4;
+        for _row in 0..h {
+            let mut x = 0u32;
+            while x < w {
+                let t = word(i * 4);
+                i += 1;
+                assert_ne!(t, 0, "stream end mid-row");
+                if t & 0x8000_0000 != 0 {
+                    for _ in 0..(t & 0x7fff_ffff) {
+                        out.push(word(i * 4));
+                        i += 1;
+                        x += 1;
+                    }
+                } else {
+                    let v = word(i * 4);
+                    i += 1;
+                    for _ in 0..t {
+                        out.push(v);
+                        x += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(word(i * 4), 0, "stream-end marker");
+        (w, h, nodes, out)
+    }
+
+    #[test]
+    fn web_pk_rle_round_trip() {
+        // 8×3 image: a long flat row (one run), a mixed row (run + literal),
+        // an alternating row (all literals, no spurious runs).
+        let mut px = Vec::new();
+        px.extend(std::iter::repeat(0xff10_1620u32).take(8));
+        px.extend([
+            0xff10_1620u32,
+            0xff10_1620,
+            0xff10_1620,
+            0xff10_1620,
+            0xffff_ffff,
+            0xff00_0000,
+            0xffff_ffff,
+            0xff00_0000,
+        ]);
+        px.extend([1u32, 2, 1, 2, 1, 2, 1, 2]);
+        let x8r8: Vec<u8> = px.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let pk = encode_web_pk(8, 3, 42, &x8r8);
+        let (w, h, nodes, back) = decode_web_pk(&pk);
+        assert_eq!((w, h, nodes), (8, 3, 42));
+        assert_eq!(back, px);
+        // Flat input compresses: the all-navy row is one (8, val) pair.
+        let flat = [0xff10_1620u32; 8 * 3];
+        let flat8: Vec<u8> = flat.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let pk2 = encode_web_pk(8, 3, 1, &flat8);
+        assert_eq!(pk2.len(), 16 + 3 * 8 + 4, "three single-run rows");
+    }
+
     fn desktop() -> BoardSpec {
         BoardSpec::from_json_str(
             r#"{
@@ -7131,7 +8080,7 @@ mod tests {
         assert!(out.contains("ssh-holyc"), "{out}");
         assert!(out.contains("loopback mbox"), "{out}");
         assert!(out.contains("until-delegate"), "{out}");
-        assert!(out.contains("Read-only"), "{out}");
+        assert!(out.contains("read-only"), "{out}");
     }
 
     #[test]
@@ -7448,7 +8397,7 @@ mod tests {
             find_node_by_id(&session.dom, "status")
                 .unwrap()
                 .inner_text(),
-            "UI-BOOT"
+            "UI-BOOT: read-only setup"
         );
         assert!(session.iframe_session(0).is_none());
         assert!(
@@ -9020,6 +9969,50 @@ mod tests {
     }
 
     #[test]
+    fn live_svelte_root_and_all_menu_rows_come_from_the_ldc_cell() {
+        let spec =
+            BoardSpec::from_json_str(include_str!("../../../fixtures/g6lc64-web-autoboot.json"))
+                .unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        assert!(session.wasm_executed);
+        let mount = find_node_by_id(&session.dom, "libwasm-root").unwrap();
+        let cell = first_descendant_by_name(mount, "main").unwrap();
+        assert!(std::ptr::eq(live_paint_root(&session.dom), cell));
+        for menu in spec.menus() {
+            let body = find_node_by_id(cell, &format!("menu-{}-body", menu.id)).unwrap();
+            for item in menu.items {
+                assert!(
+                    body.inner_text().contains(&item.label),
+                    "{}: {}",
+                    menu.id,
+                    item.label
+                );
+                assert!(
+                    body.inner_text().contains(&item.value),
+                    "{}: {}",
+                    menu.id,
+                    item.value
+                );
+            }
+        }
+        let main = session.paint_css_at(1280, 900).unwrap();
+        session.handle_key("ArrowRight").unwrap();
+        let cpu = session.paint_css_at(1280, 900).unwrap();
+        assert_eq!(session.selected_menu, "cpu");
+        assert_ne!(main.canvas.to_ppm(), cpu.canvas.to_ppm());
+        assert!(!cpu
+            .hit_boxes
+            .iter()
+            .any(|hit| hit.id.as_deref() == Some("main-title")));
+        assert!(cpu
+            .hit_boxes
+            .iter()
+            .any(|hit| hit.id.as_deref() == Some("cpu-title")));
+        session.handle_key("F10").unwrap();
+        assert_eq!(session.selected_menu, "cpu");
+    }
+
+    #[test]
     fn setup_page_renders_a_keyboard_tab_strip_above_aligned_tables() {
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
         // At the GPU scanout geometry, where the strip is meant to be read.
@@ -9068,8 +10061,9 @@ mod tests {
             .collect();
         assert!(cells.len() >= 6, "settings rows must produce cells");
         let head: Vec<_> = cells.iter().filter(|c| c.y == cells[0].y).collect();
-        assert_eq!(head.len(), 3, "Setting / Value / Access share a row");
-        assert!(head[0].x < head[1].x && head[1].x < head[2].x);
+        // The compact layout packs two `label | value` fields per visual row.
+        assert_eq!(head.len(), 4, "two label+value fields share a row");
+        assert!(head[0].x < head[1].x && head[1].x < head[2].x && head[2].x < head[3].x);
 
         // The keyboard contract the tabs advertise is the one the session
         // actually implements.
@@ -9148,9 +10142,16 @@ mod tests {
                 else {
                     panic!("menu must print")
                 };
-                assert!(
-                    output.contains(&menu.json()),
-                    "{profile} {}: {output}",
+                // `MENU 200 {json}` — compare as data, not bytes: the repl's
+                // serializer orders keys differently from `Menu::json()`, but
+                // `Json::Obj` is a BTreeMap so parsed values compare equal.
+                let body = output.strip_prefix("MENU 200 ").unwrap_or(&output);
+                let parsed = g6b_spec::parse_json(body)
+                    .unwrap_or_else(|e| panic!("{profile} {}: {e}: {body}", menu.id));
+                assert_eq!(
+                    parsed,
+                    g6b_spec::parse_json(&menu.json()).unwrap(),
+                    "{profile} {}",
                     menu.id
                 );
                 for item in menu.items {
@@ -10186,6 +11187,22 @@ mod tests {
         match repl_line(&mut p, "Reboot();").unwrap() {
             ReplResult::Output(s) => assert!(s.contains("POWER-REBOOT"), "{s}"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn zz_dump_web_dom() {
+        let json = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fixtures/g6lc64-web-autoboot.json"
+        ))
+        .unwrap();
+        let spec = BoardSpec::from_json_str(&json).unwrap();
+        let session = BrowserSession::new(&spec).unwrap();
+        println!("{}", dom_to_html(&session.dom));
+        println!("=== diagnostics ===");
+        for d in &session.diagnostics {
+            println!("{d}");
         }
     }
 }

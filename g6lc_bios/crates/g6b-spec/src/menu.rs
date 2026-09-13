@@ -328,6 +328,28 @@ impl BoardSpec {
             .collect();
         format!("{{\"menus\":[{}]}}", parts.join(","))
     }
+
+    /// The `{url → body}` read set the shipped UI cell fetches during boot —
+    /// `/bios/menu/<id>` per menu (body = the `items[]` row array the guest
+    /// parses, not the envelope) plus `/bios/store`. Single source for the
+    /// `__kget` packer (`g6b_kernel::kget_pack`) and the guest-JIT exec test,
+    /// so the baked table matches the live `KernelGet` router byte-for-byte.
+    pub fn kget_fetch_entries(&self) -> Vec<(String, String)> {
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for m in self.menus() {
+            let url = format!("/bios/menu/{}", m.id);
+            let body = crate::parse_json(&m.json())
+                .ok()
+                .and_then(|j| match j.get("items") {
+                    crate::Json::Arr(_) => Some(crate::stringify_json(j.get("items"))),
+                    _ => None,
+                })
+                .unwrap_or_else(|| m.json());
+            entries.push((url, body));
+        }
+        entries.push(("/bios/store".to_string(), "[]".to_string()));
+        entries
+    }
 }
 
 fn live(st: ExtStatus) -> &'static str {
@@ -618,6 +640,14 @@ fn has_class(spec: &BoardSpec, class: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kget_dump() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        for (u, b) in spec.kget_fetch_entries() {
+            eprintln!("KGET {u} len={} body={}", b.len(), b);
+        }
+    }
 
     #[test]
     fn tasking_limits_are_opt_in_topology_bound_and_shared() {

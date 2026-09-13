@@ -8,14 +8,21 @@
 
 pub mod analyze;
 pub mod crypto;
+pub mod dlp;
 pub mod dom;
+pub mod domt;
 pub mod encode;
 pub mod exec;
 pub mod ext4file;
 pub mod fatfile;
 pub mod font;
+pub mod jfmt;
+pub mod jitr;
+pub mod kget;
 pub mod task;
 pub mod vio;
+pub mod virgl;
+pub mod webp;
 
 use std::collections::BTreeMap;
 
@@ -206,6 +213,55 @@ pub enum Addr {
     /// backend-agnostic: the virtio-gpu TRANSFER or the uncore display
     /// engine's `DispCommit` both scan this same buffer.
     ScanFb,
+    /// Predecoded wasm bytecode image (`__jit_in`) in `.rodata` after
+    /// `__g6b_store_dump` — the guest JIT's input, produced host-side by
+    /// `g6b_wasm::jcode::encode` (not raw wasm: sections/LEB are already
+    /// resolved to a flat record stream).
+    JitIn,
+    /// JIT state header (`__jit`) in BSS after `__scan_fb`: magic/state/fuel/
+    /// counters, function table, constant pool, globals.
+    JitHdr,
+    /// JIT runtime stack (`__jit_stk`) after `__jit` — wasm value stack +
+    /// call frames.
+    JitStk,
+    /// JIT code arena (`__jit_code`) after `__jit_stk` — the translator writes
+    /// RISC-V words here, `fence.i`, then jumps in.
+    JitCode,
+    /// Wasm linear memory (`__wasm_mem`) after `__jit_code`.
+    WasmMem,
+    /// Guest DOM tree arena (`__dom`) after `__wasm_mem` — the M2 bounded
+    /// node store: a header + a fixed node pool, index handles.
+    DomT,
+    /// Guest DOM string pool (`__dom_str`) after `__dom` — bump-allocated
+    /// text/id bytes the node records point into.
+    DomS,
+    /// Guest DOM per-node element-id table (`__dom_id`) after `__dom_str` —
+    /// `u8`-length + up to 28 inline bytes per node, so `add_event_listener`
+    /// can resolve its string target to a node without a second string pool.
+    DomId,
+    /// virgl execbuffer (`__virgl_cmd`) in `.rodata` after `__jit_in` — the
+    /// static virgl command stream `VioVirgl` hands to `SUBMIT_3D` (OUT desc),
+    /// produced host-side by `crate::virgl::execbuf` (M4).
+    VirglCmd,
+    /// virgl ctrlq request table (`__virgl_req`) in `.rodata` after
+    /// `__virgl_cmd` — the CAPSET→CTX_CREATE→SUBMIT_3D→TRANSFER→FLUSH record
+    /// sequence `VioVirgl` walks, produced host-side by `crate::virgl::reqtab`.
+    VirglReq,
+    /// `__virgl_out` — guest-RAM readback target (BSS, after `__dom_id`) for
+    /// the virgl `TRANSFER_FROM_HOST_3D`; `VioVirgl` attaches it as `RES_RT`
+    /// backing then reads the rendered quad back into guest memory (M4b).
+    VirglOut,
+    /// Packed web present (`__web_pk`) in `.rodata` after `__virgl_req` — the
+    /// host-rendered `Canvas32` scene (RLE word stream, B8G8R8X8) the guest
+    /// `WebBlit` decodes into the `__disp`-latched scanout surface.
+    WebPk,
+    /// Packed display list (`__web_dl`) in `.rodata` after `__web_pk` — the
+    /// same scene as an op stream + glyph atlas the guest `DlPaint` replays;
+    /// per-menu state lists and `TEXTREF` live-text anchors ride along.
+    WebDl,
+    /// Kernel-GET table (`__kget`) in `.rodata` after `__web_dl` — the
+    /// `{url → body}` map `KernelGet`/`LwFetch` resolve `env.fetch` against.
+    KGet,
     /// Deprecated alias of [`Addr::StacksEnd`] (hart0-only layout).
     StackTop,
 }
@@ -378,6 +434,236 @@ pub enum Op {
     /// `fence` (`fence iorw,iorw`) — required between virtqueue descriptor/ring
     /// writes and the avail-idx / doorbell update.
     Fence,
+    /// `fence.i` — icache sync between guest codegen into `__jit_code` and the
+    /// first `jalr` into the arena (Zifencei).
+    FenceI,
+    /// `and rd, rs, rs2` — register AND.
+    And {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `or rd, rs, rs2`.
+    Or {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `sll rd, rs, rs2` — register shift-left.
+    Sll {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `srl rd, rs, rs2`.
+    Srl {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `sra rd, rs, rs2`.
+    Sra {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `slt rd, rs, rs2` — signed compare.
+    Slt {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `slti rd, rs, imm`.
+    Slti {
+        rd: u32,
+        rs: u32,
+        imm: i32,
+    },
+    /// `sltiu rd, rs, imm` — `sltiu rd, rs, 1` is `seqz`.
+    Sltiu {
+        rd: u32,
+        rs: u32,
+        imm: i32,
+    },
+    /// `srai rd, rs, shamt`.
+    Srai {
+        rd: u32,
+        rs: u32,
+        shamt: u32,
+    },
+    /// `div rd, rs, rs2` — signed divide.
+    Div {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `rem rd, rs, rs2` — signed remainder.
+    Rem {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `remu rd, rs, rs2`.
+    Remu {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `blt rs, rs2, label` — signed <.
+    Blt {
+        rs1: u32,
+        rs2: u32,
+        to: String,
+    },
+    /// `bge rs, rs2, label`.
+    Bge {
+        rs1: u32,
+        rs2: u32,
+        to: String,
+    },
+    /// `bltu rs, rs2, label` — unsigned <.
+    Bltu {
+        rs1: u32,
+        rs2: u32,
+        to: String,
+    },
+    /// `bgeu rs, rs2, label`.
+    Bgeu {
+        rs1: u32,
+        rs2: u32,
+        to: String,
+    },
+    /// `lb rd, off(rs)` — sign-extended byte load.
+    Lb {
+        rd: u32,
+        rs: u32,
+        off: i32,
+    },
+    /// `lh rd, off(rs)` — sign-extended halfword load.
+    Lh {
+        rd: u32,
+        rs: u32,
+        off: i32,
+    },
+    /// `lhu rd, off(rs)`.
+    Lhu {
+        rd: u32,
+        rs: u32,
+        off: i32,
+    },
+    /// `lwu rd, off(rs)` — RV64 zero-extended word load.
+    Lwu {
+        rd: u32,
+        rs: u32,
+        off: i32,
+    },
+    /// `sh rs2, off(rs)` — halfword store.
+    Sh {
+        rs2: u32,
+        rs1: u32,
+        off: i32,
+    },
+    // ---- RV64 word ops (sign-extended 32-bit results; guest wasm i32 ops).
+    /// `addw rd, rs, rs2`.
+    Addw {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `subw rd, rs, rs2`.
+    Subw {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `mulw rd, rs, rs2`.
+    Mulw {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `divw rd, rs, rs2`.
+    Divw {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `divuw rd, rs, rs2`.
+    Divuw {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `remw rd, rs, rs2`.
+    Remw {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `remuw rd, rs, rs2`.
+    Remuw {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `sllw rd, rs, rs2`.
+    Sllw {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `srlw rd, rs, rs2`.
+    Srlw {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `sraw rd, rs, rs2`.
+    Sraw {
+        rd: u32,
+        rs: u32,
+        rs2: u32,
+    },
+    /// `addiw rd, rs, imm`.
+    Addiw {
+        rd: u32,
+        rs: u32,
+        imm: i32,
+    },
+    /// `slliw rd, rs, shamt` (5-bit).
+    Slliw {
+        rd: u32,
+        rs: u32,
+        shamt: u32,
+    },
+    /// `srliw rd, rs, shamt` (5-bit).
+    Srliw {
+        rd: u32,
+        rs: u32,
+        shamt: u32,
+    },
+    /// `sraiw rd, rs, shamt` (5-bit).
+    Sraiw {
+        rd: u32,
+        rs: u32,
+        shamt: u32,
+    },
+    /// Data doubleword in the payload resolving an [`Addr`] — 2 machine words,
+    /// little-endian. Dispatch tables (`jit_disp`) carry routine addresses this
+    /// way; never executed.
+    Dw64 {
+        addr: Addr,
+    },
+    /// Scalar-FP R-type (opcode `0x53`, OP-FP). `rd`/`rs1`/`rs2` index the FP
+    /// register file (`f0`-`f31`); `funct7`/`funct3`/`rs2` select the op —
+    /// covers `fadd.s`, `fle.s`, `fcvt.s.wu`, `fmv.w.x`, … . M3b exec-model FPU.
+    FpR {
+        funct7: u32,
+        rs2: u32,
+        rs1: u32,
+        funct3: u32,
+        rd: u32,
+    },
 }
 
 /// Purpose-tagged sequence of ops (one analyzed object).
@@ -424,6 +710,51 @@ pub struct Module {
     /// Linear X8R8G8B8 scanout BSS (`__scan_fb`) when a display path is
     /// live (`wants_virtio_gpu` or `wants_disp_scan`).
     pub vio_fb_bytes: u64,
+    /// Predecoded guest-JIT bytecode image (`__jit_in`) in `.rodata` —
+    /// `g6b_wasm::jcode::encode` output, not raw wasm.
+    pub jit_in: Vec<u8>,
+    /// JIT state header BSS (`__jit`): magic/state/fuel/counters/func table/
+    /// const pool/globals.
+    pub jit_bytes: u64,
+    /// JIT value/call stack BSS (`__jit_stk`).
+    pub jit_stk_bytes: u64,
+    /// JIT code arena BSS (`__jit_code`) — executable by policy (bare satp);
+    /// `fence.i` between write and first jump.
+    pub jit_code_bytes: u64,
+    /// Wasm linear memory BSS (`__wasm_mem`).
+    pub wasm_mem_bytes: u64,
+    /// virgl execbuffer (`__virgl_cmd`) in `.rodata` after `__jit_in` — the
+    /// `SUBMIT_3D` command stream `VioVirgl` submits under `proxy.gl` (M4).
+    pub virgl_cmd: Vec<u8>,
+    /// virgl ctrlq request table (`__virgl_req`) after `__virgl_cmd` — the
+    /// CAPSET→CTX_CREATE→SUBMIT_3D→TRANSFER→FLUSH records `VioVirgl` walks.
+    pub virgl_req: Vec<u8>,
+    /// Guest DOM tree arena BSS (`__dom`) when `kernel.wasm.jit` — the M2
+    /// bounded node store (header + fixed node pool).
+    pub domt_bytes: u64,
+    /// Guest DOM string pool BSS (`__dom_str`) — bump-allocated text/id bytes.
+    pub doms_bytes: u64,
+    /// `__dom_id` BSS bytes (per-node element-id table).
+    pub domid_bytes: u64,
+    /// `__virgl_out` BSS bytes — the guest-RAM readback target for
+    /// `TRANSFER_FROM_HOST_3D` under `proxy.gl` (the offscreen `RES_RT`
+    /// render pulled back into guest memory). 0 when no virgl lane.
+    pub virgl_out_bytes: u64,
+    /// Packed web present (`__web_pk`) in `.rodata` after `__virgl_req` —
+    /// the host-rendered `Canvas32` scene (`g6b_kernel::web_pk_pack` RLE word
+    /// stream) `WebBlit` decodes into the `__disp`-latched surface. Empty ⇒
+    /// `__web_pk` aliases `boot_log` so the guest magic check fails cleanly.
+    pub web_pk: Vec<u8>,
+    /// Packed display list (`__web_dl`) in `.rodata` after `__web_pk` —
+    /// `g6b_kernel::dl_pack`'s op stream + glyph atlas + state/tref/hit
+    /// tables `DlPaint` replays. Empty ⇒ `__web_dl` aliases `boot_log` like
+    /// `__web_pk` (non-magic ⇒ `DlPaint` yields to `WebBlit`).
+    pub web_dl: Vec<u8>,
+    /// Kernel-GET table (`__kget`) in `.rodata` after `__web_dl` —
+    /// `g6b_kernel::kget_pack`'s `{url → body}` map `KernelGet` resolves
+    /// `env.fetch` against. Empty ⇒ `__kget` aliases `boot_log` (non-magic
+    /// ⇒ `KernelGet` yields `0` — no resolved body).
+    pub kget: Vec<u8>,
 }
 
 /// BSS after the payload: 16-byte aligned image + one stack per hart.
@@ -521,10 +852,23 @@ pub const PAINT_BUSY_OFF: i32 = 296;
 /// the browser's DOM. Without a latch the two faces would publish rows into the
 /// same `__ui_dom` and blit over each other every tick.
 pub const FACE_OWNER_OFF: i32 = 300;
+/// `__uart_line+304` — u32: the guest painted `__web_pk` into the latched
+/// output surface and it is still authoritative there.
+///
+/// `WebBlit` sets it after a successful blit; `CliInit` clears it when the CLI
+/// face takes the plane back from the web face (the web→CLI transition), and
+/// the `FbExpandSel` commit rungs (`DispPaint`/`PciPaint`) skip the plane
+/// expand while it is set so they do not paint the 4bpp container over the
+/// packed canvas. It lives in `__uart_line` for the same reason `PAINT_BUSY`
+/// does — this block exists on every board, so the flag cannot write into an
+/// absent `__vio`/`__ui_cap` on a pcie-only build.
+pub const WEB_STAMPED_OFF: i32 = 304;
 /// Face codes for [`FACE_OWNER_OFF`].
 pub const FACE_CLI: i64 = 0;
 pub const FACE_WEB: i64 = 1;
-pub const UART_LINE_BSS: u64 = 308;
+pub const CLI_VOLUME_OFF: i32 = 308;
+pub const CLI_FILES_OFF: i32 = 320;
+pub const UART_LINE_BSS: u64 = 832;
 /// `G6UI` magic + size + flags + accel + wasm pointer + magic echo + nfiles.
 pub const UI_HEADER_BYTES: u64 = 32;
 
@@ -553,6 +897,12 @@ impl Module {
             .saturating_add(self.pglite_initdb.len() as u64)
             .saturating_add(self.pglite_data.len() as u64)
             .saturating_add(self.store_dump.len() as u64)
+            .saturating_add(self.jit_in.len() as u64)
+            .saturating_add(self.virgl_cmd.len() as u64)
+            .saturating_add(self.virgl_req.len() as u64)
+            .saturating_add(self.web_pk.len() as u64)
+            .saturating_add(self.web_dl.len() as u64)
+            .saturating_add(self.kget.len() as u64)
     }
 
     pub fn push(&mut self, n: Node) {
@@ -576,6 +926,14 @@ impl Module {
             .saturating_add(self.cap_bytes)
             .saturating_add(self.vio_bytes)
             .saturating_add(self.vio_fb_bytes)
+            .saturating_add(self.jit_bytes)
+            .saturating_add(self.jit_stk_bytes)
+            .saturating_add(self.jit_code_bytes)
+            .saturating_add(self.wasm_mem_bytes)
+            .saturating_add(self.domt_bytes)
+            .saturating_add(self.doms_bytes)
+            .saturating_add(self.domid_bytes)
+            .saturating_add(self.virgl_out_bytes)
     }
 
     /// GNU as text. Comments include purpose and state home.
@@ -601,6 +959,11 @@ impl Module {
             || !self.pglite_initdb.is_empty()
             || !self.pglite_data.is_empty()
             || !self.store_dump.is_empty()
+            || !self.virgl_cmd.is_empty()
+            || !self.virgl_req.is_empty()
+            || !self.web_pk.is_empty()
+            || !self.web_dl.is_empty()
+            || !self.kget.is_empty()
         {
             s.push_str("\n.section .rodata\n");
             if !self.rodata.is_empty() {
@@ -634,6 +997,53 @@ impl Module {
             if !self.store_dump.is_empty() {
                 s.push_str("__g6b_store_dump:\n");
                 s.push_str(&rodata_listing(&self.store_dump));
+            }
+            if !self.jit_in.is_empty() {
+                s.push_str("__jit_in:\n");
+                s.push_str(&rodata_listing(&self.jit_in));
+            }
+            if !self.virgl_cmd.is_empty() {
+                s.push_str("__virgl_cmd:\n");
+                s.push_str(&rodata_listing(&self.virgl_cmd));
+            }
+            if !self.virgl_req.is_empty() {
+                s.push_str("__virgl_req:\n");
+                s.push_str(&rodata_listing(&self.virgl_req));
+            }
+            if !self.web_pk.is_empty() {
+                s.push_str("__web_pk:\n");
+                s.push_str(&rodata_listing(&self.web_pk));
+            } else if !self.rodata.is_empty() {
+                // No pack installed: alias the magic slot onto `boot_log`
+                // (whose 'KSTA' first word never matches 'G6PK') so `la
+                // __web_pk` still resolves and `WebBlit` reads "no pack".
+                s.push_str(".set __web_pk, boot_log\n");
+            } else {
+                // Degenerate hand-built module with no rodata at all: give
+                // `la __web_pk` a real word so the magic slot reads 0 rather
+                // than whatever follows `.rodata`.
+                s.push_str("__web_pk:\n\t.word\t0\n");
+            }
+            if !self.web_dl.is_empty() {
+                s.push_str("__web_dl:\n");
+                s.push_str(&rodata_listing(&self.web_dl));
+            } else if !self.rodata.is_empty() {
+                // Same alias trick as `__web_pk`: 'KSTA' never matches
+                // 'G6DL', so `DlPaint` reads "no list" and yields to
+                // `WebBlit`/the text-face paths.
+                s.push_str(".set __web_dl, boot_log\n");
+            } else {
+                s.push_str("__web_dl:\n\t.word\t0\n");
+            }
+            if !self.kget.is_empty() {
+                s.push_str("__kget:\n");
+                s.push_str(&rodata_listing(&self.kget));
+            } else if !self.rodata.is_empty() {
+                // Same `boot_log` alias: 'KSTA' never matches 'G6KG', so
+                // `KernelGet` resolves no entry and `LwFetch` yields 0.
+                s.push_str(".set __kget, boot_log\n");
+            } else {
+                s.push_str("__kget:\n\t.word\t0\n");
             }
         }
         if self.nodes.iter().any(|n| n.purpose == Purpose::Stack) {
@@ -699,6 +1109,72 @@ impl Module {
             }
             s.push_str(&format!("__scan_fb:\n.space {:#x}\n", self.vio_fb_bytes));
         }
+        let jit_bss =
+            self.jit_bytes + self.jit_stk_bytes + self.jit_code_bytes + self.wasm_mem_bytes;
+        if jit_bss > 0
+            && !self.nodes.iter().any(|n| n.purpose == Purpose::Stack)
+            && self.line_bytes == 0
+            && self.ui_bytes == 0
+            && self.dom_bytes == 0
+            && self.cap_bytes == 0
+            && self.vio_bytes == 0
+            && self.vio_fb_bytes == 0
+        {
+            s.push_str("\n.section .bss\n");
+        }
+        if self.jit_bytes > 0 {
+            s.push_str(&format!("__jit:\n.space {:#x}\n", self.jit_bytes));
+        }
+        if self.jit_stk_bytes > 0 {
+            s.push_str(&format!("__jit_stk:\n.space {:#x}\n", self.jit_stk_bytes));
+        }
+        if self.jit_code_bytes > 0 {
+            s.push_str(&format!("__jit_code:\n.space {:#x}\n", self.jit_code_bytes));
+        }
+        if self.wasm_mem_bytes > 0 {
+            s.push_str(&format!("__wasm_mem:\n.space {:#x}\n", self.wasm_mem_bytes));
+        }
+        if (self.domt_bytes > 0 || self.doms_bytes > 0)
+            && !self.nodes.iter().any(|n| n.purpose == Purpose::Stack)
+            && self.line_bytes == 0
+            && self.ui_bytes == 0
+            && self.dom_bytes == 0
+            && self.cap_bytes == 0
+            && self.vio_bytes == 0
+            && self.vio_fb_bytes == 0
+            && jit_bss == 0
+        {
+            s.push_str("\n.section .bss\n");
+        }
+        if self.domt_bytes > 0 {
+            s.push_str(&format!("__dom:\n.space {:#x}\n", self.domt_bytes));
+        }
+        if self.doms_bytes > 0 {
+            s.push_str(&format!("__dom_str:\n.space {:#x}\n", self.doms_bytes));
+        }
+        if self.domid_bytes > 0 {
+            s.push_str(&format!("__dom_id:\n.space {:#x}\n", self.domid_bytes));
+        }
+        if self.virgl_out_bytes > 0 {
+            if !self.nodes.iter().any(|n| n.purpose == Purpose::Stack)
+                && self.line_bytes == 0
+                && self.ui_bytes == 0
+                && self.dom_bytes == 0
+                && self.cap_bytes == 0
+                && self.vio_bytes == 0
+                && self.vio_fb_bytes == 0
+                && jit_bss == 0
+                && self.domt_bytes == 0
+                && self.doms_bytes == 0
+                && self.domid_bytes == 0
+            {
+                s.push_str("\n.section .bss\n");
+            }
+            s.push_str(&format!(
+                "__virgl_out:\n.space {:#x}\n",
+                self.virgl_out_bytes
+            ));
+        }
         s
     }
 
@@ -744,6 +1220,68 @@ impl Module {
         )
     }
 
+    /// BSS base of the first jit block (`__jit`) — `None` when no jit regions.
+    fn jit_base(&self, entry: u64) -> Option<u64> {
+        let (words, _) = self.to_words(entry).ok()?;
+        let code_bytes = (words.len() * 4) as u64;
+        let filesz = self.image_filesz(code_bytes);
+        let stacks = entry.wrapping_add(stack_memsz(filesz, self.n_harts()));
+        Some(
+            stacks
+                .wrapping_add(self.gr_bytes)
+                .wrapping_add(self.line_bytes)
+                .wrapping_add(self.ui_bytes)
+                .wrapping_add(self.dom_bytes)
+                .wrapping_add(self.cap_bytes)
+                .wrapping_add(self.vio_bytes)
+                .wrapping_add(self.vio_fb_bytes),
+        )
+    }
+
+    /// Resolved `__jit` state-header address, or `None` when not allocated.
+    pub fn jit_hdr_addr(&self, entry: u64) -> Option<u64> {
+        if self.jit_bytes == 0 {
+            return None;
+        }
+        self.jit_base(entry)
+    }
+
+    /// Resolved `__jit_code` arena address, or `None` when not allocated.
+    pub fn jit_code_addr(&self, entry: u64) -> Option<u64> {
+        if self.jit_code_bytes == 0 {
+            return None;
+        }
+        self.jit_base(entry).map(|b| {
+            b.wrapping_add(self.jit_bytes)
+                .wrapping_add(self.jit_stk_bytes)
+        })
+    }
+
+    /// Resolved `__wasm_mem` address, or `None` when not allocated.
+    pub fn wasm_mem_addr(&self, entry: u64) -> Option<u64> {
+        if self.wasm_mem_bytes == 0 {
+            return None;
+        }
+        self.jit_base(entry).map(|b| {
+            b.wrapping_add(self.jit_bytes)
+                .wrapping_add(self.jit_stk_bytes)
+                .wrapping_add(self.jit_code_bytes)
+        })
+    }
+
+    /// Resolved `__dom` (DomT) arena address, or `None` when not allocated.
+    ///
+    /// `Addr::DomT` chains immediately after `__wasm_mem`, so the base is the
+    /// wasm-memory top. Exposed so the exec model can scan the live DOM for
+    /// node/listener bookkeeping in regression checks.
+    pub fn domt_addr(&self, entry: u64) -> Option<u64> {
+        if self.domt_bytes == 0 {
+            return None;
+        }
+        self.wasm_mem_addr(entry)
+            .map(|b| b.wrapping_add(self.wasm_mem_bytes))
+    }
+
     /// Resolved `__scan_fb` BSS address for a module loaded at `entry`.
     ///
     /// Same arithmetic `to_words` uses for `Addr::ScanFb`; exposed so the exec
@@ -782,49 +1320,7 @@ impl Module {
                 Op::La { rd, addr } => {
                     let filesz = self.image_filesz(code_bytes);
                     let stacks = entry.wrapping_add(stack_memsz(filesz, self.n_harts()));
-                    let a = match addr {
-                        Addr::Abs(v) => *v,
-                        Addr::Rodata => rodata_addr,
-                        Addr::UiWasm => rodata_addr.wrapping_add(self.rodata.len() as u64),
-                        Addr::WasmData => rodata_addr
-                            .wrapping_add(self.rodata.len() as u64)
-                            .wrapping_add(self.ui_wasm.len() as u64),
-                        Addr::UiFont => rodata_addr
-                            .wrapping_add(self.rodata.len() as u64)
-                            .wrapping_add(self.ui_wasm.len() as u64)
-                            .wrapping_add(self.wasm_data.len() as u64),
-                        Addr::StacksEnd | Addr::StackTop | Addr::GrPlane => stacks,
-                        Addr::UartLine => stacks.wrapping_add(self.gr_bytes),
-                        Addr::UiBlob => stacks
-                            .wrapping_add(self.gr_bytes)
-                            .wrapping_add(self.line_bytes),
-                        Addr::UiDom => stacks
-                            .wrapping_add(self.gr_bytes)
-                            .wrapping_add(self.line_bytes)
-                            .wrapping_add(self.ui_bytes),
-                        Addr::UiCap => stacks
-                            .wrapping_add(self.gr_bytes)
-                            .wrapping_add(self.line_bytes)
-                            .wrapping_add(self.ui_bytes)
-                            .wrapping_add(self.dom_bytes),
-                        Addr::VioBss => stacks
-                            .wrapping_add(self.gr_bytes)
-                            .wrapping_add(self.line_bytes)
-                            .wrapping_add(self.ui_bytes)
-                            .wrapping_add(self.dom_bytes)
-                            .wrapping_add(self.cap_bytes),
-                        Addr::ScanFb => stacks
-                            .wrapping_add(self.gr_bytes)
-                            .wrapping_add(self.line_bytes)
-                            .wrapping_add(self.ui_bytes)
-                            .wrapping_add(self.dom_bytes)
-                            .wrapping_add(self.cap_bytes)
-                            .wrapping_add(self.vio_bytes),
-                        Addr::Label(l) => {
-                            let at = *labels.get(l).ok_or_else(|| format!("unknown label {l}"))?;
-                            entry.wrapping_add((at * 4) as u64)
-                        }
-                    };
+                    let a = resolve_addr(addr, rodata_addr, stacks, entry, &labels, self)?;
                     // PC-relative: RV64 `lui` of 0x8xxx_xxxx sign-extends (not QEMU DRAM).
                     let pc = entry.wrapping_add((i * 4) as u64);
                     let (hi, lo) = encode::hi_lo(a.wrapping_sub(pc));
@@ -841,6 +1337,14 @@ impl Module {
                     words.push(*w);
                     i += 1;
                 }
+                Op::Dw64 { addr } => {
+                    let filesz = self.image_filesz(code_bytes);
+                    let stacks = entry.wrapping_add(stack_memsz(filesz, self.n_harts()));
+                    let a = resolve_addr(addr, rodata_addr, stacks, entry, &labels, self)?;
+                    words.push(a as u32);
+                    words.push((a >> 32) as u32);
+                    i += 2;
+                }
                 other => {
                     let pc = i;
                     words.push(encode_op(other, pc, &labels)?);
@@ -856,6 +1360,12 @@ impl Module {
         rod.extend_from_slice(&self.pglite_initdb);
         rod.extend_from_slice(&self.pglite_data);
         rod.extend_from_slice(&self.store_dump);
+        rod.extend_from_slice(&self.jit_in);
+        rod.extend_from_slice(&self.virgl_cmd);
+        rod.extend_from_slice(&self.virgl_req);
+        rod.extend_from_slice(&self.web_pk);
+        rod.extend_from_slice(&self.web_dl);
+        rod.extend_from_slice(&self.kget);
         Ok((words, rod))
     }
 
@@ -877,10 +1387,236 @@ impl Module {
     }
 }
 
-fn op_nwords(op: &Op) -> usize {
+/// Resolve an [`Addr`] to its absolute guest address. Shared by `La` (which
+/// emits `auipc`+`addi` of the *delta*) and `Dw64` (which emits the address
+/// itself as data).
+fn resolve_addr(
+    addr: &Addr,
+    rodata_addr: u64,
+    stacks: u64,
+    entry: u64,
+    labels: &BTreeMap<String, usize>,
+    m: &Module,
+) -> Result<u64, String> {
+    Ok(match addr {
+        Addr::Abs(v) => *v,
+        Addr::Rodata => rodata_addr,
+        Addr::UiWasm => rodata_addr.wrapping_add(m.rodata.len() as u64),
+        Addr::WasmData => rodata_addr
+            .wrapping_add(m.rodata.len() as u64)
+            .wrapping_add(m.ui_wasm.len() as u64),
+        Addr::UiFont => rodata_addr
+            .wrapping_add(m.rodata.len() as u64)
+            .wrapping_add(m.ui_wasm.len() as u64)
+            .wrapping_add(m.wasm_data.len() as u64),
+        Addr::JitIn => rodata_addr
+            .wrapping_add(m.rodata.len() as u64)
+            .wrapping_add(m.ui_wasm.len() as u64)
+            .wrapping_add(m.wasm_data.len() as u64)
+            .wrapping_add(m.font.len() as u64)
+            .wrapping_add(m.pglite_wasm.len() as u64)
+            .wrapping_add(m.pglite_initdb.len() as u64)
+            .wrapping_add(m.pglite_data.len() as u64)
+            .wrapping_add(m.store_dump.len() as u64),
+        Addr::StacksEnd | Addr::StackTop | Addr::GrPlane => stacks,
+        Addr::UartLine => stacks.wrapping_add(m.gr_bytes),
+        Addr::UiBlob => stacks.wrapping_add(m.gr_bytes).wrapping_add(m.line_bytes),
+        Addr::UiDom => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes),
+        Addr::UiCap => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes),
+        Addr::VioBss => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes),
+        Addr::ScanFb => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes)
+            .wrapping_add(m.vio_bytes),
+        Addr::JitHdr => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes)
+            .wrapping_add(m.vio_bytes)
+            .wrapping_add(m.vio_fb_bytes),
+        Addr::JitStk => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes)
+            .wrapping_add(m.vio_bytes)
+            .wrapping_add(m.vio_fb_bytes)
+            .wrapping_add(m.jit_bytes),
+        Addr::JitCode => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes)
+            .wrapping_add(m.vio_bytes)
+            .wrapping_add(m.vio_fb_bytes)
+            .wrapping_add(m.jit_bytes)
+            .wrapping_add(m.jit_stk_bytes),
+        Addr::WasmMem => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes)
+            .wrapping_add(m.vio_bytes)
+            .wrapping_add(m.vio_fb_bytes)
+            .wrapping_add(m.jit_bytes)
+            .wrapping_add(m.jit_stk_bytes)
+            .wrapping_add(m.jit_code_bytes),
+        Addr::DomT => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes)
+            .wrapping_add(m.vio_bytes)
+            .wrapping_add(m.vio_fb_bytes)
+            .wrapping_add(m.jit_bytes)
+            .wrapping_add(m.jit_stk_bytes)
+            .wrapping_add(m.jit_code_bytes)
+            .wrapping_add(m.wasm_mem_bytes),
+        Addr::DomS => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes)
+            .wrapping_add(m.vio_bytes)
+            .wrapping_add(m.vio_fb_bytes)
+            .wrapping_add(m.jit_bytes)
+            .wrapping_add(m.jit_stk_bytes)
+            .wrapping_add(m.jit_code_bytes)
+            .wrapping_add(m.wasm_mem_bytes)
+            .wrapping_add(m.domt_bytes),
+        Addr::DomId => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes)
+            .wrapping_add(m.vio_bytes)
+            .wrapping_add(m.vio_fb_bytes)
+            .wrapping_add(m.jit_bytes)
+            .wrapping_add(m.jit_stk_bytes)
+            .wrapping_add(m.jit_code_bytes)
+            .wrapping_add(m.wasm_mem_bytes)
+            .wrapping_add(m.domt_bytes)
+            .wrapping_add(m.doms_bytes),
+        Addr::VirglOut => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes)
+            .wrapping_add(m.vio_bytes)
+            .wrapping_add(m.vio_fb_bytes)
+            .wrapping_add(m.jit_bytes)
+            .wrapping_add(m.jit_stk_bytes)
+            .wrapping_add(m.jit_code_bytes)
+            .wrapping_add(m.wasm_mem_bytes)
+            .wrapping_add(m.domt_bytes)
+            .wrapping_add(m.doms_bytes)
+            .wrapping_add(m.domid_bytes),
+        Addr::VirglCmd => rodata_addr
+            .wrapping_add(m.rodata.len() as u64)
+            .wrapping_add(m.ui_wasm.len() as u64)
+            .wrapping_add(m.wasm_data.len() as u64)
+            .wrapping_add(m.font.len() as u64)
+            .wrapping_add(m.pglite_wasm.len() as u64)
+            .wrapping_add(m.pglite_initdb.len() as u64)
+            .wrapping_add(m.pglite_data.len() as u64)
+            .wrapping_add(m.store_dump.len() as u64)
+            .wrapping_add(m.jit_in.len() as u64),
+        Addr::VirglReq => rodata_addr
+            .wrapping_add(m.rodata.len() as u64)
+            .wrapping_add(m.ui_wasm.len() as u64)
+            .wrapping_add(m.wasm_data.len() as u64)
+            .wrapping_add(m.font.len() as u64)
+            .wrapping_add(m.pglite_wasm.len() as u64)
+            .wrapping_add(m.pglite_initdb.len() as u64)
+            .wrapping_add(m.pglite_data.len() as u64)
+            .wrapping_add(m.store_dump.len() as u64)
+            .wrapping_add(m.jit_in.len() as u64)
+            .wrapping_add(m.virgl_cmd.len() as u64),
+        // No pack → `__web_pk` aliases `boot_log` (see `.set` in `to_asm`):
+        // its 'KSTA' first word never matches `WEB_PK_MAGIC`, so `WebBlit`
+        // reads a clean "no pack" without a sentinel word in `.rodata`.
+        Addr::WebPk if m.web_pk.is_empty() => rodata_addr,
+        Addr::WebPk => rodata_addr
+            .wrapping_add(m.rodata.len() as u64)
+            .wrapping_add(m.ui_wasm.len() as u64)
+            .wrapping_add(m.wasm_data.len() as u64)
+            .wrapping_add(m.font.len() as u64)
+            .wrapping_add(m.pglite_wasm.len() as u64)
+            .wrapping_add(m.pglite_initdb.len() as u64)
+            .wrapping_add(m.pglite_data.len() as u64)
+            .wrapping_add(m.store_dump.len() as u64)
+            .wrapping_add(m.jit_in.len() as u64)
+            .wrapping_add(m.virgl_cmd.len() as u64)
+            .wrapping_add(m.virgl_req.len() as u64),
+        // Same `boot_log` alias as `WebPk` (see `.set` in `to_asm`).
+        Addr::WebDl if m.web_dl.is_empty() => rodata_addr,
+        Addr::WebDl => rodata_addr
+            .wrapping_add(m.rodata.len() as u64)
+            .wrapping_add(m.ui_wasm.len() as u64)
+            .wrapping_add(m.wasm_data.len() as u64)
+            .wrapping_add(m.font.len() as u64)
+            .wrapping_add(m.pglite_wasm.len() as u64)
+            .wrapping_add(m.pglite_initdb.len() as u64)
+            .wrapping_add(m.pglite_data.len() as u64)
+            .wrapping_add(m.store_dump.len() as u64)
+            .wrapping_add(m.jit_in.len() as u64)
+            .wrapping_add(m.virgl_cmd.len() as u64)
+            .wrapping_add(m.virgl_req.len() as u64)
+            .wrapping_add(m.web_pk.len() as u64),
+        // Same `boot_log` alias as `WebDl` (see `.set` in `to_asm`).
+        Addr::KGet if m.kget.is_empty() => rodata_addr,
+        Addr::KGet => rodata_addr
+            .wrapping_add(m.rodata.len() as u64)
+            .wrapping_add(m.ui_wasm.len() as u64)
+            .wrapping_add(m.wasm_data.len() as u64)
+            .wrapping_add(m.font.len() as u64)
+            .wrapping_add(m.pglite_wasm.len() as u64)
+            .wrapping_add(m.pglite_initdb.len() as u64)
+            .wrapping_add(m.pglite_data.len() as u64)
+            .wrapping_add(m.store_dump.len() as u64)
+            .wrapping_add(m.jit_in.len() as u64)
+            .wrapping_add(m.virgl_cmd.len() as u64)
+            .wrapping_add(m.virgl_req.len() as u64)
+            .wrapping_add(m.web_pk.len() as u64)
+            .wrapping_add(m.web_dl.len() as u64),
+        Addr::Label(l) => {
+            let at = *labels.get(l).ok_or_else(|| format!("unknown label {l}"))?;
+            entry.wrapping_add((at * 4) as u64)
+        }
+    })
+}
+
+/// Machine words an [`Op`] assembles to — `La`/`Dw64` are 2, `Li` varies with
+/// the immediate width, everything else is 1. Used by `to_words`/`label_addr`
+/// to keep the label index ↔ code-offset map exact.
+pub fn op_nwords(op: &Op) -> usize {
     match op {
         Op::Label(_) | Op::Comment(_) | Op::Glob(_) | Op::Directive(_) => 0,
-        Op::La { .. } => 2,
+        Op::La { .. } | Op::Dw64 { .. } => 2,
         Op::Li { imm, .. } => encode::li_nwords(*imm),
         _ => 1,
     }
@@ -907,6 +1643,42 @@ fn encode_op(op: &Op, pc: usize, labels: &BTreeMap<String, usize>) -> Result<u32
         Op::Xor { rd, rs1, rs2 } => encode::xor(*rd, *rs1, *rs2),
         Op::Beq { rs1, rs2, to } => encode::beq(*rs1, *rs2, rel(to)?),
         Op::Bne { rs1, rs2, to } => encode::bne(*rs1, *rs2, rel(to)?),
+        Op::Blt { rs1, rs2, to } => encode::blt(*rs1, *rs2, rel(to)?),
+        Op::Bge { rs1, rs2, to } => encode::bge(*rs1, *rs2, rel(to)?),
+        Op::Bltu { rs1, rs2, to } => encode::bltu(*rs1, *rs2, rel(to)?),
+        Op::Bgeu { rs1, rs2, to } => encode::bgeu(*rs1, *rs2, rel(to)?),
+        Op::And { rd, rs, rs2 } => encode::and_(*rd, *rs, *rs2),
+        Op::Or { rd, rs, rs2 } => encode::or_(*rd, *rs, *rs2),
+        Op::Sll { rd, rs, rs2 } => encode::sll(*rd, *rs, *rs2),
+        Op::Srl { rd, rs, rs2 } => encode::srl(*rd, *rs, *rs2),
+        Op::Sra { rd, rs, rs2 } => encode::sra(*rd, *rs, *rs2),
+        Op::Slt { rd, rs, rs2 } => encode::slt(*rd, *rs, *rs2),
+        Op::Slti { rd, rs, imm } => encode::slti(*rd, *rs, *imm),
+        Op::Sltiu { rd, rs, imm } => encode::sltiu(*rd, *rs, *imm),
+        Op::Srai { rd, rs, shamt } => encode::srai(*rd, *rs, *shamt),
+        Op::Div { rd, rs, rs2 } => encode::div(*rd, *rs, *rs2),
+        Op::Rem { rd, rs, rs2 } => encode::rem(*rd, *rs, *rs2),
+        Op::Remu { rd, rs, rs2 } => encode::remu(*rd, *rs, *rs2),
+        Op::Lb { rd, rs, off } => encode::lb(*rd, *rs, *off),
+        Op::Lh { rd, rs, off } => encode::lh(*rd, *rs, *off),
+        Op::Lhu { rd, rs, off } => encode::lhu(*rd, *rs, *off),
+        Op::Lwu { rd, rs, off } => encode::lwu(*rd, *rs, *off),
+        Op::Sh { rs2, rs1, off } => encode::sh(*rs2, *rs1, *off),
+        Op::FenceI => encode::fence_i(),
+        Op::Addw { rd, rs, rs2 } => encode::addw(*rd, *rs, *rs2),
+        Op::Subw { rd, rs, rs2 } => encode::subw(*rd, *rs, *rs2),
+        Op::Mulw { rd, rs, rs2 } => encode::mulw(*rd, *rs, *rs2),
+        Op::Divw { rd, rs, rs2 } => encode::divw(*rd, *rs, *rs2),
+        Op::Divuw { rd, rs, rs2 } => encode::divuw(*rd, *rs, *rs2),
+        Op::Remw { rd, rs, rs2 } => encode::remw(*rd, *rs, *rs2),
+        Op::Remuw { rd, rs, rs2 } => encode::remuw(*rd, *rs, *rs2),
+        Op::Sllw { rd, rs, rs2 } => encode::sllw(*rd, *rs, *rs2),
+        Op::Srlw { rd, rs, rs2 } => encode::srlw(*rd, *rs, *rs2),
+        Op::Sraw { rd, rs, rs2 } => encode::sraw(*rd, *rs, *rs2),
+        Op::Addiw { rd, rs, imm } => encode::addiw(*rd, *rs, *imm),
+        Op::Slliw { rd, rs, shamt } => encode::slliw(*rd, *rs, *shamt),
+        Op::Srliw { rd, rs, shamt } => encode::srliw(*rd, *rs, *shamt),
+        Op::Sraiw { rd, rs, shamt } => encode::sraiw(*rd, *rs, *shamt),
         Op::Jal { rd, to } => encode::jal(*rd, rel(to)?),
         Op::Jalr { rd, rs, imm } => encode::jalr(*rd, *rs, *imm),
         Op::Csrrw { rd, csr, rs } => encode::csrrw(*rd, *csr, *rs),
@@ -926,12 +1698,20 @@ fn encode_op(op: &Op, pc: usize, labels: &BTreeMap<String, usize>) -> Result<u32
         Op::Ld { rd, rs, off } => encode::ld(*rd, *rs, *off),
         Op::Sw { rs2, rs1, off } => encode::sw(*rs2, *rs1, *off),
         Op::Sd { rs2, rs1, off } => encode::sd(*rs2, *rs1, *off),
+        Op::FpR {
+            funct7,
+            rs2,
+            rs1,
+            funct3,
+            rd,
+        } => encode::fpr(*funct7, *rs2, *rs1, *funct3, *rd),
         Op::Label(_)
         | Op::Comment(_)
         | Op::Glob(_)
         | Op::Directive(_)
         | Op::La { .. }
         | Op::Li { .. }
+        | Op::Dw64 { .. }
         | Op::Word(_) => {
             return Err("meta op in encode_op".into());
         }
@@ -1087,6 +1867,50 @@ fn op_to_asm(op: &Op) -> String {
             Addr::UiCap => format!("\tla\t{}, __ui_cap", reg_name(*rd)),
             Addr::VioBss => format!("\tla\t{}, __vio", reg_name(*rd)),
             Addr::ScanFb => format!("\tla\t{}, __scan_fb", reg_name(*rd)),
+            Addr::JitIn => format!("\tla\t{}, __jit_in", reg_name(*rd)),
+            Addr::JitHdr => format!("\tla\t{}, __jit", reg_name(*rd)),
+            Addr::JitStk => format!("\tla\t{}, __jit_stk", reg_name(*rd)),
+            Addr::JitCode => format!("\tla\t{}, __jit_code", reg_name(*rd)),
+            Addr::WasmMem => format!("\tla\t{}, __wasm_mem", reg_name(*rd)),
+            Addr::DomT => format!("\tla\t{}, __dom", reg_name(*rd)),
+            Addr::DomS => format!("\tla\t{}, __dom_str", reg_name(*rd)),
+            Addr::DomId => format!("\tla\t{}, __dom_id", reg_name(*rd)),
+            Addr::VirglOut => format!("\tla\t{}, __virgl_out", reg_name(*rd)),
+            Addr::VirglCmd => format!("\tla\t{}, __virgl_cmd", reg_name(*rd)),
+            Addr::VirglReq => format!("\tla\t{}, __virgl_req", reg_name(*rd)),
+            Addr::WebPk => format!("\tla\t{}, __web_pk", reg_name(*rd)),
+            Addr::WebDl => format!("\tla\t{}, __web_dl", reg_name(*rd)),
+            Addr::KGet => format!("\tla\t{}, __kget", reg_name(*rd)),
+        },
+        Op::Dw64 { addr } => match addr {
+            Addr::Label(l) => format!("\t.dword\t{l}"),
+            Addr::Abs(a) => format!("\t.dword\t{a:#x}"),
+            Addr::Rodata => "\t.dword\tboot_log".into(),
+            Addr::StacksEnd | Addr::StackTop => "\t.dword\t__stacks_end".into(),
+            Addr::GrPlane => "\t.dword\t__gr_plane".into(),
+            Addr::UartLine => "\t.dword\t__uart_line".into(),
+            Addr::UiBlob => "\t.dword\t__ui_blob".into(),
+            Addr::UiWasm => "\t.dword\t__ui_wasm".into(),
+            Addr::WasmData => "\t.dword\t__wasm_data".into(),
+            Addr::UiFont => "\t.dword\t__font".into(),
+            Addr::UiDom => "\t.dword\t__ui_dom".into(),
+            Addr::UiCap => "\t.dword\t__ui_cap".into(),
+            Addr::VioBss => "\t.dword\t__vio".into(),
+            Addr::ScanFb => "\t.dword\t__scan_fb".into(),
+            Addr::JitIn => "\t.dword\t__jit_in".into(),
+            Addr::JitHdr => "\t.dword\t__jit".into(),
+            Addr::JitStk => "\t.dword\t__jit_stk".into(),
+            Addr::JitCode => "\t.dword\t__jit_code".into(),
+            Addr::WasmMem => "\t.dword\t__wasm_mem".into(),
+            Addr::DomT => "\t.dword\t__dom".into(),
+            Addr::DomS => "\t.dword\t__dom_str".into(),
+            Addr::DomId => "\t.dword\t__dom_id".into(),
+            Addr::VirglOut => "\t.dword\t__virgl_out".into(),
+            Addr::VirglCmd => "\t.dword\t__virgl_cmd".into(),
+            Addr::VirglReq => "\t.dword\t__virgl_req".into(),
+            Addr::WebPk => "\t.dword\t__web_pk".into(),
+            Addr::WebDl => "\t.dword\t__web_dl".into(),
+            Addr::KGet => "\t.dword\t__kget".into(),
         },
         Op::Li { rd, imm } if *imm > 9 || *imm < 0 => {
             format!("\tli\t{}, {imm:#x}", reg_name(*rd))
@@ -1124,6 +1948,214 @@ fn op_to_asm(op: &Op) -> String {
         Op::Sd { rs2, rs1, off } => {
             format!("\tsd\t{}, {off}({})", reg_name(*rs2), reg_name(*rs1))
         }
+        Op::FenceI => "\tfence.i".into(),
+        Op::Blt { rs1, rs2, to } => {
+            format!("\tblt\t{}, {}, {to}", reg_name(*rs1), reg_name(*rs2))
+        }
+        Op::Bge { rs1, rs2, to } => {
+            format!("\tbge\t{}, {}, {to}", reg_name(*rs1), reg_name(*rs2))
+        }
+        Op::Bltu { rs1, rs2, to } => {
+            format!("\tbltu\t{}, {}, {to}", reg_name(*rs1), reg_name(*rs2))
+        }
+        Op::Bgeu { rs1, rs2, to } => {
+            format!("\tbgeu\t{}, {}, {to}", reg_name(*rs1), reg_name(*rs2))
+        }
+        Op::And { rd, rs, rs2 } => {
+            format!(
+                "\tand\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Or { rd, rs, rs2 } => {
+            format!(
+                "\tor\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Sll { rd, rs, rs2 } => {
+            format!(
+                "\tsll\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Srl { rd, rs, rs2 } => {
+            format!(
+                "\tsrl\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Sra { rd, rs, rs2 } => {
+            format!(
+                "\tsra\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Slt { rd, rs, rs2 } => {
+            format!(
+                "\tslt\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Slti { rd, rs, imm } => {
+            format!("\tslti\t{}, {}, {imm}", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Sltiu { rd, rs, imm } => {
+            format!("\tsltiu\t{}, {}, {imm}", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Srai { rd, rs, shamt } => {
+            format!("\tsrai\t{}, {}, {shamt}", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Div { rd, rs, rs2 } => {
+            format!(
+                "\tdiv\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Rem { rd, rs, rs2 } => {
+            format!(
+                "\trem\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Remu { rd, rs, rs2 } => {
+            format!(
+                "\tremu\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Lb { rd, rs, off } => {
+            format!("\tlb\t{}, {off}({})", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Lh { rd, rs, off } => {
+            format!("\tlh\t{}, {off}({})", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Lhu { rd, rs, off } => {
+            format!("\tlhu\t{}, {off}({})", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Lwu { rd, rs, off } => {
+            format!("\tlwu\t{}, {off}({})", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Sh { rs2, rs1, off } => {
+            format!("\tsh\t{}, {off}({})", reg_name(*rs2), reg_name(*rs1))
+        }
+        Op::Addw { rd, rs, rs2 } => {
+            format!(
+                "\taddw\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Subw { rd, rs, rs2 } => {
+            format!(
+                "\tsubw\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Mulw { rd, rs, rs2 } => {
+            format!(
+                "\tmulw\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Divw { rd, rs, rs2 } => {
+            format!(
+                "\tdivw\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Divuw { rd, rs, rs2 } => {
+            format!(
+                "\tdivuw\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Remw { rd, rs, rs2 } => {
+            format!(
+                "\tremw\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Remuw { rd, rs, rs2 } => {
+            format!(
+                "\tremuw\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Sllw { rd, rs, rs2 } => {
+            format!(
+                "\tsllw\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Srlw { rd, rs, rs2 } => {
+            format!(
+                "\tsrlw\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Sraw { rd, rs, rs2 } => {
+            format!(
+                "\tsraw\t{}, {}, {}",
+                reg_name(*rd),
+                reg_name(*rs),
+                reg_name(*rs2)
+            )
+        }
+        Op::Addiw { rd, rs, imm } => {
+            format!("\taddiw\t{}, {}, {imm}", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Slliw { rd, rs, shamt } => {
+            format!("\tslliw\t{}, {}, {shamt}", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Srliw { rd, rs, shamt } => {
+            format!("\tsrliw\t{}, {}, {shamt}", reg_name(*rd), reg_name(*rs))
+        }
+        Op::Sraiw { rd, rs, shamt } => {
+            format!("\tsraiw\t{}, {}, {shamt}", reg_name(*rd), reg_name(*rs))
+        }
+        Op::FpR {
+            funct7,
+            rs2,
+            rs1,
+            funct3,
+            rd,
+        } => format!("\tfp\tf{rd} <- f{rs1} f{rs2} f7={funct7:#x} f3={funct3}"),
         Op::Word(w) => format!("\t.word\t{w}"),
     }
 }

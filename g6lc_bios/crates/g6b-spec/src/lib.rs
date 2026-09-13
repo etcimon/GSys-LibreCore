@@ -374,6 +374,12 @@ pub struct Tls {
 pub struct Wasm {
     pub enable: bool,
     pub jit: bool,
+    /// Guest JIT substrate (`architecture/WASM.md`): predecoded `__jit_in`
+    /// image + `__jit`/`__jit_stk`/`__jit_code`/`__wasm_mem` BSS + the emitted
+    /// translator routines. `jit_cell`: "" / "auto" = the shipped UI cell;
+    /// "test" = the bounded `g6b_wasm::jcode::test_module` smoke cell.
+    pub guest_jit: bool,
+    pub jit_cell: String,
 }
 
 /// Hardware adapters compiled into the BIOS (`g6b-hw`).
@@ -1560,6 +1566,21 @@ impl BoardSpec {
         }
         if self.kernel.wasm.jit && !self.kernel.wasm.enable {
             return Err("kernel.wasm.jit needs kernel.wasm.enable".into());
+        }
+        if self.kernel.wasm.guest_jit {
+            if !self.kernel.wasm.jit {
+                return Err("kernel.wasm.guest_jit needs kernel.wasm.jit".into());
+            }
+            if self.isa.xlen != 64 {
+                // The guest JIT emits RV64 word ops (addw/lwu/…) for wasm i32.
+                return Err("kernel.wasm.guest_jit needs isa.xlen=64".into());
+            }
+            match self.kernel.wasm.jit_cell.as_str() {
+                "" | "auto" | "test" => {}
+                c => return Err(format!("kernel.wasm.jit_cell {c:?} unknown")),
+            }
+        } else if !self.kernel.wasm.jit_cell.is_empty() {
+            return Err("kernel.wasm.jit_cell needs kernel.wasm.guest_jit".into());
         }
         if self.kernel.http.serve && !self.kernel.http.enable {
             return Err("kernel.http.serve needs kernel.http.enable".into());
@@ -2860,6 +2881,12 @@ fn apply_store(s: &mut StoreCfg, v: &Json) {
 fn apply_wasm(w: &mut Wasm, v: &Json) {
     w.enable = v.get("enable").as_bool().unwrap_or(true);
     w.jit = v.get("jit").as_bool().unwrap_or(w.enable);
+    if let Some(b) = v.get("guest_jit").as_bool() {
+        w.guest_jit = b;
+    }
+    if let Some(s) = v.get("jit_cell").as_str() {
+        w.jit_cell = s.to_string();
+    }
 }
 
 fn apply_http(h: &mut Http, v: &Json) {

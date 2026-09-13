@@ -469,6 +469,24 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
     if let Some(o) = vio {
         m.push(vio_scan_call_node(o));
     }
+    // M4 virgl lane: on a `virtio-gpu-gl-device` board (`proxy.gl`) with the
+    // 2D scanout resource already created by VioScan, run the virgl bring-up —
+    // CAPSET → CTX_CREATE → RESOURCE_CREATE_3D(offscreen RES_RT) →
+    // CTX_ATTACH → SUBMIT_3D(__virgl_cmd execbuffer). The raster lands in the
+    // dedicated offscreen `virgl_fb` surface — deliberately not `vio_fb`, so a
+    // `SUBMIT_3D` render never disturbs the committed 2D frame. After the
+    // reqtab sequence, `VioVirgl` attaches `__virgl_out` as RES_RT's guest
+    // backing and TRANSFER_FROM_HOST_3D pulls the rendered quad back into
+    // guest RAM (the `Smoke::virgl_out` snapshot is the readback gate).
+    if vio.is_some() && gl.is_some() {
+        let gp = g6b_spec_proxy(spec);
+        m.virgl_cmd = crate::virgl::execbuf(gp.0, gp.1);
+        m.virgl_req = crate::virgl::reqtab(gp.0, gp.1);
+        m.virgl_out_bytes = u64::from(gp.0) * u64::from(gp.1) * 4;
+        if let Some(o) = vio {
+            m.push(vio_gl_call_node(o));
+        }
+    }
     if let Some(o) = ui {
         m.ui_bytes = UI_HEADER_BYTES;
         m.ui_wasm = ui_wasm_bytes(spec).to_vec();
@@ -492,6 +510,16 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
     }
     if let Some(o) = wasm_jit {
         m.push(wasm_ui_call_node(o, spec));
+    }
+    if spec.kernel.wasm.guest_jit {
+        // Guest JIT: translate __jit_in → __jit_code, fence.i, run _start.
+        // Independent of the DOM face — its evidence is the WASM-JIT markers.
+        m.push(jit_call_node());
+        // M2 guest DOM: seed the demo tree (idempotent — a cell that already
+        // populated `__dom` via the EXT imports leaves it alone), lay it out,
+        // and raster the dirty nodes into `__scan_fb`. The commit rungs below
+        // (VioPaint/DispPaint/PciPaint) then present that frame.
+        m.push(domt_boot_call_node(spec));
     }
     // The paint pass must run after the last __gr_plane painter (DomPaint
     // inside WasmUi, or GrInit when the DOM lane is absent): FbExpand
@@ -555,6 +583,12 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
         m.push(crate::vio::init_node(o, spec));
         m.push(crate::vio::cmd_node(spec));
         m.push(crate::vio::scan_node(spec));
+        if gl.is_some() {
+            // M4 virgl lane: the 3-desc SUBMIT_3D submitter + the
+            // CAPSET→CTX→SUBMIT→TRANSFER→FLUSH driver (VioVirgl).
+            m.push(crate::vio::cmdbuf_node(spec));
+            m.push(crate::vio::virgl_node(spec));
+        }
         if spec.kernel.gr.enable || spec.kernel.proxy.enable {
             m.push(crate::vio::paint_node(spec));
         }
@@ -604,6 +638,34 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
         // `attach` is a superset of the text face: it brings the same row table,
         // font and `DomPaint`, plus the wasm import shims.
         crate::dom::attach(&mut m, spec);
+        if spec.kernel.wasm.guest_jit {
+            // Guest-JIT substrate: `__jit*`/`__wasm_mem` BSS + the JitRun
+            // translator/executor node, with an empty `__jit_in` (JitRun
+            // reports `WASM-JIT-NOIMG`). `g6b-elf` installs the real image via
+            // `jitr::set_image` — the predecoder lives in `g6b-wasm`, which
+            // already depends on this crate.
+            crate::jitr::attach(&mut m, &[]);
+            // M2 guest DOM tree: `__dom`/`__dom_str` BSS + the node-arena,
+            // DOM-op, layout and `__scan_fb` raster routines. The cell reaches
+            // these through `env.*` EXT trampolines; `DomtBoot` seeds a demo
+            // tree the input→listener→repaint gate mutates.
+            crate::domt::ensure_bss(&mut m);
+            for n in crate::domt::nodes(spec) {
+                m.push(n);
+            }
+            // Packed web present: `WebBlit` decodes `__web_pk` (installed by
+            // g6b-elf when the LDC lane is live) into the latched surface and
+            // returns a0=1 so callers skip the text-face paint paths. `dlp`
+            // adds `DlPaint`/`WebPaint` for `__web_dl` (the display-list
+            // carry): call sites invoke `WebPaint`, which replays the list
+            // when installed and falls back to the pixel pack otherwise.
+            for n in crate::webp::nodes(spec) {
+                m.push(n);
+            }
+            for n in crate::dlp::nodes(spec) {
+                m.push(n);
+            }
+        }
     } else if wants_cli_face(spec) {
         // Text face only: row table + font + `DomPaint`, no wasm import shims.
         crate::dom::attach_text_face(&mut m, spec);
@@ -646,6 +708,24 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
     }
     if m.vio_bytes > 0 {
         ranges.push((Addr::VioBss, m.vio_bytes));
+    }
+    // `__jit`…`__wasm_mem` are contiguous (JitHdr→JitStk→JitCode→WasmMem):
+    // the wasm linear memory must read zero past its data image, and a clean
+    // code arena makes a stray `jalr` deterministic rather than garbage.
+    let jit_bss = m
+        .jit_bytes
+        .saturating_add(m.jit_stk_bytes)
+        .saturating_add(m.jit_code_bytes)
+        .saturating_add(m.wasm_mem_bytes);
+    if jit_bss > 0 {
+        ranges.push((Addr::JitHdr, jit_bss));
+    }
+    // `__dom`/`__dom_str` are contiguous after `__wasm_mem`: the DOM tree
+    // header (count/dirty/focus) must start zeroed so `DomtInit` sees a clean
+    // arena rather than stale warm-boot state.
+    let dom_bss = m.domt_bytes.saturating_add(m.doms_bytes);
+    if dom_bss > 0 {
+        ranges.push((Addr::DomT, dom_bss));
     }
     if !ranges.is_empty() {
         let at = m
@@ -2073,6 +2153,17 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                     rd: RA,
                     to: "DomKey".into(),
                 });
+                if spec.kernel.wasm.guest_jit {
+                    // M2 tree-DOM: the same key press also reaches the guest
+                    // DOM's focused-node listener (`DomtKey` → `DomtDemo`),
+                    // which mutates the tree and bumps `__dom` H_DIRTY so the
+                    // `trap_timer` tick repaints. Own `DOMT_SEEN` watermark —
+                    // DomNav/DomKey keep theirs.
+                    ops.push(Op::Jal {
+                        rd: RA,
+                        to: "DomtKey".into(),
+                    });
+                }
                 if faces_share_plane(spec) {
                     ops.push(Op::Jal {
                         rd: X0,
@@ -2185,10 +2276,12 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 rs: T0,
                 off: crate::dom::DOM_PAINTED,
             },
+            // A clean row-table skips only the __ui_dom repaint — the M2
+            // `__dom` tree still has to be checked before the tick is clean.
             Op::Beq {
                 rs1: T1,
                 rs2: T2,
-                to: "trap_timer_clean".into(),
+                to: "trap_timer_domt".into(),
             },
             Op::Sw {
                 rs2: T1,
@@ -2217,6 +2310,52 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 rd: RA,
                 to: "PciPaint".into(),
             });
+        }
+        // M2 guest DOM tree: when `__dom` has dirty nodes, re-run block layout
+        // then raster them into `__scan_fb` and present the frame on the same
+        // commit rungs the row-table path uses.
+        ops.push(Op::Label("trap_timer_domt".into()));
+        if spec.kernel.wasm.guest_jit {
+            ops.extend([
+                Op::La {
+                    rd: T0,
+                    addr: Addr::DomT,
+                },
+                Op::Lw {
+                    rd: T1,
+                    rs: T0,
+                    off: crate::domt::H_DIRTY,
+                },
+                Op::Beq {
+                    rs1: T1,
+                    rs2: X0,
+                    to: "trap_timer_clean".into(),
+                },
+                // A live packed scene owns the surface: `WebPaint` replays
+                // `__web_dl` (first time / new state) or falls back to the
+                // `__web_pk` pixel decode, or reports the canvas already
+                // live — and the bounded block-flow raster must not paint
+                // text over it.
+                Op::Jal {
+                    rd: RA,
+                    to: "WebPaint".into(),
+                },
+                Op::Bne {
+                    rs1: A0,
+                    rs2: X0,
+                    to: "trap_timer_domt_pk".into(),
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "DomtLayout".into(),
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "DomtRaster".into(),
+                },
+                Op::Label("trap_timer_domt_pk".into()),
+            ]);
+            ops.extend(paint_commit_ops(spec));
         }
         ops.push(Op::Label("trap_timer_clean".into()));
         if faces_share_plane(spec) {
@@ -2773,6 +2912,8 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
         // `Ui` on the band *is* a request for the browser face — the same request
         // the picker's "BIOS UI" entry makes with a keystroke. So it claims the
         // plane rather than dumping the browser's DOM onto the container's frame.
+        // The claim comes *before* the paint paths: a live pack must not leave
+        // the container owning the surface its canvas now covers.
         ops.push(Op::Comment(
             "Ui → the browser face claims the plane (FACE_WEB), then paints".into(),
         ));
@@ -2791,6 +2932,22 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
                 off: crate::FACE_OWNER_OFF,
             },
         ]);
+    }
+    if spec.kernel.wasm.guest_jit {
+        // `Ui` wants the browser face's *canvas*, not its row-table dump:
+        // when a web carry is live `WebPaint` owns the surface and the band
+        // goes straight to the commit rungs.
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "WebPaint".into(),
+        });
+        ops.push(Op::Bne {
+            rs1: A0,
+            rs2: X0,
+            to: "uart_ui_webpk".into(),
+        });
+    }
+    if faces_share_plane(spec) {
         ops.push(Op::Jal {
             rd: RA,
             to: "WasmUi".into(),
@@ -2816,6 +2973,9 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             rd: RA,
             to: "DomPaint".into(),
         });
+    }
+    if spec.kernel.wasm.guest_jit {
+        ops.push(Op::Label("uart_ui_webpk".into()));
     }
     if spec.wants_virtio_gpu() && (spec.kernel.gr.enable || spec.kernel.proxy.enable) {
         ops.push(Op::Comment(
@@ -2905,6 +3065,9 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             },
         ]);
         if spec.kernel.wasm.jit {
+            if faces_share_plane(spec) {
+                ops.extend(face_is(crate::FACE_WEB, "uart_keys_dom_done"));
+            }
             // Refresh the nav.sel/inp.last rows after the drain — the repaint
             // is left to the next Ui/refresh (a query shouldn't flush a frame).
             ops.push(Op::Jal {
@@ -2919,6 +3082,9 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
                 rd: RA,
                 to: "DomAwait".into(),
             });
+            if faces_share_plane(spec) {
+                ops.push(Op::Label("uart_keys_dom_done".into()));
+            }
         }
         ops.push(Op::Jal {
             rd: X0,
@@ -3387,6 +3553,9 @@ fn trap_mbox_ops(spec: &BoardSpec) -> Vec<Op> {
             },
         ]);
         if spec.kernel.wasm.jit {
+            if faces_share_plane(spec) {
+                ops.extend(face_is(crate::FACE_WEB, "mbox_keys_dom_done"));
+            }
             ops.extend([
                 Op::Jal {
                     rd: RA,
@@ -3398,7 +3567,14 @@ fn trap_mbox_ops(spec: &BoardSpec) -> Vec<Op> {
                 },
             ]);
         }
+        if spec.kernel.wasm.jit && faces_share_plane(spec) {
+            ops.push(Op::Label("mbox_keys_dom_done".into()));
+        }
         ops.extend([
+            Op::Li {
+                rd: T0,
+                imm: base as i64,
+            },
             Op::Li {
                 rd: T1,
                 imm: i64::from(MBOX_RSP_KEYS),
@@ -3877,6 +4053,22 @@ fn vio_scan_call_node(o: Object) -> Node {
             Op::Jal {
                 rd: RA,
                 to: "VioScan".into(),
+            },
+        ],
+    }
+}
+
+fn vio_gl_call_node(o: Object) -> Node {
+    Node {
+        purpose: Purpose::Virtio,
+        ops: vec![
+            Op::Comment(format!(
+                "{} — jal VioVirgl (virgl CAPSET→CTX_CREATE→SUBMIT_3D→TRANSFER→FLUSH)",
+                o.why
+            )),
+            Op::Jal {
+                rd: RA,
+                to: "VioVirgl".into(),
             },
         ],
     }
@@ -4433,6 +4625,68 @@ fn wasm_jit_call_node(o: Object) -> Node {
     }
 }
 
+fn jit_call_node() -> Node {
+    Node {
+        purpose: Purpose::WasmJit,
+        ops: vec![
+            Op::Comment("guest JIT — jal JitRun (translate __jit_in → run)".into()),
+            Op::Jal {
+                rd: RA,
+                to: "JitRun".into(),
+            },
+        ],
+    }
+}
+
+/// `jal DomtBoot; jal DomtLayout; jal DomtRaster` — seed the M2 demo DOM tree
+/// (no-op when the cell already populated `__dom`), compute the block-flow
+/// rects, and raster the dirty nodes into `__scan_fb`. Runs in normal boot
+/// context; the s-regs the raster pass uses are caller-saved here.
+fn domt_boot_call_node(spec: &BoardSpec) -> Node {
+    // `DomtBoot` always runs — it seeds the demo tree when the cell left
+    // `__dom` empty. The raster is different: on a board whose picker shares
+    // the plane (`faces_share_plane`), the picker is the power-on face and the
+    // browser must not paint over it — the face-gated timer tick lays out and
+    // rasters `__dom` only once the browser owns the plane. On a
+    // browser-owns-the-plane build there is no picker, so the raster runs here
+    // to put the DOM on the power-on frame.
+    let mut ops = vec![
+        Op::Comment("guest DOM — DomtBoot seeds __dom; raster is face-gated".into()),
+        Op::Jal {
+            rd: RA,
+            to: "DomtBoot".into(),
+        },
+    ];
+    if !faces_share_plane(spec) {
+        // The packed scene is the power-on frame when one is installed —
+        // `WebPaint` paints it (or reports the canvas already live) and the
+        // text rasterizer stays out of its surface.
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "WebPaint".into(),
+        });
+        ops.push(Op::Bne {
+            rs1: A0,
+            rs2: X0,
+            to: "domt_boot_pk".into(),
+        });
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "DomtLayout".into(),
+        });
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "DomtRaster".into(),
+        });
+        ops.push(Op::Label("domt_boot_pk".into()));
+    }
+    let _ = spec;
+    Node {
+        purpose: Purpose::UiDom,
+        ops,
+    }
+}
+
 /// True when the guest paints the `g6b-zealcli` container itself: a CLI face and a
 /// plane to paint it on.
 ///
@@ -4529,11 +4783,25 @@ fn wasm_ui_call_node(o: Object, spec: &BoardSpec) -> Node {
         ));
         ops.extend(face_is(crate::FACE_WEB, "wasm_ui_skip"));
     }
+    if spec.kernel.wasm.guest_jit {
+        // A live packed scene owns the surface: `WebPaint` paints the carry
+        // (a0=1) and the row-table `WasmUi` paint is the fallback for a build
+        // with no pack — e.g. the bounded `test` cell.
+        ops.push(Op::Jal {
+            rd: RA,
+            to: "WebPaint".into(),
+        });
+        ops.push(Op::Bne {
+            rs1: A0,
+            rs2: X0,
+            to: "wasm_ui_skip".into(),
+        });
+    }
     ops.push(Op::Jal {
         rd: RA,
         to: "WasmUi".into(),
     });
-    if faces_share_plane(spec) {
+    if faces_share_plane(spec) || spec.kernel.wasm.guest_jit {
         ops.push(Op::Label("wasm_ui_skip".into()));
     }
     Node {

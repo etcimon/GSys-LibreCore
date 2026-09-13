@@ -163,10 +163,93 @@ pub const VIO_GPU_SET_SCANOUT: u32 = 0x0103;
 pub const VIO_GPU_RESOURCE_FLUSH: u32 = 0x0104;
 pub const VIO_GPU_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 pub const VIO_GPU_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
+/// `VIRTIO_GPU_CMD_GET_CAPSET_INFO` — enumerate a capability set
+/// (`capset_index`); answered by `RESP_OK_CAPSET_INFO`.
+pub const VIO_GPU_GET_CAPSET_INFO: u32 = 0x0108;
+/// `VIRTIO_GPU_CMD_GET_CAPSET` — fetch `capset_id`/`capset_version` data.
+pub const VIO_GPU_GET_CAPSET: u32 = 0x0109;
+/// 3D commands — present only when the device offers `VIRTIO_GPU_F_VIRGL`.
+/// `VIRTIO_GPU_CMD_CTX_CREATE` (ctx_id + debug_name in the ctrl_hdr).
+pub const VIO_GPU_CTX_CREATE: u32 = 0x0200;
+/// `VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE` — bind `resource_id` to `ctx_id`.
+pub const VIO_GPU_CTX_ATTACH_RESOURCE: u32 = 0x0202;
+/// `VIRTIO_GPU_CMD_RESOURCE_CREATE_3D` — target/format/bind + 3D extent.
+pub const VIO_GPU_RESOURCE_CREATE_3D: u32 = 0x0204;
+/// `VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D` — guest→host on a 3D resource.
+pub const VIO_GPU_TRANSFER_TO_HOST_3D: u32 = 0x0205;
+/// `VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D` — host→guest on a 3D resource.
+pub const VIO_GPU_TRANSFER_FROM_HOST_3D: u32 = 0x0206;
+/// `VIRTIO_GPU_CMD_SUBMIT_3D` — the execbuffer: `virtio_gpu_cmd_submit`
+/// (32B) followed by `size` bytes of virgl command stream in the OUT
+/// descriptors. `size` counts bytes; `virgl_renderer_submit_cmd` gets `size/4`
+/// dwords.
+pub const VIO_GPU_SUBMIT_3D: u32 = 0x0207;
 /// virtio-gpu response types (`resp_hdr.type`).
 pub const VIO_GPU_RESP_OK_NODATA: u32 = 0x1100;
 pub const VIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+/// `VIRTIO_GPU_RESP_OK_CAPSET_INFO` — carries id/max_version/max_size.
+pub const VIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102;
+/// `VIRTIO_GPU_RESP_OK_CAPSET` — carries the capset blob.
+pub const VIO_GPU_RESP_OK_CAPSET: u32 = 0x1103;
 pub const VIO_GPU_RESP_ERR_UNSPEC: u32 = 0x1200;
+/// `VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY`.
+pub const VIO_GPU_RESP_ERR_OUT_OF_MEMORY: u32 = 0x1201;
+/// `VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID`.
+pub const VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID: u32 = 0x1203;
+/// `VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID`.
+pub const VIO_GPU_RESP_ERR_INVALID_CONTEXT_ID: u32 = 0x1204;
+/// `VIRTIO_GPU_RESP_ERR_INVALID_PARAMETER` (e.g. a malformed execbuffer).
+pub const VIO_GPU_RESP_ERR_INVALID_PARAMETER: u32 = 0x1205;
+/// virtio-gpu feature bits in the **low** 32-bit word (`FEATURES_SEL=0`).
+/// `VIRTIO_GPU_F_VIRGL` — the device runs a virgl/GLES renderer for
+/// `SUBMIT_3D`; `VIRTIO_GPU_F_CONTEXT_INIT` — `CTX_CREATE` carries an
+/// `context_init` mask; `VIRTIO_GPU_F_RESOURCE_BLOB` — blob resources.
+pub const VIO_GPU_F_VIRGL: u32 = 1 << 0;
+pub const VIO_GPU_F_RESOURCE_BLOB: u32 = 1 << 10;
+pub const VIO_GPU_F_CONTEXT_INIT: u32 = 1 << 11;
+/// `VIRTIO_GPU_CAPSET_VIRGL` / `_VIRGL2` — the virgl capability-set ids
+/// `GET_CAPSET_INFO` indexes 0/1 map to on a virgl device.
+pub const VIO_GPU_CAPSET_VIRGL: u32 = 1;
+pub const VIO_GPU_CAPSET_VIRGL2: u32 = 2;
+/// virgl execbuffer command header: `cmd_id | (obj_type << 8) | (size << 16)`
+/// where `size` is the total dword count of the command **including** the
+/// header (`virgl_protocol.h` `VIRGL_CMD0`). The `ctx_id`/`ring` ride the
+/// `virtio_gpu_cmd_submit` header, not the stream.
+pub const fn virgl_cmd0(cmd: u32, obj: u32, size: u32) -> u32 {
+    (cmd & 0xff) | ((obj & 0xff) << 8) | ((size & 0xffff) << 16)
+}
+/// virgl object types (`virgl_object_type`) used by `CREATE_OBJECT`/
+/// `BIND_OBJECT`.
+pub const VIRGL_OBJ_BLEND: u32 = 1;
+pub const VIRGL_OBJ_RASTERIZER: u32 = 2;
+pub const VIRGL_OBJ_DSA: u32 = 3;
+pub const VIRGL_OBJ_SHADER: u32 = 4;
+pub const VIRGL_OBJ_VERTEX_ELEMENTS: u32 = 5;
+pub const VIRGL_OBJ_SAMPLER_VIEW: u32 = 6;
+pub const VIRGL_OBJ_SAMPLER_STATE: u32 = 7;
+pub const VIRGL_OBJ_SURFACE: u32 = 8;
+/// virgl command ids (`virgl_ccmd`) used by the bounded quad stream.
+pub const VIRGL_CCMD_NOP: u32 = 0;
+pub const VIRGL_CCMD_CREATE_OBJECT: u32 = 1;
+pub const VIRGL_CCMD_BIND_OBJECT: u32 = 2;
+pub const VIRGL_CCMD_DESTROY_OBJECT: u32 = 3;
+pub const VIRGL_CCMD_SET_VIEWPORT_STATE: u32 = 4;
+pub const VIRGL_CCMD_SET_FRAMEBUFFER_STATE: u32 = 5;
+pub const VIRGL_CCMD_SET_VERTEX_BUFFERS: u32 = 6;
+pub const VIRGL_CCMD_CLEAR: u32 = 7;
+pub const VIRGL_CCMD_DRAW_VBO: u32 = 8;
+pub const VIRGL_CCMD_RESOURCE_INLINE_WRITE: u32 = 9;
+pub const VIRGL_CCMD_SET_SAMPLER_VIEWS: u32 = 10;
+pub const VIRGL_CCMD_SET_SCISSOR_STATE: u32 = 15;
+pub const VIRGL_CCMD_BIND_SAMPLER_STATES: u32 = 18;
+pub const VIRGL_CCMD_BIND_SHADER: u32 = 31;
+/// Pipe shader stages (`pipe_shader_type`) for `CREATE_OBJECT(SHADER)`/
+/// `BIND_SHADER`: `PIPE_SHADER_VERTEX`/`PIPE_SHADER_FRAGMENT`.
+pub const VIRGL_SHADER_VERTEX: u32 = 0;
+pub const VIRGL_SHADER_FRAGMENT: u32 = 1;
+/// `PIPE_PRIM_*` draw modes for `DRAW_VBO`.
+pub const VIRGL_PRIM_TRIANGLES: u32 = 4;
+pub const VIRGL_PRIM_TRIANGLE_STRIP: u32 = 5;
 /// `virtio_input_event` field values: `type` (Linux `EV_*`).
 /// `InpDrain` queues `EV_KEY` into `__vio`'s bounded key queue (VGA
 /// `DomNav`); `EV_ABS`/`EV_REL` are WebFeed (svelte-d pointer). The
@@ -295,8 +378,210 @@ pub fn xor(rd: u32, rs1: u32, rs2: u32) -> u32 {
     (rs2 << 20) | (rs1 << 15) | (0x4 << 12) | (rd << 7) | 0x33
 }
 
+/// `and rd, rs1, rs2` — register AND (JIT word building / wasm `i32.and`).
+pub fn and_(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (0x7 << 12) | (rd << 7) | 0x33
+}
+
+/// `or rd, rs1, rs2`.
+pub fn or_(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (0x6 << 12) | (rd << 7) | 0x33
+}
+
+/// `sll rd, rs1, rs2`.
+pub fn sll(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (0x1 << 12) | (rd << 7) | 0x33
+}
+
+/// `srl rd, rs1, rs2`.
+pub fn srl(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (0x5 << 12) | (rd << 7) | 0x33
+}
+
+/// `sra rd, rs1, rs2` — arithmetic register shift.
+pub fn sra(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x20 << 25) | (rs2 << 20) | (rs1 << 15) | (0x5 << 12) | (rd << 7) | 0x33
+}
+
+/// `slt rd, rs1, rs2` — signed compare (wasm `i32.lt_s` etc.).
+pub fn slt(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (rs2 << 20) | (rs1 << 15) | (0x2 << 12) | (rd << 7) | 0x33
+}
+
+/// `slti rd, rs1, imm`.
+pub fn slti(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (check_imm12(imm) << 20) | (rs1 << 15) | (0x2 << 12) | (rd << 7) | 0x13
+}
+
+/// `sltiu rd, rs1, imm` — `sltiu rd, rs, 1` is `seqz`.
+pub fn sltiu(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (check_imm12(imm) << 20) | (rs1 << 15) | (0x3 << 12) | (rd << 7) | 0x13
+}
+
+/// `srai rd, rs1, shamt` — arithmetic immediate shift (imm = 0x400|shamt).
+pub fn srai(rd: u32, rs1: u32, shamt: u32) -> u32 {
+    (((0x400 | (shamt & 0x3f)) & 0xfff) << 20) | (rs1 << 15) | (0x5 << 12) | (rd << 7) | 0x13
+}
+
+/// `div rd, rs1, rs2` — signed divide (M ext).
+pub fn div(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x01 << 25) | (rs2 << 20) | (rs1 << 15) | (0x4 << 12) | (rd << 7) | 0x33
+}
+
+/// `rem rd, rs1, rs2` — signed remainder (M ext).
+pub fn rem(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x01 << 25) | (rs2 << 20) | (rs1 << 15) | (0x6 << 12) | (rd << 7) | 0x33
+}
+
+/// `remu rd, rs1, rs2` — unsigned remainder (M ext).
+pub fn remu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x01 << 25) | (rs2 << 20) | (rs1 << 15) | (0x7 << 12) | (rd << 7) | 0x33
+}
+
+/// `blt rs1, rs2, off` — signed less-than branch (funct3 = 0b100).
+pub fn blt(rs1: u32, rs2: u32, imm: i32) -> u32 {
+    beq(rs1, rs2, imm) | (0x4 << 12)
+}
+
+/// `bge rs1, rs2, off` — signed greater-or-equal branch.
+pub fn bge(rs1: u32, rs2: u32, imm: i32) -> u32 {
+    beq(rs1, rs2, imm) | (0x5 << 12)
+}
+
+/// `bltu rs1, rs2, off` — unsigned less-than branch.
+pub fn bltu(rs1: u32, rs2: u32, imm: i32) -> u32 {
+    beq(rs1, rs2, imm) | (0x6 << 12)
+}
+
+/// `bgeu rs1, rs2, off` — unsigned greater-or-equal branch.
+pub fn bgeu(rs1: u32, rs2: u32, imm: i32) -> u32 {
+    beq(rs1, rs2, imm) | (0x7 << 12)
+}
+
+/// `lb rd, off(rs1)` — sign-extended byte load.
+pub fn lb(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (check_imm12(imm) << 20) | (rs1 << 15) | (rd << 7) | 0x03
+}
+
+/// `lh rd, off(rs1)` — sign-extended halfword load.
+pub fn lh(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (check_imm12(imm) << 20) | (rs1 << 15) | (0x1 << 12) | (rd << 7) | 0x03
+}
+
+/// `lhu rd, off(rs1)` — zero-extended halfword load.
+pub fn lhu(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (check_imm12(imm) << 20) | (rs1 << 15) | (0x5 << 12) | (rd << 7) | 0x03
+}
+
+/// `lwu rd, off(rs1)` — zero-extended word load (RV64 only).
+pub fn lwu(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (check_imm12(imm) << 20) | (rs1 << 15) | (0x6 << 12) | (rd << 7) | 0x03
+}
+
+/// `sh rs2, off(rs1)` — halfword store.
+pub fn sh(rs2: u32, rs1: u32, imm: i32) -> u32 {
+    let imm = (imm as u32) & 0xfff;
+    ((imm >> 5) << 25) | (rs2 << 20) | (rs1 << 15) | (0x1 << 12) | ((imm & 0x1f) << 7) | 0x23
+}
+
+/// `fence.i` — instruction-fetch fence; required between guest codegen into
+/// `__jit_code` and jumping to it (icache coherence, Priv "Zifencei").
+pub fn fence_i() -> u32 {
+    0x0000_100f
+}
+
+// ---- RV64 word ops (opcode OP-32 / OP-IMM-32): canonical sign-extended
+// 32-bit results — what the guest JIT emits for wasm i32 ops on xlen=64.
+
+fn op32(rd: u32, rs1: u32, rs2: u32, f3: u32, f7: u32) -> u32 {
+    (f7 << 25) | (rs2 << 20) | (rs1 << 15) | (f3 << 12) | (rd << 7) | 0x3b
+}
+
+/// `addw rd, rs1, rs2` — 32-bit add, sign-extended result.
+pub fn addw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    op32(rd, rs1, rs2, 0, 0)
+}
+
+/// `subw rd, rs1, rs2`.
+pub fn subw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    op32(rd, rs1, rs2, 0, 0x20)
+}
+
+/// `mulw rd, rs1, rs2`.
+pub fn mulw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    op32(rd, rs1, rs2, 0, 1)
+}
+
+/// `sllw rd, rs1, rs2`.
+pub fn sllw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    op32(rd, rs1, rs2, 1, 0)
+}
+
+/// `srlw rd, rs1, rs2`.
+pub fn srlw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    op32(rd, rs1, rs2, 5, 0)
+}
+
+/// `sraw rd, rs1, rs2`.
+pub fn sraw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    op32(rd, rs1, rs2, 5, 0x20)
+}
+
+/// `divw rd, rs1, rs2`.
+pub fn divw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    op32(rd, rs1, rs2, 4, 1)
+}
+
+/// `divuw rd, rs1, rs2`.
+pub fn divuw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    op32(rd, rs1, rs2, 5, 1)
+}
+
+/// `remw rd, rs1, rs2`.
+pub fn remw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    op32(rd, rs1, rs2, 6, 1)
+}
+
+/// `remuw rd, rs1, rs2`.
+pub fn remuw(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    op32(rd, rs1, rs2, 7, 1)
+}
+
+/// `addiw rd, rs1, imm`.
+pub fn addiw(rd: u32, rs1: u32, imm: i32) -> u32 {
+    (check_imm12(imm) << 20) | (rs1 << 15) | (rd << 7) | 0x1b
+}
+
+/// `slliw rd, rs1, shamt` (5-bit shamt).
+pub fn slliw(rd: u32, rs1: u32, shamt: u32) -> u32 {
+    ((shamt & 0x1f) << 20) | (rs1 << 15) | (0x1 << 12) | (rd << 7) | 0x1b
+}
+
+/// `srliw rd, rs1, shamt` (5-bit shamt).
+pub fn srliw(rd: u32, rs1: u32, shamt: u32) -> u32 {
+    ((shamt & 0x1f) << 20) | (rs1 << 15) | (0x5 << 12) | (rd << 7) | 0x1b
+}
+
+/// `sraiw rd, rs1, shamt` (imm = 0x400|shamt).
+pub fn sraiw(rd: u32, rs1: u32, shamt: u32) -> u32 {
+    (((0x400 | (shamt & 0x1f)) & 0xfff) << 20) | (rs1 << 15) | (0x5 << 12) | (rd << 7) | 0x1b
+}
+
 pub fn sub(rd: u32, rs1: u32, rs2: u32) -> u32 {
     (0x20 << 25) | (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x33
+}
+
+/// Scalar-FP R-type (opcode `0x53`, OP-FP): `funct7 rs2 rs1 funct3 rd 1010011`.
+/// One encoder covers the whole f32/f64 surface — `fadd.s` (f7=0x00),
+/// `fle.s` (f7=0x50,f3=0), `fcvt.s.wu` (f7=0x68,rs2=1), `fmv.w.x`
+/// (f7=0x78,rs2=0,f3=0), etc.
+pub fn fpr(funct7: u32, rs2: u32, rs1: u32, funct3: u32, rd: u32) -> u32 {
+    ((funct7 & 0x7f) << 25)
+        | ((rs2 & 0x1f) << 20)
+        | ((rs1 & 0x1f) << 15)
+        | ((funct3 & 0x7) << 12)
+        | ((rd & 0x1f) << 7)
+        | 0x53
 }
 
 /// `sltu rd, rs1, rs2` — R-type, funct3=0b011.

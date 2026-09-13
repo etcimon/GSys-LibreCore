@@ -80,7 +80,9 @@
     "ui": "svelte-d",
     "wasm": {
       "enable": true,
-      "jit": true
+      "jit": true,
+      "guest_jit": true,
+      "jit_cell": "auto"
     },
     "display": "html-js",
     "browser": {
@@ -150,7 +152,8 @@
   },
   "uncore": {
     "clint": true,
-    "plic": true
+    "plic": true,
+    "storage": true
   },
   "entry": {
     "hotkey": "DEL",

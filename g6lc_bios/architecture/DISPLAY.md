@@ -158,13 +158,23 @@ offsets are unchanged, so existing readers are unaffected.
 index, surface, geometry, framebuffer and HPD state, plus the `PciProbe`
 result. `DispSel` runs after every probe and before anything paints.
 
+**The surface field is a live latch, not a probe record.** `DispSel` stores the
+rung's own default, and then the face that owns the plane rewrites it:
+`CliInit` stores `vga` when the container claims the screen (the 4bpp plane
+magnifies through `FbExpand` — the intended scaled-text look on a high-res
+output), and `AutoPick`/`Ui` store `default_surface()` when the browser face
+takes over (native `FbExpand1`/`DomPaint32`). `FbExpandSel` therefore always
+follows the current owner, which is also why a run-end read of
+`__disp.surface` reports who owns the plane, not what `DispSel` resolved —
+`DISP-SEL <class><surface>` on serial is the record of the latch itself.
+
 **The blit is surface-gated.** `FbExpand` (upscale + letterbox) and `FbExpand1`
 (scale 1, centred) are two specialisations of one generator; `FbExpandSel`
 reads `__disp.surface` and calls the right one, and `VioPaint`, `DispPaint`
 and `PciPaint` all go through it. That is the concrete fix for "the low-res
-plane is magnified onto the GPU display": on a GPU-class output the 640×480
-plane is now placed 1:1 at (640, 300) of a 1920×1080 scanout instead of being
-blown up ×2.
+plane is magnified onto the GPU display": while the browser face owns the
+plane on a GPU-class output the 640×480 plane is placed 1:1 at (640, 300) of
+a 1920×1080 scanout instead of being blown up ×2.
 
 **Output geometry is runtime.** `DispSel` latches the winning output's
 `w`/`h`/`stride` into `__disp`, and every downstream consumer reads them there
@@ -246,6 +256,35 @@ rather than offset ones, and additionally assert the old 1:1 origin is now clear
 All three run on RV32 and RV64. The low-res `__gr_plane` / `DomPaint` path
 remains intact for VGA-class output. Host `ui_ppm` is a 16-colour downsample
 of the live Engine canvas, not a second HTML CSS raster.
+
+### Guest web paint: `__web_dl` display list → `DlPaint`
+
+The browser face's pixels reach `__scan_fb` two guest ways, both under
+`WebPaint`. `__web_pk` is a host-rendered Canvas32 packed into `.rodata`;
+`WebBlit` RLE-decodes it row-by-row (the `xlen-31` literal-count funnel keeps
+the RV64 `lw` sign-extension out of the run count). `__web_dl` is the same
+scene recorded as a **display list**: `Canvas32` runs an opt-in recorder
+inside `blend_rect`/`fill_rounded_rect`/`stroke_rounded_rect`/`blend_coverage`,
+`g6b-kernel::dl_pack` serializes per-menu `{FILL, FILLR, STRKR, COV, TILEPX,
+TREF}` records plus a content-dedup'd glyph atlas and the hit boxes, and
+`DlPaint` replays them into the latched framebuffer. `TREF` resolves live
+`__dom` text through `__dom_id` → `DlFindId`, so a value the JS cell edits
+later repaints without a fresh pack; it still carries the packed fallback text
+for when the node is absent. `WebPaint` is `DlPaint` then `WebBlit` on an
+absent or malformed list, and both stamp `__ui_cap` WEB so `VioPaint` hands
+the frame to the plane exactly as `GuestWebPresent` does — the CLI stays the
+power-on owner until `AutoPick` flips `FACE_OWNER`.
+
+`DlPaint` keeps a whole-frame replay inside the exec-model step budget by
+decomposing `inside_rounded` rather than scanning each bounding box: `FILLR`
+is three solid spans plus the four `r×r` corner squares (the only pixels where
+`cx` and `cy` are both nonzero), and `STRKR` is just the four corner squares —
+`stroke_rounded_rect` paints corner arcs because the `cy==0`/`cx==0` clause
+keeps the straight bands *inside* the inner rect, so no edge spans exist to
+emit. Inside pixels feed `DlBlendPx`; opaque rects take a `sw` span loop.
+`tools/qemu_web_autoboot.sh` on `virtio-gpu-device` (no GL) shows the full
+1920×1080 svelte-d scene through `WEBDL`, with `WEBPK` the recorded fallback
+on an absent or invalid list.
 
 ### Refusals, stated rather than implied
 
@@ -550,10 +589,36 @@ selected by BoardSpec:
   the device (`egl: no drm render node available` — confirmed on WSL2 QEMU
   8.2.2, whose d3d12/WSLg driver is not a DRM render node). Use
   `qemu-args --no-gl` for the 2D
-  `virtio-gpu-device` fallback. The guest command stream is identical either
-  way — virgl only accelerates host-side composite; the BIOS does not emit
-  3D commands. `GL-ADAPTER`/ProxyScale RVV is a *guest-side* scale accel
-  listing, not QEMU virgl — do not equate them.
+  `virtio-gpu-device` fallback. `GL-ADAPTER`/ProxyScale RVV is a
+  *guest-side* scale accel listing, not QEMU virgl — do not equate them.
+  **M4 (guest virgl lane):** on a `proxy.gl` board `VioInit` now also accepts
+  `VIRTIO_GPU_F_VIRGL` in the driver-features word, and `VioVirgl` (after
+  `VioScan`, before `VioPaint`) drives a real virgl bring-up over the ctrlq:
+  `GET_CAPSET_INFO`/`GET_CAPSET` (virgl capset) → `CTX_CREATE`(ctx 1) →
+  `RESOURCE_CREATE_3D`(`RES_RT`, offscreen render target) →
+  `CTX_ATTACH_RESOURCE` → `SUBMIT_3D` carrying the `__virgl_cmd` execbuffer —
+  a `VIRGL_CMD0`-framed textured-quad object/state/`CLEAR`/`DRAW_VBO` stream
+  (`crates/g6b-asm/src/virgl.rs`). `SUBMIT_3D` is a three-descriptor chain
+  (32-byte `cmd_submit` OUT + execbuffer OUT + resp WRITE); the exec model
+  gathers *all* OUT descriptors before dispatch (`vio_exec_chain`). The
+  raster lands in a **dedicated offscreen `virgl_fb` surface**, not the 2D
+  scanout `vio_fb` — a `SUBMIT_3D` render never disturbs the committed frame.
+  **M4b (guest readback):** `virgl_fb` is device-side host memory, so
+  `VioVirgl` then `sw`-builds `RESOURCE_ATTACH_BACKING`(`RES_RT`→`__virgl_out`,
+  a `Addr::VirglOut` BSS region) + `TRANSFER_FROM_HOST_3D` to DMA the rendered
+  quad back into guest RAM — `entries[0].addr` carries the resolved
+  `La VirglOut` address, which a static `__virgl_req` record cannot hold, so
+  the readback pair is codegen'd rather than tabled. `Smoke::virgl_out`
+  snapshots the guest buffer via `csr.virgl_backing[RES_RT]`.
+  Exec-model verification: `virgl_submit_executes_textured_quad` (asserts
+  `virgl_out == virgl_fb` byte-exact — the checkerboard lands in guest RAM),
+  `virgl_exec_rasterizes_inline_texture`, `virgl_texture_byte_kill_test`,
+  `virgl_transfer_requires_attached_backing` (unbacked/unknown-resource
+  refusals), plus the negotiated-feature gate (`virgl_live` = `vio_gl` *and*
+  the accepted `VIRTIO_GPU_F_VIRGL` bit, not mere device capability).
+  **Honest bound:** the model parses and rasterizes the stream itself;
+  byte-exact TGSI sampling and real-GPU QEMU rasterization stay open until a
+  host DRM render node exists.
 
 Conformity: HDMI TMDS / DisplayPort PHY stay in `corev_apu` / board (REQUIREMENTS).
 This package emits the register contract, timing metadata and the scaled

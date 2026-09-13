@@ -78,6 +78,10 @@ Read this as five bands:
 
 ## 3. The Svelte pipeline: one parse, three lanes
 
+**2026-09-11 presentation revision.** `App.svelte` and `Store.svelte` declare read bindings; they contain no fetch implementation, HolyC execution, endpoint registration, or startup SQL writes. All seven menu bodies are populated by the generated D cell from kernel data. The native JS import adapter unwraps the router's `{id,title,items}` envelope to the same row-array ABI as Rust. Access labels distinguish spec capability from the read-only UI.
+
+**Render evidence must use the live cell.** `live_paint_root` now prefers the cell's `main` under `libwasm-root`, and hit paths prefer that subtree as well. The former static-shell preference could produce attractive screenshots without exercising the cell's DOM. `live_svelte_root_and_all_menu_rows_come_from_the_ldc_cell` asserts root identity, real menu data, and keyboard-driven raster/visibility changes.
+
 Everything lives in `browser-ui/compiler/`.
 
 ```
@@ -107,6 +111,7 @@ records an op:
 | `registerEndpoint("/p","POST")` / `kernel.register(…)` | `{kind:"register", path, method}` |
 | `pgliteOpen/pgliteExec/pgliteQuery/…` | `{kind:"pglite", method, arg1, arg2, bind, awaited}` |
 | `{expr}` in markup, `{#if}` | `TextOp` (with optional `bind`/`field`), `VisibleOp` |
+| `data-menu="cpu"` / `data-fetch="/bios/store"` | Deduplicated read-only `FetchOp`; requests execute through the external kernel/host provider. A `pre`/`p`/`span` with `data-fetch` receives the response text in the D lane. |
 
 This is the single most important thing to understand before adding a feature:
 **a new capability is a new op kind plus a printer arm in each lane you care
@@ -440,6 +445,109 @@ and `dub` binaries. Any change to any of those flips the hash.
 > means binding a store-shaped context **and** letting a degraded accumulator
 > stay degraded instead of throwing mid-chain.
 
+### 7.4 The guest-JIT lane — the cell running *as RISC-V* in the payload
+
+Separate from all three hosts above: `kernel.wasm.guest_jit` compiles a
+**JIT written in RISC-V** into the BIOS payload itself (`g6b-asm::jitr`,
+`Purpose::WasmJit`). It translates the wasm cell to `__jit_code` BSS,
+`fence.i`s it, and `jalr`s the entry — the cell executes *natively* on the
+emulated core, not through a `Host` impl. This is the path the BIOS actually
+takes on hardware; the `KernelHost`/`kernel.ts` lanes are the host-side and
+browser-side oracles.
+
+`env.*` imports lower to a fixed `jit_ext_tab` of guest routines
+(`g6b-asm/src/jitr.rs`) that bridge onto the `__dom`/`__dom_str`/`__dom_id`
+arena (`g6b-asm/src/domt.rs`). The **libwasm handle ABI the bridge adapts**:
+a DOM handle is `node_index + 1` (`getRoot`→`1`, `createElement`→`2,3,…`);
+`createElement` takes a `NodeType` **ordinal** (stored biased by `TAG_LW` so
+`N_TAG!=0` keeps the node live for the raster); `setProperty` is
+`(handle, nameLen, namePtr, valLen, valPtr)` — **len-before-ptr** — while
+`add_event_listener` is `(targetPtr, targetLen, eventPtr, eventLen, cb,
+capture)` — **ptr-before-len** — and resolves its `target` as an element-id
+**string** via `LwFindId` over `__dom_id`, not as a handle. `setProperty(el,
+"id", v)` writes the `__dom_id` side-table; `fetch`/`puts` get the
+`__wasm_mem` base added (`LwFetch`) because guest-JIT imports carry raw
+linear-memory offsets, unlike the legacy `jit.rs` path that resolves
+`Addr::WasmData` absolutes. `libwasm_await_supported` returns `0` and the
+`libwasm_await_*` stubs stay bounded — **fail-closed, not a fake asyncify**.
+
+The exec model snapshots the arena for tests: `Smoke::domt_{next,live,
+listen,ids}` (`domt_addr` resolves `__dom`; `done()` scans it). The M3d gate
+`guest_jit_executes_shipped_cell` runs the real ~204 KB cell: 252 funcs
+translate, `_start` completes, `domt_next=56 live=56 ids=47 listen=8` (the 8
+`g6b_listen` calls resolve id→node→`N_LEV`), 279K px painted into
+`__scan_fb`, and **no** `DomtBoot` `0x1e3a5a` demo fallback — the cell's own
+tree painted. Honest limits: exec-model only, bounded `DomtRaster` (not the
+CSS/goosie engine), listeners latch `N_LEV` with `listener=0` (BIOS protocol —
+no wasm-funcidx re-entry yet), `await`/`throw` fail-closed.
+
+### 7.5 The virgl/GLES lane — the guest emitting a real 3D command stream
+
+The 2D path (`VioScan`: `RESOURCE_CREATE_2D` → `ATTACH_BACKING` →
+`SET_SCANOUT` → `TRANSFER_TO_HOST_2D` → `FLUSH`) is a pure scanout blit — it
+never touches 3D. M4 adds the **guest virgl lane** on `proxy.gl` boards
+(`crates/g6b-asm/src/virgl.rs`): `VioInit` now also accepts
+`VIRTIO_GPU_F_VIRGL` in the driver-features word (a plain `virtio-gpu-device`
+offers 0, so the mask accepts nothing — fail-closed, no codegen branch), and
+`VioVirgl` (call-node after `VioScan`, before `VioPaint`) drives the real
+bring-up over the shared ctrlq: `GET_CAPSET_INFO`/`GET_CAPSET` → `CTX_CREATE`
+(ctx 1) → `RESOURCE_CREATE_3D`(`RES_RT`) → `CTX_ATTACH_RESOURCE` →
+`SUBMIT_3D`(`__virgl_cmd`).
+
+Two structural points worth knowing:
+
+- **The request/control plane is a static record table** (`__virgl_req`), not
+  per-dword `sw` ops. Each record is `[req_len][resp_len][flags][req…]`;
+  `VioVirgl` is a compact copy-and-submit loop — `flags&REQFLAG_BUF` selects
+  `VioCmdBuf` (3-desc chain) vs `VioCmd` (2-desc). The execbuffer
+  (`__virgl_cmd`) is rodata, and `SUBMIT_3D`'s 32-byte `virtio_gpu_cmd_submit`
+  header rides desc0 while the command stream rides **a second OUT
+  descriptor** — which is why `vio_exec_chain` now gathers *all* OUT
+  descriptors before dispatch (previously it dispatched on the first).
+- **`VIRGL_CMD0` framing:** `cmd | object<<8 | body_dwords<<16` where the
+  length field is *body dwords excluding the header* — confirmed against the
+  decoder (`set_framebuffer_state` checks `length == 2 + nr_cbufs`). The
+  stream is a textured-quad sequence: surface/shader/vertex-element/sampler
+  objects, `SET_FRAMEBUFFER_STATE`, `CLEAR` (depth is a **double** = 2
+  dwords), `DRAW_VBO` (12 body dwords), plus inline texture/VBO writes.
+
+The exec model parses the stream end-to-end (`virgl_exec`) and rasters the
+textured quad into a **dedicated offscreen `virgl_fb`** — deliberately not
+the 2D scanout `vio_fb`, so a `SUBMIT_3D` render never disturbs the committed
+frame (the earlier shared-surface version corrupted the `vio_paint_scale`/
+`gpu_surface` tests). 3D commands gate on `virgl_live` = `vio_gl` *and* the
+negotiated `VIRTIO_GPU_F_VIRGL` bit (tracked in `vio_drv_feats`), not mere
+device capability.
+
+**M4b guest readback:** `virgl_fb` is device-side host memory, so
+`VioVirgl` then attaches `__virgl_out` (a `Addr::VirglOut` BSS region, last
+in the `stacks` chain after `__dom_id`) as `RES_RT`'s guest backing and
+issues `TRANSFER_FROM_HOST_3D` — the model DMAs `virgl_fb`→guest RAM at the
+attached address. These two requests are `sw`-built (not in `__virgl_req`)
+because `entries[0].addr` must carry the resolved `La VirglOut` BSS address —
+a static rodata record can't hold it. `Smoke::virgl_out` snapshots the guest
+buffer via `csr.virgl_backing[RES_RT]`; `virgl_submit_executes_textured_quad`
+asserts `virgl_out == virgl_fb` byte-exact, and
+`virgl_transfer_requires_attached_backing` covers the unbacked/unknown
+resource refusals. Tests: `virgl_submit_executes_textured_quad`,
+`virgl_exec_rasterizes_inline_texture`, `virgl_texture_byte_kill_test`
+(flip a texel → surface differs), `virgl_transfer_requires_attached_backing`,
+plus invalid-context/malformed-stream coverage.
+
+**Honest bound:** the model parses and rasterizes the stream itself — it is
+*not* real-GPU QEMU rasterization. `egl-headless,gl=on` refuses the device
+without a host DRM render node (`/dev/dri/renderD*`), which WSL lacks, so the
+byte-exact TGSI sampling and QEMU screendump gates stay open until that host
+exists. Do not read `virgl_px`/`virgl_submits` counters as hardware evidence.
+
+> **`image_filesz` must stay the sum of *every* emitted rodata blob.** M4
+> added `__virgl_cmd`/`__virgl_req` to `to_words` but forgot them in
+> `image_filesz`, which silently shifted every `stack_memsz`-derived BSS base
+> (`gr_base`/`scan_fb_base`/`domt_base`/…) off by the virgl size relative to
+> `resolve_addr`'s `stacks` — the snapshots then read a shifted window and the
+> 2D tests failed with `gr_frame` reading all-zeros. The rodata-blob list and
+> `image_filesz` are one logical invariant; add to both together.
+
 ---
 
 ## 8. Store ⇄ volume: how SQL reaches a real filesystem
@@ -544,10 +652,12 @@ is the first artifact, not an afterthought:
 `StoreFactory` (§7.1) — with it false, the cell's `Eval("window.pglite")` is
 refused and the test can only ever fail.
 
-**2 — Does the Svelte source produce the ops?** `Store.svelte` uses
+**2 — Does the Svelte source produce the ops?** The write-oriented tutorial fixture uses
 `pgliteOpen` / `pgliteExec` / `pgliteQuery`, each on the `pgliteMethod`
-allow-list, so `parse.ts` emits `PgliteOp`s, `print-d.ts` prints the `PgLite`
-chain into `app.d`, and `_start` will run it.
+allow-list, so `parse.ts` emits `PgliteOp`s and `print-d.ts` prints a `PgLite`
+chain. The shipped `Store.svelte` no longer runs that tutorial at startup:
+it declares a read-only `/bios/store` binding. Use the compiler's pglite
+fixtures and the Rust volume tests for write scenarios.
 
 **3 — Pin the semantics with a Rust test first.** `crates/g6b-kernel/src/vfs.rs`
 already carries `a_store_round_trips_through_btrfs` and

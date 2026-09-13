@@ -1148,11 +1148,18 @@ export function createLibwasmHost(doc, mount, wasmApi = globalThis.WebAssembly, 
       if (!url || url === ":" || /[\s\[\]]/.test(url)) throw new TypeError("Failed to construct 'Request': Invalid URL");
       if (!/^\/(bios|ui)\//.test(url)) throw new Error("libwasm fetch URL not a local /bios/ or /ui/ path: " + url);
       if (!asyncify) return 1;
-      const promise = fetchFn(url, { method: "GET", credentials: "same-origin", redirect: "error" }).then((r) => {
+      const promise = fetchFn(url, { method: "GET", credentials: "same-origin", cache: "no-store", redirect: "error" }).then((r) => {
         if (typeof r === "string") return r;
         if (!r || typeof r.ok !== "boolean") throw new Error("libwasm fetch returned non-Response");
         if (!r.ok) throw new Error(url + " HTTP " + r.status);
         return r.text();
+      }).then((body) => {
+        const menu = url.match(/^\/bios\/menu\/([a-z0-9-]+)$/);
+        if (!menu) return body;
+        const data = JSON.parse(body);
+        if (Array.isArray(data)) return body;
+        if (data?.id !== menu[1] || !Array.isArray(data.items)) throw new Error("Invalid menu response: " + url);
+        return JSON.stringify(data.items);
       });
       return objAdd(promise);
     },
@@ -2308,6 +2315,22 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
   const initial = ui && ui.getAttribute("data-start-menu");
   let selected = menus.some((node) => node.getAttribute("data-menu") === initial) ? initial : "main";
   let started = false;
+  const fieldFocus = new Map();
+  function focusField(delta) {
+    const fields = [...new Map(Array.from(doc.querySelectorAll("[data-field]"))
+      .filter((field) => field.id?.startsWith("field-" + selected + "-"))
+      .map((field) => [field.id, field])).values()];
+    if (!fields.length) return false;
+    const index = ((fieldFocus.get(selected) || 0) + delta + fields.length) % fields.length;
+    fieldFocus.set(selected, index);
+    fields.forEach((field, i) => {
+      field.setAttribute("class", i === index ? "bios-field bios-field-active" : "bios-field");
+      field.setAttribute("tabindex", i === index ? "0" : "-1");
+      field.setAttribute("aria-selected", String(i === index));
+    });
+    fields[index].focus?.();
+    return true;
+  }
   function message(value) {
     if (status) status.textContent = value;
   }
@@ -2435,7 +2458,9 @@ export function createBrowserApp(doc, fetchFn = globalThis.fetch.bind(globalThis
     if (event.defaultPrevented || event.repeat || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey ||
         event.isComposing || event.target?.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(event.target?.tagName || "")) return;
     const index = menus.findIndex((node) => node.getAttribute("data-menu") === selected);
-    if (event.key === "F10") {
+    if (["ArrowUp", "ArrowDown", "Tab"].includes(event.key) && focusField(event.key === "ArrowUp" ? -1 : 1)) {
+      event.preventDefault();
+    } else if (event.key === "F10") {
       event.preventDefault();
       await refresh();
     } else if (index >= 0 && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {

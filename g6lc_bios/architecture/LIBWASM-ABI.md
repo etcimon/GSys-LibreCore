@@ -411,6 +411,38 @@ set are implemented and tested. `Static_Call_*` and the full Moment method set
 remain `assert(0)` stubs or are absent from the wasm import list — the correct
 fail-closed state, not a gap to paper over with invented return values.
 
+### The guest-JIT lane adapts the same ABI onto `__dom` (B112)
+
+A fourth consumer exists beside host/browser/verifier: the **in-payload JIT**
+(`kernel.wasm.guest_jit`, `g6b-asm::jitr` + `g6b-asm::domt`). The shipped cell
+executes `_start` as generated RISC-V and its `env.*` imports land on a fixed
+`jit_ext_tab` of `Lw*`/`Domt*`/`Wasm*` routines over the `__dom`/`__dom_str`/
+`__dom_id` arena — the same names, but a *generated-code* calling convention
+(raw `a0..a5` and linear-memory offsets, not a Rust `Host` trait). The ABI
+details that differ and must not be conflated with the host table:
+
+- **Handle = `node_index + 1`.** `getRoot`→`1`, `createElement`→`2,3,…`;
+  `0` is invalid. `createElement` takes a `NodeType` ordinal (stored biased by
+  `TAG_LW` so `N_TAG!=0` keeps the node live), not a string tag.
+- **String order is not uniform.** `setProperty` is `(handle, nameLen, namePtr,
+  valLen, valPtr)` — len-before-ptr; `add_event_listener` is `(targetPtr,
+  targetLen, eventPtr, eventLen, cb, capture)` — ptr-before-len.
+- **`add_event_listener` targets an id string,** not a handle: `LwFindId`
+  resolves it over the `__dom_id` side-table that `setProperty(el,"id",v)`
+  populates. `listener=0` is the BIOS protocol (the host runs fetch/select), so
+  a registered listener latches `N_LEV` while `N_LISTEN` stays `0`.
+- **Linear-memory offsets, not absolutes.** `fetch`/`puts`/`add__string` get the
+  `__wasm_mem` base added (`LwFetch`/`LwAddStr`); the legacy `jit.rs` path
+  already resolves `Addr::WasmData` absolutes, so the shim lives only in the
+  `jit_ext_tab` entries.
+- **`await`/`throw` are fail-closed here.** `libwasm_await_supported`→`0`; the
+  `libwasm_await_*` stubs are bounded no-ops, not a guest asyncify suspension.
+
+Exec-model evidence (`guest_jit_executes_shipped_cell`): 252 funcs translate,
+`_start` completes, `domt_next=56 live=56 ids=47 listen=8`, and `DomtRaster`
+paints the cell's own tree into `__scan_fb` with no `DomtBoot` fallback. QEMU
+screendump and listener re-entry remain open.
+
 ## 8. Completion plan
 
 Each stage is independently landable and independently verifiable with

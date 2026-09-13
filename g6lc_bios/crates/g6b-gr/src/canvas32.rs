@@ -22,6 +22,107 @@ pub const WHITE: Rgba = [255, 255, 255, 255];
 /// Fully transparent.
 pub const CLEAR: Rgba = [0, 0, 0, 0];
 
+/// One recorded display-list op — the `__web_dl` guest vocabulary
+/// (`g6b_asm::dlp`). Produced only while [`Canvas32::dl`] is armed; the
+/// primitive records the op *then* paints it, so the vec is the paint log.
+/// Anything the vocabulary cannot express (shadow blur, image blits, direct
+/// `set`/`blend` calls) is caught host-side by the packer's replay-diff and
+/// shipped as `TILEPX` relief — the guest stream is pixel-exact either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DlOp {
+    /// `blend_rect` — opaque store when `c[3] == 255`, source-over else.
+    Fill {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        c: Rgba,
+    },
+    /// `fill_rounded_rect` with `r > 0` post-clamp.
+    FillR {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        r: i32,
+        c: Rgba,
+    },
+    /// `stroke_rounded_rect` with `r > 0` post-clamp.
+    StrkR {
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        r: i32,
+        bw: i32,
+        c: Rgba,
+    },
+    /// `blend_coverage` — row-major `w*h` coverage bitmap blit. `glyph`
+    /// carries the codepoint/size identity when the caller knows it
+    /// (`blit_glyph32`) so the packer can build the atlas char-map for
+    /// `TEXTREF` re-render. `tref` pairs the op with a [`DlOp::Tref`] marker
+    /// key — the packer drops keyed ops an accepted `TREF` replaces.
+    Cov {
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        cov: Vec<u8>,
+        c: Rgba,
+        glyph: Option<DlGlyph>,
+        tref: Option<u32>,
+    },
+    /// `TEXTREF` marker — emitted before the first glyph op of an id'd
+    /// element's single-line text run. The packer validates the region's
+    /// background is uniform, then replaces the marker *and the contiguous
+    /// `Cov` run that follows it* with one `TREF` record: the guest clears
+    /// the rect and re-renders the element's *live* `__dom` text through the
+    /// atlas. When the region is not uniform the marker is dropped and the
+    /// `Cov` run packs as ordinary ops.
+    Tref(DlTref),
+}
+
+/// Payload of [`DlOp::Tref`] — everything `DlPaint` needs to re-render an
+/// element's live text except the background (measured by the packer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DlTref {
+    /// Unique key pairing this marker with its glyph run (packer-internal).
+    pub key: u32,
+    /// Element `id` — the `DlFindId` lookup key into `__dom`.
+    pub id: String,
+    /// Packed fallback text, drawn when the live lookup misses or is empty.
+    pub text: String,
+    /// Clear rect in canvas coords (the element's content box, first line).
+    pub cx: i32,
+    pub cy: i32,
+    pub cw: i32,
+    pub ch: i32,
+    /// Pen x of the first glyph and the text baseline.
+    pub pen_x: i32,
+    pub base_y: i32,
+    /// Advance budget: the guest stops the char walk past this many pixels.
+    pub max_w: i32,
+    /// Font size in 1/8 px as painted (the pack's `size` table unit).
+    pub size_x8: u32,
+    /// Foreground colour.
+    pub fg: Rgba,
+}
+
+/// Codepoint + size + metrics for a [`DlOp::Cov`] produced by `blit_glyph32`.
+/// Fixed-point fields keep the atlas table word-sized in the pack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DlGlyph {
+    /// Unicode codepoint.
+    pub code: u32,
+    /// Font size in 1/8 px (`fontdue px * 8`).
+    pub px_x8: u16,
+    /// Metrics xmin/ymin — bitmap offsets relative to the baseline origin.
+    pub min_x: i16,
+    pub min_y: i16,
+    /// Advance width in 1/64 px (`advance_width * 64`).
+    pub adv_x64: u16,
+}
+
 /// A 2D RGBA8 surface. Every write is clipped; out-of-bounds is silently
 /// ignored, matching [`crate::canvas::Canvas`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,6 +131,12 @@ pub struct Canvas32 {
     pub h: u32,
     /// Row-major RGBA8, `w * h * 4` bytes.
     px: Vec<u8>,
+    /// Armed display-list recorder (`__web_dl` pack path). `None` everywhere
+    /// else — recording is opt-in so the raster hot path keeps zero overhead.
+    pub dl: Option<Vec<DlOp>>,
+    /// `TEXTREF` run key stamped onto `Cov` ops recorded while set — the
+    /// painter (`render32`) holds it across an eligible element's words.
+    pub dl_tref: Option<u32>,
 }
 
 impl Canvas32 {
@@ -39,6 +146,8 @@ impl Canvas32 {
             w,
             h,
             px: vec![0; (w.saturating_mul(h).saturating_mul(4)) as usize],
+            dl: None,
+            dl_tref: None,
         }
     }
 
@@ -78,6 +187,12 @@ impl Canvas32 {
     /// Read-only access to the raw RGBA8 pixels.
     pub fn pixels(&self) -> &[u8] {
         &self.px
+    }
+
+    /// Harvest the recorded display list (the `__web_dl` packer drains it
+    /// after paint). `None` when the recorder was never armed.
+    pub fn take_dl(&mut self) -> Option<Vec<DlOp>> {
+        self.dl.take()
     }
 
     /// Store one pixel (no blending). `a == 0` writes transparent.
@@ -139,6 +254,9 @@ impl Canvas32 {
         if x1 <= x0 || y1 <= y0 {
             return;
         }
+        if let Some(dl) = &mut self.dl {
+            dl.push(DlOp::Fill { x, y, w, h, c });
+        }
         if c[3] == 255 {
             for yy in y0..y1 {
                 for xx in x0..x1 {
@@ -168,6 +286,9 @@ impl Canvas32 {
         let y0 = y.max(0);
         let x1 = (x + w).min(self.w as i32);
         let y1 = (y + h).min(self.h as i32);
+        if let Some(dl) = &mut self.dl {
+            dl.push(DlOp::FillR { x, y, w, h, r, c });
+        }
         for yy in y0..y1 {
             for xx in x0..x1 {
                 if Self::inside_rounded(xx, yy, x, y, w, h, r) {
@@ -227,6 +348,17 @@ impl Canvas32 {
         let y0 = y.max(0);
         let x1 = (x + w).min(self.w as i32);
         let y1 = (y + h).min(self.h as i32);
+        if let Some(dl) = &mut self.dl {
+            dl.push(DlOp::StrkR {
+                x,
+                y,
+                w,
+                h,
+                r,
+                bw,
+                c,
+            });
+        }
         for yy in y0..y1 {
             for xx in x0..x1 {
                 if Self::inside_rounded(xx, yy, x, y, w, h, r)
@@ -241,8 +373,51 @@ impl Canvas32 {
     /// Blend a glyph coverage bitmap: `cov` scales `c`'s alpha per pixel.
     /// `coverage` is row-major `gw`×`gh` bytes.
     pub fn blend_coverage(&mut self, x: i32, y: i32, gw: u32, gh: u32, coverage: &[u8], c: Rgba) {
+        self.coverage_impl(x, y, gw, gh, coverage, c, None);
+    }
+
+    /// [`Self::blend_coverage`] with the glyph's codepoint/size identity
+    /// attached — `blit_glyph32`'s lane so the display-list packer can build
+    /// its atlas char-map for `TEXTREF` re-render.
+    #[allow(clippy::too_many_arguments)]
+    pub fn blend_coverage_tagged(
+        &mut self,
+        x: i32,
+        y: i32,
+        gw: u32,
+        gh: u32,
+        coverage: &[u8],
+        c: Rgba,
+        glyph: DlGlyph,
+    ) {
+        self.coverage_impl(x, y, gw, gh, coverage, c, Some(glyph));
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn coverage_impl(
+        &mut self,
+        x: i32,
+        y: i32,
+        gw: u32,
+        gh: u32,
+        coverage: &[u8],
+        c: Rgba,
+        glyph: Option<DlGlyph>,
+    ) {
         if coverage.len() < (gw * gh) as usize {
             return;
+        }
+        if let Some(dl) = &mut self.dl {
+            dl.push(DlOp::Cov {
+                x,
+                y,
+                w: gw,
+                h: gh,
+                cov: coverage[..(gw * gh) as usize].to_vec(),
+                c,
+                glyph,
+                tref: self.dl_tref,
+            });
         }
         for row in 0..gh {
             for col in 0..gw {

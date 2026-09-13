@@ -71,16 +71,27 @@ pub fn fat_read_node(o: Object, xlen: u32) -> Node {
         Op::Comment(format!("{} — FAT32 root file read", o.why)),
         Op::Glob("FatRead".into()),
         Op::Label("FatRead".into()),
+        Op::Li { rd: T0, imm: 0 },
+        Op::Jal {
+            rd: X0,
+            to: "fat_begin".into(),
+        },
+        Op::Glob("FatList".into()),
+        Op::Label("FatList".into()),
+        Op::Li { rd: T0, imm: 1 },
+        Op::Label("fat_begin".into()),
         // Save RA and s-regs; the routine is not leaf because it calls BlkRead.
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: -32,
+            imm: -48,
         },
         st_x(xlen, RA, SP, 0),
         st_x(xlen, S0, SP, 8),
         st_x(xlen, S1, SP, 16),
         st_x(xlen, S2, SP, 24),
+        st_x(xlen, S3, SP, 32),
+        st_x(xlen, T0, SP, 40),
         // Verify a block device was accepted; BlkInit wrote the device base.
         Op::La {
             rd: T5,
@@ -270,6 +281,15 @@ pub fn fat_read_node(o: Object, xlen: u32) -> Node {
             to: "fat_out".into(),
         },
     ];
+
+    ops.extend([
+        ld_x(xlen, T0, SP, 40),
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: "fat_list_entries".into(),
+        },
+    ]);
 
     // ---- Walk the 16 root-directory 32-byte entries in the first root cluster.
     ops.extend([
@@ -549,6 +569,7 @@ pub fn fat_read_node(o: Object, xlen: u32) -> Node {
     putc_str(&mut ops, "FILE-NOTFOUND\n");
     ops.extend([
         Op::Label("fat_done".into()),
+        ld_x(xlen, S3, SP, 32),
         ld_x(xlen, S2, SP, 24),
         ld_x(xlen, S1, SP, 16),
         ld_x(xlen, S0, SP, 8),
@@ -556,7 +577,7 @@ pub fn fat_read_node(o: Object, xlen: u32) -> Node {
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: 32,
+            imm: 48,
         },
         ret(),
         // No device or bad BPB.
@@ -564,6 +585,7 @@ pub fn fat_read_node(o: Object, xlen: u32) -> Node {
     ]);
     putc_str(&mut ops, "FILE-NODEV\n");
     ops.extend([
+        ld_x(xlen, S3, SP, 32),
         ld_x(xlen, S2, SP, 24),
         ld_x(xlen, S1, SP, 16),
         ld_x(xlen, S0, SP, 8),
@@ -571,10 +593,187 @@ pub fn fat_read_node(o: Object, xlen: u32) -> Node {
         Op::Addi {
             rd: SP,
             rs: SP,
-            imm: 32,
+            imm: 48,
         },
         ret(),
     ]);
+
+    ops.extend([
+        Op::Label("fat_list_entries".into()),
+        Op::Addi {
+            rd: A3,
+            rs: T5,
+            imm: BLK_DATA_OFF,
+        },
+        Op::La {
+            rd: T0,
+            addr: crate::Addr::UartLine,
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T0,
+            imm: crate::CLI_FILES_OFF,
+        },
+        Op::Li { rd: T1, imm: 512 },
+        Op::Label("fat_list_copy".into()),
+        lbu(T2, A3, 0),
+        Op::Sb {
+            rs2: T2,
+            rs1: T0,
+            off: 0,
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T0,
+            imm: 1,
+        },
+        Op::Addi {
+            rd: A3,
+            rs: A3,
+            imm: 1,
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "fat_list_copy".into(),
+        },
+        Op::La {
+            rd: S0,
+            addr: crate::Addr::UartLine,
+        },
+        Op::Addi {
+            rd: S0,
+            rs: S0,
+            imm: crate::CLI_FILES_OFF,
+        },
+        Op::La {
+            rd: S1,
+            addr: crate::Addr::UiDom,
+        },
+    ]);
+    for i in 0..16 {
+        let off = i * 32;
+        let row = crate::dom::DOM_HDR + off;
+        let next = format!("fat_list_skip_{i}");
+        ops.extend([
+            lbu(T0, S0, off),
+            Op::Bne {
+                rs1: T0,
+                rs2: X0,
+                to: format!("fat_list_live_{i}"),
+            },
+            Op::Jal {
+                rd: X0,
+                to: "fat_list_done".into(),
+            },
+            Op::Label(format!("fat_list_live_{i}")),
+            Op::Li { rd: T1, imm: 0xe5 },
+            Op::Beq {
+                rs1: T0,
+                rs2: T1,
+                to: next.clone(),
+            },
+            lbu(T0, S0, off + 11),
+            Op::Andi {
+                rd: T1,
+                rs: T0,
+                imm: 0x08,
+            },
+            Op::Bne {
+                rs1: T1,
+                rs2: X0,
+                to: next.clone(),
+            },
+            Op::Addi {
+                rd: S2,
+                rs: S0,
+                imm: off + 16,
+            },
+            Op::Li { rd: S3, imm: 0 },
+        ]);
+        for j in 0..11 {
+            let skip = format!("fat_list_char_{i}_{j}");
+            ops.extend([
+                lbu(T0, S0, off + j),
+                Op::Li { rd: T1, imm: 32 },
+                Op::Beq {
+                    rs1: T0,
+                    rs2: T1,
+                    to: skip.clone(),
+                },
+            ]);
+            if j == 8 {
+                ops.extend([
+                    Op::Li { rd: T1, imm: 46 },
+                    Op::Add {
+                        rd: T2,
+                        rs1: S2,
+                        rs2: S3,
+                    },
+                    Op::Sb {
+                        rs2: T1,
+                        rs1: T2,
+                        off: 0,
+                    },
+                    Op::Addi {
+                        rd: S3,
+                        rs: S3,
+                        imm: 1,
+                    },
+                ]);
+            }
+            ops.extend([
+                Op::Add {
+                    rd: T2,
+                    rs1: S2,
+                    rs2: S3,
+                },
+                Op::Sb {
+                    rs2: T0,
+                    rs1: T2,
+                    off: 0,
+                },
+                Op::Addi {
+                    rd: S3,
+                    rs: S3,
+                    imm: 1,
+                },
+                Op::Label(skip),
+            ]);
+        }
+        ops.extend([
+            st_x(xlen, S2, S1, row + 8),
+            Op::Sw {
+                rs2: S3,
+                rs1: S1,
+                off: row + 20,
+            },
+            Op::Li {
+                rd: T0,
+                imm: crate::dom::DOM_F_VISIBLE | crate::dom::DOM_F_TEXT,
+            },
+            Op::Sw {
+                rs2: T0,
+                rs1: S1,
+                off: row + 24,
+            },
+            Op::Label(next),
+        ]);
+    }
+    ops.push(Op::Label("fat_list_done".into()));
+    putc_str(
+        &mut ops,
+        "CLI-LS disk0:/ FAT32 first directory sector; 8.3 aliases\n",
+    );
+    ops.push(Op::Jal {
+        rd: X0,
+        to: "fat_done".into(),
+    });
 
     Node {
         purpose: Purpose::VirtioBlk,

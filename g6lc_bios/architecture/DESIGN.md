@@ -15,7 +15,8 @@ kernel-spec (spec) + LibreCore architecture (conformity)
                                (HDMI/DP / host-GL, 30/60/120 fps) + GLES2 listing
                 →  g6b-webidl / g6b-js / g6b-dom / g6b-wasm + browser-ui
                                BIOS browser loads the LDC cell (WasmUi);
-                               guest WASM-JIT stays the VGA glyph face
+                               guest WASM-JIT (jitr) runs the cell's _start
+                               on __dom via the Lw*/Domt* ABI bridge (B112)
                 →  g6b-tls    Botan rewrite: SHA-256 / AES-128 / HMAC / RSA / ECDSA / X.509
                                ClientHello fingerprint; kernel HttpsGet writes it on hw TCP
                                adapter :443 / :2222 until NET-DELEGATE

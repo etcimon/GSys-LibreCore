@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "profile": "full",
+  "product": "g6lc64-web-autoboot-vga",
+  "isa": { "xlen": 64, "march": "rv64imafdc", "mmu": "sv39" },
+  "kernel": {
+    "shape": "zeal",
+    "web": { "enable": true },
+    "gr": { "enable": true, "w": 640, "h": 480, "colors": 16, "backend": "virtio-gpu" },
+    "proxy": {
+      "enable": true, "link": "virtio-gpu", "dpi": 96,
+      "fps": 60, "high_w": 640, "high_h": 480,
+      "scale_mode": "fit", "surface": "vga", "gl": false
+    },
+    "cli": {
+      "enable": true, "boot": "auto", "rows": 25, "cols": 80,
+      "scrollback": 512, "mouse": true, "manual": true,
+      "vi": true, "fs": true, "fw": true,
+      "autoboot": { "enable": true, "timeout_ms": 0, "order": "live-first", "bios_ui": true }
+    },
+    "ui": "svelte-d",
+    "wasm": { "enable": true, "jit": true, "guest_jit": true, "jit_cell": "auto" },
+    "display": "html-js",
+    "browser": { "js": "aot", "ui": "svelte-d", "start_menu": "main", "wasm": { "enable": true, "jit": true } },
+    "http": { "enable": true, "http1": true, "http2": true, "proxy_js": true }
+  },
+  "peripherals": [
+    { "id": "uart0", "class": "uart", "model": "ns16550", "base": "0x10000000" }
+  ],
+  "memory": { "dram_base": "0x80000000", "dram_len": "0x40000000", "text_offset": "0x200000" },
+  "harts": { "count": 2, "cores": 1, "threads": 2 },
+  "core": { "issue_ports": 2, "ooo": false, "stream": false },
+  "uncore": { "clint": true, "plic": true, "storage": true },
+  "holyc": { "fast_init": true, "dual_band": { "uart": true, "tcp": { "enable": false } } },
+  "postboot": { "enable": "never", "access": "view" },
+  "net_expose": { "mode": "never" },
+  "loopback": { "enable": false }
+}

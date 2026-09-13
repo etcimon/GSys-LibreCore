@@ -1,11 +1,5 @@
-<script>
-fetchBios("/bios/store");
-pgliteOpen("memory://registry");
-await pgliteWaitReady();
-pgliteExec("CREATE TABLE IF NOT EXISTS bios_ui (k TEXT PRIMARY KEY, v TEXT)");
-let rows = await pgliteQuery("SELECT k, v FROM bios_ui", "[]");
-</script>
-<section id="store" data-menu="settings" aria-labelledby="store-title" hidden>
-  <h2 id="store-title">Store</h2>
-  <p id="store-status">{rows}</p>
+<section id="store" data-menu="settings" data-fetch="/bios/store" aria-labelledby="store-title" hidden>
+  <h2 id="store-title">Session storage</h2>
+  <p id="store-note">The kernel owns storage access. Inspect the registry without creating a database or changing its contents.</p>
+  <pre id="store-status" data-fetch="/bios/store"></pre>
 </section>

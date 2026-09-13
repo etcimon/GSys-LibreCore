@@ -44,6 +44,16 @@ pub const MAX_DECLARATIONS_PER_RULE: usize = 64;
 /// [`parse`] so unimplemented styling can never look implemented.
 pub const SUPPORTED_PROPERTIES: &[&str] = &[
     "display",
+    "flex-direction",
+    "flex-wrap",
+    "flex-grow",
+    "flex-shrink",
+    "flex-basis",
+    "flex",
+    "justify-content",
+    "align-items",
+    "gap",
+    "box-shadow",
     "width",
     "height",
     // Width clamps. `max-width` with `margin: 0 auto` is the standard centered
@@ -171,6 +181,27 @@ type CascadeKey = (u32, Specificity, usize);
 /// `hidden` sets all widths to `0`.
 fn expand_shorthand(property: &str, value: &str) -> Vec<(String, String)> {
     match property {
+        "flex" => {
+            let parts: Vec<_> = value.split_whitespace().collect();
+            let values = match parts.as_slice() {
+                ["none"] => Some(["0", "0", "auto"]),
+                ["auto"] => Some(["1", "1", "auto"]),
+                ["initial"] => Some(["0", "1", "auto"]),
+                [grow] if grow.parse::<f64>().is_ok() => Some([*grow, "1", "0%"]),
+                [grow, shrink] if shrink.parse::<f64>().is_ok() => Some([*grow, *shrink, "0%"]),
+                [grow, basis] => Some([*grow, "1", *basis]),
+                [grow, shrink, basis] => Some([*grow, *shrink, *basis]),
+                _ => None,
+            };
+            match values {
+                Some(values) => ["flex-grow", "flex-shrink", "flex-basis"]
+                    .into_iter()
+                    .zip(values)
+                    .map(|(k, v)| (k.into(), v.into()))
+                    .collect(),
+                None => vec![(property.into(), value.into())],
+            }
+        }
         "margin" | "padding" => {
             let parts: Vec<&str> = value.split_whitespace().collect();
             match parts.len() {
@@ -571,6 +602,50 @@ fn strip_comments(src: &str) -> String {
 fn check_value(property: &str, value: &str) -> R<()> {
     let v = value.trim();
     match property {
+        "flex" => return Err(CssError::UnsupportedValue(format!("flex {v}"))),
+        "flex-direction" if !matches!(v, "row" | "row-reverse") => {
+            return Err(CssError::UnsupportedValue(format!("flex-direction {v}")));
+        }
+        "flex-wrap" if !matches!(v, "nowrap" | "wrap") => {
+            return Err(CssError::UnsupportedValue(format!("flex-wrap {v}")));
+        }
+        "align-items" if !matches!(v, "stretch" | "flex-start" | "flex-end" | "center") => {
+            return Err(CssError::UnsupportedValue(format!("align-items {v}")));
+        }
+        "justify-content"
+            if !matches!(
+                v,
+                "flex-start"
+                    | "flex-end"
+                    | "center"
+                    | "space-between"
+                    | "space-around"
+                    | "space-evenly"
+            ) =>
+        {
+            return Err(CssError::UnsupportedValue(format!("justify-content {v}")));
+        }
+        "flex-grow" | "flex-shrink" => {
+            if !v
+                .parse::<f64>()
+                .is_ok_and(|n| n.is_finite() && (0.0..=10_000.0).contains(&n))
+            {
+                return Err(CssError::UnsupportedValue(format!("{property} {v}")));
+            }
+        }
+        "gap" => {
+            if v.ends_with('%') || !length(v, 0).is_ok_and(|n| (0..=4096).contains(&n)) {
+                return Err(CssError::UnsupportedValue(format!("gap {v}")));
+            }
+        }
+        "flex-basis" if v != "auto" => {
+            if !length(v, 100).is_ok_and(|n| (0..=16_384).contains(&n)) {
+                return Err(CssError::UnsupportedValue(format!("flex-basis {v}")));
+            }
+        }
+        "box-shadow" => {
+            render32::parse_shadow(v, [0, 0, 0, 255]).map_err(CssError::UnsupportedValue)?;
+        }
         "position" => {
             Position::parse(v)?;
         }

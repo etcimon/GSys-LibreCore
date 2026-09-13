@@ -271,7 +271,26 @@ peripheral (`fixtures/g6lc64-hdmi.json`) selects the native uncore scanout:
 yields to it. `qemu-args` emits `virtio-gpu-gl-device` + `egl-headless,gl=on`
 under `proxy.gl` (needs a host DRM render node `/dev/dri/renderD*` —
 surfaceless EGL is not software GL; `--no-gl` → 2D fallback)
-and `--vnc N` exports the console for BIOS+Linux alike. QEMU needs
+and `--vnc N` exports the console for BIOS+Linux alike. On that `proxy.gl`
+board `VioInit` also accepts `VIRTIO_GPU_F_VIRGL` in the word-0 driver
+features, and **`VioVirgl`** (after `VioScan`, before `VioPaint`) runs the
+guest virgl bring-up over the ctrlq: `GET_CAPSET_INFO`/`GET_CAPSET` →
+`CTX_CREATE`(ctx 1) → `RESOURCE_CREATE_3D`(`RES_RT` offscreen RT) →
+`CTX_ATTACH_RESOURCE` → `SUBMIT_3D` carrying the `__virgl_cmd` execbuffer (a
+`VIRGL_CMD0`-framed textured-quad object/state/`CLEAR`/`DRAW_VBO` stream from
+`crates/g6b-asm/src/virgl.rs`). `SUBMIT_3D` is a three-descriptor chain
+(32-byte `cmd_submit` OUT + execbuffer OUT + resp WRITE) — `vio_exec_chain`
+gathers all OUT descriptors before dispatch. The raster lands in a dedicated
+offscreen **`virgl_fb`** surface, not the 2D scanout `vio_fb`, so a
+`SUBMIT_3D` render never disturbs the committed frame; commands are gated on
+`virgl_live` (`vio_gl` *and* the negotiated `F_VIRGL` bit, not mere device
+capability). After the `__virgl_req` loop, `VioVirgl` `sw`-builds
+`RESOURCE_ATTACH_BACKING`(`RES_RT`→`__virgl_out` BSS) + `TRANSFER_FROM_HOST_3D`
+to pull the rendered quad back into guest RAM (`entries[0].addr` needs the
+resolved `La VirglOut` BSS address, so it can't ride the static reqtab);
+`Smoke::virgl_out` is the guest-RAM snapshot. Exec-model tests
+(`virgl_submit`/`_exec`/`_kill`/`_backing`) are the gate —
+real-GPU QEMU raster stays open until a host DRM render node exists. QEMU needs
 `-global virtio-mmio.force-legacy=false` (the default legacy v1 transport
 ignores the v2 queue registers — `qemu-args` emits it) and the used-ring
 poll is `1<<22` (QueueNotify is iothread-async) — with SEIE armed the
@@ -347,10 +366,20 @@ DedicatedWorker compute protocol, and a provenance-gated LDC 1.43 libwasm
 component-shell cell (Asyncify build path landed with the custom binaryen;
 full Svelte semantics and the D `await`/`catch` host driver still fail closed).
 The host
-`BrowserSession` and served native app are executable. The guest ELF still
-has bring-up helpers, not the complete browser runtime or arbitrary JIT code
-installation. Read `BROWSER.md` / `WASM.md` for supported subsets and limits;
-never equate a `WASM-JIT` boot marker with native compilation of the UI.
+`BrowserSession` and served native app are executable. **B111–B112 landed a
+guest-side WASM JIT** (`kernel.wasm.guest_jit`): `g6b-asm::jitr` translates a
+bounded WASM subset into `__jit_code`, `fence.i`s it and `jalr`s in, and the
+B112 libwasm host-ABI bridge (`g6b-asm::domt` `Lw*`/`Domt*` routines over the
+`__dom`/`__dom_str`/`__dom_id` arenas) now runs the shipped ~204 KB
+LDC/libwasm cell's `_start` in the exec model — 252 funcs translated, the
+cell builds a 56-node `__dom` tree (47 element ids, 8 `g6b_listen` listeners
+resolved id→node) that `DomtRaster` paints into `__scan_fb`. That is the
+guest-DOM lane verified on the exec model, **not** the full CSS/goosie engine
+and **not** QEMU-evidenced yet — `await`/`throw` stay fail-closed
+(`libwasm_await_supported`=0), listeners latch `N_LEV` with `listener=0` (no
+wasm-funcidx re-entry), and the VGA `start_ops` glyph face is unchanged. Read
+`BROWSER.md` / `WASM.md` for supported subsets and limits; never equate a
+`WASM-JIT` marker with the native-browser engine.
 
 QEMU `--loader bios` is hypothesis, never Variane evidence.
 

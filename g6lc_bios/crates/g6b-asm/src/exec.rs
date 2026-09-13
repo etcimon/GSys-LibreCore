@@ -46,6 +46,10 @@ pub enum Halt {
     Unimp(u32),
 }
 
+/// One live `__dom` node record as the exec model snapshots it:
+/// `(idx, tag, parent, x, y, w, h, tlen, text)`.
+pub type DomtNodeRow = (u32, u32, u32, u32, u32, u32, u32, u32, String);
+
 #[derive(Debug, Clone)]
 pub struct Smoke {
     pub console: String,
@@ -106,6 +110,21 @@ pub struct Smoke {
     pub dom_navtext: String,
     /// First painted 4bpp word at the DOM text origin (y=DOM_Y0).
     pub dom_pix0: u32,
+    /// `__dom` (DomT) bump-alloc cursor `H_NEXT` — nodes the guest DOM arena
+    /// allocated (root + cell-created). `0` when no DomT arena was resolved.
+    pub domt_next: u32,
+    /// `__dom` nodes with a nonzero `N_TAG` — live (non-free) nodes.
+    pub domt_live: u32,
+    /// `__dom` nodes with a nonzero `N_LEV` event mask — a registered
+    /// `add_event_listener` (the BIOS protocol passes `listener=0`, so
+    /// `N_LISTEN` stays 0 and `N_LEV` is the real registration signal).
+    pub domt_listen: u32,
+    /// `__dom_id` slots carrying a set id — `setProperty(..,"id",..)` writes.
+    pub domt_ids: u32,
+    /// Debug snapshot of each live `__dom` node after the run. Lets a test
+    /// verify the guest `DomtLayout` actually nested/placed the tree rather
+    /// than guess.
+    pub domt_nodes: Vec<DomtNodeRow>,
     /// Executed `__gr_plane` bytes (GR16 header + 4bpp plane) when Gr live.
     pub gr_frame: Vec<u8>,
     /// Final virtio STATUS register (0xF = ACK|DRIVER|FEATURES_OK|DRIVER_OK).
@@ -116,6 +135,11 @@ pub struct Smoke {
     pub vio_last_resp: u32,
     /// Device-side X8R8G8B8 scanout surface written by `TRANSFER_TO_HOST_2D`.
     pub vio_fb: Vec<u8>,
+    /// Program counter at halt — where a `Limit` run was spinning.
+    pub pc: u64,
+    /// 64-byte window of memory around `pc` at halt — lets a test disassemble
+    /// the exact instructions a spinning/trapping pc was executing.
+    pub pc_win: Vec<u8>,
     /// Native 32bpp `__scan_fb` contents at the end of the run (when the
     /// module allocated a scanout surface; empty otherwise).
     pub scan_fb: Vec<u8>,
@@ -132,6 +156,23 @@ pub struct Smoke {
     pub tab_poked: bool,
     /// `RESOURCE_FLUSH` count.
     pub vio_flushes: u32,
+    /// Negotiated virgl capset id (`GET_CAPSET_INFO` → `CAPSET`), nonzero when
+    /// the `proxy.gl` device answered the CAPSET handshake (M4).
+    pub virgl_capset: u32,
+    /// Virgl contexts created (`CTX_CREATE`).
+    pub virgl_ctxs: u32,
+    /// `SUBMIT_3D` submissions the device accepted (execbuffer parsed + run).
+    pub virgl_submits: u32,
+    /// `DRAW_VBO` draws that reached the surface (fb bound + surface object).
+    pub virgl_draws: u32,
+    /// Pixels the modelled virgl raster wrote into `vio_fb` (textured quad).
+    pub virgl_px: u32,
+    /// Device-side surface of the virgl offscreen render target — the textured
+    /// quad `SUBMIT_3D` rasterized (empty unless the virgl lane ran).
+    pub virgl_fb: Vec<u8>,
+    /// Guest-RAM `__virgl_out` after `TRANSFER_FROM_HOST_3D` — the rendered
+    /// quad DMA'd back into guest memory (empty unless the readback ran).
+    pub virgl_out: Vec<u8>,
     /// Compact persist magic (`G6CP`) when `__ui_cap` is allocated.
     pub cap_magic: u32,
     /// Live g6b-dom node count packed into `__ui_cap` (B91).
@@ -217,6 +258,7 @@ pub fn run_module_hart_with_blk_image(
         module.scan_fb_addr(entry).unwrap_or(0),
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
+        module.domt_addr(entry).unwrap_or(0),
         None,
         None,
         uart_ui_pc,
@@ -348,6 +390,7 @@ fn run_module_web_inner(
         module.scan_fb_addr(entry).unwrap_or(0),
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
+        module.domt_addr(entry).unwrap_or(0),
         web,
         feed,
         uart_ui_pc,
@@ -383,6 +426,7 @@ pub fn run_module_kick(
         module.scan_fb_addr(entry).unwrap_or(0),
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
+        module.domt_addr(entry).unwrap_or(0),
         None,
         None,
         0,
@@ -414,6 +458,7 @@ pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Resul
         module.scan_fb_addr(entry).unwrap_or(0),
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
+        module.domt_addr(entry).unwrap_or(0),
         None,
         None,
         0,
@@ -446,6 +491,7 @@ pub fn run_module_bare(spec: &BoardSpec, module: &Module, entry: u64) -> Result<
         module.scan_fb_addr(entry).unwrap_or(0),
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
+        module.domt_addr(entry).unwrap_or(0),
         None,
         None,
         0,
@@ -478,6 +524,7 @@ pub fn run(
         0,
         0,
         0,
+        0,
         None,
         None,
         0,
@@ -504,6 +551,10 @@ fn run_with_kick(
     scan_fb_base: u64,
     scan_fb_bytes: u64,
     cap_base: u64,
+    // Resolved `__dom` (DomT) arena base so `done()` can snapshot the live DOM
+    // (`__dom`/`__dom_str`/`__dom_id` are contiguous). `0` when the caller has
+    // no module to resolve it from.
+    domt_base: u64,
     web: Option<&GuestWebPresent>,
     mut feed: Option<&mut dyn WebFeed>,
     uart_ui_pc: u64,
@@ -514,16 +565,38 @@ fn run_with_kick(
     if xlen != 32 && xlen != 64 {
         return Err(format!("unsupported xlen {xlen}"));
     }
+    // `__uart_line` BSS base: stacks region + the gr plane. The CLI/autoboot
+    // line state (`AUTO_ON`, `FACE_OWNER`, `WEB_STAMPED`, the edit line) lives
+    // here regardless of whether the wasm/http `__ui_blob` follows it.
+    let line_base = {
+        let stacks = entry.wrapping_add(stack_memsz(image.len() as u64, spec.harts.max(1)));
+        let gr = if spec.kernel.gr.enable || spec.kernel.proxy.enable {
+            let w = if spec.kernel.gr.enable {
+                spec.kernel.gr.w.max(8)
+            } else {
+                640
+            };
+            let h = if spec.kernel.gr.enable {
+                spec.kernel.gr.h.max(8)
+            } else {
+                480
+            };
+            gr_bss_len(w, h, spec.kernel.gr.colors.max(16))
+        } else {
+            0
+        };
+        stacks.wrapping_add(gr)
+    };
     let mut ram = vec![0u8; memsz as usize];
     if image.len() > ram.len() {
         return Err("image larger than memsz".into());
     }
     ram[..image.len()].copy_from_slice(image);
     if let Some(web) = web {
-        inject_web_present(&mut ram, entry, scan_fb_base, cap_base, web);
+        inject_web_present(&mut ram, entry, scan_fb_base, cap_base, line_base, web);
     } else if let Some(feed) = feed.as_mut() {
         if let Some(present) = feed.initial() {
-            inject_web_present(&mut ram, entry, scan_fb_base, cap_base, &present);
+            inject_web_present(&mut ram, entry, scan_fb_base, cap_base, line_base, &present);
         }
     }
     let mut x = [0u64; 32];
@@ -567,6 +640,8 @@ fn run_with_kick(
         uart1_repl: extras && spec.holyc.dual_band.tcp.enable,
         uart1_base: crate::analyze::uart1_base(spec),
         vio_gpu,
+        // `virtio-gpu-gl-device` (proxy.gl): offer F_VIRGL + the 3D commands.
+        vio_gl: vio_gpu && spec.kernel.proxy.enable && spec.kernel.proxy.gl,
         vio_inp: vio_gpu && spec.wants_virtio_input(),
         vio_net: spec.wants_virtio_net(),
         vio_blk: spec.wants_virtio_blk(),
@@ -592,6 +667,7 @@ fn run_with_kick(
         scan_fb_base,
         scan_fb_bytes,
         cap_base,
+        domt_base,
         pci_ecam: spec.pcie_ecam().unwrap_or(0),
         pci_dev,
         pci_fb_base,
@@ -650,46 +726,14 @@ fn run_with_kick(
         } else {
             0
         },
-        ui_base: {
-            let stacks = entry.wrapping_add(stack_memsz(image.len() as u64, spec.harts.max(1)));
-            let gr = if spec.kernel.gr.enable || spec.kernel.proxy.enable {
-                let w = if spec.kernel.gr.enable {
-                    spec.kernel.gr.w.max(8)
-                } else {
-                    640
-                };
-                let h = if spec.kernel.gr.enable {
-                    spec.kernel.gr.h.max(8)
-                } else {
-                    480
-                };
-                gr_bss_len(w, h, spec.kernel.gr.colors.max(16))
-            } else {
-                0
-            };
-            if spec.kernel.wasm.enable || spec.kernel.http.files.enable {
-                stacks.wrapping_add(gr).wrapping_add(UART_LINE_BSS)
-            } else {
-                0
-            }
+        line_base,
+        ui_base: if spec.kernel.wasm.enable || spec.kernel.http.files.enable {
+            // `__ui_blob` follows the `__uart_line` BSS block.
+            line_base.wrapping_add(UART_LINE_BSS)
+        } else {
+            0
         },
         dom_base: {
-            let stacks = entry.wrapping_add(stack_memsz(image.len() as u64, spec.harts.max(1)));
-            let gr = if spec.kernel.gr.enable || spec.kernel.proxy.enable {
-                let w = if spec.kernel.gr.enable {
-                    spec.kernel.gr.w.max(8)
-                } else {
-                    640
-                };
-                let h = if spec.kernel.gr.enable {
-                    spec.kernel.gr.h.max(8)
-                } else {
-                    480
-                };
-                gr_bss_len(w, h, spec.kernel.gr.colors.max(16))
-            } else {
-                0
-            };
             // `__ui_blob` only exists when the UI object is live; the row table
             // follows it. Both the wasm DOM lane and the CLI text face use the
             // same table, so the probe latches it for either.
@@ -701,10 +745,7 @@ fn run_with_kick(
             if (spec.kernel.wasm.enable && spec.kernel.wasm.jit)
                 || crate::analyze::wants_cli_face(spec)
             {
-                stacks
-                    .wrapping_add(gr)
-                    .wrapping_add(UART_LINE_BSS)
-                    .wrapping_add(ui)
+                line_base.wrapping_add(UART_LINE_BSS).wrapping_add(ui)
             } else {
                 0
             }
@@ -719,24 +760,80 @@ fn run_with_kick(
     let mut steps = 0u32;
     loop {
         if steps >= STEP_LIMIT {
-            return Ok(done(console, steps, Halt::Limit, &csr, &ram, entry, xlen));
+            return Ok(done(
+                console,
+                steps,
+                Halt::Limit,
+                &csr,
+                &ram,
+                entry,
+                xlen,
+                pc,
+            ));
         }
         steps += 1;
         csr.time = csr.time.wrapping_add(1);
+        // Deliver the canned input burst as soon as the boot picker is armed
+        // (`__uart_line[AUTO_ON]`), not only on `wfi`. The picker's vga-surface
+        // `FbExpand` upscales the low-res plane to the full scanout and can
+        // spend the whole step budget before `park`, so a halt-gated poke would
+        // never land the irq. `take_pending_sei` runs every step, so raising
+        // irq 2 here reaches `CliKey`→`AutoKey` at the next boundary while the
+        // picker still owns the plane — and lets `AutoPick` flip `__disp.surface`
+        // to gpu before `VioPaint`, which then skips `FbExpand` entirely.
+        if !csr.inp_poked
+            && csr.vio_inp
+            && csr.inp_ready
+            && csr.inp_qused != 0
+            && !csr.inp_bufs.is_empty()
+            && csr.line_base != 0
+            && load_u32(
+                &ram,
+                entry,
+                csr.line_base.wrapping_add(crate::AUTO_ON_OFF as u64),
+            )
+            .unwrap_or(0)
+                != 0
+        {
+            let evs = host_inp_kick(&mut csr, &mut ram, entry);
+            feed_events(
+                &mut feed,
+                &mut ram,
+                entry,
+                scan_fb_base,
+                cap_base,
+                line_base,
+                evs,
+            );
+        }
         if take_pending_sei(xlen, &mut pc, &mut csr) {
             continue;
         }
         if uart_ui_pc != 0 && pc == uart_ui_pc {
             if let Some(feed) = feed.as_mut() {
                 if let Some(present) = feed.on_guest_ui() {
-                    inject_web_present(&mut ram, entry, scan_fb_base, cap_base, &present);
+                    inject_web_present(
+                        &mut ram,
+                        entry,
+                        scan_fb_base,
+                        cap_base,
+                        line_base,
+                        &present,
+                    );
                 }
             }
         }
         if trap_timer_pc != 0 && pc == trap_timer_pc {
             if let Some(feed) = feed.as_mut() {
                 if let Some(present) = feed.on_guest_tick() {
-                    inject_web_present(&mut ram, entry, scan_fb_base, cap_base, &present);
+                    inject_web_present(
+                        &mut ram,
+                        entry,
+                        scan_fb_base,
+                        cap_base,
+                        line_base,
+                        &present,
+                    );
                 }
             }
         }
@@ -751,6 +848,7 @@ fn run_with_kick(
                     &ram,
                     entry,
                     xlen,
+                    pc,
                 ))
             }
         };
@@ -772,48 +870,42 @@ fn run_with_kick(
                 }
                 // Input before UART: the canned key lands in INP_KQ early so a
                 // `Keys` command later in the UART sequence finds it queued
-                // (QEMU `sendkey` arrives asynchronously the same way).
+                // (QEMU `sendkey` arrives asynchronously the same way). The
+                // `AUTO_ON`-armed kick above usually lands this first; this
+                // remains the fallback for non-autoboot faces.
                 let evs = host_inp_kick(&mut csr, &mut ram, entry);
                 let had_inp = !evs.is_empty();
-                if had_inp {
-                    if let Some(feed) = feed.as_mut() {
-                        let mut last = None;
-                        for ev in evs {
-                            if let Some(p) = feed_inp(&mut **feed, ev) {
-                                last = Some(p);
-                            }
-                        }
-                        if let Some(p) = last {
-                            inject_web_present(&mut ram, entry, scan_fb_base, cap_base, &p);
-                        }
-                    }
-                }
+                feed_events(
+                    &mut feed,
+                    &mut ram,
+                    entry,
+                    scan_fb_base,
+                    cap_base,
+                    line_base,
+                    evs,
+                );
                 // Same Halt as keys: after InpDrain the guest often stays in
                 // the UART poll loop and never WFI-Halts again for a second
                 // poke. KEY SEQ is unchanged; tablet is EV_ABS only.
                 let hint = feed.as_ref().and_then(|f| f.hint_abs());
                 let tabs = host_inp_tab_kick(&mut csr, &mut ram, entry, hint);
                 let had_tab = !tabs.is_empty();
-                if had_tab {
-                    if let Some(feed) = feed.as_mut() {
-                        let mut last = None;
-                        for ev in tabs {
-                            if let Some(p) = feed_inp(&mut **feed, ev) {
-                                last = Some(p);
-                            }
-                        }
-                        if let Some(p) = last {
-                            inject_web_present(&mut ram, entry, scan_fb_base, cap_base, &p);
-                        }
-                    }
-                }
+                feed_events(
+                    &mut feed,
+                    &mut ram,
+                    entry,
+                    scan_fb_base,
+                    cap_base,
+                    line_base,
+                    tabs,
+                );
                 if (had_inp || had_tab) && take_pending_sei(xlen, &mut pc, &mut csr) {
                     continue;
                 }
                 if host_uart_kick(&mut csr) && take_pending_sei(xlen, &mut pc, &mut csr) {
                     continue;
                 }
-                return Ok(done(console, steps, h, &csr, &ram, entry, xlen));
+                return Ok(done(console, steps, h, &csr, &ram, entry, xlen, pc));
             }
         }
         if uart_polls > 16 && !console.is_empty() {
@@ -833,11 +925,13 @@ fn run_with_kick(
                 &ram,
                 entry,
                 xlen,
+                pc,
             ));
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn done(
     console: String,
     steps: u32,
@@ -846,6 +940,7 @@ fn done(
     ram: &[u8],
     base: u64,
     xlen: u32,
+    pc: u64,
 ) -> Smoke {
     let gr_frame = if csr.gr_base != 0 && csr.gr_bytes != 0 {
         let off = csr.gr_base.wrapping_sub(base) as usize;
@@ -900,10 +995,107 @@ fn done(
                 .collect()
         })
         .unwrap_or_default();
+    let pc_win = {
+        let off = pc.wrapping_sub(base).wrapping_sub(32) as usize;
+        if off < ram.len() {
+            let end = (off + 96).min(ram.len());
+            ram[off..end].to_vec()
+        } else {
+            Vec::new()
+        }
+    };
+    // Scan the live `__dom` (DomT) arena: the bump-alloc cursor, live (non-free)
+    // nodes, nodes carrying a registered listener, and `__dom_id` slots holding
+    // a set id. `domt_base` is `__dom`; `__dom_str`/`__dom_id` follow
+    // contiguously so the id table is `__dom + DOMT_BYTES + DOMT_STR_BYTES`.
+    let (domt_next, domt_live, domt_listen, domt_ids) = if csr.domt_base != 0 {
+        use crate::domt as dt;
+        let d = csr.domt_base;
+        let next = load_u32(ram, base, d.wrapping_add(dt::H_NEXT as u64)).unwrap_or(0);
+        let mut live = 0u32;
+        let mut listen = 0u32;
+        for i in 0..dt::DOMT_NODES as u64 {
+            let n = d
+                .wrapping_add(dt::DOMT_HDR as u64)
+                .wrapping_add(i * dt::DOMT_NODE as u64);
+            if load_u32(ram, base, n.wrapping_add(dt::N_TAG as u64)).unwrap_or(0) != 0 {
+                live += 1;
+            }
+            // `N_LEV` (event mask) is the registration signal — `N_LISTEN` is
+            // legitimately `0` for the BIOS protocol listener (`g6b_listen`
+            // passes `listener=0` so the host runs fetch/select).
+            if load_u32(ram, base, n.wrapping_add(dt::N_LEV as u64)).unwrap_or(0) != 0 {
+                listen += 1;
+            }
+        }
+        let id_base = d
+            .wrapping_add(dt::DOMT_BYTES)
+            .wrapping_add(dt::DOMT_STR_BYTES);
+        let mut ids = 0u32;
+        for i in 0..dt::DOMT_NODES as u64 {
+            let s = id_base.wrapping_add(i * dt::DOMT_ID_SLOT);
+            if load_u32(ram, base, s).unwrap_or(0) != 0 {
+                ids += 1;
+            }
+        }
+        (next, live, listen, ids)
+    } else {
+        (0, 0, 0, 0)
+    };
+    // Debug snapshot of each live `__dom` node's laid-out rect + text so a test
+    // can verify DomtLayout actually nested/placed the tree. `__dom_str` sits at
+    // `__dom + DOMT_BYTES`; `N_TPTR` is an offset into that pool.
+    let mut domt_nodes = Vec::new();
+    if csr.domt_base != 0 {
+        use crate::domt as dt;
+        let d = csr.domt_base;
+        let strb = d.wrapping_add(dt::DOMT_BYTES);
+        for i in 0..dt::DOMT_NODES as u64 {
+            let n = d
+                .wrapping_add(dt::DOMT_HDR as u64)
+                .wrapping_add(i * dt::DOMT_NODE as u64);
+            let tag = load_u32(ram, base, n.wrapping_add(dt::N_TAG as u64)).unwrap_or(0);
+            if tag == 0 {
+                continue;
+            }
+            let rd = |o: i32| load_u32(ram, base, n.wrapping_add(o as u64)).unwrap_or(0);
+            let tptr = rd(dt::N_TPTR) as u64;
+            let tlen = rd(dt::N_TLEN);
+            let text: String = (0..tlen.min(64))
+                .filter_map(|k| {
+                    load_u8(
+                        ram,
+                        base,
+                        strb.wrapping_add(tptr).wrapping_add(u64::from(k)),
+                    )
+                })
+                .map(|b| {
+                    if (0x20..0x7f).contains(&b) {
+                        b as char
+                    } else {
+                        '.'
+                    }
+                })
+                .collect();
+            domt_nodes.push((
+                i as u32,
+                tag,
+                rd(dt::N_PARENT),
+                rd(dt::N_X),
+                rd(dt::N_Y),
+                rd(dt::N_W),
+                rd(dt::N_H),
+                tlen,
+                format!("{text} bg={:#08x} fg={:#08x}", rd(dt::N_BG), rd(dt::N_FG)),
+            ));
+        }
+    }
     Smoke {
         console,
         steps,
         halt,
+        pc,
+        pc_win,
         satp: csr.satp,
         time_ecalls: csr.time_ecalls,
         ticks: csr.ticks,
@@ -941,6 +1133,11 @@ fn done(
         dom_nav,
         dom_navtext,
         dom_pix0: csr.dom_pix0,
+        domt_next,
+        domt_live,
+        domt_listen,
+        domt_ids,
+        domt_nodes,
         gr_frame,
         scan_fb: if csr.scan_fb_base != 0 && csr.scan_fb_bytes != 0 {
             let off = csr.scan_fb_base.wrapping_sub(base) as usize;
@@ -967,6 +1164,31 @@ fn done(
         tab_qused: csr.tab_qused,
         tab_poked: csr.tab_poked,
         vio_flushes: csr.vio_flushes,
+        virgl_capset: csr.virgl_capset_id,
+        virgl_ctxs: csr.virgl_ctxs,
+        virgl_submits: csr.virgl_submits,
+        virgl_draws: csr.virgl_draws,
+        virgl_px: csr.virgl_px,
+
+        virgl_fb: csr.virgl_fb.clone(),
+        virgl_out: {
+            // The guest attached `__virgl_out` as RES_RT's backing; read the
+            // rendered quad back out of guest RAM at that attached address.
+            let rt = csr.virgl_rt;
+            let n = (csr.virgl_rt_w as usize) * (csr.virgl_rt_h as usize) * 4;
+            match (rt != 0, csr.virgl_backing.get(&rt).copied()) {
+                (true, Some(addr)) if n != 0 => {
+                    let off = addr.wrapping_sub(base) as usize;
+                    let end = off.saturating_add(n).min(ram.len());
+                    if off < end {
+                        ram[off..end].to_vec()
+                    } else {
+                        Vec::new()
+                    }
+                }
+                _ => Vec::new(),
+            }
+        },
         cap_magic: if csr.cap_base != 0 {
             load_u32(ram, base, csr.cap_base).unwrap_or(0)
         } else {
@@ -1079,6 +1301,11 @@ struct Csr {
     gr_pix0: u32,
     gr_glyph_off: u64,
     gr_glyph0: u32,
+    /// `__uart_line` BSS base (`stacks + gr`) — where `CliInit` latches the
+    /// autoboot `AUTO_ON` arm flag. Unconditional (unlike `ui_base`, which is
+    /// zero without wasm/http) so the armed-input kick works on a CLI-only
+    /// picker too.
+    line_base: u64,
     ui_base: u64,
     ui_magic: u32,
     ui_size: u32,
@@ -1101,6 +1328,9 @@ struct Csr {
     vio_status: u32,
     vio_feat_sel: u32,
     vio_drv_sel: u32,
+    /// Word-0 feature bits the driver wrote to `DRV_FEATURES` (the negotiated
+    /// `VIRTIO_GPU_F_VIRGL` the 3D commands gate on).
+    vio_drv_feats: u32,
     vio_qsel: u32,
     vio_qnum: u32,
     vio_qdesc: u64,
@@ -1191,6 +1421,41 @@ struct Csr {
     /// Device-side X8R8G8B8 surface filled by `TRANSFER_TO_HOST_2D` — the
     /// host-modelled analogue of the QEMU scanout pixels.
     vio_fb: Vec<u8>,
+    /// `virtio-gpu-gl-device` (`proxy.gl`) — the device offers
+    /// `VIRTIO_GPU_F_VIRGL` and services the 3D/`SUBMIT_3D` commands.
+    vio_gl: bool,
+    /// `GET_CAPSET_INFO` result latched for the response payload.
+    virgl_capset_id: u32,
+    virgl_capset_ver: u32,
+    virgl_capset_size: u32,
+    /// Bitmap of created virgl context ids (bit `ctx_id`).
+    virgl_ctx: u64,
+    /// `CTX_CREATE` commands serviced.
+    virgl_ctxs: u32,
+    /// Bitmap of resources `CTX_ATTACH_RESOURCE` bound to a ctx.
+    virgl_attached: u64,
+    /// `SUBMIT_3D` execbuffers consumed.
+    virgl_submits: u32,
+    /// virgl command headers parsed across all submits.
+    virgl_cmds: u32,
+    /// `CLEAR` raster ops modelled.
+    virgl_clears: u32,
+    /// `DRAW_VBO` draws modelled.
+    virgl_draws: u32,
+    /// Pixels the model rasterizer wrote into `virgl_fb` for the quad.
+    virgl_px: u32,
+    /// The virgl offscreen render-target resource id (`RESOURCE_CREATE_3D`).
+    virgl_rt: u32,
+    /// Render-target geometry (w,h).
+    virgl_rt_w: u32,
+    virgl_rt_h: u32,
+    /// Device-side surface for the virgl render target — `SUBMIT_3D` rasters
+    /// the textured quad here. Kept separate from `vio_fb` (the 2D scanout)
+    /// so the virgl lane never disturbs the committed display frame.
+    virgl_fb: Vec<u8>,
+    /// Guest backing for non-scanout (3D) resources — `res_id → base` —
+    /// `TRANSFER_FROM_HOST_3D` reads the surface back into this guest buffer.
+    virgl_backing: std::collections::BTreeMap<u32, u64>,
     /// Uncore display-engine window base (`display`-class peripheral;
     /// `architecture/uncore/hdmi-display.md`) — 0 = absent.
     disp_base: u64,
@@ -1208,6 +1473,9 @@ struct Csr {
     scan_fb_bytes: u64,
     /// Resolved `__ui_cap` base (0 when the module has no compact persist).
     cap_base: u64,
+    /// Resolved `__dom` (DomT) base — `__dom`/`__dom_str`/`__dom_id` snapshot
+    /// for the live-DOM regression probes. `0` when no DomT arena exists.
+    domt_base: u64,
     /// PCIe ECAM window base — 0 = no host bridge modelled.
     pci_ecam: u64,
     /// Modelled bus-0 display controller: `(dev, vendor<<16|device, class_word,
@@ -1218,6 +1486,11 @@ struct Csr {
     /// Shadow of the linear-framebuffer BAR; `PciPaint` blits straight into it
     /// via `DISP_SEL_FB_LO`. Reported as `Smoke::pci_fb_img`.
     pci_fb_img: Vec<u8>,
+    /// Scalar-FP register file (`f0`-`f31`), M3b exec-model FPU. Each slot holds
+    /// the value's bit pattern; `f32` ops read/write the low 32 bits
+    /// (NaN-boxing is not modelled — the guest JIT keeps FP values as raw bit
+    /// patterns on the value stack and only parks them here mid-compute).
+    fr: [u64; 32],
 }
 
 #[derive(Default)]
@@ -1270,14 +1543,94 @@ fn step(
             let v = match f3 {
                 0 => a.wrapping_add(imm as u64),
                 1 => a << (shamt(w, xlen)),
+                // slti — signed immediate compare.
+                2 => u64::from((a as i64) < (imm as i64)),
+                // sltiu — the imm sign-extends, then unsigned compare (both
+                // sides are sign-extended identically, so ordering holds).
+                3 => u64::from(a < (imm as i64) as u64),
                 5 if f7 & 0x20 == 0 => {
                     let unsigned = if xlen == 32 { u64::from(a as u32) } else { a };
                     unsigned >> shamt(w, xlen)
                 }
+                // srai — registers store the sign-extended value, so an i64
+                // arithmetic shift is correct on both xlens.
+                5 => ((a as i64) >> shamt(w, xlen)) as u64,
                 7 => a & (imm as u64),
                 _ => return Step::Halt(Halt::Unimp(w)),
             };
             wr(xlen, x, rd, v);
+            *pc = npc;
+        }
+        0x1b => {
+            // OP-IMM-32 (rv64 only): addiw / slliw / srliw / sraiw — the guest
+            // JIT's wasm i32 lowering. Results sign-extend from bit 31.
+            if xlen != 64 {
+                return Step::Halt(Halt::Unimp(w));
+            }
+            let a = x[rs1 as usize] as u32;
+            let sh = (w >> 20) & 0x1f;
+            let v = match f3 {
+                0 => (a as i32).wrapping_add(iimm(w)) as u32,
+                1 => a << sh,
+                5 if f7 & 0x20 == 0 => a >> sh,
+                5 => ((a as i32) >> sh) as u32,
+                _ => return Step::Halt(Halt::Unimp(w)),
+            };
+            wr(xlen, x, rd, sext32(v as i32, xlen));
+            *pc = npc;
+        }
+        0x3b => {
+            // OP-32 (rv64 only): addw/subw/mulw/sllw/srlw/sraw/div*/rem*.
+            if xlen != 64 {
+                return Step::Halt(Halt::Unimp(w));
+            }
+            let a = x[rs1 as usize] as u32;
+            let b = x[rs2 as usize] as u32;
+            let sh = b & 0x1f;
+            let v = match (f3, f7) {
+                (0, 0) => a.wrapping_add(b),
+                (0, 0x20) => a.wrapping_sub(b),
+                (0, 1) => a.wrapping_mul(b),
+                (1, 0) => a << sh,
+                (5, 0) => a >> sh,
+                (5, 0x20) => ((a as i32) >> sh) as u32,
+                (4, 1) => {
+                    let (na, nb) = (a as i32, b as i32);
+                    if nb == 0 {
+                        u32::MAX
+                    } else if na == i32::MIN && nb == -1 {
+                        i32::MIN as u32
+                    } else {
+                        (na / nb) as u32
+                    }
+                }
+                (5, 1) => {
+                    if b == 0 {
+                        u32::MAX
+                    } else {
+                        a / b
+                    }
+                }
+                (6, 1) => {
+                    let (na, nb) = (a as i32, b as i32);
+                    if nb == 0 {
+                        a
+                    } else if na == i32::MIN && nb == -1 {
+                        0
+                    } else {
+                        (na % nb) as u32
+                    }
+                }
+                (7, 1) => {
+                    if b == 0 {
+                        a
+                    } else {
+                        a % b
+                    }
+                }
+                _ => return Step::Halt(Halt::Unimp(w)),
+            };
+            wr(xlen, x, rd, sext32(v as i32, xlen));
             *pc = npc;
         }
         0x33 => {
@@ -1309,9 +1662,207 @@ fn step(
                 // check. On rv32 the registers are already zero-extended by
                 // `wr`, so the u64 compare is the u32 compare.
                 (3, 0) => u64::from(a < b),
+                // slt — signed compare (both sides sign-extended identically).
+                (2, 0) => u64::from((a as i64) < (b as i64)),
+                (1, 0) => a << (b & if xlen == 32 { 0x1f } else { 0x3f }),
+                (5, 0) => {
+                    let sh = b & if xlen == 32 { 0x1f } else { 0x3f };
+                    let unsigned = if xlen == 32 { u64::from(a as u32) } else { a };
+                    unsigned >> sh
+                }
+                (5, 0x20) => ((a as i64) >> (b & if xlen == 32 { 0x1f } else { 0x3f })) as u64,
+                (6, 0) => a | b,
+                (7, 0) => a & b,
+                // div — signed divide (M ext). Div-by-zero yields all-ones,
+                // INT_MIN/-1 yields INT_MIN per the spec.
+                (4, 1) => {
+                    if xlen == 32 {
+                        let (na, nb) = (a as i32, b as i32);
+                        if nb == 0 {
+                            u64::from(u32::MAX)
+                        } else if na == i32::MIN && nb == -1 {
+                            u64::from(i32::MIN as u32)
+                        } else {
+                            u64::from((na / nb) as u32)
+                        }
+                    } else {
+                        let (na, nb) = (a as i64, b as i64);
+                        if nb == 0 {
+                            u64::MAX
+                        } else if na == i64::MIN && nb == -1 {
+                            i64::MIN as u64
+                        } else {
+                            (na / nb) as u64
+                        }
+                    }
+                }
+                // rem — signed remainder; divisor zero yields the dividend.
+                (6, 1) => {
+                    if xlen == 32 {
+                        let (na, nb) = (a as i32, b as i32);
+                        if nb == 0 {
+                            u64::from(na as u32)
+                        } else if na == i32::MIN && nb == -1 {
+                            0
+                        } else {
+                            u64::from((na % nb) as u32)
+                        }
+                    } else {
+                        let (na, nb) = (a as i64, b as i64);
+                        if nb == 0 {
+                            a
+                        } else if na == i64::MIN && nb == -1 {
+                            0
+                        } else {
+                            (na % nb) as u64
+                        }
+                    }
+                }
+                // remu — unsigned remainder; divisor zero yields the dividend.
+                (7, 1) => {
+                    if xlen == 32 {
+                        let (na, nb) = (a as u32, b as u32);
+                        if nb == 0 {
+                            u64::from(na)
+                        } else {
+                            u64::from(na % nb)
+                        }
+                    } else if b == 0 {
+                        a
+                    } else {
+                        a % b
+                    }
+                }
                 _ => return Step::Halt(Halt::Unimp(w)),
             };
             wr(xlen, x, rd, v);
+            *pc = npc;
+        }
+        0x53 => {
+            // OP-FP — M3b exec-model FPU. `f7 & 1` is the fmt width (0=f32,
+            // 1=f64) for the arith/cmp/move rows; conversion rows are
+            // type-specific funct7s. FP operands are bit patterns in `csr.fr`;
+            // int results land in `x[rd]`, FP results in `csr.fr[rd]`.
+            let d = f7 & 1 == 1; // 1 → f64 row
+            let fa = f32::from_bits(csr.fr[rs1 as usize] as u32);
+            let fb = f32::from_bits(csr.fr[rs2 as usize] as u32);
+            let da = f64::from_bits(csr.fr[rs1 as usize]);
+            let db = f64::from_bits(csr.fr[rs2 as usize]);
+            let mut fres: Option<u64> = None; // FP result → fr[rd]
+            let mut xres: Option<u64> = None; // int result → x[rd]
+                                              // Push a bit-pattern result honouring the row width.
+            macro_rules! fpres {
+                ($v32:expr, $v64:expr) => {
+                    fres = Some(if d {
+                        ($v64).to_bits()
+                    } else {
+                        ($v32).to_bits() as u64
+                    })
+                };
+            }
+            match (f7 & !1, f3) {
+                (0x00, _) => fpres!(fa + fb, da + db),       // fadd
+                (0x04, _) => fpres!(fa - fb, da - db),       // fsub
+                (0x08, _) => fpres!(fa * fb, da * db),       // fmul
+                (0x0c, _) => fpres!(fa / fb, da / db),       // fdiv
+                (0x14, 0) => fpres!(fa.min(fb), da.min(db)), // fmin
+                (0x14, 1) => fpres!(fa.max(fb), da.max(db)), // fmax
+                (0x10, f3) => {
+                    // fsgnj / fsgnjn / fsgnjx — sign injection on the fmt width.
+                    let (mb, sb) = if d {
+                        (63, 0x7fff_ffff_ffff_ffff)
+                    } else {
+                        (31, 0x7fff_ffff)
+                    };
+                    let (av, bv) = (csr.fr[rs1 as usize], csr.fr[rs2 as usize]);
+                    let s = match f3 {
+                        0 => bv,
+                        1 => !bv,
+                        _ => av ^ bv,
+                    } & (1u64 << mb);
+                    fres = Some((av & sb) | s);
+                }
+                (0x2c, 0) => fpres!(fa.sqrt(), da.sqrt()), // fsqrt
+                // compares → int reg
+                (0x50, 0) => xres = Some(u64::from(if d { da <= db } else { fa <= fb })),
+                (0x50, 1) => xres = Some(u64::from(if d { da < db } else { fa < fb })),
+                (0x50, 2) => xres = Some(u64::from(if d { da == db } else { fa == fb })),
+                // fcvt int<-fp (rs2 selects dest width/signedness; f3 = rm)
+                (0x60, _) => {
+                    xres = Some(match rs2 {
+                        0 => sext32(
+                            if d {
+                                fcvt_d_i32(da, f3)
+                            } else {
+                                fcvt_to_i32(fa, f3)
+                            },
+                            xlen,
+                        ),
+                        1 => sext32(
+                            if d {
+                                fcvt_d_u32(da, f3)
+                            } else {
+                                fcvt_to_u32(fa, f3)
+                            } as i32,
+                            xlen,
+                        ),
+                        2 => {
+                            (if d {
+                                fcvt_d_i64(da, f3)
+                            } else {
+                                fcvt_to_i64(fa, f3)
+                            }) as u64
+                        }
+                        _ => {
+                            if d {
+                                fcvt_d_u64(da, f3)
+                            } else {
+                                fcvt_to_u64(fa, f3)
+                            }
+                        }
+                    });
+                }
+                // fcvt fp<-int (rs2 selects src width/signedness)
+                (0x68, _) => {
+                    let sv = x[rs1 as usize];
+                    if d {
+                        let v = match rs2 {
+                            0 => sv as u32 as i32 as f64,
+                            1 => sv as u32 as f64,
+                            2 => sv as i64 as f64,
+                            _ => sv as f64,
+                        };
+                        fres = Some(v.to_bits());
+                    } else {
+                        let v = match rs2 {
+                            0 => sv as u32 as i32 as f32,
+                            1 => sv as u32 as f32,
+                            2 => sv as i64 as f32,
+                            _ => sv as f32,
+                        };
+                        fres = Some(v.to_bits() as u64);
+                    }
+                }
+                (0x70, 0) => xres = Some(sext32(csr.fr[rs1 as usize] as u32 as i32, xlen)), // fmv.x.w
+                (0x71, 0) => xres = Some(csr.fr[rs1 as usize]), // fmv.x.d
+                (0x70, 1) => xres = Some(fclass_s(fa)),         // fclass.s
+                (0x71, 1) => xres = Some(fclass_d(da)),         // fclass.d
+                (0x78, 0) => fres = Some(x[rs1 as usize] & 0xffff_ffff), // fmv.w.x
+                (0x79, 0) => fres = Some(x[rs1 as usize]),      // fmv.d.x
+                _ => return Step::Halt(Halt::Unimp(w)),
+            }
+            // f32<->f64 widening sit on distinct funct7s (not the fmt bit).
+            match f7 {
+                0x20 if rs2 == 1 => fres = Some((da as f32).to_bits() as u64), // fcvt.s.d
+                0x21 if rs2 == 0 => fres = Some((fa as f64).to_bits()),        // fcvt.d.s
+                _ => {}
+            }
+            if let Some(v) = xres {
+                wr(xlen, x, rd, v);
+            }
+            if let Some(v) = fres {
+                csr.fr[rd as usize] = v;
+            }
             *pc = npc;
         }
         0x03 => {
@@ -1354,9 +1905,17 @@ fn step(
             }
             *uart_polls = 0;
             let v = match f3 {
+                // lb — sign-extended byte.
+                0 => load_u8(ram, base, addr).map(|v| sext32(v as i8 as i32, xlen)),
+                // lh — sign-extended halfword.
+                1 => load_u16(ram, base, addr).map(|v| sext32(v as i16 as i32, xlen)),
                 2 => load_u32(ram, base, addr).map(|v| sext32(v as i32, xlen)),
                 3 => load_u64(ram, base, addr),
                 4 => load_u8(ram, base, addr).map(u64::from),
+                // lhu — zero-extended halfword.
+                5 => load_u16(ram, base, addr).map(u64::from),
+                // lwu — zero-extended word (rv64 only).
+                6 if xlen == 64 => load_u32(ram, base, addr).map(u64::from),
                 _ => return Step::Halt(Halt::Unimp(w)),
             };
             match v {
@@ -1413,6 +1972,7 @@ fn step(
             }
             let ok = match f3 {
                 0 => store_u8(ram, base, addr, val as u8),
+                1 => store_u16(ram, base, addr, val as u16),
                 2 => store_u32(ram, base, addr, val as u32),
                 3 => store_u64(ram, base, addr, val),
                 _ => return Step::Halt(Halt::Unimp(w)),
@@ -1460,9 +2020,16 @@ fn step(
         0x63 => {
             let a = x[rs1 as usize] as i64;
             let b = x[rs2 as usize] as i64;
+            let (au, bu) = (x[rs1 as usize], x[rs2 as usize]);
             let take = match f3 {
                 0 => a == b,
                 1 => a != b,
+                4 => a < b,
+                5 => a >= b,
+                // Sign-extension to 64 bits preserves unsigned ordering, so
+                // the u64 compare is the rv32 unsigned compare on rv32 too.
+                6 => au < bu,
+                7 => au >= bu,
                 _ => return Step::Halt(Halt::Unimp(w)),
             };
             *pc = if take {
@@ -1541,6 +2108,7 @@ fn step(
         }
         _ => {
             if csr.stvec != 0 {
+                csr.stval = u64::from(w);
                 take_sync_trap(*pc, 2, csr);
                 *pc = csr.stvec;
                 return Step::Cont;
@@ -1801,6 +2369,12 @@ fn vio_load(csr: &Csr, addr: u64) -> u32 {
         0x10 => {
             if csr.vio_feat_sel == 1 {
                 VIO_F_VERSION_1
+            } else if csr.vio_gl {
+                // Low feature word: a `virtio-gpu-gl-device` offers VIRGL +
+                // the context-init and blob bits a virgl guest negotiates.
+                crate::encode::VIO_GPU_F_VIRGL
+                    | crate::encode::VIO_GPU_F_RESOURCE_BLOB
+                    | crate::encode::VIO_GPU_F_CONTEXT_INIT
             } else {
                 0
             }
@@ -1840,7 +2414,14 @@ fn vio_store(csr: &mut Csr, ram: &mut [u8], base: u64, addr: u64, v: u32) {
     }
     match off % VIO_MMIO_STEP {
         0x14 => csr.vio_feat_sel = v,
-        0x20 => {} // driver features accepted without a gate
+        0x20 => {
+            // Driver feature acceptance: `DRV_FEATURES_SEL` picks the word.
+            // Word 0 carries VIRTIO_GPU_F_VIRGL — gate the 3D lane on the
+            // negotiated bit, not just device capability.
+            if csr.vio_drv_sel == 0 {
+                csr.vio_drv_feats = v;
+            }
+        }
         0x24 => csr.vio_drv_sel = v,
         0x30 => csr.vio_qsel = v,
         0x38 => csr.vio_qnum = v,
@@ -2314,6 +2895,34 @@ fn host_inp_kick(csr: &mut Csr, ram: &mut [u8], base: u64) -> Vec<InpEv> {
     out
 }
 
+/// Push a batch of injected input events through [`WebFeed`] (when present) and
+/// blit the last returned present into the modelled `__scan_fb`/`__ui_cap`.
+/// Used by both the `Step::Halt` poke and the `AUTO_ON`-armed kick.
+fn feed_events(
+    feed: &mut Option<&mut dyn WebFeed>,
+    ram: &mut [u8],
+    entry: u64,
+    scan_fb_base: u64,
+    cap_base: u64,
+    line_base: u64,
+    evs: Vec<InpEv>,
+) {
+    if evs.is_empty() {
+        return;
+    }
+    if let Some(feed) = feed.as_mut() {
+        let mut last = None;
+        for ev in evs {
+            if let Some(p) = feed_inp(&mut **feed, ev) {
+                last = Some(p);
+            }
+        }
+        if let Some(p) = last {
+            inject_web_present(ram, entry, scan_fb_base, cap_base, line_base, &p);
+        }
+    }
+}
+
 fn tab_load(csr: &Csr, reg: u64, dev_id: u32) -> u32 {
     use crate::encode::{VIO_F_VERSION_1, VIO_MAGIC};
     match reg {
@@ -2452,62 +3061,229 @@ fn host_inp_tab_kick(
     out
 }
 
-/// Walk one descriptor chain (≤8): OUT descriptors carry `ctrl_hdr.type`, the
-/// first WRITE descriptor gets the response. Returns used-elem `len`.
+/// Walk one descriptor chain (≤8): gather the OUT descriptors (the first
+/// carries `ctrl_hdr.type`; a `SUBMIT_3D` execbuffer rides the *rest*), run
+/// the command, write `resp_hdr.type` + any typed payload to the first WRITE
+/// descriptor. Returns used-elem `len`.
 fn vio_exec_chain(csr: &mut Csr, ram: &mut [u8], base: u64, head: u16) -> u32 {
     use crate::encode::{VIO_DESC_NEXT, VIO_DESC_WRITE, VIO_GPU_RESP_OK_DISPLAY_INFO};
     use crate::vio::VIO_RESP_DISPLAY_INFO;
     let mut d = u64::from(head);
-    let mut wrote = 0u32;
-    let mut pending: Option<u32> = None;
+    let mut outs: Vec<(u64, u32)> = Vec::new(); // (addr, len)
+    let mut wins: Vec<(u64, u32)> = Vec::new();
     for _ in 0..8 {
         let dbase = csr.vio_qdesc.wrapping_add(d.wrapping_mul(16));
         let daddr = load_u64(ram, base, dbase).unwrap_or(0);
         let dlen = load_u32(ram, base, dbase + 8).unwrap_or(0);
         let dfl = load_u32(ram, base, dbase + 12).unwrap_or(0);
         if dfl & VIO_DESC_WRITE == 0 {
-            let ty = load_u32(ram, base, daddr).unwrap_or(0);
-            csr.vio_last_cmd = ty;
-            pending = Some(vio_cmd(csr, ram, base, daddr, ty));
-        } else if let Some(ty) = pending.take() {
-            store_u32(ram, base, daddr, ty);
-            csr.vio_last_resp = ty;
-            if ty == VIO_GPU_RESP_OK_DISPLAY_INFO {
-                // pmodes[0]: enabled, flags, x, y, w, h (24-byte resp hdr).
-                for (i, v) in [1u32, 0, 0, 0, csr.vio_disp_w, csr.vio_disp_h]
-                    .iter()
-                    .enumerate()
-                {
-                    store_u32(ram, base, daddr + 24 + (i as u64) * 4, *v);
-                }
-            }
-            let cap = if ty == VIO_GPU_RESP_OK_DISPLAY_INFO {
-                VIO_RESP_DISPLAY_INFO
-            } else {
-                24
-            };
-            wrote = wrote.saturating_add(dlen.min(cap));
+            outs.push((daddr, dlen));
+        } else {
+            wins.push((daddr, dlen));
         }
         if dfl & VIO_DESC_NEXT == 0 {
             break;
         }
         d = u64::from((dfl >> 16) & 0xffff);
     }
-    wrote
+    let Some(&(req, _)) = outs.first() else {
+        return 0;
+    };
+    let ty = load_u32(ram, base, req).unwrap_or(0);
+    csr.vio_last_cmd = ty;
+    let resp = vio_cmd(csr, ram, base, &outs, ty);
+    csr.vio_last_resp = resp;
+    let Some(&(raddr, rlen)) = wins.first() else {
+        return 0;
+    };
+    store_u32(ram, base, raddr, resp);
+    // Typed payload after the 24-byte resp_hdr.
+    match resp {
+        VIO_GPU_RESP_OK_DISPLAY_INFO => {
+            // pmodes[0]: enabled, flags, x, y, w, h.
+            for (i, v) in [1u32, 0, 0, 0, csr.vio_disp_w, csr.vio_disp_h]
+                .iter()
+                .enumerate()
+            {
+                store_u32(ram, base, raddr + 24 + (i as u64) * 4, *v);
+            }
+        }
+        crate::encode::VIO_GPU_RESP_OK_CAPSET_INFO => {
+            // resp_capset_info: capset_id, max_version, max_size, padding.
+            for (i, v) in [
+                csr.virgl_capset_id,
+                csr.virgl_capset_ver,
+                csr.virgl_capset_size,
+                0,
+            ]
+            .iter()
+            .enumerate()
+            {
+                store_u32(ram, base, raddr + 24 + (i as u64) * 4, *v);
+            }
+        }
+        crate::encode::VIO_GPU_RESP_OK_CAPSET => {
+            // resp_capset: a bounded virgl capset blob the guest may read.
+            for (i, w) in crate::virgl::CAPSET_WORDS.iter().enumerate() {
+                store_u32(ram, base, raddr + 24 + (i as u64) * 4, *w);
+            }
+        }
+        _ => {}
+    }
+    let cap = match resp {
+        VIO_GPU_RESP_OK_DISPLAY_INFO => VIO_RESP_DISPLAY_INFO,
+        crate::encode::VIO_GPU_RESP_OK_CAPSET_INFO => 40,
+        crate::encode::VIO_GPU_RESP_OK_CAPSET => 24 + crate::virgl::CAPSET_WORDS.len() as u32 * 4,
+        _ => 24,
+    };
+    rlen.min(cap)
 }
 
-/// Execute one ctrlq command read from `req` in guest RAM; returns the
-/// `resp_hdr.type` the device would write (virtio spec 5.7.6/5.7.8–5.7.10).
-fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, req: u64, ty: u32) -> u32 {
+/// True once the virgl lane is live: the device is a `virtio-gpu-gl-device`
+/// (`vio_gl`, set at probe) *and* the driver negotiated `VIRTIO_GPU_F_VIRGL`
+/// (word-0 `DRV_FEATURES`). The 3D/capset commands are fail-closed before that.
+fn virgl_live(csr: &Csr) -> bool {
+    csr.vio_gl && csr.vio_drv_feats & crate::encode::VIO_GPU_F_VIRGL != 0
+}
+
+/// Execute one ctrlq command whose OUT descriptors are `outs` (the first is
+/// the `virtio_gpu_*` request; a `SUBMIT_3D` execbuffer rides `outs[1]`).
+/// Returns the `resp_hdr.type` the device would write (virtio spec 5.7.6/
+/// 5.7.8–5.7.10). The 3D commands are serviced only when `virgl_live` — the
+/// `proxy.gl` board offered `VIRTIO_GPU_F_VIRGL` and `VioInit` accepted it.
+fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u32) -> u32 {
     use crate::encode::{
-        VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING, VIO_GPU_RESOURCE_CREATE_2D,
-        VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_ERR_UNSPEC, VIO_GPU_RESP_OK_DISPLAY_INFO,
-        VIO_GPU_RESP_OK_NODATA, VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_TO_HOST_2D,
+        VIO_GPU_CAPSET_VIRGL, VIO_GPU_CAPSET_VIRGL2, VIO_GPU_CTX_ATTACH_RESOURCE,
+        VIO_GPU_CTX_CREATE, VIO_GPU_GET_CAPSET, VIO_GPU_GET_CAPSET_INFO, VIO_GPU_GET_DISPLAY_INFO,
+        VIO_GPU_RESOURCE_ATTACH_BACKING, VIO_GPU_RESOURCE_CREATE_2D, VIO_GPU_RESOURCE_CREATE_3D,
+        VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_ERR_INVALID_CONTEXT_ID,
+        VIO_GPU_RESP_ERR_INVALID_PARAMETER, VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID,
+        VIO_GPU_RESP_ERR_OUT_OF_MEMORY, VIO_GPU_RESP_ERR_UNSPEC, VIO_GPU_RESP_OK_CAPSET,
+        VIO_GPU_RESP_OK_CAPSET_INFO, VIO_GPU_RESP_OK_DISPLAY_INFO, VIO_GPU_RESP_OK_NODATA,
+        VIO_GPU_SET_SCANOUT, VIO_GPU_SUBMIT_3D, VIO_GPU_TRANSFER_FROM_HOST_3D,
+        VIO_GPU_TRANSFER_TO_HOST_2D,
     };
     use crate::vio::VIO_FB_MAX;
+    let req = outs[0].0;
     let rd = |o: u64| load_u32(ram, base, req + o).unwrap_or(0);
     match ty {
         VIO_GPU_GET_DISPLAY_INFO => VIO_GPU_RESP_OK_DISPLAY_INFO,
+        VIO_GPU_GET_CAPSET_INFO => {
+            // resp_capset_info: index 0 → VIRGL, 1 → VIRGL2 on a virgl device.
+            if !virgl_live(csr) {
+                return VIO_GPU_RESP_ERR_UNSPEC;
+            }
+            let idx = rd(24);
+            csr.virgl_capset_id = match idx {
+                0 => VIO_GPU_CAPSET_VIRGL,
+                1 => VIO_GPU_CAPSET_VIRGL2,
+                _ => 0,
+            };
+            if csr.virgl_capset_id == 0 {
+                csr.virgl_capset_ver = 0;
+                csr.virgl_capset_size = 0;
+            } else {
+                csr.virgl_capset_ver = 2; // virgl2 capset version
+                csr.virgl_capset_size = crate::virgl::CAPSET_WORDS.len() as u32 * 4;
+            }
+            VIO_GPU_RESP_OK_CAPSET_INFO
+        }
+        VIO_GPU_GET_CAPSET => {
+            if !virgl_live(csr) || rd(24) != csr.virgl_capset_id || csr.virgl_capset_id == 0 {
+                return VIO_GPU_RESP_ERR_INVALID_PARAMETER;
+            }
+            VIO_GPU_RESP_OK_CAPSET
+        }
+        VIO_GPU_CTX_CREATE => {
+            let ctx = rd(16); // ctrl_hdr.ctx_id
+            if !virgl_live(csr) || ctx == 0 {
+                return VIO_GPU_RESP_ERR_INVALID_CONTEXT_ID;
+            }
+            csr.virgl_ctx |= 1u64 << ctx.min(63);
+            csr.virgl_ctxs += 1;
+            VIO_GPU_RESP_OK_NODATA
+        }
+        VIO_GPU_CTX_ATTACH_RESOURCE => {
+            let (res, ctx) = (rd(24), rd(16));
+            if !virgl_live(csr) || csr.virgl_ctx & (1u64 << ctx.min(63)) == 0 {
+                return VIO_GPU_RESP_ERR_INVALID_CONTEXT_ID;
+            }
+            if res == 0 {
+                return VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
+            }
+            csr.virgl_attached |= 1u64 << res.min(63);
+            VIO_GPU_RESP_OK_NODATA
+        }
+        VIO_GPU_RESOURCE_CREATE_3D => {
+            // resource_id@24, format@28, target@32, bind@36, w@40, h@44.
+            let (res, w, h) = (rd(24), rd(40), rd(44));
+            if !virgl_live(csr) || res == 0 || w == 0 || h == 0 {
+                return VIO_GPU_RESP_ERR_INVALID_PARAMETER;
+            }
+            if u64::from(w) * u64::from(h) * 4 > VIO_FB_MAX {
+                return VIO_GPU_RESP_ERR_OUT_OF_MEMORY;
+            }
+            // The virgl render target gets its own device-side surface —
+            // `virgl_fb` — deliberately separate from `vio_fb` (the 2D scanout)
+            // so a `SUBMIT_3D` render never disturbs the committed frame.
+            csr.virgl_rt = res;
+            csr.virgl_rt_w = w;
+            csr.virgl_rt_h = h;
+            csr.virgl_fb = vec![0; (w as usize) * (h as usize) * 4];
+            VIO_GPU_RESP_OK_NODATA
+        }
+        VIO_GPU_SUBMIT_3D => {
+            let ctx = rd(16); // ctrl_hdr.ctx_id
+            let size = rd(24); // cmd_submit.size = stream bytes
+            if !virgl_live(csr) || ctx == 0 || csr.virgl_ctx & (1u64 << ctx.min(63)) == 0 {
+                return VIO_GPU_RESP_ERR_INVALID_CONTEXT_ID;
+            }
+            // The execbuffer is the OUT descriptors after the 32-byte
+            // cmd_submit header — contiguous from outs[1] (and outs[0] tail).
+            let Some(&(buf, blen)) = outs.get(1) else {
+                return VIO_GPU_RESP_ERR_INVALID_PARAMETER;
+            };
+            let avail = (u64::from(blen)).min(u64::from(size));
+            let ok = virgl_exec(csr, ram, base, buf, avail);
+            if ok {
+                csr.virgl_submits += 1;
+                VIO_GPU_RESP_OK_NODATA
+            } else {
+                VIO_GPU_RESP_ERR_INVALID_PARAMETER
+            }
+        }
+        VIO_GPU_TRANSFER_FROM_HOST_3D => {
+            // host resource → guest backing. `virtio_gpu_transfer_from_host_3d`
+            // = hdr(24) + box{x,y,z,w,h,d}@24..47 + offset@48 + res@56 (the
+            // modelled layout — real QEMU carries the resource handle in the
+            // ctrl stream; field fidelity is part of the gated real-GPU work).
+            let (x, y, rw, rh) = (rd(24), rd(28), rd(36), rd(40));
+            let off = load_u64(ram, base, req + 48).unwrap_or(0);
+            let res = rd(56);
+            if res != csr.virgl_rt || csr.virgl_fb.is_empty() {
+                return VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
+            }
+            let Some(&backing) = csr.virgl_backing.get(&res) else {
+                return VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
+            };
+            let stride = u64::from(csr.virgl_rt_w) * 4;
+            let rows = rh.min(csr.virgl_rt_h.saturating_sub(y));
+            for row in 0..rows {
+                let pix = u64::from(y + row) * stride + u64::from(x) * 4;
+                let len = u64::from(rw.min(csr.virgl_rt_w.saturating_sub(x))) * 4;
+                let di = backing
+                    .wrapping_add(off)
+                    .wrapping_add(pix)
+                    .wrapping_sub(base);
+                let si = pix as usize;
+                if si + len as usize <= csr.virgl_fb.len() {
+                    if let Some(dst) = ram.get_mut(di as usize..(di + len) as usize) {
+                        dst.copy_from_slice(&csr.virgl_fb[si..si + len as usize]);
+                    }
+                }
+            }
+            VIO_GPU_RESP_OK_NODATA
+        }
         VIO_GPU_RESOURCE_CREATE_2D => {
             let (res, w, h) = (rd(24), rd(32), rd(36));
             if res == 0 || w == 0 || h == 0 || u64::from(w) * u64::from(h) * 4 > VIO_FB_MAX {
@@ -2527,12 +3303,19 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, req: u64, ty: u32) -> u32 {
             let (res, nr) = (rd(24), rd(28));
             let addr = load_u64(ram, base, req + 32).unwrap_or(0);
             let len = rd(40);
-            if res != csr.vio_res_id || nr == 0 || addr == 0 {
+            if nr == 0 || addr == 0 {
                 VIO_GPU_RESP_ERR_UNSPEC
-            } else {
+            } else if res == csr.vio_res_id {
                 csr.vio_backing = addr;
                 csr.vio_backing_len = u64::from(len);
                 VIO_GPU_RESP_OK_NODATA
+            } else if res == csr.virgl_rt {
+                // A 3D (virgl) resource's guest backing — the readback target
+                // for TRANSFER_FROM_HOST_3D.
+                csr.virgl_backing.insert(res, addr);
+                VIO_GPU_RESP_OK_NODATA
+            } else {
+                VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID
             }
         }
         VIO_GPU_SET_SCANOUT => {
@@ -2580,6 +3363,131 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, req: u64, ty: u32) -> u32 {
         }
         _ => VIO_GPU_RESP_ERR_UNSPEC,
     }
+}
+
+/// Parse a `SUBMIT_3D` execbuffer: walk the `VIRGL_CMD0` headers, validate the
+/// framing (`len` = body dwords, stream consumed exactly), track object
+/// handles and inline-write payloads, and on a `CLEAR`+`DRAW_VBO` model the
+/// textured-quad raster into `vio_fb`. Returns false on a malformed stream
+/// (bad header / overrun) — the device answers `ERR_INVALID_PARAMETER`.
+fn virgl_exec(csr: &mut Csr, ram: &[u8], base: u64, buf: u64, size: u64) -> bool {
+    use crate::encode::{
+        VIRGL_CCMD_CLEAR, VIRGL_CCMD_CREATE_OBJECT, VIRGL_CCMD_DRAW_VBO, VIRGL_CCMD_NOP,
+        VIRGL_CCMD_RESOURCE_INLINE_WRITE, VIRGL_CCMD_SET_FRAMEBUFFER_STATE,
+    };
+    let ndw = (size / 4) as usize;
+    if ndw == 0 || ndw > 16384 {
+        return false;
+    }
+    let mut s = Vec::with_capacity(ndw);
+    for i in 0..ndw {
+        let Some(w) = load_u32(ram, base, buf + (i as u64) * 4) else {
+            return false;
+        };
+        s.push(w);
+    }
+    let mut i = 0usize;
+    let mut ncmd = 0u32;
+    let mut saw_clear = false;
+    let mut clear_rgba = [0u32; 4];
+    let mut drew = false;
+    let mut fb_bound = false;
+    let mut objects = 0u64; // created-object handle bitmap (≤64)
+    let mut tex: Option<(u32, u32, Vec<u32>)> = None; // w,h,pixels
+    while i < s.len() {
+        let hdr = s[i];
+        let cmd = hdr & 0xff;
+        let len = ((hdr >> 16) & 0xffff) as usize; // body dwords
+        if cmd != VIRGL_CCMD_NOP && len == 0 {
+            return false;
+        }
+        if i + 1 + len > s.len() {
+            return false;
+        }
+        let body = &s[i + 1..i + 1 + len];
+        match cmd {
+            VIRGL_CCMD_CREATE_OBJECT => {
+                if !body.is_empty() && body[0] < 64 {
+                    objects |= 1u64 << body[0];
+                }
+            }
+            VIRGL_CCMD_SET_FRAMEBUFFER_STATE => {
+                // body[0]=nr_cbufs; a nonzero colour count means a surface is bound.
+                fb_bound = body.first().copied().unwrap_or(0) >= 1;
+            }
+            VIRGL_CCMD_CLEAR => {
+                saw_clear = true;
+                for (k, px) in clear_rgba.iter_mut().enumerate() {
+                    *px = body.get(1 + k).copied().unwrap_or(0);
+                }
+            }
+            VIRGL_CCMD_RESOURCE_INLINE_WRITE => {
+                // res@1, usage@2, stride@3, layer@4, level@5, offset@6,
+                // box{x,y,z,w,h,d}@7..12, data@13+. The texture is the res with
+                // a 2D box whose w*h matches a known texture id (RES_TEX=2).
+                if body.len() >= 13 {
+                    let res = body[0];
+                    let (bw, bh) = (body[9], body[10]);
+                    let data = &body[12..];
+                    if res == crate::virgl::RES_TEX && bw > 0 && bh > 0 {
+                        tex = Some((bw, bh, data.to_vec()));
+                    }
+                }
+            }
+            VIRGL_CCMD_DRAW_VBO => drew = true,
+            _ => {}
+        }
+        ncmd = ncmd.wrapping_add(1);
+        i += 1 + len;
+    }
+    csr.virgl_cmds = csr.virgl_cmds.wrapping_add(ncmd);
+    if saw_clear {
+        csr.virgl_clears = csr.virgl_clears.wrapping_add(1);
+    }
+    // A draw only reaches the surface when a framebuffer was bound and the
+    // surface object (handle `OBJ_SURFACE`) was created in this stream.
+    let surface = objects & (1u64 << crate::virgl::OBJ_SURFACE) != 0;
+    if drew && fb_bound && surface {
+        csr.virgl_draws = csr.virgl_draws.wrapping_add(1);
+        virgl_raster_quad(csr, saw_clear.then_some(clear_rgba), tex.as_ref());
+    }
+    i == s.len()
+}
+
+/// Model a textured quad: sample the `INLINE_WRITE` texture across the
+/// offscreen render-target surface (`virgl_fb`), falling back to the CLEAR
+/// colour when no texture object was uploaded. This is a real nearest-sample
+/// raster of the guest's quad — the modelled analogue of the virgl draw, not
+/// a stub.
+fn virgl_raster_quad(csr: &mut Csr, clear: Option<[u32; 4]>, tex: Option<&(u32, u32, Vec<u32>)>) {
+    let (w, h) = (csr.virgl_rt_w as usize, csr.virgl_rt_h as usize);
+    if w == 0 || h == 0 || csr.virgl_fb.len() < w * h * 4 {
+        return;
+    }
+    let clear_px = clear.map(|c| {
+        // rgba are f32 bits; convert to X8R8G8B8 little-endian word.
+        let f = |b: u32| (f32::from_bits(b).clamp(0.0, 1.0) * 255.0) as u32;
+        f(c[0]) | (f(c[1]) << 8) | (f(c[2]) << 16) | (f(c[3]) << 24)
+    });
+    let mut px = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            let word = if let Some((tw, th, data)) = tex {
+                // nearest-sample the texture across the fullscreen quad.
+                let u = (x * (*tw as usize)) / w.max(1);
+                let v = (y * (*th as usize)) / h.max(1);
+                data.get(v * (*tw as usize) + u).copied().unwrap_or(0)
+            } else {
+                clear_px.unwrap_or(0)
+            };
+            let off = (y * w + x) * 4;
+            if off + 4 <= csr.virgl_fb.len() {
+                csr.virgl_fb[off..off + 4].copy_from_slice(&word.to_le_bytes());
+                px += 1;
+            }
+        }
+    }
+    csr.virgl_px = csr.virgl_px.wrapping_add(px);
 }
 
 /// True when `addr` is an S-mode PLIC context register: `base` is the
@@ -2803,6 +3711,129 @@ fn shamt(w: u32, xlen: u32) -> u32 {
     }
 }
 
+// ---- M3b FP conversion helpers (RISC-V fcvt semantics) ---------------------
+// Round-to-nearest-even; NaN → the signed/unsigned max; saturate on range.
+
+/// Round an f32 toward the `rm` rounding mode, then saturate to int range.
+/// rm 1 = RTZ (toward zero — WASM `trunc`), else RNE (the convert default and
+/// RISC-V dynamic-mode approximation). NaN saturates to the int max, matching
+/// hardware fcvt's invalid-result convention.
+fn fround(v: f32, rm: u32) -> f32 {
+    if rm == 1 {
+        v.trunc()
+    } else {
+        v.round_ties_even()
+    }
+}
+
+fn fcvt_to_i32(v: f32, rm: u32) -> i32 {
+    if v.is_nan() {
+        i32::MAX
+    } else {
+        fround(v, rm).clamp(i32::MIN as f32, i32::MAX as f32) as i32
+    }
+}
+
+fn fcvt_to_u32(v: f32, rm: u32) -> u32 {
+    if v.is_nan() {
+        u32::MAX
+    } else {
+        fround(v, rm).clamp(0.0, u32::MAX as f32) as u32
+    }
+}
+
+fn fcvt_to_i64(v: f32, rm: u32) -> i64 {
+    if v.is_nan() {
+        i64::MAX
+    } else {
+        fround(v, rm).clamp(i64::MIN as f32, i64::MAX as f32) as i64
+    }
+}
+
+fn fcvt_to_u64(v: f32, rm: u32) -> u64 {
+    if v.is_nan() {
+        u64::MAX
+    } else {
+        fround(v, rm).clamp(0.0, u64::MAX as f32) as u64
+    }
+}
+
+/// `fclass.s` — the 10-bit IEEE class mask of an f32.
+fn fclass_s(v: f32) -> u64 {
+    if v.is_nan() {
+        return if v.is_sign_negative() { 1 << 9 } else { 1 << 8 };
+    }
+    match (v.classify(), v.is_sign_negative()) {
+        (std::num::FpCategory::Infinite, true) => 1 << 0,
+        (std::num::FpCategory::Infinite, false) => 1 << 7,
+        (std::num::FpCategory::Normal, true) => 1 << 1,
+        (std::num::FpCategory::Normal, false) => 1 << 6,
+        (std::num::FpCategory::Subnormal, true) => 1 << 2,
+        (std::num::FpCategory::Subnormal, false) => 1 << 5,
+        (std::num::FpCategory::Zero, true) => 1 << 3,
+        (std::num::FpCategory::Zero, false) => 1 << 4,
+        _ => 0,
+    }
+}
+
+fn fround_d(v: f64, rm: u32) -> f64 {
+    if rm == 1 {
+        v.trunc()
+    } else {
+        v.round_ties_even()
+    }
+}
+
+fn fcvt_d_i32(v: f64, rm: u32) -> i32 {
+    if v.is_nan() {
+        i32::MAX
+    } else {
+        fround_d(v, rm).clamp(i32::MIN as f64, i32::MAX as f64) as i32
+    }
+}
+
+fn fcvt_d_u32(v: f64, rm: u32) -> u32 {
+    if v.is_nan() {
+        u32::MAX
+    } else {
+        fround_d(v, rm).clamp(0.0, u32::MAX as f64) as u32
+    }
+}
+
+fn fcvt_d_i64(v: f64, rm: u32) -> i64 {
+    if v.is_nan() {
+        i64::MAX
+    } else {
+        fround_d(v, rm).clamp(i64::MIN as f64, i64::MAX as f64) as i64
+    }
+}
+
+fn fcvt_d_u64(v: f64, rm: u32) -> u64 {
+    if v.is_nan() {
+        u64::MAX
+    } else {
+        fround_d(v, rm).clamp(0.0, u64::MAX as f64) as u64
+    }
+}
+
+/// `fclass.d` — the 10-bit IEEE class mask of an f64.
+fn fclass_d(v: f64) -> u64 {
+    if v.is_nan() {
+        return if v.is_sign_negative() { 1 << 9 } else { 1 << 8 };
+    }
+    match (v.classify(), v.is_sign_negative()) {
+        (std::num::FpCategory::Infinite, true) => 1 << 0,
+        (std::num::FpCategory::Infinite, false) => 1 << 7,
+        (std::num::FpCategory::Normal, true) => 1 << 1,
+        (std::num::FpCategory::Normal, false) => 1 << 6,
+        (std::num::FpCategory::Subnormal, true) => 1 << 2,
+        (std::num::FpCategory::Subnormal, false) => 1 << 5,
+        (std::num::FpCategory::Zero, true) => 1 << 3,
+        (std::num::FpCategory::Zero, false) => 1 << 4,
+        _ => 0,
+    }
+}
+
 fn encode_ecall() -> u32 {
     crate::encode::ecall()
 }
@@ -2938,6 +3969,13 @@ fn load_u8(ram: &[u8], base: u64, addr: u64) -> Option<u8> {
     ram.get(o).copied()
 }
 
+fn load_u16(ram: &[u8], base: u64, addr: u64) -> Option<u16> {
+    let o = addr.checked_sub(base)? as usize;
+    ram.get(o..o + 2)
+        .and_then(|b| b.try_into().ok())
+        .map(u16::from_le_bytes)
+}
+
 fn load_u32(ram: &[u8], base: u64, addr: u64) -> Option<u32> {
     let o = addr.checked_sub(base)? as usize;
     ram.get(o..o + 4)
@@ -2950,6 +3988,16 @@ fn load_u64(ram: &[u8], base: u64, addr: u64) -> Option<u64> {
     ram.get(o..o + 8)
         .and_then(|b| b.try_into().ok())
         .map(u64::from_le_bytes)
+}
+
+fn store_u16(ram: &mut [u8], base: u64, addr: u64, v: u16) -> bool {
+    if let Some(o) = addr.checked_sub(base).and_then(|d| usize::try_from(d).ok()) {
+        if o + 2 <= ram.len() {
+            ram[o..o + 2].copy_from_slice(&v.to_le_bytes());
+            return true;
+        }
+    }
+    false
 }
 
 fn store_u8(ram: &mut [u8], base: u64, addr: u64, v: u8) -> bool {
@@ -2967,8 +4015,15 @@ fn inject_web_present(
     base: u64,
     scan_fb_base: u64,
     cap_base: u64,
+    line_base: u64,
     web: &GuestWebPresent,
 ) {
+    // `WEB_STAMPED` is the authoritative "a real web canvas owns the surface"
+    // latch `WebBlit` reads — the cap's `UI_CAP_FLAG_WEB` alone only routes
+    // `vp_web` (DomtRaster sets it too), so it cannot mark ownership.
+    if line_base != 0 {
+        store_u32(ram, base, line_base + crate::WEB_STAMPED_OFF as u64, 1);
+    }
     if scan_fb_base != 0 && !web.scan_fb.is_empty() {
         if let Some(o) = scan_fb_base
             .checked_sub(base)
@@ -2989,7 +4044,7 @@ fn inject_web_present(
         ram,
         base,
         cap_base.wrapping_add(crate::vio::UI_CAP_OFF_FLAGS as u64),
-        crate::vio::UI_CAP_FLAG_WEB,
+        crate::vio::UI_CAP_FLAG_WEB | crate::vio::UI_CAP_FLAG_PK,
     );
     store_u32(
         ram,
@@ -3999,6 +5054,758 @@ mod tests {
         assert_ne!(&s.vio_fb[4..8], &[0, 0, 0xff, 0xff]);
     }
 
+    /// `__web_pk` byte builder for the tests below: magic + geometry + node
+    /// count + the token stream + the `0` stream-end marker.
+    fn web_pk(w: u32, h: u32, nodes: u32, tokens: &[u32]) -> Vec<u8> {
+        let mut pk = Vec::new();
+        pk.extend_from_slice(&crate::webp::WEB_PK_MAGIC.to_le_bytes());
+        pk.extend_from_slice(&w.to_le_bytes());
+        pk.extend_from_slice(&h.to_le_bytes());
+        pk.extend_from_slice(&nodes.to_le_bytes());
+        for t in tokens {
+            pk.extend_from_slice(&t.to_le_bytes());
+        }
+        pk.extend_from_slice(&0u32.to_le_bytes());
+        pk
+    }
+
+    /// Non-shared guest-JIT board: the browser face owns the plane from
+    /// power-on, so `WebBlit` must decode `__web_pk` into `__scan_fb` at boot
+    /// and `vp_web` must transfer it — no picker, no text face.
+    #[test]
+    fn web_blit_paints_pack_into_scan_fb() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+          "cli":{"enable":false},
+          "wasm":{"enable":true,"jit":true,"guest_jit":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = analyze::kstart(&spec);
+        // 4×2 pack. Row 0 = LIT(1,b)+RUN(3,a); row 1 = LIT(4,c,d,e,f) — both
+        // token forms on one surface, with the row-0 literal deliberately
+        // *not* row-final: a corrupt literal count must still stop at its
+        // declared width rather than swallow the run that follows (an RV64
+        // `lw` sign-extension once made it clamp to the row remainder).
+        let (a, b, c, d, e, f) = (
+            0xff11_2233u32,
+            0xff44_5566u32,
+            0xff00_00ffu32,
+            0xff00_ff00u32,
+            0xffff_0000u32,
+            0xffaa_bbccu32,
+        );
+        m.web_pk = web_pk(4, 2, 5, &[0x8000_0001, b, 3, a, 0x8000_0004, c, d, e, f]);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        let (w, h, stride) = (s.disp_sel.2, s.disp_sel.3, s.disp_sel.4);
+        assert_eq!((w, h), (640, 480), "disp_sel {:?}", s.disp_sel);
+        let px = |fb: &[u8], x: u32, y: u32| -> u32 {
+            let off = (y * stride + x * 4) as usize;
+            u32::from_le_bytes(fb[off..off + 4].try_into().unwrap())
+        };
+        // The RLE stream decoded into __scan_fb at the latched stride…
+        assert_eq!(px(&s.scan_fb, 0, 0), b, "scan_fb(0,0) the literal");
+        assert_eq!(px(&s.scan_fb, 1, 0), a, "scan_fb(1,0) run start");
+        assert_eq!(px(&s.scan_fb, 3, 0), a, "scan_fb(3,0) inside the run");
+        assert_eq!(px(&s.scan_fb, 0, 1), c, "scan_fb(0,1) second row");
+        assert_eq!(px(&s.scan_fb, 3, 1), f, "scan_fb(3,1) row end");
+        // …and `vp_web` transferred the wipe tile to the device surface.
+        assert_eq!(px(&s.vio_fb, 0, 0), b, "vio_fb(0,0)");
+        assert_eq!(px(&s.vio_fb, 3, 1), f, "vio_fb(3,1)");
+        // `__ui_cap`: web persist stamped from the pack header; the wipe tile
+        // is consumed by the paint.
+        assert_eq!(s.cap_magic, crate::vio::UI_CAP_MAGIC);
+        assert_eq!(s.cap_nodes, 5);
+        assert_eq!(s.cap_tiles, 0, "VioPaint consumes the wipe tile");
+        // One decode total: `wasm_ui` + `domt_boot` + the UART `Ui` each call
+        // `WebBlit`, but the live check makes the repeats a0=1 early-outs —
+        // the `WEBPK` marker only prints on a real blit.
+        assert_eq!(s.console.matches("WEBPK ").count(), 1, "{}", s.console);
+        assert!(s.console.contains("VIRTIO-PAINT\n"), "{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    /// Same board, no pack installed (the `.word 0` sentinel): `WebBlit`
+    /// returns a0=0 and the bounded text face still paints — the pack is a
+    /// preference, never a requirement.
+    #[test]
+    fn web_blit_no_pack_keeps_text_face() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+          "cli":{"enable":false},
+          "wasm":{"enable":true,"jit":true,"guest_jit":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert_eq!(s.console.matches("WEBPK ").count(), 0, "{}", s.console);
+        // DomtRaster's own persist stamp still drives vp_web — the text face
+        // is the documented fallback and its navy page clear proves it ran.
+        assert_eq!(s.cap_magic, crate::vio::UI_CAP_MAGIC);
+        assert!(s.console.contains("VIRTIO-PAINT\n"), "{}", s.console);
+        let navy = 0x0010_1620u32.to_le_bytes();
+        assert_eq!(&s.vio_fb[..4], &navy[..], "DomtRaster page bg");
+    }
+
+    /// Exec-model contract: an injected `GuestWebPresent` already reads as a
+    /// live web canvas (`G6CP`+WEB), so `WebBlit` must NOT overwrite it with
+    /// the static pack — the host feed wins on web-feed runs.
+    #[test]
+    fn web_blit_yields_to_injected_present() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+          "cli":{"enable":false},
+          "wasm":{"enable":true,"jit":true,"guest_jit":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = analyze::kstart(&spec);
+        m.web_pk = web_pk(4, 2, 5, &[4, 0xff11_2233, 0x8000_0004, 1, 2, 3, 4]);
+        let mut fb = vec![0u8; 640 * 480 * 4];
+        fb[0] = 0;
+        fb[1] = 0;
+        fb[2] = 0xff;
+        fb[3] = 0xff;
+        let web = GuestWebPresent {
+            scan_fb: fb,
+            tiles: vec![DirtyTile {
+                x: 0,
+                y: 0,
+                w: 1,
+                h: 1,
+            }],
+            node_count: 7,
+        };
+        let s = run_module_web(&spec, &m, 0x8020_0000, 0, Some(&web)).unwrap();
+        // The injected canvas presented, not the pack: no WEBPK decode ran.
+        assert_eq!(s.console.matches("WEBPK ").count(), 0, "{}", s.console);
+        assert_eq!(&s.vio_fb[..4], &[0, 0, 0xff, 0xff]);
+        assert_eq!(s.cap_nodes, 7, "injected persist, not the pack's 5");
+    }
+
+    // ------------------------------------------------------------------
+    // `__web_dl` (DlPaint) tests — the op-stream carry Stage 2 installs
+    // beside the pixel pack. Builders below emit the exact record layout
+    // `g6b_asm::dlp`'s module comment documents.
+    // ------------------------------------------------------------------
+
+    /// Op-stream helpers — `DLOP_*` words + args, matching `dl_state_stream`.
+    fn dl_fill(x: i32, y: i32, w: i32, h: i32, rgba: u32) -> Vec<u8> {
+        let mut s = Vec::new();
+        for v in [
+            crate::dlp::DLOP_FILL as u32,
+            x as u32,
+            y as u32,
+            w as u32,
+            h as u32,
+            rgba,
+        ] {
+            s.extend_from_slice(&v.to_le_bytes());
+        }
+        s
+    }
+
+    fn dl_words(words: &[u32]) -> Vec<u8> {
+        let mut s = Vec::new();
+        for v in words {
+            s.extend_from_slice(&v.to_le_bytes());
+        }
+        s
+    }
+
+    /// `__web_dl` byte image: header + tables laid out in the documented
+    /// order (state, tref, size, glyph, blob, hit, strings, streams, blobs).
+    /// `trefs` are the 14-word records verbatim; `glyphs` the 6-word records;
+    /// `strings` the pool the recs' offsets point into.
+    #[allow(clippy::too_many_arguments)]
+    fn web_dl(
+        w: u32,
+        h: u32,
+        states: &[(&str, Vec<u8>)],
+        trefs: &[[u32; 14]],
+        sizes: &[u32],
+        glyphs: &[[u32; 6]],
+        blobs: &[(u32, u32, Vec<u8>)],
+        strings: &[u8],
+    ) -> Vec<u8> {
+        use crate::dlp::*;
+        let hdr = WEB_DL_HDR as u32;
+        let (n_state, n_tref, n_size, n_glyph, n_blob) = (
+            states.len() as u32,
+            trefs.len() as u32,
+            sizes.len() as u32,
+            glyphs.len() as u32,
+            blobs.len() as u32,
+        );
+        let state_off = hdr;
+        let tref_off = state_off + n_state * DL_STATE_REC as u32;
+        let size_off = tref_off + n_tref * DL_TREF_REC as u32;
+        let glyph_off = size_off + n_size * 4;
+        let blobtab_off = glyph_off + n_glyph * DL_GLYPH_REC as u32;
+        let hit_off = blobtab_off + n_blob * DL_BLOB_REC as u32;
+        let str_off = hit_off;
+        let ops_off = str_off + strings.len() as u32;
+        let mut cursor = ops_off;
+        let mut ops_at = Vec::new();
+        for (_, stream) in states {
+            ops_at.push((cursor, stream.len() as u32));
+            cursor += stream.len() as u32;
+        }
+        let blobdata_off = cursor;
+        let mut out = Vec::new();
+        let push = |out: &mut Vec<u8>, v: u32| out.extend_from_slice(&v.to_le_bytes());
+        for v in [
+            WEB_DL_MAGIC,
+            w,
+            h,
+            n_state,
+            n_tref,
+            n_size,
+            n_glyph,
+            n_blob,
+            0, // n_hit
+            state_off,
+            tref_off,
+            size_off,
+            glyph_off,
+            blobtab_off,
+            hit_off,
+            str_off,
+            strings.len() as u32,
+            blobdata_off,
+        ] {
+            push(&mut out, v);
+        }
+        // state recs {name8, off, len}
+        for ((name, _), (off, len)) in states.iter().zip(&ops_at) {
+            let mut nb = [0u8; 8];
+            for (i, b) in name.as_bytes().iter().take(8).enumerate() {
+                nb[i] = *b;
+            }
+            out.extend_from_slice(&nb);
+            push(&mut out, *off);
+            push(&mut out, *len);
+        }
+        for rec in trefs {
+            for v in rec {
+                push(&mut out, *v);
+            }
+        }
+        for v in sizes {
+            push(&mut out, *v);
+        }
+        for rec in glyphs {
+            for v in rec {
+                push(&mut out, *v);
+            }
+        }
+        let mut bcursor = blobdata_off;
+        for (bw, bh, cov) in blobs {
+            for v in [bcursor, *bw, *bh, cov.len() as u32] {
+                push(&mut out, v);
+            }
+            bcursor += cov.len() as u32;
+        }
+        out.extend_from_slice(strings);
+        for (_, stream) in states {
+            out.extend_from_slice(stream);
+        }
+        for (_, _, cov) in blobs {
+            out.extend_from_slice(cov);
+        }
+        out
+    }
+
+    /// Splice `ops` right after the `jal DomtBoot` in the boot stream — the
+    /// guest-side equivalent of the JS cell's `__dom` writes, for tests that
+    /// need DOM state (`H_WST`, `__dom_id`, node text) set before the boot
+    /// `WebPaint` runs in the same node.
+    fn seed_after_domt_boot(m: &mut Module, ops: Vec<Op>) {
+        // The earliest `jal WebPaint` in the program is the first `DlPaint`
+        // the guest runs — live `__dom`/`__dom_id` state has to be in place
+        // before it, so splice immediately ahead of that call rather than
+        // after `DomtBoot` (a later node whose WebPaint would already see the
+        // surface latched).
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "WebPaint"))
+            {
+                n.ops.splice(pos..pos, ops);
+                return;
+            }
+        }
+        panic!("no WebPaint call site");
+    }
+
+    /// The guest-JIT web spec the web tests share (browser owns the plane).
+    fn web_guest_spec() -> BoardSpec {
+        BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+  "cli":{"enable":false},
+  "wasm":{"enable":true,"jit":true,"guest_jit":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap()
+    }
+
+    /// `DlPaint` replays the op stream into `__scan_fb`: FILL ground, FILLR
+    /// corner test, STRKR ring, COV blob blit, TILEPX pixel relief — one op
+    /// of each shape, each in its own region of a 16×8 canvas.
+    #[test]
+    fn dl_paint_replays_op_stream() {
+        let spec = web_guest_spec();
+        let mut m = analyze::kstart(&spec);
+        let (navy, red, green, white) = (
+            0x3020_10ffu32,
+            0x4040_ffffu32,
+            0x40ff_40ffu32,
+            0xffff_ffffu32,
+        );
+        let mut stream = dl_fill(0, 0, 16, 8, navy);
+        // FILLR {0,0,4,4,r=2,red} — inside_rounded leaves only the 2x2 centre.
+        stream.extend(dl_words(&[
+            crate::dlp::DLOP_FILLR as u32,
+            0,
+            0,
+            4,
+            4,
+            2,
+            red,
+        ]));
+        // STRKR {5,0,4,4,r=2,bw=1,green} — inner 2x2 r=1 is empty; the ring.
+        stream.extend(dl_words(&[
+            crate::dlp::DLOP_STRKR as u32,
+            5,
+            0,
+            4,
+            4,
+            2,
+            1,
+            green,
+        ]));
+        // COV {10,0,blob0,white} — 2x2 full-coverage stamp.
+        stream.extend(dl_words(&[crate::dlp::DLOP_COV as u32, 10, 0, 0, white]));
+        // TILEPX {12,0,2,2} — LIT(2)+LIT(2) raw pixel relief.
+        stream.extend(dl_words(&[
+            crate::dlp::DLOP_TILEPX as u32,
+            12,
+            0,
+            2,
+            2,
+            0x8000_0002,
+            0xff11_2233,
+            0xff44_5566,
+            0x8000_0002,
+            0xffaa_bbcc,
+            0xffde_ad00,
+        ]));
+        stream.extend(dl_words(&[0])); // END
+        m.web_dl = web_dl(
+            16,
+            8,
+            &[("main", stream)],
+            &[],
+            &[],
+            &[],
+            &[(2, 2, vec![255, 255, 255, 255])],
+            &[],
+        );
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        let stride = s.disp_sel.4;
+        let px = |x: u32, y: u32| -> u32 {
+            let off = (y * stride + x * 4) as usize;
+            u32::from_le_bytes(s.scan_fb[off..off + 4].try_into().unwrap())
+        };
+        // Opaque store word = 0xFF<<24 | rgba>>8.
+        let (x_navy, x_red, x_green, x_white) = (
+            0xff00_0000 | (navy >> 8),
+            0xff00_0000 | (red >> 8),
+            0xff00_0000 | (green >> 8),
+            0xff00_0000 | (white >> 8),
+        );
+        assert_eq!(px(0, 0), x_navy, "FILLR corner stays ground");
+        assert_eq!(px(1, 1), x_red, "FILLR centre");
+        assert_eq!(px(2, 2), x_red, "FILLR centre");
+        assert_eq!(px(3, 0), x_navy, "FILLR edge column outside");
+        // STRKR r=2/4x4: outer inside = the 4 centre px; inner r=1 on a 2x2
+        // box is empty → the ring is exactly those four.
+        assert_eq!(px(7, 0), x_navy, "STRKR corner-adjacent outside");
+        assert_eq!(px(6, 1), x_green, "STRKR ring px");
+        assert_eq!(px(7, 2), x_green, "STRKR ring px");
+        assert_eq!(px(5, 0), x_navy, "STRKR corner outside");
+        assert_eq!(px(10, 0), x_white, "COV stamp");
+        assert_eq!(px(11, 1), x_white, "COV stamp");
+        assert_eq!(px(12, 0), 0xff11_2233, "TILEPX literal");
+        assert_eq!(px(13, 1), 0xffde_ad00, "TILEPX literal row 1");
+        assert_eq!(px(15, 7), x_navy, "ground survives");
+        // Ownership: WEBDL marker once, cap stamped WEB|PK + wipe consumed.
+        assert_eq!(s.console.matches("WEBDL ").count(), 1, "{}", s.console);
+        assert!(
+            s.console.contains("WEBDL 0000000000000000\n"),
+            "{}",
+            s.console
+        );
+        assert_eq!(s.console.matches("WEBPK ").count(), 0, "{}", s.console);
+        assert_eq!(s.cap_magic, crate::vio::UI_CAP_MAGIC);
+        assert_eq!(s.cap_tiles, 0, "VioPaint consumes the wipe tile");
+        assert!(s.console.contains("VIRTIO-PAINT\n"), "{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    /// Per-state lists: `__dom+H_WST` selects the state stream. Seeding
+    /// H_WST=1 before the boot `WebPaint` must paint state 1's colour, not
+    /// state 0's — the same latch the menu picker writes at runtime.
+    #[test]
+    fn dl_paint_state_select_via_h_wst() {
+        let spec = web_guest_spec();
+        let mut m = analyze::kstart(&spec);
+        let s0 = {
+            let mut v = dl_fill(0, 0, 16, 8, 0x3020_10ff);
+            v.extend(dl_words(&[0]));
+            v
+        };
+        let s1 = {
+            let mut v = dl_fill(0, 0, 16, 8, 0x10ff_30ff);
+            v.extend(dl_words(&[0]));
+            v
+        };
+        m.web_dl = web_dl(16, 8, &[("main", s0), ("cpu", s1)], &[], &[], &[], &[], &[]);
+        seed_after_domt_boot(&mut m, {
+            use crate::domt::H_WST;
+            vec![
+                Op::La {
+                    rd: crate::encode::T0,
+                    addr: Addr::DomT,
+                },
+                Op::Li {
+                    rd: crate::encode::T1,
+                    imm: 1,
+                },
+                Op::Sw {
+                    rs2: crate::encode::T1,
+                    rs1: crate::encode::T0,
+                    off: H_WST,
+                },
+            ]
+        });
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        let stride = s.disp_sel.4;
+        let px = |x: u32, y: u32| -> u32 {
+            let off = (y * stride + x * 4) as usize;
+            u32::from_le_bytes(s.scan_fb[off..off + 4].try_into().unwrap())
+        };
+        assert_eq!(
+            px(4, 4),
+            0xff00_0000 | (0x10ff_30ff >> 8),
+            "state 1 ground\n{}",
+            s.console
+        );
+        assert!(
+            s.console.contains("WEBDL 0000000000000001\n"),
+            "{}",
+            s.console
+        );
+    }
+
+    /// `DomtKey` menu-nav: a `KEY_RIGHT` press drained through `INP_KQ` moves
+    /// `__dom+H_WST` forward one `__web_dl` state (BIOS-protocol nav — the
+    /// shipped cell wires its tabs `listener=0`, and `menu_for_key` maps
+    /// Left/Right/Home/End). The key is queued and `DomtKey` drained ahead of
+    /// the boot `WebPaint`, so `H_WST` 0→1 paints state 1's colour — the guest
+    /// half of `guest_cell_key("ArrowRight")`, driven by real input.
+    #[test]
+    fn dl_paint_nav_key_switches_state_via_domt_key() {
+        let spec = web_guest_spec();
+        let mut m = analyze::kstart(&spec);
+        let s0 = {
+            let mut v = dl_fill(0, 0, 16, 8, 0x3020_10ff);
+            v.extend(dl_words(&[0]));
+            v
+        };
+        let s1 = {
+            let mut v = dl_fill(0, 0, 16, 8, 0x10ff_30ff);
+            v.extend(dl_words(&[0]));
+            v
+        };
+        m.web_dl = web_dl(16, 8, &[("main", s0), ("cpu", s1)], &[], &[], &[], &[], &[]);
+        // Queue a KEY_RIGHT press into INP_KQ and drain it through DomtKey
+        // ahead of the boot WebPaint — the real input path, not an H_WST poke.
+        seed_after_domt_boot(&mut m, {
+            use crate::encode::{RA, T0, T1, X0};
+            use crate::vio::{DOMT_SEEN_OFF, INP_KQ_HEAD, INP_KQ_OFF, VIO_KEY_RIGHT};
+            vec![
+                Op::La {
+                    rd: T0,
+                    addr: Addr::VioBss,
+                },
+                Op::Li {
+                    rd: T1,
+                    imm: (VIO_KEY_RIGHT << 8) | 1,
+                },
+                Op::Sw {
+                    rs2: T1,
+                    rs1: T0,
+                    off: INP_KQ_OFF,
+                },
+                Op::Li { rd: T1, imm: 1 },
+                Op::Sw {
+                    rs2: T1,
+                    rs1: T0,
+                    off: INP_KQ_HEAD,
+                },
+                Op::Sw {
+                    rs2: X0,
+                    rs1: T0,
+                    off: DOMT_SEEN_OFF,
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "DomtKey".into(),
+                },
+            ]
+        });
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            s.console.contains("WEBDL 0000000000000001\n"),
+            "KEY_RIGHT nav repainted state 1: {}",
+            s.console
+        );
+        let stride = s.disp_sel.4;
+        let px = |x: u32, y: u32| -> u32 {
+            let off = (y * stride + x * 4) as usize;
+            u32::from_le_bytes(s.scan_fb[off..off + 4].try_into().unwrap())
+        };
+        assert_eq!(
+            px(4, 4),
+            0xff00_0000 | (0x10ff_30ff >> 8),
+            "KEY_RIGHT nav left state 1 painted\n{}",
+            s.console
+        );
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    /// `TREF`: the live `__dom` text wins over the packed fallback. The seed
+    /// binds node 1's `__dom_id` slot to "s1" and points its text at "LIVE"
+    /// in `__dom_str`; the pack's fallback is the single char "P". If the
+    /// lookup works the glyph stamp repeats 4×; on fallback, once.
+    #[test]
+    fn dl_paint_tref_renders_live_dom_text() {
+        let spec = web_guest_spec();
+        let mut m = analyze::kstart(&spec);
+        let mut stream = dl_fill(0, 0, 16, 8, 0x3020_10ff);
+        stream.extend(dl_words(&[crate::dlp::DLOP_TREF as u32, 0]));
+        stream.extend(dl_words(&[0]));
+        // strings: id "s1" @0 (2B), txt "P" @2 (1B).
+        let strings = b"s1P";
+        // tref {clip 0,0,16,8; pen_x 1; base_y 6; max_w 60; size_idx 0;
+        //        fg white-rgba; bg navy X8R8; id 0,2; txt 2,1}
+        let tref = [
+            0,
+            0,
+            16,
+            8,
+            1,
+            6,
+            60,
+            0,
+            0xffff_ffffu32,
+            0xff00_0000 | (0x3020_10ff >> 8),
+            0,
+            2,
+            2,
+            1,
+        ];
+        // glyphs: every LIVE/PACKED char → the shared 2x2 blob, adv 4px.
+        let glyphs: Vec<[u32; 6]> = [b'P', b'L', b'I', b'V', b'E']
+            .iter()
+            .map(|c| [*c as u32, 0, 0, 0, 0, 4 * 64])
+            .collect();
+        m.web_dl = web_dl(
+            16,
+            8,
+            &[("main", stream)],
+            &[tref],
+            &[128],
+            &glyphs,
+            &[(2, 2, vec![255, 255, 255, 255])],
+            strings,
+        );
+        {
+            use crate::domt::{DOMT_HDR, DOMT_NODE, N_TLEN, N_TPTR};
+            use crate::encode::{T0, T1};
+            let mut ops = vec![
+                // __dom_id[1] = [len=2]['s','1']
+                Op::La {
+                    rd: T0,
+                    addr: Addr::DomId,
+                },
+                Op::Addi {
+                    rd: T0,
+                    rs: T0,
+                    imm: 32,
+                },
+                Op::Li { rd: T1, imm: 2 },
+                Op::Sw {
+                    rs2: T1,
+                    rs1: T0,
+                    off: 0,
+                },
+                Op::Li {
+                    rd: T1,
+                    imm: i64::from(b's'),
+                },
+                Op::Sb {
+                    rs2: T1,
+                    rs1: T0,
+                    off: 4,
+                },
+                Op::Li {
+                    rd: T1,
+                    imm: i64::from(b'1'),
+                },
+                Op::Sb {
+                    rs2: T1,
+                    rs1: T0,
+                    off: 5,
+                },
+                // node[1]: N_TPTR=100 (__dom_str off), N_TLEN=4
+                Op::La {
+                    rd: T0,
+                    addr: Addr::DomT,
+                },
+                Op::Addi {
+                    rd: T0,
+                    rs: T0,
+                    imm: (DOMT_HDR + DOMT_NODE) as i32,
+                },
+                Op::Li { rd: T1, imm: 100 },
+                Op::Sw {
+                    rs2: T1,
+                    rs1: T0,
+                    off: N_TPTR,
+                },
+                Op::Li { rd: T1, imm: 4 },
+                Op::Sw {
+                    rs2: T1,
+                    rs1: T0,
+                    off: N_TLEN,
+                },
+                // __dom_str+100 = "LIVE"
+                Op::La {
+                    rd: T0,
+                    addr: Addr::DomS,
+                },
+            ];
+            for (i, b) in b"LIVE".iter().enumerate() {
+                ops.push(Op::Li {
+                    rd: T1,
+                    imm: i64::from(*b),
+                });
+                ops.push(Op::Sb {
+                    rs2: T1,
+                    rs1: T0,
+                    off: 100 + i as i32,
+                });
+            }
+            seed_after_domt_boot(&mut m, ops);
+        }
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        let stride = s.disp_sel.4;
+        let px = |x: u32, y: u32| -> u32 {
+            let off = (y * stride + x * 4) as usize;
+            u32::from_le_bytes(s.scan_fb[off..off + 4].try_into().unwrap())
+        };
+        let white = 0xffff_ffffu32;
+        // base_y 6, my 0, bh 2 → rows 5..6; pens at x = 1,5,9,13 (4px adv).
+        for (i, x) in [1u32, 5, 9, 13].iter().enumerate() {
+            assert_eq!(px(*x, 5), white, "LIVE glyph {i} row5");
+            assert_eq!(px(*x + 1, 6), white, "LIVE glyph {i} row6");
+        }
+        assert_eq!(px(15, 7), 0xff00_0000 | (0x3020_10ff >> 8));
+    }
+
+    /// The packed-text fallback: no `__dom` seed → `DlFindId` misses → the
+    /// guest draws the packed "P" — one glyph stamp at the pen, the rest of
+    /// the clear rect back to the tref bg.
+    #[test]
+    fn dl_paint_tref_packed_text_fallback() {
+        let spec = web_guest_spec();
+        let mut m = analyze::kstart(&spec);
+        let mut stream = dl_fill(0, 0, 16, 8, 0x3020_10ff);
+        stream.extend(dl_words(&[crate::dlp::DLOP_TREF as u32, 0]));
+        stream.extend(dl_words(&[0]));
+        let strings = b"s1P";
+        let tref = [
+            0,
+            0,
+            16,
+            8,
+            1,
+            6,
+            60,
+            0,
+            0xffff_ffffu32,
+            0xff00_0000 | (0x3020_10ff >> 8),
+            0,
+            2,
+            2,
+            1,
+        ];
+        let glyphs: Vec<[u32; 6]> = [b'P', b'L', b'I', b'V', b'E']
+            .iter()
+            .map(|c| [*c as u32, 0, 0, 0, 0, 4 * 64])
+            .collect();
+        m.web_dl = web_dl(
+            16,
+            8,
+            &[("main", stream)],
+            &[tref],
+            &[128],
+            &glyphs,
+            &[(2, 2, vec![255, 255, 255, 255])],
+            strings,
+        );
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        let stride = s.disp_sel.4;
+        let px = |x: u32, y: u32| -> u32 {
+            let off = (y * stride + x * 4) as usize;
+            u32::from_le_bytes(s.scan_fb[off..off + 4].try_into().unwrap())
+        };
+        assert_eq!(px(1, 5), 0xffff_ffff, "packed 'P' stamp");
+        assert_eq!(px(2, 6), 0xffff_ffff, "packed 'P' stamp");
+        // 'P' is one char — x=5's slot stays the tref bg (navy).
+        assert_eq!(px(5, 5), 0xff00_0000 | (0x3020_10ff >> 8), "no 2nd glyph");
+        assert!(s.console.contains("WEBDL "), "{}", s.console);
+    }
+
+    /// Absent/malformed `__web_dl` fails closed into `WebBlit`: install a
+    /// pixel pack plus a garbage-word list — the WEBPK decode runs, not
+    /// WEBDL, and the pixel pack reaches the surface.
+    #[test]
+    fn dl_paint_invalid_falls_back_to_webpk() {
+        let spec = web_guest_spec();
+        let mut m = analyze::kstart(&spec);
+        m.web_dl = b"G6XXgarbage-list".to_vec();
+        m.web_pk = web_pk(4, 2, 5, &[4, 0xff11_2233, 0x8000_0004, 1, 2, 3, 4]);
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert_eq!(s.console.matches("WEBDL ").count(), 0, "{}", s.console);
+        assert_eq!(s.console.matches("WEBPK ").count(), 1, "{}", s.console);
+        let stride = s.disp_sel.4;
+        let px = |x: u32, y: u32| -> u32 {
+            let off = (y * stride + x * 4) as usize;
+            u32::from_le_bytes(s.scan_fb[off..off + 4].try_into().unwrap())
+        };
+        assert_eq!(px(0, 0), 0xff11_2233, "web_pk run decoded");
+        assert_eq!(px(0, 1), 1, "web_pk literal decoded");
+    }
+
     #[test]
     fn vio_paint_scale_expands_to_proxy_high_res() {
         // Display-proxy live (1920×1080, dpi mode → scale 2) on the **VGA
@@ -4085,6 +5892,214 @@ mod tests {
     }
 
     #[test]
+    fn virgl_submit_executes_textured_quad() {
+        // M4: a `virtio-gpu-gl-device` board (`proxy.gl`). `VioInit` accepts
+        // the offered `VIRTIO_GPU_F_VIRGL`; `VioVirgl` then walks `__virgl_req`
+        // (CAPSET_INFO → CAPSET → CTX_CREATE → ATTACH → SUBMIT_3D →
+        // TRANSFER_FROM_HOST_3D → FLUSH). The execbuffer rides a second OUT
+        // descriptor; `virgl_exec` parses it and rasters the textured quad
+        // into `vio_fb`. Real-QEMU raster is the open gate (no DRM render node
+        // on this host) — the modelled path is the verified one here.
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"proxy":{"enable":true,"link":"hdmi","gl":true,"high_w":640,"high_h":480,"scale_mode":"fit"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        assert!(
+            !m.virgl_cmd.is_empty() && !m.virgl_req.is_empty(),
+            "proxy.gl board emits __virgl_cmd + __virgl_req"
+        );
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("VIRTIO-VIRGL"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-SCAN"), "{}", s.console);
+        // CAPSET negotiated (capset_id reported) → CTX_CREATE → SUBMIT_3D ran.
+        assert_ne!(s.virgl_capset, 0, "CAPSET_INFO/CAPSET negotiated");
+        assert!(s.virgl_ctxs >= 1, "CTX_CREATE ran: {}", s.console);
+        assert!(s.virgl_submits >= 1, "SUBMIT_3D accepted: {}", s.console);
+        assert!(s.virgl_draws >= 1, "DRAW_VBO reached a bound surface");
+        // The offscreen RT is the proxy geometry (640×480) — the textured quad
+        // rasters every pixel once. The scanout surface is untouched (the 2D
+        // paint path still owns it), which is the no-regression property.
+        assert_eq!(s.virgl_px, 640 * 480);
+        let q = |x: usize, y: usize| {
+            u32::from_le_bytes(s.virgl_fb[(y * 640 + x) * 4..][..4].try_into().unwrap())
+        };
+        // 4×4 checkerboard sampled across the surface → alternating texels.
+        assert_eq!(q(0, 0), crate::virgl::TEX_A);
+        assert_eq!(q(160, 0), crate::virgl::TEX_B);
+        assert_eq!(q(320, 0), crate::virgl::TEX_A);
+        // M4b: `VioVirgl` attached `__virgl_out` as RES_RT's guest backing and
+        // TRANSFER_FROM_HOST_3D pulled the quad back — `virgl_out` is the
+        // guest-RAM copy, byte-identical to the device-side `virgl_fb`.
+        assert_eq!(
+            s.virgl_out.len(),
+            (640 * 480 * 4) as usize,
+            "__virgl_out holds the full quad in guest RAM"
+        );
+        let go = |x: usize, y: usize| {
+            u32::from_le_bytes(s.virgl_out[(y * 640 + x) * 4..][..4].try_into().unwrap())
+        };
+        assert_eq!(go(0, 0), crate::virgl::TEX_A, "guest readback texel");
+        assert_eq!(go(160, 0), crate::virgl::TEX_B, "guest readback texel");
+        assert_eq!(go(320, 0), crate::virgl::TEX_A, "guest readback texel");
+        assert_eq!(
+            s.virgl_out, s.virgl_fb,
+            "guest __virgl_out == device virgl_fb (readback is exact)"
+        );
+    }
+
+    #[test]
+    fn virgl_exec_rasterizes_inline_texture() {
+        // Drive `virgl_exec` directly on the emitted execbuffer: a clear +
+        // textured-quad draw must paint the 4×4 checkerboard (TEX_A/TEX_B)
+        // across the surface. The texture-byte kill test mutates one texel.
+        let w = 8u32;
+        let h = 8u32;
+        let mut csr = Csr {
+            vio_gl: true,
+            vio_drv_feats: crate::encode::VIO_GPU_F_VIRGL,
+            virgl_rt: crate::virgl::RES_RT,
+            virgl_rt_w: w,
+            virgl_rt_h: h,
+            virgl_fb: vec![0; (w * h * 4) as usize],
+            virgl_ctx: 1 << crate::virgl::CTX_ID,
+            ..Default::default()
+        };
+        let buf = crate::virgl::execbuf(w, h);
+        let base = 0x8000_0000u64;
+        let mut ram = vec![0u8; 0x1000];
+        let baddr = base + 0x800;
+        ram[0x800..0x800 + buf.len()].copy_from_slice(&buf);
+        assert!(virgl_exec(&mut csr, &ram, base, baddr, buf.len() as u64));
+        assert!(csr.virgl_draws >= 1, "draw recognized");
+        assert_eq!(csr.virgl_px, w * h, "fullscreen quad rastered");
+        // Nearest-sample checkerboard: screen x∈{0,1}→texel u0, {2,3}→u1, …
+        // so u parity alternates TEX_A/TEX_B (u = x*4/8 = x/2).
+        let px = |x: usize, y: usize| {
+            u32::from_le_bytes(csr.virgl_fb[(y * 8 + x) * 4..][..4].try_into().unwrap())
+        };
+        assert_eq!(px(0, 0), crate::virgl::TEX_A);
+        assert_eq!(px(2, 0), crate::virgl::TEX_B);
+        assert_eq!(px(4, 0), crate::virgl::TEX_A);
+        assert_eq!(px(6, 0), crate::virgl::TEX_B);
+        assert_eq!(px(0, 2), crate::virgl::TEX_B); // v parity flips down a row
+                                                   // Malformed stream — a header whose body-dword count overruns the
+                                                   // buffer — must fail closed (virgl_exec returns false → INVALID_PARAM).
+        let mut bad = [0u8; 4];
+        bad.copy_from_slice(
+            &crate::encode::virgl_cmd0(crate::encode::VIRGL_CCMD_DRAW_VBO, 0, 0xffff).to_le_bytes(),
+        );
+        let mut csr2 = Csr {
+            virgl_fb: vec![0; (w * h * 4) as usize],
+            ..Default::default()
+        };
+        let mut ram2 = vec![0u8; 0x1000];
+        ram2[0x800..0x804].copy_from_slice(&bad);
+        assert!(!virgl_exec(&mut csr2, &ram2, base, baddr, bad.len() as u64));
+    }
+
+    #[test]
+    fn virgl_transfer_requires_attached_backing() {
+        // M4b readback guards: TRANSFER_FROM_HOST_3D on a resource with no
+        // attached guest backing must fail (no `virgl_backing` entry), and
+        // RESOURCE_ATTACH_BACKING on an unknown resource must fail — the
+        // readback can't DMA to an address the guest never attached.
+        let (w, h) = (8u32, 8u32);
+        let base = 0x8000_0000u64;
+        let mut ram = vec![0u8; 0x1000];
+        let req = base + 0x800;
+        let w32 = |ram: &mut [u8], o: u64, v: u32| {
+            let i = (req - base + o) as usize;
+            ram[i..i + 4].copy_from_slice(&v.to_le_bytes());
+        };
+        let mut csr = Csr {
+            vio_gl: true,
+            vio_drv_feats: crate::encode::VIO_GPU_F_VIRGL,
+            virgl_rt: crate::virgl::RES_RT,
+            virgl_rt_w: w,
+            virgl_rt_h: h,
+            virgl_fb: vec![0x11; (w * h * 4) as usize],
+            virgl_ctx: 1 << crate::virgl::CTX_ID,
+            ..Default::default()
+        };
+        // TRANSFER_FROM_HOST_3D with RES_RT valid but no backing attached.
+        w32(&mut ram, 0, crate::encode::VIO_GPU_TRANSFER_FROM_HOST_3D);
+        w32(&mut ram, 16, crate::virgl::CTX_ID);
+        w32(&mut ram, 36, w);
+        w32(&mut ram, 40, h);
+        w32(&mut ram, 44, 1);
+        w32(&mut ram, 56, crate::virgl::RES_RT);
+        let r = vio_cmd(
+            &mut csr,
+            &mut ram,
+            base,
+            &[(req, 72)],
+            crate::encode::VIO_GPU_TRANSFER_FROM_HOST_3D,
+        );
+        assert_eq!(
+            r,
+            crate::encode::VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID,
+            "transfer on unbacked RES_RT is refused"
+        );
+        // ATTACH_BACKING on a resource id that is neither the 2D scanout nor
+        // the 3D RT must fail (catches a misdirected attach).
+        w32(&mut ram, 0, crate::encode::VIO_GPU_RESOURCE_ATTACH_BACKING);
+        w32(&mut ram, 24, 999);
+        w32(&mut ram, 28, 1);
+        let i = (req - base + 32) as usize;
+        ram[i..i + 8].copy_from_slice(&(base + 0x900).to_le_bytes());
+        w32(&mut ram, 40, 64);
+        let r = vio_cmd(
+            &mut csr,
+            &mut ram,
+            base,
+            &[(req, 48)],
+            crate::encode::VIO_GPU_RESOURCE_ATTACH_BACKING,
+        );
+        assert_eq!(
+            r,
+            crate::encode::VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID,
+            "attach on unknown resource is refused"
+        );
+    }
+
+    #[test]
+    fn virgl_texture_byte_kill_test() {
+        // Kill test: rasterizing the quad against two textures that differ by
+        // one texel must change the surface — proves the draw *really* samples
+        // the guest-uploaded texture, not a hard-coded colour.
+        let (w, h) = (8u32, 8u32);
+        let run = |tex: Vec<u32>| -> Vec<u8> {
+            let mut csr = Csr {
+                virgl_rt_w: w,
+                virgl_rt_h: h,
+                virgl_fb: vec![0; (w * h * 4) as usize],
+                ..Default::default()
+            };
+            virgl_raster_quad(&mut csr, None, Some(&(4, 4, tex)));
+            csr.virgl_fb
+        };
+        let good = run(vec![crate::virgl::TEX_A; 16]);
+        let mut tex2 = vec![crate::virgl::TEX_A; 16];
+        tex2[0] = crate::virgl::TEX_B; // flip texel (0,0)
+        let killed = run(tex2);
+        assert_ne!(
+            good, killed,
+            "a texture texel change must reach the surface"
+        );
+        // And the changed region is exactly where texel(0,0) maps (top-left).
+        let first_diff = good
+            .iter()
+            .zip(&killed)
+            .position(|(a, b)| a != b)
+            .expect("differing byte");
+        assert_eq!(first_diff / 4, 0, "texel(0,0) lands at surface pixel 0");
+    }
+
+    #[test]
     fn gpu_surface_places_the_plane_1to1_instead_of_magnifying_it() {
         // Same board, but on the **default** surface for a GPU-class output.
         // `FbExpandSel` must pick `FbExpand1`, so the 640×480 plane lands at
@@ -4095,7 +6110,8 @@ mod tests {
             r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
 "kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
 "proxy":{"enable":true,"link":"hdmi","dpi":192,"detected_hz":120,
-         "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":true}},
+         "high_w":1920,"high_h":1080,"scale_mode":"dpi","gl":true},
+"cli":{"enable":false}},
 "holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
         )
         .unwrap();
@@ -4137,7 +6153,8 @@ mod tests {
         let spec = BoardSpec::from_json_str(
             r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"hdmi":true},
 "kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"hdmi"},
-"proxy":{"enable":true,"link":"hdmi","dpi":192,"high_w":1920,"high_h":1080,"scale_mode":"dpi"}},
+"proxy":{"enable":true,"link":"hdmi","dpi":192,"high_w":1920,"high_h":1080,"scale_mode":"dpi"},
+"cli":{"enable":false}},
 "peripherals":[{"id":"hdmi0","class":"display","model":"g6lc-scanout","base":"0x40003000"}],
 "holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
         )
@@ -4187,7 +6204,8 @@ mod tests {
         let spec = BoardSpec::from_json_str(
             r#"{"schema_version":1,"isa":{"xlen":64},
 "kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
-"proxy":{"enable":true,"link":"virtio-gpu","dpi":192,"high_w":1920,"high_h":1080}},
+"proxy":{"enable":true,"link":"virtio-gpu","dpi":192,"high_w":1920,"high_h":1080},
+"cli":{"enable":false}},
 "pcie":{"scan_display":true,"ecam":"0x30000000","mmio":"0x60000000","mmio_len":"0x10000000"},
 "holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
         )
@@ -4860,7 +6878,7 @@ mod tests {
     #[test]
     fn gr_init_writes_gr16_header() {
         let spec = BoardSpec::from_json_str(
-            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"gr":{"enable":true,"w":640,"h":480},"proxy":{"enable":true,"link":"hdmi","high_w":1920,"high_h":1080,"dpi":192,"scale_mode":"dpi"}},"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"gr":{"enable":true,"w":640,"h":480},"proxy":{"enable":true,"link":"hdmi","high_w":1920,"high_h":1080,"dpi":192,"scale_mode":"dpi"},"cli":{"enable":false}},"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
         )
         .unwrap();
         let m = analyze::kstart(&spec);

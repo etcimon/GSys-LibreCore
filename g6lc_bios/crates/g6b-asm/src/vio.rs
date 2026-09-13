@@ -18,19 +18,21 @@
 use crate::analyze::{g6b_spec_proxy, Object};
 use crate::dom::signbit;
 use crate::encode::{
-    A0, A1, A2, A3, A4, A5, A6, A7, RA, S0, S1, S2, S3, SP, T0, T1, T2, T3, T4, T5, T6, X0,
+    A0, A1, A2, A3, A4, A5, A6, A7, RA, S0, S1, S2, S3, S4, S5, S6, SP, T0, T1, T2, T3, T4, T5, T6,
+    X0,
 };
 use crate::encode::{
     SBI_PUTCHAR, VIO_BLK_SECTOR, VIO_BLK_S_OK, VIO_BLK_T_IN, VIO_DESC_NEXT, VIO_DESC_WRITE,
     VIO_DEV_BLK, VIO_DEV_GPU, VIO_DEV_INPUT, VIO_F_VERSION_1, VIO_GPU_FMT_B8G8R8X8,
-    VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING, VIO_GPU_RESOURCE_CREATE_2D,
-    VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_OK_DISPLAY_INFO, VIO_GPU_RESP_OK_NODATA,
-    VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_EV_KEY, VIO_MAGIC, VIO_MMIO_BASE,
-    VIO_MMIO_SLOTS, VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_DRV_FEATURES, VIO_REG_DRV_FEATURES_SEL,
-    VIO_REG_FEATURES, VIO_REG_FEATURES_SEL, VIO_REG_ISR_ACK, VIO_REG_ISR_STATUS,
-    VIO_REG_QUEUE_AVAIL, VIO_REG_QUEUE_DESC, VIO_REG_QUEUE_NOTIFY, VIO_REG_QUEUE_NUM,
-    VIO_REG_QUEUE_NUM_MAX, VIO_REG_QUEUE_READY, VIO_REG_QUEUE_SEL, VIO_REG_QUEUE_USED,
-    VIO_REG_STATUS, VIO_ST_ACK, VIO_ST_DRIVER, VIO_ST_DRIVER_OK, VIO_ST_FEATURES_OK,
+    VIO_GPU_F_VIRGL, VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING,
+    VIO_GPU_RESOURCE_CREATE_2D, VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_OK_DISPLAY_INFO,
+    VIO_GPU_RESP_OK_NODATA, VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_FROM_HOST_3D,
+    VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_EV_KEY, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS,
+    VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_DRV_FEATURES, VIO_REG_DRV_FEATURES_SEL, VIO_REG_FEATURES,
+    VIO_REG_FEATURES_SEL, VIO_REG_ISR_ACK, VIO_REG_ISR_STATUS, VIO_REG_QUEUE_AVAIL,
+    VIO_REG_QUEUE_DESC, VIO_REG_QUEUE_NOTIFY, VIO_REG_QUEUE_NUM, VIO_REG_QUEUE_NUM_MAX,
+    VIO_REG_QUEUE_READY, VIO_REG_QUEUE_SEL, VIO_REG_QUEUE_USED, VIO_REG_STATUS, VIO_ST_ACK,
+    VIO_ST_DRIVER, VIO_ST_DRIVER_OK, VIO_ST_FEATURES_OK,
 };
 use crate::{Addr, Node, Op, Purpose};
 use g6b_spec::BoardSpec;
@@ -57,6 +59,11 @@ pub const VIO_BSS: u64 = 0x1000;
 pub const UI_CAP_MAGIC: u32 = u32::from_le_bytes(*b"G6CP");
 /// Host exec / later guest compact paint filled `__scan_fb`; skip FbExpandSel.
 pub const UI_CAP_FLAG_WEB: u32 = 1;
+/// A *rendered* web canvas owns the surface — set only by `WebBlit` (packed
+/// `__web_pk` decode) and the exec-model `inject_web_present`. `DomtRaster`'s
+/// text-face stamp carries `FLAG_WEB` alone so `WebBlit` can tell its own
+/// canvas apart from the block-flow fallback it must not suppress.
+pub const UI_CAP_FLAG_PK: u32 = 2;
 pub const UI_CAP_OFF_FLAGS: i32 = 4;
 pub const UI_CAP_OFF_NODES: i32 = 8;
 pub const UI_CAP_OFF_NTILE: i32 = 12;
@@ -173,6 +180,10 @@ pub const VIO_TAB_OFF: i32 = 0x5f4;
 /// from `NAV_SEEN` so the `Keys` dump and the DOM navigator keep their own
 /// view of the same non-destructive ring.
 pub const CLI_SEEN_OFF: i32 = 0x5f8;
+/// `DOMT_SEEN` — `INP_KQ` index watermark for the guest DOM-tree input
+/// consumer (`DomtKey`), a fourth reader of the same ring so the tree's
+/// key dispatch does not disturb `NAV_SEEN`/`CLI_SEEN`/`Keys`.
+pub const DOMT_SEEN_OFF: i32 = 0x5fc;
 /// Scratch u32 holding the probed virtio-blk (DeviceID 2) mmio base, at
 /// `__vio+0x7c4`. Reached as [`BLK_DEV`] from the blk base register.
 pub const VIO_BLK_OFF: i32 = 0x7c4;
@@ -398,11 +409,19 @@ pub fn init_node(o: Object, spec: &BoardSpec) -> Node {
             imm: i64::from(VIO_ST_ACK | VIO_ST_DRIVER),
         },
         sw(T2, T0, VIO_REG_STATUS),
-        // features: accept nothing but VIRTIO_F_VERSION_1 when offered.
+        // features: accept VIRTIO_F_VERSION_1 (word 1) plus, in word 0, the
+        // VIRTIO_GPU_F_VIRGL bit iff the device offers it (a `virtio-gpu-gl-
+        // device`/`proxy.gl` board; a plain virtio-gpu-device offers 0, so the
+        // mask accepts nothing — fail-closed, no codegen branch needed).
         sw(X0, T0, VIO_REG_FEATURES_SEL),
         lw(T2, T0, VIO_REG_FEATURES),
+        Op::Andi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_GPU_F_VIRGL as i32,
+        },
         sw(X0, T0, VIO_REG_DRV_FEATURES_SEL),
-        sw(X0, T0, VIO_REG_DRV_FEATURES),
+        sw(T2, T0, VIO_REG_DRV_FEATURES),
         Op::Li { rd: T2, imm: 1 },
         sw(T2, T0, VIO_REG_FEATURES_SEL),
         lw(T3, T0, VIO_REG_FEATURES),
@@ -1251,6 +1270,413 @@ pub fn cmd_node(spec: &BoardSpec) -> Node {
         sw(T3, T6, VIO_REG_ISR_ACK),
         lw(A0, T5, VIO_RSP_OFF),
         sw(X0, T5, VIO_BUSY_OFF),
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// `VioCmdBuf` — 3-descriptor ctrlq submitter for commands that carry an extra
+/// OUT payload (the `SUBMIT_3D` execbuffer). In: a0 = request bytes (at
+/// `__vio+VIO_REQ_OFF`), a1 = response bytes (`__vio+VIO_RSP_OFF`), a2 = OUT
+/// payload pointer, a3 = OUT payload bytes. Chain: desc0=req OUT → desc1=buf
+/// OUT → desc2=resp WRITE. Out: a0 = response `type` (0 on timeout). Clobbers
+/// t0..t6, a0..a3. Same WFI/bounded poll + `VIO_BUSY` guard as `VioCmd`.
+pub fn cmdbuf_node(spec: &BoardSpec) -> Node {
+    let wfi = spec.uncore.plic;
+    let mut ops = vec![
+        Op::Comment(
+            "VioCmdBuf — submit a 3-desc ctrlq chain (desc0=req OUT, \
+                 desc1=execbuf OUT, desc2=resp WRITE); used by SUBMIT_3D"
+                .into(),
+        ),
+        Op::Glob("VioCmdBuf".into()),
+        Op::Label("VioCmdBuf".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        // Re-entrancy guard, same as VioCmd.
+        lw(T2, T5, VIO_BUSY_OFF),
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "vcb_busy".into(),
+        },
+        Op::Li { rd: T2, imm: 1 },
+        sw(T2, T5, VIO_BUSY_OFF),
+        lw(T6, T5, VIO_DEV_OFF),
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: "vcb_ret0".into(),
+        },
+        // desc0 = {req, a0, NEXT, next=1}
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: VIO_REQ_OFF,
+        },
+        sw(T2, T5, 0),
+        sw(X0, T5, 4),
+        sw(A0, T5, 8),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_DESC_NEXT | (1 << 16)),
+        },
+        sw(T3, T5, 12),
+        // desc1 = {execbuf a2, a3, NEXT, next=2}
+        sw(A2, T5, 16),
+        sw(X0, T5, 20),
+        sw(A3, T5, 24),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_DESC_NEXT | (2 << 16)),
+        },
+        sw(T3, T5, 28),
+        // desc2 = {resp, a1, WRITE}
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: VIO_RSP_OFF,
+        },
+        sw(T2, T5, 32),
+        sw(X0, T5, 36),
+        sw(A1, T5, 40),
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_DESC_WRITE),
+        },
+        sw(T3, T5, 44),
+        // avail.ring[idx % 8] = head 0 — two byte stores (u16 slot)
+        lw(T2, T5, VIO_AVAIL_OFF),
+        Op::Srli {
+            rd: T1,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Andi {
+            rd: T4,
+            rs: T1,
+            imm: 7,
+        },
+        Op::Slli {
+            rd: T4,
+            rs: T4,
+            shamt: 1,
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: VIO_AVAIL_OFF + 4,
+        },
+        Op::Add {
+            rd: T4,
+            rs1: T4,
+            rs2: T5,
+        },
+        Op::Sb {
+            rs2: X0,
+            rs1: T4,
+            off: 0,
+        },
+        Op::Sb {
+            rs2: X0,
+            rs1: T4,
+            off: 1,
+        },
+        Op::Fence,
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: 1,
+        },
+        Op::Slli {
+            rd: T3,
+            rs: T1,
+            shamt: 16,
+        },
+        sw(T3, T5, VIO_AVAIL_OFF),
+        Op::Fence,
+        sw(X0, T6, VIO_REG_QUEUE_NOTIFY),
+        // poll used.idx == the avail idx we just published
+        Op::Li {
+            rd: T4,
+            imm: VIO_POLL_MAX,
+        },
+        Op::Label("vcb_poll".into()),
+        lw(T2, T5, VIO_USED_OFF),
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: T1,
+            to: "vcb_done".into(),
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Beq {
+            rs1: T4,
+            rs2: X0,
+            to: "vcb_ret0".into(),
+        },
+    ];
+    if wfi {
+        ops.push(Op::Wfi);
+    }
+    ops.extend([
+        Op::Jal {
+            rd: X0,
+            to: "vcb_poll".into(),
+        },
+        Op::Label("vcb_busy".into()),
+        Op::Li { rd: A0, imm: 0 },
+        ret(),
+        Op::Label("vcb_ret0".into()),
+        sw(X0, T5, VIO_BUSY_OFF),
+        Op::Li {
+            rd: A0,
+            imm: i64::from(b'X'),
+        },
+        Op::Li {
+            rd: A7,
+            imm: SBI_PUTCHAR,
+        },
+        Op::Ecall,
+        Op::Li { rd: A0, imm: 0 },
+        ret(),
+        Op::Label("vcb_done".into()),
+        lw(T3, T6, VIO_REG_ISR_STATUS),
+        sw(T3, T6, VIO_REG_ISR_ACK),
+        lw(A0, T5, VIO_RSP_OFF),
+        sw(X0, T5, VIO_BUSY_OFF),
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::Virtio,
+        ops,
+    }
+}
+
+/// `VioVirgl` — the M4 virgl/GLES bring-up, run after `VioScan` on a
+/// `virtio-gpu-gl-device` board (`proxy.gl`). It walks the `__virgl_req`
+/// record table (`crate::virgl::reqtab`): `GET_CAPSET_INFO` → `GET_CAPSET` →
+/// `CTX_CREATE` → `CTX_ATTACH_RESOURCE` → `SUBMIT_3D` (the `__virgl_cmd`
+/// execbuffer rides the second OUT descriptor via `VioCmdBuf`) →
+/// `TRANSFER_FROM_HOST_3D` → `RESOURCE_FLUSH`. Each record is
+/// `[req_len][resp_len][flags][req]`; `flags&1` selects `VioCmdBuf`. Prints
+/// `VIRTIO-VIRGL ` once the sequence has been submitted. Requires the scanout
+/// resource (id 1) `VioScan` already created/backed/scanned out.
+pub fn virgl_node(spec: &BoardSpec) -> Node {
+    let xlen = spec.isa.xlen;
+    let gp = g6b_spec_proxy(spec);
+    let eb_len = crate::virgl::execbuf(gp.0, gp.1).len() as i64;
+    let frame = 48i32; // ra + s3..s6
+    let mut ops = vec![
+        Op::Comment(
+            "VioVirgl — virgl bring-up: CAPSET → CTX_CREATE → SUBMIT_3D \
+                 (execbuffer) → TRANSFER_FROM_HOST_3D → FLUSH"
+                .into(),
+        ),
+        Op::Glob("VioVirgl".into()),
+        Op::Label("VioVirgl".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -frame,
+        },
+        st_x(xlen, RA, SP, 0),
+        st_x(xlen, S3, SP, 8),
+        st_x(xlen, S4, SP, 16),
+        st_x(xlen, S5, SP, 24),
+        st_x(xlen, S6, SP, 32),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::La {
+            rd: S3,
+            addr: Addr::VirglReq,
+        },
+        Op::Label("vgl_rec".into()),
+        // a0 = req_len (0 → done); a1 = resp_len; s6 = flags.
+        lw(A0, S3, 0),
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "vgl_done".into(),
+        },
+        lw(A1, S3, 4),
+        lw(S6, S3, 8),
+        Op::Addi {
+            rd: S3,
+            rs: S3,
+            imm: 12,
+        },
+        Op::Addi {
+            rd: S4,
+            rs: A0,
+            imm: 0,
+        },
+        Op::Addi {
+            rd: S5,
+            rs: A1,
+            imm: 0,
+        },
+        // copy a0 bytes: cursor(s3) → __vio+VIO_REQ (dst t4)
+        Op::Addi {
+            rd: T4,
+            rs: T5,
+            imm: VIO_REQ_OFF,
+        },
+        Op::Li { rd: T0, imm: 0 },
+        Op::Label("vgl_copy".into()),
+        Op::Beq {
+            rs1: T0,
+            rs2: A0,
+            to: "vgl_copied".into(),
+        },
+        Op::Add {
+            rd: A6,
+            rs1: S3,
+            rs2: T0,
+        },
+        Op::Lbu {
+            rd: A6,
+            rs: A6,
+            off: 0,
+        },
+        Op::Add {
+            rd: T1,
+            rs1: T4,
+            rs2: T0,
+        },
+        Op::Sb {
+            rs2: A6,
+            rs1: T1,
+            off: 0,
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T0,
+            imm: 1,
+        },
+        jump("vgl_copy"),
+        Op::Label("vgl_copied".into()),
+        // flags&1 → VioCmdBuf (execbuffer OUT desc); else VioCmd.
+        Op::Andi {
+            rd: T3,
+            rs: S6,
+            imm: 1,
+        },
+        Op::Beq {
+            rs1: T3,
+            rs2: X0,
+            to: "vgl_cmd".into(),
+        },
+        Op::Addi {
+            rd: A0,
+            rs: S4,
+            imm: 0,
+        },
+        Op::Addi {
+            rd: A1,
+            rs: S5,
+            imm: 0,
+        },
+        Op::La {
+            rd: A2,
+            addr: Addr::VirglCmd,
+        },
+        Op::Li {
+            rd: A3,
+            imm: eb_len,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "VioCmdBuf".into(),
+        },
+        jump("vgl_next"),
+        Op::Label("vgl_cmd".into()),
+        Op::Addi {
+            rd: A0,
+            rs: S4,
+            imm: 0,
+        },
+        Op::Addi {
+            rd: A1,
+            rs: S5,
+            imm: 0,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "VioCmd".into(),
+        },
+        Op::Label("vgl_next".into()),
+        // cursor += req_len (s4) → next record
+        Op::Add {
+            rd: S3,
+            rs1: S3,
+            rs2: S4,
+        },
+        jump("vgl_rec"),
+        Op::Label("vgl_done".into()),
+    ];
+    // ---- M4b guest readback ----
+    // The SUBMIT_3D quad rastered into the device-side `virgl_fb`; attaching
+    // `__virgl_out` as RES_RT's guest backing makes TRANSFER_FROM_HOST_3D
+    // DMA it back into guest RAM (real `La` — a static reqtab record can't
+    // carry the resolved BSS address, so the readback pair is sw-built here).
+    let out_bytes = (gp.0 as i64) * (gp.1 as i64) * 4;
+    // RESOURCE_ATTACH_BACKING — hdr(24) + res@24 + nr@28 + entry{addr@32,len@40}.
+    req_hdr(&mut ops, VIO_GPU_RESOURCE_ATTACH_BACKING);
+    sw_i(&mut ops, T2, 16, i64::from(crate::virgl::CTX_ID));
+    sw_i(&mut ops, T2, 24, i64::from(crate::virgl::RES_RT));
+    sw_i(&mut ops, T2, 28, 1);
+    ops.push(Op::La {
+        rd: T0,
+        addr: Addr::VirglOut,
+    });
+    ops.push(st_x(xlen, T0, T2, 32)); // entries[0].addr = __virgl_out
+    sw_i(&mut ops, T2, 40, out_bytes); // entries[0].length
+    sw(X0, T2, 44); // entries[0].pad
+    submit_nodata(&mut ops, 48, "vgl_skip");
+    // TRANSFER_FROM_HOST_3D — hdr(24) + box{x,y,z,w,h,d}@24 + off@48 + res@56.
+    req_hdr(&mut ops, VIO_GPU_TRANSFER_FROM_HOST_3D);
+    sw_i(&mut ops, T2, 16, i64::from(crate::virgl::CTX_ID));
+    sw_i(&mut ops, T2, 24, 0); // box.x
+    sw_i(&mut ops, T2, 28, 0); // box.y
+    sw_i(&mut ops, T2, 32, 0); // box.z
+    sw_i(&mut ops, T2, 36, i64::from(gp.0)); // box.w
+    sw_i(&mut ops, T2, 40, i64::from(gp.1)); // box.h
+    sw_i(&mut ops, T2, 44, 1); // box.d
+    ops.push(st_x(xlen, X0, T2, 48)); // offset = 0
+    sw_i(&mut ops, T2, 56, i64::from(crate::virgl::RES_RT)); // resource_id
+    sw_i(&mut ops, T2, 60, 0); // level
+    sw_i(&mut ops, T2, 64, 0); // stride (0 → device derives)
+    sw_i(&mut ops, T2, 68, 0); // layer_stride
+    submit_nodata(&mut ops, 72, "vgl_skip");
+    ops.push(Op::Label("vgl_skip".into()));
+    putc_str(&mut ops, "VIRTIO-VIRGL ");
+    ops.extend([
+        ld_x(xlen, RA, SP, 0),
+        ld_x(xlen, S3, SP, 8),
+        ld_x(xlen, S4, SP, 16),
+        ld_x(xlen, S5, SP, 24),
+        ld_x(xlen, S6, SP, 32),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: frame,
+        },
         ret(),
     ]);
     Node {
@@ -4824,6 +5250,62 @@ fn expand_node_named(spec: &BoardSpec, label: &str, force_scale: Option<u32>) ->
     }
 }
 
+/// "a web canvas owns the paint surface" test for the expand gates: `__ui_cap`
+/// reads `G6CP` + `FLAG_WEB` — `DomtRaster`'s text canvas, a decoded
+/// `__web_pk`, and an exec-model injected present all stamp it (the cap
+/// survives the boot BSS-zero precisely so a pre-filled persist counts), or
+/// — on boards with no cap block (pcie-linear-fb) — the `WEB_STAMPED` latch
+/// `WebBlit`/`CliInit` maintain. Branches to `have` when a canvas is live and
+/// falls through to the caller's `FbExpandSel` otherwise. Scratches T0/T1/T6
+/// (both callers save them).
+fn web_canvas_live_ops(spec: &BoardSpec, have: &str, chk: &str) -> Vec<Op> {
+    let has_cap = spec.wants_virtio_gpu() || spec.wants_disp_scan();
+    let mut ops = Vec::new();
+    if has_cap {
+        ops.extend([
+            Op::La {
+                rd: T6,
+                addr: Addr::UiCap,
+            },
+            lw(T0, T6, 0),
+            Op::Li {
+                rd: T1,
+                imm: i64::from(UI_CAP_MAGIC),
+            },
+            Op::Bne {
+                rs1: T0,
+                rs2: T1,
+                to: chk.into(),
+            },
+            lw(T0, T6, UI_CAP_OFF_FLAGS),
+            Op::Andi {
+                rd: T0,
+                rs: T0,
+                imm: UI_CAP_FLAG_WEB as i32,
+            },
+            Op::Bne {
+                rs1: T0,
+                rs2: X0,
+                to: have.into(),
+            },
+            Op::Label(chk.into()),
+        ]);
+    }
+    ops.extend([
+        Op::La {
+            rd: T6,
+            addr: Addr::UartLine,
+        },
+        lw(T0, T6, crate::WEB_STAMPED_OFF),
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: have.into(),
+        },
+    ]);
+    ops
+}
+
 /// `DispPaint` — `FbExpand` the plane into `__scan_fb`, then program the
 /// declared uncore display engine (`class:"display"` peripheral) with the
 /// framebuffer contract of `architecture/uncore/hdmi-display.md`: MAGIC
@@ -4889,11 +5371,17 @@ pub fn disp_paint_node(spec: &BoardSpec) -> Node {
         lw(S2, T5, DISP_SEL_STRIDE),
         // Surface-gated: the resolved surface decides whether the plane is
         // upscaled or placed 1:1, so a GPU-class output never gets the
-        // magnified low-res picture by default.
+        // magnified low-res picture by default. A live web canvas is
+        // different again: `WebBlit`/`DomtRaster`/an injected present already
+        // wrote `__scan_fb`, so the plane expand must not paint over it.
+    ];
+    ops.extend(web_canvas_live_ops(spec, "dp_have_canvas", "dp_chk_latch"));
+    ops.extend([
         Op::Jal {
             rd: RA,
             to: "FbExpandSel".into(),
         },
+        Op::Label("dp_have_canvas".into()),
         Op::Li { rd: T0, imm: base },
         Op::La {
             rd: T6,
@@ -4906,7 +5394,7 @@ pub fn disp_paint_node(spec: &BoardSpec) -> Node {
             shamt: 32,
         },
         sw(T4, T0, 0x10), // FB_HI
-    ];
+    ]);
     ops.push(sw(S0, T0, 0x14));
     ops.push(sw(S1, T0, 0x18));
     ops.push(sw(S2, T0, 0x1c));
@@ -5224,15 +5712,21 @@ pub fn pci_paint_node(spec: &BoardSpec) -> Node {
             rs2: X0,
             to: "pp_out".into(),
         },
+        // A live web canvas already fills the BAR/`__scan_fb` — the plane
+        // expand would paint the container over it.
+    ];
+    ops.extend(web_canvas_live_ops(spec, "pp_have_canvas", "pp_chk_latch"));
+    ops.extend([
         Op::Jal {
             rd: RA,
             to: "FbExpandSel".into(),
         },
+        Op::Label("pp_have_canvas".into()),
         // Order the framebuffer stores before the frame is considered live —
         // the BAR may be mapped WC, so posted writes need a fence to be
         // visible to the adapter's scanout in program order.
         Op::Fence,
-    ];
+    ]);
     putc_str(&mut ops, "PCI-PAINT\n");
     ops.push(Op::Label("pp_out".into()));
     ops.push(ld_x(xlen, T3, SP, 0));

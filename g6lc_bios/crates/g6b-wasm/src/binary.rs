@@ -2524,6 +2524,139 @@ pub(crate) mod tests {
         );
     }
 
+    /// Temporary M3 profiling probe — histogram the shipped cell's instruction
+    /// categories so FP/table/EH/bulk coverage can be prioritized by real
+    /// density (plan §R1: "decide FP ops vs soft-float by cell instr profile").
+    #[test]
+    fn m3_cell_opcode_histogram() {
+        if !crate::bios_ui_libwasm_live() {
+            eprintln!("M3-PROF: cell not live");
+            return;
+        }
+        let m = decode(crate::bios_ui_libwasm()).unwrap();
+        let mut hist: std::collections::BTreeMap<&'static str, usize> =
+            std::collections::BTreeMap::new();
+        let mut nrec = 0usize;
+        for b in &m.bodies {
+            for ins in b {
+                nrec += 1;
+                let k = match ins {
+                    Instr::F32Const(_)
+                    | Instr::F64Const(_)
+                    | Instr::F32Load { .. }
+                    | Instr::F64Load { .. }
+                    | Instr::F32Store { .. }
+                    | Instr::F64Store { .. } => "fp-mem/const",
+                    Instr::Numeric(op) if (0x5b..=0x66).contains(op) => "fp-cmp",
+                    Instr::Numeric(op) if (0x8b..=0xa6).contains(op) => "fp-arith",
+                    Instr::Numeric(op) if (0x67..=0x70).contains(op) => "i32-clz/ctz/pop",
+                    Instr::Numeric(op) if (0x79..=0x7a).contains(op) => "i64-clz/ctz/pop",
+                    Instr::Numeric(_) => "int-numeric",
+                    Instr::Convert(_) | Instr::SaturatingTrunc(_) => "cvt/trunc",
+                    Instr::CallIndirect { .. } => "call_indirect",
+                    Instr::BrTable { .. } => "br_table",
+                    Instr::Throw(_) | Instr::Rethrow(_) | Instr::ThrowRef => "throw",
+                    Instr::TryTable { .. } => "try_table",
+                    Instr::Try(_) | Instr::Catch(_) | Instr::CatchAll | Instr::Delegate(_) => {
+                        "legacy-eh"
+                    }
+                    Instr::MemoryCopy => "mem.copy",
+                    Instr::MemoryFill => "mem.fill",
+                    Instr::MemoryInit(_) => "mem.init",
+                    Instr::DataDrop(_) => "data.drop",
+                    Instr::TableCopy { .. }
+                    | Instr::TableFill(_)
+                    | Instr::TableGet(_)
+                    | Instr::TableSet(_)
+                    | Instr::TableGrow(_)
+                    | Instr::TableSize(_)
+                    | Instr::TableInit { .. }
+                    | Instr::ElemDrop(_) => "table-op",
+                    Instr::Call(_) => "call",
+                    Instr::Block(_) | Instr::Loop(_) | Instr::If(_) => "ctrl",
+                    Instr::LocalGet(_) | Instr::LocalSet(_) | Instr::LocalTee(_) => "local",
+                    Instr::GlobalGet(_) | Instr::GlobalSet(_) => "global",
+                    Instr::Select => "select",
+                    Instr::Unsupported(_) => "UNSUPPORTED",
+                    _ => "other",
+                };
+                *hist.entry(k).or_default() += 1;
+            }
+        }
+        eprintln!(
+            "M3-PROF funcs={} imports={} bodies={} instrs={} mem_pages={} globals={} tables={} tags={}",
+            m.bodies.len() + m.imports.len(),
+            m.imports.len(),
+            m.bodies.len(),
+            nrec,
+            m.mem_pages,
+            m.globals.len(),
+            m.tables.len(),
+            m.tags.len()
+        );
+        for (k, v) in &hist {
+            eprintln!("M3-PROF   {k:20} {v}");
+        }
+        // M3 plumbing facts: elements/tables for call_indirect, data-seg
+        // activeness for memory.init, max-locals + type count for frames.
+        let mut maxloc = 0u32;
+        for (i, b) in m.bodies.iter().enumerate() {
+            let _ = b;
+            let l = m.locals.get(i).copied().unwrap_or(0)
+                + m.types[m.func_types[i] as usize].params.len() as u32;
+            maxloc = maxloc.max(l);
+        }
+        eprintln!(
+            "M3-PROF types={} elements={} data_segs={} (active={} passive={}) maxlocals={} max_mem={:?} datacount={:?}",
+            m.types.len(),
+            m.elements.len(),
+            m.data_segments.len(),
+            m.data_segments.iter().filter(|d| d.active).count(),
+            m.data_segments.iter().filter(|d| !d.active).count(),
+            maxloc,
+            m.max_mem_pages,
+            m.data_count,
+        );
+        for (i, e) in m.elements.iter().enumerate().take(4) {
+            eprintln!(
+                "M3-PROF   elem[{i}] off={} funcs={}",
+                e.offset,
+                e.funcs.len()
+            );
+        }
+        // Exact FP/convert opcode census — scopes the M3b FPU surface.
+        let mut ops_used: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for b in &m.bodies {
+            for ins in b {
+                let name = match ins {
+                    Instr::Numeric(op)
+                        if (0x5b..=0xa6).contains(op) || (0x67..=0x7a).contains(op) =>
+                    {
+                        format!("num:{op:#04x}")
+                    }
+                    Instr::Convert(op) => format!("cvt:{op:#04x}"),
+                    Instr::SaturatingTrunc(op) => format!("sat:{op:#04x}"),
+                    Instr::F32Const(_) => "f32.const".to_string(),
+                    Instr::F64Const(_) => "f64.const".to_string(),
+                    Instr::F32Load { .. } => "f32.load".to_string(),
+                    Instr::F64Load { .. } => "f64.load".to_string(),
+                    Instr::F32Store { .. } => "f32.store".to_string(),
+                    Instr::F64Store { .. } => "f64.store".to_string(),
+                    _ => continue,
+                };
+                *ops_used.entry(name).or_default() += 1;
+            }
+        }
+        for (k, v) in &ops_used {
+            eprintln!("M3-PROF   op {k:14} {v}");
+        }
+        // Import names — the EXT surface the cell actually binds.
+        for im in &m.imports {
+            eprintln!("M3-PROF   import {}::{}", im.module, im.name);
+        }
+    }
+
     #[test]
     fn signed_leb_boundaries_and_long_ui_strings_roundtrip() {
         for value in [i32::MIN, -65, -64, -1, 0, 63, 64, i32::MAX] {

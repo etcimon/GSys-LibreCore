@@ -197,7 +197,10 @@ impl DirVolumes {
             .ok_or_else(|| format!("no volume {volume}"))?;
         if base.is_file() {
             // An image: only the volume root addresses it.
-            return if matches!(path, "" | "/") {
+            let listed_name = base.file_name().and_then(|name| name.to_str());
+            return if matches!(path, "" | "/")
+                || listed_name.is_some_and(|name| path == name || path == format!("/{name}"))
+            {
                 Ok(base.clone())
             } else {
                 Err(format!(
@@ -599,6 +602,29 @@ pub fn session(spec: &BoardSpec) -> ZealCli {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_image_volume_reads_the_filename_it_lists() {
+        let dir = std::env::temp_dir().join(format!(
+            "g6b-image-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let image = dir.join("Image");
+        let mut bytes = vec![0u8; 128];
+        bytes[0x38..0x3c].copy_from_slice(b"RSC\x05");
+        std::fs::write(&image, &bytes).unwrap();
+        let volumes = DirVolumes::new().mount("LINUX", &image, "key", "test transport");
+        let found = g6b_zealcli::detect::probe_port(&volumes, "LINUX");
+        std::fs::remove_file(&image).unwrap();
+        std::fs::remove_dir(&dir).unwrap();
+        assert_eq!(found.medium, g6b_zealcli::Medium::Kernel);
+    }
+
     use std::io::{Read, Write};
     use std::net::TcpListener;
 

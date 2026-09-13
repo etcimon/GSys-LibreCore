@@ -30,20 +30,20 @@ nothrow:
       setProperty(root, "data-worker-url", "WORKER_URL_PLACEHOLDER");
       setProperty(root, "data-worker-limit", "WORKER_LIMIT_PLACEHOLDER");
       setProperty(root, "data-wasm-url", "WASM_URL_PLACEHOLDER");
+      auto bios_header = createElement(NodeType.header);
+      setProperty(bios_header, "id", "bios-header");
       auto banner = createElement(NodeType.h1);
       setProperty(banner, "id", "banner");
       setProperty(banner, "innerText", "G6LC-BIOS | GSys LibreCore");
-      appendChild(root, banner);
-      auto bios_mark = createElement(NodeType.img);
-      setProperty(bios_mark, "id", "bios-mark");
-      setProperty(bios_mark, "src", "/ui/g6lc.svg");
-      setProperty(bios_mark, "width", "48");
-      setProperty(bios_mark, "height", "24");
-      setProperty(bios_mark, "alt", "G6LC");
-      appendChild(root, bios_mark);
+      appendChild(bios_header, banner);
+      auto bios_eyebrow = createElement(NodeType.p);
+      setProperty(bios_eyebrow, "id", "bios-eyebrow");
+      setProperty(bios_eyebrow, "innerText", "SYSTEM SETUP");
+      appendChild(bios_header, bios_eyebrow);
       auto profile = createElement(NodeType.p);
       setProperty(profile, "id", "profile");
-      appendChild(root, profile);
+      appendChild(bios_header, profile);
+      appendChild(root, bios_header);
       auto bios_menu = createElement(NodeType.nav);
       setProperty(bios_menu, "id", "bios-menu");
       setProperty(bios_menu, "role", "tablist");
@@ -130,10 +130,24 @@ nothrow:
       appendChild(bios_menu, tab_settings);
       g6b_listen("tab-settings", "click");
       appendChild(root, bios_menu);
+      auto bios_toolbar = createElement(NodeType.div);
+      setProperty(bios_toolbar, "id", "bios-toolbar");
+      auto refresh = createElement(NodeType.button);
+      setProperty(refresh, "id", "refresh");
+      setProperty(refresh, "type", "button");
+      setProperty(refresh, "innerText", "Refresh / F10");
+      appendChild(bios_toolbar, refresh);
+      g6b_listen("refresh", "click");
+      auto row_navigation_hint = createElement(NodeType.span);
+      setProperty(row_navigation_hint, "id", "row-navigation-hint");
+      setProperty(row_navigation_hint, "innerText", "Up/Down: field / Left/Right: tab");
+      appendChild(bios_toolbar, row_navigation_hint);
+      appendChild(root, bios_toolbar);
       auto status = createElement(NodeType.p);
       setProperty(status, "id", "status");
       setProperty(status, "role", "status");
-      setProperty(status, "innerText", "UI-BOOT");
+      setProperty(status, "aria-live", "polite");
+      setProperty(status, "innerText", "UI-BOOT: read-only setup");
       appendChild(root, status);
       auto bios_nav = createElement(NodeType.p);
       setProperty(bios_nav, "id", "bios-nav");
@@ -143,16 +157,6 @@ nothrow:
       setProperty(hw_nat_status, "id", "hw-nat-status");
       setProperty(hw_nat_status, "role", "status");
       appendChild(root, hw_nat_status);
-      auto read_only_note = createElement(NodeType.p);
-      setProperty(read_only_note, "id", "read-only-note");
-      setProperty(read_only_note, "innerText", "Read-only BoardSpec setup. F10 refreshes values. Editing and flash are unavailable here.");
-      appendChild(root, read_only_note);
-      auto refresh = createElement(NodeType.button);
-      setProperty(refresh, "id", "refresh");
-      setProperty(refresh, "type", "button");
-      setProperty(refresh, "innerText", "Refresh values");
-      appendChild(root, refresh);
-      g6b_listen("refresh", "click");
       auto menu_main = createElement(NodeType.section);
       setProperty(menu_main, "id", "menu-main");
       setProperty(menu_main, "data-menu", "main");
@@ -162,22 +166,6 @@ nothrow:
       setProperty(main_title, "innerText", "Main");
       appendChild(menu_main, main_title);
       auto n0 = createElement(NodeType.table);
-      auto n1 = createElement(NodeType.thead);
-      auto n2 = createElement(NodeType.tr);
-      auto n3 = createElement(NodeType.th);
-      setProperty(n3, "class", "col-head");
-      setProperty(n3, "innerText", "Setting");
-      appendChild(n2, n3);
-      auto n4 = createElement(NodeType.th);
-      setProperty(n4, "class", "col-head");
-      setProperty(n4, "innerText", "Value");
-      appendChild(n2, n4);
-      auto n5 = createElement(NodeType.th);
-      setProperty(n5, "class", "col-head");
-      setProperty(n5, "innerText", "Access");
-      appendChild(n2, n5);
-      appendChild(n1, n2);
-      appendChild(n0, n1);
       menu_main_body = createElement(NodeType.tbody);
       setProperty(menu_main_body, "id", "menu-main-body");
       appendChild(n0, menu_main_body);
@@ -192,27 +180,11 @@ nothrow:
       setProperty(cpu_title, "id", "cpu-title");
       setProperty(cpu_title, "innerText", "CPU");
       appendChild(menu_cpu, cpu_title);
-      auto n6 = createElement(NodeType.table);
-      auto n7 = createElement(NodeType.thead);
-      auto n8 = createElement(NodeType.tr);
-      auto n9 = createElement(NodeType.th);
-      setProperty(n9, "class", "col-head");
-      setProperty(n9, "innerText", "Setting");
-      appendChild(n8, n9);
-      auto n10 = createElement(NodeType.th);
-      setProperty(n10, "class", "col-head");
-      setProperty(n10, "innerText", "Value");
-      appendChild(n8, n10);
-      auto n11 = createElement(NodeType.th);
-      setProperty(n11, "class", "col-head");
-      setProperty(n11, "innerText", "Access");
-      appendChild(n8, n11);
-      appendChild(n7, n8);
-      appendChild(n6, n7);
+      auto n1 = createElement(NodeType.table);
       menu_cpu_body = createElement(NodeType.tbody);
       setProperty(menu_cpu_body, "id", "menu-cpu-body");
-      appendChild(n6, menu_cpu_body);
-      appendChild(menu_cpu, n6);
+      appendChild(n1, menu_cpu_body);
+      appendChild(menu_cpu, n1);
       appendChild(root, menu_cpu);
       auto menu_memory = createElement(NodeType.section);
       setProperty(menu_memory, "id", "menu-memory");
@@ -223,27 +195,11 @@ nothrow:
       setProperty(memory_title, "id", "memory-title");
       setProperty(memory_title, "innerText", "Memory");
       appendChild(menu_memory, memory_title);
-      auto n12 = createElement(NodeType.table);
-      auto n13 = createElement(NodeType.thead);
-      auto n14 = createElement(NodeType.tr);
-      auto n15 = createElement(NodeType.th);
-      setProperty(n15, "class", "col-head");
-      setProperty(n15, "innerText", "Setting");
-      appendChild(n14, n15);
-      auto n16 = createElement(NodeType.th);
-      setProperty(n16, "class", "col-head");
-      setProperty(n16, "innerText", "Value");
-      appendChild(n14, n16);
-      auto n17 = createElement(NodeType.th);
-      setProperty(n17, "class", "col-head");
-      setProperty(n17, "innerText", "Access");
-      appendChild(n14, n17);
-      appendChild(n13, n14);
-      appendChild(n12, n13);
+      auto n2 = createElement(NodeType.table);
       menu_memory_body = createElement(NodeType.tbody);
       setProperty(menu_memory_body, "id", "menu-memory-body");
-      appendChild(n12, menu_memory_body);
-      appendChild(menu_memory, n12);
+      appendChild(n2, menu_memory_body);
+      appendChild(menu_memory, n2);
       appendChild(root, menu_memory);
       auto menu_uncore = createElement(NodeType.section);
       setProperty(menu_uncore, "id", "menu-uncore");
@@ -254,27 +210,11 @@ nothrow:
       setProperty(uncore_title, "id", "uncore-title");
       setProperty(uncore_title, "innerText", "Uncore");
       appendChild(menu_uncore, uncore_title);
-      auto n18 = createElement(NodeType.table);
-      auto n19 = createElement(NodeType.thead);
-      auto n20 = createElement(NodeType.tr);
-      auto n21 = createElement(NodeType.th);
-      setProperty(n21, "class", "col-head");
-      setProperty(n21, "innerText", "Setting");
-      appendChild(n20, n21);
-      auto n22 = createElement(NodeType.th);
-      setProperty(n22, "class", "col-head");
-      setProperty(n22, "innerText", "Value");
-      appendChild(n20, n22);
-      auto n23 = createElement(NodeType.th);
-      setProperty(n23, "class", "col-head");
-      setProperty(n23, "innerText", "Access");
-      appendChild(n20, n23);
-      appendChild(n19, n20);
-      appendChild(n18, n19);
+      auto n3 = createElement(NodeType.table);
       menu_uncore_body = createElement(NodeType.tbody);
       setProperty(menu_uncore_body, "id", "menu-uncore-body");
-      appendChild(n18, menu_uncore_body);
-      appendChild(menu_uncore, n18);
+      appendChild(n3, menu_uncore_body);
+      appendChild(menu_uncore, n3);
       appendChild(root, menu_uncore);
       auto menu_devices = createElement(NodeType.section);
       setProperty(menu_devices, "id", "menu-devices");
@@ -285,27 +225,11 @@ nothrow:
       setProperty(devices_title, "id", "devices-title");
       setProperty(devices_title, "innerText", "Devices");
       appendChild(menu_devices, devices_title);
-      auto n24 = createElement(NodeType.table);
-      auto n25 = createElement(NodeType.thead);
-      auto n26 = createElement(NodeType.tr);
-      auto n27 = createElement(NodeType.th);
-      setProperty(n27, "class", "col-head");
-      setProperty(n27, "innerText", "Setting");
-      appendChild(n26, n27);
-      auto n28 = createElement(NodeType.th);
-      setProperty(n28, "class", "col-head");
-      setProperty(n28, "innerText", "Value");
-      appendChild(n26, n28);
-      auto n29 = createElement(NodeType.th);
-      setProperty(n29, "class", "col-head");
-      setProperty(n29, "innerText", "Access");
-      appendChild(n26, n29);
-      appendChild(n25, n26);
-      appendChild(n24, n25);
+      auto n4 = createElement(NodeType.table);
       menu_devices_body = createElement(NodeType.tbody);
       setProperty(menu_devices_body, "id", "menu-devices-body");
-      appendChild(n24, menu_devices_body);
-      appendChild(menu_devices, n24);
+      appendChild(n4, menu_devices_body);
+      appendChild(menu_devices, n4);
       appendChild(root, menu_devices);
       auto menu_boot = createElement(NodeType.section);
       setProperty(menu_boot, "id", "menu-boot");
@@ -316,27 +240,11 @@ nothrow:
       setProperty(boot_title, "id", "boot-title");
       setProperty(boot_title, "innerText", "Boot");
       appendChild(menu_boot, boot_title);
-      auto n30 = createElement(NodeType.table);
-      auto n31 = createElement(NodeType.thead);
-      auto n32 = createElement(NodeType.tr);
-      auto n33 = createElement(NodeType.th);
-      setProperty(n33, "class", "col-head");
-      setProperty(n33, "innerText", "Setting");
-      appendChild(n32, n33);
-      auto n34 = createElement(NodeType.th);
-      setProperty(n34, "class", "col-head");
-      setProperty(n34, "innerText", "Value");
-      appendChild(n32, n34);
-      auto n35 = createElement(NodeType.th);
-      setProperty(n35, "class", "col-head");
-      setProperty(n35, "innerText", "Access");
-      appendChild(n32, n35);
-      appendChild(n31, n32);
-      appendChild(n30, n31);
+      auto n5 = createElement(NodeType.table);
       menu_boot_body = createElement(NodeType.tbody);
       setProperty(menu_boot_body, "id", "menu-boot-body");
-      appendChild(n30, menu_boot_body);
-      appendChild(menu_boot, n30);
+      appendChild(n5, menu_boot_body);
+      appendChild(menu_boot, n5);
       appendChild(root, menu_boot);
       auto menu_settings = createElement(NodeType.section);
       setProperty(menu_settings, "id", "menu-settings");
@@ -347,58 +255,84 @@ nothrow:
       setProperty(settings_title, "id", "settings-title");
       setProperty(settings_title, "innerText", "Settings");
       appendChild(menu_settings, settings_title);
-      auto n36 = createElement(NodeType.table);
-      auto n37 = createElement(NodeType.thead);
-      auto n38 = createElement(NodeType.tr);
-      auto n39 = createElement(NodeType.th);
-      setProperty(n39, "class", "col-head");
-      setProperty(n39, "innerText", "Setting");
-      appendChild(n38, n39);
-      auto n40 = createElement(NodeType.th);
-      setProperty(n40, "class", "col-head");
-      setProperty(n40, "innerText", "Value");
-      appendChild(n38, n40);
-      auto n41 = createElement(NodeType.th);
-      setProperty(n41, "class", "col-head");
-      setProperty(n41, "innerText", "Access");
-      appendChild(n38, n41);
-      appendChild(n37, n38);
-      appendChild(n36, n37);
+      auto n6 = createElement(NodeType.table);
       menu_settings_body = createElement(NodeType.tbody);
       setProperty(menu_settings_body, "id", "menu-settings-body");
-      appendChild(n36, menu_settings_body);
-      appendChild(menu_settings, n36);
+      appendChild(n6, menu_settings_body);
+      appendChild(menu_settings, n6);
       appendChild(root, menu_settings);
       auto g6b_ui_conditional = createElement(NodeType.div);
       setProperty(g6b_ui_conditional, "id", "g6b-ui-conditional");
       appendChild(root, g6b_ui_conditional);
-      auto n42 = createElement(NodeType.footer);
+      auto n7 = createElement(NodeType.footer);
       auto bios_hint = createElement(NodeType.p);
       setProperty(bios_hint, "id", "bios-hint");
       setProperty(bios_hint, "innerText", "ArrowLeft/ArrowRight Select tab Home/End First/Last F10 Refresh (not save) Esc stays in setup");
-      appendChild(n42, bios_hint);
-      appendChild(root, n42);
+      appendChild(n7, bios_hint);
+      appendChild(root, n7);
       auto store = createElement(NodeType.section);
       setProperty(store, "id", "store");
       setProperty(store, "data-menu", "settings");
+      setProperty(store, "data-fetch", "/bios/store");
       setProperty(store, "aria-labelledby", "store-title");
       setProperty(store, "hidden", "");
       auto store_title = createElement(NodeType.h2);
       setProperty(store_title, "id", "store-title");
-      setProperty(store_title, "innerText", "Store");
+      setProperty(store_title, "innerText", "Session storage");
       appendChild(store, store_title);
-      store_status = createElement(NodeType.p);
+      auto store_note = createElement(NodeType.p);
+      setProperty(store_note, "id", "store-note");
+      setProperty(store_note, "innerText", "The kernel owns storage access. Inspect the registry without creating a database or changing its contents.");
+      appendChild(store, store_note);
+      store_status = createElement(NodeType.pre);
       setProperty(store_status, "id", "store-status");
+      setProperty(store_status, "data-fetch", "/bios/store");
       appendChild(store, store_status);
       appendChild(root, store);
     } catch (Exception e) {
       // bounded catch: DOM construct
     }
-    auto p0 = g6b_fetch("/bios/menu");
-    auto p1 = g6b_fetch("/bios/menu/main");
-    g6b_register("/bios/custom", "POST");
-    auto p2 = g6b_fetch("/bios/store");
+    auto p0 = g6b_fetch("/bios/menu/main");
+    auto p1 = g6b_fetch("/bios/menu/cpu");
+    auto p2 = g6b_fetch("/bios/menu/memory");
+    auto p3 = g6b_fetch("/bios/menu/uncore");
+    auto p4 = g6b_fetch("/bios/menu/devices");
+    auto p5 = g6b_fetch("/bios/menu/boot");
+    auto p6 = g6b_fetch("/bios/menu/settings");
+    auto p7 = g6b_fetch("/bios/store");
     if (libwasm_await_supported()) {
+      libwasm_await__void(p0);
+      try {
+        auto json_p0 = libwasm_await_value();
+        auto j0 = parseJSON!ThreadMemAllocator(json_p0);
+        foreach (_; j0) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j0.byKey) {
+            if (key == "id") id = j0.read!string;
+            else if (key == "label") label = j0.read!string;
+            else if (key == "value") value = j0.read!string;
+            else if (key == "writable") writable = j0.read!bool;
+            else j0.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          setProperty(tr, "id", "field-main-" ~ id);
+          setProperty(tr, "class", "bios-field");
+          setProperty(tr, "data-field", id);
+          setProperty(tr, "data-item", id);
+          setProperty(tr, "tabindex", "-1");
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "id", "label-main-" ~ id);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "id", "row-main-" ~ id);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          setProperty(tr, "data-writable", writable ? "true" : "false");
+          appendChild(menu_main_body, tr);
+        }
+      } catch (Exception e) {}
       libwasm_await__void(p1);
       try {
         auto json_p1 = libwasm_await_value();
@@ -414,24 +348,186 @@ nothrow:
             else j1.skipValue();
           }
           auto tr = createElement(NodeType.tr);
+          setProperty(tr, "id", "field-cpu-" ~ id);
+          setProperty(tr, "class", "bios-field");
+          setProperty(tr, "data-field", id);
+          setProperty(tr, "data-item", id);
+          setProperty(tr, "tabindex", "-1");
           auto td0 = createElement(NodeType.td);
+          setProperty(td0, "id", "label-cpu-" ~ id);
           setProperty(td0, "innerText", label);
           appendChild(tr, td0);
           auto td1 = createElement(NodeType.td);
+          setProperty(td1, "id", "row-cpu-" ~ id);
           setProperty(td1, "innerText", value);
           appendChild(tr, td1);
-          auto td2 = createElement(NodeType.td);
-          setProperty(td2, "innerText", writable ? "RW" : "R");
-          appendChild(tr, td2);
-          appendChild(menu_main_body, tr);
+          setProperty(tr, "data-writable", writable ? "true" : "false");
+          appendChild(menu_cpu_body, tr);
         }
       } catch (Exception e) {}
+      libwasm_await__void(p2);
+      try {
+        auto json_p2 = libwasm_await_value();
+        auto j2 = parseJSON!ThreadMemAllocator(json_p2);
+        foreach (_; j2) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j2.byKey) {
+            if (key == "id") id = j2.read!string;
+            else if (key == "label") label = j2.read!string;
+            else if (key == "value") value = j2.read!string;
+            else if (key == "writable") writable = j2.read!bool;
+            else j2.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          setProperty(tr, "id", "field-memory-" ~ id);
+          setProperty(tr, "class", "bios-field");
+          setProperty(tr, "data-field", id);
+          setProperty(tr, "data-item", id);
+          setProperty(tr, "tabindex", "-1");
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "id", "label-memory-" ~ id);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "id", "row-memory-" ~ id);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          setProperty(tr, "data-writable", writable ? "true" : "false");
+          appendChild(menu_memory_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p3);
+      try {
+        auto json_p3 = libwasm_await_value();
+        auto j3 = parseJSON!ThreadMemAllocator(json_p3);
+        foreach (_; j3) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j3.byKey) {
+            if (key == "id") id = j3.read!string;
+            else if (key == "label") label = j3.read!string;
+            else if (key == "value") value = j3.read!string;
+            else if (key == "writable") writable = j3.read!bool;
+            else j3.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          setProperty(tr, "id", "field-uncore-" ~ id);
+          setProperty(tr, "class", "bios-field");
+          setProperty(tr, "data-field", id);
+          setProperty(tr, "data-item", id);
+          setProperty(tr, "tabindex", "-1");
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "id", "label-uncore-" ~ id);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "id", "row-uncore-" ~ id);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          setProperty(tr, "data-writable", writable ? "true" : "false");
+          appendChild(menu_uncore_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p4);
+      try {
+        auto json_p4 = libwasm_await_value();
+        auto j4 = parseJSON!ThreadMemAllocator(json_p4);
+        foreach (_; j4) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j4.byKey) {
+            if (key == "id") id = j4.read!string;
+            else if (key == "label") label = j4.read!string;
+            else if (key == "value") value = j4.read!string;
+            else if (key == "writable") writable = j4.read!bool;
+            else j4.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          setProperty(tr, "id", "field-devices-" ~ id);
+          setProperty(tr, "class", "bios-field");
+          setProperty(tr, "data-field", id);
+          setProperty(tr, "data-item", id);
+          setProperty(tr, "tabindex", "-1");
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "id", "label-devices-" ~ id);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "id", "row-devices-" ~ id);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          setProperty(tr, "data-writable", writable ? "true" : "false");
+          appendChild(menu_devices_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p5);
+      try {
+        auto json_p5 = libwasm_await_value();
+        auto j5 = parseJSON!ThreadMemAllocator(json_p5);
+        foreach (_; j5) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j5.byKey) {
+            if (key == "id") id = j5.read!string;
+            else if (key == "label") label = j5.read!string;
+            else if (key == "value") value = j5.read!string;
+            else if (key == "writable") writable = j5.read!bool;
+            else j5.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          setProperty(tr, "id", "field-boot-" ~ id);
+          setProperty(tr, "class", "bios-field");
+          setProperty(tr, "data-field", id);
+          setProperty(tr, "data-item", id);
+          setProperty(tr, "tabindex", "-1");
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "id", "label-boot-" ~ id);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "id", "row-boot-" ~ id);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          setProperty(tr, "data-writable", writable ? "true" : "false");
+          appendChild(menu_boot_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p6);
+      try {
+        auto json_p6 = libwasm_await_value();
+        auto j6 = parseJSON!ThreadMemAllocator(json_p6);
+        foreach (_; j6) {
+          string id = "", label = "", value = "";
+          bool writable = false;
+          foreach (key; j6.byKey) {
+            if (key == "id") id = j6.read!string;
+            else if (key == "label") label = j6.read!string;
+            else if (key == "value") value = j6.read!string;
+            else if (key == "writable") writable = j6.read!bool;
+            else j6.skipValue();
+          }
+          auto tr = createElement(NodeType.tr);
+          setProperty(tr, "id", "field-settings-" ~ id);
+          setProperty(tr, "class", "bios-field");
+          setProperty(tr, "data-field", id);
+          setProperty(tr, "data-item", id);
+          setProperty(tr, "tabindex", "-1");
+          auto td0 = createElement(NodeType.td);
+          setProperty(td0, "id", "label-settings-" ~ id);
+          setProperty(td0, "innerText", label);
+          appendChild(tr, td0);
+          auto td1 = createElement(NodeType.td);
+          setProperty(td1, "id", "row-settings-" ~ id);
+          setProperty(td1, "innerText", value);
+          appendChild(tr, td1);
+          setProperty(tr, "data-writable", writable ? "true" : "false");
+          appendChild(menu_settings_body, tr);
+        }
+      } catch (Exception e) {}
+      libwasm_await__void(p7);
+      setProperty(store_status, "innerText", libwasm_await_value());
     }
-    auto db = PgLite("memory://registry");
-    db.waitReady();
-    db.exec("CREATE TABLE IF NOT EXISTS bios_ui (k TEXT PRIMARY KEY, v TEXT)");
-    auto rows = db.queryAsync("SELECT k, v FROM bios_ui", "[]");
-    setProperty(store_status, "innerText", JSON.stringify(rows));
   }
   void onUnmount() { }
 }

@@ -104,6 +104,7 @@ export function printReady(file: SvelteFile, extras: SvelteFile[] = []): string 
     vars: new Map(),
     next: 0,
     tbody: new Map(),
+    dataTargets: new Map(),
     binds: new Set(
       allOps.filter((o): o is PgliteOp => o.kind === "pglite" && !!o.bind).map((o) => o.bind!),
     ),
@@ -174,6 +175,7 @@ type DTreeContext = {
   vars: Map<string, string>;
   next: number;
   tbody: Map<string, string>;
+  dataTargets: Map<string, string>;
   binds: Set<string>;
   bindTargetIds: Set<string>;
   visible: Map<string, boolean>;
@@ -195,8 +197,12 @@ function collectHoistedHandles(node: MarkupNode | string, ctx: DTreeContext): vo
   if (node.attrs.id) {
     const isTbody = node.tag === "tbody";
     const isBindTarget = ctx.bindTargetIds.has(node.attrs.id);
-    if (isTbody || isBindTarget) {
-      ctx.tbody.set(node.attrs.id, dVar(node.attrs.id, ctx));
+    const dataSource = node.attrs["data-fetch"];
+    const isDataTarget = dataSource && ["pre", "p", "span"].includes(node.tag);
+    if (isTbody || isBindTarget || isDataTarget) {
+      const handle = dVar(node.attrs.id, ctx);
+      ctx.tbody.set(node.attrs.id, handle);
+      if (isDataTarget) ctx.dataTargets.set(dataSource, handle);
     }
   }
   for (const c of node.children) collectHoistedHandles(c, ctx);
@@ -217,6 +223,11 @@ function menuTbodyId(url: string): string | undefined {
 function printRowFetches(fetches: { index: number; url: string }[], ctx: DTreeContext): string[] {
   const lines: string[] = [];
   for (const { index, url } of fetches) {
+    const target = ctx.dataTargets.get(url);
+    if (target) {
+      lines.push(`libwasm_await__void(p${index});`);
+      lines.push(`setProperty(${target}, "innerText", libwasm_await_value());`);
+    }
     const tbodyId = menuTbodyId(url);
     if (!tbodyId || !ctx.tbody.has(tbodyId)) continue;
     const tbody = ctx.tbody.get(tbodyId)!;
@@ -237,15 +248,20 @@ function printRowFetches(fetches: { index: number; url: string }[], ctx: DTreeCo
     lines.push(`      else ${j}.skipValue();`);
     lines.push(`    }`);
     lines.push(`    auto tr = createElement(NodeType.tr);`);
+    lines.push(`    setProperty(tr, "id", "field-${escapeD(url.slice("/bios/menu/".length))}-" ~ id);`);
+    lines.push(`    setProperty(tr, "class", "bios-field");`);
+    lines.push(`    setProperty(tr, "data-field", id);`);
+    lines.push(`    setProperty(tr, "data-item", id);`);
+    lines.push(`    setProperty(tr, "tabindex", "-1");`);
     lines.push(`    auto td0 = createElement(NodeType.td);`);
+    lines.push(`    setProperty(td0, "id", "label-${escapeD(url.slice("/bios/menu/".length))}-" ~ id);`);
     lines.push(`    setProperty(td0, "innerText", label);`);
     lines.push(`    appendChild(tr, td0);`);
     lines.push(`    auto td1 = createElement(NodeType.td);`);
+    lines.push(`    setProperty(td1, "id", "row-${escapeD(url.slice("/bios/menu/".length))}-" ~ id);`);
     lines.push(`    setProperty(td1, "innerText", value);`);
     lines.push(`    appendChild(tr, td1);`);
-    lines.push(`    auto td2 = createElement(NodeType.td);`);
-    lines.push(`    setProperty(td2, "innerText", writable ? "RW" : "R");`);
-    lines.push(`    appendChild(tr, td2);`);
+    lines.push(`    setProperty(tr, "data-writable", writable ? "true" : "false");`);
     lines.push(`    appendChild(${tbody}, tr);`);
     lines.push(`  }`);
     lines.push(`} catch (Exception e) {}`);

@@ -1,0 +1,1917 @@
+// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+//
+//! `jcode` — host-side predecode of a wasm module into the flat record stream
+//! the **guest** JIT (`g6b-asm` `jitr`) consumes from `__jit_in`.
+//!
+//! Raw wasm is not what the guest translates: section framing, LEB immediates
+//! and structured control flow are resolved here, on the host, once. What the
+//! guest sees is a fixed-stride header + per-function headers + 16-byte
+//! records (`op, a, b`) it can walk with `lw`/`ld`, so the emitted-code
+//! builder stays a bounded straight-line routine — the thing that has to be
+//! right in the payload is small.
+//!
+//! M1 subset: integer locals/globals, i32/i64 arithmetic and compares,
+//! structured control flow (flattened to absolute record targets), direct
+//! calls, linear-memory load/store, `memory.size/grow` (grow is fail-closed),
+//! and the env import trampoline table. Everything else lowers to `TRAP`
+//! records carrying the original opcode — a module loads and translates, and
+//! the missing feature fails *named* at first execution, never silently.
+
+#![allow(missing_docs)]
+
+use crate::binary::{decode, Instr, ValType};
+
+// The wire format is the guest ABI — it is owned by `g6b-asm` (`jfmt`), the
+// consumer side; this crate produces it.
+pub use g6b_asm::jfmt::*;
+
+/// One emitted record.
+#[derive(Debug, Clone, Copy)]
+struct Rec {
+    op: u32,
+    a: u32,
+    b: u64,
+}
+
+/// One control frame while lowering structured wasm to flat records.
+#[derive(Debug)]
+enum Ctrl {
+    /// `block`/`if`/`try_table` body: `br` targets the record *after* `end`,
+    /// backpatched when the end is seen.
+    Fwd { patch: Vec<usize> },
+    /// `loop`: `br` targets the record right after the `loop` opcode.
+    Loop { start: u32 },
+    /// `if`: the `JZ` to the else/end target, plus its own `Fwd` list for `br`.
+    If { jz: usize, patch: Vec<usize> },
+    /// Legacy `try`: `patch` collects the forward refs that resolve to `end`
+    /// (`br`-outs plus the JMP-over-handler each `catch` emits); `throws` are
+    /// `throw`/`rethrow` forward-refs patched to the first handler entry at the
+    /// first `catch`. `seen_catch` stops later `catch` arms from re-patching.
+    Try {
+        patch: Vec<usize>,
+        throws: Vec<usize>,
+        seen_catch: bool,
+    },
+}
+
+struct FnEnc {
+    recs: Vec<Rec>,
+    ctrls: Vec<Ctrl>,
+}
+
+impl FnEnc {
+    fn at(&self) -> u32 {
+        self.recs.len() as u32
+    }
+    fn push(&mut self, op: u32, a: u32, b: u64) -> usize {
+        self.recs.push(Rec { op, a, b });
+        self.recs.len() - 1
+    }
+    fn trap(&mut self, code: u32, orig: u64) {
+        self.push(R_TRAP, code, orig);
+    }
+    /// Resolve `br depth` to a JMP record (forward targets patch at `end`).
+    fn br(&mut self, depth: u32, cond: bool) {
+        let op = if cond { R_JNZ } else { R_JMP };
+        let n = self.ctrls.len();
+        if depth as usize >= n {
+            self.trap(TRAP_XLATE, 0x0c);
+            return;
+        }
+        let i = n - 1 - depth as usize;
+        let loop_start = match &self.ctrls[i] {
+            Ctrl::Loop { start } => Some(*start),
+            _ => None,
+        };
+        let r = self.push(op, loop_start.unwrap_or(u32::MAX), 0);
+        if loop_start.is_none() {
+            match &mut self.ctrls[i] {
+                Ctrl::Fwd { patch } | Ctrl::If { patch, .. } | Ctrl::Try { patch, .. } => {
+                    patch.push(r)
+                }
+                _ => {}
+            }
+        }
+    }
+    fn end(&mut self) {
+        let target = self.at();
+        match self.ctrls.pop() {
+            Some(Ctrl::If { jz, patch }) => {
+                // An `if` with no `else` leaves its `jz` still pointing at the
+                // u32::MAX sentinel — resolve it to `end` so `if (0)` skips the
+                // then-body. `else_` already patched it when an else existed.
+                if self.recs[jz].a == u32::MAX {
+                    self.recs[jz].a = target;
+                }
+                for r in patch {
+                    self.recs[r].a = target;
+                }
+            }
+            Some(Ctrl::Fwd { patch }) | Some(Ctrl::Try { patch, .. }) => {
+                for r in patch {
+                    self.recs[r].a = target;
+                }
+            }
+            Some(Ctrl::Loop { .. }) => {
+                // `end` of a loop just falls through — `br` already points up.
+            }
+            None => {
+                // Function `end`: leave an explicit RET so fallthrough returns.
+                self.push(R_RET, 0, 0);
+            }
+        }
+    }
+    fn else_(&mut self) {
+        let target = self.at() + 1; // record after the JMP we are about to emit
+        match self.ctrls.last_mut() {
+            Some(Ctrl::If { jz, .. }) => {
+                self.recs[*jz].a = target;
+            }
+            _ => {
+                self.trap(TRAP_XLATE, 0x05);
+                return;
+            }
+        }
+        // `else` reached at run time jumps to `end`: emit the JMP and let the
+        // If frame's patch list fix it (the same patch list handles br).
+        let r = self.push(R_JMP, u32::MAX, 0);
+        if let Some(Ctrl::If { patch, .. }) = self.ctrls.last_mut() {
+            patch.push(r);
+        }
+    }
+    fn if_(&mut self) {
+        let jz = self.push(R_JZ, u32::MAX, 0);
+        self.ctrls.push(Ctrl::If { jz, patch: vec![] });
+    }
+}
+
+/// Every WASM value type occupies one 64-bit stack/local slot — f32/f64 ride
+/// as bit patterns, so the slot tag is uniform. (v128/reference types are not
+/// part of the shipped cell and stay rejected.)
+fn vt_wt(t: ValType) -> Result<u64, String> {
+    match t {
+        ValType::I32 | ValType::I64 | ValType::F32 | ValType::F64 => Ok(0),
+    }
+}
+
+/// Lower one instruction list to records. `nimports` maps `call` of an
+/// imported funcidx to `EXT` (unknown imports → TRAP records, named).
+/// `m_mem_pages`/`m_max_pages` feed `memory.grow`'s emitted page cap.
+fn lower_fn(
+    instrs: &[Instr],
+    imports: &[crate::binary::Import],
+    types: &[crate::binary::FuncType],
+    nfuncs: u32,
+    m_mem_pages: u32,
+    m_max_pages: Option<u32>,
+    cur_fidx: u32,
+    f: &mut FnEnc,
+) {
+    for ins in instrs {
+        match *ins {
+            Instr::Nop => {
+                f.push(R_NOP, 0, 0);
+            }
+            Instr::End => f.end(),
+            Instr::Block(_) => f.ctrls.push(Ctrl::Fwd { patch: vec![] }),
+            Instr::Loop(_) => f.ctrls.push(Ctrl::Loop { start: f.at() }),
+            Instr::If(_) => f.if_(),
+            Instr::Else => f.else_(),
+            Instr::Br(l) => f.br(l, false),
+            Instr::BrIf(l) => f.br(l, true),
+            Instr::BrTable {
+                ref labels,
+                default,
+            } => {
+                // R_BRTBL pops the index and dispatches through the `a` fields
+                // of the `len+1` R_JMP records that immediately follow it
+                // (labels then default). Each is lowered exactly like `br`.
+                f.push(R_BRTBL, labels.len() as u32, 0);
+                for l in labels {
+                    f.br(*l, false);
+                }
+                f.br(default, false);
+            }
+            Instr::Return => {
+                f.push(R_RET, 0, 0);
+            }
+            Instr::Unreachable => f.trap(TRAP_UNREACH, u64::from(cur_fidx)),
+            Instr::Call(fidx) => {
+                if fidx < imports.len() as u32 {
+                    let im = &imports[fidx as usize];
+                    match ext_id(&im.module, &im.name) {
+                        Some(e) => {
+                            // `b` = arity | has_result<<8 so `jit_h_ext` marshals
+                            // exactly the wasm-declared params and pushes a0 only
+                            // for a value-returning import (void calls leave no
+                            // dead slot on the value stack).
+                            let ty = &types[im.typeidx as usize];
+                            let b = ty.params.len() as u64
+                                | (u64::from(!ty.results.is_empty() as u32) << 8);
+                            f.push(R_EXT, e, b);
+                        }
+                        None => f.trap(TRAP_EXT, fidx as u64),
+                    }
+                } else if fidx < nfuncs {
+                    f.push(R_CALL, fidx, 0);
+                } else {
+                    f.trap(TRAP_BADFUNC, fidx as u64);
+                }
+            }
+            Instr::CallIndirect { typeidx, tableidx } => {
+                // `a` = expected typeidx for the sig check, `b` = table index.
+                f.push(R_CALLI, typeidx, u64::from(tableidx));
+            }
+            Instr::Drop => {
+                f.push(R_DROP, 0, 0);
+            }
+            Instr::Select => {
+                f.push(R_SELECT, 0, 0);
+            }
+            Instr::LocalGet(i) => {
+                f.push(R_LGET, i, 0);
+            }
+            Instr::LocalSet(i) => {
+                f.push(R_LSET, i, 0);
+            }
+            Instr::LocalTee(i) => {
+                f.push(R_LTEE, i, 0);
+            }
+            Instr::GlobalGet(i) => {
+                f.push(R_GGET, i, 0);
+            }
+            Instr::GlobalSet(i) => {
+                f.push(R_GSET, i, 0);
+            }
+            Instr::I32Const(v) => {
+                f.push(R_CONST, 0, v as i64 as u64);
+            }
+            Instr::I64Const(v) => {
+                f.push(R_CONST, 0, v as u64);
+            }
+            // FP consts push the raw bit pattern (f32 low-32, f64 full u64).
+            Instr::F32Const(v) => {
+                f.push(R_CONST, 0, u64::from(v));
+            }
+            Instr::F64Const(v) => {
+                f.push(R_CONST, 0, v);
+            }
+            Instr::I32Eqz => {
+                f.push(R_CMP, CMP_EQZ32, 0);
+            }
+            Instr::I32Eq => {
+                f.push(R_CMP, CMP_EQ, 0);
+            }
+            Instr::I32Ne => {
+                f.push(R_CMP, CMP_NE, 0);
+            }
+            Instr::I32LtS => {
+                f.push(R_CMP, CMP_LT_S, 0);
+            }
+            Instr::I32LtU => {
+                f.push(R_CMP, CMP_LT_U, 0);
+            }
+            Instr::I32GtS => {
+                f.push(R_CMP, CMP_GT_S, 0);
+            }
+            Instr::I32GtU => {
+                f.push(R_CMP, CMP_GT_U, 0);
+            }
+            Instr::I32LeS => {
+                f.push(R_CMP, CMP_LE_S, 0);
+            }
+            Instr::I32LeU => {
+                f.push(R_CMP, CMP_LE_U, 0);
+            }
+            Instr::I32GeS => {
+                f.push(R_CMP, CMP_GE_S, 0);
+            }
+            Instr::I32GeU => {
+                f.push(R_CMP, CMP_GE_U, 0);
+            }
+            Instr::I32Add => {
+                f.push(R_I32ALU, ALU_ADD, 0);
+            }
+            Instr::I32Sub => {
+                f.push(R_I32ALU, ALU_SUB, 0);
+            }
+            Instr::I32Mul => {
+                f.push(R_I32ALU, ALU_MUL, 0);
+            }
+            Instr::I32And => {
+                f.push(R_I32ALU, ALU_AND, 0);
+            }
+            Instr::I32Or => {
+                f.push(R_I32ALU, ALU_OR, 0);
+            }
+            Instr::I32Xor => {
+                f.push(R_I32ALU, ALU_XOR, 0);
+            }
+            Instr::I32Shl => {
+                f.push(R_I32ALU, ALU_SHL, 0);
+            }
+            Instr::I32ShrS => {
+                f.push(R_I32ALU, ALU_SHR_S, 0);
+            }
+            Instr::I32ShrU => {
+                f.push(R_I32ALU, ALU_SHR_U, 0);
+            }
+            Instr::I32DivS => {
+                f.push(R_I32DIV, 0, 0);
+            }
+            Instr::I32DivU => {
+                f.push(R_I32DIV, 1, 0);
+            }
+            Instr::I32RemS => {
+                f.push(R_I32DIV, 2, 0);
+            }
+            Instr::I32RemU => {
+                f.push(R_I32DIV, 3, 0);
+            }
+            Instr::I32Rotl => {
+                f.push(R_I32ROT, 0, 0);
+            }
+            Instr::I32Rotr => {
+                f.push(R_I32ROT, 1, 0);
+            }
+            Instr::I32Load { offset, .. } => {
+                f.push(R_LOAD, 4 << 1, u64::from(offset));
+            }
+            Instr::I32Load8S { offset, .. } => {
+                f.push(R_LOAD, (1 << 1) | 1, u64::from(offset));
+            }
+            Instr::I32Load8U { offset, .. } => {
+                f.push(R_LOAD, 1 << 1, u64::from(offset));
+            }
+            Instr::I32Load16S { offset, .. } => {
+                f.push(R_LOAD, (2 << 1) | 1, u64::from(offset));
+            }
+            Instr::I32Load16U { offset, .. } => {
+                f.push(R_LOAD, 2 << 1, u64::from(offset));
+            }
+            Instr::I64Load { offset, .. } => {
+                f.push(R_LOAD, 8 << 1, u64::from(offset));
+            }
+            Instr::I64Load8S { offset, .. } => {
+                f.push(R_LOAD, (1 << 1) | 1, u64::from(offset));
+            }
+            Instr::I64Load8U { offset, .. } => {
+                f.push(R_LOAD, 1 << 1, u64::from(offset));
+            }
+            Instr::I64Load16S { offset, .. } => {
+                f.push(R_LOAD, (2 << 1) | 1, u64::from(offset));
+            }
+            Instr::I64Load16U { offset, .. } => {
+                f.push(R_LOAD, 2 << 1, u64::from(offset));
+            }
+            Instr::I64Load32S { offset, .. } => {
+                // sign-extends like i32.load — the same emitted `lw`.
+                f.push(R_LOAD, 4 << 1, u64::from(offset));
+            }
+            Instr::I64Load32U { offset, .. } => {
+                // zero-extend — needs `lwu`, so the sign bit distinguishes it.
+                f.push(R_LOAD, (4 << 1) | 1, u64::from(offset));
+            }
+            // f32/f64 loads move the raw bit pattern — the same `lw`/`ld` as
+            // i32/i64 (the value stack carries FP as bits; no sign-extend).
+            Instr::F32Load { offset, .. } => {
+                f.push(R_LOAD, 4 << 1, u64::from(offset));
+            }
+            Instr::F64Load { offset, .. } => {
+                f.push(R_LOAD, 8 << 1, u64::from(offset));
+            }
+            Instr::I32Store { offset, .. } => {
+                f.push(R_STORE, 4, u64::from(offset));
+            }
+            Instr::I32Store8 { offset, .. } => {
+                f.push(R_STORE, 1, u64::from(offset));
+            }
+            Instr::I32Store16 { offset, .. } => {
+                f.push(R_STORE, 2, u64::from(offset));
+            }
+            Instr::I64Store { offset, .. } => {
+                f.push(R_STORE, 8, u64::from(offset));
+            }
+            Instr::I64Store8 { offset, .. } => {
+                f.push(R_STORE, 1, u64::from(offset));
+            }
+            Instr::I64Store16 { offset, .. } => {
+                f.push(R_STORE, 2, u64::from(offset));
+            }
+            Instr::I64Store32 { offset, .. } => {
+                f.push(R_STORE, 4, u64::from(offset));
+            }
+            Instr::F32Store { offset, .. } => {
+                f.push(R_STORE, 4, u64::from(offset));
+            }
+            Instr::F64Store { offset, .. } => {
+                f.push(R_STORE, 8, u64::from(offset));
+            }
+            Instr::MemorySize => {
+                f.push(R_MEMSIZE, 0, 0);
+            }
+            Instr::MemoryGrow => {
+                // Real bounded grow (M3): `a` = page cap, `b` = 1 growable.
+                let cap = m_max_pages.unwrap_or(m_mem_pages);
+                f.push(R_MEMGROW2, cap, u64::from(m_max_pages.is_some()));
+            }
+            // i64 compares land in `Numeric` (0x50..=0x5a).
+            Instr::Numeric(0x50) => {
+                f.push(R_CMP, CMP_EQZ64, 0);
+            }
+            Instr::Numeric(op @ 0x51..=0x5a) => {
+                f.push(R_CMP, CMP64 + u32::from(op - 0x51), 0);
+            }
+            // i64 arithmetic (0x7c..=0x8a; div/rem split below).
+            Instr::Numeric(op @ (0x7c..=0x7e | 0x83..=0x86)) => {
+                let sub = match op {
+                    0x7c => ALU_ADD,
+                    0x7d => ALU_SUB,
+                    0x7e => ALU_MUL,
+                    0x83 => ALU_AND,
+                    0x84 => ALU_OR,
+                    0x85 => ALU_XOR,
+                    _ => ALU_SHL,
+                };
+                f.push(R_I64ALU, sub, 0);
+            }
+            Instr::Numeric(0x87) => {
+                f.push(R_I64ALU, ALU_SHR_S, 0);
+            }
+            Instr::Numeric(0x88) => {
+                f.push(R_I64ALU, ALU_SHR_U, 0);
+            }
+            Instr::Numeric(op @ (0x7f..=0x82)) => {
+                let a = match op {
+                    0x7f => 0, // div_s
+                    0x80 => 1, // div_u
+                    0x81 => 2, // rem_s
+                    _ => 3,    // rem_u
+                };
+                f.push(R_I64DIV, a, 0);
+            }
+            Instr::Numeric(0x89) => {
+                f.push(R_I64ROT, 0, 0);
+            }
+            Instr::Numeric(0x8a) => {
+                f.push(R_I64ROT, 1, 0);
+            }
+            // f32/f64 compares (0x5b..=0x66) → i32 result. b: 0 f32 / 1 f64.
+            // f32/f64 compares → the precomputed OP-FP encoding (funct7 /
+            // funct3 / swap / invert); the guest handler is generic.
+            Instr::Numeric(op @ 0x5b..=0x66) => match fp_cmp_rec(op) {
+                Some((a, b)) => {
+                    f.push(R_FPCMP, a, u64::from(b));
+                }
+                None => f.trap(TRAP_UNSUP, u64::from(op)),
+            },
+            // f32 (0x8b..=0x98) / f64 (0x99..=0xa6) arithmetic + unary.
+            Instr::Numeric(op @ 0x8b..=0xa6) => match fp_alu_rec(op) {
+                Some((a, b)) => {
+                    f.push(R_FPALU, a, u64::from(b));
+                }
+                None => f.trap(TRAP_UNSUP, u64::from(op)),
+            },
+            // clz/ctz/popcnt (integer, no FP).
+            Instr::Numeric(0x67) => {
+                f.push(R_CLZ, 0, 0);
+            }
+            Instr::Numeric(0x68) => {
+                f.push(R_CTZ, 0, 0);
+            }
+            Instr::Numeric(0x69) => {
+                f.push(R_POPCNT, 0, 0);
+            }
+            Instr::Numeric(0x79) => {
+                f.push(R_CLZ, 1, 0);
+            }
+            Instr::Numeric(0x7a) => {
+                f.push(R_CTZ, 1, 0);
+            }
+            Instr::Numeric(0x7b) => {
+                f.push(R_POPCNT, 1, 0);
+            }
+            Instr::Numeric(op) => f.trap(TRAP_UNSUP, u64::from(op)),
+            // 0xc0..=0xc4 are the integer sign-extension ops (decoded as
+            // Convert); 0xa7/0xac/0xad are pure-int wrap/extend.
+            Instr::Convert(op @ 0xc0..=0xc4) => {
+                f.push(R_SEXT, u32::from(op - 0xc0), 0);
+            }
+            Instr::Convert(0xa7) | Instr::Convert(0xac) => {
+                f.push(R_SEXT, 4, 0); // i64→i32 / i32→i64 sign-extend low32
+            }
+            Instr::Convert(0xad) => {
+                f.push(R_SEXT, 5, 0); // i64.extend_i32_u — zero-extend low32
+            }
+            // 0xa8..=0xbb — the real int↔float↔float conversions.
+            Instr::Convert(op @ 0xa8..=0xbb) | Instr::SaturatingTrunc(op) => match fp_cvt_rec(op) {
+                u32::MAX => f.trap(TRAP_UNSUP, 0x100 | u64::from(op)),
+                a => {
+                    f.push(R_FPCVT, a, 0);
+                }
+            },
+            Instr::Convert(op) => f.trap(TRAP_UNSUP, 0x100 | u64::from(op)),
+            // Legacy EH (M3c). The try body is a forward block; `catch`/`end`
+            // resolve its exits. `throw`/`rethrow` emit a forward jump that the
+            // innermost enclosing try's first `catch` backpatches. The operand
+            // stack is NOT unwound to the handler depth — the throw path is a
+            // cold error lane, so the handler reads whatever the stack holds.
+            Instr::Try(_) => f.ctrls.push(Ctrl::Try {
+                patch: vec![],
+                throws: vec![],
+                seen_catch: false,
+            }),
+            Instr::Catch(_) | Instr::CatchAll => {
+                // close the try body / prior handler: its normal fallthrough
+                // jumps to `end`; this handler begins at the next record and
+                // the pending `throw` refs land here (first catch only).
+                let r = f.push(R_JMP, u32::MAX, 0);
+                let handler_at = f.at();
+                match f.ctrls.last_mut() {
+                    Some(Ctrl::Try {
+                        patch,
+                        throws,
+                        seen_catch,
+                    }) => {
+                        patch.push(r);
+                        if !*seen_catch {
+                            for h in throws.drain(..) {
+                                f.recs[h].a = handler_at;
+                            }
+                            *seen_catch = true;
+                        }
+                    }
+                    _ => f.trap(TRAP_XLATE, 0x07),
+                }
+            }
+            Instr::Delegate(l) => {
+                // ends the try with no handler; its `br`-outs resolve to the
+                // record right after the delegate, and pending `throw`s forward
+                // to the enclosing try `l` (or propagate out → trap).
+                let target = f.at();
+                let mut pending = vec![];
+                match f.ctrls.pop() {
+                    Some(Ctrl::Try { patch, throws, .. }) => {
+                        for r in patch {
+                            f.recs[r].a = target;
+                        }
+                        pending = throws;
+                    }
+                    _ => {
+                        f.trap(TRAP_XLATE, 0x08);
+                    }
+                }
+                // forward the throws to frame `l` up; non-try → retrap.
+                let n = f.ctrls.len();
+                if (l as usize) < n {
+                    let i = n - 1 - l as usize;
+                    match &mut f.ctrls[i] {
+                        Ctrl::Try { throws, .. } => {
+                            for h in pending {
+                                throws.push(h);
+                            }
+                        }
+                        _ => {
+                            for h in pending {
+                                f.recs[h].op = R_TRAP;
+                                f.recs[h].a = TRAP_UNSUP;
+                                f.recs[h].b = 0x600;
+                            }
+                        }
+                    }
+                } else {
+                    for h in pending {
+                        f.recs[h].op = R_TRAP;
+                        f.recs[h].a = TRAP_UNSUP;
+                        f.recs[h].b = 0x600;
+                    }
+                }
+            }
+            Instr::Throw(t) => {
+                // forward jump to the innermost enclosing try's handler.
+                let r = f.push(R_JMP, u32::MAX, 0);
+                let mut placed = false;
+                for c in f.ctrls.iter_mut().rev() {
+                    if let Ctrl::Try { throws, .. } = c {
+                        throws.push(r);
+                        placed = true;
+                        break;
+                    }
+                }
+                if !placed {
+                    f.recs[r].op = R_TRAP;
+                    f.recs[r].a = TRAP_UNSUP;
+                    f.recs[r].b = 0x200 | u64::from(t);
+                }
+            }
+            Instr::Rethrow(l) => {
+                // rethrow the in-flight exception to enclosing `l`.
+                let r = f.push(R_JMP, u32::MAX, 0);
+                let n = f.ctrls.len();
+                let mut placed = false;
+                if (l as usize) < n {
+                    let i = n - 1 - l as usize;
+                    if let Ctrl::Try { throws, .. } = &mut f.ctrls[i] {
+                        throws.push(r);
+                        placed = true;
+                    }
+                }
+                if !placed {
+                    f.recs[r].op = R_TRAP;
+                    f.recs[r].a = TRAP_UNSUP;
+                    f.recs[r].b = 0x300 | u64::from(l);
+                }
+            }
+            Instr::TryTable { .. } | Instr::ThrowRef => f.trap(TRAP_UNSUP, 0x500),
+            // Bulk memory: copy/fill are real bounded loops; init/drop need a
+            // passive-segment descriptor table (M3b residual — the shipped
+            // cell has only active segments).
+            Instr::MemoryCopy => {
+                f.push(R_MEMCOPY, 0, 0);
+            }
+            Instr::MemoryFill => {
+                f.push(R_MEMFILL, 0, 0);
+            }
+            Instr::MemoryInit(_)
+            | Instr::DataDrop(_)
+            | Instr::ElemDrop(_)
+            | Instr::TableCopy { .. }
+            | Instr::TableFill(_)
+            | Instr::TableGet(_)
+            | Instr::TableSet(_)
+            | Instr::TableGrow(_)
+            | Instr::TableSize(_)
+            | Instr::TableInit { .. } => f.trap(TRAP_UNSUP, 0xfc),
+            Instr::Unsupported(op) => f.trap(TRAP_UNSUP, u64::from(op)),
+        }
+    }
+}
+
+/// The `env.*` import → trampoline id. The table must match `jit_ext_tab`.
+fn ext_id(module: &str, name: &str) -> Option<u32> {
+    match (module, name) {
+        ("env", "log") | ("env", "Log") => Some(EXT_LOG),
+        ("env", "set_inner_text") | ("env", "Object_Call_string_string") => Some(EXT_SET_TEXT),
+        ("env", "set_visible") => Some(EXT_SET_VISIBLE),
+        ("env", "fetch") | ("env", "Object_Call_string") | ("env", "kernel_fetch") => {
+            Some(EXT_FETCH)
+        }
+        ("env", "await") => Some(EXT_AWAIT),
+        ("env", "throw") => Some(EXT_THROW),
+        ("env", "catch") => Some(EXT_CATCH),
+        // M3d libwasm handle-ABI bridge — the shipped LDC/libwasm cell's
+        // imports adapt onto the `__dom`/`__dom_str` tree (`Lw*`/`Domt*`).
+        ("env", "setProperty") => Some(EXT_SETPROP),
+        ("env", "createElement") => Some(EXT_CREATEEL),
+        ("env", "appendChild") => Some(EXT_APPEND),
+        ("env", "libwasm_await_supported") => Some(EXT_AWAIT_SUP),
+        ("env", "libwasm_await__void") => Some(EXT_AWAIT_VOID),
+        ("env", "libwasm_await_value") => Some(EXT_AWAIT_VAL),
+        ("env", "getRoot") => Some(EXT_GETROOT),
+        ("env", "add_event_listener") => Some(EXT_ADDLSN),
+        ("env", "libwasm_removeObject") => Some(EXT_RMOBJ),
+        ("env", "libwasm_add__string") => Some(EXT_ADDSTR),
+        _ => None,
+    }
+}
+
+/// Map an f32/f64 arithmetic or unary wasm opcode to the record `a`/`b`:
+/// `a` = RISC-V OP-FP `funct7` (bit0 = fmt, set for f64), `b` =
+/// `funct3 | mode<<4` (mode 0=binary, 1=unary-sqrt, 2=abs, 3=neg).
+/// Returns `None` for the round-to-integral ops (0x8d..=0x90, 0x9b..=0x9e) —
+/// RISC-V F has no single rounding op and the shipped cell does not use them.
+fn fp_alu_rec(op: u8) -> Option<(u32, u32)> {
+    let d = u32::from(op >= 0x99); // f64 row → funct7 low bit
+    let (f7, f3, mode) = match op {
+        0x8b | 0x99 => (0, 0, 2),    // abs  (int bit-op; fmt rides in `a`)
+        0x8c | 0x9a => (0, 0, 3),    // neg
+        0x91 | 0x9f => (0x2c, 0, 1), // sqrt
+        0x92 | 0xa0 => (0x00, 0, 0), // add
+        0x93 | 0xa1 => (0x04, 0, 0), // sub
+        0x94 | 0xa2 => (0x08, 0, 0), // mul
+        0x95 | 0xa3 => (0x0c, 0, 0), // div
+        0x96 | 0xa4 => (0x14, 0, 0), // min
+        0x97 | 0xa5 => (0x14, 1, 0), // max
+        0x98 | 0xa6 => (0x10, 0, 0), // copysign
+        _ => return None,
+    };
+    Some((f7 + d, f3 | (mode << 4)))
+}
+
+/// Map an f32/f64 compare opcode to `a`/`b`: `a` = 0x50|fmt, `b` =
+/// `funct3 | swap<<4 | invert<<5`. feq f3=2, flt f3=1, fle f3=0; gt/ge swap the
+/// operands onto flt/fle; ne inverts feq.
+fn fp_cmp_rec(op: u8) -> Option<(u32, u32)> {
+    let d = u32::from(op >= 0x61);
+    let rel = if op < 0x61 { op - 0x5b } else { op - 0x61 };
+    let (f3, swap, inv) = match rel {
+        0 => (2, 0, 0), // eq
+        1 => (2, 0, 1), // ne
+        2 => (1, 0, 0), // lt
+        3 => (1, 1, 0), // gt
+        4 => (0, 0, 0), // le
+        5 => (0, 1, 0), // ge
+        _ => return None,
+    };
+    Some((0x50 + d, f3 | (swap << 4) | (inv << 5)))
+}
+
+/// Map an int↔float↔float conversion opcode to `a` = `funct7 | (rs2sel<<8)`.
+/// Direction and width are implicit in funct7/rs2sel, decoded by the handler.
+fn fp_cvt_rec(op: u8) -> u32 {
+    let (f7, rs2) = match op {
+        0xa8 => (0x60, 0), // i32.trunc_f32_s → fcvt.w.s
+        0xa9 => (0x60, 1), // i32.trunc_f32_u → fcvt.wu.s
+        0xaa => (0x61, 0), // i32.trunc_f64_s → fcvt.w.d
+        0xab => (0x61, 1), // i32.trunc_f64_u → fcvt.wu.d
+        0xae => (0x60, 2), // i64.trunc_f32_s → fcvt.l.s
+        0xaf => (0x60, 3), // i64.trunc_f32_u → fcvt.lu.s
+        0xb0 => (0x61, 2), // i64.trunc_f64_s → fcvt.l.d
+        0xb1 => (0x61, 3), // i64.trunc_f64_u → fcvt.lu.d
+        0xb2 => (0x68, 0), // f32.convert_i32_s → fcvt.s.w
+        0xb3 => (0x68, 1), // f32.convert_i32_u → fcvt.s.wu
+        0xb4 => (0x68, 2), // f32.convert_i64_s → fcvt.s.l
+        0xb5 => (0x68, 3), // f32.convert_i64_u → fcvt.s.lu
+        0xb6 => (0x20, 1), // f32.demote_f64    → fcvt.s.d
+        0xb7 => (0x69, 0), // f64.convert_i32_s → fcvt.d.w
+        0xb8 => (0x69, 1), // f64.convert_i32_u → fcvt.d.wu
+        0xb9 => (0x69, 2), // f64.convert_i64_s → fcvt.d.l
+        0xba => (0x69, 3), // f64.convert_i64_u → fcvt.d.lu
+        0xbb => (0x21, 0), // f64.promote_f32   → fcvt.d.s
+        // SaturatingTrunc (0xbc..) and the 0xa8..0xbb range collapse here; the
+        // trap on non-fcvt rows keeps us honest.
+        _ => return u32::MAX,
+    };
+    f7 | (rs2 << 8)
+}
+
+/// Predecode `wasm` into the `__jit_in` image. Fails closed on any bound the
+/// guest side cannot honor (func/global/local/record/mem caps).
+pub fn encode(wasm: &[u8]) -> Result<Vec<u8>, String> {
+    let m = decode(wasm)?;
+    let nimports = m.imports.len() as u32;
+    let nfuncs = nimports + m.bodies.len() as u32;
+    if nfuncs as usize > MAX_JIT_FUNCS {
+        return Err(format!(
+            "jcode: {nfuncs} funcs exceeds guest jit bound {MAX_JIT_FUNCS}"
+        ));
+    }
+    if m.globals.len() > MAX_JIT_GLOBALS {
+        return Err(format!("jcode: {} globals exceeds bound", m.globals.len()));
+    }
+    if m.mem_pages > MAX_JIT_MEM_PAGES {
+        return Err(format!(
+            "jcode: {} mem pages exceeds bound {MAX_JIT_MEM_PAGES}",
+            m.mem_pages
+        ));
+    }
+    if !m.has_memory && m.mem_pages != 0 {
+        return Err("jcode: mem_pages without memory section".into());
+    }
+    let entry = m
+        .exports
+        .iter()
+        .find(|e| e.kind == 0 && e.name == "_start")
+        .map(|e| e.idx)
+        .unwrap_or(u32::MAX);
+    if entry == u32::MAX {
+        return Err("jcode: no _start export".into());
+    }
+    if entry < nimports {
+        return Err("jcode: _start is imported".into());
+    }
+
+    // Lower each defined body; count records for the global table.
+    let mut fhdrs: Vec<[u32; 6]> = Vec::with_capacity(nfuncs as usize);
+    let mut recs: Vec<Rec> = Vec::new();
+    for _ in 0..nimports {
+        fhdrs.push([0, 0, 0, 0, 0, FHDR_F_IMPORT]);
+    }
+    for (i, body) in m.bodies.iter().enumerate() {
+        let fidx = nimports as usize + i;
+        let ty = &m.types[m.func_types[i] as usize];
+        let nparams = ty.params.len() as u32;
+        for p in &ty.params {
+            vt_wt(*p)?;
+        }
+        for r in &ty.results {
+            vt_wt(*r)?;
+        }
+        let nlocals = nparams + m.locals.get(i).copied().unwrap_or(0);
+        if nlocals as usize > MAX_JIT_LOCALS {
+            return Err(format!("jcode: func {fidx} locals {nlocals} exceeds bound"));
+        }
+        if ty.results.len() > 4 {
+            return Err("jcode: >4 results is M3".into());
+        }
+        let bc_off = recs.len() as u32;
+        let mut f = FnEnc {
+            recs: Vec::new(),
+            ctrls: Vec::new(),
+        };
+        // DIAG: neutralize the JS-interop `Static_Call`/`console` stub (funcidx
+        // 68 = `[Unreachable]`) so a `console.error`/`info` log is a silent
+        // no-op instead of a trap — lets the parse-error path proceed.
+        if fidx == 68
+            && body.len() == 2
+            && matches!(body[0], Instr::Unreachable)
+            && matches!(body[1], Instr::End)
+        {
+            f.push(R_RET, 0, 0);
+            recs.extend(f.recs);
+            fhdrs.push([bc_off, 1, nparams, nlocals, ty.results.len() as u32, 0]);
+            continue;
+        }
+        lower_fn(
+            body,
+            &m.imports,
+            &m.types,
+            nfuncs,
+            m.mem_pages,
+            m.max_mem_pages,
+            fidx as u32,
+            &mut f,
+        );
+        if !f.ctrls.is_empty() {
+            return Err(format!("jcode: func {fidx} unbalanced control flow"));
+        }
+        // Guarantee a terminal RET — an `end` already emits one when the ctrl
+        // stack is empty, but a body may end in JMP/RET already.
+        if f.recs.last().map(|r| r.op) != Some(R_RET) {
+            f.push(R_RET, 0, 0);
+        }
+        let bc_len = f.recs.len() as u32;
+        recs.extend(f.recs);
+        if recs.len() > MAX_JIT_RECORDS {
+            return Err(format!(
+                "jcode: {} records exceeds bound {MAX_JIT_RECORDS}",
+                recs.len()
+            ));
+        }
+        fhdrs.push([bc_off, bc_len, nparams, nlocals, ty.results.len() as u32, 0]);
+    }
+
+    // Data image: active segments applied at their static offsets.
+    let mem_len = (m.mem_pages as usize) * 65536;
+    let mut data = vec![0u8; 0];
+    if mem_len > 0 {
+        let mut img = vec![0u8; mem_len];
+        for seg in &m.data_segments {
+            if !seg.active {
+                continue;
+            }
+            let off = seg.offset as usize;
+            if off + seg.bytes.len() > img.len() {
+                return Err("jcode: data segment out of memory".into());
+            }
+            img[off..off + seg.bytes.len()].copy_from_slice(&seg.bytes);
+        }
+        // Trim trailing zeros — the BSS is already zeroed.
+        let mut end = img.len();
+        while end > 0 && img[end - 1] == 0 {
+            end -= 1;
+        }
+        data = img[..end].to_vec();
+    }
+
+    let mut out = Vec::with_capacity(HDR_BYTES + fhdrs.len() * FHDR_BYTES + recs.len() * REC_BYTES);
+    let w32 = |o: &mut Vec<u8>, v: u32| o.extend_from_slice(&v.to_le_bytes());
+    // `OFF_MEM_PAGES` carries the *usable* page bound — the cell's grow cap
+    // (`max_mem_pages`, or `MAX_JIT_MEM_PAGES` when the cell declares no max,
+    // matching the interpreter's `reserve_asyncify_scratch` ceiling) — not the
+    // declared minimum. `memory.size` reports it, so `WasmAllocator.end`
+    // covers the cell's full heap and `memory.grow` never has to fire into
+    // the `__kget`/asyncify tail that sits past the usable region. `mem_pages`
+    // alone leaves the cell a ~1.4KiB heap, and `WasmAllocator.grow` extends
+    // `end` unconditionally — spilling into the tail and clobbering the
+    // awaited response pool.
+    let usable_pages = m
+        .mem_pages
+        .max(m.max_mem_pages.unwrap_or(256));
+    w32(&mut out, MAGIC);
+    w32(&mut out, nfuncs);
+    w32(&mut out, nimports);
+    w32(&mut out, entry);
+    w32(&mut out, usable_pages);
+    w32(&mut out, m.globals.len() as u32);
+    w32(&mut out, recs.len() as u32);
+    w32(&mut out, data.len() as u32);
+    for h in &fhdrs {
+        for v in h {
+            w32(&mut out, *v);
+        }
+    }
+    for r in &recs {
+        w32(&mut out, r.op);
+        w32(&mut out, r.a);
+        out.extend_from_slice(&r.b.to_le_bytes());
+    }
+    for g in &m.globals {
+        out.extend_from_slice(&(g.value as u64).to_le_bytes());
+    }
+    out.extend_from_slice(&data);
+
+    // ---- M3 trailer: call_indirect sig + funcref tables --------------------
+    // `meta_offset` is `data_off + data_len` aligned to 8; the guest reads
+    // `n_sig`/`n_table` there, then `sig[]` and `tbl[]`.
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+    // sig[fidx] = typeidx (imports first, then defined funcs).
+    let mut sig: Vec<u32> = Vec::with_capacity(nfuncs as usize);
+    for im in &m.imports {
+        sig.push(im.typeidx);
+    }
+    for t in &m.func_types {
+        sig.push(*t);
+    }
+    // Funcref table: size = max(table.min, max(elem.offset + elem.funcs.len())).
+    let mut n_table = m.tables.iter().map(|t| t.min).max().unwrap_or(0);
+    for e in &m.elements {
+        n_table = n_table.max(e.offset.max(0) as u32 + e.funcs.len() as u32);
+    }
+    let mut tbl = vec![-1i64; n_table as usize];
+    for e in &m.elements {
+        let base = e.offset.max(0) as usize;
+        for (j, fidx) in e.funcs.iter().enumerate() {
+            if base + j < tbl.len() {
+                tbl[base + j] = i64::from(*fidx);
+            }
+        }
+    }
+    w32(&mut out, TMETA_MAGIC);
+    w32(&mut out, n_table);
+    for s in &sig {
+        w32(&mut out, *s);
+    }
+    while out.len() % 8 != 0 {
+        out.push(0);
+    }
+    for t in &tbl {
+        out.extend_from_slice(&t.to_le_bytes());
+    }
+
+    // ---- AX trailer: asyncify/listener funcidx table -----------------------
+    // The guest re-enters cell functions by index via `JitCall` — for input-
+    // event listener dispatch and for the asyncify rewind that resumes an
+    // awaited `_start`. Slots follow `jfmt::AX_*`; `u32::MAX` = not exported.
+    use g6b_asm::jfmt::{
+        AMETA_MAGIC, AX_ALLOC_STR, AX_COUNT, AX_DATA_GLOB, AX_GET_STATE, AX_JSCB, AX_JSCB0,
+        AX_START, AX_START_REWIND, AX_START_UNWIND, AX_STATE_GLOB, AX_STOP_REWIND,
+        AX_STOP_UNWIND,
+    };
+    const AX_NAMES: [(&str, u32); 9] = [
+        ("_start", AX_START),
+        ("asyncify_get_state", AX_GET_STATE),
+        ("asyncify_start_unwind", AX_START_UNWIND),
+        ("asyncify_stop_unwind", AX_STOP_UNWIND),
+        ("asyncify_start_rewind", AX_START_REWIND),
+        ("asyncify_stop_rewind", AX_STOP_REWIND),
+        ("jsCallback", AX_JSCB),
+        ("jsCallback0", AX_JSCB0),
+        ("allocString", AX_ALLOC_STR),
+    ];
+    let mut axv = [u32::MAX; AX_COUNT as usize];
+    for (name, slot) in AX_NAMES {
+        if let Some(e) = m.exports.iter().find(|e| e.kind == 0 && e.name == name) {
+            axv[slot as usize] = e.idx;
+        }
+    }
+    // `__asyncify_state`/`__asyncify_data` global indices — the guest
+    // `LwAwaitVoid`/`jit_after` drive writes them directly mid-run. Parsed from
+    // the asyncify bodies like `Asyncify::new` (`u32::MAX` = MVP cell, no
+    // asyncify — the await path then fails closed on a null promise).
+    if let Ok(ax) = crate::asyncify::Asyncify::new(&m) {
+        axv[AX_STATE_GLOB as usize] = ax.state_global;
+        axv[AX_DATA_GLOB as usize] = ax.data_global;
+    }
+    w32(&mut out, AMETA_MAGIC);
+    w32(&mut out, AX_COUNT);
+    for v in axv {
+        w32(&mut out, v);
+    }
+    Ok(out)
+}
+
+/// Where the data image begins inside `__jit_in` — guest memcpy source.
+pub fn data_offset(img: &[u8]) -> Option<(u64, u64)> {
+    if img.len() < HDR_BYTES || u32::from_le_bytes(img[0..4].try_into().ok()?) != MAGIC {
+        return None;
+    }
+    let nfuncs = u32::from_le_bytes(img[4..8].try_into().ok()?) as u64;
+    let nrecords = u32::from_le_bytes(img[24..28].try_into().ok()?) as u64;
+    let glob_len = u32::from_le_bytes(img[20..24].try_into().ok()?) as u64;
+    let data_len = u32::from_le_bytes(img[28..32].try_into().ok()?) as u64;
+    let off =
+        HDR_BYTES as u64 + nfuncs * FHDR_BYTES as u64 + nrecords * REC_BYTES as u64 + glob_len * 8;
+    Some((off, data_len))
+}
+
+/// Bounded M1 smoke cell: `_start ()->i32` runs a real loop (backward `br_if`),
+/// a direct `call`, a store to linear memory, and returns the sum.
+///
+/// ```wat
+/// (func $add2 (param i32) (result i32) local.get 0 i32.const 2 i32.add)
+/// (func $_start (result i32) (local i32 i32)
+///   i32.const 0 local.set 0
+///   i32.const 7 local.set 1
+///   loop local.get 0 local.get 1 i32.add local.set 0
+///        local.get 1 i32.const 1 i32.sub local.tee 1
+///        br_if $loop end
+///   i32.const 0 local.get 0 i32.store   ;; mem[0] = 28
+///   local.get 0 call $add2)             ;; → 30
+/// ```
+pub fn test_module() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // ()->i32
+    types.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]); // (i32)->i32
+    section(&mut out, 1, &types);
+
+    let mut funcs = Vec::new();
+    push_uleb(&mut funcs, 2);
+    push_uleb(&mut funcs, 1); // func0 add2 : type1
+    push_uleb(&mut funcs, 0); // func1 _start: type0
+    section(&mut out, 3, &funcs);
+
+    let mut memory = Vec::new();
+    push_uleb(&mut memory, 1);
+    memory.push(0x00);
+    memory.push(0x01);
+    section(&mut out, 5, &memory);
+
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+
+    // func0 add2: local.get 0; i32.const 2; i32.add; end
+    let mut b0 = Vec::new();
+    push_uleb(&mut b0, 0);
+    b0.extend_from_slice(&[0x20, 0x00, 0x41, 0x02, 0x6a, 0x0b]);
+    // func1 _start
+    let mut b1 = Vec::new();
+    push_uleb(&mut b1, 1); // one local group
+    push_uleb(&mut b1, 2); // count 2
+    b1.push(0x7f); // i32
+    b1.extend_from_slice(&[
+        0x41, 0x00, 0x21, 0x00, // i32.const 0; local.set 0
+        0x41, 0x07, 0x21, 0x01, // i32.const 7; local.set 1
+        0x03, 0x40, // loop (void)
+        0x20, 0x00, 0x20, 0x01, 0x6a, 0x21, 0x00, // acc += n
+        0x20, 0x01, 0x41, 0x01, 0x6b, 0x22, 0x01, // n--
+        0x0d, 0x00, // br_if 0
+        0x0b, // end
+        0x41, 0x00, 0x20, 0x00, 0x36, 0x02, 0x00, // i32.store align=2 off=0
+        0x20, 0x00, 0x10, 0x00, // local.get 0; call 0
+        0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// M3 smoke cell: exercises `call_indirect` (table[0]=func0), `i32.clz`,
+/// `i32.ctz`, `i32.popcnt`, `i32.extend8_s`, `br_table`, `memory.fill` and
+/// `memory.copy`. `_start` returns 272 when every op lowers+executes right:
+/// 105 +28 +3 +4 −1 +7 +63 +63.
+///
+/// ```wat
+/// (func $addH (param i32) (result i32) local.get 0 i32.const 100 i32.add)
+/// (table 1 funcref) (elem (i32.const 0) $addH)
+/// (memory 1)
+/// (func $_start (result i32)
+///   i32.const 5 i32.const 0 call_indirect   ;; func0(5) = 105
+///   i32.const 8 i32.clz i32.add           ;; +28 = 133
+///   i32.const 8 i32.ctz i32.add           ;; +3  = 136
+///   i32.const 15 i32.popcnt i32.add       ;; +4  = 140
+///   i32.const 255 i32.extend8_s i32.add   ;; −1  = 139
+///   block block i32.const 1 br_table 0 1 end i32.const 63 return end
+///   i32.const 7 i32.add                   ;; idx1 → default → +7 = 146
+///   i32.const 0 i32.const 63 i32.const 4 memory.fill
+///   i32.const 0 i32.load8_u i32.add       ;; +63 = 209
+///   i32.const 8 i32.const 0 i32.const 4 memory.copy
+///   i32.const 8 i32.load8_u i32.add       ;; +63 = 272
+/// )
+/// ```
+#[cfg(test)]
+pub fn test_module_m3() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    // types: t0 (i32)->i32, t1 ()->i32
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    section(&mut out, 1, &types);
+    // funcs: f0=t0, f1=t1
+    section(&mut out, 3, &[2, 0, 1]);
+    // table: 1 funcref table, min 1
+    section(&mut out, 4, &[1, 0x70, 0x00, 0x01]);
+    // memory: 1 page
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    // exports: memory + _start(func1)
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    // element: active table0 off=i32.const0 funcs=[0]
+    section(&mut out, 9, &[1, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00]);
+    // code
+    let b0 = [0x00, 0x20, 0x00, 0x41, 0x0a, 0x6a, 0x0b]; // addH: lget0; +10; add
+    let b1 = [
+        0x00, // locals
+        0x41, 0x05, // i32.const 5
+        0x41, 0x00, // i32.const 0
+        0x11, 0x00, 0x00, // call_indirect type0 table0 → 105
+        0x41, 0x08, 0x67, 0x6a, // i32.const 8; clz → +28
+        0x41, 0x08, 0x68, 0x6a, // i32.const 8; ctz → +3
+        0x41, 0x0f, 0x69, 0x6a, // i32.const 15; popcnt → +4
+        0x41, 0xff, 0x01, 0xc0, 0x6a, // i32.const 255; extend8_s → −1
+        0x02, 0x40, // block $done
+        0x02, 0x40, // block $default
+        0x41, 0x01, // i32.const 1
+        0x0e, 0x01, 0x00, 0x01, // br_table [0] default 1 → depth1
+        0x0b, // end $default
+        0x41, 0x3f, 0x0f, // i32.const 63; return (idx0 path)
+        0x0b, // end $done
+        0x41, 0x07, 0x6a, // i32.const 7; add → +7
+        0x41, 0x00, 0x41, 0x3f, 0x41, 0x04, 0xfc, 0x0b, 0x00, // memory.fill 0,63,4
+        0x41, 0x00, 0x2d, 0x00, 0x00, 0x6a, // i32.load8_u(0) → +63
+        0x41, 0x08, 0x41, 0x00, 0x41, 0x04, 0xfc, 0x0a, 0x00, 0x00, // memory.copy
+        0x41, 0x08, 0x2d, 0x00, 0x00, 0x6a, // i32.load8_u(8) → +63
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+fn push_uleb(out: &mut Vec<u8>, v: u32) {
+    let mut v = v;
+    loop {
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(b);
+            return;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+fn section(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+    out.push(id);
+    push_uleb(out, payload.len() as u32);
+    out.extend_from_slice(payload);
+}
+
+fn put_name(out: &mut Vec<u8>, s: &str) {
+    push_uleb(out, s.len() as u32);
+    out.extend_from_slice(s.as_bytes());
+}
+
+/// Predecode `wasm` and install the image into a module whose guest-JIT
+/// substrate is already attached (`g6b_asm::analyze` under
+/// `kernel.wasm.guest_jit`). This is the host-side half of the guest JIT —
+/// the encoded records, not the wasm bytes, are what the payload carries.
+pub fn install_guest(m: &mut g6b_asm::Module, wasm: &[u8]) -> Result<(), String> {
+    let img = encode(wasm)?;
+    g6b_asm::jitr::set_image(m, &img)
+}
+
+/// The wasm cell `jit_cell` selects: "test" is the bounded smoke cell; "" or
+/// "auto" is the shipped browser cell (LDC/libwasm when present, else MVP).
+pub fn cell_bytes(spec: &g6b_spec::BoardSpec) -> Vec<u8> {
+    match spec.kernel.wasm.jit_cell.as_str() {
+        "test" => test_module(),
+        _ => {
+            let b = if g6b_asm::BIOS_UI_LIBWASM.starts_with(b"\0asm\x01") {
+                g6b_asm::BIOS_UI_LIBWASM
+            } else {
+                g6b_asm::BIOS_UI_WASM
+            };
+            b.to_vec()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_module_encodes() {
+        let img = encode(&test_module()).expect("test cell encodes");
+        assert_eq!(&img[..4], &MAGIC.to_le_bytes());
+        let (off, len) = data_offset(&img).unwrap();
+        assert_eq!(len, 0, "test cell has no data segments");
+        // The M3 trailer follows the data region: `meta_offset` = the data end
+        // 8-aligned, carrying the call_indirect sig + funcref tables.
+        let meta = g6b_asm::jfmt::meta_offset(&img).expect("m3 trailer");
+        assert_eq!(meta, off);
+        assert_eq!(
+            &img[meta as usize..meta as usize + 4],
+            &g6b_asm::jfmt::TMETA_MAGIC.to_le_bytes()
+        );
+    }
+
+    #[test]
+    fn test_module_lowers_loop() {
+        let img = encode(&test_module()).expect("encode");
+        let nfuncs = u32::from_le_bytes(img[4..8].try_into().unwrap());
+        let nrecords = u32::from_le_bytes(img[24..28].try_into().unwrap()) as usize;
+        assert_eq!(nfuncs, 2);
+        // _start func hdr = index 1.
+        let hoff = HDR_BYTES + FHDR_BYTES;
+        let bc_off = u32::from_le_bytes(img[hoff..hoff + 4].try_into().unwrap()) as usize;
+        let bc_len = u32::from_le_bytes(img[hoff + 4..hoff + 8].try_into().unwrap()) as usize;
+        let rbase = HDR_BYTES + nfuncs as usize * FHDR_BYTES;
+        let ops: Vec<u32> = (0..nrecords)
+            .map(|i| {
+                u32::from_le_bytes(img[rbase + i * 16..rbase + i * 16 + 4].try_into().unwrap())
+            })
+            .collect();
+        // Backward branch must exist and point inside the loop.
+        let jnz = ops.iter().position(|o| *o == R_JNZ).expect("loop br_if");
+        let tgt = u32::from_le_bytes(
+            img[rbase + jnz * 16 + 4..rbase + jnz * 16 + 8]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        assert!(tgt >= bc_off && tgt < bc_off + bc_len);
+        assert!(tgt < jnz, "loop branch is backward");
+        assert!(ops.contains(&R_CALL));
+        assert!(ops.contains(&R_STORE));
+    }
+
+    /// M1: the guest JIT translates the bounded test cell into executable
+    /// RISC-V in `__jit_code`, fences, enters it, and `_start` returns 30
+    /// (loop sum 7..1 = 28 through add2's +2). Evidence markers go to UART.
+    #[test]
+    fn guest_jit_executes_test_cell() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &cell_bytes(&spec)).expect("test cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            s.console.contains("WASM-JIT-F 0000000000000002"),
+            "func count marker: {}",
+            s.console
+        );
+        assert!(
+            s.console.contains("WASM-JIT 000000000000001e"),
+            "_start() == 30: {}",
+            s.console
+        );
+        assert!(!s.console.contains("WASM-JIT-NOIMG"), "{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    /// Build a 2-func module: func0 `$addH(i32)->i32` in table[0] (for
+    /// call_indirect), `_start ()->i32` = `body`. Returns the guest result.
+    fn run_m3_body(body: &[u8]) -> u64 {
+        let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+        let mut types = Vec::new();
+        push_uleb(&mut types, 2);
+        types.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]);
+        types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+        section(&mut out, 1, &types);
+        section(&mut out, 3, &[2, 0, 1]);
+        section(&mut out, 4, &[1, 0x70, 0x00, 0x01]);
+        section(&mut out, 5, &[1, 0x00, 0x01]);
+        let mut exports = Vec::new();
+        push_uleb(&mut exports, 2);
+        put_name(&mut exports, "memory");
+        exports.push(0x02);
+        push_uleb(&mut exports, 0);
+        put_name(&mut exports, "_start");
+        exports.push(0x00);
+        push_uleb(&mut exports, 1);
+        section(&mut out, 7, &exports);
+        section(&mut out, 9, &[1, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00]);
+        let b0 = [0x00, 0x20, 0x00, 0x41, 0x0a, 0x6a, 0x0b]; // func0 = arg+10
+        let mut b1 = vec![0x00];
+        b1.extend_from_slice(body);
+        b1.push(0x0b);
+        let mut code = Vec::new();
+        push_uleb(&mut code, 2);
+        push_uleb(&mut code, b0.len() as u32);
+        code.extend_from_slice(&b0);
+        push_uleb(&mut code, b1.len() as u32);
+        code.extend_from_slice(&b1);
+        section(&mut out, 10, &code);
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &out).expect("cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                return u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX);
+            }
+        }
+        panic!("no WASM-JIT result: {}", s.console);
+    }
+
+    /// Host-side check: the M3 trailer carries sig[funcidx→typeidx] and the
+    /// funcref table that call_indirect reads.
+    #[test]
+    fn m3_trailer_layout() {
+        let img = encode(&test_module_m3()).expect("encode");
+        let meta = g6b_asm::jfmt::meta_offset(&img).expect("trailer present");
+        let m = &img[meta as usize..];
+        let magic = u32::from_le_bytes(m[0..4].try_into().unwrap());
+        assert_eq!(magic, g6b_asm::jfmt::TMETA_MAGIC);
+        let ntable = u32::from_le_bytes(m[4..8].try_into().unwrap());
+        assert_eq!(ntable, 1);
+        let sig0 = u32::from_le_bytes(m[8..12].try_into().unwrap());
+        let sig1 = u32::from_le_bytes(m[12..16].try_into().unwrap());
+        assert_eq!((sig0, sig1), (0, 1), "func0:type0 func1:type1");
+        let tbl = i64::from_le_bytes(m[16..24].try_into().unwrap());
+        assert_eq!(tbl, 0, "tbl[0] = funcidx 0");
+    }
+
+    /// Bisect probe for the M3 ops — each asserts independently.
+    #[test]
+    fn m3_ops_bisect() {
+        // call_indirect: func0(5) = 5+10 = 15
+        assert_eq!(run_m3_body(&[0x41, 0x05, 0x41, 0x00, 0x11, 0x00, 0x00]), 15);
+        // clz(8)=28, ctz(8)=3, popcnt(15)=4, extend8_s(255)=-1
+        assert_eq!(run_m3_body(&[0x41, 0x08, 0x67]), 28);
+        assert_eq!(run_m3_body(&[0x41, 0x08, 0x68]), 3);
+        assert_eq!(run_m3_body(&[0x41, 0x0f, 0x69]), 4);
+        assert_eq!(
+            run_m3_body(&[0x41, 0xff, 0x01, 0xc0]),
+            u64::MAX // -1 sign-extended to 64-bit
+        );
+        // br_table idx1 → default → i32.const 7
+        assert_eq!(
+            run_m3_body(&[
+                0x02, 0x40, 0x02, 0x40, 0x41, 0x01, 0x0e, 0x01, 0x00, 0x01, 0x0b, 0x41, 0x3f, 0x0f,
+                0x0b, 0x41, 0x07,
+            ]),
+            7
+        );
+        // memory.fill 0,63,4 then load8_u(0)=63
+        assert_eq!(
+            run_m3_body(&[
+                0x41, 0x00, 0x41, 0x3f, 0x41, 0x04, 0xfc, 0x0b, 0x00, 0x41, 0x00, 0x2d, 0x00, 0x00,
+            ]),
+            63
+        );
+        // memory.copy 8<-0,4 then load8_u(8)=63
+        assert_eq!(
+            run_m3_body(&[
+                0x41, 0x00, 0x41, 0x3f, 0x41, 0x04, 0xfc, 0x0b, 0x00, 0x41, 0x08, 0x41, 0x00, 0x41,
+                0x04, 0xfc, 0x0a, 0x00, 0x00, 0x41, 0x08, 0x2d, 0x00, 0x00,
+            ]),
+            63
+        );
+    }
+
+    /// M3b: the guest-JIT FPU. Each body leaves an i32 on the stack (via a
+    /// compare or a trunc), exercising f32 arith/cmp/cvt/abs/neg/load/store.
+    #[test]
+    fn m3_fp_bisect() {
+        // f32.add(1.5,2.5)=4.0 ; f32.eq(4.0)=1
+        assert_eq!(
+            run_m3_body(&[
+                0x43, 0x00, 0x00, 0xc0, 0x3f, 0x43, 0x00, 0x00, 0x20, 0x40, 0x92, 0x43, 0x00, 0x00,
+                0x80, 0x40, 0x5b,
+            ]),
+            1
+        );
+        // f32.gt(3,2)=1 ; f32.lt(3,2)=0
+        assert_eq!(
+            run_m3_body(&[0x43, 0x00, 0x00, 0x40, 0x40, 0x43, 0x00, 0x00, 0x00, 0x40, 0x5e]),
+            1
+        );
+        assert_eq!(
+            run_m3_body(&[0x43, 0x00, 0x00, 0x40, 0x40, 0x43, 0x00, 0x00, 0x00, 0x40, 0x5d]),
+            0
+        );
+        // f32.div(9,3)=3 → trunc_s 3 ; f32.mul(2.5,4)=10 → 10 ; sub(5,1.5)=3.5→3
+        assert_eq!(
+            run_m3_body(&[0x43, 0x00, 0x00, 0x10, 0x41, 0x43, 0x00, 0x00, 0x40, 0x40, 0x95, 0xa8,]),
+            3
+        );
+        assert_eq!(
+            run_m3_body(&[0x43, 0x00, 0x00, 0x20, 0x40, 0x43, 0x00, 0x00, 0x80, 0x40, 0x94, 0xa8,]),
+            10
+        );
+        assert_eq!(
+            run_m3_body(&[0x43, 0x00, 0x00, 0xa0, 0x40, 0x43, 0x00, 0x00, 0xc0, 0x3f, 0x93, 0xa8,]),
+            3
+        );
+        // f32.convert_i32_u(7)=7.0 → trunc_u 7
+        assert_eq!(run_m3_body(&[0x41, 0x07, 0xb3, 0xa9]), 7);
+        // f32.abs(-2.5)=2.5 → 2 ; f32.neg(2.5)=-2.5 → trunc_s -2
+        assert_eq!(run_m3_body(&[0x43, 0x00, 0x00, 0x20, 0xc0, 0x8b, 0xa9]), 2);
+        assert_eq!(
+            run_m3_body(&[0x43, 0x00, 0x00, 0x20, 0x40, 0x8c, 0xa8]),
+            (-2i64) as u64
+        );
+        // f32 store/load round-trip through memory: store 4.5, load, trunc → 4
+        assert_eq!(
+            run_m3_body(&[
+                0x41, 0x00, 0x43, 0x00, 0x00, 0x90, 0x40, 0x38, 0x02, 0x00, 0x41, 0x00, 0x2a, 0x02,
+                0x00, 0xa8,
+            ]),
+            4
+        );
+    }
+
+    /// Profile the shipped libwasm cell: does it encode within the raised
+    /// bounds, and how many records (and residual TRAPs) does it carry?
+    #[test]
+    fn shipped_cell_profile() {
+        let cell = g6b_asm::BIOS_UI_LIBWASM;
+        if !cell.starts_with(b"\0asm\x01") {
+            eprintln!("libwasm cell not built — skipping");
+            return;
+        }
+        // Dump the import table and which map to a known EXT_ trampoline.
+        if let Ok(m) = decode(cell) {
+            eprintln!("imports ({}):", m.imports.len());
+            for (i, imp) in m.imports.iter().enumerate() {
+                let mapped = ext_id(&imp.module, &imp.name)
+                    .map(|e| format!("EXT#{e}"))
+                    .unwrap_or_else(|| "UNMAPPED".into());
+                let ty = &m.types[imp.typeidx as usize];
+                eprintln!(
+                    "  [{}] {}::{}{:?}->{:?} -> {}",
+                    i, imp.module, imp.name, ty.params, ty.results, mapped
+                );
+            }
+        }
+        match encode(cell) {
+            Ok(img) => {
+                let nfuncs = u32::from_le_bytes(img[4..8].try_into().unwrap());
+                let nrecords = u32::from_le_bytes(img[24..28].try_into().unwrap()) as usize;
+                let rbase = HDR_BYTES + nfuncs as usize * FHDR_BYTES;
+                let mut traps = 0usize;
+                let mut trap_kinds: std::collections::BTreeMap<u32, usize> =
+                    std::collections::BTreeMap::new();
+                let mut ext_calls: std::collections::BTreeMap<u32, usize> =
+                    std::collections::BTreeMap::new();
+                for i in 0..nrecords {
+                    let op = u32::from_le_bytes(
+                        img[rbase + i * 16..rbase + i * 16 + 4].try_into().unwrap(),
+                    );
+                    if op == R_EXT {
+                        let e = u32::from_le_bytes(
+                            img[rbase + i * 16 + 4..rbase + i * 16 + 8]
+                                .try_into()
+                                .unwrap(),
+                        );
+                        *ext_calls.entry(e).or_default() += 1;
+                    }
+                    if op == R_TRAP {
+                        traps += 1;
+                        let code = u32::from_le_bytes(
+                            img[rbase + i * 16 + 4..rbase + i * 16 + 8]
+                                .try_into()
+                                .unwrap(),
+                        );
+                        let aux = u64::from_le_bytes(
+                            img[rbase + i * 16 + 8..rbase + i * 16 + 16]
+                                .try_into()
+                                .unwrap(),
+                        );
+                        *trap_kinds.entry(code).or_default() += 1;
+                        if code == TRAP_UNSUP {
+                            eprintln!("  UNSUP aux=0x{aux:x} @rec{i}");
+                        }
+                    }
+                }
+                eprintln!(
+                    "cell: funcs={} records={} traps={} kinds={:?} ext={:?} img={}B",
+                    nfuncs,
+                    nrecords,
+                    traps,
+                    trap_kinds,
+                    ext_calls,
+                    img.len()
+                );
+            }
+            Err(e) => eprintln!("cell encode FAILED: {e}"),
+        }
+    }
+
+    /// M3a: the guest JIT lowers+runs call_indirect (table), br_table, clz,
+    /// ctz, popcnt, extend8_s, memory.fill and memory.copy. `_start` == 182.
+    #[test]
+    fn guest_jit_executes_m3_cell() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_m3()).expect("m3 cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            s.console.contains("WASM-JIT 00000000000000b6"),
+            "_start() == 182: {}",
+            s.console
+        );
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    /// M3d gate: the shipped ~204KB LDC/libwasm cell translates and runs
+    /// `_start` in the guest JIT — every `env.*` import lowers to a real
+    /// `Lw*`/`Domt*`/`Wasm*` routine (no `TRAP_EXT`), so `_start` builds the
+    /// `__dom` tree it then paints into `__scan_fb` via `DomtRaster`. This is
+    /// the full-cell execution gate: translation completes (252 funcs),
+    /// `_start` returns (the `WASM-JIT` result marker), the run is fault-free,
+    /// and the DOM the cell built produces real pixels — not the `DomtBoot`
+    /// demo fallback (`DomtBoot` is idempotent and skips once the cell has
+    /// appended a child under root, so the demo `0x1e3a5a` signature stays
+    /// absent).
+    #[test]
+    fn guest_jit_executes_shipped_cell() {
+        let wasm = g6b_asm::BIOS_UI_LIBWASM;
+        if !wasm.starts_with(b"\0asm\x01") {
+            return; // cell not built on this host
+        }
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":32,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"auto"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, wasm).expect("shipped cell installs");
+        // The cell's `libwasm_await_supported` lane is live, so it issues real
+        // `fetch("/bios/menu/<id>")`/`/bios/store` calls. Bake the same
+        // `{url→body}` table the ELF payload carries (`kget_pack`) so the
+        // guest `KernelGet` resolves each to the `items[]` row JSON.
+        m.kget = g6b_asm::kget::build(&[
+            ("/bios/menu/main".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/cpu".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/memory".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/uncore".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/devices".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/boot".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/settings".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/store".into(), "[]".into()),
+        ]).unwrap();
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            s.console.contains("WASM-JIT-F 00000000000000fc"),
+            "252 funcs translated: {}",
+            s.console
+        );
+        // _start returns → the WASM-JIT result marker; no translation/EXT trap.
+        assert!(
+            s.console.contains("WASM-JIT "),
+            "_start completed: {}",
+            s.console
+        );
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "no jit trap: {}",
+            s.console
+        );
+        assert!(!s.console.contains("TRAP-"), "no guest trap: {}", s.console);
+        assert_eq!(s.faults, 0, "fault-free run: {}", s.console);
+        // The cell built a real DOM → DomtRaster painted it into __scan_fb.
+        // `demo` is the DomtBoot fallback signature — 0 proves the cell (not
+        // the demo) populated the tree.
+        let live = s
+            .scan_fb
+            .chunks_exact(4)
+            .filter(|p| **p != [0, 0, 0, 0])
+            .count();
+        let demo = s
+            .scan_fb
+            .chunks_exact(4)
+            .filter(|p| **p == 0x001e_3a5au32.to_le_bytes())
+            .count();
+        assert!(live > 0, "cell DOM painted into __scan_fb: {}", s.console);
+        assert_eq!(demo, 0, "DomtBoot demo stayed unseeded: {}", s.console);
+        eprintln!(
+            "domt: next={} live={} listen={} ids={}",
+            s.domt_next, s.domt_live, s.domt_listen, s.domt_ids
+        );
+        // The cell built more than the lone root: getRoot→createElement→
+        // appendChild→setProperty all ran through the handle-ABI bridge.
+        assert!(s.domt_next > 1, "cell allocated DOM nodes: {}", s.domt_next);
+        assert_eq!(
+            s.domt_live, s.domt_next,
+            "every allocated node is live (none tombstoned/free)"
+        );
+        // `setProperty(el,"id",..)` populated `__dom_id` (used by
+        // `add_event_listener` target resolution).
+        assert!(s.domt_ids > 0, "cell set element ids: {}", s.domt_ids);
+        // `add_event_listener("tab-*"/"refresh","click")` resolved each id to a
+        // node and set its `N_LEV` mask — the source wires exactly 8 listeners
+        // (7 nav tabs + refresh) during the initial render.
+        assert_eq!(
+            s.domt_listen, 8,
+            "add_event_listener id→node registered the 8 wired listeners"
+        );
+        for (i, tag, par, x, y, w, h, tlen, text) in &s.domt_nodes {
+            eprintln!(
+                "  node {i:3} tag={tag:3} par={par:3} rect=({x},{y},{w}x{h}) tlen={tlen} '{text}'"
+            );
+        }
+    }
+
+    // ---- Stage 3a/3b: JitCall re-entrant invoke ------------------------------
+    use g6b_asm::encode::{A0, A1, A2, A6, A7, RA, S0, S1, S2, SBI_PUTCHAR, T0, T2, X0};
+    use g6b_asm::jfmt::{AX_GET_STATE, AX_START_UNWIND};
+    use g6b_asm::{Addr, Op};
+
+    fn put_str_ops(s: &str) -> Vec<Op> {
+        s.bytes()
+            .flat_map(|b| {
+                [
+                    Op::Li {
+                        rd: A0,
+                        imm: i64::from(b),
+                    },
+                    Op::Li {
+                        rd: A7,
+                        imm: SBI_PUTCHAR,
+                    },
+                    Op::Ecall,
+                ]
+            })
+            .collect()
+    }
+
+    /// Print `T0` as 16 hex digits via the shared `hexdig` table.
+    fn hex_t0_ops(lbl: &str) -> Vec<Op> {
+        vec![
+            Op::Li { rd: A2, imm: 16 },
+            Op::Label(lbl.into()),
+            Op::Srli {
+                rd: T2,
+                rs: T0,
+                shamt: 60,
+            },
+            Op::Andi {
+                rd: T2,
+                rs: T2,
+                imm: 0xf,
+            },
+            Op::Slli {
+                rd: T0,
+                rs: T0,
+                shamt: 4,
+            },
+            Op::La {
+                rd: A6,
+                addr: Addr::Label("hexdig".into()),
+            },
+            Op::Add {
+                rd: A6,
+                rs1: A6,
+                rs2: T2,
+            },
+            Op::Lbu {
+                rd: A0,
+                rs: A6,
+                off: 0,
+            },
+            Op::Li {
+                rd: A7,
+                imm: SBI_PUTCHAR,
+            },
+            Op::Ecall,
+            Op::Addi {
+                rd: A2,
+                rs: A2,
+                imm: -1,
+            },
+            Op::Bne {
+                rs1: A2,
+                rs2: X0,
+                to: lbl.into(),
+            },
+        ]
+    }
+
+    /// `JitCall` re-enters a translated cell function: after `_start`, the probe
+    /// resolves `asyncify_get_state`'s funcidx through `JitAx`, invokes it (0 →
+    /// NORMAL), then `asyncify_start_unwind` + a second `get_state` round-trip
+    /// proves args pass and the asyncify global mutates (1 → UNWINDING). This is
+    /// the substrate input listeners and the await rewind are built on.
+    #[test]
+    fn guest_jit_jitcall_reenters_cell_fn() {
+        let wasm = g6b_asm::BIOS_UI_LIBWASM;
+        if !wasm.starts_with(b"\0asm\x01") {
+            return; // cell not built on this host
+        }
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":32,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"auto"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, wasm).expect("shipped cell installs");
+        m.kget = g6b_asm::kget::build(&[
+            ("/bios/menu/main".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/cpu".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/memory".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/uncore".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/devices".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/boot".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/settings".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/store".into(), "[]".into()),
+        ]).unwrap();
+
+        // Probe spliced after `jal JitRun`: JitAx + JitCall round-trip.
+        let mut probe = vec![
+            // s0 = JitAx(AX_GET_STATE)
+            Op::Li {
+                rd: A0,
+                imm: i64::from(AX_GET_STATE),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "JitAx".into(),
+            },
+            Op::Addi {
+                rd: S0,
+                rs: A0,
+                imm: 0,
+            },
+            Op::Addi {
+                rd: T0,
+                rs: S0,
+                imm: 0,
+            },
+        ];
+        probe.extend(put_str_ops("AXS"));
+        probe.extend(hex_t0_ops("jc_hex0"));
+        probe.extend([
+            // s1 = JitCall(s0, 0)  → asyncify_get_state() == 0
+            Op::Addi {
+                rd: A0,
+                rs: S0,
+                imm: 0,
+            },
+            Op::Addi {
+                rd: A1,
+                rs: X0,
+                imm: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "JitCall".into(),
+            },
+            Op::Addi {
+                rd: S1,
+                rs: A0,
+                imm: 0,
+            },
+            Op::Addi {
+                rd: T0,
+                rs: S1,
+                imm: 0,
+            },
+        ]);
+        probe.extend(put_str_ops(" GS"));
+        probe.extend(hex_t0_ops("jc_hex1"));
+        probe.extend([
+            // s2 = JitAx(AX_START_UNWIND); JitCall(s2, 1, scratch)
+            Op::Li {
+                rd: A0,
+                imm: i64::from(AX_START_UNWIND),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "JitAx".into(),
+            },
+            Op::Addi {
+                rd: S2,
+                rs: A0,
+                imm: 0,
+            },
+            Op::Addi {
+                rd: T0,
+                rs: S2,
+                imm: 0,
+            },
+        ]);
+        probe.extend(put_str_ops(" UW"));
+        probe.extend(hex_t0_ops("jc_hex2"));
+        probe.extend([
+            Op::Addi {
+                rd: A0,
+                rs: S2,
+                imm: 0,
+            },
+            Op::Addi {
+                rd: A1,
+                rs: X0,
+                imm: 1,
+            },
+            Op::Li {
+                rd: A2,
+                imm: 0x10ff00, // asyncify data buf — scratch in the free heap
+            },
+            Op::Jal {
+                rd: RA,
+                to: "JitCall".into(),
+            },
+            // re-read state: JitCall(s0, 0) == UNWINDING(1)
+            Op::Addi {
+                rd: A0,
+                rs: S0,
+                imm: 0,
+            },
+            Op::Addi {
+                rd: A1,
+                rs: X0,
+                imm: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "JitCall".into(),
+            },
+            Op::Addi {
+                rd: S1,
+                rs: A0,
+                imm: 0,
+            },
+            Op::Addi {
+                rd: T0,
+                rs: S1,
+                imm: 0,
+            },
+        ]);
+        probe.extend(put_str_ops(" RS"));
+        probe.extend(hex_t0_ops("jc_hex3"));
+        probe.extend(put_str_ops("\n"));
+
+        // splice the probe immediately after `jal JitRun`
+        let mut placed = false;
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                n.ops.splice(pos + 1..pos + 1, probe);
+                placed = true;
+                break;
+            }
+        }
+        assert!(placed, "no JitRun call site to splice after");
+
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        eprintln!("{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        // asyncify_get_state funcidx resolved (251), then 0 → NORMAL, then the
+        // start_unwind+get_state round-trip → 1 → UNWINDING.
+        assert!(s.console.contains("AXS00000000000000fb"), "{}", s.console);
+        assert!(s.console.contains("GS0000000000000000"), "{}", s.console);
+        assert!(s.console.contains("UW00000000000000f7"), "{}", s.console);
+        assert!(s.console.contains("RS0000000000000001"), "{}", s.console);
+    }
+}
+

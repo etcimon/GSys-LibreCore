@@ -43,7 +43,7 @@ pub fn build_with_volumes(
     if spec.isa.xlen == 32 && entry > u32::MAX as u64 {
         return Err("rv32 load address does not fit in 32 bits".into());
     }
-    let text = payload_text_with(spec, volumes);
+    let text = payload_text_with(spec, Some(volumes.unwrap_or_default()));
     let (code, nharts, gr_bytes) = assemble(spec, entry, &text)?;
     match spec.isa.xlen {
         32 => pack_elf(false, entry as u32 as u64, &code, nharts, gr_bytes),
@@ -84,6 +84,31 @@ fn payload_module(spec: &BoardSpec, msg: &[u8]) -> Result<g6b_asm::Module, Strin
     let mut module = g6b_asm::analyze::payload(spec, msg);
     if spec.kernel.wasm.enable && spec.kernel.wasm.jit {
         g6b_wasm::install_start(&mut module, spec.isa.xlen)?;
+    }
+    if spec.kernel.wasm.guest_jit {
+        // Host-side predecode → `__jit_in`; the guest `JitRun` translates and
+        // executes it. Bounds errors are fatal here, never silently dropped.
+        g6b_wasm::install_guest(&mut module, &g6b_wasm::jcode_cell_bytes(spec))?;
+        // The host-rendered `BrowserSession` scene → `__web_pk`; `WebBlit`
+        // decodes it into the latched scanout. `None` leaves `__web_pk`
+        // aliased onto `boot_log` (non-magic) so `WebBlit` falls through to
+        // the text-face paths.
+        if let Some(pk) = g6b_kernel::web_pk_pack(spec)? {
+            module.web_pk = pk;
+        }
+        // The same scene as a display list → `__web_dl`; `WebPaint` replays
+        // it (`DlPaint`) and keeps `WebBlit` as the pixel fallback when the
+        // list is absent. `None` aliases `__web_dl` onto `boot_log` — the
+        // non-magic word sends `DlPaint` to `a0=0`.
+        if let Some(dl) = g6b_kernel::dl_pack(spec)? {
+            module.web_dl = dl;
+        }
+        // The `{url → body}` fetch table → `__kget`; `KernelGet`/`LwFetch`
+        // resolve `env.fetch` against it. `None` aliases `__kget` onto
+        // `boot_log` (non-magic) so `KernelGet` resolves no entry.
+        if let Some(kg) = g6b_kernel::kget_pack(spec)? {
+            module.kget = kg;
+        }
     }
     if spec.kernel.store.pglite_embed {
         let dist = load_pglite_dist().ok_or_else(|| {
@@ -277,6 +302,45 @@ pub fn write_elf_with_volumes(
 mod tests {
     use super::*;
     use g6b_asm::STACK_BYTES;
+
+    #[test]
+    fn picking_bios_ui_replaces_the_picker_rows() {
+        let spec =
+            BoardSpec::from_json_str(include_str!("../../../fixtures/g6lc64-web-autoboot.json"))
+                .unwrap();
+        let text = payload_text_with(&spec, Some(g6b_kernel::DirVolumes::new()));
+        let module = payload_module(&spec, &text).unwrap();
+        let entry = load_addr(&spec).unwrap();
+        let smoke = g6b_asm::exec::run_module(&spec, &module, entry).unwrap();
+        eprintln!(
+            "halt={:?} steps={} faults={}\nconsole:\n{}",
+            smoke.halt, smoke.steps, smoke.faults, smoke.console
+        );
+        assert!(smoke.console.contains("AUTOBOOT-PICK bios-ui"));
+        let rows = last_frame_rows(&smoke.console);
+        assert!(!rows.is_empty());
+        assert!(
+            rows.iter()
+                .all(|row| !row.contains("AUTOBOOT") && !row.contains("Setup (this payload)")),
+            "{rows:?}"
+        );
+        assert_eq!(smoke.faults, 0);
+    }
+
+    #[test]
+    fn emitted_picker_only_offers_declared_media() {
+        let spec =
+            BoardSpec::from_json_str(include_str!("../../../fixtures/g6lc64-web-autoboot.json"))
+                .unwrap();
+        let elf = build(&spec).unwrap();
+        let text = String::from_utf8_lossy(&elf);
+        let entries: Vec<_> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("CLI-AB-ENTRY| "))
+            .map(|line| line.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(entries, ["payload", "bios-ui"]);
+    }
 
     #[test]
     fn rv64_elf_has_markers() {

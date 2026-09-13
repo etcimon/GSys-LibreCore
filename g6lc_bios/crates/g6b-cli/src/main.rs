@@ -174,7 +174,7 @@ fn main() -> ExitCode {
             Err(c) => c,
             Ok(spec) => {
                 let out = flag_value(&args, "--out").unwrap_or("out/setup32.ppm");
-                match g6b_kernel::ui_ppm32(&spec) {
+                match render_ui(&spec, &args) {
                     Ok(ppm) => {
                         if let Some(parent) = Path::new(out).parent() {
                             if !parent.as_os_str().is_empty() {
@@ -364,6 +364,53 @@ fn main() -> ExitCode {
 /// host, against an image or a raw disk. This is the same code path the BIOS uses,
 /// which is what makes it a useful check: if `g6b vfs ls` cannot read a volume,
 /// neither can the setup shell.
+fn render_ui(spec: &g6b_spec::BoardSpec, args: &[String]) -> Result<Vec<u8>, String> {
+    let dimension = |name, default| -> Result<u32, String> {
+        let value = match flag_value(args, name) {
+            Some(raw) => raw.parse().map_err(|_| format!("invalid {name}: {raw}"))?,
+            None => default,
+        };
+        if !(200..=4096).contains(&value) {
+            return Err(format!("{name} must be 200..4096"));
+        }
+        Ok(value)
+    };
+    let w = dimension("--width", spec.kernel.gr.w.max(320))?;
+    let h = dimension("--height", spec.kernel.gr.h.max(200))?;
+    let mut session = g6b_kernel::BrowserSession::new(spec)?;
+    for pair in args.windows(2) {
+        match pair[0].as_str() {
+            "--key" => {
+                if !session.handle_key(&pair[1])? {
+                    return Err(format!("unhandled UI key: {}", pair[1]));
+                }
+            }
+            "--click" | "--hover" => {
+                let frame = session.paint_css_at(w, h)?;
+                let hit = frame
+                    .hit_boxes
+                    .iter()
+                    .find(|hit| {
+                        hit.id.as_deref() == Some(pair[1].as_str()) && hit.w > 0 && hit.h > 0
+                    })
+                    .ok_or_else(|| format!("no visible UI target: {}", pair[1]))?;
+                session.dispatch_pointer(
+                    hit.x + hit.w / 2,
+                    hit.y + hit.h / 2,
+                    if pair[0] == "--click" {
+                        "click"
+                    } else {
+                        "mousemove"
+                    },
+                    "",
+                )?;
+            }
+            _ => {}
+        }
+    }
+    Ok(session.paint_css_at(w, h)?.canvas.to_ppm())
+}
+
 fn run_vfs(args: &[String]) -> ExitCode {
     let sub = args.first().map(String::as_str).unwrap_or("scan");
     // `emit-fs` writes a hand-laid fixture to a file so QEMU can attach it as

@@ -230,6 +230,8 @@ fn apply_barebone(spec: &mut BoardSpec) {
     spec.kernel.wasm = Wasm {
         enable: false,
         jit: false,
+        guest_jit: false,
+        jit_cell: String::new(),
     };
     spec.kernel.js = "off".into();
     spec.kernel.ui = "cli".into();
@@ -478,6 +480,8 @@ fn apply_desktop(spec: &mut BoardSpec) {
     spec.kernel.wasm = Wasm {
         enable: true,
         jit: true,
+        guest_jit: false,
+        jit_cell: String::new(),
     };
     spec.kernel.tls = Tls {
         enable: true,

@@ -4,24 +4,44 @@
       "ident": "App_svelte",
       "rel": "src/App.svelte",
       "tag": "main",
-      "langTs": true,
+      "langTs": false,
       "ops": [
-        {
-          "kind": "fetch",
-          "url": "/bios/menu"
-        },
         {
           "kind": "fetch",
           "url": "/bios/menu/main"
         },
         {
-          "kind": "register",
-          "path": "/bios/custom",
-          "method": "POST"
+          "kind": "fetch",
+          "url": "/bios/menu/cpu"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/memory"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/uncore"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/devices"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/boot"
+        },
+        {
+          "kind": "fetch",
+          "url": "/bios/menu/settings"
         },
         {
           "kind": "text",
           "id": "bios-ui",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "bios-header",
           "value": ""
         },
         {
@@ -31,8 +51,8 @@
         },
         {
           "kind": "text",
-          "id": "bios-mark",
-          "value": ""
+          "id": "bios-eyebrow",
+          "value": "SYSTEM SETUP"
         },
         {
           "kind": "text",
@@ -86,8 +106,23 @@
         },
         {
           "kind": "text",
+          "id": "bios-toolbar",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "refresh",
+          "value": "Refresh / F10"
+        },
+        {
+          "kind": "text",
+          "id": "row-navigation-hint",
+          "value": "Up/Down: field / Left/Right: tab"
+        },
+        {
+          "kind": "text",
           "id": "status",
-          "value": "UI-BOOT"
+          "value": "UI-BOOT: read-only setup"
         },
         {
           "kind": "text",
@@ -98,16 +133,6 @@
           "kind": "text",
           "id": "hw-nat-status",
           "value": ""
-        },
-        {
-          "kind": "text",
-          "id": "read-only-note",
-          "value": "Read-only BoardSpec setup. F10 refreshes values. Editing and flash are unavailable here."
-        },
-        {
-          "kind": "text",
-          "id": "refresh",
-          "value": "Refresh values"
         },
         {
           "kind": "text",
@@ -272,35 +297,6 @@
           "url": "/bios/store"
         },
         {
-          "kind": "pglite",
-          "method": "open",
-          "arg1": "memory://registry",
-          "arg2": "",
-          "awaited": false
-        },
-        {
-          "kind": "pglite",
-          "method": "waitReady",
-          "arg1": "",
-          "arg2": "",
-          "awaited": true
-        },
-        {
-          "kind": "pglite",
-          "method": "exec",
-          "arg1": "CREATE TABLE IF NOT EXISTS bios_ui (k TEXT PRIMARY KEY, v TEXT)",
-          "arg2": "",
-          "awaited": false
-        },
-        {
-          "kind": "pglite",
-          "method": "queryAsync",
-          "arg1": "SELECT k, v FROM bios_ui",
-          "arg2": "[]",
-          "awaited": true,
-          "bind": "rows"
-        },
-        {
           "kind": "text",
           "id": "store",
           "value": ""
@@ -308,13 +304,17 @@
         {
           "kind": "text",
           "id": "store-title",
-          "value": "Store"
+          "value": "Session storage"
+        },
+        {
+          "kind": "text",
+          "id": "store-note",
+          "value": "The kernel owns storage access. Inspect the registry without creating a database or changing its contents."
         },
         {
           "kind": "text",
           "id": "store-status",
-          "value": "",
-          "bind": "rows"
+          "value": ""
         },
         {
           "kind": "visible",

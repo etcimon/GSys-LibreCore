@@ -26,11 +26,6 @@ const _reg = ensureSvelteD();
 _reg.registerTs("Store_svelte", "fetchBios", fetchBios);
 _reg.registerTs("Store_svelte", "holycEval", holycEval);
 _reg.registerTs("Store_svelte", "registerEndpoint", registerEndpoint);
-export async function mount() {
+export function mount() {
   fetchBios("/bios/store");
-  const db = pglite("memory://registry");
-  await db.stat();
-  await db.exec("CREATE TABLE IF NOT EXISTS bios_ui (k TEXT PRIMARY KEY, v TEXT)");
-  const rows = await db.query("SELECT k, v FROM bios_ui", "[]");
-  document.getElementById("store-status").innerText = JSON.stringify(rows);
 }

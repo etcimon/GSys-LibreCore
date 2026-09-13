@@ -52,6 +52,8 @@ pub enum Action {
     /// SBI system reset (`reboot`) / shutdown.
     Reboot,
     Shutdown,
+    Disk,
+    List,
 }
 
 /// One entry of the guest dispatch table.
@@ -268,6 +270,24 @@ pub fn commands(pages: &[Page]) -> Vec<Command> {
             action: Action::Shutdown,
         },
     ];
+    out.extend([
+        Command {
+            name: "cd disk0".into(),
+            action: Action::Disk,
+        },
+        Command {
+            name: "disk0:".into(),
+            action: Action::Disk,
+        },
+        Command {
+            name: "ls".into(),
+            action: Action::List,
+        },
+        Command {
+            name: "dir".into(),
+            action: Action::List,
+        },
+    ]);
     for (i, p) in pages.iter().enumerate() {
         out.push(Command {
             name: p.name.clone(),
@@ -594,7 +614,7 @@ fn init_node(spec: &BoardSpec, l: &Layout, nrows: usize, auto: &AutoBootPage) ->
             off: CLI_PROMPT_LEN_OFF,
         },
         Op::Sw {
-            rs2: X0,
+            rs2: T1,
             rs1: T4,
             off: CLI_DIRTY_OFF,
         },
@@ -613,17 +633,72 @@ fn init_node(spec: &BoardSpec, l: &Layout, nrows: usize, auto: &AutoBootPage) ->
     // Claim the plane. `CliInit` is also the "back to setup" path, so Esc out of
     // the picker and an entry that returns both take the screen back from the
     // browser face.
+    ops.extend([Op::La {
+        rd: T4,
+        addr: Addr::UartLine,
+    }]);
+    // A web→CLI transition invalidates the packed scene's ownership latches:
+    // `WEB_STAMPED` so `WebBlit` re-blits if the browser face is picked again,
+    // and the `__ui_cap` WEB flag so `VioPaint` stops taking `vp_web` against
+    // a stale tile table and paints the container's frame instead. The clear
+    // only runs when the web face actually owned the plane — a cold `CliInit`
+    // at power-on (or an exec-model pre-filled `__ui_cap`, B91) must not
+    // disturb either latch.
     ops.extend([
-        Op::La {
-            rd: T4,
-            addr: Addr::UartLine,
+        Op::Lw {
+            rd: T1,
+            rs: T4,
+            off: crate::FACE_OWNER_OFF,
         },
+        Op::Li {
+            rd: T2,
+            imm: crate::FACE_WEB,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: T2,
+            to: "cinit_keep_pk".into(),
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T4,
+            off: crate::WEB_STAMPED_OFF,
+        },
+    ]);
+    if spec.wants_virtio_gpu() || spec.wants_disp_scan() {
+        ops.extend([
+            Op::La {
+                rd: T6,
+                addr: Addr::UiCap,
+            },
+            Op::Sw {
+                rs2: X0,
+                rs1: T6,
+                off: crate::vio::UI_CAP_OFF_FLAGS,
+            },
+        ]);
+    }
+    ops.extend([
+        Op::Label("cinit_keep_pk".into()),
         Op::Sw {
             rs2: X0,
             rs1: T4,
             off: crate::FACE_OWNER_OFF,
         },
     ]);
+    if spec.wants_virtio_gpu() || spec.wants_disp_scan() || spec.wants_pci_scan() {
+        ops.extend([
+            Op::La {
+                rd: T0,
+                addr: Addr::VioBss,
+            },
+            Op::Sw {
+                rs2: X0,
+                rs1: T0,
+                off: crate::vio::DISP_SEL_SURFACE,
+            },
+        ]);
+    }
     puts(&mut ops, &format!("ZEALCLI-PAINT {}\n", l.rows.len() + 1));
     if spec.kernel.cli.autoboot.enable && auto.live() {
         puts(&mut ops, "AUTO-ARM?\n");
@@ -1215,6 +1290,124 @@ fn enter_node(spec: &BoardSpec, pages: &[Page], l: &Layout) -> Node {
     for (i, c) in cmds.iter().enumerate() {
         ops.push(Op::Label(format!("cent_hit{i}")));
         match c.action {
+            Action::Disk | Action::List => {
+                if spec.wants_virtio_blk() && spec.kernel.cli.fs {
+                    ops.extend([
+                        Op::Jal {
+                            rd: RA,
+                            to: "BlkSig".into(),
+                        },
+                        Op::La {
+                            rd: T4,
+                            addr: Addr::VioBss,
+                        },
+                        Op::Li {
+                            rd: T0,
+                            imm: crate::vio::BLK_BASE,
+                        },
+                        Op::Add {
+                            rd: T4,
+                            rs1: T4,
+                            rs2: T0,
+                        },
+                        Op::Lw {
+                            rd: T1,
+                            rs: T4,
+                            off: crate::vio::BLK_SIG,
+                        },
+                        Op::Li { rd: T2, imm: 1 },
+                        Op::Bne {
+                            rs1: T1,
+                            rs2: T2,
+                            to: format!("cent_disk_bad{i}"),
+                        },
+                        Op::La {
+                            rd: T4,
+                            addr: Addr::UartLine,
+                        },
+                    ]);
+                    if c.action == Action::Disk {
+                        for (j, byte) in b"disk0:/>".iter().enumerate() {
+                            ops.extend([
+                                Op::Li {
+                                    rd: T1,
+                                    imm: i64::from(*byte),
+                                },
+                                Op::Sb {
+                                    rs2: T1,
+                                    rs1: T4,
+                                    off: CLI_LINE_OFF + j as i32,
+                                },
+                            ]);
+                        }
+                        ops.extend([
+                            Op::Li { rd: T1, imm: 8 },
+                            Op::Sw {
+                                rs2: T1,
+                                rs1: T4,
+                                off: CLI_PROMPT_LEN_OFF,
+                            },
+                            Op::Sw {
+                                rs2: T1,
+                                rs1: T4,
+                                off: CLI_LINE_LEN_OFF,
+                            },
+                            Op::Sw {
+                                rs2: T1,
+                                rs1: T4,
+                                off: crate::CLI_VOLUME_OFF,
+                            },
+                            Op::La {
+                                rd: T0,
+                                addr: Addr::UiDom,
+                            },
+                        ]);
+                        publish_prompt(xlen, 0, &mut ops);
+                        puts(&mut ops, "CLI-CWD disk0:/ (probed FAT32)\n");
+                    } else {
+                        ops.extend([
+                            Op::Lw {
+                                rd: T1,
+                                rs: T4,
+                                off: crate::CLI_VOLUME_OFF,
+                            },
+                            Op::Beq {
+                                rs1: T1,
+                                rs2: X0,
+                                to: format!("cent_disk_bad{i}"),
+                            },
+                            Op::La {
+                                rd: T0,
+                                addr: Addr::UiDom,
+                            },
+                        ]);
+                        for row in 0..16 {
+                            ops.push(Op::Sw {
+                                rs2: X0,
+                                rs1: T0,
+                                off: crate::dom::DOM_HDR + row * 32 + 24,
+                            });
+                        }
+                        publish_prompt(xlen, 16, &mut ops);
+                        ops.push(Op::Jal {
+                            rd: RA,
+                            to: "FatList".into(),
+                        });
+                    }
+                    ops.extend([
+                        Op::Jal {
+                            rd: X0,
+                            to: "cent_reset".into(),
+                        },
+                        Op::Label(format!("cent_disk_bad{i}")),
+                    ]);
+                }
+                puts(&mut ops, "CLI-FS unavailable: cd disk0 requires a probed FAT32 superfloppy; ls is bounded to its first root sector\n");
+                ops.push(Op::Jal {
+                    rd: X0,
+                    to: "cent_reset".into(),
+                });
+            }
             Action::Reboot | Action::Shutdown => {
                 let reset = if c.action == Action::Reboot { 1 } else { 0 };
                 puts(
@@ -1671,6 +1864,29 @@ fn auto_node(spec: &BoardSpec, l: &Layout, auto: &AutoBootPage) -> Node {
             rd: RA,
             to: "DomPaint".into(),
         },
+        // DomPaint only reached the 4bpp plane; the scanout commit is the
+        // tick's job and it runs only when CLI_DIRTY moved past CLI_PAINTED.
+        // Without this a moved cursor or a countdown digit never leaves
+        // `__scan_fb` — the DOM row said `> 2.` while the screen still showed 1.
+        Op::La {
+            rd: T1,
+            addr: Addr::UartLine,
+        },
+        Op::Lw {
+            rd: T2,
+            rs: T1,
+            off: CLI_DIRTY_OFF,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: 1,
+        },
+        Op::Sw {
+            rs2: T2,
+            rs1: T1,
+            off: CLI_DIRTY_OFF,
+        },
         ld_x(xlen, RA, SP, 8),
         Op::Addi {
             rd: SP,
@@ -1954,11 +2170,76 @@ fn auto_node(spec: &BoardSpec, l: &Layout, auto: &AutoBootPage) -> Node {
                     off: crate::FACE_OWNER_OFF,
                 },
             ]);
+            if spec.wants_virtio_gpu() || spec.wants_disp_scan() || spec.wants_pci_scan() {
+                ops.extend([
+                    Op::La {
+                        rd: T0,
+                        addr: Addr::VioBss,
+                    },
+                    Op::Li {
+                        rd: T1,
+                        imm: spec.default_surface().code() as i64,
+                    },
+                    Op::Sw {
+                        rs2: T1,
+                        rs1: T0,
+                        off: crate::vio::DISP_SEL_SURFACE,
+                    },
+                ]);
+            }
             puts(&mut ops, "AUTOBOOT-UI browser face owns the plane\n");
+            ops.extend([
+                Op::La {
+                    rd: T4,
+                    addr: Addr::UiDom,
+                },
+                Op::Sw {
+                    rs2: X0,
+                    rs1: T4,
+                    off: 0,
+                },
+            ]);
+            if spec.kernel.wasm.guest_jit {
+                // The packed scene is the browser face's canvas: `WebPaint`
+                // replays `__web_dl` (or the `__web_pk` pixels) and stamps
+                // `__ui_cap` (a0=1); `WasmUi`'s row-table paint is the
+                // no-pack fallback.
+                ops.push(Op::Jal {
+                    rd: RA,
+                    to: "WebPaint".into(),
+                });
+                ops.push(Op::Bne {
+                    rs1: A0,
+                    rs2: X0,
+                    to: "apick_nowasm".into(),
+                });
+            }
             ops.push(Op::Jal {
                 rd: RA,
                 to: "WasmUi".into(),
             });
+            if spec.kernel.wasm.guest_jit {
+                ops.push(Op::Label("apick_nowasm".into()));
+            }
+            if spec.kernel.wasm.guest_jit {
+                // The styled `__dom` tree was populated by the shipped cell at
+                // boot (JitRun) and may already have painted once — consuming
+                // its dirty watermark while the picker still owned the plane.
+                // Force the header dirty so the face-gated timer tick re-lays
+                // out and re-rasters it onto the surface the picker vacated.
+                ops.extend([
+                    Op::La {
+                        rd: T4,
+                        addr: Addr::DomT,
+                    },
+                    Op::Li { rd: T5, imm: 1 },
+                    Op::Sw {
+                        rs2: T5,
+                        rs1: T4,
+                        off: crate::domt::H_DIRTY,
+                    },
+                ]);
+            }
         } else if id == "payload" {
             ops.push(Op::Jal {
                 rd: RA,
@@ -2248,6 +2529,39 @@ pub fn sync_node(spec: &BoardSpec) -> Node {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_init_schedules_a_scanout_commit() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let auto = AutoBootPage::default();
+        let layout = layout(&[], &[], &auto);
+        let node = init_node(&spec, &layout, 0, &auto);
+        assert!(node.ops.iter().any(
+            |op| matches!(op, Op::Sw { rs2, off, .. } if *off == CLI_DIRTY_OFF && *rs2 != X0)
+        ));
+    }
+
+    #[test]
+    fn auto_draw_schedules_a_scanout_commit() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let auto = AutoBootPage {
+            headers: vec!["AUTOBOOT".into()],
+            entries: vec![
+                ("a".into(), "  1. A".into(), "> 1. A".into()),
+                ("b".into(), "  2. B".into(), "> 2. B".into()),
+            ],
+            footer: "pick one".into(),
+            ticks: 0,
+            ticks_per_sec: 0,
+        };
+        let layout = layout(&[], &[], &auto);
+        let node = auto_node(&spec, &layout, &auto);
+        // AutoDraw paints the plane but the commit is the tick's; without a
+        // dirty bump the moved cursor (or countdown digit) never leaves __scan_fb.
+        assert!(node.ops.iter().any(
+            |op| matches!(op, Op::Sw { rs2, off, .. } if *off == CLI_DIRTY_OFF && *rs2 != X0)
+        ));
+    }
 
     fn spec() -> BoardSpec {
         BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"barebone","isa":{"xlen":64}}"#)

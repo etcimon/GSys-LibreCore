@@ -12,6 +12,16 @@ is the queue, not the design.
 | Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
+## BIOS autoboot and Svelte UI (2026-09-11)
+
+Completed UI-and-boot pass: `g6lc_bios/AGENTS-todo.md` and
+`g6lc_bios/architecture/BROWSER-RUNTIME.md` carry the scope and verification.
+Undeclared modelled boot media, retained picker rows, static-fallback raster
+selection, and the JS/Rust menu-data ABI mismatch are fixed and regression-tested.
+Package check/regress and real-QEMU VGA-intent/virtio-gpu boot selection passed.
+UI/boot verification is separate; native QEMU browser integration remains open.
+No RTL/ISA/DTS change or silicon-validation claim is involved.
+
 ## AI policy codec compartment (2026-09-04)
 
 Priors: `architecture/ai-matrix/README.md` §10; implementation/test/coverage maps;

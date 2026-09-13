@@ -436,6 +436,18 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
     // the kernel AOT/WASM lanes consume.
     let shell = include_str!("../../../browser-ui/out/index.html");
     let mut html = shell.to_string();
+    let disabled_reads: Vec<_> = html
+        .match_indices(" data-fetch=\"")
+        .filter_map(|(start, prefix)| {
+            let value = start + prefix.len();
+            let end = value + html[value..].find('"')?;
+            let url = &html[value..end];
+            (!(js && spec.kernel.http.proxy_js && reads.contains(&url))).then_some((start, end + 1))
+        })
+        .collect();
+    for (start, end) in disabled_reads.into_iter().rev() {
+        html.replace_range(start..end, "");
+    }
 
     // <main> attributes: start menu, wasm/worker URLs, optional libwasm + FX.
     let mut main_open = format!(
@@ -523,18 +535,13 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
         for item in &menu.items {
             let id = escape_html(&item.id);
             rows.push_str(&format!(
-                "<tr data-item=\"{id}\" data-writable=\"{}\"><th scope=\"row\" id=\"label-{}-{id}\">{}</th><td id=\"row-{}-{id}\">{}</td><td id=\"access-{}-{id}\">{}</td></tr>\n",
+                "<tr id=\"field-{}-{id}\" class=\"bios-field\" data-field=\"{id}\" data-item=\"{id}\" data-writable=\"{}\" tabindex=\"-1\"><td id=\"label-{}-{id}\">{}</td><td id=\"row-{}-{id}\">{}</td></tr>\n",
+                menu.id,
                 item.writable,
                 menu.id,
                 escape_html(&item.label),
                 menu.id,
-                escape_html(&item.value),
-                menu.id,
-                if item.writable {
-                    "Writable in spec; editing unavailable"
-                } else {
-                    "Read-only"
-                }
+                escape_html(&item.value)
             ));
         }
         html = html.replace(
@@ -958,7 +965,9 @@ mod tests {
         ] {
             assert!(html.contains(&format!("id=\"{id}\"")), "{id}");
         }
-        assert!(html.contains("Read-only"));
+        // Per-row access moved to `data-writable`; the session-level claim is
+        // the `#status` "read-only setup" notice.
+        assert!(html.contains("read-only"));
         assert!(!html.contains("onclick="));
     }
 

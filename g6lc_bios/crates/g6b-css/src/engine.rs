@@ -236,6 +236,40 @@ impl Engine {
         self.last.as_ref()
     }
 
+    /// Forced paint with the `Canvas32` display-list recorder armed — the
+    /// `__web_dl` pack lane. Same dirty bookkeeping as a forced
+    /// [`Self::paint_nodes`] so the skip-if-clean cache stays honest.
+    pub fn paint_nodes_dl(
+        &mut self,
+        nodes: &[&Node],
+    ) -> Result<(PaintOutput, Vec<g6b_gr::canvas32::DlOp>), String> {
+        let flags = nodes
+            .iter()
+            .fold(DirtyFlag::NONE, |acc, n| acc.union(n.dirty_union()));
+        let (rendered, ops) = render32::paint_nodes_dl(
+            &self.sheet,
+            nodes,
+            self.w,
+            self.h,
+            &self.assets,
+            &self.fonts,
+        )?;
+        let dirty = if let Some(ref last) = self.last {
+            DirtyRegion::from_diff(&last.canvas, &rendered.canvas)
+        } else {
+            DirtyRegion::full(self.w, self.h)
+        };
+        let out = PaintOutput {
+            canvas: rendered.canvas,
+            hit_boxes: rendered.hit_boxes,
+            dirty,
+            skipped: false,
+            flags,
+        };
+        self.last = Some(out.clone());
+        Ok((out, ops))
+    }
+
     /// Tiles covering the last dirty bbox, then mark the region presented
     /// so a second present without a new raster is skip-if-clean.
     pub fn consume_tiles(&mut self) -> Vec<DirtyRegion> {

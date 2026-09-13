@@ -276,14 +276,27 @@ executor and compare the interpreter, including overflow and select results.
 Nested branch/unreachable validation cases were additionally cross-checked
 against native WebAssembly, including rejected cases and valid variants.
 
-**What remains open:** guest runtime compilation/dispatch, executable-memory
-permissions and installation, instruction-cache synchronization, host-import
-trampolines, full guest DOM/UI execution, and broader WASM proposals. The
-ELF's existing bring-up `WasmJit` leaf is not replaced by an on-guest general
-compiler in this pass. `WASM-INTERPRETER _start` identifies host UI execution;
-`WASM-JIT-RV numeric-leaves; UI host interpreter` does not claim the UI was
-natively compiled. Native browser tests use the browser engine, with bounded
-imports but without the Rust fuel mechanism.
+**What is landed (B111–B112, exec-model):** `kernel.wasm.guest_jit` compiles a
+JIT written in RISC-V into the payload — `g6b-asm::jitr` (`Purpose::WasmJit`)
+translates a bounded WASM subset into `__jit_code`, `fence.i`s it (the i-cache
+sync) and `jalr`s the entry. Integer-complete coverage plus `f32`/`f64` run;
+the libwasm `env.*` imports lower through a fixed `jit_ext_tab` onto the
+`__dom`/`__dom_str`/`__dom_id` arena (`domt.rs`), and the shipped ~204 KB cell
+executes `_start` end-to-end, builds a 56-node `__dom` and paints it into
+`__scan_fb`. The import trampolines (`jit_ext_tab` → `Lw*`/`Domt*`/`Wasm*`)
+and the host-import ABI bridge are therefore *landed*, not open.
+
+**What remains open:** dispatching a *registered* listener back into the cell
+(`add_event_listener` stores `N_LEV`, but `listener=0` is the BIOS protocol and
+no wasm-funcidx re-entry exists yet), asyncify suspension in the guest lane
+(`libwasm_await_supported` returns 0 — fail-closed), real executable-memory
+permissions/W^X on the `__jit_code` arena, the full CSS/goosie layout+raster
+(the guest paints through the bounded `DomtRaster` block-flow), broader WASM
+proposals, and **QEMU evidence** — every claim above is exec-model verified,
+not a QEMU screendump. `WASM-INTERPRETER _start` identifies host UI execution;
+`WASM-JIT` identifies guest-JIT completion, and neither claims the
+native-browser engine ran in-guest. Native browser tests use the browser
+engine, with bounded imports but without the Rust fuel mechanism.
 
 ## B53 prerequisite increment: LDC, continuations and display
 
