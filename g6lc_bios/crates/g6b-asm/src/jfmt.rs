@@ -103,8 +103,23 @@ pub const R_FPCMP: u32 = 37;
 /// handler derives direction from funct7: 0x60/0x61 fp→int, 0x68/0x69 int→fp,
 /// 0x20/0x21 fp→fp (demote/promote). rs2sel picks int width/signedness.
 pub const R_FPCVT: u32 = 38;
+/// Cross-function `throw`/`rethrow` — an exception escaping the function. `b` =
+/// the exception tag (`u64::MAX` for `rethrow`, which keeps the in-flight tag
+/// in `OFF_EXCTAG`). The generated code sets `OFF_EXC`, folds the callee frame
+/// back to the caller's pre-`call` vsp (`s10 = s11`), and returns into the
+/// caller's `R_EXCCHK` — which routes to a `catch` or propagates the unwind.
+pub const R_THROW: u32 = 39;
+/// Post-`call`/`call_indirect` exception check — `a` = the enclosing `catch`
+/// handler record (`u32::MAX` = propagate: unwind this frame to its caller).
+/// Emitted after every direct/indirect call so a callee's `R_THROW` has a
+/// landing pad on return.
+pub const R_EXCCHK: u32 = 40;
+/// `catch` handler entry — clears `OFF_EXC` so nested calls in the handler do
+/// not immediately re-fire. All throws (local `R_JMP` and cross-function
+/// `R_EXCCHK`) land here first, then fall through into the catch body.
+pub const R_EXCCLR: u32 = 41;
 /// One past the last record op — the guest dispatcher range-checks against it.
-pub const R_OP_COUNT: u32 = 39;
+pub const R_OP_COUNT: u32 = 42;
 
 // I32ALU/I64ALU subops — the guest indexes a literal pool of machine words.
 pub const ALU_ADD: u32 = 0;
@@ -143,6 +158,9 @@ pub const TRAP_FUEL: u32 = 7;
 pub const TRAP_EXT: u32 = 8; // unknown import trampoline id
 pub const TRAP_STK: u32 = 9; // value-stack overflow
 pub const TRAP_OVF: u32 = 10; // signed div INT_MIN / -1
+/// An uncaught wasm exception unwound all the way to the `JitRun`/`JitCall`
+/// continuation — `OFF_EXC` still set on entry return (aux = `OFF_EXCTAG`).
+pub const TRAP_EXC: u32 = 11;
 
 // EXT ids — import trampoline table order in `jitr` (`jit_ext_tab`).
 pub const EXT_LOG: u32 = 1;

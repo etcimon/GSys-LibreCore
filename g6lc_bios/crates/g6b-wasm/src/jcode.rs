@@ -71,6 +71,27 @@ impl FnEnc {
     fn trap(&mut self, code: u32, orig: u64) {
         self.push(R_TRAP, code, orig);
     }
+    /// Emit a post-`call`/`call_indirect` exception check — the landing pad a
+    /// callee's `R_THROW` returns into. Inside a `try` *body* the record is
+    /// queued into that try's `throws` so the first `catch` backpatches `a` to
+    /// the handler; a call inside a `catch` (`seen_catch`) routes to the next
+    /// enclosing try (its own protection is already consumed), and a call with
+    /// no enclosing try keeps `a` = u32::MAX → propagate the unwind up a frame.
+    fn excchk(&mut self) {
+        let r = self.push(R_EXCCHK, u32::MAX, 0);
+        for c in self.ctrls.iter_mut().rev() {
+            if let Ctrl::Try {
+                throws, seen_catch, ..
+            } = c
+            {
+                if *seen_catch {
+                    continue;
+                }
+                throws.push(r);
+                break;
+            }
+        }
+    }
     /// Resolve `br depth` to a JMP record (forward targets patch at `end`).
     fn br(&mut self, depth: u32, cond: bool) {
         let op = if cond { R_JNZ } else { R_JMP };
@@ -215,6 +236,10 @@ fn lower_fn(
                     }
                 } else if fidx < nfuncs {
                     f.push(R_CALL, fidx, 0);
+                    // Post-call exception landing pad — a callee's R_THROW
+                    // returns here; the check routes to the enclosing catch or
+                    // propagates the unwind. Cheap (one record per call site).
+                    f.excchk();
                 } else {
                     f.trap(TRAP_BADFUNC, fidx as u64);
                 }
@@ -222,6 +247,7 @@ fn lower_fn(
             Instr::CallIndirect { typeidx, tableidx } => {
                 // `a` = expected typeidx for the sig check, `b` = table index.
                 f.push(R_CALLI, typeidx, u64::from(tableidx));
+                f.excchk();
             }
             Instr::Drop => {
                 f.push(R_DROP, 0, 0);
@@ -527,7 +553,11 @@ fn lower_fn(
                 // jumps to `end`; this handler begins at the next record and
                 // the pending `throw` refs land here (first catch only).
                 let r = f.push(R_JMP, u32::MAX, 0);
-                let handler_at = f.at();
+                // The handler head is an R_EXCCLR — a cross-function throw lands
+                // here (via a caller-side R_EXCCHK) with OFF_EXC set; a local
+                // throw arrives with it clear. Clearing keeps nested calls in
+                // the handler from re-firing on the consumed exception.
+                let handler_at = f.push(R_EXCCLR, 0, 0) as u32;
                 match f.ctrls.last_mut() {
                     Some(Ctrl::Try {
                         patch,
@@ -562,35 +592,40 @@ fn lower_fn(
                         f.trap(TRAP_XLATE, 0x08);
                     }
                 }
-                // forward the throws to frame `l` up; non-try → retrap.
+                // forward the throws to frame `l` up; a non-try / out-of-range
+                // target means the exception escapes the function — a pending
+                // `R_JMP` throw becomes `R_THROW` (its tag rides `b`), while an
+                // `R_EXCCHK` post-call check just stays `a`=u32::MAX (propagate).
                 let n = f.ctrls.len();
-                if (l as usize) < n {
+                let fwd_try = if (l as usize) < n {
                     let i = n - 1 - l as usize;
-                    match &mut f.ctrls[i] {
-                        Ctrl::Try { throws, .. } => {
-                            for h in pending {
-                                throws.push(h);
-                            }
-                        }
-                        _ => {
-                            for h in pending {
-                                f.recs[h].op = R_TRAP;
-                                f.recs[h].a = TRAP_UNSUP;
-                                f.recs[h].b = 0x600;
-                            }
+                    matches!(f.ctrls[i], Ctrl::Try { .. }).then_some(i)
+                } else {
+                    None
+                };
+                match fwd_try {
+                    Some(i) => {
+                        if let Ctrl::Try { throws, .. } = &mut f.ctrls[i] {
+                            throws.extend(pending);
                         }
                     }
-                } else {
-                    for h in pending {
-                        f.recs[h].op = R_TRAP;
-                        f.recs[h].a = TRAP_UNSUP;
-                        f.recs[h].b = 0x600;
+                    None => {
+                        for h in pending {
+                            if f.recs[h].op == R_EXCCHK {
+                                f.recs[h].a = u32::MAX; // propagate
+                            } else {
+                                f.recs[h].op = R_THROW; // escape, tag in `b`
+                                f.recs[h].a = u32::MAX;
+                            }
+                        }
                     }
                 }
             }
             Instr::Throw(t) => {
-                // forward jump to the innermost enclosing try's handler.
-                let r = f.push(R_JMP, u32::MAX, 0);
+                // forward jump to the innermost enclosing try's handler. The tag
+                // rides `b` up-front so a later escape (no try / delegate to a
+                // non-try) keeps it when the record becomes R_THROW.
+                let r = f.push(R_JMP, u32::MAX, u64::from(t));
                 let mut placed = false;
                 for c in f.ctrls.iter_mut().rev() {
                     if let Ctrl::Try { throws, .. } = c {
@@ -600,14 +635,17 @@ fn lower_fn(
                     }
                 }
                 if !placed {
-                    f.recs[r].op = R_TRAP;
-                    f.recs[r].a = TRAP_UNSUP;
-                    f.recs[r].b = 0x200 | u64::from(t);
+                    // escapes the function — R_THROW unwinds the frame and
+                    // returns into the caller's R_EXCCHK landing pad.
+                    f.recs[r].op = R_THROW;
+                    f.recs[r].a = u32::MAX;
                 }
             }
             Instr::Rethrow(l) => {
-                // rethrow the in-flight exception to enclosing `l`.
-                let r = f.push(R_JMP, u32::MAX, 0);
+                // rethrow the in-flight exception to enclosing `l`; with no such
+                // enclosing try it escapes — R_THROW with b=u64::MAX keeps the
+                // in-flight OFF_EXCTAG.
+                let r = f.push(R_JMP, u32::MAX, u64::MAX);
                 let n = f.ctrls.len();
                 let mut placed = false;
                 if (l as usize) < n {
@@ -618,9 +656,8 @@ fn lower_fn(
                     }
                 }
                 if !placed {
-                    f.recs[r].op = R_TRAP;
-                    f.recs[r].a = TRAP_UNSUP;
-                    f.recs[r].b = 0x300 | u64::from(l);
+                    f.recs[r].op = R_THROW;
+                    f.recs[r].a = u32::MAX;
                 }
             }
             Instr::TryTable { .. } | Instr::ThrowRef => f.trap(TRAP_UNSUP, 0x500),
@@ -1674,6 +1711,86 @@ pub fn cell_bytes(spec: &g6b_spec::BoardSpec) -> Vec<u8> {
     }
 }
 
+/// Cross-function-EH cell: a `throw`er callee whose exception escapes into the
+/// caller `_start`'s `try`/`catch_all` — the caught handler yields 777 (0x309).
+/// ```wat
+/// (tag $e (type $void))
+/// (func $thrower (type $void) throw $e)
+/// (func $_start (type $ret) (result i32)
+///   try (result i32)  call $thrower  i32.const 0  catch_all  i32.const 777  end)
+/// ```
+#[cfg(test)]
+pub fn test_module_eh() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
+    types.extend_from_slice(&[0x60, 0, 0]);        // t1 ()->()
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[2, 1, 0]); // f0=t1 thrower, f1=t0 _start
+    section(&mut out, 5, &[1, 0x00, 0x01]); // memory 1 page
+    section(&mut out, 13, &[1, 0x00, 1]);   // 1 tag, attr 0, typeidx 1 (()->())
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    let b0 = [0x00, 0x08, 0x00, 0x0b]; // thrower: throw tag0; end
+    let b1 = [
+        0x00,               // locals=0
+        0x06, 0x7f,         // try (result i32)
+        0x10, 0x00,         //   call 0 (thrower)
+        0x41, 0x00,         //   i32.const 0   (unreached)
+        0x19,               // catch_all
+        0x41, 0x89, 0x06,   //   i32.const 777
+        0x0b,               // end try
+        0x0b,               // end func
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// Uncaught variant: `_start` itself `throw`s tag0 with no enclosing try — the
+/// exception escapes the top frame and must surface as `WASM-JIT-TRAP` TRAP_EXC.
+#[cfg(test)]
+pub fn test_module_eh_uncaught() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 1);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[1, 0]); // f0=t0 _start
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 0]); // 1 tag, typeidx 0 (()->i32 — any sig ok)
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 0);
+    section(&mut out, 7, &exports);
+    // _start: throw tag0; i32.const 0 (unreached); end
+    let b0 = [0x00, 0x08, 0x00, 0x41, 0x00, 0x0b];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    section(&mut out, 10, &code);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1800,6 +1917,53 @@ mod tests {
             }
         }
         panic!("no WASM-JIT result: {}", s.console);
+    }
+
+    /// Cross-function unwind: a callee `throw` escapes its own frame and is
+    /// caught by the caller `_start`'s `try`/`catch_all`, yielding 777 — no trap.
+    #[test]
+    fn guest_jit_cross_func_throw() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh()).expect("eh cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "throw escaped uncaught / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(got, Some(0x309), "catch did not yield 777: {}", s.console);
+    }
+
+    /// Uncaught `throw` at the top frame → `WASM-JIT-TRAP` TRAP_EXC (11).
+    #[test]
+    fn guest_jit_uncaught_throw() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_uncaught()).expect("eh cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            s.console.contains("WASM-JIT-TRAP 000000000000000b"),
+            "uncaught throw → TRAP_EXC(11): {}",
+            s.console
+        );
+        assert!(!s.console.contains("TRAP-"), "machine fault: {}", s.console);
     }
 
     /// Host-side check: the M3 trailer carries sig[funcidx→typeidx] and the
@@ -2019,13 +2183,13 @@ mod tests {
     /// appended a child under root, so the demo `0x1e3a5a` signature stays
     /// absent).
     /// Stage-3 preflight gate: `op_coverage` walks the shipped cell's reachable
-    /// set and reports every blocking trap. The contract is *bounded*: the only
-    /// permitted gap class is the uncaught-`throw`-to-caller lane (`TRAP_UNSUP`
-    /// orig `0x200|tag`) — cross-function wasm-EH, a cold error path jitr does
-    /// not yet unwind. Any *new* gap — an unlowered opcode (`TRAP_UNSUP` with a
-    /// real op), an unmapped `env` import (`TRAP_EXT`), or an out-of-range call
-    /// (`TRAP_BADFUNC`) in reachable code — fails this test loudly, which is the
-    /// point of the gate before `await_supported` may stay 1.
+    /// set and reports every blocking trap. The contract is now *strict*: with
+    /// cross-function wasm-EH lowered (`R_THROW` unwinds to a caller `catch`,
+    /// `R_EXCCHK` after each call, `R_EXCCLR` at each handler head), every
+    /// reachable op lowers — including the cold `throw`-to-caller lane. Any gap
+    /// — an unlowered opcode (`TRAP_UNSUP` with a real op), an unmapped `env`
+    /// import (`TRAP_EXT`), or an out-of-range call (`TRAP_BADFUNC`) in
+    /// reachable code — fails this test loudly, which is the point of the gate.
     #[test]
     fn shipped_cell_op_coverage_report() {
         let wasm = g6b_asm::BIOS_UI_LIBWASM;
@@ -2041,32 +2205,13 @@ mod tests {
             "op_coverage found no reachable funcs ({} funcs)",
             cov.funcs
         );
-        // `clean()` is the strict signal — the shipped cell is *not* fully clean
-        // (one cold-throw gap), so the gate below is the bounded form of it.
+        // Strict: the whole reachable set lowers with no trapping gap. The
+        // cross-function `throw` lane is now implemented (`guest_jit_cross_
+        // func_throw` exercises callee-throw → caller-catch end to end), so
+        // `clean()` must hold — a regression here is a real reachable gap.
         assert!(
-            !cov.clean(),
-            "expected the known uncaught-throw gap to remain; if it is now \
-             lowered, tighten this test to assert `cov.clean()`"
-        );
-        // The whole reachable set lowers except the known uncaught-throw lane:
-        // every gap must be a `0x200|tag` TRAP_UNSUP (cross-function EH throw),
-        // never a bare opcode gap, unmapped import, or bad call.
-        for g in &cov.gaps {
-            assert!(
-                g.code == TRAP_UNSUP && (0x200..=0x2ff).contains(&g.orig),
-                "unexpected reachable coverage gap: {}",
-                g.describe()
-            );
-        }
-        // Bound the known deferral: today exactly one reachable func carries an
-        // uncaught throw — a `_start`-reachable func whose cold error branch
-        // `throw`s to its caller (cross-function wasm-EH jitr does not unwind).
-        // `guest_jit_executes_shipped_cell` proves that branch is not taken on
-        // the happy path. If a new reachable throw lands, this count grows and
-        // must be re-audited.
-        assert!(
-            cov.gaps.len() <= 1,
-            "more than the one known cold-throw gap appeared: {:?}",
+            cov.clean(),
+            "reachable coverage gap(s): {:?}",
             cov.gaps.iter().map(OpGap::describe).collect::<Vec<_>>()
         );
     }

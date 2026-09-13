@@ -463,15 +463,30 @@ details that differ and must not be conflated with the host table:
   lowers the whole module (shared `lower_one`, the same records `encode`
   packs) and walks the re-entrable set — `_start` + func exports +
   element-table funcs — reporting `TRAP_UNSUP`/`TRAP_EXT`/`TRAP_BADFUNC` as
-  `OpGap`s. The shipped cell: 252 funcs, 239 reachable, **one** blocking gap —
-  `fidx 94` is `_start`-reachable and carries an uncaught `throw` (a cold error
-  branch throwing to its caller; cross-function wasm-EH jitr does not unwind).
-  `shipped_cell_op_coverage_report` is the gate.
+  `OpGap`s. With cross-function wasm-EH now lowered (below), the shipped cell
+  is **fully clean**: 252 funcs, 239 reachable, **zero** blocking gaps.
+  `shipped_cell_op_coverage_report` asserts `cov.clean()`.
+- **Cross-function wasm-EH unwinds through the call boundary.** A `throw` that
+  escapes its function is no longer `TRAP_UNSUP`: `R_THROW` stores the tag to
+  `OFF_EXCTAG`, sets `OFF_EXC`, folds its frame (`s10=s11`; `ld ra,8(sp)`;
+  `ld s11,0(sp)`; `sp+=16`; `jalr ra`) and returns into the caller's post-call
+  `R_EXCCHK`. That check — emitted after every `call`/`call_indirect` — reads
+  `OFF_EXC` and, when set, either jumps to the statically-resolved innermost
+  enclosing `catch` head (an `R_EXCCLR` that clears `OFF_EXC`) or re-emits the
+  frame-fold tail to propagate the unwind up a frame (`a=u32::MAX`). A `throw`
+  that escapes the *entry* frame surfaces at `jit_after`/`jit_call_done` as
+  `jit_trap(TRAP_EXC)` (`WASM-JIT-TRAP 11 <tag>`), which consumes `OFF_EXC`
+  before resuming so the continuation can't re-fire. Gates:
+  `guest_jit_cross_func_throw` (callee `throw` → caller `catch_all` → result),
+  `guest_jit_uncaught_throw` (top-frame `throw` → `TRAP_EXC`). Bounded: the
+  first `catch`/`catch_all` wins regardless of tag (no tag dispatch — the
+  shipped cell's `catch_all` lane is unaffected).
 
 Exec-model evidence (`guest_jit_executes_shipped_cell`): 252 funcs translate,
 `_start` completes, `domt_next=56 live=56 ids=47 listen=8`, and `DomtRaster`
 paints the cell's own tree into `__scan_fb` with no `DomtBoot` fallback. QEMU
-screendump remains open; listener re-entry landed (B114–B116).
+verification landed in B118 (input→`H_WST`→`DlPaint`→scanout on real
+virtio-gpu); listener re-entry landed in B114–B116.
 
 ## 8. Completion plan
 

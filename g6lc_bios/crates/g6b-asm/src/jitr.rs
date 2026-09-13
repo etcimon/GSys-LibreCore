@@ -73,6 +73,12 @@ pub const OFF_RESUME: i32 = OFF_AXB + 8; // 3216
 /// a generated-call nest unwinds to the right frame instead of corrupting the
 /// caller's register reload.
 pub const OFF_SPSAVE: i32 = OFF_RESUME + 8; // 3224
+/// Cross-function wasm-EH pending flag: a callee's `R_THROW` sets it, a
+/// post-call `R_EXCCHK` reads it, a `catch` `R_EXCCLR` clears it. >12-bit
+/// offset → the generated code addresses it via `li`+`add` off `s9`.
+pub const OFF_EXC: i32 = OFF_SPSAVE + 8; // 3232
+/// In-flight exception tag (`throw t` stores `t`; `rethrow` reuses it).
+pub const OFF_EXCTAG: i32 = OFF_EXC + 8; // 3240
 pub const JIT_HDR_BYTES: u64 = 8192;
 
 const STATE_XLATE: i64 = 1;
@@ -404,6 +410,15 @@ fn em_pop2(ops: &mut Vec<Op>) {
     emw(ops, encode::ld(T0, S10, 0));
     emw(ops, encode::ld(T1, S10, 8));
 }
+/// Emit `li t3, off; add t3, s9, t3` — leaves `t3` = `__jit` field address for
+/// a >12-bit header offset (the 4-word `li` keeps the absolute offset
+/// encodable where `ld/sd`'s signed-12 immediate cannot). Caller then emits
+/// `ld/sd r, 0(t3)` (or `8(t3)` for the adjacent field).
+fn em_jitfield(ops: &mut Vec<Op>, off: i64) {
+    ops.push(li(T4, off));
+    em64(ops, T3, T4);
+    emw(ops, encode::add(T3, S9, T3));
+}
 /// Emit `addi t3, x0, imm` — small constant into generated T3.
 fn em_li_t3(ops: &mut Vec<Op>, imm: i64, tmp: u32) {
     ops.push(li(tmp, imm));
@@ -681,6 +696,86 @@ fn jit_h_call() -> Vec<Op> {
     emw(&mut ops, encode::add(T1, S9, T1));
     emw(&mut ops, encode::ld(T6, T1, 0));
     emw(&mut ops, encode::jalr(RA, T6, 0));
+    h_epilogue(&mut ops);
+    ops
+}
+
+// ---- cross-function wasm EH: THROW / EXCCHK / EXCCLR ------------------------
+//
+// A callee's `R_THROW` marks `OFF_EXC`, folds its frame back to the caller's
+// pre-`call` vsp (`s10 = s11`), pops `ra`/`s11`, and returns — landing in the
+// `R_EXCCHK` emitted right after the caller's `jalr`. That check reads
+// `OFF_EXC`: clear → normal return path; set → either jump to the enclosing
+// `catch` (`a` = handler record) or propagate the same unwind to the next
+// frame up (`a` = u32::MAX). `R_EXCCLR` at the `catch` head clears the flag.
+//
+// The frame-fold `s10 = s11` must precede the `ld s11` reload; both the THROW
+// unwind and the EXCCHK-propagate use the identical `ld ra,8(sp); ld s11,0(sp);
+// addi sp,16; jalr ra` tail that `jit_h_ret` ends with.
+
+/// THROW: `b` = tag (`u64::MAX` = `rethrow` — keep the in-flight `OFF_EXCTAG`).
+fn jit_h_throw() -> Vec<Op> {
+    let mut ops = vec![Op::Label("jit_h_throw".into())];
+    h_prologue(&mut ops);
+    // rec.b (a2) == u64::MAX → rethrow, keep the in-flight tag.
+    ops.extend([li(T0, -1), beq(A2, T0, "jit_thr_keeptag")]);
+    em64(&mut ops, T0, A2); // emit li t0, tag
+    em_jitfield(&mut ops, i64::from(OFF_EXCTAG));
+    emw(&mut ops, encode::sd(T0, T3, 0)); // *EXCTAG = tag
+    ops.push(Op::Label("jit_thr_keeptag".into()));
+    em_jitfield(&mut ops, i64::from(OFF_EXC));
+    emw(&mut ops, encode::addi(T0, X0, 1)); // li t0,1
+    emw(&mut ops, encode::sd(T0, T3, 0));   // *EXC = 1
+    emit_ret_frame(&mut ops); // mv s10,s11; ld ra,8sp; ld s11,0sp; sp+=16; ret
+    h_epilogue(&mut ops);
+    ops
+}
+
+/// EXCCHK: `a` = enclosing `catch` handler record, or u32::MAX to propagate.
+/// Emitted immediately after every R_CALL/R_CALLI so a callee's R_THROW has a
+/// landing pad. Generated shape: `ld t0,EXC(s9); beqz t0,+24; <handle>` — the
+//  handle block is exactly 5 words either way, so the skip offset is fixed.
+fn jit_h_excchk() -> Vec<Op> {
+    let mut ops = vec![Op::Label("jit_h_excchk".into())];
+    h_prologue(&mut ops);
+    // Park rec.a (the catch-handler record index) in t2 — `em_jitfield`'s
+    // jit_lia clobbers a1, which `slot_target` below needs.
+    ops.push(mv(T2, A1));
+    em_jitfield(&mut ops, i64::from(OFF_EXC)); // t3 = &EXC
+    emw(&mut ops, encode::ld(T0, T3, 0));      // t0 = EXC
+    emw(&mut ops, encode::beq(T0, X0, 24));    // EXC==0 → skip the 5-word handle
+    // translator-time branch on the saved rec.a (t2): u32::MAX → propagate.
+    ops.extend([li(T0, i64::from(u32::MAX)), beq(T2, T0, "jit_xc_prop")]);
+    // catch: emit `li t6, a4+a*SLOT; jalr x0,t6` — jump to the catch head.
+    ops.push(mv(A1, T2));
+    slot_target(&mut ops);
+    emw(&mut ops, encode::jalr(X0, T6, 0));
+    ops.push(j("jit_xc_done"));
+    // propagate: emit the frame-fold + ret tail (unwind this frame to caller).
+    ops.push(Op::Label("jit_xc_prop".into()));
+    emit_ret_frame(&mut ops);
+    ops.push(Op::Label("jit_xc_done".into()));
+    h_epilogue(&mut ops);
+    ops
+}
+
+/// Shared emit for the unwind tail (jit_h_throw / jit_h_excchk-propagate):
+/// `mv s10,s11; ld ra,8(sp); ld s11,0(sp); addi sp,16; jalr x0,ra` — 5 words.
+fn emit_ret_frame(ops: &mut Vec<Op>) {
+    emw(ops, encode::addi(S10, S11, 0)); // mv s10,s11  (caller vsp = frame base)
+    emw(ops, encode::ld(RA, SP, 8));
+    emw(ops, encode::ld(S11, SP, 0));
+    emw(ops, encode::addi(SP, SP, 16));
+    emw(ops, encode::jalr(X0, RA, 0));
+}
+
+/// EXCCLR: `catch` head — `*OFF_EXC = 0` so nested calls in the handler don't
+/// re-fire on the already-consumed exception.
+fn jit_h_excclr() -> Vec<Op> {
+    let mut ops = vec![Op::Label("jit_h_excclr".into())];
+    h_prologue(&mut ops);
+    em_jitfield(&mut ops, i64::from(OFF_EXC)); // t3 = &EXC
+    emw(&mut ops, encode::sd(X0, T3, 0));      // *EXC = 0
     h_epilogue(&mut ops);
     ops
 }
@@ -1642,6 +1737,11 @@ fn jit_run_node() -> Vec<Op> {
         sd(X0, S9, OFF_CODELEN),
         sd(X0, S9, OFF_ERR),
         sd(X0, S9, OFF_RESULT),
+        // cross-function EH state — start with no pending exception/tag.
+        li(T0, i64::from(OFF_EXC)),
+        add(T0, S9, T0),
+        sd(X0, T0, 0),
+        sd(X0, T0, 8), // OFF_EXCTAG = OFF_EXC + 8
         li(T0, i64::from(OFF_AXB)),
         add(T0, S9, T0),
         sd(X0, T0, 0),
@@ -1973,6 +2073,12 @@ fn jit_run_node() -> Vec<Op> {
             imm: 0,
         },
         Op::Label("jit_after".into()),
+        // An uncaught wasm exception escaping the entry unwinds here with
+        // OFF_EXC still set — report it (TRAP_EXC, aux = tag), not a silent ok.
+        li(T0, i64::from(OFF_EXC)),
+        add(T0, S9, T0),
+        ld(T0, T0, 0),
+        bne(T0, X0, "jit_exc_uncaught"),
         // state==ok → the entry call returned cleanly; state==trap → jit_done.
         ld(T0, S9, OFF_STATE),
         li(T1, STATE_OK),
@@ -2103,6 +2209,22 @@ fn jit_run_node() -> Vec<Op> {
         li(A0, i64::from(jc::TRAP_BADFUNC)),
         j("jit_trap"),
     ]);
+    ops.extend([
+        // uncaught wasm exception reaching the top-level continuation —
+        // jit_trap prints `WASM-JIT-TRAP 11 <tag>` and resumes to the parked
+        // OFF_RESUME continuation (STATE=TRAP → jit_done / jit_call_err).
+        Op::Label("jit_exc_uncaught".into()),
+        li(A0, i64::from(jc::TRAP_EXC)),
+        li(T0, i64::from(OFF_EXCTAG)),
+        add(T0, S9, T0),
+        ld(A1, T0, 0), // aux = the exception tag
+        // consume the flag — jit_trap resumes to the same continuation, whose
+        // OFF_EXC check would otherwise re-fire into an unbounded report loop.
+        li(T0, i64::from(OFF_EXC)),
+        add(T0, S9, T0),
+        sd(X0, T0, 0),
+        j("jit_trap"),
+    ]);
     ops
 }
 
@@ -2176,6 +2298,11 @@ fn jit_call_node() -> Vec<Op> {
         li(T0, STATE_OK),
         sd(T0, S9, OFF_STATE),
         sd(X0, S9, OFF_ERR),
+        // a fresh re-entry starts with no pending exception.
+        li(T0, i64::from(OFF_EXC)),
+        add(T0, S9, T0),
+        sd(X0, T0, 0),
+        sd(X0, T0, 8), // OFF_EXCTAG
         // trap continuation → jit_call_done; restore sp → this frame. Both are
         // large offsets, so the header slot is addressed via li+add.
         li(T0, i64::from(OFF_SPSAVE)),
@@ -2213,6 +2340,12 @@ fn jit_call_node() -> Vec<Op> {
             imm: 0,
         },
         Op::Label("jit_call_done".into()),
+        // An uncaught wasm exception escaping the callee unwinds here with
+        // OFF_EXC set — report it via jit_trap (TRAP_EXC → resumes here → err).
+        li(T0, i64::from(OFF_EXC)),
+        add(T0, S9, T0),
+        ld(T0, T0, 0),
+        bne(T0, X0, "jit_exc_uncaught"),
         // STATE != OK → a trap fired mid-call (jit_trap resumed here).
         ld(T0, S9, OFF_STATE),
         li(T1, STATE_OK),
@@ -2304,6 +2437,9 @@ pub fn nodes(with_ext: bool) -> Vec<Node> {
     ops.extend(jit_h_fpalu());
     ops.extend(jit_h_fpcmp());
     ops.extend(jit_h_fpcvt());
+    ops.extend(jit_h_throw());
+    ops.extend(jit_h_excchk());
+    ops.extend(jit_h_excclr());
     if with_ext {
         ops.extend(jit_h_ext());
     } else {
@@ -2460,6 +2596,9 @@ pub fn nodes(with_ext: bool) -> Vec<Node> {
             "jit_h_fpalu",
             "jit_h_fpcmp",
             "jit_h_fpcvt",
+            "jit_h_throw",
+            "jit_h_excchk",
+            "jit_h_excclr",
         ];
         ops.push(j("jit_disp_over"));
         ops.push(Op::Label("jit_disp".into()));
