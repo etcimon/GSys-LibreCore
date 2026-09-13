@@ -157,7 +157,12 @@ the engine, not the full CSS cascade — and it is exec-model verified, not yet
 a QEMU screendump.
 Cell-owned `#refresh` is the same `click` listener as the tabs (`g6b_listen`);
 tablet ABS+`BTN_LEFT` on that hit box refreshes JSON like F10.
-Click/hover/arrows/F10/JS await run on that session. The guest lane runs the
-cell's `_start` but does not yet re-enter it for listener dispatch
-(`listener=0` is the BIOS protocol); `start_ops` is the VGA face. Windowing
-is **B92** later ([`plan-iframe.md`](plan-iframe.md)).
+Click/hover/arrows/F10/JS await run on that session. **B114 adds the
+listener re-entry lane**: a nonzero `add_event_listener` cb is biased into
+`N_LISTEN >= 0x100` (a wasm funcidx), and `DomtKey` fills the `__ev_obj`
+record then `JitCall`s that funcidx between `JitRun`s — so a delegate
+`appendChild` provably mutates `__dom` off a real `INP_KQ` keydown
+(`guest_jit_listener_reenters_cell_on_key`). The *shipped* cell still keeps
+`listener=0` (the BIOS protocol, host runs fetch/select), and the
+`libwasm_get__*` event-property getter bridge is still open; `start_ops` is
+the VGA face. Windowing is **B92** later ([`plan-iframe.md`](plan-iframe.md)).

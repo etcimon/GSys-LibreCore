@@ -429,8 +429,12 @@ details that differ and must not be conflated with the host table:
   targetLen, eventPtr, eventLen, cb, capture)` — ptr-before-len.
 - **`add_event_listener` targets an id string,** not a handle: `LwFindId`
   resolves it over the `__dom_id` side-table that `setProperty(el,"id",v)`
-  populates. `listener=0` is the BIOS protocol (the host runs fetch/select), so
-  a registered listener latches `N_LEV` while `N_LISTEN` stays `0`.
+  populates. `N_LISTEN` is a three-band selector: `0` is the BIOS protocol
+  (`g6b_listen` — the host runs fetch/select), `LSN_DEMO`(`1`) is the builtin,
+  and a nonzero `cb` funcidx is biased to `0x100+idx` so `DomtKey` can route it
+  back into the cell through `JitCall(funcidx,[ev])` — filling `__ev_obj` first.
+  So `listener=0` still latches `N_LEV` with `N_LISTEN=0`, while a real delegate
+  latches `N_LISTEN >= 0x100` and re-enters the cell on dispatch.
 - **Linear-memory offsets, not absolutes.** `fetch`/`puts`/`add__string` get the
   `__wasm_mem` base added (`LwFetch`/`LwAddStr`); the legacy `jit.rs` path
   already resolves `Addr::WasmData` absolutes, so the shim lives only in the

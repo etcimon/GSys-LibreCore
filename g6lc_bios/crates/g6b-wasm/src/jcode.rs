@@ -1168,6 +1168,127 @@ pub fn test_module_m3() -> Vec<u8> {
     out
 }
 
+/// Listener re-entry cell. `_start` builds a `<button id="x">` under the root
+/// and registers `add_event_listener("x","keydown",$delegate)` — the real
+/// `Listener::Wasm` lane, where `cb` is a function index `LwAddLsn` biases into
+/// `N_LISTEN >= 0x100`. `$delegate(ev)` then `appendChild(getRoot(),
+/// createElement(button))`, so a keydown dispatched to the focused node
+/// re-enters the cell through `JitCall` and grows `__dom` (root+button → +1).
+///
+/// ```wat
+/// (import "env" "getRoot" (func $getRoot (result i32)))            ;; f0
+/// (import "env" "createElement" (func $createEl (param i32) (result i32))) ;; f1
+/// (import "env" "appendChild" (func $append (param i32 i32)))      ;; f2
+/// (import "env" "setProperty" (func $setProp (param i32 x5)))      ;; f3
+/// (import "env" "add_event_listener" (func $addLsn (param i32 x6)));; f4
+/// (memory 1)
+/// (func $delegate (param i32)                                     ;; f5
+///   call $getRoot i32.const 14 call $createEl call $append)
+/// (func $_start (local i32)                                       ;; f6
+///   i32.const 14 call $createEl local.set 0          ;; el = <button>
+///   local.get 0 i32.const 2 i32.const ID i32.const 1 i32.const X call $setProp ;; el.id="x"
+///   call $getRoot local.get 0 call $append          ;; root.appendChild(el)
+///   i32.const X i32.const 1 i32.const KD i32.const 7 i32.const 5 i32.const 0
+///   call $addLsn)                                  ;; add_event_listener("x","keydown",$delegate)
+/// ```
+#[cfg(test)]
+pub fn test_module_delegate() -> Vec<u8> {
+    // `__wasm_mem` string pool (data segment): "id"@0x10, "x"@0x12, "keydown"@0x13.
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const KD: u8 = 0x13;
+    const ORD: u8 = 14; // libwasm NodeType::button
+    const DELEGATE: u8 = 5; // $delegate func index (imports 0..=4 first)
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+
+    // types: t0 ()->i32 · t1 (i32)->i32 · t2 (i32,i32)->() · t3 (i32 x5)->()
+    //        t4 (i32 x6)->() · t5 (i32)->() · t6 ()->()
+    let mut types = Vec::new();
+    push_uleb(&mut types, 7);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    section(&mut out, 1, &types);
+
+    // imports: env.{getRoot,createElement,appendChild,setProperty,add_event_listener}
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 5);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00); // func
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+
+    // funcs: $delegate(t5) → idx5, $_start(t6) → idx6
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    // memory: min 1 page
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+
+    // exports: memory(0), _start(func 6)
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x06]);
+    section(&mut out, 7, &exports);
+
+    // $delegate(ev:i32): appendChild(getRoot(), createElement(ORD))
+    let mut bdel = vec![0x00]; // 0 local groups
+    bdel.extend_from_slice(&[
+        0x10, 0x00, // call $getRoot
+        0x41, ORD,  // i32.const ORD
+        0x10, 0x01, // call $createElement
+        0x10, 0x02, // call $appendChild
+        0x0b,
+    ]);
+    // $_start(): local0 = el handle
+    let mut bst = vec![0x01, 0x01, 0x7f]; // 1 local group, count1, i32
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, // el = createElement(ORD); local.set 0
+        0x20, 0x00,                       // local.get 0  (el handle)
+        0x41, 0x02, 0x41, ID,             //   namelen=2  nameptr=ID   ("id")
+        0x41, 0x01, 0x41, X,              //   vallen=1   valptr=X    ("x")
+        0x10, 0x03,                       // setProperty(el,"id","x") — len-first ABI
+        0x10, 0x00, 0x20, 0x00, 0x10, 0x02, // appendChild(getRoot(), el)
+        0x41, X, 0x41, 0x01,              // tptr=X  tlen=1   ("x")     ptr-first ABI
+        0x41, KD, 0x41, 0x07,             // typtr=KD tylen=7 ("keydown")
+        0x41, DELEGATE,                   // cb = $delegate funcidx 5
+        0x41, 0x00,                       // capture = 0
+        0x10, 0x04,                       // add_event_listener("x","keydown",5,0)
+        0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+
+    // data @0x10: "id" "x" "keydown" packed contiguously
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]); // active mem0, off=i32.const 0x10
+    let body = b"idxkeydown"; // id@0x10, x@0x12, keydown@0x13
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(body);
+    section(&mut out, 11, &data);
+    out
+}
+
 fn push_uleb(out: &mut Vec<u8>, v: u32) {
     let mut v = v;
     loop {
@@ -1912,6 +2033,77 @@ mod tests {
         assert!(s.console.contains("GS0000000000000000"), "{}", s.console);
         assert!(s.console.contains("UW00000000000000f7"), "{}", s.console);
         assert!(s.console.contains("RS0000000000000001"), "{}", s.console);
+    }
+
+    /// Listener re-entry on a real input event. The delegate cell's `_start`
+    /// registers `add_event_listener("x","keydown",$delegate)` — `cb` is a real
+    /// funcidx, which `LwAddLsn` biases into the reserved `N_LISTEN >= 0x100`
+    /// band. A queued `INP_KQ` keydown dispatched through `DomtKey` sees that
+    /// band on the focused node, populates `__ev_obj`, and re-enters the cell
+    /// via `JitCall($delegate, [ev])`. `$delegate` `appendChild`s a node, so a
+    /// key press provably grew `__dom` (the re-entry mutation).
+    #[test]
+    fn guest_jit_listener_reenters_cell_on_key() {
+        use g6b_asm::encode::{A0, RA, T0, T1, X0};
+        use g6b_asm::vio::{DOMT_SEEN_OFF, INP_KQ_HEAD, INP_KQ_OFF, VIO_KEY_ENTER};
+        use g6b_asm::{Addr, Op};
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_delegate()).expect("delegate cell installs");
+        // `_start` built root + `<button id="x">` (__dom idx 0,1) and put a
+        // keydown listener on idx1. Focus idx1 (the BIOS owns focus; a real
+        // pointer hit-test would set it) and queue a KEY_ENTER press, drained
+        // through `DomtKey` — spliced *after* `jal JitRun` so `_start` has run
+        // and the listener is registered. The later canned burst keys then
+        // re-enter the cell through the real `trap_inp` → `DomtKey` path too.
+        let mut placed = false;
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                let ops = vec![
+                    Op::Li { rd: A0, imm: 1 },
+                    Op::Jal { rd: RA, to: "DomtFocus".into() },
+                    Op::La { rd: T0, addr: Addr::VioBss },
+                    Op::Li { rd: T1, imm: (VIO_KEY_ENTER << 8) | 1 },
+                    Op::Sw { rs2: T1, rs1: T0, off: INP_KQ_OFF },
+                    Op::Li { rd: T1, imm: 1 },
+                    Op::Sw { rs2: T1, rs1: T0, off: INP_KQ_HEAD },
+                    Op::Sw { rs2: X0, rs1: T0, off: DOMT_SEEN_OFF },
+                    Op::Jal { rd: RA, to: "DomtKey".into() },
+                ];
+                n.ops.splice(pos + 1..pos + 1, ops);
+                placed = true;
+                break;
+            }
+        }
+        assert!(placed, "no JitRun call site to splice after");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        // `add_event_listener` ran: the button carries an id and an event mask.
+        assert!(s.domt_ids >= 1, "button id interned: {}", s.console);
+        assert!(s.domt_listen >= 1, "button keydown listener: {}", s.console);
+        // Re-entry: the delegate appended a node, so `__dom` grew past the
+        // initial root+button (the canned burst keys each re-enter too).
+        assert!(
+            s.domt_live >= 3,
+            "JitCall→delegate appended a node (live={}): {}",
+            s.domt_live,
+            s.console
+        );
     }
 }
 

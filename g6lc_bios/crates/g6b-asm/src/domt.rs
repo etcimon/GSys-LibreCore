@@ -120,9 +120,25 @@ pub const EV_CLICK: i64 = 2;
 
 /// `N_LISTEN` selector for the bounded builtin key handler the M2 demo wires:
 /// `DomtKey` reads the focused node's `N_LISTEN` and routes `LSN_DEMO` to
-/// `DomtDemo` (recolor). `0` = no listener; `>= 0x100` is reserved for a
-/// JIT'd-cell funcidx once `DomtDispatch` re-enters the translator (M3).
+/// `DomtDemo` (recolor). `0` = no listener / BIOS protocol; `>= 0x100` is a
+/// JIT'd-cell funcidx re-entered via `JitCall` (value = `0x100 + funcidx`, so
+/// `N_LISTEN - LSN_FUNC` recovers the `ftab` index).
 pub const LSN_DEMO: i64 = 1;
+/// `N_LISTEN` bias marking a wasm `add_event_listener` funcidx: `cb != 0`
+/// stores `0x100 + cb` so the reserved low band (`0` BIOS protocol, `LSN_DEMO`)
+/// can't alias a real function index. `DomtKey` subtracts it before `JitCall`.
+pub const LSN_FUNC: i64 = 0x100;
+
+// `__ev_obj` field offsets — the bounded event record `DomtKey` fills before
+// `JitCall`-ing a wasm listener; the delegate receives `__ev_obj`'s address as
+// the event handle (`add_event_listener` → `Listener::Wasm` → `fn(handle)`).
+pub const EVO_TYPE: i32 = 0; // event mask that fired (EV_KEYDOWN / EV_CLICK)
+pub const EVO_CODE: i32 = 4; // virtio-input EV_KEY code (keycode)
+pub const EVO_VALUE: i32 = 8; // press/release value
+pub const EVO_CX: i32 = 12; // clientX (0 for key events)
+pub const EVO_CY: i32 = 16; // clientY (0 for key events)
+pub const EVO_TARGET: i32 = 20; // target node handle (index+1)
+pub const EVOBJ_BYTES: u64 = 64;
 
 /// Text cell metrics: an 8×8 `__font` glyph at `DOMT_CELL`px pitch.
 pub const DOMT_CELL: i64 = 8;
@@ -774,11 +790,6 @@ fn lw_createel_node() -> Vec<Op> {
         Op::Label("LwCreateEl".into()),
         addi(SP, SP, -16),
         sd(RA, SP, 8),
-        sd(A0, SP, 0),
-        li(A0, i64::from(b'c')), // DIAG: count createElement
-        li(A7, SBI_PUTCHAR),
-        Op::Ecall,
-        ld(A0, SP, 0),
         addi(A0, A0, TAG_LW as i32), // tag = ordinal + TAG_LW (nonzero)
         jal("DomtCreate"),           // a0 = index | NONE
         addi(A0, A0, 1),             // handle = index+1 ; NONE→0 (null)
@@ -1201,7 +1212,14 @@ fn lw_addlsn_node() -> Vec<Op> {
         beq(A0, T0, "lwal_out"), // id not found → no-op
         mv(A1, S5),              // evmask
         mv(A2, S4),              // cb funcidx
-        jal("DomtListen"),       // DomtListen(node=a0, evmask, funcidx)
+        // cb != 0 is a wasm funcidx — bias into the reserved >=LSN_FUNC band
+        // so it can't alias the BIOS-protocol `0` / `LSN_DEMO` builtins;
+        // `DomtKey` subtracts `LSN_FUNC` to recover the `ftab` index.
+        beq(A2, X0, "lwal_lsn"),
+        li(T0, LSN_FUNC),
+        add(A2, A2, T0),
+        Op::Label("lwal_lsn".into()),
+        jal("DomtListen"),       // DomtListen(node=a0, evmask, funcidx|0x100+funcidx)
         Op::Label("lwal_out".into()),
         ld(RA, SP, 56),
         ld(S0, SP, 48),
@@ -1852,7 +1870,33 @@ fn domt_key_node() -> Vec<Op> {
         beq(T3, X0, "dtk_skip"),
         lw(T3, T6, N_LISTEN),
         li(T1, LSN_DEMO),
-        bne(T3, T1, "dtk_skip"),
+        beq(T3, T1, "dtk_demo"),
+        li(T1, LSN_FUNC),
+        bltu(T3, T1, "dtk_skip"), // 0 (BIOS) / reserved-low → no wasm re-entry
+        // N_LISTEN >= LSN_FUNC → a wasm `add_event_listener` funcidx (the
+        // `Listener::Wasm` lane). Fill `__ev_obj` with the key event, then
+        // `JitCall(funcidx)` re-enters the cell *between* JitRuns — the same
+        // re-entry the asyncify rewind uses, so it can't run mid-frame.
+        la(T5, Addr::EvObj),
+        li(T1, EV_KEYDOWN),
+        sw(T1, T5, EVO_TYPE),
+        sw(T0, T5, EVO_CODE),
+        sw(T4, T5, EVO_VALUE),
+        addi(T1, T2, 1), // target = node handle (index+1), not the raw index
+        sw(T1, T5, EVO_TARGET),
+        sw(X0, T5, EVO_CX),
+        sw(X0, T5, EVO_CY),
+        addi(A0, T3, -(LSN_FUNC as i32)), // funcidx = N_LISTEN - LSN_FUNC
+        li(A1, 1),                       // nargs=1 — Listener::Wasm calls fn(ev)
+        mv(A2, T5),                      // event handle = __ev_obj
+        jal("JitCall"),
+        // A listener mutation repaints: bump H_DIRTY so the tick re-runs the DOM.
+        la(T6, Addr::DomT),
+        lw(T1, T6, H_DIRTY),
+        addi(T1, T1, 1),
+        sw(T1, T6, H_DIRTY),
+        j("dtk_skip"),
+        Op::Label("dtk_demo".into()),
         // DomtDemo(node, code)
         mv(A0, T2),
         mv(A1, T0),
@@ -2666,7 +2710,8 @@ pub fn nodes(spec: &BoardSpec) -> Vec<Node> {
     }]
 }
 
-/// Ensure `__dom` + `__dom_str` + `__dom_id` BSS is sized on the module.
+/// Ensure `__dom` + `__dom_str` + `__dom_id` + `__ev_obj` BSS is sized on the
+/// module.
 pub fn ensure_bss(m: &mut Module) {
     if m.domt_bytes == 0 {
         m.domt_bytes = DOMT_BYTES;
@@ -2676,6 +2721,9 @@ pub fn ensure_bss(m: &mut Module) {
     }
     if m.domid_bytes == 0 {
         m.domid_bytes = DOMT_ID_BYTES;
+    }
+    if m.evobj_bytes == 0 {
+        m.evobj_bytes = EVOBJ_BYTES;
     }
 }
 

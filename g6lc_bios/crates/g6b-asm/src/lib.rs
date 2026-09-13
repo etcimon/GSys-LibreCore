@@ -239,6 +239,11 @@ pub enum Addr {
     /// `u8`-length + up to 28 inline bytes per node, so `add_event_listener`
     /// can resolve its string target to a node without a second string pool.
     DomId,
+    /// Bounded guest event record (`__ev_obj`) — the last BSS region (after
+    /// `__virgl_out`). `DomtKey` fills it (`type`/`code`/`value`/`clientX`/
+    /// `clientY`/`target`) before `JitCall` re-enters a `N_LISTEN >= 0x100`
+    /// wasm listener, passing its address as the event handle.
+    EvObj,
     /// virgl execbuffer (`__virgl_cmd`) in `.rodata` after `__jit_in` — the
     /// static virgl command stream `VioVirgl` hands to `SUBMIT_3D` (OUT desc),
     /// produced host-side by `crate::virgl::execbuf` (M4).
@@ -736,6 +741,11 @@ pub struct Module {
     pub doms_bytes: u64,
     /// `__dom_id` BSS bytes (per-node element-id table).
     pub domid_bytes: u64,
+    /// `__ev_obj` BSS bytes — the bounded event record `DomtKey` fills before
+    /// `JitCall` re-enters a `N_LISTEN >= 0x100` wasm listener. The delegate
+    /// receives its address as the event handle; field layout is `domt::EV_*`.
+    /// 0 when no guest-DOM/JIT lane.
+    pub evobj_bytes: u64,
     /// `__virgl_out` BSS bytes — the guest-RAM readback target for
     /// `TRANSFER_FROM_HOST_3D` under `proxy.gl` (the offscreen `RES_RT`
     /// render pulled back into guest memory). 0 when no virgl lane.
@@ -934,6 +944,7 @@ impl Module {
             .saturating_add(self.doms_bytes)
             .saturating_add(self.domid_bytes)
             .saturating_add(self.virgl_out_bytes)
+            .saturating_add(self.evobj_bytes)
     }
 
     /// GNU as text. Comments include purpose and state home.
@@ -1174,6 +1185,24 @@ impl Module {
                 "__virgl_out:\n.space {:#x}\n",
                 self.virgl_out_bytes
             ));
+        }
+        if self.evobj_bytes > 0 {
+            if !self.nodes.iter().any(|n| n.purpose == Purpose::Stack)
+                && self.line_bytes == 0
+                && self.ui_bytes == 0
+                && self.dom_bytes == 0
+                && self.cap_bytes == 0
+                && self.vio_bytes == 0
+                && self.vio_fb_bytes == 0
+                && jit_bss == 0
+                && self.domt_bytes == 0
+                && self.doms_bytes == 0
+                && self.domid_bytes == 0
+                && self.virgl_out_bytes == 0
+            {
+                s.push_str("\n.section .bss\n");
+            }
+            s.push_str(&format!("__ev_obj:\n.space {:#x}\n", self.evobj_bytes));
         }
         s
     }
@@ -1535,6 +1564,22 @@ fn resolve_addr(
             .wrapping_add(m.domt_bytes)
             .wrapping_add(m.doms_bytes)
             .wrapping_add(m.domid_bytes),
+        Addr::EvObj => stacks
+            .wrapping_add(m.gr_bytes)
+            .wrapping_add(m.line_bytes)
+            .wrapping_add(m.ui_bytes)
+            .wrapping_add(m.dom_bytes)
+            .wrapping_add(m.cap_bytes)
+            .wrapping_add(m.vio_bytes)
+            .wrapping_add(m.vio_fb_bytes)
+            .wrapping_add(m.jit_bytes)
+            .wrapping_add(m.jit_stk_bytes)
+            .wrapping_add(m.jit_code_bytes)
+            .wrapping_add(m.wasm_mem_bytes)
+            .wrapping_add(m.domt_bytes)
+            .wrapping_add(m.doms_bytes)
+            .wrapping_add(m.domid_bytes)
+            .wrapping_add(m.virgl_out_bytes),
         Addr::VirglCmd => rodata_addr
             .wrapping_add(m.rodata.len() as u64)
             .wrapping_add(m.ui_wasm.len() as u64)
@@ -1876,6 +1921,7 @@ fn op_to_asm(op: &Op) -> String {
             Addr::DomS => format!("\tla\t{}, __dom_str", reg_name(*rd)),
             Addr::DomId => format!("\tla\t{}, __dom_id", reg_name(*rd)),
             Addr::VirglOut => format!("\tla\t{}, __virgl_out", reg_name(*rd)),
+            Addr::EvObj => format!("\tla\t{}, __ev_obj", reg_name(*rd)),
             Addr::VirglCmd => format!("\tla\t{}, __virgl_cmd", reg_name(*rd)),
             Addr::VirglReq => format!("\tla\t{}, __virgl_req", reg_name(*rd)),
             Addr::WebPk => format!("\tla\t{}, __web_pk", reg_name(*rd)),
@@ -1906,6 +1952,7 @@ fn op_to_asm(op: &Op) -> String {
             Addr::DomS => "\t.dword\t__dom_str".into(),
             Addr::DomId => "\t.dword\t__dom_id".into(),
             Addr::VirglOut => "\t.dword\t__virgl_out".into(),
+            Addr::EvObj => "\t.dword\t__ev_obj".into(),
             Addr::VirglCmd => "\t.dword\t__virgl_cmd".into(),
             Addr::VirglReq => "\t.dword\t__virgl_req".into(),
             Addr::WebPk => "\t.dword\t__web_pk".into(),
