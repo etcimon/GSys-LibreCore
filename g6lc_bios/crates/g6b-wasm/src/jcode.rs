@@ -771,6 +771,202 @@ fn fp_cvt_rec(op: u8) -> u32 {
 
 /// Predecode `wasm` into the `__jit_in` image. Fails closed on any bound the
 /// guest side cannot honor (func/global/local/record/mem caps).
+/// Lower one defined body (`m.bodies[i]`, func index `fidx`) into its
+/// normalized record list — the same shaping `encode` applies: the fidx-68
+/// `Static_Call`/`console` DIAG stub, `lower_fn`, a balanced-control check, and
+/// a guaranteed terminal `R_RET`. Shared by `encode` (which packs the records
+/// into the wire image) and [`op_coverage`] (which analyzes them), so the gate
+/// reports on exactly the stream the guest translates.
+fn lower_one(m: &crate::binary::Module, i: usize, fidx: u32) -> Result<FnEnc, String> {
+    let nfuncs = (m.imports.len() + m.bodies.len()) as u32;
+    let body = &m.bodies[i];
+    let mut f = FnEnc {
+        recs: Vec::new(),
+        ctrls: Vec::new(),
+    };
+    // DIAG: neutralize the JS-interop `Static_Call`/`console` stub (funcidx
+    // 68 = `[Unreachable]`) so a `console.error`/`info` log is a silent
+    // no-op instead of a trap — lets the parse-error path proceed.
+    if fidx == 68
+        && body.len() == 2
+        && matches!(body[0], Instr::Unreachable)
+        && matches!(body[1], Instr::End)
+    {
+        f.push(R_RET, 0, 0);
+        return Ok(f);
+    }
+    lower_fn(
+        body,
+        &m.imports,
+        &m.types,
+        nfuncs,
+        m.mem_pages,
+        m.max_mem_pages,
+        fidx,
+        &mut f,
+    );
+    if !f.ctrls.is_empty() {
+        return Err(format!("jcode: func {fidx} unbalanced control flow"));
+    }
+    // Guarantee a terminal RET — an `end` already emits one when the ctrl
+    // stack is empty, but a body may end in JMP/RET already.
+    if f.recs.last().map(|r| r.op) != Some(R_RET) {
+        f.push(R_RET, 0, 0);
+    }
+    Ok(f)
+}
+
+/// One blocking trap inside a reachable function — an op-coverage gap. If
+/// control reaches it, that func dies mid-run; this is the Stage-3 preflight
+/// gate's reason to exist (the plan: "report which reachable funcs contain ops
+/// jitr can't lower … never let `_start` die mid-run on a TRAP record").
+#[derive(Debug, Clone)]
+pub struct OpGap {
+    /// Function index (`>= nimports` is a defined body; `< nimports` cannot
+    /// carry a trap record — imports have no body).
+    pub fidx: u32,
+    /// `R_TRAP.a` — the trap code: `TRAP_UNSUP` (op not lowered),
+    /// `TRAP_EXT` (import with no `jit_ext_tab` slot), `TRAP_BADFUNC` (call to
+    /// an out-of-range funcidx).
+    pub code: u32,
+    /// `R_TRAP.b` — the diagnostic payload: the wasm opcode for `TRAP_UNSUP`,
+    /// the callee funcidx for `TRAP_EXT`/`TRAP_BADFUNC`.
+    pub orig: u64,
+}
+
+impl OpGap {
+    /// A short human description of the gap's class, for the report.
+    pub fn describe(&self) -> String {
+        let what = match self.code {
+            TRAP_UNSUP => match self.orig {
+                0x200..=0x2ff => format!("uncaught throw tag {}", self.orig & 0xff),
+                0x300..=0x3ff => format!("rethrow out-of-function depth {}", self.orig & 0xff),
+                0x500 => "try_table/throw_ref (wasm-eh)".into(),
+                0x600 => "throw outside a try (no handler)".into(),
+                0xfc => "bulk-memory init/table op".into(),
+                0x100..=0x1ff => format!("convert op 0x{:02x}", self.orig & 0xff),
+                _ => format!("wasm opcode 0x{:02x}", self.orig),
+            },
+            TRAP_EXT => format!("unmapped env import (callee fidx {})", self.orig),
+            TRAP_BADFUNC => format!("call to out-of-range funcidx {}", self.orig),
+            other => format!("trap code {other}"),
+        };
+        format!("fidx {}: {what}", self.fidx)
+    }
+}
+
+/// Reachability-scoped op-coverage report — the Stage-3 preflight gate.
+///
+/// `encode` lowers every unhandled wasm op to an `R_TRAP` record so a module
+/// always *translates*; whether that's *safe* depends on whether the trap sits
+/// in code the guest can actually enter. This report walks the call graph from
+/// the reachable roots — the `_start` export, every func-kind export (a
+/// listener delegate / `jsCallback` is `JitCall`-ed back in, not reached by
+/// `_start`'s own `call` graph), and every element-table func (the funcref set
+/// a `call_indirect` or a `ref.func` index can name — the `add_event_listener`
+/// delegate funcidx is exactly one of these) — and lists the blocking traps
+/// inside that set. [`OpCoverage::clean`] ⇒ `libwasm_await_supported` may be 1
+/// without `_start` dying on a trap record.
+pub struct OpCoverage {
+    /// Total funcs (imports + defined bodies).
+    pub funcs: u32,
+    /// Funcs reachable from the root set.
+    pub reachable: u32,
+    /// Blocking traps (`TRAP_UNSUP`/`TRAP_EXT`/`TRAP_BADFUNC`) in reachable
+    /// funcs — each is a `funcidx` that could trap at run time.
+    pub gaps: Vec<OpGap>,
+    /// Reachable `TRAP_UNREACH`/`TRAP_XLATE`/other codes — a legitimate wasm
+    /// `unreachable` or a translation-internal marker, not a coverage gap.
+    /// Listed for audit; they do not fail `clean()`.
+    pub benign: Vec<OpGap>,
+}
+
+impl OpCoverage {
+    /// True when no reachable func contains a blocking trap record.
+    pub fn clean(&self) -> bool {
+        self.gaps.is_empty()
+    }
+}
+
+/// Mark `fidx` reachable and push it for traversal (bounded to `nfuncs`).
+fn cover_mark(fidx: u32, nfuncs: u32, reachable: &mut [bool], stack: &mut Vec<u32>) {
+    let i = fidx as usize;
+    if i < nfuncs as usize && !reachable[i] {
+        reachable[i] = true;
+        stack.push(fidx);
+    }
+}
+
+/// Build the reachability-scoped op-coverage report for `wasm`. Decodes and
+/// lowers every defined body (via [`lower_one`], so the records match what
+/// `encode` packs), walks direct `R_CALL` edges from the entry set plus the
+/// element-table funcs a `R_CALLI`/`ref.func` index can name, then classifies
+/// each `R_TRAP` in reachable code as a coverage [`OpGap`] or a benign marker.
+/// Pure analysis — does not change what `encode` emits.
+pub fn op_coverage(wasm: &[u8]) -> Result<OpCoverage, String> {
+    let m = decode(wasm)?;
+    let nimports = m.imports.len() as u32;
+    let nfuncs = nimports + m.bodies.len() as u32;
+    let mut fns: Vec<FnEnc> = Vec::with_capacity(m.bodies.len());
+    for i in 0..m.bodies.len() {
+        fns.push(lower_one(&m, i, nimports + i as u32)?);
+    }
+    let mut reachable = vec![false; nfuncs as usize];
+    let mut stack: Vec<u32> = Vec::new();
+    // Roots: `_start` + every exported func (JitCall re-entries like the
+    // delegate/`jsCallback`) + every element-table func (call_indirect /
+    // ref.func targets — the add_event_listener delegate funcidx lives here).
+    for e in &m.exports {
+        if e.kind == 0 {
+            cover_mark(e.idx, nfuncs, &mut reachable, &mut stack);
+        }
+    }
+    for el in &m.elements {
+        for &fidx in &el.funcs {
+            cover_mark(fidx, nfuncs, &mut reachable, &mut stack);
+        }
+    }
+    while let Some(fidx) = stack.pop() {
+        if fidx < nimports {
+            continue; // imports carry no body to traverse
+        }
+        let f = &fns[(fidx - nimports) as usize];
+        for r in &f.recs {
+            if r.op == R_CALL {
+                cover_mark(r.a, nfuncs, &mut reachable, &mut stack);
+            }
+        }
+    }
+    let mut gaps = Vec::new();
+    let mut benign = Vec::new();
+    for (i, f) in fns.iter().enumerate() {
+        let fidx = nimports + i as u32;
+        if !reachable[fidx as usize] {
+            continue;
+        }
+        for r in &f.recs {
+            if r.op != R_TRAP {
+                continue;
+            }
+            let gap = OpGap {
+                fidx,
+                code: r.a,
+                orig: r.b,
+            };
+            match r.a {
+                TRAP_UNSUP | TRAP_EXT | TRAP_BADFUNC => gaps.push(gap),
+                _ => benign.push(gap),
+            }
+        }
+    }
+    Ok(OpCoverage {
+        funcs: nfuncs,
+        reachable: reachable.iter().filter(|&&b| b).count() as u32,
+        gaps,
+        benign,
+    })
+}
+
 pub fn encode(wasm: &[u8]) -> Result<Vec<u8>, String> {
     let m = decode(wasm)?;
     let nimports = m.imports.len() as u32;
@@ -811,7 +1007,7 @@ pub fn encode(wasm: &[u8]) -> Result<Vec<u8>, String> {
     for _ in 0..nimports {
         fhdrs.push([0, 0, 0, 0, 0, FHDR_F_IMPORT]);
     }
-    for (i, body) in m.bodies.iter().enumerate() {
+    for i in 0..m.bodies.len() {
         let fidx = nimports as usize + i;
         let ty = &m.types[m.func_types[i] as usize];
         let nparams = ty.params.len() as u32;
@@ -829,41 +1025,7 @@ pub fn encode(wasm: &[u8]) -> Result<Vec<u8>, String> {
             return Err("jcode: >4 results is M3".into());
         }
         let bc_off = recs.len() as u32;
-        let mut f = FnEnc {
-            recs: Vec::new(),
-            ctrls: Vec::new(),
-        };
-        // DIAG: neutralize the JS-interop `Static_Call`/`console` stub (funcidx
-        // 68 = `[Unreachable]`) so a `console.error`/`info` log is a silent
-        // no-op instead of a trap — lets the parse-error path proceed.
-        if fidx == 68
-            && body.len() == 2
-            && matches!(body[0], Instr::Unreachable)
-            && matches!(body[1], Instr::End)
-        {
-            f.push(R_RET, 0, 0);
-            recs.extend(f.recs);
-            fhdrs.push([bc_off, 1, nparams, nlocals, ty.results.len() as u32, 0]);
-            continue;
-        }
-        lower_fn(
-            body,
-            &m.imports,
-            &m.types,
-            nfuncs,
-            m.mem_pages,
-            m.max_mem_pages,
-            fidx as u32,
-            &mut f,
-        );
-        if !f.ctrls.is_empty() {
-            return Err(format!("jcode: func {fidx} unbalanced control flow"));
-        }
-        // Guarantee a terminal RET — an `end` already emits one when the ctrl
-        // stack is empty, but a body may end in JMP/RET already.
-        if f.recs.last().map(|r| r.op) != Some(R_RET) {
-            f.push(R_RET, 0, 0);
-        }
+        let f = lower_one(&m, i, fidx as u32)?;
         let bc_len = f.recs.len() as u32;
         recs.extend(f.recs);
         if recs.len() > MAX_JIT_RECORDS {
@@ -1856,6 +2018,59 @@ mod tests {
     /// demo fallback (`DomtBoot` is idempotent and skips once the cell has
     /// appended a child under root, so the demo `0x1e3a5a` signature stays
     /// absent).
+    /// Stage-3 preflight gate: `op_coverage` walks the shipped cell's reachable
+    /// set and reports every blocking trap. The contract is *bounded*: the only
+    /// permitted gap class is the uncaught-`throw`-to-caller lane (`TRAP_UNSUP`
+    /// orig `0x200|tag`) — cross-function wasm-EH, a cold error path jitr does
+    /// not yet unwind. Any *new* gap — an unlowered opcode (`TRAP_UNSUP` with a
+    /// real op), an unmapped `env` import (`TRAP_EXT`), or an out-of-range call
+    /// (`TRAP_BADFUNC`) in reachable code — fails this test loudly, which is the
+    /// point of the gate before `await_supported` may stay 1.
+    #[test]
+    fn shipped_cell_op_coverage_report() {
+        let wasm = g6b_asm::BIOS_UI_LIBWASM;
+        if !wasm.starts_with(b"\0asm\x01") {
+            return; // cell not built on this host
+        }
+        let cov = op_coverage(wasm).expect("op_coverage decodes+lowers");
+        for g in &cov.gaps {
+            eprintln!("  GAP {}", g.describe());
+        }
+        assert!(
+            cov.reachable > 0,
+            "op_coverage found no reachable funcs ({} funcs)",
+            cov.funcs
+        );
+        // `clean()` is the strict signal — the shipped cell is *not* fully clean
+        // (one cold-throw gap), so the gate below is the bounded form of it.
+        assert!(
+            !cov.clean(),
+            "expected the known uncaught-throw gap to remain; if it is now \
+             lowered, tighten this test to assert `cov.clean()`"
+        );
+        // The whole reachable set lowers except the known uncaught-throw lane:
+        // every gap must be a `0x200|tag` TRAP_UNSUP (cross-function EH throw),
+        // never a bare opcode gap, unmapped import, or bad call.
+        for g in &cov.gaps {
+            assert!(
+                g.code == TRAP_UNSUP && (0x200..=0x2ff).contains(&g.orig),
+                "unexpected reachable coverage gap: {}",
+                g.describe()
+            );
+        }
+        // Bound the known deferral: today exactly one reachable func carries an
+        // uncaught throw — a `_start`-reachable func whose cold error branch
+        // `throw`s to its caller (cross-function wasm-EH jitr does not unwind).
+        // `guest_jit_executes_shipped_cell` proves that branch is not taken on
+        // the happy path. If a new reachable throw lands, this count grows and
+        // must be re-audited.
+        assert!(
+            cov.gaps.len() <= 1,
+            "more than the one known cold-throw gap appeared: {:?}",
+            cov.gaps.iter().map(OpGap::describe).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn guest_jit_executes_shipped_cell() {
         let wasm = g6b_asm::BIOS_UI_LIBWASM;

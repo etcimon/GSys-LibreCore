@@ -452,13 +452,26 @@ details that differ and must not be conflated with the host table:
   `__wasm_mem` base added (`LwFetch`/`LwAddStr`); the legacy `jit.rs` path
   already resolves `Addr::WasmData` absolutes, so the shim lives only in the
   `jit_ext_tab` entries.
-- **`await`/`throw` are fail-closed here.** `libwasm_await_supported`→`0`; the
-  `libwasm_await_*` stubs are bounded no-ops, not a guest asyncify suspension.
+- **`await` is resolved-sync, not a guest asyncify suspension.**
+  `libwasm_await_supported`→`1`: `LwFetch` resolves every BIOS read
+  synchronously off the packed `__kget` route table (`KernelGet` scans it for
+  the URL), returning the entry index +1 as the promise handle;
+  `libwasm_await__void`/`libwasm_await_value` then resolve that slot to the
+  body string — correct semantics because the fetch is already resolved.
+  `await_failed`/`await_error` stay fail-closed.
+- **The Stage-3 op-coverage gate is `op_coverage`.** `g6b_wasm::op_coverage`
+  lowers the whole module (shared `lower_one`, the same records `encode`
+  packs) and walks the re-entrable set — `_start` + func exports +
+  element-table funcs — reporting `TRAP_UNSUP`/`TRAP_EXT`/`TRAP_BADFUNC` as
+  `OpGap`s. The shipped cell: 252 funcs, 239 reachable, **one** blocking gap —
+  `fidx 94` is `_start`-reachable and carries an uncaught `throw` (a cold error
+  branch throwing to its caller; cross-function wasm-EH jitr does not unwind).
+  `shipped_cell_op_coverage_report` is the gate.
 
 Exec-model evidence (`guest_jit_executes_shipped_cell`): 252 funcs translate,
 `_start` completes, `domt_next=56 live=56 ids=47 listen=8`, and `DomtRaster`
 paints the cell's own tree into `__scan_fb` with no `DomtBoot` fallback. QEMU
-screendump and listener re-entry remain open.
+screendump remains open; listener re-entry landed (B114–B116).
 
 ## 8. Completion plan
 

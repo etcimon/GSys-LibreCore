@@ -35,7 +35,8 @@ pub use interp::{
 };
 pub use jcode::{
     cell_bytes as jcode_cell_bytes, data_offset as jcode_data_offset, encode as jcode_encode,
-    install_guest, test_module as jcode_test_module, EXT_AWAIT, EXT_CATCH, EXT_FETCH, EXT_LOG,
+    install_guest, op_coverage, test_module as jcode_test_module, OpCoverage, OpGap, EXT_AWAIT,
+    EXT_CATCH, EXT_FETCH, EXT_LOG,
     EXT_SET_TEXT, EXT_SET_VISIBLE, EXT_THROW, FHDR_BYTES as JCODE_FHDR_BYTES, FHDR_F_IMPORT,
     HDR_BYTES as JCODE_HDR_BYTES, JIT_STK_BYTES, MAGIC as JCODE_MAGIC, MAX_JIT_CODE_BYTES,
     MAX_JIT_FUNCS, MAX_JIT_GLOBALS, MAX_JIT_LOCALS, MAX_JIT_MEM_PAGES, MAX_JIT_RECORDS,

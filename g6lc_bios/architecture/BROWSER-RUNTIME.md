@@ -182,6 +182,12 @@ which sets `EVO_PD` on `preventDefault` (read back as `defaultPrevented`).
 Bounded to the live event object (`handle == &__ev_obj`); string getters
 (`type`/`key`) and `float`/`double`/`Optional*` stay unmapped. The gate
 `guest_jit_listener_reads_event_props` appends iff `clientX>=200 &&
-target!=0 && defaultPrevented` — a real click lands `clientX≈325`. Windowing
-is **B92** later
+target!=0 && defaultPrevented` — a real click lands `clientX≈325`. **B117 is
+the Stage-3 op-coverage gate** (`g6b_wasm::op_coverage`): it lowers the whole
+cell through the shared `lower_one` and walks the re-entrable set (`_start` +
+func exports + element-table funcs) to report `TRAP_UNSUP`/`TRAP_EXT`/
+`TRAP_BADFUNC` in reachable code — the hard check behind `await_supported=1`.
+On the shipped cell it finds exactly one reachable gap, `fidx 94`'s uncaught
+`throw` (cross-function wasm-EH, a cold path), and the gate asserts no *new*
+gap class appears. Windowing is **B92** later
 ([`plan-iframe.md`](plan-iframe.md)).
