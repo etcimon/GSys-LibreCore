@@ -438,6 +438,16 @@ details that differ and must not be conflated with the host table:
   two lanes over one `__ev_obj` record: `DomtKey` focus-fires `EV_KEYDOWN`
   (`code`=keycode) and `DomtPtr`+`DomtHit` point-fires `EV_CLICK` off the
   tablet `PTR_*` scratch (`clientX`/`clientY`=display-px, `target`=handle).
+- **The `__ev_obj` record is readable through `Object_Getter__*`.** `ext_id`
+  routes the i32-returning getters (`int`/`uint`/`ushort`/`bool`/`Handle`,
+  `(handle,len,ptr)`) to `EXT_EVGET`→`LwEvGet`, which name-matches the property
+  via `LwNameEq` and `lw`s the `__ev_obj` field — `clientX`/`clientY`/`code`/
+  `detail`/`value`/`target`/`type`/`defaultPrevented` (+common aliases), with
+  `cancelable`/`bubbles`/`isTrusted` constant-1. The no-arg-void
+  `Object_Call_…__void` shape routes to `EXT_EVCALL`→`LwEvCall`, which sets the
+  `EVO_PD` bit on `preventDefault` — read back as `defaultPrevented`. Bounded
+  to the live event object (`handle` must be `&__ev_obj`); the *string* getters
+  (`type`,`key`) and `float`/`double`/`Optional*` remain unmapped (`TRAP_EXT`).
 - **Linear-memory offsets, not absolutes.** `fetch`/`puts`/`add__string` get the
   `__wasm_mem` base added (`LwFetch`/`LwAddStr`); the legacy `jit.rs` path
   already resolves `Addr::WasmData` absolutes, so the shim lives only in the

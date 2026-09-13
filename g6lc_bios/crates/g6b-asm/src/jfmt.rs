@@ -165,6 +165,11 @@ pub const EXT_GETROOT: u32 = 14; // getRoot() -> node
 pub const EXT_ADDLSN: u32 = 15; // add_event_listener(h,eoff,elen,cb,..)
 pub const EXT_RMOBJ: u32 = 16; // libwasm_removeObject(h)
 pub const EXT_ADDSTR: u32 = 17; // libwasm_add__string(off,len) -> str-handle
+// `__ev_obj` event-property bridge — the typed `Object_Getter__*`
+// (int/uint/ushort/bool/Handle) getters read a `__ev_obj` field by name; the
+// no-arg-void `Object_Call___void` is the `preventDefault` write-back.
+pub const EXT_EVGET: u32 = 18; // Object_Getter__*(ev,nlen,nptr) -> field
+pub const EXT_EVCALL: u32 = 19; // Object_Call___void(ev,mlen,mptr) -> void
 
 /// M3 bounds — sized to the shipped `bios-ui-libwasm` cell (252 funcs,
 /// ~69k records, 17 mem pages, ≤845 locals, 62-entry table). These are the

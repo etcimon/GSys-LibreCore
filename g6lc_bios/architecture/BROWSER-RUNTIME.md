@@ -165,8 +165,7 @@ listener re-entry lane**: a nonzero `add_event_listener` cb is biased into
 record then `JitCall`s that funcidx between `JitRun`s — so a delegate
 `appendChild` provably mutates `__dom` off a real `INP_KQ` keydown
 (`guest_jit_listener_reenters_cell_on_key`). The *shipped* cell still keeps
-`listener=0` (the BIOS protocol, host runs fetch/select), and the
-`libwasm_get__*` event-property getter bridge is still open; `start_ops` is
+`listener=0` (the BIOS protocol, host runs fetch/select), and `start_ops` is
 the VGA face. **B115 adds the pointer lane**: `TabDrain` latches the last
 `ABS_X`/`ABS_Y` + a `BTN_LEFT` `PTR_CLICK` flag, and `trap_tab` then runs
 `DomtPtr` (`guest_jit`), which scales to display px, `DomtHit`s the topmost
@@ -174,5 +173,15 @@ the VGA face. **B115 adds the pointer lane**: `TabDrain` latches the last
 `clientY`/target-handle) and `JitCall`s the node's wasm funcidx — a real
 tablet `BTN_LEFT` re-enters the cell the same way `DomtKey` re-enters on a
 key (`guest_jit_listener_reenters_cell_on_click`). One click per trap; no
-capture/bubble walk yet. Windowing is **B92** later
+capture/bubble walk yet. **B116 adds the `__ev_obj` property bridge** so the
+delegate can *read* the event, not just be re-entered: `Object_Getter__{int,
+uint,ushort,bool,Handle}` route to `LwEvGet` (name-matched `lw` of the
+`__ev_obj` fields — `clientX`/`clientY`/`code`/`target`/`type`/`defaultPrevented`
+and aliases), and the no-arg-void `Object_Call___void` routes to `LwEvCall`,
+which sets `EVO_PD` on `preventDefault` (read back as `defaultPrevented`).
+Bounded to the live event object (`handle == &__ev_obj`); string getters
+(`type`/`key`) and `float`/`double`/`Optional*` stay unmapped. The gate
+`guest_jit_listener_reads_event_props` appends iff `clientX>=200 &&
+target!=0 && defaultPrevented` — a real click lands `clientX≈325`. Windowing
+is **B92** later
 ([`plan-iframe.md`](plan-iframe.md)).

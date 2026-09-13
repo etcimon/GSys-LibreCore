@@ -650,6 +650,29 @@ fn lower_fn(
 
 /// The `env.*` import → trampoline id. The table must match `jit_ext_tab`.
 fn ext_id(module: &str, name: &str) -> Option<u32> {
+    if module == "env" {
+        // `Object_Getter__<kind>` is a name-encoded libwasm property getter,
+        // not a fixed import. The i32-returning kinds route onto the
+        // `__ev_obj` bridge (`LwEvGet`); `string`/`Optional*` take a leading
+        // sret arg and `float`/`double` return FP — still unmapped (TRAP_EXT).
+        if let Some(kind) = name.strip_prefix("Object_Getter__") {
+            return match kind {
+                "int" | "uint" | "ushort" | "bool" | "Handle" => Some(EXT_EVGET),
+                _ => None,
+            };
+        }
+        // The no-arg, void `Object_Call__<args>__void` method shape — the event
+        // object's `preventDefault`/`stopPropagation` — is the `__ev_obj`
+        // write-back lane (`LwEvCall`). `Object_Call` arities with args or a
+        // non-void ret (`_string_string`, `_string`) fall through to the table.
+        if let Some(rest) = name.strip_prefix("Object_Call_") {
+            if let Some((arg_part, ret)) = rest.split_once("__") {
+                if arg_part.is_empty() && ret == "void" {
+                    return Some(EXT_EVCALL);
+                }
+            }
+        }
+    }
     match (module, name) {
         ("env", "log") | ("env", "Log") => Some(EXT_LOG),
         ("env", "set_inner_text") | ("env", "Object_Call_string_string") => Some(EXT_SET_TEXT),
@@ -1294,6 +1317,146 @@ pub fn test_module_delegate_ev(ev: &[u8]) -> Vec<u8> {
     data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]); // active mem0, off=i32.const 0x10
     let mut body = b"idx".to_vec(); // id@0x10, x@0x12, ev@0x13
     body.extend_from_slice(ev);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// Click delegate that *reads the event object*. `_start` builds
+/// `root + <button id="x">` and registers `add_event_listener("x","click",
+/// $delegate)`. `$delegate(ev)` exercises the `Object_Getter__*`/`Object_Call`
+/// bridge (`LwEvGet`/`LwEvCall`): it reads `clientX`, `target`, calls
+/// `preventDefault`, reads `defaultPrevented`, and `appendChild`s a node for
+/// each result that came back nonzero — so `__dom` grows only when the bridge
+/// actually populated `__ev_obj` and the write-back round-tripped.
+#[cfg(test)]
+pub fn test_module_evget() -> Vec<u8> {
+    // `__wasm_mem` pool (data @0x10). Every name offset stays < 0x40 so each
+    // `i32.const <off>` arg is a single signed-LEB byte (offsets ≥ 0x40 need a
+    // two-byte encoding this builder doesn't emit). id@0x10 x@0x12 click@0x13
+    // clientX@0x18 target@0x1f defaultPrevented@0x25 preventDefault@0x35.
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13; // "click"
+    const CX: u8 = 0x18; // "clientX"
+    const TG: u8 = 0x1f; // "target"
+    const DP: u8 = 0x25; // "defaultPrevented" (getter)
+    const PD: u8 = 0x35; // "preventDefault" (method)
+    const ORD: u8 = 14; // NodeType::button
+    const DELEGATE: u8 = 9; // $delegate funcidx (9 imports 0..=8 first)
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+
+    // t0 ()->i32 · t1 (i32)->i32 · t2 (i32,i32)->() · t3 (i32x5)->()
+    // t4 (i32x6)->() · t5 (i32)->() · t6 ()->()
+    // t7 (i32,i32,i32)->i32 (getters) · t8 (i32,i32,i32)->() (void call)
+    let mut types = Vec::new();
+    push_uleb(&mut types, 9);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x00]);
+    section(&mut out, 1, &types);
+
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 9);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__int", 7),
+        ("Object_Getter__Handle", 7),
+        ("Object_Call___void", 8),
+        ("Object_Getter__bool", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+
+    section(&mut out, 3, &[2, 0x05, 0x06]); // $delegate(t5)=9, $_start(t6)=10
+    section(&mut out, 5, &[1, 0x00, 0x01]); // memory min 1 page
+
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x0a]);
+    section(&mut out, 7, &exports);
+
+    // $delegate(ev:i32): locals cx=1 tgt=2 dp=3. Appends one node iff the
+    // bridge returned *correct* values — `clientX>=200` (the real scaled px),
+    // `target!=0` (a real node handle), and `defaultPrevented` after
+    // `preventDefault()` (the write-back round-trip). A bridge that returns 0
+    // appends nothing, so `__dom` growth is the discriminator.
+    let mut bdel = vec![0x01, 0x03, 0x7f]; // 1 group, 3 i32 locals
+    bdel.extend_from_slice(&[
+        // cx = ev.clientX  → Object_Getter__int(ev, 7, CX)
+        0x20, 0x00, 0x41, 0x07, 0x41, CX, 0x10, 0x05, 0x21, 0x01,
+        // tgt = ev.target → Object_Getter__Handle(ev, 6, TG)
+        0x20, 0x00, 0x41, 0x06, 0x41, TG, 0x10, 0x06, 0x21, 0x02,
+        // ev.preventDefault() → Object_Call___void(ev, 14, PD)
+        0x20, 0x00, 0x41, 0x0e, 0x41, PD, 0x10, 0x07,
+        // dp = ev.defaultPrevented → Object_Getter__bool(ev, 16, DP)
+        0x20, 0x00, 0x41, 0x10, 0x41, DP, 0x10, 0x08, 0x21, 0x03,
+        // pred = (cx >= 200) && (tgt != 0) && dp
+        0x20, 0x01, 0x41, 0xC8, 0x01, 0x4e, // local.get cx; i32.const 200; i32.ge_s
+        0x20, 0x02, 0x41, 0x00, 0x47, //       local.get tgt; i32.const 0; i32.ne
+        0x71, //                             i32.and
+        0x20, 0x03, 0x71, //                 local.get dp; i32.and
+        0x04, 0x40, //                       if (void)
+        0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, // appendChild(getRoot(),createElement(ORD))
+        0x0b, // end if
+        0x0b, // end func
+    ]);
+
+    // $_start(): build + register, identical to the click-delegate cell.
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, // el = createElement(ORD)
+        0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X, 0x10, 0x03, // setProperty(el,"id","x")
+        0x10, 0x00, 0x20, 0x00, 0x10, 0x02, // appendChild(getRoot(), el)
+        0x41, X, 0x41, 0x01, // tptr=X tlen=1
+        0x41, EV, 0x41, 0x05, // typtr=EV tylen=5 ("click")
+        0x41, DELEGATE, // cb = $delegate funcidx 9
+        0x41, 0x00, // capture=0
+        0x10, 0x04, // add_event_listener("x","click",9,0)
+        0x0b,
+    ]);
+
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+
+    // data @0x10: pack the pool strings at their declared offsets (end 0x43).
+    let mut body = vec![0u8; 0x43 - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "click");
+    put(&mut body, CX, "clientX");
+    put(&mut body, TG, "target");
+    put(&mut body, DP, "defaultPrevented");
+    put(&mut body, PD, "preventDefault");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]); // active mem0, off=i32.const 0x10
     push_uleb(&mut data, body.len() as u32);
     data.extend_from_slice(&body);
     section(&mut out, 11, &data);
@@ -2214,6 +2377,100 @@ mod tests {
         assert!(
             s.domt_live >= 3,
             "tablet click→JitCall→delegate appended a node (live={}): {}",
+            s.domt_live,
+            s.console
+        );
+    }
+
+    /// The `__ev_obj` event-property bridge. The evget delegate reads
+    /// `clientX`/`target` through `Object_Getter__*` (`LwEvGet`), calls
+    /// `preventDefault` (`Object_Call___void` → `LwEvCall`), and reads back
+    /// `defaultPrevented` — appending a node iff all three returned correct
+    /// values. A real tablet `BTN_LEFT` press fills `__ev_obj` and re-enters
+    /// the delegate; `__dom` growth proves the property bridge worked.
+    #[test]
+    fn guest_jit_listener_reads_event_props() {
+        use g6b_asm::encode::RA;
+        use g6b_asm::exec::{run_module, run_module_web_feed, GuestWebPresent, WebFeed};
+        use g6b_asm::Op;
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+
+        // Same `DomtLayout` splice — deterministic laid-out rect before the
+        // canned tablet poke arrives on the first guest Halt.
+        let build = |m: &mut g6b_asm::Module| {
+            install_guest(m, &test_module_evget()).expect("evget cell installs");
+            for n in &mut m.nodes {
+                if let Some(pos) = n
+                    .ops
+                    .iter()
+                    .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+                {
+                    n.ops
+                        .splice(pos + 1..pos + 1, vec![Op::Jal { rd: RA, to: "DomtLayout".into() }]);
+                    return;
+                }
+            }
+            panic!("no JitRun call site to splice after");
+        };
+
+        // Phase 1 — probe for the button rect (same as the click test).
+        let mut probe = g6b_asm::analyze::kstart(&spec);
+        build(&mut probe);
+        let sp = run_module(&spec, &probe, 0x8020_0000).unwrap();
+        assert!(!sp.console.contains("TRAP-"), "{}", sp.console);
+        let btn = sp
+            .domt_nodes
+            .iter()
+            .find(|n| n.0 != 0)
+            .expect("a non-root button node is laid out");
+        let (bx, by, bw, bh) = (btn.3, btn.4, btn.5, btn.6);
+        assert!(bw > 0 && bh > 0, "button has a laid-out rect: {:?}", btn);
+        let (dw, dh) = (640u32, 480u32);
+        let abs_x = (bx + bw / 2) * 0x8000 / dw;
+        let abs_y = (by + bh / 2) * 0x8000 / dh;
+        // The button centre lands at clientX≈bx+bw/2>200 — the delegate's
+        // `clientX>=200` arm sees the real scaled px, not a fabricated pass.
+        assert!(bx + bw / 2 >= 200, "clientX arm meaningful: {:?}", btn);
+
+        // Phase 2 — real click delivers ABS pair + BTN_LEFT through trap_tab.
+        struct ClickFeed {
+            x: u32,
+            y: u32,
+        }
+        impl WebFeed for ClickFeed {
+            fn initial(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn on_guest_ui(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn hint_abs(&self) -> Option<(u32, u32)> {
+                Some((self.x, self.y))
+            }
+        }
+        let mut feed = ClickFeed { x: abs_x, y: abs_y };
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        build(&mut m);
+        let s = run_module_web_feed(&spec, &m, 0x8020_0000, 0, &mut feed).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        assert!(s.domt_listen >= 1, "button click listener: {}", s.console);
+        // The delegate appended iff clientX>=200 && target!=0 && defaultPrevented
+        // — i.e. the getter bridge returned correct values and the
+        // preventDefault write-back round-tripped. root+button+appended = 3.
+        assert!(
+            s.domt_live >= 3,
+            "event-property bridge read ev fields → delegate appended (live={}): {}",
             s.domt_live,
             s.console
         );

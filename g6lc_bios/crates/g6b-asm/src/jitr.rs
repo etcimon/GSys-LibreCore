@@ -2492,6 +2492,9 @@ pub fn nodes(with_ext: bool) -> Vec<Node> {
             "LwAddLsn",
             "LwRemove",
             "LwAddStr",
+            // `__ev_obj` event-property bridge (EXT_EVGET / EXT_EVCALL).
+            "LwEvGet",
+            "LwEvCall",
         ] {
             ops.push(Op::Dw64 {
                 addr: Addr::Label(l.into()),

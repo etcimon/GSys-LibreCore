@@ -138,6 +138,7 @@ pub const EVO_VALUE: i32 = 8; // press/release value
 pub const EVO_CX: i32 = 12; // clientX (0 for key events)
 pub const EVO_CY: i32 = 16; // clientY (0 for key events)
 pub const EVO_TARGET: i32 = 20; // target node handle (index+1)
+pub const EVO_PD: i32 = 24; // defaultPrevented flag — `preventDefault` write-back
 pub const EVOBJ_BYTES: u64 = 64;
 
 /// Text cell metrics: an 8×8 `__font` glyph at `DOMT_CELL`px pitch.
@@ -1235,6 +1236,153 @@ fn lw_addlsn_node() -> Vec<Op> {
     ops
 }
 
+/// `LwEvGet(a0=evhandle, a1=nlen, a2=nptr) → a0` — the `Object_Getter__*`
+/// bridge for the `__ev_obj` event record. The libwasm getter ABI is
+/// `(handle, nameLen, namePtr)`; the property name is a `__wasm_mem` string
+/// matched byte-for-byte via `LwNameEq`. `handle` must be the live event
+/// object `&__ev_obj` — any other handle returns 0 (the bridge is bounded to
+/// the in-flight event; node/object getters stay a separate lane). Numeric and
+/// handle fields load `lw(handle,off)` straight out of the record; `target`/
+/// `srcElement`/`currentTarget` return the stored node handle; `type` is the
+/// `EV_*` mask as an int (the string `type` getter is a separate sret lane);
+/// `defaultPrevented` reads the `EVO_PD` write-back bit set by `LwEvCall`;
+/// `cancelable`/`bubbles`/`isTrusted` are constant-1 — every synthetic event is
+/// cancelable+bubbling. Unknown names fall through to 0 (no trap).
+fn lw_evget_node() -> Vec<Op> {
+    let mut ops = vec![
+        Op::Comment("LwEvGet(a0=evhandle,a1=nlen,a2=nptr) → a0 — __ev_obj getter".into()),
+        Op::Glob("LwEvGet".into()),
+        Op::Label("LwEvGet".into()),
+        addi(SP, SP, -48),
+        sd(RA, SP, 40),
+        sd(S0, SP, 32),
+        sd(S1, SP, 24),
+        sd(S2, SP, 16),
+        mv(S0, A0), // event handle — must be &__ev_obj
+        mv(S1, A1), // property-name len
+        mv(S2, A2), // property-name wasm-mem off
+        // bounded: only the live event object is served — other handles → 0.
+        la(T0, Addr::EvObj),
+        bne(S0, T0, "lveg_null"),
+    ];
+    // integer + handle fields — each loads `lw(handle, off)`. Unique skip
+    // labels per candidate (a shared label would collapse the `beq`s).
+    for (i, (lit, len, off)) in [
+        ("lw_lit_clientX", 7i64, EVO_CX),
+        ("lw_lit_screenX", 7, EVO_CX),
+        ("lw_lit_pageX", 5, EVO_CX),
+        ("lw_lit_offsetX", 7, EVO_CX),
+        ("lw_lit_clientY", 7, EVO_CY),
+        ("lw_lit_screenY", 7, EVO_CY),
+        ("lw_lit_pageY", 5, EVO_CY),
+        ("lw_lit_offsetY", 7, EVO_CY),
+        ("lw_lit_code", 4, EVO_CODE),
+        ("lw_lit_keyCode", 7, EVO_CODE),
+        ("lw_lit_which", 5, EVO_CODE),
+        ("lw_lit_button", 6, EVO_CODE),
+        ("lw_lit_detail", 6, EVO_VALUE),
+        ("lw_lit_value", 5, EVO_VALUE),
+        ("lw_lit_deltaY", 6, EVO_VALUE),
+        ("lw_lit_type", 4, EVO_TYPE),
+        ("lw_lit_target", 6, EVO_TARGET),
+        ("lw_lit_srcElement", 10, EVO_TARGET),
+        ("lw_lit_currentTarget", 13, EVO_TARGET),
+        ("lw_lit_defaultPrevented", 16, EVO_PD),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let next = format!("lveg_n{i}");
+        ops.extend([
+            mv(A0, S2), // name off
+            mv(A1, S1), // name len
+            la(A2, Addr::Label((*lit).into())),
+            li(A3, *len),
+            jal("LwNameEq"),
+            beq(A0, X0, &next),
+            lw(A0, S0, *off),
+            j("lveg_out"),
+            Op::Label(next),
+        ]);
+    }
+    // constant-true boolean fields — our synthetic events cancel+bubble.
+    for (i, (lit, len)) in [
+        ("lw_lit_cancelable", 10i64),
+        ("lw_lit_bubbles", 7),
+        ("lw_lit_isTrusted", 9),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let next = format!("lveg_c{i}");
+        ops.extend([
+            mv(A0, S2),
+            mv(A1, S1),
+            la(A2, Addr::Label((*lit).into())),
+            li(A3, *len),
+            jal("LwNameEq"),
+            beq(A0, X0, &next),
+            li(A0, 1),
+            j("lveg_out"),
+            Op::Label(next),
+        ]);
+    }
+    ops.extend([
+        Op::Label("lveg_null".into()),
+        li(A0, 0),
+        Op::Label("lveg_out".into()),
+        ld(RA, SP, 40),
+        ld(S0, SP, 32),
+        ld(S1, SP, 24),
+        ld(S2, SP, 16),
+        addi(SP, SP, 48),
+        ret(),
+    ]);
+    ops.shrink_to_fit();
+    ops
+}
+
+/// `LwEvCall(a0=evhandle, a1=mlen, a2=mptr)` — the `Object_Call___void`
+/// (no-arg, void-return) method dispatch on the event object. `preventDefault`
+/// sets `EVO_PD` so a later `defaultPrevented` getter reads 1 — the write-back
+/// half of the property bridge. Any other method name, or a non-event handle,
+/// is a bounded no-op. (`preventDefault`/`stopPropagation` share the
+/// `Object_Call___void` shape; only `preventDefault` is matched.)
+fn lw_evcall_node() -> Vec<Op> {
+    let mut ops = vec![
+        Op::Comment("LwEvCall(a0=evhandle,a1=mlen,a2=mptr) — preventDefault→EVO_PD".into()),
+        Op::Glob("LwEvCall".into()),
+        Op::Label("LwEvCall".into()),
+        addi(SP, SP, -32),
+        sd(RA, SP, 24),
+        sd(S0, SP, 16),
+        sd(S1, SP, 8),
+        sd(S2, SP, 0),
+        mv(S0, A0), // event handle
+        mv(S1, A1), // method-name len
+        mv(S2, A2), // method-name wasm-mem off
+        la(T0, Addr::EvObj),
+        bne(S0, T0, "lvcl_out"), // not the event object → no-op
+        mv(A0, S2),
+        mv(A1, S1),
+        la(A2, Addr::Label("lw_lit_preventDefault".into())),
+        li(A3, 14),
+        jal("LwNameEq"),
+        beq(A0, X0, "lvcl_out"),
+        li(T0, 1),
+        sw(T0, S0, EVO_PD),
+        Op::Label("lvcl_out".into()),
+        ld(RA, SP, 24),
+        ld(S0, SP, 16),
+        ld(S1, SP, 8),
+        ld(S2, SP, 0),
+        addi(SP, SP, 32),
+        ret(),
+    ];
+    ops.shrink_to_fit();
+    ops
+}
+
 /// `LwRemove(a0=handle)` — `libwasm_removeObject`: unlink the node from its
 /// parent's child chain (fc/lc via nsib), then tombstone it (`N_TAG=0`,
 /// `F_VIS` cleared). `a0` is a libwasm handle, so the index is `a0-1`.
@@ -1706,6 +1854,31 @@ fn lw_lits_node() -> Vec<Op> {
     lit(&mut ops, "lw_lit_keyup", "keyup");
     lit(&mut ops, "lw_lit_keypress", "keypress");
     lit(&mut ops, "lw_lit_input", "input");
+    // `__ev_obj` property names for `LwEvGet`/`LwEvCall` (the typed-getter
+    // bridge). "value" reuses `lw_lit_value` above.
+    lit(&mut ops, "lw_lit_clientX", "clientX");
+    lit(&mut ops, "lw_lit_screenX", "screenX");
+    lit(&mut ops, "lw_lit_pageX", "pageX");
+    lit(&mut ops, "lw_lit_offsetX", "offsetX");
+    lit(&mut ops, "lw_lit_clientY", "clientY");
+    lit(&mut ops, "lw_lit_screenY", "screenY");
+    lit(&mut ops, "lw_lit_pageY", "pageY");
+    lit(&mut ops, "lw_lit_offsetY", "offsetY");
+    lit(&mut ops, "lw_lit_code", "code");
+    lit(&mut ops, "lw_lit_keyCode", "keyCode");
+    lit(&mut ops, "lw_lit_which", "which");
+    lit(&mut ops, "lw_lit_button", "button");
+    lit(&mut ops, "lw_lit_detail", "detail");
+    lit(&mut ops, "lw_lit_deltaY", "deltaY");
+    lit(&mut ops, "lw_lit_type", "type");
+    lit(&mut ops, "lw_lit_target", "target");
+    lit(&mut ops, "lw_lit_srcElement", "srcElement");
+    lit(&mut ops, "lw_lit_currentTarget", "currentTarget");
+    lit(&mut ops, "lw_lit_defaultPrevented", "defaultPrevented");
+    lit(&mut ops, "lw_lit_cancelable", "cancelable");
+    lit(&mut ops, "lw_lit_bubbles", "bubbles");
+    lit(&mut ops, "lw_lit_isTrusted", "isTrusted");
+    lit(&mut ops, "lw_lit_preventDefault", "preventDefault");
     ops.push(Op::Label("lw_lits_end".into()));
     ops
 }
@@ -1886,6 +2059,7 @@ fn domt_key_node() -> Vec<Op> {
         sw(T1, T5, EVO_TARGET),
         sw(X0, T5, EVO_CX),
         sw(X0, T5, EVO_CY),
+        sw(X0, T5, EVO_PD), // fresh event — not yet prevented
         addi(A0, T3, -(LSN_FUNC as i32)), // funcidx = N_LISTEN - LSN_FUNC
         li(A1, 1),                       // nargs=1 — Listener::Wasm calls fn(ev)
         mv(A2, T5),                      // event handle = __ev_obj
@@ -2059,6 +2233,7 @@ fn domt_ptr_node() -> Vec<Op> {
         sw(T1, T5, EVO_TARGET),
         sw(S0, T5, EVO_CX),
         sw(S1, T5, EVO_CY),
+        sw(X0, T5, EVO_PD), // fresh event — not yet prevented
         addi(A0, T3, -(LSN_FUNC as i32)), // funcidx = N_LISTEN - LSN_FUNC
         li(A1, 1),                       // nargs=1 — Listener::Wasm calls fn(ev)
         mv(A2, T5),
@@ -2854,6 +3029,8 @@ pub fn nodes(spec: &BoardSpec) -> Vec<Node> {
             v.extend(lw_findid_node());
             v.extend(lw_setprop_node());
             v.extend(lw_addlsn_node());
+            v.extend(lw_evget_node());
+            v.extend(lw_evcall_node());
             v.extend(lw_remove_node());
             v.extend(lw_fetch_node());
             v.extend(kernel_get_node());
