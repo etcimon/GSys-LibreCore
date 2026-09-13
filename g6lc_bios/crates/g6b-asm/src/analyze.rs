@@ -2209,11 +2209,22 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                     rd: RA,
                     to: "TabDrain".into(),
                 },
-                Op::Jal {
-                    rd: X0,
-                    to: "trap_done".into(),
-                },
             ]);
+            if spec.kernel.wasm.guest_jit {
+                // M2 tree-DOM pointer: `TabDrain` latched `PTR_CLICK` +
+                // the last `ABS_X`/`ABS_Y`; `DomtPtr` scales them to
+                // display px, hit-tests `__dom` and re-enters the node's
+                // wasm click listener (`JitCall`), bumping `H_DIRTY` for
+                // the `trap_timer` repaint.
+                ops.push(Op::Jal {
+                    rd: RA,
+                    to: "DomtPtr".into(),
+                });
+            }
+            ops.push(Op::Jal {
+                rd: X0,
+                to: "trap_done".into(),
+            });
         }
     }
     ops.extend([

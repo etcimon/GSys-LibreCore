@@ -125,7 +125,9 @@ claims the second (`VIRTIO-TABLET-OK`). The exec model parks that tablet
 on virtio-mmio slot 3 (PLIC irq 4) so source 3 stays the mailbox.
 `host_inp_tab_kick` writes `EV_ABS` then `BTN_LEFT` into the tablet
 eventq (`TabDrain` re-posts, no `INP_KQ`) so a VNC click activates the
-hinted tab.
+hinted tab. `TabDrain` also decodes each event into `PTR_X`/`PTR_Y`/
+`PTR_CLICK` (`__vio` scratch) so `DomtPtr` can dispatch a real guest
+`EV_CLICK` — see the pointer lane below.
 
 **Guest-side DOM raster lane (B111, exec-model verified).** `domt.rs`
 (`Purpose::UiDom`) is a *bounded* stand-in for the shipped engine — not
@@ -165,4 +167,12 @@ record then `JitCall`s that funcidx between `JitRun`s — so a delegate
 (`guest_jit_listener_reenters_cell_on_key`). The *shipped* cell still keeps
 `listener=0` (the BIOS protocol, host runs fetch/select), and the
 `libwasm_get__*` event-property getter bridge is still open; `start_ops` is
-the VGA face. Windowing is **B92** later ([`plan-iframe.md`](plan-iframe.md)).
+the VGA face. **B115 adds the pointer lane**: `TabDrain` latches the last
+`ABS_X`/`ABS_Y` + a `BTN_LEFT` `PTR_CLICK` flag, and `trap_tab` then runs
+`DomtPtr` (`guest_jit`), which scales to display px, `DomtHit`s the topmost
+`F_VIS` rect node with `N_LEV & EV_CLICK`, fills `__ev_obj` (`clientX`/
+`clientY`/target-handle) and `JitCall`s the node's wasm funcidx — a real
+tablet `BTN_LEFT` re-enters the cell the same way `DomtKey` re-enters on a
+key (`guest_jit_listener_reenters_cell_on_click`). One click per trap; no
+capture/bubble walk yet. Windowing is **B92** later
+([`plan-iframe.md`](plan-iframe.md)).

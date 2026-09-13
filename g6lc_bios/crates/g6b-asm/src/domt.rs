@@ -1917,6 +1917,168 @@ fn domt_key_node() -> Vec<Op> {
     ops
 }
 
+/// `DomtHit(a0=px, a1=py, a2=ev_mask) -> a0 = idx | NONE` — bounded hit-test.
+/// Walks the live `__dom` arena and returns the *topmost* node that is
+/// `F_VIS`, contains the display-px point, and latches `N_LEV & ev_mask`.
+/// "Topmost" is the last match in document order — children append after
+/// their parents and paint over them, so the highest index under the point
+/// wins. Zero-size (unlaid) rects can never contain a point. There is no
+/// capture/bubble walk — the single topmost listening node is the target.
+fn domt_hit_node() -> Vec<Op> {
+    let mut ops = vec![
+        Op::Comment(
+            "DomtHit(px,py,mask) — topmost F_VIS rect node with the event bit".into(),
+        ),
+        Op::Glob("DomtHit".into()),
+        Op::Label("DomtHit".into()),
+        // t0 = H_NEXT, t5 = first node record, t1 = idx, t2 = best. Scan from
+        // idx0 — the root can carry a document-level listener too; a deeper
+        // (later) hit still overrides it.
+        la(T5, Addr::DomT),
+        lw(T0, T5, H_NEXT),
+        addi(T5, T5, DOMT_HDR as i32),
+        li(T1, 0),
+        li(T2, NONE),
+        Op::Label("dph_loop".into()),
+        bgeu(T1, T0, "dph_done"),
+        slli(T3, T1, 6),
+        add(T3, T3, T5),
+        lw(T4, T3, N_FLAGS),
+        Op::Andi {
+            rd: T4,
+            rs: T4,
+            imm: F_VIS as i32,
+        },
+        beq(T4, X0, "dph_next"),
+        lw(T4, T3, N_LEV),
+        and_(T4, T4, A2),
+        beq(T4, X0, "dph_next"),
+        // x <= px < x+w
+        lw(T4, T3, N_X),
+        bltu(A0, T4, "dph_next"),
+        lw(T6, T3, N_W),
+        add(T4, T4, T6),
+        bgeu(A0, T4, "dph_next"),
+        // y <= py < y+h
+        lw(T4, T3, N_Y),
+        bltu(A1, T4, "dph_next"),
+        lw(T6, T3, N_H),
+        add(T4, T4, T6),
+        bgeu(A1, T4, "dph_next"),
+        mv(T2, T1),
+        Op::Label("dph_next".into()),
+        addi(T1, T1, 1),
+        j("dph_loop"),
+        Op::Label("dph_done".into()),
+        mv(A0, T2),
+        ret(),
+    ];
+    ops.shrink_to_fit();
+    ops
+}
+
+/// `DomtPtr` — the tree-DOM pointer consumer. Runs after `TabDrain` in
+/// `trap_tab`: when `PTR_CLICK` is latched it scales the last `PTR_X`/`PTR_Y`
+/// (tablet `0..=VIO_ABS_MAX`) into display px via `DISP_SEL_W`/`DISP_SEL_H`,
+/// `DomtHit`s the topmost `EV_CLICK` node, fills `__ev_obj` with the click
+/// coordinates + node-handle target, and `JitCall`s the node's wasm
+/// `add_event_listener` funcidx — the same between-`JitRun`s re-entry
+/// `DomtKey` uses for keys. Bumps `H_DIRTY` so the tick repaints; no paint
+/// here. Trap-context leaf (saved s0-s2 only).
+fn domt_ptr_node() -> Vec<Op> {
+    let mut ops = vec![
+        Op::Comment(
+            "DomtPtr — PTR_CLICK → scale → DomtHit → __ev_obj(click) → JitCall → dirty"
+                .into(),
+        ),
+        Op::Glob("DomtPtr".into()),
+        Op::Label("DomtPtr".into()),
+        addi(SP, SP, -32),
+        sd(RA, SP, 24),
+        sd(S0, SP, 16),
+        sd(S1, SP, 8),
+        sd(S2, SP, 0),
+        // s2 = __vio base. Consume a single pending click per trap.
+        la(S2, Addr::VioBss),
+        lw(T0, S2, crate::vio::PTR_CLICK),
+        beq(T0, X0, "dp_ret"),
+        sw(X0, S2, crate::vio::PTR_CLICK),
+        // px = PTR_X * DISP_SEL_W >> 15 (VIO_ABS_MAX+1 = 0x8000 = 2^15).
+        lw(T0, S2, crate::vio::PTR_X),
+        lw(T1, S2, crate::vio::DISP_SEL_W),
+        bne(T1, X0, "dp_w_ok"),
+        li(T1, 640),
+        Op::Label("dp_w_ok".into()),
+        mul(T0, T0, T1),
+        Op::Srli {
+            rd: T0,
+            rs: T0,
+            shamt: 15,
+        },
+        mv(S0, T0),
+        // py = PTR_Y * DISP_SEL_H >> 15.
+        lw(T0, S2, crate::vio::PTR_Y),
+        lw(T1, S2, crate::vio::DISP_SEL_H),
+        bne(T1, X0, "dp_h_ok"),
+        li(T1, 480),
+        Op::Label("dp_h_ok".into()),
+        mul(T0, T0, T1),
+        Op::Srli {
+            rd: T0,
+            rs: T0,
+            shamt: 15,
+        },
+        mv(S1, T0),
+        // DomtHit(px, py, EV_CLICK) → a0 = node idx | NONE.
+        mv(A0, S0),
+        mv(A1, S1),
+        li(A2, EV_CLICK),
+        jal("DomtHit"),
+        li(T1, NONE),
+        beq(A0, T1, "dp_ret"),
+        mv(T2, A0),
+        // node record → t6; need a wasm funcidx listener (N_LISTEN >= LSN_FUNC).
+        slli(T6, T2, 6),
+        la(T3, Addr::DomT),
+        add(T6, T6, T3),
+        addi(T6, T6, DOMT_HDR as i32),
+        lw(T3, T6, N_LISTEN),
+        li(T1, LSN_FUNC),
+        bltu(T3, T1, "dp_ret"), // 0 (BIOS) / LSN_DEMO / reserved-low → no wasm
+        // Fill `__ev_obj` with the click event, then `JitCall(funcidx)` re-enters
+        // the cell between JitRuns. `code`=BTN_LEFT, `value`=1 (press),
+        // `clientX`/`clientY` = display-px, `target` = node handle (index+1).
+        la(T5, Addr::EvObj),
+        li(T1, EV_CLICK),
+        sw(T1, T5, EVO_TYPE),
+        li(T1, crate::vio::VIO_BTN_LEFT),
+        sw(T1, T5, EVO_CODE),
+        li(T1, 1),
+        sw(T1, T5, EVO_VALUE),
+        addi(T1, T2, 1),
+        sw(T1, T5, EVO_TARGET),
+        sw(S0, T5, EVO_CX),
+        sw(S1, T5, EVO_CY),
+        addi(A0, T3, -(LSN_FUNC as i32)), // funcidx = N_LISTEN - LSN_FUNC
+        li(A1, 1),                       // nargs=1 — Listener::Wasm calls fn(ev)
+        mv(A2, T5),
+        jal("JitCall"),
+        la(T6, Addr::DomT),
+        lw(T1, T6, H_DIRTY),
+        addi(T1, T1, 1),
+        sw(T1, T6, H_DIRTY),
+        Op::Label("dp_ret".into()),
+        ld(RA, SP, 24),
+        ld(S0, SP, 16),
+        ld(S1, SP, 8),
+        ld(S2, SP, 0),
+        addi(SP, SP, 32),
+        ret(),
+    ];
+    ops.shrink_to_fit();
+    ops
+}
+
 /// `DomtLayout` — bounded block flow. Node rects are computed top-down:
 /// the root spans the `__disp` output minus margins; each visible child is a
 /// block row stacked under the previous sibling. A text node's height is one
@@ -2702,6 +2864,8 @@ pub fn nodes(spec: &BoardSpec) -> Vec<Node> {
             v.extend(lw_lits_node());
             v.extend(domt_demo_node());
             v.extend(domt_key_node());
+            v.extend(domt_hit_node());
+            v.extend(domt_ptr_node());
             v.extend(domt_layout_node(spec));
             v.extend(domt_raster_node(spec));
             v.extend(domt_boot_node(spec));

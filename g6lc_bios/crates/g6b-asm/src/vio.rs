@@ -27,7 +27,8 @@ use crate::encode::{
     VIO_GPU_F_VIRGL, VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING,
     VIO_GPU_RESOURCE_CREATE_2D, VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_OK_DISPLAY_INFO,
     VIO_GPU_RESP_OK_NODATA, VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_FROM_HOST_3D,
-    VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_EV_KEY, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS,
+    VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_EV_ABS, VIO_INP_EV_KEY, VIO_MAGIC, VIO_MMIO_BASE,
+    VIO_MMIO_SLOTS,
     VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_DRV_FEATURES, VIO_REG_DRV_FEATURES_SEL, VIO_REG_FEATURES,
     VIO_REG_FEATURES_SEL, VIO_REG_ISR_ACK, VIO_REG_ISR_STATUS, VIO_REG_QUEUE_AVAIL,
     VIO_REG_QUEUE_DESC, VIO_REG_QUEUE_NOTIFY, VIO_REG_QUEUE_NUM, VIO_REG_QUEUE_NUM_MAX,
@@ -225,6 +226,17 @@ pub const TAB_USED_OFF: i32 = 0x720;
 pub const TAB_EVBUF_OFF: i32 = 0x770;
 /// Shadow of the last-consumed tablet used idx.
 pub const TAB_LAST_USED: i32 = 0x7b0;
+/// Pointer scratch — `TabDrain` decodes each consumed `virtio_input_event`
+/// into the last-seen `ABS_X`/`ABS_Y` (tablet units `0..=VIO_ABS_MAX`) and
+/// latches `PTR_CLICK` on a `BTN_LEFT` press. A later `DomtPtr` consumes the
+/// click flag, scales to display px, hit-tests `__dom` and dispatches
+/// `EV_CLICK`. These are plain `__vio` BSS slots (no lock — the eventq drain
+/// is single-writer from `trap_tab`).
+pub const PTR_X: i32 = 0x7b4;
+/// Last-seen tablet `ABS_Y`.
+pub const PTR_Y: i32 = 0x7b8;
+/// Pending primary-click flag — set by `TabDrain`, consumed by `DomtPtr`.
+pub const PTR_CLICK: i32 = 0x7bc;
 /// Linux `EV_KEY` codes the menu navigator consumes (virtio-input carries
 /// the kernel's `KEY_*` codes verbatim — QEMU `sendkey down`/`ret`).
 pub const VIO_KEY_ESC: i64 = 1;
@@ -3309,6 +3321,98 @@ pub fn tab_drain_node(o: Object) -> Node {
     ];
     putc_str(&mut ops, "TAB\n");
     ops.extend([
+        // T3 = consumed buffer idx → decode the `virtio_input_event` at
+        // `TAB_EVBUF + T3*8` (`{type:u16, code:u16, value:u32}`). Track the
+        // last `ABS_X`/`ABS_Y` into `PTR_X`/`PTR_Y` and latch `PTR_CLICK` on a
+        // `BTN_LEFT` press so `DomtPtr` can turn the sequence into an
+        // `EV_CLICK` dispatch. T0/T1/T2 are scratch here — the re-post below
+        // recomputes T1/T2 and keeps T3.
+        Op::Slli {
+            rd: T0,
+            rs: T3,
+            shamt: 3,
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T0,
+            imm: TAB_EVBUF_OFF,
+        },
+        Op::Add {
+            rd: T0,
+            rs1: T0,
+            rs2: T5,
+        },
+        Op::Lhu {
+            rd: T1,
+            rs: T0,
+            off: 0,
+        },
+        Op::Lhu {
+            rd: T2,
+            rs: T0,
+            off: 2,
+        },
+        lw(T0, T0, 4),
+        // T1 = type, T2 = code, T0 = value.
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -(VIO_INP_EV_ABS as i32),
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "tpd_ev_key".into(),
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "tpd_abs_y".into(),
+        },
+        sw(T0, T5, PTR_X),
+        jump("tpd_ev_done"),
+        Op::Label("tpd_abs_y".into()),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: -(VIO_ABS_Y as i32),
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "tpd_ev_done".into(),
+        },
+        sw(T0, T5, PTR_Y),
+        jump("tpd_ev_done"),
+        Op::Label("tpd_ev_key".into()),
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: 2,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "tpd_ev_done".into(),
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: -(VIO_BTN_LEFT as i32),
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "tpd_ev_done".into(),
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: X0,
+            to: "tpd_ev_done".into(),
+        },
+        Op::Li { rd: T0, imm: 1 },
+        sw(T0, T5, PTR_CLICK),
+        Op::Label("tpd_ev_done".into()),
         lw(T2, T5, TAB_AVAIL_OFF),
         Op::Srli {
             rd: T2,

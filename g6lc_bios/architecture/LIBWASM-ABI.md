@@ -434,7 +434,10 @@ details that differ and must not be conflated with the host table:
   and a nonzero `cb` funcidx is biased to `0x100+idx` so `DomtKey` can route it
   back into the cell through `JitCall(funcidx,[ev])` — filling `__ev_obj` first.
   So `listener=0` still latches `N_LEV` with `N_LISTEN=0`, while a real delegate
-  latches `N_LISTEN >= 0x100` and re-enters the cell on dispatch.
+  latches `N_LISTEN >= 0x100` and re-enters the cell on dispatch. Dispatch is
+  two lanes over one `__ev_obj` record: `DomtKey` focus-fires `EV_KEYDOWN`
+  (`code`=keycode) and `DomtPtr`+`DomtHit` point-fires `EV_CLICK` off the
+  tablet `PTR_*` scratch (`clientX`/`clientY`=display-px, `target`=handle).
 - **Linear-memory offsets, not absolutes.** `fetch`/`puts`/`add__string` get the
   `__wasm_mem` base added (`LwFetch`/`LwAddStr`); the legacy `jit.rs` path
   already resolves `Addr::WasmData` absolutes, so the shim lives only in the

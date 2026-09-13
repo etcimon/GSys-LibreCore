@@ -1193,10 +1193,20 @@ pub fn test_module_m3() -> Vec<u8> {
 /// ```
 #[cfg(test)]
 pub fn test_module_delegate() -> Vec<u8> {
-    // `__wasm_mem` string pool (data segment): "id"@0x10, "x"@0x12, "keydown"@0x13.
+    test_module_delegate_ev(b"keydown")
+}
+
+/// Same cell as [`test_module_delegate`] but the listener is registered for a
+/// different event type — `b"click"` wires the `EV_CLICK`/`DomtPtr` lane, so a
+/// real tablet `BTN_LEFT` press re-enters `$delegate`. The event string is the
+/// tail of the `__wasm_mem` pool (id@0x10, x@0x12, ev@0x13).
+#[cfg(test)]
+pub fn test_module_delegate_ev(ev: &[u8]) -> Vec<u8> {
+    // `__wasm_mem` string pool (data segment): "id"@0x10, "x"@0x12, ev@0x13.
     const ID: u8 = 0x10;
     const X: u8 = 0x12;
     const KD: u8 = 0x13;
+    let tylen = ev.len() as u8;
     const ORD: u8 = 14; // libwasm NodeType::button
     const DELEGATE: u8 = 5; // $delegate func index (imports 0..=4 first)
     let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
@@ -1264,10 +1274,10 @@ pub fn test_module_delegate() -> Vec<u8> {
         0x10, 0x03,                       // setProperty(el,"id","x") — len-first ABI
         0x10, 0x00, 0x20, 0x00, 0x10, 0x02, // appendChild(getRoot(), el)
         0x41, X, 0x41, 0x01,              // tptr=X  tlen=1   ("x")     ptr-first ABI
-        0x41, KD, 0x41, 0x07,             // typtr=KD tylen=7 ("keydown")
+        0x41, KD, 0x41, tylen,            // typtr=KD tylen (the event name)
         0x41, DELEGATE,                   // cb = $delegate funcidx 5
         0x41, 0x00,                       // capture = 0
-        0x10, 0x04,                       // add_event_listener("x","keydown",5,0)
+        0x10, 0x04,                       // add_event_listener("x",<ev>,5,0)
         0x0b,
     ]);
     let mut code = Vec::new();
@@ -1278,13 +1288,14 @@ pub fn test_module_delegate() -> Vec<u8> {
     code.extend_from_slice(&bst);
     section(&mut out, 10, &code);
 
-    // data @0x10: "id" "x" "keydown" packed contiguously
+    // data @0x10: "id" "x" <ev> packed contiguously
     let mut data = Vec::new();
     push_uleb(&mut data, 1);
     data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]); // active mem0, off=i32.const 0x10
-    let body = b"idxkeydown"; // id@0x10, x@0x12, keydown@0x13
+    let mut body = b"idx".to_vec(); // id@0x10, x@0x12, ev@0x13
+    body.extend_from_slice(ev);
     push_uleb(&mut data, body.len() as u32);
-    data.extend_from_slice(body);
+    data.extend_from_slice(&body);
     section(&mut out, 11, &data);
     out
 }
@@ -2101,6 +2112,108 @@ mod tests {
         assert!(
             s.domt_live >= 3,
             "JitCall→delegate appended a node (live={}): {}",
+            s.domt_live,
+            s.console
+        );
+    }
+
+    /// Listener re-entry on a real *pointer* event — the `DomtPtr`/`EV_CLICK`
+    /// lane. The delegate cell registers `add_event_listener("x","click",_)`.
+    /// A probe run lays out `__dom` and reads the `<button>`'s rect; the real
+    /// run then feeds the canned tablet `ABS_X`/`ABS_Y`/`BTN_LEFT` poke at the
+    /// button's centre (`WebFeed::hint_abs`), so a *real* `trap_tab` →
+    /// `TabDrain` latches `PTR_CLICK`, `DomtPtr` scales ABS→display-px,
+    /// `DomtHit`s the button and `JitCall`s `$delegate` — which `appendChild`s.
+    /// `__dom` growth proves the pointer press re-entered the cell.
+    #[test]
+    fn guest_jit_listener_reenters_cell_on_click() {
+        use g6b_asm::encode::RA;
+        use g6b_asm::exec::{run_module, run_module_web_feed, GuestWebPresent, WebFeed};
+        use g6b_asm::Op;
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+
+        // Splice `jal DomtLayout` right after `jal JitRun` so the button has a
+        // laid-out rect before the first tablet IRQ can arrive (the timer tick
+        // would lay it out eventually, but the canned poke lands on the first
+        // guest Halt — the splice makes the ordering deterministic).
+        let build = |m: &mut g6b_asm::Module| {
+            install_guest(m, &test_module_delegate_ev(b"click"))
+                .expect("click-delegate cell installs");
+            let mut placed = false;
+            for n in &mut m.nodes {
+                if let Some(pos) = n
+                    .ops
+                    .iter()
+                    .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+                {
+                    n.ops
+                        .splice(pos + 1..pos + 1, vec![Op::Jal { rd: RA, to: "DomtLayout".into() }]);
+                    placed = true;
+                    break;
+                }
+            }
+            assert!(placed, "no JitRun call site to splice after");
+        };
+
+        // Phase 1 — probe: lay out `__dom` and read the `<button>`'s display-px
+        // rect (the non-root node, `parent == 0`). The stray (0,0) canned poke
+        // misses it, so `__dom` stays root+button.
+        let mut probe = g6b_asm::analyze::kstart(&spec);
+        build(&mut probe);
+        let sp = run_module(&spec, &probe, 0x8020_0000).unwrap();
+        assert!(!sp.console.contains("TRAP-"), "{}", sp.console);
+        let btn = sp
+            .domt_nodes
+            .iter()
+            .find(|n| n.0 != 0)
+            .expect("a non-root button node is laid out");
+        let (bx, by, bw, bh) = (btn.3, btn.4, btn.5, btn.6);
+        assert!(bw > 0 && bh > 0, "button has a laid-out rect: {:?}", btn);
+        // Button centre in display px → tablet units (`0..=0x7fff` over the
+        // `DISP_SEL` extent). `DomtPtr` scales `abs * disp >> 15`, so invert it.
+        let (dw, dh) = (640u32, 480u32);
+        let abs_x = (bx + bw / 2) * 0x8000 / dw;
+        let abs_y = (by + bh / 2) * 0x8000 / dh;
+
+        // Phase 2 — real click: the canned tablet poke delivers the ABS pair +
+        // BTN_LEFT press at the button's centre through `trap_tab`.
+        struct ClickFeed {
+            x: u32,
+            y: u32,
+        }
+        impl WebFeed for ClickFeed {
+            fn initial(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn on_guest_ui(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn hint_abs(&self) -> Option<(u32, u32)> {
+                Some((self.x, self.y))
+            }
+        }
+        let mut feed = ClickFeed { x: abs_x, y: abs_y };
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        build(&mut m);
+        let s = run_module_web_feed(&spec, &m, 0x8020_0000, 0, &mut feed).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        assert!(s.domt_listen >= 1, "button click listener: {}", s.console);
+        // Re-entry: the click hit the button and `$delegate` appended a node,
+        // so `__dom` grew past the initial root+button.
+        assert!(
+            s.domt_live >= 3,
+            "tablet click→JitCall→delegate appended a node (live={}): {}",
             s.domt_live,
             s.console
         );
