@@ -486,7 +486,13 @@ Exec-model evidence (`guest_jit_executes_shipped_cell`): 252 funcs translate,
 `_start` completes, `domt_next=56 live=56 ids=47 listen=8`, and `DomtRaster`
 paints the cell's own tree into `__scan_fb` with no `DomtBoot` fallback. QEMU
 verification landed in B118 (input→`H_WST`→`DlPaint`→scanout on real
-virtio-gpu); listener re-entry landed in B114–B116.
+virtio-gpu); listener re-entry landed in B114–B116 and was **real-QEMU-verified
+in B120** — `jit_cell="delegate"` (`delegate_key_cell`) registers a `keydown`
+funcidx listener on the root (default `H_FOCUS`), and a `send-key` press
+re-entered the cell through `DomtKey`→`JitCall`, growing `__dom` and repainting
+a new row (14,713 px scanout delta, no traps). The pointer/click lane
+(`DomtPtr`→`JitCall`) is identical machinery but not QEMU-driven: `-display
+none` can't steer `virtio-tablet` reliably (see the B120 todo entry).
 
 ## 8. Completion plan
 
