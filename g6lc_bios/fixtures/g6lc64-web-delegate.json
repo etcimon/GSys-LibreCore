@@ -1,0 +1,172 @@
+{
+  "schema_version": 1,
+  "profile": "full",
+  "product": "g6lc64-web-delegate",
+  "isa": {
+    "xlen": 64,
+    "march": "rv64imafdc",
+    "mmu": "sv39",
+    "extensions": {
+      "c": "live",
+      "v": "absent",
+      "f": "live",
+      "d": "live"
+    }
+  },
+  "kernel": {
+    "shape": "zeal",
+    "web": {
+      "enable": true
+    },
+    "gr": {
+      "enable": true,
+      "w": 640,
+      "h": 480,
+      "colors": 16,
+      "backend": "virtio-gpu"
+    },
+    "proxy": {
+      "enable": true,
+      "link": "hdmi",
+      "dpi": 192,
+      "fps": 0,
+      "detected_hz": 120,
+      "high_w": 1920,
+      "high_h": 1080,
+      "scale_mode": "dpi",
+      "gl": false
+    },
+    "cli": {
+      "enable": true,
+      "boot": "auto",
+      "rows": 25,
+      "cols": 80,
+      "scrollback": 512,
+      "mouse": true,
+      "manual": true,
+      "vi": true,
+      "fs": true,
+      "fw": true,
+      "autoboot": {
+        "enable": true,
+        "timeout_ms": 0,
+        "order": "live-first",
+        "bios_ui": true
+      }
+    },
+    "tls": {
+      "enable": true,
+      "https": true,
+      "serve": true,
+      "rsa": true,
+      "ecdsa": true,
+      "certificates": true
+    },
+    "http": {
+      "enable": true,
+      "http1": true,
+      "http2": true,
+      "proxy_js": true
+    },
+    "params": {
+      "clocks": true,
+      "edk2": true,
+      "uboot": true,
+      "bootloader": true,
+      "cpu_hz": 1000000000,
+      "uart_baud": 115200,
+      "next": "opensbi"
+    },
+    "ui": "html-js",
+    "wasm": {
+      "enable": true,
+      "jit": true,
+      "guest_jit": true,
+      "jit_cell": "delegate"
+    },
+    "display": "html-js",
+    "flash": {
+      "enable": true,
+      "self_update": true,
+      "backend": "mailbox",
+      "image": "bios",
+      "url": "https://fw.gsys.dev/g6lc_bios.elf"
+    }
+  },
+  "connectors": {
+    "core": [
+      "sbi",
+      "pmu",
+      "opp"
+    ],
+    "apu": [
+      "uart",
+      "gpio",
+      "spi"
+    ],
+    "uncore": []
+  },
+  "peripherals": [
+    {
+      "id": "uart0",
+      "class": "uart",
+      "model": "ns16550",
+      "base": "0x10000000"
+    },
+    {
+      "id": "gpio0",
+      "class": "gpio",
+      "model": "mmio-gpio",
+      "base": "0x40001000"
+    },
+    {
+      "id": "spi0",
+      "class": "blk",
+      "model": "sifive-spi-nor",
+      "base": "0x20000000"
+    }
+  ],
+  "memory": {
+    "dram_base": "0x80000000",
+    "dram_len": "0x40000000",
+    "text_offset": "0x200000"
+  },
+  "harts": {
+    "count": 2,
+    "cores": 1,
+    "threads": 2
+  },
+  "core": {
+    "issue_ports": 2,
+    "ooo": false,
+    "stream": false
+  },
+  "uncore": {
+    "clint": true,
+    "plic": true,
+    "storage": true
+  },
+  "entry": {
+    "hotkey": "DEL",
+    "timeout_ms": 2000
+  },
+  "holyc": {
+    "fast_init": true,
+    "dual_band": {
+      "uart": true,
+      "tcp": {
+        "enable": false
+      }
+    }
+  },
+  "postboot": {
+    "enable": "never",
+    "access": "view"
+  },
+  "net_expose": {
+    "mode": "never"
+  },
+  "loopback": {
+    "enable": false
+  }
+}
