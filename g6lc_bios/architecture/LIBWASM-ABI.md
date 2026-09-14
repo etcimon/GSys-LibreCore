@@ -491,13 +491,19 @@ in B120** — `jit_cell="delegate"` (`delegate_key_cell`) registers a `keydown`
 funcidx listener on the root (default `H_FOCUS`), and a `send-key` press
 re-entered the cell through `DomtKey`→`JitCall`, growing `__dom` and repainting
 a new row (14,713 px scanout delta, no traps). The pointer/click lane
-(`DomtPtr`→`JitCall`) is identical machinery and got a bootable cell in B121 —
+(`DomtPtr`→`JitCall`) is identical machinery, got a bootable cell in B121 —
 `jit_cell="delegate-click"` (`delegate_click_cell`) puts the `click` listener on
-the full-display root so any tablet press hit-tests it — but it stays
-exec-verified only: injected pointer events reach QEMU's console yet never fill
-the guest `virtio-tablet` eventq on headless WSL2 (`virtio_input_send` needs a
-trailing `EV_SYN`/`SYN_REPORT` to flush and drops when `!vinput->active`; see
-the B120/B121 todo entries).
+the document root — and was **real-QEMU-verified in B122**: an injected
+`input-send-event` abs+btn reaches the tablet's eventq (`VIPUSH` pops/fills/
+pushes + notifies), `trap_tab`→`TabDrain` latches `PTR_CLICK`, `DomtPtr`→
+`DomtHit` selects the root (its `N_H` is clamped to the display height so a
+document-level listener hit-tests anywhere on the viewport), `JitCall`
+re-enters the delegate which `appendChild`s a `<button>` (`H_NEXT` 3→4), and
+`H_DIRTY` repaints — screendump A→B/B→C each delta, `0` traps. Two guest bugs
+were fixed on the way: the DeviceID-18 scan mislabeled the lower-addressed
+*tablet* as the keyboard (now classified by the `EV_ABS` capability bitmap via
+the mmio config window, not slot order), and the root was content-height not
+viewport-height (see the B122 todo entry).
 
 ## 8. Completion plan
 

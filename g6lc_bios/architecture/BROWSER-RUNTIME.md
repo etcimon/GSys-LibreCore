@@ -120,9 +120,12 @@ UART `Ui` and mailbox doorbell `U` are a UI-hart tick + pack
 Tablet `EV_ABS` (`ABS_X`/`ABS_Y`, QEMU 0..=32767) and mouse `EV_REL` map
 to `dispatch_pointer` `mousemove`; `BTN_LEFT` clicks at the last pointer.
 `qemu-args` attaches `virtio-keyboard-device` then `virtio-tablet-device`.
-Guest `InpInit` claims the first DeviceID 18 for VGA `INP_KQ`; `TabInit`
-claims the second (`VIRTIO-TABLET-OK`). The exec model parks that tablet
-on virtio-mmio slot 3 (PLIC irq 4) so source 3 stays the mailbox.
+The DeviceID-18 scan classifies each device by **capability, not slot
+order** (B122): it writes `select=EV_BITS`/`subsel=EV_ABS` into the
+mmio config window and reads back the `EV_ABS` bitmap length — nonzero
+⇒ `TabInit`/tablet (`VIRTIO-TABLET-OK slot= irq=`), else `InpInit`/
+keyboard for `INP_KQ`. The exec model parks that tablet on virtio-mmio
+slot 3 (PLIC irq 4) so source 3 stays the mailbox.
 `host_inp_tab_kick` writes `EV_ABS` then `BTN_LEFT` into the tablet
 eventq (`TabDrain` re-posts, no `INP_KQ`) so a VNC click activates the
 hinted tab. `TabDrain` also decodes each event into `PTR_X`/`PTR_Y`/
