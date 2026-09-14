@@ -491,8 +491,13 @@ in B120** — `jit_cell="delegate"` (`delegate_key_cell`) registers a `keydown`
 funcidx listener on the root (default `H_FOCUS`), and a `send-key` press
 re-entered the cell through `DomtKey`→`JitCall`, growing `__dom` and repainting
 a new row (14,713 px scanout delta, no traps). The pointer/click lane
-(`DomtPtr`→`JitCall`) is identical machinery but not QEMU-driven: `-display
-none` can't steer `virtio-tablet` reliably (see the B120 todo entry).
+(`DomtPtr`→`JitCall`) is identical machinery and got a bootable cell in B121 —
+`jit_cell="delegate-click"` (`delegate_click_cell`) puts the `click` listener on
+the full-display root so any tablet press hit-tests it — but it stays
+exec-verified only: injected pointer events reach QEMU's console yet never fill
+the guest `virtio-tablet` eventq on headless WSL2 (`virtio_input_send` needs a
+trailing `EV_SYN`/`SYN_REPORT` to flush and drops when `!vinput->active`; see
+the B120/B121 todo entries).
 
 ## 8. Completion plan
 
