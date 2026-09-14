@@ -1388,6 +1388,10 @@ struct Csr {
     inp_bufs: Vec<u16>,
     /// Host event injection latch (one canned EV_KEY per run).
     inp_poked: bool,
+    /// virtio-input config window selector (`select` byte0 | `subsel` byte1)
+    /// written by the driver's capability probe. The keyboard reports no
+    /// `EV_ABS` bits, so its `EV_BITS`/`EV_ABS` size reads back 0.
+    inp_cfgsel: u32,
     /// Modelled virtio-tablet at slot 3 (`-device virtio-tablet-device`).
     /// Slot 2 is unused so PLIC source 3 remains the mailbox. Irq = 1+3 → 4.
     tab_status: u32,
@@ -1404,6 +1408,11 @@ struct Csr {
     tab_avail_seen: u16,
     tab_bufs: Vec<u16>,
     tab_poked: bool,
+    /// virtio-input config window selector (`select` byte0 | `subsel` byte1)
+    /// written by the driver's capability probe. The tablet reports `EV_ABS`,
+    /// so `EV_BITS`/`EV_ABS` reads back a nonzero bitmap length — that is how
+    /// the probe tells it apart from the keyboard regardless of slot order.
+    tab_cfgsel: u32,
     /// Modelled pmode geometry (BoardSpec `kernel.gr.w/h`).
     vio_disp_w: u32,
     vio_disp_h: u32,
@@ -2777,6 +2786,11 @@ fn inp_load(csr: &Csr, reg: u64, dev_id: u32) -> u32 {
         0x44 => u32::from(csr.inp_ready),
         0x60 => csr.inp_isr,
         0x70 => csr.inp_status,
+        // virtio-input config window `size` field (offset 0x102): the keyboard
+        // reports EV_KEY/EV_REP/EV_LED only — an `EV_BITS`/`EV_ABS` select
+        // (0x0311) yields no bitmap, so size reads 0. The probe uses that to
+        // tell the keyboard from the tablet.
+        0x102 => 0,
         _ => 0,
     }
 }
@@ -2791,6 +2805,8 @@ fn inp_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
         0x30 => csr.inp_qsel = v,
         0x38 => csr.inp_qnum = v,
         0x44 => csr.inp_ready = v != 0,
+        // Config window select word (offset 0x100): byte0=select byte1=subsel.
+        0x100 => csr.inp_cfgsel = v,
         0x50 => {
             if csr.inp_ready && csr.inp_qsel == 0 && csr.inp_qdesc != 0 {
                 let avail = csr.inp_qavail;
@@ -2944,6 +2960,16 @@ fn tab_load(csr: &Csr, reg: u64, dev_id: u32) -> u32 {
         0x44 => u32::from(csr.tab_ready),
         0x60 => csr.tab_isr,
         0x70 => csr.tab_status,
+        // virtio-input config window `size` field (offset 0x102): for an
+        // `EV_BITS`/`EV_ABS` select (0x0311) the tablet reports its ABS bitmap
+        // — a nonzero length is how the probe recognises it as the pointer.
+        0x102 => {
+            if csr.tab_cfgsel == 0x0311 {
+                8
+            } else {
+                0
+            }
+        }
         _ => 0,
     }
 }
@@ -2955,6 +2981,8 @@ fn tab_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
         0x30 => csr.tab_qsel = v,
         0x38 => csr.tab_qnum = v,
         0x44 => csr.tab_ready = v != 0,
+        // Config window select word (offset 0x100): byte0=select byte1=subsel.
+        0x100 => csr.tab_cfgsel = v,
         0x50 => {
             if csr.tab_ready && csr.tab_qsel == 0 && csr.tab_qdesc != 0 {
                 let avail = csr.tab_qavail;

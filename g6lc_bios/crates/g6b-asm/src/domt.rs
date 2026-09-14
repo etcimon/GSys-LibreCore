@@ -2310,6 +2310,14 @@ fn domt_layout_node(_spec: &BoardSpec) -> Vec<Op> {
         jal("DomtLay"),
         // store the laid-out total height (root) as the layout watermark.
         sw(A0, S0, H_NRECT),
+        // The root element generates the initial containing block: its box is
+        // the whole viewport, so a document-level listener (e.g. `click` on the
+        // root) is hit by a pointer anywhere on the page — not just inside the
+        // content strip. Clamp the root's laid height up to the display height.
+        lw(T0, S0, DOMT_HDR as i32 + N_H),
+        bgeu(T0, S4, "domt_layout_rootdone"),
+        sw(S4, S0, DOMT_HDR as i32 + N_H),
+        Op::Label("domt_layout_rootdone".into()),
         ld(RA, SP, 40),
         ld(S0, SP, 32),
         ld(S3, SP, 24),

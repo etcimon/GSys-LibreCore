@@ -27,13 +27,13 @@ use crate::encode::{
     VIO_GPU_F_VIRGL, VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING,
     VIO_GPU_RESOURCE_CREATE_2D, VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_OK_DISPLAY_INFO,
     VIO_GPU_RESP_OK_NODATA, VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_FROM_HOST_3D,
-    VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_EV_ABS, VIO_INP_EV_KEY, VIO_MAGIC, VIO_MMIO_BASE,
-    VIO_MMIO_SLOTS,
-    VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_DRV_FEATURES, VIO_REG_DRV_FEATURES_SEL, VIO_REG_FEATURES,
-    VIO_REG_FEATURES_SEL, VIO_REG_ISR_ACK, VIO_REG_ISR_STATUS, VIO_REG_QUEUE_AVAIL,
-    VIO_REG_QUEUE_DESC, VIO_REG_QUEUE_NOTIFY, VIO_REG_QUEUE_NUM, VIO_REG_QUEUE_NUM_MAX,
-    VIO_REG_QUEUE_READY, VIO_REG_QUEUE_SEL, VIO_REG_QUEUE_USED, VIO_REG_STATUS, VIO_ST_ACK,
-    VIO_ST_DRIVER, VIO_ST_DRIVER_OK, VIO_ST_FEATURES_OK,
+    VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_CFG_EV_BITS, VIO_INP_EV_ABS, VIO_INP_EV_KEY, VIO_MAGIC,
+    VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_CONFIG,
+    VIO_REG_DRV_FEATURES, VIO_REG_DRV_FEATURES_SEL, VIO_REG_FEATURES, VIO_REG_FEATURES_SEL,
+    VIO_REG_ISR_ACK, VIO_REG_ISR_STATUS, VIO_REG_QUEUE_AVAIL, VIO_REG_QUEUE_DESC,
+    VIO_REG_QUEUE_NOTIFY, VIO_REG_QUEUE_NUM, VIO_REG_QUEUE_NUM_MAX, VIO_REG_QUEUE_READY,
+    VIO_REG_QUEUE_SEL, VIO_REG_QUEUE_USED, VIO_REG_STATUS, VIO_ST_ACK, VIO_ST_DRIVER,
+    VIO_ST_DRIVER_OK, VIO_ST_FEATURES_OK,
 };
 use crate::{Addr, Node, Op, Purpose};
 use g6b_spec::BoardSpec;
@@ -1779,15 +1779,44 @@ pub fn inp_init_node(o: Object) -> Node {
     ops.push(ret());
     ops.extend([
         Op::Label("ipi_claim".into()),
+        // A DeviceID-18 device is the absolute pointer iff it reports EV_ABS
+        // in its EV_BITS; a keyboard reports EV_KEY/EV_REP/EV_LED only. The
+        // capability — not the scan order — decides which BSS slot claims it:
+        // QEMU `virt` attaches keyboard/tablet to transports in -device order
+        // (top-down), so the tablet can sit at a lower slot than the keyboard
+        // and an order-based claim swaps them. One word store packs the two
+        // selector bytes: select=EV_BITS (config+0), subsel=EV_ABS (config+1);
+        // config+2 then reads back the bitmap byte-length, nonzero iff the
+        // device reports EV_ABS.
+        Op::Li {
+            rd: T2,
+            imm: i64::from(VIO_INP_CFG_EV_BITS | (VIO_INP_EV_ABS << 8)),
+        },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_CONFIG,
+        },
+        Op::Lbu {
+            rd: T3,
+            rs: T0,
+            off: VIO_REG_CONFIG + 2,
+        },
         Op::La {
             rd: T5,
             addr: Addr::VioBss,
         },
+        Op::Bne {
+            rs1: T3,
+            rs2: X0,
+            to: "ipi_claim_tab".into(),
+        },
+        // No EV_ABS → keyboard.
         lw(T2, T5, VIO_INP_OFF),
         Op::Bne {
             rs1: T2,
             rs2: X0,
-            to: "ipi_claim_tab".into(),
+            to: "ipi_next".into(),
         },
         sw(T0, T5, VIO_INP_OFF),
         jump("ipi_next"),
@@ -3251,7 +3280,75 @@ pub fn tab_init_node(o: Object) -> Node {
         },
         sw(T2, T6, VIO_REG_STATUS),
     ]);
-    putc_str(&mut ops, "VIRTIO-TABLET-OK\n");
+    putc_str(&mut ops, "VIRTIO-TABLET-OK slot=");
+    // Same diagnostic the keyboard prints: the claimed PLIC source is
+    // `1 + slot`, and which slot the tablet lands in is decided by the
+    // `-device` order on the QEMU command line — so a "pointer does not
+    // arrive" report reads as one line instead of a bisection.
+    ops.extend([
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T0, T5, VIO_TAB_OFF),
+        Op::Li {
+            rd: T1,
+            imm: VIO_MMIO_BASE as i64,
+        },
+        Op::Sub {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T0,
+            shamt: 12,
+        },
+        Op::Addi {
+            rd: A0,
+            rs: T0,
+            imm: i32::from(b'0'),
+        },
+        Op::Li {
+            rd: A7,
+            imm: crate::encode::SBI_PUTCHAR,
+        },
+        Op::Ecall,
+    ]);
+    putc_str(&mut ops, " irq=");
+    ops.extend([
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        lw(T0, T5, VIO_TAB_OFF),
+        Op::Li {
+            rd: T1,
+            imm: VIO_MMIO_BASE as i64,
+        },
+        Op::Sub {
+            rd: T0,
+            rs1: T0,
+            rs2: T1,
+        },
+        Op::Srli {
+            rd: T0,
+            rs: T0,
+            shamt: 12,
+        },
+        Op::Addi {
+            rd: A0,
+            rs: T0,
+            imm: i32::from(b'0') + VIO_IRQ_BASE as i32,
+        },
+        Op::Li {
+            rd: A7,
+            imm: crate::encode::SBI_PUTCHAR,
+        },
+        Op::Ecall,
+    ]);
+    putc_str(&mut ops, "\n");
     ops.push(Op::Label("ipt_ret".into()));
     ops.push(ret());
     ops.push(Op::Label("ipt_fail".into()));

@@ -259,6 +259,13 @@ pub const VIO_INP_EV_KEY: u32 = 1;
 pub const VIO_INP_EV_REL: u32 = 2;
 /// Linux `EV_ABS` — virtio-tablet axes (`ABS_X`/`ABS_Y`, 0..=`VIO_ABS_MAX`).
 pub const VIO_INP_EV_ABS: u32 = 3;
+/// Device-configuration window — virtio-mmio `VIRTIO_MMIO_CONFIG` offset.
+/// The virtio-input `virtio_input_config` view is `select@0, subsel@1,
+/// size@2, data@8`: write `select`/`subsel`, read `size`/`data`.
+pub const VIO_REG_CONFIG: i32 = 0x100;
+/// `VIRTIO_INPUT_CFG_EV_BITS` — selects the per-event-type capability
+/// bitmap; `subsel` is the `EV_*` type and `size != 0` means it is reported.
+pub const VIO_INP_CFG_EV_BITS: u32 = 0x11;
 /// `scause` exception codes for MMIO access faults — `trap_fault` treats
 /// these inside a bounded probe window as "device absent" and resumes.
 pub const SCAUSE_LOAD_ACCESS: u32 = 5;
