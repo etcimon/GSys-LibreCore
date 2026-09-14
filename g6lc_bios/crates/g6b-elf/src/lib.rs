@@ -308,23 +308,58 @@ mod tests {
         let spec =
             BoardSpec::from_json_str(include_str!("../../../fixtures/g6lc64-web-autoboot.json"))
                 .unwrap();
+        let output = spec.default_output();
         let text = payload_text_with(&spec, Some(g6b_kernel::DirVolumes::new()));
         let module = payload_module(&spec, &text).unwrap();
         let entry = load_addr(&spec).unwrap();
-        let smoke = g6b_asm::exec::run_module(&spec, &module, entry).unwrap();
+        let smoke =
+            g6b_asm::exec::run_module_with_limit(&spec, &module, entry, 192_000_000).unwrap();
         eprintln!(
-            "halt={:?} steps={} faults={}\nconsole:\n{}",
-            smoke.halt, smoke.steps, smoke.faults, smoke.console
+            "halt={:?} steps={} faults={}",
+            smoke.halt, smoke.steps, smoke.faults
         );
-        assert!(smoke.console.contains("AUTOBOOT-PICK bios-ui"));
-        let rows = last_frame_rows(&smoke.console);
-        assert!(!rows.is_empty());
+        let (_, after_pick) = smoke
+            .console
+            .split_once("AUTOBOOT-PICK bios-ui")
+            .expect("BIOS UI selected");
         assert!(
-            rows.iter()
-                .all(|row| !row.contains("AUTOBOOT") && !row.contains("Setup (this payload)")),
-            "{rows:?}"
+            !after_pick.contains("DOM| AUTOBOOT"),
+            "picker repainted after handoff"
+        );
+        assert!(after_pick.contains("WEBDL "), "web scene replayed");
+        assert!(
+            !after_pick.contains("WEBPK "),
+            "display-list fallback was used"
+        );
+        assert_ne!(
+            smoke.halt,
+            g6b_asm::exec::Halt::Limit,
+            "incomplete web frame at {:#x}",
+            smoke.pc
         );
         assert_eq!(smoke.faults, 0);
+        assert!(!after_pick.contains("WASM-JIT-TRAP"));
+        assert!(after_pick.contains("WASM-JIT "), "guest entry completed");
+        assert!(smoke.domt_live > 56, "guest fetched and built field rows");
+        let mut session = g6b_kernel::BrowserSession::new(&spec).unwrap();
+        session.select_menu(&spec.kernel.start_menu).unwrap();
+        let expected = session
+            .paint_css_at(output.w, output.h)
+            .unwrap()
+            .canvas
+            .to_x8r8([0x10, 0x16, 0x20]);
+        assert_eq!(smoke.vio_fb.len(), expected.len());
+        let first = smoke
+            .vio_fb
+            .chunks_exact(4)
+            .zip(expected.chunks_exact(4))
+            .position(|(a, b)| a[..3] != b[..3]);
+        assert!(
+            first.is_none(),
+            "handoff frame differs from host at {:?}",
+            first.map(|p| (p % output.w as usize, p / output.w as usize))
+        );
+        assert_eq!(smoke.cap_tiles, 0);
     }
 
     #[test]

@@ -17,6 +17,7 @@ path = "src/main.rs"
 
 [dependencies]
 g6b-spec = { workspace = true }
+g6b-asm = { workspace = true }
 g6b-design = { workspace = true }
 g6b-doldoc = { workspace = true }
 g6b-kernel = { workspace = true }

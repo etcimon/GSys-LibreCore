@@ -17,6 +17,7 @@ use g6b_spec::{parse_json, stringify_json, BoardSpec, Json};
 use g6b_wasm::{Host, Ldexec, LdexecInit, LibwasmValue, ObjectKind, ObjectTable};
 use std::collections::BTreeMap;
 
+pub mod bootctl;
 pub mod browser;
 pub mod task_services;
 pub mod tasks;
@@ -8012,6 +8013,113 @@ mod tests {
         }
         assert_eq!(word(i * 4), 0, "stream-end marker");
         (w, h, nodes, out)
+    }
+
+    #[test]
+    fn guest_display_list_matches_host_pixels() {
+        use g6b_asm::encode::{T0, T1};
+        use g6b_asm::{Addr, Op};
+        let mut spec =
+            BoardSpec::from_json_str(include_str!("../../../fixtures/g6lc64-web-autoboot.json"))
+                .unwrap();
+        spec.kernel.cli.enable = false;
+        spec.kernel.proxy.gl = false;
+        spec.uncore.plic = false;
+        for (width, height) in [(640, 480), (1920, 1080)] {
+            spec.kernel.proxy.high_w = width;
+            spec.kernel.proxy.high_h = height;
+            let dl = dl_pack(&spec).unwrap().expect("shipped display list");
+            let word =
+                |off: usize| u32::from_le_bytes(dl[off..off + 4].try_into().unwrap()) as usize;
+            let mut live = GuestCellLive::open(&spec).unwrap();
+            let (w, h) = (word(4) as u32, word(8) as u32);
+            assert!(word(12) > 1);
+            for state in 0..word(12) {
+                let off = word(36) + state * 16;
+                let name = std::str::from_utf8(&dl[off..off + 8])
+                    .unwrap()
+                    .trim_end_matches('\0');
+                live.session.select_menu(name).unwrap();
+                let expected = live
+                    .session
+                    .paint_css_at(w, h)
+                    .unwrap()
+                    .canvas
+                    .to_x8r8([0x10, 0x16, 0x20]);
+                let mut module = g6b_asm::analyze::kstart(&spec);
+                module.web_dl = dl.clone();
+                assert!(module.web_pk.is_empty());
+                let node = module
+                    .nodes
+                    .iter_mut()
+                    .find(|node| {
+                        node.ops
+                            .iter()
+                            .any(|op| matches!(op, Op::Jal { to, .. } if to == "WebPaint"))
+                    })
+                    .unwrap();
+                let at = node
+                    .ops
+                    .iter()
+                    .position(|op| matches!(op, Op::Jal { to, .. } if to == "WebPaint"))
+                    .unwrap();
+                node.ops.splice(
+                    at..at,
+                    [
+                        Op::La {
+                            rd: T0,
+                            addr: Addr::DomT,
+                        },
+                        Op::Li {
+                            rd: T1,
+                            imm: state as i64,
+                        },
+                        Op::Sw {
+                            rs2: T1,
+                            rs1: T0,
+                            off: g6b_asm::domt::H_WST,
+                        },
+                    ],
+                );
+                let smoke = g6b_asm::exec::run_module(&spec, &module, 0x8020_0000).unwrap();
+                assert_ne!(
+                    smoke.halt,
+                    g6b_asm::exec::Halt::Limit,
+                    "{name}: pc={:#x}",
+                    smoke.pc
+                );
+                assert_eq!(smoke.faults, 0, "{name}");
+                assert!(smoke.console.contains("WEBDL "), "{name}");
+                assert!(!smoke.console.contains("WEBPK "), "{name}");
+                assert_eq!((smoke.vio_fb_w, smoke.vio_fb_h), (w, h));
+                assert_eq!(smoke.vio_fb.len(), expected.len());
+                let first = smoke
+                    .vio_fb
+                    .chunks_exact(4)
+                    .zip(expected.chunks_exact(4))
+                    .position(|(a, b)| a[..3] != b[..3]);
+                assert!(
+                    first.is_none(),
+                    "{name}: first RGB mismatch {:?}, steps={}",
+                    first.map(|p| (p % w as usize, p / w as usize)),
+                    smoke.steps
+                );
+                assert_eq!(smoke.cap_tiles, 0, "{name}: dirty tiles consumed");
+            }
+        }
+    }
+
+    #[test]
+    fn text_exports_use_the_guest_font() {
+        for ch in 0x20..=0x7e {
+            for row in 0..8 {
+                assert_eq!(
+                    g6b_gr::glyph_row(ch, row),
+                    g6b_asm::font::FONT8X8[g6b_asm::font::glyph_index(ch)][row as usize],
+                    "glyph {ch:#04x}, row {row}"
+                );
+            }
+        }
     }
 
     #[test]

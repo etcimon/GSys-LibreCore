@@ -286,6 +286,16 @@ emit. Inside pixels feed `DlBlendPx`; opaque rects take a `sw` span loop.
 1920×1080 svelte-d scene through `WEBDL`, with `WEBPK` the recorded fallback
 on an absent or invalid list.
 
+Local plan-review gates now compare all packed menu states, at both 640×480
+and 1920×1080, against independently host-rendered RGB pixels with zero
+tolerance after guest `DlPaint` → `VioPaint`. The full guest-JIT picker handoff
+has a separate completed-frame equality gate. See `RENDER-VALIDATION.md`
+§Guest display-list parity for commands and evidence boundaries. The blue
+`setup.ppm`/`proxy.ppm` outputs are legacy text diagnostics; their font is now
+printable-ASCII-complete, not evidence of a broken web or virgl frame.
+Remote g6q/QEMU-GL validation is ongoing in a separate session and was not run
+or modified by this local pass.
+
 ### Refusals, stated rather than implied
 
 - **No AMD/NVIDIA modesetting.** AMD needs AtomBIOS/DCN and modern NVIDIA needs
@@ -591,34 +601,60 @@ selected by BoardSpec:
   `qemu-args --no-gl` for the 2D
   `virtio-gpu-device` fallback. `GL-ADAPTER`/ProxyScale RVV is a
   *guest-side* scale accel listing, not QEMU virgl — do not equate them.
-  **M4 (guest virgl lane):** on a `proxy.gl` board `VioInit` now also accepts
-  `VIRTIO_GPU_F_VIRGL` in the driver-features word, and `VioVirgl` (after
-  `VioScan`, before `VioPaint`) drives a real virgl bring-up over the ctrlq:
+  **M4 (guest virgl composite — B124, hardware-verified):** on a `proxy.gl`
+  board `VioInit` accepts `VIRTIO_GPU_F_VIRGL` in the driver-features word,
+  and `VioVirgl` — scheduled **after `VioPaint`** so the committed frame is
+  resident — drives a real virgl bring-up over the ctrlq:
   `GET_CAPSET_INFO`/`GET_CAPSET` (virgl capset) → `CTX_CREATE`(ctx 1) →
-  `RESOURCE_CREATE_3D`(`RES_RT`, offscreen render target) →
-  `CTX_ATTACH_RESOURCE` → `SUBMIT_3D` carrying the `__virgl_cmd` execbuffer —
-  a `VIRGL_CMD0`-framed textured-quad object/state/`CLEAR`/`DRAW_VBO` stream
-  (`crates/g6b-asm/src/virgl.rs`). `SUBMIT_3D` is a three-descriptor chain
+  `RESOURCE_CREATE_3D`(`RES_RT` offscreen render target with
+  `Y_0_TOP`, `RES_VBO` vertex buffer) → `CTX_ATTACH_RESOURCE`(RES_RT,
+  RES_VBO, **RES_SCAN** — the 2D scanout resource `VioScan` created and
+  `VioPaint` filled via `TRANSFER_TO_HOST_2D`) → `SUBMIT_3D` carrying the
+  `__virgl_cmd` execbuffer → `SET_SCANOUT(RES_RT)` → `RESOURCE_FLUSH(RES_RT)`.
+  The execbuffer (`crates/g6b-asm/src/virgl.rs`, byte-exact against
+  virglrenderer 1.0.0 `virgl_protocol.h`/`vrend_decode.c`, 24 commands /
+  ~960 B at 640×480) creates surface/shaders/vertex-elements/sampler-view/
+  sampler-state/blend/DSA/rasterizer objects, binds them, inline-writes a
+  fullscreen triangle-strip vertex buffer, sets scissor/viewport/
+  framebuffer, `CLEAR`s and `DRAW_VBO`s. Its **sampler view binds
+  `RES_SCAN`** — the draw resamples the *committed display frame* through
+  the GPU into `RES_RT`, which the trailing `SET_SCANOUT`+`FLUSH` then
+  presents: the displayed image is GPU-rastered, not a guest copy — the
+  canonical virgl compositor dataflow. Shaders travel as **TGSI text**
+  (the `tgsi_dump` form `tgsi_text_translate` parses — the binary-token
+  wire was retired in virglrenderer 0.9.0): a `VERT` passthrough and a
+  `FRAG` `TEX …, 2D` sampler; UV follows clip XY without an extra V flip
+  when both resources are `Y_0_TOP` (P0 replay below). `SUBMIT_3D` is a three-descriptor chain
   (32-byte `cmd_submit` OUT + execbuffer OUT + resp WRITE); the exec model
-  gathers *all* OUT descriptors before dispatch (`vio_exec_chain`). The
-  raster lands in a **dedicated offscreen `virgl_fb` surface**, not the 2D
-  scanout `vio_fb` — a `SUBMIT_3D` render never disturbs the committed frame.
-  **M4b (guest readback):** `virgl_fb` is device-side host memory, so
-  `VioVirgl` then `sw`-builds `RESOURCE_ATTACH_BACKING`(`RES_RT`→`__virgl_out`,
-  a `Addr::VirglOut` BSS region) + `TRANSFER_FROM_HOST_3D` to DMA the rendered
-  quad back into guest RAM — `entries[0].addr` carries the resolved
-  `La VirglOut` address, which a static `__virgl_req` record cannot hold, so
-  the readback pair is codegen'd rather than tabled. `Smoke::virgl_out`
-  snapshots the guest buffer via `csr.virgl_backing[RES_RT]`.
-  Exec-model verification: `virgl_submit_executes_textured_quad` (asserts
-  `virgl_out == virgl_fb` byte-exact — the checkerboard lands in guest RAM),
-  `virgl_exec_rasterizes_inline_texture`, `virgl_texture_byte_kill_test`,
-  `virgl_transfer_requires_attached_backing` (unbacked/unknown-resource
-  refusals), plus the negotiated-feature gate (`virgl_live` = `vio_gl` *and*
-  the accepted `VIRTIO_GPU_F_VIRGL` bit, not mere device capability).
-  **Honest bound:** the model parses and rasterizes the stream itself;
-  byte-exact TGSI sampling and real-GPU QEMU rasterization stay open until a
-  host DRM render node exists.
+  gathers *all* OUT descriptors before dispatch (`vio_exec_chain`).
+  **M4b (guest readback):** `VioVirgl` `sw`-builds
+  `RESOURCE_ATTACH_BACKING`(`RES_RT`→`__virgl_out`, an `Addr::VirglOut` BSS
+  region) + `TRANSFER_FROM_HOST_3D` — `entries[0].addr` carries the
+  resolved `La VirglOut` address, which a static `__virgl_req` record
+  cannot hold, so the readback pair is codegen'd rather than tabled.
+  `Smoke::virgl_out` snapshots the guest buffer via
+  `csr.virgl_backing[RES_RT]`; `Smoke::virgl_scanout`/`virgl_flushes` record
+  the RES_RT present.
+  Exec-model verification: `virgl_submit_composites_scanout_frame` (asserts
+  `virgl_out == virgl_fb` byte-exact — the composite lands in guest RAM;
+  `virgl_src` snapshots the sampled `vio_fb` at composite time since a
+  later DOM repaint may rewrite it), `virgl_exec_composites_scanout_texture`,
+  `virgl_texture_byte_kill_test`, `virgl_transfer_requires_attached_backing`,
+  plus the negotiated-feature gate (`virgl_live` = `vio_gl` *and* the
+  accepted `VIRTIO_GPU_F_VIRGL` bit).
+  **Historical execbuffer-only check (`out/virgl/vhw`, B124):** `g6b virgl-dump` writes the
+  byte-exact execbuffer; a dlopen harness feeds it to the *real*
+  `libvirglrenderer.so.1` on WSLg's surfaceless EGL over the D3D12 gallium
+  driver (Intel Arc — no `/dev/dri` needed; the EGL device is the paravirt
+  GPU itself). Result: `submit → 0`, `transfer_read(RES_RT) → 0`,
+  **307,200/307,200 pixels byte-exact** against the uploaded scanout
+  texture — the guest's virgl stream rasterizes verbatim on hardware.
+  **Honest bound:** the QEMU `egl-headless,gl=on` path still needs a host
+  DRM render node (absent on WSL2) — the harness proves the *stream* on a
+  real GPU, while an end-to-end `virtio-gpu-gl-device` boot remains
+  untestable here. `SAMPLE`-form shaders fail `vrend_convert_shader` on
+  this backend (`Illegal shader`); the emitted `TEX …, 2D` form is the
+  accepted canonical variant.
 
 Conformity: HDMI TMDS / DisplayPort PHY stay in `corev_apu` / board (REQUIREMENTS).
 This package emits the register contract, timing metadata and the scaled
@@ -627,3 +663,104 @@ framebuffer, not a TMDS encoder. QEMU still uses `-nographic` plus
 `-global virtio-mmio.force-legacy=false` (the virt machine's mmio transports
 default to the legacy v1 interface, which ignores the v2 queue registers).
 No `-netdev`.
+
+## API-neutral APU: P0 wire audit (2026-09-14)
+
+**Status: partial protocol groundwork, not APU RTL or unchanged-driver GLES2
+completion.** The intended separation is external EGL/GLES clients → unchanged
+Mesa virgl / Linux virtio-gpu → a standard virtio device → resident control
+firmware → an API-neutral hardware graphics engine. HDMI/DP scanout remains a
+separate consumer of completed surfaces. Firmware may compile/manage commands;
+vertex, raster, sampler, fragment and output work must execute on the APU.
+
+### Pinned references and corrected wire fields
+
+`pins.toml [graphics_wire]` records immutable reference revisions: virglrenderer
+1.0.0, Mesa 24.3.4, Linux 6.6 and the published virtio 1.3 specification. They are
+external references, not Cargo dependencies, installed software claims or a
+license to advertise a complete renderer.
+
+The package-local `g6b-asm` `p0_` tests independently pin these wire values:
+
+| Field | Correct value | Previous failure |
+|---|---|---|
+| `VIRTIO_GPU_F_RESOURCE_BLOB` / `CONTEXT_INIT` | bits 3 / 4 | bits 10 / 11 |
+| `RESOURCE_CREATE_3D.bind` render target / vertex buffer | `VIRGL_BIND_*` bits 1 / 4 | current Gallium-style bits 0 / 3; QEMU forwards the wire bind unchanged |
+| `CLEAR.buffers` color target 0 | bit 2 | bit 0 selected depth |
+| Virgl capset 1 | version 1, 308-byte payload | six-word marker placeholder |
+| `GET_CAPSET` response capacity | 332 bytes including header | 48 bytes truncated a real reply |
+
+The model now returns a complete v1-shaped capset **without a GLSL grant**,
+rejects unsupported capset IDs/versions, and no longer describes that same blob
+as virgl2. The handwritten quad model is still not an implementation of general
+shader semantics. The client requests version 1 and reserves the full response;
+this does not implement runtime capability-based renderer selection.
+
+Existing TGSI-text, shader-stage, command-length and state-binding corrections
+are preserved and regression-pinned. Independent runtime probing of installed
+`libvirglrenderer1 1.0.0-1ubuntu2` confirms capset 1 is version 1 / 308 bytes.
+The initial `out/virgl/vhw-p0` diagnostic pre-created its source texture without
+QEMU's `Y_0_TOP` flag. It is not the current full-sequence oracle: replaying the
+real resource flags exposed an extra V flip (all 480 rows inverted), now fixed
+without changing expected pixels. The tracked runner is
+`python tools/bios_regress.py --virgl-reference <virgl-dump-directory>` (Linux,
+Python 3.11+, external libvirglrenderer). It replays 11 request records, validates
+response capacities, waits for submit/readback fences 1 and 2, attaches readback
+storage and checks all pixels. Both llvmpipe and explicit `GALLIUM_DRIVER=d3d12`
+(Intel Arc 140V) return **307,200 exact pixels / zero differences** at 640×480.
+Reports under `out/virgl/p0-sequence{,-d3d}/reference-report.json` identify the
+actual renderer and input/output hashes. Scanout is headless metadata validation;
+this is not a full virtqueue/SG transport, unchanged-Linux-driver or RTL test.
+
+The `p0_` tests now also cover full 64-bit fence echo/checking, response extents,
+invalid/cyclic descriptors, split OUT payloads and truncated submissions, first-error
+termination, 16-bit queue-index wrap on RV32/RV64, and Y_0_TOP UV orientation.
+The client fences SUBMIT_3D before scanout and readback before consumption; error
+responses no longer lead to a false success marker.
+
+OpenWrt boot/probe through `g6lc_qemu` is now green: the existing 24.10.2 image
+boots on project QEMU 10.0.0 through OpenSBI 1.5, reaches a shell using a temporary
+ttyS0 inittab overlay, and discovers virtio device `0x0010`. The guest image has
+no active DRM/virtio-gpu driver or Mesa packages; project QEMU has OpenGL disabled
+and no virgl GPU device. A graphics-enabled guest/emulator and modern virtio-mmio
+are the next prerequisites, separate from host render-node availability. Details:
+[g6lc_qemu guider](../../g6lc_qemu/AGENTS.md).
+
+### The effective stock-driver contract is larger than a small capset
+
+Mesa 24.3.4 `src/gallium/drivers/virgl/virgl_screen.c` unconditionally reports
+fragment derivatives/LOD, NPOT textures and swizzles. Its shader limits include
+256 temporaries and control-flow depth 32; missing texture-size fields select
+large defaults rather than zero capability. A four-invocation quad with 256
+vec4 FP32 temporary registers already requires 16 KiB of logical register
+storage before constants, shader code, pipeline state or spill memory.
+
+Therefore P0 is not closed by a successful fullscreen quad. Before freezing APU
+geometry, enumerate the **effective** driver capabilities and compiler-generated
+instructions, including implicit requirements, and prove every reported feature.
+Use parameterized temporal sharing and SRAM-backed state to reduce hardware,
+not false limits or a patched driver. Do not derive grants from the current
+zero-capability execution-model fixture.
+
+Remaining P0 gates:
+
+- [ ] Capture and validate actual shader/state streams from the pinned unchanged
+      Mesa/Linux client; the BIOS quad is not a substitute.
+- [ ] Validate full resource/SG transfers, asynchronous fencing, response failure
+      handling and context reset/lifetime against the independent backend.
+- [ ] Freeze the truthful effective capset, shader ISA/limits and resource ABI.
+- [ ] Establish a protected firmware-hart/domain and cache/DMA contract; shared
+      physical DRAM is not automatic coherency.
+- [ ] Resolve the package-wide autoboot UI test failure before claiming full
+      package verification. The picker arm-order race is fixed. With `proxy.gl=false`,
+      a diagnostic rerun clears the live row table and produces 8,294,400 correct
+      UI bytes in RAM, but has not transferred them to scanout when the unchanged
+      48-million-step limit stops in `jit_em`. The historical UART row dump is not
+      evidence of the new pixel surface; the original test remains failing.
+
+Verification for this pass: `cargo test -p g6b-asm p0_`, targeted Clippy and
+format checks pass; `python tools/g6b.py regress` passes. Full
+`python tools/g6b.py check` passes independence, Bun tests/build, fmt and workspace
+Clippy but fails at `g6b-elf::picking_bios_ui_replaces_the_picker_rows`. No RTL,
+ISA, DTS, clock/reset, DFT or synthesis change occurred; no silicon timing or
+RISC-V compliance claim follows.

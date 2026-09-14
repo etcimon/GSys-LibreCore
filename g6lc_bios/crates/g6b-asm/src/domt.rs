@@ -19,14 +19,14 @@
 use g6b_spec::BoardSpec;
 
 use crate::encode::{
-    A0, A1, A2, A3, A4, A5, A6, A7, RA, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, SBI_PUTCHAR, SP, T0,
-    T1, T2, T3, T4, T5, T6, X0,
+    A0, A1, A2, A3, A4, A5, A6, A7, RA, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, SBI_PUTCHAR, SP,
+    T0, T1, T2, T3, T4, T5, T6, X0,
 };
 use crate::jfmt::{AX_DATA_GLOB, AX_STATE_GLOB};
 use crate::jitr::{OFF_GLOB, OFF_MEMB};
 use crate::kget::{
-    KGET_ASTK_BYTES, KGET_E_JSON_LEN, KGET_E_JSON_OFF, KGET_E_URL_LEN, KGET_E_URL_OFF,
-    KGET_ENT, KGET_HDR, KGET_KSTR_BYTES, KGET_MAGIC, KGET_OFF_N, KGET_TAIL_BYTES,
+    KGET_ASTK_BYTES, KGET_ENT, KGET_E_JSON_LEN, KGET_E_JSON_OFF, KGET_E_URL_LEN, KGET_E_URL_OFF,
+    KGET_HDR, KGET_KSTR_BYTES, KGET_MAGIC, KGET_OFF_N, KGET_TAIL_BYTES,
 };
 use crate::{Addr, Module, Node, Op, Purpose};
 
@@ -1278,7 +1278,7 @@ fn lw_addlsn_node() -> Vec<Op> {
         li(T0, LSN_FUNC),
         add(A2, A2, T0),
         Op::Label("lwal_lsn".into()),
-        jal("DomtListen"),       // DomtListen(node=a0, evmask, funcidx|0x100+funcidx)
+        jal("DomtListen"), // DomtListen(node=a0, evmask, funcidx|0x100+funcidx)
         Op::Label("lwal_out".into()),
         ld(RA, SP, 56),
         ld(S0, SP, 48),
@@ -1556,9 +1556,9 @@ fn kernel_get_node() -> Vec<Op> {
         lw(T0, T6, 0),
         li(T1, i64::from(KGET_MAGIC)),
         bne(T0, T1, "kg_none"),
-        lw(T5, T6, KGET_OFF_N),  // n_entry
-        addi(T4, T6, KGET_HDR),  // entry cursor
-        li(T3, 0),               // i
+        lw(T5, T6, KGET_OFF_N), // n_entry
+        addi(T4, T6, KGET_HDR), // entry cursor
+        li(T3, 0),              // i
         Op::Label("kg_loop".into()),
         bgeu(T3, T5, "kg_none"),
         lw(T0, T4, KGET_E_URL_LEN),
@@ -1735,7 +1735,7 @@ fn lw_awaitvoid_node() -> Vec<Op> {
         bne(T2, T1, "lav_resolve"),
         // rewind re-call: restore NORMAL, leave cur as the resolved value
         sd(X0, T0, 0),
-        j("lav_out"),
+        li(S1, -1),
         Op::Label("lav_resolve".into()),
     ];
     // resolve the promise handle → cur + afail via the record's settle state.
@@ -2637,6 +2637,11 @@ fn domt_key_node() -> Vec<Op> {
         lw(S1, S2, crate::vio::DOMT_SEEN_OFF),
         Op::Label("dtk_next".into()),
         beq(S1, S0, "dtk_done"),
+        la(T6, Addr::Prom),
+        lw(T1, T6, P_ASUSP),
+        bne(T1, X0, "dtk_done"),
+        lw(T1, T6, P_RESUME),
+        bne(T1, X0, "dtk_done"),
         // t3 = KQ[s1 & 15] = (code<<8)|value
         Op::Andi {
             rd: T3,
@@ -2750,10 +2755,10 @@ fn domt_key_node() -> Vec<Op> {
         sw(T1, T5, EVO_TARGET),
         sw(X0, T5, EVO_CX),
         sw(X0, T5, EVO_CY),
-        sw(X0, T5, EVO_PD), // fresh event — not yet prevented
+        sw(X0, T5, EVO_PD),               // fresh event — not yet prevented
         addi(A0, T3, -(LSN_FUNC as i32)), // funcidx = N_LISTEN - LSN_FUNC
-        li(A1, 1),                       // nargs=1 — Listener::Wasm calls fn(ev)
-        mv(A2, T5),                      // event handle = __ev_obj
+        li(A1, 1),                        // nargs=1 — Listener::Wasm calls fn(ev)
+        mv(A2, T5),                       // event handle = __ev_obj
         jal("JitCall"),
         // A listener mutation repaints: bump H_DIRTY so the tick re-runs the DOM.
         la(T6, Addr::DomT),
@@ -2791,9 +2796,7 @@ fn domt_key_node() -> Vec<Op> {
 /// capture/bubble walk — the single topmost listening node is the target.
 fn domt_hit_node() -> Vec<Op> {
     let mut ops = vec![
-        Op::Comment(
-            "DomtHit(px,py,mask) — topmost F_VIS rect node with the event bit".into(),
-        ),
+        Op::Comment("DomtHit(px,py,mask) — topmost F_VIS rect node with the event bit".into()),
         Op::Glob("DomtHit".into()),
         Op::Label("DomtHit".into()),
         // t0 = H_NEXT, t5 = first node record, t1 = idx, t2 = best. Scan from
@@ -2853,8 +2856,7 @@ fn domt_hit_node() -> Vec<Op> {
 fn domt_ptr_node() -> Vec<Op> {
     let mut ops = vec![
         Op::Comment(
-            "DomtPtr — PTR_CLICK → scale → DomtHit → __ev_obj(click) → JitCall → dirty"
-                .into(),
+            "DomtPtr — PTR_CLICK → scale → DomtHit → __ev_obj(click) → JitCall → dirty".into(),
         ),
         Op::Glob("DomtPtr".into()),
         Op::Label("DomtPtr".into()),
@@ -2865,6 +2867,11 @@ fn domt_ptr_node() -> Vec<Op> {
         sd(S2, SP, 0),
         // s2 = __vio base. Consume a single pending click per trap.
         la(S2, Addr::VioBss),
+        la(T6, Addr::Prom),
+        lw(T1, T6, P_ASUSP),
+        bne(T1, X0, "dp_ret"),
+        lw(T1, T6, P_RESUME),
+        bne(T1, X0, "dp_ret"),
         lw(T0, S2, crate::vio::PTR_CLICK),
         beq(T0, X0, "dp_ret"),
         sw(X0, S2, crate::vio::PTR_CLICK),
@@ -2924,9 +2931,9 @@ fn domt_ptr_node() -> Vec<Op> {
         sw(T1, T5, EVO_TARGET),
         sw(S0, T5, EVO_CX),
         sw(S1, T5, EVO_CY),
-        sw(X0, T5, EVO_PD), // fresh event — not yet prevented
+        sw(X0, T5, EVO_PD),               // fresh event — not yet prevented
         addi(A0, T3, -(LSN_FUNC as i32)), // funcidx = N_LISTEN - LSN_FUNC
-        li(A1, 1),                       // nargs=1 — Listener::Wasm calls fn(ev)
+        li(A1, 1),                        // nargs=1 — Listener::Wasm calls fn(ev)
         mv(A2, T5),
         jal("JitCall"),
         la(T6, Addr::DomT),

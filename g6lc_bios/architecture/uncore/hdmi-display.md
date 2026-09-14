@@ -77,7 +77,12 @@ independent of `proxy.gl`.
 egl-headless,gl=on` in `qemu-args` (virgl host-GL composite). That requires
 a host DRM render node; on hosts without one (`qemu-system-riscv64: egl: no
 drm render node available`) QEMU refuses the device — use `qemu-args --no-gl`
-for the 2D `virtio-gpu-device` fallback (identical guest commands).
+for the 2D `virtio-gpu-device` fallback (identical guest commands). The
+guest-side virgl stream itself is hardware-verified independently of the
+render node — `g6b virgl-dump` + `out/virgl/vhw` run the byte-exact
+execbuffer through real `libvirglrenderer` on surfaceless EGL (WSLg D3D12
+gallium): full composite raster, byte-exact readback (see
+`architecture/DISPLAY.md`, M4 / B124).
 
 ## Evidence model
 

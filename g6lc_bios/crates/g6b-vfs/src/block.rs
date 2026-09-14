@@ -42,6 +42,10 @@ pub trait BlockDev {
         Err(Error::ReadOnly("device"))
     }
 
+    fn durable_flush_supported(&self) -> bool {
+        false
+    }
+
     /// Push cached writes to the medium.
     fn flush(&mut self) -> Result<()> {
         Ok(())
@@ -200,6 +204,10 @@ impl BlockDev for SubDev<'_> {
         self.inner.write_at(at, buf)
     }
 
+    fn durable_flush_supported(&self) -> bool {
+        self.inner.durable_flush_supported()
+    }
+
     fn flush(&mut self) -> Result<()> {
         self.inner.flush()
     }
@@ -291,10 +299,13 @@ impl BlockDev for FileBlock {
             .map_err(|e| Error::Io(format!("{}: {e}", self.path)))
     }
 
+    fn durable_flush_supported(&self) -> bool {
+        true
+    }
+
     fn flush(&mut self) -> Result<()> {
-        use std::io::Write;
         self.file
-            .flush()
+            .sync_all()
             .map_err(|e| Error::Io(format!("{}: {e}", self.path)))
     }
 }

@@ -31,6 +31,7 @@ g6b-hw = { workspace = true }
 g6b-zealcli = { workspace = true }
 g6b-fs = { workspace = true }
 g6b-vfs = { workspace = true }
+g6b-bootctl = { workspace = true }
 
 [lints]
 workspace = true

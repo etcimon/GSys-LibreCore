@@ -433,6 +433,42 @@ lane runs once from KStart), input delivery, virtio-gpu resource/scanout
 commands (the `DOM|` serial transcript is the observable channel until that
 exists), asyncify continuations and EH unwinding on guest code.
 
+## Guest-JIT correctness review (2026-09-14)
+
+The bounded guest lane now enforces the reachable-op preflight in
+`jcode::install_guest`, before installing any image. A reachable unsupported
+opcode/import/call is a build error with function-index diagnostics, not merely
+a failed standalone coverage test. `encode` remains available for inspection.
+
+`JitCall`'s four argument slots descend from `sp+56`; the former ascending
+read accidentally passed the argument count/function index instead of later
+arguments. The four-argument regression checks the positional result and
+refuses more than four arguments, out-of-range function indices and null
+function-table entries.
+
+A rewind through `LwAwaitVoid` now re-reads the promise's settled record to
+refresh the response span and rejection state. Previously a late fulfillment
+resumed with the empty value cached at suspension. `JitCall` also drives
+stop-unwind/start-rewind for awaited user calls (not for Asyncify control
+exports), continues through already-settled awaits, and parks again on a
+pending one. Six words in the existing JIT header preserve the suspended
+function index, argument count and four arguments; `JitResume` restores that
+call instead of always re-entering `_start`. The runtime permits one suspended
+continuation: unrelated calls fail closed while it is pending, and key/pointer
+dispatch leaves the shared event record intact. The timer resumes first, then
+drains deferred input. This is not a multi-coroutine scheduler.
+
+Local execution gates include late fulfillment through all eight shipped-cell
+awaits and DOM-row construction, a second suspension inside the resumed call,
+the original rejection/expiry path, and callback argument/bounds checks. These
+are guest-instruction/model tests, not new remote-QEMU evidence.
+
+Still outside this bounded correction: string `type`/`key` and wider event
+getters, capture/bubbling and general mousemove/scroll delivery, and complete
+tag-selective/payload/operand-stack WebAssembly EH semantics. Packed `KernelGet`
+routes are not a live guest network stack. The earlier stage labels must not be
+read as full WebIDL, network-fetch or EH conformance.
+
 ## Asyncify and EH in the guest (g6b-wasm / g6b-asm)
 
 The libwasm cell is currently built for the browser host. Running it in the

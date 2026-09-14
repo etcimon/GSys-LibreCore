@@ -94,6 +94,44 @@ Because the raster is CPU and first-party, this gate is hermetic — no browser,
 no network, no GPU, no render node. It runs in CI and on a WSL host with no
 `/dev/dri`.
 
+### Guest display-list parity (local plan review, 2026-09-14)
+
+`g6b-kernel::tests::guest_display_list_matches_host_pixels` packs the shipped
+cell's scene with `dl_pack`, then executes the emitted RISC-V `DlPaint` and
+`VioPaint` for **every packed menu state at 640×480 and 1920×1080**. Its oracle
+is an independent `BrowserSession::paint_css_at` result for the same menu and
+geometry, not a readback of the guest buffer. It compares every visible RGB
+channel with **zero tolerance**; the unused X byte of B8G8R8X8 is excluded.
+No `WebFeed` pixel injection or `__web_pk` fallback is installed. Faults,
+execution-limit halts, missing WEBDL, wrong geometry and unconsumed dirty tiles
+fail the gate. This checks guest replay/transport equivalence, not independent
+CSS conformance; the existing reviewed CSS goldens remain unchanged.
+
+The `g6b-elf::tests::picking_bios_ui_replaces_the_picker_rows` integration gate
+also runs the actual shipped guest JIT, packed routes and picker handoff at the
+fixture's 1920×1080 output, and compares the committed device framebuffer against
+the host scene.
+It rejects a picker repaint after handoff. Old `DOM|` rows are not a web-frame
+oracle: suppressing those rows is part of the face-ownership contract. This
+whole-boot gate opts into `run_module_with_limit(..., 192_000_000)` and must
+finish before the bound; other smoke callers retain their 48M default.
+
+Both pixel gates run in `tools/bios_regress.py` as `guest_pixel_parity`, as well
+as in workspace tests. They require neither a GPU nor remote g6q. Actual QEMU
+capture parity and QEMU-GL/remote g6q evidence remain assigned to the other
+session; local exec-model equality is not a claim of either.
+
+`out/setup.ppm` (`g6b gr`) and `out/proxy.ppm` (`g6b display-proxy`) are
+**legacy text-plane diagnostics**, not styled web screenshots. Their blue
+background is deliberate. The former banner-only font incorrectly rendered
+most characters as identical boxes; the host font now covers printable ASCII
+with guest-matching uppercase folding, checked exhaustively against the guest
+font. Repainting shorter text clears old cells. Use `ui-ppm32` at explicit
+`--width`/`--height` for a styled host reference, or `smoke --out-vio` for device-side
+exec-model pixels; neither is a QEMU capture. A `halt=Limit` smoke snapshot is
+incomplete and must not be used as parity evidence; use the explicitly budgeted
+integration gate for the full guest-JIT boot.
+
 ### Where OpenGL fits (and where it must not)
 
 Correctness is defined on the **CPU raster**, which is the reference. The

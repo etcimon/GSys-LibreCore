@@ -141,7 +141,10 @@ fn main() -> ExitCode {
                 }
                 let gl_path = Path::new(out).with_extension("glsl");
                 let _ = fs::write(&gl_path, g6b_kernel::gl_listing(&spec));
-                eprintln!("g6b: wrote {out} and {}", gl_path.display());
+                eprintln!(
+                    "g6b: wrote {out} (legacy text-plane proxy, not web scanout) and {}",
+                    gl_path.display()
+                );
                 ExitCode::SUCCESS
             }
         },
@@ -209,7 +212,7 @@ fn main() -> ExitCode {
                     eprintln!("g6b: gr: {e}");
                     return ExitCode::from(1);
                 }
-                eprintln!("g6b: wrote {out}");
+                eprintln!("g6b: wrote {out} (legacy text plane; use ui-ppm32 for styled UI)");
                 ExitCode::SUCCESS
             }
         },
@@ -322,6 +325,41 @@ fn main() -> ExitCode {
                     }
                     Err(e) => {
                         eprintln!("g6b: elf: {e}");
+                        ExitCode::from(1)
+                    }
+                }
+            }
+        },
+        // The byte-exact M4 virgl stream (`__virgl_cmd` execbuffer +
+        // `__virgl_req` request table) for the host-side libvirglrenderer
+        // harness — keeps the fed stream identical to what `VioVirgl`
+        // submits, regenerated on demand instead of a stale copy.
+        //   g6b virgl-dump --spec SPEC --out out/virgl
+        "virgl-dump" => match load_spec(spec_path.as_deref()) {
+            Err(c) => c,
+            Ok(spec) => {
+                let (eb, req, w, h) = g6b_asm::virgl::stream(&spec);
+                let dir = PathBuf::from(flag_value(&args, "--out").unwrap_or("out/virgl"));
+                if let Err(e) = fs::create_dir_all(&dir) {
+                    eprintln!("g6b: virgl-dump: {e}");
+                    return ExitCode::from(1);
+                }
+                let geo = format!("{w} {h}\n");
+                let wr = fs::write(dir.join("execbuf.bin"), &eb)
+                    .and_then(|_| fs::write(dir.join("reqtab.bin"), &req))
+                    .and_then(|_| fs::write(dir.join("geometry.txt"), geo));
+                match wr {
+                    Ok(()) => {
+                        eprintln!(
+                            "g6b: wrote {}/execbuf.bin ({}B) + reqtab.bin ({}B) @ {w}x{h}",
+                            dir.display(),
+                            eb.len(),
+                            req.len()
+                        );
+                        ExitCode::SUCCESS
+                    }
+                    Err(e) => {
+                        eprintln!("g6b: virgl-dump: {e}");
                         ExitCode::from(1)
                     }
                 }

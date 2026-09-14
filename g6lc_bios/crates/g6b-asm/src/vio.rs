@@ -571,11 +571,10 @@ pub fn init_node(o: Object, spec: &BoardSpec) -> Node {
             imm: VIO_POLL_MAX,
         },
         Op::Label("vi2_poll".into()),
-        lw(T2, T5, VIO_USED_OFF),
-        Op::Srli {
+        Op::Lhu {
             rd: T2,
-            rs: T2,
-            shamt: 16,
+            rs: T5,
+            off: VIO_USED_OFF + 2,
         },
         Op::Bne {
             rs1: T2,
@@ -1097,6 +1096,124 @@ fn submit_nodata(ops: &mut Vec<Op>, req_len: i64, fail: &str) {
     ]);
 }
 
+fn command_response(prefix: &str, response_desc_len: i32) -> Vec<Op> {
+    let fail = format!("{prefix}_ret0");
+    let mut ops = vec![
+        Op::Addi {
+            rd: T4,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Andi {
+            rd: T4,
+            rs: T4,
+            imm: 7,
+        },
+        Op::Slli {
+            rd: T4,
+            rs: T4,
+            shamt: 3,
+        },
+        Op::Add {
+            rd: T4,
+            rs1: T4,
+            rs2: T5,
+        },
+        lw(T3, T4, VIO_USED_OFF + 4),
+        Op::Bne {
+            rs1: T3,
+            rs2: X0,
+            to: fail.clone(),
+        },
+        lw(T3, T4, VIO_USED_OFF + 8),
+        Op::Li { rd: T2, imm: 24 },
+        Op::Bltu {
+            rs1: T3,
+            rs2: T2,
+            to: fail.clone(),
+        },
+        lw(T2, T5, response_desc_len),
+        Op::Bltu {
+            rs1: T2,
+            rs2: T3,
+            to: fail.clone(),
+        },
+        lw(A0, T5, VIO_RSP_OFF),
+    ];
+    for (kind, bytes) in [
+        (VIO_GPU_RESP_OK_DISPLAY_INFO, VIO_RESP_DISPLAY_INFO),
+        (crate::encode::VIO_GPU_RESP_OK_CAPSET_INFO, 40),
+        (
+            crate::encode::VIO_GPU_RESP_OK_CAPSET,
+            24 + crate::virgl::CAPSET_WORDS.len() as u32 * 4,
+        ),
+    ] {
+        let next = format!("{prefix}_response_{kind}");
+        ops.extend([
+            Op::Li {
+                rd: T2,
+                imm: i64::from(kind),
+            },
+            Op::Bne {
+                rs1: A0,
+                rs2: T2,
+                to: next.clone(),
+            },
+            Op::Li {
+                rd: T2,
+                imm: i64::from(bytes),
+            },
+            Op::Bltu {
+                rs1: T3,
+                rs2: T2,
+                to: fail.clone(),
+            },
+            Op::Label(next),
+        ]);
+    }
+    let valid = format!("{prefix}_response_valid");
+    ops.extend([
+        lw(T2, T5, VIO_REQ_OFF + 4),
+        Op::Andi {
+            rd: T2,
+            rs: T2,
+            imm: 1,
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: valid.clone(),
+        },
+        lw(T3, T5, VIO_RSP_OFF + 4),
+        Op::Andi {
+            rd: T3,
+            rs: T3,
+            imm: 1,
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: fail.clone(),
+        },
+        lw(T2, T5, VIO_REQ_OFF + 8),
+        lw(T3, T5, VIO_RSP_OFF + 8),
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: fail.clone(),
+        },
+        lw(T2, T5, VIO_REQ_OFF + 12),
+        lw(T3, T5, VIO_RSP_OFF + 12),
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: fail,
+        },
+        Op::Label(valid),
+    ]);
+    ops
+}
+
 /// `VioCmd` — leaf ctrlq submitter. In: a0 = request bytes, a1 = response
 /// bytes; the caller pre-builds the request at `__vio+VIO_REQ_OFF` and the
 /// device base lives at `__vio+VIO_DEV_OFF`. Out: a0 = response `type` word
@@ -1165,11 +1282,10 @@ pub fn cmd_node(spec: &BoardSpec) -> Node {
         },
         sw(T3, T5, 28),
         // avail.ring[idx % 8] = head 0 — two byte stores (u16 slot)
-        lw(T2, T5, VIO_AVAIL_OFF),
-        Op::Srli {
+        Op::Lhu {
             rd: T1,
-            rs: T2,
-            shamt: 16,
+            rs: T5,
+            off: VIO_AVAIL_OFF + 2,
         },
         Op::Andi {
             rd: T4,
@@ -1211,6 +1327,16 @@ pub fn cmd_node(spec: &BoardSpec) -> Node {
             imm: 1,
         },
         Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: spec.isa.xlen - 16,
+        },
+        Op::Srli {
+            rd: T1,
+            rs: T1,
+            shamt: spec.isa.xlen - 16,
+        },
+        Op::Slli {
             rd: T3,
             rs: T1,
             shamt: 16,
@@ -1224,11 +1350,10 @@ pub fn cmd_node(spec: &BoardSpec) -> Node {
             imm: VIO_POLL_MAX,
         },
         Op::Label("vqc_poll".into()),
-        lw(T2, T5, VIO_USED_OFF),
-        Op::Srli {
+        Op::Lhu {
             rd: T2,
-            rs: T2,
-            shamt: 16,
+            rs: T5,
+            off: VIO_USED_OFF + 2,
         },
         Op::Beq {
             rs1: T2,
@@ -1276,14 +1401,14 @@ pub fn cmd_node(spec: &BoardSpec) -> Node {
         Op::Li { rd: A0, imm: 0 },
         ret(),
         Op::Label("vqc_done".into()),
+        Op::Fence,
         // Read InterruptStatus and write it back to InterruptACK — the
         // device raised a used-buffer irq for this completion.
         lw(T3, T6, VIO_REG_ISR_STATUS),
         sw(T3, T6, VIO_REG_ISR_ACK),
-        lw(A0, T5, VIO_RSP_OFF),
-        sw(X0, T5, VIO_BUSY_OFF),
-        ret(),
     ]);
+    ops.extend(command_response("vqc", 24));
+    ops.extend([sw(X0, T5, VIO_BUSY_OFF), ret()]);
     Node {
         purpose: Purpose::Virtio,
         ops,
@@ -1363,11 +1488,10 @@ pub fn cmdbuf_node(spec: &BoardSpec) -> Node {
         },
         sw(T3, T5, 44),
         // avail.ring[idx % 8] = head 0 — two byte stores (u16 slot)
-        lw(T2, T5, VIO_AVAIL_OFF),
-        Op::Srli {
+        Op::Lhu {
             rd: T1,
-            rs: T2,
-            shamt: 16,
+            rs: T5,
+            off: VIO_AVAIL_OFF + 2,
         },
         Op::Andi {
             rd: T4,
@@ -1406,6 +1530,16 @@ pub fn cmdbuf_node(spec: &BoardSpec) -> Node {
             imm: 1,
         },
         Op::Slli {
+            rd: T1,
+            rs: T1,
+            shamt: spec.isa.xlen - 16,
+        },
+        Op::Srli {
+            rd: T1,
+            rs: T1,
+            shamt: spec.isa.xlen - 16,
+        },
+        Op::Slli {
             rd: T3,
             rs: T1,
             shamt: 16,
@@ -1419,11 +1553,10 @@ pub fn cmdbuf_node(spec: &BoardSpec) -> Node {
             imm: VIO_POLL_MAX,
         },
         Op::Label("vcb_poll".into()),
-        lw(T2, T5, VIO_USED_OFF),
-        Op::Srli {
+        Op::Lhu {
             rd: T2,
-            rs: T2,
-            shamt: 16,
+            rs: T5,
+            off: VIO_USED_OFF + 2,
         },
         Op::Beq {
             rs1: T2,
@@ -1466,27 +1599,33 @@ pub fn cmdbuf_node(spec: &BoardSpec) -> Node {
         Op::Li { rd: A0, imm: 0 },
         ret(),
         Op::Label("vcb_done".into()),
+        Op::Fence,
         lw(T3, T6, VIO_REG_ISR_STATUS),
         sw(T3, T6, VIO_REG_ISR_ACK),
-        lw(A0, T5, VIO_RSP_OFF),
-        sw(X0, T5, VIO_BUSY_OFF),
-        ret(),
     ]);
+    ops.extend(command_response("vcb", 40));
+    ops.extend([sw(X0, T5, VIO_BUSY_OFF), ret()]);
     Node {
         purpose: Purpose::Virtio,
         ops,
     }
 }
 
-/// `VioVirgl` — the M4 virgl/GLES bring-up, run after `VioScan` on a
+/// `VioVirgl` — the M4 virgl composite, run **after `VioPaint`** on a
 /// `virtio-gpu-gl-device` board (`proxy.gl`). It walks the `__virgl_req`
 /// record table (`crate::virgl::reqtab`): `GET_CAPSET_INFO` → `GET_CAPSET` →
-/// `CTX_CREATE` → `CTX_ATTACH_RESOURCE` → `SUBMIT_3D` (the `__virgl_cmd`
-/// execbuffer rides the second OUT descriptor via `VioCmdBuf`) →
-/// `TRANSFER_FROM_HOST_3D` → `RESOURCE_FLUSH`. Each record is
-/// `[req_len][resp_len][flags][req]`; `flags&1` selects `VioCmdBuf`. Prints
-/// `VIRTIO-VIRGL ` once the sequence has been submitted. Requires the scanout
-/// resource (id 1) `VioScan` already created/backed/scanned out.
+/// `CTX_CREATE` → `RESOURCE_CREATE_3D`×2 (RES_VBO, RES_RT) →
+/// `CTX_ATTACH_RESOURCE`×3 (the scanout resource 1 — the composite texture —
+/// plus RES_VBO and RES_RT) → `SUBMIT_3D` (the `__virgl_cmd` execbuffer rides
+/// the second OUT descriptor via `VioCmdBuf`) → `SET_SCANOUT(RES_RT)` →
+/// `RESOURCE_FLUSH(RES_RT)`. Each record is `[req_len][resp_len][flags][req]`;
+/// `flags&1` selects `VioCmdBuf`. The sampler view inside the execbuffer
+/// binds resource 1, so the textured quad composites the frame `VioPaint`
+/// committed (`vio_fb`/`__scan_fb`) onto the GPU render target. Prints
+/// `VIRTIO-VIRGL ` once the sequence has been submitted, then attaches
+/// `__virgl_out` as RES_RT's guest backing and pulls the composite back with
+/// `TRANSFER_FROM_HOST_3D`. Requires the scanout resource (id 1) `VioScan`
+/// already created/backed/scanned out and painted by `VioPaint`.
 pub fn virgl_node(spec: &BoardSpec) -> Node {
     let xlen = spec.isa.xlen;
     let gp = g6b_spec_proxy(spec);
@@ -1633,6 +1772,47 @@ pub fn virgl_node(spec: &BoardSpec) -> Node {
             to: "VioCmd".into(),
         },
         Op::Label("vgl_next".into()),
+        lw(T0, S3, 0),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(crate::encode::VIO_GPU_GET_CAPSET_INFO),
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: T1,
+            to: "vgl_capinfo".into(),
+        },
+        Op::Li {
+            rd: T1,
+            imm: i64::from(crate::encode::VIO_GPU_GET_CAPSET),
+        },
+        Op::Beq {
+            rs1: T0,
+            rs2: T1,
+            to: "vgl_capset".into(),
+        },
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_GPU_RESP_OK_NODATA),
+        },
+        jump("vgl_checked"),
+        Op::Label("vgl_capinfo".into()),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(crate::encode::VIO_GPU_RESP_OK_CAPSET_INFO),
+        },
+        jump("vgl_checked"),
+        Op::Label("vgl_capset".into()),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(crate::encode::VIO_GPU_RESP_OK_CAPSET),
+        },
+        Op::Label("vgl_checked".into()),
+        Op::Bne {
+            rs1: A0,
+            rs2: T1,
+            to: "vgl_fail".into(),
+        },
         // cursor += req_len (s4) → next record
         Op::Add {
             rd: S3,
@@ -1660,9 +1840,11 @@ pub fn virgl_node(spec: &BoardSpec) -> Node {
     ops.push(st_x(xlen, T0, T2, 32)); // entries[0].addr = __virgl_out
     sw_i(&mut ops, T2, 40, out_bytes); // entries[0].length
     sw(X0, T2, 44); // entries[0].pad
-    submit_nodata(&mut ops, 48, "vgl_skip");
+    submit_nodata(&mut ops, 48, "vgl_fail");
     // TRANSFER_FROM_HOST_3D — hdr(24) + box{x,y,z,w,h,d}@24 + off@48 + res@56.
     req_hdr(&mut ops, VIO_GPU_TRANSFER_FROM_HOST_3D);
+    sw_i(&mut ops, T2, 4, 1);
+    sw_i(&mut ops, T2, 8, 2);
     sw_i(&mut ops, T2, 16, i64::from(crate::virgl::CTX_ID));
     sw_i(&mut ops, T2, 24, 0); // box.x
     sw_i(&mut ops, T2, 28, 0); // box.y
@@ -1675,9 +1857,15 @@ pub fn virgl_node(spec: &BoardSpec) -> Node {
     sw_i(&mut ops, T2, 60, 0); // level
     sw_i(&mut ops, T2, 64, 0); // stride (0 → device derives)
     sw_i(&mut ops, T2, 68, 0); // layer_stride
-    submit_nodata(&mut ops, 72, "vgl_skip");
+    submit_nodata(&mut ops, 72, "vgl_fail");
     ops.push(Op::Label("vgl_skip".into()));
     putc_str(&mut ops, "VIRTIO-VIRGL ");
+    ops.push(Op::Li { rd: A0, imm: 1 });
+    ops.push(jump("vgl_return"));
+    ops.push(Op::Label("vgl_fail".into()));
+    putc_str(&mut ops, "VIRTIO-VIRGL-FAIL ");
+    ops.push(Op::Li { rd: A0, imm: 0 });
+    ops.push(Op::Label("vgl_return".into()));
     ops.extend([
         ld_x(xlen, RA, SP, 0),
         ld_x(xlen, S3, SP, 8),

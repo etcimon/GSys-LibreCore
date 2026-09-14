@@ -1,0 +1,14 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-bootctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Portable recovery-first boot health protocol and durable journal"
+
+[lints]
+workspace = true

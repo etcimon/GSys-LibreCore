@@ -7,6 +7,122 @@ Web-engine endpoint (one BrowserSession, one LDC cell; B82–B91d landed —
 `WasmJit` names, QMP shots). Track-B 4bpp `ui_ppm` is a live-Engine downsample.
 Work tree **`E:\cva6/g6lc_bios`**.
 
+## Recovery-first program — foundation increment (2026-09-14)
+
+- [x] `g6b-bootctl`: allocation-free `no_std` boot-attempt protocol and redundant
+      journal; strict version/length/reserved/CRC checks, nonce/target/image
+      identity, sticky failure policy, exact Linux readiness acknowledgement.
+- [x] Fault injection found and fixed two admission hazards: an initial I/O
+      failure leaving the cached Boot decision usable, and losing a newer
+      in-progress record resurrecting an older healthy record's boot permission.
+      Degraded records now hold recovery, not silently fall back to autoboot.
+- [x] `g6b-runtime-abi`: checked versioned request header, generational context,
+      spans and non-aliasing output. Operations are vocabulary only, not services.
+- [x] Kernel/VFS journal adapter bounds writes to two declared slots and requires
+      explicit durability. `FileBlock::flush` now calls OS `sync_all`, not the
+      non-durable `File::flush`. Disposable-file reopen/neighbour tests pass.
+- [x] 17 boot-control + 6 ABI + 2 adapter tests; VFS 39/39. Both new libraries
+      cross-check on `riscv64imac-unknown-none-elf` with Rust 1.85.0 (target install
+      approved by the user). No external crate dependencies or unsafe code added.
+- [x] Full `g6b.py check` passed, including independence, browser build/tests,
+      fmt, Clippy, workspace tests and BIOS regression with pixel-parity gates.
+- [ ] Native core link/dispatch and actual guest block/watchdog/autoboot wiring.
+- [ ] Linux-generic health helper, first tested with an OpenWrt adapter.
+- [ ] Remaining approved runtime/EH/network/TLS/UI/KVM/iframe/update/Linux boot
+      phases. Remote QEMU and GPU/RTL changes remain outside this program.
+
+These are foundations, not live recovery or management services. Existing boot
+behavior is unchanged. Storage users must serialize writers across the whole
+journal transaction; cross-process locking is not supplied by an `&mut` borrow.
+Physical power-loss and post-handoff watchdog recovery remain qualification gates.
+
+## Local plan review — PPM, stage 3 and pixel parity (2026-09-14)
+
+- [x] Reproduce unreadable legacy PPM text: `g6b-gr::glyph_row` contained only
+      banner glyphs and returned one box for almost every character. Complete
+      printable ASCII with guest-matching uppercase folding; add exhaustive
+      host/guest glyph equality and shorter/removed-row repaint tests.
+- [x] Clarify that `gr`/`display-proxy` are text diagnostics, not styled web
+      scanout. Their blue background is intentional; no golden was re-recorded.
+- [x] Enforce reachable-op preflight in `install_guest`; an unsupported reachable
+      import is refused before any image is installed.
+- [x] Fix `JitCall`'s descending argument slots and bound arguments/function
+      indices. Fix stale empty values after late fulfillment on rewind.
+- [x] Drive Asyncify after resumed calls, preserving function and arguments for
+      `JitResume`; validate late fulfillment through all eight awaits and DOM
+      rows, plus a second suspension/resume. Preserve the shared event record
+      while suspended; defer input until after resume. One continuation only.
+- [x] Add zero-RGB-difference host-versus-guest pixel parity for every packed
+      menu at 640×480 and 1920×1080, without pixel injection or WebBlit fallback.
+      Add completed-device-frame equality to the picker/JIT integration gate.
+      That full boot opts into a bounded 192M-step budget instead of accepting
+      the old 48M `Limit` snapshot; other smoke callers retain their default.
+- [x] Wire both pixel gates into `bios_regress.py` (`guest_pixel_parity`).
+- [x] `g6b.py check` and a separate `regress` passed, including fresh
+      `out/setup.ppm`/`out/proxy.ppm`, unchanged CSS goldens and both pixel gates.
+      Styled host reference: `out/web-review-host.ppm` at 1920×1080. The original
+      HD picker fixture completed at 83,655,903 instructions (`Wfi`, zero faults),
+      with guest-created field rows and exact committed-frame RGB equality.
+- Remaining stage-3 scope: string/wider event getters, capture/bubbling and
+  general pointer events, complete tag/payload/stack-correct wasm EH, and live
+  guest networking beyond packed routes. These are not claimed complete.
+- Remote g6q/QEMU-GL is owned by the other session; no remote run or emulator
+  modification belongs to this local pass.
+
+Licensing/integration review: existing MIT headers retained, no dependencies
+added and no upstream code copied. No RTL, clock/reset, ISA, DTS, DFT or
+synthesis change. Firmware timing adds bounded resume dispatch and defers input
+while the single Asyncify continuation owns its buffer; pixel loops are unchanged.
+
+## APU P0 protocol groundwork (2026-09-14)
+
+Priors and remaining gates: `architecture/DISPLAY.md` §API-neutral APU;
+reference-only source pins: `pins.toml [graphics_wire]`.
+
+- [x] Preserve concurrent TGSI-text/stage/state-binding corrections and add eight
+      package-local `p0_` wire/model tests; five tests first exposed wrong bind,
+      clear, feature-bit and capset-size/layout behavior.
+- [x] Correct `VIRGL_BIND_*` wire masks, color-clear bit and virtio feature bits;
+      request the complete 308-byte capset-v1 payload plus 24-byte response header.
+      The model grants no GLSL profile and rejects unsupported capset IDs/versions.
+- [x] Independent installed virglrenderer 1.0.0 capset query and generated
+      execbuffer diagnostic: 307,200 exact pixels, zero differences at 640×480.
+      This is external-renderer evidence, not a native APU or full virtio client test.
+- [x] Focused tests, fmt and Clippy; separate `python tools/g6b.py regress` pass.
+- [x] Follow-up request validation: fenced submit/readback, 64-bit fence checks,
+      response bounds, cyclic-descriptor refusal, split/truncated OUT payloads,
+      first-error stop and RV32/RV64 u16 queue-index wrap. Correct the double-V
+      flip against QEMU's actual Y_0_TOP source flag. The tracked external replay
+      validates 11 requests and fences 1/2 with 307,200 exact pixels on both
+      llvmpipe and explicit D3D12 Intel Arc; not a Linux-driver or RTL proof.
+- [x] OpenWrt 24.10.2 / Linux 6.6.93 boots through `g6lc_qemu` and executes
+      guest probes. Temporary ttyS0 inittab overlay leaves original images intact.
+- [x] Remote graphics baseline now runs unchanged Linux virtio-gpu + Mesa virgl
+      over modern virtio-mmio using QEMU vhost-user-gpu and a host-side
+      surfaceless-EGL shim. Guest reaches `gbm-window`, renderer `virgl
+      (LLVMPIPE...)`, stable pixel FNV-1a `0x3d667145`, `G6LC_EGL_GLES2_OK`, rc 0.
+      This is host software-rendered driver-path evidence, not APU/RTL proof.
+- [x] Actual unchanged Mesa/Linux traffic is archived and strict-validated in
+      `g6lc_qemu/out/remote-gfx/gfx-20260914T203512Z/capture`; resources,
+      transfers, fences and cleanup are `result=PASS`.
+- [x] Opt-in negative ioctl probing through the unchanged guest driver is
+      archived in `g6lc_qemu/out/remote-gfx/gfx-20260914T203421Z/capture`.
+      Invalid resource creation, out-of-bounds transfer, unknown opcode and a
+      truncated command are rejected by the backend (`EINVAL`), while queue
+      ioctls and virtio fences can still complete asynchronously.
+- [x] Fix the picker publication race: AUTO_ON is set after initialization/draw.
+- [x] The picker/JIT test now checks the completed device framebuffer rather
+      than stale `DOM|` rows. It uses an explicit integration-only instruction
+      budget and rejects `Limit`; zero-tolerance equality passes locally. Full
+      package verification is tracked in the local plan-review entry above.
+- [ ] Audit the complete effective capability set and close context/resource
+      isolation, reset, firmware-domain and cache/DMA gates.
+- [ ] P1/P2 APU RTL and firmware; P3 unchanged-driver hardware GLES2 proof;
+      P4 feature/gaming qualification; P5 HDMI/DisplayPort integration.
+
+Review: existing MIT headers retained; external references are not linked or
+installed dependencies. No RTL/ISA/DTS/timing/DFT change; no compliance claim.
+
 ## Completed UI-and-boot pass — Svelte presentation (2026-09-11)
 
 - [x] Verify pinned LDC 1.43.0-beta1 and forked wasm-opt; rebuild baseline asyncified cell.
@@ -1211,3 +1327,4 @@ into `Object_Call`. B12b–B13 and B54 are a different axis. Track-B 4bpp
 | **S4b** | S4a | **landed** — native `kernel.ts` `BiosStore` facade → `/bios/store` (lang=ts may `await`); D lodash `attempt`/`invoke` still `NotImplemented("async")`. `createPgliteWasm({PGlite})` only with FileServe bytes + injected Electric client; never real DOM `window.pglite` / `window.pgliteWasm`. |
 | **PR3c** | S1 | **landed** — `g6b.py store-embed --fixture FILE --out FILE` writes compact dump JSON; `hydrate_elf` / `elf://` seeds a deletable Memory copy when `persist.elf`; `g6b-elf` packs `__g6b_store_dump` when the file is present. `check()` does not probe. Independent of `pglite.embed`. |
 | **S5** | S4 / PR3c | **landed** — USB **live** (`UsbLive` auto-flush G6BS on the key FileMgr); `persist.volume`; `stat`/`statAsync`/`GET …/stat`/`StoreStat`/`STAT` for a dialog that polls until `live && ready`; `INNER JOIN ON` hash-join; per-store `LISTEN`/`NOTIFY`; D `queryAsync` via B68 `execute!JSON` + `libwasm_await__void`; svelte-d `let rows = await pgliteQuery` + `{rows}` / `{st.ready}` (`JSON.stringify` onto an `id`); store **name in the path** (`memory://registry`, `usb://fat32/registry`, `memory://{uuid}`); compiled `Store.svelte` flattened into App `_start` (`memory://registry`, not `usb://`); `printG6bJs` keeps fetch+text (g6b-js does not depend on g6b-pglite). |
+| **B124** | B123 | **landed — virgl composite verified on real GPU** — the M4 lane is now a byte-exact, hardware-rastered composite, not an exec-model claim. `virgl.rs` was rewritten field-for-field against virglrenderer 1.0.0 (`virgl_protocol.h`, `vrend_decode.c`): the execbuffer is 24 `VIRGL_CMD0`-framed commands (~960 B @640×480) — surface(VIRGL_OBJ_SURFACE→`RES_RT`), two `CREATE_OBJECT(SHADER)`, vertex-elements, sampler-view(**`RES_SCAN`**, the 2D scanout resource), sampler-state, blend/DSA/rasterizer + their `BIND_OBJECT`s, `BIND_SHADER`×2 (ccmd **31**, not 32=SET_TESS_STATE), `BIND_SAMPLER_STATES`/`SET_SAMPLER_VIEWS` on the fragment stage, `INLINE_WRITE` of the fullscreen strip verts, `SET_VERTEX_BUFFERS`, scissor/viewport/framebuffer, `CLEAR`, `DRAW_VBO`. **Shaders are TGSI *text*** (the `tgsi_dump` form — `vrend_create_shader` runs `tgsi_text_translate`; the binary-token wire was retired in 0.9.0), and `VIRGL_OBJ_SHADER_OFFSET` carries the *text byte length incl. NUL* for a new shader (`expected_token_count < pkt_length` → EINVAL otherwise). `reqtab` now `RESOURCE_CREATE_3D`s `RES_RT`(`Y_0_TOP`)+`RES_VBO` and `CTX_ATTACH_RESOURCE`s RES_RT/RES_VBO/**RES_SCAN**, so the composite samples the frame `VioPaint` committed — `VioVirgl` is scheduled **after** `VioPaint` (`analyze.rs`); the trailing `SET_SCANOUT(RES_RT)`+`RESOURCE_FLUSH(RES_RT)` presents the GPU texture. Latent protocol bugs fixed on the way: `VIRGL_FMT_B8G8R8X8` 6→2 (6 is B4G4R4A4), `VIRGL_SHADER_*` un-swapped to the pipe enum (**VERTEX=0, FRAGMENT=1** — the earlier "fix" was backwards; a FRAG shader typed VERTEX fails vrend with `gl_FragCoord`/`smooth on vertex inputs` errors), missing `num_so_outputs` dword, `RES_TEX`/`RES_VBO` referenced but never created/attached, `CREATE_3D` field order `target,format`, missing `Y_0_TOP`, unbound state objects, and the quad `v` coordinate flipped (`v=0` on clip-top — both surfaces are y0top, unflipped lands upside-down). `exec.rs` models multi-3D-resource tracking (`virgl_surf`/`virgl_dims`/`virgl_attached`), SVIEW→`vio_fb` sampling, `RES_RT` scanout/flush (`Smoke::virgl_scanout`/`virgl_flushes`/`virgl_src`), `TRANSFER_FROM_HOST_3D` requiring attached backing; `virgl_submit_composites_scanout_frame` asserts `virgl_out==virgl_fb` (a later DOM repaint rewrites `vio_fb`, so `virgl_src` snapshots the sampled surface at composite time). **Hardware proof (`out/virgl/vhw`):** `g6b virgl-dump` writes the byte-exact execbuf; a dlopen harness feeds it to the *real* `libvirglrenderer.so.1` on WSLg surfaceless EGL over the D3D12 gallium driver (Intel Arc — the paravirt EGL device, no `/dev/dri` needed): `submit→0`, `transfer_read(RES_RT)→0`, **307,200/307,200 px byte-exact** — the guest stream rasterizes verbatim on hardware. **Honest bounds:** QEMU `egl-headless,gl=on` still needs a host DRM render node (absent on WSL2) — the harness proves the stream on a real GPU; the end-to-end `virtio-gpu-gl-device` boot stays untested here. `SAMPLE`-form FS fails `vrend_convert_shader` on this backend; emitted `TEX …, 2D` is the accepted form. `g6b-asm` 88/88, `bios_regress` OK; the `g6b-elf` `picking_bios_ui` failure is pre-existing (gl:false spec — virgl unreachable). |

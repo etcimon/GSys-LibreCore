@@ -18,6 +18,29 @@
 
 ## Current planning state
 
+**Recovery foundation (2026-09-14):** new `g6b-bootctl` and `g6b-runtime-abi`
+are safe, allocation-free `no_std` libraries, cross-checked with Rust 1.85.0 on
+`riscv64imac-unknown-none-elf`. They provide the boot-health journal/policy and
+checked service-request wire boundary, not active guest services. Kernel/VFS
+journal storage requires explicit durability; host `FileBlock` now uses
+`sync_all`. See `architecture/KERNEL-RV.md` for the protocol, writer-ownership
+contract and gates. Native core linking, the Linux-generic health helper and
+active autoboot/management integration remain pending in the approved program.
+
+**Local plan review (2026-09-14):** `gr`/`display-proxy` produce legacy blue
+text-plane diagnostics, not web screenshots. Their host font now covers
+printable ASCII and is pixel-checked against the guest 8×8 font; repaint clears
+old cells. `RENDER-VALIDATION.md` documents the new zero-RGB-tolerance gate for
+every packed menu at 640×480 and 1920×1080 after guest `DlPaint`→`VioPaint`,
+plus a completed-frame picker/JIT integration test. `jcode::install_guest`
+enforces reachable-op coverage before installation; `JitCall` fixes positional
+arguments, bounds entry/arity, and can resume and suspend again. Rewound awaits
+refresh the settled value instead of returning the empty suspension-time span.
+The runtime still has one suspended continuation and a bounded event/EH subset
+(`architecture/WASM.md`, Guest-JIT correctness review). The larger whole-boot
+test uses an explicit ≤192M instruction budget; default smoke remains 48M.
+Remote g6q and QEMU-GL evidence are ongoing/deferred to the other session.
+
 **B0–B52 plus B55–B59 host lanes landed within the stated host/guest boundaries.** Profiles `embedded`/`router` → `full` compile UART+SPI flash
 up to browser-UI HTTPS and USB settings. USB FAT32 flash is always compiled;
 the USB-key file manager (FAT32/NTFS/ext4) is extra. 64-bit SMT2 / multi-issue /
@@ -273,24 +296,38 @@ under `proxy.gl` (needs a host DRM render node `/dev/dri/renderD*` —
 surfaceless EGL is not software GL; `--no-gl` → 2D fallback)
 and `--vnc N` exports the console for BIOS+Linux alike. On that `proxy.gl`
 board `VioInit` also accepts `VIRTIO_GPU_F_VIRGL` in the word-0 driver
-features, and **`VioVirgl`** (after `VioScan`, before `VioPaint`) runs the
-guest virgl bring-up over the ctrlq: `GET_CAPSET_INFO`/`GET_CAPSET` →
-`CTX_CREATE`(ctx 1) → `RESOURCE_CREATE_3D`(`RES_RT` offscreen RT) →
-`CTX_ATTACH_RESOURCE` → `SUBMIT_3D` carrying the `__virgl_cmd` execbuffer (a
-`VIRGL_CMD0`-framed textured-quad object/state/`CLEAR`/`DRAW_VBO` stream from
-`crates/g6b-asm/src/virgl.rs`). `SUBMIT_3D` is a three-descriptor chain
-(32-byte `cmd_submit` OUT + execbuffer OUT + resp WRITE) — `vio_exec_chain`
-gathers all OUT descriptors before dispatch. The raster lands in a dedicated
-offscreen **`virgl_fb`** surface, not the 2D scanout `vio_fb`, so a
-`SUBMIT_3D` render never disturbs the committed frame; commands are gated on
-`virgl_live` (`vio_gl` *and* the negotiated `F_VIRGL` bit, not mere device
-capability). After the `__virgl_req` loop, `VioVirgl` `sw`-builds
+features, and **`VioVirgl`** — scheduled **after `VioPaint`** so the
+committed `__scan_fb` frame is resident — runs the guest virgl composite
+over the ctrlq: `GET_CAPSET_INFO`/`GET_CAPSET` → `CTX_CREATE`(ctx 1) →
+`RESOURCE_CREATE_3D`(`RES_RT` offscreen RT `Y_0_TOP`, `RES_VBO`) →
+`CTX_ATTACH_RESOURCE`(RES_RT, RES_VBO, **RES_SCAN** — the 2D scanout
+resource becomes the sampled texture) → `SUBMIT_3D` carrying the
+`__virgl_cmd` execbuffer → `SET_SCANOUT(RES_RT)` → `RESOURCE_FLUSH(RES_RT)`.
+The execbuffer (24 `VIRGL_CMD0` commands, ~960 B, byte-exact against
+virglrenderer 1.0.0 `virgl_protocol.h`/`vrend_decode.c`,
+`crates/g6b-asm/src/virgl.rs`) builds and binds the full object/state set
+and draws a fullscreen textured quad sampling `RES_SCAN` into `RES_RT` —
+the display shows a GPU raster, not a guest copy. Shaders travel as **TGSI
+text** (`tgsi_dump` form; the binary-token wire was retired in
+virglrenderer 0.9.0) with `VIRGL_OBJ_SHADER_OFFSET` carrying the text byte
+length incl. NUL. `SUBMIT_3D` is a three-descriptor chain (32-byte
+`cmd_submit` OUT + execbuffer OUT + resp WRITE) — `vio_exec_chain` gathers
+all OUT descriptors before dispatch; commands are gated on `virgl_live`
+(`vio_gl` *and* the negotiated `F_VIRGL` bit, not mere device capability).
+After the `__virgl_req` loop, `VioVirgl` `sw`-builds
 `RESOURCE_ATTACH_BACKING`(`RES_RT`→`__virgl_out` BSS) + `TRANSFER_FROM_HOST_3D`
 to pull the rendered quad back into guest RAM (`entries[0].addr` needs the
 resolved `La VirglOut` BSS address, so it can't ride the static reqtab);
-`Smoke::virgl_out` is the guest-RAM snapshot. Exec-model tests
-(`virgl_submit`/`_exec`/`_kill`/`_backing`) are the gate —
-real-GPU QEMU raster stays open until a host DRM render node exists. QEMU needs
+`Smoke::virgl_out` is the guest-RAM snapshot, `virgl_scanout`/`virgl_flushes`
+record the RES_RT present. Exec-model tests
+(`virgl_submit`/`_exec`/`_kill`/`_backing`) are the gate, and the stream is
+**externally verified**: `g6b virgl-dump` + the opt-in
+`tools/bios_regress.py --virgl-reference DIR` replay the request table through
+`libvirglrenderer.so.1`, including matching Y_0_TOP resource flags and fences.
+Both llvmpipe and explicit D3D12 Intel Arc produce **307,200/307,200 px byte-exact**;
+reports identify the selected renderer. This supersedes the old `out/virgl/vhw`
+source-orientation assumption; see `architecture/DISPLAY.md` P0. It is not an
+unchanged-Linux-driver or RTL proof. QEMU needs
 `-global virtio-mmio.force-legacy=false` (the default legacy v1 transport
 ignores the v2 queue registers — `qemu-args` emits it) and the used-ring
 poll is `1<<22` (QueueNotify is iothread-async) — with SEIE armed the

@@ -731,12 +731,6 @@ fn init_node(spec: &BoardSpec, l: &Layout, nrows: usize, auto: &AutoBootPage) ->
                 rs2: X0,
                 to: "cinit_skip_on".into(),
             },
-            Op::Li { rd: T1, imm: 1 },
-            Op::Sw {
-                rs2: T1,
-                rs1: T4,
-                off: crate::AUTO_ON_OFF,
-            },
             Op::Sw {
                 rs2: X0,
                 rs1: T4,
@@ -773,6 +767,16 @@ fn init_node(spec: &BoardSpec, l: &Layout, nrows: usize, auto: &AutoBootPage) ->
             Op::Jal {
                 rd: RA,
                 to: "AutoDraw".into(),
+            },
+            Op::La {
+                rd: T4,
+                addr: Addr::UartLine,
+            },
+            Op::Li { rd: T1, imm: 1 },
+            Op::Sw {
+                rs2: T1,
+                rs1: T4,
+                off: crate::AUTO_ON_OFF,
             },
             ld_x(xlen, RA, SP, 8),
             Op::Addi {
@@ -2539,6 +2543,32 @@ mod tests {
         assert!(node.ops.iter().any(
             |op| matches!(op, Op::Sw { rs2, off, .. } if *off == CLI_DIRTY_OFF && *rs2 != X0)
         ));
+    }
+
+    #[test]
+    fn picker_is_armed_only_after_initial_draw() {
+        let mut spec =
+            BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        spec.kernel.cli.autoboot.enable = true;
+        let auto = AutoBootPage {
+            headers: vec!["AUTOBOOT".into()],
+            entries: vec![("bios-ui".into(), "BIOS UI".into(), "> BIOS UI".into())],
+            footer: "pick one".into(),
+            ticks: 0,
+            ticks_per_sec: 0,
+        };
+        let layout = layout(&[], &[], &auto);
+        let node = init_node(&spec, &layout, 0, &auto);
+        let draw = node
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::Jal { to, .. } if to == "AutoDraw"))
+            .unwrap();
+        let arm = node.ops.iter().position(|op| matches!(op, Op::Sw { off, rs2, .. } if *off == crate::AUTO_ON_OFF && *rs2 != X0)).unwrap();
+        assert!(
+            draw < arm,
+            "input must not observe a partially initialized picker"
+        );
     }
 
     #[test]

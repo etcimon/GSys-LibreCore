@@ -101,7 +101,11 @@ pub fn build(entries: &[(String, String)]) -> Result<Vec<u8>, String> {
     out.extend_from_slice(&table);
     out.extend_from_slice(&blob);
     if out.len() > KGET_MAX_BYTES {
-        return Err(format!("kernel-get table {} exceeds {}", out.len(), KGET_MAX_BYTES));
+        return Err(format!(
+            "kernel-get table {} exceeds {}",
+            out.len(),
+            KGET_MAX_BYTES
+        ));
     }
     Ok(out)
 }

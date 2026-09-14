@@ -179,6 +179,7 @@ fn vt_wt(t: ValType) -> Result<u64, String> {
 /// Lower one instruction list to records. `nimports` maps `call` of an
 /// imported funcidx to `EXT` (unknown imports → TRAP records, named).
 /// `m_mem_pages`/`m_max_pages` feed `memory.grow`'s emitted page cap.
+#[allow(clippy::too_many_arguments)]
 fn lower_fn(
     instrs: &[Instr],
     imports: &[crate::binary::Import],
@@ -1116,9 +1117,7 @@ pub fn encode(wasm: &[u8]) -> Result<Vec<u8>, String> {
     // alone leaves the cell a ~1.4KiB heap, and `WasmAllocator.grow` extends
     // `end` unconditionally — spilling into the tail and clobbering the
     // awaited response pool.
-    let usable_pages = m
-        .mem_pages
-        .max(m.max_mem_pages.unwrap_or(256));
+    let usable_pages = m.mem_pages.max(m.max_mem_pages.unwrap_or(256));
     w32(&mut out, MAGIC);
     w32(&mut out, nfuncs);
     w32(&mut out, nimports);
@@ -1188,8 +1187,7 @@ pub fn encode(wasm: &[u8]) -> Result<Vec<u8>, String> {
     // awaited `_start`. Slots follow `jfmt::AX_*`; `u32::MAX` = not exported.
     use g6b_asm::jfmt::{
         AMETA_MAGIC, AX_ALLOC_STR, AX_COUNT, AX_DATA_GLOB, AX_GET_STATE, AX_JSCB, AX_JSCB0,
-        AX_START, AX_START_REWIND, AX_START_UNWIND, AX_STATE_GLOB, AX_STOP_REWIND,
-        AX_STOP_UNWIND,
+        AX_START, AX_START_REWIND, AX_START_UNWIND, AX_STATE_GLOB, AX_STOP_REWIND, AX_STOP_UNWIND,
     };
     const AX_NAMES: [(&str, u32); 9] = [
         ("_start", AX_START),
@@ -1489,7 +1487,7 @@ pub fn test_module_delegate_ev(ev: &[u8]) -> Vec<u8> {
     let mut bdel = vec![0x00]; // 0 local groups
     bdel.extend_from_slice(&[
         0x10, 0x00, // call $getRoot
-        0x41, ORD,  // i32.const ORD
+        0x41, ORD, // i32.const ORD
         0x10, 0x01, // call $createElement
         0x10, 0x02, // call $appendChild
         0x0b,
@@ -1498,16 +1496,16 @@ pub fn test_module_delegate_ev(ev: &[u8]) -> Vec<u8> {
     let mut bst = vec![0x01, 0x01, 0x7f]; // 1 local group, count1, i32
     bst.extend_from_slice(&[
         0x41, ORD, 0x10, 0x01, 0x21, 0x00, // el = createElement(ORD); local.set 0
-        0x20, 0x00,                       // local.get 0  (el handle)
-        0x41, 0x02, 0x41, ID,             //   namelen=2  nameptr=ID   ("id")
-        0x41, 0x01, 0x41, X,              //   vallen=1   valptr=X    ("x")
-        0x10, 0x03,                       // setProperty(el,"id","x") — len-first ABI
+        0x20, 0x00, // local.get 0  (el handle)
+        0x41, 0x02, 0x41, ID, //   namelen=2  nameptr=ID   ("id")
+        0x41, 0x01, 0x41, X, //   vallen=1   valptr=X    ("x")
+        0x10, 0x03, // setProperty(el,"id","x") — len-first ABI
         0x10, 0x00, 0x20, 0x00, 0x10, 0x02, // appendChild(getRoot(), el)
-        0x41, X, 0x41, 0x01,              // tptr=X  tlen=1   ("x")     ptr-first ABI
-        0x41, KD, 0x41, tylen,            // typtr=KD tylen (the event name)
-        0x41, DELEGATE,                   // cb = $delegate funcidx 5
-        0x41, 0x00,                       // capture = 0
-        0x10, 0x04,                       // add_event_listener("x",<ev>,5,0)
+        0x41, X, 0x41, 0x01, // tptr=X  tlen=1   ("x")     ptr-first ABI
+        0x41, KD, 0x41, tylen, // typtr=KD tylen (the event name)
+        0x41, DELEGATE, // cb = $delegate funcidx 5
+        0x41, 0x00, // capture = 0
+        0x10, 0x04, // add_event_listener("x",<ev>,5,0)
         0x0b,
     ]);
     let mut code = Vec::new();
@@ -1622,7 +1620,8 @@ pub fn test_module_evget() -> Vec<u8> {
         0x71, //                             i32.and
         0x20, 0x03, 0x71, //                 local.get dp; i32.and
         0x04, 0x40, //                       if (void)
-        0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, // appendChild(getRoot(),createElement(ORD))
+        0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10,
+        0x02, // appendChild(getRoot(),createElement(ORD))
         0x0b, // end if
         0x0b, // end func
     ]);
@@ -1631,7 +1630,8 @@ pub fn test_module_evget() -> Vec<u8> {
     let mut bst = vec![0x01, 0x01, 0x7f];
     bst.extend_from_slice(&[
         0x41, ORD, 0x10, 0x01, 0x21, 0x00, // el = createElement(ORD)
-        0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X, 0x10, 0x03, // setProperty(el,"id","x")
+        0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X, 0x10,
+        0x03, // setProperty(el,"id","x")
         0x10, 0x00, 0x20, 0x00, 0x10, 0x02, // appendChild(getRoot(), el)
         0x41, X, 0x41, 0x01, // tptr=X tlen=1
         0x41, EV, 0x41, 0x05, // typtr=EV tylen=5 ("click")
@@ -1700,6 +1700,20 @@ fn put_name(out: &mut Vec<u8>, s: &str) {
 /// the encoded records, not the wasm bytes, are what the payload carries.
 pub fn install_guest(m: &mut g6b_asm::Module, wasm: &[u8]) -> Result<(), String> {
     let img = encode(wasm)?;
+    let coverage = op_coverage(wasm)?;
+    if !coverage.clean() {
+        return Err(format!(
+            "guest JIT preflight: {} reachable gap(s): {}",
+            coverage.gaps.len(),
+            coverage
+                .gaps
+                .iter()
+                .take(8)
+                .map(OpGap::describe)
+                .collect::<Vec<_>>()
+                .join("; ")
+        ));
+    }
     g6b_asm::jitr::set_image(m, &img)
 }
 
@@ -1833,19 +1847,19 @@ fn delegate_cell(ev: &[u8]) -> Vec<u8> {
     let mut bst = vec![0x01, 0x01, 0x7f]; // 1 local group, count1, i32
     bst.extend_from_slice(&[
         0x10, 0x00, 0x21, 0x00, // root = getRoot(); local.set 0
-        0x20, 0x00,             // local.get 0 (root)
-        0x41, 0x02, 0x41, id,   //   namelen=2 nameptr=id  ("id")
-        0x41, 0x01, 0x41, r,    //   vallen=1  valptr=r    ("r")
-        0x10, 0x03,             // setProperty(root,"id","r") — len-first ABI
-        0x20, 0x00,             // local.get 0 (root)
-        0x41, 0x09, 0x41, it,   //   namelen=9 nameptr=it  ("innerText")
-        0x41, 0x05, 0x41, rdy,  //   vallen=5  valptr=rdy  ("READY")
-        0x10, 0x03,             // setProperty(root,"innerText","READY")
-        0x41, r, 0x41, 0x01,    // tptr=r tlen=1           ("r")   ptr-first ABI
+        0x20, 0x00, // local.get 0 (root)
+        0x41, 0x02, 0x41, id, //   namelen=2 nameptr=id  ("id")
+        0x41, 0x01, 0x41, r, //   vallen=1  valptr=r    ("r")
+        0x10, 0x03, // setProperty(root,"id","r") — len-first ABI
+        0x20, 0x00, // local.get 0 (root)
+        0x41, 0x09, 0x41, it, //   namelen=9 nameptr=it  ("innerText")
+        0x41, 0x05, 0x41, rdy, //   vallen=5  valptr=rdy  ("READY")
+        0x10, 0x03, // setProperty(root,"innerText","READY")
+        0x41, r, 0x41, 0x01, // tptr=r tlen=1           ("r")   ptr-first ABI
         0x41, evp, 0x41, evlen, // typtr=evp tylen=evlen  (<ev>)
-        0x41, DELEGATE,         // cb = $delegate funcidx 5
-        0x41, 0x00,             // capture = 0
-        0x10, 0x04,             // add_event_listener("r",<ev>,5,0)
+        0x41, DELEGATE, // cb = $delegate funcidx 5
+        0x41, 0x00, // capture = 0
+        0x10, 0x04, // add_event_listener("r",<ev>,5,0)
         0x0b,
     ]);
     let mut code = Vec::new();
@@ -1895,11 +1909,11 @@ pub fn test_module_eh() -> Vec<u8> {
     let mut types = Vec::new();
     push_uleb(&mut types, 2);
     types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
-    types.extend_from_slice(&[0x60, 0, 0]);        // t1 ()->()
+    types.extend_from_slice(&[0x60, 0, 0]); // t1 ()->()
     section(&mut out, 1, &types);
     section(&mut out, 3, &[2, 1, 0]); // f0=t1 thrower, f1=t0 _start
     section(&mut out, 5, &[1, 0x00, 0x01]); // memory 1 page
-    section(&mut out, 13, &[1, 0x00, 1]);   // 1 tag, attr 0, typeidx 1 (()->())
+    section(&mut out, 13, &[1, 0x00, 1]); // 1 tag, attr 0, typeidx 1 (()->())
     let mut exports = Vec::new();
     push_uleb(&mut exports, 2);
     put_name(&mut exports, "memory");
@@ -1911,14 +1925,14 @@ pub fn test_module_eh() -> Vec<u8> {
     section(&mut out, 7, &exports);
     let b0 = [0x00, 0x08, 0x00, 0x0b]; // thrower: throw tag0; end
     let b1 = [
-        0x00,               // locals=0
-        0x06, 0x7f,         // try (result i32)
-        0x10, 0x00,         //   call 0 (thrower)
-        0x41, 0x00,         //   i32.const 0   (unreached)
-        0x19,               // catch_all
-        0x41, 0x89, 0x06,   //   i32.const 777
-        0x0b,               // end try
-        0x0b,               // end func
+        0x00, // locals=0
+        0x06, 0x7f, // try (result i32)
+        0x10, 0x00, //   call 0 (thrower)
+        0x41, 0x00, //   i32.const 0   (unreached)
+        0x19, // catch_all
+        0x41, 0x89, 0x06, //   i32.const 777
+        0x0b, // end try
+        0x0b, // end func
     ];
     let mut code = Vec::new();
     push_uleb(&mut code, 2);
@@ -2408,15 +2422,37 @@ mod tests {
         // `{url→body}` table the ELF payload carries (`kget_pack`) so the
         // guest `KernelGet` resolves each to the `items[]` row JSON.
         m.kget = g6b_asm::kget::build(&[
-            ("/bios/menu/main".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/cpu".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/memory".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/uncore".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/devices".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/boot".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/settings".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            (
+                "/bios/menu/main".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/cpu".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/memory".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/uncore".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/devices".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/boot".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/settings".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
             ("/bios/store".into(), "[]".into()),
-        ]).unwrap();
+        ])
+        .unwrap();
         let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
         assert!(
             s.console.contains("WASM-JIT-F 00000000000000fc"),
@@ -2554,6 +2590,122 @@ mod tests {
         ]
     }
 
+    #[test]
+    fn guest_install_rejects_reachable_missing_import() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"wasm":{"enable":true,"jit":true,"guest_jit":true}}}"#,
+        ).unwrap();
+        let mut module = g6b_asm::analyze::kstart(&spec);
+        let mut wasm = delegate_key_cell();
+        let at = wasm.windows(7).position(|w| w == b"getRoot").unwrap();
+        wasm[at..at + 7].copy_from_slice(b"badRoot");
+        assert!(!op_coverage(&wasm).unwrap().clean());
+        assert!(install_guest(&mut module, &wasm).is_err());
+        assert!(module.jit_in.is_empty());
+    }
+
+    #[test]
+    fn guest_jit_jitcall_preserves_four_arguments() {
+        use g6b_asm::encode::{A3, A4, A5};
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}}}"#,
+        ).unwrap();
+        let mut wasm = b"\0asm\x01\0\0\0".to_vec();
+        section(
+            &mut wasm,
+            1,
+            &[
+                2, 0x60, 0, 1, 0x7f, 0x60, 4, 0x7f, 0x7f, 0x7f, 0x7f, 1, 0x7f,
+            ],
+        );
+        section(&mut wasm, 3, &[2, 0, 1]);
+        section(&mut wasm, 5, &[1, 0, 1]);
+        let mut exports = vec![2];
+        put_name(&mut exports, "_start");
+        exports.extend_from_slice(&[0, 0]);
+        put_name(&mut exports, "callback");
+        exports.extend_from_slice(&[0, 1]);
+        section(&mut wasm, 7, &exports);
+        let start = [0, 0x41, 0, 0x0b];
+        let callback = [
+            0, 0x20, 0, 0x41, 10, 0x6c, 0x20, 1, 0x6a, 0x41, 10, 0x6c, 0x20, 2, 0x6a, 0x41, 10,
+            0x6c, 0x20, 3, 0x6a, 0x0b,
+        ];
+        let mut code = vec![2, start.len() as u8];
+        code.extend_from_slice(&start);
+        code.push(callback.len() as u8);
+        code.extend_from_slice(&callback);
+        section(&mut wasm, 10, &code);
+        let mut module = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut module, &wasm).unwrap();
+        let mut probe = put_str_ops("ARGS=");
+        for (rd, imm) in [(A0, 1), (A1, 4), (A2, 1), (A3, 2), (A4, 3), (A5, 4)] {
+            probe.push(Op::Li { rd, imm });
+        }
+        probe.extend([
+            Op::Jal {
+                rd: RA,
+                to: "JitCall".into(),
+            },
+            Op::Addi {
+                rd: T0,
+                rs: A0,
+                imm: 0,
+            },
+        ]);
+        probe.extend(hex_t0_ops("args_hex"));
+        probe.extend(put_str_ops("\n"));
+        for (i, (fidx, nargs)) in [(1, 5), (2, 0), (256, 0), (-1, 0)].into_iter().enumerate() {
+            probe.extend(put_str_ops(&format!("BAD{i}=")));
+            probe.extend([
+                Op::Li { rd: A0, imm: fidx },
+                Op::Li { rd: A1, imm: nargs },
+                Op::Jal {
+                    rd: RA,
+                    to: "JitCall".into(),
+                },
+                Op::Addi {
+                    rd: T0,
+                    rs: A0,
+                    imm: 0,
+                },
+            ]);
+            probe.extend(hex_t0_ops(&format!("bad{i}_hex")));
+            probe.extend(put_str_ops("\n"));
+        }
+        let node = module
+            .nodes
+            .iter_mut()
+            .find(|n| {
+                n.ops
+                    .iter()
+                    .any(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            })
+            .unwrap();
+        let at = node
+            .ops
+            .iter()
+            .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            .unwrap()
+            + 1;
+        node.ops.splice(at..at, probe);
+        let smoke = g6b_asm::exec::run_module(&spec, &module, 0x8020_0000).unwrap();
+        assert_eq!(smoke.faults, 0);
+        assert!(
+            smoke.console.contains("ARGS=00000000000004d2"),
+            "{}",
+            smoke.console
+        );
+        for i in 0..4 {
+            assert!(
+                smoke.console.contains(&format!("BAD{i}=ffffffffffffffff")),
+                "{}",
+                smoke.console
+            );
+        }
+        assert!(!smoke.console.contains("TRAP-"));
+    }
+
     /// `JitCall` re-enters a translated cell function: after `_start`, the probe
     /// resolves `asyncify_get_state`'s funcidx through `JitAx`, invokes it (0 →
     /// NORMAL), then `asyncify_start_unwind` + a second `get_state` round-trip
@@ -2577,15 +2729,37 @@ mod tests {
         let mut m = g6b_asm::analyze::kstart(&spec);
         install_guest(&mut m, wasm).expect("shipped cell installs");
         m.kget = g6b_asm::kget::build(&[
-            ("/bios/menu/main".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/cpu".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/memory".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/uncore".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/devices".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/boot".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/settings".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            (
+                "/bios/menu/main".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/cpu".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/memory".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/uncore".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/devices".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/boot".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/settings".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
             ("/bios/store".into(), "[]".into()),
-        ]).unwrap();
+        ])
+        .unwrap();
 
         // Probe spliced after `jal JitRun`: JitAx + JitCall round-trip.
         let mut probe = vec![
@@ -2778,14 +2952,38 @@ mod tests {
             {
                 let ops = vec![
                     Op::Li { rd: A0, imm: 1 },
-                    Op::Jal { rd: RA, to: "DomtFocus".into() },
-                    Op::La { rd: T0, addr: Addr::VioBss },
-                    Op::Li { rd: T1, imm: (VIO_KEY_ENTER << 8) | 1 },
-                    Op::Sw { rs2: T1, rs1: T0, off: INP_KQ_OFF },
+                    Op::Jal {
+                        rd: RA,
+                        to: "DomtFocus".into(),
+                    },
+                    Op::La {
+                        rd: T0,
+                        addr: Addr::VioBss,
+                    },
+                    Op::Li {
+                        rd: T1,
+                        imm: (VIO_KEY_ENTER << 8) | 1,
+                    },
+                    Op::Sw {
+                        rs2: T1,
+                        rs1: T0,
+                        off: INP_KQ_OFF,
+                    },
                     Op::Li { rd: T1, imm: 1 },
-                    Op::Sw { rs2: T1, rs1: T0, off: INP_KQ_HEAD },
-                    Op::Sw { rs2: X0, rs1: T0, off: DOMT_SEEN_OFF },
-                    Op::Jal { rd: RA, to: "DomtKey".into() },
+                    Op::Sw {
+                        rs2: T1,
+                        rs1: T0,
+                        off: INP_KQ_HEAD,
+                    },
+                    Op::Sw {
+                        rs2: X0,
+                        rs1: T0,
+                        off: DOMT_SEEN_OFF,
+                    },
+                    Op::Jal {
+                        rd: RA,
+                        to: "DomtKey".into(),
+                    },
                 ];
                 n.ops.splice(pos + 1..pos + 1, ops);
                 placed = true;
@@ -2845,13 +3043,34 @@ mod tests {
                 .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
             {
                 let ops = vec![
-                    Op::La { rd: T0, addr: Addr::VioBss },
-                    Op::Li { rd: T1, imm: (VIO_KEY_ENTER << 8) | 1 },
-                    Op::Sw { rs2: T1, rs1: T0, off: INP_KQ_OFF },
+                    Op::La {
+                        rd: T0,
+                        addr: Addr::VioBss,
+                    },
+                    Op::Li {
+                        rd: T1,
+                        imm: (VIO_KEY_ENTER << 8) | 1,
+                    },
+                    Op::Sw {
+                        rs2: T1,
+                        rs1: T0,
+                        off: INP_KQ_OFF,
+                    },
                     Op::Li { rd: T1, imm: 1 },
-                    Op::Sw { rs2: T1, rs1: T0, off: INP_KQ_HEAD },
-                    Op::Sw { rs2: X0, rs1: T0, off: DOMT_SEEN_OFF },
-                    Op::Jal { rd: RA, to: "DomtKey".into() },
+                    Op::Sw {
+                        rs2: T1,
+                        rs1: T0,
+                        off: INP_KQ_HEAD,
+                    },
+                    Op::Sw {
+                        rs2: X0,
+                        rs1: T0,
+                        off: DOMT_SEEN_OFF,
+                    },
+                    Op::Jal {
+                        rd: RA,
+                        to: "DomtKey".into(),
+                    },
                 ];
                 n.ops.splice(pos + 1..pos + 1, ops);
                 placed = true;
@@ -2913,8 +3132,13 @@ mod tests {
                 .iter()
                 .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
             {
-                n.ops
-                    .splice(pos + 1..pos + 1, vec![Op::Jal { rd: RA, to: "DomtLayout".into() }]);
+                n.ops.splice(
+                    pos + 1..pos + 1,
+                    vec![Op::Jal {
+                        rd: RA,
+                        to: "DomtLayout".into(),
+                    }],
+                );
                 placed = true;
                 break;
             }
@@ -2990,14 +3214,28 @@ mod tests {
         let mut probe: Vec<Op> = Vec::new();
         // Write "/no" at __wasm_mem[URL].
         probe.extend([
-            Op::La { rd: T1, addr: Addr::WasmMem },
+            Op::La {
+                rd: T1,
+                addr: Addr::WasmMem,
+            },
             Op::Li { rd: T2, imm: URL },
-            Op::Add { rd: T1, rs1: T1, rs2: T2 },
+            Op::Add {
+                rd: T1,
+                rs1: T1,
+                rs2: T2,
+            },
         ]);
         for (i, b) in b"/no".iter().enumerate() {
             probe.extend([
-                Op::Li { rd: T2, imm: i64::from(*b) },
-                Op::Sb { rs2: T2, rs1: T1, off: i as i32 },
+                Op::Li {
+                    rd: T2,
+                    imm: i64::from(*b),
+                },
+                Op::Sb {
+                    rs2: T2,
+                    rs1: T1,
+                    off: i as i32,
+                },
             ]);
         }
         probe.extend(put_str_ops(" BAD"));
@@ -3006,14 +3244,32 @@ mod tests {
         probe.extend([
             Op::Li { rd: A0, imm: URL },
             Op::Li { rd: A1, imm: 3 },
-            Op::Jal { rd: RA, to: "LwFetch".into() },
-            Op::Addi { rd: S0, rs: A0, imm: 0 },
+            Op::Jal {
+                rd: RA,
+                to: "LwFetch".into(),
+            },
+            Op::Addi {
+                rd: S0,
+                rs: A0,
+                imm: 0,
+            },
         ]);
         // t0 = PromGet(s0).state — expect PROM_ST_PEND (pending until drained).
         probe.extend([
-            Op::Addi { rd: A0, rs: S0, imm: 0 },
-            Op::Jal { rd: RA, to: "PromGet".into() },
-            Op::Lw { rd: T0, rs: A0, off: PR_STATE },
+            Op::Addi {
+                rd: A0,
+                rs: S0,
+                imm: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "PromGet".into(),
+            },
+            Op::Lw {
+                rd: T0,
+                rs: A0,
+                off: PR_STATE,
+            },
         ]);
         probe.extend(put_str_ops(" RS"));
         probe.extend(hex_t0_ops("pr_hex0"));
@@ -3021,61 +3277,146 @@ mod tests {
         // settles REJ, so the await below takes the rejected path (not the
         // pending suspend arm).
         probe.extend([
-            Op::Addi { rd: A0, rs: S0, imm: 0 },
-            Op::Jal { rd: RA, to: "PromGet".into() },
+            Op::Addi {
+                rd: A0,
+                rs: S0,
+                imm: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "PromGet".into(),
+            },
             Op::Li { rd: T2, imm: 1 },
-            Op::Sw { rs2: T2, rs1: A0, off: g6b_asm::domt::PR_BUDGET },
-            Op::Jal { rd: RA, to: "PromDrain".into() },
+            Op::Sw {
+                rs2: T2,
+                rs1: A0,
+                off: g6b_asm::domt::PR_BUDGET,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "PromDrain".into(),
+            },
         ]);
         // t0 = PromGet(s0).state — expect PROM_ST_REJ after the drain.
         probe.extend([
-            Op::Addi { rd: A0, rs: S0, imm: 0 },
-            Op::Jal { rd: RA, to: "PromGet".into() },
-            Op::Lw { rd: T0, rs: A0, off: PR_STATE },
+            Op::Addi {
+                rd: A0,
+                rs: S0,
+                imm: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "PromGet".into(),
+            },
+            Op::Lw {
+                rd: T0,
+                rs: A0,
+                off: PR_STATE,
+            },
         ]);
         probe.extend(put_str_ops(" RD"));
         probe.extend(hex_t0_ops("pr_hex0b"));
         // LwAwaitVoid(s0) → afail=1 ; then LwAwaitFail → a0.
         probe.extend([
-            Op::Addi { rd: A0, rs: S0, imm: 0 },
-            Op::Jal { rd: RA, to: "LwAwaitVoid".into() },
-            Op::Jal { rd: RA, to: "LwAwaitFail".into() },
-            Op::Addi { rd: T0, rs: A0, imm: 0 },
+            Op::Addi {
+                rd: A0,
+                rs: S0,
+                imm: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "LwAwaitVoid".into(),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "LwAwaitFail".into(),
+            },
+            Op::Addi {
+                rd: T0,
+                rs: A0,
+                imm: 0,
+            },
         ]);
         probe.extend(put_str_ops(" AF"));
         probe.extend(hex_t0_ops("pr_hex1"));
         // LwAwaitErr(OUT) writes {len=3,ptr=URL}; read len back → t0.
         probe.extend([
             Op::Li { rd: A0, imm: OUT },
-            Op::Jal { rd: RA, to: "LwAwaitErr".into() },
-            Op::La { rd: T1, addr: Addr::WasmMem },
+            Op::Jal {
+                rd: RA,
+                to: "LwAwaitErr".into(),
+            },
+            Op::La {
+                rd: T1,
+                addr: Addr::WasmMem,
+            },
             Op::Li { rd: T2, imm: OUT },
-            Op::Add { rd: T1, rs1: T1, rs2: T2 },
-            Op::Lw { rd: T0, rs: T1, off: 0 },
+            Op::Add {
+                rd: T1,
+                rs1: T1,
+                rs2: T2,
+            },
+            Op::Lw {
+                rd: T0,
+                rs: T1,
+                off: 0,
+            },
         ]);
         probe.extend(put_str_ops(" EL"));
         probe.extend(hex_t0_ops("pr_hex2"));
         // Contrast: a known url fulfils — PromGet(handle).state == PROM_ST_FUL.
         probe.extend([
-            Op::La { rd: T1, addr: Addr::WasmMem },
+            Op::La {
+                rd: T1,
+                addr: Addr::WasmMem,
+            },
             Op::Li { rd: T2, imm: URL },
-            Op::Add { rd: T1, rs1: T1, rs2: T2 },
+            Op::Add {
+                rd: T1,
+                rs1: T1,
+                rs2: T2,
+            },
         ]);
         for (i, b) in b"/bios/menu/main".iter().enumerate() {
             probe.extend([
-                Op::Li { rd: T2, imm: i64::from(*b) },
-                Op::Sb { rs2: T2, rs1: T1, off: i as i32 },
+                Op::Li {
+                    rd: T2,
+                    imm: i64::from(*b),
+                },
+                Op::Sb {
+                    rs2: T2,
+                    rs1: T1,
+                    off: i as i32,
+                },
             ]);
         }
         probe.extend(put_str_ops(" OK"));
         probe.extend([
             Op::Li { rd: A0, imm: URL },
             Op::Li { rd: A1, imm: 15 },
-            Op::Jal { rd: RA, to: "LwFetch".into() },
-            Op::Addi { rd: S0, rs: A0, imm: 0 },
-            Op::Addi { rd: A0, rs: S0, imm: 0 },
-            Op::Jal { rd: RA, to: "PromGet".into() },
-            Op::Lw { rd: T0, rs: A0, off: PR_STATE },
+            Op::Jal {
+                rd: RA,
+                to: "LwFetch".into(),
+            },
+            Op::Addi {
+                rd: S0,
+                rs: A0,
+                imm: 0,
+            },
+            Op::Addi {
+                rd: A0,
+                rs: S0,
+                imm: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "PromGet".into(),
+            },
+            Op::Lw {
+                rd: T0,
+                rs: A0,
+                off: PR_STATE,
+            },
         ]);
         probe.extend(put_str_ops(" FS"));
         probe.extend(hex_t0_ops("pr_hex3"));
@@ -3083,18 +3424,46 @@ mod tests {
         // flags afail=1, note_await_ok clears it — the host-recorded outcome
         // `libwasm_await_failed` then reports.
         probe.extend([
-            Op::Addi { rd: A0, rs: S0, imm: 0 },
-            Op::Jal { rd: RA, to: "LwNoteRej".into() },
-            Op::Jal { rd: RA, to: "LwAwaitFail".into() },
-            Op::Addi { rd: T0, rs: A0, imm: 0 },
+            Op::Addi {
+                rd: A0,
+                rs: S0,
+                imm: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "LwNoteRej".into(),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "LwAwaitFail".into(),
+            },
+            Op::Addi {
+                rd: T0,
+                rs: A0,
+                imm: 0,
+            },
         ]);
         probe.extend(put_str_ops(" NR"));
         probe.extend(hex_t0_ops("pr_hex4"));
         probe.extend([
-            Op::Addi { rd: A0, rs: S0, imm: 0 },
-            Op::Jal { rd: RA, to: "LwNoteFul".into() },
-            Op::Jal { rd: RA, to: "LwAwaitFail".into() },
-            Op::Addi { rd: T0, rs: A0, imm: 0 },
+            Op::Addi {
+                rd: A0,
+                rs: S0,
+                imm: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "LwNoteFul".into(),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "LwAwaitFail".into(),
+            },
+            Op::Addi {
+                rd: T0,
+                rs: A0,
+                imm: 0,
+            },
         ]);
         probe.extend(put_str_ops(" NF"));
         probe.extend(hex_t0_ops("pr_hex5"));
@@ -3126,8 +3495,16 @@ mod tests {
             "rejected after drain: {}",
             s.console
         );
-        assert!(s.console.contains("AF0000000000000001"), "afail=1: {}", s.console);
-        assert!(s.console.contains("EL0000000000000003"), "reason len=3: {}", s.console);
+        assert!(
+            s.console.contains("AF0000000000000001"),
+            "afail=1: {}",
+            s.console
+        );
+        assert!(
+            s.console.contains("EL0000000000000003"),
+            "reason len=3: {}",
+            s.console
+        );
         let ful = format!("FS{:016x}", PROM_ST_FUL);
         assert!(s.console.contains(&ful), "fulfilled state: {}", s.console);
         assert!(
@@ -3161,6 +3538,20 @@ mod tests {
     /// appears after the (final) `WASM-JIT` marker.
     #[test]
     fn guest_jit_pending_await_suspends_then_resumes() {
+        pending_await_resume(false, false);
+    }
+
+    #[test]
+    fn guest_jit_late_fulfillment_finishes_subsequent_awaits() {
+        pending_await_resume(true, false);
+    }
+
+    #[test]
+    fn guest_jit_resumed_call_can_suspend_again() {
+        pending_await_resume(true, true);
+    }
+
+    fn pending_await_resume(fulfill: bool, twice: bool) {
         use g6b_asm::domt::P_ASUSP;
         use g6b_asm::encode::{A0, RA, T0, T1, T2};
         use g6b_asm::{Addr, Op};
@@ -3182,28 +3573,161 @@ mod tests {
         install_guest(&mut m, wasm).expect("shipped cell installs");
         // Bake every route EXCEPT the first-fetched menu — its `fetch` pends.
         m.kget = g6b_asm::kget::build(&[
-            ("/bios/menu/cpu".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/memory".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/uncore".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/devices".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/boot".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
-            ("/bios/menu/settings".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            (
+                "/bios/menu/cpu".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/memory".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/uncore".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/devices".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/boot".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
+            (
+                "/bios/menu/settings".into(),
+                "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+            ),
             ("/bios/store".into(), "[]".into()),
         ])
         .unwrap();
 
+        if twice {
+            let url_off = u32::from_le_bytes(m.kget[16..20].try_into().unwrap()) as usize;
+            m.kget[url_off + 11] = b'X';
+        }
+
         // Probe (foreground, after JitRun): the cell is suspended on the pending
         // `main` fetch — `P_ASUSP` holds its handle. Cap that record's
         // `PR_BUDGET` to 1 so the boot timer tick's `PromDrain` rejects it.
-        let probe = vec![
-            Op::La { rd: T0, addr: Addr::Prom },
-            Op::Lw { rd: A0, rs: T0, off: P_ASUSP },
-            Op::Jal { rd: RA, to: "PromGet".into() }, // a0 = suspended rec|0
-            Op::Beq { rs1: A0, rs2: X0, to: "pd_probe_done".into() },
+        let mut probe = vec![
+            Op::La {
+                rd: T0,
+                addr: Addr::Prom,
+            },
+            Op::Lw {
+                rd: A0,
+                rs: T0,
+                off: P_ASUSP,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "PromGet".into(),
+            }, // a0 = suspended rec|0
+            Op::Beq {
+                rs1: A0,
+                rs2: X0,
+                to: "pd_probe_done".into(),
+            },
             Op::Li { rd: T2, imm: 1 },
-            Op::Sw { rs2: T2, rs1: A0, off: g6b_asm::domt::PR_BUDGET },
+            Op::Sw {
+                rs2: T2,
+                rs1: A0,
+                off: g6b_asm::domt::PR_BUDGET,
+            },
             Op::Label("pd_probe_done".into()),
         ];
+        if fulfill {
+            let body_off = u32::from_le_bytes(m.kget[24..28].try_into().unwrap());
+            let body_len = u32::from_le_bytes(m.kget[28..32].try_into().unwrap());
+            let at = probe.len() - 1;
+            let settle = [
+                Op::Li {
+                    rd: T2,
+                    imm: i64::from(body_off),
+                },
+                Op::Sw {
+                    rs2: T2,
+                    rs1: A0,
+                    off: g6b_asm::domt::PR_VOFF,
+                },
+                Op::Li {
+                    rd: T2,
+                    imm: i64::from(body_len),
+                },
+                Op::Sw {
+                    rs2: T2,
+                    rs1: A0,
+                    off: g6b_asm::domt::PR_VLEN,
+                },
+                Op::Li {
+                    rd: T2,
+                    imm: g6b_asm::domt::PROM_ST_FUL,
+                },
+                Op::Sw {
+                    rs2: T2,
+                    rs1: A0,
+                    off: g6b_asm::domt::PR_STATE,
+                },
+            ];
+            probe.splice(at..at, settle.clone());
+            if twice {
+                let at = probe.len() - 1;
+                let mut again = vec![
+                    Op::Jal {
+                        rd: RA,
+                        to: "PromDrain".into(),
+                    },
+                    Op::La {
+                        rd: T0,
+                        addr: Addr::Prom,
+                    },
+                    Op::Sw {
+                        rs2: X0,
+                        rs1: T0,
+                        off: g6b_asm::domt::P_RESUME,
+                    },
+                    Op::Jal {
+                        rd: RA,
+                        to: "JitResume".into(),
+                    },
+                ];
+                again.extend(put_str_ops("SUSPENDED="));
+                again.extend([
+                    Op::La {
+                        rd: T0,
+                        addr: Addr::Prom,
+                    },
+                    Op::Lw {
+                        rd: T0,
+                        rs: T0,
+                        off: P_ASUSP,
+                    },
+                ]);
+                again.extend(hex_t0_ops("second_suspend_hex"));
+                again.extend([
+                    Op::La {
+                        rd: T0,
+                        addr: Addr::Prom,
+                    },
+                    Op::Lw {
+                        rd: A0,
+                        rs: T0,
+                        off: P_ASUSP,
+                    },
+                    Op::Jal {
+                        rd: RA,
+                        to: "PromGet".into(),
+                    },
+                    Op::Beq {
+                        rs1: A0,
+                        rs2: X0,
+                        to: "pd_probe_done".into(),
+                    },
+                ]);
+                again.extend(settle);
+                probe.splice(at..at, again);
+            }
+        }
 
         let mut placed = false;
         for n in &mut m.nodes {
@@ -3227,6 +3751,21 @@ mod tests {
         // raised `P_RESUME`, and the foreground `JitCall` rewound `_start` — the
         // `v1s2` re-call of await(1) in REWINDING only runs post-park.
         let parked = s.console.find("WASM-JIT 0").expect("jit_after parked");
+        if fulfill {
+            assert!(
+                s.console[parked..].contains("v8s2"),
+                "resume must finish subsequent awaits: {}",
+                s.console
+            );
+            assert!(s.domt_live > 56, "late results must populate DOM rows");
+        }
+        if twice {
+            assert!(
+                s.console.contains("SUSPENDED=0000000000000002"),
+                "{}",
+                s.console
+            );
+        }
         assert!(
             s.console[parked..].contains("v1s2"),
             "resumed into the await continuation (rewind re-call):\n{}",
@@ -3270,14 +3809,28 @@ mod tests {
         const ARR: i64 = 0x10_fc00; // i32 handle array
         let wstr = |probe: &mut Vec<Op>, off: i64, s: &[u8]| {
             probe.extend([
-                Op::La { rd: T1, addr: Addr::WasmMem },
+                Op::La {
+                    rd: T1,
+                    addr: Addr::WasmMem,
+                },
                 Op::Li { rd: T2, imm: off },
-                Op::Add { rd: T1, rs1: T1, rs2: T2 },
+                Op::Add {
+                    rd: T1,
+                    rs1: T1,
+                    rs2: T2,
+                },
             ]);
             for (i, b) in s.iter().enumerate() {
                 probe.extend([
-                    Op::Li { rd: T2, imm: i64::from(*b) },
-                    Op::Sb { rs2: T2, rs1: T1, off: i as i32 },
+                    Op::Li {
+                        rd: T2,
+                        imm: i64::from(*b),
+                    },
+                    Op::Sb {
+                        rs2: T2,
+                        rs1: T1,
+                        off: i as i32,
+                    },
                 ]);
             }
         };
@@ -3289,26 +3842,61 @@ mod tests {
         probe.extend([
             Op::Li { rd: A0, imm: G },
             Op::Li { rd: A1, imm: 15 },
-            Op::Jal { rd: RA, to: "LwFetch".into() },
-            Op::Addi { rd: S0, rs: A0, imm: 0 },
+            Op::Jal {
+                rd: RA,
+                to: "LwFetch".into(),
+            },
+            Op::Addi {
+                rd: S0,
+                rs: A0,
+                imm: 0,
+            },
             Op::Li { rd: A0, imm: B },
             Op::Li { rd: A1, imm: 3 },
-            Op::Jal { rd: RA, to: "LwFetch".into() },
-            Op::Addi { rd: S1, rs: A0, imm: 0 },
+            Op::Jal {
+                rd: RA,
+                to: "LwFetch".into(),
+            },
+            Op::Addi {
+                rd: S1,
+                rs: A0,
+                imm: 0,
+            },
             // s1's record: budget=1 then PromDrain → REJ
-            Op::Addi { rd: A0, rs: S1, imm: 0 },
-            Op::Jal { rd: RA, to: "PromGet".into() },
+            Op::Addi {
+                rd: A0,
+                rs: S1,
+                imm: 0,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "PromGet".into(),
+            },
             Op::Li { rd: T2, imm: 1 },
-            Op::Sw { rs2: T2, rs1: A0, off: g6b_asm::domt::PR_BUDGET },
-            Op::Jal { rd: RA, to: "PromDrain".into() },
+            Op::Sw {
+                rs2: T2,
+                rs1: A0,
+                off: g6b_asm::domt::PR_BUDGET,
+            },
+            Op::Jal {
+                rd: RA,
+                to: "PromDrain".into(),
+            },
         ]);
         // Write an i32 array and combin over it. `mkarr(off, [regs])` stores
         // each handle then `LwAddInts(len, off)` → s2 = array handle.
         let mkarr = |probe: &mut Vec<Op>, off: i64, elems: &[u32]| {
             probe.extend([
-                Op::La { rd: T1, addr: Addr::WasmMem },
+                Op::La {
+                    rd: T1,
+                    addr: Addr::WasmMem,
+                },
                 Op::Li { rd: T2, imm: off },
-                Op::Add { rd: T1, rs1: T1, rs2: T2 },
+                Op::Add {
+                    rd: T1,
+                    rs1: T1,
+                    rs2: T2,
+                },
             ]);
             for (i, r) in elems.iter().enumerate() {
                 probe.push(Op::Sw {
@@ -3318,19 +3906,43 @@ mod tests {
                 });
             }
             probe.extend([
-                Op::Li { rd: A0, imm: elems.len() as i64 },
+                Op::Li {
+                    rd: A0,
+                    imm: elems.len() as i64,
+                },
                 Op::Li { rd: A1, imm: off },
-                Op::Jal { rd: RA, to: "LwAddInts".into() },
-                Op::Addi { rd: S2, rs: A0, imm: 0 },
+                Op::Jal {
+                    rd: RA,
+                    to: "LwAddInts".into(),
+                },
+                Op::Addi {
+                    rd: S2,
+                    rs: A0,
+                    imm: 0,
+                },
             ]);
         };
         // cmb(label) → s2 = array, call combinator → PromGet.state → hex.
         let cmb = |probe: &mut Vec<Op>, tag: &str, to: &str, hexn: &str| {
             probe.extend([
-                Op::Addi { rd: A0, rs: S2, imm: 0 },
-                Op::Jal { rd: RA, to: to.into() },
-                Op::Jal { rd: RA, to: "PromGet".into() },
-                Op::Lw { rd: T0, rs: A0, off: PR_STATE },
+                Op::Addi {
+                    rd: A0,
+                    rs: S2,
+                    imm: 0,
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: to.into(),
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "PromGet".into(),
+                },
+                Op::Lw {
+                    rd: T0,
+                    rs: A0,
+                    off: PR_STATE,
+                },
             ]);
             probe.extend(put_str_ops(tag));
             probe.extend(hex_t0_ops(hexn));
@@ -3372,11 +3984,31 @@ mod tests {
         assert_eq!(s.faults, 0, "fault-free: {}", s.console);
         let ful = format!("{:016x}", PROM_ST_FUL);
         let rej = format!("{:016x}", PROM_ST_REJ);
-        assert!(s.console.contains(&format!("A1={}", ful)), "all(ful,ful)→FUL: {}", s.console);
-        assert!(s.console.contains(&format!("A2={}", rej)), "all(ful,rej)→REJ: {}", s.console);
-        assert!(s.console.contains(&format!("A3={}", rej)), "any(rej,rej)→REJ: {}", s.console);
-        assert!(s.console.contains(&format!("A4={}", ful)), "any(rej,ful)→FUL: {}", s.console);
-        assert!(s.console.contains(&format!("A5={}", ful)), "alls(ful,rej)→FUL: {}", s.console);
+        assert!(
+            s.console.contains(&format!("A1={}", ful)),
+            "all(ful,ful)→FUL: {}",
+            s.console
+        );
+        assert!(
+            s.console.contains(&format!("A2={}", rej)),
+            "all(ful,rej)→REJ: {}",
+            s.console
+        );
+        assert!(
+            s.console.contains(&format!("A3={}", rej)),
+            "any(rej,rej)→REJ: {}",
+            s.console
+        );
+        assert!(
+            s.console.contains(&format!("A4={}", ful)),
+            "any(rej,ful)→FUL: {}",
+            s.console
+        );
+        assert!(
+            s.console.contains(&format!("A5={}", ful)),
+            "alls(ful,rej)→FUL: {}",
+            s.console
+        );
         let _ = (A0, A1, RA, S0, S1, S2, T0, T1, T2);
     }
 
@@ -3414,14 +4046,28 @@ mod tests {
         let mut probe: Vec<Op> = Vec::new();
         for (off, s) in [(G, &b"/bios/menu/main"[..]), (B, &b"/no"[..])] {
             probe.extend([
-                Op::La { rd: T1, addr: Addr::WasmMem },
+                Op::La {
+                    rd: T1,
+                    addr: Addr::WasmMem,
+                },
                 Op::Li { rd: T2, imm: off },
-                Op::Add { rd: T1, rs1: T1, rs2: T2 },
+                Op::Add {
+                    rd: T1,
+                    rs1: T1,
+                    rs2: T2,
+                },
             ]);
             for (i, b) in s.iter().enumerate() {
                 probe.extend([
-                    Op::Li { rd: T2, imm: i64::from(*b) },
-                    Op::Sb { rs2: T2, rs1: T1, off: i as i32 },
+                    Op::Li {
+                        rd: T2,
+                        imm: i64::from(*b),
+                    },
+                    Op::Sb {
+                        rs2: T2,
+                        rs1: T1,
+                        off: i as i32,
+                    },
                 ]);
             }
         }
@@ -3429,17 +4075,46 @@ mod tests {
         // s1 = PromAlloc() — a second pending record; point its url at B.
         for (sreg, url, ulen) in [(S0, G, 15i64), (S1, B, 3i64)] {
             probe.extend([
-                Op::Jal { rd: RA, to: "PromAlloc".into() },
-                Op::Addi { rd: sreg, rs: A0, imm: 0 },
-                Op::Addi { rd: A0, rs: sreg, imm: 0 },
-                Op::Jal { rd: RA, to: "PromGet".into() },
+                Op::Jal {
+                    rd: RA,
+                    to: "PromAlloc".into(),
+                },
+                Op::Addi {
+                    rd: sreg,
+                    rs: A0,
+                    imm: 0,
+                },
+                Op::Addi {
+                    rd: A0,
+                    rs: sreg,
+                    imm: 0,
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "PromGet".into(),
+                },
                 // rec = a0: AOFF=url, ALEN=url_len, STATE=PEND, BUDGET=1
                 Op::Li { rd: T2, imm: url },
-                Op::Sw { rs2: T2, rs1: A0, off: PR_AOFF },
+                Op::Sw {
+                    rs2: T2,
+                    rs1: A0,
+                    off: PR_AOFF,
+                },
                 Op::Li { rd: T2, imm: ulen },
-                Op::Sw { rs2: T2, rs1: A0, off: PR_ALEN },
-                Op::Li { rd: T2, imm: PROM_ST_PEND },
-                Op::Sw { rs2: T2, rs1: A0, off: PR_STATE },
+                Op::Sw {
+                    rs2: T2,
+                    rs1: A0,
+                    off: PR_ALEN,
+                },
+                Op::Li {
+                    rd: T2,
+                    imm: PROM_ST_PEND,
+                },
+                Op::Sw {
+                    rs2: T2,
+                    rs1: A0,
+                    off: PR_STATE,
+                },
                 Op::Li { rd: T2, imm: 1 },
                 Op::Sw {
                     rs2: T2,
@@ -3456,9 +4131,20 @@ mod tests {
         // Read both records' states.
         for (sreg, tag, hexn) in [(S0, " P0=", "pd_h0"), (S1, " P1=", "pd_h1")] {
             probe.extend([
-                Op::Addi { rd: A0, rs: sreg, imm: 0 },
-                Op::Jal { rd: RA, to: "PromGet".into() },
-                Op::Lw { rd: T0, rs: A0, off: PR_STATE },
+                Op::Addi {
+                    rd: A0,
+                    rs: sreg,
+                    imm: 0,
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "PromGet".into(),
+                },
+                Op::Lw {
+                    rd: T0,
+                    rs: A0,
+                    off: PR_STATE,
+                },
             ]);
             probe.extend(put_str_ops(tag));
             probe.extend(hex_t0_ops(hexn));
@@ -3493,7 +4179,19 @@ mod tests {
             "pending missing-url fetch rejected on budget: {}",
             s.console
         );
-        let _ = (PR_AOFF, PR_ALEN, PR_STATE, PROM_ST_PEND, A0, RA, S0, S1, T0, T1, T2);
+        let _ = (
+            PR_AOFF,
+            PR_ALEN,
+            PR_STATE,
+            PROM_ST_PEND,
+            A0,
+            RA,
+            S0,
+            S1,
+            T0,
+            T1,
+            T2,
+        );
     }
 
     /// Listener re-entry on a real *pointer* event — the `DomtPtr`/`EV_CLICK`
@@ -3534,8 +4232,13 @@ mod tests {
                     .iter()
                     .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
                 {
-                    n.ops
-                        .splice(pos + 1..pos + 1, vec![Op::Jal { rd: RA, to: "DomtLayout".into() }]);
+                    n.ops.splice(
+                        pos + 1..pos + 1,
+                        vec![Op::Jal {
+                            rd: RA,
+                            to: "DomtLayout".into(),
+                        }],
+                    );
                     placed = true;
                     break;
                 }
@@ -3630,8 +4333,13 @@ mod tests {
                     .iter()
                     .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
                 {
-                    n.ops
-                        .splice(pos + 1..pos + 1, vec![Op::Jal { rd: RA, to: "DomtLayout".into() }]);
+                    n.ops.splice(
+                        pos + 1..pos + 1,
+                        vec![Op::Jal {
+                            rd: RA,
+                            to: "DomtLayout".into(),
+                        }],
+                    );
                     return;
                 }
             }
@@ -3692,4 +4400,3 @@ mod tests {
         );
     }
 }
-

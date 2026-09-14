@@ -13,6 +13,8 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/g6b-runtime-abi",
+    "crates/g6b-bootctl",
     "crates/g6b-spec",
     "crates/g6b-asm",
     "crates/g6b-design",
@@ -49,6 +51,8 @@ authors = ["Etienne Cimon"]
 rust-version = "1.85"
 
 [workspace.dependencies]
+g6b-runtime-abi = { path = "crates/g6b-runtime-abi" }
+g6b-bootctl = { path = "crates/g6b-bootctl" }
 g6b-spec = { path = "crates/g6b-spec" }
 g6b-asm = { path = "crates/g6b-asm" }
 g6b-design = { path = "crates/g6b-design" }

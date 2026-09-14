@@ -44,9 +44,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "g6b-bootctl"
+version = "0.1.0"
+
+[[package]]
 name = "g6b-cli"
 version = "0.1.0"
 dependencies = [
+ "g6b-asm",
  "g6b-css",
  "g6b-design",
  "g6b-doldoc",
@@ -187,6 +192,7 @@ name = "g6b-kernel"
 version = "0.1.0"
 dependencies = [
  "g6b-asm",
+ "g6b-bootctl",
  "g6b-css",
  "g6b-design",
  "g6b-dom",
@@ -214,6 +220,10 @@ version = "0.1.0"
 dependencies = [
  "g6b-spec",
 ]
+
+[[package]]
+name = "g6b-runtime-abi"
+version = "0.1.0"
 
 [[package]]
 name = "g6b-spec"

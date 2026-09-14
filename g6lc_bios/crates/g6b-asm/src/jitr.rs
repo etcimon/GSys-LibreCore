@@ -79,6 +79,7 @@ pub const OFF_SPSAVE: i32 = OFF_RESUME + 8; // 3224
 pub const OFF_EXC: i32 = OFF_SPSAVE + 8; // 3232
 /// In-flight exception tag (`throw t` stores `t`; `rethrow` reuses it).
 pub const OFF_EXCTAG: i32 = OFF_EXC + 8; // 3240
+pub const OFF_ASYNC_CALL: i32 = OFF_EXCTAG + 8;
 pub const JIT_HDR_BYTES: u64 = 8192;
 
 const STATE_XLATE: i64 = 1;
@@ -725,7 +726,7 @@ fn jit_h_throw() -> Vec<Op> {
     ops.push(Op::Label("jit_thr_keeptag".into()));
     em_jitfield(&mut ops, i64::from(OFF_EXC));
     emw(&mut ops, encode::addi(T0, X0, 1)); // li t0,1
-    emw(&mut ops, encode::sd(T0, T3, 0));   // *EXC = 1
+    emw(&mut ops, encode::sd(T0, T3, 0)); // *EXC = 1
     emit_ret_frame(&mut ops); // mv s10,s11; ld ra,8sp; ld s11,0sp; sp+=16; ret
     h_epilogue(&mut ops);
     ops
@@ -742,9 +743,9 @@ fn jit_h_excchk() -> Vec<Op> {
     // jit_lia clobbers a1, which `slot_target` below needs.
     ops.push(mv(T2, A1));
     em_jitfield(&mut ops, i64::from(OFF_EXC)); // t3 = &EXC
-    emw(&mut ops, encode::ld(T0, T3, 0));      // t0 = EXC
-    emw(&mut ops, encode::beq(T0, X0, 24));    // EXC==0 → skip the 5-word handle
-    // translator-time branch on the saved rec.a (t2): u32::MAX → propagate.
+    emw(&mut ops, encode::ld(T0, T3, 0)); // t0 = EXC
+    emw(&mut ops, encode::beq(T0, X0, 24)); // EXC==0 → skip the 5-word handle
+                                            // translator-time branch on the saved rec.a (t2): u32::MAX → propagate.
     ops.extend([li(T0, i64::from(u32::MAX)), beq(T2, T0, "jit_xc_prop")]);
     // catch: emit `li t6, a4+a*SLOT; jalr x0,t6` — jump to the catch head.
     ops.push(mv(A1, T2));
@@ -775,7 +776,7 @@ fn jit_h_excclr() -> Vec<Op> {
     let mut ops = vec![Op::Label("jit_h_excclr".into())];
     h_prologue(&mut ops);
     em_jitfield(&mut ops, i64::from(OFF_EXC)); // t3 = &EXC
-    emw(&mut ops, encode::sd(X0, T3, 0));      // *EXC = 0
+    emw(&mut ops, encode::sd(X0, T3, 0)); // *EXC = 0
     h_epilogue(&mut ops);
     ops
 }
@@ -1313,13 +1314,13 @@ fn jit_h_memgrow2() -> Vec<Op> {
     let mut ops = vec![Op::Label("jit_h_memgrow2".into())];
     h_prologue(&mut ops);
     em_pop(&mut ops, T0); // delta → T0 (runtime)
-    // cur = usable pages = __jit_in[mem_pages] (the reported memory.size).
+                          // cur = usable pages = __jit_in[mem_pages] (the reported memory.size).
     emw(&mut ops, encode::lw(T1, S4, jc::OFF_MEM_PAGES as i32)); // T1 = usable
-    // delta==0 → return cur; delta>0 → -1 (can't grow the fixed usable bound).
+                                                                 // delta==0 → return cur; delta>0 → -1 (can't grow the fixed usable bound).
     emw(&mut ops, encode::beq(T0, X0, 12)); // → word6 (ret cur)
     emw(&mut ops, encode::addi(T2, X0, -1)); // delta>0 → -1
-    emw(&mut ops, encode::jal(X0, 8));       // → PUSH
-    emw(&mut ops, encode::addi(T2, T1, 0));  // word6: result = cur pages
+    emw(&mut ops, encode::jal(X0, 8)); // → PUSH
+    emw(&mut ops, encode::addi(T2, T1, 0)); // word6: result = cur pages
     em_push(&mut ops, T2);
     h_epilogue(&mut ops);
     ops
@@ -2064,8 +2065,8 @@ fn jit_run_node() -> Vec<Op> {
         // `__kget`/asyncify tail and clobbered the awaited body.
         li(T0, i64::from(OFF_GLOB) + 8),
         add(T0, S9, T0),
-        ld(T0, T0, 0),   // __heap_base global value
-        sd(T0, S10, 0),  // push arg0
+        ld(T0, T0, 0),  // __heap_base global value
+        sd(T0, S10, 0), // push arg0
         addi(S10, S10, 8),
         Op::Jalr {
             rd: RA,
@@ -2113,10 +2114,10 @@ fn jit_run_node() -> Vec<Op> {
     ops.extend([
         ld(T0, S9, OFF_MEMB),
         li(T1, crate::kget::KGET_TAIL_BYTES as i64),
-        sub(T0, T0, T1),           // data offset
+        sub(T0, T0, T1), // data offset
         la(T2, Addr::WasmMem),
-        add(T2, T2, T0),           // &__asyncify_data
-        lw(T0, T2, 0),             // pos
+        add(T2, T2, T0), // &__asyncify_data
+        lw(T0, T2, 0),   // pos
     ]);
     put_hex(&mut ops, "jit_uwp_hex");
     puts(&mut ops, " end=");
@@ -2167,6 +2168,19 @@ fn jit_run_node() -> Vec<Op> {
         beq(A0, X0, "jit_reenter"), // invalid handle → re-invoke anyway
         lw(T0, A0, crate::domt::PR_STATE),
         li(T1, crate::domt::PROM_ST_PEND),
+        li(T2, i64::from(OFF_ASYNC_CALL)),
+        add(T2, S9, T2),
+        lw(T3, S4, jc::OFF_ENTRY as i32),
+        sd(T3, T2, 0),
+        li(T3, 1),
+        sd(T3, T2, 8),
+        li(T3, i64::from(OFF_GLOB) + 8),
+        add(T3, S9, T3),
+        ld(T3, T3, 0),
+        sd(T3, T2, 16),
+        sd(X0, T2, 24),
+        sd(X0, T2, 32),
+        sd(X0, T2, 40),
         beq(T0, T1, "jit_result"), // still pending → park (rewind stays armed)
         Op::Label("jit_reenter".into()),
         // re-park the trap continuation JitCall clobbered → jit_after/this SP
@@ -2311,7 +2325,44 @@ fn jit_call_node() -> Vec<Op> {
         sd(A3, SP, 48),
         sd(A4, SP, 40),
         sd(A5, SP, 32),
+        li(T0, 5),
+        bgeu(A1, T0, "jit_call_err"),
+        li(T0, jc::MAX_JIT_FUNCS as i64),
+        bgeu(A0, T0, "jit_call_err"),
+        la(T0, Addr::JitIn),
+        lw(T1, T0, jc::OFF_NFUNCS as i32),
+        bgeu(A0, T1, "jit_call_err"),
+        la(T0, Addr::JitHdr),
+        slli(T1, A0, 3),
+        add(T0, T0, T1),
+        ld(T1, T0, OFF_FTAB),
+        beq(T1, X0, "jit_call_err"),
+        sd(X0, SP, 8),
+        la(T0, Addr::JitHdr),
+        li(T1, i64::from(OFF_AXB)),
+        add(T0, T0, T1),
+        ld(T0, T0, 0),
+        beq(T0, X0, "jit_call_user"),
+        addi(T0, T0, 8 + 4 * jc::AX_GET_STATE as i32),
+        li(T1, 5),
+        Op::Label("jit_call_control_loop".into()),
+        lw(T2, T0, 0),
+        beq(A0, T2, "jit_call_control"),
+        addi(T0, T0, 4),
+        addi(T1, T1, -1),
+        bne(T1, X0, "jit_call_control_loop"),
+        Op::Label("jit_call_user".into()),
+        la(T0, Addr::Prom),
+        lw(T1, T0, crate::domt::P_ASUSP),
+        bne(T1, X0, "jit_call_err"),
+        lw(T1, T0, crate::domt::P_RESUME),
+        bne(T1, X0, "jit_call_err"),
+        j("jit_call_restart"),
+        Op::Label("jit_call_control".into()),
+        li(T0, 1),
+        sd(T0, SP, 8),
         // re-establish the jit execution context for a top-level call
+        Op::Label("jit_call_restart".into()),
         la(S9, Addr::JitHdr),
         la(S8, Addr::WasmMem),
         la(S10, Addr::JitStk),
@@ -2342,7 +2393,7 @@ fn jit_call_node() -> Vec<Op> {
         ld(T1, SP, 64),
         bgeu(T0, T1, "jit_call_go"),
         slli(T0, T0, 3),
-        add(T1, SP, T0),
+        sub(T1, SP, T0),
         ld(T2, T1, 56),
         sd(T2, S10, 0),
         addi(S10, S10, 8),
@@ -2373,6 +2424,64 @@ fn jit_call_node() -> Vec<Op> {
         ld(T0, S9, OFF_STATE),
         li(T1, STATE_OK),
         bne(T0, T1, "jit_call_err"),
+        ld(T0, SP, 8),
+        bne(T0, X0, "jit_call_result"),
+        li(A0, i64::from(jc::AX_STATE_GLOB)),
+        jal("JitAx"),
+        Op::Blt {
+            rs1: A0,
+            rs2: X0,
+            to: "jit_call_result".into(),
+        },
+        slli(T0, A0, 3),
+        li(T1, i64::from(OFF_GLOB)),
+        add(T0, T0, T1),
+        add(T0, S9, T0),
+        ld(T0, T0, 0),
+        li(T1, 1),
+        bne(T0, T1, "jit_call_result"),
+        li(A0, i64::from(jc::AX_STOP_UNWIND)),
+        jal("JitAx"),
+        li(A1, 0),
+        jal("JitCall"),
+        ld(T0, S9, OFF_STATE),
+        li(T1, STATE_OK),
+        bne(T0, T1, "jit_call_err"),
+        li(A0, i64::from(jc::AX_START_REWIND)),
+        jal("JitAx"),
+        li(A1, 1),
+        ld(T0, S9, OFF_MEMB),
+        li(T1, crate::kget::KGET_TAIL_BYTES as i64),
+        sub(A2, T0, T1),
+        jal("JitCall"),
+        ld(T0, S9, OFF_STATE),
+        li(T1, STATE_OK),
+        bne(T0, T1, "jit_call_err"),
+        la(T0, Addr::Prom),
+        lw(A0, T0, crate::domt::P_ASUSP),
+        beq(A0, X0, "jit_call_restart"),
+        jal("PromGet"),
+        beq(A0, X0, "jit_call_restart"),
+        lw(T0, A0, crate::domt::PR_STATE),
+        li(T1, crate::domt::PROM_ST_PEND),
+        bne(T0, T1, "jit_call_restart"),
+        li(T0, i64::from(OFF_ASYNC_CALL)),
+        add(T0, S9, T0),
+        ld(T1, SP, 72),
+        sd(T1, T0, 0),
+        ld(T1, SP, 64),
+        sd(T1, T0, 8),
+        ld(T1, SP, 56),
+        sd(T1, T0, 16),
+        ld(T1, SP, 48),
+        sd(T1, T0, 24),
+        ld(T1, SP, 40),
+        sd(T1, T0, 32),
+        ld(T1, SP, 32),
+        sd(T1, T0, 40),
+        sd(X0, SP, 16),
+        j("jit_call_out"),
+        Op::Label("jit_call_result".into()),
         ld(T0, S10, -8), // top result cell
         sd(T0, SP, 16),
         j("jit_call_out"),
@@ -2389,6 +2498,18 @@ fn jit_call_node() -> Vec<Op> {
         ld(TP, SP, 80),
         addi(SP, SP, 128),
         ret(),
+        Op::Glob("JitResume".into()),
+        Op::Label("JitResume".into()),
+        la(T0, Addr::JitHdr),
+        li(T1, i64::from(OFF_ASYNC_CALL)),
+        add(T0, T0, T1),
+        ld(A0, T0, 0),
+        ld(A1, T0, 8),
+        ld(A2, T0, 16),
+        ld(A3, T0, 24),
+        ld(A4, T0, 32),
+        ld(A5, T0, 40),
+        j("JitCall"),
     ]
 }
 

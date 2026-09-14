@@ -571,6 +571,24 @@ def case_gr_framebuffer(spec: Path) -> None:
         raise RuntimeError(f"missing TIMER-READY: {p.stdout!r}")
 
 
+def case_guest_pixel_parity(spec: Path) -> None:
+    env = contained_env() if cargo_bin().is_file() else os.environ.copy()
+    for crate, gate in (
+        ("g6b-kernel", "guest_display_list_matches_host_pixels"),
+        ("g6b-elf", "picking_bios_ui_replaces_the_picker_rows"),
+    ):
+        cmd = [cargo_cmd(), "test", "-p", crate, gate, "--", "--nocapture"]
+        log("+ " + " ".join(cmd))
+        result = subprocess.run(
+            cmd, cwd=str(package_root()), env=env, capture_output=True,
+            text=True, encoding="utf-8", timeout=300,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(result.stdout + result.stderr)
+        if "1 passed; 0 failed" not in result.stdout:
+            raise RuntimeError(f"pixel gate did not execute: {result.stdout}")
+
+
 def case_boot_sideband(spec: Path) -> None:
     p = run_g6b(["boot", "--spec", str(spec)])
     if p.returncode != 0:
@@ -671,10 +689,256 @@ def case_disp_sel_vga(_spec: Path) -> None:
         raise RuntimeError(f"mux did not run: {out!r}")
 
 
+def case_virgl_reference(directory: Path) -> None:
+    import ctypes as c
+    import ctypes.util
+    import hashlib
+    import struct
+    import tomllib
+
+    pins = tomllib.loads((package_root() / "pins.toml").read_text(encoding="utf-8"))["graphics_wire"]
+    stream = (directory / "execbuf.bin").read_bytes()
+    table = (directory / "reqtab.bin").read_bytes()
+    w, h = map(int, (directory / "geometry.txt").read_text(encoding="ascii").split())
+    if not (4 <= w <= 4096 and 4 <= h <= 4096 and w * h * 4 <= 32 * 1024 * 1024):
+        raise ValueError("reference framebuffer exceeds bounded geometry")
+    if not stream or len(stream) % 4 or len(stream) > 65536:
+        raise ValueError("invalid execbuffer extent")
+    records = []
+    offset = 0
+    terminated = False
+    while offset + 4 <= len(table):
+        size = struct.unpack_from("<I", table, offset)[0]
+        if size == 0:
+            offset += 4
+            terminated = True
+            break
+        if offset + 12 > len(table):
+            raise ValueError("truncated request record")
+        size, capacity, flags = struct.unpack_from("<III", table, offset)
+        offset += 12
+        if size < 24 or size % 4 or offset + size > len(table) or not 24 <= capacity <= 512:
+            raise ValueError("invalid request/response extent")
+        records.append((table[offset:offset + size], capacity, flags))
+        offset += size
+    if offset != len(table) or not records or not terminated:
+        raise ValueError("request table has no exact terminal record")
+
+    class Resource(c.Structure):
+        _fields_ = [(name, c.c_uint32) for name in (
+            "handle", "target", "format", "bind", "width", "height", "depth",
+            "array_size", "last_level", "nr_samples", "flags")]
+
+    class Box(c.Structure):
+        _fields_ = [(name, c.c_uint32) for name in ("x", "y", "z", "w", "h", "d")]
+
+    class Iovec(c.Structure):
+        _fields_ = [("base", c.c_void_p), ("length", c.c_size_t)]
+
+    fence_cb = c.CFUNCTYPE(None, c.c_void_p, c.c_uint32)
+
+    class Callbacks(c.Structure):
+        _fields_ = [("version", c.c_int), ("write_fence", fence_cb)] + [
+            (name, c.c_void_p) for name in ("create", "destroy", "current", "drm_fd",
+                                          "context_fence", "server_fd", "egl_display")]
+
+    name = ctypes.util.find_library("virglrenderer")
+    if not name:
+        raise RuntimeError("external libvirglrenderer is unavailable")
+    lib = c.CDLL(name)
+
+    def bind(symbol, result, arguments):
+        fn = getattr(lib, symbol)
+        fn.restype = result
+        fn.argtypes = arguments
+        return fn
+
+    init = bind("virgl_renderer_init", c.c_int, [c.c_void_p, c.c_int, c.POINTER(Callbacks)])
+    cleanup = bind("virgl_renderer_cleanup", None, [c.c_void_p])
+    context = bind("virgl_renderer_context_create", c.c_int, [c.c_uint32, c.c_uint32, c.c_char_p])
+    create = bind("virgl_renderer_resource_create", c.c_int, [c.POINTER(Resource), c.POINTER(Iovec), c.c_uint32])
+    attach = bind("virgl_renderer_ctx_attach_resource", None, [c.c_int, c.c_int])
+    attach_iov = bind("virgl_renderer_resource_attach_iov", c.c_int, [c.c_int, c.POINTER(Iovec), c.c_int])
+    submit = bind("virgl_renderer_submit_cmd", c.c_int, [c.c_void_p, c.c_int, c.c_int])
+    cap_info = bind("virgl_renderer_get_cap_set", None, [c.c_uint32, c.POINTER(c.c_uint32), c.POINTER(c.c_uint32)])
+    cap_fill = bind("virgl_renderer_fill_caps", None, [c.c_uint32, c.c_uint32, c.c_void_p])
+    transfer_args = [c.c_uint32, c.c_uint32, c.c_uint32, c.c_uint32, c.c_uint32,
+                     c.POINTER(Box), c.c_uint64, c.POINTER(Iovec), c.c_int]
+    upload = bind("virgl_renderer_transfer_write_iov", c.c_int, transfer_args)
+    download = bind("virgl_renderer_transfer_read_iov", c.c_int, transfer_args)
+    create_fence = bind("virgl_renderer_create_fence", c.c_int, [c.c_int, c.c_uint32])
+    poll = bind("virgl_renderer_poll", None, [])
+    force_context = bind("virgl_renderer_force_ctx_0", None, [])
+    fences = []
+    callbacks = Callbacks()
+    callbacks.version = 4
+    callbacks.write_fence = fence_cb(lambda _cookie, fence: fences.append(fence))
+    cookie = c.c_uint8(0x6c)
+
+    def check(result, operation):
+        if result != 0:
+            raise RuntimeError(f"{operation} returned {result}")
+
+    def wait_fence(identifier, command):
+        if not 0 < identifier < 0x80000000:
+            raise ValueError("this reference library's legacy fence API cannot represent the requested ID")
+        check(create_fence(identifier, command), "create_fence")
+        deadline = time.monotonic() + 10
+        while identifier not in fences:
+            poll()
+            if time.monotonic() >= deadline:
+                raise TimeoutError(f"fence {identifier} did not signal")
+            time.sleep(0.001)
+
+    initialized = False
+    report = {"status": "RUNNING", "evidence": "external-renderer-request-replay-not-rtl-or-linux-driver",
+              "reference_pins": pins, "library": name, "width": w, "height": h,
+              "execbuf_sha256": hashlib.sha256(stream).hexdigest(),
+              "reqtab_sha256": hashlib.sha256(table).hexdigest(), "requests": []}
+    try:
+        check(init(c.byref(cookie), 9, c.byref(callbacks)), "renderer_init")
+        initialized = True
+        egl_name = ctypes.util.find_library("EGL")
+        if egl_name:
+            egl = c.CDLL(egl_name)
+            egl.eglGetProcAddress.argtypes = [c.c_char_p]
+            egl.eglGetProcAddress.restype = c.c_void_p
+            address = egl.eglGetProcAddress(b"glGetString")
+            if address:
+                renderer = c.CFUNCTYPE(c.c_char_p, c.c_uint32)(address)(0x1f01)
+                report["renderer"] = renderer.decode("utf-8", "replace") if renderer else "unknown"
+        source = bytearray()
+        colors = (0xff2040ff, 0xff40ff40, 0xffff4040, 0xffc0c000)
+        for y in range(h):
+            for x in range(w):
+                pixel = 0xffffffff if (x, y) == (3, 3) else colors[(y >= h // 2) * 2 + (x >= w // 2)]
+                source.extend(struct.pack("<I", pixel))
+        source_buffer = (c.c_ubyte * len(source)).from_buffer(source)
+        source_iov = Iovec(c.addressof(source_buffer), len(source))
+        box = Box(0, 0, 0, w, h, 1)
+        source_resource = Resource(1, 2, 2, 2, w, h, 1, 1, 0, 0, 1)
+        check(create(c.byref(source_resource), None, 0), "CREATE_2D prelude")
+        check(upload(1, 0, 0, w * 4, 0, c.byref(box), 0, c.byref(source_iov), 1), "TRANSFER_TO_HOST_2D prelude")
+        resources = {1: source_resource}
+        contexts = set()
+        selected = None
+        for request, capacity, record_flags in records:
+            words = struct.unpack(f"<{len(request) // 4}I", request)
+            command, flags, low, high, ctx, _pad = words[:6]
+            if flags & ~1 or record_flags != int(command == 0x0207):
+                raise ValueError("unsupported request flags")
+            fence = low | (high << 32)
+            response_size = 24
+            force_context()
+            if command == 0x0108:
+                if len(request) != 32 or words[6] != 0:
+                    raise ValueError("reference supports capset index 0")
+                version, size = c.c_uint32(), c.c_uint32()
+                cap_info(pins["capset_id"], c.byref(version), c.byref(size))
+                if (version.value, size.value) != (pins["capset_version"], pins["capset_bytes"]):
+                    raise RuntimeError("installed renderer capset disagrees with reference pin")
+                response_size = 40
+            elif command == 0x0109:
+                if len(request) != 32 or words[6:8] != (pins["capset_id"], pins["capset_version"]):
+                    raise ValueError("capset request disagrees with reference pin")
+                caps = c.create_string_buffer(pins["capset_bytes"])
+                cap_fill(words[6], words[7], caps)
+                report["capset_sha256"] = hashlib.sha256(caps.raw).hexdigest()
+                cap_words = struct.unpack("<77I", caps.raw)
+                report["reference_renderer_caps"] = {"glsl_level": cap_words[66],
+                    "max_render_targets": cap_words[70], "max_samples": cap_words[71],
+                    "primitive_mask": cap_words[72], "max_viewports": cap_words[75]}
+                response_size += len(caps)
+            elif command == 0x0200:
+                if len(request) != 96 or not 0 < ctx <= 64 or words[6] > 64 or words[7] != 0 or ctx in contexts:
+                    raise ValueError("invalid context create")
+                check(context(ctx, words[6], request[32:32 + words[6]]), "CTX_CREATE")
+                contexts.add(ctx)
+            elif command == 0x0204:
+                if len(request) != 72 or words[6] in resources or ctx not in contexts:
+                    raise ValueError("invalid resource create")
+                resource = Resource(*words[6:17])
+                if (not 0 < resource.handle <= 64 or resource.depth != 1 or resource.array_size != 1
+                        or resource.last_level != 0 or resource.nr_samples != 0
+                        or not 0 < resource.width <= 4096 or not 0 < resource.height <= 4096
+                        or resource.width * resource.height * 4 > 32 * 1024 * 1024):
+                    raise ValueError("resource exceeds reference profile")
+                check(create(c.byref(resource), None, 0), "RESOURCE_CREATE_3D")
+                resources[resource.handle] = resource
+            elif command == 0x0202:
+                if len(request) != 32 or ctx not in contexts or words[6] not in resources:
+                    raise ValueError("invalid resource attachment")
+                attach(ctx, words[6])
+            elif command == 0x0207:
+                if len(request) != 32 or record_flags != 1 or ctx not in contexts or words[6] != len(stream):
+                    raise ValueError("invalid submit payload")
+                if flags != 1:
+                    raise ValueError("SUBMIT_3D must finish before scanout")
+                data = c.create_string_buffer(stream)
+                check(submit(data, ctx, len(stream) // 4), "SUBMIT_3D")
+            elif command in (0x0103, 0x0104):
+                if len(request) != 48:
+                    raise ValueError("invalid presentation request")
+                resource_id = words[11] if command == 0x0103 else words[10]
+                resource = resources.get(resource_id)
+                if resource is None or words[6:10] != (0, 0, resource.width, resource.height):
+                    raise ValueError("invalid presentation resource or rectangle")
+                if command == 0x0103:
+                    if words[10] != 0 or not fences:
+                        raise ValueError("invalid scanout or missing completed render fence")
+                    selected = resource_id
+                elif selected != resource_id:
+                    raise ValueError("flush is not for the selected headless surface")
+            else:
+                raise ValueError(f"unimplemented reference command {command:#x}")
+            if response_size > capacity:
+                raise ValueError(f"response {response_size} exceeds descriptor capacity {capacity}")
+            if flags & 1:
+                wait_fence(fence, command)
+            report["requests"].append({"command": hex(command), "context": ctx,
+                                       "response_bytes": response_size, "fence": fence if flags & 1 else None})
+        if selected != 4:
+            raise ValueError("render target was not selected")
+        output = (c.c_ubyte * len(source))()
+        output_iov = Iovec(c.addressof(output), len(source))
+        check(attach_iov(selected, c.byref(output_iov), 1), "RESOURCE_ATTACH_BACKING readback")
+        check(download(selected, 1, 0, w * 4, 0, c.byref(box), 0, None, 0), "TRANSFER_FROM_HOST_3D")
+        wait_fence(2, 0x0206)
+        raw = bytes(output)
+        mismatches = sum(raw[i:i + 4] != source[i:i + 4] for i in range(0, len(raw), 4))
+        probes = [(3, 3), (w // 4, h // 4), (w // 4, 3 * h // 4)]
+        report["pixel_probes"] = [{"x": x, "y": y,
+            "actual": raw[(y * w + x) * 4:(y * w + x) * 4 + 4].hex(),
+            "expected": source[(y * w + x) * 4:(y * w + x) * 4 + 4].hex()} for x, y in probes]
+        report["vertical_flip_matches"] = sum(raw[y * w * 4:(y + 1) * w * 4] == source[(h - 1 - y) * w * 4:(h - y) * w * 4] for y in range(h))
+        report.update({"pixels": w * h, "mismatches": mismatches,
+                       "output_sha256": hashlib.sha256(raw).hexdigest(), "completed_fences": fences,
+                       "scanout": "headless metadata validation only", "status": "PASS" if not mismatches else "FAIL"})
+        (directory / "reference-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        if mismatches:
+            raise RuntimeError(f"{mismatches} reference pixels differ")
+        log(f"VIRGL-REFERENCE PASS {w * h} exact pixels; {len(records)} requests; fences={fences}; renderer={report.get('renderer', 'unknown')}")
+    except Exception as error:
+        report.update({"status": "FAIL", "error": str(error)})
+        (directory / "reference-report.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        raise
+    finally:
+        if initialized:
+            cleanup(c.byref(cookie))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="bios-regress")
     ap.add_argument("--spec")
+    ap.add_argument("--virgl-reference", type=Path)
     args = ap.parse_args()
+    if args.virgl_reference is not None:
+        try:
+            case_virgl_reference(args.virgl_reference)
+            return 0
+        except Exception as error:
+            err(f"virgl-reference: {error}")
+            return 1
     spec = Path(args.spec) if args.spec else package_root() / "fixtures" / "g6lc64-virt.json"
     if ensure_built() != 0:
         err("cargo build -p g6b-cli")
@@ -697,6 +961,7 @@ def main() -> int:
         ("elf_smoke", case_elf_smoke),
         ("gr_framebuffer", case_gr_framebuffer),
         ("css_golden", case_css_golden),
+        ("guest_pixel_parity", case_guest_pixel_parity),
         ("disp_scan", case_disp_scan),
         ("disp_sel_pcie", case_disp_sel_pcie),
         ("disp_sel_vga", case_disp_sel_vga),

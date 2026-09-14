@@ -173,6 +173,14 @@ pub struct Smoke {
     /// Guest-RAM `__virgl_out` after `TRANSFER_FROM_HOST_3D` — the rendered
     /// quad DMA'd back into guest memory (empty unless the readback ran).
     pub virgl_out: Vec<u8>,
+    /// `SET_SCANOUT` moved the console onto the virgl render target — the
+    /// virgl composite present path.
+    pub virgl_scanout: bool,
+    /// `RESOURCE_FLUSH` count on the virgl render target.
+    pub virgl_flushes: u32,
+    /// The scanout surface as `SUBMIT_3D` sampled it — the composite's input
+    /// (a repaint may have since overwritten `vio_fb`).
+    pub virgl_src: Vec<u8>,
     /// Compact persist magic (`G6CP`) when `__ui_cap` is allocated.
     pub cap_magic: u32,
     /// Live g6b-dom node count packed into `__ui_cap` (B91).
@@ -206,6 +214,18 @@ pub struct Smoke {
 /// Lower `module` at `entry` and run hart 0 until park/UART/SBI SRST.
 pub fn run_module(spec: &BoardSpec, module: &Module, entry: u64) -> Result<Smoke, String> {
     run_module_hart(spec, module, entry, 0)
+}
+
+pub fn run_module_with_limit(
+    spec: &BoardSpec,
+    module: &Module,
+    entry: u64,
+    step_limit: u32,
+) -> Result<Smoke, String> {
+    if step_limit == 0 || step_limit > 192_000_000 {
+        return Err("execution step limit must be in 1..=192000000".into());
+    }
+    run_module_web_inner(spec, module, entry, 0, b'V', None, None, step_limit)
 }
 
 /// Same as [`run_module`] with OpenSBI `a0=hartid`.
@@ -264,6 +284,7 @@ pub fn run_module_hart_with_blk_image(
         uart_ui_pc,
         trap_timer_pc,
         Some(blk_image),
+        STEP_LIMIT,
     )
 }
 
@@ -332,7 +353,7 @@ pub fn run_module_web(
     hartid: u64,
     web: Option<&GuestWebPresent>,
 ) -> Result<Smoke, String> {
-    run_module_web_inner(spec, module, entry, hartid, b'V', web, None)
+    run_module_web_inner(spec, module, entry, hartid, b'V', web, None, STEP_LIMIT)
 }
 
 /// Same as [`run_module_web`] but UART `Ui` re-queries [`WebFeed::on_guest_ui`]
@@ -356,9 +377,19 @@ pub fn run_module_web_feed_kick(
     kick: u8,
     feed: &mut dyn WebFeed,
 ) -> Result<Smoke, String> {
-    run_module_web_inner(spec, module, entry, hartid, kick, None, Some(feed))
+    run_module_web_inner(
+        spec,
+        module,
+        entry,
+        hartid,
+        kick,
+        None,
+        Some(feed),
+        STEP_LIMIT,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_module_web_inner(
     spec: &BoardSpec,
     module: &Module,
@@ -367,6 +398,7 @@ fn run_module_web_inner(
     kick: u8,
     web: Option<&GuestWebPresent>,
     feed: Option<&mut dyn WebFeed>,
+    step_limit: u32,
 ) -> Result<Smoke, String> {
     let (insns, rodata) = module.to_words(entry)?;
     let mut image = Vec::with_capacity(insns.len() * 4 + rodata.len());
@@ -396,6 +428,7 @@ fn run_module_web_inner(
         uart_ui_pc,
         trap_timer_pc,
         None,
+        step_limit,
     )
 }
 
@@ -432,6 +465,7 @@ pub fn run_module_kick(
         0,
         0,
         None,
+        STEP_LIMIT,
     )
 }
 
@@ -464,6 +498,7 @@ pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Resul
         0,
         0,
         None,
+        STEP_LIMIT,
     )
 }
 
@@ -497,6 +532,7 @@ pub fn run_module_bare(spec: &BoardSpec, module: &Module, entry: u64) -> Result<
         0,
         0,
         None,
+        STEP_LIMIT,
     )
 }
 
@@ -530,6 +566,7 @@ pub fn run(
         0,
         0,
         None,
+        STEP_LIMIT,
     )
 }
 
@@ -560,6 +597,7 @@ fn run_with_kick(
     uart_ui_pc: u64,
     trap_timer_pc: u64,
     blk_image: Option<Vec<u8>>,
+    step_limit: u32,
 ) -> Result<Smoke, String> {
     let xlen = spec.isa.xlen;
     if xlen != 32 && xlen != 64 {
@@ -759,7 +797,7 @@ fn run_with_kick(
     let mut uart_polls = 0u32;
     let mut steps = 0u32;
     loop {
-        if steps >= STEP_LIMIT {
+        if steps >= step_limit {
             return Ok(done(
                 console,
                 steps,
@@ -1171,6 +1209,9 @@ fn done(
         virgl_px: csr.virgl_px,
 
         virgl_fb: csr.virgl_fb.clone(),
+        virgl_scanout: csr.virgl_scanout,
+        virgl_flushes: csr.virgl_flushes,
+        virgl_src: csr.virgl_src.clone(),
         virgl_out: {
             // The guest attached `__virgl_out` as RES_RT's backing; read the
             // rendered quad back out of guest RAM at that attached address.
@@ -1462,6 +1503,23 @@ struct Csr {
     /// the textured quad here. Kept separate from `vio_fb` (the 2D scanout)
     /// so the virgl lane never disturbs the committed display frame.
     virgl_fb: Vec<u8>,
+    /// Bitmap of `RESOURCE_CREATE_3D` resource ids (≤64) — RT, VBO, …
+    virgl_res: u64,
+    /// Geometry of each created 3D resource (`res → (w,h)`); buffers keep
+    /// their byte size in `w`.
+    virgl_dims: std::collections::BTreeMap<u32, (u32, u32)>,
+    /// Device-side surfaces for non-RT 3D resources (`res → w*h*4` bytes);
+    /// the RT surface stays in `virgl_fb` and the 2D scanout in `vio_fb`.
+    virgl_surf: std::collections::BTreeMap<u32, Vec<u8>>,
+    /// The texture bytes `SUBMIT_3D` sampled — the scanout surface **at
+    /// composite time**. Later repaints (`Ui → VioPaint` on the timer tick)
+    /// keep mutating `vio_fb`, so this snapshot is the composite's honest
+    /// input record: `virgl_fb` must equal it, not end-state `vio_fb`.
+    virgl_src: Vec<u8>,
+    /// `SET_SCANOUT` moved the console onto `virgl_rt` (the virgl present).
+    virgl_scanout: bool,
+    /// `RESOURCE_FLUSH` count on the virgl render target.
+    virgl_flushes: u32,
     /// Guest backing for non-scanout (3D) resources — `res_id → base` —
     /// `TRANSFER_FROM_HOST_3D` reads the surface back into this guest buffer.
     virgl_backing: std::collections::BTreeMap<u32, u64>,
@@ -3089,6 +3147,19 @@ fn host_inp_tab_kick(
     out
 }
 
+fn vio_packet(ram: &[u8], base: u64, outs: &[(u64, u32)]) -> Option<Vec<u8>> {
+    let mut packet = Vec::new();
+    for &(address, length) in outs {
+        let start = usize::try_from(address.checked_sub(base)?).ok()?;
+        let end = start.checked_add(length as usize)?;
+        if packet.len().checked_add(length as usize)? > 64 * 1024 + 32 {
+            return None;
+        }
+        packet.extend_from_slice(ram.get(start..end)?);
+    }
+    (packet.len() >= 24).then_some(packet)
+}
+
 /// Walk one descriptor chain (≤8): gather the OUT descriptors (the first
 /// carries `ctrl_hdr.type`; a `SUBMIT_3D` execbuffer rides the *rest*), run
 /// the command, write `resp_hdr.type` + any typed payload to the first WRITE
@@ -3099,41 +3170,93 @@ fn vio_exec_chain(csr: &mut Csr, ram: &mut [u8], base: u64, head: u16) -> u32 {
     let mut d = u64::from(head);
     let mut outs: Vec<(u64, u32)> = Vec::new(); // (addr, len)
     let mut wins: Vec<(u64, u32)> = Vec::new();
+    let mut seen = 0u8;
+    let mut terminated = false;
     for _ in 0..8 {
-        let dbase = csr.vio_qdesc.wrapping_add(d.wrapping_mul(16));
-        let daddr = load_u64(ram, base, dbase).unwrap_or(0);
-        let dlen = load_u32(ram, base, dbase + 8).unwrap_or(0);
-        let dfl = load_u32(ram, base, dbase + 12).unwrap_or(0);
+        if d >= u64::from(csr.vio_qnum.min(8)) || seen & (1 << d) != 0 {
+            return 0;
+        }
+        seen |= 1 << d;
+        let Some(dbase) = csr.vio_qdesc.checked_add(d * 16) else {
+            return 0;
+        };
+        let (Some(daddr), Some(dlen), Some(dfl)) = (
+            load_u64(ram, base, dbase),
+            dbase.checked_add(8).and_then(|a| load_u32(ram, base, a)),
+            dbase.checked_add(12).and_then(|a| load_u32(ram, base, a)),
+        ) else {
+            return 0;
+        };
+        let Some(start) = daddr
+            .checked_sub(base)
+            .and_then(|a| usize::try_from(a).ok())
+        else {
+            return 0;
+        };
+        let Some(end) = start.checked_add(dlen as usize) else {
+            return 0;
+        };
+        if ram.get(start..end).is_none() || dfl & 0xfffc != 0 {
+            return 0;
+        }
         if dfl & VIO_DESC_WRITE == 0 {
+            if !wins.is_empty() {
+                return 0;
+            }
             outs.push((daddr, dlen));
         } else {
             wins.push((daddr, dlen));
         }
         if dfl & VIO_DESC_NEXT == 0 {
+            terminated = true;
             break;
         }
         d = u64::from((dfl >> 16) & 0xffff);
     }
-    let Some(&(req, _)) = outs.first() else {
+    if !terminated || wins.len() != 1 {
+        return 0;
+    }
+    let Some(packet) = vio_packet(ram, base, &outs) else {
         return 0;
     };
-    let ty = load_u32(ram, base, req).unwrap_or(0);
+    let (raddr, rlen) = wins[0];
+    if rlen < 24 {
+        return 0;
+    }
+    let ty = load_u32(&packet, 0, 0).unwrap();
+    let needed = match ty {
+        crate::encode::VIO_GPU_GET_DISPLAY_INFO => VIO_RESP_DISPLAY_INFO,
+        crate::encode::VIO_GPU_GET_CAPSET_INFO => 40,
+        crate::encode::VIO_GPU_GET_CAPSET => 24 + crate::virgl::CAPSET_WORDS.len() as u32 * 4,
+        _ => 24,
+    };
     csr.vio_last_cmd = ty;
-    let resp = vio_cmd(csr, ram, base, &outs, ty);
-    csr.vio_last_resp = resp;
-    let Some(&(raddr, rlen)) = wins.first() else {
-        return 0;
+    let resp = if rlen < needed {
+        crate::encode::VIO_GPU_RESP_ERR_INVALID_PARAMETER
+    } else {
+        vio_cmd(csr, ram, base, &outs, ty)
     };
-    store_u32(ram, base, raddr, resp);
+    csr.vio_last_resp = resp;
+    let cap = if resp >= crate::encode::VIO_GPU_RESP_ERR_UNSPEC {
+        24
+    } else {
+        needed
+    };
+    let mut response = vec![0u8; cap as usize];
+    store_u32(&mut response, 0, 0, resp);
+    if load_u32(&packet, 0, 4).unwrap() & 1 != 0 {
+        store_u32(&mut response, 0, 4, 1);
+        response[8..16].copy_from_slice(&packet[8..16]);
+    }
     // Typed payload after the 24-byte resp_hdr.
     match resp {
         VIO_GPU_RESP_OK_DISPLAY_INFO => {
-            // pmodes[0]: enabled, flags, x, y, w, h.
-            for (i, v) in [1u32, 0, 0, 0, csr.vio_disp_w, csr.vio_disp_h]
+            // pmodes[0]: x, y, w, h, enabled, flags.
+            for (i, v) in [0u32, 0, csr.vio_disp_w, csr.vio_disp_h, 1, 0]
                 .iter()
                 .enumerate()
             {
-                store_u32(ram, base, raddr + 24 + (i as u64) * 4, *v);
+                store_u32(&mut response, 0, 24 + (i as u64) * 4, *v);
             }
         }
         crate::encode::VIO_GPU_RESP_OK_CAPSET_INFO => {
@@ -3147,24 +3270,20 @@ fn vio_exec_chain(csr: &mut Csr, ram: &mut [u8], base: u64, head: u16) -> u32 {
             .iter()
             .enumerate()
             {
-                store_u32(ram, base, raddr + 24 + (i as u64) * 4, *v);
+                store_u32(&mut response, 0, 24 + (i as u64) * 4, *v);
             }
         }
         crate::encode::VIO_GPU_RESP_OK_CAPSET => {
             // resp_capset: a bounded virgl capset blob the guest may read.
             for (i, w) in crate::virgl::CAPSET_WORDS.iter().enumerate() {
-                store_u32(ram, base, raddr + 24 + (i as u64) * 4, *w);
+                store_u32(&mut response, 0, 24 + (i as u64) * 4, *w);
             }
         }
         _ => {}
     }
-    let cap = match resp {
-        VIO_GPU_RESP_OK_DISPLAY_INFO => VIO_RESP_DISPLAY_INFO,
-        crate::encode::VIO_GPU_RESP_OK_CAPSET_INFO => 40,
-        crate::encode::VIO_GPU_RESP_OK_CAPSET => 24 + crate::virgl::CAPSET_WORDS.len() as u32 * 4,
-        _ => 24,
-    };
-    rlen.min(cap)
+    let start = (raddr - base) as usize;
+    ram[start..start + response.len()].copy_from_slice(&response);
+    cap
 }
 
 /// True once the virgl lane is live: the device is a `virtio-gpu-gl-device`
@@ -3181,43 +3300,54 @@ fn virgl_live(csr: &Csr) -> bool {
 /// `proxy.gl` board offered `VIRTIO_GPU_F_VIRGL` and `VioInit` accepted it.
 fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u32) -> u32 {
     use crate::encode::{
-        VIO_GPU_CAPSET_VIRGL, VIO_GPU_CAPSET_VIRGL2, VIO_GPU_CTX_ATTACH_RESOURCE,
-        VIO_GPU_CTX_CREATE, VIO_GPU_GET_CAPSET, VIO_GPU_GET_CAPSET_INFO, VIO_GPU_GET_DISPLAY_INFO,
-        VIO_GPU_RESOURCE_ATTACH_BACKING, VIO_GPU_RESOURCE_CREATE_2D, VIO_GPU_RESOURCE_CREATE_3D,
-        VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_ERR_INVALID_CONTEXT_ID,
-        VIO_GPU_RESP_ERR_INVALID_PARAMETER, VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID,
-        VIO_GPU_RESP_ERR_OUT_OF_MEMORY, VIO_GPU_RESP_ERR_UNSPEC, VIO_GPU_RESP_OK_CAPSET,
-        VIO_GPU_RESP_OK_CAPSET_INFO, VIO_GPU_RESP_OK_DISPLAY_INFO, VIO_GPU_RESP_OK_NODATA,
-        VIO_GPU_SET_SCANOUT, VIO_GPU_SUBMIT_3D, VIO_GPU_TRANSFER_FROM_HOST_3D,
-        VIO_GPU_TRANSFER_TO_HOST_2D,
+        VIO_GPU_CAPSET_VIRGL, VIO_GPU_CTX_ATTACH_RESOURCE, VIO_GPU_CTX_CREATE, VIO_GPU_GET_CAPSET,
+        VIO_GPU_GET_CAPSET_INFO, VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING,
+        VIO_GPU_RESOURCE_CREATE_2D, VIO_GPU_RESOURCE_CREATE_3D, VIO_GPU_RESOURCE_FLUSH,
+        VIO_GPU_RESP_ERR_INVALID_CONTEXT_ID, VIO_GPU_RESP_ERR_INVALID_PARAMETER,
+        VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID, VIO_GPU_RESP_ERR_OUT_OF_MEMORY,
+        VIO_GPU_RESP_ERR_UNSPEC, VIO_GPU_RESP_OK_CAPSET, VIO_GPU_RESP_OK_CAPSET_INFO,
+        VIO_GPU_RESP_OK_DISPLAY_INFO, VIO_GPU_RESP_OK_NODATA, VIO_GPU_SET_SCANOUT,
+        VIO_GPU_SUBMIT_3D, VIO_GPU_TRANSFER_FROM_HOST_3D, VIO_GPU_TRANSFER_TO_HOST_2D,
     };
     use crate::vio::VIO_FB_MAX;
-    let req = outs[0].0;
-    let rd = |o: u64| load_u32(ram, base, req + o).unwrap_or(0);
+    let Some(packet) = vio_packet(ram, base, outs) else {
+        return VIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    };
+    let needed = match ty {
+        VIO_GPU_GET_CAPSET_INFO
+        | VIO_GPU_GET_CAPSET
+        | VIO_GPU_CTX_ATTACH_RESOURCE
+        | VIO_GPU_SUBMIT_3D => 32,
+        VIO_GPU_CTX_CREATE => 96,
+        VIO_GPU_RESOURCE_CREATE_3D | VIO_GPU_TRANSFER_FROM_HOST_3D => 72,
+        VIO_GPU_RESOURCE_CREATE_2D => 40,
+        VIO_GPU_RESOURCE_ATTACH_BACKING | VIO_GPU_SET_SCANOUT | VIO_GPU_RESOURCE_FLUSH => 48,
+        VIO_GPU_TRANSFER_TO_HOST_2D => 56,
+        _ => 24,
+    };
+    if packet.len() < needed {
+        return VIO_GPU_RESP_ERR_INVALID_PARAMETER;
+    }
+    let rd = |o: u64| load_u32(&packet, 0, o).unwrap_or(0);
     match ty {
         VIO_GPU_GET_DISPLAY_INFO => VIO_GPU_RESP_OK_DISPLAY_INFO,
         VIO_GPU_GET_CAPSET_INFO => {
-            // resp_capset_info: index 0 → VIRGL, 1 → VIRGL2 on a virgl device.
+            // resp_capset_info: the bounded model provides only index 0 → VIRGL v1.
             if !virgl_live(csr) {
                 return VIO_GPU_RESP_ERR_UNSPEC;
             }
-            let idx = rd(24);
-            csr.virgl_capset_id = match idx {
-                0 => VIO_GPU_CAPSET_VIRGL,
-                1 => VIO_GPU_CAPSET_VIRGL2,
-                _ => 0,
-            };
+            csr.virgl_capset_id = if rd(24) == 0 { VIO_GPU_CAPSET_VIRGL } else { 0 };
             if csr.virgl_capset_id == 0 {
                 csr.virgl_capset_ver = 0;
                 csr.virgl_capset_size = 0;
             } else {
-                csr.virgl_capset_ver = 2; // virgl2 capset version
+                csr.virgl_capset_ver = 1; // virgl v1 capset version
                 csr.virgl_capset_size = crate::virgl::CAPSET_WORDS.len() as u32 * 4;
             }
             VIO_GPU_RESP_OK_CAPSET_INFO
         }
         VIO_GPU_GET_CAPSET => {
-            if !virgl_live(csr) || rd(24) != csr.virgl_capset_id || csr.virgl_capset_id == 0 {
+            if !virgl_live(csr) || rd(24) != VIO_GPU_CAPSET_VIRGL || rd(28) > 1 {
                 return VIO_GPU_RESP_ERR_INVALID_PARAMETER;
             }
             VIO_GPU_RESP_OK_CAPSET
@@ -3236,14 +3366,17 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u3
             if !virgl_live(csr) || csr.virgl_ctx & (1u64 << ctx.min(63)) == 0 {
                 return VIO_GPU_RESP_ERR_INVALID_CONTEXT_ID;
             }
-            if res == 0 {
+            // The resource must exist — the 2D scanout (`vio_res_id`, which
+            // the composite samples) or a `RESOURCE_CREATE_3D` handle.
+            if res == 0 || (res != csr.vio_res_id && csr.virgl_res & (1u64 << res.min(63)) == 0) {
                 return VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
             }
             csr.virgl_attached |= 1u64 << res.min(63);
             VIO_GPU_RESP_OK_NODATA
         }
         VIO_GPU_RESOURCE_CREATE_3D => {
-            // resource_id@24, format@28, target@32, bind@36, w@40, h@44.
+            // resource_id@24, target@28, format@32, bind@36, w@40, h@44
+            // (`virtio_gpu_resource_create_3d` — target precedes format).
             let (res, w, h) = (rd(24), rd(40), rd(44));
             if !virgl_live(csr) || res == 0 || w == 0 || h == 0 {
                 return VIO_GPU_RESP_ERR_INVALID_PARAMETER;
@@ -3251,13 +3384,21 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u3
             if u64::from(w) * u64::from(h) * 4 > VIO_FB_MAX {
                 return VIO_GPU_RESP_ERR_OUT_OF_MEMORY;
             }
-            // The virgl render target gets its own device-side surface —
-            // `virgl_fb` — deliberately separate from `vio_fb` (the 2D scanout)
-            // so a `SUBMIT_3D` render never disturbs the committed frame.
-            csr.virgl_rt = res;
-            csr.virgl_rt_w = w;
-            csr.virgl_rt_h = h;
-            csr.virgl_fb = vec![0; (w as usize) * (h as usize) * 4];
+            csr.virgl_res |= 1u64 << res.min(63);
+            csr.virgl_dims.insert(res, (w, h));
+            if rd(36) & crate::virgl::VIRGL_BIND_RENDER_TARGET != 0 {
+                // The virgl render target gets its own device-side surface —
+                // `virgl_fb` — deliberately separate from `vio_fb` (the 2D
+                // scanout) so a `SUBMIT_3D` render never disturbs the
+                // committed frame.
+                csr.virgl_rt = res;
+                csr.virgl_rt_w = w;
+                csr.virgl_rt_h = h;
+                csr.virgl_fb = vec![0; (w as usize) * (h as usize) * 4];
+            } else {
+                csr.virgl_surf
+                    .insert(res, vec![0; (w as usize) * (h as usize) * 4]);
+            }
             VIO_GPU_RESP_OK_NODATA
         }
         VIO_GPU_SUBMIT_3D => {
@@ -3267,12 +3408,11 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u3
                 return VIO_GPU_RESP_ERR_INVALID_CONTEXT_ID;
             }
             // The execbuffer is the OUT descriptors after the 32-byte
-            // cmd_submit header — contiguous from outs[1] (and outs[0] tail).
-            let Some(&(buf, blen)) = outs.get(1) else {
+            // cmd_submit header, gathered without depending on segment boundaries.
+            if size % 4 != 0 || size as usize != packet.len() - 32 {
                 return VIO_GPU_RESP_ERR_INVALID_PARAMETER;
-            };
-            let avail = (u64::from(blen)).min(u64::from(size));
-            let ok = virgl_exec(csr, ram, base, buf, avail);
+            }
+            let ok = virgl_exec(csr, &packet, 0, 32, u64::from(size));
             if ok {
                 csr.virgl_submits += 1;
                 VIO_GPU_RESP_OK_NODATA
@@ -3286,7 +3426,7 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u3
             // modelled layout — real QEMU carries the resource handle in the
             // ctrl stream; field fidelity is part of the gated real-GPU work).
             let (x, y, rw, rh) = (rd(24), rd(28), rd(36), rd(40));
-            let off = load_u64(ram, base, req + 48).unwrap_or(0);
+            let off = load_u64(&packet, 0, 48).unwrap_or(0);
             let res = rd(56);
             if res != csr.virgl_rt || csr.virgl_fb.is_empty() {
                 return VIO_GPU_RESP_ERR_INVALID_RESOURCE_ID;
@@ -3329,7 +3469,7 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u3
         }
         VIO_GPU_RESOURCE_ATTACH_BACKING => {
             let (res, nr) = (rd(24), rd(28));
-            let addr = load_u64(ram, base, req + 32).unwrap_or(0);
+            let addr = load_u64(&packet, 0, 32).unwrap_or(0);
             let len = rd(40);
             if nr == 0 || addr == 0 {
                 VIO_GPU_RESP_ERR_UNSPEC
@@ -3337,9 +3477,9 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u3
                 csr.vio_backing = addr;
                 csr.vio_backing_len = u64::from(len);
                 VIO_GPU_RESP_OK_NODATA
-            } else if res == csr.virgl_rt {
-                // A 3D (virgl) resource's guest backing — the readback target
-                // for TRANSFER_FROM_HOST_3D.
+            } else if csr.virgl_res & (1u64 << res.min(63)) != 0 {
+                // A 3D (virgl) resource's guest backing — e.g. the readback
+                // target `__virgl_out` for TRANSFER_FROM_HOST_3D.
                 csr.virgl_backing.insert(res, addr);
                 VIO_GPU_RESP_OK_NODATA
             } else {
@@ -3348,16 +3488,25 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u3
         }
         VIO_GPU_SET_SCANOUT => {
             let (scanout, res) = (rd(40), rd(44));
-            if scanout != 0 || res != csr.vio_res_id || csr.vio_fb.is_empty() {
+            if scanout != 0 {
                 VIO_GPU_RESP_ERR_UNSPEC
-            } else {
+            } else if res == csr.vio_res_id && !csr.vio_fb.is_empty() {
                 csr.vio_scanout = true;
+                csr.virgl_scanout = false;
                 VIO_GPU_RESP_OK_NODATA
+            } else if res == csr.virgl_rt && !csr.virgl_fb.is_empty() {
+                // The virgl present — the console moves onto the
+                // GPU-rastered `RES_RT` (the composite output).
+                csr.virgl_scanout = true;
+                csr.vio_scanout = false;
+                VIO_GPU_RESP_OK_NODATA
+            } else {
+                VIO_GPU_RESP_ERR_UNSPEC
             }
         }
         VIO_GPU_TRANSFER_TO_HOST_2D => {
             let (x, y, rw, rh) = (rd(24), rd(28), rd(32), rd(36));
-            let off = load_u64(ram, base, req + 40).unwrap_or(0);
+            let off = load_u64(&packet, 0, 40).unwrap_or(0);
             let res = rd(48);
             if res != csr.vio_res_id || csr.vio_backing == 0 || csr.vio_fb.is_empty() {
                 return VIO_GPU_RESP_ERR_UNSPEC;
@@ -3382,8 +3531,12 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u3
             VIO_GPU_RESP_OK_NODATA
         }
         VIO_GPU_RESOURCE_FLUSH => {
-            if rd(40) == csr.vio_res_id && !csr.vio_fb.is_empty() {
+            let res = rd(40);
+            if res == csr.vio_res_id && !csr.vio_fb.is_empty() {
                 csr.vio_flushes = csr.vio_flushes.wrapping_add(1);
+                VIO_GPU_RESP_OK_NODATA
+            } else if res == csr.virgl_rt && !csr.virgl_fb.is_empty() {
+                csr.virgl_flushes = csr.virgl_flushes.wrapping_add(1);
                 VIO_GPU_RESP_OK_NODATA
             } else {
                 VIO_GPU_RESP_ERR_UNSPEC
@@ -3401,7 +3554,7 @@ fn vio_cmd(csr: &mut Csr, ram: &mut [u8], base: u64, outs: &[(u64, u32)], ty: u3
 fn virgl_exec(csr: &mut Csr, ram: &[u8], base: u64, buf: u64, size: u64) -> bool {
     use crate::encode::{
         VIRGL_CCMD_CLEAR, VIRGL_CCMD_CREATE_OBJECT, VIRGL_CCMD_DRAW_VBO, VIRGL_CCMD_NOP,
-        VIRGL_CCMD_RESOURCE_INLINE_WRITE, VIRGL_CCMD_SET_FRAMEBUFFER_STATE,
+        VIRGL_CCMD_RESOURCE_INLINE_WRITE, VIRGL_CCMD_SET_FRAMEBUFFER_STATE, VIRGL_OBJ_SAMPLER_VIEW,
     };
     let ndw = (size / 4) as usize;
     if ndw == 0 || ndw > 16384 {
@@ -3421,7 +3574,9 @@ fn virgl_exec(csr: &mut Csr, ram: &[u8], base: u64, buf: u64, size: u64) -> bool
     let mut drew = false;
     let mut fb_bound = false;
     let mut objects = 0u64; // created-object handle bitmap (≤64)
-    let mut tex: Option<(u32, u32, Vec<u32>)> = None; // w,h,pixels
+                            // The resource the `SAMPLER_VIEW` object samples — for the composite
+                            // this is `RES_SCAN` (the 2D scanout, i.e. `vio_fb` itself).
+    let mut tex_res: Option<u32> = None;
     while i < s.len() {
         let hdr = s[i];
         let cmd = hdr & 0xff;
@@ -3438,6 +3593,12 @@ fn virgl_exec(csr: &mut Csr, ram: &[u8], base: u64, buf: u64, size: u64) -> bool
                 if !body.is_empty() && body[0] < 64 {
                     objects |= 1u64 << body[0];
                 }
+                // `CREATE_OBJECT` carries the object type in the header's
+                // `obj` field; a sampler view's body[1] is the res handle
+                // (`VIRGL_OBJ_SAMPLER_VIEW_RES_HANDLE`).
+                if ((hdr >> 8) & 0xff) == VIRGL_OBJ_SAMPLER_VIEW && body.len() >= 2 {
+                    tex_res = Some(body[1]);
+                }
             }
             VIRGL_CCMD_SET_FRAMEBUFFER_STATE => {
                 // body[0]=nr_cbufs; a nonzero colour count means a surface is bound.
@@ -3450,15 +3611,22 @@ fn virgl_exec(csr: &mut Csr, ram: &[u8], base: u64, buf: u64, size: u64) -> bool
                 }
             }
             VIRGL_CCMD_RESOURCE_INLINE_WRITE => {
-                // res@1, usage@2, stride@3, layer@4, level@5, offset@6,
-                // box{x,y,z,w,h,d}@7..12, data@13+. The texture is the res with
-                // a 2D box whose w*h matches a known texture id (RES_TEX=2).
-                if body.len() >= 13 {
+                // res@0, level@1, usage@2, stride@3, layer_stride@4,
+                // box{x,y,z,w,h,d}@5..10, data@11+ — the wire layout is
+                // `VIRGL_RESOURCE_IW_*` (res,level,usage,stride,layer_stride,
+                // x,y,z,w,h,d then payload). An upload onto a modelled 3D
+                // surface fills it (the VBO bytes; texture data reaches the
+                // scanout resource through TRANSFER_TO_HOST_2D instead).
+                if body.len() >= 11 {
                     let res = body[0];
-                    let (bw, bh) = (body[9], body[10]);
-                    let data = &body[12..];
-                    if res == crate::virgl::RES_TEX && bw > 0 && bh > 0 {
-                        tex = Some((bw, bh, data.to_vec()));
+                    if let Some(surf) = csr.virgl_surf.get_mut(&res) {
+                        let data = &body[11..];
+                        for (k, w) in data.iter().enumerate() {
+                            let off = k * 4;
+                            if off + 4 <= surf.len() {
+                                surf[off..off + 4].copy_from_slice(&w.to_le_bytes());
+                            }
+                        }
                     }
                 }
             }
@@ -3472,6 +3640,33 @@ fn virgl_exec(csr: &mut Csr, ram: &[u8], base: u64, buf: u64, size: u64) -> bool
     if saw_clear {
         csr.virgl_clears = csr.virgl_clears.wrapping_add(1);
     }
+    // The texture the draw samples is the `SAMPLER_VIEW` object's resource:
+    // the 2D scanout surface (`vio_fb` — the committed `__scan_fb` frame),
+    // the virgl render target, or another created 3D surface.
+    let tex: Option<(u32, u32, Vec<u32>)> = tex_res.and_then(|res| {
+        let (tw, th, bytes) = if res == csr.vio_res_id {
+            (csr.vio_res_w, csr.vio_res_h, csr.vio_fb.as_slice())
+        } else if res == csr.virgl_rt {
+            (csr.virgl_rt_w, csr.virgl_rt_h, csr.virgl_fb.as_slice())
+        } else {
+            let (w, h) = csr.virgl_dims.get(&res).copied().unwrap_or((0, 0));
+            (
+                w,
+                h,
+                csr.virgl_surf.get(&res).map_or(&[][..], |v| v.as_slice()),
+            )
+        };
+        if tw == 0 || th == 0 {
+            return None;
+        }
+        // Record the sampled source — the composite's input snapshot.
+        csr.virgl_src = bytes.to_vec();
+        let px: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        Some((tw, th, px))
+    });
     // A draw only reaches the surface when a framebuffer was bound and the
     // surface object (handle `OBJ_SURFACE`) was created in this stream.
     let surface = objects & (1u64 << crate::virgl::OBJ_SURFACE) != 0;
@@ -3482,11 +3677,12 @@ fn virgl_exec(csr: &mut Csr, ram: &[u8], base: u64, buf: u64, size: u64) -> bool
     i == s.len()
 }
 
-/// Model a textured quad: sample the `INLINE_WRITE` texture across the
-/// offscreen render-target surface (`virgl_fb`), falling back to the CLEAR
-/// colour when no texture object was uploaded. This is a real nearest-sample
-/// raster of the guest's quad — the modelled analogue of the virgl draw, not
-/// a stub.
+/// Model a textured quad: sample the `SAMPLER_VIEW`-bound resource across
+/// the offscreen render-target surface (`virgl_fb`), falling back to the
+/// CLEAR colour when no sampler view was created. For the composite the
+/// bound resource is `RES_SCAN` — `vio_fb` itself — so the raster is a
+/// 1:1 resample of the committed frame, matching what vrend produces on a
+/// y0top render target (verified byte-exact in `out/virgl/vhw`).
 fn virgl_raster_quad(csr: &mut Csr, clear: Option<[u32; 4]>, tex: Option<&(u32, u32, Vec<u32>)>) {
     let (w, h) = (csr.virgl_rt_w as usize, csr.virgl_rt_h as usize);
     if w == 0 || h == 0 || csr.virgl_fb.len() < w * h * 4 {
@@ -4140,6 +4336,7 @@ mod tests {
         pc: u64,
         csr: Csr,
         ram: Vec<u8>,
+        console: String,
     }
 
     impl TaskMachine {
@@ -4156,12 +4353,12 @@ mod tests {
                 pc: TASK_BASE,
                 csr: Csr::default(),
                 ram,
+                console: String::new(),
             }
         }
 
         fn tick(&mut self) -> Option<Halt> {
             let word = fetch_u32(&self.ram, TASK_BASE, self.pc).unwrap();
-            let mut console = String::new();
             match step(
                 self.xlen,
                 &mut self.x,
@@ -4170,7 +4367,7 @@ mod tests {
                 &mut self.ram,
                 TASK_BASE,
                 word,
-                &mut console,
+                &mut self.console,
                 &mut 0,
             ) {
                 Step::Cont => None,
@@ -4678,6 +4875,18 @@ mod tests {
                 if xlen == 32 { 0xffff_ffff } else { u64::MAX }
             );
         }
+    }
+
+    #[test]
+    fn execution_budget_is_explicit_and_bounded() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1}"#).unwrap();
+        let module = analyze::kstart(&spec);
+        for limit in [0, 192_000_001, u32::MAX] {
+            assert!(run_module_with_limit(&spec, &module, 0x8020_0000, limit).is_err());
+        }
+        let smoke = run_module_with_limit(&spec, &module, 0x8020_0000, 1).unwrap();
+        assert_eq!(smoke.halt, Halt::Limit);
+        assert_eq!(smoke.steps, 1);
     }
 
     #[test]
@@ -5858,7 +6067,9 @@ mod tests {
         let m = analyze::kstart(&spec);
         let s = run_module(&spec, &m, 0x8020_0000).unwrap();
         assert!(s.console.contains("VIRTIO-SCAN"), "{}", s.console);
-        assert!(s.vio_scanout);
+        // `gl:true` → `VioVirgl` ran after the paint: SET_SCANOUT(RES_RT)
+        // moved the console onto the GPU surface, clearing the res-1 binding.
+        assert!(s.virgl_scanout && !s.vio_scanout);
         assert_eq!((s.vio_fb_w, s.vio_fb_h), (1920, 1080));
         assert!(s.console.contains("VIRTIO-PAINT"), "{}", s.console);
         // Sampled scale-parity: dst(x,y) in the content window equals the
@@ -5919,15 +6130,378 @@ mod tests {
         }
     }
 
+    fn p0_command_machine(xlen: u32, buffered: bool, index: u16) -> TaskMachine {
+        use crate::encode::{A0, A1, A2, A3, RA};
+        let mut spec = BoardSpec::from_json_str(r#"{"schema_version":1}"#).unwrap();
+        spec.isa.xlen = xlen;
+        spec.uncore.plic = false;
+        let mut node = if buffered {
+            crate::vio::cmdbuf_node(&spec)
+        } else {
+            crate::vio::cmd_node(&spec)
+        };
+        for op in &mut node.ops {
+            if let Op::La {
+                addr: addr @ Addr::VioBss,
+                ..
+            } = op
+            {
+                *addr = Addr::Abs(0x6000);
+            }
+        }
+        let module = Module {
+            nodes: vec![
+                node,
+                Node {
+                    purpose: Purpose::Virtio,
+                    ops: vec![Op::Label("p0_return".into()), Op::Wfi],
+                },
+            ],
+            ..Default::default()
+        };
+        let mut machine = TaskMachine::new(xlen, &module);
+        machine.csr = Csr {
+            vio_gpu: true,
+            vio_gl: true,
+            vio_drv_feats: 1,
+            vio_ready: true,
+            vio_qnum: 8,
+            vio_qdesc: 0x6000,
+            vio_qavail: 0x6080,
+            vio_qused: 0x60c0,
+            vio_used_idx: index,
+            virgl_ctx: 2,
+            ..Default::default()
+        };
+        machine.x[RA as usize] = task_label(&module, "p0_return");
+        machine.x[A0 as usize] = 32;
+        machine.x[A1 as usize] = if buffered { 24 } else { 40 };
+        machine.x[A2 as usize] = 0x9000;
+        machine.x[A3 as usize] = 4;
+        machine.put(0x6080, &(u32::from(index) << 16).to_le_bytes());
+        machine.put(0x60c0, &(u32::from(index) << 16).to_le_bytes());
+        machine.put(
+            0x6000 + crate::vio::VIO_DEV_OFF as u64,
+            &(crate::encode::VIO_MMIO_BASE as u32).to_le_bytes(),
+        );
+        let mut request = vec![0u8; 32];
+        request[0..4].copy_from_slice(&(if buffered { 0x0207u32 } else { 0x0108 }).to_le_bytes());
+        if buffered {
+            request[4..8].copy_from_slice(&1u32.to_le_bytes());
+            request[8..16].copy_from_slice(&0x1234_5678_8765_4321u64.to_le_bytes());
+            request[16..20].copy_from_slice(&1u32.to_le_bytes());
+            request[24..28].copy_from_slice(&4u32.to_le_bytes());
+        }
+        machine.put(0x6120, &request);
+        machine
+    }
+
     #[test]
-    fn virgl_submit_executes_textured_quad() {
-        // M4: a `virtio-gpu-gl-device` board (`proxy.gl`). `VioInit` accepts
-        // the offered `VIRTIO_GPU_F_VIRGL`; `VioVirgl` then walks `__virgl_req`
-        // (CAPSET_INFO → CAPSET → CTX_CREATE → ATTACH → SUBMIT_3D →
-        // TRANSFER_FROM_HOST_3D → FLUSH). The execbuffer rides a second OUT
-        // descriptor; `virgl_exec` parses it and rasters the textured quad
-        // into `vio_fb`. Real-QEMU raster is the open gate (no DRM render node
-        // on this host) — the modelled path is the verified one here.
+    fn p0_generated_submitters_handle_u16_index_wrap() {
+        for xlen in [32, 64] {
+            for buffered in [false, true] {
+                for index in [0x7fff, 0x8000, 0xffff] {
+                    let mut machine = p0_command_machine(xlen, buffered, index);
+                    let halt = (0..2000).find_map(|_| machine.tick());
+                    assert!(
+                        matches!(halt, Some(Halt::Wfi)),
+                        "xlen={xlen} buffered={buffered} index={index:#x}"
+                    );
+                    assert_eq!(
+                        machine.reg(crate::encode::A0),
+                        if buffered { 0x1100 } else { 0x1102 }
+                    );
+                    assert_eq!(machine.csr.vio_used_idx, index.wrapping_add(1));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn p0_generated_submitter_rejects_mismatched_fence() {
+        for xlen in [32, 64] {
+            let mut machine = p0_command_machine(xlen, true, 0);
+            let mut tampered = false;
+            let mut halt = None;
+            for _ in 0..2000 {
+                halt = machine.tick();
+                if !tampered && machine.csr.vio_irqs != 0 {
+                    machine.put(0x618c, &0xdead_beefu32.to_le_bytes());
+                    tampered = true;
+                }
+                if halt.is_some() {
+                    break;
+                }
+            }
+            assert!(tampered && matches!(halt, Some(Halt::Wfi)));
+            assert_eq!(machine.reg(crate::encode::A0), 0);
+        }
+    }
+
+    #[test]
+    fn p0_virgl_client_stops_at_first_failed_response() {
+        use crate::encode::{A0, RA, S11, SP, X0};
+        for xlen in [32, 64] {
+            let mut spec = BoardSpec::from_json_str(r#"{"schema_version":1}"#).unwrap();
+            spec.isa.xlen = xlen;
+            let mut virgl = crate::vio::virgl_node(&spec);
+            for op in &mut virgl.ops {
+                if let Op::La { addr, .. } = op {
+                    *addr = Addr::Abs(match addr {
+                        Addr::VioBss => 0x6000,
+                        Addr::VirglReq => 0x8000,
+                        Addr::VirglCmd => 0xa000,
+                        Addr::VirglOut => 0xc000,
+                        other => panic!("unexpected address {other:?}"),
+                    });
+                }
+            }
+            let mut nodes = vec![
+                Node {
+                    purpose: Purpose::Virtio,
+                    ops: vec![
+                        Op::Li {
+                            rd: SP,
+                            imm: 0x10000,
+                        },
+                        Op::Jal {
+                            rd: RA,
+                            to: "VioVirgl".into(),
+                        },
+                        Op::Wfi,
+                    ],
+                },
+                virgl,
+            ];
+            for name in ["VioCmd", "VioCmdBuf"] {
+                nodes.push(Node {
+                    purpose: Purpose::Virtio,
+                    ops: vec![
+                        Op::Label(name.into()),
+                        Op::Addi {
+                            rd: S11,
+                            rs: S11,
+                            imm: 1,
+                        },
+                        Op::Li {
+                            rd: A0,
+                            imm: 0x1205,
+                        },
+                        Op::Jalr {
+                            rd: X0,
+                            rs: RA,
+                            imm: 0,
+                        },
+                    ],
+                });
+            }
+            let module = Module {
+                nodes,
+                ..Default::default()
+            };
+            let mut machine = TaskMachine::new(xlen, &module);
+            machine.put(0x8000, &crate::virgl::reqtab(640, 480));
+            let halt = (0..20000).find_map(|_| machine.tick());
+            assert!(matches!(halt, Some(Halt::Wfi)));
+            assert_eq!(
+                machine.reg(S11),
+                1,
+                "failed capability query must stop the sequence"
+            );
+            assert!(!machine.console.contains("VIRTIO-VIRGL "));
+            assert!(machine.console.contains("VIRTIO-VIRGL-FAIL"));
+        }
+    }
+
+    fn p0_control_chain(request: &[u8], response_len: u32) -> (Csr, Vec<u8>, u64) {
+        let mut ram = vec![0u8; 4096];
+        let desc = TASK_BASE + 0x100;
+        let req = TASK_BASE + 0x400;
+        let rsp = TASK_BASE + 0x800;
+        ram[0x400..0x400 + request.len()].copy_from_slice(request);
+        ram[0x800..0xc00].fill(0xa5);
+        for (i, value) in [
+            req as u32,
+            0,
+            request.len() as u32,
+            1 | (1 << 16),
+            rsp as u32,
+            0,
+            response_len,
+            2,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert!(store_u32(&mut ram, TASK_BASE, desc + i as u64 * 4, value));
+        }
+        (
+            Csr {
+                vio_qdesc: desc,
+                vio_qnum: 8,
+                vio_gl: true,
+                vio_drv_feats: 1,
+                ..Default::default()
+            },
+            ram,
+            rsp,
+        )
+    }
+
+    #[test]
+    fn p0_response_echoes_full_fence_and_respects_descriptor_bounds() {
+        let mut request = vec![0u8; 96];
+        request[0..4].copy_from_slice(&0x0200u32.to_le_bytes());
+        request[4..8].copy_from_slice(&1u32.to_le_bytes());
+        request[8..16].copy_from_slice(&0xfedc_ba98_7654_3210u64.to_le_bytes());
+        request[16..20].copy_from_slice(&1u32.to_le_bytes());
+        let (mut csr, mut ram, rsp) = p0_control_chain(&request, 24);
+        assert_eq!(vio_exec_chain(&mut csr, &mut ram, TASK_BASE, 0), 24);
+        assert_eq!(load_u32(&ram, TASK_BASE, rsp), Some(0x1100));
+        assert_eq!(load_u32(&ram, TASK_BASE, rsp + 4), Some(1));
+        assert_eq!(
+            load_u64(&ram, TASK_BASE, rsp + 8),
+            Some(0xfedc_ba98_7654_3210)
+        );
+        assert!(ram[0x818..0xc00].iter().all(|b| *b == 0xa5));
+    }
+
+    #[test]
+    fn p0_invalid_response_or_descriptor_loop_has_no_command_side_effects() {
+        let mut request = vec![0u8; 96];
+        request[0..4].copy_from_slice(&0x0200u32.to_le_bytes());
+        request[16..20].copy_from_slice(&1u32.to_le_bytes());
+        let (mut csr, mut ram, _) = p0_control_chain(&request, 8);
+        assert_eq!(vio_exec_chain(&mut csr, &mut ram, TASK_BASE, 0), 0);
+        assert_eq!(csr.virgl_ctxs, 0);
+        assert!(ram[0x800..0xc00].iter().all(|b| *b == 0xa5));
+        let (mut csr, mut ram, _) = p0_control_chain(&request, 24);
+        store_u32(&mut ram, TASK_BASE, csr.vio_qdesc + 12, 1);
+        assert_eq!(vio_exec_chain(&mut csr, &mut ram, TASK_BASE, 0), 0);
+        assert_eq!(csr.virgl_ctxs, 0);
+    }
+
+    #[test]
+    fn p0_short_capset_response_cannot_overwrite_the_following_buffer() {
+        let mut request = vec![0u8; 32];
+        request[0..4].copy_from_slice(&0x0109u32.to_le_bytes());
+        request[24..28].copy_from_slice(&1u32.to_le_bytes());
+        request[28..32].copy_from_slice(&1u32.to_le_bytes());
+        let (mut csr, mut ram, rsp) = p0_control_chain(&request, 24);
+        assert_eq!(vio_exec_chain(&mut csr, &mut ram, TASK_BASE, 0), 24);
+        assert_eq!(load_u32(&ram, TASK_BASE, rsp), Some(0x1205));
+        assert!(ram[0x818..0xc00].iter().all(|b| *b == 0xa5));
+    }
+
+    #[test]
+    fn p0_submit_uses_complete_out_chain_and_rejects_truncated_size() {
+        let mut packet = vec![0u8; 36];
+        packet[0..4].copy_from_slice(&0x0207u32.to_le_bytes());
+        packet[16..20].copy_from_slice(&1u32.to_le_bytes());
+        packet[24..28].copy_from_slice(&4u32.to_le_bytes());
+        for segments in [
+            vec![(0, 36)],
+            vec![(0, 32), (32, 4)],
+            vec![(0, 12), (12, 20), (32, 4)],
+        ] {
+            let mut csr = Csr {
+                vio_gl: true,
+                vio_drv_feats: 1,
+                virgl_ctx: 2,
+                ..Default::default()
+            };
+            assert_eq!(vio_cmd(&mut csr, &mut packet, 0, &segments, 0x0207), 0x1100);
+            assert_eq!(csr.virgl_submits, 1);
+        }
+        packet[24..28].copy_from_slice(&8u32.to_le_bytes());
+        let mut csr = Csr {
+            vio_gl: true,
+            vio_drv_feats: 1,
+            virgl_ctx: 2,
+            ..Default::default()
+        };
+        assert_eq!(
+            vio_cmd(&mut csr, &mut packet, 0, &[(0, 32), (32, 4)], 0x0207),
+            0x1205
+        );
+        assert_eq!(csr.virgl_submits, 0);
+    }
+
+    #[test]
+    fn p0_capset_model_checks_id_and_version_without_prior_enumeration() {
+        let mut csr = Csr {
+            vio_gl: true,
+            vio_drv_feats: crate::encode::VIO_GPU_F_VIRGL,
+            ..Default::default()
+        };
+        let mut ram = vec![0u8; 64];
+        for (id, version, expected) in [
+            (1u32, 0u32, crate::encode::VIO_GPU_RESP_OK_CAPSET),
+            (1, 1, crate::encode::VIO_GPU_RESP_OK_CAPSET),
+            (1, 2, crate::encode::VIO_GPU_RESP_ERR_INVALID_PARAMETER),
+            (2, 1, crate::encode::VIO_GPU_RESP_ERR_INVALID_PARAMETER),
+        ] {
+            ram[24..28].copy_from_slice(&id.to_le_bytes());
+            ram[28..32].copy_from_slice(&version.to_le_bytes());
+            assert_eq!(
+                vio_cmd(
+                    &mut csr,
+                    &mut ram,
+                    0,
+                    &[(0, 32)],
+                    crate::encode::VIO_GPU_GET_CAPSET
+                ),
+                expected
+            );
+        }
+        ram[24..28].copy_from_slice(&0u32.to_le_bytes());
+        assert_eq!(
+            vio_cmd(
+                &mut csr,
+                &mut ram,
+                0,
+                &[(0, 32)],
+                crate::encode::VIO_GPU_GET_CAPSET_INFO
+            ),
+            crate::encode::VIO_GPU_RESP_OK_CAPSET_INFO
+        );
+        assert_eq!(
+            (
+                csr.virgl_capset_id,
+                csr.virgl_capset_ver,
+                csr.virgl_capset_size
+            ),
+            (1, 1, 308)
+        );
+        ram[24..28].copy_from_slice(&1u32.to_le_bytes());
+        vio_cmd(
+            &mut csr,
+            &mut ram,
+            0,
+            &[(0, 32)],
+            crate::encode::VIO_GPU_GET_CAPSET_INFO,
+        );
+        assert_eq!(
+            (
+                csr.virgl_capset_id,
+                csr.virgl_capset_ver,
+                csr.virgl_capset_size
+            ),
+            (0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn virgl_submit_composites_scanout_frame() {
+        // M4+M5: a `virtio-gpu-gl-device` board (`proxy.gl`). `VioInit`
+        // accepts `VIRTIO_GPU_F_VIRGL`; `VioVirgl` runs **after** `VioPaint`
+        // and walks `__virgl_req` (CAPSET_INFO → CAPSET → CTX_CREATE →
+        // CREATE_3D×2 → CTX_ATTACH×3 → SUBMIT_3D → SET_SCANOUT → FLUSH).
+        // The execbuffer's sampler view binds the 2D scanout resource
+        // (`RES_SCAN` = 1), so `virgl_exec` composites the *committed frame*
+        // (`vio_fb` — what `VioPaint` uploaded from `__scan_fb`) into
+        // `virgl_fb`, then the console moves onto `RES_RT`. Real-QEMU raster
+        // stays gated on a DRM render node — the modelled path is verified.
         let spec = BoardSpec::from_json_str(
             r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
 "kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
@@ -5943,36 +6517,40 @@ mod tests {
         let s = run_module(&spec, &m, 0x8020_0000).unwrap();
         assert!(s.console.contains("VIRTIO-VIRGL"), "{}", s.console);
         assert!(s.console.contains("VIRTIO-SCAN"), "{}", s.console);
-        // CAPSET negotiated (capset_id reported) → CTX_CREATE → SUBMIT_3D ran.
+        // CAPSET negotiated → CTX_CREATE → SUBMIT_3D ran.
         assert_ne!(s.virgl_capset, 0, "CAPSET_INFO/CAPSET negotiated");
         assert!(s.virgl_ctxs >= 1, "CTX_CREATE ran: {}", s.console);
         assert!(s.virgl_submits >= 1, "SUBMIT_3D accepted: {}", s.console);
         assert!(s.virgl_draws >= 1, "DRAW_VBO reached a bound surface");
-        // The offscreen RT is the proxy geometry (640×480) — the textured quad
-        // rasters every pixel once. The scanout surface is untouched (the 2D
-        // paint path still owns it), which is the no-regression property.
         assert_eq!(s.virgl_px, 640 * 480);
-        let q = |x: usize, y: usize| {
-            u32::from_le_bytes(s.virgl_fb[(y * 640 + x) * 4..][..4].try_into().unwrap())
-        };
-        // 4×4 checkerboard sampled across the surface → alternating texels.
-        assert_eq!(q(0, 0), crate::virgl::TEX_A);
-        assert_eq!(q(160, 0), crate::virgl::TEX_B);
-        assert_eq!(q(320, 0), crate::virgl::TEX_A);
-        // M4b: `VioVirgl` attached `__virgl_out` as RES_RT's guest backing and
-        // TRANSFER_FROM_HOST_3D pulled the quad back — `virgl_out` is the
-        // guest-RAM copy, byte-identical to the device-side `virgl_fb`.
+        // The composite contract: `virgl_fb` is the scanout surface resampled
+        // across the quad — same 640×480 geometry → an identity blit of the
+        // texture as sampled at submit time (`virgl_src`). `vio_fb` itself is
+        // a *moving* surface (a timer-tick `Ui → VioPaint` repaint can rewrite
+        // it after the composite), so the gate compares against the snapshot.
+        assert_eq!(
+            s.virgl_src.len(),
+            s.vio_fb.len(),
+            "composite source is the scanout surface (same geometry)"
+        );
+        assert!(
+            s.virgl_src.iter().any(|&b| b != 0),
+            "the composite sampled a committed frame, not a blank surface"
+        );
+        assert_eq!(
+            s.virgl_fb, s.virgl_src,
+            "virgl composite reproduces the scanout frame it sampled"
+        );
+        // The present moved the console onto RES_RT.
+        assert!(s.virgl_scanout, "SET_SCANOUT(RES_RT) latched");
+        assert!(!s.vio_scanout, "scanout0 no longer bound to res 1");
+        assert!(s.virgl_flushes >= 1, "RESOURCE_FLUSH(RES_RT) presented");
+        // M4b: `__virgl_out` readback is byte-identical to the device surface.
         assert_eq!(
             s.virgl_out.len(),
             (640 * 480 * 4) as usize,
-            "__virgl_out holds the full quad in guest RAM"
+            "__virgl_out holds the full composite in guest RAM"
         );
-        let go = |x: usize, y: usize| {
-            u32::from_le_bytes(s.virgl_out[(y * 640 + x) * 4..][..4].try_into().unwrap())
-        };
-        assert_eq!(go(0, 0), crate::virgl::TEX_A, "guest readback texel");
-        assert_eq!(go(160, 0), crate::virgl::TEX_B, "guest readback texel");
-        assert_eq!(go(320, 0), crate::virgl::TEX_A, "guest readback texel");
         assert_eq!(
             s.virgl_out, s.virgl_fb,
             "guest __virgl_out == device virgl_fb (readback is exact)"
@@ -5980,20 +6558,37 @@ mod tests {
     }
 
     #[test]
-    fn virgl_exec_rasterizes_inline_texture() {
-        // Drive `virgl_exec` directly on the emitted execbuffer: a clear +
-        // textured-quad draw must paint the 4×4 checkerboard (TEX_A/TEX_B)
-        // across the surface. The texture-byte kill test mutates one texel.
+    fn virgl_exec_composites_scanout_texture() {
+        const PA: u32 = 0x1122_3344;
+        const PB: u32 = 0xAABB_CCDD;
+        // Drive `virgl_exec` directly on the emitted execbuffer: the sampler
+        // view binds `RES_SCAN` (1), so the draw composites `vio_fb` — the
+        // committed scanout frame — into `virgl_fb`. Seed `vio_fb` with a
+        // 2×2-block checkerboard; same geometry → identity blit.
         let w = 8u32;
         let h = 8u32;
+        let mut fb = vec![0u8; (w * h * 4) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let c = if (x / 2 + y / 2) % 2 == 0 { PA } else { PB };
+                fb[((y * w + x) * 4) as usize..][..4].copy_from_slice(&c.to_le_bytes());
+            }
+        }
         let mut csr = Csr {
             vio_gl: true,
             vio_drv_feats: crate::encode::VIO_GPU_F_VIRGL,
+            vio_res_id: crate::virgl::RES_SCAN,
+            vio_res_w: w,
+            vio_res_h: h,
+            vio_fb: fb.clone(),
             virgl_rt: crate::virgl::RES_RT,
             virgl_rt_w: w,
             virgl_rt_h: h,
             virgl_fb: vec![0; (w * h * 4) as usize],
             virgl_ctx: 1 << crate::virgl::CTX_ID,
+            virgl_res: (1 << crate::virgl::RES_VBO)
+                | (1 << crate::virgl::RES_RT)
+                | (1 << crate::virgl::RES_SCAN),
             ..Default::default()
         };
         let buf = crate::virgl::execbuf(w, h);
@@ -6004,18 +6599,16 @@ mod tests {
         assert!(virgl_exec(&mut csr, &ram, base, baddr, buf.len() as u64));
         assert!(csr.virgl_draws >= 1, "draw recognized");
         assert_eq!(csr.virgl_px, w * h, "fullscreen quad rastered");
-        // Nearest-sample checkerboard: screen x∈{0,1}→texel u0, {2,3}→u1, …
-        // so u parity alternates TEX_A/TEX_B (u = x*4/8 = x/2).
+        // Same geometry → the composite is an exact copy of the scanout.
+        assert_eq!(csr.virgl_fb, fb, "virgl_fb == vio_fb (composite blit)");
         let px = |x: usize, y: usize| {
             u32::from_le_bytes(csr.virgl_fb[(y * 8 + x) * 4..][..4].try_into().unwrap())
         };
-        assert_eq!(px(0, 0), crate::virgl::TEX_A);
-        assert_eq!(px(2, 0), crate::virgl::TEX_B);
-        assert_eq!(px(4, 0), crate::virgl::TEX_A);
-        assert_eq!(px(6, 0), crate::virgl::TEX_B);
-        assert_eq!(px(0, 2), crate::virgl::TEX_B); // v parity flips down a row
-                                                   // Malformed stream — a header whose body-dword count overruns the
-                                                   // buffer — must fail closed (virgl_exec returns false → INVALID_PARAM).
+        assert_eq!(px(0, 0), PA);
+        assert_eq!(px(2, 0), PB);
+        assert_eq!(px(0, 2), PB);
+        // Malformed stream — a header whose body-dword count overruns the
+        // buffer — must fail closed (virgl_exec returns false → INVALID_PARAM).
         let mut bad = [0u8; 4];
         bad.copy_from_slice(
             &crate::encode::virgl_cmd0(crate::encode::VIRGL_CCMD_DRAW_VBO, 0, 0xffff).to_le_bytes(),
@@ -6110,9 +6703,9 @@ mod tests {
             virgl_raster_quad(&mut csr, None, Some(&(4, 4, tex)));
             csr.virgl_fb
         };
-        let good = run(vec![crate::virgl::TEX_A; 16]);
-        let mut tex2 = vec![crate::virgl::TEX_A; 16];
-        tex2[0] = crate::virgl::TEX_B; // flip texel (0,0)
+        let good = run(vec![0x1122_3344; 16]);
+        let mut tex2 = vec![0x1122_3344; 16];
+        tex2[0] = 0xAABB_CCDD; // flip texel (0,0)
         let killed = run(tex2);
         assert_ne!(
             good, killed,

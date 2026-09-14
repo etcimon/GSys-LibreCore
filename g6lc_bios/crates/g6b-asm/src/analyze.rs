@@ -469,23 +469,16 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
     if let Some(o) = vio {
         m.push(vio_scan_call_node(o));
     }
-    // M4 virgl lane: on a `virtio-gpu-gl-device` board (`proxy.gl`) with the
-    // 2D scanout resource already created by VioScan, run the virgl bring-up —
-    // CAPSET → CTX_CREATE → RESOURCE_CREATE_3D(offscreen RES_RT) →
-    // CTX_ATTACH → SUBMIT_3D(__virgl_cmd execbuffer). The raster lands in the
-    // dedicated offscreen `virgl_fb` surface — deliberately not `vio_fb`, so a
-    // `SUBMIT_3D` render never disturbs the committed 2D frame. After the
-    // reqtab sequence, `VioVirgl` attaches `__virgl_out` as RES_RT's guest
-    // backing and TRANSFER_FROM_HOST_3D pulls the rendered quad back into
-    // guest RAM (the `Smoke::virgl_out` snapshot is the readback gate).
+    // M4 virgl lane buffers: on a `virtio-gpu-gl-device` board (`proxy.gl`)
+    // the execbuffer + request table are emitted here, but `VioVirgl` itself
+    // is scheduled **after the paint pass** (below) — the composite's sampler
+    // view binds the 2D scanout resource (id 1), so it must run only once
+    // `VioPaint` has committed `__scan_fb` into `vio_fb`.
     if vio.is_some() && gl.is_some() {
         let gp = g6b_spec_proxy(spec);
         m.virgl_cmd = crate::virgl::execbuf(gp.0, gp.1);
         m.virgl_req = crate::virgl::reqtab(gp.0, gp.1);
         m.virgl_out_bytes = u64::from(gp.0) * u64::from(gp.1) * 4;
-        if let Some(o) = vio {
-            m.push(vio_gl_call_node(o));
-        }
     }
     if let Some(o) = ui {
         m.ui_bytes = UI_HEADER_BYTES;
@@ -540,6 +533,18 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
     if let Some(o) = pci {
         if spec.kernel.gr.enable || spec.kernel.proxy.enable {
             m.push(pci_paint_call_node(o));
+        }
+    }
+    // M4 virgl composite — **after** the paint pass. The execbuffer's
+    // sampler view binds resource 1 (the 2D scanout), so the textured quad
+    // draws the frame `VioPaint` just committed into `vio_fb` onto the
+    // offscreen `RES_RT`; `SET_SCANOUT(RES_RT)`+`RESOURCE_FLUSH` then move
+    // the console onto the GPU-rastered surface. `VioVirgl` finishes by
+    // attaching `__virgl_out` as RES_RT's guest backing and
+    // TRANSFER_FROM_HOST_3D pulls the composite back into guest RAM.
+    if vio.is_some() && gl.is_some() {
+        if let Some(o) = vio {
+            m.push(vio_gl_call_node(o));
         }
     }
     if let Some(o) = park {
@@ -2269,12 +2274,10 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
             // repaint are different work on the same timer.
             ops.extend(face_is(crate::FACE_WEB, "tick_face_cli"));
         }
-        ops.extend([
-            Op::Jal {
-                rd: RA,
-                to: "DomAwait".into(),
-            },
-        ]);
+        ops.extend([Op::Jal {
+            rd: RA,
+            to: "DomAwait".into(),
+        }]);
         // `__prom` settle pass: `PromDrain` fulfills pending fetches whose
         // `KernelGet` lands, rescans pending combinators, rejects expired ones,
         // and raises `P_RESUME` when a suspended `_start`'s promise settled.
@@ -2313,37 +2316,17 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 },
                 // JitCall(entry_funcidx, nargs=1, arg0=__heap_base): `_start`'s
                 // REWINDING prologue `start_rewind`s into the saved continuation.
-                Op::La {
-                    rd: T0,
-                    addr: Addr::JitIn,
-                },
-                Op::Lw {
-                    rd: A0,
-                    rs: T0,
-                    off: crate::jfmt::OFF_ENTRY as i32,
-                },
-                Op::Li { rd: A1, imm: 1 },
-                Op::La {
-                    rd: T0,
-                    addr: Addr::JitHdr,
-                },
-                Op::Li {
-                    rd: T1,
-                    imm: i64::from(crate::jitr::OFF_GLOB) + 8,
-                },
-                Op::Add {
-                    rd: T0,
-                    rs1: T0,
-                    rs2: T1,
-                },
-                Op::Ld {
-                    rd: A2,
-                    rs: T0,
-                    off: 0,
+                Op::Jal {
+                    rd: RA,
+                    to: "JitResume".into(),
                 },
                 Op::Jal {
                     rd: RA,
-                    to: "JitCall".into(),
+                    to: "DomtKey".into(),
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "DomtPtr".into(),
                 },
                 Op::Label("tick_prom_done".into()),
             ]);

@@ -12,6 +12,23 @@ schema_version = "1"
 rust = "1.85.0"
 python_min = "3.9"
 
+[graphics_wire]
+role = "external-protocol-reference-only"
+virglrenderer_url = "https://gitlab.freedesktop.org/virgl/virglrenderer.git"
+virglrenderer_version = "1.0.0"
+virglrenderer_rev = "9c9d55ecbe502e0d71ee99529709efcca69aac42"
+mesa_url = "https://gitlab.freedesktop.org/mesa/mesa.git"
+mesa_version = "24.3.4"
+mesa_rev = "769e51468b49b2a42f0a0eaf71cf9eed5ff4e5de"
+linux_url = "https://github.com/torvalds/linux.git"
+linux_version = "6.6"
+linux_rev = "ffc253263a1375a65fa6c9f62a893e9767fbebfa"
+virtio_spec = "https://docs.oasis-open.org/virtio/virtio/v1.3/virtio-v1.3.pdf"
+capset_id = 1
+capset_version = 1
+capset_bytes = 308
+note = "P0 reference pins, not build dependencies or a GLES capability grant; no external renderer is linked into BIOS or APU firmware."
+
 # Semantic reference only. Never a crate or Go module dependency.
 [js]
 spec = "goja-es5.1"

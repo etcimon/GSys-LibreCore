@@ -42,6 +42,56 @@ Generated artefacts: `zeal/KStart.S`, `zeal/KInts.S`, `zeal/MemCpy.S`
 after `analyze::objects` tags each state's purpose and home (`CODEGEN.md`).
 Host smoke: `g6b smoke` (`g6b-asm::exec`) runs hart 0 until WFI (UART RX is PLIC irq 10 — QEMU virt's ns16550 line — not a busy poll; virtio-mmio completions are claimed through the PLIC too).
 
+## Recovery protocol and native-service ABI groundwork
+
+The first recovery-program increment adds two independent, safe `no_std`
+libraries without changing the active boot path:
+
+- `g6b-runtime-abi`: 64-byte little-endian `G6SR` version-1 requests. Header
+  length/version/reserved bits, operation IDs, nonzero request IDs and caller
+  context slot/generation are checked before accepting input/output spans.
+  Spans must fit the caller's declared memory window without overflow; output
+  cannot overlap input or the request header. Decoding a request does not grant
+  permission to perform its operation; native dispatch/authorization is pending.
+- `g6b-bootctl`: 128-byte `G6BT` attempt tickets and two 4096-byte `G6BH`
+  journal slots. Both encode explicit version/length and CRC32C, not Rust memory
+  layouts. Tickets bind domain, sequence, nonzero nonce, device/partition IDs
+  and image digest. CRC detects corruption, not authenticity; image validation,
+  CSPRNG provenance and Linux readiness are obligations of the future producers.
+
+Journal initialization is explicit and refuses nonblank media. State transitions
+write the other slot, flush and read back before returning a handoff ticket.
+Any uncertain I/O poisons the live writer until reload. A missing/corrupt newer
+copy cannot restore an older record's permission to boot: degraded journals
+inhibit autoboot and reset reconciliation persists the hold. Conflicting equal
+generations or discontinuous copies fail closed. Generation exhaustion never
+wraps. Linux acknowledgement requires the exact in-progress attempt and root,
+service and watchdog readiness; it cannot acknowledge the firmware domain or
+silently clear an operator/recovery inhibit. A successful trial and explicit
+re-enable are separate operations.
+
+`g6b-kernel::bootctl::JournalStorage` adapts a declared VFS device region to the
+slots, rejecting invalid extents, read-only devices and transports without a
+declared durable flush. `FileBlock` uses OS `sync_all`; `SubDev` forwards the
+capability, while the default and memory-only device do not claim durability.
+The adapter's exclusive borrow is not cross-process locking: callers must own
+and serialize the metadata region for the complete read/modify/flush/readback
+transaction. Native ownership and Linux process locking remain integration work.
+File reopen tests and torn-write models are not physical storage qualification.
+
+Verification:
+
+```text
+cargo test -p g6b-bootctl -p g6b-runtime-abi
+cargo test -p g6b-kernel bootctl::tests
+cargo check -p g6b-bootctl -p g6b-runtime-abi --target riscv64imac-unknown-none-elf
+```
+
+The cross-check uses Rust 1.85.0; it proves library portability, not native guest
+link/entry or an executing BIOS service. The Linux-generic health helper,
+OpenWrt adapter, real watchdog, TLS/management and active autoboot inhibition
+are still pending. No RTL/ISA/DTS/DFT change is part of this increment.
+
 ## Cooperative integer task ABI and multicore policy
 
 The ZealOS `Sched.ZC` contract supplies per-core round-robin readiness and

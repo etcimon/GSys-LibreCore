@@ -205,16 +205,17 @@ pub const VIO_GPU_RESP_ERR_INVALID_PARAMETER: u32 = 0x1205;
 /// `SUBMIT_3D`; `VIRTIO_GPU_F_CONTEXT_INIT` — `CTX_CREATE` carries an
 /// `context_init` mask; `VIRTIO_GPU_F_RESOURCE_BLOB` — blob resources.
 pub const VIO_GPU_F_VIRGL: u32 = 1 << 0;
-pub const VIO_GPU_F_RESOURCE_BLOB: u32 = 1 << 10;
-pub const VIO_GPU_F_CONTEXT_INIT: u32 = 1 << 11;
+pub const VIO_GPU_F_RESOURCE_BLOB: u32 = 1 << 3;
+pub const VIO_GPU_F_CONTEXT_INIT: u32 = 1 << 4;
 /// `VIRTIO_GPU_CAPSET_VIRGL` / `_VIRGL2` — the virgl capability-set ids
 /// `GET_CAPSET_INFO` indexes 0/1 map to on a virgl device.
 pub const VIO_GPU_CAPSET_VIRGL: u32 = 1;
 pub const VIO_GPU_CAPSET_VIRGL2: u32 = 2;
-/// virgl execbuffer command header: `cmd_id | (obj_type << 8) | (size << 16)`
-/// where `size` is the total dword count of the command **including** the
-/// header (`virgl_protocol.h` `VIRGL_CMD0`). The `ctx_id`/`ring` ride the
-/// `virtio_gpu_cmd_submit` header, not the stream.
+/// virgl execbuffer command header: `cmd_id | (obj_type << 8) | (len << 16)`
+/// where `len` is the **body** dword count (excluding this header — the
+/// decoder advances `len + 1` and reads body fields at `buf[1..]`;
+/// `virgl_protocol.h` `VIRGL_CMD0`, `vrend_decode.c` submit loop). The
+/// `ctx_id`/`ring` ride the `virtio_gpu_cmd_submit` header, not the stream.
 pub const fn virgl_cmd0(cmd: u32, obj: u32, size: u32) -> u32 {
     (cmd & 0xff) | ((obj & 0xff) << 8) | ((size & 0xffff) << 16)
 }
@@ -244,7 +245,10 @@ pub const VIRGL_CCMD_SET_SCISSOR_STATE: u32 = 15;
 pub const VIRGL_CCMD_BIND_SAMPLER_STATES: u32 = 18;
 pub const VIRGL_CCMD_BIND_SHADER: u32 = 31;
 /// Pipe shader stages (`pipe_shader_type`) for `CREATE_OBJECT(SHADER)`/
-/// `BIND_SHADER`: `PIPE_SHADER_VERTEX`/`PIPE_SHADER_FRAGMENT`.
+/// `BIND_SHADER`: `PIPE_SHADER_VERTEX`/`PIPE_SHADER_FRAGMENT` — the wire
+/// values are the mesa enum verbatim (`p_defines.h`: VERTEX=0,
+/// FRAGMENT=1); a stage byte ≥ `PIPE_SHADER_TYPES` is rejected by
+/// `vrend_decode_ctx` outright.
 pub const VIRGL_SHADER_VERTEX: u32 = 0;
 pub const VIRGL_SHADER_FRAGMENT: u32 = 1;
 /// `PIPE_PRIM_*` draw modes for `DRAW_VBO`.
