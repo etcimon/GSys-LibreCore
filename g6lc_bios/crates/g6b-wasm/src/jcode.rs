@@ -1696,12 +1696,14 @@ pub fn install_guest(m: &mut g6b_asm::Module, wasm: &[u8]) -> Result<(), String>
 }
 
 /// The wasm cell `jit_cell` selects: "test" is the bounded smoke cell;
-/// "delegate" is the keydown-listener re-entry cell ([`delegate_key_cell`]);
-/// "" or "auto" is the shipped browser cell (LDC/libwasm when present, else MVP).
+/// "delegate"/"delegate-click" are the keydown/click listener re-entry cells
+/// ([`delegate_key_cell`]/[`delegate_click_cell`]); "" or "auto" is the shipped
+/// browser cell (LDC/libwasm when present, else MVP).
 pub fn cell_bytes(spec: &g6b_spec::BoardSpec) -> Vec<u8> {
     match spec.kernel.wasm.jit_cell.as_str() {
         "test" => test_module(),
         "delegate" => delegate_key_cell(),
+        "delegate-click" => delegate_click_cell(),
         _ => {
             let b = if g6b_asm::BIOS_UI_LIBWASM.starts_with(b"\0asm\x01") {
                 g6b_asm::BIOS_UI_LIBWASM
@@ -1713,15 +1715,18 @@ pub fn cell_bytes(spec: &g6b_spec::BoardSpec) -> Vec<u8> {
     }
 }
 
-/// Bootable listener re-entry cell for the keyboard lane (`jit_cell="delegate"`).
-/// `_start` gives the root an id, sets `innerText="READY"` (so the initial
-/// `DomtRaster` paint is non-empty — a bare element tree has no text and renders
-/// only the dark page bg), and registers `add_event_listener("r","keydown",
-/// $delegate)` — the root is the default `H_FOCUS` (node idx 0), so a queued
-/// keydown dispatches straight to the funcidx listener with no `DomtFocus` call.
-/// `$delegate(ev)` appends a `<button>` whose `innerText="K"` — each key press
+/// Bootable listener re-entry cell for a real input lane (`jit_cell="delegate"`
+/// registers `keydown`, `"delegate-click"` registers `click`). `_start` gives the
+/// root an id, sets `innerText="READY"` (so the initial `DomtRaster` paint is
+/// non-empty — a bare element tree has no text and renders only the dark page
+/// bg), and registers `add_event_listener("r",<ev>,$delegate)` **on the root**:
+/// for `keydown` the root is the default `H_FOCUS` (node idx 0), so a queued key
+/// dispatches to the funcidx listener with no `DomtFocus`; for `click` the root
+/// is laid out to fill the display, so `DomtPtr`→`DomtHit` resolves any tablet
+/// `ABS_X/ABS_Y`+`BTN_LEFT` press to it with no focus or aiming at a child rect.
+/// `$delegate(ev)` appends a `<button>` whose `innerText="K"` — each input event
 /// therefore adds one visible text row (`DomtText` sets `F_TEXT|F_DIRTY`, the
-/// `trap_timer` raster draws the glyph), so successive presses stack `K` rows and
+/// `trap_timer` raster draws the glyph), so successive events stack `K` rows and
 /// the scanout grows measurably per re-entry. This is the QEMU counterpart of the
 /// `test_module_delegate` exec cell.
 ///
@@ -1740,18 +1745,23 @@ pub fn cell_bytes(spec: &g6b_spec::BoardSpec) -> Vec<u8> {
 ///   call $getRoot local.set 0                       ;; root
 ///   local.get 0 i32.const 2 i32.const ID i32.const 1 i32.const R call $setProp ;; root.id="r"
 ///   local.get 0 i32.const 9 i32.const IT i32.const 5 i32.const RDY call $setProp ;; root.innerText="READY"
-///   i32.const R i32.const 1 i32.const KD i32.const 7 i32.const 5 i32.const 0
-///   call $addLsn)                                  ;; add_event_listener("r","keydown",$delegate)
+///   i32.const R i32.const 1 i32.const EV i32.const <evlen> i32.const 5 i32.const 0
+///   call $addLsn)                                  ;; add_event_listener("r",<ev>,$delegate)
 /// ```
-pub fn delegate_key_cell() -> Vec<u8> {
-    // `__wasm_mem` pool (data @0x10): "id"@0x10, "r"@0x12, "keydown"@0x13,
-    // "innerText"@0x1a, "K"@0x23, "READY"@0x24.
-    const ID: u8 = 0x10;
-    const R: u8 = 0x12;
-    const KD: u8 = 0x13;
-    const IT: u8 = 0x1a; // "innerText" (9B)
-    const KK: u8 = 0x23; // "K" (1B)
-    const RDY: u8 = 0x24; // "READY" (5B)
+fn delegate_cell(ev: &[u8]) -> Vec<u8> {
+    // `__wasm_mem` pool (data @0x10): "id" "r" <ev> "innerText" "K" "READY"
+    // packed contiguously; every offset must stay < 0x40 for the 1-byte
+    // `i32.const` the bodies emit (keydown → 0x10..0x28, click → 0x10..0x26).
+    let strings: [&[u8]; 6] = [b"id", b"r", ev, b"innerText", b"K", b"READY"];
+    let mut o = [0u8; 6];
+    let mut at = 0x10u8;
+    for (i, s) in strings.iter().enumerate() {
+        o[i] = at;
+        at = at.wrapping_add(s.len() as u8);
+    }
+    assert!(at <= 0x40, "delegate pool must stay under the 1B-i32.const bound");
+    let (id, r, evp, it, kk, rdy) = (o[0], o[1], o[2], o[3], o[4], o[5]);
+    let evlen = ev.len() as u8;
     const ORD: u8 = 14; // libwasm NodeType::button
     const DELEGATE: u8 = 5; // $delegate func index (imports 0..=4 first)
     let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
@@ -1802,8 +1812,8 @@ pub fn delegate_key_cell() -> Vec<u8> {
     bdel.extend_from_slice(&[
         0x41, ORD, 0x10, 0x01, 0x21, 0x01, // el = createElement(ORD); local.set 1
         0x20, 0x01, // local.get 1 (el)
-        0x41, 0x09, 0x41, IT, //   namelen=9 nameptr=IT  ("innerText")
-        0x41, 0x01, 0x41, KK, //   vallen=1  valptr=KK   ("K")
+        0x41, 0x09, 0x41, it, //   namelen=9 nameptr=it  ("innerText")
+        0x41, 0x01, 0x41, kk, //   vallen=1  valptr=kk   ("K")
         0x10, 0x03, // setProperty(el,"innerText","K") — len-first ABI
         0x10, 0x00, 0x20, 0x01, 0x10, 0x02, // appendChild(getRoot(), el)
         0x0b,
@@ -1813,18 +1823,18 @@ pub fn delegate_key_cell() -> Vec<u8> {
     bst.extend_from_slice(&[
         0x10, 0x00, 0x21, 0x00, // root = getRoot(); local.set 0
         0x20, 0x00,             // local.get 0 (root)
-        0x41, 0x02, 0x41, ID,   //   namelen=2 nameptr=ID  ("id")
-        0x41, 0x01, 0x41, R,    //   vallen=1  valptr=R    ("r")
+        0x41, 0x02, 0x41, id,   //   namelen=2 nameptr=id  ("id")
+        0x41, 0x01, 0x41, r,    //   vallen=1  valptr=r    ("r")
         0x10, 0x03,             // setProperty(root,"id","r") — len-first ABI
         0x20, 0x00,             // local.get 0 (root)
-        0x41, 0x09, 0x41, IT,   //   namelen=9 nameptr=IT  ("innerText")
-        0x41, 0x05, 0x41, RDY,  //   vallen=5  valptr=RDY  ("READY")
+        0x41, 0x09, 0x41, it,   //   namelen=9 nameptr=it  ("innerText")
+        0x41, 0x05, 0x41, rdy,  //   vallen=5  valptr=rdy  ("READY")
         0x10, 0x03,             // setProperty(root,"innerText","READY")
-        0x41, R, 0x41, 0x01,    // tptr=R tlen=1          ("r")   ptr-first ABI
-        0x41, KD, 0x41, 0x07,   // typtr=KD tylen=7      ("keydown")
+        0x41, r, 0x41, 0x01,    // tptr=r tlen=1           ("r")   ptr-first ABI
+        0x41, evp, 0x41, evlen, // typtr=evp tylen=evlen  (<ev>)
         0x41, DELEGATE,         // cb = $delegate funcidx 5
         0x41, 0x00,             // capture = 0
-        0x10, 0x04,             // add_event_listener("r","keydown",5,0)
+        0x10, 0x04,             // add_event_listener("r",<ev>,5,0)
         0x0b,
     ]);
     let mut code = Vec::new();
@@ -1835,16 +1845,29 @@ pub fn delegate_key_cell() -> Vec<u8> {
     code.extend_from_slice(&bst);
     section(&mut out, 10, &code);
 
-    // data @0x10: "id" "r" "keydown" "innerText" "K" "READY" packed contiguously.
+    // data @0x10: "id" "r" <ev> "innerText" "K" "READY" packed contiguously.
     let mut data = Vec::new();
     push_uleb(&mut data, 1);
     data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]); // active mem0, off=i32.const 0x10
-    // id@0x10 r@0x12 keydown@0x13 innerText@0x1a K@0x23 READY@0x24
-    let body = b"idrkeydowninnerTextKREADY".to_vec();
+    let mut body = Vec::new();
+    for s in strings {
+        body.extend_from_slice(s);
+    }
     push_uleb(&mut data, body.len() as u32);
     data.extend_from_slice(&body);
     section(&mut out, 11, &data);
     out
+}
+
+/// `jit_cell="delegate"` — the keydown-lane re-entry cell ([`delegate_cell`]).
+pub fn delegate_key_cell() -> Vec<u8> {
+    delegate_cell(b"keydown")
+}
+
+/// `jit_cell="delegate-click"` — the pointer-lane re-entry cell: a `click`
+/// listener on the full-display root, so any tablet press re-enters `$delegate`.
+pub fn delegate_click_cell() -> Vec<u8> {
+    delegate_cell(b"click")
 }
 
 /// Cross-function-EH cell: a `throw`er callee whose exception escapes into the
@@ -2838,6 +2861,81 @@ mod tests {
         assert!(
             s.domt_live >= 3,
             "root-focused keydown JitCall→delegate appended a node (live={}): {}",
+            s.domt_live,
+            s.console
+        );
+    }
+
+    /// The pointer-lane counterpart of `guest_jit_delegate_cell_key_reenters_root`:
+    /// `jit_cell="delegate-click"` registers `add_event_listener("r","click",_)`
+    /// on the root, which `DomtLayout` lays out to the full display — so *any*
+    /// tablet `ABS_X`/`ABS_Y`+`BTN_LEFT` press `DomtHit`s it with no aiming at a
+    /// child rect. A canned `host_inp_tab_kick` poke at the screen centre runs the
+    /// real `trap_tab`→`TabDrain`→`DomtPtr`→`JitCall` path; `$delegate` appends a
+    /// node, so `__dom` grows past the initial root.
+    #[test]
+    fn guest_jit_delegate_cell_click_reenters_root() {
+        use g6b_asm::encode::RA;
+        use g6b_asm::exec::{run_module_web_feed, GuestWebPresent, WebFeed};
+        use g6b_asm::Op;
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"delegate-click"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        // `cell_bytes` selects the click-delegate cell for "delegate-click".
+        assert_eq!(cell_bytes(&spec), delegate_click_cell());
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &delegate_click_cell()).expect("delegate-click cell installs");
+        // Lay out `__dom` right after `JitRun` so the root has its full-display
+        // rect before the first tablet IRQ (the timer tick would lay it out
+        // eventually — the splice makes the ordering deterministic).
+        let mut placed = false;
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                n.ops
+                    .splice(pos + 1..pos + 1, vec![Op::Jal { rd: RA, to: "DomtLayout".into() }]);
+                placed = true;
+                break;
+            }
+        }
+        assert!(placed, "no JitRun call site to splice after");
+
+        // A single tablet poke at the display centre — the root covers the whole
+        // extent, so `DomtHit` resolves it without reading a child rect first.
+        struct CenterClick;
+        impl WebFeed for CenterClick {
+            fn initial(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn on_guest_ui(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn hint_abs(&self) -> Option<(u32, u32)> {
+                Some((0x4000, 0x4000)) // ~centre of the 0..=0x7fff tablet extent
+            }
+        }
+        let mut feed = CenterClick;
+        let s = run_module_web_feed(&spec, &m, 0x8020_0000, 0, &mut feed).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        assert!(s.domt_ids >= 1, "root id interned: {}", s.console);
+        assert!(s.domt_listen >= 1, "root click listener: {}", s.console);
+        // Re-entry: the click `DomtHit` the root and `$delegate` appended a node,
+        // so `__dom` grew past the initial root.
+        assert!(
+            s.domt_live >= 2,
+            "tablet click→JitCall→delegate appended a node (live={}): {}",
             s.domt_live,
             s.console
         );

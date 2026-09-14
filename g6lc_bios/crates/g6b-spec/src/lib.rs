@@ -1576,7 +1576,7 @@ impl BoardSpec {
                 return Err("kernel.wasm.guest_jit needs isa.xlen=64".into());
             }
             match self.kernel.wasm.jit_cell.as_str() {
-                "" | "auto" | "test" | "delegate" => {}
+                "" | "auto" | "test" | "delegate" | "delegate-click" => {}
                 c => return Err(format!("kernel.wasm.jit_cell {c:?} unknown")),
             }
         } else if !self.kernel.wasm.jit_cell.is_empty() {
