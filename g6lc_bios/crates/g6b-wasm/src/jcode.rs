@@ -1759,7 +1759,10 @@ fn delegate_cell(ev: &[u8]) -> Vec<u8> {
         o[i] = at;
         at = at.wrapping_add(s.len() as u8);
     }
-    assert!(at <= 0x40, "delegate pool must stay under the 1B-i32.const bound");
+    assert!(
+        at <= 0x40,
+        "delegate pool must stay under the 1B-i32.const bound"
+    );
     let (id, r, evp, it, kk, rdy) = (o[0], o[1], o[2], o[3], o[4], o[5]);
     let evlen = ev.len() as u8;
     const ORD: u8 = 14; // libwasm NodeType::button
