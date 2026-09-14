@@ -2086,10 +2086,11 @@ fn jit_run_node() -> Vec<Op> {
         // ---- Asyncify drive: an awaited `_start` unwound out here. --------
         // `LwAwaitVoid` armed `__asyncify_state=UNWINDING`; the cell's own
         // instrumentation saved its operand stack to `__asyncify_data` and
-        // returned. The promise already resolved synchronously (`cur`), so
-        // settle it: stop_unwind → start_rewind(data) → re-invoke `_start`,
-        // which rewinds to the await point and continues to
-        // `libwasm_await_value`. Loop — each iteration settles one await.
+        // returned. Settle the await: stop_unwind → start_rewind(data) →
+        // re-invoke `_start`, which rewinds to the await point and continues
+        // to `libwasm_await_value`. Loop — each iteration settles one await.
+        // (A route hit is already `FUL`; a still-`PEND` record parks below —
+        // the pending check after `start_rewind` — rather than re-invoking.)
         li(A0, i64::from(jc::AX_STATE_GLOB)),
         jal("JitAx"),
         Op::Blt {
@@ -2146,6 +2147,28 @@ fn jit_run_node() -> Vec<Op> {
         li(T1, crate::kget::KGET_TAIL_BYTES as i64),
         sub(A2, T0, T1),
         jal("JitCall"),
+        // ---- Pending-promise park ---------------------------------------
+        // `start_rewind` just armed `__asyncify_state=REWINDING` and populated
+        // the unwind buffer. If the awaited `__prom` record (`P_ASUSP`) is
+        // still `PROM_ST_PEND`, the cell must NOT re-enter yet — the timer IRQ
+        // is masked inside `jit_after`, so spinning here would wedge
+        // (`PromDrain` couldn't run). Park instead: drop to `jit_result`,
+        // which restores `sie` and returns to the `park`/`wfi` loop with the
+        // rewind still armed. The next timer tick's `PromDrain` settles the
+        // record and raises `P_RESUME`, and `trap_timer` re-invokes `_start`
+        // (`JitCall` — the same from-IRQ seam listeners use), whose
+        // `REWINDING` top-check resumes the await continuation. A
+        // settled/missing suspension falls through to the normal re-invoke.
+        la(T0, Addr::Prom),
+        lw(T1, T0, crate::domt::P_ASUSP),
+        beq(T1, X0, "jit_reenter"), // no suspension → re-invoke now
+        mv(A0, T1),
+        jal("PromGet"),
+        beq(A0, X0, "jit_reenter"), // invalid handle → re-invoke anyway
+        lw(T0, A0, crate::domt::PR_STATE),
+        li(T1, crate::domt::PROM_ST_PEND),
+        beq(T0, T1, "jit_result"), // still pending → park (rewind stays armed)
+        Op::Label("jit_reenter".into()),
         // re-park the trap continuation JitCall clobbered → jit_after/this SP
         li(T0, i64::from(OFF_SPSAVE)),
         add(T0, S9, T0),
@@ -2634,6 +2657,19 @@ pub fn nodes(with_ext: bool) -> Vec<Node> {
             // `__ev_obj` event-property bridge (EXT_EVGET / EXT_EVCALL).
             "LwEvGet",
             "LwEvCall",
+            // `__prom` promise lane (EXT_AWAIT_FAIL / _ERR); the combinator and
+            // array-input handlers (22-25) land with the `LwProm*`/`LwAddInts`
+            // routines.
+            "LwAwaitFail",
+            "LwAwaitErr",
+            // Combinators + the i32-array input (EXT_PROM_* / EXT_ADDINTS).
+            "LwPromAll",
+            "LwPromAny",
+            "LwPromAlls",
+            "LwAddInts",
+            // Host-side promise settle (EXT_NOTEFUL / EXT_NOTEREJ).
+            "LwNoteFul",
+            "LwNoteRej",
         ] {
             ops.push(Op::Dw64 {
                 addr: Addr::Label(l.into()),

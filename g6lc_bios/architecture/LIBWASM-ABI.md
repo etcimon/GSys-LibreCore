@@ -452,13 +452,39 @@ details that differ and must not be conflated with the host table:
   `__wasm_mem` base added (`LwFetch`/`LwAddStr`); the legacy `jit.rs` path
   already resolves `Addr::WasmData` absolutes, so the shim lives only in the
   `jit_ext_tab` entries.
-- **`await` is resolved-sync, not a guest asyncify suspension.**
-  `libwasm_await_supported`→`1`: `LwFetch` resolves every BIOS read
-  synchronously off the packed `__kget` route table (`KernelGet` scans it for
-  the URL), returning the entry index +1 as the promise handle;
-  `libwasm_await__void`/`libwasm_await_value` then resolve that slot to the
-  body string — correct semantics because the fetch is already resolved.
-  `await_failed`/`await_error` stay fail-closed.
+- **`await` resolves through a bounded `__prom` promise-object table** (B123).
+  `libwasm_await_supported`→`1`: `LwFetch` allocates a `__prom` record — a
+  Promise with `pending`/`fulfilled`/`rejected` settle state + a value or
+  reason span — and returns `handle=index+1`. A `/bios/*` hit settles it
+  `fulfilled` off the packed `__kget` route table (`KernelGet` scans for the
+  URL); a miss leaves it `pending` — `__kget` is a route cache, so the host
+  resolves the miss asynchronously (the browser kernel's `fetch` likewise
+  returns a genuinely pending promise).
+  `libwasm_await__void` consults the record: `fulfilled`→`cur`=body,
+  `rejected`→`P_AFAIL`+empty `cur`, `pending`→latch `P_ASUSP` and arm the
+  asyncify unwind. `libwasm_await_value` copies the `cur` span into the
+  wasm-memory string pool. `libwasm_await_failed`/`libwasm_await_error`
+  (`EXT_AWAIT_FAIL`/`_ERR`) read `P_AFAIL` / emit the rejection reason as a D
+  `{len,ptr}` string — the guest-side correlate of the interpreter's
+  `awaitFailed`/`awaitError`. A still-`pending` record parks the suspended
+  `_start` in `jit_after` (the rewind is armed, the re-invoke deferred — the
+  timer IRQ is masked inside `jit_after`), the timer tick's `PromDrain`
+  settles it (`PR_BUDGET`-bounded, fail-closed `rejected`), and `trap_timer`
+  then `JitCall`s `_start` — whose `REWINDING` top-check finishes the rewind
+  into the await continuation. (The resume lives in the trap, not `park`:
+  an interrupted `wfi`'s `sepc` is the `wfi`, so a post-`wfi` check would be
+  unreachable.)
+  **Combinators:** `libwasm_add__ints` makes an `i32` handle-array record;
+  `libasync_promise_{all,any,allsettled}__promise` aggregate one via
+  `PromScan` (all=first-reject-or-fulfill, any=first-fulfill-or-all-reject,
+  allsettled=all-settled). `libwasm_note_await_{ok,fail}` settle a pending
+  record from the host. **Bound:** the shipped cell's baked routes all
+  resolve synchronously, so the pending lane is exercised by a dedicated
+  suspend→resume gate rather than the shipped fetch path; and a pending await
+  reached *inside* a `JitCall` (listener re-entry / the resume itself) does
+  not re-park — `jit_call_done` does not drive the asyncify+pending lane.
+  This is bounded promise-object plumbing for the B59 full-Svelte artifact,
+  not a general guest `ObjectTable` or a microtask queue.
 - **The Stage-3 op-coverage gate is `op_coverage`.** `g6b_wasm::op_coverage`
   lowers the whole module (shared `lower_one`, the same records `encode`
   packs) and walks the re-entrable set — `_start` + func exports +

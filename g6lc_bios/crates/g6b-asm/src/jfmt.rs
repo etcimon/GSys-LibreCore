@@ -188,6 +188,17 @@ pub const EXT_ADDSTR: u32 = 17; // libwasm_add__string(off,len) -> str-handle
 // no-arg-void `Object_Call___void` is the `preventDefault` write-back.
 pub const EXT_EVGET: u32 = 18; // Object_Getter__*(ev,nlen,nptr) -> field
 pub const EXT_EVCALL: u32 = 19; // Object_Call___void(ev,mlen,mptr) -> void
+// `__prom` promise-object lane — the guest-side correlate of the interpreter's
+// `libwasm_await_*` rejection surface + `libasync_promise_*` combinators. A
+// promise handle is a `__prom` record index +1.
+pub const EXT_AWAIT_FAIL: u32 = 20; // libwasm_await_failed() -> i32
+pub const EXT_AWAIT_ERR: u32 = 21; // libwasm_await_error(raw)
+pub const EXT_PROM_ALL: u32 = 22; // libasync_promise_all(arrH) -> promise
+pub const EXT_PROM_ANY: u32 = 23; // libasync_promise_any(arrH) -> promise
+pub const EXT_PROM_ALLS: u32 = 24; // libasync_promise_allSettled(arrH) -> promise
+pub const EXT_ADDINTS: u32 = 25; // libwasm_add__ints(len,ptr) -> i32-array handle
+pub const EXT_NOTEFUL: u32 = 26; // libwasm_note_await_ok(handle)
+pub const EXT_NOTEREJ: u32 = 27; // libwasm_note_await_fail(handle)
 
 /// M3 bounds — sized to the shipped `bios-ui-libwasm` cell (252 funcs,
 /// ~69k records, 17 mem pages, ≤845 locals, 62-entry table). These are the

@@ -1296,17 +1296,18 @@ fn uart1_node(o: Object, spec: &BoardSpec) -> Node {
 }
 
 fn park_node(o: Object) -> Node {
+    let ops = vec![
+        Op::Comment(o.why.into()),
+        Op::Label("park".into()),
+        Op::Wfi,
+        Op::Jal {
+            rd: X0,
+            to: "park".into(),
+        },
+    ];
     Node {
         purpose: Purpose::Park,
-        ops: vec![
-            Op::Comment(o.why.into()),
-            Op::Label("park".into()),
-            Op::Wfi,
-            Op::Jal {
-                rd: X0,
-                to: "park".into(),
-            },
-        ],
+        ops,
     }
 }
 
@@ -2273,6 +2274,81 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 rd: RA,
                 to: "DomAwait".into(),
             },
+        ]);
+        // `__prom` settle pass: `PromDrain` fulfills pending fetches whose
+        // `KernelGet` lands, rescans pending combinators, rejects expired ones,
+        // and raises `P_RESUME` when a suspended `_start`'s promise settled.
+        // Only on the guest-jit lane (the `__prom` table exists when Domt* do).
+        if spec.kernel.wasm.guest_jit {
+            ops.push(Op::Jal {
+                rd: RA,
+                to: "PromDrain".into(),
+            });
+            // Resume a suspended `_start` whose promise just settled. `wfi`
+            // re-executes on every interrupt (`sepc` points at the `wfi`), so
+            // the `park` foreground never runs a post-wake check — the resume
+            // must live here in trap context, the same `JitCall`-from-IRQ seam
+            // the input listeners use. `_start` was left `REWINDING` (jit_after
+            // armed `stop_unwind`+`start_rewind` before parking), so re-invoking
+            // it rewinds into the await continuation.
+            ops.extend([
+                Op::La {
+                    rd: T0,
+                    addr: Addr::Prom,
+                },
+                Op::Lw {
+                    rd: T1,
+                    rs: T0,
+                    off: crate::domt::P_RESUME,
+                },
+                Op::Beq {
+                    rs1: T1,
+                    rs2: X0,
+                    to: "tick_prom_done".into(),
+                },
+                Op::Sw {
+                    rs2: X0,
+                    rs1: T0,
+                    off: crate::domt::P_RESUME,
+                },
+                // JitCall(entry_funcidx, nargs=1, arg0=__heap_base): `_start`'s
+                // REWINDING prologue `start_rewind`s into the saved continuation.
+                Op::La {
+                    rd: T0,
+                    addr: Addr::JitIn,
+                },
+                Op::Lw {
+                    rd: A0,
+                    rs: T0,
+                    off: crate::jfmt::OFF_ENTRY as i32,
+                },
+                Op::Li { rd: A1, imm: 1 },
+                Op::La {
+                    rd: T0,
+                    addr: Addr::JitHdr,
+                },
+                Op::Li {
+                    rd: T1,
+                    imm: i64::from(crate::jitr::OFF_GLOB) + 8,
+                },
+                Op::Add {
+                    rd: T0,
+                    rs1: T0,
+                    rs2: T1,
+                },
+                Op::Ld {
+                    rd: A2,
+                    rs: T0,
+                    off: 0,
+                },
+                Op::Jal {
+                    rd: RA,
+                    to: "JitCall".into(),
+                },
+                Op::Label("tick_prom_done".into()),
+            ]);
+        }
+        ops.extend([
             Op::La {
                 rd: T0,
                 addr: Addr::UiDom,

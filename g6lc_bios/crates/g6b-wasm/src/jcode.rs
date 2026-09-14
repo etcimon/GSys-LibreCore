@@ -728,6 +728,14 @@ fn ext_id(module: &str, name: &str) -> Option<u32> {
         ("env", "libwasm_await_supported") => Some(EXT_AWAIT_SUP),
         ("env", "libwasm_await__void") => Some(EXT_AWAIT_VOID),
         ("env", "libwasm_await_value") => Some(EXT_AWAIT_VAL),
+        ("env", "libwasm_await_failed") => Some(EXT_AWAIT_FAIL),
+        ("env", "libwasm_await_error") => Some(EXT_AWAIT_ERR),
+        ("env", "libasync_promise_all__promise") => Some(EXT_PROM_ALL),
+        ("env", "libasync_promise_any__promise") => Some(EXT_PROM_ANY),
+        ("env", "libasync_promise_allsettled__promise") => Some(EXT_PROM_ALLS),
+        ("env", "libwasm_add__ints") => Some(EXT_ADDINTS),
+        ("env", "libwasm_note_await_ok") => Some(EXT_NOTEFUL),
+        ("env", "libwasm_note_await_fail") => Some(EXT_NOTEREJ),
         ("env", "getRoot") => Some(EXT_GETROOT),
         ("env", "add_event_listener") => Some(EXT_ADDLSN),
         ("env", "libwasm_removeObject") => Some(EXT_RMOBJ),
@@ -2942,6 +2950,550 @@ mod tests {
             s.domt_live,
             s.console
         );
+    }
+
+    /// `__prom` rejection surface — the guest-side correlate of the
+    /// interpreter's `libwasm_await_failed`/`_error` (the reject→catch gate).
+    /// `LwFetch` on a url absent from `__kget` returns a `PROM_ST_PEND` record
+    /// (the fetch is in-flight; `PromDrain` re-runs `KernelGet` on the stored
+    /// url and rejects at `PR_BUDGET`=0). After the forced drain the record is
+    /// `PROM_ST_REJ` (the failing url as the reason); `libwasm_await__void`
+    /// flags it so `libwasm_await_failed` returns 1 and `libwasm_await_error`
+    /// writes the reason span. A known `/bios/*` url fulfils (`PROM_ST_FUL`)
+    /// for contrast. The probe runs after `JitRun` so the table is live.
+    #[test]
+    fn guest_jit_fetch_reject_sets_await_failed() {
+        use g6b_asm::domt::{PROM_ST_FUL, PROM_ST_REJ, PR_STATE, P_AFAIL};
+        use g6b_asm::encode::{A0, A1, RA, S0, T0, T1, T2};
+        use g6b_asm::{Addr, Op};
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_delegate()).expect("delegate cell installs");
+        m.kget = g6b_asm::kget::build(&[(
+            "/bios/menu/main".into(),
+            "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+        )])
+        .unwrap();
+
+        // __wasm_mem scratch (the free-heap offset the asyncify probe uses).
+        const URL: i64 = 0x10_ff00;
+        const OUT: i64 = 0x10_fd00;
+        let mut probe: Vec<Op> = Vec::new();
+        // Write "/no" at __wasm_mem[URL].
+        probe.extend([
+            Op::La { rd: T1, addr: Addr::WasmMem },
+            Op::Li { rd: T2, imm: URL },
+            Op::Add { rd: T1, rs1: T1, rs2: T2 },
+        ]);
+        for (i, b) in b"/no".iter().enumerate() {
+            probe.extend([
+                Op::Li { rd: T2, imm: i64::from(*b) },
+                Op::Sb { rs2: T2, rs1: T1, off: i as i32 },
+            ]);
+        }
+        probe.extend(put_str_ops(" BAD"));
+        // s0 = LwFetch(URL, 3) — a missing url → PENDING promise (the host
+        // `PromDrain` poll settles it; `__kget` is the route cache).
+        probe.extend([
+            Op::Li { rd: A0, imm: URL },
+            Op::Li { rd: A1, imm: 3 },
+            Op::Jal { rd: RA, to: "LwFetch".into() },
+            Op::Addi { rd: S0, rs: A0, imm: 0 },
+        ]);
+        // t0 = PromGet(s0).state — expect PROM_ST_PEND (pending until drained).
+        probe.extend([
+            Op::Addi { rd: A0, rs: S0, imm: 0 },
+            Op::Jal { rd: RA, to: "PromGet".into() },
+            Op::Lw { rd: T0, rs: A0, off: PR_STATE },
+        ]);
+        probe.extend(put_str_ops(" RS"));
+        probe.extend(hex_t0_ops("pr_hex0"));
+        // Force the poll window shut (PR_BUDGET=1) then PromDrain → the miss
+        // settles REJ, so the await below takes the rejected path (not the
+        // pending suspend arm).
+        probe.extend([
+            Op::Addi { rd: A0, rs: S0, imm: 0 },
+            Op::Jal { rd: RA, to: "PromGet".into() },
+            Op::Li { rd: T2, imm: 1 },
+            Op::Sw { rs2: T2, rs1: A0, off: g6b_asm::domt::PR_BUDGET },
+            Op::Jal { rd: RA, to: "PromDrain".into() },
+        ]);
+        // t0 = PromGet(s0).state — expect PROM_ST_REJ after the drain.
+        probe.extend([
+            Op::Addi { rd: A0, rs: S0, imm: 0 },
+            Op::Jal { rd: RA, to: "PromGet".into() },
+            Op::Lw { rd: T0, rs: A0, off: PR_STATE },
+        ]);
+        probe.extend(put_str_ops(" RD"));
+        probe.extend(hex_t0_ops("pr_hex0b"));
+        // LwAwaitVoid(s0) → afail=1 ; then LwAwaitFail → a0.
+        probe.extend([
+            Op::Addi { rd: A0, rs: S0, imm: 0 },
+            Op::Jal { rd: RA, to: "LwAwaitVoid".into() },
+            Op::Jal { rd: RA, to: "LwAwaitFail".into() },
+            Op::Addi { rd: T0, rs: A0, imm: 0 },
+        ]);
+        probe.extend(put_str_ops(" AF"));
+        probe.extend(hex_t0_ops("pr_hex1"));
+        // LwAwaitErr(OUT) writes {len=3,ptr=URL}; read len back → t0.
+        probe.extend([
+            Op::Li { rd: A0, imm: OUT },
+            Op::Jal { rd: RA, to: "LwAwaitErr".into() },
+            Op::La { rd: T1, addr: Addr::WasmMem },
+            Op::Li { rd: T2, imm: OUT },
+            Op::Add { rd: T1, rs1: T1, rs2: T2 },
+            Op::Lw { rd: T0, rs: T1, off: 0 },
+        ]);
+        probe.extend(put_str_ops(" EL"));
+        probe.extend(hex_t0_ops("pr_hex2"));
+        // Contrast: a known url fulfils — PromGet(handle).state == PROM_ST_FUL.
+        probe.extend([
+            Op::La { rd: T1, addr: Addr::WasmMem },
+            Op::Li { rd: T2, imm: URL },
+            Op::Add { rd: T1, rs1: T1, rs2: T2 },
+        ]);
+        for (i, b) in b"/bios/menu/main".iter().enumerate() {
+            probe.extend([
+                Op::Li { rd: T2, imm: i64::from(*b) },
+                Op::Sb { rs2: T2, rs1: T1, off: i as i32 },
+            ]);
+        }
+        probe.extend(put_str_ops(" OK"));
+        probe.extend([
+            Op::Li { rd: A0, imm: URL },
+            Op::Li { rd: A1, imm: 15 },
+            Op::Jal { rd: RA, to: "LwFetch".into() },
+            Op::Addi { rd: S0, rs: A0, imm: 0 },
+            Op::Addi { rd: A0, rs: S0, imm: 0 },
+            Op::Jal { rd: RA, to: "PromGet".into() },
+            Op::Lw { rd: T0, rs: A0, off: PR_STATE },
+        ]);
+        probe.extend(put_str_ops(" FS"));
+        probe.extend(hex_t0_ops("pr_hex3"));
+        // note_await round-trip on the fulfilled handle s0: note_await_fail
+        // flags afail=1, note_await_ok clears it — the host-recorded outcome
+        // `libwasm_await_failed` then reports.
+        probe.extend([
+            Op::Addi { rd: A0, rs: S0, imm: 0 },
+            Op::Jal { rd: RA, to: "LwNoteRej".into() },
+            Op::Jal { rd: RA, to: "LwAwaitFail".into() },
+            Op::Addi { rd: T0, rs: A0, imm: 0 },
+        ]);
+        probe.extend(put_str_ops(" NR"));
+        probe.extend(hex_t0_ops("pr_hex4"));
+        probe.extend([
+            Op::Addi { rd: A0, rs: S0, imm: 0 },
+            Op::Jal { rd: RA, to: "LwNoteFul".into() },
+            Op::Jal { rd: RA, to: "LwAwaitFail".into() },
+            Op::Addi { rd: T0, rs: A0, imm: 0 },
+        ]);
+        probe.extend(put_str_ops(" NF"));
+        probe.extend(hex_t0_ops("pr_hex5"));
+        probe.extend(put_str_ops("\n"));
+
+        let mut placed = false;
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                n.ops.splice(pos + 1..pos + 1, probe);
+                placed = true;
+                break;
+            }
+        }
+        assert!(placed, "no JitRun call site to splice after");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        eprintln!("{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        let want = format!("RS{:016x}", g6b_asm::domt::PROM_ST_PEND);
+        assert!(s.console.contains(&want), "pending state: {}", s.console);
+        let want = format!("RD{:016x}", PROM_ST_REJ);
+        assert!(
+            s.console.contains(&want),
+            "rejected after drain: {}",
+            s.console
+        );
+        assert!(s.console.contains("AF0000000000000001"), "afail=1: {}", s.console);
+        assert!(s.console.contains("EL0000000000000003"), "reason len=3: {}", s.console);
+        let ful = format!("FS{:016x}", PROM_ST_FUL);
+        assert!(s.console.contains(&ful), "fulfilled state: {}", s.console);
+        assert!(
+            s.console.contains("NR0000000000000001"),
+            "note_await_fail → afail=1: {}",
+            s.console
+        );
+        assert!(
+            s.console.contains("NF0000000000000000"),
+            "note_await_ok → afail=0: {}",
+            s.console
+        );
+        let _ = (P_AFAIL, A0, A1, RA, S0, T0, T1, T2); // silence unused-import lint
+    }
+
+    /// End-to-end pending→suspend→settle→resume on the *real* shipped cell.
+    /// `/bios/menu/main` is left out of `__kget`, so its `fetch` returns a
+    /// `PROM_ST_PEND` record; the cell's `await` then parks `_start`
+    /// (`LwAwaitVoid`→`P_ASUSP` + asyncify unwind, `jit_after` arms the rewind
+    /// and drops to `jit_result`). The probe (foreground, after `JitRun`) caps
+    /// the record's `PR_BUDGET` so the one boot timer tick's `trap_timer` →
+    /// `PromDrain` settles it (reject) → `P_RESUME` → `JitCall(_start)` rewinds
+    /// into the await continuation.
+    ///
+    /// Proof of resume: the console prints `v1s0` (await(1) armed the unwind in
+    /// `NORMAL`) then `WASM-JIT 0` — `jit_after` parking early on the pending
+    /// record. Only *after* that park does `v1s2` appear — `await(1)` re-invoked
+    /// with `__asyncify_state==REWINDING`, i.e. the `JitCall` rewind re-call —
+    /// followed by the cell's own rejection-handling output. `v1s2` can only be
+    /// emitted by the resumed `_start`; in the all-fulfilled baseline it never
+    /// appears after the (final) `WASM-JIT` marker.
+    #[test]
+    fn guest_jit_pending_await_suspends_then_resumes() {
+        use g6b_asm::domt::P_ASUSP;
+        use g6b_asm::encode::{A0, RA, T0, T1, T2};
+        use g6b_asm::{Addr, Op};
+
+        let wasm = g6b_asm::BIOS_UI_LIBWASM;
+        if !wasm.starts_with(b"\0asm\x01") {
+            return; // cell not built on this host
+        }
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":32,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"auto"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, wasm).expect("shipped cell installs");
+        // Bake every route EXCEPT the first-fetched menu — its `fetch` pends.
+        m.kget = g6b_asm::kget::build(&[
+            ("/bios/menu/cpu".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/memory".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/uncore".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/devices".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/boot".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/menu/settings".into(), "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into()),
+            ("/bios/store".into(), "[]".into()),
+        ])
+        .unwrap();
+
+        // Probe (foreground, after JitRun): the cell is suspended on the pending
+        // `main` fetch — `P_ASUSP` holds its handle. Cap that record's
+        // `PR_BUDGET` to 1 so the boot timer tick's `PromDrain` rejects it.
+        let probe = vec![
+            Op::La { rd: T0, addr: Addr::Prom },
+            Op::Lw { rd: A0, rs: T0, off: P_ASUSP },
+            Op::Jal { rd: RA, to: "PromGet".into() }, // a0 = suspended rec|0
+            Op::Beq { rs1: A0, rs2: X0, to: "pd_probe_done".into() },
+            Op::Li { rd: T2, imm: 1 },
+            Op::Sw { rs2: T2, rs1: A0, off: g6b_asm::domt::PR_BUDGET },
+            Op::Label("pd_probe_done".into()),
+        ];
+
+        let mut placed = false;
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                n.ops.splice(pos + 1..pos + 1, probe.clone());
+                placed = true;
+                break;
+            }
+        }
+        assert!(placed, "no JitRun call site to splice after");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        eprintln!("=== SUSPEND/RESUME CONSOLE ===\n{}", s.console);
+        // Suspend: await(1) armed the unwind in NORMAL (`v1s0`), then `jit_after`
+        // parked on the still-pending record and `JitRun` returned (`WASM-JIT 0`).
+        assert!(s.console.contains("v1s0"), "suspend:\n{}", s.console);
+        // Resume: a timer tick drained the record (budget expiry → reject),
+        // raised `P_RESUME`, and the foreground `JitCall` rewound `_start` — the
+        // `v1s2` re-call of await(1) in REWINDING only runs post-park.
+        let parked = s.console.find("WASM-JIT 0").expect("jit_after parked");
+        assert!(
+            s.console[parked..].contains("v1s2"),
+            "resumed into the await continuation (rewind re-call):\n{}",
+            s.console
+        );
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        let _ = (A0, RA, T0, T1, T2);
+    }
+
+    /// `libasync_promise_*` combinators over a `__prom` i32-array — the
+    /// guest-side `Promise.all`/`any`/`allSettled`. `LwAddInts` wraps a
+    /// `__wasm_mem` i32 span as a `PROM_K_IARR` handle; the combinators then
+    /// aggregate the input records' settle states into a fresh promise:
+    /// all→FUL unless one input REJ; any→FUL on the first FUL else REJ;
+    /// allSettled→FUL once every input settled (mixed ful+rej still fulfils).
+    #[test]
+    fn guest_jit_promise_combinators() {
+        use g6b_asm::domt::{PROM_ST_FUL, PROM_ST_REJ, PR_STATE};
+        use g6b_asm::encode::{A0, A1, RA, S0, S1, S2, T0, T1, T2};
+        use g6b_asm::{Addr, Op};
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_delegate()).expect("delegate cell installs");
+        m.kget = g6b_asm::kget::build(&[(
+            "/bios/menu/main".into(),
+            "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+        )])
+        .unwrap();
+
+        const G: i64 = 0x10_ff00; // good url
+        const B: i64 = 0x10_fe00; // bad url
+        const ARR: i64 = 0x10_fc00; // i32 handle array
+        let wstr = |probe: &mut Vec<Op>, off: i64, s: &[u8]| {
+            probe.extend([
+                Op::La { rd: T1, addr: Addr::WasmMem },
+                Op::Li { rd: T2, imm: off },
+                Op::Add { rd: T1, rs1: T1, rs2: T2 },
+            ]);
+            for (i, b) in s.iter().enumerate() {
+                probe.extend([
+                    Op::Li { rd: T2, imm: i64::from(*b) },
+                    Op::Sb { rs2: T2, rs1: T1, off: i as i32 },
+                ]);
+            }
+        };
+        let mut probe: Vec<Op> = Vec::new();
+        wstr(&mut probe, G, b"/bios/menu/main");
+        wstr(&mut probe, B, b"/no");
+        // s0 = LwFetch(G) → fulfilled ; s1 = LwFetch(B) → pending, then
+        // drained to rejected (PR_BUDGET=1 → the miss fails closed on the poll).
+        probe.extend([
+            Op::Li { rd: A0, imm: G },
+            Op::Li { rd: A1, imm: 15 },
+            Op::Jal { rd: RA, to: "LwFetch".into() },
+            Op::Addi { rd: S0, rs: A0, imm: 0 },
+            Op::Li { rd: A0, imm: B },
+            Op::Li { rd: A1, imm: 3 },
+            Op::Jal { rd: RA, to: "LwFetch".into() },
+            Op::Addi { rd: S1, rs: A0, imm: 0 },
+            // s1's record: budget=1 then PromDrain → REJ
+            Op::Addi { rd: A0, rs: S1, imm: 0 },
+            Op::Jal { rd: RA, to: "PromGet".into() },
+            Op::Li { rd: T2, imm: 1 },
+            Op::Sw { rs2: T2, rs1: A0, off: g6b_asm::domt::PR_BUDGET },
+            Op::Jal { rd: RA, to: "PromDrain".into() },
+        ]);
+        // Write an i32 array and combin over it. `mkarr(off, [regs])` stores
+        // each handle then `LwAddInts(len, off)` → s2 = array handle.
+        let mkarr = |probe: &mut Vec<Op>, off: i64, elems: &[u32]| {
+            probe.extend([
+                Op::La { rd: T1, addr: Addr::WasmMem },
+                Op::Li { rd: T2, imm: off },
+                Op::Add { rd: T1, rs1: T1, rs2: T2 },
+            ]);
+            for (i, r) in elems.iter().enumerate() {
+                probe.push(Op::Sw {
+                    rs2: *r,
+                    rs1: T1,
+                    off: (i * 4) as i32,
+                });
+            }
+            probe.extend([
+                Op::Li { rd: A0, imm: elems.len() as i64 },
+                Op::Li { rd: A1, imm: off },
+                Op::Jal { rd: RA, to: "LwAddInts".into() },
+                Op::Addi { rd: S2, rs: A0, imm: 0 },
+            ]);
+        };
+        // cmb(label) → s2 = array, call combinator → PromGet.state → hex.
+        let cmb = |probe: &mut Vec<Op>, tag: &str, to: &str, hexn: &str| {
+            probe.extend([
+                Op::Addi { rd: A0, rs: S2, imm: 0 },
+                Op::Jal { rd: RA, to: to.into() },
+                Op::Jal { rd: RA, to: "PromGet".into() },
+                Op::Lw { rd: T0, rs: A0, off: PR_STATE },
+            ]);
+            probe.extend(put_str_ops(tag));
+            probe.extend(hex_t0_ops(hexn));
+        };
+        // all([ful,ful]) → FUL
+        mkarr(&mut probe, ARR, &[S0, S0]);
+        cmb(&mut probe, " A1=", "LwPromAll", "pc_a1");
+        // all([ful,rej]) → REJ
+        mkarr(&mut probe, ARR + 0x20, &[S0, S1]);
+        cmb(&mut probe, " A2=", "LwPromAll", "pc_a2");
+        // any([rej,rej]) → REJ
+        mkarr(&mut probe, ARR + 0x40, &[S1, S1]);
+        cmb(&mut probe, " A3=", "LwPromAny", "pc_a3");
+        // any([rej,ful]) → FUL
+        mkarr(&mut probe, ARR + 0x60, &[S1, S0]);
+        cmb(&mut probe, " A4=", "LwPromAny", "pc_a4");
+        // allsettled([ful,rej]) → FUL
+        mkarr(&mut probe, ARR + 0x80, &[S0, S1]);
+        cmb(&mut probe, " A5=", "LwPromAlls", "pc_a5");
+        probe.extend(put_str_ops("\n"));
+
+        let mut placed = false;
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                n.ops.splice(pos + 1..pos + 1, probe);
+                placed = true;
+                break;
+            }
+        }
+        assert!(placed, "no JitRun call site to splice after");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        eprintln!("{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        let ful = format!("{:016x}", PROM_ST_FUL);
+        let rej = format!("{:016x}", PROM_ST_REJ);
+        assert!(s.console.contains(&format!("A1={}", ful)), "all(ful,ful)→FUL: {}", s.console);
+        assert!(s.console.contains(&format!("A2={}", rej)), "all(ful,rej)→REJ: {}", s.console);
+        assert!(s.console.contains(&format!("A3={}", rej)), "any(rej,rej)→REJ: {}", s.console);
+        assert!(s.console.contains(&format!("A4={}", ful)), "any(rej,ful)→FUL: {}", s.console);
+        assert!(s.console.contains(&format!("A5={}", ful)), "alls(ful,rej)→FUL: {}", s.console);
+        let _ = (A0, A1, RA, S0, S1, S2, T0, T1, T2);
+    }
+
+    /// `PromDrain` settles a pending `__prom` fetch record — the drain half of
+    /// the suspend/resume lane. The probe allocs a record, points its
+    /// `PR_AOFF`/`PR_ALEN` at a live `__kget` url, leaves it `PROM_ST_PEND`,
+    /// and calls `PromDrain`: the record's `KernelGet` lands → `PROM_ST_FUL`
+    /// with the body span. A second record on a missing url stays pending until
+    /// `PR_BUDGET` lapses — here budgeted to drain-reject on the same pass.
+    #[test]
+    fn guest_jit_prom_drain_settles_pending() {
+        use g6b_asm::domt::{PROM_ST_FUL, PROM_ST_PEND, PROM_ST_REJ, PR_ALEN, PR_AOFF, PR_STATE};
+        use g6b_asm::encode::{A0, RA, S0, S1, T0, T1, T2};
+        use g6b_asm::{Addr, Op};
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_delegate()).expect("delegate cell installs");
+        m.kget = g6b_asm::kget::build(&[(
+            "/bios/menu/main".into(),
+            "[{\"id\":\"a\",\"label\":\"b\",\"value\":\"c\",\"writable\":false}]".into(),
+        )])
+        .unwrap();
+
+        const G: i64 = 0x10_ff00; // good url
+        const B: i64 = 0x10_fe00; // missing url
+        let mut probe: Vec<Op> = Vec::new();
+        for (off, s) in [(G, &b"/bios/menu/main"[..]), (B, &b"/no"[..])] {
+            probe.extend([
+                Op::La { rd: T1, addr: Addr::WasmMem },
+                Op::Li { rd: T2, imm: off },
+                Op::Add { rd: T1, rs1: T1, rs2: T2 },
+            ]);
+            for (i, b) in s.iter().enumerate() {
+                probe.extend([
+                    Op::Li { rd: T2, imm: i64::from(*b) },
+                    Op::Sb { rs2: T2, rs1: T1, off: i as i32 },
+                ]);
+            }
+        }
+        // s0 = PromAlloc() — a pending fetch record; point its url at G.
+        // s1 = PromAlloc() — a second pending record; point its url at B.
+        for (sreg, url, ulen) in [(S0, G, 15i64), (S1, B, 3i64)] {
+            probe.extend([
+                Op::Jal { rd: RA, to: "PromAlloc".into() },
+                Op::Addi { rd: sreg, rs: A0, imm: 0 },
+                Op::Addi { rd: A0, rs: sreg, imm: 0 },
+                Op::Jal { rd: RA, to: "PromGet".into() },
+                // rec = a0: AOFF=url, ALEN=url_len, STATE=PEND, BUDGET=1
+                Op::Li { rd: T2, imm: url },
+                Op::Sw { rs2: T2, rs1: A0, off: PR_AOFF },
+                Op::Li { rd: T2, imm: ulen },
+                Op::Sw { rs2: T2, rs1: A0, off: PR_ALEN },
+                Op::Li { rd: T2, imm: PROM_ST_PEND },
+                Op::Sw { rs2: T2, rs1: A0, off: PR_STATE },
+                Op::Li { rd: T2, imm: 1 },
+                Op::Sw {
+                    rs2: T2,
+                    rs1: A0,
+                    off: g6b_asm::domt::PR_BUDGET,
+                },
+            ]);
+        }
+        // PromDrain: s0's url resolves → FUL; s1's misses with budget 1 → REJ.
+        probe.push(Op::Jal {
+            rd: RA,
+            to: "PromDrain".into(),
+        });
+        // Read both records' states.
+        for (sreg, tag, hexn) in [(S0, " P0=", "pd_h0"), (S1, " P1=", "pd_h1")] {
+            probe.extend([
+                Op::Addi { rd: A0, rs: sreg, imm: 0 },
+                Op::Jal { rd: RA, to: "PromGet".into() },
+                Op::Lw { rd: T0, rs: A0, off: PR_STATE },
+            ]);
+            probe.extend(put_str_ops(tag));
+            probe.extend(hex_t0_ops(hexn));
+        }
+        probe.extend(put_str_ops("\n"));
+
+        let mut placed = false;
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                n.ops.splice(pos + 1..pos + 1, probe);
+                placed = true;
+                break;
+            }
+        }
+        assert!(placed, "no JitRun call site to splice after");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        eprintln!("{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        assert!(
+            s.console.contains(&format!("P0={:016x}", PROM_ST_FUL)),
+            "pending good-url fetch fulfilled: {}",
+            s.console
+        );
+        assert!(
+            s.console.contains(&format!("P1={:016x}", PROM_ST_REJ)),
+            "pending missing-url fetch rejected on budget: {}",
+            s.console
+        );
+        let _ = (PR_AOFF, PR_ALEN, PR_STATE, PROM_ST_PEND, A0, RA, S0, S1, T0, T1, T2);
     }
 
     /// Listener re-entry on a real *pointer* event — the `DomtPtr`/`EV_CLICK`

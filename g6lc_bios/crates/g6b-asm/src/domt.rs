@@ -141,6 +141,64 @@ pub const EVO_TARGET: i32 = 20; // target node handle (index+1)
 pub const EVO_PD: i32 = 24; // defaultPrevented flag — `preventDefault` write-back
 pub const EVOBJ_BYTES: u64 = 64;
 
+// `__prom` — the bounded guest promise-object table (the guest-side correlate
+// of the interpreter's `ObjectTable` promise subset). `LwFetch` allocates a
+// record per call instead of returning a raw `__kget` index; `LwAwaitVoid`
+// consults the record's settle state so a fetch can fulfill *or reject*, and
+// `PromDrain` settles genuinely-pending records before resuming a suspended
+// `_start`. A promise handle is the record index +1 (0 = null/unresolved).
+pub const PROM_MAGIC: i64 = 0x4736_5052; // 'G6PR'
+/// `__prom` header bytes: `[magic][n_alloc][afail][alast][asusp][rsvd×3]`.
+pub const PROM_HDR: i32 = 32;
+/// Bounded record cap — a fetch storm fails closed (handle 0) past this. The
+/// shipped cell issues ~8 fetches; a combinator adds one array + one result
+/// record per `libasync_promise_*` call. Records bump-allocate and are not
+/// reclaimed (no `release`/`free` in the await contract), so this is a fixed
+/// ceiling on total promises for the cell's lifetime — 64 gives the shipped
+/// path ~8× headroom while staying a ~3KB BSS region.
+pub const PROM_MAX: i64 = 64;
+/// Per-record bytes.
+pub const PROM_REC: i32 = 48;
+/// `__prom` BSS size: header + `PROM_MAX` records.
+pub const PROM_BYTES: u64 = (PROM_HDR as u64) + (PROM_MAX as u64) * (PROM_REC as u64);
+
+// `__prom` header offsets
+pub const P_MAGIC: i32 = 0; // 'G6PR'
+pub const P_N: i32 = 4; // n_alloc (next free record index)
+pub const P_AFAIL: i32 = 8; // 1 if the last awaited promise rejected
+pub const P_ALAST: i32 = 12; // last-awaited promise handle (for await_error)
+pub const P_ASUSP: i32 = 16; // promise handle the cell is suspended on (0=none)
+/// `__prom+20` — set by `PromDrain` when a suspended `_start`'s promise
+/// settled; the foreground loop re-invokes the cell to complete the rewind.
+pub const P_RESUME: i32 = 20;
+
+// `__prom` record offsets
+pub const PR_STATE: i32 = 0; // PROM_ST_*
+pub const PR_KIND: i32 = 4; // PROM_K_*
+pub const PR_VOFF: i32 = 8; // fulfilled: __kget body off | array: __wasm_mem elem off
+pub const PR_VLEN: i32 = 12; // body len | elem count
+pub const PR_EOFF: i32 = 16; // rejected reason __wasm_mem off (the failing url)
+pub const PR_ELEN: i32 = 20; // reason len
+pub const PR_AOFF: i32 = 24; // pending fetch url __wasm_mem off | combinator input-array handle
+pub const PR_ALEN: i32 = 28; // url len | combinator input count
+pub const PR_SUB: i32 = 32; // combinator remaining-unsettled count
+pub const PR_BUDGET: i32 = 36; // pending poll countdown → reject at 0
+
+/// Settle states.
+pub const PROM_ST_FREE: i64 = 0;
+pub const PROM_ST_PEND: i64 = 1;
+pub const PROM_ST_FUL: i64 = 2;
+pub const PROM_ST_REJ: i64 = 3;
+/// Record kinds.
+pub const PROM_K_FETCH: i64 = 0;
+pub const PROM_K_ALL: i64 = 1;
+pub const PROM_K_ANY: i64 = 2;
+pub const PROM_K_ALLS: i64 = 3;
+pub const PROM_K_IARR: i64 = 4; // i32 handle-array (combinator input / allSettled result)
+/// Pending-poll budget: a pending fetch settles on the next `PromDrain` tick,
+/// so the budget is a fail-closed ceiling, not a latency estimate.
+pub const PROM_BUDGET: i64 = 64;
+
 /// Text cell metrics: an 8×8 `__font` glyph at `DOMT_CELL`px pitch.
 pub const DOMT_CELL: i64 = 8;
 /// Block-flow margins.
@@ -1535,18 +1593,23 @@ fn kernel_get_node() -> Vec<Op> {
 
 /// `LwFetch(a0=url_off, a1=url_len) → a0 = promise handle` — libwasm `fetch`.
 /// Prints `GET <path>` (the `GetFile`/`WasmFetch` router shape), resolves the
-/// path through `KernelGet`, and returns the `__kget` entry index +1 as the
-/// promise the cell then awaits. `0` = unresolved (a skipped read — the cell
-/// treats a null handle as a missing string, never dereferences it).
+/// path through `KernelGet`, and allocates a `__prom` record as the promise the
+/// cell then awaits. A `/bios/*` hit settles the record `PROM_ST_FUL` with the
+/// `__kget` body span; a miss leaves it `PROM_ST_PEND` — `__kget` is the route
+/// cache, so the miss is an in-flight fetch `PromDrain` resolves on the poll
+/// (late hit→`FUL`, `PR_BUDGET` expiry→`REJ` with the url as the reason). `0` =
+/// `__prom` table full (fail closed).
 fn lw_fetch_node() -> Vec<Op> {
     let mut ops = vec![
-        Op::Comment("LwFetch(a0=url_off,a1=len) → a0=handle — GET + KernelGet".into()),
+        Op::Comment("LwFetch(a0=url_off,a1=len) → a0=promise — GET + PromAlloc + settle".into()),
         Op::Glob("LwFetch".into()),
         Op::Label("LwFetch".into()),
-        addi(SP, SP, -32),
-        sd(RA, SP, 24),
-        sd(S0, SP, 16),
-        sd(S1, SP, 8),
+        addi(SP, SP, -48),
+        sd(RA, SP, 40),
+        sd(S0, SP, 32),
+        sd(S1, SP, 24),
+        sd(S2, SP, 16),
+        sd(S3, SP, 8),
         mv(S0, A0),
         mv(S1, A1),
     ];
@@ -1560,25 +1623,60 @@ fn lw_fetch_node() -> Vec<Op> {
         jal("WasmPuts"),
     ]);
     ops.extend(lw_putc(i64::from(b'\n')));
+    // s2 = KernelGet(url) → entry idx | -1
+    ops.extend([mv(A0, S0), mv(A1, S1), jal("KernelGet"), mv(S2, A0)]);
+    // s3 = PromAlloc() → promise handle | 0
+    ops.extend([jal("PromAlloc"), mv(S3, A0), beq(S3, X0, "lf_out")]);
+    // a3 = rec = PromGet(s3); record url as pending-arg + rejection reason.
     ops.extend([
-        mv(A0, S0),
-        mv(A1, S1),
-        jal("KernelGet"),
-        addi(A0, A0, 1), // idx+1 promise handle; -1 → 0 unresolved
-        ld(RA, SP, 24),
-        ld(S0, SP, 16),
-        ld(S1, SP, 8),
-        addi(SP, SP, 32),
+        mv(A0, S3),
+        jal("PromGet"),
+        mv(A3, A0),
+        sw(S0, A3, PR_AOFF),
+        sw(S1, A3, PR_ALEN),
+        sw(S0, A3, PR_EOFF),
+        sw(S1, A3, PR_ELEN),
+        // A KernelGet miss leaves the record `PROM_ST_PEND` (set by PromAlloc):
+        // `__kget` is the route *cache*, and a miss means "the host may still
+        // resolve it" — the real-fetch semantic (an unrouted url pends, then
+        // the host's roundtrip settles it). `PromDrain` re-runs `KernelGet` on
+        // the stored url each tick and rejects at `PR_BUDGET`=0. An await on a
+        // pending handle suspends (`LwAwaitVoid`→`P_ASUSP`) instead of the old
+        // inline-reject.
+        blt(S2, X0, "lf_ret"), // miss → stay pending for PromDrain
+    ]);
+    // fulfill: PR_VOFF/VLEN = __kget[s2].json_off/len
+    ops.extend([
+        la(T6, Addr::KGet),
+        li(T0, KGET_ENT as i64),
+        mul(T1, S2, T0),
+        addi(T1, T1, KGET_HDR),
+        add(T1, T6, T1), // ent = __kget + KGET_HDR + idx*KGET_ENT
+        lw(T2, T1, KGET_E_JSON_OFF),
+        lw(T3, T1, KGET_E_JSON_LEN),
+        sw(T2, A3, PR_VOFF),
+        sw(T3, A3, PR_VLEN),
+        li(T2, PROM_ST_FUL),
+        sw(T2, A3, PR_STATE),
+        Op::Label("lf_ret".into()),
+        mv(A0, S3), // promise handle
+        Op::Label("lf_out".into()),
+        ld(RA, SP, 40),
+        ld(S0, SP, 32),
+        ld(S1, SP, 24),
+        ld(S2, SP, 16),
+        ld(S3, SP, 8),
+        addi(SP, SP, 48),
         ret(),
     ]);
     ops
 }
 
-/// `LwAwaitSup() → a0=1` — `libwasm_await_supported`: the resolved-sync await
-/// lane is live (`LwFetch` resolves every BIOS read synchronously, so the
-/// promise is settled before `libwasm_await__void` returns). The cell takes
-/// its async fetch lane — the full Asyncify unwind/rewind is only needed for
-/// a genuinely-pending promise, which local `/bios/*` reads never are.
+/// `LwAwaitSup() → a0=1` — `libwasm_await_supported`: the await lane is live.
+/// A `LwFetch` route hit is already `FUL` by the time `libwasm_await__void`
+/// runs (resolved-sync), and a miss suspends on the `PEND` record until
+/// `PromDrain` settles it — the full Asyncify unwind/rewind the cell's
+/// `await_supported=1` path is built for.
 fn lw_awaitsup_node() -> Vec<Op> {
     vec![
         Op::Comment("LwAwaitSup → a0=1 (resolved-sync await)".into()),
@@ -1640,24 +1738,54 @@ fn lw_awaitvoid_node() -> Vec<Op> {
         j("lav_out"),
         Op::Label("lav_resolve".into()),
     ];
-    // resolve slot → cur = __kget[slot-1].json (existing bounded scan)
+    // resolve the promise handle → cur + afail via the record's settle state.
+    // fulfilled → cur = the __kget body span; rejected → cur empty + afail=1
+    // (the reason stays in PR_EOFF/PR_ELEN for `libwasm_await_error`); pending/
+    // free → cur empty, no fail (the bounded-resolved default — a genuinely
+    // pending fetch is the PromDrain suspend/resume lane, not this path).
     ops.extend([
-        beq(S0, X0, "lav_arm"), // h==0 → nothing resolved (still arm unwind)
-        addi(T0, S0, -1),       // i = handle-1
-        la(T6, Addr::KGet),
-        lw(T1, T6, 0),
-        li(T2, i64::from(KGET_MAGIC)),
-        bne(T1, T2, "lav_arm"),
-        lw(T5, T6, KGET_OFF_N),
-        bgeu(T0, T5, "lav_arm"), // i >= n_entry → out of range
-        slli(T1, T0, 4),         // i*16
-        addi(T1, T1, KGET_HDR),
-        add(T1, T6, T1), // ent = __kget + KGET_HDR + i*16
-        lw(T2, T1, KGET_E_JSON_OFF),
-        lw(T3, T1, KGET_E_JSON_LEN),
+        la(T4, Addr::DomT),
+        sw(X0, T4, H_KCUR_OFF),
+        sw(X0, T4, H_KCUR_LEN),
+        la(T6, Addr::Prom),
+        sw(X0, T6, P_AFAIL),
+        sw(S0, T6, P_ALAST), // last-awaited handle → await_error
+        beq(S0, X0, "lav_arm"),
+        mv(A0, S0),
+        jal("PromGet"),
+        beq(A0, X0, "lav_arm"),
+        lw(T0, A0, PR_STATE),
+        li(T1, PROM_ST_FUL),
+        beq(T0, T1, "lav_ful"),
+        li(T1, PROM_ST_REJ),
+        beq(T0, T1, "lav_rej"),
+        li(T1, PROM_ST_PEND),
+        beq(T0, T1, "lav_pend"),
+        j("lav_arm"),
+        // pending — park: record the promise the cell suspended on; jit_after
+        // sees UNWINDING+P_ASUSP and skips the rewind until PromDrain settles
+        // it, then the foreground loop re-invokes `_start` to rewind.
+        Op::Label("lav_pend".into()),
+        la(T6, Addr::Prom),
+        sw(S0, T6, P_ASUSP),
+        j("lav_arm"),
+        Op::Label("lav_ful".into()),
+        // Only a fetch record's PR_VOFF is a __kget body offset — the span
+        // `await_value` copies. A combinator/i32-array result keeps a
+        // __wasm_mem element offset there (its value is a handle array, not a
+        // string), so leave `cur` empty rather than misread __kget.
+        lw(T0, A0, PR_KIND),
+        bne(T0, X0, "lav_arm"), // PROM_K_FETCH only
+        lw(T2, A0, PR_VOFF),
+        lw(T3, A0, PR_VLEN),
         la(T4, Addr::DomT),
         sw(T2, T4, H_KCUR_OFF),
         sw(T3, T4, H_KCUR_LEN),
+        j("lav_arm"),
+        Op::Label("lav_rej".into()),
+        la(T6, Addr::Prom),
+        li(T1, 1),
+        sw(T1, T6, P_AFAIL),
         Op::Label("lav_arm".into()),
     ]);
     // arm the Asyncify unwind (only when the cell has asyncify globals)
@@ -1822,6 +1950,569 @@ fn lw_phex_node() -> Vec<Op> {
 
 /// libwasm property/event name literals — a jumped-over data island so the
 /// `Op::Word` bytes are never executed. Each literal is NUL-padded to a word.
+/// `PromAlloc() → a0 = handle (1..=PROM_MAX) | 0` — lazily init the `__prom`
+/// header, then bump-claim a record: zero it and mark it `PROM_ST_PEND` /
+/// `PROM_K_FETCH`. Returns the record index +1 (the promise handle). `0` =
+/// table full — the caller fails closed (returns a null promise the cell
+/// treats as unresolved, never a pointer it dereferences).
+fn prom_alloc_node() -> Vec<Op> {
+    vec![
+        Op::Comment("PromAlloc() → a0=handle|0 — claim a __prom record".into()),
+        Op::Glob("PromAlloc".into()),
+        Op::Label("PromAlloc".into()),
+        la(T6, Addr::Prom),
+        lw(T0, T6, P_MAGIC),
+        li(T1, PROM_MAGIC),
+        beq(T0, T1, "pa_have"),
+        sw(T1, T6, P_MAGIC),
+        sw(X0, T6, P_N),
+        sw(X0, T6, P_AFAIL),
+        sw(X0, T6, P_ALAST),
+        sw(X0, T6, P_ASUSP),
+        Op::Label("pa_have".into()),
+        lw(T0, T6, P_N), // i = n_alloc
+        li(T1, PROM_MAX),
+        bgeu(T0, T1, "pa_full"),
+        // rec = __prom + PROM_HDR + i*PROM_REC
+        li(T1, PROM_REC as i64),
+        mul(T2, T0, T1),
+        addi(T2, T2, PROM_HDR),
+        add(T2, T6, T2), // rec abs
+        // zero PROM_REC bytes (word-at-a-time)
+        li(T3, 0),
+        Op::Label("pa_z".into()),
+        li(T4, PROM_REC as i64),
+        bgeu(T3, T4, "pa_zd"),
+        add(T4, T2, T3),
+        sw(X0, T4, 0),
+        addi(T3, T3, 4),
+        j("pa_z"),
+        Op::Label("pa_zd".into()),
+        li(T4, PROM_ST_PEND),
+        sw(T4, T2, PR_STATE),
+        sw(X0, T2, PR_KIND), // PROM_K_FETCH
+        li(T4, PROM_BUDGET),
+        sw(T4, T2, PR_BUDGET), // pending-poll grace before a miss rejects
+        addi(T0, T0, 1),
+        sw(T0, T6, P_N),
+        mv(A0, T0),
+        ret(),
+        Op::Label("pa_full".into()),
+        li(A0, 0),
+        ret(),
+    ]
+}
+
+/// `PromGet(a0=handle) → a0 = record addr | 0` — bounds-checked `__prom` ref:
+/// `0` when the table is absent or `handle` is 0 / past `n_alloc`.
+fn prom_get_node() -> Vec<Op> {
+    vec![
+        Op::Comment("PromGet(a0=handle) → a0=rec|0 — bounds-checked __prom ref".into()),
+        Op::Glob("PromGet".into()),
+        Op::Label("PromGet".into()),
+        la(T6, Addr::Prom),
+        lw(T0, T6, P_MAGIC),
+        li(T1, PROM_MAGIC),
+        bne(T0, T1, "pg_none"),
+        beq(A0, X0, "pg_none"), // null handle
+        lw(T1, T6, P_N),
+        bltu(T1, A0, "pg_none"), // handle > n_alloc
+        addi(T0, A0, -1),
+        li(T1, PROM_REC as i64),
+        mul(T2, T0, T1),
+        addi(T2, T2, PROM_HDR),
+        add(A0, T6, T2),
+        ret(),
+        Op::Label("pg_none".into()),
+        li(A0, 0),
+        ret(),
+    ]
+}
+
+/// `LwAwaitFail() → a0 = __prom[P_AFAIL]` — `libwasm_await_failed`: 1 when the
+/// last `libwasm_await__void` target rejected, 0 when it fulfilled (or the
+/// promise table is absent). Leaf; reads only the header.
+fn lw_awaitfail_node() -> Vec<Op> {
+    vec![
+        Op::Comment("LwAwaitFail() → a0=afail — libwasm_await_failed".into()),
+        Op::Glob("LwAwaitFail".into()),
+        Op::Label("LwAwaitFail".into()),
+        la(T6, Addr::Prom),
+        lw(T0, T6, P_MAGIC),
+        li(T1, PROM_MAGIC),
+        bne(T0, T1, "laf_zero"),
+        lw(A0, T6, P_AFAIL),
+        ret(),
+        Op::Label("laf_zero".into()),
+        li(A0, 0),
+        ret(),
+    ]
+}
+
+/// `LwAwaitErr(a0=raw)` — `libwasm_await_error`: write the last-awaited
+/// promise's rejection reason as a D `string {len:u32, ptr:u32}` at
+/// `__wasm_mem[raw]`. The reason is the failing url, already a `__wasm_mem`
+/// span (`PR_EOFF`/`PR_ELEN`), so unlike `LwAwaitVal` no copy is needed —
+/// `ptr` is emitted verbatim. On a fulfilled/absent last await it writes a
+/// zero-length string.
+fn lw_awaiterr_node() -> Vec<Op> {
+    vec![
+        Op::Comment("LwAwaitErr(a0=raw) — write {len,ptr} of rejection reason".into()),
+        Op::Glob("LwAwaitErr".into()),
+        Op::Label("LwAwaitErr".into()),
+        addi(SP, SP, -32),
+        sd(A0, SP, 0), // save raw (PromGet clobbers a0)
+        sd(RA, SP, 8),
+        sd(S1, SP, 16),
+        sd(S0, SP, 24),
+        li(S0, 0), // len
+        li(S1, 0), // ptr
+        la(T6, Addr::Prom),
+        lw(T0, T6, P_MAGIC),
+        li(T1, PROM_MAGIC),
+        bne(T0, T1, "lae_wr"),
+        lw(A0, T6, P_ALAST),
+        jal("PromGet"),
+        beq(A0, X0, "lae_wr"),
+        lw(T0, A0, PR_STATE),
+        li(T1, PROM_ST_REJ),
+        bne(T0, T1, "lae_wr"),
+        lw(S0, A0, PR_ELEN),
+        lw(S1, A0, PR_EOFF),
+        Op::Label("lae_wr".into()),
+        // write {len,ptr} at __wasm_mem[raw]  (raw was clobbered by PromGet —
+        // it was the a0 arg; reload from the caller's stack save)
+        ld(A0, SP, 0),
+        la(T1, Addr::WasmMem),
+        add(T1, T1, A0),
+        sw(S0, T1, 0),
+        sw(S1, T1, 4),
+        ld(RA, SP, 8),
+        ld(S1, SP, 16),
+        ld(S0, SP, 24),
+        addi(SP, SP, 32),
+        ret(),
+    ]
+}
+
+/// `LwAddInts(a0=len, a1=wm_ptr) → a0 = i32-array handle` — `libwasm_add__ints`
+/// (libwasm len-before-ptr order). Allocates a `PROM_K_IARR` `__prom` record
+/// holding the `__wasm_mem` element span — the bounded handle-array the
+/// `libasync_promise_*` combinators consume. `0` = table full (fail closed).
+fn lw_addints_node() -> Vec<Op> {
+    vec![
+        Op::Comment("LwAddInts(a0=len,a1=wmptr) → a0=i32-array handle".into()),
+        Op::Glob("LwAddInts".into()),
+        Op::Label("LwAddInts".into()),
+        addi(SP, SP, -32),
+        sd(RA, SP, 24),
+        sd(S0, SP, 16),
+        sd(S1, SP, 8),
+        sd(S2, SP, 0),
+        mv(S0, A0), // count
+        mv(S1, A1), // __wasm_mem elem ptr
+        jal("PromAlloc"),
+        mv(S2, A0),
+        beq(S2, X0, "lai_out"),
+        mv(A0, S2),
+        jal("PromGet"), // a0 = rec
+        li(T0, PROM_K_IARR),
+        sw(T0, A0, PR_KIND),
+        li(T0, PROM_ST_FUL),
+        sw(T0, A0, PR_STATE), // arrays are always resolved
+        sw(S1, A0, PR_VOFF),  // __wasm_mem elem ptr
+        sw(S0, A0, PR_VLEN),  // count
+        Op::Label("lai_out".into()),
+        mv(A0, S2),
+        ld(S2, SP, 0),
+        ld(RA, SP, 24),
+        ld(S0, SP, 16),
+        ld(S1, SP, 8),
+        addi(SP, SP, 32),
+        ret(),
+    ]
+}
+
+/// `PromScan(a0=arrH, a1=kind, a2=rrec)` — fill `rrec` (a `__prom` record addr)
+/// with the aggregate settle-state of the `PROM_K_IARR` handle array `arrH`.
+/// Shared by `PromCombine` (fresh record) and `PromDrain` (re-settle in place).
+/// - all: first REJ → REJ(reason); any PEND → PEND(SUB=count); else FUL(array)
+/// - any: first FUL → FUL(value);  any PEND → PEND;         all REJ → REJ(last)
+/// - allsettled: any PEND → PEND; else FUL(array)
+fn prom_scan_node() -> Vec<Op> {
+    vec![
+        Op::Comment("PromScan(a0=arrH,a1=kind,a2=rrec) — aggregate settle-state".into()),
+        Op::Glob("PromScan".into()),
+        Op::Label("PromScan".into()),
+        addi(SP, SP, -96),
+        sd(RA, SP, 88),
+        sd(S0, SP, 80),
+        sd(S1, SP, 72),
+        sd(S2, SP, 56),
+        sd(S3, SP, 48),
+        sd(S5, SP, 40),
+        sd(S6, SP, 32),
+        sd(S7, SP, 24),
+        sd(S8, SP, 16),
+        mv(S0, A0), // arrH
+        mv(S1, A1), // kind
+        mv(S2, A2), // rrec
+        // arec = the input array record
+        jal("PromGet"),
+        beq(A0, X0, "ps_out"),
+        mv(S3, A0),
+        lw(T0, S3, PR_KIND),
+        li(T1, PROM_K_IARR),
+        bne(T0, T1, "ps_out"),
+        // rrec header: kind / input-array / count / pending=0
+        sw(S1, S2, PR_KIND),
+        sw(S0, S2, PR_AOFF),
+        lw(S6, S3, PR_VLEN),
+        // Clamp the element count to the promise-table bound — a cell-supplied
+        // `add__ints(len)` past `PROM_MAX` can't hold that many live promises
+        // anyway, and an unbounded count would scan `__wasm_mem` out of range.
+        li(T1, PROM_MAX),
+        bltu(S6, T1, "ps_len_ok"),
+        mv(S6, T1),
+        Op::Label("ps_len_ok".into()),
+        sw(S6, S2, PR_ALEN),
+        sw(X0, S2, PR_SUB),
+        li(T0, PROM_ST_PEND),
+        sw(T0, S2, PR_STATE), // default until scan settles
+        la(T0, Addr::WasmMem),
+        lw(T1, S3, PR_VOFF),
+        add(S7, T0, T1), // elem base = __wasm_mem + VOFF
+        li(S5, 0),       // i
+        Op::Label("ps_loop".into()),
+        bgeu(S5, S6, "ps_done"),
+        slli(T0, S5, 2),
+        add(T0, S7, T0),
+        lw(A0, T0, 0), // elem = promise handle
+        jal("PromGet"),
+        mv(S8, A0),
+        beq(S8, X0, "ps_next"), // invalid handle → skip
+        lw(T0, S8, PR_STATE),
+        li(T1, PROM_K_ALL),
+        beq(S1, T1, "ps_all"),
+        li(T1, PROM_K_ANY),
+        beq(S1, T1, "ps_any"),
+        j("ps_alls"),
+        // ---- all ----
+        Op::Label("ps_all".into()),
+        li(T1, PROM_ST_REJ),
+        beq(T0, T1, "ps_all_rej"),
+        li(T1, PROM_ST_FUL),
+        bne(T0, T1, "ps_pend"),
+        j("ps_next"),
+        Op::Label("ps_all_rej".into()),
+        lw(T2, S8, PR_EOFF),
+        sw(T2, S2, PR_EOFF),
+        lw(T2, S8, PR_ELEN),
+        sw(T2, S2, PR_ELEN),
+        li(T2, PROM_ST_REJ),
+        sw(T2, S2, PR_STATE),
+        j("ps_done"),
+        // ---- any ----
+        Op::Label("ps_any".into()),
+        li(T1, PROM_ST_FUL),
+        beq(T0, T1, "ps_any_ful"),
+        li(T1, PROM_ST_REJ),
+        bne(T0, T1, "ps_pend"),
+        lw(T2, S8, PR_EOFF), // track last rejection reason
+        sw(T2, S2, PR_EOFF),
+        lw(T2, S8, PR_ELEN),
+        sw(T2, S2, PR_ELEN),
+        j("ps_next"),
+        Op::Label("ps_any_ful".into()),
+        lw(T2, S8, PR_VOFF),
+        sw(T2, S2, PR_VOFF),
+        lw(T2, S8, PR_VLEN),
+        sw(T2, S2, PR_VLEN),
+        li(T2, PROM_ST_FUL),
+        sw(T2, S2, PR_STATE),
+        j("ps_done"),
+        // ---- allsettled ----
+        Op::Label("ps_alls".into()),
+        li(T1, PROM_ST_PEND),
+        beq(T0, T1, "ps_pend"),
+        li(T1, PROM_ST_FREE),
+        beq(T0, T1, "ps_pend"),
+        j("ps_next"),
+        Op::Label("ps_pend".into()),
+        lw(T2, S2, PR_SUB),
+        addi(T2, T2, 1),
+        sw(T2, S2, PR_SUB),
+        Op::Label("ps_next".into()),
+        addi(S5, S5, 1),
+        j("ps_loop"),
+        // scan done with no early settle — resolve by pending count + kind
+        Op::Label("ps_done".into()),
+        lw(T2, S2, PR_STATE),
+        li(T1, PROM_ST_PEND),
+        bne(T2, T1, "ps_out"), // already FUL/REJ (early settle) → keep
+        lw(T2, S2, PR_SUB),
+        li(T1, PROM_K_ANY),
+        beq(S1, T1, "ps_any_d"),
+        beq(T2, X0, "ps_set_ful"), // all/alls: no pending → FUL
+        j("ps_out"),               // stays PEND
+        Op::Label("ps_any_d".into()),
+        bne(T2, X0, "ps_out"), // pending remain → stays PEND
+        li(T1, PROM_ST_REJ),   // no ful + no pend → all rejected
+        sw(T1, S2, PR_STATE),
+        j("ps_out"),
+        Op::Label("ps_set_ful".into()),
+        li(T1, PROM_ST_FUL),
+        sw(T1, S2, PR_STATE),
+        lw(T1, S3, PR_VOFF), // result = the input handle array
+        sw(T1, S2, PR_VOFF),
+        lw(T1, S3, PR_VLEN),
+        sw(T1, S2, PR_VLEN),
+        Op::Label("ps_out".into()),
+        ld(RA, SP, 88),
+        ld(S0, SP, 80),
+        ld(S1, SP, 72),
+        ld(S2, SP, 56),
+        ld(S3, SP, 48),
+        ld(S5, SP, 40),
+        ld(S6, SP, 32),
+        ld(S7, SP, 24),
+        ld(S8, SP, 16),
+        addi(SP, SP, 96),
+        ret(),
+    ]
+}
+
+/// `PromCombine(a0=arrH, a1=kind) → a0 = promise handle | 0` — allocate a
+/// `__prom` record and `PromScan` the `arrH` handle array into it.
+fn prom_combine_node() -> Vec<Op> {
+    vec![
+        Op::Comment("PromCombine(a0=arrH,a1=kind) → a0=promise|0".into()),
+        Op::Glob("PromCombine".into()),
+        Op::Label("PromCombine".into()),
+        addi(SP, SP, -48),
+        sd(RA, SP, 40),
+        sd(S0, SP, 32), // arrH
+        sd(S1, SP, 24), // kind
+        sd(S2, SP, 16), // result handle
+        mv(S0, A0),
+        mv(S1, A1),
+        jal("PromAlloc"),
+        mv(S2, A0),
+        beq(S2, X0, "pcb_out"),
+        mv(A0, S2),
+        jal("PromGet"), // a0 = rrec
+        mv(A2, A0),
+        mv(A0, S0), // arrH
+        mv(A1, S1), // kind
+        jal("PromScan"),
+        Op::Label("pcb_out".into()),
+        mv(A0, S2),
+        ld(RA, SP, 40),
+        ld(S0, SP, 32),
+        ld(S1, SP, 24),
+        ld(S2, SP, 16),
+        addi(SP, SP, 48),
+        ret(),
+    ]
+}
+
+/// `LwPromAll(a0=arrH) → a0=promise` — `libasync_promise_all__promise`.
+fn lw_promall_node() -> Vec<Op> {
+    vec![
+        Op::Comment("LwPromAll(a0=arrH) → promise — libasync_promise_all__promise".into()),
+        Op::Glob("LwPromAll".into()),
+        Op::Label("LwPromAll".into()),
+        li(A1, PROM_K_ALL),
+        j("PromCombine"),
+    ]
+}
+
+/// `LwPromAny(a0=arrH) → a0=promise` — `libasync_promise_any__promise`.
+fn lw_promany_node() -> Vec<Op> {
+    vec![
+        Op::Comment("LwPromAny(a0=arrH) → promise — libasync_promise_any__promise".into()),
+        Op::Glob("LwPromAny".into()),
+        Op::Label("LwPromAny".into()),
+        li(A1, PROM_K_ANY),
+        j("PromCombine"),
+    ]
+}
+
+/// `LwPromAlls(a0=arrH) → a0=promise` — `libasync_promise_allsettled__promise`.
+fn lw_promalls_node() -> Vec<Op> {
+    vec![
+        Op::Comment("LwPromAlls(a0=arrH) → promise — libasync_promise_allsettled".into()),
+        Op::Glob("LwPromAlls".into()),
+        Op::Label("LwPromAlls".into()),
+        li(A1, PROM_K_ALLS),
+        j("PromCombine"),
+    ]
+}
+
+/// `LwNoteFul(a0=handle)` — `libwasm_note_await_ok`: the cell reports an await
+/// resolved with the value carried by `handle`. Bounded correlate of the
+/// reference `objGet(handle) → asyncify.value; failed=false`: `P_AFAIL`→0,
+/// `P_ALAST`→handle, and — when `handle` names a `__prom` record — its
+/// `PR_VOFF`/`PR_VLEN` body span is adopted as `H_KCUR` so `libwasm_await_value`
+/// returns it. A non-`__prom` handle still clears `afail` (value unsurfaced).
+fn lw_noteful_node() -> Vec<Op> {
+    vec![
+        Op::Comment("LwNoteFul(a0=handle) — note_await_ok: record resolution".into()),
+        Op::Glob("LwNoteFul".into()),
+        Op::Label("LwNoteFul".into()),
+        addi(SP, SP, -32),
+        sd(RA, SP, 24),
+        sd(S0, SP, 16),
+        mv(S0, A0),
+        la(T6, Addr::Prom),
+        sw(X0, T6, P_AFAIL),
+        sw(S0, T6, P_ALAST),
+        mv(A0, S0),
+        jal("PromGet"),
+        beq(A0, X0, "lnf_out"),
+        // Only a fetch record's PR_VOFF is a __kget body offset — the kind
+        // `await_value` copies. A combinator/i32-array record's PR_VOFF is a
+        // __wasm_mem element offset, so adopting it would misread __kget.
+        lw(T0, A0, PR_KIND),
+        bne(T0, X0, "lnf_out"), // PROM_K_FETCH only
+        lw(T2, A0, PR_VOFF),
+        lw(T3, A0, PR_VLEN),
+        la(T4, Addr::DomT),
+        sw(T2, T4, H_KCUR_OFF),
+        sw(T3, T4, H_KCUR_LEN),
+        Op::Label("lnf_out".into()),
+        li(A0, 0),
+        ld(RA, SP, 24),
+        ld(S0, SP, 16),
+        addi(SP, SP, 32),
+        ret(),
+    ]
+}
+
+/// `LwNoteRej(a0=handle)` — `libwasm_note_await_fail`: the cell reports an
+/// await rejected with the error carried by `handle`. `P_AFAIL`→1 and
+/// `P_ALAST`→handle, so `libwasm_await_error` reads that record's
+/// `PR_EOFF`/`PR_ELEN` reason span. A non-`__prom` handle still sets `afail`.
+fn lw_noterej_node() -> Vec<Op> {
+    vec![
+        Op::Comment("LwNoteRej(a0=handle) — note_await_fail: record rejection".into()),
+        Op::Glob("LwNoteRej".into()),
+        Op::Label("LwNoteRej".into()),
+        la(T6, Addr::Prom),
+        li(T1, 1),
+        sw(T1, T6, P_AFAIL),
+        sw(A0, T6, P_ALAST),
+        li(A0, 0),
+        ret(),
+    ]
+}
+
+/// `PromDrain()` — the pending-promise settle pass, run from the timer tick.
+/// For each `PROM_ST_PEND` record: a `PROM_K_FETCH` re-runs `KernelGet` on its
+/// stored url (fulfills on a hit, rejects when `PR_BUDGET` hits 0); a combinator
+/// re-scans its input array in place via `PromScan`. After the scan, if the
+/// suspended `_start`'s promise (`P_ASUSP`) has settled, `PromDrain` clears it
+/// and raises `P_RESUME` so `trap_timer` re-invokes the cell (`JitCall`) to
+/// finish the asyncify rewind. Fail-closed: budget expiry rejects, never wedges.
+fn prom_drain_node() -> Vec<Op> {
+    vec![
+        Op::Comment("PromDrain — settle pending __prom records + flag resume".into()),
+        Op::Glob("PromDrain".into()),
+        Op::Label("PromDrain".into()),
+        addi(SP, SP, -48),
+        sd(RA, SP, 40),
+        sd(S0, SP, 32),
+        sd(S1, SP, 24),
+        sd(S2, SP, 16),
+        sd(S3, SP, 8),
+        la(T6, Addr::Prom),
+        lw(T0, T6, P_MAGIC),
+        li(T1, PROM_MAGIC),
+        bne(T0, T1, "pd_out"),
+        lw(S1, T6, P_N),
+        li(S0, 0),
+        Op::Label("pd_loop".into()),
+        bgeu(S0, S1, "pd_res"),
+        li(T0, PROM_REC as i64),
+        mul(T1, S0, T0),
+        addi(T1, T1, PROM_HDR),
+        add(S2, T6, T1), // rec
+        lw(T0, S2, PR_STATE),
+        li(T1, PROM_ST_PEND),
+        bne(T0, T1, "pd_next"),
+        lw(T2, S2, PR_BUDGET),
+        addi(T2, T2, -1),
+        sw(T2, S2, PR_BUDGET),
+        lw(T3, S2, PR_KIND),
+        beq(T3, X0, "pd_fetch"),
+        j("pd_comb"),
+        Op::Label("pd_fetch".into()),
+        lw(A0, S2, PR_AOFF),
+        lw(A1, S2, PR_ALEN),
+        jal("KernelGet"),
+        mv(S3, A0),
+        blt(S3, X0, "pd_miss"),
+        la(T6, Addr::KGet),
+        li(T0, KGET_ENT as i64),
+        mul(T1, S3, T0),
+        addi(T1, T1, KGET_HDR),
+        add(T1, T6, T1),
+        lw(T2, T1, KGET_E_JSON_OFF),
+        sw(T2, S2, PR_VOFF),
+        lw(T2, T1, KGET_E_JSON_LEN),
+        sw(T2, S2, PR_VLEN),
+        li(T2, PROM_ST_FUL),
+        sw(T2, S2, PR_STATE),
+        la(T6, Addr::Prom),
+        j("pd_next"),
+        Op::Label("pd_miss".into()),
+        la(T6, Addr::Prom),
+        lw(T2, S2, PR_BUDGET),
+        blt(X0, T2, "pd_next"), // budget>0 → stay pending
+        li(T2, PROM_ST_REJ),
+        sw(T2, S2, PR_STATE),
+        j("pd_next"),
+        Op::Label("pd_comb".into()),
+        la(T6, Addr::Prom),
+        lw(A0, S2, PR_AOFF),
+        lw(A1, S2, PR_KIND),
+        mv(A2, S2),
+        jal("PromScan"),
+        la(T6, Addr::Prom),
+        lw(T0, S2, PR_STATE),
+        li(T1, PROM_ST_PEND),
+        bne(T0, T1, "pd_next"),
+        lw(T2, S2, PR_BUDGET),
+        blt(X0, T2, "pd_next"),
+        li(T2, PROM_ST_REJ),
+        sw(T2, S2, PR_STATE),
+        Op::Label("pd_next".into()),
+        addi(S0, S0, 1),
+        j("pd_loop"),
+        Op::Label("pd_res".into()),
+        la(T6, Addr::Prom),
+        lw(A0, T6, P_ASUSP),
+        beq(A0, X0, "pd_out"),
+        jal("PromGet"),
+        beq(A0, X0, "pd_out"),
+        lw(T0, A0, PR_STATE),
+        li(T1, PROM_ST_PEND),
+        beq(T0, T1, "pd_out"), // still pending → keep suspended
+        la(T6, Addr::Prom),
+        sw(X0, T6, P_ASUSP),
+        li(T0, 1),
+        sw(T0, T6, P_RESUME),
+        Op::Label("pd_out".into()),
+        ld(RA, SP, 40),
+        ld(S0, SP, 32),
+        ld(S1, SP, 24),
+        ld(S2, SP, 16),
+        ld(S3, SP, 8),
+        addi(SP, SP, 48),
+        ret(),
+    ]
+}
+
 fn lw_lits_node() -> Vec<Op> {
     let lit = |ops: &mut Vec<Op>, name: &str, s: &str| {
         ops.push(Op::Label(name.into()));
@@ -3042,9 +3733,22 @@ pub fn nodes(spec: &BoardSpec) -> Vec<Node> {
             v.extend(lw_remove_node());
             v.extend(lw_fetch_node());
             v.extend(kernel_get_node());
+            v.extend(prom_alloc_node());
+            v.extend(prom_get_node());
             v.extend(lw_awaitsup_node());
             v.extend(lw_awaitvoid_node());
             v.extend(lw_awaitval_node());
+            v.extend(lw_awaitfail_node());
+            v.extend(lw_awaiterr_node());
+            v.extend(lw_addints_node());
+            v.extend(prom_scan_node());
+            v.extend(prom_combine_node());
+            v.extend(lw_promall_node());
+            v.extend(lw_promany_node());
+            v.extend(lw_promalls_node());
+            v.extend(lw_noteful_node());
+            v.extend(lw_noterej_node());
+            v.extend(prom_drain_node());
             v.extend(lw_phex_node());
             v.extend(lw_lits_node());
             v.extend(domt_demo_node());
@@ -3073,6 +3777,9 @@ pub fn ensure_bss(m: &mut Module) {
     }
     if m.evobj_bytes == 0 {
         m.evobj_bytes = EVOBJ_BYTES;
+    }
+    if m.prom_bytes == 0 {
+        m.prom_bytes = PROM_BYTES;
     }
 }
 
