@@ -20,8 +20,8 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1).collect::<Vec<_>>();
     if args.is_empty() {
         eprintln!(
-            "usage: g6b <design-compile|display|boot|tohtml|holyc-eval|holyc-serve|http-serve|loopback|qemu-args|elf|smoke|gr|display-proxy|display-proxy-32|ui-ppm32|css-paint|css-render|ppm-diff|zealcli|man> \
-             [--spec FILE] [--out DIR|FILE] [--port N] [--once] [--script FILE|-] [--keys CODES] [--frames] [--section NAME] [--cols N]"
+            "usage: g6b <design-compile|display|boot|tohtml|holyc-eval|holyc-serve|http-serve|loopback|qemu-args|elf|canary-disk|arm-disk|smoke|gr|display-proxy|display-proxy-32|ui-ppm32|css-paint|css-render|ppm-diff|zealcli|man> \
+             [--spec FILE] [--out DIR|FILE] [--disk FILE] [--native-manifest FILE] [--port N] [--once] [--script FILE|-] [--keys CODES] [--frames] [--section NAME] [--cols N]"
         );
         return ExitCode::from(2);
     }
@@ -301,6 +301,44 @@ fn main() -> ExitCode {
                 }
             },
         },
+        "arm-disk" => {
+            let Some(disk) = flag_value(&args, "--disk").or_else(|| flag_value(&args, "--out"))
+            else {
+                eprintln!("g6b: arm-disk --disk FILE");
+                return ExitCode::from(2);
+            };
+            match arm_linux_attempt(Path::new(disk)) {
+                Ok(()) => {
+                    eprintln!("g6b: armed InProgress Linux attempt on {disk}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("g6b: arm-disk: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        "canary-disk" => {
+            let Some(disk) = flag_value(&args, "--disk").or_else(|| flag_value(&args, "--out"))
+            else {
+                eprintln!("g6b: canary-disk --disk FILE");
+                return ExitCode::from(2);
+            };
+            let path = Path::new(disk);
+            match fs::read(path).and_then(|mut data| {
+                g6b_asm::linux::plant_canary(&mut data).map_err(io::Error::other)?;
+                fs::write(path, data)
+            }) {
+                Ok(()) => {
+                    eprintln!("g6b: planted canary Image on {}", path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("g6b: canary-disk: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
         "elf" => match load_spec(spec_path.as_deref()) {
             Err(c) => c,
             Ok(spec) => {
@@ -318,7 +356,13 @@ fn main() -> ExitCode {
                         return ExitCode::from(2);
                     }
                 };
-                match g6b_elf::write_elf_with_volumes(&spec, &path, vols) {
+                let written = match flag_value(&args, "--native-manifest") {
+                    Some(manifest) => {
+                        g6b_elf::native::write_elf(&spec, &path, vols, Path::new(manifest))
+                    }
+                    None => g6b_elf::write_elf_with_volumes(&spec, &path, vols),
+                };
+                match written {
                     Ok(()) => {
                         eprintln!("g6b: wrote {}", path.display());
                         ExitCode::SUCCESS
@@ -1185,6 +1229,46 @@ fn handle_conn(
             }
         }
     }
+    Ok(())
+}
+
+fn arm_linux_attempt(path: &Path) -> Result<(), String> {
+    use g6b_boot_health::{prepare_attempt, Bundle, JournalFile};
+    use g6b_bootctl::{Domain, Journal, Prerequisites, Target};
+    let mut storage = JournalFile::bios_window(path.to_str().ok_or("disk path")?)
+        .map_err(|e| format!("{e:?}"))?;
+    match Journal::load(&mut storage, Domain::Linux) {
+        Ok(_) => {}
+        Err(g6b_bootctl::Error::Uninitialized) => {
+            Journal::initialize(&mut storage, Domain::Linux).map_err(|e| format!("{e:?}"))?;
+        }
+        Err(e) => return Err(format!("{e:?}")),
+    }
+    let image = g6b_asm::linux::canary_image();
+    let dtb = [0xd0, 0x0d, 0xfe, 0xed, 0, 0, 0, 0];
+    let target = Target {
+        device: [1; 16],
+        partition: [2; 16],
+        image_digest: [3; 32],
+    };
+    prepare_attempt(
+        &mut storage,
+        target,
+        [4; 16],
+        &Bundle {
+            image: &image,
+            initrd: Some(b"initrd"),
+            dtb: Some(&dtb),
+            root: Some("/dev/vda2"),
+            bootargs: Some("console=ttyS0"),
+        },
+        Prerequisites {
+            image_verified: true,
+            durable_storage: true,
+            recovery_reset_available: true,
+        },
+    )
+    .map_err(|e| format!("{e:?}"))?;
     Ok(())
 }
 

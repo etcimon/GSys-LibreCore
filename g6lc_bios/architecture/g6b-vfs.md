@@ -362,6 +362,20 @@ transport).
   else**: an accepted feature the driver does not implement changes the request
   format under a parser that cannot follow it. Prints `VIRTIO-BLK <slot>` and
   `VIRTIO-BLK-OK`, or `-NONE`/`-FAIL`.
+* **`BlkWrite` / `BlkFlush`** — `VIRTIO_BLK_T_OUT` (data device-readable) and
+  `VIRTIO_BLK_T_FLUSH` if `F_FLUSH` was accepted. Writes are refused outside
+  LBA 8..24 (`BLK-RANGE`) so GPT/MBR/OS extents cannot change.
+* **`JrnLoad` / `JrnCommit`** — eight-sector G6BH slot at LBA 8+`slot`×8:
+  load checks magic; commit rewrites every sector, `BlkFlush`, readback.
+  Host `JournalStorage::on_bios_window` is byte offset 4096. UART `Jrn`
+  runs load+commit on slot 0. QEMU-proved on a writable scratch disk.
+  Firmware A/B stubs at LBA 24 and 32 (`G6FA`/`G6FB`) must survive journal I/O.
+* **`FwStage` / `FwCommit` / `FwSelect`** — `FwStage` is `VIRTIO_BLK_T_OUT`
+  into inactive firmware B (LBA 32..40) only; recovery A, journal, and GPT
+  are `FW-RANGE`. `FwCommit` writes all 8 sectors, `BlkFlush`, readback.
+  `FwSelect` writes `G6SL` at B+8 only when B is complete (`G6FS` first and
+  last, `G6FE` tail). A torn or missing image is `FW-HOLD`. No autoboot.
+  UART `Fws`. Not a SPI image.
 * **`BlkRead`** submits the three-descriptor chain virtio-blk mandates (spec
   5.2.6): a read-only 16-byte `{type, reserved, sector}` header, a device-writable
   512-byte landing zone, and a one-byte device-writable status. **The status byte

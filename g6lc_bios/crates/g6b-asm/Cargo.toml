@@ -12,6 +12,10 @@ description = "RISC-V ASM IR + BoardSpec analysis pass for ZealOS rewrite"
 
 [dependencies]
 g6b-spec = { workspace = true }
+g6b-boot-health = { workspace = true }
+
+[dev-dependencies]
+g6b-bootctl = { workspace = true }
 
 [lints]
 workspace = true

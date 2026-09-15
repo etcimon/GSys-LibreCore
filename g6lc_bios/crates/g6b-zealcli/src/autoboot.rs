@@ -21,6 +21,7 @@
 //! The BIOS UI is offered as the **last** entry when the web stack is compiled,
 //! so a build without it never advertises a face it does not have.
 
+use g6b_bootctl::{Decision, Reason};
 use g6b_spec::{BoardSpec, BootOrder};
 
 use crate::detect::{self, Found, Medium};
@@ -198,6 +199,8 @@ pub struct AutoBoot {
     timeout_ms: u32,
     order: BootOrder,
     done: Option<Pick>,
+    /// Recovery inhibit: unattended countdown must not run.
+    hold: Option<Reason>,
 }
 
 impl AutoBoot {
@@ -211,7 +214,25 @@ impl AutoBoot {
             timeout_ms,
             order: spec.boot_order(),
             done: None,
+            hold: None,
         }
+    }
+
+    /// Arm or hold the picker from a boot-control decision.
+    /// `Stay` inhibits unattended countdown; missing/corrupt journals must
+    /// pass `Stay`, not `new()`, if recovery is required to precede AUTO_ON.
+    pub fn with_decision(spec: &BoardSpec, ports: &Ports, decision: Decision) -> Self {
+        let mut this = Self::new(spec, ports);
+        if let Decision::Stay(reason) = decision {
+            this.hold = Some(reason);
+            this.left = None;
+        }
+        this
+    }
+
+    /// Unattended countdown is live only when health storage allowed Boot.
+    pub fn unattended_armed(&self) -> bool {
+        self.hold.is_none() && self.left.is_some()
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -327,6 +348,7 @@ impl AutoBoot {
                         ms / 1000,
                         (ms % 1000) / 100
                     ),
+                    None if self.hold.is_some() => "HOLD recovery (unattended boot inhibited)".into(),
                     None if self.done.is_some() => "picked".into(),
                     None if self.timeout_ms == 0 => "no countdown (waiting for you)".into(),
                     None => "countdown stopped".into(),
@@ -532,6 +554,32 @@ mod tests {
         assert_eq!(ab.tick(5000), Pick::Waiting, "a stopped clock never fires");
         assert_eq!(ab.key(Key::Esc), Pick::Cancelled);
         assert!(ab.finished());
+    }
+
+    #[test]
+    fn stay_decision_inhibits_unattended_countdown() {
+        let stay = AutoBoot::with_decision(
+            &spec("live-first", false, 2000),
+            &ports(),
+            Decision::Stay(Reason::Provisioning),
+        );
+        assert!(!stay.unattended_armed());
+        assert_eq!(stay.left_ms(), None);
+        assert!(stay
+            .render(80, 8)
+            .iter()
+            .any(|line| line.contains("HOLD recovery")));
+        let mut ticking = stay.clone();
+        assert_eq!(ticking.tick(5000), Pick::Waiting);
+        assert!(!ticking.finished());
+
+        let boot = AutoBoot::with_decision(
+            &spec("live-first", false, 2000),
+            &ports(),
+            Decision::Boot,
+        );
+        assert!(boot.unattended_armed());
+        assert_eq!(boot.left_ms(), Some(2000));
     }
 
     #[test]

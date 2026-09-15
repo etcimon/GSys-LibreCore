@@ -10,6 +10,8 @@
 
 #![allow(missing_docs)]
 
+pub mod native;
+
 use g6b_asm::payload_memsz;
 use g6b_http::files::{load_pglite_dist, MAX_PGLITE_EMBED_BYTES};
 use g6b_spec::BoardSpec;
@@ -400,7 +402,14 @@ mod tests {
         assert!(s.contains("KSTART-STACKS-1"), "{s}");
         assert_eq!(load_addr(&spec).unwrap(), 0x8020_0000);
         let (filesz, memsz) = ph64(&elf);
-        assert_eq!(memsz, payload_memsz(filesz, 1, g6b_asm::UART_LINE_BSS));
+        assert_eq!(
+            memsz,
+            payload_memsz(
+                filesz,
+                1,
+                g6b_asm::UART_LINE_BSS + g6b_asm::linux::LOAD_BYTES
+            )
+        );
         assert!(memsz >= filesz + STACK_BYTES);
     }
 
@@ -421,7 +430,14 @@ mod tests {
         let s = String::from_utf8_lossy(&elf);
         assert!(s.contains("KSTART-STACKS-2"), "{s}");
         let (filesz, memsz) = ph64(&elf);
-        assert_eq!(memsz, payload_memsz(filesz, 2, g6b_asm::UART_LINE_BSS));
+        assert_eq!(
+            memsz,
+            payload_memsz(
+                filesz,
+                2,
+                g6b_asm::UART_LINE_BSS + g6b_asm::linux::LOAD_BYTES
+            )
+        );
         assert!(
             memsz >= filesz + 2 * STACK_BYTES,
             "filesz={filesz} memsz={memsz}"
@@ -476,7 +492,8 @@ mod tests {
                     // allocated here — no backend commits it on this fixture.
                     + g6b_asm::vio::VIO_BSS
                     // Bounded text row table for the CLI container.
-                    + g6b_asm::dom::UI_DOM_BYTES,
+                    + g6b_asm::dom::UI_DOM_BYTES
+                    + g6b_asm::linux::LOAD_BYTES,
             )
         );
     }
@@ -762,7 +779,10 @@ mod tests {
             payload_memsz(
                 filesz,
                 spec.harts.max(1),
-                g6b_asm::UART_LINE_BSS + g6b_asm::UI_HEADER_BYTES + g6b_asm::dom::UI_DOM_BYTES,
+                g6b_asm::UART_LINE_BSS
+                    + g6b_asm::UI_HEADER_BYTES
+                    + g6b_asm::dom::UI_DOM_BYTES
+                    + g6b_asm::linux::LOAD_BYTES,
             )
         );
     }

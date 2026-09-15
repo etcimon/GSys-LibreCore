@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "profile": "barebone",
+  "product": "g6lc64-journal",
+  "isa": {
+    "xlen": 64,
+    "march": "rv64imac",
+    "mmu": "sv39",
+    "extensions": { "c": "live" }
+  },
+  "kernel": {
+    "web": { "enable": false },
+    "ui": "cli",
+    "display": "cli",
+    "gr": {
+      "enable": true,
+      "w": 640,
+      "h": 480,
+      "colors": 16,
+      "backend": "virtio-gpu"
+    },
+    "cli": {
+      "enable": true,
+      "boot": "cli",
+      "autoboot": { "enable": false, "timeout_ms": 0 }
+    },
+    "proxy": { "enable": false, "gl": false },
+    "wasm": { "enable": false, "jit": false, "guest_jit": false },
+    "hw": { "enable": false, "virtio_net": false, "ethernet": false, "wifi": false },
+    "http": { "enable": false, "serve": false, "outbound": false }
+  },
+  "memory": {
+    "dram_base": "0x80000000",
+    "dram_len": "0x20000000",
+    "text_offset": "0x200000"
+  },
+  "harts": { "count": 1 },
+  "uncore": { "clint": true, "plic": true, "storage": true },
+  "holyc": { "dual_band": { "uart": false, "tcp": { "enable": false } } },
+  "postboot": { "enable": "never" },
+  "net_expose": { "mode": "never" },
+  "loopback": { "enable": false }
+}

@@ -19,6 +19,8 @@ pub mod font;
 pub mod jfmt;
 pub mod jitr;
 pub mod kget;
+pub mod linux;
+pub mod ptr;
 pub mod task;
 pub mod vio;
 pub mod virgl;
@@ -74,7 +76,7 @@ pub enum Purpose {
     Virtio,
     /// virtio-net DeviceID 1 probe (`VioNetProbe`). Not a QEMU `-netdev`.
     VirtioNet,
-    /// virtio-blk DeviceID 2 driver (`BlkInit`/`BlkRead`/`BlkSig`) — the payload
+    /// virtio-blk DeviceID 2 driver (`BlkInit`/`BlkRead`/`BlkWrite`/`BlkFlush`/`BlkSig`) — the payload
     /// reading sectors itself, which is what the autoboot handoff waits on.
     VirtioBlk,
     /// Uncore display-engine scanout (HDMI/DP — `architecture/uncore/hdmi-display.md`).
@@ -85,6 +87,9 @@ pub enum Purpose {
     /// Runtime display-output arbitration: pick the highest-priority output
     /// that is actually present and latch its surface (`DispSel`).
     DisplayMux,
+    NativeService,
+    /// Linux entry trampoline: `satp=0`, `a0=hartid`, `a1=FDT`, jump to Image.
+    LinuxHandoff,
 }
 
 impl Purpose {
@@ -131,6 +136,8 @@ impl Purpose {
             Self::DispScan => "disp-scan",
             Self::PciScan => "pci-scan",
             Self::DisplayMux => "display-mux",
+            Self::NativeService => "native-service",
+            Self::LinuxHandoff => "linux-handoff",
         }
     }
 
@@ -178,6 +185,8 @@ impl Purpose {
             Self::DispScan => "disp-mmio",
             Self::PciScan => "pcie-ecam",
             Self::DisplayMux => "__disp sel",
+            Self::NativeService => "boot-owned ABI frame + native RX image; tick Poll after park",
+            Self::LinuxHandoff => "satp=0 a0=hartid a1=fdt jalr Image",
         }
     }
 }
@@ -244,13 +253,21 @@ pub enum Addr {
     /// re-enters a `N_LISTEN >= 0x100` wasm listener, passing its address as
     /// the event handle.
     EvObj,
-    /// Bounded guest promise/object table (`__prom`) — the last BSS region
-    /// (after `__ev_obj`). Each record is a Promise (`pending`/`fulfilled`/
-    /// `rejected` + value/reason span) or an `i32` handle-array (the
-    /// combinator input `libasync_promise_*` reads); `fetch`/`await`/`then`
-    /// address it by a `handle = index+1`. This is the guest-side correlate
-    /// of the interpreter's `ObjectTable<LibwasmValue>` promise subset.
+    /// Bounded guest promise/object table (`__prom`) — after `__ev_obj`.
+    /// Each record is a Promise (`pending`/`fulfilled`/`rejected` +
+    /// value/reason span) or an `i32` handle-array (the combinator input
+    /// `libasync_promise_*` reads); `fetch`/`await`/`then` address it by a
+    /// `handle = index+1`. This is the guest-side correlate of the
+    /// interpreter's `ObjectTable<LibwasmValue>` promise subset.
     Prom,
+    /// Platform watchdog record at the tail of `__linux_load` (`G6WD` +
+    /// `mtime` deadline). Armed by `LinuxEnter`; fires even when `sie=0`.
+    Wdt,
+    /// Durable native ABI frame (`__native_abi`) after `__linux_load`.
+    /// Boot `Purpose::NativeService` copies the 256-byte stack frame here;
+    /// `NativePoll` on `trap_timer` `jalr`s the callee with `a0` pointing at
+    /// it. Empty (`native_bytes == 0`) must not be loaded.
+    NativeAbi,
     /// virgl execbuffer (`__virgl_cmd`) in `.rodata` after `__jit_in` — the
     /// static virgl command stream `VioVirgl` hands to `SUBMIT_3D` (OUT desc),
     /// produced host-side by `crate::virgl::execbuf` (M4).
@@ -757,6 +774,11 @@ pub struct Module {
     /// `PromDrain`, the `libwasm_await_*`/`libasync_promise_*` lane). Record
     /// layout is `domt::PROM_*`. 0 when no guest-DOM/JIT lane.
     pub prom_bytes: u64,
+    /// Reserved Image+FDT load window after other BSS (`__linux_load`).
+    pub linux_bytes: u64,
+    /// Durable native ABI frame after `__linux_load`. 256 bytes when a
+    /// native-service callee is composed; 0 otherwise.
+    pub native_bytes: u64,
     /// `__virgl_out` BSS bytes — the guest-RAM readback target for
     /// `TRANSFER_FROM_HOST_3D` under `proxy.gl` (the offscreen `RES_RT`
     /// render pulled back into guest memory). 0 when no virgl lane.
@@ -957,6 +979,8 @@ impl Module {
             .saturating_add(self.virgl_out_bytes)
             .saturating_add(self.evobj_bytes)
             .saturating_add(self.prom_bytes)
+            .saturating_add(self.linux_bytes)
+            .saturating_add(self.native_bytes)
     }
 
     /// GNU as text. Comments include purpose and state home.
@@ -1235,6 +1259,12 @@ impl Module {
             }
             s.push_str(&format!("__prom:\n.space {:#x}\n", self.prom_bytes));
         }
+        if self.linux_bytes > 0 {
+            s.push_str(&format!("__linux_load:\n.space {:#x}\n", self.linux_bytes));
+        }
+        if self.native_bytes > 0 {
+            s.push_str(&format!("__native_abi:\n.space {:#x}\n", self.native_bytes));
+        }
         s
     }
 
@@ -1244,6 +1274,23 @@ impl Module {
     /// model can read the `DispSel`/`PciProbe` result block out of RAM without
     /// duplicating (and eventually diverging from) the layout. `None` when the
     /// module allocates no `__vio`.
+    /// Tail of `__linux_load`: platform WDT `G6WD` + deadline.
+    pub fn wdt_bss_addr(&self, entry: u64) -> Option<u64> {
+        if self.linux_bytes < crate::linux::WDT_BYTES {
+            return None;
+        }
+        let (words, _) = self.to_words(entry).ok()?;
+        let code_bytes = (words.len() * 4) as u64;
+        let filesz = self.image_filesz(code_bytes);
+        let stacks = entry.wrapping_add(stack_memsz(filesz, self.n_harts()));
+        Some(
+            stacks
+                .wrapping_add(self.extra_bss())
+                .wrapping_sub(self.native_bytes)
+                .wrapping_sub(crate::linux::WDT_BYTES),
+        )
+    }
+
     pub fn vio_bss_addr(&self, entry: u64) -> Option<u64> {
         if self.vio_bytes == 0 {
             return None;
@@ -1628,6 +1675,11 @@ fn resolve_addr(
             .wrapping_add(m.domid_bytes)
             .wrapping_add(m.virgl_out_bytes)
             .wrapping_add(m.evobj_bytes),
+        Addr::Wdt => stacks
+            .wrapping_add(m.extra_bss())
+            .wrapping_sub(m.native_bytes)
+            .wrapping_sub(crate::linux::WDT_BYTES),
+        Addr::NativeAbi => stacks.wrapping_add(m.extra_bss().saturating_sub(m.native_bytes)),
         Addr::VirglCmd => rodata_addr
             .wrapping_add(m.rodata.len() as u64)
             .wrapping_add(m.ui_wasm.len() as u64)
@@ -1971,6 +2023,12 @@ fn op_to_asm(op: &Op) -> String {
             Addr::VirglOut => format!("\tla\t{}, __virgl_out", reg_name(*rd)),
             Addr::EvObj => format!("\tla\t{}, __ev_obj", reg_name(*rd)),
             Addr::Prom => format!("\tla\t{}, __prom", reg_name(*rd)),
+            Addr::Wdt => format!(
+                "\tla\t{}, __linux_load + {:#x}",
+                reg_name(*rd),
+                crate::linux::IMAGE_CAP + crate::linux::FDT_CAP
+            ),
+            Addr::NativeAbi => format!("\tla\t{}, __native_abi", reg_name(*rd)),
             Addr::VirglCmd => format!("\tla\t{}, __virgl_cmd", reg_name(*rd)),
             Addr::VirglReq => format!("\tla\t{}, __virgl_req", reg_name(*rd)),
             Addr::WebPk => format!("\tla\t{}, __web_pk", reg_name(*rd)),
@@ -2003,6 +2061,11 @@ fn op_to_asm(op: &Op) -> String {
             Addr::VirglOut => "\t.dword\t__virgl_out".into(),
             Addr::EvObj => "\t.dword\t__ev_obj".into(),
             Addr::Prom => "\t.dword\t__prom".into(),
+            Addr::Wdt => format!(
+                "\t.dword\t__linux_load + {:#x}",
+                crate::linux::IMAGE_CAP + crate::linux::FDT_CAP
+            ),
+            Addr::NativeAbi => "\t.dword\t__native_abi".into(),
             Addr::VirglCmd => "\t.dword\t__virgl_cmd".into(),
             Addr::VirglReq => "\t.dword\t__virgl_req".into(),
             Addr::WebPk => "\t.dword\t__web_pk".into(),

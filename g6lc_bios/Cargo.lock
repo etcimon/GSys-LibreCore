@@ -40,7 +40,17 @@ dependencies = [
 name = "g6b-asm"
 version = "0.1.0"
 dependencies = [
+ "g6b-boot-health",
+ "g6b-bootctl",
  "g6b-spec",
+]
+
+[[package]]
+name = "g6b-boot-health"
+version = "0.1.0"
+dependencies = [
+ "g6b-bootctl",
+ "g6b-vfs",
 ]
 
 [[package]]
@@ -52,6 +62,8 @@ name = "g6b-cli"
 version = "0.1.0"
 dependencies = [
  "g6b-asm",
+ "g6b-boot-health",
+ "g6b-bootctl",
  "g6b-css",
  "g6b-design",
  "g6b-doldoc",
@@ -105,10 +117,13 @@ name = "g6b-elf"
 version = "0.1.0"
 dependencies = [
  "g6b-asm",
+ "g6b-guest",
  "g6b-http",
  "g6b-kernel",
  "g6b-pglite",
+ "g6b-runtime-abi",
  "g6b-spec",
+ "g6b-tls",
  "g6b-wasm",
 ]
 
@@ -124,6 +139,13 @@ name = "g6b-gr"
 version = "0.1.0"
 dependencies = [
  "g6b-spec",
+]
+
+[[package]]
+name = "g6b-guest"
+version = "0.1.0"
+dependencies = [
+ "g6b-runtime-abi",
 ]
 
 [[package]]
@@ -272,6 +294,7 @@ name = "g6b-zealcli"
 version = "0.1.0"
 dependencies = [
  "g6b-asm",
+ "g6b-bootctl",
  "g6b-holyc",
  "g6b-spec",
  "g6b-vfs",

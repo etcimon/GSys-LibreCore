@@ -35,7 +35,34 @@ BoardSpec JSON  →  g6b-design / g6b-holyc / g6b-html / g6b-elf
 
 ## 1. Current planning state (2026-09)
 
-**Stage: B0–B52 plus B55–B59 host lanes landed within the stated host/guest boundaries.** Named BIOS profiles (`embedded`/`router` → `full`)
+**Stage: B0–B52 plus B55–B59 host lanes landed within the stated host/guest boundaries.
+Recovery P0 callee ELF, P1 poll core + RuntimeContext table + guest per-context suspend + bounded bump arena + timer-tick Poll after park, and P2 inhibit-before-autoboot + inactive-slot stage + declared-slot rewrite + staged-slot nomination + torn-media fail-closed landed
+(QEMU `NATIVE-SERVICE-OK` / `NATIVE-POLL-OK` / `NATIVE-BOOT-HOLD`; exec-model
+`BlkWrite`/`BlkFlush`/`JrnLoad`/`JrnCommit` on G6BH slots at LBA 8);
+QEMU UART `Jrn` proved; firmware A/B stubs protected from journal I/O;
+QEMU UART `Lnx` requires InProgress (`LINUX-HOLD` otherwise);
+live OpenWrt VM and a real kernel remain open; watchdog-nowayout stamp, FDT health handoff, helper journal discovery, partition volume discovery, filesystem file discovery, `/dev/watchdog` ioctl mock, and platform WDT that survives `LinuxEnter` landed.
+P3 UTF-8 event getters, capture/at-target/bubble, multiple listener records,
+`once`/`passive`/removal, OptionalUint/Handle, float, double,
+Optional{String,Bool,Double} getters, SYN_REPORT (REL/wheel/hover), and
+RFB/KVM input normalize, modifiers/multi-button, click-to-focus,
+host-oracle mutation, password controls, timeStamp, deltaMode, printable
+US text/backspace, a per-field caret, and shift-arrow selection landed;
+RFB session/auth and IME remain open. P4 guest `try_table` catch dest,
+interp `catch_all` without throw payloads, guest JIT vsp restore,
+`try_table` catch dest vsp restore, cross-function throw into
+`try_table` (single- and multi-clause), tagged payload across
+`R_THROW` (up to 4 cells), `rethrow 0` from a tagged catch (including
+into `try_table`), `catch_all_ref`/`throw_ref` (opaque exnref), and
+`catch_ref` (payload plus exnref dest), continuation-owned EH
+(`PromCtx` spills the `__jit` EXC bank; host `Continuation` carries
+tag/payload), outermost-user `JitCall` EH nest restore, and guest-JIT
+fail-closed `await` inside `try`/`try_table` (0x700), including a `try`
+that `call`s an awaiter, and `call_indirect` inside a try when the
+funcref table can reach await, host-interp fail-closed direct `await`
+inside `try`/`try_table`, and interp callee-await from a try, landed.
+**P4 sequential leftovers are closed.** IME and RFB 3.8 stay with later
+phases. P5 may start.** Named BIOS profiles (`embedded`/`router` → `full`)
 compile from UART+SPI flash up to browser-UI HTTPS + USB settings. USB FAT32
 flash is always compiled; the USB-key file manager (FAT32/NTFS/ext4) is extra.
 64-bit SMT2 / multi-core / multi-issue / stream / OoO / hypervisor / RVV

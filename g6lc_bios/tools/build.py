@@ -588,6 +588,9 @@ def main() -> int:
         return build_full(spec)
     if cmd == "test":
         return cmd_test(rest)
+    if cmd == "native":
+        from guest_native import main as native_main
+        return native_main(rest)
     if cmd == "check":
         return cmd_check()
     err(f"unknown command: {cmd}")

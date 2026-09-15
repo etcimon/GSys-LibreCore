@@ -20,7 +20,7 @@
 
 #![allow(missing_docs)]
 
-use crate::binary::{decode, Instr, ValType};
+use crate::binary::{decode, FuncType, Import, Instr, Tag, TryTableCatch, ValType};
 
 // The wire format is the guest ABI — it is owned by `g6b-asm` (`jfmt`), the
 // consumer side; this crate produces it.
@@ -38,26 +38,72 @@ struct Rec {
 #[derive(Debug)]
 enum Ctrl {
     /// `block`/`if`/`try_table` body: `br` targets the record *after* `end`,
-    /// backpatched when the end is seen.
-    Fwd { patch: Vec<usize> },
+    /// backpatched when the end is seen. `height` is the operand cell count
+    /// from `s11` on entry; `results` is 0 or 1.
+    Fwd {
+        patch: Vec<usize>,
+        height: u32,
+        results: u32,
+    },
     /// `loop`: `br` targets the record right after the `loop` opcode.
-    Loop { start: u32 },
+    Loop {
+        start: u32,
+        height: u32,
+        results: u32,
+    },
     /// `if`: the `JZ` to the else/end target, plus its own `Fwd` list for `br`.
-    If { jz: usize, patch: Vec<usize> },
+    If {
+        jz: usize,
+        patch: Vec<usize>,
+        height: u32,
+        results: u32,
+    },
     /// Legacy `try`: `patch` collects the forward refs that resolve to `end`
     /// (`br`-outs plus the JMP-over-handler each `catch` emits); `throws` are
     /// `throw`/`rethrow` forward-refs patched to the first handler entry at the
     /// first `catch`. `seen_catch` stops later `catch` arms from re-patching.
+    /// `height` is snapshotted at `try` so `R_EXCCLR` can restore `s10`.
+    /// `catch_nparams` is the payload count of the current catch (0 for
+    /// `catch_all`) so `rethrow` can restash on escape. `catch_tag` is the
+    /// tag of that catch (`u32::MAX` = `catch_all`) so `rethrow` can select
+    /// a `try_table` dest.
     Try {
         patch: Vec<usize>,
         throws: Vec<usize>,
         seen_catch: bool,
+        height: u32,
+        results: u32,
+        catch_nparams: u32,
+        catch_tag: u32,
+    },
+    /// `try_table`: body is a forward block; `throw` emits `R_EXCCLR` at the
+    /// dest frame's height then `br` (depth = label + 1 + frames between throw
+    /// and this table). Label 0 is the parent, not the table. `throws` are
+    /// post-call `R_EXCCHK` records (one per clause, in clause order per call)
+    /// patched to skip-over landing pads. `catch_dest` is
+    /// `(label, nparams, match_tag)` per executable clause (`match_tag` =
+    /// `u64::MAX` for `catch_all`).
+    TryTable {
+        patch: Vec<usize>,
+        catches: Vec<TryTableCatch>,
+        height: u32,
+        results: u32,
+        throws: Vec<usize>,
+        catch_dest: Vec<(u32, u32, u64)>,
     },
 }
 
 struct FnEnc {
     recs: Vec<Rec>,
     ctrls: Vec<Ctrl>,
+    /// Operand + local cell count from `s11`. Starts at `nlocals` (the
+    /// prologue leaves `s10 = s11 + nlocals*8`).
+    height: u32,
+    /// `R_CALL` record indices emitted while a `try`/`try_table` is live —
+    /// sealed after the whole module is lowered if the callee can reach await.
+    try_calls: Vec<usize>,
+    /// `R_CALLI` record indices emitted while a `try`/`try_table` is live.
+    try_calli: Vec<usize>,
 }
 
 impl FnEnc {
@@ -71,26 +117,101 @@ impl FnEnc {
     fn trap(&mut self, code: u32, orig: u64) {
         self.push(R_TRAP, code, orig);
     }
+    fn adj(&mut self, d: i32) {
+        if d >= 0 {
+            self.height = self.height.saturating_add(d as u32);
+        } else {
+            self.height = self.height.saturating_sub((-d) as u32);
+        }
+    }
+    /// `catch`/`catch_all` head: JMP over the handler, then `R_EXCCLR` with
+    /// the enclosing try's snapshotted height and the tag's payload count.
+    fn catch_head(&mut self, nparams: u32, tag: u32) {
+        let r = self.push(R_JMP, u32::MAX, 0);
+        let height = match self.ctrls.last() {
+            Some(Ctrl::Try { height, .. }) => *height,
+            _ => self.height,
+        };
+        let handler_at = self.push(R_EXCCLR, height, u64::from(nparams)) as u32;
+        self.height = height + nparams;
+        match self.ctrls.last_mut() {
+            Some(Ctrl::Try {
+                patch,
+                throws,
+                seen_catch,
+                catch_nparams,
+                catch_tag,
+                ..
+            }) => {
+                patch.push(r);
+                *catch_nparams = nparams;
+                *catch_tag = tag;
+                if !*seen_catch {
+                    for h in throws.drain(..) {
+                        self.recs[h].a = handler_at;
+                    }
+                    *seen_catch = true;
+                }
+            }
+            _ => {
+                self.trap(TRAP_XLATE, 0x07);
+            }
+        }
+    }
     /// Emit a post-`call`/`call_indirect` exception check — the landing pad a
     /// callee's `R_THROW` returns into. Inside a `try` *body* the record is
     /// queued into that try's `throws` so the first `catch` backpatches `a` to
     /// the handler; a call inside a `catch` (`seen_catch`) routes to the next
-    /// enclosing try (its own protection is already consumed), and a call with
-    /// no enclosing try keeps `a` = u32::MAX → propagate the unwind up a frame.
+    /// enclosing try (its own protection is already consumed). Inside a
+    /// `try_table` one `R_EXCCHK` is emitted per clause (bit 32 of `b` chains
+    /// a tagged miss to the next check) and patched to an `R_EXCCLR`+`R_JMP`
+    /// pad at `end`. No enclosing handler keeps `a` = u32::MAX → propagate.
     fn excchk(&mut self) {
-        let r = self.push(R_EXCCHK, u32::MAX, 0);
-        for c in self.ctrls.iter_mut().rev() {
-            if let Ctrl::Try {
-                throws, seen_catch, ..
-            } = c
-            {
-                if *seen_catch {
-                    continue;
+        let mut try_i = None;
+        let mut table_i = None;
+        let mut table_dests: Option<Vec<(u32, u32, u64)>> = None;
+        for (i, c) in self.ctrls.iter().enumerate().rev() {
+            match c {
+                Ctrl::Try { seen_catch, .. } if !*seen_catch => {
+                    try_i = Some(i);
+                    break;
                 }
-                throws.push(r);
-                break;
+                Ctrl::Try { .. } => {}
+                Ctrl::TryTable { catch_dest, .. } if !catch_dest.is_empty() => {
+                    table_i = Some(i);
+                    table_dests = Some(catch_dest.clone());
+                    break;
+                }
+                Ctrl::TryTable { .. } => {}
+                _ => {}
             }
         }
+        if let Some(i) = try_i {
+            let r = self.push(R_EXCCHK, u32::MAX, 0);
+            if let Ctrl::Try { throws, .. } = &mut self.ctrls[i] {
+                throws.push(r);
+            }
+            return;
+        }
+        if let (Some(i), Some(dests)) = (table_i, table_dests) {
+            let n = dests.len();
+            let mut recs = Vec::with_capacity(n);
+            for (j, &(_, _, tag)) in dests.iter().enumerate() {
+                let b = if tag == u64::MAX {
+                    u64::MAX
+                } else if j + 1 < n {
+                    tag | EXCCHK_CHAIN
+                } else {
+                    tag
+                };
+                recs.push(self.push(R_EXCCHK, u32::MAX, b));
+            }
+            if let Ctrl::TryTable { throws, .. } = &mut self.ctrls[i] {
+                throws.extend(recs);
+            }
+            return;
+        }
+        self.push(R_EXCCHK, u32::MAX, 0);
     }
     /// Resolve `br depth` to a JMP record (forward targets patch at `end`).
     fn br(&mut self, depth: u32, cond: bool) {
@@ -102,23 +223,52 @@ impl FnEnc {
         }
         let i = n - 1 - depth as usize;
         let loop_start = match &self.ctrls[i] {
-            Ctrl::Loop { start } => Some(*start),
+            Ctrl::Loop { start, .. } => Some(*start),
             _ => None,
         };
         let r = self.push(op, loop_start.unwrap_or(u32::MAX), 0);
         if loop_start.is_none() {
             match &mut self.ctrls[i] {
-                Ctrl::Fwd { patch } | Ctrl::If { patch, .. } | Ctrl::Try { patch, .. } => {
-                    patch.push(r)
-                }
+                Ctrl::Fwd { patch, .. }
+                | Ctrl::If { patch, .. }
+                | Ctrl::Try { patch, .. }
+                | Ctrl::TryTable { patch, .. } => patch.push(r),
                 _ => {}
             }
+        }
+    }
+    /// Land a `try_table` catch dest. `CATCH_DEST_REF` synthesizes an exnref
+    /// handle; `CATCH_DEST_PAY` also copies the tag payload (`catch_ref`).
+    /// `from_stack` is a local `throw` (payload still on the wasm stack);
+    /// cross-function pads stash via `R_THROW` already and keep `OFF_EXCTAG`.
+    fn emit_catch_land(&mut self, dest_h: u32, nparams: u32, tag: u64, from_stack: bool) {
+        if nparams & CATCH_DEST_REF != 0 {
+            let pay = nparams & 0xff;
+            let with_pay = nparams & CATCH_DEST_PAY != 0;
+            if from_stack {
+                self.push(R_EXNREF, pay, tag);
+                let copy = if with_pay { pay + 1 } else { 1 };
+                self.push(R_EXCCLR, dest_h, u64::from(copy));
+            } else if with_pay {
+                self.push(R_EXCCLR, dest_h, u64::from(pay));
+                self.push(R_EXNREF, 0, u64::MAX);
+            } else {
+                self.push(R_EXCCLR, dest_h, 0);
+                self.push(R_EXNREF, 0, u64::MAX);
+            }
+        } else {
+            self.push(R_EXCCLR, dest_h, u64::from(nparams));
         }
     }
     fn end(&mut self) {
         let target = self.at();
         match self.ctrls.pop() {
-            Some(Ctrl::If { jz, patch }) => {
+            Some(Ctrl::If {
+                jz,
+                patch,
+                height,
+                results,
+            }) => {
                 // An `if` with no `else` leaves its `jz` still pointing at the
                 // u32::MAX sentinel — resolve it to `end` so `if (0)` skips the
                 // then-body. `else_` already patched it when an else existed.
@@ -128,14 +278,71 @@ impl FnEnc {
                 for r in patch {
                     self.recs[r].a = target;
                 }
+                self.height = height + results;
             }
-            Some(Ctrl::Fwd { patch }) | Some(Ctrl::Try { patch, .. }) => {
+            Some(Ctrl::Fwd {
+                patch,
+                height,
+                results,
+            })
+            | Some(Ctrl::Try {
+                patch,
+                height,
+                results,
+                ..
+            }) => {
                 for r in patch {
                     self.recs[r].a = target;
                 }
+                self.height = height + results;
             }
-            Some(Ctrl::Loop { .. }) => {
+            Some(Ctrl::TryTable {
+                patch,
+                height,
+                results,
+                throws,
+                catch_dest,
+                ..
+            }) => {
+                // One off-fallthrough pad per clause so a callee `R_THROW` can
+                // `R_EXCCHK` into `R_EXCCLR`+`R_JMP` dest. Body exits skip the
+                // pads. `throws` is clause-major per call (n checks × calls).
+                if throws.is_empty() || catch_dest.is_empty() {
+                    for r in patch {
+                        self.recs[r].a = target;
+                    }
+                    self.height = height + results;
+                } else {
+                    let skip_jmp = self.push(R_JMP, u32::MAX, 0);
+                    let nctrl = self.ctrls.len();
+                    let n = catch_dest.len();
+                    let mut landings = Vec::with_capacity(n);
+                    for &(label, nparams, _) in &catch_dest {
+                        landings.push(self.at() as u32);
+                        let dest_h = if (label as usize) < nctrl {
+                            ctrl_height(&self.ctrls[nctrl - 1 - label as usize])
+                        } else {
+                            height
+                        };
+                        self.emit_catch_land(dest_h, nparams, u64::MAX, false);
+                        self.br(label, false);
+                    }
+                    for (i, t) in throws.iter().enumerate() {
+                        self.recs[*t].a = landings[i % n];
+                    }
+                    let skip = self.at();
+                    self.recs[skip_jmp].a = skip;
+                    for r in patch {
+                        self.recs[r].a = skip;
+                    }
+                    self.height = height + results;
+                }
+            }
+            Some(Ctrl::Loop {
+                height, results, ..
+            }) => {
                 // `end` of a loop just falls through — `br` already points up.
+                self.height = height + results;
             }
             None => {
                 // Function `end`: leave an explicit RET so fallthrough returns.
@@ -146,8 +353,9 @@ impl FnEnc {
     fn else_(&mut self) {
         let target = self.at() + 1; // record after the JMP we are about to emit
         match self.ctrls.last_mut() {
-            Some(Ctrl::If { jz, .. }) => {
+            Some(Ctrl::If { jz, height, .. }) => {
                 self.recs[*jz].a = target;
+                self.height = *height;
             }
             _ => {
                 self.trap(TRAP_XLATE, 0x05);
@@ -161,10 +369,313 @@ impl FnEnc {
             patch.push(r);
         }
     }
-    fn if_(&mut self) {
+    fn if_(&mut self, results: u32) {
+        self.adj(-1); // pop the condition
+        let height = self.height;
         let jz = self.push(R_JZ, u32::MAX, 0);
-        self.ctrls.push(Ctrl::If { jz, patch: vec![] });
+        self.ctrls.push(Ctrl::If {
+            jz,
+            patch: vec![],
+            height,
+            results,
+        });
     }
+}
+
+fn nres(ty: Option<ValType>) -> u32 {
+    u32::from(ty.is_some())
+}
+
+fn tag_nparams(tags: &[Tag], types: &[FuncType], tag: u32) -> u32 {
+    tags.get(tag as usize)
+        .and_then(|t| types.get(t.typeidx as usize))
+        .map(|ty| ty.params.len() as u32)
+        .unwrap_or(0)
+        .min(MAX_EXCPAY)
+}
+
+fn call_delta(fidx: u32, imports: &[Import], types: &[FuncType], func_types: &[u32]) -> i32 {
+    let ty = if (fidx as usize) < imports.len() {
+        types.get(imports[fidx as usize].typeidx as usize)
+    } else {
+        let body = fidx as usize - imports.len();
+        func_types.get(body).and_then(|&ti| types.get(ti as usize))
+    };
+    match ty {
+        Some(t) => t.results.len() as i32 - t.params.len() as i32,
+        None => 0,
+    }
+}
+
+fn stack_delta(
+    ins: &Instr,
+    imports: &[Import],
+    types: &[FuncType],
+    func_types: &[u32],
+    tags: &[Tag],
+) -> i32 {
+    match ins {
+        Instr::I32Const(_)
+        | Instr::I64Const(_)
+        | Instr::F32Const(_)
+        | Instr::F64Const(_)
+        | Instr::LocalGet(_)
+        | Instr::GlobalGet(_)
+        | Instr::MemorySize
+        | Instr::TableGet(_)
+        | Instr::TableSize(_) => 1,
+        Instr::Drop
+        | Instr::LocalSet(_)
+        | Instr::GlobalSet(_)
+        | Instr::BrIf(_)
+        | Instr::BrTable { .. }
+        | Instr::ThrowRef => -1,
+        Instr::Select => -2,
+        Instr::I32Add
+        | Instr::I32Sub
+        | Instr::I32Mul
+        | Instr::I32DivS
+        | Instr::I32DivU
+        | Instr::I32RemS
+        | Instr::I32RemU
+        | Instr::I32And
+        | Instr::I32Or
+        | Instr::I32Xor
+        | Instr::I32Shl
+        | Instr::I32ShrS
+        | Instr::I32ShrU
+        | Instr::I32Rotl
+        | Instr::I32Rotr
+        | Instr::I32Eq
+        | Instr::I32Ne
+        | Instr::I32LtS
+        | Instr::I32LtU
+        | Instr::I32GtS
+        | Instr::I32GtU
+        | Instr::I32LeS
+        | Instr::I32LeU
+        | Instr::I32GeS
+        | Instr::I32GeU => -1,
+        Instr::I32Eqz | Instr::LocalTee(_) | Instr::I32Load { .. } => 0,
+        Instr::I32Load8S { .. }
+        | Instr::I32Load8U { .. }
+        | Instr::I32Load16S { .. }
+        | Instr::I32Load16U { .. }
+        | Instr::I64Load { .. }
+        | Instr::I64Load8S { .. }
+        | Instr::I64Load8U { .. }
+        | Instr::I64Load16S { .. }
+        | Instr::I64Load16U { .. }
+        | Instr::I64Load32S { .. }
+        | Instr::I64Load32U { .. }
+        | Instr::F32Load { .. }
+        | Instr::F64Load { .. }
+        | Instr::Convert(_)
+        | Instr::SaturatingTrunc(_)
+        | Instr::MemoryGrow => 0,
+        Instr::I32Store { .. }
+        | Instr::I32Store8 { .. }
+        | Instr::I32Store16 { .. }
+        | Instr::I64Store { .. }
+        | Instr::I64Store8 { .. }
+        | Instr::I64Store16 { .. }
+        | Instr::I64Store32 { .. }
+        | Instr::F32Store { .. }
+        | Instr::F64Store { .. }
+        | Instr::TableSet(_) => -2,
+        Instr::MemoryCopy
+        | Instr::MemoryFill
+        | Instr::MemoryInit(_)
+        | Instr::TableCopy { .. }
+        | Instr::TableFill(_)
+        | Instr::TableInit { .. } => -3,
+        Instr::TableGrow(_) => 0,
+        Instr::Numeric(op) => numeric_delta(*op),
+        Instr::Call(fidx) => call_delta(*fidx, imports, types, func_types),
+        Instr::CallIndirect { typeidx, .. } => match types.get(*typeidx as usize) {
+            Some(t) => t.results.len() as i32 - t.params.len() as i32 - 1,
+            None => -1,
+        },
+        Instr::Throw(t) => -(tag_nparams(tags, types, *t) as i32),
+        Instr::Block(_)
+        | Instr::Loop(_)
+        | Instr::If(_)
+        | Instr::Else
+        | Instr::End
+        | Instr::Br(_)
+        | Instr::Try(_)
+        | Instr::Catch(_)
+        | Instr::CatchAll
+        | Instr::Delegate(_)
+        | Instr::TryTable { .. }
+        | Instr::Nop
+        | Instr::Unreachable
+        | Instr::Return
+        | Instr::Rethrow(_)
+        | Instr::DataDrop(_)
+        | Instr::ElemDrop(_)
+        | Instr::Unsupported(_) => 0,
+    }
+}
+
+fn numeric_delta(op: u8) -> i32 {
+    match op {
+        0x45 | 0x50 => 0,                              // eqz
+        0x46..=0x4f | 0x51..=0x5a | 0x5b..=0x66 => -1, // cmp
+        0x67..=0x69 | 0x79..=0x7b => 0,                // clz/ctz/popcnt
+        0x6a..=0x78 | 0x7c..=0x8a => -1,               // i32/i64 bin
+        0x8b..=0x91 | 0x99..=0x9f => 0,                // f32/f64 unary
+        0x92..=0x98 | 0xa0..=0xa6 => -1,               // f32/f64 bin
+        _ => 0,
+    }
+}
+
+fn ctrl_height(c: &Ctrl) -> u32 {
+    match c {
+        Ctrl::Fwd { height, .. }
+        | Ctrl::Loop { height, .. }
+        | Ctrl::If { height, .. }
+        | Ctrl::Try { height, .. }
+        | Ctrl::TryTable { height, .. } => *height,
+    }
+}
+
+/// OR into a `try_table` dest `nparams` so the landing synthesizes an
+/// exnref handle (`catch_all_ref` / `catch_ref`) instead of only the tag
+/// payload.
+const CATCH_DEST_REF: u32 = 1 << 8;
+/// With `CATCH_DEST_REF`, also copy the tag payload onto the dest
+/// (`catch_ref`: payload then exnref). `catch_all_ref` omits this.
+const CATCH_DEST_PAY: u32 = 1 << 9;
+
+/// Executable `try_table` catch clauses for cross-function landing pads, in
+/// table order.
+fn try_table_catches(
+    catches: &[TryTableCatch],
+    tags: &[Tag],
+    types: &[FuncType],
+) -> Vec<(u32, u32, u64)> {
+    let mut out = Vec::new();
+    for c in catches {
+        match c {
+            TryTableCatch::Catch { tag, label } => {
+                out.push((*label, tag_nparams(tags, types, *tag), u64::from(*tag)));
+            }
+            TryTableCatch::CatchAll { label } => out.push((*label, 0, u64::MAX)),
+            TryTableCatch::CatchAllRef { label } => {
+                out.push((*label, CATCH_DEST_REF, u64::MAX));
+            }
+            TryTableCatch::CatchRef { tag, label } => {
+                out.push((
+                    *label,
+                    CATCH_DEST_REF | CATCH_DEST_PAY | tag_nparams(tags, types, *tag),
+                    u64::from(*tag),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// True when a `try`/`try_table` is on the control stack — `await` must not
+/// sit in that region (asyncify rewind is not an EH landing pad).
+fn in_eh_try(f: &FnEnc) -> bool {
+    f.ctrls
+        .iter()
+        .any(|c| matches!(c, Ctrl::Try { .. } | Ctrl::TryTable { .. }))
+}
+
+/// After every body is lowered: a `try`/`try_table` that `call`s a function
+/// which can reach `await` (directly or via other calls) is fail-closed.
+/// Direct import-await inside a try is already a 0x700 trap at the `R_EXT`
+/// site; this pass covers `try { call $awaiter }`. `call_indirect` inside a
+/// try is fail-closed when **any** funcref-table function can reach await
+/// (table-conservative; not a per-index proof).
+fn seal_await_in_try(fns: &mut [FnEnc], nimports: u32, nfuncs: u32, table: &[u32]) {
+    let n = nfuncs as usize;
+    let mut callers: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut reaches = vec![false; n];
+    let mut stack = Vec::new();
+    for (i, f) in fns.iter().enumerate() {
+        let fidx = nimports + i as u32;
+        for r in &f.recs {
+            if r.op == R_CALL && (r.a as usize) < n {
+                callers[r.a as usize].push(fidx);
+            }
+            if r.op == R_EXT
+                && (r.a == EXT_AWAIT || r.a == EXT_AWAIT_VOID)
+                && !reaches[fidx as usize]
+            {
+                reaches[fidx as usize] = true;
+                stack.push(fidx);
+            }
+        }
+    }
+    while let Some(fidx) = stack.pop() {
+        for &c in &callers[fidx as usize] {
+            if !reaches[c as usize] {
+                reaches[c as usize] = true;
+                stack.push(c);
+            }
+        }
+    }
+    let table_can_await = table.iter().any(|&fidx| {
+        let i = fidx as usize;
+        i < n && reaches[i]
+    });
+    for f in fns.iter_mut() {
+        for &ri in &f.try_calls {
+            if f.recs[ri].op != R_CALL {
+                continue;
+            }
+            let callee = f.recs[ri].a as usize;
+            if callee < n && reaches[callee] {
+                f.recs[ri].op = R_TRAP;
+                f.recs[ri].a = TRAP_UNSUP;
+                f.recs[ri].b = 0x700;
+            }
+        }
+        if table_can_await {
+            for &ri in &f.try_calli {
+                if f.recs[ri].op == R_CALLI {
+                    f.recs[ri].op = R_TRAP;
+                    f.recs[ri].a = TRAP_UNSUP;
+                    f.recs[ri].b = 0x700;
+                }
+            }
+        }
+    }
+}
+
+/// Catch dest for `throw $tag` inside `try_table`: `(br_label, payload_slots)`.
+/// `catch_all` has 0 payload slots. `CATCH_DEST_REF` marks an exnref dest;
+/// `CATCH_DEST_PAY` also copies the tag payload (`catch_ref`). Labels do
+/// not count the table (0 = parent).
+fn try_table_catch_dest(
+    catches: &[TryTableCatch],
+    tag: u32,
+    tags: &[Tag],
+    types: &[FuncType],
+) -> Option<(u32, u32)> {
+    for c in catches {
+        match c {
+            TryTableCatch::Catch { tag: t, label } if *t == tag => {
+                return Some((*label, tag_nparams(tags, types, *t)));
+            }
+            TryTableCatch::CatchAll { label } => return Some((*label, 0)),
+            TryTableCatch::CatchAllRef { label } => {
+                return Some((*label, CATCH_DEST_REF | tag_nparams(tags, types, tag)));
+            }
+            TryTableCatch::CatchRef { tag: t, label } if *t == tag => {
+                return Some((
+                    *label,
+                    CATCH_DEST_REF | CATCH_DEST_PAY | tag_nparams(tags, types, *t),
+                ));
+            }
+            TryTableCatch::CatchRef { .. } | TryTableCatch::Catch { .. } => {}
+        }
+    }
+    None
 }
 
 /// Every WASM value type occupies one 64-bit stack/local slot — f32/f64 ride
@@ -182,8 +693,10 @@ fn vt_wt(t: ValType) -> Result<u64, String> {
 #[allow(clippy::too_many_arguments)]
 fn lower_fn(
     instrs: &[Instr],
-    imports: &[crate::binary::Import],
-    types: &[crate::binary::FuncType],
+    imports: &[Import],
+    types: &[FuncType],
+    func_types: &[u32],
+    tags: &[Tag],
     nfuncs: u32,
     m_mem_pages: u32,
     m_max_pages: Option<u32>,
@@ -191,14 +704,22 @@ fn lower_fn(
     f: &mut FnEnc,
 ) {
     for ins in instrs {
-        match *ins {
+        match ins.clone() {
             Instr::Nop => {
                 f.push(R_NOP, 0, 0);
             }
             Instr::End => f.end(),
-            Instr::Block(_) => f.ctrls.push(Ctrl::Fwd { patch: vec![] }),
-            Instr::Loop(_) => f.ctrls.push(Ctrl::Loop { start: f.at() }),
-            Instr::If(_) => f.if_(),
+            Instr::Block(ty) => f.ctrls.push(Ctrl::Fwd {
+                patch: vec![],
+                height: f.height,
+                results: nres(ty),
+            }),
+            Instr::Loop(ty) => f.ctrls.push(Ctrl::Loop {
+                start: f.at(),
+                height: f.height,
+                results: nres(ty),
+            }),
+            Instr::If(ty) => f.if_(nres(ty)),
             Instr::Else => f.else_(),
             Instr::Br(l) => f.br(l, false),
             Instr::BrIf(l) => f.br(l, true),
@@ -224,19 +745,30 @@ fn lower_fn(
                     let im = &imports[fidx as usize];
                     match ext_id(&im.module, &im.name) {
                         Some(e) => {
-                            // `b` = arity | has_result<<8 so `jit_h_ext` marshals
-                            // exactly the wasm-declared params and pushes a0 only
-                            // for a value-returning import (void calls leave no
-                            // dead slot on the value stack).
-                            let ty = &types[im.typeidx as usize];
-                            let b = ty.params.len() as u64
-                                | (u64::from(!ty.results.is_empty() as u32) << 8);
-                            f.push(R_EXT, e, b);
+                            // Rewind is not a landing pad: `await` inside
+                            // `try`/`try_table` is fail-closed on the guest
+                            // JIT (printer rule; host interp may still
+                            // exercise the Binaryen-fork path).
+                            if matches!(e, EXT_AWAIT | EXT_AWAIT_VOID) && in_eh_try(f) {
+                                f.trap(TRAP_UNSUP, 0x700);
+                            } else {
+                                // `b` = arity | has_result<<8 so `jit_h_ext`
+                                // marshals exactly the wasm-declared params
+                                // and pushes a0 only for a value-returning
+                                // import (void calls leave no dead slot).
+                                let ty = &types[im.typeidx as usize];
+                                let b = ty.params.len() as u64
+                                    | (u64::from(!ty.results.is_empty() as u32) << 8);
+                                f.push(R_EXT, e, b);
+                            }
                         }
                         None => f.trap(TRAP_EXT, fidx as u64),
                     }
                 } else if fidx < nfuncs {
-                    f.push(R_CALL, fidx, 0);
+                    let ri = f.push(R_CALL, fidx, 0);
+                    if in_eh_try(f) {
+                        f.try_calls.push(ri);
+                    }
                     // Post-call exception landing pad — a callee's R_THROW
                     // returns here; the check routes to the enclosing catch or
                     // propagates the unwind. Cheap (one record per call site).
@@ -247,7 +779,10 @@ fn lower_fn(
             }
             Instr::CallIndirect { typeidx, tableidx } => {
                 // `a` = expected typeidx for the sig check, `b` = table index.
-                f.push(R_CALLI, typeidx, u64::from(tableidx));
+                let ri = f.push(R_CALLI, typeidx, u64::from(tableidx));
+                if in_eh_try(f) {
+                    f.try_calli.push(ri);
+                }
                 f.excchk();
             }
             Instr::Drop => {
@@ -541,41 +1076,21 @@ fn lower_fn(
             Instr::Convert(op) => f.trap(TRAP_UNSUP, 0x100 | u64::from(op)),
             // Legacy EH (M3c). The try body is a forward block; `catch`/`end`
             // resolve its exits. `throw`/`rethrow` emit a forward jump that the
-            // innermost enclosing try's first `catch` backpatches. The operand
-            // stack is NOT unwound to the handler depth — the throw path is a
-            // cold error lane, so the handler reads whatever the stack holds.
-            Instr::Try(_) => f.ctrls.push(Ctrl::Try {
+            // innermost enclosing try's first `catch` backpatches. `R_EXCCLR`
+            // restores `s10` to the snapshotted try height so leftover try-body
+            // values do not become the catch result (`catch_all` drops the
+            // payload; tagged catch copies `b` payload cells onto that height).
+            Instr::Try(ty) => f.ctrls.push(Ctrl::Try {
                 patch: vec![],
                 throws: vec![],
                 seen_catch: false,
+                height: f.height,
+                results: nres(ty),
+                catch_nparams: 0,
+                catch_tag: u32::MAX,
             }),
-            Instr::Catch(_) | Instr::CatchAll => {
-                // close the try body / prior handler: its normal fallthrough
-                // jumps to `end`; this handler begins at the next record and
-                // the pending `throw` refs land here (first catch only).
-                let r = f.push(R_JMP, u32::MAX, 0);
-                // The handler head is an R_EXCCLR — a cross-function throw lands
-                // here (via a caller-side R_EXCCHK) with OFF_EXC set; a local
-                // throw arrives with it clear. Clearing keeps nested calls in
-                // the handler from re-firing on the consumed exception.
-                let handler_at = f.push(R_EXCCLR, 0, 0) as u32;
-                match f.ctrls.last_mut() {
-                    Some(Ctrl::Try {
-                        patch,
-                        throws,
-                        seen_catch,
-                    }) => {
-                        patch.push(r);
-                        if !*seen_catch {
-                            for h in throws.drain(..) {
-                                f.recs[h].a = handler_at;
-                            }
-                            *seen_catch = true;
-                        }
-                    }
-                    _ => f.trap(TRAP_XLATE, 0x07),
-                }
-            }
+            Instr::Catch(tag) => f.catch_head(tag_nparams(tags, types, tag), tag),
+            Instr::CatchAll => f.catch_head(0, u32::MAX),
             Instr::Delegate(l) => {
                 // ends the try with no handler; its `br`-outs resolve to the
                 // record right after the delegate, and pending `throw`s forward
@@ -583,11 +1098,18 @@ fn lower_fn(
                 let target = f.at();
                 let mut pending = vec![];
                 match f.ctrls.pop() {
-                    Some(Ctrl::Try { patch, throws, .. }) => {
+                    Some(Ctrl::Try {
+                        patch,
+                        throws,
+                        height,
+                        results,
+                        ..
+                    }) => {
                         for r in patch {
                             f.recs[r].a = target;
                         }
                         pending = throws;
+                        f.height = height + results;
                     }
                     _ => {
                         f.trap(TRAP_XLATE, 0x08);
@@ -616,52 +1138,150 @@ fn lower_fn(
                                 f.recs[h].a = u32::MAX; // propagate
                             } else {
                                 f.recs[h].op = R_THROW; // escape, tag in `b`
-                                f.recs[h].a = u32::MAX;
+                                f.recs[h].a = if f.recs[h].b == u64::MAX {
+                                    0
+                                } else {
+                                    tag_nparams(tags, types, f.recs[h].b as u32)
+                                };
                             }
                         }
                     }
                 }
             }
             Instr::Throw(t) => {
-                // forward jump to the innermost enclosing try's handler. The tag
-                // rides `b` up-front so a later escape (no try / delegate to a
-                // non-try) keeps it when the record becomes R_THROW.
-                let r = f.push(R_JMP, u32::MAX, u64::from(t));
-                let mut placed = false;
-                for c in f.ctrls.iter_mut().rev() {
-                    if let Ctrl::Try { throws, .. } = c {
-                        throws.push(r);
-                        placed = true;
-                        break;
+                // `try_table` catch dests are `br` labels that do not count the
+                // table itself (label 0 = parent). Restore the dest frame's
+                // operand height before the jump so leftover try-body values
+                // (and `catch_all`'s discarded payload) do not survive.
+                let mut table_depth: Option<u32> = None;
+                let mut try_idx: Option<usize> = None;
+                let n = f.ctrls.len();
+                for (idx, c) in f.ctrls.iter().enumerate().rev() {
+                    match c {
+                        Ctrl::TryTable { catches, .. } => {
+                            if let Some((label, nparams)) =
+                                try_table_catch_dest(catches, t, tags, types)
+                            {
+                                let depth = (n - 1 - idx) as u32 + label + 1;
+                                if (depth as usize) < n {
+                                    let height = ctrl_height(&f.ctrls[n - 1 - depth as usize]);
+                                    f.emit_catch_land(height, nparams, u64::from(t), true);
+                                }
+                                table_depth = Some(depth);
+                                break;
+                            }
+                        }
+                        Ctrl::Try { .. } => {
+                            try_idx = Some(idx);
+                            break;
+                        }
+                        _ => {}
                     }
                 }
-                if !placed {
-                    // escapes the function — R_THROW unwinds the frame and
-                    // returns into the caller's R_EXCCHK landing pad.
+                if let Some(depth) = table_depth {
+                    f.br(depth, false);
+                } else if let Some(idx) = try_idx {
+                    let r = f.push(R_JMP, u32::MAX, u64::from(t));
+                    if let Ctrl::Try { throws, .. } = &mut f.ctrls[idx] {
+                        throws.push(r);
+                    }
+                } else {
+                    let r = f.push(R_JMP, u32::MAX, u64::from(t));
                     f.recs[r].op = R_THROW;
-                    f.recs[r].a = u32::MAX;
+                    f.recs[r].a = tag_nparams(tags, types, t);
                 }
             }
             Instr::Rethrow(l) => {
-                // rethrow the in-flight exception to enclosing `l`; with no such
-                // enclosing try it escapes — R_THROW with b=u64::MAX keeps the
-                // in-flight OFF_EXCTAG.
-                let r = f.push(R_JMP, u32::MAX, u64::MAX);
+                // `rethrow l` rethrows the exception caught by the try at
+                // depth `l` (0 = current catch). That try already consumed its
+                // handler, so search *outside* it for the next `try` catch or
+                // a `try_table` dest; otherwise escape with R_THROW (b=MAX
+                // keeps OFF_EXCTAG, a = catch payload count).
                 let n = f.ctrls.len();
-                let mut placed = false;
+                let mut nparams = 0u32;
+                let mut catch_tag = u32::MAX;
+                let mut outer_try: Option<usize> = None;
+                let mut outer_table: Option<usize> = None;
                 if (l as usize) < n {
                     let i = n - 1 - l as usize;
-                    if let Ctrl::Try { throws, .. } = &mut f.ctrls[i] {
-                        throws.push(r);
-                        placed = true;
+                    if let Ctrl::Try {
+                        catch_nparams,
+                        catch_tag: t,
+                        ..
+                    } = &f.ctrls[i]
+                    {
+                        nparams = *catch_nparams;
+                        catch_tag = *t;
+                    }
+                    for idx in (0..i).rev() {
+                        match &f.ctrls[idx] {
+                            Ctrl::Try { seen_catch, .. } if !*seen_catch => {
+                                outer_try = Some(idx);
+                                break;
+                            }
+                            Ctrl::TryTable { catches, .. } => {
+                                if try_table_catch_dest(catches, catch_tag, tags, types).is_some() {
+                                    outer_table = Some(idx);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
                     }
                 }
-                if !placed {
+                if let Some(idx) = outer_try {
+                    let r = f.push(R_JMP, u32::MAX, u64::MAX);
+                    if let Ctrl::Try { throws, .. } = &mut f.ctrls[idx] {
+                        throws.push(r);
+                    }
+                } else if let Some(idx) = outer_table {
+                    let catches = match &f.ctrls[idx] {
+                        Ctrl::TryTable { catches, .. } => catches.clone(),
+                        _ => Vec::new(),
+                    };
+                    if let Some((label, np)) =
+                        try_table_catch_dest(&catches, catch_tag, tags, types)
+                    {
+                        let n = f.ctrls.len();
+                        let depth = (n - 1 - idx) as u32 + label + 1;
+                        if (depth as usize) < n {
+                            let height = ctrl_height(&f.ctrls[n - 1 - depth as usize]);
+                            let tag = if catch_tag == u32::MAX {
+                                u64::MAX
+                            } else {
+                                u64::from(catch_tag)
+                            };
+                            f.emit_catch_land(height, np, tag, true);
+                        }
+                        f.br(depth, false);
+                    } else {
+                        let r = f.push(R_JMP, u32::MAX, u64::MAX);
+                        f.recs[r].op = R_THROW;
+                        f.recs[r].a = nparams;
+                    }
+                } else {
+                    let r = f.push(R_JMP, u32::MAX, u64::MAX);
                     f.recs[r].op = R_THROW;
-                    f.recs[r].a = u32::MAX;
+                    f.recs[r].a = nparams;
                 }
             }
-            Instr::TryTable { .. } | Instr::ThrowRef => f.trap(TRAP_UNSUP, 0x500),
+            Instr::TryTable { result, catches } => {
+                let catch_dest = try_table_catches(&catches, tags, types);
+                f.ctrls.push(Ctrl::TryTable {
+                    patch: vec![],
+                    catches,
+                    height: f.height,
+                    results: nres(result),
+                    throws: vec![],
+                    catch_dest,
+                });
+            }
+            Instr::ThrowRef => {
+                // Pop the exnref, set EXC/EXCTAG, then the same post-call
+                // EXCCHK chain an enclosing `try`/`try_table` already uses.
+                f.push(R_EXNREF, u32::MAX, 0);
+                f.excchk();
+            }
             // Bulk memory: copy/fill are real bounded loops; init/drop need a
             // passive-segment descriptor table (M3b residual — the shipped
             // cell has only active segments).
@@ -683,6 +1303,7 @@ fn lower_fn(
             | Instr::TableInit { .. } => f.trap(TRAP_UNSUP, 0xfc),
             Instr::Unsupported(op) => f.trap(TRAP_UNSUP, u64::from(op)),
         }
+        f.adj(stack_delta(ins, imports, types, func_types, tags));
     }
 }
 
@@ -691,11 +1312,19 @@ fn ext_id(module: &str, name: &str) -> Option<u32> {
     if module == "env" {
         // `Object_Getter__<kind>` is a name-encoded libwasm property getter,
         // not a fixed import. The i32-returning kinds route onto the
-        // `__ev_obj` bridge (`LwEvGet`); `string`/`Optional*` take a leading
-        // sret arg and `float`/`double` return FP — still unmapped (TRAP_EXT).
+        // `__ev_obj` bridge (`LwEvGet`); `string` is `LwEvGetStr`;
+        // `OptionalHandle`/`Uint` is `LwEvGetOpt`; `float` is `LwEvGetF`;
+        // `double` is `LwEvGetD`; remaining Optional kinds have typed srets.
         if let Some(kind) = name.strip_prefix("Object_Getter__") {
             return match kind {
                 "int" | "uint" | "ushort" | "bool" | "Handle" => Some(EXT_EVGET),
+                "string" => Some(EXT_EVGETSTR),
+                "OptionalHandle" | "OptionalUint" => Some(EXT_EVGETOPT),
+                "float" => Some(EXT_EVGETF),
+                "double" => Some(EXT_EVGETD),
+                "OptionalString" => Some(EXT_EVGETOPTS),
+                "OptionalBool" => Some(EXT_EVGETOPTB),
+                "OptionalDouble" => Some(EXT_EVGETOPTD),
                 _ => None,
             };
         }
@@ -739,6 +1368,7 @@ fn ext_id(module: &str, name: &str) -> Option<u32> {
         ("env", "libwasm_note_await_fail") => Some(EXT_NOTEREJ),
         ("env", "getRoot") => Some(EXT_GETROOT),
         ("env", "add_event_listener") => Some(EXT_ADDLSN),
+        ("env", "remove_event_listener") | ("env", "removeEventListener") => Some(EXT_RMLSN),
         ("env", "libwasm_removeObject") => Some(EXT_RMOBJ),
         ("env", "libwasm_add__string") => Some(EXT_ADDSTR),
         _ => None,
@@ -826,9 +1456,18 @@ fn fp_cvt_rec(op: u8) -> u32 {
 fn lower_one(m: &crate::binary::Module, i: usize, fidx: u32) -> Result<FnEnc, String> {
     let nfuncs = (m.imports.len() + m.bodies.len()) as u32;
     let body = &m.bodies[i];
+    let nparams = m
+        .types
+        .get(m.func_types.get(i).copied().unwrap_or(0) as usize)
+        .map(|t| t.params.len() as u32)
+        .unwrap_or(0);
+    let nlocals = nparams + m.locals.get(i).copied().unwrap_or(0);
     let mut f = FnEnc {
         recs: Vec::new(),
         ctrls: Vec::new(),
+        height: nlocals,
+        try_calls: Vec::new(),
+        try_calli: Vec::new(),
     };
     // DIAG: neutralize the JS-interop `Static_Call`/`console` stub (funcidx
     // 68 = `[Unreachable]`) so a `console.error`/`info` log is a silent
@@ -845,6 +1484,8 @@ fn lower_one(m: &crate::binary::Module, i: usize, fidx: u32) -> Result<FnEnc, St
         body,
         &m.imports,
         &m.types,
+        &m.func_types,
+        &m.tags,
         nfuncs,
         m.mem_pages,
         m.max_mem_pages,
@@ -887,8 +1528,9 @@ impl OpGap {
             TRAP_UNSUP => match self.orig {
                 0x200..=0x2ff => format!("uncaught throw tag {}", self.orig & 0xff),
                 0x300..=0x3ff => format!("rethrow out-of-function depth {}", self.orig & 0xff),
-                0x500 => "try_table/throw_ref (wasm-eh)".into(),
+                0x500 => "catch_ref (exnref payload+ref)".into(),
                 0x600 => "throw outside a try (no handler)".into(),
+                0x700 => "await inside try/try_table (rewind is not a landing pad)".into(),
                 0xfc => "bulk-memory init/table op".into(),
                 0x100..=0x1ff => format!("convert op 0x{:02x}", self.orig & 0xff),
                 _ => format!("wasm opcode 0x{:02x}", self.orig),
@@ -957,6 +1599,12 @@ pub fn op_coverage(wasm: &[u8]) -> Result<OpCoverage, String> {
     for i in 0..m.bodies.len() {
         fns.push(lower_one(&m, i, nimports + i as u32)?);
     }
+    let table: Vec<u32> = m
+        .elements
+        .iter()
+        .flat_map(|el| el.funcs.iter().copied())
+        .collect();
+    seal_await_in_try(&mut fns, nimports, nfuncs, &table);
     let mut reachable = vec![false; nfuncs as usize];
     let mut stack: Vec<u32> = Vec::new();
     // Roots: `_start` + every exported func (JitCall re-entries like the
@@ -1053,6 +1701,7 @@ pub fn encode(wasm: &[u8]) -> Result<Vec<u8>, String> {
     for _ in 0..nimports {
         fhdrs.push([0, 0, 0, 0, 0, FHDR_F_IMPORT]);
     }
+    let mut fns: Vec<FnEnc> = Vec::with_capacity(m.bodies.len());
     for i in 0..m.bodies.len() {
         let fidx = nimports as usize + i;
         let ty = &m.types[m.func_types[i] as usize];
@@ -1070,8 +1719,19 @@ pub fn encode(wasm: &[u8]) -> Result<Vec<u8>, String> {
         if ty.results.len() > 4 {
             return Err("jcode: >4 results is M3".into());
         }
+        fns.push(lower_one(&m, i, fidx as u32)?);
+    }
+    let table: Vec<u32> = m
+        .elements
+        .iter()
+        .flat_map(|el| el.funcs.iter().copied())
+        .collect();
+    seal_await_in_try(&mut fns, nimports, nfuncs, &table);
+    for (i, f) in fns.into_iter().enumerate() {
+        let ty = &m.types[m.func_types[i] as usize];
+        let nparams = ty.params.len() as u32;
+        let nlocals = nparams + m.locals.get(i).copied().unwrap_or(0);
         let bc_off = recs.len() as u32;
-        let f = lower_one(&m, i, fidx as u32)?;
         let bc_len = f.recs.len() as u32;
         recs.extend(f.recs);
         if recs.len() > MAX_JIT_RECORDS {
@@ -1670,6 +2330,1414 @@ pub fn test_module_evget() -> Vec<u8> {
     out
 }
 
+/// Delegate that reads a UTF-8 event field through `Object_Getter__string`.
+/// `_start` builds `root + <button id="x">` and registers
+/// `add_event_listener("x", <ev>, $delegate)`. `$delegate(ev)` writes the
+/// named property into a D `{len,ptr}` at wasm off `0x08` and `appendChild`s
+/// iff `len == 5` — `"click"` for `type` on a click, `"Enter"` for `code` on
+/// KEY_ENTER. Empty/unknown/`Unidentified`(13)/`KeyA`(4) leave `__dom` ungrown.
+#[cfg(test)]
+pub fn test_module_evstr(ev: &[u8], prop: &[u8]) -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    let prop_off = EV + ev.len() as u8;
+    const SRET: u8 = 0x08;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6; // imports 0..=5 first
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+
+    // t0 ()->i32 · t1 (i32)->i32 · t2 (i32,i32)->() · t3 (i32x5)->()
+    // t4 (i32x6)->() · t5 (i32)->() · t6 ()->() · t7 (i32x4)->() sret getter
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    section(&mut out, 1, &types);
+
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__string", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+
+    section(&mut out, 3, &[2, 0x05, 0x06]); // $delegate(t5)=6, $_start(t6)=7
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+
+    let plen = prop.len() as u8;
+    let elen = ev.len() as u8;
+    let mut bdel = vec![0x01, 0x01, 0x7f]; // local 1 = sret len
+    bdel.extend_from_slice(&[
+        // Object_Getter__string(SRET, ev, plen, prop_off)
+        0x41, SRET, 0x20, 0x00, 0x41, plen, 0x41, prop_off, 0x10, 0x05,
+        // len = i32.load(SRET)
+        0x41, SRET, 0x28, 0x02, 0x00, 0x21, 0x01,
+        // if len == 5 appendChild(getRoot(), createElement(ORD))
+        0x20, 0x01, 0x41, 0x05, 0x46, 0x04, 0x40, 0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02,
+        0x0b, 0x0b,
+    ]);
+
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, // el = createElement(ORD)
+        0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X, 0x10,
+        0x03, // setProperty(el,"id","x")
+        0x10, 0x00, 0x20, 0x00, 0x10, 0x02, // appendChild(getRoot(), el)
+        0x41, X, 0x41, 0x01, // tptr=X tlen=1
+        0x41, EV, 0x41, elen, // typtr=EV tylen
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, // add_event_listener
+        0x0b,
+    ]);
+
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+
+    let end = prop_off as usize + prop.len();
+    let mut body = vec![0u8; end - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &[u8]| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s);
+    };
+    put(&mut body, ID, b"id");
+    put(&mut body, X, b"x");
+    put(&mut body, EV, ev);
+    put(&mut body, prop_off, prop);
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// Parent-listener cell: `_start` ids the root `"r"`, appends `<button id="x">`,
+/// and registers `add_event_listener("r","click",$delegate,capture)`. The
+/// button has no listener. `$delegate` appends iff `eventPhase` equals the
+/// expected phase (`1` capturing, `3` bubbling) — so a click on the button
+/// only grows `__dom` when the ancestor walk ran.
+#[cfg(test)]
+pub fn test_module_phase(capture: bool) -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const R: u8 = 0x12;
+    const X: u8 = 0x13;
+    const EV: u8 = 0x14;
+    const PH: u8 = 0x19;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6;
+    let cap = if capture { 1u8 } else { 0 };
+    let want = if capture { 1u8 } else { 3 };
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
+    section(&mut out, 1, &types);
+
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__int", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+
+    let mut bdel = vec![0x01, 0x01, 0x7f];
+    bdel.extend_from_slice(&[
+        // phase = Object_Getter__int(ev, 10, PH)
+        0x20, 0x00, 0x41, 0x0a, 0x41, PH, 0x10, 0x05, 0x21, 0x01,
+        // if phase == want append
+        0x20, 0x01, 0x41, want, 0x46, 0x04, 0x40, 0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02,
+        0x0b, 0x0b,
+    ]);
+
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        // setProperty(getRoot(),"id","r")
+        0x10, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, R, 0x10, 0x03,
+        // el = createElement(ORD); setProperty(el,"id","x"); appendChild(root, el)
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02,
+        // add_event_listener("r","click",$delegate,capture)
+        0x41, R, 0x41, 0x01, 0x41, EV, 0x41, 0x05, 0x41, DELEGATE, 0x41, cap, 0x10, 0x04, 0x0b,
+    ]);
+
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+
+    let mut body = vec![0u8; 0x23 - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &[u8]| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s);
+    };
+    put(&mut body, ID, b"id");
+    put(&mut body, R, b"r");
+    put(&mut body, X, b"x");
+    put(&mut body, EV, b"click");
+    put(&mut body, PH, b"eventPhase");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// Two listeners on the root: capture `$cap` and bubble `$bub`. A click on
+/// the child button grows `__dom` twice (live ≥ 4) only when both records
+/// fire — a one-slot overwrite would keep only the second registration.
+#[cfg(test)]
+pub fn test_module_two_lsn() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const R: u8 = 0x12;
+    const X: u8 = 0x13;
+    const EV: u8 = 0x14;
+    const PH: u8 = 0x19;
+    const ORD: u8 = 14;
+    const CAP: u8 = 6;
+    const BUB: u8 = 7;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
+    section(&mut out, 1, &types);
+
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__int", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+
+    section(&mut out, 3, &[3, 0x05, 0x05, 0x06]); // $cap, $bub, $_start
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x08]);
+    section(&mut out, 7, &exports);
+
+    let del = |want: u8| -> Vec<u8> {
+        let mut b = vec![0x01, 0x01, 0x7f];
+        b.extend_from_slice(&[
+            0x20, 0x00, 0x41, 0x0a, 0x41, PH, 0x10, 0x05, 0x21, 0x01, 0x20, 0x01, 0x41, want, 0x46,
+            0x04, 0x40, 0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b, 0x0b,
+        ]);
+        b
+    };
+    let bcap = del(1);
+    let bbub = del(3);
+
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x10, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, R, 0x10, 0x03, 0x41, ORD, 0x10, 0x01,
+        0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X, 0x10, 0x03, 0x10, 0x00,
+        0x20, 0x00, 0x10, 0x02, 0x41, R, 0x41, 0x01, 0x41, EV, 0x41, 0x05, 0x41, CAP, 0x41, 0x01,
+        0x10, 0x04, 0x41, R, 0x41, 0x01, 0x41, EV, 0x41, 0x05, 0x41, BUB, 0x41, 0x00, 0x10, 0x04,
+        0x0b,
+    ]);
+
+    let mut code = Vec::new();
+    push_uleb(&mut code, 3);
+    push_uleb(&mut code, bcap.len() as u32);
+    code.extend_from_slice(&bcap);
+    push_uleb(&mut code, bbub.len() as u32);
+    code.extend_from_slice(&bbub);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+
+    let mut body = vec![0u8; 0x23 - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &[u8]| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s);
+    };
+    put(&mut body, ID, b"id");
+    put(&mut body, R, b"r");
+    put(&mut body, X, b"x");
+    put(&mut body, EV, b"click");
+    put(&mut body, PH, b"eventPhase");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// Button keydown listener with `once` (a5=2). `$delegate` always appends.
+#[cfg(test)]
+pub fn test_module_once() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 5;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 7);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 5);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x06]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x00];
+    bdel.extend_from_slice(&[0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x07,
+        0x41, DELEGATE, 0x41, 0x02, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    let mut body = b"idx".to_vec();
+    body.extend_from_slice(b"keydown");
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// Click listener with `passive` (a5=4). `$delegate` preventDefaults and
+/// appends iff `defaultPrevented` stayed 0.
+#[cfg(test)]
+pub fn test_module_passive() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const DP: u8 = 0x18;
+    const PD: u8 = 0x28;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 7;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 9);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 7);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Call___void", 7),
+        ("Object_Getter__bool", 8),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x08]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x01, 0x01, 0x7f];
+    bdel.extend_from_slice(&[
+        // preventDefault()
+        0x20, 0x00, 0x41, 0x0e, 0x41, PD, 0x10, 0x05, // dp = defaultPrevented
+        0x20, 0x00, 0x41, 0x10, 0x41, DP, 0x10, 0x06, 0x21, 0x01, // if dp==0 append
+        0x20, 0x01, 0x45, 0x04, 0x40, 0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b, 0x0b,
+    ]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x04, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x36 - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "click");
+    put(&mut body, DP, "defaultPrevented");
+    put(&mut body, PD, "preventDefault");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// Registers a click listener then immediately `remove_event_listener`s it.
+/// A later click must not append.
+#[cfg(test)]
+pub fn test_module_rmlsn() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 7);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("remove_event_listener", 5),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x00];
+    bdel.extend_from_slice(&[0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, 0x41, DELEGATE, 0x10, 0x05, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    let mut body = b"idx".to_vec();
+    body.extend_from_slice(b"click");
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// OptionalUint `clientX` (defined, ≥200) and OptionalHandle `relatedTarget`
+/// (defined=0). Appends iff both conditions hold.
+#[cfg(test)]
+pub fn test_module_optional() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const CX: u8 = 0x18;
+    const RT: u8 = 0x1f;
+    const SRET_CX: u8 = 0x08;
+    const SRET_RT: u8 = 0x00;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__OptionalUint", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x01, 0x01, 0x7f];
+    bdel.extend_from_slice(&[
+        // OptionalUint(sret_cx, ev, 7, CX)
+        0x41, SRET_CX, 0x20, 0x00, 0x41, 0x07, 0x41, CX, 0x10, 0x05,
+        // local1 = defined(cx)
+        0x41, 0x0c, 0x2d, 0x00, 0x00, 0x21, 0x01,
+        // OptionalUint(sret_rt, ev, 13, RT) — relatedTarget as uint-layout none
+        0x41, SRET_RT, 0x20, 0x00, 0x41, 0x0d, 0x41, RT, 0x10, 0x05,
+        // if defined(cx) && i32.load(cx)>=200 && !defined(rt)
+        0x20, 0x01, 0x41, SRET_CX, 0x28, 0x02, 0x00, 0x41, 0xc8, 0x01, 0x4e, 0x71, 0x41, 0x04, 0x2d,
+        0x00, 0x00, 0x45, 0x71, 0x04, 0x40, 0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b,
+        0x0b,
+    ]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x2c - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "click");
+    put(&mut body, CX, "clientX");
+    put(&mut body, RT, "relatedTarget");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// `Object_Getter__float` of `clientX` ≥ 200.0.
+#[cfg(test)]
+pub fn test_module_float() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const CX: u8 = 0x18;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7d]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__float", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x00];
+    bdel.extend_from_slice(&[
+        0x20, 0x00, 0x41, 0x07, 0x41, CX, 0x10, 0x05, 0x43, 0x00, 0x00, 0x48, 0x43, 0x60, 0x04,
+        0x40, 0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b, 0x0b,
+    ]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x1f - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "click");
+    put(&mut body, CX, "clientX");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// `Object_Getter__int` of `button` equals `want` (DOM 0/1/2, not Linux BTN_*).
+#[cfg(test)]
+pub fn test_module_button_eq(want: u8) -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const BTN: u8 = 0x18;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__int", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x00];
+    bdel.extend_from_slice(&[
+        0x20, 0x00, 0x41, 0x06, 0x41, BTN, 0x10, 0x05, 0x41, want, 0x46, 0x04, 0x40, 0x10, 0x00,
+        0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b, 0x0b,
+    ]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x1e - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "click");
+    put(&mut body, BTN, "button");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// `Object_Getter__bool` of `shiftKey` is true.
+#[cfg(test)]
+pub fn test_module_shiftkey() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const SK: u8 = 0x18;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__bool", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x00];
+    bdel.extend_from_slice(&[
+        0x20, 0x00, 0x41, 0x08, 0x41, SK, 0x10, 0x05, 0x04, 0x40, 0x10, 0x00, 0x41, ORD, 0x10,
+        0x01, 0x10, 0x02, 0x0b, 0x0b,
+    ]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x20 - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "click");
+    put(&mut body, SK, "shiftKey");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// `<input id="x">` with optional `type=password` and `value`.
+#[cfg(test)]
+pub fn test_module_password_input(password: bool, value: &str) -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const TY: u8 = 0x13;
+    const PW: u8 = 0x17;
+    const VL: u8 = 0x1f;
+    const VAL: u8 = 0x24;
+    const TX: u8 = 0x2c;
+    const ORD: u8 = 49; // NodeType::input
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 5);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 4);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[1, 0x04]); // $_start t4 → func 4
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x04]);
+    section(&mut out, 7, &exports);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, // el = createElement(input)
+        0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X, 0x10, 0x03, // id="x"
+    ]);
+    if password {
+        bst.extend_from_slice(&[
+            0x20, 0x00, 0x41, 0x04, 0x41, TY, 0x41, 0x08, 0x41, PW, 0x10, 0x03,
+        ]);
+    } else {
+        bst.extend_from_slice(&[
+            0x20, 0x00, 0x41, 0x04, 0x41, TY, 0x41, 0x04, 0x41, TX, 0x10, 0x03,
+        ]);
+    }
+    if !value.is_empty() {
+        bst.extend_from_slice(&[
+            0x20,
+            0x00,
+            0x41,
+            0x05,
+            0x41,
+            VL,
+            0x41,
+            value.len() as u8,
+            0x41,
+            VAL,
+            0x10,
+            0x03,
+        ]);
+    }
+    bst.extend_from_slice(&[
+        0x10, 0x00, 0x20, 0x00, 0x10, 0x02, // appendChild(root, el)
+        0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x30 - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, TY, "type");
+    put(&mut body, PW, "password");
+    put(&mut body, TX, "text");
+    put(&mut body, VL, "value");
+    if !value.is_empty() {
+        put(&mut body, VAL, value);
+    }
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// `Object_Getter__double` of `clientX` ≥ 200.0.
+#[cfg(test)]
+pub fn test_module_double() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const CX: u8 = 0x18;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7c]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__double", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x00];
+    bdel.extend_from_slice(&[
+        0x20, 0x00, 0x41, 0x07, 0x41, CX, 0x10, 0x05, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x69, 0x40, 0x66, 0x04, 0x40, 0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b, 0x0b,
+    ]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x1f - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "click");
+    put(&mut body, CX, "clientX");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// `Object_Getter__double` of `timeStamp` > 0.0 (csr time at fill).
+#[cfg(test)]
+pub fn test_module_timestamp() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const TS: u8 = 0x18;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7c]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__double", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x00];
+    bdel.extend_from_slice(&[
+        0x20, 0x00, 0x41, 0x09, 0x41, TS, 0x10, 0x05, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x64, 0x04, 0x40, 0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b, 0x0b,
+    ]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x21 - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "click");
+    put(&mut body, TS, "timeStamp");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// `Object_Getter__uint` of `deltaMode` == 1 (`DOM_DELTA_LINE`) on wheel.
+#[cfg(test)]
+pub fn test_module_delta_mode() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const DM: u8 = 0x18;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x01, 0x7f]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__uint", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x00];
+    bdel.extend_from_slice(&[
+        0x20, 0x00, 0x41, 0x09, 0x41, DM, 0x10, 0x05, 0x41, 0x01, 0x46, 0x04, 0x40, 0x10, 0x00,
+        0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b, 0x0b,
+    ]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x21 - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "wheel");
+    put(&mut body, DM, "deltaMode");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// OptionalString `type` is defined and len==5 (`"click"`).
+#[cfg(test)]
+pub fn test_module_optional_string() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const TY: u8 = 0x18;
+    const SRET: u8 = 0x08;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 6;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 8);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 6);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__OptionalString", 7),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x07]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x01, 0x01, 0x7f];
+    bdel.extend_from_slice(&[
+        0x41, SRET, 0x20, 0x00, 0x41, 0x04, 0x41, TY, 0x10, 0x05, 0x41, SRET, 0x28, 0x02, 0x00,
+        0x21, 0x01, 0x20, 0x01, 0x41, 0x05, 0x46, 0x41, SRET, 0x41, 0x08, 0x6a, 0x2d, 0x00, 0x00,
+        0x41, 0x01, 0x46, 0x71, 0x04, 0x40, 0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b,
+        0x0b,
+    ]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x1c - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "click");
+    put(&mut body, TY, "type");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
+/// OptionalBool `bubbles` defined=1 value=1, OptionalDouble `clientX` defined
+/// and ≥ 200.0.
+#[cfg(test)]
+pub fn test_module_optional_bool_double() -> Vec<u8> {
+    const ID: u8 = 0x10;
+    const X: u8 = 0x12;
+    const EV: u8 = 0x13;
+    const BUB: u8 = 0x18;
+    const CX: u8 = 0x1f;
+    const SRET_B: u8 = 0x00;
+    const SRET_D: u8 = 0x28;
+    const ORD: u8 = 14;
+    const DELEGATE: u8 = 7;
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 9);
+    types.extend_from_slice(&[0x60, 0x00, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x01, 0x7f]);
+    types.extend_from_slice(&[0x60, 0x02, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x06, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x01, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x00, 0x00]);
+    types.extend_from_slice(&[0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    types.extend_from_slice(&[0x60, 0x04, 0x7f, 0x7f, 0x7f, 0x7f, 0x00]);
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 7);
+    for (name, ty) in [
+        ("getRoot", 0u8),
+        ("createElement", 1),
+        ("appendChild", 2),
+        ("setProperty", 3),
+        ("add_event_listener", 4),
+        ("Object_Getter__OptionalBool", 7),
+        ("Object_Getter__OptionalDouble", 8),
+    ] {
+        put_name(&mut imps, "env");
+        put_name(&mut imps, name);
+        imps.push(0x00);
+        imps.push(ty);
+    }
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 0x05, 0x06]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.extend_from_slice(&[0x02, 0x00]);
+    put_name(&mut exports, "_start");
+    exports.extend_from_slice(&[0x00, 0x08]);
+    section(&mut out, 7, &exports);
+    let mut bdel = vec![0x01, 0x01, 0x7f];
+    bdel.extend_from_slice(&[
+        // OptionalBool(sret_b, ev, 7, BUB)
+        0x41, SRET_B, 0x20, 0x00, 0x41, 0x07, 0x41, BUB, 0x10, 0x05,
+        // OptionalDouble(sret_d, ev, 7, CX)
+        0x41, SRET_D, 0x20, 0x00, 0x41, 0x07, 0x41, CX, 0x10, 0x06,
+        // defined(b) && value(b) && defined(d) && f64.load(d) >= 200.0
+        0x41, SRET_B, 0x2d, 0x00, 0x01, 0x41, SRET_B, 0x2d, 0x00, 0x00, 0x71, 0x41, SRET_D, 0x2d,
+        0x00, 0x08, 0x71, 0x41, SRET_D, 0x2b, 0x03, 0x00, 0x44, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x69, 0x40, 0x66, 0x71, 0x04, 0x40, 0x10, 0x00, 0x41, ORD, 0x10, 0x01, 0x10, 0x02, 0x0b,
+        0x0b,
+    ]);
+    let mut bst = vec![0x01, 0x01, 0x7f];
+    bst.extend_from_slice(&[
+        0x41, ORD, 0x10, 0x01, 0x21, 0x00, 0x20, 0x00, 0x41, 0x02, 0x41, ID, 0x41, 0x01, 0x41, X,
+        0x10, 0x03, 0x10, 0x00, 0x20, 0x00, 0x10, 0x02, 0x41, X, 0x41, 0x01, 0x41, EV, 0x41, 0x05,
+        0x41, DELEGATE, 0x41, 0x00, 0x10, 0x04, 0x0b,
+    ]);
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, bdel.len() as u32);
+    code.extend_from_slice(&bdel);
+    push_uleb(&mut code, bst.len() as u32);
+    code.extend_from_slice(&bst);
+    section(&mut out, 10, &code);
+    let mut body = vec![0u8; 0x26 - 0x10];
+    let put = |body: &mut Vec<u8>, off: u8, s: &str| {
+        body[(off as usize) - 0x10..(off as usize) - 0x10 + s.len()].copy_from_slice(s.as_bytes());
+    };
+    put(&mut body, ID, "id");
+    put(&mut body, X, "x");
+    put(&mut body, EV, "click");
+    put(&mut body, BUB, "bubbles");
+    put(&mut body, CX, "clientX");
+    let mut data = Vec::new();
+    push_uleb(&mut data, 1);
+    data.extend_from_slice(&[0x00, 0x41, 0x10, 0x0b]);
+    push_uleb(&mut data, body.len() as u32);
+    data.extend_from_slice(&body);
+    section(&mut out, 11, &data);
+    out
+}
+
 fn push_uleb(out: &mut Vec<u8>, v: u32) {
     let mut v = v;
     loop {
@@ -1944,6 +4012,1066 @@ pub fn test_module_eh() -> Vec<u8> {
     out
 }
 
+/// Two-cell tagged throw: callee pushes 3 then 4; caller `catch $e` adds them.
+/// ```wat
+/// (tag $e (param i32 i32))
+/// (func $thrower i32.const 3 i32.const 4 throw $e)
+/// (func $_start (result i32)
+///   try (result i32) call $thrower i32.const 0
+///   catch $e i32.add end)
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_payload2() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 3);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
+    types.extend_from_slice(&[0x60, 0, 0]); // t1 ()->()
+    types.extend_from_slice(&[0x60, 2, 0x7f, 0x7f, 0]); // t2 (i32,i32)->()
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[2, 1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 2]); // tag typeidx 2
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    let b0 = [0x00, 0x41, 0x03, 0x41, 0x04, 0x08, 0x00, 0x0b]; // 3, 4, throw
+    let b1 = [
+        0x00, // locals
+        0x06, 0x7f, // try (result i32)
+        0x10, 0x00, //   call 0
+        0x41, 0x00, //   i32.const 0
+        0x07, 0x00, // catch 0
+        0x6a, //   i32.add
+        0x0b, // end try
+        0x0b, // end func
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// Nested `rethrow 0` in the same function: inner catch rethrows into the
+/// outer `catch $e`, which yields the payload 7.
+#[cfg(test)]
+pub fn test_module_eh_rethrow_nested() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 1]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 0);
+    section(&mut out, 7, &exports);
+    let b0 = [
+        0x00, // locals
+        0x06, 0x7f, // try (result i32)
+        0x06, 0x40, //   try (empty)
+        0x41, 0x07, //     i32.const 7
+        0x08, 0x00, //     throw 0
+        0x07, 0x00, //   catch 0
+        0x09, 0x00, //     rethrow 0
+        0x0b, //   end inner
+        0x41, 0x00, //   i32.const 0
+        0x07, 0x00, // catch 0
+        0x0b, // end outer
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// Cross-function `rethrow`: callee catches then `rethrow 0`; caller catch
+/// must see payload 7.
+#[cfg(test)]
+pub fn test_module_eh_rethrow_escape() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 3);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 0, 0]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[2, 1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 2]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    let b0 = [
+        0x00, // inner: try { const 7; throw } catch { rethrow 0 }
+        0x06, 0x40, 0x41, 0x07, 0x08, 0x00, 0x07, 0x00, 0x09, 0x00, 0x0b, 0x0b,
+    ];
+    let b1 = [
+        0x00, // _start
+        0x06, 0x7f, // try (result i32)
+        0x10, 0x00, //   call 0
+        0x41, 0x00, //   i32.const 0
+        0x07, 0x00, // catch 0
+        0x0b, 0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// `rethrow 0` into an enclosing `try_table` catch dest: payload 7.
+/// ```wat
+/// (tag $e (param i32))
+/// (func $_start (result i32)
+///   (block (result i32)
+///     (try_table (catch $e 0)
+///       try
+///         i32.const 7 throw $e
+///       catch $e
+///         rethrow 0
+///       end
+///       unreachable)))
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_rethrow_try_table() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 1]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 0);
+    section(&mut out, 7, &exports);
+    let b0 = [
+        0x00, // locals
+        0x02, 0x7f, // block (result i32)
+        0x1f, 0x40, //   try_table empty
+        0x01, //   1 catch
+        0x00, 0x00, 0x00, //   catch tag0 label0
+        0x06, 0x40, //     try empty
+        0x41, 0x07, //       i32.const 7
+        0x08, 0x00, //       throw 0
+        0x07, 0x00, //     catch 0
+        0x09, 0x00, //       rethrow 0
+        0x0b, //     end try
+        0x0b, //   end try_table
+        0x00, // unreachable
+        0x0b, // end block
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// Same-function `catch_all_ref` + `throw_ref`: local throw 7 is packaged as
+/// an exnref, then `throw_ref` rethrows into the outer `catch $e` dest.
+/// ```wat
+/// (tag $e (param i32))
+/// (func $_start (result i32)
+///   (block (result i32)
+///     (try_table (catch $e 0)
+///       (block (result i32)
+///         (try_table (catch_all_ref 0)
+///           i32.const 7 throw $e)
+///         unreachable)
+///       throw_ref unreachable)))
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_catch_all_ref() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 1]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 0);
+    section(&mut out, 7, &exports);
+    let b0 = [
+        0x00, // locals
+        0x02, 0x7f, // block (result i32)
+        0x1f, 0x40, //   try_table empty
+        0x01, //   1 catch
+        0x00, 0x00, 0x00, //   catch tag0 label0
+        0x02, 0x7f, //     block (result i32)  dest of catch_all_ref
+        0x1f, 0x40, //       try_table empty
+        0x01, //       1 catch
+        0x03, 0x00, //       catch_all_ref label0
+        0x41, 0x07, //         i32.const 7
+        0x08, 0x00, //         throw 0
+        0x0b, //       end try_table
+        0x00, //       unreachable (fallthrough)
+        0x0b, //     end inner block — exnref result
+        0x0a, //     throw_ref
+        0x00, //     unreachable
+        0x0b, //   end try_table
+        0x00, // unreachable
+        0x0b, // end outer block
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// Cross-function throw into `catch_all_ref`, then `throw_ref` into `catch $e`.
+/// ```wat
+/// (tag $e (param i32))
+/// (func $thrower i32.const 7 throw $e)
+/// (func $_start (result i32)
+///   (block (result i32)
+///     (try_table (catch $e 0)
+///       (block (result i32)
+///         (try_table (catch_all_ref 0)
+///           (call $thrower) unreachable)
+///         unreachable)
+///       throw_ref unreachable)))
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_catch_all_ref_cross() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 3);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
+    types.extend_from_slice(&[0x60, 0, 0]); // t1 ()->()
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]); // t2 (i32)->()
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[2, 1, 0]); // f0=t1 thrower, f1=t0 _start
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 2]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    let b0 = [0x00, 0x41, 0x07, 0x08, 0x00, 0x0b];
+    let b1 = [
+        0x00, // locals
+        0x02, 0x7f, // block (result i32)
+        0x1f, 0x40, //   try_table empty
+        0x01, //   1 catch
+        0x00, 0x00, 0x00, //   catch tag0 label0
+        0x02, 0x7f, //     block (result i32)  dest of catch_all_ref
+        0x1f, 0x40, //       try_table empty
+        0x01, //       1 catch
+        0x03, 0x00, //       catch_all_ref label0
+        0x10, 0x00, //         call 0
+        0x00, //         unreachable
+        0x0b, //       end try_table
+        0x00, //       unreachable (fallthrough)
+        0x0b, //     end inner block — exnref result
+        0x0a, //     throw_ref
+        0x00, //     unreachable
+        0x0b, //   end try_table
+        0x00, // unreachable
+        0x0b, // end outer block
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// Same-function `catch_ref` + `throw_ref`: dest gets payload 7 plus exnref;
+/// `throw_ref` rethrows into the outer `catch $e`.
+/// ```wat
+/// (tag $e (param i32))
+/// (func $_start (result i32)
+///   (block (result i32)
+///     (try_table (catch $e 0)
+///       (block (result i32)
+///         (try_table (catch_ref $e 0)
+///           i32.const 7 throw $e)
+///         unreachable)
+///       throw_ref unreachable)))
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_catch_ref() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 1]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 0);
+    section(&mut out, 7, &exports);
+    let b0 = [
+        0x00, // locals
+        0x02, 0x7f, // block (result i32)
+        0x1f, 0x40, //   try_table empty
+        0x01, //   1 catch
+        0x00, 0x00, 0x00, //   catch tag0 label0
+        0x02, 0x7f, //     block (result i32)  dest of catch_ref
+        0x1f, 0x40, //       try_table empty
+        0x01, //       1 catch
+        0x01, 0x00, 0x00, //       catch_ref tag0 label0
+        0x41, 0x07, //         i32.const 7
+        0x08, 0x00, //         throw 0
+        0x0b, //       end try_table
+        0x00, //       unreachable
+        0x0b, //     end inner block
+        0x0a, //     throw_ref
+        0x00, //     unreachable
+        0x0b, //   end try_table
+        0x00, // unreachable
+        0x0b, // end outer block
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// `catch_ref` dest top cell is the exnref handle (tag+1 = 1), not payload 7.
+/// ```wat
+/// (tag $e (param i32))
+/// (func $_start (result i32)
+///   (block (result i32)
+///     (try_table (catch_ref $e 0)
+///       i32.const 7 throw $e)
+///     unreachable))
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_catch_ref_handle() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 1]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 0);
+    section(&mut out, 7, &exports);
+    let b0 = [
+        0x00, // locals
+        0x02, 0x7f, // block (result i32)
+        0x1f, 0x40, //   try_table empty
+        0x01, //   1 catch
+        0x01, 0x00, 0x00, //   catch_ref tag0 label0
+        0x41, 0x07, //     i32.const 7
+        0x08, 0x00, //     throw 0
+        0x0b, //   end try_table
+        0x00, //   unreachable
+        0x0b, // end block
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// `catch_ref $e0` misses a void `$e1` throw; `catch_all` yields 777.
+/// ```wat
+/// (tag $e0 (param i32)) (tag $e1)
+/// (func $thrower throw $e1)
+/// (func $_start (result i32)
+///   (block (result i32)
+///     (block
+///       (try_table (catch_ref $e0 1) (catch_all 0)
+///         (call $thrower))
+///       unreachable)
+///     i32.const 777))
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_catch_ref_miss() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 3);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 0, 0]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[2, 1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[2, 0x00, 2, 0x00, 1]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    let b0 = [0x00, 0x08, 0x01, 0x0b]; // throw tag1
+    let b1 = [
+        0x00, // locals
+        0x02, 0x7f, // block (result i32)
+        0x02, 0x40, //   block (empty)
+        0x1f, 0x40, //     try_table
+        0x02, //     2 catches
+        0x01, 0x00, 0x01, //     catch_ref tag0 label1
+        0x02, 0x00, //     catch_all label0
+        0x10, 0x00, //     call 0
+        0x0b, //     end try_table
+        0x00, //     unreachable
+        0x0b, //   end inner
+        0x41, 0x89, 0x06, //   i32.const 777
+        0x0b, // end outer
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// `libwasm_await__void` inside a legacy `try` — rewind is not a landing pad.
+/// Guest JIT must fail-closed (coverage gap 0x700), not park inside the try.
+#[cfg(test)]
+pub fn test_module_await_in_try() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]); // t1 (i32)->()
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 1);
+    put_name(&mut imps, "env");
+    put_name(&mut imps, "libwasm_await__void");
+    imps.push(0x00);
+    imps.push(1);
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[1, 0]); // _start t0
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    let b0 = [
+        0x00, // locals
+        0x06, 0x7f, // try (result i32)
+        0x41, 0x00, //   i32.const 0
+        0x10, 0x00, //   call 0 await
+        0x41, 0x01, //   i32.const 1
+        0x19, // catch_all
+        0x41, 0x89, 0x06, //   i32.const 777
+        0x0b, // end try
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// `try { call $awaiter }` — `$awaiter` reaches `libwasm_await__void`.
+/// Guest JIT must fail-closed at the call site (0x700).
+#[cfg(test)]
+pub fn test_module_await_via_call() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 3);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]); // t1 (i32)->()
+    types.extend_from_slice(&[0x60, 0, 0]); // t2 ()->()
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 1);
+    put_name(&mut imps, "env");
+    put_name(&mut imps, "libwasm_await__void");
+    imps.push(0x00);
+    imps.push(1);
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 2, 0]); // f1=awaiter t2, f2=_start t0
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 2);
+    section(&mut out, 7, &exports);
+    let b0 = [0x00, 0x41, 0x00, 0x10, 0x00, 0x0b]; // awaiter: const 0; call await
+    let b1 = [
+        0x00, // locals
+        0x06, 0x7f, // try (result i32)
+        0x10, 0x01, //   call awaiter
+        0x41, 0x01, //   i32.const 1
+        0x19, // catch_all
+        0x41, 0x89, 0x06, //   i32.const 777
+        0x0b, // end try
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// `try { call_indirect }` with an awaiter in the funcref table.
+#[cfg(test)]
+pub fn test_module_await_via_calli() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 3);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]); // t1 (i32)->()
+    types.extend_from_slice(&[0x60, 0, 0]); // t2 ()->()
+    section(&mut out, 1, &types);
+    let mut imps = Vec::new();
+    push_uleb(&mut imps, 1);
+    put_name(&mut imps, "env");
+    put_name(&mut imps, "libwasm_await__void");
+    imps.push(0x00);
+    imps.push(1);
+    section(&mut out, 2, &imps);
+    section(&mut out, 3, &[2, 2, 0]); // awaiter t2, _start t0
+    section(&mut out, 4, &[1, 0x70, 0x00, 0x01]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 2);
+    section(&mut out, 7, &exports);
+    section(&mut out, 9, &[1, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x01]); // table[0]=awaiter
+    let b0 = [0x00, 0x41, 0x00, 0x10, 0x00, 0x0b];
+    let b1 = [
+        0x00, // locals
+        0x06, 0x7f, // try (result i32)
+        0x41, 0x00, //   i32.const 0
+        0x11, 0x02, 0x00, //   call_indirect t2 table0
+        0x41, 0x01, //   i32.const 1
+        0x19, // catch_all
+        0x41, 0x89, 0x06, //   i32.const 777
+        0x0b, 0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// `try { call_indirect }` whose table only holds a non-awaiter — must stay clean.
+#[cfg(test)]
+pub fn test_module_calli_in_try_no_await() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 1, 0x7f]); // t0 (i32)->i32
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t1 ()->i32
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[2, 0, 1]);
+    section(&mut out, 4, &[1, 0x70, 0x00, 0x01]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    section(&mut out, 9, &[1, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00]);
+    let b0 = [0x00, 0x20, 0x00, 0x41, 0x0a, 0x6a, 0x0b]; // arg+10
+    let b1 = [
+        0x00, // locals
+        0x06, 0x7f, // try (result i32)
+        0x41, 0x05, //   i32.const 5
+        0x41, 0x00, //   i32.const 0
+        0x11, 0x00, 0x00, //   call_indirect t0
+        0x19, // catch_all
+        0x41, 0x89, 0x06, //   777
+        0x0b, 0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// Cross-function throw into `try_table` `catch_all`: callee `throw` is caught
+/// by the caller's table dest (parent empty block), then `_start` yields 777.
+/// ```wat
+/// (tag $e)
+/// (func $thrower throw $e)
+/// (func $_start (result i32)
+///   (block
+///     (try_table (catch_all 0)
+///       (call $thrower) unreachable)
+///     )
+///   i32.const 777)
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_try_table() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
+    types.extend_from_slice(&[0x60, 0, 0]); // t1 ()->()
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[2, 1, 0]); // f0=t1 thrower, f1=t0 _start
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 1]); // tag typeidx 1 (()->())
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    let b0 = [0x00, 0x08, 0x00, 0x0b]; // thrower: throw tag0; end
+    let b1 = [
+        0x00, // locals
+        0x02, 0x40, // block (empty)
+        0x1f, 0x40, //   try_table (empty)
+        0x01, //   1 catch
+        0x02, 0x00, //   catch_all label0
+        0x10, 0x00, //   call 0
+        0x00, //   unreachable
+        0x0b, //   end try_table
+        0x0b, // end block
+        0x41, 0x89, 0x06, // i32.const 777
+        0x0b, // end func
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// Cross-function tagged throw: callee pushes 7 then `throw $e`; caller
+/// `try_table (catch $e 0)` must return 7, not a wiped frame.
+/// ```wat
+/// (tag $e (param i32))
+/// (func $thrower i32.const 7 throw $e)
+/// (func $_start (result i32)
+///   (block (result i32)
+///     (try_table (catch $e 0)
+///       (call $thrower) unreachable)))
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_try_table_payload() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 3);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
+    types.extend_from_slice(&[0x60, 0, 0]); // t1 ()->()
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]); // t2 (i32)->()
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[2, 1, 0]); // f0=t1 thrower, f1=t0 _start
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 2]); // tag typeidx 2 (param i32)
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    let b0 = [0x00, 0x41, 0x07, 0x08, 0x00, 0x0b]; // const 7; throw 0
+    let b1 = [
+        0x00, // locals
+        0x02, 0x7f, // block (result i32)
+        0x1f, 0x40, //   try_table (empty)
+        0x01, //   1 catch
+        0x00, 0x00, 0x00, //   catch tag0 label0
+        0x10, 0x00, //   call 0
+        0x0b, //   end try_table
+        0x00, // unreachable
+        0x0b, // end block
+        0x0b, // end func
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// Multi-clause `try_table`: `catch $e0` then `catch_all`. Callee throws the
+/// void tag `$e1` so the first clause misses and `catch_all` yields 777.
+/// ```wat
+/// (tag $e0 (param i32)) (tag $e1)
+/// (func $thrower throw $e1)
+/// (func $_start (result i32)
+///   (block (result i32)
+///     (block
+///       (try_table (catch $e0 1) (catch_all 0)
+///         (call $thrower))
+///       unreachable)
+///     i32.const 777))
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_try_table_multi_miss() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 3);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 0, 0]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[2, 1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[2, 0x00, 2, 0x00, 1]); // tag0 (i32), tag1 (void)
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    let b0 = [0x00, 0x08, 0x01, 0x0b]; // throw tag1
+    let b1 = [
+        0x00, // locals
+        0x02, 0x7f, // block (result i32)
+        0x02, 0x40, //   block (empty)
+        0x1f, 0x40, //     try_table
+        0x02, //     2 catches
+        0x00, 0x00, 0x01, //     catch tag0 label1
+        0x02, 0x00, //     catch_all label0
+        0x10, 0x00, //     call 0
+        0x0b, //     end try_table
+        0x00, //     unreachable
+        0x0b, //   end inner
+        0x41, 0x89, 0x06, //   i32.const 777
+        0x0b, // end outer
+        0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// Same table as [`test_module_eh_try_table_multi_miss`], but the callee
+/// throws `$e0` with payload 7 — the first clause must win, not `catch_all`.
+#[cfg(test)]
+pub fn test_module_eh_try_table_multi_hit() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 3);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 0, 0]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[2, 1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[2, 0x00, 2, 0x00, 1]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 1);
+    section(&mut out, 7, &exports);
+    let b0 = [0x00, 0x41, 0x07, 0x08, 0x00, 0x0b]; // const 7; throw tag0
+    let b1 = [
+        0x00, 0x02, 0x7f, // block (result i32)
+        0x02, 0x40, //   block (empty)
+        0x1f, 0x40, //     try_table
+        0x02, 0x00, 0x00, 0x01, //     catch tag0 label1
+        0x02, 0x00, //     catch_all label0
+        0x10, 0x00, 0x0b, 0x00, 0x0b, 0x41, 0x89,
+        0x06, //   i32.const 777 (unreached if $e0 hits)
+        0x0b, 0x0b,
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 2);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    push_uleb(&mut code, b1.len() as u32);
+    code.extend_from_slice(&b1);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// `try_table` catch dest: throw i32 7 lands on the parent block.
+/// ```wat
+/// (tag $e (param i32))
+/// (func $_start (result i32)
+///   (block (result i32)
+///     (try_table (catch $e 0)
+///       (i32.const 7) (throw $e))
+///     unreachable))
+/// ```
+#[cfg(test)]
+pub fn test_module_try_table() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 1]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 0);
+    section(&mut out, 7, &exports);
+    let b0 = [
+        0x00, // locals
+        0x02, 0x7f, // block (result i32)
+        0x1f, 0x40, // try_table (empty type)
+        0x01, // 1 catch
+        0x00, 0x00, 0x00, // catch tag0 label0
+        0x41, 0x07, // i32.const 7
+        0x08, 0x00, // throw 0
+        0x0b, // end try_table
+        0x00, // unreachable
+        0x0b, // end block
+        0x0b, // end func
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// `try_table` `catch_all` dest must restore vsp: leftover 99 must not become
+/// the result. `_start` pushes 1, throws 99 inside `try_table`, catch dest is
+/// the parent empty block.
+/// ```wat
+/// (tag $e (param i32))
+/// (func $_start (result i32)
+///   i32.const 1
+///   (block
+///     (try_table (catch_all 0)
+///       (i32.const 99) (throw $e))
+///     unreachable))
+/// ```
+#[cfg(test)]
+pub fn test_module_try_table_catch_all_vsp() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]);
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]);
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 1]);
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 0);
+    section(&mut out, 7, &exports);
+    let b0 = [
+        0x00, // locals
+        0x41, 0x01, // i32.const 1
+        0x02, 0x40, // block (empty)
+        0x1f, 0x40, //   try_table (empty type)
+        0x01, //   1 catch
+        0x02, 0x00, //   catch_all label0
+        0x41, 0x63, //   i32.const 99
+        0x08, 0x00, //   throw 0
+        0x0b, //   end try_table
+        0x00, //   unreachable
+        0x0b, // end block
+        0x0b, // end func
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    section(&mut out, 10, &code);
+    out
+}
+
+/// catch_all must restore vsp: leftover throw payload 99 must not become the
+/// result. `_start` pushes 1, throws 99 inside `try`, `catch_all` drops it.
+/// ```wat
+/// (tag $e (param i32))
+/// (func $_start (result i32)
+///   i32.const 1
+///   try
+///     i32.const 99
+///     throw $e
+///   catch_all
+///   end)
+/// ```
+#[cfg(test)]
+pub fn test_module_eh_vsp() -> Vec<u8> {
+    let mut out = b"\0asm\x01\x00\x00\x00".to_vec();
+    let mut types = Vec::new();
+    push_uleb(&mut types, 2);
+    types.extend_from_slice(&[0x60, 0, 1, 0x7f]); // t0 ()->i32
+    types.extend_from_slice(&[0x60, 1, 0x7f, 0]); // t1 (i32)->()
+    section(&mut out, 1, &types);
+    section(&mut out, 3, &[1, 0]);
+    section(&mut out, 5, &[1, 0x00, 0x01]);
+    section(&mut out, 13, &[1, 0x00, 1]); // tag typeidx 1 (param i32)
+    let mut exports = Vec::new();
+    push_uleb(&mut exports, 2);
+    put_name(&mut exports, "memory");
+    exports.push(0x02);
+    push_uleb(&mut exports, 0);
+    put_name(&mut exports, "_start");
+    exports.push(0x00);
+    push_uleb(&mut exports, 0);
+    section(&mut out, 7, &exports);
+    let b0 = [
+        0x00, // locals
+        0x41, 0x01, // i32.const 1
+        0x06, 0x40, // try (empty)
+        0x41, 0x63, //   i32.const 99
+        0x08, 0x00, //   throw 0
+        0x19, // catch_all
+        0x0b, // end try
+        0x0b, // end func
+    ];
+    let mut code = Vec::new();
+    push_uleb(&mut code, 1);
+    push_uleb(&mut code, b0.len() as u32);
+    code.extend_from_slice(&b0);
+    section(&mut out, 10, &code);
+    out
+}
+
 /// Uncaught variant: `_start` itself `throw`s tag0 with no enclosing try — the
 /// exception escapes the top frame and must surface as `WASM-JIT-TRAP` TRAP_EXC.
 #[cfg(test)]
@@ -2128,6 +5256,695 @@ mod tests {
             }
         }
         assert_eq!(got, Some(0x309), "catch did not yield 777: {}", s.console);
+    }
+
+    /// Cross-function unwind into `try_table` `catch_all`: callee `throw` is
+    /// caught by the caller's table dest, yielding 777 — no trap.
+    #[test]
+    fn guest_jit_cross_func_throw_try_table() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_try_table()).expect("try_table eh cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "try_table throw escaped uncaught / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(0x309),
+            "try_table catch_all did not yield 777: {}",
+            s.console
+        );
+    }
+
+    /// Cross-function tagged throw: callee `i32.const 7; throw` returns 7,
+    /// not a folded-away payload.
+    #[test]
+    fn guest_jit_cross_func_throw_payload() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_try_table_payload())
+            .expect("try_table payload cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "tagged throw escaped uncaught / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(7),
+            "cross-func tagged throw dropped payload: {}",
+            s.console
+        );
+    }
+
+    /// Two-cell tagged throw: callee pushes 3 then 4; catch adds them to 7.
+    #[test]
+    fn guest_jit_cross_func_throw_payload2() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_payload2()).expect("payload2 cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "two-cell throw escaped uncaught / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(7),
+            "two-cell payload 3+4 did not add to 7: {}",
+            s.console
+        );
+    }
+
+    /// Nested `rethrow 0` lands on the outer catch with payload 7.
+    #[test]
+    fn guest_jit_rethrow_nested() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_rethrow_nested()).expect("rethrow nested installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "nested rethrow escaped / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(got, Some(7), "nested rethrow payload: {}", s.console);
+    }
+
+    /// Cross-function `rethrow 0`: callee catch restashes payload 7 for caller.
+    #[test]
+    fn guest_jit_rethrow_escape() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_rethrow_escape()).expect("rethrow escape installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "escape rethrow uncaught / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(got, Some(7), "escape rethrow payload: {}", s.console);
+    }
+
+    /// `rethrow 0` into an enclosing `try_table` catch dest returns 7.
+    #[test]
+    fn guest_jit_rethrow_try_table() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_rethrow_try_table())
+            .expect("rethrow try_table installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "rethrow try_table escaped / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(got, Some(7), "rethrow try_table payload: {}", s.console);
+    }
+
+    /// Local `catch_all_ref` + `throw_ref` keeps payload 7 on the outer catch.
+    #[test]
+    fn guest_jit_catch_all_ref_throw_ref() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_catch_all_ref())
+            .expect("catch_all_ref cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "catch_all_ref throw_ref escaped / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(7),
+            "catch_all_ref throw_ref payload: {}",
+            s.console
+        );
+    }
+
+    /// Cross-function throw into `catch_all_ref`, then `throw_ref` returns 7.
+    #[test]
+    fn guest_jit_cross_func_catch_all_ref_throw_ref() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_catch_all_ref_cross())
+            .expect("cross catch_all_ref cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "cross catch_all_ref throw_ref escaped / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(7),
+            "cross catch_all_ref throw_ref payload: {}",
+            s.console
+        );
+    }
+
+    /// Local `catch_ref` dest is payload plus exnref; `throw_ref` returns 7.
+    #[test]
+    fn guest_jit_catch_ref_throw_ref() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_catch_ref()).expect("catch_ref cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "catch_ref throw_ref escaped / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(got, Some(7), "catch_ref throw_ref payload: {}", s.console);
+    }
+
+    /// `catch_ref` dest top cell is the exnref handle (1), not payload 7.
+    #[test]
+    fn guest_jit_catch_ref_exnref_is_nonzero() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_catch_ref_handle())
+            .expect("catch_ref handle cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "catch_ref handle escaped / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(1),
+            "catch_ref dest top should be exnref handle 1, not payload: {}",
+            s.console
+        );
+    }
+
+    /// `catch_ref $e0` misses void `$e1`; `catch_all` yields 777.
+    #[test]
+    fn guest_jit_catch_ref_miss_falls_to_catch_all() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_catch_ref_miss())
+            .expect("catch_ref miss cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "catch_all after catch_ref miss escaped / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(0x309),
+            "catch_ref miss did not reach catch_all 777: {}",
+            s.console
+        );
+    }
+
+    /// Local `catch_ref` EXCCLR copies payload+handle (b=2).
+    #[test]
+    fn catch_ref_excclear_copies_payload_and_handle() {
+        let img = encode(&test_module_eh_catch_ref_handle()).expect("catch_ref handle encodes");
+        let nfuncs = u32::from_le_bytes(img[4..8].try_into().unwrap()) as usize;
+        let nrecords = u32::from_le_bytes(img[24..28].try_into().unwrap()) as usize;
+        let rbase = HDR_BYTES + nfuncs * FHDR_BYTES;
+        let mut found = None;
+        for i in 0..nrecords {
+            let op =
+                u32::from_le_bytes(img[rbase + i * 16..rbase + i * 16 + 4].try_into().unwrap());
+            if op == R_EXCCLR {
+                let b = u64::from_le_bytes(
+                    img[rbase + i * 16 + 8..rbase + i * 16 + 16]
+                        .try_into()
+                        .unwrap(),
+                );
+                found = Some(b);
+            }
+        }
+        assert_eq!(
+            found,
+            Some(2),
+            "catch_ref EXCCLR should copy payload+handle (b=2)"
+        );
+    }
+
+    /// Direct `libwasm_await__void` inside `try` is a reachable coverage gap.
+    #[test]
+    fn await_inside_try_is_a_coverage_gap() {
+        let wasm = test_module_await_in_try();
+        let cov = op_coverage(&wasm).expect("await-in-try encodes");
+        assert!(
+            !cov.clean(),
+            "await inside try must not look clean: {:?}",
+            cov.gaps.iter().map(OpGap::describe).collect::<Vec<_>>()
+        );
+        assert!(
+            cov.gaps
+                .iter()
+                .any(|g| g.code == TRAP_UNSUP && g.orig == 0x700),
+            "expected 0x700 await-in-try gap, got {:?}",
+            cov.gaps.iter().map(OpGap::describe).collect::<Vec<_>>()
+        );
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        let err = install_guest(&mut m, &wasm).expect_err("await-in-try must not install");
+        assert!(
+            err.contains("await inside try"),
+            "preflight should name the gap: {err}"
+        );
+    }
+
+    /// `try { call $awaiter }` is the same gap when await is in the callee.
+    #[test]
+    fn await_via_call_from_try_is_a_coverage_gap() {
+        let wasm = test_module_await_via_call();
+        let cov = op_coverage(&wasm).expect("await-via-call encodes");
+        assert!(
+            !cov.clean(),
+            "try calling an awaiter must not look clean: {:?}",
+            cov.gaps.iter().map(OpGap::describe).collect::<Vec<_>>()
+        );
+        assert!(
+            cov.gaps
+                .iter()
+                .any(|g| g.code == TRAP_UNSUP && g.orig == 0x700),
+            "expected 0x700 callee-await gap, got {:?}",
+            cov.gaps.iter().map(OpGap::describe).collect::<Vec<_>>()
+        );
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        let err = install_guest(&mut m, &wasm).expect_err("callee-await from try must not install");
+        assert!(
+            err.contains("await inside try"),
+            "preflight should name the gap: {err}"
+        );
+    }
+
+    /// `try { call_indirect }` with an awaiter in the table is the same gap.
+    #[test]
+    fn await_via_calli_from_try_is_a_coverage_gap() {
+        let wasm = test_module_await_via_calli();
+        let cov = op_coverage(&wasm).expect("await-via-calli encodes");
+        assert!(
+            !cov.clean(),
+            "try call_indirect to an awaiter must not look clean: {:?}",
+            cov.gaps.iter().map(OpGap::describe).collect::<Vec<_>>()
+        );
+        assert!(
+            cov.gaps
+                .iter()
+                .any(|g| g.code == TRAP_UNSUP && g.orig == 0x700),
+            "expected 0x700 call_indirect-await gap, got {:?}",
+            cov.gaps.iter().map(OpGap::describe).collect::<Vec<_>>()
+        );
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        let err = install_guest(&mut m, &wasm).expect_err("calli-await from try must not install");
+        assert!(
+            err.contains("await inside try"),
+            "preflight should name the gap: {err}"
+        );
+    }
+
+    /// `try { call_indirect }` to a non-awaiter stays installable.
+    #[test]
+    fn calli_in_try_without_awaiter_is_clean() {
+        let wasm = test_module_calli_in_try_no_await();
+        let cov = op_coverage(&wasm).expect("calli-in-try encodes");
+        assert!(
+            cov.clean(),
+            "try call_indirect to a non-awaiter must stay clean: {:?}",
+            cov.gaps.iter().map(OpGap::describe).collect::<Vec<_>>()
+        );
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &wasm).expect("non-awaiter calli in try installs");
+    }
+
+    /// Multi-clause `try_table`: a miss on `catch $e0` falls through to
+    /// `catch_all` instead of propagating.
+    #[test]
+    fn guest_jit_cross_func_throw_try_table_multi_miss() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_try_table_multi_miss())
+            .expect("multi-miss cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "catch_all after tagged miss escaped / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(0x309),
+            "tagged miss did not reach catch_all 777: {}",
+            s.console
+        );
+    }
+
+    /// Multi-clause `try_table`: matching `catch $e0` wins over a later
+    /// `catch_all` (payload 7, not 777).
+    #[test]
+    fn guest_jit_cross_func_throw_try_table_multi_hit() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_try_table_multi_hit())
+            .expect("multi-hit cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "tagged hit escaped / {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(7),
+            "first-clause hit lost to catch_all: {}",
+            s.console
+        );
+    }
+
+    /// `try_table` catch dest: throw 7 returns 7 (not TRAP_UNSUP).
+    #[test]
+    fn guest_jit_try_table_catch() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_try_table()).expect("try_table cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "try_table throw was not caught: {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(got, Some(7), "try_table catch dest payload: {}", s.console);
+    }
+
+    /// `try_table` catch_all dest records EXCCLR at the parent block height.
+    #[test]
+    fn try_table_catch_all_excclear_records_dest_height() {
+        let img = encode(&test_module_try_table_catch_all_vsp()).expect("try_table vsp encodes");
+        let nfuncs = u32::from_le_bytes(img[4..8].try_into().unwrap()) as usize;
+        let nrecords = u32::from_le_bytes(img[24..28].try_into().unwrap()) as usize;
+        let rbase = HDR_BYTES + nfuncs * FHDR_BYTES;
+        let mut found = None;
+        for i in 0..nrecords {
+            let op =
+                u32::from_le_bytes(img[rbase + i * 16..rbase + i * 16 + 4].try_into().unwrap());
+            if op == R_EXCCLR {
+                let a = u32::from_le_bytes(
+                    img[rbase + i * 16 + 4..rbase + i * 16 + 8]
+                        .try_into()
+                        .unwrap(),
+                );
+                let b = u64::from_le_bytes(
+                    img[rbase + i * 16 + 8..rbase + i * 16 + 16]
+                        .try_into()
+                        .unwrap(),
+                );
+                found = Some((a, b));
+            }
+        }
+        assert_eq!(
+            found,
+            Some((1, 0)),
+            "try_table catch_all EXCCLR should be dest height=1 nparams=0"
+        );
+    }
+
+    /// `try_table` catch_all dest restores vsp: leftover 99 must not be returned.
+    #[test]
+    fn guest_jit_try_table_catch_all_restores_vsp() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_try_table_catch_all_vsp())
+            .expect("try_table vsp cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "try_table catch_all throw was not caught: {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(1),
+            "try_table catch_all left throw payload on the stack: {}",
+            s.console
+        );
+    }
+
+    /// `R_EXCCLR.a` is the try height (1 = the `i32.const 1` below the try);
+    /// `b` is 0 for `catch_all`.
+    #[test]
+    fn catch_all_excclear_records_try_height() {
+        let img = encode(&test_module_eh_vsp()).expect("vsp cell encodes");
+        let nfuncs = u32::from_le_bytes(img[4..8].try_into().unwrap()) as usize;
+        let nrecords = u32::from_le_bytes(img[24..28].try_into().unwrap()) as usize;
+        let rbase = HDR_BYTES + nfuncs * FHDR_BYTES;
+        let mut found = None;
+        for i in 0..nrecords {
+            let op =
+                u32::from_le_bytes(img[rbase + i * 16..rbase + i * 16 + 4].try_into().unwrap());
+            if op == R_EXCCLR {
+                let a = u32::from_le_bytes(
+                    img[rbase + i * 16 + 4..rbase + i * 16 + 8]
+                        .try_into()
+                        .unwrap(),
+                );
+                let b = u64::from_le_bytes(
+                    img[rbase + i * 16 + 8..rbase + i * 16 + 16]
+                        .try_into()
+                        .unwrap(),
+                );
+                found = Some((a, b));
+            }
+        }
+        assert_eq!(
+            found,
+            Some((1, 0)),
+            "catch_all EXCCLR should be height=1 nparams=0"
+        );
+    }
+
+    /// catch_all restores vsp: leftover throw payload 99 must not be returned.
+    #[test]
+    fn guest_jit_catch_all_restores_vsp() {
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},"wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh_vsp()).expect("vsp cell installs");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(
+            !s.console.contains("WASM-JIT-TRAP"),
+            "catch_all throw was not caught: {}",
+            s.console
+        );
+        let mut got = None;
+        for line in s.console.lines() {
+            if let Some(hex) = line.strip_prefix("WASM-JIT ") {
+                got = Some(u64::from_str_radix(hex.trim(), 16).unwrap_or(u64::MAX));
+            }
+        }
+        assert_eq!(
+            got,
+            Some(1),
+            "catch_all left throw payload on the stack: {}",
+            s.console
+        );
     }
 
     /// Uncaught `throw` at the top frame → `WASM-JIT-TRAP` TRAP_EXC (11).
@@ -3541,6 +7358,368 @@ mod tests {
         pending_await_resume(false, false);
     }
 
+    /// `PromCtx(1)` parks the await on table slot 1; header `P_ASUSP` (slot 0)
+    /// stays 0 so two contexts cannot alias the one image-global suspend.
+    #[test]
+    fn guest_jit_ctx1_suspend_does_not_alias_slot0() {
+        use g6b_asm::domt::{PCTX_ASUSP, PROM_CTX_OFF, PROM_CTX_STRIDE, P_ASUSP};
+        use g6b_asm::encode::{A1, T1};
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_delegate()).expect("cell installs");
+        const URL: i64 = 0x10_fe00;
+        let mut probe = vec![
+            Op::La {
+                rd: T1,
+                addr: Addr::WasmMem,
+            },
+            Op::Li { rd: T2, imm: URL },
+            Op::Add {
+                rd: T1,
+                rs1: T1,
+                rs2: T2,
+            },
+        ];
+        for (i, b) in b"/no".iter().enumerate() {
+            probe.extend([
+                Op::Li {
+                    rd: T2,
+                    imm: i64::from(*b),
+                },
+                Op::Sb {
+                    rs2: T2,
+                    rs1: T1,
+                    off: i as i32,
+                },
+            ]);
+        }
+        probe.extend([
+            Op::Li { rd: A0, imm: 1 },
+            Op::Jal {
+                rd: RA,
+                to: "PromCtx".into(),
+            },
+            Op::Li { rd: A0, imm: URL },
+            Op::Li { rd: A1, imm: 3 },
+            Op::Jal {
+                rd: RA,
+                to: "LwFetch".into(),
+            },
+            Op::Jal {
+                rd: RA,
+                to: "LwAwaitVoid".into(),
+            },
+        ]);
+        probe.extend(put_str_ops("C0="));
+        probe.extend([
+            Op::La {
+                rd: T0,
+                addr: Addr::Prom,
+            },
+            Op::Lw {
+                rd: T0,
+                rs: T0,
+                off: P_ASUSP,
+            },
+        ]);
+        probe.extend(hex_t0_ops("ctx0_asusp"));
+        probe.extend(put_str_ops(" C1="));
+        probe.extend([
+            Op::La {
+                rd: T0,
+                addr: Addr::Prom,
+            },
+            Op::Li {
+                rd: T1,
+                imm: i64::from(PROM_CTX_OFF + PROM_CTX_STRIDE),
+            },
+            Op::Add {
+                rd: T0,
+                rs1: T0,
+                rs2: T1,
+            },
+            Op::Lw {
+                rd: T0,
+                rs: T0,
+                off: PCTX_ASUSP,
+            },
+        ]);
+        probe.extend(hex_t0_ops("ctx1_asusp"));
+        probe.extend(put_str_ops("\n"));
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                n.ops.splice(pos + 1..pos + 1, probe);
+                break;
+            }
+        }
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert_eq!(s.faults, 0, "{}", s.console);
+        assert!(
+            s.console.contains("C0=0000000000000000"),
+            "slot 0 must stay empty:\n{}",
+            s.console
+        );
+        let c1 = s.console.split("C1=").nth(1).unwrap_or("");
+        let c1 = &c1[..16.min(c1.len())];
+        assert_ne!(
+            c1, "0000000000000000",
+            "ctx1 must hold the await:\n{}",
+            s.console
+        );
+    }
+
+    /// `PromCtx` spills/fills the `__jit` EH bank so slot 1 cannot see
+    /// slot 0's in-flight exception.
+    #[test]
+    fn guest_jit_promctx_isolates_exc_bank() {
+        use g6b_asm::encode::{A0, RA, T0, T1};
+        use g6b_asm::jitr::OFF_EXC;
+        use g6b_asm::{Addr, Op};
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_delegate()).expect("cell installs");
+        let jit_exc = |rd| {
+            vec![
+                Op::La {
+                    rd,
+                    addr: Addr::JitHdr,
+                },
+                Op::Li {
+                    rd: T1,
+                    imm: i64::from(OFF_EXC),
+                },
+                Op::Add {
+                    rd,
+                    rs1: rd,
+                    rs2: T1,
+                },
+            ]
+        };
+        let mut probe = jit_exc(T0);
+        probe.extend([
+            Op::Li { rd: T1, imm: 1 },
+            Op::Sd {
+                rs2: T1,
+                rs1: T0,
+                off: 0,
+            },
+            Op::Li { rd: T1, imm: 7 },
+            Op::Sd {
+                rs2: T1,
+                rs1: T0,
+                off: 8,
+            },
+            Op::Li { rd: T1, imm: 99 },
+            Op::Sd {
+                rs2: T1,
+                rs1: T0,
+                off: 16,
+            },
+            Op::Li { rd: A0, imm: 1 },
+            Op::Jal {
+                rd: RA,
+                to: "PromCtx".into(),
+            },
+        ]);
+        probe.extend(put_str_ops("E1="));
+        probe.extend(jit_exc(T0));
+        probe.push(Op::Ld {
+            rd: T0,
+            rs: T0,
+            off: 0,
+        });
+        probe.extend(hex_t0_ops("exc1"));
+        probe.extend([
+            Op::Li { rd: A0, imm: 0 },
+            Op::Jal {
+                rd: RA,
+                to: "PromCtx".into(),
+            },
+        ]);
+        probe.extend(put_str_ops(" T0="));
+        probe.extend(jit_exc(T0));
+        probe.push(Op::Ld {
+            rd: T0,
+            rs: T0,
+            off: 8,
+        });
+        probe.extend(hex_t0_ops("tag0"));
+        probe.extend(put_str_ops(" P0="));
+        probe.extend(jit_exc(T0));
+        probe.push(Op::Ld {
+            rd: T0,
+            rs: T0,
+            off: 16,
+        });
+        probe.extend(hex_t0_ops("pay0"));
+        probe.extend(put_str_ops("\n"));
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                n.ops.splice(pos + 1..pos + 1, probe);
+                break;
+            }
+        }
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert_eq!(s.faults, 0, "{}", s.console);
+        assert!(
+            s.console.contains("E1=0000000000000000"),
+            "slot 1 must not see slot 0 EXC:\n{}",
+            s.console
+        );
+        assert!(
+            s.console.contains("T0=0000000000000007"),
+            "slot 0 EXCTAG restored:\n{}",
+            s.console
+        );
+        assert!(
+            s.console.contains("P0=0000000000000063"),
+            "slot 0 EXCPAY restored:\n{}",
+            s.console
+        );
+    }
+
+    /// Outermost user `JitCall` restores the caller's EH bank after the
+    /// nested invoke (listeners must not clobber `EXCPAY`).
+    #[test]
+    fn guest_jit_jitcall_restores_exc_bank() {
+        use g6b_asm::encode::{A0, A1, RA, T0, T1};
+        use g6b_asm::jfmt::OFF_ENTRY;
+        use g6b_asm::jitr::OFF_EXC;
+        use g6b_asm::{Addr, Op};
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_eh()).expect("eh cell installs");
+        let jit_exc = |rd| {
+            vec![
+                Op::La {
+                    rd,
+                    addr: Addr::JitHdr,
+                },
+                Op::Li {
+                    rd: T1,
+                    imm: i64::from(OFF_EXC),
+                },
+                Op::Add {
+                    rd,
+                    rs1: rd,
+                    rs2: T1,
+                },
+            ]
+        };
+        let mut probe = jit_exc(T0);
+        probe.extend([
+            Op::Li { rd: T1, imm: 1 },
+            Op::Sd {
+                rs2: T1,
+                rs1: T0,
+                off: 0,
+            },
+            Op::Li { rd: T1, imm: 7 },
+            Op::Sd {
+                rs2: T1,
+                rs1: T0,
+                off: 8,
+            },
+            Op::Li { rd: T1, imm: 99 },
+            Op::Sd {
+                rs2: T1,
+                rs1: T0,
+                off: 16,
+            },
+            Op::La {
+                rd: A0,
+                addr: Addr::JitIn,
+            },
+            Op::Lw {
+                rd: A0,
+                rs: A0,
+                off: OFF_ENTRY as i32,
+            },
+            Op::Li { rd: A1, imm: 0 },
+            Op::Jal {
+                rd: RA,
+                to: "JitCall".into(),
+            },
+        ]);
+        probe.extend(put_str_ops("T0="));
+        probe.extend(jit_exc(T0));
+        probe.push(Op::Ld {
+            rd: T0,
+            rs: T0,
+            off: 8,
+        });
+        probe.extend(hex_t0_ops("jc_tag"));
+        probe.extend(put_str_ops(" P0="));
+        probe.extend(jit_exc(T0));
+        probe.push(Op::Ld {
+            rd: T0,
+            rs: T0,
+            off: 16,
+        });
+        probe.extend(hex_t0_ops("jc_pay"));
+        probe.extend(put_str_ops("\n"));
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                n.ops.splice(pos + 1..pos + 1, probe);
+                break;
+            }
+        }
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert_eq!(s.faults, 0, "{}", s.console);
+        assert!(
+            s.console.contains("T0=0000000000000007"),
+            "JitCall must restore caller EXCTAG:\n{}",
+            s.console
+        );
+        assert!(
+            s.console.contains("P0=0000000000000063"),
+            "JitCall must restore caller EXCPAY:\n{}",
+            s.console
+        );
+    }
+
     #[test]
     fn guest_jit_late_fulfillment_finishes_subsequent_awaits() {
         pending_await_resume(true, false);
@@ -4395,6 +8574,1239 @@ mod tests {
         assert!(
             s.domt_live >= 3,
             "event-property bridge read ev fields → delegate appended (live={}): {}",
+            s.domt_live,
+            s.console
+        );
+    }
+
+    /// UTF-8 `Object_Getter__string` for `type` on a real click. The evstr
+    /// delegate appends iff the sret `{len,ptr}` reports len==5 (`"click"`).
+    /// Empty/unknown leave `__dom` at root+button.
+    #[test]
+    fn guest_jit_listener_reads_event_type_string() {
+        use g6b_asm::encode::RA;
+        use g6b_asm::exec::{run_module, run_module_web_feed, GuestWebPresent, WebFeed};
+        use g6b_asm::Op;
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+
+        let build = |m: &mut g6b_asm::Module| {
+            install_guest(m, &test_module_evstr(b"click", b"type"))
+                .expect("evstr click cell installs");
+            for n in &mut m.nodes {
+                if let Some(pos) = n
+                    .ops
+                    .iter()
+                    .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+                {
+                    n.ops.splice(
+                        pos + 1..pos + 1,
+                        vec![Op::Jal {
+                            rd: RA,
+                            to: "DomtLayout".into(),
+                        }],
+                    );
+                    return;
+                }
+            }
+            panic!("no JitRun call site to splice after");
+        };
+
+        let mut probe = g6b_asm::analyze::kstart(&spec);
+        build(&mut probe);
+        let sp = run_module(&spec, &probe, 0x8020_0000).unwrap();
+        assert!(!sp.console.contains("TRAP-"), "{}", sp.console);
+        let btn = sp
+            .domt_nodes
+            .iter()
+            .find(|n| n.0 != 0)
+            .expect("a non-root button node is laid out");
+        let (bx, by, bw, bh) = (btn.3, btn.4, btn.5, btn.6);
+        assert!(bw > 0 && bh > 0, "button has a laid-out rect: {:?}", btn);
+        let (dw, dh) = (640u32, 480u32);
+        let abs_x = (bx + bw / 2) * 0x8000 / dw;
+        let abs_y = (by + bh / 2) * 0x8000 / dh;
+
+        struct ClickFeed {
+            x: u32,
+            y: u32,
+        }
+        impl WebFeed for ClickFeed {
+            fn initial(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn on_guest_ui(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn hint_abs(&self) -> Option<(u32, u32)> {
+                Some((self.x, self.y))
+            }
+        }
+        let mut feed = ClickFeed { x: abs_x, y: abs_y };
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        build(&mut m);
+        let s = run_module_web_feed(&spec, &m, 0x8020_0000, 0, &mut feed).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        assert!(s.domt_listen >= 1, "button click listener: {}", s.console);
+        assert!(
+            s.domt_live >= 3,
+            "string type getter wrote \"click\" (len=5) → delegate appended (live={}): {}",
+            s.domt_live,
+            s.console
+        );
+    }
+
+    /// UTF-8 `Object_Getter__string` for KeyboardEvent.code on KEY_ENTER.
+    /// `code` is `"Enter"` (len 5), never the Linux keycode integer 28.
+    #[test]
+    fn guest_jit_listener_reads_event_code_string() {
+        use g6b_asm::encode::{A0, RA, T0, T1, X0};
+        use g6b_asm::vio::{DOMT_SEEN_OFF, INP_KQ_HEAD, INP_KQ_OFF, VIO_KEY_ENTER};
+        use g6b_asm::{Addr, Op};
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_evstr(b"keydown", b"code"))
+            .expect("evstr key cell installs");
+        let mut placed = false;
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                let ops = vec![
+                    Op::Li { rd: A0, imm: 1 },
+                    Op::Jal {
+                        rd: RA,
+                        to: "DomtFocus".into(),
+                    },
+                    Op::La {
+                        rd: T0,
+                        addr: Addr::VioBss,
+                    },
+                    Op::Li {
+                        rd: T1,
+                        imm: (VIO_KEY_ENTER << 8) | 1,
+                    },
+                    Op::Sw {
+                        rs2: T1,
+                        rs1: T0,
+                        off: INP_KQ_OFF,
+                    },
+                    Op::Li { rd: T1, imm: 1 },
+                    Op::Sw {
+                        rs2: T1,
+                        rs1: T0,
+                        off: INP_KQ_HEAD,
+                    },
+                    Op::Sw {
+                        rs2: X0,
+                        rs1: T0,
+                        off: DOMT_SEEN_OFF,
+                    },
+                    Op::Jal {
+                        rd: RA,
+                        to: "DomtKey".into(),
+                    },
+                ];
+                n.ops.splice(pos + 1..pos + 1, ops);
+                placed = true;
+                break;
+            }
+        }
+        assert!(placed, "no JitRun call site to splice after");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        assert!(s.domt_listen >= 1, "button keydown listener: {}", s.console);
+        assert!(
+            s.domt_live >= 3,
+            "string code getter wrote \"Enter\" (len=5, not Linux 28) → appended (live={}): {}",
+            s.domt_live,
+            s.console
+        );
+    }
+
+    fn click_wasm_grows(wasm: &[u8], min_live: u32, why: &str) {
+        let _ = click_wasm_grows_m(wasm, min_live, why, 0);
+    }
+
+    fn click_wasm_grows_m(wasm: &[u8], min_live: u32, why: &str, mods: u8) -> g6b_asm::exec::Smoke {
+        use g6b_asm::encode::RA;
+        use g6b_asm::exec::{run_module, run_module_web_feed, GuestWebPresent, WebFeed};
+        use g6b_asm::Op;
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+
+        let build = |m: &mut g6b_asm::Module| {
+            install_guest(m, wasm).expect("cell installs");
+            for n in &mut m.nodes {
+                if let Some(pos) = n
+                    .ops
+                    .iter()
+                    .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+                {
+                    n.ops.splice(
+                        pos + 1..pos + 1,
+                        vec![Op::Jal {
+                            rd: RA,
+                            to: "DomtLayout".into(),
+                        }],
+                    );
+                    return;
+                }
+            }
+            panic!("no JitRun call site to splice after");
+        };
+
+        let mut probe = g6b_asm::analyze::kstart(&spec);
+        build(&mut probe);
+        let sp = run_module(&spec, &probe, 0x8020_0000).unwrap();
+        assert!(!sp.console.contains("TRAP-"), "{}", sp.console);
+        let btn = sp
+            .domt_nodes
+            .iter()
+            .find(|n| n.0 != 0)
+            .expect("a non-root button node is laid out");
+        let (bx, by, bw, bh) = (btn.3, btn.4, btn.5, btn.6);
+        assert!(bw > 0 && bh > 0, "button has a laid-out rect: {:?}", btn);
+        let abs_x = (bx + bw / 2) * 0x8000 / 640;
+        let abs_y = (by + bh / 2) * 0x8000 / 480;
+
+        struct ClickFeed {
+            x: u32,
+            y: u32,
+            mods: u8,
+        }
+        impl WebFeed for ClickFeed {
+            fn initial(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn on_guest_ui(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn hint_abs(&self) -> Option<(u32, u32)> {
+                Some((self.x, self.y))
+            }
+            fn hint_mods(&self) -> Option<u8> {
+                (self.mods != 0).then_some(self.mods)
+            }
+        }
+        let mut feed = ClickFeed {
+            x: abs_x,
+            y: abs_y,
+            mods,
+        };
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        build(&mut m);
+        let s = run_module_web_feed(&spec, &m, 0x8020_0000, 0, &mut feed).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        assert!(
+            s.domt_live >= min_live,
+            "{why} (live={}): {}",
+            s.domt_live,
+            s.console
+        );
+        s
+    }
+
+    /// Click the child button; root capture listener sees `eventPhase==1`.
+    #[test]
+    fn guest_jit_click_capture_on_parent() {
+        click_wasm_grows(
+            &test_module_phase(true),
+            3,
+            "parent capture walk wrote eventPhase=1 → appended",
+        );
+    }
+
+    /// Click the child button; root bubble listener sees `eventPhase==3`.
+    #[test]
+    fn guest_jit_click_bubble_on_parent() {
+        click_wasm_grows(
+            &test_module_phase(false),
+            3,
+            "parent bubble walk wrote eventPhase=3 → appended",
+        );
+    }
+
+    /// Capture and bubble listeners on the same parent both fire (two records).
+    #[test]
+    fn guest_jit_two_listeners_on_parent() {
+        click_wasm_grows(
+            &test_module_two_lsn(),
+            4,
+            "capture+bubble records both fired → two appends",
+        );
+    }
+
+    /// `once` (a5=2): two KEY_ENTER presses append only once.
+    #[test]
+    fn guest_jit_once_listener_fires_once() {
+        use g6b_asm::encode::{A0, RA, T0, T1, X0};
+        use g6b_asm::vio::{DOMT_SEEN_OFF, INP_KQ_HEAD, INP_KQ_OFF, VIO_KEY_ENTER};
+        use g6b_asm::{Addr, Op};
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, &test_module_once()).expect("once cell installs");
+        let mut placed = false;
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                let enter = (VIO_KEY_ENTER << 8) | 1;
+                let ops = vec![
+                    Op::Li { rd: A0, imm: 1 },
+                    Op::Jal {
+                        rd: RA,
+                        to: "DomtFocus".into(),
+                    },
+                    Op::La {
+                        rd: T0,
+                        addr: Addr::VioBss,
+                    },
+                    Op::Li { rd: T1, imm: enter },
+                    Op::Sw {
+                        rs2: T1,
+                        rs1: T0,
+                        off: INP_KQ_OFF,
+                    },
+                    Op::Sw {
+                        rs2: T1,
+                        rs1: T0,
+                        off: INP_KQ_OFF + 4,
+                    },
+                    Op::Li { rd: T1, imm: 2 },
+                    Op::Sw {
+                        rs2: T1,
+                        rs1: T0,
+                        off: INP_KQ_HEAD,
+                    },
+                    Op::Sw {
+                        rs2: X0,
+                        rs1: T0,
+                        off: DOMT_SEEN_OFF,
+                    },
+                    Op::Jal {
+                        rd: RA,
+                        to: "DomtKey".into(),
+                    },
+                ];
+                n.ops.splice(pos + 1..pos + 1, ops);
+                placed = true;
+                break;
+            }
+        }
+        assert!(placed, "no JitRun call site to splice after");
+        let s = g6b_asm::exec::run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        assert_eq!(
+            s.domt_live, 3,
+            "once listener appended once for two keydowns (live={}): {}",
+            s.domt_live, s.console
+        );
+    }
+
+    /// `passive` (a5=4): preventDefault does not set defaultPrevented → append.
+    #[test]
+    fn guest_jit_passive_prevent_default_is_noop() {
+        click_wasm_grows(
+            &test_module_passive(),
+            3,
+            "passive preventDefault left defaultPrevented=0 → appended",
+        );
+    }
+
+    /// `remove_event_listener` tombs the record; a later click does not append.
+    #[test]
+    fn guest_jit_remove_event_listener() {
+        use g6b_asm::encode::RA;
+        use g6b_asm::exec::{run_module, run_module_web_feed, GuestWebPresent, WebFeed};
+        use g6b_asm::Op;
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let build = |m: &mut g6b_asm::Module| {
+            install_guest(m, &test_module_rmlsn()).expect("rmlsn cell installs");
+            for n in &mut m.nodes {
+                if let Some(pos) = n
+                    .ops
+                    .iter()
+                    .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+                {
+                    n.ops.splice(
+                        pos + 1..pos + 1,
+                        vec![Op::Jal {
+                            rd: RA,
+                            to: "DomtLayout".into(),
+                        }],
+                    );
+                    return;
+                }
+            }
+            panic!("no JitRun call site to splice after");
+        };
+        let mut probe = g6b_asm::analyze::kstart(&spec);
+        build(&mut probe);
+        let sp = run_module(&spec, &probe, 0x8020_0000).unwrap();
+        assert!(!sp.console.contains("TRAP-"), "{}", sp.console);
+        let btn = sp
+            .domt_nodes
+            .iter()
+            .find(|n| n.0 != 0)
+            .expect("button laid out");
+        let abs_x = (btn.3 + btn.5 / 2) * 0x8000 / 640;
+        let abs_y = (btn.4 + btn.6 / 2) * 0x8000 / 480;
+        struct ClickFeed {
+            x: u32,
+            y: u32,
+        }
+        impl WebFeed for ClickFeed {
+            fn initial(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn on_guest_ui(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn hint_abs(&self) -> Option<(u32, u32)> {
+                Some((self.x, self.y))
+            }
+        }
+        let mut feed = ClickFeed { x: abs_x, y: abs_y };
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        build(&mut m);
+        let s = run_module_web_feed(&spec, &m, 0x8020_0000, 0, &mut feed).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "{}", s.console);
+        assert_eq!(
+            s.domt_live, 2,
+            "removed listener must not append (live={}): {}",
+            s.domt_live, s.console
+        );
+    }
+
+    /// OptionalUint `clientX` is defined and ≥200; Optional `relatedTarget` is
+    /// defined=0. Both must hold for the append.
+    #[test]
+    fn guest_jit_optional_event_getters() {
+        click_wasm_grows(
+            &test_module_optional(),
+            3,
+            "OptionalUint clientX defined≥200 and relatedTarget none → appended",
+        );
+    }
+
+    /// `Object_Getter__float` of `clientX` compared as f32 ≥ 200.0.
+    #[test]
+    fn guest_jit_float_event_getter() {
+        click_wasm_grows(&test_module_float(), 3, "float clientX >= 200.0 → appended");
+    }
+
+    /// `Object_Getter__double` of `clientX` compared as f64 ≥ 200.0.
+    #[test]
+    fn guest_jit_double_event_getter() {
+        click_wasm_grows(
+            &test_module_double(),
+            3,
+            "double clientX >= 200.0 → appended",
+        );
+    }
+
+    /// `Object_Getter__double` of `timeStamp` > 0 (csr time at fill).
+    #[test]
+    fn guest_jit_timestamp_event_getter() {
+        click_wasm_grows(
+            &test_module_timestamp(),
+            3,
+            "double timeStamp > 0 → appended",
+        );
+    }
+
+    /// Wheel `deltaMode` is `DOM_DELTA_LINE` (1); virtio REL_WHEEL is a detent.
+    #[test]
+    fn guest_jit_wheel_delta_mode_is_line() {
+        ptr_wasm_grows(
+            &test_module_delta_mode(),
+            3,
+            "uint deltaMode == 1 → appended",
+            true,
+            false,
+            Some(-3),
+        );
+    }
+
+    /// OptionalString `type` is defined and `"click"` (len 5).
+    #[test]
+    fn guest_jit_optional_string_event_getter() {
+        click_wasm_grows(
+            &test_module_optional_string(),
+            3,
+            "OptionalString type defined click → appended",
+        );
+    }
+
+    /// OptionalBool `bubbles` defined=1 and OptionalDouble `clientX` ≥ 200.0.
+    #[test]
+    fn guest_jit_optional_bool_double_event_getters() {
+        click_wasm_grows(
+            &test_module_optional_bool_double(),
+            3,
+            "OptionalBool bubbles and OptionalDouble clientX → appended",
+        );
+    }
+
+    /// REL_X/Y from the origin (tablet units) to the button centre, no BTN.
+    /// `TabDrain` clamp-adds into `PTR_X`/`PTR_Y` and latches `PTR_MOVE`;
+    /// `DomtPtr` dispatches `mousemove` and `$delegate` appends.
+    #[test]
+    fn guest_jit_mousemove_via_rel() {
+        ptr_wasm_grows(
+            &test_module_delegate_ev(b"mousemove"),
+            3,
+            "REL_X/Y → mousemove → appended",
+            false,
+            true,
+            None,
+        );
+    }
+
+    /// First pointer enter: `PTR_HOVER` starts at NONE, REL to the button
+    /// fires `mouseover` (no prior hover to leave).
+    #[test]
+    fn guest_jit_mouseover_first_enter() {
+        ptr_wasm_grows(
+            &test_module_delegate_ev(b"mouseover"),
+            3,
+            "PTR_HOVER NONE → mouseover first enter → appended",
+            false,
+            true,
+            None,
+        );
+    }
+
+    /// Wheel at the button centre: `hint_abs` + `hint_wheel`, no BTN.
+    #[test]
+    fn guest_jit_wheel_at_button() {
+        ptr_wasm_grows(
+            &test_module_delegate_ev(b"wheel"),
+            3,
+            "hint_abs+hint_wheel no BTN → wheel → appended",
+            true,
+            false,
+            Some(-3),
+        );
+    }
+
+    fn ptr_wasm_grows(
+        wasm: &[u8],
+        min_live: u32,
+        why: &str,
+        use_abs: bool,
+        use_rel: bool,
+        wheel: Option<i32>,
+    ) {
+        use g6b_asm::encode::RA;
+        use g6b_asm::exec::{run_module, run_module_web_feed, GuestWebPresent, WebFeed};
+        use g6b_asm::Op;
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+
+        let build = |m: &mut g6b_asm::Module| {
+            install_guest(m, wasm).expect("cell installs");
+            for n in &mut m.nodes {
+                if let Some(pos) = n
+                    .ops
+                    .iter()
+                    .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+                {
+                    n.ops.splice(
+                        pos + 1..pos + 1,
+                        vec![Op::Jal {
+                            rd: RA,
+                            to: "DomtLayout".into(),
+                        }],
+                    );
+                    return;
+                }
+            }
+            panic!("no JitRun call site to splice after");
+        };
+
+        let mut probe = g6b_asm::analyze::kstart(&spec);
+        build(&mut probe);
+        let sp = run_module(&spec, &probe, 0x8020_0000).unwrap();
+        assert!(!sp.console.contains("TRAP-"), "{}", sp.console);
+        let btn = sp
+            .domt_nodes
+            .iter()
+            .find(|n| n.0 != 0)
+            .expect("a non-root button node is laid out");
+        let (bx, by, bw, bh) = (btn.3, btn.4, btn.5, btn.6);
+        assert!(bw > 0 && bh > 0, "button has a laid-out rect: {:?}", btn);
+        let abs_x = (bx + bw / 2) * 0x8000 / 640;
+        let abs_y = (by + bh / 2) * 0x8000 / 480;
+
+        struct PtrFeed {
+            abs: Option<(u32, u32)>,
+            rel: Option<(i32, i32)>,
+            wheel: Option<i32>,
+        }
+        impl WebFeed for PtrFeed {
+            fn initial(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn on_guest_ui(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn hint_abs(&self) -> Option<(u32, u32)> {
+                self.abs
+            }
+            fn hint_rel(&self) -> Option<(i32, i32)> {
+                self.rel
+            }
+            fn hint_wheel(&self) -> Option<i32> {
+                self.wheel
+            }
+        }
+        let mut feed = PtrFeed {
+            abs: if use_abs { Some((abs_x, abs_y)) } else { None },
+            rel: if use_rel {
+                Some((abs_x as i32, abs_y as i32))
+            } else {
+                None
+            },
+            wheel,
+        };
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        build(&mut m);
+        let s = run_module_web_feed(&spec, &m, 0x8020_0000, 0, &mut feed).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        assert!(
+            s.domt_live >= min_live,
+            "{why} (live={}): {}",
+            s.domt_live,
+            s.console
+        );
+    }
+
+    /// RFB PointerEvent (type 5, left down) at the button centre, through
+    /// `PtrNorm` scale/clip → tablet ABS+BTN → `TabDrain`/`DomtPtr`.
+    #[test]
+    fn guest_jit_rfb_pointer_clicks_button() {
+        remote_ptr_wasm_grows(
+            &test_module_delegate_ev(b"click"),
+            3,
+            "RFB PointerEvent left-down → click → appended",
+            RemotePtr::RfbClick,
+        );
+    }
+
+    /// Browser-KVM wheel at the button centre, no BTN.
+    #[test]
+    fn guest_jit_kvm_wheel_at_button() {
+        remote_ptr_wasm_grows(
+            &test_module_delegate_ev(b"wheel"),
+            3,
+            "KVM wheel at button → wheel → appended",
+            RemotePtr::KvmWheel(-3),
+        );
+    }
+
+    /// DOM `button` is 0 for left, not Linux `BTN_LEFT` (0x110).
+    #[test]
+    fn guest_jit_click_button_is_zero() {
+        click_wasm_grows(
+            &test_module_button_eq(0),
+            3,
+            "DOM button==0 on left click → appended",
+        );
+    }
+
+    /// RFB right-down (mask bit 2) → DOM `button==2`.
+    #[test]
+    fn guest_jit_rfb_right_button_is_two() {
+        remote_ptr_wasm_grows(
+            &test_module_button_eq(2),
+            3,
+            "RFB right → button==2 → appended",
+            RemotePtr::RfbRight,
+        );
+    }
+
+    /// KEY_LEFTSHIFT then click → `shiftKey` is true.
+    #[test]
+    fn guest_jit_shift_click_shiftkey() {
+        let _ = click_wasm_grows_m(
+            &test_module_shiftkey(),
+            3,
+            "shift+click → shiftKey → appended",
+            g6b_asm::vio::MOD_SHIFT as u8,
+        );
+    }
+
+    /// Click moves `H_FOCUS` from the root onto the button.
+    #[test]
+    fn guest_jit_click_focuses_button() {
+        let s = click_wasm_grows_m(
+            &test_module_delegate_ev(b"click"),
+            3,
+            "click → focus button",
+            0,
+        );
+        let btn = s.domt_nodes.iter().find(|n| n.0 != 0).expect("button node");
+        assert_eq!(
+            s.domt_focus, btn.0,
+            "H_FOCUS should be the clicked button (focus={}, btn={:?}): {}",
+            s.domt_focus, btn, s.console
+        );
+    }
+
+    fn password_run(wasm: &[u8], focus: bool, raster: bool) -> g6b_asm::exec::Smoke {
+        use g6b_asm::encode::{A0, RA};
+        use g6b_asm::exec::run_module;
+        use g6b_asm::Op;
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, wasm).expect("cell installs");
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                let mut extra = Vec::new();
+                if focus {
+                    extra.extend([
+                        Op::Li { rd: A0, imm: 1 },
+                        Op::Jal {
+                            rd: RA,
+                            to: "DomtFocus".into(),
+                        },
+                    ]);
+                }
+                extra.push(Op::Jal {
+                    rd: RA,
+                    to: "DomtLayout".into(),
+                });
+                if raster {
+                    extra.push(Op::Jal {
+                        rd: RA,
+                        to: "DomtRaster".into(),
+                    });
+                }
+                n.ops.splice(pos + 1..pos + 1, extra);
+                break;
+            }
+        }
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert_eq!(s.faults, 0, "{}", s.console);
+        s
+    }
+
+    /// `type=password` keeps the real value in `__dom_str` and sets `F_PASSWORD`.
+    #[test]
+    fn guest_jit_password_keeps_value() {
+        let s = password_run(&test_module_password_input(true, "ab"), false, false);
+        let n = s.domt_nodes.iter().find(|n| n.0 != 0).expect("input node");
+        assert!(
+            n.8.starts_with("ab "),
+            "stored value must stay plaintext: {:?}",
+            n
+        );
+        assert!(
+            n.8.contains("flags=") && n.8.contains("flags=0x"),
+            "flags dumped: {:?}",
+            n
+        );
+        let flags =
+            n.8.rsplit("flags=")
+                .next()
+                .and_then(|h| u32::from_str_radix(h.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0);
+        assert_eq!(
+            flags & g6b_asm::domt::F_PASSWORD as u32,
+            g6b_asm::domt::F_PASSWORD as u32,
+            "F_PASSWORD set: {:?}",
+            n
+        );
+    }
+
+    /// Password raster paints `*`, not the stored letters.
+    #[test]
+    fn guest_jit_password_masks_raster() {
+        let plain = password_run(&test_module_password_input(false, "ab"), false, true);
+        let secret = password_run(&test_module_password_input(true, "ab"), false, true);
+        assert!(
+            !plain.scan_fb.is_empty() && !secret.scan_fb.is_empty(),
+            "both runs must raster"
+        );
+        assert_ne!(
+            plain.scan_fb, secret.scan_fb,
+            "password glyphs must differ from plaintext"
+        );
+        let n = secret.domt_nodes.iter().find(|n| n.0 != 0).expect("input");
+        assert!(n.8.starts_with("ab "), "value still ab: {:?}", n);
+    }
+
+    /// Focused password field: canned KEY_A appends 'a'.
+    #[test]
+    fn guest_jit_password_types_a() {
+        let s = password_run(&test_module_password_input(true, ""), true, false);
+        let n = s.domt_nodes.iter().find(|n| n.0 != 0).expect("input node");
+        assert!(
+            n.8.starts_with("a "),
+            "KEY_A default action appends 'a': {:?}",
+            n
+        );
+    }
+
+    fn flags_of(n: &g6b_asm::exec::DomtNodeRow) -> u32 {
+        n.8.rsplit("flags=")
+            .next()
+            .and_then(|h| u32::from_str_radix(h.trim_start_matches("0x"), 16).ok())
+            .unwrap_or(0)
+    }
+
+    fn password_edit(
+        wasm: &[u8],
+        value: &str,
+        password: bool,
+        mods: u8,
+        key: Option<(u16, u32)>,
+        keys: Option<&'static [(u16, u32)]>,
+    ) -> g6b_asm::exec::Smoke {
+        use g6b_asm::encode::{A0, RA};
+        use g6b_asm::exec::{run_module_web_feed, GuestWebPresent, WebFeed};
+        use g6b_asm::Op;
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        install_guest(&mut m, wasm).expect("cell installs");
+        for n in &mut m.nodes {
+            if let Some(pos) = n
+                .ops
+                .iter()
+                .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+            {
+                n.ops.splice(
+                    pos + 1..pos + 1,
+                    [
+                        Op::Li { rd: A0, imm: 1 },
+                        Op::Jal {
+                            rd: RA,
+                            to: "DomtFocus".into(),
+                        },
+                        Op::Jal {
+                            rd: RA,
+                            to: "DomtLayout".into(),
+                        },
+                    ],
+                );
+                break;
+            }
+        }
+        struct KeyFeed {
+            mods: u8,
+            key: Option<(u16, u32)>,
+            keys: Option<&'static [(u16, u32)]>,
+        }
+        impl WebFeed for KeyFeed {
+            fn initial(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn on_guest_ui(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn hint_mods(&self) -> Option<u8> {
+                if self.mods == 0 {
+                    None
+                } else {
+                    Some(self.mods)
+                }
+            }
+            fn hint_key(&self) -> Option<(u16, u32)> {
+                self.key
+            }
+            fn hint_keys(&self) -> Option<&'static [(u16, u32)]> {
+                self.keys
+            }
+        }
+        let mut feed = KeyFeed { mods, key, keys };
+        let s = run_module_web_feed(&spec, &m, 0x8020_0000, 0, &mut feed).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert_eq!(s.faults, 0, "{}", s.console);
+        let _ = value;
+        let _ = password;
+        s
+    }
+
+    /// `type=text` takes the same KEY_A default action, unmasked.
+    #[test]
+    fn guest_jit_text_types_a() {
+        let s = password_edit(
+            &test_module_password_input(false, ""),
+            "",
+            false,
+            0,
+            None,
+            None,
+        );
+        let n = s.domt_nodes.iter().find(|n| n.0 != 0).expect("input node");
+        assert!(
+            n.8.starts_with("a "),
+            "type=text KEY_A appends 'a': {:?}",
+            n
+        );
+        let flags = flags_of(n);
+        assert_eq!(
+            flags & g6b_asm::domt::F_EDITABLE as u32,
+            g6b_asm::domt::F_EDITABLE as u32,
+            "F_EDITABLE: {:?}",
+            n
+        );
+        assert_eq!(
+            flags & g6b_asm::domt::F_PASSWORD as u32,
+            0,
+            "not password: {:?}",
+            n
+        );
+    }
+
+    /// KEY_B through the US keymap appends 'b'.
+    #[test]
+    fn guest_jit_password_types_b() {
+        let s = password_edit(
+            &test_module_password_input(true, ""),
+            "",
+            true,
+            0,
+            Some((g6b_asm::vio::VIO_KEY_B as u16, 1)),
+            None,
+        );
+        let n = s.domt_nodes.iter().find(|n| n.0 != 0).expect("input node");
+        assert!(n.8.starts_with("b "), "KEY_B appends 'b': {:?}", n);
+    }
+
+    /// Backspace deletes the last character.
+    #[test]
+    fn guest_jit_password_backspace() {
+        let s = password_edit(
+            &test_module_password_input(true, "ab"),
+            "ab",
+            true,
+            0,
+            Some((g6b_asm::vio::VIO_KEY_BACKSPACE as u16, 1)),
+            None,
+        );
+        let n = s.domt_nodes.iter().find(|n| n.0 != 0).expect("input node");
+        assert!(n.8.starts_with("a "), "backspace leaves 'a': {:?}", n);
+        assert!(
+            !n.8.starts_with("ab "),
+            "must not keep both letters: {:?}",
+            n
+        );
+    }
+
+    /// Shift+KEY_A appends 'A'.
+    #[test]
+    fn guest_jit_password_shift_a() {
+        let s = password_edit(
+            &test_module_password_input(true, ""),
+            "",
+            true,
+            g6b_asm::vio::MOD_SHIFT as u8,
+            Some((g6b_asm::vio::VIO_KEY_A as u16, 1)),
+            None,
+        );
+        let n = s.domt_nodes.iter().find(|n| n.0 != 0).expect("input node");
+        assert!(n.8.starts_with("A "), "shift+A appends 'A': {:?}", n);
+    }
+
+    /// Left then KEY_C inserts in the middle: "ab" → "acb".
+    #[test]
+    fn guest_jit_text_caret_insert() {
+        let s = password_edit(
+            &test_module_password_input(false, "ab"),
+            "ab",
+            false,
+            0,
+            None,
+            Some(&[
+                (g6b_asm::vio::VIO_KEY_LEFT as u16, 1),
+                (g6b_asm::vio::VIO_KEY_C as u16, 1),
+            ]),
+        );
+        let n = s.domt_nodes.iter().find(|n| n.0 != 0).expect("input node");
+        assert!(
+            n.8.starts_with("acb "),
+            "LEFT then C inserts in the middle: {:?}",
+            n
+        );
+    }
+
+    /// Left then backspace deletes the first character: "ab" → "b".
+    #[test]
+    fn guest_jit_text_caret_backspace() {
+        let s = password_edit(
+            &test_module_password_input(false, "ab"),
+            "ab",
+            false,
+            0,
+            None,
+            Some(&[
+                (g6b_asm::vio::VIO_KEY_LEFT as u16, 1),
+                (g6b_asm::vio::VIO_KEY_BACKSPACE as u16, 1),
+            ]),
+        );
+        let n = s.domt_nodes.iter().find(|n| n.0 != 0).expect("input node");
+        assert!(
+            n.8.starts_with("b "),
+            "LEFT then backspace deletes the first letter: {:?}",
+            n
+        );
+        assert!(!n.8.starts_with("ab "), "must not keep 'ab': {:?}", n);
+    }
+
+    /// Shift+Left selects the last character; KEY_C replaces it: "ab" → "ac".
+    #[test]
+    fn guest_jit_text_select_replace() {
+        let s = password_edit(
+            &test_module_password_input(false, "ab"),
+            "ab",
+            false,
+            0,
+            None,
+            Some(&[
+                (g6b_asm::vio::VIO_KEY_LEFTSHIFT as u16, 1),
+                (g6b_asm::vio::VIO_KEY_LEFT as u16, 1),
+                (g6b_asm::vio::VIO_KEY_LEFTSHIFT as u16, 0),
+                (g6b_asm::vio::VIO_KEY_C as u16, 1),
+            ]),
+        );
+        let n = s.domt_nodes.iter().find(|n| n.0 != 0).expect("input node");
+        assert!(
+            n.8.starts_with("ac "),
+            "shift+LEFT then C replaces the selection: {:?}",
+            n
+        );
+        assert!(
+            !n.8.starts_with("acb "),
+            "must not insert beside the selection: {:?}",
+            n
+        );
+    }
+
+    /// Shift+Left then backspace deletes the selection: "ab" → "a".
+    #[test]
+    fn guest_jit_text_select_backspace() {
+        let s = password_edit(
+            &test_module_password_input(false, "ab"),
+            "ab",
+            false,
+            0,
+            None,
+            Some(&[
+                (g6b_asm::vio::VIO_KEY_LEFTSHIFT as u16, 1),
+                (g6b_asm::vio::VIO_KEY_LEFT as u16, 1),
+                (g6b_asm::vio::VIO_KEY_LEFTSHIFT as u16, 0),
+                (g6b_asm::vio::VIO_KEY_BACKSPACE as u16, 1),
+            ]),
+        );
+        let n = s.domt_nodes.iter().find(|n| n.0 != 0).expect("input node");
+        assert!(
+            n.8.starts_with("a "),
+            "shift+LEFT then backspace deletes the selection: {:?}",
+            n
+        );
+        assert!(!n.8.starts_with("ab "), "must not keep 'ab': {:?}", n);
+    }
+
+    enum RemotePtr {
+        RfbClick,
+        RfbRight,
+        KvmWheel(i32),
+    }
+
+    fn remote_ptr_wasm_grows(wasm: &[u8], min_live: u32, why: &str, poke: RemotePtr) {
+        use g6b_asm::encode::RA;
+        use g6b_asm::exec::{run_module, run_module_web_feed, GuestWebPresent, WebFeed};
+        use g6b_asm::ptr::{encode_rfb_pointer, KvmPointer, RFB_BTN_LEFT};
+        use g6b_asm::Op;
+
+        let spec = g6b_spec::BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},
+"kernel":{"cli":{"enable":false},
+ "gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+ "wasm":{"enable":true,"jit":true,"guest_jit":true,"jit_cell":"test"}},
+"uncore":{"clint":true,"plic":true},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+
+        let build = |m: &mut g6b_asm::Module| {
+            install_guest(m, wasm).expect("cell installs");
+            for n in &mut m.nodes {
+                if let Some(pos) = n
+                    .ops
+                    .iter()
+                    .position(|o| matches!(o, Op::Jal { to, .. } if to == "JitRun"))
+                {
+                    n.ops.splice(
+                        pos + 1..pos + 1,
+                        vec![Op::Jal {
+                            rd: RA,
+                            to: "DomtLayout".into(),
+                        }],
+                    );
+                    return;
+                }
+            }
+            panic!("no JitRun call site to splice after");
+        };
+
+        let mut probe = g6b_asm::analyze::kstart(&spec);
+        build(&mut probe);
+        let sp = run_module(&spec, &probe, 0x8020_0000).unwrap();
+        assert!(!sp.console.contains("TRAP-"), "{}", sp.console);
+        let btn = sp
+            .domt_nodes
+            .iter()
+            .find(|n| n.0 != 0)
+            .expect("a non-root button node is laid out");
+        let (bx, by, bw, bh) = (btn.3, btn.4, btn.5, btn.6);
+        assert!(bw > 0 && bh > 0, "button has a laid-out rect: {:?}", btn);
+        let cx = bx + bw / 2;
+        let cy = by + bh / 2;
+
+        struct RemoteFeed {
+            rfb: Option<[u8; 6]>,
+            kvm: Option<KvmPointer>,
+        }
+        impl WebFeed for RemoteFeed {
+            fn initial(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn on_guest_ui(&mut self) -> Option<GuestWebPresent> {
+                None
+            }
+            fn hint_rfb(&self) -> Option<[u8; 6]> {
+                self.rfb
+            }
+            fn hint_kvm(&self) -> Option<KvmPointer> {
+                self.kvm
+            }
+        }
+        let mut feed = match poke {
+            RemotePtr::RfbClick => RemoteFeed {
+                rfb: Some(encode_rfb_pointer(cx as u16, cy as u16, RFB_BTN_LEFT)),
+                kvm: None,
+            },
+            RemotePtr::RfbRight => RemoteFeed {
+                rfb: Some(encode_rfb_pointer(
+                    cx as u16,
+                    cy as u16,
+                    g6b_asm::ptr::RFB_BTN_RIGHT,
+                )),
+                kvm: None,
+            },
+            RemotePtr::KvmWheel(w) => RemoteFeed {
+                rfb: None,
+                kvm: Some(KvmPointer {
+                    x: cx as i32,
+                    y: cy as i32,
+                    buttons: 0,
+                    wheel: w,
+                }),
+            },
+        };
+        let mut m = g6b_asm::analyze::kstart(&spec);
+        build(&mut m);
+        let s = run_module_web_feed(&spec, &m, 0x8020_0000, 0, &mut feed).unwrap();
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+        assert!(!s.console.contains("WASM-JIT-TRAP"), "{}", s.console);
+        assert_eq!(s.faults, 0, "fault-free: {}", s.console);
+        assert!(
+            s.domt_live >= min_live,
+            "{why} (live={}): {}",
             s.domt_live,
             s.console
         );

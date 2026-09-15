@@ -436,18 +436,37 @@ details that differ and must not be conflated with the host table:
   So `listener=0` still latches `N_LEV` with `N_LISTEN=0`, while a real delegate
   latches `N_LISTEN >= 0x100` and re-enters the cell on dispatch. Dispatch is
   two lanes over one `__ev_obj` record: `DomtKey` focus-fires `EV_KEYDOWN`
-  (`code`=keycode) and `DomtPtr`+`DomtHit` point-fires `EV_CLICK` off the
-  tablet `PTR_*` scratch (`clientX`/`clientY`=display-px, `target`=handle).
+  (`code`=keycode) and `DomtPtr`+`DomtHit` point-fires click / mousemove /
+  wheel / hover off the tablet `PTR_*` scratch (`clientX`/`clientY`=display-px,
+  `target`=handle, wheel `deltaY`=`EVO_VALUE`). `add_event_listener` accepts
+  `mousemove`/`wheel`/`mouseover`/`mouseout` as well as `click`/`keydown`.
+  Dispatch then walks the parent chain (B125/B126): a bounded `__dom` listener
+  table holds per-record `{node,mask,cb,capture}`. `eventPhase` is 1/2/3;
+  `currentTarget` is the node whose listener is running. `add_event_listener`'s
+  last i32 packs `LSNF_CAPTURE|ONCE|PASSIVE` (existing 0/1 stay capture-only).
+  `once` tombs the record after it fires; `passive` makes `preventDefault` a
+  no-op. `remove_event_listener(cb)` → `EXT_RMLSN`→`LwRmLsn`.
+  `Object_Call___void` `stopPropagation` sets `EVO_STOP`.
 - **The `__ev_obj` record is readable through `Object_Getter__*`.** `ext_id`
   routes the i32-returning getters (`int`/`uint`/`ushort`/`bool`/`Handle`,
   `(handle,len,ptr)`) to `EXT_EVGET`→`LwEvGet`, which name-matches the property
   via `LwNameEq` and `lw`s the `__ev_obj` field — `clientX`/`clientY`/`code`/
-  `detail`/`value`/`target`/`type`/`defaultPrevented` (+common aliases), with
-  `cancelable`/`bubbles`/`isTrusted` constant-1. The no-arg-void
-  `Object_Call_…__void` shape routes to `EXT_EVCALL`→`LwEvCall`, which sets the
-  `EVO_PD` bit on `preventDefault` — read back as `defaultPrevented`. Bounded
-  to the live event object (`handle` must be `&__ev_obj`); the *string* getters
-  (`type`,`key`) and `float`/`double`/`Optional*` remain unmapped (`TRAP_EXT`).
+  `detail`/`value`/`target`/`currentTarget`/`eventPhase`/`type`/
+  `defaultPrevented` (+common aliases), with `cancelable`/`bubbles`/`isTrusted`
+  constant-1. The no-arg-void `Object_Call_…__void` shape routes to
+  `EXT_EVCALL`→`LwEvCall`, which sets `EVO_PD` on `preventDefault` and
+  `EVO_STOP` on `stopPropagation`. Bounded
+  to the live event object (`handle` must be `&__ev_obj`). **UTF-8 string
+  getters** (`Object_Getter__string` → `EXT_EVGETSTR`→`LwEvGetStr`) write a D
+  `{len,ptr}` sret for `type` (`"click"`/`"keydown"`), `key` (`"Enter"`/`"a"`)
+  and `code` (KeyboardEvent.code `"Enter"`/`"KeyA"`, never a Linux keycode).
+  Unknown names / non-event handles write an empty string. Payload lives in
+  the last 32 B of the KSTR tail (past `mem_pages`). **OptionalUint/Handle**
+  (`EXT_EVGETOPT`→`LwEvGetOpt`) write `{value:u32, defined:u8}` at `raw`;
+  `relatedTarget` is a known name with `defined=0`. **float**
+  (`EXT_EVGETF`→`LwEvGetF`) converts the integer field with `fcvt.s.w` so
+  the value-stack cell holds IEEE f32 bits. `double` and
+  `Optional{String,Bool,Double}` remain unmapped (`TRAP_EXT`).
 - **Linear-memory offsets, not absolutes.** `fetch`/`puts`/`add__string` get the
   `__wasm_mem` base added (`LwFetch`/`LwAddStr`); the legacy `jit.rs` path
   already resolves `Addr::WasmData` absolutes, so the shim lives only in the
@@ -498,21 +517,56 @@ details that differ and must not be conflated with the host table:
   `ld s11,0(sp)`; `sp+=16`; `jalr ra`) and returns into the caller's post-call
   `R_EXCCHK`. That check — emitted after every `call`/`call_indirect` — reads
   `OFF_EXC` and, when set, either jumps to the statically-resolved innermost
-  enclosing `catch` head (an `R_EXCCLR` that clears `OFF_EXC`) or re-emits the
+  enclosing `catch` head (an `R_EXCCLR` that clears `OFF_EXC` and restores
+  `s10` to the try height, copying a tagged payload when `b != 0`) or re-emits the
   frame-fold tail to propagate the unwind up a frame (`a=u32::MAX`). A `throw`
   that escapes the *entry* frame surfaces at `jit_after`/`jit_call_done` as
   `jit_trap(TRAP_EXC)` (`WASM-JIT-TRAP 11 <tag>`), which consumes `OFF_EXC`
   before resuming so the continuation can't re-fire. Gates:
   `guest_jit_cross_func_throw` (callee `throw` → caller `catch_all` → result),
-  `guest_jit_uncaught_throw` (top-frame `throw` → `TRAP_EXC`). Bounded: the
-  first `catch`/`catch_all` wins regardless of tag (no tag dispatch — the
-  shipped cell's `catch_all` lane is unaffected).
+  `guest_jit_uncaught_throw` (top-frame `throw` → `TRAP_EXC`),
+  `guest_jit_catch_all_restores_vsp` (leftover payload 99 does not become the
+  result), `guest_jit_try_table_catch_all_restores_vsp` (same for a `try_table`
+  catch dest). Bounded: the first `catch`/`catch_all` wins regardless of tag (no
+  tag dispatch — the shipped cell's `catch_all` lane is unaffected). The handler
+  still restores operand depth: `R_EXCCLR.a` is the try/dest height from `s11`,
+  `.b` is the tag payload count (`0` for `catch_all`). A local `throw` inside
+  `try_table` emits that restore then `br`. A single-clause `try_table` patches
+  post-call `R_EXCCHK` to an off-fallthrough `R_EXCCLR`+`R_JMP` pad (`b` =
+  expected tag, `u64::MAX` = `catch_all`). A one-cell tagged payload is stored
+  in `OFF_EXCPAY` on `R_THROW` and reloaded by `R_EXCCLR` when `OFF_EXC` was
+  set. Multi-clause `try_table` EXCCHK uses `EXCCHK_CHAIN` (bit 32 of `b`) so a
+  tagged miss falls through to the next check. Tagged payloads of up to
+  `MAX_EXCPAY` (4) cells ride `OFF_EXCPAY` across `R_THROW`. `rethrow 0` from a
+  tagged catch skips that try and JMPs to an outer catch or escapes with
+  `R_THROW` `a=catch_nparams`. `rethrow 0` into an enclosing `try_table`
+  catch dest keeps the payload. `catch_all_ref` packages an opaque
+  exnref (handle = `EXCTAG+1`; payload in `OFF_EXCPAY`); `throw_ref`
+  pops it and the following `R_EXCCHK` routes (null → `TRAP_UNREACH`).
+  `catch_ref` dest copies the tag payload then the handle (tag-matched;
+  a miss falls through). `PromCtx` spills/fills `OFF_EXC`/`EXCTAG`/
+  `EXCPAY` per context slot so two slots cannot alias one in-flight
+  exception. Host `Continuation` carries the same cells. The outermost
+  user `JitCall` spills the live bank into `OFF_EXC_NEST` and restores
+  it on the way out so a listener cannot clobber the caller's `EXCPAY`.
+  Nested/control `JitCall`s skip the spill. Direct `libwasm_await__void`
+  inside `try`/`try_table`, and a `try` that `call`s a function which can
+  reach await, are `TRAP_UNSUP` 0x700 on the guest JIT (rewind is not a
+  landing pad). `call_indirect` inside a try is the same gap when any
+  funcref-table function can reach await (table-conservative). Host interp
+  also rejects a direct `libwasm_await__void` while a `try`/`try_table` is
+  live. Fork WAT still decodes; await outside try still rewinds. Interp
+  also rejects `try { call $awaiter }` when `$awaiter` can reach await via
+  direct `call`. A second throw in the *same* slot still clobbers
+  `OFF_EXCPAY`. **P4 sequential leftovers are closed.** P5 (guest packet
+  stack) may start.
 
 Exec-model evidence (`guest_jit_executes_shipped_cell`): 252 funcs translate,
 `_start` completes, `domt_next=56 live=56 ids=47 listen=8`, and `DomtRaster`
 paints the cell's own tree into `__scan_fb` with no `DomtBoot` fallback. QEMU
 verification landed in B118 (input→`H_WST`→`DlPaint`→scanout on real
-virtio-gpu); listener re-entry landed in B114–B116 and was **real-QEMU-verified
+virtio-gpu); listener re-entry landed in B114–B116 (UTF-8 `type`/`key`/`code` sret getters
+in B124) and was **real-QEMU-verified
 in B120** — `jit_cell="delegate"` (`delegate_key_cell`) registers a `keydown`
 funcidx listener on the root (default `H_FOCUS`), and a `send-key` press
 re-entered the cell through `DomtKey`→`JitCall`, growing `__dom` and repainting

@@ -134,8 +134,9 @@ Table state is mutable: `table.get/set/fill/copy/init/grow/size` and
 `elem.drop` now execute with bounds and dropped-segment checks. `memory.init`
 and `data.drop` execute on passive `DataSegment` data with dropped-segment
 bounds checks. Legacy exception handling `try`/`catch`/`catch_all`/`throw`/
-`rethrow` executes for single-payload tags; `try_table`, `delegate` and
-`throw_ref` remain fail-closed. Reference types and multi-value blocks remain
+`rethrow` and `try_table` (`catch`/`catch_all`/`catch_all_ref`/`catch_ref`)
+execute; `delegate` remains fail-closed. `throw_ref` executes (opaque
+exnref; one live exception). Reference types and multi-value blocks remain
 parsed and validated but fail-closed at execution.
 The libwasm D host imports (`env.createElement` with a `NodeType` enum,
 `env.appendChild`, `env.setProperty` with D `(length, ptr)` string pairs,
@@ -519,10 +520,11 @@ asyncify runtime and the WebAssembly proposals it depends on.
 - `decode` and `validate` structurally accept the real LDC 1.43 / libwasm
   Asyncify artifact and fail closed on unsupported opcodes.
 - Execution: i32 numeric opcodes, `i64`/`f32`/`f64` constants and loads/stores
-  (the `Value` stack carries all four width classes), legacy exception handling
-  (`try`/`catch`/`catch_all`/`throw`/`rethrow`), bulk memory and table
+  (the `Value` stack carries all four width classes), exception handling
+  (`try`/`catch`/`catch_all`/`throw`/`rethrow`, `try_table` including
+  `catch_all_ref`/`catch_ref`, and `throw_ref`), bulk memory and table
   operations, and `call_indirect` with type checking.
-- `try_table`, `delegate`, `throw_ref`, reference types and multi-value blocks
+- `delegate`, reference types and multi-value blocks
   remain parsed and validated but fail closed at execution.
 - `g6b-wasm::Asyncify` recognizes the five asyncify exports, `__asyncify_state`
   and `__asyncify_data` globals, and the `run_start` bounded step/resume loop.
@@ -542,6 +544,10 @@ asyncify runtime and the WebAssembly proposals it depends on.
   and object/string imports, plus a `writeString` helper that bounds-checks the
   sret pointer, allocates UTF-8 payload memory (via `allocString` or a fallback
   page growth), and writes a D `(length, ptr)` string struct.
+- Guest JIT: `Object_Getter__string` maps to `EXT_EVGETSTR`→`LwEvGetStr`, which
+  writes the same D `{len,ptr}` for `__ev_obj` UTF-8 `type`/`key`/`code`
+  (`code` is KeyboardEvent.code, never a Linux keycode). Payload lives in the
+  KSTR tail past `mem_pages`. `float`/`double`/`Optional*` stay unmapped.
 - `libwasm/source/libwasm/g6b_kernel.d` exposes the new imports as
   `extern(C)` declarations, keeps `libwasm_get__string`/`libwasm_add__string` as
   host imports, and adds the B62 scalar box/unbox set (`libwasm_add__*` /

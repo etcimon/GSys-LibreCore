@@ -68,6 +68,8 @@ those knobs emit is an analyzed IR, not a string template.
 | `Virtio` | `vio-mmio` | `wants_virtio_gpu` | `VioProbe` slot scan for GPU DeviceID 16 + `VioInit` handshake/ctrlq/`GET_DISPLAY_INFO` + `VioCmd` submit-one + `VioScan` (`CREATE_2D`/`ATTACH_BACKING`/`SET_SCANOUT`/band-fill/`TRANSFER`/`FLUSH` at the `__disp`-latched output geometry) (`VIRTIO-GPU n`/`NONE`/`OK`/`INFO`/`SCAN`/`FAIL`); `__vio` BSS rings + `__scan_fb` (max-geometry shared surface); host-modelled + QEMU `screendump` captured (1920×1080) |
 | `VirtioNet` | `vio-mmio-net` | `wants_virtio_net` (`kernel.hw.virtio_net`) | `VioNetProbe` DeviceID 1 (`VIRTIO-NET n`/`NONE`). Exec model slot 5. **Never** QEMU `-netdev`. Host TCP/UDP/NAT is `g6b-hw`; HTTP(S) fetch is kernel→hw TCP |
 | `DispScan` | `disp-mmio` | `wants_disp_scan` (`display`-class peripheral) | `FbExpand`/`FbExpand1`/`DomPaint32` (shared blits, `Proxy::to_ppm` semantics, geometry from `__disp` at runtime via `divu`) + `DispPaint` — register-window commit + `G6FB` simplefb handoff at `__vio+0x400` (`architecture/uncore/hdmi-display.md`); `DISP-OK`/`DISP-FAIL` |
+| `NativeService` | `boot-owned ABI frame + native RX image` | `g6b elf --native-manifest` | rustc `g6b-guest` callee; `Capabilities` / `Input` / `Poll` then `BootStatus`/`BootTrial` `NotReady` → `NATIVE-SERVICE-OK` / `NATIVE-POLL-OK` / `NATIVE-BOOT-HOLD`; copies the frame to `__native_abi`; `trap_timer` `NativePoll` → `NATIVE-TICK-POLL-OK` once. Clears `AUTO_ON`. Not firmware `_start`. [`KERNEL-RV.md`](KERNEL-RV.md) |
+| `LinuxHandoff` | `satp=0 a0=hartid a1=fdt jalr Image` | `LinuxEnter` / `LinuxRelocate` / `LinuxLoadDisk` | UART `Lnx` loads LBA 40 after G6BH `InProgress`; else `LINUX-HOLD`. QEMU `LINUX-ENTRY-OK`. Not OpenWrt. [`KERNEL-RV.md`](KERNEL-RV.md) |
 
 ## Crate surface
 
@@ -75,6 +77,7 @@ those knobs emit is an analyzed IR, not a string template.
 |---|---|
 | `g6b_asm::analyze::objects` | state inventory (purpose, live, why, home) |
 | `g6b_asm::analyze::payload` | ELF body (`kstart` + `MemCpy` + boot-log rodata) |
+| `g6b-elf::native` / `g6b-guest` | opt-in rustc callee PT_LOADs; not a second encoder for KStart |
 | `g6b_asm::analyze::kstart` | `zeal/KStart.S` |
 | `g6b_asm::analyze::kints` | `zeal/KInts.S` |
 | `g6b_asm::analyze::libcalls` | `zeal/MemCpy.S` (`MemCpy` + `Reboot`) |

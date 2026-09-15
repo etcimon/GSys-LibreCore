@@ -1,0 +1,20 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-guest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Safe native BIOS service dispatcher and opt-in link boundary"
+
+[features]
+native = []
+
+[dependencies]
+g6b-runtime-abi = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,8 +1,11 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 
-use g6b_bootctl::{SlotStorage, JOURNAL_BYTES, SLOT_BYTES};
+use g6b_bootctl::{FirmwareLayout, SlotStorage, JOURNAL_BYTES, SLOT_BYTES};
 use g6b_vfs::{BlockDev, Error, Result};
+
+/// Guest virtio-blk journal window: LBA 8, two 4 KiB slots (`BLK_JRN_LBA`).
+pub const BIOS_JOURNAL_OFFSET: u64 = FirmwareLayout::BIOS.journal_offset();
 
 pub struct JournalStorage<'a> {
     device: &'a mut dyn BlockDev,
@@ -26,6 +29,11 @@ impl<'a> JournalStorage<'a> {
             ));
         }
         Ok(Self { device, offset })
+    }
+
+    /// Journal on the dedicated BIOS virtio-blk window (LBA 8..24).
+    pub fn on_bios_window(device: &'a mut dyn BlockDev) -> Result<Self> {
+        Self::new(device, BIOS_JOURNAL_OFFSET)
     }
 
     fn slot_offset(&self, slot: usize) -> Result<u64> {
@@ -116,6 +124,22 @@ mod tests {
         required_services_ready: true,
         watchdog_owned: true,
     };
+
+    #[test]
+    fn bios_journal_window_holds_a_fail_closed_record() {
+        let scratch = Scratch::new();
+        let mut dev = scratch.open(true);
+        // 4 slots of 4096 in Scratch; window at LBA 8 needs 24 sectors = 12 KiB.
+        // Scratch is 16 KiB (4 * SLOT_BYTES).
+        let mut j = JournalStorage::on_bios_window(&mut dev).unwrap();
+        let journal = Journal::initialize(&mut j, Domain::Linux).unwrap();
+        assert_eq!(BIOS_JOURNAL_OFFSET, 8 * 512);
+        assert_eq!(g6b_bootctl::FirmwareLayout::BIOS.check(), Ok(()));
+        assert_eq!(
+            journal.decision(&TARGET, READY),
+            Decision::Stay(Reason::Provisioning)
+        );
+    }
 
     #[test]
     fn journal_requires_declared_durability_and_bounded_writable_extent() {

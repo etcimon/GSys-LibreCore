@@ -19,15 +19,16 @@
 use g6b_spec::BoardSpec;
 
 use crate::encode::{
-    A0, A1, A2, A3, A4, A5, A6, A7, RA, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, SBI_PUTCHAR, SP,
-    T0, T1, T2, T3, T4, T5, T6, X0,
+    A0, A1, A2, A3, A4, A5, A6, A7, CSR_TIME, RA, S0, S1, S2, S3, S4, S5, S6, S7, S8, S9,
+    SBI_PUTCHAR, SP, T0, T1, T2, T3, T4, T5, T6, X0,
 };
-use crate::jfmt::{AX_DATA_GLOB, AX_STATE_GLOB};
-use crate::jitr::{OFF_GLOB, OFF_MEMB};
+use crate::jfmt::{AX_DATA_GLOB, AX_STATE_GLOB, MAX_EXCPAY};
+use crate::jitr::{OFF_EXC, OFF_GLOB, OFF_MEMB};
 use crate::kget::{
     KGET_ASTK_BYTES, KGET_ENT, KGET_E_JSON_LEN, KGET_E_JSON_OFF, KGET_E_URL_LEN, KGET_E_URL_OFF,
     KGET_HDR, KGET_KSTR_BYTES, KGET_MAGIC, KGET_OFF_N, KGET_TAIL_BYTES,
 };
+use crate::vio::{VIO_KEY_A, VIO_KEY_ENTER};
 use crate::{Addr, Module, Node, Op, Purpose};
 
 /// Node pool bound (records; index 0 is the root, allocated by `DomtInit`).
@@ -38,8 +39,26 @@ pub const DOMT_NODES: i64 = 1024;
 pub const DOMT_NODE: i64 = 64;
 /// Header bytes at `__dom` before node records.
 pub const DOMT_HDR: i64 = 64;
-/// `__dom` BSS size: header + `DOMT_NODES` records.
-pub const DOMT_BYTES: u64 = (DOMT_HDR + DOMT_NODES * DOMT_NODE) as u64;
+/// Bounded extra-listener table at the end of `__dom` (after the node pool).
+/// One 16-byte record per `add_event_listener`; a node may have several.
+pub const LSN_MAX: i64 = 64;
+pub const LSN_REC: i64 = 16;
+pub const LSN_HDR: i64 = 16;
+pub const LSN_NODE: i32 = 0;
+pub const LSN_MASK: i32 = 4;
+pub const LSN_CB: i32 = 8;
+pub const LSN_FLG: i32 = 12;
+/// Record flags packed in `add_event_listener`'s last i32 (`a5`).
+/// Existing cells pass 0/1 (capture only); extra bits are additive.
+pub const LSNF_CAPTURE: i64 = 1;
+pub const LSNF_ONCE: i64 = 2;
+pub const LSNF_PASSIVE: i64 = 4;
+pub const LSNF_KNOWN: i32 = (LSNF_CAPTURE | LSNF_ONCE | LSNF_PASSIVE) as i32;
+/// Byte offset of the listener table from `__dom`.
+pub const DOMT_LSN_OFF: i64 = DOMT_HDR + DOMT_NODES * DOMT_NODE;
+pub const DOMT_LSN_BYTES: u64 = (LSN_HDR + LSN_MAX * LSN_REC) as u64;
+/// `__dom` BSS size: header + node pool + listener table.
+pub const DOMT_BYTES: u64 = (DOMT_HDR + DOMT_NODES * DOMT_NODE) as u64 + DOMT_LSN_BYTES;
 /// `__dom_str` pool bytes (bump-allocated text/id content).
 pub const DOMT_STR_BYTES: u64 = 32768;
 /// `__dom_id` per-node slot bytes: `[len:u32][bytes:≤28]` inline element id.
@@ -75,6 +94,10 @@ pub const H_KCUR_LEN: i32 = 36;
 /// `__dom+40` — `libwasm_await_value` string-pool bump cursor (bytes used
 /// past `mem_pages*64K` in `__wasm_mem`).
 pub const H_KSTR_CUR: i32 = 40;
+/// `__dom+44` — caret index in the focused editable node's text.
+pub const H_CARET: i32 = 44;
+/// `__dom+48` — selection anchor. Equal to `H_CARET` when collapsed.
+pub const H_SEL: i32 = 48;
 
 // node-record field offsets
 pub const N_TAG: i32 = 0;
@@ -109,14 +132,26 @@ pub const TAG_LW: i64 = 4;
 pub const F_VIS: i64 = 1;
 pub const F_DIRTY: i64 = 2;
 pub const F_TEXT: i64 = 4;
+/// Listener was registered with `capture=true` (`add_event_listener` a5).
+/// One slot per node: a later registration overwrites the bit.
+pub const F_CAPTURE: i64 = 8;
+/// `setProperty(el,"type","password")`. Raster paints `*` per character;
+/// `N_TPTR`/`N_TLEN` keep the real value.
+pub const F_PASSWORD: i64 = 16;
+/// `setProperty(el,"type","text")`. Default-action typing (keymap + backspace).
+pub const F_EDITABLE: i64 = 32;
 
 /// "no node" sentinel for link fields (0 is a valid index — the root — so
 /// empty links use the all-ones sentinel instead).
 pub const NONE: i64 = -1;
 
-/// Event-mask bits for `DomtListen` / `DomtKey` dispatch.
+/// Event-mask bits for `DomtListen` / `DomtKey` / `DomtPtr` dispatch.
 pub const EV_KEYDOWN: i64 = 1;
 pub const EV_CLICK: i64 = 2;
+pub const EV_MOUSEMOVE: i64 = 4;
+pub const EV_WHEEL: i64 = 8;
+pub const EV_MOUSEOVER: i64 = 16;
+pub const EV_MOUSEOUT: i64 = 32;
 
 /// `N_LISTEN` selector for the bounded builtin key handler the M2 demo wires:
 /// `DomtKey` reads the focused node's `N_LISTEN` and routes `LSN_DEMO` to
@@ -139,7 +174,23 @@ pub const EVO_CX: i32 = 12; // clientX (0 for key events)
 pub const EVO_CY: i32 = 16; // clientY (0 for key events)
 pub const EVO_TARGET: i32 = 20; // target node handle (index+1)
 pub const EVO_PD: i32 = 24; // defaultPrevented flag — `preventDefault` write-back
+pub const EVO_PHASE: i32 = 28; // eventPhase: 1 capturing, 2 at-target, 3 bubbling
+pub const EVO_CUR: i32 = 32; // currentTarget handle (index+1) while a listener runs
+pub const EVO_STOP: i32 = 36; // stopPropagation — remaining path nodes are skipped
+pub const EVO_PASSIVE: i32 = 40; // current listener is passive — preventDefault no-op
+pub const EVO_BTN: i32 = 44; // DOM MouseEvent.button (0 left, 1 middle, 2 right)
+pub const EVO_BTNS: i32 = 48; // DOM MouseEvent.buttons mask
+pub const EVO_MODS: i32 = 52; // bit0 ctrl, bit1 shift, bit2 alt, bit3 meta
+pub const EVO_TIME: i32 = 56; // DOM timeStamp (csr time at fill)
+pub const EVO_DMODE: i32 = 60; // WheelEvent.deltaMode (0 pixel, 1 line, 2 page)
 pub const EVOBJ_BYTES: u64 = 64;
+/// `WheelEvent.DOM_DELTA_LINE` — virtio `REL_WHEEL` is a detent, not CSS px.
+pub const DOM_DELTA_LINE: i64 = 1;
+
+/// DOM `Event.eventPhase` values written to `EVO_PHASE`.
+pub const EV_CAPTURING: i64 = 1;
+pub const EV_AT_TARGET: i64 = 2;
+pub const EV_BUBBLING: i64 = 3;
 
 // `__prom` — the bounded guest promise-object table (the guest-side correlate
 // of the interpreter's `ObjectTable` promise subset). `LwFetch` allocates a
@@ -159,18 +210,37 @@ pub const PROM_HDR: i32 = 32;
 pub const PROM_MAX: i64 = 64;
 /// Per-record bytes.
 pub const PROM_REC: i32 = 48;
-/// `__prom` BSS size: header + `PROM_MAX` records.
-pub const PROM_BYTES: u64 = (PROM_HDR as u64) + (PROM_MAX as u64) * (PROM_REC as u64);
+/// Per-context suspend table after the records. Matches
+/// `g6b_runtime_abi::RUNTIME_CTX_MAX` (4 slots).
+pub const PROM_CTX_MAX: i32 = 4;
+/// asusp/resume/gen plus a spilled `__jit` EH bank (`EXC`/`EXCTAG`/`EXCPAY`).
+pub const PROM_CTX_STRIDE: i32 = 64;
+pub const PROM_CTX_OFF: i32 = PROM_HDR + (PROM_MAX as i32) * PROM_REC;
+pub const PCTX_ASUSP: i32 = 0;
+pub const PCTX_RESUME: i32 = 4;
+pub const PCTX_GEN: i32 = 8;
+/// Spilled `OFF_EXC` (u64).
+pub const PCTX_EXC: i32 = 16;
+/// Spilled `OFF_EXCTAG` (u64).
+pub const PCTX_EXCTAG: i32 = 24;
+/// Spilled `OFF_EXCPAY[0]` (u64); `[1..3]` follow at +8.
+pub const PCTX_EXCPAY: i32 = 32;
+const _: () = assert!(PCTX_EXCPAY + (MAX_EXCPAY as i32) * 8 == PROM_CTX_STRIDE);
+/// `__prom` BSS size: header + records + context table.
+pub const PROM_BYTES: u64 =
+    (PROM_CTX_OFF as u64) + (PROM_CTX_MAX as u64) * (PROM_CTX_STRIDE as u64);
 
 // `__prom` header offsets
 pub const P_MAGIC: i32 = 0; // 'G6PR'
 pub const P_N: i32 = 4; // n_alloc (next free record index)
 pub const P_AFAIL: i32 = 8; // 1 if the last awaited promise rejected
 pub const P_ALAST: i32 = 12; // last-awaited promise handle (for await_error)
-pub const P_ASUSP: i32 = 16; // promise handle the cell is suspended on (0=none)
+pub const P_ASUSP: i32 = 16; // slot-0 alias of table[0].asusp (0=none)
 /// `__prom+20` — set by `PromDrain` when a suspended `_start`'s promise
 /// settled; the foreground loop re-invokes the cell to complete the rewind.
 pub const P_RESUME: i32 = 20;
+/// Current runtime-context slot (`0..PROM_CTX_MAX`). Default 0.
+pub const P_CTX: i32 = 24;
 
 // `__prom` record offsets
 pub const PR_STATE: i32 = 0; // PROM_ST_*
@@ -384,6 +454,10 @@ fn domt_init_node() -> Vec<Op> {
         // one dirty node so the first tick paints
         li(T0, 1),
         sw(T0, T3, H_DIRTY),
+        // listener-table used count
+        li(T1, DOMT_LSN_OFF),
+        add(T0, T3, T1),
+        sw(X0, T0, 0),
         Op::Label("domt_init_done".into()),
         ret(),
     ];
@@ -640,26 +714,68 @@ fn domt_style_node() -> Vec<Op> {
     ops
 }
 
-/// `DomtListen(a0=node, a1=evmask, a2=funcidx)` — register the JIT'd-cell
-/// callback `funcidx` for the event bits in `evmask`. One listener slot per
-/// node (bounded); a second registration overwrites.
+/// `DomtListen(a0=node, a1=evmask, a2=funcidx, a3=capture)` — register a
+/// listener. `N_LEV` is OR'd so a node can match several types; the first
+/// `N_LISTEN` is kept (BIOS/demo). Wasm callbacks (`>=LSN_FUNC`) append a
+/// bounded table record (fail closed when full). `a3≠0` stores `LSNF_CAPTURE`.
 fn domt_listen_node() -> Vec<Op> {
     let mut ops = vec![
-        Op::Comment("DomtListen(a0=node,a1=evmask,a2=funcidx)".into()),
+        Op::Comment("DomtListen(a0=node,a1=mask,a2=cb,a3=capture) — OR + table append".into()),
         Op::Glob("DomtListen".into()),
         Op::Label("DomtListen".into()),
-        addi(SP, SP, -16),
-        sd(RA, SP, 8),
+        addi(SP, SP, -48),
+        sd(RA, SP, 40),
+        sd(S0, SP, 32),
+        sd(S1, SP, 24),
+        sd(S2, SP, 16),
+        sd(S3, SP, 8),
+        mv(S0, A0),
+        mv(S1, A1),
+        mv(S2, A2),
+        mv(S3, A3),
         jal("DomtInit"),
-    ];
-    node_addr(&mut ops, T6, A0);
-    ops.extend([
-        sw(A1, T6, N_LEV),
-        sw(A2, T6, N_LISTEN),
-        ld(RA, SP, 8),
-        addi(SP, SP, 16),
+        slli(T6, S0, 6),
+        la(T3, Addr::DomT),
+        add(T6, T6, T3),
+        addi(T6, T6, DOMT_HDR as i32),
+        lw(T0, T6, N_LEV),
+        or_(T0, T0, S1),
+        sw(T0, T6, N_LEV),
+        lw(T0, T6, N_LISTEN),
+        bne(T0, X0, "dtl_tab"),
+        sw(S2, T6, N_LISTEN),
+        Op::Label("dtl_tab".into()),
+        li(T0, LSN_FUNC),
+        bltu(S2, T0, "dtl_out"),
+        Op::Andi {
+            rd: S3,
+            rs: S3,
+            imm: LSNF_KNOWN,
+        },
+        la(T5, Addr::DomT),
+        li(T1, DOMT_LSN_OFF),
+        add(T5, T5, T1),
+        lw(T1, T5, 0),
+        li(T2, LSN_MAX),
+        bgeu(T1, T2, "dtl_out"),
+        slli(T2, T1, 4),
+        add(T2, T5, T2),
+        addi(T2, T2, LSN_HDR as i32),
+        sw(S0, T2, LSN_NODE),
+        sw(S1, T2, LSN_MASK),
+        sw(S2, T2, LSN_CB),
+        sw(S3, T2, LSN_FLG),
+        addi(T1, T1, 1),
+        sw(T1, T5, 0),
+        Op::Label("dtl_out".into()),
+        ld(RA, SP, 40),
+        ld(S0, SP, 32),
+        ld(S1, SP, 24),
+        ld(S2, SP, 16),
+        ld(S3, SP, 8),
+        addi(SP, SP, 48),
         ret(),
-    ]);
+    ];
     ops.shrink_to_fit();
     ops
 }
@@ -672,6 +788,12 @@ fn domt_focus_node() -> Vec<Op> {
         Op::Label("DomtFocus".into()),
         la(T6, Addr::DomT),
         sw(A0, T6, H_FOCUS),
+        slli(T0, A0, 6),
+        add(T0, T0, T6),
+        addi(T0, T0, DOMT_HDR as i32),
+        lw(T1, T0, N_TLEN),
+        sw(T1, T6, H_CARET),
+        sw(T1, T6, H_SEL),
         ret(),
     ];
     ops.shrink_to_fit();
@@ -1103,6 +1225,7 @@ fn lw_setprop_node() -> Vec<Op> {
         ("lw_lit_bgcolor", 7, "lsp_bg"),
         ("lw_lit_color", 5, "lsp_fg"),
         ("lw_lit_hidden", 6, "lsp_hidden"),
+        ("lw_lit_type", 4, "lsp_type"),
     ] {
         ops.extend([
             mv(A0, S2), // name off
@@ -1194,6 +1317,61 @@ fn lw_setprop_node() -> Vec<Op> {
     mark_dirty(&mut ops, S0);
     ops.extend([
         j("lsp_out"),
+        Op::Label("lsp_type".into()),
+        mv(A0, S4),
+        mv(A1, S3),
+        la(A2, Addr::Label("lw_lit_password".into())),
+        li(A3, 8),
+        jal("LwNameEq"),
+        slli(T6, S0, 6),
+        la(T5, Addr::DomT),
+        add(T6, T6, T5),
+        addi(T6, T6, DOMT_HDR as i32),
+        lw(T0, T6, N_FLAGS),
+        beq(A0, X0, "lsp_type_text"),
+        li(T1, F_PASSWORD),
+        or_(T0, T0, T1),
+        sw(T0, T6, N_FLAGS),
+        j("lsp_type_done"),
+        Op::Label("lsp_type_text".into()),
+        mv(A0, S4),
+        mv(A1, S3),
+        la(A2, Addr::Label("lw_lit_text".into())),
+        li(A3, 4),
+        jal("LwNameEq"),
+        slli(T6, S0, 6),
+        la(T5, Addr::DomT),
+        add(T6, T6, T5),
+        addi(T6, T6, DOMT_HDR as i32),
+        lw(T0, T6, N_FLAGS),
+        beq(A0, X0, "lsp_type_clr"),
+        li(T1, F_PASSWORD),
+        li(T2, -1),
+        Op::Xor {
+            rd: T2,
+            rs1: T1,
+            rs2: T2,
+        },
+        and_(T0, T0, T2),
+        li(T1, F_EDITABLE),
+        or_(T0, T0, T1),
+        sw(T0, T6, N_FLAGS),
+        j("lsp_type_done"),
+        Op::Label("lsp_type_clr".into()),
+        li(T1, F_PASSWORD | F_EDITABLE),
+        li(T2, -1),
+        Op::Xor {
+            rd: T2,
+            rs1: T1,
+            rs2: T2,
+        },
+        and_(T0, T0, T2),
+        sw(T0, T6, N_FLAGS),
+        Op::Label("lsp_type_done".into()),
+    ]);
+    mark_dirty(&mut ops, S0);
+    ops.extend([
+        j("lsp_out"),
         Op::Label("lsp_out".into()),
         ld(RA, SP, 40),
         ld(S0, SP, 32),
@@ -1212,7 +1390,8 @@ fn lw_setprop_node() -> Vec<Op> {
 /// `add_event_listener`. The libwasm target is an **element-id string**, not a
 /// node handle: `LwFindId` resolves it through `__dom_id` (set earlier by
 /// `setProperty(el,"id",..)`). The event-type string maps to an `EV_*` mask
-/// (`click`→CLICK, `keydown`/`keyup`/`keypress`→KEYDOWN); the `cb` funcidx is
+/// (`click`→CLICK, `keydown`/`keyup`/`keypress`→KEYDOWN,
+/// `mousemove`/`wheel`/`mouseover`/`mouseout`); the `cb` funcidx is
 /// stored in `N_LISTEN` for the bounded dispatch lane. An unresolvable id or
 /// unknown event is a no-op (bounded, no trap).
 fn lw_addlsn_node() -> Vec<Op> {
@@ -1220,23 +1399,25 @@ fn lw_addlsn_node() -> Vec<Op> {
         Op::Comment("LwAddLsn(a0=tptr,a1=tlen,a2=typtr,a3=tylen,a4=cb) — id→node + ev→mask".into()),
         Op::Glob("LwAddLsn".into()),
         Op::Label("LwAddLsn".into()),
-        addi(SP, SP, -64),
-        sd(RA, SP, 56),
-        sd(S0, SP, 48),
-        sd(S1, SP, 40),
-        sd(S2, SP, 32),
-        sd(S3, SP, 24),
-        sd(S4, SP, 16),
-        sd(S5, SP, 8),
+        addi(SP, SP, -80),
+        sd(RA, SP, 72),
+        sd(S0, SP, 64),
+        sd(S1, SP, 56),
+        sd(S2, SP, 48),
+        sd(S3, SP, 40),
+        sd(S4, SP, 32),
+        sd(S5, SP, 24),
+        sd(S6, SP, 16),
         mv(S0, A0), // target id off
         mv(S1, A1), // target id len
         mv(S2, A2), // ev-type off
         mv(S3, A3), // ev-type len
         mv(S4, A4), // cb funcidx
+        mv(S6, A5), // capture flag
         jal("DomtInit"),
     ];
     // ev-type name → mask in S5 (type is (off=S2, len=S3)). Each candidate gets
-    // a unique skip label — a shared `lwal_next` would collapse all six `beq`s
+    // a unique skip label — a shared `lwal_next` would collapse all the `beq`s
     // onto one address and misroute every non-final match.
     ops.push(li(S5, 0));
     for (i, (lit, len, mask)) in [
@@ -1246,6 +1427,10 @@ fn lw_addlsn_node() -> Vec<Op> {
         ("lw_lit_keyup", 5, EV_KEYDOWN),
         ("lw_lit_keypress", 8, EV_KEYDOWN),
         ("lw_lit_input", 5, EV_KEYDOWN),
+        ("lw_lit_mousemove", 9, EV_MOUSEMOVE),
+        ("lw_lit_wheel", 5, EV_WHEEL),
+        ("lw_lit_mouseover", 9, EV_MOUSEOVER),
+        ("lw_lit_mouseout", 8, EV_MOUSEOUT),
     ]
     .iter()
     .enumerate()
@@ -1269,6 +1454,7 @@ fn lw_addlsn_node() -> Vec<Op> {
         jal("LwFindId"),
         li(T0, NONE),
         beq(A0, T0, "lwal_out"), // id not found → no-op
+        mv(S0, A0),              // node idx (id-off no longer needed)
         mv(A1, S5),              // evmask
         mv(A2, S4),              // cb funcidx
         // cb != 0 is a wasm funcidx — bias into the reserved >=LSN_FUNC band
@@ -1278,20 +1464,56 @@ fn lw_addlsn_node() -> Vec<Op> {
         li(T0, LSN_FUNC),
         add(A2, A2, T0),
         Op::Label("lwal_lsn".into()),
-        jal("DomtListen"), // DomtListen(node=a0, evmask, funcidx|0x100+funcidx)
+        mv(A0, S0),
+        mv(A3, S6), // capture
+        jal("DomtListen"),
         Op::Label("lwal_out".into()),
-        ld(RA, SP, 56),
-        ld(S0, SP, 48),
-        ld(S1, SP, 40),
-        ld(S2, SP, 32),
-        ld(S3, SP, 24),
-        ld(S4, SP, 16),
-        ld(S5, SP, 8),
-        addi(SP, SP, 64),
+        ld(RA, SP, 72),
+        ld(S0, SP, 64),
+        ld(S1, SP, 56),
+        ld(S2, SP, 48),
+        ld(S3, SP, 40),
+        ld(S4, SP, 32),
+        ld(S5, SP, 24),
+        ld(S6, SP, 16),
+        addi(SP, SP, 80),
         ret(),
     ]);
     ops.shrink_to_fit();
     ops
+}
+
+/// `LwRmLsn(a0=cb)` — `remove_event_listener`. Tombs every table record whose
+/// `LSN_CB` equals `0x100+cb` (the same bias `LwAddLsn` stores). `cb==0` is a
+/// no-op (BIOS protocol). Does not recompute `N_LEV`.
+fn lw_rmlsn_node() -> Vec<Op> {
+    vec![
+        Op::Comment("LwRmLsn(a0=cb) — tombstone matching listener records".into()),
+        Op::Glob("LwRmLsn".into()),
+        Op::Label("LwRmLsn".into()),
+        beq(A0, X0, "lrm_out"),
+        li(T0, LSN_FUNC),
+        add(A0, A0, T0),
+        la(T5, Addr::DomT),
+        li(T1, DOMT_LSN_OFF),
+        add(T5, T5, T1),
+        lw(T4, T5, 0), // n
+        li(T3, 0),
+        Op::Label("lrm_loop".into()),
+        bgeu(T3, T4, "lrm_out"),
+        slli(T2, T3, 4),
+        add(T2, T5, T2),
+        addi(T2, T2, LSN_HDR as i32),
+        lw(T0, T2, LSN_CB),
+        bne(T0, A0, "lrm_next"),
+        li(T0, NONE),
+        sw(T0, T2, LSN_NODE),
+        Op::Label("lrm_next".into()),
+        addi(T3, T3, 1),
+        j("lrm_loop"),
+        Op::Label("lrm_out".into()),
+        ret(),
+    ]
 }
 
 /// `LwEvGet(a0=evhandle, a1=nlen, a2=nptr) → a0` — the `Object_Getter__*`
@@ -1301,7 +1523,8 @@ fn lw_addlsn_node() -> Vec<Op> {
 /// object `&__ev_obj` — any other handle returns 0 (the bridge is bounded to
 /// the in-flight event; node/object getters stay a separate lane). Numeric and
 /// handle fields load `lw(handle,off)` straight out of the record; `target`/
-/// `srcElement`/`currentTarget` return the stored node handle; `type` is the
+/// `srcElement` return the stored node handle; `currentTarget` is the node
+/// whose listener is running (`EVO_CUR`); `eventPhase` is 1/2/3; `type` is the
 /// `EV_*` mask as an int (the string `type` getter is a separate sret lane);
 /// `defaultPrevented` reads the `EVO_PD` write-back bit set by `LwEvCall`;
 /// `cancelable`/`bubbles`/`isTrusted` are constant-1 — every synthetic event is
@@ -1337,14 +1560,18 @@ fn lw_evget_node() -> Vec<Op> {
         ("lw_lit_code", 4, EVO_CODE),
         ("lw_lit_keyCode", 7, EVO_CODE),
         ("lw_lit_which", 5, EVO_CODE),
-        ("lw_lit_button", 6, EVO_CODE),
+        ("lw_lit_button", 6, EVO_BTN),
+        ("lw_lit_buttons", 7, EVO_BTNS),
         ("lw_lit_detail", 6, EVO_VALUE),
         ("lw_lit_value", 5, EVO_VALUE),
         ("lw_lit_deltaY", 6, EVO_VALUE),
+        ("lw_lit_deltaMode", 9, EVO_DMODE),
+        ("lw_lit_timeStamp", 9, EVO_TIME),
         ("lw_lit_type", 4, EVO_TYPE),
         ("lw_lit_target", 6, EVO_TARGET),
         ("lw_lit_srcElement", 10, EVO_TARGET),
-        ("lw_lit_currentTarget", 13, EVO_TARGET),
+        ("lw_lit_currentTarget", 13, EVO_CUR),
+        ("lw_lit_eventPhase", 10, EVO_PHASE),
         ("lw_lit_defaultPrevented", 16, EVO_PD),
     ]
     .iter()
@@ -1385,6 +1612,36 @@ fn lw_evget_node() -> Vec<Op> {
             Op::Label(next),
         ]);
     }
+    // modifier bits on EVO_MODS.
+    for (i, (lit, len, bit)) in [
+        ("lw_lit_ctrlKey", 7i64, crate::vio::MOD_CTRL),
+        ("lw_lit_shiftKey", 8, crate::vio::MOD_SHIFT),
+        ("lw_lit_altKey", 6, crate::vio::MOD_ALT),
+        ("lw_lit_metaKey", 7, crate::vio::MOD_META),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let next = format!("lveg_m{i}");
+        ops.extend([
+            mv(A0, S2),
+            mv(A1, S1),
+            la(A2, Addr::Label((*lit).into())),
+            li(A3, *len),
+            jal("LwNameEq"),
+            beq(A0, X0, &next),
+            lw(A0, S0, EVO_MODS),
+            Op::Andi {
+                rd: A0,
+                rs: A0,
+                imm: *bit as i32,
+            },
+            beq(A0, X0, "lveg_out"),
+            li(A0, 1),
+            j("lveg_out"),
+            Op::Label(next),
+        ]);
+    }
     ops.extend([
         Op::Label("lveg_null".into()),
         li(A0, 0),
@@ -1400,15 +1657,495 @@ fn lw_evget_node() -> Vec<Op> {
     ops
 }
 
+/// Dedicated UTF-8 scratch at the KSTR tail (`OFF_MEMB - EV_STR_BYTES`).
+/// Past `mem_pages`, so the cell allocator never reaches it. Longest interned
+/// event string is `"Unidentified"` (13 B).
+pub const EV_STR_BYTES: i32 = 32;
+
+/// `LwEvGetStr(a0=rawResult, a1=handle, a2=nlen, a3=nptr)` — UTF-8 sret
+/// `{len,ptr}` for `type` / `key` / `code`. `code` is KeyboardEvent.code
+/// (`KeyA`), never a Linux keycode integer. Unknown names write empty.
+fn lw_evgetstr_node() -> Vec<Op> {
+    let mut ops = vec![
+        Op::Comment("LwEvGetStr(a0=raw,a1=ev,a2=nlen,a3=nptr) — UTF-8 type/key/code sret".into()),
+        Op::Glob("LwEvGetStr".into()),
+        Op::Label("LwEvGetStr".into()),
+        addi(SP, SP, -64),
+        sd(RA, SP, 56),
+        sd(S0, SP, 48),
+        sd(S1, SP, 40),
+        sd(S2, SP, 32),
+        sd(S3, SP, 24),
+        sd(S4, SP, 16),
+        mv(S0, A0), // rawResult wasm off
+        mv(S1, A1), // handle
+        mv(S2, A2), // nlen
+        mv(S3, A3), // nptr
+        la(T0, Addr::EvObj),
+        bne(S1, T0, "lves_empty"),
+        li(S4, 0), // default empty
+        li(S1, 0), // len (reuse S1 after handle check)
+    ];
+    // type → "click" / "keydown" / pointer names
+    ops.extend([
+        mv(A0, S3),
+        mv(A1, S2),
+        la(A2, Addr::Label("lw_lit_type".into())),
+        li(A3, 4),
+        jal("LwNameEq"),
+        beq(A0, X0, "lves_nkey"),
+        la(T0, Addr::EvObj),
+        lw(T0, T0, EVO_TYPE),
+        li(T1, EV_CLICK),
+        bne(T0, T1, "lves_type_key"),
+        la(S4, Addr::Label("lw_lit_click".into())),
+        li(S1, 5),
+        j("lves_wr"),
+        Op::Label("lves_type_key".into()),
+        li(T1, EV_KEYDOWN),
+        bne(T0, T1, "lves_type_mm"),
+        la(S4, Addr::Label("lw_lit_keydown".into())),
+        li(S1, 7),
+        j("lves_wr"),
+        Op::Label("lves_type_mm".into()),
+        li(T1, EV_MOUSEMOVE),
+        bne(T0, T1, "lves_type_wh"),
+        la(S4, Addr::Label("lw_lit_mousemove".into())),
+        li(S1, 9),
+        j("lves_wr"),
+        Op::Label("lves_type_wh".into()),
+        li(T1, EV_WHEEL),
+        bne(T0, T1, "lves_type_over"),
+        la(S4, Addr::Label("lw_lit_wheel".into())),
+        li(S1, 5),
+        j("lves_wr"),
+        Op::Label("lves_type_over".into()),
+        li(T1, EV_MOUSEOVER),
+        bne(T0, T1, "lves_type_out"),
+        la(S4, Addr::Label("lw_lit_mouseover".into())),
+        li(S1, 9),
+        j("lves_wr"),
+        Op::Label("lves_type_out".into()),
+        li(T1, EV_MOUSEOUT),
+        bne(T0, T1, "lves_empty"),
+        la(S4, Addr::Label("lw_lit_mouseout".into())),
+        li(S1, 8),
+        j("lves_wr"),
+        Op::Label("lves_nkey".into()),
+        mv(A0, S3),
+        mv(A1, S2),
+        la(A2, Addr::Label("lw_lit_key".into())),
+        li(A3, 3),
+        jal("LwNameEq"),
+        beq(A0, X0, "lves_ncode"),
+        la(T0, Addr::EvObj),
+        lw(T1, T0, EVO_TYPE),
+        li(T2, EV_KEYDOWN),
+        bne(T1, T2, "lves_empty"),
+        lw(T0, T0, EVO_CODE),
+        li(T1, VIO_KEY_ENTER),
+        bne(T0, T1, "lves_key_a"),
+        la(S4, Addr::Label("lw_lit_Enter".into())),
+        li(S1, 5),
+        j("lves_wr"),
+        Op::Label("lves_key_a".into()),
+        li(T1, VIO_KEY_A),
+        bne(T0, T1, "lves_unid"),
+        la(S4, Addr::Label("lw_lit_key_a".into())),
+        li(S1, 1),
+        j("lves_wr"),
+        Op::Label("lves_ncode".into()),
+        mv(A0, S3),
+        mv(A1, S2),
+        la(A2, Addr::Label("lw_lit_code".into())),
+        li(A3, 4),
+        jal("LwNameEq"),
+        beq(A0, X0, "lves_empty"),
+        la(T0, Addr::EvObj),
+        lw(T1, T0, EVO_TYPE),
+        li(T2, EV_KEYDOWN),
+        bne(T1, T2, "lves_empty"),
+        lw(T0, T0, EVO_CODE),
+        li(T1, VIO_KEY_ENTER),
+        bne(T0, T1, "lves_code_a"),
+        la(S4, Addr::Label("lw_lit_Enter".into())),
+        li(S1, 5),
+        j("lves_wr"),
+        Op::Label("lves_code_a".into()),
+        li(T1, VIO_KEY_A),
+        bne(T0, T1, "lves_unid"),
+        la(S4, Addr::Label("lw_lit_KeyA".into())),
+        li(S1, 4),
+        j("lves_wr"),
+        Op::Label("lves_unid".into()),
+        la(S4, Addr::Label("lw_lit_Unidentified".into())),
+        li(S1, 13),
+        j("lves_wr"),
+        Op::Label("lves_empty".into()),
+        li(S1, 0),
+        li(S4, 0),
+        Op::Label("lves_wr".into()),
+        // payload at the last EV_STR_BYTES of the KSTR tail — past mem_pages,
+        // so the cell allocator never reaches it. `addi` cannot hold 0xF80.
+        la(T0, Addr::JitHdr),
+        ld(T0, T0, OFF_MEMB),
+        li(T1, i64::from(EV_STR_BYTES)),
+        sub(T5, T0, T1), // T5 = dst_off (wasm offset)
+        la(T0, Addr::WasmMem),
+        add(T1, T0, T5), // dest abs
+        beq(S1, X0, "lves_sret"),
+        mv(T2, S4),
+        mv(T3, S1),
+        Op::Label("lves_cpy".into()),
+        lbu(T4, T2, 0),
+        sb(T4, T1, 0),
+        addi(T2, T2, 1),
+        addi(T1, T1, 1),
+        addi(T3, T3, -1),
+        bne(T3, X0, "lves_cpy"),
+        Op::Label("lves_sret".into()),
+        la(T0, Addr::WasmMem),
+        add(T0, T0, S0),
+        sw(S1, T0, 0),
+        sw(T5, T0, 4), // ptr = dst_off
+        ld(RA, SP, 56),
+        ld(S0, SP, 48),
+        ld(S1, SP, 40),
+        ld(S2, SP, 32),
+        ld(S3, SP, 24),
+        ld(S4, SP, 16),
+        addi(SP, SP, 64),
+        ret(),
+    ]);
+    ops.shrink_to_fit();
+    ops
+}
+
+/// `LwEvGetOpt(a0=raw, a1=handle, a2=nlen, a3=nptr)` — OptionalUint/Handle
+/// sret `{value:u32, defined:u8}` at `__wasm_mem[raw]`. Known integer/handle
+/// fields write the `lw` and `defined=1`. `relatedTarget` is a present name
+/// with `defined=0`. Unknown names / non-event handles write `{0,0}`.
+fn lw_evgetopt_node() -> Vec<Op> {
+    let mut ops = vec![
+        Op::Comment("LwEvGetOpt(a0=raw,a1=ev,a2=nlen,a3=nptr) — OptionalUint sret".into()),
+        Op::Glob("LwEvGetOpt".into()),
+        Op::Label("LwEvGetOpt".into()),
+        addi(SP, SP, -64),
+        sd(RA, SP, 56),
+        sd(S0, SP, 48),
+        sd(S1, SP, 40),
+        sd(S2, SP, 32),
+        sd(S3, SP, 24),
+        sd(S4, SP, 16),
+        sd(S5, SP, 8),
+        mv(S0, A0), // raw
+        mv(S1, A1), // handle
+        mv(S2, A2), // nlen
+        mv(S3, A3), // nptr
+        li(S4, 0),  // value
+        li(S5, 0),  // defined
+        la(T0, Addr::EvObj),
+        bne(S1, T0, "lvgo_wr"),
+    ];
+    for (i, (lit, len, off)) in [
+        ("lw_lit_clientX", 7i64, EVO_CX),
+        ("lw_lit_screenX", 7, EVO_CX),
+        ("lw_lit_pageX", 5, EVO_CX),
+        ("lw_lit_offsetX", 7, EVO_CX),
+        ("lw_lit_clientY", 7, EVO_CY),
+        ("lw_lit_screenY", 7, EVO_CY),
+        ("lw_lit_pageY", 5, EVO_CY),
+        ("lw_lit_offsetY", 7, EVO_CY),
+        ("lw_lit_code", 4, EVO_CODE),
+        ("lw_lit_keyCode", 7, EVO_CODE),
+        ("lw_lit_which", 5, EVO_CODE),
+        ("lw_lit_button", 6, EVO_BTN),
+        ("lw_lit_buttons", 7, EVO_BTNS),
+        ("lw_lit_detail", 6, EVO_VALUE),
+        ("lw_lit_value", 5, EVO_VALUE),
+        ("lw_lit_deltaY", 6, EVO_VALUE),
+        ("lw_lit_deltaMode", 9, EVO_DMODE),
+        ("lw_lit_timeStamp", 9, EVO_TIME),
+        ("lw_lit_type", 4, EVO_TYPE),
+        ("lw_lit_target", 6, EVO_TARGET),
+        ("lw_lit_srcElement", 10, EVO_TARGET),
+        ("lw_lit_currentTarget", 13, EVO_CUR),
+        ("lw_lit_eventPhase", 10, EVO_PHASE),
+        ("lw_lit_defaultPrevented", 16, EVO_PD),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let next = format!("lvgo_n{i}");
+        ops.extend([
+            mv(A0, S3),
+            mv(A1, S2),
+            la(A2, Addr::Label((*lit).into())),
+            li(A3, *len),
+            jal("LwNameEq"),
+            beq(A0, X0, &next),
+            lw(S4, S1, *off),
+            li(S5, 1),
+            j("lvgo_wr"),
+            Op::Label(next),
+        ]);
+    }
+    for (i, (lit, len)) in [
+        ("lw_lit_cancelable", 10i64),
+        ("lw_lit_bubbles", 7),
+        ("lw_lit_isTrusted", 9),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let next = format!("lvgo_c{i}");
+        ops.extend([
+            mv(A0, S3),
+            mv(A1, S2),
+            la(A2, Addr::Label((*lit).into())),
+            li(A3, *len),
+            jal("LwNameEq"),
+            beq(A0, X0, &next),
+            li(S4, 1),
+            li(S5, 1),
+            j("lvgo_wr"),
+            Op::Label(next),
+        ]);
+    }
+    ops.extend([
+        mv(A0, S3),
+        mv(A1, S2),
+        la(A2, Addr::Label("lw_lit_relatedTarget".into())),
+        li(A3, 13),
+        jal("LwNameEq"),
+        beq(A0, X0, "lvgo_wr"),
+        li(S4, 0),
+        li(S5, 0), // known OptionalHandle, absent
+        Op::Label("lvgo_wr".into()),
+        la(T0, Addr::WasmMem),
+        add(T0, T0, S0),
+        sw(S4, T0, 0),
+        sb(S5, T0, 4),
+        ld(RA, SP, 56),
+        ld(S0, SP, 48),
+        ld(S1, SP, 40),
+        ld(S2, SP, 32),
+        ld(S3, SP, 24),
+        ld(S4, SP, 16),
+        ld(S5, SP, 8),
+        addi(SP, SP, 64),
+        ret(),
+    ]);
+    ops.shrink_to_fit();
+    ops
+}
+
+/// `LwEvGetF(a0=handle, a1=nlen, a2=nptr) → a0` — `Object_Getter__float`.
+/// Reuses `LwEvGet` then `fcvt.s.w`/`fmv.x.w` so the value-stack cell holds
+/// IEEE f32 bits (exec-model FPU; same path as JIT FP ALU).
+fn lw_evgetf_node() -> Vec<Op> {
+    const F0: u32 = 0;
+    vec![
+        Op::Comment("LwEvGetF(a0=ev,a1=nlen,a2=nptr) → f32 bits in a0".into()),
+        Op::Glob("LwEvGetF".into()),
+        Op::Label("LwEvGetF".into()),
+        addi(SP, SP, -16),
+        sd(RA, SP, 8),
+        jal("LwEvGet"),
+        Op::FpR {
+            funct7: 0x68,
+            rs2: 0,
+            rs1: A0,
+            funct3: 0,
+            rd: F0,
+        },
+        Op::FpR {
+            funct7: 0x70,
+            rs2: 0,
+            rs1: F0,
+            funct3: 0,
+            rd: A0,
+        },
+        ld(RA, SP, 8),
+        addi(SP, SP, 16),
+        ret(),
+    ]
+}
+
+/// `LwEvGetD(a0=handle, a1=nlen, a2=nptr) → a0` — `Object_Getter__double`.
+/// `fcvt.d.w` / `fmv.x.d` so the value-stack cell holds IEEE f64 bits.
+fn lw_evgetd_node() -> Vec<Op> {
+    const F0: u32 = 0;
+    vec![
+        Op::Comment("LwEvGetD(a0=ev,a1=nlen,a2=nptr) → f64 bits in a0".into()),
+        Op::Glob("LwEvGetD".into()),
+        Op::Label("LwEvGetD".into()),
+        addi(SP, SP, -16),
+        sd(RA, SP, 8),
+        jal("LwEvGet"),
+        Op::FpR {
+            funct7: 0x69,
+            rs2: 0,
+            rs1: A0,
+            funct3: 0,
+            rd: F0,
+        },
+        Op::FpR {
+            funct7: 0x71,
+            rs2: 0,
+            rs1: F0,
+            funct3: 0,
+            rd: A0,
+        },
+        ld(RA, SP, 8),
+        addi(SP, SP, 16),
+        ret(),
+    ]
+}
+
+/// `LwEvGetOptS` — OptionalString sret `{len,ptr,defined}`. Reuses `LwEvGetStr`;
+/// `defined=1` iff the UTF-8 payload is non-empty.
+fn lw_evgetopts_node() -> Vec<Op> {
+    vec![
+        Op::Comment("LwEvGetOptS(a0=sret,a1=ev,a2=nlen,a3=nptr)".into()),
+        Op::Glob("LwEvGetOptS".into()),
+        Op::Label("LwEvGetOptS".into()),
+        addi(SP, SP, -16),
+        sd(RA, SP, 8),
+        sd(S0, SP, 0),
+        mv(S0, A0),
+        jal("LwEvGetStr"),
+        la(T0, Addr::WasmMem),
+        add(T0, T0, S0),
+        lw(T1, T0, 0),
+        li(T2, 0),
+        beq(T1, X0, "lvgos_wr"),
+        li(T2, 1),
+        Op::Label("lvgos_wr".into()),
+        sb(T2, T0, 8),
+        ld(S0, SP, 0),
+        ld(RA, SP, 8),
+        addi(SP, SP, 16),
+        ret(),
+    ]
+}
+
+/// `LwEvGetOptB` — OptionalBool sret `{value:u8, defined:u8}`.
+/// `bubbles`/`cancelable`/`isTrusted` are defined=1 value=1; unknown is none.
+fn lw_evgetoptb_node() -> Vec<Op> {
+    let mut ops = vec![
+        Op::Comment("LwEvGetOptB(a0=sret,a1=ev,a2=nlen,a3=nptr)".into()),
+        Op::Glob("LwEvGetOptB".into()),
+        Op::Label("LwEvGetOptB".into()),
+        addi(SP, SP, -64),
+        sd(RA, SP, 56),
+        sd(S0, SP, 48),
+        sd(S1, SP, 40),
+        sd(S2, SP, 32),
+        sd(S3, SP, 24),
+        sd(S4, SP, 16),
+        sd(S5, SP, 8),
+        mv(S0, A0),
+        mv(S1, A1),
+        mv(S2, A2),
+        mv(S3, A3),
+        li(S4, 0),
+        li(S5, 0),
+        la(T0, Addr::EvObj),
+        bne(S1, T0, "lvgob_wr"),
+    ];
+    for (i, (lit, len)) in [
+        ("lw_lit_cancelable", 10i64),
+        ("lw_lit_bubbles", 7),
+        ("lw_lit_isTrusted", 9),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let next = format!("lvgob_c{i}");
+        ops.extend([
+            mv(A0, S3),
+            mv(A1, S2),
+            la(A2, Addr::Label((*lit).into())),
+            li(A3, *len),
+            jal("LwNameEq"),
+            beq(A0, X0, &next),
+            li(S4, 1),
+            li(S5, 1),
+            j("lvgob_wr"),
+            Op::Label(next),
+        ]);
+    }
+    ops.extend([
+        Op::Label("lvgob_wr".into()),
+        la(T0, Addr::WasmMem),
+        add(T0, T0, S0),
+        sb(S4, T0, 0),
+        sb(S5, T0, 1),
+        ld(RA, SP, 56),
+        ld(S0, SP, 48),
+        ld(S1, SP, 40),
+        ld(S2, SP, 32),
+        ld(S3, SP, 24),
+        ld(S4, SP, 16),
+        ld(S5, SP, 8),
+        addi(SP, SP, 64),
+        ret(),
+    ]);
+    ops
+}
+
+/// `LwEvGetOptD` — OptionalDouble sret `{f64, defined:u8}`. Reuses
+/// `LwEvGetOpt` then `fcvt.d.w` of the integer field.
+fn lw_evgetoptd_node() -> Vec<Op> {
+    const F0: u32 = 0;
+    vec![
+        Op::Comment("LwEvGetOptD(a0=sret,a1=ev,a2=nlen,a3=nptr)".into()),
+        Op::Glob("LwEvGetOptD".into()),
+        Op::Label("LwEvGetOptD".into()),
+        addi(SP, SP, -16),
+        sd(RA, SP, 8),
+        sd(S0, SP, 0),
+        mv(S0, A0),
+        jal("LwEvGetOpt"),
+        la(T0, Addr::WasmMem),
+        add(T0, T0, S0),
+        lw(A0, T0, 0),
+        lbu(S0, T0, 4),
+        Op::FpR {
+            funct7: 0x69,
+            rs2: 0,
+            rs1: A0,
+            funct3: 0,
+            rd: F0,
+        },
+        Op::FpR {
+            funct7: 0x71,
+            rs2: 0,
+            rs1: F0,
+            funct3: 0,
+            rd: A0,
+        },
+        sd(A0, T0, 0),
+        sb(S0, T0, 8),
+        ld(S0, SP, 0),
+        ld(RA, SP, 8),
+        addi(SP, SP, 16),
+        ret(),
+    ]
+}
+
 /// `LwEvCall(a0=evhandle, a1=mlen, a2=mptr)` — the `Object_Call___void`
 /// (no-arg, void-return) method dispatch on the event object. `preventDefault`
 /// sets `EVO_PD` so a later `defaultPrevented` getter reads 1 — the write-back
 /// half of the property bridge. Any other method name, or a non-event handle,
-/// is a bounded no-op. (`preventDefault`/`stopPropagation` share the
-/// `Object_Call___void` shape; only `preventDefault` is matched.)
+/// is a bounded no-op. `preventDefault` and `stopPropagation` share the
+/// `Object_Call___void` shape.
 fn lw_evcall_node() -> Vec<Op> {
     let mut ops = vec![
-        Op::Comment("LwEvCall(a0=evhandle,a1=mlen,a2=mptr) — preventDefault→EVO_PD".into()),
+        Op::Comment(
+            "LwEvCall(a0=evhandle,a1=mlen,a2=mptr) — preventDefault/stopPropagation".into(),
+        ),
         Op::Glob("LwEvCall".into()),
         Op::Label("LwEvCall".into()),
         addi(SP, SP, -32),
@@ -1426,9 +2163,21 @@ fn lw_evcall_node() -> Vec<Op> {
         la(A2, Addr::Label("lw_lit_preventDefault".into())),
         li(A3, 14),
         jal("LwNameEq"),
-        beq(A0, X0, "lvcl_out"),
+        beq(A0, X0, "lvcl_stop"),
+        lw(T0, S0, EVO_PASSIVE),
+        bne(T0, X0, "lvcl_out"), // passive listener: preventDefault is a no-op
         li(T0, 1),
         sw(T0, S0, EVO_PD),
+        j("lvcl_out"),
+        Op::Label("lvcl_stop".into()),
+        mv(A0, S2),
+        mv(A1, S1),
+        la(A2, Addr::Label("lw_lit_stopPropagation".into())),
+        li(A3, 16),
+        jal("LwNameEq"),
+        beq(A0, X0, "lvcl_out"),
+        li(T0, 1),
+        sw(T0, S0, EVO_STOP),
         Op::Label("lvcl_out".into()),
         ld(RA, SP, 24),
         ld(S0, SP, 16),
@@ -1767,6 +2516,17 @@ fn lw_awaitvoid_node() -> Vec<Op> {
         // it, then the foreground loop re-invokes `_start` to rewind.
         Op::Label("lav_pend".into()),
         la(T6, Addr::Prom),
+        lw(T1, T6, P_CTX),
+        li(T2, PROM_CTX_MAX as i64),
+        bltu(T1, T2, "lav_slot"),
+        li(T1, 0),
+        Op::Label("lav_slot".into()),
+        li(T2, PROM_CTX_OFF as i64),
+        add(T3, T6, T2),
+        slli(T2, T1, 6),
+        add(T3, T3, T2),
+        sw(S0, T3, PCTX_ASUSP),
+        bne(T1, X0, "lav_arm"),
         sw(S0, T6, P_ASUSP),
         j("lav_arm"),
         Op::Label("lav_ful".into()),
@@ -1860,7 +2620,7 @@ fn lw_awaitval_node() -> Vec<Op> {
     ops.extend([
         // kstr_cur + len overflow → wrap the bump cursor to 0.
         add(T1, T5, T3),
-        li(T6, KGET_KSTR_BYTES as i64),
+        li(T6, KGET_KSTR_BYTES as i64 - i64::from(EV_STR_BYTES)),
         bltu(T1, T6, "lavl_ok"),
         li(T5, 0),
         Op::Label("lavl_ok".into()),
@@ -1950,6 +2710,69 @@ fn lw_phex_node() -> Vec<Op> {
 
 /// libwasm property/event name literals — a jumped-over data island so the
 /// `Op::Word` bytes are never executed. Each literal is NUL-padded to a word.
+/// `PromCtx(a0=slot)` — select the runtime-context slot (`0..PROM_CTX_MAX`).
+/// Out-of-range is a no-op. Slot 0 keeps `P_ASUSP`/`P_RESUME` as aliases.
+/// Switching slots spills the live `__jit` EH bank (`OFF_EXC`/`EXCTAG`/
+/// `EXCPAY`) into the old slot and fills the new slot's bank, so two
+/// contexts cannot alias one in-flight exception.
+fn prom_ctx_node() -> Vec<Op> {
+    vec![
+        Op::Comment("PromCtx(a0=slot) — select __prom context + EH bank".into()),
+        Op::Glob("PromCtx".into()),
+        Op::Label("PromCtx".into()),
+        li(T0, PROM_CTX_MAX as i64),
+        bgeu(A0, T0, "pcx_out"),
+        la(T6, Addr::Prom),
+        lw(T1, T6, P_CTX),
+        beq(T1, A0, "pcx_set"),
+        bgeu(T1, T0, "pcx_fill"),
+        // spill old slot
+        li(T2, PROM_CTX_OFF as i64),
+        add(T3, T6, T2),
+        slli(T2, T1, 6),
+        add(T3, T3, T2),
+        la(T5, Addr::JitHdr),
+        li(T4, i64::from(OFF_EXC)),
+        add(T5, T5, T4),
+        ld(T0, T5, 0),
+        sd(T0, T3, PCTX_EXC),
+        ld(T0, T5, 8),
+        sd(T0, T3, PCTX_EXCTAG),
+        ld(T0, T5, 16),
+        sd(T0, T3, PCTX_EXCPAY),
+        ld(T0, T5, 24),
+        sd(T0, T3, PCTX_EXCPAY + 8),
+        ld(T0, T5, 32),
+        sd(T0, T3, PCTX_EXCPAY + 16),
+        ld(T0, T5, 40),
+        sd(T0, T3, PCTX_EXCPAY + 24),
+        Op::Label("pcx_fill".into()),
+        li(T2, PROM_CTX_OFF as i64),
+        add(T3, T6, T2),
+        slli(T2, A0, 6),
+        add(T3, T3, T2),
+        la(T5, Addr::JitHdr),
+        li(T4, i64::from(OFF_EXC)),
+        add(T5, T5, T4),
+        ld(T0, T3, PCTX_EXC),
+        sd(T0, T5, 0),
+        ld(T0, T3, PCTX_EXCTAG),
+        sd(T0, T5, 8),
+        ld(T0, T3, PCTX_EXCPAY),
+        sd(T0, T5, 16),
+        ld(T0, T3, PCTX_EXCPAY + 8),
+        sd(T0, T5, 24),
+        ld(T0, T3, PCTX_EXCPAY + 16),
+        sd(T0, T5, 32),
+        ld(T0, T3, PCTX_EXCPAY + 24),
+        sd(T0, T5, 40),
+        Op::Label("pcx_set".into()),
+        sw(A0, T6, P_CTX),
+        Op::Label("pcx_out".into()),
+        ret(),
+    ]
+}
+
 /// `PromAlloc() → a0 = handle (1..=PROM_MAX) | 0` — lazily init the `__prom`
 /// header, then bump-claim a record: zero it and mark it `PROM_ST_PEND` /
 /// `PROM_K_FETCH`. Returns the record index +1 (the promise handle). `0` =
@@ -1969,6 +2792,27 @@ fn prom_alloc_node() -> Vec<Op> {
         sw(X0, T6, P_AFAIL),
         sw(X0, T6, P_ALAST),
         sw(X0, T6, P_ASUSP),
+        sw(X0, T6, P_RESUME),
+        // Do not clear P_CTX — PromCtx may have selected a slot first.
+        li(T0, 0),
+        Op::Label("pa_ctxz".into()),
+        li(T1, PROM_CTX_MAX as i64),
+        bgeu(T0, T1, "pa_have"),
+        slli(T2, T0, 6),
+        li(T3, PROM_CTX_OFF as i64),
+        add(T3, T6, T3),
+        add(T3, T3, T2),
+        mv(T4, T3),
+        li(T2, 8), // 64-byte slot
+        Op::Label("pa_z8".into()),
+        sd(X0, T4, 0),
+        addi(T4, T4, 8),
+        addi(T2, T2, -1),
+        bne(T2, X0, "pa_z8"),
+        li(T2, 1),
+        sw(T2, T3, PCTX_GEN),
+        addi(T0, T0, 1),
+        j("pa_ctxz"),
         Op::Label("pa_have".into()),
         lw(T0, T6, P_N), // i = n_alloc
         li(T1, PROM_MAX),
@@ -2490,18 +3334,33 @@ fn prom_drain_node() -> Vec<Op> {
         addi(S0, S0, 1),
         j("pd_loop"),
         Op::Label("pd_res".into()),
+        li(S0, 0),
+        Op::Label("pd_ctx".into()),
+        li(T1, PROM_CTX_MAX as i64),
+        bgeu(S0, T1, "pd_out"),
         la(T6, Addr::Prom),
-        lw(A0, T6, P_ASUSP),
-        beq(A0, X0, "pd_out"),
+        li(T2, PROM_CTX_OFF as i64),
+        add(T2, T6, T2),
+        slli(T3, S0, 6),
+        add(S2, T2, T3),
+        lw(A0, S2, PCTX_ASUSP),
+        beq(A0, X0, "pd_ctx_next"),
         jal("PromGet"),
-        beq(A0, X0, "pd_out"),
+        beq(A0, X0, "pd_ctx_next"),
         lw(T0, A0, PR_STATE),
         li(T1, PROM_ST_PEND),
-        beq(T0, T1, "pd_out"), // still pending → keep suspended
+        beq(T0, T1, "pd_ctx_next"),
+        sw(X0, S2, PCTX_ASUSP),
+        li(T0, 1),
+        sw(T0, S2, PCTX_RESUME),
         la(T6, Addr::Prom),
-        sw(X0, T6, P_ASUSP),
         li(T0, 1),
         sw(T0, T6, P_RESUME),
+        bne(S0, X0, "pd_ctx_next"),
+        sw(X0, T6, P_ASUSP),
+        Op::Label("pd_ctx_next".into()),
+        addi(S0, S0, 1),
+        j("pd_ctx"),
         Op::Label("pd_out".into()),
         ld(RA, SP, 40),
         ld(S0, SP, 32),
@@ -2511,6 +3370,55 @@ fn prom_drain_node() -> Vec<Op> {
         addi(SP, SP, 48),
         ret(),
     ]
+}
+
+/// Linux EV_KEY → unshifted US ASCII. 0 = unmapped. `0x08` is backspace.
+fn us_keymap() -> [u8; 128] {
+    let mut m = [0u8; 128];
+    m[2] = b'1';
+    m[3] = b'2';
+    m[4] = b'3';
+    m[5] = b'4';
+    m[6] = b'5';
+    m[7] = b'6';
+    m[8] = b'7';
+    m[9] = b'8';
+    m[10] = b'9';
+    m[11] = b'0';
+    m[12] = b'-';
+    m[13] = b'=';
+    m[14] = 0x08;
+    m[16] = b'q';
+    m[17] = b'w';
+    m[18] = b'e';
+    m[19] = b'r';
+    m[20] = b't';
+    m[21] = b'y';
+    m[22] = b'u';
+    m[23] = b'i';
+    m[24] = b'o';
+    m[25] = b'p';
+    m[30] = b'a';
+    m[31] = b's';
+    m[32] = b'd';
+    m[33] = b'f';
+    m[34] = b'g';
+    m[35] = b'h';
+    m[36] = b'j';
+    m[37] = b'k';
+    m[38] = b'l';
+    m[44] = b'z';
+    m[45] = b'x';
+    m[46] = b'c';
+    m[47] = b'v';
+    m[48] = b'b';
+    m[49] = b'n';
+    m[50] = b'm';
+    m[51] = b',';
+    m[52] = b'.';
+    m[53] = b'/';
+    m[57] = b' ';
+    m
 }
 
 fn lw_lits_node() -> Vec<Op> {
@@ -2545,6 +3453,10 @@ fn lw_lits_node() -> Vec<Op> {
     lit(&mut ops, "lw_lit_keyup", "keyup");
     lit(&mut ops, "lw_lit_keypress", "keypress");
     lit(&mut ops, "lw_lit_input", "input");
+    lit(&mut ops, "lw_lit_mousemove", "mousemove");
+    lit(&mut ops, "lw_lit_wheel", "wheel");
+    lit(&mut ops, "lw_lit_mouseover", "mouseover");
+    lit(&mut ops, "lw_lit_mouseout", "mouseout");
     // `__ev_obj` property names for `LwEvGet`/`LwEvCall` (the typed-getter
     // bridge). "value" reuses `lw_lit_value` above.
     lit(&mut ops, "lw_lit_clientX", "clientX");
@@ -2559,9 +3471,24 @@ fn lw_lits_node() -> Vec<Op> {
     lit(&mut ops, "lw_lit_keyCode", "keyCode");
     lit(&mut ops, "lw_lit_which", "which");
     lit(&mut ops, "lw_lit_button", "button");
+    lit(&mut ops, "lw_lit_buttons", "buttons");
+    lit(&mut ops, "lw_lit_ctrlKey", "ctrlKey");
+    lit(&mut ops, "lw_lit_shiftKey", "shiftKey");
+    lit(&mut ops, "lw_lit_altKey", "altKey");
+    lit(&mut ops, "lw_lit_metaKey", "metaKey");
     lit(&mut ops, "lw_lit_detail", "detail");
     lit(&mut ops, "lw_lit_deltaY", "deltaY");
+    lit(&mut ops, "lw_lit_deltaMode", "deltaMode");
+    lit(&mut ops, "lw_lit_timeStamp", "timeStamp");
     lit(&mut ops, "lw_lit_type", "type");
+    lit(&mut ops, "lw_lit_password", "password");
+    lit(&mut ops, "lw_lit_text", "text");
+    ops.push(Op::Label("dtk_keymap".into()));
+    for chunk in us_keymap().chunks(4) {
+        let mut w = [0u8; 4];
+        w[..chunk.len()].copy_from_slice(chunk);
+        ops.push(Op::Word(u32::from_le_bytes(w)));
+    }
     lit(&mut ops, "lw_lit_target", "target");
     lit(&mut ops, "lw_lit_srcElement", "srcElement");
     lit(&mut ops, "lw_lit_currentTarget", "currentTarget");
@@ -2570,6 +3497,16 @@ fn lw_lits_node() -> Vec<Op> {
     lit(&mut ops, "lw_lit_bubbles", "bubbles");
     lit(&mut ops, "lw_lit_isTrusted", "isTrusted");
     lit(&mut ops, "lw_lit_preventDefault", "preventDefault");
+    lit(&mut ops, "lw_lit_stopPropagation", "stopPropagation");
+    lit(&mut ops, "lw_lit_eventPhase", "eventPhase");
+    // UTF-8 event `type`/`key`/`code` values (`LwEvGetStr`). `lw_lit_key` is
+    // the property name; `lw_lit_key_a` is KeyboardEvent.key for KEY_A.
+    lit(&mut ops, "lw_lit_key", "key");
+    lit(&mut ops, "lw_lit_Enter", "Enter");
+    lit(&mut ops, "lw_lit_KeyA", "KeyA");
+    lit(&mut ops, "lw_lit_key_a", "a");
+    lit(&mut ops, "lw_lit_Unidentified", "Unidentified");
+    lit(&mut ops, "lw_lit_relatedTarget", "relatedTarget");
     ops.push(Op::Label("lw_lits_end".into()));
     ops
 }
@@ -2615,6 +3552,228 @@ fn domt_demo_node() -> Vec<Op> {
     ops
 }
 
+/// `DomtFire(a0=node)` — invoke matching listeners. `LSN_DEMO` on `N_LISTEN`
+/// still runs `DomtDemo`. Wasm callbacks live in the `__dom` listener table
+/// and are filtered by `EVO_PHASE`: capturing needs `LSNF_CAPTURE`, bubbling
+/// needs it clear, at-target fires capture records then bubble records.
+fn domt_fire_node() -> Vec<Op> {
+    let mut ops = vec![
+        Op::Comment("DomtFire(a0=node) — demo + table scan by phase/capture".into()),
+        Op::Glob("DomtFire".into()),
+        Op::Label("DomtFire".into()),
+        addi(SP, SP, -80),
+        sd(RA, SP, 72),
+        sd(S0, SP, 64),
+        sd(S1, SP, 56),
+        sd(S2, SP, 48),
+        sd(S3, SP, 40),
+        sd(S4, SP, 32),
+        sd(S5, SP, 24),
+        mv(S0, A0),
+        slli(T6, S0, 6),
+        la(T3, Addr::DomT),
+        add(T6, T6, T3),
+        addi(T6, T6, DOMT_HDR as i32),
+        lw(T3, T6, N_LEV),
+        la(T0, Addr::EvObj),
+        lw(T1, T0, EVO_TYPE),
+        and_(T3, T3, T1),
+        beq(T3, X0, "dtf_out"),
+        lw(T3, T6, N_LISTEN),
+        li(T1, LSN_DEMO),
+        bne(T3, T1, "dtf_tab"),
+        mv(A0, S0),
+        lw(A1, T0, EVO_CODE),
+        jal("DomtDemo"),
+        Op::Label("dtf_tab".into()),
+        la(T0, Addr::EvObj),
+        lw(T1, T0, EVO_PHASE),
+        li(S2, LSNF_CAPTURE),
+        li(T0, EV_CAPTURING),
+        beq(T1, T0, "dtf_scan"),
+        li(S2, 0),
+        li(T0, EV_BUBBLING),
+        beq(T1, T0, "dtf_scan"),
+        // at-target: capture records then bubble records
+        li(S2, LSNF_CAPTURE),
+        Op::Label("dtf_scan".into()),
+        la(S3, Addr::DomT),
+        li(T1, DOMT_LSN_OFF),
+        add(S3, S3, T1),
+        lw(S4, S3, 0), // n (S-reg: JitCall clobbers t)
+        li(S1, 0),
+        Op::Label("dtf_loop".into()),
+        bgeu(S1, S4, "dtf_scandone"),
+        slli(T2, S1, 4),
+        add(T2, S3, T2),
+        addi(T2, T2, LSN_HDR as i32),
+        lw(T0, T2, LSN_NODE),
+        bne(T0, S0, "dtf_next"),
+        la(T0, Addr::EvObj),
+        lw(T1, T0, EVO_TYPE),
+        lw(T0, T2, LSN_MASK),
+        and_(T0, T0, T1),
+        beq(T0, X0, "dtf_next"),
+        lw(T0, T2, LSN_FLG),
+        Op::Andi {
+            rd: T0,
+            rs: T0,
+            imm: LSNF_CAPTURE as i32,
+        },
+        bne(T0, S2, "dtf_next"),
+        lw(T3, T2, LSN_CB),
+        li(T1, LSN_FUNC),
+        bltu(T3, T1, "dtf_next"),
+        mv(S5, T2), // rec survives JitCall
+        addi(T1, S0, 1),
+        la(T0, Addr::EvObj),
+        sw(T1, T0, EVO_CUR),
+        lw(T1, S5, LSN_FLG),
+        Op::Andi {
+            rd: T1,
+            rs: T1,
+            imm: LSNF_PASSIVE as i32,
+        },
+        beq(T1, X0, "dtf_npas"),
+        li(T1, 1),
+        Op::Label("dtf_npas".into()),
+        sw(T1, T0, EVO_PASSIVE),
+        addi(A0, T3, -(LSN_FUNC as i32)),
+        li(A1, 1),
+        mv(A2, T0),
+        jal("JitCall"),
+        la(T0, Addr::EvObj),
+        sw(X0, T0, EVO_PASSIVE),
+        lw(T0, S5, LSN_FLG),
+        Op::Andi {
+            rd: T0,
+            rs: T0,
+            imm: LSNF_ONCE as i32,
+        },
+        beq(T0, X0, "dtf_dirty"),
+        li(T0, NONE),
+        sw(T0, S5, LSN_NODE),
+        Op::Label("dtf_dirty".into()),
+        la(T6, Addr::DomT),
+        lw(T1, T6, H_DIRTY),
+        addi(T1, T1, 1),
+        sw(T1, T6, H_DIRTY),
+        Op::Label("dtf_next".into()),
+        addi(S1, S1, 1),
+        j("dtf_loop"),
+        Op::Label("dtf_scandone".into()),
+        la(T0, Addr::EvObj),
+        lw(T1, T0, EVO_PHASE),
+        li(T0, EV_AT_TARGET),
+        bne(T1, T0, "dtf_out"),
+        bne(S2, X0, "dtf_at2"),
+        j("dtf_out"),
+        Op::Label("dtf_at2".into()),
+        li(S2, 0),
+        j("dtf_scan"),
+        Op::Label("dtf_out".into()),
+        ld(RA, SP, 72),
+        ld(S0, SP, 64),
+        ld(S1, SP, 56),
+        ld(S2, SP, 48),
+        ld(S3, SP, 40),
+        ld(S4, SP, 32),
+        ld(S5, SP, 24),
+        addi(SP, SP, 80),
+        ret(),
+    ];
+    ops.shrink_to_fit();
+    ops
+}
+
+/// `DomtDispatch(a0=target_idx)` — capture → at-target → bubble over the
+/// parent chain. `DomtFire` filters each node's table records by phase.
+/// `EVO_STOP` skips remaining nodes. Path is bounded by `DOMT_DEPTH`.
+fn domt_dispatch_node() -> Vec<Op> {
+    let mut ops = vec![
+        Op::Comment("DomtDispatch(a0=target) — capture / at-target / bubble".into()),
+        Op::Glob("DomtDispatch".into()),
+        Op::Label("DomtDispatch".into()),
+        addi(SP, SP, -240),
+        sd(RA, SP, 232),
+        sd(S0, SP, 224),
+        sd(S1, SP, 216),
+        sd(S2, SP, 208),
+        sd(S3, SP, 200),
+        sd(S4, SP, 192),
+        mv(S0, A0), // target
+        mv(S3, SP), // path base
+        li(S1, 0),  // count
+        mv(T2, S0),
+        Op::Label("dtd_path".into()),
+        li(T1, DOMT_DEPTH),
+        bgeu(S1, T1, "dtd_path_done"),
+        slli(T0, S1, 3),
+        add(T0, S3, T0),
+        sd(T2, T0, 0),
+        addi(S1, S1, 1),
+        slli(T6, T2, 6),
+        la(T3, Addr::DomT),
+        add(T6, T6, T3),
+        addi(T6, T6, DOMT_HDR as i32),
+        lw(T2, T6, N_PARENT),
+        li(T1, NONE),
+        beq(T2, T1, "dtd_path_done"),
+        j("dtd_path"),
+        Op::Label("dtd_path_done".into()),
+        // Capture: i = count-1 .. 1 (exclude target at 0)
+        addi(S2, S1, -1),
+        Op::Label("dtd_cap".into()),
+        beq(S2, X0, "dtd_at"),
+        la(T0, Addr::EvObj),
+        lw(T1, T0, EVO_STOP),
+        bne(T1, X0, "dtd_done"),
+        li(T1, EV_CAPTURING),
+        sw(T1, T0, EVO_PHASE),
+        slli(T0, S2, 3),
+        add(T0, S3, T0),
+        ld(A0, T0, 0),
+        jal("DomtFire"),
+        addi(S2, S2, -1),
+        j("dtd_cap"),
+        // At-target: fire regardless of F_CAPTURE
+        Op::Label("dtd_at".into()),
+        la(T0, Addr::EvObj),
+        lw(T1, T0, EVO_STOP),
+        bne(T1, X0, "dtd_done"),
+        li(T1, EV_AT_TARGET),
+        sw(T1, T0, EVO_PHASE),
+        mv(A0, S0),
+        jal("DomtFire"),
+        // Bubble: i = 1 .. count-1
+        li(S2, 1),
+        Op::Label("dtd_bub".into()),
+        bgeu(S2, S1, "dtd_done"),
+        la(T0, Addr::EvObj),
+        lw(T1, T0, EVO_STOP),
+        bne(T1, X0, "dtd_done"),
+        li(T1, EV_BUBBLING),
+        sw(T1, T0, EVO_PHASE),
+        slli(T0, S2, 3),
+        add(T0, S3, T0),
+        ld(A0, T0, 0),
+        jal("DomtFire"),
+        addi(S2, S2, 1),
+        j("dtd_bub"),
+        Op::Label("dtd_done".into()),
+        ld(RA, SP, 232),
+        ld(S0, SP, 224),
+        ld(S1, SP, 216),
+        ld(S2, SP, 208),
+        ld(S3, SP, 200),
+        ld(S4, SP, 192),
+        addi(SP, SP, 240),
+        ret(),
+    ];
+    ops.shrink_to_fit();
+    ops
+}
+
 /// `DomtKey` — the tree-DOM key consumer. Drains new `INP_KQ` entries off its
 /// own `DOMT_SEEN` watermark and, for each key *press*, focus-dispatches to
 /// the node `H_FOCUS` points at: the node needs `N_LEV & EV_KEYDOWN` and a
@@ -2626,11 +3785,12 @@ fn domt_key_node() -> Vec<Op> {
         Op::Comment("DomtKey — INP_KQ → focused-node keydown listener → dirty".into()),
         Op::Glob("DomtKey".into()),
         Op::Label("DomtKey".into()),
-        addi(SP, SP, -32),
-        sd(RA, SP, 24),
-        sd(S0, SP, 16),
-        sd(S1, SP, 8),
-        sd(S2, SP, 0),
+        addi(SP, SP, -48),
+        sd(RA, SP, 40),
+        sd(S0, SP, 32),
+        sd(S1, SP, 24),
+        sd(S2, SP, 16),
+        sd(S3, SP, 8),
         // s2 = __vio base (survives the DomtDemo call — it keeps to a/t regs).
         la(S2, Addr::VioBss),
         lw(S0, S2, crate::vio::INP_KQ_HEAD),
@@ -2642,7 +3802,7 @@ fn domt_key_node() -> Vec<Op> {
         bne(T1, X0, "dtk_done"),
         lw(T1, T6, P_RESUME),
         bne(T1, X0, "dtk_done"),
-        // t3 = KQ[s1 & 15] = (code<<8)|value
+        // t3 = KQ[s1 & 15] = (mods<<24)|(code<<8)|value
         Op::Andi {
             rd: T3,
             rs: S1,
@@ -2657,9 +3817,29 @@ fn domt_key_node() -> Vec<Op> {
             rs: T3,
             imm: 0xff,
         },
-        srli(T0, T3, 8), // t0 = code, t4 = value
+        srli(T0, T3, 8),
+        li(T1, 0xffff),
+        and_(T0, T0, T1),
+        srli(T1, T3, 24),
+        la(T5, Addr::EvObj),
+        sw(T1, T5, EVO_MODS),
         // press/repeat only — releases (value 0) don't dispatch.
         beq(T4, X0, "dtk_skip"),
+        // Focused password/text fields own Left/Right/Home/End (caret).
+        la(T6, Addr::DomT),
+        lw(T1, T6, H_FOCUS),
+        li(T2, NONE),
+        beq(T1, T2, "dtk_menu"),
+        slli(T1, T1, 6),
+        add(T1, T1, T6),
+        addi(T1, T1, DOMT_HDR as i32),
+        lw(T1, T1, N_FLAGS),
+        Op::Andi {
+            rd: T1,
+            rs: T1,
+            imm: (F_PASSWORD | F_EDITABLE) as i32,
+        },
+        bne(T1, X0, "dtk_lsn"),
         // Menu nav keys → `__web_dl` state switch. The shipped cell wires its
         // nav tabs with `listener=0` (the BIOS protocol — the host, not a wasm
         // callback, runs fetch/select), so the guest honours the arrows/Home/
@@ -2667,6 +3847,7 @@ fn domt_key_node() -> Vec<Op> {
         // `n_state` and bump `H_DIRTY`; the `trap_timer` tick then repaints the
         // new `DlPaint` state. A missing `__web_dl` falls through to the
         // focused-node listener lane (`dtk_lsn`).
+        Op::Label("dtk_menu".into()),
         la(T6, Addr::WebDl),
         lw(T3, T6, 0),
         li(T1, i64::from(crate::dlp::WEB_DL_MAGIC)),
@@ -2719,68 +3900,314 @@ fn domt_key_node() -> Vec<Op> {
         sw(T1, T6, H_DIRTY),
         j("dtk_skip"),
         Op::Label("dtk_lsn".into()),
-        // focus node idx -> t2
+        // focus node idx -> t2; dispatch walks ancestors even if the focus
+        // node itself has no listener (parent capture/bubble).
         la(T6, Addr::DomT),
-        lw(T2, T6, crate::domt::H_FOCUS),
+        lw(S3, T6, crate::domt::H_FOCUS),
         li(T1, NONE),
-        beq(T2, T1, "dtk_skip"),
-        // focus rec -> t6
-        slli(T6, T2, 6),
-        la(T3, Addr::DomT),
-        add(T6, T6, T3),
-        addi(T6, T6, DOMT_HDR as i32),
-        // needs N_LEV & EV_KEYDOWN and a nonzero N_LISTEN
-        lw(T3, T6, N_LEV),
-        Op::Andi {
-            rd: T3,
-            rs: T3,
-            imm: EV_KEYDOWN as i32,
-        },
-        beq(T3, X0, "dtk_skip"),
-        lw(T3, T6, N_LISTEN),
-        li(T1, LSN_DEMO),
-        beq(T3, T1, "dtk_demo"),
-        li(T1, LSN_FUNC),
-        bltu(T3, T1, "dtk_skip"), // 0 (BIOS) / reserved-low → no wasm re-entry
-        // N_LISTEN >= LSN_FUNC → a wasm `add_event_listener` funcidx (the
-        // `Listener::Wasm` lane). Fill `__ev_obj` with the key event, then
-        // `JitCall(funcidx)` re-enters the cell *between* JitRuns — the same
-        // re-entry the asyncify rewind uses, so it can't run mid-frame.
+        beq(S3, T1, "dtk_skip"),
         la(T5, Addr::EvObj),
         li(T1, EV_KEYDOWN),
         sw(T1, T5, EVO_TYPE),
         sw(T0, T5, EVO_CODE),
         sw(T4, T5, EVO_VALUE),
-        addi(T1, T2, 1), // target = node handle (index+1), not the raw index
+        addi(T1, S3, 1),
         sw(T1, T5, EVO_TARGET),
+        sw(T1, T5, EVO_CUR),
         sw(X0, T5, EVO_CX),
         sw(X0, T5, EVO_CY),
-        sw(X0, T5, EVO_PD),               // fresh event — not yet prevented
-        addi(A0, T3, -(LSN_FUNC as i32)), // funcidx = N_LISTEN - LSN_FUNC
-        li(A1, 1),                        // nargs=1 — Listener::Wasm calls fn(ev)
-        mv(A2, T5),                       // event handle = __ev_obj
-        jal("JitCall"),
-        // A listener mutation repaints: bump H_DIRTY so the tick re-runs the DOM.
-        la(T6, Addr::DomT),
-        lw(T1, T6, H_DIRTY),
+        sw(X0, T5, EVO_PD),
+        sw(X0, T5, EVO_STOP),
+        sw(X0, T5, EVO_PASSIVE),
+        sw(X0, T5, EVO_PHASE),
+        sw(X0, T5, EVO_BTN),
+        sw(X0, T5, EVO_BTNS),
+        Op::Csrrs {
+            rd: T1,
+            csr: CSR_TIME,
+            rs: X0,
+        },
+        sw(T1, T5, EVO_TIME),
+        sw(X0, T5, EVO_DMODE),
+        mv(A0, S3),
+        jal("DomtDispatch"),
+        // Default action: printable US keymap / backspace / caret / selection
+        // into a focused password or type=text field, unless preventDefault.
+        // Not IME.
+        la(T5, Addr::EvObj),
+        lw(T0, T5, EVO_PD),
+        bne(T0, X0, "dtk_skip"),
+        slli(T6, S3, 6),
+        la(T5, Addr::DomT),
+        add(T6, T6, T5),
+        addi(T6, T6, DOMT_HDR as i32),
+        lw(T0, T6, N_FLAGS),
+        Op::Andi {
+            rd: T0,
+            rs: T0,
+            imm: (F_PASSWORD | F_EDITABLE) as i32,
+        },
+        beq(T0, X0, "dtk_skip"),
+        la(T5, Addr::EvObj),
+        lw(T0, T5, EVO_CODE),
+        li(T1, crate::vio::VIO_KEY_LEFT),
+        beq(T0, T1, "dtk_cleft"),
+        li(T1, crate::vio::VIO_KEY_RIGHT),
+        beq(T0, T1, "dtk_cright"),
+        li(T1, crate::vio::VIO_KEY_HOME),
+        beq(T0, T1, "dtk_chome"),
+        li(T1, crate::vio::VIO_KEY_END),
+        beq(T0, T1, "dtk_cend"),
+        li(T1, 128),
+        bgeu(T0, T1, "dtk_skip"),
+        la(T1, Addr::Label("dtk_keymap".into())),
+        add(T1, T1, T0),
+        lbu(T1, T1, 0),
+        beq(T1, X0, "dtk_skip"),
+        li(T0, 8),
+        beq(T1, T0, "dtk_bs"),
+        la(T5, Addr::EvObj),
+        lw(T0, T5, EVO_MODS),
+        Op::Andi {
+            rd: T0,
+            rs: T0,
+            imm: crate::vio::MOD_SHIFT as i32,
+        },
+        beq(T0, X0, "dtk_case"),
+        li(T0, i64::from(b'a')),
+        bltu(T1, T0, "dtk_case"),
+        li(T0, i64::from(b'z') + 1),
+        bgeu(T1, T0, "dtk_case"),
+        addi(T1, T1, -32),
+        Op::Label("dtk_case".into()),
+        sw(T1, SP, 0),
+        mv(S4, RA),
+        jal("dtk_delsel"),
+        mv(RA, S4),
+        lw(T3, T6, N_TLEN),
+        li(T1, DOMT_TEXT),
+        bgeu(T3, T1, "dtk_skip"),
+        la(T5, Addr::DomT),
+        lw(T2, T5, H_CARET),
+        bgeu(T2, T3, "dtk_iclamp"),
+        j("dtk_ins"),
+        Op::Label("dtk_iclamp".into()),
+        mv(T2, T3),
+        Op::Label("dtk_ins".into()),
+        lw(T4, T5, H_STR),
+        la(T1, Addr::DomS),
+        add(T5, T1, T4),
+        lw(T0, T6, N_TPTR),
+        add(T0, T1, T0),
+        li(T1, 0),
+        Op::Label("dtk_ipre".into()),
+        bgeu(T1, T2, "dtk_imid"),
+        add(A3, T0, T1),
+        lbu(A3, A3, 0),
+        add(A4, T5, T1),
+        sb(A3, A4, 0),
         addi(T1, T1, 1),
-        sw(T1, T6, H_DIRTY),
+        j("dtk_ipre"),
+        Op::Label("dtk_imid".into()),
+        lw(A3, SP, 0),
+        add(A4, T5, T2),
+        sb(A3, A4, 0),
+        Op::Label("dtk_isuf".into()),
+        bgeu(T1, T3, "dtk_idone"),
+        add(A3, T0, T1),
+        lbu(A3, A3, 0),
+        add(A4, T5, T1),
+        addi(A4, A4, 1),
+        sb(A3, A4, 0),
+        addi(T1, T1, 1),
+        j("dtk_isuf"),
+        Op::Label("dtk_idone".into()),
+        addi(T3, T3, 1),
+        addi(T2, T2, 1),
+        sw(T4, T6, N_TPTR),
+        sw(T3, T6, N_TLEN),
+        la(T5, Addr::DomT),
+        sw(T2, T5, H_CARET),
+        sw(T2, T5, H_SEL),
+        lw(T0, T6, N_FLAGS),
+        li(T1, F_TEXT | F_DIRTY),
+        or_(T0, T0, T1),
+        sw(T0, T6, N_FLAGS),
+        add(T4, T4, T3),
+        sw(T4, T5, H_STR),
+        lw(T0, T5, H_DIRTY),
+        addi(T0, T0, 1),
+        sw(T0, T5, H_DIRTY),
         j("dtk_skip"),
-        Op::Label("dtk_demo".into()),
-        // DomtDemo(node, code)
-        mv(A0, T2),
-        mv(A1, T0),
-        jal("DomtDemo"),
+        Op::Label("dtk_cleft".into()),
+        la(T5, Addr::DomT),
+        lw(T0, T5, H_CARET),
+        beq(T0, X0, "dtk_ccollapse"),
+        addi(T0, T0, -1),
+        sw(T0, T5, H_CARET),
+        j("dtk_ccollapse"),
+        Op::Label("dtk_cright".into()),
+        la(T5, Addr::DomT),
+        lw(T0, T5, H_CARET),
+        lw(T1, T6, N_TLEN),
+        bgeu(T0, T1, "dtk_ccollapse"),
+        addi(T0, T0, 1),
+        sw(T0, T5, H_CARET),
+        j("dtk_ccollapse"),
+        Op::Label("dtk_chome".into()),
+        la(T5, Addr::DomT),
+        sw(X0, T5, H_CARET),
+        j("dtk_ccollapse"),
+        Op::Label("dtk_cend".into()),
+        la(T5, Addr::DomT),
+        lw(T0, T6, N_TLEN),
+        sw(T0, T5, H_CARET),
+        Op::Label("dtk_ccollapse".into()),
+        la(T5, Addr::EvObj),
+        lw(T0, T5, EVO_MODS),
+        Op::Andi {
+            rd: T0,
+            rs: T0,
+            imm: crate::vio::MOD_SHIFT as i32,
+        },
+        bne(T0, X0, "dtk_skip"),
+        la(T5, Addr::DomT),
+        lw(T0, T5, H_CARET),
+        sw(T0, T5, H_SEL),
+        j("dtk_skip"),
+        Op::Label("dtk_bs".into()),
+        mv(S4, RA),
+        jal("dtk_delsel"),
+        mv(RA, S4),
+        lw(T0, SP, 4),
+        bne(T0, X0, "dtk_skip"),
+        la(T5, Addr::DomT),
+        lw(T2, T5, H_CARET),
+        beq(T2, X0, "dtk_skip"),
+        lw(T3, T6, N_TLEN),
+        beq(T3, X0, "dtk_skip"),
+        addi(T2, T2, -1),
+        addi(T1, T2, 1),
+        beq(T1, T3, "dtk_bs_end"),
+        lw(T4, T5, H_STR),
+        la(T1, Addr::DomS),
+        add(T5, T1, T4),
+        lw(T0, T6, N_TPTR),
+        add(T0, T1, T0),
+        li(T1, 0),
+        Op::Label("dtk_bpre".into()),
+        bgeu(T1, T2, "dtk_bsuf"),
+        add(A3, T0, T1),
+        lbu(A3, A3, 0),
+        add(A4, T5, T1),
+        sb(A3, A4, 0),
+        addi(T1, T1, 1),
+        j("dtk_bpre"),
+        Op::Label("dtk_bsuf".into()),
+        addi(T1, T1, 1),
+        Op::Label("dtk_bsuf_l".into()),
+        bgeu(T1, T3, "dtk_bs_done"),
+        add(A3, T0, T1),
+        lbu(A3, A3, 0),
+        add(A4, T5, T1),
+        addi(A4, A4, -1),
+        sb(A3, A4, 0),
+        addi(T1, T1, 1),
+        j("dtk_bsuf_l"),
+        Op::Label("dtk_bs_done".into()),
+        addi(T3, T3, -1),
+        sw(T4, T6, N_TPTR),
+        sw(T3, T6, N_TLEN),
+        la(T5, Addr::DomT),
+        sw(T2, T5, H_CARET),
+        sw(T2, T5, H_SEL),
+        add(T4, T4, T3),
+        sw(T4, T5, H_STR),
+        j("dtk_bs_dirty"),
+        Op::Label("dtk_bs_end".into()),
+        addi(T3, T3, -1),
+        sw(T3, T6, N_TLEN),
+        sw(T2, T5, H_CARET),
+        sw(T2, T5, H_SEL),
+        Op::Label("dtk_bs_dirty".into()),
+        lw(T0, T6, N_FLAGS),
+        li(T1, F_TEXT | F_DIRTY),
+        or_(T0, T0, T1),
+        sw(T0, T6, N_FLAGS),
+        la(T5, Addr::DomT),
+        lw(T0, T5, H_DIRTY),
+        addi(T0, T0, 1),
+        sw(T0, T5, H_DIRTY),
         Op::Label("dtk_skip".into()),
         addi(S1, S1, 1),
         j("dtk_next"),
         Op::Label("dtk_done".into()),
         sw(S1, S2, crate::vio::DOMT_SEEN_OFF),
-        ld(RA, SP, 24),
-        ld(S0, SP, 16),
-        ld(S1, SP, 8),
-        ld(S2, SP, 0),
-        addi(SP, SP, 32),
+        ld(RA, SP, 40),
+        ld(S0, SP, 32),
+        ld(S1, SP, 24),
+        ld(S2, SP, 16),
+        ld(S3, SP, 8),
+        addi(SP, SP, 48),
+        ret(),
+        Op::Label("dtk_delsel".into()),
+        sw(X0, SP, 4),
+        la(T5, Addr::DomT),
+        lw(T2, T5, H_CARET),
+        lw(T1, T5, H_SEL),
+        beq(T1, T2, "dtk_delsel_out"),
+        li(T0, 1),
+        sw(T0, SP, 4),
+        bltu(T1, T2, "dtk_delsel_ord"),
+        mv(T0, T1),
+        mv(T1, T2),
+        mv(T2, T0),
+        Op::Label("dtk_delsel_ord".into()),
+        lw(T3, T6, N_TLEN),
+        lw(T4, T5, H_STR),
+        la(T0, Addr::DomS),
+        add(T5, T0, T4),
+        lw(A2, T6, N_TPTR),
+        add(A2, T0, A2),
+        li(T0, 0),
+        Op::Label("dtk_dpre".into()),
+        bgeu(T0, T1, "dtk_dsuf"),
+        add(A3, A2, T0),
+        lbu(A3, A3, 0),
+        add(A4, T5, T0),
+        sb(A3, A4, 0),
+        addi(T0, T0, 1),
+        j("dtk_dpre"),
+        Op::Label("dtk_dsuf".into()),
+        mv(T0, T2),
+        Op::Label("dtk_dsuf_l".into()),
+        bgeu(T0, T3, "dtk_ddone"),
+        add(A3, A2, T0),
+        lbu(A3, A3, 0),
+        sub(A4, T0, T2),
+        add(A4, A4, T1),
+        add(A4, T5, A4),
+        sb(A3, A4, 0),
+        addi(T0, T0, 1),
+        j("dtk_dsuf_l"),
+        Op::Label("dtk_ddone".into()),
+        sub(T0, T2, T1),
+        sub(T3, T3, T0),
+        sw(T4, T6, N_TPTR),
+        sw(T3, T6, N_TLEN),
+        la(T5, Addr::DomT),
+        sw(T1, T5, H_CARET),
+        sw(T1, T5, H_SEL),
+        add(T4, T4, T3),
+        sw(T4, T5, H_STR),
+        lw(T0, T6, N_FLAGS),
+        li(T2, F_TEXT | F_DIRTY),
+        or_(T0, T0, T2),
+        sw(T0, T6, N_FLAGS),
+        lw(T0, T5, H_DIRTY),
+        addi(T0, T0, 1),
+        sw(T0, T5, H_DIRTY),
+        Op::Label("dtk_delsel_out".into()),
         ret(),
     ];
     ops.shrink_to_fit();
@@ -2788,15 +4215,14 @@ fn domt_key_node() -> Vec<Op> {
 }
 
 /// `DomtHit(a0=px, a1=py, a2=ev_mask) -> a0 = idx | NONE` — bounded hit-test.
-/// Walks the live `__dom` arena and returns the *topmost* node that is
-/// `F_VIS`, contains the display-px point, and latches `N_LEV & ev_mask`.
-/// "Topmost" is the last match in document order — children append after
-/// their parents and paint over them, so the highest index under the point
-/// wins. Zero-size (unlaid) rects can never contain a point. There is no
-/// capture/bubble walk — the single topmost listening node is the target.
+/// Walks the live `__dom` arena and returns the *topmost* `F_VIS` node whose
+/// laid-out rect contains the display-px point. `ev_mask` is accepted for
+/// call-site compatibility but is not a listener filter — the target is the
+/// painted node, and `DomtDispatch` walks ancestors for capture/bubble.
+/// "Topmost" is the last match in document order. Zero-size rects never hit.
 fn domt_hit_node() -> Vec<Op> {
     let mut ops = vec![
-        Op::Comment("DomtHit(px,py,mask) — topmost F_VIS rect node with the event bit".into()),
+        Op::Comment("DomtHit(px,py,mask) — topmost F_VIS rect node (geometric target)".into()),
         Op::Glob("DomtHit".into()),
         Op::Label("DomtHit".into()),
         // t0 = H_NEXT, t5 = first node record, t1 = idx, t2 = best. Scan from
@@ -2817,9 +4243,6 @@ fn domt_hit_node() -> Vec<Op> {
             rs: T4,
             imm: F_VIS as i32,
         },
-        beq(T4, X0, "dph_next"),
-        lw(T4, T3, N_LEV),
-        and_(T4, T4, A2),
         beq(T4, X0, "dph_next"),
         // x <= px < x+w
         lw(T4, T3, N_X),
@@ -2845,27 +4268,69 @@ fn domt_hit_node() -> Vec<Op> {
     ops
 }
 
+/// Fill `__ev_obj` from pointer state. `ty` is an `EV_*` mask. Caller leaves
+/// `code` in T2 and `value` in T3; `tgt` is the node index (S-reg — `JitCall`
+/// clobbers t-regs). `S0`/`S1` are display px.
+fn ptr_fill_ev(ops: &mut Vec<Op>, ty: i64, tgt: u32) {
+    ops.extend([
+        la(T5, Addr::EvObj),
+        li(T1, ty),
+        sw(T1, T5, EVO_TYPE),
+        sw(T2, T5, EVO_CODE),
+        sw(T3, T5, EVO_VALUE),
+        addi(T1, tgt, 1),
+        sw(T1, T5, EVO_TARGET),
+        sw(T1, T5, EVO_CUR),
+        sw(S0, T5, EVO_CX),
+        sw(S1, T5, EVO_CY),
+        sw(X0, T5, EVO_PD),
+        sw(X0, T5, EVO_STOP),
+        sw(X0, T5, EVO_PASSIVE),
+        sw(X0, T5, EVO_PHASE),
+        lw(T1, S2, crate::vio::PTR_BTNS),
+        sw(T1, T5, EVO_BTNS),
+        lw(T1, S2, crate::vio::PTR_MODS),
+        sw(T1, T5, EVO_MODS),
+    ]);
+    if ty == EV_CLICK {
+        ops.extend([
+            lw(T1, S2, crate::vio::PTR_CLICK),
+            addi(T1, T1, -1),
+            sw(T1, T5, EVO_BTN),
+        ]);
+    } else {
+        ops.push(sw(X0, T5, EVO_BTN));
+    }
+    ops.extend([
+        Op::Csrrs {
+            rd: T1,
+            csr: CSR_TIME,
+            rs: X0,
+        },
+        sw(T1, T5, EVO_TIME),
+        li(T1, if ty == EV_WHEEL { DOM_DELTA_LINE } else { 0 }),
+        sw(T1, T5, EVO_DMODE),
+    ]);
+}
+
 /// `DomtPtr` — the tree-DOM pointer consumer. Runs after `TabDrain` in
-/// `trap_tab`: when `PTR_CLICK` is latched it scales the last `PTR_X`/`PTR_Y`
-/// (tablet `0..=VIO_ABS_MAX`) into display px via `DISP_SEL_W`/`DISP_SEL_H`,
-/// `DomtHit`s the topmost `EV_CLICK` node, fills `__ev_obj` with the click
-/// coordinates + node-handle target, and `JitCall`s the node's wasm
-/// `add_event_listener` funcidx — the same between-`JitRun`s re-entry
-/// `DomtKey` uses for keys. Bumps `H_DIRTY` so the tick repaints; no paint
-/// here. Trap-context leaf (saved s0-s2 only).
+/// `trap_tab`: scales `PTR_X`/`PTR_Y` (tablet `0..=VIO_ABS_MAX`) into display
+/// px, `DomtHit`s the geometric target, then dispatches pending MOVE (hover
+/// enter/leave + mousemove), WHEEL (`deltaY` in `EVO_VALUE`), and CLICK.
+/// One packet per trap — `SYN_REPORT` was a no-op in the drain. Trap-context
+/// (saved s0-s4; `JitCall` clobbers t-regs).
 fn domt_ptr_node() -> Vec<Op> {
     let mut ops = vec![
-        Op::Comment(
-            "DomtPtr — PTR_CLICK → scale → DomtHit → __ev_obj(click) → JitCall → dirty".into(),
-        ),
+        Op::Comment("DomtPtr — MOVE/WHEEL/CLICK → scale → DomtHit → hover/move/wheel/click".into()),
         Op::Glob("DomtPtr".into()),
         Op::Label("DomtPtr".into()),
-        addi(SP, SP, -32),
-        sd(RA, SP, 24),
-        sd(S0, SP, 16),
-        sd(S1, SP, 8),
-        sd(S2, SP, 0),
-        // s2 = __vio base. Consume a single pending click per trap.
+        addi(SP, SP, -48),
+        sd(RA, SP, 40),
+        sd(S0, SP, 32),
+        sd(S1, SP, 24),
+        sd(S2, SP, 16),
+        sd(S3, SP, 8),
+        sd(S4, SP, 0),
         la(S2, Addr::VioBss),
         la(T6, Addr::Prom),
         lw(T1, T6, P_ASUSP),
@@ -2873,8 +4338,11 @@ fn domt_ptr_node() -> Vec<Op> {
         lw(T1, T6, P_RESUME),
         bne(T1, X0, "dp_ret"),
         lw(T0, S2, crate::vio::PTR_CLICK),
+        lw(T1, S2, crate::vio::PTR_MOVE),
+        or_(T0, T0, T1),
+        lw(T1, S2, crate::vio::PTR_WHEEL),
+        or_(T0, T0, T1),
         beq(T0, X0, "dp_ret"),
-        sw(X0, S2, crate::vio::PTR_CLICK),
         // px = PTR_X * DISP_SEL_W >> 15 (VIO_ABS_MAX+1 = 0x8000 = 2^15).
         lw(T0, S2, crate::vio::PTR_X),
         lw(T1, S2, crate::vio::DISP_SEL_W),
@@ -2901,53 +4369,93 @@ fn domt_ptr_node() -> Vec<Op> {
             shamt: 15,
         },
         mv(S1, T0),
-        // DomtHit(px, py, EV_CLICK) → a0 = node idx | NONE.
+        // Geometric hit; ev_mask unused. S3 = idx | NONE.
         mv(A0, S0),
         mv(A1, S1),
-        li(A2, EV_CLICK),
+        li(A2, 0),
         jal("DomtHit"),
+        mv(S3, A0),
+        lw(T0, S2, crate::vio::PTR_MOVE),
+        beq(T0, X0, "dp_wheel"),
+        sw(X0, S2, crate::vio::PTR_MOVE),
+        lw(S4, S2, crate::vio::PTR_HOVER),
+        beq(S4, S3, "dp_move"),
         li(T1, NONE),
-        beq(A0, T1, "dp_ret"),
-        mv(T2, A0),
-        // node record → t6; need a wasm funcidx listener (N_LISTEN >= LSN_FUNC).
-        slli(T6, T2, 6),
-        la(T3, Addr::DomT),
-        add(T6, T6, T3),
-        addi(T6, T6, DOMT_HDR as i32),
-        lw(T3, T6, N_LISTEN),
-        li(T1, LSN_FUNC),
-        bltu(T3, T1, "dp_ret"), // 0 (BIOS) / LSN_DEMO / reserved-low → no wasm
-        // Fill `__ev_obj` with the click event, then `JitCall(funcidx)` re-enters
-        // the cell between JitRuns. `code`=BTN_LEFT, `value`=1 (press),
-        // `clientX`/`clientY` = display-px, `target` = node handle (index+1).
-        la(T5, Addr::EvObj),
-        li(T1, EV_CLICK),
-        sw(T1, T5, EVO_TYPE),
-        li(T1, crate::vio::VIO_BTN_LEFT),
-        sw(T1, T5, EVO_CODE),
-        li(T1, 1),
-        sw(T1, T5, EVO_VALUE),
-        addi(T1, T2, 1),
-        sw(T1, T5, EVO_TARGET),
-        sw(S0, T5, EVO_CX),
-        sw(S1, T5, EVO_CY),
-        sw(X0, T5, EVO_PD),               // fresh event — not yet prevented
-        addi(A0, T3, -(LSN_FUNC as i32)), // funcidx = N_LISTEN - LSN_FUNC
-        li(A1, 1),                        // nargs=1 — Listener::Wasm calls fn(ev)
-        mv(A2, T5),
-        jal("JitCall"),
-        la(T6, Addr::DomT),
-        lw(T1, T6, H_DIRTY),
-        addi(T1, T1, 1),
-        sw(T1, T6, H_DIRTY),
-        Op::Label("dp_ret".into()),
-        ld(RA, SP, 24),
-        ld(S0, SP, 16),
-        ld(S1, SP, 8),
-        ld(S2, SP, 0),
-        addi(SP, SP, 32),
-        ret(),
+        beq(S4, T1, "dp_over"),
+        li(T2, 0),
+        li(T3, 0),
     ];
+    ptr_fill_ev(&mut ops, EV_MOUSEOUT, S4);
+    ops.extend([
+        mv(A0, S4),
+        jal("DomtDispatch"),
+        Op::Label("dp_over".into()),
+        li(T1, NONE),
+        beq(S3, T1, "dp_hover_store"),
+        li(T2, 0),
+        li(T3, 0),
+    ]);
+    ptr_fill_ev(&mut ops, EV_MOUSEOVER, S3);
+    ops.extend([
+        mv(A0, S3),
+        jal("DomtDispatch"),
+        Op::Label("dp_hover_store".into()),
+        sw(S3, S2, crate::vio::PTR_HOVER),
+        Op::Label("dp_move".into()),
+        li(T1, NONE),
+        beq(S3, T1, "dp_wheel"),
+        li(T2, 0),
+        li(T3, 0),
+    ]);
+    ptr_fill_ev(&mut ops, EV_MOUSEMOVE, S3);
+    ops.extend([
+        mv(A0, S3),
+        jal("DomtDispatch"),
+        Op::Label("dp_wheel".into()),
+        lw(S4, S2, crate::vio::PTR_WHEEL),
+        beq(S4, X0, "dp_click"),
+        sw(X0, S2, crate::vio::PTR_WHEEL),
+        li(T1, NONE),
+        beq(S3, T1, "dp_click"),
+        li(T2, 0),
+        mv(T3, S4),
+    ]);
+    ptr_fill_ev(&mut ops, EV_WHEEL, S3);
+    ops.extend([
+        mv(A0, S3),
+        jal("DomtDispatch"),
+        Op::Label("dp_click".into()),
+        lw(T0, S2, crate::vio::PTR_CLICK),
+        beq(T0, X0, "dp_ret"),
+        li(T1, NONE),
+        beq(S3, T1, "dp_ret"),
+        li(T2, crate::vio::VIO_BTN_LEFT),
+        li(T1, 1),
+        beq(T0, T1, "dp_btn_code"),
+        li(T2, crate::vio::VIO_BTN_MIDDLE),
+        li(T1, 2),
+        beq(T0, T1, "dp_btn_code"),
+        li(T2, crate::vio::VIO_BTN_RIGHT),
+        Op::Label("dp_btn_code".into()),
+        li(T3, 1),
+    ]);
+    ptr_fill_ev(&mut ops, EV_CLICK, S3);
+    ops.extend([
+        sw(X0, S2, crate::vio::PTR_CLICK),
+        mv(A0, S3),
+        jal("DomtFocus"),
+        mv(A0, S3),
+        jal("DomtDispatch"),
+        Op::Label("dp_ret".into()),
+        ld(RA, SP, 40),
+        ld(S0, SP, 32),
+        ld(S1, SP, 24),
+        ld(S2, SP, 16),
+        ld(S3, SP, 8),
+        ld(S4, SP, 0),
+        addi(SP, SP, 48),
+        ret(),
+    ]);
     ops.shrink_to_fit();
     ops
 }
@@ -3429,6 +4937,15 @@ fn domt_raster_node(spec: &BoardSpec) -> Vec<Op> {
         add(T1, T1, T2),
         add(T1, T1, S7),
         lbu(T1, T1, 0), // ch
+        lw(T0, S6, N_FLAGS),
+        Op::Andi {
+            rd: T0,
+            rs: T0,
+            imm: F_PASSWORD as i32,
+        },
+        beq(T0, X0, "domt_raster_ch"),
+        li(T1, 0x2a), // '*'
+        Op::Label("domt_raster_ch".into()),
         // glyph index: __font is indexed `ch - 0x20` (FONT8X8 folds a-z onto
         // the A-Z bitmaps). Raw `ch*8` landed lowercase/punct out of the
         // 96-glyph table — the garbled cells. Clamp to the box glyph.
@@ -3685,6 +5202,7 @@ fn domt_boot_node(spec: &BoardSpec) -> Vec<Op> {
         mv(A0, S1),
         li(A1, EV_KEYDOWN),
         li(A2, LSN_DEMO),
+        li(A3, 0),
         jal("DomtListen"),
         mv(A0, S1),
         jal("DomtFocus"),
@@ -3735,11 +5253,20 @@ pub fn nodes(spec: &BoardSpec) -> Vec<Node> {
             v.extend(lw_findid_node());
             v.extend(lw_setprop_node());
             v.extend(lw_addlsn_node());
+            v.extend(lw_rmlsn_node());
             v.extend(lw_evget_node());
+            v.extend(lw_evgetstr_node());
+            v.extend(lw_evgetopt_node());
+            v.extend(lw_evgetf_node());
+            v.extend(lw_evgetd_node());
+            v.extend(lw_evgetopts_node());
+            v.extend(lw_evgetoptb_node());
+            v.extend(lw_evgetoptd_node());
             v.extend(lw_evcall_node());
             v.extend(lw_remove_node());
             v.extend(lw_fetch_node());
             v.extend(kernel_get_node());
+            v.extend(prom_ctx_node());
             v.extend(prom_alloc_node());
             v.extend(prom_get_node());
             v.extend(lw_awaitsup_node());
@@ -3759,6 +5286,8 @@ pub fn nodes(spec: &BoardSpec) -> Vec<Node> {
             v.extend(lw_phex_node());
             v.extend(lw_lits_node());
             v.extend(domt_demo_node());
+            v.extend(domt_fire_node());
+            v.extend(domt_dispatch_node());
             v.extend(domt_key_node());
             v.extend(domt_hit_node());
             v.extend(domt_ptr_node());

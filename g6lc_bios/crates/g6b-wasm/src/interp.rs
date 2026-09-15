@@ -807,6 +807,7 @@ pub fn run_with_fuel_mut(
         asyncify_data,
         string_pool_next,
         call_stack: Vec::new(),
+        await_reach: await_reachability(m),
     };
     let results = rt.invoke(idx, &value_args, 0)?;
     // Persist mutable globals and memory so asyncify / multi-step calls see
@@ -876,6 +877,8 @@ struct Runtime<'a, H> {
     string_pool_next: u32,
     /// Function indices of the live UI-JIT call stack (outermost first).
     call_stack: Vec<u32>,
+    /// `true` when that funcidx can reach `await` via direct `call`.
+    await_reach: Vec<bool>,
 }
 
 fn func_label(m: &Module, idx: u32) -> String {
@@ -884,6 +887,46 @@ fn func_label(m: &Module, idx: u32) -> String {
         .find(|e| e.kind == 0 && e.idx == idx)
         .map(|e| e.name.clone())
         .unwrap_or_else(|| format!("f{idx}"))
+}
+
+fn is_await_import(m: &Module, idx: u32) -> bool {
+    m.imports.get(idx as usize).is_some_and(|im| {
+        im.module == "env" && (im.name == "libwasm_await__void" || im.name == "await")
+    })
+}
+
+/// Functions (and await imports) that can reach `libwasm_await__void` via
+/// direct `call`. Used to fail-close `try { call $awaiter }`.
+fn await_reachability(m: &Module) -> Vec<bool> {
+    let n = m.imports.len() + m.bodies.len();
+    let mut reaches = vec![false; n];
+    let mut callers: Vec<Vec<u32>> = vec![Vec::new(); n];
+    let mut stack = Vec::new();
+    for i in 0..m.imports.len() {
+        if is_await_import(m, i as u32) {
+            reaches[i] = true;
+            stack.push(i as u32);
+        }
+    }
+    for (bi, body) in m.bodies.iter().enumerate() {
+        let fidx = (m.imports.len() + bi) as u32;
+        for ins in body {
+            if let Instr::Call(c) = ins {
+                if (*c as usize) < n {
+                    callers[*c as usize].push(fidx);
+                }
+            }
+        }
+    }
+    while let Some(fidx) = stack.pop() {
+        for &c in &callers[fidx as usize] {
+            if !reaches[c as usize] {
+                reaches[c as usize] = true;
+                stack.push(c);
+            }
+        }
+    }
+    reaches
 }
 
 fn throw_stack_suffix(frames: &[String]) -> String {
@@ -944,6 +987,12 @@ impl Clone for Frame {
             table_catches: self.table_catches.clone(),
         }
     }
+}
+
+fn in_eh_try(controls: &[Frame]) -> bool {
+    controls
+        .iter()
+        .any(|f| f.is_try || !f.table_catches.is_empty())
 }
 
 struct Exception {
@@ -1022,6 +1071,7 @@ impl<H: Host> Runtime<'_, H> {
             if !controls[i].table_catches.is_empty() {
                 let mut dest = None;
                 let mut with_payload = true;
+                let mut with_ref = false;
                 for c in &controls[i].table_catches {
                     match c {
                         TryTableCatch::Catch { tag: t, label } if *t == tag => {
@@ -1034,11 +1084,17 @@ impl<H: Host> Runtime<'_, H> {
                             with_payload = false;
                             break;
                         }
-                        TryTableCatch::CatchRef { tag: t, .. } if *t == tag => {
-                            return Err("try_table catch_ref (exnref) is not executable".into());
+                        TryTableCatch::CatchAllRef { label } => {
+                            dest = Some(*label);
+                            with_payload = false;
+                            with_ref = true;
+                            break;
                         }
-                        TryTableCatch::CatchAllRef { .. } => {
-                            return Err("try_table catch_all_ref (exnref) is not executable".into());
+                        TryTableCatch::CatchRef { tag: t, label } if *t == tag => {
+                            dest = Some(*label);
+                            with_payload = true;
+                            with_ref = true;
+                            break;
                         }
                         _ => {}
                     }
@@ -1054,6 +1110,13 @@ impl<H: Host> Runtime<'_, H> {
                     stack.truncate(frame.height);
                     if with_payload {
                         stack.extend(&values);
+                    }
+                    if with_ref {
+                        // Opaque exnref: tag+1 so 0 stays null. An i32 cell so
+                        // a 1-result dest can return the handle. Payload lives
+                        // in `caught` (one live exception; a second throw
+                        // clobbers it).
+                        stack.push(Value::I32(tag.wrapping_add(1) as i32));
                     }
                     controls.truncate(target);
                     *pc = frame.end + 1;
@@ -1076,7 +1139,6 @@ impl<H: Host> Runtime<'_, H> {
                 controls.truncate(i + 1);
                 controls[i].in_catch = true;
                 stack.truncate(frame.height);
-                stack.extend(&values);
                 *pc = start;
                 self.caught = Some(Exception { tag, values });
                 return Ok(());
@@ -1114,6 +1176,10 @@ impl<H: Host> Runtime<'_, H> {
             .unwrap_or_default();
         self.pending_throw = Some(Exception { tag: 0, values });
         Err(err.to_string())
+    }
+
+    fn can_reach_await(&self, idx: u32) -> bool {
+        is_await_import(self.m, idx) || self.await_reach.get(idx as usize).copied().unwrap_or(false)
     }
 
     /// Run `callee`; if it throws wasm-eh with no local `catch`, land in this
@@ -1475,6 +1541,11 @@ impl<H: Host> Runtime<'_, H> {
                     stack.push(Value::I32(i32::from(a == 0)));
                 }
                 Instr::Call(callee) => {
+                    if in_eh_try(&controls) && self.can_reach_await(*callee) {
+                        return Err(
+                            "await inside try/try_table (rewind is not a landing pad)".into()
+                        );
+                    }
                     let count = func_type(self.m, *callee)?.params.len();
                     let base = stack
                         .len()
@@ -1648,6 +1719,11 @@ impl<H: Host> Runtime<'_, H> {
                     let got = func_type(self.m, callee)?;
                     if expected != got {
                         return Err("call_indirect type mismatch".into());
+                    }
+                    if in_eh_try(&controls) && self.can_reach_await(callee) {
+                        return Err(
+                            "await inside try/try_table (rewind is not a landing pad)".into()
+                        );
                     }
                     let count = expected.params.len();
                     let base = stack
@@ -1910,17 +1986,30 @@ impl<H: Host> Runtime<'_, H> {
                     }
                     if let (Some(start), Some(i)) = (catch, catch_idx) {
                         let frame = controls[i].clone();
+                        let catch_all = frame.catch_all == Some(start);
                         controls.truncate(i + 1);
                         controls[i].in_catch = true;
                         stack.truncate(frame.height);
-                        stack.extend(&exn.values);
+                        if !catch_all {
+                            stack.extend(&exn.values);
+                        }
                         pc = start;
                         self.caught = Some(exn);
                         continue;
                     }
                     return Err("unhandled rethrow".into());
                 }
-                Instr::Delegate(_) | Instr::ThrowRef => {
+                Instr::ThrowRef => {
+                    let h = pop(&mut stack)?;
+                    if h.into_raw() == 0 {
+                        return Err("null exnref".into());
+                    }
+                    let exn = self.caught.take().ok_or("stale exnref")?;
+                    self.snapshot_throw_stack();
+                    self.throw_exception(exn.tag, exn.values, &mut controls, &mut stack, &mut pc)?;
+                    continue;
+                }
+                Instr::Delegate(_) => {
                     return Err(format!("unsupported wasm execution opcode {ins:?}"));
                 }
                 other => {
@@ -5314,6 +5403,408 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn try_table_catch_all_does_not_keep_throw_payload() {
+        use crate::binary::{Export, Module, TryTableCatch};
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![],
+            func_types: vec![0],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![Export {
+                name: "_start".into(),
+                kind: 0,
+                idx: 0,
+            }],
+            bodies: vec![vec![
+                Instr::I32Const(1),
+                Instr::Block(None),
+                Instr::TryTable {
+                    result: None,
+                    catches: vec![TryTableCatch::CatchAll { label: 0 }],
+                },
+                Instr::I32Const(99),
+                Instr::Throw(0),
+                Instr::End,
+                Instr::Unreachable,
+                Instr::End,
+                Instr::End,
+            ]],
+            memory: vec![],
+            locals: vec![0],
+            has_memory: false,
+            tags: vec![Tag { typeidx: 1 }],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        assert_eq!(
+            run(&m, 0, &[], &mut host).unwrap(),
+            [1],
+            "try_table catch_all must drop leftover throw payload"
+        );
+    }
+
+    #[test]
+    fn catch_all_ref_throw_ref_returns_payload() {
+        use crate::binary::{Export, Module, TryTableCatch};
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![],
+            func_types: vec![0],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![Export {
+                name: "_start".into(),
+                kind: 0,
+                idx: 0,
+            }],
+            bodies: vec![vec![
+                Instr::Block(Some(ValType::I32)),
+                Instr::TryTable {
+                    result: None,
+                    catches: vec![TryTableCatch::Catch { tag: 0, label: 0 }],
+                },
+                Instr::Block(Some(ValType::I32)),
+                Instr::TryTable {
+                    result: None,
+                    catches: vec![TryTableCatch::CatchAllRef { label: 0 }],
+                },
+                Instr::I32Const(7),
+                Instr::Throw(0),
+                Instr::End,
+                Instr::Unreachable,
+                Instr::End,
+                Instr::ThrowRef,
+                Instr::Unreachable,
+                Instr::End,
+                Instr::Unreachable,
+                Instr::End,
+                Instr::End,
+            ]],
+            memory: vec![],
+            locals: vec![0],
+            has_memory: false,
+            tags: vec![Tag { typeidx: 1 }],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        assert_eq!(
+            run(&m, 0, &[], &mut host).unwrap(),
+            [7],
+            "catch_all_ref + throw_ref must keep the thrown payload"
+        );
+    }
+
+    #[test]
+    fn catch_ref_throw_ref_returns_payload() {
+        use crate::binary::{Export, Module, TryTableCatch};
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![],
+            func_types: vec![0],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![Export {
+                name: "_start".into(),
+                kind: 0,
+                idx: 0,
+            }],
+            bodies: vec![vec![
+                Instr::Block(Some(ValType::I32)),
+                Instr::TryTable {
+                    result: None,
+                    catches: vec![TryTableCatch::Catch { tag: 0, label: 0 }],
+                },
+                Instr::Block(Some(ValType::I32)),
+                Instr::TryTable {
+                    result: None,
+                    catches: vec![TryTableCatch::CatchRef { tag: 0, label: 0 }],
+                },
+                Instr::I32Const(7),
+                Instr::Throw(0),
+                Instr::End,
+                Instr::Unreachable,
+                Instr::End,
+                Instr::ThrowRef,
+                Instr::Unreachable,
+                Instr::End,
+                Instr::Unreachable,
+                Instr::End,
+                Instr::End,
+            ]],
+            memory: vec![],
+            locals: vec![0],
+            has_memory: false,
+            tags: vec![Tag { typeidx: 1 }],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        assert_eq!(
+            run(&m, 0, &[], &mut host).unwrap(),
+            [7],
+            "catch_ref + throw_ref must keep the thrown payload"
+        );
+    }
+
+    #[test]
+    fn catch_ref_dest_top_is_exnref_handle() {
+        use crate::binary::{Export, Module, TryTableCatch};
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![],
+            func_types: vec![0],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![Export {
+                name: "_start".into(),
+                kind: 0,
+                idx: 0,
+            }],
+            bodies: vec![vec![
+                Instr::Block(Some(ValType::I32)),
+                Instr::TryTable {
+                    result: None,
+                    catches: vec![TryTableCatch::CatchRef { tag: 0, label: 0 }],
+                },
+                Instr::I32Const(7),
+                Instr::Throw(0),
+                Instr::End,
+                Instr::Unreachable,
+                Instr::End,
+                Instr::End,
+            ]],
+            memory: vec![],
+            locals: vec![0],
+            has_memory: false,
+            tags: vec![Tag { typeidx: 1 }],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        assert_eq!(
+            run(&m, 0, &[], &mut host).unwrap(),
+            [1],
+            "catch_ref dest top should be exnref handle 1, not payload 7"
+        );
+    }
+
+    #[test]
+    fn await_inside_try_is_rejected() {
+        use crate::binary::{Export, Import, Module};
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![Import {
+                module: "env".into(),
+                name: "libwasm_await__void".into(),
+                typeidx: 1,
+            }],
+            func_types: vec![0],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![Export {
+                name: "_start".into(),
+                kind: 0,
+                idx: 1,
+            }],
+            bodies: vec![vec![
+                Instr::Try(Some(ValType::I32)),
+                Instr::I32Const(0),
+                Instr::Call(0),
+                Instr::I32Const(1),
+                Instr::CatchAll,
+                Instr::I32Const(777),
+                Instr::End,
+                Instr::End,
+            ]],
+            memory: vec![],
+            locals: vec![0],
+            has_memory: false,
+            tags: vec![],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        let err = run(&m, 1, &[], &mut host).expect_err("await inside try");
+        assert!(
+            err.contains("await inside try"),
+            "interp must refuse await-in-try: {err}"
+        );
+    }
+
+    #[test]
+    fn await_via_call_from_try_is_rejected() {
+        use crate::binary::{Export, Import, Module};
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+                FuncType {
+                    params: vec![],
+                    results: vec![],
+                },
+            ],
+            imports: vec![Import {
+                module: "env".into(),
+                name: "libwasm_await__void".into(),
+                typeidx: 1,
+            }],
+            func_types: vec![2, 0],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![Export {
+                name: "_start".into(),
+                kind: 0,
+                idx: 2,
+            }],
+            bodies: vec![
+                vec![Instr::I32Const(0), Instr::Call(0), Instr::End],
+                vec![
+                    Instr::Try(Some(ValType::I32)),
+                    Instr::Call(1),
+                    Instr::I32Const(1),
+                    Instr::CatchAll,
+                    Instr::I32Const(777),
+                    Instr::End,
+                    Instr::End,
+                ],
+            ],
+            memory: vec![],
+            locals: vec![0, 0],
+            has_memory: false,
+            tags: vec![],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        let err = run(&m, 2, &[], &mut host).expect_err("callee-await from try");
+        assert!(
+            err.contains("await inside try"),
+            "interp must refuse try calling an awaiter: {err}"
+        );
+    }
+
+    #[test]
+    fn catch_all_does_not_push_throw_payload() {
+        use crate::binary::{Export, Module};
+        let m = Module {
+            types: vec![
+                FuncType {
+                    params: vec![],
+                    results: vec![ValType::I32],
+                },
+                FuncType {
+                    params: vec![ValType::I32],
+                    results: vec![],
+                },
+            ],
+            imports: vec![],
+            func_types: vec![0],
+            mem_pages: 0,
+            max_mem_pages: None,
+            exports: vec![Export {
+                name: "_start".into(),
+                kind: 0,
+                idx: 0,
+            }],
+            bodies: vec![vec![
+                Instr::Try(Some(ValType::I32)),
+                Instr::I32Const(99),
+                Instr::Throw(0),
+                Instr::CatchAll,
+                Instr::I32Eqz,
+                Instr::End,
+            ]],
+            memory: vec![],
+            locals: vec![0],
+            has_memory: false,
+            tags: vec![Tag { typeidx: 1 }],
+            globals: vec![],
+            tables: vec![],
+            elements: vec![],
+            data_count: None,
+            data_segments: vec![],
+        };
+        let mut host = TestHost::default();
+        let err = run(&m, 0, &[], &mut host).unwrap_err();
+        assert!(
+            err.contains("underflow"),
+            "catch_all must not see the thrown i32: {err}"
+        );
+    }
+
+    #[test]
     fn memory_copy_and_fill_operate_on_linear_memory() {
         let copy_ops = [
             0x41, 10, // dest = 10
@@ -5433,6 +5924,7 @@ pub(crate) mod tests {
                     asyncify_data: 0,
                     string_pool_next: m.memory.len() as u32,
                     call_stack: Vec::new(),
+                    await_reach: await_reachability(&m),
                 };
                 assert!(runtime
                     .invoke(0, &[], 0)
@@ -5509,6 +6001,7 @@ pub(crate) mod tests {
             asyncify_data: 0,
             string_pool_next: m.memory.len() as u32,
             call_stack: Vec::new(),
+            await_reach: await_reachability(&m),
         };
         assert_eq!(runtime.invoke(0, &[], 0).unwrap(), [Value::I32(0)]);
         assert_eq!(runtime.memory[0], 42);

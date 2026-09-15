@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "profile": "barebone",
+  "product": "g6lc64-native-services",
+  "isa": {
+    "xlen": 64,
+    "march": "rv64imac",
+    "mmu": "sv39",
+    "extensions": { "c": "live" }
+  },
+  "memory": {
+    "dram_base": "0x80000000",
+    "dram_len": "0x20000000",
+    "text_offset": "0x200000"
+  },
+  "harts": { "count": 1 },
+  "kernel": {
+    "web": { "enable": false },
+    "ui": "cli",
+    "display": "cli",
+    "cli": { "enable": true },
+    "gr": { "enable": false },
+    "proxy": { "enable": false, "gl": false },
+    "wasm": { "enable": false, "jit": false, "guest_jit": false },
+    "hw": { "enable": false, "virtio_net": false, "ethernet": false, "wifi": false },
+    "http": { "enable": false, "serve": false, "outbound": false }
+  },
+  "uncore": { "clint": true, "plic": false },
+  "holyc": { "dual_band": { "uart": false, "tcp": { "enable": false } } },
+  "postboot": { "enable": "never" },
+  "net_expose": { "mode": "never" },
+  "loopback": { "enable": false }
+}

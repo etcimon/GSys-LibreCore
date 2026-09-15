@@ -149,11 +149,12 @@ pub struct Tag {
 pub enum TryTableCatch {
     /// `catch $tag $label` — branch with the tag payload.
     Catch { tag: u32, label: u32 },
-    /// `catch_ref $tag $label` — payload plus exnref (not executed here).
+    /// `catch_ref $tag $label` — tag payload plus an opaque exnref.
     CatchRef { tag: u32, label: u32 },
     /// `catch_all $label`.
     CatchAll { label: u32 },
-    /// `catch_all_ref $label`.
+    /// `catch_all_ref $label` — dest gets an opaque exnref; payload stays
+    /// in the exception object for `throw_ref`.
     CatchAllRef { label: u32 },
 }
 
@@ -669,7 +670,8 @@ pub(crate) fn analyze(m: &Module) -> Result<Vec<BodyInfo>, String> {
         // the ldexec Lodash imports use i64/f64 (LIBWASM-ABI.md §2).
         let ldexec = im.name.starts_with("ldexec_");
         let libwasm = im.name.starts_with("libwasm_");
-        let typed = ldexec || libwasm || im.name == "getTimeStamp";
+        let object = im.name.starts_with("Object_Getter__") || im.name.starts_with("Object_Call_");
+        let typed = ldexec || libwasm || object || im.name == "getTimeStamp";
         if ty.params.len() > if typed { 10 } else { 8 } || ty.results.len() > 1 {
             return Err("host import arity out of bounds".into());
         }

@@ -105,21 +105,42 @@ pub const R_FPCMP: u32 = 37;
 pub const R_FPCVT: u32 = 38;
 /// Cross-function `throw`/`rethrow` — an exception escaping the function. `b` =
 /// the exception tag (`u64::MAX` for `rethrow`, which keeps the in-flight tag
-/// in `OFF_EXCTAG`). The generated code sets `OFF_EXC`, folds the callee frame
-/// back to the caller's pre-`call` vsp (`s10 = s11`), and returns into the
-/// caller's `R_EXCCHK` — which routes to a `catch` or propagates the unwind.
+/// in `OFF_EXCTAG`). `a` = tag payload cell count (`0` for void / rethrow).
+/// The generated code stores up to `MAX_EXCPAY` payload cells to `OFF_EXCPAY`
+/// when `a != 0`, sets `OFF_EXC`, folds the callee frame (`s10 = s11`), and
+/// returns into the caller's `R_EXCCHK` — which routes to a `catch` or
+/// propagates the unwind.
 pub const R_THROW: u32 = 39;
 /// Post-`call`/`call_indirect` exception check — `a` = the enclosing `catch`
 /// handler record (`u32::MAX` = propagate: unwind this frame to its caller).
-/// Emitted after every direct/indirect call so a callee's `R_THROW` has a
-/// landing pad on return.
+/// `b` = expected tag (`u64::MAX` = `catch_all`: do not compare). Bit 32
+/// (`EXCCHK_CHAIN`) means a tagged mismatch falls through to the next
+/// `R_EXCCHK` (multi-clause `try_table`); without it a mismatch propagates.
 pub const R_EXCCHK: u32 = 40;
+/// OR into `R_EXCCHK.b` so a tagged mismatch tries the next check.
+pub const EXCCHK_CHAIN: u64 = 1 << 32;
 /// `catch` handler entry — clears `OFF_EXC` so nested calls in the handler do
-/// not immediately re-fire. All throws (local `R_JMP` and cross-function
-/// `R_EXCCHK`) land here first, then fall through into the catch body.
+/// not immediately re-fire, then restores the operand vsp to the enclosing
+/// `try`'s height. `a` = cell count from `s11` (locals plus operands below
+/// the try); `b` = tag payload slots (`0` for `catch_all`). Generated code
+/// sets `s10 = s11 + a*8`. When `b != 0`, a cross-function catch (`OFF_EXC`
+/// was set) copies `b` cells from `OFF_EXCPAY`; a local `JMP` copies the top
+/// `b` stack cells onto that height. All throws (local `R_JMP` and
+/// cross-function `R_EXCCHK`) land here first, then fall through into the
+/// catch body.
 pub const R_EXCCLR: u32 = 41;
+/// `catch_all_ref` / `throw_ref`. `a == u32::MAX` is `throw_ref`: pop the
+/// exnref handle (0 = null → `TRAP_UNREACH`), store `handle-1` to
+/// `OFF_EXCTAG`, set `OFF_EXC`, and fall through to the following `R_EXCCHK`.
+/// Otherwise MAKE: `a` = payload cells copied from the wasm stack into
+/// `OFF_EXCPAY` (0 if already there); `b` = tag (`u64::MAX` keeps
+/// `OFF_EXCTAG`). Pushes handle = `EXCTAG+1`. Payload stays in `OFF_EXCPAY`
+/// for a later `throw_ref`; a second throw clobbers it.
+pub const R_EXNREF: u32 = 42;
 /// One past the last record op — the guest dispatcher range-checks against it.
-pub const R_OP_COUNT: u32 = 42;
+pub const R_OP_COUNT: u32 = 43;
+/// Bounded tagged-throw payload cells in `OFF_EXCPAY` (deepest first).
+pub const MAX_EXCPAY: u32 = 4;
 
 // I32ALU/I64ALU subops — the guest indexes a literal pool of machine words.
 pub const ALU_ADD: u32 = 0;
@@ -199,6 +220,22 @@ pub const EXT_PROM_ALLS: u32 = 24; // libasync_promise_allSettled(arrH) -> promi
 pub const EXT_ADDINTS: u32 = 25; // libwasm_add__ints(len,ptr) -> i32-array handle
 pub const EXT_NOTEFUL: u32 = 26; // libwasm_note_await_ok(handle)
 pub const EXT_NOTEREJ: u32 = 27; // libwasm_note_await_fail(handle)
+/// `Object_Getter__string` sret: write `{len,ptr}` UTF-8 `type`/`key`/`code`.
+pub const EXT_EVGETSTR: u32 = 28;
+/// `remove_event_listener(cb)` — tombstone matching table records.
+pub const EXT_RMLSN: u32 = 29;
+/// `Object_Getter__Optional{Handle,Uint}` sret: `{value:u32, defined:u8}`.
+pub const EXT_EVGETOPT: u32 = 30;
+/// `Object_Getter__float` — integer `__ev_obj` field as IEEE f32 bits in a0.
+pub const EXT_EVGETF: u32 = 31;
+/// `Object_Getter__double` — integer field as IEEE f64 bits in a0.
+pub const EXT_EVGETD: u32 = 32;
+/// `Object_Getter__OptionalString` sret: `{len:u32, ptr:u32, defined:u8}`.
+pub const EXT_EVGETOPTS: u32 = 33;
+/// `Object_Getter__OptionalBool` sret: `{value:u8, defined:u8}`.
+pub const EXT_EVGETOPTB: u32 = 34;
+/// `Object_Getter__OptionalDouble` sret: `{value:f64, defined:u8}`.
+pub const EXT_EVGETOPTD: u32 = 35;
 
 /// M3 bounds — sized to the shipped `bios-ui-libwasm` cell (252 funcs,
 /// ~69k records, 17 mem pages, ≤845 locals, 62-entry table). These are the

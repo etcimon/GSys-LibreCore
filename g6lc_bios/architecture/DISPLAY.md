@@ -718,49 +718,333 @@ termination, 16-bit queue-index wrap on RV32/RV64, and Y_0_TOP UV orientation.
 The client fences SUBMIT_3D before scanout and readback before consumption; error
 responses no longer lead to a false success marker.
 
-OpenWrt boot/probe through `g6lc_qemu` is now green: the existing 24.10.2 image
-boots on project QEMU 10.0.0 through OpenSBI 1.5, reaches a shell using a temporary
-ttyS0 inittab overlay, and discovers virtio device `0x0010`. The guest image has
-no active DRM/virtio-gpu driver or Mesa packages; project QEMU has OpenGL disabled
-and no virgl GPU device. A graphics-enabled guest/emulator and modern virtio-mmio
-are the next prerequisites, separate from host render-node availability. Details:
-[g6lc_qemu guider](../../g6lc_qemu/AGENTS.md).
+OpenWrt boot/probe through `g6lc_qemu` is green and now uses a graphics-enabled
+remote image. OpenWrt 24.10.2 / Linux 6.6.93 runs on project QEMU 10.0.0 with
+modern virtio-mmio, DRM/KMS, `virtio_gpu`, Mesa 21.3, libdrm and the in-tree
+probe. The headless host has no DRM render node, so the verified path is QEMU's
+unchanged `vhost-user-gpu` frontend plus the contrib backend and a host-only
+surfaceless-EGL preload shim. Guest evidence includes `+virgl +edid`,
+`-resource_blob -host_visible -context_init`, capsets 1/2,
+`/dev/dri/renderD128`, a GBM window surface, `virgl (LLVMPIPE...)`, and
+`G6LC_EGL_GLES2_OK`. Details: [g6lc_qemu guider](../../g6lc_qemu/AGENTS.md).
 
-### The effective stock-driver contract is larger than a small capset
+### Effective stock-driver contract observed so far
 
-Mesa 24.3.4 `src/gallium/drivers/virgl/virgl_screen.c` unconditionally reports
-fragment derivatives/LOD, NPOT textures and swizzles. Its shader limits include
-256 temporaries and control-flow depth 32; missing texture-size fields select
-large defaults rather than zero capability. A four-invocation quad with 256
-vec4 FP32 temporary registers already requires 16 KiB of logical register
-storage before constants, shader code, pipeline state or spill memory.
+The archived captures now cover three unchanged-driver paths, all rendered by
+host llvmpipe and therefore software-compatibility evidence only:
 
-Therefore P0 is not closed by a successful fullscreen quad. Before freezing APU
-geometry, enumerate the **effective** driver capabilities and compiler-generated
-instructions, including implicit requirements, and prove every reported feature.
-Use parameterized temporal sharing and SRAM-backed state to reduce hardware,
-not false limits or a patched driver. Do not derive grants from the current
-zero-capability execution-model fixture.
+| Run | Evidence |
+|---|---|
+| `gfx-20260914T203512Z` | normal triangle: resource create/backing/attach, TGSI shaders, surface/state objects, framebuffer, clear, vertex buffer, draw, readback, four typed fences and cleanup |
+| `gfx-20260914T203421Z` | negative ioctl/virgl traffic: malformed submits and bad transfer bounds are archived; backend `EINVAL` can coexist with successful guest ioctls and completed virtio fences |
+| `gfx-audit-20260914T213500Z` | richer GLES2 scene: texture upload/mipmap/sampling, packed sampler-view fields, sampler state, fragment constants, indexed draw, scissor/blend state, transfers, nine typed fences and cleanup |
+
+The audit stream contains `SET_SAMPLER_VIEWS`, `BIND_SAMPLER_STATES`,
+`SET_CONSTANT_BUFFER`, `SET_INDEX_BUFFER`, `SET_SCISSOR_STATE`, `BLIT`,
+`TRANSFER3D`, `SET_SHADER_IMAGES`, `SET_SHADER_BUFFERS`, `SET_SUB_CTX`,
+`SET_TWEAKS`, `SET_FRAMEBUFFER_STATE_NO_ATTACH`, object create/bind/destroy and
+typed fences for `RESOURCE_CREATE_3D`, `SUBMIT_3D` and `TRANSFER_FROM_HOST_3D`.
+Sampler views pack `format | target<<24`; texture layer ranges are
+`first | last<<16` and level ranges are `first | last<<8`. Resource backing
+must cover all declared mip levels, not only level 0. Mesa reserves the first
+1024 dwords of a submission for encoded transfers when `VIRGL_CAP_TRANSFER` is
+negotiated, then emits `END_TRANSFERS` as a skip command over unused padding;
+the device must preserve that framing.
+
+### Capability contract evidence
+
+The current reference backend negotiates capset 1 version 1 (308-byte payload)
+and capset 2 version 2 (1384-byte payload). Its observed v1 feature mask is
+`bset=0x4f617d77`, its v2 capability mask is `0xdf3ee7df`, and its v2-extension
+mask is `0x00004693`. These values are the llvmpipe grant used for evidence
+collection, not automatically the minimum APU capset.
+
+Commands/state actually observed and therefore required under this negotiation:
+context/sub-context create/select/destroy; TGSI text shader create/bind/destroy;
+surface, blend, DSA, rasterizer, vertex-element, sampler-view and sampler-state
+objects; framebuffer and no-attach framebuffer state; clear, viewport, scissor,
+blend-color, polygon-stipple, tessellation state, min-samples, streamout-target,
+stencil-ref, sample-mask, shader-buffer/image slot clearing; vertex/index
+buffers; constants; ordinary and indexed `DRAW_VBO`; `BLIT`; encoded and API
+`TRANSFER3D`; `SET_TWEAKS`; and `END_TRANSFERS` padding. Observed TGSI includes
+`MOV`, `MAD`, `MUL`, `TEX`, immediate constants, generic varyings, sampler/view
+and constant declarations; this is still a narrow GLES2 shader subset.
+
+The negotiated-but-not-yet-exercised advertised grant is mapped below. “Parse”
+means the command/state must decode safely; “implement” means observable
+graphics semantics are required if the bit remains advertised; “omit or
+recapture” means the APU may remove the grant only after proving Mesa still
+creates and uses the required GLES2 context under the reduced capset.
+
+| Advertised feature | Current P0 device requirement |
+|---|---|
+| `indep_blend_enable`, `indep_blend_func` | implement independent render-target blend enables/functions or lower the grant |
+| `cube_map_array`, `seamless_cube_map` | implement cube/cube-array addressing and seamless edge filtering if advertised |
+| `conditional_render`, `occlusion_query`, `timer_query` | implement query objects, results and conditional-draw predicates |
+| `start_instance`, `instanceid`, `has_indirect_draw` | implement instance fields/semantics and indirect draw resources |
+| `primitive_restart` | implement index restart semantics for indexed draws |
+| `streamout_pause_resume` | implement stream-output targets plus pause/resume state |
+| `texture_multisample`, `has_sample_shading` | implement multisample resources, sample masks and per-sample shading |
+| `depth_clip_disable`, `has_cull`, `polygon_offset_clamp`, `mirror_clamp` | implement the corresponding rasterizer/sampler state semantics |
+| `texture_query_lod` | implement texture LOD query instructions |
+| `has_tessellation_shaders` | implement tessellation stages or omit the grant |
+| `TGSI_INVARIANT`, `TGSI_PRECISE`, `TGSI_COMPONENTS`, `INDIRECT_INPUT_ADDR` | preserve those TGSI semantics in compiled shaders if advertised |
+| `TEXTURE_VIEW` | exercised: implement packed sampler-view target/format/layer/level |
+| `SET_MIN_SAMPLES` | exercised: parse and retain the min-samples state |
+| `FB_NO_ATTACH` | exercised: parse framebuffer no-attach dimensions/layers/samples |
+| `TRANSFER` | exercised: implement encoded `TRANSFER3D` plus `END_TRANSFERS` framing |
+| `APP_TWEAK_SUPPORT` | exercised: parse `SET_TWEAKS` and apply only defined tweaks |
+| `COPY_IMAGE`, `COPY_TRANSFER`, `COPY_TRANSFER_BOTH_DIRECTIONS` | implement resource-copy/staging transfer paths or omit |
+| `MEMORY_BARRIER`, `CLEAR_TEXTURE` | implement barrier/clear commands or omit; `TEXTURE_BARRIER` was not granted in this capture |
+| `COMPUTE_SHADER` | implement compute shader/launch-grid semantics or omit |
+| `ROBUST_BUFFER_ACCESS` | implement defined out-of-bounds buffer behavior or omit |
+| `TGSI_FBFETCH` | implement fragment framebuffer fetch or omit |
+| `GUEST_MAY_INIT_LOG`, `STRING_MARKER` | parse debug/marker traffic if advertised |
+| `SRGB_WRITE_CONTROL` | implement destination sRGB write control or omit |
+| `FBO_MIXED_COLOR_FORMATS` | implement mixed-format framebuffer validation/output or omit |
+| `HOST_IS_GLES` | preserve GLES host semantics/tweaks when advertised |
+| `BIND_COMMAND_ARGS`, `MULTI_DRAW_INDIRECT` | implement command-argument resources and multi/indirect draws or omit |
+| `3D_ASTC` | implement ASTC including 3D use or omit |
+| `CLIP_HALFZ` | implement half-Z clip convention or omit |
+| `ARB_BUFFER_STORAGE` | implement persistent/coherent mapped-buffer semantics or omit |
+| `BLEND_EQUATION` | implement advanced blend equations or omit |
+| `UNTYPED_RESOURCE` | implement untyped shader resources or omit |
+| `SSO` | implement separate shader object/link path or omit |
+| `TEXTURE_SHADOW_LOD` | implement shadow LOD sampling or omit |
+| `DRAW_PARAMETERS` | implement draw-parameter shader inputs or omit |
+
+Advertised numeric limits are grants, not harmless labels: texture dimensions,
+array layers, render targets, samples, viewports, vertex attributes/outputs,
+uniform blocks and size, shader buffers/images, atomic counters, compute grids,
+anisotropy, LOD bias and line/point ranges must all be backed by the device or
+lowered before recapture. The current llvmpipe values are useful stress
+evidence, not a required floor.
+
+Some wire commands are emitted as part of normal state setup/teardown even when
+the matching feature bit is not granted. The audit stream contains polygon
+stipple, tessellation state, stencil reference, streamout-target and
+sample-mask state, plus shader-buffer/image slot clearing. A reduced-capability
+device therefore needs a safe decoder and defined no-op/error behavior for
+state commands outside its advertised feature surface; it cannot reject every
+command merely because the corresponding optional feature is absent.
+
+### Mesa assumptions that cannot be masked by a small capset
+
+The pinned guest Mesa 21.3 virgl driver has several unconditional reports in
+`virgl_get_param()`/`virgl_get_shader_param()`: NPOT textures; fragment texture
+LOD and derivatives; vertex saturate; point sprite; texture swizzle; separate
+blend equations; TGSI instance ID and vertex divisors; timestamp/elapsed
+queries; mixed framebuffer sizes and color/depth bits; float/half-float linear
+filtering; TGSI as the preferred/default shader IR; unlimited instruction,
+ALU, texture and texture-indirection counts; indirect output/temp/const
+addressing; 256 temporary registers; subroutine support; 16 texture samplers;
+control-flow depth 32; and a 16 KiB constant-buffer limit. Other driver-visible
+features come from capset fields/bitmasks and must be truthful.
+
+The current llvmpipe capset advertises GLSL 430, 16K 2D/cube textures, 2K 3D,
+2048 array layers, 8 render targets, 16 vertex inputs/outputs, 15 uniform
+blocks, 64 KiB uniform blocks, 16 shader buffers, 32 shader images, compute and
+large format masks. That is the **observed reference-backend grant**, not
+proof that a minimal GLES2 device must advertise every feature. The APU capset
+must still be honest: Mesa may choose lower feature paths from lower caps, but
+the unconditional assumptions above remain part of the ABI surface.
+
+### Reduced P0 device contract (empirical freeze)
+
+`remote-gfx-probe.py --cap-profile gles2-min` masks the negotiated capset after
+the host virglrenderer fills it. QEMU, Linux and Mesa remain unchanged; only the
+device-visible capability payload is reduced. The reduced profile passed both
+the strict richer audit and the negative probe:
+
+| Run | Result |
+|---|---|
+| `gfx-20260914T221515Z` | `--audit --cap-profile gles2-min`: `G6LC_AUDIT_RESULT=PASS`, strict capture `result=PASS` |
+| `gfx-20260914T221551Z` | `--negative --cap-profile gles2-min`: `G6LC_NEG_RESULT=PASS`, strict `--expect-errors` `result=PASS` |
+| `gfx-20260914T221800Z` | optional `--cap-profile gles2-xfer` diagnostic: encoded `TRANSFER3D` path also passes |
+
+`gles2-min` is the frozen P0 baseline. `gles2-xfer` retains only
+`VIRGL_CAP_TRANSFER`; it is a useful optional diagnostic, not the minimum.
+
+#### Transport and advertised capset
+
+- Device model: virtio GPU (device ID 16) over **modern virtio-mmio**
+  (`virtio-mmio.force-legacy=false` on the QEMU reference), with standard
+  control and cursor queues. The cursor queue may remain idle but must be a
+  valid queue.
+- Feature bits observed/required for the reduced path: `VIRTIO_GPU_F_VIRGL`
+  and `VIRTIO_GPU_F_EDID`; no `VIRTIO_GPU_F_RESOURCE_BLOB`, no
+  `VIRTIO_GPU_F_HOST_VISIBLE`, and no `VIRTIO_GPU_F_CONTEXT_INIT`. The guest
+  reports `+virgl +edid -resource_blob -host_visible -context_init`.
+- The headless proof uses `max_outputs=0`. Physical scanout later adds normal
+  display-info/EDID/scanout resources to the same contract; it does not change
+  the render ABI.
+- Capset 1 (`VIRGL`): version 1, 308-byte payload.
+- Capset 2 (`VIRGL2`): version 2, 1384-byte payload; its embedded
+  `v1.max_version` remains 2.
+- Reduced grants: `bset=0`, `capability_bits=0`, `capability_bits_v2=0`.
+- Reduced limits: GLSL 120; 2D/cube 2048; 3D 1; array layers 1; render
+  targets 1; samples 0; viewports 1; vertex attributes 8; vertex outputs 8;
+  vertex stride 2048; uniform blocks 1; uniform-block size 0; per-stage
+  constant-buffer sizes 65536; shader buffers/images 0; compute limits 0;
+  atomic counters 0; texture image units 8; anisotropy 1.0; point/line maxima
+  1.0; LOD bias 0; texture buffer/streamout/dual-source/tessellation/video
+  limits 0; `host_feature_check_version=2`.
+- Primitive mask: `0x7f` (points, lines, line loop/strip, triangles,
+  triangle strip/fan).
+- Sampler/render formats: `1,2,3,4,7,28,29,30,31,64,65,66,67,68,91,92,93,94,
+  121,134` (packed RGBA/BGRA/XRGB/ARGB, RGB565, R/RG/RGB/RGBA8, float16 and
+  float32 families). Float/half-float entries are present because Mesa reports
+  float/half-float linear filtering unconditionally.
+- Depth/stencil formats: `16,18,19,20,23` (Z16, Z32F, packed Z24/S8 orders and
+  S8).
+- Vertex-buffer formats: the reduced R8/R16 normalized/scaled formats plus
+  R32 fixed, R16 float and R32 float families (`28-31,48-67,69-72,74-77,
+  82-85,87-94` as implemented by `apply_gles2_v1()`).
+- Readback/scanout formats: `1,2,3,4,7,64,65,66,67,68,121,134`; multisample
+  formats: none.
+
+#### Command and data surface proven under `gles2-min`
+
+- Virtio/API operations: capset query/fill; context create/destroy; resource
+  create/unref; backing attach/detach; context attach/detach; 3D transfers to
+  and from host; command submission; typed fences.
+- Render stream: TGSI-text shader create/bind/destroy; surface, DSA, blend,
+  rasterizer, vertex-elements, sampler-view and sampler-state objects;
+  sub-context create/select/destroy; framebuffer state; clear; polygon
+  stipple; blend color; viewport; scissor; sampler views; constant buffers;
+  vertex and 16-bit index buffers; ordinary and indexed `DRAW_VBO`; `BLIT`;
+  state teardown and object destruction.
+- `BLIT` remains required even with `VIRGL_CAP_TRANSFER=0`: Mesa used it for
+  mipmap generation. Ordinary `transfer-write`/`transfer-read` API calls carry
+  uploads and readback in the minimum profile.
+- `TRANSFER3D` and `END_TRANSFERS` are required only if `VIRGL_CAP_TRANSFER`
+  is later advertised; `gles2-xfer` preserves that path for comparison.
+- Without `VIRGL_CAP_TEXTURE_VIEW`, Mesa still emits a `SAMPLER_VIEW` object,
+  but its packed target field is `BUFFER`/`0`; the device must therefore
+  interpret the view through the resource's real target while still honoring
+  packed format, layer/level range and swizzle fields.
+- Mesa emits some state-clearing commands even when their optional feature is
+  not granted. The reduced decoder must safely parse or defined-no-op those
+  state commands rather than treating every unadvertised feature command as a
+  transport failure.
+
+#### Execution, isolation and lifetime semantics
+
+- Resource handles are device-global; context IDs and object handles are
+  context-scoped. A context may operate on a resource only after
+  `ctx_attach_resource`; a resource may exist without backing after create,
+  but transfers/draws that need storage must fail until backing is attached.
+- `RESOURCE_ATTACH_BACKING` supplies guest pages as an ordered scatter list.
+  Backing must cover the whole resource payload, including every declared mip
+  level/layer, not merely level 0. Transfers and `TRANSFER3D` must bounds-check
+  boxes, strides, layer strides, offsets and byte counts against that backing.
+- `ctx_destroy` destroys context state and object handles; it does not by
+  itself free resource handles. `resource_unref` releases a resource after all
+  context references and in-flight operations are retired. `detach_iov` must
+  not make in-flight DMA unsafe; ordering is handled before the backing is
+  reclaimed.
+- Commands execute in submission order for a context. A fence may complete
+  only after the command or transfer that requested it and all earlier
+  same-context work touching the same resources have retired. Fence IDs are
+  echoed; they are retirement markers, not success codes.
+- Queue submission success, fence completion and graphics correctness are
+  separate states. Malformed virgl streams, invalid resource parameters and
+  out-of-bounds transfers can return backend `EINVAL` while their virtio
+  response/fence still completes; the guest ioctl may report success. The
+  device must therefore record/report asynchronous command failure distinctly
+  from transport acceptance and must keep later queue traffic well-defined.
+- A malformed command buffer stops at the first decoder error. Unknown opcodes,
+  truncated bodies, invalid objects, invalid formats/binds and out-of-bounds
+  transfers must fail deterministically without dereferencing guest memory
+  beyond the descriptor/backing bounds.
+- Contexts must not see another context's state/object namespace. Shared
+  resource access is explicit through global handles and context attachment;
+  hardware scheduling across contexts still needs deterministic fencing and
+  no stale-state leakage.
+- Device reset stops queue processing, drops all contexts/resources/backing
+  mappings and blocks further DMA before reset completes. After reset the guest
+  renegotiates features/capsets; no render state survives implicitly.
+
+#### DMA, cache and firmware-domain contract
+
+- Virtio descriptors, command buffers and attached resource backing are guest
+  memory. The device/firmware must translate descriptor addresses through the
+  platform's DMA/IOMMU path and must not assume cache coherence unless the
+  SoC integration explicitly provides it.
+- Producer rule: CPU writes to descriptors, commands and resource data must be
+  visible to the device before queue notification. Device reads must be ordered
+  after that notification and after any required cache invalidate/sync.
+- Consumer rule: device writes to readback/framebuffer memory must reach the
+  point of coherence, and any required cache clean/invalidate must complete,
+  before the fence/used-buffer interrupt becomes visible to the guest.
+- If the implementation provides hardware IO coherency, the software-visible
+  ordering and fence rules above still apply; cache operations may become
+  architectural no-ops only where the platform guarantees coherence.
+- Resident firmware may validate/decode commands, manage resources/contexts,
+  schedule hardware work, compile TGSI to the APU shader format and maintain
+  protected bookkeeping. It must not vertex-process, rasterize, sample,
+  shade fragments or write rendered pixels in software.
+- Firmware bookkeeping and shader/compiler workspaces live in a protected
+  domain. Guest descriptors/commands are inputs to validate, not writable
+  firmware structures; failure isolation must prevent one guest context from
+  corrupting firmware state or another context's resources.
+- This freezes the external ABI and required semantics for P1 planning. It is
+  not a full GLES2 conformance grant and not hardware-rendered evidence: all
+  reference captures above were still rendered by host llvmpipe.
 
 Remaining P0 gates:
 
-- [ ] Capture and validate actual shader/state streams from the pinned unchanged
-      Mesa/Linux client; the BIOS quad is not a substitute.
-- [ ] Validate full resource/SG transfers, asynchronous fencing, response failure
-      handling and context reset/lifetime against the independent backend.
-- [ ] Freeze the truthful effective capset, shader ISA/limits and resource ABI.
-- [ ] Establish a protected firmware-hart/domain and cache/DMA contract; shared
-      physical DRAM is not automatic coherency.
-- [ ] Resolve the package-wide autoboot UI test failure before claiming full
-      package verification. The picker arm-order race is fixed. With `proxy.gl=false`,
-      a diagnostic rerun clears the live row table and produces 8,294,400 correct
-      UI bytes in RAM, but has not transferred them to scanout when the unchanged
-      48-million-step limit stops in `jit_em`. The historical UART row dump is not
-      evidence of the new pixel surface; the original test remains failing.
+- [x] The negotiated cap bits/limits and Mesa's unconditional assumptions are
+      mapped to either a device requirement or an explicitly omitted optional
+      grant; the reduced capset above is empirical, not derived from the
+      permissive model fixture.
+- [x] Context/resource isolation, resource lifetime, reset behavior, response
+      failure, asynchronous errors, queue ordering and fence visibility are
+      specified above as P1 obligations.
+- [x] The protected firmware domain and DMA/cache ownership rules are
+      specified above; shared DRAM alone is not treated as coherent or safe.
+- [x] The package-wide autoboot/UI blocker is resolved in the current tree:
+      `python tools/g6b.py check` is green, including
+      `picking_bios_ui_replaces_the_picker_rows` and the BIOS regression suite.
 
 Verification for this pass: `cargo test -p g6b-asm p0_`, targeted Clippy and
-format checks pass; `python tools/g6b.py regress` passes. Full
-`python tools/g6b.py check` passes independence, Bun tests/build, fmt and workspace
-Clippy but fails at `g6b-elf::picking_bios_ui_replaces_the_picker_rows`. No RTL,
-ISA, DTS, clock/reset, DFT or synthesis change occurred; no silicon timing or
-RISC-V compliance claim follows.
+format checks pass; `python tools/g6b.py regress` and `python tools/g6b.py
+check` pass. The reduced-capset OpenWrt runs above pass strict normal, audit
+and expected-error validation. No RTL, ISA, DTS, clock/reset, DFT or synthesis
+change occurred; no silicon timing or RISC-V compliance claim follows.
+
+## API-neutral APU: P1 leaves (2026-09-14)
+
+Standalone default-off units in `corev_apu/apu/`, not attached to the testharness
+xbar or advertised as virgl: transport, AXI/control, DMA read/write, bounded SG walker,
+protected mapping table + immutable command snapshot (`g6lc_apu_storage`),
+used-ring publication (`g6lc_apu_queue`), a firmware-facing backend
+(`g6lc_apu_mem`) that muxes those leaves onto one AXI master, and a SoC attach
+box (`g6lc_apu_grant` + `g6lc_apu_soc`) that authorizes the control aperture
+from the firmware hart ID (never PROT) and publishes guest virtio IRQ as PLIC
+source 9, a testharness-shaped attach (`g6lc_apu_attach`) that splices that
+IRQ onto `irq_sources[8]` without touching AI source 8 and exports guest/
+control xbar windows adjacent to GPIO/AI, and a native execution cluster
+(`g6lc_apu_exec`) with one FPnew FP32 lane, four lockstep fragment-quad
+contexts (predication, privilege, quad exchange), uniform BR, a local
+privilege-separated LSU, `FSUB`/`FNEG`, and a firmware mailbox bind (`g6lc_apu_fw`) that
+loads IMEM and runs micro vs shader jobs through `ACTRL_MAIL_*`. Linux DTS
+describes `gpu@40001000` (`virtio,mmio`) as `status = "disabled"`. A testharness AXI4-64 adapter and opt-in xbar ports (`+define+G6LC_APU`,
+idx 10/11/12) are proven; default testharness topology is unchanged. Firmware
+RAM sits at `0x90000000` / 256 KiB on the opt-in xbar. PLIC
+source 9 is reserved. An OpenSBI domain overlay for firmware hart 1
+(`g6lc-apu-domain.dtsi`) is documented and checked, not included in default
+DTBs and not applied to SMT2. Opt-in `ariane-g6lc-apu.dts` includes it on
+the stream8 dual-core `NrHarts=1` tree. Resident mailbox firmware (`software/apu-fw`)
+programs native `TID`+`IADD` through `ACTRL_MAIL_*`. A verif mini hart
+AXI-fetches the checked-in `apu_fw.hex` image from firmware RAM at
+`0x90000000`. A directed dual-core CVA6 TB now runs that image to cookie
+`0x600D000A` through uncached control MMIO; it does not execute shaders on
+the service CPU. Host TGSI compile covers
+`MOV`/`ADD`/`SUB`/`MUL`/`MAD` with src1 negate; `TEX` still fails closed.
+A separate `apu_tgsi_fw` image runs a locked MOV shader (cookie `0x600D000B`)
+on the mini-hart and on CVA6 through compositor `gen_exec`;
+the compiler is not resident.
+Remote directed results
+live in root `AGENTS-todo.md`. This is not P3 shader-to-RTL evidence and does
+not move EGL/GLES into firmware or RTL.

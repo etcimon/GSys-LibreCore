@@ -127,10 +127,11 @@ mmio config window and reads back the `EV_ABS` bitmap length — nonzero
 keyboard for `INP_KQ`. The exec model parks that tablet on virtio-mmio
 slot 3 (PLIC irq 4) so source 3 stays the mailbox.
 `host_inp_tab_kick` writes `EV_ABS` then `BTN_LEFT` into the tablet
-eventq (`TabDrain` re-posts, no `INP_KQ`) so a VNC click activates the
-hinted tab. `TabDrain` also decodes each event into `PTR_X`/`PTR_Y`/
-`PTR_CLICK` (`__vio` scratch) so `DomtPtr` can dispatch a real guest
-`EV_CLICK` — see the pointer lane below.
+eventq when only `hint_abs` is set (`TabDrain` re-posts, no `INP_KQ`) so a
+VNC click activates the hinted tab. `hint_rel` / `hint_wheel` skip that
+dummy click. `TabDrain` decodes ABS/REL/wheel into `PTR_X`/`PTR_Y`/
+`PTR_CLICK`/`PTR_MOVE`/`PTR_WHEEL` (`__vio` scratch) so `DomtPtr` can
+dispatch click, mousemove, wheel, and hover — see the pointer lane below.
 
 **Guest-side DOM raster lane (B111, exec-model verified).** `domt.rs`
 (`Purpose::UiDom`) is a *bounded* stand-in for the shipped engine — not
@@ -172,20 +173,59 @@ record then `JitCall`s that funcidx between `JitRun`s — so a delegate
 the VGA face. **B115 adds the pointer lane**: `TabDrain` latches the last
 `ABS_X`/`ABS_Y` + a `BTN_LEFT` `PTR_CLICK` flag, and `trap_tab` then runs
 `DomtPtr` (`guest_jit`), which scales to display px, `DomtHit`s the topmost
-`F_VIS` rect node with `N_LEV & EV_CLICK`, fills `__ev_obj` (`clientX`/
-`clientY`/target-handle) and `JitCall`s the node's wasm funcidx — a real
-tablet `BTN_LEFT` re-enters the cell the same way `DomtKey` re-enters on a
-key (`guest_jit_listener_reenters_cell_on_click`). One click per trap; no
-capture/bubble walk yet. **B116 adds the `__ev_obj` property bridge** so the
+`F_VIS` rect node, fills `__ev_obj` (`clientX`/`clientY`/target-handle)
+and `JitCall`s the node's wasm funcidx — a real tablet `BTN_LEFT` re-enters
+the cell the same way `DomtKey` re-enters on a key
+(`guest_jit_listener_reenters_cell_on_click`). **B130 extends that packet
+to SYN_REPORT:** `REL_X`/`REL_Y` clamp-add into `PTR_X`/`PTR_Y` and latch
+`PTR_MOVE`; `REL_WHEEL` latches `PTR_WHEEL`; `EV_SYN` is a no-op because
+the used-ring walk already batches. `PTR_HOVER` starts at NONE. `DomtPtr`
+then dispatches mouseout-old / mouseover-new / mousemove / wheel
+(`deltaY`=`EVO_VALUE`) / click (`guest_jit_mousemove_via_rel`,
+`guest_jit_mouseover_first_enter`, `guest_jit_wheel_at_button`).
+**B131 normalizes RFB/KVM into that packet:** `ptr.rs` `PtrNorm` scales
+framebuffer px to tablet ABS, coalesces moves, preserves left press/release,
+and refuses a second source while left is held. An RFB 3.8 PointerEvent or
+`KvmPointer` injects the same virtio eventq (`guest_jit_rfb_pointer_clicks_button`,
+`guest_jit_kvm_wheel_at_button`). Not RFB session/auth.
+**B132 adds modifiers and DOM buttons:** `button` is 0/1/2 (left/middle/right),
+`buttons` is the chord mask, `ctrlKey`/`shiftKey`/`altKey`/`metaKey` come from
+keyboard `PTR_MODS`, and a click `DomtFocus`es the hit node
+(`guest_jit_click_button_is_zero`, `guest_jit_rfb_right_button_is_two`,
+`guest_jit_shift_click_shiftkey`, `guest_jit_click_focuses_button`).
+**B125 adds the capture/at-target/bubble walk:** `DomtHit` is geometric (the
+topmost `F_VIS` rect, not a listener filter); `DomtDispatch` snapshots the
+`N_PARENT` chain. **B126 replaces the one per-node slot** with a bounded
+`__dom` listener table (64×16 B after the node pool). `DomtListen` ORs `N_LEV`
+and appends `{node,mask,cb,LSNF_CAPTURE}`; `DomtFire` scans by `eventPhase`
+(capturing needs the flag, bubbling needs it clear, at-target fires capture
+then bubble). `stopPropagation` skips remaining nodes. A node can hold both
+a capture and a bubble listener (`guest_jit_two_listeners_on_parent`).
+**B127 adds `once`/`passive`/removal:** `add_event_listener`'s last i32 packs
+`LSNF_CAPTURE|ONCE|PASSIVE` (0/1 stay capture-only). `once` tombs the record
+after `JitCall`; `passive` sets `EVO_PASSIVE` so `preventDefault` is a no-op;
+`remove_event_listener` maps to `EXT_RMLSN`→`LwRmLsn` (tombstone by cb). **B116 adds the `__ev_obj` property bridge** so the
 delegate can *read* the event, not just be re-entered: `Object_Getter__{int,
 uint,ushort,bool,Handle}` route to `LwEvGet` (name-matched `lw` of the
-`__ev_obj` fields — `clientX`/`clientY`/`code`/`target`/`type`/`defaultPrevented`
-and aliases), and the no-arg-void `Object_Call___void` routes to `LwEvCall`,
-which sets `EVO_PD` on `preventDefault` (read back as `defaultPrevented`).
-Bounded to the live event object (`handle == &__ev_obj`); string getters
-(`type`/`key`) and `float`/`double`/`Optional*` stay unmapped. The gate
+`__ev_obj` fields — `clientX`/`clientY`/`code`/`target`/`currentTarget`/
+`eventPhase`/`type`/`defaultPrevented` and aliases), and the no-arg-void
+`Object_Call___void` routes to `LwEvCall`, which sets `EVO_PD` on
+`preventDefault` (read back as `defaultPrevented`) and `EVO_STOP` on
+`stopPropagation`.
+Bounded to the live event object (`handle == &__ev_obj`). **UTF-8 string
+getters** (`Object_Getter__string` → `EXT_EVGETSTR`→`LwEvGetStr`) write a D
+`{len,ptr}` for `type`/`key`/`code` (`code` is KeyboardEvent.code, never a
+Linux keycode). **OptionalUint/Handle** (`LwEvGetOpt`) write `{value,defined}`;
+`relatedTarget` is defined=0. **float** (`LwEvGetF`) is `fcvt.s.w` of the
+integer field. **double** (`LwEvGetD`) is `fcvt.d.w`. **OptionalString**
+writes `{len,ptr,defined}` (`defined` iff the UTF-8 payload is non-empty).
+**OptionalBool** writes `{value,defined}` bytes (`bubbles`/`cancelable`/
+`isTrusted` are defined=1). **OptionalDouble** writes `{f64,defined}` from
+the integer field. The gate
 `guest_jit_listener_reads_event_props` appends iff `clientX>=200 &&
-target!=0 && defaultPrevented` — a real click lands `clientX≈325`. **B117 is
+target!=0 && defaultPrevented` — a real click lands `clientX≈325`. String
+gates: `guest_jit_listener_reads_event_type_string` (click → `"click"`) and
+`guest_jit_listener_reads_event_code_string` (KEY_ENTER → `"Enter"`). **B117 is
 the Stage-3 op-coverage gate** (`g6b_wasm::op_coverage`): it lowers the whole
 cell through the shared `lower_one` and walks the re-entrable set (`_start` +
 func exports + element-table funcs) to report `TRAP_UNSUP`/`TRAP_EXT`/

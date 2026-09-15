@@ -206,6 +206,12 @@ def cmd_check(_: argparse.Namespace) -> int:
     if rc != 0:
         failed.append("independence")
     else:
+        log("--- native-image-tests ---")
+        if subprocess.run([sys.executable, str(_TOOLS / "test_guest_native.py")], cwd=str(package_root())).returncode != 0:
+            failed.append("native-image-tests")
+        log("--- journal-disk-tests ---")
+        if subprocess.run([sys.executable, str(_TOOLS / "test_journal_disk.py")], cwd=str(package_root())).returncode != 0:
+            failed.append("journal-disk-tests")
         ui = package_root() / "browser-ui"
         bun = shutil.which("bun")
         log("--- browser-ui ---")
@@ -323,7 +329,18 @@ def cmd_elf(args: argparse.Namespace) -> int:
         argv += ["--spec", args.spec]
     if args.out:
         argv += ["--out", args.out]
+    if args.native_manifest:
+        argv += ["--native-manifest", args.native_manifest]
     return run_cargo(argv)
+
+
+def cmd_native(args: argparse.Namespace) -> int:
+    from guest_native import main as native_main
+
+    argv = ["--load-address", args.load_address]
+    if args.out:
+        argv += ["--out", args.out]
+    return native_main(argv)
 
 
 def cmd_regress(args: argparse.Namespace) -> int:
@@ -370,6 +387,10 @@ def main() -> int:
     elfp = sub.add_parser("elf")
     elfp.add_argument("--spec")
     elfp.add_argument("--out")
+    elfp.add_argument("--native-manifest")
+    nat = sub.add_parser("native")
+    nat.add_argument("--load-address", required=True)
+    nat.add_argument("--out")
     smk = sub.add_parser("smoke")
     smk.add_argument("--spec")
     smk.add_argument("--out")
@@ -415,6 +436,8 @@ def main() -> int:
         return cmd_regress(args)
     if args.cmd == "elf":
         return cmd_elf(args)
+    if args.cmd == "native":
+        return cmd_native(args)
     if args.cmd == "smoke":
         return cmd_smoke(args)
     if args.cmd == "gr":

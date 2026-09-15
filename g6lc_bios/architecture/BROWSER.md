@@ -116,12 +116,14 @@ This is lirx-style mutation locality, not a complete lirx reactive runtime.
 
 `g6b-dom::event` provides a bounded HTML5-style `Event`, `EventInit`,
 `addEventListener`, `removeEventListener` and `dispatch_event`. Propagation
-runs capture phase (root → target), then bubble phase (target → root) if
+runs capture (root → parent of target), at-target (capture then non-capture
+listeners, including when `bubbles` is false), then bubble (parent → root) if
 `bubbles` is true. `stopPropagation` cancels the rest of the tree;
 `stopImmediatePropagation` cancels siblings on the current node;
 `preventDefault` is recorded and returned from `dispatch_event` so the caller
-can decide whether to run a default action (e.g. link navigation). Listeners
-are stored as data (`event_listeners` on `Node`) and invoked through an
+can decide whether to run a default action (e.g. link navigation); a `passive`
+listener cannot prevent default. `once` listeners are removed after they fire.
+Listeners are stored as data (`event_listeners` on `Node`) and invoked through an
 `EventHost` trait, so `g6b-js` and `libwasm` each provide their own callback
 mapping without making `Node` non-`Clone`. The model is intentionally narrow:
 no `EventTarget` interface object, no `CustomEvent` subclassing, no default

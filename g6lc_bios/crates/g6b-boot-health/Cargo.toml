@@ -1,0 +1,22 @@
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+
+[package]
+name = "g6b-boot-health"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+description = "Linux-generic boot-health helper; OpenWrt is a thin adapter"
+
+[[bin]]
+name = "g6b-boot-health"
+path = "src/main.rs"
+
+[dependencies]
+g6b-bootctl = { workspace = true }
+g6b-vfs = { workspace = true }
+
+[lints]
+workspace = true

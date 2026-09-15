@@ -5,6 +5,11 @@
 #![forbid(unsafe_code)]
 #![allow(missing_docs)]
 
+mod context;
+mod heap;
+pub use context::{ContextTable, Continuation, EXC_PAY_CELLS, RUNTIME_CTX_MAX};
+pub use heap::{Bump, HEAP_ALIGN};
+
 pub const ABI_VERSION: u16 = 1;
 pub const REQUEST_BYTES: usize = 64;
 const MAGIC: &[u8; 4] = b"G6SR";
@@ -62,6 +67,94 @@ impl TryFrom<u16> for Operation {
     }
 }
 
+pub const RESPONSE_BYTES: usize = 32;
+pub const NATIVE_FRAME_BYTES: usize = 256;
+pub const RESPONSE_OFFSET: usize = REQUEST_BYTES;
+pub const PAYLOAD_OFFSET: usize = REQUEST_BYTES + RESPONSE_BYTES;
+pub const CAPABILITIES_BYTES: usize = 16;
+pub const CORE_OFFSET: usize = 128;
+pub const CORE_BYTES: usize = NATIVE_FRAME_BYTES - CORE_OFFSET;
+pub const POLL_REPORT_BYTES: usize = 16;
+pub const INPUT_BYTES: usize = 8;
+pub const CANCEL_BYTES: usize = 8;
+pub const IRQ_WATCHDOG: u32 = 1;
+pub const IRQ_INPUT: u32 = 2;
+pub const IRQ_SLOW: u32 = 3;
+pub const POLL_FLAG_WATCHDOG: u32 = 1;
+pub const POLL_FLAG_QUOTA: u32 = 2;
+pub const BOOT_CONTEXT: Context = Context {
+    slot: 0,
+    generation: 1,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Status {
+    Ok = 0,
+    InvalidRequest = 1,
+    Unsupported = 2,
+    NotReady = 3,
+    BufferTooSmall = 4,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Response {
+    pub request_id: u64,
+    pub status: Status,
+    pub written: u32,
+}
+
+impl Response {
+    pub fn encode(self) -> [u8; RESPONSE_BYTES] {
+        let mut bytes = [0; RESPONSE_BYTES];
+        bytes[..4].copy_from_slice(b"G6SP");
+        bytes[4..6].copy_from_slice(&ABI_VERSION.to_le_bytes());
+        bytes[6..8].copy_from_slice(&(RESPONSE_BYTES as u16).to_le_bytes());
+        bytes[8..12].copy_from_slice(&(self.status as u32).to_le_bytes());
+        bytes[16..24].copy_from_slice(&self.request_id.to_le_bytes());
+        bytes[24..28].copy_from_slice(&self.written.to_le_bytes());
+        bytes
+    }
+
+    pub fn decode(bytes: &[u8], request_id: u64, capacity: u64) -> Result<Self, Error> {
+        if bytes.len() != RESPONSE_BYTES
+            || u16::from_le_bytes(bytes[6..8].try_into().unwrap()) as usize != RESPONSE_BYTES
+        {
+            return Err(Error::Length);
+        }
+        if &bytes[..4] != b"G6SP" {
+            return Err(Error::Magic);
+        }
+        if u16::from_le_bytes(bytes[4..6].try_into().unwrap()) != ABI_VERSION {
+            return Err(Error::Version);
+        }
+        if bytes[12..16].iter().chain(&bytes[28..32]).any(|&b| b != 0) {
+            return Err(Error::Reserved);
+        }
+        let status = match u32::from_le_bytes(bytes[8..12].try_into().unwrap()) {
+            0 => Status::Ok,
+            1 => Status::InvalidRequest,
+            2 => Status::Unsupported,
+            3 => Status::NotReady,
+            4 => Status::BufferTooSmall,
+            _ => return Err(Error::Opcode),
+        };
+        let actual_id = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+        if request_id == 0 || actual_id != request_id {
+            return Err(Error::RequestId);
+        }
+        let written = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+        if u64::from(written) > capacity || (status != Status::Ok && written != 0) {
+            return Err(Error::Length);
+        }
+        Ok(Self {
+            request_id,
+            status,
+            written,
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Context {
     pub slot: u32,
@@ -91,7 +184,7 @@ impl Span {
         Ok(())
     }
 
-    fn overlaps(self, other: Self) -> Result<bool, Error> {
+    pub fn overlaps(self, other: Self) -> Result<bool, Error> {
         Ok(self.length != 0
             && other.length != 0
             && self.address < other.end()?

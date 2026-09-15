@@ -12,16 +12,16 @@
 use g6b_spec::BoardSpec;
 
 use crate::encode::{
-    A0, A1, A2, A3, A4, A5, A6, A7, CMD_AWAI, CMD_BLK, CMD_FILE, CMD_GET, CMD_KEYS, CMD_REBO,
-    CMD_SHUT, CMD_THRO, CMD_UI, CMD_VIEW, CMD_WAKE, CSR_SATP, CSR_SCAUSE, CSR_SEPC, CSR_SIE,
-    CSR_SSTATUS, CSR_STVEC, CSR_TIME, GR16_MAGIC, GR_FILL_WORD, MBOX_MAGIC, MBOX_OFF_CMD,
-    MBOX_OFF_DOORBELL, MBOX_OFF_IRQ_EN, MBOX_OFF_LENGTH, MBOX_OFF_RSP, MBOX_OFF_STATUS,
-    MBOX_RSP_FILE, MBOX_RSP_KEYS, MBOX_RSP_UI, MBOX_RSP_VIEW, MBOX_RSP_WAKE, MBOX_ST_BUSY,
-    MBOX_ST_RSP, PLIC_BASE, PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID, SBI_IPI_EID,
-    SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID, SCAUSE_LOAD_ACCESS, SCAUSE_STORE_ACCESS, SIE_SEIE,
-    SIE_SSIE, SIE_STIE, SP, SSTATUS_SIE, T0, T1, T2, T3, T4, T5, T6, TP, UART_IER_RX, UART_IRQ,
-    UART_LSR_DR, UI_MAGIC, VIO_DEV_GPU, VIO_DEV_NET, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS,
-    VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
+    A0, A1, A2, A3, A4, A5, A6, A7, CMD_AWAI, CMD_BLK, CMD_FILE, CMD_FWS, CMD_GET, CMD_JRN,
+    CMD_KEYS, CMD_LNX, CMD_REBO, CMD_SHUT, CMD_THRO, CMD_UI, CMD_VIEW, CMD_WAKE, CSR_SATP,
+    CSR_SCAUSE, CSR_SEPC, CSR_SIE, CSR_SSTATUS, CSR_STVEC, CSR_TIME, GR16_MAGIC, GR_FILL_WORD,
+    MBOX_MAGIC, MBOX_OFF_CMD, MBOX_OFF_DOORBELL, MBOX_OFF_IRQ_EN, MBOX_OFF_LENGTH, MBOX_OFF_RSP,
+    MBOX_OFF_STATUS, MBOX_RSP_FILE, MBOX_RSP_KEYS, MBOX_RSP_UI, MBOX_RSP_VIEW, MBOX_RSP_WAKE,
+    MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE, PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID,
+    SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID, SCAUSE_LOAD_ACCESS, SCAUSE_STORE_ACCESS,
+    SIE_SEIE, SIE_SSIE, SIE_STIE, SP, SSTATUS_SIE, T0, T1, T2, T3, T4, T5, T6, TP, UART_IER_RX,
+    UART_IRQ, UART_LSR_DR, UI_MAGIC, VIO_DEV_GPU, VIO_DEV_NET, VIO_MAGIC, VIO_MMIO_BASE,
+    VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
 };
 use crate::{
     gr_bss_len, gr_stride, Addr, Module, Node, Op, Purpose, BIOS_UI_LIBWASM, BIOS_UI_WASM,
@@ -368,6 +368,7 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
                 }
             }
             Purpose::Mailbox => mbox = Some(o),
+            Purpose::NativeService | Purpose::LinuxHandoff => {}
             Purpose::MemCpy
             | Purpose::Reboot
             | Purpose::Tls
@@ -552,6 +553,7 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
     }
     if let Some(o) = trap {
         m.push(trap_node(o, spec));
+        m.push(native_poll_stub());
     }
     if let Some(o) = timer {
         m.push(timer_init_node(o, spec));
@@ -619,6 +621,14 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
     if let Some(o) = vblk {
         m.push(crate::vio::blk_init_node(o));
         m.push(crate::vio::blk_read_node(o));
+        m.push(crate::vio::blk_write_node(o));
+        m.push(crate::vio::blk_flush_node(o));
+        m.push(crate::vio::fw_stage_node(o));
+        m.push(crate::vio::fw_commit_node(o, spec.isa.xlen));
+        m.push(crate::vio::fw_select_node(o, spec.isa.xlen));
+        m.push(crate::vio::jrn_load_node(o, spec.isa.xlen));
+        m.push(crate::vio::jrn_commit_node(o, spec.isa.xlen));
+        m.push(crate::vio::fw_stage_selftest_node());
         m.push(crate::vio::blk_sig_node(o, spec.isa.xlen));
     }
     if disp.is_some() {
@@ -748,6 +758,14 @@ fn kstart_inner(spec: &BoardSpec, boot_log: Option<&[u8]>) -> Module {
         m.push(crate::fatfile::fat_read_node(o, spec.isa.xlen));
         m.push(crate::ext4file::ext4_read_node(o, spec.isa.xlen));
     }
+    m.linux_bytes = crate::linux::LOAD_BYTES;
+    let linux_off = m.extra_bss().saturating_sub(m.linux_bytes);
+    m.push(crate::linux::linux_enter_node());
+    m.push(crate::linux::linux_stub_node());
+    m.push(crate::linux::linux_relocate_node(spec.isa.xlen, linux_off));
+    if vblk.is_some() {
+        m.push(crate::linux::linux_load_disk_node(spec.isa.xlen, linux_off));
+    }
     m
 }
 
@@ -771,6 +789,7 @@ pub fn kints(spec: &BoardSpec) -> Module {
             why: "supervisor trap",
         });
     m.push(trap_node(o, spec));
+    m.push(native_poll_stub());
     m.push(file_serve_node(spec));
     m.push(get_file_node(spec));
     m
@@ -1696,6 +1715,23 @@ fn load_op(xlen: u32, rd: u32, rs: u32, off: i32) -> Op {
     }
 }
 
+/// No-op tick poll when no native callee is composed. `g6b-elf` replaces
+/// this node with a `jalr` of the durable `__native_abi` frame.
+fn native_poll_stub() -> Node {
+    Node {
+        purpose: Purpose::NativeService,
+        ops: vec![
+            Op::Label("NativePoll".into()),
+            Op::Comment("no native callee — tick Poll is a no-op".into()),
+            Op::Jalr {
+                rd: X0,
+                rs: RA,
+                imm: 0,
+            },
+        ],
+    }
+}
+
 fn trap_node(o: Object, spec: &BoardSpec) -> Node {
     let irq = spec.loopback.irq;
     let xlen = spec.isa.xlen;
@@ -2217,10 +2253,10 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
                 },
             ]);
             if spec.kernel.wasm.guest_jit {
-                // M2 tree-DOM pointer: `TabDrain` latched `PTR_CLICK` +
-                // the last `ABS_X`/`ABS_Y`; `DomtPtr` scales them to
-                // display px, hit-tests `__dom` and re-enters the node's
-                // wasm click listener (`JitCall`), bumping `H_DIRTY` for
+                // M2 tree-DOM pointer: `TabDrain` latched MOVE/WHEEL/CLICK
+                // plus the last `PTR_X`/`PTR_Y`; `DomtPtr` scales them to
+                // display px, hit-tests `__dom` and re-enters hover/move/
+                // wheel/click listeners (`JitCall`), bumping `H_DIRTY` for
                 // the `trap_timer` repaint.
                 ops.push(Op::Jal {
                     rd: RA,
@@ -2449,10 +2485,16 @@ fn trap_node(o: Object, spec: &BoardSpec) -> Node {
         ops.extend(paint_commit_ops(spec));
         ops.push(Op::Label(crate::cli::TICK_CLEAN.into()));
     }
-    ops.extend([Op::Jal {
-        rd: X0,
-        to: "trap_done".into(),
-    }]);
+    ops.extend([
+        Op::Jal {
+            rd: RA,
+            to: "NativePoll".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "trap_done".into(),
+        },
+    ]);
     ops.extend(trap_fault_ops(xlen, spec));
     ops.push(Op::Label("trap_done".into()));
     for (r, i) in saves {
@@ -2814,6 +2856,51 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
                 rs2: A2,
                 to: "uart_blk".into(),
             },
+            Op::Li {
+                rd: A2,
+                imm: i64::from(CMD_JRN),
+            },
+            Op::Beq {
+                rs1: A1,
+                rs2: A2,
+                to: "uart_jrn".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: i64::from(b'J'),
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: A2,
+                to: "uart_jrn".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: i64::from(CMD_FWS),
+            },
+            Op::Beq {
+                rs1: A1,
+                rs2: A2,
+                to: "uart_fws".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: i64::from(CMD_LNX),
+            },
+            Op::Beq {
+                rs1: A1,
+                rs2: A2,
+                to: "uart_lnx".into(),
+            },
+            Op::Li {
+                rd: A2,
+                imm: i64::from(b'L'),
+            },
+            Op::Beq {
+                rs1: T1,
+                rs2: A2,
+                to: "uart_lnx".into(),
+            },
         ]);
     }
     if spec.kernel.wasm.jit {
@@ -3114,6 +3201,52 @@ fn trap_uart_ops(spec: &BoardSpec) -> Vec<Op> {
             Op::Jal {
                 rd: RA,
                 to: "Ext4Read".into(),
+            },
+            Op::Jal {
+                rd: X0,
+                to: "trap_done".into(),
+            },
+            Op::Label("uart_jrn".into()),
+            Op::Comment("Jrn — JrnLoad + JrnCommit slot 0 (G6BH window, not Linux)".into()),
+            Op::Li { rd: A0, imm: 0 },
+            Op::Jal {
+                rd: RA,
+                to: "JrnLoad".into(),
+            },
+            Op::Li { rd: A0, imm: 0 },
+            Op::Jal {
+                rd: RA,
+                to: "JrnCommit".into(),
+            },
+            Op::Jal {
+                rd: X0,
+                to: "trap_done".into(),
+            },
+            Op::Label("uart_fws".into()),
+            Op::Comment("Fws — stage inactive firmware B, refuse A/journal, FwSelect holds".into()),
+            Op::Jal {
+                rd: RA,
+                to: "FwStageSelftest".into(),
+            },
+            Op::Jal {
+                rd: X0,
+                to: "trap_done".into(),
+            },
+            Op::Label("uart_lnx".into()),
+            Op::Comment("Lnx — LinuxLoadDisk canary Image at LBA 40, not autoboot".into()),
+            Op::Li {
+                rd: A0,
+                imm: crate::linux::DISK_IMAGE_LBA,
+            },
+            Op::Li { rd: A1, imm: 4 },
+            Op::Li {
+                rd: A2,
+                imm: crate::linux::DISK_IMAGE_LBA + 4,
+            },
+            Op::Li { rd: A3, imm: 1 },
+            Op::Jal {
+                rd: RA,
+                to: "LinuxLoadDisk".into(),
             },
             Op::Jal {
                 rd: X0,

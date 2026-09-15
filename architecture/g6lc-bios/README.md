@@ -1,6 +1,15 @@
 # Extension point: `g6lc_bios`
 
-**Status:** B0–B49 landed. Profiles `embedded`/`router` → `full` (UART+SPI flash
+**Status:** B0–B52 plus later guest/web/CLI stages live in `g6lc_bios/`.
+Recovery program: `g6b-bootctl` / `g6b-runtime-abi` landed; native service
+callee ELF is labelled `native-service-callee-not-bootable-firmware` and
+QEMU-proved for `Capabilities`, in-frame `Poll`, and boot inhibit
+(`NATIVE-SERVICE-OK`, `NATIVE-POLL-OK`, `NATIVE-BOOT-HOLD`). Journal-window
+`BlkWrite`/`BlkFlush`/`JrnLoad`/`JrnCommit` landed in exec model (G6BH at
+LBA 8). QEMU UART `Jrn` proved (`JRN-LOAD-OK`/`JRN-COMMIT-OK`). A/B
+firmware flash/slot-select and live OpenWrt VM remain open.
+
+Profiles `embedded`/`router` → `full` (UART+SPI flash
 to browser-UI HTTPS + USB settings). USB FAT32 flash always compiled; USB-key
 FileMgr extra. HolyC kernel file server emits generated HTML/JS/WASM over
 HTTP(S) (`http.files`). 64-bit SMT2 / multi-issue / stream / OoO / H / RVV infer

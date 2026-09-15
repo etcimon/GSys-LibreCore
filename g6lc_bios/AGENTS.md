@@ -18,14 +18,146 @@
 
 ## Current planning state
 
-**Recovery foundation (2026-09-14):** new `g6b-bootctl` and `g6b-runtime-abi`
+**Recovery foundation (2026-09-14):** `g6b-bootctl` and `g6b-runtime-abi`
 are safe, allocation-free `no_std` libraries, cross-checked with Rust 1.85.0 on
 `riscv64imac-unknown-none-elf`. They provide the boot-health journal/policy and
-checked service-request wire boundary, not active guest services. Kernel/VFS
-journal storage requires explicit durability; host `FileBlock` now uses
-`sync_all`. See `architecture/KERNEL-RV.md` for the protocol, writer-ownership
-contract and gates. Native core linking, the Linux-generic health helper and
-active autoboot/management integration remain pending in the approved program.
+checked service-request wire boundary. Kernel/VFS journal storage requires
+explicit durability; host `FileBlock` now uses `sync_all`.
+**Native callee ELF + P1 poll core (same day):** `g6b-guest` is linked as a
+labelled `native-service-callee-not-bootable-firmware` RV64 image and
+composed as extra RX/R PT_LOADs. The BIOS `jalr`s `native_entry` with a
+256-byte ABI frame: `Capabilities` (SIE masked), IRQ `Input` enqueue,
+then `Poll` with SIE restored, then `BootStatus`/`BootTrial` hold.
+QEMU virt prints `NATIVE-SERVICE-OK`, `NATIVE-POLL-OK`, and
+`NATIVE-BOOT-HOLD`. State lives in the frame at offset 128, not a RW
+callee segment. Portable `ContextTable` owns generation-checked wasm/DOM/Asyncify
+records (4 slots). Guest `__prom` has a matching 4-slot suspend table
+(`PromCtx`/`P_CTX`; slot 0 aliases `P_ASUSP`). Portable `Bump` hands aligned
+`Span`s over caller-owned backing (not a Rust `GlobalAlloc`). After park,
+`trap_timer` `NativePoll`s the durable `__native_abi` frame (`NATIVE-TICK-POLL-OK`
+once). Not autoboot/TLS.
+See `architecture/KERNEL-RV.md`. `g6b-boot-health` acknowledges the exact pending Linux attempt
+only when watchdog `nowayout` is armed; keepalive alone is not ownership.
+UART `Lnx` requires G6BH `InProgress` (`LINUX-HOLD` otherwise). QEMU
+`arm-disk` + `Lnx` → `LINUX-ENTRY-OK`. Canary FDT includes
+`/firmware/g6b-boot-health`; the helper discovers that window via `--dtb`
+or `--dt-root`. Partition `--scan` classifies Image vs squashfs root vs
+FDT, walks `/boot` on mountable filesystems, and does not jump. A file
+mock of `/dev/watchdog` applies Linux nowayout/magic-close effects
+without `ioctl(2)`. `LinuxEnter` arms a platform `mtime` WDT that
+still fires after `sie=0` (`LINUX-WDT-FIRE`). Live OpenWrt VM remains
+open. **P2 hold:** `BootStatus`/`BootTrial` stay `NotReady` without
+durable journal storage; the probe clears `AUTO_ON` and prints
+`NATIVE-BOOT-HOLD`. Host picker `with_decision(Stay)` will not countdown.
+Firmware A/B stubs at LBA 24/32 are protected from journal I/O. `FwStage`
+writes inactive B only; `FwCommit` rewrites all 8 declared sectors
+(`G6FS`/`G6FE`) with flush+readback. `FwSelect` nominates B (`G6SL`) only when the whole slot is present;
+a torn B is `FW-HOLD`.
+**P3 UTF-8 event getters (2026-09-15):** `Object_Getter__string` maps to
+`EXT_EVGETSTR`→`LwEvGetStr` and writes a D `{len,ptr}` for `type`/`key`/`code`.
+`code` is KeyboardEvent.code (`Enter`/`KeyA`), never a Linux keycode.
+Exec: click → `"click"`; KEY_ENTER → `"Enter"`.
+**P3 capture/bubble (same day):** geometric `DomtHit` + `DomtDispatch` parent
+walk. `eventPhase`/`currentTarget`/`stopPropagation` live. Exec: child click
+→ parent capture phase 1 and bubble phase 3.
+**P3 multiple listeners (same day):** bounded `__dom` table (64 records).
+Capture and bubble on the same parent both fire (`guest_jit_two_listeners_on_parent`).
+**P3 once/passive/removal (same day):** `a5` packs capture/once/passive.
+`once` tombs after fire; `passive` blocks `preventDefault`;
+`remove_event_listener` tombs by cb.
+**P3 Optional/float getters (same day):** `LwEvGetOpt` writes
+`{value:u32, defined:u8}`; `relatedTarget` is none. `LwEvGetF` returns
+`clientX` as f32 bits.
+**P3 double/OptionalString/Bool/Double (2026-09-15):** `LwEvGetD` is
+`fcvt.d.w`; OptionalString `{len,ptr,defined}`; OptionalBool `{u8,u8}`;
+OptionalDouble `{f64,defined}`. Exec: double `clientX>=200.0`; OptionalString
+`type` defined `"click"`; OptionalBool `bubbles` and OptionalDouble `clientX`.
+**P3 SYN_REPORT REL/wheel/hover (same day):** `TabDrain` clamp-adds REL into
+`PTR_X`/`PTR_Y`, latches `PTR_MOVE`/`PTR_WHEEL`; `PTR_HOVER` inits NONE;
+`DomtPtr` dispatches mouseout/mouseover/mousemove/wheel/click. Exec: REL
+mousemove; first-enter mouseover; abs+wheel no BTN.
+**P3 RFB/KVM normalize (same day):** `ptr.rs` `PtrNorm` scales/clips display
+px to tablet ABS, coalesces moves, preserves left press/release, one owner
+while held. RFB PointerEvent and `KvmPointer` inject the same virtio eventq.
+Exec: RFB click; KVM wheel. Not RFB 3.8 session/auth.
+**P3 modifiers/multi-button/click-to-focus (same day):** DOM `button` is
+0/1/2 (not Linux `BTN_*`); `buttons` mask; `ctrlKey`/`shiftKey`/`altKey`/
+`metaKey` from `PTR_MODS`. TabDrain maps left/middle/right; RFB bits 0/1/2
+match. Click `DomtFocus`es the hit node. Exec: left `button==0`; RFB right
+`button==2`; shift+click `shiftKey`; click focuses the button.
+**P3 host-oracle mutation/lifetime (same day):** `dispatch_event` snapshots
+stamps, not live child indices. Removing the target cannot retarget a
+sibling. `currentTarget`/`eventPhase` clear after dispatch.
+**P3 password controls (same day):** `type=password` sets `F_PASSWORD`.
+Raster paints `*` per character; stored value stays plaintext. Focused
+password field: KEY_A appends `'a'` unless `preventDefault`. Not a full
+editor.
+**P3 timeStamp/deltaMode (same day):** `__ev_obj` stores csr `time` at fill
+and `DOM_DELTA_LINE` (1) for virtio `REL_WHEEL`. `timeStamp` is a double
+getter; `deltaMode` is uint. Exec: click `timeStamp>0`; wheel
+`deltaMode==1`.
+**P3 text controls (same day):** US EV_KEY→ASCII keymap, backspace, Shift
+letters, `type=text` (`F_EDITABLE`).
+**P3 caret (same day):** `H_CARET` on the focused field. Left/Right/Home/End
+move it; insert/backspace apply at the caret.
+**P3 selection (same day):** `H_SEL` anchor. Shift+arrows extend; insert and
+backspace replace the range. KQ stores per-press mods. Not IME.
+**P4 try_table catch dest (same day):** guest JIT lowers `try_table` +
+`catch $tag` as a `br` to the catch label. `throw_ref`/exnref stay
+unsupported. Exec: throw 7 returns 7.
+**P4 catch_all payload (same day):** interp `catch_all` truncates to the
+try height and does not push the thrown values.
+**P4 guest vsp restore (same day):** `R_EXCCLR` sets `s10` to the try
+height and copies a tagged payload (`b` cells; `0` for `catch_all`).
+Exec: leftover throw 99 does not replace the outer 1.
+**P4 try_table catch dest vsp (same day):** local `throw` in `try_table`
+emits `R_EXCCLR` at the dest frame height then `br`. `catch_all` drops
+leftover body values.
+**P4 cross-func throw into try_table (same day):** a single-clause
+`try_table` patches post-call `R_EXCCHK` to an `R_EXCCLR`+`R_JMP` pad.
+Exec: callee throw yields 777.
+**P4 tagged payload across THROW (same day):** one cell is stored in
+`OFF_EXCPAY` before the frame fold; cross-function catch reloads it.
+Exec: callee `i32.const 7; throw` returns 7.
+**P4 multi-clause try_table EXCCHK (same day):** one post-call check per
+clause; `EXCCHK_CHAIN` falls through on a tagged miss. Exec: miss `$e0`
+→ `catch_all` 777; hit `$e0` returns 7.
+**P4 multi-cell payload (same day):** `OFF_EXCPAY` holds up to 4 cells.
+Exec: callee pushes 3 then 4; catch `i32.add` returns 7.
+**P4 rethrow (same day):** `rethrow 0` skips the current try; nested JMP
+or escape `R_THROW` restashes payload. Exec: nested and cross-func
+rethrow return 7.
+**P4 rethrow into try_table (same day):** `rethrow 0` into an enclosing
+`try_table` catch dest keeps payload 7.
+**P4 catch_all_ref / throw_ref (same day):** `catch_all_ref` packages the
+exception as an opaque exnref (handle = tag+1; payload stays in
+`OFF_EXCPAY`). `throw_ref` pops it, sets `OFF_EXC`, and the following
+`R_EXCCHK` routes. Null handle is `TRAP_UNREACH`.
+**P4 catch_ref (same day):** dest gets tag payload then the exnref.
+Tag-matched; a miss falls through to `catch_all`. Exec: throw_ref
+returns 7; dest top is handle 1; miss yields 777.
+**P4 continuation-owned EH (same day):** `PromCtx` spills/fills the
+`__jit` EXC/EXCTAG/EXCPAY bank per slot. Host `Continuation` carries
+the same cells. Exec: slot 1 does not see slot 0's EXC; switch-back
+restores tag 7 and payload 99.
+**P4 JitCall EH nest (same day):** the outermost user `JitCall` spills
+the live EH bank and restores it on the way out so a listener cannot
+clobber the caller's `EXCPAY`. Nested/control calls skip the spill.
+Exec: plant tag 7 / pay 99, `JitCall` `_start`, bank restored.
+**P4 await-in-try fail-closed (same day):** a direct
+`libwasm_await__void` inside `try`/`try_table` is `TRAP_UNSUP` 0x700
+(rewind is not a landing pad). A `try` that `call`s a function which
+can reach await is the same gap. `call_indirect` inside a try is the
+same gap when any funcref-table function can reach await. Exec:
+coverage gaps; `install_guest` refuses. Shipped cell stays clean.
+**P4 interp await-in-try fail-closed (same day):** a direct
+`libwasm_await__void` while a `try`/`try_table` is live is rejected
+(rewind is not a landing pad). Fork WAT still decodes. Await outside
+try still rewinds.
+**P4 interp callee-await (same day):** `try { call $awaiter }` is
+rejected when `$awaiter` can reach await via direct `call`. **P4
+sequential leftovers are closed.** IME and RFB 3.8 stay with later
+phases. P5 (guest packet stack) may start.
 
 **Local plan review (2026-09-14):** `gr`/`display-proxy` produce legacy blue
 text-plane diagnostics, not web screenshots. Their host font now covers
@@ -157,7 +289,7 @@ only what was read, name the source; U-Boot is recognized by
 `extlinux.conf`/`boot.scr` as well as `u-boot.itb`), and FAT32 create records carry
 the FAT epoch rather than a zero date.
 **B101 (landed):** the **guest reads its own sectors** — a real virtio-blk driver in
-the payload (`BlkInit`/`BlkRead`/`BlkSig`, gated by `wants_virtio_blk()` =
+the payload (`BlkInit`/`BlkRead`/`BlkWrite`/`BlkFlush`/`JrnLoad`/`JrnCommit`/`BlkSig`, gated by `wants_virtio_blk()` =
 `uncore.storage` + a CLI/picker + the virtio transport). The requestq uses the
 three-descriptor chain the spec mandates, and **the status byte decides success, not
 the used ring** — a device can complete a request and report `IOERR`, and a

@@ -79,7 +79,18 @@ pub const OFF_SPSAVE: i32 = OFF_RESUME + 8; // 3224
 pub const OFF_EXC: i32 = OFF_SPSAVE + 8; // 3232
 /// In-flight exception tag (`throw t` stores `t`; `rethrow` reuses it).
 pub const OFF_EXCTAG: i32 = OFF_EXC + 8; // 3240
-pub const OFF_ASYNC_CALL: i32 = OFF_EXCTAG + 8;
+/// Tagged-throw payload cells that survive `R_THROW`'s `s10=s11` fold
+/// (`MAX_EXCPAY` × 8 bytes, deepest first). `R_EXCCLR` reloads them when
+/// `OFF_EXC` is set (cross-function); local `JMP` to catch still copies off
+/// the wasm stack.
+pub const OFF_EXCPAY: i32 = OFF_EXCTAG + 8; // 3248
+pub const OFF_ASYNC_CALL: i32 = OFF_EXCPAY + (jc::MAX_EXCPAY as i32) * 8;
+/// 6 × u64: parked `JitCall` funcidx/nargs/a2..a5.
+pub const OFF_ASYNC_CALL_BYTES: i32 = 48;
+/// Nest depth for the JitCall EH spill (0 = no user JitCall owns the nest).
+pub const OFF_EXC_NEST_DEPTH: i32 = OFF_ASYNC_CALL + OFF_ASYNC_CALL_BYTES;
+/// Saved `OFF_EXC`/`EXCTAG`/`EXCPAY` for the outermost user `JitCall`.
+pub const OFF_EXC_NEST: i32 = OFF_EXC_NEST_DEPTH + 8;
 pub const JIT_HDR_BYTES: u64 = 8192;
 
 const STATE_XLATE: i64 = 1;
@@ -708,17 +719,24 @@ fn jit_h_call() -> Vec<Op> {
 // `R_EXCCHK` emitted right after the caller's `jalr`. That check reads
 // `OFF_EXC`: clear → normal return path; set → either jump to the enclosing
 // `catch` (`a` = handler record) or propagate the same unwind to the next
-// frame up (`a` = u32::MAX). `R_EXCCLR` at the `catch` head clears the flag.
+// frame up (`a` = u32::MAX). `R_EXCCLR` at the `catch` head clears the flag
+// and restores `s10` to the try's operand height (`a` cells from `s11`),
+// copying `b` payload cells when the catch is tagged.
 //
 // The frame-fold `s10 = s11` must precede the `ld s11` reload; both the THROW
 // unwind and the EXCCHK-propagate use the identical `ld ra,8(sp); ld s11,0(sp);
 // addi sp,16; jalr ra` tail that `jit_h_ret` ends with.
 
 /// THROW: `b` = tag (`u64::MAX` = `rethrow` — keep the in-flight `OFF_EXCTAG`).
+/// `a` = payload cell count; when nonzero the top `a` wasm cells (deepest
+/// first) are stored to `OFF_EXCPAY` so the frame-fold `s10=s11` does not
+/// drop a tagged payload. `t3` is still `&EXC` after the flag store, so
+/// EXCPAY is `addi t3, 16` (not a second `em_jitfield`). 32 generated words.
 fn jit_h_throw() -> Vec<Op> {
     let mut ops = vec![Op::Label("jit_h_throw".into())];
     h_prologue(&mut ops);
-    // rec.b (a2) == u64::MAX → rethrow, keep the in-flight tag.
+    ops.push(mv(T2, A1)); // park nparams; jit_lia clobbers a1
+                          // rec.b (a2) == u64::MAX → rethrow, keep the in-flight tag.
     ops.extend([li(T0, -1), beq(A2, T0, "jit_thr_keeptag")]);
     em64(&mut ops, T0, A2); // emit li t0, tag
     em_jitfield(&mut ops, i64::from(OFF_EXCTAG));
@@ -727,32 +745,74 @@ fn jit_h_throw() -> Vec<Op> {
     em_jitfield(&mut ops, i64::from(OFF_EXC));
     emw(&mut ops, encode::addi(T0, X0, 1)); // li t0,1
     emw(&mut ops, encode::sd(T0, T3, 0)); // *EXC = 1
+    ops.extend([beq(T2, X0, "jit_thr_fold")]); // a==0 → no payload
+    emi(&mut ops, encode::addi(T4, X0, 0), T2); // t4 = nparams
+    emw(&mut ops, encode::slli(T1, T4, 3));
+    emw(&mut ops, encode::sub(T1, S10, T1)); // src = s10 - n*8
+    emw(&mut ops, encode::addi(T3, T3, 16)); // t3 = &EXCPAY (was &EXC)
+    emw(&mut ops, encode::ld(T0, T1, 0));
+    emw(&mut ops, encode::sd(T0, T3, 0));
+    emw(&mut ops, encode::addi(T1, T1, 8));
+    emw(&mut ops, encode::addi(T3, T3, 8));
+    emw(&mut ops, encode::addi(T4, T4, -1));
+    emw(&mut ops, encode::bne(T4, X0, -20));
+    ops.push(Op::Label("jit_thr_fold".into()));
     emit_ret_frame(&mut ops); // mv s10,s11; ld ra,8sp; ld s11,0sp; sp+=16; ret
     h_epilogue(&mut ops);
     ops
 }
 
 /// EXCCHK: `a` = enclosing `catch` handler record, or u32::MAX to propagate.
+/// `b` = expected tag (`u64::MAX` = do not compare — `catch_all` / legacy).
 /// Emitted immediately after every R_CALL/R_CALLI so a callee's R_THROW has a
-/// landing pad. Generated shape: `ld t0,EXC(s9); beqz t0,+24; <handle>` — the
-//  handle block is exactly 5 words either way, so the skip offset is fixed.
+/// landing pad. Generated shape: `ld t0,EXC(s9); beqz t0,<handle>; <handle>`.
+/// A tagged `try_table` landing also compares `OFF_EXCTAG` and propagates on
+/// mismatch. Handle length is 5 words (no tag check) or 21 (tag check).
 fn jit_h_excchk() -> Vec<Op> {
     let mut ops = vec![Op::Label("jit_h_excchk".into())];
     h_prologue(&mut ops);
     // Park rec.a (the catch-handler record index) in t2 — `em_jitfield`'s
-    // jit_lia clobbers a1, which `slot_target` below needs.
+    // jit_lia clobbers a1, which `slot_target` below needs. rec.b stays in a2.
     ops.push(mv(T2, A1));
     em_jitfield(&mut ops, i64::from(OFF_EXC)); // t3 = &EXC
     emw(&mut ops, encode::ld(T0, T3, 0)); // t0 = EXC
-    emw(&mut ops, encode::beq(T0, X0, 24)); // EXC==0 → skip the 5-word handle
-                                            // translator-time branch on the saved rec.a (t2): u32::MAX → propagate.
-    ops.extend([li(T0, i64::from(u32::MAX)), beq(T2, T0, "jit_xc_prop")]);
-    // catch: emit `li t6, a4+a*SLOT; jalr x0,t6` — jump to the catch head.
+                                          // translator-time: a==MAX → propagate-only 5-word handle.
+    ops.extend([li(T0, i64::from(u32::MAX)), beq(T2, T0, "jit_xc_propchk")]);
+    // translator-time: b==MAX → catch_all, no tag compare (5-word jalr).
+    ops.extend([li(T0, -1), beq(A2, T0, "jit_xc_notag")]);
+    // translator-time: bit 32 of b → chain (mismatch falls through).
+    ops.extend([srli(T1, A2, 32), bne(T1, X0, "jit_xc_chain")]);
+    // tagged, last clause: skip 21-word handle when EXC==0 (offset = (21+1)*4).
+    emw(&mut ops, encode::beq(T0, X0, 88));
+    em_jitfield(&mut ops, i64::from(OFF_EXCTAG)); // t3 = &EXCTAG
+    emw(&mut ops, encode::ld(T0, T3, 0)); // t0 = EXCTAG
+    em64(&mut ops, T1, A2); // li t1, expected tag (low bits)
+    emw(&mut ops, encode::bne(T0, T1, 24)); // mismatch → skip 5-word jalr
+    ops.push(mv(A1, T2));
+    slot_target(&mut ops);
+    emw(&mut ops, encode::jalr(X0, T6, 0));
+    emit_ret_frame(&mut ops); // tag mismatch: propagate
+    ops.push(j("jit_xc_done"));
+    // chained tagged miss: skip 16-word handle when EXC==0 ((16+1)*4).
+    ops.push(Op::Label("jit_xc_chain".into()));
+    emw(&mut ops, encode::beq(T0, X0, 68));
+    em_jitfield(&mut ops, i64::from(OFF_EXCTAG));
+    emw(&mut ops, encode::ld(T0, T3, 0));
+    ops.extend([li(T3, 0xffff_ffff), and_(T3, A2, T3)]); // tag = b low 32
+    em64(&mut ops, T1, T3);
+    emw(&mut ops, encode::bne(T0, T1, 24)); // mismatch → skip jalr, next EXCCHK
     ops.push(mv(A1, T2));
     slot_target(&mut ops);
     emw(&mut ops, encode::jalr(X0, T6, 0));
     ops.push(j("jit_xc_done"));
-    // propagate: emit the frame-fold + ret tail (unwind this frame to caller).
+    ops.push(Op::Label("jit_xc_notag".into()));
+    emw(&mut ops, encode::beq(T0, X0, 24)); // EXC==0 → skip 5-word jalr
+    ops.push(mv(A1, T2));
+    slot_target(&mut ops);
+    emw(&mut ops, encode::jalr(X0, T6, 0));
+    ops.push(j("jit_xc_done"));
+    ops.push(Op::Label("jit_xc_propchk".into()));
+    emw(&mut ops, encode::beq(T0, X0, 24)); // EXC==0 → skip 5-word unwind
     ops.push(Op::Label("jit_xc_prop".into()));
     emit_ret_frame(&mut ops);
     ops.push(Op::Label("jit_xc_done".into()));
@@ -770,13 +830,87 @@ fn emit_ret_frame(ops: &mut Vec<Op>) {
     emw(ops, encode::jalr(X0, RA, 0));
 }
 
-/// EXCCLR: `catch` head — `*OFF_EXC = 0` so nested calls in the handler don't
-/// re-fire on the already-consumed exception.
+/// EXCCLR: `catch` head — save `OFF_EXC`, clear it, restore vsp to `s11+a*8`.
+/// `b==0` (`catch_all`): just truncate. Tagged catch copies `b` cells from
+/// either the wasm stack (local `JMP`, `EXC` clear) or `OFF_EXCPAY`
+/// (cross-function, `EXC` set). 29 generated words (slot is 32).
 fn jit_h_excclr() -> Vec<Op> {
     let mut ops = vec![Op::Label("jit_h_excclr".into())];
     h_prologue(&mut ops);
+    // Park rec.a (height): jit_lia clobbers a1. rec.b (nparams) stays in a2.
+    ops.push(mv(T2, A1));
     em_jitfield(&mut ops, i64::from(OFF_EXC)); // t3 = &EXC
+    emw(&mut ops, encode::ld(T6, T3, 0)); // t6 = EXC (cross-func vs local)
     emw(&mut ops, encode::sd(X0, T3, 0)); // *EXC = 0
+    em64(&mut ops, T1, T2); // li t1, height
+    emw(&mut ops, encode::slli(T1, T1, 3));
+    emw(&mut ops, encode::add(T0, S11, T1)); // dest = s11 + a*8
+    emi(&mut ops, encode::addi(T2, X0, 0), A2); // li t2, nparams (fits 12-bit)
+                                                // nparams==0 → skip src-select + copy (13 words → offset 56).
+    emw(&mut ops, encode::beq(T2, X0, 56));
+    emw(&mut ops, encode::bne(T6, X0, 16)); // EXC set → skip stack src (3 words)
+    emw(&mut ops, encode::slli(T3, T2, 3));
+    emw(&mut ops, encode::sub(T1, S10, T3)); // src = s10 - b*8
+    emw(&mut ops, encode::jal(X0, 12)); // skip EXCPAY src (2 words)
+    emw(&mut ops, encode::addi(T3, T3, 16)); // t3 = &EXCPAY (still &EXC)
+    emw(&mut ops, encode::addi(T1, T3, 0)); // src = EXCPAY
+    emw(&mut ops, encode::addi(T4, X0, 0));
+    emw(&mut ops, encode::ld(T5, T1, 0));
+    emw(&mut ops, encode::sd(T5, T0, 0));
+    emw(&mut ops, encode::addi(T1, T1, 8));
+    emw(&mut ops, encode::addi(T0, T0, 8));
+    emw(&mut ops, encode::addi(T4, T4, 1));
+    emw(&mut ops, encode::bltu(T4, T2, -20));
+    emw(&mut ops, encode::addi(S10, T0, 0)); // s10 = dest (+ b*8 after copy)
+    h_epilogue(&mut ops);
+    ops
+}
+
+/// EXNREF: `a == u32::MAX` is `throw_ref` (pop handle, null→TRAP_UNREACH,
+/// write EXCTAG=handle-1, set EXC, fall through to the following EXCCHK).
+/// Otherwise MAKE: `a` = payload cells copied from the wasm stack into
+/// EXCPAY (0 if already there); `b` = tag (`u64::MAX` keeps OFF_EXCTAG).
+/// Pushes handle = EXCTAG+1 (0 is null). Translator-time branches pick one
+/// path per record so each stays under 32 generated words.
+fn jit_h_exnref() -> Vec<Op> {
+    let mut ops = vec![Op::Label("jit_h_exnref".into())];
+    h_prologue(&mut ops);
+    ops.push(mv(T2, A1)); // park a; jit_lia clobbers a1
+    ops.extend([li(T0, i64::from(u32::MAX)), beq(T2, T0, "jit_exn_throw")]);
+
+    // MAKE
+    em_jitfield(&mut ops, i64::from(OFF_EXC)); // t3 = &EXC
+    ops.extend([li(T0, -1), beq(A2, T0, "jit_exn_keep")]);
+    em64(&mut ops, T0, A2);
+    emw(&mut ops, encode::sd(T0, T3, 8)); // *EXCTAG = tag
+    ops.push(Op::Label("jit_exn_keep".into()));
+    ops.extend([beq(T2, X0, "jit_exn_push")]); // a==0 → no stack copy
+    emi(&mut ops, encode::addi(T4, X0, 0), T2); // t4 = nparams
+    emw(&mut ops, encode::slli(T1, T4, 3));
+    emw(&mut ops, encode::sub(T1, S10, T1));
+    emw(&mut ops, encode::addi(T2, T3, 16)); // t2 = &EXCPAY
+    emw(&mut ops, encode::ld(T0, T1, 0));
+    emw(&mut ops, encode::sd(T0, T2, 0));
+    emw(&mut ops, encode::addi(T1, T1, 8));
+    emw(&mut ops, encode::addi(T2, T2, 8));
+    emw(&mut ops, encode::addi(T4, T4, -1));
+    emw(&mut ops, encode::bne(T4, X0, -20));
+    ops.push(Op::Label("jit_exn_push".into()));
+    emw(&mut ops, encode::ld(T0, T3, 8)); // t0 = EXCTAG
+    emw(&mut ops, encode::addi(T0, T0, 1));
+    em_push(&mut ops, T0);
+    h_epilogue(&mut ops);
+
+    // THROWREF — no frame fold; the following R_EXCCHK routes or propagates.
+    ops.push(Op::Label("jit_exn_throw".into()));
+    em_pop(&mut ops, T0);
+    emw(&mut ops, encode::bne(T0, X0, 28)); // skip 6-word trap
+    em_trap(&mut ops, i64::from(jc::TRAP_UNREACH), T1);
+    emw(&mut ops, encode::addi(T0, T0, -1)); // tag = handle-1
+    em_jitfield(&mut ops, i64::from(OFF_EXC));
+    emw(&mut ops, encode::sd(T0, T3, 8)); // *EXCTAG = tag
+    emw(&mut ops, encode::addi(T1, X0, 1));
+    emw(&mut ops, encode::sd(T1, T3, 0)); // *EXC = 1
     h_epilogue(&mut ops);
     ops
 }
@@ -1742,7 +1876,14 @@ fn jit_run_node() -> Vec<Op> {
         li(T0, i64::from(OFF_EXC)),
         add(T0, S9, T0),
         sd(X0, T0, 0),
-        sd(X0, T0, 8), // OFF_EXCTAG = OFF_EXC + 8
+        sd(X0, T0, 8),  // OFF_EXCTAG
+        sd(X0, T0, 16), // OFF_EXCPAY[0..3]
+        sd(X0, T0, 24),
+        sd(X0, T0, 32),
+        sd(X0, T0, 40),
+        li(T0, i64::from(OFF_EXC_NEST_DEPTH)),
+        add(T0, S9, T0),
+        sd(X0, T0, 0),
         li(T0, i64::from(OFF_AXB)),
         add(T0, S9, T0),
         sd(X0, T0, 0),
@@ -2299,10 +2440,12 @@ fn jit_ax_node() -> Vec<Op> {
 /// state), parks a trap continuation (`OFF_RESUME`/`OFF_SPSAVE`) so a fault deep
 /// in the call unwinds back to this frame, pushes `nargs` 8-byte cells onto the
 /// value stack, `jalr`s `ftab[funcidx]`, and returns the top result cell (-1 on
-/// trap). Runs *between* `JitRun`s — input listeners and the asyncify rewind —
-/// never inside an active run (the value-stack base reset would clobber a live
-/// frame). Working state rides the frame, not s-regs, because generated code
-/// owns s8-s11.
+/// trap). The outermost user call spills the live EH bank (`OFF_EXC` nest)
+/// so a listener cannot clobber the caller's `EXCPAY`; nested/control calls
+/// skip the spill. Runs *between* `JitRun`s — input listeners and the asyncify
+/// rewind — never inside an active run (the value-stack base reset would
+/// clobber a live frame). Working state rides the frame, not s-regs, because
+/// generated code owns s8-s11.
 fn jit_call_node() -> Vec<Op> {
     vec![
         Op::Comment(
@@ -2325,6 +2468,7 @@ fn jit_call_node() -> Vec<Op> {
         sd(A3, SP, 48),
         sd(A4, SP, 40),
         sd(A5, SP, 32),
+        sd(X0, SP, 0), // nest-owner flag
         li(T0, 5),
         bgeu(A1, T0, "jit_call_err"),
         li(T0, jc::MAX_JIT_FUNCS as i64),
@@ -2372,11 +2516,43 @@ fn jit_call_node() -> Vec<Op> {
         li(T0, STATE_OK),
         sd(T0, S9, OFF_STATE),
         sd(X0, S9, OFF_ERR),
+        // Outermost user JitCall spills the live EH bank so a listener cannot
+        // clobber the caller's EXCPAY; nested/control calls skip the spill.
+        ld(T0, SP, 8),
+        bne(T0, X0, "jit_call_exc_clear"),
+        li(T1, i64::from(OFF_EXC_NEST_DEPTH)),
+        add(T1, S9, T1),
+        ld(T0, T1, 0),
+        bne(T0, X0, "jit_call_exc_clear"),
+        li(T0, 1),
+        sd(T0, T1, 0),
+        sd(T0, SP, 0),
+        li(T2, i64::from(OFF_EXC)),
+        add(T2, S9, T2),
+        li(T3, i64::from(OFF_EXC_NEST)),
+        add(T3, S9, T3),
+        ld(T0, T2, 0),
+        sd(T0, T3, 0),
+        ld(T0, T2, 8),
+        sd(T0, T3, 8),
+        ld(T0, T2, 16),
+        sd(T0, T3, 16),
+        ld(T0, T2, 24),
+        sd(T0, T3, 24),
+        ld(T0, T2, 32),
+        sd(T0, T3, 32),
+        ld(T0, T2, 40),
+        sd(T0, T3, 40),
+        Op::Label("jit_call_exc_clear".into()),
         // a fresh re-entry starts with no pending exception.
         li(T0, i64::from(OFF_EXC)),
         add(T0, S9, T0),
         sd(X0, T0, 0),
-        sd(X0, T0, 8), // OFF_EXCTAG
+        sd(X0, T0, 8),  // OFF_EXCTAG
+        sd(X0, T0, 16), // OFF_EXCPAY[0..3]
+        sd(X0, T0, 24),
+        sd(X0, T0, 32),
+        sd(X0, T0, 40),
         // trap continuation → jit_call_done; restore sp → this frame. Both are
         // large offsets, so the header slot is addressed via li+add.
         li(T0, i64::from(OFF_SPSAVE)),
@@ -2490,6 +2666,28 @@ fn jit_call_node() -> Vec<Op> {
         sd(T0, SP, 16),
         Op::Label("jit_call_out".into()),
         ld(A0, SP, 16),
+        ld(T0, SP, 0),
+        beq(T0, X0, "jit_call_unpark"),
+        li(T2, i64::from(OFF_EXC_NEST)),
+        add(T2, S9, T2),
+        li(T3, i64::from(OFF_EXC)),
+        add(T3, S9, T3),
+        ld(T0, T2, 0),
+        sd(T0, T3, 0),
+        ld(T0, T2, 8),
+        sd(T0, T3, 8),
+        ld(T0, T2, 16),
+        sd(T0, T3, 16),
+        ld(T0, T2, 24),
+        sd(T0, T3, 24),
+        ld(T0, T2, 32),
+        sd(T0, T3, 32),
+        ld(T0, T2, 40),
+        sd(T0, T3, 40),
+        li(T1, i64::from(OFF_EXC_NEST_DEPTH)),
+        add(T1, S9, T1),
+        sd(X0, T1, 0),
+        Op::Label("jit_call_unpark".into()),
         ld(RA, SP, 120),
         ld(S8, SP, 112),
         ld(S9, SP, 104),
@@ -2584,6 +2782,7 @@ pub fn nodes(with_ext: bool) -> Vec<Node> {
     ops.extend(jit_h_throw());
     ops.extend(jit_h_excchk());
     ops.extend(jit_h_excclr());
+    ops.extend(jit_h_exnref());
     if with_ext {
         ops.extend(jit_h_ext());
     } else {
@@ -2743,6 +2942,7 @@ pub fn nodes(with_ext: bool) -> Vec<Node> {
             "jit_h_throw",
             "jit_h_excchk",
             "jit_h_excclr",
+            "jit_h_exnref",
         ];
         ops.push(j("jit_disp_over"));
         ops.push(Op::Label("jit_disp".into()));
@@ -2791,6 +2991,20 @@ pub fn nodes(with_ext: bool) -> Vec<Node> {
             // Host-side promise settle (EXT_NOTEFUL / EXT_NOTEREJ).
             "LwNoteFul",
             "LwNoteRej",
+            // UTF-8 event `type`/`key`/`code` (EXT_EVGETSTR). Not Linux keycodes.
+            "LwEvGetStr",
+            // remove_event_listener(cb) (EXT_RMLSN).
+            "LwRmLsn",
+            // OptionalUint/Handle sret (EXT_EVGETOPT).
+            "LwEvGetOpt",
+            // float getter (EXT_EVGETF).
+            "LwEvGetF",
+            // double getter (EXT_EVGETD).
+            "LwEvGetD",
+            // OptionalString/Bool/Double sret (EXT_EVGETOPTS/B/D).
+            "LwEvGetOptS",
+            "LwEvGetOptB",
+            "LwEvGetOptD",
         ] {
             ops.push(Op::Dw64 {
                 addr: Addr::Label(l.into()),

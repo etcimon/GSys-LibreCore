@@ -801,38 +801,17 @@ mod tests {
     }
 
     #[test]
-    fn ui_try_await_catch_catches_event_throw_after_asyncify_rewind() {
+    fn ui_try_await_catch_is_rejected_before_unwind() {
         let mut m = load_ui_event_throw_module();
         let a = Asyncify::new(&m).expect("wasm-opt left asyncify exports");
         let mut host = TestHost::default();
         let surrounding = export_idx(&m, "surrounding");
-        let data = 1024u32;
-        let stack_end = 4096u32;
-        let step = a
-            .step(&mut m, surrounding, &[], data, stack_end, &mut host)
-            .expect("surrounding await unwinds");
-        let slot = match step {
-            Step::Sleeping { slot, .. } => slot,
-            other => panic!("expected Sleeping from await, got {other:?}"),
-        };
-        // wrapExportFn: settle the Promise then start_rewind.
-        host.resolve_slot(slot).expect("await resolve");
-        let step = a
-            .resume(&mut m, surrounding, &[], data, stack_end, &mut host)
-            .expect("rewind continues into on_click throw, caught outside");
-        match step {
-            Step::Done(v) => assert_eq!(v, vec![1], "catch returns 1"),
-            other => panic!("expected Done(1), got {other:?}"),
-        }
+        let err = a
+            .step(&mut m, surrounding, &[], 1024, 4096, &mut host)
+            .expect_err("await inside try must not unwind");
         assert!(
-            host.throw_stack
-                .windows(3)
-                .any(|w| { w[0] == "thrower" && w[1] == "on_click" && w[2] == "surrounding" })
-                || (host.throw_stack.first().map(String::as_str) == Some("thrower")
-                    && host.throw_stack.iter().any(|f| f == "on_click")
-                    && host.throw_stack.iter().any(|f| f == "surrounding")),
-            "JIT stack at throw (callee first): {:?}",
-            host.throw_stack
+            err.contains("await inside try"),
+            "interp must refuse await-in-try: {err}"
         );
     }
 
@@ -843,73 +822,32 @@ mod tests {
     }
 
     #[test]
-    fn try_table_throw_in_await_caught_after_asyncify_rewind() {
+    fn try_table_await_is_rejected_before_unwind() {
         let mut m = load_try_table_await_module();
         let a = Asyncify::new(&m).expect("wasm-opt left asyncify exports");
         let mut host = TestHost::default();
         let throw_in_await = export_idx(&m, "throw_in_await");
-        let data = 1024u32;
-        let stack_end = 4096u32;
-        let slot = match a
-            .step(&mut m, throw_in_await, &[], data, stack_end, &mut host)
-            .expect("await inside try_table unwinds")
-        {
-            Step::Sleeping { slot, .. } => slot,
-            other => panic!("expected Sleeping, {other:?}"),
-        };
-        host.resolve_slot(slot).expect("wrapExportFn settle");
-        match a
-            .resume(&mut m, throw_in_await, &[], data, stack_end, &mut host)
-            .expect("rewind then throw lands on try_table catch dest")
-        {
-            Step::Done(v) => assert_eq!(v, vec![7], "valued catch dest is the throw payload"),
-            other => panic!("expected Done(7), {other:?}"),
-        }
+        let err = a
+            .step(&mut m, throw_in_await, &[], 1024, 4096, &mut host)
+            .expect_err("await inside try_table must not unwind");
         assert!(
-            host.throw_stack.iter().any(|f| f == "throw_in_await"),
-            "JIT stack in catch: {:?}",
-            host.throw_stack
-        );
-        assert!(
-            !host
-                .throw_stack
-                .iter()
-                .any(|f| f == "on_click" || f == "domEvent"),
-            "simple throw-in-await must not enter the event export: {:?}",
-            host.throw_stack
+            err.contains("await inside try"),
+            "interp must refuse await-in-try_table: {err}"
         );
     }
 
     #[test]
-    fn async_dom_event_awaits_then_thrower_caught_with_jit_stack() {
+    fn async_dom_event_await_inside_try_is_rejected() {
         let mut m = load_try_table_await_module();
         let a = Asyncify::new(&m).expect("wasm-opt left asyncify exports");
         let mut host = TestHost::default();
-        // EXPORTED_FROM_D includes `domEvent`; same body as `on_click`.
         let dom_event = export_idx(&m, "domEvent");
-        let data = 1024u32;
-        let stack_end = 4096u32;
-        let slot = match a
-            .step(&mut m, dom_event, &[], data, stack_end, &mut host)
-            .expect("async DOM event await unwinds")
-        {
-            Step::Sleeping { slot, .. } => slot,
-            other => panic!("expected Sleeping, {other:?}"),
-        };
-        host.resolve_slot(slot).expect("wrapExportFn settle");
-        match a
-            .resume(&mut m, dom_event, &[], data, stack_end, &mut host)
-            .expect("rewind into thrower, try_table catch dest")
-        {
-            Step::Done(v) => assert_eq!(v, vec![1], "event catch returns 1"),
-            other => panic!("expected Done(1), {other:?}"),
-        }
+        let err = a
+            .step(&mut m, dom_event, &[], 1024, 4096, &mut host)
+            .expect_err("await inside try_table must not unwind");
         assert!(
-            host.throw_stack.first().map(String::as_str) == Some("thrower")
-                && (host.throw_stack.iter().any(|f| f == "on_click")
-                    || host.throw_stack.iter().any(|f| f == "domEvent")),
-            "JIT stack at throw (callee first): {:?}",
-            host.throw_stack
+            err.contains("await inside try"),
+            "interp must refuse event await-in-try: {err}"
         );
     }
 

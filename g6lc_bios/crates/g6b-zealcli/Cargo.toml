@@ -16,6 +16,7 @@ g6b-holyc = { workspace = true }
 # Real block devices, partition tables and filesystems. The CLI walks them; it
 # does not implement them.
 g6b-vfs = { workspace = true }
+g6b-bootctl = { workspace = true }
 
 # Test-only: the guest decodes the same keycodes (`g6b_asm::cli::keycode_ascii`),
 # and two keymaps that disagree is a bug an operator meets one key at a time.

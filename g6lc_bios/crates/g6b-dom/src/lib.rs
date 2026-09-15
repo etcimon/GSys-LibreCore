@@ -9,6 +9,15 @@ mod event;
 pub use event::*;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Identity stamp for dispatch path snapshots. Child-index paths retarget
+/// when a listener mutates the tree; stamps do not.
+static NEXT_STAMP: AtomicU64 = AtomicU64::new(1);
+
+fn next_stamp() -> u64 {
+    NEXT_STAMP.fetch_add(1, Ordering::Relaxed)
+}
 
 /// goosie invalidation bits (Style / Layout / Paint). `Node` has no parent
 /// pointer, so callers walk [`Node::dirty_union`] instead of bubbling up.
@@ -64,6 +73,8 @@ pub struct Node {
     pub hidden: bool,
     pub attributes: BTreeMap<String, String>,
     pub event_listeners: Vec<event::Listener>,
+    /// Stable identity for event-path snapshots. Not an id attribute.
+    pub stamp: u64,
 }
 
 impl Node {
@@ -78,6 +89,7 @@ impl Node {
             hidden: false,
             attributes: BTreeMap::new(),
             event_listeners: Vec::new(),
+            stamp: next_stamp(),
         }
     }
 
@@ -92,6 +104,7 @@ impl Node {
             hidden: false,
             attributes: BTreeMap::new(),
             event_listeners: Vec::new(),
+            stamp: next_stamp(),
         }
     }
 

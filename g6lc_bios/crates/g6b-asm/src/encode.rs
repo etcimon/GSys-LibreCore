@@ -128,8 +128,16 @@ pub const VIO_DEV_BLK: u32 = 2;
 pub const VIO_BLK_SLOT: u64 = 6;
 /// `virtio_blk_req.type` — `VIRTIO_BLK_T_IN` is a read *from* the device.
 pub const VIO_BLK_T_IN: i64 = 0;
+/// `VIRTIO_BLK_T_OUT` — write *to* the device. Guest data is device-readable.
+pub const VIO_BLK_T_OUT: i64 = 1;
+/// `VIRTIO_BLK_T_FLUSH` — durable flush; requires `VIRTIO_BLK_F_FLUSH`.
+pub const VIO_BLK_T_FLUSH: i64 = 4;
+/// Feature bit 9 (`VIRTIO_BLK_F_FLUSH`) in device-features word 0.
+pub const VIO_BLK_F_FLUSH: u32 = 1 << 9;
 /// `virtio_blk_req.status` — `VIRTIO_BLK_S_OK`.
 pub const VIO_BLK_S_OK: i64 = 0;
+/// `VIRTIO_BLK_S_IOERR`.
+pub const VIO_BLK_S_IOERR: u8 = 1;
 /// The unit every virtio-blk request is quoted in: virtio spec 5.2.4 fixes it at
 /// 512 bytes regardless of the device's own block size.
 pub const VIO_BLK_SECTOR: i64 = 512;
@@ -256,13 +264,20 @@ pub const VIRGL_PRIM_TRIANGLES: u32 = 4;
 pub const VIRGL_PRIM_TRIANGLE_STRIP: u32 = 5;
 /// `virtio_input_event` field values: `type` (Linux `EV_*`).
 /// `InpDrain` queues `EV_KEY` into `__vio`'s bounded key queue (VGA
-/// `DomNav`); `EV_ABS`/`EV_REL` are WebFeed (svelte-d pointer). The
-/// statusq (queue 1) is unused — the guest is a passive consumer.
+/// `DomNav`); `EV_ABS`/`EV_REL` are WebFeed (svelte-d pointer) and the
+/// guest `TabDrain` pointer lane. `EV_SYN`/`SYN_REPORT` is a batch
+/// delimiter — `TabDrain` no-ops it because the used-ring walk already
+/// latches the whole packet before `DomtPtr`. The statusq (queue 1) is
+/// unused — the guest is a passive consumer.
+pub const VIO_INP_EV_SYN: u32 = 0;
+/// Linux `EV_KEY`.
 pub const VIO_INP_EV_KEY: u32 = 1;
-/// Linux `EV_REL` — virtio-mouse deltas (`REL_X`/`REL_Y`).
+/// Linux `EV_REL` — virtio-mouse deltas (`REL_X`/`REL_Y`/`REL_WHEEL`).
 pub const VIO_INP_EV_REL: u32 = 2;
 /// Linux `EV_ABS` — virtio-tablet axes (`ABS_X`/`ABS_Y`, 0..=`VIO_ABS_MAX`).
 pub const VIO_INP_EV_ABS: u32 = 3;
+/// Linux `SYN_REPORT` — end of one input packet (`code` of `EV_SYN`).
+pub const VIO_SYN_REPORT: u32 = 0;
 /// Device-configuration window — virtio-mmio `VIRTIO_MMIO_CONFIG` offset.
 /// The virtio-input `virtio_input_config` view is `select@0, subsel@1,
 /// size@2, data@8`: write `select`/`subsel`, read `size`/`data`.
@@ -292,6 +307,12 @@ pub const CMD_GET: u32 = 0x0074_6547; // "Get\0"
 /// `Blk` — read LBA 0/1 and report what the medium is, from the guest's own
 /// virtio-blk driver rather than from a host-rendered page.
 pub const CMD_BLK: u32 = u32::from_le_bytes(*b"Blk\n");
+/// `Jrn` — load/commit the G6BH journal window (LBA 8), not a Linux boot.
+pub const CMD_JRN: u32 = u32::from_le_bytes(*b"Jrn\n");
+/// `Fws` — stage the inactive firmware slot (B). Not a slot switch, not autoboot.
+pub const CMD_FWS: u32 = u32::from_le_bytes(*b"Fws\n");
+/// `Lnx` — `LinuxLoadDisk` of the canary Image at LBA 40. Not autoboot.
+pub const CMD_LNX: u32 = u32::from_le_bytes(*b"Lnx\n");
 pub const CMD_KEYS: u32 = 0x7379_654b; // "Keys" — dump the virtio-input key queue
 pub const CMD_AWAI: u32 = 0x6961_7741; // "Awai" — Await: claim a bounded pending slot
 pub const CMD_THRO: u32 = 0x6f72_6854; // "Thro" — Throw: reject the newest pending await

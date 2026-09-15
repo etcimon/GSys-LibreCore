@@ -98,8 +98,131 @@ fn commissioned() -> (Memory, Journal) {
 }
 
 #[test]
+fn bios_firmware_layout_keeps_journal_off_ab_slots() {
+    assert_eq!(FirmwareLayout::BIOS.check(), Ok(()));
+    assert!(FirmwareLayout::BIOS.contains_journal(8));
+    assert!(FirmwareLayout::BIOS.contains_journal(23));
+    assert!(!FirmwareLayout::BIOS.contains_journal(24));
+    assert!(FirmwareLayout::BIOS.contains_firmware(24));
+    assert!(FirmwareLayout::BIOS.contains_firmware(32));
+    assert!(!FirmwareLayout::BIOS.contains_firmware(16));
+    let overlap = FirmwareLayout {
+        journal_lba: 8,
+        journal_sectors: 16,
+        slot_a_lba: 20,
+        slot_b_lba: 32,
+        slot_sectors: 8,
+    };
+    assert_eq!(overlap.check(), Err(LayoutError::Overlap));
+    let low = FirmwareLayout {
+        journal_lba: 0,
+        journal_sectors: 16,
+        slot_a_lba: 24,
+        slot_b_lba: 32,
+        slot_sectors: 8,
+    };
+    assert_eq!(low.check(), Err(LayoutError::BelowGpt));
+}
+
+#[test]
+fn inactive_slot_is_the_only_stage_window() {
+    let layout = FirmwareLayout::BIOS;
+    assert_eq!(layout.slot_lba(FirmwareSlot::A), 24);
+    assert_eq!(layout.slot_lba(FirmwareSlot::B), 32);
+    assert_eq!(layout.slot_sectors, 8);
+    assert_eq!(layout.slot_bytes(), 4096);
+    assert!(layout.contains_slot(FirmwareLayout::RECOVERY, 24));
+    assert!(layout.contains_slot(FirmwareLayout::INACTIVE, 32));
+    assert!(layout.may_stage(32));
+    assert!(layout.may_stage(39));
+    assert!(!layout.may_stage(24));
+    assert!(!layout.may_stage(8));
+    assert!(!layout.may_stage(0));
+    assert!(!layout.may_stage(40));
+}
+
+#[test]
+fn slot_select_is_refused_while_inhibit_and_never_switches() {
+    let (_, journal) = setup();
+    assert_eq!(journal.record().may_select(), Err(Reason::Provisioning));
+    let (_, commissioned) = commissioned();
+    assert_eq!(commissioned.record().may_select(), Err(Reason::Operator));
+}
+
+#[test]
+fn nominate_inactive_records_b_without_clearing_inhibit() {
+    let (mut mem, mut journal) = setup();
+    assert_eq!(journal.record().staged(), None);
+    assert_eq!(
+        journal.record().may_nominate(FirmwareSlot::A),
+        Err(Reason::Operator)
+    );
+    journal.nominate_inactive(&mut mem).unwrap();
+    assert_eq!(journal.record().staged(), Some(FirmwareSlot::B));
+    assert_eq!(journal.record().inhibit(), Some(Reason::Provisioning));
+    assert_eq!(
+        journal.decision(&TARGET, READY),
+        Decision::Stay(Reason::Provisioning)
+    );
+    assert_eq!(journal.record().may_select(), Err(Reason::Provisioning));
+    let encoded = journal.record().encode();
+    assert_eq!(encoded[20], 2);
+    assert_eq!(
+        Record::decode(&encoded).unwrap().staged(),
+        Some(FirmwareSlot::B)
+    );
+}
+
+#[test]
+fn interrupted_nominate_never_clears_inhibit() {
+    for operation in 0..8 {
+        let (mut mem, mut journal) = setup();
+        mem.fail_at = Some(mem.operations + operation);
+        let _ = journal.nominate_inactive(&mut mem);
+        mem.fail_at = None;
+        match Journal::load(&mut mem, Domain::Linux) {
+            Ok(reload) => {
+                assert!(
+                    matches!(reload.decision(&TARGET, READY), Decision::Stay(_)),
+                    "operation {operation}: {:?}",
+                    reload.decision(&TARGET, READY)
+                );
+                assert!(
+                    reload.record().may_select().is_err(),
+                    "operation {operation}"
+                );
+            }
+            Err(_) => {}
+        }
+    }
+    for prefix in [0, 1, 20, 32, SLOT_BYTES - 1] {
+        let (mut mem, mut journal) = setup();
+        mem.fail_at = Some(mem.operations + 2);
+        mem.partial_write = prefix;
+        let _ = journal.nominate_inactive(&mut mem);
+        mem.fail_at = None;
+        if let Ok(reload) = Journal::load(&mut mem, Domain::Linux) {
+            assert!(matches!(reload.decision(&TARGET, READY), Decision::Stay(_)));
+        }
+    }
+}
+
+#[test]
 fn crc32c_reference_vector() {
     assert_eq!(crc32c(b"123456789"), 0xe306_9283);
+}
+
+#[test]
+fn initial_record_matches_journal_disk_plant() {
+    let (mem, _) = setup();
+    assert_eq!(
+        &mem.slots[0][..20],
+        &[
+            0x47, 0x36, 0x42, 0x48, 0x01, 0x00, 0x00, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x01, 0x00, 0x01, 0x00
+        ]
+    );
+    assert_eq!(&mem.slots[0][4092..], &[0xb2, 0x8b, 0xdd, 0x5e]);
 }
 
 #[test]
@@ -132,12 +255,16 @@ fn truncated_corrupt_and_unknown_records_are_refused() {
         bad[at] ^= 1;
         assert!(Record::decode(&bad).is_err(), "byte {at}");
     }
-    for at in [20, 23, 112, 509, SLOT_BYTES - 5] {
+    for at in [21, 23, 112, 509, SLOT_BYTES - 5] {
         let mut bad = good;
         bad[at] = 1;
         seal(&mut bad);
         assert_eq!(Record::decode(&bad), Err(FormatError::Reserved));
     }
+    let mut bad = good;
+    bad[20] = 3;
+    seal(&mut bad);
+    assert_eq!(Record::decode(&bad), Err(FormatError::Fields));
     let mut bad = good;
     bad[18] = 255;
     seal(&mut bad);

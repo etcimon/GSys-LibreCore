@@ -22,18 +22,18 @@ use crate::encode::{
     X0,
 };
 use crate::encode::{
-    SBI_PUTCHAR, VIO_BLK_SECTOR, VIO_BLK_S_OK, VIO_BLK_T_IN, VIO_DESC_NEXT, VIO_DESC_WRITE,
-    VIO_DEV_BLK, VIO_DEV_GPU, VIO_DEV_INPUT, VIO_F_VERSION_1, VIO_GPU_FMT_B8G8R8X8,
-    VIO_GPU_F_VIRGL, VIO_GPU_GET_DISPLAY_INFO, VIO_GPU_RESOURCE_ATTACH_BACKING,
-    VIO_GPU_RESOURCE_CREATE_2D, VIO_GPU_RESOURCE_FLUSH, VIO_GPU_RESP_OK_DISPLAY_INFO,
-    VIO_GPU_RESP_OK_NODATA, VIO_GPU_SET_SCANOUT, VIO_GPU_TRANSFER_FROM_HOST_3D,
-    VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_CFG_EV_BITS, VIO_INP_EV_ABS, VIO_INP_EV_KEY, VIO_MAGIC,
-    VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_CONFIG,
-    VIO_REG_DRV_FEATURES, VIO_REG_DRV_FEATURES_SEL, VIO_REG_FEATURES, VIO_REG_FEATURES_SEL,
-    VIO_REG_ISR_ACK, VIO_REG_ISR_STATUS, VIO_REG_QUEUE_AVAIL, VIO_REG_QUEUE_DESC,
-    VIO_REG_QUEUE_NOTIFY, VIO_REG_QUEUE_NUM, VIO_REG_QUEUE_NUM_MAX, VIO_REG_QUEUE_READY,
-    VIO_REG_QUEUE_SEL, VIO_REG_QUEUE_USED, VIO_REG_STATUS, VIO_ST_ACK, VIO_ST_DRIVER,
-    VIO_ST_DRIVER_OK, VIO_ST_FEATURES_OK,
+    SBI_PUTCHAR, VIO_BLK_F_FLUSH, VIO_BLK_SECTOR, VIO_BLK_S_OK, VIO_BLK_T_FLUSH, VIO_BLK_T_IN,
+    VIO_BLK_T_OUT, VIO_DESC_NEXT, VIO_DESC_WRITE, VIO_DEV_BLK, VIO_DEV_GPU, VIO_DEV_INPUT,
+    VIO_F_VERSION_1, VIO_GPU_FMT_B8G8R8X8, VIO_GPU_F_VIRGL, VIO_GPU_GET_DISPLAY_INFO,
+    VIO_GPU_RESOURCE_ATTACH_BACKING, VIO_GPU_RESOURCE_CREATE_2D, VIO_GPU_RESOURCE_FLUSH,
+    VIO_GPU_RESP_OK_DISPLAY_INFO, VIO_GPU_RESP_OK_NODATA, VIO_GPU_SET_SCANOUT,
+    VIO_GPU_TRANSFER_FROM_HOST_3D, VIO_GPU_TRANSFER_TO_HOST_2D, VIO_INP_CFG_EV_BITS,
+    VIO_INP_EV_ABS, VIO_INP_EV_KEY, VIO_INP_EV_REL, VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS,
+    VIO_MMIO_STEP, VIO_QUEUE_NUM, VIO_REG_CONFIG, VIO_REG_DRV_FEATURES, VIO_REG_DRV_FEATURES_SEL,
+    VIO_REG_FEATURES, VIO_REG_FEATURES_SEL, VIO_REG_ISR_ACK, VIO_REG_ISR_STATUS,
+    VIO_REG_QUEUE_AVAIL, VIO_REG_QUEUE_DESC, VIO_REG_QUEUE_NOTIFY, VIO_REG_QUEUE_NUM,
+    VIO_REG_QUEUE_NUM_MAX, VIO_REG_QUEUE_READY, VIO_REG_QUEUE_SEL, VIO_REG_QUEUE_USED,
+    VIO_REG_STATUS, VIO_ST_ACK, VIO_ST_DRIVER, VIO_ST_DRIVER_OK, VIO_ST_FEATURES_OK,
 };
 use crate::{Addr, Node, Op, Purpose};
 use g6b_spec::BoardSpec;
@@ -48,8 +48,10 @@ use g6b_spec::BoardSpec;
 /// buffers @0x530 (8×8B `virtio_input_event`), used-idx shadow @0x570,
 /// key-queue head/tail @0x574/0x578, key codes @0x580 (16×4B), tablet-device
 /// scratch @0x5f4, `DispSel` @0x600, tablet eventq @0x680 (desc / avail @0x700 /
-/// used @0x720 / evbuf @0x770 / used-idx @0x7b0), virtio-net scratch @0x7c0,
-/// virtio-blk scratch @0x7c4, then the blk requestq: desc @0x800, avail @0x880,
+/// used @0x720 / evbuf @0x770 / used-idx @0x7b0), pointer ABS/click @0x7b4..0x7bc,
+/// virtio-net scratch @0x7c0, virtio-blk scratch @0x7c4, `BLK_FLUSH_OK` @0x7c8,
+/// pointer MOVE/WHEEL/HOVER @0x7cc..0x7d4, BTNS/MODS @0x7d8..0x7dc,
+/// then the blk requestq: desc @0x800, avail @0x880,
 /// used @0x8c0, request header @0x920, status @0x930, used-idx @0x934, cached
 /// sector @0x938, and one 512-byte sector buffer @0x940. The FAT file reader
 /// uses an extra 1 KiB scratch at 0xc00, so `__vio` is sized to 0x1000.
@@ -195,6 +197,16 @@ pub const VIO_BLK_OFF: i32 = 0x7c4;
 pub const BLK_BASE: i64 = 0x800;
 /// Device-base scratch, relative to [`BLK_BASE`] (`0x800 - 0x3c = 0x7c4`).
 pub const BLK_DEV: i32 = -0x3c;
+/// Nonzero when `VIRTIO_BLK_F_FLUSH` was offered and accepted (`BlkInit`).
+pub const BLK_FLUSH_OK: i32 = -0x38;
+/// Dedicated BIOS journal window: two 4 KiB slots (16 sectors) past the
+/// protective MBR/GPT headers. `BlkWrite` refuses every other LBA.
+pub const BLK_JRN_LBA: i64 = 8;
+pub const BLK_JRN_SECTORS: i64 = 16;
+/// Selector/recovery firmware A/B stubs. Ordinary `BlkWrite` must not land here.
+pub const BLK_FW_A_LBA: i64 = 24;
+pub const BLK_FW_B_LBA: i64 = 32;
+pub const BLK_FW_SECTORS: i64 = 8;
 /// virtio-blk **requestq** (queue 0) — the rings and buffers that let the payload
 /// read a sector itself. A request is a three-descriptor chain, which is the shape
 /// the device requires (virtio spec 5.2.6): a read-only 16-byte header, a
@@ -227,20 +239,38 @@ pub const TAB_EVBUF_OFF: i32 = 0x770;
 /// Shadow of the last-consumed tablet used idx.
 pub const TAB_LAST_USED: i32 = 0x7b0;
 /// Pointer scratch — `TabDrain` decodes each consumed `virtio_input_event`
-/// into the last-seen `ABS_X`/`ABS_Y` (tablet units `0..=VIO_ABS_MAX`) and
-/// latches `PTR_CLICK` on a `BTN_LEFT` press. A later `DomtPtr` consumes the
-/// click flag, scales to display px, hit-tests `__dom` and dispatches
-/// `EV_CLICK`. These are plain `__vio` BSS slots (no lock — the eventq drain
-/// is single-writer from `trap_tab`).
+/// into the last-seen `ABS_X`/`ABS_Y` (tablet units `0..=VIO_ABS_MAX`),
+/// clamp-adds `REL_X`/`REL_Y`, latches `PTR_CLICK` on a `BTN_LEFT` press,
+/// `PTR_MOVE` on ABS/REL motion, and `PTR_WHEEL` on `REL_WHEEL`. `EV_SYN`/
+/// `SYN_REPORT` is an explicit no-op: the used-ring walk already batches
+/// one packet before `DomtPtr`. These sit in the gap after `BLK_FLUSH_OK`
+/// (`0x7c8`) and before the blk rings at `0x800` (12-bit `__vio` reach).
+/// No lock — the eventq drain is single-writer from `trap_tab`.
 pub const PTR_X: i32 = 0x7b4;
 /// Last-seen tablet `ABS_Y`.
 pub const PTR_Y: i32 = 0x7b8;
 /// Pending primary-click flag — set by `TabDrain`, consumed by `DomtPtr`.
 pub const PTR_CLICK: i32 = 0x7bc;
+/// Pending mousemove flag — set on ABS or REL_X/Y, consumed by `DomtPtr`.
+/// After `BLK_FLUSH_OK` (`0x7c8`); do not reuse `0x7c0`/`0x7c4`.
+pub const PTR_MOVE: i32 = 0x7cc;
+/// Latched signed `REL_WHEEL` delta; `0` means no pending wheel.
+pub const PTR_WHEEL: i32 = 0x7d0;
+/// Last hovered node index. `NONE` (`-1`) until the first enter — must not
+/// reset to `0` (that is the root). `TabInit` stores `-1`.
+pub const PTR_HOVER: i32 = 0x7d4;
+/// DOM `MouseEvent.buttons` mask (bit0 left, bit1 right, bit2 middle).
+pub const PTR_BTNS: i32 = 0x7d8;
+/// Keyboard modifiers: bit0 ctrl, bit1 shift, bit2 alt, bit3 meta.
+pub const PTR_MODS: i32 = 0x7dc;
 /// Linux `EV_KEY` codes the menu navigator consumes (virtio-input carries
 /// the kernel's `KEY_*` codes verbatim — QEMU `sendkey down`/`ret`).
 pub const VIO_KEY_ESC: i64 = 1;
+pub const VIO_KEY_BACKSPACE: i64 = 14;
 pub const VIO_KEY_ENTER: i64 = 28;
+pub const VIO_KEY_A: i64 = 30;
+pub const VIO_KEY_C: i64 = 46;
+pub const VIO_KEY_B: i64 = 48;
 pub const VIO_KEY_F10: i64 = 68;
 pub const VIO_KEY_HOME: i64 = 102;
 pub const VIO_KEY_UP: i64 = 103;
@@ -248,6 +278,23 @@ pub const VIO_KEY_LEFT: i64 = 105;
 pub const VIO_KEY_RIGHT: i64 = 106;
 pub const VIO_KEY_END: i64 = 107;
 pub const VIO_KEY_DOWN: i64 = 108;
+/// Linux `KEY_LEFTCTRL` / `KEY_RIGHTCTRL`.
+pub const VIO_KEY_LEFTCTRL: i64 = 29;
+pub const VIO_KEY_RIGHTCTRL: i64 = 97;
+/// Linux `KEY_LEFTSHIFT` / `KEY_RIGHTSHIFT`.
+pub const VIO_KEY_LEFTSHIFT: i64 = 42;
+pub const VIO_KEY_RIGHTSHIFT: i64 = 54;
+/// Linux `KEY_LEFTALT` / `KEY_RIGHTALT`.
+pub const VIO_KEY_LEFTALT: i64 = 56;
+pub const VIO_KEY_RIGHTALT: i64 = 100;
+/// Linux `KEY_LEFTMETA` / `KEY_RIGHTMETA`.
+pub const VIO_KEY_LEFTMETA: i64 = 125;
+pub const VIO_KEY_RIGHTMETA: i64 = 126;
+/// `PTR_MODS` / `EVO_MODS` bits (DOM `ctrlKey`/`shiftKey`/`altKey`/`metaKey`).
+pub const MOD_CTRL: i64 = 1;
+pub const MOD_SHIFT: i64 = 2;
+pub const MOD_ALT: i64 = 4;
+pub const MOD_META: i64 = 8;
 /// Linux `BTN_LEFT` (EV_KEY) — virtio-tablet / virtio-mouse primary click.
 pub const VIO_BTN_LEFT: i64 = 0x110;
 /// Linux `BTN_RIGHT`.
@@ -262,6 +309,8 @@ pub const VIO_ABS_Y: i64 = 1;
 pub const VIO_REL_X: i64 = 0;
 /// Linux `REL_Y`.
 pub const VIO_REL_Y: i64 = 1;
+/// Linux `REL_WHEEL` — vertical wheel clicks (signed).
+pub const VIO_REL_WHEEL: i64 = 8;
 /// QEMU `INPUT_EVENT_ABS_MAX` — virtio-tablet `ABS_X`/`ABS_Y` range.
 pub const VIO_ABS_MAX: u32 = 0x7fff;
 /// Uncore display-engine presence magic (`architecture/uncore/hdmi-display.md`).
@@ -2291,6 +2340,56 @@ pub fn inp_init_node(o: Object) -> Node {
     }
 }
 
+fn blk_kick_avail(ops: &mut Vec<Op>) {
+    ops.extend([
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: BLK_AVAIL_OFF,
+        },
+        lw(T1, T2, 0),
+        Op::Srli {
+            rd: T1,
+            rs: T1,
+            shamt: 16,
+        },
+        Op::Andi {
+            rd: T3,
+            rs: T1,
+            imm: 7,
+        },
+        Op::Slli {
+            rd: T3,
+            rs: T3,
+            shamt: 1,
+        },
+        Op::Add {
+            rd: T3,
+            rs1: T2,
+            rs2: T3,
+        },
+        Op::Sh {
+            rs2: X0,
+            rs1: T3,
+            off: 4,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T1,
+            imm: 1,
+        },
+        Op::Slli {
+            rd: T3,
+            rs: T3,
+            shamt: 16,
+        },
+        Op::Fence,
+        sw(T3, T2, 0),
+        Op::Fence,
+        sw(X0, T6, VIO_REG_QUEUE_NOTIFY),
+    ]);
+}
+
 /// `BlkInit` — virtio-blk (DeviceID 2) probe + requestq bring-up.
 ///
 /// This is the driver that lets the payload **read a disk itself** rather than be
@@ -2471,12 +2570,18 @@ pub fn blk_init_node(o: Object) -> Node {
             imm: i64::from(VIO_ST_ACK | VIO_ST_DRIVER),
         },
         sw(T2, T6, VIO_REG_STATUS),
-        // Accept VERSION_1 and nothing else: an unimplemented accepted feature
-        // changes the request format under a driver that cannot parse it.
+        // Accept VERSION_1 and optional F_FLUSH. Anything else changes the
+        // request format under a driver that cannot parse it.
         sw(X0, T6, VIO_REG_FEATURES_SEL),
         lw(T2, T6, VIO_REG_FEATURES),
+        Op::Andi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_BLK_F_FLUSH as i32,
+        },
         sw(X0, T6, VIO_REG_DRV_FEATURES_SEL),
-        sw(X0, T6, VIO_REG_DRV_FEATURES),
+        sw(T2, T6, VIO_REG_DRV_FEATURES),
+        sw(T2, T5, BLK_FLUSH_OK),
         Op::Li { rd: T2, imm: 1 },
         sw(T2, T6, VIO_REG_FEATURES_SEL),
         lw(T3, T6, VIO_REG_FEATURES),
@@ -2694,37 +2799,9 @@ pub fn blk_read_node(o: Object) -> Node {
             imm: i64::from(VIO_DESC_WRITE),
         },
         sw(T1, T2, 44),
-        // ---- publish: avail.ring[idx % QUEUE_NUM] = 0, then avail.idx ------
-        Op::Addi {
-            rd: T2,
-            rs: T5,
-            imm: BLK_AVAIL_OFF,
-        },
-        lw(T1, T2, 0),
-        Op::Srli {
-            rd: T1,
-            rs: T1,
-            shamt: 16,
-        },
-        // ring entries are u16; slot 0 of the word pair is enough for a depth-1
-        // submission pattern (one request in flight, which is what a BIOS needs).
-        sw(X0, T2, 4),
-        Op::Addi {
-            rd: T3,
-            rs: T1,
-            imm: 1,
-        },
-        Op::Slli {
-            rd: T3,
-            rs: T3,
-            shamt: 16,
-        },
-        Op::Fence,
-        sw(T3, T2, 0),
-        Op::Fence,
-        sw(X0, T6, VIO_REG_QUEUE_NOTIFY),
-        // ---- bounded used.idx poll ----------------------------------------
-        //
+    ];
+    blk_kick_avail(&mut ops);
+    ops.extend([
         // Against the **shadow**, not against zero. The second request in a run
         // already sees a nonzero `used.idx` from the first, so a `!= 0` test
         // returns before the device has written anything — the reader then parses
@@ -2758,7 +2835,7 @@ pub fn blk_read_node(o: Object) -> Node {
             rs2: X0,
             to: "blkr_poll".into(),
         },
-    ];
+    ]);
     putc_str(&mut ops, "BLK-TIMEOUT\n");
     ops.extend([Op::Li { rd: A0, imm: 0 }, ret()]);
     ops.extend([
@@ -2794,6 +2871,1357 @@ pub fn blk_read_node(o: Object) -> Node {
     ]);
     putc_str(&mut ops, "BLK-NODEV\n");
     ops.extend([Op::Li { rd: A0, imm: 0 }, ret()]);
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops,
+    }
+}
+
+/// `BlkWrite` — write `__vio+BLK_DATA_OFF` to sector `a0` if and only if `a0`
+/// is inside the dedicated journal window. Returns `a0`=1 on device OK.
+///
+/// The data descriptor is device-**readable** (`VIRTIO_BLK_T_OUT`); a WRITE
+/// flag here would let the device clobber the caller's buffer. LBAs outside
+/// [`BLK_JRN_LBA`], [`BLK_JRN_SECTORS`) are refused before QueueNotify so
+/// unrelated ranges cannot change.
+pub fn blk_write_node(o: Object) -> Node {
+    blk_out_window(
+        o,
+        "BlkWrite",
+        BLK_JRN_LBA,
+        BLK_JRN_SECTORS,
+        "BLK-RANGE\n",
+        "blkw",
+        None,
+    )
+}
+
+/// `FwStage` — `VIRTIO_BLK_T_OUT` into the **inactive** firmware slot (B,
+/// LBA 32..40). Recovery A, the journal, and GPT/MBR are `FW-RANGE`.
+/// Does not select a slot or arm autoboot.
+pub fn fw_stage_node(o: Object) -> Node {
+    blk_out_window(
+        o,
+        "FwStage",
+        BLK_FW_B_LBA,
+        BLK_FW_SECTORS,
+        "FW-RANGE\n",
+        "fws",
+        None,
+    )
+}
+
+/// `FwSelect` — nominate staged inactive B (`G6SL` at B+8) only when the
+/// whole slot is present (`G6FS` first and last, index 7, `G6FE` tail).
+/// A torn or missing image is `FW-HOLD`. Does not write recovery A, the
+/// journal, or `AUTO_ON`.
+pub fn fw_select_node(o: Object, xlen: u32) -> Node {
+    let magic = i64::from(u32::from_le_bytes(*b"G6FS"));
+    let sel = i64::from(u32::from_le_bytes(*b"G6SL"));
+    let tail = i64::from(u32::from_le_bytes(*b"G6FE"));
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — nominate inactive B in the staged header; no autoboot",
+            o.why
+        )),
+        Op::Glob("FwSelect".into()),
+        Op::Label("FwSelect".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -16,
+        },
+        st_x(xlen, RA, SP, 0),
+        Op::Li {
+            rd: A0,
+            imm: BLK_FW_B_LBA,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fwsel_hold".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        lw(T0, T5, BLK_DATA_OFF),
+        Op::Li { rd: T1, imm: magic },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "fwsel_hold".into(),
+        },
+        Op::Li {
+            rd: A0,
+            imm: BLK_FW_B_LBA + BLK_FW_SECTORS - 1,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fwsel_fail".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        lw(T0, T5, BLK_DATA_OFF),
+        Op::Li { rd: T1, imm: magic },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "fwsel_hold".into(),
+        },
+        lw(T0, T5, BLK_DATA_OFF + 4),
+        Op::Li { rd: T1, imm: 7 },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "fwsel_hold".into(),
+        },
+        lw(T0, T5, BLK_DATA_OFF + 508),
+        Op::Li { rd: T1, imm: tail },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "fwsel_hold".into(),
+        },
+        Op::Li {
+            rd: A0,
+            imm: BLK_FW_B_LBA,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fwsel_fail".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        Op::Li { rd: T0, imm: sel },
+        sw(T0, T5, BLK_DATA_OFF + 8),
+        Op::Li {
+            rd: A0,
+            imm: BLK_FW_B_LBA,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "FwStage".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fwsel_fail".into(),
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkFlush".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fwsel_fail".into(),
+        },
+        Op::Li {
+            rd: A0,
+            imm: BLK_FW_B_LBA,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fwsel_fail".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        lw(T0, T5, BLK_DATA_OFF + 8),
+        Op::Li { rd: T1, imm: sel },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "fwsel_fail".into(),
+        },
+    ];
+    putc_str(&mut ops, "FW-SELECT-OK\n");
+    ops.extend([
+        Op::Li { rd: A0, imm: 1 },
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        ret(),
+        Op::Label("fwsel_hold".into()),
+    ]);
+    putc_str(&mut ops, "FW-HOLD\n");
+    ops.extend([
+        Op::Li { rd: A0, imm: 0 },
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        ret(),
+        Op::Label("fwsel_fail".into()),
+    ]);
+    putc_str(&mut ops, "FW-SELECT-FAIL\n");
+    ops.extend([
+        Op::Li { rd: A0, imm: 0 },
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops,
+    }
+}
+
+/// `FwCommit` — write every sector of inactive B, `BlkFlush`, read back the
+/// first and last sector. Recovery A is never a target. Not a slot switch.
+pub fn fw_commit_node(o: Object, xlen: u32) -> Node {
+    let magic = i64::from(u32::from_le_bytes(*b"G6FS"));
+    let tail = i64::from(u32::from_le_bytes(*b"G6FE"));
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — {}-sector inactive B rewrite + F_FLUSH + readback",
+            o.why, BLK_FW_SECTORS
+        )),
+        Op::Glob("FwCommit".into()),
+        Op::Label("FwCommit".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -32,
+        },
+        st_x(xlen, RA, SP, 0),
+        st_x(xlen, S1, SP, 8),
+        Op::Li { rd: S1, imm: 0 },
+        Op::Label("fwc_loop".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        Op::Li { rd: T0, imm: magic },
+        sw(T0, T5, BLK_DATA_OFF),
+        sw(S1, T5, BLK_DATA_OFF + 4),
+        Op::Li { rd: T0, imm: tail },
+        sw(T0, T5, BLK_DATA_OFF + 508),
+        Op::Addi {
+            rd: A0,
+            rs: S1,
+            imm: BLK_FW_B_LBA as i32,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "FwStage".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fwc_fail".into(),
+        },
+        Op::Addi {
+            rd: S1,
+            rs: S1,
+            imm: 1,
+        },
+        Op::Li {
+            rd: T0,
+            imm: BLK_FW_SECTORS,
+        },
+        Op::Blt {
+            rs1: S1,
+            rs2: T0,
+            to: "fwc_loop".into(),
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkFlush".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fwc_fail".into(),
+        },
+        Op::Li {
+            rd: A0,
+            imm: BLK_FW_B_LBA,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fwc_fail".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        lw(T0, T5, BLK_DATA_OFF),
+        Op::Li { rd: T1, imm: magic },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "fwc_fail".into(),
+        },
+        lw(T0, T5, BLK_DATA_OFF + 4),
+        Op::Bne {
+            rs1: T0,
+            rs2: X0,
+            to: "fwc_fail".into(),
+        },
+        Op::Li {
+            rd: A0,
+            imm: BLK_FW_B_LBA + BLK_FW_SECTORS - 1,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fwc_fail".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        lw(T0, T5, BLK_DATA_OFF),
+        Op::Li { rd: T1, imm: magic },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "fwc_fail".into(),
+        },
+        lw(T0, T5, BLK_DATA_OFF + 4),
+        Op::Li { rd: T1, imm: 7 },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "fwc_fail".into(),
+        },
+        lw(T0, T5, BLK_DATA_OFF + 508),
+        Op::Li { rd: T1, imm: tail },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "fwc_fail".into(),
+        },
+    ];
+    putc_str(&mut ops, "FW-COMMIT-OK\n");
+    ops.extend([
+        Op::Li { rd: A0, imm: 1 },
+        ld_x(xlen, S1, SP, 8),
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 32,
+        },
+        ret(),
+        Op::Label("fwc_fail".into()),
+    ]);
+    putc_str(&mut ops, "FW-COMMIT-FAIL\n");
+    ops.extend([
+        Op::Li { rd: A0, imm: 0 },
+        ld_x(xlen, S1, SP, 8),
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 32,
+        },
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops,
+    }
+}
+
+fn blk_out_window(
+    o: Object,
+    glob: &str,
+    lo: i64,
+    sectors: i64,
+    range_msg: &str,
+    tag: &str,
+    ok_msg: Option<&str>,
+) -> Node {
+    let no = format!("{tag}_no");
+    let range = format!("{tag}_range");
+    let poll = format!("{tag}_poll");
+    let done = format!("{tag}_done");
+    let ok = format!("{tag}_ok");
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — one VIRTIO_BLK_T_OUT in [{lo}..{}), status checked",
+            o.why,
+            lo + sectors
+        )),
+        Op::Glob(glob.into()),
+        Op::Label(glob.into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        lw(T6, T5, BLK_DEV),
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: no.clone(),
+        },
+        Op::Li { rd: T1, imm: lo },
+        Op::Blt {
+            rs1: A0,
+            rs2: T1,
+            to: range.clone(),
+        },
+        Op::Li {
+            rd: T1,
+            imm: lo + sectors,
+        },
+        Op::Bge {
+            rs1: A0,
+            rs2: T1,
+            to: range.clone(),
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T5,
+            imm: BLK_REQ_OFF,
+        },
+        Op::Li {
+            rd: T1,
+            imm: VIO_BLK_T_OUT,
+        },
+        sw(T1, T0, 0),
+        sw(X0, T0, 4),
+        sw(A0, T0, 8),
+        sw(X0, T0, 12),
+        Op::Li { rd: T1, imm: 0xff },
+        Op::Sb {
+            rs2: T1,
+            rs1: T5,
+            off: BLK_STATUS_OFF,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: BLK_DESC_OFF,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_REQ_OFF,
+        },
+        sw(T3, T2, 0),
+        sw(X0, T2, 4),
+        Op::Li { rd: T1, imm: 16 },
+        sw(T1, T2, 8),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_DESC_NEXT) | (1 << 16),
+        },
+        sw(T1, T2, 12),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_DATA_OFF,
+        },
+        sw(T3, T2, 16),
+        sw(X0, T2, 20),
+        Op::Li {
+            rd: T1,
+            imm: VIO_BLK_SECTOR,
+        },
+        sw(T1, T2, 24),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_DESC_NEXT) | (2 << 16),
+        },
+        sw(T1, T2, 28),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_STATUS_OFF,
+        },
+        sw(T3, T2, 32),
+        sw(X0, T2, 36),
+        Op::Li { rd: T1, imm: 1 },
+        sw(T1, T2, 40),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_DESC_WRITE),
+        },
+        sw(T1, T2, 44),
+    ];
+    blk_kick_avail(&mut ops);
+    ops.extend([
+        lw(A1, T5, BLK_LAST_USED),
+        Op::Li {
+            rd: T4,
+            imm: VIO_POLL_MAX,
+        },
+        Op::Label(poll.clone()),
+        lw(T2, T5, BLK_USED_OFF),
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: A1,
+            to: done.clone(),
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: poll.clone(),
+        },
+    ]);
+    putc_str(&mut ops, "BLK-TIMEOUT\n");
+    ops.extend([Op::Li { rd: A0, imm: 0 }, ret()]);
+    ops.extend([
+        Op::Label(done),
+        lw(T3, T6, VIO_REG_ISR_STATUS),
+        sw(T3, T6, VIO_REG_ISR_ACK),
+        sw(T2, T5, BLK_LAST_USED),
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_STATUS_OFF,
+        },
+        Op::Li {
+            rd: T2,
+            imm: VIO_BLK_S_OK,
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: T2,
+            to: ok.clone(),
+        },
+    ]);
+    putc_str(&mut ops, "BLK-ERR\n");
+    ops.extend([Op::Li { rd: A0, imm: 0 }, ret(), Op::Label(ok)]);
+    if let Some(msg) = ok_msg {
+        putc_str(&mut ops, msg);
+    }
+    ops.extend([Op::Li { rd: A0, imm: 1 }, ret(), Op::Label(range)]);
+    putc_str(&mut ops, range_msg);
+    ops.extend([Op::Li { rd: A0, imm: 0 }, ret(), Op::Label(no)]);
+    putc_str(&mut ops, "BLK-NODEV\n");
+    ops.extend([Op::Li { rd: A0, imm: 0 }, ret()]);
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops,
+    }
+}
+
+/// `BlkFlush` — `VIRTIO_BLK_T_FLUSH` if `F_FLUSH` was negotiated. No data
+/// descriptor. Returns `a0`=1 on OK, 0 if the feature is missing or the
+/// device reports IOERR. A no-op flush is not durability.
+pub fn blk_flush_node(o: Object) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — VIRTIO_BLK_T_FLUSH, two-descriptor chain, F_FLUSH required",
+            o.why
+        )),
+        Op::Glob("BlkFlush".into()),
+        Op::Label("BlkFlush".into()),
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        lw(T6, T5, BLK_DEV),
+        Op::Beq {
+            rs1: T6,
+            rs2: X0,
+            to: "blkf_no".into(),
+        },
+        lw(T1, T5, BLK_FLUSH_OK),
+        Op::Beq {
+            rs1: T1,
+            rs2: X0,
+            to: "blkf_nofeat".into(),
+        },
+        Op::Addi {
+            rd: T0,
+            rs: T5,
+            imm: BLK_REQ_OFF,
+        },
+        Op::Li {
+            rd: T1,
+            imm: VIO_BLK_T_FLUSH,
+        },
+        sw(T1, T0, 0),
+        sw(X0, T0, 4),
+        sw(X0, T0, 8),
+        sw(X0, T0, 12),
+        Op::Li { rd: T1, imm: 0xff },
+        Op::Sb {
+            rs2: T1,
+            rs1: T5,
+            off: BLK_STATUS_OFF,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: BLK_DESC_OFF,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_REQ_OFF,
+        },
+        sw(T3, T2, 0),
+        sw(X0, T2, 4),
+        Op::Li { rd: T1, imm: 16 },
+        sw(T1, T2, 8),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_DESC_NEXT) | (1 << 16),
+        },
+        sw(T1, T2, 12),
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: BLK_STATUS_OFF,
+        },
+        sw(T3, T2, 16),
+        sw(X0, T2, 20),
+        Op::Li { rd: T1, imm: 1 },
+        sw(T1, T2, 24),
+        Op::Li {
+            rd: T1,
+            imm: i64::from(VIO_DESC_WRITE),
+        },
+        sw(T1, T2, 28),
+    ];
+    blk_kick_avail(&mut ops);
+    ops.extend([
+        lw(A1, T5, BLK_LAST_USED),
+        Op::Li {
+            rd: T4,
+            imm: VIO_POLL_MAX,
+        },
+        Op::Label("blkf_poll".into()),
+        lw(T2, T5, BLK_USED_OFF),
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: A1,
+            to: "blkf_done".into(),
+        },
+        Op::Addi {
+            rd: T4,
+            rs: T4,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T4,
+            rs2: X0,
+            to: "blkf_poll".into(),
+        },
+    ]);
+    putc_str(&mut ops, "BLK-TIMEOUT\n");
+    ops.extend([Op::Li { rd: A0, imm: 0 }, ret()]);
+    ops.extend([
+        Op::Label("blkf_done".into()),
+        lw(T3, T6, VIO_REG_ISR_STATUS),
+        sw(T3, T6, VIO_REG_ISR_ACK),
+        sw(T2, T5, BLK_LAST_USED),
+        Op::Lbu {
+            rd: T1,
+            rs: T5,
+            off: BLK_STATUS_OFF,
+        },
+        Op::Li {
+            rd: T2,
+            imm: VIO_BLK_S_OK,
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: T2,
+            to: "blkf_ok".into(),
+        },
+    ]);
+    putc_str(&mut ops, "BLK-ERR\n");
+    ops.extend([
+        Op::Li { rd: A0, imm: 0 },
+        ret(),
+        Op::Label("blkf_ok".into()),
+        Op::Li { rd: A0, imm: 1 },
+        ret(),
+        Op::Label("blkf_nofeat".into()),
+    ]);
+    putc_str(&mut ops, "BLK-NOFLUSH\n");
+    ops.extend([
+        Op::Li { rd: A0, imm: 0 },
+        ret(),
+        Op::Label("blkf_no".into()),
+    ]);
+    putc_str(&mut ops, "BLK-NODEV\n");
+    ops.extend([Op::Li { rd: A0, imm: 0 }, ret()]);
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops,
+    }
+}
+
+fn jrn_lba(ops: &mut Vec<Op>) {
+    ops.extend([
+        Op::Slli {
+            rd: T0,
+            rs: S0,
+            shamt: 3,
+        },
+        Op::Add {
+            rd: A0,
+            rs1: T0,
+            rs2: S1,
+        },
+        Op::Addi {
+            rd: A0,
+            rs: A0,
+            imm: BLK_JRN_LBA as i32,
+        },
+    ]);
+}
+
+fn jrn_magic_ok(ops: &mut Vec<Op>, fail: &str) {
+    ops.extend([
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF,
+        },
+        Op::Li {
+            rd: T1,
+            imm: i64::from(b'G'),
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: fail.into(),
+        },
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF + 1,
+        },
+        Op::Li {
+            rd: T1,
+            imm: i64::from(b'6'),
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: fail.into(),
+        },
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF + 2,
+        },
+        Op::Li {
+            rd: T1,
+            imm: i64::from(b'B'),
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: fail.into(),
+        },
+        Op::Lbu {
+            rd: T0,
+            rs: T5,
+            off: BLK_DATA_OFF + 3,
+        },
+        Op::Li {
+            rd: T1,
+            imm: i64::from(b'H'),
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: fail.into(),
+        },
+    ]);
+}
+
+/// `JrnLoad` — `a0` = slot (0 or 1). Reads the first journal sector and
+/// requires the `G6BH` magic. Full 4 KiB lives on the medium; this is the
+/// identity check before `JrnCommit` rewrites the eight-sector slot.
+pub fn jrn_load_node(o: Object, xlen: u32) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!("{} — load journal slot, require G6BH", o.why)),
+        Op::Glob("JrnLoad".into()),
+        Op::Label("JrnLoad".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -32,
+        },
+        st_x(xlen, RA, SP, 0),
+        st_x(xlen, S0, SP, 8),
+        st_x(xlen, S1, SP, 16),
+        Op::Addi {
+            rd: S0,
+            rs: A0,
+            imm: 0,
+        },
+        Op::Li { rd: T0, imm: 2 },
+        Op::Bgeu {
+            rs1: S0,
+            rs2: T0,
+            to: "jrnl_slot".into(),
+        },
+        Op::Li { rd: S1, imm: 0 },
+    ];
+    jrn_lba(&mut ops);
+    ops.extend([
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "jrnl_fail".into(),
+        },
+    ]);
+    jrn_magic_ok(&mut ops, "jrnl_fail");
+    putc_str(&mut ops, "JRN-LOAD-OK\n");
+    ops.extend([
+        Op::Li { rd: A0, imm: 1 },
+        ld_x(xlen, S1, SP, 16),
+        ld_x(xlen, S0, SP, 8),
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 32,
+        },
+        ret(),
+        Op::Label("jrnl_slot".into()),
+    ]);
+    putc_str(&mut ops, "JRN-SLOT\n");
+    ops.extend([
+        Op::Label("jrnl_fail".into()),
+        Op::Li { rd: A0, imm: 0 },
+        ld_x(xlen, S1, SP, 16),
+        ld_x(xlen, S0, SP, 8),
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 32,
+        },
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops,
+    }
+}
+
+/// `JrnCommit` — rewrite all eight sectors of slot `a0` from the live medium
+/// (read/write each sector), `BlkFlush`, then require `G6BH` on readback.
+pub fn jrn_commit_node(o: Object, xlen: u32) -> Node {
+    let mut ops = vec![
+        Op::Comment(format!(
+            "{} — 8-sector journal slot write + F_FLUSH + G6BH readback",
+            o.why
+        )),
+        Op::Glob("JrnCommit".into()),
+        Op::Label("JrnCommit".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -32,
+        },
+        st_x(xlen, RA, SP, 0),
+        st_x(xlen, S0, SP, 8),
+        st_x(xlen, S1, SP, 16),
+        Op::Addi {
+            rd: S0,
+            rs: A0,
+            imm: 0,
+        },
+        Op::Li { rd: T0, imm: 2 },
+        Op::Bgeu {
+            rs1: S0,
+            rs2: T0,
+            to: "jrnc_slot".into(),
+        },
+        Op::Li { rd: S1, imm: 0 },
+        Op::Label("jrnc_loop".into()),
+    ];
+    jrn_lba(&mut ops);
+    ops.extend([
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "jrnc_fail".into(),
+        },
+    ]);
+    jrn_lba(&mut ops);
+    ops.extend([
+        Op::Jal {
+            rd: RA,
+            to: "BlkWrite".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "jrnc_fail".into(),
+        },
+        Op::Addi {
+            rd: S1,
+            rs: S1,
+            imm: 1,
+        },
+        Op::Li { rd: T0, imm: 8 },
+        Op::Blt {
+            rs1: S1,
+            rs2: T0,
+            to: "jrnc_loop".into(),
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkFlush".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "jrnc_fail".into(),
+        },
+        Op::Li { rd: S1, imm: 0 },
+    ]);
+    jrn_lba(&mut ops);
+    ops.extend([
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "jrnc_fail".into(),
+        },
+    ]);
+    jrn_magic_ok(&mut ops, "jrnc_fail");
+    putc_str(&mut ops, "JRN-COMMIT-OK\n");
+    ops.extend([
+        Op::Li { rd: A0, imm: 1 },
+        ld_x(xlen, S1, SP, 16),
+        ld_x(xlen, S0, SP, 8),
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 32,
+        },
+        ret(),
+        Op::Label("jrnc_slot".into()),
+    ]);
+    putc_str(&mut ops, "JRN-SLOT\n");
+    ops.extend([
+        Op::Label("jrnc_fail".into()),
+        Op::Li { rd: A0, imm: 0 },
+        ld_x(xlen, S1, SP, 16),
+        ld_x(xlen, S0, SP, 8),
+        ld_x(xlen, RA, SP, 0),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 32,
+        },
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops,
+    }
+}
+
+/// Test-only: write a marker to journal LBA 8, flush, smash the buffer, read
+/// it back, then refuse LBA 0. Not installed in the production payload.
+pub fn blk_journal_selftest_node() -> Node {
+    let mut ops = vec![
+        Op::Comment("journal window write + F_FLUSH + range refuse".into()),
+        Op::Label("BlkJournalSelftest".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -16,
+        },
+        Op::Sd {
+            rs2: RA,
+            rs1: SP,
+            off: 0,
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        Op::Li {
+            rd: T0,
+            imm: 0x315e_4e52, // 'RN^1' marker little-endian-ish JRN1
+        },
+        sw(T0, T5, BLK_DATA_OFF),
+        Op::Li {
+            rd: A0,
+            imm: BLK_JRN_LBA,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkWrite".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "blkj_fail".into(),
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkFlush".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "blkj_fail".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        sw(X0, T5, BLK_DATA_OFF),
+        Op::Li {
+            rd: A0,
+            imm: BLK_JRN_LBA,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "BlkRead".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "blkj_fail".into(),
+        },
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: BLK_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        lw(T0, T5, BLK_DATA_OFF),
+        Op::Li {
+            rd: T1,
+            imm: 0x315e_4e52,
+        },
+        Op::Bne {
+            rs1: T0,
+            rs2: T1,
+            to: "blkj_fail".into(),
+        },
+        Op::Li { rd: A0, imm: 0 },
+        Op::Jal {
+            rd: RA,
+            to: "BlkWrite".into(),
+        },
+        Op::Bne {
+            rs1: A0,
+            rs2: X0,
+            to: "blkj_fail".into(),
+        },
+    ];
+    putc_str(&mut ops, "BLK-WRITE-OK\n");
+    ops.extend([
+        Op::Ld {
+            rd: RA,
+            rs: SP,
+            off: 0,
+        },
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        ret(),
+        Op::Label("blkj_fail".into()),
+    ]);
+    putc_str(&mut ops, "BLK-WRITE-FAIL\n");
+    ops.extend([
+        Op::Ld {
+            rd: RA,
+            rs: SP,
+            off: 0,
+        },
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        ret(),
+    ]);
+    Node {
+        purpose: Purpose::VirtioBlk,
+        ops,
+    }
+}
+
+/// Operator/UART path: `FwCommit` inactive B, refuse A/journal, nominate
+/// `G6SL`. Not on the boot kstart path.
+pub fn fw_stage_selftest_node() -> Node {
+    let mut ops = vec![
+        Op::Comment("inactive firmware B stage + recovery/journal refuse + select hold".into()),
+        Op::Label("FwStageSelftest".into()),
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: -16,
+        },
+        Op::Sd {
+            rs2: RA,
+            rs1: SP,
+            off: 0,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "FwCommit".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fws_fail".into(),
+        },
+        Op::Li {
+            rd: A0,
+            imm: BLK_FW_A_LBA,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "FwStage".into(),
+        },
+        Op::Bne {
+            rs1: A0,
+            rs2: X0,
+            to: "fws_fail".into(),
+        },
+        Op::Li {
+            rd: A0,
+            imm: BLK_JRN_LBA,
+        },
+        Op::Jal {
+            rd: RA,
+            to: "FwStage".into(),
+        },
+        Op::Bne {
+            rs1: A0,
+            rs2: X0,
+            to: "fws_fail".into(),
+        },
+        Op::Jal {
+            rd: RA,
+            to: "FwSelect".into(),
+        },
+        Op::Beq {
+            rs1: A0,
+            rs2: X0,
+            to: "fws_fail".into(),
+        },
+        Op::Ld {
+            rd: RA,
+            rs: SP,
+            off: 0,
+        },
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        ret(),
+        Op::Label("fws_fail".into()),
+    ];
+    putc_str(&mut ops, "FW-STAGE-FAIL\n");
+    ops.extend([
+        Op::Ld {
+            rd: RA,
+            rs: SP,
+            off: 0,
+        },
+        Op::Addi {
+            rd: SP,
+            rs: SP,
+            imm: 16,
+        },
+        ret(),
+    ]);
     Node {
         purpose: Purpose::VirtioBlk,
         ops,
@@ -3280,6 +4708,12 @@ pub fn tab_init_node(o: Object) -> Node {
             rd: T5,
             addr: Addr::VioBss,
         },
+        // Hover must start at NONE (-1), not 0 (root). Motion/wheel flags
+        // start clear; ABS/click slots stay BSS-zero until the first event.
+        Op::Li { rd: T0, imm: -1 },
+        sw(T0, T5, PTR_HOVER),
+        sw(X0, T5, PTR_MOVE),
+        sw(X0, T5, PTR_WHEEL),
         lw(T0, T5, VIO_TAB_OFF),
         Op::Bne {
             rs1: T0,
@@ -3607,11 +5041,12 @@ pub fn tab_drain_node(o: Object) -> Node {
     putc_str(&mut ops, "TAB\n");
     ops.extend([
         // T3 = consumed buffer idx → decode the `virtio_input_event` at
-        // `TAB_EVBUF + T3*8` (`{type:u16, code:u16, value:u32}`). Track the
-        // last `ABS_X`/`ABS_Y` into `PTR_X`/`PTR_Y` and latch `PTR_CLICK` on a
-        // `BTN_LEFT` press so `DomtPtr` can turn the sequence into an
-        // `EV_CLICK` dispatch. T0/T1/T2 are scratch here — the re-post below
-        // recomputes T1/T2 and keeps T3.
+        // `TAB_EVBUF + T3*8` (`{type:u16, code:u16, value:u32}`). ABS/REL
+        // motion updates `PTR_X`/`PTR_Y` (REL clamp-adds 0..=0x7fff) and
+        // latches `PTR_MOVE`; `REL_WHEEL` latches `PTR_WHEEL`; `BTN_LEFT`
+        // press latches `PTR_CLICK`. `EV_SYN`/`SYN_REPORT` falls through
+        // as a no-op — the used-ring walk is the packet batch. T0/T1/T2
+        // are scratch here — the re-post below recomputes T1/T2 and keeps T3.
         Op::Slli {
             rd: T0,
             rs: T3,
@@ -3647,7 +5082,7 @@ pub fn tab_drain_node(o: Object) -> Node {
         Op::Bne {
             rs1: T1,
             rs2: X0,
-            to: "tpd_ev_key".into(),
+            to: "tpd_ev_rel".into(),
         },
         Op::Bne {
             rs1: T2,
@@ -3655,7 +5090,7 @@ pub fn tab_drain_node(o: Object) -> Node {
             to: "tpd_abs_y".into(),
         },
         sw(T0, T5, PTR_X),
-        jump("tpd_ev_done"),
+        jump("tpd_abs_moved"),
         Op::Label("tpd_abs_y".into()),
         Op::Addi {
             rd: T2,
@@ -3668,35 +5103,194 @@ pub fn tab_drain_node(o: Object) -> Node {
             to: "tpd_ev_done".into(),
         },
         sw(T0, T5, PTR_Y),
+        Op::Label("tpd_abs_moved".into()),
+        Op::Li { rd: T1, imm: 1 },
+        sw(T1, T5, PTR_MOVE),
         jump("tpd_ev_done"),
-        Op::Label("tpd_ev_key".into()),
+        Op::Label("tpd_ev_rel".into()),
+        // T1 = type - ABS; REL is ABS-1 so T1 == 0 after this add.
         Op::Addi {
             rd: T1,
             rs: T1,
-            imm: 2,
+            imm: (VIO_INP_EV_ABS as i32) - (VIO_INP_EV_REL as i32),
         },
         Op::Bne {
             rs1: T1,
             rs2: X0,
-            to: "tpd_ev_done".into(),
+            to: "tpd_ev_key".into(),
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "tpd_rel_y".into(),
+        },
+        lw(T1, T5, PTR_X),
+        Op::Add {
+            rd: T1,
+            rs1: T1,
+            rs2: T0,
+        },
+        Op::Blt {
+            rs1: T1,
+            rs2: X0,
+            to: "tpd_rx_lo".into(),
+        },
+        Op::Li {
+            rd: T2,
+            imm: i64::from(VIO_ABS_MAX),
+        },
+        Op::Blt {
+            rs1: T2,
+            rs2: T1,
+            to: "tpd_rx_hi".into(),
+        },
+        sw(T1, T5, PTR_X),
+        jump("tpd_rel_moved"),
+        Op::Label("tpd_rx_lo".into()),
+        sw(X0, T5, PTR_X),
+        jump("tpd_rel_moved"),
+        Op::Label("tpd_rx_hi".into()),
+        sw(T2, T5, PTR_X),
+        jump("tpd_rel_moved"),
+        Op::Label("tpd_rel_y".into()),
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: -(VIO_REL_Y as i32),
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "tpd_rel_y_do".into(),
         },
         Op::Addi {
             rd: T2,
             rs: T2,
-            imm: -(VIO_BTN_LEFT as i32),
+            imm: -((VIO_REL_WHEEL - VIO_REL_Y) as i32),
         },
         Op::Bne {
             rs1: T2,
             rs2: X0,
             to: "tpd_ev_done".into(),
         },
-        Op::Beq {
-            rs1: T0,
+        sw(T0, T5, PTR_WHEEL),
+        jump("tpd_ev_done"),
+        Op::Label("tpd_rel_y_do".into()),
+        lw(T1, T5, PTR_Y),
+        Op::Add {
+            rd: T1,
+            rs1: T1,
+            rs2: T0,
+        },
+        Op::Blt {
+            rs1: T1,
+            rs2: X0,
+            to: "tpd_ry_lo".into(),
+        },
+        Op::Li {
+            rd: T2,
+            imm: i64::from(VIO_ABS_MAX),
+        },
+        Op::Blt {
+            rs1: T2,
+            rs2: T1,
+            to: "tpd_ry_hi".into(),
+        },
+        sw(T1, T5, PTR_Y),
+        jump("tpd_rel_moved"),
+        Op::Label("tpd_ry_lo".into()),
+        sw(X0, T5, PTR_Y),
+        jump("tpd_rel_moved"),
+        Op::Label("tpd_ry_hi".into()),
+        sw(T2, T5, PTR_Y),
+        Op::Label("tpd_rel_moved".into()),
+        Op::Li { rd: T1, imm: 1 },
+        sw(T1, T5, PTR_MOVE),
+        jump("tpd_ev_done"),
+        Op::Label("tpd_ev_key".into()),
+        // T1 = type - REL; KEY is REL-1 so T1 == 0 after this add. SYN (0)
+        // and others fall through to tpd_ev_done as the packet delimiter.
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: (VIO_INP_EV_REL as i32) - (VIO_INP_EV_KEY as i32),
+        },
+        Op::Bne {
+            rs1: T1,
             rs2: X0,
             to: "tpd_ev_done".into(),
         },
-        Op::Li { rd: T0, imm: 1 },
-        sw(T0, T5, PTR_CLICK),
+        // T2 = code, T0 = value. Map BTN_* → A0=PTR_CLICK (button+1),
+        // A1=DOM buttons bit. T3 is the buffer idx — leave it alone.
+        Op::Addi {
+            rd: T1,
+            rs: T2,
+            imm: -(VIO_BTN_LEFT as i32),
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: X0,
+            to: "tpd_btn_left".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T2,
+            imm: -(VIO_BTN_MIDDLE as i32),
+        },
+        Op::Beq {
+            rs1: T1,
+            rs2: X0,
+            to: "tpd_btn_mid".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T2,
+            imm: -(VIO_BTN_RIGHT as i32),
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "tpd_ev_done".into(),
+        },
+        Op::Li { rd: A0, imm: 3 },
+        Op::Li { rd: A1, imm: 2 },
+        jump("tpd_btn_go"),
+        Op::Label("tpd_btn_left".into()),
+        Op::Li { rd: A0, imm: 1 },
+        Op::Li { rd: A1, imm: 1 },
+        jump("tpd_btn_go"),
+        Op::Label("tpd_btn_mid".into()),
+        Op::Li { rd: A0, imm: 2 },
+        Op::Li { rd: A1, imm: 4 },
+        Op::Label("tpd_btn_go".into()),
+        Op::Beq {
+            rs1: T0,
+            rs2: X0,
+            to: "tpd_btn_rel".into(),
+        },
+        sw(A0, T5, PTR_CLICK),
+        lw(T1, T5, PTR_BTNS),
+        Op::Or {
+            rd: T1,
+            rs: T1,
+            rs2: A1,
+        },
+        sw(T1, T5, PTR_BTNS),
+        jump("tpd_ev_done"),
+        Op::Label("tpd_btn_rel".into()),
+        lw(T1, T5, PTR_BTNS),
+        Op::Li { rd: T0, imm: -1 },
+        Op::Xor {
+            rd: A1,
+            rs1: A1,
+            rs2: T0,
+        },
+        Op::And {
+            rd: T1,
+            rs: T1,
+            rs2: A1,
+        },
+        sw(T1, T5, PTR_BTNS),
         Op::Label("tpd_ev_done".into()),
         lw(T2, T5, TAB_AVAIL_OFF),
         Op::Srli {
@@ -3876,6 +5470,132 @@ pub fn inp_drain_node(o: Object) -> Node {
             rs: A1,
             shamt: 16,
         },
+        // Latch ctrl/shift/alt/meta into PTR_MODS (press OR, release AND-not).
+        // A1=code, A2=value. T3 is the buffer idx — leave it alone.
+        Op::Li {
+            rd: T0,
+            imm: VIO_KEY_LEFTCTRL,
+        },
+        Op::Beq {
+            rs1: A1,
+            rs2: T0,
+            to: "ipd_mod_ctrl".into(),
+        },
+        Op::Li {
+            rd: T0,
+            imm: VIO_KEY_RIGHTCTRL,
+        },
+        Op::Beq {
+            rs1: A1,
+            rs2: T0,
+            to: "ipd_mod_ctrl".into(),
+        },
+        Op::Li {
+            rd: T0,
+            imm: VIO_KEY_LEFTSHIFT,
+        },
+        Op::Beq {
+            rs1: A1,
+            rs2: T0,
+            to: "ipd_mod_shift".into(),
+        },
+        Op::Li {
+            rd: T0,
+            imm: VIO_KEY_RIGHTSHIFT,
+        },
+        Op::Beq {
+            rs1: A1,
+            rs2: T0,
+            to: "ipd_mod_shift".into(),
+        },
+        Op::Li {
+            rd: T0,
+            imm: VIO_KEY_LEFTALT,
+        },
+        Op::Beq {
+            rs1: A1,
+            rs2: T0,
+            to: "ipd_mod_alt".into(),
+        },
+        Op::Li {
+            rd: T0,
+            imm: VIO_KEY_RIGHTALT,
+        },
+        Op::Beq {
+            rs1: A1,
+            rs2: T0,
+            to: "ipd_mod_alt".into(),
+        },
+        Op::Li {
+            rd: T0,
+            imm: VIO_KEY_LEFTMETA,
+        },
+        Op::Beq {
+            rs1: A1,
+            rs2: T0,
+            to: "ipd_mod_meta".into(),
+        },
+        Op::Li {
+            rd: T0,
+            imm: VIO_KEY_RIGHTMETA,
+        },
+        Op::Beq {
+            rs1: A1,
+            rs2: T0,
+            to: "ipd_mod_meta".into(),
+        },
+        jump("ipd_mod_done"),
+        Op::Label("ipd_mod_ctrl".into()),
+        Op::Li {
+            rd: T1,
+            imm: MOD_CTRL,
+        },
+        jump("ipd_mod_apply"),
+        Op::Label("ipd_mod_shift".into()),
+        Op::Li {
+            rd: T1,
+            imm: MOD_SHIFT,
+        },
+        jump("ipd_mod_apply"),
+        Op::Label("ipd_mod_alt".into()),
+        Op::Li {
+            rd: T1,
+            imm: MOD_ALT,
+        },
+        jump("ipd_mod_apply"),
+        Op::Label("ipd_mod_meta".into()),
+        Op::Li {
+            rd: T1,
+            imm: MOD_META,
+        },
+        Op::Label("ipd_mod_apply".into()),
+        lw(T0, T5, PTR_MODS),
+        Op::Beq {
+            rs1: A2,
+            rs2: X0,
+            to: "ipd_mod_clr".into(),
+        },
+        Op::Or {
+            rd: T0,
+            rs: T0,
+            rs2: T1,
+        },
+        jump("ipd_mod_store"),
+        Op::Label("ipd_mod_clr".into()),
+        Op::Li { rd: T2, imm: -1 },
+        Op::Xor {
+            rd: T1,
+            rs1: T1,
+            rs2: T2,
+        },
+        Op::And {
+            rd: T0,
+            rs: T0,
+            rs2: T1,
+        },
+        Op::Label("ipd_mod_store".into()),
+        sw(T0, T5, PTR_MODS),
+        Op::Label("ipd_mod_done".into()),
         Op::Slli {
             rd: A1,
             rs: A1,
@@ -3890,6 +5610,19 @@ pub fn inp_drain_node(o: Object) -> Node {
             rd: A1,
             rs1: A1,
             rs2: A2,
+        },
+        // Pack PTR_MODS in bits 24..31 so DomtKey sees the modifiers at
+        // this press, not the latch after a later Shift release in the burst.
+        lw(T0, T5, PTR_MODS),
+        Op::Slli {
+            rd: T0,
+            rs: T0,
+            shamt: 24,
+        },
+        Op::Or {
+            rd: A1,
+            rs: A1,
+            rs2: T0,
         },
         lw(T1, T5, INP_KQ_HEAD),
         Op::Andi {

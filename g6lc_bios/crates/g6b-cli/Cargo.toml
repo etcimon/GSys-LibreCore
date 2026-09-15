@@ -31,6 +31,8 @@ g6b-img = { workspace = true }
 g6b-ttf = { workspace = true }
 g6b-zealcli = { workspace = true }
 g6b-vfs = { workspace = true }
+g6b-bootctl = { workspace = true }
+g6b-boot-health = { workspace = true }
 
 [lints]
 workspace = true

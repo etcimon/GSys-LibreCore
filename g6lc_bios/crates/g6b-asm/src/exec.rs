@@ -43,7 +43,17 @@ pub enum Halt {
     UartPoll,
     Srst,
     Limit,
+    Watchdog,
     Unimp(u32),
+}
+
+/// Exec-model stand-in for a native-service `jalr`. Host tests pass
+/// `g6b_guest::native_entry`; the generated ASM never fetches the RX
+/// callee image. `entry` is the absolute `jalr` target.
+#[derive(Clone, Copy)]
+pub struct NativeHook {
+    pub entry: u64,
+    pub dispatch: fn(&mut [u8; 256]) -> u32,
 }
 
 /// One live `__dom` node record as the exec model snapshots it:
@@ -119,6 +129,8 @@ pub struct Smoke {
     /// `add_event_listener` (the BIOS protocol passes `listener=0`, so
     /// `N_LISTEN` stays 0 and `N_LEV` is the real registration signal).
     pub domt_listen: u32,
+    /// `__dom` `H_FOCUS` — node index that receives keydown (`DomtFocus`).
+    pub domt_focus: u32,
     /// `__dom_id` slots carrying a set id — `setProperty(..,"id",..)` writes.
     pub domt_ids: u32,
     /// Debug snapshot of each live `__dom` node after the run. Lets a test
@@ -192,6 +204,23 @@ pub struct Smoke {
     /// virtio-blk requests the modelled device completed. A test asserts the
     /// driver *asked the device* for its sectors rather than reading stale RAM.
     pub blk_reqs: u32,
+    /// Durable `VIRTIO_BLK_T_FLUSH` completions.
+    pub blk_flushes: u32,
+    /// First bytes of LBA 0 after the run (protective MBR must survive journal writes).
+    pub blk_lba0_tail: u16,
+    /// First word of journal LBA 8 after the run.
+    pub blk_lba8: u32,
+    /// Slot 0 of the BIOS journal window (8 sectors at LBA 8), if the image is long enough.
+    pub blk_jrn0: Vec<u8>,
+    /// First word of firmware-A / firmware-B stubs (must survive journal I/O).
+    pub blk_fw_a: u32,
+    pub blk_fw_b: u32,
+    /// First word of the last sector of firmware B (full-slot stage).
+    pub blk_fw_b_last: u32,
+    /// Trailing word of the last sector of firmware B.
+    pub blk_fw_b_end: u32,
+    /// Selector word at firmware B + 8 (`G6SL` when nominated).
+    pub blk_fw_sel: u32,
     /// Uncore display engine latched a scanout commit (`disp`-class
     /// peripheral; `architecture/uncore/hdmi-display.md`).
     pub disp_committed: bool,
@@ -225,7 +254,7 @@ pub fn run_module_with_limit(
     if step_limit == 0 || step_limit > 192_000_000 {
         return Err("execution step limit must be in 1..=192000000".into());
     }
-    run_module_web_inner(spec, module, entry, 0, b'V', None, None, step_limit)
+    run_module_web_inner(spec, module, entry, 0, b'V', None, None, step_limit, None)
 }
 
 /// Same as [`run_module`] with OpenSBI `a0=hartid`.
@@ -279,12 +308,14 @@ pub fn run_module_hart_with_blk_image(
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
         module.domt_addr(entry).unwrap_or(0),
+        module.wdt_bss_addr(entry).unwrap_or(0),
         None,
         None,
         uart_ui_pc,
         trap_timer_pc,
         Some(blk_image),
         STEP_LIMIT,
+        None,
     )
 }
 
@@ -338,6 +369,37 @@ pub trait WebFeed {
     fn hint_abs(&self) -> Option<(u32, u32)> {
         None
     }
+    /// Mouse `REL_X`/`REL_Y` deltas (tablet units, signed). When set, the
+    /// poke skips the dummy `BTN_LEFT` click.
+    fn hint_rel(&self) -> Option<(i32, i32)> {
+        None
+    }
+    /// Mouse `REL_WHEEL` delta. When set, the poke skips the dummy click.
+    fn hint_wheel(&self) -> Option<i32> {
+        None
+    }
+    /// One RFB 3.8 PointerEvent (`[5, mask, x_be, y_be]`). When set, the
+    /// poke runs [`crate::ptr::PtrNorm`] instead of the dummy ABS+BTN click.
+    fn hint_rfb(&self) -> Option<[u8; 6]> {
+        None
+    }
+    /// First-party browser-KVM pointer (display px + buttons + wheel).
+    fn hint_kvm(&self) -> Option<crate::ptr::KvmPointer> {
+        None
+    }
+    /// Keyboard modifier mask (`MOD_SHIFT` etc.). Injected as `KEY_LEFT*`
+    /// presses ahead of the canned KEY SEQ so `InpDrain` latches `PTR_MODS`.
+    fn hint_mods(&self) -> Option<u8> {
+        None
+    }
+    /// Replace the canned KEY SEQ with one EV_KEY press (`code`, `value`).
+    fn hint_key(&self) -> Option<(u16, u32)> {
+        None
+    }
+    /// Replace the canned KEY SEQ with several EV_KEY presses.
+    fn hint_keys(&self) -> Option<&'static [(u16, u32)]> {
+        None
+    }
     /// Guest `trap_timer` ≡ UI-hart `tick`. Return `None` when skip-if-clean
     /// (no CSS dirty / no due rAF) so `VioPaint` does not TRANSFER.
     fn on_guest_tick(&mut self) -> Option<GuestWebPresent> {
@@ -353,7 +415,9 @@ pub fn run_module_web(
     hartid: u64,
     web: Option<&GuestWebPresent>,
 ) -> Result<Smoke, String> {
-    run_module_web_inner(spec, module, entry, hartid, b'V', web, None, STEP_LIMIT)
+    run_module_web_inner(
+        spec, module, entry, hartid, b'V', web, None, STEP_LIMIT, None,
+    )
 }
 
 /// Same as [`run_module_web`] but UART `Ui` re-queries [`WebFeed::on_guest_ui`]
@@ -386,6 +450,27 @@ pub fn run_module_web_feed_kick(
         None,
         Some(feed),
         STEP_LIMIT,
+        None,
+    )
+}
+
+/// Like [`run_module`] with a native-service `jalr` hook.
+pub fn run_module_native(
+    spec: &BoardSpec,
+    module: &Module,
+    entry: u64,
+    hook: NativeHook,
+) -> Result<Smoke, String> {
+    run_module_web_inner(
+        spec,
+        module,
+        entry,
+        0,
+        b'V',
+        None,
+        None,
+        STEP_LIMIT,
+        Some(hook),
     )
 }
 
@@ -399,6 +484,7 @@ fn run_module_web_inner(
     web: Option<&GuestWebPresent>,
     feed: Option<&mut dyn WebFeed>,
     step_limit: u32,
+    native: Option<NativeHook>,
 ) -> Result<Smoke, String> {
     let (insns, rodata) = module.to_words(entry)?;
     let mut image = Vec::with_capacity(insns.len() * 4 + rodata.len());
@@ -423,12 +509,14 @@ fn run_module_web_inner(
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
         module.domt_addr(entry).unwrap_or(0),
+        module.wdt_bss_addr(entry).unwrap_or(0),
         web,
         feed,
         uart_ui_pc,
         trap_timer_pc,
         None,
         step_limit,
+        native,
     )
 }
 
@@ -460,12 +548,14 @@ pub fn run_module_kick(
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
         module.domt_addr(entry).unwrap_or(0),
+        module.wdt_bss_addr(entry).unwrap_or(0),
         None,
         None,
         0,
         0,
         None,
         STEP_LIMIT,
+        None,
     )
 }
 
@@ -493,12 +583,14 @@ pub fn run_module_no_gpu(spec: &BoardSpec, module: &Module, entry: u64) -> Resul
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
         module.domt_addr(entry).unwrap_or(0),
+        module.wdt_bss_addr(entry).unwrap_or(0),
         None,
         None,
         0,
         0,
         None,
         STEP_LIMIT,
+        None,
     )
 }
 
@@ -527,12 +619,14 @@ pub fn run_module_bare(spec: &BoardSpec, module: &Module, entry: u64) -> Result<
         module.vio_fb_bytes,
         module.cap_addr(entry).unwrap_or(0),
         module.domt_addr(entry).unwrap_or(0),
+        module.wdt_bss_addr(entry).unwrap_or(0),
         None,
         None,
         0,
         0,
         None,
         STEP_LIMIT,
+        None,
     )
 }
 
@@ -561,12 +655,14 @@ pub fn run(
         0,
         0,
         0,
+        0,
         None,
         None,
         0,
         0,
         None,
         STEP_LIMIT,
+        None,
     )
 }
 
@@ -592,12 +688,14 @@ fn run_with_kick(
     // (`__dom`/`__dom_str`/`__dom_id` are contiguous). `0` when the caller has
     // no module to resolve it from.
     domt_base: u64,
+    wdt_base: u64,
     web: Option<&GuestWebPresent>,
     mut feed: Option<&mut dyn WebFeed>,
     uart_ui_pc: u64,
     trap_timer_pc: u64,
     blk_image: Option<Vec<u8>>,
     step_limit: u32,
+    native: Option<NativeHook>,
 ) -> Result<Smoke, String> {
     let xlen = spec.isa.xlen;
     if xlen != 32 && xlen != 64 {
@@ -701,6 +799,9 @@ fn run_with_kick(
             Vec::new()
         },
         blk_reqs: 0,
+        blk_flushes: 0,
+        blk_drv_sel: 0,
+        blk_drv_feat0: 0,
         vio_base,
         scan_fb_base,
         scan_fb_bytes,
@@ -791,6 +892,7 @@ fn run_with_kick(
         disp_base: spec.display_ctrl().unwrap_or(0),
         jit_lane: spec.kernel.wasm.enable && spec.kernel.wasm.jit,
         cli_face: crate::analyze::wants_cli_face(spec),
+        wdt_base,
         ..Default::default()
     };
     let mut console = String::new();
@@ -811,6 +913,19 @@ fn run_with_kick(
         }
         steps += 1;
         csr.time = csr.time.wrapping_add(1);
+        if platform_wdt_due(&ram, entry, &csr) {
+            console.push_str("LINUX-WDT-FIRE\n");
+            return Ok(done(
+                console,
+                steps,
+                Halt::Watchdog,
+                &csr,
+                &ram,
+                entry,
+                xlen,
+                pc,
+            ));
+        }
         // Deliver the canned input burst as soon as the boot picker is armed
         // (`__uart_line[AUTO_ON]`), not only on `wfi`. The picker's vga-surface
         // `FbExpand` upscales the low-res plane to the full scanout and can
@@ -833,7 +948,9 @@ fn run_with_kick(
             .unwrap_or(0)
                 != 0
         {
-            let evs = host_inp_kick(&mut csr, &mut ram, entry);
+            let key = feed.as_ref().and_then(|f| f.hint_key());
+            let keys = feed.as_ref().and_then(|f| f.hint_keys());
+            let evs = host_inp_kick(&mut csr, &mut ram, entry, 0, key, keys);
             feed_events(
                 &mut feed,
                 &mut ram,
@@ -901,7 +1018,13 @@ fn run_with_kick(
             &mut console,
             &mut uart_polls,
         ) {
-            Step::Cont => {}
+            Step::Cont => {
+                if let Some(hook) = native {
+                    if pc == hook.entry {
+                        apply_native_hook(&mut x, &mut pc, &mut ram, entry, hook.dispatch);
+                    }
+                }
+            }
             Step::Halt(h) => {
                 if host_mbox_kick(&mut csr, kick) && take_pending_sei(xlen, &mut pc, &mut csr) {
                     continue;
@@ -911,7 +1034,10 @@ fn run_with_kick(
                 // (QEMU `sendkey` arrives asynchronously the same way). The
                 // `AUTO_ON`-armed kick above usually lands this first; this
                 // remains the fallback for non-autoboot faces.
-                let evs = host_inp_kick(&mut csr, &mut ram, entry);
+                let mods = feed.as_ref().and_then(|f| f.hint_mods()).unwrap_or(0);
+                let key = feed.as_ref().and_then(|f| f.hint_key());
+                let keys = feed.as_ref().and_then(|f| f.hint_keys());
+                let evs = host_inp_kick(&mut csr, &mut ram, entry, mods, key, keys);
                 let had_inp = !evs.is_empty();
                 feed_events(
                     &mut feed,
@@ -924,9 +1050,15 @@ fn run_with_kick(
                 );
                 // Same Halt as keys: after InpDrain the guest often stays in
                 // the UART poll loop and never WFI-Halts again for a second
-                // poke. KEY SEQ is unchanged; tablet is EV_ABS only.
-                let hint = feed.as_ref().and_then(|f| f.hint_abs());
-                let tabs = host_inp_tab_kick(&mut csr, &mut ram, entry, hint);
+                // poke. KEY SEQ is unchanged; tablet is ABS+REL+wheel.
+                let poke = TabPoke {
+                    abs: feed.as_ref().and_then(|f| f.hint_abs()),
+                    rel: feed.as_ref().and_then(|f| f.hint_rel()),
+                    wheel: feed.as_ref().and_then(|f| f.hint_wheel()),
+                    rfb: feed.as_ref().and_then(|f| f.hint_rfb()),
+                    kvm: feed.as_ref().and_then(|f| f.hint_kvm()),
+                };
+                let tabs = host_inp_tab_kick(&mut csr, &mut ram, entry, poke);
                 let had_tab = !tabs.is_empty();
                 feed_events(
                     &mut feed,
@@ -1124,7 +1256,12 @@ fn done(
                 rd(dt::N_W),
                 rd(dt::N_H),
                 tlen,
-                format!("{text} bg={:#08x} fg={:#08x}", rd(dt::N_BG), rd(dt::N_FG)),
+                format!(
+                    "{text} bg={:#08x} fg={:#08x} flags={:#x}",
+                    rd(dt::N_BG),
+                    rd(dt::N_FG),
+                    rd(dt::N_FLAGS)
+                ),
             ));
         }
     }
@@ -1174,6 +1311,16 @@ fn done(
         domt_next,
         domt_live,
         domt_listen,
+        domt_focus: if csr.domt_base != 0 {
+            load_u32(
+                ram,
+                base,
+                csr.domt_base.wrapping_add(crate::domt::H_FOCUS as u64),
+            )
+            .unwrap_or(0)
+        } else {
+            0
+        },
         domt_ids,
         domt_nodes,
         gr_frame,
@@ -1259,6 +1406,60 @@ fn done(
         },
         vio_irqs: csr.vio_irqs,
         blk_reqs: csr.blk_reqs,
+        blk_flushes: csr.blk_flushes,
+        blk_lba0_tail: if csr.blk_image.len() >= 512 {
+            u16::from_le_bytes(csr.blk_image[510..512].try_into().unwrap())
+        } else {
+            0
+        },
+        blk_lba8: if csr.blk_image.len() >= 9 * 512 {
+            u32::from_le_bytes(csr.blk_image[8 * 512..8 * 512 + 4].try_into().unwrap())
+        } else {
+            0
+        },
+        blk_jrn0: csr
+            .blk_image
+            .get(8 * 512..8 * 512 + 4096)
+            .map(|b| b.to_vec())
+            .unwrap_or_default(),
+        blk_fw_a: {
+            let o = crate::vio::BLK_FW_A_LBA as usize * 512;
+            csr.blk_image
+                .get(o..o + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .unwrap_or(0)
+        },
+        blk_fw_b: {
+            let o = crate::vio::BLK_FW_B_LBA as usize * 512;
+            csr.blk_image
+                .get(o..o + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .unwrap_or(0)
+        },
+        blk_fw_b_last: {
+            let o =
+                (crate::vio::BLK_FW_B_LBA as usize + crate::vio::BLK_FW_SECTORS as usize - 1) * 512;
+            csr.blk_image
+                .get(o..o + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .unwrap_or(0)
+        },
+        blk_fw_b_end: {
+            let o = (crate::vio::BLK_FW_B_LBA as usize + crate::vio::BLK_FW_SECTORS as usize - 1)
+                * 512
+                + 508;
+            csr.blk_image
+                .get(o..o + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .unwrap_or(0)
+        },
+        blk_fw_sel: {
+            let o = crate::vio::BLK_FW_B_LBA as usize * 512 + 8;
+            csr.blk_image
+                .get(o..o + 4)
+                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .unwrap_or(0)
+        },
         disp_committed: csr.disp_committed,
         disp_desc: (
             csr.disp_regs[3] as u64 | ((csr.disp_regs[4] as u64) << 32),
@@ -1405,6 +1606,9 @@ struct Csr {
     /// Requests the device completed — a test asserts the driver asked once, not
     /// that it spun.
     blk_reqs: u32,
+    blk_flushes: u32,
+    blk_drv_sel: u32,
+    blk_drv_feat0: u32,
     /// Modelled virtio-net at slot 5 (DeviceID 1). Not a QEMU `-netdev`.
     vio_net: bool,
     /// Modelled virtio-input keyboard at slot 1 (`-device
@@ -1553,6 +1757,8 @@ struct Csr {
     /// Shadow of the linear-framebuffer BAR; `PciPaint` blits straight into it
     /// via `DISP_SEL_FB_LO`. Reported as `Smoke::pci_fb_img`.
     pci_fb_img: Vec<u8>,
+    /// Platform WDT record (`G6WD` + deadline) at the tail of `__linux_load`.
+    wdt_base: u64,
     /// Scalar-FP register file (`f0`-`f31`), M3b exec-model FPU. Each slot holds
     /// the value's bit pattern; `f32` ops read/write the low 32 bits
     /// (NaN-boxing is not modelled — the guest JIT keeps FP values as raw bit
@@ -2147,6 +2353,12 @@ fn step(
                     *pc = npc;
                     return Step::Cont;
                 }
+                // An armed platform WDT must survive `sie=0`. `wfi` is a wait,
+                // not a halt, until the deadline fires in the run loop.
+                if platform_wdt_armed(ram, base, csr) {
+                    *pc = npc;
+                    return Step::Cont;
+                }
                 *pc = npc;
                 return Step::Halt(Halt::Wfi);
             }
@@ -2703,7 +2915,7 @@ fn blk_load(csr: &Csr, reg: u64) -> u32 {
             if csr.blk_feat_sel == 1 {
                 VIO_F_VERSION_1
             } else {
-                0
+                crate::encode::VIO_BLK_F_FLUSH
             }
         }
         0x14 => csr.blk_feat_sel,
@@ -2721,8 +2933,12 @@ fn blk_load(csr: &Csr, reg: u64) -> u32 {
 fn blk_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
     match reg {
         0x14 => csr.blk_feat_sel = v,
-        0x20 => {}
-        0x24 => {}
+        0x20 => {
+            if csr.blk_drv_sel == 0 {
+                csr.blk_drv_feat0 = v;
+            }
+        }
+        0x24 => csr.blk_drv_sel = v,
         0x30 => csr.blk_qsel = v,
         0x38 => csr.blk_qnum = v,
         0x44 => csr.blk_ready = v != 0,
@@ -2735,6 +2951,8 @@ fn blk_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
                 csr.blk_ready = false;
                 csr.blk_isr = 0;
                 csr.blk_used_idx = 0;
+                csr.blk_drv_sel = 0;
+                csr.blk_drv_feat0 = 0;
             }
         }
         0x80 => csr.blk_qdesc = (csr.blk_qdesc & !0xffff_ffff) | u64::from(v),
@@ -2772,21 +2990,24 @@ fn blk_notify(csr: &mut Csr, ram: &mut [u8], base: u64) {
         let ty = load_u32(ram, base, hdr).unwrap_or(u32::MAX);
         let sector = load_u64(ram, base, hdr + 8).unwrap_or(0);
         let next1 = u64::from((flags0 >> 16) & 0xffff);
-        // desc1: the data buffer the device fills.
         let d1 = csr.blk_qdesc + next1 * 16;
-        let data = load_u64(ram, base, d1).unwrap_or(0);
+        let buf = load_u64(ram, base, d1).unwrap_or(0);
         let dlen = load_u32(ram, base, d1 + 8).unwrap_or(0);
         let flags1 = load_u32(ram, base, d1 + 12).unwrap_or(0);
         let next2 = u64::from((flags1 >> 16) & 0xffff);
-        // desc2: the one-byte status.
-        let d2 = csr.blk_qdesc + next2 * 16;
-        let stat = load_u64(ram, base, d2).unwrap_or(0);
-        // Only reads are modelled; anything else is an honest IOERR (1), which is
-        // also what the driver must notice instead of trusting the used ring.
-        let mut status = 1u8;
+        let flush = ty == crate::encode::VIO_BLK_T_FLUSH as u32;
+        let (data, stat) = if flush {
+            (0, buf)
+        } else {
+            let d2 = csr.blk_qdesc + next2 * 16;
+            (buf, load_u64(ram, base, d2).unwrap_or(0))
+        };
+        let mut status = crate::encode::VIO_BLK_S_IOERR;
+        let start = (sector as usize).saturating_mul(512);
+        let want = dlen.min(512) as usize;
+        const JRN: u64 = crate::vio::BLK_JRN_LBA as u64;
+        const JRN_N: u64 = crate::vio::BLK_JRN_SECTORS as u64;
         if ty == 0 {
-            let start = (sector as usize) * 512;
-            let want = dlen.min(512) as usize;
             if start + want <= csr.blk_image.len() {
                 let bytes: Vec<u8> = csr.blk_image[start..start + want].to_vec();
                 for (i, b) in bytes.iter().enumerate() {
@@ -2794,6 +3015,25 @@ fn blk_notify(csr: &mut Csr, ram: &mut [u8], base: u64) {
                 }
                 status = 0;
             }
+        } else if ty == crate::encode::VIO_BLK_T_OUT as u32 {
+            const FW_B: u64 = crate::vio::BLK_FW_B_LBA as u64;
+            const FW_N: u64 = crate::vio::BLK_FW_SECTORS as u64;
+            let journal = sector >= JRN && sector < JRN + JRN_N;
+            let inactive = sector >= FW_B && sector < FW_B + FW_N;
+            if (journal || inactive)
+                && start + want <= csr.blk_image.len()
+                && (flags1 & crate::encode::VIO_DESC_WRITE) == 0
+            {
+                for i in 0..want {
+                    if let Some(b) = load_u8(ram, base, data + i as u64) {
+                        csr.blk_image[start + i] = b;
+                    }
+                }
+                status = 0;
+            }
+        } else if flush && csr.blk_drv_feat0 & crate::encode::VIO_BLK_F_FLUSH != 0 {
+            csr.blk_flushes = csr.blk_flushes.saturating_add(1);
+            status = 0;
         }
         store_u8(ram, base, stat, status);
         let used = csr.blk_qused;
@@ -2932,18 +3172,45 @@ fn feed_inp(feed: &mut dyn WebFeed, ev: InpEv) -> Option<GuestWebPresent> {
 /// SEQ is EV_KEY only (VGA `DomNav` tests). Pointer `EV_ABS`/`EV_REL` use
 /// the same `InpEv` / [`WebFeed`] dispatcher when a later poke writes them;
 /// do not append tablet events to this burst.
-fn host_inp_kick(csr: &mut Csr, ram: &mut [u8], base: u64) -> Vec<InpEv> {
+fn host_inp_kick(
+    csr: &mut Csr,
+    ram: &mut [u8],
+    base: u64,
+    mods: u8,
+    key: Option<(u16, u32)>,
+    keys: Option<&[(u16, u32)]>,
+) -> Vec<InpEv> {
     if !csr.vio_inp || csr.inp_poked || !csr.inp_ready || csr.inp_qused == 0 {
         return Vec::new();
     }
     csr.inp_poked = true;
     // virtio_input_event {u16 type=EV_KEY, u16 code, u32 value}: 'a' (30),
     // KEY_DOWN (108), KEY_ENTER (28) — a non-nav letter, a nav arrow and an
-    // activation in one burst.
-    const SEQ: [(u16, u32); 3] = [(30, 1), (108, 1), (28, 1)];
+    // activation in one burst. Optional modifier presses from `hint_mods`.
+    // `hint_key` replaces that SEQ so a test can inject backspace or KEY_B.
+    let mut seq: Vec<(u16, u32)> = Vec::new();
+    if mods & crate::vio::MOD_SHIFT as u8 != 0 {
+        seq.push((crate::vio::VIO_KEY_LEFTSHIFT as u16, 1));
+    }
+    if mods & crate::vio::MOD_CTRL as u8 != 0 {
+        seq.push((crate::vio::VIO_KEY_LEFTCTRL as u16, 1));
+    }
+    if mods & crate::vio::MOD_ALT as u8 != 0 {
+        seq.push((crate::vio::VIO_KEY_LEFTALT as u16, 1));
+    }
+    if mods & crate::vio::MOD_META as u8 != 0 {
+        seq.push((crate::vio::VIO_KEY_LEFTMETA as u16, 1));
+    }
+    if let Some(ks) = keys {
+        seq.extend_from_slice(ks);
+    } else if let Some(k) = key {
+        seq.push(k);
+    } else {
+        seq.extend_from_slice(&[(30, 1), (108, 1), (28, 1)]);
+    }
     let used = csr.inp_qused;
     let mut out = Vec::new();
-    for &(code, val) in &SEQ {
+    for &(code, val) in &seq {
         let Some(head) = csr.inp_bufs.pop() else {
             break;
         };
@@ -3081,18 +3348,26 @@ fn tab_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
     }
 }
 
-/// Inject a canned virtio-tablet packet into the tablet eventq: `ABS_X`,
-/// `ABS_Y`, then `BTN_LEFT` press (QEMU VNC click). Does not change the
-/// keyboard KEY SEQ and does not touch `INP_KQ` (`TabDrain` re-posts).
-/// `abs` is the feed hint (svelte-d tab hit in tablet units) or (0,0).
-fn host_inp_tab_kick(
-    csr: &mut Csr,
-    ram: &mut [u8],
-    base: u64,
+/// Host tablet poke: local ABS/REL/wheel hints, or RFB/KVM samples that
+/// [`crate::ptr::PtrNorm`] scales into the same virtio eventq.
+struct TabPoke {
     abs: Option<(u32, u32)>,
-) -> Vec<InpEv> {
-    use crate::encode::{VIO_INP_EV_ABS, VIO_INP_EV_KEY};
-    use crate::vio::{VIO_ABS_X, VIO_ABS_Y, VIO_BTN_LEFT};
+    rel: Option<(i32, i32)>,
+    wheel: Option<i32>,
+    rfb: Option<[u8; 6]>,
+    kvm: Option<crate::ptr::KvmPointer>,
+}
+
+/// Inject a canned virtio-tablet packet into the tablet eventq.
+/// Default (no REL/wheel): `ABS_X`, `ABS_Y`, then `BTN_LEFT` press — the
+/// QEMU VNC click stand-in. `hint_rel` / `hint_wheel` skip that dummy click
+/// so a mousemove or wheel packet is not also a press. RFB/KVM go through
+/// [`crate::ptr::PtrNorm`]. Does not change the keyboard KEY SEQ and does
+/// not touch `INP_KQ` (`TabDrain` re-posts).
+fn host_inp_tab_kick(csr: &mut Csr, ram: &mut [u8], base: u64, poke: TabPoke) -> Vec<InpEv> {
+    use crate::encode::{VIO_INP_EV_ABS, VIO_INP_EV_KEY, VIO_INP_EV_REL};
+    use crate::ptr::{decode_rfb_pointer, PtrNorm};
+    use crate::vio::{VIO_ABS_X, VIO_ABS_Y, VIO_BTN_LEFT, VIO_REL_WHEEL, VIO_REL_X, VIO_REL_Y};
     if !csr.vio_inp || csr.tab_poked || !csr.tab_ready || csr.tab_qused == 0 {
         return Vec::new();
     }
@@ -3100,24 +3375,68 @@ fn host_inp_tab_kick(
         return Vec::new();
     }
     csr.tab_poked = true;
-    let (ax, ay) = abs.unwrap_or((0, 0));
-    let seq = [
-        InpEv {
-            ty: VIO_INP_EV_ABS as u16,
-            code: VIO_ABS_X as u16,
-            value: ax,
-        },
-        InpEv {
-            ty: VIO_INP_EV_ABS as u16,
-            code: VIO_ABS_Y as u16,
-            value: ay,
-        },
-        InpEv {
-            ty: VIO_INP_EV_KEY as u16,
-            code: VIO_BTN_LEFT as u16,
-            value: 1,
-        },
-    ];
+    let seq = if poke.rfb.is_some() || poke.kvm.is_some() {
+        let mut n = PtrNorm::new(csr.vio_disp_w, csr.vio_disp_h);
+        if let Some(b) = poke.rfb {
+            if let Some(s) = decode_rfb_pointer(&b) {
+                let _ = n.push(s);
+            }
+        }
+        if let Some(k) = poke.kvm {
+            let _ = n.push(k.sample());
+        }
+        n.finish()
+            .into_iter()
+            .map(|e| InpEv {
+                ty: e.ty,
+                code: e.code,
+                value: e.value,
+            })
+            .collect()
+    } else {
+        let click = poke.rel.is_none() && poke.wheel.is_none();
+        let (ax, ay) = poke.abs.unwrap_or((0, 0));
+        let mut seq = Vec::new();
+        if poke.abs.is_some() || click {
+            seq.push(InpEv {
+                ty: VIO_INP_EV_ABS as u16,
+                code: VIO_ABS_X as u16,
+                value: ax,
+            });
+            seq.push(InpEv {
+                ty: VIO_INP_EV_ABS as u16,
+                code: VIO_ABS_Y as u16,
+                value: ay,
+            });
+        }
+        if let Some((dx, dy)) = poke.rel {
+            seq.push(InpEv {
+                ty: VIO_INP_EV_REL as u16,
+                code: VIO_REL_X as u16,
+                value: dx as u32,
+            });
+            seq.push(InpEv {
+                ty: VIO_INP_EV_REL as u16,
+                code: VIO_REL_Y as u16,
+                value: dy as u32,
+            });
+        }
+        if let Some(w) = poke.wheel {
+            seq.push(InpEv {
+                ty: VIO_INP_EV_REL as u16,
+                code: VIO_REL_WHEEL as u16,
+                value: w as u32,
+            });
+        }
+        if click {
+            seq.push(InpEv {
+                ty: VIO_INP_EV_KEY as u16,
+                code: VIO_BTN_LEFT as u16,
+                value: 1,
+            });
+        }
+        seq
+    };
     let used = csr.tab_qused;
     let mut out = Vec::new();
     for ev in seq {
@@ -3761,6 +4080,18 @@ fn timer_armed(csr: &Csr) -> bool {
     (csr.sstatus & SSTATUS_SIE as u64) != 0 && (csr.sie & SIE_STIE as u64) != 0
 }
 
+fn platform_wdt_armed(ram: &[u8], base: u64, csr: &Csr) -> bool {
+    csr.wdt_base != 0 && load_u32(ram, base, csr.wdt_base).unwrap_or(0) == crate::linux::WDT_MAGIC
+}
+
+fn platform_wdt_due(ram: &[u8], base: u64, csr: &Csr) -> bool {
+    if !platform_wdt_armed(ram, base, csr) {
+        return false;
+    }
+    let deadline = u64::from(load_u32(ram, base, csr.wdt_base.wrapping_add(4)).unwrap_or(0));
+    csr.time >= deadline
+}
+
 fn enter_s_trap(pc: u64, scause: u64, csr: &mut Csr) {
     csr.sepc = pc;
     csr.scause = scause;
@@ -4232,6 +4563,40 @@ fn store_u8(ram: &mut [u8], base: u64, addr: u64, v: u8) -> bool {
         }
     }
     false
+}
+
+fn apply_native_hook(
+    x: &mut [u64; 32],
+    pc: &mut u64,
+    ram: &mut [u8],
+    base: u64,
+    dispatch: fn(&mut [u8; 256]) -> u32,
+) {
+    let frame_addr = x[crate::encode::A0 as usize];
+    let mut frame = [0u8; 256];
+    let mut ok = true;
+    for (i, byte) in frame.iter_mut().enumerate() {
+        match load_u8(ram, base, frame_addr.wrapping_add(i as u64)) {
+            Some(b) => *byte = b,
+            None => {
+                ok = false;
+                break;
+            }
+        }
+    }
+    let status = if ok {
+        let status = dispatch(&mut frame);
+        for (i, byte) in frame.iter().enumerate() {
+            if !store_u8(ram, base, frame_addr.wrapping_add(i as u64), *byte) {
+                break;
+            }
+        }
+        status
+    } else {
+        1
+    };
+    x[crate::encode::A0 as usize] = u64::from(status);
+    *pc = x[crate::encode::RA as usize];
 }
 
 fn inject_web_present(
@@ -5157,6 +5522,445 @@ mod tests {
             "LBA 0 + LBA 1, at boot and on Blk: {}",
             s.console
         );
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    /// Journal-window write + F_FLUSH + range refuse. LBA 0 (GPT/MBR) is unchanged.
+    #[test]
+    fn the_guest_writes_and_flushes_only_the_journal_window() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"storage":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = analyze::kstart(&spec);
+        let park = m
+            .nodes
+            .iter()
+            .position(|n| n.purpose == crate::Purpose::Park)
+            .expect("park");
+        m.nodes.insert(
+            park,
+            crate::Node {
+                purpose: crate::Purpose::VirtioBlk,
+                ops: vec![Op::Jal {
+                    rd: crate::encode::RA,
+                    to: "BlkJournalSelftest".into(),
+                }],
+            },
+        );
+        m.nodes
+            .insert(park + 1, crate::vio::blk_journal_selftest_node());
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("BLK-WRITE-OK"), "{}", s.console);
+        assert!(s.console.contains("BLK-RANGE"), "{}", s.console);
+        assert!(!s.console.contains("BLK-WRITE-FAIL"), "{}", s.console);
+        assert!(!s.console.contains("BLK-NOFLUSH"), "{}", s.console);
+        assert!(s.blk_flushes >= 1, "flush completions: {}", s.blk_flushes);
+        assert_eq!(s.blk_lba0_tail, 0xAA55, "protective MBR must survive");
+        assert_eq!(s.blk_lba8, 0x315e_4e52);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    #[test]
+    fn the_guest_loads_and_commits_g6bh_slots_on_the_journal_window() {
+        use g6b_bootctl::{Domain, Journal, Record, SlotStorage, SLOT_BYTES};
+
+        struct Window<'a>(&'a mut [u8]);
+        impl SlotStorage for Window<'_> {
+            type Error = ();
+            fn read_slot(&mut self, slot: usize, bytes: &mut [u8; SLOT_BYTES]) -> Result<(), ()> {
+                let o = slot * SLOT_BYTES;
+                bytes.copy_from_slice(&self.0[o..o + SLOT_BYTES]);
+                Ok(())
+            }
+            fn write_slot(&mut self, slot: usize, bytes: &[u8; SLOT_BYTES]) -> Result<(), ()> {
+                let o = slot * SLOT_BYTES;
+                self.0[o..o + SLOT_BYTES].copy_from_slice(bytes);
+                Ok(())
+            }
+            fn flush(&mut self) -> Result<(), ()> {
+                Ok(())
+            }
+        }
+
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"storage":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut img = modelled_blk_image();
+        let off = crate::vio::BLK_JRN_LBA as usize * 512;
+        Journal::initialize(
+            &mut Window(&mut img[off..off + 2 * SLOT_BYTES]),
+            Domain::Linux,
+        )
+        .unwrap();
+        let fa = crate::vio::BLK_FW_A_LBA as usize * 512;
+        let fb = crate::vio::BLK_FW_B_LBA as usize * 512;
+        img[fa..fa + 4].copy_from_slice(b"G6FA");
+        img[fb..fb + 4].copy_from_slice(b"G6FB");
+        let mut m = analyze::kstart(&spec);
+        let park = m
+            .nodes
+            .iter()
+            .position(|n| n.purpose == crate::Purpose::Park)
+            .expect("park");
+        m.nodes.insert(
+            park,
+            crate::Node {
+                purpose: crate::Purpose::VirtioBlk,
+                ops: vec![
+                    Op::Li {
+                        rd: crate::encode::A0,
+                        imm: 0,
+                    },
+                    Op::Jal {
+                        rd: crate::encode::RA,
+                        to: "JrnLoad".into(),
+                    },
+                    Op::Li {
+                        rd: crate::encode::A0,
+                        imm: 0,
+                    },
+                    Op::Jal {
+                        rd: crate::encode::RA,
+                        to: "JrnCommit".into(),
+                    },
+                ],
+            },
+        );
+        let s = run_module_with_blk_image(&spec, &m, 0x8020_0000, img).unwrap();
+        assert!(s.console.contains("JRN-LOAD-OK"), "{}", s.console);
+        assert!(s.console.contains("JRN-COMMIT-OK"), "{}", s.console);
+        assert!(!s.console.contains("JRN-SLOT"), "{}", s.console);
+        assert!(s.blk_flushes >= 1);
+        assert_eq!(&s.blk_jrn0[..4], b"G6BH");
+        let rec = Record::decode(&s.blk_jrn0).unwrap();
+        assert_eq!(rec.inhibit(), Some(g6b_bootctl::Reason::Provisioning));
+        assert_eq!(s.blk_lba0_tail, 0xAA55);
+        assert_eq!(s.blk_fw_a, u32::from_le_bytes(*b"G6FA"));
+        assert_eq!(s.blk_fw_b, u32::from_le_bytes(*b"G6FB"));
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    #[test]
+    fn the_guest_stages_inactive_firmware_and_nominates_b() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"storage":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut img = modelled_blk_image();
+        let fa = crate::vio::BLK_FW_A_LBA as usize * 512;
+        let fb = crate::vio::BLK_FW_B_LBA as usize * 512;
+        img[fa..fa + 4].copy_from_slice(b"G6FA");
+        img[fb..fb + 4].copy_from_slice(b"G6FB");
+        let last = fb + 7 * 512;
+        img[last..last + 4].copy_from_slice(b"G6FB");
+        img[last + 508..last + 512].copy_from_slice(b"XXXX");
+        let mut m = analyze::kstart(&spec);
+        let park = m
+            .nodes
+            .iter()
+            .position(|n| n.purpose == crate::Purpose::Park)
+            .expect("park");
+        m.nodes.insert(
+            park,
+            crate::Node {
+                purpose: crate::Purpose::VirtioBlk,
+                ops: vec![Op::Jal {
+                    rd: crate::encode::RA,
+                    to: "FwStageSelftest".into(),
+                }],
+            },
+        );
+        let s = run_module_with_blk_image(&spec, &m, 0x8020_0000, img).unwrap();
+        assert!(s.console.contains("FW-COMMIT-OK"), "{}", s.console);
+        assert!(s.console.contains("FW-RANGE"), "{}", s.console);
+        assert!(s.console.contains("FW-SELECT-OK"), "{}", s.console);
+        assert!(!s.console.contains("FW-HOLD"), "{}", s.console);
+        assert!(!s.console.contains("FW-COMMIT-FAIL"), "{}", s.console);
+        assert!(!s.console.contains("FW-SELECT-FAIL"), "{}", s.console);
+        assert!(!s.console.contains("FW-STAGE-FAIL"), "{}", s.console);
+        assert_eq!(
+            s.blk_fw_a,
+            u32::from_le_bytes(*b"G6FA"),
+            "recovery A must survive"
+        );
+        assert_eq!(
+            s.blk_fw_b,
+            u32::from_le_bytes(*b"G6FS"),
+            "inactive B first sector is staged"
+        );
+        assert_eq!(
+            s.blk_fw_b_last,
+            u32::from_le_bytes(*b"G6FS"),
+            "inactive B last sector is staged"
+        );
+        assert_eq!(
+            s.blk_fw_b_end,
+            u32::from_le_bytes(*b"G6FE"),
+            "inactive B last sector tail is staged"
+        );
+        assert_eq!(
+            s.blk_fw_sel,
+            u32::from_le_bytes(*b"G6SL"),
+            "inactive B nominates itself without a slot switch"
+        );
+        assert_eq!(s.blk_lba0_tail, 0xAA55, "protective MBR must survive");
+        assert!(s.blk_flushes >= 1, "flush completions: {}", s.blk_flushes);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    #[test]
+    fn torn_inactive_firmware_is_not_nominated() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"storage":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut img = modelled_blk_image();
+        let fa = crate::vio::BLK_FW_A_LBA as usize * 512;
+        let fb = crate::vio::BLK_FW_B_LBA as usize * 512;
+        img[fa..fa + 4].copy_from_slice(b"G6FA");
+        img[fb..fb + 4].copy_from_slice(b"G6FS");
+        img[fb + 4..fb + 8].copy_from_slice(&0u32.to_le_bytes());
+        let last = fb + 7 * 512;
+        img[last..last + 4].copy_from_slice(b"G6FB");
+        img[last + 508..last + 512].copy_from_slice(b"XXXX");
+        let mut m = analyze::kstart(&spec);
+        let park = m
+            .nodes
+            .iter()
+            .position(|n| n.purpose == crate::Purpose::Park)
+            .expect("park");
+        m.nodes.insert(
+            park,
+            crate::Node {
+                purpose: crate::Purpose::VirtioBlk,
+                ops: vec![Op::Jal {
+                    rd: crate::encode::RA,
+                    to: "FwSelect".into(),
+                }],
+            },
+        );
+        let s = run_module_with_blk_image(&spec, &m, 0x8020_0000, img).unwrap();
+        assert!(s.console.contains("FW-HOLD"), "{}", s.console);
+        assert!(!s.console.contains("FW-SELECT-OK"), "{}", s.console);
+        assert_eq!(
+            s.blk_fw_a,
+            u32::from_le_bytes(*b"G6FA"),
+            "recovery A must survive a torn B"
+        );
+        assert_eq!(s.blk_fw_b, u32::from_le_bytes(*b"G6FS"));
+        assert_eq!(
+            s.blk_fw_b_last,
+            u32::from_le_bytes(*b"G6FB"),
+            "last sector stays the old image"
+        );
+        assert_eq!(s.blk_fw_sel, 0, "torn B must not be nominated");
+        assert_eq!(s.blk_lba0_tail, 0xAA55);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    #[test]
+    fn linux_enter_sets_satp0_hartid_and_fdt() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = analyze::kstart(&spec);
+        let park = m
+            .nodes
+            .iter()
+            .position(|n| n.purpose == crate::Purpose::Park)
+            .expect("park");
+        m.nodes
+            .insert(park, crate::linux::linux_enter_selftest_node());
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("LINUX-ENTRY-OK"), "{}", s.console);
+        assert!(
+            !s.console.contains("LINUX-HEALTH-OK"),
+            "4-byte FDT magic is not a health handoff: {}",
+            s.console
+        );
+        assert!(s.console.contains("LINUX-WDT-FIRE"), "{}", s.console);
+        assert_eq!(s.ticks, 0, "platform WDT must not use sie/trap_timer");
+        assert!(matches!(s.halt, Halt::Watchdog), "{:?}", s.halt);
+        assert!(!s.console.contains("LINUX-ENTRY-FAIL"), "{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    #[test]
+    fn linux_relocate_copies_into_reserved_bss_and_refuses_overlap() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = analyze::kstart(&spec);
+        let dest_off = m.extra_bss().saturating_sub(m.linux_bytes);
+        let park = m
+            .nodes
+            .iter()
+            .position(|n| n.purpose == crate::Purpose::Park)
+            .expect("park");
+        m.nodes.insert(
+            park,
+            crate::linux::linux_relocate_overlap_selftest_node(dest_off),
+        );
+        m.nodes
+            .insert(park + 1, crate::linux::linux_relocate_selftest_node());
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("LINUX-LOAD-OVERLAP"), "{}", s.console);
+        assert!(s.console.contains("LINUX-ENTRY-OK"), "{}", s.console);
+        assert!(s.console.contains("LINUX-WDT-FIRE"), "{}", s.console);
+        assert_eq!(s.ticks, 0, "platform WDT must not use sie/trap_timer");
+        assert!(!s.console.contains("LINUX-ENTRY-FAIL"), "{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    fn plant_canary_and_journal(img: &mut [u8], in_progress: bool) {
+        use g6b_bootctl::{
+            BootMode, Domain, Journal, Prerequisites, SlotStorage, Target, SLOT_BYTES,
+        };
+        crate::linux::plant_canary(img).unwrap();
+        if !in_progress {
+            return;
+        }
+        struct Window<'a>(&'a mut [u8]);
+        impl SlotStorage for Window<'_> {
+            type Error = ();
+            fn read_slot(&mut self, slot: usize, bytes: &mut [u8; SLOT_BYTES]) -> Result<(), ()> {
+                let o = slot * SLOT_BYTES;
+                bytes.copy_from_slice(&self.0[o..o + SLOT_BYTES]);
+                Ok(())
+            }
+            fn write_slot(&mut self, slot: usize, bytes: &[u8; SLOT_BYTES]) -> Result<(), ()> {
+                let o = slot * SLOT_BYTES;
+                self.0[o..o + SLOT_BYTES].copy_from_slice(bytes);
+                Ok(())
+            }
+            fn flush(&mut self) -> Result<(), ()> {
+                Ok(())
+            }
+        }
+        let off = crate::vio::BLK_JRN_LBA as usize * 512;
+        let mut j = Journal::initialize(
+            &mut Window(&mut img[off..off + 2 * SLOT_BYTES]),
+            Domain::Linux,
+        )
+        .unwrap();
+        j.begin(
+            &mut Window(&mut img[off..off + 2 * SLOT_BYTES]),
+            Target {
+                device: [1; 16],
+                partition: [2; 16],
+                image_digest: [3; 32],
+            },
+            [4; 16],
+            BootMode::ExplicitTrial,
+            Prerequisites {
+                image_verified: true,
+                durable_storage: true,
+                recovery_reset_available: true,
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn linux_load_disk_holds_without_in_progress_journal() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"storage":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut img = modelled_blk_image();
+        plant_canary_and_journal(&mut img, false);
+        let mut m = analyze::kstart(&spec);
+        let park = m
+            .nodes
+            .iter()
+            .position(|n| n.purpose == crate::Purpose::Park)
+            .expect("park");
+        m.nodes
+            .insert(park, crate::linux::linux_load_disk_selftest_node());
+        let s = run_module_with_blk_image(&spec, &m, 0x8020_0000, img).unwrap();
+        assert!(s.console.contains("LINUX-HOLD"), "{}", s.console);
+        assert!(!s.console.contains("LINUX-ENTRY-OK"), "{}", s.console);
+        assert!(!s.console.contains("LINUX-WDT-FIRE"), "{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    #[test]
+    fn linux_load_disk_reads_image_and_enters() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true,"storage":true},
+"kernel":{"gr":{"enable":true,"w":640,"h":480,"colors":16,"backend":"virtio-gpu"},
+"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut img = modelled_blk_image();
+        plant_canary_and_journal(&mut img, true);
+        let mut m = analyze::kstart(&spec);
+        let park = m
+            .nodes
+            .iter()
+            .position(|n| n.purpose == crate::Purpose::Park)
+            .expect("park");
+        m.nodes
+            .insert(park, crate::linux::linux_load_disk_selftest_node());
+        let s = run_module_with_blk_image(&spec, &m, 0x8020_0000, img).unwrap();
+        assert!(s.console.contains("LINUX-ENTRY-OK"), "{}", s.console);
+        assert!(
+            s.console.contains("LINUX-HEALTH-OK"),
+            "health-handoff FDT must be visible to the canary: {}",
+            s.console
+        );
+        assert!(s.console.contains("LINUX-WDT-FIRE"), "{}", s.console);
+        assert_eq!(s.ticks, 0, "platform WDT must not use sie/trap_timer");
+        assert!(!s.console.contains("LINUX-LOAD-FAIL"), "{}", s.console);
+        assert!(!s.console.contains("LINUX-ENTRY-FAIL"), "{}", s.console);
+        assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    #[test]
+    fn linux_hang_after_enter_fires_platform_wdt_with_sie_clear() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"cli":{"enable":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let mut m = analyze::kstart(&spec);
+        let park = m
+            .nodes
+            .iter()
+            .position(|n| n.purpose == crate::Purpose::Park)
+            .expect("park");
+        m.nodes
+            .insert(park, crate::linux::linux_hang_selftest_node());
+        let s = run_module(&spec, &m, 0x8020_0000).unwrap();
+        assert!(s.console.contains("LINUX-WDT-FIRE"), "{}", s.console);
+        assert!(!s.console.contains("LINUX-ENTRY-OK"), "{}", s.console);
+        assert_eq!(s.ticks, 0, "sie is clear; trap_timer must not run");
+        assert!(matches!(s.halt, Halt::Watchdog), "{:?}", s.halt);
         assert!(!s.console.contains("TRAP-"), "{}", s.console);
     }
 

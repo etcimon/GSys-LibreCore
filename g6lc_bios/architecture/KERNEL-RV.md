@@ -87,10 +87,90 @@ cargo test -p g6b-kernel bootctl::tests
 cargo check -p g6b-bootctl -p g6b-runtime-abi --target riscv64imac-unknown-none-elf
 ```
 
-The cross-check uses Rust 1.85.0; it proves library portability, not native guest
-link/entry or an executing BIOS service. The Linux-generic health helper,
-OpenWrt adapter, real watchdog, TLS/management and active autoboot inhibition
-are still pending. No RTL/ISA/DTS/DFT change is part of this increment.
+The cross-check uses Rust 1.85.0; it proves library portability. Native guest
+**link/entry** is a separate increment (below). `g6b-boot-health` is the Linux-generic helper core plus a file-based
+OpenWrt adapter; it acknowledges the exact pending G6BH attempt and
+cannot enable autoboot. Watchdog ownership requires a `nowayout=1` stamp;
+keepalive or magic-close of a disarmable watchdog is not an acknowledgement. `g6b-boot-health::bundle` refuses squashfs/UBI as kernels and requires a
+complete RISC-V Image bundle before any future jump. `LinuxEnter` is the
+S-mode entry ABI (`satp=0`, `a0=hartid`, `a1=FDT`, `jalr`); exec canary
+`LINUX-ENTRY-OK`. `LinuxRelocate` copies Image+FDT into reserved `__linux_load` BSS and
+refuses overlapping source/destination. `LinuxLoadDisk` requires a G6BH `InProgress` slot or prints `LINUX-HOLD`.
+UART `Lnx` on QEMU virt after `g6b arm-disk` prints `LINUX-ENTRY-OK`. The
+canary FDT carries `/firmware/g6b-boot-health` (`LINUX-HEALTH-OK`);
+`g6b-boot-health --dtb`/`--dt-root` opens that journal window.
+`g6b-boot-health::volume::scan` classifies GPT/MBR partitions (Image vs
+squashfs/UBI rootfs vs FDT) and lists `/boot` files on mountable
+filesystems; `--scan` is read-only and does not jump. A file-backed
+`/dev/watchdog` mock applies Linux open/keepalive/magic-close/nowayout
+without `ioctl(2)`. `LinuxEnter` arms a platform `mtime` WDT (`G6WD`)
+that fires `LINUX-WDT-FIRE` even when `sie=0`. Live OpenWrt VM, real
+kernel, TLS/management and flashing a full inactive firmware image
+remain open. No RTL/ISA/DTS/DFT change is part of this increment.
+
+## Native service-callee ELF (not bootable firmware)
+
+The rustc image is labelled `native-service-callee-not-bootable-firmware` in
+`out/native/native-manifest.json`. It is **not** OpenSBI `_start`. Build:
+
+```text
+python tools/g6b.py native --load-address 0x84000000 --out out/native
+python tools/g6b.py elf --spec fixtures/g6lc64-native-services.json \
+    --native-manifest out/native/native-manifest.json \
+    --out out/native/g6lc_bios-native.elf
+```
+
+Contract (Python `guest_native.validate_image` and `g6b-elf::native::Image::parse`
+must agree):
+
+- ELF64 LE SYSV, EM_RISCV, ET_EXEC, integer calling convention (e_flags bit 0 only)
+- PT_LOAD is RX (`PF=5`) or R (`PF=4`), page-aligned, `p_filesz == p_memsz`
+- no W, no WX, no BSS, no PT_DYNAMIC / PT_INTERP / PT_TLS / GNU_RELRO
+- PT_RISCV_ATTRIBUTES / GNU_STACK / NOTE / PHDR are ignored
+- `e_entry` of the **composed** BIOS ELF is the generated ASM payload
+  (`dram_base+text_offset`); the callee's entry is a later RX PT_LOAD
+- C ABI: `a0` points at one exclusively owned 256-byte frame; `a0` returns status
+
+`Purpose::NativeService` is inserted before `Park`. It zeros a 256-byte
+frame on the BIOS stack, then:
+
+1. Masks SIE and `jalr`s `Capabilities` (initializes the 128-byte core at
+   frame offset 128). Prints `NATIVE-SERVICE-OK`.
+2. Still masked, `Input` enqueues a watchdog IRQ then a slow-I/O IRQ
+   (enqueue only — no TLS/wasm/slow work).
+3. Restores SIE and `jalr`s `Poll`. `Poll` always takes watchdog before
+   slow jobs, under a small quota. Prints `NATIVE-POLL-OK` when the
+   watchdog bit is set.
+4. Failure prints `NATIVE-SERVICE-FAIL` and parks.
+
+Implemented operations: `Capabilities`, `Input`, `Poll`, `Cancel`,
+`BootStatus`, `BootTrial`. The last two return `NotReady` until a durable
+`SlotStorage` exists; `written` stays 0 so Ok cannot be forged. `Cancel`
+checks context generation. `g6b-runtime-abi::Bump` is a fail-closed
+cursor over caller-owned backing (workspace forbids `unsafe`, so not a
+Rust `GlobalAlloc`). After `NATIVE-BOOT-HOLD` the probe copies the
+256-byte frame to `__native_abi`; `trap_timer` `jal NativePoll` and
+`jalr`s the callee (SIE still masked). First successful tick prints
+`NATIVE-TICK-POLL-OK` once. Absent `--native-manifest` the stub
+returns immediately and keeps the legacy single RWX PT_LOAD.
+
+After `NATIVE-POLL-OK` the probe requires `BootStatus`/`BootTrial`
+`NotReady`, stores 0 to `AUTO_ON`, and prints `NATIVE-BOOT-HOLD`.
+
+QEMU 8.2.2 `-M virt -kernel` serial: `NATIVE-SERVICE-OK`, `NATIVE-POLL-OK`,
+`NATIVE-BOOT-HOLD`. Host `g6b smoke` does **not** map extra PT_LOADs.
+The callee stays RX/R. Host `AutoBoot::with_decision(Stay)` will not
+countdown. Guest `BlkWrite`/`BlkFlush` exist for LBA 8..24 with `F_FLUSH`.
+`JrnLoad`/`JrnCommit` rewrite an 8-sector `G6BH` slot and read it back;
+the production boot path does not call them. Host
+`JournalStorage::on_bios_window` is that same window. QEMU 8.2.2 UART `Jrn` on a writable virtio-blk scratch disk prints
+`JRN-LOAD-OK`/`JRN-COMMIT-OK` and leaves a CRC-valid G6BH record.
+Firmware A/B stubs occupy LBA 24 and 32 (`FirmwareLayout::BIOS`); journal
+I/O must not overwrite them. `FwStage` may rewrite inactive B only
+(`G6FS`); recovery A is `FW-RANGE`. `FwCommit` writes all 8 declared
+sectors of B, flushes, and readbacks first/last. `FwSelect` nominates staged B (`G6SL` at B+8) only when first and last
+sectors match `G6FS`/`G6FE`; a torn slot is `FW-HOLD`. Inhibit and
+autoboot stay untouched. Do not arm unattended Linux handoff.
 
 ## Cooperative integer task ABI and multicore policy
 

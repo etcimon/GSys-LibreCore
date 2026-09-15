@@ -17,6 +17,11 @@ g6b-asm = { workspace = true }
 g6b-wasm = { workspace = true }
 g6b-http = { workspace = true }
 g6b-pglite = { workspace = true }
+g6b-runtime-abi = { workspace = true }
+g6b-tls = { workspace = true }
+
+[dev-dependencies]
+g6b-guest = { workspace = true }
 
 [lints]
 workspace = true
