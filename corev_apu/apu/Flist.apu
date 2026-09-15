@@ -1,0 +1,14 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// APU subsystem file list. P1 currently contains the independently gated
+// virtio-mmio transport seam only. DMA, SG, storage and used-ring leaves live
+// on Flist.apu_{axi,sg,mem} until they are integrated under the control top.
+
++incdir+${CVA6_REPO_DIR}/corev_apu/apu/include
+
+${CVA6_REPO_DIR}/core/include/config_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/include/g6lc_apu_cfg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_virtio_mmio.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_top.sv

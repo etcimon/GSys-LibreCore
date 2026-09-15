@@ -21,6 +21,9 @@ module g6lc_cluster
     // (when L3En) invalidate the matching L2 tag. Default on when L3En so the
     // stream-plane × multicore hierarchy stays coherent without TB knobs.
     parameter bit          INCLUSIVE_L3 = 1'b0,
+    // When set, boot_addr_core_i[c] is the reset PC for physical core c.
+    // Default off: every core uses boot_addr_i (ROM). FPGA/Altera unused.
+    parameter bit          PerCoreBoot = 1'b0,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -32,6 +35,7 @@ module g6lc_cluster
     input  logic clk_i,
     input  logic rst_ni,
     input  logic [CVA6Cfg.VLEN-1:0] boot_addr_i,
+    input  logic [NR_CORES-1:0][CVA6Cfg.VLEN-1:0] boot_addr_core_i,
     // Per physical core × SMT hart: PLIC {MEIP,SEIP}, CLINT IPI, CLINT timer
     input  logic [NR_CORES-1:0][(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][1:0] irq_i,
     input  logic [NR_CORES-1:0][(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0]     ipi_i,
@@ -86,6 +90,11 @@ module g6lc_cluster
   assign l3_miss_o  = l3_miss_w;
   assign pf_issue_o = pf_issue_w;
   assign pf_train_o = pf_train_w;
+
+  if (!PerCoreBoot) begin : gen_boot_default
+    logic unused_core_boot;
+    assign unused_core_boot = |boot_addr_core_i;
+  end
 
   // Prefer L3 victim when L3En; else L2 victim (feeds L1 inclusive inv)
   assign evict_v = CVA6Cfg.L3En ? l3_evict_v : l2_evict_v;
@@ -163,7 +172,7 @@ module g6lc_cluster
     ) i_ariane (
         .clk_i            (core_clk[c]),
         .rst_ni,
-        .boot_addr_i      (boot_addr_i),
+        .boot_addr_i      (PerCoreBoot ? boot_addr_core_i[c] : boot_addr_i),
         // mhartid base: core_index × NrHarts (SMT banks add +h in csr bank)
         .hart_id_i        (CVA6Cfg.XLEN'(c * ((CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts))),
         .irq_i            (irq_i[c]),      // [NrHarts-1:0][1:0]

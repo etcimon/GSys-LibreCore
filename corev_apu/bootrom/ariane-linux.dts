@@ -128,5 +128,18 @@
       reg-shift = <2>;
       reg-io-width = <4>;
     };
+
+    // LibreCore APU guest window. status=disabled until a G6LC_APU
+    // testharness instantiates g6lc_apu_xbar. PLIC source 9 (irq_sources[8]);
+    // source 8 is the AI island. Firmware control at 0x40002000 is omitted
+    // so Linux cannot map it. OpenSBI domain overlay:
+    // corev_apu/bootrom/g6lc-apu-domain.dtsi (not included here).
+    gpu@40001000 {
+      compatible = "virtio,mmio";
+      reg = <0x0 0x40001000 0x0 0x1000>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <9>;
+      status = "disabled";
+    };
   };
 };

@@ -1,0 +1,14 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// Firmware mailbox bound to native exec. Not on the production testharness flist.
+
+-f ${CVA6_REPO_DIR}/corev_apu/apu/Flist.apu_axi
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_pkg.sv
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_classifier.sv
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_rounding.sv
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_fma.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_mbox.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_exec.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_exec_bind.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_fw.sv

@@ -156,12 +156,26 @@ module ariane_testharness #(
   `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_req)
   `AXI_ASSIGN_TO_RESP(ai_dma_resp, slave[2])
 
+`ifdef G6LC_APU
+  localparam int unsigned APU_NB_EXTRA = 3;
+  localparam int unsigned APU_GUEST_IDX = ariane_soc::NB_PERIPHERALS;
+  localparam int unsigned APU_CTRL_IDX  = ariane_soc::NB_PERIPHERALS + 1;
+  localparam int unsigned APU_RAM_IDX   = ariane_soc::NB_PERIPHERALS + 2;
+  // Second DRAM rule for the firmware-RAM hole (same master idx, extra rule).
+  localparam int unsigned APU_NB_RULES_EXTRA = 1;
+`else
+  localparam int unsigned APU_NB_EXTRA = 0;
+  localparam int unsigned APU_NB_RULES_EXTRA = 0;
+`endif
+  localparam int unsigned NB_MST = ariane_soc::NB_PERIPHERALS + APU_NB_EXTRA;
+  localparam int unsigned NB_RULES = NB_MST + APU_NB_RULES_EXTRA;
+
   AXI_BUS #(
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
     .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
     .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
     .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
-  ) master[ariane_soc::NB_PERIPHERALS-1:0]();
+  ) master[NB_MST-1:0]();
 
   rstgen i_rstgen_main (
     .clk_i        ( clk_i                ),
@@ -171,14 +185,28 @@ module ariane_testharness #(
     .init_no      (                      ) // keep open
   );
 
+  logic [NR_CORES-1:0][CVA6Cfg.VLEN-1:0] cluster_boot;
+`ifdef G6LC_APU
+  logic apu_fw_ready /*verilator public*/;
+  axi_pkg::xbar_rule_64_t apu_guest_rule, apu_ctrl_rule, apu_ram_rule;
+  axi_pkg::xbar_rule_64_t apu_dram_lo_rule, apu_dram_hi_rule;
+`endif
 `ifdef G6LC_HAVE_LITEDRAM
-  wire core_rst_n = ndmreset_n & ~preload_hold;
+  wire core_rst_n = ndmreset_n & ~preload_hold
+`ifdef G6LC_APU
+      & apu_fw_ready
+`endif
+      ;
   function void g6lc_tb_preload_hold(input int unsigned on);
     preload_hold = (on != 32'd0);
   endfunction
   export "DPI-C" function g6lc_tb_preload_hold;
 `else
-  wire core_rst_n = ndmreset_n;
+  wire core_rst_n = ndmreset_n
+`ifdef G6LC_APU
+      & apu_fw_ready
+`endif
+      ;
 `endif
 
   // ---------------
@@ -441,6 +469,10 @@ module ariane_testharness #(
   logic [15:0] ai_isl_last_status;
   logic        ai_isl_has_completion;
   logic        ai_irq;
+  logic        apu_irq;
+`ifndef G6LC_APU
+  assign apu_irq = 1'b0;
+`endif
 
   if (CVA6Cfg.AiCfg.MatrixEn) begin : gen_ai_island
     logic         ai_penable, ai_pwrite, ai_psel, ai_pready, ai_pslverr;
@@ -751,8 +783,30 @@ module ariane_testharness #(
   // AXI Xbar
   // ---------------
 
-  axi_pkg::xbar_rule_64_t [ariane_soc::NB_PERIPHERALS-1:0] addr_map;
+  axi_pkg::xbar_rule_64_t [NB_RULES-1:0] addr_map;
 
+`ifdef G6LC_APU
+  // OpenSBI-visible testharness map. Split DRAM around firmware RAM.
+  // addr_decode last-match-wins: a full DRAM rule at a higher array index
+  // than the RAM rule aliases 0x90000000. Locked by tb_g6lc_apu_th_osbi
+  // and software/apu-fw/test/osbi_check.c. Not an OpenSBI firmware boot.
+  assign addr_map = '{
+    '{ idx: ariane_soc::Debug,    start_addr: ariane_soc::DebugBase,    end_addr: ariane_soc::DebugBase + ariane_soc::DebugLength       },
+    '{ idx: ariane_soc::ROM,      start_addr: ariane_soc::ROMBase,      end_addr: ariane_soc::ROMBase + ariane_soc::ROMLength           },
+    '{ idx: ariane_soc::CLINT,    start_addr: ariane_soc::CLINTBase,    end_addr: ariane_soc::CLINTBase + ariane_soc::CLINTLength       },
+    '{ idx: ariane_soc::PLIC,     start_addr: ariane_soc::PLICBase,     end_addr: ariane_soc::PLICBase + ariane_soc::PLICLength         },
+    '{ idx: ariane_soc::UART,     start_addr: ariane_soc::UARTBase,     end_addr: ariane_soc::UARTBase + ariane_soc::UARTLength         },
+    '{ idx: ariane_soc::Timer,    start_addr: ariane_soc::TimerBase,    end_addr: ariane_soc::TimerBase + ariane_soc::TimerLength       },
+    '{ idx: ariane_soc::SPI,      start_addr: ariane_soc::SPIBase,      end_addr: ariane_soc::SPIBase + ariane_soc::SPILength           },
+    '{ idx: ariane_soc::Ethernet, start_addr: ariane_soc::EthernetBase, end_addr: ariane_soc::EthernetBase + ariane_soc::EthernetLength },
+    '{ idx: ariane_soc::GPIO,     start_addr: ariane_soc::GPIOBase,     end_addr: ariane_soc::GPIOBase + ariane_soc::GPIOLength         },
+    apu_dram_lo_rule,
+    apu_guest_rule,
+    apu_ctrl_rule,
+    apu_ram_rule,
+    apu_dram_hi_rule
+  };
+`else
   assign addr_map = '{
     '{ idx: ariane_soc::Debug,    start_addr: ariane_soc::DebugBase,    end_addr: ariane_soc::DebugBase + ariane_soc::DebugLength       },
     '{ idx: ariane_soc::ROM,      start_addr: ariane_soc::ROMBase,      end_addr: ariane_soc::ROMBase + ariane_soc::ROMLength           },
@@ -765,6 +819,7 @@ module ariane_testharness #(
     '{ idx: ariane_soc::GPIO,     start_addr: ariane_soc::GPIOBase,     end_addr: ariane_soc::GPIOBase + ariane_soc::GPIOLength         },
     '{ idx: ariane_soc::DRAM,     start_addr: ariane_soc::DRAMBase,     end_addr: ariane_soc::DRAMBase + ariane_soc::DRAMLength         }
   };
+`endif
 
   // Multi-core + L2 miss-fill needs multi-outstanding on the xbar demux.
   // Max*=1 (legacy single-core) silently stalls AR when an ID is still
@@ -773,7 +828,7 @@ module ariane_testharness #(
   // at 0x80000080). Match hub OT depth (4) with headroom for L2 line fills.
   localparam axi_pkg::xbar_cfg_t AXI_XBAR_CFG = '{
     NoSlvPorts: unsigned'(ariane_soc::NrSlaves),
-    NoMstPorts: unsigned'(ariane_soc::NB_PERIPHERALS),
+    NoMstPorts: unsigned'(NB_MST),
     MaxMstTrans: unsigned'(8),
     MaxSlvTrans: unsigned'(8),
     FallThrough: 1'b0,
@@ -783,7 +838,7 @@ module ariane_testharness #(
     UniqueIds: 1'b0,
     AxiAddrWidth: unsigned'(AXI_ADDRESS_WIDTH),
     AxiDataWidth: unsigned'(AXI_DATA_WIDTH),
-    NoAddrRules: unsigned'(ariane_soc::NB_PERIPHERALS)
+    NoAddrRules: unsigned'(NB_RULES)
   };
 
   axi_xbar_intf #(
@@ -800,6 +855,52 @@ module ariane_testharness #(
     .en_default_mst_port_i ( '0         ),
     .default_mst_port_i    ( '0         )
   );
+
+`ifdef G6LC_APU
+  // Opt-in APU load compositor: guest/control + firmware RAM + DRAM hole +
+  // hart-1 boot PC. Testharness only stitches xbar masters. DMA stays idle.
+  ariane_axi_soc::req_slv_t  apu_guest_req, apu_ctrl_req, apu_ram_req;
+  ariane_axi_soc::resp_slv_t apu_guest_rsp, apu_ctrl_rsp, apu_ram_rsp;
+  logic [ariane_soc::NumSources-1:0] apu_irq_vec_in, apu_irq_vec_out;
+  `AXI_ASSIGN_TO_REQ(apu_guest_req, master[APU_GUEST_IDX])
+  `AXI_ASSIGN_FROM_RESP(master[APU_GUEST_IDX], apu_guest_rsp)
+  `AXI_ASSIGN_TO_REQ(apu_ctrl_req, master[APU_CTRL_IDX])
+  `AXI_ASSIGN_FROM_RESP(master[APU_CTRL_IDX], apu_ctrl_rsp)
+  `AXI_ASSIGN_TO_REQ(apu_ram_req, master[APU_RAM_IDX])
+  `AXI_ASSIGN_FROM_RESP(master[APU_RAM_IDX], apu_ram_rsp)
+  assign apu_irq_vec_in = '0;
+  g6lc_apu_th_load #(
+    .ApuCfg(g6lc_apu_cfg_pkg::ApuHarness),
+    .CoreCfg(CVA6Cfg),
+    .AppBoot(ariane_soc::ROMBase),
+    .DramBase(ariane_soc::DRAMBase),
+    .DramBytes(ariane_soc::DRAMLength),
+    .GuestIdx(APU_GUEST_IDX),
+    .CtrlIdx(APU_CTRL_IDX),
+    .RamIdx(APU_RAM_IDX),
+    .DramIdx(ariane_soc::DRAM),
+    .NumCores(NR_CORES),
+    .Vlen(CVA6Cfg.VLEN),
+    .HexFile("apu_fw.hex"),
+    .NumSources(ariane_soc::NumSources),
+    .axi4_req_t(ariane_axi_soc::req_slv_t),
+    .axi4_rsp_t(ariane_axi_soc::resp_slv_t)
+  ) i_apu_load (
+    .clk_i, .rst_ni(ndmreset_n), .testmode_i(test_en),
+    .guest_req_i(apu_guest_req), .guest_rsp_o(apu_guest_rsp),
+    .control_req_i(apu_ctrl_req), .control_rsp_o(apu_ctrl_rsp),
+    .ram_req_i(apu_ram_req), .ram_rsp_o(apu_ram_rsp),
+    .control_aw_hart_i(32'(g6lc_apu_cfg_pkg::ApuHarness.FirmwareHart)),
+    .control_ar_hart_i(32'(g6lc_apu_cfg_pkg::ApuHarness.FirmwareHart)),
+    .irq_sources_i(apu_irq_vec_in), .irq_sources_o(apu_irq_vec_out),
+    .plic_irq_o(apu_irq), .fw_ready_o(apu_fw_ready),
+    .boot_addr_core_o(cluster_boot),
+    .guest_rule_o(apu_guest_rule), .control_rule_o(apu_ctrl_rule),
+    .ram_rule_o(apu_ram_rule),
+    .dram_lo_rule_o(apu_dram_lo_rule), .dram_hi_rule_o(apu_dram_hi_rule),
+    .dma_req_o(), .dma_rsp_i('0)
+  );
+`endif
 
   // ---------------
   // CLINT (scaled to total software harts = NR_CORES × NrHarts)
@@ -863,6 +964,7 @@ module ariane_testharness #(
     .timer     ( master[ariane_soc::Timer]    ),
     .irq_o     ( irqs                         ),
     .ai_irq_i  ( ai_irq                       ),
+    .apu_irq_i ( apu_irq                      ),
     .rx_i      ( rx                           ),
     .tx_o      ( tx                           ),
     .eth_txck  ( ),
@@ -920,6 +1022,12 @@ module ariane_testharness #(
 
   // Always use the cluster wrapper: N=1 is identity (no hub), N>1 is coherent.
   // L2 is owned by the cluster when L2En (avoids double-instantiation).
+`ifndef G6LC_APU
+  always_comb begin
+    for (int unsigned c = 0; c < NR_CORES; c++)
+      cluster_boot[c] = ariane_soc::ROMBase[CVA6Cfg.VLEN-1:0];
+  end
+`endif
   g6lc_cluster #(
     .CVA6Cfg        ( CVA6Cfg             ),
     .NR_CORES       ( NR_CORES            ),
@@ -928,6 +1036,9 @@ module ariane_testharness #(
     // Inclusive L1 (+ L2 when L3En) back-inval on LLC victim — stream plane
     // × multicore coherence for U6.2 / L3 hierarchy.
     .INCLUSIVE_L3   ( CVA6Cfg.L3En        ),
+`ifdef G6LC_APU
+    .PerCoreBoot    ( 1'b1                ),
+`endif
     .AXI_ADDR_WIDTH ( ariane_axi::AddrWidth ),
     .AXI_DATA_WIDTH ( ariane_axi::DataWidth ),
     .AXI_ID_WIDTH   ( ariane_axi::IdWidth   ),
@@ -938,7 +1049,8 @@ module ariane_testharness #(
   ) i_cluster (
     .clk_i          ( clk_i               ),
     .rst_ni         ( core_rst_n          ),
-    .boot_addr_i    ( ariane_soc::ROMBase[CVA6Cfg.VLEN-1:0] ),
+    .boot_addr_i      ( ariane_soc::ROMBase[CVA6Cfg.VLEN-1:0] ),
+    .boot_addr_core_i ( cluster_boot                         ),
     .irq_i          ( core_irqs           ),
     .ipi_i          ( core_ipi            ),
     .time_irq_i     ( core_timer_irq      ),

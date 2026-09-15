@@ -32,8 +32,11 @@ module ariane_peripherals #(
     AXI_BUS.Slave      timer           ,
     // Multi-context PLIC: one MEIP/SEIP pair per core (see ariane_soc::NumTargets)
     output logic [ariane_soc::NumTargets-1:0] irq_o,
-    // Xg6lcai island completion IRQ → PLIC source 7 (tie 0 when no island)
+    // Xg6lcai island completion IRQ → PLIC source 8 / irq_sources[7]
     input  logic       ai_irq_i        ,
+    // LibreCore APU guest virtio IRQ → PLIC source 9 / irq_sources[8]
+    // (tie 0 until testharness instantiates g6lc_apu_th)
+    input  logic       apu_irq_i       ,
     // UART
     input  logic       rx_i            ,
     output logic       tx_o            ,
@@ -62,10 +65,11 @@ module ariane_peripherals #(
     // ---------------
     logic [ariane_soc::NumSources-1:0] irq_sources;
 
-    // Source 7: Xg6lcai island. Sources 8.. end unused.
+    // Source 8: Xg6lcai island. Source 9: APU guest virtio. Rest unused.
     assign irq_sources[7] = ai_irq_i;
-    if (ariane_soc::NumSources > 8)
-      assign irq_sources[ariane_soc::NumSources-1:8] = '0;
+    assign irq_sources[8] = apu_irq_i;
+    if (ariane_soc::NumSources > 9)
+      assign irq_sources[ariane_soc::NumSources-1:9] = '0;
 
     REG_BUS #(
         .ADDR_WIDTH ( 32 ),

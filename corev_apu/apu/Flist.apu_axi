@@ -1,0 +1,22 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+
+-f ${CVA6_REPO_DIR}/corev_apu/apu/Flist.apu
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/include
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include
++incdir+${CVA6_REPO_DIR}/corev_apu/register_interface/include
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/cf_math_pkg.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/lzc.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/fifo_v3.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/rr_arb_tree.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/stream_arbiter_flushable.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/stream_arbiter.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_pkg.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_intf.sv
+${CVA6_REPO_DIR}/corev_apu/register_interface/src/reg_intf.sv
+${CVA6_REPO_DIR}/corev_apu/register_interface/src/axi_lite_to_reg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_bus_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_control.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_axi_lite.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_dma_read.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_dma_write.sv

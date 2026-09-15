@@ -36,6 +36,16 @@ controller vs board/analog PHY, and *what* gates it must pass before it is wired
 | `pcie-endpoint.md` | interconnect | `verilog-pcie`, `litepcie` | **Inverse role:** LibreCore *is* the endpoint (CPU+AI card); BAR/config target on-die; SerDes = hard IP |
 | `storage-controllers.md` | storage | `litesata`, `litesdcard` (+ NVMe over PCIe) | Controller on-die; SerDes/level-shift external |
 | `hdmi-display.md` | display | `hdmi` | TMDS encoder on-die; connector + re-driver on board |
+| `apu-native-exec.md` | graphics APU | (in-tree `corev_apu/apu`) | Native exec leaf: one FPnew lane, four lockstep quad contexts, `LDC` 32-bit payload, uniform BR, local LSU; default-off |
+| `apu-testharness-attach.md` | graphics APU | (in-tree `corev_apu/apu`) | Testharness-shaped PLIC splice + xbar windows; not on the production xbar |
+| `apu-fw-exec.md` | graphics APU | (in-tree `corev_apu/apu`) | Firmware mailbox bound to native exec; testharness `ExecEn && !MemEn` |
+| `apu-testharness-bus.md` | graphics APU | (in-tree `corev_apu/apu`) | AXI4-64 adapter + opt-in testharness xbar ports + idle DMA export (`+define+G6LC_APU`) |
+| `apu-testharness-load.md` | graphics APU | (in-tree `corev_apu/apu`) | Testharness load compositor: DRAM hole + hart-1 boot PC + 14-rule OpenSBI-visible map |
+| `apu-firmware-domain.md` | graphics APU | (in-tree `corev_apu/apu`) | OpenSBI domain / PMP NAPOT + opt-in `ariane-g6lc-apu.dts`; not SMT2 firmware |
+| `apu-resident-fw.md` | graphics APU | `software/apu-fw` | Hart-1 mailbox client; TID+IADD microjob; mini-hart image; not EGL |
+| `apu-firmware-ram.md` | graphics APU | (in-tree `corev_apu/apu`) | Testharness firmware RAM at `0x90000000` / 256 KiB; idx 12; I$ INCR fills |
+| `apu-cva6-fetch.md` | graphics APU | (in-tree `corev_apu/apu`) | CVA6 fetch of `apu_fw.hex`; cluster PerCoreBoot; cookies `0x600D000A` / `0x600D000B`; resident `apu_tgsi_cc.hex`; DRAM-lo OpenSBI load-addr fetch |
+| `apu-tgsi.md` | graphics APU | `software/apu-fw` | TGSI text subset → native exec; `IMM[n]` via `LDC`; separate `apu_tgsi_fw` image; not TEX; not in `apu_fw.elf` |
 
 ---
 

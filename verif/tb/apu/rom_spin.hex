@@ -1,0 +1,5 @@
+// RV64I spin (jal x0, 0) for core-0 ROM at 0x10000. One 16-byte I$ line.
+0000006f
+0000006f
+0000006f
+0000006f

@@ -1,0 +1,13 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+
+`verilator_config
+lint_off -rule EOFNEWLINE -file "*/corev_apu/register_interface/include/register_interface/assign.svh"
+lint_off -rule WIDTHTRUNC -file "*/vendor/pulp-platform/axi/src/axi_pkg.sv"
+lint_off -rule WIDTHEXPAND -file "*/vendor/pulp-platform/axi/src/axi_pkg.sv"
+lint_off -rule UNSIGNED -file "*/vendor/pulp-platform/common_cells/src/rr_arb_tree.sv"
+lint_off -rule WIDTHTRUNC -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv"
+lint_off -rule WIDTHEXPAND -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv"
+lint_off -rule UNSIGNED -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv"
+lint_off -rule COMBDLY -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_clk.sv"
+lint_off -rule LATCH -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_clk.sv"

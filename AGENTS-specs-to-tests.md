@@ -134,9 +134,44 @@ table, immutable command snapshot, `apu_xfer_check`), `tb_g6lc_apu_queue.sv`
 (used-ring elem-then-idx publication, idx wrap, cancelled idx not published)
 and `tb_g6lc_apu_mem.sv` (firmware backend: map insert/lookup, used-ring,
 command-DMA fill/release, SG list load and SG read transfer through one AXI
-master).
+master). `APU_SOC=1` adds grant/soc/attach/th/xbar/th_load/fwram/domain.
+`tb_g6lc_apu_fwram.sv` covers idx 12, hex load, cookie, size-3, a CVA6 I$
+2-beat INCR fill of crt0 `auipc`/`spin`, and WRAP/oversize/window-cross
+SLVERR. `tb_g6lc_apu_th_load.sv` AXI-reads the preloaded reset vector
+through the compositor. `run-cva6-fetch.sh` adds `tb_g6lc_apu_cva6_fetch.sv`
+(one CVA6 `hart_id=1` I$ fill + commit at `0x90000000`).
+`run-cva6-dual-fetch.sh` adds `tb_g6lc_apu_cva6_dual_fetch.sv` (core 0 ROM
+`0x10000`, core 1 firmware RAM). `run-cva6-cluster-fetch.sh` adds
+`tb_g6lc_apu_cluster_fetch.sv` (`g6lc_cluster` PerCoreBoot, shared mem).
+`run-cva6-th-fetch.sh` adds `tb_g6lc_apu_th_fetch.sv` (compositor last-match-wins
+DRAM hole + RAM-port I$ fill). `run-dma-init.sh` adds `tb_g6lc_apu_dma_init.sv`
+(DMA read through DRAM lo; firmware RAM is not DMA backing). `run-th-osbi.sh`
+adds `tb_g6lc_apu_th_osbi.sv` (testharness 14-rule OpenSBI-visible last-match
++ host `osbi_check` for opt-in `ariane-g6lc-apu.dts`). `run-cva6-cookie.sh`
+adds `tb_g6lc_apu_cva6_cookie.sv` (CVA6 hart 1 mailbox run to cookie
+`0x600D000A`). `run-cva6-th-cookie.sh` adds `tb_g6lc_apu_cva6_th_cookie.sv`
+(same cookie through compositor `th_load` `gen_exec`). `run-cva6-tgsi.sh`
+adds `tb_g6lc_apu_cva6_tgsi.sv` (pre-encoded MOV job cookie `0x600D000B`).
+`run-cva6-tgsi-cc.sh` reuses that TB with `apu_tgsi_cc.hex` (compiler +
+job linked on CVA6; TEX fail then MOV; cookie `0x600D000B`). Directed
+`tb_g6lc_apu_fwram.sv` case 6 covers size-0/1 and sign-ext PA.
+`run-cva6-osbi-boot.sh` adds `tb_g6lc_apu_cva6_osbi_boot.sv` (hart 0
+fetches DRAM lo `0x80000000`; hart 1 firmware RAM; not a real OpenSBI ELF).
+`run-cva6-osbi-uart.sh` adds `tb_g6lc_apu_cva6_osbi_uart.sv` (DRAM-lo
+payload stores `0x41` to UART `0x10000000` through compositor stub).
+`run-cva6-osbi-clint.sh` adds `tb_g6lc_apu_cva6_osbi_clint.sv` (DRAM-lo
+payload stores MSIP=1 to CLINT `0x02000000` through compositor stub).
+`run-cva6-osbi-plic.sh` adds `tb_g6lc_apu_cva6_osbi_plic.sv` (DRAM-lo
+payload stores priority=1 to PLIC `0x0C000004` through compositor stub).
+`run-th-exec.sh` adds `tb_g6lc_apu_th_exec.sv` (compositor
+AXI4 `ExecEn` bind, TID+IADD peek 10/11, shader MOV, shader `ST`+`DPEEK`
+`1.0f`, scanline-fill DMEM[0..3], packed `size=3`). `APU_EXEC=1`
+(`run-exec.sh`) adds native exec `LDC` plus host `tgsi_check` for `IMM[n]`/
+`{0,0.5,1,2}`; TEX still fail-closed.
+None of these tests is a full testharness OpenSBI firmware boot or a
+stock-driver GLES2 proof.
 Remote results are recorded in `AGENTS-todo.md` under P1 SG walker / storage /
-used-ring. None of these tests is a stock-driver GLES2 or renderer proof.
+used-ring and P2 testharness firmware RAM I$ fills. None of these tests is a stock-driver GLES2 or renderer proof.
 
 ## Running the suites (single orchestrator)
 

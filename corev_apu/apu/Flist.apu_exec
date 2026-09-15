@@ -1,0 +1,15 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// Native execution leaf. FPnew FMA only; not the CPU FPU wrap and not the
+// AI MUL-then-ADD FSM. Not on the production testharness flist.
+
+-f ${CVA6_REPO_DIR}/corev_apu/apu/Flist.apu
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/cf_math_pkg.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/lzc.sv
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_pkg.sv
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_classifier.sv
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_rounding.sv
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_fma.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_exec.sv

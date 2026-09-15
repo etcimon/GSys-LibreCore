@@ -301,12 +301,95 @@ This records the supplied authorization, not a claim that a signed CLA document 
     (`verif/regress/remote/run_ooo_rename_cover.py`) TIMEOUT 90 s, 0 traces
     (`rename-cover-z3-2`). BMC rename stays in `verify.formalTasks` (abc+z3).
   **Still open:** mapped production-geometry (256 KiB) flop-tag equivalence,
-  16 KiB collect (900 s timeout, not waived), isolated SMT2 RR-on (I=2 fetch
-  livelock). Remote rename cover is TIMEOUT (not a gate). Cluster AMOCAS on isolated
+  16 KiB collect (900 s timeout, not waived), smt2 full checked-work
+  regression (fetch-B/icache defect bisected to `7e6c19c54`; RR
+  exonerated — see vt1 table below). Remote rename cover is TIMEOUT (not a gate). Cluster AMOCAS on isolated
   stream8 RR-on is a functional envelope with 0 cycle delta, not a win.
   Isolated stream8 RR-on is a functional envelope. SMT2 N=1 RR-off
   control passes; N=2 waits for hart 1. **Performance promotion is still
   NOT QUALIFIED.**
+
+- **Deterministic vt1 resolution (2026-09-15, second sitting):** the
+  earlier `384,179/384,179` identical-cycle result was a confounder —
+  the scan buffer sat inside `ExecuteRegionDramLen` (WB-only path), so
+  L1/L2 never saw the traffic. Isolated e8k overlays set
+  `ExecuteRegionDramLen 0x40000000→0x8000` (data cacheable) plus
+  `L2RoundRobinEn 0→1` for the RR leg. `mini_l2_hot_scan_pmu.S` reports
+  PMU words at `report` (DRAM offset `0x1080`). Paired
+  `--threads 1` runs, identical tree (L2 `3a1e788c…`), identical ELF,
+  `+debug_disable`, cookie exit `off=0x1000 val=1`:
+  rr0 `cyc=374,177 l2m=18,787 l1m=18,857 lds=20,483 dac=20,524` vs
+  rr1 `cyc=325,980 l2m=13,318 l1m=18,857 lds=20,483 dac=20,524`
+  (−12.9% ROI cycles, −29.1% L2 misses; ~8.7 cy/avoided miss on a
+  deliberately RR-favourable hot+scan). Genuine core-level RR signal,
+  NOT promotion evidence.
+- **vthreads=12 is not qualification-grade:** the same vt12 exe
+  completed at 912,938 cy once then hung at ~397k on rerun; smt2
+  showed nonconverge/livelock variants. All anomalies vanish under
+  `--threads 1`; guest-visible PMU counters are bit-identical across
+  schedulers, so vt12 divergence lived in scheduler/observer paths.
+- **smt2 "RR livelock" retracted:** all smt2 traffic is
+  `AxCACHE=0010` → rejected by the L2 cacheability predicate → RR
+  logic is functionally dead on smt2. `iso-smt2-rr0-vt1` and
+  `iso-smt2-rr1-vt1` both PASS at 22,964 cy on the 8 KiB
+  `mini_checked_work_n1_8k.elf`. The vt12 livelock was a scheduler
+  artifact, not RTL — but see the full-ELF finding below.
+- **Full `mini_checked_work.elf` (48 KiB) fails on the current tree,
+  RR-independent, bisected to `7e6c19c54` (2026-09-15 third sitting):**
+  same ELF, same observer (`+debug_disable`, cookie exits val=1/3,
+  `--threads 1`, `env -i` — see env crash note):
+
+  | build | tree | result |
+  |---|---|---|
+  | `work-ver-smt2-fw64-B-vt1` (Aug-30 exe) | `2c7dd4870` | `tohost=1` @131,072 |
+  | `base-smt2-vt1` (fresh `@2c7dd4870`) | `2c7dd4870` | `tohost=1` @143,360 |
+  | `mid7-smt2-vt1` | `7e6c19c54` | fetch-loop at entry → `_hang` |
+  | `mid6/mid5/mid4` | `4885b41f6`/`ccedfbfce`/`aee0b36c3` | trap/park |
+  | `mid3` | `fedf3f2b7` | cause=6 (store-misaligned) @t=336 → `_hang` |
+  | `mid2` | `becdd9f92` | `tohost=3` @143,360 |
+  | `mid` | `348343e37` (= `ac820a3d6~1`) | `tohost=3` @143,360 |
+  | `iso-smt2-nodrain-vt1` | HEAD minus drain tweak | `tohost=3` @143,360 |
+  | `iso-smt2-vt1` | HEAD RR=0 | `tohost=3` @131,072 |
+  | `iso-smt2-rr1-vt1` | HEAD RR=1 | `tohost=3` @~131k |
+
+  `tohost=3` is the kernel's verify-mismatch verdict: a load returns
+  different data than the fill store wrote. First bad commit is
+  **`7e6c19c54` "Fix remote testharness exclusivity, DI pass detection,
+  and bootrom s0 load"** — the `g6lc_icache` two-cycle-hit rewrite
+  (`cl_index`/`dreq_o.vaddr` → `vaddr_q`, `dreq_o.ready` removed from
+  the READ-hit branch, `kill_s2`→`kill_s1`, `vaddr_q` reset to
+  `boot_addr_i`) plus `instr_queue`/`frontend`/`issue_read_operands`/
+  `g6lc_issue_barrier` changes and the `addi s0, x0, 1` bootrom
+  workaround. Its own message names an "SMT FDT-compensation commit
+  filter" that can suppress immediate loads — exactly the mechanism
+  for a corrupted `li`/`mul`/`add` chain producing a bad store address
+  (misaligned trap at `fedf3f2b7`) or bad stored data (`tohost=3` at
+  HEAD). Symptom drifted with the 8-31 afternoon fetch churn; the
+  defect did not. **Neither `L2RoundRobinEn` nor the drain tweak is
+  implicated** — the nodrain build fails identically and all smt2
+  traffic bypasses L2. The fully-uncompressed `-norvc` variant also
+  fails `tohost=3` @131,072 on current-tree vt1 (`smt2-norvc-vt1`,
+  ELF sha1 `a5a04d6d…`), so the defect is NOT RVC-realigner-specific;
+  the earlier `-norvc` PASS was vt12/older-tree evidence. This is a
+  fetch-B/icache or issue/commit-path regression tracked in
+  `architecture/core-fetch/NEGATIVE.md`; it blocks any smt2
+  checked-work claim and any SMT gate, independent of L2 work.
+- **Current-tree smt2 vt1 exe startup crash (env-dependent):**
+  `iso-smt2-vt1` and a fresh production-config vt1 build segfault in
+  `getenv("G6LC_METRICS_SIDECAR")` under the proxy's full environment;
+  `env -i` runs cleanly. `__environ` is valid but a later environ
+  entry points at unmapped memory — generated-model/host-layout
+  interaction, not RTL. rr1-vt1 does not crash; treat rr0 verdicts as
+  requiring `env -i` until reduced.
+- **Harness observer traps (recorded so they are not re-debugged):**
+  `debug_req` fires at t≈511 after `DmiDelCycles=500`; under vt1 it
+  parks the hart in bootrom `_hang` with no debugger → use
+  `+debug_disable` for standalone workloads. `rvf_tracer` reports
+  `tohost_addr=0` for this ELF and `dtm->done()` never fires, so the
+  only trustworthy exits are soak/cookie rules
+  (`exit cookie off=<dram_off> val=<tohost_val>` polls the DRAM array
+  directly). `log mem off=` takes DRAM-relative offsets, not VAs.
+  Rule text belongs in `CVA6_TRACE_SPEC`, not `CVA6_TRACE`.
 
 Candidate RTL is present but **performance promotion is NOT QUALIFIED**. No new
 Linux boot, SMT stability, physical sign-off or production-geometry equivalence
@@ -712,11 +795,152 @@ Priors: frozen `gles2-min` contract; DMA read/write handoff/lifetime contracts a
 - [ ] Attach backend AXI to the control wrapper; SoC address/IRQ/DTS; native
       execution.
 
+### P2 testharness firmware RAM I$ fills
+
+Priors: `architecture/uncore/apu-firmware-ram.md`,
+`architecture/uncore/apu-testharness-load.md`. Opt-in `+define+G6LC_APU` only.
+
+- [x] `g6lc_apu_fwram` 64-bit INCR read fills (`size=3`, `len<=15`, window
+      contained). Stream8 CVA6 I$/D$ lines are `size=3 len=1`. Writes stay
+      single-beat. WRAP / `len>15` / window-crossing SLVERR and drain.
+      Remote `run-soc.sh` rc=0: **`tb_g6lc_apu_fwram` 5 cases / 306 checks /
+      1,386 clocks**; screening synth 4 KiB enabled 105,439 / 32,938
+      sequential, disabled 166 / 15. Mini-hart `run-hart.sh` still 186 /
+      3,077, cookie `0x600D000A`. Not a CVA6 fetch. FPGA/Altera maps and
+      SMT OpenSBI unchanged. No FeatureVirgl.
+- [x] Directed CVA6 fetch of preloaded `apu_fw.hex`: one `ariane`
+      (`g6lc64_stream8`, `hart_id=1`, boot `0x90000000`) against
+      `g6lc_apu_fwram`. Remote `run-cva6-fetch.sh` rc=0:
+      **`tb_g6lc_apu_cva6_fetch` 5 checks / 279 clocks** (I$ `size=3
+      len=1` INCR + commit PC). Not testharness PerCoreBoot, not OpenSBI.
+- [x] Dual-core fetch at testharness PerCoreBoot PCs: two `ariane`
+      (`g6lc64_stream8`), core 0 ROM `0x10000` spin, core 1 firmware RAM
+      `0x90000000`. Remote `run-cva6-dual-fetch.sh` rc=0:
+      **`tb_g6lc_apu_cva6_dual_fetch` 4 checks / 279 clocks**. Not
+      `g6lc_cluster`, not OpenSBI, not `+define+G6LC_APU` testharness.
+- [x] `g6lc_cluster` PerCoreBoot shared mem: `NR_CORES=2`, L2/L3 off, core 0
+      ROM `0x10000`, core 1 firmware RAM `0x90000000`. Remote
+      `run-cva6-cluster-fetch.sh` rc=0: **`tb_g6lc_apu_cluster_fetch` 4
+      checks / 283 clocks**. Not testharness `+define+G6LC_APU` xbar/DRAM
+      hole, not OpenSBI.
+- [x] Testharness compositor xbar + DRAM hole: cluster mem through
+      last-match-wins ROM + DRAM lo/hi + RAM idx 12. Compositor boot PCs
+      and `fw_ready`. Remote `run-cva6-th-fetch.sh` rc=0:
+      **`tb_g6lc_apu_th_fetch` 14 checks / 283 clocks** (decode hole vs
+      aliased steal, RAM-port I$ fill, DRAM poison not hit, both commits).
+      Not full testharness UART/PLIC/DRAM/L2, not OpenSBI.
+- [x] TGSI immediates via native `LDC` (next IMEM word is the 32-bit
+      payload). Host compiler accepts `IMM[n] FLT32` and inline
+      `{0,0.5,1,2}` (and negatives). TEX/IF/src0 register-negate still
+      fail closed. Compiler not in `apu_fw.elf` / `apu_tgsi_fw.elf`.
+      Remote `run-exec.sh` rc=0: **`tb_g6lc_apu_exec` 12/29/886**;
+      **`PASS tgsi_check`**; tgsi_fw later 188/3,486 cookie `0x600D000B`.
+      Exec synth enabled 23,329 / 3,888 sequential, disabled zero cells.
+- [x] Optional DMA initiator: compositor exports the DMA AXI master
+      (idle when `DmaReadEn=0`). Directed read through DRAM lo
+      `0x80000000`; firmware RAM is not DMA backing. Testharness ties the
+      port; FPGA/Altera `NrSlaves` unchanged. Remote `run-dma-init.sh`
+      rc=0: **`tb_g6lc_apu_dma_init` 10 checks / 19 clocks**. xbar 3/17/30;
+      th_load 3/21/16.
+- [x] Testharness OpenSBI-visible map + opt-in domain DTS: 14-rule
+      `+define+G6LC_APU` last-match (Debug..GPIO, DRAM lo, guest, ctrl,
+      RAM, DRAM hi) locked to compositor exports and hart-1 boot.
+      `ariane-g6lc-apu.dts` includes the overlay on stream8 and points
+      `possible-harts`/`boot-hart` at CPU1. Default DTBs and
+      `build-opensbi-smt2.sh` unchanged. Not UART/PLIC/DRAM/L2, not an
+      OpenSBI firmware payload. Host `osbi_check` PASS. Remote
+      `run-th-osbi.sh` rc=0: **`tb_g6lc_apu_th_osbi` 27 checks / 4
+      clocks**; th_load screening synth 4 KiB enabled 127,687 / 35,127
+      sequential, disabled 275 / 27.
+- [x] CVA6 firmware hart runs resident image to cookie: cluster
+      PerCoreBoot, L2/L3 off, control MMIO through `g6lc_apu_axi4_lite`
+      into `g6lc_apu_fw` (`ExecEn=1`). `ApuHarness.ExecEn` stays 0.
+      Remote `run-cva6-cookie.sh` rc=0: **`tb_g6lc_apu_cva6_cookie` 14
+      checks / 1,835 clocks**, cookie `0x600D000A`. fw synth enabled
+      46,854 / 7,131; disabled 522 / 162. Not OpenSBI, not TEX.
+- [x] Testharness compositor exec bind: `g6lc_apu_sys` `ExecEn && !MemEn`
+      mailbox + `g6lc_apu_exec_bind`. AXI4 control TID+IADD peek 10/11.
+      `ApuHarness.ExecEn` stays 0. Remote `run-th-exec.sh` rc=0:
+      **`tb_g6lc_apu_th_exec` 38 cases / 271 checks / 1,601 clocks**
+      (shader MOV + packed `size=3` IDX+DATA). Screening synth 4 KiB
+      enabled 155,234 / 40,114 sequential; disabled 275 / 27.
+- [x] CVA6 cookie through compositor: cluster PerCoreBoot into
+      `g6lc_apu_th_load` `gen_exec` (not sidecar `g6lc_apu_fw`). Remote
+      `run-cva6-th-cookie.sh` rc=0: **`tb_g6lc_apu_cva6_th_cookie` 14
+      checks / 1,835 clocks**, cookie `0x600D000A`. Same cycle count as
+      the sidecar cookie TB. `ApuHarness.ExecEn` stays 0.
+- [x] CVA6 TGSI MOV job through compositor: `apu_tgsi.hex` to cookie
+      `0x600D000B`. Peek CPL0 is address-dependent on mailbox GO/STAT.
+      Aligned AXI4 `size=3` stores split on `g6lc_apu_axi4_lite` (CVA6
+      this image issues `size=2`). Compiler not resident. Remote
+      `run-cva6-tgsi.sh` rc=0: **`tb_g6lc_apu_cva6_tgsi` 14 checks /
+      2,081 clocks**, cookie `0x600D000B`. `run-th-exec.sh` (APU_SYNTH=0)
+      **38 cases / 271 checks / 1,601 clocks**. Screening synth 4 KiB
+      enabled 155,234 / 40,114 sequential; disabled 275 / 27.
+      `ApuHarness.ExecEn` stays 0. Not OpenSBI, not TEX.
+- [x] CVA6-resident TGSI compile image: `apu_tgsi_cc.elf` (compiler +
+      job linked; not `apu_fw.elf`). On-hart walk TEX-fail then MOV
+      opcode; job emits frozen MOV+HALT. fwram `in_win`/`last_match` on
+      `addr[31:0]`; D$ `lbu` size=0/1; mailbox `sw` (no `sd` merge).
+      Remote `run-cva6-tgsi-cc.sh` rc=0: **`tb_g6lc_apu_cva6_tgsi` 14
+      checks / 10,511 clocks**, cookie `0x600D000B`. Directed fwram
+      **6/317/1,421**. Screening synth 4 KiB enabled 153,932 / 40,114
+      sequential; disabled 275 / 27. `ApuHarness.ExecEn` stays 0. Not
+      OpenSBI, not TEX.
+- [x] CVA6 hart 0 fetches DRAM lo at the OpenSBI load address
+      `0x80000000` through the compositor hole; hart 1 stays on firmware
+      RAM. Testharness default app boot stays ROM `0x10000`.
+      `build-opensbi-smt2.sh` unchanged. Remote `run-cva6-osbi-boot.sh`
+      rc=0: **`tb_g6lc_apu_cva6_osbi_boot` 13 checks / 286 clocks**.
+      Host `osbi_check` PASS. th_load screening synth 4 KiB enabled
+      127,297 / 35,275 sequential; disabled 275 / 27. Not UART/PLIC/L2,
+      not a real OpenSBI ELF, not TEX.
+- [x] CVA6 hart 0 at DRAM lo stores `0x41` to UART `0x10000000` through
+      the compositor. Stub UART, not 16550/PLIC/L2. Hart 1 firmware RAM.
+      Remote `run-cva6-osbi-uart.sh` rc=0: **`tb_g6lc_apu_cva6_osbi_uart`
+      12 checks / 288 clocks**, byte `0x41`. Host `osbi_check` PASS.
+      th_load screening synth 4 KiB enabled 127,297 / 35,275 sequential;
+      disabled 275 / 27. `build-opensbi-smt2.sh` unchanged. Not a real
+      OpenSBI ELF, not TEX.
+- [x] CVA6 hart 0 at DRAM lo stores MSIP=1 to CLINT `0x02000000` through
+      the compositor. Stub CLINT, not a real timer, not PLIC/L2. Hart 1
+      firmware RAM. Remote `run-cva6-osbi-clint.sh` rc=0:
+      **`tb_g6lc_apu_cva6_osbi_clint` 12 checks / 288 clocks**, word
+      `0x1`. Host `osbi_check` PASS. th_load screening synth 4 KiB
+      enabled 127,297 / 35,275 sequential; disabled 275 / 27.
+      `build-opensbi-smt2.sh` unchanged. Not a real OpenSBI ELF, not TEX.
+- [x] CVA6 hart 0 at DRAM lo stores priority=1 to PLIC `0x0C000004`
+      through the compositor. Stub PLIC, not a real interrupt controller,
+      not L2. Hart 1 firmware RAM. Remote `run-cva6-osbi-plic.sh` rc=0:
+      **`tb_g6lc_apu_cva6_osbi_plic` 12 checks / 290 clocks**, word
+      `0x1`. Host `osbi_check` PASS. th_load screening synth 4 KiB
+      enabled 127,297 / 35,275 sequential; disabled 275 / 27.
+      `build-opensbi-smt2.sh` unchanged. Not a real OpenSBI ELF, not TEX.
+- [x] Headless DMEM color readback: mailbox `APU_MEM_EXEC_DPEEK`. Shader
+      `ST` of `1.0f` to DMEM[0] peeks `0x3f800000`. Remote `run-th-exec.sh`
+      rc=0: **`tb_g6lc_apu_th_exec` 45 cases / 324 checks / 1,916 clocks**.
+      Screening synth 4 KiB enabled 155,978 / 40,114 sequential; disabled
+      275 / 27. `ApuHarness.ExecEn` stays 0. Not raster, not DRAM, not
+      Linux/Mesa, not TEX.
+- [x] Scanline-fill microprogram: BR loop `ST` `1.0f` to DMEM[0..3];
+      `DPEEK` tile readback, DMEM[4] empty. Remote `run-th-exec.sh` rc=0:
+      **`tb_g6lc_apu_th_exec` 64 cases / 513 checks / 3,071 clocks**.
+      Screening synth 4 KiB enabled 155,978 / 40,114 sequential; disabled
+      275 / 27. Not triangle coverage, not DRAM, not Linux/Mesa, not TEX.
+- [ ] TEX still rejected; L2 and a real OpenSBI ELF payload still open.
+- [ ] P3 unchanged Linux/Mesa GLES2 shader-to-RTL `glReadPixels` still open.
+
 Reproduce:
 
 ```powershell
 wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py sync
-wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py --timeout 3600 shell env APU_SG=1 APU_MEM=1 APU_DMA=1 APU_DMA_WRITE=1 APU_AXI=1 APU_SYNTH=1 bash /opt/testharness/repo/verif/tb/apu/run-virtio-mmio.sh
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py --timeout 3600 shell --cmd-file verif/tb/apu/run-cva6-tgsi.cmd
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py --timeout 3600 shell --cmd-file verif/tb/apu/run-cva6-tgsi-cc.sh
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py --timeout 3600 shell --cmd-file verif/tb/apu/run-cva6-osbi-boot.sh
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py --timeout 3600 shell --cmd-file verif/tb/apu/run-cva6-osbi-uart.sh
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py --timeout 3600 shell --cmd-file verif/tb/apu/run-cva6-osbi-clint.sh
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py --timeout 3600 shell --cmd-file verif/tb/apu/run-cva6-osbi-plic.sh
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py --timeout 3600 shell --cmd-file verif/tb/apu/run-th-exec.sh
 ```
 
 No FeatureVirgl/EDID advertisement, no EGL in RTL, no testharness attachment.

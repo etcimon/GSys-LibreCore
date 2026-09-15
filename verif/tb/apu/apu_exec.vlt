@@ -1,0 +1,8 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+
+`verilator_config
+// Vendored FPnew: packed [0:N] ranges, BLKANDNBLK on pipe arrays, width noise.
+lint_off -file "*/core/cvfpu/src/*.sv"
+lint_off -rule UNOPTFLAT -file "*/vendor/pulp-platform/common_cells/src/lzc.sv"
+lint_off -rule BLKANDNBLK -file "*/core/cvfpu/src/fpnew_fma.sv"

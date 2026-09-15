@@ -189,3 +189,21 @@ path = [
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Etienne Cimon"
 SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["corev_apu/apu/**", "corev_apu/include/g6lc_apu_cfg_pkg.sv"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Etienne Cimon"
+SPDX-License-Identifier = "CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial"
+
+[[annotations]]
+path = ["software/apu-fw/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Etienne Cimon"
+SPDX-License-Identifier = "MIT"
+
+[[annotations]]
+path = ["verif/tb/apu/**"]
+precedence = "aggregate"
+SPDX-FileCopyrightText = "2026 Etienne Cimon"
+SPDX-License-Identifier = "MIT"

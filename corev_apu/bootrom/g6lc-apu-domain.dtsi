@@ -1,0 +1,43 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+//
+// OpenSBI domain overlay for the LibreCore APU firmware hart. Not included
+// by default. Do not apply to ariane-smt2.dts (NrHarts=2). Requires a
+// dual-core NrHarts=1 DTB whose cpu@1 is the firmware hart.
+// Opt-in include: corev_apu/bootrom/ariane-g6lc-apu.dts (possible-harts /
+// boot-hart on CPU1). Do not patch build-opensbi-smt2.sh.
+//
+// Numbers must match g6lc_apu_cfg_pkg::ApuHarness:
+//   FirmwareRam 0x90000000 / 256 KiB (order 18)
+//   control     0x40002000 / 4 KiB  (order 12, mmio)
+// Guest virtio 0x40001000 is intentionally omitted: Linux maps it.
+
+/ {
+  chosen {
+    opensbi-domains {
+      compatible = "opensbi,domain,config";
+
+      apu_fw_ram: apu-fw-ram {
+        compatible = "opensbi,domain,memregion";
+        base = <0x0 0x90000000>;
+        order = <18>;
+      };
+
+      apu_fw_ctrl: apu-fw-ctrl {
+        compatible = "opensbi,domain,memregion";
+        base = <0x0 0x40002000>;
+        order = <12>;
+        mmio;
+      };
+
+      // Firmware domain: hart 1 only. Perms 0x7 = M-mode RWX.
+      // Integrator must point possible-harts / boot-hart at cpu@1.
+      apu_firmware: apu-firmware-domain {
+        compatible = "opensbi,domain,instance";
+        regions = <&apu_fw_ram 0x7>, <&apu_fw_ctrl 0x3>;
+        next-addr = <0x0 0x90000000>;
+        next-mode = <0x3>;
+      };
+    };
+  };
+};

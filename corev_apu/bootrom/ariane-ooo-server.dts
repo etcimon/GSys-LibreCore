@@ -320,5 +320,16 @@
       reg-shift = <2>;
       reg-io-width = <4>;
     };
+
+    // LibreCore APU guest window. status=disabled until testharness
+    // instantiates g6lc_apu_soc. PLIC source 9; firmware control at
+    // 0x40002000 is omitted so Linux cannot map it.
+    gpu@40001000 {
+      compatible = "virtio,mmio";
+      reg = <0x0 0x40001000 0x0 0x1000>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <9>;
+      status = "disabled";
+    };
   };
 };
