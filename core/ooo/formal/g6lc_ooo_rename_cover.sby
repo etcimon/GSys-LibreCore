@@ -1,0 +1,25 @@
+# Separate cover task for live g6lc_rename. BMC assertions stay in
+# g6lc_ooo_rename.sby. Covers require a legal PRF (>32) so allocation,
+# dual allocation, pool exhaustion and checkpoint recovery are reachable.
+# Not in default formalTasks: testharness has no yices, and z3 timed out
+# with zero traces. Local: sby -f core/ooo/formal/g6lc_ooo_rename_cover.sby
+
+[options]
+mode cover
+depth 8
+timeout 90
+
+[engines]
+# Cover has no abc path. yices PASSes locally in ~1 s. Testharness has no
+# yices (sby ERROR if yices is engine_0); remote runner patches this to z3.
+# Not a default formalTasks gate.
+smtbmc --nopresat yices
+
+[script]
+read_slang --std 1800-2017 --top g6lc_ooo_rename_props -DFORMAL \
+    g6lc_rename.sv g6lc_ooo_rename_props.sv
+prep -top g6lc_ooo_rename_props
+
+[files]
+../g6lc_rename.sv
+g6lc_ooo_rename_props.sv

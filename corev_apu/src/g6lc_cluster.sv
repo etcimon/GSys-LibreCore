@@ -278,6 +278,7 @@ module g6lc_cluster
                          (CVA6Cfg.DCACHE_LINE_WIDTH != 0 ? CVA6Cfg.DCACHE_LINE_WIDTH : 32'd512)),
         .MSHR_DEPTH     (CVA6Cfg.L2MshrDepth != 0 ? CVA6Cfg.L2MshrDepth : 32'd8),
         .DATA_BANKS     (CVA6Cfg.L2DataBanks != 0 ? CVA6Cfg.L2DataBanks : 32'd4),
+        .RR_EN          (CVA6Cfg.L2RoundRobinEn),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),

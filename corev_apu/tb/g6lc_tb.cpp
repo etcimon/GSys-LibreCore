@@ -49,6 +49,28 @@
 #define G6LC_CVA6_C0(path) ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6##__DOT__##path
 #define G6LC_CVA6_C1(path) ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__1__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6##__DOT__##path
 #endif
+// SMT hierarchy flavor: NrHarts>1 builds the banked CSR/RF wrappers and the
+// g6lc_thread_select gen_smt block; NrHarts==1 collapses to the gen_single*
+// paths. The Makefile defines G6LC_TB_BANKED when the target config package
+// has NrHarts>1. G6LC_TB_CSR/RF take the core path macro (G6LC_CVA6_C0/C1) so
+// the pasted member name is produced on rescan. G6LC_TB_H1(expr) evaluates
+// expr only on banked builds — hart-1 / gen_smt state does not exist in
+// non-banked models, where it compiles to 0. Always wrap hart-1 and
+// i_smt_thread_select reads in G6LC_TB_H1: a bare G6LC_TB_CSR(core,1,·)
+// silently aliases hart-0 state when non-banked.
+#if defined(G6LC_TB_BANKED)
+#  define G6LC_TB_CSR(core, h, sig) \
+     core(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__##h##__KET____DOT__i_csr__DOT__##sig)
+#  define G6LC_TB_RF(core, h) \
+     core(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__##h##__KET____DOT__i_rf_bank__DOT__mem)
+#  define G6LC_TB_H1(expr) (expr)
+#else
+#  define G6LC_TB_CSR(core, h, sig) \
+     core(csr_regfile_i__DOT__gen_single__DOT__i_csr__DOT__##sig)
+#  define G6LC_TB_RF(core, h) \
+     core(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_single_bank__DOT__i_rf__DOT__mem)
+#  define G6LC_TB_H1(expr) 0u
+#endif
 #include <stdio.h>
 #include <iostream>
 #include <iomanip>
@@ -399,6 +421,9 @@ done_processing:
     main_time++;
   }
   top->rst_ni = 1;
+  const char *metrics_sidecar = std::getenv("G6LC_METRICS_SIDECAR");
+  uint64_t metrics_retired[2] = {0, 0};
+  uint64_t metrics_dropped[2] = {0, 0};
 
   // Preload memory.
   //
@@ -542,13 +567,27 @@ done_processing:
       top->rtc_i ^= 1;
     }
     main_time++;
+    if (metrics_sidecar) {
+#if (VERILATOR_VERSION_INTEGER >= 5000000)
+      unsigned cack0 = (unsigned)top->rootp->G6LC_CVA6_C0(commit_ack);
+      unsigned cdrop0 = (unsigned)top->rootp->G6LC_CVA6_C0(commit_drop_id_commit);
+      metrics_retired[0] += (uint64_t)__builtin_popcount(cack0 & ~cdrop0);
+      metrics_dropped[0] += (uint64_t)__builtin_popcount(cack0 & cdrop0);
+#if defined(G6LC_TB_CLUSTER)
+      unsigned cack1 = (unsigned)top->rootp->G6LC_CVA6_C1(commit_ack);
+      unsigned cdrop1 = (unsigned)top->rootp->G6LC_CVA6_C1(commit_drop_id_commit);
+      metrics_retired[1] += (uint64_t)__builtin_popcount(cack1 & ~cdrop1);
+      metrics_dropped[1] += (uint64_t)__builtin_popcount(cack1 & cdrop1);
+#endif
+#endif
+    }
     // I4q: first time frontend NPC is 0 after leaving boot (smt2 hart0 illegal).
     if (std::getenv("CVA6_TRAP_DUMP") != nullptr) {
       static int saw_nonzero_npc = 0;
       static int logged_zero_npc = 0;
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
       uint64_t npc_now = (uint64_t)top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
-      unsigned act_now = (unsigned)top->rootp->G6LC_CVA6_C0(i_smt_thread_select__DOT__gen_smt__DOT__active_q);
+      unsigned act_now = (unsigned)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(i_smt_thread_select__DOT__gen_smt__DOT__active_q));
       if (npc_now != 0) saw_nonzero_npc = 1;
       if (saw_nonzero_npc && npc_now == 0 && !logged_zero_npc) {
         logged_zero_npc = 1;
@@ -631,12 +670,12 @@ done_processing:
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
       if (main_time < 64) {
         auto gpr0 = [&](int n) -> uint64_t {
-          const auto &rf = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem);
+          const auto &rf = top->rootp->G6LC_TB_RF(G6LC_CVA6_C0, 0);
           return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
         };
         uint64_t npc = (uint64_t)top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
-        uint64_t mepc0 = (uint64_t)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q);
-        uint64_t mcause0 = (uint64_t)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q);
+        uint64_t mepc0 = (uint64_t)top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
+        uint64_t mcause0 = (uint64_t)top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
         std::cerr << std::hex << "[boot] t=" << main_time << " npc=0x" << npc
                   << " mepc=0x" << mepc0 << " mcause=" << mcause0
                   << " s0=0x" << gpr0(8) << " a5=0x" << gpr0(15)
@@ -653,12 +692,12 @@ done_processing:
         };
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
         uint64_t npc = (uint64_t)top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
-        uint64_t mepc0 = (uint64_t)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q);
-        uint64_t mcause0 = (uint64_t)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q);
-        uint64_t mepc1 = (uint64_t)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__mepc_q);
-        uint64_t mcause1 = (uint64_t)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__mcause_q);
-        unsigned wfi0 = (unsigned)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__wfi_q);
-        unsigned wfi1 = (unsigned)top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__wfi_q);
+        uint64_t mepc0 = (uint64_t)top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
+        uint64_t mcause0 = (uint64_t)top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
+        uint64_t mepc1 = (uint64_t)G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mepc_q));
+        uint64_t mcause1 = (uint64_t)G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mcause_q));
+        unsigned wfi0 = (unsigned)top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, wfi_q);
+        unsigned wfi1 = (unsigned)G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, wfi_q));
         uint64_t cpc = 0;
         uint64_t cpc1 = 0;
         unsigned cack = 0;
@@ -695,11 +734,15 @@ done_processing:
         }
         auto gpr = [&](unsigned hart, int n) -> uint64_t {
           if (hart == 0) {
-            const auto &rf = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem);
+            const auto &rf = top->rootp->G6LC_TB_RF(G6LC_CVA6_C0, 0);
             return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
           }
-          const auto &rf = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__1__KET____DOT__i_rf_bank__DOT__mem);
+#if defined(G6LC_TB_BANKED)
+          const auto &rf = top->rootp->G6LC_TB_RF(G6LC_CVA6_C0, 1);
           return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
+#else
+          return 0;
+#endif
         };
         static int boot_wait_logs0 = 0;
         static int boot_wait_logs1 = 0;
@@ -717,6 +760,9 @@ done_processing:
         }
         // Trapping visit: dump ID/SB handshake. id_pc uses the same
         // sbe_w as commit (do not scan from lo — bp tgt leak).
+        // SMT/SS debug only: issue_entry_*_id_issue are DCE'd when the
+        // target has SuperscalarEn=0 or NrHarts==1.
+#if defined(G6LC_TB_BANKED)
         static int idsb_logs = 0;
         if (trace_on && main_time >= 103000 && main_time <= 180000 &&
             idsb_logs < 250) {
@@ -823,6 +869,7 @@ done_processing:
             }
           }
         }
+#endif // G6LC_TB_BANKED (idsb issue-entry debug)
         // Leftover-complete 12958 vs sequential 12960. replay_addr /
         // serving_unaligned / is_mispredict DCE; k1 = misp|flush|replay.
         // npc_q and icache_vaddr_q are flops (not DCE).
@@ -959,16 +1006,17 @@ done_processing:
             } else if (r.kind == G6LC_LOG_HOLD && have_hold) {
               // Ports (load_paddr_i, st_fwd_*) are not public in the
               // Verilator v5.008 model. Internals g1ao_hold_* are.
-              unsigned hv = (unsigned)top->rootp->G6LC_CVA6_C0(
-                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_v_q);
-              unsigned hh = (unsigned)top->rootp->G6LC_CVA6_C0(
-                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_hit);
-              unsigned hbe = (unsigned)top->rootp->G6LC_CVA6_C0(
-                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_be_q);
-              uint64_t hpa = (uint64_t)top->rootp->G6LC_CVA6_C0(
-                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_pa_q);
-              uint64_t hdata = (uint64_t)top->rootp->G6LC_CVA6_C0(
-                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_data_q);
+              // g1ao_hold_* only survive DCE when SuperscalarEn && NrHarts>1.
+              unsigned hv = (unsigned)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(
+                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_v_q));
+              unsigned hh = (unsigned)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(
+                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_hit));
+              unsigned hbe = (unsigned)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(
+                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_be_q));
+              uint64_t hpa = (uint64_t)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(
+                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_pa_q));
+              uint64_t hdata = (uint64_t)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(
+                  ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_data_q));
               bool in_win = (cack & 1u) && g6lc_in_win(cpc, r.lo, r.hi);
               uint64_t filt = r.off;
               bool pa_hit = (filt == 0) ||
@@ -1096,7 +1144,7 @@ done_processing:
       auto cack_ev = top->rootp->G6LC_CVA6_C0(commit_ack);
       // SMT banked RF: hart0 bank (gen_single_bank removed)
       const auto &rf_ev = top->rootp
-          ->G6LC_CVA6_C0(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem);
+          ->G6LC_TB_RF(G6LC_CVA6_C0, 0);
       auto ge = [&](int n) -> uint64_t {
         return (uint64_t)rf_ev[2 * n] | ((uint64_t)rf_ev[2 * n + 1] << 32);
       };
@@ -1340,10 +1388,10 @@ done_processing:
       auto iss_ptr = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT__i_scoreboard__DOT__issue_pointer_q);
       auto cmt_ptr = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT__i_scoreboard__DOT__commit_pointer_q);
       auto epc = top->rootp->G6LC_CVA6_C0(epc_commit_pcgen);
-      auto mepc = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q);
-      auto mcause = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q);
-      auto mtval = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mtval_q);
-      auto wfi = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__wfi_q);
+      auto mepc = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
+      auto mcause = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
+      auto mtval = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtval_q);
+      auto wfi = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, wfi_q);
       auto flush_if = top->rootp->G6LC_CVA6_C0(flush_ctrl_if);
       auto iq_full = top->rootp->G6LC_CVA6_C0(i_frontend__DOT__i_instr_queue__DOT__instr_queue_full);
       auto iq_rdy = top->rootp->G6LC_CVA6_C0(i_frontend__DOT__instr_queue_ready);
@@ -1449,7 +1497,7 @@ done_processing:
         // GPR snapshot: RF mem is [32][64] packed → VlWide word n = bit/32.
         // xN lives at bits [64*N +: 64] → words 2*N, 2*N+1 (LE).
         const auto &rf = top->rootp
-            ->G6LC_CVA6_C0(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem);
+            ->G6LC_TB_RF(G6LC_CVA6_C0, 0);
         auto gpr = [&](int n) -> uint64_t {
           return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
         };
@@ -1576,30 +1624,32 @@ done_processing:
     // I4o: npc0=0x32e is _start_warm hart-id scan; mepc=0 is a separate illegal.
     {
       auto npc0 = top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
-      auto mepc0 = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q);
-      auto mtvec = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mtvec_q);
-      auto mcause0 = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q);
-      auto wfi0 = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__wfi_q);
-      auto mepc1 = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__mepc_q);
-      auto mcause1 = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__mcause_q);
-      auto wfi1 = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__wfi_q);
-      auto active = top->rootp->G6LC_CVA6_C0(i_smt_thread_select__DOT__gen_smt__DOT__active_q);
-      const auto &rf0 = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem);
-      const auto &rf1 = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__1__KET____DOT__i_rf_bank__DOT__mem);
+      auto mepc0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
+      auto mtvec = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtvec_q);
+      auto mcause0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
+      auto wfi0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, wfi_q);
+      auto mepc1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mepc_q));
+      auto mcause1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mcause_q));
+      auto wfi1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, wfi_q));
+      auto active = G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(i_smt_thread_select__DOT__gen_smt__DOT__active_q));
+      const auto &rf0 = top->rootp->G6LC_TB_RF(G6LC_CVA6_C0, 0);
+#if defined(G6LC_TB_BANKED)
+      const auto &rf1 = top->rootp->G6LC_TB_RF(G6LC_CVA6_C0, 1);
+#endif
       auto gpr64 = [](const auto &rf, int n) -> uint64_t {
         return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
       };
-      uint64_t ra0 = gpr64(rf0, 1), ra1 = gpr64(rf1, 1);
-      uint64_t sp0 = gpr64(rf0, 2), sp1 = gpr64(rf1, 2);
-      uint64_t s00 = gpr64(rf0, 8), s01 = gpr64(rf1, 8);
-      auto mtval0 = top->rootp->G6LC_CVA6_C0(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mtval_q);
-      uint64_t t00 = gpr64(rf0, 5), t01 = gpr64(rf1, 5);
-      uint64_t t10 = gpr64(rf0, 6), t11 = gpr64(rf1, 6);
-      uint64_t t20 = gpr64(rf0, 7), t21 = gpr64(rf1, 7);
-      uint64_t a00 = gpr64(rf0, 10), a01 = gpr64(rf1, 10);
-      uint64_t a30 = gpr64(rf0, 13), a31 = gpr64(rf1, 13);
-      uint64_t a40 = gpr64(rf0, 14), a41 = gpr64(rf1, 14);
-      uint64_t a50 = gpr64(rf0, 15), a51 = gpr64(rf1, 15);
+      uint64_t ra0 = gpr64(rf0, 1), ra1 = G6LC_TB_H1(gpr64(rf1, 1));
+      uint64_t sp0 = gpr64(rf0, 2), sp1 = G6LC_TB_H1(gpr64(rf1, 2));
+      uint64_t s00 = gpr64(rf0, 8), s01 = G6LC_TB_H1(gpr64(rf1, 8));
+      auto mtval0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtval_q);
+      uint64_t t00 = gpr64(rf0, 5), t01 = G6LC_TB_H1(gpr64(rf1, 5));
+      uint64_t t10 = gpr64(rf0, 6), t11 = G6LC_TB_H1(gpr64(rf1, 6));
+      uint64_t t20 = gpr64(rf0, 7), t21 = G6LC_TB_H1(gpr64(rf1, 7));
+      uint64_t a00 = gpr64(rf0, 10), a01 = G6LC_TB_H1(gpr64(rf1, 10));
+      uint64_t a30 = gpr64(rf0, 13), a31 = G6LC_TB_H1(gpr64(rf1, 13));
+      uint64_t a40 = gpr64(rf0, 14), a41 = G6LC_TB_H1(gpr64(rf1, 14));
+      uint64_t a50 = gpr64(rf0, 15), a51 = G6LC_TB_H1(gpr64(rf1, 15));
       std::cerr << std::hex << "[hangpc] npc0=0x" << (uint64_t)npc0
                 << " act=" << (unsigned)active
                 << " mepc0=0x" << (uint64_t)mepc0
@@ -1627,15 +1677,17 @@ done_processing:
 #if defined(G6LC_CVA6_GEN_ACC)
     {
       auto npc0 = top->rootp->G6LC_CVA6_C1(i_frontend__DOT__npc_q);
-      auto mepc0 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mepc_q);
-      auto mcause0 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__mcause_q);
-      auto wfi0 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__0__KET____DOT__i_csr__DOT__wfi_q);
-      auto mepc1 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__mepc_q);
-      auto mcause1 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__mcause_q);
-      auto wfi1 = top->rootp->G6LC_CVA6_C1(csr_regfile_i__DOT__gen_banked__DOT__gen_csr__BRA__1__KET____DOT__i_csr__DOT__wfi_q);
-      auto active = top->rootp->G6LC_CVA6_C1(i_smt_thread_select__DOT__gen_smt__DOT__active_q);
-      const auto &rf0 = top->rootp->G6LC_CVA6_C1(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__0__KET____DOT__i_rf_bank__DOT__mem);
-      const auto &rf1 = top->rootp->G6LC_CVA6_C1(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_banked__DOT__gen_hart_bank__BRA__1__KET____DOT__i_rf_bank__DOT__mem);
+      auto mepc0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 0, mepc_q);
+      auto mcause0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 0, mcause_q);
+      auto wfi0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 0, wfi_q);
+      auto mepc1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 1, mepc_q));
+      auto mcause1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 1, mcause_q));
+      auto wfi1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 1, wfi_q));
+      auto active = G6LC_TB_H1(top->rootp->G6LC_CVA6_C1(i_smt_thread_select__DOT__gen_smt__DOT__active_q));
+      const auto &rf0 = top->rootp->G6LC_TB_RF(G6LC_CVA6_C1, 0);
+#if defined(G6LC_TB_BANKED)
+      const auto &rf1 = top->rootp->G6LC_TB_RF(G6LC_CVA6_C1, 1);
+#endif
       auto gpr64 = [](const auto &rf, int n) -> uint64_t {
         return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
       };
@@ -1647,9 +1699,9 @@ done_processing:
                 << " mepc1=0x" << (uint64_t)mepc1
                 << " mcause1=0x" << (uint64_t)mcause1
                 << " wfi1=" << (unsigned)wfi1
-                << " ra0=0x" << gpr64(rf0, 1) << " ra1=0x" << gpr64(rf1, 1)
-                << " sp0=0x" << gpr64(rf0, 2) << " sp1=0x" << gpr64(rf1, 2)
-                << " s00=0x" << gpr64(rf0, 8) << " s01=0x" << gpr64(rf1, 8)
+                << " ra0=0x" << gpr64(rf0, 1) << " ra1=0x" << G6LC_TB_H1(gpr64(rf1, 1))
+                << " sp0=0x" << gpr64(rf0, 2) << " sp1=0x" << G6LC_TB_H1(gpr64(rf1, 2))
+                << " s00=0x" << gpr64(rf0, 8) << " s01=0x" << G6LC_TB_H1(gpr64(rf1, 8))
                 << std::dec << "\n";
     }
 #endif
@@ -1767,6 +1819,24 @@ done_processing:
               << "Wall clock time passed: "
               << std::chrono::duration<double, std::milli>(t_end-t_start).count()
               << " ms\n";
+  }
+
+  if (metrics_sidecar) {
+    fprintf(stderr,
+            "[G6LC_METRICS] cycles=%ld retired0=%llu dropped0=%llu retired1=%llu dropped1=%llu\n",
+            (long)main_time,
+            (unsigned long long)metrics_retired[0], (unsigned long long)metrics_dropped[0],
+            (unsigned long long)metrics_retired[1], (unsigned long long)metrics_dropped[1]);
+    FILE *mf = fopen(metrics_sidecar, "w");
+    if (mf) {
+      fprintf(mf,
+              "{\"cycles\":%ld,\"retired\":[%llu,%llu],\"dropped\":[%llu,%llu],"
+              "\"kind\":\"tb-sidecar\",\"instrumented\":true}\n",
+              (long)main_time,
+              (unsigned long long)metrics_retired[0], (unsigned long long)metrics_retired[1],
+              (unsigned long long)metrics_dropped[0], (unsigned long long)metrics_dropped[1]);
+      fclose(mf);
+    }
   }
 
   return ret;

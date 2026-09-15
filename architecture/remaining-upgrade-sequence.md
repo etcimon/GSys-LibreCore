@@ -115,6 +115,13 @@ core/include/cv64a6_server_math_v_config_pkg.sv  # VExtEn=1, CvxifEn=0
 
 **Live next (authoritative ordered list + file priors):**
 [`AGENTS-todo.md`](../AGENTS-todo.md) — **Current phase** and **Practical next**.
+Perf-foundation next (before any RR promotion): 16 KiB collect timed out
+(900 s, not waived); mapped flop-tag through 8 KiB. Isolated stream8 RR-on
+checked-work, AMOCAS W/D/Q, 512 B stream_plane, and all-set L2 hot+scan
+(`mini_l2_hot_scan.S` 384,179 cy) match RR-off cycle-for-cycle (0 delta).
+SMT2 RR-on livelocks (I=2 fetch). Cluster/SMT controls stay
+stream8 minis + smt2 cookie. Do not merge packages; do not default-on RR (8-way leaf mix ~0.7%, core 0
+delta, +1 `$mem` when on).
 Stage map: [`current-stage.md`](current-stage.md) (parallel envelopes, not one serial queue).
 Host residual §1–§10 largely **done**; lab FO4/STA + stream8 optional growth open.
 QEMU firmware ladder (U-Boot/EDK2 virt+soc) is **green as hypothesis**; E4 pflash and soc Shell

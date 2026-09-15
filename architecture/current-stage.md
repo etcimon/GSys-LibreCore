@@ -19,7 +19,7 @@ at U0.
 | **QEMU firmware** | U1–U3 (virt + generated `g6lc-soc` OpenSBI/U-Boot/EDK2/OpenWrt/`CPUINFO-DONE`); E2–E3 EDK2 virt; linux-dist **gitlinks** (openwrt `37fc534`, edk2 `4460122`, four feeds) | E4 RTL pflash tandem; soc U3-Shell StartImage hang; `g6lc-soc` has no PCI |
 | **AI island** | I1-lite AccTile 256, HARD gemm_s8 + 256³ ~83.7k cy (~0.512 TOPS @ 1 GHz, §2 def); CPL FIFO; PLIC-8; **I3-lite** NoC 8 GB/s + PMU/CAP; `MaxAROut=2`; Cas=0 bypass; opt-in `G6LC_AI_DRAM_TIMING` → `AiIslandDdr4TimingSim` (class 0, Cas=14, AR=8); DRAM backend is the **SoC** `master[DRAM]` slave (cores + island share it); `DramChannels` N=1 live. **CLI:** `diag run ai` / `test --ai` / `test --ai-remote` / `test --ai --channels 4 --ai-dram 1` / `g6q --ai` (QEMU not Variane) | **I3 DRAM-class** (LiteDRAM generated, class-1 N=1/2/4 **opt-in only**; S7 N=4 two IDs/PHY + GEMM stripe directed PASS — `uncore/dram-channel-scaling.md`; 400 GB/s SKU not live); I2 clusters; I4 UPF/thermal |
 | **ai-tensor / PCIe stand-in** | virt-ai-pcie TCP UIO; packed DESC/CPL/CAP join EDK2 ESP; doorbell/IRQ/QoS/qid bounds; `contracts.ai_host_transport` **unpinned** | Fused GPEX endpoint; pinned BAR/MSI/device ID; Linux UIO on live board |
-| **OoO / multi-issue / multi-core** | `OoOEn` production-gated; `NrIssuePorts` 1–4 by package; `NrCores` 1–8 hub; stream8 CRT 9/9 | Slice-OoO default off; `CVA6_MAX_SMT_HARTS=2`; merge stream×SMT packages |
+| **OoO / multi-issue / multi-core** | `OoOEn` production-gated; `NrIssuePorts` 1–4 by package; `NrCores` 1–8 hub; stream8 CRT 9/9. **Issue width is not retirement:** `g6lc64_ooo_server` requests four commit ports; `scoreboard`/`commit_stage` still count/retire two. L2 RR is default-off; 8 KiB mapped + 4 KiB collect PASS; 16 KiB collect timed out. Isolated stream8 RR-on AMOCAS/stream minis and all-set L2 hot+scan (384,179 cy) match RR-off cycles (0 delta). L2 leaf A/B 4-way 31,108 vs 27,604 cy; 8-way mix 26,256 vs 26,080 (~0.7%). Keep RR off. SMT2 RR-on livelocks. Not a core performance win | Slice-OoO default off; `CVA6_MAX_SMT_HARTS=2`; merge stream×SMT packages; 4-port retirement; production-geometry mapped L2 equivalence |
 | **Hypervisor** | U9.0–U9.2 + H-edge Spike+RTL 3/3 | KVM stress; G-stage soak |
 | **RVV** | Ara vendored + attach + lint + DTS + directed tests | OpenSBI VRF; live Ara cosim |
 | **Stream plane** | `g6lc64_stream8` promoted; orthogonal to SMT2 until FDT trusted | Do not merge with `g6lc64_smt2` DI |
@@ -83,10 +83,10 @@ not a QEMU measurement.
 
 | Track | Next concrete | Must not |
 |---|---|---|
-| SMT2 | SL-C FDT/`cpu-map` honesty; R3b Image; keep cookie green | Treat QEMU `smp: 2 CPUs` as Variane SUCCESS |
+| SMT2 | SL-C FDT/`cpu-map` honesty; R3b Image; keep cookie green. Cookie soak is the SMT **control**, not a candidate-on RR pairing | Treat QEMU `smp: 2 CPUs` as Variane SUCCESS; merge with stream8 |
 | QEMU | Soc Shell file-path; 32 MiB pflash for E4; `results --tops` from `g6q-diag` | Cite virt as tape-out evidence; invent AI PCI IDs |
-| OoO | Keep `OoOEn` gated; dual-issue SMT product closeout is U6.1 not U5 | Turn on full OoO in the router low-power SKU |
-| Multi-core | `NrCores` scale per envelope; PLIC `S≤8`. DRAM channels stay a **slave** knob — raising N cores does not raise `DramChannels` (`uncore/dram-channel-scaling.md`) | `NrHarts>2` until `CVA6_MAX_SMT_HARTS` + contexts; do not infer channel count from core count |
+| OoO | Keep `OoOEn` gated; dual-issue SMT product closeout is U6.1 not U5; restore reliable T=1 two-wide issue before I=4 | Turn on full OoO in the router low-power SKU; claim 4-wide retirement from `ooo_server` knobs |
+| Multi-core | `NrCores` scale per envelope; PLIC `S≤8`. DRAM channels stay a **slave** knob — raising N cores does not raise `DramChannels` (`uncore/dram-channel-scaling.md`). Stream8 AMOCAS minis are the cluster **control** | `NrHarts>2` until `CVA6_MAX_SMT_HARTS` + contexts; do not infer channel count from core count; promote L2 RR from leaf diagnostics |
 | Hypervisor | KVM stress on server_math | Block 100 TOPS on KVM |
 | Stream | Keep `g6lc64_stream8` separate | Merge with smt2 DI |
 | RVV | `ara-vector-cosim` when `_v` TB + Image | Grow core tile 8×8×8 with island TOPS |

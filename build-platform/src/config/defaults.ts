@@ -945,6 +945,54 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         openSource: true,
         optional: true,
       },
+      {
+        // Strict-qualification entry: remote proxy soak bound to a build
+        // manifest, host-side pulled-log classification, terminal G6LC_EVIDENCE
+        // record. Only runnable via `verify --sim --qualification <profile>`;
+        // the ordinary `test` path never selects it (not in defaultSuites).
+        id: "qual-soft-ladder-osbi",
+        description:
+          "STRICT qualification: remote SMT2 OpenSBI cookie soak bound to a fresh build manifest (g6lc64_smt2, proxy+pulled-log classified).",
+        script: "verif/regress/remote/qualify-soft-ladder-osbi.sh",
+        group: "directed",
+        target: "g6lc64_smt2",
+        dvTarget: "g6lc64_smt2",
+        dvSimulators: "veri-testharness",
+        tools: [],
+        openSource: true,
+        optional: true,
+        execution: "remote-proxy",
+      },
+      {
+        // Strict-qualification entry: stream8 multicore minis bound to a build
+        // manifest; pulled-log classification; terminal G6LC_EVIDENCE record.
+        id: "qual-stream8-minis",
+        description:
+          "STRICT qualification: remote stream8 AMOCAS W/D/Q + stream-plane minis bound to a fresh work-ver-stream8 manifest (g6lc64_stream8).",
+        script: "verif/regress/remote/qualify-stream8-minis.sh",
+        group: "directed",
+        target: "g6lc64_stream8",
+        dvTarget: "g6lc64_stream8",
+        dvSimulators: "veri-testharness",
+        tools: ["riscv-gcc"],
+        openSource: true,
+        optional: true,
+        execution: "remote-proxy",
+      },
+      {
+        id: "qual-checked-work",
+        description:
+          "Isolated overlay + geometry-sized checked-work payload (experimental N=1/N=2; not a Linux SKU or performance promotion).",
+        script: "verif/regress/remote/qualify-checked-work.sh",
+        group: "directed",
+        target: "g6lc64_stream8",
+        dvTarget: "g6lc64_stream8",
+        dvSimulators: "veri-testharness",
+        tools: ["riscv-gcc"],
+        openSource: true,
+        optional: true,
+        execution: "remote-proxy",
+      },
       // --- pk: proxy-kernel hosted suites ----------------------------------
       {
         id: "pk-tests",
@@ -1416,6 +1464,51 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     //   cva6-build verify --target g6lc64_ooo_server
     //   cva6-build test --suite ooo-l3-tests
     targets: ["cv64a6_imafdc_sv39", "cv32a65x"],
+    // Strict qualification profiles: `verify --sim --qualification <name>`.
+    // Each requirement names a remote-proxy suite, the evidence kind it must
+    // produce, the DUT top, and the build manifest the run must be bound to.
+    // Refresh the manifest after every source/config change:
+    //   python3 verif/regress/remote/testharness_proxy.py build B \
+    //     --manifest-out remote-runs/builds/work-ver-smt2-fw64-B.manifest.json
+    qualifications: {
+      "smt2-cookie": {
+        targets: {
+          g6lc64_smt2: [
+            {
+              suite: "qual-soft-ladder-osbi",
+              kind: "rtl-core",
+              top: "ariane_testharness",
+              buildManifest: "remote-runs/builds/work-ver-smt2-fw64-B.manifest.json",
+            },
+          ],
+        },
+      },
+      // Foundation profile: stream8 multicore envelope + the SMT2 control.
+      // Refresh manifests first:
+      //   proxy build B --target g6lc64_stream8 --verlib work-ver-stream8 \
+      //     --manifest-out remote-runs/builds/work-ver-stream8.manifest.json
+      //   proxy build B --manifest-out remote-runs/builds/work-ver-smt2-fw64-B.manifest.json
+      "perf-foundation": {
+        targets: {
+          g6lc64_stream8: [
+            {
+              suite: "qual-stream8-minis",
+              kind: "rtl-cluster",
+              top: "ariane_testharness",
+              buildManifest: "remote-runs/builds/work-ver-stream8.manifest.json",
+            },
+          ],
+          g6lc64_smt2: [
+            {
+              suite: "qual-soft-ladder-osbi",
+              kind: "rtl-core",
+              top: "ariane_testharness",
+              buildManifest: "remote-runs/builds/work-ver-smt2-fw64-B.manifest.json",
+            },
+          ],
+        },
+      },
+    },
     // Mirrors the accepted Verilator flag set in the repo-root Makefile
     // (`verilate_command`): -Wall with the project's long-standing waivers, and
     // PINMISSING/IMPLICIT promoted to errors. -Wno-fatal keeps Verilator's exit
@@ -1446,6 +1539,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       "core/ooo/formal/g6lc_ooo_rob.sby",
       "core/ooo/formal/g6lc_ooo_cancel.sby",
       "core/ooo/formal/g6lc_ooo_rename.sby",
+      // g6lc_ooo_rename_cover.sby is path-checked only: local yices cover PASS
+      // (alloc/dual/exhaust/ckpt); testharness has no yices and z3 timed out.
       // Fetch bounded formal (M2 in architecture/AGENTS-g6lc-opensbi-dev-heuristics.md
       // section 5). `core/fetch_B/g6lc_fetch_pkg.sv` is already pure functions, so
       // invariants I3/I5 (leftover), I2/I7 (packet order) and I8 (redirect
@@ -1805,6 +1900,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "core/ooo/formal/g6lc_ooo_freelist.sby",
           "core/ooo/formal/g6lc_ooo_rob.sby",
           "core/ooo/formal/g6lc_ooo_rename.sby",
+          "core/ooo/formal/g6lc_ooo_rename_cover.sby",
         ],
       },
       // --- core: fetch bounded formal present (L2 rung) --------------------

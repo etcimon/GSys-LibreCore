@@ -1,0 +1,35 @@
+// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+//
+// Lint waivers for the L2 leaf testbench (verilator_config). File-scoped;
+// each entry records a PRE-EXISTING condition (vendor upstream, or
+// shipped-RTL findings logged in AGENTS-todo.md) — not a license to add
+// new warnings.
+//
+//   DUT findings (pre-existing, tracked):
+//   - LATCH: inferred latches in g6lc_l2_top.sv always_comb (found_inv,
+//     mst_r_ot_d) and g6lc_l2_mshr.sv (wi) — repo rule prefers explicit
+//     assignment; fixing is a separate, reviewed RTL change.
+//   - UNOPTFLAT: word-level circularity through tag lookup / bank-conflict
+//     / MSHR-merge combinational cone (Verilator cannot prove non-circular).
+//
+//   Vendor (tier-U, do not edit): tc_sram.sv, axi_pkg.sv warnings.
+
+`verilator_config
+
+lint_off -rule LATCH -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*found_inv*"
+lint_off -rule LATCH -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*mst_r_ot_d*"
+lint_off -rule LATCH -file "*/corev_apu/l2_cache/g6lc_l2_mshr.sv" -match "*.wi*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*tag_iindex*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*tag_probe_way*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*bank_conflict*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*mshr_merged*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*tag_way_valid*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_tag.sv" -match "*hit_way*"
+lint_off -rule PINCONNECTEMPTY -file "*/corev_apu/l2_cache/*.sv"
+
+`ifdef L2TB_GENUNNAMED
+lint_off -rule GENUNNAMED     -file "*/vendor/pulp-platform/*"
+`endif
+lint_off -rule UNSIGNED       -file "*/vendor/pulp-platform/*"
+lint_off -rule WIDTH          -file "*/vendor/pulp-platform/*"

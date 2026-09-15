@@ -504,6 +504,7 @@ package config_pkg;
     int unsigned L2LineWidth;         // bits; must match D$ / 512 for 64 B
     int unsigned L2MshrDepth;         // outstanding misses (MLP)
     int unsigned L2DataBanks;         // banked data array
+    bit          L2RoundRobinEn;
     int unsigned NrHarts;             // SMT threads per core: 1 baseline, ≤CVA6_MAX_SMT_HARTS
     // U6.1 SMT contention policy (inert when NrHarts==1)
     smt_policy_t SmtPolicy;           // RR / switch-on-miss / hybrid
@@ -669,6 +670,7 @@ package config_pkg;
     int unsigned L2LineWidth;
     int unsigned L2MshrDepth;
     int unsigned L2DataBanks;
+    bit L2RoundRobinEn;
     int unsigned NrHarts;
     smt_policy_t SmtPolicy;
     int unsigned SmtFetchQuantum;
@@ -902,6 +904,9 @@ package config_pkg;
     assert (!(Cfg.NrCores > 1 && !Cfg.MmuPresent));
     assert (!(Cfg.L2En && Cfg.L2ByteSize == 0));
     assert (!(Cfg.L2En && Cfg.L2SetAssoc == 0));
+    assert (!Cfg.L2RoundRobinEn || Cfg.L2En);
+    assert (!Cfg.L2RoundRobinEn || Cfg.L2SetAssoc >= 2);
+    assert (!Cfg.L2RoundRobinEn || (2 ** $clog2(Cfg.L2SetAssoc) == Cfg.L2SetAssoc));
     // L2 line width: 0 → inferred 512 (64 B / Zic64b), explicit 512, or match L1
     // DCACHE_LINE_WIDTH. L1 may be 128b (16 B) while L2 is 64 B — that is legal.
     assert (!(Cfg.L2En && Cfg.L2LineWidth != 0 && Cfg.L2LineWidth != 512 &&

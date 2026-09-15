@@ -121,6 +121,18 @@ ifneq (,$(findstring server_math_v,$(target)))
   CFLAGS := $(CFLAGS) -DG6LC_CVA6_GEN_ACC
 endif
 
+# g6lc_tb SMT probes (per-hart CSR/RF banks, thread-select) only exist when the
+# target package has NrHarts>1. Detect it so non-SMT g6lc targets still
+# compile the testbench; hart-1 reads compile to 0 via G6LC_TB_H1.
+G6LC_TB_NR_HARTS := $(shell grep -oE "NrHarts:[[:space:]]*unsigned'\([0-9]+\)" $(root-dir)core/include/$(target)_config_pkg.sv 2>/dev/null | grep -oE "[0-9]+" | head -1)
+ifneq ($(filter-out 0 1,$(G6LC_TB_NR_HARTS)),)
+  CFLAGS := $(CFLAGS) -DG6LC_TB_BANKED
+endif
+G6LC_TB_NR_CORES := $(shell grep -oE "NrCores:[[:space:]]*unsigned'\([0-9]+\)" $(root-dir)core/include/$(target)_config_pkg.sv 2>/dev/null | grep -oE "[0-9]+" | head -1)
+ifneq ($(filter-out 0 1,$(G6LC_TB_NR_CORES)),)
+  CFLAGS := $(CFLAGS) -DG6LC_TB_CLUSTER
+endif
+
 # HPDcache directory
 HPDCACHE_DIR ?= $(CVA6_REPO_DIR)/core/cache_subsystem/hpdcache
 export HPDCACHE_DIR

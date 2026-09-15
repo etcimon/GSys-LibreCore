@@ -580,8 +580,11 @@ class Remote:
                 try:
                     import select
                     ready = select.select([proc.stdout], [], [], 1.0)[0] != []
-                except (ImportError, AttributeError):
-                    proc.wait(timeout=1.0)
+                except (ImportError, AttributeError, OSError):
+                    try:
+                        proc.wait(timeout=1.0)
+                    except subprocess.TimeoutExpired:
+                        pass
                     ready = False
                 if ready:
                     line = proc.stdout.readline()
@@ -962,12 +965,148 @@ def build_cache_key(root: Path, flavour: str, target: str) -> str:
     return h.hexdigest()[:24]
 
 
+# --------------------------------------------------------------------------
+# build manifest (build-platform strict qualification)
+# --------------------------------------------------------------------------
+#
+# The manifest binds a remote harness binary to the exact host source/config
+# state it was built from. `build --manifest-out PATH` writes it; the
+# build-platform then re-hashes the listed local files and refuses to qualify
+# a run whose tree has drifted since the build.
+#
+# Canonical digests must match digestJson() in build-platform/src/tests/
+# runner.ts: JSON.stringify of sorted entries / sorted object keys with no
+# spaces == json.dumps(..., sort_keys=True, separators=(",", ":")).
+
+
+def _manifest_sources(root: Path) -> dict[str, str]:
+    """sha256 of every build input, keyed by repo-relative POSIX path.
+
+    Same input set as build_cache_key: seed files plus tracked (or scanned)
+    RTL/TB sources under the synced trees.
+    """
+    exts = {".sv", ".v", ".vlt", ".svh", ".vh", ".cc", ".cpp", ".h", ".hpp"}
+    patterns = ["core/**", "corev_apu/**", "common/**", "vendor/**", "verif/tb/**"]
+    files: set[Path] = set()
+    for rel in (
+        "Makefile",
+        "verilator_config.vlt",
+        "verif/regress/soft-ladder-build-harness.sh",
+        "verif/regress/ai-matrix-build-harness.sh",
+        "core/Flist.cva6",
+        "core/Flist.fetch_B",
+        "core/Flist.smt_legacy",
+    ):
+        p = root / rel
+        if p.is_file():
+            files.add(p)
+    tracked = _git_tracked_files(root, patterns)
+    if tracked:
+        files.update(f for f in tracked if f.suffix in exts)
+    else:
+        for pat in patterns:
+            d = root / pat.rstrip("/**")
+            if d.is_dir():
+                files.update(
+                    f for f in d.rglob("*")
+                    if f.is_file() and f.suffix in exts
+                    and not any(
+                        part in {".git", "__pycache__"}
+                        or str(part).startswith("work-ver")
+                        or f.name.endswith((".o", ".d", ".log", ".vcd", ".fst"))
+                        for part in f.parts
+                    )
+                )
+    out = {}
+    for f in files:
+        try:
+            out[f.relative_to(root).as_posix()] = hashlib.sha256(
+                f.read_bytes()
+            ).hexdigest()
+        except OSError:
+            continue
+    return dict(sorted(out.items()))
+
+
+def _canon_sha256(value) -> str:
+    """sha256 of the canonical JSON form (sorted keys, no spaces)."""
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def write_build_manifest(rem: Remote, root: Path, args, verlib: str) -> None:
+    """Write a schema-1 build manifest to a repo-relative --manifest-out path."""
+    rel = args.manifest_out.replace("\\", "/")
+    if (
+        not rel
+        or rel.startswith("/")
+        or ":" in rel
+        or any(part == ".." for part in rel.split("/"))
+    ):
+        die(f"--manifest-out must be a repository-relative path, got '{args.manifest_out}'")
+    harness = f"{REMOTE_ROOT}/work/{verlib}/Variane_testharness"
+    exe_sha = rem.out(
+        f"sha256sum {shlex.quote(harness)} | awk '{{print $1}}'"
+    ).strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", exe_sha):
+        die(f"could not hash remote harness {harness} (got '{exe_sha}')")
+    sources = _manifest_sources(root)
+    configuration = {
+        "flavour": args.flavour,
+        "target": args.target,
+        "verlib": verlib,
+        "defines": AI_FLAVOURS.get(args.flavour, {}).get("defines", ""),
+        "jobs": str(args.jobs or ("1" if args.flavour in AI_FLAVOURS else "nproc")),
+        "vthreads": str(getattr(args, "vthreads", None) or ("nproc" if args.flavour in AI_FLAVOURS else "harness")),
+    }
+    for kv in getattr(args, "env", None) or []:
+        key, _, value = kv.partition("=")
+        if key in ("SOFT_LADDER_ISOLATED", "SOFT_LADDER_OVERLAY"):
+            configuration[key] = value
+    manifest = {
+        "schemaVersion": 1,
+        "target": args.target,
+        "top": "ariane_testharness",
+        "execution": "remote-proxy",
+        "sources": sources,
+        "sourceSha256": _canon_sha256([[k, v] for k, v in sources.items()]),
+        "configuration": configuration,
+        "configSha256": _canon_sha256(configuration),
+        "executableSha256": exe_sha,
+    }
+    dest = root / rel
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    log(f"build manifest -> {dest} (exe sha256 {exe_sha[:16]}…, {len(sources)} sources)")
+
+
+def _expect_exe(rem: Remote, harness: str, want: str) -> None:
+    """Refuse to run when the remote binary is not the manifested artifact."""
+    if not re.fullmatch(r"[0-9a-f]{64}", want):
+        die(f"--expect-exe-sha256 needs a lowercase sha256, got '{want}'")
+    got = rem.out(f"sha256sum {shlex.quote(harness)} | awk '{{print $1}}'").strip()
+    if got != want:
+        die(f"remote harness digest mismatch: {harness} is {got[:16]}…, "
+            f"manifest expects {want[:16]}… — rebuild or point at the right flavour")
+
+
 def cmd_build(rem: Remote, args) -> int:
     rem.start_master()
     ai_meta = AI_FLAVOURS.get(args.flavour)
     verlib, _stock = flavour_info(args.flavour)
     if args.verlib:
         verlib = args.verlib
+    prod_mdirs = {
+        "work-ver-smt2-fw64", "work-ver-smt2-fw64-B",
+        "work-ver-stream8", "work-ver-smt2",
+    }
+    isolated = any(
+        kv.partition("=")[0] == "SOFT_LADDER_ISOLATED" and kv.partition("=")[2] == "1"
+        for kv in (getattr(args, "env", None) or [])
+    )
+    if isolated and Path(verlib).name in prod_mdirs:
+        die(f"isolated candidate must not reuse production Mdir {Path(verlib).name}")
     if ai_meta and args.target == DEFAULT_TARGET:
         args.target = ai_meta["target"]
 
@@ -1085,6 +1224,9 @@ def cmd_build(rem: Remote, args) -> int:
             check=False,
         )
 
+    if rc == 0 and args.manifest_out:
+        write_build_manifest(rem, root, args, verlib)
+
     if rc == 0 and args.output_cache and cache_dir:
         rem.run(
             f"mkdir -p {shlex.quote(f'{REMOTE_ROOT}/cache/builds')} && "
@@ -1146,6 +1288,9 @@ def cmd_run(rem: Remote, args) -> int:
         die(f"no remote harness for flavour '{args.flavour}': {harness}\n"
             f"       build it first:  {sys.argv[0]} build {args.flavour}")
 
+    if getattr(args, "expect_exe_sha256", None):
+        _expect_exe(rem, harness, args.expect_exe_sha256)
+
     elf = Path(args.elf).resolve()
     if not elf.is_file():
         die(f"no such ELF: {elf}")
@@ -1192,8 +1337,14 @@ def cmd_run(rem: Remote, args) -> int:
     # g6lc64_ai at -O0: Verilator combo eval of dual-core scoreboard + 256 Mi
     # SRAM blew the default 8 Mi stack (SIGSEGV at ~2.6k cycles, guard page
     # in ProcMaps). Soft-ladder B/legacy stay well under 8 Mi.
+    run_id = getattr(args, "run_id", None)
+    stamp = (
+        f"printf '%s\\n' {shlex.quote(run_id)} > {shlex.quote(rundir)}/run-id && "
+        if run_id else ""
+    )
     script = (
         f"{env_prefix()} {env_vars}cd {rundir} && ulimit -s unlimited && "
+        f"{stamp}"
         f"{shlex.quote(harness)} +time_out={args.time_out} "
         f"+max-cycles={args.time_out} +debug_disable +quiet_axi "
         f"{tohost_arg}{plusargs} {shlex.quote(remote_elf)} > {shlex.quote(logfile)} 2>&1; "
@@ -1217,6 +1368,9 @@ def cmd_soak(rem: Remote, args) -> int:
     verlib, _ = flavour_info(args.flavour)
     if args.verlib:
         verlib = args.verlib
+    harness = f"{REMOTE_ROOT}/work/{verlib}/Variane_testharness"
+    if getattr(args, "expect_exe_sha256", None):
+        _expect_exe(rem, harness, args.expect_exe_sha256)
     env = [f"SOFT_LADDER_FETCH={args.flavour}",
            f"SOFT_LADDER_HARNESS={REMOTE_ROOT}/work/{verlib}"]
     if args.skip_build:
@@ -1225,6 +1379,13 @@ def cmd_soak(rem: Remote, args) -> int:
         env.append("SOFT_LADDER_SKIP_BUILD=0")
     if args.hold:
         env.append("SOFT_LADDER_HOLD=1")
+    tag = getattr(args, "tag", None)
+    if getattr(args, "run_id", None) or args.pull or tag:
+        tag = tag or f"soak-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        rundir = f"{REMOTE_ROOT}/runs/{tag}"
+        env.append(f"SOFT_LADDER_OSBI_OUT={rundir}")
+    if getattr(args, "run_id", None):
+        env.append(f"G6LC_RUN_ID={args.run_id}")
     for kv in args.env:
         env.append(kv)
     script = (
@@ -1237,6 +1398,10 @@ def cmd_soak(rem: Remote, args) -> int:
     t0 = time.time()
     rc = rem.run(script, check=False).returncode
     log(f"soak finished rc={rc} in {time.time()-t0:.1f}s")
+    if args.pull:
+        dest = repo_root() / "remote-runs" / tag
+        rem.pull(f"{rundir}/", dest)
+        log(f"pulled logs -> {dest}")
     return rc
 
 
@@ -1560,6 +1725,191 @@ def _shell_command(args) -> str | None:
     return command
 
 
+def l2_leaf_sources(snapshot: Path, extra: list[str] | None = None) -> dict[str, str]:
+    root = snapshot.resolve(strict=True)
+    paths = [
+        "vendor/pulp-platform/axi/src/axi_pkg.sv",
+        "vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv",
+        *[f"corev_apu/l2_cache/g6lc_l2_{name}.sv" for name in ("pkg", "tag", "data", "mshr", "top")],
+        "verif/tb/l2/tb_g6lc_l2.sv", "verif/tb/l2/tb_g6lc_l2.vlt", "verif/tb/l2/run-l2-tb.sh",
+    ]
+    paths += list(extra or [])
+    result = {}
+    for path in paths:
+        source = (root / path).resolve(strict=True)
+        if not source.is_relative_to(root) or not source.is_file():
+            raise ValueError(f"invalid L2 snapshot input: {path}")
+        result[path] = hashlib.sha256(source.read_bytes()).hexdigest()
+    return result
+
+
+def l2_leaf_passed(text: str, rc: int, ways: int, rr_en: int) -> bool:
+    if ways not in (2, 4, 8) or rr_en not in (0, 1):
+        return False
+    policies = re.findall(r"^\[L2TB\] policy checks lookups=(\d+) installs=(\d+) evictions=(\d+) victim_mask=([0-9a-fA-F]+)$", text, re.M)
+    if len(policies) != 1:
+        return False
+    lookups, installs, evictions = map(int, policies[0][:3])
+    return (rc == 0 and lookups >= installs >= evictions >= (ways if rr_en else 1)
+            and int(policies[0][3], 16) == ((1 << ways) - 1 if rr_en else 1)
+            and text.splitlines().count("[L2TB] RESULT pass") == 1
+            and not re.search(r"FAIL|%Error|%Fatal", text)
+            and all(f"[L2TB] ATOP mode={mode} forwarded=1" in text for mode in range(3))
+            and "[L2TB] AMO arith add=1 swap=1 cas_hit=1 cas_miss=1 lrsc_ok=1 lrsc_fail=1" in text
+            and all(f"phase={phase}" in text for phase in ("replacement_hole", "bypass_backpressure", "short_last_fill_guard")))
+
+
+def l2_units_passed(text: str, rc: int) -> bool:
+    return (
+        rc == 0
+        and text.splitlines().count("[L2UNIT] RESULT pass") == 1
+        and "[L2UNIT] mshr_full=1 merge=1 merge_full=1 waiter=1 bank_conflict=1 bank_ok=1" in text
+        and not re.search(r"FAIL|%Error|%Fatal", text)
+    )
+
+
+def l2_synth_passed(text: str, rc: int, rr_en: int) -> bool:
+    if rr_en not in (0, 1):
+        return False
+    mem = 2 + rr_en
+    # Yosys logs mention $dlatch in the select command; the runner already
+    # asserted no latches and the expected $mem_v2 count before printing PASS.
+    return rc == 0 and f"[l2-tb] SYNTH PASS rr={rr_en} mem={mem}" in text
+
+
+def cmd_l2_leaf(rem: Remote, args) -> int:
+    root = Path(args.snapshot).resolve()
+    mode = getattr(args, "mode", "sim")
+    extra = ["verif/tb/l2/tb_g6lc_l2_units.sv"] if mode == "units" else []
+    sources = l2_leaf_sources(root, extra)
+    if args.mem_latency < 0 or args.stall_every < 0 or args.stall_every == 1:
+        die("invalid L2 memory latency/stall period")
+    tag = f"l2-leaf-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{os.urandom(6).hex()}"
+    rundir = f"{REMOTE_ROOT}/runs/{tag}"
+    source_dir = f"{rundir}/source"
+    dest = repo_root() / "remote-runs" / tag
+    dest.mkdir(parents=True, exist_ok=False)
+    rem.start_master()
+    rem.run(f"ls -d {shlex.quote(REMOTE_ROOT + '/runs')} && mkdir {shlex.quote(rundir)}")
+    parents = sorted({f"{source_dir}/{Path(path).parent.as_posix()}" for path in sources})
+    rem.run("mkdir -p " + " ".join(map(shlex.quote, [*parents, f"{rundir}/output"])))
+    for path in sources:
+        rem.push(root / path, f"{source_dir}/{path}")
+    checksums = "".join(f"{digest}  {path}\n" for path, digest in sources.items())
+    rem.run(f"cd {shlex.quote(source_dir)} && printf %s {shlex.quote(checksums)} | sha256sum -c -")
+    verilator = f"{REMOTE_ROOT}/toolchains/verilator-{VERILATOR_VERSION}/bin/verilator"
+    env = {
+        "VERILATOR": verilator, "L2TB_OUT": f"{rundir}/output", "L2TB_RR_EN": str(args.rr_en),
+        "L2TB_SET_ASSOC": str(args.ways), "L2TB_MEM_LATENCY": str(args.mem_latency),
+        "L2TB_STALL_EVERY": str(args.stall_every), "L2TB_MODE": mode,
+        "L2TB_BYTE_SIZE": "4096", "L2TB_SEED": str(0x600df00d), "L2TB_EXTRA": "",
+    }
+    if mode == "synth":
+        env["YOSYS"] = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"
+    command = " ".join(shlex.quote(f"{key}={value}") for key, value in env.items())
+    plus = "+bypass-backpressure +atop-drain +amo-arith " if mode == "sim" else ""
+    log(f"isolated L2 leaf mode={mode} -> {rundir}; no shared repo sync or cleanup")
+    rc = rem.run(
+        f"{env_prefix()} cd {shlex.quote(source_dir)} && env {command} bash verif/tb/l2/run-l2-tb.sh "
+        f"{plus}> {shlex.quote(rundir + '/driver.log')} 2>&1",
+        check=False, timeout=args.timeout or 900, heartbeat=True,
+    ).returncode
+    rem.pull(f"{rundir}/driver.log", dest)
+    rem.pull(f"{rundir}/output/", dest / "output")
+    log_name = "synth.log" if mode == "synth" else "sim.log"
+    logs = list((dest / "output").glob(f"run-*/{log_name}"))
+    text = logs[0].read_text(errors="replace") if len(logs) == 1 else ""
+    if mode == "units":
+        passed = l2_units_passed(text, rc)
+        kind = "rtl-leaf-units"
+    elif mode == "synth":
+        passed = l2_synth_passed(text + "\n" + (dest / "driver.log").read_text(errors="replace"), rc, args.rr_en)
+        kind = "rtl-leaf-synth"
+    else:
+        passed = l2_leaf_passed(text, rc, args.ways, args.rr_en)
+        kind = "rtl-leaf-diagnostic"
+    record = {
+        "kind": kind, "execution": "remote-proxy", "runId": tag,
+        "status": "pass" if passed else "fail", "sources": sources, "configuration": env,
+        "remoteReturnCode": rc, "strictQualification": False,
+    }
+    (dest / "leaf-result.json").write_text(json.dumps(record, indent=2) + "\n")
+    log(f"L2 leaf {mode} {'PASS' if passed else 'FAIL'}: pulled diagnostics in {dest}; not core/SMT qualification")
+    return 0 if passed else 1
+
+
+def l2_equiv_passed(text: str, rc: int, negative: bool) -> bool:
+    if negative:
+        return rc != 0 and ("unproven" in text.lower() or "ERROR" in text or "Assert" in text)
+    return (
+        rc == 0
+        and "[l2-tb] EQUIVALENCE PASS" in text
+        and "LADDER FAIL" not in text
+        and "timeout: failed" not in text.lower()
+        and "ERROR: " not in text
+    )
+
+
+def cmd_l2_equiv(rem: Remote, args) -> int:
+    root = Path(args.snapshot).resolve()
+    sources = l2_leaf_sources(root)
+    if args.byte_size < 256 or args.byte_size.bit_count() != 1:
+        die("L2 equivalence byte size must be a power of two >= 256")
+    tag = f"l2-equiv-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{os.urandom(6).hex()}"
+    rundir = f"{REMOTE_ROOT}/runs/{tag}"
+    source_dir = f"{rundir}/source"
+    dest = repo_root() / "remote-runs" / tag
+    dest.mkdir(parents=True, exist_ok=False)
+    rem.start_master()
+    rem.run(f"ls -d {shlex.quote(REMOTE_ROOT + '/runs')} && mkdir {shlex.quote(rundir)}")
+    parents = sorted({f"{source_dir}/{Path(path).parent.as_posix()}" for path in sources})
+    rem.run("mkdir -p " + " ".join(map(shlex.quote, [*parents, f"{rundir}/output"])))
+    for path in sources:
+        rem.push(root / path, f"{source_dir}/{path}")
+    blob = "5be075b1a01ff754da384c3dd129fd58c33733fa"
+    legacy = subprocess.check_output(["git", "-C", str(repo_root()), "cat-file", "blob", blob])
+    rem.run(f"mkdir -p {shlex.quote(source_dir + '/equiv-ref')}")
+    tmp = dest / "legacy.original.sv"
+    tmp.write_bytes(legacy)
+    rem.push(tmp, f"{source_dir}/equiv-ref/legacy.original.sv")
+    checksums = "".join(f"{digest}  {path}\n" for path, digest in sources.items())
+    rem.run(f"cd {shlex.quote(source_dir)} && printf %s {shlex.quote(checksums)} | sha256sum -c -")
+    mem = "" if args.mem == "auto" else args.mem
+    formal_bin = f"{REMOTE_ROOT}/toolchains/formal/bin"
+    env = {
+        "L2TB_OUT": f"{rundir}/output", "L2TB_MODE": "equiv",
+        "L2TB_BYTE_SIZE": str(args.byte_size), "L2TB_SET_ASSOC": str(args.ways),
+        "L2TB_EQ_MEM": mem, "L2TB_EQ_NEGATIVE": "1" if args.negative else "0",
+        "L2TB_EQ_LADDER": "1" if args.ladder else "0",
+        "L2TB_EQ_BASE_FILE": f"{source_dir}/equiv-ref/legacy.original.sv",
+        "L2TB_EQ_TIMEOUT": str(args.timeout or (120 if mem == "map" or args.byte_size <= 512 else 300)),
+        "YOSYS": f"{formal_bin}/yosys",
+    }
+    command = " ".join(shlex.quote(f"{key}={value}") for key, value in env.items() if value != "")
+    log(f"isolated L2 equiv -> {rundir}; no shared repo sync or cleanup")
+    rc = rem.run(
+        f"{env_prefix()} cd {shlex.quote(source_dir)} && env {command} bash verif/tb/l2/run-l2-tb.sh "
+        f"> {shlex.quote(rundir + '/driver.log')} 2>&1",
+        check=False, timeout=args.timeout or 1800, heartbeat=True,
+    ).returncode
+    rem.pull(f"{rundir}/driver.log", dest)
+    rem.pull(f"{rundir}/output/", dest / "output")
+    logs = list((dest / "output").glob("run-*/equiv.log")) + [dest / "driver.log"]
+    text = ""
+    for path in logs:
+        if path.is_file():
+            text += path.read_text(errors="replace") + "\n"
+    passed = l2_equiv_passed(text, rc, args.negative)
+    record = {
+        "kind": "rtl-leaf-equivalence", "execution": "remote-proxy", "runId": tag,
+        "status": "pass" if passed else "fail", "sources": sources, "configuration": env,
+        "remoteReturnCode": rc, "strictQualification": False,
+    }
+    (dest / "leaf-result.json").write_text(json.dumps(record, indent=2) + "\n")
+    log(f"L2 equiv {'PASS' if passed else 'FAIL'}: pulled diagnostics in {dest}; not production-geometry sign-off")
+    return 0 if passed else 1
+
+
 def cmd_shell(rem: Remote, args) -> int:
     args.command = _shell_command(args)
     rem.start_master()
@@ -1815,6 +2165,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="seed from and archive the full Mdir in a content-keyed cache")
     sp.add_argument("--env", action="append", default=[],
                     help="extra KEY=VALUE env var for the build (repeatable)")
+    sp.add_argument("--manifest-out", default=None,
+                    help="write a schema-1 build manifest to this repo-relative "
+                         "path after a successful build (strict qualification)")
     sp.set_defaults(fn=cmd_build)
 
     sp = sub.add_parser("run", help="upload one ELF and run it (minimal payload)")
@@ -1828,6 +2181,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--tail", type=int, default=30)
     sp.add_argument("--env", action="append", default=[],
                     help="extra KEY=VALUE for the harness environment (repeatable)")
+    sp.add_argument("--run-id", default=None,
+                    help="stamp this run id into <rundir>/run-id (pulled with --pull)")
+    sp.add_argument("--expect-exe-sha256", default=None,
+                    help="refuse to run unless the remote harness sha256 matches")
     sp.add_argument("--pull", action="store_true", help="copy logs back when done")
     sp.set_defaults(fn=cmd_run)
 
@@ -1841,6 +2198,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="use the held (SOFT_HART_INIT) ELF")
     sp.add_argument("--env", action="append", default=[],
                     help="extra KEY=VALUE for the soak (repeatable)")
+    sp.add_argument("--run-id", default=None,
+                    help="stamp this run id into the soak out dir (G6LC_RUN_ID)")
+    sp.add_argument("--expect-exe-sha256", default=None,
+                    help="refuse to run unless the remote harness sha256 matches")
+    sp.add_argument("--tag", default=None,
+                    help="remote run dir name under runs/ (default soak-<timestamp>)")
+    sp.add_argument("--pull", action="store_true",
+                    help="pull the soak out dir back to remote-runs/<tag>/")
     sp.set_defaults(fn=cmd_soak)
 
     sp = sub.add_parser("di", help="run the directed mini (DI) suite remotely in parallel")
@@ -1883,6 +2248,24 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("pull", help="copy remote run logs back")
     sp.add_argument("--dest", default=None)
     sp.set_defaults(fn=cmd_pull)
+
+    sp = sub.add_parser("l2-leaf", help="run a copied L2 snapshot without shared repo sync or cleanup")
+    sp.add_argument("snapshot", help="source/ directory from an isolated L2 leaf diagnostic")
+    sp.add_argument("--rr-en", type=int, choices=[0, 1], default=0)
+    sp.add_argument("--ways", type=int, choices=[2, 4, 8], default=4)
+    sp.add_argument("--mem-latency", type=int, default=6)
+    sp.add_argument("--stall-every", type=int, default=0)
+    sp.add_argument("--mode", choices=["sim", "units", "synth"], default="sim")
+    sp.set_defaults(fn=cmd_l2_leaf)
+
+    sp = sub.add_parser("l2-equiv", help="RR-off equivalence of a copied L2 snapshot (no shared sync)")
+    sp.add_argument("snapshot", help="repository root or isolated L2 snapshot")
+    sp.add_argument("--byte-size", type=int, default=4096)
+    sp.add_argument("--ways", type=int, choices=[2, 4, 8], default=4)
+    sp.add_argument("--mem", choices=["map", "collect", "bbox", "auto"], default="auto")
+    sp.add_argument("--negative", action="store_true")
+    sp.add_argument("--ladder", action="store_true")
+    sp.set_defaults(fn=cmd_l2_equiv)
 
     sp = sub.add_parser("shell", help="interactive ssh into the remote root, or run one command")
     sp.add_argument("command", default=None, nargs="*",

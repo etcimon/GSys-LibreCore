@@ -322,6 +322,7 @@ package build_config_pkg;
     cfg.L2LineWidth = CVA6Cfg.L2LineWidth;
     cfg.L2MshrDepth = CVA6Cfg.L2MshrDepth;
     cfg.L2DataBanks = CVA6Cfg.L2DataBanks;
+    cfg.L2RoundRobinEn = CVA6Cfg.L2RoundRobinEn;
     cfg.NrHarts = (CVA6Cfg.NrHarts == 0) ? unsigned'(1) : CVA6Cfg.NrHarts;
     cfg.SmtPolicy = CVA6Cfg.SmtPolicy;
     // Quantum 0 → 1 so NrHarts==1 configs stay legal without every package listing it.

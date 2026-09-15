@@ -31,6 +31,113 @@ RV32/RV64 numeric JIT machine-word execution. Sources:
 These are host-model checks, not Variane, silicon timing or RISC-V architectural
 conformance evidence; no ISA coverage status is changed in the derived map.
 
+APU P0 adds seventeen `g6b-asm` `p0_` wire/model tests in
+`g6lc_bios/crates/g6b-asm/src/{virgl,exec}.rs`: virtio feature bits, virgl bind
+masks/color clear, TGSI-text termination/stage binding, state-object ordering,
+capset-v1 layout/response capacity and ID/version rejection, 64-bit fence handling,
+response bounds/cyclic descriptors, fragmented/truncated submissions, first-error
+termination, RV32/RV64 u16 queue wrap and Y_0_TOP orientation. A separate
+`cli.rs::picker_is_armed_only_after_initial_draw` test protects publication order. Run
+`cargo test -p g6b-asm p0_` from `g6lc_bios`. References are pinned in its
+`pins.toml [graphics_wire]`. External virglrenderer execution is a separate
+reference diagnostic; none of these tests proves APU RTL or adds ISA coverage.
+
+## Standalone APU transport verification (non-ISA)
+
+`verif/tb/apu/run-virtio-mmio.sh` consumes `corev_apu/apu/Flist.apu` and runs
+`tb_g6lc_apu_virtio_mmio.sv` through the remote testharness proxy. Virtio 1.3 CSD01
+sections 2.1/2.6/4.2.2 are the register/status/split-queue references. The test first
+reproduced 25 failing checks, then passed **4,240 checks / 636 clock cycles**, rc 0,
+on remote Verilator 5.008 with assertions enabled. Coverage: discovery, unsupported
+feature rejection, status-bit retention, queue stop/reset/re-enable, delayed backend
+reset/stop acknowledgements, synchronized QueueReady reads, inactive/failed queue
+completion refusal, notification/IRQ set-over-clear, 64-bit ring/fence and 32-bit
+context retention, malformed MMIO accesses, 2,048 queue-size helper cases, 2,049
+configured-depth cases and continuous ApuOff output checks. Configuration-helper
+AI/issue-width independence is not a full SoC or real-DMA configuration matrix.
+
+Strict RTL lint covers enabled AddrWidth=12/16/64 and disabled top. `APU_SYNTH=1`
+adds remote Yosys/slang generic synthesis, structural checks, no-latch assertions
+and a zero-cell assertion for the disabled top; enabled transport is 13,964 generic
+cells / 819 sequential bits. No STA, formal proof, DMA, renderer or unchanged-driver
+RTL evidence follows. This is a standalone runner, not yet a registered default
+build-platform suite; the full SoC/formal gate remains open. Runtime sideband and
+verification commands are recorded in `AGENTS-todo.md` under P1 transport review.
+
+`APU_AXI=1` adds `Flist.apu_axi` and `tb_g6lc_apu_axi_lite.sv`: **318 checks /
+1,601 clocks**, remote rc 0. Both real PULP AXI-Lite/register bridges are exercised:
+private/public aperture separation, accepted-request authorization retention, stale
+control epochs, snapshot consistency, 64 authorization/strobe/AW-W-skew cases,
+R/B stability under stalls, hardware reset with pending responses, and control
+progress while guest QueueReady reads wait for backend drain. Firmware ACK alone
+cannot finish reset. Packed BFM bus arrays resolve the observed coroutine request
+propagation skew; the stability assertions remain enabled. The fixture describes
+only core geometry for admission checks, not an instantiated CPU/domain system.
+
+With `APU_SYNTH=1`, enabled/disabled wrapper lint and flattened generic synthesis
+pass: **19,944 cells / 2,287 sequential bits enabled; 522 / 162 disabled**, no
+latches or structural errors. Disabled AXI retains response bookkeeping, not APU
+state. File/rule-specific warnings in unchanged upstream dependencies are scoped
+by `apu_axi.vlt`; first-party RTL width warnings are not waived. No actual DMA,
+firmware-domain routing, epoch-exhaustion proof or renderer is covered.
+
+`APU_DMA=1` adds `tb_g6lc_apu_dma_read.sv` and the actual standalone read master
+against a backpressured AXI memory responder. Three remote profiles pass:
+
+| Window base / burst cap | Cases | Checks | Clocks | Generic synthesis cells |
+|---|---:|---:|---:|---:|
+| 0x80000000 / 16 | 295 | 159,208 | 33,000 | 5,698 |
+| 0x280000000 / 1 | 293 | 227,649 | 47,460 | 5,678 |
+| 0x280000000 / 256 | 295 | 156,424 | 33,576 | 5,687 |
+
+All report zero errors and exit 0. Checks include per-cycle invariants, byte-exact
+stream comparisons, one outstanding burst, no AR extent outside the request,
+4 KiB boundaries, every alignment with lengths 1..33, 64 KiB transfers, invalid
+resource/context/permission/epoch/offset/length/mapping/root configurations,
+request snapshots, cancellation under AR/R/data/completion stalls, SLVERR/DECERR
+including an exact delivered prefix, runtime disable, and wrong-ID/early-or-missing
+RLAST/unsolicited-response quarantine. The one-beat profile omits inapplicable
+early-last and mid-burst-pause cases. SVA checks AR/data/completion stability and
+successful completion counts. There is no time-out-to-success behavior.
+
+`APU_SYNTH=1` adds strict first-party width lint plus flattened synthesis for all
+three enabled profiles and the disabled leaf: 751 sequential bits enabled; zero
+cells disabled (asserted); no latches or structural errors. Prior transport and
+AXI suites still pass in the same invocation. These are AXI memory-model tests,
+not protected-table lifecycle, SG/write DMA, cache coherence, SoC integration,
+formal proof or graphics execution evidence. Handoff/cancellation obligations
+are recorded in `AGENTS-todo.md` under P1 resource-checked DMA read leaf.
+
+`APU_DMA_WRITE=1` adds `tb_g6lc_apu_dma_write.sv` and the actual standalone
+writer against an independently backpressured AW/W/B memory model. Both profiles
+pass 298 cases: window 0x80000000 with 8-byte input chunks (456,689 checks / 80,169
+clocks) and 0x280000000 with 3-byte chunks (1,246,216 / 283,317). Checks include
+per-cycle invariants, byte-exact memory/guard comparisons and every AW extent/WSTRB,
+all alignments with lengths 1..33, 64 KiB, invalid mappings/permissions/epochs and
+stream keep/offset/last, source starvation, independent AW-first/W-first progress,
+WVALID-dependent AWREADY, cancellation and runtime disable under stalls, delayed B,
+partial-error writes, and early/wrong-ID/unsolicited B quarantine. AW/W/completion
+stability and success-byte accounting assertions remain active. No timeout implies
+successful retirement, and errors do not imply rollback of written bytes.
+
+Strict first-party width lint and flattened synthesis pass: enabled low/high
+profiles 5,712/5,708 generic cells, 766 sequential bits; disabled zero cells asserted,
+no latches/structural errors. The shared read/write admission checker is also
+rechecked by the prior three read profiles and transport/control suites, unchanged.
+These are standalone leaf tests, not SG, protected-table lifecycle, combined-copy,
+coherence, rendered output or strict core qualification. The write completion/lifetime
+contract and exact runner flags are in `AGENTS-todo.md` under P1 DMA write leaf.
+
+`APU_SG=1` adds `tb_g6lc_apu_sg.sv` (Entries=64 and 128) against the list-walker
+plus child read/write DMA. `APU_MEM=1` adds `tb_g6lc_apu_storage.sv` (mapping
+table, immutable command snapshot, `apu_xfer_check`), `tb_g6lc_apu_queue.sv`
+(used-ring elem-then-idx publication, idx wrap, cancelled idx not published)
+and `tb_g6lc_apu_mem.sv` (firmware backend: map insert/lookup, used-ring,
+command-DMA fill/release, SG list load and SG read transfer through one AXI
+master).
+Remote results are recorded in `AGENTS-todo.md` under P1 SG walker / storage /
+used-ring. None of these tests is a stock-driver GLES2 or renderer proof.
+
 ## Running the suites (single orchestrator)
 
 ```sh
@@ -63,6 +170,9 @@ Groups: `smoke`, `arch`, `directed`, `benchmark`, `uvm`, `generated`, `pk`, `lin
 | `cv32a6-tests` / `cv64a6-tests` | directed | `cv32a6_tests.sh` / `cv64a6_imafdc_tests.sh` | per-target directed base/ext regressions |
 | `ooo-l3-tests` | directed (optional/lengthy) | `testlist_ooo_l3.yaml` + `ooo-l3-tests.sh` | U5 4-issue OoO ILP/memdep + L2/L3 (`cv64a6_ooo_server`) |
 | `mc-stream-tests` | directed (optional) | `testlist_mc_stream.yaml` + `mc-stream-tests.{sh,ps1}` | U6/p6 stream plane × multicore + Zacas/spo: multi-stream PF, thrash, inclusive L3→L2/L1, AMOCAS.W/D, store-fwd, fence drain, CAS lock handoff, CF×stream (`cv64a6_ooo_server` / `server_math`) |
+| L2 RR-off equivalence | formal-equivalence diagnostic (small mapped fixtures + larger bbox) | `verif/tb/l2/run-l2-tb.sh` with `L2TB_MODE=equiv`; `L2TB_EQ_MEM=map\|collect\|bbox`; proxy `l2-equiv` | Pinned pre-RR Git blob plus only the bypass fix versus current RR-off. Mapped: 256 B/two-way 9,151; 512 B/four-way 11,675; 0 unproven. `bbox` keep-hierarchy blackboxes tag/data/mshr: 4 KiB 2054/0 (`run-ChPtb8Vc`); 16 KiB PASS; 256 KiB/8-way 2057/0 (`run-zisQrCl4`). Hit inversion leaves `hit_o` unproven. Mapped flop-tag: 1 KiB 16670/0, 2 KiB 26625/0, 4 KiB 46468/0 (300 s), 8 KiB 86023/0 (490 s). Collect 4 KiB 13828/0 (275 s). 1 KiB mapped hit-inversion leaves exactly `hit_o` unproven. Isolated proxy must point `YOSYS` at testharness formal/bin. Controller/port bbox is not a 256 KiB mapped tag-array netlist or ISA claim. |
+| L2 replacement and bypass-R leaf diagnostic | directed (copied local/remote snapshots; not strict core qualification) | `verif/tb/l2/tb_g6lc_l2.sv`, `run-l2-tb.sh`; sim/config/synth modes; proxy `l2-leaf` | 17 phases + 3 synthetic ATOP schedules: independent data/traffic/completion and tag/next-victim model checks, including invalid-hole refill and every install/victim address. Four-way remote RR off/on check 1,484 lookups each with victim masks 1/f; eight-way stalled RR mask ff. Corrupted victim oracle fails. Earlier 16-phase records also cover held single/burst/error/exclusive R, ATOP R before/with/after B and short-last fill guard, invalid-first/reset/hits/WT masks/invalidation and opposing hot/scan traces. Baseline bypass R-hold fails; narrow handshake repair passes on four-way RR off/on locally and remote Verilator 5.008 (`l2-leaf-20260914T234313-4bd9099b1be4`, `...T234448-fec52bccce2d`), plus eight-way/stalled local fixture. Generic synth: 2/3 pre-map memories, no latches; correction adds 2 generic cells per policy. `+amo-arith` now computes ADD/SWAP/CAS.W and LR/SC reservation in the leaf memory model and checks WT self-inval readback; synthetic ATOP R/B forwarding remains. Cluster/SMT controls stay `qual-stream8-minis` and `qual-soft-ladder-osbi`. Isolated overlay + `mini_checked_work.S` are experimental N=1/N=2 envelopes, not Linux SKUs. Isolated RR-on candidate `iso-stream8-rr1` (exe `ec650f20…`) ran the same N=2 ELF to kernel `tohost=1` in 154,170 cycles — identical to the RR-off control, not a speedup. Cluster AMOCAS.W/D/Q + 512 B stream_plane also match RR-off cycle-for-cycle (550/704/998/2138). SMT2 I=2: uncompressed tohost RR-off PASS 129,455 cy; isolated `iso-smt2-rr1` RR-on livelocks in verify at 2M cy (fetch dual-issues the two loop addis, never the `bnez`) — not a pass. No RVWMO/CBO or physical qualification claimed. |
+| L2 MSHR/bank-conflict units leaf | directed (copied remote snapshot; not core/SMT qualification) | `verif/tb/l2/tb_g6lc_l2_units.sv`; `L2TB_MODE=units`; proxy `l2-leaf --mode units` | Direct `g6lc_l2_mshr` (DEPTH=4, MAX_WAITERS=2) + `g6lc_l2_data` (2 banks). Remote Verilator 5.008 PASS `l2-leaf-20260915T020340-df5db8e21fd8`: merge, merge_full, MSHR full, waiter pop+complete, same-bank conflict and different-bank no-conflict. Serialized-top zero counts are still not passes. Top `merge_full_o` remains unconnected. |
 | `mc-spo-soak` | directed (optional) | `mc-spo-soak.{sh,ps1}` + `testlist_mc_stream` artifacts | Assemble smoke + dual-target lint for stream×spo/CF/CAS narrow list (no full sim required) |
 | `mc-spo-spike` | directed (optional) | `mc-spo-spike.sh` + `testlist_mc_stream` | Spike ISS soak of multicore spo/CF/Zacas narrow tests (`cv64a6_server_math`); **Spike has no zacas** — CAS paths may soft-skip; not a hard CAS golden |
 | `mc-mini-veri` | directed (optional) | `mc-mini-veri.sh` + `verif/tests/custom/multicore/mini_*.S` | **Hard** Verilator bare-metal CAS golden: `mini_tohost` / `mini_jumps` / `mini_amocas_{w,d}` (+ Q via `zacas-policy`) on Variane (`cv64a6_imafdc_sv39`, `RVZacas`); no CRT |

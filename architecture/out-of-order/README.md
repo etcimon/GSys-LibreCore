@@ -30,6 +30,11 @@ decode → scoreboard (in-order alloc + commit)
 
 **OoOEn=0:** identity (no dispatch module). **SliceOoOEn ⊕ OoOEn.**
 
+Rename BMC (`g6lc_ooo_rename.sby`) is in `verify.formalTasks`. Cover
+(`g6lc_ooo_rename_cover.sby`) is local yices only: testharness z3 timed
+out 90 s with zero traces (`rename-cover-z3-2`). Do not mix this lane
+with L2 RR or SMT2 pairing.
+
 ## Bottleneck optimizations
 
 | Bottleneck | Mitigation |
@@ -123,6 +128,7 @@ cva6-build verify --target g6lc64_ooo
 2. ~~Expand formal to live freelist / ROB / multi-port rename~~ **done** (`core/ooo/formal/`)  
 3. Inclusive L3 back-inval polish  
 4. Optional default-on for selected server board packages only  
+5. Retirement width: `g6lc64_ooo_server` requests `NrCommitPorts=4` but `scoreboard`/`commit_stage` still implement two-port commit. Four-wide issue is not four-wide retirement.  
 
 ## Status
 

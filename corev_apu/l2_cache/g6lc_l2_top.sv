@@ -24,6 +24,11 @@ module g6lc_l2_top
     parameter int unsigned LINE_WIDTH  = L2_DEFAULT_LINE_WIDTH,
     parameter int unsigned MSHR_DEPTH  = L2_DEFAULT_MSHR_DEPTH,
     parameter int unsigned DATA_BANKS  = L2_DEFAULT_DATA_BANKS,
+    // Optional per-set round-robin victim select. 0 = legacy policy
+    // (invalid-first, else way 0). 1 = invalid-first still wins; among
+    // all-valid sets the victim is a per-set pointer advanced past the
+    // last-installed way. Default-off: RR_EN=0 folds to the legacy netlist.
+    parameter bit          RR_EN       = 1'b0,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -186,6 +191,10 @@ module g6lc_l2_top
   logic mshr_alloc, mshr_ready, mshr_merged, mshr_complete, mshr_full, mshr_empty;
   logic [MSHR_W-1:0] mshr_alloc_idx, mshr_complete_idx;
   logic [AXI_ADDR_WIDTH-1:0] mshr_alloc_line;
+  // Optional round-robin victim pointer (RR_EN). rr_adv strobes on a
+  // successful install; rr_victim_way is the pointer read for the current set.
+  logic rr_adv;
+  logic [WAY_W-1:0] rr_victim_way;
 
   g6lc_l2_mshr #(
       .DEPTH       (MSHR_DEPTH),
@@ -318,6 +327,7 @@ module g6lc_l2_top
     mshr_alloc_line  = line_align(addr_q);
     mshr_complete    = 1'b0;
     mshr_complete_idx = mshr_idx_q;
+    rr_adv           = 1'b0;
 
     state_d     = state_q;
     addr_d      = addr_q;
@@ -413,11 +423,12 @@ module g6lc_l2_top
           state_d    = S_HIT_WAIT;
         end else begin
           l2_miss_o = 1'b1;
-          // Victim: first invalid way (lowest index), else way 0
+          // Victim: first invalid way (lowest index), else the per-set
+          // round-robin pointer (RR_EN) or way 0 (legacy).
           begin
             logic found_inv;
             found_inv = 1'b0;
-            way_d = '0;
+            way_d = (RR_EN && (&tag_way_valid)) ? rr_victim_way : '0;
             for (int w = 0; w < int'(SET_ASSOC); w++) begin
               if (!found_inv && !tag_way_valid[w]) begin
                 way_d = WAY_W'(w);
@@ -525,6 +536,9 @@ module g6lc_l2_top
         if (!bank_conflict) begin
           mshr_complete = 1'b1;
           mshr_complete_idx = mshr_idx_q;
+          // RR pointer tracks the last-installed way (advances past it).
+          // Applies to invalid-first installs too, keeping order consistent.
+          rr_adv = RR_EN;
           // Serve core from line_q; beat_q is response count from 0, index via beat_base
           beat_d  = '0;
           state_d = S_HIT_RESP;
@@ -623,8 +637,8 @@ module g6lc_l2_top
     end
     if (mst_r_ot_q) begin
       // Keep accepting R until last beat even if FSM left S_MISS_R/S_BYPASS_R.
-      mst_req_o.r_ready = 1'b1;
-      if (mst_resp_i.r_valid && mst_resp_i.r.last) begin
+      if (state_q != S_BYPASS_R) mst_req_o.r_ready = 1'b1;
+      if (mst_resp_i.r_valid && mst_req_o.r_ready && mst_resp_i.r.last) begin
         // Do not retire OT on a spurious early last during a multi-beat fill
         // (see S_MISS_R). Bypass (len may be 0) and final fill beat are fine.
         if (!(state_q == S_MISS_R && beat_q != $bits(beat_q)'(BEATS - 1))) begin
@@ -679,6 +693,31 @@ module g6lc_l2_top
       mshr_idx_q  <= mshr_idx_d;
       mst_r_ot_q  <= mst_r_ot_d;
     end
+  end
+
+  // Optional per-set round-robin victim state (RR_EN) at the tc_sram seam.
+  // Read on cacheable AR acceptance, available in S_TAG with no added stage.
+  // Invalid-first installs initialize each set before an all-valid lookup;
+  // reset clears tags, so stale SRAM bits cannot select a valid victim.
+  // RR_EN=0 elaborates no metadata RAM; off-path equivalence is a separate gate.
+  if (RR_EN) begin : gen_rr
+    logic read_req;
+    logic [IDX_BITS-1:0] ram_addr;
+    logic [WAY_W-1:0] next_way;
+    assign read_req = slv_req_i.ar_valid && slv_resp_o.ar_ready &&
+                      l2_is_cacheable(slv_req_i.ar.cache) && !slv_req_i.ar.lock;
+    assign ram_addr = rr_adv ? idx_of(addr_q) : idx_of(slv_req_i.ar.addr);
+    assign next_way = (way_q == WAY_W'(SET_ASSOC - 1)) ? '0 : way_q + 1'b1;
+    tc_sram #(
+        .NumWords(NUM_SETS), .DataWidth(WAY_W), .ByteWidth(WAY_W),
+        .NumPorts(1), .Latency(1), .SimInit("none")
+    ) i_metadata (
+        .clk_i, .rst_ni,
+        .req_i(rst_ni && (read_req || rr_adv)), .we_i(rr_adv),
+        .addr_i(ram_addr), .wdata_i(next_way), .be_i(1'b1), .rdata_o(rr_victim_way)
+    );
+  end else begin : gen_no_rr
+    assign rr_victim_way = '0;
   end
 
   end  // gen_l2

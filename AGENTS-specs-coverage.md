@@ -30,6 +30,33 @@ configs; a specific build may have less. Use the source maps + the target's prof
 
 ---
 
+## Non-ISA APU transport
+
+**N/A for RISC-V ISA coverage; partial subsystem implementation.** Standalone
+register/queue transport, private AXI control authorization/epoch checks,
+default-off behavior and bounded resource-checked AXI read/write leaves have remote
+directed, lint and generic synthesis evidence. The DMA leaves are exercised against
+memory responder models, separately from control reset/stop tests. Protected
+mapping-table lifecycle, SG and combined-copy integration, cache coherence, firmware domains, graphics
+execution, formal proof and full SoC coexistence are not covered. No architectural coverage status below is promoted.
+
+## Non-ISA L2 replacement experiment
+
+**N/A for ISA certification; bounded leaf diagnostics only.** Default-off
+round-robin metadata has local functional and generic-synthesis evidence,
+including a workload regression against legacy replacement. Bypass response
+holding was reproduced failing and repaired; local/remote leaf checks now pass,
+including synthetic ATOP response ordering plus leaf ADD/SWAP/CAS.W and LR/SC
+arithmetic/reservation (`+amo-arith`).
+Independent replacement-policy checks and small RR-off **mapped** equivalence fixtures
+now pass, with negative controls; `memory_collect` is the larger-geometry path
+(4 KiB/16 KiB). Neither certifies ISA correctness.
+Concurrency, production-geometry mapped equivalence, candidate-on SMT pairing
+and physical qualification remain open; no RVWMO, PMA or CBO status is promoted
+by these microarchitectural tests. Isolated stream8 RR-on checked-work
+(`iso-stream8-rr1`) is a functional envelope, not promotion. Isolated SMT2 RR-on checked-work livelocks in verify (I=2 fetch, 2M cy).
+Cluster AMOCAS and SMT cookie soaks remain the named-package controls.
+
 ## Part I — Unprivileged Architecture
 
 | Chapter / feature | Status |

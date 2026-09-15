@@ -44,6 +44,53 @@ exist: the AXI route inserts an AXI-to-AXI L2 cache between the core's master
 SoC level in `corev_apu/`; the OpenPiton route reuses `core/cache_subsystem/wt_l15_adapter.sv`, which
 already hands cache lines to an external L1.5/L2.
 
+### Current memory-side experiment
+
+`g6lc_l2_top.RR_EN` is driven by default-off `L2RoundRobinEn` through both
+config structs, `build_config` and `g6lc_cluster`. All target defaults remain
+off; L3 still uses legacy replacement. Metadata uses `tc_sram`, read alongside
+AR acceptance, with invalid-first installs initializing state after tag reset.
+No new hit-path stage, clock/reset domain, cache geometry, DTS or ISA exposure.
+The serialized top does not yet provide MSHR concurrency merely because the
+MSHR leaf has several entries. Bank mapping is `(set * ways + way) % banks`.
+
+`verif/tb/l2/run-l2-tb.sh` provides isolated simulation, config and synthesis
+diagnostics from fresh copied inputs; the proxy's `l2-leaf` command runs the
+same snapshot remotely without shared-repo sync/cleanup. The runner always
+includes the bypass/ATOP follow-ups. It retains an adversarial workload where
+RR regresses. The earlier stalled-bypass failure is repaired by preserving
+slave ready in S_BYPASS_R and retiring AR credit only on an accepted final R;
+local and pinned remote leaf suites pass for both policies, including synthetic
+ATOP response timing and the existing early-short-last fill guard.
+See `architecture/l2-l3-cache/README.md` for measured counts, SRAM timing/reset
+contract, DFT/STA gaps and promotion blockers. Do not infer SMT stability,
+nonblocking operation or production-geometry equivalence from simulation.
+An independent policy model now checks every lookup/install/victim and requires
+all RR victim ways to be observed. `L2TB_MODE=equiv` separately proves small
+RR-off fixtures against a pinned pre-RR engine with only the bypass fix applied;
+its hit-output mutation must fail. Default proof geometry is 512 B/four ways
+(`memory_map`, 120 seconds). Larger geometries use `L2TB_EQ_MEM=bbox` (controller/port; tag/data/mshr
+blackboxed) which proved 4 KiB, 16 KiB and 256 KiB/eight-way RR-off with
+zero unproven points; hit-output inversion fails. Mapped flop-tag now
+PASSes 1/2/4/8 KiB (8 KiB 86023/0 at 490 s). Collect 4 KiB PASSes 13828/0
+(275 s). 1 KiB mapped hit-inversion leaves `hit_o` unproven. `+amo-arith` is a real ADD/SWAP/CAS.W + LR/SC leaf control, not a
+substitute for cluster `qual-stream8-minis` or SMT cookie soaks. Isolated
+overlays may change only `L2RoundRobinEn`. Isolated stream8 RR-on
+checked-work (`iso-stream8-rr1`) is a functional envelope (154,170
+cycles, `tohost=1`), not promotion. Isolated SMT2 RR-on
+(`iso-smt2-rr1`) livelocks N=1 checked-work in verify at 2M cy
+(I=2 fetch dual-issues the loop addis). Isolated stream8 RR-on AMOCAS
+W/D/Q + 512 B stream_plane and all-set `mini_l2_hot_scan.S` (384,179 cy)
+match RR-off cycles exactly (0 delta). Leaf A/B: RR-on 27,604 vs RR-off
+31,108 cy (`hot_scan` better, `protected_hot` worse); not a core win.
+Generic synth: +1 `$mem_v2` and +24 cells when RR is on (not STA).
+8-way leaf mix ~0.7% (hot_scan win cancelled by protected_hot). Best
+P0–P4: keep RR off. Keep `l2-leaf --mode sim|units|synth` and `l2-equiv`
+as separate lanes. `L2TB_MODE=units` (proxy
+`l2-leaf --mode units`) covers MSHR merge/full/waiter and data-array bank
+conflict on the leaves; serialized-top zero counts remain not passes.
+See the cache architecture record for exact proof scope and hashes.
+
 ## 5. Feature-addition playbook
 Choose the route by `NOCType`. For an AXI L2, add the L2 module (a separate IP) in `corev_apu/`,
 wire it between the core AXI master and the memory `corev_apu/axi_mem_if/`, and preserve

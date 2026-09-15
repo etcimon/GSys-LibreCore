@@ -244,6 +244,7 @@ package cva6_config_pkg;
       L2LineWidth: unsigned'(512),
       L2MshrDepth: unsigned'(16),
       L2DataBanks: unsigned'(4),
+      L2RoundRobinEn: bit'(0),
       // U6.1 SMT2
       NrHarts: unsigned'(2),
       SmtPolicy: config_pkg::SMT_HYBRID,

@@ -2,13 +2,15 @@
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
 // Bounded formal against live multi-port `g6lc_rename` (free/busy/map + bypass).
-// Small PRF and 2 dispatch ports keep the BMC cone tractable.
+// PRF must exceed the 32 architectural identities: reset only marks
+// phys 32..PRF_ENTRIES-1 free. PRF=16 left the rename pool empty, so
+// allocation covers were unreachable (vacuous). 32+8 keeps BMC tractable.
 //
 // Run: sby -f core/ooo/formal/g6lc_ooo_rename.sby
 //      cva6-build verify --formal
 
 module g6lc_ooo_rename_props #(
-    parameter int unsigned PRF_ENTRIES = 16,
+    parameter int unsigned PRF_ENTRIES = 40,
     parameter int unsigned PRF_W       = $clog2(PRF_ENTRIES),
     parameter int unsigned NR_PORTS    = 2,
     parameter int unsigned NR_FREE     = 1,
@@ -133,7 +135,7 @@ module g6lc_ooo_rename_props #(
       cover (enable_i && valid_i[0] && need_rd_i[0] && !stall_o);
       cover (NR_PORTS >= 2 && enable_i && valid_i[0] && valid_i[1] && need_rd_i[0] &&
              need_rd_i[1] && !stall_o);
-      cover (stall_o);
+      cover (stall_o && (dut.free_q == '0));
       cover (mispredict_i && dut.ckpt_ptr_q != 0);
     end
   end

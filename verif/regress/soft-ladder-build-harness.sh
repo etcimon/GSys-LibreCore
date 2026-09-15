@@ -208,6 +208,19 @@ if [[ -n "$SEED" && ! -f "$VERLIB_DIR/Variane_testharness.mk" ]]; then
   fi
 fi
 
+# Isolated candidate builds must not reuse the named production Mdirs.
+# Match the basename: SOFT_LADDER_VERLIB is often an absolute remote path.
+if [[ "${SOFT_LADDER_ISOLATED:-0}" == 1 ]]; then
+  verlib_base="$(basename "$VERLIB_DIR")"
+  case "$verlib_base" in
+    work-ver-smt2-fw64|work-ver-smt2-fw64-B|work-ver-stream8|work-ver-smt2)
+      log "REFUSING: isolated candidate must not reuse production Mdir $verlib_base"
+      exit 2
+      ;;
+  esac
+  log "isolated Mdir $VERLIB_DIR (experimental overlay; not a Linux SKU)"
+fi
+
 # --- flist selection -------------------------------------------------------
 if [[ "$FETCH" == "B" ]]; then
   FLIST="$STOCK_FLIST"
@@ -231,6 +244,19 @@ else
     log "ERROR: Flist.smt_legacy not included in $FLIST"; exit 1
   fi
   log "flavour=legacy flist=$FLIST (derived: define dropped, smt_legacy supply)"
+fi
+
+if [[ -n "${SOFT_LADDER_OVERLAY:-}" ]]; then
+  [[ "${SOFT_LADDER_ISOLATED:-0}" == 1 ]] || {
+    log "REFUSING: SOFT_LADDER_OVERLAY requires SOFT_LADDER_ISOLATED=1"
+    exit 2
+  }
+  OVERLAY_DIR="${SOFT_LADDER_OVERLAY_DIR:-$VERLIB_DIR/overlay}"
+  python3 "$ROOT/verif/regress/isolated-config-overlay.py" \
+    --root "$ROOT" --target "$TARGET" --out "$OVERLAY_DIR" \
+    --field "$SOFT_LADDER_OVERLAY"
+  FLIST="$OVERLAY_DIR/Flist.cva6.overlay"
+  log "overlay flist=$FLIST field=$SOFT_LADDER_OVERLAY"
 fi
 
 VTHREADS="${SOFT_LADDER_VERILATOR_THREADS:-$( (command -v nproc >/dev/null && nproc) || echo 4)}"

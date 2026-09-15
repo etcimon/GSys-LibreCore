@@ -12,6 +12,716 @@ is the queue, not the design.
 | Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
+## Balanced core performance foundation (2026-09-14)
+
+Priors: `architecture/router-core-upgrade-program.md`, `architecture/l2-l3-cache/README.md`,
+`architecture/multi-threading/testharness-proxy.md`, and the approved P0–P3 plan.
+User objective: balanced single-core latency and multicore throughput/area, preserving SMT.
+First candidate: optional L2 round-robin replacement; no production-default or SMT-scheduler change.
+
+Etienne Cimon explicitly authorized tier-R contributions in this session:
+“I, Etienne Cimon, give tier-R contribution authorization for all code base changes as necessary”.
+This records the supplied authorization, not a claim that a signed CLA document was found.
+
+- [~] P0: strict target-specific qualification, positive/negative evidence checks, complete build provenance.
+  **Host side landed (2026-09-14):** `verify --sim --qualification <profile>` resolves
+  `verify.qualifications` targets to remote-proxy suites only, refuses skips /
+  lint fallbacks / dry-run / missing manifests, and requires exactly one terminal
+  `G6LC_EVIDENCE` record whose suite/target/top/kind/runId and
+  source/config/executable sha256 match the expected identity
+  (`build-platform/src/tests/runner.ts`). `testharness_proxy.py build
+  --manifest-out <repo-rel>` writes the schema-1 manifest (603-source digest set,
+  canonical digests verified byte-identical to the TS side by interop test);
+  `soak --run-id/--tag/--pull/--expect-exe-sha256` and `run --run-id/
+  --expect-exe-sha256` bind a run to the manifested binary. First producer:
+  `verif/regress/remote/qualify-soft-ladder-osbi.sh` + suite `qual-soft-ladder-osbi`
+  + profile `smt2-cookie` — classifies the pulled soak log (run-id file,
+  trapdump, cookie `51b1babe`, no `51b1dead`) and emits the terminal record.
+  Verified: 16/16 qualification tests, `tsc --noEmit`, proxy `doctor` rc=0
+  (Verilator 5.008 + xpack 14.2.0 remote), CLI refusal on missing manifest.
+  **First real qualified run (2026-09-14, run `48f4e481`):** `build B
+  --manifest-out remote-runs/builds/work-ver-smt2-fw64-B.manifest.json`
+  produced the manifest (exe `894ea012…`, 603 sources); `verify --sim
+  --qualification smt2-cookie --target g6lc64_smt2` bound run-id, checked the
+  remote exe sha256, pulled `remote-runs/qsl-48f4e481/`, and classified the
+  log as **FAIL — 3/4 checks**: run-id and trapdump present, no `51b1dead`,
+  but **no `51b1babe` cookie**. The log's `*** SUCCESS *** (tohost = 0)` was
+  correctly NOT counted; residual signature is the known O3/SL-C state
+  (`plat_hc=80, coldboot_done=0, mcause=0x2 @ mepc=0x80013898`, hart 1 never
+  started). This is the machinery working: a residual is an honest red, not a
+  qualified pass.
+- **g6lc_tb.cpp NrHarts-agnostic probes (2026-09-14):** the testbench hardcoded
+  banked-SMT hierarchy (`gen_banked.gen_csr[h].i_csr`,
+  `gen_hart_bank[h].i_rf_bank`, `i_smt_thread_select.gen_smt`), so NO g6lc*
+  target with NrHarts==1 could compile a harness — including g6lc64_stream8.
+  `Makefile` now derives `-DG6LC_TB_BANKED` from the target pkg's `NrHarts`
+  field; `G6LC_TB_CSR/RF(core,h,sig)` macros pick `gen_banked`/`gen_single`
+  paths and `G6LC_TB_H1(expr)` drops hart-1/DCE'd reads (g1ao_hold_*,
+  issue_entry_*_id_issue, gen_smt.active_q) to 0 when non-banked. The SMT/SS
+  `idsb` debug block is `#if G6LC_TB_BANKED`-only. Banked smt2 rebuild produced
+  the identical exe sha256 (894ea012…) — macro expansion is bit-equivalent.
+  ariane_tb.cpp keeps its existing `G6LC_TB_NO_HIER` escape (AI builds);
+  non-g6lc cv* targets still can't use its hierarchy probes (needs same pass
+  or -DG6LC_TB_NO_HIER).
+- **First qualified PASS (2026-09-14, run `dd705dad`):** `verify --sim
+  --qualification perf-foundation --target g6lc64_stream8` — fresh
+  `work-ver-stream8` build (manifest exe `7e27de94…`), 4/4 minis
+  (amocas_w/d/q + stream_plane) bound per-run-id and exe-sha, pulled-log
+  classification 12/12, terminal `G6LC_EVIDENCE` accepted by the gate.
+  New suite `qual-stream8-minis` + wrapper
+  `verif/regress/remote/qualify-stream8-minis.sh`; profile `perf-foundation`
+  = stream8 minis (rtl-cluster) + smt2 cookie soak (rtl-core control).
+  **Still open in P0:** isolated-build-dir support for candidate experiments,
+  the concurrent-worktree cache-key gap, and ariane_tb banked-path parity.
+- [~] P1: deterministic L2 leaf and short checked-work metrics; non-vacuous formal covers.
+  **Leaf diagnostic strengthened (2026-09-14):** `verif/tb/l2/tb_g6lc_l2.sv`
+  and `run-l2-tb.sh`: independent expected/backing memories, ID/data/length and
+  stable-response assertions, exact accepted/completed-work and memory traffic,
+  unique misses/fills, all-way/burst hits, reset, WT masks, quiescent invalidation,
+  NC/exclusive bypass and adversarial hot/scan traces. Final four-way pair:
+  `remote-runs/l2-sram-final-rr{0,1}`, local Verilator 5.020, 13 phases PASS,
+  1,493 reads + 83 writes each. Latency=0/stall-every=3 pair also PASS; eight-way
+  RR/stall-every=5 PASS. All are explicitly **local diagnostic exceptions**, not
+  remote strict qualification. Final simulations keep source/executable hashes.
+  **Correction:** the initial bench's seed default was converted incorrectly;
+  `0x600df00d` is now exact. Earlier random counts are superseded. The initial
+  memory model shared the expected write state and mishandled held responses;
+  it was repaired before accepting these stronger diagnostic results.
+  **Warning correction:** Verilator LATCH (`found_inv`, `mst_r_ot_d`, `wi`) and
+  word-level UNOPTFLAT reports do not alone establish physical latches/loops.
+  Both generic Yosys/slang fixture syntheses report zero check problems and no
+  latches. Bench waivers are signal/file-scoped; vendor SRAM read-output reset
+  warnings remain visible. No production-geometry or STA conclusion follows.
+  **Open:** concurrent invalidations/errors. MSHR-full/merge/waiter and
+  bank-conflict are covered by the units leaf (serialized-top zeros remain
+  not passes). Rename covers reached locally (yices). Isolated-Mdir RR-on
+  candidate core runs remain gated.
+- [~] P2: default-off L2 replacement candidate; L3 legacy and SMT behavior preserved.
+  Config wiring is complete (`L2RoundRobinEn` in user/built structs → build_config
+  → cluster → RR_EN), all 27 explicit target defaults zero. Fixed malformed
+  `bit\'(0)` fields introduced by the earlier interrupted script; they were not
+  pre-existing. Three check_cfg negative tests reject no-L2, one-way and
+  non-power-of-two-way enables; SMT2- and stream8-derived positive config tests pass.
+  **SRAM correction:** removed the experimental per-set flop array. Metadata
+  is now one-port/one-cycle `tc_sram`, read on accepted cacheable AR; invalid-first
+  initializes after tag reset, successful installs advance. No new FSM stage,
+  clock/reset or SMT/issue/retirement change. L3 still uses the default-off policy.
+  **Elaboration:** 20/21 active target config-package diagnostics pass;
+  `cv64a60ax` fails on existing missing `RVZiCbom/RVZiCboz/RVZiCbop` initializers
+  (its only semantic diff here is the new default-off field). Archived/UVM
+  literals updated but not included in that active-target sweep.
+- [~] P3: paired measurements, required remote stability evidence, synthesis/timing and architecture updates.
+  Final four-way latency=6 cycles legacy→RR: hot_scan 12,096→9,024;
+  lfsr 9,840→8,640; **protected_hot 1,152→1,920 (regression)**;
+  diagnostic total 30,315→26,811. Not a core/multicore performance claim.
+  Generic 4 KiB fixture synth PASS (`l2-synth-rr{0,1}`): two→three pre-map
+  memories; 120,844→121,015 generic mapped cells, no latches. Data SRAM mapping
+  dominates these counts; they are not physical-area percentages. Default-off
+  netlist equivalence, production geometry, remote SMT and STA/DFT/power remain open.
+  **Bypass follow-up (2026-09-14):** reproduced R-hold failure from copied
+  baseline `l2-drain-before/run-30YFmOGc`, then repaired independently of RR:
+  preserve the S_BYPASS_R ready signal and clear AR outstanding only on a final
+  R handshake. No state/stage/reset/config/DTS change; applies to enabled L2/L3.
+  Expanded tests: 5 bypass requests/13 accepted R beats (single/burst/final stalls,
+  exclusive EXOKAY, SLVERR/DECERR); three synthetic ATOP R-before/with/after-B
+  schedules; following fill/hit and early-short-last injection guard. No real
+  AMO arithmetic/reservation or new-AR-before-delayed-ATOP claim.
+  Local 4-way RR off/on PASS (1,501 reads, 86 writes; original 13 phase counts
+  unchanged), plus 8-way RR/latency0/stall3 PASS. Generic synth PASS:
+  120,846/121,017 cells (+2 vs before fix), 2/3 memories, zero latches/problems.
+  Remote pinned Verilator 5.008 PASS for both policies:
+  `l2-leaf-20260914T234313-4bd9099b1be4` and `l2-leaf-20260914T234448-fec52bccce2d`.
+  The initial remote attempt FAILED on unsupported GENUNNAMED; warning-name
+  capability probing and vendor-scoped WIDTH restored compatibility, no SVA waiver.
+  New non-cleaning runner snapshots inputs into a fresh run-* directory and
+  always enables bypass/ATOP tests. Proxy `l2-leaf` uploads ten allowlisted
+  inputs, verifies hashes remotely, pulls/classifies logs and emits
+  `leaf-result.json` with strictQualification=false. No shared repo sync, cleanup
+  or harness killing. Snapshot-host test and focused suites: 24/24, tsc clean.
+  **Still gated:** real AMO/SMT/cluster integration and formal non-vacuity.
+  RR remains default-off and must be compared against the corrected AXI baseline.
+  Architecture/cache guide and both traceability maps now distinguish RTL
+  presence, bounded diagnostics and unqualified integration; bank/channel
+  mapping corrected to `(set * ways + way) % banks` rather than address bits.
+  Host checks: 23/23 config + qualification tests; tsc clean; scoped RTL diff-check clean.
+  Licensing pass: active contributor/policy/tier map verified; prior tier-R
+  authorization retained; upstream notices and existing outbound offers preserved,
+  testbench/scripts remain MIT. The earlier bulk script normalized AI-package
+  line endings; `git diff --ignore-space-at-eol` confirms only the new field is
+  semantic. The file-edit tools normalize supplied CRLF too, so EOL-only churn
+  remains visible in its raw diff.
+  **Full verification incomplete:** default `verify --formal-jobs 1 --formal-tasks 1`
+  reached the legacy smoke suite's unanticipated `make clean`/`make clean_all`,
+  deleting matching local generated outputs before the run was stopped. No
+  tracked-file deletions were found; prior ignored-artifact contents cannot be
+  reconstructed from git. No automatic restoration was attempted. Rerun only
+  with explicit cleanup approval or an isolated disposable checkout. The full
+  gate is NOT reported green; see build-platform/AGENTS.md §11.
+  **Non-cleaning follow-up:** the unbounded
+  `verify --lint --synth --target g6lc64_stream8` attempt was explicitly stopped
+  while native Yosys was still active; synthesis is **incomplete**, not PASS or
+  an RTL counterexample. Its actual top was `cva6`, not the L2/cluster boundary.
+  A separate `verify --lint --target g6lc64_stream8` completed: Verilator PASS
+  under the configured budget (278 warnings), strict slang elaboration clean.
+  No simulation/cleanup stage was rerun. Full-core smoke isolation and fresh
+  SMT controls remain open.
+  **Replacement checks (2026-09-15 artifacts):** independent testbench tags,
+  valid bits and per-set next-way state now check every lookup, installed way/set
+  and victim address, including a reset/fill/invalidate-nonzero-way/refill case.
+  Remote Verilator 5.008 PASS: `l2-leaf-20260915T001658-72af040d10a6` (RR off),
+  `l2-leaf-20260915T001701-554d8da2815c` (RR on), and
+  `l2-leaf-20260915T001821-86549ac21b77` (8-way RR, latency0/stall3).
+  Four-way checks: 1,484 lookups each; off 1,341 installs/1,243 evictions, mask1;
+  on 1,122/1,013, maskf. Eight-way victim maskff, 1,432 lookups. Corrupting the
+  expected victim address fails immediately (`l2-policy-oracle-negative/run-daboFKUZ`).
+  Proxy classification now rejects empty/inconsistent counts, missing cases,
+  incorrect policy masks, failed runs and duplicate pass records; explicit
+  environment pins prevent inherited L2TB_EXTRA from changing the experiment.
+  **Scoped RR-off equivalence:** `L2TB_MODE=equiv` uses immutable Git blob
+  `5be075b1a01ff754da384c3dd129fd58c33733fa`, applying only the validated two-line
+  bypass correction to the copied golden engine. Yosys 0.68+1, memory-mapped,
+  async-reset-normalized model, common 64-bit AXI inputs and 2 data banks.
+  256 B/two-way and 512 B/four-way fixtures pass, respectively 9,151 and 11,675
+  comparison points with none unproven (`l2-equiv-short/run-p9hU86oH`,
+  `l2-equiv-4way-small/run-GC6b0TBD`). Final default 512 B/four-way mode rerun
+  PASS: `l2-equiv-final/run-1blQPZgt`; negative FAIL:
+  `l2-equiv-final-negative/run-ZG0cGREl`. Inverting the gate's hit output fails
+  specifically at hit_o (`l2-equiv-short-negative/run-YSRsaZAE`). No zero-point
+  proof or unchecked assumptions about new memory concurrency are accepted.
+  SAT-only/alternative-preprocessing trials and 4 KiB equivalence exceeded the
+  120-second budget; an equiv_struct trial introduced invalid internal matches
+  and was rejected, not waived. The retained flow uses opt_merge plus short-cone
+  SAT; larger/production-geometry equivalence is still open. No core RTL or
+  production config changed in this verification tranche.
+
+- **Next tranche (2026-09-15), still before any performance promotion:**
+  larger-geometry RR-off equivalence, isolated core checked-work, and real
+  AMO/SMT/cluster controls. Named packages stay split (`g6lc64_stream8` T=1
+  N=2 single-issue; `g6lc64_smt2` T=2 N=1 dual-issue; `g6lc64_ooo_server`
+  requests I=4/C=4 but `scoreboard`/`commit_stage` still retire two ports).
+  Do not merge stream8×SMT2. RR remains default-off.
+  - Equivalence: `L2TB_EQ_MEM=bbox` keep-hierarchy blackboxes uniquified
+    `g6lc_l2_tag*`/`data*`/`mshr*`/`tc_sram*` so flop tags do not explode SAT.
+    This is **controller/port** RR-off vs the bypass-corrected pre-RR engine,
+    not a tag-flop netlist proof. Yosys 0.33:
+    4 KiB/4-way **2054 proven / 0 unproven** (`run-ChPtb8Vc`);
+    16 KiB/4-way **PASS** (`run-kLWpIH6I`);
+    256 KiB/8-way **2057 proven / 0 unproven** (`run-zisQrCl4`,
+    `--unroll-limit=16384`). Hit-output inversion leaves exactly `hit_o`
+    unproven (NEG_RC=1). Collect 4 KiB **13828/0** (`run-DIR7V5Rx`, 275 s);
+    earlier `run-i0I3V69g` timeout is superseded, not waived. Mapped flop-tag ladder (proxy now sets
+    `YOSYS` to testharness `toolchains/formal/bin/yosys`): 1 KiB/4-way
+    **16670/0** (`l2-equiv-...T024028-e033a6cf2074`); 2 KiB/4-way
+    **26625/0** (`...T024114-1720ee26a8cf`); 4 KiB/4-way **46468/0**
+    (`...T024234-ca4166f3968a`, 300 s); 8 KiB/4-way **86023/0**
+    (`...T025605-591f32129130`, 490 s / 600 s budget). Earlier 4 KiB
+    mapped 120 s budget was a miss, not a waiver. 8 KiB map is opt-in,
+    not in the default ladder. Collect 8 KiB timed out at 600 s
+    (`l2-equiv-20260915T081911-d252c1621712`); 16 KiB timed out at 900 s
+    (`l2-equiv-20260915T072626-2597c1ae5355`) — incomplete, not waived.
+    Proxy `l2-equiv --mem map|bbox`. Testharness formal/bin has yosys/sby,
+    no yices; `/usr/bin/z3` exists.
+  - Isolated overlay: `verif/regress/isolated-config-overlay.py` copies one
+    config package, rewrites only allowlisted `L2RoundRobinEn`, and derives
+    a flist. `SOFT_LADDER_ISOLATED=1` plus `SOFT_LADDER_OVERLAY=...` refuse
+    production Mdir *basenames* (`work-ver-stream8`, `work-ver-smt2-fw64-B`)
+    even when `SOFT_LADDER_VERLIB` is an absolute remote path. Qualification
+    manifests must be exact production filenames, not `*work-ver-stream8*`.
+    N=1/N=2 overlays are experimental, not Linux SKUs.
+  - Checked-work payload: `mini_checked_work.S` (48 KiB, NWORKERS=2).
+    Compiled `remote-runs/checked-work/mini_checked_work.elf`. RR-off
+    cluster **control** on production `work-ver-stream8`: tag
+    `checked-work-stream8-n2`, **154,170 cycles**, kernel `tohost=1`
+    (mini pass; fail is 3). Harness prints `FAILED (tohost = 1)` because
+    non-zero tohost is HTIF-fail; classify from the kernel code, not that
+    line. Isolated RR-on candidate: Mdir `iso-stream8-rr1` (production
+    names refused by basename), overlay `L2RoundRobinEn` 0→1
+    (`overlaySha25612=d0f9c87f67fd`), warm-seeded from `work-ver-stream8`.
+    Manifest exe `ec650f20…` (603 sources; production stream8 stays
+    `7e27de94…`). Same ELF, tag `checked-work-stream8-n2-rr1`, kernel
+    `tohost=1` after **154,170 cycles** — identical to the RR-off control.
+    Sequential fill/verify is not a replacement-sensitive working set;
+    this is a functional isolated-candidate envelope, not a speedup.
+    `qualify-checked-work` CONTROL PASS. Production packages stay RR
+    default-off. Sidecar `G6LC_METRICS_SIDECAR` is compiled only into new
+    harnesses.
+  - Candidate-on SMT pairing (not a package merge): production
+    `work-ver-smt2-fw64-B` exe `894ea012…`. Isolated `iso-smt2-rr1` has
+    live `gen_l2...gen_rr...i_metadata` (RR-on netlist), exe `a76e218c…`,
+    overlay `L2RoundRobinEn` 0→1 (`overlaySha25612=326ed3f46c85`).
+    N=2 timed out 400k `tohost=0` (only `trace_hart_0`; `wait_workers`).
+    N=1 compressed tohost spun on `c.li`/`c.j` after fill/verify.
+    Uncompressed tohost RR-off **CONTROL PASS**
+    `checked-work-smt2-n1-norvc` **129,455 cy** `tohost=1`; fully
+    uncompressed body `...-norvc-body` **135,616 cy** `tohost=1`.
+    Isolated RR-on **livelock** in verify: 400k and **2,000,000 cy**
+    `tohost=0`, fetch stuck dual-issuing the two loop addis (16-bit or
+    32-bit) and never the `bnez`. A nop between addis only shifted the
+    stuck pair (`...-rr1-nop`). Stream8 I=1 RR-on still PASSes. This is
+    SMT2 I=2 fetch after long-latency miss, exposed by RR-on; not L2
+    data corruption (`tohost` never 3). Fetch dual-issue repair is
+    follow-on (needs new approval). Cookie soak was not re-run.
+  - Real AMO at the L2 leaf: `+amo-arith` (always on in the runner) computes
+    ADD/SWAP/CAS.W and LR/SC reservation in the memory model, then checks
+    WT self-inval readback. Remote Verilator 5.008 **PASS**
+    `l2-leaf-20260915T012151-99c14472e3e2` (RR off, 4-way/4 KiB): policy
+    1,484/1,341/1,243 mask=1 plus
+    `AMO arith add=1 swap=1 cas_hit=1 cas_miss=1 lrsc_ok=1 lrsc_fail=1`.
+    First attempt `...T011700-0930b1b14318` failed on an inline SC AW
+    timeout; SC now uses the existing write driver with lock/BRESP. This is
+    still a leaf control, not cluster AMO through `g6lc_axi_lrsc`.
+    Cluster minis on production `work-ver-stream8` vs `iso-stream8-rr1`:
+    AMOCAS.W 550/550, D 704/704, Q 998/998, `mini_stream_plane` 2138/2138
+    (SUCCESS `tohost=0`). All-set hot+scan `mini_l2_hot_scan.S` (512 sets,
+    16 rounds, HTIF exit 0 from kernel `tohost=1`) **384,179 / 384,179** cy.
+    Identical cycles. Leaf A/B (4-way/4 KiB): RR-off 31,108 cy / 143 hit /
+    1,348 miss (`l2-leaf-...T075756-9ce569078d49`) vs RR-on 27,604 cy /
+    362 hit / 1,129 miss (`...T075827-c740d8b7af0d`); `hot_scan` 12,096→
+    9,024, `protected_hot` 1,152→1,920. Pin-level mix is not a core win.
+    Generic synth (not STA): RR-off 2 `$mem_v2`/1,257 cells vs RR-on 3
+    `$mem_v2`/1,281 cells (`...T080459-9e4346fd0dee`,
+    `...T080517-a300dbaed132`). 8-way leaf A/B: 26,256 vs 26,080 cy
+    (`...T080935-67c68349c896` / `...T081003-a0436a16ea1d`); hot_scan win
+    cancelled by protected_hot. Best P0–P4 area/perf: keep RR off. Cookie
+    soak not re-run as a performance claim.
+  - MSHR/bank-conflict **leaf** (not serialized top): `L2TB_MODE=units`
+    instantiates `g6lc_l2_mshr` (DEPTH=4, MAX_WAITERS=2) and `g6lc_l2_data`
+    (2 banks) directly. Remote Verilator 5.008 **PASS**
+    `l2-leaf-20260915T020340-df5db8e21fd8`:
+    `mshr_full=1 merge=1 merge_full=1 waiter=1 bank_conflict=1 bank_ok=1`.
+    Units compile uses `tb_g6lc_l2.vlt` (LATCH `wi`, vendor WIDTH). Drive
+    at negedge like `axi_read`. Top still leaves `merge_full_o` unconnected
+    and `waiter_pop_i=0`; mapped RR-off equiv includes the MSHR netlist, so
+    the ready formula was not changed. First units attempt failed `-Wall`
+    (`...T014409-f4c25b090d2e`).
+  - Rename covers: `g6lc_ooo_rename_cover.sby` PRF=40. Local yices **PASS**
+    1 s, depth 8: alloc step 2, dual-alloc step 2, ckpt/mispredict step 3,
+    `stall_o && free_q==0` step 6. Path-check only. Testharness has no
+    yices; a yices+z3 race ERROR-kills z3. Remote z3-only
+    (`verif/regress/remote/run_ooo_rename_cover.py`) TIMEOUT 90 s, 0 traces
+    (`rename-cover-z3-2`). BMC rename stays in `verify.formalTasks` (abc+z3).
+  **Still open:** mapped production-geometry (256 KiB) flop-tag equivalence,
+  16 KiB collect (900 s timeout, not waived), isolated SMT2 RR-on (I=2 fetch
+  livelock). Remote rename cover is TIMEOUT (not a gate). Cluster AMOCAS on isolated
+  stream8 RR-on is a functional envelope with 0 cycle delta, not a win.
+  Isolated stream8 RR-on is a functional envelope. SMT2 N=1 RR-off
+  control passes; N=2 waits for hart 1. **Performance promotion is still
+  NOT QUALIFIED.**
+
+Candidate RTL is present but **performance promotion is NOT QUALIFIED**. No new
+Linux boot, SMT stability, physical sign-off or production-geometry equivalence
+claim is made; the small-fixture RR-off equivalence result above is separately scoped. Concurrent APU work and its verification records are separate.
+
+Baseline issue found while landing P0 (pre-existing, not caused by these edits):
+`bun test` → `branding-g6lc.test.ts` fails on the two `g6lc_core_types.svh`
+headers — the stem check scans `.svh` macro includes and finds no module/package
+declaration (`found [moved]` is a regex false-positive on a comment word). Either
+exempt `.svh` includes from the stem rule or rename the headers; deferred as a
+test-semantics decision, unrelated to the qualification path.
+
+## API-neutral APU P0 groundwork (2026-09-14)
+
+Priors/status: `g6lc_bios/architecture/DISPLAY.md` §API-neutral APU and
+`g6lc_bios/AGENTS-todo.md`. EGL remains client-side; proposed hardware uses an
+independent uncore gate and unchanged virtio-gpu/virgl drivers, with resident
+command firmware but no CPU rendering.
+
+- [x] First BIOS protocol slice: eight regression tests, corrected feature/bind/
+      clear fields and full capset-v1 response sizing; no fictitious GLSL grant.
+- [x] Follow-up P0 tests cover request/fence/error bounds and u16 queue wrap;
+      seventeen wire/model tests now present, plus picker-arm publication order.
+      The tracked external replay validates 11 requests and two fences, with
+      corrected Y_0_TOP orientation: 307,200 exact pixels on llvmpipe and D3D12.
+      This remains external-reference, not full virtqueue, Linux-driver or RTL evidence.
+- [x] OpenWrt 24.10.2 / Linux 6.6.93 boots through `g6lc_qemu` to a working
+      shell using a temporary ttyS0 inittab overlay. Guest sees GPU device 0x0010.
+- [x] Graphics-enabled remote OpenWrt/QEMU now executes the unchanged guest
+      virtio-gpu + Mesa virgl path over modern virtio-mmio. QEMU 10.0.0 has
+      OpenGL/virgl/GBM/vhost-user; the headless host uses `vhost-user-gpu` with a
+      surfaceless-EGL shim. Guest evidence includes `+virgl`, two capsets,
+      `/dev/dri/renderD128`, `gbm-window`, renderer `virgl (LLVMPIPE...)`, stable
+      pixel FNV-1a `0x3d667145`, `G6LC_EGL_GLES2_DRIVER=virgl`, rc 0. This is
+      host software-rendered virgl evidence, not RTL/APU hardware execution.
+- [x] Actual unchanged Mesa/Linux command traffic is archived and strict-checked:
+      normal capture `g6lc_qemu/out/remote-gfx/gfx-20260914T203512Z/capture`
+      (`result=PASS`), with API/capset/resource/transfer/submit/fence events and
+      binary command buffers retained.
+- [x] Opt-in negative ioctl probing now runs through the unchanged guest driver:
+      `remote-gfx-probe.py --negative` uses `g6lc-virgl-negprobe`; capture
+      `gfx-20260914T203421Z/capture` passes `--expect-errors`. Backend `EINVAL`
+      is observed for invalid resource creation, out-of-bounds transfer, unknown
+      virgl opcode and truncated command; queue ioctls/fences can still report
+      success, so the device contract must model asynchronous rejection.
+- [x] The richer opt-in GLES2 audit workload now runs through the same unchanged
+      driver stack: `gfx-audit-20260914T213500Z/capture` passes strict
+      validation and archives texture upload/sampling, sampler views/states,
+      fragment constants, indexed drawing, scissor state, state binds,
+      transfers/readback, cleanup and nine typed fences. This expands the
+      observed command inventory without changing Mesa, Linux or QEMU.
+- [x] Close P0: `g6lc_bios/architecture/DISPLAY.md` now freezes the reduced
+      `gles2-min` device contract and its context/resource, fence/error,
+      reset, DMA/cache and protected-firmware obligations. The unchanged
+      Linux/Mesa path passed the richer audit with all optional virgl masks
+      clear (`gfx-20260914T221515Z`) and passed expected-error probing
+      (`gfx-20260914T221551Z`); `gles2-xfer` retains only `VIRGL_CAP_TRANSFER`
+      as an optional diagnostic (`gfx-20260914T221800Z`). The separate BIOS
+      package gate is green (`python tools/g6b.py check`, including the
+      previous picker/JIT device-frame test). This is still llvmpipe-backed
+      compatibility evidence, not RTL or hardware acceleration.
+- [ ] P1/P2 independently gated APU execution and protected firmware.
+- [ ] P3 real unchanged Linux/Mesa GLES2 shader-to-RTL readback, plus BIOS client.
+- [ ] P4 feature conformance/gaming measurements; P5 separate HDMI and DP scanout.
+
+No core or AI RTL, ISA, DTS or production capability mask changed in the P0 pass.
+
+## API-neutral APU P1 transport review
+
+Priors: the frozen `gles2-min` contract in `g6lc_bios/architecture/DISPLAY.md`,
+`AGENTS-corev-apu.md`, and the APU rows in the implementation/test maps.
+
+- [x] Independently gated `corev_apu/apu/g6lc_apu_top.sv`, transport and native
+  package, plus `corev_apu/include/g6lc_apu_cfg_pkg.sv`. Default `ApuOff` is
+  inert; `ApuP1Transport` offers VERSION_1/RING_RESET only. No virgl/EDID,
+  capset, physical scanout or software-rendering fallback is enabled.
+- [x] Review against virtio 1.3 CSD01 sections 2.1, 2.6 and 4.2.2 reproduced
+  25 failing checks before repair: queue reset/stop/re-enable, status monotonicity,
+  inactive/failed completion acceptance, power-of-two/alignment/extent guards,
+  shared-memory discovery and configuration legality. SHM selector/length words
+  now use 0xac/0xb0/0xb4; absent lengths/bases are all ones.
+- [x] Add explicit backend reset/stop request-acknowledge handshakes, queue-enable
+  qualification, full 64-bit fence/32-bit context metadata, and set-over-clear
+  priority for interrupt and notification collisions. NEEDS_RESET generates a
+  config interrupt when DRIVER_OK was set; malformed bus accesses do not mutate
+  registers. Queue reconfiguration after reset works with DRIVER_OK still set.
+- [x] Remote Verilator 5.008: `PASS tb_g6lc_apu_virtio_mmio cycles=636
+  checks=4236 errors=0`, exit 0. Includes 2,048 queue-size and 2,049 configured-depth
+  checks, delayed acknowledgements, same-cycle reset/completion, stop-read stalls,
+  high addresses/fences/context, and a continuously checked ApuOff copy.
+  AI/issue-width checks are configuration-helper independence, not SoC coexistence.
+- [x] Strict enabled RTL lint at AddrWidth=12/16/64 plus disabled-top lint;
+  assertions enabled in simulation. Remote Yosys/slang `synth -noabc` and
+  `check -assert`: enabled transport 13,964 generic cells / 819 sequential bits,
+  no latches; ApuOff zero cells (asserted). These are not mapped area or STA results.
+- [ ] Attach the now-verified AXI/control wrapper to trusted SoC source/PMP routing,
+  address/IRQ/DTS discovery and PMU. The wrapper enforces `apu_soc_legal`, but
+  fabric/domain routing is not implemented. Firmware reservations currently
+  require two physical cores and NrHarts=1; SMT service-domain partitioning is not
+  implemented. Private RAM must be aligned, at least 256 KiB, and disjoint from MMIO.
+- [x] Resource-checked DMA read/write leaves and bounded SG walker are present as
+  default-off standalone units (`g6lc_apu_dma_{read,write}.sv`, `g6lc_apu_sg.sv`).
+- [x] Immutable command snapshot SRAM, protected mapping table and used-ring
+  publisher are present (`g6lc_apu_storage.sv`, `g6lc_apu_queue.sv`); remote
+  Verilator/lint/synth for SG+storage+queue is the close-out of this slice.
+- [ ] Integrate the leaves under control, native execution and resident firmware.
+- [ ] Full SoC APU/AI/config matrix, formal safety/liveness, stock-driver shader
+  execution, PDK timing/CDC/DFT/power qualification. Full build-platform `verify`
+  was only dry-run/preflighted here; its configured core suites do not include APU.
+  The documented `diag run licensing` id is absent in the current catalog; this
+  slice's tier/header and GPL-free flist review is manual, not an automated pass.
+
+**Backend contract:** all sidebands are synchronous to clk_i and must be protected
+by the eventual fabric/domain integration; port names alone are not protection.
+`queue_enable_o` authorizes new work, not `vq_state_o.ready` alone. On a held
+`fw_queue_stop_req_o[q]`, the backend must stop new work, drain all existing queue
+memory responses and invalidate pending completions before acknowledging. Queue
+reset releases its mapping only after that acknowledgement. A QueueReady=0 stop
+retains its configuration; reading QueueReady stalls through rvalid_o until the
+backend drains, so the future bus adapter must hold the request. Ordinary register
+accesses remain single-cycle. `fw_reset_req_o` stays high until `fw_reset_ack_i`
+certifies all device DMA is drained and resource/context/program state invalidated;
+status does not report reset complete earlier. Never tie these ACKs high once a
+real asynchronous work source exists. `used_valid_i/used_ready_o` reports an already
+retired, memory-visible used entry, not a queue of commands to DMA; last-used
+metadata is debug state, not a lossless completion FIFO. The producer holds its
+payload while stalled and discards cancelled completions before reset ACK.
+
+**Timing/DFT note:** one clock and the existing async-assert/sync-deassert reset
+contract; no new CDC, gated clocks or memories in this slice. Two queue CSR banks
+are flops, not bulk storage. testmode is threaded but scan/ATPG is not qualified.
+64-bit extent checks and status qualification are combinational control cones;
+register the future AXI boundary and qualify them against the inferred 1.25 GHz /
+12FFC target before integration. No CPU/AI pipeline, ISA, DTS or global flist change.
+
+Reproduce from Windows PowerShell, using the existing authenticated WSL proxy:
+
+```powershell
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py sync
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py --timeout 240 shell env APU_SYNTH=1 bash /opt/testharness/repo/verif/tb/apu/run-virtio-mmio.sh
+```
+
+The runner consumes `corev_apu/apu/Flist.apu`; lint/build/sim/synthesis logs live
+under remote `/tmp/g6lc-apu-virtio-mmio` (override `APU_VIRTIO_OUT`). Warnings
+are fatal except unused/timescale, testbench width-widening/clock-style and SVA
+reset-observation categories; RTL lint does not suppress width warnings. Do not use a dry-run's
+“Gate passed” line as execution evidence.
+
+### P1 AXI/control boundary follow-up
+
+- [x] `g6lc_apu_axi_lite.sv` exposes independent guest/control AXI-Lite ports
+  (64-bit addresses, 32-bit data), reusing the unchanged `axi_lite_to_reg` bridge.
+  It checks full addresses before offset decoding; neither port aliases the other.
+  Default private aperture is `0x40002000/0x1000`, separately configured and checked
+  against guest MMIO and firmware RAM. This is not yet a live SoC/DTS allocation.
+- [x] Per-AW/per-AR authorization and the control epoch travel through the bridge
+  with each accepted request. `PROT` is not authentication. Denied or stale control
+  requests complete with SLVERR and zero read data, without register side effects.
+  Epoch changes on device-reset or queue-stop entry invalidate buffered requests
+  and snapshots; the counter saturates and locks control/ACKs on exhaustion until
+  external reset. Exhaustion still needs a dedicated runtime/formal proof.
+- [x] `g6lc_apu_control.sv`: queue/fence/context snapshots, notifications and a
+  separate level firmware IRQ; firmware reset/stop acknowledgement registers.
+  Reset requires firmware acknowledgement, all backend queues idle, and backend
+  resource teardown complete. Per-queue stop requires firmware ACK plus that
+  queue's idle signal. A guest's stalled QueueReady read does not block control.
+- [x] Remote Verilator 5.008: **318 AXI/control checks / 1,601 clocks / errors=0**;
+  raw transport recheck **4,240 checks / 636 clocks / errors=0** (four new aperture
+  legality checks). Covers buffered authorization changes, stale queued writes,
+  snapshot consistency, 64 authorization/strobe/skew cases, independent AW/W
+  arrival, B/R stalls, hardware reset with pending responses, disabled endpoints,
+  and firmware ACK with a busy backend. The first stall check exposed out-of-step
+  coroutine/unpacked-array request propagation in the TB; packed bus arrays fixed
+  the observed handshake timing without weakening the assertion or changing RTL.
+- [x] Enabled/disabled wrapper lint (no first-party width waivers) and remote
+  Yosys/slang flattened `synth -noabc`, `check -assert`, no-latch checks pass:
+  enabled **19,944 generic cells / 2,287 sequential bits**; disabled **522 cells /
+  162 sequential bits**. Unlike the raw zero-cell off top, the AXI endpoint retains
+  response bookkeeping so accepted transactions finish, but contains no APU state.
+- [ ] Integrator supplies trusted AW/AR grants from source/domain routing, not from
+  Linux-controlled fields, and holds them with the relevant address until handshake.
+  Admission-time grants remain attached to accepted transactions; later grant changes
+  are not retroactive revocation. Quiesce/reset before switching ownership.
+- [ ] Integrate the checked DMA leaves and single-bank SG controller below with
+  private control, immutable command buffers and virtqueue used-ring publication. This control
+  test still models drain/teardown rather than memory traffic or rendering.
+  Full SoC/core configuration coverage,
+  OpenSBI domains/PMP, full-width AXI adaptation, formal liveness and STA remain open.
+
+Control ABI is `ACTRL_*` in `corev_apu/apu/include/g6lc_apu_pkg.sv`. STATUS bits:
+0 reset request, 2:1 queue stop, 4:3 notification pending, 6:5 queue enabled,
+8:7 backend idle, 9 snapshot valid. SNAPSHOT=1 captures selected queue geometry
+and last-used metadata; invalid snapshot data reads fail. EPOCH and SNAP_EPOCH
+must agree around a multiword read. Already-produced AXI responses remain stable
+across later reset events; software must check epoch/validity and retry SLVERR.
+Any new stop/reset epoch invalidates prior software acknowledgements, so firmware
+must re-read pending bits and re-acknowledge after completing the current teardown.
+
+Run the previous proxy command with **`APU_AXI=1 APU_SYNTH=1`**. The optional
+`Flist.apu_axi` adds only the existing PULP bus/FIFO/arbiter dependencies and new
+APU wrapper/control/package; it does not enter the global production flist.
+Artifacts are under remote `/tmp/g6lc-apu-virtio-mmio/axi`. Scoped `apu_axi.vlt`
+waives only known upstream EOFNEWLINE, AXI-package width and arbiter unsigned
+warnings; the root blanket corev_apu/vendor waiver is not used. Tier R/T headers
+and GPL-free dependencies were manually reviewed; upstream notices are unchanged.
+
+Timing: bridge request/response FIFOs register the fabric boundary; new 32-bit
+control epoch comparison/increment and 64-bit aperture checks are control cones,
+not CPU pipeline changes. One clock/reset domain, testmode threaded to APU state;
+upstream bridges retain their own DFT behavior. No SRAM or ICG is added here.
+Cell counts are untechmapped screening, not STA, scan/ATPG or power qualification.
+
+### P1 resource-checked DMA read leaf
+
+- [x] `corev_apu/apu/g6lc_apu_dma_read.sv`: standalone 64-bit AXI read master,
+  gated by `Enable && DmaReadEn` (all supplied production/transport profiles remain
+  read-disabled). Captures request and trusted mapping before validation; checks
+  resource ID, context, read permission, epoch, nonzero/bounded length, offset and
+  complete mapping containment in a configured physical window. No refused request
+  issues AR. The root window must exclude guest/control MMIO and firmware RAM;
+  hardware coherency grants are refused for this non-coherent leaf.
+- [x] One outstanding burst, configured 1..256-beat cap, INCR with ID 0 and
+  non-cacheable/non-exclusive attributes. Registered planning limits bursts to 4 KiB;
+  naturally aligned 1/2/4-byte head/tail reads avoid accessing bytes outside the
+  request. Stream bytes are packed low with contiguous keep bits, zero unused lanes,
+  relative offsets and last on successful full payload. Completion echoes full
+  64-bit tag and resource/context/epoch plus the exact delivered-byte count.
+- [x] Cancellation/runtime disable stops fresh bursts but never withdraws an
+  asserted AR. Accepted bursts drain; stalled published data and completion stay
+  stable. SLVERR/DECERR stops further bursts and reports failure after drain.
+  Wrong RID, early/missing RLAST or unsolicited responses quarantine the master:
+  no fresh requests and idle remains false until a coordinated fabric reset.
+- [x] Remote Verilator 5.008 with assertions, strict first-party RTL lint, and
+  Yosys/slang flattened generic synthesis/no-latch/structural checks pass:
+
+  | Physical window / burst cap | DMA cases | Checks | Clocks | Generic cells |
+  |---|---:|---:|---:|---:|
+  | 0x80000000 / 16 | 295 | 159,208 | 33,000 | 5,698 |
+  | 0x280000000 / 1 | 293 | 227,649 | 47,460 | 5,678 |
+  | 0x280000000 / 256 | 295 | 156,424 | 33,576 | 5,687 |
+
+  Each reports errors=0 and rc=0; enabled profiles have 751 sequential bits.
+  Disabled leaf has zero cells (asserted) and no bus/data/completion activity.
+  Counts include per-cycle invariants, not that many independent workloads.
+  Cases include every byte alignment with lengths 1..33 around a page boundary,
+  64 KiB reads, last-resource-byte access, invalid IDs/permissions/epochs/extents,
+  invalid root configurations, request-input changes after acceptance, AR/R/data/
+  completion stalls, partial-delivery bus error, runtime disable and protocol faults.
+  Early-last/mid-burst pause cases are inapplicable to the one-beat profile.
+- [x] Same remote invocation rechecks transport (4,240 checks) and AXI/control
+  (318 checks), including their existing lint/synthesis gates. No CPU, AI, BIOS,
+  performance-tooling or global production flist changes were made in this slice.
+- [ ] Attach this leaf to protected mapping tables, actual queue/command staging,
+  the checked DMA writer and bounded SG engines, control reset/stop aggregation and the SoC
+  fabric. Row/stride/resource-lifetime validation and immutable command SRAM are
+  not implemented by the contiguous read leaf. Rendering remains absent.
+- [ ] Prove full mapping lifecycle, cache ownership/IOMMU/physical-window policy,
+  independent source/PMP routing, formal safety/liveness, STA/DFT/power and the
+  unchanged Linux/Mesa path. The memory responder here is a verification model,
+  not SoC DRAM/cache coherence or a Linux DMA integration proof.
+
+**DMA handoff contract:** `mapping_i` is a protected per-context mapping, never
+user-supplied authority. It is sampled with the request; its pages and permission
+lifetime must stay pinned until idle. Changing the input for another lookup does
+not revoke an in-flight mapping. To revoke, assert cancel (or disable admission),
+drain data/completion and bus responses, then release the mapping. Flush unaccepted
+upstream work before re-enabling admission after reset/revocation. The root window
+is a second hardware bound, not an IOMMU or a substitute for context authorization.
+
+Stream data is provisional until an OK completion; on any error/cancellation,
+discard the whole command snapshot, including its already delivered prefix. Failed
+streams need not emit last. A protocol-error completion is a diagnostic, **not**
+permission to free backing: bus_fault stays set and idle stays low. Missing bus
+responses never get converted into successful drain by a timeout. `rst_ni` may
+clear outstanding state only with a coordinated fabric reset; ordinary device/
+queue reset must use cancel and wait for idle. Already-published completions stay
+stable even if cancel arrives later. Consumers must keep draining while cancelling.
+All liveness claims depend on explicit bus and consumer progress.
+
+Reproduce via the existing WSL testharness proxy with
+`APU_DMA=1 APU_AXI=1 APU_SYNTH=1` on `verif/tb/apu/run-virtio-mmio.sh`.
+Remote artifacts: `/tmp/g6lc-apu-virtio-mmio/dma-{0-16,1-1,1-256}`.
+The reader is in the optional `Flist.apu_axi`, not instantiated by the control top
+or any global target. No new virtio graphics/DMA feature bit is advertised.
+
+Timing/DFT: separate registered admission, burst planning and AR stages; one
+registered stream beat, no bulk FIFO or SRAM yet. 64-bit bounds/addition and byte
+lane selection are local control/data cones. Same clock/reset, testmode retained,
+no new CDC or ICG. Generic cell counts are screening, not mapped area, throughput,
+STA at the inferred 1.25 GHz/12FFC operating point, or scan/power qualification.
+Tier-R RTL and tier-T tests retain their established licensing; no upstream code
+was changed. The concurrent balanced-core performance work remains separate.
+
+### P1 resource-checked DMA write leaf
+
+- [x] `g6lc_apu_dma_write.sv`: default-off, 64-bit AXI writer sharing the bounded
+  resource/context/epoch/extent checker with the read leaf, but requiring write
+  permission and its own `DmaWriteEn/DmaWriteMaxBytes`. Write-only configurations
+  do not depend on read resources. Both directions require the configured root
+  window to exclude MMIO/control/firmware RAM; neither grants hardware coherency.
+- [x] Accepts packed 1..8-byte chunks with contiguous low keep bits, exact relative
+  offsets and exact final last. Invalid chunks fail before any byte of that chunk
+  is written. One naturally aligned 1/2/4/8-byte AXI transaction at a time, ID 1,
+  INCR, LEN=0, exact WSTRB and zero unused data lanes. AW and W are independently
+  held/accepted, so a slave that waits for WVALID before AWREADY makes progress.
+  No AW extent crosses the request or 4 KiB boundary; packet aggregation and
+  multi-beat write bursts are intentionally not implemented yet.
+- [x] Waits for B before advancing or completing. Cancellation/runtime disable
+  preserves already offered AW/W, drains B, and discards unissued buffered bytes.
+  SLVERR/DECERR terminate after the response; early/wrong-ID/unsolicited B enters
+  quarantine until coordinated fabric reset. Missing B never becomes successful
+  drain via a timeout. Full 64-bit tag and resource/context/epoch are preserved.
+- [x] Remote Verilator 5.008 and strict first-party lint pass; Yosys/slang generic
+  flattened synthesis and no-latch/structural checks pass:
+
+  | Window / input chunk size | Cases | Checks | Clocks | Generic cells |
+  |---|---:|---:|---:|---:|
+  | 0x80000000 / 8 | 298 | 456,689 | 80,169 | 5,712 |
+  | 0x280000000 / 3 | 298 | 1,246,216 | 283,317 | 5,708 |
+
+  Enabled writer has 766 sequential bits; disabled zero cells asserted. Checks
+  include per-cycle invariants and byte/guard comparisons, not that many distinct
+  workloads. Covers all byte alignments with lengths 1..33 at page boundaries,
+  64 KiB writes, high addresses, invalid authority/extents/chunks, partial writes,
+  AW-first/W-first stalls, a WVALID-dependent AWREADY slave, missing B, source
+  starvation, late cancel, runtime disable and protocol faults. A harmless Slang
+  static-local-initializer warning in the TB was removed and the writer gates rerun.
+- [x] Shared-checker refactor rechecked against all three read profiles, transport
+  (4,240 checks) and AXI/control (318 checks), including lint/synthesis. Their
+  results and generic cell counts are unchanged. No new warning waiver was added.
+- [ ] Integrate reader/writer with protected mapping tables, bounded SG walking,
+  immutable command/program SRAM, virtqueue used-ring ordering and SoC reset/IRQ/
+  DMA routing. These memory-model tests do not cover a combined read→write copy,
+  cache coherence, actual DRAM, firmware domains, rendering, formal proof or STA.
+
+**Write lifetime contract:** accepted chunks are irrevocable once their writes
+are offered to AXI. Completion `bytes` counts strobed bytes accepted on W, **not**
+confirmed memory commits on a failing bus. A cancelled/failed destination can
+contain a partial prefix; it must remain invalid and must not be published for
+scanout or trusted as a complete reply. Keep mapping and backing pinned through
+idle, and flush unaccepted source chunks before reusing the stream for another
+job. A malformed later chunk does not roll back earlier writes. Wrong/early B is
+not a trustworthy retirement event: bus_fault stays set and idle stays low until
+fabric reset. B completion alone is not proof of CPU cache visibility; establish
+the platform DMA/cache contract before issuing virtio used/fence notifications.
+
+Run the existing proxy runner with
+`APU_DMA_WRITE=1 APU_DMA=1 APU_AXI=1 APU_SYNTH=1`. Writer artifacts are under
+remote `/tmp/g6lc-apu-virtio-mmio/write-{0-8,1-3}`. This remains an optional leaf
+in `Flist.apu_axi`, not instantiated in the control top or any production SoC.
+No new graphics capability or strict core-qualification evidence is claimed.
+
+Timing/DFT: registered admission, one 64-bit input chunk and registered AW/W
+payloads; small per-byte alignment/strobe selection and local counters. Same
+clock/reset and testmode seam, no new SRAM/ICG/CDC. Counts are generic screening,
+not mapped area, sustained bandwidth or 1.25 GHz/12FFC timing/scan/power sign-off.
+Tier-R RTL and MIT verification headers are retained; upstream, BIOS and the
+concurrent strict-qualification/core-performance work were left untouched.
+
+### P1 SG walker, mapping table, command snapshot and used-ring
+
+Priors: frozen `gles2-min` contract; DMA read/write handoff/lifetime contracts above.
+
+- [x] `g6lc_apu_sg.sv`: default-off bounded SG walker behind `Enable && SgEn`.
+  Fetches a 16-byte guest list through the checked DMA reader into `tc_sram`
+  (Latency=1), rejects empty/overlapping/out-of-backing entries, then fragments
+  a logical transfer across entries without refetching the list. Child DMA
+  completions are leased until idle. Cancellation does not retract an offered
+  fragment. Remote runner flag `APU_SG=1`.
+- [x] `g6lc_apu_storage.sv`: protected resource mapping table (`MaxResources`)
+  and one immutable command snapshot (`MaxCmdBytes`) in `tc_sram`. Insert
+  refuses duplicate resource IDs; lookup checks context/epoch/write permission;
+  invalidate by slot/resource/context/all. Command bytes stream in 8-byte-aligned
+  beats and cannot be mutated until release. Optional `tc_clk_gating`
+  (`IS_FUNCTIONAL=0`) on the SRAM clocks. Combinational `apu_xfer_check` covers
+  box/stride/layer overflow against backing.
+- [x] `g6lc_apu_queue.sv`: used-ring publisher. Writes `virtq_used_elem` then
+  `used.idx` through the DMA writer. The idx store is publication; a failed or
+  cancelled idx must not be treated as a completed used entry. Does not pulse
+  the transport `used_valid` sideband.
+- [x] Remote Verilator 5.008, errors=0, rc=0:
+
+  | Leaf | Result |
+  |---|---|
+  | SG Entries=64 | 122 cases / 6,593 checks / 11,352 clocks |
+  | SG Entries=128 | 122 cases / 6,589 checks / 25,009 clocks |
+  | storage | 25 cases / 120 checks / 429 clocks |
+  | used-ring | 9 cases / 41 checks / 166 clocks |
+
+  Transport recheck 4,240 checks / 636 clocks. Lint+generic synth pass.
+  Disabled SG/storage/queue fixtures have zero cells (asserted). Enabled
+  storage 1,127 generic cells / 80 sequential bits (command array inferred;
+  mapping array is simulation-proven). Enabled queue 8,453 cells / 938
+  sequential bits, no latches. Enabled SG 64-entry 58,231 cells after the
+  table is mapped to FFs in this screening (128-entry 89,116); not mapped
+  area or STA. Leaves remain outside the control top and production flist.
+- [x] Firmware-facing backend `g6lc_apu_mem.sv` binds storage, SG, DMA and
+      used-ring behind one op port and one AXI master. Registered AR grant
+      before RVALID; command-DMA completion drain; SG fragment accept-then-DMA.
+      Remote `tb_g6lc_apu_mem`: 7 cases / 12 checks / 164 clocks (insert,
+      lookup, used-ring, command-DMA fill/release, SG load, SG read xfer).
+      `APU_MEM=1 APU_SYNTH=1` rc=0. Not on the AXI-lite wrapper or testharness.
+- [ ] Attach backend AXI to the control wrapper; SoC address/IRQ/DTS; native
+      execution.
+
+Reproduce:
+
+```powershell
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py sync
+wsl --cd /mnt/e/cva6 -e python3 verif/regress/remote/testharness_proxy.py --timeout 3600 shell env APU_SG=1 APU_MEM=1 APU_DMA=1 APU_DMA_WRITE=1 APU_AXI=1 APU_SYNTH=1 bash /opt/testharness/repo/verif/tb/apu/run-virtio-mmio.sh
+```
+
+No FeatureVirgl/EDID advertisement, no EGL in RTL, no testharness attachment.
+Concurrent BIOS native-service work is untouched.
+
 ## BIOS autoboot and Svelte UI (2026-09-11)
 
 Completed UI-and-boot pass: `g6lc_bios/AGENTS-todo.md` and
@@ -998,7 +1708,7 @@ Program spine: `architecture/remaining-upgrade-sequence.md` §0/§4 · residual 
 | **Ara / RVV** | Attach + DTS + directed; **VRF/cosim gate** `ara-vector-cosim` (live lmul opt) | `architecture/ara-vector-attach.md` · `agents/guides/AGENTS-vector.md` · `agents/vendor/AGENTS-vendor-ara.md` · `agents/spec/riscv-spec-I-9-vector.html` · suite `ara-vector-path` |
 | **H / KVM** | U9 + **H-edge Spike+RTL 3/3** (`kvm-h-spike` / Variane server_math) | `architecture/server-math-hypervisor.md` · remaining-upgrade Phase B · `agents/spec/riscv-spec-II-5.*-hypervisor*.html` · impl Hypervisor row · `verif/tests/custom/kvm_h/` · suite `kvm-h-tests` |
 | **`g6lc_qemu` emulation** | **Q1–Q2 landed; Q3–Q9 in progress.** QEMU virt + generated `g6lc-soc` OpenSBI/U-Boot/EDK2/OpenWrt **boot green** (hypothesis). AI DESC/CPL join + virt_ai_card; `ai_host_transport` **unpinned**. **Never Variane evidence.** Snapshot: `architecture/current-stage.md`. Design asks F1–F15: `g6lc_qemu/architecture/RTL_FEEDBACK.md` §2.1. | `architecture/g6lc-qemu/README.md` · `staging.md` · `u-boot-edk2-boot-architecture.md` · package `g6lc_qemu/AGENTS-todo.md` |
-| **`g6lc_bios`** | **B0–B52 landed within host/guest boundaries.** B50 strict JS/DOM; B51 shared configurable HolyC/browser menu rows, native browser imports/navigation and framed local HTTP; B52 bounded i32 WASM execution + real RV32/RV64 numeric lowering. Guest full browser/JIT installation and persistent settings/TLS remain open. Check: 196 Rust + 15 Bun tests; 13 BIOS regressions. Never Variane, never `-netdev`. | `architecture/g6lc-bios/README.md` · `g6lc_bios/AGENTS.md` · `g6lc_bios/architecture/PLAN.md` |
+| **`g6lc_bios`** | **B0–B52 landed; recovery P0–P2 QEMU-proved (journal + A/B stub protection).** Firmware flash/slot-select, wasm/DOM `RuntimeContext`, and Linux health helper remain open. Never Variane, never `-netdev`. | `architecture/g6lc-bios/README.md` · `g6lc_bios/AGENTS.md` · `g6lc_bios/architecture/PLAN.md` · `g6lc_bios/architecture/KERNEL-RV.md` |
 | **U-Boot / EDK2 loader architecture** | **U0/U1/U2 QEMU virt green; E0–E3 QEMU virt green; E1 RTL SEC-ABI green (E2/U2 not RTL).** `g6q fw build --loader edk2` wraps upstream `OvmfPkg/RiscVVirt/RiscVVirtQemu.dsc`. Remote `edk2-stable202511` + BaseTools + user-local `iasl` **OK**; CODE 8 MiB / VARS 768 KiB. **Isolation:** post-sync B with SL-W `wbuffer_all` SIGSEGV'd `mini_must_pass` (rc=139, t=275). HEAD dcache `work-ver-smt2-fw64-B-headiso` oracle green, `mini_edk2_sec` **PASS**, `mini_stq_flush_fwd` FAIL (gate-6). IQ width casts were not the crash. SL-W crash-fix (unsigned fixup index + power-of-two `WbufferAllDepth`) **`work-ver-smt2-fw64-B-slwfix` oracle green, `mini_edk2_sec` PASS** (6.5 s); `mini_stq_flush_fwd` **PASS** (`slw-gate6-noprop`, no sim probes): checked-miss ACK pushes fixup, miss keeps the entry, same-PA coalesce. E2 no longer gated on this mini. `apply_edk2_pflash` floors `-m` to 4 GiB and prefers generic-virt OpenSBI (`out/fw/fw_dynamic-generic-virt.bin`, no `FW_FDT_PATH`) over a g6lc-FDT `fw_dynamic` (that hung silent on virt). CpuDxe SATP green after `RiscVInterrupt.S` `s0` smash fix (`g6lc_qemu/patches/edk2-riscv-sstatus-no-stack.patch`). Smbios `INST_ACCESS_PAGE_FAULT` was `SupervisorModeTrap` `addi sp,-140` vs C `UINT64[35]` (xpack PP default ilp32); trap-frame ×8 + `PP_FLAGS -mabi=lp64` → `addi sp,-280`. QEMU 8.2.2 virt DEBUG: `SATP mode 10`, Bds, **UEFI Interactive Shell v2.2**. Virtio ESP `FS0:` + `BOOTRISCV64.EFI` (`E2-VIRTIO-ESP`) via `g6q run --loader edk2 --machine g6lc-virt --drive fat:rw:out/loader-run/esp`. E3 OpenWrt EFI stub green on EDK2. **U2 green**: `g6q run --loader u-boot --os openwrt` → U-Boot `bootefi` → `Linux version 6.6.93`; `--smp 2` → 2 CPUs and `procd`. **U3a/U3b/U3-FIT/U3-SPI green**: `--machine g6lc-soc` → `bootefi` DRAM PE (procd) and `bootm` of `g6lc-efi.itb` from NOR (`CPUINFO-DONE`). **U3-Shell virt green**: `--os efi-shell --machine g6lc-virt` → `UEFI Interactive Shell v2.2`. Soc SPI Shell `StartImage` hangs; soc `bootefi hello` ASCII green. **E2-PCI**: EDK2 Shell `pci` on GPEX (root complex) vs `virt_ai_card` (endpoint stand-in); `ai_host_transport` unpinned. SD still open. `mini_fdt_next_tag_lbu` PASS (`slw-fdt-regress`). | `architecture/g6lc-qemu/u-boot-edk2-boot-architecture.md` · `architecture/dcache-ack-before-check.md` §2.1 · `g6lc_qemu/AGENTS-todo.md` · `g6lc_qemu/pins.toml` |
 
 Standing disciplines remain active (`AGENTS.md` §0.4–§0.6). Keep
