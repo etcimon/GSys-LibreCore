@@ -88,7 +88,17 @@ crate only chooses the destination. Default `gl=off`.
 - Exec model sits on virtio-mmio **slot 5** (PLIC irq 6) so it does not
   collide with GPU (0), keyboard (1), mailbox irq 3 (slot 2), tablet (3),
   or timer irq 5 (slot 4)
-- Console: `VIRTIO-NET 5` or `VIRTIO-NET-NONE`
+- Console: `VIRTIO-NET 5` / `NONE`, then `OK` / `PKT` / `ARP` / `ICMP` /
+  `TCP` / `ACK` / `HTTP` / `FIN` / `UDP` / `DNS` / `DHCP` / `RST` /
+  `REXMIT` or `HOLD`. KernelNet `10.0.2.2` GET on a `virtio_net` board
+  runs kstart then `fetch` on live `__vio`. IPv4 DF + oversize → ICMP
+  frag-needed. No-DF fragments reassemble (`IpReasm`) before GET.
+  KernelNet `get` arms the NAT job; `poll` takes watchdog then one
+  handshake step; cancel drops the rings; link-down completes the
+  job without waiting for stall. Socket connect is IPv4-literal on
+  poll (no OS DNS, no IPv6). Isolated NAT DNS queries `10.0.2.3:53`
+  and answers `g6lc` A 10.0.2.2; the HTTP hop must use that A.
+  TCP window 8192; zero-window SYN refused. Not QEMU, not a PHY.
 
 ## Vendor ethernet / wifi
 

@@ -62,7 +62,41 @@ that `call`s an awaiter, and `call_indirect` inside a try when the
 funcref table can reach await, host-interp fail-closed direct `await`
 inside `try`/`try_table`, and interp callee-await from a try, landed.
 **P4 sequential leftovers are closed.** IME and RFB 3.8 stay with later
-phases. P5 may start.** Named BIOS profiles (`embedded`/`router` → `full`)
+phases. P5 binary-safe HTTP/1 response parse (`parse_http1_response`
+bytes + `Content-Length` + conflicting-framing reject), chunked
+decode (`Transfer-Encoding: chunked` alone; trailers discarded), and
+partial I/O (`NeedMore`/`NeedEof`/`Done`; KernelNet finishes framed
+bodies on `Done`), and TCP `WouldBlock` vs peer EOF (`TcpRecv`;
+close-delimited completes on EOF, not idle) and virtio-net feature
+negotiation, RX/TX queues, exec-model TX→RX loopback, Ethernet/ARP
+who-has 10.0.2.2, IPv4 ICMP echo, and TCP SYN/SYN-ACK to :80
+(`VIRTIO-NET-TCP` / `ACK` / `HTTP` / `FIN` / `UDP` / `DNS` / `DHCP` /
+`RST` / `REXMIT`) and KernelNet `10.0.2.2` fetch over in-memory
+packets (`nat_http_on_wire`) and TCP reassembly of a split GET
+(`NatHttpReasm`), NAT TCP listen (`NatTcp`), and virtio-shaped TX/RX
+used-idx (`VirtioNetDma`) with virtio desc/avail/used rings, and
+KernelNet GET via exec-model `GuestVirtioNet` rings, and a second GET
+on live kstart `__vio` after `VioNetProbe`, and KernelNet `10.0.2.2` GET
+via `from_kstart`, and ICMP dest-unreach frag-needed on DF+oversize,
+and IPv4 fragment reassembly of a split GET (`IpReasm`),
+and KernelNet cancel/watchdog during a NAT fetch,
+and link-loss completion of an in-flight GET,
+and KernelNet socket GET armed without connect (IPv4 literal;
+IPv6/hostname refused), and isolated NAT DNS A `g6lc`→10.0.2.2
+as a pollable job (query `NAT_DNS` 10.0.2.3; A is the HTTP gateway),
+and DNS destination policy (HTTP hop must match the A),
+and HTTP redirect origin policy (no follow, no HTTPS downgrade),
+TCP window (8192; zero-window SYN refused), and generational
+KernelNet job slots (4)
+landed. P5 sequential leftovers are closed; the P5 gate still
+needs external isolated peers, QEMU `-netdev`, and a PHY.
+P6: ClientHello no longer advertises CBC/RSA key transport;
+TLS random is not `sha256(host)` (`NoEntropy` fails closed);
+HKDF-SHA256 extract/expand (RFC 5869);
+RFC 8446 Expand-Label / Derive-Secret (0-RTT/resumption labels refused);
+AES-128-GCM seal/open; TLS 1.3 AEAD record (`wrap_app` stays plaintext);
+handshake transcript + Finished HMAC.
+Named BIOS profiles (`embedded`/`router` → `full`)
 compile from UART+SPI flash up to browser-UI HTTPS + USB settings. USB FAT32
 flash is always compiled; the USB-key file manager (FAT32/NTFS/ext4) is extra.
 64-bit SMT2 / multi-core / multi-issue / stream / OoO / hypervisor / RVV

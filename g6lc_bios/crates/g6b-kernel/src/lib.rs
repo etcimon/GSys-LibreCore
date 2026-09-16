@@ -4724,9 +4724,15 @@ impl BrowserSession {
     fn hw_tcp_recv_until(&mut self, sock: u32, min: usize, http: bool) -> Result<Vec<u8>, String> {
         let mut acc = Vec::new();
         for _ in 0..80 {
-            let chunk = self.hw.tcp_recv_bytes(sock)?;
-            if !chunk.is_empty() {
-                acc.extend_from_slice(&chunk);
+            match self.hw.tcp_recv_bytes(sock)? {
+                g6b_hw::TcpRecv::Data(chunk) => acc.extend_from_slice(&chunk),
+                g6b_hw::TcpRecv::WouldBlock => {}
+                g6b_hw::TcpRecv::Eof => {
+                    if acc.is_empty() {
+                        return Err("hw tcp recv timeout".into());
+                    }
+                    return Ok(acc);
+                }
             }
             if http && acc.windows(4).any(|w| w == b"\r\n\r\n") && acc.len() >= min {
                 return Ok(acc);

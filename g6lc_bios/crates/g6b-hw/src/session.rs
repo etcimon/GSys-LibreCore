@@ -253,6 +253,10 @@ impl HwSession {
         }
     }
 
+    pub fn board(&self) -> Option<&BoardSpec> {
+        self.board.as_ref()
+    }
+
     pub fn from_board(spec: &BoardSpec) -> Self {
         let mut s = Self::from_hw(HwSpec::from_board(spec));
         s.board = Some(spec.clone());
@@ -589,6 +593,12 @@ impl HwSession {
             CableEvent::Removed | CableEvent::LinkDown => {
                 self.cable = CableState::Unplugged;
                 self.phase = NatPhase::Idle;
+                let ids: Vec<String> = self.spec.net().map(|a| a.id.clone()).collect();
+                for id in ids {
+                    if let Ok(cfg) = self.net_cfg_mut(&id) {
+                        cfg.inet.link = LinkState::Down;
+                    }
+                }
             }
         }
     }
@@ -795,15 +805,30 @@ impl HwSession {
 
     /// Kernel fetch path: connect and return the socket id (not JSON).
     pub fn tcp_connect_sock(&mut self, id: &str, host: &str, port: u16) -> Result<u32, String> {
+        for _ in 0..50 {
+            if let Some(sock) = self.tcp_try_connect_sock(id, host, port)? {
+                return Ok(sock);
+            }
+        }
+        Err("tcp connect: wouldblock".into())
+    }
+
+    /// One bounded connect. `None` means poll again. IPv4 literals only.
+    pub fn tcp_try_connect_sock(
+        &mut self,
+        id: &str,
+        host: &str,
+        port: u16,
+    ) -> Result<Option<u32>, String> {
         self.require_stack(id, "tcp")?;
-        self.stack.tcp_connect(id, host, port)
+        self.stack.tcp_try_connect(id, host, port)
     }
 
     pub fn tcp_send_bytes(&mut self, sock: u32, data: &[u8]) -> Result<usize, String> {
         self.stack.tcp_send_bytes(sock, data)
     }
 
-    pub fn tcp_recv_bytes(&mut self, sock: u32) -> Result<Vec<u8>, String> {
+    pub fn tcp_recv_bytes(&mut self, sock: u32) -> Result<crate::TcpRecv, String> {
         self.stack.tcp_recv_bytes(sock)
     }
 
@@ -1422,6 +1447,7 @@ mod tests {
         let _ = s.drain_one();
         assert_eq!(s.phase(), NatPhase::Idle);
         assert_eq!(s.cable(), CableState::Unplugged);
+        assert_eq!(s.device("net0").unwrap().inet.link, LinkState::Down);
         assert!(s.env_untouched());
     }
 

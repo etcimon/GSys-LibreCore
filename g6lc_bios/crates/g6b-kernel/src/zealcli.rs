@@ -12,10 +12,12 @@
 //! The HTTPS transfer is **poll-driven on purpose**. `get` plans the URL
 //! (`g6b-http`), opens an isolated-NAT hw TCP socket (`g6b-hw`) and writes the
 //! request; each `poll` performs exactly one non-blocking `recv` and returns.
-//! No thread is created, nothing blocks the prompt or the timer tick, and the
-//! transfer can be cancelled between two polls.
+//! The `10.0.2.2` packet path is the same shape: `get` only arms the job,
+//! each `poll` takes watchdog then one SYN/ACK/GET step. No thread is created,
+//! nothing blocks the prompt or the timer tick, and the transfer can be
+//! cancelled between two polls.
 
-use std::collections::BTreeMap;
+use std::fmt;
 
 use g6b_spec::BoardSpec;
 use g6b_zealcli::{
@@ -299,40 +301,82 @@ impl VolumePort for DirVolumes {
     }
 }
 
-/// One in-flight GET on an hw TCP socket.
-#[derive(Debug)]
+/// One in-flight GET on an hw TCP socket, or the in-process NAT packet peer.
 struct Job {
-    sock: u32,
+    sock: Option<u32>,
     https: bool,
+    from_host: String,
+    from_port: u16,
     device: String,
     buf: Vec<u8>,
-    /// Content-Length once the header has been parsed.
-    want: Option<usize>,
-    header_end: Option<usize>,
+    /// HTTP bytes waiting to be parsed (after the GET step).
+    pkt: Option<Vec<u8>>,
+    /// Armed NAT GET; rings are created on the first poll, not in `get`.
+    nat_req: Option<Vec<u8>>,
+    nat: Option<NatJob>,
     /// When bytes last arrived. A poll count is not a clock — under load 20k
     /// non-blocking reads can pass before the peer has even accepted — so the
     /// framing and stall rules are stated in time, while each poll still
     /// returns immediately. The guest equivalent reads `rdtime`.
     last: std::time::Instant,
-    saw_bytes: bool,
     done: bool,
+    /// Socket GET: connect on poll, not in `get`. IPv4 literal only.
+    conn: Option<(String, u16)>,
+    tx: Option<Vec<u8>>,
+    /// Isolated NAT DNS A (`g6lc`) before the packet GET.
+    dns: Option<String>,
+    /// Next-hop IPv4 after DNS (or the literal NAT origin). HTTP must match.
+    dst: Option<[u8; 4]>,
 }
 
-/// Outbound GET over the isolated NAT stack, one `recv` per poll.
+/// Guest virtio-net rings for one NAT GET. Dropped on cancel.
+struct NatJob {
+    net: g6b_asm::exec::GuestVirtioNet,
+    req: Vec<u8>,
+    step: u8,
+    ack_n: u32,
+}
+
+impl fmt::Debug for Job {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Job")
+            .field("sock", &self.sock)
+            .field("https", &self.https)
+            .field("from_host", &self.from_host)
+            .field("from_port", &self.from_port)
+            .field("device", &self.device)
+            .field("buf", &self.buf.len())
+            .field("pkt", &self.pkt.as_ref().map(Vec::len))
+            .field("nat_req", &self.nat_req.as_ref().map(Vec::len))
+            .field("nat_step", &self.nat.as_ref().map(|n| n.step))
+            .field("conn", &self.conn)
+            .field("tx", &self.tx.as_ref().map(Vec::len))
+            .field("dns", &self.dns)
+            .field("dst", &self.dst)
+            .field("done", &self.done)
+            .finish()
+    }
+}
+
+const JOB_SLOTS: usize = 4;
+
+/// Outbound GET over the isolated NAT stack, one `recv` (or one handshake
+/// step) per poll. Watchdog is taken before that I/O.
 #[derive(Debug)]
 pub struct KernelNet {
     hw: g6b_hw::HwSession,
-    jobs: BTreeMap<u32, Job>,
-    next: u32,
+    slots: [Option<Job>; JOB_SLOTS],
+    gen: [u32; JOB_SLOTS],
+    wdt_hits: u32,
+    wdt_hold: bool,
+    /// `None` fails closed. Hostname hash is not entropy.
+    tls_rng: Option<g6b_tls::FixtureEntropy>,
 }
 
 /// No data for this long ends the transfer. Polls stay non-blocking; this is
-/// the deadline that makes them terminate.
+/// the deadline that makes them terminate. Close-delimited bodies complete
+/// on peer EOF (`TcpRecv::Eof`), not on idle time.
 const STALL: std::time::Duration = std::time::Duration::from_secs(10);
-/// Quiet time after the last byte that means "peer closed" when the response
-/// carried no `Content-Length` (`Connection: close` framing). A non-blocking
-/// read cannot tell EOF from "not yet", so the grace period is explicit.
-const CLOSE_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
 /// Ceiling on a single response, so a hostile server cannot grow the heap.
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
@@ -340,8 +384,128 @@ impl KernelNet {
     pub fn new(spec: &BoardSpec) -> Self {
         Self {
             hw: g6b_hw::HwSession::from_board(spec),
-            jobs: BTreeMap::new(),
-            next: 1,
+            slots: [None, None, None, None],
+            gen: [0; JOB_SLOTS],
+            wdt_hits: 0,
+            wdt_hold: false,
+            tls_rng: None,
+        }
+    }
+
+    fn use_test_entropy(&mut self) {
+        self.tls_rng = Some(g6b_tls::FixtureEntropy::TEST);
+    }
+
+    fn pack(slot: usize, gen: u32) -> u32 {
+        (gen << 8) | slot as u32
+    }
+
+    fn unpack(handle: u32) -> (usize, u32) {
+        ((handle & 0xff) as usize, handle >> 8)
+    }
+
+    fn job(&self, handle: u32) -> Option<&Job> {
+        let (slot, gen) = Self::unpack(handle);
+        if slot >= JOB_SLOTS || gen == 0 || self.gen[slot] != gen {
+            return None;
+        }
+        self.slots[slot].as_ref()
+    }
+
+    fn job_mut(&mut self, handle: u32) -> Option<&mut Job> {
+        let (slot, gen) = Self::unpack(handle);
+        if slot >= JOB_SLOTS || gen == 0 || self.gen[slot] != gen {
+            return None;
+        }
+        self.slots[slot].as_mut()
+    }
+
+    fn alloc(&mut self, job: Job) -> Result<u32, String> {
+        for slot in 0..JOB_SLOTS {
+            if self.slots[slot].is_none() {
+                let mut g = self.gen[slot].saturating_add(1);
+                if g == 0 {
+                    g = 1;
+                }
+                self.gen[slot] = g;
+                self.slots[slot] = Some(job);
+                return Ok(Self::pack(slot, g));
+            }
+        }
+        Err("job budget".into())
+    }
+
+    fn job_count(&self) -> usize {
+        self.slots.iter().filter(|s| s.is_some()).count()
+    }
+
+    /// Test seam: next `poll` fails before packet/socket I/O.
+    fn hold_watchdog(&mut self) {
+        self.wdt_hold = true;
+    }
+
+    fn drop_link(&mut self) {
+        let id = self.hw.primary_net_id();
+        let _ = self.hw.apply_link(&id, "down");
+    }
+
+    fn unplug(&mut self) {
+        let _ = self.hw.push(g6b_hw::HwMsg::Cable(g6b_hw::CableEvent::Removed));
+        let _ = self.hw.drain_one();
+    }
+
+    fn force_dst(&mut self, handle: u32, ip: [u8; 4]) {
+        if let Some(job) = self.job_mut(handle) {
+            job.dst = Some(ip);
+        }
+    }
+
+    fn link_down(&self, id: &str) -> bool {
+        self.hw
+            .device(id)
+            .map(|d| d.inet.link != g6b_hw::LinkState::Up)
+            .unwrap_or(true)
+    }
+
+    fn open_nat(&self, req: Vec<u8>) -> Result<NatJob, String> {
+        let net = match self.hw.board() {
+            Some(spec) if spec.wants_virtio_net() => {
+                let m = g6b_asm::analyze::kstart(spec);
+                g6b_asm::exec::GuestVirtioNet::from_kstart(spec, &m, 0x8020_0000)?.1
+            }
+            _ => g6b_asm::exec::GuestVirtioNet::new()?,
+        };
+        Ok(NatJob {
+            net,
+            req,
+            step: 0,
+            ack_n: 0,
+        })
+    }
+
+    /// One SYN / ACK / GET. `true` means the handshake is still open.
+    fn step_nat(job: &mut Job) -> Result<bool, String> {
+        let Some(nat) = job.nat.as_mut() else {
+            return Ok(false);
+        };
+        match nat.step {
+            0 => {
+                nat.ack_n = nat.net.handshake_syn()?;
+                nat.step = 1;
+                Ok(true)
+            }
+            1 => {
+                nat.net.handshake_ack(nat.ack_n)?;
+                nat.step = 2;
+                Ok(true)
+            }
+            2 => {
+                let http = nat.net.handshake_get(&nat.req, nat.ack_n)?;
+                job.nat = None;
+                job.pkt = Some(http);
+                Ok(false)
+            }
+            _ => Err("nat handshake".into()),
         }
     }
 
@@ -379,74 +543,301 @@ impl NetPort for KernelNet {
     fn get(&mut self, url: &str) -> Result<u32, String> {
         let req = g6b_http::outbound::plan(url)?;
         let device = self.prepare()?;
-        let sock = self.hw.tcp_connect_sock(&device, &req.host, req.port)?;
         let bytes = if req.https {
             // HTTPS starts with the ClientHello the TLS crate writes; the
             // record layer answer is inspected on the first poll.
-            g6b_tls::client_hello(&req.host)
+            let rng = self
+                .tls_rng
+                .as_mut()
+                .ok_or("tls: no entropy")?;
+            g6b_tls::client_hello_with(&req.host, rng)?
         } else {
             g6b_http::outbound::http1_get_request(&req)
         };
-        self.hw.tcp_send_bytes(sock, &bytes)?;
-        let handle = self.next;
-        self.next += 1;
-        self.jobs.insert(
-            handle,
-            Job {
-                sock,
-                https: req.https,
+        if !req.https && g6b_hw::is_nat_http_host(&req.host, req.port) {
+            return self.alloc(Job {
+                sock: None,
+                https: false,
+                from_host: req.host.clone(),
+                from_port: req.port,
                 device,
                 buf: Vec::new(),
-                want: None,
-                header_end: None,
+                pkt: None,
+                nat_req: Some(bytes),
+                nat: None,
                 last: std::time::Instant::now(),
-                saw_bytes: false,
                 done: false,
-            },
-        );
-        Ok(handle)
+                conn: None,
+                tx: None,
+                dns: None,
+                dst: Some([10, 0, 2, 2]),
+            });
+        }
+        if !req.https && g6b_hw::is_nat_dns_name(&req.host) && req.port == 80 {
+            return self.alloc(Job {
+                sock: None,
+                https: false,
+                from_host: req.host.clone(),
+                from_port: req.port,
+                device,
+                buf: Vec::new(),
+                pkt: None,
+                nat_req: Some(bytes),
+                nat: None,
+                last: std::time::Instant::now(),
+                done: false,
+                conn: None,
+                tx: None,
+                dns: Some(req.host),
+                dst: None,
+            });
+        }
+        self.alloc(Job {
+            sock: None,
+            https: req.https,
+            from_host: req.host.clone(),
+            from_port: req.port,
+            device,
+            buf: Vec::new(),
+            pkt: None,
+            nat_req: None,
+            nat: None,
+            last: std::time::Instant::now(),
+            done: false,
+            conn: Some((req.host, req.port)),
+            tx: Some(bytes),
+            dns: None,
+            dst: None,
+        })
     }
 
     fn poll(&mut self, handle: u32) -> Progress {
-        let Some(job) = self.jobs.get_mut(&handle) else {
-            return Progress::Failed("no such transfer".into());
-        };
-        if job.done {
-            return Progress::Failed("transfer already finished".into());
+        let (slot, gen) = Self::unpack(handle);
+        if slot < JOB_SLOTS && gen != 0 && self.gen[slot] != gen {
+            return Progress::Failed("stale generation".into());
         }
-        let chunk = match self.hw.tcp_recv_bytes(job.sock) {
-            Ok(c) => c,
-            Err(e) => {
+        match self.job(handle) {
+            None => return Progress::Failed("no such transfer".into()),
+            Some(job) if job.done => {
+                return Progress::Failed("transfer already finished".into());
+            }
+            Some(_) => {}
+        }
+        self.wdt_hits = self.wdt_hits.wrapping_add(1);
+        if self.wdt_hold {
+            if let Some(job) = self.job_mut(handle) {
                 job.done = true;
+            }
+            return Progress::Failed("watchdog: fetch stopped".into());
+        }
+        let device = self
+            .job(handle)
+            .map(|j| j.device.clone())
+            .unwrap_or_default();
+        if self.link_down(&device) {
+            let sock = if let Some(job) = self.job_mut(handle) {
+                job.done = true;
+                job.nat = None;
+                job.nat_req = None;
+                job.pkt = None;
+                job.conn = None;
+                job.tx = None;
+                job.dns = None;
+                job.dst = None;
+                job.sock.take()
+            } else {
+                None
+            };
+            if let Some(s) = sock {
+                let _ = self.hw.sock_close(s);
+            }
+            return Progress::Failed("link down".into());
+        }
+        let need_dns = self
+            .job(handle)
+            .map(|j| j.dns.is_some())
+            .unwrap_or(false);
+        if need_dns {
+            let name = self
+                .job_mut(handle)
+                .and_then(|j| j.dns.take())
+                .expect("dns");
+            match g6b_hw::nat_dns_a(&name) {
+                Ok(ip) => {
+                    if let Some(j) = self.job_mut(handle) {
+                        j.dst = Some(ip);
+                    }
+                    return Progress::Pending {
+                        done: 0,
+                        total: 0,
+                    };
+                }
+                Err(e) => {
+                    if let Some(j) = self.job_mut(handle) {
+                        j.done = true;
+                    }
+                    return Progress::Failed(e);
+                }
+            }
+        }
+        if let Some(ip) = self.job(handle).and_then(|j| j.dst) {
+            if let Err(e) = g6b_hw::nat_http_dst(ip) {
+                if let Some(j) = self.job_mut(handle) {
+                    j.done = true;
+                }
                 return Progress::Failed(e);
             }
-        };
-        if chunk.is_empty() {
-            let quiet = job.last.elapsed();
-            if job.saw_bytes && job.want.is_none() && quiet > CLOSE_GRACE {
-                // Close-framed response: nothing more is coming.
-                return finish(job);
-            }
-            if quiet > STALL {
-                job.done = true;
-                return Progress::Failed(format!(
-                    "transfer stalled: no data for {}s",
-                    STALL.as_secs()
-                ));
-            }
-            return Progress::Pending {
-                done: job.buf.len() as u64,
-                total: job.want.unwrap_or(0) as u64,
-            };
         }
-        job.last = std::time::Instant::now();
-        job.saw_bytes = true;
-        job.buf.extend_from_slice(&chunk);
-        if job.buf.len() > MAX_BODY_BYTES {
-            job.done = true;
-            return Progress::Failed(format!("response exceeds {MAX_BODY_BYTES} bytes"));
+        let need_conn = self
+            .job(handle)
+            .map(|j| j.sock.is_none() && j.conn.is_some())
+            .unwrap_or(false);
+        if need_conn {
+            let (device, host, port) = {
+                let j = self.job(handle).expect("conn job");
+                let (h, p) = j.conn.clone().expect("conn");
+                (j.device.clone(), h, p)
+            };
+            match self.hw.tcp_try_connect_sock(&device, &host, port) {
+                Ok(None) => {
+                    return Progress::Pending {
+                        done: 0,
+                        total: 0,
+                    };
+                }
+                Ok(Some(sock)) => {
+                    if let Some(j) = self.job_mut(handle) {
+                        j.sock = Some(sock);
+                        j.conn = None;
+                    }
+                }
+                Err(e) => {
+                    if let Some(j) = self.job_mut(handle) {
+                        j.done = true;
+                    }
+                    return Progress::Failed(e);
+                }
+            }
+        }
+        let send = self.job(handle).and_then(|j| match (j.sock, j.tx.as_ref()) {
+            (Some(s), Some(t)) if !t.is_empty() => Some((s, t.clone())),
+            _ => None,
+        });
+        if let Some((sock, tx)) = send {
+            match self.hw.tcp_send_bytes(sock, &tx) {
+                Ok(n) if n >= tx.len() => {
+                    if let Some(j) = self.job_mut(handle) {
+                        j.tx = None;
+                    }
+                    return Progress::Pending {
+                        done: 0,
+                        total: 0,
+                    };
+                }
+                Ok(n) => {
+                    if let Some(j) = self.job_mut(handle) {
+                        if let Some(rest) = j.tx.as_mut() {
+                            rest.drain(..n.min(rest.len()));
+                        }
+                    }
+                    return Progress::Pending {
+                        done: 0,
+                        total: 0,
+                    };
+                }
+                Err(e) => {
+                    if let Some(j) = self.job_mut(handle) {
+                        j.done = true;
+                    }
+                    return Progress::Failed(e);
+                }
+            }
+        }
+        let need_arm = self
+            .job(handle)
+            .map(|j| j.nat_req.is_some() && j.nat.is_none())
+            .unwrap_or(false);
+        if need_arm {
+            let req = self
+                .job_mut(handle)
+                .and_then(|j| j.nat_req.take())
+                .expect("nat_req");
+            match self.open_nat(req) {
+                Ok(nat) => {
+                    if let Some(j) = self.job_mut(handle) {
+                        j.nat = Some(nat);
+                    }
+                }
+                Err(e) => {
+                    if let Some(j) = self.job_mut(handle) {
+                        j.done = true;
+                    }
+                    return Progress::Failed(e);
+                }
+            }
+        }
+        {
+            let Some(job) = self.job_mut(handle) else {
+                return Progress::Failed("no such transfer".into());
+            };
+            match Self::step_nat(job) {
+                Ok(true) => {
+                    return Progress::Pending {
+                        done: job.buf.len() as u64,
+                        total: 0,
+                    };
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    job.done = true;
+                    return Progress::Failed(e);
+                }
+            }
+        }
+        let pkt = self.job_mut(handle).and_then(|j| j.pkt.take());
+        let sock = self.job(handle).and_then(|j| j.sock);
+        let (chunk, eof) = if let Some(pkt) = pkt {
+            (pkt, true)
+        } else if let Some(sock) = sock {
+            match self.hw.tcp_recv_bytes(sock) {
+                Ok(g6b_hw::TcpRecv::Data(c)) => (c, false),
+                Ok(g6b_hw::TcpRecv::WouldBlock) => (Vec::new(), false),
+                Ok(g6b_hw::TcpRecv::Eof) => (Vec::new(), true),
+                Err(e) => {
+                    if let Some(j) = self.job_mut(handle) {
+                        j.done = true;
+                    }
+                    return Progress::Failed(e);
+                }
+            }
+        } else {
+            if let Some(j) = self.job_mut(handle) {
+                j.done = true;
+            }
+            return Progress::Failed("no packet and no socket".into());
+        };
+        let Some(job) = self.job_mut(handle) else {
+            return Progress::Failed("no such transfer".into());
+        };
+        if !chunk.is_empty() {
+            job.last = std::time::Instant::now();
+            job.buf.extend_from_slice(&chunk);
+            if job.buf.len() > MAX_BODY_BYTES {
+                job.done = true;
+                return Progress::Failed(format!("response exceeds {MAX_BODY_BYTES} bytes"));
+            }
         }
         if job.https {
+            if job.buf.is_empty() {
+                if eof || job.last.elapsed() > STALL {
+                    job.done = true;
+                    return Progress::Failed(format!(
+                        "transfer stalled: no data for {}s",
+                        STALL.as_secs()
+                    ));
+                }
+                return Progress::Pending { done: 0, total: 0 };
+            }
             // The client record layer is not implemented (B54): report the
             // handshake honestly instead of pretending to decrypt.
             let kind = g6b_tls::tls_record_kind(&job.buf).unwrap_or("unknown");
@@ -456,29 +847,33 @@ impl NetPort for KernelNet {
                  use a USB key image or an http mirror on the isolated NAT"
             ));
         }
-        if job.header_end.is_none() {
-            if let Some(at) = job.buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                job.header_end = Some(at + 4);
-                job.want = content_length(&job.buf[..at]);
+        match g6b_http::outbound::parse_http1_response_partial(&job.buf, eof) {
+            g6b_http::outbound::Http1Parse::Done(resp) => finish_resp(job, resp),
+            g6b_http::outbound::Http1Parse::NeedMore | g6b_http::outbound::Http1Parse::NeedEof => {
+                if job.last.elapsed() > STALL {
+                    job.done = true;
+                    return Progress::Failed(format!(
+                        "transfer stalled: no data for {}s",
+                        STALL.as_secs()
+                    ));
+                }
+                Progress::Pending {
+                    done: job.buf.len() as u64,
+                    total: 0,
+                }
             }
-        }
-        if let (Some(head), Some(len)) = (job.header_end, job.want) {
-            if job.buf.len() >= head + len {
-                return finish(job);
-            }
-        }
-        Progress::Pending {
-            done: job.buf.len() as u64,
-            total: job
-                .want
-                .map(|l| (job.header_end.unwrap_or(0) + l) as u64)
-                .unwrap_or(0),
         }
     }
 
     fn cancel(&mut self, handle: u32) {
-        if let Some(job) = self.jobs.remove(&handle) {
-            let _ = self.hw.sock_close(job.sock);
+        let (slot, gen) = Self::unpack(handle);
+        if slot >= JOB_SLOTS || gen == 0 || self.gen[slot] != gen {
+            return;
+        }
+        if let Some(job) = self.slots[slot].take() {
+            if let Some(sock) = job.sock {
+                let _ = self.hw.sock_close(sock);
+            }
         }
     }
 
@@ -495,35 +890,48 @@ impl NetPort for KernelNet {
             return "HW-NET none (no adapter compiled)".into();
         }
         format!(
-            "HW-NET {} nat={} jobs={}",
+            "HW-NET {} nat={} jobs={} wdt={}",
             nets.join(", "),
             self.hw.mode().as_str(),
-            self.jobs.len()
+            self.job_count(),
+            self.wdt_hits
         )
     }
 }
 
-fn finish(job: &mut Job) -> Progress {
+fn finish_resp(job: &mut Job, resp: g6b_http::Response) -> Progress {
     job.done = true;
-    let resp = g6b_http::outbound::parse_http1_response(&job.buf);
+    if g6b_http::outbound::is_redirect(resp.status) {
+        let loc = resp
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+            .map(|(_, v)| v.as_str())
+            .unwrap_or("");
+        let from = g6b_http::outbound::OutboundReq {
+            https: job.https,
+            host: job.from_host.clone(),
+            port: job.from_port,
+            path: "/".into(),
+        };
+        return match g6b_http::outbound::redirect_hop(&from, loc) {
+            Ok(next) => Progress::Failed(format!(
+                "redirect: not followed {}://{}:{}{}",
+                if next.https { "https" } else { "http" },
+                next.host,
+                next.port,
+                next.path
+            )),
+            Err(e) => Progress::Failed(e),
+        };
+    }
     if resp.status != 200 {
         return Progress::Failed(format!(
             "HTTP {} from {} via=hw-tcp",
             resp.status, job.device
         ));
     }
-    Progress::Done(resp.body.clone())
-}
-
-fn content_length(head: &[u8]) -> Option<usize> {
-    let text = String::from_utf8_lossy(head);
-    for line in text.split("\r\n").skip(1) {
-        let (name, value) = line.split_once(':')?;
-        if name.trim().eq_ignore_ascii_case("content-length") {
-            return value.trim().parse().ok();
-        }
-    }
-    None
+    Progress::Done(resp.body)
 }
 
 /// Firmware sink. `stage` digests with the kernel's SHA-256 (`g6b-tls`) so the
@@ -626,7 +1034,7 @@ mod tests {
     }
 
     use std::io::{Read, Write};
-    use std::net::TcpListener;
+    use std::net::{Shutdown, TcpListener};
 
     fn spec(profile: &str) -> BoardSpec {
         BoardSpec::from_json_str(&format!(r#"{{"schema_version":1,"profile":"{profile}"}}"#))
@@ -647,6 +1055,23 @@ mod tests {
                 );
                 let _ = stream.write_all(head.as_bytes());
                 let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+        });
+        (port, handle)
+    }
+
+    fn serve_redirect(location: &'static str) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let head = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                let _ = stream.write_all(head.as_bytes());
                 let _ = stream.flush();
             }
         });
@@ -744,10 +1169,418 @@ mod tests {
     }
 
     #[test]
+    fn outbound_get_nat_gateway_uses_packets_not_host_sockets() {
+        let mut net = KernelNet::new(&spec("barebone"));
+        let handle = net.get("http://10.0.2.2/fw.bin").expect("nat get");
+        let mut pending = 0;
+        let got = loop {
+            match net.poll(handle) {
+                Progress::Pending { .. } => {
+                    pending += 1;
+                    assert!(pending < 8, "packet peer completes without a socket wait");
+                }
+                Progress::Done(b) => break b,
+                Progress::Failed(e) => panic!("nat fetch failed: {e}"),
+            }
+        };
+        assert_eq!(got, g6b_hw::NAT_HTTP_BODY);
+        net.cancel(handle);
+    }
+
+    fn spec_pkt() -> BoardSpec {
+        BoardSpec::from_json_str(
+            r#"{"schema_version":1,"profile":"barebone","kernel":{"hw":{"enable":true,"virtio_net":false,"ethernet":true}}}"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn outbound_nat_cancel_before_poll_never_sends_get() {
+        let mut net = KernelNet::new(&spec("barebone"));
+        let handle = net.get("http://10.0.2.2/fw.bin").expect("armed");
+        assert!(net.status().contains("jobs=1"), "{}", net.status());
+        assert!(net.status().contains("wdt=0"), "{}", net.status());
+        net.cancel(handle);
+        assert!(net.status().contains("jobs=0"), "{}", net.status());
+        match net.poll(handle) {
+            Progress::Failed(_) => {}
+            other => panic!("cancelled before poll must not complete: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outbound_nat_cancel_after_syn_never_completes() {
+        let mut net = KernelNet::new(&spec_pkt());
+        let handle = net.get("http://10.0.2.2/fw.bin").expect("armed");
+        match net.poll(handle) {
+            Progress::Pending { .. } => {}
+            other => panic!("SYN step is pending: {other:?}"),
+        }
+        assert!(net.status().contains("wdt=1"), "{}", net.status());
+        net.cancel(handle);
+        match net.poll(handle) {
+            Progress::Failed(_) => {}
+            Progress::Done(_) => panic!("cancelled after SYN must not GET"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn outbound_nat_watchdog_stops_fetch_before_packet() {
+        let mut net = KernelNet::new(&spec_pkt());
+        let handle = net.get("http://10.0.2.2/fw.bin").expect("armed");
+        net.hold_watchdog();
+        match net.poll(handle) {
+            Progress::Failed(e) => assert!(e.contains("watchdog"), "{e}"),
+            other => panic!("watchdog must run before packet: {other:?}"),
+        }
+        assert!(net.status().contains("wdt=1"), "{}", net.status());
+    }
+
+    #[test]
+    fn outbound_nat_cancel_does_not_drop_neighbour() {
+        let mut net = KernelNet::new(&spec_pkt());
+        let a = net.get("http://10.0.2.2/fw.bin").expect("a");
+        let b = net.get("http://10.0.2.2/fw.bin").expect("b");
+        net.cancel(a);
+        let mut pending = 0;
+        let got = loop {
+            match net.poll(b) {
+                Progress::Pending { .. } => {
+                    pending += 1;
+                    assert!(pending < 8);
+                }
+                Progress::Done(body) => break body,
+                Progress::Failed(e) => panic!("neighbour failed: {e}"),
+            }
+        };
+        assert_eq!(got, g6b_hw::NAT_HTTP_BODY);
+    }
+
+    #[test]
+    fn outbound_nat_link_down_after_syn_never_completes() {
+        let mut net = KernelNet::new(&spec_pkt());
+        let handle = net.get("http://10.0.2.2/fw.bin").expect("armed");
+        match net.poll(handle) {
+            Progress::Pending { .. } => {}
+            other => panic!("SYN step is pending: {other:?}"),
+        }
+        net.drop_link();
+        match net.poll(handle) {
+            Progress::Failed(e) => assert!(e.contains("link down"), "{e}"),
+            Progress::Done(_) => panic!("link down after SYN must not GET"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn outbound_nat_unplug_before_poll_never_sends_get() {
+        let mut net = KernelNet::new(&spec_pkt());
+        let handle = net.get("http://10.0.2.2/fw.bin").expect("armed");
+        net.unplug();
+        match net.poll(handle) {
+            Progress::Failed(e) => assert!(e.contains("link down"), "{e}"),
+            other => panic!("unplug must complete the job: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outbound_get_link_down_completes_without_stall() {
+        let body = b"G6LC".to_vec();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (port, th) = serve_close_delimited(body, rx);
+        let mut net = KernelNet::new(&spec("barebone"));
+        let handle = net
+            .get(&format!("http://127.0.0.1:{port}/fw.bin"))
+            .expect("connect");
+        let mut pending = 0;
+        loop {
+            match net.poll(handle) {
+                Progress::Pending { .. } => {
+                    pending += 1;
+                    if pending > 8 {
+                        break;
+                    }
+                }
+                Progress::Done(_) => panic!("must not finish before link down"),
+                Progress::Failed(e) => panic!("fetch failed before link down: {e}"),
+            }
+        }
+        net.drop_link();
+        match net.poll(handle) {
+            Progress::Failed(e) => assert!(e.contains("link down"), "{e}"),
+            other => panic!("link down must not wait for stall: {other:?}"),
+        }
+        let _ = tx.send(());
+        let _ = th.join();
+    }
+
+    #[test]
+    fn outbound_get_arms_without_connect() {
+        let mut net = KernelNet::new(&spec("barebone"));
+        let t0 = std::time::Instant::now();
+        let handle = net
+            .get("http://127.0.0.1:1/fw.bin")
+            .expect("get must not wait for connect");
+        assert!(
+            t0.elapsed() < std::time::Duration::from_millis(500),
+            "get blocked on connect: {:?}",
+            t0.elapsed()
+        );
+        assert!(net.status().contains("jobs=1"), "{}", net.status());
+        match net.poll(handle) {
+            Progress::Pending { .. } | Progress::Failed(_) => {}
+            Progress::Done(_) => panic!("nothing listening on :1"),
+        }
+    }
+
+    #[test]
+    fn outbound_get_hostname_needs_async_dns() {
+        let mut net = KernelNet::new(&spec("barebone"));
+        let handle = net
+            .get("http://g6lc.invalid/fw.bin")
+            .expect("get must not block on DNS");
+        match net.poll(handle) {
+            Progress::Failed(e) => assert!(e.contains("dns"), "{e}"),
+            other => panic!("hostname is not an IPv4 literal: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outbound_get_g6lc_uses_nat_dns_not_os() {
+        let mut net = KernelNet::new(&spec_pkt());
+        let handle = net.get("http://g6lc/fw.bin").expect("armed");
+        match net.poll(handle) {
+            Progress::Pending { .. } => {}
+            other => panic!("DNS step is pending: {other:?}"),
+        }
+        let mut pending = 1;
+        let got = loop {
+            match net.poll(handle) {
+                Progress::Pending { .. } => {
+                    pending += 1;
+                    assert!(pending < 8);
+                }
+                Progress::Done(body) => break body,
+                Progress::Failed(e) => panic!("nat dns fetch failed: {e}"),
+            }
+        };
+        assert_eq!(got, g6b_hw::NAT_HTTP_BODY);
+    }
+
+    #[test]
+    fn outbound_get_g6lc_cancel_before_dns_never_gets() {
+        let mut net = KernelNet::new(&spec_pkt());
+        let handle = net.get("http://g6lc/fw.bin").expect("armed");
+        net.cancel(handle);
+        match net.poll(handle) {
+            Progress::Failed(_) => {}
+            other => panic!("cancelled DNS job must not GET: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outbound_get_g6lc_refuses_nameserver_as_origin() {
+        let mut net = KernelNet::new(&spec_pkt());
+        let handle = net.get("http://g6lc/fw.bin").expect("armed");
+        match net.poll(handle) {
+            Progress::Pending { .. } => {}
+            other => panic!("DNS step is pending: {other:?}"),
+        }
+        net.force_dst(handle, [10, 0, 2, 3]);
+        match net.poll(handle) {
+            Progress::Failed(e) => assert!(e.contains("origin"), "{e}"),
+            Progress::Done(_) => panic!("nameserver is not an HTTP origin"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn outbound_nat_job_budget_and_stale_generation() {
+        let mut net = KernelNet::new(&spec_pkt());
+        let mut hs = Vec::new();
+        for _ in 0..4 {
+            hs.push(net.get("http://10.0.2.2/fw.bin").expect("slot"));
+        }
+        assert!(
+            net.get("http://10.0.2.2/fw.bin")
+                .unwrap_err()
+                .contains("budget"),
+            "four in-flight jobs"
+        );
+        net.cancel(hs[0]);
+        let n = net.get("http://10.0.2.2/fw.bin").expect("reuse");
+        match net.poll(hs[0]) {
+            Progress::Failed(e) => assert!(e.contains("stale"), "{e}"),
+            other => panic!("cancelled generation must not complete: {other:?}"),
+        }
+        match net.poll(n) {
+            Progress::Pending { .. } => {}
+            other => panic!("new generation is live: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn outbound_get_redirect_origin_mismatch_is_not_followed() {
+        let (port, th) = serve_redirect("http://evil.example/x");
+        let mut net = KernelNet::new(&spec("barebone"));
+        let handle = net
+            .get(&format!("http://127.0.0.1:{port}/fw.bin"))
+            .expect("armed");
+        let mut steps = 0;
+        loop {
+            match net.poll(handle) {
+                Progress::Pending { .. } => {
+                    steps += 1;
+                    assert!(steps < 5_000_000);
+                }
+                Progress::Failed(e) => {
+                    assert!(e.contains("origin"), "{e}");
+                    break;
+                }
+                Progress::Done(_) => panic!("cross-origin redirect must not complete"),
+            }
+        }
+        let _ = th.join();
+    }
+
+    #[test]
+    fn outbound_get_same_origin_redirect_is_not_followed() {
+        let (port, th) = serve_redirect("/other.bin");
+        let mut net = KernelNet::new(&spec("barebone"));
+        let handle = net
+            .get(&format!("http://127.0.0.1:{port}/fw.bin"))
+            .expect("armed");
+        let mut steps = 0;
+        loop {
+            match net.poll(handle) {
+                Progress::Pending { .. } => {
+                    steps += 1;
+                    assert!(steps < 5_000_000);
+                }
+                Progress::Failed(e) => {
+                    assert!(e.contains("not followed"), "{e}");
+                    break;
+                }
+                Progress::Done(_) => panic!("redirect must not auto-follow"),
+            }
+        }
+        let _ = th.join();
+    }
+
+    fn serve_once_chunked(body: Vec<u8>) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let mut wire = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: application/octet-stream\r\n\r\n".to_vec();
+                wire.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
+                wire.extend_from_slice(&body);
+                wire.extend_from_slice(b"\r\n0\r\n\r\n");
+                let _ = stream.write_all(&wire);
+                let _ = stream.flush();
+            }
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn outbound_get_finishes_chunked_without_idle_eof() {
+        let body = vec![0x00, 0xff, 0xfe, 0x80];
+        let (port, th) = serve_once_chunked(body.clone());
+        let mut net = KernelNet::new(&spec("barebone"));
+        let handle = net
+            .get(&format!("http://127.0.0.1:{port}/fw.bin"))
+            .expect("connect");
+        let mut pending = 0;
+        let got = loop {
+            match net.poll(handle) {
+                Progress::Pending { .. } => {
+                    pending += 1;
+                    assert!(pending < 5_000_000, "poll must converge");
+                }
+                Progress::Done(b) => break b,
+                Progress::Failed(e) => panic!("fetch failed: {e}"),
+            }
+        };
+        assert_eq!(got, body);
+        net.cancel(handle);
+        let _ = th.join();
+    }
+
+    fn serve_close_delimited(
+        body: Vec<u8>,
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> (u16, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let head = b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n";
+                let _ = stream.write_all(head);
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+                let _ = release.recv();
+                let _ = stream.shutdown(Shutdown::Write);
+            }
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn outbound_get_close_delimited_waits_for_peer_eof_not_idle() {
+        let body = b"G6LC".to_vec();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (port, th) = serve_close_delimited(body.clone(), rx);
+        let mut net = KernelNet::new(&spec("barebone"));
+        let handle = net
+            .get(&format!("http://127.0.0.1:{port}/fw.bin"))
+            .expect("connect");
+        let mut pending = 0;
+        loop {
+            match net.poll(handle) {
+                Progress::Pending { done, .. } if done > 0 => break,
+                Progress::Pending { .. } => {
+                    pending += 1;
+                    assert!(pending < 5_000_000, "headers must arrive");
+                }
+                Progress::Done(_) => panic!("close-delimited must not finish before EOF"),
+                Progress::Failed(e) => panic!("fetch failed: {e}"),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        match net.poll(handle) {
+            Progress::Pending { .. } => {}
+            Progress::Done(_) => panic!("500ms idle is not peer close"),
+            Progress::Failed(e) => panic!("fetch failed during idle: {e}"),
+        }
+        tx.send(()).unwrap();
+        let mut after = 0;
+        let got = loop {
+            match net.poll(handle) {
+                Progress::Pending { .. } => {
+                    after += 1;
+                    assert!(after < 5_000_000, "EOF must complete the body");
+                }
+                Progress::Done(b) => break b,
+                Progress::Failed(e) => panic!("fetch failed after EOF: {e}"),
+            }
+        };
+        assert_eq!(got, body);
+        net.cancel(handle);
+        let _ = th.join();
+    }
+
+    #[test]
     fn https_reports_the_handshake_instead_of_faking_crypto() {
         // A server that answers with a TLS handshake record header.
         let (port, th) = serve_once(Vec::new());
         let mut net = KernelNet::new(&spec("barebone"));
+        net.use_test_entropy();
         let handle = net
             .get(&format!("https://127.0.0.1:{port}/fw.elf"))
             .unwrap();
@@ -768,6 +1601,15 @@ mod tests {
             }
         }
         let _ = th.join();
+    }
+
+    #[test]
+    fn outbound_https_without_entropy_fails_closed() {
+        let mut net = KernelNet::new(&spec("barebone"));
+        let err = net
+            .get("https://127.0.0.1/fw.elf")
+            .unwrap_err();
+        assert!(err.contains("entropy"), "{err}");
     }
 
     #[test]

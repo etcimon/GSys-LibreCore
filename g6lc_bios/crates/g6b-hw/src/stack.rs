@@ -7,12 +7,21 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::time::Duration;
 
 use g6b_spec::quote_json;
 
 const MAX_SOCKS: usize = 16;
 const MAX_IO: usize = 4096;
+
+/// Non-blocking TCP read. `WouldBlock` is not peer close.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TcpRecv {
+    Data(Vec<u8>),
+    WouldBlock,
+    Eof,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SockKind {
@@ -145,25 +154,52 @@ impl InetStack {
     }
 
     pub fn tcp_connect(&mut self, device: &str, host: &str, port: u16) -> Result<u32, String> {
-        let addr = resolve_one(host, port)?;
-        let stream = TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(5))
-            .map_err(|e| format!("tcp connect: {e}"))?;
-        stream
-            .set_nonblocking(true)
-            .map_err(|e| format!("tcp connect nonblock: {e}"))?;
-        let local = stream
-            .local_addr()
-            .map(|a| a.to_string())
-            .unwrap_or_default();
-        let id = self.alloc(SockMeta {
-            id: 0,
-            kind: SockKind::Tcp,
-            local,
-            peer: addr.to_string(),
-            device: device.into(),
-        })?;
-        self.tcp.insert(id, stream);
-        Ok(id)
+        for _ in 0..50 {
+            if let Some(id) = self.tcp_try_connect(device, host, port)? {
+                return Ok(id);
+            }
+        }
+        Err("tcp connect: wouldblock".into())
+    }
+
+    /// One bounded connect attempt. IPv4 literals only; no OS DNS, no IPv6.
+    /// `None` is in-progress (poll again). Not a kept EINPROGRESS fd — std
+    /// drops a timed-out connect — so each poll may SYN again.
+    pub fn tcp_try_connect(
+        &mut self,
+        device: &str,
+        host: &str,
+        port: u16,
+    ) -> Result<Option<u32>, String> {
+        let addr = resolve_ipv4(host, port)?;
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(1)) {
+            Ok(stream) => {
+                stream
+                    .set_nonblocking(true)
+                    .map_err(|e| format!("tcp connect nonblock: {e}"))?;
+                let local = stream
+                    .local_addr()
+                    .map(|a| a.to_string())
+                    .unwrap_or_default();
+                let id = self.alloc(SockMeta {
+                    id: 0,
+                    kind: SockKind::Tcp,
+                    local,
+                    peer: addr.to_string(),
+                    device: device.into(),
+                })?;
+                self.tcp.insert(id, stream);
+                Ok(Some(id))
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::TimedOut
+                    || e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(format!("tcp connect: {e}")),
+        }
     }
 
     pub fn tcp_send(&mut self, id: u32, data: &str) -> Result<usize, String> {
@@ -180,16 +216,31 @@ impl InetStack {
     }
 
     pub fn tcp_recv(&mut self, id: u32) -> Result<String, String> {
-        Ok(String::from_utf8_lossy(&self.tcp_recv_bytes(id)?).into_owned())
+        match self.tcp_recv_bytes(id)? {
+            TcpRecv::Data(b) => Ok(String::from_utf8_lossy(&b).into_owned()),
+            TcpRecv::WouldBlock | TcpRecv::Eof => Ok(String::new()),
+        }
     }
 
-    pub fn tcp_recv_bytes(&mut self, id: u32) -> Result<Vec<u8>, String> {
+    pub fn tcp_recv_bytes(&mut self, id: u32) -> Result<TcpRecv, String> {
         let s = self.tcp.get_mut(&id).ok_or("tcp recv: no such socket")?;
         let mut buf = [0u8; MAX_IO];
         match s.read(&mut buf) {
-            Ok(0) => Ok(Vec::new()),
-            Ok(n) => Ok(buf[..n].to_vec()),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(Vec::new()),
+            Ok(0) => Ok(TcpRecv::Eof),
+            Ok(n) => Ok(TcpRecv::Data(buf[..n].to_vec())),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::Interrupted =>
+            {
+                Ok(TcpRecv::WouldBlock)
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ConnectionReset
+                    || e.kind() == std::io::ErrorKind::ConnectionAborted
+                    || e.kind() == std::io::ErrorKind::UnexpectedEof =>
+            {
+                Ok(TcpRecv::Eof)
+            }
             Err(e) => Err(format!("tcp recv: {e}")),
         }
     }
@@ -218,7 +269,7 @@ impl InetStack {
         port: u16,
         data: &str,
     ) -> Result<usize, String> {
-        let addr = resolve_one(host, port)?;
+        let addr = resolve_ipv4(host, port)?;
         let s = self.udp.get_mut(&id).ok_or("udp send: no such socket")?;
         match s.send_to(data.as_bytes(), addr) {
             Ok(n) => {
@@ -269,17 +320,32 @@ fn parse_bind(host: &str, port: u16) -> Result<SocketAddr, String> {
         .map_err(|e| format!("bad bind {host}:{port}: {e}"))
 }
 
-fn resolve_one(host: &str, port: u16) -> Result<SocketAddr, String> {
-    (host, port)
-        .to_socket_addrs()
-        .map_err(|e| format!("resolve {host}: {e}"))?
-        .next()
-        .ok_or_else(|| format!("resolve {host}: no address"))
+/// IPv4 literals only. Hostnames need an async DNS job; IPv6 is refused.
+pub fn resolve_ipv4(host: &str, port: u16) -> Result<SocketAddr, String> {
+    if host.contains(':') {
+        return Err("ipv6 is not implemented".into());
+    }
+    let ip: Ipv4Addr = host
+        .parse()
+        .map_err(|_| format!("dns: hostname {host} needs an async job (IPv4 literal only)"))?;
+    Ok(SocketAddr::from((ip, port)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_ipv4_literal_skips_dns() {
+        let a = resolve_ipv4("127.0.0.1", 80).unwrap();
+        assert_eq!(a, SocketAddr::from((Ipv4Addr::LOCALHOST, 80)));
+        assert!(
+            resolve_ipv4("::1", 80).unwrap_err().contains("ipv6"),
+            "IPv6 is a named refuse"
+        );
+        let e = resolve_ipv4("example.com", 80).unwrap_err();
+        assert!(e.contains("dns"), "{e}");
+    }
 
     #[test]
     fn tcp_listen_connect_send_recv_localhost() {
@@ -315,6 +381,67 @@ mod tests {
         assert_eq!(got, "hello");
         a.close(lid).unwrap();
         b.close(cid).unwrap();
+    }
+
+    #[test]
+    fn tcp_recv_distinguishes_wouldblock_and_eof() {
+        let mut server = InetStack::default();
+        let lid = server.tcp_listen("net0", "127.0.0.1", 0).unwrap();
+        let port: u16 = server.meta[&lid]
+            .local
+            .rsplit(':')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut client = InetStack::default();
+        let cid = client.tcp_connect("net0", "127.0.0.1", port).unwrap();
+        let mut peer = None;
+        for _ in 0..50 {
+            if let Ok(id) = server.tcp_accept(lid) {
+                peer = Some(id);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let pid = peer.expect("accept");
+        assert_eq!(
+            server.tcp_recv_bytes(pid).unwrap(),
+            TcpRecv::WouldBlock,
+            "connected with no payload is not EOF"
+        );
+        assert!(client.tcp_send(cid, "ping").unwrap() >= 4);
+        let mut data = None;
+        for _ in 0..50 {
+            match server.tcp_recv_bytes(pid).unwrap() {
+                TcpRecv::Data(b) if !b.is_empty() => {
+                    data = Some(b);
+                    break;
+                }
+                TcpRecv::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                other => panic!("unexpected while waiting for payload: {other:?}"),
+            }
+        }
+        assert_eq!(data.unwrap(), b"ping");
+        client.close(cid).unwrap();
+        let mut saw_eof = false;
+        for _ in 0..50 {
+            match server.tcp_recv_bytes(pid).unwrap() {
+                TcpRecv::Eof => {
+                    saw_eof = true;
+                    break;
+                }
+                TcpRecv::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                TcpRecv::Data(b) => panic!("payload after close: {b:?}"),
+            }
+        }
+        assert!(saw_eof, "peer close is Eof, not WouldBlock");
+        server.close(lid).unwrap();
+        server.close(pid).unwrap();
     }
 
     #[test]

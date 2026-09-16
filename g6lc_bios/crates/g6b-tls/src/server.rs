@@ -6,10 +6,8 @@
 
 #![allow(missing_docs)]
 
-use crate::hello::{
-    SUITE_ECDHE_ECDSA_AES128_GCM, SUITE_ECDHE_RSA_AES128_GCM, SUITE_RSA_AES128_SHA256,
-};
-use crate::sha::sha256;
+use crate::entropy::{Entropy, FixtureEntropy};
+use crate::hello::{SUITE_ECDHE_ECDSA_AES128_GCM, SUITE_ECDHE_RSA_AES128_GCM};
 
 /// Handshake record content type.
 pub const REC_HANDSHAKE: u8 = 0x16;
@@ -27,13 +25,22 @@ pub fn is_app_record(raw: &[u8]) -> bool {
 }
 
 /// ServerHello + Certificate + ServerHelloDone in one handshake record.
+/// Test-only random ([`FixtureEntropy::TEST`]), not `sha256(ClientHello)`.
 pub fn server_handshake(client_hello: &[u8]) -> Result<Vec<u8>, String> {
+    let mut rng = FixtureEntropy::TEST;
+    server_handshake_with(client_hello, &mut rng)
+}
+
+pub fn server_handshake_with(
+    client_hello: &[u8],
+    rng: &mut dyn Entropy,
+) -> Result<Vec<u8>, String> {
     if !is_client_hello(client_hello) {
         return Err("not a TLS 1.2 ClientHello".into());
     }
-    let suite = pick_suite(client_hello);
+    let suite = pick_suite(client_hello)?;
     let mut body = Vec::new();
-    body.extend(server_hello_msg(suite, client_hello));
+    body.extend(server_hello_msg(suite, rng)?);
     body.extend(certificate_msg());
     body.extend(hello_done_msg());
     Ok(record(REC_HANDSHAKE, &body))
@@ -56,27 +63,27 @@ pub fn unwrap_app(raw: &[u8]) -> Result<Vec<u8>, String> {
     Ok(raw[5..5 + n].to_vec())
 }
 
-fn pick_suite(hello: &[u8]) -> u16 {
+fn pick_suite(hello: &[u8]) -> Result<u16, String> {
     let has = |a, b| hello.windows(2).any(|w| w == [a, b]);
     if has(0xc0, 0x2f) {
-        SUITE_ECDHE_RSA_AES128_GCM
+        Ok(SUITE_ECDHE_RSA_AES128_GCM)
     } else if has(0xc0, 0x2b) {
-        SUITE_ECDHE_ECDSA_AES128_GCM
+        Ok(SUITE_ECDHE_ECDSA_AES128_GCM)
     } else {
-        SUITE_RSA_AES128_SHA256
+        Err("tls: no implemented suite (CBC/RSA key transport is not offered)".into())
     }
 }
 
-fn server_hello_msg(suite: u16, client_hello: &[u8]) -> Vec<u8> {
+fn server_hello_msg(suite: u16, rng: &mut dyn Entropy) -> Result<Vec<u8>, String> {
     let mut rnd = [0u8; 32];
-    rnd.copy_from_slice(&sha256(client_hello));
+    rng.fill(&mut rnd)?;
     let mut body = Vec::new();
     body.extend_from_slice(&[0x03, 0x03]);
     body.extend_from_slice(&rnd);
     body.push(0);
     body.extend_from_slice(&suite.to_be_bytes());
     body.push(0);
-    handshake(0x02, &body)
+    Ok(handshake(0x02, &body))
 }
 
 fn certificate_msg() -> Vec<u8> {

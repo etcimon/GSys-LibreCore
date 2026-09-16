@@ -20,8 +20,13 @@ use crate::encode::{
     MBOX_ST_BUSY, MBOX_ST_RSP, PLIC_BASE, PLIC_CTXT_BASE, PLIC_ENABLE_BASE, RA, S1, SBI_HSM_EID,
     SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID, SCAUSE_LOAD_ACCESS, SCAUSE_STORE_ACCESS,
     SIE_SEIE, SIE_SSIE, SIE_STIE, SP, SSTATUS_SIE, T0, T1, T2, T3, T4, T5, T6, TP, UART_IER_RX,
-    UART_IRQ, UART_LSR_DR, UI_MAGIC, VIO_DEV_GPU, VIO_DEV_NET, VIO_MAGIC, VIO_MMIO_BASE,
-    VIO_MMIO_SLOTS, VIO_MMIO_STEP, VTYPE_E8_M1_TA_MA, X0,
+    UART_IRQ, UART_LSR_DR, UI_MAGIC, VIO_DESC_WRITE, VIO_DEV_GPU, VIO_DEV_NET, VIO_F_VERSION_1,
+    VIO_MAGIC, VIO_MMIO_BASE, VIO_MMIO_SLOTS, VIO_MMIO_STEP, VIO_NET_F_WORD0, VIO_QUEUE_NUM,
+    VIO_REG_DRV_FEATURES, VIO_REG_DRV_FEATURES_SEL, VIO_REG_FEATURES, VIO_REG_FEATURES_SEL,
+    VIO_REG_QUEUE_AVAIL, VIO_REG_QUEUE_DESC, VIO_REG_QUEUE_NOTIFY, VIO_REG_QUEUE_NUM,
+    VIO_REG_QUEUE_NUM_MAX, VIO_REG_QUEUE_READY, VIO_REG_QUEUE_SEL, VIO_REG_QUEUE_USED,
+    VIO_REG_STATUS, VIO_ST_ACK, VIO_ST_DRIVER, VIO_ST_DRIVER_OK, VIO_ST_FEATURES_OK,
+    VTYPE_E8_M1_TA_MA, X0,
 };
 use crate::{
     gr_bss_len, gr_stride, Addr, Module, Node, Op, Purpose, BIOS_UI_LIBWASM, BIOS_UI_WASM,
@@ -3822,6 +3827,264 @@ fn putc_ops(ch: i64) -> Vec<Op> {
     ]
 }
 
+fn sw_bytes(ops: &mut Vec<Op>, rs: u32, off: i32, bytes: &[u8]) {
+    let mut i = 0;
+    while i + 4 <= bytes.len() {
+        let w = u32::from_le_bytes(bytes[i..i + 4].try_into().unwrap());
+        ops.push(Op::Li {
+            rd: T3,
+            imm: i64::from(w),
+        });
+        ops.push(Op::Sw {
+            rs2: T3,
+            rs1: rs,
+            off: off + i as i32,
+        });
+        i += 4;
+    }
+    while i < bytes.len() {
+        ops.push(Op::Li {
+            rd: T3,
+            imm: i64::from(bytes[i]),
+        });
+        ops.push(Op::Sb {
+            rs2: T3,
+            rs1: rs,
+            off: off + i as i32,
+        });
+        i += 1;
+    }
+}
+
+fn net_arp_whohas() -> [u8; 42] {
+    let mut f = [0u8; 42];
+    f[0..6].copy_from_slice(&[0xff; 6]);
+    f[6..12].copy_from_slice(&crate::vio::NET_MAC_LOCAL);
+    f[12] = 0x08;
+    f[13] = 0x06;
+    f[14] = 0x00;
+    f[15] = 0x01;
+    f[16] = 0x08;
+    f[17] = 0x00;
+    f[18] = 6;
+    f[19] = 4;
+    f[21] = 1;
+    f[22..28].copy_from_slice(&crate::vio::NET_MAC_LOCAL);
+    f[28..32].copy_from_slice(&crate::vio::NET_IP_LOCAL);
+    f[38..42].copy_from_slice(&crate::vio::NET_IP_GW);
+    f
+}
+
+fn net_dhcp_discover() -> [u8; 286] {
+    let mut f = [0u8; 286];
+    f[0..6].fill(0xff);
+    f[6..12].copy_from_slice(&crate::vio::NET_MAC_LOCAL);
+    f[12] = 0x08;
+    f[13] = 0x00;
+    f[14] = 0x45;
+    f[16] = 0x01;
+    f[17] = 0x10;
+    f[22] = 64;
+    f[23] = 17;
+    f[30..34].fill(0xff);
+    f[34] = 0;
+    f[35] = 68;
+    f[36] = 0;
+    f[37] = 67;
+    f[38] = 0;
+    f[39] = 252;
+    f[42] = 1;
+    f[43] = 1;
+    f[44] = 6;
+    f[46] = 0x12;
+    f[47] = 0x34;
+    f[48] = 0x56;
+    f[49] = 0x78;
+    f[52] = 0x80;
+    f[70..76].copy_from_slice(&crate::vio::NET_MAC_LOCAL);
+    f[278] = 0x63;
+    f[279] = 0x82;
+    f[280] = 0x53;
+    f[281] = 0x63;
+    f[282] = 53;
+    f[283] = 1;
+    f[284] = 1;
+    f[285] = 255;
+    f
+}
+
+fn net_dhcp_request() -> [u8; 298] {
+    let mut f = [0u8; 298];
+    let d = net_dhcp_discover();
+    f[..286].copy_from_slice(&d);
+    f[16] = 0x01;
+    f[17] = 0x1c;
+    f[26..30].copy_from_slice(&crate::vio::NET_IP_LOCAL);
+    f[38] = 0x01;
+    f[39] = 0x08;
+    f[284] = 3;
+    f[285] = 50;
+    f[286] = 4;
+    f[287..291].copy_from_slice(&crate::vio::NET_IP_LOCAL);
+    f[291] = 54;
+    f[292] = 4;
+    f[293..297].copy_from_slice(&crate::vio::NET_IP_GW);
+    f[297] = 255;
+    f
+}
+
+fn net_dns_query() -> [u8; 64] {
+    let mut f = [0u8; 64];
+    f[0..6].copy_from_slice(&crate::vio::NET_MAC_GW);
+    f[6..12].copy_from_slice(&crate::vio::NET_MAC_LOCAL);
+    f[12] = 0x08;
+    f[13] = 0x00;
+    f[14] = 0x45;
+    f[17] = 50;
+    f[19] = 8;
+    f[22] = 64;
+    f[23] = 17;
+    f[26..30].copy_from_slice(&crate::vio::NET_IP_LOCAL);
+    f[30..34].copy_from_slice(&crate::vio::NET_IP_GW);
+    f[34] = 0x30;
+    f[35] = 0x39;
+    f[37] = 53;
+    f[39] = 30;
+    f[43] = 1;
+    f[44] = 0x01;
+    f[47] = 1;
+    f[54] = 4;
+    f[55] = b'g';
+    f[56] = b'6';
+    f[57] = b'l';
+    f[58] = b'c';
+    f[61] = 1;
+    f[63] = 1;
+    f
+}
+
+fn net_udp_echo() -> [u8; 46] {
+    let mut f = [0u8; 46];
+    f[0..6].copy_from_slice(&crate::vio::NET_MAC_GW);
+    f[6..12].copy_from_slice(&crate::vio::NET_MAC_LOCAL);
+    f[12] = 0x08;
+    f[13] = 0x00;
+    f[14] = 0x45;
+    f[17] = 32;
+    f[19] = 7;
+    f[22] = 64;
+    f[23] = 17;
+    f[26..30].copy_from_slice(&crate::vio::NET_IP_LOCAL);
+    f[30..34].copy_from_slice(&crate::vio::NET_IP_GW);
+    f[34] = 0x30;
+    f[35] = 0x39;
+    f[37] = 7;
+    f[39] = 12;
+    f[42..46].copy_from_slice(&crate::vio::NET_HTTP_BODY);
+    f
+}
+
+fn net_tcp_fin() -> [u8; 54] {
+    let mut f = net_tcp_ack();
+    f[19] = 6;
+    f[40] = 0;
+    f[41] = 42;
+    f[44] = 0x04;
+    f[45] = 0x13;
+    f[47] = 0x11;
+    f
+}
+
+fn net_http_get() -> [u8; 94] {
+    let mut f = [0u8; 94];
+    f[..54].copy_from_slice(&net_tcp_ack());
+    f[17] = 80;
+    f[19] = 4;
+    f[47] = 0x18;
+    f[54..94].copy_from_slice(b"GET /fw.bin HTTP/1.1\r\nHost: 10.0.2.2\r\n\r\n");
+    f
+}
+
+fn net_tcp_ack() -> [u8; 54] {
+    let mut f = net_tcp_syn();
+    f[19] = 3;
+    f[41] = 2;
+    f[44] = 0x03;
+    f[45] = 0xe9;
+    f[47] = 0x10;
+    f[50] = 0;
+    f[51] = 0;
+    f
+}
+
+fn net_tcp_syn_rexmit() -> [u8; 54] {
+    let mut f = net_tcp_syn();
+    f[19] = 10;
+    f[37] = 81;
+    f
+}
+
+fn net_tcp_syn_closed() -> [u8; 54] {
+    let mut f = net_tcp_syn();
+    f[19] = 9;
+    f[37] = 9;
+    f
+}
+
+fn net_tcp_syn() -> [u8; 54] {
+    let mut f = [0u8; 54];
+    f[0..6].copy_from_slice(&crate::vio::NET_MAC_GW);
+    f[6..12].copy_from_slice(&crate::vio::NET_MAC_LOCAL);
+    f[12] = 0x08;
+    f[13] = 0x00;
+    f[14] = 0x45;
+    f[17] = 40;
+    f[19] = 2;
+    f[22] = 64;
+    f[23] = 6;
+    f[24] = 0x62;
+    f[25] = 0xbe;
+    f[26..30].copy_from_slice(&crate::vio::NET_IP_LOCAL);
+    f[30..34].copy_from_slice(&crate::vio::NET_IP_GW);
+    f[34] = 0x30;
+    f[35] = 0x39;
+    f[37] = 80;
+    f[41] = 1;
+    f[46] = 0x50;
+    f[47] = 0x02;
+    f[48] = 0x20;
+    f[50] = 0x47;
+    f[51] = 0x48;
+    f
+}
+
+fn net_icmp_echo() -> [u8; 46] {
+    let mut f = [0u8; 46];
+    f[0..6].copy_from_slice(&crate::vio::NET_MAC_GW);
+    f[6..12].copy_from_slice(&crate::vio::NET_MAC_LOCAL);
+    f[12] = 0x08;
+    f[13] = 0x00;
+    f[14] = 0x45;
+    f[17] = 32;
+    f[19] = 1;
+    f[22] = 64;
+    f[23] = 1;
+    f[24] = 0x62;
+    f[25] = 0xcc;
+    f[26..30].copy_from_slice(&crate::vio::NET_IP_LOCAL);
+    f[30..34].copy_from_slice(&crate::vio::NET_IP_GW);
+    f[34] = 8;
+    f[36] = 0x64;
+    f[37] = 0x84;
+    f[39] = 1;
+    f[41] = 1;
+    f[42] = b'G';
+    f[43] = b'6';
+    f[44] = b'L';
+    f[45] = b'C';
+    f
+}
+
 fn hex_loop_ops(label: &str, nibble_shamt: u32, nibbles: i64) -> Vec<Op> {
     vec![
         Op::Li {
@@ -4473,7 +4736,10 @@ fn vio_probe_node(o: Object) -> Node {
 }
 
 /// Virtio-mmio slot scan for DeviceID 1 (virtio-net). Prints `VIRTIO-NET <slot>`
-/// or `VIRTIO-NET-NONE`. Enumeration only — no virtqueue, no QEMU `-netdev`.
+/// or `VIRTIO-NET-NONE`, then negotiates features and brings up receiveq /
+/// transmitq, then an ARP who-has for 10.0.2.2 (`VIRTIO-NET-OK` /
+/// `VIRTIO-NET-PKT` / `VIRTIO-NET-ARP` / `VIRTIO-NET-HOLD`). No IPv4/TCP,
+/// no QEMU `-netdev`.
 fn vio_net_probe_node(o: Object) -> Node {
     let mut ops = vec![
         Op::Comment(format!("{} — read-only virtio-net slot scan", o.why)),
@@ -4587,6 +4853,1976 @@ fn vio_net_probe_node(o: Object) -> Node {
         Op::Ecall,
     ]);
     ops.extend(putc_ops(i64::from(b'\n')));
+    // Feature negotiation (virtio 1.x): ACK|DRIVER, accept word0
+    // CSUM|MAC|STATUS and word1 VERSION_1, FEATURES_OK readback.
+    // T0 is still the mmio base. No queues.
+    ops.extend([
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_STATUS,
+        },
+        Op::Li {
+            rd: T2,
+            imm: i64::from(VIO_ST_ACK | VIO_ST_DRIVER),
+        },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_STATUS,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_FEATURES_SEL,
+        },
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: VIO_REG_FEATURES,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_NET_F_WORD0),
+        },
+        Op::And {
+            rd: T2,
+            rs: T2,
+            rs2: T3,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_DRV_FEATURES_SEL,
+        },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_DRV_FEATURES,
+        },
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_FEATURES_SEL,
+        },
+        Op::Lw {
+            rd: T3,
+            rs: T0,
+            off: VIO_REG_FEATURES,
+        },
+        Op::Andi {
+            rd: T3,
+            rs: T3,
+            imm: VIO_F_VERSION_1 as i32,
+        },
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_DRV_FEATURES_SEL,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_DRV_FEATURES,
+        },
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: VIO_REG_STATUS,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_FEATURES_OK,
+        },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_STATUS,
+        },
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: VIO_REG_STATUS,
+        },
+        Op::Andi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_FEATURES_OK,
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "vn_hold".into(),
+        },
+        // receiveq (0) then transmitq (1). Rings at __vio+NET_BASE.
+        Op::La {
+            rd: T5,
+            addr: Addr::VioBss,
+        },
+        Op::Li {
+            rd: T1,
+            imm: crate::vio::NET_BASE,
+        },
+        Op::Add {
+            rd: T5,
+            rs1: T5,
+            rs2: T1,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: VIO_REG_QUEUE_NUM_MAX,
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Li {
+            rd: T3,
+            imm: VIO_QUEUE_NUM,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NUM,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: crate::vio::NET_RX_DESC_OFF,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_QUEUE_DESC,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_DESC + 4,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_QUEUE_AVAIL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_AVAIL + 4,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_QUEUE_USED,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_USED + 4,
+        },
+        Op::Li { rd: T3, imm: 1 },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_QUEUE_READY,
+        },
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: VIO_REG_QUEUE_NUM_MAX,
+        },
+        Op::Beq {
+            rs1: T2,
+            rs2: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Li {
+            rd: T3,
+            imm: VIO_QUEUE_NUM,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NUM,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: crate::vio::NET_TX_DESC_OFF,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_QUEUE_DESC,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_DESC + 4,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_QUEUE_AVAIL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_AVAIL + 4,
+        },
+        Op::Addi {
+            rd: T3,
+            rs: T5,
+            imm: crate::vio::NET_TX_USED_OFF,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_QUEUE_USED,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_USED + 4,
+        },
+        Op::Li { rd: T3, imm: 1 },
+        Op::Sw {
+            rs2: T3,
+            rs1: T0,
+            off: VIO_REG_QUEUE_READY,
+        },
+        Op::Lw {
+            rd: T2,
+            rs: T0,
+            off: VIO_REG_STATUS,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T2,
+            imm: VIO_ST_DRIVER_OK,
+        },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_STATUS,
+        },
+        // One RX buffer (device-write) and one TX buffer (G6LC after hdr).
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_RXBUF_OFF,
+        },
+        Op::Sw {
+            rs2: T2,
+            rs1: T5,
+            off: crate::vio::NET_RX_DESC_OFF,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T5,
+            off: crate::vio::NET_RX_DESC_OFF + 4,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_BUF_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_DESC_WRITE),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_DESC_OFF + 12,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_RXBUF2_OFF,
+        },
+        Op::Sw {
+            rs2: T2,
+            rs1: T5,
+            off: crate::vio::NET_RX_DESC_OFF + 16,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T5,
+            off: crate::vio::NET_RX_DESC_OFF + 20,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_BUF_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_DESC_OFF + 24,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(VIO_DESC_WRITE),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_DESC_OFF + 28,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 2 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 1 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF + 4,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_arp_whohas());
+    ops.extend([
+        Op::Sw {
+            rs2: T2,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 4,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_PKT_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 12,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 1 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF + 4,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_pkt_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: X0,
+            to: "vn_pkt_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_pkt_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_pkt_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 12,
+        },
+        Op::Li { rd: T3, imm: 0x08 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 13,
+        },
+        Op::Li { rd: T3, imm: 0x06 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 21,
+        },
+        Op::Li { rd: T3, imm: 2 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 28,
+        },
+        Op::Li { rd: T3, imm: 10 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 31,
+        },
+        Op::Li { rd: T3, imm: 2 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-OK\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    for ch in b"VIRTIO-NET-PKT\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    for ch in b"VIRTIO-NET-ARP\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([Op::Addi {
+        rd: T2,
+        rs: T5,
+        imm: crate::vio::NET_TXBUF_OFF,
+    }]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_icmp_echo());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_ICMP_PKT_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 2 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_icmp_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 2 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_icmp_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_icmp_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_icmp_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 23,
+        },
+        Op::Li { rd: T3, imm: 1 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 34,
+        },
+        Op::Li { rd: T3, imm: 0 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-ICMP\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: 3 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF + 8,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_tcp_syn());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_TCP_SYN_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 3 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF + 8,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_tcp_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 3 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_tcp_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_tcp_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_tcp_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 23,
+        },
+        Op::Li { rd: T3, imm: 6 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 47,
+        },
+        Op::Li { rd: T3, imm: 0x12 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 36,
+        },
+        Op::Li { rd: T3, imm: 0x30 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 37,
+        },
+        Op::Li { rd: T3, imm: 0x39 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-TCP\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: 4 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 1 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF + 8,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_tcp_ack());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_TCP_SYN_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 4 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_ack_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 4 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_ack_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_ack_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_ack_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 47,
+        },
+        Op::Li { rd: T3, imm: 0x10 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 45,
+        },
+        Op::Li { rd: T3, imm: 2 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-ACK\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: 5 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF + 12,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_http_get());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_HTTP_REQ_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 5 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_http_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 5 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_http_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_http_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_http_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 54,
+        },
+        Op::Li {
+            rd: T3,
+            imm: i64::from(b'H'),
+        },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 92,
+        },
+        Op::Li { rd: T3, imm: 0 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 93,
+        },
+        Op::Li { rd: T3, imm: 0xff },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 95,
+        },
+        Op::Li { rd: T3, imm: 0x80 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-HTTP\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: 6 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 1 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF + 12,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_tcp_fin());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_TCP_SYN_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 6 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_fin_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 6 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_fin_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_fin_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_fin_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 47,
+        },
+        Op::Li { rd: T3, imm: 0x11 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 45,
+        },
+        Op::Li { rd: T3, imm: 43 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-FIN\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: 7 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF + 16,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_udp_echo());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_UDP_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 7 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_udp_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 7 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_udp_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_udp_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_udp_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 23,
+        },
+        Op::Li { rd: T3, imm: 17 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 35,
+        },
+        Op::Li { rd: T3, imm: 7 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 45,
+        },
+        Op::Li { rd: T3, imm: 0x80 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-UDP\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: 8 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 1 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF + 16,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_dns_query());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_DNS_Q_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 8 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_dns_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 8 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_dns_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_dns_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_dns_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 44,
+        },
+        Op::Li { rd: T3, imm: 0x81 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 76,
+        },
+        Op::Li { rd: T3, imm: 10 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 79,
+        },
+        Op::Li { rd: T3, imm: 2 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-DNS\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: 9 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_dhcp_discover());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_DHCP_DISC_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 9 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_dhcpo_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 9 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_dhcpo_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_dhcpo_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_dhcpo_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 284,
+        },
+        Op::Li { rd: T3, imm: 2 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 58,
+        },
+        Op::Li { rd: T3, imm: 10 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Li {
+            rd: T3,
+            imm: 10 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_dhcp_request());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_DHCP_REQ_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 10 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_dhcpa_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 10 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_dhcpa_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_dhcpa_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_dhcpa_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 284,
+        },
+        Op::Li { rd: T3, imm: 5 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-DHCP\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: 11 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_tcp_syn_closed());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_TCP_SYN_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 11 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_rst_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 11 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_rst_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_rst_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_rst_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 47,
+        },
+        Op::Li { rd: T3, imm: 0x14 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF_OFF + crate::vio::NET_HDR_LEN + 37,
+        },
+        Op::Li { rd: T3, imm: 0x39 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-RST\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: 12 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_RX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Addi {
+            rd: T2,
+            rs: T5,
+            imm: crate::vio::NET_TXBUF_OFF,
+        },
+    ]);
+    sw_bytes(&mut ops, T2, 0, &[0u8; 12]);
+    sw_bytes(&mut ops, T2, crate::vio::NET_HDR_LEN, &net_tcp_syn_rexmit());
+    ops.extend([
+        Op::Li {
+            rd: T3,
+            imm: i64::from(crate::vio::NET_TCP_SYN_LEN),
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_DESC_OFF + 8,
+        },
+        Op::Li {
+            rd: T3,
+            imm: 12 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Li { rd: T2, imm: 1 },
+        Op::Sw {
+            rs2: T2,
+            rs1: T0,
+            off: VIO_REG_QUEUE_SEL,
+        },
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_rex_wait".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_TX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 12 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_rex_tx".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_rex_wait".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_rex_tx".into()),
+        Op::Li {
+            rd: T3,
+            imm: 13 << 16,
+        },
+        Op::Sw {
+            rs2: T3,
+            rs1: T5,
+            off: crate::vio::NET_TX_AVAIL_OFF,
+        },
+        Op::Fence,
+        Op::Sw {
+            rs2: X0,
+            rs1: T0,
+            off: VIO_REG_QUEUE_NOTIFY,
+        },
+        Op::Li { rd: T1, imm: 8 },
+        Op::Label("vn_rex_wait2".into()),
+        Op::Lw {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RX_USED_OFF,
+        },
+        Op::Srli {
+            rd: T2,
+            rs: T2,
+            shamt: 16,
+        },
+        Op::Li { rd: T3, imm: 12 },
+        Op::Beq {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_rex_got".into(),
+        },
+        Op::Addi {
+            rd: T1,
+            rs: T1,
+            imm: -1,
+        },
+        Op::Bne {
+            rs1: T1,
+            rs2: X0,
+            to: "vn_rex_wait2".into(),
+        },
+        Op::Jal {
+            rd: X0,
+            to: "vn_hold".into(),
+        },
+        Op::Label("vn_rex_got".into()),
+        Op::Lbu {
+            rd: T2,
+            rs: T5,
+            off: crate::vio::NET_RXBUF2_OFF + crate::vio::NET_HDR_LEN + 47,
+        },
+        Op::Li { rd: T3, imm: 0x12 },
+        Op::Bne {
+            rs1: T2,
+            rs2: T3,
+            to: "vn_hold".into(),
+        },
+    ]);
+    for ch in b"VIRTIO-NET-REXMIT\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
+    ops.extend([
+        Op::Jalr {
+            rd: X0,
+            rs: RA,
+            imm: 0,
+        },
+        Op::Label("vn_hold".into()),
+    ]);
+    for ch in b"VIRTIO-NET-HOLD\n" {
+        ops.extend(putc_ops(i64::from(*ch)));
+    }
     ops.push(Op::Jalr {
         rd: X0,
         rs: RA,
@@ -5745,6 +7981,7 @@ mod tests {
         assert!(jal < park, "VioNetProbe must be called before park:\n{s}");
         assert!(park < body, "VioNetProbe body must sit after park:\n{s}");
         assert!(s.contains("0x74726976"), "{s}");
+        assert!(s.contains("vn_hold"), "feature-negotiation hold path:\n{s}");
         let spec_off = spec_json(r#"{"schema_version":1,"isa":{"xlen":64}}"#);
         assert!(!spec_off.wants_virtio_net());
         let s_off = kstart(&spec_off).to_asm();

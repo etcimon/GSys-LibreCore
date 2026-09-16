@@ -10,22 +10,37 @@ mod aes;
 mod bigint;
 mod cert;
 mod ecdsa;
+mod entropy;
+mod gcm;
 mod hello;
+mod hkdf;
 mod hmac;
+mod record;
 mod rsa;
 mod server;
+mod transcript;
 mod sha;
 
 pub use aes::aes128_encrypt_block;
+pub use gcm::{open as aes128_gcm_open, seal as aes128_gcm_seal, tls13_nonce};
 pub use cert::{parse as parse_cert, Cert};
 pub use ecdsa::ecdsa_p256_sha256_verify;
-pub use hello::{client_hello, is_web_compatible};
+pub use entropy::{Entropy, FixtureEntropy, NoEntropy};
+pub use hello::{client_hello, client_hello_with, is_web_compatible};
+pub use hkdf::{
+    derive_secret, expand as hkdf_expand, expand_label as hkdf_expand_label, extract as hkdf_extract,
+    hkdf, traffic_keys as tls13_traffic_keys,
+};
 pub use hmac::hmac_sha256;
+pub use record::{open_record, seal_record};
 pub use rsa::{rsa_pkcs1_sha256_verify, RsaPub};
 pub use server::{
     is_app_record, is_client_hello, server_handshake, unwrap_app, wrap_app, REC_APP, REC_HANDSHAKE,
 };
 pub use sha::sha256;
+pub use transcript::{
+    check_finished, finished_key, finished_mac, HandshakeTranscript,
+};
 
 /// Hex of SHA-256 (lowercase).
 pub fn sha256_hex(data: &[u8]) -> String {
@@ -147,6 +162,25 @@ mod tests {
         let hello = client_hello("httpbin.org");
         assert!(is_web_compatible(&hello));
         assert!(!hello.is_empty());
+        assert!(
+            !super::hello::offers_suite(&hello, super::hello::SUITE_RSA_AES128_SHA256),
+            "CBC/RSA key transport must not be advertised"
+        );
+        assert_ne!(
+            &hello[11..43],
+            &sha256(b"httpbin.org"),
+            "hostname hash is not entropy"
+        );
+        assert!(
+            client_hello_with("httpbin.org", &mut NoEntropy)
+                .unwrap_err()
+                .contains("entropy")
+        );
+        let mut a = FixtureEntropy::from_seed([1; 32]);
+        let mut b = FixtureEntropy::from_seed([2; 32]);
+        let ha = client_hello_with("httpbin.org", &mut a).unwrap();
+        let hb = client_hello_with("httpbin.org", &mut b).unwrap();
+        assert_ne!(&ha[11..43], &hb[11..43], "fixture seed changes random");
     }
 
     #[test]

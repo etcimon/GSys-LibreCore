@@ -157,7 +157,120 @@ try still rewinds.
 **P4 interp callee-await (same day):** `try { call $awaiter }` is
 rejected when `$awaiter` can reach await via direct `call`. **P4
 sequential leftovers are closed.** IME and RFB 3.8 stay with later
-phases. P5 (guest packet stack) may start.
+phases.
+**P5 binary-safe HTTP/1 response parse (same day):**
+`parse_http1_response` copies the body as bytes, honors
+`Content-Length`, and rejects conflicting framing (`Content-Length`
+plus `Transfer-Encoding`, or disagreeing lengths).
+**P5 chunked HTTP/1 decode (same day):** `Transfer-Encoding: chunked`
+(alone) is decoded; trailers are discarded; `gzip, chunked` is refused.
+**P5 partial HTTP/1 I/O (same day):** `parse_http1_response_partial`
+returns `NeedMore` for a framed prefix, `NeedEof` for close-delimited,
+and `Done` when complete. KernelNet finishes `Content-Length`/chunked
+on `Done`, not idle.
+**P5 TCP EOF vs WouldBlock (same day):** `tcp_recv_bytes` returns
+`TcpRecv::{Data,WouldBlock,Eof}`. Close-delimited bodies complete on
+peer EOF, not idle `CLOSE_GRACE`.
+**P5 virtio-net feature negotiation (same day):** guest `VioNetProbe`
+accepts word0 `CSUM|MAC|STATUS` and word1 `VERSION_1`, then
+`FEATURES_OK` readback (`VIRTIO-NET-OK` / `VIRTIO-NET-HOLD`).
+**P5 virtio-net RX/TX queues (same day):** receiveq 0 and transmitq 1
+at `__vio+0x1000`, then `DRIVER_OK`.
+**P5 virtio-net loopback packet (same day):** RX/TX DMA (`VIRTIO-NET-PKT`).
+**P5 Ethernet/ARP + IPv4 ICMP (same day):** ARP who-has 10.0.2.2 and ICMP
+echo on the exec-model gateway (`VIRTIO-NET-ARP`, `VIRTIO-NET-ICMP`).
+**P5 TCP SYN/SYN-ACK (same day):** guest SYN to 10.0.2.2:80, gateway
+SYN-ACK (`VIRTIO-NET-TCP`).
+**P5 TCP ACK (same day):** guest ACK seq=2 ack=1001; gateway ACK
+(`VIRTIO-NET-ACK`).
+**P5 TCP HTTP GET (same day):** PSH+ACK `GET /fw.bin` → 200 with binary
+`00 ff fe 80` (`VIRTIO-NET-HTTP`).
+**P5 TCP FIN (same day):** guest FIN+ACK seq=42; gateway FIN+ACK
+(`VIRTIO-NET-FIN`).
+**P5 UDP echo (same day):** UDP to 10.0.2.2:7, payload `00 ff fe 80`
+echoed (`VIRTIO-NET-UDP`).
+**P5 DNS A (same day):** query `g6lc` to :53 → A 10.0.2.2
+(`VIRTIO-NET-DNS`).
+**P5 DHCP (same day):** DISCOVER/OFFER/REQUEST/ACK, yiaddr 10.0.2.15
+(`VIRTIO-NET-DHCP`). Packet buffers 320 B.
+**P5 TCP RST (same day):** SYN to :9 (closed) → RST+ACK (`VIRTIO-NET-RST`).
+**P5 TCP retransmit (same day):** first SYN to :81 is dropped; retry
+gets SYN-ACK (`VIRTIO-NET-REXMIT`).
+**P5 KernelNet NAT packets (same day):** `GET http://10.0.2.2/fw.bin`
+uses in-memory Ethernet/IPv4/TCP (`nat_http_on_wire`), not `std::net`.
+**P5 TCP reassembly (same day):** `NatHttpReasm` joins out-of-order GET
+segments by seq, then the same 200 body.
+**P5 NAT TCP listen (same day):** `NatTcp::listen` SYN→SYN-ACK, ACK,
+then GET. `nat_http_on_wire` completes that handshake first.
+**P5 virtio-shaped DMA (same day):** `VirtioNetDma` posts TX/RX with
+avail/used idx; KernelNet `10.0.2.2` GET pumps that path.
+**P5 virtio desc/avail/used (same day):** rings use 16-byte desc,
+DEVICE_WRITE on RX, used `{id,len}` at `NET_*` offsets.
+**P5 KernelNet on exec guest rings (same day):**
+`GuestVirtioNet::http_get` programs exec-model `NET_*` rings and KernelNet
+`10.0.2.2` uses that.
+**P5 kstart `__vio` second GET (same day):** `GuestVirtioNet::from_kstart`
+keeps RAM/CSR after `VioNetProbe` and `fetch` posts another GET on those
+rings.
+**P5 KernelNet from_kstart (same day):** `http://10.0.2.2` GET on a
+`virtio_net` board runs kstart then `fetch` on live `__vio`.
+**P5 ICMP MTU (same day):** IPv4 DF + totlen > MTU → dest-unreach
+frag-needed (type 3 code 4). `NAT_MTU` 1500. Not QEMU, not a PHY.
+**P5 IP reassembly (same day):** `IpReasm` joins out-of-order IPv4
+fragments of a GET (MF/offset; DF refuses fragment). Gateway rejects
+a lone first fragment. Not a reassembly timeout, not QEMU, not a PHY.
+**P5 KernelNet cancel/watchdog (same day):** `get` only arms a
+`10.0.2.2` job; each `poll` takes watchdog then one SYN/ACK/GET step.
+Cancel drops the rings before GET; a neighbour job is not cancelled.
+Not QEMU, not a PHY.
+**P5 link-loss (same day):** cable unplug marks the NIC down. An
+in-flight GET fails `link down` on the next poll (before SYN/GET/recv)
+and drops rings/socket. Not a stall wait, not QEMU, not a PHY.
+**P5 connect/DNS (same day):** socket `get` only arms; each `poll`
+tries one IPv4-literal connect (1 ms cap). IPv6 and hostnames are
+named refuses until an async DNS job. Not OS `getaddrinfo` in `get`,
+not QEMU, not a PHY.
+**P5 NAT DNS job (same day):** `g6lc` A query on in-memory UDP :53
+→ 10.0.2.2, then the same NAT GET. `g6lc.invalid` still fails closed.
+Not OS DNS, not recursive, not QEMU, not a PHY.
+**P5 NAT nameserver (same day):** DNS queries go to `10.0.2.3`
+(`NAT_DNS`), not the HTTP gateway. A is still `10.0.2.2`. A query
+to :53 on 10.0.2.2 is `not nameserver`. Not QEMU, not a PHY.
+**P5 DNS destination (same day):** the HTTP hop must use the resolved
+A (`nat_http_dst`). The nameserver is not an origin. Not a redirect
+follow, not QEMU, not a PHY.
+**P5 redirect origin (same day):** 3xx `Location` is parsed.
+`redirect_hop` allows same-origin only and refuses HTTPS downgrade
+and credentials. KernelNet does not follow; it fails named.
+Not QEMU, not a PHY.
+**P5 TCP window (same day):** `NAT_TCP_WINDOW` 8192 on encapsulate,
+SYN-ACK, and HTTP. Zero-window SYN is refused. Not QEMU.
+**P5 generational jobs (same day):** four KernelNet slots; cancel
+then reuse is a new generation; the old handle is `stale generation`.
+Not QEMU, not a PHY.
+**P5 sequential leftovers are closed.** The P5 gate still needs
+external isolated peers, QEMU `-netdev`, and a PHY.
+**P6 suite advertisement (same day):** ClientHello offers ECDHE-GCM
+only; CBC/RSA key transport is not advertised. Framing is still
+non-secure. Not a TLS 1.3 record layer, not B54.
+**P6 entropy (same day):** ClientHello/ServerHello random comes from
+an explicit `Entropy` fill. `NoEntropy` fails closed. Hostname and
+handshake hashes are not used. KernelNet HTTPS needs a fixture or
+it fails `tls: no entropy`. Not a CSPRNG, not virtio-rng, not B54.
+**P6 HKDF (same day):** HKDF-SHA256 extract/expand (RFC 5869). Not a
+handshake, not AEAD, not B54.
+**P6 Expand-Label (same day):** RFC 8446 `HKDF-Expand-Label` /
+`Derive-Secret`. 0-RTT and resumption labels refused. RFC 8448
+early-secret + `derived`. Not a handshake, not AEAD, not B54.
+**P6 AES-GCM (same day):** AES-128-GCM seal/open (12-byte nonce,
+16-byte tag). TLS 1.3 `key`/`iv` from a traffic secret. `wrap_app`
+stays plaintext. Not a record layer, not B54.
+**P6 record (same day):** TLS 1.3 AEAD record `seal_record` /
+`open_record` (inner type, seq nonce, header AAD). `wrap_app` is
+still plaintext. Not a handshake, not B54.
+**P6 transcript/Finished (same day):** handshake transcript hash
+and Finished HMAC (`finished` key). RFC 8448 ClientHello+ServerHello
+hash and server Finished key. Not (EC)DHE, not B54.
 
 **Local plan review (2026-09-14):** `gr`/`display-proxy` produce legacy blue
 text-plane diagnostics, not web screenshots. Their host font now covers

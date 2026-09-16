@@ -54,8 +54,10 @@ use g6b_spec::BoardSpec;
 /// then the blk requestq: desc @0x800, avail @0x880,
 /// used @0x8c0, request header @0x920, status @0x930, used-idx @0x934, cached
 /// sector @0x938, and one 512-byte sector buffer @0x940. The FAT file reader
-/// uses an extra 1 KiB scratch at 0xc00, so `__vio` is sized to 0x1000.
-pub const VIO_BSS: u64 = 0x1000;
+/// uses an extra 1 KiB scratch at 0xc00, and virtio-net RX/TX rings sit at
+/// [`NET_BASE`] (0x1000) with 320-byte packet buffers for BOOTP/DHCP, so
+/// `__vio` is sized to 0x1800.
+pub const VIO_BSS: u64 = 0x1800;
 
 /// Compact persist (`__ui_cap`) after `__ui_dom`. Dirty tiles + live node
 /// count for the web engine. Not the 48-row `__ui_dom` table.
@@ -129,6 +131,45 @@ pub const VIO_POLL_MAX: i64 = 1 << 22;
 pub const VIO_DEV_OFF: i32 = 0x3f0;
 /// Scratch u32 holding the probed virtio-net (DeviceID 1) mmio base.
 pub const VIO_NET_OFF: i32 = 0x7c0;
+/// virtio-net receiveq/transmitq rings. Past 12-bit `__vio` reach, so the
+/// probe forms one base like [`BLK_BASE`]. receiveq is queue 0, transmitq
+/// is queue 1 (virtio spec 5.1.2). One RX and one TX buffer follow the rings.
+pub const NET_BASE: i64 = 0x1000;
+pub const NET_RX_DESC_OFF: i32 = 0x000;
+pub const NET_RX_AVAIL_OFF: i32 = 0x080;
+pub const NET_RX_USED_OFF: i32 = 0x0c0;
+pub const NET_TX_DESC_OFF: i32 = 0x140;
+pub const NET_TX_AVAIL_OFF: i32 = 0x1c0;
+pub const NET_TX_USED_OFF: i32 = 0x200;
+/// `virtio_net_hdr` (12) plus Ethernet(14)+ARP(28).
+pub const NET_HDR_LEN: i32 = 12;
+pub const NET_ETH_LEN: i32 = 14;
+pub const NET_ARP_LEN: i32 = 28;
+pub const NET_PKT_LEN: i32 = NET_HDR_LEN + NET_ETH_LEN + NET_ARP_LEN;
+pub const NET_BUF_LEN: i32 = 320;
+pub const NET_RXBUF_OFF: i32 = 0x280;
+pub const NET_TXBUF_OFF: i32 = 0x3c0;
+pub const NET_RXBUF2_OFF: i32 = 0x500;
+pub const NET_DHCP_PORT: u16 = 67;
+pub const NET_DHCP_SPORT: u16 = 68;
+pub const NET_DHCP_DISC_LEN: i32 = NET_HDR_LEN + 286;
+pub const NET_DHCP_REQ_LEN: i32 = NET_HDR_LEN + 298;
+pub const NET_ICMP_PKT_LEN: i32 = NET_HDR_LEN + NET_ETH_LEN + 20 + 12;
+/// Ethernet + IPv4 + TCP20 SYN/SYN-ACK.
+pub const NET_TCP_SYN_LEN: i32 = NET_HDR_LEN + NET_ETH_LEN + 20 + 20;
+pub const NET_TCP_SPORT: u16 = 12345;
+pub const NET_TCP_DPORT: u16 = 80;
+pub const NET_HTTP_GET_LEN: i32 = 40;
+pub const NET_HTTP_REQ_LEN: i32 = NET_HDR_LEN + NET_ETH_LEN + 20 + 20 + NET_HTTP_GET_LEN;
+pub const NET_HTTP_BODY: [u8; 4] = [0x00, 0xff, 0xfe, 0x80];
+pub const NET_UDP_PORT: u16 = 7;
+pub const NET_UDP_LEN: i32 = NET_HDR_LEN + NET_ETH_LEN + 20 + 8 + 4;
+pub const NET_DNS_PORT: u16 = 53;
+pub const NET_DNS_Q_LEN: i32 = NET_HDR_LEN + NET_ETH_LEN + 20 + 8 + 22;
+pub const NET_MAC_LOCAL: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+pub const NET_MAC_GW: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x02];
+pub const NET_IP_LOCAL: [u8; 4] = [10, 0, 2, 15];
+pub const NET_IP_GW: [u8; 4] = [10, 0, 2, 2];
 /// Used-buffer interrupt counter in `__vio`, bumped by `trap_vio` (the SEI
 /// path for the virtio-mmio PLIC source, irq 1+slot on QEMU virt — see the
 /// machine DTB).

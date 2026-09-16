@@ -558,8 +558,32 @@ details that differ and must not be conflated with the host table:
   live. Fork WAT still decodes; await outside try still rewinds. Interp
   also rejects `try { call $awaiter }` when `$awaiter` can reach await via
   direct `call`. A second throw in the *same* slot still clobbers
-  `OFF_EXCPAY`. **P4 sequential leftovers are closed.** P5 (guest packet
-  stack) may start.
+  `OFF_EXCPAY`. **P4 sequential leftovers are closed.** P5 binary-safe
+  HTTP/1 response parse landed (`parse_http1_response` copies bytes,
+  honors `Content-Length`, rejects conflicting framing). Chunked
+  decode (`Transfer-Encoding: chunked` alone; trailers discarded)
+  partial I/O (`NeedMore`/`NeedEof`/`Done`), and TCP `WouldBlock` vs
+  peer EOF (`TcpRecv`), and virtio-net feature negotiation
+  (`VIRTIO-NET-OK` / `HOLD`), RX/TX queues, loopback DMA, Ethernet/ARP,
+  IPv4 ICMP echo, TCP handshake, HTTP GET/200 binary body, TCP FIN, UDP
+  echo, DNS A `g6lc`→10.0.2.2, DHCP DISCOVER/ACK, TCP RST to :9, and
+  SYN :81 drop+retry, and KernelNet `10.0.2.2` fetch over in-memory
+  packets, TCP reassembly, NAT TCP listen, virtio desc/avail/used rings,
+  KernelNet GET via exec-model guest rings, and a second GET on live
+  kstart `__vio`, KernelNet GET via `from_kstart`, ICMP
+  fragmentation-needed, IPv4 fragment reassembly of a split GET, and
+  KernelNet cancel/watchdog during a NAT fetch, link-loss
+  completion of an in-flight GET, socket GET armed without
+  connect (IPv4 literal; IPv6/hostname refused), and isolated NAT
+  DNS A `g6lc`→10.0.2.2 as a pollable job (nameserver 10.0.2.3),
+  DNS destination policy (HTTP hop must match the A), and HTTP
+  redirect origin policy (no follow, no HTTPS downgrade), TCP
+  window, and generational KernelNet jobs landed. P5 sequential
+  leftovers are closed; the P5 gate still needs external peers,
+  QEMU `-netdev`, and a PHY. P6: ClientHello does not advertise
+  CBC/RSA key transport; TLS random is not a hostname hash;
+  HKDF-SHA256 (RFC 5869); RFC 8446 Expand-Label (0-RTT/resumption
+  refused).
 
 Exec-model evidence (`guest_jit_executes_shipped_cell`): 252 funcs translate,
 `_start` completes, `domt_next=56 live=56 ids=47 listen=8`, and `DomtRaster`

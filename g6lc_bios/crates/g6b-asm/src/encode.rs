@@ -164,6 +164,12 @@ pub const VIO_ST_DRIVER_OK: i32 = 4;
 pub const VIO_ST_FEATURES_OK: i32 = 8;
 /// `VIRTIO_F_VERSION_1` — bit 32 of the feature space = bit 0 of word 1.
 pub const VIO_F_VERSION_1: u32 = 1;
+/// virtio-net 5.1 word-0 features advertised by the exec model / `g6b-hw`
+/// catalog (`csum`, `mac`, `status`). Packet DMA is a later leftover.
+pub const VIO_NET_F_CSUM: u32 = 1 << 0;
+pub const VIO_NET_F_MAC: u32 = 1 << 5;
+pub const VIO_NET_F_STATUS: u32 = 1 << 16;
+pub const VIO_NET_F_WORD0: u32 = VIO_NET_F_CSUM | VIO_NET_F_MAC | VIO_NET_F_STATUS;
 /// virtio-gpu ctrlq commands (`ctrl_hdr.type`; virtio spec 5.7.6).
 pub const VIO_GPU_GET_DISPLAY_INFO: u32 = 0x0100;
 pub const VIO_GPU_RESOURCE_CREATE_2D: u32 = 0x0101;

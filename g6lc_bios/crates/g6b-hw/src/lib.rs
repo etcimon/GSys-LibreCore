@@ -36,6 +36,7 @@ mod host_gl;
 mod host_nic;
 mod inet;
 mod net;
+mod pkt;
 mod session;
 mod stack;
 
@@ -62,11 +63,17 @@ pub use inet::{
     NAT_LEASE, NAT_NETWORK, NAT_PREFIX,
 };
 pub use net::VIRTIO_NET_FEATURES;
+pub use pkt::{
+    dns_gateway, encapsulate_dns_a, encapsulate_seq, encapsulate_tcp, icmp_frag_needed,
+    ip_fragment, ip_is_fragment, is_nat_dns_name, is_nat_http_host, nat_dns_a, nat_http_dst,
+    nat_http_on_wire, nat_http_via_dma, IpReasm, NatHttpReasm, NatTcp, VirtioNetDma, NAT_HTTP_BODY,
+    NAT_MTU, NAT_TCP_WINDOW,
+};
 pub use session::{
     Addressing, CableEvent, CableState, DeviceCfg, HwMsg, HwPort, HwSession, NatMode, NatPhase,
     MAX_HW_QUEUE,
 };
-pub use stack::InetStack;
+pub use stack::{resolve_ipv4, InetStack, TcpRecv};
 
 /// virtio-net DeviceID — must match `g6b_asm::encode::VIO_DEV_NET`.
 pub const VIRTIO_NET_DEVICE_ID: u32 = 1;

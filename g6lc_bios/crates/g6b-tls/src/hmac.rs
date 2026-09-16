@@ -33,3 +33,25 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     outer.extend_from_slice(&ih);
     sha256(&outer)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hx(s: &str) -> Vec<u8> {
+        (0..s.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn rfc4231_case_1() {
+        let key = [0x0bu8; 20];
+        let mac = hmac_sha256(&key, b"Hi There");
+        assert_eq!(
+            mac,
+            hx("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")[..]
+        );
+    }
+}

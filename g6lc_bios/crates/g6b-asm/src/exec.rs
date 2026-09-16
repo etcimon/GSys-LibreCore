@@ -676,6 +676,56 @@ fn run_with_kick(
     kick: u8,
     vio_gpu: bool,
     extras: bool,
+    vio_base: u64,
+    scan_fb_base: u64,
+    scan_fb_bytes: u64,
+    cap_base: u64,
+    domt_base: u64,
+    wdt_base: u64,
+    web: Option<&GuestWebPresent>,
+    feed: Option<&mut dyn WebFeed>,
+    uart_ui_pc: u64,
+    trap_timer_pc: u64,
+    blk_image: Option<Vec<u8>>,
+    step_limit: u32,
+    native: Option<NativeHook>,
+) -> Result<Smoke, String> {
+    Ok(run_with_kick_keep(
+        spec,
+        image,
+        entry,
+        memsz,
+        hartid,
+        kick,
+        vio_gpu,
+        extras,
+        vio_base,
+        scan_fb_base,
+        scan_fb_bytes,
+        cap_base,
+        domt_base,
+        wdt_base,
+        web,
+        feed,
+        uart_ui_pc,
+        trap_timer_pc,
+        blk_image,
+        step_limit,
+        native,
+    )?
+    .0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_with_kick_keep(
+    spec: &BoardSpec,
+    image: &[u8],
+    entry: u64,
+    memsz: u64,
+    hartid: u64,
+    kick: u8,
+    vio_gpu: bool,
+    extras: bool,
     // Resolved `__vio` address so `done()` can read the `DispSel`/`PciProbe`
     // result block. `0` when the caller has no module to resolve it from.
     vio_base: u64,
@@ -696,7 +746,7 @@ fn run_with_kick(
     blk_image: Option<Vec<u8>>,
     step_limit: u32,
     native: Option<NativeHook>,
-) -> Result<Smoke, String> {
+) -> Result<(Smoke, Vec<u8>, Csr), String> {
     let xlen = spec.isa.xlen;
     if xlen != 32 && xlen != 64 {
         return Err(format!("unsupported xlen {xlen}"));
@@ -780,6 +830,24 @@ fn run_with_kick(
         vio_gl: vio_gpu && spec.kernel.proxy.enable && spec.kernel.proxy.gl,
         vio_inp: vio_gpu && spec.wants_virtio_input(),
         vio_net: spec.wants_virtio_net(),
+        net_status: 0,
+        net_feat_sel: 0,
+        net_drv_sel: 0,
+        net_drv_feat0: 0,
+        net_drv_feat1: 0,
+        net_qsel: 0,
+        net_qnum: [0; 2],
+        net_ready: [false; 2],
+        net_qdesc: [0; 2],
+        net_qavail: [0; 2],
+        net_qused: [0; 2],
+        net_rx_seen: 0,
+        net_tx_seen: 0,
+        net_rx_used: 0,
+        net_tx_used: 0,
+        net_rx_bufs: Vec::new(),
+        net_pkts: 0,
+        net_syn81_drop: false,
         vio_blk: spec.wants_virtio_blk(),
         blk_status: 0,
         blk_feat_sel: 0,
@@ -900,30 +968,20 @@ fn run_with_kick(
     let mut steps = 0u32;
     loop {
         if steps >= step_limit {
-            return Ok(done(
-                console,
-                steps,
-                Halt::Limit,
-                &csr,
-                &ram,
-                entry,
-                xlen,
-                pc,
+            return Ok((
+                done(console, steps, Halt::Limit, &csr, &ram, entry, xlen, pc),
+                ram,
+                csr,
             ));
         }
         steps += 1;
         csr.time = csr.time.wrapping_add(1);
         if platform_wdt_due(&ram, entry, &csr) {
             console.push_str("LINUX-WDT-FIRE\n");
-            return Ok(done(
-                console,
-                steps,
-                Halt::Watchdog,
-                &csr,
-                &ram,
-                entry,
-                xlen,
-                pc,
+            return Ok((
+                done(console, steps, Halt::Watchdog, &csr, &ram, entry, xlen, pc),
+                ram,
+                csr,
             ));
         }
         // Deliver the canned input burst as soon as the boot picker is armed
@@ -995,15 +1053,10 @@ fn run_with_kick(
         let w = match fetch_u32(&ram, entry, pc) {
             Some(w) => w,
             None => {
-                return Ok(done(
-                    console,
-                    steps,
-                    Halt::Unimp(0),
-                    &csr,
-                    &ram,
-                    entry,
-                    xlen,
-                    pc,
+                return Ok((
+                    done(console, steps, Halt::Unimp(0), &csr, &ram, entry, xlen, pc),
+                    ram,
+                    csr,
                 ))
             }
         };
@@ -1075,7 +1128,11 @@ fn run_with_kick(
                 if host_uart_kick(&mut csr) && take_pending_sei(xlen, &mut pc, &mut csr) {
                     continue;
                 }
-                return Ok(done(console, steps, h, &csr, &ram, entry, xlen, pc));
+                return Ok((
+                    done(console, steps, h, &csr, &ram, entry, xlen, pc),
+                    ram,
+                    csr,
+                ));
             }
         }
         if uart_polls > 16 && !console.is_empty() {
@@ -1087,15 +1144,10 @@ fn run_with_kick(
                 uart_polls = 0;
                 continue;
             }
-            return Ok(done(
-                console,
-                steps,
-                Halt::UartPoll,
-                &csr,
-                &ram,
-                entry,
-                xlen,
-                pc,
+            return Ok((
+                done(console, steps, Halt::UartPoll, &csr, &ram, entry, xlen, pc),
+                ram,
+                csr,
             ));
         }
     }
@@ -1611,6 +1663,25 @@ struct Csr {
     blk_drv_feat0: u32,
     /// Modelled virtio-net at slot 5 (DeviceID 1). Not a QEMU `-netdev`.
     vio_net: bool,
+    net_status: u32,
+    net_feat_sel: u32,
+    net_drv_sel: u32,
+    net_drv_feat0: u32,
+    net_drv_feat1: u32,
+    net_qsel: u32,
+    net_qnum: [u32; 2],
+    net_ready: [bool; 2],
+    net_qdesc: [u64; 2],
+    net_qavail: [u64; 2],
+    net_qused: [u64; 2],
+    net_rx_seen: u16,
+    net_tx_seen: u16,
+    net_rx_used: u16,
+    net_tx_used: u16,
+    net_rx_bufs: Vec<u16>,
+    net_pkts: u32,
+    /// First SYN to :81 is dropped (retransmit leftover). Not a RTO timer.
+    net_syn81_drop: bool,
     /// Modelled virtio-input keyboard at slot 1 (`-device
     /// virtio-keyboard-device`; QEMU virt PLIC irq = 1+slot → 2).
     vio_inp: bool,
@@ -2633,7 +2704,7 @@ fn vio_load(csr: &Csr, addr: u64) -> u32 {
         return tab_load(csr, off % VIO_MMIO_STEP, VIO_DEV_INPUT);
     }
     if slot == VIO_NET_SLOT && csr.vio_net {
-        return net_load(off % VIO_MMIO_STEP);
+        return net_load(csr, off % VIO_MMIO_STEP);
     }
     if slot == crate::encode::VIO_BLK_SLOT && csr.vio_blk {
         return blk_load(csr, off % VIO_MMIO_STEP);
@@ -2682,6 +2753,10 @@ fn vio_store(csr: &mut Csr, ram: &mut [u8], base: u64, addr: u64, v: u32) {
     }
     if slot == 3 && csr.vio_inp {
         tab_store(csr, ram, base, off % VIO_MMIO_STEP, v);
+        return;
+    }
+    if slot == crate::encode::VIO_NET_SLOT && csr.vio_net {
+        net_store(csr, ram, base, off % VIO_MMIO_STEP, v);
         return;
     }
     if slot == crate::encode::VIO_BLK_SLOT && csr.vio_blk {
@@ -3049,16 +3124,1447 @@ fn blk_notify(csr: &mut Csr, ram: &mut [u8], base: u64) {
     }
 }
 
-/// virtio-net identity (DeviceID 1). Probe-only: magic/version/id, no queues.
-fn net_load(reg: u64) -> u32 {
-    use crate::encode::{VIO_DEV_NET, VIO_F_VERSION_1, VIO_MAGIC};
+/// virtio-net identity, features, and receiveq/transmitq (DeviceID 1).
+/// Queue notify / packet DMA is a later leftover.
+fn net_load(csr: &Csr, reg: u64) -> u32 {
+    use crate::encode::{VIO_DEV_NET, VIO_F_VERSION_1, VIO_MAGIC, VIO_NET_F_WORD0};
+    let qi = (csr.net_qsel as usize).min(2);
     match reg {
         0x00 => VIO_MAGIC,
         0x04 => 2,
         0x08 => VIO_DEV_NET,
-        0x10 => VIO_F_VERSION_1, // FEATURES_SEL=1 window is not modelled
+        0x10 => {
+            if csr.net_feat_sel == 1 {
+                VIO_F_VERSION_1
+            } else {
+                VIO_NET_F_WORD0
+            }
+        }
+        0x14 => csr.net_feat_sel,
+        0x24 => csr.net_drv_sel,
+        0x30 => csr.net_qsel,
+        0x34 => {
+            if csr.net_qsel < 2 {
+                8
+            } else {
+                0
+            }
+        }
+        0x38 => {
+            if qi < 2 {
+                csr.net_qnum[qi]
+            } else {
+                0
+            }
+        }
+        0x44 => {
+            if qi < 2 {
+                u32::from(csr.net_ready[qi])
+            } else {
+                0
+            }
+        }
+        0x70 => csr.net_status,
         _ => 0,
     }
+}
+
+fn net_store(csr: &mut Csr, ram: &mut [u8], base: u64, reg: u64, v: u32) {
+    use crate::encode::{VIO_F_VERSION_1, VIO_NET_F_WORD0, VIO_ST_FEATURES_OK};
+    let qi = csr.net_qsel as usize;
+    match reg {
+        0x14 => csr.net_feat_sel = v,
+        0x20 => {
+            if csr.net_drv_sel == 0 {
+                csr.net_drv_feat0 = v;
+            } else if csr.net_drv_sel == 1 {
+                csr.net_drv_feat1 = v;
+            }
+        }
+        0x24 => csr.net_drv_sel = v,
+        0x30 => csr.net_qsel = v,
+        0x38 => {
+            if qi < 2 {
+                csr.net_qnum[qi] = v;
+            }
+        }
+        0x44 => {
+            if qi < 2 {
+                csr.net_ready[qi] = v != 0;
+            }
+        }
+        0x50 => net_notify(csr, ram, base),
+        0x80 => {
+            if qi < 2 {
+                csr.net_qdesc[qi] = (csr.net_qdesc[qi] & !0xffff_ffff) | u64::from(v);
+            }
+        }
+        0x84 => {
+            if qi < 2 {
+                csr.net_qdesc[qi] = (csr.net_qdesc[qi] & 0xffff_ffff) | (u64::from(v) << 32);
+            }
+        }
+        0x90 => {
+            if qi < 2 {
+                csr.net_qavail[qi] = (csr.net_qavail[qi] & !0xffff_ffff) | u64::from(v);
+            }
+        }
+        0x94 => {
+            if qi < 2 {
+                csr.net_qavail[qi] = (csr.net_qavail[qi] & 0xffff_ffff) | (u64::from(v) << 32);
+            }
+        }
+        0xa0 => {
+            if qi < 2 {
+                csr.net_qused[qi] = (csr.net_qused[qi] & !0xffff_ffff) | u64::from(v);
+            }
+        }
+        0xa4 => {
+            if qi < 2 {
+                csr.net_qused[qi] = (csr.net_qused[qi] & 0xffff_ffff) | (u64::from(v) << 32);
+            }
+        }
+        0x70 => {
+            let mut status = v;
+            if status & VIO_ST_FEATURES_OK as u32 != 0 {
+                let extra0 = csr.net_drv_feat0 & !VIO_NET_F_WORD0;
+                if extra0 != 0 || csr.net_drv_feat1 & VIO_F_VERSION_1 == 0 {
+                    status &= !VIO_ST_FEATURES_OK as u32;
+                }
+            }
+            csr.net_status = status;
+            if v == 0 {
+                csr.net_feat_sel = 0;
+                csr.net_drv_sel = 0;
+                csr.net_drv_feat0 = 0;
+                csr.net_drv_feat1 = 0;
+                csr.net_qsel = 0;
+                csr.net_qnum = [0; 2];
+                csr.net_ready = [false; 2];
+                csr.net_qdesc = [0; 2];
+                csr.net_qavail = [0; 2];
+                csr.net_qused = [0; 2];
+                csr.net_rx_seen = 0;
+                csr.net_tx_seen = 0;
+                csr.net_rx_used = 0;
+                csr.net_tx_used = 0;
+                csr.net_rx_bufs.clear();
+                csr.net_pkts = 0;
+                csr.net_syn81_drop = false;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn net_avail_head(ram: &[u8], base: u64, avail: u64, slot: u16) -> u16 {
+    let word = load_u32(ram, base, avail + 4 + u64::from(slot & !1) * 2).unwrap_or(0);
+    ((word >> ((slot & 1) * 16)) & 0xffff) as u16
+}
+
+fn net_publish_used(ram: &mut [u8], base: u64, used: u64, idx: &mut u16, head: u16, len: u32) {
+    let ui = u64::from(*idx % 8);
+    store_u32(ram, base, used + 4 + ui * 8, u32::from(head));
+    store_u32(ram, base, used + 8 + ui * 8, len);
+    *idx = idx.wrapping_add(1);
+    store_u32(ram, base, used, u32::from(*idx) << 16);
+}
+
+fn net_csum(bytes: &[u8]) -> u16 {
+    let mut s = 0u32;
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        s += u16::from_be_bytes([bytes[i], bytes[i + 1]]) as u32;
+        i += 2;
+    }
+    if i < bytes.len() {
+        s += u16::from_be_bytes([bytes[i], 0]) as u32;
+    }
+    while s > 0xffff {
+        s = (s >> 16) + (s & 0xffff);
+    }
+    !s as u16
+}
+
+/// IPv4 ICMP echo-request for 10.0.2.2 → echo-reply. Not a PHY.
+fn net_icmp_reply(
+    ram: &mut [u8],
+    base: u64,
+    tx_addr: u64,
+    tx_len: u32,
+    rx_addr: u64,
+    rx_len: u32,
+) -> Option<u32> {
+    use crate::vio::{NET_HDR_LEN, NET_ICMP_PKT_LEN, NET_IP_GW};
+    let need = NET_ICMP_PKT_LEN as u32;
+    if tx_len < need || rx_len < need {
+        return None;
+    }
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    if load_u8(ram, base, eth + 12)? != 0x08 || load_u8(ram, base, eth + 13)? != 0x00 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 23)? != 1 || load_u8(ram, base, eth + 34)? != 8 {
+        return None;
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        if load_u8(ram, base, eth + 30 + i as u64)? != *b {
+            return None;
+        }
+    }
+    for i in 0..need as u64 {
+        let b = load_u8(ram, base, tx_addr + i)?;
+        store_u8(ram, base, rx_addr + i, b);
+    }
+    let dst = rx_addr + NET_HDR_LEN as u64;
+    for i in 0..6u64 {
+        let a = load_u8(ram, base, eth + i)?;
+        let b = load_u8(ram, base, eth + 6 + i)?;
+        store_u8(ram, base, dst + i, b);
+        store_u8(ram, base, dst + 6 + i, a);
+    }
+    for i in 0..4u64 {
+        let a = load_u8(ram, base, eth + 26 + i)?;
+        let b = load_u8(ram, base, eth + 30 + i)?;
+        store_u8(ram, base, dst + 26 + i, b);
+        store_u8(ram, base, dst + 30 + i, a);
+    }
+    store_u8(ram, base, dst + 24, 0);
+    store_u8(ram, base, dst + 25, 0);
+    let mut ip = [0u8; 20];
+    for (i, b) in ip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 14 + i as u64)?;
+    }
+    let cs = net_csum(&ip);
+    store_u8(ram, base, dst + 24, (cs >> 8) as u8);
+    store_u8(ram, base, dst + 25, cs as u8);
+    store_u8(ram, base, dst + 34, 0);
+    store_u8(ram, base, dst + 36, 0);
+    store_u8(ram, base, dst + 37, 0);
+    let icmp_len = (need as usize).saturating_sub(NET_HDR_LEN as usize + 14 + 20);
+    let mut icmp = vec![0u8; icmp_len];
+    for (i, b) in icmp.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 34 + i as u64)?;
+    }
+    let ics = net_csum(&icmp);
+    store_u8(ram, base, dst + 36, (ics >> 8) as u8);
+    store_u8(ram, base, dst + 37, ics as u8);
+    Some(need)
+}
+
+fn net_tcp_csum(src: [u8; 4], dst: [u8; 4], tcp: &[u8]) -> u16 {
+    let mut p = Vec::with_capacity(12 + tcp.len());
+    p.extend_from_slice(&src);
+    p.extend_from_slice(&dst);
+    p.extend_from_slice(&[0, 6, (tcp.len() >> 8) as u8, tcp.len() as u8]);
+    p.extend_from_slice(tcp);
+    net_csum(&p)
+}
+
+/// TCP SYN to 10.0.2.2:80 → SYN-ACK. No payload, no retransmission.
+fn net_tcp_synack(
+    ram: &mut [u8],
+    base: u64,
+    tx_addr: u64,
+    tx_len: u32,
+    rx_addr: u64,
+    rx_len: u32,
+) -> Option<u32> {
+    use crate::vio::{NET_HDR_LEN, NET_IP_GW, NET_TCP_SYN_LEN};
+    let need = NET_TCP_SYN_LEN as u32;
+    if tx_len < need || rx_len < need {
+        return None;
+    }
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    if load_u8(ram, base, eth + 12)? != 0x08 || load_u8(ram, base, eth + 13)? != 0x00 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 23)? != 6 || load_u8(ram, base, eth + 47)? != 0x02 {
+        return None;
+    }
+    let dport = load_u8(ram, base, eth + 37)?;
+    if load_u8(ram, base, eth + 36)? != 0 || (dport != 80 && dport != 81) {
+        return None;
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        if load_u8(ram, base, eth + 30 + i as u64)? != *b {
+            return None;
+        }
+    }
+    for i in 0..need as u64 {
+        let b = load_u8(ram, base, tx_addr + i)?;
+        store_u8(ram, base, rx_addr + i, b);
+    }
+    let dst = rx_addr + NET_HDR_LEN as u64;
+    for i in 0..6u64 {
+        let a = load_u8(ram, base, eth + i)?;
+        let b = load_u8(ram, base, eth + 6 + i)?;
+        store_u8(ram, base, dst + i, b);
+        store_u8(ram, base, dst + 6 + i, a);
+    }
+    for i in 0..4u64 {
+        let a = load_u8(ram, base, eth + 26 + i)?;
+        let b = load_u8(ram, base, eth + 30 + i)?;
+        store_u8(ram, base, dst + 26 + i, b);
+        store_u8(ram, base, dst + 30 + i, a);
+    }
+    for i in 0..2u64 {
+        let a = load_u8(ram, base, eth + 34 + i)?;
+        let b = load_u8(ram, base, eth + 36 + i)?;
+        store_u8(ram, base, dst + 34 + i, b);
+        store_u8(ram, base, dst + 36 + i, a);
+    }
+    let mut seq = 0u32;
+    for i in 0..4u64 {
+        seq = (seq << 8) | u32::from(load_u8(ram, base, eth + 38 + i)?);
+    }
+    let iss: u32 = 1000;
+    let ack = seq.wrapping_add(1);
+    for (i, b) in iss.to_be_bytes().iter().enumerate() {
+        store_u8(ram, base, dst + 38 + i as u64, *b);
+    }
+    for (i, b) in ack.to_be_bytes().iter().enumerate() {
+        store_u8(ram, base, dst + 42 + i as u64, *b);
+    }
+    store_u8(ram, base, dst + 47, 0x12);
+    store_u8(ram, base, dst + 24, 0);
+    store_u8(ram, base, dst + 25, 0);
+    let mut ip = [0u8; 20];
+    for (i, b) in ip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 14 + i as u64)?;
+    }
+    let cs = net_csum(&ip);
+    store_u8(ram, base, dst + 24, (cs >> 8) as u8);
+    store_u8(ram, base, dst + 25, cs as u8);
+    store_u8(ram, base, dst + 50, 0);
+    store_u8(ram, base, dst + 51, 0);
+    let mut tcp = [0u8; 20];
+    for (i, b) in tcp.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 34 + i as u64)?;
+    }
+    let mut src = [0u8; 4];
+    let mut dip = [0u8; 4];
+    for (i, b) in src.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 26 + i as u64)?;
+    }
+    for (i, b) in dip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 30 + i as u64)?;
+    }
+    let tcs = net_tcp_csum(src, dip, &tcp);
+    store_u8(ram, base, dst + 50, (tcs >> 8) as u8);
+    store_u8(ram, base, dst + 51, tcs as u8);
+    Some(need)
+}
+
+/// SYN to a closed port (not :80) → RST+ACK. Not retransmit.
+fn net_tcp_rst(
+    ram: &mut [u8],
+    base: u64,
+    tx_addr: u64,
+    tx_len: u32,
+    rx_addr: u64,
+    rx_len: u32,
+) -> Option<u32> {
+    use crate::vio::{NET_HDR_LEN, NET_IP_GW, NET_TCP_SYN_LEN};
+    let need = NET_TCP_SYN_LEN as u32;
+    if tx_len < need || rx_len < need {
+        return None;
+    }
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    if load_u8(ram, base, eth + 12)? != 0x08 || load_u8(ram, base, eth + 13)? != 0x00 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 23)? != 6 || load_u8(ram, base, eth + 47)? != 0x02 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 37)? != 9 {
+        return None;
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        if load_u8(ram, base, eth + 30 + i as u64)? != *b {
+            return None;
+        }
+    }
+    for i in 0..need as u64 {
+        let b = load_u8(ram, base, tx_addr + i)?;
+        store_u8(ram, base, rx_addr + i, b);
+    }
+    let dst = rx_addr + NET_HDR_LEN as u64;
+    for i in 0..6u64 {
+        let a = load_u8(ram, base, eth + i)?;
+        let b = load_u8(ram, base, eth + 6 + i)?;
+        store_u8(ram, base, dst + i, b);
+        store_u8(ram, base, dst + 6 + i, a);
+    }
+    for i in 0..4u64 {
+        let a = load_u8(ram, base, eth + 26 + i)?;
+        let b = load_u8(ram, base, eth + 30 + i)?;
+        store_u8(ram, base, dst + 26 + i, b);
+        store_u8(ram, base, dst + 30 + i, a);
+    }
+    for i in 0..2u64 {
+        let a = load_u8(ram, base, eth + 34 + i)?;
+        let b = load_u8(ram, base, eth + 36 + i)?;
+        store_u8(ram, base, dst + 34 + i, b);
+        store_u8(ram, base, dst + 36 + i, a);
+    }
+    let mut seq = 0u32;
+    for i in 0..4u64 {
+        seq = (seq << 8) | u32::from(load_u8(ram, base, eth + 38 + i)?);
+    }
+    for i in 0..4u64 {
+        store_u8(ram, base, dst + 38 + i, 0);
+    }
+    let ack = seq.wrapping_add(1);
+    for (i, b) in ack.to_be_bytes().iter().enumerate() {
+        store_u8(ram, base, dst + 42 + i as u64, *b);
+    }
+    store_u8(ram, base, dst + 47, 0x14);
+    store_u8(ram, base, dst + 24, 0);
+    store_u8(ram, base, dst + 25, 0);
+    let mut ip = [0u8; 20];
+    for (i, b) in ip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 14 + i as u64)?;
+    }
+    let cs = net_csum(&ip);
+    store_u8(ram, base, dst + 24, (cs >> 8) as u8);
+    store_u8(ram, base, dst + 25, cs as u8);
+    store_u8(ram, base, dst + 50, 0);
+    store_u8(ram, base, dst + 51, 0);
+    let mut tcp = [0u8; 20];
+    for (i, b) in tcp.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 34 + i as u64)?;
+    }
+    let mut src = [0u8; 4];
+    let mut dip = [0u8; 4];
+    for (i, b) in src.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 26 + i as u64)?;
+    }
+    for (i, b) in dip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 30 + i as u64)?;
+    }
+    let tcs = net_tcp_csum(src, dip, &tcp);
+    store_u8(ram, base, dst + 50, (tcs >> 8) as u8);
+    store_u8(ram, base, dst + 51, tcs as u8);
+    Some(need)
+}
+
+/// Handshake ACK (seq=2, ack=1001) → ACK (seq=1001, ack=2). No payload.
+fn net_tcp_ack_reply(
+    ram: &mut [u8],
+    base: u64,
+    tx_addr: u64,
+    tx_len: u32,
+    rx_addr: u64,
+    rx_len: u32,
+) -> Option<u32> {
+    use crate::vio::{NET_HDR_LEN, NET_IP_GW, NET_TCP_SYN_LEN};
+    let need = NET_TCP_SYN_LEN as u32;
+    if tx_len < need || rx_len < need {
+        return None;
+    }
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    if load_u8(ram, base, eth + 12)? != 0x08 || load_u8(ram, base, eth + 13)? != 0x00 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 23)? != 6 || load_u8(ram, base, eth + 47)? != 0x10 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 41)? != 2 {
+        return None;
+    }
+    let mut ack_in = 0u32;
+    for i in 0..4u64 {
+        ack_in = (ack_in << 8) | u32::from(load_u8(ram, base, eth + 42 + i)?);
+    }
+    if ack_in != 1001 {
+        return None;
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        if load_u8(ram, base, eth + 30 + i as u64)? != *b {
+            return None;
+        }
+    }
+    for i in 0..need as u64 {
+        let b = load_u8(ram, base, tx_addr + i)?;
+        store_u8(ram, base, rx_addr + i, b);
+    }
+    let dst = rx_addr + NET_HDR_LEN as u64;
+    for i in 0..6u64 {
+        let a = load_u8(ram, base, eth + i)?;
+        let b = load_u8(ram, base, eth + 6 + i)?;
+        store_u8(ram, base, dst + i, b);
+        store_u8(ram, base, dst + 6 + i, a);
+    }
+    for i in 0..4u64 {
+        let a = load_u8(ram, base, eth + 26 + i)?;
+        let b = load_u8(ram, base, eth + 30 + i)?;
+        store_u8(ram, base, dst + 26 + i, b);
+        store_u8(ram, base, dst + 30 + i, a);
+    }
+    for i in 0..2u64 {
+        let a = load_u8(ram, base, eth + 34 + i)?;
+        let b = load_u8(ram, base, eth + 36 + i)?;
+        store_u8(ram, base, dst + 34 + i, b);
+        store_u8(ram, base, dst + 36 + i, a);
+    }
+    let iss: u32 = 1001;
+    let ack: u32 = 2;
+    for (i, b) in iss.to_be_bytes().iter().enumerate() {
+        store_u8(ram, base, dst + 38 + i as u64, *b);
+    }
+    for (i, b) in ack.to_be_bytes().iter().enumerate() {
+        store_u8(ram, base, dst + 42 + i as u64, *b);
+    }
+    store_u8(ram, base, dst + 47, 0x10);
+    store_u8(ram, base, dst + 24, 0);
+    store_u8(ram, base, dst + 25, 0);
+    let mut ip = [0u8; 20];
+    for (i, b) in ip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 14 + i as u64)?;
+    }
+    let cs = net_csum(&ip);
+    store_u8(ram, base, dst + 24, (cs >> 8) as u8);
+    store_u8(ram, base, dst + 25, cs as u8);
+    store_u8(ram, base, dst + 50, 0);
+    store_u8(ram, base, dst + 51, 0);
+    let mut tcp = [0u8; 20];
+    for (i, b) in tcp.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 34 + i as u64)?;
+    }
+    let mut src = [0u8; 4];
+    let mut dip = [0u8; 4];
+    for (i, b) in src.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 26 + i as u64)?;
+    }
+    for (i, b) in dip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 30 + i as u64)?;
+    }
+    let tcs = net_tcp_csum(src, dip, &tcp);
+    store_u8(ram, base, dst + 50, (tcs >> 8) as u8);
+    store_u8(ram, base, dst + 51, tcs as u8);
+    Some(need)
+}
+
+/// TCP PSH+ACK GET /fw.bin → HTTP/1.1 200 with a 4-byte binary body.
+fn net_http_reply(
+    ram: &mut [u8],
+    base: u64,
+    tx_addr: u64,
+    _tx_len: u32,
+    rx_addr: u64,
+    rx_len: u32,
+) -> Option<u32> {
+    use crate::vio::{NET_HDR_LEN, NET_HTTP_BODY, NET_IP_GW};
+    const HTTP: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\n";
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    if load_u8(ram, base, eth + 12)? != 0x08 || load_u8(ram, base, eth + 13)? != 0x00 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 23)? != 6 {
+        return None;
+    }
+    let tot =
+        u16::from(load_u8(ram, base, eth + 16)?) << 8 | u16::from(load_u8(ram, base, eth + 17)?);
+    if tot <= 40 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 47)? & 0x10 == 0 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 36)? != 0 || load_u8(ram, base, eth + 37)? != 80 {
+        return None;
+    }
+    let pay = eth + 54;
+    if load_u8(ram, base, pay)? != b'G'
+        || load_u8(ram, base, pay + 1)? != b'E'
+        || load_u8(ram, base, pay + 2)? != b'T'
+    {
+        return None;
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        if load_u8(ram, base, eth + 30 + i as u64)? != *b {
+            return None;
+        }
+    }
+    let http_len = HTTP.len() + NET_HTTP_BODY.len();
+    let need = (NET_HDR_LEN as usize + 14 + 20 + 20 + http_len) as u32;
+    if rx_len < need {
+        return None;
+    }
+    for i in 0..12u64 {
+        store_u8(ram, base, rx_addr + i, 0);
+    }
+    let dst = rx_addr + NET_HDR_LEN as u64;
+    for i in 0..6u64 {
+        let a = load_u8(ram, base, eth + i)?;
+        let b = load_u8(ram, base, eth + 6 + i)?;
+        store_u8(ram, base, dst + i, b);
+        store_u8(ram, base, dst + 6 + i, a);
+    }
+    store_u8(ram, base, dst + 12, 0x08);
+    store_u8(ram, base, dst + 13, 0x00);
+    store_u8(ram, base, dst + 14, 0x45);
+    store_u8(ram, base, dst + 15, 0);
+    let tot = 40 + http_len as u16;
+    store_u8(ram, base, dst + 16, (tot >> 8) as u8);
+    store_u8(ram, base, dst + 17, tot as u8);
+    store_u8(ram, base, dst + 18, 0);
+    store_u8(ram, base, dst + 19, 5);
+    store_u8(ram, base, dst + 20, 0);
+    store_u8(ram, base, dst + 21, 0);
+    store_u8(ram, base, dst + 22, 64);
+    store_u8(ram, base, dst + 23, 6);
+    for i in 0..4u64 {
+        let a = load_u8(ram, base, eth + 26 + i)?;
+        let b = load_u8(ram, base, eth + 30 + i)?;
+        store_u8(ram, base, dst + 26 + i, b);
+        store_u8(ram, base, dst + 30 + i, a);
+    }
+    for i in 0..2u64 {
+        let a = load_u8(ram, base, eth + 34 + i)?;
+        let b = load_u8(ram, base, eth + 36 + i)?;
+        store_u8(ram, base, dst + 34 + i, b);
+        store_u8(ram, base, dst + 36 + i, a);
+    }
+    let iss: u32 = 1001;
+    let ack: u32 = 2 + 40;
+    for (i, b) in iss.to_be_bytes().iter().enumerate() {
+        store_u8(ram, base, dst + 38 + i as u64, *b);
+    }
+    for (i, b) in ack.to_be_bytes().iter().enumerate() {
+        store_u8(ram, base, dst + 42 + i as u64, *b);
+    }
+    store_u8(ram, base, dst + 46, 0x50);
+    store_u8(ram, base, dst + 47, 0x18);
+    store_u8(ram, base, dst + 48, 0x20);
+    let pay_dst = dst + 54;
+    for (i, b) in HTTP.iter().enumerate() {
+        store_u8(ram, base, pay_dst + i as u64, *b);
+    }
+    for (i, b) in NET_HTTP_BODY.iter().enumerate() {
+        store_u8(ram, base, pay_dst + HTTP.len() as u64 + i as u64, *b);
+    }
+    store_u8(ram, base, dst + 24, 0);
+    store_u8(ram, base, dst + 25, 0);
+    let mut ip = [0u8; 20];
+    for (i, b) in ip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 14 + i as u64)?;
+    }
+    let cs = net_csum(&ip);
+    store_u8(ram, base, dst + 24, (cs >> 8) as u8);
+    store_u8(ram, base, dst + 25, cs as u8);
+    store_u8(ram, base, dst + 50, 0);
+    store_u8(ram, base, dst + 51, 0);
+    let mut tcp = vec![0u8; 20 + http_len];
+    for (i, b) in tcp.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 34 + i as u64)?;
+    }
+    let mut src = [0u8; 4];
+    let mut dip = [0u8; 4];
+    for (i, b) in src.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 26 + i as u64)?;
+    }
+    for (i, b) in dip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 30 + i as u64)?;
+    }
+    let tcs = net_tcp_csum(src, dip, &tcp);
+    store_u8(ram, base, dst + 50, (tcs >> 8) as u8);
+    store_u8(ram, base, dst + 51, tcs as u8);
+    Some(need)
+}
+
+/// Guest FIN+ACK after HTTP (seq=42) → FIN+ACK (seq=1043, ack=43).
+fn net_tcp_finack(
+    ram: &mut [u8],
+    base: u64,
+    tx_addr: u64,
+    tx_len: u32,
+    rx_addr: u64,
+    rx_len: u32,
+) -> Option<u32> {
+    use crate::vio::{NET_HDR_LEN, NET_IP_GW, NET_TCP_SYN_LEN};
+    let need = NET_TCP_SYN_LEN as u32;
+    if tx_len < need || rx_len < need {
+        return None;
+    }
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    if load_u8(ram, base, eth + 12)? != 0x08 || load_u8(ram, base, eth + 13)? != 0x00 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 23)? != 6 || load_u8(ram, base, eth + 47)? != 0x11 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 41)? != 42 {
+        return None;
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        if load_u8(ram, base, eth + 30 + i as u64)? != *b {
+            return None;
+        }
+    }
+    for i in 0..need as u64 {
+        let b = load_u8(ram, base, tx_addr + i)?;
+        store_u8(ram, base, rx_addr + i, b);
+    }
+    let dst = rx_addr + NET_HDR_LEN as u64;
+    for i in 0..6u64 {
+        let a = load_u8(ram, base, eth + i)?;
+        let b = load_u8(ram, base, eth + 6 + i)?;
+        store_u8(ram, base, dst + i, b);
+        store_u8(ram, base, dst + 6 + i, a);
+    }
+    for i in 0..4u64 {
+        let a = load_u8(ram, base, eth + 26 + i)?;
+        let b = load_u8(ram, base, eth + 30 + i)?;
+        store_u8(ram, base, dst + 26 + i, b);
+        store_u8(ram, base, dst + 30 + i, a);
+    }
+    for i in 0..2u64 {
+        let a = load_u8(ram, base, eth + 34 + i)?;
+        let b = load_u8(ram, base, eth + 36 + i)?;
+        store_u8(ram, base, dst + 34 + i, b);
+        store_u8(ram, base, dst + 36 + i, a);
+    }
+    let iss: u32 = 1043;
+    let ack: u32 = 43;
+    for (i, b) in iss.to_be_bytes().iter().enumerate() {
+        store_u8(ram, base, dst + 38 + i as u64, *b);
+    }
+    for (i, b) in ack.to_be_bytes().iter().enumerate() {
+        store_u8(ram, base, dst + 42 + i as u64, *b);
+    }
+    store_u8(ram, base, dst + 47, 0x11);
+    store_u8(ram, base, dst + 24, 0);
+    store_u8(ram, base, dst + 25, 0);
+    let mut ip = [0u8; 20];
+    for (i, b) in ip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 14 + i as u64)?;
+    }
+    let cs = net_csum(&ip);
+    store_u8(ram, base, dst + 24, (cs >> 8) as u8);
+    store_u8(ram, base, dst + 25, cs as u8);
+    store_u8(ram, base, dst + 50, 0);
+    store_u8(ram, base, dst + 51, 0);
+    let mut tcp = [0u8; 20];
+    for (i, b) in tcp.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 34 + i as u64)?;
+    }
+    let mut src = [0u8; 4];
+    let mut dip = [0u8; 4];
+    for (i, b) in src.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 26 + i as u64)?;
+    }
+    for (i, b) in dip.iter_mut().enumerate() {
+        *b = load_u8(ram, base, dst + 30 + i as u64)?;
+    }
+    let tcs = net_tcp_csum(src, dip, &tcp);
+    store_u8(ram, base, dst + 50, (tcs >> 8) as u8);
+    store_u8(ram, base, dst + 51, tcs as u8);
+    Some(need)
+}
+
+/// UDP echo to 10.0.2.2:7 — swap MAC/IP/ports, copy payload. Not DNS.
+fn net_udp_echo(
+    ram: &mut [u8],
+    base: u64,
+    tx_addr: u64,
+    tx_len: u32,
+    rx_addr: u64,
+    rx_len: u32,
+) -> Option<u32> {
+    use crate::vio::{NET_HDR_LEN, NET_IP_GW, NET_UDP_LEN};
+    let need = NET_UDP_LEN as u32;
+    if tx_len < need || rx_len < need {
+        return None;
+    }
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    if load_u8(ram, base, eth + 12)? != 0x08 || load_u8(ram, base, eth + 13)? != 0x00 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 23)? != 17 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 36)? != 0 || load_u8(ram, base, eth + 37)? != 7 {
+        return None;
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        if load_u8(ram, base, eth + 30 + i as u64)? != *b {
+            return None;
+        }
+    }
+    for i in 0..need as u64 {
+        let b = load_u8(ram, base, tx_addr + i)?;
+        store_u8(ram, base, rx_addr + i, b);
+    }
+    let dst = rx_addr + NET_HDR_LEN as u64;
+    for i in 0..6u64 {
+        let a = load_u8(ram, base, eth + i)?;
+        let b = load_u8(ram, base, eth + 6 + i)?;
+        store_u8(ram, base, dst + i, b);
+        store_u8(ram, base, dst + 6 + i, a);
+    }
+    for i in 0..4u64 {
+        let a = load_u8(ram, base, eth + 26 + i)?;
+        let b = load_u8(ram, base, eth + 30 + i)?;
+        store_u8(ram, base, dst + 26 + i, b);
+        store_u8(ram, base, dst + 30 + i, a);
+    }
+    for i in 0..2u64 {
+        let a = load_u8(ram, base, eth + 34 + i)?;
+        let b = load_u8(ram, base, eth + 36 + i)?;
+        store_u8(ram, base, dst + 34 + i, b);
+        store_u8(ram, base, dst + 36 + i, a);
+    }
+    Some(need)
+}
+
+/// DNS A query for `g6lc` to :53 → A 10.0.2.2. Not a recursive resolver.
+fn net_dns_reply(
+    ram: &mut [u8],
+    base: u64,
+    tx_addr: u64,
+    tx_len: u32,
+    rx_addr: u64,
+    rx_len: u32,
+) -> Option<u32> {
+    use crate::vio::{NET_DNS_Q_LEN, NET_HDR_LEN, NET_IP_GW};
+    if tx_len < NET_DNS_Q_LEN as u32 {
+        return None;
+    }
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    if load_u8(ram, base, eth + 12)? != 0x08 || load_u8(ram, base, eth + 13)? != 0x00 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 23)? != 17 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 36)? != 0 || load_u8(ram, base, eth + 37)? != 53 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 54)? != 4
+        || load_u8(ram, base, eth + 55)? != b'g'
+        || load_u8(ram, base, eth + 56)? != b'6'
+    {
+        return None;
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        if load_u8(ram, base, eth + 30 + i as u64)? != *b {
+            return None;
+        }
+    }
+    let need = NET_DNS_Q_LEN as u32 + 16;
+    if rx_len < need {
+        return None;
+    }
+    for i in 0..NET_DNS_Q_LEN as u64 {
+        let b = load_u8(ram, base, tx_addr + i)?;
+        store_u8(ram, base, rx_addr + i, b);
+    }
+    let dst = rx_addr + NET_HDR_LEN as u64;
+    for i in 0..6u64 {
+        let a = load_u8(ram, base, eth + i)?;
+        let b = load_u8(ram, base, eth + 6 + i)?;
+        store_u8(ram, base, dst + i, b);
+        store_u8(ram, base, dst + 6 + i, a);
+    }
+    for i in 0..4u64 {
+        let a = load_u8(ram, base, eth + 26 + i)?;
+        let b = load_u8(ram, base, eth + 30 + i)?;
+        store_u8(ram, base, dst + 26 + i, b);
+        store_u8(ram, base, dst + 30 + i, a);
+    }
+    for i in 0..2u64 {
+        let a = load_u8(ram, base, eth + 34 + i)?;
+        let b = load_u8(ram, base, eth + 36 + i)?;
+        store_u8(ram, base, dst + 34 + i, b);
+        store_u8(ram, base, dst + 36 + i, a);
+    }
+    store_u8(ram, base, dst + 16, 0);
+    store_u8(ram, base, dst + 17, 66);
+    store_u8(ram, base, dst + 38, 0);
+    store_u8(ram, base, dst + 39, 38);
+    store_u8(ram, base, dst + 44, 0x81);
+    store_u8(ram, base, dst + 45, 0x80);
+    store_u8(ram, base, dst + 49, 1);
+    let ans = dst + 64;
+    let rec: [u8; 16] = [
+        0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, 10, 0, 2, 2,
+    ];
+    for (i, b) in rec.iter().enumerate() {
+        store_u8(ram, base, ans + i as u64, *b);
+    }
+    Some(need)
+}
+
+fn dhcp_msg_type(ram: &[u8], base: u64, eth: u64) -> Option<u8> {
+    let mut i = eth + 282;
+    for _ in 0..32 {
+        let tag = load_u8(ram, base, i)?;
+        if tag == 255 {
+            return None;
+        }
+        if tag == 0 {
+            i += 1;
+            continue;
+        }
+        let n = u64::from(load_u8(ram, base, i + 1)?);
+        if tag == 53 && n >= 1 {
+            return load_u8(ram, base, i + 2);
+        }
+        i += 2 + n;
+    }
+    None
+}
+
+/// DHCP DISCOVER → OFFER (yiaddr 10.0.2.15); REQUEST → ACK. Not a lease db.
+fn net_dhcp_reply(
+    ram: &mut [u8],
+    base: u64,
+    tx_addr: u64,
+    tx_len: u32,
+    rx_addr: u64,
+    rx_len: u32,
+) -> Option<u32> {
+    use crate::vio::{NET_HDR_LEN, NET_IP_GW, NET_IP_LOCAL, NET_MAC_GW, NET_MAC_LOCAL};
+    if tx_len < NET_HDR_LEN as u32 + 286 {
+        return None;
+    }
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    if load_u8(ram, base, eth + 23)? != 17 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 37)? != 67 {
+        return None;
+    }
+    let msg = dhcp_msg_type(ram, base, eth)?;
+    let reply = match msg {
+        1 => 2,
+        3 => 5,
+        _ => return None,
+    };
+    if rx_len < tx_len {
+        return None;
+    }
+    for i in 0..tx_len as u64 {
+        let b = load_u8(ram, base, tx_addr + i)?;
+        store_u8(ram, base, rx_addr + i, b);
+    }
+    let dst = rx_addr + NET_HDR_LEN as u64;
+    for (i, b) in NET_MAC_LOCAL.iter().enumerate() {
+        store_u8(ram, base, dst + i as u64, *b);
+    }
+    for (i, b) in NET_MAC_GW.iter().enumerate() {
+        store_u8(ram, base, dst + 6 + i as u64, *b);
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        store_u8(ram, base, dst + 26 + i as u64, *b);
+    }
+    for (i, b) in NET_IP_LOCAL.iter().enumerate() {
+        store_u8(ram, base, dst + 30 + i as u64, *b);
+    }
+    store_u8(ram, base, dst + 34, 0);
+    store_u8(ram, base, dst + 35, 67);
+    store_u8(ram, base, dst + 36, 0);
+    store_u8(ram, base, dst + 37, 68);
+    store_u8(ram, base, dst + 42, 2);
+    for (i, b) in NET_IP_LOCAL.iter().enumerate() {
+        store_u8(ram, base, dst + 58 + i as u64, *b);
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        store_u8(ram, base, dst + 62 + i as u64, *b);
+    }
+    let mut i = dst + 282;
+    for _ in 0..32 {
+        let tag = load_u8(ram, base, i)?;
+        if tag == 255 {
+            break;
+        }
+        if tag == 0 {
+            i += 1;
+            continue;
+        }
+        let n = u64::from(load_u8(ram, base, i + 1)?);
+        if tag == 53 && n >= 1 {
+            store_u8(ram, base, i + 2, reply);
+            break;
+        }
+        i += 2 + n;
+    }
+    Some(tx_len)
+}
+
+/// If TX is an ARP who-has for the modelled gateway, write a reply into RX.
+/// Otherwise `None` and the caller copies. Not a PHY.
+fn net_arp_reply(
+    ram: &mut [u8],
+    base: u64,
+    tx_addr: u64,
+    tx_len: u32,
+    rx_addr: u64,
+    rx_len: u32,
+) -> Option<u32> {
+    use crate::vio::{NET_HDR_LEN, NET_IP_GW, NET_MAC_GW, NET_PKT_LEN};
+    let need = NET_PKT_LEN as u32;
+    if tx_len < need || rx_len < need {
+        return None;
+    }
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    if load_u8(ram, base, eth + 12)? != 0x08 || load_u8(ram, base, eth + 13)? != 0x06 {
+        return None;
+    }
+    if load_u8(ram, base, eth + 21)? != 1 {
+        return None;
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        if load_u8(ram, base, eth + 38 + i as u64)? != *b {
+            return None;
+        }
+    }
+    let mut sha = [0u8; 6];
+    let mut spa = [0u8; 4];
+    for (i, b) in sha.iter_mut().enumerate() {
+        *b = load_u8(ram, base, eth + 22 + i as u64)?;
+    }
+    for (i, b) in spa.iter_mut().enumerate() {
+        *b = load_u8(ram, base, eth + 28 + i as u64)?;
+    }
+    for i in 0..12u64 {
+        store_u8(ram, base, rx_addr + i, 0);
+    }
+    let dst = rx_addr + 12;
+    for (i, b) in sha.iter().enumerate() {
+        store_u8(ram, base, dst + i as u64, *b);
+    }
+    for (i, b) in NET_MAC_GW.iter().enumerate() {
+        store_u8(ram, base, dst + 6 + i as u64, *b);
+    }
+    store_u8(ram, base, dst + 12, 0x08);
+    store_u8(ram, base, dst + 13, 0x06);
+    store_u8(ram, base, dst + 14, 0);
+    store_u8(ram, base, dst + 15, 1);
+    store_u8(ram, base, dst + 16, 0x08);
+    store_u8(ram, base, dst + 17, 0);
+    store_u8(ram, base, dst + 18, 6);
+    store_u8(ram, base, dst + 19, 4);
+    store_u8(ram, base, dst + 20, 0);
+    store_u8(ram, base, dst + 21, 2);
+    for (i, b) in NET_MAC_GW.iter().enumerate() {
+        store_u8(ram, base, dst + 22 + i as u64, *b);
+    }
+    for (i, b) in NET_IP_GW.iter().enumerate() {
+        store_u8(ram, base, dst + 28 + i as u64, *b);
+    }
+    for (i, b) in sha.iter().enumerate() {
+        store_u8(ram, base, dst + 32 + i as u64, *b);
+    }
+    for (i, b) in spa.iter().enumerate() {
+        store_u8(ram, base, dst + 38 + i as u64, *b);
+    }
+    Some(need)
+}
+
+fn net_drop_syn81(csr: &mut Csr, ram: &[u8], base: u64, tx_addr: u64, tx_len: u32) -> bool {
+    use crate::vio::{NET_HDR_LEN, NET_TCP_SYN_LEN};
+    if csr.net_syn81_drop || tx_len < NET_TCP_SYN_LEN as u32 {
+        return false;
+    }
+    let eth = tx_addr + NET_HDR_LEN as u64;
+    let ok = load_u8(ram, base, eth + 23) == Some(6)
+        && load_u8(ram, base, eth + 47) == Some(0x02)
+        && load_u8(ram, base, eth + 37) == Some(81);
+    if ok {
+        csr.net_syn81_drop = true;
+    }
+    ok
+}
+
+/// receiveq notify records posted RX buffers. transmitq notify copies the TX
+/// descriptor payload into the next RX buffer, or answers ARP. Not a real PHY.
+fn net_notify(csr: &mut Csr, ram: &mut [u8], base: u64) {
+    let qi = csr.net_qsel as usize;
+    if qi > 1 || !csr.net_ready[qi] || csr.net_qdesc[qi] == 0 {
+        return;
+    }
+    let avail = csr.net_qavail[qi];
+    let idx = load_u32(ram, base, avail)
+        .map(|w| (w >> 16) as u16)
+        .unwrap_or(0);
+    if qi == 0 {
+        while csr.net_rx_seen != idx {
+            let head = net_avail_head(ram, base, avail, csr.net_rx_seen % 8);
+            if csr.net_rx_bufs.len() < 8 {
+                csr.net_rx_bufs.push(head);
+            }
+            csr.net_rx_seen = csr.net_rx_seen.wrapping_add(1);
+        }
+        return;
+    }
+    while csr.net_tx_seen != idx {
+        let tx_head = net_avail_head(ram, base, avail, csr.net_tx_seen % 8);
+        let dtx = csr.net_qdesc[1] + u64::from(tx_head) * 16;
+        let tx_addr = load_u64(ram, base, dtx).unwrap_or(0);
+        let tx_len = load_u32(ram, base, dtx + 8).unwrap_or(0);
+        if net_drop_syn81(csr, ram, base, tx_addr, tx_len) {
+            net_publish_used(
+                ram,
+                base,
+                csr.net_qused[1],
+                &mut csr.net_tx_used,
+                tx_head,
+                tx_len,
+            );
+            csr.net_tx_seen = csr.net_tx_seen.wrapping_add(1);
+            continue;
+        }
+        if let Some(rx_head) = csr.net_rx_bufs.first().copied() {
+            csr.net_rx_bufs.remove(0);
+            let drx = csr.net_qdesc[0] + u64::from(rx_head) * 16;
+            let rx_addr = load_u64(ram, base, drx).unwrap_or(0);
+            let rx_len = load_u32(ram, base, drx + 8).unwrap_or(0);
+            let n = if let Some(alen) = net_icmp_reply(ram, base, tx_addr, tx_len, rx_addr, rx_len)
+            {
+                alen as usize
+            } else if let Some(alen) = net_tcp_synack(ram, base, tx_addr, tx_len, rx_addr, rx_len) {
+                alen as usize
+            } else if let Some(alen) = net_tcp_rst(ram, base, tx_addr, tx_len, rx_addr, rx_len) {
+                alen as usize
+            } else if let Some(alen) =
+                net_tcp_ack_reply(ram, base, tx_addr, tx_len, rx_addr, rx_len)
+            {
+                alen as usize
+            } else if let Some(alen) = net_http_reply(ram, base, tx_addr, tx_len, rx_addr, rx_len) {
+                alen as usize
+            } else if let Some(alen) = net_tcp_finack(ram, base, tx_addr, tx_len, rx_addr, rx_len) {
+                alen as usize
+            } else if let Some(alen) = net_udp_echo(ram, base, tx_addr, tx_len, rx_addr, rx_len) {
+                alen as usize
+            } else if let Some(alen) = net_dns_reply(ram, base, tx_addr, tx_len, rx_addr, rx_len) {
+                alen as usize
+            } else if let Some(alen) = net_dhcp_reply(ram, base, tx_addr, tx_len, rx_addr, rx_len) {
+                alen as usize
+            } else if let Some(alen) = net_arp_reply(ram, base, tx_addr, tx_len, rx_addr, rx_len) {
+                alen as usize
+            } else {
+                let n = tx_len.min(rx_len) as usize;
+                for i in 0..n {
+                    if let Some(b) = load_u8(ram, base, tx_addr + i as u64) {
+                        store_u8(ram, base, rx_addr + i as u64, b);
+                    }
+                }
+                n
+            };
+            net_publish_used(
+                ram,
+                base,
+                csr.net_qused[0],
+                &mut csr.net_rx_used,
+                rx_head,
+                n as u32,
+            );
+            csr.net_pkts = csr.net_pkts.saturating_add(1);
+        }
+        net_publish_used(
+            ram,
+            base,
+            csr.net_qused[1],
+            &mut csr.net_tx_used,
+            tx_head,
+            tx_len,
+        );
+        csr.net_tx_seen = csr.net_tx_seen.wrapping_add(1);
+    }
+}
+
+/// Host API: drive the exec-model virtio-net rings (same `NET_*` layout as
+/// guest `__vio`). Not QEMU, not a PHY.
+pub struct GuestVirtioNet {
+    ram: Vec<u8>,
+    csr: Csr,
+    ram_base: u64,
+    rx_i: u16,
+    tx_i: u16,
+}
+
+impl GuestVirtioNet {
+    pub fn new() -> Result<Self, String> {
+        use crate::encode::{
+            VIO_F_VERSION_1, VIO_NET_F_WORD0, VIO_ST_ACK, VIO_ST_DRIVER, VIO_ST_DRIVER_OK,
+            VIO_ST_FEATURES_OK,
+        };
+        use crate::vio::{
+            NET_BASE, NET_RX_AVAIL_OFF, NET_RX_DESC_OFF, NET_RX_USED_OFF, NET_TX_AVAIL_OFF,
+            NET_TX_DESC_OFF, NET_TX_USED_OFF,
+        };
+        let mut ram = vec![0u8; crate::vio::VIO_BSS as usize];
+        let mut csr = Csr {
+            vio_net: true,
+            ..Default::default()
+        };
+        let base = 0u64;
+        net_store(&mut csr, &mut ram, base, 0x70, 0);
+        net_store(
+            &mut csr,
+            &mut ram,
+            base,
+            0x70,
+            (VIO_ST_ACK | VIO_ST_DRIVER) as u32,
+        );
+        net_store(&mut csr, &mut ram, base, 0x14, 0);
+        net_store(&mut csr, &mut ram, base, 0x24, 0);
+        net_store(&mut csr, &mut ram, base, 0x20, VIO_NET_F_WORD0);
+        net_store(&mut csr, &mut ram, base, 0x14, 1);
+        net_store(&mut csr, &mut ram, base, 0x24, 1);
+        net_store(&mut csr, &mut ram, base, 0x20, VIO_F_VERSION_1);
+        net_store(
+            &mut csr,
+            &mut ram,
+            base,
+            0x70,
+            (VIO_ST_ACK | VIO_ST_DRIVER | VIO_ST_FEATURES_OK) as u32,
+        );
+        if net_load(&csr, 0x70) & VIO_ST_FEATURES_OK as u32 == 0 {
+            return Err("guest virtio-net: FEATURES_OK dropped".into());
+        }
+        let nb = NET_BASE as u64;
+        setup_net_q(
+            &mut csr,
+            &mut ram,
+            0,
+            nb + NET_RX_DESC_OFF as u64,
+            nb + NET_RX_AVAIL_OFF as u64,
+            nb + NET_RX_USED_OFF as u64,
+        );
+        setup_net_q(
+            &mut csr,
+            &mut ram,
+            1,
+            nb + NET_TX_DESC_OFF as u64,
+            nb + NET_TX_AVAIL_OFF as u64,
+            nb + NET_TX_USED_OFF as u64,
+        );
+        net_store(
+            &mut csr,
+            &mut ram,
+            base,
+            0x70,
+            (VIO_ST_ACK | VIO_ST_DRIVER | VIO_ST_FEATURES_OK | VIO_ST_DRIVER_OK) as u32,
+        );
+        Ok(Self {
+            ram,
+            csr,
+            ram_base: 0,
+            rx_i: 0,
+            tx_i: 0,
+        })
+    }
+
+    /// Continue after kstart `VioNetProbe` on the live `__vio` rings.
+    pub fn from_kstart(
+        spec: &BoardSpec,
+        module: &crate::Module,
+        entry: u64,
+    ) -> Result<(Smoke, Self), String> {
+        let (insns, rodata) = module.to_words(entry)?;
+        let mut image = Vec::with_capacity(insns.len() * 4 + rodata.len());
+        for w in insns {
+            image.extend_from_slice(&w.to_le_bytes());
+        }
+        image.extend_from_slice(&rodata);
+        let memsz = crate::payload_memsz(image.len() as u64, module.n_harts(), module.extra_bss());
+        let uart_ui_pc = module.label_addr(entry, "uart_ui").unwrap_or(0);
+        let trap_timer_pc = module.label_addr(entry, "trap_timer").unwrap_or(0);
+        let (smoke, ram, csr) = run_with_kick_keep(
+            spec,
+            &image,
+            entry,
+            memsz,
+            0,
+            b'V',
+            spec.wants_virtio_gpu(),
+            true,
+            module.vio_bss_addr(entry).unwrap_or(0),
+            module.scan_fb_addr(entry).unwrap_or(0),
+            module.vio_fb_bytes,
+            module.cap_addr(entry).unwrap_or(0),
+            module.domt_addr(entry).unwrap_or(0),
+            module.wdt_bss_addr(entry).unwrap_or(0),
+            None,
+            None,
+            uart_ui_pc,
+            trap_timer_pc,
+            None,
+            STEP_LIMIT,
+            None,
+        )?;
+        if !csr.vio_net || csr.net_qdesc[0] == 0 {
+            return Err("kstart had no virtio-net rings".into());
+        }
+        let rx_i = csr.net_rx_seen;
+        let tx_i = csr.net_tx_seen;
+        Ok((
+            smoke,
+            Self {
+                ram,
+                csr,
+                ram_base: entry,
+                rx_i,
+                tx_i,
+            },
+        ))
+    }
+
+    pub fn post_rx(&mut self) {
+        use crate::encode::VIO_DESC_WRITE;
+        use crate::vio::{NET_BUF_LEN, NET_RXBUF_OFF};
+        let b = self.ram_base;
+        let slot = self.rx_i % 8;
+        let d = self.csr.net_qdesc[0] + u64::from(slot) * 16;
+        let addr = self.csr.net_qdesc[0] + NET_RXBUF_OFF as u64;
+        store_u32(&mut self.ram, b, d, addr as u32);
+        store_u32(&mut self.ram, b, d + 4, (addr >> 32) as u32);
+        store_u32(&mut self.ram, b, d + 8, NET_BUF_LEN as u32);
+        store_u32(&mut self.ram, b, d + 12, VIO_DESC_WRITE);
+        let avail = self.csr.net_qavail[0];
+        let idx = self.rx_i.wrapping_add(1);
+        store_u32(&mut self.ram, b, avail, u32::from(idx) << 16);
+        store_u16(
+            &mut self.ram,
+            b,
+            avail + 4 + u64::from(self.rx_i % 8) * 2,
+            slot,
+        );
+        net_store(&mut self.csr, &mut self.ram, b, 0x30, 0);
+        net_store(&mut self.csr, &mut self.ram, b, 0x50, 0);
+        self.rx_i = idx;
+    }
+
+    pub fn push_tx(&mut self, frame: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        use crate::vio::{NET_TXBUF_OFF, NET_TX_DESC_OFF};
+        let b = self.ram_base;
+        let addr = self.csr.net_qdesc[1] + (NET_TXBUF_OFF - NET_TX_DESC_OFF) as u64;
+        for (i, byte) in frame.iter().enumerate() {
+            store_u8(&mut self.ram, b, addr + i as u64, *byte);
+        }
+        let d = self.csr.net_qdesc[1];
+        store_u32(&mut self.ram, b, d, addr as u32);
+        store_u32(&mut self.ram, b, d + 4, (addr >> 32) as u32);
+        store_u32(&mut self.ram, b, d + 8, frame.len() as u32);
+        store_u32(&mut self.ram, b, d + 12, 0);
+        let avail = self.csr.net_qavail[1];
+        let idx = self.tx_i.wrapping_add(1);
+        store_u32(&mut self.ram, b, avail, u32::from(idx) << 16);
+        store_u16(
+            &mut self.ram,
+            b,
+            avail + 4 + u64::from(self.tx_i % 8) * 2,
+            0,
+        );
+        let used0 = self.csr.net_rx_used;
+        net_store(&mut self.csr, &mut self.ram, b, 0x30, 1);
+        net_store(&mut self.csr, &mut self.ram, b, 0x50, 0);
+        self.tx_i = idx;
+        if self.csr.net_rx_used == used0 {
+            return Ok(None);
+        }
+        let n = load_u32(
+            &self.ram,
+            b,
+            self.csr.net_qused[0] + 8 + u64::from((used0 % 8) * 8),
+        )
+        .unwrap_or(0) as usize;
+        let rx = self.csr.net_qdesc[0] + crate::vio::NET_RXBUF_OFF as u64;
+        let mut out = vec![0u8; n];
+        for (i, byte) in out.iter_mut().enumerate() {
+            *byte = load_u8(&self.ram, b, rx + i as u64).unwrap_or(0);
+        }
+        Ok(Some(out))
+    }
+
+    /// SYN → SYN-ACK. Returns the gateway ACK number. One poll step.
+    pub fn handshake_syn(&mut self) -> Result<u32, String> {
+        self.post_rx();
+        let synack = self
+            .push_tx(&net_enc_tcp(&[], 1, 0, 0x02))?
+            .ok_or("guest virtio-net: no SYN-ACK")?;
+        if synack.len() < 12 + 48 || synack[12 + 47] != 0x12 {
+            return Err("guest virtio-net: SYN-ACK flags".into());
+        }
+        Ok(u32::from_be_bytes(
+            synack[12 + 42..12 + 46].try_into().unwrap(),
+        ))
+    }
+
+    /// ACK the SYN-ACK. Silent on RX.
+    pub fn handshake_ack(&mut self, ack_n: u32) -> Result<(), String> {
+        self.push_tx(&net_enc_tcp(&[], 2, ack_n, 0x10))?;
+        Ok(())
+    }
+
+    /// PSH+ACK GET. Returns HTTP bytes.
+    pub fn handshake_get(&mut self, http_req: &[u8], ack_n: u32) -> Result<Vec<u8>, String> {
+        if http_req.len() < 4 || &http_req[..4] != b"GET " {
+            return Err("guest virtio-net: not GET".into());
+        }
+        self.post_rx();
+        let rx = self
+            .push_tx(&net_enc_tcp(http_req, 2, ack_n, 0x18))?
+            .ok_or("guest virtio-net: no HTTP")?;
+        if rx.len() < 12 + 14 + 20 + 20 {
+            return Err("guest virtio-net: short HTTP".into());
+        }
+        Ok(rx[12 + 14 + 20 + 20..].to_vec())
+    }
+
+    /// SYN/SYN-ACK/ACK then GET on these rings. Returns HTTP bytes.
+    pub fn fetch(&mut self, http_req: &[u8]) -> Result<Vec<u8>, String> {
+        let ack_n = self.handshake_syn()?;
+        self.handshake_ack(ack_n)?;
+        self.handshake_get(http_req, ack_n)
+    }
+
+    /// SYN/SYN-ACK/ACK then GET on a fresh exec-model ring set.
+    pub fn http_get(http_req: &[u8]) -> Result<Vec<u8>, String> {
+        Self::new()?.fetch(http_req)
+    }
+}
+
+fn setup_net_q(csr: &mut Csr, ram: &mut [u8], q: u32, desc: u64, avail: u64, used: u64) {
+    net_store(csr, ram, 0, 0x30, q);
+    net_store(csr, ram, 0, 0x38, 8);
+    net_store(csr, ram, 0, 0x80, desc as u32);
+    net_store(csr, ram, 0, 0x84, (desc >> 32) as u32);
+    net_store(csr, ram, 0, 0x90, avail as u32);
+    net_store(csr, ram, 0, 0x94, (avail >> 32) as u32);
+    net_store(csr, ram, 0, 0xa0, used as u32);
+    net_store(csr, ram, 0, 0xa4, (used >> 32) as u32);
+    net_store(csr, ram, 0, 0x44, 1);
+}
+
+fn net_enc_tcp(payload: &[u8], seq: u32, ack: u32, flags: u8) -> Vec<u8> {
+    let mut f = vec![0u8; 12 + 14 + 20 + 20 + payload.len()];
+    let e = 12;
+    f[e + 12] = 0x08;
+    f[e + 13] = 0x00;
+    f[e + 14] = 0x45;
+    let tot = (20 + 20 + payload.len()) as u16;
+    f[e + 16] = (tot >> 8) as u8;
+    f[e + 17] = tot as u8;
+    f[e + 22] = 64;
+    f[e + 23] = 6;
+    f[e + 26..e + 30].copy_from_slice(&[10, 0, 2, 15]);
+    f[e + 30..e + 34].copy_from_slice(&[10, 0, 2, 2]);
+    f[e + 34] = 0x30;
+    f[e + 35] = 0x39;
+    f[e + 37] = 80;
+    f[e + 38..e + 42].copy_from_slice(&seq.to_be_bytes());
+    f[e + 42..e + 46].copy_from_slice(&ack.to_be_bytes());
+    f[e + 46] = 0x50;
+    f[e + 47] = flags;
+    f[e + 48] = 0x20;
+    f[e + 49] = 0x00;
+    f[e + 54..].copy_from_slice(payload);
+    f
 }
 
 /// virtio-input register reads (transport regs only — DeviceID 18, no
@@ -6053,8 +7559,85 @@ mod tests {
         let m = analyze::kstart(&spec);
         let s = run_module(&spec, &m, 0x8020_0000).unwrap();
         assert!(s.console.contains("VIRTIO-NET 5"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-OK"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-PKT"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-ARP"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-ICMP"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-TCP"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-ACK"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-HTTP"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-FIN"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-UDP"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-DNS"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-DHCP"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-RST"), "{}", s.console);
+        assert!(s.console.contains("VIRTIO-NET-REXMIT"), "{}", s.console);
         assert!(!s.console.contains("VIRTIO-NET-NONE"), "{}", s.console);
+        assert!(!s.console.contains("VIRTIO-NET-HOLD"), "{}", s.console);
         assert!(!s.console.contains("TRAP-"), "{}", s.console);
+    }
+
+    #[test]
+    fn guest_virtio_net_http_get_via_exec_rings() {
+        let req = b"GET /fw.bin HTTP/1.1\r\nHost: 10.0.2.2\r\n\r\n";
+        let resp = GuestVirtioNet::http_get(req).expect("guest rings");
+        assert!(
+            resp.starts_with(b"HTTP/1.1 200 OK"),
+            "{}",
+            String::from_utf8_lossy(&resp)
+        );
+        assert_eq!(&resp[resp.len() - 4..], &[0x00, 0xff, 0xfe, 0x80]);
+    }
+
+    #[test]
+    fn kstart_vio_bss_second_http_get() {
+        let spec = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64},"uncore":{"plic":true},
+"kernel":{"hw":{"enable":true,"virtio_net":true}},
+"holyc":{"dual_band":{"tcp":{"enable":false}}}}"#,
+        )
+        .unwrap();
+        let m = analyze::kstart(&spec);
+        let (smoke, mut net) =
+            GuestVirtioNet::from_kstart(&spec, &m, 0x8020_0000).expect("kstart net");
+        assert!(
+            smoke.console.contains("VIRTIO-NET-HTTP"),
+            "{}",
+            smoke.console
+        );
+        let req = b"GET /fw.bin HTTP/1.1\r\nHost: 10.0.2.2\r\n\r\n";
+        let resp = net.fetch(req).expect("second GET on __vio");
+        assert!(
+            resp.starts_with(b"HTTP/1.1 200 OK"),
+            "{}",
+            String::from_utf8_lossy(&resp)
+        );
+        assert_eq!(&resp[resp.len() - 4..], &[0x00, 0xff, 0xfe, 0x80]);
+    }
+
+    #[test]
+    fn net_http_reply_sees_get() {
+        let mut ram = vec![0u8; 256];
+        let mut eth = [0u8; 94];
+        eth[0..6].copy_from_slice(&crate::vio::NET_MAC_GW);
+        eth[6..12].copy_from_slice(&crate::vio::NET_MAC_LOCAL);
+        eth[12] = 0x08;
+        eth[13] = 0x00;
+        eth[14] = 0x45;
+        eth[17] = 80;
+        eth[22] = 64;
+        eth[23] = 6;
+        eth[26..30].copy_from_slice(&crate::vio::NET_IP_LOCAL);
+        eth[30..34].copy_from_slice(&crate::vio::NET_IP_GW);
+        eth[37] = 80;
+        eth[46] = 0x50;
+        eth[47] = 0x18;
+        eth[54..94].copy_from_slice(b"GET /fw.bin HTTP/1.1\r\nHost: 10.0.2.2\r\n\r\n");
+        ram[12..12 + 94].copy_from_slice(&eth);
+        let n = net_http_reply(&mut ram, 0, 0, 106, 128, 128);
+        assert!(n.is_some(), "GET should match");
+        assert_eq!(ram[128 + 12 + 54], b'H');
+        assert_eq!(ram[128 + 12 + 95], 0x80);
     }
 
     #[test]
