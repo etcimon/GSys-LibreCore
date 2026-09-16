@@ -35,12 +35,34 @@ while IFS= read -r line || [ -n "$line" ]; do
     log "MISSING $line"
     exit 1
   fi
+  case "$line" in
+    0001-kernel-defaults-olddefconfig.patch)
+      if grep -q "G6LC_OLDDEFCONFIG" "$SRC/include/kernel-defaults.mk" 2>/dev/null; then
+        log "already applied $p"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      ;;
+    0002-sifiveu-g6lc-virt-and-isa-overlay.patch)
+      if grep -q "BEGIN G6LC-VIRT-OVERLAY" "$SRC/target/linux/sifiveu/config-6.6" 2>/dev/null; then
+        log "already applied $p"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      ;;
+    0003-sifiveu-virt-gpu-drm.patch)
+      if grep -q "CONFIG_DRM_VIRTIO_GPU=y" "$SRC/target/linux/sifiveu/config-6.6" 2>/dev/null; then
+        log "already applied $p"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      ;;
+  esac
   if patch --dry-run -p1 --forward --fuzz=3 -d "$SRC" < "$PATCHES/$p" >/dev/null 2>&1; then
     patch -p1 --forward --fuzz=3 -d "$SRC" < "$PATCHES/$p"
     log "applied $p"
     applied=$((applied + 1))
-  elif grep -q "G6LC_OLDDEFCONFIG" "$SRC/include/kernel-defaults.mk" 2>/dev/null \
-        && grep -q "BEGIN G6LC-VIRT-OVERLAY" "$SRC/target/linux/sifiveu/config-6.6" 2>/dev/null; then
+  elif patch --dry-run -p1 -R -d "$SRC" < "$PATCHES/$p" >/dev/null 2>&1; then
     log "already applied $p"
     skipped=$((skipped + 1))
   else
@@ -50,6 +72,10 @@ while IFS= read -r line || [ -n "$line" ]; do
   fi
 done < "$SERIES"
 
+if [ -d "$PATCHES/files" ]; then
+  (cd "$PATCHES/files" && tar --exclude='./diffconfig' -cf - .) | tar -C "$SRC" -xf -
+  log "copied files/ overlay into source tree"
+fi
 if [ -f "$PATCHES/files/diffconfig" ]; then
   cp "$PATCHES/files/diffconfig" "$SRC/.config"
   log "copied files/diffconfig -> .config"

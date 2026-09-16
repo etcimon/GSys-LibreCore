@@ -30,7 +30,12 @@ test -f "$SRC/Makefile"
 export OPENWRT_SRC="$SRC"
 bash "$HERE/apply-patches.sh"
 cd "$SRC"
-# Non-interactive; skip feeds for a smaller first world.
+if [ -f feeds.conf ]; then
+  log "updating pinned feeds"
+  ./scripts/feeds update -a
+  ./scripts/feeds install -a -p packages
+  ./scripts/feeds install -a -p video
+fi
 make defconfig
 log "building -j$JOBS (toolchain + kernel + initramfs)"
 make -j"$JOBS" V=s

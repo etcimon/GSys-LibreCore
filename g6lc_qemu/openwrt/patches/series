@@ -3,3 +3,4 @@
 # after developing on linux-dist/openwrt-* (etcimon forks).
 0001-kernel-defaults-olddefconfig.patch
 0002-sifiveu-g6lc-virt-and-isa-overlay.patch
+0003-sifiveu-virt-gpu-drm.patch

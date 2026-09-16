@@ -69,10 +69,13 @@ find "$SRC/build_dir" -path '*linux-sifiveu_generic/Image' -type f 2>/dev/null |
 find "$SRC/build_dir" -path '*linux-sifiveu_generic/linux-*/arch/riscv/boot/Image' -type f 2>/dev/null | head
 echo '===== linux .config pins ====='
 if [ -f "$K/.config" ]; then
-  grep -E "^CONFIG_SOC_VIRT|^CONFIG_GOLDFISH|^# CONFIG_GOLDFISH|^CONFIG_CMDLINE|^# CONFIG_CMDLINE|^CONFIG_VIRTIO=|^CONFIG_EFI_STUB|^CONFIG_POWER_RESET" \
-    "$K/.config" | head -30
+  grep -E "^CONFIG_SOC_VIRT|^CONFIG_GOLDFISH|^# CONFIG_GOLDFISH|^CONFIG_CMDLINE|^# CONFIG_CMDLINE|^CONFIG_VIRTIO=|^CONFIG_VIRTIO_MMIO|^CONFIG_DRM=|^CONFIG_DRM_VIRTIO_GPU|^CONFIG_FB=|^CONFIG_EFI_STUB|^CONFIG_POWER_RESET" \
+    "$K/.config" | head -50
 else
   echo "no linux .config"
 fi
+echo '===== openwrt graphics selections ====='
+grep -E '^CONFIG_(DISPLAY_SUPPORT|PACKAGE_(libdrm|libmesa|libmesadri-virtio-gpu|g6lc-egl-probe|kmscube))=' \
+  "$SRC/.config" 2>/dev/null || true
 echo '===== tail ====='
 tail -n 12 "$LOG" 2>/dev/null || true

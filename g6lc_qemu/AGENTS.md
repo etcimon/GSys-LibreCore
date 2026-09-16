@@ -305,6 +305,94 @@ python tools/g6q.py check              # GREEN gate
 
 ---
 
+## OpenWrt console and graphics probe (2026-09-14)
+
+The existing `out/loader-run/openwrt/initramfs-Image` boots through OpenSBI 1.5
+and `qemu/build/qemu-system-riscv64` 10.0.0 to OpenWrt 24.10.2 / Linux 6.6.93.
+Use the explicit `g6lc-virt` / stock `virt` profile; this is not RTL evidence.
+The sifiveu rootfs starts gettys on `ttySIF0` and `tty1`, so adding a virtio
+console alone does not supply a login on QEMU's `ttyS0`. For an isolated test,
+use an external newc initramfs containing only `etc/inittab`, retaining the
+sysinit/shutdown entries and using `ttyS0::askfirst:/usr/libexec/login.sh`.
+The tested artifact is `out/openwrt-apu-probe/console.cpio`; the original image
+and firmware remain unchanged. Windows `tar.exe --format=newc` can create it
+when WSL lacks `cpio`.
+
+```text
+python tools/g6q.py run -- --backend qemu --target g6lc64_smt2 --repo-root .. --os openwrt --machine g6lc-virt --stock-machine virt --qemu-path qemu/build/qemu-system-riscv64 --fw out/fw/fw_dynamic-generic-virt.bin --initrd out/openwrt-apu-probe/console.cpio --smp 1 --mem-size 1G --virtio gpu --wsl
+```
+
+For automation, `--send-on "Please press Enter=\n"` activates the console;
+the early prompt is `root@(none):~#`, so match `:~#` rather than assuming the
+hostname or working directory. Generate completion markers with `printf PREFIX_%s DONE`
+so serial echo cannot satisfy `--expect PREFIX_DONE` before commands execute.
+
+The remote graphics baseline now uses the pinned OpenWrt 24.10.2 image with
+DRM/KMS, `virtio_gpu`, Mesa 21.3, libdrm, the in-tree `g6lc-egl-probe` and
+its opt-in `g6lc-virgl-negprobe` companion, plus remote QEMU 10.0.0 configured
+with OpenGL/epoxy, virglrenderer, GBM, pixman and vhost-user. The testharness
+host has only `/dev/dri/card0` backed by `simple-framebuffer`, so in-process
+`-device virtio-gpu-gl-device -display egl-headless,gl=on` still fails before
+guest boot (`egl: no drm render node available`). The working headless path is
+QEMU's unchanged `vhost-user-gpu` frontend plus the contrib backend, with
+`openwrt/vugpu-virgl-surfaceless.c` preloaded only into that backend so
+virglrenderer selects Mesa surfaceless GLES on llvmpipe. Run it through the
+authenticated testharness transport:
+
+```bash
+python openwrt/push-overlay.py
+python openwrt/remote-gfx-probe.py --mode vugpu
+python openwrt/remote-gfx-probe.py --mode vugpu --audit
+python openwrt/remote-gfx-probe.py --mode vugpu --negative
+python openwrt/remote-gfx-probe.py --mode vugpu --audit --cap-profile gles2-min
+```
+
+The probe forces modern virtio-mmio (`virtio-mmio.force-legacy=false`), uses
+shared memfd memory, disables scanouts (`max_outputs=0`), decompresses the
+packaged gzip initramfs kernel automatically, and collects logs under
+`out/remote-gfx/<tag>/`. The normal run was verified again after the
+negative-probe image rebuild in `out/remote-gfx/gfx-20260914T203512Z/`:
+guest `+virgl`, two capsets (virgl v1 size 308; virgl2 v2 size 1384),
+`/dev/dri/renderD128`, EGL 1.4 on a real `gbm-window` surface, renderer
+`virgl (LLVMPIPE (LLVM 20.1.2, 256 bits))`, stable `G6LC_PIXEL_FNV1A=0x3d667145`,
+`G6LC_EGL_GLES2_DRIVER=virgl`, `G6LC_EGL_GLES2_OK`, `G6LC_GFX_DONE rc=0`, and
+`G6LC_GFX_RESULT=PASS`.
+
+`--audit` adds `g6lc_audit=1`, keeps the unchanged guest stack, runs
+`g6lc-egl-probe audit`, and validates the capture with `--expect-audit`. The
+archived run `out/remote-gfx/gfx-audit-20260914T213500Z/` reports
+`G6LC_AUDIT_PIXEL_FNV1A=0x35f36230`, `G6LC_AUDIT_RESULT=PASS` and strict capture
+`result=PASS`. Its five submitted command buffers exercise texture upload and
+sampling, packed sampler-view target/format/level fields, sampler state,
+fragment constant data, an indexed draw, scissor state, state-object creation
+and binding, readback transfers, object destruction and context cleanup. Nine
+fences cover 3D resource creation, command submission and transfer traffic.
+This remains host llvmpipe software-rendered evidence for the external driver
+contract, not APU RTL or hardware rendering proof.
+
+`--negative` adds `g6lc_neg=1`, replaces only the guest probe binary, and keeps
+the QEMU/Linux/Mesa path unchanged. `out/remote-gfx/gfx-20260914T203421Z/`
+archives the resulting API events and malformed command buffers. The unchanged
+driver rejects bad capset IDs, absent context-init, and invalid BO lookup locally
+(`EINVAL`/`ENOENT`). Invalid 3D resource creation, out-of-bounds transfer, an
+unknown virgl opcode, and a truncated command are queued through virtio and then
+reported by the backend as `EINVAL`; their virtio fences still complete and the
+guest ioctls may report success. `summarize-virgl-capture.py --strict
+--expect-errors` reports `result=PASS` for that run. The `Failed to register
+client: -95` line remains the expected fbdev/KMS-client failure when scanouts are
+disabled. All of this is host software-rendered virgl evidence over the unchanged
+Linux/Mesa driver path, not APU/RTL or physical-GPU evidence.
+
+`--cap-profile gles2-min` masks the host backend's capset to the reduced
+contract documented in `g6lc_bios/architecture/DISPLAY.md` while leaving QEMU,
+Linux and Mesa unchanged. `out/remote-gfx/gfx-20260914T221515Z/` passed the
+full audit with `bset=0`, `capability_bits=0`, `capability_bits_v2=0`, API-level
+transfers instead of `TRANSFER3D`, `BLIT`, sampler views/states, indexed draw,
+constant data and cleanup. `gfx-20260914T221551Z/` passed the same reduced
+capset under `--expect-errors`. The optional `gles2-xfer` profile retains only
+`VIRGL_CAP_TRANSFER` and passed in `gfx-20260914T221800Z/`. These are still
+llvmpipe-rendered contract probes, not APU RTL or hardware acceleration proof.
+
 ## 10. Firmware and QEMU build flow
 
 The firmware chain is independent from the QEMU build chain. Both emit artifacts into gitignored `out/` and `qemu/`.

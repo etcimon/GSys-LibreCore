@@ -1,0 +1,28 @@
+From: Etienne Cimon <etcimon@globecsys.com>
+Subject: [PATCH] sifiveu: enable virtio-gpu DRM on QEMU virt
+
+Add the in-kernel virtio-gpu DRM/KMS driver so the stock Linux driver
+binds to QEMU's modern virtio-mmio GPU without a kmod package.
+
+---
+ target/linux/sifiveu/config-6.6 | 7 +++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/target/linux/sifiveu/config-6.6 b/target/linux/sifiveu/config-6.6
+--- a/target/linux/sifiveu/config-6.6
++++ b/target/linux/sifiveu/config-6.6
+@@ -424,7 +424,14 @@ CONFIG_VIRTIO_MMIO=y
+ CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES=y
+ CONFIG_VIRTIO_CONSOLE=y
+ CONFIG_VIRTIO_ANCHOR=y
++# Unchanged virtio-gpu DRM path. VIRTIO_GPU selects DRM_KMS_HELPER,
++# DRM_GEM_SHMEM_HELPER and VIRTIO_DMA_SHARED_BUFFER; olddefconfig resolves them.
++CONFIG_DRM=y
++CONFIG_DRM_VIRTIO_GPU=y
++CONFIG_DRM_VIRTIO_GPU_KMS=y
++CONFIG_FB=y
++CONFIG_DRM_FBDEV_EMULATION=y
+ CONFIG_SERIAL_8250=y
+ CONFIG_SERIAL_8250_CONSOLE=y
+ CONFIG_SERIAL_8250_NR_UARTS=4
+ CONFIG_SERIAL_8250_RUNTIME_UARTS=4

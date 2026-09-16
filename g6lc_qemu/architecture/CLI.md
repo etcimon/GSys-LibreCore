@@ -178,7 +178,7 @@ Secondary harts park until the supervisor interface starts them; `--sbi-extensio
 | `--maxcpus N` | see §6 |  |
 | `--console uart\|virtio`, `--serial stdio\|file:…\|tcp:…\|null` | `uart`, `stdio` | `virtio` adds `virtio-serial-device` + `virtconsole`; implies virt profile |
 | `--netdev user\|tap\|none`, `--net-fwd H:G`, `--ssh-port N` | `none` | networking implies the virt profile |
-| `--virtio blk,net,rng,9p,console` | — | virt profile only; `rng` currently wires `virtio-rng-device` |
+| `--virtio blk,net,rng,9p,console,gpu,gpu-gl,gpu-vhost-user[=SOCK]` | — | virt profile only; `rng` wires `virtio-rng-device`; `gpu-gl` uses `virtio-gpu-gl-device` + `egl-headless,gl=on`; `gpu-vhost-user` uses QEMU's external `vhost-user-gpu` backend and emits the required shared-memory object |
 | `--elf FILE`, `--exit-on-tohost` | — | bare-metal harness semantics |
 | `--timeout SECONDS`, `--max-instret N` | none | bounded runs for CI |
 | `--expect TEXT` | — | kill QEMU when `TEXT` appears on serial; the run succeeds if it was seen |

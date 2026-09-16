@@ -20,6 +20,70 @@ contract, the pin in `pins.toml` plus the document it names.
 
 ---
 
+## OpenWrt APU baseline boot/probe (2026-09-14)
+
+Priors: `AGENTS.md` §OpenWrt console and graphics probe; `architecture/CLI.md`
+§Operating system / Execution; `openwrt/kernel-virt.config`.
+
+- [x] Boot the existing OpenWrt initramfs through `g6q run`, project-built QEMU
+      10.0.0 and OpenSBI 1.5, with one hart, 1 GiB RAM and `--virtio gpu`.
+- [x] Reach the BusyBox shell and execute guest probes. OpenWrt 24.10.2,
+      `r28739-d9340319c6`, Linux 6.6.93, `sifiveu/generic`, `riscv64_riscv64`;
+      `G6LC_OPENWRT_PROBE_DONE` emitted by the guest, runner exited 0.
+- [x] Isolate the console mismatch without rebuilding or modifying the original
+      kernel/rootfs: temporary `out/openwrt-apu-probe/console.cpio` overrides
+      only `etc/inittab` to keep the standard login service on `ttyS0` instead
+      of `ttySIF0`. The early prompt is `root@(none):~#`.
+- [x] Observe virtio GPU device ID `0x0010` in guest sysfs. No DRM class/device,
+      loaded virtio_gpu module or installed Mesa stack is present in this image.
+- [x] Graphics-enabled OpenWrt kernel/packages and QEMU OpenGL/virgl build on
+      the remote testharness: OpenWrt v24.10.2 has DRM/KMS, virtio_gpu, Mesa
+      21.3, libdrm and `g6lc-egl-probe`; QEMU 10.0.0 has OpenGL/epoxy,
+      virglrenderer 1.0.0, GBM, pixman and vhost-user. The probe forces modern
+      virtio-mmio and uses unchanged guest Linux/Mesa/virtio-gpu.
+- [x] Headless remote virgl proof through `vhost-user-gpu`: the host has no
+      render node, so the contrib backend runs with an LD_PRELOAD surfaceless-
+      EGL/GLES shim and `max_outputs=0`. Guest reports `+virgl`, capsets 1/2,
+      `/dev/dri/renderD128`, `gbm-window` EGL surface, renderer `virgl
+      (LLVMPIPE (LLVM 20.1.2, 256 bits))`, stable FNV-1a `0x3d667145`,
+      `G6LC_EGL_GLES2_DRIVER=virgl`, `G6LC_EGL_GLES2_OK`, rc 0. Logs:
+      `out/remote-gfx/gfx-20260914T203512Z/` (latest normal rerun).
+- [x] Archive actual unchanged Mesa/Linux traffic: API/capset/resource/transfer/
+      submit/fence events and binary command buffers are summarized by
+      `openwrt/summarize-virgl-capture.py --strict`; normal capture
+      `gfx-20260914T203512Z/capture` reports `result=PASS`.
+- [x] Add and run opt-in unchanged-driver error probing:
+      `remote-gfx-probe.py --negative` sets `g6lc_neg=1`, runs
+      `g6lc-virgl-negprobe`, and validates with `--expect-errors`. Capture
+      `gfx-20260914T203421Z/capture` reports `result=PASS`: malformed and
+      out-of-range backend operations return `EINVAL`, while queue submission
+      ioctls and virtio fences can still report/complete successfully.
+- [x] Add and run the opt-in richer GLES2 audit workload:
+      `remote-gfx-probe.py --mode vugpu --audit` sets `g6lc_audit=1` and runs
+      `g6lc-egl-probe audit`, then validates with `--expect-audit`. Capture
+      `gfx-audit-20260914T213500Z/capture` reports `result=PASS` with texture upload/sampling, sampler-view and
+      sampler-state objects, fragment constants, indexed draw, scissor state,
+      state-object binds, readback, cleanup and nine command-typed fences. The
+      summarizer now decodes packed sampler-view fields and full mip-level
+      backing sizes; this remains llvmpipe software-rendered contract evidence.
+- [ ] In-process QEMU `egl-headless,gl=on` remains unavailable on this host
+      (`simple-framebuffer`, no `/dev/dri/renderD*`); use `--mode vugpu` or a
+      host with a real render node. This is host software rendering, not RTL/APU
+      hardware proof.
+- [x] Freeze the reduced P0 contract for the pinned Mesa path:
+      `--cap-profile gles2-min` passed the strict audit in
+      `gfx-20260914T221515Z/capture` and expected-error probing in
+      `gfx-20260914T221551Z/capture` with all optional virgl capability masks
+      clear. `gles2-xfer` retains only `VIRGL_CAP_TRANSFER` and passed in
+      `gfx-20260914T221800Z/capture`. The full cap/limit, command, lifetime,
+      fence/error, reset, DMA/cache and protected-firmware obligations are in
+      `g6lc_bios/architecture/DISPLAY.md`. The separate BIOS package gate is
+      green again, including the previous picker/JIT device-frame test.
+
+No production configuration or RTL changed. This is a `g6lc-virt` software
+boot/probe result over unchanged Linux/Mesa/virtio-gpu, not faithful SoC
+simulation, hardware acceleration or P3 completion.
+
 ## DMA destination validation follow-up (complete)
 
 Preserved the native evaluator and the subsequent mode-legality/INT4-alias changes.

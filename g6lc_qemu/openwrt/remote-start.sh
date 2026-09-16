@@ -2,8 +2,10 @@
 set -euo pipefail
 sudo apt-get update -qq
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  bison flex gettext libssl-dev libelf-dev python3-dev quilt time xsltproc swig \
-  || true
+  bison flex gettext libssl-dev libelf-dev python3-dev python3-pip python3-venv \
+  python3-mako quilt time xsltproc swig cpio tar rsync pkg-config ninja-build meson cmake \
+  libepoxy-dev libgbm-dev libdrm-dev libpixman-1-dev libvirglrenderer-dev \
+  virgl-server mesa-utils
 ls -l /opt/testharness/cache/openwrt-overlay/
 if [ ! -f /opt/testharness/cache/openwrt/Makefile ]; then
   git clone --depth 1 --branch v24.10.2 https://github.com/openwrt/openwrt.git /opt/testharness/cache/openwrt

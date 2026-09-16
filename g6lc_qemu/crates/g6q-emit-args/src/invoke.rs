@@ -87,7 +87,9 @@ pub struct BootOptions {
     /// Console transport: `uart` or `virtio`.
     pub console: String,
     /// Extra virtio devices to attach: `rng` enables `virtio-rng-device`;
-    /// `console` is implied by `console=virtio`.
+    /// `gpu-gl` uses integrated virgl, `gpu-vhost-user[=SOCK]` uses QEMU's
+    /// external vhost-user-gpu backend, and `console` is implied by
+    /// `console=virtio`.
     pub virtio: Vec<String>,
     /// Override the processor count; `None` uses the model's hart total.
     pub smp: Option<u32>,
@@ -333,6 +335,23 @@ pub fn build_argv(
     a.push("-m".into());
     a.push(memory_argument(mem));
 
+    let gpu_vhost_user = boot.virtio.iter().find_map(|v| {
+        if v == "gpu-vhost-user" {
+            Some("/tmp/g6lc-vhost-user-gpu.sock".to_string())
+        } else {
+            v.strip_prefix("gpu-vhost-user=").map(str::to_string)
+        }
+    });
+    if gpu_vhost_user.is_some() {
+        a.push("-object".into());
+        a.push(format!(
+            "memory-backend-memfd,id=mem,size={},share=on",
+            memory_argument(mem)
+        ));
+        a.push("-numa".into());
+        a.push("node,memdev=mem".into());
+    }
+
     match &boot.firmware {
         Firmware::None => {
             a.push("-bios".into());
@@ -417,15 +436,33 @@ pub fn build_argv(
         a.push(format!("{net_dev},netdev=net0"));
     }
 
+    let gpu_gl = boot.virtio.iter().any(|v| v == "gpu-gl");
+    let virtio_mmio = !boot.virtio.is_empty()
+        || (!boot.virtio_pci
+            && (!boot.drives.is_empty()
+                || boot.netdev_user
+                || boot.netdev_hub
+                || boot.console == "virtio"));
+    if virtio_mmio {
+        a.push("-global".into());
+        a.push("virtio-mmio.force-legacy=false".into());
+    }
+
     // QEMU's -nographic already redirects serial to stdio; -serial stdio would
     // create a second stdio character device and fail with "cannot use stdio by
-    // multiple character devices" on QEMU 10.x. Only emit -serial when the user
-    // explicitly requests a non-stdio backend.
-    if let Some(serial) = &boot.serial {
-        if serial != "stdio" {
+    // multiple character devices" on QEMU 10.x. The egl-headless and
+    // vhost-user paths do not carry that implication, so they need an explicit
+    // serial destination.
+    match &boot.serial {
+        Some(serial) if serial != "stdio" || gpu_gl || gpu_vhost_user.is_some() => {
             a.push("-serial".into());
             a.push(serial.clone());
         }
+        None if gpu_gl || gpu_vhost_user.is_some() => {
+            a.push("-serial".into());
+            a.push("stdio".into());
+        }
+        _ => {}
     }
 
     // virtio-serial-pci is the endpoint "virtio-console" role on GPEX.
@@ -450,10 +487,20 @@ pub fn build_argv(
             a.push("-device".into());
             a.push("virtio-rng-device,rng=rng0".into());
         }
-        if v.as_str() == "gpu" {
+        if v.as_str() == "gpu" && !gpu_gl && gpu_vhost_user.is_none() {
             a.push("-device".into());
             a.push("virtio-gpu-device".into());
         }
+        if v.as_str() == "gpu-gl" {
+            a.push("-device".into());
+            a.push("virtio-gpu-gl-device".into());
+        }
+    }
+    if let Some(sock) = &gpu_vhost_user {
+        a.push("-chardev".into());
+        a.push(format!("socket,id=vgpu,path={sock}"));
+        a.push("-device".into());
+        a.push("vhost-user-gpu,chardev=vgpu".into());
     }
 
     // icount is incompatible with MTTCG; resolve the combination before either is emitted.
@@ -501,7 +548,15 @@ pub fn build_argv(
         a.push(format!("loader,file={path},addr={addr:#x},force-raw=on"));
     }
 
-    a.push("-nographic".into());
+    if gpu_gl {
+        a.push("-display".into());
+        a.push("egl-headless,gl=on".into());
+    } else if gpu_vhost_user.is_some() {
+        a.push("-display".into());
+        a.push("none".into());
+    } else {
+        a.push("-nographic".into());
+    }
     a
 }
 
@@ -631,6 +686,79 @@ mod tests {
         assert_eq!(memory_argument(512 * 1024 * 1024), "512M");
         assert_eq!(memory_argument(1536 * 1024 * 1024), "1536M");
         assert_eq!(memory_argument(1234), "1234");
+    }
+
+    #[test]
+    fn virtio_mmio_is_forced_modern_when_used() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            virtio: vec!["gpu".into()],
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(
+            joined.contains("virtio-mmio.force-legacy=false"),
+            "{joined}"
+        );
+        assert!(joined.contains("virtio-gpu-device"), "{joined}");
+        assert!(joined.contains("-nographic"), "{joined}");
+    }
+
+    #[test]
+    fn gpu_gl_selects_egl_headless_and_explicit_serial() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            virtio: vec!["gpu-gl".into()],
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(
+            joined.contains("virtio-mmio.force-legacy=false"),
+            "{joined}"
+        );
+        assert!(joined.contains("virtio-gpu-gl-device"), "{joined}");
+        assert!(joined.contains("-display egl-headless,gl=on"), "{joined}");
+        assert!(joined.contains("-serial stdio"), "{joined}");
+        assert!(!joined.contains("-nographic"), "{joined}");
+    }
+
+    #[test]
+    fn gpu_gl_does_not_add_a_second_2d_gpu() {
+        let m = model_with(&[], 1, None);
+        let boot = BootOptions {
+            virtio: vec!["gpu".into(), "gpu-gl".into()],
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(joined.contains("virtio-gpu-gl-device"), "{joined}");
+        assert!(!joined.contains("virtio-gpu-device"), "{joined}");
+    }
+
+    #[test]
+    fn gpu_vhost_user_emits_shared_mem_socket_and_modern_mmio() {
+        let m = model_with(&[], 1, Some((0x8000_0000, 0x4000_0000)));
+        let boot = BootOptions {
+            virtio: vec!["gpu-vhost-user=/tmp/g6lc-test-gpu.sock".into()],
+            ..BootOptions::default()
+        };
+        let joined = build_argv(&m, &StockTarget::default(), &boot, &ident).join(" ");
+        assert!(
+            joined.contains("virtio-mmio.force-legacy=false"),
+            "{joined}"
+        );
+        assert!(
+            joined.contains("memory-backend-memfd,id=mem,size=1G,share=on"),
+            "{joined}"
+        );
+        assert!(joined.contains("-numa node,memdev=mem"), "{joined}");
+        assert!(
+            joined.contains("-chardev socket,id=vgpu,path=/tmp/g6lc-test-gpu.sock"),
+            "{joined}"
+        );
+        assert!(joined.contains("vhost-user-gpu,chardev=vgpu"), "{joined}");
+        assert!(joined.contains("-display none"), "{joined}");
+        assert!(joined.contains("-serial stdio"), "{joined}");
+        assert!(!joined.contains("-nographic"), "{joined}");
     }
 
     #[test]

@@ -18,3 +18,8 @@ CONFIG_TARGET_OPTIMIZATION="-Os -pipe -march=rv64imafdc_zba_zbb_zbs_zcb_zicond_z
 CONFIG_PACKAGE_kmod-virtio-blk=y
 CONFIG_PACKAGE_kmod-virtio-net=y
 CONFIG_PACKAGE_kmod-fs-vfat=y
+CONFIG_DISPLAY_SUPPORT=y
+CONFIG_PACKAGE_libdrm=y
+CONFIG_PACKAGE_libmesa=y
+CONFIG_PACKAGE_libmesadri-virtio-gpu=y
+CONFIG_PACKAGE_g6lc-egl-probe=y

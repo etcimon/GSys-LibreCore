@@ -1,0 +1,39 @@
+#!/bin/sh
+# Run the graphics probe only when the QEMU command line opts in.
+if grep -qw 'g6lc_probe=1' /proc/cmdline; then
+	exec >/dev/console 2>&1
+	echo G6LC_GFX_BEGIN
+	uname -a
+	cat /proc/cmdline
+	for p in /dev/dri /sys/class/drm /sys/module/virtio_gpu /sys/bus/virtio/devices; do
+		echo "G6LC_LS $p"
+		ls -la "$p" 2>&1 || true
+	done
+	for f in /sys/bus/virtio/devices/*/device /sys/bus/virtio/devices/*/vendor /sys/bus/virtio/devices/*/features /sys/bus/virtio/devices/*/status; do
+		[ -f "$f" ] && echo "G6LC_SYSFS $f=$(cat "$f")"
+	done
+	dmesg | grep -Ei 'virtio|drm|gpu' || true
+	if grep -qw 'g6lc_neg=1' /proc/cmdline; then
+		if command -v g6lc-virgl-negprobe >/dev/null 2>&1; then
+			g6lc-virgl-negprobe
+			rc=$?
+		else
+			echo G6LC_NEG_PROBE_MISSING
+			rc=127
+		fi
+	elif command -v g6lc-egl-probe >/dev/null 2>&1; then
+		if grep -qw 'g6lc_audit=1' /proc/cmdline; then
+			g6lc-egl-probe audit
+		else
+			g6lc-egl-probe
+		fi
+		rc=$?
+	else
+		echo G6LC_EGL_PROBE_MISSING
+		rc=127
+	fi
+	echo G6LC_GFX_DONE rc=$rc
+	sync
+	poweroff -f || reboot -f || halt -f
+fi
+exit 0

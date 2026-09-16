@@ -42,6 +42,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import shutil
@@ -80,6 +81,21 @@ if not _REMOTE_PASS:
     _creds = os.environ.get("G6Q_REMOTE_CREDS")
     if _creds and Path(_creds).is_file():
         _REMOTE_PASS = Path(_creds).read_text().splitlines()[0].strip()
+
+
+def _platform_remote_pass() -> str | None:
+    cache = package_root().parent / "build-platform" / ".remote-ssh-creds"
+    try:
+        data = json.loads(cache.read_text(encoding="utf-8"))
+        entry = (data.get("hosts") or {}).get(DEFAULT_HOST) or {}
+        val = entry.get("passphrase")
+        return val if isinstance(val, str) and val else None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+if not _REMOTE_PASS:
+    _REMOTE_PASS = _platform_remote_pass()
 
 _REMOTE_KEY = os.environ.get("G6Q_REMOTE_KEY")
 
@@ -485,11 +501,14 @@ def _rsync_to_remote(
         base += ["--dry-run"]
     for e in excludes or []:
         base += ["--exclude", e]
-    if _WINDOWS and DEFAULT_RSYNC[0] == "wsl":
-        src = _wsl_path(local) + "/"
+    if _WINDOWS and "wsl" in DEFAULT_RSYNC[:2]:
+        src = _wsl_path(local)
     else:
-        src = str(local) + "/"
-    base += [src, f"{host}:{remote_path}/"]
+        src = str(local)
+    if local.is_dir():
+        src += "/"
+        remote_path += "/"
+    base += [src, f"{host}:{remote_path}"]
     res = _run(base, check=False, timeout=timeout)
     if res.returncode != 0:
         raise RuntimeError(f"rsync to {host}:{remote_path} failed (rc={res.returncode})")
@@ -507,7 +526,7 @@ def _rsync_from_remote(
     if dry_run:
         base += ["--dry-run"]
     local.parent.mkdir(parents=True, exist_ok=True)
-    if _WINDOWS and DEFAULT_RSYNC[0] == "wsl":
+    if _WINDOWS and "wsl" in DEFAULT_RSYNC[:2]:
         dst = _wsl_path(local)
     else:
         dst = str(local)
@@ -568,6 +587,39 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         # Remote directories
         _remote_mkdir(host, sock, root)
         _remote_mkdir(host, sock, f"{root}/{CACHE_DIR}")
+
+        if getattr(args, "gl", False):
+            res = _remote(
+                host,
+                sock,
+                [
+                    f"{_env(append_path=True)}"
+                    "pkg-config --modversion epoxy virglrenderer gbm libdrm pixman-1"
+                ],
+                check=False,
+                capture=True,
+                timeout=_step_timeout(args, 30),
+            )
+            if res.returncode != 0:
+                err("remote GL deps MISSING (need epoxy, virglrenderer, gbm, libdrm, pixman)")
+                return 1
+            for name, version in zip(
+                ["epoxy", "virglrenderer", "gbm", "libdrm", "pixman"],
+                res.stdout.splitlines(),
+            ):
+                log(f"  remote {name}: {version}")
+            res = _remote(
+                host,
+                sock,
+                ["ls -l /dev/dri 2>/dev/null || true"],
+                check=False,
+                capture=True,
+                timeout=_step_timeout(args, 30),
+            )
+            if "renderD" not in res.stdout:
+                log("  remote DRM render node: absent (use egl-headless/surfaceless)")
+            else:
+                log("  remote DRM render node: present")
     return 0
 
 
@@ -585,15 +637,23 @@ def cmd_sync(args: argparse.Namespace) -> int:
     _remote_mkdir(host, None, remote_qemu, timeout=_step_timeout(args, 60))
     with _control_socket(host) as sock:
         _rsync_to_remote(host, sock, qemu_src, remote_qemu, SYNC_EXCLUDES, timeout=_step_timeout(args, 1800))
+        if getattr(args, "gl", False):
+            _repair_vhost_user_symlinks(host, sock, remote_qemu, _step_timeout(args, 60))
     log(f"synced qemu/ to {host}:{remote_qemu}")
     return 0
 
 
-def _configure_args(args: argparse.Namespace) -> str:
+def _configure_args(args: argparse.Namespace, remote_qemu: str) -> str:
     cfg = f"--target-list={args.target}"
     cfg += " --disable-libvduse --disable-vduse-blk-export"
-    cfg += " --disable-vhost-user --disable-vhost-user-blk-server"
-    cfg += " --enable-plugins"
+    if getattr(args, "gl", False):
+        cfg += " --enable-vhost-user"
+    else:
+        cfg += " --disable-vhost-user"
+    cfg += " --disable-vhost-user-blk-server --enable-plugins"
+    if getattr(args, "gl", False):
+        cfg += " --enable-opengl --enable-virglrenderer"
+        cfg += f" --extra-cflags=-I{remote_qemu}/include"
     if args.debug:
         cfg += " --enable-debug"
     if args.trace:
@@ -604,12 +664,26 @@ def _configure_args(args: argparse.Namespace) -> str:
     return cfg
 
 
+def _repair_vhost_user_symlinks(host: str, sock: Path | None, remote_qemu: str, timeout: float | None) -> None:
+    """Restore symlinks lost when a Windows checkout is rsynced as text files."""
+    cmd = (
+        f"cd {remote_qemu}/subprojects/libvhost-user && "
+        "rm -f include/atomic.h include/compiler.h standard-headers/linux && "
+        "ln -s ../../../include/qemu/atomic.h include/atomic.h && "
+        "ln -s ../../../include/qemu/compiler.h include/compiler.h && "
+        "ln -s ../../../include/standard-headers/linux standard-headers/linux"
+    )
+    res = _remote(host, sock, [cmd], check=False, timeout=timeout)
+    if res.returncode != 0:
+        raise RuntimeError(f"repairing vhost-user symlinks on {host} failed (rc={res.returncode})")
+
+
 def cmd_configure(args: argparse.Namespace) -> int:
     host = args.host
     root = args.root
     remote_qemu = f"{root}/{REPO_DIR}"
     remote_build = f"{root}/{BUILD_DIR}"
-    cfg_args = _configure_args(args)
+    cfg_args = _configure_args(args, remote_qemu)
     cmd = f"cd {remote_build} && CC='ccache gcc' CXX='ccache g++' CCACHE_DIR={root}/{CACHE_DIR} {remote_qemu}/configure {cfg_args}"
     full = f"{_env()}{cmd}"
     log(f"configure: {full}")
@@ -617,6 +691,8 @@ def cmd_configure(args: argparse.Namespace) -> int:
         return 0
     _remote_mkdir(host, None, remote_build)
     with _control_socket(host) as sock:
+        if getattr(args, "gl", False):
+            _repair_vhost_user_symlinks(host, sock, remote_qemu, _step_timeout(args, 60))
         res = _remote(host, sock, [full], check=False, timeout=_step_timeout(args, 1800))
     if res.returncode != 0:
         err("remote configure failed")
@@ -1067,6 +1143,7 @@ def _add_common(p: argparse.ArgumentParser) -> None:
 
 def _add_build_opts(p: argparse.ArgumentParser) -> None:
     p.add_argument("--target", default=QEMU_TARGET, help="QEMU target list")
+    p.add_argument("--gl", action="store_true", help="enable OpenGL and virglrenderer")
     p.add_argument("--debug", action="store_true", help="pass --enable-debug to configure")
     p.add_argument("--trace", default=None, help="enable trace backend (e.g. log)")
     p.add_argument("--extra", action="append", default=None, help="extra configure flags")
@@ -1085,10 +1162,12 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("doctor", help="probe local and remote toolchain")
     _add_common(p)
+    p.add_argument("--gl", action="store_true", help="also probe OpenGL/virgl build dependencies")
     p.set_defaults(fn=cmd_doctor)
 
     p = sub.add_parser("sync", help="rsync qemu/ source to the remote builder")
     _add_common(p)
+    p.add_argument("--gl", action="store_true", help="prepare OpenGL/virgl remote sources")
     p.set_defaults(fn=cmd_sync)
 
     p = sub.add_parser("configure", help="run meson setup on the remote builder")
