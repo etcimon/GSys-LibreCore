@@ -7,13 +7,26 @@ crypto IR.
 
 | Primitive | Crate / IR | Web role |
 |---|---|---|
-| SHA-256 | `g6b-tls` | transcripts, PKCS#1 DigestInfo |
-| AES-128 | `g6b-tls` | record cipher (CBC/GCM suites advertised) |
+| SHA-256 | `g6b-tls` / Zknh names; `g6b-asm` `sha256sum*` when `isa.zknh` live | transcripts, PKCS#1 DigestInfo |
+| AES-128 | `g6b-tls` software; `g6b-asm` `aes64es*` when `isa.zkne` live (CVA6: absent) | record cipher |
 | HMAC-SHA256 | `g6b-tls` / `Purpose::Hmac` | Finished / CBC MAC |
 | RSA PKCS#1 v1.5 SHA-256 | `g6b-tls` / `Purpose::Rsa` | `rsa_pkcs1_sha256` (0x0401) |
 | ECDSA P-256 SHA-256 | `g6b-tls` / `Purpose::Ecdsa` | `ecdsa_secp256r1_sha256` (0x0403) |
 | X.509 | `g6b-tls` / `Purpose::Cert` | CN + algo from PEM/DER |
-| TLS 1.2 ClientHello | `g6b-tls::client_hello` | suites `c02b` ECDHE-ECDSA-AES128-GCM, `c02f` ECDHE-RSA-GCM, `003c` RSA-AES128-SHA256 |
+| TLS 1.2 ClientHello | `g6b-tls::client_hello` | ECDHE-GCM `c02b`/`c02f`, `supported_versions` 1.2 (no X25519). ALPN `http/1.1`. CBC/RSA-KEX not advertised. |
+| TLS 1.3 ClientHello | `client_hello_tls13` | `0x1301` + X25519 `key_share`, then 1.2 ECDHE-GCM fallback; versions 1.3 then 1.2. ALPN `http/1.1`. No 0-RTT. HelloRetryRequest and `h2` refused. |
+| TLS 1.2 PRF | `tls12_prf_sha256` | RFC 5246 P_SHA256. |
+| TLS 1.2 CCS/GCM | `change_cipher_spec` / `seal_record_tls12` | RFC 5288 salt\|\|seq nonce. `wrap_app` stays plaintext. |
+| TLS 1.2 Finished | `tls12_finished` | 12-byte verify_data. |
+| TLS 1.2 ECDHE | `complete_tls12_ecdhe_gcm` | X25519 + PKCS#1 SHA-256 SKE (RFC 8448 leaf). |
+| X25519 | `x25519` | 51-bit limbs, mask cswap. RFC 7748. Not a side-channel lab review. |
+| HMAC-DRBG | `HmacDrbg` + `entropy_health` | Stuck-zero/ones/weight/run fail closed. Not SP 800-90B. |
+| TLS 1.3 1-RTT | `complete_tls13_1rtt` | CH/SH/dummy CCS/EE/Cert/CV/Finished/NST. RSA-PSS CV. Not a CA path. |
+| TLS 1.3 padding | `seal_record_padded` / `open_record` | Inner `content \|\| type \|\| zeros`. |
+| TLS alerts | `bad_record_mac` / `decrypt_error` | Fatal 20 / 51. |
+| virtio-rtc | `VirtioRtc` | 8-byte BE unix seconds. Fail closed if short. Not `rdtime`. |
+| X.509 path | `CertStore` | SAN/KU/BC/EKU serverAuth; DNS name constraints (permitted/excluded). Not a system store. |
+| OCSP | `ocsp_plan` / BasicOCSP | Isolated NAT HTTP `10.0.2.2`/`10.0.2.3` only. HTTPS chicken-egg refused. Not a live public responder. |
 
 HolyC: `TlsHandshake`, `TlsClientHello`, `TlsServerHello`, `HttpsGet`,
 `HttpGet` (kernel path, plaintext GET on hw TCP), `HttpsServe`,

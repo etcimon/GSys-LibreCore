@@ -123,6 +123,8 @@ pub const VIO_DEV_INPUT: u32 = 18;
 /// virtio-blk device id (virtio spec 5.2). `BlkProbe` enumerates it; this is how
 /// the payload reads sectors *itself* instead of being handed bytes by a host.
 pub const VIO_DEV_BLK: u32 = 2;
+/// virtio-rng (virtio spec 5.4). Entropy, not a CSPRNG claim.
+pub const VIO_DEV_RNG: u32 = 4;
 /// Exec-model virtio-mmio slot for the modelled block device (irq 1+slot = 7).
 /// Slots 0–3 are GPU / keyboard / mailbox-gap / tablet and slot 5 is virtio-net.
 pub const VIO_BLK_SLOT: u64 = 6;
@@ -405,6 +407,62 @@ pub fn add(rd: u32, rs1: u32, rs2: u32) -> u32 {
 /// RV32M/RV64M `mul`.
 pub fn mul(rd: u32, rs1: u32, rs2: u32) -> u32 {
     (0x01 << 25) | (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x33
+}
+
+/// RV64M `mulhu` — high half of unsigned 64×64.
+pub fn mulhu(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x01 << 25) | (rs2 << 20) | (rs1 << 15) | (0x3 << 12) | (rd << 7) | 0x33
+}
+
+/// Zbkc `clmul`.
+pub fn clmul(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x05 << 25) | (rs2 << 20) | (rs1 << 15) | (0x1 << 12) | (rd << 7) | 0x33
+}
+
+/// Zbkc `clmulh`.
+pub fn clmulh(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x05 << 25) | (rs2 << 20) | (rs1 << 15) | (0x3 << 12) | (rd << 7) | 0x33
+}
+
+/// Zkne RV64 `aes64es`.
+pub fn aes64es(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x13 << 25) | (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x33
+}
+
+/// Zkne RV64 `aes64esm`.
+pub fn aes64esm(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x17 << 25) | (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x33
+}
+
+/// Zkne RV64 `aes64ks2`.
+pub fn aes64ks2(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x3f << 25) | (rs2 << 20) | (rs1 << 15) | (rd << 7) | 0x33
+}
+
+/// Zkne RV64 `aes64ks1i` — `rnum` is 0..=10.
+pub fn aes64ks1i(rd: u32, rs1: u32, rnum: u32) -> u32 {
+    (0x19 << 25) | ((rnum & 0x1f) << 20) | (rs1 << 15) | (0x1 << 12) | (rd << 7) | 0x13
+}
+
+fn sha256_unop(rd: u32, rs1: u32, rs2: u32) -> u32 {
+    (0x08 << 25) | (rs2 << 20) | (rs1 << 15) | (0x1 << 12) | (rd << 7) | 0x13
+}
+
+/// Zknh `sha256sum0`.
+pub fn sha256sum0(rd: u32, rs1: u32) -> u32 {
+    sha256_unop(rd, rs1, 0)
+}
+/// Zknh `sha256sum1`.
+pub fn sha256sum1(rd: u32, rs1: u32) -> u32 {
+    sha256_unop(rd, rs1, 1)
+}
+/// Zknh `sha256sig0`.
+pub fn sha256sig0(rd: u32, rs1: u32) -> u32 {
+    sha256_unop(rd, rs1, 2)
+}
+/// Zknh `sha256sig1`.
+pub fn sha256sig1(rd: u32, rs1: u32) -> u32 {
+    sha256_unop(rd, rs1, 3)
 }
 
 /// RV32M/RV64M `divu` — unsigned divide, funct3=0b101.

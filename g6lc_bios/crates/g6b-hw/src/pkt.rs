@@ -720,8 +720,22 @@ pub fn dns_gateway(tx: &[u8]) -> Result<Vec<u8>, String> {
     rx[DN + 7] = 1;
     rx[DN + 9] = 1;
     rx.extend_from_slice(&[
-        0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3c, 0x00, 0x04, NAT_GW_IP[0],
-        NAT_GW_IP[1], NAT_GW_IP[2], NAT_GW_IP[3],
+        0xc0,
+        0x0c,
+        0x00,
+        0x01,
+        0x00,
+        0x01,
+        0x00,
+        0x00,
+        0x00,
+        0x3c,
+        0x00,
+        0x04,
+        NAT_GW_IP[0],
+        NAT_GW_IP[1],
+        NAT_GW_IP[2],
+        NAT_GW_IP[3],
     ]);
     let tot = (rx.len() - ETH) as u16;
     rx[16] = (tot >> 8) as u8;
@@ -786,7 +800,10 @@ mod tests {
         assert_eq!(tcp_window(&synack), NAT_TCP_WINDOW);
         let mut z = encapsulate_tcp(&[], 1, 0, 0x02);
         set_tcp_window(&mut z, 0);
-        assert!(NatTcp::listen().push(&z).unwrap_err().contains("zero window"));
+        assert!(NatTcp::listen()
+            .push(&z)
+            .unwrap_err()
+            .contains("zero window"));
         assert!(t.push(&encapsulate_tcp(&[], 2, 2, 0x10)).unwrap().is_none());
         let req = b"GET /fw.bin HTTP/1.1\r\nHost: 10.0.2.2\r\n\r\n";
         let resp = t

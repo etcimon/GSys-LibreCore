@@ -271,6 +271,240 @@ still plaintext. Not a handshake, not B54.
 **P6 transcript/Finished (same day):** handshake transcript hash
 and Finished HMAC (`finished` key). RFC 8448 ClientHello+ServerHello
 hash and server Finished key. Not (EC)DHE, not B54.
+**P6 clock/alerts/listen/headers/reasm/PBKDF2 (same day):** `NoClock`
+fails closed; TLS alert `close_notify`/`handshake_failure`; listen
+refuses `0.0.0.0`; HTTP security headers; `RecordReasm`; PBKDF2-HMAC-SHA256.
+Not a CSPRNG, not virtio-rtc, not a login session, not B54.
+**P6–P12 management (same day):** `Mgmt` sessions (HttpOnly/Secure/
+SameSite=Strict cookie, CSRF, rate limit, no default password),
+boot-target generations, real update jobs, HMAC capsules, recovery
+latch that blocks apply/autoboot. RFB 3.8 refuses None and DES.
+Canned POST `/bios/flash` is 401. Not a VNC server, not live OpenWrt,
+not SPI.
+**P8–P9 RFB session + iframe grant (same day):** RFB 3.8 needs TLS
+before framebuffer (zero rects, no Tight, no fabricated pixels).
+Iframe `EmbedGrant` is https origin + nonce; hostile parent, expired
+grant, credentials-in-URL, and child `/bios/*` are refused. Not a
+VNC client, not nested BIOS login.
+**P6/P8/P9 X25519 + WS + nested nav (same day):** RFC 7748 X25519;
+WebSocket upgrade checks https Origin and RFC 6455 accept; FrameEngine
+refuses credential URLs and `/bios/*` when a grant is set. Not CT,
+not a KVM pump, not a full TLS 1.3 handshake.
+**P6 TLS 1.3 schedule (same day):** X25519 ECDHE → handshake secret →
+`c/s hs traffic` and traffic keys (RFC 8448). TLS 1.3 ClientHello
+offers `TLS_AES_128_GCM_SHA256` + X25519 `key_share`, no 0-RTT.
+Not CT, not B54.
+**P6 session tickets (same day):** 1-RTT PSK-DHE tickets (`res master` /
+`resumption`). Per-host `SessionCache`. Resumed ClientHello carries
+`pre_shared_key` + binder; `early_data` stays refused. KernelNet reuses
+the ticket so the certificate flight is not repeated. Not 0-RTT, not CT.
+**P6 CertificateVerify + ticket install (same day):** RSA-PSS SHA-256
+verify/sign; TLS 1.3 CertificateVerify transcript; NewSessionTicket
+parse installs into `SessionCache` so the next GET resumes.
+**P6 RFC 8448 CV bytes + encrypted flight (same day):** RSA pub from
+the leaf; CertificateVerify 0x0804 over CH+SH+EE+Cert; `s hs` record
+opens EncryptedExtensions+Cert+CV+Finished; master/`c|s ap` match
+RFC 8448 and decrypt server appdata. Not CT, not a browser stack.
+**P6 client Finished + res master (same day):** `c hs` opens the
+client Finished record; `res master` from CH…client Finished installs
+the RFC 8448 ticket PSK; `close_notify` is `c ap` seq 1 / `s ap` seq 2.
+Not CT, not a CSPRNG, not a full stack.
+**P6 X.509 store + OCSP (same day):** DER TLV; SAN/KU/BC/validity;
+in-memory `CertStore`; RFC 8448 self-pin; Botan SAN chain; BasicOCSP
+good/revoked; POST `/bios/trust/root` (CSRF + trust scope). Not a
+system store, not HTTP OCSP, not name-constraints, not CT.
+**P6 TLS 1.2 fallback + botan spec-sync (same day):** 1.3 ClientHello
+lists 1.2 ECDHE-GCM and versions 1.3 then 1.2; 1.2 hello is the
+no-X25519 first GET; BIOS file server picks 1.2 when fallback suites
+are present. `g6b.py spec-sync` inits kernel-spec submodules and
+ensures botan RFC 8448 vectors. Not a full 1.2 handshake, not CT.
+**P6 RISC-V crypto IR (same day):** `g6b-asm` first-class Zkne/Zknh/Zbkc/M
+leaves; BoardSpec `isa.zkne` default absent (CVA6); SHA-256 uses Zknh
+σ/Σ names. Not x86, not botan-math.
+**P6 KeyUpdate + virtio-rng + HTTPS trust (same day):** `traffic upd`
+rotates application keys; virtio-rng DeviceID 4 fails closed when empty;
+KernelNet `verify_https_peer` needs a pinned `CertStore`. Not a CSPRNG,
+not a full record layer.
+**P6 exporter + EE + rng probe (same day):** `exp master`; EncryptedExtensions
+refuse `early_data`; CertificateRequest fail-closed; OCSP staple from the
+TLS 1.3 Certificate entry; `VioRngProbe` scans virtio-rng. Not HTTP OCSP,
+not a CSPRNG.
+**P6 listen/AIA/RFB client/rng whitener (same day):** `ListenPolicy` may
+bind `0.0.0.0` only when provisioned+entropy+trust; advertised URL is
+`10.0.2.15`. AIA OCSP `http://` on isolated NAT; HTTPS chicken-egg refused.
+`RfbClient` requires TLS before a 0×0 framebuffer request. virtio-rng
+HKDF-Extract whitener. Not a published wildcard management URL, not live
+public OCSP, not a VNC viewer, not a CSPRNG.
+**P6 name constraints + EKU (same day):** DNS permitted/excluded; Botan
+Valid/InvalidNameConstraint; leaf EKU serverAuth when present. Not
+directoryName, not CT.
+**P6 ALPN/HRR/PRF + CORS/view-only (same day):** ALPN `http/1.1`; `h2`,
+HelloRetryRequest, and `post_handshake_auth` refused; TLS 1.2 P_SHA256.
+Mgmt Origin fail-closed (no `*`); mutating GET 405. RFB view-only refuses
+pointer/key; clipboard refused. Not a full 1.2 handshake, not native VNC.
+**P6 TLS 1.2 CCS/GCM/Finished (same day):** ChangeCipherSpec; RFC 5288
+AES-GCM record; 12-byte Finished via P_SHA256. `wrap_app` stays plaintext.
+Not a completed ECDHE 1.2 handshake, not CT.
+**P6 SKI/AKI + email NC (same day):** AKI matches issuer SKI when both
+present; rfc822Name mailbox/host constraints. Not directoryName, not CT.
+**P6 virtio-rtc (same day):** 8-byte BE unix seconds from a device buffer.
+Short/empty fail closed. Not `rdtime`, not QEMU.
+**P8 KVM lease + WS backpressure (same day):** RFB ServerInit geometry;
+generation without pixels; one controller, local priority, disconnect
+releases keys; WS frames 64 KiB / queue 4. Not a native VNC viewer.
+**P6 HMAC-DRBG (same day):** HMAC-DRBG-SHA256 over extracted virtio-rng.
+Not a CSPRNG-quality claim.
+**P10 capsule ELF/replay (same day):** RISC-V 64 LE ident; version must be
+newer than last applied; empty PSS fail-closed. Not SPI.
+**P12 RecoveryState (same day):** Unconfirmed power-loss; login does not
+clear; autoboot blocked. Not live OpenWrt qualification.
+**P9 embed direct-login (same day):** Partitioned/SameSite=None is not a
+grant. Not nested BIOS login.
+**P7–P8 UI isolation + Linux quiesce (same day):** recovery/jobs survive
+`ui_down`; RFB/KVM must terminate before LinuxEnter. Not KVM pixels.
+**P6 reauth (same day):** mutating jobs need `x-reauth` from login. Not a
+password-prompt UI.
+**P10 slot A (same day):** apply to recovery slot A refused; password
+survives apply. Not SPI.
+**P9 iframe generation (same day):** superseded HostNeed fetches fail
+`stale generation`. Not nested BIOS login.
+**P8 damage metadata (same day):** gen+rect only; 0 framebuffer
+rectangles; KVM `remote` flag. Not pixels.
+**P12 second session (same day):** two logins see latched recovery.
+Not live OpenWrt.
+**P6 session expiry (same day):** clock past expires is 401; errors do not
+echo passwords. Not CT.
+**P10–P12 trial ack (same day):** apply → InProgress; health ack →
+Confirmed without enabling autoboot; ack cannot clear Latched. Not live
+helper.
+**P7 recovery HTML (same day):** `GET /bios/recovery.html`. Not a full UI.
+**P10 ELF ET_EXEC (same day):** `e_type==2`; DYN refused.
+**P11 other harts (same day):** `linux_enter_ready` needs other harts
+stopped. Not a live kernel.
+**P8 32bpp (same day):** RFB SetPixelFormat must be 32bpp true-color;
+colour map refused. Not pixels.
+**P10 ELF64 header (same day):** 64-byte Ehdr, ident version, OSABI,
+`e_ehsize`. Not SPI.
+**P9 sandbox (same day):** popups/top-navigation refused. Not nested
+BIOS login.
+**P6 TLS 1.0/1.1 (same day):** record version `03 03` only.
+**P12 no recovery-clear (same day):** POST clear is 403; logout drops
+the session. Not live qualification.
+**P6 cookie Max-Age (same day):** login `Max-Age=3600`; logout `Max-Age=0`.
+**P10 ELF phdr (same day):** `e_version`, `phentsize==56`, `phnum>=1`.
+**P8 WS opcodes (same day):** text/close/ping/pong; binary/RSV refused.
+**P6 SNI (same day):** empty/NUL host refused.
+**P6 HSTS (same day):** `max-age=31536000; includeSubDomains`. Not a browser
+review.
+**P10 e_entry (same day):** non-zero 4-byte aligned. Not SPI.
+**P8 WS close (same day):** 1005/1006/1015 refused. Not pixels.
+**P6 unexpected_message (same day):** fatal alert 10.
+**P12 health-ack gen (same day):** digest+generation must match.
+**P6–P9 COOP/COEP (same day):** same-origin / require-corp; Permissions-Policy
+empties camera/mic/geo. Not nested BIOS login.
+**P10 PT_LOAD (same day):** `e_phoff==64`, first `p_type==1`. Not SPI.
+**P8 RFB sizes (same day):** key 8 B, pointer 6 B.
+**P6 heartbeat/SCT (same day):** EE 0x000f/0x0012 refused. Not CT.
+**P6 `__Host-` cookie (same day):** no Domain; Path=/; Secure.
+**P10 RX-not-WX (same day):** `p_flags` W+X refused. Not SPI.
+**P8 ping/pong (same day):** pong echoes ping. Not pixels.
+**P6 seq wrap (same day):** `u64::MAX` fails closed. Not CT.
+**P12 Confirmed retry (same day):** retry-once after ack is 409.
+**P6 extra headers (same day):** DNS prefetch off; cross-domain policies none.
+**P10 p_align (same day):** 4/8/4096. Not SPI.
+**P6 SNI IP/len (same day):** IP literals and >255 refused. Not CT.
+**P8 FBU size (same day):** type 3 is 10 B. Not pixels.
+**P10 p_vaddr (same day):** non-zero 4-byte aligned. Not SPI.
+**P6 compress_certificate (same day):** EE 0x001b refused.
+**P8 WS control FIN (same day):** fragmented ping/close refused.
+**P6 advertise `::` / secret-in-URL (same day):** IPv6 unspecified remapped;
+`password=` in the path is 403.
+**P10 p_filesz (same day):** filesz>0 and filesz<=memsz. Not SPI.
+**P6 inner CCS (same day):** TLS 1.3 inner type 20/24 refused.
+**P8 incremental (same day):** FBU byte1 is 0 or 1. Not pixels.
+**P6 SNI dots (same day):** `..` / leading `-` refused.
+**P12 unplug latch (same day):** unplug does not clear recovery.
+**P10 p_offset (same day):** ≥120 after Ehdr+Phdr. Not SPI.
+**P6 EE cookie/psk_modes (same day):** 0x002c/0x002d in EE refused.
+**P8 WS control length (same day):** >125 refused. Not pixels.
+**P6 TRACE / P12 PUT (same day):** TRACE/CONNECT and PUT/PATCH/DELETE on
+`/bios/*` are 405.
+**P6 HTTP Host/body (same day):** HTTP/1.1 Host required; chunked refused;
+body ≤64 KiB.
+**P6 empty TLS record (same day):** length 0 fail closed.
+**P8 encodings count (same day):** 1..=8. Not pixels.
+**P9 grant TTL (same day):** 1..=86400 s. Not nested BIOS login.
+**P6 duplicate Host/CL (same day):** second Host or mismatched Content-Length
+refused; request-line path ≤2048.
+**P8 SecurityResult (same day):** 0 only. Not pixels.
+**P6 SNI slash (same day):** `/` `\\` `@` refused.
+**P6 password controls (same day):** bytes <32 refused.
+**P6 header length / Host userinfo (same day):** line ≤8192; `user@host`
+refused.
+**P6 EE renegotiation_info (same day):** 0xff01 in EE refused.
+**P8 WS 1-byte close (same day):** payload length 1 refused.
+**P6 login lockout (same day):** 5 failures then 429 even if the password
+is correct.
+**P6 logout CSRF (same day):** logout needs CSRF+reauth.
+**P6 Expect continue (same day):** 100-continue refused; header names are
+tokens.
+**P8 RFB 3.3 (same day):** `RFB 003.003` refused. Not pixels.
+**P9 origin port 0 (same day):** empty/zero port refused. Not nested login.
+**P6 HTTP/1.0 and path (same day):** 1.0 refused; `//` paths refused.
+**P8 WS close range (same day):** `<1000` and 1004 refused. Not pixels.
+**P6 SNI underscore / HEAD (same day):** `_` in SNI refused; HEAD `/bios/*`
+is 405.
+**P6 encoded traversal (same day):** `%2e%2e` / `%2f` refused.
+**P6 EE max_fragment_length (same day):** 0x0001 refused.
+**P6 password trim / headers (same day):** leading space refused; ≤64
+headers; CR/LF in values refused.
+**P10 ELF overflow (same day):** offset+filesz / vaddr+memsz; entry in PT_LOAD.
+Not SPI.
+**P6 TLS 1.2 SKE (same day):** named X25519/P-256 ServerKeyExchange parse;
+ServerHelloDone. Not a completed ECDHE handshake, not CT.
+**P8 WS UTF-8 / RFB LE (same day):** text frames UTF-8; 32bpp depth 24 LE.
+Not pixels.
+**P6 JSON Content-Type / TLS cap (same day):** non-json POST 415; ciphertext
+>16384+256 refused.
+**P6 TLS 1.2 CKE/Certificate (same day):** ECDHE point 32/65; RSA-KEX
+refused; empty Certificate refused. Not a completed handshake.
+**P8 colour max (same day):** 0x00ff RGB. Not pixels.
+**P10 phnum (same day):** ≤4. Not SPI.
+**P6 cookie/h2c (same day):** cookie CTL/space ignored; Upgrade h2c
+refused.
+**P6–P7 optional HTTP/2 (same day):** PRI preface only; one odd stream;
+PUSH/GOAWAY/RST/PRIORITY/PADDED refused. Not ALPN `h2`, not h2c, not a
+multiplexer.
+**P6 TLS 1.2 X25519 ECDHE (same day):** shared from SKE. Schoolbook, not CT,
+not a completed handshake.
+**P6 directoryName CN (same day):** `cn=` NC. Not a full DN engine.
+**P7 H2 SETTINGS/PING ACK (same day):** ENABLE_PUSH=1 refused; PING ACK
+encoder. Not flow control / multiplexer.
+**P8 RFB shifts (same day):** 16/8/0. Not pixels.
+**P6–P7 H2 preferred (same day):** ALPN `h2` then `http/1.1`; h2c → 101;
+`H2Session` multiplex, receive WINDOW_UPDATE, CONTINUATION across TCP
+chunks. Not CSPRNG, not CT, not VNC, not SPI, not live OpenWrt.
+**P6 completed handshake (same day):** TLS 1.2 ECDHE-GCM full flight + GCM
+appdata; TLS 1.3 1-RTT CH/SH/EE/Finished + AP. SKE sig opaque; no 1.3
+CertificateVerify. Not CT, not CSPRNG.
+**P6 SKE/CV/NST (same day):** TLS 1.2 SKE PKCS#1 SHA-256 (RFC 8448 leaf);
+TLS 1.3 Certificate + RSA-PSS CertificateVerify; dummy CCS; NewSessionTicket
+at `s ap` seq 0. Not a CA path, not CT, not CSPRNG.
+**P7 H2 respond (same day):** `H2Session::respond` + send WINDOW_UPDATE.
+Not GOAWAY, not VNC, not SPI, not live OpenWrt.
+**P6 inner padding/alerts (same day):** TLS 1.3 inner zeros; `bad_record_mac` /
+`decrypt_error`.
+**P7 H2 GOAWAY/RST/SETTINGS (same day):** inbound GOAWAY/RST; header-table
+refused; max 32 streams; CONNECT refused.
+**P8/P10 encodings/p_paddr (same day):** RFB CopyRect/RRE/Hextile/ZRLE
+refused; ELF p_paddr 0 or vaddr. Not pixels, not SPI, not CSPRNG, not CT.
+**P6 CT X25519 / DRBG health (same day):** 51-bit limbs + mask cswap; stuck-bit
+health before HMAC-DRBG. Not a side-channel lab or CSPRNG-quality review.
+**P8 committed pixels (same day):** raw rect from `commit_pixels`; KVM GET
+gen/sha after login. Not a native VNC viewer.
+**P9 nested login (same day):** child `/bios/login` allowed; parent `/bios`
+refused; sids isolated. Not a full nested BIOS.
+**P10 SPI layout (same day):** 16 MiB map, no flash.
 
 **Local plan review (2026-09-14):** `gr`/`display-proxy` produce legacy blue
 text-plane diagnostics, not web screenshots. Their host font now covers

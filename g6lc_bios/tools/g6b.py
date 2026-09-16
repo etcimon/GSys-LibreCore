@@ -196,8 +196,64 @@ def cmd_store_embed(args: argparse.Namespace) -> int:
     return 0
 
 
+_BOTAN_MARKER = "kernel-spec/botan/test_data/tls_13_rfc8448/server_certificate.pem"
+_BOTAN_URL = "https://github.com/etcimon/botan.git"
+_SPEC_SUBMODULES = (
+    "g6lc_bios/kernel-spec/goja",
+    "g6lc_bios/kernel-spec/TempleOS",
+    "g6lc_bios/kernel-spec/lirx-dom",
+    "g6lc_bios/kernel-spec/goosie",
+)
+
+
+def _git_toplevel(start: Path) -> Path | None:
+    r = subprocess.run(
+        ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        return None
+    return Path(r.stdout.strip())
+
+
+def cmd_spec_sync(args: argparse.Namespace) -> int:
+    """Submodule init/pull for kernel-spec + botan marker for g6b-tls tests."""
+    root = package_root()
+    check_only = bool(getattr(args, "check", False))
+    top = _git_toplevel(root)
+    if top is not None and not check_only:
+        cmd = ["git", "-C", str(top), "submodule", "update", "--init", "--"]
+        cmd.extend(_SPEC_SUBMODULES)
+        log("+ " + " ".join(cmd))
+        subprocess.run(cmd, check=False)
+    marker = root / _BOTAN_MARKER
+    botan = root / "kernel-spec" / "botan"
+    if marker.is_file():
+        log(f"botan spec OK {marker}")
+        return 0
+    if check_only:
+        err(f"missing {_BOTAN_MARKER}; run python tools/g6b.py spec-sync")
+        return 1
+    if (botan / ".git").is_dir():
+        log("+ git -C kernel-spec/botan pull --ff-only")
+        rc = subprocess.run(["git", "-C", str(botan), "pull", "--ff-only"]).returncode
+        return rc if not marker.is_file() else 0
+    botan.parent.mkdir(parents=True, exist_ok=True)
+    log(f"+ git clone --depth 1 {_BOTAN_URL} {botan}")
+    rc = subprocess.run(["git", "clone", "--depth", "1", "--single-branch", _BOTAN_URL, str(botan)]).returncode
+    if rc != 0 or not marker.is_file():
+        err("botan clone did not produce TLS 1.3 RFC 8448 vectors")
+        return 1
+    return 0
+
+
 def cmd_check(_: argparse.Namespace) -> int:
     failed: list[str] = []
+    log("--- spec-sync ---")
+    if cmd_spec_sync(argparse.Namespace(check=True)) != 0:
+        failed.append("spec-sync")
     log("--- independence ---")
     rc = subprocess.run(
         [sys.executable, str(_TOOLS / "check_independence.py")],
@@ -356,6 +412,15 @@ def main() -> int:
     p = argparse.ArgumentParser(prog="g6b")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check")
+    ss = sub.add_parser(
+        "spec-sync",
+        help="git submodule update --init for kernel-spec + botan fetch/pull for g6b-tls vectors",
+    )
+    ss.add_argument(
+        "--check",
+        action="store_true",
+        help="fail if botan RFC 8448 vectors are missing (no network)",
+    )
     d = sub.add_parser("design-compile")
     d.add_argument("--spec", required=True)
     d.add_argument("--out")
@@ -416,6 +481,8 @@ def main() -> int:
     se.add_argument("--fixture", help="JSON dump fixture")
     se.add_argument("--out", help="output path")
     args = p.parse_args()
+    if args.cmd == "spec-sync":
+        return cmd_spec_sync(args)
     if args.cmd == "check":
         rc = cmd_check(args)
         if rc != 0:

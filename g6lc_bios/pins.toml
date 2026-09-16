@@ -69,8 +69,9 @@ note = "WASM JIT druntime / Object_Call / fetch spec; not compiled; not LDC"
 [botan]
 spec = "botan-d"
 path = "kernel-spec/botan"
+url = "https://github.com/etcimon/botan.git"
 license = "BSD-2-Clause"
-note = "TLS/X.509/RSA/ECDSA spec; not compiled; rewrite in g6b-tls"
+note = "TLS/X.509/RSA/ECDSA spec; not compiled; rewrite in g6b-tls. spec-sync: submodule init/pull or clone if marker missing."
 
 [zealos]
 role = "kernel-spec-reference"

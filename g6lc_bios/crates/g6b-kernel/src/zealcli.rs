@@ -19,6 +19,8 @@
 
 use std::fmt;
 
+use g6b_tls::{CertStore, Entropy, FixtureEntropy, VirtioRng};
+
 use g6b_spec::BoardSpec;
 use g6b_zealcli::{
     Entry, FlashPort, NetPort, Ports, Progress, Session as ZealCli, VolumeInfo, VolumePort,
@@ -370,7 +372,26 @@ pub struct KernelNet {
     wdt_hits: u32,
     wdt_hold: bool,
     /// `None` fails closed. Hostname hash is not entropy.
-    tls_rng: Option<g6b_tls::FixtureEntropy>,
+    tls_rng: Option<TlsEntropyKind>,
+    /// 1-RTT PSK tickets. 0-RTT is not stored.
+    tls_sessions: g6b_tls::SessionCache,
+    /// Empty / missing store fails closed for `verify_https_peer`.
+    trust: Option<CertStore>,
+}
+
+#[derive(Clone, Debug)]
+enum TlsEntropyKind {
+    Fixture(FixtureEntropy),
+    Virtio(VirtioRng),
+}
+
+impl Entropy for TlsEntropyKind {
+    fn fill(&mut self, buf: &mut [u8]) -> Result<(), String> {
+        match self {
+            Self::Fixture(e) => e.fill(buf),
+            Self::Virtio(e) => e.fill(buf),
+        }
+    }
 }
 
 /// No data for this long ends the transfer. Polls stay non-blocking; this is
@@ -389,11 +410,63 @@ impl KernelNet {
             wdt_hits: 0,
             wdt_hold: false,
             tls_rng: None,
+            tls_sessions: g6b_tls::SessionCache::default(),
+            trust: None,
         }
     }
 
     fn use_test_entropy(&mut self) {
-        self.tls_rng = Some(g6b_tls::FixtureEntropy::TEST);
+        self.tls_rng = Some(TlsEntropyKind::Fixture(FixtureEntropy::TEST));
+    }
+
+    fn use_virtio_rng(&mut self, bytes: Vec<u8>) {
+        self.tls_rng = Some(TlsEntropyKind::Virtio(VirtioRng::from_device(bytes)));
+    }
+
+    fn use_virtio_rng_extracted(&mut self, bytes: &[u8]) -> Result<(), String> {
+        self.tls_rng = Some(TlsEntropyKind::Virtio(VirtioRng::from_device_extracted(
+            bytes,
+        )?));
+        Ok(())
+    }
+
+    /// Isolated-NAT OCSP POST bytes. HTTPS and public hosts fail closed.
+    fn ocsp_http_plan(url: &str, serial: &[u8]) -> Result<Vec<u8>, String> {
+        let u = g6b_http::ocsp_plan(url)?;
+        Ok(g6b_http::ocsp_http_post(
+            &u,
+            &g6b_tls::ocsp_request_for_serial(serial),
+        ))
+    }
+
+    fn attach_trust(&mut self, store: CertStore) {
+        self.trust = Some(store);
+    }
+
+    fn verify_https_peer(
+        &self,
+        host: &str,
+        pem: &[u8],
+        clock: &dyn g6b_tls::Clock,
+    ) -> Result<(), String> {
+        let store = self.trust.as_ref().ok_or("tls: no trust store")?;
+        let chain = g6b_tls::parse_cert_chain(pem)?;
+        store.verify_chain(&chain, host, clock)
+    }
+
+    fn remember_ticket(&mut self, ticket: g6b_tls::Ticket) {
+        self.tls_sessions.store(ticket);
+    }
+
+    /// After a 1-RTT handshake, install NewSessionTicket for this host.
+    fn install_server_ticket(
+        &mut self,
+        host: &str,
+        nst: &[u8],
+        res_master: &[u8; 32],
+        pk: &[u8; 32],
+    ) -> Result<(), String> {
+        self.tls_sessions.install_nst(host, nst, res_master, pk)
     }
 
     fn pack(slot: usize, gen: u32) -> u32 {
@@ -450,7 +523,9 @@ impl KernelNet {
     }
 
     fn unplug(&mut self) {
-        let _ = self.hw.push(g6b_hw::HwMsg::Cable(g6b_hw::CableEvent::Removed));
+        let _ = self
+            .hw
+            .push(g6b_hw::HwMsg::Cable(g6b_hw::CableEvent::Removed));
         let _ = self.hw.drain_one();
     }
 
@@ -544,13 +619,20 @@ impl NetPort for KernelNet {
         let req = g6b_http::outbound::plan(url)?;
         let device = self.prepare()?;
         let bytes = if req.https {
-            // HTTPS starts with the ClientHello the TLS crate writes; the
-            // record layer answer is inspected on the first poll.
-            let rng = self
-                .tls_rng
-                .as_mut()
-                .ok_or("tls: no entropy")?;
-            g6b_tls::client_hello_with(&req.host, rng)?
+            let rng = self.tls_rng.as_mut().ok_or("tls: no entropy")?;
+            if let Some(t) = self.tls_sessions.lookup(&req.host).cloned() {
+                let mut rnd = [0u8; 32];
+                rng.fill(&mut rnd)?;
+                let ch = g6b_tls::client_hello_tls13_psk(&rnd, &t.pk, &req.host, &t)?;
+                let mut rec = vec![0x16, 0x03, 0x03];
+                rec.extend_from_slice(&(ch.len() as u16).to_be_bytes());
+                rec.extend(ch);
+                rec
+            } else {
+                // TLS 1.2 ECDHE-GCM hello (supported_versions 1.2). Avoids schoolbook
+                // X25519 on the first GET; 1.3 is used once a ticket/pk exists.
+                g6b_tls::client_hello_with(&req.host, rng)?
+            }
         } else {
             g6b_http::outbound::http1_get_request(&req)
         };
@@ -653,10 +735,7 @@ impl NetPort for KernelNet {
             }
             return Progress::Failed("link down".into());
         }
-        let need_dns = self
-            .job(handle)
-            .map(|j| j.dns.is_some())
-            .unwrap_or(false);
+        let need_dns = self.job(handle).map(|j| j.dns.is_some()).unwrap_or(false);
         if need_dns {
             let name = self
                 .job_mut(handle)
@@ -667,10 +746,7 @@ impl NetPort for KernelNet {
                     if let Some(j) = self.job_mut(handle) {
                         j.dst = Some(ip);
                     }
-                    return Progress::Pending {
-                        done: 0,
-                        total: 0,
-                    };
+                    return Progress::Pending { done: 0, total: 0 };
                 }
                 Err(e) => {
                     if let Some(j) = self.job_mut(handle) {
@@ -700,10 +776,7 @@ impl NetPort for KernelNet {
             };
             match self.hw.tcp_try_connect_sock(&device, &host, port) {
                 Ok(None) => {
-                    return Progress::Pending {
-                        done: 0,
-                        total: 0,
-                    };
+                    return Progress::Pending { done: 0, total: 0 };
                 }
                 Ok(Some(sock)) => {
                     if let Some(j) = self.job_mut(handle) {
@@ -719,20 +792,19 @@ impl NetPort for KernelNet {
                 }
             }
         }
-        let send = self.job(handle).and_then(|j| match (j.sock, j.tx.as_ref()) {
-            (Some(s), Some(t)) if !t.is_empty() => Some((s, t.clone())),
-            _ => None,
-        });
+        let send = self
+            .job(handle)
+            .and_then(|j| match (j.sock, j.tx.as_ref()) {
+                (Some(s), Some(t)) if !t.is_empty() => Some((s, t.clone())),
+                _ => None,
+            });
         if let Some((sock, tx)) = send {
             match self.hw.tcp_send_bytes(sock, &tx) {
                 Ok(n) if n >= tx.len() => {
                     if let Some(j) = self.job_mut(handle) {
                         j.tx = None;
                     }
-                    return Progress::Pending {
-                        done: 0,
-                        total: 0,
-                    };
+                    return Progress::Pending { done: 0, total: 0 };
                 }
                 Ok(n) => {
                     if let Some(j) = self.job_mut(handle) {
@@ -740,10 +812,7 @@ impl NetPort for KernelNet {
                             rest.drain(..n.min(rest.len()));
                         }
                     }
-                    return Progress::Pending {
-                        done: 0,
-                        total: 0,
-                    };
+                    return Progress::Pending { done: 0, total: 0 };
                 }
                 Err(e) => {
                     if let Some(j) = self.job_mut(handle) {
@@ -1604,11 +1673,43 @@ mod tests {
     }
 
     #[test]
+    fn outbound_https_reuses_psk_ticket() {
+        let mut net = KernelNet::new(&spec("barebone"));
+        net.use_test_entropy();
+        let rm = [0x5au8; 32];
+        let t = g6b_tls::issue_ticket("127.0.0.1", &rm, &[0, 0], b"t1", &[9u8; 32]).unwrap();
+        net.remember_ticket(t);
+        let handle = net.get("https://127.0.0.1/fw.elf").expect("armed");
+        let hello = net.job(handle).and_then(|j| j.tx.clone()).expect("hello");
+        assert!(
+            hello.windows(2).any(|w| w == [0x00, 0x29]),
+            "resumed ClientHello carries pre_shared_key"
+        );
+        assert!(
+            !hello.windows(2).any(|w| w == [0x00, 0x2a]),
+            "0-RTT still refused"
+        );
+        let handle2 = net.get("https://127.0.0.1/fw.elf").expect("second");
+        let hello2 = net.job(handle2).and_then(|j| j.tx.clone()).expect("hello2");
+        assert!(hello2.windows(2).any(|w| w == [0x00, 0x29]));
+        let mut nst = vec![0x04, 0x00, 0x00, 0x11];
+        nst.extend_from_slice(&0x1eu32.to_be_bytes());
+        nst.extend_from_slice(&0u32.to_be_bytes());
+        nst.push(2);
+        nst.extend_from_slice(&[0, 0]);
+        nst.extend_from_slice(&[0, 2, 0xcc, 0xdd]);
+        nst.extend_from_slice(&[0, 0]);
+        net.install_server_ticket("10.0.2.2", &nst, &[0x5au8; 32], &[9u8; 32])
+            .unwrap();
+        let h3 = net.get("https://10.0.2.2/fw.elf").expect("nst host");
+        let hello3 = net.job(h3).and_then(|j| j.tx.clone()).expect("hello3");
+        assert!(hello3.windows(2).any(|w| w == [0x00, 0x29]));
+    }
+
+    #[test]
     fn outbound_https_without_entropy_fails_closed() {
         let mut net = KernelNet::new(&spec("barebone"));
-        let err = net
-            .get("https://127.0.0.1/fw.elf")
-            .unwrap_err();
+        let err = net.get("https://127.0.0.1/fw.elf").unwrap_err();
         assert!(err.contains("entropy"), "{err}");
     }
 
@@ -1630,5 +1731,70 @@ mod tests {
             .unwrap_err()
             .contains("staged image is bios"));
         assert!(ok.commit("bios").unwrap().contains(&digest));
+    }
+
+    #[test]
+    fn virtio_rng_entropy_and_empty_trust_fail_closed() {
+        let mut net = KernelNet::new(&spec("barebone"));
+        assert!(net
+            .get("https://127.0.0.1/fw.elf")
+            .unwrap_err()
+            .contains("entropy"));
+        net.use_virtio_rng(vec![]);
+        assert!(net
+            .get("https://localhost/fw.elf")
+            .unwrap_err()
+            .contains("virtio-rng"));
+        net.use_virtio_rng((0u8..64).collect());
+        assert!(net.get("https://localhost/fw.elf").is_ok());
+        let pem = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../kernel-spec/botan/test_data/tls_13_rfc8448/server_certificate.pem"
+        ));
+        assert!(net
+            .verify_https_peer(
+                "rsa",
+                pem.as_bytes(),
+                &g6b_tls::FixtureClock {
+                    unix: 1_483_228_800
+                }
+            )
+            .unwrap_err()
+            .contains("trust"));
+        let mut store = CertStore::default();
+        store
+            .add_root(g6b_tls::parse_cert(pem.as_bytes()).unwrap())
+            .unwrap();
+        net.attach_trust(store);
+        net.verify_https_peer(
+            "rsa",
+            pem.as_bytes(),
+            &g6b_tls::FixtureClock {
+                unix: 1_483_228_800,
+            },
+        )
+        .unwrap();
+        assert!(net
+            .verify_https_peer(
+                "server",
+                pem.as_bytes(),
+                &g6b_tls::FixtureClock {
+                    unix: 1_483_228_800
+                }
+            )
+            .unwrap_err()
+            .contains("name"));
+        assert!(KernelNet::ocsp_http_plan("https://10.0.2.2/ocsp", &[2])
+            .unwrap_err()
+            .contains("chicken-egg"));
+        assert!(KernelNet::ocsp_http_plan("http://example.com/ocsp", &[2])
+            .unwrap_err()
+            .contains("isolated"));
+        let post = KernelNet::ocsp_http_plan("http://10.0.2.2/ocsp", &[2]).unwrap();
+        assert!(post.starts_with(b"POST /ocsp HTTP/1.1"));
+        let mut whitened = KernelNet::new(&spec("barebone"));
+        let seed: Vec<u8> = (0u8..32).collect();
+        whitened.use_virtio_rng_extracted(&seed).unwrap();
+        assert!(whitened.get("https://localhost/fw.elf").is_ok());
     }
 }

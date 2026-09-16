@@ -1,9 +1,16 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 
-//! HTTP/2 frames (RFC 9113) + HPACK (RFC 7541) static/literal + Huffman.
+//! HTTP/2 (RFC 9113) + HPACK static/literal + Huffman.
+//! Higher-level selection prefers H2 over HTTP/1.1 when both are on.
+//! ALPN `h2` and h2c Upgrade are selected above this module. Live `H2Session`
+//! multiplexes odd streams, CONTINUATION across TCP chunks, receive
+//! flow-control, and send WINDOW_UPDATE / respond. Not CSPRNG, CT, VNC,
+//! SPI, or live OpenWrt.
 
 #![allow(missing_docs)]
+
+use std::collections::BTreeMap;
 
 use crate::{Request, Response, Version};
 
@@ -11,11 +18,20 @@ pub const PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
 
 const FRAME_DATA: u8 = 0;
 const FRAME_HEADERS: u8 = 1;
+const FRAME_PRIORITY: u8 = 2;
+const FRAME_RST: u8 = 3;
 const FRAME_SETTINGS: u8 = 4;
+const FRAME_PUSH: u8 = 5;
 const FRAME_PING: u8 = 6;
+const FRAME_GOAWAY: u8 = 7;
+const FRAME_WINDOW: u8 = 8;
+const FRAME_CONTINUATION: u8 = 9;
 const END_STREAM: u8 = 0x01;
 const END_HEADERS: u8 = 0x04;
+const PADDED: u8 = 0x08;
 const ACK: u8 = 0x01;
+const PRIORITY_FLAG: u8 = 0x20;
+const MAX_FRAME: usize = 16 * 1024;
 
 /// RFC 7541 Appendix A (1-based).
 const STATIC: &[(&str, &str)] = &[
@@ -215,7 +231,7 @@ fn decode_str(c: &mut Cursor) -> Result<String, String> {
     } else {
         raw.to_vec()
     };
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    String::from_utf8(bytes).map_err(|_| "hpack utf8".into())
 }
 
 fn static_ent(i: usize) -> Result<(&'static str, &'static str), String> {
@@ -238,6 +254,9 @@ fn hpack_decode(block: &[u8]) -> Result<Vec<(String, String)>, String> {
         } else if first & 0x40 != 0 {
             let (n, v) = literal(&mut c, first, 6, &dyn_tab)?;
             dyn_tab.insert(0, (n.clone(), v.clone()));
+            if dyn_tab.len() > 32 {
+                dyn_tab.pop();
+            }
             headers.push((n, v));
         } else if first & 0xe0 == 0x20 {
             let _sz = decode_int(&mut c, first, 5)?;
@@ -290,17 +309,37 @@ fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
     o
 }
 
-/// Parse HTTP/2 (optional preface) into a request.
+/// One preface, one odd request stream. Encoded responses use `stream`.
+#[derive(Debug)]
+pub struct H2Exchange {
+    pub stream: u32,
+    pub req: Request,
+}
+
+/// Parse HTTP/2 preface + frames into a request. Preface is required.
 pub fn parse(raw: &[u8]) -> Result<Request, String> {
-    let mut i = 0usize;
-    if raw.starts_with(PREFACE) {
-        i = PREFACE.len();
+    Ok(parse_exchange(raw)?.req)
+}
+
+pub fn parse_exchange(raw: &[u8]) -> Result<H2Exchange, String> {
+    if !raw.starts_with(PREFACE) {
+        return Err("h2: preface required".into());
     }
+    let mut i = PREFACE.len();
     let mut header_block = Vec::new();
     let mut body = Vec::new();
+    let mut req_stream: Option<u32> = None;
+    let mut want_cont = false;
+    let mut headers_done = false;
+    let mut max_frame = MAX_FRAME;
     while i + 9 <= raw.len() {
         let len = ((raw[i] as usize) << 16) | ((raw[i + 1] as usize) << 8) | raw[i + 2] as usize;
+        if len > max_frame {
+            return Err("h2: frame too long".into());
+        }
         let kind = raw[i + 3];
+        let flags = raw[i + 4];
+        let stream = u32::from_be_bytes([raw[i + 5] & 0x7f, raw[i + 6], raw[i + 7], raw[i + 8]]);
         i += 9;
         if i + len > raw.len() {
             return Err("h2 truncated frame".into());
@@ -308,12 +347,101 @@ pub fn parse(raw: &[u8]) -> Result<Request, String> {
         let payload = &raw[i..i + len];
         i += len;
         match kind {
-            FRAME_HEADERS | 9 => header_block.extend_from_slice(payload),
-            FRAME_DATA => body.extend_from_slice(payload),
-            FRAME_SETTINGS | FRAME_PING => {}
-            _ => {}
+            FRAME_HEADERS => {
+                if stream == 0 || stream % 2 == 0 {
+                    return Err("h2: stream".into());
+                }
+                if flags & (PADDED | PRIORITY_FLAG) != 0 {
+                    return Err("h2: padded/priority refused".into());
+                }
+                if want_cont {
+                    return Err("h2: expected continuation".into());
+                }
+                if let Some(s) = req_stream {
+                    if s != stream {
+                        return Err("h2: one stream".into());
+                    }
+                }
+                req_stream = Some(stream);
+                header_block.extend_from_slice(payload);
+                headers_done = flags & END_HEADERS != 0;
+                want_cont = !headers_done;
+            }
+            FRAME_CONTINUATION => {
+                if !want_cont || req_stream != Some(stream) {
+                    return Err("h2: continuation".into());
+                }
+                header_block.extend_from_slice(payload);
+                headers_done = flags & END_HEADERS != 0;
+                want_cont = !headers_done;
+            }
+            FRAME_DATA => {
+                if req_stream != Some(stream) || !headers_done {
+                    return Err("h2: data".into());
+                }
+                if flags & PADDED != 0 {
+                    return Err("h2: padded/priority refused".into());
+                }
+                body.extend_from_slice(payload);
+            }
+            FRAME_SETTINGS => {
+                if stream != 0 {
+                    return Err("h2: settings stream".into());
+                }
+                if flags & ACK != 0 {
+                    if !payload.is_empty() {
+                        return Err("h2: settings ack".into());
+                    }
+                } else if payload.len() % 6 != 0 || payload.len() > 6 * 16 {
+                    return Err("h2: settings".into());
+                } else {
+                    let mut k = 0;
+                    while k + 6 <= payload.len() {
+                        let id = u16::from_be_bytes([payload[k], payload[k + 1]]);
+                        let val = u32::from_be_bytes([
+                            payload[k + 2],
+                            payload[k + 3],
+                            payload[k + 4],
+                            payload[k + 5],
+                        ]);
+                        if id == 2 && val != 0 {
+                            return Err("h2: push refused".into());
+                        }
+                        if id == 5 {
+                            if val < 16384 || val > 16_777_215 {
+                                return Err("h2: max frame".into());
+                            }
+                            max_frame = max_frame.min(val as usize);
+                        }
+                        k += 6;
+                    }
+                }
+            }
+            FRAME_PING => {
+                if stream != 0 || payload.len() != 8 {
+                    return Err("h2: ping".into());
+                }
+            }
+            FRAME_WINDOW => {
+                if payload.len() != 4 {
+                    return Err("h2: window".into());
+                }
+                let inc =
+                    u32::from_be_bytes([payload[0] & 0x7f, payload[1], payload[2], payload[3]]);
+                if inc == 0 {
+                    return Err("h2: window".into());
+                }
+            }
+            FRAME_PRIORITY | FRAME_RST | FRAME_PUSH | FRAME_GOAWAY => {
+                return Err("h2: frame refused".into());
+            }
+            _ => return Err("h2: frame refused".into()),
         }
     }
+    if want_cont {
+        return Err("h2: truncated headers".into());
+    }
+    let stream = req_stream.ok_or("h2: no headers")?;
     let headers = hpack_decode(&header_block)?;
     let mut method = "GET".to_string();
     let mut path = "/".to_string();
@@ -322,32 +450,438 @@ pub fn parse(raw: &[u8]) -> Result<Request, String> {
         match n.as_str() {
             ":method" => method = v,
             ":path" => path = v,
+            ":scheme" | ":authority" => {}
             _ => rest.push((n, v)),
         }
+    }
+    let mu = method.to_ascii_uppercase();
+    if matches!(mu.as_str(), "TRACE" | "CONNECT" | "TRACK" | "HEAD") {
+        return Err("h2: method".into());
+    }
+    if !path.starts_with('/') || path.contains("//") || path.contains('\\') {
+        return Err("h2: path".into());
+    }
+    if path.contains("password=") || path.contains("token=") {
+        return Err("h2: secret in url".into());
+    }
+    Ok(H2Exchange {
+        stream,
+        req: Request {
+            method,
+            path,
+            version: Version::Http2,
+            headers: rest,
+            body,
+        },
+    })
+}
+
+/// PING ACK on stream 0.
+pub fn ping_ack(opaque: &[u8; 8]) -> Vec<u8> {
+    frame(FRAME_PING, ACK, 0, opaque)
+}
+
+fn window_update(stream: u32, inc: u32) -> Vec<u8> {
+    frame(FRAME_WINDOW, 0, stream, &inc.to_be_bytes())
+}
+
+#[cfg(test)]
+fn goaway_frame(last: u32, err: u32) -> Vec<u8> {
+    let mut p = Vec::with_capacity(8);
+    p.extend_from_slice(&last.to_be_bytes());
+    p.extend_from_slice(&err.to_be_bytes());
+    frame(FRAME_GOAWAY, 0, 0, &p)
+}
+
+#[cfg(test)]
+fn rst_frame(stream: u32, err: u32) -> Vec<u8> {
+    frame(FRAME_RST, 0, stream, &err.to_be_bytes())
+}
+
+const INITIAL_WINDOW: i32 = 65535;
+
+#[derive(Debug)]
+struct H2Stream {
+    header_block: Vec<u8>,
+    body: Vec<u8>,
+    headers_done: bool,
+    win_in: i32,
+    win_out: i32,
+}
+
+/// Live HTTP/2 connection: leftover bytes, many odd streams, receive windows.
+#[derive(Debug)]
+pub struct H2Session {
+    buf: Vec<u8>,
+    preface: bool,
+    streams: BTreeMap<u32, H2Stream>,
+    conn_win_in: i32,
+    conn_win_out: i32,
+    send_win: BTreeMap<u32, i32>,
+    max_frame: usize,
+    max_streams: u32,
+    init_win_out: i32,
+    goaway: Option<u32>,
+    cont: Option<u32>,
+}
+
+/// Session output: a completed request or control bytes to write.
+#[derive(Debug)]
+pub enum H2Event {
+    Request { stream: u32, req: Request },
+    Control(Vec<u8>),
+}
+
+impl Default for H2Session {
+    fn default() -> Self {
+        Self {
+            buf: Vec::new(),
+            preface: false,
+            streams: BTreeMap::new(),
+            conn_win_in: INITIAL_WINDOW,
+            conn_win_out: INITIAL_WINDOW,
+            send_win: BTreeMap::new(),
+            max_frame: MAX_FRAME,
+            max_streams: 32,
+            init_win_out: INITIAL_WINDOW,
+            goaway: None,
+            cont: None,
+        }
+    }
+}
+
+impl H2Session {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Encode HEADERS+DATA on an odd stream. Body must fit the send window.
+    pub fn respond(&mut self, stream: u32, resp: &Response) -> Result<Vec<u8>, String> {
+        if stream == 0 || stream % 2 == 0 {
+            return Err("h2: stream".into());
+        }
+        let n = resp.body.len() as i32;
+        let sw = *self.send_win.get(&stream).unwrap_or(&INITIAL_WINDOW);
+        if n > self.conn_win_out || n > sw {
+            return Err("h2: send window".into());
+        }
+        self.conn_win_out -= n;
+        self.send_win.insert(stream, sw - n);
+        Ok(encode_response(resp, stream))
+    }
+
+    /// Push a TCP chunk. Incomplete frames stay buffered (CONTINUATION-safe).
+    pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<H2Event>, String> {
+        self.buf.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        if !self.preface {
+            if self.buf.len() < PREFACE.len() {
+                if PREFACE.starts_with(self.buf.as_slice()) {
+                    return Ok(out);
+                }
+                return Err("h2: preface required".into());
+            }
+            if !self.buf.starts_with(PREFACE) {
+                return Err("h2: preface required".into());
+            }
+            self.buf.drain(..PREFACE.len());
+            self.preface = true;
+        }
+        loop {
+            if self.buf.len() < 9 {
+                break;
+            }
+            let len = ((self.buf[0] as usize) << 16)
+                | ((self.buf[1] as usize) << 8)
+                | self.buf[2] as usize;
+            if len > self.max_frame {
+                return Err("h2: frame too long".into());
+            }
+            if self.buf.len() < 9 + len {
+                break;
+            }
+            let fr: Vec<u8> = self.buf.drain(..9 + len).collect();
+            out.extend(self.feed(&fr)?);
+        }
+        Ok(out)
+    }
+
+    fn feed(&mut self, fr: &[u8]) -> Result<Vec<H2Event>, String> {
+        let len = ((fr[0] as usize) << 16) | ((fr[1] as usize) << 8) | fr[2] as usize;
+        let kind = fr[3];
+        let flags = fr[4];
+        let stream = u32::from_be_bytes([fr[5] & 0x7f, fr[6], fr[7], fr[8]]);
+        let payload = &fr[9..9 + len];
+        let mut out = Vec::new();
+        match kind {
+            FRAME_HEADERS => {
+                if stream == 0 || stream % 2 == 0 {
+                    return Err("h2: stream".into());
+                }
+                if flags & (PADDED | PRIORITY_FLAG) != 0 {
+                    return Err("h2: padded/priority refused".into());
+                }
+                if self.cont.is_some() {
+                    return Err("h2: expected continuation".into());
+                }
+                if let Some(last) = self.goaway {
+                    if stream > last {
+                        return Err("h2: goaway".into());
+                    }
+                }
+                if !self.streams.contains_key(&stream)
+                    && self.streams.len() as u32 >= self.max_streams
+                {
+                    return Err("h2: max streams".into());
+                }
+                let init_out = self.init_win_out;
+                let st = self.streams.entry(stream).or_insert_with(|| H2Stream {
+                    header_block: Vec::new(),
+                    body: Vec::new(),
+                    headers_done: false,
+                    win_in: INITIAL_WINDOW,
+                    win_out: init_out,
+                });
+                st.header_block.extend_from_slice(payload);
+                st.headers_done = flags & END_HEADERS != 0;
+                let done = st.headers_done;
+                let end = flags & END_STREAM != 0;
+                self.cont = if done { None } else { Some(stream) };
+                if done && end {
+                    let win = st.win_out;
+                    let req = finish_h2_request(st)?;
+                    self.streams.remove(&stream);
+                    self.send_win.insert(stream, win);
+                    out.push(H2Event::Request { stream, req });
+                }
+            }
+            FRAME_CONTINUATION => {
+                if self.cont != Some(stream) {
+                    return Err("h2: continuation".into());
+                }
+                let st = self.streams.get_mut(&stream).ok_or("h2: continuation")?;
+                st.header_block.extend_from_slice(payload);
+                st.headers_done = flags & END_HEADERS != 0;
+                let done = st.headers_done;
+                let end = flags & END_STREAM != 0;
+                self.cont = if done { None } else { Some(stream) };
+                if done && end {
+                    let win = st.win_out;
+                    let req = finish_h2_request(st)?;
+                    self.streams.remove(&stream);
+                    self.send_win.insert(stream, win);
+                    out.push(H2Event::Request { stream, req });
+                }
+            }
+            FRAME_DATA => {
+                if stream == 0 {
+                    return Err("h2: stream".into());
+                }
+                let n = payload.len() as i32;
+                if n > self.conn_win_in {
+                    return Err("h2: conn window".into());
+                }
+                let st = self.streams.get_mut(&stream).ok_or("h2: data")?;
+                if !st.headers_done {
+                    return Err("h2: data".into());
+                }
+                if flags & PADDED != 0 {
+                    return Err("h2: padded/priority refused".into());
+                }
+                if n > st.win_in {
+                    return Err("h2: stream window".into());
+                }
+                st.body.extend_from_slice(payload);
+                st.win_in -= n;
+                self.conn_win_in -= n;
+                if n > 0 {
+                    let mut wu = window_update(0, n as u32);
+                    wu.extend(window_update(stream, n as u32));
+                    self.conn_win_in += n;
+                    st.win_in += n;
+                    out.push(H2Event::Control(wu));
+                }
+                if flags & END_STREAM != 0 {
+                    let win = st.win_out;
+                    let req = finish_h2_request(st)?;
+                    self.streams.remove(&stream);
+                    self.send_win.insert(stream, win);
+                    out.push(H2Event::Request { stream, req });
+                }
+            }
+            FRAME_SETTINGS => {
+                if stream != 0 {
+                    return Err("h2: settings stream".into());
+                }
+                if flags & ACK != 0 {
+                    if !payload.is_empty() {
+                        return Err("h2: settings ack".into());
+                    }
+                } else {
+                    if payload.len() % 6 != 0 || payload.len() > 6 * 16 {
+                        return Err("h2: settings".into());
+                    }
+                    let mut k = 0;
+                    while k + 6 <= payload.len() {
+                        let id = u16::from_be_bytes([payload[k], payload[k + 1]]);
+                        let val = u32::from_be_bytes([
+                            payload[k + 2],
+                            payload[k + 3],
+                            payload[k + 4],
+                            payload[k + 5],
+                        ]);
+                        if id == 1 && val != 0 {
+                            return Err("h2: header table".into());
+                        }
+                        if id == 2 && val != 0 {
+                            return Err("h2: push refused".into());
+                        }
+                        if id == 3 {
+                            self.max_streams = val.min(32);
+                        }
+                        if id == 5 {
+                            if val < 16384 || val > 16_777_215 {
+                                return Err("h2: max frame".into());
+                            }
+                            self.max_frame = self.max_frame.min(val as usize);
+                        }
+                        if id == 4 {
+                            if val > 2_147_483_647 {
+                                return Err("h2: window".into());
+                            }
+                            let neww = val as i32;
+                            let delta = neww - self.init_win_out;
+                            self.init_win_out = neww;
+                            for st in self.streams.values_mut() {
+                                st.win_out = st.win_out.saturating_add(delta);
+                            }
+                            for v in self.send_win.values_mut() {
+                                *v = v.saturating_add(delta);
+                            }
+                        }
+                        if id == 8 && val != 0 {
+                            return Err("h2: connect refused".into());
+                        }
+                        k += 6;
+                    }
+                    out.push(H2Event::Control(frame(FRAME_SETTINGS, ACK, 0, &[])));
+                }
+            }
+            FRAME_PING => {
+                if stream != 0 || payload.len() != 8 {
+                    return Err("h2: ping".into());
+                }
+                if flags & ACK == 0 {
+                    let mut o = [0u8; 8];
+                    o.copy_from_slice(payload);
+                    out.push(H2Event::Control(ping_ack(&o)));
+                }
+            }
+            FRAME_WINDOW => {
+                if payload.len() != 4 {
+                    return Err("h2: window".into());
+                }
+                let inc =
+                    u32::from_be_bytes([payload[0] & 0x7f, payload[1], payload[2], payload[3]]);
+                if inc == 0 {
+                    return Err("h2: window".into());
+                }
+                if stream == 0 {
+                    self.conn_win_out = self.conn_win_out.saturating_add(inc as i32);
+                } else if let Some(st) = self.streams.get_mut(&stream) {
+                    st.win_out = st.win_out.saturating_add(inc as i32);
+                } else {
+                    let e = self.send_win.entry(stream).or_insert(INITIAL_WINDOW);
+                    *e = e.saturating_add(inc as i32);
+                }
+            }
+            FRAME_RST => {
+                if stream == 0 || payload.len() != 4 {
+                    return Err("h2: rst".into());
+                }
+                self.streams.remove(&stream);
+                self.send_win.remove(&stream);
+                if self.cont == Some(stream) {
+                    self.cont = None;
+                }
+            }
+            FRAME_GOAWAY => {
+                if stream != 0 || payload.len() < 8 {
+                    return Err("h2: goaway".into());
+                }
+                let last =
+                    u32::from_be_bytes([payload[0] & 0x7f, payload[1], payload[2], payload[3]]);
+                self.goaway = Some(last);
+            }
+            FRAME_PRIORITY | FRAME_PUSH => {
+                return Err("h2: frame refused".into());
+            }
+            _ => return Err("h2: frame refused".into()),
+        }
+        Ok(out)
+    }
+}
+
+fn finish_h2_request(st: &H2Stream) -> Result<Request, String> {
+    let headers = hpack_decode(&st.header_block)?;
+    let mut method = "GET".to_string();
+    let mut path = "/".to_string();
+    let mut rest = Vec::new();
+    for (n, v) in headers {
+        match n.as_str() {
+            ":method" => method = v,
+            ":path" => path = v,
+            ":scheme" | ":authority" => {}
+            _ => rest.push((n, v)),
+        }
+    }
+    let mu = method.to_ascii_uppercase();
+    if matches!(mu.as_str(), "TRACE" | "CONNECT" | "TRACK" | "HEAD") {
+        return Err("h2: method".into());
+    }
+    if !path.starts_with('/') || path.contains("//") || path.contains('\\') {
+        return Err("h2: path".into());
+    }
+    if path.contains("password=") || path.contains("token=") {
+        return Err("h2: secret in url".into());
     }
     Ok(Request {
         method,
         path,
         version: Version::Http2,
         headers: rest,
-        body,
+        body: st.body.clone(),
     })
 }
 
-/// Encode a response as HEADERS(:status) + DATA on `stream`.
-pub fn encode(resp: &Response, stream: u32) -> Vec<u8> {
-    let mut blk = Vec::new();
-    let st = match resp.status {
-        200 => 8u8,
-        204 => 9,
-        404 => 13,
-        500 => 14,
-        _ => 8,
-    };
-    blk.push(0x80 | st);
-    let mut out = frame(FRAME_SETTINGS, ACK, 0, &[]);
-    out.extend(frame(FRAME_HEADERS, END_HEADERS, stream, &blk));
+fn hpack_status(code: u16) -> Vec<u8> {
+    match code {
+        200 => vec![0x80 | 8],
+        204 => vec![0x80 | 9],
+        404 => vec![0x80 | 13],
+        500 => vec![0x80 | 14],
+        400 => vec![0x80 | 12],
+        _ => {
+            let s = code.to_string();
+            let mut v = vec![0x08, s.len() as u8];
+            v.extend_from_slice(s.as_bytes());
+            v
+        }
+    }
+}
+
+/// HEADERS(:status) + DATA on `stream` (no SETTINGS ACK).
+pub fn encode_response(resp: &Response, stream: u32) -> Vec<u8> {
+    let blk = hpack_status(resp.status);
+    let mut out = frame(FRAME_HEADERS, END_HEADERS, stream, &blk);
     out.extend(frame(FRAME_DATA, END_STREAM, stream, &resp.body));
+    out
+}
+
+/// Encode a response as SETTINGS ACK + HEADERS(:status) + DATA (one-shot adapter).
+pub fn encode(resp: &Response, stream: u32) -> Vec<u8> {
+    let mut out = frame(FRAME_SETTINGS, ACK, 0, &[]);
+    out.extend(encode_response(resp, stream));
     out
 }
 
@@ -384,5 +918,185 @@ mod tests {
         let r = parse(&raw).unwrap();
         assert_eq!(r.method, "GET");
         assert_eq!(r.path, "/bios/clocks");
+    }
+
+    #[test]
+    fn preface_stream_and_refused_frames() {
+        assert!(parse(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            .unwrap_err()
+            .contains("preface"));
+        let mut push = PREFACE.to_vec();
+        push.extend(frame(FRAME_PUSH, 0, 1, &[0, 0, 0, 1]));
+        assert!(parse(&push).unwrap_err().contains("frame refused"));
+        let mut even = PREFACE.to_vec();
+        even.extend(frame(FRAME_HEADERS, END_HEADERS, 2, &[0x82, 0x84]));
+        assert!(parse(&even).unwrap_err().contains("stream"));
+        let mut pad = PREFACE.to_vec();
+        pad.extend(frame(
+            FRAME_HEADERS,
+            END_HEADERS | PADDED,
+            1,
+            &[0, 0x82, 0x84],
+        ));
+        assert!(parse(&pad).unwrap_err().contains("padded"));
+        let mut ping = PREFACE.to_vec();
+        ping.extend(frame(FRAME_PING, 0, 0, &[0u8; 8]));
+        ping.extend(frame(FRAME_HEADERS, END_HEADERS, 3, &[0x82, 0x84]));
+        let ex = parse_exchange(&ping).unwrap();
+        assert_eq!(ex.stream, 3);
+        assert_eq!(ex.req.method, "GET");
+        let mut two = PREFACE.to_vec();
+        two.extend(frame(FRAME_HEADERS, END_HEADERS, 1, &[0x82, 0x84]));
+        two.extend(frame(FRAME_HEADERS, END_HEADERS, 3, &[0x82, 0x84]));
+        assert!(parse(&two).unwrap_err().contains("one stream"));
+        let secret = client_get("/bios/trust?password=x");
+        assert!(parse(&secret).unwrap_err().contains("secret"));
+        let mut push_on = PREFACE.to_vec();
+        let mut set = Vec::new();
+        set.extend_from_slice(&2u16.to_be_bytes());
+        set.extend_from_slice(&1u32.to_be_bytes());
+        push_on.extend(frame(FRAME_SETTINGS, 0, 0, &set));
+        push_on.extend(frame(FRAME_HEADERS, END_HEADERS, 1, &[0x82, 0x84]));
+        assert!(parse(&push_on).unwrap_err().contains("push"));
+        assert_eq!(ping_ack(&[9u8; 8])[3], FRAME_PING);
+        assert_eq!(ping_ack(&[9u8; 8])[4], ACK);
+    }
+
+    #[test]
+    fn session_multiplex_continuation_and_window() {
+        let mut s = H2Session::new();
+        assert!(s.push(b"PRI").unwrap().is_empty());
+        let mut two = PREFACE[3..].to_vec();
+        two.extend(frame(
+            FRAME_HEADERS,
+            END_HEADERS | END_STREAM,
+            1,
+            &[0x82, 0x84],
+        ));
+        two.extend(frame(
+            FRAME_HEADERS,
+            END_HEADERS | END_STREAM,
+            3,
+            &[0x82, 0x84],
+        ));
+        let ev = s.push(&two).unwrap();
+        let reqs: Vec<u32> = ev
+            .iter()
+            .filter_map(|e| match e {
+                H2Event::Request { stream, .. } => Some(*stream),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reqs, vec![1, 3]);
+        let mut s2 = H2Session::new();
+        s2.push(PREFACE).unwrap();
+        let h = frame(FRAME_HEADERS, 0, 1, &[0x82]);
+        assert!(s2.push(&h).unwrap().is_empty());
+        let c = frame(FRAME_CONTINUATION, END_HEADERS | END_STREAM, 1, &[0x84]);
+        let ev = s2.push(&c).unwrap();
+        assert!(ev
+            .iter()
+            .any(|e| matches!(e, H2Event::Request { stream: 1, .. })));
+        let mut s3 = H2Session::new();
+        s3.push(PREFACE).unwrap();
+        s3.push(&frame(FRAME_HEADERS, END_HEADERS, 1, &[0x82, 0x84]))
+            .unwrap();
+        let data = frame(FRAME_DATA, END_STREAM, 1, b"abcd");
+        let ev = s3.push(&data).unwrap();
+        assert!(ev.iter().any(|e| matches!(e, H2Event::Control(_))));
+        assert!(ev
+            .iter()
+            .any(|e| matches!(e, H2Event::Request { stream: 1, req } if req.body == b"abcd")));
+        let mut s4 = H2Session::new();
+        s4.push(PREFACE).unwrap();
+        s4.push(&frame(
+            FRAME_HEADERS,
+            END_HEADERS | END_STREAM,
+            1,
+            &[0x82, 0x84],
+        ))
+        .unwrap();
+        let wu = window_update(0, 16);
+        s4.push(&wu).unwrap();
+        let resp = Response {
+            status: 405,
+            headers: Vec::new(),
+            body: b"no".to_vec(),
+        };
+        let wire = s4.respond(1, &resp).unwrap();
+        assert_eq!(wire[3], FRAME_HEADERS);
+        assert!(s4.respond(2, &resp).unwrap_err().contains("stream"));
+        let big = Response {
+            status: 200,
+            headers: Vec::new(),
+            body: vec![0u8; 70_000],
+        };
+        assert!(s4.respond(1, &big).unwrap_err().contains("send window"));
+        let mut s5 = H2Session::new();
+        s5.push(PREFACE).unwrap();
+        let mut set = Vec::new();
+        set.extend_from_slice(&3u16.to_be_bytes());
+        set.extend_from_slice(&1u32.to_be_bytes());
+        s5.push(&frame(FRAME_SETTINGS, 0, 0, &set)).unwrap();
+        s5.push(&frame(FRAME_HEADERS, END_HEADERS, 1, &[0x82, 0x84]))
+            .unwrap();
+        assert!(s5
+            .push(&frame(
+                FRAME_HEADERS,
+                END_HEADERS | END_STREAM,
+                3,
+                &[0x82, 0x84],
+            ))
+            .unwrap_err()
+            .contains("max streams"));
+        let mut s6 = H2Session::new();
+        s6.push(PREFACE).unwrap();
+        s6.push(&goaway_frame(1, 0)).unwrap();
+        assert!(s6
+            .push(&frame(
+                FRAME_HEADERS,
+                END_HEADERS | END_STREAM,
+                3,
+                &[0x82, 0x84],
+            ))
+            .unwrap_err()
+            .contains("goaway"));
+        s6.push(&frame(
+            FRAME_HEADERS,
+            END_HEADERS | END_STREAM,
+            1,
+            &[0x82, 0x84],
+        ))
+        .unwrap();
+        let mut s7 = H2Session::new();
+        s7.push(PREFACE).unwrap();
+        s7.push(&frame(FRAME_HEADERS, 0, 1, &[0x82])).unwrap();
+        s7.push(&rst_frame(1, 8)).unwrap();
+        assert!(s7
+            .push(&frame(FRAME_DATA, END_STREAM, 1, b"x"))
+            .unwrap_err()
+            .contains("data"));
+        let mut tbl = Vec::new();
+        tbl.extend_from_slice(&1u16.to_be_bytes());
+        tbl.extend_from_slice(&4096u32.to_be_bytes());
+        let mut s8 = H2Session::new();
+        s8.push(PREFACE).unwrap();
+        assert!(s8
+            .push(&frame(FRAME_SETTINGS, 0, 0, &tbl))
+            .unwrap_err()
+            .contains("header table"));
+        let mut conn = Vec::new();
+        conn.extend_from_slice(&8u16.to_be_bytes());
+        conn.extend_from_slice(&1u32.to_be_bytes());
+        let mut s9 = H2Session::new();
+        s9.push(PREFACE).unwrap();
+        assert!(s9
+            .push(&frame(FRAME_SETTINGS, 0, 0, &conn))
+            .unwrap_err()
+            .contains("connect"));
+        assert!(s9
+            .push(&frame(FRAME_DATA, END_STREAM, 0, b"x"))
+            .unwrap_err()
+            .contains("stream"));
     }
 }

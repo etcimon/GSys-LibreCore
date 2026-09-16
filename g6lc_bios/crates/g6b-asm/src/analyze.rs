@@ -157,7 +157,7 @@ pub fn objects(spec: &BoardSpec) -> Vec<Object> {
         Object {
             purpose: Purpose::Tls,
             live: spec.kernel.tls.enable,
-            why: "Botan-shaped TLS 1.2 ClientHello; SHA-256 + AES-128; not OpenSSL",
+            why: "Botan-shaped TLS 1.2/1.3; SHA-256 + AES-128; Zkne/Zknh/Zbkc when BoardSpec live",
         },
         Object {
             purpose: Purpose::Https,

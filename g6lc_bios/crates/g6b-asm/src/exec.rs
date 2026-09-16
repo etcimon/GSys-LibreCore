@@ -18,6 +18,10 @@ use crate::encode::{
     SBI_HSM_EID, SBI_IPI_EID, SBI_PUTCHAR, SBI_SRST_EID, SBI_TIME_EID, SIE_SEIE, SIE_STIE, SRET,
     SSTATUS_SIE, UART_IRQ,
 };
+use crate::rvk::{
+    aes64es, aes64esm, aes64ks1i, aes64ks2, clmul_hi, clmul_lo, sha256sig0, sha256sig1, sha256sum0,
+    sha256sum1,
+};
 use crate::{
     gr_bss_len, gr_stride, payload_memsz, stack_memsz, Module, GR_HEADER_BYTES, UART_LINE_BSS,
 };
@@ -1886,7 +1890,16 @@ fn step(
             let a = x[rs1 as usize];
             let v = match f3 {
                 0 => a.wrapping_add(imm as u64),
-                1 => a << (shamt(w, xlen)),
+                1 if f7 == 0 => a << (shamt(w, xlen)),
+                1 if f7 == 0x08 => match rs2 {
+                    0 => sha256sum0(a as u32) as u64,
+                    1 => sha256sum1(a as u32) as u64,
+                    2 => sha256sig0(a as u32) as u64,
+                    3 => sha256sig1(a as u32) as u64,
+                    _ => return Step::Halt(Halt::Unimp(w)),
+                },
+                1 if f7 == 0x19 && xlen == 64 => aes64ks1i(a, rs2),
+                1 => return Step::Halt(Halt::Unimp(w)),
                 // slti — signed immediate compare.
                 2 => u64::from((a as i64) < (imm as i64)),
                 // sltiu — the imm sign-extends, then unsigned compare (both
@@ -1984,6 +1997,18 @@ fn step(
                 (0, 0) => a.wrapping_add(b),
                 (0, 0x20) => a.wrapping_sub(b),
                 (0, 1) => a.wrapping_mul(b),
+                (3, 1) => {
+                    if xlen == 32 {
+                        ((u64::from(a as u32) * u64::from(b as u32)) >> 32) as u64
+                    } else {
+                        ((a as u128 * b as u128) >> 64) as u64
+                    }
+                }
+                (1, 5) => clmul_lo(a, b),
+                (3, 5) => clmul_hi(a, b),
+                (0, 0x13) if xlen == 64 => aes64es(a, b),
+                (0, 0x17) if xlen == 64 => aes64esm(a, b),
+                (0, 0x3f) if xlen == 64 => aes64ks2(a, b),
                 // divu — runtime `FbExpand` scale (`__disp.w / low_w`).
                 // Registers hold sign-extended values on rv32, so mask to
                 // u32 first; div-by-zero yields all-ones per the spec.

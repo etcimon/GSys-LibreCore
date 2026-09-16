@@ -81,6 +81,42 @@ pub fn plan(url: &str) -> Result<OutboundReq, String> {
     })
 }
 
+/// OCSP over isolated NAT HTTP only. HTTPS is chicken-egg and refused.
+pub fn ocsp_plan(url: &str) -> Result<OutboundReq, String> {
+    let u = plan(url)?;
+    if u.https {
+        return Err("ocsp: https chicken-egg refused".into());
+    }
+    if u.host != "10.0.2.2" && u.host != "10.0.2.3" {
+        return Err("ocsp: not isolated NAT".into());
+    }
+    Ok(u)
+}
+
+/// HTTP/1.1 POST for an OCSP request (application/ocsp-request).
+pub fn ocsp_http_post(u: &OutboundReq, der: &[u8]) -> Vec<u8> {
+    format!(
+        "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/ocsp-request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        u.path, u.host, der.len()
+    )
+    .into_bytes()
+    .into_iter()
+    .chain(der.iter().copied())
+    .collect()
+}
+
+/// Body of a 200 OCSP HTTP response. Not a live public responder.
+pub fn ocsp_from_http(raw: &[u8]) -> Result<Vec<u8>, String> {
+    let r = parse_http1_response(raw);
+    if r.status != 200 {
+        return Err("ocsp: http".into());
+    }
+    if r.body.is_empty() {
+        return Err("ocsp: empty".into());
+    }
+    Ok(r.body)
+}
+
 /// HTTP/1.1 GET bytes the kernel writes onto an hw TCP socket.
 pub fn http1_get_request(u: &OutboundReq) -> Vec<u8> {
     format!(
@@ -390,6 +426,19 @@ mod tests {
         assert!(plan("javascript:alert(1)").is_err());
         assert!(plan("https://user@host/").is_err());
         assert!(plan("http://ex/../etc").is_err());
+        let o = ocsp_plan("http://10.0.2.2/ocsp").unwrap();
+        assert!(!o.https && o.host == "10.0.2.2");
+        assert!(ocsp_plan("https://10.0.2.2/ocsp")
+            .unwrap_err()
+            .contains("chicken-egg"));
+        assert!(ocsp_plan("http://example.com/ocsp")
+            .unwrap_err()
+            .contains("isolated"));
+        let post = ocsp_http_post(&o, b"der");
+        assert!(post.starts_with(b"POST /ocsp HTTP/1.1"));
+        let http = b"HTTP/1.1 200 OK\r\nContent-Type: application/ocsp-response\r\nContent-Length: 3\r\n\r\nder";
+        assert_eq!(ocsp_from_http(http).unwrap(), b"der");
+        assert!(ocsp_from_http(b"HTTP/1.1 404 Not Found\r\n\r\n").is_err());
         let req = http1_get_request(&h);
         let s = String::from_utf8(req).unwrap();
         assert!(s.starts_with("GET /ui/help.html HTTP/1.1"), "{s}");
@@ -590,17 +639,13 @@ mod tests {
         assert!(!rel.https);
         let abs = redirect_hop(&from, "http://10.0.2.2/other.bin").unwrap();
         assert_eq!(abs.path, "/other.bin");
-        assert!(
-            redirect_hop(&from, "http://evil.example/x")
-                .unwrap_err()
-                .contains("origin")
-        );
+        assert!(redirect_hop(&from, "http://evil.example/x")
+            .unwrap_err()
+            .contains("origin"));
         let https = plan("https://10.0.2.2/fw.bin").unwrap();
-        assert!(
-            redirect_hop(&https, "http://10.0.2.2/fw.bin")
-                .unwrap_err()
-                .contains("downgrade")
-        );
+        assert!(redirect_hop(&https, "http://10.0.2.2/fw.bin")
+            .unwrap_err()
+            .contains("downgrade"));
         assert!(redirect_hop(&from, "http://user@10.0.2.2/x").is_err());
         assert!(redirect_hop(&from, "/../etc").unwrap_err().contains("path"));
         assert!(redirect_hop(&from, "").unwrap_err().contains("missing"));

@@ -51,7 +51,7 @@ Default `NatMode` is **minimal** (status only). Opt-in:
 
 Static addressing (`HwIfconfig` / `HwConfig(...,"static",ip)`) rejects the subnet and broadcast addresses; a default route must sit in the interface subnet. `HwConfig(...,"nat")` promotes minimal → isolated and assigns the NAT lease.
 
-TCP/UDP (`HwTcpListen` / `HwTcpConnect` / `HwTcpAccept` / `HwTcpSend` / `HwTcpRecv` / `HwUdpBind` / `HwUdpSend` / `HwUdpRecv` / `HwSockClose`) require `nat=isolated|host` and link up. Recv is non-blocking so HolyC stays instant. Budget is 16 sockets.
+TCP/UDP (`HwTcpListen` / `HwTcpConnect` / `HwTcpAccept` / `HwTcpSend` / `HwTcpRecv` / `HwUdpBind` / `HwUdpSend` / `HwUdpRecv` / `HwSockClose`) require `nat=isolated|host` and link up. Recv is non-blocking so HolyC stays instant. Budget is 16 sockets. `tcp_listen` refuses `0.0.0.0` unless `ListenPolicy` has provisioned identity, entropy, and at least one trust root; `ListenPolicy::advertise` never publishes `0.0.0.0` (uses `10.0.2.15`).
 
 Host NIC apply is explicit on a **named** adapter (`HwHostList` / `HwHostApply("net0","vEthernet")` / `HwHostRevert`). An empty name is refused so the default-route NIC is never guessed. `env_untouched` becomes false only after a successful apply. Windows uses `netsh`; Unix uses `ip addr`.
 

@@ -2025,7 +2025,7 @@ U0 WriteSection(U8 *name) { Print("x"); }
             other => panic!("{other:?}"),
         }
         match p
-            .repl(r#"HttpHandle("GET /bios/custom HTTP/1.1\r\n\r\n");"#)
+            .repl(r#"HttpHandle("GET /bios/custom HTTP/1.1\r\nHost: bios\r\n\r\n");"#)
             .unwrap()
         {
             ReplResult::Output(s) => assert!(s.contains("HTTP-OK"), "{s}"),

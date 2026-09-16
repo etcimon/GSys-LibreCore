@@ -20,6 +20,23 @@ fn rotr(x: u32, n: u32) -> u32 {
     x.rotate_right(n)
 }
 
+/// Zknh `sha256sig0` (message schedule σ0).
+fn sha256sig0(x: u32) -> u32 {
+    rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3)
+}
+/// Zknh `sha256sig1`.
+fn sha256sig1(x: u32) -> u32 {
+    rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10)
+}
+/// Zknh `sha256sum0` (compression Σ0).
+fn sha256sum0(x: u32) -> u32 {
+    rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22)
+}
+/// Zknh `sha256sum1`.
+fn sha256sum1(x: u32) -> u32 {
+    rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25)
+}
+
 /// SHA-256 digest.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h = [
@@ -45,8 +62,8 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
             w[i] = u32::from_be_bytes(chunk[i * 4..i * 4 + 4].try_into().unwrap());
         }
         for i in 16..64 {
-            let s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
-            let s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            let s0 = sha256sig0(w[i - 15]);
+            let s1 = sha256sig1(w[i - 2]);
             w[i] = w[i - 16]
                 .wrapping_add(s0)
                 .wrapping_add(w[i - 7])
@@ -61,14 +78,14 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
         let mut g = h[6];
         let mut hh = h[7];
         for i in 0..64 {
-            let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            let s1 = sha256sum1(e);
             let ch = (e & f) ^ ((!e) & g);
             let t1 = hh
                 .wrapping_add(s1)
                 .wrapping_add(ch)
                 .wrapping_add(K[i])
                 .wrapping_add(w[i]);
-            let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            let s0 = sha256sum0(a);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let t2 = s0.wrapping_add(maj);
             hh = g;

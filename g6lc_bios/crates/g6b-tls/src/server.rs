@@ -69,6 +69,8 @@ fn pick_suite(hello: &[u8]) -> Result<u16, String> {
         Ok(SUITE_ECDHE_RSA_AES128_GCM)
     } else if has(0xc0, 0x2b) {
         Ok(SUITE_ECDHE_ECDSA_AES128_GCM)
+    } else if has(0x13, 0x01) {
+        Err("tls: 1.3-only ClientHello (1.2 fallback suites absent)".into())
     } else {
         Err("tls: no implemented suite (CBC/RSA key transport is not offered)".into())
     }
@@ -161,5 +163,38 @@ mod tests {
         let wrapped = wrap_app(b"HTTP/1.1 200 OK\r\n\r\n");
         assert!(is_app_record(&wrapped));
         assert_eq!(unwrap_app(&wrapped).unwrap(), b"HTTP/1.1 200 OK\r\n\r\n");
+        assert_eq!(
+            crate::tls13::negotiated_version(&sh).unwrap(),
+            crate::tls13::TlsVersion::Tls12
+        );
+    }
+
+    #[test]
+    fn dual_tls13_hello_falls_back_to_tls12_server() {
+        let pk = [9u8; 32];
+        let ch = crate::tls13::client_hello_tls13(&[0x11u8; 32], &pk, "gsys.dev");
+        let mut rec = vec![REC_HANDSHAKE, 0x03, 0x03];
+        rec.extend_from_slice(&(ch.len() as u16).to_be_bytes());
+        rec.extend_from_slice(&ch);
+        let sh = server_handshake(&rec).unwrap();
+        assert!(sh.windows(2).any(|w| w == [0xc0, 0x2f]));
+        assert_eq!(
+            crate::tls13::negotiated_version(&sh).unwrap(),
+            crate::tls13::TlsVersion::Tls12
+        );
+        let only13 = vec![
+            REC_HANDSHAKE,
+            0x03,
+            0x03,
+            0x00,
+            0x06,
+            0x01,
+            0x00,
+            0x00,
+            0x02,
+            0x13,
+            0x01,
+        ];
+        assert!(server_handshake(&only13).unwrap_err().contains("1.3-only"));
     }
 }

@@ -97,7 +97,17 @@ impl InetStack {
     }
 
     pub fn tcp_listen(&mut self, device: &str, bind: &str, port: u16) -> Result<u32, String> {
-        let addr = parse_bind(bind, port)?;
+        self.tcp_listen_with(device, bind, port, None)
+    }
+
+    pub fn tcp_listen_with(
+        &mut self,
+        device: &str,
+        bind: &str,
+        port: u16,
+        policy: Option<ListenPolicy>,
+    ) -> Result<u32, String> {
+        let addr = parse_bind_with(bind, port, policy)?;
         let listener = TcpListener::bind(addr).map_err(|e| format!("tcp listen: {e}"))?;
         listener
             .set_nonblocking(true)
@@ -309,12 +319,49 @@ impl InetStack {
     }
 }
 
+/// Identity + entropy + trust before a wildcard listen. Default is refuse.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ListenPolicy {
+    pub provisioned: bool,
+    pub has_entropy: bool,
+    pub trust_roots: usize,
+}
+
+impl ListenPolicy {
+    pub fn public_ok(self) -> bool {
+        self.provisioned && self.has_entropy && self.trust_roots > 0
+    }
+
+    /// Never publish `0.0.0.0` as a client URL.
+    pub fn advertise(host: &str) -> String {
+        if host.is_empty() || host == "*" || host == "0.0.0.0" {
+            "10.0.2.15".into()
+        } else {
+            host.into()
+        }
+    }
+}
+
 fn parse_bind(host: &str, port: u16) -> Result<SocketAddr, String> {
-    let host = if host.is_empty() || host == "*" || host == "0.0.0.0" {
-        "0.0.0.0"
-    } else {
-        host
-    };
+    parse_bind_with(host, port, None)
+}
+
+fn parse_bind_with(
+    host: &str,
+    port: u16,
+    policy: Option<ListenPolicy>,
+) -> Result<SocketAddr, String> {
+    if host.is_empty() || host == "*" || host == "0.0.0.0" {
+        if !policy.map(|p| p.public_ok()).unwrap_or(false) {
+            return Err("listen: 0.0.0.0 is not enabled".into());
+        }
+        return format!("0.0.0.0:{port}")
+            .parse()
+            .map_err(|e| format!("bad bind 0.0.0.0:{port}: {e}"));
+    }
+    if host.contains(':') {
+        return Err("ipv6 is not implemented".into());
+    }
     format!("{host}:{port}")
         .parse()
         .map_err(|e| format!("bad bind {host}:{port}: {e}"))
@@ -334,6 +381,40 @@ pub fn resolve_ipv4(host: &str, port: u16) -> Result<SocketAddr, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tcp_listen_refuses_wildcard() {
+        let mut s = InetStack::default();
+        let err = s.tcp_listen("net0", "0.0.0.0", 0).unwrap_err();
+        assert!(err.contains("0.0.0.0"), "{err}");
+        assert!(parse_bind("*", 80).unwrap_err().contains("0.0.0.0"));
+        let lid = s.tcp_listen("net0", "127.0.0.1", 0).unwrap();
+        assert!(s.meta[&lid].local.starts_with("127.0.0.1:"));
+        let incomplete = ListenPolicy {
+            provisioned: true,
+            has_entropy: true,
+            trust_roots: 0,
+        };
+        assert!(s
+            .tcp_listen_with("net0", "0.0.0.0", 0, Some(incomplete))
+            .unwrap_err()
+            .contains("0.0.0.0"));
+        let ready = ListenPolicy {
+            provisioned: true,
+            has_entropy: true,
+            trust_roots: 1,
+        };
+        let wid = s
+            .tcp_listen_with("net0", "0.0.0.0", 0, Some(ready))
+            .unwrap();
+        assert!(
+            s.meta[&wid].local.starts_with("0.0.0.0:"),
+            "{}",
+            s.meta[&wid].local
+        );
+        assert_eq!(ListenPolicy::advertise("0.0.0.0"), "10.0.2.15");
+        assert_eq!(ListenPolicy::advertise("127.0.0.1"), "127.0.0.1");
+    }
 
     #[test]
     fn resolve_ipv4_literal_skips_dns() {

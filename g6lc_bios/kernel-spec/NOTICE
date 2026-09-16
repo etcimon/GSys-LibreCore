@@ -36,7 +36,7 @@ svelte-d/
   Role: Svelte → libwasm/WASM UI compiler spec; never LDC/Binaryen in this package
 
 botan/
-  Source: riscv-dev/botan (Botan, BSD-2-Clause; Jack Lloyd et al. / Etienne Cimon D port)
+  Source: https://github.com/etcimon/botan (Botan, BSD-2-Clause; Jack Lloyd et al. / Etienne Cimon D port)
   Role: TLS 1.2, X.509, RSA, ECDSA reference; never compiled here
 
 libwasm/

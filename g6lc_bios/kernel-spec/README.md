@@ -12,7 +12,7 @@ linked into `g6b-*` crates. Inferences are validated against LibreCore
 | [`goja/`](goja/) | https://github.com/dop251/goja | MIT | **submodule** |
 | [`lirx-dom/`](lirx-dom/) | https://github.com/lirx-js/dom | MIT | **submodule** |
 | [`webidl/`](webidl/) | Gecko WebIDL via libwasm (WHATWG/W3C) | MPL-2.0 | vendored |
-| [`botan/`](botan/) | `riscv-dev/botan` (Botan D port) | BSD-2-Clause | vendored |
+| [`botan/`](botan/) | https://github.com/etcimon/botan (Botan D port) | BSD-2-Clause | vendored; `g6b.py spec-sync` clones/pulls if the RFC 8448 marker is missing |
 | [`libwasm/`](libwasm/) | `riscv-compilers/libwasm` | MIT | vendored (spec only) |
 | [`goosie/`](goosie/) | https://github.com/vyquocvu/goosie | MIT | **submodule** |
 

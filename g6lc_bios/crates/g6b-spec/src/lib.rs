@@ -35,6 +35,10 @@ impl ExtStatus {
             _ => ExtStatus::Absent,
         }
     }
+
+    pub fn is_live(self) -> bool {
+        matches!(self, ExtStatus::Live)
+    }
 }
 
 /// ISA slice of a BoardSpec.
@@ -53,6 +57,14 @@ pub struct Isa {
     pub d: ExtStatus,
     /// Privileged hypervisor extension (H). BIOS stays S-mode; H is next-stage KVM.
     pub h: ExtStatus,
+    /// Scalar AES encrypt (Zkne). CVA6 default is absent.
+    pub zkne: ExtStatus,
+    /// Scalar AES decrypt (Zknd).
+    pub zknd: ExtStatus,
+    /// Scalar SHA-256/512 (Zknh).
+    pub zknh: ExtStatus,
+    /// Carry-less multiply (Zbkc) for GHASH.
+    pub zbkc: ExtStatus,
 }
 
 impl Default for Isa {
@@ -70,6 +82,10 @@ impl Default for Isa {
             f: ExtStatus::Absent,
             d: ExtStatus::Absent,
             h: ExtStatus::Absent,
+            zkne: ExtStatus::Absent,
+            zknd: ExtStatus::Absent,
+            zknh: ExtStatus::Absent,
+            zbkc: ExtStatus::Absent,
         }
     }
 }
@@ -2489,7 +2505,42 @@ fn parse_isa(v: &Json) -> Isa {
     isa.f = ExtStatus::parse(ext.get("f").as_str().unwrap_or("absent"));
     isa.d = ExtStatus::parse(ext.get("d").as_str().unwrap_or("absent"));
     isa.h = ExtStatus::parse(ext.get("h").as_str().unwrap_or("absent"));
+    isa.zkne = ExtStatus::parse(ext.get("zkne").as_str().unwrap_or("absent"));
+    isa.zknd = ExtStatus::parse(ext.get("zknd").as_str().unwrap_or("absent"));
+    isa.zknh = ExtStatus::parse(ext.get("zknh").as_str().unwrap_or("absent"));
+    isa.zbkc = ExtStatus::parse(ext.get("zbkc").as_str().unwrap_or("absent"));
+    infer_zk_from_march(&mut isa);
     isa
+}
+
+fn march_token(march: &str, name: &str) -> bool {
+    march.to_ascii_lowercase().split('_').any(|p| p == name)
+}
+
+fn infer_zk_from_march(isa: &mut Isa) {
+    let m = &isa.march;
+    let bump = |st: &mut ExtStatus| {
+        if *st == ExtStatus::Absent {
+            *st = ExtStatus::Live;
+        }
+    };
+    if march_token(m, "zkn") || march_token(m, "zk") {
+        bump(&mut isa.zkne);
+        bump(&mut isa.zknd);
+        bump(&mut isa.zknh);
+    }
+    if march_token(m, "zkne") {
+        bump(&mut isa.zkne);
+    }
+    if march_token(m, "zknd") {
+        bump(&mut isa.zknd);
+    }
+    if march_token(m, "zknh") {
+        bump(&mut isa.zknh);
+    }
+    if march_token(m, "zbkc") || march_token(m, "zk") {
+        bump(&mut isa.zbkc);
+    }
 }
 
 fn apply_geo(g: &mut CoreGeo, v: &Json) {
@@ -3247,6 +3298,23 @@ fn parse_hex(s: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn march_zkne_is_live_cva6_default_absent() {
+        let s = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64,"march":"rv64imac"}}"#,
+        )
+        .unwrap();
+        assert!(!s.isa.zkne.is_live());
+        assert!(!s.isa.zbkc.is_live());
+        let s = BoardSpec::from_json_str(
+            r#"{"schema_version":1,"isa":{"xlen":64,"march":"rv64imac_zkne_zknh_zbkc"}}"#,
+        )
+        .unwrap();
+        assert!(s.isa.zkne.is_live());
+        assert!(s.isa.zknh.is_live());
+        assert!(s.isa.zbkc.is_live());
+    }
 
     #[test]
     fn rv32_fixture_rejects_rvv() {

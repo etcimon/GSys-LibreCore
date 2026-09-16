@@ -21,6 +21,7 @@ pub mod jitr;
 pub mod kget;
 pub mod linux;
 pub mod ptr;
+pub mod rvk;
 pub mod task;
 pub mod vio;
 pub mod virgl;
@@ -349,6 +350,61 @@ pub enum Op {
         rd: u32,
         rs1: u32,
         rs2: u32,
+    },
+    /// RV64M `mulhu`.
+    Mulhu {
+        rd: u32,
+        rs1: u32,
+        rs2: u32,
+    },
+    /// Zbkc `clmul` / `clmulh`.
+    Clmul {
+        rd: u32,
+        rs1: u32,
+        rs2: u32,
+    },
+    Clmulh {
+        rd: u32,
+        rs1: u32,
+        rs2: u32,
+    },
+    /// Zkne RV64 AES.
+    Aes64es {
+        rd: u32,
+        rs1: u32,
+        rs2: u32,
+    },
+    Aes64esm {
+        rd: u32,
+        rs1: u32,
+        rs2: u32,
+    },
+    Aes64ks2 {
+        rd: u32,
+        rs1: u32,
+        rs2: u32,
+    },
+    Aes64ks1i {
+        rd: u32,
+        rs: u32,
+        rnum: u32,
+    },
+    /// Zknh SHA-256 unary (`rs2` selects sum0/sum1/sig0/sig1).
+    Sha256sum0 {
+        rd: u32,
+        rs: u32,
+    },
+    Sha256sum1 {
+        rd: u32,
+        rs: u32,
+    },
+    Sha256sig0 {
+        rd: u32,
+        rs: u32,
+    },
+    Sha256sig1 {
+        rd: u32,
+        rs: u32,
     },
     /// `divu rd, rs1, rs2` — unsigned divide. `FbExpand` computes the
     /// runtime fit/fill scale as `__disp.w / low_w`; the IR has no other
@@ -1784,6 +1840,17 @@ fn encode_op(op: &Op, pc: usize, labels: &BTreeMap<String, usize>) -> Result<u32
         Op::Sub { rd, rs1, rs2 } => encode::sub(*rd, *rs1, *rs2),
         Op::Sltu { rd, rs1, rs2 } => encode::sltu(*rd, *rs1, *rs2),
         Op::Mul { rd, rs1, rs2 } => encode::mul(*rd, *rs1, *rs2),
+        Op::Mulhu { rd, rs1, rs2 } => encode::mulhu(*rd, *rs1, *rs2),
+        Op::Clmul { rd, rs1, rs2 } => encode::clmul(*rd, *rs1, *rs2),
+        Op::Clmulh { rd, rs1, rs2 } => encode::clmulh(*rd, *rs1, *rs2),
+        Op::Aes64es { rd, rs1, rs2 } => encode::aes64es(*rd, *rs1, *rs2),
+        Op::Aes64esm { rd, rs1, rs2 } => encode::aes64esm(*rd, *rs1, *rs2),
+        Op::Aes64ks2 { rd, rs1, rs2 } => encode::aes64ks2(*rd, *rs1, *rs2),
+        Op::Aes64ks1i { rd, rs, rnum } => encode::aes64ks1i(*rd, *rs, *rnum),
+        Op::Sha256sum0 { rd, rs } => encode::sha256sum0(*rd, *rs),
+        Op::Sha256sum1 { rd, rs } => encode::sha256sum1(*rd, *rs),
+        Op::Sha256sig0 { rd, rs } => encode::sha256sig0(*rd, *rs),
+        Op::Sha256sig1 { rd, rs } => encode::sha256sig1(*rd, *rs),
         Op::Divu { rd, rs1, rs2 } => encode::divu(*rd, *rs1, *rs2),
         Op::Xor { rd, rs1, rs2 } => encode::xor(*rd, *rs1, *rs2),
         Op::Beq { rs1, rs2, to } => encode::beq(*rs1, *rs2, rel(to)?),
@@ -1935,6 +2002,52 @@ fn op_to_asm(op: &Op) -> String {
             reg_name(*rs1),
             reg_name(*rs2)
         ),
+        Op::Mulhu { rd, rs1, rs2 } => format!(
+            "\tmulhu\t{}, {}, {}",
+            reg_name(*rd),
+            reg_name(*rs1),
+            reg_name(*rs2)
+        ),
+        Op::Clmul { rd, rs1, rs2 } => format!(
+            "\tclmul\t{}, {}, {}",
+            reg_name(*rd),
+            reg_name(*rs1),
+            reg_name(*rs2)
+        ),
+        Op::Clmulh { rd, rs1, rs2 } => format!(
+            "\tclmulh\t{}, {}, {}",
+            reg_name(*rd),
+            reg_name(*rs1),
+            reg_name(*rs2)
+        ),
+        Op::Aes64es { rd, rs1, rs2 } => format!(
+            "\taes64es\t{}, {}, {}",
+            reg_name(*rd),
+            reg_name(*rs1),
+            reg_name(*rs2)
+        ),
+        Op::Aes64esm { rd, rs1, rs2 } => format!(
+            "\taes64esm\t{}, {}, {}",
+            reg_name(*rd),
+            reg_name(*rs1),
+            reg_name(*rs2)
+        ),
+        Op::Aes64ks2 { rd, rs1, rs2 } => format!(
+            "\taes64ks2\t{}, {}, {}",
+            reg_name(*rd),
+            reg_name(*rs1),
+            reg_name(*rs2)
+        ),
+        Op::Aes64ks1i { rd, rs, rnum } => format!(
+            "\taes64ks1i\t{}, {}, {}",
+            reg_name(*rd),
+            reg_name(*rs),
+            rnum
+        ),
+        Op::Sha256sum0 { rd, rs } => format!("\tsha256sum0\t{}, {}", reg_name(*rd), reg_name(*rs)),
+        Op::Sha256sum1 { rd, rs } => format!("\tsha256sum1\t{}, {}", reg_name(*rd), reg_name(*rs)),
+        Op::Sha256sig0 { rd, rs } => format!("\tsha256sig0\t{}, {}", reg_name(*rd), reg_name(*rs)),
+        Op::Sha256sig1 { rd, rs } => format!("\tsha256sig1\t{}, {}", reg_name(*rd), reg_name(*rs)),
         Op::Divu { rd, rs1, rs2 } => format!(
             "\tdivu\t{}, {}, {}",
             reg_name(*rd),

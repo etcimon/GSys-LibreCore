@@ -193,7 +193,9 @@ mod tests {
         assert_eq!(open(&key, &nonce, &[], &ct, &tag).unwrap(), pt);
         let mut bad = tag;
         bad[0] ^= 1;
-        assert!(open(&key, &nonce, &[], &ct, &bad).unwrap_err().contains("tag"));
+        assert!(open(&key, &nonce, &[], &ct, &bad)
+            .unwrap_err()
+            .contains("tag"));
     }
 
     #[test]

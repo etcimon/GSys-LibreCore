@@ -27,16 +27,26 @@ pub fn client_hello(host: &str) -> Vec<u8> {
 
 /// ClientHello random comes from `rng`. Hostname is SNI only.
 pub fn client_hello_with(host: &str, rng: &mut dyn Entropy) -> Result<Vec<u8>, String> {
+    if host.is_empty() || host.contains(' ') || host.contains('\0') {
+        return Err("tls: sni".into());
+    }
+    if host.len() > 255 || host.parse::<std::net::IpAddr>().is_ok() || host.contains(':') {
+        return Err("tls: sni".into());
+    }
+    if host.contains("..") || host.starts_with('-') || host.ends_with('.') || host.starts_with('.')
+    {
+        return Err("tls: sni".into());
+    }
+    if host.contains('/') || host.contains('\\') || host.contains('@') || host.contains('_') {
+        return Err("tls: sni".into());
+    }
     let mut rnd = [0u8; 32];
     rng.fill(&mut rnd)?;
     let mut body = Vec::new();
     body.extend_from_slice(&[0x03, 0x03]); // legacy version TLS 1.2
     body.extend_from_slice(&rnd);
     body.push(0); // session id
-    let suites: [u16; 2] = [
-        SUITE_ECDHE_ECDSA_AES128_GCM,
-        SUITE_ECDHE_RSA_AES128_GCM,
-    ];
+    let suites: [u16; 2] = [SUITE_ECDHE_ECDSA_AES128_GCM, SUITE_ECDHE_RSA_AES128_GCM];
     let sl = (suites.len() * 2) as u16;
     body.extend_from_slice(&sl.to_be_bytes());
     for s in suites {
@@ -63,6 +73,17 @@ pub fn client_hello_with(host: &str, rng: &mut dyn Entropy) -> Result<Vec<u8>, S
     sa.extend_from_slice(&SIG_ECDSA_SECP256R1_SHA256.to_be_bytes());
     sa.extend_from_slice(&SIG_RSA_PKCS1_SHA256.to_be_bytes());
     ext_push(&mut ext, 0x000d, &sa);
+    // TLS 1.2 only: no X25519 key_share. 1.3 servers see this as fallback.
+    ext_push(&mut ext, 0x002b, &[0x02, 0x03, 0x03]);
+    // ALPN h2 preferred, http/1.1 fallback. Empty renegotiation_info.
+    let mut alpn = Vec::new();
+    alpn.extend_from_slice(&0x000cu16.to_be_bytes());
+    alpn.push(2);
+    alpn.extend_from_slice(b"h2");
+    alpn.push(8);
+    alpn.extend_from_slice(b"http/1.1");
+    ext_push(&mut ext, 0x0010, &alpn);
+    ext_push(&mut ext, 0xff01, &[0x00]);
     body.extend_from_slice(&(ext.len() as u16).to_be_bytes());
     body.extend(ext);
     let mut hs = vec![0x01]; // client_hello
@@ -95,6 +116,12 @@ pub fn is_web_compatible(hello: &[u8]) -> bool {
         && !offers_suite(hello, SUITE_RSA_AES128_SHA256)
         && has(0x04, 0x01)
         && has(0x04, 0x03)
+        && !has(0x13, 0x01)
+}
+
+/// TLS 1.2 ECDHE-GCM suites used as 1.3 compatibility fallback.
+pub fn offers_tls12_fallback(hello: &[u8]) -> bool {
+    hello.windows(2).any(|w| w == [0xc0, 0x2f]) || hello.windows(2).any(|w| w == [0xc0, 0x2b])
 }
 
 pub(crate) fn offers_suite(hello: &[u8], suite: u16) -> bool {
@@ -115,4 +142,43 @@ pub(crate) fn offers_suite(hello: &[u8], suite: u16) -> bool {
     hello[start..end]
         .chunks_exact(2)
         .any(|c| u16::from_be_bytes([c[0], c[1]]) == suite)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tls12_hello_is_fallback_not_13() {
+        let h = client_hello("gsys.dev");
+        assert!(is_web_compatible(&h));
+        assert!(offers_tls12_fallback(&h));
+        assert!(!h.windows(2).any(|w| w == [0x13, 0x01]));
+        assert!(h.windows(4).any(|w| w == [0x00, 0x2b, 0x00, 0x03]));
+        assert!(h.windows(8).any(|w| w == b"http/1.1"));
+        assert!(h.windows(2).any(|w| w == b"h2"));
+        let mut rng = FixtureEntropy::TEST;
+        assert!(client_hello_with("", &mut rng).unwrap_err().contains("sni"));
+        assert!(client_hello_with("127.0.0.1", &mut rng)
+            .unwrap_err()
+            .contains("sni"));
+        assert!(client_hello_with(&"a".repeat(256), &mut rng)
+            .unwrap_err()
+            .contains("sni"));
+        assert!(client_hello_with("a..b", &mut rng)
+            .unwrap_err()
+            .contains("sni"));
+        assert!(client_hello_with("-bad.example", &mut rng)
+            .unwrap_err()
+            .contains("sni"));
+        assert!(client_hello_with("ex/ample", &mut rng)
+            .unwrap_err()
+            .contains("sni"));
+        assert!(client_hello_with("a@b.example", &mut rng)
+            .unwrap_err()
+            .contains("sni"));
+        assert!(client_hello_with("a_b.example", &mut rng)
+            .unwrap_err()
+            .contains("sni"));
+    }
 }

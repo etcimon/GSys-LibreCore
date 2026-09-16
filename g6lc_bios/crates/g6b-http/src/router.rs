@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use g6b_pglite::StorePort;
 use g6b_spec::BoardSpec;
 
-use crate::{files, parse, Request, Response, Version};
+use crate::{files, Request, Response, Version};
 
 /// One registered endpoint.
 #[derive(Debug, Clone)]
@@ -209,20 +209,8 @@ impl Router {
                 if f.self_update { "true" } else { "false" }
             );
             r.insert("GET", "/bios/flash", "bios", body.clone());
-            r.insert(
-                "POST",
-                "/bios/flash",
-                "bios",
-                "{\"ok\":true,\"action\":\"flash\"}",
-            );
             if f.self_update {
                 r.insert("GET", "/bios/update", "bios", body);
-                r.insert(
-                    "POST",
-                    "/bios/update",
-                    "bios",
-                    "{\"ok\":true,\"action\":\"self-update\"}",
-                );
             }
         }
         let s = &spec.kernel.settings;
@@ -372,6 +360,21 @@ impl Router {
 
     /// Dispatch, threading a live store for `/bios/store/*` before canned routes.
     pub fn handle_store(&self, req: &Request, store: Option<&mut dyn StorePort>) -> Response {
+        self.handle_store_mgmt(req, store, None)
+    }
+
+    /// Same as [`Self::handle_store`], with optional authenticated management.
+    pub fn handle_store_mgmt(
+        &self,
+        req: &Request,
+        store: Option<&mut dyn StorePort>,
+        mgmt: Option<&mut crate::mgmt::Mgmt>,
+    ) -> Response {
+        if let Some(m) = mgmt {
+            if let Some(r) = m.handle(req) {
+                return r;
+            }
+        }
         let path = req.path.split('?').next().unwrap_or(req.path.as_str());
         if path == "/bios/store" || path.starts_with("/bios/store/") {
             if (!self.http1 && !self.http2) || store.is_none() {
@@ -437,22 +440,26 @@ impl Router {
         raw: &[u8],
         store: Option<&mut dyn StorePort>,
     ) -> Result<Vec<u8>, String> {
-        let req = parse(raw)?;
-        let resp = self.handle_store(&req, store);
-        match req.version {
-            Version::Http11 => {
-                if !self.http1 {
-                    return Err("http1 compiled out".into());
-                }
-                Ok(crate::h1::encode(&resp))
+        if raw.starts_with(crate::h2::PREFACE) {
+            if !self.http2 {
+                return Err("http2 compiled out".into());
             }
-            Version::Http2 => {
-                if !self.http2 {
-                    return Err("http2 compiled out".into());
-                }
-                Ok(crate::h2::encode(&resp, 1))
-            }
+            let ex = crate::h2::parse_exchange(raw)?;
+            let resp = self.handle_store(&ex.req, store);
+            return Ok(crate::h2::encode(&resp, ex.stream));
         }
+        if !self.http1 {
+            return Err("http1 compiled out".into());
+        }
+        let req = crate::h1::parse(raw)?;
+        if crate::h1::is_h2c_upgrade(&req) {
+            if !self.http2 {
+                return Err("http2 compiled out".into());
+            }
+            return Ok(crate::h1::encode(&crate::h1::h2c_switching_protocols()));
+        }
+        let resp = self.handle_store(&req, store);
+        Ok(crate::h1::encode(&resp))
     }
 
     /// Parse bytes and dispatch through an optional live store.
@@ -732,5 +739,24 @@ mod tests {
                 .status,
             404
         );
+    }
+
+    #[test]
+    fn flash_post_is_not_canned_success() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"router"}"#).unwrap();
+        let r = Router::from_spec(&spec);
+        assert_eq!(r.fetch_get("/bios/flash").status, 200);
+        assert_eq!(r.fetch("POST", "/bios/flash").status, 404);
+        let mut mgmt = crate::Mgmt::new("g6lc64", "riscv64");
+        let req = crate::Request {
+            method: "POST".into(),
+            path: "/bios/flash".into(),
+            version: crate::Version::Http11,
+            headers: Vec::new(),
+            body: Vec::new(),
+        };
+        let resp = r.handle_store_mgmt(&req, None, Some(&mut mgmt));
+        assert_eq!(resp.status, 401);
+        assert!(resp.body_str().contains("canned"));
     }
 }

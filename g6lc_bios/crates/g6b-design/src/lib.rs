@@ -89,6 +89,10 @@ fn emit_config(spec: &BoardSpec) -> String {
          #define G6LC_ZBB {}\n\
          #define G6LC_ZICBOZ {}\n\
          #define G6LC_ZACAS {}\n\
+         #define G6LC_ZKNE {}\n\
+         #define G6LC_ZKND {}\n\
+         #define G6LC_ZKNH {}\n\
+         #define G6LC_ZBKC {}\n\
          #define G6LC_F {}\n\
          #define G6LC_D {}\n\
          #define G6LC_HARTS {}\n\
@@ -176,6 +180,10 @@ fn emit_config(spec: &BoardSpec) -> String {
         flag(spec.isa.zbb),
         flag(spec.isa.zicboz),
         flag(spec.isa.zacas),
+        flag(spec.isa.zkne),
+        flag(spec.isa.zknd),
+        flag(spec.isa.zknh),
+        flag(spec.isa.zbkc),
         flag(spec.isa.f),
         flag(spec.isa.d),
         spec.harts,
@@ -743,7 +751,7 @@ fn emit_https_zc(spec: &BoardSpec) -> String {
 }
 
 fn emit_crypto_s(spec: &BoardSpec) -> String {
-    g6b_asm::crypto::lib(&spec.kernel.tls).to_asm()
+    g6b_asm::crypto::lib(&spec.kernel.tls, &spec.isa).to_asm()
 }
 
 fn emit_endpoints_zc(spec: &BoardSpec) -> String {

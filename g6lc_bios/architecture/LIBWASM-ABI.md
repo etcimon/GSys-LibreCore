@@ -582,8 +582,19 @@ details that differ and must not be conflated with the host table:
   leftovers are closed; the P5 gate still needs external peers,
   QEMU `-netdev`, and a PHY. P6: ClientHello does not advertise
   CBC/RSA key transport; TLS random is not a hostname hash;
-  HKDF-SHA256 (RFC 5869); RFC 8446 Expand-Label (0-RTT/resumption
-  refused).
+  HKDF-SHA256 (RFC 5869); RFC 8446 Expand-Label (0-RTT refused);
+  RFC 8448 CertificateVerify bytes, encrypted handshake flight,
+  client Finished, `res master`, close_notify, X.509 store,
+  BasicOCSP, and TLS 1.2 as a 1.3 compatibility fallback.
+  Listen policy after identity+entropy+trust (advertised URL never
+  `0.0.0.0`); AIA OCSP over isolated NAT HTTP; RFB client TLS-before-framebuffer;
+  virtio-rng HKDF-Extract; DNS name constraints + EKU; ALPN `http/1.1`;
+  HelloRetryRequest/`h2`/`post_handshake_auth` refused; TLS 1.2 P_SHA256;
+  Mgmt CORS fail-closed; RFB view-only. TLS 1.2 CCS/GCM/Finished;
+  SKI/AKI + email constraints; virtio-rtc; RFB ServerInit/generation
+  (0 rectangles); KVM lease + WS backpressure. Completed TLS 1.2
+  ECDHE-GCM (PKCS#1 SKE) and TLS 1.3 1-RTT (CertificateVerify + NST);
+  H2 respond + send WINDOW_UPDATE; inner padding; H2 GOAWAY/RST.
 
 Exec-model evidence (`guest_jit_executes_shipped_cell`): 252 funcs translate,
 `_start` completes, `domt_next=56 live=56 ids=47 listen=8`, and `DomtRaster`

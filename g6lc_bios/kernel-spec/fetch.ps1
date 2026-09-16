@@ -19,6 +19,13 @@ Fetch "svelte-d" "https://github.com/etcimon/svelte-d.git"
 if (Test-Path (Join-Path $here "lirx-dom/.git")) {
   git -C (Join-Path $here "lirx-dom") config core.longpaths true
 }
-# botan is copied from riscv-dev/botan (BSD-2-Clause TLS/X.509 spec), not cloned.
+# botan: vendored tree is enough when present.
+$botan = Join-Path $here "botan"
+$marker = Join-Path $botan "test_data/tls_13_rfc8448/server_certificate.pem"
+if (Test-Path (Join-Path $botan ".git")) {
+  git -C $botan pull --ff-only
+} elseif (-not (Test-Path $marker)) {
+  git clone --depth 1 --single-branch "https://github.com/etcimon/botan.git" $botan
+}
 # libwasm is copied from riscv-compilers/libwasm (exclude tmp/, runtime-v1.*, *.a).
 # Refresh: copy the tree excluding build/; do not compile it here.

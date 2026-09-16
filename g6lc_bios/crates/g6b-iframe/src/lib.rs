@@ -20,8 +20,13 @@
 #![allow(missing_docs)]
 
 mod engine;
+mod grant;
 mod vars;
 pub use engine::{FrameEngine, FrameNote, HostNeed};
+pub use grant::{
+    child_path_allowed, direct_login_required, nested_login_isolated, nested_nav_allowed,
+    origin_of, sandbox_allowed, EmbedGrant,
+};
 pub use vars::{
     parse_vars_attr, session_var_name_allowed, SessionVar, SessionVars, VarsAttr, MAX_SESSION_VARS,
     PROP_VARS, RESERVED_VAR_NAMES,

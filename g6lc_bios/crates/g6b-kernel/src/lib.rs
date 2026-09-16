@@ -4633,11 +4633,11 @@ impl BrowserSession {
     fn fulfill_host_need(&mut self, need: HostNeed) {
         match need {
             HostNeed::None => {}
-            HostNeed::Html { slot, path } => {
+            HostNeed::Html { slot, path, gen } => {
                 let resp = self.program.router.fetch_get(&path);
-                let note = self
-                    .frames
-                    .provide_html(slot, &path, resp.status, &resp.body_str());
+                let note =
+                    self.frames
+                        .provide_html_gen(slot, gen, &path, resp.status, &resp.body_str());
                 self.frame_note(note);
             }
             HostNeed::Files {
@@ -4664,9 +4664,9 @@ impl BrowserSession {
                 let note = self.frames.provide_files(slot, listing.body_str(), vols);
                 self.frame_note(note);
             }
-            HostNeed::RemoteHtml { slot, url } => {
+            HostNeed::RemoteHtml { slot, url, gen } => {
                 let (status, body) = self.outbound_get(&url);
-                let note = self.frames.provide_html(slot, &url, status, &body);
+                let note = self.frames.provide_html_gen(slot, gen, &url, status, &body);
                 self.frame_note(note);
             }
         }

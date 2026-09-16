@@ -48,7 +48,7 @@ pub fn linux_enter_node() -> Node {
         purpose: Purpose::LinuxHandoff,
         ops: vec![
             Op::Comment(
-                "LinuxEnter — arm platform WDT, satp=0, sie=0, a0=hartid (tp), a1=FDT, jalr entry"
+                "LinuxEnter — RFB/KVM must already be idle; arm platform WDT, satp=0, sie=0, a0=hartid (tp), a1=FDT, jalr entry"
                     .into(),
             ),
             Op::Glob("LinuxEnter".into()),

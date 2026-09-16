@@ -746,16 +746,10 @@ impl HwSession {
     }
 
     fn bind_host(&self, id: &str) -> String {
-        self.devices
-            .get(id)
-            .map(|c| {
-                if c.addressing == Addressing::Static && looks_like_ipv4(&c.inet.addr) {
-                    c.inet.addr.clone()
-                } else {
-                    "0.0.0.0".into()
-                }
-            })
-            .unwrap_or_else(|| "0.0.0.0".into())
+        let _ = id;
+        // Loopback preview only. Wildcard 0.0.0.0 needs identity, credentials
+        // and entropy (P6) and is not enabled.
+        "127.0.0.1".into()
     }
 
     fn require_up(&self, id: &str, proto: &str) -> Result<(), String> {

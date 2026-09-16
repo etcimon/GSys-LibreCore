@@ -95,7 +95,72 @@ TLS random is not `sha256(host)` (`NoEntropy` fails closed);
 HKDF-SHA256 extract/expand (RFC 5869);
 RFC 8446 Expand-Label / Derive-Secret (0-RTT/resumption labels refused);
 AES-128-GCM seal/open; TLS 1.3 AEAD record (`wrap_app` stays plaintext);
-handshake transcript + Finished HMAC.
+handshake transcript + Finished HMAC;
+NoClock fail-closed; TLS alerts; listen refuses 0.0.0.0; HTTP security
+headers; RecordReasm; PBKDF2-HMAC-SHA256; Mgmt sessions/CSRF/update
+jobs/capsule MAC/recovery latch; RFB 3.8 refuses None/DES;
+RFC 8448 CertificateVerify bytes + `s hs` encrypted flight + application
+traffic secrets; client Finished + `res master` + close_notify;
+X.509 SAN/KU/BC + `CertStore` + BasicOCSP + `/bios/trust/root`;
+TLS 1.3 ClientHello lists 1.2 ECDHE-GCM fallback; first GET stays 1.2
+(no X25519); `g6b.py spec-sync` for botan vectors; RISC-V Zkne/Zknh/Zbkc
+IR in `g6b-asm` when BoardSpec live (CVA6 absent);
+`ListenPolicy` may bind `0.0.0.0` only after identity+entropy+trust (advertised
+URL never `0.0.0.0`); AIA OCSP over isolated NAT HTTP; RFB client TLS-before-framebuffer;
+virtio-rng HKDF-Extract whitener; DNS name constraints + EKU serverAuth;
+ALPN `http/1.1` (h2/HRR/`post_handshake_auth` refused); TLS 1.2 P_SHA256 PRF;
+Mgmt CORS fail-closed and mutating GET 405; RFB view-only + clipboard refused;
+TLS 1.2 CCS/AES-GCM/Finished (`wrap_app` plaintext); SKI/AKI + email name
+constraints; virtio-rtc unix seconds fail-closed; RFB ServerInit/generation
+(0 rectangles); KVM one-controller lease with local priority and disconnect
+key release; WebSocket frame bound + backpressure; HMAC-DRBG from extracted
+virtio-rng; capsule ELF ident + version replay refuse; RecoveryState
+(Unconfirmed power-loss); embed SameSite=None is direct-login; RFB/KVM
+quiesce before LinuxEnter; UI fail does not take down recovery/jobs;
+reauth on mutating jobs; slot A protected; iframe stale-generation cancel;
+RFB damage metadata (0 rectangles); second recovery session;
+session expiry; trial InProgress + health ack; recovery HTML; ELF ET_EXEC;
+other harts stopped before LinuxEnter; RFB 32bpp true-color; ELF64 Ehdr;
+iframe sandbox escape refused; TLS 1.0/1.1 records refused; recovery
+cannot be cleared by POST; session Max-Age=3600; ELF phdr fields;
+WS binary/RSV refused; empty SNI refused; logout clears the cookie; HSTS on responses; ELF e_entry aligned;
+WS close 1005/1006 refused; unexpected_message alert; health-ack generation; COOP/COEP/CORP; Permissions-Policy; ELF PT_LOAD;
+RFB key/pointer sizes; EE heartbeat/SCT refused; `__Host-` cookie; ELF RX-not-WX; WS ping/pong;
+TLS seq wrap; Confirmed retry-once refused; DNS prefetch off; ELF p_align;
+SNI IP/length refused; RFB FBU request 10 B; ELF p_vaddr; compress_certificate
+refused; WS control FIN; IPv6 `::` advertise remapped; secret-in-URL 403; ELF p_filesz/p_memsz; TLS 1.3 inner CCS refused; RFB
+incremental 0/1; SNI `..`/hyphen refused; unplug does not clear latch; ELF p_offset; EE cookie/psk_modes refused;
+WS control >125 refused; TRACE/CONNECT and PUT/PATCH/DELETE `/bios/*`
+are 405; HTTP/1.1 Host required; chunked refused; body ≤64 KiB; empty TLS
+record refused; RFB encodings 1..=8; embed grant TTL 1..=86400 s; duplicate Host/Content-Length refused;
+request-line bound; RFB SecurityResult 0; SNI slash/@ refused; password
+control bytes refused; header line ≤8192; Host userinfo refused; EE
+renegotiation_info refused; WS 1-byte close refused; login lockout after
+5 failures; logout CSRF; Expect 100-continue refused; header-name token;
+RFB 3.3 refused; origin port 0 refused; HTTP/1.0 refused; path `//` refused; WS close
+`<1000`/1004 refused; SNI underscore refused; HEAD `/bios/*` 405; encoded `%2e%2e`/`%2f` refused; EE max_fragment_length
+refused; password trim; ≤64 headers; CR/LF in header values refused; ELF overflow and e_entry in PT_LOAD; TLS 1.2
+named-curve ServerKeyExchange + ServerHelloDone; WS text UTF-8; RFB 24-depth
+LE; JSON Content-Type 415; TLS ciphertext ≤16384+256; TLS 1.2
+ClientKeyExchange + Certificate handshake; RFB RGB max 0x00ff; ELF phnum
+≤4; cookie whitespace ignored; Upgrade h2c refused; optional HTTP/2 PRI-preface adapter (one odd stream;
+not ALPN `h2`, not h2c); TLS 1.2 X25519 ECDHE shared (not CT); directoryName
+CN constraints; H2 ENABLE_PUSH refused + MAX_FRAME_SIZE; RFB RGB shifts;
+H2 PING ACK; H2 preferred over HTTP/1.1; ALPN `h2`; h2c 101; live
+H2Session multiplex + receive flow-control + CONTINUATION across chunks;
+completed TLS 1.2 ECDHE-GCM and TLS 1.3 1-RTT handshake drivers;
+TLS 1.2 SKE PKCS#1 SHA-256 (RFC 8448 leaf); TLS 1.3 Certificate +
+RSA-PSS CertificateVerify; dummy CCS; NewSessionTicket at `s ap` seq 0;
+H2 `respond` + send WINDOW_UPDATE; TLS 1.3 inner padding + `bad_record_mac`/
+`decrypt_error`; H2 inbound GOAWAY/RST, HEADER_TABLE_SIZE refused, max 32
+streams; RFB CopyRect/RRE/Hextile/ZRLE refused; ELF p_paddr 0 or = vaddr.
+SKE/CV are the RFC 8448 RSA leaf, not a CA path. X25519 is a 51-bit
+limb Montgomery ladder with mask cswap; HMAC-DRBG has stuck-bit health
+tests (not a CSPRNG-quality review). RFB/KVM expose committed raw pixels
+only; nested iframe login is origin-isolated; `FirmwareLayout::SPI` is a
+16 MiB map without erase/program. Independent TLS review, native VNC
+viewer, SPI flash, live OpenWrt, and publishing `0.0.0.0` as a client URL
+remain open.
 Named BIOS profiles (`embedded`/`router` → `full`)
 compile from UART+SPI flash up to browser-UI HTTPS + USB settings. USB FAT32
 flash is always compiled; the USB-key file manager (FAT32/NTFS/ext4) is extra.

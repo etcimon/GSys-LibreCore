@@ -42,6 +42,29 @@ impl HandshakeTranscript {
     pub fn hash(&self) -> [u8; 32] {
         sha256(&self.buf)
     }
+
+    pub fn bytes(&self) -> &[u8] {
+        &self.buf
+    }
+}
+
+/// Split concatenated handshake messages (type + 24-bit length + body).
+pub fn split_handshake(buf: &[u8]) -> Result<Vec<&[u8]>, String> {
+    let mut i = 0usize;
+    let mut out = Vec::new();
+    while i < buf.len() {
+        if i + 4 > buf.len() {
+            return Err("tls: truncated handshake".into());
+        }
+        let n =
+            ((buf[i + 1] as usize) << 16) | ((buf[i + 2] as usize) << 8) | (buf[i + 3] as usize);
+        if i + 4 + n > buf.len() {
+            return Err("tls: truncated handshake".into());
+        }
+        out.push(&buf[i..i + 4 + n]);
+        i += 4 + n;
+    }
+    Ok(out)
 }
 
 /// `HKDF-Expand-Label(base, "finished", "", Hash.length)`.
@@ -55,6 +78,20 @@ pub fn finished_key(base: &[u8]) -> Result<[u8; 32], String> {
 /// `HMAC(finished_key, Transcript-Hash)`.
 pub fn finished_mac(key: &[u8; 32], transcript_hash: &[u8; 32]) -> [u8; 32] {
     hmac_sha256(key, transcript_hash)
+}
+
+/// Handshake type 0x14 Finished → 32-byte verify_data.
+pub fn parse_finished(msg: &[u8]) -> Result<[u8; 32], String> {
+    if msg.len() != 36 || msg[0] != 0x14 {
+        return Err("tls: not Finished".into());
+    }
+    let n = ((msg[1] as usize) << 16) | ((msg[2] as usize) << 8) | (msg[3] as usize);
+    if n != 32 {
+        return Err("tls: Finished length".into());
+    }
+    let mut v = [0u8; 32];
+    v.copy_from_slice(&msg[4..]);
+    Ok(v)
 }
 
 /// Constant-time compare. Mismatch is `tls: finished`.
@@ -105,6 +142,10 @@ mod tests {
             hx("860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8")[..]
         );
         assert!(t.push(&[0x01, 0x00, 0x00, 0x01]).is_err());
+        let mut both = ch.clone();
+        both.extend_from_slice(&sh);
+        assert_eq!(split_handshake(&both).unwrap().len(), 2);
+        assert!(split_handshake(&[0x01, 0x00, 0x00, 0x02, 0x00]).is_err());
     }
 
     #[test]
@@ -120,6 +161,14 @@ mod tests {
         check_finished(&key, &th, &mac).unwrap();
         let mut bad = mac;
         bad[0] ^= 1;
-        assert!(check_finished(&key, &th, &bad).unwrap_err().contains("finished"));
+        assert!(check_finished(&key, &th, &bad)
+            .unwrap_err()
+            .contains("finished"));
+        let fin = hx("14000020a8ec436d677634ae525ac1fcebe11a039ec17694fac6e98527b642f2edd5ce61");
+        assert_eq!(
+            parse_finished(&fin).unwrap(),
+            hx("a8ec436d677634ae525ac1fcebe11a039ec17694fac6e98527b642f2edd5ce61")[..]
+        );
+        assert!(parse_finished(&hx("1400001f00")).is_err());
     }
 }

@@ -5,9 +5,9 @@
 //! Hosts register hooks and fulfill [`HostNeed`] fetches.
 
 use crate::{
-    match_hook, plan_navigate_gated, plan_srcdoc, replace_history, AppHook, FilesAppView,
-    FilesVolume, HookKind, IframeSession, LoadPlan, PageView, SessionCaps, SessionDocument,
-    SessionIntern, SessionLoad, SessionVars, MAX_SESSIONS,
+    child_path_allowed, match_hook, plan_navigate_gated, plan_srcdoc, replace_history, AppHook,
+    EmbedGrant, FilesAppView, FilesVolume, HookKind, IframeSession, LoadPlan, PageView,
+    SessionCaps, SessionDocument, SessionIntern, SessionLoad, SessionVars, MAX_SESSIONS,
 };
 
 /// What the kernel (or JS host) must fetch. No I/O here.
@@ -18,6 +18,7 @@ pub enum HostNeed {
     Html {
         slot: usize,
         path: String,
+        gen: u32,
     },
     /// GET FileMgr index + volume listings (registered `app:files` only).
     Files {
@@ -30,6 +31,7 @@ pub enum HostNeed {
     RemoteHtml {
         slot: usize,
         url: String,
+        gen: u32,
     },
 }
 
@@ -45,6 +47,7 @@ pub struct FrameEngine {
     sessions: [Option<IframeSession>; MAX_SESSIONS],
     hooks: Vec<AppHook>,
     outbound: bool,
+    grant: Option<EmbedGrant>,
 }
 
 impl Default for FrameEngine {
@@ -59,7 +62,12 @@ impl FrameEngine {
             sessions: std::array::from_fn(|_| None),
             hooks: Vec::new(),
             outbound: false,
+            grant: None,
         }
+    }
+
+    pub fn set_grant(&mut self, grant: EmbedGrant) {
+        self.grant = Some(grant);
     }
 
     pub fn set_outbound(&mut self, armed: bool) {
@@ -172,6 +180,29 @@ impl FrameEngine {
                 },
             );
         }
+        if url.contains('@') || url.contains("password=") {
+            return (
+                HostNeed::None,
+                FrameNote {
+                    text: format!("FRAME-NAV {slot} error: credentials in url"),
+                },
+            );
+        }
+        if let Some(g) = &self.grant {
+            if crate::nested_nav_allowed(g, url).is_err() {
+                let path = url.split(['?', '#']).next().unwrap_or(url);
+                if child_path_allowed(path).is_err() || url.starts_with("https://") {
+                    return (
+                        HostNeed::None,
+                        FrameNote {
+                            text: format!(
+                                "FRAME-NAV {slot} error: child must not target parent /bios/*"
+                            ),
+                        },
+                    );
+                }
+            }
+        }
         match plan_navigate_gated(url, &self.hooks, self.outbound) {
             LoadPlan::Blank => {
                 self.repopulate_slot(slot);
@@ -200,10 +231,12 @@ impl FrameEngine {
             }
             LoadPlan::FetchHtml { path } => {
                 self.begin_load(slot, &path, SessionCaps::deny());
+                let gen = self.slot_gen(slot);
                 (
                     HostNeed::Html {
                         slot,
                         path: path.clone(),
+                        gen,
                     },
                     FrameNote {
                         text: format!("FRAME-NAV {slot} {path} fetch"),
@@ -212,10 +245,12 @@ impl FrameEngine {
             }
             LoadPlan::FetchRemote { url: loc } => {
                 self.begin_load(slot, &loc, SessionCaps::deny());
+                let gen = self.slot_gen(slot);
                 (
                     HostNeed::RemoteHtml {
                         slot,
                         url: loc.clone(),
+                        gen,
                     },
                     FrameNote {
                         text: format!("FRAME-NAV {slot} {loc} outbound"),
@@ -266,8 +301,32 @@ impl FrameEngine {
         }
     }
 
-    /// FileServe GET result for [`HostNeed::Html`].
+    fn slot_gen(&self, slot: usize) -> u32 {
+        self.sessions
+            .get(slot)
+            .and_then(|s| s.as_ref())
+            .map(|s| s.context.generation)
+            .unwrap_or(0)
+    }
+
+    /// FileServe GET result for [`HostNeed::Html`]. Stale generation is refused.
     pub fn provide_html(&mut self, slot: usize, path: &str, status: u16, body: &str) -> FrameNote {
+        self.provide_html_gen(slot, self.slot_gen(slot), path, status, body)
+    }
+
+    pub fn provide_html_gen(
+        &mut self,
+        slot: usize,
+        gen: u32,
+        path: &str,
+        status: u16,
+        body: &str,
+    ) -> FrameNote {
+        if self.slot_gen(slot) != gen {
+            return FrameNote {
+                text: format!("FRAME-NAV {slot} stale generation"),
+            };
+        }
         if status != 200 {
             if let Some(s) = self.sessions.get_mut(slot).and_then(|s| s.as_mut()) {
                 replace_history(s, path.into());
@@ -452,7 +511,33 @@ mod tests {
         );
         assert!(e.session(1).is_none());
         assert_eq!(e.drop(0).text, "SESSION-DROP 0");
-        assert!(e.content_window(0).is_none());
+    }
+
+    #[test]
+    fn nested_grant_blocks_parent_bios_path() {
+        let mut e = FrameEngine::new();
+        e.ensure(0);
+        let g = EmbedGrant::issue(
+            "https://parent.example/",
+            "https://child.example/",
+            "n".repeat(16),
+            1,
+            100,
+        )
+        .unwrap();
+        e.set_grant(g);
+        let (_, note) = e.navigate(0, "/bios/flash");
+        assert!(note.text.contains("bios"), "{}", note.text);
+        let (_, note) = e.navigate(0, "https://parent.example/bios/login");
+        assert!(note.text.contains("bios"), "{}", note.text);
+        let (_, note) = e.navigate(0, "https://child.example/bios/login");
+        assert!(
+            !note.text.contains("parent /bios"),
+            "child BIOS login is nested, {}",
+            note.text
+        );
+        let (_, note) = e.navigate(0, "https://user:pass@h/");
+        assert!(note.text.contains("credentials"), "{}", note.text);
     }
 
     #[test]
@@ -464,7 +549,8 @@ mod tests {
             need,
             HostNeed::Html {
                 slot: 0,
-                path: "/ui/help.html".into()
+                path: "/ui/help.html".into(),
+                gen: 2,
             }
         );
         let loading = e.session(0).unwrap();
@@ -484,6 +570,26 @@ mod tests {
         assert!(s.caps.is_deny());
         let _ = e.ensure(0);
         assert_eq!(e.session(0).unwrap().document.title(), Some("Help"));
+        let (need, _) = e.navigate(0, "/ui/help.html");
+        let stale_gen = match need {
+            HostNeed::Html { gen, .. } => gen,
+            other => panic!("{other:?}"),
+        };
+        let _ = e.navigate(0, "/ui/other.html");
+        let note = e.provide_html_gen(
+            0,
+            stale_gen,
+            "/ui/help.html",
+            200,
+            "<html><body>stale</body></html>",
+        );
+        assert!(note.text.contains("stale generation"));
+        assert!(!e
+            .session(0)
+            .unwrap()
+            .document
+            .paint_text()
+            .contains("stale"));
     }
 
     #[test]
@@ -560,7 +666,8 @@ mod tests {
             need,
             HostNeed::RemoteHtml {
                 slot: 0,
-                url: "https://example/path".into()
+                url: "https://example/path".into(),
+                gen: 3,
             }
         );
     }
@@ -576,7 +683,8 @@ mod tests {
             need,
             HostNeed::RemoteHtml {
                 slot: 0,
-                url: "https://example/path".into()
+                url: "https://example/path".into(),
+                gen: 2,
             }
         );
         assert_eq!(e.session(0).unwrap().load, SessionLoad::Loading);

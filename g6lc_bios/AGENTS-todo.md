@@ -239,7 +239,56 @@ Physical power-loss and post-handoff watchdog recovery remain qualification gate
   HKDF-SHA256 (B212), and TLS 1.3 Expand-Label (B213) started:
   ClientHello does not offer CBC/RSA; random is not `sha256(host)`;
   RFC 5869; RFC 8446 labels; AES-128-GCM (B214); TLS 1.3 AEAD
-  record (B215); transcript/Finished (B216).
+  record (B215); transcript/Finished (B216); clock/alerts/listen/
+  headers/reasm/PBKDF2 (B217–B222); RFC 8448 CertificateVerify
+  bytes + encrypted handshake flight (B229); client Finished +
+  `res master` + close_notify (B230); X.509 store + OCSP + trust
+  pin (B231); TLS 1.2 fallback in 1.3 hellos + botan spec-sync (B232);
+  RISC-V Zkne/Zknh/Zbkc IR (B233); KeyUpdate + virtio-rng + HTTPS trust (B234);
+  exporter/EE/VioRngProbe (B235); listen policy + AIA/OCSP plan + RFB client
+  + rng whitener (B236); DNS name constraints + EKU (B237); ALPN/HRR/PRF +
+  CORS/view-only (B238); TLS 1.2 CCS/GCM/Finished (B239); SKI/AKI + email NC
+  (B240); virtio-rtc (B241); RFB ServerInit/gen + KVM lease + WS backpressure
+  (B242); HMAC-DRBG + capsule ELF/replay + RecoveryState + embed direct-login
+  + KVM quiesce-before-Linux (B243–B247); reauth + slot A + iframe
+  stale generation + RFB damage + second recovery session (B248–B252);
+  session expiry + trial health ack + recovery HTML + ELF ET_EXEC +
+  other-harts-stopped (B253–B257); RFB 32bpp + ELF64 header + sandbox
+  + TLS 1.0/1.1 refuse + no recovery-clear (B258–B262); cookie Max-Age +
+  ELF phdr + WS opcode allowlist + SNI refuse + logout cookie (B263–B267);
+  HSTS + e_entry + WS close codes + unexpected_message + health-ack gen
+  (B268–B272); COOP/COEP + ELF PT_LOAD + RFB event sizes + EE heartbeat/SCT
+  + Permissions-Policy (B273–B277); __Host- cookie + ELF RX-not-WX + WS
+  ping/pong + TLS seq wrap + Confirmed retry-once refuse (B278–B282);
+  extra isolation headers + ELF p_align + SNI IP/len + RFB FBU size
+  (B283–B287); p_vaddr + compress_certificate + WS control FIN + IPv6
+  advertise + secret-in-URL (B288–B292); p_filesz/p_memsz + inner CCS +
+  RFB incremental + SNI dots + unplug does not clear latch (B293–B297);
+  p_offset + EE cookie/psk_modes + WS control length + TRACE/PUT refuse
+  (B298–B302); HTTP/1.1 Host + body cap + empty TLS record + RFB encoding
+  count + embed TTL (B303–B307); duplicate Host/CL + request-line + RFB
+  SecurityResult + SNI slash + password controls (B308–B312); header
+  length + Host userinfo + EE renegotiation_info + WS 1-byte close +
+  login lockout (B313–B317); logout CSRF + Expect continue + header token
+  + RFB 3.3 + origin port 0 (B318–B322); HTTP/1.0 + path // + WS close
+  range + SNI underscore + HEAD (B323–B327); encoded traversal + EE
+  max_fragment_length + password trim + header cap + CR/LF values
+  (B328–B332); ELF overflow/entry range + TLS 1.2 SKE/SHD + WS UTF-8 +
+  RFB LE 24-depth + JSON Content-Type + TLS ciphertext cap (B333–B338);
+  TLS 1.2 CKE/Certificate + RFB colour max + ELF phnum cap + cookie
+  whitespace + h2c Upgrade (B339–B344); optional HTTP/2 preface adapter
+  (B345); TLS 1.2 X25519 ECDHE shared + directoryName CN + H2 SETTINGS
+  push/max-frame + RFB colour shifts + PING ACK (B346–B350); H2 preferred
+  over H1, ALPN h2, h2c, H2Session multiplex/flow-control/CONTINUATION
+  (B351); completed TLS 1.2 ECDHE-GCM + TLS 1.3 1-RTT handshake drivers
+  (B352); PKCS#1 SKE + 1.3 CertificateVerify + NST/dummy CCS (B353–B355);
+  H2 respond + send WINDOW_UPDATE (B356); TLS inner padding + alerts
+  (B357–B358); H2 GOAWAY/RST/max-streams/header-table (B359–B361); RFB
+  named encodings + ELF p_paddr (B362–B363); CT X25519 + DRBG health
+  (B364–B365); committed RFB/KVM pixels (B366); nested login isolation
+  (B367); SPI-sized layout (B368). Independent TLS review, native VNC
+  viewer, SPI flash, live OpenWrt, and published `0.0.0.0` as a client
+  URL stay unclaimed.
 - Remote g6q/QEMU-GL is owned by the other session; no remote run or emulator
   modification belongs to this local pass.
 
@@ -1601,6 +1650,158 @@ into `Object_Call`. B12b–B13 and B54 are a different axis. Track-B 4bpp
 | **B214** | B213 / P6 | **landed (host, not QEMU)** — **AES-128-GCM + TLS 1.3 traffic keys.** Seal/open, 12-byte nonce, 16-byte tag, fail-closed tag check. `tls13_nonce` XORs seq into the IV. `traffic_keys` is Expand-Label `key`/`iv`. **Gates:** `nist_gcm_case_1_empty`; `nist_gcm_case_2_one_block`; `rfc8448_handshake_write_traffic_keys`. `wrap_app` stays plaintext. Not a record layer, not B54. |
 | **B215** | B214 / P6 | **landed (host, not QEMU)** — **TLS 1.3 AEAD record.** `seal_record`/`open_record`: inner `content \|\| type`, AAD = record header, nonce = IV⊕seq. Wrong seq fails the tag. `wrap_app` stays plaintext. **Gates:** `rfc8448_client_appdata_record`; `seal_open_round_trip_and_seq`; `wrap_app_stays_plaintext`. Not a handshake, not Finished, not B54. |
 | **B216** | B215 / P6 | **landed (host, not QEMU)** — **transcript + Finished.** `HandshakeTranscript` concatenates handshake messages (4-byte header, 64 KiB cap). `finished_key` / `finished_mac` / `check_finished` (constant-time). **Gates:** `rfc8448_ch_sh_transcript_hash`; `rfc8448_finished_key_and_check`. Not (EC)DHE, not a full handshake, not B54. |
+| **B217** | B216 / P6 | **landed (host, not QEMU)** — **trusted time fail-closed.** `NoClock` / `FixtureClock` / `check_validity`. Not virtio-rtc, not `rdtime`. **Gates:** `no_clock_fails_closed`; `fixture_clock_enforces_window`. |
+| **B218** | B217 / P6 | **landed (host, not QEMU)** — **TLS alerts.** Inner type 21; `close_notify` (1,0); `handshake_failure` (2,40). **Gates:** `alert_close_notify_is_inner_type_21`. |
+| **B219** | B218 / P6 | **landed (host, not QEMU)** — **no wildcard listen.** `0.0.0.0` / `*` refused; session binds `127.0.0.1`. **Gates:** `tcp_listen_refuses_wildcard`; `tcp_udp_loopback_via_session`. |
+| **B220** | B219 / P6 | **landed (host, not QEMU)** — **HTTP security headers.** nosniff, DENY, CSP `frame-ancestors 'none'`, no-store. **Gates:** `responses_carry_security_headers`. Not CSRF tokens, not cookies. |
+| **B221** | B220 / P6 | **landed (host, not QEMU)** — **TLS record reassembly.** `RecordReasm` joins a split header+body. **Gates:** `record_reasm_joins_split_header_and_body`. |
+| **B222** | B221 / P6 | **landed (host, not QEMU)** — **PBKDF2-HMAC-SHA256.** Bounded rounds/dkLen; empty salt refused. **Gates:** `pbkdf2_rfc6070_sha256_c1`. Not a login session, not a default password. |
+| **B223** | B222 / P6–P12 | **landed (host, not QEMU)** — **combined management path.** Sessions+CSRF+Secure cookie+rate limit (P6); boot-target discovery generation and real update jobs instead of canned POST success (P7); RFB 3.8 refuses None/DES (P8); HMAC capsule digest/MAC (P10); recovery latch blocks apply and autoboot, retry-once does not clear it (P12). **Gates:** `canned_flash_post_is_disabled`; `login_needs_provision_and_csrf_on_jobs`; `update_apply_binds_digest_and_recovery_latch`; `wrong_password_is_rate_limited`; `rfb_refuses_none_and_des`; `flash_post_is_not_canned_success`. Not a VNC server, not iframe, not SPI, not live OpenWrt. |
+| **B224** | B223 / P8–P9 | **landed (host, not QEMU)** — **RFB session + iframe grant.** `RfbServer` requires version → TLS security → `tls_complete` before framebuffer; Tight refused; update is 0 rectangles (no fabricated pixels). `EmbedGrant` verifies exact parent origin + nonce; credentials-in-URL, expired grant, hostile parent, and child `/bios/*` fail closed. **Gates:** `rfb_session_requires_tls_before_framebuffer`; `grant_requires_https_origin_and_nonce`. Not a native VNC client, not nested BIOS login, not QEMU `-vnc`. |
+| **B225** | B224 / P6–P9 | **landed (host, not QEMU)** — **X25519 + WebSocket origin + nested navigate.** RFC 7748 Alice/shared secret. RFC 6455 accept + https Origin. FrameEngine with `EmbedGrant` refuses `/bios/*` and credential URLs. **Gates:** `rfc7748_alice`; `rfc7748_shared`; `rfc6455_accept_and_origin`; `nested_grant_blocks_parent_bios_path`. Not constant-time, not a full handshake, not a KVM frame pump. |
+| **B226** | B225 / P6 | **landed (host, not QEMU)** — **TLS 1.3 handshake schedule from ECDHE.** `handshake_secret` / `hs_traffic` match RFC 8448; `x25519(client_sk, server_pk)` is the IKM; TLS 1.3 ClientHello has `0x1301` + X25519 share and no early_data. **Gates:** `rfc8448_handshake_secret_from_ecdhe`; `rfc8448_ecdhe_from_x25519`; `client_hello_tls13_has_x25519_share_no_early_data`. Not CertificateVerify, not CT, not a browser stack. |
+| **B227** | B226 / P6 | **landed (host, not QEMU)** — **1-RTT PSK-DHE session reuse.** RFC 8448 `resumption` PSK; per-host `SessionCache`; ClientHello `pre_shared_key` + binder; 0-RTT still refused. KernelNet second HTTPS GET to the same host reuses the ticket. **Gates:** `rfc8448_resumption_psk`; `resume_hello_reuses_ticket_without_early_data`; `outbound_https_reuses_psk_ticket`. Not 0-RTT, not a skipped ECDHE, not CertificateVerify. |
+| **B228** | B227 / P6 | **landed (host, not QEMU)** — **CertificateVerify + NST install.** RSA-PSS SHA-256; signed-content (64 spaces + context); `parse_new_session_ticket` / `install_nst`. KernelNet installs a server ticket and the next GET to that host is PSK. **Gates:** `rsa_pss_sha256_roundtrip_rfc8448_key`; `rfc8448_resumption_psk` (NST); `outbound_https_reuses_psk_ticket`. Not RFC 8448 CV bytes, not CT, not a full stack. |
+| **B229** | B228 / P6 | **landed (host, not QEMU)** — **RFC 8448 CertificateVerify bytes + encrypted handshake flight.** Leaf RSA from the Certificate message; PSS-SHA256 over CH+SH+EE+Cert; `open_record` of the `s hs` flight; Finished MAC; master/`c|s ap traffic`; NewSessionTicket at `s ap` seq 0; server appdata at seq 1. **Gates:** `rfc8448_simple_1rtt_certificate_verify_bytes`; `rfc8448_simple_1rtt_encrypted_flight_finished_and_app`; `rfc8448_simple_1rtt_server_appdata_record`. Not CT, not a CSPRNG, not a full stack. |
+| **B230** | B229 / P6 | **landed (host, not QEMU)** — **client Finished + res master + close_notify.** `c hs` opens RFC 8448 ClientFinished; Finished MAC over CH…server Finished; `res master` from CH…client Finished installs the NST PSK `4ecd0eb6…`; client `close_notify` is `c ap` seq 1, server seq 2. **Gates:** `rfc8448_simple_1rtt_client_finished_res_master_and_close`; `rfc8448_simple_1rtt_close_notify_records`. Not CT, not a CSPRNG, not a full stack. |
+| **B231** | B230 / P6–P7 | **landed (host, not QEMU)** — **ASN.1 DER + X.509 + store + OCSP + trust pin.** SAN/KU/BC/validity; SHA-256 and SHA-1 PKCS#1 path (SHA-1 is X.509 only); empty store fails closed; Botan `ValidAltName` SAN wins over CN; BasicOCSP good vs revoked; Mgmt `POST /bios/trust/root` needs CSRF + trust scope. **Gates:** `rfc8448_leaf_pin_and_name`; `botan_altname_chain_prefers_san`; `ocsp_good_serial_and_revoked`; `trust_root_needs_csrf_and_pins_rfc8448`. Not a system store, not HTTP OCSP, not name-constraints, not CT. |
+| **B232** | B231 / P6 | **landed (host, not QEMU)** — **TLS 1.2 as 1.3 compatibility fallback + botan spec-sync.** 1.3 CH offers `0x1301` then `c02f`/`c02b` and versions 1.3+1.2; 1.2 CH is `supported_versions` 1.2 only (no X25519); BIOS `server_handshake` picks 1.2 when fallback suites exist, names 1.3-only refusal; `negotiated_version` reads SH `supported_versions`. `g6b.py spec-sync` / `fetch.ps1` ensure botan vectors (submodule init + clone/pull). **Gates:** `tls12_hello_is_fallback_not_13`; `dual_tls13_hello_falls_back_to_tls12_server`; `rfc8448_serverhello_negotiates_tls13`; `client_hello_tls13_has_x25519_share_no_early_data`. Not a full 1.2 handshake, not CT, not a botan compile. |
+| **B233** | B232 / P6 | **landed (host, not QEMU)** — **RISC-V scalar crypto IR (g6b-asm first class).** BoardSpec `zkne`/`zknd`/`zknh`/`zbkc` (CVA6 absent); `aes64es`/`esm`/`ks1i`/`ks2`, `sha256sum*`/`sig*`, `clmul`/`clmulh`, `mulhu` when live; software AES comment when absent. SHA-256 host path uses Zknh names. **Gates:** `cva6_default_has_no_zkne_insns`; `zk_live_emits_scalar_crypto`; `march_zkne_is_live_cva6_default_absent`; `sha256_abc`. Not x86, not botan-math, not executing Zkne on CVA6. |
+| **B234** | B233 / P6–P7 | **landed (host, not QEMU)** — **KeyUpdate + virtio-rng + HTTPS trust.** `traffic_update` / `parse_key_update`; virtio-rng DeviceID 4 fail-closed; KernelNet `verify_https_peer` against `CertStore`. botan-math removed. **Gates:** `rfc8448_traffic_update_rotates_app_keys`; `virtio_rng_fail_closed_then_fills`; `virtio_rng_entropy_and_empty_trust_fail_closed`. Not a CSPRNG, not a completed TLS record layer, not `0.0.0.0`. |
+| **B235** | B234 / P6 | **landed (host, not QEMU)** — **exporter master + EncryptedExtensions + VioRngProbe.** RFC 8448 `exp master`; EE refuses 0-RTT; CertificateRequest fail-closed; OCSP staple ext 0x0005; RISC-V `VioRngProbe` DeviceID 4. **Gates:** `rfc8448_exporter_master_and_ee_refuse_early_data`; `cva6_default_has_no_zkne_insns` (VioRngProbe). Not HTTP OCSP, not a CSPRNG, not QEMU. |
+| **B236** | B235 / P6–P8 | **landed (host, not QEMU)** — **listen policy + AIA OCSP + RFB client + rng whitener.** `ListenPolicy` (provisioned ∧ entropy ∧ trust_roots>0) may bind `0.0.0.0`; default still refuse; advertised URL is `10.0.2.15` never `0.0.0.0`. AIA OCSP URI `http://` only; `ocsp_plan` isolated NAT `10.0.2.2`/`10.0.2.3` (HTTPS chicken-egg refused); KernelNet POST plan. `RfbClient` TLS before 0×0 framebuffer request. `VirtioRng::from_device_extracted` HKDF-Extract. **Gates:** `tcp_listen_refuses_wildcard`; `aia_ocsp_http_only`; `parses_and_refuses` (OCSP); `rfb_client_requires_tls_before_framebuffer`; `virtio_rng_fail_closed_then_fills`; `virtio_rng_entropy_and_empty_trust_fail_closed`. Not a published `0.0.0.0` management URL, not live public OCSP, not a VNC viewer, not a CSPRNG. |
+| **B237** | B236 / P6 | **landed (host, not QEMU)** — **X.509 DNS name constraints + EKU serverAuth.** Permitted/excluded dNSName; Botan `ValidNameConstraint` / `InvalidNameConstraintPermit` / `Exclude`; leaf EKU must include serverAuth when present (`InvalidExtendedKeyUsage` fails). **Gates:** `botan_name_constraints_and_eku`; `dns_constraint_dot_test_matches_www_tls_test`. Not directoryName/email, not a system store, not CT. |
+| **B238** | B237 / P6–P9 | **landed (host, not QEMU)** — **ALPN http/1.1, HelloRetryRequest refuse, TLS 1.2 PRF, CORS, RFB view-only.** ClientHello ALPN `http/1.1` + empty `renegotiation_info`; EE refuses `h2` and `post_handshake_auth`; HRR magic random named refuse; RFC 5246 P_SHA256. Mgmt Origin fail-closed (no `*`), mutating GET 405, advertise never `0.0.0.0`. RFB view-only refuses pointer/key; clipboard refused. **Gates:** `alpn_h2_hrr_and_post_handshake_auth_refused`; `tls12_prf_sha256_label_seed`; `cors_mutating_get_and_advertise`; `rfb_view_only_and_clipboard_refused`. Not a full 1.2 handshake, not native VNC, not CT, not CSPRNG. |
+| **B239** | B238 / P6 | **landed (host, not QEMU)** — **TLS 1.2 CCS + AES-GCM record + Finished.** ChangeCipherSpec `14 03 03 00 01 01`; RFC 5288 nonce salt\|\|seq; AAD seq\|type\|version\|len; Finished verify_data 12 B via P_SHA256. `wrap_app` stays plaintext. **Gates:** `tls12_ccs_gcm_finished_and_wrap_app_stays_plaintext`. Not a full ECDHE 1.2 handshake, not CT. |
+| **B240** | B239 / P6 | **landed (host, not QEMU)** — **SKI/AKI + rfc822Name constraints.** AKI must match issuer SKI when both present; email mailbox exact / host domain match. **Gates:** `ski_aki_and_email_constraint`. Not directoryName, not CT. |
+| **B241** | B240 / P6 | **landed (host, not QEMU)** — **virtio-rtc unix seconds.** 8-byte BE from the device buffer; short/empty fail closed. **Gates:** `virtio_rtc_fail_closed_then_reads`. Not `rdtime`, not QEMU, not a host wall clock. |
+| **B242** | B241 / P8–P9 | **landed (host, not QEMU)** — **RFB ServerInit/generation, KVM lease, WS backpressure.** Geometry+name after TLS; commit bumps gen; framebuffer still 0 rectangles. One controller; local priority; disconnect returns held keys. WS frames ≤64 KiB, queue 4, full is backpressure. Mgmt `GET /bios/kvm` view, `POST /bios/kvm/lease` control. **Gates:** `rfb_view_only_and_clipboard_refused` (ServerInit/gen); `kvm_lease_local_priority_and_disconnect_releases_keys`; `kvm_lease_needs_scope_and_releases_keys`; `ws_frame_backpressure_and_bound`. Not a native VNC viewer, not fabricated KVM pixels, not nested BIOS login. |
+| **B243** | B242 / P6 | **landed (host, not QEMU)** — **HMAC-DRBG-SHA256.** NIST SP 800-90A over HKDF-Extract virtio-rng seed. Two generates differ; seed ≠ output. **Gates:** `hmac_drbg_from_extracted_is_not_the_seed`. Not a CSPRNG-quality claim. |
+| **B244** | B243 / P10 | **landed (host, not QEMU)** — **capsule ELF ident + replay/downgrade + PSS fail-closed.** `check_image_elf` RISC-V 64 LE; `version_newer`; apply refuses same version; empty PSS refused. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI, not a signed live flash. |
+| **B245** | B244 / P12 | **landed (host, not QEMU)** — **RecoveryState.** Eligible/Latched/Unconfirmed/InProgress/Confirmed. Power-loss is Unconfirmed; login/refresh does not clear; autoboot blocked. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not live recovery qualification. |
+| **B246** | B245 / P9 | **landed (host, not QEMU)** — **embed direct-login.** SameSite=None / Partitioned is not a grant; named `direct-login required`. **Gates:** `grant_requires_https_origin_and_nonce`. Not nested BIOS login, not CHIPS. |
+| **B247** | B246 / P7–P8 | **landed (host, not QEMU)** — **UI isolation + KVM quiesce before Linux.** `ui_down` does not stop recovery/update status; RFB negative encodings refused; `terminate_for_linux` + `linux_enter_blocked`. **Gates:** `kvm_lease_local_priority_and_disconnect_releases_keys`. Not fabricated pixels, not a live kernel. |
+| **B248** | B247 / P6 | **landed (host, not QEMU)** — **reauth on mutating jobs.** Login issues `reauth`; CSRF POSTs need `x-reauth`. **Gates:** `reauth_slot_a_second_session_and_credentials_survive_apply`. Not a second password prompt UI. |
+| **B249** | B248 / P10 | **landed (host, not QEMU)** — **slot A protected.** Apply to `A` refused; applied slot is B; provisioned password survives apply. **Gates:** same. Not SPI, not a selector write. |
+| **B250** | B249 / P9 | **landed (host, not QEMU)** — **iframe stale generation.** `HostNeed` carries gen; `provide_html_gen` refuses a superseded fetch. **Gates:** `navigate_blank_and_html_need`. Not nested BIOS login. |
+| **B251** | B250 / P8 | **landed (host, not QEMU)** — **RFB damage metadata.** `commit_damage` updates gen+rect; framebuffer stays 0 rectangles. KVM GET `remote` flag. **Gates:** `rfb_view_only_and_clipboard_refused`. Not committed pixels, not native VNC. |
+| **B252** | B251 / P12 | **landed (host, not QEMU)** — **second session during recovery.** Two logins both see latched recovery; autoboot stays blocked. **Gates:** `reauth_slot_a_second_session_and_credentials_survive_apply`. Not live OpenWrt qualification. |
+| **B253** | B252 / P6 | **landed (host, not QEMU)** — **session expiry + no password in errors.** Clock past `expires` is 401; failed login body does not echo the password. **Gates:** `session_expiry_health_ack_and_recovery_html`. Not a CSPRNG, not CT. |
+| **B254** | B253 / P10–P12 | **landed (host, not QEMU)** — **trial InProgress + health ack.** Apply (when not latched) sets InProgress (autoboot blocked); `POST /bios/health/ack` matching digest → Confirmed, autoboot stays false; ack does not clear Latched. **Gates:** same. Not live helper ack, not SPI. |
+| **B255** | B254 / P7 | **landed (host, not QEMU)** — **recovery HTML.** `GET /bios/recovery.html` is text/html, no secrets, VIEW session. **Gates:** same. Not a full UI, not QEMU. |
+| **B256** | B255 / P10 | **landed (host, not QEMU)** — **ELF ET_EXEC.** `e_type` must be 2; ET_DYN refused. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not a loader, not SPI. |
+| **B257** | B256 / P11 | **landed (host, not QEMU)** — **other harts stopped.** `linux_enter_ready(..., false)` fails `other harts live`. **Gates:** `kvm_lease_local_priority_and_disconnect_releases_keys`. Not a live kernel, not HSM on silicon. |
+| **B258** | B257 / P8 | **landed (host, not QEMU)** — **RFB 32bpp true-color; colour map refused.** SetPixelFormat 8bpp fails; type 1 colour map refused. **Gates:** `rfb_view_only_and_clipboard_refused`. Not a VNC viewer, not pixels. |
+| **B259** | B258 / P10 | **landed (host, not QEMU)** — **ELF64 header.** 64-byte Ehdr; ident version 1; OSABI NONE/LINUX; `e_ehsize==64`; ET_DYN still refused. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B260** | B259 / P9 | **landed (host, not QEMU)** — **iframe sandbox.** `allow-popups` / `allow-top-navigation` refused. **Gates:** `grant_requires_https_origin_and_nonce`. Not nested BIOS login. |
+| **B261** | B260 / P6 | **landed (host, not QEMU)** — **TLS 1.0/1.1 records refused.** Record version must be 1.2 (`03 03`); CCS classified. **Gates:** `tls_record_kind_handshake_and_alert`. Not a full 1.2 handshake, not CT. |
+| **B262** | B261 / P12 | **landed (host, not QEMU)** — **no recovery-clear.** `POST /bios/recovery/clear` is 403; latch remains; logout drops the session. **Gates:** `session_expiry_health_ack_and_recovery_html`. Not live qualification. |
+| **B263** | B262 / P6 | **landed (host, not QEMU)** — **session cookie Max-Age=3600.** Matches login TTL. **Gates:** `login_needs_provision_and_csrf_on_jobs`. Not a default password. |
+| **B264** | B263 / P10 | **landed (host, not QEMU)** — **ELF phdr.** `e_version==1`, `phentsize==56`, `phnum>=1`. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B265** | B264 / P8 | **landed (host, not QEMU)** — **WS opcode allowlist.** Text/close/ping/pong only; binary (pixels) and RSV refused. **Gates:** `ws_frame_backpressure_and_bound`. Not KVM pixels. |
+| **B266** | B265 / P6 | **landed (host, not QEMU)** — **SNI refuse empty/NUL host.** **Gates:** `tls12_hello_is_fallback_not_13`. Not CT. |
+| **B267** | B266 / P6 | **landed (host, not QEMU)** — **logout clears cookie.** `Max-Age=0`. **Gates:** `session_expiry_health_ack_and_recovery_html`. Not nested login. |
+| **B268** | B267 / P6 | **landed (host, not QEMU)** — **HSTS.** `strict-transport-security: max-age=31536000; includeSubDomains`. **Gates:** `responses_carry_security_headers`. Not a browser review. |
+| **B269** | B268 / P10 | **landed (host, not QEMU)** — **ELF e_entry.** Non-zero, 4-byte aligned. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B270** | B269 / P8 | **landed (host, not QEMU)** — **WS close codes.** 1000 ok; 1005/1006/1015 refused. **Gates:** `ws_frame_backpressure_and_bound`. Not KVM pixels. |
+| **B271** | B270 / P6 | **landed (host, not QEMU)** — **unexpected_message alert.** Fatal 10; decode refuses unknown level. **Gates:** `alert_close_notify_is_inner_type_21`. Not CT. |
+| **B272** | B271 / P12 | **landed (host, not QEMU)** — **health-ack generation.** Digest+generation must match the trial job. **Gates:** `session_expiry_health_ack_and_recovery_html`. Not live helper. |
+| **B273** | B272 / P6–P9 | **landed (host, not QEMU)** — **COOP/COEP/CORP + Permissions-Policy.** same-origin / require-corp; camera/mic/geo empty. **Gates:** `responses_carry_security_headers`. Not nested BIOS login. |
+| **B274** | B273 / P10 | **landed (host, not QEMU)** — **ELF PT_LOAD.** `e_phoff==64`; first `p_type==1`. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B275** | B274 / P8 | **landed (host, not QEMU)** — **RFB event sizes.** Key 8 B, pointer 6 B; truncated refused. **Gates:** `rfb_session_requires_tls_before_framebuffer`. Not pixels. |
+| **B276** | B275 / P6 | **landed (host, not QEMU)** — **EE heartbeat/SCT refuse.** 0x000f and 0x0012 fail closed (CT not implemented). **Gates:** `rfc8448_exporter_master_and_ee_refuse_early_data`. Not CT. |
+| **B277** | B276 / P6 | **landed (host, not QEMU)** — **Permissions-Policy** camera/microphone/geolocation empty. **Gates:** `responses_carry_security_headers`. Not a browser review. |
+| **B278** | B277 / P6 | **landed (host, not QEMU)** — **`__Host-` cookie.** `__Host-g6b_sid`; Secure; Path=/; no Domain. **Gates:** `login_needs_provision_and_csrf_on_jobs`. Not nested login. |
+| **B279** | B278 / P10 | **landed (host, not QEMU)** — **ELF RX not WX.** `p_flags` W+X refused. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B280** | B279 / P8 | **landed (host, not QEMU)** — **WS ping/pong.** Opcode 9/10; pong echoes ping payload. **Gates:** `ws_frame_backpressure_and_bound`. Not KVM pixels. |
+| **B281** | B280 / P6 | **landed (host, not QEMU)** — **TLS seq wrap.** `seq==u64::MAX` fails closed. **Gates:** `seal_open_round_trip_and_seq`. Not CT. |
+| **B282** | B281 / P12 | **landed (host, not QEMU)** — **Confirmed retry-once refuse.** After health ack, retry-once is 409. **Gates:** `session_expiry_health_ack_and_recovery_html`. Not live qualification. |
+| **B283** | B282 / P6 | **landed (host, not QEMU)** — **DNS prefetch / X-Permitted-Cross-Domain.** `off` / `none`. **Gates:** `responses_carry_security_headers`. Not a browser review. |
+| **B284** | B283 / P10 | **landed (host, not QEMU)** — **ELF p_align.** 4, 8, or 4096 only. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B285** | B284 / P6 | **landed (host, not QEMU)** — **SNI IP/length.** IP literals, `:`, and names >255 refused. **Gates:** `tls12_hello_is_fallback_not_13`. Not CT. |
+| **B286** | B285 / P8 | **landed (host, not QEMU)** — **RFB FBU request size.** Type 3 must be 10 B. **Gates:** `rfb_session_requires_tls_before_framebuffer`. Not pixels. |
+| **B287** | B286 / P6 | **landed (host, not QEMU)** — **SNI length bound** (255). **Gates:** `tls12_hello_is_fallback_not_13`. Not a full handshake. |
+| **B288** | B287 / P10 | **landed (host, not QEMU)** — **ELF p_vaddr.** Non-zero, 4-byte aligned. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B289** | B288 / P6 | **landed (host, not QEMU)** — **compress_certificate refuse.** EE 0x001b fail closed. **Gates:** `rfc8448_exporter_master_and_ee_refuse_early_data`. Not CT. |
+| **B290** | B289 / P8 | **landed (host, not QEMU)** — **WS control FIN.** Ping/pong/close without FIN refused. **Gates:** `ws_frame_backpressure_and_bound`. Not pixels. |
+| **B291** | B290 / P6 | **landed (host, not QEMU)** — **advertise `::`.** IPv6 unspecified maps to `10.0.2.15`. **Gates:** `cors_mutating_get_and_advertise`. Not published wildcard management. |
+| **B292** | B291 / P6 | **landed (host, not QEMU)** — **secret in URL.** `password=` / `token=` in the path is 403. **Gates:** `cors_mutating_get_and_advertise`. Not nested login. |
+| **B293** | B292 / P10 | **landed (host, not QEMU)** — **ELF p_filesz/p_memsz.** filesz>0, memsz>=filesz. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B294** | B293 / P6 | **landed (host, not QEMU)** — **TLS 1.3 inner CCS/heartbeat refuse.** Inner type 20/24 fail closed. **Gates:** `seal_open_round_trip_and_seq`. Not CT. |
+| **B295** | B294 / P8 | **landed (host, not QEMU)** — **RFB incremental flag.** Type 3 byte1 must be 0 or 1. **Gates:** `rfb_session_requires_tls_before_framebuffer`. Not pixels. |
+| **B296** | B295 / P6 | **landed (host, not QEMU)** — **SNI dots/hyphen.** `..`, leading `-`/`.`, trailing `.` refused. **Gates:** `tls12_hello_is_fallback_not_13`. Not CT. |
+| **B297** | B296 / P12 | **landed (host, not QEMU)** — **unplug does not clear latch.** **Gates:** `reauth_slot_a_second_session_and_credentials_survive_apply`. Not live qualification. |
+| **B298** | B297 / P10 | **landed (host, not QEMU)** — **ELF p_offset.** Must be ≥120 (after Ehdr+Phdr). **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B299** | B298 / P6 | **landed (host, not QEMU)** — **EE cookie / psk_key_exchange_modes refuse.** 0x002c / 0x002d in EncryptedExtensions fail closed. **Gates:** `rfc8448_exporter_master_and_ee_refuse_early_data`. Not 0-RTT. |
+| **B300** | B299 / P8 | **landed (host, not QEMU)** — **WS control length.** Ping/pong/close >125 refused. **Gates:** `ws_frame_backpressure_and_bound`. Not pixels. |
+| **B301** | B300 / P6 | **landed (host, not QEMU)** — **TRACE/CONNECT refuse.** 405. **Gates:** `cors_mutating_get_and_advertise`. Not a browser review. |
+| **B302** | B301 / P12 | **landed (host, not QEMU)** — **PUT/PATCH/DELETE /bios/\* refuse.** 405. **Gates:** `cors_mutating_get_and_advertise`. Not live qualification. |
+| **B303** | B302 / P6 | **landed (host, not QEMU)** — **HTTP/1.1 Host required; chunked refused.** **Gates:** `post_body`. Not a browser review. |
+| **B304** | B303 / P6 | **landed (host, not QEMU)** — **HTTP body cap 64 KiB.** **Gates:** `post_body`. Not a live kernel. |
+| **B305** | B304 / P6 | **landed (host, not QEMU)** — **empty TLS record refuse.** Length 0 fail closed. **Gates:** `record_reasm_joins_split_header_and_body`. Not CT. |
+| **B306** | B305 / P8 | **landed (host, not QEMU)** — **RFB encodings 1..=8.** Empty or >8 refused. **Gates:** `rfb_session_requires_tls_before_framebuffer`. Not pixels. |
+| **B307** | B306 / P9 | **landed (host, not QEMU)** — **embed grant TTL.** 1..=86400 s. **Gates:** `grant_requires_https_origin_and_nonce`. Not nested BIOS login. |
+| **B308** | B307 / P6 | **landed (host, not QEMU)** — **duplicate Host / Content-Length refuse.** **Gates:** `post_body`. Not a browser review. |
+| **B309** | B308 / P6 | **landed (host, not QEMU)** — **request-line bound.** method ≤16, path ≤2048, no NUL. **Gates:** `post_body`. |
+| **B310** | B309 / P8 | **landed (host, not QEMU)** — **RFB SecurityResult 0.** Non-zero is auth failed. **Gates:** `rfb_client_requires_tls_before_framebuffer`. Not pixels. |
+| **B311** | B310 / P6 | **landed (host, not QEMU)** — **SNI slash/@.** `/` `\\` `@` refused. **Gates:** `tls12_hello_is_fallback_not_13`. Not CT. |
+| **B312** | B311 / P6 | **landed (host, not QEMU)** — **password control chars.** Bytes <32 refused at provision. **Gates:** `login_needs_provision_and_csrf_on_jobs`. Not a default password. |
+| **B313** | B312 / P6 | **landed (host, not QEMU)** — **header line ≤8192.** **Gates:** `post_body`. |
+| **B314** | B313 / P6 | **landed (host, not QEMU)** — **Host userinfo.** `user@host` refused. **Gates:** `post_body`. |
+| **B315** | B314 / P6 | **landed (host, not QEMU)** — **EE renegotiation_info refuse.** 0xff01 fail closed. **Gates:** `rfc8448_exporter_master_and_ee_refuse_early_data`. Not a 1.2 renegotiation. |
+| **B316** | B315 / P8 | **landed (host, not QEMU)** — **WS 1-byte close payload refuse.** **Gates:** `ws_frame_backpressure_and_bound`. Not pixels. |
+| **B317** | B316 / P6 | **landed (host, not QEMU)** — **login lockout.** 5 failures then even the correct password is 429. **Gates:** `login_needs_provision_and_csrf_on_jobs`. Not a default password. |
+| **B318** | B317 / P6 | **landed (host, not QEMU)** — **logout CSRF.** POST /bios/logout requires `x-csrf-token` + `x-reauth`. **Gates:** `session_expiry_health_ack_and_recovery_html`. |
+| **B319** | B318 / P6 | **landed (host, not QEMU)** — **Expect: 100-continue refused.** **Gates:** `post_body`. |
+| **B320** | B319 / P6 | **landed (host, not QEMU)** — **header name token.** Space in the name refused. **Gates:** `post_body`. |
+| **B321** | B320 / P8 | **landed (host, not QEMU)** — **RFB 3.3 refused.** **Gates:** `rfb_refuses_none_and_des`. Not pixels. |
+| **B322** | B321 / P9 | **landed (host, not QEMU)** — **origin port 0 / empty port refused.** **Gates:** `grant_requires_https_origin_and_nonce`. Not nested BIOS login. |
+| **B323** | B322 / P6 | **landed (host, not QEMU)** — **HTTP/1.0 refused.** **Gates:** `post_body`. |
+| **B324** | B323 / P6 | **landed (host, not QEMU)** — **path `//` and `\\` refused.** Must start with `/`. **Gates:** `post_body`. |
+| **B325** | B324 / P8 | **landed (host, not QEMU)** — **WS close codes.** `<1000`, 1004/1005/1006/1015 refused. **Gates:** `ws_frame_backpressure_and_bound`. Not pixels. |
+| **B326** | B325 / P6 | **landed (host, not QEMU)** — **SNI underscore refused.** **Gates:** `tls12_hello_is_fallback_not_13`. Not CT. |
+| **B327** | B326 / P6 | **landed (host, not QEMU)** — **HEAD /bios/\* 405.** **Gates:** `cors_mutating_get_and_advertise`. |
+| **B328** | B327 / P6 | **landed (host, not QEMU)** — **encoded path traversal.** `%2e%2e` / `%2f` / `%5c` refused. **Gates:** `post_body`. |
+| **B329** | B328 / P6 | **landed (host, not QEMU)** — **EE max_fragment_length refuse.** 0x0001 fail closed. **Gates:** `rfc8448_exporter_master_and_ee_refuse_early_data`. Not CT. |
+| **B330** | B329 / P6 | **landed (host, not QEMU)** — **password trim.** Leading/trailing space refused. **Gates:** `login_needs_provision_and_csrf_on_jobs`. |
+| **B331** | B330 / P6 | **landed (host, not QEMU)** — **header count ≤64.** **Gates:** `post_body`. |
+| **B332** | B331 / P6 | **landed (host, not QEMU)** — **header value CR/LF refused.** **Gates:** `post_body`. |
+| **B333** | B332 / P10 | **landed (host, not QEMU)** — **ELF overflow + e_entry range.** `p_offset+filesz` / `p_vaddr+memsz` overflow; entry in PT_LOAD. **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B334** | B333 / P6 | **landed (host, not QEMU)** — **TLS 1.2 ServerKeyExchange + ServerHelloDone.** Named X25519/P-256 only; explicit curves refused. **Gates:** `tls12_ccs_gcm_finished_and_wrap_app_stays_plaintext`. Not a completed ECDHE handshake, not CT. |
+| **B335** | B334 / P8 | **landed (host, not QEMU)** — **WS text UTF-8.** Opcode 1 must be UTF-8. **Gates:** `ws_frame_backpressure_and_bound`. Not pixels. |
+| **B336** | B335 / P8 | **landed (host, not QEMU)** — **RFB LE 24-depth.** big-endian-flag 0, depth 24. **Gates:** `rfb_view_only_and_clipboard_refused`. Not pixels. |
+| **B337** | B336 / P6 | **landed (host, not QEMU)** — **JSON Content-Type.** POST `/bios/*` with a non-json Content-Type is 415 (PEM trust/root excluded). **Gates:** `cors_mutating_get_and_advertise`. |
+| **B338** | B337 / P6 | **landed (host, not QEMU)** — **TLS ciphertext cap.** Record length > 16384+256 refused. **Gates:** `record_reasm_joins_split_header_and_body`. Not CT. |
+| **B339** | B338 / P6 | **landed (host, not QEMU)** — **TLS 1.2 ClientKeyExchange.** ECDHE 32/65-byte point; RSA-KEX refused. **Gates:** `tls12_ccs_gcm_finished_and_wrap_app_stays_plaintext`. Not a completed ECDHE handshake. |
+| **B340** | B339 / P6 | **landed (host, not QEMU)** — **TLS 1.2 Certificate handshake.** Type 11; empty leaf refused. **Gates:** same. |
+| **B341** | B340 / P8 | **landed (host, not QEMU)** — **RFB colour max 0x00ff.** **Gates:** `rfb_view_only_and_clipboard_refused`. Not pixels. |
+| **B342** | B341 / P10 | **landed (host, not QEMU)** — **ELF phnum ≤4.** **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B343** | B342 / P6 | **landed (host, not QEMU)** — **cookie CTL/space refused.** **Gates:** `cors_mutating_get_and_advertise`. |
+| **B344** | B343 / P6 | **landed (host, not QEMU)** — **Upgrade: h2c refused.** **Gates:** `post_body`. |
+| **B345** | B344 / P6–P7 | **landed (host, not QEMU)** — **optional HTTP/2 preface adapter.** PRI preface required; `looks_h2_frame` removed; one odd stream; SETTINGS/PING/WINDOW_UPDATE on stream 0; PUSH/GOAWAY/RST/PRIORITY/PADDED refused; `kernel.http.http2` compiles it out. Not ALPN `h2`, not h2c, not a multiplexer. **Gates:** `preface_stream_and_refused_frames`; `roundtrip_h1_and_h2_clocks`. |
+| **B346** | B345 / P6 | **landed (host, not QEMU)** — **TLS 1.2 ECDHE-X25519 shared.** `tls12_ecdhe_x25519` from SKE point. Schoolbook; not CT; not a completed 1.2 handshake. **Gates:** `tls12_ecdhe_x25519_shared`. |
+| **B347** | B346 / P6 | **landed (host, not QEMU)** — **directoryName CN constraints.** `cn=` in NC; not a full DN engine. **Gates:** `ski_aki_and_email_constraint`. |
+| **B348** | B347 / P6–P7 | **landed (host, not QEMU)** — **H2 SETTINGS_ENABLE_PUSH=1 refused; MAX_FRAME_SIZE applied.** Not flow control. **Gates:** `preface_stream_and_refused_frames`. |
+| **B349** | B348 / P8 | **landed (host, not QEMU)** — **RFB RGB shifts 16/8/0.** **Gates:** `rfb_view_only_and_clipboard_refused`. Not pixels. |
+| **B350** | B349 / P6–P7 | **landed (host, not QEMU)** — **H2 PING ACK encoder.** **Gates:** `preface_stream_and_refused_frames`. |
+| **B351** | B350 / P6–P7 | **landed (host, not QEMU)** — **H2 preferred + ALPN h2 + h2c + live session.** `preferred_http` returns `h2` when both are on; ClientHello ALPN `h2` then `http/1.1`; EE accepts `h2`; h2c Upgrade → 101; `H2Session` multiplexes odd streams, CONTINUATION across TCP chunks, receive WINDOW_UPDATE. **Gates:** `session_multiplex_continuation_and_window`; `roundtrip_h1_and_h2_clocks`; `client_hello_tls13_has_x25519_share_no_early_data`. Not CSPRNG, not CT, not VNC, not SPI, not live OpenWrt. |
+| **B352** | B351 / P6 | **landed (host, not QEMU)** — **completed handshake drivers.** TLS 1.2 ECDHE-GCM: CH, SH, Cert, SKE (X25519), SHD, CKE, CCS, Finished both ways, GCM appdata. TLS 1.3 1-RTT: CH, SH, EE, Finished both ways, AP GCM. SKE signature opaque (not a CA). X25519 schoolbook. **Gates:** `tls12_completed_ecdhe_gcm_appdata`; `tls13_completed_1rtt_appdata`. Not CT, not CSPRNG, not independent review, not CertificateVerify on the 1.3 driver. |
+| **B353** | B352 / P6 | **landed (host, not QEMU)** — **TLS 1.2 SKE PKCS#1 SHA-256.** `rsa_pkcs1_sha256_sign`; `verify_server_key_exchange` over `client_random\|\|server_random\|\|params` (scheme 0x0401). RFC 8448 RSA leaf. **Gates:** `tls12_completed_ecdhe_gcm_appdata`. Not a CA path, not CT. |
+| **B354** | B353 / P6 | **landed (host, not QEMU)** — **TLS 1.3 Certificate + CertificateVerify.** RFC 8448 leaf (CN=rsa, self-signed, CA:FALSE); RSA-PSS SHA-256 over CH+SH+EE+Cert; server flight is one HS record. **Gates:** `tls13_completed_1rtt_appdata`. Not a CA path, not hostname pin in the driver. |
+| **B355** | B354 / P6 | **landed (host, not QEMU)** — **dummy CCS + NewSessionTicket.** TLS 1.3 compatibility CCS after SH; NST at `s ap` seq 0; `res master` from CH…client Finished; `Traffic13.ticket`. **Gates:** same. Not 0-RTT. |
+| **B356** | B355 / P7 | **landed (host, not QEMU)** — **H2 respond + send WINDOW_UPDATE.** `H2Session::respond` encodes HEADERS+DATA; receive WINDOW_UPDATE credits `conn_win_out`; body over window fail-closed; HPACK literal `:status`. **Gates:** `session_multiplex_continuation_and_window`. Not GOAWAY, not CSPRNG, not CT, not VNC, not SPI, not live OpenWrt. |
+| **B357** | B356 / P6 | **landed (host, not QEMU)** — **TLS 1.3 inner padding.** `open_record` strips trailing zeros (RFC 8446 §5.4); `seal_record_padded`. **Gates:** `seal_open_round_trip_and_seq`. Not CT. |
+| **B358** | B357 / P6 | **landed (host, not QEMU)** — **TLS alerts `bad_record_mac` / `decrypt_error`.** **Gates:** `alert_close_notify_is_inner_type_21`. |
+| **B359** | B358 / P7 | **landed (host, not QEMU)** — **H2 inbound GOAWAY.** New streams above `last_stream_id` refused. **Gates:** `session_multiplex_continuation_and_window`. |
+| **B360** | B359 / P7 | **landed (host, not QEMU)** — **H2 RST_STREAM drops the stream.** **Gates:** same. |
+| **B361** | B360 / P7 | **landed (host, not QEMU)** — **H2 SETTINGS.** HEADER_TABLE_SIZE≠0 refused (no dynamic table); MAX_CONCURRENT_STREAMS cap 32; ENABLE_CONNECT refused; DATA stream 0 refused. **Gates:** same. Not GOAWAY as a send API. |
+| **B362** | B361 / P8 | **landed (host, not QEMU)** — **RFB named encoding refusals.** CopyRect/RRE/Hextile/ZRLE. Raw only. **Gates:** `rfb_session_requires_tls_before_framebuffer`. Not pixels, not native VNC. |
+| **B363** | B362 / P10 | **landed (host, not QEMU)** — **ELF p_paddr 0 or = p_vaddr.** **Gates:** `recovery_unconfirmed_elf_replay_and_ui_isolation`. Not SPI. |
+| **B364** | B363 / P6 | **landed (host, not QEMU)** — **constant-time X25519 ladder.** 51-bit limbs + mask cswap (no BigUint, no secret-dependent branch). RFC 7748 Alice/shared. Not a side-channel lab review. **Gates:** `rfc7748_alice`; `rfc7748_shared`; `cswap_is_mask_not_branch`. |
+| **B365** | B364 / P6 | **landed (host, not QEMU)** — **DRBG/entropy health.** Stuck-zero/ones, Hamming weight, 16-byte run fail closed before HMAC-DRBG instantiate. Not SP 800-90B certification, not a CSPRNG-quality review. **Gates:** `hmac_drbg_from_extracted_is_not_the_seed`; `virtio_rng_fail_closed_then_fills`. |
+| **B366** | B365 / P8 | **landed (host, not QEMU)** — **committed RFB/KVM pixels.** Raw rect only from `commit_pixels`; 0 rectangles until a buffer exists; first-party client `apply_update` sees the same bytes; KVM GET reports gen/sha after login. Not a native VNC viewer, not TightVNC. **Gates:** `rfb_session_requires_tls_before_framebuffer`; `kvm_lease_needs_scope_and_releases_keys`. |
+| **B367** | B366 / P9 | **landed (host, not QEMU)** — **nested BIOS login isolation.** Child origin `/bios/login` allowed; parent `/bios/*` refused; parent/child sids must differ. Not a full nested BIOS inside the engine. **Gates:** `grant_requires_https_origin_and_nonce`; `nested_grant_blocks_parent_bios_path`. |
+| **B368** | B367 / P10 | **landed (host, not QEMU)** — **SPI-sized layout.** `FirmwareLayout::SPI` 16 MiB map; `fits(16MiB)`; no erase/program/protection. **Gates:** `bios_firmware_layout_keeps_journal_off_ab_slots`. Not SPI flash. |
 | **S3** | S2 | **landed** — `Param::HostName` intern-before-`step`; `HostDispatch` `attempt`/`invoke` on `ObjectKind::StoreFactory`/`Store`; `libwasm_global("pglite")` gated (not `is_browser_global`); shell BINDINGS only (nested `global("pglite")` is `undefined`; no real DOM `window.pglite`); native Promise path → `NotImplemented("async")`; `libwasm.pglite` D wrap (no `G6B_DUB_WASM`). |
 | **S4a** | S3 | **landed** — `files::mount` runtime-reads `.tools/pglite-dist/` when `pglite.files`; missing dist omits paths and live `store_pglite_files=false`. `g6b.py pglite-dist` SHA-256-verifies the npm tarball. Guest `ui_file_paths` grows `/ui/pglite/*` only for `pglite.embed`. Embed without dist is an ELF/link error. Not Electric-in-`g6b-wasm`. |
 | **S4b** | S4a | **landed** — native `kernel.ts` `BiosStore` facade → `/bios/store` (lang=ts may `await`); D lodash `attempt`/`invoke` still `NotImplemented("async")`. `createPgliteWasm({PGlite})` only with FileServe bytes + injected Electric client; never real DOM `window.pglite` / `window.pgliteWasm`. |

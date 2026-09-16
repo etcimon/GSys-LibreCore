@@ -29,7 +29,7 @@ Each row is a BoardSpec gate. Off ⇒ no `#define`, no route, no IR object.
 | Feature | Gate | Cost | Practical in ZealOS/RISC-V BIOS |
 |---|---|---|---|
 | HTTP/1.1 parse+respond | `kernel.http.http1` | small | **yes** — HolyC + JS default |
-| HTTP/2 frames + HPACK static/literal | `kernel.http.http2` | medium | **yes** — web ClientHello-shaped h2 on the adapter |
+| HTTP/2 frames + HPACK static/literal | `kernel.http.http2` | medium | **yes (default on, preferred over HTTP/1.1)** — ALPN `h2` then `http/1.1`; h2c Upgrade; live `H2Session` multiplex + receive windows + CONTINUATION across chunks. |
 | HPACK Huffman | always on with http2 | small decode | **yes** — RFC 7541 Appendix B |
 | Dynamic HPACK / QPACK | — | large | **no** (refused) |
 | JS `fetch` proxy | `kernel.http.proxy_js` | tiny | **yes** |

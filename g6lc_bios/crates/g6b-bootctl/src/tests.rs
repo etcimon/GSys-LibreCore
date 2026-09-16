@@ -100,6 +100,12 @@ fn commissioned() -> (Memory, Journal) {
 #[test]
 fn bios_firmware_layout_keeps_journal_off_ab_slots() {
     assert_eq!(FirmwareLayout::BIOS.check(), Ok(()));
+    assert_eq!(FirmwareLayout::SPI.check(), Ok(()));
+    assert!(FirmwareLayout::SPI.fits(FirmwareLayout::SPI_BYTES));
+    assert!(!FirmwareLayout::SPI.fits(1024));
+    assert!(FirmwareLayout::SPI.contains_slot(FirmwareSlot::A, 256));
+    assert!(FirmwareLayout::SPI.may_stage(16_384));
+    assert!(!FirmwareLayout::SPI.may_stage(256));
     assert!(FirmwareLayout::BIOS.contains_journal(8));
     assert!(FirmwareLayout::BIOS.contains_journal(23));
     assert!(!FirmwareLayout::BIOS.contains_journal(24));

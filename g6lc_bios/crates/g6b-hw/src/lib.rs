@@ -73,7 +73,7 @@ pub use session::{
     Addressing, CableEvent, CableState, DeviceCfg, HwMsg, HwPort, HwSession, NatMode, NatPhase,
     MAX_HW_QUEUE,
 };
-pub use stack::{resolve_ipv4, InetStack, TcpRecv};
+pub use stack::{resolve_ipv4, InetStack, ListenPolicy, TcpRecv};
 
 /// virtio-net DeviceID — must match `g6b_asm::encode::VIO_DEV_NET`.
 pub const VIRTIO_NET_DEVICE_ID: u32 = 1;
@@ -85,6 +85,8 @@ pub const VIRTIO_NET_SLOT: u64 = 5;
 pub const VIRTIO_GPU_SLOT: u64 = 0;
 /// virtio-input DeviceID — must match `g6b_asm::encode::VIO_DEV_INPUT`.
 pub const VIRTIO_INPUT_DEVICE_ID: u32 = 18;
+/// virtio-rng DeviceID — must match `g6b_asm::encode::VIO_DEV_RNG`.
+pub const VIRTIO_RNG_DEVICE_ID: u32 = 4;
 
 /// Ethernet MAC catalog ids (`architecture/uncore/ethernet-controller.md`).
 pub const ETHERNET_VENDORS: &[&str] =

@@ -53,7 +53,8 @@ pub fn hkdf(salt: &[u8], ikm: &[u8], info: &[u8], len: usize) -> Result<Vec<u8>,
 
 const TLS13_PREFIX: &[u8] = b"tls13 ";
 
-/// RFC 8446 `HKDF-Expand-Label`. 0-RTT / resumption labels are refused.
+/// RFC 8446 `HKDF-Expand-Label`. 0-RTT labels are refused. 1-RTT PSK
+/// resumption (`res master` / `resumption`) is allowed.
 pub fn expand_label(
     secret: &[u8],
     label: &str,
@@ -63,9 +64,6 @@ pub fn expand_label(
     match label {
         "c e traffic" | "e exp master" => {
             return Err("tls: 0-rtt label refused".into());
-        }
-        "res master" | "resumption" => {
-            return Err("tls: resumption label refused".into());
         }
         _ => {}
     }
@@ -88,7 +86,11 @@ pub fn expand_label(
 }
 
 /// RFC 8446 `Derive-Secret(Secret, Label, Messages)`.
-pub fn derive_secret(secret: &[u8], label: &str, messages: &[u8]) -> Result<[u8; HASH_LEN], String> {
+pub fn derive_secret(
+    secret: &[u8],
+    label: &str,
+    messages: &[u8],
+) -> Result<[u8; HASH_LEN], String> {
     let ctx = crate::sha::sha256(messages);
     let v = expand_label(secret, label, &ctx, HASH_LEN)?;
     let mut out = [0u8; HASH_LEN];
@@ -153,7 +155,9 @@ mod tests {
     #[test]
     fn expand_refuses_overlong() {
         let prk = [0u8; 32];
-        assert!(expand(&prk, &[], 255 * 32 + 1).unwrap_err().contains("too long"));
+        assert!(expand(&prk, &[], 255 * 32 + 1)
+            .unwrap_err()
+            .contains("too long"));
         assert!(expand(&[], &[], 1).unwrap_err().contains("short prk"));
     }
 
@@ -172,15 +176,12 @@ mod tests {
         );
         let key = expand_label(&derived, "key", &[], 16).unwrap();
         assert_eq!(key.len(), 16);
-        assert!(
-            expand_label(&early, "c e traffic", &[], 32)
-                .unwrap_err()
-                .contains("0-rtt")
-        );
-        assert!(
-            expand_label(&early, "res master", &[], 32)
-                .unwrap_err()
-                .contains("resumption")
+        assert!(expand_label(&early, "c e traffic", &[], 32)
+            .unwrap_err()
+            .contains("0-rtt"));
+        assert_eq!(
+            expand_label(&early, "res master", &[], 32).unwrap().len(),
+            32
         );
     }
 

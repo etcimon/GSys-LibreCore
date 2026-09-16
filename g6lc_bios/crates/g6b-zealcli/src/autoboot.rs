@@ -348,7 +348,8 @@ impl AutoBoot {
                         ms / 1000,
                         (ms % 1000) / 100
                     ),
-                    None if self.hold.is_some() => "HOLD recovery (unattended boot inhibited)".into(),
+                    None if self.hold.is_some() =>
+                        "HOLD recovery (unattended boot inhibited)".into(),
                     None if self.done.is_some() => "picked".into(),
                     None if self.timeout_ms == 0 => "no countdown (waiting for you)".into(),
                     None => "countdown stopped".into(),
@@ -573,11 +574,8 @@ mod tests {
         assert_eq!(ticking.tick(5000), Pick::Waiting);
         assert!(!ticking.finished());
 
-        let boot = AutoBoot::with_decision(
-            &spec("live-first", false, 2000),
-            &ports(),
-            Decision::Boot,
-        );
+        let boot =
+            AutoBoot::with_decision(&spec("live-first", false, 2000), &ports(), Decision::Boot);
         assert!(boot.unattended_armed());
         assert_eq!(boot.left_ms(), Some(2000));
     }

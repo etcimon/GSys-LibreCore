@@ -129,6 +129,18 @@ impl FirmwareLayout {
         slot_sectors: 8,
     };
 
+    /// Declared 16 MiB SPI NOR map. Layout only: no erase/program/protection.
+    /// GPT 0..8, journal 8 KiB, A/B 8 MiB-class slots. Not a flash driver.
+    pub const SPI: Self = Self {
+        journal_lba: 8,
+        journal_sectors: 16,
+        slot_a_lba: 256,
+        slot_b_lba: 16_384,
+        slot_sectors: 16_128,
+    };
+
+    pub const SPI_BYTES: u64 = 16 * 1024 * 1024;
+
     pub fn check(self) -> Result<(), LayoutError> {
         if self.journal_sectors == 0 || self.slot_sectors == 0 {
             return Err(LayoutError::Empty);
@@ -198,6 +210,15 @@ impl FirmwareLayout {
     /// GPT/MBR are refused.
     pub fn may_stage(self, lba: u64) -> bool {
         self.contains_slot(Self::INACTIVE, lba)
+    }
+
+    /// True when A/B+journal fit `media_bytes`. SPI programming is not implemented.
+    pub fn fits(self, media_bytes: u64) -> bool {
+        let end = self
+            .slot_b_lba
+            .saturating_add(self.slot_sectors)
+            .saturating_mul(512);
+        end <= media_bytes
     }
 }
 
