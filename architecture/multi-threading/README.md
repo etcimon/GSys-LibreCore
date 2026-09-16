@@ -29,9 +29,56 @@ workers.
 | Per-hart GHR | **Live** — `g6lc_bp_ghist` + gshare GHR banks |
 | Shared BHT/BTB | Shared tables (cross-hart pollution possible) |
 | `g6lc_thread_select.sv` + `g6lc_hart_state.sv` | **Live** under `core/smt_legacy/` — inventory [`../core-fetch/SMT-LEGACY.md`](../core-fetch/SMT-LEGACY.md) |
-| Soft-ladder DI residual | **Active** — Variane cookie `51b1babe` is the SUCCESS pin; QEMU dual-hart OpenSBI/Linux is **not** that pin. SL-C topology + R3b Image still open. Snapshot: [`../current-stage.md`](../current-stage.md). Perf-foundation SMT **control** is `qual-soft-ladder-osbi`. Isolated overlay Mdir `iso-smt2-rr1` exists (RR-on `gen_rr`); N=1 checked-work RR-off PASSes, RR-on livelocks in verify (I=2 fetch stuck dual-issuing loop addis after long-latency miss, 2M cy). Do not treat that as a cookie-soak pairing or a promotion. FPR remains unbanked. Dual-issue fetch repair is follow-on. |
+| Soft-ladder DI residual | **Active** — Variane cookie `51b1babe` is the SUCCESS pin; QEMU dual-hart OpenSBI/Linux is **not** that pin. SL-C topology + R3b Image still open. Snapshot: [`../current-stage.md`](../current-stage.md). Perf-foundation SMT **control** is `qual-soft-ladder-osbi`. 2026-09-15 reviewed state: full 48 KiB N1 checked-work passes with current fetch fixes, including renewed RR0/RR1 controls. Explicitly IPI-activated RVI and mixed C/I integer checked-work now pass independent retirement/operand checks; original no-IPI N2 does not activate hart 1. This does not close natural firmware or the broader SMT ISA envelope. Historical bisect/VT12 attributions do not establish the current root cause. See the completion gate below, `../core-fetch/NEGATIVE.md` §12 and `AGENTS-todo.md`. FPR remains unbanked. |
 | QEMU SMT2 firmware | **Green as hypothesis** — `g6q run` OpenSBI/U-Boot/EDK2/OpenWrt `--smp 2` on virt and generated soc | Never cite as Variane |
 | AI / PyTorch host path | **Live soft** on `g6lc64_ai` + virt-ai-pcie + EDK2 DESC join; **SMT2 multi-thread pytorch** after SL-C + Image |
+
+### Current completion gate (2026-09-15 review)
+
+Use the F0–F5 plan in `../../AGENTS-todo.md`. Historical cookies and NWORKERS=1
+results are not proof of two active harts. The current sparse-input IQ defect
+has a reproduced failing leaf test and a compaction repair; full-core SMT2
+still needs closure. With queue compaction alone, fresh RVC N=1 passed but norvc N=1 failed.
+A second repair aligns the prefix filter's expected PC with current-cycle
+response bytes: now both N=1 variants pass (131,072 / 137,216 cycles), while
+both N=2 variants still have no verdict by 500,000. Historical ELF names were misleading
+(the `smt2-norvc-vt1` copy contains compressed code). Keep these envelopes
+separate. Current `WtDcacheFixupDepth=2`, so the prior zero-depth exclusion of
+WT fixup logic does not apply to HEAD.
+
+Live IQ/realigner formal had an impossible narrowed hart-range assumption and
+undriven stimulus; prior green labels are withdrawn pending repaired assertions
+and reachability. Generic queue screening improves cell count without adding
+state, but is neither physical area nor SMT2 promotion. Natural OpenSBI,
+per-hart work/isolation, release/acquire, traps, WFI and atomics remain gates.
+
+Follow-up: original N2 checked-work has no IPI and leaves hart 1 masked by the
+current boot contract; RF/done-word evidence confirms it is not a dual-active
+run. The existing IPI-start mini passes. Typed, generation-tagged traces locate
+three subsequent boundary defects: banking transport PC past discarded ID/IQ
+instructions; a foreign-hart resolution updating incoming recovery state; and
+split-target completion tested against the response window rather than the
+accepted instruction PC. These are repaired without changing boot/switch policy,
+keeping queues alive or adding bank state. Resolution still reaches scoreboard,
+LSU and predictor training; recovery is routed to the owning hart.
+
+Final model `7037f685…` writes PASS for the byte-identical 48 KiB/hart RVI and
+mixed C/I workloads at 282,624 / 270,336 cookie polls. More importantly, the
+4 KiB/hart independent reference checks pass 13,696 / 14,202 retirements and
+25,774 operand checks each. One cross-hart flag value is outside the local
+memory-order assertion. Observer-off/on fingerprints match, and both positive
+and injected-error checker controls pass. A cookie PASS after the first repair
+had hidden another sequence loss; that intermediate result is not qualification.
+
+Targeted restart/owner/acceptance proofs and covers, bank tests, SMT2/minimal
+lint and full-core synthesis pass. Independent IQ proof still times out. Natural
+firmware, broader ISA/FP/trap/atomic/concurrency coverage and physical gates stay
+open. Matched revalidation against the private, canary-checked Verilator
+runtime also passes these integer traces and full-workload replays; use baseline
+`5a10acc1…` / observer `528b720c…` and the recorded runtime header identity.
+The installed Verilator 5.008 header is unchanged and still needs correction
+before it can be trusted for new native runs. Evidence and exact scope:
+`../core-fetch/README.md`, typed-trace section.
 
 ### Model: fine-grain SMT (drain-friendly)
 On thread switch: flush **IF** and drop **unissued** decode; restore banked NPC; **do not** clear scoreboard/EX or BP. Outgoing-hart ops retire with CSR/RF keyed by instruction `hart_id`. Active fetch hart owns RAS/GHR bank and privilege mux. See `smt2-bringup.md`.

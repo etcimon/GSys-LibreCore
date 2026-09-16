@@ -30,6 +30,31 @@ Detail: [`../uncore/dram-channel-scaling.md`](../uncore/dram-channel-scaling.md)
 | L3 | `g6lc_l3_top` (wraps L2 engine) | `L3En` (requires `L2En`) |
 | Prefetch | `g6lc_server_prefetcher` | `ServerPrefetchEn`, streams, distance |
 
+## Completion plan after methodology review (2026-09-15)
+
+The active work is the flattened F0–F5 plan in `../../AGENTS-todo.md`, not
+another sequence of policy features. Preserve the RR metadata SRAM and existing
+AXI/SRAM interfaces; fix instruction-supply correctness in its owning RTL
+before measuring policy benefits. Prefer fewer ranking/mux/state costs where
+an accepted-stream invariant can replace recovery heuristics. Do not change
+SMT scheduling or production execute/cacheability regions to make a benchmark
+pass.
+
+A single-worker checked-work PASS on the SMT2 package does not close SMT2:
+two-active-hart progress/isolation, release/acquire and atomic controls plus
+natural firmware are separate gates. Historical `7e6c19c54` index skew was
+fixed in `9fbab3044`; current-tree failure attribution remains open. The fetch
+formal review found impossible hart-range assumptions, so their previous PASS
+labels cannot support promotion. All old RR-specific livelock claims below
+are historical and superseded, not evidence of a replacement-policy defect.
+
+Compare each candidate at identical geometry, tool, clock constraints and
+workload: checked results, ROI cycles, L1/L2 traffic, storage bits, mapped cells
+and critical path. Include workloads where RR loses. Generic synthesis and
+structural timing are screening only; macro area/MBIST, STA and power remain
+physical gates. Production-geometry blackbox equivalence is a controller/port
+result, not a full-memory proof.
+
 ## Evidence compartments (do not mix)
 
 | Lane | Files | Purpose |
@@ -322,15 +347,67 @@ vs RR-on **27,604** cy (`hot_scan` 12,096→9,024; `protected_hot` 1,152→1,920
 8-way/4 KiB: RR-off **26,256** cy (`...T080935-67c68349c896`) vs RR-on
 **26,080** cy (`...T081003-a0436a16ea1d`, mask=ff) — mix ~0.7%; hot_scan
 6,720→4,928 cancelled by protected_hot 1,792→3,584. Core+L1+WT still 0
-delta. Best area/perf in this tranche: keep RR default-off. SMT2 RR-on remains
-a fetch livelock. No RR default-on and no performance promotion.
+delta. Best area/perf in this tranche: keep RR default-off. ~~SMT2 RR-on remains
+a fetch livelock~~ — retracted 2026-09-15: a Verilator vthreads=12 model
+artifact (see below); smt2 traffic never reaches the L2 tag path anyway.
+No RR default-on and no performance promotion.
+
+**Renewed current-fetch controls (2026-09-15):** after replay-loop and redirect
+completion repairs, VT1 byte-identical N1 checked-work passes on SMT2 RR0/RR1
+(cookie polling at 137,216 on both) and stream8 RR0/RR1 (167,936 on both).
+Production-cacheability hot+scan passes on both stream8 legs at 464,896 cookie
+polling cycles. Its warm+scan counter report is identical: 275,593 cycles,
+4 L2 misses, 0 L1D misses, 20,483 load events, 7 store events, 20,492 data requests
+and 17 I-cache misses. These report deltas exclude the initial data fill and
+include the stated warm-up/report boundary; they are not whole-kernel timing.
+Only `L2RoundRobinEn` changes in the overlays; no execute-region narrowing.
+The zero L1D allocation/miss count is consistent with the existing cacheability
+restriction, not a representative cacheable-data replacement-policy test.
+No benefit or default-on decision follows. Artifacts:
+`remote-runs/review-renewed-rr-controls-20260915/output/` (`results.json`,
+`models.json`, `payloads.json`, overlays, disassembly and raw trace reports).
+All are diagnostic, not strict qualification. Subsequent dual-hart repairs and
+runtime revalidation are recorded below; physical qualification still lacks
+its PDK/library/corner/constraint inputs.
+
+**Final paired renewal:** the restart-frontier, redirect-owner and split-target
+repairs pass the activated integer witnesses. Rebuilding the matched RR models
+exposed a Verilator 5.008 `VL_CONSTHI_W_*X` host out-of-bounds zero-fill in
+stream8 RR1, not an RR policy result. A user-approved private runtime copy fixes
+the absolute-index/shifted-pointer mismatch; its guarded canary gives 18
+mismatches before and zero after. No installed tool, RTL or workload changed
+for this correction. All generated C++ objects were rebuilt against the same
+corrected header (SHA256 `dfbc2c4a…`). All six controls now pass and reproduce
+the timings/counters above, including 275,593 ROI cycles and four L2 misses on
+both stream8 legs. Source/model/ELF/runtime records and logs are in
+`/opt/testharness/runs/review-private-runtime-rebuild-20260915/output/`, copied
+locally to the approved C: artifact directory. Older native results remain
+historical; use the corrected-runtime identities for renewed evidence.
+RR remains default-off; no physical or representative cacheable-data gain is claimed.
 
 Isolated core overlays (`verif/regress/isolated-config-overlay.py`) may
-flip only `L2RoundRobinEn` in a copied package and derived flist.
-`SOFT_LADDER_ISOLATED=1` refuses production Mdir basenames
+flip only allowlisted fields (`L2RoundRobinEn`, `ExecuteRegionDramLen`) in
+a copied package and derived flist. `SOFT_LADDER_OVERLAY` fields are
+comma-separated. `SOFT_LADDER_ISOLATED=1` refuses production Mdir basenames
 (`work-ver-stream8`, `work-ver-smt2-fw64-B`, …) even when the path is
 absolute. `mini_checked_work.S` is a 48 KiB checked fill/verify with DRAM
 markers; N=2 is experimental.
+
+**2026-09-15 — execute-region/cacheability overlap (the real "high miss"
+finding).** `cva6_hpdcache_if_adapter.sv` marks a load uncacheable when its
+paddr is inside an *execute* region (the S4/2jr workaround), and every
+shipped config maps `ExecuteRegion[all-DRAM] = 0x8000_0000+0x4000_0000` ⊇
+the whole cached region. On HPDCACHE targets **all DRAM data loads are
+uncached**: L1 never allocates (`l1m=0` over ~544 KiB), uncached reads emit
+`AxCACHE=0010`, `l2_is_cacheable` fails, and the L2 only ever sees I$
+refills. The earlier "0 cycle delta" stream8 pairings measured that quirk,
+not the L2 policy. With an isolated `ExecuteRegionDramLen=8000` overlay
+(the buffer made cached-non-execute), `mini_l2_hot_scan_pmu` shows real
+traffic: l1m=18,857 / l2m=18,787 (rr0) vs l2m=13,318 (rr1), cyc
+374,177→**325,980 (−12.9%)** — RR keeps the hot line resident under the
+all-set scan. Single RR-favorable workload: evidence a win exists, not
+promotion. Narrowing the execute region in production configs is a product
+decision (it was a deliberate hang workaround); do not silently change it.
 
 Isolated RR-on candidate (2026-09-15): Mdir `iso-stream8-rr1`, overlay
 `L2RoundRobinEn` 0→1, exe `ec650f20…` vs production `7e27de94…`. Same
@@ -349,6 +426,17 @@ addis and never the `bnez`. Uncompressing the loop and inserting a nop
 only moved the stuck pair. Stream8 I=1 RR-on still completes. Not L2
 data corruption (never `tohost=3`). Fetch dual-issue repair is
 follow-on. Not a pass and not promotion.
+
+**2026-09-15 correction — the SMT2 "livelock" is a Verilator vthreads
+artifact, not RTL.** smt2 emits `AxCACHE=0010` on every channel (WT path),
+so `l2_is_cacheable` rejects all traffic and the RR netlist is functionally
+dead there — rr0/rr1 can only diverge through the simulator. Rebuilt
+same-tree pair: vthreads=12 iso-smt2-rr1 froze at the `0x78/0x7c` pair
+(800k, twice, deterministic), while vthreads=12 iso-smt2-rr0 instead hit
+`Active region did not converge` at t=287. Both iso-smt2 verlibs rebuilt
+with `SOFT_LADDER_VERILATOR_THREADS=1` (rr0 and rr1) **pass identically at
+22,964 cy**. Determinism-before-attribution applies: RR never caused it.
+Treat smt2 vthreads=12 model behavior as suspect; qualify at vthreads=1.
 
 MSHR merge/full/waiter and same-bank vs different-bank conflict are now
 leaf-covered (`L2TB_MODE=units`). Isolated stream8 RR-on checked-work is a

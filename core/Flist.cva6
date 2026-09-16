@@ -144,7 +144,6 @@ ${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/counter.sv
 ${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/src/delta_counter.sv
 
 // Top-level source files (not necessarily instantiated at the top of the cva6).
-${CVA6_REPO_DIR}/core/cva6.sv
 ${CVA6_REPO_DIR}/core/cva6_rvfi_probes.sv
 ${CVA6_REPO_DIR}/core/alu.sv
 ${CVA6_REPO_DIR}/core/alu_wrapper.sv
@@ -251,6 +250,7 @@ ${CVA6_REPO_DIR}/core/frontend/ras.sv
 // ${CVA6_REPO_DIR}/core/fetch_A/frontend/frontend.sv
 // ${CVA6_REPO_DIR}/core/fetch_A/smt/g6lc_fetch_dbg.sv
 -f ${CVA6_REPO_DIR}/core/Flist.fetch_B
+${CVA6_REPO_DIR}/core/cva6.sv
 
 // Cache subsystem
 ${CVA6_REPO_DIR}/core/cache_subsystem/wt_dcache_ctrl.sv

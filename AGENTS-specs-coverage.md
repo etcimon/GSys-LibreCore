@@ -15,6 +15,27 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ---
 
+## Instruction-supply review status (2026-09-15)
+
+**Partial / not SMT2-qualified.** A sparse-packet dual-issue ordering defect is
+reproduced and repaired, with independent leaf scoreboarding and generic
+synthesis screening. No physical-area, frequency or throughput improvement is
+qualified. Earlier live-fetch formal passes included impossible hart bounds;
+assertions and reachable covers are being re-established. A same-cycle response/expected-PC repair also makes fresh single-worker
+compressed and uncompressed checked-work pass; two-worker controls still
+lack a verdict without explicit activation. A further redirect-chain witness
+passes after a current-transaction completion repair, full-core synthesis is
+clean, and bounded realigner assertions/covers pass in a reduced aligned-input
+envelope. Typed retirement/operand checking now validates the explicitly
+activated RVI and mixed C/I integer workloads after restart-boundary,
+redirect-ownership and split-target acceptance repairs. Matching observer
+controls and an injected-error checker control are retained; a cookie PASS
+alone had hidden an intermediate instruction loss. A later host-runtime
+memory corruption was isolated and corrected in a private runtime; matched
+full-workload and reference-trace revalidation passes on that runtime.
+Independent IQ order verification remains open. Physical qualification lacks technology inputs.
+No complete base ISA, C-extension, natural-firmware or SMT coverage status is promoted.
+
 ## Status legend and derivation
 
 | Status | Derivation (from the two source maps) |
@@ -32,13 +53,28 @@ configs; a specific build may have less. Use the source maps + the target's prof
 
 ## Non-ISA APU transport
 
-**N/A for RISC-V ISA coverage; partial subsystem implementation.** Standalone
-register/queue transport, private AXI control authorization/epoch checks,
-default-off behavior and bounded resource-checked AXI read/write leaves have remote
-directed, lint and generic synthesis evidence. The DMA leaves are exercised against
-memory responder models, separately from control reset/stop tests. Protected
-mapping-table lifecycle, SG and combined-copy integration, cache coherence, firmware domains, graphics
-execution, formal proof and full SoC coexistence are not covered. No architectural coverage status below is promoted.
+**N/A for RISC-V ISA coverage; partial subsystem implementation.** Transport,
+AXI-Lite control, checked read/write DMA, SRAM SG snapshots, mapping/command
+storage, used-ring and mailbox memory integration have directed component
+evidence. Optional testharness decode, firmware-RAM fills and CVA6 fetch/cookie
+runs establish bring-up, not a protected service. Native arithmetic/control and
+local-word output are prototypes, not a hardware graphics pipeline. Review adds
+passing adversarial source-retention, decode/privilege and read-error-drain tests.
+Native/compositor synthesis screens and the CVA6 cookie were revalidated;
+existing core range and upstream SRAM warnings remain. This does not change
+the subsystem's partial status. Firmware-RAM write follow-through adds tested
+full rejected-burst draining, lane-strobe protection, malformed-WLAST quarantine
+and reset recovery; enabled/disabled RAM retention is screened separately from
+mapping-table validity. The separate control bridge's burst/error gaps remain.
+
+Production source/RAM protection, full-address/write-bus safety, hardware table
+initialization and mapping/program lifecycle, combined memory/exec, compiler
+parity, cache coherence and real S-mode/OpenSBI/Linux operation remain open.
+Optional BIOS service loading/health is specified, not implemented; service-ready
+is not Linux boot confirmation. No unchanged-driver GLES2, combined-copy/context
+isolation, full advertised conformance, formal safety/liveness, full SoC
+coexistence or physical qualification follows. Disabled and generic synthesis
+results are per-fixture only. No architectural coverage status below is promoted.
 
 ## Non-ISA L2 replacement experiment
 

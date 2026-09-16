@@ -19,6 +19,172 @@ Priors: `architecture/router-core-upgrade-program.md`, `architecture/l2-l3-cache
 User objective: balanced single-core latency and multicore throughput/area, preserving SMT.
 First candidate: optional L2 round-robin replacement; no production-default or SMT-scheduler change.
 
+### Flattened completion gates (2026-09-15 review; supersedes experiment ordering below)
+
+Treat the historical P0–P3 entries below as an evidence ledger, not a serial
+implementation checklist. RTL present, bounded diagnostic PASS, named-package
+functional qualification, and performance/area promotion are distinct states.
+No stage closes merely because its implementation or a proof file exists.
+
+| Gate | Current state | Completion criterion / next action |
+|---|---|---|
+| F0 — reproducible evidence | Partial | Immutable source closure including submodules/generated bootrom, target/config/tool/flags/ELF/executable hashes, bounded execution, separate PASS/FAIL/timeout/crash verdicts. Use VT1 and `+debug_disable`; `env -i` is a control, not a memory-safety fix. Reject cookie-free `SUCCESS(tohost=0)`. |
+| F1 — instruction supply correctness | Seven targeted repairs; integer trace gate passes, broader gate open | Check accepted bytes/PC/hart/exception/prediction as one transaction. Independent FIFO reference must cover sparse masks, partial acceptance, stalls, wrap, flush and backward branches. Repair current RTL, not an obsolete historical selector. |
+| F2 — SMT2 functional gate | Dual-active integer diagnostics pass; broader gate open | Full checked-work on freshly built compressed and uncompressed ELFs; then two active harts with disjoint work/checksums, release/acquire, traps, WFI/wakeup and LR/SC. NWORKERS=1 on a two-hart package is not a two-active-hart pass. Natural OpenSBI remains a separate gate. |
+| F3 — integrated efficiency | Diagnostic evidence only | Retain existing interfaces, reset/clock strategy and `CVA6Cfg` geometry; prefer removing redundant ranking/mux/state over adding heuristics. Compare checked work/cycles, generic cells/storage and timing cones on identical configurations before/after; no area/STA claim from line counts or generic cells. |
+| F4 — L2 policy decision | Default-off candidate | Preserve completed leaf/equivalence/AMO evidence at its stated scope. Rerun paired core/SMT/cluster controls after F1; representative hot, streaming, pointer-chase and conflict workloads must expose actual cacheable traffic. Record regressions as well as wins. |
+| F5 — release qualification | Open | Close source/build/run binding gaps, production-geometry mapped or explicitly compositional equivalence, concurrent invalidation/error/atomic coverage, required formal covers, then mapped SRAM/DFT/STA/power. No RR default-on or SMT2 SKU promotion before these gates. |
+
+**Review corrections:** `7e6c19c54` introduced an I-cache index skew already
+fixed by `9fbab3044`. Its minimum-PC queue selector has since been replaced by
+age selection. Historical hybrid failures and current `tohost=3` do not prove
+one uninterrupted root cause. An unchanged log ending at a probe cutoff does
+not prove simulator livelock; process matching must not match its own command.
+The bisect payload copied from `smt2-norvc-vt1` visibly contains compressed
+instructions in the recorded disassembly, so directory names cannot establish
+a `-norvc` control. Recheck ELF hashes, symbols, code and build recipes.
+
+**Formal review blocker:** `g6lc_fetch_iq_props.sv` and
+`g6lc_fetch_realign_props.sv` narrow `NH=2` to a one-bit `HARTW'(NH)=0` in an
+assumption. No hart satisfies that bound after reset. Their prior PASS claims
+must be treated as vacuous until corrected and reachable covers rerun. The IQ
+order harness additionally assumes prefix-valid inputs although the live
+frontend can prefix-filter slots; it checks DUT sequence metadata, not an
+independent conservation/order model. These are verification defects to repair,
+not grounds to waive the live interface cases.
+
+**Efficiency scope:** the stream8 e8k-overlay result (374,177→325,980 ROI
+cycles; 18,787→13,318 L2 misses) remains a recorded RR-favourable measurement,
+not a production cacheability or performance claim. Do not narrow execute
+regions, merge stream8 and SMT2 packages, disable assertions or add
+register/value/opcode-specific workarounds to obtain a passing result.
+
+### Review implementation and evidence (2026-09-15)
+
+- [x] Reproduce the current sparse-input IQ defect against an independent
+  accepted-stream model. Fix `core/fetch_B/instr_queue.sv` by compaction,
+  origin-slot consumption mapping and slot-rank timestamps. Remote 2/I1/H1,
+  4/I2/H2 and 8/I2/H2 fixtures pass (548 / 1,103 / 1,462 accepted entries).
+  Before, dual-issue skipped a hidden older entry at t=35.
+- [x] Compare identical live-port IQ synthesis fixtures: 25,618→22,354 generic
+  cells (−12.7%), 5,954 sequential cells unchanged, no latches/check problems.
+  This is logic-cost screening, not physical area or critical-path sign-off.
+- [x] Local diagnostic `verify --target g6lc64_smt2 --lint`: 256 warnings within
+  the existing budget; strict elaboration clean. Remote full-core builds use
+  unique copied source/Mdirs, VT1, fixed seed and direct cookie verdicts.
+- [x] Isolate the remaining N1 verdict failure: verified-norvc finishes with
+  both checksums `0xc000`, sets PASS (`a0=1`), then executes the fall-through
+  FAIL write (`a0=3`). Repair `core/fetch_B/frontend.sv` to filter current-cycle
+  bytes against the current response/pending target, not `present_exp_q` from
+  the previous response. No new state/cycle/config/ISA/DTS or scheduler change.
+- [x] Byte-identical payload A/B: models `0993083d…`→`44096c6f…`; historical
+  `f14a140c…` FAIL→PASS @131,072; verified-norvc `baad8f97…` FAIL→PASS
+  @137,216; fresh RVC `555f7c14…` PASS→PASS @131,072. Artifacts:
+  `remote-runs/review-identical-serial-20260915/` (diagnostic, not strict
+  qualification). Do not describe `tohost=3` here as proved memory corruption.
+- [~] Two-active-worker qualification now uses typed allocation-generation,
+  issue/ALU/LSU/writeback/retirement traces, not transient GPR snapshots. Original
+  no-IPI N2 remains an activation-negative control; no boot/scheduler gate changed.
+  The first proved loss discarded IQ PCs 0x68/0x6c but saved transport PC 0x70.
+  `restart_frontier` now preserves the oldest owning decode/IQ token. A cookie
+  PASS after this fix was false assurance: the independent model found a later
+  foreign-hart misprediction corrupting the incoming recovery filter. Active
+  recovery/controller flushes now route by owner; inactive redirects update
+  their own PC bank, with global scoreboard/LSU/training resolution retained.
+  The RVI witness now passes 13,696 retirements and 25,774 operand checks;
+  1,025 known load values are checked and one peer-flag value is not asserted
+  against global commit order. RVC then exposed an uncleared split target:
+  response 0x58 accepts target 0x56, but window-only completion misses it and
+  later replays 0x56 instead of branch target 0x52. `accepted_target` uses
+  actual consumed instruction PCs. Model `7037f685…` now writes PASS for the
+  byte-identical 48 KiB/hart RVI and RVC ELFs at 282,624 / 270,336 cookie polls;
+  independent post-fix traces pass for both encodings (13,696 RVI / 14,202 mixed
+  C/I retirements, each 25,774 operand checks, 1,025 checked known loads and one
+  peer-flag value outside the memory-order oracle). Both have nine matching
+  baseline/off/on witness fingerprints and positive/mutated-trace controls.
+  Do not equate this integer diagnostic scope with full SMT, natural firmware
+  or physical qualification.
+- [x] Realigner bounded closure: widened hart bounds, top-level inputs and
+  equivalent bounded checker index. Eight-frame BMC plus five covers PASS,
+  including hart-1 carry completion and switching with live carry. Scope remains
+  FW64/H2/VLEN32, aligned inputs and emitted low halfwords, not full qualification.
+- [~] Independent IQ formal now has free inputs, arbitrary sparse/PC packets,
+  ghost occupancy and a watched accepted-entry PC/instruction/hart oracle.
+  Both cover and ten-frame BMC timed out at 120 s (`review-iq-independent-order-20260915`);
+  no final safety verdict. Raw-opcode non-interference remains a separate
+  contract conflict; its prior frame-3 counterexample is not waived.
+- [x] Recover and repair full-core synthesis failure: three replay/realigner/
+  I-cache response-valid combinational loops. Register retry/address feedback,
+  retain response-cycle IQ acceptance and align exception/retry metadata. Final
+  full-core SMT2 smoke: zero check problems, 32,487 coarse RTLIL cells (not
+  comparable to the mapped IQ-only count; not physical area).
+- [x] Repair architectural redirect completion on current IQ acceptance. The
+  accepted target branch's prediction previously cleared the registered response
+  before completion, losing its target. Byte-identical `mini_fetch_redirect_chain.S`
+  ELF `829fbeaa…` changes no-verdict→PASS on `44096c6f…`→`3aa9014d…`.
+  Both fresh N1 checked-work encoding controls remain PASS. No scheduler change.
+- [x] Prove restart selection, redirect-owner routing and actual target
+  acceptance with reachable covers in `g6lc_fetch_smt.sby` (default formal
+  list). `smtbmc --unroll z3` removes the SMT cover solver bottleneck without
+  weakening assertions. Bank tests cover owner, invalid source, valid zero PC,
+  reset, single-hart identity and inactive/coincident redirects. The cold
+  `mini_fetch_split_redirect.S` passes on the pre-fix model and is a control,
+  not a negative witness; the warmed dual-hart RVC program is the live negative.
+- [x] Validate observer-off/on controls before interpreting traces; private
+  generation counters never drive RTL. The independent reference checker also
+  passes a single-worker positive and detects an in-memory operand mutation.
+  E: filled during a large pull; remote evidence stayed intact. User approved
+  new local artifacts on C:/Users/etcim/AppData/Local/Temp/cva6-artifacts/.
+  Proxy per-run/destination pulls and nonzero transfer failures have six tests.
+- [x] Renew default-cacheability RR controls using the earlier fetch snapshot,
+  VT1 and byte-identical payloads. SMT2 N1 RR0/RR1 PASS at 137,216 cookie polls;
+  stream8 N1 RR0/RR1 PASS at 167,936; stream8 hot+scan both PASS at 464,896.
+  Warm+scan report: both 275,593 cycles, L2 misses 4 and L1D misses 0; no RR
+  performance gain established. `review-renewed-rr-controls-20260915` retains
+  build/model/ELF/overlay records and raw counters. RR stays default-off.
+- [ ] Physical/STA/DFT/P&R/power qualification: `tech status/check` confirms no
+  PDK content, no active technology, no tech-spec and `physicalDesign.flow=none`.
+  Need an approved library/SRAM bundle, corners and constraints; no guessed
+  process mapping or frequency promotion. Production geometry/cluster/AMO and
+  natural firmware remain independent release gates.
+- [x] F0 host-runtime correction/revalidation: stream8 RR-on crashed in
+  `getenv` before guest execution. A hardware watchpoint identifies a generated
+  initialization write into `environ`; Verilator 5.008 `VL_CONSTHI_W_*X` uses
+  an absolute zero-fill index on an already shifted pointer. A guarded-buffer
+  test gives 18 mismatches before / zero after the private header correction.
+  User approved a run-local runtime copy and matched model rebuilds; installed
+  tools and RTL are untouched. Native results require this revalidation even
+  when their old binaries did not crash. First rebuild failed because a
+  command-line VPATH suppressed Make's runtime search paths; the corrected
+  invocation supplies VPATH through the environment. Four matched models now
+  rebuild and all six RR controls pass: SMT2 N1 137,216 / 137,216, stream8 N1
+  167,936 / 167,936, hot+scan 464,896 / 464,896 cookie polls; ROI counters remain
+  275,593 cycles / four L2 misses / zero L1D misses on both stream8 legs.
+  Corrected-runtime full-core replays also pass both 48 KiB/hart encodings.
+  Independent revalidation passes 13,696 RVI / 14,202 mixed C/I retirements,
+  with the same operand/load checks and nine matching baseline/off/on witness
+  fingerprints per encoding. Corrected baseline `5a10acc1…`, observer
+  `528b720c…`, private runtime-header SHA `dfbc2c4a…`; original installation
+  remains unchanged. The permanent reference checker is `run_operand_analysis.py`
+  (byte-identical to the old ignored `analyze_*.py` scratch copy).
+- [ ] Close F0 gaps: tracked-only manifests omit submodule contents and some
+  build inputs; include generated bootrom and source closure, reject drift.
+  C++ commit trace assumes 16 scoreboard entries but this SMT2 model has eight.
+  Proxy `py --env` quoting fails for values containing spaces. Use scoped
+  transport actions without shared-tree deletion or broad process killing.
+
+Licensing/philosophy review: retain all upstream notices on fetch RTL;
+formal collateral keeps its existing tier-R terms and recorded authorization;
+new diagnostic scripts/benches/minis are MIT. No licensing controls changed.
+The documented `diag run licensing` command is unavailable (`Unknown`), so no
+automated licensing PASS is claimed. Current configs/tiers and retained notices
+were reviewed; no GPL link-set member or licensing control changed. Broader
+build-platform tests report 217 pass / 1 skip / 1 fail: the unchanged branding
+test expects `g6lc_core_types.svh` to declare a matching module/package and
+matches `module moved` in its comment (including a generated formal copy).
+This pre-existing test/header mismatch is not waived or altered here. Generic logic improves without new state;
+full RTL/SMT/physical completion remains subject to F0–F5, not these checkmarks.
+
 Etienne Cimon explicitly authorized tier-R contributions in this session:
 “I, Etienne Cimon, give tier-R contribution authorization for all code base changes as necessary”.
 This records the supplied authorization, not a claim that a signed CLA document was found.
@@ -401,6 +567,113 @@ headers — the stem check scans `.svh` macro includes and finds no module/packa
 declaration (`found [moved]` is a regex false-positive on a comment word). Either
 exempt `.svh` includes from the stem rule or rename the headers; deferred as a
 test-semantics decision, unrelated to the qualification path.
+
+## API-neutral APU completion review (2026-09-15)
+
+**Current-state authority:** review of `d74010111d7f9d78e32e75fd64f4ea07c3323fcc`.
+Older P0/P1/P2 entries below are historical slice evidence where superseded here.
+The local APU plan `plan-5ddc97674e5bf9b0.md` is flattened into gates A0–A7,
+not another chronological cookie series. `architecture/uncore/apu-*` now
+separates bring-up mechanisms, actual guarantees and deployment blockers.
+
+- [x] Review both the APU plan and recoverable-BIOS plan
+  `plan-c06f2ee19717de0d.md`. Define independent platform-managed and optional
+  BIOS-managed loading of one persistent S-mode service. Only an image/status/
+  handoff adapter is common; no BIOS crate dependency, shared journal writer or
+  synchronized update cycle. `apu-firmware-domain.md` owns the contract.
+- [x] Distinguish firmware-instance readiness, graphics owner/queue epochs and
+  Linux boot-attempt health. APU cookie/heartbeat is not Linux acknowledgement,
+  BIOS candidate confirmation, watchdog ownership or permission to autoboot.
+  Optional graphics failure leaves serial/recovery usable. No BIOS code changed.
+- [x] Reproduce and fix AXI4 source retention in `g6lc_apu_th`: twelve failing
+  checks became **12 cases / 60 checks / 221 clocks, errors=0**. AW and AR hart
+  tags are captured at accepted address handshakes and held through the adapter;
+  both source-change directions and delayed W are tested, including side effects.
+- [x] Reproduce and fix native Fetch admission: 26 failing checks became
+  **29 cases / 61 checks / 2,646 clocks, errors=0**. Shader privilege applies
+  to BR/NOP/HALT as well as Issue-stage ops; undefined opcodes and high register
+  bits fault without RF writes. A valid job recovers after decode failure.
+- [x] Reproduce and fix firmware-RAM read errors: six failing checks became
+  **8 cases / 842 checks / 2,479 clocks, errors=0**. Rejected ARs return exactly
+  ARLEN+1 beats (17 and 256 included, on/off); all misaligned 64-bit reads reject.
+- [x] Firmware-RAM write follow-through: initial tests reproduced **170 failed
+  checks**. Expanded suite passes **49 cases / 5,699 checks / 5,372 clocks**:
+  AW-first/W-first/coincident arrivals, 2/16/256-beat rejected bursts on/off,
+  captured AW metadata, stable B/ID, missing-data stalls, early/missing WLAST
+  quarantine, coordinated reset, sparse/zero strobes and guard-byte preservation.
+  Enabled/disabled 4-KiB strict leaf lint and generic synthesis pass, including
+  exactly one retained pre-map `$mem_v2` enabled and zero disabled. Existing LEN
+  state is reused; lane-mask admission adds no valid-write latency or new clock.
+  ApuOff, ExecEn and FeatureVirgl/DTS grants are unchanged. This is not full-PA
+  protection, a complete AXI target, formal proof or Linux/GLES2 functionality.
+  Focused remote run `cf49f2` exited 0; CVA6 cookie remains **14 checks / 1,835
+  clocks**, `0x600D000A`, with five existing core SELRANGE warnings. Test-map
+  entry records the RAM/TB blob identities and logs. General verify was rechecked
+  in dry-run only: still selects local/core suites, not executed APU qualification.
+- [x] Earlier review: all directed suites in the combined APU runner passed
+  before the write follow-through (not a fresh all-suite result for that slice):
+  transport/control, three read/two write profiles, SG64/128, storage/queue/
+  memory/system, grant/attach/compositor/domain, exec/mailbox and firmware
+  diagnostics. Firmware cross-compilation is **skipped** on the builder (no
+  RISC-V gcc); checked-in hex/host tests are not freshly compiled firmware proof.
+- [x] Close the remote review rerun `5a1d1f` (exit 0): compositor **64 cases /
+  513 checks / 3,071 clocks**, CVA6 cookie **14 checks / 1,835 clocks**,
+  `0x600D000A`. Native/compositor lint and generic synthesis screens completed:
+  exec **25,430 cells / 3,888 sequential bits**, enabled 4-KiB compositor
+  **156,122 cells / 40,178 sequential bits**. These are per-fixture screens,
+  not a new all-fixture area baseline, memory-retention proof or STA.
+  Initial combined run stopped at upstream FPnew package width warnings;
+  `apu_axi.vlt` scopes LITENDIAN/WIDTHEXPAND to that package only. Existing
+  runner waivers remain; CVA6 still emits five SELRANGE warnings in
+  `core/issue_read_operands.sv` (1303, 1375, 1424), and Slang reports upstream
+  unreset SRAM read-data warnings. Do not call this warning-free full-core lint.
+  Local run log: `%LOCALAPPDATA%/Temp/devin.exe-overflows/`
+  `shell-5a1d1f-85d08c19fdc81f85/content.txt`; remote artifacts under
+  `/tmp/g6lc-apu-virtio-mmio`. No firmware cross-compile or Linux boot is inferred.
+- [ ] General build-platform gate remains **dry-run only**, not PASS:
+  `verify --lint --formal --sim --synth --target g6lc64_stream8 --dry-run`
+  selects local Verilator and unrelated core suites. Resolve remote routing/
+  APU registration separately; do not edit concurrent qualification settings.
+
+**Remaining gates (not implied by the implemented corrections):**
+
+- [ ] A1: trusted fabric source/domain enforcement for control **and RAM**;
+  constant testharness hart tags are not authority. Carry epochs across AXI4
+  buffering, not only AXI-Lite. No guest grant from PROT or an assumed AXI ID.
+- [ ] A1: remove RAM upper-address aliases with full-PA bounds and correct
+  compiler/linker/translation; audit narrow-read/atomic policy. RAM write-drain/
+  lane-strobe fixes are implemented below; the separate AXI4-Lite bridge still
+  needs early-B/burst drain and split-write error aggregation. Integrate fault
+  reporting and coordinated fabric reset for quarantined transactions.
+- [ ] A1: hardware map validity initialization/scrub (SimInit is not reset),
+  mapping/program/SG pinning and retirement, immutable command/program storage,
+  no stale data across reset/context changes, held cancellation/completion.
+- [ ] A2: real pinned OpenSBI → S-mode service and Linux. Current DTS next-mode=3,
+  direct reset, cookie, `fw_ready=#1` / synthesis constant and UART/CLINT/PLIC
+  stubs do not prove this. Add verified loader/BSS/traps/cache sync/protection,
+  service-ready and failed-image/restart behavior; reserve hart/memory in Linux.
+- [ ] A3: standard virtqueue/virgl decoder and one host/CVA6 semantic compiler.
+  RISC-V opcode-only parsing plus frozen MOV is a blocker; IN/OUT/CONST aliasing,
+  vec4/swizzle/write-mask semantics and mandatory Mesa limits remain unsatisfied.
+- [ ] A4: combine memory and exec (currently mutually selected), handle-only
+  protected LSU, real vertex/coverage/interpolation/sampler/fragment/output,
+  context isolation and a cache-visible common surface. Current local storage
+  is resettable arrays, not tc_sram; make exec geometry and DFT claims truthful.
+- [ ] A5: unchanged Linux/Mesa EGL/GLES2 shader/data-dependent output on RTL,
+  no software fallback, raw+PPM evidence; BIOS same-device scene and quiesced
+  client handoff. Optional BIOS-managed provisioning is a separate integration
+  test, not a second firmware. Linux health stays with the BIOS plan's live gate.
+- [ ] A6/A7: full advertised feature/error/exhaustion/CTS coverage, non-vacuous
+  formal safety/liveness, AI/APU/config coexistence, gaming after correctness,
+  HDMI/DP scanout and actual STA/CDC/DFT/MBIST/power/board qualification.
+
+**Review checklist:** separately ApuCfg-gated; no new clock/reset/CDC or CPU/AI
+change. Source latching adds two HartIdWidth banks without bus latency; decode
+checks remain before existing stage registers; RAM uses its existing LEN counter
+and SRAM seam. Timing/area are screening only. No DTS/capability/ISA grant changed.
+Tier/header review is manual: active Etienne Cimon is the recorded rights holder;
+RTL keeps tier R, tests keep MIT, upstream notices and GPL-free link separation
+are unchanged. Existing QEMU whitespace findings are unrelated and left intact.
 
 ## API-neutral APU P0 groundwork (2026-09-14)
 

@@ -37,7 +37,17 @@ module g6lc_fetch_iq_props #(
     parameter int unsigned NH = 2,   // NrHarts
     parameter int unsigned NI = 2    // NrIssuePorts
 ) (
-    input logic clk_i
+    input logic clk_i,
+    input logic flush_i, leftover_complete_i, exception_gva_i,
+    input logic [(NH > 1 ? $clog2(NH) : 1)-1:0] hart_i,
+    input logic [FW/16-1:0][31:0] addr_i,
+    input logic [FW/16-1:0] valid_i,
+    input ariane_pkg::frontend_exception_t exception_i,
+    input logic [31:0] exception_addr_i, predict_address_i,
+    input logic [31:0] exception_gpaddr_i, exception_tinst_i,
+    input ariane_pkg::cf_t [FW/16-1:0] cf_type_i,
+    input logic [NI-1:0] fetch_entry_ready_i,
+    input logic [FW/16-1:0][31:0] instr_a, instr_b
 );
 
 `ifdef FORMAL
@@ -92,19 +102,8 @@ module g6lc_fetch_iq_props #(
   } fe_t;
 
   // --- shared (identical) stimulus -----------------------------------------
-  logic                        flush_i, leftover_complete_i, exception_gva_i;
-  logic [HARTW-1:0]            hart_i;
-  logic [SLOTS-1:0][VLEN-1:0]  addr_i;
-  logic [SLOTS-1:0]            valid_i;
-  frontend_exception_t         exception_i;
-  logic [VLEN-1:0]             exception_addr_i, predict_address_i;
-  logic [GPLEN-1:0]            exception_gpaddr_i;
-  logic [31:0]                 exception_tinst_i;
-  cf_t  [SLOTS-1:0]            cf_type_i;
-  logic [NI-1:0]               fetch_entry_ready_i;
 
   // --- the only difference: the raw instruction payload --------------------
-  logic [SLOTS-1:0][31:0] instr_a, instr_b;
 
   logic rst_init_q = 1'b1;
   logic rst_ni;
@@ -140,7 +139,7 @@ module g6lc_fetch_iq_props #(
   );
 
   always_ff @(posedge clk_i) begin
-    if (rst_ni && NH > 1) assume (hart_i < HARTW'(NH));
+    if (rst_ni) assume (int'(hart_i) < NH);
   end
 
   // --- I6: control flow is identical under a different encoding ------------

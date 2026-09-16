@@ -3,10 +3,15 @@
 # Run: sby -f core/fetch_B/formal/g6lc_fetch_smt.sby
 # Wired into build-platform verify.formalTasks (cva6-build verify --formal).
 
+[tasks]
+prove
+cover
+
 [options]
 # Combinational contract; en.restore/en_smt are free, so one run covers both
 # the T=1 and T>1 envelopes.
-mode prove
+prove: mode prove
+cover: mode cover
 depth 4
 
 [engines]
@@ -16,8 +21,9 @@ depth 4
 # pdr and does not converge in 240s under z3 -- while z3 is the more capable
 # engine if a property later grows word-level arithmetic. Racing them means
 # no single solver shape can stall the gate.
-abc pdr
-smtbmc z3
+prove: abc pdr
+prove: smtbmc z3
+cover: smtbmc --unroll z3
 
 [script]
 # `config_pkg.sv` uses user-defined-type casts (`ai_cfg_t'(0)`), which the

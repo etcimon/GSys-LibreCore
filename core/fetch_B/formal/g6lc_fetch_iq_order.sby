@@ -9,15 +9,22 @@
 # Not in the default verify.formalTasks until pseq_monotone PASSes; the FIFO
 # data-order discharge lives in cva6_fifo_v3_order.sby (that task is default).
 
+[tasks]
+bmc
+cover
+
 [options]
 # One live queue; depth must cover fill, a few dual issues, a replay and a flush.
-mode bmc
+bmc: mode bmc
+cover: mode cover
 depth 10
+bmc: aigsmt z3
 
 [engines]
 # abc-bmc3 first (far faster than z3 on this bit-level cone); both are raced.
-abc bmc3
-smtbmc z3
+bmc: abc bmc3
+bmc: smtbmc --unroll z3
+cover: smtbmc --unroll z3
 
 [script]
 read_slang --std 1800-2017 --top g6lc_fetch_iq_order_props -DFORMAL \

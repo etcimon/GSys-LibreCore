@@ -7,17 +7,24 @@
 # Run: sby -f core/fetch_B/formal/g6lc_fetch_iq.sby
 # Wired into build-platform verify.formalTasks (cva6-build verify --formal).
 
+[tasks]
+bmc
+cover
+
 [options]
 # Two queues plus their FIFOs; the horizon must cover fill, dual issue, replay
 # and a flush. Bounded rather than unbounded: `prove` on two copies of a FIFO is
 # a much harder induction problem than the property needs.
-mode bmc
+bmc: mode bmc
+cover: mode cover
 depth 10
+bmc: aigsmt z3
 
 [engines]
 # abc-bmc3 first (far faster than z3 on this bit-level cone); both are raced.
-abc bmc3
-smtbmc z3
+bmc: abc bmc3
+bmc: smtbmc z3
+cover: smtbmc z3
 
 [script]
 # read_slang: `fetch_entry_t` is a `parameter type`, and the queue is driven

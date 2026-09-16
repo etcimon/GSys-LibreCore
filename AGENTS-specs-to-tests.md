@@ -17,6 +17,41 @@ matching row here so "which spec chapter is this test protecting?" stays answera
 
 ---
 
+## Instruction-supply review tests (2026-09-15)
+
+| Contract | Test / execution | Scope and result |
+|---|---|---|
+| Accepted instruction order, bytes, hart and predicted target | `verif/tb/core/tb_g6lc_fetch_queue.sv`; proxy `py verif/regress/remote/run_fetch_queue.py` with explicit source files | Independent accepted-stream scoreboard. Before: sparse input skips an older entry at t=35 for 4/8 slots, dual issue. After compaction: 2-slot/I1/H1, 4-slot/I2/H2 and 8-slot/I2/H2 PASS, including stalls, flushes, backward packet PCs and CF target accounting. Leaf diagnostic, not two-active-core execution. |
+| Implementation cost / synthesizability | Proxy `py verif/regress/remote/run_fetch_queue_synth.py` with the same copied sources | Four-slot/I2/H2 live-port generic fixture, exceptions tied off. 25,618→22,354 cells; sequential count unchanged; no latches/check errors. Not physical area, full-core synthesis or STA. |
+| Live fetch assertions and non-vacuity | `g6lc_fetch_{iq,realign}.sby` now have separate `bmc` and `cover` tasks; proxy `py verif/regress/remote/run_fetch_formal.py` | Fixed impossible NH=2 bound and made free stimulus explicit top-level ports. Covers/assertions must pass independently; prior vacuous PASS withdrawn. IQ raw-opcode non-interference and reduced formal envelopes remain review gates, not program-order proof. |
+| SMT2 checked-work witness | Proxy `py verif/regress/remote/run_checked_work_review.py`, model path+SHA and compiler prefix explicit | Rebuild source, record ELF/recipe/disassembly, verify zero compressed opcodes in norvc cases, VT1/model-bound cookie verdicts. With queue compaction alone, RVC N1 PASS and norvc N1 FAIL. After same-cycle expected-PC repair, both N1 variants PASS (131,072 / 137,216 cycles); both N2 still no verdict by 500k. `mini_fetch_target_prefix.S` is a short warmed same-window jump control, not a replacement for the full regression. No dual-active SMT2 qualification. |
+
+Follow-up regressions: `mini_fetch_redirect_chain.S` is a byte-identical
+no-verdict→PASS witness for an architectural redirect whose target is another
+taken branch. Existing `mini_ipi_hart1_sp.S` passes; IPI-started checked-work
+still fails and the original no-IPI N2 case remains a negative activation
+control. Final SMT2 lint/elaboration and full-core synthesis pass. The
+realigner's eight-frame BMC and five covers pass after an equivalent bounded
+index rewrite; its assumptions still restrict input alignment and geometry.
+`g6lc_fetch_iq_order_props.sv` now exposes free inputs, accepts sparse/arbitrary
+PC packets and checks a watched accepted entry against independent occupancy
+and output progress; it is not replaced by IQ self-composition. Both its cover
+and ten-frame BMC timed out at 120 seconds; no final safety verdict is claimed.
+
+Typed restart follow-up: `g6lc_operand_trace.svh`, `run_operand_trace.py` and
+`run_operand_analysis.py` add allocation-generation/hart correlation, actual
+execution/LSU events, observer-off/on fingerprints and an independent integer
+retirement model with an injected-operand negative control. They expose missing
+unissued instructions at switch and then a foreign-hart redirect despite a
+cookie PASS. `tb_g6lc_restart.sv` / `run_restart_bank.py` exercise bank ownership,
+valid-zero/invalid-source handling and redirect collisions. Selector/routing
+proofs and covers in the already-listed `g6lc_fetch_smt.sby` pass. None of these
+supersedes full SMT qualification or the still-open IQ proof.
+
+Source/build/run snapshots are under `remote-runs/review-*20260915/` and
+`remote-runs/review-20260915/`; these diagnostics do not emit strict
+`G6LC_EVIDENCE`. No architectural coverage status is promoted.
+
 ## Independent BIOS software verification
 
 `g6lc_bios` B50–B52 tests are package-local, not ISA compliance suites:
@@ -172,6 +207,59 @@ None of these tests is a full testharness OpenSBI firmware boot or a
 stock-driver GLES2 proof.
 Remote results are recorded in `AGENTS-todo.md` under P1 SG walker / storage /
 used-ring and P2 testharness firmware RAM I$ fills. None of these tests is a stock-driver GLES2 or renderer proof.
+
+### APU completion review regression (2026-09-15)
+
+Against `d74010111`, added tests first reproduce twelve source-tag failures,
+26 native decode failures and six firmware-RAM read failures. After corrections:
+
+| Test | Cases | Checks | Clocks | New contract evidence |
+|---|---:|---:|---:|---|
+| `tb_g6lc_apu_th` | 12 | 60 | 221 | AW/AR acceptance source retained across live tag changes; delayed W; denied writes have no effect |
+| `tb_g6lc_apu_exec` | 29 | 61 | 2,646 | BR/NOP/HALT shader privilege; undefined opcode and high-register-index rejection; RF preserved; next valid job works |
+| `tb_g6lc_apu_fwram` | 49 | 5,699 | 5,372 | Read-drain/alignment plus AWLEN+1 rejected-write drain on/off, AW metadata retention, B stalls, lane strobes/guard bytes, WLAST quarantine and fabric-reset recovery |
+
+Write follow-through initially reproduced 170 failed checks; the expanded RAM
+suite above passes via `run-fwram-only.sh`. Enabled/disabled 4-KiB leaf lint and
+generic synthesis pass, with exactly one pre-map `$mem_v2` enabled and zero
+disabled. Missing W cannot complete; malformed WLAST blocks all channels until
+coordinated fabric reset. No full-PA/source/atomic or control-bridge fix is implied.
+The same focused run revalidated `run-cva6-cookie.sh`: 14 checks / 1,835 clocks,
+`0x600D000A`, retaining the five known core SELRANGE warnings. Remote shell
+`cf49f2` exited 0. Local log: `%LOCALAPPDATA%/Temp/devin.exe-overflows/`
+`shell-cf49f2-9d95ba4a2eb780c4/content.txt`; RAM synthesis logs on the builder:
+`/tmp/g6lc-apu-virtio-mmio/fwram/write-synth-{0,1}.log`. Tested RAM/TB Git blob
+IDs: `5335eff6f97185ae20cb3667efff534a0eff4dd7` /
+`bffa420cd3b7951d69513a6bb7b3e2305671e09c` (not a commit or full-source manifest).
+
+The earlier review ran all directed suites in `APU_EXEC=1 APU_SOC=1 APU_AXI=1 APU_DMA=1
+APU_DMA_WRITE=1 APU_SG=1 APU_MEM=1 APU_SYNTH=1 bash
+verif/tb/apu/run-virtio-mmio.sh` through the remote testharness proxy, passing
+before this write follow-through. The focused rerun is not a fresh full-suite pass.
+The initial combined run stopped in SoC lint on upstream FPnew width warnings.
+File/rule-scoped `fpnew_pkg.sv` exceptions cover LITENDIAN/WIDTHEXPAND;
+no new first-party width exception is added. Remote rerun `5a1d1f` exited 0:
+compositor 64 cases / 513 checks / 3,071 clocks and CVA6 cookie 14 checks /
+1,835 clocks pass. Native/compositor lint and generic synthesis screens
+completed; exact counts and log location are in `AGENTS-todo.md`. Existing
+runner waivers remain. Five CVA6 SELRANGE warnings and upstream unreset-SRAM
+read-data warnings remain visible; this is not warning-free full-core lint.
+Firmware cross-compile is skipped without RISC-V gcc; the checked-in images are
+bring-up inputs, not fresh compiler-parity or reproducible-image evidence.
+
+Review narrows prior claims: the target TGSI cookie uses an opcode stub and
+frozen MOV output, not host-equivalent compilation. Direct CVA6 reset does not
+establish S-mode isolation. Exec local arrays are not SRAM macro proof; MemEn
+and ExecEn are not combined; table simulation initialization does not prove
+reset validity. Remaining source/RAM protection, full-PA/write-drain, epoch/
+lease/cancel, actual OpenSBI/Linux, noncoherent DMA, formal and graphics gates
+are enumerated in the APU architecture notes. No Linux/Mesa, BIOS boot-health,
+rendering or physical qualification is promoted by these unit tests.
+
+Build-platform `verify --lint --formal --sim --synth --target g6lc64_stream8
+--dry-run` executes no verification; its success exit is not gate evidence.
+It currently chooses local tools/core suites rather than the required APU
+remote path. No BIOS source, Linux helper or journal-format changes were made.
 
 ## Running the suites (single orchestrator)
 

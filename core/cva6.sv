@@ -441,6 +441,7 @@ module cva6
   exception_t ex_commit;  // exception from commit stage
   bp_resolve_t resolved_branch;
   bp_resolve_t resolved_branch_fe;
+  bp_resolve_t resolved_branch_ctrl;
 `ifndef G6LC_FETCH_B
   // G1gq: A-only commit-time JALR salvage redirect. Dropped from B at
   // 3745cfb06; issue_stage still declares the ports under the same guard.
@@ -804,6 +805,9 @@ module cva6
   // Frontend
   // --------------
   logic [CVA6Cfg.VLEN-1:0] smt_npc_live;
+  logic [CVA6Cfg.VLEN-1:0] smt_restart_pc;
+  logic smt_restart_valid;
+  logic [HART_ID_BITS-1:0] smt_outgoing_hart;
   logic [CVA6Cfg.VLEN-1:0] smt_npc_restore;
   logic                    smt_pc_restore;
 
@@ -866,13 +870,57 @@ module cva6
 `endif
   );
 
+`ifdef G6LC_FETCH_B
+  if (CVA6Cfg.NrHarts > 1) begin : gen_smt_restart_frontier
+    logic [7:0] decode_valid, queue_valid;
+    logic [7:0][7:0] decode_hart, queue_hart;
+    logic [7:0][63:0] decode_pc, queue_pc;
+    g6lc_fetch_pkg::restart_t selected;
+    always_comb begin
+      decode_valid = '0;
+      queue_valid = '0;
+      decode_hart = '0;
+      queue_hart = '0;
+      decode_pc = '0;
+      queue_pc = '0;
+      for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
+        decode_valid[p] = smt_switch && issue_entry_valid_id_issue[p];
+        decode_hart[p] = 8'(issue_entry_id_issue[p].hart_id);
+        decode_pc[p] = 64'(issue_entry_id_issue[p].pc);
+        queue_valid[p] = smt_switch && fetch_valid_if_id[p];
+        queue_hart[p] = 8'(fetch_entry_if_id[p].hart_id);
+        queue_pc[p] = 64'(fetch_entry_if_id[p].address);
+      end
+      selected = g6lc_fetch_pkg::restart_frontier(
+          CVA6Cfg.NrIssuePorts, 8'(smt_outgoing_hart),
+          decode_valid, decode_hart, decode_pc, queue_valid, queue_hart, queue_pc,
+          '{valid: 1'b1, pc: 64'(smt_npc_live)},
+          smt_switch && resolved_branch.valid && resolved_branch.is_mispredict,
+          8'(resolved_branch.hart_id), 64'(resolved_branch.target_address));
+    end
+    assign smt_restart_pc = CVA6Cfg.VLEN'(selected.pc);
+    assign smt_restart_valid = selected.valid;
+  end else begin : gen_smt_restart_single
+    assign smt_restart_pc = smt_npc_live;
+    assign smt_restart_valid = 1'b1;
+  end
+`else
+  assign smt_restart_pc = smt_npc_live;
+  assign smt_restart_valid = 1'b1;
+`endif
+
   g6lc_smt_pc_bank #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_pc_bank (
       .clk_i,
       .rst_ni,
       .boot_addr_i  (boot_addr_i[CVA6Cfg.VLEN-1:0]),
-      .npc_live_i      (smt_npc_live),
+      .npc_live_i      (smt_restart_pc),
+      .npc_live_valid_i(smt_restart_valid),
+      .redirect_valid_i(resolved_branch.valid && resolved_branch.is_mispredict),
+      .redirect_hart_i (resolved_branch.hart_id),
+      .redirect_pc_i   (resolved_branch.target_address),
+      .outgoing_hart_o (smt_outgoing_hart),
       .active_hart_i   (smt_active_hart),
       .switch_i        (smt_switch),
 `ifdef G6LC_FETCH_B
@@ -1849,6 +1897,16 @@ module cva6
   // ------------
   // Controller
   // ------------
+  always_comb begin
+    resolved_branch_ctrl = resolved_branch_fe;
+`ifdef G6LC_FETCH_B
+    if (CVA6Cfg.NrHarts > 1)
+      resolved_branch_ctrl.is_mispredict = g6lc_fetch_pkg::redirect_for_hart(
+          1'b1, resolved_branch_fe.valid && resolved_branch_fe.is_mispredict,
+          8'(resolved_branch_fe.hart_id), 8'(smt_active_hart));
+`endif
+  end
+
   controller #(
       .CVA6Cfg(CVA6Cfg),
       .bp_resolve_t(bp_resolve_t)
@@ -1879,7 +1937,7 @@ module cva6
       .eret_i                (eret),
       .ex_valid_i            (ex_commit.valid),
       .set_debug_pc_i        (set_debug_pc),
-      .resolved_branch_i     (resolved_branch_fe),
+      .resolved_branch_i     (resolved_branch_ctrl),
       .flush_csr_i           (flush_csr_ctrl),
       .fence_i_i             (fence_i_commit_controller),
       .fence_i               (fence_commit_controller),

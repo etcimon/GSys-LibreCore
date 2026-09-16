@@ -762,7 +762,7 @@ done_processing:
         // sbe_w as commit (do not scan from lo — bp tgt leak).
         // SMT/SS debug only: issue_entry_*_id_issue are DCE'd when the
         // target has SuperscalarEn=0 or NrHarts==1.
-#if defined(G6LC_TB_BANKED)
+#if defined(G6LC_TB_BANKED) && defined(G6LC_TRACE_LEGACY_IDSB)
         static int idsb_logs = 0;
         if (trace_on && main_time >= 103000 && main_time <= 180000 &&
             idsb_logs < 250) {

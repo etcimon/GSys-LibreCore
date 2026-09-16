@@ -17,6 +17,10 @@ module g6lc_smt_pc_bank
     input  logic [CVA6Cfg.VLEN-1:0] boot_addr_i,
     // Live NPC from frontend (belongs to previous/active hart on switch cycle)
     input  logic [CVA6Cfg.VLEN-1:0] npc_live_i,
+    input  logic npc_live_valid_i,
+    input logic redirect_valid_i,
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] redirect_hart_i,
+    input logic [CVA6Cfg.VLEN-1:0] redirect_pc_i,
     // Thread select
     input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] active_hart_i,
     input  logic switch_i,
@@ -26,7 +30,8 @@ module g6lc_smt_pc_bank
     input  logic [CVA6Cfg.VLEN-1:0] npc_alt_i,
     // Restored NPC for the newly active hart (valid when restore_o)
     output logic [CVA6Cfg.VLEN-1:0] npc_restore_o,
-    output logic restore_o
+    output logic restore_o,
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] outgoing_hart_o
 );
 
   localparam int unsigned NH    = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
@@ -35,11 +40,13 @@ module g6lc_smt_pc_bank
   if (NH <= 1) begin : gen_single
     assign npc_restore_o = '0;
     assign restore_o     = 1'b0;
+    assign outgoing_hart_o = '0;
     logic _unused_alt;
     assign _unused_alt = npc_alt_valid_i | (|npc_alt_i);
   end else begin : gen_banked
     logic [NH-1:0][CVA6Cfg.VLEN-1:0] npc_bank_q;
     logic [HID_W-1:0] prev_hart_q;
+    assign outgoing_hart_o = prev_hart_q;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -60,18 +67,33 @@ module g6lc_smt_pc_bank
         // I10: snapshot only on switch into the outgoing bank. Never bank 0.
         // npc_alt is A-only t0 rewind (tied off under G6LC_FETCH_B).
         if (switch_i) begin
+`ifdef G6LC_FETCH_B
+          if (npc_alt_valid_i)
+            npc_bank_q[prev_hart_q] <= npc_alt_i;
+          else if (npc_live_valid_i)
+            npc_bank_q[prev_hart_q] <= npc_live_i;
+`else
           if (npc_alt_valid_i && |npc_alt_i)
             npc_bank_q[prev_hart_q] <= npc_alt_i;
           else if (|npc_live_i)
             npc_bank_q[prev_hart_q] <= npc_live_i;
+`endif
         end
+`ifdef G6LC_FETCH_B
+        if (redirect_valid_i && redirect_hart_i != active_hart_i)
+          npc_bank_q[redirect_hart_i] <= redirect_pc_i;
+`endif
       end
     end
 
     // Combinational restore target for the cycle of the switch (new active).
     assign restore_o = switch_i;
+`ifdef G6LC_FETCH_B
+    assign npc_restore_o = npc_bank_q[active_hart_i];
+`else
     assign npc_restore_o = (|npc_bank_q[active_hart_i]) ? npc_bank_q[active_hart_i]
                                                         : boot_addr_i;
+`endif
   end
 
 endmodule

@@ -163,8 +163,19 @@ module frontend
   // indicates whether we come out of reset (then we need to load boot_addr_i)
   logic npc_rst_load_q;
 
-  logic replay;
-  logic [CVA6Cfg.VLEN-1:0] replay_addr;
+  logic replay, replay_q;
+  logic [CVA6Cfg.VLEN-1:0] replay_addr, replay_addr_q;
+  logic arch_valid, arch_step, arch_reseed;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      replay_q <= 1'b0;
+      replay_addr_q <= '0;
+    end else begin
+      replay_q <= replay && !arch_valid;
+      if (replay && !arch_valid) replay_addr_q <= replay_addr;
+    end
+  end
 
   // halfword offset of the fetch address inside the block
   logic [IdxW-1:0] shamt;
@@ -192,7 +203,7 @@ module frontend
   logic [CVA6Cfg.VLEN-1:0] vpc_bht;
 
   // branch-predict update
-  logic is_mispredict;
+  logic is_mispredict, resolution_for_active;
   logic ras_push, ras_pop;
   logic [CVA6Cfg.VLEN-1:0] ras_update;
 
@@ -265,7 +276,7 @@ module frontend
   // jal@12990 window and live[] ate the jal (beqz retired a0=FDT).
   // Not I$ extra-shift (SIGSEGV). Not exact vaddr==tgt / bp_ret_ge (MINI-FAIL).
   // accept=1: do not AND kill_s2 (eats taken jumps).
-  logic [63:0] present_exp_q;
+  logic [63:0] present_exp_q, present_exp;
   // `G6LC_NO_PREFIX_FILTER` makes this filter permissive. It is kept as a
   // documented switch because the answer it gave is worth being able to reproduce.
   //
@@ -294,7 +305,7 @@ module frontend
                   (i == 0) && serving_unaligned,
 `endif
                   64'(addr[i]),
-                  present_exp_q),
+                  present_exp),
               rvi_jump[i] | rvc_jump[i] | rvi_call[i] | rvc_call[i]));
     end
   end
@@ -433,7 +444,9 @@ module frontend
       && g6lc_fetch_pkg::predict_fetchable(CVA6Cfg, 64'(predict_address))
       && g6lc_fetch_pkg::cf_consumed(cf_v8, cf_t8, cf_c8);
 
-  assign is_mispredict = resolved_branch_i.valid & resolved_branch_i.is_mispredict;
+  assign resolution_for_active = g6lc_fetch_pkg::redirect_for_hart(
+      SmtEn, resolved_branch_i.valid, 8'(resolved_branch_i.hart_id), 8'(smt_hart_i));
+  assign is_mispredict = resolution_for_active && resolved_branch_i.is_mispredict;
 
   // Classic EX mispredict only. A matching taken Jump must not reseed the NPC:
   // re-fetching a call pushes the RAS twice.
@@ -447,7 +460,6 @@ module frontend
   //                  register steps to the *following* block, otherwise the same
   //                  address would be pushed twice when the CF hold lifts
   //  - arch_reseed : force an FTQ push/flush even if if_ready is low
-  logic arch_valid, arch_step, arch_reseed;
   logic [CVA6Cfg.VLEN-1:0] arch_pc;
   logic [CVA6Cfg.VLEN-1:0] commit_next_pc, debug_halt_pc;
 
@@ -528,11 +540,18 @@ module frontend
   logic redirect_trap_q, redirect_tail_q;
   logic [CVA6Cfg.VLEN-1:0] redirect_pc_q;
   logic redirect_hit, redirect_hold, redirect_accept;
+  logic [7:0][63:0] redirect_slot_pc;
+
+  always_comb begin
+    redirect_slot_pc = '0;
+    for (int p = 0; p < CVA6Cfg.INSTR_PER_FETCH; p++)
+      redirect_slot_pc[p] = 64'(addr[p]);
+  end
 
   // L2 keep: registered / in-flight window vs redirect target. No opcode.
-  assign redirect_hit = g6lc_fetch_pkg::window_accept(
-      icache_valid_q, 1'b0,
-      g6lc_fetch_pkg::same_win(CVA6Cfg, 64'(icache_vaddr_q), 64'(redirect_pc_q)));
+  assign redirect_hit = g6lc_fetch_pkg::accepted_target(
+      CVA6Cfg.INSTR_PER_FETCH, icache_take, flush_i, 8'(instr_queue_consumed),
+      redirect_slot_pc, 64'(redirect_pc_q));
   assign redirect_hold = g6lc_fetch_pkg::redirect_rehold(
       FtqEn, redirect_pend_q, redirect_lost_q, redirect_hit);
   assign redirect_accept = g6lc_fetch_pkg::window_accept(
@@ -639,7 +658,7 @@ module frontend
     if (arch_valid) npc_d = arch_step ? next_block(arch_pc) : arch_pc;
     // re-present the redirect target until its block has been registered
     else if (redirect_hold) npc_d = redirect_pc_q;
-    else if (replay) npc_d = replay_addr;
+    else if (replay_q) npc_d = replay_addr_q;
     else if (if_ready) npc_d = next_block(seq_base);
     else if (bp_fire) npc_d = predict_address;
     else npc_d = seq_base;
@@ -798,7 +817,7 @@ module frontend
       (FtqEn && pf_req) ? pf_vaddr : fetch_address;
 
   // Redirect drops in-flight I$ (A keep/kill capability, no opcode spares).
-  assign kill_s1 = g6lc_fetch_pkg::kill_s1(is_mispredict, flush_i, replay);
+  assign kill_s1 = g6lc_fetch_pkg::kill_s1(is_mispredict, flush_i, replay_q);
   assign kill_s2 = g6lc_fetch_pkg::kill_s2(kill_s1, bp_fire);
   assign icache_dreq_o.kill_s1 = kill_s1;
   assign icache_dreq_o.kill_s2 = kill_s2;
@@ -834,7 +853,7 @@ module frontend
 
   // assert on branch, deassert when resolved; prefetches are always speculative
   logic speculative_q, speculative_d;
-  assign speculative_d = (speculative_q && !resolved_branch_i.valid
+  assign speculative_d = (speculative_q && !resolution_for_active
                           || |is_branch || |is_return || |is_jalr) && !flush_i;
   // FDIP is speculative by construction; a demand fetch is speculative only
   // while an unresolved CF is outstanding. Do not reuse this as a leftover
@@ -872,13 +891,15 @@ module frontend
   // (gated all take; 2jr hang). pipe_keep MINI-FAIL s4-v-pipekeep-minis
   // (held leftover_drop; osbi illegal 129b8). serving_unaligned &&
   // take==next_block SIGSEGV s4-v-lotake1. Not leftover_drop npc mux.
+  assign present_exp = g6lc_fetch_pkg::present_expected(
+      bp_pend_q, 64'(bp_tgt_q), 64'(realigner_vaddr));
   assign icache_take = (icache_dreq_i.valid | lbuf_inject)
       && g6lc_fetch_pkg::bp_ret_ok(bp_pend_q,
           g6lc_fetch_pkg::same_win(CVA6Cfg,
               64'(icache_dreq_i.valid ? icache_dreq_i.vaddr : ftq_head_vaddr),
               64'(bp_tgt_q)))
       && g6lc_fetch_pkg::leftover_retake(
-          replay, leftover_valid,
+          replay_q, leftover_valid,
           g6lc_fetch_pkg::leftover_next(
               64'(icache_dreq_i.valid ? icache_dreq_i.vaddr : ftq_head_vaddr),
               64'(leftover_pc)));
@@ -1098,7 +1119,7 @@ module frontend
         .vpc_btb_i          (vpc_btb),
         .bht_update_i       (bht_update),
         .btb_update_i       (btb_update),
-        .mispredict_i       (is_mispredict),
+        .mispredict_i       (resolved_branch_i.valid && resolved_branch_i.is_mispredict),
         .ras_stack_i        (ras_stack_snap),
         .ras_restore_o      (ras_restore),
         .ras_restore_stack_o(ras_restore_stack),
@@ -1154,11 +1175,11 @@ module frontend
       .hart_i             (smt_hart_i),
       .instr_i            (instr),                 // from re-aligner
       .addr_i             (addr),                  // from re-aligner
-      .exception_i        (icache_ex_valid_q),     // from I$
-      .exception_addr_i   (icache_vaddr_q),
-      .exception_gpaddr_i (icache_gpaddr_q),
-      .exception_tinst_i  (icache_tinst_q),
-      .exception_gva_i    (icache_gva_q),
+      .exception_i        (icache_dreq_i.valid && icache_dreq_i.ex.valid ? fe_exception(icache_dreq_i.ex.cause) : ariane_pkg::FE_NONE),     // from I$
+      .exception_addr_i   (realigner_vaddr),
+      .exception_gpaddr_i (CVA6Cfg.RVH && icache_dreq_i.valid ? icache_dreq_i.ex.tval2[CVA6Cfg.GPLEN-1:0] : '0),
+      .exception_tinst_i  (CVA6Cfg.RVH && icache_dreq_i.valid ? icache_dreq_i.ex.tinst : '0),
+      .exception_gva_i    (CVA6Cfg.RVH && icache_dreq_i.valid && icache_dreq_i.ex.gva),
       .predict_address_i  (predict_address),
       .cf_type_i          (cf_type),
       .valid_i            (instruction_valid),     // from re-aligner

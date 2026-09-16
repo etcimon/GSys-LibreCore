@@ -254,6 +254,26 @@ Configure the proxy with environment variables (`TH_REMOTE_HOST`, `TH_REMOTE_ROO
 `TH_RSYNC_BIN`, `TH_SSH_PASSPHRASE`, `TH_SSH_PASSPHRASE_FILE`). Store credentials only in untracked
 files (e.g. `~/.config/librecore/th-remote.pass`), never in the repository.
 
+**Windows artifact storage (2026-09-15):** E: exhausted space during a large
+proxy pull. The user approved new diagnostic artifacts under
+`C:/Users/etcim/AppData/Local/Temp/cva6-artifacts/`; do not delete existing E:
+artifacts. `testharness_proxy.py py ... --pull --dest <directory>` selects the
+local output destination. `pull --tag <run> --dest <directory>` retrieves an
+existing run's output without rerunning it. Invoke through WSL from PowerShell
+on this host (e.g. destination `/mnt/c/Users/etcim/AppData/Local/Temp/cva6-artifacts/<run>`).
+A failed rsync now propagates failure; a partial download is not complete evidence.
+This is diagnostic-artifact storage, not permission to install managed tools
+outside the build-platform workspace.
+
+**Verilator 5.008 runtime caveat (same review):** `VL_CONSTHI_W_*X` shifts `o`
+then zero-fills with absolute word indices through `o`, which can overwrite
+host stack data for wide config constants. `run_runtime_repair.py` reproduces
+this with guarded buffers and creates a private corrected runtime; do not use
+`env -i` or a non-crashing binary as a memory-safety fix. The installed toolchain
+was deliberately left unchanged. Use a validated corrected runtime identity
+for model revalidation; generated C++ rebuilds need VPATH in the environment,
+not a command-line override that suppresses Make's runtime include search.
+
 ---
 
 ## 1. Why this substructure exists (reasoning)

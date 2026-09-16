@@ -61,6 +61,8 @@ CVA6 DTS under validation:
 | `corev_apu/bootrom/ariane-linux.dts` | Single-hart Linux |
 | `corev_apu/bootrom/ariane-smt2.dts` | Dual-hart SMT Linux topology |
 | `corev_apu/bootrom/ariane-stream8.dts` | Dual-core stream8 residual package topology |
+| `gpu@40001000` (`virtio,mmio`) | LibreCore APU guest window; `status = "disabled"` until a `G6LC_APU` testharness build instantiates `g6lc_apu_xbar`. PLIC source 9. Control `0x40002000` is firmware-only and omitted. Default testharness topology is unchanged. |
+| `g6lc-apu-domain.dtsi` | OpenSBI domain overlay for firmware hart 1; **not included** in default DTBs. Do not apply to `ariane-smt2.dts`. |
 
 ---
 

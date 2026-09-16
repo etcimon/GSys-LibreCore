@@ -7,8 +7,9 @@
 // bash regression script run from the repo root with the managed toolchain
 // environment (so RISCV/VERILATOR_INSTALL_DIR/etc. point at workspace/tooling).
 
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
 
 import { childEnv, type PlatformContext } from "../context.ts";
 import { hasBinary } from "../platform/exec.ts";
@@ -18,9 +19,144 @@ import {
   resolveRegressEngine,
   runRegressScript,
 } from "../platform/shell.ts";
-import type { ManagedTool, ResolvedBuildConfig, TestGroup, TestSuite } from "../config/schema.ts";
+import { EVIDENCE_KINDS, type EvidenceKind, type QualificationRequirement, type ManagedTool, type ResolvedBuildConfig, type TestGroup, type TestSuite } from "../config/schema.ts";
+import { qualificationIssues } from "../config/load.ts";
 import { findOssCadVerilatorRoot, isVerilatorInstalled } from "../tooling/recipes.ts";
 import { copyAiEnv } from "../tooling/aiTesting.ts";
+
+export interface EvidenceIdentity {
+  suite: string;
+  target: string;
+  top: string;
+  kind: EvidenceKind;
+  runId: string;
+  sourceSha256: string;
+  configSha256: string;
+  executableSha256: string;
+}
+
+export interface SuiteEvidence extends EvidenceIdentity {
+  schemaVersion: 1;
+  execution: "remote-proxy";
+  status: "pass" | "fail" | "skip" | "timeout";
+  checks: number;
+}
+
+export interface QualificationSelection extends Omit<QualificationRequirement, "suite"> {
+  target: string;
+  suite: TestSuite;
+}
+
+function repositoryFile(root: string, path: string): string {
+  if (!path || /^(?:[A-Za-z]:|[\\/])/.test(path) || /[\0\r\n:]/.test(path) || path.split(/[\\/]/).includes("..")) {
+    throw new Error("evidence input must be a repository-relative path");
+  }
+  const base = realpathSync(root);
+  const file = realpathSync(resolve(base, path));
+  const rel = relative(base, file);
+  if (!rel || isAbsolute(rel) || rel.split(/[\\/]/).includes("..")) {
+    throw new Error("evidence input escapes the repository");
+  }
+  return file;
+}
+
+function digestJson(value: unknown): string {
+  const text = JSON.stringify(value, (_key, entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    return Object.fromEntries(Object.entries(entry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+  });
+  if (text === undefined) throw new Error("missing manifest value");
+  return createHash("sha256").update(text).digest("hex");
+}
+
+export function evidenceIdentityFromManifest(
+  root: string,
+  value: unknown,
+  selection: QualificationSelection,
+  runId: string,
+): EvidenceIdentity {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid build manifest");
+  const manifest = value as Record<string, unknown>;
+  if (manifest.schemaVersion !== 1 || manifest.target !== selection.target || manifest.top !== selection.top || manifest.execution !== "remote-proxy") {
+    throw new Error("build manifest does not match the qualified remote DUT");
+  }
+  if (!manifest.sources || typeof manifest.sources !== "object" || Array.isArray(manifest.sources)) {
+    throw new Error("missing source manifest");
+  }
+  const sources = Object.entries(manifest.sources).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  if (sources.length === 0 || digestJson(sources) !== manifest.sourceSha256) throw new Error("source manifest digest mismatch");
+  for (const [path, digest] of sources) {
+    const actual = createHash("sha256").update(readFileSync(repositoryFile(root, path))).digest("hex");
+    if (actual !== digest) throw new Error(`source changed since build: ${path}`);
+  }
+  if (!manifest.configuration || typeof manifest.configuration !== "object" || Array.isArray(manifest.configuration) ||
+      digestJson(manifest.configuration) !== manifest.configSha256) {
+    throw new Error("configuration digest mismatch");
+  }
+  const identity = {
+    suite: selection.suite.id, target: selection.target, top: selection.top, kind: selection.kind, runId,
+    sourceSha256: manifest.sourceSha256, configSha256: manifest.configSha256, executableSha256: manifest.executableSha256,
+  } as EvidenceIdentity;
+  for (const key of ["sourceSha256", "configSha256", "executableSha256"] as const) {
+    if (typeof identity[key] !== "string" || !/^[a-f0-9]{64}$/.test(identity[key])) throw new Error(`invalid manifest ${key}`);
+  }
+  return identity;
+}
+
+export function selectQualification(config: ResolvedBuildConfig, name: string, target?: string): QualificationSelection[] {
+  const profile = config.verify.qualifications[name];
+  if (!profile) throw new Error(`unknown qualification '${name}'`);
+  const byId = new Map(config.tests.suites.map((s) => [s.id, s]));
+  const issues = qualificationIssues({ [name]: profile }, byId);
+  if (issues.length) throw new Error(issues.join("\n"));
+  if (target && !Object.hasOwn(profile.targets, target)) {
+    throw new Error(`qualification '${name}' does not cover target '${target}'`);
+  }
+  return Object.entries(profile.targets)
+    .filter(([id]) => !target || id === target)
+    .flatMap(([id, requirements]) => requirements.map((requirement) => {
+      const suite = byId.get(requirement.suite)!;
+      if (suite.execution !== "remote-proxy") throw new Error(`qualification suite '${suite.id}' must run through the remote proxy`);
+      return { ...requirement, target: id, suite };
+    }));
+}
+
+export function validateSuiteEvidence(stdout: string, stderr: string, expected: EvidenceIdentity): {
+  ok: boolean;
+  evidence?: SuiteEvidence;
+  reason?: string;
+} {
+  const fail = (reason: string) => ({ ok: false, reason });
+  const diagnostic = detectFalsePassSignals(stdout, stderr);
+  if (diagnostic || /(?:^|\n)\s*(?:FAIL\b|%Error\b|Assertion failed\b)/m.test(`${stdout}\n${stderr}`)) {
+    return fail(`failure diagnostics: ${diagnostic ?? "RTL/test failure"}`);
+  }
+  const lines = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const records = lines.filter((line) => line.startsWith("G6LC_EVIDENCE "));
+  if (records.length !== 1 || records[0] !== lines.at(-1)) {
+    return fail("expected exactly one terminal G6LC_EVIDENCE record");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(records[0]!.slice("G6LC_EVIDENCE ".length));
+  } catch {
+    return fail("malformed evidence JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) return fail("invalid evidence object");
+  const record = value as Record<string, unknown>;
+  if (record.schemaVersion !== 1 || record.execution !== "remote-proxy" || record.status !== "pass" ||
+      typeof record.checks !== "number" || !Number.isSafeInteger(record.checks) || record.checks <= 0) {
+    return fail("evidence must be version 1, pass, and contain positive checked work");
+  }
+  if (!EVIDENCE_KINDS.includes(expected.kind)) return fail("invalid expected evidence kind");
+  for (const key of ["sourceSha256", "configSha256", "executableSha256"] as const) {
+    if (!/^[a-f0-9]{64}$/.test(expected[key])) return fail(`invalid expected ${key}`);
+  }
+  for (const key of ["suite", "target", "top", "kind", "runId", "sourceSha256", "configSha256", "executableSha256"] as const) {
+    if (!expected[key] || record[key] !== expected[key]) return fail(`evidence ${key} mismatch`);
+  }
+  return { ok: true, evidence: record as unknown as SuiteEvidence };
+}
 
 export interface SuiteResult {
   id: string;
@@ -29,10 +165,13 @@ export interface SuiteResult {
   durationMs: number;
   skipped: boolean;
   reason?: string;
+  target?: string;
+  evidence?: SuiteEvidence;
 }
 
 export interface RunSuiteOptions {
   dryRun?: boolean;
+  qualification?: QualificationSelection;
   /** Skip host preflight (used by `bun test`, where an un-runnable suite is a pass). */
   skipPreflight?: boolean;
   /**
@@ -71,7 +210,7 @@ export function selectSuites(
 
 /** True if the host can execute a regression script (bash and/or PowerShell). */
 export function canRunSuites(): boolean {
-  return hasBinary("bash") || hasBinary("pwsh") || hasBinary("powershell");
+  return hasBinary("bash") || hasBinary("pwsh") || hasBinary("powershell") || hasBinary("wsl");
 }
 
 /** All suites belonging to a group. */
@@ -162,7 +301,7 @@ export function preflightSuite(ctx: PlatformContext, suite: TestSuite): SuitePre
   }
   // On Windows without a usable bash (Git-Bash preferred), require sibling .ps1
   const bash = resolveBashBinary();
-  if (!bash && /\.sh$/i.test(suite.script)) {
+  if (!bash && /\.sh$/i.test(suite.script) && !(suite.execution === "remote-proxy" && process.platform === "win32" && resolveRegressEngine() === "wsl")) {
     const ps1 = join(ctx.repoRoot, suite.script.replace(/\.sh$/i, ".ps1"));
     if (!existsSync(ps1)) {
       return {
@@ -191,13 +330,36 @@ export async function runSuite(
   options: RunSuiteOptions = {},
 ): Promise<SuiteResult> {
   const { logger, config, repoRoot } = ctx;
-  const dvTarget = process.env.DV_TARGET || suite.dvTarget || suite.target;
+  const qualified = options.qualification;
+  const dvTarget = qualified?.target || process.env.DV_TARGET || suite.dvTarget || suite.target;
+  const refuse = (reason: string): SuiteResult => ({
+    id: suite.id, target: dvTarget, ok: false, code: 1, durationMs: 0, skipped: false, reason,
+  });
+  let expected: EvidenceIdentity | undefined;
+  if (qualified) {
+    if (options.dryRun || options.skipPreflight) return refuse("qualification requires real execution and preflight");
+    if (suite.execution !== "remote-proxy") return refuse("qualification requires a remote-proxy suite");
+    if (qualified.suite.id !== suite.id || (process.env.DV_TARGET && process.env.DV_TARGET !== dvTarget)) {
+      return refuse("qualification target or suite override mismatch");
+    }
+    try {
+      const manifest = JSON.parse(readFileSync(repositoryFile(repoRoot, qualified.buildManifest), "utf8"));
+      expected = evidenceIdentityFromManifest(repoRoot, manifest, qualified, randomUUID());
+    } catch (error) {
+      return refuse(`qualification unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
   // Prefer caller env so `DV_SIMULATORS=spike` short-circuits multi-hour Verilator.
   const extra: Record<string, string> = {
     DV_SIMULATORS: process.env.DV_SIMULATORS || suite.dvSimulators,
     UVM_VERBOSITY: config.tests.uvmVerbosity,
     DV_TARGET: dvTarget,
   };
+  if (expected && qualified) {
+    extra.G6LC_QUALIFICATION_IDENTITY = JSON.stringify(expected);
+    extra.G6LC_REQUIRE_EVIDENCE = expected.kind;
+    extra.G6LC_BUILD_MANIFEST = qualified.buildManifest;
+  }
   if (options.fromTimingDir) {
     extra.CVA6_FROM_TIMING = options.fromTimingDir;
     extra.FROM_TIMING = options.fromTimingDir;
@@ -235,6 +397,7 @@ export async function runSuite(
   if (!options.skipPreflight) {
     const pf = preflightSuite(ctx, suite);
     if (!pf.runnable) {
+      if (qualified) return refuse(`required suite unavailable: ${pf.reason}`);
       return { id: suite.id, ok: true, code: 0, durationMs: 0, skipped: true, reason: pf.reason };
     }
   }
@@ -268,13 +431,25 @@ export async function runSuite(
     }
   }
 
+  let evidence: SuiteEvidence | undefined;
+  if (expected && ok) {
+    const checked = validateSuiteEvidence(result.stdout, result.stderr, expected);
+    evidence = checked.evidence;
+    if (!checked.ok) {
+      ok = false;
+      code = 1;
+      reason = checked.reason;
+    }
+  }
   return {
     id: suite.id,
+    target: dvTarget,
     ok,
     code,
     durationMs: result.durationMs,
     skipped: false,
     reason,
+    evidence,
   };
 }
 

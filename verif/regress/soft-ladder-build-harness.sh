@@ -252,11 +252,16 @@ if [[ -n "${SOFT_LADDER_OVERLAY:-}" ]]; then
     exit 2
   }
   OVERLAY_DIR="${SOFT_LADDER_OVERLAY_DIR:-$VERLIB_DIR/overlay}"
+  OVERLAY_ARGS=()
+  IFS=',' read -ra _overlay_fields <<<"$SOFT_LADDER_OVERLAY"
+  for _f in "${_overlay_fields[@]}"; do
+    [[ -n "$_f" ]] && OVERLAY_ARGS+=(--field "$_f")
+  done
   python3 "$ROOT/verif/regress/isolated-config-overlay.py" \
     --root "$ROOT" --target "$TARGET" --out "$OVERLAY_DIR" \
-    --field "$SOFT_LADDER_OVERLAY"
+    "${OVERLAY_ARGS[@]}"
   FLIST="$OVERLAY_DIR/Flist.cva6.overlay"
-  log "overlay flist=$FLIST field=$SOFT_LADDER_OVERLAY"
+  log "overlay flist=$FLIST fields=$SOFT_LADDER_OVERLAY"
 fi
 
 VTHREADS="${SOFT_LADDER_VERILATOR_THREADS:-$( (command -v nproc >/dev/null && nproc) || echo 4)}"

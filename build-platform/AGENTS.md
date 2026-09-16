@@ -431,6 +431,18 @@ bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth]
   and non-synthesizable constructs early.
 - `--target <cfg>` narrows lint/synth to one config package.
 - `--tools` lists the OSS CAD Suite tools and exits `0`/`3` based on presence.
+- `--sim --qualification <profile>` switches the sim stage to **strict
+  qualification** over `verify.qualifications[profile]`: each listed target
+  must be covered by a `tests.suites` entry with `execution: "remote-proxy"`,
+  the declared `buildManifest` must exist and re-verify against the live tree
+  (produced by `testharness_proxy.py build <flavour> --manifest-out <path>`),
+  and the suite must print exactly one terminal `G6LC_EVIDENCE` JSON record
+  matching suite/target/top/kind/runId and all three sha256 digests. Skips,
+  lint fallbacks, stale binaries, zero-work runs and diagnostic failures are
+  all hard failures. Incompatible with `--dry-run` and other stage flags; it
+  qualifies *simulation evidence*, not full RTL/PPA sign-off. Producer example:
+  `verif/regress/remote/qualify-soft-ladder-osbi.sh` (suite
+  `qual-soft-ladder-osbi`, profile `smt2-cookie`).
 
 Add a new formal task by extending `verify.formalTasks` in `.config.ts`; add a
 new simulation suite by extending `tests.suites` (§4.4). `verify` consumes both
@@ -606,6 +618,29 @@ Tools; then the PnR flow off `pd/synth`.
 
 ## 11. Gotchas
 
+- **Legacy smoke is destructive to local artifacts:** the default
+  `smoke-tests-cv64a6_imafdc_sv39.sh` invokes root `make clean` and simulation
+  `make clean_all`, including work directories, traces and generated FPGA
+  bootrom files. A 2026-09-14 full-verify attempt reached this cleanup before
+  being stopped; no tracked deletions were found, but ignored-artifact loss
+  could not be inventoried retroactively. Do not run full/default simulation
+  verification in a shared worktree without explicit cleanup approval or an
+  isolated disposable checkout. Strict remote qualification and isolated leaf
+  checks are different paths; a host-ready probe does not make smoke safe.
+  L2-specific safe route: `verif/tb/l2/run-l2-tb.sh` now creates a fresh `run-*`
+  artifact directory and compiles copied sources. Proxy `l2-leaf <source-dir>`
+  uploads only ten inputs to a unique remote run, verifies hashes and classifies
+  pulled logs without shared sync or cleanup. It emits a leaf diagnostic record,
+  not strict core/SMT qualification. This does not isolate the legacy full smoke
+  suites. Explicit `verify --lint --synth` avoids their simulation/cleanup stage.
+  `L2TB_MODE=equiv bash verif/tb/l2/run-l2-tb.sh` is a separate bounded L2
+  equivalence diagnostic (default 512 B/four ways, 120 seconds). It compares a
+  pinned pre-RR Git blob plus only the validated bypass repair against RR-off,
+  preserving inputs, reference hashes and proof logs. A hit-output mutation
+  (`L2TB_EQ_NEGATIVE=1`) must fail. Small-fixture proofs are not production
+  geometry or whole-core qualification; timeouts stay failed/incomplete.
+  See `architecture/l2-l3-cache/README.md` for exact coverage and run identities.
+
 - **Probe before install**: do not hard-code host package lists in agents —
   run `probe install` (or `probe --json`) and follow its playbook.
 - **Windows bash**: the LibreCore regression scripts are bash; `test` needs Git-Bash
@@ -623,3 +658,13 @@ Tools; then the PnR flow off `pd/synth`.
   `childEnv` sets both `PATH` and `Path` on Windows.
 - **JSON import**: `index.ts` imports `package.json` for the version; keep
   `resolveJsonModule` on.
+- **Verilator vthreads is not bit-exact on this netlist (2026-09-15):**
+  `SOFT_LADDER_VERILATOR_THREADS=12` builds of the smt2 testharness produced
+  two different non-functional outcomes on identical RTL+input —
+  `Active region did not converge` at t=287 in one netlist and a stable
+  fetch livelock in another — while `SOFT_LADDER_VERILATOR_THREADS=1` builds
+  of the same trees pass identically. This is a Verilator 5.008 MTask
+  scheduling artifact, not an RTL defect (a comb-path perturbation flips the
+  partition). For smt2 (and any kernel-level qualification) use
+  `SOFT_LADDER_VERILATOR_THREADS=1`; never attribute a vthreads=12 anomaly
+  to RTL before a vt=1 control.

@@ -9,15 +9,21 @@
 # Run: sby -f core/fetch_B/formal/g6lc_fetch_realign.sby
 # Wired into build-platform verify.formalTasks (cva6-build verify --formal).
 
+[tasks]
+bmc
+cover
+
 [options]
 # Stateful (the carry bank), so the horizon must cover establish-then-complete
 # across two windows plus the kill/flush cases in between.
-mode bmc
+bmc: mode bmc
+cover: mode cover
 depth 8
 
 [engines]
-abc bmc3
-smtbmc z3
+bmc: abc bmc3
+bmc: smtbmc z3
+cover: smtbmc z3
 
 [script]
 # No --keep-hierarchy: slang refuses a hierarchical read across a PRESERVED

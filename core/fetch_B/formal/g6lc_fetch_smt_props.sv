@@ -36,7 +36,16 @@ module g6lc_fetch_smt_props (
     input logic        snap_en,
     input logic        inflight,
     input logic [63:0] inflight_addr,
-    input logic [63:0] npc
+    input logic [63:0] npc,
+    input logic [3:0] port_count,
+    input logic [7:0] decode_valid, queue_valid,
+    input logic [7:0][7:0] decode_hart, queue_hart,
+    input logic [7:0][63:0] decode_pc, queue_pc,
+    input logic transport_valid, redirect_valid,
+    input logic [7:0] redirect_hart,
+    input logic [63:0] redirect_pc,
+    input logic accept_take, accept_flush,
+    input logic [63:0] accept_window
 );
 
 `ifdef FORMAL
@@ -46,6 +55,90 @@ module g6lc_fetch_smt_props (
   logic [7:0]  stamped;
   logic        cfh;
   logic [63:0] snapped;
+  restart_t frontier, transport;
+  logic decode_match, queue_match;
+  logic active_redirect, bank_redirect;
+  logic target_accepted;
+
+  assign target_accepted = accepted_target(32'(port_count), accept_take, accept_flush,
+      queue_valid, queue_pc, redirect_pc);
+
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      logic seen;
+      seen = 1'b0;
+      for (int p = 0; p < 8; p++) begin
+        if (p < port_count && queue_valid[p] && queue_pc[p] == redirect_pc) seen = 1'b1;
+      end
+      assert (target_accepted == (accept_take && !accept_flush && seen));
+      if (!accept_take || accept_flush) assert (!target_accepted);
+      cover (target_accepted && queue_valid[0] && queue_pc[0] == redirect_pc &&
+          redirect_pc[2:0] == 3'd6 && accept_window == ((redirect_pc & ~64'd7) + 64'd8));
+      cover (target_accepted && !queue_valid[0] && port_count > 1);
+      cover (seen && accept_flush && !target_accepted);
+      cover (accept_take && !accept_flush && |queue_valid && !seen && !target_accepted);
+    end
+  end
+
+  assign active_redirect = redirect_for_hart(en_smt, redirect_valid, redirect_hart, active_hart);
+  assign bank_redirect = en_smt && redirect_valid && redirect_hart != active_hart;
+
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      assert (!(active_redirect && bank_redirect));
+      assert ((active_redirect || bank_redirect) == redirect_valid);
+      if (en_smt && active_redirect) assert (redirect_hart == active_hart);
+      if (!en_smt) assert (active_redirect == redirect_valid);
+      cover (bank_redirect && !active_redirect);
+      cover (en_smt && active_redirect);
+    end
+  end
+
+  always_comb begin
+    transport = '{valid: transport_valid, pc: npc};
+    frontier = restart_frontier(32'(port_count), active_hart,
+        decode_valid, decode_hart, decode_pc, queue_valid, queue_hart, queue_pc,
+        transport, redirect_valid, redirect_hart, redirect_pc);
+    decode_match = 1'b0;
+    queue_match = 1'b0;
+    for (int p = 0; p < 8; p++) begin
+      if (p < port_count) begin
+        decode_match |= decode_valid[p] && decode_hart[p] == active_hart;
+        queue_match |= queue_valid[p] && queue_hart[p] == active_hart;
+      end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      assume (port_count >= 1 && port_count <= 8);
+      if (redirect_valid && redirect_hart == active_hart) begin
+        assert (frontier.valid && frontier.pc == redirect_pc);
+      end else begin
+        logic found;
+        found = 1'b0;
+        for (int p = 0; p < 8; p++) begin
+          if (!found && p < port_count && decode_valid[p] && decode_hart[p] == active_hart) begin
+            assert (frontier.valid && frontier.pc == decode_pc[p]);
+            found = 1'b1;
+          end
+        end
+        for (int p = 0; p < 8; p++) begin
+          if (!found && p < port_count && queue_valid[p] && queue_hart[p] == active_hart) begin
+            assert (frontier.valid && frontier.pc == queue_pc[p]);
+            found = 1'b1;
+          end
+        end
+        if (!found) assert (frontier == transport);
+      end
+      cover (decode_match && queue_match && !redirect_valid);
+      cover (!decode_match && queue_match && !redirect_valid);
+      cover (redirect_valid && redirect_hart == active_hart && decode_match);
+      cover (redirect_valid && redirect_hart != active_hart && queue_match);
+      cover (decode_match && frontier.valid && frontier.pc == 0 && !redirect_valid);
+      cover (!decode_match && !queue_match && !redirect_valid && !frontier.valid);
+    end
+  end
 
   always_comb begin
     e           = '0;

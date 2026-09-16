@@ -459,6 +459,9 @@ fi
 export PATH="\$RISCV/bin:\${VERILATOR_INSTALL_DIR:+\$VERILATOR_INSTALL_DIR/bin:}/usr/local/bin:/usr/bin:/bin\${SPIKE_INSTALL_DIR:+:\$SPIKE_INSTALL_DIR/bin}"
 ${e.DV_SIMULATORS ? `export DV_SIMULATORS=${JSON.stringify(e.DV_SIMULATORS)}` : "true"}
 ${e.DV_TARGET ? `export DV_TARGET=${JSON.stringify(e.DV_TARGET)}` : "true"}
+${e.G6LC_QUALIFICATION_IDENTITY ? `export G6LC_QUALIFICATION_IDENTITY='${e.G6LC_QUALIFICATION_IDENTITY.replace(/'/g, "'\\''")}'` : "true"}
+${e.G6LC_REQUIRE_EVIDENCE ? `export G6LC_REQUIRE_EVIDENCE='${e.G6LC_REQUIRE_EVIDENCE.replace(/'/g, "'\\''")}'` : "true"}
+${e.G6LC_BUILD_MANIFEST ? `export G6LC_BUILD_MANIFEST='${e.G6LC_BUILD_MANIFEST.replace(/'/g, "'\\''")}'` : "true"}
 ${e.ISS_TIMEOUT ? `export ISS_TIMEOUT=${JSON.stringify(e.ISS_TIMEOUT)}` : "true"}
 ${e.OUT_DIR ? `export OUT_DIR=${JSON.stringify(e.OUT_DIR)}` : "true"}
 ${e.UVM_VERBOSITY ? `export UVM_VERBOSITY=${JSON.stringify(e.UVM_VERBOSITY)}` : 'export UVM_VERBOSITY=UVM_NONE'}

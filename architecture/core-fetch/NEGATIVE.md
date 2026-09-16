@@ -305,6 +305,47 @@ compressed-then-straddling-RVI case (`I4aa`).
 
 ## 12. Process-level negatives
 
+**2026-09-15 review supersedes the broad attribution in the historical rows
+below.** First-observed bad commit does not prove a single root cause persists
+through later fixes. `9fbab3044` repairs the I-cache index skew; HEAD no longer
+uses the minimum-PC queue selector. Current sparse-input placement independently
+violates accepted order and is repaired by compaction (see `README.md`). A
+second repair aligns current response bytes with current expected-PC metadata.
+The failing norvc run had equal checksums and set PASS before executing a
+wrong-path FAIL write. Byte-identical historical and norvc N1 payloads now
+pass. A cookie value of 3 does not by itself prove a checksum mismatch or a
+corrupt load; trace the actual path to that write. N2 progress remains open.
+
+Follow-up: the original N2 payload sends no IPI and is not a dual-active
+control under the current unseen-hart mask. Keep it distinct from the
+explicitly activated diagnostic, which starts both harts and still fails.
+Do not infer missing counter updates from transient RF snapshots: a complete
+check at decrement points found no imbalance. The next trace must correlate
+accepted memory addresses, source operands and hart-tagged retirement.
+
+A response accepted by the IQ can predict another branch in that same cycle.
+Its prediction may clear the registered response-valid bit, so that register
+cannot serve as the earlier architectural redirect's completion event. The
+short redirect-chain witness and current-acceptance repair demonstrate this
+without a forced mispredict or branch-specific RTL exemption. Separately,
+registering retry feedback breaks the three full-core synthesis loops; generic
+synthesis passing still does not establish SMT or physical qualification.
+
+Proof PASS is invalid when assumptions exclude every post-reset state:
+`hart_i < HARTW'(NH)` becomes `hart_i < 0` for two harts. Undriven local formal
+stimulus is not a shared nondeterministic input under the actual slang flow;
+use top-level ports and inspect reachable covers. Self-composition is not a
+conservation/order oracle, and a prefix-valid assumption cannot cover a live
+sparse prefix filter. Program order is never global numerical PC order.
+
+Do not identify payload variants from directory names: the historical
+`smt2-norvc-vt1/mini_checked_work.elf` contains compressed instructions. Do not
+identify simulator liveness from a log cutoff or `pgrep -f` matching its own
+command. `env -i` is a startup control, not a proved memory-corruption fix;
+an intermittent segfault remains a host/model blocker. Current SMT2 WT fixup
+depth is two, so the previous depth-zero exclusion is not applicable to HEAD.
+
+
 From `CONT-FULL-MAP.md` §5 and the iteration log — these are about *method*, and they are the reason
 this file exists.
 
@@ -318,6 +359,8 @@ this file exists.
 | Steering ~200 increments by a 32-bit firmware cookie | pin unchanged for the entire span |
 | Treating the firmware pin as authoritative | authoritative for 200 increments that did not move it |
 | Gating fetch fixes on `NrHarts>1` for netlist identity | hid a geometry defect behind a thread parameter for ~1,600 predicates |
+| Attributing a vthreads=12 fetch freeze/nonconvergence to RTL | `iso-smt2-rr{0,1}` identical trees+ELF gave nonconverge@t=287 vs livelock@800k; both pass at 22,964 cy under `SOFT_LADDER_VERILATOR_THREADS=1` (2026-09-15). Verilator 5.008 MTask is not bit-exact here — always run a vt=1 control before blaming logic. |
+| Attributing the full checked-work `tohost=3` to L2/RR without a same-tree control | Real functional regression on smt2: `mini_checked_work.elf` (48 KiB) fails `tohost=3` (verify mismatch) on current RR-off **and** RR-on, current-minus-drain, and every tree ≥`7e6c19c54`; passes `tohost=1` on `2c7dd4870` (Aug-30). Bisect: `7e6c19c54` — the `g6lc_icache` two-cycle-hit rewrite (`cl_index`/`dreq_o.vaddr`→`vaddr_q`, `dreq_o.ready` out of the READ-hit branch, `kill_s2`→`kill_s1`, `vaddr_q` reset to `boot_addr_i`) + `instr_queue`/`issue_read_operands`/`g6lc_issue_barrier` changes. Early trees trap cause=6 (store-misaligned) on the first fill `sd`; later trees silently corrupt and fail verify — same defect, symptom drifts with surrounding fetch work. All smt2 traffic is `AxCACHE=0010` → bypasses L2, and the nodrain build fails identically, so neither RR nor the drain fix is implicated. The uncompressed `-norvc` variant fails identically on current-tree vt1 (`smt2-norvc-vt1`, `tohost=3` @131,072), so this is not RVC-realigner-specific — suspect the I$ two-cycle hit/issue/commit delivery path itself. Blocks all smt2 checked-work/SMT claims (2026-09-15). |
 
 **Design consequence:** the process rules in `firmware-boot-principles.md` §G — search with directed
 minis and instruction-stream co-simulation; the firmware soak is a regression gate only; identity comes

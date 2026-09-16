@@ -29,7 +29,11 @@ module g6lc_fetch_realign_props #(
     parameter int unsigned AB = 3,   // FETCH_ALIGN_BITS = log2(FW/8)
     parameter int unsigned NH = 2    // NrHarts (>=2 exercises the bank)
 ) (
-    input logic clk_i
+    input logic clk_i,
+    input logic flush_i, kill_i, valid_i,
+    input logic [(NH > 1 ? $clog2(NH) : 1)-1:0] hart_i,
+    input logic [31:0] address_i,
+    input logic [FW-1:0] data_i
 );
 
 `ifdef FORMAL
@@ -55,10 +59,6 @@ module g6lc_fetch_realign_props #(
   localparam config_pkg::cva6_cfg_t Cfg = mk_cfg();
 
   // --- free stimulus --------------------------------------------------------
-  logic              flush_i, kill_i, valid_i;
-  logic [HARTW-1:0]  hart_i;
-  logic [VLEN-1:0]   address_i;
-  logic [FW-1:0]     data_i;
 
   logic              serving_unaligned, leftover_pending, leftover_valid;
   logic [VLEN-1:0]   leftover_pc;
@@ -100,7 +100,7 @@ module g6lc_fetch_realign_props #(
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
       assume (address_i[AB-1:0] == '0);
-      if (NH > 1) assume (hart_i < HARTW'(NH));
+      assume (int'(hart_i) < NH);
     end
   end
 
@@ -115,7 +115,7 @@ module g6lc_fetch_realign_props #(
           automatic logic [VLEN-1:0] off;
           off = addr_o[k] - address_i;
           if (off < VLEN'(FW / 8)) begin
-            assert (instr_o[k][15:0] == data_i[16*(off >> 1)+:16]);
+            assert (instr_o[k][15:0] == data_i[16*off[AB-1:1]+:16]);
           end
         end
       end
@@ -167,6 +167,8 @@ module g6lc_fetch_realign_props #(
       cover (serving_unaligned);
       cover (leftover_pending);
       cover (|bank_v);
+      cover (serving_unaligned && hart_i == HARTW'(1));
+      cover (armed_q && hart_i != hart_q && |bank_v);
     end
   end
 `endif

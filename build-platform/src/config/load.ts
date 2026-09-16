@@ -17,7 +17,47 @@ import { pathToFileURL } from "node:url";
 
 import { deepMerge } from "../util/object.ts";
 import { DEFAULT_CONFIG } from "./defaults.ts";
-import type { BuildConfigInput, ResolvedBuildConfig } from "./schema.ts";
+import { EVIDENCE_KINDS, type BuildConfigInput, type ResolvedBuildConfig, type QualificationRequirement, type TestSuite } from "./schema.ts";
+
+export function qualificationIssues(
+  profiles: ResolvedBuildConfig["verify"]["qualifications"],
+  suites: ReadonlyMap<string, Pick<TestSuite, "execution">>,
+): string[] {
+  const issues: string[] = [];
+  for (const [name, profile] of Object.entries(profiles)) {
+    if (!/^[A-Za-z0-9_-]+$/.test(name) || !profile?.targets || Object.keys(profile.targets).length === 0) {
+      issues.push(`qualification '${name}' requires a valid name and nonempty targets.`);
+      continue;
+    }
+    for (const [target, requirements] of Object.entries(profile.targets)) {
+      const prefix = `qualification '${name}' target '${target}'`;
+      if (!/^[A-Za-z0-9_]+$/.test(target) || !Array.isArray(requirements) || requirements.length === 0) {
+        issues.push(`${prefix} requires a valid target and at least one suite.`);
+        continue;
+      }
+      const seen = new Set<string>();
+      for (const requirement of requirements as QualificationRequirement[]) {
+        const suite = requirement && suites.get(requirement.suite);
+        if (!suite || seen.has(requirement.suite)) {
+          issues.push(`${prefix} has an unknown or duplicate suite '${requirement?.suite}'.`);
+          continue;
+        }
+        seen.add(requirement.suite);
+        if (suite.execution !== "remote-proxy") {
+          issues.push(`${prefix} suite '${requirement.suite}' must declare execution: "remote-proxy".`);
+        }
+        if (!EVIDENCE_KINDS.includes(requirement.kind) || typeof requirement.top !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(requirement.top)) {
+          issues.push(`${prefix} has invalid evidence kind or DUT top.`);
+        }
+        const path = requirement.buildManifest;
+        if (typeof path !== "string" || !path || /^(?:[A-Za-z]:|[\\/])/.test(path) || path.split(/[\\/]/).includes("..")) {
+          issues.push(`${prefix} buildManifest must be a nonempty repository-relative path.`);
+        }
+      }
+    }
+  }
+  return issues;
+}
 
 export class ConfigError extends Error {
   constructor(message: string, readonly issues: string[] = []) {
@@ -166,6 +206,7 @@ export function validateConfig(config: ResolvedBuildConfig): void {
   // Verification gate: the stages are only meaningful with a manifest, a top
   // module and at least one config-package target to elaborate.
   const { verify } = config;
+  issues.push(...qualificationIssues(verify.qualifications, new Map(tests.suites.map((s) => [s.id, s]))));
   if (!verify.flist) issues.push("verify.flist must name the core manifest (e.g. core/Flist.cva6).");
   if (!verify.top) issues.push("verify.top must name the module lint/synthesis elaborates.");
   if (!verify.suite.root) issues.push("verify.suite.root must point at an extracted OSS CAD Suite.");

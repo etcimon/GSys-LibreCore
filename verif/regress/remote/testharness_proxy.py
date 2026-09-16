@@ -93,12 +93,14 @@ SYNC_INCLUDE = [
     "verif/tests/",
     "verif/core-v-verif/lib/",
     "verif/tb/",
+    "software/apu-fw/",
     "util/",
     # Provisioning scripts the remote runs on itself. `install-formal.sh` builds
     # the bounded-formal toolchain (Yosys >= v0.67 with the integrated slang
     # frontend, plus SymbiYosys) on the builder, so `verify --formal
     # --formal-remote` can put the solver work on the machine with the cores.
     "build-platform/scripts/",
+    "software/smt2-linux/scripts/build-opensbi-smt2.sh",
     "software/smt2-linux/soft-ladder/mk_plat_skip.py",
     "software/smt2-linux/soft-ladder/rebuild_held_from_pin.sh",
     "software/smt2-linux/soft-ladder/build/fw_payload_diag.elf",
@@ -686,6 +688,7 @@ class Remote:
             check=False,
         )
         log(f"pull rc={proc.returncode} in {time.time()-t0:.3f}s")
+        proc.check_returncode()
 
 
 # --------------------------------------------------------------------------
@@ -1686,9 +1689,15 @@ def cmd_di(rem: Remote, args) -> int:
 
 
 def cmd_pull(rem: Remote, args) -> int:
+    if args.tag and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", args.tag):
+        die("invalid run tag")
     rem.start_master()
     dest = Path(args.dest) if args.dest else repo_root() / "remote-runs"
     src = f"{REMOTE_ROOT}/runs/"
+    if args.tag:
+        src += f"{args.tag}/output/"
+        if not args.dest:
+            dest = dest / args.tag / "output"
     log(f"pulling {rem.host}:{src} -> {dest}")
     rem.pull(src, dest)
     return 0
@@ -2108,7 +2117,7 @@ def cmd_py(rem: Remote, args) -> int:
     log(f"py finished rc={rc} in {time.time()-t0:.1f}s")
 
     if args.pull:
-        dest = repo_root() / "remote-runs" / tag / "output"
+        dest = Path(args.dest).resolve() if args.dest else repo_root() / "remote-runs" / tag / "output"
         rem.pull(f"{rundir}/output/", dest)
         log(f"pulled output -> {dest}")
     return rc
@@ -2243,10 +2252,13 @@ def build_parser() -> argparse.ArgumentParser:
                     help="KEY=VALUE env var for the scripts (repeatable)")
     sp.add_argument("--pull", action="store_true",
                     help="copy output/ back when done")
+    sp.add_argument("--dest", default=None,
+                    help="local output directory for --pull (default remote-runs/<tag>/output)")
     sp.set_defaults(fn=cmd_py)
 
     sp = sub.add_parser("pull", help="copy remote run logs back")
     sp.add_argument("--dest", default=None)
+    sp.add_argument("--tag", default=None, help="pull only this run's output/ directory")
     sp.set_defaults(fn=cmd_pull)
 
     sp = sub.add_parser("l2-leaf", help="run a copied L2 snapshot without shared repo sync or cleanup")

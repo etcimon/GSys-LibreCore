@@ -115,13 +115,20 @@ core/include/cv64a6_server_math_v_config_pkg.sv  # VExtEn=1, CvxifEn=0
 
 **Live next (authoritative ordered list + file priors):**
 [`AGENTS-todo.md`](../AGENTS-todo.md) — **Current phase** and **Practical next**.
-Perf-foundation next (before any RR promotion): 16 KiB collect timed out
-(900 s, not waived); mapped flop-tag through 8 KiB. Isolated stream8 RR-on
-checked-work, AMOCAS W/D/Q, 512 B stream_plane, and all-set L2 hot+scan
-(`mini_l2_hot_scan.S` 384,179 cy) match RR-off cycle-for-cycle (0 delta).
-SMT2 RR-on livelocks (I=2 fetch). Cluster/SMT controls stay
-stream8 minis + smt2 cookie. Do not merge packages; do not default-on RR (8-way leaf mix ~0.7%, core 0
-delta, +1 `$mem` when on).
+Perf-foundation follows the flattened F0–F5 gates in `AGENTS-todo.md`
+(2026-09-15 review): source/verdict integrity, current fetch correctness,
+two-active-hart SMT2, then integrated performance/area and release evidence.
+The former RR-specific SMT livelock attribution is withdrawn. Full checked-work
+has failed on both RR policies; historical I-cache skew is already fixed and
+HEAD uses a newer queue, so the current cause must be established directly.
+Two fetch formal harnesses contained an impossible two-hart bound and require
+non-vacuous reruns. NWORKERS=1 is not a dual-active SMT pass.
+
+Preserve completed leaf and mapped equivalence through 8 KiB at their scope;
+16 KiB collect and production mapped/physical gates remain incomplete. The
+cacheability-overlay stream8 hot+scan recorded 374,177→325,980 ROI cycles, but
+it is one RR-favourable experiment, not a production default decision. Named
+stream8 and SMT2 controls remain separate. RR remains default-off.
 Stage map: [`current-stage.md`](current-stage.md) (parallel envelopes, not one serial queue).
 Host residual §1–§10 largely **done**; lab FO4/STA + stream8 optional growth open.
 QEMU firmware ladder (U-Boot/EDK2 virt+soc) is **green as hypothesis**; E4 pflash and soc Shell

@@ -153,6 +153,22 @@ package g6lc_fetch_pkg;
     window_accept = valid && !kill && same;
   endfunction
 
+  function automatic logic accepted_target(
+      input int unsigned slots,
+      input logic take,
+      input logic flush,
+      input logic [7:0] consumed,
+      input logic [7:0][63:0] pc,
+      input logic [63:0] target
+  );
+    logic found;
+    found = 1'b0;
+    for (int p = 0; p < 8; p++) begin
+      if (p < slots && consumed[p] && pc[p] == target) found = 1'b1;
+    end
+    return take && !flush && found;
+  endfunction
+
   function automatic logic slot_live(
       input logic slot_v,
       input logic accept,
@@ -216,6 +232,15 @@ package g6lc_fetch_pkg;
       input logic [7:0] active_hart
   );
     commit_for_hart = commit && (!en_smt || (commit_hart == active_hart));
+  endfunction
+
+  function automatic logic redirect_for_hart(
+      input logic en_smt,
+      input logic valid,
+      input logic [7:0] owner,
+      input logic [7:0] active_hart
+  );
+    return valid && (!en_smt || owner == active_hart);
   endfunction
 
   function automatic logic leftover_pending(input logic lo_v, input logic complete);
@@ -282,6 +307,40 @@ package g6lc_fetch_pkg;
       input logic [63:0] npc
   );
     snap_pc = (en && inflight) ? inflight_addr : npc;
+  endfunction
+
+  typedef struct packed {
+    logic valid;
+    logic [63:0] pc;
+  } restart_t;
+
+  function automatic restart_t restart_frontier(
+      input int unsigned ports,
+      input logic [7:0] owner,
+      input logic [7:0] decode_valid,
+      input logic [7:0][7:0] decode_hart,
+      input logic [7:0][63:0] decode_pc,
+      input logic [7:0] queue_valid,
+      input logic [7:0][7:0] queue_hart,
+      input logic [7:0][63:0] queue_pc,
+      input restart_t transport,
+      input logic redirect_valid,
+      input logic [7:0] redirect_hart,
+      input logic [63:0] redirect_pc
+  );
+    restart_t selected;
+    selected = transport;
+    for (int p = 7; p >= 0; p--) begin
+      if (p < ports && queue_valid[p] && queue_hart[p] == owner)
+        selected = '{valid: 1'b1, pc: queue_pc[p]};
+    end
+    for (int p = 7; p >= 0; p--) begin
+      if (p < ports && decode_valid[p] && decode_hart[p] == owner)
+        selected = '{valid: 1'b1, pc: decode_pc[p]};
+    end
+    if (redirect_valid && redirect_hart == owner)
+      selected = '{valid: 1'b1, pc: redirect_pc};
+    return selected;
   endfunction
 
   // L3: the packet carries the hart that fetched it. Decode must not retag

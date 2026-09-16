@@ -32,6 +32,12 @@ Editor: **Florian Zaruba**
    * repo-root ``AGENTS.md`` / ``architecture/README.md`` — live RTL map,
      config-gated OoO/SMT/L2, upgrade programs
    * ``docs/design/`` adoc design manuals for config-generated product books
+   * ``architecture/l2-l3-cache/README.md`` — serialized memory-side L2,
+     default-off SRAM-backed replacement experiment, diagnostic measurements
+     and unresolved bypass-backpressure/SMT qualification gates
+   * ``architecture/core-fetch/README.md`` — accepted-stream queue compaction,
+     live-RTL regression evidence, generic area screening and explicit SMT2
+     completion blockers; flattened F0–F5 plan in ``AGENTS-todo.md``
 
 .. toctree::
    :maxdepth: 2

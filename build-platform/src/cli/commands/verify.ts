@@ -30,7 +30,7 @@ import {
   assessSimPreflight,
   formatSimPreflightLines,
 } from "../../tooling/simPreflight.ts";
-import { runSuites, selectSuites } from "../../tests/runner.ts";
+import { runSuite, runSuites, selectSuites, selectQualification, type QualificationSelection } from "../../tests/runner.ts";
 import { offerInstallMissingTools } from "../../tooling/offerInstall.ts";
 import type { ManagedTool } from "../../config/schema.ts";
 import {
@@ -61,7 +61,7 @@ export const verifyCommand: Command = {
   name: "verify",
   summary: "Run the per-change gate: lint, formal, simulation, synthesis.",
   usage:
-    "bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth] [--target <cfg>] [--ai] [--from-timing DIR] [--use-emit] [--yes] [--json] [--dry-run]",
+    "bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth] [--target <cfg>] [--qualification <profile>] [--ai] [--from-timing DIR] [--use-emit] [--yes] [--json] [--dry-run]",
   details:
     "Runs the AGENTS.md §0.2 verification gate with the open EDA suite pinned in\n" +
     ".config.ts (verify.suite). Stages:\n" +
@@ -74,6 +74,9 @@ export const verifyCommand: Command = {
     "         synthesizable and surfaces inferred latches early.\n" +
     "With no stage flag, the stages enabled in verify.stages all run.\n" +
     "\n" +
+    "  --qualification P with --sim: require target-specific, fresh remote RTL evidence\n" +
+    "                    from verify.qualifications[P]; skips/fallbacks cannot qualify.\n" +
+    "                    This qualifies simulation only, not full RTL or PPA sign-off.\n" +
     "  --from-timing DIR  validate timings precompile package before stages\n" +
     "  --ai               opt-in g6lc64_ai lint target + AI directed sim suites\n" +
     "                     (like --target g6lc64_ooo_server). Remote S4 is\n" +
@@ -105,6 +108,21 @@ export const verifyCommand: Command = {
   async run(args) {
     const ctx = requireContext(args);
     const { logger, config } = ctx;
+    const qualificationName = flagString(args.flags, "qualification");
+    let qualification: QualificationSelection[] | undefined;
+    if (args.flags.qualification !== undefined) {
+      if (!qualificationName || !flagBool(args.flags, "sim") || ctx.dryRun ||
+          ["lint", "formal", "synth", "ai", "from-timing", "use-emit"].some((key) => args.flags[key])) {
+        logger.error("Qualification currently requires --sim and a profile, with no dry-run, other stages or build overrides. Full RTL verification remains separate.");
+        return 2;
+      }
+      try {
+        qualification = selectQualification(config, qualificationName, flagString(args.flags, "target") ?? undefined);
+      } catch (error) {
+        logger.error(error instanceof Error ? error.message : String(error));
+        return 2;
+      }
+    }
     const paths = edaPaths(ctx);
     let presence = edaPresence(paths);
 
@@ -119,14 +137,14 @@ export const verifyCommand: Command = {
     }
 
     // Managed tools (Verilator via tools install) before OSS CAD suite path check.
-    if (!ctx.dryRun) {
+    if (!ctx.dryRun && !qualification) {
       const want: ManagedTool[] = ["verilator", "riscv-gcc"];
       await offerInstallMissingTools(ctx, want, args.flags as Record<string, string | boolean>);
       presence = edaPresence(paths);
     }
 
     const missingRequired = presence.filter((t) => t.required && !t.present);
-    if (missingRequired.length > 0 && !ctx.dryRun) {
+    if (missingRequired.length > 0 && !ctx.dryRun && !qualification) {
       logger.error(
         `Verification gate unavailable: missing ${missingRequired.map((t) => t.id).join(", ")}.`,
       );
@@ -208,7 +226,9 @@ export const verifyCommand: Command = {
 
     const stages = requestedStages(args.flags as Record<string, unknown>, config.verify.stages);
     const targetFlag = typeof args.flags.target === "string" ? args.flags.target : null;
-    const targets = targetFlag
+    const targets = qualification
+      ? [...new Set(qualification.map((entry) => entry.target))]
+      : targetFlag
       ? [targetFlag]
       : aiKnobs.wantAi
         ? [...config.verify.targets, "g6lc64_ai"].filter(
@@ -249,6 +269,18 @@ export const verifyCommand: Command = {
         }
       } else {
         logger.heading("Simulation");
+        if (qualification) {
+          for (const entry of qualification) {
+            const result = await runSuite(ctx, entry.suite, { qualification: entry });
+            outcomes.push({
+              stage: "sim", target: entry.target,
+              status: result.ok && !result.skipped && result.evidence ? "pass" : "fail",
+              detail: `${entry.suite.id}: ${result.reason ?? (result.evidence ? `${result.evidence.kind}, ${result.evidence.checks} checks, run ${result.evidence.runId}` : "missing evidence")}`,
+              durationMs: result.durationMs,
+            });
+          }
+          continue;
+        }
         const pre = assessSimPreflight(ctx);
         for (const line of formatSimPreflightLines(pre)) {
           if (line.includes("NEED") || line.includes("NOT READY")) logger.error(line);
@@ -302,7 +334,7 @@ export const verifyCommand: Command = {
     }
 
     if (args.flags.json) {
-      logger.raw(JSON.stringify({ stages, targets, outcomes }, null, 2) + "\n");
+      logger.raw(JSON.stringify({ stages, targets, outcomes, qualification: qualificationName }, null, 2) + "\n");
     } else {
       logger.heading("Gate summary");
       for (const o of outcomes) {
@@ -323,7 +355,7 @@ export const verifyCommand: Command = {
       logger.error(`Gate failed: ${failed.length} of ${outcomes.length} step(s).`);
       return 1;
     }
-    logger.success(`Gate passed: ${outcomes.length} step(s).`);
+    logger.success(`${qualification ? "Simulation evidence qualified" : "Gate passed"}: ${outcomes.length} step(s).`);
     return 0;
   },
 };

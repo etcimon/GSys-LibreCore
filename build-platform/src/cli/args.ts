@@ -19,6 +19,7 @@ const VALUE_FLAGS = new Set([
   "config",
   "iss",
   "target",
+  "qualification",
   "suite",
   "group",
   "log-level",

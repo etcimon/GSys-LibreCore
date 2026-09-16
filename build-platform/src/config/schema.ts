@@ -232,6 +232,20 @@ export type TestGroup =
   | "pk" // proxy-kernel (pk) hosted suites
   | "linux"; // full Linux boot (buildroot/opensbi) — heavy
 
+export const EVIDENCE_KINDS = ["artifact", "iss", "rtl-leaf", "rtl-core", "rtl-cluster", "linux"] as const;
+export type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
+
+export interface QualificationRequirement {
+  suite: string;
+  kind: EvidenceKind;
+  top: string;
+  buildManifest: string;
+}
+
+export interface QualificationProfile {
+  targets: Record<string, QualificationRequirement[]>;
+}
+
 export interface TestSuite {
   /** Stable identifier used on the CLI and in bun test names. */
   id: string;
@@ -259,6 +273,7 @@ export interface TestSuite {
   openSource: boolean;
   /** Heavy/slow — excluded from `--all` unless explicitly named. */
   optional?: boolean;
+  execution?: "host" | "remote-proxy";
 }
 
 export interface TestsConfig {
@@ -598,6 +613,7 @@ export interface VerifyConfig {
   formal: FormalConfig;
   /** Test suite ids (see tests.suites) run by the sim stage. */
   simSuites: string[];
+  qualifications: Record<string, QualificationProfile>;
   /** Stages enabled when `verify` runs with no explicit stage flag. */
   stages: GateStages;
   /**

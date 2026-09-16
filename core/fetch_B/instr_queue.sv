@@ -108,6 +108,7 @@ module instr_queue
   logic [NrFifo-1:0] push_instr, push_instr_fifo, pop_instr;
   // input stream
   logic [NrFifo-1:0] taken, branch_mask, valid, fifo_pos;
+  fifo_idx_t [NrFifo-1:0] slot_fifo;
   logic instr_overflow;
   logic [NrFifo-1:0] slot0_pos;
   logic slot0_full, lo_partial, rest_found;
@@ -188,7 +189,19 @@ module instr_queue
   // realigner still emitted them, and L2/L3 may drop but never modify (SPEC §0).
   assign valid = valid_i & branch_mask;
   // input slot i is served by FIFO (i + idx_is_q)
-  assign fifo_pos = rotate_left(valid, idx_is_q);
+  always_comb begin : gen_compact_slots
+    fifo_idx_t rank;
+    rank = '0;
+    fifo_pos = '0;
+    slot_fifo = '0;
+    for (int unsigned s = 0; s < NrFifo; s++) begin
+      slot_fifo[s] = (idx_is_q + rank) & IdxMask;
+      if (valid[s]) begin
+        fifo_pos[slot_fifo[s]] = 1'b1;
+        rank = rank + 1'b1;
+      end
+    end
+  end
   assign instr_overflow = |(instr_queue_full & fifo_pos);
   // I7: if any needed slot cannot enqueue, push none (then replay).
   // Leftover-complete slot0 is the previous window's carry: if it fits
@@ -204,7 +217,9 @@ module instr_queue
       & {NrFifo{g6lc_fetch_pkg::packet_accept(address_overflow)}};
   // Rotated BACK into realigner slot order: the frontend's cf_consumed / ras_push
   // index by input slot, so returning FIFO order here would credit the wrong slot.
-  assign consumed_o = rotate_right(push_instr_fifo, idx_is_q);
+  for (genvar s = 0; s < NrFifo; s++) begin : gen_consumed_slots
+    assign consumed_o[s] = valid[s] && push_instr_fifo[slot_fifo[s]];
+  end
 
   // First unpushed slot after a leftover-complete slot0 push. Replay must resume
   // there, not at the completing window, or the carry would be dropped again.
@@ -231,7 +246,10 @@ module instr_queue
     for (int unsigned f = 0; f < NrFifo; f++) begin
       fifo_idx_t s;
       fifo_idx_t rank;
-      s = (fifo_idx_t'(f) - idx_is_q) & IdxMask;
+      s = '0;
+      for (int unsigned i = 0; i < NrFifo; i++) begin
+        if (valid[i] && slot_fifo[i] == fifo_idx_t'(f)) s = fifo_idx_t'(i);
+      end
       instr_data_in[f].instr = instr_i[s];
       instr_data_in[f].pc = addr_i[s];
       instr_data_in[f].cf = cf_type_i[s];
@@ -247,7 +265,7 @@ module instr_queue
       // independent of the realigner slot order and of the input rotation.
       rank = '0;
       for (int unsigned s2 = 0; s2 < NrFifo; s2++) begin
-        if (valid[s2] && (addr_i[s2] < addr_i[s])) rank = rank + 1'b1;
+        if (valid[s2] && (s2 < int'(s))) rank = rank + 1'b1;
       end
       // O7o: rank is only IdxW bits; pad it explicitly so read_slang/Verific
       // both see the addition as a clean 16-bit sum.

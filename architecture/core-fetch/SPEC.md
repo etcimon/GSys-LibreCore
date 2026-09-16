@@ -106,11 +106,33 @@ do not AND `kill_s2` (eats taken jumps). Leftover slot0 is always ge. `wr=` is I
 
 ## 4. L3 — order
 
-Per-hart FIFO; fill port `p+1` only if `pc == prev.pc + prev.ilen`. Width = `geo.issue`. Taken CF
-ends the packet naturally (`packet_upto_cf`, n = `geo.slots`). Opcode-agnostic (I6). Live B:
-`packet_hart` is stamped at IQ push; decode reads `fetch_entry.hart_id` so a switch cannot
-retag an in-flight packet as the incoming hart (R1). BTB-miss jalr is NoCF — not a packet
-end (NEGATIVE always-JumpR).
+**2026-09-15 contract clarification:** program order is accepted-stream order,
+not numerical PC order. Backward branches, returns and repeated PCs do not
+change an instruction's age. Preserve bytes, PC, hart, exception and prediction
+metadata together. A flush cancels the queued stream; otherwise every accepted
+instruction must leave exactly once in acceptance order. Issue is a prefix up
+to `geo.issue`, and may not skip an older entry hidden behind a selected FIFO
+head. PC contiguity can limit a same-window group, but is not an age oracle.
+
+The live prefix filter can present sparse valid masks. The queue must either
+compact them into consecutive logical positions or explicitly account for holes;
+assuming prefix-valid input is not a proof of the connected frontend. Branch
+target queue push/pop must track the same accepted/fired control-flow entries.
+`packet_upto_cf` truncates after the first predicted-taken control flow. A
+BTB-miss jalr is NoCF, not a predicted packet end.
+
+`packet_hart` is stamped at IQ push; decode reads `fetch_entry.hart_id` so a
+switch cannot retag an in-flight packet. Any port throttling by control-flow
+class must be distinguished from head selection and tested against the actual
+raw-opcode gating in the live RTL, not described as proven opcode independence.
+
+**Verification status:** the existing self-composition harness is not an
+ordering/conservation reference. Its two-hart bound was vacuous (`1'(2)==0`)
+and is being repaired together with the realigner harness. The separate
+`g6lc_fetch_iq_order` task assumes prefix-valid input and checks DUT age stamps;
+it does not close the sparse-mask or independent accepted-stream obligations.
+Use the flattened F0–F5 gates in `AGENTS-todo.md`; historical PASS labels below
+do not supersede these limitations.
 
 ---
 
@@ -216,16 +238,16 @@ from S to S'", never "run S again".
 
 | Inv | Rule (short) | Rung now | Artifact | Envelope proven | Move left? |
 |---|---|---|---|---|---|
-| **I1** | decode is a function of bytes+address alone | **L2** + L3 | `g6lc_fetch_realign.sby` (live module: emitted halfword == `data_i` at that slot's own address); `g6lc_fetch_dbg` keeps the same check in every sim | smt2 cfg (FW=64, T=2, RVC) | Done. *This row previously read "L3 is leftmost feasible" - that was wrong: one window is a bounded free input, so the quantifier is closed after all.* |
+| **I1** | decode is a function of bytes+address alone | Bounded L2 + L3 open | `g6lc_fetch_realign.sby`: corrected hart bound, top-level stimulus, bounded checker index; separate covers | Reduced FW64/T2/RVC, VLEN32, aligned input; low halfword | Eight-frame BMC and five covers PASS (`review-realign-bounded-index-20260915`). Prior vacuous PASS withdrawn; not end-to-end bytes/metadata proof. |
 | **I2** | realigner emits exactly the ISA instrs, no rewrite | L3 + L2 | dbg slot pc-step + emission check; `packet_upto_cf` order proof | slots ≤ 8 | Partly moved. The packet-order half is L2; the bytes half stays L3. |
 | **I3** | leftover completes only from the next window | **L2** | `g6lc_fetch_align.sby` | all addresses | Done. |
-| **I4** | leftover is per-hart | **L2** | `g6lc_fetch_realign.sby` - a window presented for one hart leaves every other hart's carry unchanged (NH=2) | smt2 cfg | Done. |
+| **I4** | leftover is per-hart | Bounded L2 | `g6lc_fetch_realign.sby`, NH=2 with a representable hart bound | Reduced aligned-input realigner fixture | Eight-frame BMC PASS; covers include hart-1 completion and changing hart with live carry. Not unbounded/full-envelope proof. |
 | **I5** | complete only from a legal RVI prefix | **L2** | `g6lc_fetch_align.sby` | all halfwords | Done. Also re-checked on the *emitted* slot at L3. |
-| **I6** | IQ order is program order, opcode-agnostic | **L2** | `g6lc_fetch_iq.sby` - NON-INTERFERENCE over two live `instr_queue` copies: identical control, different raw `instr_i`, identical `ready_o`/`consumed_o`/`replay_*`/`fetch_entry_valid_o`/`.address`. Packet-mask shape also proven by `g6lc_fetch_order` | smt2 cfg, NI=2 | Done. |
+| **I6** | IQ order is accepted-stream order | L2 reopened + directed live leaf | `g6lc_fetch_iq.sby` is non-interference, not conservation/order. Independent `tb_g6lc_fetch_queue` reproduces sparse-mask skip and passes after compaction | Leaf 2/I1/H1, 4/I2/H2, 8/I2/H2 | IQ cover/BMC timeout; ABC frame-3 failure pending witness. Raw-opcode throttle contract and broader order proof remain open. |
 | **I7** | whole window or none | **L2** | `packet_accept`, `leftover_slot0_push` | all | Done. |
 | **I8** | redirect total priority order | **L2** | `g6lc_fetch_redirect.sby` (incl. restore-never-outranks-trap) | both T envelopes | Done. |
 | **I9** | trap entry held until decode consumes | L3 (observe) | `redirect_hold` / `hold_age` | - | **Open.** Needs the hold state, which lives in `frontend.sv`; a live-module proof there is far heavier than the realigner (predictors + IQ elaborate too). Next candidate after I6. |
-| **I10** | thread switch loses no progress | **L2** | `g6lc_fetch_smt.sby` (`snap_pc`) | both T envelopes | Done. |
+| **I10** | thread switch loses no progress | Live integration reopened; selector proved | `restart_frontier` in `g6lc_fetch_smt.sby`; PC-bank unit test; typed issue/retirement reference | 1..8 selector ports; live SMT2 RVI witness | Transport-only `snap_pc` proof did not cover discarded ID/IQ entries. Frontier and owner-routing fixes pass the RVI reference trace. Split-target completion checks consumed instruction PCs. RVI and mixed C/I reference traces pass for the activated integer witness; full firmware/ISA/SMT scope remains open. |
 | **I11** | mispredict always redirects to the resolved target | L1 + L3 | `G6LC_FETCH_B` skips `g6lc_jalr_usable`; `diag-isa-red-lines` RL-RESOLVE-PMA | — | Enforced by absence, mechanically. |
 | **I12** | sequential step is one window | **L2** | `g6lc_fetch_geo.sby` (`nxt == base + W`, `nxt > pc`, `!same_win(pc, nxt)`) | FW 32/64/128/256 × RVC on/off | Done. |
 | **geo** | window algebra is self-consistent (`win_base`/`win_tag`/`same_win`/`hw_off` agree; `ilen_of` ≡ `rvi_prefix`) | **L2** | `g6lc_fetch_geo.sby` | 6 envelope points | Done. This is SPEC §1 and §F as properties. |
@@ -265,13 +287,18 @@ work item is *break the cone*, after which the I9 proof is a re-run rather than 
 the optional `diag-smt2-comb-loops` diagnostic. Only the SAFETY half of I9 is in scope for a proof at
 all; the I23 bound stays an L3 observation for the reason given above.
 
-**Open, in ladder order:** just **I9** (bounded trap hold). I4 and I6 both closed by moving from
-pure functions to LIVE modules: I1/I2/I4 in `g6lc_fetch_realign` (the realigner plus its per-hart
-bank) and I6 in `g6lc_fetch_iq` (two queue copies). I9 is the last one, and it is harder than
-either because the hold state lives in `frontend.sv`, which drags in the predictors and the queue.
+**Current open gates:** I9 is not the only remaining obligation. The realigner
+now has non-vacuous bounded results in the reduced aligned-input envelope, not
+unbounded closure. IQ self-composition does not establish conservation/order
+and its raw-opcode control claim conflicts with issue throttling. The IQ order
+harness now adds independent accepted-entry/occupancy checks and removes
+prefix-valid/numeric-PC assumptions; its assertion and cover results remain
+separate gates. Current-response redirect completion and registered replay
+feedback repair demonstrated frontend defects, but full dual-active SMT2 and
+physical qualification remain open.
 
 **A note on proof shape, since it decided three of these.** A property that says "X must not
 depend on Y" cannot be witnessed by any single execution, so it needs self-composition: run two
-copies, vary only Y, assert the observable agrees. That is how I6 is proven, and it is the right
+copies, vary only Y, assert the observable agrees. This addresses only I6 non-interference, not order, and is the appropriate
 shape for any future "opcode-agnostic" / "value-independent" claim -- including the ISA red lines
 in `../firmware-boot-principles.md` sE, which are all of that form.

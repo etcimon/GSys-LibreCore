@@ -16,11 +16,24 @@ import re
 import sys
 from pathlib import Path
 
+# name -> (rewrite pattern, value validator). The rewrite pattern must expose
+# group 2 as the replaced span; groups 1 and 3 are preserved verbatim.
 ALLOWED = {
-    "L2RoundRobinEn": re.compile(
-        r"(L2RoundRobinEn:\s*bit'\()([01])(\))"
+    "L2RoundRobinEn": (
+        re.compile(r"(L2RoundRobinEn:\s*bit'\()([01])(\))"),
+        r"[01]",
+    ),
+    # Shrink-only: rewrites the FIRST element of ExecuteRegionLength (the
+    # all-DRAM rule on every shipped config) so a data buffer placed above the
+    # truncated range becomes cached-but-not-execute. Used to measure the
+    # HPDCACHE load-port execute-region uncacheable quirk; never widens.
+    "ExecuteRegionDramLen": (
+        re.compile(r"(ExecuteRegionLength:\s*1024'\(\{\s*64'h)([0-9A-Fa-f_]+)()"),
+        r"[0-9A-Fa-f_]+",
     ),
 }
+
+EXEC_DRAM_LEN_MAX = 0x4000_0000
 
 
 def die(msg: str) -> None:
@@ -36,8 +49,13 @@ def parse_fields(items: list[str]) -> dict[str, str]:
         name, value = item.split("=", 1)
         if name not in ALLOWED:
             die(f"field {name!r} is not allowlisted; permitted: {sorted(ALLOWED)}")
-        if not re.fullmatch(r"[01]", value):
-            die(f"{name} value must be 0 or 1")
+        _, value_re = ALLOWED[name]
+        if not re.fullmatch(value_re, value):
+            die(f"{name} value {value!r} fails validator {value_re}")
+        if name == "ExecuteRegionDramLen":
+            n = int(value.replace("_", ""), 16)
+            if not 0 < n <= EXEC_DRAM_LEN_MAX:
+                die(f"{name}={value!r} must be in (0, 0x{EXEC_DRAM_LEN_MAX:x}]; shrink-only")
         fields[name] = value
     if not fields:
         die("no overlay fields")
@@ -48,7 +66,7 @@ def apply_fields(text: str, fields: dict[str, str]) -> tuple[str, dict]:
     record = {}
     out = text
     for name, value in fields.items():
-        pattern = ALLOWED[name]
+        pattern, _ = ALLOWED[name]
         matches = list(pattern.finditer(out))
         if len(matches) != 1:
             die(f"{name} must occur exactly once in the package (found {len(matches)})")
