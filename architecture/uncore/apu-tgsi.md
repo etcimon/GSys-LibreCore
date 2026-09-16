@@ -8,7 +8,7 @@ Immediates lower through native `LDC` (next IMEM word).
 
 ## Intent
 
-Three compartments:
+Four diagnostic compartments (not one production compiler path):
 
 1. **Compiler** (`g6lc_apu_tgsi.c`) — host-testable, freestanding, no libc.
 2. **Job policy** (`g6lc_apu_tgsi_job.c`) — host `tgsi_fw_check`: TEX fail closed,
@@ -22,6 +22,41 @@ Three compartments:
    Bring-up `apu_fw.elf` stays TID+IADD (`0x600D000A`).
 
 No FeatureVirgl.
+
+## Completion review — 2026-09-15
+
+The target-specific opcode stub and frozen MOV substitution are a **blocker**,
+not resident semantic compilation. The host tests and CVA6 cookie exercise
+different implementations. Preserve these as labelled diagnostics only; no
+unsupported input may be promoted to a successful known program in a service.
+
+Required next compiler gate:
+
+- Use the same bounded semantic parser/lowering on host and CVA6. Resolve the
+  target's pointer/ordering failures with differential traces and valid memory
+  semantics, not address truncation, forced success or dependence tricks that
+  stand in for architectural synchronization.
+- Mutate opcode, operand register, constant, swizzle and writemask independently;
+  compare native words, errors and hardware outputs. Include unsupported and
+  truncated/continued shader input and capacity exhaustion. Rebuild ELF/hex from
+  pinned sources; merely linking the compiler or replaying a checked-in hex is
+  insufficient.
+- IN/OUT/CONST currently share physical register numbers and TEMP overlaps
+  them. Register swizzles are parsed but no general vec4 representation is
+  provided. Four quad invocations are not four color components. Establish
+  stage-specific namespaces, vectors/components, liveness/spilling and correct
+  swizzle/write-mask semantics before general shaders are accepted.
+- The current 16-word native program, eight registers and closed immediate
+  literals cannot satisfy the pinned Mesa effective profile. Implement required
+  indirect addressing, flow/derivatives/TEX and formats or reject them while
+  grants remain off. Reduced capsets do not remove Mesa's unconditional limits.
+- Shader continuation assembly, virgl object lifetime and resource binding
+  belong to the service decoder, not this text-only API. Compilation may run
+  on the service hart; execution and texture/pixel processing may not.
+
+The independent firmware image and optional BIOS loader use the same compiler
+artifact/ABI. No BIOS crate dependency or joint release cycle is required.
+`apu-resident-fw.md` and `apu-firmware-domain.md` own that relationship.
 
 ## Seams
 

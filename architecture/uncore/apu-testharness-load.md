@@ -39,12 +39,34 @@ so the cluster stays generic (`PerCoreBoot`) and SRAM stays in `g6lc_apu_fwram`.
 - Application cores keep ROM `0x10000`. Firmware hart resets at
   `0x90000000`. Overlay DTSI is still not in default trees.
 - Hex preload stays in `g6lc_apu_fwram` (image prefix only; not BSS-zero).
-  This box holds cluster reset for one time unit (`fw_ready_o`, `#1`).
-  Verilator 5.008 rejects `#0` Inactive scheduling.
+  In simulation this box holds cluster reset for one time unit (`fw_ready_o`,
+  `#1`). Synthesis ties readiness to 1; this is not a hardware load/ready
+  handshake. Verilator 5.008 rejects `#0` Inactive scheduling.
 - SMT OpenSBI is unchanged. Full testharness UART/PLIC/DRAM/L2 and an
   OpenSBI firmware payload are not this leaf. The directed cluster TB proves
   CVA6 I$ fills through the compositor map. `tb_g6lc_apu_th_osbi` locks the
   testharness 14-rule OpenSBI-visible decode without booting OpenSBI.
+
+## Deployment redesign — 2026-09-15
+
+The compositor is reusable decode/attachment scaffolding, not the production
+boot controller. Firmware RAM lacks a source grant and the main testharness
+supplies a constant trusted hart tag. `ExecEn && !MemEn` is a diagnostic branch;
+the DMA master is still disconnected there. Full-width RAM checks, trusted
+provenance, combined memory/exec and reset epochs across adapters are open.
+
+A real loader must independently hold the service hart/admission while BIOS or
+platform firmware runs, validate and initialize the image, install protection,
+then start a protected S-mode payload. Holding the whole cluster until a BIOS
+loader reports ready would deadlock that loader. Keep simulation preload status
+separate from service-ready, device-ready and Linux boot-health status.
+
+Platform-managed loading requires no BIOS. Optional BIOS-managed loading uses
+the same versioned artifact/supervisor interface, with no BIOS UI/runtime linked
+into the service. Image reload waits for complete DMA/lease drain. See
+`apu-firmware-domain.md` for ownership and health and `apu-firmware-ram.md` for
+remaining physical-address/AXI concerns. The old per-run counts below are
+historical diagnostics; exact revalidation belongs in the root test map.
 
 ## Verification
 

@@ -3,7 +3,8 @@
 **Domain:** graphics uncore · **Status:** standalone default-off leaf (P1)
 
 PLIC source splice and xbar window exports for `g6lc_apu_soc`. EGL/GLES stay
-in client Mesa. Not instantiated on the production testharness xbar.
+in client Mesa. Reached through the opt-in `G6LC_APU` testharness compositor;
+default topology stays unchanged. This is not a protected production attachment.
 
 ## Intent
 
@@ -18,17 +19,23 @@ virtio IRQ onto PLIC source 9 without touching AI source 8.
 | Config | `MmioBase=0x40001000`, `ControlBase=0x40002000`, `IrqSource=9` |
 | RTL | `corev_apu/apu/g6lc_apu_attach.sv` wraps `g6lc_apu_soc` |
 | PLIC | `irq_sources[IrqSource-1]`; source 8 / `irq_sources[7]` is AI |
-| Flist | `corev_apu/apu/Flist.apu_soc` (not production / testharness) |
+| Flist | `corev_apu/apu/Flist.apu_soc`; opt-in diagnostic testharness composition |
 
 ## Invariants
 
 - Default-off: `Enable=0` passes `irq_sources` through and keeps the SoC box
   inert. `FeatureVirgl` remains illegal.
 - Guest and control windows do not overlap GPIO/AI `0x40000000..0x40000fff`.
-- Authorization is the firmware hart ID, never AXI PROT.
+- Authorization requires a trusted supplied source/hart ID, never AXI PROT.
+  The testharness's constant tag is bring-up only. The AXI4 wrapper now retains
+  source metadata at handshake; actual provenance/RAM protection remain open.
 - Physical display stays disabled. No OpenSBI domain/PMP programming here.
-- Production `ariane_testharness` / `ariane_soc_pkg` / `ariane_peripherals`
-  topology is unchanged.
+- Default topology is unchanged; `+define+G6LC_APU` adds guest/control/RAM
+  ports and the firmware DRAM hole in the diagnostic testharness only.
+- Optional BIOS loading/health is an independent supervisor adapter, not
+  permission for Linux or the BIOS UI to share private mailbox ownership.
+  See `apu-firmware-domain.md` and `apu-testharness-bus.md` for the reviewed
+  deployment and remaining bus/source/reset gates.
 
 ## Verification
 

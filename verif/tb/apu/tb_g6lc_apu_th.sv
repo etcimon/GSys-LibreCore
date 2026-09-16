@@ -285,6 +285,39 @@ module tb_g6lc_apu_th;
     read_reg(2, APU_MMIO_BASE, r, 2);
     check("disabled AXI4 guest is SLVERR", 1'b1);
 
+    for (int authorized = 0; authorized < 2; authorized++) begin
+      cases++;
+      send_read(1, APU_CONTROL_BASE, 32'(authorized));
+      ar_hart = 32'(1 - authorized);
+      receive_read(1, APU_CONTROL_BASE, r, authorized != 0 ? RESP_OKAY : RESP_SLVERR);
+      check("read authority belongs to accepted AR", r == (authorized != 0 ? APU_CONTROL_MAGIC : 0));
+
+      cases++;
+      write_reg(1, APU_CONTROL_BASE + 64'(ACTRL_QUEUE_SEL), 0);
+      send_write(1, APU_CONTROL_BASE + 64'(ACTRL_QUEUE_SEL), 1, 32'(authorized));
+      aw_hart = 32'(1 - authorized);
+      receive_write(1, authorized != 0 ? RESP_OKAY : RESP_SLVERR);
+      read_reg(1, APU_CONTROL_BASE + 64'(ACTRL_QUEUE_SEL), r);
+      check("write authority belongs to accepted AW", r == 32'(authorized));
+
+      cases++;
+      write_reg(1, APU_CONTROL_BASE + 64'(ACTRL_QUEUE_SEL), 0);
+      @(negedge clk);
+      aw_hart = 32'(authorized);
+      req[1].aw.addr = APU_CONTROL_BASE + 64'(ACTRL_QUEUE_SEL);
+      req[1].aw.size = 3'd2; req[1].aw.len = 0; req[1].aw_valid = 1;
+      @(posedge clk); while (!rsp[1].aw_ready) @(posedge clk);
+      @(negedge clk); req[1].aw_valid = 0; aw_hart = 32'(1 - authorized);
+      repeat (4) begin @(negedge clk); check("split AW waits for W", !rsp[1].b_valid); end
+      pack32(req[1].aw.addr, 1, req[1].w.data, req[1].w.strb);
+      req[1].w.last = 1; req[1].w_valid = 1;
+      @(posedge clk); while (!rsp[1].w_ready) @(posedge clk);
+      @(negedge clk); req[1].w_valid = 0;
+      receive_write(1, authorized != 0 ? RESP_OKAY : RESP_SLVERR);
+      read_reg(1, APU_CONTROL_BASE + 64'(ACTRL_QUEUE_SEL), r);
+      check("split write retains AW authority", r == 32'(authorized));
+    end
+
     if (errors != 0) $fatal(1, "APU th errors=%0d", errors);
     else begin
       $display("PASS tb_g6lc_apu_th cases=%0d checks=%0d cycles=%0d errors=0",

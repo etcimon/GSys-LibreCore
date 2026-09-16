@@ -282,6 +282,39 @@ module tb_g6lc_apu_exec;
     check("ldc t3", v3 == 32'h3f800000);
     check("ldc no fault", !fault);
 
+    for (int opcode = 0; opcode < 32; opcode++) begin
+      clear_imem();
+      shader = 1;
+      poke(0, 3, 32'h12345678);
+      if (opcode == int'(APU_EX_NOP) || opcode == int'(APU_EX_HALT) || opcode == int'(APU_EX_BR)) begin
+        load(0, apu_exec_enc(apu_exec_op_e'(opcode), 0, 0, 0, 0, 0, 1, 9'd1));
+        run();
+        check("fetch-only opcode enforces shader privilege", fault);
+      end else if (opcode > int'(APU_EX_LDC)) begin
+        load(0, apu_exec_enc(apu_exec_op_e'(opcode), 3, 0, 0, 0, 0, 0, 0));
+        run();
+        check("unknown opcode faults", fault);
+        peek(0, 3, v0);
+        check("unknown opcode cannot write registers", v0 == 32'h12345678);
+      end
+    end
+    clear_imem();
+    load(0, apu_exec_enc(APU_EX_MOV, 3, 8, 0, 0, 0, 0, 0));
+    run();
+    check("out-of-range source register faults rather than aliases", fault);
+    clear_imem();
+    load(0, apu_exec_enc(APU_EX_LDI, 11, 0, 0, 0, 0, 0, 9'd1));
+    run();
+    check("out-of-range destination register faults rather than aliases", fault);
+    peek(0, 3, v0);
+    check("invalid encodings preserve RF", v0 == 32'h12345678);
+    shader = 0;
+    clear_imem();
+    load(0, apu_exec_enc(APU_EX_LDI, 3, 0, 0, 0, 0, 0, 9'd7));
+    run();
+    peek(0, 3, v0);
+    check("valid run recovers after decode fault", !fault && v0 == 7);
+
     if (errors != 0) $fatal(1, "APU exec errors=%0d", errors);
     else begin
       $display("PASS tb_g6lc_apu_exec cases=%0d checks=%0d cycles=%0d errors=0",

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: MIT
 
 `verilator_config
+lint_off -rule LITENDIAN -file "*/core/cvfpu/src/fpnew_pkg.sv"
+lint_off -rule WIDTHEXPAND -file "*/core/cvfpu/src/fpnew_pkg.sv"
 lint_off -rule EOFNEWLINE -file "*/corev_apu/register_interface/include/register_interface/assign.svh"
 lint_off -rule WIDTHTRUNC -file "*/vendor/pulp-platform/axi/src/axi_pkg.sv"
 lint_off -rule WIDTHEXPAND -file "*/vendor/pulp-platform/axi/src/axi_pkg.sv"

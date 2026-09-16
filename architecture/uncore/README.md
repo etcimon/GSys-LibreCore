@@ -37,7 +37,7 @@ controller vs board/analog PHY, and *what* gates it must pass before it is wired
 | `storage-controllers.md` | storage | `litesata`, `litesdcard` (+ NVMe over PCIe) | Controller on-die; SerDes/level-shift external |
 | `hdmi-display.md` | display | `hdmi` | TMDS encoder on-die; connector + re-driver on board |
 | `apu-native-exec.md` | graphics APU | (in-tree `corev_apu/apu`) | Native exec leaf: one FPnew lane, four lockstep quad contexts, `LDC` 32-bit payload, uniform BR, local LSU; default-off |
-| `apu-testharness-attach.md` | graphics APU | (in-tree `corev_apu/apu`) | Testharness-shaped PLIC splice + xbar windows; not on the production xbar |
+| `apu-testharness-attach.md` | graphics APU | (in-tree `corev_apu/apu`) | PLIC splice + opt-in diagnostic xbar windows; trusted production source/RAM protection still open |
 | `apu-fw-exec.md` | graphics APU | (in-tree `corev_apu/apu`) | Firmware mailbox bound to native exec; testharness `ExecEn && !MemEn` |
 | `apu-testharness-bus.md` | graphics APU | (in-tree `corev_apu/apu`) | AXI4-64 adapter + opt-in testharness xbar ports + idle DMA export (`+define+G6LC_APU`) |
 | `apu-testharness-load.md` | graphics APU | (in-tree `corev_apu/apu`) | Testharness load compositor: DRAM hole + hart-1 boot PC + 14-rule OpenSBI-visible map |
@@ -48,6 +48,22 @@ controller vs board/analog PHY, and *what* gates it must pass before it is wired
 | `apu-tgsi.md` | graphics APU | `software/apu-fw` | TGSI text subset → native exec; `IMM[n]` via `LDC`; separate `apu_tgsi_fw` image; not TEX; not in `apu_fw.elf` |
 
 ---
+
+## APU completion review (2026-09-15)
+
+The APU outlines now distinguish committed bring-up evidence from deployment
+requirements. `apu-firmware-domain.md` owns the persistent S-mode service,
+platform-managed versus optional BIOS-managed loading, and the narrow Linux/
+BIOS boot-health interoperability contract. It does not add a BIOS dependency
+or a joint code-update cycle. Firmware-instance health, client/queue ownership
+and Linux-attempt health remain separate.
+
+`apu-native-exec.md` and `apu-tgsi.md` identify prototype storage/ISA and
+host-versus-target compiler gaps; `apu-fw-exec.md` owns the missing combined
+memory/exec path. `apu-firmware-ram.md` and `apu-testharness-bus.md` distinguish
+review fixes from the remaining physical-address, source, AXI and reset gates.
+Cookies/DMEM fills and stub peripheral stores are not Linux/Mesa GLES2 proof.
+Root implementation/test/coverage maps and `AGENTS-todo.md` own current evidence.
 
 ## What each outline contains
 

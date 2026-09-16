@@ -1,65 +1,129 @@
-# APU firmware domain (OpenSBI / PMP)
+# APU firmware domain and boot ownership
 
-**Domain:** graphics uncore · **Status:** contract + opt-in DTS leaf (P2)
+**Domain:** graphics uncore · **Status:** protected-service design; bring-up wiring only
 
-OpenSBI domain and PMP numbers for the APU firmware hart. EGL/GLES stay in
-client Mesa. Not applied to the SMT2 OpenSBI build. A directed CVA6 fetch
-from DRAM lo `0x80000000` (OpenSBI load address) exists; not a full
-testharness OpenSBI ELF/UART/PLIC/L2 boot.
+Review baseline: `d74010111d7f9d78e32e75fd64f4ea07c3323fcc` (2026-09-15).
+EGL/GLES remain in clients. The APU service validates commands, manages resources
+and compiles shaders; only the dedicated APU executes graphics stages.
 
-## Intent
+## Current implementation versus required protection
 
-Encode the firmware-private RAM and control window as an OpenSBI domain
-memregion pair, with RISC-V PMP NAPOT encodings that match `ApuHarness`.
-Guest virtio at `0x40001000` stays in the application domain.
+| Seam | Present | Not established |
+|---|---|---|
+| Configuration | `apu_soc_legal`, `apu_domain_legal`, NAPOT/order helpers; two physical cores, `NrHarts=1` | Actual PMP programming or isolation |
+| Firmware placement | `ApuHarness`: hart 1, RAM `0x90000000` / 256 KiB, control `0x40002000` / 4 KiB | RAM access firewall, image authentication, production loader |
+| Application device | Guest `0x40001000` / 4 KiB; PLIC source 9 (AI remains source 8) | Working virgl device or coherent DMA |
+| Boot | `PerCoreBoot`, firmware hex preload and CVA6 commit/cookie tests | An OpenSBI-launched S-mode service surviving Linux boot |
+| Domain overlay | Opt-in `ariane-g6lc-apu.dts` includes `g6lc-apu-domain.dtsi` | Overlay selects `next-mode=3` (M-mode), not the intended S-mode payload |
+| Source grant | `g6lc_apu_grant` compares supplied source/hart and full control address | The testharness supplies a constant firmware tag; this is not authentication |
 
-## Seams
+The overlay's M-mode permissions and direct reset into firmware are diagnostic
+scaffolding, **not** the deployment contract. Do not enable the Linux GPU node or
+claim source isolation from these tests. A DT omission or `reserved-memory` alone
+is not access control. Firmware RAM currently has no source input at all.
 
-| Piece | Path |
-|---|---|
-| Checks | `apu_domain_legal`, `apu_region_order`, `apu_pmp_napot` in `g6lc_apu_cfg_pkg` |
-| Overlay | `corev_apu/bootrom/g6lc-apu-domain.dtsi` (not included by default) |
-| Opt-in DTS | `corev_apu/bootrom/ariane-g6lc-apu.dts` (stream8 + overlay + CPU1 harts) |
-| Profile | `ApuHarness`: hart 1, RAM `0x90000000` / 256 KiB, control `0x40002000` |
-| Testharness map | 14-rule `+define+G6LC_APU` addr_map (OpenSBI-visible decode) |
-| Boot split | `apu_core_boot_addr` / `apu_boot_split_legal`; testharness `PerCoreBoot` |
-| Host lock | `software/apu-fw/test/boot_check.c`, `osbi_check.c` |
-| TB | `verif/tb/apu/tb_g6lc_apu_th_osbi.sv`, `tb_g6lc_apu_cva6_osbi_boot.sv`, `tb_g6lc_apu_cva6_osbi_uart.sv`, `tb_g6lc_apu_cva6_osbi_clint.sv`, `tb_g6lc_apu_cva6_osbi_plic.sv` |
+## Target boot contract (not yet implemented)
 
-## Invariants
+OpenSBI remains the trusted M-mode supervisor. The parser/compiler service runs
+as an isolated S-mode payload on a reserved physical hart. Linux cannot acquire
+that hart through its CPU topology or SBI HSM operations. All application harts
+keep their normal boot path. No SMT reservation, CPU pipeline change or
+`build-opensbi-smt2.sh` policy change is required by the APU plan.
 
-- Two physical cores, `NrHarts=1`. SMT service-domain partitioning is out of
-  scope. Do not patch `build-opensbi-smt2.sh`.
-- Firmware RAM is `2^order` aligned, `order >= 18` (256 KiB). Control and
-  guest are `order >= 12` (4 KiB).
-- Firmware RAM and control are firmware-private. Guest virtio is not.
-- GPIO/AI `0x40000000..0x40000fff` is never an APU region.
-- Testharness DRAM hole: firmware RAM sits strictly inside DRAM
-  (`apu_dram_hole_legal`). Empty lo/hi fragments are illegal.
-- Firmware hart reset PC is `FirmwareRamBase`. Application cores keep ROM
-  `0x10000`. Overlay `next-addr` matches. Not applied to SMT2.
-- Opt-in `ariane-g6lc-apu.dts` is not in `bootrom/Makefile` `LINUX_DTBS`.
-  FPGA/Altera maps do not grow. `FeatureVirgl` remains illegal. Physical
-  display stays disabled.
+Two provisioning paths converge on **one service image and runtime ABI**:
 
-## Verification
+1. **Platform-managed:** trusted ROM/platform loader verifies and loads the
+   configured APU image, establishes domains and starts it before Linux probes.
+   `g6lc_bios` is not required to build, boot or operate the APU.
+2. **Optional BIOS-managed:** BIOS stages/selects a compatible APU image and asks
+   the trusted supervisor to validate, load and start the reserved service. The
+   BIOS UI is not the service runtime, is not granted parser execution in M-mode,
+   and does not gain unrestricted RAM/control access. Cross-domain start/restart
+   needs an explicit bounded supervisor interface; ordinary Linux-domain HSM is
+   not assumed to start a hart belonging to another domain.
 
-`run-soc.sh` (`APU_SOC=1`), `run-th-osbi.sh`, `run-cva6-osbi-boot.sh`,
-`run-cva6-osbi-uart.sh`, `run-cva6-osbi-clint.sh`, and
-`run-cva6-osbi-plic.sh`.
-Remote Verilator 5.008 (2026-09-15): **`tb_g6lc_apu_domain` 26 checks /
-errors=0**. Directed **`tb_g6lc_apu_th_osbi` 27 checks / 4 clocks** locks
-the testharness 14-rule last-match to compositor DRAM lo/hi + guest/ctrl/RAM
-and the hart-1 boot split. **`tb_g6lc_apu_cva6_osbi_boot` 13 checks / 286
-clocks**: hart 0 I$ fill + commit at DRAM lo `0x80000000`, hart 1 firmware
-RAM; default testharness app boot stays ROM `0x10000`.
-**`tb_g6lc_apu_cva6_osbi_uart` 12 checks / 288 clocks**, byte `0x41` at
-UART `0x10000000` (stub, not 16550).
-**`tb_g6lc_apu_cva6_osbi_clint` 12 checks / 288 clocks**, word `0x1` at
-CLINT `0x02000000` (stub MSIP, not a real timer).
-**`tb_g6lc_apu_cva6_osbi_plic` 12 checks / 290 clocks**, word `0x1` at
-PLIC `0x0C000004` (stub source-1 priority, not a real interrupt
-controller). Host `osbi_check`
-refuses default-tree includes and SMT2 script edits. th_load screening synth
-4 KiB enabled 127,297 / 35,275 sequential; disabled 275 / 27. Results also
-live in `AGENTS-todo.md`.
+Required start sequence:
+
+- Stop admission and prove device/child DMA idle before any image replacement.
+- Validate manifest/image identity, lengths, entry, privilege, ABI/native ISA,
+  required RTL configuration and capability-profile compatibility. Digest/CRC
+  alone is not authenticity; signature trust and rollback policy are separate.
+- Load file-backed segments, initialize BSS/stack/workspace, perform required
+  cache maintenance and instruction synchronization, then install protection.
+- Grant firmware RAM/code/data and private control to the correct domain only;
+  control is non-executable. Resolve actual OpenSBI revision/permission encoding,
+  PMA attributes, PMP entry budget and root-domain exclusions before changing the
+  template. Guest backing access must be bounded by the DMA/resource policy.
+- Start the service in S-mode, collect versioned readiness for this boot instance,
+  then expose only implemented virtio features. No `#1` preload delay or cookie
+  is a hardware-ready signal.
+
+The fabric must carry trusted source/domain metadata through arbitration and
+buffering. AXI transaction ID and PROT are not intrinsically hart identity. If
+cluster aggregation loses provenance, enforce protection before that loss or
+introduce a verified metadata seam; never reconstruct it from an address.
+Both control and RAM need adversarial application-hart and DMA denial tests.
+
+## Minimal BIOS/Linux boot-health commonality
+
+This is the only coordination required with the recoverable-BIOS plan
+`plan-c06f2ee19717de0d.md`; the APU implementation has an independent update cycle.
+Existing `g6b-bootctl` provides Linux/Firmware tickets and a redundant journal;
+`g6b-boot-health` checks Linux root/services/watchdog readiness and discovers a
+journal window through `/firmware/g6b-boot-health`. These do **not** implement an
+APU service-health protocol. `Domain::Firmware` is BIOS-candidate health, not an
+available APU namespace. Do not reinterpret v1 records or share a concurrently
+written journal between BIOS, Linux and APU firmware.
+
+Proposed adapter input, to be versioned before implementation: service image
+identity, firmware/native-ISA ABI, hardware/config/capability identity, fresh
+boot-instance nonce, device epoch, client-owner generation, lifecycle state,
+self-test result and progress/fault counters. This is a status contract, not an
+existing MMIO layout, FDT binding or SBI extension. A stale cookie/heartbeat must
+not satisfy it. Publish a sanitized immutable handoff; Linux gets no private
+firmware pointers, write grants or secret material.
+
+- BIOS decides whether graphics is **optional** (default) or an explicit boot
+  prerequisite. Optional APU failure degrades to serial/recovery and keeps the
+  device disabled; it does not globally turn a healthy Linux boot into failure.
+- APU-ready, successful hardware graphics self-test, BIOS-candidate confirmation
+  and Linux-attempt confirmation are four different observations. Only the
+  existing Linux readiness policy acknowledges the exact Linux attempt. None
+  clears an operator inhibit or enables autoboot.
+- A future required-graphics policy may use an ordinary DRM/EGL probe as one
+  required-service predicate. DRM presence and a cached cookie are insufficient;
+  hardware completion/output and no-fallback evidence are required for APU proof.
+- A service heartbeat is not ownership of the platform boot watchdog. Linux
+  takeover must have a proven no-gap watchdog path; the current file mock is not
+  hardware watchdog evidence. APU recovery must not feed away a broken Linux boot.
+- No post-Linux BIOS web/KVM loop is retained just to service graphics. The APU
+  domain persists independently after BIOS management clients stop.
+
+## Client ownership and recovery
+
+Use BIOS and Linux as sequential virtio clients of the same device, not concurrent
+private-mailbox owners. Before Linux entry: BIOS stops submissions, drains all
+leases and display references, resets queues/device state and records a fresh
+owner generation. Linux negotiates from clean virtio state; queue addresses and
+BIOS context IDs are not inherited. A frozen presentation surface may survive
+only via a separate explicit scanout lease, not a reusable guest mapping.
+
+A guest virtio reset clears guest resources/epochs after drain; it is not permission
+to overwrite firmware or reset a live AXI fabric. Firmware restart is supervisor
+owned, revokes admission and waits for drain. Protocol quarantine requires a
+coordinated fabric reset. On timeout, remain failed/isolated; do not free backing
+or synthesize success. kexec, warm reset, service crash and failed image rollback
+must follow the same ownership rules.
+
+## Evidence and next acceptance
+
+Historical directed evidence at the baseline commit: domain 26 checks;
+`run-th-osbi.sh` 27 checks / 4 clocks; CVA6 DRAM-load-address 13/286;
+UART, CLINT and PLIC stub stores 12/288, 12/288 and 12/290. Those last four
+payloads are **not OpenSBI ELFs**, real timer/interrupt operation or Linux boot.
+
+Next gate: real pinned OpenSBI → protected S-mode service + application Linux,
+with source/RAM denial, correct topology/reserved-memory, service readiness and
+reset fault injection. Run through the remote testharness proxy. See
+`apu-firmware-ram.md`, `apu-resident-fw.md`, `apu-fw-exec.md` and
+`apu-testharness-load.md`; generic synthesis is not PMP, CDC, STA or DFT sign-off.

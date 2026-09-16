@@ -59,6 +59,24 @@ module g6lc_apu_th
   localparam bit Enable = ApuCfg.Enable;
   apu_axi_req_t guest_lite, control_lite;
   apu_axi_resp_t guest_lite_rsp, control_lite_rsp;
+  logic [HartIdWidth-1:0] control_aw_hart_q, control_ar_hart_q;
+
+  if (Enable) begin : gen_source
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        control_aw_hart_q <= '0;
+        control_ar_hart_q <= '0;
+      end else begin
+        if (control_req_i.aw_valid && control_rsp_o.aw_ready)
+          control_aw_hart_q <= control_aw_hart_i;
+        if (control_req_i.ar_valid && control_rsp_o.ar_ready)
+          control_ar_hart_q <= control_ar_hart_i;
+      end
+    end
+  end else begin : gen_source_off
+    assign control_aw_hart_q = '0;
+    assign control_ar_hart_q = '0;
+  end
 
   g6lc_apu_axi4_lite #(.Enable(Enable), .axi4_req_t(axi4_req_t),
                        .axi4_rsp_t(axi4_rsp_t)) i_guest (
@@ -79,7 +97,7 @@ module g6lc_apu_th
     .clk_i, .rst_ni, .testmode_i,
     .guest_req_i(guest_lite), .guest_rsp_o(guest_lite_rsp),
     .control_req_i(control_lite), .control_rsp_o(control_lite_rsp),
-    .control_aw_hart_i, .control_ar_hart_i,
+    .control_aw_hart_i(control_aw_hart_q), .control_ar_hart_i(control_ar_hart_q),
     .irq_sources_i, .irq_sources_o,
     .guest_irq_o, .control_irq_o, .plic_irq_o, .plic_source_o,
     .guest_base_o, .guest_end_o, .control_base_o, .control_end_o,

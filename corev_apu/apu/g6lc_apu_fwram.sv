@@ -41,7 +41,7 @@ module g6lc_apu_fwram
   localparam logic [7:0] MaxLen = 8'd15;
 
   typedef enum logic [3:0] {
-    Idle, WaitW, DoWrite, SendB, DoRead, ReadCap, SendR, ErrB, ErrR
+    Idle, WaitW, DoWrite, SendB, DoRead, ReadCap, SendR, ErrB, ErrR, DrainW, Fault
   } state_e;
 
   `ifndef SYNTHESIS
@@ -72,15 +72,16 @@ module g6lc_apu_fwram
     if (r.aw.size == 3'd3) ok = ok && r.aw.addr[2] == 1'b0;
     return ok;
   endfunction
+  function automatic logic [7:0] write_mask(input logic [63:0] addr,
+      input logic [2:0] size);
+    return size == 3'd3 ? 8'hff : (addr[2] ? 8'hf0 : 8'h0f);
+  endfunction
   function automatic logic in_win(input logic [63:0] a);
     logic [31:0] pa, base, bytes;
     pa = a[31:0];
     base = RamBase[31:0];
     bytes = ApuCfg.FirmwareRamBytes[31:0];
     return pa >= base && (pa - base) < bytes;
-  endfunction
-  function automatic logic [LenW-1:0] cap_len(input logic [LenW-1:0] len);
-    return (8'(len) > MaxLen) ? LenW'(MaxLen) : len;
   endfunction
   function automatic logic rd_ok(input axi4_req_t r);
     logic ok;
@@ -91,7 +92,7 @@ module g6lc_apu_fwram
     else if (r.ar.size == 3'd2)
       ok = ok && r.ar.len == '0 && r.ar.addr[1:0] == 2'b00;
     else if (r.ar.size == 3'd3) begin
-      ok = ok && r.ar.burst == axi_pkg::BURST_INCR && r.ar.addr[2] == 1'b0 &&
+      ok = ok && r.ar.burst == axi_pkg::BURST_INCR && r.ar.addr[2:0] == 3'b000 &&
            8'(r.ar.len) <= MaxLen;
       bytes = (64'(r.ar.len) + 64'd1) << 3;
       last = {32'b0, r.ar.addr[31:0]} + bytes - 64'd1;
@@ -119,6 +120,7 @@ module g6lc_apu_fwram
           slv_rsp_o.b.id = id_q;
           slv_rsp_o.b.resp = axi_pkg::RESP_SLVERR;
         end
+        Fault: ;
         default: begin
           slv_rsp_o.r_valid = 1'b1;
           slv_rsp_o.r.id = id_q;
@@ -134,15 +136,26 @@ module g6lc_apu_fwram
         Idle: begin
           if (slv_req_i.aw_valid && slv_rsp_o.aw_ready) begin
             id_q <= slv_req_i.aw.id;
-            state_q <= (slv_req_i.w_valid && slv_rsp_o.w_ready) ? ErrB : WaitW;
+            beats_q <= slv_req_i.aw.len;
+            state_q <= WaitW;
+            if (slv_req_i.w_valid && slv_rsp_o.w_ready) begin
+              if (slv_req_i.w.last != (slv_req_i.aw.len == '0)) state_q <= Fault;
+              else if (slv_req_i.aw.len == '0) state_q <= ErrB;
+              else beats_q <= slv_req_i.aw.len - 1'b1;
+            end
           end else if (slv_req_i.ar_valid && slv_rsp_o.ar_ready) begin
             id_q <= slv_req_i.ar.id;
-            beats_q <= cap_len(slv_req_i.ar.len);
+            beats_q <= slv_req_i.ar.len;
             state_q <= ErrR;
           end
         end
-        WaitW: if (slv_req_i.w_valid) state_q <= ErrB;
+        WaitW: if (slv_req_i.w_valid && slv_rsp_o.w_ready) begin
+          if (slv_req_i.w.last != (beats_q == '0)) state_q <= Fault;
+          else if (beats_q == '0) state_q <= ErrB;
+          else beats_q <= beats_q - 1'b1;
+        end
         ErrB, SendB: if (slv_req_i.b_ready) state_q <= Idle;
+        Fault: ;
         default: if (slv_req_i.r_ready) begin
           if (beats_q == '0) state_q <= Idle;
           else beats_q <= beats_q - 1;
@@ -156,7 +169,7 @@ module g6lc_apu_fwram
     logic [IdW-1:0] id_q;
     logic [LenW-1:0] beats_q;
     logic [63:0] addr_q, data_q;
-    logic [7:0] strb_q;
+    logic [7:0] strb_q, write_mask_q;
     logic ram_req, ram_we;
     logic [AddrWidth-1:0] ram_addr;
     logic [63:0] ram_wdata, ram_rdata;
@@ -205,7 +218,7 @@ module g6lc_apu_fwram
           slv_rsp_o.w_ready  = slv_req_i.aw_valid;
           slv_rsp_o.ar_ready = !slv_req_i.aw_valid;
         end
-        WaitW: slv_rsp_o.w_ready = 1'b1;
+        WaitW, DrainW: slv_rsp_o.w_ready = 1'b1;
         SendB: begin
           slv_rsp_o.b_valid = 1'b1;
           slv_rsp_o.b.id = id_q;
@@ -236,24 +249,33 @@ module g6lc_apu_fwram
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         state_q <= Idle; id_q <= '0; beats_q <= '0;
-        addr_q <= '0; data_q <= '0; strb_q <= '0;
+        addr_q <= '0; data_q <= '0; strb_q <= '0; write_mask_q <= '0;
       end else unique case (state_q)
         Idle: begin
           if (slv_req_i.aw_valid && slv_rsp_o.aw_ready) begin
             id_q <= slv_req_i.aw.id;
             addr_q <= slv_req_i.aw.addr;
+            beats_q <= slv_req_i.aw.len;
+            write_mask_q <= write_mask(slv_req_i.aw.addr, slv_req_i.aw.size);
             if (slv_req_i.w_valid && slv_rsp_o.w_ready) begin
               data_q <= slv_req_i.w.data;
               strb_q <= slv_req_i.w.strb;
-              state_q <= (wr_ok(slv_req_i) && in_win(slv_req_i.aw.addr) &&
-                          slv_req_i.w.last) ? DoWrite : ErrB;
+              if (slv_req_i.w.last != (slv_req_i.aw.len == '0)) state_q <= Fault;
+              else if (slv_req_i.aw.len != '0) begin
+                beats_q <= slv_req_i.aw.len - 1'b1;
+                state_q <= DrainW;
+              end else
+                state_q <= (wr_ok(slv_req_i) && in_win(slv_req_i.aw.addr) &&
+                            (slv_req_i.w.strb & ~write_mask(slv_req_i.aw.addr,
+                                                          slv_req_i.aw.size)) == '0)
+                           ? DoWrite : ErrB;
             end else
               state_q <= (wr_ok(slv_req_i) && in_win(slv_req_i.aw.addr))
-                         ? WaitW : ErrB;
+                         ? WaitW : DrainW;
           end else if (slv_req_i.ar_valid && slv_rsp_o.ar_ready) begin
             id_q <= slv_req_i.ar.id;
             addr_q <= slv_req_i.ar.addr;
-            beats_q <= cap_len(slv_req_i.ar.len);
+            beats_q <= slv_req_i.ar.len;
             state_q <= (rd_ok(slv_req_i) && in_win(slv_req_i.ar.addr))
                        ? DoRead : ErrR;
           end
@@ -261,8 +283,15 @@ module g6lc_apu_fwram
         WaitW: if (slv_req_i.w_valid && slv_rsp_o.w_ready) begin
           data_q <= slv_req_i.w.data;
           strb_q <= slv_req_i.w.strb;
-          state_q <= slv_req_i.w.last ? DoWrite : ErrB;
+          if (!slv_req_i.w.last) state_q <= Fault;
+          else state_q <= (slv_req_i.w.strb & ~write_mask_q) == '0 ? DoWrite : ErrB;
         end
+        DrainW: if (slv_req_i.w_valid && slv_rsp_o.w_ready) begin
+          if (slv_req_i.w.last != (beats_q == '0)) state_q <= Fault;
+          else if (beats_q == '0) state_q <= ErrB;
+          else beats_q <= beats_q - 1'b1;
+        end
+        Fault: ;
         DoWrite: state_q <= SendB;
         SendB: if (slv_req_i.b_ready) state_q <= Idle;
         DoRead: state_q <= ReadCap;

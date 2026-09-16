@@ -7,6 +7,29 @@ through the testharness compositor DRAM-hole map, a directed mailbox
 run to cookie `0x600D000A`, and the separate TGSI MOV job to
 `0x600D000B`. EGL/GLES stay in client Mesa. Not full testharness OpenSBI.
 
+## Review boundary — 2026-09-15
+
+Results below are historical bring-up evidence from `d74010111`, except the
+review rerun of `run-cva6-cookie.sh`: 14 checks / 1,835 clocks, errors=0,
+cookie `0x600D000A`. That build retains five SELRANGE warnings in
+`core/issue_read_operands.sv`; it is not a warning-free full-core lint pass.
+Direct reset into firmware is M-mode execution unless a verified supervisor
+transition establishes otherwise. No cookie test here demonstrates a protected
+S-mode domain. `apu_tgsi_cc.hex` runs an opcode-only target stub plus frozen MOV
+emit, not the same semantic compiler as the host suite.
+
+Keep these tests for bus/fetch regression, but stop multiplying peripheral-stub
+milestones as a proxy for Linux progress. The next boot gate is one real pinned
+OpenSBI ELF launching the service in S-mode with RAM/control isolation, correct
+Linux topology and fresh readiness; the next graphics gate is resource-backed
+execution with genuine program dependence. A failed normal `fence` or compiler
+load/store must be traced, not bypassed by weakening address/ordering semantics.
+
+The platform loader and optional BIOS-managed loader converge on that same
+service entry/ABI. Neither a checked-in hex nor the compositor preload delay
+establishes image integrity, BSS initialization, readiness or warm-reset safety.
+See `apu-firmware-domain.md` and `apu-resident-fw.md` for current contracts.
+
 ## Intent
 
 Prove the firmware image at `0x90000000` is a real CVA6 instruction stream,

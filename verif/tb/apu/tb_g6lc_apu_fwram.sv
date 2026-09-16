@@ -141,16 +141,20 @@ module tb_g6lc_apu_fwram;
   task automatic drain_read(input int p, input logic [1:0] expected = 0);
     logic [63:0] beat;
     bit seen_last;
+    int beats;
     seen_last = 0;
+    beats = 0;
     while (!seen_last) begin
       @(posedge clk);
       while (!rsp[p].r_valid) @(posedge clk);
       beat = rsp[p].r.data;
       check("AXI R resp", rsp[p].r.resp == expected);
       seen_last = rsp[p].r.last;
+      beats++;
       @(negedge clk); req[p].r_ready = 1;
       @(posedge clk); @(negedge clk); req[p].r_ready = 0;
     end
+    check("read response count matches accepted ARLEN", beats == int'(req[p].ar.len) + 1);
   endtask
   task automatic receive_read(input int p, input logic [63:0] a,
       output logic [31:0] data, input logic [1:0] expected = 0);
@@ -162,6 +166,75 @@ module tb_g6lc_apu_fwram;
       input logic [1:0] expected = 0, input logic [2:0] size = 3'd2);
     send_read(p, a, size);
     receive_read(p, a, data, expected);
+  endtask
+
+  task automatic exercise_write(input int p, input logic [63:0] addr,
+      input logic [7:0] len, input logic [2:0] size, input logic [7:0] strb,
+      input int skew, input int bad_last, input logic [1:0] expected);
+    int accepted, b_stalls, fault_cycle;
+    bit aw_done, w_pending, done;
+    apu_dma_axi_resp_t held;
+    accepted = 0; b_stalls = 0; fault_cycle = -1;
+    aw_done = 0; w_pending = 0; done = 0; held = '0;
+    cases++;
+    for (int tick = 0; tick < 2048; tick++) begin
+      @(negedge clk);
+      req[p].aw.addr = addr; req[p].aw.len = len; req[p].aw.size = size;
+      req[p].aw.burst = BURST_INCR; req[p].aw.id = 5;
+      req[p].aw_valid = !aw_done && tick >= (skew < 0 ? -skew : 0);
+      if (aw_done) begin
+        req[p].aw.addr = ~addr; req[p].aw.len = ~len;
+        req[p].aw.size = 0; req[p].aw.id = 0;
+      end
+      if (!w_pending && accepted <= int'(len) && fault_cycle < 0 &&
+          tick >= (skew > 0 ? skew : 0) && tick % 3 != 2) begin
+        w_pending = 1;
+        req[p].w.data = 64'h11223344_55667788; req[p].w.strb = strb;
+        req[p].w.last = bad_last == 1 ? accepted == 0 :
+                       bad_last == 2 ? 1'b0 : accepted == int'(len);
+      end
+      req[p].w_valid = w_pending;
+      req[p].b_ready = b_stalls >= 4;
+      if (fault_cycle >= 0) begin
+        req[p].aw_valid = 1; req[p].ar_valid = 1; req[p].w_valid = 1;
+      end
+      @(posedge clk);
+      if (p == 0 && (expected != RESP_OKAY || bad_last != 0))
+        check("rejected write has no SRAM effect", !i_on.i_dut.gen_on.ram_we);
+      if (fault_cycle >= 0) begin
+        check("malformed WLAST quarantines all channels",
+              !rsp[p].aw_ready && !rsp[p].ar_ready && !rsp[p].w_ready &&
+              !rsp[p].b_valid && !rsp[p].r_valid);
+        if (tick - fault_cycle >= 4) begin done = 1; break; end
+      end else begin
+        if (aw_done) check("pending write blocks new addresses", !rsp[p].aw_ready && !rsp[p].ar_ready);
+        if (rsp[p].b_valid) begin
+          check("B follows complete accepted write", aw_done && accepted == int'(len) + 1);
+          check("B preserves ID and response", rsp[p].b.id == 5 && rsp[p].b.resp == expected);
+          if (b_stalls != 0) check("stalled B payload stable", rsp[p].b == held.b);
+          held = rsp[p];
+          check("B blocks new addresses", !rsp[p].aw_ready && !rsp[p].ar_ready);
+          b_stalls++;
+          if (req[p].b_ready) begin done = 1; break; end
+        end
+        if (req[p].aw_valid && rsp[p].aw_ready) aw_done = 1;
+        if (req[p].w_valid && rsp[p].w_ready) begin
+          if (req[p].w.last != (accepted == int'(len))) fault_cycle = tick;
+          accepted++; w_pending = 0;
+        end
+      end
+    end
+    check("write completes or quarantines within bound", done);
+    if (bad_last == 0) check("all accepted write beats drained", accepted == int'(len) + 1);
+    else check("bad WLAST observed", fault_cycle >= 0);
+    @(negedge clk); req[p] = '0;
+    if (!done || bad_last != 0 || accepted != int'(len) + 1) begin
+      rst_ni = 0;
+      repeat (3) @(negedge clk);
+      rst_ni = 1;
+      @(posedge clk);
+      check("fabric reset recovers admission", rsp[p].aw_ready && rsp[p].ar_ready);
+    end
   endtask
 
   initial begin
@@ -251,6 +324,74 @@ module tb_g6lc_apu_fwram;
     send_read(0, 64'hFFFFFFFF9003_EFA0, 3'd0);
     receive_beat(0, 64'hFFFFFFFF9003_EFA0, beat);
     check("sign-ext stack lbu", beat[7:0] == 8'h46);
+
+    cases++;
+    for (int p = 0; p < 2; p++) begin
+      send_read(p, 64'h9000_0000, 3'd3, 8'd255);
+      drain_read(p, RESP_SLVERR);
+    end
+    cases++;
+    for (int offset = 1; offset < 8; offset++) begin
+      send_read(0, 64'h9000_0000 + 64'(offset), 3'd3);
+      receive_beat(0, 64'h9000_0000 + 64'(offset), beat, RESP_SLVERR);
+    end
+
+    write_reg(0, 64'h9000_1000, 32'haabbccdd);
+    write_reg(0, 64'h9000_1004, 32'heeff0011);
+    for (int p = 0; p < 2; p++) begin
+      for (int skew = -4; skew <= 4; skew += 4) begin
+        exercise_write(p, 64'h4000_0000, 0, 2, 8'h0f, skew, 0, RESP_SLVERR);
+        exercise_write(p, 64'h9000_1000, 1, 3, 8'hff, skew, 0, RESP_SLVERR);
+        exercise_write(p, 64'h9000_1000, 15, 3, 8'hff, skew, 0, RESP_SLVERR);
+        exercise_write(p, 64'h9000_1000, 255, 3, 8'hff, skew, 0, RESP_SLVERR);
+      end
+      exercise_write(p, 64'h9000_1000, 3, 3, 8'hff, 0, 1, RESP_SLVERR);
+      exercise_write(p, 64'h9000_1000, 0, 3, 8'hff, 4, 2, RESP_SLVERR);
+    end
+    for (int p = 0; p < 2; p++) begin
+      cases++;
+      @(negedge clk);
+      req[p].aw.addr = 64'h9000_1000; req[p].aw.len = 15;
+      req[p].aw.size = 3; req[p].aw.burst = BURST_INCR;
+      req[p].aw_valid = 1; req[p].w_valid = 1;
+      req[p].w.last = 0; req[p].w.strb = 8'hff;
+      @(posedge clk);
+      check("rejected burst accepts first AW and W", rsp[p].aw_ready && rsp[p].w_ready);
+      @(negedge clk); req[p].aw_valid = 0; req[p].w_valid = 0;
+      repeat (6) begin
+        @(posedge clk);
+        check("missing burst data prevents completion", !rsp[p].b_valid && rsp[p].w_ready &&
+              !rsp[p].aw_ready && !rsp[p].ar_ready);
+      end
+      @(negedge clk); rst_ni = 0; req[p] = '0;
+      repeat (3) @(negedge clk);
+      rst_ni = 1;
+      @(posedge clk);
+      check("fabric reset drops incomplete burst without stale B", !rsp[p].b_valid && rsp[p].aw_ready);
+    end
+    exercise_write(1, 64'h9000_1000, 0, 3, 8'hff, 0, 0, RESP_SLVERR);
+    for (int skew = 0; skew <= 4; skew += 4) begin
+      exercise_write(0, 64'h9000_1000, 0, 2, 8'hf0, skew, 0, RESP_SLVERR);
+      exercise_write(0, 64'h9000_1004, 0, 2, 8'h0f, skew, 0, RESP_SLVERR);
+      exercise_write(0, 64'h9000_1000, 0, 2, 8'hff, skew, 0, RESP_SLVERR);
+    end
+    read_reg(0, 64'h9000_1000, r);
+    read_reg(0, 64'h9000_1004, r2);
+    check("rejected writes preserve both guard words", r == 32'haabbccdd && r2 == 32'heeff0011);
+    exercise_write(0, 64'h9000_1000, 0, 2, 8'h05, 4, 0, RESP_OKAY);
+    read_reg(0, 64'h9000_1000, r);
+    check("sparse low strobes preserve guard bytes", r == 32'haa66cc88);
+    exercise_write(0, 64'h9000_1004, 0, 2, 8'ha0, -4, 0, RESP_OKAY);
+    read_reg(0, 64'h9000_1004, r);
+    check("sparse high strobes preserve guard bytes", r == 32'h11ff3311);
+    exercise_write(0, 64'h9000_1000, 0, 3, 0, 0, 0, RESP_OKAY);
+    read_reg(0, 64'h9000_1000, r);
+    read_reg(0, 64'h9000_1004, r2);
+    check("zero strobes preserve both words", r == 32'haa66cc88 && r2 == 32'h11ff3311);
+    exercise_write(0, 64'h9000_1000, 0, 3, 8'hff, 0, 0, RESP_OKAY);
+    send_read(0, 64'h9000_1000, 3'd3);
+    receive_beat(0, 64'h9000_1000, beat);
+    check("full-width write recovers after rejected bursts", beat == 64'h11223344_55667788);
 
     if (errors != 0) $fatal(1, "APU fwram errors=%0d", errors);
     $display("PASS tb_g6lc_apu_fwram cases=%0d checks=%0d cycles=%0d errors=0 nwords=%0d",

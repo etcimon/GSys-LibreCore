@@ -206,7 +206,10 @@ module g6lc_apu_exec
             inst_q <= fetched;
             thread_q <= '0;
             for (t = 0; t < N; t++) snap_q[t] <= rf_q[t][fetched.rs1[2:0]];
-            if (fetched.op == APU_EX_HALT) state_q <= Idle;
+            if ((shader_q && fetched.priv) || fetched.op > APU_EX_LDC ||
+                fetched.rd[3] || fetched.rs1[3] || fetched.rs2[3] || fetched.rs3[3]) begin
+              fault_q <= 1'b1; state_q <= Idle;
+            end else if (fetched.op == APU_EX_HALT) state_q <= Idle;
             else if (fetched.op == APU_EX_NOP) begin
               pc_q <= pc_q + 4'd1; state_q <= Fetch;
             end else if (fetched.op == APU_EX_BR) begin

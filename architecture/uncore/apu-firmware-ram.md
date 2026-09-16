@@ -1,69 +1,100 @@
 # APU firmware RAM window
 
-**Domain:** graphics uncore · **Status:** testharness-shaped SRAM leaf (P2)
+**Domain:** graphics uncore · **Status:** default-off testharness SRAM; not a protected boot store
 
-AXI4-64 SRAM at `ApuHarness` `FirmwareRamBase` `0x90000000` / 256 KiB.
-32-bit register cycles stay single-beat. 64-bit INCR fills cover stream8
-CVA6 I$/D$ 16-byte lines (`size=3 len=1`). EGL/GLES stay in client Mesa.
-A directed CVA6 fetch exists, including cluster PerCoreBoot through the
-compositor DRAM-hole map and the resident TGSI compile image. OpenSBI is
-not this window.
+`g6lc_apu_fwram.sv` provides a `tc_sram` AXI4-64 target at the configured
+firmware window. `ApuHarness` uses `0x90000000` / 256 KiB, testharness rule
+12. The window sits between DRAM lo/hi fragments; neither GPIO/AI nor guest
+virtio is part of it. See `apu-firmware-domain.md` for the target ownership
+contract and optional BIOS-managed loading.
 
-## Intent
+## Implemented interface and review corrections
 
-Give hart-1 firmware a private RAM target on the opt-in `G6LC_APU`
-testharness xbar so `apu_fw.hex` can live at the OpenSBI/PMP window. Guest
-virtio and GPIO/AI are not this window.
+- Disabled configurations are AXI error responders, not writable memories.
+- Byte/halfword reads are single-beat. Word reads are single-beat and
+  word-aligned. 64-bit reads require INCR, eight-byte alignment, `len<=15`
+  and a contained span. Stream8 I$/D$ 16-byte fills use `size=3,len=1`.
+- Unsupported reads return SLVERR for **all `ARLEN+1` accepted beats**, with
+  RLAST only on the last response. The 16-beat data-path limit is not an
+  error-response limit. Review tests cover 17- and 256-beat rejections,
+  including the disabled responder, and all seven misaligned 64-bit offsets.
+- Writes support aligned single-beat words/doublewords only. Word WSTRB must
+  be a subset of the addressed four-byte lane; sparse and zero strobes are legal.
+  Out-of-lane strobes return SLVERR with no SRAM write.
+- Unsupported writes, including disabled RAM, accept all **AWLEN+1** data beats
+  before returning SLVERR. AW-first, W-first and simultaneous arrivals share
+  that rule. AW metadata is retained; response ID/status remain stable under
+  B backpressure. Missing data cannot complete or admit another transaction.
+- Early or missing WLAST relative to accepted AWLEN enters fail-closed quarantine:
+  no address/data acceptance or response until coordinated fabric reset. No
+  timeout-success, guessed burst boundary or local firmware reset may reuse it.
+  These policies do not make this a complete CVA6/Linux memory target.
+- No new clock/reset or SRAM macro is introduced. The existing full-width LEN
+  counter also tracks rejected writes; captured lane-mask state and an eight-bit
+  strobe check protect delayed W. Legal write latency is unchanged. Synthesis
+  remains a screen, not timing closure.
 
-## Seams
+## Remaining blocking review findings
 
-| Piece | Path |
-|---|---|
-| SRAM slave | `corev_apu/apu/g6lc_apu_fwram.sv` (`tc_sram`, 64-bit words) |
-| Rule | idx 12, `0x90000000`..`0x90040000` |
-| DRAM hole | testharness splits DRAM around that window (`apu_dram_hole_legal`) |
-| Host lock | `software/apu-fw/include/g6lc_apu_th_map.h`, `test/map_check.c`, `test/boot_check.c` |
-| Testharness | `+define+G6LC_APU` extra slave; hex preload; FPGA/Altera maps unchanged |
-| Image | `verif/tb/apu/apu_fw.hex` |
-| TB | `verif/tb/apu/tb_g6lc_apu_fwram.sv` |
+1. `in_win` and SRAM indexing truncate physical addresses to 32 bits. The
+   leaf accepts arbitrary upper-bit aliases, not just the sign-extended
+   addresses used by its diagnostic. This disagrees with the 64-bit xbar
+   and PMP view. Deployment requires full-width physical containment and
+   overflow-safe spans. Fix compiler/linker/VA-to-PA assumptions at their
+   source; never normalize arbitrary AXI physical addresses to make a
+   cookie pass. Existing alias-success tests are diagnostic debt, not ABI.
+2. RAM has no trusted source/domain authorization. A DRAM hole reserves
+   decode space but does not stop application or other DMA accesses.
+   Protection must exist before access, with matched read/write provenance.
+3. The RAM write-drain/strobe correction does not repair `g6lc_apu_axi4_lite`.
+   That separate bridge still needs invalid-burst draining and split-write error
+   aggregation. Integrate quarantine reporting and supervisor recovery without
+   resetting a target underneath outstanding fabric transactions.
+4. Narrow-read span/alignment and AXI lock/atomic/4-KiB policies need a full
+   audit; successful fill/cookie tests do not establish all AXI semantics.
 
-## Invariants
+## Load and restart contract
 
-- Default-off is an AXI4 SLVERR error slave. `FeatureVirgl` remains illegal.
-- Window and SRAM index match on `addr[31:0]` (RV64 `auipc`/`lui` of
-  `0x9000xxxx` sign-extend to `0xffffffff9000xxxx`).
-- Reads: `size=0/1` is `len=0` (D$ `lbu`/`lhu`, any align). `size=2` is
-  `len=0` and `addr[1:0]==0`. `size=3` is INCR, `addr[2]==0`, `len<=15`;
-  the whole `(len+1)*8` byte span must sit in the window. Stream8 I$/D$
-  lines are `size=3 len=1`. WRAP, oversize, and window-crossing fills
-  SLVERR (beat count is still drained). Writes stay single-beat.
-- Window does not overlap GPIO/AI `0x40000000` or control `0x40002000`.
-- Default `NB_MST` is unchanged. `+define+G6LC_APU` sets `APU_NB_EXTRA=3`
-  (guest/control/RAM) and `APU_NB_RULES_EXTRA=1` (DRAM high fragment).
-  `ariane_soc::NB_PERIPHERALS` is not grown.
-- Firmware RAM must sit strictly inside DRAM. A single DRAM rule covering
-  `0x80000000` aliases `0x90000000` (`addr_decode` last-match-wins).
-- SMT OpenSBI is unchanged. Testharness `+define+G6LC_APU` preloads
-  `apu_fw.hex` into this SRAM (`HexFile`, `+APU_FW_HEX=`) and points hart 1
-  at `0x90000000`. HexFile writes the defined image prefix only; a full
-  256 KiB blocking init is Verilator BLKLOOPINIT. Unwritten words stay
-  `SimInit("none")` — not a BSS-zero contract. That is a load contract, not
-  a testharness boot. The compositor TB AXI-reads the reset vector; the
-  directed fwram TB issues a 2-beat I$ fill of crt0; the verif mini hart
-  fetches through AXI-Lite → AXI4 (still `len=0`). A directed CVA6
-  (`tb_g6lc_apu_cva6_fetch`) now fetches this window.
+`HexFile` / `+APU_FW_HEX=` and the compositor's simulation `#1` preload hold
+are test utilities only. Synthesis does not load a file and ties `fw_ready`
+high. Unwritten SRAM words are not guaranteed zero; scanning a hex prefix
+for nonzero words is not an image length/authentication check.
 
-## Verification
+The platform or optional BIOS supervisor adapter must validate an image
+manifest, initialize code/data/BSS/stack, synchronize caches and instruction
+fetch, install protection, and release only the reserved firmware hart.
+Image replacement requires admission stopped and all DMA/command/program/
+surface leases retired. Software reset does not erase SRAM or establish
+new mapping validity. A real boot controller and readiness state are still
+required; do not synthesize a time delay as a loader.
 
-`run-soc.sh` (`APU_SOC=1 APU_SYNTH=1`) and `run-exec.sh` (`APU_EXEC=1`).
-Remote Verilator 5.008 (2026-09-15): **`tb_g6lc_apu_fwram` 6 cases / 317
-checks / 1,421 clocks** (hex, cookie, size-3, I$ 2-beat `auipc`+spin,
-WRAP/len-16/window-cross SLVERR, size-0/1 and sign-ext PA). Screening
-synth uses 4 KiB: enabled 105,439 cells / 32,938 sequential bits;
-disabled 166 / 15. Compositor fixture (same screening): enabled 127,687
-/ 35,127; disabled 275 / 27.
+Linux FDT/memory discovery must reserve the entire private window (and any
+private DMA pool) and exclude it from ordinary RAM allocation; the supervisor
+must enforce permissions independently. Provisioning grants are narrower
+than runtime control grants and revoked before serving guest input. Exact
+image/ABI/epoch identity is part of health, not a magic word at `0x9003ff00`.
 
-Host WSL gcc (2026-09-15): **`PASS map_check`**, **`PASS boot_check`**.
-Punched maps send `0x90000000` to idx 12; hart 1 reset PC is that window,
-hart 0 stays ROM `0x10000`; hex auipc/spin and DTSI `next-addr` match.
-Results also live in `AGENTS-todo.md`.
+## Evidence and regressions
+
+Historical `d74010111` evidence: `tb_g6lc_apu_fwram` 6 cases / 317 checks /
+1,421 clocks; CVA6 fetch and cookie suites described in `apu-cva6-fetch.md`.
+Generic 4-KiB screening formerly reported 105,439 cells / 32,938 sequential
+bits enabled and 166 / 15 disabled; these are not 256-KiB SRAM-macro area.
+
+The read review first reproduced six failures. The write follow-through initially
+reproduced 170 failed checks before repair; the expanded suite now passes
+**49 cases / 5,699 checks / 5,372 clocks**. It covers 2/16/256-beat rejected
+writes, AW/W skew, live AW metadata changes, B stalls, missing data, malformed
+WLAST quarantine, reset recovery and sparse/zero/illegal strobes with guard bytes.
+The 4-KiB enabled/disabled lint and generic synthesis screens pass; a pre-map
+`memory_collect` assertion retains exactly one `$mem_v2` enabled and zero disabled.
+This is RAM-array retention evidence, not protected loading or a mapping-table proof.
+The same focused run revalidates the CVA6 cookie: 14 checks / 1,835 clocks,
+`0x600D000A`; five existing core SELRANGE warnings remain. No new firmware build
+or protected S-mode/Linux boot was performed.
+
+Rerun `run-fwram-only.sh` and `APU_SOC=1 APU_SYNTH=1`
+on `run-virtio-mmio.sh` through the remote proxy. Current revalidation is
+recorded in `AGENTS-todo.md` and `AGENTS-specs-to-tests.md`. Keep the upstream
+unreset-SRAM read-data warning visible. No protected loader, S-mode domain,
+actual DRAM, cache-coherent Linux execution or rendered surface follows.
