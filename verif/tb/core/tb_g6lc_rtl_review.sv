@@ -186,12 +186,16 @@ module tb_g6lc_review_dispatch;
   logic[1:0][31:0] orig;
   int scenario,seen,seen_st,seen_ld;
   bit negative;
+  logic [1:0] wb_v='0,cm_ack='0;
+  logic [1:0][3:0] wb_id='0;
+  sbe_t [1:0] cm_instr='0;
   g6lc_ooo_dispatch #(.CVA6Cfg(C),.scoreboard_entry_t(sbe_t)) dut(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(1'b0),.flush_unissued_i(1'b0),.cancelled_mask_i('0),
     .dispatch_sbe_i(ds),.dispatch_orig_i('0),.dispatch_valid_i(dv),.dispatch_ack_o(da),
     .issue_sbe_o(issued),.issue_orig_o(orig),.issue_valid_o(iv),.issue_ack_i(2'b11),
     .issue_op_a_o(),.issue_op_b_o(),.issue_op_a_valid_o(),.issue_op_b_valid_o(),
-    .wb_valid_i('0),.wb_id_i('0),.wb_data_i('0),.wb_exc_i('0),.commit_ack_i('0),.commit_instr_i('0),.mispredict_i(1'b0),
+    .wb_valid_i(wb_v),.wb_id_i(wb_id),.wb_data_i('0),.wb_exc_i('0),
+    .commit_ack_i(cm_ack),.commit_instr_i(cm_instr),.mispredict_i(1'b0),
     .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o());
   task automatic tick;clk=1;#2;clk=0;#2;endtask
   initial begin
@@ -236,6 +240,19 @@ module tb_g6lc_review_dispatch;
         end
         if(seen_st!=1)$fatal(1,"DISPATCH_STORE_PROGRESS scenario=3 issued=%0d",seen_st);
         if(seen_ld!=(negative?1:0))$fatal(1,"DISPATCH_LOAD_ORDER load_issued=%0d",seen_ld);
+      end
+      // Writeback of a store's own trans_id must retire its LSQ entry. Observed
+      // only through older_store_pending: hierarchical reads of the dispatch
+      // port arrays proved unreliable under Verilator optimisation, so this
+      // check deliberately uses no internal port probes.
+      6:begin
+        ds[0].fu=STORE;ds[0].op=SD;ds[0].pc=64'h1000;ds[0].trans_id=1;dv=2'b01;
+        #2;if(!da[0])$fatal(1,"DISPATCH_ADMISSION");tick();dv=0;
+        repeat(3)begin #2;tick();end
+        if(!dut.older_st)$fatal(1,"DISPATCH_STORE_ABSENT");
+        wb_v=2'b01;wb_id[0]=4'd1;#2;tick();wb_v='0;wb_id='0;#2;
+        if(dut.older_st!==(negative?1'b1:1'b0))
+          $fatal(1,"DISPATCH_STORE_WB_RETIRE older_st=%b",dut.older_st);
       end
       default:$fatal(1,"DISPATCH_SCENARIO");
     endcase

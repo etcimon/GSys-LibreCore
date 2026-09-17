@@ -187,12 +187,41 @@ issuing, and an ordering guard in which a load must not issue while an older
 store's address is unresolved. Injected `DISPATCH_ID` and `DISPATCH_LOAD_ORDER`
 controls both fail as required, so neither check is vacuous.
 
-Not fixed by this change, and still required before wider memory speculation:
-store lifetime is ended at writeback rather than at commit, and
-`older_store_pending_o` is not age-aware. Holding stores until commit without a
-monotonic age would introduce a *new* deadlock — an older load blocked by a
-younger store that cannot commit until that load retires. Age/byte-coverage,
-load-result forwarding and the LSU store-buffer handoff must be settled together.
+**Reproduced, NOT repaired — id-matched LSQ updates never land.** Scenario 6 of
+the dispatch reproducer (`review-rtl-store-wb-v3`, recorded as a known-red
+expected failure) dispatches one store, waits for it to issue, then writes back
+that store's own `trans_id`. `older_store_pending_o` stays asserted:
+`DISPATCH_STORE_WB_RETIRE older_st=1`. The check is observed purely at the top
+level and its negative control is live, so it is not vacuous.
+
+Registered-state evidence from the same fixture: the allocated entry holds
+`id == 0` instead of the dispatched `trans_id`, and `addr_v`/`data_v` remain 0
+after the store issues. Every LSQ update that matches on id — writeback retire
+(`st_q[i].id == complete_id_i`), AGU address (`addr_id_i`) and store data
+(`st_data_id_i`) — therefore fails to find its entry. Consequences to assume
+until this is fixed: store-to-load forwarding can never fire, store addresses are
+never learned, and store entries are only ever released by the commit-time
+"free the oldest valid store" path or by cancellation.
+
+The exact point at which `trans_id` is lost between dispatch and the LSQ
+allocation port is **not yet grounded**. `alloc_ids[p] = dispatch_sbe_i[p].trans_id`
+reads correct in source, and the neighbouring `tid_is_st_d[dispatch_sbe_i[p].trans_id]`
+write does index the right bits — so the two disagree and the cause is still
+open. Note for whoever picks this up: hierarchical `$display` reads of the
+dispatch port arrays are **unreliable** here (they read 0 while the design
+behaves otherwise, an artefact of Verilator optimisation). Use a VCD or a bound
+probe module; only registered state proved trustworthy.
+
+An earlier hypothesis that writeback and commit *double-free* a store entry was
+tested and is **wrong**: because the id never matches, writeback frees nothing,
+so the commit-time free is currently the only release path.
+
+Also still required before wider memory speculation: `older_store_pending_o` is
+not age-aware, and commit only drains through port 0. Moving the release point to
+commit without a monotonic age would introduce a *new* deadlock — an older load
+blocked by a younger store that cannot commit until that load retires. Age,
+byte-coverage, load-result forwarding and the LSU store-buffer handoff must be
+settled together.
 
 **Source-derived risks requiring separate reproducers/design:**
 - Rename admission depends on `can_go`, while `can_go` depends on rename stall;

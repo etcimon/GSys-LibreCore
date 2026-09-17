@@ -91,7 +91,9 @@ def main():
         configurations.append(('incl',f'n{nc}',[f'-GNC={nc}'],[(0,'L3_SOURCE_ACK' if before else None)]))
     if dispatch_mode:
         cases=[(0,None),(1,'DISPATCH_STORE_PROGRESS' if before else None)]
-        if not before:cases+=[(2,None),(3,None)]
+        # scenario 6 is a known-red reproducer: a store's writeback does not
+        # retire its LSQ entry. Expect the failure until that is repaired.
+        if not before:cases+=[(2,None),(3,None),(6,'DISPATCH_STORE_WB_RETIRE')]
         configurations=[('dispatch','n2',[],cases)]
     results=[]
     for kind,geometry,parameters,cases in configurations:

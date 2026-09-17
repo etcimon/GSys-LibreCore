@@ -167,10 +167,16 @@ package promotion is recorded in `review-l2-size-integrations-20260916` and
   issue→AGU→WB resolution. Six live-path records pass (ALU, store, two stores,
   load-ordering guard) with two injected controls failing. Load conservatism is
   deliberately unchanged.
-- [ ] LSQ store lifetime/age: stores free at WB not commit, `older_store_pending_o`
-  is not age-aware, and commit only drains through port 0. Needs a monotonic
-  sequence number before moving freeing to commit, or an older load deadlocks
-  behind a younger store.
+- [ ] **LSQ id-matched updates never land (reproduced, unrepaired).** Writing back
+  a store's own `trans_id` does not retire its entry; the entry holds `id==0` and
+  `addr_v`/`data_v` stay 0, so writeback retire, AGU address and store-data
+  updates all miss. No store-to-load forwarding is possible today. Known-red as
+  `DISPATCH_STORE_WB_RETIRE` in the dispatch reproducer. Root cause of the lost
+  `trans_id` is still open — use a VCD or bound probe, since hierarchical reads of
+  the dispatch port arrays read 0 while the design behaves otherwise.
+- [ ] LSQ store age/lifetime: `older_store_pending_o` is not age-aware and commit
+  drains only through port 0. Needs a monotonic sequence number before the release
+  point moves to commit, or an older load deadlocks behind a younger store.
 - [x] Land same-line L2 hit-under-miss: merged readers are accepted during a fill
   and drained with their own id/beats; waiter payload stores the in-line offset
   only (+170 flops at depth 2 vs +634 for a full address). Leaf 8 shared-line
