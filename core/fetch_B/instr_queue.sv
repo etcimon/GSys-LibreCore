@@ -97,7 +97,7 @@ module instr_queue
     logic [31:0]                     ex_tinst;   // tinst of exception
     logic                            ex_gva;
     logic [HidW-1:0]                 hart;       // fetch hart (L3 packet_hart)
-    // O7o debug: monotonic per-instruction sequence for program-order selection.
+    // O7o debug: monotonic per-instruction sequence, kept for the order probe.
     // This field is not used for any architectural handshake; it is trace/gate only.
     logic [15:0]                     push_seq;
   } instr_data_t;
@@ -293,38 +293,13 @@ module instr_queue
   // ----------------------
   // Downstream interface
   // ----------------------
-  // O7o: select the issue group by age (push sequence). Larger age means
-  // older in program order. This works across control-flow boundaries, returns,
-  // and multi-FIFO pushes because the sequence is a global, monotonic,
-  // PC-ordered timestamp. Selection is greedy: pick the oldest non-empty FIFO
-  // for port 0, then the next oldest for port 1, etc.
+  // O7o: select the issue group by circular position from the registered
+  // drain head. Compact insertion maps consecutive logical positions onto
+  // consecutive FIFOs and pop is a prefix, so the p-th oldest live entry is
+  // always the FIFO at head+p; push_seq no longer arbitrates (trace only).
   always_comb begin : gen_age_pointers
-    logic [NrFifo-1:0] selected;
-
-    for (int unsigned p = 0; p <= NrIssue; p++) idx_ds[p] = '0;
-    selected = '0;
-
     for (int unsigned p = 0; p <= NrIssue; p++) begin
-      logic [15:0] best_age, age;
-      int          best_f;
-      best_age = 16'd0;
-      best_f   = -1;
-      for (int unsigned f = 0; f < NrFifo; f++) begin
-        age = 16'd0;
-        if (~selected[f] && ~instr_queue_empty[f]) begin
-          // push_seq_d is the next sequence number; a larger difference
-          // between it and the head's stamp means the head is older.
-          age = push_seq_d - instr_data_out[f].push_seq;
-        end
-        if (age > best_age) begin
-          best_age = age;
-          best_f   = f;
-        end
-      end
-      if (best_f >= 0) begin
-        idx_ds[p][best_f] = 1'b1;
-        selected[best_f]  = 1'b1;
-      end
+      idx_ds[p] = (p < NrFifo) ? rotate_left(idx_ds_q, fifo_idx_t'(p)) : '0;
     end
   end
 
@@ -425,12 +400,14 @@ module instr_queue
   assign pop_address = |(fetch_entry_is_cf & fire_prefix);
 
   always_comb begin : gen_rotate_head
-    // The age-ordered selection already gives the oldest non-empty FIFO. Keep
-    // the registered pointer there for the trace, but the next cycle's
-    // gen_age_pointers is independent of it.
-    // Fall back to a one-hot slot 0 when nothing was selected: an all-zero
-    // pointer would present a bogus pc=0 entry and then wedge fire_prefix.
-    idx_ds_d = (|idx_ds[0]) ? idx_ds[0] : {{NrFifo - 1{1'b0}}, 1'b1};
+    // Advance the drain head by the prefix-fire count: fire_prefix[p] means
+    // ports 0..p all popped, so the last set index leaves the next head at
+    // head+p+1. With no fire the one-hot pointer holds; it can never be
+    // all-zero, so no fallback is needed.
+    idx_ds_d = idx_ds_q;
+    for (int unsigned p = 0; p < NrIssue; p++) begin
+      if (fire_prefix[p]) idx_ds_d = rotate_left(idx_ds_q, fifo_idx_t'(p + 1));
+    end
   end
 
 //pragma translate_off

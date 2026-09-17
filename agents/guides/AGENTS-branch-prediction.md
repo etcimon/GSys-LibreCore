@@ -21,33 +21,50 @@ Transfer Records — a taken-branch/call/return log that a predictor's classific
 Sub-files: `../spec/riscv-spec-I-2.1-rv32i.html`, `-I-4.1-zifencei.html`, `-I-4.17-cfi.html`.
 
 ## 2. Code map
-- Predictor struct types: `core/fetch_A/frontend/frontend.sv:71-91` (`bht_update_t`, `btb_prediction_t`, `btb_update_t`, `ras_t`).
-- Registered last-cycle predictions: `core/fetch_A/frontend/frontend.sv:104-105`; prediction arrays `139-143`.
-- RVC unaligned prediction shifting: `core/fetch_A/frontend/frontend.sv:180-197`.
-- Control-flow classification: `core/fetch_A/frontend/frontend.sv:210-221` — branch->BHT, call/return->RAS, immediate jump resolved inline, `jalr`->BTB.
-- Prediction selection/priority (lower-most wins): `core/fetch_A/frontend/frontend.sv:236-294`; RAS push/pop only when instruction consumed `261,290`.
-- Mispredict detect: `core/fetch_A/frontend/frontend.sv:308` (`resolved_branch_i.valid & .is_mispredict`); BHT/BTB update `324+`.
-- Predictor modules: `core/frontend/bht.sv` (bimodal), `core/frontend/bht2lvl.sv` (PH_BHT, private-history 2-level), `core/frontend/btb.sv` (BTB), `core/frontend/ras.sv` (RAS).
-- Resolution source: `core/branch_unit.sv` computes taken/target -> `resolved_branch_i` (EXECUTE).
-- Flush/redirect: `core/controller.sv` on mispredict.
+- Live frontend: `core/fetch_B/frontend.sv`; `core/fetch_A` is historical, not the feature-edit target.
+- Predictor structs: `frontend.sv:95+`; prediction arrays and saved carry hints `154+`.
+- Current response transaction: `realigner_vaddr` / `realigner_data` at `248+`.
+- RVC hint shifting: `gen_prediction_shifted` at `318+`; a carried first half uses saved `bht_q`/`btb_q`.
+- Control-flow classification and lower-most prediction priority: `330+`, `350+`.
+- Resolution-driven BHT/BTB training: `864+`; ownership routing does not suppress architectural resolution.
+- Lookup PC phase and provider selection: `1027+`; BHT, GSHARE and TAGE use `vpc_bht`, BTB/ITTAGE use `vpc_btb`. The PH_BHT port retains its separate registered-PC connection.
+- Predictors: `core/frontend/{bht,bht2lvl,btb,ras}.sv`, `g6lc_bp_{top,tage,gshare,loop,ittage,statcor,ckpt,ghist}.sv`.
+- Resolution source: `core/branch_unit.sv`; architectural flush control: `core/controller.sv`.
+- Current contracts and scoped evidence: `architecture/core-fetch/SPEC.md` §6 and `architecture/core-fetch/README.md`.
 
 ## 3. Config knobs (`core/include/config_pkg.sv`)
-- `bp_type_t` enum `39-42` (`BHT`, `PH_BHT`); selected by `BPType` `251`.
-- `BTBEntries` `249`, `BHTEntries` `253`, `BHTHist` `255`, `RASDepth` `247`.
+- `bp_type_t` (`BHT`, `PH_BHT`, `GSHARE`, `TAGE_LITE`); selected by `BPType`.
+- `BTBEntries`, `BHTEntries`, `BHTHist`, `RASDepth`, and the optional `BP*` fabric fields.
+- `BPStatCorEn` gates the statistical corrector; `FpgaEn`/`FpgaAlteraEn` determine existing lookup phase.
 - `RVC` changes `INSTR_PER_FETCH` and the prediction-shift path.
-- Legality: `check_cfg` `448-450` (`RASDepth>0`; `BTBEntries`/`BHTEntries` power-of-two or 0).
+- Legality remains in `check_cfg`, including supported RAS depth and power-of-two/zero table sizes.
 
 ## 4. Feature-addition playbook
 To add a predictor (for example gshare or TAGE), the change is config-first. Extend `bp_type_t` in
 `core/include/config_pkg.sv` with the new kind, add sizing fields, and add matching `check_cfg`
 assertions; then set the value in the per-target packages under `core/include/cv*_config_pkg.sv`.
-Implement the predictor as a new module in `core/frontend/` mirroring the port shape of
-`core/frontend/bht2lvl.sv`, instantiate it in `core/fetch_A/frontend/frontend.sv` under a `generate` gated on
-`CVA6Cfg.BPType`, and drive the existing `bht_prediction`/`btb_prediction` arrays
-(`frontend.sv:139-143`) so the downstream selection logic (`236-294`) is untouched. Feed training
-from the resolution path (`resolved_branch_i` at `frontend.sv:48`) into the update logic (`324+`).
-The classification stage (`210-221`) is predictor-agnostic and should not change. Keep every new
-structure elaboration-gated so a zero-sized predictor still compiles.
+Implement the predictor as a new module in `core/frontend/` mirroring the existing port shape,
+instantiate it in `core/fetch_B/frontend.sv` under a `generate` gated on `CVA6Cfg.BPType`,
+and drive the existing prediction arrays without adding opcode-specific downstream exceptions.
+Match lookup metadata to the transaction being classified and training metadata to the resolving
+instruction, including ownership and lifetime. State whether learned values represent absolute
+outcomes, relative errors or confidence; consuming one as another is a semantic defect. Keep every
+new structure elaboration-gated so disabled/minimal configurations still compile. Preserve the
+legacy FPGA phase unless a separate memory-interface change is explicitly validated.
+
+### Broad-review counter repair and limits
+
+`g6lc_bp_tage` now uses a twelve-bit decay counter for the documented 4096 accepted
+updates. The old sixteen-bit counter missed the second scheduled decay. Directed
+reset/debug/flush/update tests and prediction-output equivalence qualify this
+latent contract fix. Useful writes remain tied off by `t_weak=0`, and allocation
+does not consult usefulness; do not market the repair as an accuracy or physical
+state saving. The small mapped fixture has unchanged state (89 cells).
+
+Next accuracy work must resolve per-window/per-slot lookup-update association,
+fetch-hart vs resolve-hart history use, and prediction-time checkpoint ownership.
+Source presence of TAGE/loop/SC/ITTAGE does not qualify their combined semantics.
+Keep matched branch-pattern/alias controls and the protected SMT2 baseline.
 
 ## 5. `.dts` linkage
 Branch prediction is not device-tree visible: it is pure microarchitecture and changes no
@@ -58,6 +75,18 @@ add DT nodes for it.
 ## 6. Invariants and pitfalls
 The transparency invariant is absolute: a prediction must never alter an architectural result;
 divergence is corrected only by `resolved_branch_i` plus a `controller.sv` flush. Watch the RVC
-unaligned case (`180-197`) where the upper prediction of the previous fetch is reused; the RAS is
-corrupted if push/pop fire on non-consumed instructions (guarded at `261,290`); and BTB/BHT sizes
-must stay powers of two or the `check_cfg` assertion trips.
+unaligned case where a carried instruction reuses a saved prediction; the RAS is corrupted if
+push/pop fire on non-consumed instructions; and table sizes must satisfy `check_cfg`.
+
+The 2026-09-16 corrector repair uses the same three-bit absolute-outcome counters:
+0/1 overrides to not-taken, 6/7 to taken, and 2..5 defers. Invalid predictions are
+preserved, flush wins over training and counters saturate. Aliased indices share
+state intentionally; passing these semantics does not prove prediction accuracy
+or per-hart isolation. `verif/tb/core/tb_g6lc_bp_statcor.sv` independently checks
+these rules, with an injected-error control and multiple slot/RVC geometries.
+
+Qualification includes an extracted-selector SAT check with a wrong-PC negative,
+SMT2 RVI/mixed-C integer reference checks, broader stream8 work and full-core
+synthesis smoke. The corrector costs 99 additional generic leaf cells with no
+state growth; physical timing/power and broader firmware/ISA qualification remain
+open. A throughput gain is workload-scoped, not a claim of whole-core PPA sign-off.

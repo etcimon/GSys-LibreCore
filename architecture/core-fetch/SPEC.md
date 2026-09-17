@@ -127,12 +127,44 @@ class must be distinguished from head selection and tested against the actual
 raw-opcode gating in the live RTL, not described as proven opcode independence.
 
 **Verification status:** the existing self-composition harness is not an
-ordering/conservation reference. Its two-hart bound was vacuous (`1'(2)==0`)
-and is being repaired together with the realigner harness. The separate
-`g6lc_fetch_iq_order` task assumes prefix-valid input and checks DUT age stamps;
-it does not close the sparse-mask or independent accepted-stream obligations.
-Use the flattened F0–F5 gates in `AGENTS-todo.md`; historical PASS labels below
-do not supersede these limitations.
+ordering/conservation reference. The impossible hart bound (`1'(2)==0`) and
+prefix-valid assumptions were removed in the 2026-09-15 review; realigner BMC
+and covers subsequently passed at their stated reduced scope. Independent IQ
+order remained timed out, and raw-opcode non-interference conflicts with the
+separate port-throttling policy. Neither is closed by the old PASS labels.
+
+**2026-09-16 structural-order candidate:** after compact insertion, consecutive
+accepted entries occupy consecutive circular FIFO positions. Prefix removal
+must advance the head by exactly the number of fired ports, while a stalled
+head stays fixed. Partial carry acceptance advances insertion by one; target
+FIFO rejection advances it by zero. This invariant, not a sequence stamp or
+numerical PC ordering, is the basis for simplifying output selection. Existing
+queue depth, normal-fetch latency, replay and control-flow throttling stay fixed.
+
+The revised independent checker watches arbitrary accepted bytes/PC/hart/
+exception/prediction metadata and asserts bank occupancy against logical stream
+counters. The historical twelve-frame BMC remains recorded. The later proof adds
+asserted storage invariants: exact bank status/pointer spans, a watched payload
+at its logical bank/rank, live-CF count matching the target FIFO, and the watched
+CF target at its prefix-CF rank. These are not assumptions on DUT contents.
+Only the existing legal hart-ID and CF-enum input assumptions remain.
+
+The binary-state SAT route passes an explicit four-frame base check and temporal
+induction at length two. All 12 cover predicates are reached within 28 steps,
+including a newly explicit full drain without a flush and target-FIFO pressure;
+an emitted-instruction bit flip is detected and a constant-false cover is not
+reported reachable. This closes unbounded ordering safety in the formal envelope:
+FW64/RVC, four depth-eight banks, two target entries, two hart tags, two issue
+ports, XLEN/VLEN/GPLEN32, ASIC storage and non-hypervisor metadata. It does not
+close every production width/geometry, FPGA RAM timing, hypervisor handling,
+X-propagation, liveness without ready, or end-to-end SMT behavior. The standard
+SBY engine attempts remain distinct from the explicit successful SAT recipe.
+
+The simulation oracle additionally predicts acceptance, tests carry/target
+pressure, arbitrary ready and long no-flush sequences, and rejects injected
+output errors. See `README.md` for source identities, generated proof scripts,
+witnesses and invocation flags. E1–E6 in `AGENTS-todo.md` order the work; F0–F5
+remain qualification gates.
 
 ---
 
@@ -177,6 +209,21 @@ Opaque hint `{taken, target, cf_type, confidence}`. Suppression is I19 only. Per
 (I20). `g6lc_cf_legal(regime, target)` at priority 8 only — never on resolve. `BPType` is not a
 fetch input. `bp_fire` also requires the CF slot was consumed (IQ accept); classification is
 independent of consume (NEGATIVE G1br).
+
+For the asynchronous BHT/GSHARE/TAGE and BTB selector paths, lookup PC follows
+`realigner_vaddr`, the transaction whose bytes are being classified, not the
+previous response's `icache_vaddr_q`. Saved carry prediction is still used for a
+split instruction's first half. The existing FPGA selector expressions retain
+their phase; the separately connected PH_BHT registered port is outside this
+repair's scope. Selector equivalence is checked independently of full frontend
+stateful behavior.
+
+The optional statistical corrector's state is an absolute taken-outcome count,
+not an inversion-error count. A valid prediction is overridden to not-taken at
+0/1, to taken at 6/7, and left unchanged at 2..5. Invalid predictions remain
+invalid. Reset/flush establish 4; flush dominates training, and training saturates
+at 0/7. Index aliasing intentionally shares this state and supplies no identity
+or prediction-accuracy guarantee. It must never filter architectural resolution.
 
 ---
 

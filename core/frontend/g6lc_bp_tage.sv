@@ -65,7 +65,7 @@ module g6lc_bp_tage
   logic [NR_TABLES-1:0][TAG_BITS-1:0] t_tag, t_utag;
   logic [NR_TABLES-1:0] t_upd_valid, t_alloc, t_weak;
   logic decay_q;
-  logic [15:0] decay_cnt_q;
+  logic [11:0] decay_cnt_q;
 
   for (genvar t = 0; t < NR_TABLES; t++) begin : gen_tables
     // Index = low PC XOR folded history; tag = high PC XOR rotated fold
@@ -176,8 +176,8 @@ module g6lc_bp_tage
     end else begin
       decay_q <= 1'b0;
       if (hist_update_valid_o) begin
-        decay_cnt_q <= decay_cnt_q + 16'd1;
-        if (decay_cnt_q == 16'h0fff) decay_q <= 1'b1;
+        decay_cnt_q <= decay_cnt_q + 12'd1;
+        if (&decay_cnt_q) decay_q <= 1'b1;
       end
     end
   end

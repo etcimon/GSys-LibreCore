@@ -21,9 +21,230 @@ Normative why: [`../firmware-boot-principles.md`](../firmware-boot-principles.md
 
 `SPEC.md` `A_decode_pure` / `A_no_fabricate`. L2/L3 may **drop**, never modify. Only L1 produces bytes.
 
+## Predictor lookup/corrector follow-up retained (2026-09-16)
+
+The working tree now contains the previously isolated response-PC and absolute
+corrector fixes. ASIC `vpc_bht`/`vpc_btb` in `frontend.sv` follow the transaction
+being realigned instead of the preceding response register. FPGA selector phase
+is unchanged. The separate PH_BHT port still uses its legacy registered path;
+this pass does not claim to repair that provider's timing. Saved carry prediction
+and resolution ownership are unchanged.
+
+`g6lc_bp_statcor` still has the same three-bit counters and training rule. It
+interprets the learned absolute outcome consistently: 0/1 selects not-taken,
+6/7 selects taken, 2..5 defers, and invalid input predictions remain invalid.
+It remains gated by the existing `BPStatCorEn`/predictor configuration. Counters
+are shared by index; no per-PC, per-slot or per-hart isolation guarantee is added.
+
+| Check | Result / scope |
+|---|---|
+| Independent corrector contract | Original RTL fails by inverting a correct not-taken input at counter 1. Candidate passes six geometries (1/2/4/8 slots, RVC on/off, 4/64 entries), each with a detected injected error; covers saturation, alternating/bursty outcomes, aliasing, simultaneous lookup/update, reset and flush priority |
+| Live-port corrector synthesis | 1,261 → 1,360 generic cells (+99); 192 state bits unchanged; zero check problems/latches. Leaf screening, not whole-core mapped area |
+| Extracted PC selector contract | SAT PASS over symbolic 64-bit PCs and FPGA/Altera/valid inputs; wrong-PC negative fails. Proves ASIC current-transaction selection and preservation of prior FPGA selector expressions, not full FPGA timing or frontend proof |
+| Fresh SMT2 integer integration | All 13 execution records pass. RVI/mixed C/I references check 13,699/14,203 retirements, 25,774 operands and 1,025 known loads each; no skipped checks. One peer-flag value remains unchecked. Observer controls, mutated operands, redirect chain and both 48 KiB/hart workloads pass |
+| Broader stream8 controls | 8 positive records and one expected-negative record pass; checked-work poll unchanged. Hot-scan 275,593 → 262,740 ROI cycles (-4.66%) with cache policy unchanged; 1/8/64 KiB locality gains remain about 30.77%. These are distinct measurement windows, not physical-time qualification |
+| Full-core synthesis smoke | SMT2 and stream8 report zero check problems; no physical STA/power claim |
+| Retained-source verification | Non-comment source matches tested model `48038fd4…`; only explanatory comments differ. Default `verify --lint` passes 32/64-bit minimal targets; explicit SMT2/stream8 lint and strict elaboration also pass |
+
+Artifacts are `review-statcor-contract-v2-20260916`, `review-predictor-smt2-20260916`,
+`review-predictor-work-20260916`, `review-predictor-synth-20260916`,
+`review-predictor-pc-proof-20260916` and `review-predictor-promotion-20260916`.
+`review-statcor-retained-20260916` repeats the leaf gate on the retained source;
+`verif/tb/core/tb_g6lc_bp_statcor.sv` remains the independent oracle.
+The original selector proof launch required `$check` lowering for SAT; assertions
+were preserved, and successful full-core synthesis was reused rather than rerun.
+
+**Carry-over:** no stage, clock, reset, memory, scan interface, CSR, ISA encoding or
+DTS change. Existing predictor and FPGA gates apply. The ASIC response-PC mux and
+corrector output decode require mapped timing/power assessment; no area-neutral
+claim. Architectural resolve still wins unconditionally, and I-cache kill/refill,
+PMA/execute regions, cacheability and RR defaults are untouched. Physical inputs,
+full firmware/ISA/FP/ordering qualification and broader IQ geometry qualification
+remain open. Licensing/attribution were reviewed manually using the recorded tier-R
+authorization; the documented licensing diagnostic is not registered, so no
+automated licensing PASS is claimed.
+
+## Next performance discriminator: warm-fetch service (2026-09-16)
+
+Scoped promotion is reaffirmed: IQ/frontend/corrector hashes match the recorded
+validated versions. The later depth-two L2 sizing promotion changes only the
+named packages' MSHR fields; its tested package identities and matched dual-hart
+results are recorded in `architecture/l2-l3-cache/README.md`. This review
+adds no fresh performance measurement or functional RTL change.
+
+`g6lc_icache` accepts in IDLE and returns hits in READ, with no new request
+accepted in READ. Stream8 has one issue port, a derived 32-bit fetch window and
+FTQ/FDIP/loop buffer disabled. Its uncompressed nine-instruction checked loop
+measures `9 × 2 × 8192 + 14 = 147470` cycles. The agreement identifies a useful
+supply-ceiling discriminator, not a guaranteed 2× core speedup.
+
+The saved observer trace has now been analyzed without a new model run:
+`review-fetch-supply-analysis-20260916` covers ticks [5182, 29986), bounded by
+loop-head transfers after ROI-call retirement. All 24,804 cycle rows are present;
+1,378 complete loop intervals contain 12,402 accepted I-cache requests, responses,
+IQ transfers, decoded allocations and committed retirements. Request spacing is
+uniformly two cycles; accepted-request-to-response latency is one cycle. Requests
+are offered on every cycle, with 12,402 not-ready cycles. There are no misses,
+memory requests, mispredictions or architectural flush/control events in this
+interval. The 1,378 `kill_s2` cycles are not mispredictions; they coexist with
+correct loop-branch prediction and no instruction refills in this window.
+
+Input/model/ELF hashes and observer off/on/repeat identities are checked. Dropping
+a cycle row and corrupting a fetch PC are rejected by the analysis controls.
+This is a bounded core-0 observation, not a new whole-ROI or multicore measurement.
+The existing observer does not expose cycle-level IQ-empty/readiness or backend
+stall reasons; those fields are unavailable, not zero. Add those observations
+before implementing overlap. Reproduction uses `REVIEW_FETCH_SUPPLY=1` with
+`REVIEW_FETCH_INPUTS`, `REVIEW_FETCH_CONTROLS` and `TH_OUT_DIR` in
+`run_checked_work_review.py`; this mode performs host-side analysis only.
+
+Next measure IQ-empty/issue stalls and per-hart useful work.
+If supply is binding, evaluate registered request/response overlap with a target
+warm initiation interval of one cycle, preserving hit latency and transaction
+ownership. Do not simply assert ready in READ: the earlier address/response and
+feedback-loop failures remain regression obligations. New-request/current-return,
+backpressure, split carry, replay, kill/flush, refill and hart-switch cases must
+be checked before a change is retained. Mixed RVC and memory-bound workloads may
+benefit less; every relevant integration retains the dual-active SMT2 oracle.
+
+## IQ ordering: unbounded safety in the formal envelope (2026-09-16)
+
+The live IQ now passes two-state temporal induction at length two, following an
+explicit four-frame base check. This discharges the ordering/conservation safety
+contract for the stated formal envelope, rather than merely extending BMC depth.
+All original assertions and the two input assumptions remain: legal hart IDs and
+supported control-flow metadata. The new storage relations are assertions, not
+assumptions. No DUT timestamp or numerical PC ordering supplies the oracle.
+The claim is order/conservation after `consumed_o` acceptance and across prefix
+fires between flushes; upstream instruction completeness and the full ready/replay
+protocol retain their separate checks.
+
+**Envelope:** four FIFOs of depth eight (32 instructions), a two-entry target
+FIFO, two issue ports, two hart tags, 64-bit fetch windows with RVC, 32-bit
+XLEN/VLEN/GPLEN, ASIC/non-fall-through storage, FTQ off and non-hypervisor exception
+handling. This is not a proof of all production widths, all parameter tuples,
+FPGA RAM timing, hypervisor metadata or the whole SMT pipeline. It is not an
+X-propagation/metastability proof or an unconditional progress claim under a
+consumer that never becomes ready.
+
+The independent accepted-entry watcher retains its logical rank and input bytes,
+PC, hart, exception and predicted target. Additional inductive assertions relate:
+
+- bank occupancy, read/write pointer spans and circular head position, including
+  the empty state;
+- the watched entry's logical rank to its stored payload;
+- the count of live predicted control-flow entries to target-FIFO occupancy;
+- the watched CF entry's prefix-CF rank to its stored target.
+
+The two CF counts use six bits, sufficient for every sum of at most 32 terms.
+This is a lossless proof-model sizing change, not an input restriction.
+
+| Check | Recorded result |
+|---|---|
+| `review-iq-sat-binary-20260916` | Four-frame base PASS; induction length two PASS, about 226 seconds including preparation |
+| `review-iq-sat-binary-negative-20260916` | One-bit corruption of the emitted instruction is detected in the base check; only the copied negative RTL is changed |
+| `review-iq-cover-binary-20260916` | All 12 clocked cover predicates reached within 28 steps; constant-false negative stays unreachable; about 359 seconds total |
+| Witness inspection | No-flush full-drain trace reaches count 32 / all banks full at step 11, then count 0 / all banks empty at step 27, with no intervening flush |
+| Earlier twelve-frame BMC | Preserved as historical bounded evidence; not relabeled as unbounded proof |
+
+Covers include watched retirement, hart-1 retirement, sparse acceptance, dual
+pop, full capacity, historical full-to-empty, **full drain without flush**, target
+pressure, reuse after flush, partial carry, exception and predicted-target cases.
+The old full-to-empty cover could be met by a flush, so a separate no-flush
+predicate was necessary. The horizon grows from 20 to 28 for fill-plus-drain;
+no old cover predicate is removed. Each goal has its own witness; this does not
+claim all goals occur in one execution.
+
+**Execution:** `run_fetch_formal.py` retains the default mode order, snapshot
+hashing, incremental results and 120..600-second timeout controls. Explicit
+`REVIEW_FORMAL_TASK=g6lc_fetch_iq_order`, `REVIEW_FORMAL_MODES=prove`,
+`REVIEW_FORMAL_SAT_PROVE=1`, `REVIEW_FORMAL_TIMEOUT=600` selects the proven SAT
+route. Add `REVIEW_FORMAL_NEGATIVE=1` for the copied instruction-bit fault. For
+reachability use `REVIEW_FORMAL_MODES=cover` and `REVIEW_FORMAL_SAT_COVER=1` instead.
+Upload the files listed by the SBY task through the existing credential-cache
+proxy gateway. Generated Yosys scripts, input hashes and witnesses are retained.
+SAT modes reject altered SBY preprocessing/parameter overrides and unsupported
+formal geometries rather than silently ignoring them.
+
+The cover route replaces each clocked cover with an initialized sticky observation
+under the same guard, removes safety assertions only for reachability (as SBY
+cover does), retains assumptions, and searches for each observation. A per-goal
+SAT counterexample to `reach=0` means the goal is reachable, not a DUT safety
+failure; the constant-false control must instead prove unreachable. Safety uses
+all assertions and a separate base-plus-induction run. The default SBY PDR/SMT
+routes remain exploratory; their timeout records are not converted to PASS.
+
+The first direct-SAT attempt accidentally enabled X-state induction via
+`-set-def-inputs`; its inductive counterexamples included undefined proof-state
+flags and were not reachable RTL counterexamples. The successful binary-state
+route matches the SBY bit-state domain and retains the reset base check. Earlier
+solver timeouts, declaration-order and `$check` lowering errors remain archived.
+
+Proof input identities: IQ `7fba053f…` (unchanged), properties `d2aee4ce…`, SBY
+`861e4de3…`. Existing instruction, metadata and predictor RTL is untouched by this
+proof-only follow-up. The older depth-four FIFO BMC helper is not used as a
+substitute for this live depth-eight IQ proof.
+
+## Circular IQ efficiency follow-up (2026-09-16)
+
+The E1 candidate replaces greedy timestamp arbitration with circular selection
+from the existing registered drain head. Compacted insertion and prefix removal
+keep logical positions consecutive; the head advances by actual fired count,
+not ready count or numerical PC order. Queue depth, ports, normal-fetch latency,
+replay, control-flow throttling, scheduler and configuration are unchanged.
+`push_seq` is retained for diagnostic trace compatibility but no longer drives
+selection; synthesis removes its now-unobserved functional storage and logic.
+
+| Check | Result | Limit |
+|---|---|---|
+| Independent acceptance/retirement bench, BEFORE and AFTER | Five configurations PASS: 4/I2/H2/C, 2/I1/H1/C, 8/I2/H2/C, 2/I1/H1/no-C, 2/I2/H2/no-C; each rejects the injected output error | Leaf geometry/metadata envelope, not all ISA/control-flow opcodes or FPGA memory implementations |
+| Extended directed/randomized controls | Partial carry acceptance, target FIFO full, exception metadata, arbitrary ready, flush, simultaneous pop/push and 70,000 accepted no-flush iterations per configuration | Exceptions are non-hypervisor; runtime checks are not a proof |
+| Matched four-slot/I2/H2 generic synthesis | 22,354 to 20,085 cells; 5,954 to 5,426 sequential cells; zero check problems/latches | Same live-port fixture with exceptions/carry tied off. Saves 2,269 generic cells and 528 sequential cells, not physical area or full-core area |
+| Fresh isolated SMT2 observer-capable model | `255cda29…`, built directly with private runtime `dfbc2c4a…`; all 13 run records PASS | Reuses the validated source snapshot plus current IQ, not unrelated concurrent worktree changes |
+| RVI / mixed C/I independent references | 13,696 / 14,202 retirements; each 25,774 operand checks and 1,025 known loads; both positive/mutated-operand controls PASS | One peer-flag load per witness remains outside the local memory-value assertion |
+| Observer controls | Off/on retirement and cookie fingerprints match; repeated enabled traces identical; witness trace hashes match the prior corrected-runtime references | This pass builds one observer-capable model, not a new observer-absent executable |
+| Redirect-chain and byte-identical 48 KiB/hart RVI/RVC | PASS; cookie polls unchanged at 10,240 / 282,624 / 270,336 | No throughput improvement inferred from cookie polling |
+| Current SMT2 lint and strict elaboration | PASS; 256 warnings at the recorded baseline level | No new full-core synthesis, STA or physical power measurement in this pass |
+| Expanded independent IQ formal | Historical twelve-frame BMC PASS; subsequently base-plus-two-step induction PASS and all 12 covers reached via the explicit binary SAT route above | Reduced formal envelope only; no production-width/FPGA/hypervisor or full-SMT closure. Original assumptions retained; storage invariants are asserted, not assumed |
+
+The independent formal oracle no longer relies on DUT sequence stamps or
+ordinary unsigned sequence monotonicity across wrap. It watches arbitrary
+accepted PC/bytes/hart/exception/prediction and asserts per-bank occupancy from
+logical stream counters. The unchanged twelve-frame safety task passed
+(`review-iq-ring-order600-20260916`, ABC solver 376.32 seconds); that run's cover
+timeout remains recorded. The later storage-invariant/SAT follow-up above closes
+unbounded safety and the expanded cover set within the same reduced envelope.
+`run_fetch_formal.py` records the task-file hash and each mode's result before
+starting the next mode. `REVIEW_FORMAL_TIMEOUT=600` changes the deadline only;
+the default remains 120 seconds. Raw-opcode non-interference remains a separate
+contract conflict, not waived. The simplification is supported by bounded
+safety plus directed/runtime and synthesis evidence, not represented as fully
+formally closed or release-qualified.
+
+Artifacts are `review-iq-ring-{before,after,synth-before,synth-after,order,core}-20260916`
+under `/opt/testharness/runs/`, copied to the approved C: artifact directory.
+`run_fetch_queue.py` uses the pinned private runtime and checks actual compiler
+dependencies; `run_fetch_queue_synth.py` retains the matched fixture contract.
+`run_restart_review.py` with `REVIEW_IQ_RING=1` builds the isolated integration
+and checks `analysis.json` results, not only process return codes. Source
+manifests include submodule source files and generated bootrom inputs by the
+runner's declared file-extension set; strict qualification remains false.
+Use fresh run tags; do not overwrite previous source/results to retry a run.
+The remote login PATH needed explicit Verilator/formal toolchain prefixes for
+proxy `py` leaf/proof calls; no installed toolchain was modified.
+
+Timing/DFT/ecosystem: the wide age subtract/compare/select cone is removed and
+the existing one-hot head now advances on the accepted output prefix. No added
+pipeline stage, clock/reset domain or storage capacity; existing FIFO/test-mode
+seams remain. The 528 sequential-cell reduction is observed only in the generic
+fixture. ISA/DTS/config discovery is unchanged. Actual mapped slack, SRAM
+binding, scan/MBIST and power remain unmeasured. Next performance investigation
+is cacheability, not RR enablement; see `../l2-l3-cache/README.md`.
+
 ## Current correctness/efficiency review (2026-09-15)
 
-The active completion sequence is F0–F5 in `../../AGENTS-todo.md`.
+The active implementation order is the 2026-09-16 E1–E6 effort-ranked section
+in `../../AGENTS-todo.md`; F0–F5 remain completion/qualification gates.
 Historical handoff/firmware successes below are scoped observations, not a
 current SMT2 qualification. The current implementation was reviewed against
 accepted-stream order, not the minimum-PC selector from an obsolete bisect
@@ -248,8 +469,9 @@ closes the demonstrated integer witnesses, not all ISA/firmware/SMT contracts.
 Selector/routing proofs and reachability covers pass with SMT unrolling;
 `tb_g6lc_restart.sv` passes ownership, invalid source, valid zero PC, reset,
 NH1 inactivity and inactive/coincident redirect cases. These are component
-contracts, not an end-to-end SMT proof. The independent IQ proof still times
-out. Raw cookie PASS alone must not promote any of these configurations.
+contracts, not an end-to-end SMT proof. The independent IQ proof subsequently
+passes induction in its reduced formal envelope, as recorded above. Raw cookie
+PASS alone must not promote any of these configurations.
 
 Visibility audit: channels 1/2 (required/forbidden writes) are checked by the
 reference retirement model; 3/4 (state kept or killed) motivate restart and

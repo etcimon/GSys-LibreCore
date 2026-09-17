@@ -238,6 +238,43 @@ paragraph, and it is cheaper than one soak.
 specification in `architecture/firmware-boot-principles.md` / `architecture/core-fetch/`. Where a
 lens and a normative document disagree, the normative document wins and the lens is corrected.
 
+### 2.10 Runtime reflection and bounded learning (preliminary)
+
+[`AGENTS-rt-learning-philosophy-AGI.md`](AGENTS-rt-learning-philosophy-AGI.md)
+generalizes the §2.9 guides into evidence-bounded analysis segments, conditional
+pattern transfer and versioned learning artifacts. It retains their proposition,
+thought-pattern and rejection-condition structure while distinguishing a
+supporting observation from causal proof, repetition from generality, and
+external memory/procedure improvement from actual model training.
+
+**Preliminary analysis instruction.** Before choosing a solution to a non-trivial
+technical problem or changing RTL, use `AGENTS-rt-learning-philosophy-AGI.md` to
+analyze the underlying mechanisms and infer an appropriate reasoning pattern:
+
+1. State the problem, authorized objective and configuration/observation envelope.
+2. Trace the relevant mechanism through its interfaces, ownership, state lifetime
+   and ordering contracts; separate directly observed facts from hypotheses.
+3. Abstract incidental symptoms into a conditional problem class without erasing
+   causally relevant conditions. Consult the guide's propositions and thought
+   patterns to select how to approach that class, rather than copy a past fix.
+4. Name a plausible alternative explanation, a distinguishing prediction and a
+   rejection condition. Choose the earliest faithful, lowest-cost check before
+   committing to an implementation direction.
+5. Record a concise analysis-segment summary: mechanism, evidence, assumptions,
+   chosen reasoning pattern, next check and limits on generalization. After the
+   result, revise the hypothesis or retain a refutable lesson with its provenance.
+
+Keep this proportional to the problem: reuse a still-valid segment for mechanical
+follow-ups, and reopen it when the evidence, instrument, context or objective
+changes. A compelling explanation does not waive validation, and a stored pattern
+never overrides the specification, user authorization or the SoC checklist.
+
+This is a methodological extension, not an implemented learner, an AGI claim or
+permission to modify goals, correctness gates or production policies. Reflection
+uses explicit predictions, observations and outcomes; a more coherent narrative
+is not itself evidence of improved capability. Apply it where a reusable lesson
+can be checked independently, and keep the existing SoC/verification obligations.
+
 ---
 
 ## 3. Abstract timing-analysis practices

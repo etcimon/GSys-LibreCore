@@ -33,8 +33,54 @@ controls and an injected-error checker control are retained; a cookie PASS
 alone had hidden an intermediate instruction loss. A later host-runtime
 memory corruption was isolated and corrected in a private runtime; matched
 full-workload and reference-trace revalidation passes on that runtime.
-Independent IQ order verification remains open. Physical qualification lacks technology inputs.
-No complete base ISA, C-extension, natural-firmware or SMT coverage status is promoted.
+Circular IQ simplification subsequently passes expanded independent acceptance/
+metadata leaf controls, long no-flush runs, matched generic synthesis and fresh
+corrected-runtime dual-hart integer revalidation. Independent IQ twelve-frame
+bounded safety is retained as historical evidence. Additional asserted storage
+invariants subsequently enable binary-state temporal induction at length two,
+and all twelve cover predicates are reached within 28 steps with negative
+controls. This closes unbounded ordering safety only in the reduced four-slot,
+two-hart, two-issue, 32-bit ASIC/non-hypervisor formal envelope; wider/FPGA/RVH
+and full-pipeline proofs remain separate. Physical qualification lacks technology
+inputs. No complete base ISA, C-extension, natural-firmware or SMT coverage
+status is promoted.
+
+Isolated executable-data cacheability controls show correct table values and
+real cached fills/hits in a short witness, and larger checked workloads pass.
+The scan/control performance regresses despite warm-hit improvement. Production
+cacheability is unchanged; no broader memory, ISA or physical qualification is
+inferred from these diagnostics. Checked pointer-locality controls subsequently
+pass with fixed load counts and negative controls, but show no measured cycle
+gain between cacheability policies. Validated instruction-miss tracing then
+identifies repeated killed wrong-path refills. Predictor lookup/corrector
+semantics are now repaired and retained after independent leaf/negative checks,
+a selector contract proof, SMT2 integer revalidation, broader stream8 controls
+and synthesis smoke. Mapped timing/power, full FPGA/provider coverage, natural
+firmware and full ISA qualification remain open. No architectural or physical
+coverage status is promoted solely from these microarchitectural checks.
+
+The subsequent invalidation-leaf repair rejects partial-target admission and
+preserves a new command when a sole old entry departs. Directed/random leaf
+checks and local eight-step formal checks pass; no full coherence, RVWMO or SMT
+coverage status is promoted. The hub's held AR/AW owner/ID reservation and phantom-read credit are subsequently
+repaired with directed and eight-step local checks. Invalidation retention,
+visibility and selected-source qualification remain open; no full memory-model
+or multicore coverage status follows. Bounded warm-fetch trace analysis also
+confirms the existing two-cycle supply interval; it does not qualify a new
+pipeline or provide missing IQ/backend stall observations.
+
+Depth-two L2 MSHR sizing is subsequently promoted only in the named SMT2 and
+stream8 packages after production-shaped leaf checks, control-occupancy induction
+and matched full-model regressions preserve prior results. This is an internal
+area/resource-sizing change, not a new ISA, coherence, physical or full-platform
+coverage status. Other configurations and the generic MSHR capability are unchanged.
+
+The broad RTL review repairs the OoO IQ readiness/capacity leaf, generic MSHR
+merge lifetime, selected inclusive acknowledgments and latent TAGE decay period.
+Focused formal and matched protected-profile tests do not close full OoO/L3/
+nonblocking coverage: accepted-store self-block is reproduced in live dispatch,
+and further rename/LSQ/recovery/hart/FP/retirement contracts remain open. Source
+capability labels are not release evidence; see the upgrade-sequence audit map.
 
 ## Status legend and derivation
 

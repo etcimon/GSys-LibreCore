@@ -28,6 +28,25 @@ parallel pipeline.
 | LSU / `store_buffer` / `load_unit` | Memory speculation | **FSE S1 STQ depth** |
 | `core/smt/*` | Banked state / fine switch | U6.1 |
 
+## Qualification boundary from the broad RTL review
+
+`DeepSpecEn` widens storage; it does not prove safe speculative execution. The
+current OoO dispatch has a reproduced accepted-store self-block, and rename
+checkpoint association, older WB/commit preservation, committed-map recovery,
+LSQ age/byte coverage and hart/FP domains still need qualification. The IQ now
+uses writeback-qualified readiness rather than speculative issue-time wakeup.
+
+The predictor checkpoint FIFO is pushed and popped from resolution in the live
+top; conservation of simultaneous operations and prediction-time branch identity
+are separate obligations. The STQ retains page-offset interlocks, full-address
+forwarding and saved-forward behavior whose lifetime must be checked against
+cancellation, fences and peer writes before another throughput rewrite.
+
+The protected depth-two SMT2/stream8 integrations match their frozen baselines;
+that is not full `OoOEn=1`, hypervisor, memory-order or physical sign-off. See
+`../remaining-upgrade-sequence.md` for source loci, reproduced vs source-derived
+findings, the selected repairs and effort-ranked next contracts.
+
 ## Config knobs
 
 | Knob | Role |

@@ -13,7 +13,7 @@
 //   3. Independent RR + starve counters per channel
 //   4. Snoop filter guided inv (owners only)
 //   5. Inv coalesce + per-core FIFOs (g6lc_inval_bus)
-//   6. Inv backpressure: hold AW if inv bus not ready (no silent drop storm)
+//   6. Invalidation retention beyond AXI credits remains a separate obligation
 //   7. Global LR/SC tracker — kill remote reservations on store/AMO
 //   8. NC (non-cacheable) skips SF/inv entirely
 //   9. NR_CORES==1 → pure AXI identity
@@ -28,7 +28,7 @@ module g6lc_coherence_hub
     parameter int unsigned INVAL_DEPTH          = COH_DEFAULT_INVAL_DEPTH,
     parameter int unsigned LINE_BYTES           = COH_DEFAULT_LINE_BYTES,
     parameter int unsigned AXI_STARVE_LIMIT     = 16,
-    parameter int unsigned MAX_OUTSTANDING      = 4,  // per direction (AR/AW)
+    parameter int unsigned MAX_OUTSTANDING      = 4,  // shared AR/AW slots
     parameter coh_policy_t POLICY               = COH_FILTERED,
     parameter int unsigned AXI_ADDR_WIDTH       = 64,
     parameter int unsigned AXI_DATA_WIDTH       = 64,
@@ -92,6 +92,9 @@ module g6lc_coherence_hub
     logic [NC-1:0]    aw_req, ar_req;
     logic [CID_W-1:0] aw_winner, ar_winner;
     logic             aw_starve_force, ar_starve_force;
+    logic aw_hold_q, ar_hold_q;
+    logic [CID_W-1:0] aw_hold_owner_q, ar_hold_owner_q;
+    logic [OT_W-1:0] aw_hold_slot_q, ar_hold_slot_q;
 
     for (genvar c = 0; c < NC; c++) begin : gen_req
       assign aw_req[c] = core_req_i[c].aw_valid;
@@ -134,6 +137,14 @@ module g6lc_coherence_hub
           ar_starve_force = 1'b1;
         end
       end
+      if (aw_hold_q) begin
+        aw_winner = aw_hold_owner_q;
+        aw_starve_force = 1'b0;
+      end
+      if (ar_hold_q) begin
+        ar_winner = ar_hold_owner_q;
+        ar_starve_force = 1'b0;
+      end
     end
 
     assign coh_arb_starve_o = aw_starve_force | ar_starve_force;
@@ -164,7 +175,9 @@ module g6lc_coherence_hub
     // same id would be un-demuxable).
     logic [OT_MAX-1:0] slot_used;
     for (genvar s = 0; s < OT_MAX; s++) begin : gen_slot_used
-      assign slot_used[s] = ar_ot_q[s].valid | aw_ot_q[s].valid;
+      assign slot_used[s] = ar_ot_q[s].valid | aw_ot_q[s].valid |
+          (ar_hold_q && ar_hold_slot_q == OT_W'(s)) |
+          (aw_hold_q && aw_hold_slot_q == OT_W'(s));
     end
     assign ar_ot_full = &slot_used;
     assign aw_ot_full = &slot_used;
@@ -184,9 +197,10 @@ module g6lc_coherence_hub
           aw_free_slot = OT_W'(s);
         end
       end
-      // Prefer distinct free slots when both can allocate the same first free
+      // Prefer distinct free slots when a new AR actually competes
       // (combinational tie-break: AW takes next free after AR's choice)
-      if (ar_have_free && aw_have_free && (ar_free_slot == aw_free_slot)) begin
+      if (ar_have_free && aw_have_free && |ar_req && !ar_hold_q &&
+          (ar_free_slot == aw_free_slot)) begin
         aw_have_free = 1'b0;
         for (int unsigned s = 0; s < OT_MAX; s++) begin
           if (!slot_used[s] && OT_W'(s) != ar_free_slot && !aw_have_free) begin
@@ -194,6 +208,14 @@ module g6lc_coherence_hub
             aw_free_slot = OT_W'(s);
           end
         end
+      end
+      if (ar_hold_q) begin
+        ar_have_free = 1'b1;
+        ar_free_slot = ar_hold_slot_q;
+      end
+      if (aw_hold_q) begin
+        aw_have_free = 1'b1;
+        aw_free_slot = aw_hold_slot_q;
       end
     end
 
@@ -212,7 +234,16 @@ module g6lc_coherence_hub
     logic aw_fire, ar_fire, w_fire, b_fire, r_fire;
 
     always_comb begin
+      logic [OT_W-1:0] bs, rs;
+      logic [CID_W-1:0] bc, rc;
+      logic b_id_ok, r_id_ok;
       // Defaults
+      bs = '0;
+      rs = '0;
+      bc = '0;
+      rc = '0;
+      b_id_ok = 1'b0;
+      r_id_ok = 1'b0;
       mem_req_o   = '0;
       aw_fire     = 1'b0;
       ar_fire     = 1'b0;
@@ -246,7 +277,7 @@ module g6lc_coherence_hub
       // mem aw_ready (downstream L2 only asserts ready when valid is high;
       // gating valid on ready is a combinational deadlock).
       // Hold new AW while write data for previous AW still in flight (W has no id).
-      aw_grant = |aw_req && !aw_ot_full && aw_have_free && !w_busy_q;
+      aw_grant = aw_hold_q || (|aw_req && !aw_ot_full && aw_have_free && !w_busy_q);
 
       if (aw_grant) begin
         mem_req_o.aw       = core_req_i[aw_winner].aw;
@@ -271,7 +302,7 @@ module g6lc_coherence_hub
       end
 
       // ---- AR path (independent of AW) — same valid/ready split ----
-      ar_grant = |ar_req && !ar_ot_full && ar_have_free;
+      ar_grant = ar_hold_q || (|ar_req && !ar_ot_full && ar_have_free);
       if (ar_grant) begin
         mem_req_o.ar       = core_req_i[ar_winner].ar;
         // Mem-side id = OT slot (AR/AW share slot space; see slot_used above).
@@ -301,9 +332,6 @@ module g6lc_coherence_hub
 
       // ---- B response demux by OT slot id; restore original core id ----
       if (mem_resp_i.b_valid) begin
-        automatic logic [OT_W-1:0] bs;
-        automatic logic [CID_W-1:0] bc;
-        automatic logic            b_id_ok;
         // Compare full id against OT_MAX (do not truncate OT_MAX to OT_W bits —
         // when OT_MAX is a power of two that truncates to 0).
         b_id_ok = (mem_resp_i.b.id < AXI_ID_WIDTH'(OT_MAX));
@@ -335,9 +363,6 @@ module g6lc_coherence_hub
       // data on R with the *AW* id — demux via aw_ot and free the slot here
       // (B may already have completed; see expect_r above).
       if (mem_resp_i.r_valid) begin
-        automatic logic [OT_W-1:0] rs;
-        automatic logic [CID_W-1:0] rc;
-        automatic logic            r_id_ok;
         r_id_ok = (mem_resp_i.r.id < AXI_ID_WIDTH'(OT_MAX));
         rs      = OT_W'(mem_resp_i.r.id);
         if (r_id_ok && ar_ot_q[rs].valid) begin
@@ -391,6 +416,12 @@ module g6lc_coherence_hub
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
+        aw_hold_q <= 1'b0;
+        ar_hold_q <= 1'b0;
+        aw_hold_owner_q <= '0;
+        ar_hold_owner_q <= '0;
+        aw_hold_slot_q <= '0;
+        ar_hold_slot_q <= '0;
         aw_rr_q     <= '0;
         ar_rr_q     <= '0;
         ar_ot_cnt_q <= '0;
@@ -407,6 +438,16 @@ module g6lc_coherence_hub
           ar_starve_q[c] <= '0;
         end
       end else begin
+        aw_hold_q <= aw_grant && !mem_resp_i.aw_ready;
+        ar_hold_q <= ar_grant && !mem_resp_i.ar_ready;
+        if (aw_grant && !mem_resp_i.aw_ready && !aw_hold_q) begin
+          aw_hold_owner_q <= aw_winner;
+          aw_hold_slot_q <= aw_free_slot;
+        end
+        if (ar_grant && !mem_resp_i.ar_ready && !ar_hold_q) begin
+          ar_hold_owner_q <= ar_winner;
+          ar_hold_slot_q <= ar_free_slot;
+        end
         aw_rr_q     <= aw_rr_d;
         ar_rr_q     <= ar_rr_d;
         ar_ot_cnt_q <= ar_ot_cnt_d;

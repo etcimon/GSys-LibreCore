@@ -14,6 +14,134 @@
 #define NROUNDS 16
 #endif
 
+#ifdef G6LC_LOCALITY_PROBE
+#ifndef LOCAL_NODES
+#define LOCAL_NODES 1024
+#endif
+#ifndef LOCAL_STEPS
+#define LOCAL_STEPS 8192
+#endif
+#if LOCAL_NODES < 128 || LOCAL_NODES > 8192 || (LOCAL_NODES & (LOCAL_NODES - 1))
+#error LOCAL_NODES_must_be_a_power_of_two_in_128_to_8192
+#endif
+#if LOCAL_STEPS < LOCAL_NODES || LOCAL_STEPS % LOCAL_NODES
+#error LOCAL_STEPS_must_be_a_positive_multiple_of_LOCAL_NODES
+#endif
+
+  .section .text.init
+  .globl _start
+  .option push
+  .option norvc
+_start:
+  csrr t0, mhartid
+  bnez t0, park
+  li s0, 0x80100000
+  li s1, LOCAL_NODES
+  li s2, LOCAL_NODES-1
+  li t0, 0
+.Llocal_fill:
+  addi t1, t0, 37
+  and t1, t1, s2
+  slli t1, t1, 3
+  add t1, t1, s0
+  slli t2, t0, 3
+  add t2, t2, s0
+  sd t1, 0(t2)
+  addi t0, t0, 1
+  bltu t0, s1, .Llocal_fill
+  fence rw, rw
+
+  li s3, 0
+  mv s4, s0
+  mv s5, s1
+  jal ra, .Llocal_walk
+  bne s4, s0, fail
+  fence rw, rw
+
+  li t0, 0x44
+  csrw mhpmevent3, t0
+  li t0, 0x02
+  csrw mhpmevent4, t0
+  li t0, 0x05
+  csrw mhpmevent5, t0
+  li t0, 0x06
+  csrw mhpmevent6, t0
+  li t0, 0x11
+  csrw mhpmevent7, t0
+  li t0, 0x01
+  csrw mhpmevent8, t0
+  li s5, LOCAL_STEPS
+  csrr s7, mhpmcounter3
+  csrr s8, mhpmcounter4
+  csrr s9, mhpmcounter5
+  csrr s10, mhpmcounter6
+  csrr s11, mhpmcounter7
+  csrr t3, mhpmcounter8
+  csrr s6, mcycle
+  .globl locality_roi_begin
+locality_roi_begin:
+  jal ra, .Llocal_walk
+  bne s4, s0, fail
+  .globl locality_roi_end
+locality_roi_end:
+  csrr t0, mcycle
+  sub t0, t0, s6
+  csrr s0, mhpmcounter3
+  sub s0, s0, s7
+  csrr s1, mhpmcounter4
+  sub s1, s1, s8
+  csrr s2, mhpmcounter5
+  sub s2, s2, s9
+  csrr s3, mhpmcounter6
+  sub s3, s3, s10
+  csrr s4, mhpmcounter7
+  sub s4, s4, s11
+  csrr s5, mhpmcounter8
+  sub s5, s5, t3
+  li t1, LOCAL_STEPS
+  bne s2, t1, fail
+  la t4, report
+  sd t0, 0(t4)
+  sd s0, 8(t4)
+  sd s1, 16(t4)
+  sd s2, 24(t4)
+  sd s3, 32(t4)
+  sd s4, 40(t4)
+  sd s5, 48(t4)
+  fence rw, rw
+  li t6, 16384
+.Llocal_report_wait:
+  addi t6, t6, -1
+  bnez t6, .Llocal_report_wait
+  li a0, 1
+  j write_tohost
+fail:
+  li a0, 3
+write_tohost:
+  la t0, tohost
+  sw a0, 0(t0)
+.Llocal_done:
+  j .Llocal_done
+park:
+  wfi
+  j park
+
+.Llocal_walk:
+  ld t0, 0(s4)
+  addi s3, s3, 37
+  and s3, s3, s2
+  slli t1, s3, 3
+  add t1, t1, s0
+#ifdef LOCAL_NEGATIVE
+  addi t1, t1, 8
+#endif
+  bne t0, t1, fail
+  mv s4, t0
+  addi s5, s5, -1
+  bnez s5, .Llocal_walk
+  ret
+  .option pop
+#else
   .section .text.init
   .globl _start
   .option push
@@ -193,6 +321,7 @@ park:
   jal  x0, park
 
   .option pop
+#endif
 
   .section .data
   .align 6

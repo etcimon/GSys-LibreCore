@@ -86,7 +86,8 @@ module g6lc_l2_mshr #(
       if (mem_q[i].valid && (mem_q[i].line_addr == alloc_line_addr_i)) begin
         merge_found = 1'b1;
         merge_idx   = IDX_W'(i);
-        merge_can_attach = (mem_q[i].nwait < NW[NW_W-1:0]);
+        merge_can_attach = (mem_q[i].nwait < NW[NW_W-1:0]) ||
+            (waiter_pop_i && complete_idx_i == IDX_W'(i) && mem_q[i].nwait != '0);
       end
       if (!mem_q[i].valid && !free_found) begin
         free_found = 1'b1;
@@ -95,7 +96,7 @@ module g6lc_l2_mshr #(
     end
   end
 
-  assign alloc_ready_o  = free_found || (merge_found && merge_can_attach);
+  assign alloc_ready_o  = merge_found ? merge_can_attach : free_found;
   assign alloc_merged_o = alloc_i && merge_found && merge_can_attach;
   assign alloc_idx_o    = merge_found ? merge_idx : free_idx;
   assign merge_full_o   = merge_found && !merge_can_attach;
@@ -124,17 +125,10 @@ module g6lc_l2_mshr #(
           mem_d[complete_idx_i].waiters[w] = mem_q[complete_idx_i].waiters[w+1];
         mem_d[complete_idx_i].nwait = mem_q[complete_idx_i].nwait - 1'b1;
       end
-      // Complete frees entry only when no waiters left
-      if (complete_i && mem_q[complete_idx_i].valid) begin
-        if (mem_d[complete_idx_i].nwait == '0) begin
-          mem_d[complete_idx_i].valid = 1'b0;
-          count_d = count_q - (IDX_W+1)'(1);
-        end
-      end
       // Alloc new or attach waiter
       if (alloc_i && merge_found && merge_can_attach) begin
         automatic logic [NW_W-1:0] wi;
-        wi = mem_q[merge_idx].nwait;
+        wi = mem_d[merge_idx].nwait;
         mem_d[merge_idx].waiters[wi] = alloc_id_i;
         mem_d[merge_idx].nwait       = wi + 1'b1;
       end else if (alloc_i && free_found && !merge_found) begin
@@ -144,6 +138,13 @@ module g6lc_l2_mshr #(
         mem_d[free_idx].is_write  = alloc_is_write_i;
         mem_d[free_idx].nwait     = '0;
         count_d = count_d + (IDX_W+1)'(1);
+      end
+      // Complete frees entry only when no waiters left
+      if (complete_i && mem_q[complete_idx_i].valid) begin
+        if (mem_d[complete_idx_i].nwait == '0) begin
+          mem_d[complete_idx_i].valid = 1'b0;
+          count_d = count_d - (IDX_W+1)'(1);
+        end
       end
     end
   end

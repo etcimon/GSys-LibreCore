@@ -107,9 +107,11 @@ module g6lc_cluster
   assign l2_back_inval_v = INCLUSIVE_L3 && CVA6Cfg.L3En && l3_evict_v;
   assign l2_back_inval_a = l3_evict_a;
 
+  logic [NC-1:0] inv_incl_ready;
   // Merge hub + inclusive inv (hub wins if both valid same cycle)
   always_comb begin
     for (int unsigned c = 0; c < NC; c++) begin
+      inv_incl_ready[c] = inv_core_ready[c] && !inv_hub[c].valid;
       if (inv_hub[c].valid) inv_to_core[c] = inv_hub[c];
       else inv_to_core[c] = inv_incl[c];
     end
@@ -392,7 +394,7 @@ module g6lc_cluster
       .rst_ni,
       .evict_valid_i(evict_v),
       .evict_addr_i (evict_a),
-      .inv_ready_i  (inv_core_ready),
+      .inv_ready_i  (inv_incl_ready),
       .inv_o        (inv_incl),
       .inv_busy_o   ()
   );

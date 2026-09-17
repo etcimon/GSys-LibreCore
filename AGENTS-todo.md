@@ -17,7 +17,206 @@ is the queue, not the design.
 Priors: `architecture/router-core-upgrade-program.md`, `architecture/l2-l3-cache/README.md`,
 `architecture/multi-threading/testharness-proxy.md`, and the approved P0–P3 plan.
 User objective: balanced single-core latency and multicore throughput/area, preserving SMT.
-First candidate: optional L2 round-robin replacement; no production-default or SMT-scheduler change.
+The original first candidate was optional L2 round-robin replacement. The
+2026-09-16 effort-ranked priorities below supersede that implementation order;
+RR remains default-off and no production-default or SMT-scheduler change is implied.
+
+### Active reassessment: stability-balanced speed/area (2026-09-16)
+
+The user-local `plan-ea69493e7a14829a.md` is revised in place; its original
+RR-first plan and early conclusions are preserved as superseded history.
+Current IQ/frontend/corrector hashes and SMT2/stream8 packages match the scoped
+promotion records. Promotion into the working RTL is complete; no repeat edit,
+cacheability/RR default-on change or new multicore speedup is implied.
+
+Immediate decision order, flexible when evidence changes:
+
+1. **Single-core supply:** measure the warm I-cache request interval before
+   implementing a registered overlap/buffering candidate. Current IDLE/READ
+   service is one window per two cycles; the nine-instruction RVI locality loop
+   takes `9 × 2 × 8192 + 14` cycles. Target interval 2→1, not a promised 2× CPU
+   gain. Preserve hit latency, request/response identity, kills/replay and SMT2;
+   never blindly restore READ-state ready and its old combinational loop.
+2. **Multicore stability:** reproduce held AR/AW owner/ID changes under stalls,
+   one-free-slot AW eligibility, full-target invalidation admission, per-target
+   coalescing and selected-source acknowledgments. The multi-target coalescing
+   case needs N≥3 at the source-excluding hub; L3-source conflicts are L3-enabled
+   prerequisites. Two invalidation-leaf triggers are now reproduced/repaired
+   below; remaining hub/inclusive cases are not fresh end-to-end failures.
+3. **Low-cost area screen:** prove serialized L2 demand occupancy and compare
+   current MSHR depth against 4 and 2. Do not assume depth 1 is a clean parameter
+   choice: public index widths and full-event semantics need separate review.
+4. **Memory service / storage:** compare matched post-predictor cacheability and
+   CPU-visible latency/backpressure, while studying tag-SRAM ports and obtaining
+   approved macros. Do not mix tag conversion with nonblocking control or RR.
+5. **Later growth:** provider/slot completeness and measured SMT overhead precede
+   wider issue, nonblocking L2, scheduler retuning or more prefetch capacity.
+   Keep N=1/T=1, N=1/T=2 and N>1/T=1 objectives separate; preserve the existing
+   dual-active RVI/mixed-C integer gate at every relevant integration.
+
+The E1–E6 rows below remain evidence/work families, not an inflexible sequence.
+No mapped Fmax/area/power or multicore scaling gain is inferred from these targets.
+
+### Effort-ranked priorities (2026-09-16; evidence and work families)
+
+User decision: prioritize the current performance/area opportunities over the
+older feature plan. Make existing capacity useful and cheaper before growing
+capacity. F0–F5 remain qualification gates, not a requirement to execute every
+historical experiment before taking the next bounded improvement.
+
+| Priority | Work and current state | Discriminator / completion condition |
+|---|---|---|
+| E1 — IQ structural order | Circular head retained; reduced-envelope binary induction and all 12 covers now pass, alongside prior leaf/synthesis/SMT2 and BMC evidence | Storage/pointer and CF-target relations are asserted, not assumed. Four-step base plus two-step induction covers the live 4-bank/depth-8, 2-target, 2-hart/2-issue, 32-bit ASIC/non-RVH model. Explicit no-flush full drain and negative controls pass. Broader production-width, parameter, FPGA and RVH proof coverage remains open; raw-opcode throttling is separate. No DUT/scheduler change in this proof pass. |
+| E2 — useful cacheability | Short/larger controls pass; cached scan ROI regresses 35.77%; checked locality shows equal cycles and about one I-cache miss event per loop | Keep cacheability isolated. Validated tracing finds repeated killed wrong-path FAIL-line refills after a persistently mispredicted not-taken check. Response-aligned lookup alone failed to remove steady-state misses (213,012 cycles). The combined response-aligned lookup/absolute-corrector repair is retained after six leaf geometries/negatives, selector proof, SMT2 references, broader stream8 controls and synthesis. Locality improves about 30.77%; unchanged-policy hot-scan improves 4.66%. Corrector costs +99 generic leaf cells, no state growth. Mapped timing/power, full FPGA/provider and release qualification remain open; PH_BHT's separate registered port is unchanged. Validation work can hide short data latency; locality is not a pure latency benchmark. Future latency/backpressure must affect CPU-visible memory, not the island-only timing model. WT admission, production correctness and physical gates remain open; no automatic RR/MSHR/cacheability change. |
+| E3 — production L2 tags | Architecture/macro study; technology inputs blocked | Compare resettable flop tags with a synchronous tag-SRAM organization through the existing memory seam. Resolve lookup, victim probe, install and address-match invalidation arbitration together. Require library/SRAM views, test access and timing constraints before quoting physical savings. Start obtaining these inputs in parallel with E1/E2. |
+| E4 — SMT work efficiency | Deferred until switch-cost evidence | Measure reason/hold counts, discarded/refetched work, switch-to-useful-issue latency and per-hart fairness. The package uses quantum 128 / starve 64; hybrid starve can preempt quantum. Reassess legacy tail/register-specific holds against the repaired restart contract, never remove them solely from a cookie result. |
+| E5 — L2 concurrency or right-sizing | Depth two promoted in SMT2/stream8 after matched production-shaped qualification | The top serializes through response and does not drain merged waiters. Prove live occupancy, then screen depths 4/2 against current depth; depth 1 needs public-width/full-event review. More MSHRs/banks alone do not create MLP. Nonblocking service waits for shared-path correctness and measured latency/occupancy. Do not combine it with tag-SRAM or replacement-policy changes. |
+| E6 — policy/features | Deferred, RR default-off | Representative cacheable hot/conflict/streaming/pointer-chain controls, including losing cases, precede RR promotion. Wider issue, larger predictors, prefetch growth and frequency increases need an observed bottleneck and matched cost evidence. |
+
+Efficiency is checked work per ROI cycle at fixed configuration/frequency,
+with per-hart fairness and matched mapped cost; cookie polling times and
+instruction counts across different encodings are not throughput metrics.
+Preserve the validated runtime header identity and immutable source/ELF inputs.
+Reuse unchanged controls; run narrow leaf/proof screens before one integrated
+candidate gate, rather than repeatedly rebuilding all named packages.
+
+Release requirements are not deleted by reprioritization: natural firmware,
+traps/WFI/wakeup, release/acquire/LR-SC/AMO, production geometry and FP isolation
+remain open. The SMT2 package enables F/D while its FP register file is unbanked;
+a documentation-only FDT closeout node is not a hardware isolation mechanism.
+Physical STA/DFT/P&R/power remains blocked on approved technology inputs.
+
+### Warm-fetch / invalidation follow-up (2026-09-16)
+
+- [x] Analyze the immutable bounded core-0 trace: 24,804 cycles, 12,402 requests/
+  responses/IQ transfers/allocations/retirements; uniform two-cycle request spacing,
+  one-cycle accepted-request response, no misses or mispredictions in that window.
+  Source identity and missing-row/wrong-PC negatives pass. No new full-ROI run.
+- [x] Reproduce mixed-target admission and coalesce/sole-pop loss in the original
+  invalidation leaf. Retain a shared per-target eligibility repair without new
+  state, clock, stage, interface or config. Five N/depth variants and negatives
+  pass; N3/D2 eight-step local formal and both covers pass. Generic cells change
+  1900→1860 (N3/D2), 6528→6623 (N4/D4), with state unchanged. No physical claim.
+- [ ] Complete source-bound remote platform verification: host dry-run selected
+  local executables and all SKIPs; the immutable remote tree lacks build-platform
+  CLI. No default config/tool changes or automated licensing PASS are implied.
+- [x] Reproduce five live-hub failures in `review-hub-before-20260916`: held AR/AW
+  payload, held AR ID after slot release, AW one-slot credit, and accepted-write
+  invalidation loss (3 completed, 2 delivered). Basic response control passes;
+  an observed-data mutation is caught. Hub RTL remains unchanged.
+- [x] Repair held AR/AW owner/slot reservation and phantom read credit. OT4/OT1
+  positive/negative tests and eight-step local formal checks pass; N1 identity
+  is unchanged. Generic N2/OT4 cost: 2760→2808 cells, 326→342 state cells.
+  Invalidation-loss remains a real failing case, not a qualifying negative.
+- [ ] Design lossless invalidation intent/commit and visibility handling. Current `aw_fire`-activated ready cannot
+  be wired into AW grant without a feedback dependency. Preserve separate tests.
+- [ ] Close hub invalidation reservation/retention and inclusive source
+  acknowledgment/eviction handling; extend held-AXI qualification beyond the
+  scoped tests before end-to-end multicore promotion.
+  The one-core SMT2 identity path remains unchanged, not freshly re-run here.
+- [ ] Add cycle-level IQ occupancy/readiness and backend-stall observations before
+  implementing request overlap; absence of a transfer is not an empty/stall label.
+
+Priors/results: `architecture/core-fetch/README.md`, `architecture/multi-core/README.md`,
+`review-fetch-supply-analysis-20260916`, `review-inval-before-20260916`,
+`review-inval-after-20260916`, `review-inval-quality-20260916`.
+
+### Serialized-L2 area candidate (2026-09-16)
+
+- [x] Measure depths16/8/4/2 with fixed 4 KiB/four-way/two-bank/RR0 geometry in
+  (latency,stall-period) profiles (6,0)/(24,3). All phases and timestamped accepted
+  transactions match; totals31108/61659 cycles, peak live MSHR one, 1348 completed
+  allocations. Observer off/on/repeat and eight occupancy mutations are checked.
+- [x] Paired synthesis: 16→2 removes874 sequential cells; generic cells23953→18913
+  in fully mapped512 B/two-way and33647→28840 in 4 KiB/four-way excluding its two
+  unchanged data macros. Metadata is excluded; no physical or whole-core claim.
+- [x] Prove the one-live/slot-zero/no-waiter invariant by two-step binary induction
+  at depths16/2 in a 512 B/two-way fixture; reach live/completion and catch checker
+  mutation. This is not complete data equivalence or all-geometry qualification.
+- [x] Qualify depth2 at 256 KiB/eight-way/four-bank geometry and matched named
+  integrations with current hub/invalidation RTL on both sides. SMT2 preserves all
+  13 records per model; stream8 preserves ten positives plus its expected negative
+  per model, including ROI cycles and retirement traces. Current package fields
+  now select depth2 and match tested candidate hashes exactly; other defaults,
+  generic MSHR capability, cache policy and scheduling remain unchanged.
+- [ ] Keep full platform/physical/ISA/FP/coherence qualification open. The matched
+  sizing pass does not resolve the hub's remaining invalidation-retention failure.
+
+Evidence: `architecture/l2-l3-cache/README.md`, `review-l2-size-20260916`,
+`review-l2-size-assessment-20260916`, `review-l2-occupancy-v2-20260916`.
+The initial measurement pass made no production change. The subsequent qualified
+package promotion is recorded in `review-l2-size-integrations-20260916` and
+`review-l2-integration-evidence-20260916`; no new throughput gain is claimed.
+
+### Broad RTL review follow-up (2026-09-16)
+
+- [x] Repair OoO IQ false wakeup, dispatch/WB coincidence and exact-group capacity;
+  independent queue tests and watched-readiness induction qualify the leaf.
+  Generic IQ fixtures reduce13,866→13,074 and60,370→53,260 cells, not whole-core area.
+- [x] Repair matching-full MSHR admission and concurrent waiter retention/order;
+  D2/4/8 controls and ten-step symbolic checks pass. State unchanged; standalone
+  logic grows125/100 cells in the measured D4/D8 fixtures.
+- [x] Mask inclusive ready by actual per-core source selection; source seam plus
+  real inclusive leaf controls and formal pass. Eviction retention remains open.
+- [x] Correct the latent TAGE decay period; prediction-output equivalence passes.
+  Usefulness remains inactive in the top; do not claim accuracy or physical-state savings.
+- [x] Fresh four-file-overlay SMT2/stream8 models match all24 frozen depth-two
+  records, including timing and operand/retirement identity. No OoO/L3 enable.
+- [ ] Resolve reproduced live OoO store self-block (ALU control passes) together
+  with LSQ/LSU age, byte coverage, result forwarding and commit identity.
+- [ ] Reproduce and close rename admission feedback, branch-correlated recovery,
+  committed-map preservation, hart/FP ownership and wide-commit counting contracts.
+- [ ] Reconcile predictor per-slot PC / fetch-vs-resolve history / checkpoint
+  ownership before policy growth; retain precise source-vs-measurement distinctions.
+- [ ] Close cacheable refill-error handling, eviction retention and hub write
+  visibility before real nonblocking/inclusive traffic scaling.
+
+Reviewed paths, measurements and artifact tags: `architecture/remaining-upgrade-sequence.md`.
+Full OoO production wording is superseded by explicit qualification blockers.
+
+### IQ proof follow-up (2026-09-16)
+
+- [x] Preserve all original safety assertions/input assumptions and add asserted
+  bank status/pointer, watched-storage and live-CF/target-FIFO relations.
+- [x] Close binary-state unbounded safety in the reduced FW64/RVC, four depth-eight
+  banks, two-entry target FIFO, two-hart/two-issue, XLEN/VLEN/GPLEN32 ASIC envelope:
+  explicit four-frame base and two-step induction pass in
+  `review-iq-sat-binary-20260916`. The copied instruction-bit fault is detected.
+- [x] Reach all 12 cover predicates within 28 steps, with an unreachable negative.
+  The added no-flush drain witness is full at step 11 and empty at step 27 with
+  no intervening flush. The old full-to-empty predicate could use a flush.
+- [x] Preserve historical BMC/timeout records and the user's timeout/hash/incremental
+  runner controls. Add explicit, guarded SAT modes; do not label the default
+  SBY PDR/SMT timeouts as passes. Binary proof does not qualify X-propagation.
+- [ ] Extend IQ proof qualification to production-width/parameter tuples, FPGA
+  storage and hypervisor metadata; full SMT/ISA/physical gates remain separate.
+
+### Predictor follow-up qualification (2026-09-16)
+
+- [x] Retain response-aligned asynchronous BHT/BTB selector paths and absolute
+  corrector semantics after six independent leaf geometries/negative controls,
+  symbolic selector proof/negative, thirteen SMT2 execution records, broader
+  stream8 controls and full-core synthesis smoke. FPGA selector phase, state
+  capacity, cacheability, RR and ISA/DTS are unchanged; PH_BHT's separate
+  registered port is outside this repair.
+- [x] Verify retained non-comment source against the tested model and rerun
+  corrector tests. Minimal 32/64-bit, SMT2 and stream8 lint/strict elaboration pass.
+  Corrector leaf costs 99 additional generic cells (192 state bits unchanged).
+  Locality improves about 30.77%; unchanged-policy hot-scan improves 4.66%.
+- [ ] Complete mapped timing/power with approved physical inputs; extend remaining
+  provider/FPGA, natural-firmware, ISA/FP/ordering and IQ proof qualification.
+  No release-sign-off claim follows from the scoped predictor checks.
+
+### Runtime reasoning methodology (2026-09-16)
+
+- [x] Draft `AGENTS-rt-learning-philosophy-AGI.md` from the coding philosophy and
+  actual reasoning-workflow/heuristics/logics sources. It defines evidence-bounded
+  analysis segments, refutable pattern memory and preliminary capability evaluation;
+  it is not an implemented learner or an AGI claim.
+- [x] Add the requested preliminary mechanism-analysis instruction to
+  `AGENTS-coding-philosophy.md` §2.10: scope, interface/ownership/lifetime contracts,
+  facts versus hypotheses, competing predictions, rejection conditions and the
+  earliest faithful check before choosing an implementation direction.
 
 ### Flattened completion gates (2026-09-15 review; supersedes experiment ordering below)
 

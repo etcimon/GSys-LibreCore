@@ -404,8 +404,51 @@ module tb_g6lc_l2;
     end
   end
 
-  // ---- per-phase counters ---------------------------------------------------
   longint unsigned cyc_q = 0;
+  integer size_fd = 0;
+  initial if ($test$plusargs("mshr-trace")) begin
+    size_fd = $fopen("ports.log", "w");
+    if (!size_fd) $fatal(1, "L2SIZE_TRACE_OPEN");
+  end
+  always @(posedge clk) if (rst_n && size_fd) begin
+    if (slv_req.ar_valid && slv_resp.ar_ready) $fdisplay(size_fd, "%0d sar %h", cyc_q, slv_req.ar);
+    if (slv_req.aw_valid && slv_resp.aw_ready) $fdisplay(size_fd, "%0d saw %h", cyc_q, slv_req.aw);
+    if (slv_req.w_valid && slv_resp.w_ready) $fdisplay(size_fd, "%0d sw %h", cyc_q, slv_req.w);
+    if (slv_resp.r_valid && slv_req.r_ready) $fdisplay(size_fd, "%0d sr %h", cyc_q, slv_resp.r);
+    if (slv_resp.b_valid && slv_req.b_ready) $fdisplay(size_fd, "%0d sb %h", cyc_q, slv_resp.b);
+    if (mst_req.ar_valid && driven_resp.ar_ready) $fdisplay(size_fd, "%0d mar %h", cyc_q, mst_req.ar);
+    if (mst_req.aw_valid && driven_resp.aw_ready) $fdisplay(size_fd, "%0d maw %h", cyc_q, mst_req.aw);
+    if (mst_req.w_valid && driven_resp.w_ready) $fdisplay(size_fd, "%0d mw %h", cyc_q, mst_req.w);
+    if (driven_resp.r_valid && mst_req.r_ready) $fdisplay(size_fd, "%0d mr %h", cyc_q, driven_resp.r);
+    if (driven_resp.b_valid && mst_req.b_ready) $fdisplay(size_fd, "%0d mb %h", cyc_q, driven_resp.b);
+  end
+  final if (size_fd) $fclose(size_fd);
+
+  int unsigned size_live = 0, size_peak = 0, size_allocations = 0, size_completions = 0;
+  always @(posedge clk) begin
+    if (!rst_n) size_live = 0;
+    else if ($test$plusargs("mshr-observe")) begin
+      int unsigned observed;
+      observed = int'(dut.gen_l2.i_mshr.count_o);
+      if ($test$plusargs("mshr-negative") && observed != 0) observed++;
+      if (observed != size_live || observed > 1)
+        $fatal(1, "L2SIZE_OCCUPANCY observed=%0d expected=%0d", observed, size_live);
+      if (size_live > size_peak) size_peak = size_live;
+      if (dut.gen_l2.mshr_alloc) begin
+        if (!dut.gen_l2.mshr_ready || dut.gen_l2.mshr_merged || size_live != 0 || dut.gen_l2.mshr_complete)
+          $fatal(1, "L2SIZE_ALLOCATION");
+        size_live++;
+        size_allocations++;
+      end
+      if (dut.gen_l2.mshr_complete) begin
+        if (size_live != 1) $fatal(1, "L2SIZE_COMPLETION");
+        size_live--;
+        size_completions++;
+      end
+    end
+  end
+
+  // ---- per-phase counters ---------------------------------------------------
   int unsigned cnt_hit, cnt_miss, cnt_evict, cnt_bypass, cnt_mshr_full, cnt_bankconf;
   int unsigned ph_hit, ph_miss, ph_evict, ph_bypass, ph_mshr, ph_bank;
   longint unsigned ph_cycles;
@@ -1129,6 +1172,12 @@ module tb_g6lc_l2;
 
     if ($test$plusargs("amo-arith")) amo_arith();
 
+    if ($test$plusargs("mshr-observe")) begin
+      if (size_live != 0 || size_peak != 1 || size_allocations == 0 || size_allocations != size_completions)
+        $fatal(1, "L2SIZE_EMPTY_OR_INCOMPLETE");
+      $display("[L2SIZE] peak=%0d allocated=%0d completed=%0d", size_peak, size_allocations, size_completions);
+    end
+
     // ---- verdict ------------------------------------------------------------
     $display("[L2TB] totals reads=%0d writes=%0d hits=%0d misses=%0d evictions=%0d bypass=%0d mshr_full=%0d bank_conf=%0d cycles=%0d",
              total_reads, total_writes, cnt_hit, cnt_miss, cnt_evict,
@@ -1184,7 +1233,9 @@ module g6lc_l2_fixture
   parameter int unsigned BYTE_SIZE = 4096,
   parameter int unsigned SET_ASSOC = 4,
   parameter int unsigned RR_EN = 0,
-  parameter int unsigned EQ_NEGATIVE = 0
+  parameter int unsigned EQ_NEGATIVE = 0,
+  parameter int unsigned MSHR_DEPTH = 4,
+  parameter int unsigned DATA_BANKS = 2
 )(
   input logic clk_i, rst_ni,
   input req_t slv_req_i,
@@ -1201,7 +1252,7 @@ module g6lc_l2_fixture
   assign hit_o = EQ_NEGATIVE != 0 ? !actual_hit : actual_hit;
   g6lc_l2_top #(
     .BYTE_SIZE(BYTE_SIZE), .SET_ASSOC(SET_ASSOC), .LINE_WIDTH(512),
-    .MSHR_DEPTH(4), .DATA_BANKS(2),
+    .MSHR_DEPTH(MSHR_DEPTH), .DATA_BANKS(DATA_BANKS),
 `ifndef L2TB_LEGACY
     .RR_EN(bit'(RR_EN)),
 `endif

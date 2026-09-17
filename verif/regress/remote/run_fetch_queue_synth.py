@@ -25,6 +25,10 @@ def main():
     bench = (source/'tb_g6lc_fetch_queue.sv').read_text()
     declarations = bench.split('  logic clk =',1)[0].split('module tb_g6lc_fetch_queue;\n',1)[1]
     instance = bench.split('  instr_queue #',1)[1].split('\n  );',1)[0]
+    instance = instance.replace('.leftover_complete_i(leftover)', '.leftover_complete_i(1\'b0)')
+    instance = instance.replace('.exception_i(exception)', '.exception_i(FE_NONE)')
+    instance = instance.replace('.exception_addr_i(exception_addr)', '.exception_addr_i(addr[0])')
+    instance = instance.replace('.predict_address_i(prediction)', '.predict_address_i(64\'h80000200)')
     wrapper = '''module g6lc_fetch_queue_synth (
   input logic clk, rst_n, flush,
   input logic hart,

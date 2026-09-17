@@ -91,6 +91,34 @@ as separate lanes. `L2TB_MODE=units` (proxy
 conflict on the leaves; serialized-top zero counts remain not passes.
 See the cache architecture record for exact proof scope and hashes.
 
+### Invalidation admission follow-up (2026-09-16)
+
+The live invalidation leaf now accepts only when every target has room or a
+retainable matching tail. A sole entry being popped cannot absorb a new command;
+admission and update share that predicate. Five N/depth combinations, negative
+controls and local eight-step formal checks pass through `run_inval_review.py`.
+See `architecture/multi-core/README.md` for exact scope and generic-cell costs.
+No state, reset, clock, DTS or PMU selector changes; the consumer-ready eligibility
+cone still needs physical timing qualification. Held AR/AW owner/ID reservation and phantom read credit are subsequently repaired
+with scoped directed/formal checks. Producer invalidation retention/visibility,
+inclusive-source acknowledgment and source-bound full-platform verification
+remain open. A passing leaf is not full multicore coherence or a fresh SMT2 pass.
+
+### Serialized MSHR sizing (2026-09-16)
+
+The existing leaf now has opt-in MSHR occupancy/port tracing and a parameterized
+static fixture. `run_l2_size_review.py` compares depths16/8/4/2 with matched cache,
+policy and service: all checked cycles/traffic are identical. Depth2 removes874
+sequential cells versus16 in both measured fixtures, with21.04%/14.29% generic
+cell reductions at their stated small/full-map versus data-macro-excluded scope.
+Two-step occupancy induction supports the single-live observation, not full data
+or production-geometry equivalence. Subsequent real 256 KiB/eight-way/four-bank checks and matched SMT2/stream8
+integrations pass without cycle/trace changes. Those two packages now explicitly
+select depth 2; generic inference and other packages remain unchanged. Production-
+shaped incremental area is recorded separately with fixed tag/data storage excluded.
+Keep the generic MSHR capability intact and coherence/physical/platform gates open.
+See `architecture/l2-l3-cache/README.md` for exact counts and open promotion gates.
+
 ## 5. Feature-addition playbook
 Choose the route by `NOCType`. For an AXI L2, add the L2 module (a separate IP) in `corev_apu/`,
 wire it between the core AXI master and the memory `corev_apu/axi_mem_if/`, and preserve

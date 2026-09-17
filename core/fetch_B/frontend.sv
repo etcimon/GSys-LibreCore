@@ -1024,11 +1024,11 @@ module frontend
     );
   end
 
-  // For FPGA the BTB/BHT are read-synchronous BRAM, for ASIC D flip-flops which
-  // can be read in the same cycle.
-  assign vpc_btb = CVA6Cfg.FpgaEn ? icache_dreq_i.vaddr : icache_vaddr_q;
-  assign vpc_bht = (CVA6Cfg.FpgaEn && CVA6Cfg.FpgaAlteraEn && icache_dreq_i.valid)
-                   ? icache_dreq_i.vaddr : icache_vaddr_q;
+  // FPGA BTB/BHT retain their BRAM lookup phase; ASIC predictors follow the
+  // response being realigned, including loop-buffer injection.
+  assign vpc_btb = CVA6Cfg.FpgaEn ? icache_dreq_i.vaddr : realigner_vaddr;
+  assign vpc_bht = !CVA6Cfg.FpgaEn ? realigner_vaddr :
+      (CVA6Cfg.FpgaAlteraEn && icache_dreq_i.valid) ? icache_dreq_i.vaddr : icache_vaddr_q;
 
   // classic BTB, unless the ITTAGE fabric owns the indirect prediction
   if (CVA6Cfg.BTBEntries == 0

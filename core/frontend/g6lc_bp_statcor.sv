@@ -4,8 +4,8 @@
 // Versions of this file released before 2026-08-05 were additionally available
 // under Apache-2.0 WITH SHL-2.1; that grant is irrevocable for those versions.
 //
-// U1 statistical corrector (lite): a small PC-indexed confidence table that can
-// invert a weak TAGE/base prediction. Trained on resolve.
+// U1 statistical corrector (lite): a small PC-indexed outcome table that can
+// override a valid TAGE/base prediction at strong confidence. Trained on resolve.
 
 module g6lc_bp_statcor
   import ariane_pkg::*;
@@ -26,7 +26,7 @@ module g6lc_bp_statcor
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
 
-  // Signed-ish 3-bit weight: MSB means "invert"
+  // Unsigned 3-bit taken-outcome counter; reset is neutral.
   logic [NR_ENTRIES-1:0][2:0] w_d, w_q;
   logic [IDX_W-1:0] idx, uidx;
 
@@ -36,9 +36,11 @@ module g6lc_bp_statcor
   for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_sc
     always_comb begin
       pred_o[i] = pred_i[i];
-      // Invert when weight is strongly negative (ctr < 2) and pred valid
+      // Strong absolute bias overrides direction only for valid predictions.
       if (pred_i[i].valid && w_q[idx] < 3'b010) begin
-        pred_o[i].taken = ~pred_i[i].taken;
+        pred_o[i].taken = 1'b0;
+      end else if (pred_i[i].valid && w_q[idx] > 3'b101) begin
+        pred_o[i].taken = 1'b1;
       end
     end
   end

@@ -4,9 +4,9 @@
 // U6.2 invalidation fan-out bus for 1..CVA6_MAX_CORES.
 //
 // Contention optimisations:
-//   * Per-core shallow FIFO (CohInvalDepth) — producer never blocks on one slow core
+//   * Per-core shallow FIFO (CohInvalDepth) — absorbs temporary consumer backpressure
 //   * Source-excluded delivery (writer does not self-invalidate for WT store)
-//   * RR drain across cores when multiple invs pending
+//   * Independent per-core drain preserves target order
 //   * Line-coalesce: back-to-back same-line inv to same core merges
 //   * NR_CORES==1: identity (accept and drop; no fan-out)
 
@@ -50,24 +50,28 @@ module g6lc_inval_bus
     logic [NC-1:0] full, empty;
     logic          can_accept;
     logic          coalesce;
+    logic [NC-1:0] merge_tail;
 
     for (genvar c = 0; c < NC; c++) begin : gen_status
       assign full[c]  = (count_q[c] == DP[PTR_W:0]);
       assign empty[c] = (count_q[c] == '0);
     end
 
-    // Accept if every targeted non-empty-needed slot has room OR coalesce
+    // Accept only if every target has room or a retainable matching tail
     always_comb begin
       can_accept = 1'b1;
       coalesce   = 1'b0;
+      merge_tail = '0;
       if (inv_req_i.valid) begin
         for (int unsigned c = 0; c < NC; c++) begin
           if (inv_target_i[c]) begin
-            // Coalesce with tail if same line
+            // A departing sole entry cannot retain a new obligation
             if (!empty[c] &&
                 fifo_q[c][(tail_q[c] == 0) ? PTR_W'(DP-1) : PTR_W'(int'(tail_q[c])-1)].line_addr
                   == inv_req_i.line_addr &&
-                fifo_q[c][(tail_q[c] == 0) ? PTR_W'(DP-1) : PTR_W'(int'(tail_q[c])-1)].valid) begin
+                fifo_q[c][(tail_q[c] == 0) ? PTR_W'(DP-1) : PTR_W'(int'(tail_q[c])-1)].valid &&
+                !(count_q[c] == 1 && inv_core_ready_i[c])) begin
+              merge_tail[c] = 1'b1;
               coalesce = 1'b1;
             end else if (full[c]) begin
               can_accept = 1'b0;
@@ -77,7 +81,7 @@ module g6lc_inval_bus
       end
     end
 
-    assign inv_ready_o    = can_accept | coalesce;
+    assign inv_ready_o    = can_accept;
     assign inv_drop_o     = inv_req_i.valid & ~inv_ready_o;
     assign inv_coalesce_o = inv_req_i.valid & coalesce & can_accept;
 
@@ -99,8 +103,7 @@ module g6lc_inval_bus
           tail_m1 = (tail_q[c] == 0) ? PTR_W'(DP - 1) : PTR_W'(int'(tail_q[c]) - 1);
 
           if (inv_req_i.valid && inv_ready_o && inv_target_i[c]) begin
-            if (!empty[c] && fifo_q[c][tail_m1].valid &&
-                fifo_q[c][tail_m1].line_addr == inv_req_i.line_addr) begin
+            if (merge_tail[c]) begin
               // Coalesce: OR flags into tail entry
               fifo_q[c][tail_m1].dcache  <= fifo_q[c][tail_m1].dcache | inv_req_i.dcache;
               fifo_q[c][tail_m1].icache  <= fifo_q[c][tail_m1].icache | inv_req_i.icache;

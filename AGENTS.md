@@ -179,6 +179,10 @@ the review & validation checklist in the PR.
   integration.
 - **Evolution**: exceptions to the philosophy are allowed only with senior review and are recorded in
   this file or in `AGENTS-coding-philosophy.md` if they become patterns.
+- **Runtime reflection (preliminary)**: `AGENTS-rt-learning-philosophy-AGI.md` extends the reasoning
+  guides with evidence-bounded analysis segments, conditional pattern transfer and versioned memory.
+  It is not an implemented learner or an AGI claim, and never overrides authorization, specifications,
+  privacy or verification gates.
 - **Uncore counterpart**: for changes to the SoC-integration layer (`corev_apu/**`, board wrappers,
   vendored controllers/PHY), `AGENTS-corev-apu.md` carries the SystemVerilog **preconditions** (AXI
   seam, clock/reset/CDC, PHY-vs-controller separation, DFT, flist/DTS), and `AGENTS-vendor.md` +
@@ -274,6 +278,55 @@ was deliberately left unchanged. Use a validated corrected runtime identity
 for model revalidation; generated C++ rebuilds need VPATH in the environment,
 not a command-line override that suppresses Make's runtime include search.
 
+**IQ review execution (2026-09-16):** proxy `py` calls could not find Verilator
+or SBY on the remote login PATH. For this host, explicitly supplying the managed
+`/opt/testharness/toolchains/verilator-v5.008/bin` and
+`/opt/testharness/toolchains/formal/bin` prefixes through `--env PATH=...`
+restored the leaf/formal commands without installing tools. Use fresh run tags
+rather than overwriting failed source/output directories. `run_fetch_queue.py`
+now builds generated models against the pinned private runtime and checks actual
+compiler dependencies; `run_restart_review.py` with `REVIEW_IQ_RING=1` is the
+scoped SMT2 circular-IQ integration recipe. Results and remaining proof limits
+are in `architecture/core-fetch/README.md`.
+
+The IQ order proof has explicit binary SAT routes in `run_fetch_formal.py`:
+select `REVIEW_FORMAL_TASK=g6lc_fetch_iq_order` with a 600-second budget;
+`REVIEW_FORMAL_MODES=prove` + `REVIEW_FORMAL_SAT_PROVE=1` runs base/induction
+(`REVIEW_FORMAL_NEGATIVE=1` injects a copied-output bit fault), while mode `cover`
++ `REVIEW_FORMAL_SAT_COVER=1` checks all cover goals. Default mode order and
+120..600 timeout limits are unchanged. The validated scope is FW64/RVC, four
+8-entry banks, two target entries, two harts/issues and 32-bit ASIC/non-RVH
+metadata; do not silently extend it or substitute a standard SBY timeout for
+this route's result. Generated scripts, input hashes and witnesses identify it.
+
+**L2 sizing qualification (2026-09-16):** `g6lc64_smt2` and `g6lc64_stream8`
+now explicitly select two L2 MSHRs after production-shaped leaf and matched
+full-model checks. `run_l2_size_review.py` has production geometry, occupancy,
+area-reuse and integration modes. Integration imports the existing restart/work
+runners, uses immutable older source baselines plus explicit current RTL pins,
+and verifies actual elaborated geometry. Do not rebase its pinned baseline on
+already-promoted package values or rerun workloads merely to collect artifacts;
+`REVIEW_L2_CAPTURE_INTEGRATION` retrieves completed child evidence. See the L2
+architecture record for exact scope, hashes and open full-platform/physical gates.
+
+**Broad RTL review (2026-09-16):** use `architecture/remaining-upgrade-sequence.md`
+for the current source-path/qualification map. OoO is live behind its gate but
+has a reproduced store-issue self-block; do not reuse older production wording as
+proof of full integration. `run_rtl_audit_review.py`, `run_rtl_audit_quality.py`
+and `run_rtl_audit_integrations.py` preserve separate leaf, proof, area and frozen-
+baseline identity gates. IQ proof witnesses use explicit stable input signals;
+inspect the lowered model before trusting symbolic-attribute intent. Internal
+state intentionally changed by a repair is not an output-equivalence obligation.
+
+**Credential-source preference (2026-09-16):** the user requests
+`build-platform/.remote-ssh-creds`. Use the existing build-platform `remote`
+gateway, which reads that cache and supplies credentials to the proxy without
+putting them on the command line. For raw proxy arguments use, for example,
+`bun build-platform/src/cli/index.ts remote py -- <script> --tag <fresh-tag> ...`.
+Do not display or copy credential values into logs or repository records. A direct
+proxy invocation may prefer another configured passphrase source, so it is not
+the equivalent route when this specific cache is requested.
+
 ---
 
 ## 1. Why this substructure exists (reasoning)
@@ -305,6 +358,7 @@ subchapter at a time without rewriting a monolith.
 |---|---|
 | `AGENTS.md` (this file) | Main guider: reasoning, navigation, dev patterns, spec-to-code master map, `.dts` linkage. |
 | `AGENTS-coding-philosophy.md` | **Standing governance** (co-equal w/ licensing + spec-status + todo upkeep): coding philosophy, timing-analysis practices, review checklist, and trade-off documentation for all code changes. |
+| `AGENTS-rt-learning-philosophy-AGI.md` | **Preliminary methodology**: trace-grounded reflection, refutable patterns, analysis-segment memory and bounded capability improvement; not an implemented learner or new authority. |
 | `AGENTS-configuration.md` | **Standing governance** (co-equal w/ coding-philosophy + licensing): target SoC context (frequency, voltage, power, process, memory, software, DFT) that every code change must respect. |
 | `AGENTS-licensing.md` | **Standing governance** (co-equal w/ coding-philosophy + spec-status + todo upkeep): license/attribution policy for **code only**, driven by `.active-contributor` + `.licensing-policy` (see section 0.4). |
 | `AGENTS-specs-to-impl.md` | **Standing traceability** (§0.6): RISC-V spec ⇄ CVA6 RTL map; updated on every ISA-visible `.sv` change. |

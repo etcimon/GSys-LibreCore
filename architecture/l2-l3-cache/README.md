@@ -32,8 +32,9 @@ Detail: [`../uncore/dram-channel-scaling.md`](../uncore/dram-channel-scaling.md)
 
 ## Completion plan after methodology review (2026-09-15)
 
-The active work is the flattened F0–F5 plan in `../../AGENTS-todo.md`, not
-another sequence of policy features. Preserve the RR metadata SRAM and existing
+The active implementation order is the 2026-09-16 E1–E6 efficiency review in
+`../../AGENTS-todo.md`; F0–F5 are retained as qualification gates, not another
+sequence of policy features. Preserve the RR metadata SRAM and existing
 AXI/SRAM interfaces; fix instruction-supply correctness in its owning RTL
 before measuring policy benefits. Prefer fewer ranking/mux/state costs where
 an accepted-stream invariant can replace recovery heuristics. Do not change
@@ -54,6 +55,470 @@ and critical path. Include workloads where RR loses. Generic synthesis and
 structural timing are screening only; macro area/MBIST, STA and power remain
 physical gates. Production-geometry blackbox equivalence is a controller/port
 result, not a full-memory proof.
+
+## Efficiency-first next discriminators (2026-09-16)
+
+**Cacheability precedes replacement policy.** There are two distinct paths:
+`g6lc64_stream8` uses HPDCACHE_WT, whose load adapter ORs executable-region
+membership into uncacheability; that package's execute window covers its
+cached DRAM window. `g6lc64_smt2` uses WT, whose `axi_shim` supplies
+`CACHE_MODIFIABLE` without allocation bits, while `l2_is_cacheable` requires
+an allocation bit. Zero L2 policy sensitivity does not establish that either
+hierarchy is optimally used. This is not a claim that WT L1 itself is uncached.
+
+The first HPDCACHE experiment is now complete: a byte-identical A/B of the
+existing `mini_hpd_2jr.S` on the current fetch and corrected runtime, with only
+the execute-region load exemption removed in an isolated diagnostic source copy.
+Keep production regions, workload bytes, geometry and RR policy fixed.
+`mini_hpd_2jr_data.S`, `_pad.S` and `_fencei.S` are controls, not interchangeable
+ELFs or proof that only layout changes between their sources. Confirm the
+actual linked instruction/table placement. Log accepted loads, physical
+addresses/PMA, grants/aborts, response IDs/data and retirement around the second
+indirect dispatch. A repeated failure must identify the first broken boundary;
+a PASS must also demonstrate real cacheable allocation/hit activity before it
+can retire the old workaround. Natural firmware, cacheable stores/fences,
+MMIO/exclusive bypass and concurrent invalidation remain follow-up gates.
+Historical SIGSEGV-based negatives do not prove RTL failure on the corrected
+runtime. Do not repeat register/opcode-specific fetch cuts from the S4 ledger.
+
+The WT path needs its own attribute contract before any edit: classify accepted
+L1 refills, uncached accesses, writes and exclusive/ATOP operations, then relate
+their AXI attributes to L2 tag admission. Do not globally mark WT traffic as
+allocating or relax `l2_is_cacheable`; either can pull MMIO/ROM/exclusive traffic
+into a line-fill path. Changing only RR is not a discriminator for this path.
+
+### Executable-data witness result (2026-09-16)
+
+`review-cacheability-pair-20260916` builds fresh stream8 observer-capable models
+from the validated circular-IQ snapshot. Baseline `2c222402…` retains the
+execute-region load exemption; candidate `b970be74…` uses cached-region PMA only.
+Configuration, IQ, typed observer and cache observer hashes match, with the
+private runtime `dfbc2c4a…` verified in compiler dependencies. The candidate
+adapter exists only in the isolated run tree; production RTL/regions/AXI/RR
+remain unchanged. All eighteen records pass: original witness off/on/on plus
+three controls off/on under each policy. Repeated traces and observer off/on
+retirement/cookie fingerprints match within each model. The common 10,240-cycle
+cookie poll is not a performance measurement.
+
+The linked original witness retains `lw` at `0x80000090`, indirect dispatch at
+`0x80000094`, table at `0x800000a8`, and targets `0x80000096` / `0x8000009e`.
+The table words are -18 / -10 relative to the table base. Raw cache and typed
+operand traces show:
+
+| Boundary | Execute-uncached baseline | Cached-PMA-only candidate |
+|---|---|---|
+| First table read | Uncached request for `0x800000a8`, no D-cache installation | Cacheable fill for line `0x800000a0`, installed at t=447 |
+| Second table read | Request t=495, response t=500; `uc=1`, `hit=0` | Request t=521, response t=522; `uc=0`, `hit=1` |
+| Architectural value/target | Sign-extended -10, target `0x8000009e`, expected result 3 | Same checked value/target/result |
+| PASS store request | t=555 | t=573 |
+
+This shows real cache use and no recurrence of the historical jump-table hang
+in the checked envelope, not merely cookie agreement. It does not identify
+which intervening fix removed the old symptom. The warm load is faster, but
+the first phase/stack cold reads take longer and the candidate PASS-store
+boundary is later. No aggregate speedup or production exemption-removal decision
+follows; a complete per-cycle cost attribution is still open. The larger controls below reuse
+these models and existing byte-identical checked-work/hot-scan ELFs without a
+new model build, observer enablement or RR change.
+
+`run_checked_work_review.py` with `REVIEW_CACHEABILITY=1` creates the pair and
+observation-only cache wrapper. `REVIEW_CACHEABILITY_WORK=1` reuses the pair for
+the larger controls, reporting stable PMU samples with source/model/ELF hashes.
+The original typed reference checker is not claimed to cover all compressed
+load/store and CSR instructions in these minis; the table-value/target checks
+above are scoped trace review against the linked symbols and instruction bytes.
+Natural firmware, store/fence/error/invalidation/atomic qualification and the
+separate WT attribute contract remain open. Artifacts are on the approved C:
+path, with remote source trees and raw traces retained.
+
+### Larger cacheability controls and priority correction (2026-09-16)
+
+`review-cacheability-work-20260916` reuses the exact pair above. Two serial
+trials of each model/workload give eight PASS records, with matching per-case
+retirement, cookie and reported-counter fingerprints. Source/ELF/model/runtime
+hashes are rechecked; no model is rebuilt. Checked-work ELF `57c9e51f…` passes
+at cookie polls 167,936 / 174,080 (baseline/candidate), not precise completion
+latencies. Hot-scan ELF `69ef15f4…` also passes; its stable reported deltas are:
+
+| Warm+scan report | Execute-uncached | Cached-PMA-only |
+|---|---:|---:|
+| Cycles | 275,593 | 374,177 |
+| L2 miss events | 4 | 18,788 |
+| L1D miss events | 0 | 19,370 |
+| Load events | 20,483 | 20,483 |
+| Store events | 7 | 7 |
+| Data-request events | 20,492 | 20,524 |
+| I-cache miss events | 17 | 79 |
+
+These deltas include cache warm-up and scan/report boundaries but exclude the
+initial data fill. Final repeated host samples agree; the total sample counts
+also include pre-report zeros and are not counts of independent measurements.
+Do not sum duplicated shared-cache counters across cores or interpret request
+level events as distinct accepted memory transactions.
+
+**Decision:** the candidate uses 98,584 more ROI cycles (+35.77%) in this
+workload. Restoring cache use is a functional/workaround-retirement candidate,
+not an established performance improvement. Keep it isolated and retain RR=0.
+The jump-table warm hit is genuinely faster, but that does not predict the
+streaming/conflict workload's aggregate result. The I-cache event increase also
+means the entire delta must not be assigned to D-cache replacement alone.
+
+Next high-information work: compare a repeated cache-resident working set with
+the existing conflict/scan control, then measure accepted refill service and
+I/D arbitration under stated memory latency/backpressure. Use one fixed baseline
+and vary one dimension per experiment. The serialized L2 controller and cheap
+uncached returns in the short trace are grounded mechanisms to investigate,
+not a completed causal decomposition of these ROI cycles. Do not grow MSHRs,
+change RR, weaken execute-region permissions or claim DRAM/physical performance
+to obtain a favorable number. Store/fence/invalidation/error/atomic and natural
+firmware gates still precede production removal of the exemption.
+
+### Reassessment: memory efficiency and multicore prerequisites (2026-09-16)
+
+The retained IQ/predictor gains do not authorize a cacheability or RR default
+change. Next comparisons must use a matched post-predictor baseline and state
+whether imposed CPU-visible delay affects command acceptance, first response or
+each beat. The island-only timing flag is not a CPU DRAM-latency experiment.
+
+Before increasing multicore traffic, reproduce the shared-path source scenarios:
+held AR/AW payload/ID changes when arbitration or free-slot selection changes,
+AW eligibility with one free slot and no competing AR, accepted writes without
+invalidation credit, coalescing for one target while another is full, and
+acknowledgment of an unselected inclusive source. The multiple-target hub case
+needs N≥3; inclusive conflicts require the L3-enabled path. Two invalidation-leaf
+cases are now reproduced and repaired (`architecture/multi-core/README.md`).
+Five isolated hub failures are subsequently reproduced in `review-hub-before-20260916`
+(held AR/AW, held ID, one-slot AW credit and accepted-write notification loss).
+The held-address/ID and phantom-credit cases are subsequently repaired with
+owner/slot reservations (`review-hub-reservations-20260916`); accepted-write
+notification loss remains open. These are not end-to-end failures reproduced in
+the passing SMT2/stream8 controls; inclusive-source tests and integration
+qualification remain separate. A finite invalidation
+queue cannot make coherence best effort.
+
+A cheaper serial-L2 control screen can precede nonblocking design: prove maximum
+live demand occupancy, then compare current MSHR depth with 4 and 2 at unchanged
+latency, geometry and interfaces. Depth 1 is not assumed safe: public MSHR ports
+use `$clog2(DEPTH)-1:0`, and a one-entry table changes full-event behavior. Before
+merging/concurrency, also check merge-full admission and bind saved request IDs,
+not a live AR bus sampled after acceptance.
+
+For the 256 KiB/eight-way/64-byte/64-bit-address case, tag storage represents
+200,704 tag bits plus 4,096 validity bits. Study SRAM payload plus controlled
+validity initialization at the existing memory boundary; no physical savings
+are inferred from the bit count. A one-cycle SRAM read may fit accepted-AR/S_TAG
+scheduling, but lookup/probe/install/invalidation ports and producer backpressure
+must be solved together. Current unconditional back-invalidation readiness cannot
+be silently replaced by a stall. Do not combine this conversion, concurrency and
+replacement policy in one experiment. Detailed ordering is in `AGENTS-todo.md`.
+
+### Serialized-MSHR sizing measurements (2026-09-16)
+
+`review-l2-size-20260916` compares depths 16/8/4/2 at fixed 4 KiB, four ways,
+two data banks, 64-byte lines, RR off and the same existing independent leaf
+reference. Memory-service profiles are first-beat delay 6 with no periodic stall,
+and delay 24 with a 1-in-3 beat stall. No production RTL/config is changed.
+
+Across all depths, every phase and the complete timestamped accepted-transaction
+trace match byte-for-byte within each service profile. Each profile completes
+1,516 reads, 95 writes, 143 hits, 1,348 misses and 1,243 evictions, with peak live
+MSHR occupancy one and 1,348 allocations/completions. Total cycles are **31,108**
+and **61,659** respectively, independent of depth. This is no measured speedup
+and no measured slowdown. Observer off/on/repeat agree; all eight occupancy
+mutations are detected (24 positive and eight negative runs).
+
+| MSHR depth | 512 B / two-way fully mapped generic cells | Sequential cells | 4 KiB / four-way logic with fixed data macros excluded | Sequential cells outside data macros |
+|---|---:|---:|---:|---:|
+| 16 | 23,953 | 7,202 | 33,647 | 5,143 |
+| 8 | 21,221 | 6,704 | 30,897 | 4,645 |
+| 4 | 19,890 | 6,454 | 30,000 | 4,395 |
+| 2 | 18,913 | 6,328 | 28,840 | 4,269 |
+
+Depth16→2 removes **874 sequential cells** in either fixture. Generic-cell
+reductions are **21.04%** and **14.29%**, respectively. These are not percentages
+of a production 256 KiB L2 or whole-core physical area. The large-fixture report
+keeps the two unchanged `tc_sram` data macros (32,768 storage bits) outside the
+logic count; tags and MSHRs are real/mapped. Both reports exclude `$scopeinfo`
+metadata. Raw Yosys totals, cell types and macro counts remain in the artifacts;
+`review-l2-size-assessment-20260916` derives the presentation from frozen data
+without rerunning synthesis. No latches/check problems are reported; existing
+width warnings in the source/vendor fixture are not relabeled as clean lint.
+
+`review-l2-occupancy-v2-20260916` proves the live controller's one-MSHR invariant
+by two-step binary induction at depths 16 and 2 in a 512 B/two-way/two-bank fixture,
+with no input assumptions. It checks count/state correspondence, only slot zero
+live, no extra waiters and zero allocation/completion indices. Live and completion
+covers are reached within 16 steps, and an allocation-index checker mutation fails.
+This is an occupancy/lifecycle proof, not a general bus-data equivalence or full
+memory-order proof. A first attempt hit a frontend enum-reference error; the
+successful harness uses source-validated numeric state encodings, not weaker
+assumptions or a modified DUT.
+
+**Promotion assessment:** depth two is the strongest measured area candidate for
+the current serialized service. Do not select depth one blindly: its public index
+widths and full-event behavior have separate concerns. Keep the generic multi-MSHR
+leaf intact for future nonblocking work. Before changing named defaults, qualify
+256 KiB/eight-way/four-bank geometry and matched SMT2/stream8 source/config/runtime
+integrations; the protected SMT2 depth remains 16 and stream8's zero field still
+auto-resolves to eight. Preserve current hub repairs in both A/B builds and retain
+the independent dual-hart checks. Physical timing/area, full platform verification
+and coherence release qualification remain separate. No cacheability/RR/clock or
+SMT scheduling policy is promoted by this result.
+
+Reproduction: `run_l2_size_review.py` runs the existing leaf with opt-in
+`+mshr-observe`, `+mshr-trace` and `+mshr-negative`; `REVIEW_L2_SIZE_PROOF=1`
+selects the occupancy proof. The static fixture's new `MSHR_DEPTH` parameter
+defaults to four, preserving earlier equivalence/synthesis behavior.
+
+### Production-shaped depth-two qualification and scoped promotion (2026-09-16)
+
+The next leaf run uses real 256 KiB/eight-way/four-bank tag/data RTL, not the small
+fixture. Depths 16/8/2 match all 17 phase reports and full timestamped accepted
+transactions at memory latency6/stall0. Each completes 31,704 reads, 591 writes,
+30,822 allocations/completions and 668,512 cycles, with peak one MSHR. Nine
+positive observer controls and three injected-occupancy negatives pass.
+
+The initial synthesis stage hit the frontend's 4000-iteration limit for 4096 tag
+entries. The retry raises that frontend limit to16384 and reuses the completed
+simulation evidence rather than rerunning it. `review-l2-production-area-20260916`
+measures only mapped controller/MSHR/bank logic, with one unchanged tag module and
+four unchanged data macros blackboxed. Its counts exclude those five blocks and
+scope metadata; they are **not whole-cache or physical area**:
+
+| Depth | Mapped-portion generic cells | Sequential cells in that portion |
+|---|---:|---:|
+| 16 | 15,539 | 1,625 |
+| 8 | 12,727 | 1,127 |
+| 2 | 10,844 | 751 |
+
+Thus the measured incremental reductions are 4,695 cells/874 state cells from16,
+or 1,883/376 from8. No timing/energy percentage follows from this partial area model.
+
+`review-l2-occupancy-production-v2-20260916` passes two-step occupancy induction
+for depths16/8/2 at the production dimensions, with live/completion covers and a
+checker negative. Tag-hit and bank-conflict are explicit unconstrained formal
+cutpoints, so the controller invariant must hold for arbitrary cache outcomes.
+This is a compositional control proof, not tag/data correctness or bus-data
+equivalence. The earlier 180-second attempt stalled in preprocessing before the
+cutpoints; moving them before preparation preserves the predicates and budget.
+
+`review-l2-size-integrations-20260916` completes both matched integrations on
+fresh copies with current IQ/predictor/hub/invalidation RTL pinned on both sides.
+Elaboration-time probes check effective depth, geometry and core/hart counts.
+SMT2's16→2 pair passes all13 execution records per side with identical cookies,
+retirement/operand traces and independent reference results. The dual-active RVI
+and mixed-C references retain 13699/14203 retirements,25774 operand checks and1025
+known loads each (one peer-flag value remains unchecked). Both48 KiB/hart workloads
+and redirect-chain controls pass. Stream8's8→2 pair passes ten positive workload
+records plus the expected negative per side; all reports, cookies and retirement
+traces match. Hot-scan remains262740 ROI cycles; locality remains147470/147470/
+147467 for1/8/64 KiB. These are preserved benefits, not a new speedup.
+
+The source-delta audit permits only the selected package's MSHR value and the
+private observer-path/geometry-check differences, normalizes those exact edits,
+and requires all other consumed inputs to match. Full child logs/manifests/traces
+are retrieved in `review-l2-integration-evidence-20260916`; completed jobs were
+not rerun for capture. Four model builds pass, with unchanged warning levels within
+each pair (SMT2 two; stream8 twelve), not a warning-free or full-platform claim.
+
+**Scoped promotion:** `g6lc64_smt2` changes L2MshrDepth16→2 and `g6lc64_stream8`
+changes its zero/auto-eight field to explicit2. Retained package hashes exactly
+match tested candidates: `b61109d7…` and `f2c564c9…`. The generic MSHR leaf and all
+other packages/default inference are unchanged, preserving the future multi-miss
+seam. No new RTL stage, reset, clock, buffer, ISA/DTS field or software interface.
+Smaller CAM/selection logic is an area/timing-cone improvement candidate, not STA
+or power sign-off. Cache geometry, RR/cacheability and SMT scheduling stay fixed.
+
+Candidate model identities: SMT2 `f6697765…` (baseline `6623fe63…`); stream8
+`af3503d9…` (baseline `d410b552…`). The prior measurements' unchanged-default
+flags remain historical records, not rewritten as promotion evidence. Full
+source-bound platform verification, physical implementation, broader ISA/FP and
+coherence/visibility qualification remain open; the hub invalidation-loss test
+still fails and is not waived by these matched results.
+
+### Generic MSHR merge/retention repair (broad RTL review)
+
+The live generic leaf previously advertised ready for a matching full waiter queue
+when some other entry was free, but could not retain the accepted waiter. A
+simultaneous completion and same-line merge could also leave a waiter on an invalid
+entry. Admission now selects matching-entry capacity rather than ORing unrelated
+free capacity; pop precedes append, append uses the post-pop index, and completion
+checks post-append occupancy. Concurrent allocation at another slot preserves count.
+No state or interface is added; completion still frees only after waiters drain.
+
+Depth/waiter combinations2/1,4/2,8/3 pass directed controls and oracle mutations,
+including full+pop+merge and complete+merge. Ten-step symbolic checks cover count,
+entry uniqueness, waiter bounds and admission; full-tail/joint/retained cases are
+reachable. Standalone16-bit-address/four-bit-ID synthesis grows878→1003 cells at
+D4/W2 and1995→2095 at D8/W3, with127/284 state cells unchanged. This is a measured
+correctness cost, not an area win.
+
+The current L2/L3 top is still serial and ties waiter pop low. Fresh SMT2/stream8
+models with the repaired leaf match all24 frozen depth-two records, including
+cycle/cookie, retirement/operand trace and ROI identity. That preserves the prior
+named-package behavior; it does not establish nonblocking L2/L3 operation or new
+physical-area numbers for the earlier sizing promotion. Waiter response/data
+routing, refill error handling, eviction retention and coherence remain separate.
+
+Evidence: `review-rtl-audit-before-v2`, `review-rtl-audit-after-v1`,
+`review-rtl-audit-quality-rest-v3` and `review-rtl-audit-integrations-v1`.
+
+### Checked locality probe (2026-09-16)
+
+`mini_l2_hot_scan.S` adds an opt-in `G6LC_LOCALITY_PROBE` path. Its default
+hot-scan instruction bytes remain identical to HEAD when compiled with the same
+linker/toolchain (`.text` SHA256 `a75aac75…`, local cross-compile only). The probe
+initializes a ring `next(i)=(i+37)&(N-1)`, checks every loaded pointer, warms N
+loads, then measures exactly 8,192 loads. It captures PMU endpoints in registers
+before report stores and checks the reported load count and zero ROI stores.
+Working sets are 1/8/64 KiB (128/1,024/8,192 nodes); the predicate and measured
+work are fixed, and each ELF is byte-identical across the two existing models.
+
+The first diagnostic link failed because `.data` overlapped the report inside
+`.tohost`; `locality.ld` now places `.data` at `0x80001100` while report remains
+`0x80001080`. The failed run is retained, not classified as RTL failure.
+`review-cache-locality-v2-20260916` completes twelve positive trials (two per
+case/model) plus two correctly detected negative controls. Negative records keep
+cookie 3 / functional FAIL and a separate `matchedExpected=true`; they are not
+relabeled as workload PASS. The models/runtime are reused without rebuilding.
+
+| Working set | Execute-uncached / PMA-only ROI cycles | PMA-only L1D miss events | I-cache miss events, both policies |
+|---|---:|---:|---:|
+| 1 KiB | 213,009 / 213,009 | 0 | 8,195 |
+| 8 KiB | 213,009 / 213,009 | 0 | 8,195 |
+| 64 KiB | 213,006 / 213,006 | 4,567 | 8,196 |
+
+All cases report 8,192 loads, zero stores and 8,192 data-request events; L2 miss
+report is one. Each positive pair repeats identically. ROI excludes initialization
+and warm-up, unlike the earlier warm+scan report, so these absolute cycle totals
+are not interchangeable with that report. The loop's validation arithmetic also
+provides independent work between dependent loads and can hide short memory
+latencies; this is checked-work throughput, not a pure load-latency measurement.
+
+**Preliminary mechanism analysis:** the unexpectedly high I-cache count is about
+one per loop iteration despite a tiny instruction footprint. Competing accounts
+are genuine repeated instruction refills versus an event/measurement association
+problem; neither is settled by aggregate PMU data. E2 therefore next observes
+accepted I-cache requests, tag comparison, refill/kill/install and PMU pulses on
+the same ELF. A new observer must preserve its baseline retirement/cookie trace.
+Do not change data cache policy, RR or pipeline timing before that distinction.
+
+**Validated instruction-refill observation:** `review-locality-icache-trace-v2-20260916`
+reuses the observation-only model `aab9ad4b…`. Its off/on/on runs preserve the
+baseline cookie and byte-identical retirement streams, with repeated enabled
+traces identical. The first attempt's control comparison was a Python tuple/list
+normalization error, not an execution difference; the model was reused rather
+than rebuilt. Capture is a bounded first-30,000-tick prefix, not a full trace.
+
+The large I-cache count reflects genuine wrong-path requests. For example,
+at t=2774 the not-taken pointer check at `0x80000164` predicts its FAIL target
+`0x80000134`; at t=2776 the I-cache accepts a miss for line `0x80000130`.
+Resolution at t=2777 correctly selects `0x80000168`, kills the miss, and its
+response drains at t=2782 without installation. The same sequence repeats.
+The loop's own lines hit; this is not evidence of insufficient I-cache capacity
+or inclusive L2 eviction. The repeated wrong-path fetch also explains why a
+low L2 miss count can coexist with many I-cache miss events.
+
+**Next candidate, isolated until checked:** align asynchronous predictor lookup
+with the current response transaction. Source review shows instruction bytes
+are scanned from `realigner_vaddr`, but ASIC `vpc_bht`/`vpc_btb` still select the
+previous response's `icache_vaddr_q`; training uses the resolving instruction PC.
+This can leave the current branch falling back to a wrong static prediction.
+The pilot changes only ASIC lookup PC selection, retains the FPGA phase rules,
+and does not change predictor capacity, I-cache kill/install semantics, cache
+policy or pipeline depth. `review-predictor-response-pc-20260916` preserves the
+checked instruction prefix and passes off/on/on controls, but reports 213,012
+ROI cycles and the same 8,195 I-cache miss events. A few early predictions improve;
+steady-state misprediction returns. The PC-alignment candidate is therefore
+NOT a sufficient optimization and remains unpromoted.
+
+The next isolated discriminator concerns `g6lc_bp_statcor`: training increments
+for taken and decrements for not-taken, but a low counter inverts the incoming
+prediction. An absolute outcome counter is not an inversion-error counter. Test
+a consistent absolute interpretation (confident low selects not-taken, confident
+high selects taken, middle defers) atop the response-aligned candidate. This is
+not permission to rewrite predictor training or add state without evidence.
+`review-predictor-absolute-sc-20260916` validates this combined pilot on the same
+1 KiB ELF: 147,470 ROI cycles versus 213,009 baseline (65,539 fewer, -30.77%),
+with I-cache miss events 3 versus 8,195. All three off/on/on records agree;
+each reports 8,192 loads, zero stores and one L2 miss. The untimed core-0
+instruction prefix through the checked-work exit boundary matches the baseline,
+and the program's per-pointer and load-count checks pass. Post-exit polling
+spins are deliberately outside that instruction-prefix comparison; full timed
+traces match within the candidate's observer controls. Captured branch events
+show the not-taken check remaining correctly predicted after training rather
+than reverting to persistent misprediction. No claim is made that this check
+is a complete ISA reference model.
+
+The initial candidate used copied run trees through `REVIEW_PREDICTOR_CANDIDATE=1`
+plus `REVIEW_SC_ABSOLUTE=1`. Subsequent qualification retained its functional
+changes in `core/fetch_B/frontend.sv` and `core/frontend/g6lc_bp_statcor.sv`.
+PC-alignment alone remains a recorded insufficient candidate, not a claimed win.
+Cacheability and RR are unchanged; no state capacity or pipeline stage is added.
+
+**Qualification and retention:** the independent corrector bench first fails
+on the original inversion and then passes six slot/RVC/table geometries, with
+negative controls, saturation, alternating/bursty outcomes, alias sharing,
+concurrent read/update and reset/flush priority. A symbolic 64-bit selector check
+proves ASIC current-transaction selection and preservation of FPGA selector
+expressions; its wrong-PC control fails. It is not a full stateful frontend or
+FPGA-memory proof. Full-core SMT2 and stream8 synthesis smoke report zero check
+problems. Matched corrector leaf synthesis is 1,261 → 1,360 generic cells (+99),
+with 192 state bits unchanged; no physical area/STA/power claim.
+
+Fresh SMT2 integration passes all 13 records, including independent RVI/mixed-C
+references (13,699/14,203 retirements; 25,774 operands and 1,025 known loads each),
+negative controls and both 48 KiB/hart cases. One peer-flag value remains unchecked.
+Broader stream8 replay passes eight positives plus one expected negative:
+
+| Unchanged-cache-policy control | Baseline ROI | Retained predictor ROI |
+|---|---:|---:|
+| Hot-scan warm+scan | 275,593 | 262,740 (-4.66%) |
+| 8 KiB checked locality | 213,009 | 147,470 |
+| 64 KiB checked locality | 213,006 | 147,467 |
+
+Reports and retirement fingerprints repeat within each model. Hot-scan still
+reports 4 L2 / 0 L1D / 17 I-cache miss events, 20,483 loads and 7 stores;
+locality reports exactly 8,192 loads and zero stores. The ordinary checked-work
+cookie poll remains 167,936, not an exact ROI performance measurement.
+
+Artifacts: `review-statcor-contract-v2-20260916`, `review-predictor-smt2-20260916`,
+`review-predictor-work-20260916`, `review-predictor-synth-20260916`,
+`review-predictor-pc-proof-20260916`, `review-predictor-promotion-20260916`.
+Retained non-comment source matches the tested prototype. Default minimal-target
+lint/strict elaboration and explicit SMT2/stream8 checks pass. The separate
+PH_BHT registered port is unchanged and outside the repaired selector scope.
+Mapped timing/power, natural firmware and broad ISA/FP/ordering remain open.
+IQ ordering subsequently passes unbounded induction and all twelve covers in its
+reduced formal envelope; broader IQ geometries/FPGA/RVH remain separate. No
+cacheability or replacement-policy promotion is implied.
+
+Source review also limits the latency claim: the default CPU memory backend is
+class-0 AXI-to-SRAM, and the testharness delayer has zero added delay. The
+`G6LC_AI_DRAM_TIMING` model delays island DMA, not CPU requests. I-cache requests
+enter a one-entry holding FIFO before a fixed-priority I/D arbiter; index zero
+(I-cache) has priority, and a stalled grant is held. The connected L2 still
+serializes through its final response. These are mechanisms to instrument, not
+an attribution of all observed cycles. Any future latency/backpressure experiment
+must operate on the CPU-visible path and name the imposed service model; it is
+not DDR or physical timing qualification.
+
+**Area follow-up:** `g6lc_l2_tag` has resettable flop tags/valids and asynchronous
+indexed lookup, whereas `g6lc_l2_data` uses one-cycle `tc_sram` banks. At the
+256 KiB/eight-way/64-byte/64-bit-address envelope, the tags plus valid bits are
+204,800 logical storage bits. This is a size calculation, not a mapped-area
+measurement. A tag-SRAM study must resolve lookup, victim probing, install and
+address-match invalidation ports; the current always-ready back-invalidation
+contract cannot be preserved by simply replacing the array declaration.
+Obtain approved SRAM/library views, timing constraints and MBIST/test access in
+parallel; no physical saving or hit-latency guarantee exists yet.
+
+**Concurrency follow-up:** retain the current serialized top while measuring
+it. The presence of multiple MSHRs and data banks does not provide overlapping
+miss service; merged waiters are not drained. Nonblocking control and smaller
+supported serialized geometry are alternatives to evaluate from actual stall
+and mapped-cost evidence, not changes to combine with tag SRAM and RR in one
+candidate. See E1–E6 in `../../AGENTS-todo.md` for priority and retained gates.
 
 ## Evidence compartments (do not mix)
 

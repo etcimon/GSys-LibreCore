@@ -223,7 +223,7 @@ package cva6_config_pkg;
       L2ByteSize: unsigned'(0),
       L2SetAssoc: unsigned'(0),
       L2LineWidth: unsigned'(0),  // 512b (64 B) after infer — Zic64b-class line
-      L2MshrDepth: unsigned'(0),
+      L2MshrDepth: unsigned'(2),
       L2DataBanks: unsigned'(0),
       L2RoundRobinEn: bit'(0),
       NrHarts: unsigned'(1),

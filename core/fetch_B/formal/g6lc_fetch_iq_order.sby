@@ -1,30 +1,37 @@
 # R6 instruction-queue formal (bounded) - I6 clause 1: program-order issue.
 #
-# Proves against the live `instr_queue` that, when multiple FIFO heads are
-# available, the greedy age-ordered pointer selects the smallest per-entry
-# `push_seq` first and that the issued `push_seq` (and therefore `address`)
-# sequence is non-decreasing over time.
+# Checks the live `instr_queue` against an independently watched accepted
+# entry and ghost occupancy. Sparse inputs, arbitrary PCs, partial carry,
+# exceptions and predicted targets remain live; no DUT timestamp provides
+# the expected order, payload or metadata.
 #
 # Run: sby -f core/fetch_B/formal/g6lc_fetch_iq_order.sby
-# Not in the default verify.formalTasks until pseq_monotone PASSes; the FIFO
-# data-order discharge lives in cva6_fifo_v3_order.sby (that task is default).
+# Kept separate from the raw-opcode non-interference task. Bounded PASS is
+# not an unbounded proof; reachability is reported independently of safety.
 
 [tasks]
 bmc
 cover
+prove
 
 [options]
 # One live queue; depth must cover fill, a few dual issues, a replay and a flush.
 bmc: mode bmc
 cover: mode cover
-depth 10
+prove: mode prove
+bmc: depth 12
+cover: depth 28
+prove: depth 4
 bmc: aigsmt z3
+prove: aigsmt z3
 
 [engines]
 # abc-bmc3 first (far faster than z3 on this bit-level cone); both are raced.
 bmc: abc bmc3
 bmc: smtbmc --unroll z3
 cover: smtbmc --unroll z3
+prove: abc pdr
+prove: smtbmc --unroll z3
 
 [script]
 read_slang --std 1800-2017 --top g6lc_fetch_iq_order_props -DFORMAL \

@@ -52,6 +52,305 @@ Source/build/run snapshots are under `remote-runs/review-*20260915/` and
 `remote-runs/review-20260915/`; these diagnostics do not emit strict
 `G6LC_EVIDENCE`. No architectural coverage status is promoted.
 
+### Circular IQ verification follow-up (2026-09-16)
+
+`tb_g6lc_fetch_queue.sv` now independently predicts acceptance from logical
+occupancy as well as checking emitted PC/bytes/hart/exception/prediction. Both
+the timestamp baseline and circular-head candidate pass five C/no-C leaf
+configurations, including carry-only partial acceptance, target FIFO pressure,
+arbitrary ready, flush, concurrent pop/push and 70,000 accepted no-flush
+iterations per configuration. Each rejects `+oracle_negative`. The runner
+validates the private runtime header and compiler dependencies. Matched generic
+synthesis is 22,354 to 20,085 cells and 5,954 to 5,426 sequential cells; the
+fixture still ties exception/carry inputs off, unlike the simulation checker.
+
+`run_restart_review.py` with `REVIEW_IQ_RING=1` builds one fresh observer-capable
+SMT2 model from the validated snapshot plus candidate IQ, directly against the
+corrected runtime. All thirteen run records pass: two encodings with off/on
+positive and witness controls plus witness repeat, redirect-chain, and both
+48 KiB/hart workloads. The independent reference checks 13,696 RVI / 14,202
+mixed C/I retirements and 25,774 operands each; one peer-flag read per witness
+is not covered by the local load-value oracle. Both injected-operand controls
+are detected. Off/on fingerprints and repeated enabled traces match; witness
+trace hashes also match the preceding corrected-runtime references. This is
+not a newly built observer-absent control or a throughput benchmark.
+
+The rewritten `g6lc_fetch_iq_order` checks watched accepted metadata and logical
+bank occupancy without DUT age stamps. Both modes initially time out at 120
+seconds. With `REVIEW_FORMAL_TIMEOUT=600`, unchanged twelve-frame BMC passes
+(ABC: no asserted output through twelve frames); twenty-frame cover still
+expires. Additional partial-carry reachability is logged, but its final witness
+dump is interrupted. `review-iq-ring-order600-20260916` preserves separate mode
+statuses and the task-file hash; the all-PASS runner correctly returns nonzero.
+Partial reached covers are not a complete PASS, and BMC is not an unbounded proof.
+Yices is absent remotely; no solver installed or assumption weakened. SMT2
+lint/strict elaboration passes; physical/full-SMT qualification and raw-opcode
+non-interference remain open. Artifacts: approved C: `review-iq-ring-*20260916`
+with remote originals retained. No whole-ISA coverage status is promoted.
+
+### Invalidation leaf and bounded fetch-supply observation (2026-09-16)
+
+`tb_g6lc_inval_bus.sv` uses independent per-target queues to check global
+admission, output order/flags and blocked/coalesced status. The original N3/D2
+passes a basic control and fails mixed-target admission plus coalesce/sole-pop
+preservation. The candidate passes N/D 1/1, 2/1, 3/2, 4/3 and 4/4 with directed,
+wrap and 600-cycle deterministic streams; all ready-observation mutations fail.
+`run_inval_review.py` runs through the credential-cache proxy with the pinned
+corrected Verilator runtime. Its quality mode checks eight-step N3/D2 local
+admission/status/departure safety, both covers and a checker negative; original
+RTL fails. This is not unbounded full-FIFO/coherence qualification.
+
+Artifacts: `review-inval-before-20260916`, `review-inval-after-20260916`,
+`review-inval-quality-20260916`; `review-inval-clean-tb-20260916` repeats all
+five positives/negatives warning-free after test-only width/loop cleanup.
+Paired generic synthesis has 1900→1860 cells at
+N3/D2 (372 state cells), 6528→6623 at N4/D4 (988), and zero at N1/D1. No new state
+or physical claim. Full platform verify was dry-run only; its SKIPs and missing
+remote build-platform CLI do not qualify the gate. Hub/inclusive integration
+remains open; the protected one-core SMT2 path and core RTL are unchanged.
+
+`REVIEW_FETCH_SUPPLY=1` in `run_checked_work_review.py` analyzes already captured
+traces with source/model/ELF/observer identity checks. In [5182,29986), 24,804
+complete clock rows contain 1,378 loop intervals and 12,402 requests/responses,
+IQ transfers, decoded allocations and retirements. Request interval is two
+cycles; response latency after acceptance is one. No misses or mispredictions
+occur in that interval. Missing-row and wrong-PC negatives are rejected.
+`review-fetch-supply-analysis-20260916` is bounded core-0 analysis, not a new
+model run, full-ROI measurement or multicore speedup. IQ-empty and backend-stall
+cycle counts are not observed and remain explicitly unavailable.
+
+### Hub transaction-lifetime baseline (2026-09-16)
+
+`tb_g6lc_coherence_hub.sv` and `REVIEW_HUB_BASELINE=1` reuse the exact L2 bench
+AXI types and private runtime. The N2/OT4/invalidation-depth2 broadcast fixture
+passes its basic response-owner/ID/data control and catches an observed-data
+mutation. Five separate scenarios fail: held AR payload, held AW payload, held
+AR ID after an old response frees a lower slot, AW eligibility with a single
+free slot/no AR, and accepted-write invalidation retention (3 accepted/completed,
+2 delivered). The memory responder completes AW+W before B; consumer readiness
+resumes at cycle 32, with a 128-cycle delivery bound.
+
+`review-hub-before-20260916` records these as expected baseline failures, never
+hardware qualification. Hub RTL is unchanged. Existing LR width/block-local latch
+warnings are recorded; no mapped hub synthesis or full coherence claim follows.
+See `architecture/multi-core/README.md` for the transaction-reservation boundary
+and why the current `aw_fire`-activated invalidation ready cannot be fed directly
+back into AW grant.
+
+### Hub held-address reservation follow-up (2026-09-16)
+
+`REVIEW_HUB_RESERVATIONS=1` checks the retained owner/slot hold repair. Twelve
+positives pass across N2 with OT4 and OT1: prior address/ID/credit failures,
+simultaneous held channels, filling other slots without stealing a reservation,
+stalled B/R response ownership, one-slot operation and reset while held. Both
+response-data oracle negatives are caught. The separate invalidation retention
+case remains failed (3 accepted/completed writes, 2 deliveries).
+
+`REVIEW_HUB_QUALITY=1` passes eight-step binary hold/routing/ID-exclusion/credit
+checks at N2/OT4, N2/OT1 and N1 identity. It assumes only the relevant AXI producer
+contract for AR/AW stability while not accepted; it does not prove full response,
+ATOP or coherence ordering. Both covers are reached; old RTL and a checker
+address mutation fail. Paired generic synthesis has zero latches/check problems;
+N2/OT4 cells 2760→2808, state cells 326→342; N4/OT4 5981→6238, 607→625; N1 zero.
+The old OT1 write path was disabled by phantom AR reservation, so its much smaller
+netlist is not equal-capability area evidence. Physical and platform gates remain
+open. Artifacts: `review-hub-reservations-20260916` and
+`review-hub-reservation-quality-20260916`; `review-hub-hold-starve-20260916`
+repeats the matrix with 20-cycle held-request checks. No protected SMT2 core/config change.
+
+### L2 MSHR sizing comparison (2026-09-16)
+
+`run_l2_size_review.py` snapshots the existing full L2 leaf and uses the corrected
+private Verilator runtime. The bench adds opt-in live-MSHR accounting and full
+accepted-port tracing; static fixture MSHR_DEPTH defaults to4 as before. Depths
+16/8/4/2 have identical17 phase reports and timestamped transactions in service
+profiles(6,0)/(24,3), totaling31108/61659 cycles. All have peak one,1348 allocations
+and completions;24 positive observer controls and8 occupancy-error negatives
+are checked. Existing data/ID/length, policy, bypass/ATOP and AMO checks remain.
+
+`review-l2-size-20260916` stores the raw runs/synthesis;
+`review-l2-size-assessment-20260916` excludes scope metadata and separately reports
+fixed data macros. Depth16→2 removes874 sequential cells in both fixtures;
+512 B/two-way generic23953→18913,4 KiB/four-way logic33647→28840 outside data RAM.
+No physical/production-cache area or throughput gain is claimed.
+
+`review-l2-occupancy-v2-20260916` proves one-live/slot-zero/no-waiter invariants
+at depths16 and2 using a four-frame base and two-step binary induction, with no
+input assumptions, live/completion covers within16 and a failing index mutation.
+An earlier hierarchical-enum frontend error is retained; the workaround validates
+source encodings. This is not all-geometry bus-data equivalence. Production
+configuration, named SMT2 behavior and full platform/physical/coherence gates
+are not promoted by these reduced leaf checks.
+
+### Depth-two production-shaped integration and promotion (2026-09-16)
+
+The real 256 KiB/eight-way/four-bank leaf passes depths 16/8/2 with identical
+17-phase and timestamped-port results: 31,704 reads, 591 writes, 30,822 completed
+miss allocations and 668,512 cycles. Nine positives and three occupancy negatives
+are checked. The initial frontend unroll-limit failure occurs only in synthesis;
+`review-l2-production-area-20260916` reuses the completed simulations and raises
+the frontend limit. Its mapped controller/MSHR/bank portion excludes one tag
+module and four unchanged data macros: 15,539/12,727/10,844 cells and 1,625/1,127/751
+state cells for depths 16/8/2. This is not total-cache or physical area.
+
+`review-l2-occupancy-production-v2-20260916` proves occupancy by two-step induction
+at those dimensions with tag-hit/bank-conflict as arbitrary formal cutpoints.
+Live/completion and checker controls pass. It proves control for arbitrary cache
+outcomes, not correctness of the cut tag/data circuitry.
+
+`review-l2-size-integrations-20260916` builds matched SMT2 16/2 and stream8 8/2
+models with current IQ/predictor/hub/invalidation RTL on both sides. Elaboration
+checks effective geometry/depth. SMT2 passes all 13 records per model with equal
+cookies, retirement/operand traces and independent analyses; stream8 matches ten
+positive records plus its expected negative, including ROI and retirement data.
+Only the package depth and private observer/geometry-probe text differ, with
+those exact differences normalized and checked. Child evidence is captured under
+`review-l2-integration-evidence-20260916` without rerunning workloads.
+
+The two named packages now explicitly select depth 2 and match the tested package
+hashes exactly (`b61109d7…` SMT2, `f2c564c9…` stream8). Generic inference and other
+packages remain unchanged. No new throughput, full-platform, physical, broad
+ISA/FP or coherence sign-off follows; the hub's notification-loss case remains
+open. Prior unchanged-default result flags are kept as historical run records.
+
+### Broad RTL review component and preservation gates (2026-09-16)
+
+`tb_g6lc_rtl_review.sv` and `run_rtl_audit_review.py` cover OoO IQ availability,
+dispatch/WB coincidence and exact-capacity admission; MSHR merge capacity and
+concurrent pop/complete; TAGE decay; and source-selected inclusive acknowledgments.
+The repaired component matrix has54 positive/negative records. Baseline basic
+controls pass while the authored defect scenarios fail. Earlier checker-container
+initialization and indexed stimulus issues are retained as testbench attempts,
+not hardware defect evidence. The L3 seam is extracted from live cluster source
+and uses the real inclusive leaf, not a full-cluster simulation.
+
+Quality evidence is separated: `review-rtl-audit-iq-proof-v5` has reset base plus
+two-step watched-readiness/capacity induction, stable symbolic witness inputs,
+live-TID uniqueness assumptions and wait/drain covers; rest-v3 has ten-step MSHR
+admission/count/uniqueness plus three covers; tail-v7 has TAGE prediction-output
+induction and the inclusive ready equation, with checker negatives. Earlier
+watcher/lowering/induction/internal-equivalence attempts are not promoted as passes.
+The TAGE miter asserts useful-state zero instead of assuming it or equating the
+intentionally changed internal counter.
+
+`review-rtl-audit-integrations-v1` builds fresh four-file-overlay candidates and
+matches all24 prior depth-two SMT2/stream8 records byte-for-byte where applicable:
+cookies/cycles, retirement/operand traces and ROI reports. Prior independent SMT2
+reference analyses therefore remain bound to identical new traces. OoO is off in
+these packages. `review-rtl-dispatch-contract-v1` separately reproduces an accepted
+store that does not issue in eight cycles while ALU control passes; it remains
+known-red. Full OoO/L3/nonblocking, broad ISA/FP/physical and platform claims are open.
+See `architecture/remaining-upgrade-sequence.md` for the reviewed paths and costs.
+
+### IQ induction and complete cover set (2026-09-16)
+
+The later `g6lc_fetch_iq_order_props.sv` keeps all original safety assertions and
+input assumptions, adding asserted bank/pointer and watched-storage invariants.
+Live predicted-CF counts relate the instruction banks to the two-entry target
+FIFO; the watched target is checked at its prefix-CF rank. The helper counts
+fit 0..32 exactly in six bits. No production RTL changes are made by this pass.
+
+`review-iq-sat-binary-20260916` passes a four-frame reset base check and temporal
+induction at length two. This is unbounded safety for the existing reduced
+four-slot/two-hart/two-issue/32-bit/ASIC/non-hypervisor envelope, not all product
+geometries. `review-iq-sat-binary-negative-20260916` detects a copied-RTL one-bit
+instruction-output error. `review-iq-cover-binary-20260916` reaches all 12 cover
+predicates within 28 steps, with a constant-false negative kept unreachable.
+The no-flush drain witness is full (count 32, all banks full) at step 11 and
+empty at step 27 with no intervening flush. Existing full-to-empty coverage
+alone could have used a flush, so both predicates remain explicit.
+
+Runner flags: select `g6lc_fetch_iq_order` and `REVIEW_FORMAL_TIMEOUT=600`;
+`REVIEW_FORMAL_MODES=prove` plus `REVIEW_FORMAL_SAT_PROVE=1` selects safety
+(add `REVIEW_FORMAL_NEGATIVE=1` for the bit fault), while mode `cover` plus
+`REVIEW_FORMAL_SAT_COVER=1` selects reachability. SAT preprocessing/geometry
+validation rejects unsupported overrides. Default mode order, timeout limits,
+source/task hashing and incremental results are preserved. Binary-state SAT
+matches the SBY bit-state domain; the discarded X-state induction experiment
+is not evidence of a reachable hardware failure. The prior BMC and timeout
+records remain historical evidence, not relabeled passes. Wider/FPGA/RVH and
+whole-SMT qualification remain separate obligations.
+
+### Executable-data cacheability diagnostics (2026-09-16)
+
+`run_checked_work_review.py` with `REVIEW_CACHEABILITY=1` builds an isolated
+stream8 pair differing only in the HPDCACHE load adapter's executable-region
+uncached exemption. The circular IQ, configuration and private runtime are
+matched; production RTL is not changed. `mini_hpd_2jr.S`, its data/pad/fence.i
+controls and observer off/on/repeat checks all pass (eighteen run records).
+The original witness's second table load is a genuine candidate D-cache hit,
+returns the linked table's sign-extended -10 and dispatches to the expected
+second target. The baseline serves that read uncached. This is a scoped trace
+and functional result, not full RVC/CSR reference-model validation or a speedup.
+The short candidate's cold reads and PASS-store boundary are later despite the
+warm-hit improvement. `REVIEW_CACHEABILITY_WORK=1` reuses these models for larger controls:
+eight repeated run records pass, with matching per-case fingerprints. The
+hot-scan reported warm+scan cycles rise 275,593 to 374,177 (+35.77%); L2/L1D
+miss events are 4/0 versus 18,788/19,370. Reports exclude initial fill; neither
+cookie polling nor event counts imply physical memory timing. This is a measured
+regression, not a production-performance promotion. Artifacts:
+`review-cacheability-pair-20260916` and `review-cacheability-work-20260916`.
+No ISA or production cacheability coverage status is promoted. Broader
+store/fence/error/invalidation/atomic and natural-firmware gates remain open.
+
+### Checked locality and instruction-refill investigation (2026-09-16)
+
+`mini_l2_hot_scan.S` has an optional `G6LC_LOCALITY_PROBE` path with power-of-two
+`LOCAL_NODES`, a fully checked pointer ring and exactly 8,192 measured loads
+following warm-up. The default hot-scan `.text` is byte-identical to HEAD under
+the same local compiler/linker. `REVIEW_CACHEABILITY_LOCALITY=1` in
+`run_checked_work_review.py` reuses the existing cacheability pair; twelve
+positive trials pass across 1/8/64 KiB working sets and both negative controls
+produce expected cookie 3. PMU endpoints are captured before report stores;
+every positive report has 8,192 loads and zero stores. ROI times match between
+policies (213,009 / 213,009 / 213,006 by working set), with roughly one I-cache
+miss event per loop. This does not establish a data-cache speedup or a pure
+load-latency result: validation arithmetic can hide short data latency.
+
+Artifacts: `review-cache-locality-v2-20260916`; the first run's linker overlap is
+retained as a tooling failure. `REVIEW_LOCALITY_ICACHE=1` adds observation-only
+I-cache request/tag/refill/kill/install tracing in a copied model to distinguish
+real refills from an event/measurement error. Its first control check falsely
+failed on list-versus-tuple cookie comparison despite identical cookie and
+byte-identical retirement traces; comparison normalization is corrected and
+`REVIEW_ICACHE_MODEL` reuses the already-built model rather than rebuilding it.
+The normalized observer check passes in `review-locality-icache-trace-v2-20260916`:
+real misses target a wrong-path FAIL line that is killed and not installed after
+correct not-taken resolution. Production I-cache/data-cache RTL stays unchanged.
+
+`review-predictor-response-pc-20260916` tests ASIC response-aligned BHT/BTB lookup
+without changing FPGA phase or storage: execution checks pass, but 213,012 ROI
+cycles / 8,195 I-cache events show no steady-state gain. Adding an absolute
+interpretation of the absolute-trained statistical-corrector counter in
+`review-predictor-absolute-sc-20260916` gives 147,470 cycles / 3 I-cache events
+on the same checked ELF, versus 213,009 / 8,195 baseline. The candidate passes
+three observer controls, 8,192 checked loads, zero ROI stores and a baseline
+instruction-prefix comparison with timestamps excluded. The prefix ends at the
+workload exit routine; trailing polling spins are not compared. These are
+initial isolated candidate results, not full-ISA or SMT2 release closure.
+
+The maintained independent corrector test is
+`verif/tb/core/tb_g6lc_bp_statcor.sv`, run through `REVIEW_PREDICTOR_LEAF=1` in
+`verif/regress/remote/run_checked_work_review.py`. The retained-source rerun
+`review-statcor-retained-20260916` also passes; the diagnostic runner preserves
+its hashed legacy source when current RTL already contains the repair.
+
+The fixes are now retained after `review-statcor-contract-v2-20260916` (original
+inversion fails; six candidate geometries pass with negative controls and
+learning/alias/reset/flush/concurrent-update coverage),
+`review-predictor-pc-proof-20260916` (extracted ASIC/FPGA selector contract and
+wrong-PC negative), `review-predictor-smt2-20260916` (13 passing execution records,
+independent RVI/mixed-C references and negative checks), and
+`review-predictor-work-20260916` (eight positives plus the expected failure).
+The SMT2 references check 13,699/14,203 retirements and 25,774 operands each;
+one peer-flag value remains unchecked. The broader hot-scan ROI is 262,740 versus
+275,593 baseline, with unchanged cache policy; 8/64 KiB locality gives
+147,470/147,467 cycles. Corrector leaf synthesis grows 1,261→1,360 generic cells,
+with 192 state bits unchanged; full SMT2/stream8 synthesis smoke has zero check
+problems. Retained-source identity and minimal/SMT2/stream8 lint/elaboration are
+checked. These gates do not qualify mapped timing/power, PH_BHT's separate
+registered port, full FPGA behavior, full ISA or natural firmware.
+
 ## Independent BIOS software verification
 
 `g6lc_bios` B50–B52 tests are package-local, not ISA compliance suites:

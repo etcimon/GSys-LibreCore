@@ -70,6 +70,18 @@ to flush different pipeline stages.
 
 #### Branch Prediction
 
+**Current LibreCore note (2026-09-16):** the description below is historical.
+The live `core/fetch_B/frontend.sv` uses current-response PCs for its asynchronous
+BHT/GSHARE/TAGE and BTB selector paths, while preserving FPGA selector phase.
+The optional `g6lc_bp_statcor` interprets its saturating counter as an absolute
+outcome: confident low selects not-taken, confident high selects taken, and the
+middle range defers to a valid incoming prediction. This adds no pipeline stage
+or state capacity and does not change architectural resolution, ISA or DTS.
+The separate PH_BHT registered path is not changed by this repair. See
+`architecture/core-fetch/SPEC.md` §6 and `architecture/core-fetch/README.md` for
+current contracts, validation, the measured generic logic cost and remaining
+physical/firmware qualification limits.
+
 <!-- ![Implementation of Ariane's BTB](../../img/ariane_overview.pdf) -->
 ![Ariane Block Diagram](_static/branch_prediction.png)
 

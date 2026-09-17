@@ -103,6 +103,11 @@ if [[ -f "$ELF" ]] && command -v md5sum >/dev/null; then
 fi
 OUT="${SOFT_LADDER_OSBI_OUT:-/tmp/cva6-soft-ladder-osbi}"
 mkdir -p "$OUT"
+# Strict-qualification binding: when the proxy passes a run id, stamp it into
+# the out dir so the pulled log can be tied to one specific invocation.
+if [[ -n "${G6LC_RUN_ID:-}" ]]; then
+  printf '%s\n' "$G6LC_RUN_ID" > "$OUT/run-id"
+fi
 TIME_OUT="${SOFT_LADDER_TIME_OUT:-12000000}"
 SKIP_BUILD="${SOFT_LADDER_SKIP_BUILD:-0}"
 # Wall-clock safety net in seconds (so the remote proxy can abort a hung sim).

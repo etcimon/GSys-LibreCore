@@ -22,9 +22,84 @@ WIP snapshot (SMT2 / QEMU / 100 TOPS / PCIe vs OoO·H·RVV·stream):
 | **U10 server math package** | **C-light production** — HPDCACHE+HWPF+L2 auto, RVB/Zicbo*/H+Sstc, `server-math-tests` (optional) |
 | U10ᵇ RVV / Ara attach | **Partial / live-lintable** — Ara vendored + attach + lint; purpose guide + DTS + directed tests; full cosim/SBI open |
 | Multi-context PLIC | **Done** — 16 targets (8×M/S); harness fan-out per core |
-| **U5 full OoO** | **Production (gated)** — `OoOEn=1` backend; dual-issue `cv64a6_ooo` + 4-issue server pkg; cancel-mask mispredict recovery; `ooo-l3-tests` optional |
+| **U5 full OoO** | **Implemented/gated; qualification blocked** — live dispatch store self-blocking is reproduced; rename/LSQ/recovery/FP/hart and wide-retirement contracts remain open. In-order SMT2/stream8 passes do not qualify this path. |
 
 ---
+
+## Broad RTL path review (2026-09-16)
+
+This pass follows live control/data paths across issue/scoreboard/commit, OoO
+rename/IQ/ROB/LSQ/PRF, speculative store forwarding, prediction/history recovery,
+and shared L2/L3/invalidation. It is not a line-by-line proof of the repository,
+vendored IP, firmware or every feature combination. Feature names, source presence
+and old production labels are not substitutes for executed qualification.
+
+### Selected repairs and measured trade-offs
+
+| Change | Mechanism and result | Promotion scope |
+|---|---|---|
+| OoO IQ readiness | Remove selection/issue-time false wakeup; retain actual WB wakeup and capture WB coincident with dispatch. Permit the final exactly fitting dispatch group. | Directed/random tests and watched-readiness formal; not complete OoO execution qualification. |
+| MSHR merge lifetime | A full matching waiter queue cannot be hidden by another free slot; post-pop append order and post-append completion preserve newly accepted waiters. | Generic leaf fixed; current L2/L3 top remains serialized and has no waiter drain. |
+| Inclusive invalidation acknowledgment | Only the selected source receives ready. Hub priority now masks inclusive ready per target. | Source-derived mux plus live inclusive-leaf checks; producer eviction retention still open. |
+| TAGE decay period | Twelve-bit wrap implements the stated 4096 accepted-update period. | Latent contract repair; usefulness training is tied off and not used in allocation. Prediction-output equivalence passes, no accuracy/power claim. |
+
+Matched generic fixtures (scope metadata excluded):
+- IQ two ports/depth8/four-bit tags: 13,866→13,074 cells, 698→699 sequential cells.
+- IQ four ports/depth16/seven-bit tags: 60,370→53,260 cells, 1,538→1,540 sequential cells.
+- MSHR depth4/two waiters: 878→1,003 cells, 127 state cells unchanged.
+- MSHR depth8/three waiters: 1,995→2,095 cells, 284 state cells unchanged.
+- Inclusive mux N3: 180→183 cells, zero state.
+- Small TAGE fixture: 587→584 generic cells, 89 state cells unchanged. The small
+  mapping difference is not attributed to a new predictor performance benefit.
+
+No new array, clock, reset, pipeline stage, ISA/DTS field or feature enable is added.
+Existing configuration/type seams remain. IQ removes a quadratic comparison cone
+but adds per-dispatch WB comparisons; MSHR ready now includes pop/index eligibility;
+inclusive ready adds a per-target priority gate. These are timing-impact loci, not
+STA/Fmax closure. Scan/storage strategy is unchanged; fixed-size source registers
+and generic mapped sequential counts must not be conflated.
+
+Evidence: `review-rtl-audit-after-v1` passes 54 positive/negative component records;
+`review-rtl-audit-integrations-v1` matches all 24 protected depth-two SMT2/stream8
+records against their immutable qualified baselines, including timing, retirement,
+operand traces, ROI reports and the expected stream8 negative. Thus the prior
+independent SMT2 reference analyses remain bound to byte-identical new traces.
+OoO is off in these packages; no full-OoO/L3 release claim follows.
+
+Formal evidence is split rather than collapsed into one PASS: IQ v5 proves watched
+readiness/capacity/storage relations by reset base plus two-step induction under
+stable witness inputs and uniqueness of the watched live TID, with wait/drain
+covers; MSHR rest-v3 passes ten-step admission/count/uniqueness safety and three
+covers; tail-v7 proves TAGE prediction-output equivalence by two-step induction
+and the inclusive-source acknowledgment equation. Mutations are detected. Earlier
+harness/container initialization, frontend symbolic-witness/lowering, induction
+and automatic internal-equivalence failures remain archived; only the named
+successful recipes qualify. The TAGE miter proves useful bits zero as assertions,
+not assumptions, and does not require the intentionally changed decay signal to
+match. Reused synthesis numbers come from frozen raw artifacts, not reruns.
+
+### Remaining blockers and effort-ranked next checks
+
+| Priority/path | Established source contract or reproduced result | Next faithful check / constraint |
+|---|---|---|
+| P0 OoO store issue | Live `g6lc_ooo_dispatch` accepts a store but does not issue it in the eight-cycle reproducer; basic ALU passes. LSQ any-store state blocks the store itself. | Define dispatch/AGU/LSQ/LSU store order and commit identity together; never merely remove the block. |
+| P0 OoO rename admission | Request validity and enable are gated by `can_go`, while `can_go` depends on rename stall. | Reproduce exhausted freelist feedback; separate ungated capacity calculation from committed updates. |
+| P0 LSQ allocation/age/STL | Full means no free entry, not sufficient group credits; freed-slot reuse breaks index-as-age; STL data feeds address operand A. | Multi-alloc saturation, younger/older store distinction, exact byte coverage and load-result forwarding tests before speculative memory enable. |
+| P0 rename recovery | Pre-group checkpoint, no resolving-branch identifier, snapshots of changing free/busy state; full flush resets identity mapping. | Preserve older work and committed values through multiple branches, late WB/commit and traps; do not infer precision from checkpoint storage. |
+| P0 OoO hart/FP domains | Single rename/PRF namespace and generic TID bookkeeping do not establish separate hart/FP ownership. | Per-hart/per-class allocation, WB/bypass, exception and flush isolation. |
+| P0 retirement width | Four-port configuration falls through scoreboard's one-port count path; commit remains two-port oriented. | Prefix commit/count/TID conservation tests; distinguish configured width from supported retirement. |
+| P0 shared coherence | Accepted-write notification loss remains reproduced in the hub. The inclusive source's busy output is unused and eviction producer has no admission handshake. | Reserve invalidation obligations and settle write visibility; retain multiple victims under backpressure before scaling traffic. |
+| P1 predictor context | Multi-slot base row/index overlap, per-window tagged provider, and fetch-hart folds used for training need explicit ownership. | Opposing branches within a window and fetch/resolve-hart mismatch accuracy tests; no blind capacity increase. |
+| P1 prediction checkpoints | Push and pop are both driven from resolution; same-cycle count assignments and checkpoint association need reconciliation. | FIFO conservation plus branch-correlated prediction-time snapshots, before claiming speculative recovery or right-sizing. |
+| P1 STQ/cancellation | Page-offset stalls, full-address forwarding and one-shot saved forwards coexist with different cancel/flush paths. | Full PA/byte-enable, same-PA peer write, fence/trap and commit handoff traces; preserve existing passing SMT2 behavior. |
+| P1 cache refill errors | Serialized cacheable fill installs data and returns OKAY without a dedicated response-error accumulator. | Cacheable SLVERR/DECERR refill, no poisoned-line install and retry tests; bypass-error tests alone are insufficient. |
+| P1 warm fetch | Prior traces demonstrate initiation interval two, but cycle-level IQ/backend reasons are incomplete. | Add neutral occupancy/readiness observations before registered fetch overlap; never reintroduce combinational ready feedback. |
+| P2 real nonblocking L2/L3 | L3 reuses the serial L2 engine; waiter pop is tied low in the live top. | End-to-end waiter data/ID/response routing, refill/eviction/coherence and request credits before advertising MLP. |
+| P2 area/physical | IQ compaction, tag flops and speculative checkpoints remain cost candidates. | Prove lifetimes first, then mapped macro/STA/power comparisons; no physical area from generic counts alone. |
+
+The two-entry MSHR package promotion and prior fetch/predictor fixes remain intact.
+No OoO, L3, replacement or cacheability option is newly enabled. Full source-bound
+platform, firmware/ISA/FP/RVH/FPGA, DFT and physical qualification remain open.
 
 ## 1. Spec map (RISC-V identity of “AVX” + H)
 
@@ -115,14 +190,36 @@ core/include/cv64a6_server_math_v_config_pkg.sv  # VExtEn=1, CvxifEn=0
 
 **Live next (authoritative ordered list + file priors):**
 [`AGENTS-todo.md`](../AGENTS-todo.md) — **Current phase** and **Practical next**.
-Perf-foundation follows the flattened F0–F5 gates in `AGENTS-todo.md`
-(2026-09-15 review): source/verdict integrity, current fetch correctness,
-two-active-hart SMT2, then integrated performance/area and release evidence.
-The former RR-specific SMT livelock attribution is withdrawn. Full checked-work
-has failed on both RR policies; historical I-cache skew is already fixed and
-HEAD uses a newer queue, so the current cause must be established directly.
-Two fetch formal harnesses contained an impossible two-hart bound and require
-non-vacuous reruns. NWORKERS=1 is not a dual-active SMT pass.
+The **2026-09-16 stability-balanced reassessment** in `AGENTS-todo.md` and the
+user-local `plan-ea69493e7a14829a.md` supersedes RR-first sequencing. E1–E6 are
+work families, not a rigid queue: retained IQ/predictor gains are the foundation;
+next measure warm-fetch supply and reproduce shared-path correctness scenarios,
+then screen serialized-MSHR right-sizing and matched CPU-visible memory service.
+Tag-SRAM feasibility/physical inputs proceed in parallel. Scheduler, concurrency,
+width and policy growth require their own bottleneck evidence.
+F0–F5 remain qualification gates, not a serial queue of historical experiments.
+Technology/library/SRAM/constraint acquisition starts in parallel, not after RTL.
+The IQ now also passes binary-state temporal induction and all twelve cover
+predicates in its reduced formal envelope. The twelve-frame BMC remains historical
+evidence; wider/FPGA/RVH and full-pipeline qualification are still separate.
+Executable-data cacheability A/B now passes its short and larger controls, but
+hot-scan ROI rises 275,593 to 374,177 cycles (+35.77%). Keep that candidate
+isolated: checked locality subsequently identifies a repeated wrong-path
+instruction-refill bottleneck rather than a cache-capacity explanation. A
+response-aligned predictor lookup plus consistent absolute-corrector repair is
+now retained after independent leaf/selector checks, SMT2 integration, broader
+stream8 controls and synthesis. Locality ROI improves about 30.77%; unchanged-policy
+hot-scan improves 4.66%. The corrector adds 99 generic leaf cells, no state bits.
+Mapped timing/power and broader release qualification remain open; do not
+automatically remove the cacheability workaround or tune RR.
+
+The demonstrated restart, redirect-owner and split-target integer failures are
+repaired and independently revalidated with the private corrected runtime.
+NWORKERS=1 is still not a dual-active SMT pass; the two activated integer
+encodings do not close natural firmware, FP isolation, ordering or physical
+qualification. The old RR-specific livelock attribution and vacuous formal
+PASS labels remain withdrawn. Do not repeat obsolete bisects to justify a new
+optimization; use the current accepted-stream and cacheability contracts.
 
 Preserve completed leaf and mapped equivalence through 8 KiB at their scope;
 16 KiB collect and production mapped/physical gates remain incomplete. The
