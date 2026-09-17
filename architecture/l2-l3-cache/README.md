@@ -336,6 +336,75 @@ source-bound platform verification, physical implementation, broader ISA/FP and
 coherence/visibility qualification remain open; the hub invalidation-loss test
 still fails and is not waived by these matched results.
 
+### Same-line hit-under-miss (first nonblocking increment)
+
+**Starting state.** `g6lc_l2_top` was strictly single-transaction: `S_IDLE`
+accepted one request and a miss ran `S_TAG → S_MISS_AR → S_MISS_R →
+S_MISS_INSTALL → S_HIT_RESP → S_IDLE`. The controller is only ever in `S_TAG`
+when no fill is outstanding, so `mshr_merged` could never be true and
+`waiter_pop_i` was hardwired to `1'b0`. That is why MSHR depth measured
+irrelevant earlier: peak occupancy was structurally one.
+
+**Change.** While a fill is outstanding (`S_MISS_AR/R/INSTALL` only), a further
+cacheable, non-locked read to the **same line** is accepted and parked as an MSHR
+waiter; after install each waiter is popped and served from the filled line with
+its own AXI id and its own beats. MSHR completion moved from `S_MISS_INSTALL` to
+the end of the response so the entry stays valid while waiters drain. Merges are
+refused during the drain, which bounds the waiter list and makes termination
+trivial. `g6lc_l2_mshr` gained a per-waiter payload channel (`META_WIDTH`,
+`alloc_meta_i`, `waiter_meta_o`) that shifts in lockstep with the waiter ids and
+is excluded from every admission, ordering, occupancy and completion equation.
+
+The payload stores only the in-line **offset** plus len/size, not the full
+address: a waiter is on the primary's line by construction. Storing the whole
+address first cost **+634 flops at depth 2** versus **+170** for the offset form —
+about 4x, for no added capability.
+
+**Measured (leaf fixture, 4 KiB/4-way/2-bank, memory latency 8).**
+
+| Stimulus | Baseline | Candidate |
+|---|---:|---:|
+| 8 readers of one shared line | 50 cycles, 1 fill | **42 cycles**, 1 fill, 4 merges |
+| 8 readers of 8 distinct lines | 176 cycles, 8 fills | **176 cycles**, 8 fills, 0 merges |
+
+The gain is the removal of request-acceptance serialisation behind an in-flight
+fill. It is **not** a DRAM-traffic reduction: the baseline already absorbed later
+same-line readers as post-install hits, so the fill count is 1 either way. The
+different-line control is unchanged, confirming no regression where merging
+cannot apply.
+
+Area for the mapped controller/MSHR/bank portion:
+
+| MSHR depth | Cells before → after | Flops |
+|---|---:|---:|
+| 2 (production default) | 32,609 → **32,910** | 4,281 → 4,451 |
+| 8 | 33,899 → 38,106 | 4,693 → 5,367 |
+| 16 | 37,323 → 44,394 | 5,239 → 6,585 |
+
+Cost scales with `depth × MAX_WAITERS`; at the promoted depth of two it is +301
+generic cells and +170 flops, which does not undo the earlier depth-two saving.
+
+**Evidence.** `review-l2-hum-v3`: seven contract scenarios and five injected-error
+controls pass — same-line merge with observed merge count (engagement proven
+directly, not inferred), waiters with a different len/size/offset than the
+primary, one more same-line reader than there are waiter slots, refusal of
+different-line/non-cacheable/locked requests during the fill, and primary-then-
+attach-order service. `review-l2-hum-baseline-v3` reproduces `HUM_NOT_ENGAGED` on
+the pre-change build, so the contract test is not vacuous.
+`review-l2-hum-regress-v5` vs `review-l2-hum-baseline-v1`: all 32 existing L2
+records over depths 16/8/4/2 and both memory profiles are **phase-identical**,
+compared against a matched baseline build rather than a figure from an older
+harness revision. `review-rtl-audit-mshr-meta-v1` re-runs the MSHR proofs
+unchanged and they still pass, which is the evidence that the payload channel is
+non-intrusive.
+
+**Still not nonblocking.** Only one line fill is outstanding at a time; misses to
+*different* lines still serialise (8 distinct-line readers remain 176 cycles with
+8 fills and no memory-level parallelism). Multiple concurrent DRAM fills with
+response routing/reordering, waiter response-error handling, and write
+interleaving remain the open P2 work. No end-to-end speedup is claimed: every
+SMT2 and stream8 cookie is unchanged (below).
+
 ### Generic MSHR merge/retention repair (broad RTL review)
 
 The live generic leaf previously advertised ready for a matching full waiter queue

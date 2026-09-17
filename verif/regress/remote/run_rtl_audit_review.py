@@ -89,7 +89,10 @@ def main():
         configurations.append(('decay',f's{slots}-c{rvc}',[f'-GSLOTS={slots}',f'-GRVC={rvc}'],[(0,'TAGE_DECAY' if before else None)]))
     for nc in ([3] if before else [1,3,4]):
         configurations.append(('incl',f'n{nc}',[f'-GNC={nc}'],[(0,'L3_SOURCE_ACK' if before else None)]))
-    if dispatch_mode:configurations=[('dispatch','n2',[],[(0,None),(1,'DISPATCH_STORE_PROGRESS')])]
+    if dispatch_mode:
+        cases=[(0,None),(1,'DISPATCH_STORE_PROGRESS' if before else None)]
+        if not before:cases+=[(2,None),(3,None)]
+        configurations=[('dispatch','n2',[],cases)]
     results=[]
     for kind,geometry,parameters,cases in configurations:
         if os.environ.get('REVIEW_RTL_KIND') and kind != os.environ['REVIEW_RTL_KIND']:continue
@@ -105,7 +108,9 @@ def main():
         assert str(Path(runtime_info['originalRoot'])/'include/verilated_funcs.h') not in dependencies
         exe=model/'review-test'
         trials=[(scenario,False,error) for scenario,error in cases]
-        if not before and not dispatch_mode:trials.append((0,True,{'iq':'IQ_ISSUE','mshr':'MSHR_ADMISSION','decay':'TAGE_DECAY','incl':'L3_PAYLOAD'}[kind]))
+        if not before:
+            if dispatch_mode:trials+=[(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER')]
+            else:trials.append((0,True,{'iq':'IQ_ISSUE','mshr':'MSHR_ADMISSION','decay':'TAGE_DECAY','incl':'L3_PAYLOAD'}[kind]))
         for scenario,negative,error in trials:
             cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])
             p=subprocess.run(cmd,cwd=work,capture_output=True,text=True,timeout=30)

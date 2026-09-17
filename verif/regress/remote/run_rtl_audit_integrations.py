@@ -14,10 +14,32 @@ import sys
 def digest(p):return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+def arch_digest(p):
+ # Retirement trace with the leading retirement-cycle column removed, so an
+ # architecturally identical run whose instructions retire a cycle earlier is
+ # still recognised as identical. PC, encoding and privilege are all retained.
+ h=hashlib.sha256()
+ for line in p.read_text(errors='replace').splitlines():
+  parts=line.split(None,1)
+  h.update(((parts[1] if len(parts)>1 else line)+'\n').encode())
+ return h.hexdigest()
+
+
+def golden_arch(record_root,exact_hashes):
+ # Bind to the frozen trace files by their recorded exact hash, never by name.
+ out={}
+ for name,value in exact_hashes.items():
+  for candidate in record_root.rglob(name):
+   if digest(candidate)==value:
+    out[name]=arch_digest(candidate);break
+  assert name in out,(name,value)
+ return out
+
+
 def main():
  root=Path(os.environ['TH_RUN_DIR']);out=Path(os.environ['TH_OUT_DIR']);data=Path(os.environ['TH_DATA_DIR'])
  frozen=Path('/opt/testharness/runs/review-l2-size-integrations-20260916')
- overlays=['core/ooo/g6lc_iq.sv','core/frontend/g6lc_bp_tage.sv','corev_apu/l2_cache/g6lc_l2_mshr.sv','corev_apu/src/g6lc_cluster.sv']
+ overlays=['core/ooo/g6lc_iq.sv','core/frontend/g6lc_bp_tage.sv','corev_apu/l2_cache/g6lc_l2_mshr.sv','corev_apu/l2_cache/g6lc_l2_top.sv','corev_apu/src/g6lc_cluster.sv']
  results=[];models=[]
  for target in ['g6lc64_smt2','g6lc64_stream8']:
   previous=frozen/(target+'-depth2')/'output'
@@ -71,15 +93,21 @@ def main():
    for field in before.get('report',{}):
     values=[int(v,16) for v in re.findall(r'\[trace\] t=\d+ tag='+field+r' loc=0x([0-9a-fA-F]+)',text)]
     assert len(values)>=2 and values[-1]==values[-2];report[field]=values[-1]
-   matched=p.returncode==before['rc'] and '%Error' not in text and 'Assertion failed' not in text and cookies==before['cookie'] and retirement==before['retirement']
-   if target=='g6lc64_smt2':matched=matched and trace_sha==before['traceSha256']
+   # Architectural identity (instruction stream) is required. Exact identity
+   # additionally pins retirement cycles; it is recorded separately because a
+   # cache-timing change can retire the same instructions a cycle earlier.
+   arch={q.name:arch_digest(q) for q in work.glob('trace_hart_*.dasm')}
+   expected_arch=golden_arch(record_root,before['retirement'])
+   timing_identical=retirement==before['retirement']
+   matched=p.returncode==before['rc'] and '%Error' not in text and 'Assertion failed' not in text and cookies==before['cookie'] and arch==expected_arch
+   if target=='g6lc64_smt2':matched=matched and trace_sha==before['traceSha256'] and timing_identical
    else:matched=matched and report==before['report'] and not trace.exists()
-   record={'target':target,'tag':tag,'matchedBaseline':matched,'rc':p.returncode,'cookie':cookies,'retirement':retirement,'traceSha256':trace_sha,'report':report,'modelSha256':model_sha,'elfSha256':digest(elf),'negativeControl':before.get('negativeControl',False),'strictQualification':False}
+   record={'target':target,'tag':tag,'matchedBaseline':matched,'rc':p.returncode,'cookie':cookies,'retirement':retirement,'retirementArch':arch,'timingIdentical':timing_identical,'traceSha256':trace_sha,'report':report,'modelSha256':model_sha,'elfSha256':digest(elf),'negativeControl':before.get('negativeControl',False),'strictQualification':False}
    results.append(record);(out/'results.json').write_text(json.dumps(results,indent=2));assert matched,record
    assert digest(exe)==model_sha
   if target=='g6lc64_smt2':shutil.copy2(previous/'analysis.json',result/'reference-analysis-bound-by-identical-traces.json')
   assert all(digest(repo/name)==value for name,value in closed.items())
- (out/'assessment.json').write_text(json.dumps({'allMatched':True,'records':len(results),'scope':'same checked execution/timing as immutable qualified depth-two models; no OoO/L3 release claim','sourceOverlays':overlays},indent=2))
+ (out/'assessment.json').write_text(json.dumps({'allMatched':True,'records':len(results),'cycleIdenticalRecords':sum(1 for r in results if r['timingIdentical']),'scope':'identical checked results/cookies and architectural instruction streams vs the immutable qualified depth-two models; records with timingIdentical=false retire the same instructions at shifted cycles; no OoO/L3 release claim','sourceOverlays':overlays},indent=2))
  return 0
 
 

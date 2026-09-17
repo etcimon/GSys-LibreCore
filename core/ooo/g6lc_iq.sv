@@ -5,7 +5,7 @@
 // Bottleneck optimizations:
 //   * Same-cycle WB tag wakeup
 //   * Same-cycle dispatch/WB capture without speculative issue-time wakeup
-//   * mem_stall only blocks LOAD/STORE; ALU/MULT/CTRL issue under mem pressure
+//   * mem_stall only blocks LOAD; STORE/ALU/MULT/CTRL issue under mem pressure
 //   * Dual-grant oldest-ready up to NrIssuePorts
 
 module g6lc_iq
@@ -93,10 +93,14 @@ module g6lc_iq
     grants = 0;
     for (int unsigned e = 0; e < DEPTH; e++) begin
       automatic logic ready;
-      automatic logic is_mem;
+      automatic logic is_ld;
       ready  = q_chain[e].valid && q_chain[e].rs1_rdy && q_chain[e].rs2_rdy;
-      is_mem = (q_chain[e].sbe.fu == LOAD) || (q_chain[e].sbe.fu == STORE);
-      if (ready && !(is_mem && mem_stall_i) && grants < CVA6Cfg.NrIssuePorts) begin
+      // mem_stall_i (older_st | md_stall) gates LOADs only. A STORE allocates its
+      // LSQ entry at dispatch and older_st is derived from that entry, so gating
+      // STORE here would block the issue -> AGU -> WB path that is the only way to
+      // resolve and free it: the first store would deadlock permanently.
+      is_ld  = (q_chain[e].sbe.fu == LOAD);
+      if (ready && !(is_ld && mem_stall_i) && grants < CVA6Cfg.NrIssuePorts) begin
         issue_valid_o[grants] = 1'b1;
         issue_sbe_o[grants]   = q_chain[e].sbe;
         issue_orig_o[grants]  = q_chain[e].orig;

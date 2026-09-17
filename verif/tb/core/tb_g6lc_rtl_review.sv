@@ -184,7 +184,8 @@ module tb_g6lc_review_dispatch;
   logic[1:0] dv=0,da,iv;
   sbe_t[1:0] ds='0,issued;
   logic[1:0][31:0] orig;
-  int scenario,seen;
+  int scenario,seen,seen_st,seen_ld;
+  bit negative;
   g6lc_ooo_dispatch #(.CVA6Cfg(C),.scoreboard_entry_t(sbe_t)) dut(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(1'b0),.flush_unissued_i(1'b0),.cancelled_mask_i('0),
     .dispatch_sbe_i(ds),.dispatch_orig_i('0),.dispatch_valid_i(dv),.dispatch_ack_o(da),
@@ -194,11 +195,50 @@ module tb_g6lc_review_dispatch;
     .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o());
   task automatic tick;clk=1;#2;clk=0;#2;endtask
   initial begin
-    scenario=0;seen=0;void'($value$plusargs("scenario=%d",scenario));#2;tick();rst_n=1;
-    ds[0].fu=scenario==0?ALU:STORE;ds[0].op=scenario==0?ADD:SD;ds[0].pc=64'h1000;ds[0].trans_id=1;dv=1;
-    #2;if(!da[0])$fatal(1,"DISPATCH_ADMISSION");tick();dv=0;
-    repeat(8)begin #2;if(iv[0])begin if(issued[0].trans_id!=1)$fatal(1,"DISPATCH_ID");seen++;end tick();end
-    if(seen!=1)$fatal(1,"DISPATCH_STORE_PROGRESS scenario=%0d issued=%0d",scenario,seen);
+    scenario=0;seen=0;seen_st=0;seen_ld=0;
+    negative=$test$plusargs("oracle_negative");
+    void'($value$plusargs("scenario=%d",scenario));#2;tick();rst_n=1;
+    case(scenario)
+      0,1:begin
+        ds[0].fu=scenario==0?ALU:STORE;ds[0].op=scenario==0?ADD:SD;ds[0].pc=64'h1000;ds[0].trans_id=1;dv=1;
+        #2;if(!da[0])$fatal(1,"DISPATCH_ADMISSION");tick();dv=0;
+        repeat(8)begin #2;if(iv[0])begin if(issued[0].trans_id!=(negative?4'd2:4'd1))$fatal(1,"DISPATCH_ID");seen++;end tick();end
+        if(seen!=1)$fatal(1,"DISPATCH_STORE_PROGRESS scenario=%0d issued=%0d",scenario,seen);
+      end
+      // Two stores: neither may block the other out of issue.
+      2:begin
+        ds[0].fu=STORE;ds[0].op=SD;ds[0].pc=64'h1000;ds[0].trans_id=1;
+        ds[1].fu=STORE;ds[1].op=SD;ds[1].pc=64'h1004;ds[1].trans_id=2;dv=2'b11;
+        #2;if(!da[0]||!da[1])$fatal(1,"DISPATCH_ADMISSION");tick();dv=0;
+        repeat(8)begin
+          #2;
+          for(int p=0;p<2;p++)if(iv[p])begin
+            if(issued[p].trans_id==4'd1)seen_st++;
+            if(issued[p].trans_id==4'd2)seen_ld++;
+          end
+          tick();
+        end
+        if(seen_st!=1||seen_ld!=(negative?2:1))$fatal(1,"DISPATCH_STORE_PAIR a=%0d b=%0d",seen_st,seen_ld);
+      end
+      // Ordering guard: the load must not issue while an older store address is
+      // unresolved. No writeback is supplied, so the store never resolves.
+      3:begin
+        ds[0].fu=STORE;ds[0].op=SD;ds[0].pc=64'h1000;ds[0].trans_id=1;
+        ds[1].fu=LOAD;ds[1].op=LD;ds[1].pc=64'h1004;ds[1].trans_id=2;dv=2'b11;
+        #2;if(!da[0]||!da[1])$fatal(1,"DISPATCH_ADMISSION");tick();dv=0;
+        repeat(8)begin
+          #2;
+          for(int p=0;p<2;p++)if(iv[p])begin
+            if(issued[p].trans_id==4'd1)seen_st++;
+            if(issued[p].trans_id==4'd2)seen_ld++;
+          end
+          tick();
+        end
+        if(seen_st!=1)$fatal(1,"DISPATCH_STORE_PROGRESS scenario=3 issued=%0d",seen_st);
+        if(seen_ld!=(negative?1:0))$fatal(1,"DISPATCH_LOAD_ORDER load_issued=%0d",seen_ld);
+      end
+      default:$fatal(1,"DISPATCH_SCENARIO");
+    endcase
     $display("RTL_REVIEW_PASS dispatch scenario=%0d",scenario);$finish;
   end
 endmodule

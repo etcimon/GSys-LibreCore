@@ -162,8 +162,23 @@ package promotion is recorded in `review-l2-size-integrations-20260916` and
   Usefulness remains inactive in the top; do not claim accuracy or physical-state savings.
 - [x] Fresh four-file-overlay SMT2/stream8 models match all24 frozen depth-two
   records, including timing and operand/retirement identity. No OoO/L3 enable.
-- [ ] Resolve reproduced live OoO store self-block (ALU control passes) together
-  with LSQ/LSU age, byte coverage, result forwarding and commit identity.
+- [x] Resolve reproduced live OoO store self-block: `mem_stall_i` now gates LOAD
+  only, since a store sets `older_st` at dispatch and so blocked its own
+  issue→AGU→WB resolution. Six live-path records pass (ALU, store, two stores,
+  load-ordering guard) with two injected controls failing. Load conservatism is
+  deliberately unchanged.
+- [ ] LSQ store lifetime/age: stores free at WB not commit, `older_store_pending_o`
+  is not age-aware, and commit only drains through port 0. Needs a monotonic
+  sequence number before moving freeing to commit, or an older load deadlocks
+  behind a younger store.
+- [x] Land same-line L2 hit-under-miss: merged readers are accepted during a fill
+  and drained with their own id/beats; waiter payload stores the in-line offset
+  only (+170 flops at depth 2 vs +634 for a full address). Leaf 8 shared-line
+  readers 50→42 cycles; different-line control unchanged; 32/32 existing L2
+  records phase-identical to a matched baseline; MSHR proofs still pass.
+- [ ] Real nonblocking L2/L3: still one outstanding fill (8 distinct-line misses
+  remain 176 cycles / 8 fills, no MLP). Needs concurrent fills with response
+  routing/reordering, waiter error propagation and write interleaving.
 - [ ] Reproduce and close rename admission feedback, branch-correlated recovery,
   committed-map preservation, hart/FP ownership and wide-commit counting contracts.
 - [ ] Reconcile predictor per-slot PC / fetch-vs-resolve history / checkpoint

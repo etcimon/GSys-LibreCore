@@ -512,9 +512,12 @@ module tb_g6lc_l2;
           end
         end
       end
-      if (dut.gen_l2.mshr_complete) begin
+      // The install event is the committed tag write itself. MSHR completion is
+      // deliberately deferred past the response so that same-line readers which
+      // merged during the fill can still be drained from the entry.
+      if (dut.gen_l2.tag_write && !dut.gen_l2.bank_conflict) begin
         if (!policy_cacheable || policy_hit || !policy_lookup_seen ||
-            !dut.gen_l2.tag_write || int'(dut.gen_l2.tag_wway) != policy_way ||
+            int'(dut.gen_l2.tag_wway) != policy_way ||
             int'(dut.gen_l2.tag_windex) != policy_set)
           $fatal(1, "policy install way/set mismatch");
         policy_lines[policy_set][policy_way] = policy_line;

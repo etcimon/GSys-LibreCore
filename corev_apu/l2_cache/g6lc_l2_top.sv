@@ -191,6 +191,21 @@ module g6lc_l2_top
   logic mshr_alloc, mshr_ready, mshr_merged, mshr_complete, mshr_full, mshr_empty;
   logic [MSHR_W-1:0] mshr_alloc_idx, mshr_complete_idx;
   logic [AXI_ADDR_WIDTH-1:0] mshr_alloc_line;
+  // Hit-under-miss: waiter payload is the requester's own AXI read shape, so a
+  // merged reader is served its own beats rather than the primary's. A waiter
+  // is on the same line as the primary by construction, so only the in-line
+  // offset is stored — keeping the full address here cost ~4x the waiter flops.
+  localparam int unsigned MSHR_META_W = OFF_BITS + 8 + 3;
+  logic                    mshr_lookup_hit;
+  logic [AXI_ID_WIDTH-1:0] mshr_alloc_id;
+  logic [MSHR_META_W-1:0]  mshr_alloc_meta;
+  logic                    mshr_waiter_pop, mshr_waiter_valid;
+  logic [AXI_ID_WIDTH-1:0] mshr_waiter_id;
+  logic [MSHR_META_W-1:0]  mshr_waiter_meta;
+  logic [OFF_BITS-1:0]     waiter_off;
+  logic [7:0]              waiter_len;
+  logic [2:0]              waiter_size;
+  assign {waiter_off, waiter_len, waiter_size} = mshr_waiter_meta;
   // Optional round-robin victim pointer (RR_EN). rr_adv strobes on a
   // successful install; rr_victim_way is the pointer read for the current set.
   logic rr_adv;
@@ -200,27 +215,30 @@ module g6lc_l2_top
       .DEPTH       (MSHR_DEPTH),
       .ADDR_WIDTH  (AXI_ADDR_WIDTH),
       .ID_WIDTH    (AXI_ID_WIDTH),
-      .MAX_WAITERS (4)  // multi-core same-line attach depth
+      .MAX_WAITERS (4),  // multi-core same-line attach depth
+      .META_WIDTH  (MSHR_META_W)
   ) i_mshr (
       .clk_i,
       .rst_ni,
       .flush_i           (1'b0),
       .alloc_i           (mshr_alloc),
       .alloc_line_addr_i (mshr_alloc_line),
-      .alloc_id_i        (slv_req_i.ar.id),
+      .alloc_id_i        (mshr_alloc_id),
+      .alloc_meta_i      (mshr_alloc_meta),
       .alloc_is_write_i  (1'b0),
       .alloc_ready_o     (mshr_ready),
       .alloc_merged_o    (mshr_merged),
       .alloc_idx_o       (mshr_alloc_idx),
       .lookup_line_addr_i(mshr_alloc_line),
-      .lookup_hit_o      (),
+      .lookup_hit_o      (mshr_lookup_hit),
       .lookup_idx_o      (),
       .complete_i        (mshr_complete),
       .complete_idx_i    (mshr_complete_idx),
       .complete_id_o     (),
-      .waiter_valid_o    (),
-      .waiter_id_o       (),
-      .waiter_pop_i      (1'b0),  // multi-waiter drain wired when multi-miss resp path lands
+      .waiter_valid_o    (mshr_waiter_valid),
+      .waiter_id_o       (mshr_waiter_id),
+      .waiter_meta_o     (mshr_waiter_meta),
+      .waiter_pop_i      (mshr_waiter_pop),
       .empty_o           (mshr_empty),
       .full_o            (mshr_full),
       .merge_full_o      (),
@@ -239,6 +257,7 @@ module g6lc_l2_top
     S_MISS_AR,
     S_MISS_R,
     S_MISS_INSTALL,
+    S_WAIT_POP,
     S_BYPASS_AR,
     S_BYPASS_R,
     S_BYPASS_AW,
@@ -268,6 +287,9 @@ module g6lc_l2_top
   // r_valid && !r_ready and all subsequent DRAM traffic deadlocks (OpenSBI hang
   // after MaxMstTrans fix: a2m=READ @0x80000080, L2 IDLE).
   logic mst_r_ot_q, mst_r_ot_d;
+  // Set while S_HIT_RESP is serving a miss fill (primary or a merged waiter), so
+  // the plain tag-hit path keeps its original completion behaviour.
+  logic miss_serve_q, miss_serve_d;
 
   // First AXI beat index within the L2 line for the captured AR address.
   // Without this, a hit on a 64 B line always returned beats from offset 0,
@@ -325,8 +347,14 @@ module g6lc_l2_top
 
     mshr_alloc       = 1'b0;
     mshr_alloc_line  = line_align(addr_q);
+    // The primary's id is the captured one: the AR bus has already moved on by
+    // the time S_TAG allocates. A merging waiter overrides both below.
+    mshr_alloc_id    = id_q;
+    mshr_alloc_meta  = {addr_q[OFF_BITS-1:0], len_q, size_q};
+    mshr_waiter_pop  = 1'b0;
     mshr_complete    = 1'b0;
     mshr_complete_idx = mshr_idx_q;
+    miss_serve_d     = miss_serve_q;
     rr_adv           = 1'b0;
 
     state_d     = state_q;
@@ -460,6 +488,7 @@ module g6lc_l2_top
       S_HIT_WAIT: begin
         state_d = S_HIT_RESP;
         line_d  = data_a_rdata;
+        miss_serve_d = 1'b0;
       end
 
       S_HIT_RESP: begin
@@ -472,12 +501,33 @@ module g6lc_l2_top
         slv_resp_o.r.data  = line_q[beat_idx*AXI_DATA_WIDTH +: AXI_DATA_WIDTH];
         if (slv_req_i.r_ready) begin
           if (beat_q == len_q) begin
-            state_d = S_IDLE;
-            beat_d  = '0;
+            beat_d = '0;
+            // Serve any same-line reader that attached during the fill before
+            // retiring the MSHR entry; the entry must stay valid until then.
+            if (miss_serve_q && mshr_waiter_valid) begin
+              state_d = S_WAIT_POP;
+            end else begin
+              if (miss_serve_q) mshr_complete = 1'b1;
+              miss_serve_d = 1'b0;
+              state_d = S_IDLE;
+            end
           end else begin
             beat_d = beat_q + 1'b1;
           end
         end
+      end
+
+      // Pop the next merged waiter and re-serve it from the filled line.
+      S_WAIT_POP: begin
+        mshr_waiter_pop = 1'b1;
+        id_d            = mshr_waiter_id;
+        // Same line as the primary: keep the line bits, swap in the offset.
+        addr_d          = {addr_q[AXI_ADDR_WIDTH-1:OFF_BITS], waiter_off};
+        len_d           = waiter_len;
+        size_d          = waiter_size;
+        beat_d          = '0;
+        miss_serve_d    = 1'b1;
+        state_d         = S_HIT_RESP;
       end
 
       // ---------------- MISS: issue line fill ----------------
@@ -534,8 +584,9 @@ module g6lc_l2_top
         data_b_be    = '1;
 
         if (!bank_conflict) begin
-          mshr_complete = 1'b1;
-          mshr_complete_idx = mshr_idx_q;
+          // MSHR completion is deferred to the end of the response so merged
+          // same-line waiters can still be drained from this entry.
+          miss_serve_d = 1'b1;
           // RR pointer tracks the last-installed way (advances past it).
           // Applies to invalid-first installs too, keeping order consistent.
           rr_adv = RR_EN;
@@ -628,6 +679,25 @@ module g6lc_l2_top
       default: state_d = S_IDLE;
     endcase
 
+    // ---------------- Hit-under-miss: attach same-line readers ----------------
+    // While a line fill is outstanding, a further cacheable read to the SAME
+    // line is accepted and parked as an MSHR waiter instead of stalling until
+    // the controller returns to S_IDLE. One DRAM fill then serves all of them.
+    // Deliberately NOT accepted during S_HIT_RESP/S_WAIT_POP: refusing merges
+    // while draining bounds the waiter list, so the drain always terminates.
+    // mshr_lookup_hit/mshr_ready are probes of the registered table (they do not
+    // depend on mshr_alloc), so this cannot form a combinational loop.
+    if ((state_q == S_MISS_AR || state_q == S_MISS_R || state_q == S_MISS_INSTALL) &&
+        slv_req_i.ar_valid && l2_is_cacheable(slv_req_i.ar.cache) && !slv_req_i.ar.lock &&
+        (line_align(slv_req_i.ar.addr) == line_align(addr_q)) &&
+        mshr_lookup_hit && mshr_ready) begin
+      slv_resp_o.ar_ready = 1'b1;
+      mshr_alloc          = 1'b1;
+      mshr_alloc_id       = slv_req_i.ar.id;
+      mshr_alloc_meta     = {slv_req_i.ar.addr[OFF_BITS-1:0], slv_req_i.ar.len,
+                             slv_req_i.ar.size};
+    end
+
     // ---- Master R drain (must run after case so it can override r_ready) ----
     // Track AR→R outstanding so we never leave the DRAM R channel blocked:
     // axi2mem stays in READ with r_valid && !r_ready until r_last is taken.
@@ -676,6 +746,7 @@ module g6lc_l2_top
       beat_q      <= '0;
       mshr_idx_q  <= '0;
       mst_r_ot_q  <= 1'b0;
+      miss_serve_q <= 1'b0;
     end else begin
       state_q     <= state_d;
       addr_q      <= addr_d;
@@ -692,6 +763,7 @@ module g6lc_l2_top
       beat_q      <= beat_d;
       mshr_idx_q  <= mshr_idx_d;
       mst_r_ot_q  <= mst_r_ot_d;
+      miss_serve_q <= miss_serve_d;
     end
   end
 

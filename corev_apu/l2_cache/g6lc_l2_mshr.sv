@@ -13,7 +13,11 @@ module g6lc_l2_mshr #(
     parameter int unsigned DEPTH       = 8,
     parameter int unsigned ADDR_WIDTH  = 64,
     parameter int unsigned ID_WIDTH    = 4,
-    parameter int unsigned MAX_WAITERS = 4  // multi-core same-line attach depth
+    parameter int unsigned MAX_WAITERS = 4,  // multi-core same-line attach depth
+    // Opaque per-waiter payload carried alongside the waiter id (e.g. the
+    // requester's AXI addr/len/size). Purely additive: it never participates in
+    // admission, ordering, occupancy or completion.
+    parameter int unsigned META_WIDTH  = 1
 ) (
     input  logic                         clk_i,
     input  logic                         rst_ni,
@@ -22,6 +26,7 @@ module g6lc_l2_mshr #(
     input  logic                         alloc_i,
     input  logic [ADDR_WIDTH-1:0]        alloc_line_addr_i,
     input  logic [ID_WIDTH-1:0]          alloc_id_i,
+    input  logic [META_WIDTH-1:0]        alloc_meta_i,
     input  logic                         alloc_is_write_i,
     output logic                         alloc_ready_o,
     output logic                         alloc_merged_o,
@@ -37,6 +42,7 @@ module g6lc_l2_mshr #(
     // Extra waiters after fill (pop one per cycle)
     output logic                         waiter_valid_o,
     output logic [ID_WIDTH-1:0]          waiter_id_o,
+    output logic [META_WIDTH-1:0]        waiter_meta_o,
     input  logic                         waiter_pop_i,
     // Status
     output logic                         empty_o,
@@ -56,6 +62,7 @@ module g6lc_l2_mshr #(
     logic                          is_write;
     // Packed multi-dim (not unpacked []) so the struct stays packed for Verilator.
     logic [NW-1:0][ID_WIDTH-1:0]   waiters;     // secondary multi-core waiters
+    logic [NW-1:0][META_WIDTH-1:0] wmeta;       // payload paired 1:1 with waiters
     logic [NW_W-1:0]               nwait;       // 0..NW
   } entry_t;
 
@@ -108,6 +115,7 @@ module g6lc_l2_mshr #(
   // Waiter pop port (drain after primary complete — controller may sequence)
   assign waiter_valid_o = mem_q[complete_idx_i].valid && (mem_q[complete_idx_i].nwait != '0);
   assign waiter_id_o    = mem_q[complete_idx_i].waiters[0];
+  assign waiter_meta_o  = mem_q[complete_idx_i].wmeta[0];
 
   always_comb begin
     mem_d   = mem_q;
@@ -121,8 +129,10 @@ module g6lc_l2_mshr #(
     end else begin
       // Pop one waiter (shift queue)
       if (waiter_pop_i && mem_q[complete_idx_i].valid && mem_q[complete_idx_i].nwait != '0) begin
-        for (int unsigned w = 0; w < NW - 1; w++)
+        for (int unsigned w = 0; w < NW - 1; w++) begin
           mem_d[complete_idx_i].waiters[w] = mem_q[complete_idx_i].waiters[w+1];
+          mem_d[complete_idx_i].wmeta[w]   = mem_q[complete_idx_i].wmeta[w+1];
+        end
         mem_d[complete_idx_i].nwait = mem_q[complete_idx_i].nwait - 1'b1;
       end
       // Alloc new or attach waiter
@@ -130,6 +140,7 @@ module g6lc_l2_mshr #(
         automatic logic [NW_W-1:0] wi;
         wi = mem_d[merge_idx].nwait;
         mem_d[merge_idx].waiters[wi] = alloc_id_i;
+        mem_d[merge_idx].wmeta[wi]   = alloc_meta_i;
         mem_d[merge_idx].nwait       = wi + 1'b1;
       end else if (alloc_i && free_found && !merge_found) begin
         mem_d[free_idx].valid     = 1'b1;

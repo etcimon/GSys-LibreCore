@@ -82,7 +82,8 @@ match. Reused synthesis numbers come from frozen raw artifacts, not reruns.
 
 | Priority/path | Established source contract or reproduced result | Next faithful check / constraint |
 |---|---|---|
-| P0 OoO store issue | Live `g6lc_ooo_dispatch` accepts a store but does not issue it in the eight-cycle reproducer; basic ALU passes. LSQ any-store state blocks the store itself. | Define dispatch/AGU/LSQ/LSU store order and commit identity together; never merely remove the block. |
+| ~~P0 OoO store issue~~ **repaired** | `mem_stall_i` gated STORE on `older_st`, which a store sets at dispatch, blocking its own issue→AGU→WB resolution. `g6lc_iq` now gates LOAD only. Six live-path records pass incl. two-store and load-ordering guard, with two injected controls failing. | Store lifetime still ends at WB, and `older_store_pending_o` is not age-aware: holding stores to commit needs a monotonic age or it deadlocks an older load behind a younger store. |
+| P0 LSQ store lifetime/age | Stores free at writeback, not commit; index-as-age breaks on slot reuse. | Add a monotonic sequence number, then move freeing to commit across **all** commit ports (today only port 0 drains). |
 | P0 OoO rename admission | Request validity and enable are gated by `can_go`, while `can_go` depends on rename stall. | Reproduce exhausted freelist feedback; separate ungated capacity calculation from committed updates. |
 | P0 LSQ allocation/age/STL | Full means no free entry, not sufficient group credits; freed-slot reuse breaks index-as-age; STL data feeds address operand A. | Multi-alloc saturation, younger/older store distinction, exact byte coverage and load-result forwarding tests before speculative memory enable. |
 | P0 rename recovery | Pre-group checkpoint, no resolving-branch identifier, snapshots of changing free/busy state; full flush resets identity mapping. | Preserve older work and committed values through multiple branches, late WB/commit and traps; do not infer precision from checkpoint storage. |
@@ -94,8 +95,30 @@ match. Reused synthesis numbers come from frozen raw artifacts, not reruns.
 | P1 STQ/cancellation | Page-offset stalls, full-address forwarding and one-shot saved forwards coexist with different cancel/flush paths. | Full PA/byte-enable, same-PA peer write, fence/trap and commit handoff traces; preserve existing passing SMT2 behavior. |
 | P1 cache refill errors | Serialized cacheable fill installs data and returns OKAY without a dedicated response-error accumulator. | Cacheable SLVERR/DECERR refill, no poisoned-line install and retry tests; bypass-error tests alone are insufficient. |
 | P1 warm fetch | Prior traces demonstrate initiation interval two, but cycle-level IQ/backend reasons are incomplete. | Add neutral occupancy/readiness observations before registered fetch overlap; never reintroduce combinational ready feedback. |
-| P2 real nonblocking L2/L3 | L3 reuses the serial L2 engine; waiter pop is tied low in the live top. | End-to-end waiter data/ID/response routing, refill/eviction/coherence and request credits before advertising MLP. |
+| P2 real nonblocking L2/L3 | **Same-line hit-under-miss landed**: readers merging onto an in-flight fill are accepted and drained with their own id/beats (leaf 50→42 cycles for 8 shared-line readers; different-line control unchanged). Waiter pop is no longer tied low. Still one outstanding fill: 8 distinct-line misses remain 176 cycles / 8 fills, i.e. no MLP. | Multiple concurrent DRAM fills with response routing/reordering and per-fill line buffers; waiter response-error propagation; write interleaving. L3 still reuses the serial engine. |
 | P2 area/physical | IQ compaction, tag flops and speculative checkpoints remain cost candidates. | Prove lifetimes first, then mapped macro/STA/power comparisons; no physical area from generic counts alone. |
+
+### Follow-on pass: store-issue repair + L2 hit-under-miss
+
+Both changes are qualified within the scopes stated in
+`architecture/out-of-order/README.md` and `architecture/l2-l3-cache/README.md`.
+
+Integration identity was re-established with `g6lc_l2_top` **actually overlaid** —
+the earlier overlay list silently omitted it, so a first pass of this gate proved
+nothing about the L2 change. `review-rtl-audit-integrations-v4`: 24/24 records,
+every SMT2 and stream8 **cookie identical** to the frozen depth-two baselines, and
+every architectural instruction stream identical. 13 records (all SMT2) are also
+cycle-identical; the 11 stream8 records retire the same instructions 1-2 cycles
+earlier during boot, which is the expected effect of a cache-timing change and was
+confirmed by diffing the traces (80,667 identical lines, differing only in the
+retirement-cycle column). The gate now requires cookie plus architectural
+identity and records exact cycle identity separately, rather than being relaxed.
+
+Because all cookies are unchanged, **no end-to-end SMT2 or stream8 speedup is
+claimed** from hit-under-miss; the measured gain is confined to the leaf
+shared-line stimulus. Full OoO remains unqualified: the store-issue repair removes
+one deadlock, it does not close rename admission/recovery, LSQ age/forwarding,
+hart/FP ownership or wide retirement.
 
 The two-entry MSHR package promotion and prior fetch/predictor fixes remain intact.
 No OoO, L3, replacement or cacheability option is newly enabled. Full source-bound

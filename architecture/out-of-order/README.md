@@ -168,12 +168,31 @@ clock/reset and interfaces are unchanged; synthesis mapping yields the small
 sequential-cell differences shown. Precise data-qualified ALU chaining is future
 work and must respect FU latency and physical tags.
 
-**Reproduced, still open:** `review-rtl-dispatch-contract-v1` accepts one store in
-the live dispatch glue but observes no issue in eight cycles; the ALU control
-passes. The LSQ's any-valid-store flag feeds IQ memory blocking, including the
-store itself. No address/data update, WB or commit can occur in that stimulus.
-Removing the block alone is not a safe fix: store execution/commit order, LSQ age
-and LSU store-buffer handoff must be defined together.
+**Store-issue deadlock: reproduced and repaired.** `review-rtl-dispatch-contract-v1`
+accepted one store in the live dispatch glue and observed no issue in eight cycles
+while the ALU control passed. Mechanism: `mem_stall_i` is `md_stall || older_st`,
+`older_st` is the LSQ's any-valid-store flag, and a store allocates its LSQ entry
+at **dispatch** — so gating STORE on it blocked the store's own
+issue→AGU→writeback path, which is the only way that entry is ever resolved and
+freed. The first store therefore deadlocked permanently.
+
+`g6lc_iq` now applies `mem_stall_i` to **LOAD only**; stores are never blocked by
+memory pressure. The load-side gate is deliberately unchanged: loads still block
+on any in-flight store, which is what currently covers `stl_stall` being excluded
+from issue select to avoid a combinational loop (`g6lc_ooo_dispatch` 268-279).
+
+`review-rtl-dispatch-fix-v2` passes six records on the live rename/ROB/LSQ/PRF/
+memdep/dispatch/IQ path: the ALU control, the repaired store, two stores both
+issuing, and an ordering guard in which a load must not issue while an older
+store's address is unresolved. Injected `DISPATCH_ID` and `DISPATCH_LOAD_ORDER`
+controls both fail as required, so neither check is vacuous.
+
+Not fixed by this change, and still required before wider memory speculation:
+store lifetime is ended at writeback rather than at commit, and
+`older_store_pending_o` is not age-aware. Holding stores until commit without a
+monotonic age would introduce a *new* deadlock — an older load blocked by a
+younger store that cannot commit until that load retires. Age/byte-coverage,
+load-result forwarding and the LSU store-buffer handoff must be settled together.
 
 **Source-derived risks requiring separate reproducers/design:**
 - Rename admission depends on `can_go`, while `can_go` depends on rename stall;
