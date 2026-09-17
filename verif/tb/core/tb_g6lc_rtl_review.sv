@@ -316,6 +316,11 @@ module tb_g6lc_review_dispatch;
         #2;if(!da[0])$fatal(1,"DISPATCH_ADMISSION");tick();dv=0;
         repeat(3)begin #2;tick();end
         if(!dut.older_st)$fatal(1,"DISPATCH_STORE_ABSENT");
+        // Deliberately no internal $display probes here. Hierarchical reads of
+        // the dispatch/LSQ/ROB signals in this fixture are not dependable: the
+        // reported values changed when unrelated readers were added, so they
+        // produced two mutually inconsistent diagnoses. Use a VCD or a bound
+        // module if this needs to be traced inward.
         wb_v=2'b01;wb_id[0]=4'd1;#2;tick();wb_v='0;wb_id='0;#2;
         if(dut.older_st!==(negative?1'b1:1'b0))
           $fatal(1,"DISPATCH_STORE_WB_RETIRE older_st=%b",dut.older_st);

@@ -211,19 +211,29 @@ address followed by id-matched data **does** produce `stl_forward_o` with the
 right payload. Both injected controls (`LSQ_WB_RETIRE`, `LSQ_STL_DATA`) fail as
 required.
 
-So the fault is in the **dispatch-side allocation plumbing**, not in the LSQ:
-`alloc_id_i` arrives as 0 instead of the dispatched `trans_id`. The source line
-`alloc_ids[p] = dispatch_sbe_i[p].trans_id` reads correct, and the neighbouring
-`tid_is_st_d[dispatch_sbe_i[p].trans_id]` write does index the right bits, so the
-disagreement is not yet explained by inspection. One hypothesis not yet tested:
-`st_alloc[p]` asserting on a port whose `dispatch_valid_i` is low would allocate a
-spurious entry carrying an unset `trans_id`, which would also keep
-`older_store_pending_o` asserted after the real store retires.
+So the fault is on the **integrated dispatch side**, not in the LSQ. Beyond that,
+the internal cause is **not determined**, and the reason is worth recording
+because it invalidated two intermediate diagnoses:
 
-Note for whoever continues: hierarchical `$display` reads of the dispatch port
-arrays are **unreliable** here — they report 0 while the design behaves otherwise,
-an artefact of Verilator optimisation, and that cost several wrong turns. Use a
-VCD or a bound probe module; only registered state proved trustworthy.
+Hierarchical `$display` reads of the dispatch/LSQ/ROB signals in this fixture are
+**not dependable**. They first suggested the LSQ entry carried `id == 0` while a
+sibling `always_comb` read the same `trans_id` as 1, and then that the ROB latched
+the correct tid where the LSQ did not — which would have isolated the fault to the
+LSQ connection. That second reading **reversed** (ROB tid went from 1 to 0) purely
+because an unrelated extra reader of `rob_alloc_tid` was added, with no change to
+the ROB or its inputs. Values that move when an observer is added are artefacts of
+Verilator's optimisation, not evidence, so both diagnoses are withdrawn. The
+probes were removed rather than left in place to mislead.
+
+Two hypotheses were tested and **refuted** along the way: that writeback and commit
+double-free an entry (writeback frees nothing, since nothing matches), and that
+`st_alloc[p]` fires on a port whose `dispatch_valid_i` is low to create a spurious
+entry (`is_st[p]` is gated by `dispatch_valid_i[p]` at line 103).
+
+What stands on trustworthy evidence: the isolated LSQ satisfies both contracts,
+and the integrated path does not retire a store on its own writeback. The next
+instrument must reflect the evaluated netlist — a VCD, or assertions in a bound
+module — not `$display` of hierarchical references.
 
 An earlier hypothesis that writeback and commit *double-free* a store entry was
 tested and is **wrong**: because the id never matches, writeback frees nothing,

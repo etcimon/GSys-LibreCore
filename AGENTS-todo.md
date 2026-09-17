@@ -173,11 +173,12 @@ package promotion is recorded in `review-l2-size-integrations-20260916` and
   updates all miss. No store-to-load forwarding is possible today. Known-red as
   `DISPATCH_STORE_WB_RETIRE` in the dispatch reproducer. **Bisected**: driving
   `g6lc_lsq` directly with an explicit id retires and forwards correctly (4/4
-  records, both controls live), so the LSQ is sound and the loss is on the
-  dispatch side. Root cause still open — use a VCD or bound probe, since
-  hierarchical reads of the dispatch port arrays read 0 while the design behaves
-  otherwise. Untested hypothesis: `st_alloc[p]` asserting on a port whose
-  `dispatch_valid_i` is low, allocating a spurious entry with an unset id.
+  records, both controls live), so the LSQ leaf is sound and the fault is on the
+  integrated dispatch side. Internal cause undetermined: hierarchical `$display`
+  reads in this fixture are undependable (a reading reversed when an unrelated
+  reader was added), so two intermediate diagnoses were withdrawn and the probes
+  removed. Refuted: writeback/commit double-free; spurious allocation on a port
+  with `dispatch_valid_i` low. Next instrument: VCD or bound-module assertions.
 - [ ] LSQ store age/lifetime: `older_store_pending_o` is not age-aware and commit
   drains only through port 0. Needs a monotonic sequence number before the release
   point moves to commit, or an older load deadlocks behind a younger store.
