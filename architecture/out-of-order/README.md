@@ -203,14 +203,27 @@ until this is fixed: store-to-load forwarding can never fire, store addresses ar
 never learned, and store entries are only ever released by the commit-time
 "free the oldest valid store" path or by cancellation.
 
-The exact point at which `trans_id` is lost between dispatch and the LSQ
-allocation port is **not yet grounded**. `alloc_ids[p] = dispatch_sbe_i[p].trans_id`
-reads correct in source, and the neighbouring `tid_is_st_d[dispatch_sbe_i[p].trans_id]`
-write does index the right bits — so the two disagree and the cause is still
-open. Note for whoever picks this up: hierarchical `$display` reads of the
-dispatch port arrays are **unreliable** here (they read 0 while the design
-behaves otherwise, an artefact of Verilator optimisation). Use a VCD or a bound
-probe module; only registered state proved trustworthy.
+**Bisected: the LSQ itself is correct.** `tb_g6lc_review_lsq`
+(`review-lsq-direct-v2`, kind `lsq`) drives `g6lc_lsq` directly with an explicit
+`alloc_id_i`, bypassing dispatch entirely. Four records pass: allocating a store
+with id 1 and completing with id 1 **does** retire the entry, and an id-matched
+address followed by id-matched data **does** produce `stl_forward_o` with the
+right payload. Both injected controls (`LSQ_WB_RETIRE`, `LSQ_STL_DATA`) fail as
+required.
+
+So the fault is in the **dispatch-side allocation plumbing**, not in the LSQ:
+`alloc_id_i` arrives as 0 instead of the dispatched `trans_id`. The source line
+`alloc_ids[p] = dispatch_sbe_i[p].trans_id` reads correct, and the neighbouring
+`tid_is_st_d[dispatch_sbe_i[p].trans_id]` write does index the right bits, so the
+disagreement is not yet explained by inspection. One hypothesis not yet tested:
+`st_alloc[p]` asserting on a port whose `dispatch_valid_i` is low would allocate a
+spurious entry carrying an unset `trans_id`, which would also keep
+`older_store_pending_o` asserted after the real store retires.
+
+Note for whoever continues: hierarchical `$display` reads of the dispatch port
+arrays are **unreliable** here — they report 0 while the design behaves otherwise,
+an artefact of Verilator optimisation, and that cost several wrong turns. Use a
+VCD or a bound probe module; only registered state proved trustworthy.
 
 An earlier hypothesis that writeback and commit *double-free* a store entry was
 tested and is **wrong**: because the id never matches, writeback frees nothing,

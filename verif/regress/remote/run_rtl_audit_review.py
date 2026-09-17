@@ -58,7 +58,7 @@ def main():
     before=os.environ.get('REVIEW_RTL_BEFORE')=='1'
     source=out/'source';source.mkdir()
     names=['config_pkg.sv','g6lc64_smt2_config_pkg.sv','riscv_pkg.sv','ariane_pkg.sv','g6lc_iq.sv','g6lc_bp_tage_table.sv','g6lc_bp_tage.sv','g6lc_l2_mshr.sv','g6lc_coherence_pkg.sv','g6lc_l3_inclusive_inv.sv','g6lc_cluster.sv','tb_g6lc_rtl_review.sv']
-    dispatch_mode=os.environ.get('REVIEW_RTL_DISPATCH')=='1'
+    dispatch_mode=os.environ.get('REVIEW_RTL_DISPATCH')=='1' or os.environ.get('REVIEW_RTL_LSQ')=='1'
     if dispatch_mode:
         names[4:4]=['g6lc_ooo_pkg.sv']
         names+=['g6lc_rename.sv','g6lc_rob.sv','g6lc_lsq.sv','g6lc_prf.sv','g6lc_memdep.sv','g6lc_ooo_dispatch.sv']
@@ -89,7 +89,9 @@ def main():
         configurations.append(('decay',f's{slots}-c{rvc}',[f'-GSLOTS={slots}',f'-GRVC={rvc}'],[(0,'TAGE_DECAY' if before else None)]))
     for nc in ([3] if before else [1,3,4]):
         configurations.append(('incl',f'n{nc}',[f'-GNC={nc}'],[(0,'L3_SOURCE_ACK' if before else None)]))
-    if dispatch_mode:
+    if os.environ.get('REVIEW_RTL_LSQ')=='1':
+        configurations=[('lsq','direct',[],[(0,None),(1,None)])]
+    elif dispatch_mode:
         cases=[(0,None),(1,'DISPATCH_STORE_PROGRESS' if before else None)]
         # scenario 6 is a known-red reproducer: a store's writeback does not
         # retire its LSQ entry. Expect the failure until that is repaired.
@@ -111,7 +113,8 @@ def main():
         exe=model/'review-test'
         trials=[(scenario,False,error) for scenario,error in cases]
         if not before:
-            if dispatch_mode:trials+=[(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER')]
+            if kind=='lsq':trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA')]
+            elif dispatch_mode:trials+=[(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER')]
             else:trials.append((0,True,{'iq':'IQ_ISSUE','mshr':'MSHR_ADMISSION','decay':'TAGE_DECAY','incl':'L3_PAYLOAD'}[kind]))
         for scenario,negative,error in trials:
             cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])

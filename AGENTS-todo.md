@@ -171,9 +171,13 @@ package promotion is recorded in `review-l2-size-integrations-20260916` and
   a store's own `trans_id` does not retire its entry; the entry holds `id==0` and
   `addr_v`/`data_v` stay 0, so writeback retire, AGU address and store-data
   updates all miss. No store-to-load forwarding is possible today. Known-red as
-  `DISPATCH_STORE_WB_RETIRE` in the dispatch reproducer. Root cause of the lost
-  `trans_id` is still open — use a VCD or bound probe, since hierarchical reads of
-  the dispatch port arrays read 0 while the design behaves otherwise.
+  `DISPATCH_STORE_WB_RETIRE` in the dispatch reproducer. **Bisected**: driving
+  `g6lc_lsq` directly with an explicit id retires and forwards correctly (4/4
+  records, both controls live), so the LSQ is sound and the loss is on the
+  dispatch side. Root cause still open — use a VCD or bound probe, since
+  hierarchical reads of the dispatch port arrays read 0 while the design behaves
+  otherwise. Untested hypothesis: `st_alloc[p]` asserting on a port whose
+  `dispatch_valid_i` is low, allocating a spurious entry with an unset id.
 - [ ] LSQ store age/lifetime: `older_store_pending_o` is not age-aware and commit
   drains only through port 0. Needs a monotonic sequence number before the release
   point moves to commit, or an older load deadlocks behind a younger store.

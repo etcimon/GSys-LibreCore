@@ -170,6 +170,72 @@ module tb_g6lc_review_mshr;
   end
 endmodule
 
+// Bisect fixture: drives g6lc_lsq directly with an explicit allocation id, so a
+// failure here isolates the LSQ itself rather than the dispatch id plumbing.
+module tb_g6lc_review_lsq;
+  import ariane_pkg::*;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.NrWbPorts=2;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  logic clk=0,rst_n=0;
+  logic [1:0] ld_alloc='0,st_alloc='0,addr_v='0,addr_is_st='0,st_data_v='0,cmpl_v='0,cmpl_st='0;
+  logic [1:0][3:0] alloc_id='0,addr_id='0,st_data_id='0,cmpl_id='0;
+  logic [1:0][55:0] addr='0;
+  logic [1:0][1:0] addr_size='0;
+  logic [1:0][63:0] st_data='0;
+  logic commit_st=0,ld_query=0;
+  logic [55:0] ld_addr='0;
+  logic [3:0] ld_id='0;
+  logic older,fwd,stall,busy,ldf,stf;
+  logic [63:0] fwd_data;
+  int scenario;bit negative;
+  g6lc_lsq #(.CVA6Cfg(C),.LD_ENTRIES(4),.ST_ENTRIES(4),.NR_ALLOC(2),.NR_UPDATE(2)) dut(
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(1'b0),.cancelled_mask_i('0),
+    .ld_alloc_i(ld_alloc),.st_alloc_i(st_alloc),.alloc_id_i(alloc_id),
+    .ld_full_o(ldf),.st_full_o(stf),
+    .addr_valid_i(addr_v),.addr_id_i(addr_id),.addr_i(addr),
+    .addr_is_st_i(addr_is_st),.addr_size_i(addr_size),
+    .st_data_valid_i(st_data_v),.st_data_id_i(st_data_id),.st_data_i(st_data),
+    .complete_valid_i(cmpl_v),.complete_id_i(cmpl_id),.complete_is_st_i(cmpl_st),
+    .commit_st_i(commit_st),
+    .ld_query_i(ld_query),.ld_query_addr_i(ld_addr),.ld_query_id_i(ld_id),
+    .older_store_pending_o(older),.stl_forward_o(fwd),.stl_data_o(fwd_data),
+    .stl_stall_o(stall),.lsq_busy_o(busy));
+  task automatic tick;clk=1;#2;clk=0;#2;endtask
+  initial begin
+    scenario=0;negative=$test$plusargs("oracle_negative");
+    void'($value$plusargs("scenario=%d",scenario));
+    #2;tick();rst_n=1;tick();
+    case(scenario)
+      // A store's completion, matched by its own id, must retire its entry.
+      0:begin
+        st_alloc=2'b01;alloc_id[0]=4'd1;#2;tick();st_alloc='0;alloc_id='0;#2;
+        if(!older)$fatal(1,"LSQ_ALLOC older=%b",older);
+        cmpl_v=2'b01;cmpl_st=2'b01;cmpl_id[0]=4'd1;#2;tick();
+        cmpl_v='0;cmpl_st='0;cmpl_id='0;#2;
+        if(older!==(negative?1'b1:1'b0))$fatal(1,"LSQ_WB_RETIRE older=%b",older);
+      end
+      // Address then data, both matched by id, must enable forwarding.
+      1:begin
+        st_alloc=2'b01;alloc_id[0]=4'd1;#2;tick();st_alloc='0;alloc_id='0;
+        addr_v=2'b01;addr_is_st=2'b01;addr_id[0]=4'd1;addr[0]=56'h2000;addr_size[0]=2'b11;
+        #2;tick();addr_v='0;addr_is_st='0;addr_id='0;
+        st_data_v=2'b01;st_data_id[0]=4'd1;st_data[0]=64'hdeadbeef;
+        #2;tick();st_data_v='0;st_data_id='0;#2;
+        ld_query=1;ld_addr=56'h2000;ld_id=4'd2;#2;
+        if(!fwd||stall)$fatal(1,"LSQ_STL_FORWARD fwd=%b stall=%b",fwd,stall);
+        if(fwd_data!==(negative?64'd0:64'hdeadbeef))$fatal(1,"LSQ_STL_DATA got=%h",fwd_data);
+        ld_query=0;
+      end
+      default:$fatal(1,"LSQ_SCENARIO");
+    endcase
+    $display("RTL_REVIEW_PASS lsq scenario=%0d",scenario);$finish;
+  end
+endmodule
+
 module tb_g6lc_review_dispatch;
   import ariane_pkg::*;
   function automatic config_pkg::cva6_cfg_t configuration();
