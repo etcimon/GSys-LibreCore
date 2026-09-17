@@ -93,8 +93,9 @@ def main():
         configurations=[('lsq','direct',[],[(0,None),(1,None)])]
     elif dispatch_mode:
         cases=[(0,None),(1,'DISPATCH_STORE_PROGRESS' if before else None)]
-        # scenario 6 is a known-red reproducer: a store's writeback does not
-        # retire its LSQ entry. Expect the failure until that is repaired.
+        # scenario 6 is red at default optimisation. See the fixture-reliability
+        # caveat in architecture/out-of-order/README.md before reading anything
+        # from this configuration as an RTL result.
         if not before:cases+=[(2,None),(3,None),(6,'DISPATCH_STORE_WB_RETIRE')]
         configurations=[('dispatch','n2',[],cases)]
     results=[]
@@ -102,7 +103,11 @@ def main():
         if os.environ.get('REVIEW_RTL_KIND') and kind != os.environ['REVIEW_RTL_KIND']:continue
         work=out/(kind+'-'+geometry);work.mkdir();model=work/'model'
         top='tb_g6lc_review_'+kind
-        command=['verilator','--cc','--main','--exe','--timing','--assert','--threads','1','-Wno-fatal','--top-module',top,*parameters,'--Mdir',str(model),'-o','review-test',*rtl]
+        trace=['--trace','--trace-structs'] if os.environ.get('REVIEW_RTL_TRACE')=='1' else []
+        # -O0 discriminates a genuine RTL defect from a simulator optimisation
+        # artefact: the RTL is unchanged, only the optimiser is disabled.
+        if os.environ.get('REVIEW_RTL_NOOPT')=='1':trace+=['-O0']
+        command=['verilator','--cc','--main','--exe','--timing','--assert','--threads','1','-Wno-fatal',*trace,'--top-module',top,*parameters,'--Mdir',str(model),'-o','review-test',*rtl]
         for label,cmd in [('verilate',command),('build',['make','-C',str(model),'-f','V'+top+'.mk','-j4','VERILATOR_ROOT='+str(runtime)])]:
             (work/(label+'-command.json')).write_text(json.dumps(cmd,indent=2))
             with (work/(label+'.log')).open('w') as log:p=subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,timeout=180)
@@ -117,7 +122,7 @@ def main():
             elif dispatch_mode:trials+=[(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER')]
             else:trials.append((0,True,{'iq':'IQ_ISSUE','mshr':'MSHR_ADMISSION','decay':'TAGE_DECAY','incl':'L3_PAYLOAD'}[kind]))
         for scenario,negative,error in trials:
-            cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])
+            cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])+(['+vcd'] if os.environ.get('REVIEW_RTL_TRACE')=='1' else [])
             p=subprocess.run(cmd,cwd=work,capture_output=True,text=True,timeout=30)
             text=p.stdout+p.stderr;(work/f'case-{scenario}-negative-{int(negative)}.log').write_text(text)
             matched=(p.returncode!=0 and error in text and 'RTL_REVIEW_PASS' not in text) if error else p.returncode==0 and text.count('RTL_REVIEW_PASS')==1 and '%Error' not in text

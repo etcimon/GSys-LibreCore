@@ -167,18 +167,20 @@ package promotion is recorded in `review-l2-size-integrations-20260916` and
   issue→AGU→WB resolution. Six live-path records pass (ALU, store, two stores,
   load-ordering guard) with two injected controls failing. Load conservatism is
   deliberately unchanged.
-- [ ] **LSQ id-matched updates never land (reproduced, unrepaired).** Writing back
-  a store's own `trans_id` does not retire its entry; the entry holds `id==0` and
-  `addr_v`/`data_v` stay 0, so writeback retire, AGU address and store-data
-  updates all miss. No store-to-load forwarding is possible today. Known-red as
-  `DISPATCH_STORE_WB_RETIRE` in the dispatch reproducer. **Bisected**: driving
-  `g6lc_lsq` directly with an explicit id retires and forwards correctly (4/4
-  records, both controls live), so the LSQ leaf is sound and the fault is on the
-  integrated dispatch side. Internal cause undetermined: hierarchical `$display`
-  reads in this fixture are undependable (a reading reversed when an unrelated
-  reader was added), so two intermediate diagnoses were withdrawn and the probes
-  removed. Refuted: writeback/commit double-free; spurious allocation on a port
-  with `dispatch_valid_i` low. Next instrument: VCD or bound-module assertions.
+- [ ] **Make the dispatch fixture trustworthy first — it currently blocks the OoO
+  items below.** Identical RTL rebuilt with the simulator optimiser disabled
+  (`REVIEW_RTL_NOOPT=1`) fails even the basic ALU case with `DISPATCH_ID`, so
+  `tb_g6lc_review_dispatch` cannot separate RTL from toolchain behaviour and all
+  of its results are provisional. Suspect the fixture's own stimulus timing
+  (blocking assignments a fixed `#2` before a hand-rolled `tick()`, fragile under
+  `--timing`). Isolated `tb_g6lc_review_lsq` is unaffected: 4/4 with live controls.
+- [ ] Store writeback does not retire its LSQ entry — an **observation**, not an
+  established RTL defect, pending the item above. Known-red as
+  `DISPATCH_STORE_WB_RETIRE`. VCD shows completion arriving correctly while
+  `alloc_id_i`/`st_q[].id` never leave zero and `alloc_ids` is optimised away.
+  Refuted: writeback/commit double-free; spurious allocation on a port with
+  `dispatch_valid_i` low; duplicated id computation (sharing one signal changed
+  nothing; that edit was reverted).
 - [ ] LSQ store age/lifetime: `older_store_pending_o` is not age-aware and commit
   drains only through port 0. Needs a monotonic sequence number before the release
   point moves to commit, or an older load deadlocks behind a younger store.

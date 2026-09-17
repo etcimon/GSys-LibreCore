@@ -264,6 +264,11 @@ module tb_g6lc_review_dispatch;
     .commit_ack_i(cm_ack),.commit_instr_i(cm_instr),.mispredict_i(1'b0),
     .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o());
   task automatic tick;clk=1;#2;clk=0;#2;endtask
+  // Waveform dump: the only dependable way to look inside this fixture.
+  initial if($test$plusargs("vcd")) begin
+    $dumpfile("dispatch.vcd");
+    $dumpvars(0,tb_g6lc_review_dispatch);
+  end
   initial begin
     scenario=0;seen=0;seen_st=0;seen_ld=0;
     negative=$test$plusargs("oracle_negative");

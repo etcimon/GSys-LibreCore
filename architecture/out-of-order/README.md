@@ -181,13 +181,36 @@ memory pressure. The load-side gate is deliberately unchanged: loads still block
 on any in-flight store, which is what currently covers `stl_stall` being excluded
 from issue select to avoid a combinational loop (`g6lc_ooo_dispatch` 268-279).
 
-`review-rtl-dispatch-fix-v2` passes six records on the live rename/ROB/LSQ/PRF/
+`review-rtl-dispatch-fix-v2` passes records on the live rename/ROB/LSQ/PRF/
 memdep/dispatch/IQ path: the ALU control, the repaired store, two stores both
 issuing, and an ordering guard in which a load must not issue while an older
 store's address is unresolved. Injected `DISPATCH_ID` and `DISPATCH_LOAD_ORDER`
 controls both fail as required, so neither check is vacuous.
 
-**Reproduced, NOT repaired — id-matched LSQ updates never land.** Scenario 6 of
+**Weight of that evidence:** those records come from the fixture carrying the
+reliability caveat below, so they corroborate rather than establish the repair.
+The repair rests primarily on the mechanism, which is unambiguous in source, and
+on the independent evidence that nothing regressed: 54/54 component records and
+24/24 integration records against the frozen baselines.
+
+> **Fixture-reliability caveat — read before using `tb_g6lc_review_dispatch`.**
+> This fixture does **not** currently distinguish RTL behaviour from toolchain
+> behaviour, so nothing below it should be promoted to an RTL conclusion on its
+> own. Rebuilding the identical RTL with the simulator's optimiser disabled
+> (`-O0`, `REVIEW_RTL_NOOPT=1`) makes even the basic ALU case fail with
+> `DISPATCH_ID` — `trans_id` does not reach issue at all — while the same source
+> at default optimisation propagates it correctly. A functional result that
+> depends on optimisation level indicates either a simulator defect or
+> ambiguous/racy stimulus in the fixture, and until that is resolved the
+> fixture's passes *and* its failures are provisional. The likely suspect is the
+> fixture itself: it drives `ds`/`dv`/`wb_*` with blocking assignments a fixed
+> `#2` before a hand-rolled `tick()`, which is fragile under `--timing`.
+>
+> The isolated `tb_g6lc_review_lsq` fixture is **not** affected: it drives the
+> leaf directly with simple stimulus and its result is corroborated by its own
+> injected controls.
+
+**Reproduced but NOT established as an RTL defect — id-matched LSQ updates.** Scenario 6 of
 the dispatch reproducer (`review-rtl-store-wb-v3`, recorded as a known-red
 expected failure) dispatches one store, waits for it to issue, then writes back
 that store's own `trans_id`. `older_store_pending_o` stays asserted:
@@ -211,9 +234,17 @@ address followed by id-matched data **does** produce `stl_forward_o` with the
 right payload. Both injected controls (`LSQ_WB_RETIRE`, `LSQ_STL_DATA`) fail as
 required.
 
-So the fault is on the **integrated dispatch side**, not in the LSQ. Beyond that,
-the internal cause is **not determined**, and the reason is worth recording
-because it invalidated two intermediate diagnoses:
+So the symptom is on the **integrated dispatch side**, not in the LSQ. Its cause
+is **not determined**, and — given the caveat above — it is not yet attributable
+to the RTL at all. A VCD of the elaborated netlist shows the completion arriving
+correctly (`complete_valid_i=01`, `complete_id_i=0001`, `complete_is_st_i=01`)
+while `i_lsq.alloc_id_i[0]` and `st_q[0].id` never leave zero, and the
+intermediate `alloc_ids` is optimised away entirely. Removing the duplicate
+computation of that id (feeding the LSQ from the same signal the ROB uses, which
+the VCD shows carrying the correct value) did **not** change the outcome, so the
+duplication was not the cause either; that edit was reverted.
+
+The record of failed diagnoses, kept so they are not retried:
 
 Hierarchical `$display` reads of the dispatch/LSQ/ROB signals in this fixture are
 **not dependable**. They first suggested the LSQ entry carried `id == 0` while a
@@ -225,19 +256,21 @@ the ROB or its inputs. Values that move when an observer is added are artefacts 
 Verilator's optimisation, not evidence, so both diagnoses are withdrawn. The
 probes were removed rather than left in place to mislead.
 
-Two hypotheses were tested and **refuted** along the way: that writeback and commit
-double-free an entry (writeback frees nothing, since nothing matches), and that
-`st_alloc[p]` fires on a port whose `dispatch_valid_i` is low to create a spurious
-entry (`is_st[p]` is gated by `dispatch_valid_i[p]` at line 103).
+Refuted hypotheses, kept so they are not retried: writeback and commit
+double-free an entry (writeback frees nothing, since nothing matches);
+`st_alloc[p]` fires on a port whose `dispatch_valid_i` is low to create a
+spurious entry (`is_st[p]` is gated by `dispatch_valid_i[p]`, line 103); the id
+is computed twice and one copy is wrong (sharing a single signal changed
+nothing, and that edit was reverted).
 
-What stands on trustworthy evidence: the isolated LSQ satisfies both contracts,
-and the integrated path does not retire a store on its own writeback. The next
-instrument must reflect the evaluated netlist — a VCD, or assertions in a bound
-module — not `$display` of hierarchical references.
+What stands on trustworthy evidence is only this: **the isolated LSQ satisfies
+both contracts.** The integrated symptom is a real observation but is **not**
+established as an RTL defect, per the caveat at the top of this section.
 
-An earlier hypothesis that writeback and commit *double-free* a store entry was
-tested and is **wrong**: because the id never matches, writeback frees nothing,
-so the commit-time free is currently the only release path.
+**Required next step before any further inference from this fixture:** settle its
+stimulus timing (clocking/driver discipline), or re-host the integrated check
+under an independent frontend, and confirm the optimisation level no longer
+changes the result. Only then re-read scenario 6.
 
 Also still required before wider memory speculation: `older_store_pending_o` is
 not age-aware, and commit only drains through port 0. Moving the release point to
