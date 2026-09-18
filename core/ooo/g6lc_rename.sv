@@ -61,10 +61,22 @@ module g6lc_rename #(
     // Multi-port free at commit (up to NR_FREE = NrCommitPorts)
     input  logic [NR_FREE-1:0]            free_i,
     input  logic [NR_FREE-1:0][PRF_W-1:0] free_prd_i,
+    // Architectural (committed) mapping updates, one per commit port: the
+    // destination and the physical register the committing instruction owns.
+    // A full flush must restore THIS map. Resetting to identity instead claims
+    // architectural register i lives in physical register i, which holds
+    // unrelated data as soon as anything has committed, so every committed
+    // value is silently lost at the first exception, fence or CSR side effect.
+    // Ports are in program order, so a younger commit to the same destination
+    // overrides an older one in the same cycle.
+    input  logic [NR_FREE-1:0]            commit_valid_i,
+    input  logic [NR_FREE-1:0][4:0]       commit_rd_i,
+    input  logic [NR_FREE-1:0][PRF_W-1:0] commit_prd_i,
     input  logic                      enable_i
 );
 
   logic [31:0][PRF_W-1:0] map_q, map_d;
+  logic [31:0][PRF_W-1:0] amap_q, amap_d;
   logic [PRF_ENTRIES-1:0] free_q, free_d;
   logic [PRF_ENTRIES-1:0] busy_q, busy_d;
 
@@ -151,6 +163,7 @@ module g6lc_rename #(
     p1 = '0; p2 = '0; old = '0; picked = '0;
     squashed = '0; level = '0; slots = 0; rel = 0; n_ret = 0;
     map_d = map_q;
+    amap_d = amap_q;
     free_d = free_q;
     busy_d = busy_q;
     ckpt_head_d = ckpt_head_q;
@@ -284,10 +297,21 @@ module g6lc_rename #(
       ckpt_cnt_d  = ckpt_cnt_d - LVL_W'(n_ret);
     end
 
+    // Architectural map tracks commit. A destination that was never renamed
+    // (physical 0) leaves its entry alone.
+    for (int unsigned c = 0; c < NR_FREE; c++) begin
+      if (commit_valid_i[c] && (commit_rd_i[c] != 5'd0) && (commit_prd_i[c] != '0))
+        amap_d[commit_rd_i[c]] = commit_prd_i[c];
+    end
+
     if (flush_i) begin
-      for (int unsigned i = 0; i < 32; i++) map_d[i] = PRF_W'(i);
+      // Restore committed state: the architectural map, and a free list holding
+      // everything it does not reference.
+      map_d  = amap_d;
       free_d = '0;
-      for (int unsigned i = 32; i < PRF_ENTRIES; i++) free_d[i] = 1'b1;
+      for (int unsigned i = 1; i < PRF_ENTRIES; i++) free_d[i] = 1'b1;
+      for (int unsigned a = 0; a < 32; a++)
+        if (amap_d[a] != '0) free_d[amap_d[a]] = 1'b0;
       busy_d = '0;
       ckpt_head_d = '0;
       ckpt_cnt_d  = '0;
@@ -296,7 +320,10 @@ module g6lc_rename #(
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      for (int unsigned i = 0; i < 32; i++) map_q[i] <= PRF_W'(i);
+      for (int unsigned i = 0; i < 32; i++) begin
+        map_q[i]  <= PRF_W'(i);
+        amap_q[i] <= PRF_W'(i);
+      end
       free_q <= '0;
       for (int unsigned i = 32; i < PRF_ENTRIES; i++) free_q[i] <= 1'b1;
       busy_q <= '0;
@@ -306,6 +333,7 @@ module g6lc_rename #(
       ckpt_free_q <= '0;
     end else begin
       map_q <= map_d;
+      amap_q <= amap_d;
       free_q <= free_d;
       busy_q <= busy_d;
       ckpt_head_q <= ckpt_head_d;

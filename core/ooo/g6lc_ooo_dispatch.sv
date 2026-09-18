@@ -158,6 +158,9 @@ module g6lc_ooo_dispatch
   // what returns it to the pool. Commit is in program order, matching the order
   // the checkpoints were taken.
   logic [CVA6Cfg.NrCommitPorts-1:0] ckpt_retire;
+  logic [CVA6Cfg.NrCommitPorts-1:0] commit_wr;
+  logic [CVA6Cfg.NrCommitPorts-1:0][4:0] commit_rd;
+  logic [CVA6Cfg.NrCommitPorts-1:0][PRF_W-1:0] commit_prd;
   always_comb begin
     for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++) begin
       free_en[c]  = commit_ack_i[c] && (commit_instr_i[c].rd != 5'd0) &&
@@ -165,6 +168,12 @@ module g6lc_ooo_dispatch
       free_prd[c] = tid_old_q[commit_instr_i[c].trans_id];
       ckpt_retire[c] = commit_ack_i[c] &&
                        (tid_ckpt_q[commit_instr_i[c].trans_id] != '1);
+      // Architectural map update: the destination and the physical register this
+      // committing instruction owns. A non-renamed op carries physical 0 and is
+      // filtered inside rename.
+      commit_wr[c]  = commit_ack_i[c] && (commit_instr_i[c].rd != 5'd0);
+      commit_rd[c]  = commit_instr_i[c].rd[4:0];
+      commit_prd[c] = tid_prd_q[commit_instr_i[c].trans_id];
     end
   end
 
@@ -205,6 +214,9 @@ module g6lc_ooo_dispatch
       .rs2_ready_o(rs2_rdy),
       .ckpt_id_o (ren_ckpt_id),
       .ckpt_retire_i(ckpt_retire),
+      .commit_valid_i(commit_wr),
+      .commit_rd_i   (commit_rd),
+      .commit_prd_i  (commit_prd),
       .stall_o   (ren_stall),
       .wb_valid_i(wb_valid_i),
       .wb_prd_i  (wb_prd),

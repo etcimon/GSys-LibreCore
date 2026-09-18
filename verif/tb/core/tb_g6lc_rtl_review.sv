@@ -188,6 +188,9 @@ module tb_g6lc_review_rename;
   logic [NR_WB-1:0][PRF_W-1:0] wb_prd='0;
   logic [NR_FREE-1:0] fr='0;
   logic [NR_FREE-1:0] ckpt_ret='0;
+  logic [NR_FREE-1:0] cm_v='0;
+  logic [NR_FREE-1:0][4:0] cm_rd='0;
+  logic [NR_FREE-1:0][PRF_W-1:0] cm_prd='0;
   logic [NR_FREE-1:0][PRF_W-1:0] fr_prd='0;
   int scenario;bit negative;
   logic [PRF_W-1:0] first_alloc,mid_alloc;
@@ -201,11 +204,12 @@ module tb_g6lc_review_rename;
     .is_branch_i(is_branch),.prs1_o(prs1),.prs2_o(prs2),.prd_o(prd),
     .prd_old_o(prd_old),.rs1_ready_o(rs1_rdy),.rs2_ready_o(rs2_rdy),
     .ckpt_id_o(ckpt_id),.ckpt_retire_i(ckpt_ret),.stall_o(stall),
+    .commit_valid_i(cm_v),.commit_rd_i(cm_rd),.commit_prd_i(cm_prd),
     .wb_valid_i(wb_v),.wb_prd_i(wb_prd),.free_i(fr),.free_prd_i(fr_prd),.enable_i(enable));
   always #5 clk=~clk;
   task automatic drive; @(negedge clk); endtask
   task automatic presample; #4; endtask
-  task automatic idle; valid='0;need_rd='0;is_branch='0;wb_v='0;fr='0;ckpt_ret='0;mispredict=0; endtask
+  task automatic idle; valid='0;need_rd='0;is_branch='0;wb_v='0;fr='0;ckpt_ret='0;cm_v='0;mispredict=0; endtask
   initial begin
     scenario=0;negative=$test$plusargs("oracle_negative");
     void'($value$plusargs("scenario=%d",scenario));
@@ -354,6 +358,30 @@ module tb_g6lc_review_rename;
         // The post-A rename is older than B and must not have been squashed.
         if(prd[0]===mid_alloc)
           $fatal(1,"RENAME_RETIRE_SQUASH got=%0d",prd[0]);
+      end
+      // A full flush must restore the COMMITTED mapping. Resetting to identity
+      // claims architectural register i lives in physical register i, which
+      // discards every committed value.
+      9:begin
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd1;
+        presample();first_alloc=prd[0];
+        if(first_alloc==0)$fatal(1,"RENAME_NO_ALLOC");
+        drive();idle();
+        // r1's producer writes back and the instruction commits.
+        drive();wb_v[0]=1'b1;wb_prd[0]=first_alloc;
+        drive();idle();cm_v[0]=1'b1;cm_rd[0]=5'd1;cm_prd[0]=first_alloc;
+        drive();idle();
+        drive();flush=1;
+        drive();flush=0;idle();
+        drive();valid=2'b01;rs1[0]=5'd1;
+        presample();
+        if(prs1[0]!==(negative?PRF_W'(1):first_alloc))
+          $fatal(1,"RENAME_FLUSH_ARCH got=%0d want=%0d",prs1[0],first_alloc);
+        // and the committed register must not be handed out again.
+        drive();idle();valid=2'b01;need_rd=2'b01;rd[0]=5'd2;
+        presample();
+        if(prd[0]===first_alloc)
+          $fatal(1,"RENAME_FLUSH_FREE reissued committed phys %0d",prd[0]);
       end
       default:$fatal(1,"RENAME_SCENARIO");
     endcase

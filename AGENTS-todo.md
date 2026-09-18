@@ -94,8 +94,14 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   now declared and defaulted at `always_comb` scope. `review-ooo-latch-v2` builds
   with `-Werror-LATCH -Werror-UNOPTFLAT` (16 records); rename/LSQ/dispatch re-pass
   18/24/16. Elaborator cleanliness only, not mapped synthesis.
-- [ ] Reopen P0 committed-map/free/reuse recovery. Source-backed review finding, not
-  a freshly reproduced full-core failure.
+- [x] P0 committed-state recovery: a full flush reset the map to identity and freed
+  32..N-1, so every committed value was discarded and its register reissued. Rename
+  now keeps an architectural map updated at commit; a flush restores it and rebuilds
+  the free list from it. `review-rename-flush-fault-v1` reproduces the loss,
+  `review-rename-flush-after-v1` 20 records, `review-flush-dispatch-v1` 16 records.
+- [ ] P0 remaining: checkpoint free-snapshot reuse across a flush; per-hart
+  map/free/busy namespaces and the FP register class (legality asserts still gate
+  those configurations).
 - [x] Recover supply-cap-v3 log without rerunning it: `review-supply-recovery-v1`
   has the PASS-cookie tail and final summaries, but model/input manifests are
   absent and rows omit explicit owner identity. This is diagnostic only.

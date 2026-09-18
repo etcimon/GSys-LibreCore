@@ -68,9 +68,12 @@ module g6lc_ooo_rename_props #(
       .rs1_ready_o,
       .rs2_ready_o,
       .ckpt_id_o,
-      // No retirement stimulus: these properties are about recovery, not the
-      // checkpoint pool lifetime.
+      // No retirement or architectural-commit stimulus: these properties are
+      // about branch recovery, not the checkpoint pool or flush lifetime.
       .ckpt_retire_i('0),
+      .commit_valid_i('0),
+      .commit_rd_i('0),
+      .commit_prd_i('0),
       .stall_o,
       .wb_valid_i,
       .wb_prd_i,

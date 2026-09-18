@@ -50,6 +50,33 @@ passes 24; `review-lsq-credit-fault-v2` restores the any-free-entry term and the
 group-credit scenario fails as contracted. Scope: one geometry
 (`LsqLoadEntries=LsqStoreEntries=4`, two issue ports) at fixture level.
 
+### Committed-state recovery on full flush (repaired, leaf-verified)
+
+A full flush reset the rename map to identity and freed physical registers
+32..N-1. That claims architectural register *i* lives in physical register *i*,
+which is false as soon as anything has committed: committed values live wherever
+their producers allocated. Every committed value was therefore discarded at the
+first exception, fence or CSR side effect, and the registers holding them were
+handed back to the free list.
+
+Rename now keeps an architectural map updated at commit from the destination and
+the physical register the committing instruction owns (younger port wins within a
+cycle; a non-renamed destination carries physical 0 and is filtered). A flush
+restores that map and rebuilds the free list as everything the map does not
+reference. `g6lc_ooo_dispatch` supplies the commit triple from `commit_ack_i`,
+the retiring instruction's `rd`, and its recorded physical register.
+
+Scenario 9 allocates a rename for `r1`, writes it back, commits it, flushes, and
+requires the mapping to survive *and* the committed register not to be reissued.
+`review-rename-flush-fault-v1` restores the identity-map flush and the scenario
+fails as contracted; `review-rename-flush-after-v1` passes 20 records and
+`review-flush-dispatch-v1` passes 16 with latch and feedback errors fatal.
+
+Scope: leaf and dispatch-fixture. The PRF is not reset by a flush, so this
+depends on committed physical registers retaining their values — true here, but
+the interaction with the architectural register file at full-core level is not
+covered. Checkpoint free-snapshot reuse across a flush remains open.
+
 ### Enabled memory-dependence prediction (loop removed; predictor no longer gates issue)
 
 `MemDepPredEn=1` had never been elaborated. With the dispatch fixture built at
