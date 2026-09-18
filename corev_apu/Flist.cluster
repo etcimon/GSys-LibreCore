@@ -1,0 +1,55 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// Uncore cluster file list: the cache hierarchy and coherence layer that
+// core/Flist.cva6 does NOT contain.
+//
+// Why this exists: the verification gate elaborates top `cva6` from
+// core/Flist.cva6, which holds none of g6lc_cluster, g6lc_l2_top, g6lc_l3_top
+// or g6lc_server_prefetcher. Every repair in the L2/L3/prefetch path was
+// therefore outside the gate's lint and synthesis coverage, checked only by its
+// own leaf fixtures. Pointing a target's lint top at `g6lc_cluster` with this
+// flist appended puts the production wiring — including the direct L2-to-L3
+// abutment — under the standing gate.
+//
+// Order follows the `src` list in the repo-root Makefile, which is the
+// authoritative dependency order for these files. Append this to
+// core/Flist.cva6; it does not repeat what that manifest already provides.
+
+// ariane.sv includes cva6_acc_intf.svh for the accelerator interface typedef
+// macros; without this include path its typedefs are undefined directives.
++incdir+${CVA6_REPO_DIR}/corev_apu/include
++incdir+${CVA6_REPO_DIR}/corev_apu/tb
+
+// Clock-gating cell: instantiated by the coherence/cluster path but not on
+// core/Flist.cva6 (the core's own gating comes in through the testharness).
+${CVA6_REPO_DIR}/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_clk.sv
+${CVA6_REPO_DIR}/corev_apu/tb/ariane_axi_pkg.sv
+${CVA6_REPO_DIR}/core/cva6_rvfi.sv
+${CVA6_REPO_DIR}/corev_apu/src/ariane.sv
+${CVA6_REPO_DIR}/corev_apu/src/g6lc_ara_attach.sv
+${CVA6_REPO_DIR}/corev_apu/src/g6lc_axi_2to1_mux.sv
+${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_coherence_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_inval_bus.sv
+${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_snoop_filter.sv
+${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_lr_sc_tracker.sv
+${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_l1_inv_adapter.sv
+${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_coherence_hub.sv
+${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_tag.sv
+${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_data.sv
+${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_mshr.sv
+${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_top.sv
+${CVA6_REPO_DIR}/corev_apu/l3_cache/g6lc_l3_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/l3_cache/g6lc_l3_inclusive_inv.sv
+${CVA6_REPO_DIR}/corev_apu/l3_cache/g6lc_server_prefetcher.sv
+${CVA6_REPO_DIR}/corev_apu/l3_cache/g6lc_l3_top.sv
+${CVA6_REPO_DIR}/corev_apu/src/g6lc_cluster.sv
+${CVA6_REPO_DIR}/verif/tb/g6lc_cluster_lint_top.sv
+// Per-module typed lint/synth tops. These exist because several uncore modules
+// type their ports through `parameter type axi_req_t = logic` and cannot be
+// synthesised as top with that default, while others (hub, inval bus, snoop
+// filter) collapse to a degenerate path at NR_CORES=1 and "pass" having emitted
+// zero cells. See verif/tb/g6lc_uncore_lint_tops.sv.
+${CVA6_REPO_DIR}/verif/tb/g6lc_uncore_lint_tops.sv
+

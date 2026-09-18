@@ -69,8 +69,15 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   collision occurs. `review-l2-rr-fault-v3` `collide=1 lost=1`,
   `review-l2-rr-after-v3` `collide=1 lost=0`, `review-l2-rr-regate-v3` 60 records with
   RR0/RR1 synthesis, sequential RR1 policy oracle passes. No policy-benefit claim.
+- [x] P2 inclusion engaged in the stack fixture: the first version left the outer
+  cache's victim output unconnected, so an L3 eviction never reached the L2
+  back-invalidation port and inclusion was never exercised. The fixture now
+  arbitrates that port as the cluster does and counts accepted victims.
+  `review-l2-inclusion-v1` 40 records; `review-l2-inclusion-fault-v1` disconnects the
+  victim and the scenario fails with a stale hit. Mechanism engagement only — with one
+  master the stale copy still holds correct data, so the discriminator is the refetch.
 - [ ] Remaining P2: zero-cut abutment, prefetch accuracy/bandwidth, reserved-ID width
-  decision, directory/multi-master coherence and inclusive L3 behavior.
+  decision, directory precision (no L2-residency tracking) and multi-master coherence.
 - [x] P0 rename-checkpoint retirement: the pool released only on mispredict/flush,
   so dispatch stalled permanently after `CKPT_DEPTH` correct branches. Now a
   program-order ring retired at commit, levels as ring slots, retirement bounded by
@@ -106,14 +113,859 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   cost. `review-rename-leak-fault-v3` reproduces the leak (a faithful fault needs both
   the seeded snapshot and the removed accumulation), `review-rename-leak-after-v2` 22
   records, `review-p0-dispatch-regate-v1` 16, `review-p0-core-regate-v1` 66.
-- [ ] P0 remaining: per-hart
-  map/free/busy namespaces and the FP register class (legality asserts still gate
-  those configurations).
+- [x] P0 hart/FP restriction hardened from a simulation warning to an elaboration
+  refusal: `check_cfg` sits under `pragma translate_off`, so an unsound OoO+SMT2 or
+  OoO+FP configuration still synthesised. `g6lc_ooo_dispatch` now carries generate-scope
+  `$error` guards (same idiom as `gen_err_xif_and_acc`). `review-ooo-illegal-smt-v4` and
+  `review-ooo-illegal-fp-v4` confirm the refusal without `-Wno-fatal` and match the
+  specific guard message; `review-p0-guard-regate-v1` keeps the legal config at 66
+  records. Two false positives (an `FPU` enum-name collision, a runner comparing the
+  wrong message because the loop rebinds `kind`) were found and fixed.
+- [ ] P0 open redesigns: per-hart map/free/busy namespaces (needs hart tagging across
+  rename/IQ/ROB/LSQ/memdep and per-hart flush) and an FP register class (second map,
+  class tagging through rename/wakeup/WB, PRF and issue_read_operands paths). Both are
+  multi-module redesigns needing a full-core gate, not increments; the elaboration
+  guards keep the configurations unbuildable meanwhile.
 - [x] Recover supply-cap-v3 log without rerunning it: `review-supply-recovery-v1`
   has the PASS-cookie tail and final summaries, but model/input manifests are
   absent and rows omit explicit owner identity. This is diagnostic only.
 - [ ] Independently validate warm-fetch overlap and compare fixed useful work.
   Bind model/ELF/runtime and ownership; do not transplant old analyses to new traces.
+- [x] Platform gate no longer reports a pass for steps that did not run: `verify`
+  counted only failures, so the dry-run printed "Gate passed: 8 step(s)" while every
+  stage was SKIP. The verdict is now a pure `gateVerdict()`: failure outranks skip,
+  skip outranks pass, a skipped stage yields exit 4 unless `--allow-skips`, and a dry
+  run reports a plan explicitly. Unit-tested; `bun test` 219 pass / 0 fail, tsc clean.
+  Two pre-existing tooling-test defects fixed while doing this: a stale
+  `l2_leaf_passed` fixture (my earlier commit tightened the predicate without updating
+  its test) and a branding scan that matched the word "program" inside a comment,
+  which had been masking that two `.svh` includes declare no design unit.
+- [x] Remote lint route for the gate (`verify --lint --lint-remote`): one round trip
+  through the testharness proxy, the flattened flist and waiver rewritten to the
+  builder's checkout, outcomes classified from emitted RESULT lines rather than the
+  transport exit code. Verified substantive: 245 flist entries, real warnings from
+  `/opt/testharness/repo/core/*.sv`, zero missing files, both targets rc=0.
+  The builder's Verilator is not the local suite's, so local `warningBaseline` does
+  NOT transfer — comparing against it would let a regression hide under a much larger
+  accepted count (8 remote vs 483 local). A separate `verify.warningBaselineRemote`
+  governs the remote route and is currently unset, so the route reports counts
+  explicitly as ungated instead of implying a baseline comparison.
+- [x] Remote synth route added and `--remote` switches every routable stage (lint,
+  synth, formal) in one flag. `verify --lint --synth --remote` passes both targets on
+  the builder: lint 8/54 warnings, synth clean after ~3.5 min of real elaboration per
+  sweep. Two defects found in my own route while doing it: the slang frontend does not
+  strip quotes from a command-file argument, so the quoted flist path reached it
+  literally and every target failed; and the warning pattern `Warning:` matched
+  nothing, reporting a false "0 warning(s)" where the log holds 32/5 — now counted
+  with the same notion as the local `countDiagnostics`.
+- [x] Gate coverage gap closed for the uncore: lint/synth elaborate top `cva6` from
+  core/Flist.cva6, which contains NONE of g6lc_cluster, g6lc_l2_top, g6lc_l3_top or
+  g6lc_server_prefetcher (276-line flist, zero matches) — so every L2/L3/prefetch
+  repair in this review sat outside the standing gate, checked only by its own
+  fixtures. Added `corev_apu/Flist.cluster` + `verif/tb/g6lc_cluster_lint_top.sv`
+  (a typed top, since g6lc_cluster as top elaborates with `cva6_cfg_empty` and
+  `axi_req_t = logic`), wired via extraFlistsByTarget/topByTarget on
+  g6lc64_ooo_server — the only target with L3En=1.
+- [x] Gate now refuses a configuration whose elaboration guards fire: `-Wno-fatal`
+  demoted `%Warning-USERERROR` so g6lc64_ooo_server reported PASS while both hart/FP
+  guards had fired. The remote lint counts them and fails: "remote refused: 2
+  elaboration guard(s) fired". Default targets unaffected (8/54 warnings, pass).
+- [x] RVFI CSR probe truncation repaired: `ariane.sv`'s DEFAULT `rvfi_probes_t` and
+  `ariane_gate_tb.sv` declared `logic csr` while `cva6_rvfi_probes` assigns the whole
+  CSR payload (5898 bits) to it. ariane_testharness already used the wide
+  `rvfi_probes_csr_t`; the default and the gate-level bench now match it. Surfaced by
+  the new uncore lint coverage; warnings 11 -> 10.
+- [x] Uncore lint made usable: the only L3En=1 target is deliberately unsound, so
+  gating the uncore on it could never pass. `g6lc_cluster_lint_top` clears OoOEn only
+  (one field), keeping the full cache hierarchy, SMT and FP core legal and elaborating;
+  the OoO backend keeps its own leaf suites and refusal checks. Remote lint: 2 warnings.
+- [x] Tag reset elaboration blocker removed: the nested per-set/per-way reset loop is
+  now a whole-array clear — behaviourally identical, but the loop form is unrolled per
+  set and blew the synthesis frontend's budget at 512 sets. Re-gated: 60/60 direct with
+  clean RR0/RR1 synthesis (`review-l2-tagreset-regate-v3`), 40/40 chained
+  (`review-l2-tagreset-chain-v1`). One comment had to be reworded: a line beginning
+  "Verilator" is parsed as a metacomment directive and failed the build.
+- [x] Scenario 31 restricted to the cache-stack plan: it needs an outer cache to evict,
+  so on the direct path its engagement check correctly failed and the default plan
+  aborted. Chain-only now; default 60 records, chained 40.
+- [ ] **Uncore synthesis smoke is nightly-scope, not per-change, and has NOT been
+  observed to complete.** The route is correct (yosys confirmed running
+  `read_slang ... --top g6lc_cluster_lint_top -DSYNTHESIS`) and both earlier
+  elaboration blockers are gone, but a two-core cluster exceeded the 900s budget and
+  was cut off mid-`proc`; at one core it was still running past ~30 minutes. Budget
+  raised to 2400s and the synth smoke reduced to one core plus a smaller cache
+  geometry under `SYNTHESIS` only. No pass is claimed for this stage.
+- [ ] **Production-geometry synthesis remains open, not waived.** With L2 at
+  262144 B / 8-way / 64 B line (512 sets) the tag module's per-set reset/maintenance
+  loops (`g6lc_l2_tag.sv:105`) exceed the slang unroll budget: `Build failed: 2 errors`,
+  `Design elaboration failed`. Verilator lints the same geometry fine. Root cause is a
+  FLOP tag array (512x8 entries) where AGENTS 0.1/0.4 requires `tc_sram`; no leaf
+  fixture could show it because they all used small geometries. Fix = tag array behind
+  `tc_sram`, then re-run. Raising the tool limit is refused: it would hide a flop array
+  in the production build and no mapped area/STA/power claim could rest on it.
+- [x] corev_apu AXI 2-to-1 mux response ownership (DATA CORRUPTION, repaired): the
+  core/Ara mux carries no ID remapping, so responses are routed purely by lock
+  ownership, yet it released the lock whenever no request was momentarily valid —
+  ignoring responses still owed. With any memory latency the core's read data was
+  delivered to the vector unit and the core never got its beat
+  (`review-mux-before-v2`: `MUX_R_MISROUTED port=0 got_id=3 want_id=5`). Separate
+  read/write outstanding counters now hold the lock through RLAST/B, capping requests
+  rather than wrapping. `review-mux-after-v1` 6 records, `review-mux-fault-v1`
+  reproduces it. Reachable only under `CVA6_ARA_ATTACH`; port-0 priority starvation
+  remains a known QoS limit.
+- [x] Cross-core LR/SC ownership reviewed — **no defect** (negative result, recorded).
+  The hart-local reservation in `hpdcache_uncached` is cleared only by that hart's own
+  store/AMO; coherence invalidations reach the directory, not the reservation. That is
+  sound because `g6lc_l2_top` forwards AxLOCK downstream to the exclusive monitor,
+  which is authoritative — a stale-valid local reservation only lets the SC reach
+  memory to be adjudicated, never grants one. Documented in
+  `architecture/multi-core/README.md` because the question recurs.
+- [x] RE-POINTED — `coh_sc_fail_o` -> `coh_sc_noresv_o` (tracker `sc_fail_o` ->
+  `sc_noresv_o`), driven by a condition the hub genuinely observes: an SC-shaped store
+  arriving with no matching reservation recorded for the storing core, evaluated
+  against the pre-store state. Named "no reservation recorded here", NOT "SC failed" —
+  the hub is not entitled to that claim (the downstream exclusive monitor is the
+  authority), and a name implying it would repeat the over-reach of the dead signal.
+  Probe port kept but documented unused. Renamed at all five live sites (tracker, hub
+  port/tie-off/instantiation, cluster, tb_g6lc_coherence_hub, both wrappers in
+  run_inval_review.py). Verified: uncore lint 4 warnings unchanged; hub reservation
+  suite `review-hub-noresv-v1` 15/15.
+- [~] (superseded) `coh_sc_fail_o` is hardwired zero: the hub ties `sc_probe_i = 1'b0`, so the
+  tracker's `sc_fail_o` can never assert. AUDITED THE WHOLE SET: in gen_cluster,
+  coh_inv_fire_o / coh_sf_hit_o / coh_sf_overapprox_o / coh_arb_starve_o /
+  coh_split_conflict_o / coh_lr_kill_o are ALL genuinely driven — this is one dead
+  signal, not a systemic gap. It also cannot be fixed by driving the probe: the hub
+  does not adjudicate SC (g6lc_l2_top forwards AxLOCK to the downstream exclusive
+  monitor by design), so the hub never learns an SC outcome. Options: retire the port,
+  or re-point it at something observable here. Interface change => flagged in the RTL
+  at the tie-off with the full reasoning, decision left to the owner.
+- [x] Stale comment in `cva6.sv` corrected: it claimed "HPDCACHE/std paths ack and
+  ignore" external L1 invalidations. HPDCACHE consumes them via the read-response
+  inval port; only the std path ignores them. As written it read as "multi-core
+  coherence is broken on HPDCACHE", which is what sent this review down a false trail,
+  and `g6lc64_stream8` runs NrCores=2 with HPDCACHE_WT.
+- [x] corev_apu snoop filter could hide a live sharer (STALE LINE, repaired): the hub
+  gates invalidations with `sf_present & ~(1<<writer)`, and a capacity conflict forgot
+  the displaced line's sharers — safe while untracked, but re-installing that line
+  from one core's fetch produced a confident HIT naming only that core
+  (`SF_SHARER_LOST must=01 targets=00 hit=1 over=0`), leaving the other core stale.
+  Install over a different valid tag now starts all-present; a never-used index stays
+  exact. `review-sf-after-v3` 5 records, `review-sf-fault-v3` reproduces. Live on
+  stream8/ooo_server/server_math (COH_FILTERED + SnoopFilterEn=1).
+- [ ] Follow-up: back-invalidate on snoop-filter displacement so forgetting sharers is
+  sound and thrashed indices stay precise. Needs a new hub invalidation source with
+  retention, or the repaired HUB_INV_LOSS defect returns.
+- [x] Mux negative control STRENGTHENED (was: only required errors != 0, which a correct
+  DUT cannot produce — it proved the harness complains about an absent error, not that
+  the ID comparison catches a misroute). `+oracle_negative` now flips the OBSERVED
+  response id so the routing check must fire: `review-mux-negctl-v2` 6 records ending
+  `MUX_NEGATIVE_CAUGHT 2`, `review-mux-fault-v4` still reproduces the real defect
+  (`MUX_R_MISROUTED port=0 got_id=3 want_id=5` + `MUX_R_LOST port=1`). Also fixed the
+  diagnostic to print the COMPARED id: printing the raw one made the control's output
+  read "got_id=3 want_id=3", which looks like a false alarm.
+- [x] FINAL — the HPDCACHE invalidation hypothesis is REFUTED and my change is REVERTED.
+  Two runs on the pre-change stream8 netlist passed; the second used a test where hart 1
+  initialises LINE so hart 0's load provably misses and fills (`SUCCESS tohost=0`, 67100
+  cycles), and every control word sits in a different cache set so no conflict eviction
+  can refresh the copy. External invalidations ARE delivered.
+  `core/cache_subsystem/cva6_hpdcache_subsystem.sv` restored to original; re-linted, 4
+  warnings unchanged. Keeping an unvalidated edit that re-arbitrates the read-response
+  channel on a working path would be pure risk. OPEN PUZZLE: the source-level
+  `mem_resp_read_valid_i` gating still looks lossy and I cannot explain why it is not —
+  that is a question to answer before anyone edits this path, not a defect.
+- [!] (earlier) CORRECTION — the HPDCACHE invalidation defect is NOT REPRODUCED. The directed test
+  ran on the pre-change stream8 netlist and PASSED (`SUCCESS tohost=0`, 57657 cycles):
+  hart 0 observed hart 1's write. Fence-flush is ruled out (`DcacheFlushOnFence=0` on
+  stream8). The likely flaw is my own test: hart 0 stores SEED then loads it back to
+  "confirm" caching, and HPDcache can serve that load from the WRITE BUFFER without
+  allocating a line — the check meant to prove the line was cached is what lets it not
+  be. LINE must be initialised by something other than hart 0 before the caching load.
+  The RTL change is retained but must NOT be counted as a repair. Original analysis
+  below kept as a hypothesis:
+- [~] HPDCACHE dropped external coherence invalidations (hypothesis, unvalidated): HPDcache
+  samples `mem_resp_read_inval_i` only while `mem_resp_read_valid_i` is asserted (demux
+  in hpdcache.sv, metadata FIFO write in hpdcache_miss_handler.sv) — correct for the
+  L15 port where an inval IS a response beat, wrong for the AXI branch, which drove it
+  from an independent external inval while reporting `inval_ready_o = 1'b1`. Every
+  invalidation not coinciding with a read response was discarded and reported
+  delivered. Now held in one slot and presented as its own beat in an idle arbiter
+  cycle, retired on acceptance. Live on stream8 (NrCores=2), ooo_server, server_math.
+- [x] Coverage finding: cacheable cross-core sharing was UNTESTED, which is why the
+  HPDCACHE invalidation defect survived. The `mc_*` multicore tests are single-hart
+  programs run under a multi-core config (`mc_cas_lock_handoff` CASes its own stack),
+  and `ai_dual_core_excl_smoke` touches its shared line only via lr.d/sc.d (uncached),
+  so a dropped cacheable invalidation cannot change its result. Added
+  `verif/tests/custom/multicore/mc_shared_line_coherence.S` (hart 0 caches LINE with an
+  ordinary load; hart 1 writes it and raises FLAG on a SEPARATE line so the spin
+  cannot refill it; tohost=9 = stale) plus
+  `verif/regress/remote/mc-shared-line-coherence.sh`.
+- [x] Executed mc_shared_line_coherence on the pre-change netlist. The built model is at
+  `/opt/testharness/work/work-ver-stream8/` (NOT in the repo checkout — my first check
+  looked in the wrong place and wrongly concluded a build was needed). Result: PASSED,
+  which contradicts the HPDCACHE hypothesis. See the correction above.
+- [x] Test repaired (v2): hart 1 initialises LINE and hart 0 never writes it, so the
+  caching load cannot be served by the write buffer. Five control words on five
+  distinct cache sets. Ran on the pre-change netlist: PASS, 67100 cycles. The test is
+  now a sound discriminator and is retained as the standing cross-core coherence
+  check — it just has nothing to catch on this design.
+- [!!!] RETRACTION + the real finding. My "the control was a different program" claim was
+  itself an unvalidated instrument (RT-P1 / RT-H1 in the learning philosophy: validate
+  before interpreting). Compiling the SAME source twice seconds apart gives different
+  md5s (4e6a2d79… vs ef2f42d8…) — this toolchain embeds non-code content, so md5-of-ELF
+  is NOT program identity. Disassembly md5 of mc2.elf (the 67100-cycle PASS), poll2.elf
+  (the 1.2M-cycle hang) and a fresh compile are ALL 2e4409b189f6eebc3d8ccac8fb13424c —
+  the same program. With the model binary also unchanged (5b487b85…), the actual finding
+  is: SAME program + SAME binary => completion at 67100 cycles in one run and a hang past
+  1.2M cycles in another. That is simulation NON-DETERMINISM. Leading hypothesis:
+  X-initialisation / random-reset seeding — REFUTED: three consecutive runs of the same
+  ELF with the same plusargs gave the identical verdict, identical 1200013 cycle count and
+  identical warning at the identical cycle 240711. The sim is deterministic. Also learned:
+  `+verilator+seed+N` is rejected by the HTIF arg parser before Verilator sees it, so seed
+  control is unavailable at this boundary. THIRD hypothesis (files differ outside .text)
+  also REFUTED: mc2.elf and poll2.elf are byte-identical in every loadable byte — same
+  size 9832, zero section/program-header diffs, tohost at 0x80001000 in both, identical
+  objcopy binary md5 8a6d40fd…. And mc2.elf, the file that once passed at 67100 cycles,
+  now times out at 1200013 and at 600013 with the same terminal state, so +time_out is
+  not the variable either.
+  CONCLUSION: the current work-ver-stream8 model does not run ANY of these programs — it
+  stalls in early boot at the same commit-dbg state (pc~0x80000074, cause=24) with the
+  same g6lc_fetch_dbg assertion at the same cycle 240711, whichever ELF is loaded. That is
+  a property of the model, not of a test. The earlier pass is unrecoverable: its model
+  hash was never recorded, so whether the binary moved cannot be established now. That is
+  the concrete cost of not pinning evidence.
+  Scope of damage (philosophy §2.4): only results that depend on this simulator; leaf
+  benches that hash their own sources, lint and synthesis are unaffected.
+- [ ] Rebuild a g6lc64_stream8 model from a RECORDED source state and capture the model
+  binary hash in the run record before any further coherence experiment. Every sim run
+  record must carry: model-binary md5, ELF objcopy-image md5 (NOT the ELF file md5 —
+  that embeds non-code content and differs between two compiles of the same source),
+  plusargs, and the source commit/state.
+- [x] ROOT CAUSE of the "early-boot stall": my invocation, not the model. `cause=24` is
+  `riscv_pkg::DEBUG_REQUEST` — `ariane_testharness` defaults `debug_enable=1` on the DMI
+  path, so a run without `+debug_disable` sits in a debug request. Adding it removes the
+  cause=24 line. The canonical invocation (from testharness_proxy.py) is
+  `+time_out=N +max-cycles=N +debug_disable +quiet_axi [+tohost=…] ELF`; I supplied only
+  `+time_out`. That is also why `mc_boot_sanity.S` — which provably reached its store,
+  stalling at the `j` AFTER the `sw` — never delivered tohost.
+  `mc-shared-line-coherence.sh` now uses the canonical plusargs with a comment.
+  Four of my conclusions in this episode were wrong in sequence (dropped invalidation,
+  different program, non-determinism, broken model); every one came from an unvalidated
+  instrument. Use the repo's runner instead of hand-rolling the harness command.
+- [!] HARNESS VERDICT DEFECT (same class as the gate that passed over 8 SKIPs): with
+  `+max-cycles` equal to `+time_out` — what testharness_proxy.py does — a run that never
+  completes prints `*** SUCCESS *** (tohost = 0) after <bound> cycles` at EXACTLY the
+  bound (verified at 200000 and 2000000). tohost reads 0 because nothing wrote it, so a
+  hang is reported as a pass. With `+time_out` alone the same run reports
+  tohost=2147483647, which is distinguishable. `mc-shared-line-coherence.sh` now omits
+  `+max-cycles` and rejects a SUCCESS that lands on the bound as VACUOUS.
+  NARROWED after reading the proxy: its `di` SUITE path ALREADY guards this correctly —
+  it accepts a SUCCESS only when `rvfi_tracer ... Simulation terminated` is also
+  present, else `verdict=FAIL reason=timeout`, and it runs mini_must_pass /
+  mini_must_fail oracle controls first. The file even documents this exact defect
+  shipping on 2026-08-31. So suite results are NOT suspect; the exposure is the simpler
+  `run` path plus any human reading a raw SUCCESS line — which is how I was fooled.
+- [x] Also established: `+tohost=<addr>` is NOT a valid plusarg (rejected with the usage
+  banner), and a bare-metal ELF that stores to tohost and spins is not observed even
+  with +debug_disable and a fence. The repo's review runners use `-m <cycles> -s 1
+  +debug_disable` and check in-memory cookies instead of tohost — use those.
+- [x] RESOLVED — the idle-observer question is ANSWERED. Missing plusarg was
+  `+tohost_addr=0x…` (the proxy derives it from the ELF via nm), alongside
+  `+debug_disable`. With `+time_out=400000 +debug_disable +quiet_axi
+  +tohost_addr=0x80001000`: mc_boot_sanity SUCCESS 364 cy; mc_shared_line_coherence
+  (polling) SUCCESS 773 cy; mc_shared_line_quiet (IDLE observer) SUCCESS 240698 cy —
+  all terminating EARLY inside the 400000 bound and all carrying the
+  `rvfi_tracer ... Simulation terminated` marker, so none is the vacuous
+  SUCCESS-at-the-bound. The quiet run's 240698 cycles matches its 60000-iteration
+  register-only wait, which proves the window was genuinely traffic-free.
+  => HPDcache delivers external invalidations, and delivery does NOT depend on the
+  observing hart's own memory traffic. The revert was correct. Mechanism by which the
+  pulse survives the `mem_resp_read_valid_i` gate is still untraced — open question,
+  not a defect.
+  CAVEAT, not buried: the conclusion assumes hart 0's load ALLOCATED the line. The test
+  forces that load to miss (hart 1 wrote the value, hart 0 never did) and read-allocate
+  is standard, but I have not verified residency independently in this config. If the
+  D-cache never held the line, BOTH the polling and idle tests pass vacuously.
+- [~] Residency check built (`mc_shared_line_resident.S`) — makes the coherence verdict
+  conditional on demonstrated residency. Two measurement lessons, both recorded in the
+  test: (1) single-load timing is useless here — a csrr/ld/csrr window costs 16 cycles
+  whether or not the line is resident, because csrr is serialising (measured: first=16,
+  reload=16); (2) amortised over 64 same-line loads the cost is 791 cycles = 12.4/load,
+  which is ambiguous because ~4-6 of that is loop overhead on an in-order core.
+  BASELINE ADDED, and it kills the method: 64 loads of DISTINCT never-touched lines
+  cost 779 cycles vs 793 for 64 loads of the same line — identical, with the
+  guaranteed-miss loop marginally CHEAPER. On this model a miss costs no more than a
+  hit, so TIMING CANNOT DETECT RESIDENCY. Not a threshold-tuning problem: the
+  instrument has no resolution, which is what the baseline existed to reveal (a guessed
+  constant would have "proved" either answer). Code 13 now means "residency unproven",
+  never "not resident".
+  ARCHITECTURAL INSTRUMENT TRIED AND IT IS BROKEN: mhpmevent legacy index 2 ("L1
+  D-Cache misses") in mhpmcounter3 reads 0 misses across 64 GUARANTEED misses. The test
+  reported code 15 ("counter not wired") instead of mistaking a dead counter for a
+  resident line. POSITIVE CONTROL (`mc_pmu_control.S`, same program, event index 5 =
+  load accesses): 64 and 64, exactly REPS per loop — so the CSR path, event programming
+  and counter reads are all correct and the zero belongs to the event.
+- [x] Tested and ELIMINATED my own innocent explanation for the zero: hpdcache excludes
+  prefetch-driven allocations from the event (`evt_cache_read_miss_o =
+  ~st2_mshr_alloc_is_prefetch_i`, hpdcache_ctrl_pe.sv), and my baseline walked a
+  perfectly sequential BASE+i*64 stride — ideal prefetcher bait, so a HEALTHY counter
+  could legitimately read 0. Re-ran with a shuffled walk (step 37 lines mod 64, every
+  line once, no constant delta): STILL 0. Prefetch exclusion does not explain it.
+- [!!!] ROOT CAUSE FOUND — the PMU event is NOT broken; that claim is WITHDRAWN. In
+  `cva6_hpdcache_if_adapter.sv:94` a load is uncacheable if
+  `!is_inside_cacheable_regions(...) || is_inside_execute_regions(...)`. On stream8 the
+  ExecuteRegion (0x8000_0000 +0x4000_0000) is IDENTICAL to the CachedRegion, so EVERY
+  DRAM load is uncacheable and the L1 D-cache holds NO DRAM data. One fact explains the
+  whole chain: 0 miss events (nothing allocates an MSHR), no timing difference between
+  same-line and distinct-line loops (all loads go to memory), and 64 D$ ACCESSES counted
+  (requests reach the cache and bypass it).
+- [!!] CONSEQUENCE — the cross-core coherence results are VACUOUS. Hart 0 never held the
+  line, so "the idle observer saw the remote write" shows only that it read memory; it
+  says nothing about invalidation delivery, busy or idle. The residency caveat I flagged
+  earlier turned out to be the entire story. mc_shared_line_* cannot test coherence on a
+  config where D-cache allocation is off for DRAM.
+- [x] Attempted the source fix for the I$/D$ aliasing; RULED OUT the leading mechanism
+  and fixed a real guard weakness found on the way. Candidate was response-ID aliasing:
+  the arbiter demuxes read responses purely by id
+  (`mem_resp_read_rt[i] = (i == icache_miss_id_i) ? 0 : 1`), so a D$ read carrying
+  ICACHE_RDTXID would have its refill delivered to the I$ and hang the load. Ruled out
+  for shipped configs: the bound `MEM_TID_WIDTH >= clog2(mshrSets*mshrWays)+1` reserves
+  the MSB for the I$; stream8 needs 4/has 4, ooo_server needs 6/has 8. So this is NOT
+  the 2jr mechanism and the real aliasing hazard REMAINS UNIDENTIFIED — not changing a
+  load path on a guess.
+  FIXED ANYWAY: that bound lived under `pragma translate_off`, so a violating config
+  would SYNTHESIZE and hang silently. Promoted to generate-scope $error (same treatment
+  as the OoO hart/FP guards). Verified BOTH ways: MemTidWidth 8->5 on ooo_server =>
+  "remote refused: 1 elaboration guard(s) fired"; restored => pass, 4 warnings. Margin
+  is ZERO on stream8 (needs 4, has 4) — NrLoadBufEntries=16 would have aliased silently.
+- [x] RESOLVED — 2jr mechanism IDENTIFIED and the execute-region exclusion REMOVED.
+  It was never a cache hazard: it is a bind-attached frontend checker reading the wrong
+  signal. `kill_s1` is driven from replay_q (frontend.sv:820) while g6lc_fetch_dbg was
+  bound with `.replay_i(replay)` — the combinational one. One cycle after replay drops,
+  replay_q still holds kill_s1 high and replay_i reads 0, so a legal replay-kill trips
+  "kill_s1 outside misp|flush|replay" and the sim aborts. FIX: bind `.replay_i(replay_q)`.
+  THREE-ARM EVIDENCE (g6lc64_stream8, flavour B, arms differ only as stated):
+    exclusion ON                  2jr/_pad/_data PASS 534/491/501 cy
+    exclusion OFF, checker as-was all three ASSERT
+    exclusion OFF, checker fixed  all three PASS 545/497/519 cy
+    mc_boot_sanity PASS 359 cy in ALL THREE arms => arms otherwise equivalent (control)
+  Execute-region term removed from cva6_hpdcache_if_adapter.sv => L1 D$ load allocation
+  for DRAM is restored on every HPDCACHE config (it had been disabled wholesale to dodge
+  a checker bug). `G6LC_DCACHE_EXEC_UNCACHED` restores the old behaviour for bisection.
+  BREADTH: whole mini_hpd_* family + sanity tests on the default build, 22 pass / 0 fail,
+  each requiring SUCCESS *and* the rvfi terminated marker. Default lint 8/54 unchanged.
+  STILL OWED: a full regression before release — this changes D$ allocation behaviour on
+  every HPDCACHE configuration.
+- [x] RETRACTED + CORRECTED — core 1 DOES execute. My "second core never executes" claim
+  below is WRONG; it rested on a silent verdict with no instrument that could see the
+  DUT. Repaired the instrument first: CVA6_MC_PC_PROBE prints c1.npc but would not
+  compile — stale hierarchy (`i_cva6_icache` -> `i_g6lc_icache`, 5 renames). With it:
+    c1.npc: 0x10000 -> 0x10014 -> 0x8000001c -> 0x8000002c
+  Core 1 is elaborated (102 generated files name gen_core__BRA__1), runs the bootrom,
+  jumps to DRAM and executes the test. Disassembly of mc_hart1_alive.S: 0x80000024 is
+  `sw a0,0(t0)` to tohost, 0x80000028 the fence, 0x8000002c the park loop AFTER both —
+  so core 1 RETIRED the store. Probe also shows l2a=0x80001000 (the store's address at
+  the L2), so it propagates that far.
+- [!!! P0] CROSS-CORE COHERENCE IS BROKEN, and the D$ execute-region exclusion was MASKING
+  it. This VINDICATES the original HPDCACHE invalidation concern I twice withdrew: it was
+  withdrawn as "vacuous" because the L1 D$ held no DRAM data — true at the time — and the
+  defect appears the moment D$ load allocation is restored.
+  TEST: `mc_hart1_store_visible.S` separates property from reporting channel — hart 1
+  stores a cookie to a shared cache line, HART 0 (whose tohost writes work) loads it and
+  reports. code 1 = observed, code 9 = never observed.
+  ONE-VARIABLE CONTROL, both flavour B, same source, differing only by
+  G6LC_DCACHE_EXEC_UNCACHED:
+    work-ver-s8-b-uncached (exclusion ON,  D$ alloc OFF) => SUCCESS 6449 cy  (observed)
+    work-ver-s8-b-retired  (exclusion OFF, D$ alloc ON)  => code 9  320416 cy (NEVER)
+    production work-ver-stream8 (exclusion ON)           => SUCCESS 8448 cy
+  With the D$ actually caching DRAM, hart 0 polls a stale zero forever: hart 1's store
+  never invalidates hart 0's copy.
+- [!!] THE EXECUTE-REGION DECISION REVERSES ORDER. Removing the exclusion is still right
+  for performance and the 2jr checker fix still stands, BUT the exclusion was also an
+  unintended CORRECTNESS crutch: uncached DRAM loads make stale copies impossible, hiding
+  the coherence defect. Required order: (1) fix cross-core invalidation delivery, THEN
+  (2) remove the exclusion. Shipping (2) without (1) turns a performance problem into a
+  correctness one. G6LC_DCACHE_EXEC_UNCACHED exists to restore the safe behaviour while
+  (1) is in progress.
+- [x] MECHANISM TRACED END TO END — the original source analysis was RIGHT. Every link
+  checked, not assumed: (1) hub generates the target set (COH_FILTERED + SnoopFilterEn,
+  `sf_present & ~(1<<aw_winner)`; SF allocates on `aw_fire | ar_fire` at
+  g6lc_coherence_hub.sv:509, so core 0's polling load DOES register as a sharer);
+  (2) inval_bus -> l1_inv_adapter -> l1_inval_valid_i; (3) cva6.sv:2127-2129 forwards it
+  to the HPDCACHE subsystem (the std branch by contrast ties inval_ready=1 and drops —
+  the distinction the corrected comment records); (4) subsystem AXI branch sets
+  `dcache_resp_read_inval = inval_valid_i` with `inval_ready_o = 1'b1`;
+  (5) **hpdcache.sv:1132 DROPS IT** —
+      always_comb begin : mem_resp_read_demux_comb
+        mem_resp_read_miss_valid = 1'b0;
+        if (mem_resp_read_valid_i) begin        // THE GATE
+          mem_resp_read_miss_valid = 1'b1;      // only ever set inside it
+      assign mem_resp_read_miss_inval = mem_resp_read_inval_i;  // payload unconsumed
+  `mem_resp_read_miss_valid` is what makes the miss handler act on the response AND its
+  invalidation payload, and it is asserted ONLY while a read response is concurrently
+  valid. So an external invalidation arriving with no D$ read response in flight is
+  ACKNOWLEDGED AND SILENTLY DISCARDED — and `inval_ready_o = 1'b1` is the lie that makes
+  it silent. An idle observer (exactly the failing case) never has a read response in
+  flight.
+- [x] FIX APPLIED AND VERIFIED — cva6_hpdcache_subsystem.sv AXI branch: one-entry retention
+  holds the external invalidation until HPDCACHE consumes it, and inval_ready_o now
+  reports REAL occupancy instead of unconditional acceptance:
+    inv_inject             = ext_inv_pend_q & ~axi_rresp_valid;   // real response wins
+    dcache_read_resp_valid = axi_rresp_valid | inv_inject;
+    dcache_resp_read_inval = inv_inject;
+    axi_rresp_ready        = dcache_read_resp_ready & ~inv_inject;
+    inval_ready_o          = ~ext_inv_pend_q;
+  Two points settled from SOURCE, not intuition: (1) an invalidation-only response is a
+  FIRST-CLASS case in hpdcache_miss_handler.sv — it is how the OpenPiton/L15 port
+  delivers invals at all: meta FIFO written on mem_resp_inval_i regardless of r_last,
+  data FIFO explicitly NOT written (& ~mem_resp_inval_i), mem_resp_ready_o from meta
+  space alone, REFILL_IDLE routes is_inval to REFILL_INVAL without touching the MSHR
+  (mshr_ack = ~is_inval) — so the injected cycle needs no data/r_last/MSHR; (2) an inval
+  must OWN its cycle, because is_inval diverts the FSM INSTEAD of refilling, so
+  piggybacking would DROP the refill. One entry suffices BECAUSE the producer is now
+  back-pressured rather than lied to.
+  VERIFIED against the criterion committed BEFORE writing the fix:
+    exclusion removed, unfixed        => code 9  @320416 cy (never observed)
+    exclusion removed + retention fix => SUCCESS  @6471 cy  (OBSERVED)
+    exclusion present (uncached ctl)  => SUCCESS  @6449 cy
+  Fixed cached arm matches the uncached arm's latency (6471 vs 6449) — the signature of
+  an inval that lands promptly. Breadth on the fixed build 22 pass / 0 fail; lint 8/54
+  unchanged. This also UNBLOCKS the execute-region removal: step 1 (invalidation) is now
+  done, so keeping D$ allocation no longer trades performance for correctness.
+  BACK-PRESSURE NOW MEASURED — `mc_two_inval_backpressure.S`: hart 0 caches TWO lines
+  (different sets, so no eviction/conflict refill can refresh either), waits in a
+  register-only loop (no read response to ride on), and hart 1 writes both lines
+  back-to-back with no fence between. Distinct codes (9 = A stale, 11 = B stale) so a
+  dropped SECOND inval is distinguishable from a broken first.
+    invfix   => SUCCESS (both observed) 60569 cy
+    retired  => code 9 (A stale)        60561 cy  <- first inval already dropped, so
+                                                     this arm never reaches the
+                                                     back-pressure case
+    uncached => SUCCESS                 60519 cy
+  INSTRUMENTED (translate_off counters + final block in cva6_hpdcache_subsystem.sv:
+  `injected` = invals delivered on a stolen response cycle, `backpressured` = cycles the
+  producer was held off with the slot full):
+    store-visible                      SUCCESS  6471 cy  injected=1      backpressured=0
+    two invals, idle observer          SUCCESS 60569 cy  injected=2 / 4  backpressured=0
+    miss-streaming observer, 4 writes  SUCCESS 37573 cy  injected=4 / 6  backpressured=0
+    (mc_inval_bp_stress.S — observer walks 256 KiB so the response channel stays busy
+     and injection is deferred, which is the only condition that keeps the slot full)
+  GOOD: `injected` non-zero on both cores in every run => the injection path is really
+  exercised; direct evidence for the MECHANISM, not just the outcome.
+  NOT GOOD: `backpressured` = 0 EVERYWHERE, including the stress test => the one-entry
+  depth's OVERFLOW PATH REMAINS UNPROVEN. Could not provoke it from software. Likely
+  because g6lc_inval_bus already buffers INVAL_DEPTH per core
+  (COH_DEFAULT_INVAL_DEPTH = 4, g6lc_coherence_pkg.sv:12), so the slot sees a drip not
+  a burst.
+  CLOSED — retention EXTRACTED to core/cache_subsystem/g6lc_inval_retain.sv (named unit,
+  explicit contract, own assertions, DEPTH parameter; subsystem instantiates DEPTH=1).
+  Extraction is behaviour-identical: the three full-core tests return the SAME cycle
+  counts (6471 / 60569 / 37573) and the same counters as the inline version.
+  UNIT BENCH verif/tb/uncore/tb_g6lc_inval_retain.sv drives producer + response channel
+  directly so the slot can be held full. Checks conservation (exactly once, in order),
+  honest backpressure, and "a real response always wins" (asserted: piggybacking would
+  divert the FSM to REFILL_INVAL and DROP a refill).
+    DEPTH=1 (SHIPPED) 3/3 pass, negative caught, backpressured=11
+    DEPTH=2           3/3 pass, negative caught, backpressured=10
+    DEPTH=4           3/3 pass, negative caught, backpressured=8
+  => overflow path FINALLY EXERCISED, including at the shipped depth, nothing lost,
+  order preserved. Scenario 1: emitted=0 while the channel is busy. Scenario 2: drains
+  under toggling ready without loss.
+  WIRED INTO A REVIEW RUNNER: verif/regress/remote/run_retain_review.py — hashes inputs,
+  records the Verilator version, sweeps DEPTH 1/2/4 x scenarios 0/1/2, runs the negative
+  control at every depth, and REFUSES a scenario-0 run reporting backpressured=0 (a
+  verdict without back-pressure has not tested the overflow path). Plus an RTL FAULT arm
+  (REVIEW_RETAIN_FAULT=1) restoring the ORIGINAL defect `inval_ready_o = 1'b1`:
+    clean arm  12/12 matched, faultDetected=[] (correct), noBackPressure=[]
+    fault arm  12/12 matched, detected at (1,0)(1,2)(2,0)(2,1)(2,2)(4,0)(4,1)
+    source hashes differ (b4720bf2 vs 83d99bdd) so the arms are attributable; at
+    DEPTH=1 the bench reports RETAIN_LOSS accepted=12 emitted=0 — the exact P0.
+  RUNNER NOW SELF-SUFFICIENT: resolves inputs from the repo when nothing is staged, so
+  it runs standalone on the builder over plain ssh. It previously needed the `remote py`
+  wrapper, which blocks the local CLI for the whole run and costs a round trip per arm;
+  both arms now finish in ONE invocation in ~15 s.
+  THREE RUNNER LESSONS, all the same mistake in different clothing — an over-narrow
+  criterion making CORRECT behaviour look like failure: (a) it demanded EVERY scenario
+  detect the fault, but scenario 1 legitimately cannot (its check is unaffected by
+  unconditional ready) — a fault control must assert the SUITE catches it, not every
+  case; (b) it looked only for RETAIN_ERRORS, while at DEPTH>1 the unit's OWN assertion
+  fires first — a detection counted as a miss; (c) it labelled the negative control's
+  intentional errors as faultDetected, making the clean arm's results.json read as
+  though good RTL had faults. `reported` and `detected` are now distinct.
+  TWO BENCH LESSONS: (1) DEPTH made overridable (-GDEPTH) so the SHIPPED depth is
+  qualified, not a friendlier one — it began as a localparam testing only DEPTH=2;
+  (2) the NEGATIVE CONTROL WAS INERT AT DEPTH=1 because it perturbed the SECOND
+  accepted entry and only one is ever accepted there (measured negative_caught=0 at
+  DEPTH=1 vs 1 at 2/4). Now perturbs the first. Same failure mode this review keeps
+  meeting: a control that cannot fail where it matters most — visible only because the
+  depths were swept rather than assumed.
+  (superseded) HONEST LIMIT: this proves both invals land; it does NOT prove the slot was OCCUPIED
+  when the second arrived (adjacent stores to an idle target make it likely, not
+  certain). Closing it needs instrumentation, not a verdict: an assertion that
+  `inval_valid_i & ~inval_ready_o` is seen at least once, or a count of inv_inject
+  events. Retention depth is currently justified by the handshake argument plus this
+  end-to-end pass, not by a measured collision.
+  RE-QUALIFIED the three original tests on the fixed build — ALL PASS, and the per-core
+  `injected` counter separates the two delivery paths for the first time:
+    mc_shared_line_coherence (polling)  SUCCESS 25661 cy  injected=0
+    mc_shared_line_quiet     (idle)     SUCCESS 25422 cy  injected=4
+    mc_shared_line_resident             SUCCESS 25156 cy  injected=3
+  => the POLLING observer needs ZERO injections (its own refill traffic carries the
+  invalidations — the exact "rescue" mechanism hypothesised earlier and then retracted
+  for being consistent with both a working and a broken design); the IDLE observer needs
+  4, because it has no read responses to ride on, so the retention path is what delivers
+  them. And mc_shared_line_resident passing means its RESIDENCY GATE NOW PASSES, so
+  residency is MEASURED at last — that gate could never pass before because the D$ held
+  no DRAM data (same root cause).
+  Three items asserted/retracted/left-open across this file — idle-observer delivery,
+  polling self-rescue, and line residency — are now settled by ONE consistent set of
+  measurements.
+  REGRESSION RUN for this change:
+    lint stream8 / ooo_server / server_math   PASS (7 / 4 / 7 warnings)
+    synth of g6lc_inval_retain (yosys-slang)  PASS — 8 cells (2 $_DFFE_PN0P_, 2 ANDNOT,
+                                             2 AND, NOT, OR), NO latch cells,
+                                             check -assert 0 problems
+    full-core sim mini_hpd_* + sanity         21/21
+    full-core sim 3 cross-core tests          all pass
+    unit bench both arms                     12/12 each
+    whole-cluster synth (ooo_server)          KILLED exit 137 (SIGKILL) after ~16.5 min
+  The cluster-synth failure is PRE-EXISTING, not this change. BUT MY FIRST EXPLANATION OF
+  IT WAS WRONG and is corrected here rather than quietly fixed: I called it an OOM on a
+  30 GiB host. The builder actually has 12 CORES AND 125 GiB (116 free), and the failures
+  are DEADLINES, not crashes — cut at 900s, then exit 137 at ~994s, then exit 255 at 2412s
+  against a 2400s budget. The route is SLOW, not broken.
+  THREE CHANGES CAME OUT OF THAT:
+   (1) MEASUREMENT so the next failure is attributable: each target's yosys now runs under
+       /usr/bin/time and its peak RSS + elapsed ride out on the RESULT line. A run that
+       dies otherwise leaves nothing to tell an OOM from a deadline — exactly how the first
+       diagnosis went wrong.
+   (2) PARALLELISM, WITH AN HONEST LIMIT: per-target runners launch via
+       `xargs -P $(nproc)`, so a MULTI-TARGET sweep saturates the builder instead of
+       costing N x one target. A SINGLE cluster target CANNOT saturate 12 cores — yosys is
+       single-threaded. Splitting the cluster into independently synthesised submodules is
+       what would, and is the real answer if per-change cost matters.
+   (3) budget floor raised to 5400s so the route can complete at least once (run in
+       flight at the time of writing).
+  BUG IN MY OWN CHANGE, recorded: the per-target runners use a QUOTED heredoc so the yosys
+  command text survives verbatim, but the child bash inherits the ENVIRONMENT and not plain
+  shell variables — so they ran with an empty $RUNROOT/$YS and emitted no RESULT line. The
+  gate then said "no RESULT lines ... check the proxy credentials", a misleading way to
+  spell "the script I generated was broken". Fixed by exporting REPO/RUNROOT/YS/TIMEW.
+  VERIFIED: g6lc64_stream8 synth PASSES clean in ~178s (36 warnings).
+  BUT THE SYNTH STAGE CAUGHT A REAL DEFECT OF MINE that lint missed: I declared
+  axi_rresp_valid/ready and axi_rresp AFTER the arbiter instantiation that consumes
+  them. Verilator tolerates that use-before-declaration; yosys-slang correctly rejects
+  it ("identifier 'axi_rresp_ready' used before its declaration"). => A Verilator-clean
+  build is NOT evidence of SystemVerilog conformance, and the synth stage is not
+  redundant with lint even when both merely elaborate. Declarations moved to the top of
+  the AXI branch.
+  PER-SUBMODULE PARALLEL UNCORE SYNTH now built:
+  verif/regress/remote/run_cluster_synth_review.py synthesises 10 major uncore tops
+  CONCURRENTLY (10 yosys at once, ~0.13s each) against a genuinely FLAT manifest — it
+  expands ALL THREE variables (CVA6_REPO_DIR, TARGET_CFG, HPDCACHE_DIR) and INLINES
+  nested -F includes recursively, because slang expands nothing itself. Three bugs on
+  the way, each with a misleading symptom: (a) raw flist => "unknown class or package
+  'cva6_config_pkg'" (corev_apu/Flist.cluster is an ADDITION to core/Flist.cva6 and
+  carries no config package); (b) unexpanded HPDCACHE_DIR => "'/rtl/hpdcache.Flist': No
+  such file" — the EMPTY PREFIX is the tell; (c) the same variable AGAIN inside the
+  nested hpdcache.Flist, one level deeper.
+  TYPED LINT TOPS ADDED (verif/tb/g6lc_uncore_lint_tops.sv, on corev_apu/Flist.cluster):
+  hub / inval_bus / snoop_filter / axi_2to1_mux, each binding CONCRETE ariane_axi structs
+  and NR_CORES=2 + SF enabled so the interesting logic stays alive.
+  FINAL RESULT 10/10 with real cell counts, 0 latches everywhere (typed tops added for
+  l2_top/l3_top/server_prefetcher too, the first two with the SYNTHESIS geometry shrink
+  the cluster top already needs):
+    l3_top        7640 cells  2.0 GB  278 s   <- at a SHRUNK 32 KiB geometry
+    l2_top        4660 cells  682 MB   46 s   <- at a SHRUNK 16 KiB geometry
+    coherence_hub 1236        213 MB  5.4 s
+    snoop_filter   582        186 MB 14.6 s
+    prefetcher     368   inval_bus 250   mux 80
+    lr_sc_tracker   49   inval_retain 31  l1_inv_adapter 3
+  Wall time is set by the SLOWEST module, not the sum: ~5 min for the whole suite
+  against a cluster route that never finished in 40.
+  THESE NUMBERS EXPLAIN THE CLUSTER FAILURE: l3_top alone costs 2.0 GB / 278 s at a
+  shrunk geometry, l2_top 682 MB at 16 KiB, and the cluster elaborates BOTH plus two
+  full cores at once. The deadline overruns are the direct cost of ~3.4 Mbit of tag
+  state built from FLOPS — the strongest argument yet for the standing tc_sram
+  migration: it is not only area, it is WHY there is no whole-cluster synth evidence.
+  (superseded) 7/10 with real cell counts, 0 latches everywhere:
+    coherence_hub 1236 cells (5.4s)   snoop_filter 582 (13.6s)
+    inval_bus      250               axi_2to1_mux  80
+    lr_sc_tracker   49               inval_retain  31      l1_inv_adapter 3
+    still missing: l2_top, l3_top, server_prefetcher (need typed tops; they will also
+    need the cluster top's SYNTHESIS geometry shrink, because the behavioural tc_sram
+    model cannot elaborate at production geometry in the synth frontend)
+  THE COUNT WENT 6 -> 3 -> 7, and both corrections were MY OWN vacuous passes:
+   (1) rc=0 with ZERO cells — at NR_CORES=1 the hub/inval_bus/snoop_filter collapse to
+       their degenerate path, so "success" meant nothing synthesised. `cells > 0` became
+       part of the criterion; 6 dropped to 3.
+   (2) TIE-OFFS DELETE THE DESIGN — my first typed wrappers tied every input to a
+       constant and left outputs dangling, so `opt` removed everything as unreachable:
+       stat showed wires and ports and NO CELLS while the run reported rc 0 / no
+       latches. A vacuous pass MANUFACTURED BY THE HARNESS rather than found in the RTL.
+       Wrappers now PASS THROUGH the DUT interface; the counts appeared immediately.
+  The discriminating evidence for (2) was the resource measurement I had added earlier:
+  213 MB / 5.4 s for the hub vs 64 MB / 0.12 s for a run that genuinely did nothing.
+  `cells > 0` is a weak criterion — it cannot separate correct from partly-optimised —
+  but it is exactly strong enough to catch "this proved nothing".
+  (superseded) HONEST RESULT: 3/10, not the 6/10 I first reported.
+    genuine (rc0, no latches, cells>0): lr_sc_tracker 49, inval_retain 31,
+                                       l1_inv_adapter 3
+    VACUOUS (rc0 but ZERO cells):       coherence_hub, inval_bus, snoop_filter
+    error (needs a typed wrapper):      l2_top, l3_top, server_prefetcher,
+                                       axi_2to1_mux
+  The vacuous three have ports typed via `parameter type axi_req_t = logic`, so with the
+  default parameter their generate branches collapse and NOTHING is synthesised — rc=0
+  with 0 cells. `cells > 0` is now part of the pass criterion. The four errors are the
+  same cause made visible: "invalid member access for type 'axi_resp_t' (aka 'logic')".
+  => 7 OF 10 UNCORE MODULES STILL HAVE NO STANDALONE SYNTH EVIDENCE; the specific
+  remaining work is a typed lint wrapper each, in the style of g6lc_cluster_lint_top.
+  NOTE ON MYSELF: I reproduced this review's favourite failure mode — a vacuous pass —
+  in my own runner, and only caught it because cells=0 looked wrong beside
+  lr_sc_tracker's 49.
+  STILL OWED: the whole-cluster synth route must complete somewhere before any
+  area/timing claim.
+- [~] (superseded by the applied fix) FIX DIRECTION (not applied — must be verified against the reproduction; the earlier
+  attempt was reverted for want of one): retain the external invalidation until the miss
+  handler consumes it (one-entry hold or small FIFO) and drive `inval_ready_o` from REAL
+  acceptance instead of tying it to 1. ACCEPTANCE CRITERION, concrete: on the
+  exclusion-removed arm `mc_hart1_store_visible.S` must flip from code 9 (320416 cy) to
+  code 1, while the uncached arm keeps passing and mini_hpd_* breadth stays 22/0.
+- [x] RESOLVED — "core 1's committed store never reaches polled memory" was a HARNESS
+  artifact, not a lost write: the uncached arm passes in 6449 cy, so the store IS
+  globally visible. The TB polls the DRAM array while the write sits in a write-back L2.
+  tohost from hart 1 is not a reliable reporting channel; report via hart 0.
+- [~] (superseded) REAL DEFECT TO CHASE: a COMMITTED STORE FROM CORE 1 NEVER BECOMES VISIBLE IN
+  POLLED DRAM, while the identical store from core 0 does. The TB reads the DRAM array
+  directly, so a write parked dirty in a cache — or lost in the hub write path — is
+  invisible. The coherence hub is the only structural difference between the two cores'
+  write paths, and it is in scope. Two-hart handshakes through memory cannot be
+  interpreted until this lands.
+- [x] OBSERVABILITY GAP CLOSED FOR VISIBILITY (not for verdicts). ariane_testharness.sv now
+  instantiates a cva6_rvfi + rvfi_tracer per SECONDARY core, fed by tapping the
+  cluster's per-core probe array hierarchically from the TB — chosen over widening
+  `rvfi_probes_o` to an array because that scalar is consumed by ariane.sv, the
+  Xilinx/Altera tops, ariane_gate_tb and the APU benches, and a missing pin is an error
+  here (%Error-PINMISSING), so widening forces a change at EVERY instantiation.
+  DESIGN: secondary tracers OBSERVE, never terminate — core 0's tracer_exit drives
+  rvfi_exit and thus simulation end, so end_of_test_o is left open on the secondaries.
+  HART_ID = c * NrHarts to match the cluster's mhartid derivation.
+  VERIFIED: store-visibility run gives trace_rvfi_hart_00.dasm 6084 instructions and
+  trace_rvfi_hart_01.dasm 8072 — core 1's stream visible for the first time; verdict
+  unchanged (SUCCESS 6471 cy) and exactly ONE "Simulation terminated" marker, so the
+  classifier contract is intact. Build clean, 8 warnings.
+- [x] VERDICT NOW MULTI-CORE AWARE (no array-port change needed). Criterion: EVERY
+  instantiated core must retire >=1 instruction by the time core 0 declares the test
+  over; a violation forces exit code 127 through exit_o, the channel the C++ side already
+  turns into the verdict. Deliberately the WEAKEST useful criterion: an idle park is
+  indistinguishable from a hang without test-specific knowledge, so requiring progress
+  would fail legitimate tests while requiring "it ran at all" cannot. Safe everywhere
+  here because the bootrom sends ALL harts to DRAM_BASE (even single-hart tests execute
+  the mhartid check per core); vacuous at NR_CORES==1.
+  VERIFIED BOTH WAYS (a verdict never seen to fail == a verdict that cannot fail):
+    normal                 SUCCESS + "[mc_verdict] all 2 core(s) retired instructions"
+    +mc_verdict_fault      FAILED (tohost = 127), retired_mask=01
+    breadth mini_hpd_*+sanity  21/21 pass, each also requiring the mc_verdict line
+    three cross-core tests     all SUCCESS
+  THREE GOTCHAS: (a) `rvfi_instr[N-1:0].valid` is ILLEGAL (no range on the instance part
+  of a dotted reference) — use an explicit reduction loop; (b) the plusarg MUST be
+  allowlisted in g6lc_tb.cpp or HTIF rejects it and the run dies, which looks exactly
+  like the control working while the verdict was never exercised; (c) the diagnosis had
+  to move to a `final` block — the C++ side leaves its loop the moment exit_o[0] is set,
+  so the first version exited 127 with NO REASON PRINTED.
+  STILL NOT COVERED: a secondary core that runs and THEN hangs while core 0 finishes.
+  Needs per-core liveness windows or test-declared expectations; both risk failing
+  legitimate idle parks, so left open rather than guessed.
+- [~] (superseded) OBSERVABILITY GAP that hid all of this: `g6lc_cluster.sv:221` is
+  `assign rvfi_probes_o = core_rvfi[0];` — the cluster forwards ONLY CORE 0's RVFI
+  probes. Every trace-based check, including the suite classifier's
+  "rvfi_tracer ... Simulation terminated" marker that this review treats as the gold
+  standard, is blind to core 1 by construction. AGENTS.md 0.1(6) exists to prevent
+  exactly this.
+- [x] Fixed the TB multi-core PC probe (was the top multi-core item): 5 stale
+  `i_cva6_icache` paths renamed to `i_g6lc_icache`; CVA6_MC_PC_PROBE_COMPILE builds
+  clean (0 warnings, 0 errors) and produced every result above.
+- [~] (WRONG, superseded) THE SECOND CORE NEVER EXECUTES — every two-hart result in this repo is vacuous.
+  Probed directly instead of inferred: `mc_hart1_alive.S` inverts the roles so hart 0
+  parks in a plain loop and ONLY hart 1 writes tohost; `mc_hart1_trap.S` makes hart 1's
+  FIRST instruction a deliberate `unimp`, so even one fetched instruction would publish
+  32+((mcause<<1)|1) via the trap handler. Results on BOTH work-ver-s8-b-retired and
+  production work-ver-stream8: watchdog 2147483647 for all three variants (wfi park,
+  plain-loop park, trap). => hart 1 does not execute a single instruction; store
+  visibility and wfi are both ruled out.
+  CONSEQUENCES: every two-hart test in verif/tests/custom/multicore/ has been passing on
+  hart 0 alone, including the polling/idle-observer coherence results (already withdrawn
+  for the D$-allocation reason — this is a SECOND independent reason). The old 773-cycle
+  "polling observer" pass is explained: that version had hart 0 write the seed itself.
+  No cross-core invalidation / snoop-filter / LR-SC claim can be supported by full-core
+  sim on this config until core 1 boots.
+  RULED OUT: bootrom (sends ALL harts to DRAM_BASE, parking deliberately removed; .sv
+  newer than .S, commit "Sync the generated bootrom with its source"); BOOT_HOLD gating
+  ((NC>1 && NrHarts>1) is false for stream8); boot address (PerCoreBoot only under
+  G6LC_APU, both cores take ROMBase). WITHDRAWN: my "npc=0x0 means secondary boot
+  failure" claim — g6lc_tb.cpp:676 prints CORE 0 ONLY and only for main_time<64.
+  REMAINING CANDIDATES: core 1 held in reset by the harness; core 1 I$ fetch never
+  answered through the hub/AXI arbiter (a real uncore defect, in scope); core 1 not
+  elaborated.
+- [ ] TOP MULTI-CORE ITEM: repair the TB's multi-core PC probe. It prints c1.npc, which is
+  exactly the instrument needed, but CVA6_MC_PC_PROBE_COMPILE no longer compiles — stale
+  hierarchy paths, e.g.
+  gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_cva6_icache__DOT__cache_en_q.
+- [~] (superseded) NEW BLOCKER for the coherence re-run: on the fixed flavour-B build all three
+  cross-core tests fail with code 5 (READY timeout) at ~160.5k cycles — hart 1 never
+  publishes, while hart 0 plainly runs. Boot trace shows `[boot] npc=0x0` on this build
+  vs `npc=0x10000` (bootrom) on production and on every 2jr run. BOOT_HOLD is NOT the
+  cause: it is (NC>1 && NrHarts>1) and stream8 is NrHarts=1/NrCores=2. The same test
+  passed on production (773 cy, which required hart 1), so secondary-core boot works
+  there and not under flavour B. Separate defect; chase it before reading anything into
+  the coherence tests. NOTE for whoever picks this up: code 5 = "hart 1 never ran";
+  only code 9 would mean a stale line.
+- [x] Blocker cleared, and neither obstacle was an RTL defect: (1) `legacy` flavour cannot
+  build (%Error-PINMISSING at core/fetch_A/smt_legacy/frontend.sv:4003, push_cf_i /
+  cf_resolve_i) — ALL WORK NOW USES FLAVOUR B (fetch_B); fetch_A/smt_legacy is never the
+  supply — and fetch_A is now RETIRED IN TOOLING, not merely avoided: the build harness
+  refuses flavour legacy|a|A|oracle with a directive message
+  (override SOFT_LADDER_ALLOW_RETIRED_FETCH_A=1 only to repair that supply). Flist
+  trimmed ON EVIDENCE: of the 10 core/fetch_A/smt_legacy/* helpers listed, 5 were dead
+  (referenced only by fetch_A files the flist never compiles — frontend.sv /
+  instr_queue.sv / instr_realign.sv) and are REMOVED: g6lc_fe_kill, g6lc_iq_hide,
+  g6lc_present, g6lc_leftover, g6lc_lj_hide. The OTHER 5 ARE NOT RETIRED despite their
+  path and deleting them would break the build — g6lc_rvc_enc, g6lc_jalr_usable,
+  g6lc_cf_unissued, g6lc_fe_keep, g6lc_sib_cjalr are used by the LIVE core
+  (compressed_decoder, id_stage, controller, scoreboard, branch_unit,
+  issue_read_operands, issue_stage).
+  RELOCATED (follow-up now done): all five `git mv`'d from core/fetch_A/smt_legacy/ to
+  core/, next to the consumers that use them, and core/Flist.cva6 updated. Checked first
+  that nothing else referenced the old paths — Flist.smt_legacy and
+  verif/sv-timing-tests/flists/sparse_frontend.f mention fetch_A but NOT these five, so
+  core/Flist.cva6 was the only file to change. core/fetch_A now has ZERO entries in the
+  stock flist, so the directory can be deleted without stranding live code — which was
+  the point: live files inside a directory documented as retired are a trap for whoever
+  finally deletes it. VERIFIED: stream8 flavour B builds clean (8 warnings), default lint
+  8/54 unchanged.
+  PROCESS NOTE: the path edits and the comment edit were done in one script whose LAST
+  assertion failed, so nothing was written — but the `git mv` had already run, leaving
+  moved files and a stale flist (a broken tree). Sequence the irreversible step AFTER the
+  edits that can still abort, or make the whole thing idempotent. core/smt_legacy/* (9 entries) left alone: different directory,
+  SMT support that NrHarts>1 configs need. Verified: stream8 flavour B builds clean,
+  breadth 22/0, lint 8/54 unchanged, flavour legacy now refuses up front.
+  SELF-INFLICTED NOTE: writing the .sh via Python on Windows injected CRLF and broke
+  the harness ("$'
+': command not found"); shell scripts must be written LF-only.
+  (2) flavour B "segfaulted on every ELF" — it was the 8 MB DEFAULT STACK; the
+  Verilated model is stack-allocated and exceeds it. gdb put the fault in getenv() inside
+  main (first page past the limit). `ulimit -s unlimited` and it runs. Add that to any
+  runner that launches this model.
+- [~] (superseded) 2jr REPRODUCTION BLOCKED by a build-infrastructure regression, NOT by analysis.
+  Built the seam (`G6LC_DCACHE_EXEC_CACHEABLE` in cva6_hpdcache_if_adapter.sv) plus
+  `--define` support in isolated-config-overlay.py and a bare-NAME form in
+  SOFT_LADDER_OVERLAY, so both arms build from ONE source state. Then:
+    legacy flavour  -> BUILD FAILS: %Error-PINMISSING at
+      core/fetch_A/smt_legacy/frontend.sv:4003, missing pins push_cf_i / cf_resolve_i
+    B flavour       -> builds clean (8 warnings) but SEGFAULTS (rc=139) on every ELF,
+      including the control built with NO define => crash is not from the seam
+  Neither core/fetch_A, core/fetch_B, core/fetch nor core/frontend is modified in this
+  worktree (`git status` clean for all four), so neither breakage is mine. Production
+  work-ver-stream8 (2026-09-15) runs all four tests fine => it was built from an OLDER
+  source state than the tree can reproduce today.
+  METHOD NOTE: my first pair compared production vs an overlay build, and the overlay
+  derives from the STOCK flist — so the arms differed by frontend supply (fetch_A vs
+  fetch_B) as well as by the define, making its segfault unattributable. Corrected pair
+  pins both arms to flavour B; verified by flist diff (identical but for the define) and
+  config-package md5 (7ad570b1… both).
+- [ ] PREREQUISITE for the 2jr mechanism hunt: fix the fetch_A/smt_legacy frontend pin
+  mismatch (push_cf_i / cf_resolve_i), or fix whatever makes a fetch_B stream8 model
+  segfault at startup. Until one is resolved, execute-region option 3 cannot be
+  attempted and the exclusion cannot be removed on evidence.
+- [ ] PERFORMANCE DEFECT to investigate on its own merits: the execute-region exclusion
+  was added as a narrow I$/D$ aliasing fix (comment cites a jtab line the I$ already
+  holds), but excluding the WHOLE execute region — which spans all DRAM — disables D$
+  allocation for all ordinary data. Almost certainly not the intent; it would gut load
+  performance on every config with this shape.
+  SCOPE CONFIRMED: `is_inside_execute_regions` is a plain range check, and ALL THREE
+  HPDCACHE configs (stream8, ooo_server, server_math) declare the identical overlap
+  ExecuteRegion[0] = CachedRegion[0] = 0x8000_0000 +0x4000_0000. Asymmetry worth noting:
+  the store/AMO branch of the same adapter applies only the cacheable check, so it is
+  specifically LOAD allocation that is disabled.
+  NOT PATCHED UNILATERALLY — the exclusion fixes a real I$/D$ aliasing case and names
+  the tests it repaired (2jr_fencei / 2jr_pad / 2jr_data); deleting it would likely
+  reintroduce that defect. Options for the owner: (1) narrow the predicate to the
+  actual hazard (a load to a line the I$ holds) rather than the whole region;
+  (2) shrink ExecuteRegion in config to the text range only — cheap but leaves the
+  over-reach latent; (3) fix the aliasing at source and drop the exclusion. Any of
+  them must use the 2jr_* tests as the regression gate.
+- [~] (withdrawn) DEFECT — L1 D-cache miss PMU event does not fire on HPDCACHE configs. Wiring looks
+  complete: cva6.sv connects `.dcache_miss_o` on the HPDCACHE branch and
+  cva6_hpdcache_wrapper.sv drives it from hpdcache's `evt_cache_read_miss_o`, yet the
+  counter never increments. Same class as `coh_sc_fail_o` hardwired zero; AGENTS.md
+  0.1(6) requires a working PMU event. Worth fixing on its own merits — a dead
+  cache-miss counter blinds every perf investigation on these configs. It is also the
+  prerequisite for proving cache residency, which stays unproven until then.
+  RESIDUAL: all evidence is black-box. The remaining check is an RTL trace of
+  `dcache_miss_cache_perf` (waveform or an SVA counting pulses) to distinguish "never
+  pulses" from "pulses but is swallowed before generic_counter".
+- [~] (superseded) FIRST investigate the early-boot stall, which may be a real frontend defect and
+  currently blocks the whole multi-core sim route: `g6lc_fetch_dbg.sv:347` — `I23
+  redirect_hold age 3 exceeds geo.hold_max 2`, hart 1 frontend, cycle 240711, followed
+  by a stall at pc~0x80000074 cause=24. Reproduces with every ELF tried.
+- [~] (superseded) EVIDENCE SUSPENDED — all cross-core coherence results are currently untrustworthy.
+  Re-running the UNMODIFIED polling test on the same netlist produced a 1.2M-cycle harness
+  timeout instead of its earlier 67100-cycle pass. The simulator binary is unchanged
+  (`/opt/testharness/work/work-ver-stream8/Variane_testharness`, md5
+  5b487b85a4893e04876fe8bb2ba9f95e, 2026-09-15 02:12:59), but the two ELFs compiled from
+  the SAME source path have different hashes: the passing `mc2.elf` is 9df35828… and
+  today's control `poll2.elf` is ce2626c1…. So the control was not the same program, the
+  comparison is void, and it is not known which source state produced the pass. The
+  quiet-observer runs are uninterpretable for the same reason. ACTION before any further
+  coherence experiment: pin and record the md5 of BOTH the simulator binary and the ELF in
+  every run, refuse to compare runs whose hashes differ, and re-establish a passing
+  baseline from a known source state.
+- [ ] Separate defect surfaced by these runs, needs its own investigation: both harts trip
+  `g6lc_fetch_dbg.sv:347` — `I23 redirect_hold age 3 exceeds geo.hold_max 2` on hart 1's
+  frontend at ~240k cycles — followed by a machine-level stall (commit-dbg pc=0x80000074,
+  cause=24). Unrelated to polling vs quiet waiting.
+- [!] CORRECTION to the "self-proving" claim: the FLAG-loop argument proves delivery only
+  for a POLLING observer, which is precisely the case where the observer's own refill
+  traffic can supply the coincident read response. It does not cover an idle observer, so
+  the polling passes do NOT settle the question and my previous conclusion was too strong.
+  Cacheability is ruled out: stream8's cached region is [0x8000_0000, 0xC000_0000).
+  Added `mc_shared_line_quiet.S` (resident line + register-only wait, no traffic) as the
+  decisive variant; its first run returned `tohost=2147483647`, the harness CYCLE TIMEOUT
+  at 900013 cycles — inconclusive, neither hart reached a verdict. v2 completes in 67100
+  cycles, so the quiet variant does not terminate and needs per-stage progress markers and
+  a smaller quiet window. Position: defect neither demonstrated nor excluded; change stays
+  reverted for lack of a reproduction; concern NOT closed.
+- [~] (superseded) The pass is self-proving: hart 0 spins on FLAG with ordinary loads and hart 1
+  writes FLAG, so LEAVING the loop already requires hart 0's cached FLAG line to be
+  invalidated — otherwise it exits with code 6 (timeout). The run completed in 67100
+  cycles with the correct LINE value, so delivery is demonstrated twice in one run
+  (FLAG loop exit and LINE value). The refutation is solid.
+- [ ] Mechanism still unexplained (behaviour is correct): the arbiter drives
+  `dcache_read_resp_valid_o = mem_resp_read_valid_arb[1]` (real read responses only)
+  and the demux samples the inval only inside `if (mem_resp_read_valid_i)`, yet no
+  pulse is lost. Settle it with a PMU-instrumented variant: load LINE twice before the
+  remote write (second must HIT = resident) and once after (must MISS), reading the D$
+  miss counter around each. Candidates: spin-loop refill traffic supplying the
+  coincident response, or the region not being cached in this harness's PMA.
+- [ ] Proxy usage note: `shell` takes the command POSITIONALLY. `--cmd "X"` is not a
+  flag, so it was passed to bash as argv[0] ("--cmd: command not found") and the first
+  command in the string was consumed. Global flags such as `--timeout` must precede
+  the subcommand. Also: a proxy-side timeout kills the ssh command but leaves the
+  remote simulator running, and the overlap guard then refuses the next run.
+- [x] The ooo_server 2 -> 4 warning delta is identified and is NOT from the HPDCACHE
+  repair: both new warnings are WIDTHCONCAT on `g6lc_l2_tag.sv:112` (`tags_q <= '0`,
+  the earlier whole-array tag reset). They quantify the flop tag arrays at production
+  geometry — **3,080,192 bits** (L3 instance) and **401,408 bits** (L2), ~3.4 Mbit of
+  tag state in flops. Left unsilenced on purpose: they are the standing signal for the
+  tag-SRAM item.
+- [ ] Remote shell quoting gotcha (cost me several queries): `remote shell -- --cmd "X"`
+  passes `--cmd` to bash as argv[0], so the FIRST command in the string is consumed.
+  Prefix a sacrificial token (`x ; real command`) or the first command's output is
+  silently missing — which is how a `grep` looked like "no matches".
+- [ ] Remaining gate work: record `warningBaselineRemote` from a reviewed run; give
+  slang elaboration a remote route (no standalone slang on the builder, and the
+  Yosys-integrated frontend is not a substitute — it rejects hpdcache SVA that
+  standalone slang accepts); add the uncore to the remote synth sweep; then execute
+  the full source-bound gate including sim.
 - [ ] Full source-bound platform verification and natural SMT2/OpenSBI remain
   gates, separate from in-order integer diagnostics and OoO-disabled regressions.
   The current `verify --lint --sim --synth --dry-run` still selects local tool
@@ -124,6 +976,126 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   remain missing; generic cell counts do not discharge this item.
 - [ ] Preserve the documented OoO hart/FP legality restrictions and track the
   missing namespaces and simulator `-O0` divergence explicitly.
+
+- [x] REMOTE WARNING BASELINE RECORDED — `verify.warningBaselineRemote` in
+  build-platform/src/config/defaults.ts:
+    cv64a6_imafdc_sv39 8   cv32a65x 54
+    g6lc64_stream8     7   g6lc64_ooo_server 4   g6lc64_server_math 7
+  WHY IT MATTERS: unset meant warnings were NOT GATED AT ALL on the remote route. The gate
+  said so on every run of this session ("NO remote baseline recorded, warnings not
+  gated") — a hole, not a default: a change adding twenty warnings would still have
+  passed. Deliberately NOT copied from the local `warningBaseline` (483/146), because the
+  builder's Verilator emits a different diagnostic set (8/54) and transferring the local
+  numbers would hide real regressions under a much larger accepted count.
+  Values are trustworthy because they held steady across many runs while the D$
+  read-response path changed on all three HPDCACHE targets.
+  VERIFIED THE BASELINE ACTUALLY GATES, not just that it is present: lowering
+  cv64a6_imafdc_sv39 to 7 produced
+    FAIL lint cv64a6_imafdc_sv39 remote 8 warning(s), remote baseline 7 — REGRESSION
+  then restored to 8 and all five targets pass against their own baselines. A baseline
+  never observed to fail is indistinguishable from one that is not consulted.
+
+- [~] HUB ARBITRATION FAIRNESS — partially characterised, NOT qualified.
+  The hub bench left `coh_arb_starve_o()` UNCONNECTED, so the starvation override had never
+  been observed to fire in any test ("the RTL drives it" was the only evidence). Added
+  tb_g6lc_coherence_hub scenario 9 (+ a `+starve_trace` probe) and connected the output.
+  MEASURED (trace, both cores' AW asserted, memory refusing):
+    i=14  starve0=14 starve1=14  force=0 hold=1 grant=1
+    i=16  starve0=16 starve1=16  force=0 hold=1 grant=1
+    i=19  starve0=16 starve1=16  force=0 hold=1 grant=1
+  (1) COUNTERS ARE CORRECT and SATURATE at the limit — the `< LIMIT` guard (line 414) means
+      a starvation claim cannot wrap and be silently lost. Previously a reading, now
+      measured.
+  (2) THE OVERRIDE NEVER FIRES: line 141 clears aw_starve_force whenever aw_hold_q is set,
+      and the hold latches on grant and persists until the memory side accepts. So
+      coh_arb_starve_o CANNOT ASSERT WHILE AN AW IS PENDING DOWNSTREAM, however long a core
+      has waited. The suppression is correct in itself (the AW owner must not change
+      mid-burst or W data mis-routes), but it means the override is NOT an unconditional
+      service bound: the real bound is AXI_STARVE_LIMIT + hold duration, and the hold is set
+      by downstream memory, not by the hub.
+  MY FIRST STIMULUS WAS WRONG and the test SAID SO rather than passing: refusing AW for
+  EVERYONE is not starvation (nobody is served, so nobody is relatively starved). Scenario 9
+  fatals with HUB_STARVE_NOT_OBSERVED instead of reporting success — the behaviour a
+  fairness test must have.
+  FINAL MEASUREMENT, after TWO harness errors (bench parameterised -GNC/-GSTARVE_LIMIT/
+  -GCYCLES). Total grants went from 4 to 600 once B was drained CORRECTLY:
+    NC=2 L=16  total=600  300:300        override asserted 0 cycles
+    NC=4 L=16  total=600  150 x4         override asserted 0 cycles
+    NC=8 L=16  total=600  75 x8          override asserted 0 cycles
+    NC=4 L=1   total=600  599:0:...      SHUT-OUT
+    NC=8 L=1   total=600  599:0:...      SHUT-OUT
+  RETRACTION: I previously recorded that the override "fires routinely at the production
+  limit — 39 of 60 cycles" and that my round-robin reasoning was "not the operative
+  effect". THAT WAS AN ARTIFACT of the stalled harness: with the hub jammed every core
+  waited indefinitely and trivially passed the limit. On a working harness the override
+  NEVER FIRES at the production limit — 0 cycles in 1200, at 2, 4 AND 8 cores — and
+  round-robin alone distributes grants perfectly evenly. My original reasoning was right.
+  THE REAL FINDING, sharper than a bias: when the override DOES engage it LOCKS THE
+  ARBITER ONTO ONE CORE — 599 of 600 grants to a single core, others get NONE, at both 4
+  and 8 cores. Cause: the selection loop (lines 129-140) assigns `aw_winner = c` for
+  every starved core, so the highest-indexed starved core always wins; at a low limit it
+  re-qualifies immediately after each grant and never yields.
+  => The override is NOT a fairness net; engaged, it is a fairness HAZARD. What protects
+  production is that it never engages: the margin between the service interval and
+  AXI_STARVE_LIMIT=16 IS the safety argument, now measured rather than assumed. Anyone
+  lowering the limit — or lengthening the service interval enough to reach it — should
+  expect MONOPOLISATION, not rescue.
+  TWO HARNESS ERRORS, both mine, both caught by data:
+   (1) B never drained => scoreboard fills after MAX_OUTSTANDING and the hub stops
+       granting; every config reported exactly 4 grants and a 20x window changed
+       NOTHING. Identical counts over 20x the time = stalled harness, not unfair
+       arbiter. Scenario now reports HUB_STARVE_INCONCLUSIVE when total grants < NC.
+   (2) First B fix issued the response in the SAME cycle as the AW handshake, but the
+       slot is only registered at the clock edge — the B arrived before the entry
+       existed and was never matched. Delaying B one cycle: 4 -> 600 grants.
+  SUITE STATE: 9/9 scenarios pass with the output connected. Default production config
+  (2 cores, limit 16, 60 cycles): grants=15 15, starve_cycles=0 — even, override never
+  engaged. s9 negative control fires (HUB_STARVE_SHUTOUT core 0), and the pre-existing
+  s0 control still fires, so nothing was weakened.
+  OWNER DECISION QUEUED: make the override pick ROTATIONALLY among starved cores (scan
+  from aw_rr_q, take the first starved) instead of letting the loop's last iteration
+  win. One changed loop; converts a hazard into the net it was meant to be. NOT applied
+  here because the override is unreachable in production and changing arbitration
+  without a reproduction of harm would be speculative.
+
+- [x] INVAL_BUS DRAIN reviewed — NO LOSS, but the loss-signal was MISNAMED.
+  inv_ready_o = can_accept, false whenever ANY target FIFO is full
+  (g6lc_inval_bus.sv:60-84), so the producer is back-pressured and the hub holds the
+  request. With the hub's registered invalidation obligation and the L1-side retention
+  repaired earlier, ALL THREE stages of the path now hold rather than discard.
+  THE NAME WAS THE DEFECT: `inv_drop_o`, documented "producer drop (all FIFOs full)", is
+  assigned `inv_req_i.valid & ~inv_ready_o` — i.e. "refused this cycle", RETRIED not lost.
+  On a coherence path that distinction is everything: anyone debugging a stale line would
+  see inv_drop high and conclude invalidations were discarded — the wrong search direction.
+  It is also UNCONNECTED in the hub, so nothing was going to contradict the misreading.
+  RENAMED to inv_stall_o at all five sites. Two things confirm it was a naming defect and
+  not a design one: both existing benches already bound it to a signal called `blocked`,
+  and the module coalesces same-line invalidations rather than dropping them.
+  Same repair as coh_sc_fail_o -> coh_sc_noresv_o: point the name at the condition the
+  signal actually observes.
+  VERIFIED: inval-bus leaf bench passes, hub suite 9/9, ooo_server lint 4 warnings against
+  its recorded baseline.
+
+- [x] LINE-ENDING CHURN CLEANED (self-inflicted, and the same trap already recorded in this
+  file). Python `write_text` on Windows rewrites files as CRLF, so 17 edited files had
+  become whole-file diffs:
+    g6lc_coherence_hub.sv      666/651  ->  19/4
+    g6lc_inval_bus.sv          145/139  ->   9/3
+    tb_g6lc_inval_bus.sv       226/226  ->   1/1   (a ONE-LINE change)
+    total across the tree   12287/8619  ->  3971/247
+  ~8,400 lines of pure churn removed. Several files (ariane.sv, g6lc_cluster.sv,
+  ariane_gate_tb.sv, g6lc_lr_sc_tracker.sv, tb_g6lc_rtl_review.sv, verify.ts, schema.ts)
+  had been sitting as whole-file CRLF diffs from EARLIER in the session and only now show
+  their real 1-4 line changes.
+  METHOD, so this is reversible and safe: normalise ONLY files that were LF in HEAD —
+  a file legitimately CRLF upstream must keep its endings. Checked per file against
+  `git show HEAD:<path>` rather than blanket-converting.
+  RE-VERIFIED AFTER: stream8 flavour B builds clean (8 warnings), breadth 21/21, the three
+  cross-core tests pass, hub suite 9/9, inval-bus leaf bench passes.
+  RULE (already in this file for .sh, now shown to apply to .sv/.ts/.py too): prefer the
+  edit tool; if Python must write a repo file, write BYTES and preserve the original
+  newlines. `git diff --numstat` is the cheap detector — insertions == deletions == file
+  length means line endings, not content.
 
 ## Balanced core performance foundation (2026-09-14)
 

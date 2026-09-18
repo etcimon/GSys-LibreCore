@@ -27,7 +27,13 @@ module g6lc_inval_bus
     output coh_inval_t [NR_CORES-1:0]          inv_core_o,
     input  logic       [NR_CORES-1:0]          inv_core_ready_i,
     // Observability
-    output logic                               inv_drop_o,    // producer drop (all FIFOs full)
+    //  Named `stall`, NOT `drop`: this is `valid & ~ready`, i.e. the producer was
+    //  REFUSED this cycle because some target FIFO is full. Nothing is lost -- the
+    //  hub holds the request and retries. The previous name `inv_drop_o` invited the
+    //  opposite reading, which is dangerous on a coherence path: anyone debugging a
+    //  stale line would see it high and conclude invalidations were being discarded.
+    //  Both existing benches already bound it to a signal called `blocked`.
+    output logic                               inv_stall_o,   // valid & ~ready (retried, not lost)
     output logic                               inv_coalesce_o
 );
 
@@ -39,7 +45,7 @@ module g6lc_inval_bus
     // Single core: no remote inv needed; always ready, never emits
     assign inv_ready_o     = 1'b1;
     assign inv_core_o      = '{default: '0};
-    assign inv_drop_o      = 1'b0;
+    assign inv_stall_o     = 1'b0;
     assign inv_coalesce_o  = 1'b0;
   end else begin : gen_multi
 
@@ -82,7 +88,7 @@ module g6lc_inval_bus
     end
 
     assign inv_ready_o    = can_accept;
-    assign inv_drop_o     = inv_req_i.valid & ~inv_ready_o;
+    assign inv_stall_o    = inv_req_i.valid & ~inv_ready_o;
     assign inv_coalesce_o = inv_req_i.valid & coalesce & can_accept;
 
     // Push / pop

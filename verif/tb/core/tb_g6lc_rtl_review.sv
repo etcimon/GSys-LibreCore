@@ -668,9 +668,14 @@ module tb_g6lc_review_dispatch;
   // stall is a combinational function of the IQ's own issue outputs while also
   // gating IQ selection.
   parameter bit MDP=1'b0;
+  // Exercises the elaboration guards: an unsound configuration must fail to
+  // build, not merely warn in simulation.
+  parameter int unsigned HARTS=1;
+  parameter bit FPEN=1'b0;
   function automatic config_pkg::cva6_cfg_t configuration();
     config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
-    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NrHarts=1;c.NrCores=1;c.NrIssuePorts=2;c.NrCommitPorts=2;c.NrWbPorts=2;
+    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NrHarts=HARTS;c.NrCores=1;c.NrIssuePorts=2;c.NrCommitPorts=2;c.NrWbPorts=2;
+    c.FpPresent=FPEN;
     c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.PrfEntries=40;c.RobEntries=8;c.IqEntries=8;
     c.LsqLoadEntries=4;c.LsqStoreEntries=4;c.BPCkptDepth=2;c.OoOEn=1;
     c.MemDepPredEn=MDP;return c;

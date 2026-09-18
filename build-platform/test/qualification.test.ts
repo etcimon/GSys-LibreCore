@@ -10,7 +10,7 @@ import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs, type FlagValue } from "../src/cli/args.ts";
-import { verifyCommand } from "../src/cli/commands/verify.ts";
+import { gateVerdict, verifyCommand } from "../src/cli/commands/verify.ts";
 import type { PlatformContext } from "../src/context.ts";
 import { Logger } from "../src/util/log.ts";
 import { hasBinary } from "../src/platform/exec.ts";
@@ -55,6 +55,25 @@ test("qualification option consumes its profile argument", () => {
   const args = parseArgs(["verify", "--sim", "--qualification", "perf-foundation", "--target", "g6lc64_stream8"]);
   expect(args.flags.qualification).toBe("perf-foundation");
   expect(args.positionals).toEqual([]);
+});
+
+test("a skipped stage cannot report a passed gate", () => {
+  const step = (status: "pass" | "skip" | "fail") =>
+    ({ stage: "sim" as const, target: "t", status, detail: "", durationMs: 0 });
+  const opts = { dryRun: false, allowSkips: false, qualified: false };
+  expect(gateVerdict([step("pass"), step("pass")], opts).code).toBe(0);
+  expect(gateVerdict([step("pass"), step("fail")], opts).code).toBe(1);
+  // A failure outranks a skip, and a skip outranks a pass.
+  expect(gateVerdict([step("skip"), step("fail")], opts).code).toBe(1);
+  const incomplete = gateVerdict([step("pass"), step("skip")], opts);
+  expect(incomplete.code).toBe(4);
+  expect(incomplete.message).not.toContain("Gate passed");
+  expect(gateVerdict([step("pass"), step("skip")], { ...opts, allowSkips: true }).code).toBe(0);
+  // A dry run executes nothing, so it never claims a gate result.
+  const dry = gateVerdict([step("skip")], { ...opts, dryRun: true });
+  expect(dry.code).toBe(0);
+  expect(dry.message).toContain("not a gate result");
+  expect(gateVerdict([step("pass")], { ...opts, qualified: true }).message).toContain("qualified");
 });
 
 test("qualification refuses unsafe CLI combinations before tool provisioning", async () => {
@@ -253,6 +272,9 @@ text = chr(10).join([
     *[f"[L2TB] ATOP mode={mode} forwarded=1" for mode in range(3)],
     "[L2TB] AMO arith add=1 swap=1 cas_hit=1 cas_miss=1 lrsc_ok=1 lrsc_fail=1",
     "phase=replacement_hole", "phase=bypass_backpressure", "phase=short_last_fill_guard",
+    # l2_leaf_passed also requires the fill-error phase: a run whose error-fill
+    # coverage silently disappeared must not be accepted as a pass.
+    "phase=fill_error_no_install",
     "[L2TB] RESULT pass",
 ])
 assert proxy.l2_leaf_passed(text, 0, 4, 1)

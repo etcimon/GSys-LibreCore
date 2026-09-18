@@ -1451,12 +1451,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     // Requires `cva6-build vendor sync ara` (upstream tree + Flist.ara present).
     extraFlistsByTarget: {
       g6lc64_server_math_v: ["vendor/ara/Flist.ara"],
+      // The uncore cache hierarchy is not reachable from top `cva6`, so a gate
+      // run on this target would elaborate none of the L2/L3/prefetch path it
+      // enables. Appending the cluster flist and retargeting the top below puts
+      // the production wiring, including the direct L2-to-L3 abutment, under the
+      // gate.
+      g6lc64_ooo_server: ["corev_apu/Flist.cluster"],
     },
     waiverFile: "verilator_config.vlt",
     top: "cva6",
     // RVV package needs typed accelerator interfaces for LSU/acc paths.
     topByTarget: {
       g6lc64_server_math_v: "g6lc_ara_lint_top",
+      g6lc64_ooo_server: "g6lc_cluster_lint_top",
     },
     // Default gate: full-feature 64-bit + minimal 32-bit. Production-heavy
     // packages (g6lc64_ooo / ooo_server, server_math, smt2, spec_deep) are
@@ -1600,6 +1607,26 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // re-measured 2026-08-06 after g6lc instance rename (full elab): 146.
       cv64a6_imafdc_sv39: 483,
       cv32a65x: 146,
+    },
+    // Remote route, measured 2026-09-16 across repeated runs in one session and
+    // stable at these values throughout the HPDCACHE invalidation-retention work
+    // (the D$ read-response path changed on every one of these targets, and the
+    // counts did not move). Recorded because an UNSET baseline means warnings are
+    // not gated at all on the remote route — the gate says so on every run
+    // ("NO remote baseline recorded, warnings not gated"), which is a hole, not a
+    // default: a change that added twenty warnings would still have passed.
+    //
+    // Deliberately NOT copied from `warningBaseline` above: the builder's
+    // Verilator emits a different diagnostic set (8/54 here versus 483/146
+    // locally), so transferring those numbers would hide real regressions under a
+    // much larger accepted count. Lower these whenever a change removes warnings;
+    // never raise one without saying why.
+    warningBaselineRemote: {
+      cv64a6_imafdc_sv39: 8,
+      cv32a65x: 54,
+      g6lc64_stream8: 7,
+      g6lc64_ooo_server: 4,
+      g6lc64_server_math: 7,
     },
     failOnMissingBaseline: false,
   },

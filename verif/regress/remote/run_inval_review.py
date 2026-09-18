@@ -39,7 +39,7 @@ module g6lc_inval_contract
   g6lc_inval_bus #(.NR_CORES(3), .DEPTH(2)) dut (
     .clk_i, .rst_ni(rst_n), .inv_req_i(request), .inv_target_i(targets),
     .inv_ready_o(ready), .inv_core_o(delivered), .inv_core_ready_i(consumer_ready),
-    .inv_drop_o(blocked), .inv_coalesce_o(coalesced)
+    .inv_stall_o(blocked), .inv_coalesce_o(coalesced)
   );
   always_comb begin
     expected_ready = 1;
@@ -114,7 +114,7 @@ def quality_review(out, data):
     areas = []
     for cores, depth in [(1, 1), (3, 2), (4, 4)]:
         wrapper = work / f'shape-{cores}-{depth}.sv'
-        wrapper.write_text(f'// Copyright (c) 2026 Etienne Cimon\n// SPDX-License-Identifier: MIT\nmodule leaf import g6lc_coherence_pkg::*; (input logic clk_i, rst_ni, input coh_inval_t request, input logic [{cores-1}:0] targets, consumer_ready, output coh_inval_t [{cores-1}:0] delivered, output logic ready, blocked, coalesced);\ng6lc_inval_bus #(.NR_CORES({cores}), .DEPTH({depth})) dut (.clk_i, .rst_ni, .inv_req_i(request), .inv_target_i(targets), .inv_core_ready_i(consumer_ready), .inv_core_o(delivered), .inv_ready_o(ready), .inv_drop_o(blocked), .inv_coalesce_o(coalesced));\nendmodule\n')
+        wrapper.write_text(f'// Copyright (c) 2026 Etienne Cimon\n// SPDX-License-Identifier: MIT\nmodule leaf import g6lc_coherence_pkg::*; (input logic clk_i, rst_ni, input coh_inval_t request, input logic [{cores-1}:0] targets, consumer_ready, output coh_inval_t [{cores-1}:0] delivered, output logic ready, blocked, coalesced);\ng6lc_inval_bus #(.NR_CORES({cores}), .DEPTH({depth})) dut (.clk_i, .rst_ni, .inv_req_i(request), .inv_target_i(targets), .inv_core_ready_i(consumer_ready), .inv_core_o(delivered), .inv_ready_o(ready), .inv_stall_o(blocked), .inv_coalesce_o(coalesced));\nendmodule\n')
         for role, rtl in [('before', original), ('after', candidate)]:
             label = f'synth-{role}-{cores}-{depth}'
             script = f'read_slang --std 1800-2017 --top leaf {package} {rtl} {wrapper}\nsynth -top leaf -flatten\ncheck -assert\nwrite_json {label}.json\n'
@@ -156,7 +156,7 @@ module hub_contract
     .inv_core_o(invalidations), .inv_core_ready_i(inv_ready),
     .lr_valid_i(1'b0), .lr_addr_i('0), .lr_core_i('0),
     .coh_inv_fire_o(), .coh_sf_hit_o(), .coh_sf_overapprox_o(),
-    .coh_arb_starve_o(), .coh_split_conflict_o(), .coh_sc_fail_o(), .coh_lr_kill_o()
+    .coh_arb_starve_o(), .coh_split_conflict_o(), .coh_sc_noresv_o(), .coh_lr_kill_o()
   );
   always_ff @(posedge clk_i) begin
     initial_reset <= 0;
@@ -278,7 +278,7 @@ def hub_quality(out, data):
         assert 'model found: FAIL!' in text
     for cores, limit in [(1,1),(2,1),(2,4),(4,4)]:
         wrapper=work/f'leaf-{cores}-{limit}.sv'
-        wrapper.write_text(f'// Copyright (c) 2026 Etienne Cimon\n// SPDX-License-Identifier: MIT\nmodule leaf import config_pkg::*; import g6lc_coherence_pkg::*; import g6lc_l2_tb_pkg::*; (input logic clk_i,rst_ni, input req_t [{cores-1}:0] requests, input resp_t memory_response, input logic [{cores-1}:0] inv_ready, output resp_t [{cores-1}:0] responses, output req_t memory_request, output coh_inval_t [{cores-1}:0] invalidations, output logic [6:0] events); g6lc_coherence_hub #(.NR_CORES({cores}),.MAX_OUTSTANDING({limit}),.INVAL_DEPTH(2),.SNOOP_FILTER_EN(0),.SNOOP_FILTER_ENTRIES(4),.POLICY(COH_BROADCAST),.AXI_STARVE_LIMIT(16),.axi_req_t(req_t),.axi_resp_t(resp_t)) dut (.clk_i,.rst_ni,.core_req_i(requests),.core_resp_o(responses),.mem_req_o(memory_request),.mem_resp_i(memory_response),.inv_core_o(invalidations),.inv_core_ready_i(inv_ready),.lr_valid_i(1\'b0),.lr_addr_i(\'0),.lr_core_i(\'0),.coh_inv_fire_o(events[0]),.coh_sf_hit_o(events[1]),.coh_sf_overapprox_o(events[2]),.coh_arb_starve_o(events[3]),.coh_split_conflict_o(events[4]),.coh_sc_fail_o(events[5]),.coh_lr_kill_o(events[6])); endmodule\n')
+        wrapper.write_text(f'// Copyright (c) 2026 Etienne Cimon\n// SPDX-License-Identifier: MIT\nmodule leaf import config_pkg::*; import g6lc_coherence_pkg::*; import g6lc_l2_tb_pkg::*; (input logic clk_i,rst_ni, input req_t [{cores-1}:0] requests, input resp_t memory_response, input logic [{cores-1}:0] inv_ready, output resp_t [{cores-1}:0] responses, output req_t memory_request, output coh_inval_t [{cores-1}:0] invalidations, output logic [6:0] events); g6lc_coherence_hub #(.NR_CORES({cores}),.MAX_OUTSTANDING({limit}),.INVAL_DEPTH(2),.SNOOP_FILTER_EN(0),.SNOOP_FILTER_ENTRIES(4),.POLICY(COH_BROADCAST),.AXI_STARVE_LIMIT(16),.axi_req_t(req_t),.axi_resp_t(resp_t)) dut (.clk_i,.rst_ni,.core_req_i(requests),.core_resp_o(responses),.mem_req_o(memory_request),.mem_resp_i(memory_response),.inv_core_o(invalidations),.inv_core_ready_i(inv_ready),.lr_valid_i(1\'b0),.lr_addr_i(\'0),.lr_core_i(\'0),.coh_inv_fire_o(events[0]),.coh_sf_hit_o(events[1]),.coh_sf_overapprox_o(events[2]),.coh_arb_starve_o(events[3]),.coh_split_conflict_o(events[4]),.coh_sc_noresv_o(events[5]),.coh_lr_kill_o(events[6])); endmodule\n')
         for role,rtl in [('before',original),('after',candidate)]:
             label=f'synth-{role}-{cores}-{limit}'
             run(label,f'read_slang --std 1800-2017 --top leaf {common} {rtl} {wrapper}\nsynth -top leaf -flatten\ncheck -assert\nwrite_json {label}.json\n')
@@ -323,7 +323,11 @@ def hub_review(out, data, runtime_info, runtime):
         assert str(Path(runtime_info['originalRoot']) / 'include/verilated_funcs.h') not in dependencies
         exe = work / 'hub-test'
         if repaired:
-            scenarios = [0, 1, 2, 3, 4, 5, 6, 8] if outstanding == 4 else [0, 1, 2, 7, 8]
+            #  9 = arbiter fairness / starvation override. Needs the 4-slot
+            #  configuration so both cores can hold AW requests outstanding
+            #  while the memory side refuses, which is what drives the starve
+            #  counters to AXI_STARVE_LIMIT.
+            scenarios = [0, 1, 2, 3, 4, 5, 6, 8, 9] if outstanding == 4 else [0, 1, 2, 7, 8]
             # Scenario 5 (accepted writes vs delivered invalidations) now passes:
             # the hub retains an accepted write's invalidation obligation in a
             # registered slot and refuses further invalidating writes while it is

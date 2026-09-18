@@ -849,6 +849,349 @@ export async function formalTask(
 /** Remote layout used by verif/regress/remote/testharness_proxy.py. */
 const REMOTE_REPO = "/opt/testharness/repo";
 const REMOTE_FORMAL = "/opt/testharness/toolchains/formal";
+const REMOTE_VERILATOR = "/opt/testharness/toolchains/verilator-v5.008/bin";
+
+/**
+ * Rewrite absolute host paths in a generated command file so they name the same
+ * files inside the builder's checkout. The flattened flist is written with
+ * absolute paths, which is right locally and meaningless remotely.
+ */
+function toRemotePaths(text: string, repoRoot: string): string {
+  const local = posixPath(repoRoot);
+  // A Windows root differs only in drive-letter case between callers.
+  const pattern = local.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replace(new RegExp(pattern, "gi"), REMOTE_REPO);
+}
+
+/**
+ * Run one bash script on the remote testharness builder through the proxy
+ * wrapper, which owns the SSH ControlMaster and the key passphrase (this
+ * function never handles a credential). Shared by the formal and lint routes.
+ */
+async function runRemoteScript(
+  ctx: PlatformContext,
+  script: string,
+  opts: { name: string; budgetSeconds: number; sync: boolean },
+): Promise<{ ok: boolean; text: string; code: number; error?: string }> {
+  const wrapper = "verif/regress/remote-testharness.sh";
+  if (!existsSync(join(ctx.repoRoot, wrapper))) {
+    return { ok: false, text: "", code: -1, error: `${wrapper} missing; the remote route needs the testharness proxy` };
+  }
+  const onWindows = ctx.host.os === "windows";
+  if (onWindows && !hasWsl()) {
+    return { ok: false, text: "", code: -1, error: "the remote route needs bash; wsl is not available on this host" };
+  }
+
+  const scriptDir = join(ctx.paths.build, "remote");
+  mkdirSync(scriptDir, { recursive: true });
+  const scriptPath = join(scriptDir, `${opts.name}.sh`);
+  writeFileSync(scriptPath, script, "utf8");
+
+  const scriptArg = onWindows ? await windowsPathToWsl(scriptPath) : scriptPath;
+  const repoArg = onWindows ? await windowsPathToWsl(ctx.repoRoot) : ctx.repoRoot;
+  const hostFlag = ctx.config.verify.formal?.remoteHost
+    ? ` --host ${ctx.config.verify.formal.remoteHost}`
+    : "";
+  const posix =
+    `cd ${JSON.stringify(repoArg)} && ` +
+    (opts.sync ? `bash ${wrapper}${hostFlag} sync && ` : "") +
+    `bash ${wrapper}${hostFlag} --timeout ${opts.budgetSeconds} shell --cmd-file ${JSON.stringify(scriptArg)}`;
+
+  const forward = ["TH_SSH_PASSPHRASE", "TH_REMOTE_HOST"].filter((k) => process.env[k]);
+  const wslEnv: Record<string, string> = {};
+  if (forward.length > 0) {
+    const existing = process.env.WSLENV ? `${process.env.WSLENV}:` : "";
+    wslEnv.WSLENV = existing + forward.join(":");
+  }
+
+  const res = onWindows
+    ? await run("wsl", wslCommand(posix), {
+        cwd: ctx.repoRoot,
+        env: { ...process.env, ...wslEnv } as Record<string, string>,
+        stdio: "capture",
+        allowFailure: true,
+        dryRun: ctx.dryRun,
+        logger: ctx.logger,
+      })
+    : await run("bash", ["-lc", posix], {
+        cwd: ctx.repoRoot,
+        stdio: "capture",
+        allowFailure: true,
+        dryRun: ctx.dryRun,
+        logger: ctx.logger,
+      });
+  return { ok: res.ok, text: `${res.stdout}\n${res.stderr}`, code: res.code ?? -1 };
+}
+
+/**
+ * Synthesis smoke for every target on the remote builder in one round trip.
+ *
+ * Uses the builder's managed formal toolchain, whose Yosys has the slang
+ * frontend integrated, so no plugin is loaded. Same rewriting and RESULT-line
+ * classification as the remote lint route.
+ */
+export async function synthTargetsRemote(
+  ctx: PlatformContext,
+  paths: EdaPaths,
+  targets: string[],
+): Promise<StageOutcome[]> {
+  const started = performance.now();
+  const { verify } = ctx.config;
+  const fail = (detail: string): StageOutcome[] =>
+    targets.map((t) => ({ stage: "synth" as const, target: t, status: "fail" as const, detail, durationMs: elapsed(started) }));
+
+  const lines = [
+    "set -u",
+    `REPO=${REMOTE_REPO}`,
+    `RUNROOT="$HOME/.cache/g6lc-synth"`,
+    'mkdir -p "$RUNROOT"',
+    `YS=${REMOTE_FORMAL}/bin/yosys`,
+    'if [ ! -x "$YS" ]; then YS="$(command -v yosys || true)"; fi',
+    'if [ -z "$YS" ]; then echo "RESULT_TOOLCHAIN fail yosys"; exit 3; fi',
+    // A Yosys without the integrated slang frontend cannot read a config
+    // package at all, so say that rather than reporting every target as failed.
+    'if ! "$YS" -p "help read_slang" >/dev/null 2>&1; then echo "RESULT_TOOLCHAIN fail read_slang"; exit 3; fi',
+    // Resource accounting, because a synth run that dies leaves nothing to
+    // diagnose: a whole-cluster target was once killed with exit 137 and there
+    // was no way afterwards to tell an OOM from a deadline. `%M` is peak RSS in
+    // KiB, `%e` wall seconds; both ride out on the RESULT line.
+    'TIMEW=""; if [ -x /usr/bin/time ]; then TIMEW="/usr/bin/time -f MEASURE_MAXRSS_KB=%M_ELAPSED_S=%e -o"; fi',
+    // Exported because the per-target runners are written with a QUOTED heredoc
+    // (so the yosys command text survives verbatim) and then executed by a child
+    // bash, which inherits the environment but not plain shell variables. Without
+    // this the children ran with an empty $RUNROOT/$YS and produced no RESULT
+    // line at all — the transport reported exit 123 from xargs and the gate could
+    // only say "no RESULT lines", which is a misleading way to spell "the script
+    // I generated was broken".
+    "export REPO RUNROOT YS TIMEW",
+  ];
+  for (const target of targets) {
+    const manifest = writeFlatManifest(ctx, paths, target);
+    let body: string;
+    try {
+      body = readFileSync(manifest.path, "utf8");
+    } catch {
+      return fail(`could not read the generated manifest for ${target}`);
+    }
+    const top = resolveVerifyTop(verify, target);
+    const script = [
+      // Unquoted on purpose, as in the local route: the slang frontend does not
+      // strip quotes from a command-file argument, and this string is passed to
+      // yosys -p, so any quote here would reach slang literally. $RUNROOT is
+      // expanded by the shell before yosys starts and holds no spaces.
+      [`read_slang -f $RUNROOT/${target}.f`, `--top ${top}`, "--single-unit",
+        ...verify.synthDefines.map((d) => `-D${d}`)].join(" "),
+      `hierarchy -check -top ${top}`,
+      "proc",
+      "opt -fast",
+      "check -assert",
+      "stat",
+    ].join("; ");
+    lines.push(
+      `cat > "$RUNROOT/${target}.f" <<'G6LC_FLIST_EOF'`,
+      toRemotePaths(body, ctx.repoRoot).replace(/\r/g, ""),
+      "G6LC_FLIST_EOF",
+      // One self-contained runner per target, launched in parallel below. Yosys
+      // is single-threaded, so the only parallelism available in a multi-target
+      // sweep is to run the targets concurrently — which is why a sweep of N
+      // targets used to cost N times a single target's wall time.
+      `cat > "$RUNROOT/run-${target}.sh" <<'G6LC_RUN_EOF'`,
+      "set -u",
+      `cd "$REPO"`,
+      `if [ -n "$TIMEW" ]; then $TIMEW "$RUNROOT/${target}.measure" "$YS" -p ${JSON.stringify(script)} > "$RUNROOT/${target}.log" 2>&1; else "$YS" -p ${JSON.stringify(script)} > "$RUNROOT/${target}.log" 2>&1; fi`,
+      "rc=$?",
+      `M=$(tr -d '\\n' < "$RUNROOT/${target}.measure" 2>/dev/null || true)`,
+      // Same notion of a diagnostic as countDiagnostics() locally, so the
+      // reported number means the same thing on both routes.
+      `echo "RESULT ${target} rc=$rc warnings=$(grep -ciE '%Warning|warning:' "$RUNROOT/${target}.log" || true) errors=$(grep -ciE '%Error|error:' "$RUNROOT/${target}.log" || true) measure=$M"`,
+      `echo "LOGSTART ${target}"; tail -40 "$RUNROOT/${target}.log"; echo "LOGEND ${target}"`,
+      "G6LC_RUN_EOF",
+    );
+  }
+
+  // Saturate the builder: one yosys per target, bounded by the core count.
+  // Bounded rather than unbounded because each target's peak RSS is large — the
+  // L2/L3 tag arrays are ~3.4 Mbit of flops today — so oversubscribing memory is
+  // a likelier failure than leaving a core idle.
+  lines.push(
+    "JOBS=$(nproc 2>/dev/null || echo 4)",
+    `if [ ${targets.length} -lt "$JOBS" ]; then JOBS=${targets.length}; fi`,
+    `echo "SYNTH_PARALLEL jobs=$JOBS targets=${targets.length}"`,
+    `printf '%s\\n' ${targets.map((x) => `"$RUNROOT/run-${x}.sh"`).join(" ")} | xargs -P "$JOBS" -n1 bash`,
+  );
+
+  ctx.logger.info(`synth: remote via the testharness proxy (${targets.length} target(s), parallel)`);
+  const res = await runRemoteScript(ctx, lines.join("\n") + "\n", {
+    name: "remote-synth",
+    // Generous on purpose, and measured rather than guessed. A core-only target
+    // (g6lc64_stream8) completes in ~178s. A whole-cluster target
+    // (g6lc64_ooo_server: two cores plus the L2/L3 hierarchy) does NOT: it ran
+    // past 900s, then past 2400s, each time cut off mid-run and reported as a
+    // transport drop — correctly, since no RESULT line arrived, but the message
+    // "no RESULT lines" reads like a credentials problem rather than a deadline.
+    // It is slow, not broken. 5400s lets it finish once so the route can be
+    // characterised; it does NOT belong in a per-change gate at that cost, and is
+    // tracked as an opt-in/nightly route.
+    budgetSeconds: Math.max(5400, 1800 * targets.length),
+    sync: true,
+  });
+  if (res.error) return fail(res.error);
+  if (/RESULT_TOOLCHAIN fail yosys/.test(res.text)) return fail("no yosys on the remote builder");
+  if (/RESULT_TOOLCHAIN fail read_slang/.test(res.text)) {
+    return fail("remote yosys has no integrated read_slang (needs >= v0.67; run tools install formal there)");
+  }
+
+  const seen = new Map<string, { rc: number; warnings: number }>();
+  for (const m of res.text.matchAll(/^RESULT (\S+) rc=(\d+) warnings=(\d+)/gm)) {
+    seen.set(m[1] as string, { rc: Number(m[2]), warnings: Number(m[3]) });
+  }
+  if (seen.size === 0) {
+    return fail(
+      `no RESULT lines from the remote synthesis (transport exit ${res.code}); ` +
+        "check the proxy credentials and that `sync` succeeded",
+    );
+  }
+
+  const durationMs = elapsed(started);
+  return targets.map((target) => {
+    const r = seen.get(target);
+    if (!r) {
+      return { stage: "synth" as const, target, status: "fail" as const, detail: "no RESULT line for this target", durationMs };
+    }
+    const slice = res.text.match(new RegExp(`^LOGSTART ${target}$([\\s\\S]*?)^LOGEND ${target}$`, "m"));
+    return {
+      stage: "synth" as const,
+      target,
+      status: r.rc === 0 ? ("pass" as const) : ("fail" as const),
+      // Synthesis is judged on elaboration success and check -assert, as it is
+      // locally; warnings are reported, not gated.
+      detail: r.rc === 0 ? `remote clean (${r.warnings} warning(s))` : `remote exit ${r.rc}`,
+      durationMs,
+      warnings: r.warnings,
+      log: r.rc === 0 ? undefined : (slice?.[1] ?? "").trim().split("\n").slice(0, 40),
+    };
+  });
+}
+
+/**
+ * Lint every target on the remote builder in one round trip.
+ *
+ * The flattened flist and the waiver path are rewritten to the builder's
+ * checkout and written there by the script itself, so the stage needs no
+ * local Verilator. Outcomes are classified from the emitted RESULT lines and
+ * per-target logs, never from the transport's exit code: an SSH drop is rc=255
+ * and says nothing about any target.
+ */
+export async function lintTargetsRemote(
+  ctx: PlatformContext,
+  paths: EdaPaths,
+  targets: string[],
+): Promise<StageOutcome[]> {
+  const started = performance.now();
+  const { verify } = ctx.config;
+  const fail = (detail: string): StageOutcome[] =>
+    targets.map((t) => ({ stage: "lint" as const, target: t, status: "fail" as const, detail, durationMs: elapsed(started) }));
+
+  const lines = [
+    "set -u",
+    `REPO=${REMOTE_REPO}`,
+    `RUNROOT="$HOME/.cache/g6lc-lint"`,
+    'mkdir -p "$RUNROOT"',
+    `if [ -x ${REMOTE_VERILATOR}/verilator ]; then VL=${REMOTE_VERILATOR}/verilator;`,
+    '  else VL="$(command -v verilator || true)"; fi',
+    'if [ -z "$VL" ]; then echo "RESULT_TOOLCHAIN fail verilator"; exit 3; fi',
+    '"$VL" --version || true',
+  ];
+  for (const target of targets) {
+    const manifest = writeFlatManifest(ctx, paths, target);
+    let body: string;
+    try {
+      body = readFileSync(manifest.path, "utf8");
+    } catch {
+      return fail(`could not read the generated manifest for ${target}`);
+    }
+    const top = resolveVerifyTop(verify, target);
+    const waiver = toRemotePaths(posixPath(join(ctx.repoRoot, verify.waiverFile)), ctx.repoRoot);
+    const args = ["--lint-only", ...verify.lintArgs, "--top-module", top, waiver, "-f", `"$RUNROOT/${target}.f"`];
+    lines.push(
+      `cat > "$RUNROOT/${target}.f" <<'G6LC_FLIST_EOF'`,
+      toRemotePaths(body, ctx.repoRoot).replace(/\r/g, ""),
+      "G6LC_FLIST_EOF",
+      `( cd "$REPO" && "$VL" ${args.join(" ")} ) > "$RUNROOT/${target}.log" 2>&1`,
+      "rc=$?",
+      // usererrors counts deliberate elaboration guards ($error in a generate
+      // block). The gate passes -Wno-fatal, which demotes them to warnings, so
+      // without this a configuration that refuses to elaborate is reported as a
+      // clean pass — observed on g6lc64_ooo_server, whose hart/FP guards fired
+      // while the target still showed PASS.
+      `echo "RESULT ${target} rc=$rc warnings=$(grep -c '%Warning' "$RUNROOT/${target}.log" || true) errors=$(grep -c '%Error' "$RUNROOT/${target}.log" || true) usererrors=$(grep -c '%Warning-USERERROR' "$RUNROOT/${target}.log" || true)"`,
+      `echo "LOGSTART ${target}"; tail -40 "$RUNROOT/${target}.log"; echo "LOGEND ${target}"`,
+    );
+  }
+
+  ctx.logger.info(`lint: remote via the testharness proxy (${targets.length} target(s))`);
+  const res = await runRemoteScript(ctx, lines.join("\n") + "\n", {
+    name: "remote-lint",
+    budgetSeconds: Math.max(600, 240 * targets.length),
+    sync: true,
+  });
+  if (res.error) return fail(res.error);
+  if (/RESULT_TOOLCHAIN fail verilator/.test(res.text)) {
+    return fail("no verilator on the remote builder (expected the managed toolchain or PATH)");
+  }
+
+  const seen = new Map<string, { rc: number; warnings: number; errors: number; userErrors: number }>();
+  for (const m of res.text.matchAll(/^RESULT (\S+) rc=(\d+) warnings=(\d+) errors=(\d+) usererrors=(\d+)/gm)) {
+    seen.set(m[1] as string, {
+      rc: Number(m[2]), warnings: Number(m[3]), errors: Number(m[4]), userErrors: Number(m[5]),
+    });
+  }
+  if (seen.size === 0) {
+    return fail(
+      `no RESULT lines from the remote lint (transport exit ${res.code}); ` +
+        "check the proxy credentials and that `sync` succeeded",
+    );
+  }
+
+  const durationMs = elapsed(started);
+  return targets.map((target) => {
+    const r = seen.get(target);
+    if (!r) {
+      return { stage: "lint" as const, target, status: "fail" as const, detail: "no RESULT line for this target", durationMs };
+    }
+    // The builder's Verilator is not the local suite's, so its diagnostic set
+    // differs and warningBaseline does not transfer. Use the remote baseline or
+    // none at all; borrowing the local number would let a regression hide.
+    const baseline = verify.warningBaselineRemote?.[target];
+    const limit = baseline ?? (verify.failOnMissingBaseline ? 0 : null);
+    const overBaseline = limit !== null && r.warnings > limit;
+    const slice = res.text.match(new RegExp(`^LOGSTART ${target}$([\\s\\S]*?)^LOGEND ${target}$`, "m"));
+    const detail =
+      r.userErrors > 0
+        ? `remote refused: ${r.userErrors} elaboration guard(s) fired — unsound configuration`
+        : r.rc !== 0
+        ? `remote exit ${r.rc}, ${r.errors} error(s)`
+        : overBaseline
+          ? `remote ${r.warnings} warning(s), remote baseline ${limit} — REGRESSION`
+          : baseline !== undefined
+            ? `remote ${r.warnings} warning(s) (remote baseline ${baseline})`
+            : `remote ${r.warnings} warning(s); NO remote baseline recorded, warnings not gated ` +
+              `(set verify.warningBaselineRemote.${target})`;
+    return {
+      stage: "lint" as const,
+      target,
+      status:
+        r.rc === 0 && !overBaseline && r.userErrors === 0 ? ("pass" as const) : ("fail" as const),
+      detail,
+      durationMs,
+      warnings: r.warnings,
+      log:
+        r.rc === 0 && !overBaseline && r.userErrors === 0
+          ? undefined
+          : (slice?.[1] ?? "").trim().split("\n").slice(0, 40),
+    };
+  });
+}
 
 /**
  * Bash run remotely to provision the toolchain once and then execute every

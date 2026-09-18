@@ -1243,6 +1243,131 @@ module ariane_testharness #(
     .end_of_test_o(tracer_exit)
   );
 
+  //  Secondary-core trace visibility.
+  //
+  //  `g6lc_cluster` forwards only core 0's probes on its scalar `rvfi_probes_o`
+  //  (`assign rvfi_probes_o = core_rvfi[0];`), so every trace-based check above —
+  //  including the "Simulation terminated" marker the regression classifier treats
+  //  as proof a run really finished — is blind to cores 1..N-1. That is how a
+  //  secondary-core problem can hide indefinitely, and it is the observability
+  //  requirement in AGENTS.md 0.1(6).
+  //
+  //  Widening that port is an RTL interface change with a wide blast radius: it is
+  //  consumed by ariane.sv, the Xilinx and Altera tops, ariane_gate_tb and the APU
+  //  benches, and a missing pin is an error here (%Error-PINMISSING), so every
+  //  instantiation would have to change. This observer closes the visibility half
+  //  with no RTL change at all, by tapping the cluster's per-core probe array
+  //  hierarchically from the testbench.
+  //
+  //  Deliberately NOT wired to end_of_test: core 0's `tracer_exit` drives
+  //  `rvfi_exit` and therefore simulation termination, so a secondary core reaching
+  //  its own halt must not end the run. These tracers observe; they never terminate.
+  //  Multi-core VERDICT, not just visibility.
+  //
+  //  The pass criterion is core 0's `tracer_exit`, so a run in which a secondary
+  //  core never executed a single instruction still reported SUCCESS. That is not a
+  //  hypothetical: this review spent a long stretch unable to tell "hart 1 never
+  //  ran" from "hart 1 ran but the shared line was stale", precisely because no
+  //  verdict covered the secondary cores.
+  //
+  //  So every instantiated core must retire at least one instruction by the time
+  //  core 0 declares the test over. That is deliberately the weakest useful
+  //  criterion: a secondary core parked in an idle loop is indistinguishable from a
+  //  hung one without test-specific knowledge, so requiring progress at the end
+  //  would fail legitimate tests, while requiring "it ran at all" cannot.
+  //
+  //  It is safe for every configuration here: the bootrom sends ALL harts to
+  //  DRAM_BASE with no parking, so even a single-hart test executes the mhartid
+  //  check on each core before branching. With NR_CORES == 1 the check is empty.
+  logic [NR_CORES-1:0] core_retired;
+
+  //  Injected-error control for the verdict itself. A verdict that has never been
+  //  observed to fail is indistinguishable from one that cannot fail -- the exact
+  //  trap this review keeps finding in its own controls. +mc_verdict_fault makes the
+  //  secondary cores appear silent, so a normally-passing test must come out as a
+  //  multi-core failure with exit code 127.
+  logic mc_fault_inject;
+  initial mc_fault_inject = $test$plusargs("mc_verdict_fault");
+
+  //  An explicit reduction loop, not `rvfi_instr[N-1:0].valid`: a range on the
+  //  instance part of a dotted reference is illegal SystemVerilog.
+  logic core0_any_retire;
+  always_comb begin
+    core0_any_retire = 1'b0;
+    for (int unsigned i = 0; i < CVA6Cfg.NrCommitPorts; i++)
+      core0_any_retire |= rvfi_instr[i].valid;
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : mc_retire_track
+    if (!rst_ni) core_retired[0] <= 1'b0;
+    else if (core0_any_retire) core_retired[0] <= 1'b1;
+  end
+
+  for (genvar c = 1; c < NR_CORES; c++) begin : gen_secondary_trace
+    rvfi_csr_t                                sec_rvfi_csr;
+    rvfi_instr_t [CVA6Cfg.NrCommitPorts-1:0]  sec_rvfi_instr;
+    rvfi_to_iti_t                             sec_rvfi_to_iti;
+
+    cva6_rvfi #(
+        .CVA6Cfg   (CVA6Cfg),
+        .rvfi_instr_t(rvfi_instr_t),
+        .rvfi_csr_t(rvfi_csr_t),
+        .rvfi_probes_instr_t(rvfi_probes_instr_t),
+        .rvfi_probes_csr_t(rvfi_probes_csr_t),
+        .rvfi_probes_t(rvfi_probes_t),
+        .rvfi_to_iti_t(rvfi_to_iti_t)
+    ) i_cva6_rvfi_sec (
+        .clk_i        (clk_i),
+        .rst_ni       (rst_ni),
+        .rvfi_probes_i(i_cluster.core_rvfi[c]),
+        .rvfi_instr_o (sec_rvfi_instr),
+        .rvfi_to_iti_o(sec_rvfi_to_iti),
+        .rvfi_csr_o   (sec_rvfi_csr)
+    );
+
+    rvfi_tracer #(
+        .CVA6Cfg(CVA6Cfg),
+        .rvfi_instr_t(rvfi_instr_t),
+        .rvfi_csr_t(rvfi_csr_t),
+        .HART_ID(8'(c * ((CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts))),
+        .DEBUG_START(0),
+        .DEBUG_STOP(0)
+    ) i_rvfi_tracer_sec (
+        .clk_i(clk_i),
+        .rst_ni(rst_ni),
+        .rvfi_i(sec_rvfi_instr),
+        .rvfi_csr_i(sec_rvfi_csr),
+        .end_of_test_o(  /* observer only: must not terminate the simulation */)
+    );
+
+    logic sec_any_retire;
+    always_comb begin
+      sec_any_retire = 1'b0;
+      for (int unsigned i = 0; i < CVA6Cfg.NrCommitPorts; i++)
+        sec_any_retire |= sec_rvfi_instr[i].valid;
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : mc_retire_track_sec
+      if (!rst_ni) core_retired[c] <= 1'b0;
+      else if (sec_any_retire && !mc_fault_inject) core_retired[c] <= 1'b1;
+    end
+  end
+
+  //  Report in a `final` block, not from the clocked process. The C++ side leaves
+  //  its loop as soon as `exit_o[0]` is set, so a $display issued in that same
+  //  cycle never reaches the log -- measured: the run exited 127 with no reason
+  //  printed, which is exactly the "verdict with no diagnosis" this review keeps
+  //  complaining about elsewhere.
+  //pragma translate_off
+  final begin
+    if (!(&core_retired))
+      $display("*** [mc_verdict] FAIL: core(s) retired no instruction, retired_mask=%b (exit code 127)",
+               core_retired);
+    else
+      $display("*** [mc_verdict] all %0d core(s) retired instructions", NR_CORES);
+  end
+  //pragma translate_on
+
 `ifdef SPIKE_TANDEM
     spike #(
         .CVA6Cfg ( CVA6Cfg ),
@@ -1282,7 +1407,11 @@ module ariane_testharness #(
 
     end
 `else
-    assign rvfi_exit = tracer_exit;
+    //  Fold the multi-core verdict in: keep core 0's done bit, but override the
+    //  exit code with a distinctive 127 so a silent secondary core cannot report
+    //  SUCCESS. exit_o>>1 is the exit code the C++ side reports.
+    assign rvfi_exit = (tracer_exit[0] && !(&core_retired)) ? {31'd127, 1'b1}
+                                                            : tracer_exit;
 `endif
 
 `ifdef VERILATOR

@@ -120,6 +120,14 @@ static const char *verilog_plusargs[] = {
     // rule: an unlisted plusarg is handed to HTIF, rejected, and the run dies
     // before the observer arms.
     "fetch_supply", "fetch_supply_lo", "fetch_supply_hi", "fetch_supply_limit",
+    // Injected-error control for the MULTI-CORE VERDICT
+    // (corev_apu/tb/ariane_testharness.sv): makes the secondary cores appear
+    // silent, so a normally-passing test must come out as a multi-core failure.
+    // Allowlisted for the same reason as the probes above -- and the reason bites
+    // harder here: an unlisted plusarg is rejected by HTIF and the run dies, which
+    // looks exactly like the control "working", when in fact the verdict was never
+    // exercised at all.
+    "mc_verdict_fault",
     nullptr};
 
 extern dtm_t* dtm;
@@ -1339,9 +1347,9 @@ done_processing:
       // when address is the first wide field after instruction in some packs —
       // use commit-adjacent npc as reliable IQ progress proxy.
       uint64_t pc_iq0 = (uint64_t)npc0;
-      auto ic0 = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_cva6_icache__DOT__state_q);
+      auto ic0 = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__state_q);
 #if !defined(CVA6_PROBE_NO_CORE1)
-      auto ic1 = top->rootp->G6LC_CVA6_C1(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_cva6_icache__DOT__state_q);
+      auto ic1 = top->rootp->G6LC_CVA6_C1(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__state_q);
 #else
       unsigned ic1 = 0;
 #endif
@@ -1414,9 +1422,9 @@ done_processing:
       auto itlb_hit = top->rootp->G6LC_CVA6_C0(ex_stage_i__DOT__lsu_i__DOT__gen_mmu__DOT__i_cva6_mmu__DOT__itlb_lu_hit);
       auto stlb_miss = top->rootp->G6LC_CVA6_C0(ex_stage_i__DOT__lsu_i__DOT__gen_mmu__DOT__i_cva6_mmu__DOT__shared_tlb_miss);
       auto ptw_st = top->rootp->G6LC_CVA6_C0(ex_stage_i__DOT__lsu_i__DOT__gen_mmu__DOT__i_cva6_mmu__DOT__i_ptw__DOT__state_q);
-      auto ic_hit = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_cva6_icache__DOT__cl_hit);
-      auto ic_inv = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_cva6_icache__DOT__inv_q);
-      auto ic_en = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_cva6_icache__DOT__cache_en_q);
+      auto ic_hit = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__cl_hit);
+      auto ic_inv = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__inv_q);
+      auto ic_en = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__cache_en_q);
       auto a2m_addr = top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_axi2mem__DOT__req_addr_q;
       // ax_req_q: packed {id, addr, len, size, burst}
       const auto &a2m_ax = top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_axi2mem__DOT__ax_req_q;

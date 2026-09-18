@@ -92,9 +92,12 @@ function isActiveConfigPackage(file: string): boolean {
 
 function declaredStems(src: string): string[] {
   const stems: string[] = [];
+  // Comments are prose: "the formal program moved past ..." is not a program
+  // declaration, and matching it reported a real header as misnamed.
+  const code = src.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/\/\/[^\n]*/g, " ");
   const re = /\b(?:module|package|interface|program)\s+([A-Za-z_][A-Za-z0-9_]*)/g;
   let m: RegExpExecArray | null;
-  while ((m = re.exec(src)) !== null) {
+  while ((m = re.exec(code)) !== null) {
     stems.push(m[1]!);
   }
   return stems;
@@ -110,6 +113,11 @@ describe("GSys LibreCore / G6LC branding rename", () => {
     const failures: string[] = [];
     for (const file of listG6lcSvFiles()) {
       if (isActiveConfigPackage(file)) continue;
+      // A .svh is an include of declarations, not a design unit, so it has no
+      // module/package to match. Both such headers in the tree declare none;
+      // they satisfied this rule before only because the scan matched the word
+      // "program" inside a comment.
+      if (/\.svh$/i.test(file)) continue;
       const stem = basename(file).replace(/\.svh?$/i, "");
       const src = readFileSync(file, "utf8");
       const stems = declaredStems(src);

@@ -456,7 +456,9 @@ module cva6_hpdcache_subsystem
         .l15_req_o (noc_req_o),
         .l15_rtrn_i(noc_resp_i)
     );
-    // External inv ORed with L15 (external wins address if both same cycle)
+    // External inv ORed with L15 (external wins address if both same cycle).
+    // The L15 path delivers invalidations natively inside its response stream, so
+    // it needs no retention here; the AXI branch does, and adds it there.
     assign ext_inval_valid = inval_valid_i;
     assign ext_inval_nline =
         hpdcache_nline_t'(inval_addr_i[HPDC_LINE_OFF +: HPDcacheCfg.nlineWidth]);
@@ -465,6 +467,20 @@ module cva6_hpdcache_subsystem
     assign inval_ready_o = 1'b1;
     //}}}
   end else begin
+
+    //  Retention state and read-response taps. Declared HERE, ahead of the
+    //  arbiter that consumes them: declaring them after the instantiation is a
+    //  use-before-declaration that Verilator tolerates but yosys-slang correctly
+    //  rejects, so the synth stage failed while lint passed. Only the AXI path
+    //  needs these; the L15 path receives invalidations natively in its response
+    //  stream.
+    hpdcache_nline_t      ext_inv_nline_q;
+    logic                 inv_inject;
+    logic                 inv_evt_injected;
+    logic                 inv_evt_backpressured;
+    logic                 axi_rresp_valid;
+    logic                 axi_rresp_ready;
+    hpdcache_mem_resp_r_t axi_rresp;
 
     //  AXI arbiter instantiation
     //  {{{
@@ -505,9 +521,9 @@ module cva6_hpdcache_subsystem
         .dcache_read_valid_i(dcache_read_valid),
         .dcache_read_i      (dcache_read),
 
-        .dcache_read_resp_ready_i(dcache_read_resp_ready),
-        .dcache_read_resp_valid_o(dcache_read_resp_valid),
-        .dcache_read_resp_o      (dcache_read_resp),
+        .dcache_read_resp_ready_i(axi_rresp_ready),
+        .dcache_read_resp_valid_o(axi_rresp_valid),
+        .dcache_read_resp_o      (axi_rresp),
 
         .dcache_write_ready_o(dcache_write_ready),
         .dcache_write_valid_i(dcache_write_valid),
@@ -526,17 +542,140 @@ module cva6_hpdcache_subsystem
     );
     //  }}}
 
-    // U6.2: inject external coherence invalidations into HPDCACHE read-resp
-    // inv path (same port L15 adapter uses). Address is converted to nline
-    // (drop line offset bits). Always ready — HPDcache accepts inv pulses.
+    //  U6.2: external coherence invalidations, RETAINED until HPDCACHE consumes them.
+    //
+    //  Why this exists. HPDCACHE only ever acts on a read response — and on the
+    //  invalidation payload riding it — inside
+    //
+    //      if (mem_resp_read_valid_i) ... mem_resp_read_miss_valid = 1'b1;  (hpdcache.sv)
+    //
+    //  The previous code waved `inval_valid_i` at `dcache_resp_read_inval` while
+    //  tying `inval_ready_o = 1'b1`: it claimed unconditional acceptance for a path
+    //  that only landed if a genuine read response happened to be valid in the very
+    //  same cycle. An observer that is NOT missing in its D$ — the common case for a
+    //  hart spinning on a flag it already cached — has no read response in flight, so
+    //  its invalidation was acknowledged and silently discarded and it span on stale
+    //  data forever. Reproduced with a one-variable control (see
+    //  architecture/multi-core/README.md): with D$ load allocation on, hart 0 never
+    //  observes hart 1's store (code 9 at 320416 cycles) where the uncached arm sees
+    //  it in 6449.
+    //
+    //  Injecting a response cycle is legitimate, not a hack: an invalidation-only
+    //  response is a first-class case in the miss handler — it is how the
+    //  OpenPiton/L15 port delivers invalidations at all. `hpdcache_miss_handler.sv`
+    //  writes the metadata FIFO on `mem_resp_inval_i` regardless of `r_last`,
+    //  explicitly does NOT write the data FIFO (`& ~mem_resp_inval_i`), derives
+    //  `mem_resp_ready_o` from metadata space alone, and in REFILL_IDLE takes
+    //  `is_inval` to REFILL_INVAL without touching the MSHR (`mshr_ack = ~is_inval`).
+    //  So the injected cycle needs no data, no `r_last` and no MSHR entry.
+    //
+    //  An invalidation must OWN its cycle: `is_inval` diverts the FSM to REFILL_INVAL
+    //  instead of refilling, so piggybacking it on a real response would DROP that
+    //  refill. Hence `inv_inject` is qualified with `~axi_rresp_valid` and a real
+    //  response always wins the channel.
+    //
+    //  `inval_ready_o` now reports real occupancy, so the inval bus holds the request
+    //  instead of losing it — one entry suffices precisely because the producer is
+    //  back-pressured rather than lied to.
+    //
+    //  Timing: one 2:1 mux on the read-response valid/inval fields plus one flop and
+    //  an nline register; no change to the response data path.
     assign noc_inval_valid = 1'b0;
     assign noc_inval_nline = '0;
-    assign ext_inval_valid = inval_valid_i;
-    assign ext_inval_nline =
-        hpdcache_nline_t'(inval_addr_i[HPDC_LINE_OFF +: HPDcacheCfg.nlineWidth]);
-    assign dcache_resp_read_inval = ext_inval_valid;
-    assign dcache_resp_read_inval_nline = ext_inval_nline;
-    assign inval_ready_o = 1'b1;
+
+    //  Retention extracted into g6lc_inval_retain so its contract can be unit
+    //  tested: the overflow path is unreachable from software (the upstream inval
+    //  bus buffers per core, so the slot never filled in any full-core test), and
+    //  an end-to-end pass cannot tell a retention that fills and drains correctly
+    //  from one that never fills at all.
+    g6lc_inval_retain #(
+        .nline_t(hpdcache_nline_t),
+        .DEPTH  (1)
+    ) i_inval_retain (
+        .clk_i,
+        .rst_ni,
+        .inval_valid_i (inval_valid_i),
+        .inval_nline_i (
+            hpdcache_nline_t'(inval_addr_i[HPDC_LINE_OFF +: HPDcacheCfg.nlineWidth])),
+        .inval_ready_o (inval_ready_o),
+        .resp_valid_i  (axi_rresp_valid),
+        .resp_ready_i  (dcache_read_resp_ready),
+        .inject_o      (inv_inject),
+        .inject_nline_o(ext_inv_nline_q),
+        .evt_injected_o     (inv_evt_injected),
+        .evt_backpressured_o(inv_evt_backpressured)
+    );
+
+    assign ext_inval_valid = inv_inject;
+    assign ext_inval_nline = ext_inv_nline_q;
+
+    assign dcache_read_resp_valid       = axi_rresp_valid | inv_inject;
+    assign dcache_read_resp             = axi_rresp;
+    assign dcache_resp_read_inval       = inv_inject;
+    assign dcache_resp_read_inval_nline = ext_inv_nline_q;
+
+    //  Never let the arbiter see an acknowledge for a cycle we stole.
+    assign axi_rresp_ready = dcache_read_resp_ready & ~inv_inject;
+
+    //  Sim-only observation of this retention, because the end-to-end test alone
+    //  cannot distinguish a retention that fills and drains correctly from one that
+    //  never fills at all — both would pass identically. `injected` counts
+    //  invalidations actually delivered on a stolen response cycle; `backpressured`
+    //  counts cycles where the producer was held off because the slot was full,
+    //  which is the only direct evidence the one-entry depth is ever exercised.
+    //pragma translate_off
+    // verilog_lint: waive always-ff-non-reset
+    int unsigned inv_injected_cnt = 0;
+    int unsigned inv_backpressured_cnt = 0;
+    always_ff @(posedge clk_i) begin : ext_inval_observe
+      if (rst_ni) begin
+        if (inv_evt_injected) inv_injected_cnt <= inv_injected_cnt + 1;
+        if (inv_evt_backpressured) inv_backpressured_cnt <= inv_backpressured_cnt + 1;
+      end
+    end
+    final begin
+      $display("[hpdc_inv] injected=%0d backpressured=%0d", inv_injected_cnt,
+               inv_backpressured_cnt);
+    end
+    //pragma translate_on
+  end
+
+  //  I$/D$ memory-id partitioning — ELABORATION guard, not simulation-only.
+  //
+  //  The read-response demux in cva6_hpdcache_subsystem_axi_arbiter routes purely
+  //  by id: `mem_resp_read_rt[i] = (i == icache_miss_id_i) ? 0 : 1`, i.e. the
+  //  response whose id equals ICACHE_RDTXID goes to the I$ and everything else to
+  //  the D$. ICACHE_RDTXID is {1'b1, 0...} — the MSB of MEM_TID_WIDTH — so the
+  //  scheme is only safe while every D$ id stays below that bit. D$ miss ids are
+  //  {mshr_alloc_way, mshr_set}, which is why the bound is
+  //  clog2(mshrSets*mshrWays) + 1.
+  //
+  //  Violate it and a D$ refill carries the I$'s id: its response is delivered to
+  //  the instruction cache, the load never completes, and the core hangs with no
+  //  error anywhere. That is a silent routing defect of exactly the kind this
+  //  review has been repairing elsewhere (the Ara/core AXI mux routed responses by
+  //  an identifier that was not exclusive either).
+  //
+  //  The same condition was already checked below, but inside `pragma
+  //  translate_off` — so a configuration that violates it SYNTHESIZES and only
+  //  complains in simulation. Promoted here to a generate-scope $error, matching
+  //  the treatment given to the OoO hart/FP legality guards, so such a
+  //  configuration cannot be built at all.
+  //
+  //  Note the current margin is zero, not comfortable: g6lc64_stream8 has
+  //  NrLoadBufEntries=8 -> mshrSets*mshrWays = 8 -> requires MEM_TID_WIDTH >= 4 and
+  //  supplies exactly 4. Raising NrLoadBufEntries to 16 would need 5 and, without
+  //  this guard, would have aliased silently.
+  if (CVA6Cfg.MEM_TID_WIDTH <
+      ($clog2(HPDcacheCfg.u.mshrSets * HPDcacheCfg.u.mshrWays) + 1)) begin : gen_err_memtid_miss
+    $error("MEM_TID_WIDTH too small: D$ miss ids would alias ICACHE_RDTXID and the ",
+           "arbiter would deliver D$ refills to the I$");
+  end
+  if (CVA6Cfg.MEM_TID_WIDTH < ($clog2(HPDcacheCfg.u.wbufDirEntries) + 1)) begin : gen_err_memtid_wbuf
+    $error("MEM_TID_WIDTH too small: D$ write ids would alias ICACHE_RDTXID");
+  end
+  if (CVA6Cfg.MEM_TID_WIDTH > CVA6Cfg.AxiIdWidth) begin : gen_err_memtid_axi
+    $error("MEM_TID_WIDTH exceeds AxiIdWidth: ids would be truncated on the AXI port");
   end
 
   //  Assertions

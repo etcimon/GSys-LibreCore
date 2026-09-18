@@ -54,7 +54,8 @@ module g6lc_coherence_hub
     output logic                       coh_sf_overapprox_o,
     output logic                       coh_arb_starve_o,
     output logic                       coh_split_conflict_o, // W-data vs AW owner mismatch
-    output logic                       coh_sc_fail_o,
+    // SC-shaped store with no reservation recorded here (see g6lc_lr_sc_tracker).
+    output logic                       coh_sc_noresv_o,
     output logic                       coh_lr_kill_o
 );
 
@@ -79,7 +80,7 @@ module g6lc_coherence_hub
     assign coh_sf_overapprox_o  = 1'b0;
     assign coh_arb_starve_o     = 1'b0;
     assign coh_split_conflict_o = 1'b0;
-    assign coh_sc_fail_o        = 1'b0;
+    assign coh_sc_noresv_o      = 1'b0;
     assign coh_lr_kill_o        = 1'b0;
   end else begin : gen_cluster
 
@@ -549,6 +550,20 @@ module g6lc_coherence_hub
         .store_addr_i (core_req_i[aw_winner].aw.addr),
         .store_core_i (aw_winner),
         .store_is_sc_i(is_lock_aw && is_atop_aw),  // coarse SC hint
+        // The SC probe is tied off deliberately, and it cannot be otherwise at
+        // this layer: the hub does not adjudicate SC. g6lc_l2_top forwards AxLOCK
+        // downstream on purpose (see its LDEX/STEX note) because the authoritative
+        // reservation is the downstream exclusive monitor, so the hub never learns
+        // whether an SC succeeded. The tracker's per-core slots are used only to
+        // generate kill hints (kill_cores_o -> invalidations), which the hub DOES
+        // know about.
+        //
+        // The former coh_sc_fail_o hung off this probe and was therefore permanently
+        // zero — the one hub observability output that could not fire, while
+        // coh_inv_fire_o, coh_sf_hit_o, coh_sf_overapprox_o, coh_arb_starve_o,
+        // coh_split_conflict_o and coh_lr_kill_o are all really driven. It has been
+        // re-pointed at coh_sc_noresv_o, which the hub genuinely observes: an
+        // SC-shaped store arriving with no reservation recorded for that core.
         .sc_probe_i   (1'b0),
         .sc_addr_i    ('0),
         .sc_core_i    ('0),
@@ -557,7 +572,7 @@ module g6lc_coherence_hub
         .kill_line_o  (lr_kill_line),
         .kill_valid_o (lr_kill_v),
         .lr_set_o     (),
-        .sc_fail_o    (coh_sc_fail_o)
+        .sc_noresv_o  (coh_sc_noresv_o)
     );
 
     assign coh_lr_kill_o = lr_kill_v;
@@ -642,7 +657,7 @@ module g6lc_coherence_hub
         .inv_ready_o     (inv_ready),
         .inv_core_o      (inv_core_o),
         .inv_core_ready_i(inv_core_ready_i),
-        .inv_drop_o      (),
+        .inv_stall_o     (),
         .inv_coalesce_o  ()
     );
 

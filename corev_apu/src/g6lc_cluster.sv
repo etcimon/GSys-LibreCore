@@ -269,7 +269,7 @@ module g6lc_cluster
         .coh_sf_overapprox_o(),
         .coh_arb_starve_o (),
         .coh_split_conflict_o(),
-        .coh_sc_fail_o    (),
+        .coh_sc_noresv_o  (),
         .coh_lr_kill_o    ()
     );
   end

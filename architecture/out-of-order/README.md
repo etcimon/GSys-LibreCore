@@ -50,6 +50,37 @@ passes 24; `review-lsq-credit-fault-v2` restores the any-free-entry term and the
 group-credit scenario fails as contracted. Scope: one geometry
 (`LsqLoadEntries=LsqStoreEntries=4`, two issue ports) at fixture level.
 
+### The hart/FP restriction is now an elaboration refusal, not a simulation warning
+
+The per-hart-namespace and FP-register-class gaps remain **open redesigns** (see the
+plan below). What changed is the strength of the gate. `config_pkg::check_cfg` sits
+under `pragma translate_off`, so the assertions that reject `OoOEn` with
+`NrHarts > 1` or `FpPresent` only fire in simulation: an unsound configuration still
+elaborated *and synthesised*, silently aliasing architectural registers.
+
+`g6lc_ooo_dispatch` now carries two generate-scope elaboration guards — the same
+`$error` idiom as `cva6.sv`'s `gen_err_xif_and_acc` — so those configurations refuse
+to build. `review-ooo-illegal-smt-v4` and `review-ooo-illegal-fp-v4` each confirm the
+refusal, checked without `-Wno-fatal` (which would demote the error to a warning and
+defeat the point) and matched against the specific guard message.
+`review-p0-guard-regate-v1` confirms the legal configuration still passes 66 records.
+
+Two false positives were caught and fixed while establishing this: a fixture
+parameter named `FPU` collided with an enum item, and the runner compared against
+the wrong guard message because the configuration loop rebinds `kind`. Either would
+have reported a refusal that had nothing to do with the guard.
+
+Remaining work for these two items, in order:
+1. **Per-hart namespaces.** Rename needs a hart-indexed map and architectural map,
+   physical-register ownership per hart, and per-hart flush. That ripples into
+   IQ/ROB/LSQ/memdep entry tagging and cancel masks — `core/ooo/**` contains no hart
+   signal today — plus per-hart checkpoint pools. This is a multi-module redesign,
+   not an increment, and needs a full-core SMT2 gate to validate.
+2. **FP register class.** A second 32-entry map, register-class tagging on rename,
+   wakeup and writeback, PRF read/write paths for FP operands, and commit-side
+   class awareness. Contained to one hart but still spans dispatch, PRF and
+   `issue_read_operands`.
+
 ### Checkpoint recovery returns the right registers (repaired, leaf-verified)
 
 Recovery computed the squashed set as "free at the checkpoint and no longer

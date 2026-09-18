@@ -392,7 +392,19 @@ module cva6
     // noc response, can be AXI or OpenPiton - SUBSYSTEM
     input noc_resp_t noc_resp_i,
     // U6.2 external L1 invalidation (coherence hub). Tie valid=0 when unused.
-    // WT cache accepts these; HPDCACHE/std paths ack and ignore.
+    // WT and HPDCACHE both consume these: WT turns them into a DCACHE_INV_REQ in
+    // wt_axi_adapter, HPDCACHE injects them on its read-response invalidation
+    // port (cva6_hpdcache_subsystem), which invalidates the directory line. Only
+    // the std path acks without acting. The earlier note here claimed HPDCACHE
+    // ignored them, which reads as "multi-core coherence is broken on HPDCACHE
+    // configs" — it is not, and g6lc64_stream8 runs NrCores=2 with HPDCACHE_WT.
+    //
+    // These invalidations do NOT clear the hart-local LR/SC reservation buffer in
+    // hpdcache_uncached (only a local store/AMO does). That is sound rather than a
+    // gap: the authoritative reservation is the downstream exclusive monitor, so a
+    // stale-valid local reservation only lets the SC reach memory, where it is
+    // adjudicated. The local buffer can therefore fail an SC early but can never
+    // grant one on its own. See the AxLOCK forwarding note in g6lc_l2_top.
     input  logic [63:0] l1_inval_addr_i,
     input  logic        l1_inval_valid_i,
     output logic        l1_inval_ready_o,

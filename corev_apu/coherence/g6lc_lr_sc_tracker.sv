@@ -36,7 +36,14 @@ module g6lc_lr_sc_tracker
     output logic [55:0]                kill_line_o,
     output logic                       kill_valid_o,
     output logic                       lr_set_o,
-    output logic                       sc_fail_o
+    // Observable at THIS layer: an SC-shaped store arrived while the hub held no
+    // matching reservation for the storing core. The hub cannot report a real SC
+    // outcome — g6lc_l2_top forwards AxLOCK to the downstream exclusive monitor,
+    // which is the authority — so a truthful event here is "this SC is one the
+    // monitor is expected to refuse", not "this SC failed". Replaces the former
+    // sc_fail_o, which could only assert while sc_probe_i was high and was
+    // therefore permanently zero at every instantiation.
+    output logic                       sc_noresv_o
 );
 
   localparam int unsigned NC    = (NR_CORES < 1) ? 1 : NR_CORES;
@@ -60,12 +67,13 @@ module g6lc_lr_sc_tracker
     kill_line_o  = '0;
     kill_valid_o = 1'b0;
     lr_set_o     = 1'b0;
-    sc_fail_o    = 1'b0;
+    sc_noresv_o  = 1'b0;
     sc_ok_o      = 1'b0;
 
+    // The probe port is retained but unused by the hub: see sc_noresv_o above for
+    // why an SC verdict cannot be produced at this layer.
     if (sc_probe_i) begin
       sc_ok_o = valid_q[sc_core_i] && (line_q[sc_core_i] == sc_line);
-      if (!sc_ok_o) sc_fail_o = 1'b1;
     end
 
     if (lr_valid_i) begin
@@ -76,6 +84,9 @@ module g6lc_lr_sc_tracker
 
     if (store_valid_i) begin
       kill_line_o = st_line;
+      // Reservation-less SC, evaluated against the pre-store state.
+      if (store_is_sc_i)
+        sc_noresv_o = !(valid_q[store_core_i] && (line_q[store_core_i] == st_line));
       for (int unsigned c = 0; c < NC; c++) begin
         if (valid_q[c] && line_q[c] == st_line) begin
           if (c[CID_W-1:0] != store_core_i || store_is_sc_i) begin

@@ -532,7 +532,17 @@ bind frontend g6lc_fetch_dbg #(
     .spec_i             (spec_req),
     .flush_i            (flush_i),
     .is_mispredict_i    (is_mispredict),
-    .replay_i           (replay),
+    // replay_q, not replay. The checker's "kill_s1 outside misp|flush|replay"
+    // rule must observe the SAME term the driver uses:
+    //   frontend.sv:820  kill_s1 = kill_s1(is_mispredict, flush_i, replay_q)
+    //   frontend.sv:175  replay_q <= replay && !arch_valid
+    // Passing the combinational `replay` made the antecedent true one cycle late:
+    // in the cycle after replay drops, replay_q still holds kill_s1 high while
+    // replay_i reads 0, so a perfectly legal replay-kill tripped the assertion.
+    // That false failure is what the execute-region D$ exclusion in
+    // cva6_hpdcache_if_adapter.sv was working around — see
+    // architecture/multi-core/README.md.
+    .replay_i           (replay_q),
     .redirect_hold_i    (redirect_hold),
     .redirect_hit_i     (redirect_hit),
     .redirect_pc_i      (redirect_pc_q),

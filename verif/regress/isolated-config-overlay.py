@@ -57,8 +57,6 @@ def parse_fields(items: list[str]) -> dict[str, str]:
             if not 0 < n <= EXEC_DRAM_LEN_MAX:
                 die(f"{name}={value!r} must be in (0, 0x{EXEC_DRAM_LEN_MAX:x}]; shrink-only")
         fields[name] = value
-    if not fields:
-        die("no overlay fields")
     return fields
 
 
@@ -95,11 +93,23 @@ def main() -> int:
     p.add_argument("--target", required=True)
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--field", action="append", default=[], help="NAME=VALUE (repeatable)")
+    # --define appends `+define+NAME` to the derived flist. Overlays could only
+    # rewrite config FIELDS, so an investigation gated on a `ifdef seam had no way
+    # to build both arms from one source state — the alternative being to edit RTL
+    # between builds, which makes the two arms unattributable. Isolated-only, like
+    # the rest of this script.
+    p.add_argument("--define", action="append", default=[],
+                   help="NAME to add as +define+NAME in the derived flist (repeatable)")
     p.add_argument("--check-only", action="store_true")
     args = p.parse_args()
     if not re.fullmatch(r"[A-Za-z0-9_]+", args.target):
         die("illegal target")
     fields = parse_fields(args.field)
+    if not fields and not args.define:
+        die("no overlay fields and no defines")
+    for name in args.define:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            die(f"illegal define {name!r}")
     root = args.root.resolve()
     pkg = root / "core" / "include" / f"{args.target}_config_pkg.sv"
     flist = root / "core" / "Flist.cva6"
@@ -119,7 +129,10 @@ def main() -> int:
     overlay_pkg = pkg_dir / pkg.name
     overlay_pkg.write_text(rewritten, encoding="utf-8")
     derived = out / "Flist.cva6.overlay"
-    derived.write_text(derive_flist(flist.read_text(encoding="utf-8"), overlay_pkg, args.target), encoding="utf-8")
+    derived_text = derive_flist(flist.read_text(encoding="utf-8"), overlay_pkg, args.target)
+    if args.define:
+        derived_text += "".join("+define+" + name + "\n" for name in args.define)
+    derived.write_text(derived_text, encoding="utf-8")
     meta = {
         "isolated": True,
         "experimental": True,
@@ -129,10 +142,11 @@ def main() -> int:
         "overlayPackage": str(overlay_pkg),
         "derivedFlist": str(derived),
         "fields": record,
+        "defines": list(args.define),
         "overlaySha25612": digest,
     }
     (out / "overlay.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-    print(f"[isolated-overlay] wrote {out} fields={record}")
+    print(f"[isolated-overlay] wrote {out} fields={record} defines={args.define}")
     return 0
 
 

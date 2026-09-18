@@ -109,12 +109,76 @@ last, B and stability oracles live and two L3 MSHRs backpressuring four L2 fills
 `review-l2-stack-direct-v2` re-confirms 54 records and both RR0/RR1 synthesis
 checks after the fixture change.
 
-Two scope limits: the zero-cut abutment remains unexercised in simulation, and
+**Inclusion was not exercised at all** by the first version of this fixture: it
+left the outer cache's victim output unconnected, so an L3 eviction never reached
+the L2's back-invalidation port. The fixture now arbitrates that port exactly as
+the cluster does — the directed stimulus owns it while driving, otherwise the
+outer victim does — and counts accepted victims so the scenario cannot pass
+without one. Scenario 31 fills three lines mapping to the same two-way outer set,
+so the third evicts the first, then re-reads the evicted line and requires the
+inner cache to refetch rather than hit. `review-l2-inclusion-v1` passes 40 records;
+`review-l2-inclusion-fault-v1` disconnects the victim (the original wiring) and the
+scenario fails with a stale hit and no refetch.
+
+This is mechanism engagement, not a coherence proof: with a single master the
+stale copy still holds correct data, so the discriminator is the refetch, not the
+returned value. Directory precision (the L3 does not track L2 residency, so it
+back-invalidates on every eviction) and multi-master coherence remain open.
+
+Two further scope limits: the zero-cut abutment remains unexercised in simulation, and
 scenario 20/21's end-to-end atomic-R backpressure assertion applies only to the
 direct seam, because a register slice may legitimately buffer one accepted beat.
 Single-cache collision scenarios 9–11 stay on the direct path since their stimulus
 aligns to one cache's own refill boundary. Inclusive invalidation, server
 prefetching, coherence, ISA and physical qualification remain open.
+
+### Production geometry does not elaborate for synthesis (open, not waived)
+
+Putting the uncore under the gate (`corev_apu/Flist.cluster` +
+`g6lc_cluster_lint_top`) immediately produced a failing synthesis result that no
+leaf fixture could have shown, because every fixture used a small geometry.
+
+At the production L2 configuration — 262144 B, 8-way, 64 B line, so **512 sets**
+— the tag module's reset and maintenance loops (`for s < NUM_SETS` nested over
+`SET_ASSOC`, e.g. `g6lc_l2_tag.sv:105`) exceed the slang frontend's unroll budget:
+`Build failed: 2 errors` / `Design elaboration failed`, with `loop contributes to
+unroll tally` naming the tag loops. Remote lint (Verilator) passes the same
+geometry; only the synthesis frontend refuses it.
+
+The tool limit is the symptom. The cause is that the tag array is **flops**, not an
+SRAM macro: 512 sets x 8 ways of tag+valid state elaborated as a flat register
+array. That is the anti-pattern `AGENTS.md` 0.1/0.4 forbids ("arrays via `tc_sram`
+... do not instantiate raw flops for arrays"), and it is why the P2 area row lists
+the tag SRAM as the first candidate.
+
+Raising the frontend's unroll limit was refused: it would make the result green
+while leaving a flop tag array in the production build. Two separable causes were
+then isolated.
+
+**Cause 1 — an unnecessary elaboration blocker, fixed.** The reset was a nested
+per-set/per-way loop; a whole-array clear is behaviourally identical and is not
+unrolled per set. That error is gone. It does not make the array cheaper: the tags
+are still flops, which remains the open cost item.
+
+**Cause 2 — the behavioural SRAM model, a flow boundary.** With the tag error gone,
+the remaining failure is in the vendored generic `tc_sram` model
+(`tc_sram.sv:130`): at production cache size its reset construct is rejected as an
+asynchronous load pattern. That is the documented PDK-swap seam — a real flow binds
+a compiled macro there — so it is a tooling boundary rather than an RTL defect.
+The synthesis smoke therefore reduces the cache geometry **under `SYNTHESIS` only**
+(lint keeps the production geometry), which checks the hierarchy's synthesizability
+and latch-freedom and claims nothing about area or production-geometry closure.
+
+**Now quantified.** The uncore lint reports the replication width of the whole-array
+tag reset at production geometry: `g6lc_l2_tag.sv:112` is **3,080,192 bits** in the L3
+instance (`gen_l3.i_l3.i_l3_as_l2`) and **401,408 bits** in the L2 (`gen_l2.i_l2`) —
+about 3.4 Mbit of tag state held in flip-flops rather than SRAM. Those two WIDTHCONCAT
+warnings are deliberately left in place: they are the cheapest standing signal of this
+cost, and silencing them would hide it.
+
+Still open: the tag array must move behind `tc_sram` before any mapped area, STA or
+power claim, and production-geometry synthesis needs an approved macro. The affected
+target is opt-in, so default gate runs are unchanged.
 
 ### Replacement-metadata port scheduling
 
@@ -1229,3 +1293,75 @@ elaboration; the unbounded core synthesis attempt was cancelled incomplete.
 This tranche changes verification/tooling and the leaf TB memory model
 only: no new silicon state, clock, reset, PMU event, ISA/DTS exposure or
 enabled production replacement policy.
+
+## Uncore synthesis evidence: 10 of 10, and why the cluster route cannot finish
+
+The whole-cluster synth target does not finish (cut at 900 s, exit 137 at ~994 s, exit 255
+at 2412 s against a 2400 s budget — slow, not crashing; the builder has 12 cores and
+125 GiB, so an earlier "OOM" claim here was wrong).
+`verif/regress/remote/run_cluster_synth_review.py` therefore synthesises the uncore tops
+**separately and in parallel** — ten yosys processes at once. Yosys is single-threaded, so
+this is the only way to use more than one core; one cluster target never can.
+
+Modules whose ports are typed through `parameter type axi_req_t = logic` cannot be a
+synthesis top with that default (`invalid member access for type 'axi_resp_t' (aka
+'logic')`), so `verif/tb/g6lc_uncore_lint_tops.sv` supplies typed tops — the same device as
+`g6lc_cluster_lint_top`, applied per module so a failure names one module rather than the
+whole cluster.
+
+| Module | Cells | Peak RSS | Time | Latches |
+|---|---|---|---|---|
+| `g6lc_l3_top` (32 KiB under `SYNTHESIS`) | **7640** | **2.0 GB** | **278 s** | 0 |
+| `g6lc_l2_top` (16 KiB under `SYNTHESIS`) | **4660** | 682 MB | 46 s | 0 |
+| `g6lc_coherence_hub` (NR_CORES=2, SF on) | 1236 | 213 MB | 5.4 s | 0 |
+| `g6lc_snoop_filter` (NR_CORES=2, enabled) | 582 | 186 MB | 14.6 s | 0 |
+| `g6lc_server_prefetcher` | 368 | 70 MB | 0.3 s | 0 |
+| `g6lc_inval_bus` (NR_CORES=2) | 250 | 70 MB | 0.2 s | 0 |
+| `g6lc_axi_2to1_mux` | 80 | 71 MB | 0.2 s | 0 |
+| `g6lc_lr_sc_tracker` | 49 | 70 MB | 0.2 s | 0 |
+| `g6lc_inval_retain` | 31 | 69 MB | 0.2 s | 0 |
+| `g6lc_l1_inv_adapter` | 3 | 68 MB | 0.2 s | 0 |
+
+**10 / 10, zero inferred latches anywhere.** Wall time is set by the slowest module rather
+than the sum — ~5 minutes for the whole suite, against a cluster route that never finished
+in 40.
+
+### These numbers explain the cluster failure
+
+`g6lc_l3_top` alone takes **2.0 GB and 278 s at a shrunk 32 KiB geometry**, and `g6lc_l2_top`
+682 MB at 16 KiB. The cluster instantiates both *plus* two full cores in one elaboration —
+so the deadline overruns are not mysterious, and they are not a toolchain defect. They are
+the direct cost of ~3.4 Mbit of tag state built from flip-flops. That is the strongest
+argument yet for the standing `tc_sram` migration item: it is not only an area concern, it
+is why the uncore has no whole-cluster synthesis evidence.
+
+### Two vacuous passes, both mine, both caught by the same metric
+
+The count went 6 → 3 → 7 → 10, and the corrections matter more than the final number:
+
+1. **`rc=0` with zero cells.** Three modules exited successfully having synthesised
+   *nothing*: at `NR_CORES = 1` the hub, the invalidation bus and the snoop filter collapse
+   to their degenerate path. So `cells > 0` became part of the pass criterion, and the count
+   dropped from 6 to 3.
+2. **Tie-offs delete the design.** My first typed wrappers tied every input to a constant
+   and left the outputs dangling, on the theory that a synthesis smoke only needs the module
+   elaborated. `opt` removed everything as unreachable: `stat` showed wires and ports and
+   **no cells**, while the run reported rc 0 and no latches — a vacuous pass manufactured by
+   the harness rather than found in the RTL. The wrappers now re-export the DUT interface
+   with concrete types.
+
+In the second case the discriminating evidence was the resource measurement: 213 MB / 5.4 s
+for the hub against 64 MB / 0.12 s for a run that genuinely did nothing. That is what the
+`/usr/bin/time` wrapper is for.
+
+`cells > 0` is a weak criterion — it cannot tell a correctly synthesised module from a
+partly optimised one — but it is exactly strong enough to catch "this proved nothing".
+
+### What these runs do and do not establish
+
+They establish that every uncore module elaborates and synthesises to generic gates with no
+inferred latches, individually. They do **not** establish that the assembled cluster does,
+because cross-module elaboration is what they skip. And the L2/L3 runs use reduced geometry
+because the behavioural `tc_sram` model cannot elaborate at production size in the synthesis
+frontend — so **no cell count here is an area figure**, and none of it is closure evidence
+at production geometry.

@@ -36,8 +36,11 @@ module ariane import ariane_pkg::*; #(
   parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
   parameter type rvfi_probes_instr_t = `RVFI_PROBES_INSTR_T(CVA6Cfg),
   parameter type rvfi_probes_csr_t = `RVFI_PROBES_CSR_T(CVA6Cfg),
+  // rvfi_probes_csr_t, not logic: cva6_rvfi_probes assigns the whole CSR probe
+  // payload to this member, so a 1-bit default silently truncates it. The
+  // production testharness already passes the wide type; the default must match.
   parameter type rvfi_probes_t = struct packed {
-    logic csr;
+    rvfi_probes_csr_t csr;
     rvfi_probes_instr_t instr;
   },
 

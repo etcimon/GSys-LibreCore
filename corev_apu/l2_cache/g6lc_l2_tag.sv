@@ -102,9 +102,14 @@ module g6lc_l2_tag #(
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      for (int unsigned s = 0; s < NUM_SETS; s++)
-        for (int unsigned w = 0; w < SET_ASSOC; w++)
-          tags_q[s][w] <= '0;
+      // Whole-array clear rather than a nested per-set/per-way loop. Identical
+      // behaviour, but the loop form is unrolled per set by the synthesis
+      // frontend, and at the production geometry (512 sets x 8 ways) that
+      // exceeds its unroll budget: the design failed to elaborate for synthesis
+      // even though the simulator accepted it. This removes the elaboration
+      // blocker only; the array is still flops, which is the real cost issue and
+      // is tracked separately.
+      tags_q <= '0;
     end else begin
       tags_q <= tags_d;
     end

@@ -43,7 +43,23 @@ cd "$ROOT"
 FETCH="${1:-${SOFT_LADDER_FETCH:-B}}"
 case "$FETCH" in
   B|b|fetch_b|fetchb) FETCH=B; DEF_VERLIB=work-ver-smt2-fw64 ;;
-  legacy|a|A|oracle) FETCH=legacy; DEF_VERLIB=work-ver-smt2-fw64-legacy ;;
+  # RETIRED. core/fetch_A/smt_legacy is no longer a buildable supply: selecting it
+  # fails elaboration with %Error-PINMISSING at
+  # core/fetch_A/smt_legacy/frontend.sv:4003 (missing push_cf_i / cf_resolve_i).
+  # Refusing here rather than letting the build fail 30 s later with an error that
+  # looks like the caller's fault. Set SOFT_LADDER_ALLOW_RETIRED_FETCH_A=1 only to
+  # work on repairing that supply itself.
+  legacy|a|A|oracle)
+    # echo, not log(): the flavour case runs before log() is defined.
+    if [[ "${SOFT_LADDER_ALLOW_RETIRED_FETCH_A:-0}" != 1 ]]; then
+      echo "[soft-ladder-build] REFUSING flavour '$FETCH': core/fetch_A/smt_legacy is retired" >&2
+      echo "[soft-ladder-build]   and does not elaborate (PINMISSING push_cf_i / cf_resolve_i" >&2
+      echo "[soft-ladder-build]   at core/fetch_A/smt_legacy/frontend.sv:4003)." >&2
+      echo "[soft-ladder-build]   Use flavour B (fetch_B)." >&2
+      echo "[soft-ladder-build]   Override only to repair that supply: SOFT_LADDER_ALLOW_RETIRED_FETCH_A=1" >&2
+      exit 2
+    fi
+    FETCH=legacy; DEF_VERLIB=work-ver-smt2-fw64-legacy ;;
   *) echo "usage: $0 <B|legacy>" >&2; exit 2 ;;
 esac
 
@@ -253,9 +269,19 @@ if [[ -n "${SOFT_LADDER_OVERLAY:-}" ]]; then
   }
   OVERLAY_DIR="${SOFT_LADDER_OVERLAY_DIR:-$VERLIB_DIR/overlay}"
   OVERLAY_ARGS=()
+  # Entries are NAME=VALUE config fields, or a bare NAME which becomes a
+  # +define+NAME in the derived flist. The define form exists so an investigation
+  # gated on a `ifdef seam can build both arms from ONE source state; the
+  # alternative is editing RTL between builds, which leaves the two arms
+  # unattributable to any recorded source. Isolated builds only, as before.
   IFS=',' read -ra _overlay_fields <<<"$SOFT_LADDER_OVERLAY"
   for _f in "${_overlay_fields[@]}"; do
-    [[ -n "$_f" ]] && OVERLAY_ARGS+=(--field "$_f")
+    [[ -z "$_f" ]] && continue
+    if [[ "$_f" == *=* ]]; then
+      OVERLAY_ARGS+=(--field "$_f")
+    else
+      OVERLAY_ARGS+=(--define "$_f")
+    fi
   done
   python3 "$ROOT/verif/regress/isolated-config-overlay.py" \
     --root "$ROOT" --target "$TARGET" --out "$OVERLAY_DIR" \

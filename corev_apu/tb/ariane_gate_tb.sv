@@ -67,8 +67,10 @@ module ariane_gate_tb;
     // RVFI PROBES
     localparam type rvfi_probes_instr_t = `RVFI_PROBES_INSTR_T(CVA6Cfg);
     localparam type rvfi_probes_csr_t = `RVFI_PROBES_CSR_T(CVA6Cfg);
+    // Wide CSR probe type, as ariane_testharness uses: `logic csr` truncated the
+    // entire CSR payload to one bit in this gate-level bench.
     localparam type rvfi_probes_t = struct packed {
-      logic csr;
+      rvfi_probes_csr_t csr;
       rvfi_probes_instr_t instr;
     };
 

@@ -53,6 +53,17 @@ module tb_g6lc_l2_hum;
   logic back_inval_ready;
   logic back_inval_valid = 1'b0;
   addr_t back_inval_addr = '0;
+  // Inclusive source selection: a directed stimulus and the outer cache's own
+  // victim share the L2's single back-invalidation port, so the fixture has to
+  // arbitrate exactly as the cluster does. Leaving the outer victim
+  // unconnected (as this fixture first did) never exercises inclusion at all.
+  logic inval_valid;
+  addr_t inval_addr;
+  logic l3_evict_valid;
+  addr_t l3_evict_addr;
+  int unsigned l3_evict_count = 0;
+  assign inval_valid = back_inval_valid || (CHAIN_L3 && l3_evict_valid);
+  assign inval_addr  = back_inval_valid ? back_inval_addr : l3_evict_addr;
 
   g6lc_l2_top #(
       .Enable      (1'b1),
@@ -83,8 +94,8 @@ module tb_g6lc_l2_hum;
       .l2_evict_valid_o   (evict_v),
       .l2_evict_addr_o    (evict_addr),
       .l2_evict_ready_i   (evict_ready),
-      .l2_back_inval_valid_i (back_inval_valid),
-      .l2_back_inval_addr_i  (back_inval_addr),
+      .l2_back_inval_valid_i (inval_valid),
+      .l2_back_inval_addr_i  (inval_addr),
       .l2_back_inval_ready_o (back_inval_ready)
   );
 
@@ -105,12 +116,20 @@ module tb_g6lc_l2_hum;
     ) i_l3 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(cut_req),.slv_resp_o(cut_resp),
       .mst_req_o(mst_req),.mst_resp_i(mst_resp),
-      .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),.l3_evict_valid_o(),
-      .l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
+      .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),
+      .l3_evict_valid_o(l3_evict_valid),
+      .l3_evict_addr_o(l3_evict_addr),
+      // The directed stimulus owns the port when it is driving.
+      .l3_evict_ready_i(back_inval_ready && !back_inval_valid)
     );
+    always_ff @(posedge clk) if(rst_n && l3_evict_valid && back_inval_ready &&
+                                !back_inval_valid)
+      l3_evict_count <= l3_evict_count + 1;
   end else begin : gen_l2_only
     assign mst_req=cache_req;
     assign cache_resp=mst_resp;
+    assign l3_evict_valid=1'b0;
+    assign l3_evict_addr='0;
   end
   assert property(@(posedge clk)disable iff(!rst_n)
     cache_req.ar_valid && !cache_resp.ar_ready |=> cache_req.ar_valid && $stable(cache_req.ar))
@@ -134,7 +153,7 @@ module tb_g6lc_l2_hum;
 
   // Requests leaving the L2 under test. Counting at this boundary keeps the
   // refetch checks valid when an outer cache absorbs them.
-  int unsigned l2_ar_count=0;
+  int unsigned l2_ar_count=0, l2_ar_mark=0;
   always_ff @(posedge clk) if(rst_n && cache_req.ar_valid && cache_resp.ar_ready)
     l2_ar_count <= l2_ar_count + 1;
 
@@ -710,6 +729,21 @@ module tb_g6lc_l2_hum;
         if(RR_EN && rr_collide==0 && !$test$plusargs("rr_diagnose"))
           $fatal(1,"HUM_RR_NO_COLLISION");
         if(rr_read_lost!=0)$fatal(1,"HUM_RR_READ_LOST lost=%0d",rr_read_lost);
+      end
+      // Inclusion mechanism: the outer cache's victim must invalidate the inner
+      // copy. With two outer ways, a third line in the same outer set evicts the
+      // first, and the inner cache must then refetch it instead of hitting.
+      // Chain-only: without the outer cache there is no victim to propagate.
+      31: begin
+        push(4'd1,64'h30000,0);wait_done();
+        push(4'd1,64'h30400,0);wait_done();
+        push(4'd1,64'h30800,0);wait_done();
+        repeat(20)@(negedge clk);
+        if(l3_evict_count==0)$fatal(1,"HUM_NO_OUTER_EVICT");
+        l2_ar_mark=l2_ar_count;
+        push(4'd2,64'h30000,0);wait_done();
+        if(l2_ar_count==l2_ar_mark)
+          $fatal(1,"HUM_INCLUSION_STALE_HIT ar=%0d",l2_ar_count);
       end
       default: $fatal(1, "HUM_SCENARIO");
     endcase

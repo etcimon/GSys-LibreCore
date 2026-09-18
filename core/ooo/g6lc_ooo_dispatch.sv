@@ -90,6 +90,21 @@ module g6lc_ooo_dispatch
 
   localparam int unsigned CKPT_W = $clog2(CKPT+1);
 
+  // Elaboration guards, not simulation assertions. The legality checks in
+  // config_pkg::check_cfg sit under `pragma translate_off`, so an unsound
+  // configuration still ELABORATES AND SYNTHESISES and only complains in
+  // simulation. Both combinations below alias architectural state silently:
+  // the rename map is indexed by rd[4:0] with no hart field, so two harts share
+  // one namespace, and FP destinations are excluded from renaming entirely, so
+  // an FP consumer can read a stale register. Refuse to build instead.
+  // Remove these only together with per-hart namespaces / an FP register class.
+  if (CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_smt
+    $error("OoO dispatch has no per-hart rename namespace: NrHarts>1 aliases architectural registers.");
+  end
+  if (CVA6Cfg.FpPresent) begin : gen_err_ooo_fp
+    $error("OoO dispatch has no FP register class: FP destinations are not renamed or tracked.");
+  end
+
   logic [NP-1:0] need_rd, is_br, is_ld, is_st;
   logic [NP-1:0][4:0] rs1_a, rs2_a, rd_a;
   logic ren_stall, can_go, lsq_disp_block;

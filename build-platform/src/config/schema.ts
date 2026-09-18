@@ -625,6 +625,16 @@ export interface VerifyConfig {
    * without saying why in the commit message.
    */
   warningBaseline: Record<string, number>;
+  /**
+   * Accepted warning counts for the REMOTE lint route, keyed by target.
+   *
+   * The builder runs its own Verilator, whose diagnostic set differs from the
+   * local suite's, so `warningBaseline` does not transfer: comparing a remote
+   * count against a local baseline would let a real regression hide under a
+   * much larger accepted number. Unset means "no accepted remote count yet",
+   * which `failOnMissingBaseline` then governs exactly as it does locally.
+   */
+  warningBaselineRemote?: Record<string, number>;
   /** Fail a target that has no recorded baseline (forces the baseline to be owned). */
   failOnMissingBaseline: boolean;
 }

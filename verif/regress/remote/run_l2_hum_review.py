@@ -28,7 +28,7 @@ CONTRACT = {0: 'HUM_DATA', 1: 'HUM_DATA', 2: 'HUM_DATA', 3: 'HUM_DATA',
             17: 'HUM_DATA', 18: 'HUM_DATA', 19: 'HUM_DATA', 20: 'HUM_DATA',
             21: 'HUM_DATA', 22: 'HUM_DATA', 23: 'HUM_DATA', 24: 'HUM_DATA',
             25: 'HUM_DATA', 26: 'HUM_DATA', 27: 'HUM_DATA', 28: 'HUM_DATA',
-            29: 'HUM_DATA', 30: 'HUM_DATA'}
+            29: 'HUM_DATA', 30: 'HUM_DATA', 31: 'HUM_DATA'}
 
 
 def digest(path):
@@ -53,6 +53,10 @@ def main():
     # Restores the original single-port schedule, where a colliding install took
     # the port and the accepted request's own pointer read was dropped.
     rr_fault = os.environ.get('REVIEW_L2_HUM_RR_FAULT') == '1'
+    # Disconnects the outer cache's victim from the inner back-invalidation port,
+    # which is how this fixture was originally wired, so the inclusion scenario
+    # must fail.
+    incl_fault = os.environ.get('REVIEW_L2_HUM_INCL_FAULT') == '1'
     RR_SITES = (
         ("assign do_write = (rr_adv || rr_pend_q) && !read_req;",
          "assign do_write = rr_adv;"),
@@ -76,6 +80,13 @@ def main():
             origin = data / ('base_' + name)
             assert origin.exists(), origin
         shutil.copy2(origin, source / name)
+    if incl_fault:
+        assert chain, 'inclusion fault requires the cache-stack configuration'
+        tb_path = source / 'tb_g6lc_l2_hum.sv'
+        text = tb_path.read_text()
+        old = '  assign inval_valid = back_inval_valid || (CHAIN_L3 && l3_evict_valid);'
+        assert text.count(old) == 1, 'inclusion fault injection site changed'
+        tb_path.write_text(text.replace(old, '  assign inval_valid = back_inval_valid;'))
     if rr_fault:
         assert rr_sched, 'rr-fault requires the RR configuration'
         rtl_path = source / 'g6lc_l2_top.sv'
@@ -157,8 +168,12 @@ def main():
     results, metrics = [], {}
     # On the pre-change build the merge path does not exist, so the engagement
     # contract must visibly fail; only the measurements are comparable.
+    # Scenario 31 needs an outer cache to evict a line, so it belongs to the
+    # cache-stack plan only; running it on the direct path would have nothing to
+    # measure and its engagement check fails, which is the correct behaviour.
+    CHAIN_ONLY = {31}
     plan = ([(0, 'HUM_NOT_ENGAGED'), (5, None), (6, None)] if baseline
-            else [(s, None) for s in sorted(CONTRACT)])
+            else [(s, None) for s in sorted(CONTRACT) if s not in CHAIN_ONLY])
     if fault: plan = [(faults[fault][0], faults[fault][3])]
     if order_before:
         plan = [(12, 'HUM_DATA'), (13, 'HUM_DATA'), (14, 'HUM_DATA'),
@@ -166,7 +181,8 @@ def main():
     if atop_before:
         plan=[(20,'HUM_ATOP_R_BACKPRESSURE'),(21,'HUM_TIMEOUT'),(22,None),(23,None),
               (24,None),(25,None),(26,'HUM_TIMEOUT'),(27,None)]
-    if chain: plan=[(s,None) for s in [8,*range(12,30)]]
+    if chain: plan=([(31,'HUM_INCLUSION_STALE_HIT')] if incl_fault
+                    else [(s,None) for s in [8,*range(12,30),31]])
     if rr_sched: plan=[(30,'HUM_RR_READ_LOST' if rr_fault else None)]
     if inval_before: plan=[(28,None),(29,'HUM_SELF_INVAL_LOST')]
     for scenario, positive_error in plan:

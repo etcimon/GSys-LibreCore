@@ -71,6 +71,35 @@ module g6lc_snoop_filter
     logic [IDX_W-1:0] lu_idx, al_idx, cl_idx;
     logic [TAG_W-1:0] lu_tag, al_tag, cl_tag;
 
+    // Sharer set for a newly installed entry.
+    //
+    // The filter's safety argument is that `present_o` may over-report but must
+    // never under-report: the hub uses `sf_present & ~(1 << writer)` as a write's
+    // invalidation targets, so a missing core keeps a stale line.
+    //
+    // A capacity conflict silently forgets the displaced line's sharers. That is
+    // safe for as long as the line stays untracked, because a lookup then misses
+    // and falls back to "everyone". It stops being safe the moment that line is
+    // installed again from a single core's fetch: the entry hits, reports only
+    // that core, and every other core still holding the line is skipped.
+    //
+    // An index that is still invalid has never displaced anything since reset, so
+    // the allocating core is the exact set. Installing over a DIFFERENT valid tag
+    // means this index has already forgotten at least one line, and the incoming
+    // line may be one of them, so assume every core may hold it.
+    //
+    // Cost: an index that has ever thrashed reports "everyone" for whatever line
+    // sits there, i.e. it degrades toward broadcast rather than reporting a wrong
+    // answer. The precise fix is directory-style back-invalidation on
+    // displacement (invalidate the displaced entry's sharers, so forgetting them
+    // is sound); that needs an invalidation source in the hub and is recorded as
+    // follow-up rather than bundled here.
+    logic [NC-1:0] install_present;
+    always_comb begin
+      install_present = '0;
+      if (mem_q[al_idx].valid) install_present = {NC{1'b1}};
+    end
+
     assign lu_idx = idx_of(lookup_addr_i);
     assign lu_tag = tag_of(lookup_addr_i);
     assign al_idx = idx_of(alloc_addr_i);
@@ -105,7 +134,7 @@ module g6lc_snoop_filter
             // Install (replace on conflict — over-approx until refilled)
             mem_d[al_idx].valid                 = 1'b1;
             mem_d[al_idx].tag                   = al_tag;
-            mem_d[al_idx].present               = '0;
+            mem_d[al_idx].present               = install_present;
             mem_d[al_idx].present[alloc_core_i] = 1'b1;
             rr_d = IDX_W'(int'(rr_q) + 1);
           end

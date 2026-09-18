@@ -11,7 +11,8 @@
 //   g6lc-build verify --lint          # one stage
 //   g6lc-build verify --target g6lc64_ooo_server
 //
-// Exit codes: 0 = gate passed, 1 = a stage failed, 3 = tools missing.
+// Exit codes: 0 = gate passed, 1 = a stage failed, 3 = tools missing,
+//             4 = incomplete (a stage was skipped and did not run).
 
 import { requireContext, type Command } from "../command.ts";
 import { flagBool, flagString } from "../args.ts";
@@ -21,7 +22,9 @@ import {
   elaborateTarget,
   runFormalTasks,
   lintTarget,
+  lintTargetsRemote,
   synthTarget,
+  synthTargetsRemote,
   type GateStageId,
   type StageOutcome,
 } from "../../tooling/eda.ts";
@@ -57,11 +60,55 @@ function symbol(status: StageOutcome["status"]): string {
   return status === "pass" ? "PASS" : status === "fail" ? "FAIL" : "SKIP";
 }
 
+/**
+ * The gate verdict. A skipped step is not a passed step: announcing
+ * "Gate passed" while stages did not run is how a plan gets mistaken for
+ * evidence, so skips make the verdict incomplete (exit 4) unless accepted
+ * explicitly, and a dry run never reports a gate result at all.
+ */
+export function gateVerdict(
+  outcomes: StageOutcome[],
+  opts: { dryRun: boolean; allowSkips: boolean; qualified: boolean },
+): { code: number; level: "success" | "error" | "info"; message: string } {
+  const failed = outcomes.filter((o) => o.status === "fail");
+  if (failed.length > 0) {
+    return {
+      code: 1,
+      level: "error",
+      message: `Gate failed: ${failed.length} of ${outcomes.length} step(s).`,
+    };
+  }
+  if (opts.dryRun) {
+    return {
+      code: 0,
+      level: "info",
+      message: `Dry run: ${outcomes.length} step(s) planned, none executed. This is not a gate result.`,
+    };
+  }
+  const skipped = outcomes.filter((o) => o.status === "skip");
+  if (skipped.length > 0 && !opts.allowSkips) {
+    return {
+      code: 4,
+      level: "error",
+      message:
+        `Gate incomplete: ${skipped.length} of ${outcomes.length} step(s) did not run ` +
+        `(${skipped.map((o) => `${o.stage}/${o.target ?? "-"}`).join(", ")}). ` +
+        `A skipped step qualifies nothing; pass --allow-skips to accept this run.`,
+    };
+  }
+  const suffix = skipped.length > 0 ? ` (${skipped.length} skipped, accepted by --allow-skips)` : "";
+  return {
+    code: 0,
+    level: "success",
+    message: `${opts.qualified ? "Simulation evidence qualified" : "Gate passed"}: ${outcomes.length} step(s)${suffix}.`,
+  };
+}
+
 export const verifyCommand: Command = {
   name: "verify",
   summary: "Run the per-change gate: lint, formal, simulation, synthesis.",
   usage:
-    "bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth] [--target <cfg>] [--qualification <profile>] [--ai] [--from-timing DIR] [--use-emit] [--yes] [--json] [--dry-run]",
+    "bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth] [--target <cfg>] [--qualification <profile>] [--ai] [--from-timing DIR] [--use-emit] [--remote] [--allow-skips] [--yes] [--json] [--dry-run]",
   details:
     "Runs the AGENTS.md §0.2 verification gate with the open EDA suite pinned in\n" +
     ".config.ts (verify.suite). Stages:\n" +
@@ -84,6 +131,9 @@ export const verifyCommand: Command = {
     "  --channels / --ai-dram / --ai-ghz / --ai-flavour\n" +
     "                     stamp AI_ISLAND_DRAM_* env for sim (same as test --ai)\n" +
     "  --use-emit         expert: export emit flist env for sim consumers (default off)\n" +
+    "  --allow-skips      accept a run in which stages were skipped. Without it a\n" +
+    "                     skipped stage makes the verdict incomplete (exit 4):\n" +
+    "                     a step that did not run has qualified nothing.\n" +
     "  --yes / -y         auto-accept tools install when managed tools are missing\n" +
     "  --formal-jobs N    solver processes per sby task (sby -j; default: host cores)\n" +
     "  --formal-tasks N   sby tasks run concurrently (default: cores / formal-jobs)\n" +
@@ -211,7 +261,11 @@ export const verifyCommand: Command = {
     // any nested call see one source of truth.
     const formalJobs = flagString(args.flags, "formal-jobs");
     const formalTaskJobs = flagString(args.flags, "formal-tasks");
-    const formalRemote = flagBool(args.flags, "formal-remote");
+    // --remote is the whole-gate switch; the per-stage flags stay for one stage.
+    const allRemote = flagBool(args.flags, "remote");
+    const lintRemote = allRemote || flagBool(args.flags, "lint-remote");
+    const synthRemote = allRemote || flagBool(args.flags, "synth-remote");
+    const formalRemote = allRemote || flagBool(args.flags, "formal-remote");
     const formalHost = flagString(args.flags, "formal-host");
     if (formalJobs || formalTaskJobs || formalRemote || formalHost) {
       const f = (config.verify.formal ??= {});
@@ -240,14 +294,38 @@ export const verifyCommand: Command = {
     for (const stage of stages) {
       if (stage === "lint") {
         logger.heading(`Lint + elaboration (${targets.length} target(s))`);
-        for (const target of targets) {
-          outcomes.push(await lintTarget(ctx, paths, target));
-          outcomes.push(await elaborateTarget(ctx, paths, target));
+        if (lintRemote) {
+          // Remote route: one round trip per stage half, on the builder's own
+          // Verilator and its Yosys-integrated slang frontend.
+          outcomes.push(...(await lintTargetsRemote(ctx, paths, targets)));
+          // Strict elaboration stays local: the builder carries no standalone
+          // slang, and substituting the Yosys-integrated frontend does not run
+          // the same check — it rejects hpdcache SVA that standalone slang
+          // accepts, so it would only pass with assertions defined out.
+          // Provisioning slang on the builder is the fix, not a substitution.
+          for (const target of targets) {
+            outcomes.push({
+              stage: "lint",
+              target,
+              status: "skip",
+              detail: "strict slang elaboration is local-only: no standalone slang on the builder",
+              durationMs: 0,
+            });
+          }
+        } else {
+          for (const target of targets) {
+            outcomes.push(await lintTarget(ctx, paths, target));
+            outcomes.push(await elaborateTarget(ctx, paths, target));
+          }
         }
       } else if (stage === "synth") {
         logger.heading("Synthesis smoke");
-        for (const target of targets) {
-          outcomes.push(await synthTarget(ctx, paths, target));
+        if (synthRemote) {
+          outcomes.push(...(await synthTargetsRemote(ctx, paths, targets)));
+        } else {
+          for (const target of targets) {
+            outcomes.push(await synthTarget(ctx, paths, target));
+          }
         }
       } else if (stage === "formal") {
         logger.heading("Formal (SymbiYosys)");
@@ -350,12 +428,14 @@ export const verifyCommand: Command = {
       }
     }
 
-    const failed = outcomes.filter((o) => o.status === "fail");
-    if (failed.length > 0) {
-      logger.error(`Gate failed: ${failed.length} of ${outcomes.length} step(s).`);
-      return 1;
-    }
-    logger.success(`${qualification ? "Simulation evidence qualified" : "Gate passed"}: ${outcomes.length} step(s).`);
-    return 0;
+    const verdict = gateVerdict(outcomes, {
+      dryRun: ctx.dryRun,
+      allowSkips: flagBool(args.flags, "allow-skips"),
+      qualified: Boolean(qualification),
+    });
+    if (verdict.level === "error") logger.error(verdict.message);
+    else if (verdict.level === "success") logger.success(verdict.message);
+    else logger.info(verdict.message);
+    return verdict.code;
   },
 };

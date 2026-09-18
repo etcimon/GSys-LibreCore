@@ -151,16 +151,26 @@ ${CVA6_REPO_DIR}/core/aes.sv
 // Note: depends on fpnew_pkg, above
 ${CVA6_REPO_DIR}/core/fpu_wrap.sv
 // EXTRACT E2–E9 + leftover packages (before branch_unit / controller / compressed_decoder)
-${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_rvc_enc.sv
-${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_jalr_usable.sv
-${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_cf_unissued.sv
-${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_fe_keep.sv
-${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_fe_kill.sv
-${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_iq_hide.sv
-${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_sib_cjalr.sv
-${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_present.sv
-${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_leftover.sv
-${CVA6_REPO_DIR}/core/fetch_A/smt_legacy/g6lc_lj_hide.sv
+// RETIRED SUPPLY: core/fetch_A is not the instruction supply — -f Flist.fetch_B is
+// (see the flavour note above), and core/fetch_A/smt_legacy/frontend.sv does not even
+// build (%Error-PINMISSING, missing push_cf_i / cf_resolve_i). Five helpers that were
+// listed here are referenced ONLY by fetch_A files that this flist does not compile
+// (frontend.sv / instr_queue.sv / instr_realign.sv), so they were dead in every
+// fetch_B build and are removed: g6lc_fe_kill, g6lc_iq_hide, g6lc_present,
+// g6lc_leftover, g6lc_lj_hide.
+//
+// The five below have been MOVED OUT of fetch_A/ to core/, because they are not
+// retired despite having lived there: g6lc_rvc_enc, g6lc_jalr_usable,
+// g6lc_cf_unissued, g6lc_fe_keep and g6lc_sib_cjalr are used by the live core
+// (compressed_decoder, id_stage, controller, scoreboard, branch_unit,
+// issue_read_operands, issue_stage) — all of which live in core/ too, so that is
+// where these belong. Leaving live files inside a directory documented as retired
+// is a trap for whoever finally deletes it.
+${CVA6_REPO_DIR}/core/g6lc_rvc_enc.sv
+${CVA6_REPO_DIR}/core/g6lc_jalr_usable.sv
+${CVA6_REPO_DIR}/core/g6lc_cf_unissued.sv
+${CVA6_REPO_DIR}/core/g6lc_fe_keep.sv
+${CVA6_REPO_DIR}/core/g6lc_sib_cjalr.sv
 // G1r: per-instr CF PC (before branch_unit)
 ${CVA6_REPO_DIR}/core/smt_legacy/g6lc_cf_pc.sv
 // I14: CF issue-port pick (before branch_unit / IRO / ex_stage)
@@ -273,6 +283,7 @@ ${HPDCACHE_DIR}/rtl/src/utils/hpdcache_mem_resp_demux.sv
 ${HPDCACHE_DIR}/rtl/src/utils/hpdcache_mem_to_axi_read.sv
 ${HPDCACHE_DIR}/rtl/src/utils/hpdcache_mem_to_axi_write.sv
 ${CVA6_REPO_DIR}/core/include/dummy_l15_pkg.sv
+${CVA6_REPO_DIR}/core/cache_subsystem/g6lc_inval_retain.sv
 ${CVA6_REPO_DIR}/core/cache_subsystem/cva6_hpdcache_subsystem.sv
 ${CVA6_REPO_DIR}/core/cache_subsystem/cva6_hpdcache_subsystem_axi_arbiter.sv
 ${CVA6_REPO_DIR}/core/cache_subsystem/cva6_hpdcache_if_adapter.sv

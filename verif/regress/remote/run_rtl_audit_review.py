@@ -232,6 +232,17 @@ def main():
         # a settled combinational cycle is not evidence of a working predictor.
         if os.environ.get('REVIEW_RTL_MEMDEP')=='1':
             configurations=[('dispatch','mdp1',['-GMDP=1'],cases)]
+        # Elaboration guards: these configurations must FAIL to build. The
+        # legality checks in check_cfg are simulation-only, so a build success
+        # here would mean an aliasing configuration can be synthesised.
+        if os.environ.get('REVIEW_RTL_ILLEGAL'):
+            # Distinct name: the configuration loop below rebinds `kind` to the
+            # configuration's own kind, which silently selected the wrong
+            # expected message.
+            illegal_kind=os.environ['REVIEW_RTL_ILLEGAL']
+            assert illegal_kind in ('smt','fp')
+            configurations=[('dispatch','illegal-'+illegal_kind,
+                             ['-GHARTS=2'] if illegal_kind=='smt' else ['-GFPEN=1'],[])]
     results=[]
     for kind,geometry,parameters,cases in configurations:
         if os.environ.get('REVIEW_RTL_KIND') and kind != os.environ['REVIEW_RTL_KIND']:continue
@@ -251,6 +262,25 @@ def main():
         if os.environ.get('REVIEW_RTL_MEMDEP')=='1':strict+=['-Werror-UNOPTFLAT']
         if os.environ.get('REVIEW_RTL_LATCH')=='1':strict+=['-Werror-LATCH']
         command=['verilator','--cc','--main','--exe','--timing',*asserts,'--threads','1','-Wno-fatal',*strict,'-I'+str(source),*trace,'--top-module',top,*parameters,'--Mdir',str(model),'-o','review-test',*rtl]
+        if os.environ.get('REVIEW_RTL_ILLEGAL'):
+            # -Wno-fatal would demote the elaboration $error to a warning, which
+            # is exactly the weakness being tested: the build must be refused.
+            strict_cmd=[a for a in command if a!='-Wno-fatal']
+            (work/'verilate-command.json').write_text(json.dumps(strict_cmd,indent=2))
+            with (work/'verilate.log').open('w') as log:
+                p=subprocess.run(strict_cmd,stdout=log,stderr=subprocess.STDOUT,timeout=180)
+            text=(work/'verilate.log').read_text(errors='replace')
+            expected=('per-hart rename namespace' if illegal_kind=='smt'
+                      else 'no FP register class')
+            refused=p.returncode!=0 and expected in text
+            results.append({'kind':kind,'geometry':geometry,'scenario':None,
+                            'illegalKind':illegal_kind,
+                            'negative':False,'expectedError':'elaboration refusal',
+                            'rc':p.returncode,'matched':refused,
+                            'strictQualification':False})
+            (out/'results.json').write_text(json.dumps(results,indent=2))
+            assert refused,'illegal configuration elaborated'
+            continue
         for label,cmd in [('verilate',command),('build',['make','-C',str(model),'-f','V'+top+'.mk','-j4','VERILATOR_ROOT='+str(runtime)])]:
             (work/(label+'-command.json')).write_text(json.dumps(cmd,indent=2))
             with (work/(label+'.log')).open('w') as log:p=subprocess.run(cmd,stdout=log,stderr=subprocess.STDOUT,timeout=180)

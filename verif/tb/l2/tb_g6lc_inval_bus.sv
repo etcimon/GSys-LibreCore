@@ -20,7 +20,7 @@ module tb_g6lc_inval_bus;
   g6lc_inval_bus #(.NR_CORES(CORES), .DEPTH(DEPTH)) dut (
     .clk_i(clk), .rst_ni(rst_n), .inv_req_i(request), .inv_target_i(targets),
     .inv_ready_o(ready), .inv_core_o(delivered), .inv_core_ready_i(consumer_ready),
-    .inv_drop_o(blocked), .inv_coalesce_o(coalesced)
+    .inv_stall_o(blocked), .inv_coalesce_o(coalesced)
   );
 
   function automatic logic [31:0] next_random();

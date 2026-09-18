@@ -91,9 +91,36 @@ module cva6_hpdcache_if_adapter
         cva6_req_i.address_tag,
         cva6_req_i.address_index
       };
+      // The execute-region term is GONE, and that is a deliberate reversal of the
+      // S4 workaround described above. It excluded every load inside an execute
+      // region from D$ allocation — and since ExecuteRegion[0] equals
+      // CachedRegion[0] on every HPDCACHE configuration, that disabled L1 D$ load
+      // allocation for ALL of DRAM.
+      //
+      // The "2jr hang" it was avoiding was not a cache hazard at all: it was a
+      // FALSE assertion in the bind-attached frontend checker. `kill_s1` is driven
+      // from replay_q (frontend.sv:820) while the checker was passed the
+      // combinational replay, so one cycle after replay dropped a legal
+      // replay-kill tripped "kill_s1 outside misp|flush|replay". Fixed in
+      // core/fetch_B/g6lc_fetch_dbg.sv by binding .replay_i(replay_q).
+      //
+      // Three-arm evidence, g6lc64_stream8 flavour B, arms differing only as
+      // stated (architecture/multi-core/README.md):
+      //   exclusion ON                    2jr / _pad / _data PASS 534/491/501 cy
+      //   exclusion OFF, checker as-was   all three trip the assertion
+      //   exclusion OFF, checker fixed    all three PASS 545/497/519 cy
+      // mc_boot_sanity passes at 359 cycles in all three arms, so the arms are
+      // otherwise equivalent.
+      //
+      // G6LC_DCACHE_EXEC_UNCACHED restores the old behaviour for bisection.
+`ifdef G6LC_DCACHE_EXEC_UNCACHED
       assign hpdcache_req_is_uncacheable =
           !config_pkg::is_inside_cacheable_regions(CVA6Cfg, load_paddr) ||
           config_pkg::is_inside_execute_regions(CVA6Cfg, load_paddr);
+`else
+      assign hpdcache_req_is_uncacheable =
+          !config_pkg::is_inside_cacheable_regions(CVA6Cfg, load_paddr);
+`endif
 
       //    Request forwarding
       assign hpdcache_req_valid_o = cva6_req_i.data_req;
