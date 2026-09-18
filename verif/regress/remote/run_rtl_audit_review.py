@@ -125,6 +125,26 @@ def main():
     # Same shape for the LSQ group-credit repair: restoring the any-free-entry
     # admission term must make the group-credit scenario fail.
     credit_fault=os.environ.get('REVIEW_RTL_CREDIT_FAULT')=='1'
+    # Restores the free-list-snapshot recovery, so the allocation-leak scenario
+    # must fail.
+    leak_fault=os.environ.get('REVIEW_RTL_LEAK_FAULT')=='1'
+    if leak_fault:
+        assert os.environ.get('REVIEW_RTL_RENAME')=='1'
+        path=source/'g6lc_rename.sv';text=path.read_text()
+        # Both halves are needed to reproduce the original semantics: seed the
+        # per-level mask with the free list AND drop the accumulation, so
+        # squashed becomes exactly (free at checkpoint) & ~(free now). Seeding
+        # alone leaves the accumulation to re-add the later allocation.
+        accumulate = ("            for (int unsigned s = 0; s < CKPT_DEPTH; s++)\n"
+                      "              ckpt_alloc_d[s][picked] = 1'b1;")
+        for old, new in (
+            ("          ckpt_alloc_d[ckpt_slot_c[p]] = '0;",
+             "          ckpt_alloc_d[ckpt_slot_c[p]] = free_d;"),
+            (accumulate, "            /* accumulation removed by fault control */"),
+        ):
+            assert text.count(old)==1,'leak fault injection site changed'
+            text=text.replace(old,new)
+        path.write_text(text)
     # Restores the identity-map flush, so the committed-state scenario must fail.
     flush_fault=os.environ.get('REVIEW_RTL_FLUSH_FAULT')=='1'
     if flush_fault:
@@ -184,7 +204,8 @@ def main():
         configurations=[('rename','direct',[],
                          [(7,'RENAME_CKPT_NO_RELEASE')] if rename_fault
                          else [(9,'RENAME_FLUSH_ARCH')] if flush_fault
-                         else [(n,None) for n in range(10)])]
+                         else [(10,'RENAME_CKPT_ALLOC_LEAK')] if leak_fault
+                         else [(n,None) for n in range(11)])]
     elif os.environ.get('REVIEW_RTL_LSQ')=='1':
         configurations=[('lsq','direct',[],[(n,None) for n in range(12)])]
     elif os.environ.get('REVIEW_RTL_TAGE')=='1':
@@ -239,8 +260,8 @@ def main():
         assert str(Path(runtime_info['originalRoot'])/'include/verilated_funcs.h') not in dependencies
         exe=model/'review-test'
         trials=[(scenario,False,error) for scenario,error in cases]
-        if not before and not rename_fault and not credit_fault and not flush_fault:
-            if kind=='rename':trials+=[(0,True,'RENAME_MAP'),(1,True,'RENAME_OLDER_LOST'),(2,True,'RENAME_BUSY_RESURRECT'),(3,True,'RENAME_STALE_LEVEL'),(4,True,'RENAME_CKPT2_UNWIND'),(5,True,'RENAME_CKPT_FULL'),(6,True,'RENAME_EXCLUSIVE'),(7,True,'RENAME_CKPT_NO_RELEASE'),(8,True,'RENAME_RETIRE_WINDOW'),(9,True,'RENAME_FLUSH_ARCH')]
+        if not before and not rename_fault and not credit_fault and not flush_fault and not leak_fault:
+            if kind=='rename':trials+=[(0,True,'RENAME_MAP'),(1,True,'RENAME_OLDER_LOST'),(2,True,'RENAME_BUSY_RESURRECT'),(3,True,'RENAME_STALE_LEVEL'),(4,True,'RENAME_CKPT2_UNWIND'),(5,True,'RENAME_CKPT_FULL'),(6,True,'RENAME_EXCLUSIVE'),(7,True,'RENAME_CKPT_NO_RELEASE'),(8,True,'RENAME_RETIRE_WINDOW'),(9,True,'RENAME_FLUSH_ARCH'),(10,True,'RENAME_CKPT_ALLOC_LEAK')]
             elif kind=='lsq':trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA'),(2,True,'LSQ_COMMIT_DOUBLE_FREE'),(3,True,'LSQ_STL_AGE'),(4,True,'LSQ_AGE_STALL'),(5,True,'LSQ_WRAP_DATA'),(6,True,'LSQ_BYTE_DISJOINT'),(7,True,'LSQ_BYTE_COVER'),(8,True,'LSQ_PARTIAL_NODATA'),(9,True,'LSQ_PARTIAL_MERGE'),(10,True,'LSQ_CANCEL_DROP'),(11,True,'LSQ_FLUSH')]
             elif dispatch_mode:trials+=[(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER'),(6,True,'DISPATCH_STORE_WB_RETIRE'),(7,True,'DISPATCH_LOAD_UNBLOCKED'),(8,True,'DISPATCH_WRAP_ORDER'),(9,True,'DISPATCH_TAG_REUSE'),(10,True,'DISPATCH_LSQ_CREDIT')]
             elif kind=='tage':trials+=[(0,True,'TAGE_SLOT_BROADCAST'),(1,True,'TAGE_UPDATE_FOLD'),(2,True,'TAGE_BASE_ALIAS'),(3,True,'ITTAGE_SLOT_ALIAS')]

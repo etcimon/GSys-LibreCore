@@ -81,7 +81,14 @@ module g6lc_rename #(
   logic [PRF_ENTRIES-1:0] busy_q, busy_d;
 
   logic [CKPT_DEPTH-1:0][31:0][PRF_W-1:0] ckpt_map_q;
-  logic [CKPT_DEPTH-1:0][PRF_ENTRIES-1:0]  ckpt_free_q;
+  // Registers allocated AFTER each checkpoint. A free-list snapshot cannot
+  // express this: a register that was live at the checkpoint, freed by an OLDER
+  // instruction committing afterwards, and then reallocated to younger work is
+  // absent from the snapshot, so recovery never returns it and it leaks
+  // permanently. Commit is in order, so nothing allocated after the checkpoint
+  // can have committed before the branch resolves, and every such register is
+  // safe to return.
+  logic [CKPT_DEPTH-1:0][PRF_ENTRIES-1:0]  ckpt_alloc_q, ckpt_alloc_d;
   localparam int unsigned LVL_W = $clog2(CKPT_DEPTH+1);
   logic [LVL_W-1:0] ckpt_head_q, ckpt_head_d;
   logic [LVL_W-1:0] ckpt_cnt_q, ckpt_cnt_d;
@@ -100,7 +107,6 @@ module g6lc_rename #(
   // consumes two levels, so each branch unwinds to its own post-rename point.
   // No busy snapshot is kept -- see the restore below.
   logic [NR_PORTS-1:0][31:0][PRF_W-1:0] ckpt_map_c;
-  logic [NR_PORTS-1:0][PRF_ENTRIES-1:0]  ckpt_free_c;
 
   // Lowest free phys ≥1 in current free vector
   function automatic logic [PRF_W-1:0] pick_free(input logic [PRF_ENTRIES-1:0] fr);
@@ -179,7 +185,7 @@ module g6lc_rename #(
     do_ckpt = '0;
     ckpt_slot_c = '1;
     ckpt_map_c = '0;
-    ckpt_free_c = '0;
+    ckpt_alloc_d = ckpt_alloc_q;
 
     begin
       for (int unsigned p = 0; p < NR_PORTS; p++) begin
@@ -207,6 +213,10 @@ module g6lc_rename #(
             map_d[rd_i[p]] = picked;
             busy_d[picked] = 1'b1;
             prd_o[p] = picked;
+            // Younger than every live checkpoint, including one taken earlier in
+            // this same group.
+            for (int unsigned s = 0; s < CKPT_DEPTH; s++)
+              ckpt_alloc_d[s][picked] = 1'b1;
           end
         end else if (valid_i[p] && enable_i) begin
           prd_o[p] = old;
@@ -221,7 +231,8 @@ module g6lc_rename #(
           do_ckpt[p] = 1'b1;
           ckpt_slot_c[p] = ckpt_slot(int'(ckpt_head_q) + int'(ckpt_cnt_q) + slots);
           ckpt_map_c[p] = map_d;
-          ckpt_free_c[p] = free_d;
+          // This branch's own rename is at or older than the branch.
+          ckpt_alloc_d[ckpt_slot_c[p]] = '0;
           slots++;
         end
       end
@@ -281,7 +292,7 @@ module g6lc_rename #(
       if ((int'(mispredict_level_i) >= CKPT_DEPTH) || (rel >= int'(ckpt_cnt_q)))
         rel = int'(ckpt_cnt_q) - 1;
       level = ckpt_slot(int'(ckpt_head_q) + rel);
-      squashed = ckpt_free_q[level] & ~free_d;
+      squashed = ckpt_alloc_q[level] & ~free_d;
       map_d  = ckpt_map_q[level];
       free_d = free_d | squashed;
       busy_d = busy_d & ~squashed;
@@ -330,7 +341,7 @@ module g6lc_rename #(
       ckpt_head_q <= '0;
       ckpt_cnt_q <= '0;
       ckpt_map_q <= '0;
-      ckpt_free_q <= '0;
+      ckpt_alloc_q <= '0;
     end else begin
       map_q <= map_d;
       amap_q <= amap_d;
@@ -338,11 +349,9 @@ module g6lc_rename #(
       busy_q <= busy_d;
       ckpt_head_q <= ckpt_head_d;
       ckpt_cnt_q <= ckpt_cnt_d;
+      ckpt_alloc_q <= ckpt_alloc_d;
       for (int unsigned p = 0; p < NR_PORTS; p++) begin
-        if (do_ckpt[p]) begin
-          ckpt_map_q[ckpt_slot_c[p]]  <= ckpt_map_c[p];
-          ckpt_free_q[ckpt_slot_c[p]] <= ckpt_free_c[p];
-        end
+        if (do_ckpt[p]) ckpt_map_q[ckpt_slot_c[p]] <= ckpt_map_c[p];
       end
     end
   end

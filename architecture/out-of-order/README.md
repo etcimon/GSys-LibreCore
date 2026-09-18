@@ -50,6 +50,32 @@ passes 24; `review-lsq-credit-fault-v2` restores the any-free-entry term and the
 group-credit scenario fails as contracted. Scope: one geometry
 (`LsqLoadEntries=LsqStoreEntries=4`, two issue ports) at fixture level.
 
+### Checkpoint recovery returns the right registers (repaired, leaf-verified)
+
+Recovery computed the squashed set as "free at the checkpoint and no longer
+free". A free-list snapshot cannot express what recovery actually needs. A
+register that was *live* at the checkpoint, freed afterwards by an **older**
+instruction committing, and then reallocated to younger work is absent from the
+snapshot, so recovery never returns it: it is left neither mapped nor free and
+leaks permanently. Repeated often enough this exhausts the free list and dispatch
+stalls for good.
+
+Each checkpoint level now carries a mask of registers allocated **after** it,
+cleared when the level is taken (so the branch's own rename is excluded) and set
+by every later allocation, including one made earlier in the same group. Commit is
+in order, so nothing allocated after a checkpoint can have committed before that
+branch resolves, and every register in the mask is safe to return. This replaces
+the snapshot rather than adding to it, so the storage is unchanged.
+
+Scenario 10 builds exactly that case and requires the register to be reissued
+after recovery. The fault control has to restore *both* halves of the old
+behaviour — seed the mask with the free list **and** drop the accumulation —
+because seeding alone lets the accumulation re-add the register and the scenario
+passes; my first attempt at this fault was not faithful and was corrected.
+`review-rename-leak-fault-v3` fails as contracted, `review-rename-leak-after-v2`
+passes 22 records, `review-p0-dispatch-regate-v1` 16 and
+`review-p0-core-regate-v1` 66.
+
 ### Committed-state recovery on full flush (repaired, leaf-verified)
 
 A full flush reset the rename map to identity and freed physical registers

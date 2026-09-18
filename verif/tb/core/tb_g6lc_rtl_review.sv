@@ -383,6 +383,35 @@ module tb_g6lc_review_rename;
         if(prd[0]===first_alloc)
           $fatal(1,"RENAME_FLUSH_FREE reissued committed phys %0d",prd[0]);
       end
+      // A register that was LIVE at the checkpoint, freed afterwards by an OLDER
+      // instruction committing, and then reallocated to younger work must be
+      // returned by recovery. A free-list snapshot cannot express that: the
+      // register is absent from it, so it leaks permanently.
+      10:begin
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd1;   // I0: r1 -> a0
+        presample();first_alloc=prd[0];
+        if(first_alloc==0)$fatal(1,"RENAME_NO_ALLOC");
+        drive();idle();valid=2'b01;need_rd=2'b01;rd[0]=5'd1;  // I1: r1 -> b0
+        presample();
+        if(prd_old[0]!==first_alloc)$fatal(1,"RENAME_OLD_TAG old=%0d",prd_old[0]);
+        drive();idle();valid=2'b01;is_branch=2'b01;     // branch -> ckpt 0
+        drive();idle();
+        // I1 is OLDER than the branch and commits, freeing a0.
+        drive();fr[0]=1'b1;fr_prd[0]=first_alloc;
+        drive();idle();
+        // Younger work reallocates a0.
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd2;
+        presample();mid_alloc=prd[0];
+        if(mid_alloc!==first_alloc)$fatal(1,"RENAME_NO_REALLOC got=%0d want=%0d",mid_alloc,first_alloc);
+        drive();idle();
+        drive();mispredict=1;mis_level=2'd0;
+        drive();idle();mis_level='1;
+        // Recovery discarded that younger allocation, so a0 must be free again.
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd3;
+        presample();
+        if(prd[0]!==(negative?PRF_W'(0):first_alloc))
+          $fatal(1,"RENAME_CKPT_ALLOC_LEAK got=%0d want=%0d",prd[0],first_alloc);
+      end
       default:$fatal(1,"RENAME_SCENARIO");
     endcase
     $display("RTL_REVIEW_PASS rename scenario=%0d",scenario);$finish;

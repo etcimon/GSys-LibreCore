@@ -99,7 +99,14 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   now keeps an architectural map updated at commit; a flush restores it and rebuilds
   the free list from it. `review-rename-flush-fault-v1` reproduces the loss,
   `review-rename-flush-after-v1` 20 records, `review-flush-dispatch-v1` 16 records.
-- [ ] P0 remaining: checkpoint free-snapshot reuse across a flush; per-hart
+- [x] P0 checkpoint recovery set: recovery used "free at the checkpoint and no longer
+  free", so a register live at the checkpoint, freed by an older commit and then
+  reallocated to younger work was never returned and leaked. Each level now carries a
+  mask of registers allocated after it, replacing the snapshot at the same storage
+  cost. `review-rename-leak-fault-v3` reproduces the leak (a faithful fault needs both
+  the seeded snapshot and the removed accumulation), `review-rename-leak-after-v2` 22
+  records, `review-p0-dispatch-regate-v1` 16, `review-p0-core-regate-v1` 66.
+- [ ] P0 remaining: per-hart
   map/free/busy namespaces and the FP register class (legality asserts still gate
   those configurations).
 - [x] Recover supply-cap-v3 log without rerunning it: `review-supply-recovery-v1`
