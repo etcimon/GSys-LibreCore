@@ -24,14 +24,18 @@ module g6lc_bp_ittage
     input  logic                    debug_mode_i,
     input  logic [CVA6Cfg.VLEN-1:0] vpc_i,
     input  logic [FOLD_W-1:0]       folded_i,
+    // Folded history of the resolve/train hart for update index/tag.
+    input  logic [FOLD_W-1:0]       folded_update_i,
     input  btb_update_t             btb_update_i,
     output btb_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] btb_prediction_o
 );
 
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned NR_ROWS = NR_ENTRIES / CVA6Cfg.INSTR_PER_FETCH;
-  localparam int unsigned ROW_ADDR_BITS = $clog2(CVA6Cfg.INSTR_PER_FETCH);
-  localparam int unsigned ROW_INDEX_BITS = CVA6Cfg.RVC == 1'b1 ? $clog2(CVA6Cfg.INSTR_PER_FETCH) : 1;
+  // Column bits select the instruction slot inside a row; row bits sit above
+  // them, so an unaligned window's slots hash by their own PCs.
+  localparam int unsigned COL_BITS = (CVA6Cfg.INSTR_PER_FETCH <= 1) ? 0 : $clog2(CVA6Cfg.INSTR_PER_FETCH);
+  localparam int unsigned SLOT_W   = (COL_BITS == 0) ? 1 : COL_BITS;
   localparam int unsigned IDX_W = (NR_ROWS <= 1) ? 1 : $clog2(NR_ROWS);
 
   typedef struct packed {
@@ -41,24 +45,37 @@ module g6lc_bp_ittage
   } entry_t;
 
   entry_t [NR_ROWS-1:0][CVA6Cfg.INSTR_PER_FETCH-1:0] mem_d, mem_q;
-  logic [IDX_W-1:0] index, uindex;
-  logic [ROW_INDEX_BITS-1:0] urow;
-  logic [TAG_BITS-1:0] tag, utag;
+  logic [CVA6Cfg.VLEN-1:0] slot_pc [CVA6Cfg.INSTR_PER_FETCH];
+  logic [IDX_W-1:0] index  [CVA6Cfg.INSTR_PER_FETCH];
+  logic [IDX_W-1:0] uindex;
+  logic [SLOT_W-1:0] urow;
+  logic [TAG_BITS-1:0] tag [CVA6Cfg.INSTR_PER_FETCH];
+  logic [TAG_BITS-1:0] utag;
 
-  assign index  = vpc_i[OFFSET+:IDX_W] ^ folded_i[IDX_W-1:0];
-  assign tag    = vpc_i[OFFSET+IDX_W+:TAG_BITS] ^ TAG_BITS'(folded_i);
-  assign uindex = btb_update_i.pc[OFFSET+:IDX_W] ^ folded_i[IDX_W-1:0];
-  assign utag   = btb_update_i.pc[OFFSET+IDX_W+:TAG_BITS] ^ TAG_BITS'(folded_i);
+  for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_slot_pc
+    assign slot_pc[i] = vpc_i + CVA6Cfg.VLEN'(i << OFFSET);
+    assign index[i]   = slot_pc[i][OFFSET+COL_BITS+:IDX_W] ^ folded_i[IDX_W-1:0];
+    assign tag[i]     = slot_pc[i][OFFSET+COL_BITS+IDX_W+:TAG_BITS] ^ TAG_BITS'(folded_i);
+  end
+  assign uindex = btb_update_i.pc[OFFSET+COL_BITS+:IDX_W] ^ folded_update_i[IDX_W-1:0];
+  assign utag   = btb_update_i.pc[OFFSET+COL_BITS+IDX_W+:TAG_BITS] ^ TAG_BITS'(folded_update_i);
 
-  if (CVA6Cfg.RVC) begin : gen_row
-    assign urow = btb_update_i.pc[ROW_ADDR_BITS+OFFSET-1:OFFSET];
-  end else begin : gen_row0
+  if (COL_BITS == 0) begin : gen_row0
     assign urow = '0;
+  end else begin : gen_row
+    assign urow = btb_update_i.pc[OFFSET+:COL_BITS];
   end
 
   for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_out
-    assign btb_prediction_o[i].valid = mem_q[index][i].valid && (mem_q[index][i].tag == tag);
-    assign btb_prediction_o[i].target_address = mem_q[index][i].target;
+    if (COL_BITS == 0) begin : gen_out_nocol
+      assign btb_prediction_o[i].valid = mem_q[index[i]][0].valid && (mem_q[index[i]][0].tag == tag[i]);
+      assign btb_prediction_o[i].target_address = mem_q[index[i]][0].target;
+    end else begin : gen_out_col
+      logic [SLOT_W-1:0] col;
+      assign col = slot_pc[i][OFFSET+:COL_BITS];
+      assign btb_prediction_o[i].valid = mem_q[index[i]][col].valid && (mem_q[index[i]][col].tag == tag[i]);
+      assign btb_prediction_o[i].target_address = mem_q[index[i]][col].target;
+    end
   end
 
   always_comb begin

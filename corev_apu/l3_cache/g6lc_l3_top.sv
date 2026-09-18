@@ -29,9 +29,12 @@ module g6lc_l3_top
     output logic      l3_hit_o,
     output logic      l3_miss_o,
     output logic      l3_bypass_o,
-    // Victim replace — inclusive back-inval toward L1/L2
+    // Victim replace — inclusive back-inval toward L1/L2. Valid/ready offer:
+    // the victim commit inside holds until l3_evict_ready_i accepts the
+    // notification. Tie high when no inclusive engine is connected.
     output logic                       l3_evict_valid_o,
-    output logic [AXI_ADDR_WIDTH-1:0]  l3_evict_addr_o
+    output logic [AXI_ADDR_WIDTH-1:0]  l3_evict_addr_o,
+    input  logic                       l3_evict_ready_i
 );
 
   logic full, bank_cfl;
@@ -63,6 +66,7 @@ module g6lc_l3_top
       .l2_bank_conflict_o (bank_cfl),
       .l2_evict_valid_o   (l3_evict_valid_o),
       .l2_evict_addr_o    (l3_evict_addr_o),
+      .l2_evict_ready_i   (l3_evict_ready_i),
       // L3 has no upper-level inclusive slave; back-inval is L2's job
       .l2_back_inval_valid_i (1'b0),
       .l2_back_inval_addr_i  ('0),

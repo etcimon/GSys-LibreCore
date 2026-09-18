@@ -225,9 +225,15 @@ module g6lc_coherence_hub
     // Slot of the in-flight W-data owner (for optional debug); B uses scoreboard.
     logic [OT_W-1:0]  w_slot_q, w_slot_d;
 
-    // Inv ready (from bus). Not used to gate AW (avoids AW↔inv combinational loop);
-    // inv path is best-effort with coalesce under storms.
+    // Inv ready (from bus). Still never used to gate AW: admission consults the
+    // registered retention occupancy below instead, which keeps the obligation
+    // lossless without creating an AW<->inv combinational loop.
     logic inv_ready;
+
+    // Retained invalidation obligation for an already-accepted write.
+    coh_inval_t    inv_pend_q, inv_pend_d;
+    logic [NC-1:0] inv_pend_tgt_q, inv_pend_tgt_d;
+    logic          inv_pend_valid_q, inv_pend_valid_d;
 
     // Combinational grant eligibility
     logic aw_grant, ar_grant;
@@ -277,7 +283,12 @@ module g6lc_coherence_hub
       // mem aw_ready (downstream L2 only asserts ready when valid is high;
       // gating valid on ready is a combinational deadlock).
       // Hold new AW while write data for previous AW still in flight (W has no id).
-      aw_grant = aw_hold_q || (|aw_req && !aw_ot_full && aw_have_free && !w_busy_q);
+      // A write that will require an invalidation may only be admitted when the
+      // retention slot is free, so its obligation cannot be dropped. This reads
+      // only registered occupancy and the incoming cache attribute, never
+      // inv_ready or aw_fire, so admission stays loop-free.
+      aw_grant = aw_hold_q || (|aw_req && !aw_ot_full && aw_have_free && !w_busy_q &&
+                               !(core_req_i[aw_winner].aw.cache[1] && inv_pend_valid_q));
 
       if (aw_grant) begin
         mem_req_o.aw       = core_req_i[aw_winner].aw;
@@ -416,6 +427,9 @@ module g6lc_coherence_hub
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
+        inv_pend_q       <= '0;
+        inv_pend_tgt_q   <= '0;
+        inv_pend_valid_q <= 1'b0;
         aw_hold_q <= 1'b0;
         ar_hold_q <= 1'b0;
         aw_hold_owner_q <= '0;
@@ -438,6 +452,9 @@ module g6lc_coherence_hub
           ar_starve_q[c] <= '0;
         end
       end else begin
+        inv_pend_q       <= inv_pend_d;
+        inv_pend_tgt_q   <= inv_pend_tgt_d;
+        inv_pend_valid_q <= inv_pend_valid_d;
         aw_hold_q <= aw_grant && !mem_resp_i.aw_ready;
         ar_hold_q <= ar_grant && !mem_resp_i.ar_ready;
         if (aw_grant && !mem_resp_i.aw_ready && !aw_hold_q) begin
@@ -550,29 +567,64 @@ module g6lc_coherence_hub
     // ================================================================
     coh_inval_t    inv_req;
     logic [NC-1:0] inv_target;
+    // Freshly generated obligation for the write accepted this cycle.
+    coh_inval_t    inv_new;
+    logic [NC-1:0] inv_new_target;
 
     always_comb begin
-      inv_req    = '0;
-      inv_target = '0;
+      inv_new        = '0;
+      inv_new_target = '0;
       if (aw_fire && core_req_i[aw_winner].aw.cache[1]) begin
-        inv_req.valid     = 1'b1;
-        inv_req.dcache    = 1'b1;
-        inv_req.icache    = 1'b0;
-        inv_req.all_ways  = 1'b0;
-        inv_req.line_addr = coh_line_tag(core_req_i[aw_winner].aw.addr, LINE_BYTES);
+        inv_new.valid     = 1'b1;
+        inv_new.dcache    = 1'b1;
+        inv_new.icache    = 1'b0;
+        inv_new.all_ways  = 1'b0;
+        inv_new.line_addr = coh_line_tag(core_req_i[aw_winner].aw.addr, LINE_BYTES);
         unique case (POLICY)
           COH_BROADCAST:
-            inv_target = {NC{1'b1}} & ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
+            inv_new_target = {NC{1'b1}} & ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
           default:
-            inv_target = sf_present & ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
+            inv_new_target = sf_present & ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
         endcase
       end
       // Union LR-kill victims (they need D$ inv of the reserved line)
       if (lr_kill_v) begin
-        inv_req.valid     = 1'b1;
-        inv_req.dcache    = 1'b1;
-        inv_req.line_addr = lr_kill_line;
-        inv_target        = inv_target | lr_kill_cores;
+        inv_new.valid     = 1'b1;
+        inv_new.dcache    = 1'b1;
+        inv_new.line_addr = lr_kill_line;
+        inv_new_target    = inv_new_target | lr_kill_cores;
+      end
+    end
+
+    // Retention of an accepted write's invalidation obligation.
+    // Previously the request was presented combinationally in the same cycle the
+    // AW handshook and simply evaporated if the bus was not ready, so a write
+    // could complete with no invalidation ever delivered (HUB_INV_LOSS). The
+    // obligation is now held until the bus takes it. AW admission consults only
+    // the REGISTERED occupancy, never inv_ready or aw_fire, so no combinational
+    // loop is created -- which is why gating AW on inv_ready directly was
+    // rejected. A retained entry is presented in preference to a fresh one, and a
+    // fresh request that the bus accepts immediately still costs no extra cycle.
+    always_comb begin
+      inv_pend_d       = inv_pend_q;
+      inv_pend_tgt_d   = inv_pend_tgt_q;
+      inv_pend_valid_d = inv_pend_valid_q;
+      if (inv_pend_valid_q) begin
+        if (inv_ready) inv_pend_valid_d = 1'b0;
+      end else if (inv_new.valid && |inv_new_target && !inv_ready) begin
+        inv_pend_valid_d = 1'b1;
+        inv_pend_d       = inv_new;
+        inv_pend_tgt_d   = inv_new_target;
+      end
+    end
+
+    always_comb begin
+      if (inv_pend_valid_q) begin
+        inv_req    = inv_pend_q;
+        inv_target = inv_pend_tgt_q;
+      end else begin
+        inv_req    = inv_new;
+        inv_target = inv_new_target;
       end
     end
 

@@ -9,6 +9,95 @@ reproduces an accepted store that cannot issue; other recovery/ordering contract
 below remain unresolved. Minimal/default packages keep `OoOEn=0`. Passing SMT2 and
 stream8 regressions exercise that protected in-order path, not full OoO.
 
+## Continuation review: lifetime closure remains open
+
+### Checkpoint retirement (repaired, leaf-verified)
+
+Rename checkpoints were allocated per branch and released only by mispredict or
+flush, so the capacity gate stalled dispatch permanently after `CKPT_DEPTH`
+correctly predicted branches. Checkpoints are taken in program order and commit is
+in program order, so the pool is now a ring: allocate at the tail, retire at the
+head on commit. A checkpoint level is a ring slot, and its age is its distance from
+the head, so an older branch still unwinds to its own level and consumes every
+younger one; a level outside the live window falls back to the youngest. Retirement
+is bounded by what is live, so a stale strobe cannot advance the head past the tail.
+
+`g6lc_ooo_dispatch` derives the retire strobes from `commit_ack_i` and the per-tid
+checkpoint tag, writes that tag unconditionally at dispatch so a reused slot cannot
+retire a checkpoint it never took, and clears the resolving branch's tag on
+mispredict because the unwind already consumed it.
+
+`review-rename-ckpt-release-v1` passes 18 records (9 positives, 9 injected-oracle
+negatives), including reuse of the retired slot and preserved recovery after a
+retirement. `review-rename-ckpt-fault-v1` disables retirement and the new scenario
+fails as contracted, so it is the discriminator for the original defect.
+`review-dispatch-ckpt-release-v1` passes 14 records with the new wiring. This is
+leaf and dispatch-fixture evidence: it does not close full OoO, and the hart/FP
+legality restrictions stay.
+
+### LSQ group credits (repaired, leaf-verified)
+
+Admission asked only whether *any* load/store entry was free, but dispatch is
+all-or-nothing across the group, and a surplus allocation is silently discarded by
+the queue's placement loop — leaving that memory op live in the ROB/IQ with no queue
+entry to order or forward it. `g6lc_lsq` now exports free-entry counts and dispatch
+compares them against the group's memory-op count. The counts come from registered
+state and the group size from ungated intent, so admission still cannot feed back
+through `can_go`.
+
+`review-lsq-credit-dispatch-v2` passes 16 records and `review-lsq-credit-lsq-v1`
+passes 24; `review-lsq-credit-fault-v2` restores the any-free-entry term and the new
+group-credit scenario fails as contracted. Scope: one geometry
+(`LsqLoadEntries=LsqStoreEntries=4`, two issue ports) at fixture level.
+
+### Enabled memory-dependence prediction (loop removed; predictor no longer gates issue)
+
+`MemDepPredEn=1` had never been elaborated. With the dispatch fixture built at
+`MemDepPredEn=1` and feedback promoted to an error, Verilator reports a genuine
+combinational cycle (`review-memdep-before-v2`):
+
+```
+md_stall -> g6lc_iq select -> issue_sbe_o -> g6lc_memdep -> md_stall
+```
+
+The predictor's query *is* the selected load, so feeding its stall back into
+selection closes the loop. The stall was also wrongly conservative:
+`store_pending` is global, so it blocked a load whose only pending stores are
+younger and cannot alias it.
+
+Safety at issue comes from the IQ's per-entry age gate, which already blocks a load
+behind every older live store, so the predictor is not required for correctness. The
+IQ's `mem_stall_i` is therefore tied off in `g6lc_ooo_dispatch`, and the predictor
+continues to train and report. A predictor that *relaxes* the age gate — the only
+version that buys performance — needs an alias proof and a dispatch-time query keyed
+by the dispatching load, not by the selected one; that remains open and unbuilt.
+`review-memdep-after-v1` elaborates loop-free and passes 16 records at
+`MemDepPredEn=1`.
+
+### Latch inferences across the OoO path (repaired)
+
+The same strict build exposed latch inferences in `g6lc_rename`, `g6lc_lsq`,
+`g6lc_rob` and `g6lc_ooo_dispatch`: block-locals declared inside conditional or loop
+scopes are unassigned on the paths that skip the scope. All are now declared and
+defaulted at their `always_comb` scope. `review-ooo-latch-v2` builds with
+`-Werror-LATCH` and `-Werror-UNOPTFLAT` and passes 16 records; the rename, LSQ and
+dispatch suites re-pass 18/24/16 afterwards. This is elaborator-level cleanliness,
+not a mapped-synthesis or timing result.
+
+`../remaining-upgrade-sequence.md` records the remaining source-backed gaps behind
+the earlier repaired-leaf rows. Checkpoint free snapshots do not include later old-commit
+frees subsequently reallocated to younger work; full flush resets the map to
+identity rather than a committed map. Directed commit/free/reuse/recovery tests
+must settle these contracts before another rename-area optimization.
+
+LSQ admission still advertises any-free-entry rather than enough credits for the
+whole dispatch group, and enabled memdep still queries the selected load while
+its result gates IQ selection. These are source findings, not newly observed
+firmware failures. More-than-depth branch progress, multi-alloc saturation,
+MemDepPredEn-on liveness, committed values across flush, and delayed wrong-path
+WB reuse need their own tests. Keep OoO hart/FP legality restrictions. In-order
+SMT2/stream8 or the corrected predictor-checkpoint leaf cannot close this backend.
+
 ## Pipeline (OoOEn=1)
 
 ```
@@ -128,6 +217,141 @@ cva6-build verify --target g6lc64_ooo
 - FSE depth plane: `architecture/speculative-execution/` (`DeepSpecEn`, STQ, PMU g3)
 - Slice MLP (U4): still off by default; mutually exclusive with U5
 
+## Combinational loops in the OoO path (objective compiler evidence)
+
+Both were reported as `UNOPTFLAT` "circular combinational logic" by the
+elaborator, so neither is a matter of interpretation.
+
+**1. Store-to-load forward into the address operand — FIXED.**
+```
+ld_qaddr -> g6lc_lsq CAM -> stl_fwd -> issue_op_a_o -> ld_qaddr
+```
+The load's CAM query address was built from `issue_op_a_o[0]`, which is itself
+overwritten by the forwarded data returned by that query. The forward carries a
+load *result*, not an address base, so the fix separates them: `op_a_agu` (register
+file plus writeback bypass) feeds address generation, and the forward is applied
+only to the issued operand.
+
+Two structural points were needed, because dependency analysis is **per
+`always_comb` block**, not per signal:
+- `g6lc_lsq` computes `older_store_pending_o`/`lsq_busy_o` in their own block, so
+  they no longer appear to depend on `ld_query_*`. Sharing a block with the STL
+  outputs closed a second path `ld_qaddr -> LSQ -> older_store_pending ->
+  mem_stall -> issue_valid -> ld_qaddr`. (The occupancy output has since been
+  renamed `store_pending_o` — it reports only ordering-relevant stores.)
+- `g6lc_ooo_dispatch` computes `op_a_agu`/`op_b_pre` in a block that does not read
+  `stl_*`, and applies the forward in a separate block.
+
+Result: the elaborator now reports one loop instead of two, and the dispatch suite
+is unchanged at 7/7.
+
+**2. Rename admission — FIXED.**
+```
+can_go -> i_rename.valid_i -> capacity/stall_c -> ren_stall -> can_go
+```
+Admission depended on its own result. Two things closed it, and the reported
+example path had to be read at each step rather than guessed:
+- Rename computed exhaustion inside the allocation loop, which is gated by
+  `enable_i` (= `can_go`). Capacity is now computed in its own block from
+  **ungated intent** and the registered free list: whether a group *fits* is a
+  property of the group, not of whether it is currently permitted to proceed.
+  State updates remain gated by `enable_i`, so behaviour is unchanged.
+- The instantiation also passed `valid_i = dispatch_valid_i & {NP{can_go}}`. That
+  gating was redundant, because `can_go` already arrives via `enable_i`, and it
+  re-closed the loop through the new capacity block. Rename now receives ungated
+  `dispatch_valid_i`.
+
+**Result: the elaborator reports no circular combinational logic (2 loops -> 0),
+with the dispatch suite unchanged at 7/7.** Note the same block-granularity
+lesson applied three times over: `older_store_pending_o`, `ld_full_o`/`st_full_o`
+and `op_a_agu` each had to be moved into their own `always_comb`, because a
+signal computed from registered state still inherits its *block's* dependencies.
+
+## Rename recovery: two defects reproduced and repaired
+
+`tb_g6lc_review_rename` drives `g6lc_rename` directly — it is package-free by
+design — and observes recovery only through its ports: `prs1_o` reveals the map,
+`rs1_ready_o` reveals the busy table, and which register an allocation picks
+reveals the free list. `review-rename-recovery-v2` records 4/4, with the basic
+allocation contract passing, its injected control firing, and both defects below
+captured as expected failures.
+
+**1. Renames older than the mispredicting branch are discarded.**
+`RENAME_OLDER_LOST got=1 want=32`. The checkpoint saves `map_q`/`free_q`/`busy_q`,
+i.e. state from *before* the group renamed. When the branch sits at port 1 and an
+older instruction at port 0 allocated a destination, restoring that checkpoint
+reverts port 0's mapping to the architectural register. Recovery must restore the
+state *after* the branch renamed, retaining the branch and everything older.
+
+**2. Restoring the busy table resurrects a completed producer — a deadlock.**
+`RENAME_BUSY_RESURRECT rdy=0 prs1=32`. A physical register whose writeback
+happened *after* the checkpoint is marked busy again by the restore. That
+writeback will never repeat, so any consumer of that register waits forever.
+By the same argument, restoring `free_q` discards commit-time frees that occurred
+after the checkpoint, leaking those physical registers permanently.
+
+**Repair.** Both follow from one principle: recovery must not reinstate a raw
+snapshot, because post-checkpoint writeback and commit effects are real progress.
+
+- *Capture point.* The checkpoint is now taken immediately after the **first
+  branch in the group has renamed**, rather than before the group. Pre-group
+  capture discarded older siblings' renames; post-group capture would wrongly
+  retain younger ones.
+- *Restore.* The map is restored, but free/busy are **repaired, not reinstated**.
+  The squashed set is `ckpt_free & ~free`: exactly those registers that were free
+  at the checkpoint and are no longer free, i.e. every allocation made after the
+  branch. Recovery returns only those (`free |= squashed`) and clears busy only
+  for those (`busy &= ~squashed`). Commit frees therefore stay freed and a busy
+  bit already cleared by a writeback stays cleared.
+- *Consequence.* The busy snapshot is no longer needed at all, so `ckpt_busy_q`
+  is deleted — `PRF_ENTRIES x CKPT_DEPTH` flops removed (576 at the production
+  PRF=72/CKPT=8 geometry). The repair is a net state **reduction**.
+
+`review-rename-recovery-fix-v1` passes 6/6 with all three injected controls
+firing, and the integrated dispatch suite stays 7/7 with still no combinational
+loops.
+
+**3. Resolving-branch identity — plumbed end-to-end.**
+`mispredict_i` carried no identity, so recovery always popped the *youngest*
+checkpoint. When an older branch resolves that restores state which still contains
+work younger than the resolver, and the intervening checkpoints leak.
+
+Rename takes `mispredict_level_i`, the checkpoint level to unwind to; any value
+at or above the current depth means "youngest". Restoring level `k` consumes
+checkpoint `k` and discards every younger one in one step, so nothing is left
+behind. The tag travels without any frontend/ex-stage interface change:
+`bp_resolve_t.trans_id` already identifies the resolving branch, `issue_stage`
+forwards it as `mispredict_id_i`, and `g6lc_ooo_dispatch` keeps a
+`tid_ckpt_q[trans_id]` table — written with the `ckpt_id_o` level rename emitted
+when that branch dispatched — so `mispredict_level_i = tid_ckpt_q[mispredict_id_i]`
+selects exactly the resolving branch's own checkpoint.
+
+**4. Per-branch checkpoints.** `do_ckpt` was a single bit, so a two-branch group
+checkpointed once — the younger branch's own recovery point was never captured.
+Checkpointing is now per-port: each branch in a group captures the map/free state
+immediately after *its own* rename and exposes its level on `ckpt_id_o[p]`;
+`ckpt_ptr` advances by the group's branch count. A group containing more branches
+than free levels stalls (`RENAME_CKPT_FULL`) — a branch must never dispatch
+without a checkpoint, since it could never be unwound.
+
+**5. Commit-free vs checkpoint-restore race (formal find).** `free_i` on a
+register whose `busy` bit was still set left it both free and busy when the free
+raced a restore — the reg landed in `free_d` before the squashed-set computation,
+was skipped by `busy_d &= ~squashed`, and kept its stale busy bit. A freed
+register is definitionally not awaiting a producer (its writeback landed before
+the overwriting instruction could commit), so `free_i` now clears `busy` as well
+as setting `free`. Found by the abc-bmc3 prove at frame 3
+(`RENAME_EXCLUSIVE free=1 busy=1`); the fix holds the invariant under all
+reachable input traces rather than relying on an environment assumption.
+
+Evidence: rename suite 14/14 including the two-branch tag check
+(`ckpt_id[0]=0, ckpt_id[1]=1`), level-0 unwind with checkpoint reuse, the
+capacity stall, and the exclusivity probe — every record paired with a live
+control. Dispatch suite 14/14 including scenario 9's older-branch unwind observed
+through the *issued* physical register: the squashed reg returns to the free list
+and is reissued to the next allocation (`DISPATCH_TAG_REUSE` control fires when
+the wrong level is selected). Rename prove PASSes 12 frames under abc bmc3.
+
 ## Remaining integration blockers and hardening
 
 1. Associative IQ / FU-class split queues when area allows  
@@ -187,106 +411,129 @@ issuing, and an ordering guard in which a load must not issue while an older
 store's address is unresolved. Injected `DISPATCH_ID` and `DISPATCH_LOAD_ORDER`
 controls both fail as required, so neither check is vacuous.
 
-**Weight of that evidence:** those records come from the fixture carrying the
-reliability caveat below, so they corroborate rather than establish the repair.
-The repair rests primarily on the mechanism, which is unambiguous in source, and
-on the independent evidence that nothing regressed: 54/54 component records and
-24/24 integration records against the frozen baselines.
+**Weight of that evidence:** these records hold at the supported optimisation
+level and their negative controls are live, so they do support the repair. They
+are corroborated independently by 54/54 component records and 24/24 integration
+records against the frozen baselines, and by the mechanism being unambiguous in
+source. See the note below on why `-O0` disagreement does **not** undermine them.
 
-> **Fixture-reliability caveat — read before using `tb_g6lc_review_dispatch`.**
-> This fixture does **not** currently distinguish RTL behaviour from toolchain
-> behaviour, so nothing below it should be promoted to an RTL conclusion on its
-> own. Rebuilding the identical RTL with the simulator's optimiser disabled
-> (`-O0`, `REVIEW_RTL_NOOPT=1`) makes even the basic ALU case fail with
-> `DISPATCH_ID` — `trans_id` does not reach issue at all — while the same source
-> at default optimisation propagates it correctly. A functional result that
-> depends on optimisation level indicates either a simulator defect or
-> ambiguous/racy stimulus in the fixture, and until that is resolved the
-> fixture's passes *and* its failures are provisional. The likely suspect is the
-> fixture itself: it drives `ds`/`dv`/`wb_*` with blocking assignments a fixed
-> `#2` before a hand-rolled `tick()`, which is fragile under `--timing`.
+> **`-O0` is not a usable reference in this environment — do not treat it as an
+> arbiter.** An attempt to use the simulator's optimiser-disabled build to tell
+> an RTL defect from a tooling artefact failed, because `-O0` changes results
+> even for the *simplest* fixture here: the isolated, directly-driven
+> `tb_g6lc_review_lsq` with a free-running clock passes its forwarding contract
+> at default optimisation and fails it at `-O0` (`LSQ_STL_FORWARD fwd=0`). A
+> reference that disagrees with itself on trivial stimulus cannot adjudicate
+> anything, so an earlier conclusion that the dispatch fixture "cannot separate
+> RTL from toolchain behaviour" is **withdrawn** — it rested on that invalid
+> reference. `REVIEW_RTL_NOOPT=1` is kept only to reproduce this observation.
 >
-> The isolated `tb_g6lc_review_lsq` fixture is **not** affected: it drives the
-> leaf directly with simple stimulus and its result is corroborated by its own
-> injected controls.
+> The operative evidence is therefore the default optimisation level, which is
+> the supported configuration. The fixtures were additionally rewritten to use a
+> free-running clock with defined drive/sample points (stimulus on the falling
+> edge, combinational handshakes sampled just before the rising edge, since the
+> rising edge itself consumes `issue_valid_o`). That rewrite left every
+> default-optimisation result unchanged, which is mild evidence the original
+> stimulus was not in fact racing.
+>
+> **The unifying explanation was first refuted, then partly vindicated.** The
+> OoO path did contain two genuine combinational loops, and when they were first
+> removed neither symptom changed — scenario 6 stayed red and `-O0` still failed
+> scenario 0 — so the loop hypothesis was recorded as refuted. The *later*
+> rename admission rework told the fuller story: ungating `valid_i` from
+> `can_go` removed a third circular settle (`can_go -> valid_i -> stall_c ->
+> ren_stall -> can_go` had already been broken on the capacity side, but
+> `valid_i & can_go` still fed the admission cone), and with it the
+> `alloc_id_i`→0 artefact — the phantom zero was a product of how the simulator
+> ordered that feedback cone, not of any wiring defect (as the slang proof had
+> already established). The `-O0` divergence on trivial fixtures remains a
+> separate, still-unexplained simulator issue.
+>
+> **Resolved — twice.** First by an independent elaborator:
+> `review-dispatch-tid-formal-v1` elaborates `g6lc_ooo_dispatch` under
+> slang/yosys with 0 errors and 0 warnings and *proves*
+> `alloc_ids[p] == dispatch_sbe_i[p].trans_id` (`SAT proof finished - no model
+> found: SUCCESS!`), establishing that the zero-valued `i_lsq.alloc_id_i` was a
+> **Verilator artefact, not an RTL defect**. Then the artefact itself
+> disappeared: ungating rename's `valid_i` from `can_go` (the loop repair above)
+> removed the circular comb settle whose scheduling produced the phantom zero,
+> and the dispatched `trans_id` now reaches `alloc_id_i` unimpaired — scenario 6
+> retires its store by genuine id match. Scenarios 6–8 are therefore **real
+> passes with live controls**, no longer artefact trackers.
 
-**Reproduced but NOT established as an RTL defect — id-matched LSQ updates.** Scenario 6 of
-the dispatch reproducer (`review-rtl-store-wb-v3`, recorded as a known-red
-expected failure) dispatches one store, waits for it to issue, then writes back
-that store's own `trans_id`. `older_store_pending_o` stays asserted:
-`DISPATCH_STORE_WB_RETIRE older_st=1`. The check is observed purely at the top
-level and its negative control is live, so it is not vacuous.
+**Store commit released the wrong entry — reproduced and repaired.** Because the
+independent proof above establishes that id matching is sound in RTL, the
+simulator's zero id had been masking a real defect that the isolated fixture can
+see. `g6lc_lsq` released a committed store by scanning for the *lowest valid
+index* while writeback had already released that store by id — so commit freed a
+**different, still-pending** store. `tb_g6lc_review_lsq` scenario 2 allocates
+stores 1 and 2, completes and commits store 1, and observed
+`LSQ_COMMIT_DOUBLE_FREE older=0` while store 2 was still pending and unresolved:
+an unresolved older store had become invisible to load ordering.
 
-Registered-state evidence from the same fixture: the allocated entry holds
-`id == 0` instead of the dispatched `trans_id`, and `addr_v`/`data_v` remain 0
-after the store issues. Every LSQ update that matches on id — writeback retire
-(`st_q[i].id == complete_id_i`), AGU address (`addr_id_i`) and store data
-(`st_data_id_i`) — therefore fails to find its entry. Consequences to assume
-until this is fixed: store-to-load forwarding can never fire, store addresses are
-never learned, and store entries are only ever released by the commit-time
-"free the oldest valid store" path or by cancellation.
+Release is now by `trans_id`, on **every** commit port rather than only port 0 (a
+store retiring on a higher port previously never released its entry at all). The
+operation is idempotent: if writeback already released the entry, nothing
+matches. `review-lsq-commitfix-v2` passes 6/6 with all three injected controls
+failing as required, and the dispatch suite is unchanged at 7/7.
 
-**Bisected: the LSQ itself is correct.** `tb_g6lc_review_lsq`
-(`review-lsq-direct-v2`, kind `lsq`) drives `g6lc_lsq` directly with an explicit
-`alloc_id_i`, bypassing dispatch entirely. Four records pass: allocating a store
-with id 1 and completing with id 1 **does** retire the entry, and an id-matched
-address followed by id-matched data **does** produce `stl_forward_o` with the
-right payload. Both injected controls (`LSQ_WB_RETIRE`, `LSQ_STL_DATA`) fail as
-required.
+**Simulator artefact — resolved.** The `alloc_id_i`→0 symptom is gone: ungating
+rename's `valid_i` from `can_go` (removing the admission comb settle) also
+removed the scheduling artefact that zeroed the id. Scenario 6 now retires its
+store by genuine id match, and scenarios 6–8 run as real passes with live
+controls. The isolated LSQ suite and the `iq-age` formal check remain as
+independent corroboration of the age gate.
 
-So the symptom is on the **integrated dispatch side**, not in the LSQ. Its cause
-is **not determined**, and — given the caveat above — it is not yet attributable
-to the RTL at all. A VCD of the elaborated netlist shows the completion arriving
-correctly (`complete_valid_i=01`, `complete_id_i=0001`, `complete_is_st_i=01`)
-while `i_lsq.alloc_id_i[0]` and `st_q[0].id` never leave zero, and the
-intermediate `alloc_ids` is optimised away entirely. Removing the duplicate
-computation of that id (feeding the LSQ from the same signal the ROB uses, which
-the VCD shows carrying the correct value) did **not** change the outcome, so the
-duplication was not the cause either; that edit was reverted.
+The record of failed diagnoses is kept so the dead ends are not retried:
 
-The record of failed diagnoses, kept so they are not retried:
-
-Hierarchical `$display` reads of the dispatch/LSQ/ROB signals in this fixture are
-**not dependable**. They first suggested the LSQ entry carried `id == 0` while a
-sibling `always_comb` read the same `trans_id` as 1, and then that the ROB latched
-the correct tid where the LSQ did not — which would have isolated the fault to the
-LSQ connection. That second reading **reversed** (ROB tid went from 1 to 0) purely
-because an unrelated extra reader of `rob_alloc_tid` was added, with no change to
-the ROB or its inputs. Values that move when an observer is added are artefacts of
-Verilator's optimisation, not evidence, so both diagnoses are withdrawn. The
-probes were removed rather than left in place to mislead.
+Hierarchical `$display` reads of the dispatch/LSQ/ROB signals in this fixture
+were **not dependable** under the artefact. They first suggested the LSQ entry
+carried `id == 0` while a sibling `always_comb` read the same `trans_id` as 1,
+and then that the ROB latched the correct tid where the LSQ did not — which would
+have isolated the fault to the LSQ connection. That second reading **reversed**
+(ROB tid went from 1 to 0) purely because an unrelated extra reader of
+`rob_alloc_tid` was added, with no change to the ROB or its inputs. Values that
+move when an observer is added are artefacts of Verilator's optimisation, not
+evidence, so both diagnoses are withdrawn. The probes were removed rather than
+left in place to mislead.
 
 Refuted hypotheses, kept so they are not retried: writeback and commit
-double-free an entry (writeback frees nothing, since nothing matches);
+double-free an entry (writeback frees nothing when no id matches);
 `st_alloc[p]` fires on a port whose `dispatch_valid_i` is low to create a
-spurious entry (`is_st[p]` is gated by `dispatch_valid_i[p]`, line 103); the id
-is computed twice and one copy is wrong (sharing a single signal changed
-nothing, and that edit was reverted).
+spurious entry (`is_st[p]` is gated by `dispatch_valid_i[p]`); the id is
+computed twice and one copy is wrong (sharing a single signal changed nothing,
+and that edit was reverted). The structural proof that `alloc_ids[p] ==
+dispatch_sbe_i[p].trans_id` (slang/yosys `dispatch-tid`, `SAT proof finished -
+no model found: SUCCESS!`) stood throughout and is now corroborated by the
+simulation itself.
 
-What stands on trustworthy evidence is only this: **the isolated LSQ satisfies
-both contracts.** The integrated symptom is a real observation but is **not**
-established as an RTL defect, per the caveat at the top of this section.
+**Store-age ordering — repaired.** The gate is now age-aware rather than
+any-store: age is the scoreboard's circular `trans_id` order anchored at
+`commit_pointer_q[0]` (in-order dispatch ⇒ SB slot order = program order), so a
+store is older than a load iff `(st_id - commit_ptr) < (ld_id - commit_ptr)`
+mod 2^TRANS_ID_BITS. `g6lc_lsq` exposes `st_live_mask_o` (live store tids) and
+applies the same age filter in its CAM — only the youngest matching *older*
+store forwards, and unresolved or data-less *older* stores stall; younger
+stores can neither forward nor block. `g6lc_iq` gates LOADs on
+`st_live_mask_i`+`commit_ptr_i`; `issue_stage` supplies the commit pointer.
+Evidence: isolated LSQ suite 12/12 (age-select, unresolved-older stall, cp=14
+wraparound, controls live); IQ gate formally proven (`issue ⟺ no older live
+store`); integrated dispatch 9/9. Commit also drains on all ports now, so the
+release point can move from writeback to commit without the younger-store
+deadlock — still a separate change.
 
-**Required next step before any further inference from this fixture:** settle its
-stimulus timing (clocking/driver discipline), or re-host the integrated check
-under an independent frontend, and confirm the optimisation level no longer
-changes the result. Only then re-read scenario 6.
-
-Also still required before wider memory speculation: `older_store_pending_o` is
-not age-aware, and commit only drains through port 0. Moving the release point to
-commit without a monotonic age would introduce a *new* deadlock — an older load
-blocked by a younger store that cannot commit until that load retires. Age,
-byte-coverage, load-result forwarding and the LSU store-buffer handoff must be
-settled together.
+Still required before wider memory speculation: byte-coverage, the load-result
+forwarding contract and the LSU store-buffer handoff must be settled together.
 
 **Source-derived risks requiring separate reproducers/design:**
 - Rename admission depends on `can_go`, while `can_go` depends on rename stall;
   exhaustion can form ready/enable feedback. Capacity must be computed from
   ungated intent, with state updates committed separately.
 - Multi-alloc LSQ full signals expose only zero free slots, not whole-group
-  capacity, and physical slot indices are treated as age despite freed-slot reuse.
-- STL data replaces load operand A, which also forms the AGU address; byte coverage,
-  youngest-older ordering and the no-forward stall path are not an integrated
+  capacity. (Age no longer uses slot indices: ordering is by circular
+  `trans_id` distance from the commit pointer.)
+- STL data no longer feeds the AGU address (the `ld_qaddr` loop is repaired);
+  byte coverage and the no-forward stall path still lack an integrated
   load-result forwarding contract.
 - Rename/PRF maps have no hart namespace; FP destinations avoid allocation but
   PRF/TID bookkeeping and bypass need bank/class auditing. Do not infer SMT/FP

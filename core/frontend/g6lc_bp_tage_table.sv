@@ -14,18 +14,19 @@ module g6lc_bp_tage_table
     parameter config_pkg::cva6_cfg_t CVA6Cfg = config_pkg::cva6_cfg_empty,
     parameter int unsigned NR_ENTRIES = 64,
     parameter int unsigned TAG_BITS   = 8,
-    parameter int unsigned IDX_BITS   = 6
+    parameter int unsigned IDX_BITS   = 6,
+    parameter int unsigned NR_LOOKUPS = 1
 ) (
     input  logic                   clk_i,
     input  logic                   rst_ni,
     input  logic                   flush_i,
-    // Lookup
-    input  logic [IDX_BITS-1:0]    index_i,
-    input  logic [TAG_BITS-1:0]    tag_i,
-    output logic                   hit_o,
-    output logic                   taken_o,
-    output logic [2:0]             ctr_o,
-    output logic                   useful_o,
+    // Lookup (one read port per fetch slot)
+    input  logic [NR_LOOKUPS-1:0][IDX_BITS-1:0] index_i,
+    input  logic [NR_LOOKUPS-1:0][TAG_BITS-1:0] tag_i,
+    output logic [NR_LOOKUPS-1:0]               hit_o,
+    output logic [NR_LOOKUPS-1:0]               taken_o,
+    output logic [NR_LOOKUPS-1:0][2:0]          ctr_o,
+    output logic [NR_LOOKUPS-1:0]               useful_o,
     // Update / allocate
     input  logic                   update_valid_i,
     input  logic [IDX_BITS-1:0]    update_index_i,
@@ -44,13 +45,16 @@ module g6lc_bp_tage_table
   } entry_t;
 
   entry_t [NR_ENTRIES-1:0] mem_d, mem_q;
-  entry_t rd;
 
-  assign rd      = mem_q[index_i];
-  assign hit_o   = rd.valid && (rd.tag == tag_i);
-  assign taken_o = rd.ctr[2];
-  assign ctr_o   = rd.ctr;
-  assign useful_o = rd.u;
+  // Flop array: each fetch slot gets an independent combinational read.
+  for (genvar l = 0; l < NR_LOOKUPS; l++) begin : gen_lookup
+    entry_t rd;
+    assign rd         = mem_q[index_i[l]];
+    assign hit_o[l]   = rd.valid && (rd.tag == tag_i[l]);
+    assign taken_o[l] = rd.ctr[2];
+    assign ctr_o[l]   = rd.ctr;
+    assign useful_o[l] = rd.u;
+  end
 
   always_comb begin
     mem_d = mem_q;

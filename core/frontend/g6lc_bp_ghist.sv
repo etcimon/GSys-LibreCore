@@ -29,12 +29,19 @@ module g6lc_bp_ghist
     // Checkpoint restore (overrides update in the same cycle)
     input  logic                         restore_valid_i,
     input  logic [GHIST_LEN-1:0]         restore_ghist_i,
+    // Fold-source GHR selected by the caller for the update path: the resolving
+    // branch's prediction-time snapshot (checkpoint head) when available, else
+    // the train hart's live bank.
+    input  logic [GHIST_LEN-1:0]         fold_src_i,
     // Live GHR
     output logic [GHIST_LEN-1:0]         ghist_o,
-    // Live GHR of the train/resolve hart (for ckpt push on resolve path)
+    // Live GHR of the train/resolve hart (ckpt fallback source)
     output logic [GHIST_LEN-1:0]         train_ghist_o,
     // Folded history per table geometry (XOR-fold of GHR into FOLD_W)
-    output logic [NR_FOLDS-1:0][FOLD_W-1:0] folded_o
+    output logic [NR_FOLDS-1:0][FOLD_W-1:0] folded_o,
+    // Folded view of fold_src_i: TAGE/ITTAGE update index/tag must hash the
+    // branch's prediction-time history snapshot, not a live bank.
+    output logic [NR_FOLDS-1:0][FOLD_W-1:0] folded_src_o
 );
 
   localparam int unsigned NH    = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
@@ -67,18 +74,23 @@ module g6lc_bp_ghist
   // Balanced-style fold: XOR every FOLD_W-wide slice of the GHR into one word.
   // Different folds rotate the GHR first so each table sees a distinct hash.
   for (genvar t = 0; t < NR_FOLDS; t++) begin : gen_fold
-    logic [GHIST_LEN-1:0] rot;
-    logic [FOLD_W-1:0] f;
+    logic [GHIST_LEN-1:0] rot, rot_src;
+    logic [FOLD_W-1:0] f, f_src;
     // Rotate left by t bits (mod GHIST_LEN). Tables are few (≤ 8).
-    assign rot = (t == 0) ? ghist_live
-                          : ((ghist_live << t) | (ghist_live >> (GHIST_LEN - t)));
+    assign rot     = (t == 0) ? ghist_live
+                              : ((ghist_live << t) | (ghist_live >> (GHIST_LEN - t)));
+    assign rot_src = (t == 0) ? fold_src_i
+                              : ((fold_src_i << t) | (fold_src_i >> (GHIST_LEN - t)));
     always_comb begin
-      f = '0;
+      f     = '0;
+      f_src = '0;
       for (int unsigned k = 0; k < GHIST_LEN; k++) begin
-        f[k%FOLD_W] = f[k%FOLD_W] ^ rot[k];
+        f[k%FOLD_W]     = f[k%FOLD_W]     ^ rot[k];
+        f_src[k%FOLD_W] = f_src[k%FOLD_W] ^ rot_src[k];
       end
     end
-    assign folded_o[t] = f;
+    assign folded_o[t]     = f;
+    assign folded_src_o[t] = f_src;
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin

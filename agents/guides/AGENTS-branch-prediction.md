@@ -52,6 +52,26 @@ outcomes, relative errors or confidence; consuming one as another is a semantic 
 new structure elaboration-gated so disabled/minimal configurations still compile. Preserve the
 legacy FPGA phase unless a separate memory-interface change is explicitly validated.
 
+### Continuation: overflow ownership correction
+
+Stored FIFO occupancy is not the number of unresolved branches once pushes have
+been dropped. Ordinary pop-to-empty must not clear desynchronization: a dropped
+branch can still resolve and consume a later snapshot. `g6lc_bp_ckpt` retains its
+existing desync bit until explicit restore/reset/flush. This supersedes the older
+“until the bank drains” wording below and in historical source comments.
+
+`review-ckpt-before-20260916` fails new cases 5/6 with
+`CKPT_DROPPED_OWNER`/`CKPT_EMPTY_POISON`. The after run passes seven positives and
+five expected-failure controls; default one-hart leaf synthesis has zero check
+problems/no latches. No state, port, pipeline, clock/reset or ISA/DTS addition.
+The clear condition changes a local control input, not the prediction datapath;
+no mapped timing/area/power claim follows. Tests remain leaf-scoped. A consumed
+CF is not automatically a future resolved CF across replay, kill and hart switch;
+full snapshot membership/phase and out-of-order resolution remain open. The
+integration comparator reassessment in `architecture/remaining-upgrade-sequence.md`
+also supersedes unconditional preservation claims based on collapsed/multiset
+traces. Architectural resolution is never filtered to accommodate a predictor.
+
 ### Broad-review counter repair and limits
 
 `g6lc_bp_tage` now uses a twelve-bit decay counter for the documented 4096 accepted
@@ -61,8 +81,64 @@ latent contract fix. Useful writes remain tied off by `t_weak=0`, and allocation
 does not consult usefulness; do not market the repair as an accuracy or physical
 state saving. The small mapped fixture has unchanged state (89 cells).
 
-Next accuracy work must resolve per-window/per-slot lookup-update association,
-fetch-hart vs resolve-hart history use, and prediction-time checkpoint ownership.
+The 2026-09-17 context-ownership pass resolved per-slot lookup-update
+association and fetch-hart vs resolve-hart history use:
+
+- `g6lc_bp_tage`/`g6lc_bp_ittage` hash each fetch slot's own PC
+  (`vpc_i + i*instr_size`) for base row/column and tagged index/tag, so an
+  unaligned RVC window no longer misattributes entries across slots, and a
+  tagged hit predicts only its own slot rather than broadcasting to the whole
+  window. The base-table row index previously overlapped the column bits and
+  non-RVC updates always wrote column 0.
+- `g6lc_bp_ghist` gained `folded_train_o`, the fold of the resolve/train
+  hart's bank; `g6lc_bp_tage`/`g6lc_bp_ittage` consume it through a new
+  `folded_update_i` port so update index/tag use the resolving branch's own
+  history instead of the live fetch fold. `g6lc_bp_tage_table` lookup ports
+  are per-slot arrays (`NR_LOOKUPS`).
+- Directed evidence: `review-tage-ctx-v2` 10/10 (opposing-branch window,
+  update-fold ownership, unaligned base and ITTAGE addressing, banked-GHR
+  fold split) with live negatives; decay suite re-verified 6/6 across all
+  three geometries.
+
+The 2026-09-17 prediction-checkpoint pass made `g6lc_bp_ckpt` a true
+prediction-time, branch-correlated snapshot FIFO:
+
+- Push moved from resolve to predict: `bp_push_cf[i]` counts every consumed
+  slot carrying a *decoded* CF (`is_branch|is_jump|is_jalr|is_return`, not the
+  predicted cf_type), so the push set equals the resolve set and the FIFO head
+  is always the resolving branch's own entry. `pop_i` is any CF resolve
+  (`cf_type != NoCF`); `restore_i` (mispredict) consumes the head and drops
+  every younger wrong-path push. Same-cycle full push+pop now advances the
+  head exactly once — the pop frees the slot the push takes.
+- The snapshot is `{live fetch-hart GHR, RAS stack}` at predict time. The TAGE/
+  ITTAGE update folds hash it via `fold_src`/`folded_src_o` (ckpt head when
+  valid, else the live train-hart bank — which is also the `BPCkptDepth==0`
+  fallback), so `t_uindex`/`t_utag` now match the context the prediction used
+  rather than the resolve-time fold. RAS restore receives the predict-time
+  stack, so wrong-path RAS pushes/pops are actually undone.
+- The arch-only GHR bank needs no restore — it only ever holds resolved
+  outcomes, so the actual outcome shifts in on every branch resolve including
+  mispredicts, and the old stale-head GHR write is gone.
+- Overflow is honest: a full bank refuses the push and raises `desync_o` until
+  it drains; restore is unqualified meanwhile and the fold falls back.
+- Residuals: all slots of one window share the window-start RAS snapshot (an
+  older same-window CF's own RAS op is absent from a younger sibling's entry —
+  bounded over-restore, self-heals), and a CF whose fetch-time decode missed
+  the `is_*` set but resolves non-NoCF (e.g. ZCMT) over-pops one entry until
+  the next drain.
+- Directed evidence: `review-ckpt-v2` 8/8 (conservation, full-window push+pop
+  single head advance, restore-drains-younger, overflow desync, ordering; live
+  negatives CKPT_MULTI/CKPT_DOUBLE_ADV/CKPT_DESYNC_RV).
+- Integration evidence: `review-int-ckpt-v3` 24/24 — smt2 13/13 cycle-identical
+  (BHT config, ckpt path inert), stream8 11/11 matched with
+  `timingLegibleDivergence` (rdcycle reads and spin-tail length shift under
+  better predictions; PC/encoding stream, `load`/`store`/`data_req` counts and
+  cookies identical). The integration comparator now splits a PC/encoding-only
+  `retirementArchPC` digest from value-bearing digests and splits report fields
+  into arch-binding vs timing-legible (`roi_cycles`, cache-miss counters), so
+  legal predictor-timing changes classify instead of fail — a real
+  instruction-stream divergence still fails `matchedBaseline`.
+
 Source presence of TAGE/loop/SC/ITTAGE does not qualify their combined semantics.
 Keep matched branch-pattern/alias controls and the protected SMT2 baseline.
 

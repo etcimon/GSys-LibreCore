@@ -53,6 +53,7 @@ module g6lc_server_prefetcher #(
     } stream_t;
 
     stream_t [NR_STREAMS-1:0] st_q, st_d;
+    logic signed [31:0] delta;
     logic [NR_STREAMS-1:0] hit_stream;
     logic train, issue;
     logic [AXI_ADDR_WIDTH-1:0] pf_addr, demand_line;
@@ -68,12 +69,12 @@ module g6lc_server_prefetcher #(
       issue = 1'b0;
       pf_addr = '0;
       hit_stream = '0;
+      delta = '0;
 
       if (demand_ar) begin
         // Find matching stream (same or strided)
         for (int unsigned s = 0; s < NR_STREAMS; s++) begin
           if (st_q[s].valid) begin
-            automatic logic signed [31:0] delta;
             delta = signed'(demand_line - st_q[s].addr);
             if (demand_line == st_q[s].addr + (st_q[s].stride)) begin
               hit_stream[s] = 1'b1;
@@ -124,23 +125,45 @@ module g6lc_server_prefetcher #(
     logic pf_pending_q, pf_pending_d;
     logic pf_ot_q, pf_ot_d;  // PF AR accepted, waiting for R last
     logic [AXI_ADDR_WIDTH-1:0] pf_addr_q, pf_addr_d;
+    // Upstream reads already owning the reserved id. While any is outstanding a
+    // prefetch response would be indistinguishable from the demand burst, so
+    // no prefetch may be injected and the absorb path must stay closed.
+    localparam logic [AXI_ID_WIDTH-1:0] PF_ID = '1;
+    logic [3:0] up_pfid_ot_q, up_pfid_ot_d;
+    logic pf_inject, pf_beat, up_pfid_alias;
+
+    assign up_pfid_alias = up_req_i.ar_valid && (up_req_i.ar.id == PF_ID);
+    assign pf_inject     = pf_pending_q && !up_req_i.ar_valid && !pf_ot_q &&
+                           (up_pfid_ot_q == '0);
+    assign pf_beat       = pf_ot_q && dn_resp_i.r_valid &&
+                           (dn_resp_i.r.id == PF_ID);
 
     always_comb begin
       pf_pending_d = pf_pending_q;
       pf_addr_d    = pf_addr_q;
       pf_ot_d      = pf_ot_q;
+      up_pfid_ot_d = up_pfid_ot_q;
       if (issue && !pf_ot_q) begin
         pf_pending_d = 1'b1;
         pf_addr_d    = pf_addr;
       end
       // PF AR accepted by downstream
-      if (pf_pending_q && !up_req_i.ar_valid && !pf_ot_q && dn_resp_i.ar_ready) begin
+      if (pf_inject && dn_resp_i.ar_ready) begin
         pf_pending_d = 1'b0;
         pf_ot_d      = 1'b1;
       end
-      // PF R completed (absorb last beat)
-      if (pf_ot_q && dn_resp_i.r_valid && dn_resp_i.r.last) begin
+      // PF R completed (absorb last beat) — only the reserved id retires it
+      if (pf_beat && dn_resp_i.r.last) begin
         pf_ot_d = 1'b0;
+      end
+      // Upstream reserved-id reads: accepted downstream, retired upstream
+      if (!pf_inject && dn_req_o.ar_valid && dn_resp_i.ar_ready &&
+          dn_req_o.ar.id == PF_ID) begin
+        up_pfid_ot_d = up_pfid_ot_q + 1'b1;
+      end
+      if (up_resp_o.r_valid && up_req_i.r_ready && up_resp_o.r.last &&
+          up_resp_o.r.id == PF_ID) begin
+        up_pfid_ot_d = up_pfid_ot_d - 1'b1;
       end
     end
 
@@ -149,10 +172,12 @@ module g6lc_server_prefetcher #(
         pf_pending_q <= 1'b0;
         pf_ot_q      <= 1'b0;
         pf_addr_q    <= '0;
+        up_pfid_ot_q <= '0;
       end else begin
         pf_pending_q <= pf_pending_d;
         pf_ot_q      <= pf_ot_d;
         pf_addr_q    <= pf_addr_d;
+        up_pfid_ot_q <= up_pfid_ot_d;
       end
     end
 
@@ -162,8 +187,9 @@ module g6lc_server_prefetcher #(
       dn_req_o  = up_req_i;
       up_resp_o = dn_resp_i;
 
-      // Block demand AR while PF in flight (avoid id/R collision)
-      if (pf_ot_q || (pf_pending_q && !up_req_i.ar_valid)) begin
+      // Block only the demand ARs that would alias the reserved id: any other
+      // id stays independently routable while a prefetch is outstanding.
+      if ((pf_ot_q || pf_inject) && up_pfid_alias) begin
         dn_req_o.ar_valid = 1'b0;
         up_resp_o.ar_ready = 1'b0;
       end
@@ -172,16 +198,16 @@ module g6lc_server_prefetcher #(
       // Demand always wins the AR channel, and only one prefetch may be in
       // flight: the PF response is absorbed here, so a second one would have
       // no reserved id to come back on.
-      if (pf_pending_q && !up_req_i.ar_valid && !pf_ot_q) begin
+      if (pf_inject) begin
         dn_req_o.ar_valid = 1'b1;
         dn_req_o.ar       = up_req_i.ar;  // inherit size/burst/cache defaults
         dn_req_o.ar.addr  = pf_addr_q;
-        dn_req_o.ar.id    = '1;           // reserved PF id (all-ones)
+        dn_req_o.ar.id    = PF_ID;        // reserved PF id (all-ones)
         dn_req_o.ar.len   = '0;           // single-beat probe
       end
 
       // Absorb PF R: do not present to upper; assert r_ready toward memory
-      if (pf_ot_q) begin
+      if (pf_beat) begin
         up_resp_o.r_valid = 1'b0;
         dn_req_o.r_ready  = 1'b1;
       end

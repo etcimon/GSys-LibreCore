@@ -82,7 +82,7 @@ module g6lc_cluster
   logic l3_hit_w, l3_miss_w, l3_bypass_w, l3_evict_v;
   logic [AXI_ADDR_WIDTH-1:0] l3_evict_a;
   logic pf_issue_w, pf_train_w;
-  logic evict_v;
+  logic evict_v, incl_evict_ready;
   logic [AXI_ADDR_WIDTH-1:0] evict_a;
 
   assign l2_miss_o  = l2_miss_w;
@@ -310,6 +310,11 @@ module g6lc_cluster
         .l2_bank_conflict_o (),
         .l2_evict_valid_o   (l2_evict_v),
         .l2_evict_addr_o    (l2_evict_a),
+        // Under L3En the L2's evict output is not the inclusive broadcast
+        // source (l3_evict_v is), so it always sees ready; without L3 the L2
+        // is the producer and must hold its victim until the inv engine takes
+        // it.
+        .l2_evict_ready_i   (CVA6Cfg.L3En ? 1'b1 : incl_evict_ready),
         .l2_back_inval_valid_i (l2_back_inval_v),
         .l2_back_inval_addr_i  (l2_back_inval_a),
         .l2_back_inval_ready_o (l2_back_inval_ready)
@@ -349,7 +354,8 @@ module g6lc_cluster
         .l3_miss_o        (l3_miss_w),
         .l3_bypass_o      (l3_bypass_w),
         .l3_evict_valid_o (l3_evict_v),
-        .l3_evict_addr_o  (l3_evict_a)
+        .l3_evict_addr_o  (l3_evict_a),
+        .l3_evict_ready_i (incl_evict_ready)
     );
   end else begin : gen_no_l3
     assign l3_mst_req  = l2_mst_req;
@@ -384,6 +390,7 @@ module g6lc_cluster
   );
 
   // Inclusive back-inval (parameter; default off)
+  logic incl_inv_busy;
   g6lc_l3_inclusive_inv #(
       .InclusiveEn   (INCLUSIVE_L3),
       .NR_CORES      (NC),
@@ -396,12 +403,22 @@ module g6lc_cluster
       .evict_addr_i (evict_a),
       .inv_ready_i  (inv_incl_ready),
       .inv_o        (inv_incl),
-      .inv_busy_o   ()
+      .inv_busy_o   (incl_inv_busy),
+      .evict_ready_o(incl_evict_ready)
   );
 
   // Silence unused
-  logic _unused_bypass, _unused_l2_bi_rdy;
+  // NOTE: incl_evict_ready is now honoured end-to-end on the selected producer
+  // (i_l3 under L3En, i_l2 otherwise): both engines hold their victim offer in
+  // S_TAG until the inclusive-inv leaf accepts it, so a victim arriving while
+  // a previous back-invalidation drains is no longer dropped.
+  // Remaining gap (documented in architecture/multi-core/README.md): under
+  // L3En the shared L2's OWN evictions are not an inv source at all — evict_v
+  // selects only l3_evict_v — so an L2 victim displacing an L1-held line does
+  // not broadcast an invalidation.
+  logic _unused_bypass, _unused_l2_bi_rdy, _unused_incl_busy;
   assign _unused_bypass = l3_bypass_w;
   assign _unused_l2_bi_rdy = l2_back_inval_ready;
+  assign _unused_incl_busy = incl_inv_busy;
 
 endmodule

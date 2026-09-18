@@ -342,15 +342,36 @@ module g6lc_icache
               state_d      = IDLE;
               force_all_ways_d = 1'b0;
 
-              // I4xj: do not assert dreq_o.ready in the READ hit branch. The
-              // I$ is a two-cycle machine (request in IDLE, hit/output in READ).
-              // Keeping ready=1 here made vaddr_d combinational and created an
-              // active-region convergence loop with the frontend branch-predictor
-              // same-window logic.
-              // if a request is being killed at this stage,
-              // we have to bail out and wait for the address translation to complete
-              if (dreq_i.kill_s1) begin
-                state_d = IDLE;
+              // W1: request/response overlap. A hit-response cycle may also
+              // accept the next request: `cl_index` already keys off `vaddr_d`,
+              // which carries the arriving address while `ready & req`, so the
+              // accepted request's array read is launched in this same cycle
+              // and its response returns one cycle later -- warm initiation
+              // interval 1 instead of 2. Measured supply (fetch_supply,
+              // locality-1024): 100% of take cycles carried a refused request
+              // with the IQ empty and ready, locked at the II=2 cadence.
+              //
+              // `ready` here is a function of `cl_hit`/state only: the tag/vld
+              // SRAM outputs and `cl_tag_d` (the areq_i translation of
+              // `vaddr_q`) are registered-state cones -- none combinationally
+              // depends on `vaddr_d`, `cl_index` or `dreq_i`. The I4xi/I4xj
+              // convergence loop required `vaddr_d`/`cl_index` to feed the
+              // tag-compare cone (`areq_o.fetch_vaddr`, way-pred index); those
+              // paths were already cut to `vaddr_q`/`cl_index_q`, so a
+              // hit-qualified `ready` cannot loop back into itself. Do NOT
+              // widen this to an unconditional `ready` (miss/deferred accept)
+              // or drive `cl_index` off anything that reads `dreq_o.ready`
+              // combinationally -- that is what recreates the feedback.
+              //
+              // Killed streams are not accepted: on kill_s1/kill_s2 the
+              // offered address belongs to a dying or redirected stream, so
+              // the requester re-offers in IDLE next cycle. Miss, flush,
+              // inval and translation-wait paths stay serialized as before.
+              if (~dreq_i.kill_s1 & ~dreq_i.kill_s2) begin
+                dreq_o.ready = 1'b1;
+                if (dreq_i.req) begin
+                  state_d = READ;
+                end
               end
             end
             // we have a miss / NC transaction

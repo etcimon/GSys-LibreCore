@@ -962,6 +962,21 @@ package config_pkg;
     assert (!(Cfg.OoOEn && Cfg.RobEntries == 0));
     assert (!(Cfg.OoOEn && Cfg.PrfEntries != 0 && Cfg.PrfEntries <= 32 + Cfg.RobEntries));
     assert (!(Cfg.OoOEn && Cfg.BPCkptDepth != 0 && Cfg.BPCkptDepth < Cfg.RobEntries));
+    // The OoO rename/PRF path has no notion of a hart or of a floating-point
+    // register class, and these are not conservative gaps but aliasing ones:
+    //  * core/ooo/** contains no hart signal at all. g6lc_rename keeps a single
+    //    32-entry architectural map indexed by rd[4:0], so with NrHarts > 1 the
+    //    two harts' architectural registers occupy the SAME map entries and
+    //    silently clobber each other.
+    //  * need_rd excludes FP destinations from renaming, so with FpPresent the FP
+    //    results are neither renamed nor tracked in the busy table, and an FP
+    //    consumer can read a stale value.
+    // Refuse the combination until per-hart namespaces and an FP register class
+    // exist. Note g6lc64_ooo_server currently sets OoOEn=1 with NrHarts=2 and
+    // RVF/RVD=1, so it trips this deliberately: the configuration was unsound
+    // and silently so. See architecture/out-of-order/README.md.
+    assert (!(Cfg.OoOEn && Cfg.NrHarts > 1));
+    assert (!(Cfg.OoOEn && Cfg.FpPresent));
     // FSE deep speculation (DeepSpecEn=0 keeps legacy STQ depth / package depths).
     assert (!(Cfg.DeepSpecEn && !Cfg.SpeculativeSb));
     assert (!(Cfg.DeepSpecEn && Cfg.BPCkptDepth != 0 &&

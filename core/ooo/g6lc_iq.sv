@@ -38,7 +38,12 @@ module g6lc_iq
     output logic [CVA6Cfg.NrIssuePorts-1:0][PRF_W-1:0]   issue_prd_o,
     output logic [CVA6Cfg.NrIssuePorts-1:0]               issue_valid_o,
     input  logic [CVA6Cfg.NrIssuePorts-1:0]               issue_ack_i,
-    input  logic                                         mem_stall_i
+    input  logic                                         mem_stall_i,
+    // Store age gate: live store trans_ids (one bit per scoreboard slot) and
+    // the commit pointer anchoring the circular age order. A load waits only
+    // for stores OLDER than itself; younger stores can never alias it.
+    input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              st_live_mask_i,
+    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0]              commit_ptr_i
 );
 
   localparam int unsigned DW = (DEPTH <= 1) ? 1 : $clog2(DEPTH + 1);
@@ -94,13 +99,24 @@ module g6lc_iq
     for (int unsigned e = 0; e < DEPTH; e++) begin
       automatic logic ready;
       automatic logic is_ld;
+      automatic logic older_st;
       ready  = q_chain[e].valid && q_chain[e].rs1_rdy && q_chain[e].rs2_rdy;
-      // mem_stall_i (older_st | md_stall) gates LOADs only. A STORE allocates its
-      // LSQ entry at dispatch and older_st is derived from that entry, so gating
-      // STORE here would block the issue -> AGU -> WB path that is the only way to
-      // resolve and free it: the first store would deadlock permanently.
+      // mem_stall_i (memdep) gates LOADs only. A STORE allocates its LSQ entry
+      // at dispatch and the live-store mask is derived from that entry, so
+      // gating STORE here would block the issue -> AGU -> WB path that is the
+      // only way to resolve and free it: the first store would deadlock
+      // permanently.
       is_ld  = (q_chain[e].sbe.fu == LOAD);
-      if (ready && !(is_ld && mem_stall_i) && grants < CVA6Cfg.NrIssuePorts) begin
+      // Age-aware store gate: only a store OLDER than this load (closer to the
+      // commit pointer in the circular trans_id window) may block it. A load
+      // whose pending stores are all younger issues freely.
+      older_st = 1'b0;
+      for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
+        if (st_live_mask_i[s] &&
+            (CVA6Cfg.TRANS_ID_BITS'(s) - commit_ptr_i) <
+            (q_chain[e].sbe.trans_id - commit_ptr_i))
+          older_st = 1'b1;
+      if (ready && !(is_ld && (mem_stall_i || older_st)) && grants < CVA6Cfg.NrIssuePorts) begin
         issue_valid_o[grants] = 1'b1;
         issue_sbe_o[grants]   = q_chain[e].sbe;
         issue_orig_o[grants]  = q_chain[e].orig;

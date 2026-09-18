@@ -12,6 +12,106 @@ is the queue, not the design.
 | Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
+## Active P0–P2 continuation: contract re-evaluation
+
+The continuation reassessment in `architecture/remaining-upgrade-sequence.md`
+supersedes conflicting closure labels below. The requested coding philosophy,
+SMT2/OpenSBI workflow, development logics/heuristics and runtime-learning guide
+have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
+
+- [x] Fault-test the integration comparator: unordered multisets and duplicate
+  collapse can hide ordering/conservation errors. The preservation predicate
+  now fails closed; overlap-v8's architectural-preservation claim is withdrawn,
+  not its raw run artifacts. `review-overlap-reassessment-v2` reclassifies all
+  24 saved records as requiring independent validation, not as RTL failures.
+- [x] Predictor overflow lifetime: stored FIFO drain no longer clears desync.
+  Old RTL fails the two new cases; `review-ckpt-after-20260916` passes seven
+  positives/five expected failures, and leaf synthesis is check/latch clean.
+  End-to-end branch identity, replay/kill and bank-flush interactions stay open.
+- [x] P2 bounded counter/install increment: concurrent HUM memory, MLP and exact
+  collision tests; `review-l2-hum-clean-v1` passes 22 records and small RR0/RR1
+  synth checks without latches/check problems. Old-assignment mutations reproduce
+  three failures. Declaration/probe/merge-feedback warnings repaired; width/SRAM
+  model warnings remain. RR write ownership is fixed, its port schedule is open.
+- [x] P2 read-response ownership: five before-cases reproduce same-ID hit/bypass/
+  waiter overtaking, nonadjacent A/B/A merge reordering and held-AR replacement.
+  Repaired using existing MSHR primary/waiter IDs plus one AR-hold bit;
+  `review-l2-read-order-after-v1` passes 38 records with different-ID hit-under-miss
+  and same-ID MLP still live.
+- [x] P2 write/ATOP response lifetime: the captured write now survives until B and
+  every required RLAST handshake, ID-qualified and excluding fill beats. Three
+  old-RTL failures reproduced; `review-l2-atop-after-v1` passes 54 records plus
+  RR0/RR1 synthesis. Transport only — no atomic arithmetic or coherence claim.
+- [x] P2 cache-stack simulation: `CHAIN_L3=1` runs L2 into a two-MSHR L3 across a
+  vendor `axi_cut`; `review-l2-stack-chain-v4` passes 34 records and
+  `review-l2-stack-direct-v2` re-passes 54 with synthesis. Direct abutment still
+  fails the UNOPTFLAT gate (not waived); the lowered graph has zero SCCs.
+- [x] P2 server-prefetch ownership: latch, non-ID-qualified absorb/retire, blanket
+  demand blocking and reserved-ID collision reproduced then repaired;
+  `review-pf-after-v2` passes 8 records with zero-SCC fixture synthesis.
+- [x] P2 sequential leaf regression restored: the bench required fill ARs to carry
+  the requester's id, which the reserved-fill-id engine no longer does. Oracle
+  corrected (reserved id for cacheable unlocked fills, requester id for bypass) and
+  leaf-unit ties added. Passes RR0 4-way/latency-8 and RR1 2-way/stalls, including
+  bypass backpressure, three ATOP schedules, AMO/LR-SC, fill errors, masked
+  invalidation and replacement hole; MSHR/data unit suite passes.
+- [x] P2 invalidation source ownership: an external snoop discarded a same-cycle
+  write self-invalidation, leaving a stale line that a later read hit without
+  refilling (`review-l2-inval-before-v1`). A displaced self-invalidation is now
+  deferred and retired when the shared match port frees, with request acceptance
+  gated meanwhile; external ordering unchanged. `review-l2-inval-after-v2` 58
+  records + synthesis, `review-l2-stack-chain-v6` 38 records, sequential leaf green.
+- [x] P2 replacement-metadata port scheduling: one port served both the victim-pointer
+  read and the install update, and the update won, so the accepted request's lookup
+  used another set's pointer. The read now takes the port and a displaced update is
+  held. Reaching the collision needed a phase sweep (a saturated MSHR parks the front
+  end, so a continuous stream never collides); the test fails as inconclusive if no
+  collision occurs. `review-l2-rr-fault-v3` `collide=1 lost=1`,
+  `review-l2-rr-after-v3` `collide=1 lost=0`, `review-l2-rr-regate-v3` 60 records with
+  RR0/RR1 synthesis, sequential RR1 policy oracle passes. No policy-benefit claim.
+- [ ] Remaining P2: zero-cut abutment, prefetch accuracy/bandwidth, reserved-ID width
+  decision, directory/multi-master coherence and inclusive L3 behavior.
+- [x] P0 rename-checkpoint retirement: the pool released only on mispredict/flush,
+  so dispatch stalled permanently after `CKPT_DEPTH` correct branches. Now a
+  program-order ring retired at commit, levels as ring slots, retirement bounded by
+  live count; dispatch derives strobes from commit and clears reused/resolved tags.
+  `review-rename-ckpt-release-v1` 18 records, `review-rename-ckpt-fault-v1`
+  reproduces the defect with retirement disabled, `review-dispatch-ckpt-release-v1`
+  14 records. Leaf/fixture scope; hart/FP legality gates stay.
+- [x] P0 LSQ group credits: admission asked only whether any entry was free while
+  dispatch is all-or-nothing, so a surplus allocation was silently discarded and the
+  op stayed live in ROB/IQ. LSQ now exports free counts and dispatch compares them
+  against the group size. `review-lsq-credit-dispatch-v2` 16 records,
+  `review-lsq-credit-lsq-v1` 24, `review-lsq-credit-fault-v2` reproduces the defect.
+- [x] P0 enabled memdep: `MemDepPredEn=1` had never elaborated and closes a real
+  combinational cycle (`md_stall` → IQ select → `issue_sbe_o` → memdep). The stall
+  was also wrongly conservative (global store-pending blocked loads with only
+  younger stores). The IQ age gate is the safety property, so `mem_stall_i` is tied
+  off and the predictor trains/reports only. `review-memdep-before-v2` reproduces the
+  loop, `review-memdep-after-v1` elaborates loop-free with 16 records. A relaxing
+  predictor with a dispatch-time query and alias proof remains unbuilt.
+- [x] P0 OoO latch inferences repaired in rename/LSQ/ROB/dispatch: block-locals are
+  now declared and defaulted at `always_comb` scope. `review-ooo-latch-v2` builds
+  with `-Werror-LATCH -Werror-UNOPTFLAT` (16 records); rename/LSQ/dispatch re-pass
+  18/24/16. Elaborator cleanliness only, not mapped synthesis.
+- [ ] Reopen P0 committed-map/free/reuse recovery. Source-backed review finding, not
+  a freshly reproduced full-core failure.
+- [x] Recover supply-cap-v3 log without rerunning it: `review-supply-recovery-v1`
+  has the PASS-cookie tail and final summaries, but model/input manifests are
+  absent and rows omit explicit owner identity. This is diagnostic only.
+- [ ] Independently validate warm-fetch overlap and compare fixed useful work.
+  Bind model/ELF/runtime and ownership; do not transplant old analyses to new traces.
+- [ ] Full source-bound platform verification and natural SMT2/OpenSBI remain
+  gates, separate from in-order integer diagnostics and OoO-disabled regressions.
+  The current `verify --lint --sim --synth --dry-run` still selects local tool
+  routes and reports eight SKIPs, not qualification; remote-only routing must
+  be reconciled before executing that full gate.
+- [ ] Physical P2: tag/IQ/checkpoint lifetime and port studies, followed by
+  approved macro/library/corner/clock/activity-based STA/area/power/DFT. Inputs
+  remain missing; generic cell counts do not discharge this item.
+- [ ] Preserve the documented OoO hart/FP legality restrictions and track the
+  missing namespaces and simulator `-O0` divergence explicitly.
+
 ## Balanced core performance foundation (2026-09-14)
 
 Priors: `architecture/router-core-upgrade-program.md`, `architecture/l2-l3-cache/README.md`,
@@ -167,23 +267,131 @@ package promotion is recorded in `review-l2-size-integrations-20260916` and
   issue→AGU→WB resolution. Six live-path records pass (ALU, store, two stores,
   load-ordering guard) with two injected controls failing. Load conservatism is
   deliberately unchanged.
-- [ ] **Make the dispatch fixture trustworthy first — it currently blocks the OoO
-  items below.** Identical RTL rebuilt with the simulator optimiser disabled
-  (`REVIEW_RTL_NOOPT=1`) fails even the basic ALU case with `DISPATCH_ID`, so
-  `tb_g6lc_review_dispatch` cannot separate RTL from toolchain behaviour and all
-  of its results are provisional. Suspect the fixture's own stimulus timing
-  (blocking assignments a fixed `#2` before a hand-rolled `tick()`, fragile under
-  `--timing`). Isolated `tb_g6lc_review_lsq` is unaffected: 4/4 with live controls.
-- [ ] Store writeback does not retire its LSQ entry — an **observation**, not an
-  established RTL defect, pending the item above. Known-red as
-  `DISPATCH_STORE_WB_RETIRE`. VCD shows completion arriving correctly while
-  `alloc_id_i`/`st_q[].id` never leave zero and `alloc_ids` is optimised away.
-  Refuted: writeback/commit double-free; spurious allocation on a port with
-  `dispatch_valid_i` low; duplicated id computation (sharing one signal changed
-  nothing; that edit was reverted).
-- [ ] LSQ store age/lifetime: `older_store_pending_o` is not age-aware and commit
-  drains only through port 0. Needs a monotonic sequence number before the release
-  point moves to commit, or an older load deadlocks behind a younger store.
+- [x] Rewrote both core review fixtures onto a free-running clock with defined
+  drive/sample points (stimulus at the falling edge; combinational handshakes
+  sampled just before the rising edge, since that edge consumes `issue_valid_o`).
+  Every default-optimisation result is unchanged, so the earlier stimulus was not
+  in fact racing.
+- [x] Abandoned `-O0` as an RTL-vs-tooling arbiter: it flips even the isolated,
+  directly-driven LSQ forwarding contract (`LSQ_STL_FORWARD fwd=0`), so it cannot
+  adjudicate anything here. The earlier conclusion that the dispatch fixture is
+  untrustworthy rested on that invalid reference and is withdrawn.
+  `REVIEW_RTL_NOOPT=1` is retained only to reproduce the observation.
+- [x] Settled the dispatch allocation-id question with an independent elaborator:
+  slang/yosys proves `alloc_ids[p] == dispatch_sbe_i[p].trans_id` with 0 errors
+  and 0 warnings, so the zero `alloc_id_i` in simulation is a **Verilator
+  artefact, not an RTL defect**. `DISPATCH_STORE_WB_RETIRE` stays expected-fail
+  to track the artefact and must not be read as an RTL result.
+- [x] **Repaired a real LSQ defect the artefact had masked:** commit released the
+  lowest-valid-index store while writeback had already released that store by id,
+  so commit freed a different, still-pending store and an unresolved older store
+  went invisible to load ordering. Release is now by `trans_id` across all commit
+  ports (previously only port 0, so higher-port stores leaked their entry).
+  6/6 isolated records, three live controls, dispatch unchanged at 7/7.
+- [x] **Found and fixed a real combinational loop:** `ld_qaddr -> LSQ CAM ->
+  stl_fwd -> issue_op_a_o -> ld_qaddr`. The load CAM query address came from the
+  operand that the query's own forward overwrites. Address generation now uses a
+  pre-forward `op_a_agu`; the forward applies only to the issued operand. Needed
+  splitting `always_comb` blocks in `g6lc_lsq` and `g6lc_ooo_dispatch` because
+  dependency analysis is per block. Loop count 2 -> 1, dispatch unchanged 7/7.
+- [x] **Fixed the rename admission loop** `can_go -> i_rename.valid_i -> stall_c
+  -> ren_stall -> can_go`: capacity now computed in its own block from ungated
+  intent plus the registered free list (state updates still gated by `enable_i`),
+  and the redundant `& {NP{can_go}}` on `valid_i` dropped. **Elaborator reports
+  2 combinational loops -> 0**; dispatch suite unchanged 7/7.
+- [x] Hypothesis that the loops explained the simulator oddities: **partially
+  vindicated after all.** With the first two loops removed neither symptom
+  changed, but ungating `valid_i` from `can_go` in the admission rework removed
+  the last circular settle — and with it the `alloc_id_i`→0 artefact. Scenario 6
+  now retires by genuine id match; dispatch 6/7/8 are real passes.
+- [x] `alloc_id_i`→0 artefact: **gone** (see above). The slang/yosys proof of
+  `alloc_ids == trans_id` stood throughout and is now corroborated by
+  simulation. Still open, simulator-side only: `-O0` divergence on trivial
+  fixtures.
+- [x] **Rename recovery: two defects reproduced then repaired.**
+  (a) `RENAME_OLDER_LOST` — pre-group checkpoint discarded a rename *older* than a
+  same-group branch. Capture now happens after the first branch in the group
+  renames. (b) `RENAME_BUSY_RESURRECT` — reinstating the busy snapshot re-marked a
+  register whose writeback had already happened (never repeats, so its consumer
+  waited forever); reinstating the free snapshot likewise leaked registers freed
+  after the checkpoint. Restore now **repairs** instead: squashed set
+  `ckpt_free & ~free` is exactly the post-branch allocations, so only those are
+  returned and only those have busy cleared. `ckpt_busy_q` deleted as a result —
+  net **state reduction** of PRF_ENTRIES x CKPT_DEPTH flops (576 at PRF=72/CKPT=8).
+  `review-rename-recovery-fix-v1` 6/6 with three live controls; dispatch 7/7;
+  still zero combinational loops.
+- [x] Rename recovery, resolving-branch identity: added `mispredict_level_i` so
+  recovery unwinds to the branch that actually resolved, consuming that checkpoint
+  and discarding all younger ones in one step. Out-of-range means "youngest", so
+  tying it high (what dispatch does today) reproduces the previous behaviour
+  exactly. Scenario 3 shows correct unwind at level 0 and its control reproduces
+  the old defect (`RENAME_STALE_LEVEL`). 8/8 rename records, four live controls,
+  dispatch 7/7, zero loops.
+- [x] **Retirement width repaired (was reachable).** `num_commit` special-cased
+  `NrCommitPorts==2` and otherwise counted only port 0, while the commit loop
+  clears `issued` on every acknowledged port — so a four-port build retired up to
+  four entries per cycle but advanced the commit pointer by at most one,
+  desynchronising the scoreboard FIFO. `g6lc64_ooo_server` sets `NrCommitPorts=4`,
+  so this was live. Now a width-generic popcount; the port-1-only validity
+  assertion is generalised to all ports. Non-regression: 24/24 frozen
+  SMT2/stream8 records with `core/scoreboard.sv` overlaid.
+- [x] Directed four-port retirement/TID-conservation test landed:
+  `review-commit4` kind, 3/3 records (ordering + payload markers, pointer
+  wraparound with live wrapped entries, live negative control). Two Verilator
+  5.008 workarounds documented in the runner.
+- [x] **Hub accepted-write invalidation loss repaired.** The invalidation was
+  generated combinationally from `aw_fire` and dropped when the bus was not ready,
+  so writes completed with no invalidation (`HUB_INV_LOSS`). A registered
+  retention slot now holds the obligation until the bus takes it; admission
+  consults only registered occupancy plus the incoming `aw.cache[1]`, never
+  `inv_ready`/`aw_fire`, so the loop that made the earlier attempt unsafe is
+  avoided. One slot suffices because admission is refused while occupied.
+  15/15 hub records, negative control live, scenario 5 passes.
+- [x] Landed the `check_cfg` legality asserts rejecting `OoOEn=1` with
+  `NrHarts>1` or `FpPresent`. These are `translate_off` sim-time asserts, so lint
+  and synthesis are unaffected and the protected `OoOEn=0` packages pass: 24/24
+  frozen SMT2/stream8 records with `core/include/config_pkg.sv` **and**
+  `core/scoreboard.sv` overlaid. `g6lc64_ooo_server` trips them deliberately.
+- [x] Coherence producer side repaired: `g6lc_l3_inclusive_inv` gained
+  `evict_ready_o` (`!pend_q`, tied high when disabled), `g6lc_l2_top`/
+  `g6lc_l3_top` propagate `l2_evict_ready_i` (the S_TAG offer re-pulses every
+  stalled cycle, so gating the commit transition converts it into a held
+  handshake), and `g6lc_cluster` wires it to the active producer. 18/18 incl
+  records, HUM hold scenario, 24/24 integration.
+- [x] **OoO + SMT2 + FP aliasing gated:** `check_cfg` rejects `OoOEn=1` with
+  `NrHarts>1` or `FpPresent` (translate-off, sim-time). Per-hart map/free/busy
+  namespaces and an FP register class remain open as a redesign.
+- [x] Rename recovery remainder — **done**: per-port checkpoints
+  (`do_ckpt[p]`/`ckpt_slot_c[p]`/`ckpt_id_o[p]`, capture after each branch's own
+  rename, ptr advances by group branch count, over-capacity groups stall), and
+  the tag path closed via a dispatch-side `tid_ckpt_q[trans_id]` table —
+  `bp_resolve_t.trans_id` already identifies the resolver, `issue_stage` feeds
+  `mispredict_id_i`, dispatch drives `mispredict_level_i`. Older-branch unwind
+  verified through the issued physical register (scenario 9 + control). Also
+  fixed a formal-found race: `free_i` now clears `busy` too (a freed reg is
+  never awaiting a producer), closing a `free&busy` exclusivity violation when
+  a commit free raced a restore (abc-bmc3 frame-3 cex). Evidence: rename 14/14,
+  dispatch 14/14, rename prove PASS (12 frames).
+- [ ] Lesson worth keeping: a signal computed only from registered state still
+  inherits its **`always_comb` block's** dependencies. Three separate loop paths
+  here were closed only by moving `older_store_pending_o`, `ld_full_o`/`st_full_o`
+  and `op_a_agu` into their own blocks.
+- [x] LSQ store age — **repaired**: `older_store_pending_o` (renamed
+  `store_pending_o`) reported any in-flight store, so a load could block behind
+  a younger one. Age is now the scoreboard's circular `trans_id` order anchored
+  at `commit_pointer_q[0]` — `g6lc_lsq` gained `commit_ptr_i`+`st_live_mask_o`
+  and its CAM forwards the youngest matching *older* store and stalls only on
+  unresolved/data-less *older* stores; `g6lc_iq` gates loads on
+  `st_live_mask_i`+`commit_ptr_i`; `issue_stage` supplies the pointer.
+  Evidence: isolated LSQ suite 12/12 (age/stall/wraparound, controls live) + IQ
+  gate formally proven under slang/yosys (`iq-age`: `issue ⟺ no older live
+  store`) + integrated dispatch 14/14 as real evidence — the `alloc_id_i`→0
+  artefact disappeared with the admission-loop rework, so scenarios 6/7/8 are
+  no longer artefact-pinned.
+- [x] LSQ store lifetime precondition now met: with age-aware ordering and
+  all-port commit draining, moving the release point from writeback to commit
+  no longer risks the older-load/younger-store deadlock. The move itself
+  remains a separate change.
 - [x] Land same-line L2 hit-under-miss: merged readers are accepted during a fill
   and drained with their own id/beats; waiter payload stores the in-line offset
   only (+170 flops at depth 2 vs +634 for a full address). Leaf 8 shared-line
@@ -192,12 +400,58 @@ package promotion is recorded in `review-l2-size-integrations-20260916` and
 - [ ] Real nonblocking L2/L3: still one outstanding fill (8 distinct-line misses
   remain 176 cycles / 8 fills, no MLP). Needs concurrent fills with response
   routing/reordering, waiter error propagation and write interleaving.
-- [ ] Reproduce and close rename admission feedback, branch-correlated recovery,
-  committed-map preservation, hart/FP ownership and wide-commit counting contracts.
-- [ ] Reconcile predictor per-slot PC / fetch-vs-resolve history / checkpoint
-  ownership before policy growth; retain precise source-vs-measurement distinctions.
-- [ ] Close cacheable refill-error handling, eviction retention and hub write
-  visibility before real nonblocking/inclusive traffic scaling.
+- [x] Rename admission feedback, branch-correlated recovery, committed-map
+  preservation, and wide-commit counting contracts — all reproduced and closed
+  (entries above). Hart/FP ownership is gated by the `check_cfg` legality
+  assert pending the namespace redesign.
+- [x] Predictor per-slot PC ownership (per-slot base row/column + tagged
+  provider for TAGE and ITTAGE) and fetch-vs-resolve fold ownership
+  (`folded_update_i`) — `review-tage-ctx-v2` 10/10 with live negatives, decay
+  6/6 non-regression.
+- [x] Prediction-time checkpoints — `g6lc_bp_ckpt` reworked to predict-time
+  per-CF-slot pushes (`bp_push_cf`), per-resolve pops, restore-drains-younger,
+  full push+pop single-advance conservation, and `desync_o` overflow gating.
+  Update folds now hash the popped prediction-time snapshot (`fold_src`),
+  closing the recency gap; arch-GHR shifts the actual outcome on every resolve
+  (no stale-head restore); RAS restore gets the branch's own predict-time
+  stack. `review-ckpt-v2` 8/8 with live negatives, `review-int-ckpt-v3`
+  integration 24/24 (smt2 13/13 cycle-identical; stream8 matched with
+  timing-legible rdcycle/report deltas — comparator now splits a
+  PC/encoding-only arch digest and arch-binding vs timing-legible report
+  fields). Residuals documented: window-granular RAS snapshot; non-`is_*`
+  CF (ZCMT) over-pop until next drain.
+- [x] STQ/cancellation reconciliation — the OoO LSQ no longer injects store
+  data into `operand_a` (it destroyed `vaddr = imm + operand_a`); the LSU
+  store_buffer owns the byte-exact forward (full PA + BE, spec+commit
+  queues). LSQ is ordering-only: `stl_stall` on older unresolved-address or
+  byte-overlap-without-data stores, real footprints via
+  `extract_transfer_size(sbe.op)` both directions (new `ld_query_size_i`),
+  `agu_size` hardcode removed. `stl_forward`/`stl_data` kept as
+  fully-covered observability for the PMU probe. `fwd_keep`/G1ao are
+  SuperscalarEn&&NrHarts>1-gated, unreachable under OoOEn.
+  `review-lsq-be-v2` 24/24 (byte-overlap, cancel, flush; live negatives),
+  dispatch 14/14.
+- [x] Cacheable refill errors — `g6lc_l2_top` gains `fill_err_q`: accumulated
+  over the whole refill, it gates `tag_write`/data install at `S_MISS_INSTALL`
+  and serves the saved code to the requester (and waiters it drains) at
+  `S_HIT_RESP`; `bank_conflict` can't deadlock (b_req gated). `l2-leaf` phase
+  `fill_error_no_install` verifies SLVERR+DECERR → no install + retry, in
+  4w/rr1 and 2w/rr0+stall geometries. Residual: single-master bench, waiter-
+  on-errored-fill drain proven by construction only. (Eviction retention and
+  hub write visibility were already closed earlier.)
+- [~] P1 warm fetch — `+fetch_supply` measured supply binding (supply-cap-v2:
+  19791/19791 take cycles refused, all `iqrdy=1`, 19788 `iquse=0`; accept gap
+  locked at II=2; `iq_stall=7`/`empty=13`/`be_stall=5`). Implemented `W1`
+  registered overlap in `g6lc_icache`: READ hit-response asserts `dreq_o.ready`
+  and stays in READ on `dreq_i.req` (array read launches same cycle via
+  `vaddr_d`→`cl_index` → II=1, hit latency unchanged). `ready` is a
+  `cl_hit`/state cone — all registered inputs; no combinational ready feedback
+  (Verilator clean, no convergence warning). Miss/flush/inv/kill/atrans-wait
+  stay serialized. **Integration qualified** `review-int-overlap-v8` 24/24
+  (all timing-legible: archpc sequence on ordered streams, archms multiset on
+  merged-hart dasm, per-hart `h`-split operand digest, cookie-value binding).
+  supply-cap-v3 re-measurement in flight (early rows: sustained
+  `req&rdy&rsp&take`, `iquse`≈9–10 vs ~4 ceiling).
 
 Reviewed paths, measurements and artifact tags: `architecture/remaining-upgrade-sequence.md`.
 Full OoO production wording is superseded by explicit qualification blockers.

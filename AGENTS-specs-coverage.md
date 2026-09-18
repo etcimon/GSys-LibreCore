@@ -15,6 +15,34 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ---
 
+## P0–P2 continuation status
+
+**Partial; no architectural coverage promotion.** The source maps now record a
+leaf-tested prediction-checkpoint desync lifetime repair. Full predictor membership,
+OoO checkpoint/committed-state recovery, LSQ capacity, nonblocking-cache ordering
+and coherence remain open. Reproduced comparator blind spots withdraw the later
+warm-overlap architectural-preservation claim; they do not prove that the changed
+RTL corrupted its workloads. Earlier independent source/trace-bound tests and
+formal results keep their scope. Full SMT2/OpenSBI, platform and physical gates
+remain unqualified. Concurrent-fill accounting and blocked-install safety now
+have directed positive/fault-control evidence and small synthesis checks, but
+that does not establish complete cache response ordering, coherence or atomics.
+
+Read-response ownership, held-AR arbitration and write/atomic B/R lifetime are now
+leaf-repaired with reproduced pre-change failures, and the sequential leaf
+regression is restored after correcting a stale fill-id oracle. The cache stack
+simulates across a register slice, and server-prefetch response ownership is
+repaired. Coverage effects are confined to memory-side response handling: no ISA
+chapter status changes, and coherence, inclusive invalidation, atomics semantics,
+prefetch effectiveness, production geometry and physical closure remain open.
+
+Invalidation-source ownership is repaired, and on the OoO side rename checkpoints now
+retire at commit and LSQ admission uses group credits, each with a fault control that
+reproduces the original defect. These are leaf/fixture results: OoO remains
+config-gated with the hart and floating-point legality assertions in force, so no
+ISA-chapter coverage changes. Committed-map recovery, enabled memdep feedback,
+per-hart namespaces and the FP register class stay open.
+
 ## Instruction-supply review status (2026-09-15)
 
 **Partial / not SMT2-qualified.** A sparse-packet dual-issue ordering defect is

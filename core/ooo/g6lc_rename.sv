@@ -21,6 +21,14 @@ module g6lc_rename #(
     input  logic rst_ni,
     input  logic flush_i,
     input  logic mispredict_i,
+    // Checkpoint level to unwind to, i.e. the identity of the resolving branch.
+    // Any value at or above the current depth means "the youngest checkpoint",
+    // which is the behaviour a caller with no branch tag gets by tying this
+    // high. Supplying a real level lets an OLDER branch resolve correctly:
+    // without it, recovery always pops the youngest checkpoint, which restores
+    // state that still contains work younger than the branch that actually
+    // mispredicted, and leaks the intervening checkpoints.
+    input  logic [$clog2(CKPT_DEPTH+1)-1:0] mispredict_level_i,
     // Dispatch ports (program order p=0 oldest)
     input  logic [NR_PORTS-1:0]       valid_i,
     input  logic [NR_PORTS-1:0][4:0]  rs1_i,
@@ -34,6 +42,18 @@ module g6lc_rename #(
     output logic [NR_PORTS-1:0][PRF_W-1:0] prd_old_o,
     output logic [NR_PORTS-1:0]       rs1_ready_o,
     output logic [NR_PORTS-1:0]       rs2_ready_o,
+    // Checkpoint level consumed by each port's branch this cycle (the value a
+    // caller must present back as mispredict_level_i when that branch later
+    // resolves). '1 means the port took no checkpoint. Emitted combinationally
+    // for the cycle the group is admitted.
+    output logic [NR_PORTS-1:0][$clog2(CKPT_DEPTH+1)-1:0] ckpt_id_o,
+    // Retirement of the OLDEST outstanding checkpoint, one strobe per commit
+    // port. A branch that has committed can never be unwound to, so without
+    // this the pool only ever drains on mispredict or flush and dispatch stalls
+    // permanently after CKPT_DEPTH correctly predicted branches. Checkpoints are
+    // taken in program order and commit is in program order, so the pool is a
+    // ring: allocate at the tail, retire at the head.
+    input  logic [NR_FREE-1:0]        ckpt_retire_i,
     output logic                      stall_o,
     // Busy table / freelist
     input  logic [NR_WB-1:0]            wb_valid_i,
@@ -50,8 +70,25 @@ module g6lc_rename #(
 
   logic [CKPT_DEPTH-1:0][31:0][PRF_W-1:0] ckpt_map_q;
   logic [CKPT_DEPTH-1:0][PRF_ENTRIES-1:0]  ckpt_free_q;
-  logic [CKPT_DEPTH-1:0][PRF_ENTRIES-1:0]  ckpt_busy_q;
-  logic [$clog2(CKPT_DEPTH+1)-1:0] ckpt_ptr_q, ckpt_ptr_d;
+  localparam int unsigned LVL_W = $clog2(CKPT_DEPTH+1);
+  logic [LVL_W-1:0] ckpt_head_q, ckpt_head_d;
+  logic [LVL_W-1:0] ckpt_cnt_q, ckpt_cnt_d;
+
+  // Ring index for a tail/head walk. The largest argument is head + count +
+  // NR_PORTS, so two conditional subtractions cover every case.
+  function automatic logic [LVL_W-1:0] ckpt_slot(input int unsigned v);
+    int unsigned t;
+    t = v;
+    for (int unsigned i = 0; i < 3; i++) if (t >= CKPT_DEPTH) t -= CKPT_DEPTH;
+    return LVL_W'(t);
+  endfunction
+  // Checkpoint payload captured this cycle: the map and free list as they stand
+  // immediately AFTER that port's branch has renamed, so work at or older than
+  // the branch survives recovery. One slot per branch — a two-branch group
+  // consumes two levels, so each branch unwinds to its own post-rename point.
+  // No busy snapshot is kept -- see the restore below.
+  logic [NR_PORTS-1:0][31:0][PRF_W-1:0] ckpt_map_c;
+  logic [NR_PORTS-1:0][PRF_ENTRIES-1:0]  ckpt_free_c;
 
   // Lowest free phys ≥1 in current free vector
   function automatic logic [PRF_W-1:0] pick_free(input logic [PRF_ENTRIES-1:0] fr);
@@ -64,23 +101,60 @@ module g6lc_rename #(
   logic [NR_PORTS-1:0][PRF_W-1:0] alloc_prd_c;
   logic [NR_PORTS-1:0] do_alloc;
   logic stall_c;
-  logic do_ckpt;
+  logic [NR_PORTS-1:0] do_ckpt;
+  logic [NR_PORTS-1:0][$clog2(CKPT_DEPTH+1)-1:0] ckpt_slot_c;
 
-  // Checkpoint on first branch in this dispatch group (any port, not only 0)
+  // Admission capacity, from ungated intent. This must NOT read enable_i:
+  // enable_i is the caller's can_go, and can_go consumes stall_o, so gating the
+  // capacity test on it closes a combinational loop
+  // (can_go -> enable_i -> stall_c -> stall_o -> ren_stall -> can_go).
+  // Whether the group *fits* is a property of the group and of the registered
+  // free list, not of whether the group is currently allowed to proceed.
+  // Registered free state only, which matches the allocation loop below: that
+  // loop likewise cannot consume registers freed in this same cycle.
   always_comb begin
-    do_ckpt = 1'b0;
-    if (enable_i && (ckpt_ptr_q < CKPT_DEPTH[$clog2(CKPT_DEPTH+1)-1:0])) begin
-      for (int unsigned p = 0; p < NR_PORTS; p++) begin
-        if (valid_i[p] && is_branch_i[p]) do_ckpt = 1'b1;
+    automatic logic [PRF_ENTRIES-1:0] avail;
+    automatic logic [PRF_W-1:0] picked;
+    automatic int unsigned n_br;
+    stall_c = 1'b0;
+    avail = free_q;
+    // Unconditional defaults: a block-local left unassigned on some path is a
+    // latch to the elaborator even when every read is guarded.
+    picked = '0;
+    n_br = 0;
+    for (int unsigned p = 0; p < NR_PORTS; p++) begin
+      if (valid_i[p] && need_rd_i[p]) begin
+        picked = pick_free(avail);
+        if (picked == '0) stall_c = 1'b1;
+        else avail[picked] = 1'b0;
       end
     end
+    // Every branch must own a checkpoint slot before it may dispatch: one
+    // taken without a slot could never be unwound correctly. This gate is the
+    // same "ungated intent vs registered capacity" shape as the freelist
+    // check, so it cannot feed back through can_go.
+    n_br = 0;
+    for (int unsigned p = 0; p < NR_PORTS; p++)
+      n_br += int'(valid_i[p] && is_branch_i[p]);
+    if (int'(ckpt_cnt_q) + n_br > CKPT_DEPTH) stall_c = 1'b1;
   end
 
+  assign stall_o = stall_c;
+
   always_comb begin
+    // Block-locals are declared and defaulted here: one declared inside a
+    // conditional scope reads as a latch to the elaborator.
+    automatic logic [PRF_W-1:0] p1, p2, old, picked;
+    automatic logic [PRF_ENTRIES-1:0] squashed;
+    automatic logic [LVL_W-1:0] level;
+    automatic int unsigned slots, rel, n_ret;
+    p1 = '0; p2 = '0; old = '0; picked = '0;
+    squashed = '0; level = '0; slots = 0; rel = 0; n_ret = 0;
     map_d = map_q;
     free_d = free_q;
     busy_d = busy_q;
-    ckpt_ptr_d = ckpt_ptr_q;
+    ckpt_head_d = ckpt_head_q;
+    ckpt_cnt_d  = ckpt_cnt_q;
     prs1_o = '0;
     prs2_o = '0;
     prd_o = '0;
@@ -89,38 +163,56 @@ module g6lc_rename #(
     rs2_ready_o = '1;
     alloc_prd_c = '0;
     do_alloc = '0;
-    stall_c = 1'b0;
+    do_ckpt = '0;
+    ckpt_slot_c = '1;
+    ckpt_map_c = '0;
+    ckpt_free_c = '0;
 
-    for (int unsigned p = 0; p < NR_PORTS; p++) begin
-      automatic logic [PRF_W-1:0] p1, p2, old, picked;
-      // map_d, not map_q: earlier ports in this same cycle have already written
-      // it, so a younger op in the group sees its older sibling's rename and
-      // intra-group WAW/WAR resolve without a stall.
-      p1  = (rs1_i[p] == 5'd0) ? '0 : map_d[rs1_i[p]];
-      p2  = (rs2_i[p] == 5'd0) ? '0 : map_d[rs2_i[p]];
-      old = (rd_i[p] == 5'd0) ? '0 : map_d[rd_i[p]];
-      prs1_o[p] = p1;
-      prs2_o[p] = p2;
-      prd_old_o[p] = old;
-      rs1_ready_o[p] = (rs1_i[p] == 5'd0) || !busy_d[p1];
-      rs2_ready_o[p] = (rs2_i[p] == 5'd0) || !busy_d[p2];
+    begin
+      for (int unsigned p = 0; p < NR_PORTS; p++) begin
+        // map_d, not map_q: earlier ports in this same cycle have already written
+        // it, so a younger op in the group sees its older sibling's rename and
+        // intra-group WAW/WAR resolve without a stall.
+        p1  = (rs1_i[p] == 5'd0) ? '0 : map_d[rs1_i[p]];
+        p2  = (rs2_i[p] == 5'd0) ? '0 : map_d[rs2_i[p]];
+        old = (rd_i[p] == 5'd0) ? '0 : map_d[rd_i[p]];
+        prs1_o[p] = p1;
+        prs2_o[p] = p2;
+        prd_old_o[p] = old;
+        rs1_ready_o[p] = (rs1_i[p] == 5'd0) || !busy_d[p1];
+        rs2_ready_o[p] = (rs2_i[p] == 5'd0) || !busy_d[p2];
 
-      if (valid_i[p] && enable_i && need_rd_i[p]) begin
-        // free_d already has earlier ports' allocs removed
-        picked = pick_free(free_d);
-        if (picked == '0) begin
-          stall_c = 1'b1;
-        end else begin
-          do_alloc[p] = 1'b1;
-          alloc_prd_c[p] = picked;
-          free_d[picked] = 1'b0;
-          map_d[rd_i[p]] = picked;
-          busy_d[picked] = 1'b1;
-          prd_o[p] = picked;
+        if (valid_i[p] && enable_i && need_rd_i[p]) begin
+          // free_d already has earlier ports' allocs removed
+          picked = pick_free(free_d);
+          // Exhaustion is reported by the ungated capacity block above; here it
+          // simply means no allocation happens this cycle.
+          if (picked != '0) begin
+            do_alloc[p] = 1'b1;
+            alloc_prd_c[p] = picked;
+            free_d[picked] = 1'b0;
+            map_d[rd_i[p]] = picked;
+            busy_d[picked] = 1'b1;
+            prd_o[p] = picked;
+          end
+        end else if (valid_i[p] && enable_i) begin
+          prd_o[p] = old;
         end
-      end else if (valid_i[p] && enable_i) begin
-        prd_o[p] = old;
+
+        // Capture a checkpoint per branch, immediately after that branch's own
+        // rename. The capacity block has already guaranteed a slot for every
+        // branch in the group, so each branch gets a distinct level and a
+        // later mispredict unwinds to exactly its own post-rename point.
+        if (enable_i && valid_i[p] && is_branch_i[p] &&
+            (int'(ckpt_cnt_q) + slots < CKPT_DEPTH)) begin
+          do_ckpt[p] = 1'b1;
+          ckpt_slot_c[p] = ckpt_slot(int'(ckpt_head_q) + int'(ckpt_cnt_q) + slots);
+          ckpt_map_c[p] = map_d;
+          ckpt_free_c[p] = free_d;
+          slots++;
+        end
       end
+      ckpt_id_o = ckpt_slot_c;
     end
 
     for (int unsigned p = 1; p < NR_PORTS; p++) begin
@@ -140,16 +232,56 @@ module g6lc_rename #(
       if (wb_valid_i[w] && wb_prd_i[w] != '0) busy_d[wb_prd_i[w]] = 1'b0;
     end
     for (int unsigned f = 0; f < NR_FREE; f++) begin
-      if (free_i[f] && free_prd_i[f] != '0) free_d[free_prd_i[f]] = 1'b1;
+      // A freed register is definitionally not awaiting a producer: in-order
+      // retire means the reg being released (prd_old) had its writeback land
+      // before the overwriting instruction could commit. Clearing busy keeps
+      // free/busy exclusive even if the bit was still set, and prevents the
+      // restore below from skipping it (a reg already in free_d is not part of
+      // `squashed`, so without this clear a stale busy would survive).
+      if (free_i[f] && free_prd_i[f] != '0) begin
+        free_d[free_prd_i[f]] = 1'b1;
+        busy_d[free_prd_i[f]] = 1'b0;
+      end
     end
 
-    if (do_ckpt) ckpt_ptr_d = ckpt_ptr_q + 1'b1;
+    ckpt_cnt_d = ckpt_cnt_q + LVL_W'($countones(do_ckpt));
 
-    if (mispredict_i && ckpt_ptr_q != 0) begin
-      map_d  = ckpt_map_q[ckpt_ptr_q-1'b1];
-      free_d = ckpt_free_q[ckpt_ptr_q-1'b1];
-      busy_d = ckpt_busy_q[ckpt_ptr_q-1'b1];
-      ckpt_ptr_d = ckpt_ptr_q - 1'b1;
+    // Recovery restores the map, but free/busy are REPAIRED rather than
+    // reinstated. The squashed set is exactly those registers that were free at
+    // the checkpoint and are no longer free: every allocation made after the
+    // branch, i.e. the registers whose producers are being discarded. Returning
+    // only those preserves progress that happened after the checkpoint -- commit
+    // frees stay freed, and a busy bit already cleared by a writeback stays
+    // cleared. Reinstating whole snapshots resurrected completed producers (a
+    // permanent wait, since the writeback never repeats) and discarded commit
+    // frees (a permanent register leak).
+    if (mispredict_i && ckpt_cnt_q != 0) begin
+      // Unwind to the resolving branch, defaulting to the youngest checkpoint.
+      // Restoring level k consumes checkpoint k and discards every younger one
+      // in a single step, so nothing leaks when an older branch resolves. The
+      // level is a ring slot, so its age is its distance from the head; a slot
+      // outside the live window (retired, or an untagged resolve) falls back to
+      // the youngest checkpoint.
+      rel = (int'(mispredict_level_i) >= int'(ckpt_head_q))
+            ? (int'(mispredict_level_i) - int'(ckpt_head_q))
+            : (int'(mispredict_level_i) + CKPT_DEPTH - int'(ckpt_head_q));
+      if ((int'(mispredict_level_i) >= CKPT_DEPTH) || (rel >= int'(ckpt_cnt_q)))
+        rel = int'(ckpt_cnt_q) - 1;
+      level = ckpt_slot(int'(ckpt_head_q) + rel);
+      squashed = ckpt_free_q[level] & ~free_d;
+      map_d  = ckpt_map_q[level];
+      free_d = free_d | squashed;
+      busy_d = busy_d & ~squashed;
+      ckpt_cnt_d = LVL_W'(rel);
+    end
+
+    // Retire committed checkpoints from the head. Bounded by what is live so a
+    // stale strobe cannot advance the head past the tail.
+    begin
+      n_ret = $countones(ckpt_retire_i);
+      if (n_ret > int'(ckpt_cnt_d)) n_ret = int'(ckpt_cnt_d);
+      ckpt_head_d = ckpt_slot(int'(ckpt_head_q) + n_ret);
+      ckpt_cnt_d  = ckpt_cnt_d - LVL_W'(n_ret);
     end
 
     if (flush_i) begin
@@ -157,10 +289,9 @@ module g6lc_rename #(
       free_d = '0;
       for (int unsigned i = 32; i < PRF_ENTRIES; i++) free_d[i] = 1'b1;
       busy_d = '0;
-      ckpt_ptr_d = '0;
+      ckpt_head_d = '0;
+      ckpt_cnt_d  = '0;
     end
-
-    stall_o = stall_c;
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -169,19 +300,21 @@ module g6lc_rename #(
       free_q <= '0;
       for (int unsigned i = 32; i < PRF_ENTRIES; i++) free_q[i] <= 1'b1;
       busy_q <= '0;
-      ckpt_ptr_q <= '0;
+      ckpt_head_q <= '0;
+      ckpt_cnt_q <= '0;
       ckpt_map_q <= '0;
       ckpt_free_q <= '0;
-      ckpt_busy_q <= '0;
     end else begin
       map_q <= map_d;
       free_q <= free_d;
       busy_q <= busy_d;
-      ckpt_ptr_q <= ckpt_ptr_d;
-      if (do_ckpt) begin
-        ckpt_map_q[ckpt_ptr_q]  <= map_q;
-        ckpt_free_q[ckpt_ptr_q] <= free_q;
-        ckpt_busy_q[ckpt_ptr_q] <= busy_q;
+      ckpt_head_q <= ckpt_head_d;
+      ckpt_cnt_q <= ckpt_cnt_d;
+      for (int unsigned p = 0; p < NR_PORTS; p++) begin
+        if (do_ckpt[p]) begin
+          ckpt_map_q[ckpt_slot_c[p]]  <= ckpt_map_c[p];
+          ckpt_free_q[ckpt_slot_c[p]] <= ckpt_free_c[p];
+        end
       end
     end
   end

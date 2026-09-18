@@ -53,6 +53,10 @@ AR acceptance, with invalid-first installs initializing state after tag reset.
 No new hit-path stage, clock/reset domain, cache geometry, DTS or ISA exposure.
 The serialized top does not yet provide MSHR concurrency merely because the
 MSHR leaf has several entries. Bank mapping is `(set * ways + way) % banks`.
+Refill response codes are now honored: `fill_err_q` accumulates non-OKAY
+`mst_resp_i.r.resp` across the fill, blocks the install, and returns the code
+to the requester (and waiters it drains); `fill_error_no_install` in the leaf
+bench covers SLVERR/DECERR + retry.
 
 `verif/tb/l2/run-l2-tb.sh` provides isolated simulation, config and synthesis
 diagnostics from fresh copied inputs; the proxy's `l2-leaf` command runs the

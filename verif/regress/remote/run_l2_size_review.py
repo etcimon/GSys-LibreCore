@@ -32,7 +32,8 @@ module l2_occupancy
     .MSHR_DEPTH(DEPTH),.DATA_BANKS(BANKS),.RR_EN(0),.axi_req_t(req_t),.axi_resp_t(resp_t)) dut (
     .clk_i,.rst_ni(rst_n),.slv_req_i(request),.slv_resp_o(),.mst_req_o(),.mst_resp_i(memory_response),
     .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
-    .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_back_inval_valid_i(invalidate),
+    .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
+    .l2_back_inval_valid_i(invalidate),
     .l2_back_inval_addr_i(invalidate_addr),.l2_back_inval_ready_o()
   );
   logic miss_active;

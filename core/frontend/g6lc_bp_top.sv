@@ -25,6 +25,14 @@ module g6lc_bp_top
     input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] hart_i,
     // FSE S5: resolve/train hart for ckpt push/pop/restore and GHR train
     input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] resolve_hart_i,
+    // Prediction-time checkpoint push: one bit per fetch slot carrying a real
+    // control-flow instruction that was consumed by the instruction queue this
+    // cycle. Entries are pushed in fetch (= program) order so the FIFO head is
+    // always the oldest in-flight CF.
+    input  logic [CVA6Cfg.INSTR_PER_FETCH-1:0] push_cf_i,
+    // Any control-flow resolve this cycle (branch/jump/jalr/ret): pops one
+    // checkpoint. mispredict_i additionally restores + drops younger entries.
+    input  logic                    cf_resolve_i,
     input  logic [CVA6Cfg.VLEN-1:0] vpc_bht_i,
     input  logic [CVA6Cfg.VLEN-1:0] vpc_btb_i,
     input  bht_update_t             bht_update_i,
@@ -56,18 +64,28 @@ module g6lc_bp_top
   localparam int unsigned NR_FOLDS = 8;
   localparam int unsigned RAS_D = (CVA6Cfg.RASDepth < 1) ? 1 : CVA6Cfg.RASDepth;
 
-  logic [GHIST_LEN-1:0] ghist, train_ghist;
-  logic [NR_FOLDS-1:0][FOLD_W-1:0] folded;
+  logic [GHIST_LEN-1:0] ghist, train_ghist, ckpt_ghist, fold_src;
+  logic [NR_FOLDS-1:0][FOLD_W-1:0] folded, folded_src;
   logic hist_upd_v, hist_upd_taken;
   logic restore_v;
-  logic [GHIST_LEN-1:0] restore_ghist;
-  logic ckpt_empty;
-  // Mispredict with empty ckpt: flush resolve-hart GHR rather than leave wrong-path history
+  logic ckpt_empty, ckpt_desync;
+  // The GHR bank only ever shifts in resolved (architectural) outcomes, so a
+  // mispredict never needs a GHR restore — there is no speculative history to
+  // unwind. flush_bp_i remains the only reset of a bank.
   logic ghist_flush;
-  assign ghist_flush = flush_bp_i | (mispredict_i && !restore_v);
-  // FSE S5: train/resolve hart for update+restore; fall back to fetch on bare flush_bp
+  assign ghist_flush = flush_bp_i;
+  // FSE S5: train/resolve hart for update; fall back to fetch on bare flush_bp
   logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] train_h;
   assign train_h = (hist_upd_v || mispredict_i) ? resolve_hart_i : hart_i;
+
+  // Update-fold source: the resolving CF's own prediction-time GHR snapshot
+  // (checkpoint head) when the association is trustworthy, else the live
+  // train-hart bank (also the only source when BPCkptDepth==0).
+  assign fold_src = (!ckpt_empty && !ckpt_desync) ? ckpt_ghist : train_ghist;
+  // Suppress pushes on a mispredict cycle: any window consumed then is
+  // wrong-path and is being flushed, so its CFs never resolve.
+  logic [CVA6Cfg.INSTR_PER_FETCH-1:0] push_cf;
+  assign push_cf = push_cf_i & {CVA6Cfg.INSTR_PER_FETCH{~mispredict_i}};
 
   logic [RAS_D-1:0] push_ras_v, rest_ras_v;
   logic [RAS_D-1:0][CVA6Cfg.VLEN-1:0] push_ras_ra, rest_ras_ra;
@@ -88,13 +106,18 @@ module g6lc_bp_top
       .flush_i          (ghist_flush),
       .hart_i           (hart_i),
       .train_hart_i     (train_h),
-      .update_valid_i   (hist_upd_v && !restore_v),
+      // Every branch resolve shifts the actual outcome into the architectural
+      // bank — including mispredicts (the real outcome belongs in history).
+      .update_valid_i   (hist_upd_v),
       .update_taken_i   (hist_upd_taken),
-      .restore_valid_i  (restore_v),
-      .restore_ghist_i  (restore_ghist),
+      // Arch-GHR never restores: there is no speculative history to unwind.
+      .restore_valid_i  (1'b0),
+      .restore_ghist_i  ('0),
+      .fold_src_i       (fold_src),
       .ghist_o          (ghist),
       .train_ghist_o    (train_ghist),
-      .folded_o         (folded)
+      .folded_o         (folded),
+      .folded_src_o     (folded_src)
   );
 
   // ----- Checkpoint (GHR + RAS stack), banked per resolve hart (FSE S5) -----
@@ -114,24 +137,29 @@ module g6lc_bp_top
         .GHIST_LEN(GHIST_LEN),
         .DEPTH    (CKPT_DEPTH),
         .RAS_DEPTH(CVA6Cfg.RASDepth),
-        .RAS_VLEN (CVA6Cfg.VLEN)
+        .RAS_VLEN (CVA6Cfg.VLEN),
+        .NR_PUSH  (CVA6Cfg.INSTR_PER_FETCH)
     ) i_ckpt (
         .clk_i,
         .rst_ni,
         .flush_i          (flush_bp_i),
-        .hart_i           (resolve_hart_i),
-        .push_i           (hist_upd_v),
-        .push_ghist_i     (train_ghist),
+        .push_hart_i      (hart_i),
+        .pop_hart_i       (resolve_hart_i),
+        // Predict-time push: one entry per consumed CF slot, snapshotting the
+        // live fetch-hart GHR and RAS stack — the context the prediction used.
+        .push_i           (push_cf),
+        .push_ghist_i     (ghist),
         .push_ras_valid_i (push_ras_v),
         .push_ras_ra_i    (push_ras_ra),
-        .pop_i            (hist_upd_v || mispredict_i),
+        .pop_i            (cf_resolve_i),
         .restore_i        (mispredict_i),
-        .restore_ghist_o  (restore_ghist),
+        .restore_ghist_o  (ckpt_ghist),
         .restore_ras_valid_o(rest_ras_v),
         .restore_ras_ra_o   (rest_ras_ra),
         .restore_valid_o  (restore_v),
         .empty_o          (ckpt_empty),
-        .full_o           ()
+        .full_o           (),
+        .desync_o         (ckpt_desync)
     );
 
     if (CVA6Cfg.RASDepth != 0) begin : gen_ras_restore
@@ -146,8 +174,9 @@ module g6lc_bp_top
     end
   end else begin : gen_no_ckpt
     assign restore_v     = 1'b0;
-    assign restore_ghist = '0;
+    assign ckpt_ghist    = '0;
     assign ckpt_empty    = 1'b1;
+    assign ckpt_desync   = 1'b0;
     assign push_ras_v    = '0;
     assign push_ras_ra   = '0;
     assign rest_ras_v    = '0;
@@ -157,9 +186,12 @@ module g6lc_bp_top
   end
 
   // ----- TAGE direction -----
-  logic [NR_TABLES-1:0][FOLD_W-1:0] folded_use;
+  // Update index/tag fold the resolving branch's prediction-time history
+  // (checkpoint snapshot when live, train bank otherwise).
+  logic [NR_TABLES-1:0][FOLD_W-1:0] folded_use, folded_update_use;
   for (genvar t = 0; t < NR_TABLES; t++) begin : gen_fold_use
-    assign folded_use[t] = folded[t];
+    assign folded_use[t]        = folded[t];
+    assign folded_update_use[t] = folded_src[t];
   end
 
   g6lc_bp_tage #(
@@ -178,6 +210,7 @@ module g6lc_bp_top
       .vpc_i               (vpc_bht_i),
       .ghist_i             (ghist),
       .folded_i            (folded_use),
+      .folded_update_i     (folded_update_use),
       .bht_update_i        (bht_update_i),
       .bht_prediction_o    (tage_pred),
       .hist_update_valid_o (hist_upd_v),
@@ -240,6 +273,7 @@ module g6lc_bp_top
         .debug_mode_i,
         .vpc_i         (vpc_btb_i),
         .folded_i      (folded[0]),
+        .folded_update_i(folded_src[0]),
         .btb_update_i  (btb_update_i),
         .btb_prediction_o(ittage_pred)
     );

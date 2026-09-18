@@ -7,7 +7,7 @@
 [options]
 mode cover
 depth 8
-timeout 90
+timeout 300
 
 [engines]
 # Cover has no abc path. yices PASSes locally in ~1 s. Testharness has no

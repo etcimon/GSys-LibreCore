@@ -28,6 +28,12 @@ module g6lc_l2_mshr #(
     input  logic [ID_WIDTH-1:0]          alloc_id_i,
     input  logic [META_WIDTH-1:0]        alloc_meta_i,
     input  logic                         alloc_is_write_i,
+    // Per-entry merge mask: an entry that must not accept new waiters (e.g. a
+    // fill whose install was killed by a same-line invalidation). Blocked
+    // entries stay valid for drain but are invisible to merge/lookup, so a
+    // later same-line request allocates a fresh entry instead of attaching to
+    // a fill that will never install.
+    input  logic [DEPTH-1:0]             merge_block_i,
     output logic                         alloc_ready_o,
     output logic                         alloc_merged_o,
     output logic [$clog2(DEPTH)-1:0]     alloc_idx_o,
@@ -35,6 +41,7 @@ module g6lc_l2_mshr #(
     input  logic [ADDR_WIDTH-1:0]        lookup_line_addr_i,
     output logic                         lookup_hit_o,
     output logic [$clog2(DEPTH)-1:0]     lookup_idx_o,
+    output logic [DEPTH-1:0]             id_match_o,
     // Complete primary
     input  logic                         complete_i,
     input  logic [$clog2(DEPTH)-1:0]     complete_idx_i,
@@ -69,12 +76,25 @@ module g6lc_l2_mshr #(
   entry_t [DEPTH-1:0] mem_q, mem_d;
   logic [IDX_W:0] count_q, count_d;
 
+  always_comb begin
+    id_match_o='0;
+    for(int unsigned e=0;e<DEPTH;e++)begin
+      if(mem_q[e].valid)begin
+        id_match_o[e]=(mem_q[e].id==alloc_id_i);
+        for(int unsigned w=0;w<NW;w++)
+          if(w<int'(mem_q[e].nwait) && mem_q[e].waiters[w]==alloc_id_i)
+            id_match_o[e]=1'b1;
+      end
+    end
+  end
+
   // CAM lookup
   always_comb begin
     lookup_hit_o = 1'b0;
     lookup_idx_o = '0;
     for (int unsigned i = 0; i < DEPTH; i++) begin
-      if (mem_q[i].valid && (mem_q[i].line_addr == lookup_line_addr_i)) begin
+      if (mem_q[i].valid && !merge_block_i[i] &&
+          (mem_q[i].line_addr == lookup_line_addr_i)) begin
         lookup_hit_o = 1'b1;
         lookup_idx_o = IDX_W'(i);
       end
@@ -90,7 +110,8 @@ module g6lc_l2_mshr #(
     merge_idx        = '0;
     merge_can_attach = 1'b0;
     for (int unsigned i = 0; i < DEPTH; i++) begin
-      if (mem_q[i].valid && (mem_q[i].line_addr == alloc_line_addr_i)) begin
+      if (mem_q[i].valid && !merge_block_i[i] &&
+          (mem_q[i].line_addr == alloc_line_addr_i)) begin
         merge_found = 1'b1;
         merge_idx   = IDX_W'(i);
         merge_can_attach = (mem_q[i].nwait < NW[NW_W-1:0]) ||
@@ -137,11 +158,9 @@ module g6lc_l2_mshr #(
       end
       // Alloc new or attach waiter
       if (alloc_i && merge_found && merge_can_attach) begin
-        automatic logic [NW_W-1:0] wi;
-        wi = mem_d[merge_idx].nwait;
-        mem_d[merge_idx].waiters[wi] = alloc_id_i;
-        mem_d[merge_idx].wmeta[wi]   = alloc_meta_i;
-        mem_d[merge_idx].nwait       = wi + 1'b1;
+        mem_d[merge_idx].waiters[mem_d[merge_idx].nwait] = alloc_id_i;
+        mem_d[merge_idx].wmeta[mem_d[merge_idx].nwait]   = alloc_meta_i;
+        mem_d[merge_idx].nwait = mem_d[merge_idx].nwait + 1'b1;
       end else if (alloc_i && free_found && !merge_found) begin
         mem_d[free_idx].valid     = 1'b1;
         mem_d[free_idx].line_addr = alloc_line_addr_i;

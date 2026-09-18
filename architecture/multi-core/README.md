@@ -187,6 +187,38 @@ source-bound platform gate, producer invalidation reservation/retention, write
 visibility, and inclusive-source qualification remain open. Do not wire current
 `aw_fire`-activated invalidation ready into AW grant as a shortcut.
 
+## Accepted-write invalidation loss — repaired
+
+The hub generated a write's invalidation request **combinationally from
+`aw_fire`** and presented it to the invalidation bus in the same cycle. If the
+bus was not ready that cycle the request simply evaporated, so a write could be
+accepted and completed with no invalidation ever delivered — reproduced as
+`HUB_INV_LOSS`: three accepted, completed writes producing only two
+invalidations. The source comment recorded this as deliberate ("inv path is
+best-effort with coalesce under storms"), and the earlier attempt to gate AW on
+`inv_ready` was correctly rejected because `inv_ready` is itself
+`aw_fire`-dependent, so that closes a combinational loop.
+
+**Repair: retain the obligation instead of gating on readiness.** A single
+registered slot holds an accepted write's invalidation until the bus takes it. A
+retained entry is presented in preference to a fresh one, and a fresh request the
+bus accepts immediately still costs no extra cycle. Admission consults only the
+**registered** occupancy plus the incoming `aw.cache[1]` attribute — never
+`inv_ready` and never `aw_fire` — so a write that will need an invalidation is
+refused while the slot is occupied and no loop is created. Because admission is
+blocked while occupied, one slot is sufficient: the obligation cannot be
+overwritten.
+
+New state is one `coh_inval_t`, an `NC`-bit target mask and a valid bit. Evidence:
+`review-hub-invretain-v1` records 15/15 across the outstanding-limit geometries
+with the response-oracle negative control still firing, and scenario 5 — the
+invalidation-loss reproducer — now passes.
+
+**Still open:** the inclusive source's `inv_busy_o` remains unconsumed and the
+eviction producer has no admission handshake, so a later victim can still be lost
+while an earlier one waits. That is a separate producer-side contract from the
+hub's write path repaired here.
+
 ## Inclusive-source acknowledgment repair (broad RTL review)
 
 `g6lc_cluster` now masks inclusive ready when the hub wins that core's invalidation

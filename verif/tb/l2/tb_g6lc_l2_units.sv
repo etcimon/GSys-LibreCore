@@ -26,6 +26,8 @@ module tb_g6lc_l2_units;
   logic [$clog2(DEPTH+1)-1:0] count;
   logic lookup_hit_nc;
   logic [$clog2(DEPTH)-1:0] lookup_idx_nc;
+  logic [DEPTH-1:0] id_match_nc;
+  logic waiter_meta_nc;
 
   g6lc_l2_mshr #(
       .DEPTH(DEPTH), .ADDR_WIDTH(AW), .ID_WIDTH(IDW), .MAX_WAITERS(NW)
@@ -33,13 +35,14 @@ module tb_g6lc_l2_units;
       .clk_i(clk), .rst_ni(rst_n), .flush_i(flush),
       .alloc_i(alloc), .alloc_line_addr_i(alloc_line), .alloc_id_i(alloc_id),
       .alloc_is_write_i(1'b0), .alloc_ready_o(alloc_ready),
+      .merge_block_i('0), .alloc_meta_i('0),
       .alloc_merged_o(alloc_merged), .alloc_idx_o(alloc_idx),
       .lookup_line_addr_i(alloc_line), .lookup_hit_o(lookup_hit_nc),
-      .lookup_idx_o(lookup_idx_nc),
+      .lookup_idx_o(lookup_idx_nc), .id_match_o(id_match_nc),
       .complete_i(complete), .complete_idx_i(complete_idx),
       .complete_id_o(complete_id),
       .waiter_valid_o(waiter_valid), .waiter_id_o(waiter_id),
-      .waiter_pop_i(waiter_pop),
+      .waiter_meta_o(waiter_meta_nc), .waiter_pop_i(waiter_pop),
       .empty_o(empty), .full_o(full), .merge_full_o(merge_full), .count_o(count)
   );
 

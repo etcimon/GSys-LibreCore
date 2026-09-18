@@ -37,6 +37,7 @@ module g6lc_ooo_rename_props #(
 `ifdef FORMAL
   logic [NR_PORTS-1:0][PRF_W-1:0] prs1_o, prs2_o, prd_o, prd_old_o;
   logic [NR_PORTS-1:0]            rs1_ready_o, rs2_ready_o;
+  logic [NR_PORTS-1:0][$clog2(CKPT_DEPTH+1)-1:0] ckpt_id_o;
   logic                           stall_o;
 
   g6lc_rename #(
@@ -51,6 +52,9 @@ module g6lc_ooo_rename_props #(
       .rst_ni,
       .flush_i,
       .mispredict_i,
+      // Untagged resolve -> youngest checkpoint, the behaviour these
+      // properties were written against.
+      .mispredict_level_i('1),
       .valid_i,
       .rs1_i,
       .rs2_i,
@@ -63,6 +67,10 @@ module g6lc_ooo_rename_props #(
       .prd_old_o,
       .rs1_ready_o,
       .rs2_ready_o,
+      .ckpt_id_o,
+      // No retirement stimulus: these properties are about recovery, not the
+      // checkpoint pool lifetime.
+      .ckpt_retire_i('0),
       .stall_o,
       .wb_valid_i,
       .wb_prd_i,

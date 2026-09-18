@@ -471,11 +471,18 @@ module scoreboard #(
     end
   end
 
-  // FIFO counter updates
-  if (CVA6Cfg.NrCommitPorts == 2) begin : gen_commit_ports
-    assign num_commit = commit_ack_i[1] + commit_ack_i[0];
-  end else begin : gen_one_commit_port
-    assign num_commit = commit_ack_i[0];
+  // FIFO counter updates: count acknowledged commits across ALL ports.
+  // This was special-cased for two ports and fell through to counting only
+  // port 0 for every other width. A four-port configuration therefore retired
+  // up to four entries per cycle -- the loop above clears `issued` for each
+  // acknowledged port -- while advancing the commit pointer by at most one, so
+  // the scoreboard FIFO desynchronised and already-retired slots were presented
+  // again. Width-generic popcount, correct for any NrCommitPorts.
+  always_comb begin : gen_commit_count
+    num_commit = '0;
+    for (int unsigned i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin
+      if (commit_ack_i[i]) num_commit = num_commit + 1'b1;
+    end
   end
 
   assign commit_pointer_n[0] = (flush_i) ? '0 : commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(num_commit);
@@ -562,9 +569,11 @@ module scoreboard #(
   assert property (
     @(posedge clk_i) disable iff (!rst_ni) commit_ack_i[0] |-> commit_instr_o[0].valid)
   else $fatal(1, "Commit acknowledged but instruction is not valid");
-  if (CVA6Cfg.NrCommitPorts == 2) begin : gen_two_commit_ports
+  // Every commit port, not just port 1: the two-port special case left ports 2
+  // and above unchecked in wider configurations.
+  for (genvar cp = 1; cp < CVA6Cfg.NrCommitPorts; cp++) begin : gen_commit_port_valid
     assert property (
-        @(posedge clk_i) disable iff (!rst_ni) commit_ack_i[1] |-> commit_instr_o[1].valid)
+        @(posedge clk_i) disable iff (!rst_ni) commit_ack_i[cp] |-> commit_instr_o[cp].valid)
     else $fatal(1, "Commit acknowledged but instruction is not valid");
   end
   // assert that we never give an issue ack signal if the instruction is not valid

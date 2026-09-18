@@ -115,7 +115,12 @@ static const char *verilog_plusargs[] = {
     // before the probe arms.
     "fetch_win_trace",
     // instr_queue order probe (core/fetch_B/instr_queue.sv).
-    "iq_trace", nullptr};
+    "iq_trace",
+    // Fetch-supply observer (core/fetch_B/g6lc_fetch_dbg.sv). Same allowlist
+    // rule: an unlisted plusarg is handed to HTIF, rejected, and the run dies
+    // before the observer arms.
+    "fetch_supply", "fetch_supply_lo", "fetch_supply_hi", "fetch_supply_limit",
+    nullptr};
 
 extern dtm_t* dtm;
 extern remote_bitbang_t * jtag;
@@ -1807,6 +1812,7 @@ done_processing:
     fprintf(stderr, "%s *** SUCCESS *** (tohost = 0) after %ld cycles\n", htif_argv[1], main_time);
   }
 
+  top->final();
   if (dtm) delete dtm;
   if (jtag) delete jtag;
 

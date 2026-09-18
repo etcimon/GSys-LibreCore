@@ -60,7 +60,13 @@ module g6lc_ooo_dispatch
     input  logic [CVA6Cfg.NrWbPorts-1:0]                            wb_exc_i,
     input  logic [CVA6Cfg.NrCommitPorts-1:0]                        commit_ack_i,
     input  scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0]           commit_instr_i,
+    // Oldest live scoreboard slot: the age anchor for LSQ store ordering and
+    // the IQ's per-entry older-store gate.
+    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0]                        commit_ptr_i,
     input  logic                                                    mispredict_i,
+    // Resolving branch's scoreboard trans_id (bp_resolve_t.trans_id): selects
+    // the checkpoint level to unwind to via the per-tid tag table below.
+    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0]                        mispredict_id_i,
     // PMU group-1 probes
     output logic freelist_empty_o,
     output logic rob_full_o,
@@ -82,15 +88,22 @@ module g6lc_ooo_dispatch
   localparam int unsigned CKPT  = (CVA6Cfg.BPCkptDepth == 0) ? 8 : CVA6Cfg.BPCkptDepth;
   localparam int unsigned NP    = CVA6Cfg.NrIssuePorts;
 
+  localparam int unsigned CKPT_W = $clog2(CKPT+1);
+
   logic [NP-1:0] need_rd, is_br, is_ld, is_st;
   logic [NP-1:0][4:0] rs1_a, rs2_a, rd_a;
   logic ren_stall, can_go, lsq_disp_block;
   logic [NP-1:0][PRF_W-1:0] prs1, prs2, prd, prd_old;
+  logic [NP-1:0][CKPT_W-1:0] ren_ckpt_id;
   logic [NP-1:0] rs1_rdy, rs2_rdy;
   logic [CVA6Cfg.NrWbPorts-1:0][PRF_W-1:0] wb_prd;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0][PRF_W-1:0] tid_prd_q, tid_prd_d;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0][PRF_W-1:0] tid_old_q, tid_old_d;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] tid_is_st_q, tid_is_st_d;
+  // Checkpoint tag per scoreboard slot: which rename checkpoint level the
+  // branch occupying that tid consumed. '1 (out of range) = untagged -> the
+  // recovery path unwinds to the youngest checkpoint, the legacy behaviour.
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0][CKPT_W-1:0] tid_ckpt_q, tid_ckpt_d;
 
   for (genvar p = 0; p < NP; p++) begin : gen_ports
     assign rs1_a[p] = dispatch_sbe_i[p].rs1[4:0];
@@ -104,12 +117,27 @@ module g6lc_ooo_dispatch
   end
 
   logic rob_full, iq_full, ld_full, st_full;
-  logic older_st, stl_fwd, stl_stall, lsq_busy, md_stall, mem_stall;
+  logic [$clog2(CVA6Cfg.LsqLoadEntries+1)-1:0] ld_free;
+  logic [$clog2(CVA6Cfg.LsqStoreEntries+1)-1:0] st_free;
+  logic store_pend, stl_fwd, stl_stall, lsq_busy, md_stall, mem_stall;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] st_live_mask;
 
   assign rob_full_o = rob_full;
   assign iq_full_o  = iq_full;
-  // LSQ pressure only blocks when a mem op wants to dispatch
-  assign lsq_disp_block = ((|is_ld) && ld_full) || ((|is_st) && st_full);
+  // LSQ pressure blocks unless the whole group fits: dispatch is all-or-nothing,
+  // so admitting a group with more memory ops than free entries would leave the
+  // surplus without a queue entry. Counts are registered state and the group size
+  // comes from ungated intent, so this cannot feed back through can_go.
+  always_comb begin
+    automatic int unsigned n_ld, n_st;
+    n_ld = 0;
+    n_st = 0;
+    for (int unsigned p = 0; p < NP; p++) begin
+      n_ld += int'(is_ld[p]);
+      n_st += int'(is_st[p]);
+    end
+    lsq_disp_block = (n_ld > int'(ld_free)) || (n_st > int'(st_free));
+  end
   // Dispatch is all-or-nothing across the group: partial allocation would leave
   // ROB/rename/LSQ indices out of program order and break flush recovery, which
   // walks those structures assuming contiguous in-order allocation.
@@ -126,11 +154,17 @@ module g6lc_ooo_dispatch
   // Multi-port freelist free on all commit ports
   logic [CVA6Cfg.NrCommitPorts-1:0] free_en;
   logic [CVA6Cfg.NrCommitPorts-1:0][PRF_W-1:0] free_prd;
+  // A committing branch's checkpoint can never be unwound to again, so commit is
+  // what returns it to the pool. Commit is in program order, matching the order
+  // the checkpoints were taken.
+  logic [CVA6Cfg.NrCommitPorts-1:0] ckpt_retire;
   always_comb begin
     for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++) begin
       free_en[c]  = commit_ack_i[c] && (commit_instr_i[c].rd != 5'd0) &&
                     (tid_old_q[commit_instr_i[c].trans_id] != '0);
       free_prd[c] = tid_old_q[commit_instr_i[c].trans_id];
+      ckpt_retire[c] = commit_ack_i[c] &&
+                       (tid_ckpt_q[commit_instr_i[c].trans_id] != '1);
     end
   end
 
@@ -146,7 +180,18 @@ module g6lc_ooo_dispatch
       .rst_ni,
       .flush_i,
       .mispredict_i,
-      .valid_i   (dispatch_valid_i & {NP{can_go}}),
+      // Branch-tag plumbing: each dispatched branch recorded the checkpoint
+      // level it consumed (rename's ckpt_id_o) keyed by its trans_id. On
+      // resolve, the resolving branch's id selects its own level, so an OLDER
+      // branch unwinds to its own checkpoint instead of the youngest.
+      .mispredict_level_i(tid_ckpt_q[mispredict_id_i]),
+      // Ungated intent. can_go is already delivered through enable_i, which
+      // gates every state update inside rename, so gating valid_i with it as
+      // well was redundant and closed a combinational loop
+      // (can_go -> valid_i -> capacity/stall_c -> ren_stall -> can_go).
+      // Rename must see what the group *needs* independently of whether the
+      // group is allowed to proceed.
+      .valid_i   (dispatch_valid_i),
       .rs1_i     (rs1_a),
       .rs2_i     (rs2_a),
       .rd_i      (rd_a),
@@ -158,6 +203,8 @@ module g6lc_ooo_dispatch
       .prd_old_o (prd_old),
       .rs1_ready_o(rs1_rdy),
       .rs2_ready_o(rs2_rdy),
+      .ckpt_id_o (ren_ckpt_id),
+      .ckpt_retire_i(ckpt_retire),
       .stall_o   (ren_stall),
       .wb_valid_i(wb_valid_i),
       .wb_prd_i  (wb_prd),
@@ -181,17 +228,31 @@ module g6lc_ooo_dispatch
     tid_prd_d = tid_prd_q;
     tid_old_d = tid_old_q;
     tid_is_st_d = tid_is_st_q;
+    tid_ckpt_d = tid_ckpt_q;
     for (int unsigned p = 0; p < NP; p++) begin
       if (dispatch_ack_o[p]) begin
         tid_prd_d[dispatch_sbe_i[p].trans_id] = prd[p];
         tid_old_d[dispatch_sbe_i[p].trans_id] = prd_old[p];
         tid_is_st_d[dispatch_sbe_i[p].trans_id] = is_st[p];
+        // Record the checkpoint level this branch consumed. Non-branch ports
+        // emit '1 from rename, which is exactly the "no tag -> youngest"
+        // default the recovery path expects for an untagged resolve. Writing it
+        // unconditionally also clears a previous branch's tag from a reused
+        // slot, which would otherwise retire a checkpoint this slot never took.
+        tid_ckpt_d[dispatch_sbe_i[p].trans_id] = is_br[p] ? ren_ckpt_id[p] : '1;
       end
     end
+    // The resolving branch's own checkpoint is consumed by the unwind, so its
+    // later commit must not retire a second one.
+    if (mispredict_i) tid_ckpt_d[mispredict_id_i] = '1;
     if (flush_i) begin
       tid_prd_d = '0;
       tid_old_d = '0;
       tid_is_st_d = '0;
+      // tid_ckpt survives a flush: entries are keyed by trans_id and rewritten
+      // whenever that slot's next branch dispatches, so a stale tag can only be
+      // read by a resolve for a branch that was never re-dispatched -- which
+      // cannot resolve.
     end
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -199,10 +260,12 @@ module g6lc_ooo_dispatch
       tid_prd_q <= '0;
       tid_old_q <= '0;
       tid_is_st_q <= '0;
+      tid_ckpt_q <= '1;
     end else begin
       tid_prd_q <= tid_prd_d;
       tid_old_q <= tid_old_d;
       tid_is_st_q <= tid_is_st_d;
+      tid_ckpt_q <= tid_ckpt_d;
     end
   end
 
@@ -261,8 +324,8 @@ module g6lc_ooo_dispatch
   logic [NP-1:0][CVA6Cfg.XLEN-1:0] st_data;
   logic [NP-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] agu_id;
   logic [NP-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] st_data_id;
-  logic [CVA6Cfg.XLEN-1:0] stl_data;
   logic [CVA6Cfg.PLEN-1:0] ld_qaddr;
+  logic [1:0]              ld_qsize;
   logic [CVA6Cfg.NrWbPorts-1:0] complete_is_st;
 
   // IQ (mem_stall from LSQ/memdep below — combinational loop risk:
@@ -273,9 +336,11 @@ module g6lc_ooo_dispatch
   // select uses only older_st/md from registered state + ld_full, NOT stl_stall
   // of current select. STL applied as post-select recheck / op forward only.
 
-  // Prefer: stall mem issue when memdep predicts or older stores in flight.
-  // Use registered older_st + md_stall only inside IQ to avoid combo loop
-  // through issue_valid → stl_stall → mem_stall → issue_valid.
+  // Prefer: stall mem issue when memdep predicts or an OLDER store is pending.
+  // md_stall and the registered st_live_mask/commit_ptr are safe inside the IQ
+  // select; the load's own trans_id is not available here (it is a select
+  // result), so the per-entry age comparison lives inside g6lc_iq and this
+  // path stays free of the issue_valid → stall → issue_valid loop.
   assign mem_stall = md_stall || stl_stall;
 
   g6lc_iq #(
@@ -305,8 +370,18 @@ module g6lc_ooo_dispatch
       .issue_prd_o     (issue_prd),
       .issue_valid_o   (issue_valid_o),
       .issue_ack_i     (issue_ack_i),
-      // Use md_stall || older_st for IQ select (no stl combo through issue_valid)
-      .mem_stall_i     (md_stall || older_st)
+      // Not md_stall: the predictor's stall is a combinational function of this
+      // IQ's own issue outputs (its query is the selected load), so feeding it
+      // back into selection is a real cycle, which MemDepPredEn=1 exposes. It is
+      // also wrongly conservative — store_pending is global, so it blocks a load
+      // whose only pending stores are YOUNGER and cannot alias it. Safety comes
+      // from the per-entry age gate below (st_live_mask/commit_ptr), which
+      // already blocks a load behind every older store. A predictor that
+      // RELAXES that gate needs an alias proof and its own dispatch-time query;
+      // until then the predictor trains and reports, and does not gate issue.
+      .mem_stall_i     (1'b0),
+      .st_live_mask_i  (st_live_mask),
+      .commit_ptr_i    (commit_ptr_i)
   );
 
   // Block PRF writeback for cancelled SB slots (wrong-path after mispredict)
@@ -352,7 +427,13 @@ module g6lc_ooo_dispatch
       .we_i   (prf_we)
   );
 
-  // Operand assemble + WB bypass + STL into load op A
+  logic [NP-1:0][CVA6Cfg.XLEN-1:0] op_a_agu, op_b_pre;
+  // Operand assemble from the register file plus writeback bypass. This block
+  // must NOT read the store-to-load forward: the address-generation value
+  // op_a_agu feeds the LSQ query, and the forward is produced by that query, so
+  // reading stl_* here closes a combinational loop
+  // (ld_qaddr -> LSQ CAM -> stl_fwd -> op_a -> ld_qaddr). Dependency analysis is
+  // per always_comb block, so the forward is applied in a separate block below.
   always_comb begin
     for (int unsigned p = 0; p < NP; p++) begin
       automatic logic [CVA6Cfg.XLEN-1:0] a, b;
@@ -366,9 +447,21 @@ module g6lc_ooo_dispatch
             b = wb_data_i[w];
         end
       end
-      if (p == 0 && stl_fwd && issue_sbe_o[0].fu == LOAD) a = stl_data;
-      issue_op_a_o[p] = a;
-      issue_op_b_o[p] = b;
+      op_a_agu[p] = a;
+      op_b_pre[p] = b;
+    end
+  end
+
+  // operand_a of a LOAD is its base register -- the LSU computes
+  // vaddr = imm + operand_a, so it must NOT be overwritten with forwarded
+  // data. The byte-exact data path lives downstream in the LSU store_buffer
+  // (full PA + byte enables, spec+commit queues, commit handoff); the LSQ
+  // supplies only the ordering stall (stl_stall) since the serial LSU pipe
+  // lands any older store in the buffer before a younger load's PA compare.
+  always_comb begin
+    for (int unsigned p = 0; p < NP; p++) begin
+      issue_op_a_o[p] = op_a_agu[p];
+      issue_op_b_o[p] = op_b_pre[p];
       issue_op_a_valid_o[p] = issue_valid_o[p] && issue_sbe_o[p].ooo_renamed;
       issue_op_b_valid_o[p] = issue_valid_o[p] && issue_sbe_o[p].ooo_renamed;
     end
@@ -376,6 +469,7 @@ module g6lc_ooo_dispatch
 
   // Live AGU at issue: vaddr = imm + rs1 (matches load_store_unit AGU)
   always_comb begin
+    automatic logic [CVA6Cfg.XLEN-1:0] vaddr_x;
     agu_valid = '0;
     agu_addr  = '0;
     agu_is_st = '0;
@@ -384,15 +478,15 @@ module g6lc_ooo_dispatch
     st_data_v = '0;
     st_data   = '0;
     st_data_id = '0;
+    vaddr_x   = '0;
     for (int unsigned p = 0; p < NP; p++) begin
       if (issue_valid_o[p] && issue_ack_i[p] && issue_sbe_o[p].ooo_renamed &&
           (issue_sbe_o[p].fu == LOAD || issue_sbe_o[p].fu == STORE)) begin
-        automatic logic [CVA6Cfg.XLEN-1:0] vaddr_x;
         vaddr_x = $unsigned($signed(issue_sbe_o[p].result) + $signed(issue_op_a_o[p]));
         agu_valid[p] = 1'b1;
         agu_addr[p]  = CVA6Cfg.PLEN'(vaddr_x[CVA6Cfg.PLEN-1:0]);
         agu_is_st[p] = (issue_sbe_o[p].fu == STORE);
-        agu_size[p]  = 2'b11; // full XLEN transfer; LSU still enforces exact size
+        agu_size[p]  = ariane_pkg::extract_transfer_size(issue_sbe_o[p].op);
         agu_id[p]    = issue_sbe_o[p].trans_id;
         if (issue_sbe_o[p].fu == STORE) begin
           st_data_v[p]  = 1'b1;
@@ -403,19 +497,34 @@ module g6lc_ooo_dispatch
     end
   end
 
-  // Load query address for CAM (port 0)
+  // Load query address for CAM (port 0). Real transfer size so the LSQ can do
+  // byte-overlap hazard checks instead of whole-word group matches.
   always_comb begin
+    automatic logic [CVA6Cfg.XLEN-1:0] v;
     ld_qaddr = '0;
+    ld_qsize = '0;
+    v        = '0;
     if (issue_valid_o[0] && issue_sbe_o[0].fu == LOAD && issue_sbe_o[0].ooo_renamed) begin
-      automatic logic [CVA6Cfg.XLEN-1:0] v;
-      v = $unsigned($signed(issue_sbe_o[0].result) + $signed(issue_op_a_o[0]));
+      v = $unsigned($signed(issue_sbe_o[0].result) + $signed(op_a_agu[0]));
       ld_qaddr = CVA6Cfg.PLEN'(v[CVA6Cfg.PLEN-1:0]);
+      ld_qsize = ariane_pkg::extract_transfer_size(issue_sbe_o[0].op);
     end
   end
 
   always_comb begin
     for (int unsigned w = 0; w < CVA6Cfg.NrWbPorts; w++)
       complete_is_st[w] = tid_is_st_q[wb_id_i[w]];
+  end
+
+  // Store commit across every commit port, not just port 0: a store retiring on
+  // a higher port would otherwise never release its LSQ entry.
+  logic [CVA6Cfg.NrCommitPorts-1:0] commit_st;
+  logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] commit_st_id;
+  always_comb begin
+    for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++) begin
+      commit_st[c]    = commit_ack_i[c] && (commit_instr_i[c].fu == STORE);
+      commit_st_id[c] = commit_instr_i[c].trans_id;
+    end
   end
 
   logic [NP-1:0] ld_alloc, st_alloc;
@@ -444,6 +553,8 @@ module g6lc_ooo_dispatch
       .alloc_id_i (alloc_ids),
       .ld_full_o  (ld_full),
       .st_full_o  (st_full),
+      .ld_free_o  (ld_free),
+      .st_free_o  (st_free),
       .addr_valid_i(agu_valid),
       .addr_id_i   (agu_id),
       .addr_i      (agu_addr),
@@ -455,13 +566,17 @@ module g6lc_ooo_dispatch
       .complete_valid_i(wb_valid_i),
       .complete_id_i   (wb_id_i),
       .complete_is_st_i(complete_is_st),
-      .commit_st_i(commit_ack_i[0] && commit_instr_i[0].fu == STORE),
+      .commit_st_i(commit_st),
+      .commit_id_i(commit_st_id),
+      .commit_ptr_i(commit_ptr_i),
       .ld_query_i (issue_valid_o[0] && issue_sbe_o[0].fu == LOAD),
       .ld_query_addr_i(ld_qaddr),
+      .ld_query_size_i(ld_qsize),
       .ld_query_id_i  (issue_sbe_o[0].trans_id),
-      .older_store_pending_o(older_st),
+      .st_live_mask_o (st_live_mask),
+      .store_pending_o(store_pend),
       .stl_forward_o(stl_fwd),
-      .stl_data_o   (stl_data),
+      .stl_data_o   (),
       .stl_stall_o  (stl_stall),
       .lsq_busy_o   (lsq_busy)
   );
@@ -489,8 +604,8 @@ module g6lc_ooo_dispatch
       .st_pc_i   (memdep_st_pc),
       .ld_query_i(issue_valid_o[0] && issue_sbe_o[0].fu == LOAD),
       .ld_pc_i   (issue_sbe_o[0].pc),
-      .dep_observe_i(stl_stall || (older_st && issue_valid_o[0] && issue_sbe_o[0].fu == LOAD)),
-      .older_store_pending_i(older_st),
+      .dep_observe_i(stl_stall || (store_pend && issue_valid_o[0] && issue_sbe_o[0].fu == LOAD)),
+      .store_pending_i(store_pend),
       .stall_o   (md_stall),
       .predict_o ()
   );

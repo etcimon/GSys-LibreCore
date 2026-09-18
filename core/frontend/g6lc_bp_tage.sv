@@ -26,6 +26,9 @@ module g6lc_bp_tage
     input  logic [CVA6Cfg.VLEN-1:0]      vpc_i,
     input  logic [GHIST_LEN-1:0]         ghist_i,
     input  logic [NR_TABLES-1:0][7:0]    folded_i,
+    // Folded history of the resolve/train hart: tagged-table update index/tag
+    // hash the resolving branch's own history bank, not the live fetch fold.
+    input  logic [NR_TABLES-1:0][7:0]    folded_update_i,
     input  bht_update_t                  bht_update_i,
     output bht_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] bht_prediction_o,
     // To history/ckpt: request an architectural update
@@ -35,8 +38,11 @@ module g6lc_bp_tage
 
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned NR_ROWS = NR_ENTRIES / CVA6Cfg.INSTR_PER_FETCH;
-  localparam int unsigned ROW_ADDR_BITS = $clog2(CVA6Cfg.INSTR_PER_FETCH);
-  localparam int unsigned ROW_INDEX_BITS = CVA6Cfg.RVC == 1'b1 ? $clog2(CVA6Cfg.INSTR_PER_FETCH) : 1;
+  // Column bits select the instruction slot inside a row; row bits sit above
+  // them. Slot i's PC is vpc_i + i instructions — for an unaligned fetch window
+  // the slot's own PC bits must drive row/column, not the slot position.
+  localparam int unsigned COL_BITS = (CVA6Cfg.INSTR_PER_FETCH <= 1) ? 0 : $clog2(CVA6Cfg.INSTR_PER_FETCH);
+  localparam int unsigned SLOT_W   = (COL_BITS == 0) ? 1 : COL_BITS;
   localparam int unsigned BASE_IDX_W = (NR_ROWS <= 1) ? 1 : $clog2(NR_ROWS);
   localparam int unsigned TBL_IDX_W = (TABLE_ENTRIES <= 1) ? 1 : $clog2(TABLE_ENTRIES);
 
@@ -47,38 +53,61 @@ module g6lc_bp_tage
   } base_entry_t;
 
   base_entry_t [NR_ROWS-1:0][CVA6Cfg.INSTR_PER_FETCH-1:0] base_d, base_q;
-  logic [BASE_IDX_W-1:0] base_index, base_update_index;
-  logic [ROW_INDEX_BITS-1:0] update_row;
+  logic [CVA6Cfg.VLEN-1:0] slot_pc [CVA6Cfg.INSTR_PER_FETCH];
+  logic [BASE_IDX_W-1:0] base_row_i  [CVA6Cfg.INSTR_PER_FETCH];
+  logic [SLOT_W-1:0]     base_col_i  [CVA6Cfg.INSTR_PER_FETCH];
+  logic [BASE_IDX_W-1:0] base_update_index;
+  logic [SLOT_W-1:0]     update_row;
 
-  assign base_index = vpc_i[OFFSET+:BASE_IDX_W];
-  assign base_update_index = bht_update_i.pc[OFFSET+:BASE_IDX_W];
-  if (CVA6Cfg.RVC) begin : gen_row
-    assign update_row = bht_update_i.pc[ROW_ADDR_BITS+OFFSET-1:OFFSET];
-  end else begin : gen_row0
-    assign update_row = '0;
+  for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_slot_pc
+    assign slot_pc[i] = vpc_i + CVA6Cfg.VLEN'(i << OFFSET);
+    if (COL_BITS == 0) begin : gen_nocol
+      assign base_row_i[i] = slot_pc[i][OFFSET +: BASE_IDX_W];
+      assign base_col_i[i] = '0;
+    end else begin : gen_col
+      assign base_row_i[i] = slot_pc[i][OFFSET+COL_BITS +: BASE_IDX_W];
+      assign base_col_i[i] = slot_pc[i][OFFSET +: COL_BITS];
+    end
+  end
+
+  if (COL_BITS == 0) begin : gen_upd_nocol
+    assign base_update_index = bht_update_i.pc[OFFSET +: BASE_IDX_W];
+    assign update_row        = '0;
+  end else begin : gen_upd_col
+    assign base_update_index = bht_update_i.pc[OFFSET+COL_BITS +: BASE_IDX_W];
+    assign update_row        = bht_update_i.pc[OFFSET +: COL_BITS];
   end
 
   // ----- Tagged tables -----
-  logic [NR_TABLES-1:0] hit, taken_t, useful;
-  logic [NR_TABLES-1:0][2:0] ctr_t;
-  logic [NR_TABLES-1:0][TBL_IDX_W-1:0] t_index, t_uindex;
-  logic [NR_TABLES-1:0][TAG_BITS-1:0] t_tag, t_utag;
+  // Per-slot lookups: each fetch slot hashes its own instruction PC so two
+  // branches in one window can carry opposite predictions.
+  logic [NR_TABLES-1:0][CVA6Cfg.INSTR_PER_FETCH-1:0] hit, taken_t, useful;
+  logic [NR_TABLES-1:0][CVA6Cfg.INSTR_PER_FETCH-1:0][2:0] ctr_t;
+  logic [NR_TABLES-1:0][CVA6Cfg.INSTR_PER_FETCH-1:0][TBL_IDX_W-1:0] t_index;
+  logic [NR_TABLES-1:0][CVA6Cfg.INSTR_PER_FETCH-1:0][TAG_BITS-1:0] t_tag;
+  logic [NR_TABLES-1:0][TBL_IDX_W-1:0] t_uindex;
+  logic [NR_TABLES-1:0][TAG_BITS-1:0] t_utag;
   logic [NR_TABLES-1:0] t_upd_valid, t_alloc, t_weak;
   logic decay_q;
   logic [11:0] decay_cnt_q;
 
   for (genvar t = 0; t < NR_TABLES; t++) begin : gen_tables
-    // Index = low PC XOR folded history; tag = high PC XOR rotated fold
-    assign t_index[t] = vpc_i[OFFSET+:TBL_IDX_W] ^ folded_i[t][TBL_IDX_W-1:0];
-    assign t_tag[t]   = vpc_i[OFFSET+TBL_IDX_W+:TAG_BITS] ^ TAG_BITS'(folded_i[t]);
-    assign t_uindex[t] = bht_update_i.pc[OFFSET+:TBL_IDX_W] ^ folded_i[t][TBL_IDX_W-1:0];
-    assign t_utag[t]   = bht_update_i.pc[OFFSET+TBL_IDX_W+:TAG_BITS] ^ TAG_BITS'(folded_i[t]);
+    // Index = low PC XOR folded history; tag = high PC XOR rotated fold.
+    // Predict folds come from the fetch hart (folded_i); update folds come
+    // from the resolving branch's own hart (folded_update_i).
+    for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_slot_idx
+      assign t_index[t][i] = slot_pc[i][OFFSET+:TBL_IDX_W] ^ folded_i[t][TBL_IDX_W-1:0];
+      assign t_tag[t][i]   = slot_pc[i][OFFSET+TBL_IDX_W+:TAG_BITS] ^ TAG_BITS'(folded_i[t]);
+    end
+    assign t_uindex[t] = bht_update_i.pc[OFFSET+:TBL_IDX_W] ^ folded_update_i[t][TBL_IDX_W-1:0];
+    assign t_utag[t]   = bht_update_i.pc[OFFSET+TBL_IDX_W+:TAG_BITS] ^ TAG_BITS'(folded_update_i[t]);
 
     g6lc_bp_tage_table #(
         .CVA6Cfg    (CVA6Cfg),
         .NR_ENTRIES (TABLE_ENTRIES),
         .TAG_BITS   (TAG_BITS),
-        .IDX_BITS   (TBL_IDX_W)
+        .IDX_BITS   (TBL_IDX_W),
+        .NR_LOOKUPS (CVA6Cfg.INSTR_PER_FETCH)
     ) i_table (
         .clk_i,
         .rst_ni,
@@ -99,30 +128,34 @@ module g6lc_bp_tage
     );
   end
 
-  // Provider = highest-index hit (longest history by construction of fold rotation)
-  logic any_hit;
-  logic provider_taken;
+  // Provider per slot = highest-index hit (longest history by construction of
+  // fold rotation). Each slot's prediction is owned by its own PC's lookup.
+  logic [CVA6Cfg.INSTR_PER_FETCH-1:0] any_hit;
+  logic [CVA6Cfg.INSTR_PER_FETCH-1:0] provider_taken;
 
   always_comb begin
-    any_hit        = 1'b0;
-    provider_taken = 1'b0;
-    for (int unsigned t = 0; t < NR_TABLES; t++) begin
-      if (hit[t]) begin
-        any_hit        = 1'b1;
-        provider_taken = taken_t[t];
+    for (int unsigned i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin
+      any_hit[i]        = 1'b0;
+      provider_taken[i] = 1'b0;
+      for (int unsigned t = 0; t < NR_TABLES; t++) begin
+        if (hit[t][i]) begin
+          any_hit[i]        = 1'b1;
+          provider_taken[i] = taken_t[t][i];
+        end
       end
     end
   end
 
-  // Direction prediction per fetch slot (same index for all; RVC row uses base only for alt)
+  // Direction prediction per fetch slot from that slot's own row/column and
+  // tagged lookups.
   for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_pred
     always_comb begin
-      if (any_hit) begin
+      if (any_hit[i]) begin
         bht_prediction_o[i].valid = 1'b1;
-        bht_prediction_o[i].taken = provider_taken;
+        bht_prediction_o[i].taken = provider_taken[i];
       end else begin
-        bht_prediction_o[i].valid = base_q[base_index][i].valid;
-        bht_prediction_o[i].taken = base_q[base_index][i].ctr[1];
+        bht_prediction_o[i].valid = base_q[base_row_i[i]][base_col_i[i]].valid;
+        bht_prediction_o[i].taken = base_q[base_row_i[i]][base_col_i[i]].ctr[1];
       end
     end
   end

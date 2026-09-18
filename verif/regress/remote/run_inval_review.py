@@ -324,7 +324,11 @@ def hub_review(out, data, runtime_info, runtime):
         exe = work / 'hub-test'
         if repaired:
             scenarios = [0, 1, 2, 3, 4, 5, 6, 8] if outstanding == 4 else [0, 1, 2, 7, 8]
-            trials = [(i, False, 'HUB_INV_LOSS' if i == 5 else None) for i in scenarios]
+            # Scenario 5 (accepted writes vs delivered invalidations) now passes:
+            # the hub retains an accepted write's invalidation obligation in a
+            # registered slot and refuses further invalidating writes while it is
+            # occupied, so no write completes without its invalidation.
+            trials = [(i, False, None) for i in scenarios]
         else:
             expected = [None, 'HUB_AR_STABILITY', 'HUB_AW_STABILITY', 'HUB_ID_STABILITY', 'HUB_AW_CREDIT', 'HUB_INV_LOSS']
             trials = [(i, False, error) for i, error in enumerate(expected)]

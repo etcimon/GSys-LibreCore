@@ -52,6 +52,9 @@ module g6lc_rob #(
   assign full_o = (count_q > ROB_ENTRIES[ROB_W:0] - NR_ALLOC[ROB_W:0]);
 
   always_comb begin
+    automatic logic [ROB_W-1:0] rid, hid;
+    rid = '0;
+    hid = '0;
     rob_d   = rob_q;
     head_d  = head_q;
     tail_d  = tail_q;
@@ -59,7 +62,6 @@ module g6lc_rob #(
     for (int unsigned a = 0; a < NR_ALLOC; a++) begin
       alloc_id_o[a] = '0;
       if (alloc_valid_i[a] && !full_o) begin
-        automatic logic [ROB_W-1:0] rid;
         rid = tail_q + ROB_W'(a);
         alloc_id_o[a] = rid;
         rob_d[rid].valid = 1'b1;
@@ -93,7 +95,6 @@ module g6lc_rob #(
       end
     end
     for (int unsigned r = 0; r < NR_RETIRE; r++) begin
-      automatic logic [ROB_W-1:0] hid;
       hid = head_q + ROB_W'(r);
       retire_valid_o[r] = rob_q[hid].valid && rob_q[hid].complete;
       retire_entry_o[r] = rob_q[hid].e;

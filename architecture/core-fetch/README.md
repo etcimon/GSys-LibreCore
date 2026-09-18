@@ -21,6 +21,21 @@ Normative why: [`../firmware-boot-principles.md`](../firmware-boot-principles.md
 
 `SPEC.md` `A_decode_pure` / `A_no_fabricate`. L2/L3 may **drop**, never modify. Only L1 produces bytes.
 
+## Continuation qualification correction
+
+The later overlap-v8 “24/24 matched” record below does **not** establish full
+architectural preservation: its PC/multiset and duplicate-collapsing operand
+comparators admit instruction reordering or loss. Fault checks reproduce those
+oracle holes. The raw run is retained as a diagnostic; the stronger qualification
+claim is superseded by `../remaining-upgrade-sequence.md`'s continuation review.
+The comparator now requires ordered nonempty retirement identity (only cycle
+stamps removed) and exact captured operand traces. Timing-dependent differences
+need an independent reference; they are neither automatic PASS nor proof of an
+RTL defect. Reuse the earlier independent analyses only for their exact traces.
+The retained IQ/corrector evidence below keeps its original scope. Warm-overlap
+conservation, SMT2/reference revalidation and fixed-useful-work measurement remain
+open; no new speedup or physical timing claim is made here.
+
 ## Predictor lookup/corrector follow-up retained (2026-09-16)
 
 The working tree now contains the previously isolated response-PC and absolute
@@ -92,20 +107,99 @@ correct loop-branch prediction and no instruction refills in this window.
 Input/model/ELF hashes and observer off/on/repeat identities are checked. Dropping
 a cycle row and corrupting a fetch PC are rejected by the analysis controls.
 This is a bounded core-0 observation, not a new whole-ROI or multicore measurement.
-The existing observer does not expose cycle-level IQ-empty/readiness or backend
-stall reasons; those fields are unavailable, not zero. Add those observations
-before implementing overlap. Reproduction uses `REVIEW_FETCH_SUPPLY=1` with
-`REVIEW_FETCH_INPUTS`, `REVIEW_FETCH_CONTROLS` and `TH_OUT_DIR` in
-`run_checked_work_review.py`; this mode performs host-side analysis only.
+The earlier observer did not expose cycle-level IQ-empty/readiness or backend
+stall reasons. `g6lc_fetch_dbg` now carries a neutral `+fetch_supply`
+observer (translate_off; no feedback into any ready/valid path): per-cycle
+`[fetch_supply]` rows export req/rdy/rsp/take, `instr_queue_ready`, per-FIFO
+full/empty/usage, issue-port valid/ready, demand/FTQ/loop-buffer state and the
+redirect/kill/halt set; a cumulative `[fetch_supply_sum]` classifies every
+cycle once in priority order (redirect, take, refused×IQ-ready, iq_stall,
+halt, be_stall, empty, idle), so a supply-vs-demand bound is measured rather
+than assumed. `fetch_window_metrics` consumes the rows when a capture
+provides them and reports `iqEmptyCycles`/`backendStallCycles`/
+`refusedWhileIqReadyCycles`/`refusedWhileIqFullCycles`; captures without the
+rows still report `None` (missing, not zero). Reproduction uses
+`REVIEW_FETCH_SUPPLY=1` with `REVIEW_FETCH_INPUTS`, `REVIEW_FETCH_CONTROLS`
+and `TH_OUT_DIR` in `run_checked_work_review.py`; this mode performs
+host-side analysis only.
 
-Next measure IQ-empty/issue stalls and per-hart useful work.
-If supply is binding, evaluate registered request/response overlap with a target
-warm initiation interval of one cycle, preserving hit latency and transaction
-ownership. Do not simply assert ready in READ: the earlier address/response and
-feedback-loop failures remain regression obligations. New-request/current-return,
-backpressure, split carry, replay, kill/flush, refill and hart-switch cases must
-be checked before a change is retained. Mixed RVC and memory-bound workloads may
-benefit less; every relevant integration retains the dual-active SMT2 oracle.
+## Warm-fetch overlap: measured, then implemented (2026-09-17)
+
+The `+fetch_supply` capture (`supply-cap-v2`, locality-1024, stream8) settled the
+supply-vs-demand question before any RTL change: on the active hart, **19791 of
+19791** response (`take`) cycles carried a refused request, every refusal with
+`instr_queue_ready=1` and 19788/19791 with `iquse=0` (IQ empty and ready); the
+accept-to-accept interval was 2 cycles for 19751/19801 accepts — the machine ran
+at its structural II=2 ceiling while the pipeline starved. Whole-run split:
+`iq_stall=7`, `empty=13`, `be_stall=5`, `halt=0` — the backend essentially never
+binds; supply did.
+
+`g6lc_icache` now implements the registered request/response overlap (tag `W1`):
+the READ hit-response cycle asserts `dreq_o.ready` and remains in READ when
+`dreq_i.req` is offered. `cl_index` already keys off `vaddr_d` (the arriving
+address while `ready & req`), so the accepted request's tag/data/valid read is
+launched in the same cycle and its response returns one cycle later — a warm
+initiation interval of one cycle with hit latency (accept→response) unchanged
+at two cycles. `ready` is a function of `cl_hit` and FSM state only; every
+`cl_hit` input (`cl_tag_rdata`/`vld_rdata`/`cl_rdata` SRAM read registers,
+`cl_tag_d` from the `areq_i` translation of the registered `vaddr_q`) is a
+registered-state cone, so the I4xi/I4xj convergence loop
+(`vaddr_d`/`cl_index` → tag compare → `ready` → `vaddr_d`) cannot re-form —
+that loop needed the arriving address to feed the compare cone, and those paths
+stay cut at `vaddr_q`/`cl_index_q`. Verilator reports no convergence warning.
+
+Kill (`kill_s1`/`kill_s2`), flush, invalidation, translation-wait and all miss
+paths stay serialized exactly as before — the offer is simply re-made in IDLE,
+so transaction ownership and the single-outstanding-miss property are
+preserved. Way prediction is unaffected on the hit path: every accept-cycle
+launch is an all-ways read (`way_pred_use` is already low under `ready & req`),
+and the `force_all_ways` re-read keeps working through the `r_addr_q`
+same-index invariant; a way mispredict still costs the pre-existing +1 re-read
+cycle. Downstream, the frontend's staged response (`icache_valid_q`) remains a
+one-cycle register, so two-in-flight response arrivals are bounded by the
+existing IQ-overflow replay machinery rather than lost.
+
+Historical verification record (2026-09-17; preservation claim withdrawn by the
+continuation qualification correction above): the 24-record dual-config integration suite
+(`review-int-overlap-v8`) is **24/24 matched** against the immutable qualified
+depth-two models — every record `timingLegibleDivergence`, zero
+`timingIdentical`, as expected when fetch resolves faster on both configs. The
+comparator binds architecture at three levels: (a) PC+encoding sequence
+(`archpc`) for ordered streams; (b) the `(pc, priv, encoding)` multiset
+(`archms`) for `trace_hart_*.dasm` on multi-hart models, which is a **merged**
+retire stream whose cross-hart interleave has no architectural order — a fetch
+change legitimately reshuffles the merge and re-counts peer-flag polls while
+each hart still retires its own program in order; (c) the operand-trace
+`ot-retire drop=0` outcome stream split per committing hart (`h` field), with
+timing/allocation stamps (`t`/`gen`/`tid`/`p`) stripped and consecutive
+identical records collapsed — this absorbs timing-bounded loops (terminal
+`jal x0,0` spins, `rdcycle` polls, `wait_workers` flag spins) that run more
+iterations in the same window. Cookie *values* (tohost pass/fail) are bound
+exactly; cookie *timestamps* are cycle-counted and timing-legible. The audit
+did not establish detection of every wrong-path retire, dropped instruction,
+reordering or result corruption; its normalization predicates are now diagnostic only. `supply-cap-v3`
+re-measurement of the same workload is in flight (early rows already show
+`req&rdy&rsp&take` coincidence and `iquse`≈9–10 vs the old ceiling ~4).
+Residuals documented: `dreq_i.spec` attribution during READ describes the
+offered (next) request — pre-existing, unchanged; FDIP prefetches may now be
+accepted on response cycles; replays bound IQ-pressure arrival.
+
+### Recovered supply-cap-v3 artifact
+
+`review-supply-recovery-v1` retrieves the existing root-level `run.log` without
+rerunning the workload; the original `output/` directory is empty. Its SHA-256 is
+`5b233d3afd47baad1956cf83fc77d7af139af252b4ac73a41ddb9df7715d734b`.
+The tail contains cookie `[1000]=1` at t=159744 and two final supply summaries.
+The harness's separate `tohost=0` banner is not the pass criterion. Late captured
+rows directly show simultaneous req/ready/response/take and IQ occupancy up to 11.
+
+Neither `model.json` nor `inputs.json` exists in that capture directory. Rows and
+summaries also omit explicit core/hart identity; activity filtering is not a
+substitute for ownership. Therefore this is recovered diagnostic evidence, not a
+source-bound fixed-work performance or SMT2-preservation result. Do not derive a
+speedup from its cookie timestamp versus the old capture. P1 still needs model/
+ELF/runtime binding, independent architectural checks and a declared useful-work
+ROI comparison.
 
 ## IQ ordering: unbounded safety in the formal envelope (2026-09-16)
 

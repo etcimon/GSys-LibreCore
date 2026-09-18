@@ -743,10 +743,29 @@ def predictor_promotion_review():
     return 0
 
 
-def fetch_window_metrics(ic, events, begin, end, head):
+def fetch_window_metrics(ic, events, begin, end, head, supply=None):
     clock = [r for r in ic if begin <= int(r['t']) < end]
     assert [int(r['t']) for r in clock] == list(range(begin, end)), 'capture-complete'
     selected = [(kind, r) for kind, r in events if 't' in r and begin <= int(r['t']) < end]
+    # [fetch_supply] rows (g6lc_fetch_dbg, +fetch_supply) carry the cycle-level
+    # IQ/backend readiness fields this observer otherwise lacks. When the
+    # capture predates them the fields stay None (missing, not zero).
+    supply_rows = []
+    if supply:
+        supply_rows = [r for r in supply if begin <= int(r['t']) < end]
+        assert supply_rows, 'supply-observation-window-empty'
+    iq_empty_cycles = backend_stall_cycles = iq_ready_low = refused_iqrdy = refused_iqfull = None
+    if supply_rows:
+        # iquse is the summed FIFO occupancy: 0 means every FIFO empty
+        # (width-agnostic all-empty check); bevld/berdy print as %b strings.
+        iq_empty_cycles = sum(1 for r in supply_rows if int(r['iquse']) == 0)
+        backend_stall_cycles = sum(1 for r in supply_rows
+                                   if set(r['bevld']) != {'0'} and '0' in r['berdy'])
+        iq_ready_low = sum(1 for r in supply_rows if r['iqrdy'] == '0')
+        refused_iqrdy = sum(1 for r in supply_rows
+                            if r['req'] == '1' and r['rdy'] == '0' and r['iqrdy'] == '1')
+        refused_iqfull = sum(1 for r in supply_rows
+                             if r['req'] == '1' and r['rdy'] == '0' and r['iqrdy'] == '0')
     fetched = [r for kind, r in selected if kind == 'ot-fetch']
     assert fetched and len(fetched) % 9 == 0, 'complete-iterations'
     for i, r in enumerate(fetched):
@@ -790,8 +809,12 @@ def fetch_window_metrics(ic, events, begin, end, head):
         'flushCycles': sum(int(r['flush']) for r in clock),
         'decodedAllocations': len(allocated), 'committedRetirements': len(retired),
         'resolvedBranches': len(branches), 'mispredicts': sum(int(r['mispredict']) for r in branches),
-        'controlEvents': len(controls), 'iqEmptyCycles': None, 'backendStallCycles': None,
-        'missingObservations': 'No cycle-level IQ occupancy/ready or backend stall reason in this observer; missing transfers are not classified as empty/stalled.'
+        'controlEvents': len(controls), 'iqEmptyCycles': iq_empty_cycles,
+        'backendStallCycles': backend_stall_cycles,
+        'iqReadyLowCycles': iq_ready_low,
+        'refusedWhileIqReadyCycles': refused_iqrdy,
+        'refusedWhileIqFullCycles': refused_iqfull,
+        'missingObservations': None if supply_rows else 'No cycle-level IQ occupancy/ready or backend stall reason in this observer; missing transfers are not classified as empty/stalled.'
     }
 
 

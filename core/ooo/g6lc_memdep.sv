@@ -22,9 +22,9 @@ module g6lc_memdep #(
     // Query: load about to issue
     input  logic                     ld_query_i,
     input  logic [CVA6Cfg.VLEN-1:0]  ld_pc_i,
-    // Observed dependence this cycle (older store pending && stl_stall)
+    // Observed dependence this cycle (store pending && stl_stall)
     input  logic                     dep_observe_i,
-    input  logic                     older_store_pending_i,
+    input  logic                     store_pending_i,
     output logic                     stall_o,
     output logic                     predict_o
 );
@@ -68,7 +68,7 @@ module g6lc_memdep #(
       end
     end
 
-    if (enable_i && ld_query_i && older_store_pending_i) begin
+    if (enable_i && ld_query_i && store_pending_i) begin
       // Classic store-set: load PC table hit with matching ssid
       if (set_valid_q[idx(ld_pc_i)] &&
           (set_ssid_q[idx(ld_pc_i)] == ssid(ld_pc_i) || ld_wait_q[idx(ld_pc_i)])) begin

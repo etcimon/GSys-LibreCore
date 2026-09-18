@@ -318,6 +318,17 @@ baseline identity gates. IQ proof witnesses use explicit stable input signals;
 inspect the lowered model before trusting symbolic-attribute intent. Internal
 state intentionally changed by a repair is not an output-equivalence obligation.
 
+**P0–P2 continuation evidence:** the upgrade-sequence continuation review
+supersedes conflicting historical closure rows. `run_rtl_audit_integrations.py`
+now requires ordered nonempty retirement identity (only cycle stamps removed)
+and exact operand traces when captured; multiset/duplicate-collapsing digests
+are diagnostic, not architectural-preservation proof. Its
+`REVIEW_INTEGRATION_REASSESS=<captured results.json>` mode reclassifies frozen
+artifacts without rerunning workloads. Stream8's frozen schema has no operand
+trace field; SMT2's field is mandatory. Do not copy old independent analyses to
+changed traces. The new checkpoint overflow tests distinguish stored FIFO drain
+from full resolution-lifetime drain. Preserve that distinction in future fixes.
+
 **Credential-source preference (2026-09-16):** the user requests
 `build-platform/.remote-ssh-creds`. Use the existing build-platform `remote`
 gateway, which reads that cache and supplies credentials to the proxy without

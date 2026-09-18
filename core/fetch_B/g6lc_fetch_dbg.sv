@@ -53,7 +53,32 @@ module g6lc_fetch_dbg
     input logic set_debug_pc_i,
     input logic set_pc_commit_i,
     input logic ex_valid_i,
-    input logic eret_i
+    input logic eret_i,
+    // ---- Fetch-supply neutral observation (P1 warm fetch) -----------------
+    // Read-only probes of the module-scope handshake signals; the joint
+    // distribution of "request refused" x "IQ ready" is what decides whether
+    // registered request/response overlap can raise the warm II. Nothing in
+    // this block may feed back into a ready/valid path.
+    input logic icache_req_i,
+    input logic icache_rdy_i,
+    input logic icache_rsp_i,
+    input logic icache_take_i,
+    input logic iq_ready_i,
+    input logic demand_req_i,
+    input logic demand_fire_i,
+    input logic ftq_full_i,
+    input logic ftq_head_valid_i,
+    input logic lbuf_hit_i,
+    input logic lbuf_consume_i,
+    input logic pf_req_i,
+    input logic if_ready_i,
+    input logic halt_frontend_i,
+    input logic bp_fire_i,
+    input logic arch_reseed_i,
+    input logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_ready_i,
+    input logic [CVA6Cfg.INSTR_PER_FETCH-1:0] iq_full_i,
+    input logic [CVA6Cfg.INSTR_PER_FETCH-1:0] iq_empty_i,
+    input logic [CVA6Cfg.INSTR_PER_FETCH-1:0][$clog2(8)-1:0] iq_use_i
 );
 
   localparam fetch_geo_t Geo = geo(CVA6Cfg);
@@ -357,6 +382,108 @@ module g6lc_fetch_dbg
     end
   end
 
+  // ---- Fetch-supply neutral observation (P1 warm fetch) ------------------
+  // The II=2 warm signature is already known structurally (I$ accepts only in
+  // IDLE, responds in READ). What is NOT known is the joint distribution:
+  // during refused cycles, could the IQ/backend have absorbed an overlapped
+  // response? These counters classify every cycle exactly once, in priority
+  // order, so "supply-bound" vs "demand-bound" is measured, not assumed.
+  //   redirect  - flush/mispredict/reseed/bp_fire/kill/replay (correctness
+  //               bubbles; the pipeline is deliberately restarted)
+  //   take      - an I$ response was registered into the response stage
+  //   refused   - req offered, I$ not ready (the II=2 arm), split by whether
+  //               the IQ could have taken a packet that cycle
+  //   iq_stall  - IQ full: backend-limited, overlap would not help
+  //   halt      - controller halt
+  //   be_stall  - entries offered to ID stage but not all accepted
+  //   empty     - IQ fully empty and no staged response: starved
+  //   idle      - nothing outstanding at all
+  logic        supply_en;
+  longint unsigned supply_row_limit;
+  logic [63:0] supply_lo, supply_hi;
+  int unsigned sup_total, sup_redir, sup_take, sup_accept;
+  int unsigned sup_refused, sup_ref_iqrdy, sup_ref_iqfull;
+  int unsigned sup_iq_stall, sup_halt, sup_be_stall, sup_empty, sup_idle;
+  int unsigned iq_use_total;
+
+  always_comb begin
+    iq_use_total = 0;
+    for (int unsigned k = 0; k < Slots; k++)
+      iq_use_total += int'(iq_use_i[k]);
+  end
+
+  initial begin
+    supply_en = $test$plusargs("fetch_supply");
+    supply_lo = '0;
+    supply_hi = {64{1'b1}};
+    supply_row_limit = 30000;
+    void'($value$plusargs("fetch_supply_lo=%h", supply_lo));
+    void'($value$plusargs("fetch_supply_hi=%h", supply_hi));
+    void'($value$plusargs("fetch_supply_limit=%d", supply_row_limit));
+  end
+
+  // verilog_lint: waive always-ff-non-reset
+  always_ff @(posedge clk_i) begin
+    automatic logic redir, active;
+    if (!rst_ni) begin
+      sup_total <= '0; sup_redir <= '0; sup_take <= '0; sup_accept <= '0;
+      sup_refused <= '0; sup_ref_iqrdy <= '0; sup_ref_iqfull <= '0;
+      sup_iq_stall <= '0; sup_halt <= '0; sup_be_stall <= '0;
+      sup_empty <= '0; sup_idle <= '0;
+    end else if (supply_en) begin
+      redir = flush_i || is_mispredict_i || arch_reseed_i || bp_fire_i
+              || kill_s1_i || kill_s2_i || replay_i;
+      sup_total <= sup_total + 1;
+      if (redir) begin
+        sup_redir <= sup_redir + 1;
+      end else if (icache_take_i) begin
+        sup_take <= sup_take + 1;
+      end else if (icache_req_i && !icache_rdy_i) begin
+        sup_refused <= sup_refused + 1;
+        if (iq_ready_i) sup_ref_iqrdy <= sup_ref_iqrdy + 1;
+        else sup_ref_iqfull <= sup_ref_iqfull + 1;
+      end else if (!iq_ready_i) begin
+        sup_iq_stall <= sup_iq_stall + 1;
+      end else if (halt_frontend_i) begin
+        sup_halt <= sup_halt + 1;
+      end else if (|issue_v_i && !(&fetch_entry_ready_i)) begin
+        sup_be_stall <= sup_be_stall + 1;
+      end else if (&iq_empty_i && !icache_valid_q_i) begin
+        sup_empty <= sup_empty + 1;
+      end else begin
+        sup_idle <= sup_idle + 1;
+      end
+      if (icache_req_i && icache_rdy_i) sup_accept <= sup_accept + 1;
+
+      // Per-cycle row only while fetch is doing something (ic-cycle
+      // convention): a fully quiet pipeline emits nothing.
+      active = icache_req_i || icache_rsp_i || icache_valid_q_i
+               || !(&iq_empty_i) || !iq_ready_i || demand_req_i || pf_req_i
+               || flush_i || is_mispredict_i || replay_i || halt_frontend_i
+               || |issue_v_i;
+      if (active && $time <= supply_row_limit
+          && 64'(vaddr_q_i) >= supply_lo && 64'(vaddr_q_i) <= supply_hi)
+        $display(
+            "[fetch_supply] t=%0t req=%0d rdy=%0d rsp=%0d take=%0d qv=%0d dem=%0d dfire=%0d ftqfull=%0d ftqhv=%0d ifrdy=%0d iqrdy=%0d iqfull=%h iqempty=%h iquse=%0d bevld=%b berdy=%b bpf=%0d ars=%0d k1=%0d k2=%0d misp=%0d flush=%0d halt=%0d rpl=%0d unal=%0d lpend=%0d lbuf=%0d lcons=%0d pf=%0d npc=%h",
+            $time, icache_req_i, icache_rdy_i, icache_rsp_i, icache_take_i,
+            icache_valid_q_i, demand_req_i, demand_fire_i, ftq_full_i,
+            ftq_head_valid_i, if_ready_i, iq_ready_i, iq_full_i, iq_empty_i,
+            iq_use_total, issue_v_i, fetch_entry_ready_i, bp_fire_i,
+            arch_reseed_i, kill_s1_i, kill_s2_i, is_mispredict_i, flush_i,
+            halt_frontend_i, replay_i, serving_unaligned_i, leftover_pending_i,
+            lbuf_hit_i, lbuf_consume_i, pf_req_i, npc_i);
+    end
+  end
+
+  final begin
+    if (supply_en)
+      $display(
+          "[fetch_supply_sum] total=%0d redir=%0d take=%0d accept=%0d refused=%0d ref_iqrdy=%0d ref_iqfull=%0d iq_stall=%0d halt=%0d be_stall=%0d empty=%0d idle=%0d",
+          sup_total, sup_redir, sup_take, sup_accept, sup_refused,
+          sup_ref_iqrdy, sup_ref_iqfull, sup_iq_stall, sup_halt,
+          sup_be_stall, sup_empty, sup_idle);
+  end
+
   logic unused_dbg;
   assign unused_dbg = |{snap.npc[0], snap.fetch_addr[0], snap.vaddr_q[0], snap.expected[0],
       snap.win_tag_v[0], snap.win_tag_e[0], snap.hw_off_f[0], snap.icache_valid_q,
@@ -365,7 +492,11 @@ module g6lc_fetch_dbg
       snap.redirect_hit, snap.win_rej, snap.arch_valid, |snap.arch_src, snap.restore_fire,
       |snap.geo_issue, |snap.geo_harts, |snap.geo_slots, |snap.geo_hold_max, |snap.hold_age,
       |arch_pc_i, |resolve_pc_i, Geo.smt, leftover_valid_i, |leftover_pc_i, |leftover_lo_i,
-      hold_bound_reported_q,
+      hold_bound_reported_q, supply_en, |supply_lo, |supply_hi,
+      iq_ready_i, demand_req_i, demand_fire_i, ftq_full_i, ftq_head_valid_i,
+      lbuf_hit_i, lbuf_consume_i, pf_req_i, if_ready_i, halt_frontend_i,
+      bp_fire_i, arch_reseed_i, |fetch_entry_ready_i, |iq_full_i, |iq_empty_i,
+      |iq_use_i, icache_req_i, icache_rdy_i, icache_rsp_i, icache_take_i,
       Geo.rvc, Geo.ftq, Geo.rvh, En.align, En.accept, En.redirect, En.trap_hold,
       En.bp_hint, |data_q_i, |slot_instr_i, |slot_bytes_ok};
 
@@ -412,6 +543,26 @@ bind frontend g6lc_fetch_dbg #(
     .set_debug_pc_i     (set_debug_pc_i),
     .set_pc_commit_i    (set_pc_commit_i),
     .ex_valid_i         (ex_valid_i),
-    .eret_i             (eret_i)
+    .eret_i             (eret_i),
+    .icache_req_i       (icache_dreq_o.req),
+    .icache_rdy_i       (icache_dreq_i.ready),
+    .icache_rsp_i       (icache_dreq_i.valid),
+    .icache_take_i      (icache_take),
+    .iq_ready_i         (instr_queue_ready),
+    .demand_req_i       (demand_req),
+    .demand_fire_i      (demand_fire),
+    .ftq_full_i         (ftq_full),
+    .ftq_head_valid_i   (ftq_head_valid),
+    .lbuf_hit_i         (lbuf_hit),
+    .lbuf_consume_i     (lbuf_consume),
+    .pf_req_i           (pf_req),
+    .if_ready_i         (if_ready),
+    .halt_frontend_i    (halt_frontend_i),
+    .bp_fire_i          (bp_fire),
+    .arch_reseed_i      (arch_reseed),
+    .fetch_entry_ready_i(fetch_entry_ready_i),
+    .iq_full_i          (i_instr_queue.instr_queue_full),
+    .iq_empty_i         (i_instr_queue.instr_queue_empty),
+    .iq_use_i           (i_instr_queue.instr_queue_usage)
 );
 //pragma translate_on

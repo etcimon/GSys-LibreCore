@@ -17,6 +17,84 @@ matching row here so "which spec chapter is this test protecting?" stays answera
 
 ---
 
+## P0–P2 continuation qualification boundary
+
+Predictor recovery is microarchitectural and indirectly constrained by base-ISA
+control flow: `tb_g6lc_review_ckpt` in `verif/tb/core/tb_g6lc_rtl_review.sv` adds
+cases 5/6 for dropped-snapshot ownership after stored entries drain, and recovery
+while empty. Proxy `run_rtl_audit_review.py` with `REVIEW_RTL_CKPT=1` reproduces
+old-RTL failures and passes seven positives/five expected-failure controls after
+the desync clear repair (`review-ckpt-after-20260916`). One-hart leaf synthesis
+is check/latch clean. This does not qualify full predictor/SMT2 or OoO recovery.
+
+`run_rtl_audit_integrations.py` now fault-tests its preservation comparator and
+requires ordered nonempty retirement identity with only cycle stamps removed,
+plus exact captured operand traces. The weaker overlap-v8 multiset/duplicate
+normalization could hide reordering/loss. Its raw runs remain diagnostic; their
+stronger preservation claim is withdrawn pending independent validation. No old
+architectural analysis is inherited merely because normalized traces match.
+Reclassification reads captured artifacts; it is not a new RTL execution.
+
+The concurrent L2 HUM bench now models multiple outstanding read jobs and adds
+cases 8–11 for MLP engagement, collector/issue versus retirement collisions, and
+blocked data installation. `review-l2-hum-clean-v1` passes 22 records after the
+counter/tag and elaboration/control-block repairs. Three isolated old-assignment
+mutations are detected by the corresponding contract checks. RR0/RR1 512 B/two-way/
+two-MSHR/two-bank synthesis reports zero check problems/no latches; SRAM model
+warnings remain. The runner's optional `REVIEW_L2_HUM_SYNTH=1` runs that smoke,
+and `REVIEW_L2_HUM_FAULT=collect|issue|install` reproduces the controls in copied
+sources. This does not qualify same-ID reorder, concurrent writes/atomics,
+invalidations, L3/prefetch integration or the still-serial main leaf bench.
+
+### Read ownership and atomic transport continuation
+
+`tb_g6lc_l2_hum.sv` now scores accepted requests per AXI ID and holds offered ARs
+until handshake. Cases 12–19 exercise same-ID hit/bypass/waiter ordering,
+nonadjacent merges, held AR, different-ID hit-under-miss and same-ID MLP. Cases
+20–27 add independent B/R delay/backpressure and no-R write controls. Before RTL
+repairs, five read/channel cases and three atomic-lifetime cases fail as predicted.
+After repairs, `review-l2-atop-after-v1` passes 28 positives and 26 data-oracle
+negatives, with small RR0/RR1 synthesis checks. The atomic model checks transport
+only; it does not perform arithmetic or update memory.
+
+The default-direct stack fixture repeats 54 records successfully with both RR0/RR1
+synthesis checks (`review-l2-stack-direct-v2`); the existing MSHR-only suite passes
+18 records (`review-mshr-id-query-regress-v1`). `CHAIN_L3=1` places a vendor
+`axi_cut` between L2 and a two-MSHR L3 and passes 34 records
+(`review-l2-stack-chain-v4`). Direct abutment still fails Verilator's UNOPTFLAT
+gate, which is not waived; `review-l2-stack-scc-v1` separately finds zero SCCs in
+the matching lowered two-cache fixture.
+
+`verif/tb/l2/tb_g6lc_pf.sv` with `run_pf_review.py` covers server-prefetch response
+ownership: reserved-ID demand bursts, non-aliasing demand progress under an
+outstanding prefetch, and no injection while upstream owns the reserved ID. The
+pre-change RTL fails all four scenarios with three distinct tokens plus a latch
+error; the repair passes 8 records and fixture synthesis with zero SCCs. Prefetch
+accuracy and bandwidth are not covered, and no broader cache, coherence or ISA
+coverage promotion follows.
+
+Invalidation-source ownership adds two scenarios: invalidation during an active fill
+(serve the attached requester, install nothing, force a refill) and a write
+self-invalidation displaced by a same-cycle external snoop. Refills are counted at
+the L2 master boundary so the checks stay valid when an outer cache absorbs them.
+
+`tb_g6lc_review_rename` gains checkpoint-retirement scenarios (retired slot reuse,
+recovery preserved across a retirement) and `tb_g6lc_review_dispatch` gains an LSQ
+group-credit scenario. Both have fault controls that restore the defective behaviour
+(`REVIEW_RTL_RENAME_FAULT=release`, `REVIEW_RTL_CREDIT_FAULT=1`) and must fail.
+Scenario 30 covers replacement-metadata port scheduling under `RR_EN=1`, measuring the
+read/install collision and any lost read structurally at the RAM interface, sweeping
+the phase to reach the collision and failing as inconclusive when none occurs;
+`REVIEW_L2_HUM_RR_FAULT=1` restores the original schedule and must fail.
+
+`tb_g6lc_review_dispatch` gains a `MDP` parameter so `MemDepPredEn=1` can be
+elaborated; `REVIEW_RTL_MEMDEP=1` promotes feedback to an error and `REVIEW_RTL_LATCH=1`
+promotes latch inference to an error.
+
+Final re-gate: `review-l2-rr-regate-v3` 60 cache records with synthesis and
+`review-core-final-regate-v1` 66 records across the core suites (the earlier
+`review-l2-final-regate-v1` 58-record gate predates scenario 30).
+
 ## Instruction-supply review tests (2026-09-15)
 
 | Contract | Test / execution | Scope and result |

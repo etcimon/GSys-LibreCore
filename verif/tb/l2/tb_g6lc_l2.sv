@@ -144,6 +144,7 @@ module tb_g6lc_l2;
       .l2_bank_conflict_o (l2_bank_conf),
       .l2_evict_valid_o   (evict_v),
       .l2_evict_addr_o    (evict_addr),
+      .l2_evict_ready_i   (1'b1),
       .l2_back_inval_valid_i (back_inval_valid),
       .l2_back_inval_addr_i  (back_inval_addr),
       .l2_back_inval_ready_o (back_inval_ready)
@@ -258,7 +259,11 @@ module tb_g6lc_l2;
       mst_resp.ar_ready <= !rd_active && !mst_resp.r_valid && !atop_r_pending;
       if (mst_req.ar_valid && mst_resp.ar_ready) begin
         if (rd_active || mst_resp.r_valid || atop_r_pending) $fatal(1, "memory read overlap");
-        if (mst_req.ar.id !== slv_req.ar.id || mst_req.ar.size !== 3 ||
+        // Fills issue under the engine's reserved id so their beats can be
+        // routed to the collector; a bypass keeps the requester's id.
+        if (mst_req.ar.id !== ((l2_is_cacheable(slv_req.ar.cache) && !slv_req.ar.lock)
+                               ? id_t'('1) : slv_req.ar.id) ||
+            mst_req.ar.size !== 3 ||
             mst_req.ar.burst !== axi_pkg::BURST_INCR || mst_req.ar.lock !== slv_req.ar.lock)
           $fatal(1, "memory AR metadata mismatch");
         if (l2_is_cacheable(slv_req.ar.cache) && !slv_req.ar.lock) begin
@@ -408,9 +413,9 @@ module tb_g6lc_l2;
   integer size_fd = 0;
   initial if ($test$plusargs("mshr-trace")) begin
     size_fd = $fopen("ports.log", "w");
-    if (!size_fd) $fatal(1, "L2SIZE_TRACE_OPEN");
+    if (size_fd == 0) $fatal(1, "L2SIZE_TRACE_OPEN");
   end
-  always @(posedge clk) if (rst_n && size_fd) begin
+  always @(posedge clk) if (rst_n && size_fd != 0) begin
     if (slv_req.ar_valid && slv_resp.ar_ready) $fdisplay(size_fd, "%0d sar %h", cyc_q, slv_req.ar);
     if (slv_req.aw_valid && slv_resp.aw_ready) $fdisplay(size_fd, "%0d saw %h", cyc_q, slv_req.aw);
     if (slv_req.w_valid && slv_resp.w_ready) $fdisplay(size_fd, "%0d sw %h", cyc_q, slv_req.w);
@@ -422,7 +427,7 @@ module tb_g6lc_l2;
     if (driven_resp.r_valid && mst_req.r_ready) $fdisplay(size_fd, "%0d mr %h", cyc_q, driven_resp.r);
     if (driven_resp.b_valid && mst_req.b_ready) $fdisplay(size_fd, "%0d mb %h", cyc_q, driven_resp.b);
   end
-  final if (size_fd) $fclose(size_fd);
+  final if (size_fd != 0) $fclose(size_fd);
 
   int unsigned size_live = 0, size_peak = 0, size_allocations = 0, size_completions = 0;
   always @(posedge clk) begin
@@ -466,6 +471,9 @@ module tb_g6lc_l2;
   int unsigned policy_set, policy_way;
   bit policy_hit, policy_cacheable, policy_lookup_seen;
   int unsigned policy_lookups = 0, policy_installs = 0, policy_evictions = 0;
+  // Fills that completed with a non-OKAY R resp: they install no tag, so the
+  // installs == fills invariant must subtract them.
+  int unsigned fill_errors = 0;
   logic [SET_ASSOC-1:0] policy_evicted_ways = '0;
 
   always @(posedge clk) begin
@@ -525,6 +533,9 @@ module tb_g6lc_l2;
         policy_next[policy_set] = (policy_way + 1) % SET_ASSOC;
         policy_installs++;
       end
+      if (dut.gen_l2.mshr_complete &&
+          dut.gen_l2.fill_ferr_q[dut.gen_l2.serve_idx_q] != axi_pkg::RESP_OKAY)
+        fill_errors++;
       if (slv_req.aw_valid && slv_resp.aw_ready) begin
         for (int w = 0; w < SET_ASSOC; w++)
           if (policy_lines[int'((slv_req.aw.addr >> OFF_BITS) % NUM_SETS)][w] ==
@@ -1150,6 +1161,23 @@ module tb_g6lc_l2;
         $fatal(1, "short-last recovery accounting");
     end
 
+    // Cacheable fill error: SLVERR/DECERR fill beats must propagate their resp
+    // to the requester, install NO line, and leave a clean retry (the second
+    // read must miss+refill, not hit a poisoned install). Bypass-error tests
+    // alone do not cover this path.
+    phase_begin();
+    memory_resp_code = axi_pkg::RESP_SLVERR;
+    axi_read(line_addr(1, 950), CACHEABLE, BEATS, 0, MEM_LATENCY + 30, 0, axi_pkg::RESP_SLVERR);
+    memory_resp_code = axi_pkg::RESP_OKAY;
+    axi_read(line_addr(1, 950), CACHEABLE, BEATS);
+    memory_resp_code = axi_pkg::RESP_DECERR;
+    axi_read(line_addr(2, 951), CACHEABLE, BEATS, 0, MEM_LATENCY + 30, 0, axi_pkg::RESP_DECERR);
+    memory_resp_code = axi_pkg::RESP_OKAY;
+    axi_read(line_addr(2, 951), CACHEABLE, BEATS);
+    phase_end("fill_error_no_install", 4, 0);
+    if (cnt_miss - ph_miss != 4 || cnt_hit != ph_hit || fills - ph_fills != 4)
+      $fatal(1, "fill-error poisoned install or resp drop");
+
     @(negedge clk); rst_n = 0;
     repeat (4) @(negedge clk);
     rst_n = 1;
@@ -1166,7 +1194,7 @@ module tb_g6lc_l2;
     phase_end("replacement_hole", SET_ASSOC + 2, 0);
     if (cnt_evict - ph_evict != 1 || cnt_hit != ph_hit) $fatal(1, "hole refill/eviction coverage");
 
-    if (policy_lookups != cnt_hit + cnt_miss || policy_installs != fills ||
+    if (policy_lookups != cnt_hit + cnt_miss || policy_installs != fills - fill_errors ||
         policy_evictions != cnt_evict || policy_lookups == 0 || policy_installs == 0 ||
         policy_evictions == 0 || policy_evicted_ways !== (RR_EN != 0 ? '1 : SET_ASSOC'(1)))
       $fatal(1, "empty or incomplete replacement coverage");
@@ -1238,7 +1266,8 @@ module g6lc_l2_fixture
   parameter int unsigned RR_EN = 0,
   parameter int unsigned EQ_NEGATIVE = 0,
   parameter int unsigned MSHR_DEPTH = 4,
-  parameter int unsigned DATA_BANKS = 2
+  parameter int unsigned DATA_BANKS = 2,
+  parameter bit CHAIN_L3 = 1'b0
 )(
   input logic clk_i, rst_ni,
   input req_t slv_req_i,
@@ -1252,7 +1281,23 @@ module g6lc_l2_fixture
   output logic inval_ready_o
 );
   logic actual_hit;
+  req_t cache_req;
+  resp_t cache_resp;
   assign hit_o = EQ_NEGATIVE != 0 ? !actual_hit : actual_hit;
+  if(CHAIN_L3)begin : gen_l3_chain
+    g6lc_l3_top #(
+      .Enable(1'b1),.BYTE_SIZE(2048),.SET_ASSOC(2),.LINE_WIDTH(512),
+      .MSHR_DEPTH(2),.DATA_BANKS(2),.AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),
+      .AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),.axi_req_t(req_t),.axi_resp_t(resp_t)
+    ) i_l3 (
+      .clk_i,.rst_ni,.slv_req_i(cache_req),.slv_resp_o(cache_resp),
+      .mst_req_o,.mst_resp_i,.l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),
+      .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
+    );
+  end else begin : gen_l2_only
+    assign mst_req_o=cache_req;
+    assign cache_resp=mst_resp_i;
+  end
   g6lc_l2_top #(
     .BYTE_SIZE(BYTE_SIZE), .SET_ASSOC(SET_ASSOC), .LINE_WIDTH(512),
     .MSHR_DEPTH(MSHR_DEPTH), .DATA_BANKS(DATA_BANKS),
@@ -1261,10 +1306,13 @@ module g6lc_l2_fixture
 `endif
     .axi_req_t(req_t), .axi_resp_t(resp_t)
   ) i_l2 (
-    .clk_i, .rst_ni, .slv_req_i, .slv_resp_o, .mst_req_o, .mst_resp_i,
+    .clk_i, .rst_ni, .slv_req_i, .slv_resp_o, .mst_req_o(cache_req), .mst_resp_i(cache_resp),
     .l2_hit_o(actual_hit), .l2_miss_o(miss_o), .l2_bypass_o(bypass_o),
     .l2_mshr_full_o(full_o), .l2_bank_conflict_o(conflict_o),
     .l2_evict_valid_o(evict_o), .l2_evict_addr_o(evict_addr_o),
+`ifndef L2TB_LEGACY
+    .l2_evict_ready_i(1'b1),
+`endif
     .l2_back_inval_valid_i(inval_i), .l2_back_inval_addr_i(inval_addr_i),
     .l2_back_inval_ready_o(inval_ready_o)
   );

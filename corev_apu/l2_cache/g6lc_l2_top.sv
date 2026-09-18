@@ -51,9 +51,14 @@ module g6lc_l2_top
     output logic      l2_bypass_o,
     output logic      l2_mshr_full_o,
     output logic      l2_bank_conflict_o,
-    // Victim replace (valid way overwritten on miss) — inclusive LLC back-inval
+    // Victim replace (valid way overwritten on miss) — inclusive LLC back-inval.
+    // evict is a valid/ready offer: it re-asserts every cycle the FSM holds in
+    // S_TAG, and the victim commit waits for l2_evict_ready_i, so a victim can
+    // never be displaced while its back-invalidation is still unaccepted.
+    // Tie ready high when no inclusive engine is connected (legacy behaviour).
     output logic                          l2_evict_valid_o,
     output logic [AXI_ADDR_WIDTH-1:0]     l2_evict_addr_o,
+    input  logic                          l2_evict_ready_i,
     // L3→L2 inclusive back-invalidate (address of victim line at L3). Always
     // ready (single-cycle tag match). Tie valid low when unused.
     input  logic                          l2_back_inval_valid_i,
@@ -100,6 +105,17 @@ module g6lc_l2_top
     return a[OFF_BITS+IDX_BITS +: TAG_BITS];
   endfunction
 
+  // Issue-order fifo pointer helpers (MSHR_DEPTH is not required to be a
+  // power of two, so wrap explicitly rather than relying on width overflow).
+  function automatic logic [MSHR_W-1:0] fifo_inc(input logic [MSHR_W-1:0] p);
+    return (p == MSHR_W'(MSHR_DEPTH - 1)) ? '0 : p + 1'b1;
+  endfunction
+
+  function automatic logic [MSHR_W-1:0] fifo_wrap(input logic [MSHR_W:0] p);
+    return (p >= (MSHR_W + 1)'(MSHR_DEPTH))
+           ? MSHR_W'(p - MSHR_DEPTH) : MSHR_W'(p);
+  endfunction
+
   // --------------------
   // Tag / data / MSHR
   // --------------------
@@ -119,11 +135,21 @@ module g6lc_l2_top
   assign l2_back_inval_ready_o = 1'b1;
   logic wr_self_inval;
   logic [AXI_ADDR_WIDTH-1:0] wr_self_inval_addr;
-  assign tag_match_inval = l2_back_inval_valid_i | wr_self_inval;
+  // The two invalidation sources share one match port, so an external snoop
+  // would otherwise discard a same-cycle write self-invalidation and leave the
+  // written line cached. The deferred request is held until it is applied, and
+  // no new request is accepted meanwhile, so no read can hit the stale line.
+  logic wr_inval_pend_q, wr_inval_pend_d;
+  logic [AXI_ADDR_WIDTH-1:0] wr_inval_addr_q, wr_inval_addr_d;
+  logic [AXI_ADDR_WIDTH-1:0] self_inval_addr;
+  logic self_inval_req;
+  assign self_inval_req  = wr_self_inval | wr_inval_pend_q;
+  assign self_inval_addr = wr_inval_pend_q ? wr_inval_addr_q : wr_self_inval_addr;
+  assign tag_match_inval = l2_back_inval_valid_i | self_inval_req;
   assign tag_match_index = idx_of(l2_back_inval_valid_i ? l2_back_inval_addr_i
-                                                        : wr_self_inval_addr);
+                                                       : self_inval_addr);
   assign tag_match_tag   = tag_of(l2_back_inval_valid_i ? l2_back_inval_addr_i
-                                                        : wr_self_inval_addr);
+                                                       : self_inval_addr);
 
   g6lc_l2_tag #(
       .NUM_SETS  (NUM_SETS),
@@ -190,6 +216,8 @@ module g6lc_l2_top
 
   logic mshr_alloc, mshr_ready, mshr_merged, mshr_complete, mshr_full, mshr_empty;
   logic [MSHR_W-1:0] mshr_alloc_idx, mshr_complete_idx;
+  logic [MSHR_DEPTH-1:0] fill_kill_q, fill_kill_d;
+  logic [AXI_ID_WIDTH-1:0] mshr_complete_id;
   logic [AXI_ADDR_WIDTH-1:0] mshr_alloc_line;
   // Hit-under-miss: waiter payload is the requester's own AXI read shape, so a
   // merged reader is served its own beats rather than the primary's. A waiter
@@ -197,6 +225,8 @@ module g6lc_l2_top
   // offset is stored — keeping the full address here cost ~4x the waiter flops.
   localparam int unsigned MSHR_META_W = OFF_BITS + 8 + 3;
   logic                    mshr_lookup_hit;
+  logic [MSHR_DEPTH-1:0]   mshr_id_match;
+  logic [MSHR_W-1:0]       mshr_lookup_idx;
   logic [AXI_ID_WIDTH-1:0] mshr_alloc_id;
   logic [MSHR_META_W-1:0]  mshr_alloc_meta;
   logic                    mshr_waiter_pop, mshr_waiter_valid;
@@ -226,15 +256,20 @@ module g6lc_l2_top
       .alloc_id_i        (mshr_alloc_id),
       .alloc_meta_i      (mshr_alloc_meta),
       .alloc_is_write_i  (1'b0),
+      // A killed (invalidated) fill stays in the table to drain and serve
+      // pre-kill waiters, but new same-line readers must not merge into it —
+      // they allocate their own entry and re-fetch the post-inval line.
+      .merge_block_i     (fill_kill_q),
       .alloc_ready_o     (mshr_ready),
       .alloc_merged_o    (mshr_merged),
       .alloc_idx_o       (mshr_alloc_idx),
       .lookup_line_addr_i(mshr_alloc_line),
       .lookup_hit_o      (mshr_lookup_hit),
-      .lookup_idx_o      (),
+      .lookup_idx_o      (mshr_lookup_idx),
+      .id_match_o        (mshr_id_match),
       .complete_i        (mshr_complete),
       .complete_idx_i    (mshr_complete_idx),
-      .complete_id_o     (),
+      .complete_id_o     (mshr_complete_id),
       .waiter_valid_o    (mshr_waiter_valid),
       .waiter_id_o       (mshr_waiter_id),
       .waiter_meta_o     (mshr_waiter_meta),
@@ -247,17 +282,24 @@ module g6lc_l2_top
   assign l2_mshr_full_o = mshr_full;
 
   // --------------------
-  // Controller FSM
+  // Controller FSM (request pipeline) + decoupled fill engine
+  //
+  // The request pipeline accepts ARs, runs tag lookup, serves hits and parks
+  // misses in the MSHR without blocking: a fresh miss pushes a fill request
+  // into the fill engine and returns to S_IDLE. The fill engine issues line
+  // fills on the memory port, collects the R beats into per-entry line
+  // buffers, installs completed lines, and exposes serve-ready entries back
+  // to the pipeline, which drains them (primary + merged waiters) on the
+  // slave R channel. Multiple fills are therefore outstanding concurrently
+  // (true MLP) while the slave side keeps a single ordered response stream.
   // --------------------
   typedef enum logic [3:0] {
     S_IDLE,
     S_TAG,
     S_HIT_WAIT,
     S_HIT_RESP,
-    S_MISS_AR,
-    S_MISS_R,
-    S_MISS_INSTALL,
-    S_WAIT_POP,
+    S_SERVE,
+    S_SERVE_POP,
     S_BYPASS_AR,
     S_BYPASS_R,
     S_BYPASS_AW,
@@ -279,27 +321,178 @@ module g6lc_l2_top
   logic                      cacheable_q, cacheable_d;
   logic [WAY_W-1:0]          way_q, way_d;
   logic [LINE_WIDTH-1:0]     line_q, line_d;
-  // beat_q dual use: fill index in S_MISS_R; response *count* (0..len) in S_HIT_RESP
-  logic [$clog2(BEATS+1)-1:0] beat_q, beat_d;
-  logic [MSHR_W-1:0]         mshr_idx_q, mshr_idx_d;
-  // Master R outstanding: after AR handshake we MUST drain R until r_last, even if
-  // the FSM leaves S_MISS_R/S_BYPASS_R early. Otherwise axi2mem stays in READ with
-  // r_valid && !r_ready and all subsequent DRAM traffic deadlocks (OpenSBI hang
-  // after MaxMstTrans fix: a2m=READ @0x80000080, L2 IDLE).
-  logic mst_r_ot_q, mst_r_ot_d;
-  // Set while S_HIT_RESP is serving a miss fill (primary or a merged waiter), so
-  // the plain tag-hit path keeps its original completion behaviour.
-  logic miss_serve_q, miss_serve_d;
-
   // First AXI beat index within the L2 line for the captured AR address.
   // Without this, a hit on a 64 B line always returned beats from offset 0,
   // so I$ fills at +16/+32/... re-read the first 16 B of the line.
   localparam int unsigned BEAT_ADDR_LSB = $clog2(AXI_DATA_WIDTH / 8);
   localparam int unsigned BEAT_IDX_W    = (BEATS <= 1) ? 1 : $clog2(BEATS);
+  // beat_q: response *count* (0..len) in S_HIT_RESP/S_SERVE.
+  logic [$clog2(BEATS+1)-1:0] beat_q, beat_d;
+  // MSHR index of the entry currently being served.
+  logic [MSHR_W-1:0]         serve_idx_q, serve_idx_d;
+  // Master R outstanding (bypass reads only): after a bypass AR handshake we
+  // MUST drain R until r_last, even if the FSM leaves S_BYPASS_R early.
+  // Otherwise axi2mem stays in READ with r_valid && !r_ready and all
+  // subsequent DRAM traffic deadlocks (OpenSBI hang after MaxMstTrans fix:
+  // a2m=READ @0x80000080, L2 IDLE). Fill ARs are tracked separately — the
+  // fill collector drains their beats unconditionally.
+  logic mst_r_ot_q, mst_r_ot_d;
+  logic wr_r_pending_q,wr_r_pending_d,wr_b_done_q,wr_b_done_d;
+  // Serve alternation: set when a fill-serve burst just completed so a
+  // pending AR gets the next S_IDLE slot before another serve starts.
+  logic serve_turn_q, serve_turn_d;
+  // Dedicated serve registers: the request regs (addr_q/id_q/len_q/beat_q)
+  // stay captive to a request stalled in S_TAG while a deadlock-breaking
+  // serve interrupts it, so the serve datapath carries its own context.
+  // serve_intr_q marks a serve started from an S_TAG stall: on completion the
+  // FSM returns to S_TAG (not S_IDLE) to retry the captive request's lookup.
+  logic [AXI_ADDR_WIDTH-1:0]     serve_addr_q, serve_addr_d;
+  logic [AXI_ID_WIDTH-1:0]       serve_id_q,   serve_id_d;
+  logic [7:0]                    serve_len_q,  serve_len_d;
+  logic [$clog2(BEATS+1)-1:0]    serve_beat_q, serve_beat_d;
+  logic                          serve_intr_q, serve_intr_d;
+  logic [BEAT_IDX_W-1:0]         serve_base, serve_bidx;
+  assign serve_base = serve_addr_q[OFF_BITS-1:BEAT_ADDR_LSB];
+  assign serve_bidx = serve_base + BEAT_IDX_W'(serve_beat_q);
+
+  // The primary's id is the captured one: the AR bus has already moved on by
+  // the time S_TAG allocates. A merging waiter overrides both below.
+  assign mshr_alloc_id   = id_q;
+  assign mshr_alloc_line = line_align(addr_q);
+
+  // --------------------
+  // Fill engine: per-MSHR-entry fill state, line buffers and issue order.
+  //
+  // All fill ARs issue under the reserved FILL_ID. AXI guarantees same-ID
+  // read bursts return in issue order with contiguous beats (no interleave),
+  // so a single collect pointer walking the issue-order FIFO routes every
+  // fill beat to the right entry without per-entry AXI IDs. FILL_ID is kept
+  // exclusive: a bypass/AMO whose id equals FILL_ID never issues while a fill
+  // is outstanding, and a fill never issues while a FILL_ID bypass trail is
+  // live (bfid_*), so r.id==FILL_ID beats are unambiguously fill beats.
+  // --------------------
+  localparam logic [AXI_ID_WIDTH-1:0] FILL_ID = '1;
+  localparam int unsigned BFID_SETTLE = 16;
+
+  typedef enum logic [1:0] {
+    F_QUEUED,   // allocated, waiting for AR issue
+    F_FILLING,  // AR issued, collecting R beats
+    F_DONE,     // all beats collected, waiting to install
+    F_READY     // installed (or kill-skipped), waiting to serve
+  } fstate_e;
+
+  logic [MSHR_DEPTH-1:0]                   fill_act_q,   fill_act_d;
+  fstate_e                                 fill_state_q  [MSHR_DEPTH];
+  fstate_e                                 fill_state_d  [MSHR_DEPTH];
+  logic [MSHR_DEPTH-1:0][AXI_ADDR_WIDTH-1:0] fill_addr_q,  fill_addr_d;
+  logic [MSHR_DEPTH-1:0][WAY_W-1:0]        fill_way_q,   fill_way_d;
+  logic [MSHR_DEPTH-1:0][7:0]              fill_len_q,   fill_len_d;
+  logic [MSHR_DEPTH-1:0][LINE_WIDTH-1:0]   fill_buf_q,   fill_buf_d;
+  logic [MSHR_DEPTH-1:0][BEAT_IDX_W:0]     fill_bcnt_q,  fill_bcnt_d;
+  logic [MSHR_DEPTH-1:0][1:0]              fill_ferr_q,  fill_ferr_d;
+  // Issue-order FIFO of entry indices: pushed at MSHR alloc, ARs issue from
+  // rd+issued_cnt, R beats collect into rd+collect_cnt, the rd head frees
+  // when its serve completes.
+  logic [MSHR_DEPTH-1:0][MSHR_W-1:0]       fifo_q, fifo_d;
+  logic [MSHR_W-1:0]                       fifo_rd_q, fifo_rd_d;
+  logic [MSHR_W-1:0]                       fifo_wr_q, fifo_wr_d;
+  logic [MSHR_W:0]                         fifo_cnt_q, fifo_cnt_d;
+  logic [MSHR_W:0]                         issued_cnt_q, issued_cnt_d;
+  logic [MSHR_W:0]                         collect_cnt_q, collect_cnt_d;
+  // FILL_ID bypass trail: a FILL_ID bypass AR/AW holds fills off until its
+  // response (incl. any injected AMO/ATOP R straggler) has drained.
+  logic                                    bfid_rpend_q, bfid_rpend_d;
+  logic [5:0]                              bfid_timer_q, bfid_timer_d;
+  logic                                    bfid_busy;
+  assign bfid_busy = bfid_rpend_q || (bfid_timer_q != '0);
+
+  // Derived fill-engine wires. fifo position = rd + offset wrapped; the
+  // counters are distances from rd so the oldest outstanding entry is always
+  // at rd+collect_cnt and the next-to-issue at rd+issued_cnt.
+  logic [MSHR_W-1:0] collect_pos, issue_pos, collect_idx, issue_idx;
+  logic              collect_active, is_fill_beat, fill_out, issue_vld;
+  logic              serve_pend;
+  logic [MSHR_W-1:0] inst_idx;
+  logic              inst_vld;
+  assign collect_pos    = fifo_wrap((MSHR_W + 1)'(fifo_rd_q) + collect_cnt_q);
+  assign issue_pos      = fifo_wrap((MSHR_W + 1)'(fifo_rd_q) + issued_cnt_q);
+  assign collect_idx    = fifo_q[collect_pos];
+  assign issue_idx      = fifo_q[issue_pos];
+  // An issued-but-not-yet-collected fill burst is outstanding on the R
+  // channel; the entry at that position is F_FILLING by construction.
+  assign collect_active = (collect_cnt_q < issued_cnt_q) &&
+                          (fill_state_q[collect_idx] == F_FILLING);
+  assign is_fill_beat   = mst_resp_i.r_valid &&
+                          (mst_resp_i.r.id == FILL_ID) && collect_active;
+  assign fill_out       = (issued_cnt_q != collect_cnt_q);
+  assign issue_vld      = (issued_cnt_q < fifo_cnt_q) && !bfid_busy &&
+                          (fill_state_q[issue_idx] == F_QUEUED)
+                          && !((state_q==S_BYPASS_AW || state_q==S_BYPASS_W || state_q==S_BYPASS_B) && id_q==FILL_ID);
+  assign serve_pend     = (fifo_cnt_q != '0) &&
+                          (fill_state_q[fifo_q[fifo_rd_q]] == F_READY);
+  logic merge_order_block, after_match;
+  logic fill_ar_hold_q, fill_ar_hold_d;
+  logic fill_ar_offer, bypass_ar_offer;
+  always_comb begin
+    merge_order_block=1'b0;
+    after_match=1'b0;
+    for(int unsigned n=0;n<MSHR_DEPTH;n++)begin
+      if(n<int'(fifo_cnt_q))begin
+        if(mshr_lookup_hit && fifo_q[fifo_wrap((MSHR_W+1)'(fifo_rd_q)+(MSHR_W+1)'(n))]==mshr_lookup_idx)
+          after_match=1'b1;
+        else if(after_match && mshr_id_match[fifo_q[fifo_wrap((MSHR_W+1)'(fifo_rd_q)+(MSHR_W+1)'(n))]])
+          merge_order_block=1'b1;
+      end
+    end
+  end
+  assign bypass_ar_offer=(state_q==S_BYPASS_AR) && !(|mshr_id_match) &&
+                         !(id_q==FILL_ID && fill_out) && !fill_ar_hold_q;
+  assign fill_ar_offer=fill_ar_hold_q || (issue_vld &&
+                       (state_q!=S_BYPASS_AR || (|mshr_id_match)));
+  // Oldest fill-done entry awaiting install (lowest MSHR index wins).
+  always_comb begin
+    inst_vld = 1'b0;
+    inst_idx = '0;
+    for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
+      if (!inst_vld && fill_act_q[e] && (fill_state_q[e] == F_DONE)) begin
+        inst_vld = 1'b1;
+        inst_idx = MSHR_W'(e);
+      end
+    end
+  end
+
   logic [BEAT_IDX_W-1:0] beat_base;
   logic [BEAT_IDX_W-1:0] beat_idx;
   assign beat_base = addr_q[OFF_BITS-1:BEAT_ADDR_LSB];
   assign beat_idx  = beat_base + BEAT_IDX_W'(beat_q);
+
+  logic [SET_ASSOC-1:0] pend_way;
+  logic found_inv, way_ok;
+  logic [WAY_W-1:0] victim_way;
+  always_comb begin
+    pend_way = '0;
+    for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
+      if (fill_act_q[e] && (fill_state_q[e] != F_READY) &&
+          (idx_of(fill_addr_q[e]) == idx_of(addr_q)))
+        pend_way[fill_way_q[e]] = 1'b1;
+    end
+    found_inv = 1'b0;
+    victim_way = (RR_EN && (&tag_way_valid)) ? rr_victim_way : '0;
+    for (int w = 0; w < int'(SET_ASSOC); w++) begin
+      if (!found_inv && !tag_way_valid[w]) begin
+        victim_way = WAY_W'(w);
+        found_inv = 1'b1;
+      end
+    end
+    way_ok = !pend_way[victim_way];
+    for (int w = 0; w < int'(SET_ASSOC); w++) begin
+      if (!way_ok && !pend_way[w]) begin
+        victim_way = WAY_W'(w);
+        way_ok = 1'b1;
+      end
+    end
+  end
+  assign tag_probe_way = victim_way;
 
   // AXI slave defaults
   always_comb begin
@@ -330,7 +523,6 @@ module g6lc_l2_top
     tag_wtag   = tag_of(addr_q);
     tag_wvalid = 1'b1;
     tag_iway   = way_q;
-    tag_probe_way = way_q;
 
     data_a_req = 1'b0;
     data_a_we  = 1'b0;
@@ -346,17 +538,45 @@ module g6lc_l2_top
     data_b_be    = '1;
 
     mshr_alloc       = 1'b0;
-    mshr_alloc_line  = line_align(addr_q);
-    // The primary's id is the captured one: the AR bus has already moved on by
-    // the time S_TAG allocates. A merging waiter overrides both below.
-    mshr_alloc_id    = id_q;
     mshr_alloc_meta  = {addr_q[OFF_BITS-1:0], len_q, size_q};
     mshr_waiter_pop  = 1'b0;
     mshr_complete    = 1'b0;
-    mshr_complete_idx = mshr_idx_q;
-    miss_serve_d     = miss_serve_q;
+    // The serve engine's entry: the registered pick while draining, else the
+    // issue-order fifo head (the S_IDLE serve candidate). All waiter/complete
+    // probes of the MSHR index off this.
+    mshr_complete_idx = ((state_q == S_SERVE) || (state_q == S_SERVE_POP))
+                        ? serve_idx_q : fifo_q[fifo_rd_q];
     rr_adv           = 1'b0;
 
+    // Fill engine defaults
+    fill_act_d    = fill_act_q;
+    fill_state_d  = fill_state_q;
+    fill_kill_d   = fill_kill_q;
+    fill_addr_d   = fill_addr_q;
+    fill_way_d    = fill_way_q;
+    fill_len_d    = fill_len_q;
+    fill_buf_d    = fill_buf_q;
+    fill_bcnt_d   = fill_bcnt_q;
+    fill_ferr_d   = fill_ferr_q;
+    fifo_d        = fifo_q;
+    fifo_rd_d     = fifo_rd_q;
+    fifo_wr_d     = fifo_wr_q;
+    fifo_cnt_d    = fifo_cnt_q;
+    issued_cnt_d  = issued_cnt_q;
+    collect_cnt_d = collect_cnt_q;
+    bfid_rpend_d  = bfid_rpend_q;
+    bfid_timer_d  = bfid_timer_q;
+    serve_turn_d  = serve_turn_q;
+    serve_idx_d   = serve_idx_q;
+    serve_addr_d  = serve_addr_q;
+    serve_id_d    = serve_id_q;
+    serve_len_d   = serve_len_q;
+    serve_beat_d  = serve_beat_q;
+    serve_intr_d  = serve_intr_q;
+
+    mst_r_ot_d  = mst_r_ot_q;
+    wr_r_pending_d = wr_r_pending_q;
+    wr_b_done_d    = wr_b_done_q;
     state_d     = state_q;
     addr_d      = addr_q;
     id_d        = id_q;
@@ -370,7 +590,6 @@ module g6lc_l2_top
     way_d       = way_q;
     line_d      = line_q;
     beat_d      = beat_q;
-    mshr_idx_d  = mshr_idx_q;
 
     l2_hit_o    = 1'b0;
     l2_miss_o   = 1'b0;
@@ -379,19 +598,26 @@ module g6lc_l2_top
     l2_evict_addr_o  = '0;
     wr_self_inval      = 1'b0;
     wr_self_inval_addr = addr_q;
+    wr_inval_pend_d    = wr_inval_pend_q;
+    wr_inval_addr_d    = wr_inval_addr_q;
 
     unique case (state_q)
-      // ---------------- IDLE: accept AR (reads) or AW (writes) ----------------
+      // ---------------- IDLE: accept AR (reads), serve a ready fill, or AW --
       S_IDLE: begin
-        // Drain any late ATOP/AMO R before starting a new request. Accepting a
-        // miss-fill AR while amos is still injecting R (mst_r_ready=0) is the
-        // hang-2 failure mode: L2 can see the injected r_last as a fill done
-        // while axi2mem still holds the real multi-beat READ.
-        if (mst_resp_i.r_valid) begin
+        // Drain any late ATOP/AMO/bypass R before starting a new request —
+        // but never fill beats: those are consumed by the fill collector
+        // below (r.id==FILL_ID while a fill is collecting), and forwarding
+        // them here would both corrupt the response stream and starve the
+        // collecting entry.
+        if (mst_resp_i.r_valid && !is_fill_beat) begin
           slv_resp_o.r_valid = 1'b1;
           slv_resp_o.r       = mst_resp_i.r;
           mst_req_o.r_ready  = slv_req_i.r_ready;
-        end else if (slv_req_i.ar_valid) begin
+        end else if (wr_inval_pend_q) begin
+          // A deferred self-invalidation must land before any later request can
+          // look up the line it covers.
+          state_d = S_IDLE;
+        end else if (slv_req_i.ar_valid && (serve_turn_q || !serve_pend)) begin
           // Prefer reads (MLP); accept write when no AR
           slv_resp_o.ar_ready = 1'b1;
           addr_d      = slv_req_i.ar.addr;
@@ -409,12 +635,24 @@ module g6lc_l2_top
           is_write_d  = 1'b0;
           cacheable_d = l2_is_cacheable(slv_req_i.ar.cache);
           beat_d      = '0;
+          serve_turn_d = 1'b0;
           if (l2_is_cacheable(slv_req_i.ar.cache) && !slv_req_i.ar.lock) begin
             state_d = S_TAG;
           end else begin
             l2_bypass_o = 1'b1;
             state_d = S_BYPASS_AR;
           end
+        end else if (serve_pend) begin
+          // Oldest ready fill entry gets the response channel next. Its
+          // primary's id/offset come from the entry itself (complete_idx is
+          // already pointed at the fifo head below).
+          serve_idx_d  = fifo_q[fifo_rd_q];
+          serve_addr_d = fill_addr_q[fifo_q[fifo_rd_q]];
+          serve_id_d   = mshr_complete_id;
+          serve_len_d  = fill_len_q[fifo_q[fifo_rd_q]];
+          serve_beat_d = '0;
+          serve_intr_d = 1'b0;
+          state_d      = S_SERVE;
         end else if (slv_req_i.aw_valid) begin
           // Writes: write-through bypass (always push to memory); optional allocate
           slv_resp_o.aw_ready = 1'b1;
@@ -431,6 +669,8 @@ module g6lc_l2_top
           cacheable_d = l2_is_cacheable(slv_req_i.aw.cache);
           beat_d      = '0;
           l2_bypass_o = 1'b1;
+          wr_r_pending_d = slv_req_i.aw.atop[5];
+          wr_b_done_d    = 1'b0;
           state_d     = S_BYPASS_AW;
         end
       end
@@ -440,7 +680,17 @@ module g6lc_l2_top
         tag_lookup = 1'b1;
         tag_iindex = idx_of(addr_q);
         tag_ltag   = tag_of(addr_q);
-        if (tag_hit) begin
+        if((tag_hit && (|mshr_id_match)) || (!tag_hit && merge_order_block))begin
+          if(serve_pend)begin
+            serve_idx_d=fifo_q[fifo_rd_q];
+            serve_addr_d=fill_addr_q[fifo_q[fifo_rd_q]];
+            serve_id_d=mshr_complete_id;
+            serve_len_d=fill_len_q[fifo_q[fifo_rd_q]];
+            serve_beat_d='0;
+            serve_intr_d=1'b1;
+            state_d=S_SERVE;
+          end
+        end else if(tag_hit)begin
           l2_hit_o = 1'b1;
           way_d    = tag_way;
           // Kick data read
@@ -452,35 +702,65 @@ module g6lc_l2_top
         end else begin
           l2_miss_o = 1'b1;
           // Victim: first invalid way (lowest index), else the per-set
-          // round-robin pointer (RR_EN) or way 0 (legacy).
+          // round-robin pointer (RR_EN) or way 0 (legacy). Ways that a
+          // still-in-flight fill will install for this set are deprioritized:
+          // picking one would let a younger fill silently overwrite a line the
+          // older fill installs afterwards, with no evict notification for it.
           begin
-            logic found_inv;
-            found_inv = 1'b0;
-            way_d = (RR_EN && (&tag_way_valid)) ? rr_victim_way : '0;
-            for (int w = 0; w < int'(SET_ASSOC); w++) begin
-              if (!found_inv && !tag_way_valid[w]) begin
-                way_d = WAY_W'(w);
-                found_inv = 1'b1;
-              end
+            way_d = victim_way;
+            // Inclusive path: report replace of a valid victim line. The offer
+            // re-asserts on every cycle spent in S_TAG, so withholding
+            // l2_evict_ready_i simply extends the offer; the miss commit (MSHR
+            // alloc + victim selection capture) waits for the accept edge,
+            // which is also the edge the back-inval engine registers the
+            // victim. A same-line merge needs no victim at all.
+            if (!mshr_lookup_hit && tag_way_valid[way_d]) begin
+              l2_evict_valid_o = 1'b1;
+              l2_evict_addr_o  = {
+                tag_probe_tag,
+                idx_of(addr_q),
+                {OFF_BITS{1'b0}}
+              };
             end
+            // A same-line merge needs no victim way and no evict — only a
+            // fresh alloc is gated on way_ok and the evict handshake.
+            if (mshr_ready &&
+                (mshr_lookup_hit ||
+                 (way_ok && (!tag_way_valid[way_d] || l2_evict_ready_i)))) begin
+              mshr_alloc = 1'b1;
+              if (!mshr_lookup_hit) begin
+                // Fresh miss: park the entry, queue a background fill and
+                // return to S_IDLE — the pipeline takes the next request
+                // while the fill engine fetches the line (MLP).
+                fifo_d[fifo_wr_q]            = mshr_alloc_idx;
+                fifo_wr_d                    = fifo_inc(fifo_wr_q);
+                fifo_cnt_d                   = fifo_cnt_q + 1'b1;
+                fill_act_d[mshr_alloc_idx]   = 1'b1;
+                fill_state_d[mshr_alloc_idx] = F_QUEUED;
+                fill_kill_d[mshr_alloc_idx]  = 1'b0;
+                fill_addr_d[mshr_alloc_idx]  = addr_q;
+                fill_way_d[mshr_alloc_idx]   = way_d;
+                fill_len_d[mshr_alloc_idx]   = len_q;
+                fill_bcnt_d[mshr_alloc_idx]  = '0;
+                fill_ferr_d[mshr_alloc_idx]  = axi_pkg::RESP_OKAY;
+              end
+              state_d = S_IDLE;
+            end else if (serve_pend) begin
+              // Deadlock break: this request cannot commit (MSHR full, or no
+              // evictable way), and MSHR entries only free through the serve
+              // path — which needs this FSM. Interrupt: drain the oldest
+              // ready entry on the dedicated serve regs (the captive request
+              // stays in addr_q & friends), then return to S_TAG to retry.
+              serve_idx_d  = fifo_q[fifo_rd_q];
+              serve_addr_d = fill_addr_q[fifo_q[fifo_rd_q]];
+              serve_id_d   = mshr_complete_id;
+              serve_len_d  = fill_len_q[fifo_q[fifo_rd_q]];
+              serve_beat_d = '0;
+              serve_intr_d = 1'b1;
+              state_d      = S_SERVE;
+            end
+            // else stall in S_TAG until MSHR free / evict accept / way frees
           end
-          // Inclusive path: report replace of a valid victim line
-          tag_probe_way = way_d;
-          if (tag_way_valid[way_d]) begin
-            l2_evict_valid_o = 1'b1;
-            l2_evict_addr_o  = {
-              tag_probe_tag,
-              idx_of(addr_q),
-              {OFF_BITS{1'b0}}
-            };
-          end
-          if (mshr_ready) begin
-            mshr_alloc = 1'b1;
-            mshr_idx_d = mshr_alloc_idx;
-            if (!mshr_merged) state_d = S_MISS_AR;
-            else state_d = S_MISS_R;  // wait on in-flight fill
-          end
-          // else stall in S_TAG until MSHR free
         end
       end
 
@@ -488,7 +768,6 @@ module g6lc_l2_top
       S_HIT_WAIT: begin
         state_d = S_HIT_RESP;
         line_d  = data_a_rdata;
-        miss_serve_d = 1'b0;
       end
 
       S_HIT_RESP: begin
@@ -501,106 +780,74 @@ module g6lc_l2_top
         slv_resp_o.r.data  = line_q[beat_idx*AXI_DATA_WIDTH +: AXI_DATA_WIDTH];
         if (slv_req_i.r_ready) begin
           if (beat_q == len_q) begin
-            beat_d = '0;
-            // Serve any same-line reader that attached during the fill before
-            // retiring the MSHR entry; the entry must stay valid until then.
-            if (miss_serve_q && mshr_waiter_valid) begin
-              state_d = S_WAIT_POP;
-            end else begin
-              if (miss_serve_q) mshr_complete = 1'b1;
-              miss_serve_d = 1'b0;
-              state_d = S_IDLE;
-            end
+            beat_d  = '0;
+            state_d = S_IDLE;
           end else begin
             beat_d = beat_q + 1'b1;
           end
         end
       end
 
-      // Pop the next merged waiter and re-serve it from the filled line.
-      S_WAIT_POP: begin
-        mshr_waiter_pop = 1'b1;
-        id_d            = mshr_waiter_id;
-        // Same line as the primary: keep the line bits, swap in the offset.
-        addr_d          = {addr_q[AXI_ADDR_WIDTH-1:OFF_BITS], waiter_off};
-        len_d           = waiter_len;
-        size_d          = waiter_size;
-        beat_d          = '0;
-        miss_serve_d    = 1'b1;
-        state_d         = S_HIT_RESP;
-      end
-
-      // ---------------- MISS: issue line fill ----------------
-      S_MISS_AR: begin
-        mst_req_o.ar_valid = 1'b1;
-        mst_req_o.ar.id    = id_q;
-        mst_req_o.ar.addr  = line_align(addr_q);
-        mst_req_o.ar.len   = axi_pkg::len_t'(BEATS - 1);
-        mst_req_o.ar.size  = axi_pkg::size_t'($clog2(AXI_DATA_WIDTH/8));
-        mst_req_o.ar.burst = axi_pkg::BURST_INCR;
-        mst_req_o.ar.cache = 4'b1111;
-        mst_req_o.ar.prot  = 3'b000;
-        if (mst_resp_i.ar_ready) begin
-          beat_d  = '0;
-          line_d  = '0;
-          state_d = S_MISS_R;
-        end
-      end
-
-      S_MISS_R: begin
-        mst_req_o.r_ready = 1'b1;
-        if (mst_resp_i.r_valid) begin
-          // Full line fill is always BEATS beats (len=BEATS-1). A spurious early
-          // r_last (classic: axi_riscv_amos injects a 1-beat R with last=1 on the
-          // slave side while holding mst_r_ready=0 during AMO/invalid-ATOP R
-          // injection — often under a shared id) must NOT complete the miss:
-          // that leaves the real DRAM burst orphaned in axi2mem forever.
-          if (mst_resp_i.r.last && (beat_q != $bits(beat_q)'(BEATS - 1))) begin
-            // Discard injected/short last; stay in S_MISS_R until full line arrives.
-          end else begin
-            line_d[beat_q*AXI_DATA_WIDTH +: AXI_DATA_WIDTH] = mst_resp_i.r.data;
-            if (mst_resp_i.r.last) begin
-              state_d = S_MISS_INSTALL;
+      // ---------------- SERVE: drain a ready fill entry ----------------
+      // Serve one response burst (primary or a popped waiter) from the fill
+      // entry's line buffer on the dedicated serve regs — addr_q & friends
+      // may be holding a request stalled in S_TAG (interrupt case). A failed
+      // or killed fill still drains its beats and serves the accumulated
+      // error resp to every attached waiter.
+      S_SERVE: begin
+        slv_resp_o.r_valid = 1'b1;
+        slv_resp_o.r.id    = serve_id_q;
+        slv_resp_o.r.resp  = (fill_ferr_q[serve_idx_q] != axi_pkg::RESP_OKAY)
+                             ? fill_ferr_q[serve_idx_q] : axi_pkg::RESP_OKAY;
+        slv_resp_o.r.last  = (serve_beat_q == serve_len_q);
+        slv_resp_o.r.data  =
+          fill_buf_q[serve_idx_q][serve_bidx*AXI_DATA_WIDTH +: AXI_DATA_WIDTH];
+        if (slv_req_i.r_ready) begin
+          if (serve_beat_q == serve_len_q) begin
+            serve_beat_d = '0;
+            // Serve any same-line reader that attached before retiring the
+            // MSHR entry; the entry must stay valid until then.
+            if (mshr_waiter_valid) begin
+              state_d = S_SERVE_POP;
             end else begin
-              beat_d = beat_q + 1'b1;
+              mshr_complete = 1'b1;
+              fill_act_d[serve_idx_q] = 1'b0;
+              // Retire the issue-order fifo head: every counter is a
+              // distance from rd, so all of them shift down by one.
+              fifo_rd_d     = fifo_inc(fifo_rd_q);
+              fifo_cnt_d    = fifo_cnt_q - 1'b1;
+              issued_cnt_d  = issued_cnt_q - 1'b1;
+              collect_cnt_d = collect_cnt_q - 1'b1;
+              serve_turn_d  = 1'b1;
+              serve_intr_d  = 1'b0;
+              // An interrupted S_TAG request retries its lookup next.
+              state_d       = serve_intr_q ? ((cacheable_q && !lock_q) ? S_TAG : S_BYPASS_AR) : S_IDLE;
             end
+          end else begin
+            serve_beat_d = serve_beat_q + 1'b1;
           end
         end
       end
 
-      S_MISS_INSTALL: begin
-        // Write tag + data (port B); handle bank conflict by stalling
-        tag_write  = 1'b1;
-        tag_windex = idx_of(addr_q);
-        tag_wway   = way_q;
-        tag_wtag   = tag_of(addr_q);
-        tag_wvalid = 1'b1;
-
-        data_b_req   = 1'b1;
-        data_b_we    = 1'b1;
-        data_b_idx   = idx_of(addr_q);
-        data_b_way   = way_q;
-        data_b_wdata = line_q;
-        data_b_be    = '1;
-
-        if (!bank_conflict) begin
-          // MSHR completion is deferred to the end of the response so merged
-          // same-line waiters can still be drained from this entry.
-          miss_serve_d = 1'b1;
-          // RR pointer tracks the last-installed way (advances past it).
-          // Applies to invalid-first installs too, keeping order consistent.
-          rr_adv = RR_EN;
-          // Serve core from line_q; beat_q is response count from 0, index via beat_base
-          beat_d  = '0;
-          state_d = S_HIT_RESP;
-        end
+      // Pop the next merged waiter and re-serve it from the filled line.
+      S_SERVE_POP: begin
+        mshr_waiter_pop = 1'b1;
+        serve_id_d      = mshr_waiter_id;
+        // Same line as the primary: keep the line bits, swap in the offset.
+        serve_addr_d    = {serve_addr_q[AXI_ADDR_WIDTH-1:OFF_BITS], waiter_off};
+        serve_len_d     = waiter_len;
+        serve_beat_d    = '0;
+        state_d         = S_SERVE;
       end
 
       // ---------------- Non-cacheable / write bypass ----------------
       S_BYPASS_AR: begin
         // Drive captured fields. Copying live slv.ar a cycle after the
         // handshake drops AR.lock (HPDCACHE already deasserted the beat).
-        mst_req_o.ar_valid = 1'b1;
+        // FILL_ID exclusion: a bypass under the reserved fill id can only
+        // issue while no fill is outstanding — its R beats would otherwise
+        // interleave with fill beats and alias into the collector.
+        mst_req_o.ar_valid = bypass_ar_offer;
         mst_req_o.ar.addr  = addr_q;
         mst_req_o.ar.id    = id_q;
         mst_req_o.ar.len   = len_q;
@@ -609,19 +856,36 @@ module g6lc_l2_top
         mst_req_o.ar.cache = cache_q;
         mst_req_o.ar.lock  = lock_q;
         mst_req_o.ar.prot  = 3'b000;
-        if (mst_resp_i.ar_ready) state_d = S_BYPASS_R;
+        if (mst_req_o.ar_valid && mst_resp_i.ar_ready) begin
+          if (id_q == FILL_ID) bfid_rpend_d = 1'b1;
+          state_d = S_BYPASS_R;
+        end
+        else if((|mshr_id_match) && serve_pend)begin
+          serve_idx_d=fifo_q[fifo_rd_q];
+          serve_addr_d=fill_addr_q[fifo_q[fifo_rd_q]];
+          serve_id_d=mshr_complete_id;
+          serve_len_d=fill_len_q[fifo_q[fifo_rd_q]];
+          serve_beat_d='0;
+          serve_intr_d=1'b1;
+          state_d=S_SERVE;
+        end
       end
 
       S_BYPASS_R: begin
-        slv_resp_o.r_valid = mst_resp_i.r_valid;
-        slv_resp_o.r       = mst_resp_i.r;
-        mst_req_o.r_ready  = slv_req_i.r_ready;
-        if (mst_resp_i.r_valid && slv_req_i.r_ready && mst_resp_i.r.last)
-          state_d = S_IDLE;
+        // Forward only this transaction's beats: fill beats (id==FILL_ID) can
+        // interleave on the R channel and belong to the collector below.
+        if (mst_resp_i.r_valid && mst_resp_i.r.id == id_q) begin
+          slv_resp_o.r_valid = 1'b1;
+          slv_resp_o.r       = mst_resp_i.r;
+          mst_req_o.r_ready  = slv_req_i.r_ready;
+          if (slv_req_i.r_ready && mst_resp_i.r.last) state_d = S_IDLE;
+        end
       end
 
       S_BYPASS_AW: begin
-        mst_req_o.aw_valid = 1'b1;
+        // FILL_ID exclusion mirrors S_BYPASS_AR: an AMO/ATOP under the fill id
+        // injects R beats that would alias into an in-flight fill collector.
+        mst_req_o.aw_valid = !(id_q == FILL_ID && (fill_out || fill_ar_hold_q));
         mst_req_o.aw.addr  = addr_q;
         mst_req_o.aw.id    = id_q;
         mst_req_o.aw.len   = len_q;
@@ -634,12 +898,15 @@ module g6lc_l2_top
         wr_self_inval      = 1'b1;
         wr_self_inval_addr = addr_q;
         // ATOP/AMO may already be fetching old data — never block R.
-        if (mst_resp_i.r_valid) begin
+        if(wr_r_pending_q && mst_resp_i.r_valid && mst_resp_i.r.id==id_q && !is_fill_beat)begin
           slv_resp_o.r_valid = 1'b1;
           slv_resp_o.r       = mst_resp_i.r;
           mst_req_o.r_ready  = slv_req_i.r_ready;
         end
-        if (mst_resp_i.aw_ready) state_d = S_BYPASS_W;
+        if (mst_req_o.aw_valid && mst_resp_i.aw_ready) begin
+          if(id_q==FILL_ID)bfid_rpend_d=atop_q[5];
+          state_d = S_BYPASS_W;
+        end
       end
 
       S_BYPASS_W: begin
@@ -650,7 +917,7 @@ module g6lc_l2_top
         wr_self_inval      = 1'b1;
         wr_self_inval_addr = addr_q;
         // Forward ATOP load/compare R beats while W is in flight
-        if (mst_resp_i.r_valid) begin
+        if(wr_r_pending_q && mst_resp_i.r_valid && mst_resp_i.r.id==id_q && !is_fill_beat)begin
           slv_resp_o.r_valid = 1'b1;
           slv_resp_o.r       = mst_resp_i.r;
           mst_req_o.r_ready  = slv_req_i.r_ready;
@@ -660,60 +927,161 @@ module g6lc_l2_top
       end
 
       S_BYPASS_B: begin
-        slv_resp_o.b_valid = mst_resp_i.b_valid;
-        slv_resp_o.b       = mst_resp_i.b;
-        mst_req_o.b_ready  = slv_req_i.b_ready;
+        slv_resp_o.b_valid=mst_resp_i.b_valid && (mst_resp_i.b.id==id_q) && !wr_b_done_q;
+        slv_resp_o.b=mst_resp_i.b;
+        mst_req_o.b_ready=slv_req_i.b_ready && (mst_resp_i.b.id==id_q) && !wr_b_done_q;
         // AXI ATOP (AMOCAS/AMOLOAD/…) returns old data on R with the AW id.
         // Must forward and accept R here — if we leave it unabsorbed,
-        // axi_riscv_amos stays in SEND_R with mst_r_ready=0, the next L2
-        // miss-fill AR can still pass, and L2 may consume the injected AMO
-        // r_last as a spurious line-fill completion (orphan axi2mem READ).
-        if (mst_resp_i.r_valid) begin
+        // axi_riscv_amos stays in SEND_R with mst_r_ready=0 and would orphan
+        // the next miss-fill at axi2mem.
+        if(wr_r_pending_q && mst_resp_i.r_valid && mst_resp_i.r.id==id_q && !is_fill_beat)begin
           slv_resp_o.r_valid = 1'b1;
           slv_resp_o.r       = mst_resp_i.r;
           mst_req_o.r_ready  = slv_req_i.r_ready;
         end
-        if (mst_resp_i.b_valid && slv_req_i.b_ready) state_d = S_IDLE;
+        if(mst_resp_i.b_valid && mst_resp_i.b.id==id_q && slv_req_i.b_ready && !wr_b_done_q)
+          wr_b_done_d=1'b1;
       end
 
       default: state_d = S_IDLE;
     endcase
 
-    // ---------------- Hit-under-miss: attach same-line readers ----------------
-    // While a line fill is outstanding, a further cacheable read to the SAME
-    // line is accepted and parked as an MSHR waiter instead of stalling until
-    // the controller returns to S_IDLE. One DRAM fill then serves all of them.
-    // Deliberately NOT accepted during S_HIT_RESP/S_WAIT_POP: refusing merges
-    // while draining bounds the waiter list, so the drain always terminates.
-    // mshr_lookup_hit/mshr_ready are probes of the registered table (they do not
-    // depend on mshr_alloc), so this cannot form a combinational loop.
-    if ((state_q == S_MISS_AR || state_q == S_MISS_R || state_q == S_MISS_INSTALL) &&
-        slv_req_i.ar_valid && l2_is_cacheable(slv_req_i.ar.cache) && !slv_req_i.ar.lock &&
-        (line_align(slv_req_i.ar.addr) == line_align(addr_q)) &&
-        mshr_lookup_hit && mshr_ready) begin
-      slv_resp_o.ar_ready = 1'b1;
-      mshr_alloc          = 1'b1;
-      mshr_alloc_id       = slv_req_i.ar.id;
-      mshr_alloc_meta     = {slv_req_i.ar.addr[OFF_BITS-1:0], slv_req_i.ar.len,
-                             slv_req_i.ar.size};
+    if((state_q==S_BYPASS_AW || state_q==S_BYPASS_W || state_q==S_BYPASS_B) &&
+       wr_r_pending_q && mst_resp_i.r_valid && mst_resp_i.r.id==id_q &&
+       !is_fill_beat && slv_req_i.r_ready && mst_resp_i.r.last)
+      wr_r_pending_d=1'b0;
+    if(state_q==S_BYPASS_B && wr_b_done_d && !wr_r_pending_d)state_d=S_IDLE;
+
+    // ---- Fill collector: drain FILL_ID beats into per-entry line buffers ----
+    // All fills issue under FILL_ID, so AXI same-ID ordering guarantees their
+    // bursts return in issue order with contiguous beats — fifo position
+    // rd+collect_cnt always names the entry the current beat belongs to. A
+    // spurious early r_last (axi_riscv_amos injection can share an id) is
+    // discarded unless it lands on the final beat position.
+    if (collect_active && mst_resp_i.r_valid && mst_resp_i.r.id == FILL_ID) begin
+      mst_req_o.r_ready = 1'b1;
+      // A last arriving before the final beat position is spurious (amos
+      // injection can share an id): discard it and keep collecting. A last at
+      // or past the final position terminates the fill.
+      if (!(mst_resp_i.r.last &&
+            (fill_bcnt_q[collect_idx] < (BEAT_IDX_W + 1)'(BEATS - 1)))) begin
+        if (fill_bcnt_q[collect_idx] < (BEAT_IDX_W + 1)'(BEATS)) begin
+          fill_buf_d[collect_idx][fill_bcnt_q[collect_idx]*AXI_DATA_WIDTH +: AXI_DATA_WIDTH]
+            = mst_resp_i.r.data;
+          if (mst_resp_i.r.resp != axi_pkg::RESP_OKAY &&
+              fill_ferr_q[collect_idx] == axi_pkg::RESP_OKAY)
+            fill_ferr_d[collect_idx] = mst_resp_i.r.resp;
+          fill_bcnt_d[collect_idx] = fill_bcnt_q[collect_idx] + 1'b1;
+        end
+        if (mst_resp_i.r.last) begin
+          fill_state_d[collect_idx] = F_DONE;
+          collect_cnt_d             = collect_cnt_d + 1'b1;
+        end
+      end
     end
 
+    // ---- Fill-issue engine: oldest queued entry drives mst.ar under FILL_ID
+    // The AR channel is shared with the bypass path (S_BYPASS_AR has it when
+    // the FSM is there) and a live FILL_ID bypass trail holds fills off.
+    if (fill_ar_offer) begin
+      mst_req_o.ar_valid = 1'b1;
+      mst_req_o.ar.id    = FILL_ID;
+      mst_req_o.ar.addr  = line_align(fill_addr_q[issue_idx]);
+      mst_req_o.ar.len   = axi_pkg::len_t'(BEATS - 1);
+      mst_req_o.ar.size  = axi_pkg::size_t'($clog2(AXI_DATA_WIDTH/8));
+      mst_req_o.ar.burst = axi_pkg::BURST_INCR;
+      mst_req_o.ar.cache = 4'b1111;
+      mst_req_o.ar.prot  = 3'b000;
+      if (mst_resp_i.ar_ready) begin
+        fill_state_d[issue_idx] = F_FILLING;
+        issued_cnt_d            = issued_cnt_d + 1'b1;
+      end
+    end
+    fill_ar_hold_d = fill_ar_offer && !mst_resp_i.ar_ready;
+
+    // ---- Install engine: one F_DONE entry per cycle gets the write port ----
+    // A killed fill (invalidated while in flight) or a failed fill installs
+    // nothing — a poisoned "valid" line would serve error/stale data to every
+    // later read silently. Both still become servable so attached waiters
+    // drain, then the entry frees.
+    if (inst_vld) begin
+      if (fill_kill_q[inst_idx] || (fill_ferr_q[inst_idx] != axi_pkg::RESP_OKAY)) begin
+        fill_state_d[inst_idx] = F_READY;
+      end else begin
+        tag_write  = !bank_conflict;
+        tag_windex = idx_of(fill_addr_q[inst_idx]);
+        tag_wway   = fill_way_q[inst_idx];
+        tag_wtag   = tag_of(fill_addr_q[inst_idx]);
+        tag_wvalid = 1'b1;
+
+        data_b_req   = 1'b1;
+        data_b_we    = 1'b1;
+        data_b_idx   = idx_of(fill_addr_q[inst_idx]);
+        data_b_way   = fill_way_q[inst_idx];
+        data_b_wdata = fill_buf_q[inst_idx];
+        data_b_be    = '1;
+
+        if (!bank_conflict) begin
+          fill_state_d[inst_idx] = F_READY;
+          // RR pointer tracks the last-installed way (advances past it).
+          rr_adv = RR_EN;
+        end
+      end
+    end
+
+    // ---- Kill-on-invalidation: fills matching an accepted snoop stop
+    // merging, skip install, and drain+discard. Waiters that attached before
+    // the invalidation are ordered before it and may still be served; F_READY
+    // entries are killed too because a merge attaching after the inval is
+    // ordered after it and must not be served the stale pre-inval line.
+    // Defer a self-invalidation the external snoop displaced, and retire it on
+    // the first cycle the match port is free.
+    if (self_inval_req && l2_back_inval_valid_i) begin
+      wr_inval_pend_d = 1'b1;
+      wr_inval_addr_d = self_inval_addr;
+    end else if (wr_inval_pend_q) begin
+      wr_inval_pend_d = 1'b0;
+    end
+
+    if (tag_match_inval) begin
+      for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
+        if (fill_act_q[e] &&
+            (line_align(fill_addr_q[e]) ==
+             AXI_ADDR_WIDTH'({tag_match_tag, tag_match_index, {OFF_BITS{1'b0}}})))
+          fill_kill_d[e] = 1'b1;
+      end
+    end
+
+    // ---- FILL_ID bypass trail: holds the fill-issue engine off until the
+    // bypass's own response (and any late AMO/ATOP R straggler) has drained.
+    if (mst_resp_i.r_valid && (mst_resp_i.r.id == FILL_ID) && !collect_active &&
+        mst_req_o.r_ready) begin
+      bfid_timer_d = BFID_SETTLE[5:0];
+      if (mst_resp_i.r.last) bfid_rpend_d = 1'b0;
+    end
+    if (mst_resp_i.b_valid && (mst_resp_i.b.id == FILL_ID) &&
+        mst_req_o.b_ready) begin
+      bfid_timer_d = BFID_SETTLE[5:0];
+      // Non-ATOP writes and ATOP-stores return no R trail; ATOP-loads keep
+      // rpend until their R's last beat clears it above.
+      if(!atop_q[5]) bfid_rpend_d = 1'b0;
+    end
+    if (bfid_timer_q != '0) bfid_timer_d = bfid_timer_q - 1'b1;
+
     // ---- Master R drain (must run after case so it can override r_ready) ----
-    // Track AR→R outstanding so we never leave the DRAM R channel blocked:
-    // axi2mem stays in READ with r_valid && !r_ready until r_last is taken.
+    // Track bypass AR→R outstanding so we never leave the DRAM R channel
+    // blocked: axi2mem stays in READ with r_valid && !r_ready until r_last is
+    // taken. Fill ARs are tracked by issued/collect counters instead.
     mst_r_ot_d = mst_r_ot_q;
-    if (mst_req_o.ar_valid && mst_resp_i.ar_ready) begin
+    if (mst_req_o.ar_valid && mst_resp_i.ar_ready && mst_req_o.ar.id != FILL_ID) begin
       mst_r_ot_d = 1'b1;
     end
     if (mst_r_ot_q) begin
-      // Keep accepting R until last beat even if FSM left S_MISS_R/S_BYPASS_R.
+      // Keep accepting R until last beat even if FSM left S_BYPASS_R.
       if (state_q != S_BYPASS_R) mst_req_o.r_ready = 1'b1;
-      if (mst_resp_i.r_valid && mst_req_o.r_ready && mst_resp_i.r.last) begin
-        // Do not retire OT on a spurious early last during a multi-beat fill
-        // (see S_MISS_R). Bypass (len may be 0) and final fill beat are fine.
-        if (!(state_q == S_MISS_R && beat_q != $bits(beat_q)'(BEATS - 1))) begin
-          mst_r_ot_d = 1'b0;
-        end
+      if (mst_resp_i.r_valid && mst_req_o.r_ready && mst_resp_i.r.last &&
+          mst_resp_i.r.id == id_q) begin
+        mst_r_ot_d = 1'b0;
       end
     end
     // Safety: ATOP/AMO R can arrive after the write-bypass FSM has already
@@ -721,8 +1089,8 @@ module g6lc_l2_top
     // (1) HPDCACHE gets the atomic old-data beat and (2) amos leaves SEND_R
     // (which holds mst_r_ready=0 and would orphan the next miss-fill at
     // axi2mem). If the slave is not ready, keep the beat pending — do not
-    // silently drop ATOP R.
-    if (state_q == S_IDLE && mst_resp_i.r_valid && !mst_r_ot_q) begin
+    // silently drop ATOP R. Fill beats are never forwarded here.
+    if (state_q == S_IDLE && mst_resp_i.r_valid && !mst_r_ot_q && !is_fill_beat) begin
       slv_resp_o.r_valid = 1'b1;
       slv_resp_o.r       = mst_resp_i.r;
       mst_req_o.r_ready  = slv_req_i.r_ready;
@@ -744,9 +1112,38 @@ module g6lc_l2_top
       way_q       <= '0;
       line_q      <= '0;
       beat_q      <= '0;
-      mshr_idx_q  <= '0;
       mst_r_ot_q  <= 1'b0;
-      miss_serve_q <= 1'b0;
+      wr_r_pending_q <= 1'b0;
+      wr_b_done_q    <= 1'b0;
+      wr_inval_pend_q <= 1'b0;
+      wr_inval_addr_q <= '0;
+      serve_turn_q <= 1'b0;
+      serve_idx_q <= '0;
+      serve_addr_q <= '0;
+      serve_id_q   <= '0;
+      serve_len_q  <= '0;
+      serve_beat_q <= '0;
+      serve_intr_q <= 1'b0;
+      fill_act_q  <= '0;
+      fill_kill_q <= '0;
+      fifo_rd_q   <= '0;
+      fifo_wr_q   <= '0;
+      fifo_cnt_q  <= '0;
+      issued_cnt_q  <= '0;
+      collect_cnt_q <= '0;
+      bfid_rpend_q  <= 1'b0;
+      bfid_timer_q  <= '0;
+      fill_ar_hold_q <= 1'b0;
+      for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
+        fill_state_q[e] <= F_QUEUED;
+        fill_addr_q[e]  <= '0;
+        fill_way_q[e]   <= '0;
+        fill_len_q[e]   <= '0;
+        fill_buf_q[e]   <= '0;
+        fill_bcnt_q[e]  <= '0;
+        fill_ferr_q[e]  <= axi_pkg::RESP_OKAY;
+        fifo_q[e]       <= '0;
+      end
     end else begin
       state_q     <= state_d;
       addr_q      <= addr_d;
@@ -761,9 +1158,38 @@ module g6lc_l2_top
       way_q       <= way_d;
       line_q      <= line_d;
       beat_q      <= beat_d;
-      mshr_idx_q  <= mshr_idx_d;
       mst_r_ot_q  <= mst_r_ot_d;
-      miss_serve_q <= miss_serve_d;
+      wr_r_pending_q <= wr_r_pending_d;
+      wr_b_done_q    <= wr_b_done_d;
+      wr_inval_pend_q <= wr_inval_pend_d;
+      wr_inval_addr_q <= wr_inval_addr_d;
+      serve_turn_q <= serve_turn_d;
+      serve_idx_q <= serve_idx_d;
+      serve_addr_q <= serve_addr_d;
+      serve_id_q   <= serve_id_d;
+      serve_len_q  <= serve_len_d;
+      serve_beat_q <= serve_beat_d;
+      serve_intr_q <= serve_intr_d;
+      fill_act_q  <= fill_act_d;
+      fill_kill_q <= fill_kill_d;
+      fifo_rd_q   <= fifo_rd_d;
+      fifo_wr_q   <= fifo_wr_d;
+      fifo_cnt_q  <= fifo_cnt_d;
+      issued_cnt_q  <= issued_cnt_d;
+      collect_cnt_q <= collect_cnt_d;
+      bfid_rpend_q  <= bfid_rpend_d;
+      bfid_timer_q  <= bfid_timer_d;
+      fill_ar_hold_q <= fill_ar_hold_d;
+      for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
+        fill_state_q[e] <= fill_state_d[e];
+        fill_addr_q[e]  <= fill_addr_d[e];
+        fill_way_q[e]   <= fill_way_d[e];
+        fill_len_q[e]   <= fill_len_d[e];
+        fill_buf_q[e]   <= fill_buf_d[e];
+        fill_bcnt_q[e]  <= fill_bcnt_d[e];
+        fill_ferr_q[e]  <= fill_ferr_d[e];
+        fifo_q[e]       <= fifo_d[e];
+      end
     end
   end
 
@@ -773,20 +1199,54 @@ module g6lc_l2_top
   // reset clears tags, so stale SRAM bits cannot select a valid victim.
   // RR_EN=0 elaborates no metadata RAM; off-path equivalence is a separate gate.
   if (RR_EN) begin : gen_rr
-    logic read_req;
+    logic read_req, do_write;
     logic [IDX_BITS-1:0] ram_addr;
-    logic [WAY_W-1:0] next_way;
+    logic [WAY_W-1:0] next_way, wr_way;
+    // One port serves both the lookup read and the install update. The read
+    // belongs to the request that is being accepted this cycle and cannot be
+    // repeated, so it takes the port; a colliding update is held and retired on
+    // the first free cycle. A later install overwrites a held one because the
+    // pointer means "past the way installed most recently".
+    logic rr_pend_q, rr_pend_d;
+    logic [IDX_BITS-1:0] rr_pend_idx_q, rr_pend_idx_d;
+    logic [WAY_W-1:0] rr_pend_way_q, rr_pend_way_d;
     assign read_req = slv_req_i.ar_valid && slv_resp_o.ar_ready &&
                       l2_is_cacheable(slv_req_i.ar.cache) && !slv_req_i.ar.lock;
-    assign ram_addr = rr_adv ? idx_of(addr_q) : idx_of(slv_req_i.ar.addr);
-    assign next_way = (way_q == WAY_W'(SET_ASSOC - 1)) ? '0 : way_q + 1'b1;
+    assign next_way = (tag_wway == WAY_W'(SET_ASSOC - 1)) ? '0 : tag_wway + 1'b1;
+    assign do_write = (rr_adv || rr_pend_q) && !read_req;
+    assign ram_addr = read_req ? idx_of(slv_req_i.ar.addr)
+                               : (rr_adv ? tag_windex : rr_pend_idx_q);
+    assign wr_way   = rr_adv ? next_way : rr_pend_way_q;
+    always_comb begin
+      rr_pend_d     = rr_pend_q;
+      rr_pend_idx_d = rr_pend_idx_q;
+      rr_pend_way_d = rr_pend_way_q;
+      if (rr_adv && read_req) begin
+        rr_pend_d     = 1'b1;
+        rr_pend_idx_d = tag_windex;
+        rr_pend_way_d = next_way;
+      end else if (rr_pend_q && !read_req) begin
+        rr_pend_d = 1'b0;
+      end
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        rr_pend_q     <= 1'b0;
+        rr_pend_idx_q <= '0;
+        rr_pend_way_q <= '0;
+      end else begin
+        rr_pend_q     <= rr_pend_d;
+        rr_pend_idx_q <= rr_pend_idx_d;
+        rr_pend_way_q <= rr_pend_way_d;
+      end
+    end
     tc_sram #(
         .NumWords(NUM_SETS), .DataWidth(WAY_W), .ByteWidth(WAY_W),
         .NumPorts(1), .Latency(1), .SimInit("none")
     ) i_metadata (
         .clk_i, .rst_ni,
-        .req_i(rst_ni && (read_req || rr_adv)), .we_i(rr_adv),
-        .addr_i(ram_addr), .wdata_i(next_way), .be_i(1'b1), .rdata_o(rr_victim_way)
+        .req_i(rst_ni && (read_req || do_write)), .we_i(do_write),
+        .addr_i(ram_addr), .wdata_i(wr_way), .be_i(1'b1), .rdata_o(rr_victim_way)
     );
   end else begin : gen_no_rr
     assign rr_victim_way = '0;

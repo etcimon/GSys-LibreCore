@@ -1000,6 +1000,18 @@ module frontend
   logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] resolve_hart;
   assign resolve_hart = resolved_branch_i.hart_id;
 
+  // Prediction-time checkpoint bookkeeping (TAGE fabric): push one entry per
+  // consumed real-CF slot — decode type, not predicted cf_type, so the push
+  // set equals the resolve set; pop one per resolved CF.
+  logic [NrInstr-1:0] bp_push_cf;
+  logic             bp_cf_resolve;
+  for (genvar i = 0; i < NrInstr; i++) begin : gen_bp_push_cf
+    assign bp_push_cf[i] = (is_branch[i] | is_jump[i] | is_jalr[i] | is_return[i])
+                           & instr_queue_consumed[i];
+  end
+  assign bp_cf_resolve = resolved_branch_i.valid
+                         && (resolved_branch_i.cf_type != ariane_pkg::NoCF);
+
   if (CVA6Cfg.RASDepth == 0) begin : gen_no_ras
     assign ras_predict = '0;
     assign ras_stack_snap = '0;
@@ -1115,6 +1127,8 @@ module frontend
         .debug_mode_i,
         .hart_i             (smt_hart_i),
         .resolve_hart_i     (resolve_hart),
+        .push_cf_i          (bp_push_cf),
+        .cf_resolve_i       (bp_cf_resolve),
         .vpc_bht_i          (vpc_bht),
         .vpc_btb_i          (vpc_btb),
         .bht_update_i       (bht_update),

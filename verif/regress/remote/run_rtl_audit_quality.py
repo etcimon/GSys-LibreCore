@@ -40,7 +40,8 @@ module leaf import ariane_pkg::*; import audit_types::*;
  .clk_i,.rst_ni,.flush_i(flush),.cancelled_mask_i(cancel),.disp_valid_i(dv),.disp_sbe_i(ds),.disp_orig_i(di),
  .disp_prs1_i(p1),.disp_prs2_i(p2),.disp_prd_i(pd),.disp_rs1_ready_i(r1),.disp_rs2_ready_i(r2),
  .disp_ack_o(da),.full_o(full),.wb_valid_i(wv),.wb_prd_i(wp),.issue_sbe_o(issued),.issue_orig_o(instruction),
- .issue_prd_o(ip),.issue_valid_o(iv),.issue_ack_i(ia),.mem_stall_i(mem_stall));
+ .issue_prd_o(ip),.issue_valid_o(iv),.issue_ack_i(ia),.mem_stall_i(mem_stall),
+ .st_live_mask_i('0),.commit_ptr_i('0));
 `ifdef AUDIT_FORMAL
  logic history_valid=0;
  always_ff @(posedge clk_i)begin
@@ -155,6 +156,110 @@ endmodule
 '''
 
 
+DISPATCH_TID=r'''
+// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+//
+// Independent-elaborator check for the dispatch -> LSQ allocation id. The
+// simulator reports i_lsq.alloc_id_i as a constant zero while
+// dispatch_sbe_i[p].trans_id carries the dispatched value; this asks a second
+// frontend (slang/yosys) whether that connection is structurally sound.
+module dispatch_tid_check
+ (input logic clk_i,rst_ni,input logic[1:0] dv,input logic[3:0] tid0,tid1,input logic[2:0] rawfu);
+ import ariane_pkg::*;
+ typedef struct packed {fu_t fu;fu_op op;logic[4:0] rs1,rs2,rd;logic[3:0] trans_id;
+   logic[63:0] pc,result;logic[7:0] p_rs1,p_rs2,p_rd;logic ooo_renamed;} sbe_t;
+ function automatic config_pkg::cva6_cfg_t cfg();
+  config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+  c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NrHarts=1;c.NrCores=1;c.NrIssuePorts=2;c.NrCommitPorts=2;
+  c.NrWbPorts=2;c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.PrfEntries=40;c.RobEntries=8;
+  c.IqEntries=8;c.LsqLoadEntries=4;c.LsqStoreEntries=4;c.BPCkptDepth=2;c.OoOEn=1;return c;
+ endfunction
+ sbe_t [1:0] ds;
+ always_comb begin
+  ds='0;
+  ds[0].trans_id=tid0;ds[1].trans_id=tid1;
+  ds[0].fu=fu_t'(rawfu);ds[1].fu=fu_t'(rawfu);
+  ds[0].op=SD;ds[1].op=SD;
+ end
+ g6lc_ooo_dispatch #(.CVA6Cfg(cfg()),.scoreboard_entry_t(sbe_t)) dut(
+  .clk_i,.rst_ni,.flush_i(1'b0),.flush_unissued_i(1'b0),.cancelled_mask_i('0),
+  .dispatch_sbe_i(ds),.dispatch_orig_i('0),.dispatch_valid_i(dv),.dispatch_ack_o(),
+  .issue_sbe_o(),.issue_orig_o(),.issue_valid_o(),.issue_ack_i(2'b11),
+  .issue_op_a_o(),.issue_op_b_o(),.issue_op_a_valid_o(),.issue_op_b_valid_o(),
+  .wb_valid_i('0),.wb_id_i('0),.wb_data_i('0),.wb_exc_i('0),
+  .commit_ack_i('0),.commit_instr_i('0),.commit_ptr_i('0),.mispredict_i(1'b0),.mispredict_id_i('0),
+  .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o());
+ // Purely combinational, so a single step settles it.
+ always_comb begin
+  assert(dut.alloc_ids[0]==ds[0].trans_id);
+  assert(dut.alloc_ids[1]==ds[1].trans_id);
+ end
+endmodule
+'''
+
+
+IQ_AGE=r'''
+// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+//
+// Independent-elaborator check for the IQ store-age gate: a queued ready LOAD
+// must issue exactly when no live store OLDER than it exists (circular
+// trans_id distance anchored at the commit pointer). The integrated dispatch
+// suite also covers this end-to-end (scenarios 7/8); this proof keeps the gate
+// honest for arbitrary mask/commit-pointer combinations a directed bench
+// cannot enumerate.
+module iq_age_check
+ (input logic clk_i,rst_ni,input logic[3:0] ltid,cp,input logic[15:0] smask);
+ import ariane_pkg::*;
+ typedef struct packed {fu_t fu;fu_op op;logic[4:0] rs1,rs2,rd;logic[3:0] trans_id;
+   logic[63:0] pc,result;logic[7:0] p_rs1,p_rs2,p_rd;logic ooo_renamed;} sbe_t;
+ function automatic config_pkg::cva6_cfg_t cfg();
+  config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+  c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NrHarts=1;c.NrCores=1;c.NrIssuePorts=1;c.NrCommitPorts=1;
+  c.NrWbPorts=1;c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.PrfEntries=40;c.RobEntries=8;
+  c.IqEntries=4;c.LsqLoadEntries=4;c.LsqStoreEntries=4;c.BPCkptDepth=2;c.OoOEn=1;return c;
+ endfunction
+ logic started=0,pending=0,dv,da,iv;
+ sbe_t[0:0] ds;
+ always_ff @(posedge clk_i)begin
+  if(!rst_ni)begin started<=0;pending<=0;end
+  else begin
+   started<=1;
+   if(da)pending<=1;
+   else if(pending&&iv)pending<=0;
+  end
+ end
+ always_comb begin
+  dv=!started;
+  ds='0;ds[0].fu=LOAD;ds[0].op=LD;ds[0].trans_id=ltid;
+ end
+ logic older_ref;
+ always_comb begin
+  older_ref=1'b0;
+  for(int s=0;s<16;s++)
+   if(smask[s]&&(4'(s)-cp)<(ltid-cp))older_ref=1'b1;
+ end
+ g6lc_iq #(.CVA6Cfg(cfg()),.DEPTH(4),.PRF_W(4),.scoreboard_entry_t(sbe_t)) dut(
+  .clk_i,.rst_ni,.flush_i(1'b0),.cancelled_mask_i('0),
+  .disp_valid_i(dv),.disp_sbe_i(ds),.disp_orig_i('0),.disp_prs1_i('0),.disp_prs2_i('0),
+  .disp_prd_i('0),.disp_rs1_ready_i(1'b1),.disp_rs2_ready_i(1'b1),.disp_ack_o(da),
+  .full_o(),.wb_valid_i('0),.wb_prd_i('0),
+  .issue_sbe_o(),.issue_orig_o(),.issue_prd_o(),.issue_valid_o(iv),.issue_ack_i(1'b1),
+  .mem_stall_i(1'b0),.st_live_mask_i(smask),.commit_ptr_i(cp));
+ always_ff @(posedge clk_i)begin
+  if(rst_ni&&started)begin
+   // ltid is baked into the queued entry at dispatch; smask/cp are free per
+   // step and the gate is combinational, so the reference tracks them live.
+   assume(ltid==$past(ltid));
+   assume(!smask[ltid]);
+   if(pending)assert(iv==!older_ref);
+  end
+ end
+endmodule
+'''
+
+
 def main():
  out=Path(os.environ['TH_OUT_DIR']);data=Path(os.environ['TH_DATA_DIR'])
  base=Path('/opt/testharness/runs/review-rtl-audit-before-v2/output/source')
@@ -169,6 +274,23 @@ def main():
   results.append({'label':label,'rc':p.returncode,'expectedError':expected,'matched':ok});(out/'results.json').write_text(json.dumps(results,indent=2))
   assert ok,label
   return work,text
+ if os.environ.get('REVIEW_AUDIT_DISPATCH_TID')=='1':
+  wrapper=out/'dispatch_tid.sv';wrapper.write_text(DISPATCH_TID)
+  ooo=' '.join(str(data/n) for n in ['g6lc_ooo_pkg.sv','g6lc_rename.sv','g6lc_rob.sv','g6lc_lsq.sv','g6lc_prf.sv','g6lc_memdep.sv','g6lc_iq.sv','g6lc_ooo_dispatch.sv'])
+  script=(f'read_slang --top dispatch_tid_check {packages} {ooo} {wrapper}\n'
+          'prep -top dispatch_tid_check\nasync2sync\nchformal -lower\nflatten\nmemory_map\n'
+          'opt -full\ndffunmap\nopt_clean -purge\n'
+          'sat -seq 1 -set rst_ni 1 -prove-asserts -verify\n')
+  run('dispatch-tid',script)
+  return 0
+ if os.environ.get('REVIEW_AUDIT_IQ_AGE')=='1':
+  wrapper=out/'iq_age.sv';wrapper.write_text(IQ_AGE)
+  script=(f'read_slang --top iq_age_check {packages} {data}/g6lc_iq.sv {wrapper}\n'
+          'prep -top iq_age_check\nasync2sync\nchformal -lower\nflatten\nmemory_map\n'
+          'opt -full\ndffunmap\nopt_clean -purge\n'
+          'sat -seq 4 -set-at 1 rst_ni 0 -set rst_ni 1 -set-assumes -prove-asserts -verify\n')
+  run('iq-age',script)
+  return 0
  for kind,template,filename in [('iq',IQ,'g6lc_iq.sv'),('mshr',MSHR,'g6lc_l2_mshr.sv'),('tage',TAGE,'g6lc_bp_tage.sv')]:
   if os.environ.get('REVIEW_AUDIT_TAIL')=='1' and kind!='tage':continue
   if os.environ.get('REVIEW_AUDIT_SKIP_IQ')=='1' and kind=='iq':continue

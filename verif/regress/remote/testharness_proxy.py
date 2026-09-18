@@ -1765,7 +1765,7 @@ def l2_leaf_passed(text: str, rc: int, ways: int, rr_en: int) -> bool:
             and not re.search(r"FAIL|%Error|%Fatal", text)
             and all(f"[L2TB] ATOP mode={mode} forwarded=1" in text for mode in range(3))
             and "[L2TB] AMO arith add=1 swap=1 cas_hit=1 cas_miss=1 lrsc_ok=1 lrsc_fail=1" in text
-            and all(f"phase={phase}" in text for phase in ("replacement_hole", "bypass_backpressure", "short_last_fill_guard")))
+            and all(f"phase={phase}" in text for phase in ("replacement_hole", "bypass_backpressure", "short_last_fill_guard", "fill_error_no_install")))
 
 
 def l2_units_passed(text: str, rc: int) -> bool:

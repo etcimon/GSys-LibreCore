@@ -30,6 +30,252 @@ Detail: [`../uncore/dram-channel-scaling.md`](../uncore/dram-channel-scaling.md)
 | L3 | `g6lc_l3_top` (wraps L2 engine) | `L3En` (requires `L2En`) |
 | Prefetch | `g6lc_server_prefetcher` | `ServerPrefetchEn`, streams, distance |
 
+## P2 read-response ownership increment
+
+`review-l2-read-order-before-v1` reproduces four response-data/order failures
+(same-ID miss followed by hit/bypass, nonadjacent A/B/A merge, and a pending
+waiter's ID followed by another request) plus replacement of a stalled master
+AR. Different-ID hit-under-miss, adjacent same-ID merging and eight same-ID
+independent fills are passing controls. The bench now queues accepted requests
+per ID instead of overwriting expected data with the newest offered request;
+its AR driver also holds VALID/payload until actual acceptance.
+
+The repair queries primary/waiter IDs from existing MSHR state, including killed
+entries that still owe responses. Hits/bypasses wait for older same-ID responses;
+a merge cannot leapfrog a later fill carrying the same ID. The existing serve
+interrupt drains dependencies and resumes the captured read class. Independent
+misses still allocate concurrently, including all-ones IDs used by an upper cache.
+One new hold bit preserves fill-AR ownership until handshake; the issue pointer
+and existing captured metadata retain its payload without another full AXI buffer.
+
+`review-l2-read-order-after-v1` passes all 20 positives and 18 data-oracle negatives
+(38 records), with master/slave AR and slave R stability assertions active.
+Small RR0/RR1 synthesis checks remain check/latch clean; runtime dependencies bind
+to the private corrected header. The default simulation geometry is 4 KiB/four
+ways/four MSHRs/two banks; synthesis is 512 B/two ways/two MSHRs/two banks. No full
+AXI/formal/production-geometry or L3-stack qualification follows. This adds ID
+comparisons and a FIFO-order scan to read admission, not a pipeline stage or new
+clock/reset/ISA/DTS/default. Mapped timing/area/power remains unmeasured.
+
+Still open after the read increment: invalidation/write races, RR metadata-port
+scheduling, L3/server-prefetch integration, and the main sequential leaf regression.
+Atomic B/R transport lifetime is addressed by the separate increment below.
+
+### Atomic B/R transport lifetime
+
+`review-l2-atop-before-v2` reproduces three failures: a reserved-ID atomic R is
+consumed despite requester backpressure after B releases the context; a late
+non-reserved-ID R deadlocks behind a newer bypass read; a no-R atomic store never
+releases the reserved-ID trail. The five R-before-B, simultaneous-B/R and plain
+write controls pass. The response delay exceeds the old sixteen-cycle settling
+window; a timeout is an expected failure here, never a successful transaction.
+
+`wr_r_pending` and `wr_b_done` now retain the captured write context until B and
+all required R beats have handshaken. R forwarding is ID-qualified, requires a
+live write response obligation, and excludes fill-collector beats. B is forwarded
+once with matching ID. No-R writes clear the reserved-ID trail; returning atomics
+clear it only on accepted RLAST. The conservative settling timer remains, but it
+no longer substitutes for ownership. Two state bits are added; no new pipeline,
+clock/reset, configuration default or ISA/DTS capability.
+
+`review-l2-atop-after-v1` passes all 28 positives and 26 data-oracle negatives
+(54 records), plus the same small RR0/RR1 synthesis checks with no check problems
+or latches. This is **transport lifetime only**: the HUM write model emits B/R
+but does not perform atomic arithmetic or update backing memory, and tests never
+read the written location. AMO arithmetic, LR/SC, older-fill/write visibility,
+invalidation and full cache-stack qualification remain separate obligations.
+
+### Cache-stack verification boundary
+
+`CHAIN_L3=1` in the HUM fixture connects the real 4 KiB/four-way/four-MSHR L2
+through a 2 KiB/two-way/two-MSHR `g6lc_l3_top`. The default-off path is direct
+wiring and `review-l2-stack-direct-v1` passes all 54 records after that fixture
+change. `review-mshr-id-query-regress-v1` passes the existing 18 MSHR records
+across depth/waiter geometries 2/1, 4/2 and 8/3 with explicit unused-port ties.
+
+Directly abutting the two controllers fails Verilator's UNOPTFLAT gate
+(`review-l2-stack-chain-v1`): each side's response drives the other's request
+combinationally through the packed AXI structs. The matching lowered synthesis
+fixture reports zero combinational SCCs and no check problems
+(`review-l2-stack-scc-v1`, `REVIEW_L2_HUM_SCC=1`), so the aggregate diagnostic is
+coarser than the bit-level graph — but a zero-latency cache-to-cache abutment is
+also not the intended integration. The stack fixture therefore places a vendor
+`axi_cut` register slice between L2 and L3, matching a real pipelined cache
+crossing at the inferred 1.25 GHz target. No gate is waived.
+
+`review-l2-stack-chain-v4` then runs and passes 34 records across MLP and
+scenarios 12–27 (positives plus data-oracle negatives) with the full data, ID,
+last, B and stability oracles live and two L3 MSHRs backpressuring four L2 fills.
+`review-l2-stack-direct-v2` re-confirms 54 records and both RR0/RR1 synthesis
+checks after the fixture change.
+
+Two scope limits: the zero-cut abutment remains unexercised in simulation, and
+scenario 20/21's end-to-end atomic-R backpressure assertion applies only to the
+direct seam, because a register slice may legitimately buffer one accepted beat.
+Single-cache collision scenarios 9–11 stay on the direct path since their stimulus
+aligns to one cache's own refill boundary. Inclusive invalidation, server
+prefetching, coherence, ISA and physical qualification remain open.
+
+### Replacement-metadata port scheduling
+
+One SRAM port serves both the victim-pointer read (for the request being accepted)
+and the pointer update (for the fill being installed), and the update won. The read
+cannot be repeated — the accepted request reaches its lookup the next cycle — so the
+lookup used another set's pointer.
+
+Reaching it required care. A continuous miss stream never collides: while fills are
+outstanding the MSHR saturates and the front end parks in its lookup state, so
+installs land while no request is being accepted. Scenario 30 therefore sweeps the
+phase between a fill's issue and a second request's acceptance. Both the collision
+count and the lost-read count are measured structurally at the RAM interface, and the
+test fails as inconclusive if no collision occurred rather than passing vacuously.
+
+With the original schedule: `collide=1 lost=1`. After the repair — the read takes the
+port and a displaced update is held in one pending slot, with a later install
+overwriting a held one because the pointer means "past the most recently installed
+way" — `collide=1 lost=0` with all 48 requests returning correct data
+(`review-l2-rr-fault-v3` / `review-l2-rr-after-v3`). The default suite re-passes 60
+records with RR0/RR1 synthesis (`review-l2-rr-regate-v3`), and the sequential bench's
+independent RR policy oracle passes at `RR_EN=1`.
+
+This is a scheduling/ownership result. It is **not** a replacement-policy benefit
+claim: no representative losing-case workload or mapped cost is measured, and RR
+remains default-off.
+
+One runner defect was found and fixed while doing this: a new `rr` mode variable
+collided with the synthesis loop's `for rr in (0, 1)`, which rebound it to 1 and
+silently narrowed the plan to a single scenario. Two "regate" runs recorded one
+record instead of sixty; both are superseded by `review-l2-rr-regate-v3`.
+
+### Invalidation source ownership
+
+External back-invalidation and write-through self-invalidation share one tag match
+port, and the external source won unconditionally, so a same-cycle snoop discarded
+the write's self-invalidation and left the written line cached — the exact stale-hit
+the self-invalidation exists to prevent. `review-l2-inval-before-v1` reproduces it:
+with a snoop held on an unrelated line across the write, the following read is
+served from the stale line and issues no refill (`HUM_SELF_INVAL_LOST ar=1`). The
+kill-on-invalidation control (invalidation during an active fill still serves the
+attached requester, installs nothing, and forces a refill) passes before and after.
+
+A displaced self-invalidation is now held in one pending bit plus its address and
+retired on the first cycle the match port is free; no new request is accepted while
+it is pending, so no lookup can hit the line in between. External ordering is
+unchanged — the snoop still wins the port. `review-l2-inval-after-v2` passes 58
+records with RR0/RR1 synthesis, `review-l2-stack-chain-v6` passes 38 through the
+L3 stack, and the sequential regression still passes.
+
+Refill checks are counted at the L2 master boundary rather than at memory, because
+an outer cache legitimately absorbs the refill. Limits: a permanently asserted
+snoop would defer the self-invalidation indefinitely (the port is always ready, so
+the source is expected to drop it), and this covers invalidation *ownership*, not
+directory or multi-master coherence.
+
+### Sequential leaf regression against the changed engine
+
+The main sequential bench had been failing since the concurrent-fill rework: its
+memory model still required a fill AR to carry the requester's id, while fills
+deliberately issue under the reserved id so their beats can be routed to the
+collector. The oracle now expects the reserved id for cacheable unlocked fills and
+the requester's id for bypasses; the design was not changed to satisfy it. The
+leaf-unit bench also needed named ties for the new MSHR outputs, since that build
+promotes empty-pin and width warnings to errors.
+
+With those corrections the sequential regression passes at 4 KiB/four ways/RR0 with
+8-cycle memory and at 4 KiB/two ways/RR1 with stalls: warm, capacity, thrash,
+hot-scan, write-through, non-cacheable, pseudo-random, reset-fill, all-ways-hit,
+protected-hot, masked-invalidation, exclusive, bypass-backpressure, all three ATOP
+schedules, post-ATOP fill, short-last guard, fill-error-no-install and
+replacement-hole, plus AMO add/swap/CAS-hit/CAS-miss and LR-SC success/failure
+(1520 reads, 95 writes, no MSHR-full or bank-conflict anomalies). The MSHR/data
+leaf-unit suite also passes. This is the regression evidence that the read-order
+and atomic-lifetime repairs did not disturb the bypass, atomic, error and
+replacement paths the concurrent bench does not reach.
+
+### Server-prefetch response ownership
+
+The prefetcher was unsound at the response seam and is now repaired at leaf scope
+(`verif/tb/l2/tb_g6lc_pf.sv`, `verif/regress/remote/run_pf_review.py`). Findings on
+the pre-change RTL, each reproduced with a distinct discriminator
+(`review-pf-diagnose-v1`, `review-pf-before-v3`):
+
+- A loop-local stride variable was conditionally assigned, so the module failed
+  the latch gate before any test could run. Fixed by hoisting and defaulting it.
+- The outstanding-prefetch flag was retired by *any* last beat, so a demand
+  burst cleared it and the prefetch beat was then forwarded upstream as a foreign
+  response (`PF_UNEXPECTED_ID`, scenarios 0 and 1).
+- The absorb path swallowed every beat while a prefetch was outstanding,
+  regardless of ID, so demand data could be consumed.
+- All demand ARs were blocked while a prefetch was outstanding, including IDs
+  that cannot alias it (`PF_DEMAND_BLOCKED`).
+- A prefetch could be injected while an upstream read already owned the reserved
+  all-ones ID — the same value L2/L3 uses as `FILL_ID` (`PF_ID_COLLIDE`).
+
+Injection, absorption and retirement are now qualified by the reserved ID, and a
+small counter of upstream reserved-ID reads keeps at most one such transaction
+outstanding. Only aliasing demand ARs are held. `review-pf-after-v2` passes 4
+positives and 4 data-oracle negatives with latch/feedback errors fatal, and the
+fixture synthesis reports no check problems, no latches and zero SCCs.
+
+Scope: this is response ownership only. Prefetch accuracy, coverage, timeliness
+and any bandwidth/latency effect are unmeasured, the reserved-ID throttle limits
+prefetch under reserved-ID demand traffic pending an ID-width decision at the
+cache boundary, and `ServerPrefetchEn` remains off in every shipped package.
+
+## P2 concurrent-fill continuation: qualified leaf increment
+
+The worktree now has decoupled per-entry fills rather than only same-line
+hit-under-miss. This remains an **unfinished nonblocking candidate**, not an
+L2/L3 release. The concurrent-reader bench `tb_g6lc_l2_hum.sv` now accepts up to
+16 memory read jobs, counts outstanding accepted ARs through RLAST, preserves
+FIFO/same-ID memory response order, and holds R under backpressure. Scenario 8
+requires at least two outstanding fills and a clean eight-request drain.
+It does not yet reorder different IDs or model concurrent atomic writes.
+
+Three repaired contracts are exercised at their exact collision boundaries:
+
+- Fill issue/collection increments compose with same-cycle served-entry retirement
+  decrements; they no longer overwrite those decrements with registered-count +1.
+- Tag publication requires the data-bank install to succeed; a bank conflict
+  leaves the fill pending and cannot publish a tag for unwritten data.
+- RR metadata writes use the installed fill's set/way, not the foreground request.
+  RR read/write-port scheduling and policy behavior under concurrency stay open.
+
+`review-l2-hum-collision-v2` passes 22 records. Isolated source mutations restoring
+old collector, issue and tag-write assignments fail respectively with
+`HUM_COLLECT_RETIRE_COUNT`, `HUM_ISSUE_RETIRE_COUNT`, and `HUM_TAG_WITHOUT_DATA`
+(`review-l2-hum-fault-{collect,issue,install}-v1`). The first issue-collision
+stimulus deadlocked itself by queuing the second request after stalling the serve
+FSM; the corrected test queues it during the first fill. That failed test is
+retained, not attributed to an RTL defect.
+
+Strict slang then exposed declaration-before-use of `fill_kill_q`. Moving the
+declaration, separating victim selection from the probe-consuming FSM, using
+registered MSHR lookup rather than alloc-qualified merge feedback, and removing
+an unnecessary waiter-index temporary resolves the elaboration failure and all
+reported LATCH/UNOPTFLAT warnings in this leaf. `review-l2-hum-clean-v1` passes all
+22 simulation records plus RR0/RR1 synthesis at 512 B, two ways, two MSHRs and two
+banks. Both synthesis checks report zero problems and no latch cells; unchanged
+`tc_sram` unreset-read-output warnings remain, as do benign-width warnings in the
+simulation build. The runner now treats LATCH/UNOPTFLAT as errors;
+`review-l2-hum-gated-v1` repeats all 22 records successfully with those gates.
+Compiler dependency files bind the model to the pinned private corrected runtime.
+This is not
+all-width/production-geometry, mapped physical area, STA, power or MBIST evidence.
+
+No state capacity, clock/reset, ISA/DTS or configuration default is added by these
+repairs. The timing-relevant cones are victim select/probe, install bank-conflict
+qualification and fill-counter arithmetic; no Fmax claim follows from lint/synth.
+No throughput gain is attributed to the repairs: the earlier serial-memory and
+new queued-memory fixture timings are not a matched performance comparison.
+
+Still required: same-ID miss/hit/bypass and nonadjacent-merge response ordering;
+held fill AR stability across bypass arbitration; invalidation/install/write
+races; exact delayed ATOP-R lifetime; L3/server-prefetch demand ownership; the
+main `tb_g6lc_l2.sv` model's serial/ID assumptions and its error/atomic regression;
+MSHR unit/formal requalification; source-bound integration; production geometry
+and physical gates. `../remaining-upgrade-sequence.md` records these prerequisites.
+
 ## Completion plan after methodology review (2026-09-15)
 
 The active implementation order is the 2026-09-16 E1–E6 efficiency review in
