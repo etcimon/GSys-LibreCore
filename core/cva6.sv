@@ -718,6 +718,7 @@ module cva6
   logic [1:0] irq_active;
   assign irq_active = irq_i[smt_active_hart];
   logic                    smt_switch;
+  logic                    smt_quiesce, smt_sb_empty;
   logic                    smt_t0_extra;
   logic                    smt_t0_rewind;
   logic [CVA6Cfg.VLEN-1:0] smt_t0_alt;
@@ -921,6 +922,44 @@ module cva6
   assign smt_restart_valid = 1'b1;
 `endif
 
+  logic [CVA6Cfg.NrCommitPorts-1:0] smt_retire_valid;
+  logic [CVA6Cfg.NrCommitPorts-1:0][HART_ID_BITS-1:0] smt_retire_hart;
+  logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.VLEN-1:0] smt_retire_pc;
+  logic smt_arch_redirect_valid;
+  logic [HART_ID_BITS-1:0] smt_arch_redirect_hart;
+  logic [CVA6Cfg.VLEN-1:0] smt_arch_redirect_pc;
+  for (genvar p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin : gen_smt_retire_pc
+    assign smt_retire_valid[p] = commit_ack[p] && !commit_drop_id_commit[p] &&
+        !commit_instr_id_commit[p].ex.valid;
+    assign smt_retire_hart[p] = commit_instr_id_commit[p].hart_id;
+    assign smt_retire_pc[p] = commit_instr_id_commit[p].fu == CTRL_FLOW
+        ? commit_instr_id_commit[p].bp.predict_address
+        : commit_instr_id_commit[p].pc + CVA6Cfg.VLEN'(commit_instr_id_commit[p].is_compressed ? 2 : 4);
+  end
+  always_comb begin
+    smt_arch_redirect_valid = 1'b0;
+    smt_arch_redirect_hart = smt_active_hart;
+    smt_arch_redirect_pc = '0;
+    if (CVA6Cfg.DebugEn && set_debug_pc) begin
+      smt_arch_redirect_valid = 1'b1;
+      smt_arch_redirect_pc = CVA6Cfg.VLEN'(CVA6Cfg.DmBaseAddress + CVA6Cfg.HaltAddress);
+    end
+    if (set_pc_ctrl_pcgen) begin
+      smt_arch_redirect_valid = 1'b1;
+      smt_arch_redirect_hart = whart_commit_id[0];
+      smt_arch_redirect_pc = pc_commit + CVA6Cfg.VLEN'(halt_ctrl ? 0 : 4);
+    end
+    if (eret) begin
+      smt_arch_redirect_valid = 1'b1;
+      smt_arch_redirect_hart = smt_active_hart;
+      smt_arch_redirect_pc = epc_commit_pcgen;
+    end
+    if (ex_commit.valid) begin
+      smt_arch_redirect_valid = 1'b1;
+      smt_arch_redirect_hart = smt_active_hart;
+      smt_arch_redirect_pc = trap_vector_base_commit_pcgen;
+    end
+  end
   g6lc_smt_pc_bank #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_pc_bank (
@@ -929,9 +968,12 @@ module cva6
       .boot_addr_i  (boot_addr_i[CVA6Cfg.VLEN-1:0]),
       .npc_live_i      (smt_restart_pc),
       .npc_live_valid_i(smt_restart_valid),
-      .redirect_valid_i(resolved_branch.valid && resolved_branch.is_mispredict),
-      .redirect_hart_i (resolved_branch.hart_id),
-      .redirect_pc_i   (resolved_branch.target_address),
+      .redirect_valid_i(smt_arch_redirect_valid),
+      .redirect_hart_i (smt_arch_redirect_hart),
+      .redirect_pc_i   (smt_arch_redirect_pc),
+      .retire_valid_i  (smt_retire_valid),
+      .retire_hart_i   (smt_retire_hart),
+      .retire_pc_i     (smt_retire_pc),
       .outgoing_hart_o (smt_outgoing_hart),
       .active_hart_i   (smt_active_hart),
       .switch_i        (smt_switch),
@@ -1109,6 +1151,10 @@ module cva6
       .hart_block_o  (smt_hart_block)
   );
 
+`ifdef G6LC_FETCH_B
+  assign smt_switch_hold = 1'b0;
+  assign smt_hart_ready_sel = smt_hart_ready;
+`else
   // Dual-hart bare-metal SMT switch holds:
   // 1) Sticky: primary has committed outside boot ROM + DRAM grace.
   // 2) Sticky per-hart first-exit: do not eject a hart until *that* hart has
@@ -1242,6 +1288,7 @@ module cva6
     assign smt_switch_hold = 1'b0;
     assign smt_hart_ready_sel = smt_hart_ready;
   end
+`endif
 
 
 
@@ -1265,6 +1312,8 @@ module cva6
       .issue_fire_i        (smt_issue_fire),
       .flush_i             (flush_ctrl_if),
       .hold_i              (smt_switch_hold),
+      .drain_ready_i       (smt_sb_empty && no_st_pending_commit && !flush_ctrl_id),
+      .quiesce_o           (smt_quiesce),
       .id_uniss_i          (issue_entry_valid_id_issue[0]),
       .iq_valid_i          (fetch_valid_if_id[0]),
       .t0_imm_i            (smt_t0_imm),
@@ -1376,6 +1425,7 @@ module cva6
       .clk_i,
       .rst_ni,
       .sb_full_o               (sb_full),
+      .sb_empty_o              (smt_sb_empty),
       .spec_cancel_o           (spec_cancel),
       .cancelled_mask_o        (sb_cancelled_mask),
       .flush_unissued_instr_i  (flush_unissued_instr_ctrl_id),
@@ -1385,7 +1435,8 @@ module cva6
       .decoded_instr_i         (issue_entry_id_issue),
       .decoded_instr_i_prev    (issue_entry_id_issue_prev),
       .orig_instr_i            (orig_instr_id_issue),
-      .decoded_instr_valid_i   (issue_entry_valid_id_issue),
+      .decoded_instr_valid_i   (issue_entry_valid_id_issue & {CVA6Cfg.NrIssuePorts{
+          !smt_quiesce && !(CVA6Cfg.NrHarts > 1 && halt_ctrl)}}),
       .is_ctrl_flow_i          (is_ctrl_fow_id_issue),
       .decoded_instr_ack_o     (issue_instr_issue_id),
       .g1fh_csr_a0_i           (g1fh_csr_a0),
@@ -2507,6 +2558,28 @@ module cva6
   );
 
   //pragma translate_off
+`ifdef G6LC_FETCH_B
+  bit smt_handoff_trace;
+  initial smt_handoff_trace = $test$plusargs("smt_flow_trace");
+  always @(posedge clk_i) begin
+    if (rst_ni && smt_handoff_trace && smt_switch) begin
+      $display("[smt-flow] handoff time=%0t from=%0d to=%0d frontier_candidate=%h transport=%h restore=%h empty=%b stores_clear=%b",
+               $time, smt_outgoing_hart, smt_active_hart, smt_restart_pc, smt_npc_live,
+               smt_npc_restore, smt_sb_empty, no_st_pending_commit);
+      $display("[smt-flow] transport pending=%b target=%h inflight=%b inflight_pc=%h cursor=%h registered=%b registered_pc=%h carry=%b carry_pc=%h ftq=%b ftq_pc=%h",
+               i_frontend.redirect_pend_q, i_frontend.redirect_pc_q,
+               i_frontend.inflight_q, i_frontend.inflight_addr_q, i_frontend.npc_q,
+               i_frontend.icache_valid_q, i_frontend.icache_vaddr_q,
+               i_frontend.leftover_valid, i_frontend.leftover_pc,
+               i_frontend.ftq_head_valid, i_frontend.ftq_head_vaddr);
+      for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+        $display("[smt-flow] frontier port=%0d decode_v=%b decode_h=%0d decode_pc=%h queue_v=%b queue_h=%0d queue_pc=%h",
+                 p, issue_entry_valid_id_issue[p], issue_entry_id_issue[p].hart_id,
+                 issue_entry_id_issue[p].pc, fetch_valid_if_id[p], fetch_entry_if_id[p].hart_id,
+                 fetch_entry_if_id[p].address);
+    end
+  end
+`endif
   initial begin
     assert (!(CVA6Cfg.SuperscalarEn && CVA6Cfg.EnableAccelerator))
     else $fatal(1, "Accelerator is not supported by superscalar pipeline");

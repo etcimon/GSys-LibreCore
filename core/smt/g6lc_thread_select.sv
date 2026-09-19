@@ -32,6 +32,8 @@ module g6lc_thread_select
     // Hold switches (e.g. active hart still executing bootrom). Keeps active_hart
     // stable so PC-bank save/restore cannot corrupt a bootrom→DRAM jump.
     input  logic hold_i,
+    input  logic drain_ready_i,
+    output logic quiesce_o,
     // I4ba: ID has a hart-tagged unissued instruction.
     // I4bc: IQ head valid while ID is empty.
     // I4bd tried I$ present ∪ IQ while ID empty; hold-FAIL (`51b1c001`).
@@ -65,6 +67,7 @@ module g6lc_thread_select
   if (NH <= 1) begin : gen_single_hart
     assign active_hart_o       = '0;
     assign switch_o            = 1'b0;
+    assign quiesce_o           = 1'b0;
     assign t0_extra_o          = 1'b0;
     assign switch_on_miss_o    = 1'b0;
     assign switch_on_quantum_o = 1'b0;
@@ -97,6 +100,15 @@ module g6lc_thread_select
     logic          found_peer, found_clean, found_starve;
     logic          do_switch;
     logic          reason_miss, reason_quantum, reason_starve;
+    logic switch_q;
+`ifdef G6LC_FETCH_B
+    logic drain_pending_q, drain_pending_d;
+    logic [HID_W-1:0] drain_peer_q, drain_peer_d;
+    logic [2:0] drain_reason_q, drain_reason_d;
+    assign quiesce_o = drain_pending_q | switch_q;
+`else
+    assign quiesce_o = 1'b0;
+`endif
 
     always_comb begin
       for (int unsigned h = 0; h < NH; h++) begin
@@ -140,6 +152,11 @@ module g6lc_thread_select
     end
 
     always_comb begin
+`ifdef G6LC_FETCH_B
+      drain_pending_d = drain_pending_q;
+      drain_peer_d = drain_peer_q;
+      drain_reason_d = drain_reason_q;
+`endif
       active_d       = active_q;
       rr_ptr_d       = rr_ptr_q;
       quantum_d      = quantum_q;
@@ -176,7 +193,7 @@ module g6lc_thread_select
           end
         end
         SMT_RR: begin
-          if (fetch_fire_i && (quantum_q + 1'b1 >= Q_MAX[Q_W-1:0]) && found_peer) begin
+          if (fetch_fire_i && (quantum_q >= Q_W'(Q_MAX - 1)) && found_peer) begin
             do_switch      = 1'b1;
             reason_quantum = 1'b1;
             next_peer      = peer_any;
@@ -198,7 +215,7 @@ module g6lc_thread_select
             reason_starve = 1'b1;
             next_peer     = peer_starve;
           end else if (fetch_fire_i &&
-                       (quantum_q + 1'b1 >= Q_MAX[Q_W-1:0]) && found_peer) begin
+                       (quantum_q >= Q_W'(Q_MAX - 1)) && found_peer) begin
             do_switch      = 1'b1;
             reason_quantum = 1'b1;
             next_peer      = peer_any;
@@ -244,6 +261,27 @@ module g6lc_thread_select
         reason_starve  = 1'b0;
       end
 
+`ifdef G6LC_FETCH_B
+      if (drain_pending_q) begin
+        next_peer = drain_peer_q;
+        do_switch = drain_ready_i && hart_ready_i[drain_peer_q] &&
+                    !hold_i && !trap_hold_i && !flush_i;
+        reason_miss = do_switch && drain_reason_q[2];
+        reason_quantum = do_switch && drain_reason_q[1];
+        reason_starve = do_switch && drain_reason_q[0];
+        if (do_switch || !hart_ready_i[drain_peer_q]) drain_pending_d = 1'b0;
+      end else begin
+        if (do_switch && !hold_i && !flush_i) begin
+          drain_pending_d = 1'b1;
+          drain_peer_d = next_peer;
+          drain_reason_d = {reason_miss, reason_quantum, reason_starve};
+        end
+        do_switch = 1'b0;
+        reason_miss = 1'b0;
+        reason_quantum = 1'b0;
+        reason_starve = 1'b0;
+      end
+`endif
       // Hold wins over policy: no switch. Also *freeze* quantum/starve aging —
       // otherwise the parked primary's starve hits ST_MAX during peer bootrom
       // and, the cycle peer exits bootrom (hold drops), starve immediately
@@ -273,7 +311,7 @@ module g6lc_thread_select
         rr_ptr_d            = HID_W'((int'(next_peer) + 1) % NH);
       end else begin
         if (fetch_fire_i) begin
-          if (quantum_q + 1'b1 >= Q_MAX[Q_W-1:0])
+          if (quantum_q >= Q_W'(Q_MAX - 1))
             quantum_d = Q_MAX[Q_W-1:0];
           else
             quantum_d = quantum_q + 1'b1;
@@ -293,12 +331,16 @@ module g6lc_thread_select
     end
 
     // Delayed switch pulse: fires when active_q already equals the incoming hart.
-    logic switch_q;
     logic t0_bank_q;
     logic reason_miss_q, reason_quantum_q, reason_starve_q;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
+`ifdef G6LC_FETCH_B
+        drain_pending_q <= 1'b0;
+        drain_peer_q <= '0;
+        drain_reason_q <= '0;
+`endif
         active_q         <= '0;
         rr_ptr_q         <= HID_W'(1 % NH);  // prefer hart 1 as first alternate
         quantum_q        <= '0;
@@ -313,6 +355,11 @@ module g6lc_thread_select
         reason_starve_q  <= 1'b0;
         for (int unsigned h = 0; h < NH; h++) starve_q[h] <= '0;
       end else begin
+`ifdef G6LC_FETCH_B
+        drain_pending_q <= drain_pending_d;
+        drain_peer_q <= drain_peer_d;
+        drain_reason_q <= drain_reason_d;
+`endif
         active_q         <= active_d;
         rr_ptr_q         <= rr_ptr_d;
         quantum_q        <= quantum_d;

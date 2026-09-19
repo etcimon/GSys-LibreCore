@@ -15,14 +15,14 @@ WIP snapshot (SMT2 / QEMU / 100 TOPS / PCIe vs OoO·H·RVV·stream):
 | Track | Status |
 |-------|--------|
 | U1–U4, multi-issue, U7ᵃ/ᵇ/ᶜ, U6.0–U6.2 integrated | **Done / partial** |
-| **U6.1 dual-PC / CSR + follow-ons** | **Banks landed (fine-grain); product closeout open** — PC/CSR/RF/RAS/GHR banks; IF-only switch; *open:* dual-commit same cycle, banked BHT/BTB, FP reg banking, idle-thread clock gate, `Zawrs`/wait-for-peer, `SMT2` default SKU, boot-crutch retirement. |
+| **U6.1 dual-PC / CSR + follow-ons** | **Coarse-grained drained handoff; directed HSM profile passes** — active fetch_B stops admission and drains issued work/stores before switching, with retirement-owned restart PCs. The pinned source profile completes both supervisor contexts with OoOEn=0. Fine-grained cross-hart overlap, per-hart OoO namespaces, FP qualification, general liveness and product closeout remain open. |
 | **U9.0 Hypervisor Sstc×H** | **Done** — `vstimecmp` + `henvcfg.STCE` + VSTIP |
 | **U9.1 htimedelta** | **Done** — guest time = mtime + htimedelta; TIME under V |
 | **U9.2 VS litmus / trap polish** | **Done** — virtual-instr STCE, VSTIP mip, VS mret litmus; G-stage paths present |
 | **U10 server math package** | **C-light production** — HPDCACHE+HWPF+L2 auto, RVB/Zicbo*/H+Sstc, `server-math-tests` (optional) |
 | U10ᵇ RVV / Ara attach | **Partial / live-lintable** — Ara vendored + attach + lint; purpose guide + DTS + directed tests; full cosim/SBI open |
 | Multi-context PLIC | **Done** — 16 targets (8×M/S); harness fan-out per core |
-| **U5 full OoO** | **Implemented/gated; qualification blocked** — live dispatch store self-blocking is reproduced; rename/LSQ/recovery/FP/hart and wide-retirement contracts remain open. In-order SMT2/stream8 passes do not qualify this path. |
+| **U5 full OoO** | **Config-gated, partial qualification** — store self-blocking and several rename/LSQ contracts have directed repairs; these are not current unrepaired findings. Invalid-WB ownership now has live dispatch controls and generic synthesis evidence. Commit/drop, late-result data, full-core recovery, FP/hart namespaces and wide-retirement closure remain open. In-order SMT2/stream8 passes do not qualify this path. |
 
 ---
 

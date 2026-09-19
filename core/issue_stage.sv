@@ -36,6 +36,7 @@ module issue_stage
     input logic rst_ni,
     // Is scoreboard full - PERF_COUNTERS
     output logic sb_full_o,
+    output logic sb_empty_o,
     // FSE: SpeculativeSb younger cancel - PERF_COUNTERS
     output logic spec_cancel_o,
     // U5 production: SB cancel mask for OoO squash
@@ -248,6 +249,7 @@ module issue_stage
       .clk_i,
       .rst_ni,
       .sb_full_o               (sb_full_o),
+      .sb_empty_o              (sb_empty_o),
       .spec_cancel_o           (spec_cancel_o),
       .cancelled_mask_o        (cancelled_mask_o),
       .flush_unissued_instr_i,

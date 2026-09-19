@@ -37,3 +37,34 @@ If the halt signal is asserted it will not commit any new instruction
 which will generate back-pressure and eventually stall the pipeline.
 Commit stage also communicates heavily with the controller to execute
 fence instructions (cache flushes) and other pipeline re-sets.
+
+AMO result availability
+-----------------------
+
+AMO execution writeback prepares an instruction for commit; it is not the final
+architectural register result. The commit stage selects that result from the AMO
+response. The architectural operand-forwarding path therefore waits for an AMO
+producer to retire instead of forwarding its early placeholder. This distinction
+is covered by the directed LR/SC dependency tests in ``AGENTS-specs-to-tests.md``.
+No LR reservation or flush rule is changed by this readiness correction.
+
+OoO cancelled-slot retirement
+----------------------------
+
+Retiring a cancelled slot drains bookkeeping but does not authorize architectural
+side effects. The OoO dispatch path qualifies committed-map updates, old-physical
+register frees, checkpoint release and LSQ store commit with the existing cancellation
+mask. Raw ROB retirement remains active so cancelled work can drain. Directed tests
+cover cancellation on the first commit lane and alongside an older live retirement
+on the second-lane case. This is component qualification, not full OoO/SMT closure.
+
+WT retained-copy visibility
+--------------------------
+
+Commit and memory acknowledgment are not the end of a store's visibility
+obligation when a post-ACK fixup still forwards its bytes. A later same-word
+acknowledgment must refresh that copy, including at full queue capacity and on a
+cache hit. Byte coalescing must preserve untouched valid bytes, and retirement
+must not discard a concurrent update. The directed checks and remaining limits
+are recorded in ``architecture/dcache-ack-before-check.md`` and
+``AGENTS-specs-to-tests.md``; no ISA, device-tree or permission change is involved.

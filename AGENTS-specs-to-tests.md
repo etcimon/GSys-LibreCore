@@ -17,6 +17,192 @@ matching row here so "which spec chapter is this test protecting?" stays answera
 
 ---
 
+## Issue-group order qualification (2026-09-18)
+
+`tb_g6lc_review_issue_order` in `verif/tb/core/tb_g6lc_rtl_review.sv`, driven through
+proxy `py` by `run_issue_order_review.py`, tests lane age independently of PC
+ordering. Cases cover younger low-PC producers, older high-PC producers,
+cross-hart isolation, pending/committed SP writes, invalid lanes and older CSRs.
+Two/four issue ports and one/two harts produce 18 positive passes and 18
+checker-negative detections. The pre-fix rule fails both inverted-PC cases;
+`ISSUE_ORDER_FAULT=1` restores that rule privately and matches all 18 expected
+outcomes. `ISSUE_ORDER_SYNTH=1` adds a two-port/two-hart live-port synthesis smoke:
+163 generic cells, zero latches, `check -assert` clean. These are leaf contracts,
+not full-ISA or multi-hart firmware qualification. Artifacts:
+`issue-order-before-20260918`, `issue-order-relocated-after-20260918`,
+`issue-order-relocated-fault-20260918`, `issue-order-quality-20260918`.
+
+## WT response-tag ownership checks (2026-09-18)
+
+`run_wt_tag_review.py` defaults to Yosys bounded checks over the live write-buffer
+RTL and a 12-cycle directed driver derived from `tb_g6lc_review_wt_tag` in
+`tb_g6lc_rtl_review.sv`. Fixup depths 0, 2 and 4 pass the repaired rule; all three
+checker mutations fail and all three covers reach the final normal response after
+the normal request disappears. Restoring the old selector privately fails all
+three depths. These are directed bounded checks, not an unbounded cache proof or
+all fixup/normal concurrency cases. Use `WT_TAG_FAULT=1` for the RTL control.
+
+The first reference wrongly assigned the normal tag to empty-fixup reads; its
+nonzero-depth conclusions are superseded by `wt-tag-formal-{after,fault}-v2-20260918`.
+The corrected reference distinguishes request indices and the cover requires the
+normal tag. Isolated timed Verilator tests remain blocked by the vendored lzc
+UNOPTFLAT diagnostic; no waiver was added and no timed-leaf pass is claimed.
+Full-core off/on traces locate correct store-queue handoff followed by corrupted
+WT tag metadata. `smt2-wttag-cookie-20260918` (200k) and `smt2-wttag-long-20260918`
+(1M) show prefix progress; `smt2-progress-cookie-20260918` reaches the unchanged
+ELF's completion cookie at 1,693,696 cycles. Typed counters report 1,301,234/0
+retirements, so this is not dual-active SMT2 completion. The same model passes
+`mini_ipi_hart1_sp.S` with counts 256/16; removing only the two IPI stores in a
+private test copy gives no termination and 4024/0. `SMT2_REVIEW_ACTIVATION=1` runs
+these controls through the source/runtime-bound runner. They are separate from
+the OpenSBI cookie gate and do not change its firmware or acceptance conditions.
+The cookie repeats at the identical cycle/final pins on the earlier model without
+the progress-counter instrumentation (`smt2-wttag-cookie-repeat-20260918`).
+
+## Reset-time SMT rendezvous and handoff (2026-09-19)
+
+`SMT_BOOT_RENDEZVOUS` in `verif/tests/custom/smt/smt_dual_active.S` checks unique hart
+IDs, atomic election and shared-memory release/acquire without an IPI. The old model
+runs hart0 alone to the 250k cap. Removing boot masks alone exposes a foreign AMO
+flush deleting hart1 work in the uncompressed case. The quiescent handoff plus halt
+admission repair passes mixed C/I at642 cycles and norvc at643, counts47/53; the
+same-sized wrong-result control fails. Artifacts: `smt2-startup-before-20260919`,
+`smt2-startup-norvc-flow-20260919`, `smt2-drain-wfi-flow-v2-20260919`,
+`smt2-startup-quiescent-v2-20260919`.
+
+`run_smt_drain_review.py` exercises 1/2/4 harts, cancellation, delayed drain,
+trap/flush holds, and the production hybrid quantum128/starve64 tuple. Quality run:
+8 positives +8 checker negatives; gate-removal fault controls fail for multihart
+while single-hart stays unchanged. Live-port synthesis:215 generic cells, no latches,
+no combinational SCCs, check -assert clean (`smt-drain-quality-20260919`).
+
+The frozen soft-ladder image reaches its cookie with both harts retiring, but hart1
+correctly rejects its zero-filled hart-ID table. Its forced count2 and NULL FDT
+property stubs are not natural enumeration evidence. User approved a separate
+source-built OpenSBI profile; `run_opensbi_source_review.py` preserves upstream
+startup/FDT/HSM logic and uses `G6LC_STRICT_DUAL` in the existing S-mode payload.
+Strict completion requires real HSM peer startup, checked per-hart seen flags and
+an explicit successful payload store, not banner text or the old soft cookie.
+
+## Architectural resume and source-profile residual (2026-09-19)
+
+`tb_g6lc_restart.sv` / `run_restart_bank.py` now test retirement-owned PC banking:
+per-hart independence, two-port ordering, concurrent distinct-hart writes, redirects
+over retirement, address zero, speculative cursor rejection and NH1 identity. The
+old transport-owned bank fails `RESTART_ARCH_PC`; `RESTART_BANK_FAULT=1` reintroduces
+that overwrite privately. Positive and checker-negative directions pass. Live-port
+synthesis reports27 generic cells, no latches or SCCs. Artifacts:
+`smt-retired-pc-{before,after,quality,fault}-20260919`. These checks supersede the old
+bank test's transport-snapshot contract for fetch_B's drained handoff.
+
+The exact natural ELF6b2bad99... on model3b4fec56... reaches both initialized stacks
+and records325,919/5,447,462 retirements at8M cycles, but strictDualPassed remains
+false (`opensbi-architectural-pc-dual-20260919`). No supervisor payload completion.
+The retained trace contains a 0x80 store to shared init_count_offset followed later
+by a zero read from that word by the waiting peer. That visibility boundary still
+needs a directed reproduction and ownership localization. The source-profile oracle
+has independent unit refusals for timeout SUCCESS text, missing peer execution or
+publication, non-S-mode stores and failure values. No firmware barrier is weakened.
+
+## WT retained-copy freshness checks (2026-09-19)
+
+`run_wt_fixup_review.py` drives live WT-wbuffer ports through reset, accepted stores,
+legal transaction responses, tag lookups and delayed refills. Yosys lowered-RTL
+simulation (not an unbounded proof) checks depths2/4: full-queue refresh, partial-byte
+preservation, cache-hit ACK refresh, unrelated-copy preservation, and simultaneous
+coalescing/retirement. Eight positives and eight checker negatives pass with reached
+checkpoints. Four private mutations (capacity, byte mask, retirement, export) fail.
+No vendor warning waiver was changed; the older timed Verilator leaf blocker remains
+separate. Artifacts: wt-fixup-before-20260919, wt-fixup-export-before-20260919,
+wt-fixup-quality-20260919, wt-fixup-fault-{capacity,bytes,retire,export}-20260919.
+
+The opt-in +smt_mem_watch=HEX observer follows a physical word without controlling
+DUT behavior. The pre-fix replay matches2,458,292 retirement lines against the frozen
+natural-firmware run. It records correct STQ/data handoff, suppression of the full
+fixup queue's same-word refresh at ACK, then a stale retained-copy load. See
+opensbi-init-word-watch-20260919. End-to-end HSM and broad compliance stay separate.
+
+## AMO result-dependency reproduction (2026-09-19)
+
+`SMT_LRSC_DEP` in `smt_dual_active.S`, selected by `SMT2_REVIEW_LRSC=1` with startup
+mode in `run_smt2_soak_review.py`, gives each hart a separate initialized word and
+checks LR/SC data and its immediate consumers. Before repair, RVC/norvc fail at
+410/420 cycles. Typed trace: LR placeholder WB0 atcycle324, dependent BNE consumes
+0 versus2 at325, real LR retires2 at330. After the readiness repair, the branch
+issues at331 with2/2 from RF. RVC/norvc pass597/594 cycles; result-corruption control
+fails. RS2 and ALU-consumer variants also pass both encodings and reject the negative.
+Artifacts: smt2-lrsc-dependency-{before,after}-20260919,
+smt2-lrsc-{rs2,alu}-after-20260919. Source/ELF/model identities and explicit tohost
+stores are retained. These are directed checks, not an LR/SC eventuality proof.
+
+## PMP compiler scheduling and strict HSM completion (2026-09-19)
+
+`run_pmp_transition_review.py` retains all PMP assertions and treats LATCH/UNOPTFLAT
+as errors. The baseline isolated build stops on the vendored lzc packed-array
+feedback warning. A private split_var control for lzc index_nodes/sel_nodes builds
+and passes valid NAPOT transitions; both the independent checker-negative and
+corrupted-size controls fail. Independent combinational matching proofs pass for
+PLEN32/56 with all NAPOT address/configuration inputs; size mutation fails both.
+These prove address matching, not all PMP permission modes or physical timing.
+Artifacts: pmp-transition-split-{quality,fault}-20260919,
+pmp-napot-match-{positive,fault}-20260919.
+
+With that same control and unchanged RTL/ELF, the full-core source profile extends
+all18,502,243 lines of the prior assertion-stopped retirement trace and reaches
+strictDualPassed=true at12,765,628 cycles; counts333,635/8,932,406. Both supervisor
+seen stores and successful tohost store are mandatory. No check or waiver was
+removed. Artifact: opensbi-counter-split-dual-20260919. This closes the directed
+source-profile HSM completion gate, not broader formal or ISA qualification.
+
+The compiler control also unblocks the timed WT-tag leaf. Its fixture now identifies
+A/B requests by distinct word offsets in the same cache index, fixing the prior
+ambiguous reference tag. Five positives, five checker negatives and five restored-
+selector failures pass at depths0/2/4: wt-tag-timed-split-{after,fault}-20260919.
+Use WT_TAG_COMPILER_CONTROL with the retained split-counter.vlt; default toolchain
+settings are unchanged. This supersedes the earlier timed-leaf build blocker only
+for this pinned, explicitly controlled recipe.
+
+## OoO ownership continuation (2026-09-19)
+
+`tb_g6lc_review_dispatch` cases11–14 exercise reused-PRF cancellation, retained/new
+waiters, bypass after real WB and exception data availability. Cases15–17 exercise
+cancelled-retirement map poisoning, incorrect physical frees and release of a new
+checkpoint through an old cancelled tag. The latter run with cancellation in port0
+and with an older live retirement in port0 plus a cancelled slot in port1. Six
+positives, six checker negatives and six single-mechanism faults match. No direct
+DUT state is forced. Whole-vector timed input drives avoid the recorded Verilator
+packed-part propagation artifact; PRF RTL is unchanged.
+
+Artifacts: ooo-qualification-{owner,fault,regression,rename,lsq,smt,fp}-20260919;
+ooo-drop-{before,after,map,free,checkpoint,regression,wb}-20260919 and corresponding
+ooo-drop-dual-{after,map,free,checkpoint}-20260919. Dispatch16/rename22/LSQ24 and
+both illegality controls pass at their fixture scope. `run_ooo_validation_review.py`
+retains live-port generic synthesis; final86,824 cells/state6,250, zero latches/SCCs.
+The fresh SMT2 drop-regate model is byte-identical to the passing c421aedc... model.
+
+Rename formal now uses current count/head state and passes the existing12-step BMC.
+The false-x0 checker has a four-step SAT counterexample (`ooo-rename-checker-sat-20260919`).
+The broad follow-up has11 formal task passes; fetch-IQ remains failed/unresolved:
+its engine counterexample was retained and prolonged witness/cover processing was
+interrupted, not declared PASS. Default lint8/54 and synthesis32/5 warnings remain;
+strict standalone slang still skips. No full OoO, ISA compliance, per-hart fairness
+or physical sign-off follows from these component results.
+
+## Dual-runnable fixed-work service measurement (2026-09-19)
+
+`SMT_BALANCE` and SMT2_REVIEW_BALANCE=1 add a separate M-mode microbenchmark, not a
+firmware edit. The paired RVC/solo binaries have identical text; data chooses active
+workers. Each hart checks sum/XOR values and publishes its sum after512 iterations. Typed ROI
+markers and an exact ordered body-PC oracle reject missing, duplicate, reordered or
+wrong-hart events. RVC/norvc and both solo modes pass; result corruption fails and
+observer-off replay matches. Nineteen tooling tests pass, including parser negatives.
+Artifact: smt2-balance-ordered-20260919. RVC common-window shares49.9264%/50.0736%;
+weighted speedup0.90234, worst slowdown2.21795x versus matched solo runs. These are
+retirement-service observations, not per-cycle readiness, bounded fairness, proven
+saturation, cache-RTT attribution or Linux qualification. No adaptive RTL is enabled.
+The existing reset-rendezvous and LR/SC modes re-pass both encodings and their
+negative controls: smt2-balance-{startup,lrsc}-regression-20260919.
+
 ## P0–P2 continuation qualification boundary
 
 Predictor recovery is microarchitectural and indirectly constrained by base-ISA

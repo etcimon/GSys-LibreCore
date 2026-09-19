@@ -161,9 +161,12 @@ module g6lc_ooo_dispatch
   assign freelist_empty_o = ren_stall;
   assign stl_forward_o = stl_fwd;
 
+  logic [CVA6Cfg.NrWbPorts-1:0] wb_value_valid;
   always_comb begin
-    for (int unsigned w = 0; w < CVA6Cfg.NrWbPorts; w++)
+    for (int unsigned w = 0; w < CVA6Cfg.NrWbPorts; w++) begin
       wb_prd[w] = tid_prd_q[wb_id_i[w]];
+      wb_value_valid[w] = wb_valid_i[w] && !wb_exc_i[w] && !cancelled_mask_i[wb_id_i[w]];
+    end
   end
 
   // Multi-port freelist free on all commit ports
@@ -173,20 +176,21 @@ module g6lc_ooo_dispatch
   // what returns it to the pool. Commit is in program order, matching the order
   // the checkpoints were taken.
   logic [CVA6Cfg.NrCommitPorts-1:0] ckpt_retire;
-  logic [CVA6Cfg.NrCommitPorts-1:0] commit_wr;
+  logic [CVA6Cfg.NrCommitPorts-1:0] commit_wr, commit_arch;
   logic [CVA6Cfg.NrCommitPorts-1:0][4:0] commit_rd;
   logic [CVA6Cfg.NrCommitPorts-1:0][PRF_W-1:0] commit_prd;
   always_comb begin
     for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++) begin
-      free_en[c]  = commit_ack_i[c] && (commit_instr_i[c].rd != 5'd0) &&
+      commit_arch[c] = commit_ack_i[c] && !cancelled_mask_i[commit_instr_i[c].trans_id];
+      free_en[c]  = commit_arch[c] && (commit_instr_i[c].rd != 5'd0) &&
                     (tid_old_q[commit_instr_i[c].trans_id] != '0);
       free_prd[c] = tid_old_q[commit_instr_i[c].trans_id];
-      ckpt_retire[c] = commit_ack_i[c] &&
+      ckpt_retire[c] = commit_arch[c] &&
                        (tid_ckpt_q[commit_instr_i[c].trans_id] != '1);
       // Architectural map update: the destination and the physical register this
       // committing instruction owns. A non-renamed op carries physical 0 and is
       // filtered inside rename.
-      commit_wr[c]  = commit_ack_i[c] && (commit_instr_i[c].rd != 5'd0);
+      commit_wr[c]  = commit_arch[c] && (commit_instr_i[c].rd != 5'd0);
       commit_rd[c]  = commit_instr_i[c].rd[4:0];
       commit_prd[c] = tid_prd_q[commit_instr_i[c].trans_id];
     end
@@ -233,7 +237,7 @@ module g6lc_ooo_dispatch
       .commit_rd_i   (commit_rd),
       .commit_prd_i  (commit_prd),
       .stall_o   (ren_stall),
-      .wb_valid_i(wb_valid_i),
+      .wb_valid_i(wb_value_valid),
       .wb_prd_i  (wb_prd),
       .free_i    (free_en),
       .free_prd_i(free_prd),
@@ -390,7 +394,7 @@ module g6lc_ooo_dispatch
       .disp_rs2_ready_i(rs2_rdy),
       .disp_ack_o      (dispatch_ack_o),
       .full_o          (iq_full),
-      .wb_valid_i      (wb_valid_i),
+      .wb_valid_i      (wb_value_valid),
       .wb_prd_i        (wb_prd),
       .issue_sbe_o     (issue_sbe_o),
       .issue_orig_o    (issue_orig_o),
@@ -412,11 +416,6 @@ module g6lc_ooo_dispatch
   );
 
   // Block PRF writeback for cancelled SB slots (wrong-path after mispredict)
-  logic [CVA6Cfg.NrWbPorts-1:0] wb_not_cancelled;
-  always_comb begin
-    for (int unsigned w = 0; w < CVA6Cfg.NrWbPorts; w++)
-      wb_not_cancelled[w] = !cancelled_mask_i[wb_id_i[w]];
-  end
 
   // PRF dual-read per issue port + multi-write WB with write-through
   logic [NP*2-1:0][PRF_W-1:0] prf_raddr;
@@ -433,8 +432,7 @@ module g6lc_ooo_dispatch
     for (int unsigned w = 0; w < CVA6Cfg.NrWbPorts; w++) begin
       prf_waddr[w] = wb_prd[w];
       prf_wdata[w] = wb_data_i[w];
-      prf_we[w]    = wb_valid_i[w] && !wb_exc_i[w] && (wb_prd[w] != '0) &&
-                     wb_not_cancelled[w];
+      prf_we[w]    = wb_value_valid[w] && (wb_prd[w] != '0);
     end
   end
 
@@ -467,7 +465,7 @@ module g6lc_ooo_dispatch
       a = prf_rdata[p*2+0];
       b = prf_rdata[p*2+1];
       for (int unsigned w = 0; w < CVA6Cfg.NrWbPorts; w++) begin
-        if (wb_valid_i[w] && !wb_exc_i[w] && issue_sbe_o[p].ooo_renamed) begin
+        if (wb_value_valid[w] && issue_sbe_o[p].ooo_renamed) begin
           if (wb_prd[w] == PRF_W'(issue_sbe_o[p].p_rs1) && wb_prd[w] != '0)
             a = wb_data_i[w];
           if (wb_prd[w] == PRF_W'(issue_sbe_o[p].p_rs2) && wb_prd[w] != '0)
@@ -549,7 +547,7 @@ module g6lc_ooo_dispatch
   logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] commit_st_id;
   always_comb begin
     for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++) begin
-      commit_st[c]    = commit_ack_i[c] && (commit_instr_i[c].fu == STORE);
+      commit_st[c]    = commit_arch[c] && (commit_instr_i[c].fu == STORE);
       commit_st_id[c] = commit_instr_i[c].trans_id;
     end
   end

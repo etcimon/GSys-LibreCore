@@ -16,6 +16,124 @@ matching row here so the spec→code answer stays one hop away.
 
 ---
 
+## Issue-group program-order repair (2026-09-18)
+
+Base-ISA dynamic instruction order is independent of numerical PC order.
+`core/smt/g6lc_issue_barrier.sv` now compares issue-lane age (`o < p`) for its
+same-group stack-pointer dependency, retaining valid and same-hart qualification.
+This prevents a younger low-address target-path operation from blocking its older
+call, and retains the dependency when an older producer has the higher PC.
+Shared SMT modules were first relocated byte-for-byte from the excluded legacy
+path; fetch_B remains the only instruction supply. No state, port, clock/reset,
+ISA/DTS field or configuration default changed. A wide PC comparison is removed
+from the issue-valid cone; no physical timing/power claim follows. Directed
+positive/mutation controls and live-port leaf synthesis pass; full SMT/OpenSBI
+completion remains a separate gate.
+
+## WT cache response-tag ownership (2026-09-18)
+
+Same-hart load/store visibility depends on preserving tag-lookup identity across
+its response cycle. `core/cache_subsystem/wt_dcache_wbuffer.sv` now selects the
+normal lookup's registered tag with `check_en_q`, not the current `|tocheck` request
+set. Previously the final normal response could use the fixup tag after the normal
+queue became checked, overwrite a real hit with a miss, and discard forwarding
+without updating the resident line. The observed store queue handed over the new
+bytes correctly; the stale reload was downstream of that seam. This changes an
+existing mux selector only: no new state, latency, reset, config/default, ISA or
+DTS change. Bounded directed ownership checks are qualified separately from full
+WT cache/coherence and SMT2 firmware completion; physical timing is unmeasured.
+
+## Reset eligibility and coarse SMT handoff (2026-09-19)
+
+For fetch_B, `core/cva6.sv` passes enabled/non-halted hart readiness to the scheduler
+without the legacy boot-PC, fixed-time or unseen-until-IPI masks. Reset-time software
+rendezvous must not require an interrupt from a peer that is itself waiting for entry.
+`core/smt/g6lc_thread_select.sv` now registers a switch request/target/reason, quiesces
+admission, and waits for the scoreboard plus committed store/write-buffer paths to
+empty. `scoreboard.sv` exports occupancy-based `sb_empty_o` through `issue_stage.sv`.
+Admission stays blocked over the delayed switch pulse and while an SMT hart is halted.
+This prevents an outgoing AMO's whole-scoreboard flush from deleting incoming work,
+and prevents post-WFI work from blocking the drain. Quantum comparison avoids overflow
+at a one-entry quantum. Single-hart scheduling remains the constant-zero identity.
+
+Trade-off: this is conservative coarse scheduling, not overlapping in-flight harts.
+D-cache miss overlap is reduced; throughput and physical timing are not qualified.
+New small control state uses the existing asynchronous-active-low reset; no clock,
+memory macro, ISA encoding or DTS change. Existing switch PMU outputs retain actual
+handoff timing. Cancelled-transaction, privilege and FP breadth remain separate gates.
+
+## Architectural SMT resume PC (2026-09-19)
+
+With a drained handoff, the next architectural instruction is the restart authority,
+not an I-cache request/continuation address. `core/smt/g6lc_smt_pc_bank.sv` reuses its
+existing per-hart storage to track non-dropped retirements. `core/cva6.sv` supplies
+sequential PC+instruction length or the resolved control-flow successor, plus
+architectural redirects with frontend-consistent priority (trap, eret, commit,
+debug). `core/scoreboard.sv` retains resolved branch targets for SMT independently
+of debug enable. A speculative transport cursor no longer overwrites the bank on
+switch. Multi-port updates preserve retirement order and hart ownership; zero PCs
+remain representable. Single-hart behavior is inert.
+
+This introduces retirement-to-bank mux/adder activity and may retain branch metadata
+otherwise pruned in debug-disabled SMT configurations. PC-bank storage is reused;
+no new clocks, resets, ISA or DTS fields. Physical timing/power and macro/privilege
+breadth remain unqualified. Directed cases, mutation controls and live-port bank
+synthesis pass; natural firmware now progresses past the former invalid resume but
+still exposes a separate shared-data visibility failure.
+
+## WT retained-copy freshness (2026-09-19)
+
+RVWMO load-value obligations outlive the normal write-buffer entry. A newer
+acknowledged store must refresh an older same-word fixup even at full capacity or
+on a checked cache hit. `wt_dcache_wbuffer.sv` adds an address-qualified existing-copy
+match, byte-mask-preserving coalescing, and a coalescing/retirement interlock. Its
+same-cycle forward export updates a matching slot or uses a free slot rather than
+hiding an unrelated valid copy at slot0. This repairs the observed zero returned
+from a retained copy after a peer's acknowledged 0x80 initialization store.
+
+Configuration: existing WtDcacheFixupDepth gate, unchanged zero-depth branch/defaults;
+no new state, clock, reset, SRAM, ISA, DTS, permission or scan-control change. Existing
+fixup PMU events include refresh activity. Timing risk: added word-address comparisons,
+byte merges and slot selection on the ACK/forwarding cone; no physical STA/power
+qualification. Preserve upstream notices. Broader cache/coherence qualification is
+not implied by the directed same-word checks.
+
+## AMO result availability at issue (2026-09-19)
+
+The A-extension result must reach a dependent instruction only when its architectural
+value is available. AMO execution writeback makes an entry eligible for commit, but
+`commit_stage.sv` selects the real value from `amo_resp_i` later. In
+`issue_read_operands.sv`, both scoreboard and same-cycle WB candidates are now excluded
+from operand forwarding when the producer is an AMO. Dependents wait until retirement
+removes the producer and the committed RF value is visible. CSR handling, ordinary
+load/ALU forwarding and LR reservation/flush behavior are unchanged.
+
+Existing RVA configuration gate; no new state, clock/reset, memory, encoding, DTS,
+permission or scan-control change. Timing impact is an opcode-class decode and gate
+on forwarding readiness per scoreboard entry. Dependent AMO consumers wait for commit
+rather than consuming the placeholder; no physical STA/power claim. This qualifies
+the architectural scoreboard path in the directed in-order SMT2 tests, not general
+OoO/PRF or full ISA coverage.
+
+## OoO result and retirement ownership (2026-09-19)
+
+Precise architectural effects require a surviving owner; completion is not permission
+to consume data or update committed state. `g6lc_ooo_dispatch.sv` now uses one data-
+valid predicate for rename busy clearing, IQ wakeup, PRF writes and operand bypass,
+rejecting cancelled/exception WB. ROB completion/exception handling stays separate.
+It also derives architectural retirement from commit_ack and the existing cancellation
+mask: map updates, old-physical frees, checkpoint release and LSQ store commit reject
+cancelled slots while raw ROB retirement still drains them. No new state, interface,
+clock/reset, memory or ISA/DTS field; existing OoOEn/hart/FP guards remain.
+
+Timing: validity/cancellation gating fans out across wake/bypass and commit-side
+controls. One live-port integer fixture reports91,242->88,501 cells for WB ownership,
+then86,824 with cancelled-retirement qualification, state6,250 bits unchanged,
+zero latches/SCCs. These are generic cells, not mapped area/power or target timing.
+LSQ byte masks use constant XLEN lane bounds with predicated bits, preserving the
+prior mask while permitting synthesis. Late CSR/AMO PRF result delivery, TID epoch
+closure, per-hart namespaces and FP register classes remain separate open work.
+
 ## Status vocabulary
 
 | Status | Meaning |

@@ -50,9 +50,9 @@ need=(
   core/include/g6lc64_smt2_config_pkg.sv
   architecture/multi-threading/smt2-bringup.md
   architecture/multi-threading/dts-linux-smt.md
-  core/smt_legacy/g6lc_smt_regfile.sv
-  core/smt_legacy/g6lc_smt_csr_bank.sv
-  core/smt_legacy/g6lc_thread_select.sv
+  core/smt/g6lc_smt_regfile.sv
+  core/smt/g6lc_smt_csr_bank.sv
+  core/smt/g6lc_thread_select.sv
   corev_apu/bootrom/ariane-smt2.dts
   verif/tests/custom/smt/smt_dual_park.S
   verif/tests/testlist_smt_linux.yaml

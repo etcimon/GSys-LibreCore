@@ -203,7 +203,18 @@ def main():
     sources = json.loads((base / 'output/sources.json').read_text())
     for name, digest in sources.items():
         assert sha(repo / name) == digest, name
-    for name in ['core/cva6.sv', 'core/Flist.cva6', 'core/fetch_B/frontend.sv', 'core/fetch_B/g6lc_fetch_pkg.sv', 'core/smt_legacy/g6lc_smt_pc_bank.sv', 'corev_apu/tb/g6lc_tb.cpp']:
+    for module in ('g6lc_cf_pc', 'g6lc_ex_id', 'g6lc_sb_keep', 'g6lc_thread_select',
+                   'g6lc_hart_state', 'g6lc_smt_regfile', 'g6lc_smt_pc_bank',
+                   'g6lc_smt_csr_bank', 'g6lc_issue_barrier'):
+        old = f'core/smt_legacy/{module}.sv'
+        new = f'core/smt/{module}.sv'
+        if (repo / old).is_file():
+            (repo / new).parent.mkdir(parents=True, exist_ok=True)
+            (repo / old).rename(repo / new)
+            sources[new] = sources.pop(old)
+    for name in ['core/cva6.sv', 'core/issue_stage.sv', 'core/scoreboard.sv', 'core/Flist.cva6',
+                 'core/fetch_B/frontend.sv', 'core/fetch_B/g6lc_fetch_pkg.sv',
+                 'core/smt/g6lc_smt_pc_bank.sv', 'core/smt/g6lc_thread_select.sv', 'corev_apu/tb/g6lc_tb.cpp']:
         shutil.copy2(data / Path(name).name, repo / name)
         sources[name] = sha(repo / name)
     (out / 'sources.json').write_text(json.dumps(sources, indent=2))

@@ -17,6 +17,7 @@ SECTIONS
   }
   .rodata : { *(.rodata*) }
   .data : { *(.data*) }
+  .tohost : { *(.tohost) }
   .bss : {
     __bss_start = .;
     *(.bss*)

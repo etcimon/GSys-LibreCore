@@ -106,7 +106,9 @@ endmodule
 
 def main():
     data=Path(os.environ['TH_DATA_DIR']);out=Path(os.environ['TH_OUT_DIR'])
-    before=os.environ.get('REVIEW_RTL_BEFORE')=='1'
+    wb_fault=os.environ.get('REVIEW_RTL_WB_FAULT')=='1'
+    drop_fault=os.environ.get('REVIEW_RTL_DROP_FAULT')
+    before=os.environ.get('REVIEW_RTL_BEFORE')=='1' or wb_fault or bool(drop_fault)
     source=out/'source';source.mkdir()
     names=['config_pkg.sv','g6lc64_smt2_config_pkg.sv','riscv_pkg.sv','ariane_pkg.sv','g6lc_iq.sv','g6lc_bp_tage_table.sv','g6lc_bp_tage.sv','g6lc_bp_ghist.sv','g6lc_bp_ckpt.sv','g6lc_bp_ittage.sv','g6lc_l2_mshr.sv','g6lc_coherence_pkg.sv','g6lc_l3_inclusive_inv.sv','g6lc_cluster.sv','g6lc_core_types.svh','tb_g6lc_rtl_review.sv']
     # scoreboard.sv (and its smt_legacy/fetch_A helper packages) are only
@@ -168,6 +170,22 @@ def main():
         old='      n_ret = $countones(ckpt_retire_i);'
         assert text.count(old)==1,'rename fault injection site changed'
         path.write_text(text.replace(old,'      n_ret = 0;'))
+    if wb_fault:
+        path=source/'g6lc_ooo_dispatch.sv';text=path.read_text()
+        for old,new in (
+            ('.wb_valid_i(wb_value_valid)', '.wb_valid_i(wb_valid_i)'),
+            ('.wb_valid_i      (wb_value_valid)', '.wb_valid_i      (wb_valid_i)'),
+            ('if (wb_value_valid[w] && issue_sbe_o[p].ooo_renamed)',
+             'if (wb_valid_i[w] && !wb_exc_i[w] && issue_sbe_o[p].ooo_renamed)')):
+            assert text.count(old)==1,'writeback fault site changed'
+            text=text.replace(old,new)
+        path.write_text(text)
+    if drop_fault:
+        target={'map':'commit_wr[c]  =','free':'free_en[c]  =','checkpoint':'ckpt_retire[c] ='}[drop_fault]
+        path=source/'g6lc_ooo_dispatch.sv';text=path.read_text()
+        old=target+' commit_arch[c]'
+        assert text.count(old)==1,'retirement fault site changed'
+        path.write_text(text.replace(old,target+' commit_ack_i[c]'))
     hashes={name:digest(source/name) for name in names}
     (out/'sources.json').write_text(json.dumps(hashes,indent=2))
     cluster=(source/'g6lc_cluster.sv').read_text()
@@ -226,6 +244,13 @@ def main():
         # propagate (scenario 6 retires its store by genuine id match), so 6-8
         # run as real evidence with live negative controls.
         if not before:cases+=[(2,None),(3,None),(6,None),(7,None),(8,None),(9,None),(10,None)]
+        if os.environ.get('REVIEW_RTL_WB_OWNER')=='1':
+            cases=[(n,('DISPATCH_WB_VALUE' if n==13 else 'DISPATCH_STALE_WAKE') if before else None)
+                   for n in (11,12,13,14)]
+        if os.environ.get('REVIEW_RTL_DROP')=='1':
+            cases=[(n,('DISPATCH_DROP_ARCH','DISPATCH_DROP_FREE','DISPATCH_DROP_CKPT')[n-15] if before else None)
+                   for n in (15,16,17)]
+            if drop_fault:cases=[entry for entry in cases if entry[0]=={'map':15,'free':16,'checkpoint':17}[drop_fault]]
         configurations=[('dispatch','n2',[],
                          [(10,'DISPATCH_LSQ_CREDIT')] if credit_fault else cases)]
         # MemDepPredEn=1 elaboration/liveness. Feedback is promoted to an error:
@@ -293,7 +318,12 @@ def main():
         if not before and not rename_fault and not credit_fault and not flush_fault and not leak_fault:
             if kind=='rename':trials+=[(0,True,'RENAME_MAP'),(1,True,'RENAME_OLDER_LOST'),(2,True,'RENAME_BUSY_RESURRECT'),(3,True,'RENAME_STALE_LEVEL'),(4,True,'RENAME_CKPT2_UNWIND'),(5,True,'RENAME_CKPT_FULL'),(6,True,'RENAME_EXCLUSIVE'),(7,True,'RENAME_CKPT_NO_RELEASE'),(8,True,'RENAME_RETIRE_WINDOW'),(9,True,'RENAME_FLUSH_ARCH'),(10,True,'RENAME_CKPT_ALLOC_LEAK')]
             elif kind=='lsq':trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA'),(2,True,'LSQ_COMMIT_DOUBLE_FREE'),(3,True,'LSQ_STL_AGE'),(4,True,'LSQ_AGE_STALL'),(5,True,'LSQ_WRAP_DATA'),(6,True,'LSQ_BYTE_DISJOINT'),(7,True,'LSQ_BYTE_COVER'),(8,True,'LSQ_PARTIAL_NODATA'),(9,True,'LSQ_PARTIAL_MERGE'),(10,True,'LSQ_CANCEL_DROP'),(11,True,'LSQ_FLUSH')]
-            elif dispatch_mode:trials+=[(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER'),(6,True,'DISPATCH_STORE_WB_RETIRE'),(7,True,'DISPATCH_LOAD_UNBLOCKED'),(8,True,'DISPATCH_WRAP_ORDER'),(9,True,'DISPATCH_TAG_REUSE'),(10,True,'DISPATCH_LSQ_CREDIT')]
+            elif dispatch_mode:
+                trials+=([(n,True,('DISPATCH_DROP_ARCH','DISPATCH_DROP_FREE','DISPATCH_DROP_CKPT')[n-15]) for n in (15,16,17)]
+                         if os.environ.get('REVIEW_RTL_DROP')=='1' else
+                         [(n,True,'DISPATCH_WB_VALUE') for n in (11,12,13,14)]
+                         if os.environ.get('REVIEW_RTL_WB_OWNER')=='1' else
+                         [(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER'),(6,True,'DISPATCH_STORE_WB_RETIRE'),(7,True,'DISPATCH_LOAD_UNBLOCKED'),(8,True,'DISPATCH_WRAP_ORDER'),(9,True,'DISPATCH_TAG_REUSE'),(10,True,'DISPATCH_LSQ_CREDIT')])
             elif kind=='tage':trials+=[(0,True,'TAGE_SLOT_BROADCAST'),(1,True,'TAGE_UPDATE_FOLD'),(2,True,'TAGE_BASE_ALIAS'),(3,True,'ITTAGE_SLOT_ALIAS')]
             elif kind=='ghist':trials+=[(0,True,'GHIST_FOLD_TRAIN')]
             elif kind=='ckpt':trials+=[(0,True,'CKPT_MULTI'),(1,True,'CKPT_DOUBLE_ADV'),(3,True,'CKPT_DESYNC_RV'),(5,True,'CKPT_DROPPED_OWNER'),(6,True,'CKPT_EMPTY_RESTORE_HEAD')]
@@ -302,6 +332,8 @@ def main():
                 if kind=='incl':trials+=[(1,True,'L3_EVICT_NO_BACKPRESSURE'),(2,True,'L3_EVICT_LOST_B')]
         for scenario,negative,error in trials:
             cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])+(['+vcd'] if os.environ.get('REVIEW_RTL_TRACE')=='1' else [])
+            if os.environ.get('REVIEW_RTL_WB_TRACE')=='1':cmd+=['+owner_trace']
+            if os.environ.get('REVIEW_RTL_DUAL_COMMIT')=='1':cmd+=['+dual_commit']
             p=subprocess.run(cmd,cwd=work,capture_output=True,text=True,timeout=30)
             text=p.stdout+p.stderr;(work/f'case-{scenario}-negative-{int(negative)}.log').write_text(text)
             matched=(p.returncode!=0 and error in text and 'RTL_REVIEW_PASS' not in text) if error else p.returncode==0 and text.count('RTL_REVIEW_PASS')==1 and '%Error' not in text

@@ -1663,3 +1663,244 @@ This is the same repair as `coh_sc_fail_o` → `coh_sc_noresv_o` earlier in this
 point the name at the condition the signal actually observes. Verified: inval-bus leaf
 bench passes, hub suite 9/9, `g6lc64_ooo_server` lint unchanged at 4 warnings against its
 recorded baseline.
+
+## Secondary-core liveness: a core that runs and then stops is now caught
+
+The multi-core verdict above only asked whether a core EVER retired, so a core that
+started and then hung still passed. I had recorded that closing this needed "per-core
+liveness windows or test-declared expectations, and both risk failing legitimate idle
+parks". That turned out to be wrong in a useful way: **an idle park loop keeps retiring**
+— it retires its own branch every few cycles — so a parked core and a hung core are
+distinguishable by retirement, even though they are indistinguishable by PC.
+
+**The bound was measured before it was chosen**, rather than guessed:
+
+| Test | core 0 max gap | core 1 max gap |
+|---|---|---|
+| store-visible | 23 | 25 |
+| two-invalidation back-pressure | 32 | 25 |
+| miss-streaming stress | **60** | **71** |
+| `mini_hpd_2jr` (hart 1 parked in a loop) | 33 | 30 |
+| `mc_boot_sanity` | 23 | 23 |
+
+The largest retirement gap anywhere — including the test that deliberately streams DRAM
+misses — is **71 cycles**, and parked cores sit at 23-30. `MC_GAP_LIMIT` is 5000, roughly
+seventy times the worst observed case, so it cannot fire on a cache miss, a DRAM stall or
+a park.
+
+**WFI is the one legitimate way to stop retiring**, and it is excluded by the *instruction*
+read from RVFI (`insn == 0x10500073`) rather than by a hierarchical reference to
+`csr_regfile.wfi_q`. The register path runs through `gen_std` or `gen_acc` depending on
+configuration, and this review has already been bitten once by a probe wired to a hierarchy
+that moved (`i_cva6_icache`).
+
+Verified in both directions, with a distinct exit code so the log says which failure it was:
+
+| Run | Result |
+|---|---|
+| `mini_hpd_*` + sanity | **21 / 21 pass** |
+| the three cross-core tests | all SUCCESS |
+| **`+mc_hang_fault`** (freezes secondary liveness after start) | **exit 126**, *"a core ran and then stopped retiring"* |
+
+Exit **127** remains "a core never ran"; **126** is "a core ran and then stopped". The
+injected-error control matters as much as the passing runs: a bound never observed to fire
+is indistinguishable from one that cannot.
+
+## Starve-override rotation: applied, because the harm is now reproduced
+
+Earlier I declined to change the override, on the grounds that it is unreachable in
+production and "changing arbitration without a reproduction of harm would be speculative".
+That was the right rule and the wrong conclusion, because the measurement behind it used a
+memory model that accepts every request immediately — the fastest possible, and therefore
+the shortest possible service interval.
+
+The tell was in my own data: at 8 cores, 600 grants over 1200 cycles is 75 each, i.e. a
+core served every **16 cycles** — exactly `AXI_STARVE_LIMIT`. The margin was not large, it
+was zero. So the bench now parameterises memory acceptance (`-GMEM_STALL`, AW accepted once
+every N+1 cycles) and sweeps it:
+
+| Cores | memory | override | grant distribution (before) |
+|---|---|---|---|
+| 2 | 1-in-1, 1-in-4 | never | even (500:500, 250:250) |
+| 4 | 1-in-1, 1-in-4 | never | even (250×4, 125×4) |
+| 8 | 1-in-1, 1-in-2 | never | even (125×8) |
+| **8** | **1-in-4** | **992 / 2000 cycles** | **1, 1, 1, 100, 100, 99, 99, 99** |
+| **8** | **1-in-8** | fires | **shut-out: core 3 never granted** |
+
+At eight cores with memory accepting one request in four — ordinary DRAM behaviour, not a
+pathological case — the last-wins override produces a **hundredfold** grant disparity, and
+at one-in-eight a core is never served at all. The mechanism meant to rescue a starved core
+was the thing starving it: a core that wins re-qualifies immediately and keeps winning the
+tie.
+
+**The repair** reuses the arbiter's existing `pick_rr` over the starved subset, so a forced
+grant advances the rotation instead of fighting it. No new state — the starved mask is
+combinational over counters that already exist.
+
+| Cores / memory | before | after |
+|---|---|---|
+| 8, 1-in-4 | 1, 1, 1, 100, 100, 99, 99, 99 | **63, 63, 63, 63, 62, 62, 62, 62** |
+| 8, 1-in-8 | shut-out | **32, 32, 31, 31, 31, 31, 31, 31** |
+
+The override still engages (992 and 496 cycles respectively) — it is doing its job — but it
+now distributes. Configurations that were already fair are unchanged, so this is not a
+behaviour swap.
+
+Verified: hub suite **9 / 9**, inval-bus leaf bench passes, stream8 builds clean at 8
+warnings, full-core breadth **21 / 21** with the three cross-core tests passing and the
+hang control still firing at exit 126, and lint unchanged on all three HPDCACHE targets
+against their recorded baselines (7 / 4 / 7).
+
+**The general lesson, recorded because it nearly cost a real defect:** "unreachable in
+production" was a conclusion drawn from a model whose one relevant parameter was pinned at
+its most favourable value. An arbitration margin measured against infinitely fast memory is
+not a margin.
+
+## Snoop-filter displacement: no correctness hole, and a piece of dead state removed
+
+The follow-up carried here was "back-invalidate on snoop-filter displacement". Reading the
+filter against that plan changes both halves of it.
+
+**There is no correctness hole to close.** Every address resolves to one of two outcomes:
+
+```systemverilog
+present_o = {NC{1'b1}};                       // default: snoop everyone
+if (lookup_valid_i && valid && tag match) present_o = mem_q[lu_idx].present;
+...
+if (mem_q[al_idx].valid) install_present = {NC{1'b1}};   // install over a live entry
+```
+
+A lookup that misses reports **all cores present**, and an install over a live entry starts
+**all present**. So a displaced line's forgotten sharers can never produce an under-report —
+the structure degrades to broadcast, which is safe. Back-invalidation would buy *precision*,
+not correctness, and that framing matters because it moves the item out of the P0/P1 class
+entirely.
+
+**And the structure is not what its state suggested.** The filter is **direct-mapped** —
+every access is `mem_q[idx_of(addr)]`, with no way selection. It nonetheless carried an
+`rr_q` counter, incremented on every install and **read by nothing**. That is dead state,
+and worse, it advertises a round-robin victim policy that does not exist: anyone planning
+displacement handling would look for a victim to select, and there is none. An install just
+overwrites whatever shares the index. Removed, with the direct-mapped property stated in
+its place.
+
+Being direct-mapped is also the substance of the precision story: with
+`NR_ENTRIES ≈ 64 × NrCores`, any working set that aliases in the index space evicts itself,
+and each aliasing install re-arms `all present`. The filter therefore decays toward
+broadcast under aliasing pressure rather than under capacity pressure — a different
+mitigation (more entries, or associativity) than "back-invalidate on displacement".
+
+Verified with a one-variable control: the committed filter and the `rr_q`-removed filter
+both pass scenarios 0-2 and both fire the injected-error control (rc 134). Identical, as a
+dead-state removal should be.
+
+**A method note worth recording.** My first attempt at that control ran
+`git show HEAD:...` *on the builder*, which returned a pre-session file: the remote is an
+rsync'd working tree whose `.git` is stale (`4bab99ca0`, not the session's commit). It
+usefully re-reproduced the original `SF_SHARER_LOST must=01 targets=00 hit=1 over=0`
+signature, but it was not the comparison I had asked for. A baseline has to come from the
+local repository and be copied over, not from the remote's own history.
+
+## OpenSBI/SMT2 soak: historical comparison, attribution superseded
+
+**2026-09-18 evidence correction (H3/H4, T9):** the observations below remain recorded,
+but the conclusions that the edits are exonerated and the liveness policy is validated
+are withdrawn. Two different failing models are not a one-variable control. The newer
+model used the stock runtime header with a separately reproduced wide-constant defect.
+The 5,000-cycle policy also aggregates physical cores, not SMT harts, and observed small
+gaps do not bound all legal memory/debug/WFI delays. See the source-bound prefix audit
+below; OpenSBI boot and per-hart liveness remain open.
+
+The liveness bound added above was calibrated on bare-metal tests whose longest retirement
+gap is 71 cycles. Firmware is the case that could break it: real memory pressure, long
+stalls, WFI. So the OpenSBI cookie soak (`soft-ladder-opensbi-soak.sh`, SUCCESS iff the
+trap dump shows `51b1babe`) was run against an SMT2 harness built from current source.
+
+| Harness | verdict | cookie | hang PC |
+|---|---|---|---|
+| `work-ver-smt2-fw64-B` (pre-existing build) | `FAILED (tohost = 2147483647)` @ 12,000,013 cy | **absent** | `0x80002d38` |
+| built from current source | `FAILED (tohost = 126)` @ 12,000,013 cy | **absent** | `0x80012588` |
+
+**The boot failure is pre-existing.** Both harnesses run the same ELF, both exhaust the
+12M-cycle budget, and neither reaches the cookie. Nothing in this session's changes
+introduced it — which is the point of running the same payload on a harness built before
+them.
+
+**The hang verdict did not false-fire; it fired correctly.** Its report looks
+self-contradictory at first — `max retirement gap 270 cycles (limit 5000)` alongside
+`FAIL: a core ran and then stopped retiring` — but the two measure different things:
+`mc_gap_max` is the largest *completed* gap, while the verdict tests the *live* gap at the
+end of the run. The core retired healthily (gaps under 271, well inside the 5000 bound)
+right up to the point it hung, after which the live gap ran away. That is exactly the
+behaviour the bound was designed for, observed on a real hang rather than an injected one,
+and it complements the `+mc_hang_fault` control: one shows it can fire, this shows it fires
+on the real thing.
+
+Two honest qualifications:
+
+* **The baseline harness is old.** `work-ver-smt2-fw64-B` predates this session, so it
+  differs from the current build by everything committed since, not only by my edits. It
+  establishes "this boot was already failing", not "my edits changed nothing" — the
+  differing hang PCs (`0x80002d38` vs `0x80012588`) are consistent with either intervening
+  commits or run-to-run variation, and I have not separated those.
+* **A timeout's exit code can now change.** Previously a watchdog timeout reported
+  `0x7FFFFFFF`; if the core has also stopped retiring, it now reports **126**. That is more
+  specific — "timed out *and* a core is dead" versus "timed out" — but any tooling matching
+  on the old code needs to know.
+
+Worth noting what this validates about the coherence work: SMT2 is `NrCores = 1`, so the
+cluster takes its identity path and the invalidation machinery is inert. This soak
+therefore exercises the *testharness* changes and the core, not the hub rotation or the
+retention. The uncore repairs are covered by their own leaf suites and the two-core tests.
+
+### Source-bound SMT2 prefix audit (2026-09-18)
+
+This increment applies coding philosophy §2.9, H3/H4/H5 and T2/T9: validate the
+instrument, make the observation repeatable, then locate a violated interface contract.
+The heuristics source is `architecture/AGENTS-g6lc-opensbi-dev-heuristics.md` (not under
+`multi-threading/`). Historical legacy-A comparison recipes do not override the current
+fetch_B-only requirement. No firmware, bootrom, scheduler or datapath changes were made.
+
+**Oracle correction:** `soft-ladder-opensbi-soak.sh` used `wait ... || true`, so its
+reported child status was always zero. It also accepted a bare `[cookie-exit]` marker,
+a cookie substring not aligned to a 32-bit word, and silently substituted artifacts
+when an explicitly requested harness or hold payload was missing. Runner-only fixtures
+reproduced these errors before repair. Thirteen unittest methods now pass, including
+positive cookies, partial/malformed-cookie negatives, failed harnesses, missing artifacts
+and the misleading `SUCCESS (tohost=0)` cycle-cap banner. A cookie is necessary evidence;
+a failed local harness process cannot be hidden by it. Proxy transport status remains a
+separate observation.
+
+**Runtime control:** the prior `work-ver-smt2-soak` compiler dependencies reference stock
+`verilated_funcs.h`, SHA `8c408609...`, whose wide-constant defect was already recorded.
+Freshly compiled canaries reproduce 18 failures on stock and zero on private runtime
+`dfbc2c4a...`. The new model's dependency files point to that corrected header. No global
+toolchain was modified. This does not prove the runtime defect caused the firmware symptom.
+
+**Frozen envelope:** N=1/T=2/I=2, WT D-cache, fetch_B, Verilator 5.008 `--threads 1`,
+fixed seed 1, one harness at a time. Model SHA `62454f73f105c837...`, ELF SHA
+`1a8bd52a6042744b...`; build manifest records 689 source hashes. Existing patched payload
+is copied unchanged; no peels are added or retired. Three 200,000-cycle prefix runs have
+identical recorded pin/trapdump/verdict fields: no cookie, `plat_hc=80`, `coldboot_done=0`,
+`npc0=0x80012588`, `sp1=0`. Full log hashes differ; no byte-identical-log claim is made.
+This is a repeated failing prefix, not a successful full soak or proof of the failure's cause.
+
+On the same binary and ELF, enabling `+fetch_i1_check` leaves those fields unchanged and
+reports 395,363 presentations checked, zero byte mismatches. These are presentations,
+not unique or accepted instructions. The checker does not prove instruction boundaries,
+queue acceptance, retirement or per-hart progress. The PC lies inside the instruction at
+`0x80012586`, but a next-fetch PC is not a retired PC. The retained RVFI tail ends at
+`0x800138a0`; only the physical-core-0 trace is present. No frontend/LSU attribution follows
+yet. Next check: accepted instruction ownership and progress across IQ/issue/commit,
+with a co-factor mini once the earliest failed promise is established.
+
+Artifacts under `remote-runs/`: `smt2-runtime-audit-20260918/output/audit.json`,
+`smt2-method-build-20260918/build-manifest.json`,
+`smt2-method-prefix-20260918/output/{results,runtime-controls,review-summary}.json`,
+`smt2-method-i1-20260918/output/results.json`, and
+`smt2-retire-audit-20260918/output/trace-tails.json`.
+`run_smt2_soak_review.py` retains identities and logs and refuses missing/mismatched
+inputs; a repeated failure still returns failure. Tooling-only change: no hardware timing,
+DFT, ISA/DTS or six-channel speculation behavior changed. Per-hart liveness and full
+OpenSBI qualification remain open; an observed 270-cycle completed gap is not a bound
+on all legal memory, debug or WFI delays.

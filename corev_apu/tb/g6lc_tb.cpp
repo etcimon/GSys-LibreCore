@@ -109,7 +109,7 @@ static const char *verilog_plusargs[] = {
     // parser hands it to HTIF, which rejects it and the run dies before the
     // checker ever arms -- a silent-oracle failure mode, since a rejected plusarg
     // looks exactly like a check that found nothing.
-    "fetch_i1_check",
+    "fetch_i1_check", "smt_flow_trace", "smt_progress", "smt_mem_watch",
     // Window lifecycle probe (core/fetch_B/frontend.sv). Same allowlist rule as
     // above: an unlisted plusarg is handed to HTIF, rejected, and the run dies
     // before the probe arms.
@@ -128,6 +128,11 @@ static const char *verilog_plusargs[] = {
     // looks exactly like the control "working", when in fact the verdict was never
     // exercised at all.
     "mc_verdict_fault",
+    // Injected-error control for the HANG bound: freezes the secondary cores'
+    // observed liveness once they have started, so a normally-passing test must
+    // come out as exit 126. Same allowlist rule -- unlisted means HTIF kills the
+    // run, which would look like the control working.
+    "mc_hang_fault",
     nullptr};
 
 extern dtm_t* dtm;

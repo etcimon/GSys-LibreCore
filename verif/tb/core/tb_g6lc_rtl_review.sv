@@ -688,18 +688,21 @@ module tb_g6lc_review_dispatch;
   logic[1:0][31:0] orig;
   int scenario,seen,seen_st,seen_ld;
   logic [7:0] p9a='0,p9b='0;
-  bit negative;
+  bit negative, dual_commit;
   logic [1:0] wb_v='0,cm_ack='0;
   logic [1:0][3:0] wb_id='0;
+  logic [15:0] cancel_mask='0;
+  logic [1:0][63:0] wb_data='0, op_a, op_b;
+  logic [1:0] wb_exc='0, op_a_valid, op_b_valid;
   sbe_t [1:0] cm_instr='0;
   logic [3:0] cp='0,mis_id='0;
-  logic mispredict=0;
+  logic mispredict=0, dispatch_flush=0;
   g6lc_ooo_dispatch #(.CVA6Cfg(C),.scoreboard_entry_t(sbe_t)) dut(
-    .clk_i(clk),.rst_ni(rst_n),.flush_i(1'b0),.flush_unissued_i(1'b0),.cancelled_mask_i('0),
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(dispatch_flush),.flush_unissued_i(1'b0),.cancelled_mask_i(cancel_mask),
     .dispatch_sbe_i(ds),.dispatch_orig_i('0),.dispatch_valid_i(dv),.dispatch_ack_o(da),
     .issue_sbe_o(issued),.issue_orig_o(orig),.issue_valid_o(iv),.issue_ack_i(2'b11),
-    .issue_op_a_o(),.issue_op_b_o(),.issue_op_a_valid_o(),.issue_op_b_valid_o(),
-    .wb_valid_i(wb_v),.wb_id_i(wb_id),.wb_data_i('0),.wb_exc_i('0),
+    .issue_op_a_o(op_a),.issue_op_b_o(op_b),.issue_op_a_valid_o(op_a_valid),.issue_op_b_valid_o(op_b_valid),
+    .wb_valid_i(wb_v),.wb_id_i(wb_id),.wb_data_i(wb_data),.wb_exc_i(wb_exc),
     .commit_ack_i(cm_ack),.commit_instr_i(cm_instr),.commit_ptr_i(cp),
     .mispredict_i(mispredict),.mispredict_id_i(mis_id),
     .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o());
@@ -723,6 +726,7 @@ module tb_g6lc_review_dispatch;
   initial begin
     scenario=0;seen=0;seen_st=0;seen_ld=0;
     negative=$test$plusargs("oracle_negative");
+    dual_commit=$test$plusargs("dual_commit");
     void'($value$plusargs("scenario=%d",scenario));
     repeat(3) drive();
     rst_n=1;
@@ -876,6 +880,134 @@ module tb_g6lc_review_dispatch;
         presample();
         if((da[0]||da[1])!==(negative?1'b1:1'b0))
           $fatal(1,"DISPATCH_LSQ_CREDIT ack=%b free=%0d",da,dut.ld_free);
+      end
+      11,12,13,14:begin
+        ds[0].fu=CTRL_FLOW;ds[0].op=BRANCH;ds[0].trans_id=1;dv=1;
+        presample();if(!da[0])$fatal(1,"DISPATCH_OWNER_SETUP branch");
+        drive();dv=0;
+        ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=7;ds[0].trans_id=2;dv=1;
+        presample();if(!da[0])$fatal(1,"DISPATCH_OWNER_SETUP old");
+        drive();dv=0;
+        presample();
+        if(!iv[0]||issued[0].trans_id!=2)$fatal(1,"DISPATCH_OWNER_SETUP old issue");
+        p9a=issued[0].p_rd;
+        drive();
+        cancel_mask=16'h0004;mispredict=1;mis_id=1;
+        drive();mispredict=0;
+        ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=9;ds[0].trans_id=3;dv=1;
+        if(scenario==11||scenario==14)begin
+          ds[1].fu=ALU;ds[1].op=ADD;ds[1].rs1=9;ds[1].rd=10;ds[1].trans_id=4;dv=3;
+        end
+        presample();if(da!=dv)$fatal(1,"DISPATCH_OWNER_SETUP new");
+        drive();dv=0;
+        presample();
+        if(!iv[0]||issued[0].trans_id!=3)$fatal(1,"DISPATCH_OWNER_SETUP new issue");
+        p9b=issued[0].p_rd;
+        if(p9a==0||p9a!=p9b)$fatal(1,"DISPATCH_OWNER_SETUP no reuse old=%0d new=%0d",p9a,p9b);
+        drive();
+        if(scenario==13)begin
+          wb_v=1;wb_id[0]=3;wb_data={64'b0,64'h5678};
+          presample();
+          if($test$plusargs("owner_trace"))
+            $display("OWNER_WB valid=%b qualified=%b id=%h prd=%h we=%b data=%h",wb_v,dut.wb_value_valid,wb_id,dut.wb_prd,dut.prf_we,wb_data);
+          drive();wb_v=0;
+        end else begin
+          wb_v=1;wb_id[0]=scenario==14?3:2;wb_data={64'b0,64'h1111};
+          wb_exc=scenario==14?2'b01:2'b00;
+          presample();
+          for(int p=0;p<2;p++)
+            if(iv[p]&&issued[p].trans_id==4)$fatal(1,"DISPATCH_STALE_WAKE invalid completion issued waiter");
+          drive();wb_v=0;wb_exc=0;
+        end
+        if(scenario!=11&&scenario!=14)begin
+          ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rs1=9;ds[0].rd=10;ds[0].trans_id=4;dv=1;
+          presample();if(!da[0])$fatal(1,"DISPATCH_OWNER_SETUP consumer");
+          drive();dv=0;
+        end
+        if(scenario==14)begin
+          presample();
+          if((|iv)^negative)$fatal(1,"DISPATCH_WB_VALUE exception made data ready");
+        end else begin
+        if(scenario==13)begin
+          wb_v=1;wb_id[0]=2;wb_data={64'b0,64'h1111};
+        end else begin
+          presample();
+          for(int p=0;p<2;p++)
+            if(iv[p]&&issued[p].trans_id==4)$fatal(1,"DISPATCH_STALE_WAKE cancelled completion cleared busy");
+          drive();wb_v=1;wb_id[0]=3;wb_data={64'b0,64'h5678};
+        end
+        presample();seen=0;
+        for(int p=0;p<2;p++)if(iv[p]&&issued[p].trans_id==4)begin
+          seen++;
+          if($test$plusargs("owner_trace"))
+            $display("OWNER_READ prs=%h readaddr=%h mem=%h raw=%h data=%h",issued[p].p_rs1,dut.prf_raddr[p*2],dut.i_prf.mem_q[p9b],dut.prf_rdata[p*2],op_a[p]);
+          if(!op_a_valid[p]||(op_a[p] ^ (negative?64'd1:64'd0))!=64'h5678)
+            $fatal(1,"DISPATCH_WB_VALUE scenario=%0d operand=%h",scenario,op_a[p]);
+        end
+        if(seen!=1)$fatal(1,"DISPATCH_OWNER_SETUP no genuine wake");
+        drive();wb_v=0;
+        end
+      end
+      15,16,17:begin
+        ds[0].fu=CTRL_FLOW;ds[0].op=BRANCH;ds[0].trans_id=1;dv=1;
+        presample();if(!da[0])$fatal(1,"DISPATCH_DROP_SETUP branch");
+        drive();dv=0;
+        ds='0;ds[0].fu=scenario==17?CTRL_FLOW:ALU;ds[0].op=scenario==17?JALR:ADD;
+        ds[0].rd=7;ds[0].trans_id=2;dv=1;
+        presample();if(!da[0])$fatal(1,"DISPATCH_DROP_SETUP victim");
+        drive();dv=0;
+        presample();
+        if(!iv[0]||issued[0].trans_id!=2)$fatal(1,"DISPATCH_DROP_SETUP victim issue");
+        p9a=issued[0].p_rd;
+        if(p9a==0||p9a==7)$fatal(1,"DISPATCH_DROP_SETUP no rename");
+        drive();cancel_mask=16'h0004;mispredict=1;mis_id=1;wb_v=1;wb_id=8'h01;
+        drive();mispredict=0;wb_v=0;
+        cm_instr='0;cm_instr[0].fu=CTRL_FLOW;cm_instr[0].trans_id=1;cm_ack=dual_commit?0:1;
+        drive();cm_ack=0;
+        if(scenario==17)begin
+          ds='0;ds[0].fu=CTRL_FLOW;ds[0].op=BRANCH;ds[0].trans_id=3;dv=1;
+          presample();if(!da[0])$fatal(1,"DISPATCH_DROP_SETUP replacement branch");
+          drive();dv=0;
+          drive();
+        end
+        cm_instr='0;cm_instr[0].fu=scenario==17?CTRL_FLOW:ALU;
+        cm_instr[0].rd=7;cm_instr[0].trans_id=2;cm_ack=1;
+        if(dual_commit)begin
+          cm_instr[1]=cm_instr[0];cm_instr[0]='0;
+          cm_instr[0].fu=CTRL_FLOW;cm_instr[0].trans_id=1;cm_ack=3;
+        end
+        drive();cm_ack=0;cancel_mask=0;
+        if(scenario==15)begin
+          dispatch_flush=1;drive();dispatch_flush=0;
+          ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rs1=7;ds[0].rd=10;ds[0].trans_id=3;dv=1;
+          presample();if(!da[0])$fatal(1,"DISPATCH_DROP_SETUP arch read");
+          drive();dv=0;
+          presample();
+          if(!iv[0]||issued[0].trans_id!=3)$fatal(1,"DISPATCH_DROP_SETUP arch issue");
+          if((issued[0].p_rs1 ^ (negative?8'd1:8'd0))!=8'd7)
+            $fatal(1,"DISPATCH_DROP_ARCH physical=%0d",issued[0].p_rs1);
+        end else begin
+          ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=9;ds[0].trans_id=scenario==17?4:3;dv=1;
+          presample();if(!da[0])$fatal(1,"DISPATCH_DROP_SETUP next allocation");
+          drive();dv=0;
+          presample();
+          if(!iv[0]||issued[0].rd!=9)$fatal(1,"DISPATCH_DROP_SETUP next issue");
+          p9b=issued[0].p_rd;
+          if(scenario==16)begin
+            if((p9b ^ (negative?8'd1:8'd0))!=p9a)
+              $fatal(1,"DISPATCH_DROP_FREE physical=%0d expected=%0d",p9b,p9a);
+          end else begin
+            drive();mispredict=1;mis_id=3;cancel_mask=16'h0010;wb_v=1;wb_id=8'h03;
+            drive();mispredict=0;wb_v=0;
+            ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=10;ds[0].trans_id=5;dv=1;
+            presample();if(!da[0])$fatal(1,"DISPATCH_DROP_SETUP recovered allocation");
+            drive();dv=0;
+            presample();
+            if(!iv[0]||issued[0].trans_id!=5)$fatal(1,"DISPATCH_DROP_SETUP recovered issue");
+            if((issued[0].p_rd ^ (negative?8'd1:8'd0))!=p9b)
+              $fatal(1,"DISPATCH_DROP_CKPT physical=%0d expected=%0d",issued[0].p_rd,p9b);
+          end
+        end
       end
       default:$fatal(1,"DISPATCH_SCENARIO");
     endcase
@@ -1294,7 +1426,7 @@ module tb_g6lc_review_commit;
   scoreboard #(.CVA6Cfg(C),.bp_resolve_t(bp_resolve_t),.exception_t(exception_t),
       .scoreboard_entry_t(scoreboard_entry_t),.forwarding_t(forwarding_t),
       .writeback_t(writeback_t),.rs3_len_t(rs3_len_t)) dut (
-    .clk_i(clk),.rst_ni(rst_n),.sb_full_o(sb_full),.spec_cancel_o(spec_cancel),
+    .clk_i(clk),.rst_ni(rst_n),.sb_full_o(sb_full),.sb_empty_o(),.spec_cancel_o(spec_cancel),
     .cancelled_mask_o(cancelled_mask),.flush_unissued_instr_i(flush_unissued),
     .flush_i(flush),.x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),
     .x_id_i('0),.commit_instr_o(commit_instr),.commit_drop_o(commit_drop),
@@ -1395,5 +1527,299 @@ module tb_g6lc_review_commit;
     end
     else $fatal(1,"COMMIT4_SCENARIO");
     $display("RTL_REVIEW_PASS commit scenario=%0d npc=%0d",scenario,NPC);$finish;
+  end
+endmodule
+
+module tb_g6lc_review_issue_order;
+  import ariane_pkg::*;
+  parameter int NP=2, HARTS=2;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.NrIssuePorts=NP; c.NrCommitPorts=2; c.NrHarts=HARTS;
+    c.SuperscalarEn=1; c.XLEN=64; c.VLEN=64;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef struct packed {
+    logic [63:0] pc;
+    fu_t fu;
+    fu_op op;
+    logic [4:0] rd, rs1, rs2;
+    logic hart_id;
+  } sbe_t;
+  typedef struct packed { logic hart_id; } resolve_t;
+  logic clk=0, rst_n=0, flush=0, resolve=0;
+  logic [NP-1:0] valid='0, ack='0, granted;
+  sbe_t [NP-1:0] entries='0;
+  logic [1:0] commit_ack='0;
+  sbe_t [1:0] committed='0;
+  resolve_t branch='0;
+  bit negative;
+  int scenario;
+
+  g6lc_issue_barrier #(.CVA6Cfg(C), .scoreboard_entry_t(sbe_t),
+                      .bp_resolve_t(resolve_t)) dut (
+    .clk_i(clk), .rst_ni(rst_n), .flush_i(flush), .flush_unissued_instr_i(1'b0),
+    .issue_valid_sb_i(valid), .issue_ack_iro_i(ack), .issue_instr_sb_i(entries),
+    .decoded_instr_i(entries), .decoded_instr_valid_i(valid),
+    .resolve_branch_i(resolve), .resolved_branch_i(branch),
+    .commit_ack_i(commit_ack), .commit_instr_i(committed),
+    .g1fh_csr_a0_i(1'b0), .g1fh_hart_i('0), .issue_valid_o(granted)
+  );
+
+  function automatic sbe_t stack_write(input logic [63:0] pc, input logic hart=0);
+    return '{pc:pc, fu:ALU, op:ADD, rd:2, rs1:2, rs2:0, hart_id:hart};
+  endfunction
+  function automatic sbe_t control_flow(input logic [63:0] pc, input logic hart=0);
+    return '{pc:pc, fu:CTRL_FLOW, op:ADD, rd:1, rs1:0, rs2:0, hart_id:hart};
+  endfunction
+  task automatic tick;
+    clk=1; #2; clk=0; #2;
+  endtask
+  task automatic expect_grants(input logic [NP-1:0] expected);
+    logic [NP-1:0] observed;
+    #2;
+    observed=granted;
+    if (negative) observed[0]=!observed[0];
+    if (observed !== expected)
+      $fatal(1,"ISSUE_PROGRAM_ORDER scenario=%0d expected=%b observed=%b",scenario,expected,observed);
+  endtask
+  initial begin
+    scenario=0; void'($value$plusargs("scenario=%d",scenario));
+    negative=$test$plusargs("oracle_negative");
+    #2; tick(); rst_n=1; #2;
+    case (scenario)
+      0: begin
+        entries[0]=control_flow(64'h9000);
+        entries[1]=stack_write(64'h1000);
+        valid=NP'(3);
+        expect_grants(NP'(3));
+      end
+      1: begin
+        entries[0]=stack_write(64'h9000);
+        entries[1]=control_flow(64'h1000);
+        valid=NP'(3);
+        expect_grants(NP'(1));
+      end
+      2: begin
+        entries[0]=stack_write(64'h1000);
+        entries[1]=control_flow(64'h9000, HARTS > 1 ? 1'b1 : 1'b0);
+        valid=NP'(3);
+        expect_grants(HARTS > 1 ? NP'(3) : NP'(1));
+      end
+      3: begin
+        entries[0]=stack_write(64'h1000);
+        valid=NP'(1); ack=NP'(1); tick(); ack='0;
+        committed[0]=entries[0];
+        entries[0]=control_flow(64'h9000);
+        expect_grants('0);
+        commit_ack=2'b01; tick(); commit_ack='0;
+        expect_grants(NP'(1));
+      end
+      4: begin
+        entries[0]=control_flow(64'h9000);
+        entries[1]=stack_write(64'h1000);
+        valid=NP'(1);
+        expect_grants(NP'(1));
+      end
+      5: begin
+        entries[0]='{pc:64'h9000, fu:CSR, op:CSR_WRITE, rd:5, rs1:1, rs2:0, hart_id:0};
+        entries[1]=control_flow(64'h1000);
+        valid=NP'(3);
+        expect_grants(NP'(1));
+      end
+      default: $fatal(1,"ISSUE_ORDER_SCENARIO");
+    endcase
+    $display("RTL_REVIEW_PASS issue_order scenario=%0d ports=%0d harts=%0d",scenario,NP,HARTS);
+    $finish;
+  end
+endmodule
+
+module tb_g6lc_review_wt_tag;
+  parameter int FIXUP=2;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64; c.IS_XLEN64=1; c.XLEN_ALIGN_BYTES=3; c.PLEN=56;
+    c.DCACHE_INDEX_WIDTH=12; c.DCACHE_OFFSET_WIDTH=4; c.DCACHE_TAG_WIDTH=44;
+    c.DCACHE_SET_ASSOC=2; c.DCACHE_LINE_WIDTH=128; c.DCACHE_NUM_WORDS=256;
+    c.DCACHE_USER_WIDTH=64; c.WtDcacheWbufDepth=4; c.WtDcacheFixupDepth=FIXUP;
+    c.DCACHE_MAX_TX=2; c.MEM_TID_WIDTH=1;
+    c.NrCachedRegionRules=1; c.CachedRegionAddrBase[0]=64'h80000000;
+    c.CachedRegionLength[0]=64'h40000000;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef struct packed {
+    logic [43:0] address_tag;
+    logic [11:0] address_index;
+    logic [63:0] data_wdata, data_wuser;
+    logic [7:0] data_be;
+    logic data_req, tag_valid, kill_req;
+  } req_t;
+  typedef struct packed {
+    logic data_gnt, data_rvalid;
+    logic [63:0] data_rdata, data_ruser;
+    logic data_rid;
+  } rsp_t;
+  typedef struct packed {
+    logic [52:0] wtag;
+    logic [63:0] data, user;
+    logic [7:0] dirty, valid, txblock;
+    logic checked;
+    logic [1:0] hit_oh;
+  } wb_t;
+  logic clk=0, rst_n=0, empty;
+  req_t request='0;
+  rsp_t response;
+  logic miss_req, miss_ack=0, return_valid=0, return_id=0, miss_id;
+  logic [55:0] miss_address;
+  logic [63:0] miss_data;
+  logic rd_req, rd_ack=0, tag_only;
+  logic [43:0] rd_tag;
+  logic [7:0] rd_index;
+  logic [3:0] rd_offset;
+  logic [1:0] rd_hit;
+  logic [1:0] wr_req;
+  logic [63:0] wr_data;
+  logic [7:0] wr_be;
+  wb_t [3:0] buffered;
+  wb_t [FIXUP:0] fixups;
+  logic previous_read=0;
+  logic [43:0] previous_tag='0;
+  int checks=0, requests=0, scenario=0;
+  bit negative, saw_normal_tail=0;
+  localparam logic [43:0] TAG_A=44'h81000, TAG_B=44'h82000;
+
+  assign rd_hit = previous_read && rd_tag == previous_tag ? 2'b01 : 2'b00;
+  wt_dcache_wbuffer #(.CVA6Cfg(C), .DCACHE_CL_IDX_WIDTH(8),
+    .dcache_req_i_t(req_t), .dcache_req_o_t(rsp_t), .wbuffer_t(wb_t)) dut (
+    .clk_i(clk), .rst_ni(rst_n), .cache_en_i(1'b1), .empty_o(empty), .not_ni_o(),
+    .req_port_i(request), .req_port_o(response),
+    .miss_ack_i(miss_ack), .miss_paddr_o(miss_address), .miss_req_o(miss_req),
+    .miss_we_o(), .miss_wdata_o(miss_data), .miss_wuser_o(), .miss_vld_bits_o(),
+    .miss_nc_o(), .miss_size_o(), .miss_id_o(miss_id),
+    .miss_rtrn_vld_i(return_valid), .miss_rtrn_id_i(return_id),
+    .rd_tag_o(rd_tag), .rd_idx_o(rd_index), .rd_off_o(rd_offset), .rd_req_o(rd_req),
+    .rd_tag_only_o(tag_only), .rd_ack_i(rd_ack), .rd_data_i('0),
+    .rd_vld_bits_i(2'b01), .rd_hit_oh_i(rd_hit), .wr_cl_vld_i(1'b0), .wr_cl_idx_i('0),
+    .wr_req_o(wr_req), .wr_ack_i(1'b1), .wr_idx_o(), .wr_off_o(),
+    .wr_data_o(wr_data), .wr_data_be_o(wr_be), .wr_user_o(),
+    .inv_req_o(), .inv_ack_i(1'b1), .inv_idx_o(), .inv_way_oh_o(), .inv_vld_bits_o(),
+    .pm_void_ack_o(), .pm_fixup_write_o(), .pm_fixup_inval_o(), .pm_fixup_full_o(),
+    .fixup_wbuffer_o(fixups), .wbuffer_data_o(buffered), .tx_paddr_o(), .tx_vld_o()
+  );
+
+  task automatic cycle(input logic [43:0] accepting_tag=TAG_A);
+    bit next_read;
+    logic [43:0] observed;
+    #2;
+    if (previous_read) begin
+      observed=rd_tag ^ (negative ? 44'd1 : 44'd0);
+      if (observed !== previous_tag)
+        $fatal(1,"WT_TAG_OWNER scenario=%0d checks=%0d expected=%h observed=%h pending=%b",
+               scenario,checks,previous_tag,observed,rd_req);
+      checks++;
+    end
+    if (previous_read && previous_tag == TAG_A && !rd_req) saw_normal_tail=1;
+    next_read=rd_req && rd_ack;
+    if (next_read) requests++;
+    observed=rd_index == 0 && FIXUP>0 ? '0 :
+        rd_index == 8'h12 ? (rd_offset == 4'h8 ? TAG_A : TAG_B) : accepting_tag;
+    clk=1; #2; clk=0;
+    previous_read=next_read;
+    previous_tag=observed;
+    #2;
+  endtask
+  task automatic offer(input logic [43:0] tag);
+    request='0;
+    request.address_tag=tag; request.address_index=tag == TAG_A ? 12'h128 : 12'h120;
+    request.data_req=1; request.data_be='1; request.data_wdata=64'hcab51234;
+    #2;
+    if (!response.data_gnt) $fatal(1,"WT_TAG_SETUP no write credit");
+    cycle(); request.data_req=0;
+  endtask
+  initial begin
+    void'($value$plusargs("scenario=%d",scenario));
+    negative=$test$plusargs("oracle_negative");
+    cycle(); rst_n=1;
+    offer(TAG_A);
+    if (scenario==0) begin
+      rd_ack=1;
+      repeat (12) cycle();
+      if (checks < 2 || !saw_normal_tail)
+        $fatal(1,"WT_TAG_VACUOUS checks=%0d requests=%0d tail=%b",checks,requests,saw_normal_tail);
+    end else if (scenario==1 && FIXUP>0) begin
+      #2;
+      if (!miss_req) $fatal(1,"WT_TAG_SETUP no memory request");
+      return_id=miss_id; miss_ack=1; cycle(); miss_ack=0;
+      return_valid=1; cycle(); return_valid=0;
+      repeat (6) cycle();
+      #2;
+      if (!rd_req) $fatal(1,"WT_TAG_SETUP no fixup lookup");
+      rd_ack=1;
+      offer(TAG_B);
+      repeat (12) cycle(TAG_B);
+      if (checks < 2) $fatal(1,"WT_TAG_VACUOUS handoff not observed");
+    end else $fatal(1,"WT_TAG_SCENARIO");
+    $display("RTL_REVIEW_PASS wt_tag scenario=%0d depth=%0d checks=%0d",scenario,FIXUP,checks);
+    $finish;
+  end
+endmodule
+
+module tb_g6lc_review_smt_drain;
+  parameter int NH=2, QUANTUM=1;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.NrHarts=NH;
+    c.SmtPolicy=QUANTUM==128 ? config_pkg::SMT_HYBRID : config_pkg::SMT_RR;
+    c.SmtFetchQuantum=QUANTUM; c.SmtStarveLimit=QUANTUM==128 ? 64 : 8;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  logic clk=0, rst_n=0, fetch=0, idle=0, quiesce, switched, trap_hold=0, flush=0;
+  logic [NH-1:0] ready='1;
+  logic [$clog2(NH>1?NH:2)-1:0] active;
+  int scenario=0;
+  bit negative;
+  g6lc_thread_select #(.CVA6Cfg(C)) dut (
+    .clk_i(clk), .rst_ni(rst_n), .fetch_fire_i(fetch), .issue_fire_i(1'b0), .flush_i(flush),
+    .hold_i(1'b0), .drain_ready_i(idle), .quiesce_o(quiesce), .id_uniss_i(1'b0),
+    .iq_valid_i(1'b0), .t0_imm_i(1'b0), .trap_hold_i(trap_hold), .hart_ready_i(ready),
+    .hart_dmiss_i('0), .hart_imiss_i('0), .hart_block_i('0), .active_hart_o(active),
+    .switch_o(switched), .t0_extra_o(), .switch_on_miss_o(), .switch_on_quantum_o(),
+    .switch_on_starve_o()
+  );
+  task automatic tick;
+    #2; clk=1; #2; clk=0; #2;
+  endtask
+  task automatic check_wait;
+    if ((active != 0) || switched || !quiesce)
+      $fatal(1,"SMT_DRAIN_EARLY active=%0d switch=%b quiesce=%b",active,switched,quiesce);
+  endtask
+  initial begin
+    void'($value$plusargs("scenario=%d",scenario));
+    negative=$test$plusargs("oracle_negative");
+    tick(); rst_n=1; fetch=1; repeat (QUANTUM) tick(); fetch=0;
+    if (NH==1) begin
+      if (active != 0 || switched || quiesce) $fatal(1,"SMT_DRAIN_SINGLE");
+    end else begin
+      check_wait();
+      repeat (4) begin tick(); check_wait(); end
+      if (scenario==1) begin
+        ready='d1; tick();
+        if (active != 0 || switched || quiesce) $fatal(1,"SMT_DRAIN_CANCEL");
+        ready='1; fetch=1; tick(); fetch=0; check_wait();
+      end
+      idle=1; trap_hold=1; tick(); check_wait();
+      trap_hold=0; flush=1; tick(); check_wait();
+      flush=0; tick();
+      if (active != 1 || !switched || !quiesce) $fatal(1,"SMT_DRAIN_RELEASE");
+      tick();
+      if (quiesce || switched || active != 1) $fatal(1,"SMT_DRAIN_PULSE");
+    end
+    if ((int'(active) ^ int'(negative)) != (NH>1 ? 1 : 0))
+      $fatal(1,"SMT_DRAIN_ORACLE");
+    $display("RTL_REVIEW_PASS smt_drain harts=%0d scenario=%0d",NH,scenario);
+    $finish;
   end
 endmodule

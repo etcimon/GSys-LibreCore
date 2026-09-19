@@ -21,12 +21,37 @@ Sub-files: `../spec/riscv-spec-I-3.1-rvwmo.html`, `-I-4.1-zifencei.html`, `-I-5.
 
 ## 2. Code map
 The speculation pipeline is a composition, not one module:
-- Predict: `core/fetch_A/frontend/frontend.sv` (see `AGENTS-branch-prediction.md`).
+- Predict: `core/fetch_B/frontend.sv` (see `AGENTS-branch-prediction.md`).
 - Track in-flight: `core/scoreboard.sv` (the speculative window; operands via `core/issue_read_operands.sv`).
 - Execute: `core/ex_stage.sv`; branch resolution `core/branch_unit.sv` -> `resolved_branch_i`.
 - Retire in order: `core/commit_stage.sv` (architectural state changes only here).
-- Flush/redirect: `core/controller.sv` (`flush_i` sequencing) -> frontend redirect `core/fetch_A/frontend/frontend.sv:48,308`.
+- Flush/redirect: `core/controller.sv` (`flush_i` sequencing) -> frontend redirect `core/fetch_B/frontend.sv`.
 - Memory speculation: `core/load_unit.sv` (speculative loads / hazard checks), `core/store_buffer.sv` (speculative vs committed stores), `core/lsu_bypass.sv`, `core/amo_buffer.sv`.
+
+### Result readiness is not commit readiness
+
+AMO execution writeback prepares the scoreboard entry for commit; its architectural
+result arrives through `amo_resp_i` at commit. The architectural forwarding path
+must not advertise the earlier placeholder to a dependent branch or ALU operation.
+`issue_read_operands.sv` gates both stored and same-cycle WB candidates by AMO class
+under RVA, letting the consumer read the committed RF value after retirement.
+No reservation/flush policy or ISA/DTS/default changes accompany that repair.
+The opcode decode and readiness gate affect the issue cone; physical STA/power is
+not qualified. Directed RVC/norvc, RS1/RS2/ALU consumer and negative controls are in
+`../../AGENTS-specs-to-tests.md`. This is not general OoO/PRF qualification.
+
+### Completion, usable data and architectural retirement
+
+For OoO, an invalid/cancelled response must not clear rename busy or wake IQ merely
+because a transaction completed. PRF writes and bypass must use the same qualification.
+Likewise, acknowledging a cancelled scoreboard/ROB slot only drains it: it must not
+update the committed map, free an architectural physical register, release a reused
+checkpoint or authorize a store. The dispatch fixture now checks both commit lanes
+and private restored-defect controls; ROB completion and retirement stay separate.
+This adds combinational qualification, not state/clock/reset or software-visible
+features. Generic cell evidence and remaining late-result/TID/hart/FP limits live in
+`../../architecture/out-of-order/README.md`. Preserve the drained SMT2 boot baseline;
+assess fairness only with independently checked, simultaneously runnable workers.
 
 ## 3. Config knobs (`core/include/config_pkg.sv`)
 - `NrScoreboardEntries` `241` (size of the in-flight/speculative window).

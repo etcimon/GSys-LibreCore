@@ -1097,6 +1097,479 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   newlines. `git diff --numstat` is the cheap detector — insertions == deletions == file
   length means line endings, not content.
 
+- [~] SECONDARY-CORE LIVENESS — diagnostic exercised, not generally qualified.
+  2026-09-18 correction: sampled gaps do not establish an architectural delay bound;
+  NR_CORES-based aggregation does not observe each SMT hart. WFI/wakeup, debug/boot
+  holds, long legal stalls and original failure-code preservation remain obligations.
+  Historical measurements and the injected-observer control follow:
+  I had recorded this as needing "per-core liveness windows or test-declared expectations,
+  both risking false failures on legitimate idle parks". WRONG in a useful way: AN IDLE
+  PARK LOOP KEEPS RETIRING (it retires its own branch), so a parked core and a hung core
+  ARE distinguishable by retirement even though they are identical by PC.
+  BOUND MEASURED BEFORE IT WAS CHOSEN (max retirement gap, cycles):
+    store-visible            core0 23  core1 25
+    two-inval back-pressure  core0 32  core1 25
+    miss-streaming stress    core0 60  core1 71   <- worst anywhere
+    mini_hpd_2jr (parked)    core0 33  core1 30
+    mc_boot_sanity           core0 23  core1 23
+  Largest gap ANYWHERE is 71; parked cores 23-30. MC_GAP_LIMIT = 5000, ~70x the worst
+  observed, so it cannot fire on a cache miss, DRAM stall or park.
+  WFI (the one legitimate way to stop retiring) is excluded by the INSTRUCTION read from
+  RVFI (insn == 0x10500073), NOT by a hierarchical reference to csr_regfile.wfi_q: that
+  path runs through gen_std or gen_acc by configuration, and this review was already
+  bitten once by a probe wired to a hierarchy that moved (i_cva6_icache).
+  VERIFIED BOTH WAYS, with distinct exit codes so the log says which failure occurred:
+    mini_hpd_* + sanity        21/21 pass
+    three cross-core tests     all SUCCESS
+    +mc_hang_fault             exit 126, "a core ran and then stopped retiring"
+  127 = a core never ran; 126 = a core ran and then stopped.
+
+- [x] STARVE OVERRIDE NOW ROTATES — decision REVERSED on new evidence, and applied.
+  I had declined this as speculative ("unreachable in production; no reproduction of
+  harm"). Right rule, WRONG CONCLUSION: the measurement behind it used a memory model that
+  accepts every request immediately — the shortest possible service interval. The tell was
+  in my own data: at 8 cores, 600 grants / 1200 cycles = 75 each = a core served every 16
+  cycles = EXACTLY AXI_STARVE_LIMIT. The margin was not large, it was ZERO.
+  Bench now sweeps memory acceptance (-GMEM_STALL, AW accepted 1 in N+1):
+    NC=2 stall 0,3   override never fires, even (500:500, 250:250)
+    NC=4 stall 0,3   override never fires, even (250x4, 125x4)
+    NC=8 stall 0,1   override never fires, even (125x8)
+    NC=8 stall 3     FIRES 992/2000 cycles -> grants 1,1,1,100,100,99,99,99 (100x!)
+    NC=8 stall 7     FIRES -> SHUT-OUT, core 3 never granted
+  Ordinary DRAM behaviour, not a pathological case. The mechanism meant to RESCUE a
+  starved core was the thing STARVING it: the winner re-qualifies immediately and keeps
+  winning the last-wins tie.
+  REPAIR: reuse the arbiter's existing pick_rr over the starved subset, so a forced grant
+  ADVANCES the rotation instead of fighting it. No new state (mask is combinational over
+  existing counters).
+    NC=8 stall 3  1,1,1,100,100,99,99,99 -> 63,63,63,63,62,62,62,62
+    NC=8 stall 7  SHUT-OUT               -> 32,32,31,31,31,31,31,31
+  The override still engages (992 / 496 cycles) — it is doing its job — but now
+  distributes. Already-fair configurations unchanged, so this is not a behaviour swap.
+  VERIFIED: hub suite 9/9, inval-bus bench passes, stream8 builds clean (8 warnings),
+  breadth 21/21 + 3 cross-core pass + hang control still fires at 126, lint 7/4/7 against
+  recorded baselines.
+  LESSON, recorded because it nearly cost a real defect: "unreachable in production" was a
+  conclusion drawn from a model whose one relevant parameter was pinned at its most
+  favourable value. AN ARBITRATION MARGIN MEASURED AGAINST INFINITELY FAST MEMORY IS NOT A
+  MARGIN.
+
+- [!] TAG ARRAY RE-SCOPED — it is NOT a "swap to tc_sram" job, it is a PIPELINE CHANGE.
+  BLOCKING PROPERTY IS THE READ CONTRACT, not the array declaration: the lookup is
+  COMBINATIONAL (hit_o valid in the same cycle as index_i; the module header advertises
+  "single cycle"). An SRAM read is REGISTERED, so the swap inserts a pipeline stage into
+  the L2 lookup and changes the latency the parent is built around.
+  THREE MORE PROPERTIES to resolve before binding a macro:
+   * probe_tag_o / probe_valid_o are a SECOND combinational read at an arbitrary way,
+     independent of the lookup index -> second read port or arbitration;
+   * inval_match_i is CONTENT-ASSOCIATIVE: compares against ALL ways of a set and clears
+     matches, read+write same set same cycle -> becomes a multi-cycle RMW that must not
+     race the lookup;
+   * write_i and inval_i are independent ifs in one always_comb, so both can update in the
+     same cycle at different indices -> two write ports or serialisation.
+  The standard valid-in-flops/tags-in-SRAM split is NECESSARY (it removes the whole-array
+  reset) but is NOT where the area is: valid is 1 bit of a 48-bit entry = 2.0% of the L2
+  array, 2.1% of L3. The tags are the cost AND are exactly what needs the registered read.
+  FIGURE I CANNOT RECONCILE: this repo quotes 3,080,192 (L3) + 401,408 (L2) ~= 3.4 Mbit
+  from a Verilator WIDTHCONCAT warning. Derived from geometry:
+    L2 256 KiB a8 -> 512 sets, TAG 49, 4096 entries  = 0.205 Mbit
+    L3 2 MiB  a16 -> 2048 sets, TAG 47, 32768 entries = 1.573 Mbit   total 1.78 Mbit
+  The quoted numbers are 1.96x mine in BOTH cases — a uniform factor consistent with the
+  warning counting the reset concat across tags_q AND tags_d rather than storage. Not
+  proven either way, so: the array is BETWEEN 1.8 AND 3.4 Mbit of flops, dominant either
+  way, and the precise figure must come from a synthesis flop count, not a lint warning.
+  PLANNING CONSEQUENCE: not a contained P2 array swap. New pipeline stage + second read
+  port/arbitration + serialised content-associative invalidate, invalidating timing
+  assumptions of a module with extensive leaf suites (review-l2-read-order-*,
+  review-l2-atop-*, review-l2-inclusion-*). Plan and qualify as a micro-arch change.
+
+- [x] RETRACTION — the 3.4 Mbit tag figure is CORRECT; my challenge to it was WRONG.
+  I derived 1.78 Mbit and flagged a "uniform 1.96x discrepancy". The error was mine: I used
+  the DEFAULT geometry (256 KiB L2 / 2 MiB L3) instead of the CONFIGURED one. build_config
+  scales caches with core count -- L2 = max(256 KiB, NrCores x 128 KiB), L3 = max(2 MiB,
+  NrCores x 1 MiB) -- and g6lc64_ooo_server sets NrCores: 4, so the real geometry is
+  512 KiB L2 / 4 MiB L3:
+    L2 512 KiB a8  -> 1024 sets, TAG 48, 8192 entries  -> 8192*49  = 401,408   MATCHES
+    L3 4 MiB   a16 -> 4096 sets, TAG 46, 65536 entries -> 65536*47 = 3,080,192 MATCHES
+  Both to the bit. The array IS 3.48 Mbit of flops. The "1.96x" I found suspicious was just
+  the ratio between two geometries differing 2x in size: doubling sets doubles entries
+  while removing one tag bit.
+  KEEP FROM THE DETOUR: the valid-bit fraction is unchanged and still small (1 of 49 bits,
+  2.0%), so "the valid/tag split does not address the area" stands. And the lint-warning
+  width was a RELIABLE measurement here -- distrusting it was reasonable, the arithmetic
+  that seemed to support the distrust was not, and the fix was to read the CONFIGURED
+  parameters rather than the defaults.
+
+- [x] SNOOP-FILTER DISPLACEMENT reviewed — NO correctness hole; dead state removed instead.
+  Every address resolves to exactly two outcomes: a lookup MISS reports ALL CORES PRESENT
+  (present_o default {NC{1'b1}}), and an install over a live entry starts ALL PRESENT
+  (install_present). So a displaced line's forgotten sharers can NEVER under-report -- the
+  structure degrades to broadcast, which is safe. Back-invalidation buys PRECISION, not
+  correctness => the item leaves the P0/P1 class.
+  STRUCTURE IS NOT WHAT ITS STATE SUGGESTED: the filter is DIRECT-MAPPED (every access is
+  mem_q[idx_of(addr)], no way selection) yet carried an `rr_q` counter incremented on every
+  install and READ BY NOTHING. Dead state that also advertised a round-robin victim policy
+  that does not exist -- anyone planning displacement handling would look for a victim to
+  select and find none. Removed; direct-mapped property documented in its place.
+  PRECISION STORY IS ALIASING, NOT CAPACITY: with NR_ENTRIES ~= 64 x NrCores and direct
+  mapping, any working set aliasing in the index space evicts itself and each aliasing
+  install re-arms all-present. Mitigation is more entries or associativity, NOT
+  "back-invalidate on displacement".
+  VERIFIED one-variable: committed filter and rr_q-removed filter both pass scenarios 0-2
+  and both fire the injected-error control (rc 134). Identical.
+  METHOD NOTE: my first control ran `git show HEAD:` ON THE BUILDER and got a PRE-SESSION
+  file -- the remote is an rsync'd working tree with a stale .git (4bab99ca0, not the
+  session commit). It usefully re-reproduced the original SF_SHARER_LOST signature, but a
+  baseline must come from the LOCAL repo and be copied over, never from the remote's own
+  history.
+
+- [x] OoO P0s VERIFIED CONTAINED — refused at ELABORATION, not just in simulation.
+  check_cfg has assert(!(OoOEn && NrHarts>1)) and assert(!(OoOEn && FpPresent)), but it is
+  called from core/cva6.sv:2294 inside an `initial` block = SIMULATION ONLY. I went looking
+  for the hole that implies (synthesis would accept the unsound config silently).
+  THE HOLE IS NOT THERE: core/ooo/g6lc_ooo_dispatch.sv:101-106 carries GENERATE-SCOPE
+  $error guards that fire during elaboration in BOTH flows. Verified by synthesising top
+  `cva6` with the g6lc64_ooo_server package AS DECLARED (OoOEn=1, NrHarts=2, RVF/RVD=1)
+  against a flat manifest:
+    g6lc_ooo_dispatch.sv:102 $error OoO dispatch has no per-hart rename namespace
+    g6lc_ooo_dispatch.sv:105 $error OoO dispatch has no FP register class
+    Build failed: 2 errors -- Design elaboration failed
+  => Both P0s are FEATURE GAPS BEHIND A HARD GUARD, not latent defects that can reach
+  silicon. Materially different priority from "P0 defect": nothing can accidentally build
+  the aliasing design. Remaining work is implementation (per-hart map/free/busy namespaces;
+  FP register class through rename/PRF/operand read), to be planned and qualified as such.
+  GENERAL POINT (recurring): an `initial`-block assert refuses the configuration to anyone
+  who RUNS A TEST and refuses nothing to anyone who RUNS SYNTHESIS. The generate-scope
+  $error is what makes it a BUILD refusal -- same promotion applied to the MEM_TID_WIDTH
+  bound earlier in this review.
+
+- [x] AUDITED whether the "simulation-only guard" pattern is SYSTEMIC. It is not, and the
+  bounded answer is worth more than the suspicion was.
+  COUNTS: check_cfg carries 124 asserts, ALL simulation-only (called from an `initial`
+  block at core/cva6.sv:2294). Against that, the whole core carries only 12 generate-scope
+  elaboration guards (`begin : gen_err_*`):
+    cva6_hpdcache_subsystem  3  (MEM_TID_WIDTH -- promoted from translate_off THIS session)
+    vendored hpdcache        6  (recovery, multi/single-way, scrubber, rdata ecc/noecc)
+    cva6.sv                  1  (CvxifEn && EnableAccelerator)
+    g6lc_ooo_dispatch        2  (NrHarts>1 aliasing; FpPresent not renamed)
+  CLASSIFICATION of the risky check_cfg rules (those mentioning NrHarts/NrCores/FpPresent):
+   * SILENT-ALIASING class -- a violation BUILDS FINE and corrupts architectural state:
+     OoOEn && NrHarts>1, OoOEn && FpPresent. BOTH are separately guarded at elaboration.
+   * SANITY class -- range/sizing rules (NrHarts/NrCores bounds, NrCores*NrHarts <= MAX,
+     SnoopFilterEntries==0, SmtFetchQuantum==0) and platform-capability rules (NrHarts>1 or
+     NrCores>1 requiring RVS/MmuPresent). A violation of these is self-evident: the build
+     breaks on widths, or the software plainly cannot run. They do not silently alias
+     hardware state, so an `initial` assert is adequate.
+  => The one class that can silently alias core state is covered. The pattern DID exist
+  (MEM_TID_WIDTH was translate_off-only until this session promoted it), which is why the
+  suspicion was reasonable -- but it is not systemic, and I am not manufacturing an alarm
+  where the audit does not support one.
+
+- [~] OpenSBI/SMT2 SOAK — historical runs completed, but causal attribution and liveness
+  qualification remain OPEN. The following historical interpretation is superseded by the
+  2026-09-18 H3/H4 audit: an unmatched failing baseline cannot exonerate current edits;
+  stock-runtime provenance and physical-core aggregation also limit its conclusions.
+  Motivation: MC_GAP_LIMIT=5000 was calibrated on bare-metal tests whose worst gap is 71
+  cycles. FIRMWARE is the case that could break it (real memory pressure, long stalls, WFI).
+  Ran soft-ladder-opensbi-soak.sh (SUCCESS iff trapdump shows 51b1babe) on an SMT2 harness
+  built from current source, then the SAME ELF on a pre-existing harness:
+    work-ver-smt2-fw64-B (old build)  FAILED tohost=2147483647 @12,000,013 cy  cookie ABSENT  npc0=0x80002d38
+    built from current source         FAILED tohost=126        @12,000,013 cy  cookie ABSENT  npc0=0x80012588
+  BOTH fail, both exhaust the 12M budget, neither reaches the cookie => the boot failure is
+  PRE-EXISTING, not introduced here.
+  THE HANG VERDICT DID NOT FALSE-FIRE. Its output looks self-contradictory --
+  "max retirement gap 270 cycles (limit 5000)" alongside "FAIL: a core ran and then stopped
+  retiring" -- but they measure different things: mc_gap_max is the largest COMPLETED gap,
+  the verdict tests the LIVE gap at end of run. The core retired healthily (gaps <=270)
+  until it hung, then the live gap ran away. Exactly the designed behaviour, observed on a
+  REAL hang rather than an injected one -- complements +mc_hang_fault (can fire) with
+  (does fire on the real thing).
+  TWO HONEST QUALIFICATIONS:
+   * the baseline harness PREDATES this session, so it differs by everything committed
+     since, not only my edits. It establishes "this boot was already failing", NOT "my
+     edits changed nothing". The differing hang PCs are consistent with intervening commits
+     OR run-to-run variation; I have not separated those.
+   * a timeout's EXIT CODE can now change: previously 0x7FFFFFFF, now 126 if the core has
+     also stopped retiring. More specific, but tooling matching the old code must know.
+  SCOPE NOTE: SMT2 is NrCores=1, so the cluster takes its identity path and the
+  invalidation machinery is INERT. This soak exercises the TESTHARNESS changes and the
+  core, not the hub rotation or the retention (those are covered by their leaf suites and
+  the two-core tests).
+
+- [x] SMT2 methodology applied (2026-09-18): coding philosophy §2.9 + H3/H4/H5 + T2/T9.
+  Fixed four reproduced soak-oracle defects: lost child rc, unbound cookie matching,
+  explicit-model fallback and missing-hold substitution. Thirteen unittest methods pass.
+  Run tooling checks with:
+    python -m unittest discover -s verif/regress/remote -p test_testharness_proxy.py -v
+  These use fake processes only; they are not RTL soak evidence.
+- [x] Deterministic failing PREFIX established, not a boot pass: corrected-runtime fetch_B
+  SMT2 model 62454f73... and frozen ELF 1a8bd52a...; threads=1, seed=1, cap=200000,
+  three sequential proxy runs, same recorded pin/trapdump/verdict fields. Runtime canary
+  separately reproduces stock failures=18 versus private failures=0; compiler dependency
+  files bind the model to private header dfbc2c4a... . Prior soak used stock 8c408609... .
+  Artifacts: remote-runs/smt2-method-prefix-20260918/output/ and
+  remote-runs/smt2-method-build-20260918/build-manifest.json.
+- [ ] SMT2 OpenSBI completion/attribution remains OPEN. The byte-at-PC observer reports
+  395363 presentations, zero mismatches, with unchanged prefix pin. It is not an
+  acceptance or instruction-boundary oracle. RVFI tail ends at 0x800138a0 while next-fetch
+  PC is 0x80012588; this is a localization question, not a frontend diagnosis yet.
+  Next: correlate accepted entries and ownership through IQ/issue/commit, then a generic
+  co-factor mini; preserve ISA effects, firmware and fetch_B-only supply. Full soak,
+  per-hart liveness, observer fault sensitivity and a matched before/after remain owed.
+  No further commits (user instruction); e3c1fb642 remains the last commit.
+
+- [x] Fetch_B-only source boundary (2026-09-18, user-authorized relocation): nine shared
+  SMT support files moved from core/smt_legacy to core/smt; initially 100% byte-identical
+  renames. Flist.cva6 and live artifact-gate references updated. The relocated SMT2 model
+  is byte-identical to the pre-relocation issue-observer build (85495788...), and the
+  failing prefix is unchanged. Fifteen proxy/runner tests pass, including recursive
+  manifest exclusion and positive/negative generated-source guards for fetch_A and
+  smt_legacy. No retired frontend built; no further git commit. Archived path mentions
+  are history or replay-path conversion, not active build inputs.
+- [x] Issue-group dependency ordering repaired in core/smt/g6lc_issue_barrier.sv:
+  typed scoreboard trace shows empty SB, oldest direct call blocked by a younger low-PC
+  target-path stack update. Both reversed-PC relationships fail the pre-fix leaf test.
+  Same-group age now uses o<p with valid/same-hart guards, not PC magnitude. No new state,
+  clock, reset, pipeline latency or ISA/DTS/config default. Removes a VLEN comparison;
+  physical timing at the 1.25 GHz/12 nm target remains unmeasured. Visibility channels:
+  restores progress/order, no squash/write filtering, data-value predicate or new memory
+  effect. Debug observers are translate_off and opt-in; off/on prefix signatures agree.
+  Evidence: issue-order-before-20260918; issue-order-relocated-after-20260918 (18 positive
+  cases + 18 oracle negatives); issue-order-relocated-fault-20260918 (old rule restored,
+  expected failures reproduced); issue-order-quality-20260918 (163 generic cells,
+  zero latches, check -assert clean, two-port/two-hart leaf only). SMT2 remote lint passes
+  with one existing WIDTHCONCAT warning; strict full-core slang stage is skipped, not passed.
+- [~] SMT2 COOKIE REMAINS OPEN after that repair. Unchanged ELF 1a8bd52a..., new model
+  8e888128..., corrected runtime dfbc2c4a..., VT1, seed1, fetch_B-only source check passed.
+  Previously blocked call now allocates/WBs/retires at cycles 7022/7023/7024; the 200k
+  prefix keeps retiring but has no cookie. Full-cap attempt ends at wall timeout 900s,
+  9,019,026 cycles (NOT the requested 12M), rc124, cookie absent, plat_hc=80,
+  coldboot_done=0, sp1=0. Harness SUCCESS text is rejected by the corrected oracle.
+  Artifacts: smt2-relocated-prefix-20260918, smt2-order-prefix-20260918,
+  smt2-order-cookie-20260918 under remote-runs. Both-hart progress remains unproven.
+  Next: localize post-repair loop progress using the short trace and per-hart ownership;
+  do not infer completion from continued retirement or extend the wall limit as a fix.
+
+- [x] WT normal-response ownership repair (2026-09-18): after the issue-order repair,
+  a call saved a new return address but reloaded the previous one. Typed observations
+  follow correct operands, STQ accept/commit and D-cache grant. A final normal tag
+  response switched to the fixup tag when tocheck emptied (cycle7041), then overwrote
+  the true hit with a miss (7042). Select rd_tag_q by existing check_en_q instead of
+  current |tocheck| in wt_dcache_wbuffer.sv. No added state, latency, clock/reset,
+  address specialization, config default or firmware change. Selector is registered;
+  no physical timing/area claim. All opt-in diagnostic logic is translate_off.
+  Artifacts: smt2-frame-rvfi-v2-20260918, smt2-storeflow-{off,flow}-20260918,
+  smt2-wt-check-window-20260918. Directed d12 Yosys checks at fixup depths0/2/4:
+  3 positives, 3 reached normal-tail covers, 3 checker negatives; private old selector
+  fails3/3. Authoritative artifacts are wt-tag-formal-{after,fault}-v2-20260918.
+  Initial reference wrongly attributed empty-fixup reads to the normal word; v2 fixes
+  that ownership model and re-runs both directions. Isolated timed Verilator leaf
+  remains blocked by unchanged vendor lzc UNOPTFLAT; no waivers changed, no pass claimed.
+- [x] SAME-ELF SOFT-LADDER COOKIE REACHED after WT repair: smt2-progress-cookie-20260918,
+  ELF1a8bd52a..., modeld22bbbdc..., runtimedfbc2c4a..., VT1/seed1, fetch_B-only inputs.
+  51b1babe and51b1d000 at1,693,696 cycles, plat_hc=2, last_hartidx=1, coldboot_done=1,
+  banner present, driver rc0. Prefixes200k and1M without cookie were not successes.
+  This supersedes the earlier cookie-open result after issue-order repair ALONE.
+- [~] TWO-ACTIVE-HART OpenSBI remains OPEN: +smt_progress counts non-dropped typed
+  commits by hart; cookie run reports1,301,234/0 retirements. Topology enumeration
+  does not prove execution. cva6.sv masks unseen harts until IPI; policy unchanged.
+  Same-model mini_ipi_hart1_sp passes with counts256/16 and hart1 SP initialized.
+  Private equal-sized NOP replacement of only its two IPI stores gives4024/0 and no
+  termination (smt2-activation-controls-20260918). This qualifies directed activation
+  and the observer's positive direction, not both harts in the OpenSBI cookie run.
+  Observer off/on200k snapshots match. The earlier model99dc42f3... without progress
+  counter instrumentation also reaches the same cookie at exactly1,693,696 cycles
+  (smt2-wttag-cookie-repeat-20260918), with matching final pins. Activation-controls-v2
+  additionally binds the no-IPI result to the full30000-cycle cap; both arms repeat.
+  Lint: SMT2=1 warning, default targets8/54 at baseline; strict full-core slang skipped.
+  Fifteen tooling tests, Python compilation and scoped diff checks pass. No new commit.
+
+- [~] RESET-TIME SMT / NATURAL OpenSBI (2026-09-19): user explicitly chose a separate
+  source-built profile; frozen soft image1a8bd52a... is unchanged. Its count2 was forced
+  and fdt_getprop_namelen actually contains li a0,0;ret. Both contexts now execute it,
+  but table[0,0] legitimately sends hart1 to _start_hang. That cookie is not dual-hart
+  completion, and forced plat_hc is not enumeration evidence.
+  Fetch_B boot/time/unseen masks are excluded; runnable harts need no IPI to start.
+  No-IPI atomic election/release mini reproduced old exclusion beyond250k cycles.
+  Simply unmasking exposed an outgoing AMO flush deleting peer work; a registered
+  quiescent handoff now blocks admission until SB and committed store/wbuffer drain.
+  Halt admission avoids post-WFI work preventing drain; quantum comparison avoids
+  minimum-quantum overflow. RVC/norvc minis pass642/643 cycles, counts47/53; corrupt
+  result control fails. Scheduler 8 positives/8 checker negatives; drain-gate mutation
+  fails multihart, preserves NH1. Live-port production-tuple synth215 cells, no latches,
+  no SCCs (smt-drain-quality-20260919). This is coarse, not overlapping in-flight SMT;
+  cancellation, privilege, FP breadth and physical timing remain unqualified.
+  Natural profile: upstream455de672..., unchanged fw_base/sbi_init/sbi_hsm/generic
+  platform/FDT source hashes, existing toolchain/platform adaptations, DTB validates
+  two nodes. Strict S-mode payload requires HSM start, both checked seen flags and
+  explicit tohost success; no peer-timeout pass. Archive and per-file identities in
+  opensbi-source-dual-v3-20260919/output/profile.json. FW6b2bad99..., modelc5fdeca3...,
+  8M cap: h0/h1=1,488,775/119,050, strictDualPassed=false; no payload completion.
+  SAME ELF on retained d22bbbdc... held-hart control executes enumeration correctly:
+  table[0,1] and count2 stores observed. Dual-active model instead calls at7392, then
+  resumes at73f0 mid-instruction and skips enumeration continuation. Handoff at
+  time327746 has decode/IQ empty and snapshots transport=73f0. Do not special-case
+  this PC. Next boundary: pending fetch/redirect/carry ownership at restart.
+  Evidence: opensbi-source-held-control-20260919, opensbi-held-enumeration-audit-20260919,
+  opensbi-source-resume-prefix-20260919, opensbi-call-handoff-audit-20260919.
+  Source-based profile remains red; no further production RTL repair inferred from
+  the PC alone. No commits; retired fetch supplies remain excluded.
+
+- [x] Retired-PC bank contract (2026-09-19): transport snapshot at time327613 saved
+  0x7380, an instruction continuation, not the unfinished instruction at0x737e.
+  Later handoff saved0x73f0 with decode/IQ empty, skipping the call continuation.
+  PC bank now consumes retired next PCs (ordered per hart) and architectural
+  redirects, not speculative fetch cursors. Branch targets retained for SMT even
+  without DebugEn; no value/address special cases. Existing PC storage reused,
+  retirement mux/adder switching increases; physical timing/power not measured.
+  RESTART_ARCH_PC fails before and under private overwrite mutation, passes after;
+  checker-negative fires. NH1 inert, zero PC, two-port ordering/distinct-hart and
+  redirect priority covered. Live-port synth27 cells, no latches/SCC. Artifacts:
+  smt-retired-pc-{before,after,quality,fault}-20260919. RVC/norvc reset rendezvous
+  plus negative still pass (smt2-startup-retired-pc-20260919). Broader macro,
+  cancellation, privilege and FP qualification remains separate.
+- [~] NATURAL dual-hart HSM verdict still OPEN, not a cookie failure to mask.
+  User-approved source profile6b2bad99... on model3b4fec56... executes both harts
+  through natural enumeration and per-hart stack setup: counts325,919/5,447,462,
+  SP0=80047f30, SP1=80045db0 at8M. No successful supervisor payload store;
+  strictDualPassed=false. Hart0 enters sbi_hart_hang after reading init_count_offset
+  as0 atPC800008cc/address80042008; prior hart1 store atPC80000800 wrote0x80 there.
+  Hart1 remains active in firmware; its recorded breakpoint is the semihosting
+  feature probe, not by itself a fatal verdict. Next: reproduce and localize this
+  cross-hart visibility mismatch (STQ→WT wbuffer/fixup→load) before any repair.
+  Source and replay runners retain exact ELF/model/runtime identities; current
+  strict oracle additionally demands supervisor-mode seen/completion stores.
+  16 tooling tests pass; SMT2 lint1 warning, defaults8/54, full-core slang skipped.
+  No commits; no retired frontend inputs; original soft-ladder image unmodified.
+
+- [x] WT retained-copy freshness increment (2026-09-19): natural ELF6b2bad99...
+  recorded no intervening write between shared init_count_offset store0x80 and
+  peer load0. Word watch matches2,458,292 reference retirement lines. Actual store
+  accepted/committed/drained1455531/32/33; ACK1455540 dropped the normal copy while
+  full fixup queue retained older0 (forward0200 atload1459074/75).
+  Refresh an existing same-word fixup at ACK regardless of capacity/cache hit;
+  merge byte masks, retain a concurrently retiring update, and preserve unrelated
+  copies in same-cycle export. Intermediate slot0 export failed its new control.
+  No new state/clock/reset/ISA/DTS/permission/DFT change; existing Depth gate and
+  zero-depth behavior retained. Added comparisons/merge/selection affect ACK and
+  forwarding timing/activity; physical STA/power remains unqualified.
+  Depth2/4 lowered-RTL simulation:8 positives +8 checker negatives; four private
+  faults (capacity/bytes/retire/export) fail. This is directed simulation, not full
+  cache or unbounded formal qualification. Artifacts wt-fixup-quality-20260919 and
+  wt-fixup-fault-{capacity,bytes,retire,export}-20260919. Upstream notices preserved;
+  tooling MIT attribution checked. Documented licensing diag is unavailable in
+  current CLI (unknown id); manual policy/tier/header checks used, no automated
+  licensing pass claimed. SMT2 build returns to1 known WIDTHCONCAT warning.
+- [~] Natural profile after freshness repair: model532dc9a2..., same ELF6b2bad99...
+  now refreshes atACK1455540 and returns0x80 atload1459074/75. Hart0 reaches the
+  normal sbi_hsm_init wait (PC8000f72e), not sbi_hart_hang. At8M cycles counts are
+  325,952/5,447,347; strictDualPassed=false, no supervisor payload verdict. Hart1
+  remains active in libfdt. Next discriminate primary cold-boot progress/loop
+  arguments before increasing the cap or changing firmware. Evidence:
+  opensbi-fixup-preserve-dual-20260919, opensbi-hsm-wait-audit-20260919.
+  Sixteen tooling tests and CRLF-aware scoped diff/Python checks pass. Core SMT2
+  synthesis via verify --synth --target g6lc64_smt2 passes (31 warnings; not STA).
+  Previous12-cycle WT-tag proof/checker/cover controls pass again at depths0/2/4
+  (wt-tag-fixup-regression-v2-20260919), including the zero-depth branch.
+  Broad verify --lint --formal --synth --remote --allow-skips completed RED:
+  lint8/54 at baseline and both default synthesis targets pass;10 formal tasks pass.
+  Rename ERROR is stale ckpt_ptr_q references at props lines124/150. Fetch-IQ ABC
+  reports an assertion failure atframe3, then witness reconstruction fails with a
+  z3 BrokenPipeError; cover also errors. Do not relabel that BMC failure as a tool-only
+  issue. Logs and raw witness: verification-errors-v2-20260919. Configured smoke
+  scripts retain local/installer execution; broad simulation/compliance is not
+  claimed. Timed WT leaf UNOPTFLAT remains separate.
+  No commits; no fetch_A/smt_legacy model inputs or firmware byte changes.
+
+- [x] AMO commit-ready versus data-ready (2026-09-19): source16M trace reached
+  sbi_hsm_hart_start_finish, then LR's placeholder0 was forwarded to BNE before its
+  architectural2 result committed. Generic two-hart LR/SC mini reproduces it in
+  RVC/norvc (410/420 cycles). issue_read_operands now masks AMO result availability
+  after both stored and same-cycle WB selection, behind RVA. Consumer waits for
+  committed RF data; no new state/clock/reset/ISA/DTS or LR flush change. New decode
+  gate affects issue readiness; no physical timing claim. RVC/norvc pass597/594,
+  RS2 and ALU-consumer variants pass, negatives fire. SMT2 and default lint/synth
+  pass with recorded warnings; strict standalone slang remains skipped.
+- [x] Directed source-built OpenSBI/HSM completion (2026-09-19): the AMO-repaired
+  modelcb3aead6... reached primary S-mode and sent the HSM IPI, but existing PMP
+  assertion pmp_entry.sv:81 stopped it at12,731,487 cycles. No assertion was disabled.
+  Private Verilator split_var control for lzc index_nodes/sel_nodes removes packed-
+  array scheduling feedback without changing RTL, vendor files or warning waivers.
+  Strict PMP transition checks pass; checker-negative and size-fault controls fail.
+  Independent NAPOT match proofs pass PLEN32/56, fault controls fail both. This is
+  address-match/simulator evidence, not all-mode PMP or physical qualification.
+  Full modelc421aedc... with unchanged ELF6b2bad99... matches ALL18,502,243 retained
+  retirement lines before the old assertion stop, then reaches strictDualPassed=true
+  at12,765,628 cycles. Hart counts333,635/8,932,406; both supervisor seen flags and
+  checked peer result precede explicit tohost success. Artifact:
+  opensbi-counter-split-dual-20260919/output/results.json. Compiler control SHA
+  be176b279ada076a3459d8bd6509e0946ccf0994d5c35a092bede308bba8c8ff is pinned/copied there.
+  Opt-in build recipe uses VERILATOR_TEST_FLAGS=<retained split-counter.vlt>;
+  SOURCE_REVIEW_COMPILER_CONTROL verifies the generated input and binds its hash.
+  The original soft-ladder ELF remains unchanged, and is not this success oracle.
+- [x] Timed WT-tag build blocker resolved for the pinned split-control recipe:
+  WT_TAG_COMPILER_CONTROL supplies the private optimization, with UNOPTFLAT still
+  an error. Fixture A/B requests now use distinct word offsets in the same cache
+  index so accepted response identity is unambiguous. Five positives, five checker
+  negatives and five restored-selector faults match at depths0/2/4. Artifacts:
+  wt-tag-timed-split-{after,fault}-20260919. No vendor or repo waiver edit. Default
+  build policy is NOT changed by this experimental control.
+  Superseded by the follow-up below: rename elaboration is repaired; fetch-IQ,
+  compliance, generalized liveness and product/physical qualification remain open.
+  No further commits.
+- [x] OoO ownership continuation (2026-09-19): the current SMT2 pass is OoOEn=0,
+  not backend qualification. Reproduced cancelled WB reaching rename busy, IQ
+  wakeup and bypass despite suppressed PRF writes. Shared data-valid qualification
+  rejects cancelled/exception WB; ROB completion remains separate. Four positives,
+  four negatives and four restored-defect controls pass; dispatch16/rename22/LSQ24
+  and both illegal hart/FP guards re-pass. Fixed LSQ runtime-bound lane-mask loop
+  to iterate constant XLEN byte lanes. Generic live-port area91,242->88,501 cells,
+  state6,250 unchanged, zero latches/SCCs. No mapped timing/power or IPC claim.
+- [x] Cancelled retirement side effects (plan Phase2, component scope): raw commit
+  acknowledgement could poison the committed map, free an owned register and retire
+  a replacement checkpoint via a stale cancelled tag. commit_arch now qualifies
+  map/free/checkpoint/store effects by the existing cancellation mask, while ROB
+  retirement still drains drops. Cases15–17 fail before repair. Both commit lanes
+  (including older live + younger cancelled in one cycle) pass six positives and
+  six checker negatives; six individual map/free/checkpoint faults fail. Evidence:
+  ooo-drop-{before,after,map,free,checkpoint,regression,wb}-20260919;
+  ooo-drop-dual-{after,map,free,checkpoint}-20260919. Final generic area86,824 cells,
+  state6,250 unchanged, no latches/SCCs. SMT2 fresh regates remain byte-identical to
+  passing modelc421aedc...; firmware/scheduler/ISA/DTS/guards unchanged.
+- [x] Rename formal harness now reads ckpt_cnt_q and checks ckpt_head_q, rather than
+  the removed ckpt_ptr_q. Existing12-step BMC passes; a false-x0 checker has a
+  four-step SAT witness. SBY negative witness reconstruction attempts remain archived
+  (missing yices, then z3 timeout); neither is passed off as a successful trace.
+- [~] Broad follow-up collected:11 formal PASS tasks, fetch-IQ failed/unresolved
+  after its assertion witness and cover were interrupted following19+ minutes.
+  Default lint8/54 and synthesis32/5 warnings remain; standalone slang skips.
+  No full formal/compliance gate is green. Preserve raw IQ witness for diagnosis.
+- [ ] Execute the updated plan-ea69493e7a14829a Phases0–9. Next: baseline dual-runnable
+  per-hart service/saturation metrics (without boot-policy retuning), actual late
+  CSR/AMO PRF data delivery, full-core/TID lifetime closure, then reviewed per-hart
+  namespaces and FP register classes. Coldboot retirement imbalance is not a fairness
+  metric. Keep predictor, stream/hierarchy, coherence and physical promotion gates
+  separate; preserve original hypotheses and failed controls. No new commits.
+
+- [x] Phase1 initial symmetric service baseline (2026-09-19): SMT_BALANCE in the
+  existing dual-active fixture checks512 iterations/2,048 ordered body retirements
+  per hart, result publication and explicit termination. RVC/norvc and solo0/solo1
+  pass; shared/solo RVC text is identical, active data mask differs. Result fault
+  is rejected and observer-off replay matches exactly. Unit suite19 passes, with
+  empty/drop/duplicate/reorder/wrong-hart controls. Artifact:
+  smt2-balance-ordered-20260919. Shared ROI5709/5708 cycles, observed service split
+  49.9264%/50.0736%, max body-retirement gap76, weighted speedup0.90234 and worst
+  slowdown2.21795x versus solo. Balanced observation is NOT throughput improvement,
+  a starvation bound, saturation or Linux qualification. Modelc421aedc... unchanged.
+- [ ] Adaptive extension to plan Phase6 is analysis only: bounded/hysteretic policy
+  over legal candidates, static fallback, minimum service/credits, and no throttling
+  of completions/store/invalidation drain. Current coarse handoff cannot hide an
+  outstanding load before drain. Measure readiness, real switch reason and RTT/MLP
+  before policy changes; hybrid starvation and quantum use different units/precedence.
+  Add asymmetric cache/lock/IPI phases, validate actual Linux SMT topology, timers,
+  shootdowns, PMA/fences and FP context at their dependency gates. No adaptive RTL,
+  new policy default, firmware change or claimed cache-RTT speedup in this increment.
+
 ## Balanced core performance foundation (2026-09-14)
 
 Priors: `architecture/router-core-upgrade-program.md`, `architecture/l2-l3-cache/README.md`,

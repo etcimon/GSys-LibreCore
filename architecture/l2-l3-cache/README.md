@@ -1365,3 +1365,71 @@ because cross-module elaboration is what they skip. And the L2/L3 runs use reduc
 because the behavioural `tc_sram` model cannot elaborate at production size in the synthesis
 frontend — so **no cell count here is an area figure**, and none of it is closure evidence
 at production geometry.
+
+## The tag array is not a "swap to tc_sram" job — it is a pipeline change
+
+This item has been carried as a P2 area task ("move the tag array behind `tc_sram`").
+Reading `g6lc_l2_tag.sv` against what an SRAM macro can actually do says otherwise, and the
+re-scoping matters more than the area number.
+
+**The blocking property is the read contract, not the array declaration.** The lookup is
+*combinational*:
+
+```systemverilog
+hit_way[w] = lookup_i && tags_q[index_i][w].valid && (tags_q[index_i][w].tag == tag_i);
+```
+
+`hit_o` is valid in the same cycle as `index_i`, and the module's own header advertises
+"single cycle". An SRAM read is registered — data arrives the cycle after the address. So
+the swap is not transparent: it inserts a pipeline stage into the L2 lookup path and
+changes the latency the parent is built around.
+
+Three further properties have to be resolved before any macro can be bound:
+
+* **`probe_tag_o` / `probe_valid_o`** are a second combinational read, at an arbitrary way
+  and independent of the lookup index — a second read port, or an arbitrated one.
+* **`inval_match_i` is content-associative**: it compares the tag against *all* ways of a
+  set and clears the matches, reading and writing the same set in one cycle. Against an
+  SRAM that becomes a multi-cycle read-modify-write which must not race the lookup.
+* **`write_i` and `inval_i` are independent `if`s in one `always_comb`**, so both can
+  update in the same cycle at different indices — two write ports, or serialisation.
+
+The standard split — valid bits in flops, tags in SRAM — is necessary (it is what removes
+the whole-array reset) but is **not** where the area is: valid is one bit of a 48-bit
+entry, **2.0 % of the L2 array and 2.1 % of the L3**. The tags are the cost, and they are
+exactly the part that needs the registered read.
+
+### The recorded figure is correct — my challenge to it was wrong
+
+I questioned the long-standing **3,080,192 + 401,408 ≈ 3.4 Mbit** figure, deriving 1.78 Mbit
+from the geometry and noting a suspiciously uniform 1.96x factor. **That challenge was
+wrong, and the retraction is more useful than the doubt was.**
+
+The error was mine: I used the *default* geometry (256 KiB L2, 2 MiB L3) instead of the
+configured one. `build_config` scales the caches with core count — L2 is
+`max(256 KiB, NrCores x 128 KiB)`, L3 is `max(2 MiB, NrCores x 1 MiB)` — and
+`g6lc64_ooo_server` sets `NrCores: 4`, so the real geometry is **512 KiB L2 and 4 MiB L3**.
+Recomputed:
+
+| | size | assoc | sets | TAG | entries | storage | recorded |
+|---|---|---|---|---|---|---|---|
+| L2 | 512 KiB | 8 | 1,024 | 48 | 8,192 | **401,408** | 401,408 |
+| L3 | 4 MiB | 16 | 4,096 | 46 | 65,536 | **3,080,192** | 3,080,192 |
+
+Both match to the bit. The array is **3.48 Mbit of flip-flops**, exactly as recorded, and
+the "uniform 1.96x" I found suspicious was simply the ratio between two geometries that
+differ by 2x in size — doubling the sets doubles the entries while removing one tag bit.
+
+Two things worth keeping from the detour. The valid-bit fraction is unchanged and still
+small (1 bit of 49, **2.0 %**), so the conclusion that the valid/tag split does not address
+the area stands. And a lint-warning width turned out to be a *reliable* measurement here —
+the instinct to distrust it was reasonable, the arithmetic that appeared to support the
+distrust was not, and the fix was to check the configured parameters rather than the
+defaults.
+
+**Consequence for planning:** this is not a contained P2 array swap. It is a
+micro-architectural change to the L2 lookup — a new pipeline stage, a second read port or
+its arbitration, and a serialised content-associative invalidate — and it invalidates the
+timing assumptions of a module that already carries extensive leaf suites
+(`review-l2-read-order-*`, `review-l2-atop-*`, `review-l2-inclusion-*`). It should be
+planned and qualified as such, not attempted as a declaration change.

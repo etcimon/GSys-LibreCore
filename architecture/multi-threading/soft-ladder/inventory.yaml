@@ -281,7 +281,7 @@ sites:
       - core/fetch_B/frontend.sv
       - core/fetch_B/instr_queue.sv
       - core/fetch_B/instr_realign.sv
-      - core/smt_legacy/g6lc_thread_select.sv
+      - core/smt/g6lc_thread_select.sv
       - core/controller.sv
       - core/scoreboard.sv
     verif_idea: >

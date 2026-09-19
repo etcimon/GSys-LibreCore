@@ -606,11 +606,10 @@ module g6lc_issue_barrier
                           (issue_instr_sb_i[p].rs2[4:0] == 5'd2));
         if (issue_valid_sb_i[p] && (is_sp_consumer || is_cf)) begin
           for (int unsigned o = 0; o < CVA6Cfg.NrIssuePorts; o++) begin
-            if (o != p &&
+            if (o < p &&
                 issue_valid_sb_i[o] &&
                 issue_instr_sb_i[o].hart_id == issue_instr_sb_i[p].hart_id &&
-                is_addi_sp(issue_instr_sb_i[o]) &&
-                issue_instr_sb_i[o].pc < issue_instr_sb_i[p].pc) begin
+                is_addi_sp(issue_instr_sb_i[o])) begin
               stall_sp_older[p] = 1'b1;
             end
           end

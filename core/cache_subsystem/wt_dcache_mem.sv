@@ -11,6 +11,7 @@
 // Author: Michael Schaffner <schaffner@iis.ee.ethz.ch>, ETH Zurich
 // Date: 13.09.2018
 // Description: Memory arrays, arbiter and tag comparison for WT dcache.
+// Modified by: Etienne Cimon (opt-in visibility diagnostics).
 //
 //
 // Notes: 1) all ports can trigger a readout of all ways, and the way where the tag hits is selected
@@ -441,6 +442,32 @@ module wt_dcache_mem
   ///////////////////////////////////////////////////////
 
   //pragma translate_off
+  bit smt_mem_trace, smt_mem_watch;
+  logic [CVA6Cfg.PLEN-1:0] smt_mem_address;
+  int unsigned smt_mem_cycle = 0;
+  initial begin
+    smt_mem_watch = $value$plusargs("smt_mem_watch=%h", smt_mem_address);
+    smt_mem_trace = $test$plusargs("smt_flow_trace") || smt_mem_watch;
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) smt_mem_cycle = 0;
+    else if (smt_mem_trace) begin
+      smt_mem_cycle++;
+      if ((cmp_en_q || wr_cl_vld_i) && (!smt_mem_watch ||
+          (wbuffer_cmp_addr >> CVA6Cfg.XLEN_ALIGN_BYTES) == (smt_mem_address >> CVA6Cfg.XLEN_ALIGN_BYTES)))
+        $display("[smt-flow] wt_lookup cycle=%0d port=%0d pa=%h hit=%h raw=%h forward=%h be=%h result=%h refill=%b",
+                 smt_mem_cycle, vld_sel_q, wbuffer_cmp_addr, rd_hit_oh_o, rdata,
+                 wbuffer_hit_oh, wbuffer_be, rd_data_o, wr_cl_vld_i);
+      if ((|wr_req_i) && (!smt_mem_watch || {wr_idx_i, wr_off_i} == smt_mem_address[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0]))
+        $display("[smt-flow] wt_word cycle=%0d idx=%h off=%h ways=%h ack=%b data=%h be=%h denied=%b",
+                 smt_mem_cycle, wr_idx_i, wr_off_i, wr_req_i, wr_ack_o,
+                 wr_data_i, wr_data_be_i, wr_denied);
+      if ((inv_req_i || wr_denied) && (!smt_mem_watch ||
+          vld_addr == smt_mem_address[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH]))
+        $display("[smt-flow] wt_inval cycle=%0d idx=%h ways=%h valid=%h explicit=%b ack=%b",
+                 smt_mem_cycle, vld_addr, vld_req, vld_wdata, inv_req_i, inv_ack_o);
+    end
+  end
 `ifndef VERILATOR
   initial begin
     cach_line_width_axi :

@@ -17,7 +17,7 @@ required=(
   architecture/multi-threading/smt2-bringup.md
   build-platform/scripts/validate-cva6-dts.ps1
   build-platform/scripts/fetch-linux-dts.ps1
-  core/smt_legacy/g6lc_smt_csr_bank.sv
+  core/smt/g6lc_smt_csr_bank.sv
   corev_apu/tb/ariane_testharness.sv
   corev_apu/src/g6lc_cluster.sv
   core/cva6.sv
@@ -39,8 +39,8 @@ grep -q "NR_CORES(NR_HARTS)" corev_apu/tb/ariane_testharness.sv || \
 }
 echo "  ok CLINT NR_HARTS scaling"
 
-grep -q 'time_irq_i\[h\]' core/smt_legacy/g6lc_smt_csr_bank.sv
-grep -q 'ipi_i\[h\]' core/smt_legacy/g6lc_smt_csr_bank.sv
+grep -q 'time_irq_i\[h\]' core/smt/g6lc_smt_csr_bank.sv
+grep -q 'ipi_i\[h\]' core/smt/g6lc_smt_csr_bank.sv
 echo "  ok per-hart timer/IPI in smt_csr_bank"
 
 grep -q 'irq_active' core/cva6.sv

@@ -1,6 +1,35 @@
 # WT D$ ACK-before-check — the L1-stale class (SL-W)
 
-**Status:** micro-arch note of record for the S1 residual. The post-ACK fixup queue is implemented
+## Response ownership correction (2026-09-18)
+
+The pinned fetch_B SMT2 configuration has `WtDcacheFixupDepth=2`. A new trace found
+a distinct cause of stale L1 data: the last normal tag-check response selected a
+fixup tag after `tocheck` emptied. At cycle 7041 the requested word's index/offset
+was paired with a different tag; the next cycle overwrote its real hit with a miss.
+Its later ACK then removed forwarding without updating the resident cache line.
+Correct store operands, speculative/commit queue contents and D-cache handoff were
+observed before blaming the cache.
+
+The repair selects `rd_tag_q` with the existing registered `check_en_q`, not the
+current request-set reduction. No queue, ACK policy, capacity, address window,
+clock, reset, state or pipeline latency is changed. The selector now comes from a
+registered acceptance event; physical timing/power is not measured. The visibility
+walk concerns same-hart load values: no change to cancellation, CSR/trap ownership,
+architectural writes or memory permissions is introduced.
+
+`wt-tag-formal-after-v2-20260918` records 12-cycle directed checks at depths 0/2/4,
+three reached normal-response tail covers and three checker negatives. The private
+old-selector control fails all three depths. This is not an unbounded cache proof;
+all fixup/normal interleavings and isolated timed-leaf qualification remain open.
+The original constant-tag reference mishandled empty-fixup reads and is superseded
+by v2. No lint waiver or vendor source was changed. Full SMT2 builds/lint pass with
+one tag-array WIDTHCONCAT warning, not the historical default-driver error below.
+
+The unchanged soft-ladder ELF now reaches `51b1babe` at 1,693,696 cycles. Its progress
+summary reports only hart 0 retiring; the separate IPI-start mini runs both harts.
+See `multi-threading/README.md` for the strict separation of those results.
+
+**Historical implementation status:** micro-arch note of record for the S1 residual. The post-ACK fixup queue is implemented
 in `wt_dcache_wbuffer.sv` and plumbed through `wt_dcache`/`wt_dcache_mem`; it is disabled by default
 (`WtDcacheFixupDepth=0`) and leaves the `VoidKeepEn`/`VoidKeepTag` containment unchanged until proxy
 gate 6 is passed. The explicit `inv_req`/`inv_ack` invalidation port and the four SL-W PMU events are
@@ -236,6 +265,29 @@ chase was expensive. A fix must land with permanent instrumentation: a counter f
 (ACK with `checked == 0`), for **denied `wr_ack`**, and for **fixup-queue full → invalidate**, exposed
 as PMU events rather than `$display`. `nackinv` and the VOID-keep window shipped without any, which is
 why "is the containment even arming?" repeatedly cost a TRACE run.
+
+## 2026-09-19: retained-copy freshness
+
+The natural source-built SMT2 OpenSBI run exposed a separate post-ACK issue. The
+initial zero at PA0x80042008 entered a fixup. A later0x80 store was accepted,
+committed, drained and acknowledged correctly, but the full fixup queue suppressed
+its push. The normal copy disappeared; the old fixup then forwarded zero. The
+word-filtered observer's run matches2,458,292 retirement lines from the original.
+
+The repair refreshes a matching fixup regardless of full capacity or a cache hit,
+merges enabled bytes without losing older valid bytes, and retains a coalescing
+entry when retirement coincides. Same-cycle export updates a matching/free slot,
+not unconditional slot0 (which hid an unrelated copy in the expanded test).
+Existing state and WtDcacheFixupDepth gating are retained; no firmware condition,
+new reset/clock/memory, permission change or pipeline stage is introduced.
+
+`run_wt_fixup_review.py` supplies deterministic legal port traffic to lowered RTL.
+Depths2/4 pass eight positive cases and eight checker negatives; four private
+mutations fail. This is directed simulation, not full formal/coherence proof. The
+comparison, merge and export selection add work to ACK/forwarding cones; no
+physical timing/power sign-off is claimed. PMU fixup events include refreshes.
+Artifacts: wt-fixup-{before,export-before,quality}-20260919 and
+wt-fixup-fault-{capacity,bytes,retire,export}-20260919.
 
 ## 6. Do not
 

@@ -21,6 +21,9 @@ module g6lc_smt_pc_bank
     input logic redirect_valid_i,
     input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] redirect_hart_i,
     input logic [CVA6Cfg.VLEN-1:0] redirect_pc_i,
+    input logic [CVA6Cfg.NrCommitPorts-1:0] retire_valid_i,
+    input logic [CVA6Cfg.NrCommitPorts-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] retire_hart_i,
+    input logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.VLEN-1:0] retire_pc_i,
     // Thread select
     input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] active_hart_i,
     input  logic switch_i,
@@ -66,22 +69,18 @@ module g6lc_smt_pc_bank
         // ecall_unregister mcause=4). I4p still applies: never bank 0.
         // I10: snapshot only on switch into the outgoing bank. Never bank 0.
         // npc_alt is A-only t0 rewind (tied off under G6LC_FETCH_B).
-        if (switch_i) begin
 `ifdef G6LC_FETCH_B
-          if (npc_alt_valid_i)
-            npc_bank_q[prev_hart_q] <= npc_alt_i;
-          else if (npc_live_valid_i)
-            npc_bank_q[prev_hart_q] <= npc_live_i;
+        for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++)
+          if (retire_valid_i[p]) npc_bank_q[retire_hart_i[p]] <= retire_pc_i[p];
+        if (redirect_valid_i)
+          npc_bank_q[redirect_hart_i] <= redirect_pc_i;
 `else
+        if (switch_i) begin
           if (npc_alt_valid_i && |npc_alt_i)
             npc_bank_q[prev_hart_q] <= npc_alt_i;
           else if (|npc_live_i)
             npc_bank_q[prev_hart_q] <= npc_live_i;
-`endif
         end
-`ifdef G6LC_FETCH_B
-        if (redirect_valid_i && redirect_hart_i != active_hart_i)
-          npc_bank_q[redirect_hart_i] <= redirect_pc_i;
 `endif
       end
     end

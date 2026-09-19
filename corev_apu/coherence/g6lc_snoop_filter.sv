@@ -58,8 +58,13 @@ module g6lc_snoop_filter
     assign overapprox_o = 1'b1;
   end else begin : gen_sf
 
+    //  Direct-mapped: every access is mem_q[idx_of(addr)], so there is no way
+    //  selection and therefore no replacement policy. A `rr_q` counter used to be
+    //  incremented on every install and read by nothing -- dead state that also
+    //  advertised a round-robin victim choice this structure does not have, which
+    //  is misleading for anyone planning displacement handling: there is no victim
+    //  to select, an install simply overwrites whatever shares the index.
     sf_entry_t [NE-1:0] mem_q, mem_d;
-    logic [IDX_W-1:0] rr_q, rr_d;
 
     function automatic logic [IDX_W-1:0] idx_of(input logic [ADDR_WIDTH-1:0] a);
       return a[OFF +: IDX_W];
@@ -121,7 +126,6 @@ module g6lc_snoop_filter
 
     always_comb begin
       mem_d = mem_q;
-      rr_d  = rr_q;
 
       if (clear_all_i) begin
         for (int unsigned i = 0; i < NE; i++) mem_d[i].valid = 1'b0;
@@ -136,7 +140,6 @@ module g6lc_snoop_filter
             mem_d[al_idx].tag                   = al_tag;
             mem_d[al_idx].present               = install_present;
             mem_d[al_idx].present[alloc_core_i] = 1'b1;
-            rr_d = IDX_W'(int'(rr_q) + 1);
           end
         end
         // Clear one core's presence
@@ -152,10 +155,8 @@ module g6lc_snoop_filter
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         mem_q <= '{default: '0};
-        rr_q  <= '0;
       end else begin
         mem_q <= mem_d;
-        rr_q  <= rr_d;
       end
     end
 

@@ -1280,6 +1280,9 @@ module ariane_testharness #(
   //  DRAM_BASE with no parking, so even a single-hart test executes the mhartid
   //  check on each core before branching. With NR_CORES == 1 the check is empty.
   logic [NR_CORES-1:0] core_retired;
+  logic [NR_CORES-1:0] mc_retire_pulse;
+  logic [NR_CORES-1:0] mc_hang_frozen;
+  assign mc_hang_frozen[0] = 1'b0;
 
   //  Injected-error control for the verdict itself. A verdict that has never been
   //  observed to fail is indistinguishable from one that cannot fail -- the exact
@@ -1296,6 +1299,14 @@ module ariane_testharness #(
     core0_any_retire = 1'b0;
     for (int unsigned i = 0; i < CVA6Cfg.NrCommitPorts; i++)
       core0_any_retire |= rvfi_instr[i].valid;
+  end
+
+  assign mc_retire_pulse[0] = core0_any_retire;
+
+  always_comb begin
+    mc_retire_is_wfi[0] = 1'b0;
+    for (int unsigned i = 0; i < CVA6Cfg.NrCommitPorts; i++)
+      if (rvfi_instr[i].valid && rvfi_instr[i].insn == MC_WFI_INSN) mc_retire_is_wfi[0] = 1'b1;
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin : mc_retire_track
@@ -1347,10 +1358,97 @@ module ariane_testharness #(
         sec_any_retire |= sec_rvfi_instr[i].valid;
     end
 
+    assign mc_retire_pulse[c] = sec_any_retire;
+
+    always_comb begin
+      mc_retire_is_wfi[c] = 1'b0;
+      for (int unsigned i = 0; i < CVA6Cfg.NrCommitPorts; i++)
+        if (sec_rvfi_instr[i].valid && sec_rvfi_instr[i].insn == MC_WFI_INSN)
+          mc_retire_is_wfi[c] = 1'b1;
+    end
+
     always_ff @(posedge clk_i or negedge rst_ni) begin : mc_retire_track_sec
       if (!rst_ni) core_retired[c] <= 1'b0;
       else if (sec_any_retire && !mc_fault_inject) core_retired[c] <= 1'b1;
     end
+
+    //  Freeze this core's observed liveness once it has started, simulating a hang.
+    always_ff @(posedge clk_i or negedge rst_ni) begin : mc_hang_fault_track
+      if (!rst_ni) mc_hang_frozen[c] <= 1'b0;
+      else if (mc_hang_fault_inject && core_retired[c]) mc_hang_frozen[c] <= 1'b1;
+    end
+  end
+
+  //  Per-core retirement-gap measurement.
+  //
+  //  The verdict above only asks whether a core EVER retired, so a core that runs
+  //  and then hangs still passes. The obvious fix -- require recent retirement --
+  //  needs a threshold, and a threshold picked without data is a guess that will
+  //  either miss hangs or fail legitimate stalls. So this measures the largest gap
+  //  between retirements per core and reports it; the number decides whether a hard
+  //  bound is defensible.
+  //
+  //  An idle park loop KEEPS RETIRING (it retires its own branch every few cycles),
+  //  which is what makes a gap bound workable at all: a parked core and a hung core
+  //  are distinguishable here, unlike by PC alone.
+  //
+  //  MEASURED before choosing the bound, across the cross-core tests, the
+  //  miss-streaming stress and the single-hart suite: the largest gap anywhere is
+  //  **71 cycles**, and cores parked in a loop show 23-30. MC_GAP_LIMIT is set two
+  //  orders of magnitude above that, so it cannot fire on a cache miss, a DRAM
+  //  stall or a park -- only on a core that has genuinely stopped.
+  //
+  //  WFI is the one legitimate way to stop retiring. It is excluded by the
+  //  INSTRUCTION, read from RVFI, rather than by a hierarchical reference to
+  //  `csr_regfile.wfi_q`: the register path runs through `gen_std` or `gen_acc`
+  //  depending on configuration, and this review has already been bitten once by a
+  //  probe wired to a hierarchy that moved (`i_cva6_icache`).
+  //  WFI = 0x10500073. A core whose LAST retirement was a WFI is asleep by
+  //  instruction, not hung, and is exempt from the gap bound.
+  localparam logic [31:0] MC_WFI_INSN  = 32'h1050_0073;
+  localparam int unsigned MC_GAP_LIMIT = 5000;
+
+  int unsigned mc_gap_cur   [NR_CORES];
+  int unsigned mc_gap_max   [NR_CORES];
+  logic        mc_last_wfi  [NR_CORES];
+  logic [NR_CORES-1:0] mc_retire_is_wfi;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : mc_gap_track
+    if (!rst_ni) begin
+      for (int unsigned c = 0; c < NR_CORES; c++) begin
+        mc_gap_cur[c]  <= 0;
+        mc_gap_max[c]  <= 0;
+        mc_last_wfi[c] <= 1'b0;
+      end
+    end else begin
+      for (int unsigned c = 0; c < NR_CORES; c++) begin
+        //  Only count once a core has started: the pre-boot gap is not a hang.
+        if (core_retired[c]) begin
+          if (mc_retire_pulse[c] && !mc_hang_frozen[c]) begin
+            if (mc_gap_cur[c] > mc_gap_max[c]) mc_gap_max[c] <= mc_gap_cur[c];
+            mc_gap_cur[c]  <= 0;
+            mc_last_wfi[c] <= mc_retire_is_wfi[c];
+          end else begin
+            mc_gap_cur[c] <= mc_gap_cur[c] + 1;
+          end
+        end
+      end
+    end
+  end
+
+  //  A core is hung if it started, has not retired for MC_GAP_LIMIT cycles, and is
+  //  not asleep in WFI. +mc_hang_fault freezes the secondaries' retire pulse once
+  //  they have started, which is the injected-error control for this check: without
+  //  it, a bound that never fires is indistinguishable from one that cannot.
+  logic mc_hang_fault_inject;
+  initial mc_hang_fault_inject = $test$plusargs("mc_hang_fault");
+
+  logic mc_any_hung;
+  always_comb begin
+    mc_any_hung = 1'b0;
+    for (int unsigned c = 0; c < NR_CORES; c++)
+      if (core_retired[c] && !mc_last_wfi[c] && mc_gap_cur[c] >= MC_GAP_LIMIT)
+        mc_any_hung = 1'b1;
   end
 
   //  Report in a `final` block, not from the clocked process. The C++ side leaves
@@ -1365,6 +1463,11 @@ module ariane_testharness #(
                core_retired);
     else
       $display("*** [mc_verdict] all %0d core(s) retired instructions", NR_CORES);
+    for (int unsigned c = 0; c < NR_CORES; c++)
+      $display("*** [mc_gap] core %0d max retirement gap %0d cycles (limit %0d, wfi=%0b)",
+               c, mc_gap_max[c], MC_GAP_LIMIT, mc_last_wfi[c]);
+    if (mc_any_hung)
+      $display("*** [mc_verdict] FAIL: a core ran and then stopped retiring (exit code 126)");
   end
   //pragma translate_on
 
@@ -1410,7 +1513,10 @@ module ariane_testharness #(
     //  Fold the multi-core verdict in: keep core 0's done bit, but override the
     //  exit code with a distinctive 127 so a silent secondary core cannot report
     //  SUCCESS. exit_o>>1 is the exit code the C++ side reports.
+    //  Exit 126 for a core that ran and then STOPPED, distinct from 127 (a core
+    //  that never ran at all) so the log says which failure occurred.
     assign rvfi_exit = (tracer_exit[0] && !(&core_retired)) ? {31'd127, 1'b1}
+                     : (tracer_exit[0] && mc_any_hung)      ? {31'd126, 1'b1}
                                                             : tracer_exit;
 `endif
 

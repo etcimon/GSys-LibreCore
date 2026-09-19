@@ -102,8 +102,8 @@ module g6lc_lsq #(
   );
     automatic logic [LANES-1:0] m;
     m = '0;
-    for (int unsigned b = 0; b < (1 << size); b++)
-      if (b < LANES) m[b] = 1'b1;
+    for (int unsigned b = 0; b < LANES; b++)
+      if (b < (1 << size)) m[b] = 1'b1;
     if (CVA6Cfg.XLEN == 64)
       lane_be = m << a[2:0];
     else

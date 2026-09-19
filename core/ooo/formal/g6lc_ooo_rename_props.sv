@@ -121,7 +121,8 @@ module g6lc_ooo_rename_props #(
       // Free and busy are exclusive for every phys reg.
       assert ((dut.free_q & dut.busy_q) == '0);
       // Checkpoint pointer stays in range [0, CKPT_DEPTH].
-      assert (dut.ckpt_ptr_q <= CKPT_DEPTH[$clog2(CKPT_DEPTH+1)-1:0]);
+      assert (dut.ckpt_cnt_q <= CKPT_DEPTH[$clog2(CKPT_DEPTH+1)-1:0]);
+      assert (dut.ckpt_head_q < CKPT_DEPTH[$clog2(CKPT_DEPTH+1)-1:0]);
       // x0 stays identity phys 0.
       assert (dut.map_q[0] == '0);
       // Successful dest alloc never returns phys 0.
@@ -147,7 +148,7 @@ module g6lc_ooo_rename_props #(
       cover (NR_PORTS >= 2 && enable_i && valid_i[0] && valid_i[1] && need_rd_i[0] &&
              need_rd_i[1] && !stall_o);
       cover (stall_o && (dut.free_q == '0));
-      cover (mispredict_i && dut.ckpt_ptr_q != 0);
+      cover (mispredict_i && dut.ckpt_cnt_q != 0);
     end
   end
 `endif

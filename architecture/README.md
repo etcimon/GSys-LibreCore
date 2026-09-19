@@ -97,8 +97,8 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 |------|----------------|---------|
 | U1 prediction fabric | `core/frontend/` (compiled) + copies in `core/fetch_B/` (not on flist) | TAGE_LITE on primary 64b target |
 | U2 FTQ / FDIP / loop buffer | `core/frontend/` | On primary 64b target |
-| Fetch oracle (`smt_legacy`) | `core/smt_legacy/` + `g6lc_{present,sib_cjalr,…}` | opt-in `Flist.smt_legacy` |
-| Fetch frozen A / workspace B | A: `core/frontend` + `core/smt` pkg/dbg; B: `core/fetch_B/` + `Flist.fetch_B` | default B; pin R4 FDT walk / R6–R11 |
+| Retired fetch supplies | `core/fetch_A/`; historical `Flist.smt_legacy` | Excluded from active builds |
+| Active instruction supply | `core/fetch_B/` + `Flist.fetch_B`; shared SMT support in `core/smt/` | fetch_B only; firmware completion remains under qualification |
 | U3 way-pred / RRIP | `core/cache_subsystem/g6lc_way_predictor.sv`, `g6lc_rrip_repl.sv`, hpdcache | Target-dependent |
 | U4 slice-OoO | `core/cva6_slice_*.sv` | **Off** (`SliceOoOEn=0`) |
 | U5 full OoO | `core/ooo/*` | **Production gated** (`OoOEn`; identity when 0) |
@@ -126,7 +126,7 @@ target; it is a plan of record, applied only if/when the project chooses the "re
 | `core/cache/` | `cache_subsystem/` | `cache/l2/`, `cache/coherence/` |
 | `core/mmu/`, `core/pmp/` | `cva6_mmu/`, `pmp/` | more `Sv*` modes |
 | `core/csr/` | `csr_regfile.sv`, `perf_counters.sv`, `trigger_module.sv` | new CSR groups |
-| `core/smt/` | `g6lc_fetch_{pkg,dbg}` only (supply copies removed) | fetch A package; banks live in `core/smt_legacy/` |
+| `core/smt/` | Shared SMT banks, thread selection and pipeline helpers | Active with fetch_B; no source files loaded from retired directories |
 | `core/multicore/` *(new)* | — | tile wrapper, coherence hub |
 | `core/ooo/` *(new)* | — | slice queues, rename/ROB/IQ/LSQ |
 | `core/rvfi/` | `cva6_rvfi*.sv` | trace for new features |

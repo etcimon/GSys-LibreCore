@@ -1,13 +1,95 @@
-# Extension point: out-of-order execution (production path)
+# Extension point: out-of-order execution (config-gated backend)
 
 Program: `../router-core-upgrade-program.md` (U4 / U5).
 
 **Status: config-gated implementation; full architectural qualification blocked.**
 `OoOEn=1` routes the live dispatch/IQ/rename/LSQ/PRF path, but routing and component
-passes do not establish a shipping backend. The 2026-09-16 broad RTL review
-reproduces an accepted store that cannot issue; other recovery/ordering contracts
-below remain unresolved. Minimal/default packages keep `OoOEn=0`. Passing SMT2 and
-stream8 regressions exercise that protected in-order path, not full OoO.
+passes do not establish a shipping backend. The accepted-store self-blocking defect
+from the 2026-09-16 review has a directed repair; it is not the current unresolved
+failure. Minimal/default packages keep `OoOEn=0`. Passing SMT2 and stream8 regressions
+exercise that protected in-order path, not full OoO. The successful source-built
+SMT2 OpenSBI/HSM profile likewise uses OoOEn=0 and drained context switches.
+
+## Completion assessment after SMT2/HSM (2026-09-19)
+
+The passing firmware is a prerequisite and regression anchor, not evidence that
+OoO execution is correct. The active SMT2 target uses OoOEn=0, one physical core,
+two logical harts and a drained handoff. A fresh build after the OoO-only repairs
+is byte-identical to the passing modelc421aedc... (`smt2-ooo-regate-build-20260919`).
+The g6lc64_ooo target still requests RVF/RVD; the existing FP legality guard means
+its name is not evidence of a usable qualified configuration. No guard is removed.
+
+### Bounded increment: result ownership
+
+`g6lc_ooo_dispatch` previously blocked cancelled PRF writes but still let their
+writeback-valid pulses clear rename busy state, wake IQ consumers, and override
+operands through bypass. A mispredicted producer can release its physical register
+before its late response arrives; another live producer can own that register.
+The qualified data-valid predicate now feeds all four consumers consistently,
+rejecting cancelled and exception responses. Raw ROB completion/exception reporting
+is retained: an exception must still reach precise retirement. No state, queue,
+stage, clock/reset, memory macro, ISA/DTS field or default is added. Existing OoOEn
+and hart/FP legality restrictions remain the integration boundary.
+
+`ooo-qualification-owner-20260919` checks retained waiters, newly dispatched waiters,
+operand bypass after genuine writeback, and exception response availability. Four
+positives/four negatives pass; four private restored-defect controls fail. The
+fixture had a Verilator5.008 packed-part-update propagation problem, exposed by a
+zero PRF value. Whole-vector input drives preserve the intended stimulus and fix
+the fixture; PRF RTL is unchanged. Retain that tool limitation, not a PRF repair claim.
+Dispatch regression16, rename22 and LSQ24 records pass, and both illegal SMT/FP
+elaboration controls still refuse their configurations.
+
+Live-port synthesis exposed an LSQ lane-mask loop with a runtime-dependent bound.
+Its equivalent rewrite iterates the fixed XLEN byte lanes and predicates each bit
+by access size. With that same rewrite in both synthesis arms, generic cells change
+91,242 ->88,501 (-3.00%) for the writeback qualification change; state remains6,250
+bits and both arms have zero latches/SCCs. Artifact: ooo-wb-area-v2-{before,after}-20260919.
+This is one two-port integer fixture, not mapped silicon area, power or timing. The
+qualified-valid gate adds cancellation/exception fanout to wakeup/bypass; no Fmax
+or IPC improvement is claimed. The inferred router1.25GHz target still needs STA.
+
+The rename formal task now references checkpoint count/head rather than the removed
+pointer: its original12-step BMC passes. A private false-x0 checker yields a concrete
+four-step SAT counterexample. These are bounded invariants, not checkpoint lifetime
+or full architecture proofs. Fetch-IQ's assertion/witness problem remains separate.
+
+### Cancelled retirement follow-up (Phase2)
+
+Acknowledging a cancelled slot previously updated the architectural map, freed its
+old physical register and released a checkpoint using a stale tag. The live-port
+cases reproduce all three effects. `commit_arch` now qualifies those side effects
+and LSQ store commit with the existing cancellation mask, leaving ROB retirement
+unfiltered so dropped slots drain. Single-lane and paired older-live/younger-dropped
+retirement pass six positives/six negatives; six independently restored map/free/
+checkpoint faults fail. Artifacts: ooo-drop-* and ooo-drop-dual-*-20260919.
+
+Final generic live-port fixture:86,824 cells,6,250 state bits, zero latches/SCCs
+(`ooo-drop-area-20260919`), versus88,501 before this guard. No mapped PPA/IPC claim.
+The SMT2 regate executable again matches c421aedc... exactly; no firmware rerun is
+claimed. The collected broad gate now has11 formal task passes; fetch-IQ remains
+failed/unresolved after witness/cover interruption. Default lint/synthesis pass
+with prior warning counts and standalone-slang skips.
+
+This closes the reproduced component-level drop side effects, not simultaneous
+full-core trap/flush/commit or late TID reuse. The external plan's Phases0–9 preserve
+that distinction and place dual-runnable service measurement before scheduler tuning.
+
+### Promotion gates and efficiency order
+
+| Gate | Evidence required before promotion |
+|---|---|
+| Single-hart integer data/commit | Actual CSR/AMO late results must reach PRF/wakeup, not early commit-ready placeholders. The in-order AMO fix does not provide that OoO path. Preserve the cancelled commit/drop component controls; extend them to full-core trap/flush/commit and late WB after TID reuse. |
+| Full-core recovery and memory | Ordered architectural retirement against an independent reference; precise traps; branch/exception/commit collisions; LSQ credits, byte forwarding, fences and LR/SC. A fixture PASS cannot replace this. |
+| SMT ownership | Hart-indexed architectural/speculative maps, physical-register ownership and checkpoint identity; hart-tagged IQ/ROB/LSQ and per-hart cancellation. Start with the existing drained handoff; do not assume it preserves an unbanked committed PRF. |
+| FP class | Separate integer/FP identities through rename, readiness, PRF, writeback and commit; cross-class alias and exception controls. Keep the FP guard until integrated qualification. |
+| Performance/area | On functionally qualified configurations, sweep one queue/width/policy at a time. Measure useful committed work per cycle, stalls, fairness, generic/mapped area and timing. Report geomean speedup and worst-hart slowdown, not just aggregate retirement. |
+
+Prefer shared control and result qualification before widening queues or duplicating
+banks. Do not add a new PRF write port for late results without proving an existing
+port cannot safely be reused; do not reuse one without an exclusivity proof. A
+memory-dependence predictor may relax the conservative age gate only with alias
+validation and replay. Compiler wall-time gains are not hardware IPC gains.
 
 ## Continuation review: lifetime closure remains open
 
@@ -168,19 +250,13 @@ defaulted at their `always_comb` scope. `review-ooo-latch-v2` builds with
 dispatch suites re-pass 18/24/16 afterwards. This is elaborator-level cleanliness,
 not a mapped-synthesis or timing result.
 
-`../remaining-upgrade-sequence.md` records the remaining source-backed gaps behind
-the earlier repaired-leaf rows. Checkpoint free snapshots do not include later old-commit
-frees subsequently reallocated to younger work; full flush resets the map to
-identity rather than a committed map. Directed commit/free/reuse/recovery tests
-must settle these contracts before another rename-area optimization.
-
-LSQ admission still advertises any-free-entry rather than enough credits for the
-whole dispatch group, and enabled memdep still queries the selected load while
-its result gates IQ selection. These are source findings, not newly observed
-firmware failures. More-than-depth branch progress, multi-alloc saturation,
-MemDepPredEn-on liveness, committed values across flush, and delayed wrong-path
-WB reuse need their own tests. Keep OoO hart/FP legality restrictions. In-order
-SMT2/stream8 or the corrected predictor-checkpoint leaf cannot close this backend.
+The repaired-leaf sections above supersede the former findings about free-list
+snapshots, identity-map flush, any-free LSQ admission and predictor feedback into
+IQ selection. Repeating those historical defects as current source findings is
+incorrect. Their full-core integration scope remains open: recovery/retirement
+ownership, late responses after TID reuse, commit/drop side effects, and actual
+committed operand values need architectural tests. Keep OoO hart/FP legality
+restrictions. In-order SMT2/HSM or predictor-leaf passes cannot close this backend.
 
 ## Pipeline (OoOEn=1)
 
@@ -633,3 +709,36 @@ No OoO/L3 defaults are enabled by these repairs. Fresh protected SMT2/stream8
 models match their frozen depth-two baselines across 24 execution records;
 this is off-path preservation, not full-OoO promotion. See
 `architecture/remaining-upgrade-sequence.md` for the cross-feature ranking.
+
+## The two P0 gaps are refused at ELABORATION, not just in simulation
+
+`check_cfg` carries `assert (!(Cfg.OoOEn && Cfg.NrHarts > 1))` and
+`assert (!(Cfg.OoOEn && Cfg.FpPresent))`, but it is invoked from
+`core/cva6.sv:2294` inside an `initial` block — **simulation only**. Synthesis does not
+evaluate it, so on that evidence alone an unsound configuration could be synthesised
+silently. I went looking for exactly that hole.
+
+It is not there. `core/ooo/g6lc_ooo_dispatch.sv:101-106` carries generate-scope `$error`
+guards, which fire during elaboration in *both* flows. Verified by actually synthesising
+top `cva6` with the `g6lc64_ooo_server` package **as declared** (`OoOEn=1`, `NrHarts=2`,
+`RVF/RVD=1`) against a flat manifest:
+
+```
+g6lc_ooo_dispatch.sv:102: $error: OoO dispatch has no per-hart rename namespace:
+                                  NrHarts>1 aliases architectural registers.
+g6lc_ooo_dispatch.sv:105: $error: OoO dispatch has no FP register class:
+                                  FP destinations are not renamed or tracked.
+Build failed: 2 errors — Design elaboration failed
+```
+
+So the two P0 items are **feature gaps behind a hard guard**, not latent defects that could
+reach silicon. That is a materially different priority from "P0 defect": nothing can
+accidentally build the aliasing design, and the remaining work — per-hart map/free/busy
+namespaces, and an FP register class through rename/PRF/operand read — is implementation,
+to be planned and qualified as such.
+
+Worth stating why the `initial`-only form is insufficient on its own, since the same
+pattern recurs: a simulation-time `assert` refuses the configuration to anyone who runs a
+test, and refuses nothing to anyone who runs synthesis. The generate-scope `$error` is what
+makes it a build refusal. The same promotion was applied to the `MEM_TID_WIDTH` bound
+earlier in this review, for the same reason.

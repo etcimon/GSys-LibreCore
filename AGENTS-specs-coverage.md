@@ -15,6 +15,61 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ---
 
+## Issue-order increment status (2026-09-18)
+
+**Partial; no architectural coverage promotion.** The same-group dependency
+barrier now uses dynamic lane order rather than numerical PC order. Directed
+one/two-hart and two/four-port positives, checker negatives, a restored-defect
+control and small live-port synthesis qualify that leaf repair. They do not
+qualify full SMT/OpenSBI completion or general per-hart liveness.
+
+## WT response-identity increment status (2026-09-18)
+
+**Partial; no architectural coverage promotion.** A response-tag selection defect
+has a scoped repair and directed 12-cycle bounded checks across three fixup
+geometries, reached covers and both checker/RTL fault controls. The isolated timed
+leaf flow is not qualified. Same-hart stale-load evidence is localized, but full
+WT-cache ordering/coherence and multi-hart firmware completion remain open.
+
+## Reset-time SMT increment status (2026-09-19)
+
+**Partial; no full SMT ISA promotion.** Two-hart reset rendezvous, mixed/uncompressed
+code, atomic publication and WFI handoff have directed evidence with negative
+controls. Conservative quiescent switching replaces unsafe cross-hart drain; leaf
+synthesis is clean. Both harts execute the frozen diagnostic firmware, but its
+forced topology and stubbed FDT prevent healthy secondary initialization. Natural
+source-profile HSM completion remains a separate gate, not implied by its cookie.
+
+## Architectural resume increment status (2026-09-19)
+
+**Partial; no full dual-hart boot promotion.** Retirement-owned resume replaces
+speculative cursor snapshots for the drained SMT path, with directed/mutation and
+small synthesis evidence. The natural OpenSBI profile reaches both per-hart stacks,
+but a subsequent shared initialization-data visibility failure still prevents the
+strict HSM/S-mode payload verdict. Counts and firmware activity are not completion.
+
+## WT retained-copy increment status (2026-09-19)
+
+**Partial.** Directed lowered-RTL checks and mutation controls cover same-word
+freshness across normal-buffer ACK and retained fixup lifetime, including full
+capacity, byte masks, checked hits and concurrent retirement. No full RVWMO,
+cache/coherence, physical-timing or dual-hart firmware qualification follows.
+
+## Directed source-profile HSM completion (2026-09-19)
+
+**Directed profile passes; broader coverage remains partial.** The pinned natural
+OpenSBI profile reaches both supervisor contexts and explicit checked completion.
+AMO consumers no longer use early placeholder writeback. An opt-in compiler array-
+splitting control removes the PMP simulation stop while preserving the entire
+retained architectural prefix and all assertions. NAPOT address-match proofs and
+negative controls pass; no permissions, firmware barriers or warning waivers change.
+This is not general PMP/SMT/RVWMO/FP/OoO, Linux, liveness or physical qualification.
+The rename elaboration defect is now corrected and its existing12-step BMC passes;
+fetch-IQ's assertion/witness failure remains open. OoO result/drop ownership has
+separate directed controls and live-port synthesis, not full-core qualification.
+SMT2 boot remains OoOEn=0; it does not promote hart/FP namespaces or imply balanced
+service while both harts are runnable.
+
 ## P0–P2 continuation status
 
 **Partial; no architectural coverage promotion.** The source maps now record a

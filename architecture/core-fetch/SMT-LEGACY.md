@@ -1,4 +1,15 @@
-# `core/smt_legacy/` — what default B still compiles, and why recover is not fetch
+# SMT support and retired fetch supplies
+
+**2026-09-18 active boundary:** the nine shared SMT banks, scheduler and pipeline helpers
+have moved byte-for-byte from `core/smt_legacy/` to `core/smt/`. Their module names,
+interfaces and licenses are unchanged. `core/Flist.cva6` references the new paths;
+`core/fetch_B/` remains the only active frontend. No active source or include path may
+traverse `fetch_A` or `smt_legacy`. The manifest regression and the soak runner's generated
+source-list check enforce that boundary. The inventory below records earlier splits;
+it does not authorize building a retired frontend.
+
+The issue-order repair is a separate change in `core/smt/g6lc_issue_barrier.sv` after
+relocation. Moving shared code does not endorse or re-enable any disabled A-only policy.
 
 Companion to [`README.md`](README.md), [`SPEC.md`](SPEC.md) §8, [`LEDGER.md`](LEDGER.md) §2,
 [`NEGATIVE.md`](NEGATIVE.md), [`../firmware-boot-principles.md`](../firmware-boot-principles.md).
@@ -116,5 +127,5 @@ incoming hart when `g6lc_smt_pc_bank` restores. Controller flushes IF + unissued
 | Goal | Edit |
 |---|---|
 | R6–R11 / FDT / leftover present | `core/fetch_B/` (the only live supply) (`g6lc_fetch_pkg`, realign, queue, frontend). Frozen A untouched |
-| SMT schedule / banks | `core/smt_legacy/g6lc_thread_select.sv` etc. (still there) + `cva6.sv` holds |
+| SMT schedule / banks | `core/smt/g6lc_thread_select.sv` etc. + `cva6.sv` holds |
 | g1\* recover | **Do not.** Oracle-only, now `core/fetch_A/smt_legacy/`. Skip remaining call sites with `G6LC_FETCH_B` |

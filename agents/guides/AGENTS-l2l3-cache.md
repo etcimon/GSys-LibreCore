@@ -28,6 +28,18 @@ Sub-files: `../spec/riscv-spec-I-3.1-rvwmo.html`, `-II-3.6-pma.html`, `-I-4.15-z
 - Memory-side adapters (the L2 attach points): `core/cache_subsystem/axi_adapter.sv`, `wt_axi_adapter.sv`, `wt_l15_adapter.sv`, `cva6_hpdcache_subsystem_l15_adapter.sv`, `cva6_hpdcache_subsystem_axi_arbiter.sv`.
 - Structural selection: `core/cva6.sv:1400-1449` (`gen_cache_wt` -> `wt_cache_subsystem`), `1450-1515` (`gen_cache_hpd` -> `cva6_hpdcache_subsystem`), `1516+` (`gen_cache_wb` -> `std_cache_subsystem`); all bind `i_cache_subsystem`.
 
+### WT retained-copy ownership review (2026-09-19)
+
+An ACK may remove the normal write-buffer copy while an older same-word fixup still
+forwards data. Capacity must not prevent refreshing an existing entry; cache-hit
+ACKs must refresh it too. Preserve untouched valid bytes on coalescing, and do not
+pop a simultaneously updated copy before the merged value is discharged. The
+same-cycle export must preserve unrelated entries. See
+`../../architecture/dcache-ack-before-check.md` and `run_wt_fixup_review.py` for the
+reproduction and qualification boundary. No config/default, cache macro, clock,
+reset, DFT or software ABI changes. The new comparison/merge/selection cone requires
+physical timing and activity review; directed simulation is not STA.
+
 ## 3. Config knobs (`core/include/config_pkg.sv`)
 - `cache_type_t` enum `30-36`; concrete `DCacheType` `186`.
 - I$ geometry `Icache{ByteSize,SetAssoc,LineWidth}` `180-184`; D$ geometry `Dcache{ByteSize,SetAssoc,LineWidth}` `190-194`.

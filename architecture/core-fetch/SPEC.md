@@ -239,13 +239,13 @@ One window: `FETCH_WIDTH` bits + exception sideband (`gpaddr`/`tinst`/`gva` pass
 | Path | Fate |
 |---|---|
 | `core/frontend/*.sv` + `core/instr_realign.sv` | Frozen **A** (applied fetch). Predictors still compiled from here |
-| `core/smt/` | **pkg + dbg only**. Not on the default flist while `Flist.fetch_B` is included |
-| `core/smt_legacy/` | g1\* oracle frontend + recover + SMT banks (`Flist.smt_legacy`) |
+| `core/smt/` | Live shared SMT banks, scheduler and issue helpers; relocated without behavior changes |
+| `core/smt_legacy/` / `core/fetch_A/` | Excluded from the active fetch_B source graph |
 | `g6lc_{present,sib_cjalr,fe_keep,fe_kill,lj_hide,iq_hide,leftover,rvc_enc}` | Stay with `smt_legacy`. Never instantiated on B. Inventory: [`SMT-LEGACY.md`](SMT-LEGACY.md) |
 | `g6lc_jalr_usable` on resolve | **I11:** skip under `G6LC_FETCH_B` (`branch_unit` / IRO G1gg / issue G1gq). A keeps. Predict-only is `bp_fire` |
 | `id_stage` recover latches / `make_cjalr16` | `smt_legacy` only; B ID sees memory bytes |
 | I$ sibling `user` channel | **dead on B** (`G6LC_FETCH_B` skips G1iw/jl overlay in `g6lc_icache`) |
-| `g6lc_smt_*` banks, `thread_select`, `issue_barrier`, `sb_keep` | `core/smt_legacy/` (not fetch) |
+| `g6lc_smt_*` banks, `thread_select`, `issue_barrier`, `sb_keep` | `core/smt/` (shared pipeline support, not frontend supply) |
 | `core/fetch_B/` | **B workspace** — default `Flist.cva6` via `-f Flist.fetch_B` |
 
 B wiring: `Flist.fetch_B`, `+define+G6LC_FETCH_B`, g1 ports tied in `cva6.sv`.

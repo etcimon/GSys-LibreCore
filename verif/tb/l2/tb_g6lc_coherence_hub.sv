@@ -25,6 +25,12 @@ module tb_g6lc_coherence_hub;
   //  several are simply not reached yet. Separating "too short" from "starved"
   //  requires lengthening this, not re-reading the RTL.
   parameter int unsigned CYCLES = 60;
+  //  Memory acceptance rate for the fairness scenario: AW is accepted once every
+  //  (MEM_STALL+1) cycles. 0 is an infinitely fast memory, which is what the first
+  //  measurement used -- and it flattered the design, because the service interval
+  //  it produces is the SHORTEST possible. Real memory is slower, so this sweeps
+  //  the one variable that decides whether the starve override is reachable.
+  parameter int unsigned MEM_STALL = 0;
   logic clk = 0, rst_n = 0;
   req_t [NC-1:0] core_req;
   resp_t [NC-1:0] core_rsp;
@@ -455,7 +461,6 @@ module tb_g6lc_coherence_hub;
       core_req[c].w_valid  = 1;
       core_req[c].w        = '{data: 64'hA0 + c, strb: '1, last: 1, user: 0};
     end
-    memory_rsp.aw_ready = 1;
     memory_rsp.w_ready  = 1;
 
     //  Drain B. Without this the scenario is worthless and worse than worthless: the
@@ -466,6 +471,8 @@ module tb_g6lc_coherence_hub;
     //  lengthening the window 20x changed nothing, which is the signature of a
     //  stalled harness rather than an unfair arbiter.
     for (int i = 0; i < int'(CYCLES); i++) begin
+      //  Throttle acceptance to model memory that is not instantly ready.
+      memory_rsp.aw_ready = (MEM_STALL == 0) || ((i % (int'(MEM_STALL) + 1)) == 0);
       #2;
       if (arb_starve) starve_seen++;
       if (memory_req.aw_valid)

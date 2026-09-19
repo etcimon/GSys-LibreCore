@@ -579,6 +579,9 @@ module issue_read_operands
         fwd_res_valid[fwd_i.wb[i].trans_id] = 1'b1;
       end
     end
+    for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+      if (CVA6Cfg.RVA && ariane_pkg::is_amo(fwd_i.sbe[i].op)) fwd_res_valid[i] = 1'b0;
+    end
   end
 
   for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
@@ -1573,6 +1576,31 @@ module issue_read_operands
   end
 
   //pragma translate_off
+  bit smt_issue_trace;
+  int unsigned smt_issue_idle = 0;
+  initial smt_issue_trace = $test$plusargs("smt_flow_trace");
+  always @(posedge clk_i) begin
+    if (!rst_ni) smt_issue_idle = 0;
+    else if (smt_issue_trace) begin
+      for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+        if (issue_instr_valid_i[p] && issue_ack_o[p] && !flush_i)
+          $display("[smt-flow] operands time=%0t port=%0d id=%0d hart=%0d pc=%h fu=%0d a=%h b=%h imm=%h forward=%b%b",
+                   $time, p, issue_instr_i[p].trans_id, issue_instr_i[p].hart_id,
+                   issue_instr_i[p].pc, issue_instr_i[p].fu, fu_data_n[p].operand_a,
+                   fu_data_n[p].operand_b, fu_data_n[p].imm, forward_rs1[p], forward_rs2[p]);
+      smt_issue_idle = (issue_instr_valid_i[0] && !issue_ack_o[0]) ? smt_issue_idle + 1 : 0;
+      if (smt_issue_idle != 0 && smt_issue_idle <= 4096 && smt_issue_idle % 1024 == 0) begin
+        $display("[smt-flow] issue_stall time=%0t idle=%0d stall_i=%b valid=%b ack=%b busy=%b raw=%b rs1=%b rs2=%b rs3=%b flu_ready=%b lsu_ready=%b mult=%b casq=%b lrsc=%b live=%b",
+                 $time, smt_issue_idle, stall_i, issue_instr_valid_i, issue_ack_o,
+                 fu_busy, stall_raw, stall_rs1, stall_rs2, stall_rs3, flu_ready_i,
+                 lsu_ready_i, mult_valid_q, casq_stall, lr_sc_pair_q, fwd_i.still_issued);
+        for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+          $display("[smt-flow] operand port=%0d hart=%0d pc=%h fu=%0d op=%0d forward=%b%b raw_check=%b%b",
+                   p, issue_instr_i[p].hart_id, issue_instr_i[p].pc, issue_instr_i[p].fu,
+                   issue_instr_i[p].op, forward_rs1[p], forward_rs2[p], rs1_raw_check[p], rs2_raw_check[p]);
+      end
+    end
+  end
   initial begin
     assert (OPERANDS_PER_INSTR == 2 || (OPERANDS_PER_INSTR == 3 && (CVA6Cfg.CvxifEn || CVA6Cfg.RVZacas)))
     else

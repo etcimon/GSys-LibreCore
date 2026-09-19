@@ -28,6 +28,7 @@ module scoreboard #(
     input  logic                                          rst_ni,
     // Is scoreboard full - PERF_COUNTERS
     output logic                                          sb_full_o,
+    output logic                                          sb_empty_o,
     // FSE: younger-than-branch cancel fired this cycle (SpeculativeSb path) - PERF
     output logic                                          spec_cancel_o,
     // U5 production: per-SB-slot cancel mask (sticky cancelled | same-cycle bmiss window)
@@ -149,6 +150,7 @@ module scoreboard #(
   end
 
   assign sb_full_o = issue_full[0];
+  assign sb_empty_o = sb_issued_cnt == '0;
 
   // output commit instruction directly
   always_comb begin : commit_ports
@@ -288,7 +290,8 @@ module scoreboard #(
           mem_n[trans_id_i[i]].sbe.result = wbdata_i[i];
 `endif
         // save the target address of a branch (needed for debug in commit stage)
-        if (CVA6Cfg.DebugEn) begin
+        if (CVA6Cfg.DebugEn || (CVA6Cfg.NrHarts > 1 &&
+            mem_q[trans_id_i[i]].sbe.fu == ariane_pkg::CTRL_FLOW)) begin
           mem_n[trans_id_i[i]].sbe.bp.predict_address = resolved_branch_i.target_address;
         end
         if (mem_n[trans_id_i[i]].sbe.fu == ariane_pkg::CVXIF) begin
@@ -561,6 +564,92 @@ module scoreboard #(
   end
 
   //pragma translate_off
+  bit smt_progress_enabled;
+  localparam int SMT_TRACE_HARTS = CVA6Cfg.NrHarts > 0 ? CVA6Cfg.NrHarts : 1;
+  longint unsigned smt_retired_count[SMT_TRACE_HARTS];
+  logic [CVA6Cfg.VLEN-1:0] smt_last_retired_pc[SMT_TRACE_HARTS];
+  initial smt_progress_enabled = $test$plusargs("smt_progress");
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      foreach (smt_retired_count[h]) begin
+        smt_retired_count[h] = 0;
+        smt_last_retired_pc[h] = '0;
+      end
+    end else if (smt_progress_enabled) begin
+      for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++)
+        if (commit_ack_i[p] && !commit_drop_o[p]) begin
+          smt_retired_count[commit_instr_o[p].hart_id]++;
+          smt_last_retired_pc[commit_instr_o[p].hart_id] = commit_instr_o[p].pc;
+        end
+    end
+  end
+  final begin
+    if (smt_progress_enabled)
+      foreach (smt_retired_count[h])
+        $display("[smt-progress] scope=%m hart=%0d retired=%0d last_pc=%h",
+                 h, smt_retired_count[h], smt_last_retired_pc[h]);
+  end
+  bit smt_flow_enabled;
+  int unsigned smt_flow_cycle = 0;
+  int unsigned smt_flow_idle = 0;
+  int unsigned smt_flow_snapshots = 0;
+  int unsigned smt_flow_generation[CVA6Cfg.NR_SB_ENTRIES];
+  initial smt_flow_enabled = $test$plusargs("smt_flow_trace");
+
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      smt_flow_cycle = 0;
+      smt_flow_idle = 0;
+      smt_flow_snapshots = 0;
+      foreach (smt_flow_generation[s]) smt_flow_generation[s] = 0;
+    end else if (smt_flow_enabled) begin
+      smt_flow_cycle++;
+      smt_flow_idle = (|commit_ack_i || flush_i) ? 0 : smt_flow_idle + 1;
+      for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++)
+        if (commit_ack_i[p])
+          $display("[smt-flow] retire cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h valid=%b drop=%b ex=%b",
+                   smt_flow_cycle, p, commit_pointer_q[p], smt_flow_generation[commit_pointer_q[p]],
+                   commit_instr_o[p].hart_id, commit_instr_o[p].pc, commit_instr_o[p].valid,
+                   commit_drop_o[p], commit_instr_o[p].ex.valid);
+      for (int p = 0; p < CVA6Cfg.NrWbPorts; p++)
+        if (wt_valid_i[p])
+          $display("[smt-flow] wb cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h issued=%b cancelled=%b data=%h ex=%b",
+                   smt_flow_cycle, p, trans_id_i[p], smt_flow_generation[trans_id_i[p]],
+                   mem_q[trans_id_i[p]].sbe.hart_id, mem_q[trans_id_i[p]].sbe.pc,
+                   mem_q[trans_id_i[p]].issued, mem_q[trans_id_i[p]].cancelled, wbdata_i[p], ex_i[p].valid);
+      for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+        if (decoded_instr_valid_i[p] && decoded_instr_ack_o[p] && !flush_unissued_instr_i) begin
+          smt_flow_generation[issue_pointer[p]]++;
+          $display("[smt-flow] alloc cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h insn=%h fu=%0d op=%0d rd=%0d rs1=%0d rs2=%0d",
+                   smt_flow_cycle, p, issue_pointer[p], smt_flow_generation[issue_pointer[p]],
+                   decoded_instr_i[p].hart_id, decoded_instr_i[p].pc, orig_instr_i[p],
+                   decoded_instr_i[p].fu, decoded_instr_i[p].op, decoded_instr_i[p].rd,
+                   decoded_instr_i[p].rs1, decoded_instr_i[p].rs2);
+        end
+      if (flush_i || flush_unissued_instr_i || resolved_branch_i.valid)
+        $display("[smt-flow] control cycle=%0d flush=%b flush_unissued=%b resolve=%b mispredict=%b target=%h",
+                 smt_flow_cycle, flush_i, flush_unissued_instr_i, resolved_branch_i.valid,
+                 resolved_branch_i.is_mispredict, resolved_branch_i.target_address);
+      if (smt_flow_idle != 0 && smt_flow_idle % 1024 == 0 && smt_flow_snapshots < 4) begin
+        smt_flow_snapshots++;
+        $display("[smt-flow] stalled cycle=%0d idle=%0d issue_ptr=%0d commit_ptr=%0d full=%b decoded=%b ack=%b",
+                 smt_flow_cycle, smt_flow_idle, issue_pointer_q, commit_pointer_q[0],
+                 sb_full_o, decoded_instr_valid_i, decoded_instr_ack_o);
+        for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+          $display("[smt-flow] offered port=%0d hart=%0d pc=%h insn=%h fu=%0d op=%0d rd=%0d rs1=%0d rs2=%0d",
+                   p, decoded_instr_i[p].hart_id, decoded_instr_i[p].pc, orig_instr_i[p],
+                   decoded_instr_i[p].fu, decoded_instr_i[p].op, decoded_instr_i[p].rd,
+                   decoded_instr_i[p].rs1, decoded_instr_i[p].rs2);
+        for (int s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
+          if (mem_q[s].issued)
+            $display("[smt-flow] slot id=%0d gen=%0d hart=%0d pc=%h valid=%b cancelled=%b fu=%0d op=%0d rd=%0d result=%h",
+                     s, smt_flow_generation[s], mem_q[s].sbe.hart_id, mem_q[s].sbe.pc,
+                     mem_q[s].sbe.valid, mem_q[s].cancelled, mem_q[s].sbe.fu,
+                     mem_q[s].sbe.op, mem_q[s].sbe.rd, mem_q[s].sbe.result);
+      end
+    end
+  end
+
   initial begin
     assert (CVA6Cfg.NR_SB_ENTRIES == 2 ** CVA6Cfg.TRANS_ID_BITS)
     else $fatal(1, "Scoreboard size needs to be a power of two.");

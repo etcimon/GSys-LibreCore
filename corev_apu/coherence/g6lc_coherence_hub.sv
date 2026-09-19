@@ -121,22 +121,42 @@ module g6lc_coherence_hub
       return sel;
     endfunction
 
+    //  The starve override picks ROUND-ROBIN among starved cores, not "last one
+    //  the loop looked at".
+    //
+    //  The previous form assigned `winner = c` inside the scan, so the
+    //  HIGHEST-INDEXED starved core won every time. That is harmless while the
+    //  override never engages, and it does not engage at 2 or 4 cores even with
+    //  memory accepting one request in four. At EIGHT cores with the same memory it
+    //  engages hard, and the consequence is not a mild bias: measured
+    //  1,1,1,100,100,99,99,99 grants over 2000 cycles -- a hundredfold disparity --
+    //  and at one-in-eight acceptance a core is never granted at all. The mechanism
+    //  meant to rescue a starved core was instead the thing starving it, because a
+    //  core that wins re-qualifies immediately and keeps winning the tie.
+    //
+    //  Reusing pick_rr over the starved subset keeps the rotation the fair path
+    //  already has, so a forced grant advances the pointer's intent instead of
+    //  fighting it. No new state: the mask is combinational over existing counters.
+    logic [NC-1:0] aw_starved_req, ar_starved_req;
+    for (genvar c = 0; c < NC; c++) begin : gen_starved_mask
+      assign aw_starved_req[c] = (AXI_STARVE_LIMIT != 0) && aw_req[c] &&
+                                 (aw_starve_q[c] >= AXI_STARVE_LIMIT[ST_W-1:0]);
+      assign ar_starved_req[c] = (AXI_STARVE_LIMIT != 0) && ar_req[c] &&
+                                 (ar_starve_q[c] >= AXI_STARVE_LIMIT[ST_W-1:0]);
+    end
+
     always_comb begin
       aw_winner       = pick_rr(aw_req, aw_rr_q);
       ar_winner       = pick_rr(ar_req, ar_rr_q);
       aw_starve_force = 1'b0;
       ar_starve_force = 1'b0;
-      for (int unsigned c = 0; c < NC; c++) begin
-        if (AXI_STARVE_LIMIT != 0 && aw_starve_q[c] >= AXI_STARVE_LIMIT[ST_W-1:0] &&
-            aw_req[c]) begin
-          aw_winner       = c[CID_W-1:0];
-          aw_starve_force = 1'b1;
-        end
-        if (AXI_STARVE_LIMIT != 0 && ar_starve_q[c] >= AXI_STARVE_LIMIT[ST_W-1:0] &&
-            ar_req[c]) begin
-          ar_winner       = c[CID_W-1:0];
-          ar_starve_force = 1'b1;
-        end
+      if (|aw_starved_req) begin
+        aw_winner       = pick_rr(aw_starved_req, aw_rr_q);
+        aw_starve_force = 1'b1;
+      end
+      if (|ar_starved_req) begin
+        ar_winner       = pick_rr(ar_starved_req, ar_rr_q);
+        ar_starve_force = 1'b1;
       end
       if (aw_hold_q) begin
         aw_winner = aw_hold_owner_q;

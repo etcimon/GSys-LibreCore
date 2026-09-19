@@ -64,7 +64,7 @@ if [[ ! -x "$HARNESS" ]]; then
     echo "[soft-ladder-osbi] see architecture/multi-threading/soft-ladder/firmware-boot-principles.md §4" >&2
     exit 2
   fi
-  if [[ -x "$ROOT/work-ver-smt2/Variane_testharness" ]]; then
+  if [[ -z "${SOFT_LADDER_HARNESS:-}" && -x "$ROOT/work-ver-smt2/Variane_testharness" ]]; then
     HARNESS_DIR=work-ver-smt2
     HARNESS="$ROOT/${HARNESS_DIR}/Variane_testharness"
     HARNESS_DIR_BASE="$ROOT/$HARNESS_DIR"
@@ -77,7 +77,11 @@ _HELD="$SOFT_LADDER_DIR/build/fw_payload_r3a_c15_plat_skip.held.elf"
 _PIN="$SOFT_LADDER_DIR/build/fw_payload_r3a_c15_plat_skip.elf"
 if [[ -n "${SOFT_LADDER_ELF:-}" ]]; then
   ELF="$SOFT_LADDER_ELF"
-elif [[ "${SOFT_LADDER_HOLD:-0}" == "1" && -f "$_HELD" ]]; then
+elif [[ "${SOFT_LADDER_HOLD:-0}" == "1" ]]; then
+  if [[ ! -f "$_HELD" ]]; then
+    echo "[soft-ladder-osbi] missing requested hold payload $_HELD" >&2
+    exit 2
+  fi
   ELF="$_HELD"
 elif [[ -z "${PEEL_FDT_GETPROP:-}" && -f "$_HELD" && "${SOFT_LADDER_PREFER_HELD:-0}" == "1" ]]; then
   # Held ELF is only used when explicitly requested (SOFT_LADDER_HOLD=1
@@ -190,20 +194,31 @@ while kill -0 "$pid" 2>/dev/null; do
   fi
   sleep 1
 done
-wait "$pid" 2>/dev/null || true
+wait "$pid" 2>/dev/null
 rc=$?
 set -e
 
+if [[ "$rc" -ne 0 ]]; then
+  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
+    log "CLASSIFY=TIMEOUT fetch=${FETCH} rc=$rc (harness did not finish cleanly)"
+  else
+    log "CLASSIFY=FAIL fetch=${FETCH} rc=$rc (harness failed)"
+  fi
+  tail -30 "$LOG" || true
+  exit 1
+fi
+
 # Cookie is authoritative (b3-sim-harness). Do NOT treat harness "*** SUCCESS ***"
 # as green — OpenSBI often ends with tohost=0 after +time_out without cookie.
-if grep -qE '\[cookie-exit\]|\[1000\]=(0x)?[0-9a-fA-F]*51b1babe' "$LOG"; then
+COOKIE_PATTERN='^\[(cookie-exit|trapdump)\].*\[1000\]=(0x)?([[:xdigit:]]{0,8}51b1babe|51b1babe[[:xdigit:]]{8})([[:space:]]|$)'
+if grep -qiE "$COOKIE_PATTERN" "$LOG"; then
   log "CLASSIFY=SUCCESS fetch=${FETCH} cookie 51b1babe (rc=$rc)"
   grep -E '\[trapdump\]|\[hangpc\]|51b1|coldboot' "$LOG" | tail -20 || true
   exit 0
 fi
 # Also accept hex dump style with 0x prefix in hang notes
 if grep -qiE '51b1babe' "$LOG" && grep -q '\[trapdump\]' "$LOG"; then
-  if grep -qE '\[1000\]=[0-9a-fA-F]*51b1babe' "$LOG"; then
+  if grep -qiE "$COOKIE_PATTERN" "$LOG"; then
     log "CLASSIFY=SUCCESS fetch=${FETCH} cookie 51b1babe (rc=$rc)"
     grep -E '\[trapdump\]|\[hangpc\]' "$LOG" | tail -20 || true
     exit 0

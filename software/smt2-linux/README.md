@@ -18,6 +18,28 @@ Outputs land under **gitignored** `build-platform/workspace/smt2-linux/` (or
 
 ---
 
+## Source-profile dual-hart review (2026-09-19)
+
+`verif/regress/remote/run_opensbi_source_review.py`, invoked through proxy `py`,
+builds an isolated archive of OpenSBI commit `455de672...`, applies the existing
+platform/toolchain recipes, validates the two-hart DTS, and uses
+`G6LC_STRICT_DUAL` in `payload/smt2_sbi_dual.S`. The strict mode accepts either
+boot hart, requires a successful SBI HSM start and checked secondary publication,
+and fails rather than accepting a peer timeout. Its oracle requires explicit
+supervisor-mode seen/completion stores and both hart-tagged retirement counters.
+The print helper also preserves its return address and callee-saved register.
+
+The older payload mode and soft-ladder cookie are not this oracle. Source archive,
+protected firmware hashes, applied recipe hashes, DTB, ELF and model identities
+are retained in the run. `SOURCE_REVIEW_PROFILE` replays the exact already-built
+ELF without rebuilding or changing firmware bytes. The strict profile now passes
+at12,765,628 cycles in `opensbi-counter-split-dual-20260919` (modelc421aedc...,
+ELF6b2bad99...). Both harts reach the supervisor payload. This result requires the
+recorded private Verilator split_var control for the lzc packed arrays; no PMP
+assertion, RTL permission or repository warning waiver was disabled. It is an
+opt-in validation profile, not default-build or Linux qualification. See
+`architecture/multi-threading/README.md` from the repo root.
+
 ## Quick start
 
 ### Linux / WSL / MSYS2 (recommended for full OpenSBI firmware)

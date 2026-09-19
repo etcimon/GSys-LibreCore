@@ -278,6 +278,18 @@ was deliberately left unchanged. Use a validated corrected runtime identity
 for model revalidation; generated C++ rebuilds need VPATH in the environment,
 not a command-line override that suppresses Make's runtime include search.
 
+**Verilator packed-counter scheduling control (2026-09-19):** the strict isolated
+PMP/WT tests encountered UNOPTFLAT on the vendored lzc packed index_nodes/sel_nodes
+arrays. A private control file containing `split_var -module "lzc" -var "*index_nodes"`
+and the equivalent `*sel_nodes` directive resolves that scheduling dependency without
+changing RTL, assertions or warning waivers. `run_pmp_transition_review.py` generates
+it with `PMP_SPLIT_COUNTER=1`; `WT_TAG_COMPILER_CONTROL` selects it for the timed WT
+runner. Proxy full-model builds can pass `VERILATOR_TEST_FLAGS=<control.vlt>`.
+The strict source-profile runner verifies the file occurs in generated model inputs
+and records its SHA when `SOURCE_REVIEW_COMPILER_CONTROL` is supplied. This remains
+an opt-in, pinned toolchain recipe, not permission to disable assertions or promote
+all configurations. Evidence and limits: `architecture/multi-threading/README.md`.
+
 **IQ review execution (2026-09-16):** proxy `py` calls could not find Verilator
 or SBY on the remote login PATH. For this host, explicitly supplying the managed
 `/opt/testharness/toolchains/verilator-v5.008/bin` and

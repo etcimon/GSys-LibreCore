@@ -612,6 +612,39 @@ module store_buffer
   ///////////////////////////////////////////////////////
 
   //pragma translate_off
+  bit smt_store_trace, smt_store_watch;
+  logic [CVA6Cfg.PLEN-1:0] smt_store_address;
+  int unsigned smt_store_cycle = 0;
+  initial begin
+    smt_store_watch = $value$plusargs("smt_mem_watch=%h", smt_store_address);
+    smt_store_trace = $test$plusargs("smt_flow_trace") || smt_store_watch;
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) smt_store_cycle = 0;
+    else if (smt_store_trace) begin
+      smt_store_cycle++;
+      if (valid_i && (!smt_store_watch || pa_eq(paddr_i, smt_store_address)))
+        $display("[smt-flow] store_offer cycle=%0d id=%0d pa=%h data=%h be=%h cancel=%b flush=%b ready=%b",
+                 smt_store_cycle, trans_id_i, paddr_i, data_i, be_i,
+                 cancelled_mask_i[trans_id_i], flush_i, ready_o);
+      if (commit_i && (!smt_store_watch || pa_eq(speculative_queue_q[speculative_read_pointer_q].address, smt_store_address)))
+        $display("[smt-flow] store_commit cycle=%0d id=%0d pa=%h data=%h be=%h valid=%b",
+                 smt_store_cycle, speculative_queue_q[speculative_read_pointer_q].trans_id,
+                 speculative_queue_q[speculative_read_pointer_q].address,
+                 speculative_queue_q[speculative_read_pointer_q].data,
+                 speculative_queue_q[speculative_read_pointer_q].be,
+                 speculative_queue_q[speculative_read_pointer_q].valid);
+      if (req_port_o.data_req && req_port_i.data_gnt &&
+          (!smt_store_watch || pa_eq(commit_queue_q[commit_read_pointer_q].address, smt_store_address)))
+        $display("[smt-flow] store_drain cycle=%0d id=%0d pa=%h data=%h be=%h",
+                 smt_store_cycle, commit_queue_q[commit_read_pointer_q].trans_id,
+                 commit_queue_q[commit_read_pointer_q].address, req_port_o.data_wdata,
+                 req_port_o.data_be);
+      if (load_paddr_valid_i && (!smt_store_watch || pa_eq(load_paddr_i, smt_store_address)))
+        $display("[smt-flow] store_forward cycle=%0d pa=%h valid=%b data=%h be=%h replay=%b",
+                 smt_store_cycle, load_paddr_i, st_fwd_valid_o, st_fwd_data_o, st_fwd_be_o, g1ao_hold_hit);
+    end
+  end
   // assert that commit is never set when we are flushing this would be counter intuitive
   // as flush and commit is decided in the same stage
   commit_and_flush :
