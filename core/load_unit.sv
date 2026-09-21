@@ -74,6 +74,10 @@ module load_unit
     // R3a: full load paddr when DTLB hit - STORE_UNIT / STQ match
     output logic [CVA6Cfg.PLEN-1:0] load_paddr_o,
     output logic                    load_paddr_valid_o,
+    // OoO: program-order identity of the querying load. A store may only be
+    // observed by a load that follows it in program order; under OoO issue the
+    // store buffer can hold younger stores, so an address match is not enough.
+    output logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id_o,
     // Indicates if the page offset matches a store unit entry - STORE_UNIT
     input logic page_offset_matches_i,
     // Store buffer is empty - STORE_UNIT
@@ -226,6 +230,7 @@ module load_unit
   // P4 c.lw then waited ~200k and retired leftover data (a5=0x010dfeec).
   assign load_paddr_valid_o = valid_i;
   assign load_paddr_o = CVA6Cfg.PLEN'(lsu_ctrl_i.vaddr);
+  assign load_trans_id_o = lsu_ctrl_i.trans_id;
   // feed-through the virtual address for VA translation
   assign vaddr_o = lsu_ctrl_i.vaddr;
   assign hs_ld_st_inst_o = CVA6Cfg.RVH ? lsu_ctrl_i.hs_ld_st_inst : 1'b0;
@@ -293,6 +298,9 @@ module load_unit
 
   // Pulse: load completed from STQ forward this cycle (no D$ request)
   logic st_fwd_done;
+  logic cancelled_request;
+  assign cancelled_request = CVA6Cfg.OoOEn && valid_i &&
+      (lsu_ctrl_i.is_speculative_load_miss || cancelled_mask_i[lsu_ctrl_i.trans_id]);
 
   // ---------------
   // Load Control
@@ -524,6 +532,14 @@ module load_unit
       end
     endcase
 
+    if (cancelled_request) begin
+      req_port_o.data_req = 1'b0;
+      translation_req_o = 1'b0;
+      st_fwd_done = 1'b0;
+      pop_ld_o = 1'b1;
+      state_d = IDLE;
+    end
+
     // if we just flushed and the queue is not empty or we are getting an rvalid this cycle wait in an extra stage
     if (flush_i) begin
       state_d = WAIT_FLUSH;
@@ -569,14 +585,14 @@ module load_unit
     // exceptions can retire out-of-order -> but we need to give priority to non-excepting load and stores
     // so we simply check if we got an rvalid if so we prioritize it by not retiring the exception - we simply go for another
     // round in the load FSM
-    if ((CVA6Cfg.MmuPresent || CVA6Cfg.NonIdemPotenceEn) && (state_q == WAIT_TRANSLATION) && !req_port_i.data_rvalid && ex_i.valid && valid_i) begin
+    if ((CVA6Cfg.MmuPresent || CVA6Cfg.NonIdemPotenceEn) && (state_q == WAIT_TRANSLATION) && !req_port_i.data_rvalid && ex_i.valid && valid_i && !cancelled_request) begin
       trans_id_o = lsu_ctrl_i.trans_id;
       valid_o = 1'b1;
       ex_o.valid = 1'b1;
     end
 
     // raise valid when removing a misspredicted speculative load
-    if (CVA6Cfg.SpeculativeSb && (state_q == WAIT_SPEC_LOAD) && lsu_ctrl_i.is_speculative_load_miss && !req_port_i.data_rvalid && valid_i) begin
+    if (CVA6Cfg.SpeculativeSb && (state_q == WAIT_SPEC_LOAD) && lsu_ctrl_i.is_speculative_load_miss && !req_port_i.data_rvalid && valid_i && !cancelled_request) begin
       trans_id_o = lsu_ctrl_i.trans_id;
       valid_o = 1'b1;
       ex_o.valid = 1'b0;

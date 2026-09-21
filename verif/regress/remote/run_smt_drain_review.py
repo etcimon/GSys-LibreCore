@@ -73,7 +73,7 @@ def main():
         wrapper.write_text('''module smt_drain_synth(
   input logic clk_i, rst_ni, fetch_fire_i, issue_fire_i, flush_i, hold_i,
   input logic drain_ready_i, id_uniss_i, iq_valid_i, t0_imm_i, trap_hold_i,
-  input logic [cva6_config_pkg::cva6_cfg.NrHarts-1:0] hart_ready_i, hart_dmiss_i, hart_imiss_i, hart_block_i,
+  input logic [cva6_config_pkg::cva6_cfg.NrHarts-1:0] hart_ready_i, hart_dmiss_i, hart_imiss_i, hart_block_i, pause_hint_i,
   output logic [$clog2(cva6_config_pkg::cva6_cfg.NrHarts)-1:0] active_hart_o,
   output logic switch_o, quiesce_o, t0_extra_o, switch_on_miss_o, switch_on_quantum_o, switch_on_starve_o
 );
@@ -83,6 +83,7 @@ def main():
     c.SmtPolicy=cva6_config_pkg::cva6_cfg.SmtPolicy;
     c.SmtFetchQuantum=cva6_config_pkg::cva6_cfg.SmtFetchQuantum;
     c.SmtStarveLimit=cva6_config_pkg::cva6_cfg.SmtStarveLimit;
+    c.ZihintpauseEn=cva6_config_pkg::cva6_cfg.ZihintpauseEn;
     return c;
   endfunction
   g6lc_thread_select #(.CVA6Cfg(configuration())) dut (.*);

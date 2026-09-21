@@ -36,6 +36,13 @@ module store_buffer
     // R3a: full load paddr when DTLB has translated; required for exact STQ match.
     input  logic [CVA6Cfg.PLEN-1:0] load_paddr_i,
     input  logic                    load_paddr_valid_i,
+    // U5.4 OoO program-order keys. A store may only be observed by a load that
+    // follows it in program order, and stores must reach memory in that order.
+    // Index order is not age once scoreboard slots are reused, so age is the
+    // circular trans_id distance from the oldest live instruction. Both inputs
+    // are inert when OoOEn is 0.
+    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id_i,
+    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] commit_trans_id_i,
     // R3a cont.13: D$ write buffer empty — sticky [11:0] match must outlive
     // STQ→wbuffer handoff so post-return loads of *nextoffset see the store.
     input  logic                    dcache_wbuffer_empty_i,
@@ -120,6 +127,24 @@ module store_buffer
   logic [$clog2(DEPTH_COMMIT)-1:0] commit_read_pointer_n, commit_read_pointer_q;
   logic [$clog2(DEPTH_COMMIT)-1:0] commit_write_pointer_n, commit_write_pointer_q;
 
+  localparam bit LEGACY_SMT_KEEP = CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 && !CVA6Cfg.OoOEn;
+
+  // Program order under OoO: circular trans_id distance from the oldest live
+  // instruction, the same key g6lc_lsq.sv applies with commit_ptr_i. Declared
+  // ahead of first use: Verilator tolerates a later declaration, slang does not.
+  function automatic logic ooo_older(input logic [CVA6Cfg.TRANS_ID_BITS-1:0] a,
+                                     input logic [CVA6Cfg.TRANS_ID_BITS-1:0] b);
+    return (a - commit_trans_id_i) < (b - commit_trans_id_i);
+  endfunction
+
+  // Visibility of a *speculative* store to the querying load. Commit-queue
+  // entries are deliberately NOT filtered by this: they are architecturally
+  // older by construction, and their trans_ids may already have been recycled
+  // by younger instructions, so an age test there would reject valid data.
+  function automatic logic spec_visible(input logic [CVA6Cfg.TRANS_ID_BITS-1:0] sid);
+    return !CVA6Cfg.OoOEn || ooo_older(sid, load_trans_id_i);
+  endfunction
+
   assign store_buffer_empty_o = (speculative_status_cnt_q == 0) & no_st_pending_o;
   // ----------------------------------------
   // Speculative Queue - Core Interface
@@ -127,7 +152,8 @@ module store_buffer
   always_comb begin : core_if
     automatic logic [$clog2(DEPTH_SPEC):0] speculative_status_cnt;
     automatic logic [$clog2(DEPTH_SPEC)-1:0] src, dst;
-    automatic logic [$clog2(DEPTH_SPEC):0] live, old_cnt;
+    automatic logic [$clog2(DEPTH_SPEC):0] live, old_cnt, ins;
+    automatic int unsigned nlive, nins;
     automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.PLEN-1:0] a_addr;
     automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] a_data;
     automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] a_be;
@@ -140,6 +166,9 @@ module store_buffer
     dst     = '0;
     live    = '0;
     old_cnt = '0;
+    ins     = '0;
+    nlive   = 0;
+    nins    = 0;
     a_addr  = '0;
     a_data  = '0;
     a_be    = '0;
@@ -166,7 +195,7 @@ module store_buffer
       speculative_queue_n[speculative_write_pointer_q].trans_id = trans_id_i;
       speculative_queue_n[speculative_write_pointer_q].wait_rvalid = 1'b0;
       speculative_queue_n[speculative_write_pointer_q].fwd_keep =
-          CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+          LEGACY_SMT_KEEP &&
           load_paddr_valid_i && pa_eq(paddr_i, load_paddr_i);
       // advance the write pointer
       speculative_write_pointer_n = speculative_write_pointer_q + 1'b1;
@@ -185,9 +214,75 @@ module store_buffer
 
     speculative_status_cnt_n = speculative_status_cnt;
 
+    // U5.4 OoO: place each arrival at its program-order position.
+    //
+    // Entries are written here at AGU time, so arrival order is ISSUE order.
+    // Under in-order issue that was program order; under OoO it is not, and
+    // this queue's head is what the commit handoff below hands to memory --
+    // so a younger store whose data resolved first reached memory ahead of an
+    // older store to the same address. The rest of the module (forward scan,
+    // rvfi_mem_paddr_o, the commit assertions) also reads the head as the
+    // oldest store, so the fix restores that invariant rather than adding an
+    // exception to it. Every pre-existing entry is already ordered, so the
+    // arrival only has to sink past the younger stores it was queued behind.
+    if (CVA6Cfg.OoOEn && valid_i && !cancelled_mask_i[trans_id_i]) begin
+      live   = speculative_status_cnt_n;
+      nlive  = int'(live);
+      a_addr = '0;
+      a_data = '0;
+      a_be   = '0;
+      a_sz   = '0;
+      a_tid  = '0;
+      a_wr   = '0;
+      a_fk   = '0;
+      for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
+      // snapshot the live set in current order, oldest first, arrival last
+      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+        if (k < nlive) begin
+          src         = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
+          a_addr[k]   = speculative_queue_n[src].address;
+          a_data[k]   = speculative_queue_n[src].data;
+          a_be[k]     = speculative_queue_n[src].be;
+          a_sz[k]     = speculative_queue_n[src].data_size;
+          a_cbo[k]    = speculative_queue_n[src].cbo_op;
+          a_tid[k]    = speculative_queue_n[src].trans_id;
+          a_wr[k]     = speculative_queue_n[src].wait_rvalid;
+          a_fk[k]     = speculative_queue_n[src].fwd_keep;
+        end
+      end
+      // position of the arrival = number of already-queued stores older than it
+      ins = '0;
+      for (int unsigned k = 0; k < DEPTH_SPEC; k++)
+        if (((k + 1) < nlive) && ooo_older(a_tid[k], a_tid[(nlive > 0) ? nlive-1 : 0]))
+          ins = ins + 1'b1;
+      nins = int'(ins);
+      // rewrite dense with the arrival at `ins`, younger entries shifted up
+      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+        if (k < nlive) begin
+          if (k < nins) dst = $clog2(DEPTH_SPEC)'(k);
+          else if (k == nins) dst = $clog2(DEPTH_SPEC)'(nlive - 1);
+          else dst = $clog2(DEPTH_SPEC)'(k - 1);
+          speculative_queue_n[k].address     = a_addr[dst];
+          speculative_queue_n[k].data        = a_data[dst];
+          speculative_queue_n[k].be          = a_be[dst];
+          speculative_queue_n[k].data_size   = a_sz[dst];
+          speculative_queue_n[k].cbo_op      = a_cbo[dst];
+          speculative_queue_n[k].trans_id    = a_tid[dst];
+          speculative_queue_n[k].wait_rvalid = a_wr[dst];
+          speculative_queue_n[k].fwd_keep    = a_fk[dst];
+          speculative_queue_n[k].valid       = 1'b1;
+        end else begin
+          speculative_queue_n[k].valid    = 1'b0;
+          speculative_queue_n[k].fwd_keep = 1'b0;
+        end
+      end
+      speculative_read_pointer_n  = '0;
+      speculative_write_pointer_n = $clog2(DEPTH_SPEC)'(nlive);
+    end
+
     // G1ah: a spec store that a live load already forwarded from must
     // drain. Mark those entries before cancel/flush compact.
-    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 && load_paddr_valid_i) begin
+    if (LEGACY_SMT_KEEP && load_paddr_valid_i) begin
       for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
         if (speculative_queue_n[i].valid &&
             pa_eq(speculative_queue_n[i].address, load_paddr_i)) begin
@@ -203,7 +298,7 @@ module store_buffer
     // still in the spec queue (getprop `sw` mepc=0x12eb2 mcause=6).
     // Snapshot then rewrite dense [0 .. live) so pointers match status_cnt.
     if ((|cancelled_mask_i && !flush_i) ||
-        (flush_i && CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1)) begin
+        (flush_i && LEGACY_SMT_KEEP)) begin
       old_cnt = speculative_status_cnt_n;
       live = '0;
       dst  = '0;
@@ -220,11 +315,11 @@ module store_buffer
           src = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
           if (speculative_queue_n[src].valid &&
 `ifdef G6LC_FETCH_B
-              ((CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+              ((LEGACY_SMT_KEEP &&
                 speculative_queue_n[src].fwd_keep) ||
                !cancelled_mask_i[speculative_queue_n[src].trans_id])
 `else
-              ((CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+              ((LEGACY_SMT_KEEP &&
                 speculative_queue_n[src].fwd_keep) ||
                (!flush_i &&
                 !cancelled_mask_i[speculative_queue_n[src].trans_id]))
@@ -416,13 +511,18 @@ module store_buffer
       end
     end
     for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+      // Age filter is load-bearing for LIVENESS here, not just for data:
+      // commit is in-order, so an older load that stalls on a YOUNGER store
+      // can never progress -- that store cannot commit until the load retires.
       if (speculative_queue_q[i].valid &&
+          spec_visible(speculative_queue_q[i].trans_id) &&
           (speculative_queue_q[i].address[11:0] == page_offset_i)) begin
         page_offset_matches_now = 1'b1;
         break;
       end
     end
-    if (valid_without_flush_i && (paddr_i[11:0] == page_offset_i)) begin
+    if (valid_without_flush_i && spec_visible(trans_id_i) &&
+        (paddr_i[11:0] == page_offset_i)) begin
       page_offset_matches_now = 1'b1;
     end
 
@@ -433,7 +533,7 @@ module store_buffer
          (page_offset_sticky_po_v_q && (page_offset_sticky_po_q == page_offset_i)) ||
          (page_offset_sticky_v_q &&
           pa_eq(page_offset_sticky_pa_q, load_paddr_i)) ||
-         (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+         (LEGACY_SMT_KEEP &&
           g1ao_hold_v_q && pa_eq(g1ao_hold_pa_q, load_paddr_i)));
   end
 
@@ -464,6 +564,7 @@ module store_buffer
       for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
         sidx = speculative_read_pointer_q + $clog2(DEPTH_SPEC)'(k);
         if (speculative_queue_q[sidx].valid &&
+            spec_visible(speculative_queue_q[sidx].trans_id) &&
             pa_eq(speculative_queue_q[sidx].address, load_paddr_i)) begin
           for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
             if (speculative_queue_q[sidx].be[b]) begin
@@ -473,7 +574,8 @@ module store_buffer
           end
         end
       end
-      if (valid_without_flush_i && pa_eq(paddr_i, load_paddr_i)) begin
+      if (valid_without_flush_i && spec_visible(trans_id_i) &&
+          pa_eq(paddr_i, load_paddr_i)) begin
         for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
           if (be_i[b]) begin
             data_m[8*b+:8] = data_i[8*b+:8];
@@ -488,7 +590,7 @@ module store_buffer
     // G1ao: if the live STQ already drained, replay the last
     // forward to a same-PA load. ld t1 took 0x2c8; ld t3 of
     // 8(sp) missed. SMT+SS. Not G1af (all spec nofwd).
-    if (CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1 &&
+    if (LEGACY_SMT_KEEP &&
         !(|be_m) && g1ao_hold_v_q && load_paddr_valid_i &&
         pa_eq(g1ao_hold_pa_q, load_paddr_i)) begin
       data_m        = g1ao_hold_data_q;
@@ -558,7 +660,7 @@ module store_buffer
       g1ao_hold_data_q <= '0;
       g1ao_hold_be_q   <= '0;
     end else if (flush_i ||
-                 !(CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1)) begin
+                 !(LEGACY_SMT_KEEP)) begin
       g1ao_hold_v_q <= 1'b0;
     end else if (valid_i && g1ao_hold_v_q &&
                  pa_eq(paddr_i, g1ao_hold_pa_q)) begin
@@ -645,6 +747,21 @@ module store_buffer
                  smt_store_cycle, load_paddr_i, st_fwd_valid_o, st_fwd_data_o, st_fwd_be_o, g1ao_hold_hit);
     end
   end
+  // Witness for the forwarding age contract: does any speculative entry that is
+  // NOT older than the querying load overlap the bytes it is taking?
+  logic ooo_younger_spec_hit;
+  always_comb begin
+    ooo_younger_spec_hit = 1'b0;
+    if (CVA6Cfg.OoOEn && load_paddr_valid_i) begin
+      for (int unsigned i = 0; i < DEPTH_SPEC; i++)
+        if (speculative_queue_q[i].valid &&
+            !ooo_older(speculative_queue_q[i].trans_id, load_trans_id_i) &&
+            pa_eq(speculative_queue_q[i].address, load_paddr_i) &&
+            (|(speculative_queue_q[i].be & st_fwd_be_o)))
+          ooo_younger_spec_hit = 1'b1;
+    end
+  end
+
   // assert that commit is never set when we are flushing this would be counter intuitive
   // as flush and commit is decided in the same stage
   commit_and_flush :
@@ -663,6 +780,27 @@ module store_buffer
   commit_buffer_overflow :
   assert property (@(posedge clk_i) rst_ni && (commit_status_cnt_q == $bits(commit_status_cnt_q)'(DEPTH_COMMIT)) |-> !commit_i)
   else $error("[Commit Queue] You are trying to commit a store although the buffer is full");
+
+  // U5.4 OoO: the store handed to memory must be the one commit is retiring.
+  // Commit is in program order, so the committing store is the oldest live
+  // store and therefore the queue head. This catches any program-order
+  // insertion error directly, at the handoff rather than in a later value.
+  ooo_commit_is_oldest :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   (CVA6Cfg.OoOEn && commit_i) |->
+                   (speculative_queue_q[speculative_read_pointer_q].valid &&
+                    speculative_queue_q[speculative_read_pointer_q].trans_id == commit_trans_id_i))
+  else
+    $error("[Speculative Queue] OoO commit handoff took tid %0d, commit is retiring tid %0d",
+           speculative_queue_q[speculative_read_pointer_q].trans_id, commit_trans_id_i);
+
+  // U5.4 OoO: a store younger than the querying load must never reach it.
+  ooo_no_younger_forward :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   (CVA6Cfg.OoOEn && load_paddr_valid_i && st_fwd_valid_o) |->
+                   !ooo_younger_spec_hit)
+  else $error("[Speculative Queue] OoO load tid %0d forwarded from a younger store",
+              load_trans_id_i);
   //pragma translate_on
 endmodule
 

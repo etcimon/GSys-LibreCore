@@ -31,6 +31,20 @@ ALLOWED = {
         re.compile(r"(ExecuteRegionLength:\s*1024'\(\{\s*64'h)([0-9A-Fa-f_]+)()"),
         r"[0-9A-Fa-f_]+",
     ),
+    # The in-order control arm for an OoO investigation. Clearing this field is
+    # the "reduce the knob to baseline" operation `check_cfg` already demands be
+    # bit-identical, and every OoO legality assertion is of the form
+    # !(OoOEn && X), so the rest of the package stays valid untouched. Building
+    # both arms from ONE source state is the whole point of this overlay: editing
+    # the config package between builds leaves the arms unattributable to any
+    # recorded source. check_cfg still runs on the overlaid package, so an
+    # illegal combination is refused at elaboration rather than here.
+    # Anchored at the start of the field line so it cannot also match the
+    # distinct `SliceOoOEn` field, which the uniqueness check correctly rejected.
+    "OoOEn": (
+        re.compile(r"(^\s+OoOEn:\s*bit'\()([01])(\))", re.M),
+        r"[01]",
+    ),
 }
 
 EXEC_DRAM_LEN_MAX = 0x4000_0000

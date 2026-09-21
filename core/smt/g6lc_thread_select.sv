@@ -52,6 +52,10 @@ module g6lc_thread_select
     // I4bi: t0_extra was set on the do_switch cycle (valid with switch_o).
     output logic t0_extra_o,
     output logic switch_on_miss_o,
+    // Zihintpause yield hint (one bit per hart). Advisory only: it can defer a
+    // hart behind an unpaused peer, never gate readiness, and the anti-starvation
+    // limit below still guarantees the hinting hart's forward service.
+    input logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] pause_hint_i,
     output logic switch_on_quantum_o,
     output logic switch_on_starve_o
 );
@@ -100,11 +104,18 @@ module g6lc_thread_select
     logic          found_peer, found_clean, found_starve;
     logic          do_switch;
     logic          reason_miss, reason_quantum, reason_starve;
+    // Sticky per-hart yield request: set when that hart retires a PAUSE, cleared
+    // when it is next activated. No counter, so a hart can never be held off by
+    // its own stale hint.
+    localparam bit PAUSE_EN = (CVA6Cfg.ZihintpauseEn && NH > 1);
+    logic [NH-1:0] pause_req_q, pause_req_d;
+    logic [HID_W-1:0] peer_unpaused;
+    logic          found_unpaused, reason_yield;
     logic switch_q;
 `ifdef G6LC_FETCH_B
     logic drain_pending_q, drain_pending_d;
     logic [HID_W-1:0] drain_peer_q, drain_peer_d;
-    logic [2:0] drain_reason_q, drain_reason_d;
+    logic [3:0] drain_reason_q, drain_reason_d;
     assign quiesce_o = drain_pending_q | switch_q;
 `else
     assign quiesce_o = 1'b0;
@@ -123,9 +134,11 @@ module g6lc_thread_select
       peer_any     = active_q;
       peer_clean   = active_q;
       peer_starve  = active_q;
+      peer_unpaused = active_q;
       found_peer   = 1'b0;
       found_clean  = 1'b0;
       found_starve = 1'b0;
+      found_unpaused = 1'b0;
       for (int unsigned k = 0; k < NH; k++) begin
         automatic logic [HID_W-1:0] cand;
         cand = HID_W'((int'(rr_ptr_q) + k) % NH);
@@ -137,6 +150,11 @@ module g6lc_thread_select
           if (!miss_or_block[cand] && !found_clean) begin
             peer_clean  = cand;
             found_clean = 1'b1;
+          end
+          // A peer that has itself yielded is not a better place to send work.
+          if (PAUSE_EN && !pause_req_q[cand] && !found_unpaused) begin
+            peer_unpaused  = cand;
+            found_unpaused = 1'b1;
           end
         end
       end
@@ -174,6 +192,10 @@ module g6lc_thread_select
       reason_miss    = 1'b0;
       reason_quantum = 1'b0;
       reason_starve  = 1'b0;
+      reason_yield   = 1'b0;
+      // Latch a fresh hint; clear the active hart's own request once it has been
+      // given the core again, so a hart is never held off by a stale yield.
+      pause_req_d    = PAUSE_EN ? (pause_req_q | pause_hint_i) : '0;
       t0_extra_d     = t0_extra_q;
       next_peer      = peer_any;
       for (int unsigned h = 0; h < NH; h++) starve_d[h] = starve_q[h];
@@ -214,6 +236,13 @@ module g6lc_thread_select
             do_switch     = 1'b1;
             reason_starve = 1'b1;
             next_peer     = peer_starve;
+            // Ranked below anti-starvation so a yield can never deny the service
+            // floor, and requiring an UNPAUSED peer so two yielding harts fall
+            // through to the normal policy instead of ping-ponging.
+          end else if (PAUSE_EN && pause_req_q[active_q] && found_unpaused) begin
+            do_switch    = 1'b1;
+            reason_yield = 1'b1;
+            next_peer    = peer_unpaused;
           end else if (fetch_fire_i &&
                        (quantum_q >= Q_W'(Q_MAX - 1)) && found_peer) begin
             do_switch      = 1'b1;
@@ -259,6 +288,7 @@ module g6lc_thread_select
         reason_miss    = 1'b0;
         reason_quantum = 1'b0;
         reason_starve  = 1'b0;
+        reason_yield   = 1'b0;
       end
 
 `ifdef G6LC_FETCH_B
@@ -269,17 +299,19 @@ module g6lc_thread_select
         reason_miss = do_switch && drain_reason_q[2];
         reason_quantum = do_switch && drain_reason_q[1];
         reason_starve = do_switch && drain_reason_q[0];
+        reason_yield = do_switch && drain_reason_q[3];
         if (do_switch || !hart_ready_i[drain_peer_q]) drain_pending_d = 1'b0;
       end else begin
         if (do_switch && !hold_i && !flush_i) begin
           drain_pending_d = 1'b1;
           drain_peer_d = next_peer;
-          drain_reason_d = {reason_miss, reason_quantum, reason_starve};
+          drain_reason_d = {reason_yield, reason_miss, reason_quantum, reason_starve};
         end
         do_switch = 1'b0;
         reason_miss = 1'b0;
         reason_quantum = 1'b0;
         reason_starve = 1'b0;
+        reason_yield = 1'b0;
       end
 `endif
       // Hold wins over policy: no switch. Also *freeze* quantum/starve aging —
@@ -291,6 +323,7 @@ module g6lc_thread_select
         reason_miss    = 1'b0;
         reason_quantum = 1'b0;
         reason_starve  = 1'b0;
+        reason_yield   = 1'b0;
         // Zero quantum under hold so when hold drops the active hart always
         // receives a full fetch quantum (freeze-high caused immediate RR steal).
         quantum_d      = '0;
@@ -342,6 +375,7 @@ module g6lc_thread_select
         drain_reason_q <= '0;
 `endif
         active_q         <= '0;
+        pause_req_q      <= '0;
         rr_ptr_q         <= HID_W'(1 % NH);  // prefer hart 1 as first alternate
         quantum_q        <= '0;
         activate_age_q   <= '0;
@@ -361,6 +395,11 @@ module g6lc_thread_select
         drain_reason_q <= drain_reason_d;
 `endif
         active_q         <= active_d;
+        // Clear only on an activation TRANSITION: the hint is raised while the
+        // hart is still active, so clearing every active cycle would erase it in
+        // the same cycle it was set and the yield would never happen.
+        pause_req_q <= !PAUSE_EN ? '0 :
+            (active_d != active_q) ? (pause_req_d & ~(NH'(1) << active_d)) : pause_req_d;
         rr_ptr_q         <= rr_ptr_d;
         quantum_q        <= quantum_d;
         activate_age_q   <= activate_age_d;
@@ -386,6 +425,59 @@ module g6lc_thread_select
     // issue_fire reserved for future issue-quantum policy
     logic _unused_issue;
     assign _unused_issue = issue_fire_i;
+
+    //pragma translate_off
+`ifdef G6LC_FETCH_B
+    // Read-only service/handoff observer. `state` is edge-compressed: it prints
+    // only when a reported field changes, so the reader reconstructs intervals.
+    // The cycle counter must match smt_flow_cycle in scoreboard.sv (increment
+    // first, then print) or the reported cycles cannot be correlated.
+    localparam int unsigned SMT_SCHED_W = HID_W + 4 * NH + 4;
+    bit smt_sched_trace;
+    int unsigned smt_sched_cycle;
+    int unsigned smt_sched_decide;
+    bit smt_sched_seen;
+    logic [SMT_SCHED_W-1:0] smt_sched_shadow, smt_sched_now;
+    initial smt_sched_trace = $test$plusargs("smt_sched_trace");
+    always @(posedge clk_i) begin
+      if (!rst_ni) begin
+        smt_sched_cycle  = 0;
+        smt_sched_decide = 0;
+        smt_sched_seen   = 1'b0;
+        smt_sched_shadow = '0;
+      end else if (smt_sched_trace) begin
+        smt_sched_cycle = smt_sched_cycle + 1;
+        smt_sched_now = {active_q, hart_ready_i, hart_dmiss_i, hart_imiss_i, hart_block_i,
+                         quiesce_o, hold_i, trap_hold_i, flush_i};
+        if (!smt_sched_seen || (smt_sched_now !== smt_sched_shadow)) begin
+          $display("[smt-sched] state cycle=%0d active=%0d ready=%b dmiss=%b imiss=%b block=%b quiesce=%b hold=%b trap=%b flush=%b",
+                   smt_sched_cycle, active_q, hart_ready_i, hart_dmiss_i, hart_imiss_i,
+                   hart_block_i, quiesce_o, hold_i, trap_hold_i, flush_i);
+          smt_sched_seen   = 1'b1;
+          smt_sched_shadow = smt_sched_now;
+        end
+        // A drain cannot be requested while one is pending, so decide and its
+        // completion never coincide and the reader can pair them one to one.
+        if (drain_pending_d && !drain_pending_q) begin
+          smt_sched_decide = smt_sched_cycle;
+          $display("[smt-sched] decide cycle=%0d from=%0d to=%0d reason=%b",
+                   smt_sched_cycle, active_q, drain_peer_d, drain_reason_d);
+        end else if (drain_pending_q && !drain_pending_d) begin
+          // Cleared either by the real switch or because the target peer stopped
+          // being ready; the second case is an abort, not a handoff.
+          if (do_switch)
+            $display("[smt-sched] switch cycle=%0d from=%0d to=%0d reason=%b waited=%0d",
+                     smt_sched_cycle, active_q, drain_peer_q, drain_reason_q,
+                     smt_sched_cycle - smt_sched_decide);
+          else
+            $display("[smt-sched] abort cycle=%0d from=%0d to=%0d reason=%b waited=%0d",
+                     smt_sched_cycle, active_q, drain_peer_q, drain_reason_q,
+                     smt_sched_cycle - smt_sched_decide);
+        end
+      end
+    end
+`endif
+    //pragma translate_on
 
   end
 

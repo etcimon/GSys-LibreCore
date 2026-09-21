@@ -60,9 +60,18 @@ on; zeros when off. RVFI/commit observe tags via the scoreboard entry.
 
 | Package | Role |
 |---|---|
-| `g6lc64_ooo_server_config_pkg.sv` | Server: wide issue, multi-core×hart, L2/L3 auto, deep spec, memdep |
-| `g6lc64_ooo_config_pkg.sv` | Dual-issue OoO lite (area-lean bring-up) |
+| `g6lc64_ooo_server_config_pkg.sv` | Server: wide issue, multi-core×hart, L2/L3 auto, deep spec, memdep — **refused at elaboration** (FP *and* hart guards) |
+| `g6lc64_ooo_config_pkg.sv` | Dual-issue OoO lite (area-lean bring-up) — **refused at elaboration** (FP guard) |
+| `g6lc64_ooo_int_config_pkg.sv` | Integer-only OoO: the **only OoO package that elaborates, lints and synthesizes** today |
 | Default `cv64a6_imafdc_sv39` (etc.) | `OoOEn=0` identity |
+
+`check_cfg` refuses `OoOEn && FpPresent` and `OoOEn && NrHarts > 1`. These are
+**aliasing** gaps, not conservative ones: outside `g6lc_rename` the OoO block contains
+no hart signal at all, and it has no FP register class, so FP results are neither
+renamed nor tracked in the busy table. `g6lc64_ooo_int` clears every FP format and
+keeps `NrHarts=1`, which is what makes it legal. Treat it as a bring-up and
+verification baseline — it has no independent-reference comparison and no boot
+evidence, so it is not a qualified product.
 
 ROB / IQ / LSQ / PRF depths scale from issue width when left at 0 in package
 builders (see `build_config_pkg` / package sources).
@@ -92,6 +101,10 @@ events. Prefer counters + RVFI when debugging mispredict or memory-order bugs.
 | Memdep / STL | `verif/tests/custom/ooo/ooo_mem_dep.S` |
 
 ```bash
+# The OoO target that actually elaborates end to end:
+g6lc-build verify --lint --synth --target g6lc64_ooo_int
+# These two are refused by check_cfg until the FP class (Phase 5) and the
+# per-hart namespaces (Phase 4) land; the refusal is the intended behaviour.
 g6lc-build verify --target g6lc64_ooo
 g6lc-build verify --target g6lc64_ooo_server
 g6lc-build test --suite ooo-l3-tests

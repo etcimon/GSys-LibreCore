@@ -1627,6 +1627,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       g6lc64_stream8: 7,
       g6lc64_ooo_server: 4,
       g6lc64_server_math: 7,
+      // First full-core OoO configuration that legally elaborates: g6lc64_ooo
+      // and _server both trip check_cfg (FpPresent / NrHarts>1), so this is the
+      // only OoO target whose warning count can be gated end to end today.
+      g6lc64_ooo_int: 11,
     },
     failOnMissingBaseline: false,
   },
@@ -1962,6 +1966,22 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
         verilator: {
           target: "g6lc64_ooo",
+          warningBudget: 650,
+        },
+      },
+      {
+        // g6lc64_ooo trips check_cfg's !(OoOEn && FpPresent) guard because it
+        // sets RVF/RVD=1. This integer-only package is the OoO configuration
+        // that legally elaborates today, so it is the one that can be linted
+        // end to end rather than refused.
+        id: "diag-ooo-int-lint",
+        description: "Verilator lint of the legal integer-only g6lc64_ooo_int package.",
+        compartment: "ooo",
+        kind: "verilator-lint",
+        tools: ["verilator"],
+        optional: true,
+        verilator: {
+          target: "g6lc64_ooo_int",
           warningBudget: 650,
         },
       },

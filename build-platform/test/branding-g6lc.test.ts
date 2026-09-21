@@ -54,6 +54,7 @@ const FORBIDDEN_MODULE_TOKENS: RegExp[] = [
 const REQUIRED_CONFIG_PKGS = [
   "g6lc64_smt2_config_pkg.sv",
   "g6lc64_ooo_config_pkg.sv",
+  "g6lc64_ooo_int_config_pkg.sv",
   "g6lc64_ooo_server_config_pkg.sv",
   "g6lc64_server_math_config_pkg.sv",
   "g6lc64_server_math_v_config_pkg.sv",

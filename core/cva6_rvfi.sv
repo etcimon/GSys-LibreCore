@@ -244,6 +244,8 @@ module cva6_rvfi
 
   logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rs1;
   logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rs2;
+  logic [CVA6Cfg.NrIssuePorts-1:0] operand_valid;
+  logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] operand_tid;
 
   logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_intr;
 
@@ -322,6 +324,8 @@ module cva6_rvfi
 
   assign rs1 = instr.rs1;
   assign rs2 = instr.rs2;
+  assign operand_valid = instr.operand_valid;
+  assign operand_tid = instr.operand_tid;
 
   assign commit_instr_pc = instr.commit_instr_pc;
   assign commit_instr_op = instr.commit_instr_op;
@@ -353,7 +357,13 @@ module cva6_rvfi
 
   assign lsu_addr = instr.lsu_ctrl_vaddr;
   assign lsu_rmask = instr.lsu_ctrl_fu == LOAD ? instr.lsu_ctrl_be : '0;
-  assign lsu_wmask = instr.lsu_ctrl_fu == STORE ? instr.lsu_ctrl_be : '0;
+  // A load-reserved is dispatched down the STORE path like every other AMO, but
+  // it only reads memory. Reporting a write mask for it makes the tracer emit a
+  // memory write the architecture never performs, which diverges from any
+  // reference model on the first LR.
+  assign lsu_wmask = (instr.lsu_ctrl_fu == STORE &&
+                      !(CVA6Cfg.RVA && instr.lsu_ctrl_op inside {AMO_LRW, AMO_LRD}))
+      ? instr.lsu_ctrl_be : '0;
   assign lsu_addr_trans_id = instr.lsu_ctrl_trans_id;
   assign branch_trans_id = instr.branch_trans_id;
 
@@ -458,6 +468,21 @@ module cva6_rvfi
         };
       end
     end
+    // Operands are READ at issue, not at dispatch. In order those are the same
+    // instruction in the same cycle, so the capture above is sound. Under OoO
+    // the issue queue offers an older ready entry while a different instruction
+    // is being dispatched, so keying rs1/rs2 by dispatch port records another
+    // instruction's operand values -- which is how AMO mem_wdata, computed from
+    // rs2, came out as the pre-operation value. Re-capture them against the
+    // identity that actually owns them.
+    if (CVA6Cfg.OoOEn) begin
+      for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+        if (operand_valid[i]) begin
+          mem_n[operand_tid[i]].rs1_rdata = rs1[i];
+          mem_n[operand_tid[i]].rs2_rdata = rs2[i];
+        end
+      end
+    end
     if (branch_valid_iti) begin
       mem_n[branch_trans_id].branch_valid = branch_valid_iti;
       mem_n[branch_trans_id].is_taken = is_taken_iti;
@@ -522,7 +547,12 @@ module cva6_rvfi
       rvfi_instr_o[i].mem_addr <= mem_q[commit_pointer[i]].lsu_addr;
       // So far, only write paddr is reported. TODO: read paddr
       rvfi_instr_o[i].mem_paddr <= mem_paddr;
-      rvfi_instr_o[i].mem_wmask <= mem_q[commit_pointer[i]].lsu_wmask;
+      // A store-conditional that fails performs no memory write. The mask is
+      // captured at LSU time, before the outcome is known, so it has to be
+      // suppressed here where the result is available: rd == 0 is success.
+      rvfi_instr_o[i].mem_wmask <= (CVA6Cfg.RVA &&
+                                    is_amo_sc(commit_instr_op[i]) && |wdata[i])
+          ? '0 : mem_q[commit_pointer[i]].lsu_wmask;
 
       // For AMO operations, compute the actual write value
       // Note: AMO operations write a computed value to memory, not the original register value

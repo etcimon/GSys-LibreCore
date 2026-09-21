@@ -245,6 +245,7 @@ module load_store_unit
   logic                             page_offset_matches;
   logic [         CVA6Cfg.PLEN-1:0] load_paddr;
   logic                             load_paddr_valid;
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id;
   logic                             st_fwd_valid;
   logic [         CVA6Cfg.XLEN-1:0] st_fwd_data;
   logic [     (CVA6Cfg.XLEN/8)-1:0] st_fwd_be;
@@ -564,6 +565,8 @@ module load_store_unit
       .page_offset_i        (page_offset),
       .load_paddr_i         (load_paddr),
       .load_paddr_valid_i   (load_paddr_valid),
+      .load_trans_id_i      (load_trans_id),
+      .commit_tran_id_i,
       .dcache_wbuffer_empty_i,
       .page_offset_matches_o(page_offset_matches),
       .st_fwd_valid_o       (st_fwd_valid),
@@ -614,6 +617,7 @@ module load_store_unit
       .page_offset_o        (page_offset),
       .load_paddr_o         (load_paddr),
       .load_paddr_valid_o   (load_paddr_valid),
+      .load_trans_id_o      (load_trans_id),
       .page_offset_matches_i(page_offset_matches),
       .store_buffer_empty_i (store_buffer_empty),
       .st_fwd_valid_i       (st_fwd_valid),
@@ -915,6 +919,7 @@ module load_store_unit
   ) lsu_bypass_i (
       .clk_i,
       .rst_ni,
+      .cancelled_mask_i,
       .flush_i,
       .lsu_req_i      (lsu_req_i),
       .lsu_req_valid_i(lsu_valid_i),

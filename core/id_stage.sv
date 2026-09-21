@@ -134,6 +134,9 @@ module id_stage #(
     input logic [CVA6Cfg.XLEN-1:0] hart_id_i,
     // U6.1 SMT active thread tag (0 when NrHarts==1)
     input logic [((CVA6Cfg.NrHarts <= 1) ? 1 : $clog2(CVA6Cfg.NrHarts))-1:0] smt_hart_id_i,
+    // Zihintpause yield hint, one bit per hart, pulsed when a PAUSE is accepted
+    // into issue. A hint only, never a readiness or correctness signal.
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] smt_pause_hint_o,
     input logic compressed_ready_i,
     //JVT
     input jvt_t jvt_i,
@@ -171,8 +174,11 @@ module id_stage #(
   // they start at 0, so nothing clears them: the checker's always_ff below is
   // deliberately their only writer.
   int unsigned i1_bad, i1_seen;
+  // Early decode-supply trace, opt-in for the same reason as the oracle above.
+  logic id_dbg_trace;
   initial begin
     i1_chk_en = $test$plusargs("fetch_i1_check");
+    id_dbg_trace = $test$plusargs("id_dbg_trace");
   end
 //pragma translate_on
 
@@ -402,6 +408,22 @@ module id_stage #(
         is_illegal_deco[0]    = is_illegal_cvxif_i;
         instruction_deco[0]   = instruction_cvxif_i;
         is_compressed_deco[0] = is_compressed_cvxif_i;
+      end
+    end
+  end
+
+  // Zihintpause (PAUSE = fence w,0 with rs1=rd=x0, imm=0x010). The decoder folds
+  // it into a NOP, so recover it from the expanded instruction and report it to
+  // thread select. Wrong-path decode can only cost the hinting hart a voluntary
+  // yield, never correctness, and thread select keeps its own service floor.
+  always_comb begin
+    smt_pause_hint_o = '0;
+    if (CVA6Cfg.ZihintpauseEn && CVA6Cfg.NrHarts > 1) begin
+      for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+        if (fetch_entry_valid_i[i] && issue_instr_ack_i[i] &&
+            instruction_deco[i] == 32'h0100_000F) begin
+          smt_pause_hint_o[fetch_entry_i[i].hart_id] = 1'b1;
+        end
       end
     end
   end
@@ -1180,7 +1202,9 @@ module id_stage #(
         for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) issue_n[i].valid = 1'b0;
       end
 //pragma translate_off
-      if ($time() < 200000)
+      // Opt-in: ungated this floods ~134 MB into every run's log, which both
+      // hides real output and costs the verdict reader time and memory.
+      if (id_dbg_trace && $time() < 200000)
         for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++)
           if (fetch_entry_valid_i[i])
             $display("[id-dbg] t=%0t port=%0d fetch_addr=%h instr=%h is_illegal=%b dec_pc=%h dec_ex=%b",

@@ -81,6 +81,10 @@ module store_unit
     input logic [11:0] page_offset_i,
     input logic [CVA6Cfg.PLEN-1:0] load_paddr_i,
     input logic                    load_paddr_valid_i,
+    // OoO program-order keys: querying load identity and the oldest live
+    // instruction (age anchor). Both are inert when OoOEn is 0.
+    input logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id_i,
+    input logic [CVA6Cfg.TRANS_ID_BITS-1:0] commit_tran_id_i,
     // R3a cont.13: D$ wbuffer empty for STQ page-offset sticky release
     input logic dcache_wbuffer_empty_i,
     // Address check result - load_unit
@@ -447,6 +451,8 @@ module store_unit
       .page_offset_i,
       .load_paddr_i,
       .load_paddr_valid_i,
+      .load_trans_id_i,
+      .commit_trans_id_i(commit_tran_id_i),
       .dcache_wbuffer_empty_i,
       .page_offset_matches_o,
       .st_fwd_valid_o,

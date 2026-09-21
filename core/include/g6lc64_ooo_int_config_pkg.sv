@@ -5,8 +5,15 @@
 // SPDX-License-Identifier: Apache-2.0 WITH SHL-2.0
 // You may obtain a copy of the License at https://solderpad.org/licenses/
 //
-// U5 production OoO lite: 2-issue rename/IQ/ROB/LSQ + DeepSpec + MemDepPred.
-// Leaner than g6lc64_ooo_server (4-issue / multi-core). Identity packages keep OoOEn=0.
+// U5 integer-only OoO baseline: 2-issue rename/IQ/ROB/LSQ + DeepSpec + MemDepPred,
+// with the FP register class OFF so the configuration is LEGAL today.
+// g6lc64_ooo sets RVF/RVD=1 and therefore trips config_pkg check_cfg
+//   assert (!(Cfg.OoOEn && Cfg.FpPresent));
+// because core/ooo/** has no FP register class: FP results are neither renamed nor
+// tracked in the busy table. This package keeps NrHarts=1 and clears every FP format,
+// so FpPresent computes to 0 and both OoO legality guards pass. It is the shippable
+// full-core OoO baseline; g6lc64_ooo returns once Phase 5 adds the FP class, and the
+// NrHarts>1 guard stays until Phase 4 adds per-hart namespaces.
 // See architecture/out-of-order/README.md
 // Copyright (c) 2026 Etienne Cimon
 // Original Author: Jean-Roch COULON - Thales
@@ -14,7 +21,7 @@
 // ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
 // The original work of the copyright holders named above remains licensed
 // under the license stated above, and that grant is unaffected.
-// Modifications (c) 2026 Etienne Cimon: out-of-order profile derived from the Thales config package template.
+// Modifications (c) 2026 Etienne Cimon: integer-only out-of-order profile derived from the Thales config package template.
 // Etienne Cimon offers this file AS A WHOLE under the dual licence below.
 // Expressed as a non-SPDX tag because SPDX has no operator for "whole is X,
 // portions remain Y"; the machine-readable form is in REUSE.toml.
@@ -25,8 +32,9 @@ package cva6_config_pkg;
 
   localparam CVA6ConfigXlen = 64;
 
-  localparam CVA6ConfigRVF = 1;
-  localparam CVA6ConfigRVD = 1;
+  // FP off: core/ooo/** has no FP register class yet (Phase 5).
+  localparam CVA6ConfigRVF = 0;
+  localparam CVA6ConfigRVD = 0;
   localparam CVA6ConfigF16En = 0;
   localparam CVA6ConfigF16AltEn = 0;
   localparam CVA6ConfigF8En = 0;

@@ -258,6 +258,18 @@ Configure the proxy with environment variables (`TH_REMOTE_HOST`, `TH_REMOTE_ROO
 `TH_RSYNC_BIN`, `TH_SSH_PASSPHRASE`, `TH_SSH_PASSPHRASE_FILE`). Store credentials only in untracked
 files (e.g. `~/.config/librecore/th-remote.pass`), never in the repository.
 
+**Remote throughput policy (user request, 2026-09-21):** maximize useful remote parallelism,
+not nested oversubscription. Probe CPU affinity/count, available RAM, active work and free disk
+before a batch; budget the sum of worker compiler/model threads against that capacity. The current
+server reports 12 logical CPUs and about 115 GiB available RAM: use up to 12 aggregate compiler
+jobs (for existing -j4 leaf runners, three concurrent isolated runs). Keep unique run tags and
+source/output directories; multi-script `remote py --threads N` now isolates each script's outputs.
+The protected model remains at its pinned single simulation thread; changing compiled thread count
+requires a separate build identity and qualification. Run independent leaf/formal/checker tasks
+alongside it where budgets permit. Serialize shared-tree mutation and experiments explicitly testing
+host-load effects. Never kill another live workload to make room: routine run/soak/di/shell preflight
+now refuses overlap without automatic pkill. Retain incomplete/error results; no retry-to-green.
+
 **Windows artifact storage (2026-09-15):** E: exhausted space during a large
 proxy pull. The user approved new diagnostic artifacts under
 `C:/Users/etcim/AppData/Local/Temp/cva6-artifacts/`; do not delete existing E:
@@ -389,6 +401,7 @@ subchapter at a time without rewriting a monolith.
 | `AGENTS-specs-coverage.md` | **Standing traceability** (§0.6): derived, status-only spec coverage summary (no file refs). |
 | `AGENTS-dts-validation.md` | **Standing traceability** (§0.6): Linux RISC-V device-tree bindings ⇄ upstream reference DTS ⇄ CVA6 `.dts` ⇄ CVA6 RTL cross-validation. Fetched via `build-platform/scripts/fetch-linux-dts.{sh,ps1}`. |
 | `architecture/` (+ `README.md`) | Non-compiled **scaffold** + target-layout blueprint: extension points for future growth (branch prediction, speculation, SMT, multi-core, L2/L3, more spec features). Not in any flist. Live RTL summary + upgrade programs live here too. |
+| `core/ooo/AGENTS-ooo-contract.md` (+ `AGENTS-ooo-plan.md`) | **Architecture contract of record** for the config-gated OoO backend and its path to mixed-resident SMT2: structures/owners, the age key, kill identities, issue legality, timing cones, configuration guards, tranche exits. History is immutable in `architecture/out-of-order/log-2026-09.md`; a claim absent from the contract is not a claim. |
 | `architecture/sv-timing/` | **Pointer only** → package design under `sv-timing/architecture/`. |
 | `architecture/uncore/` (+ `README.md`) | Non-compiled **scaffold**: per-domain uncore controller/PHY integration outlines (DDR4, Ethernet, PCIe, storage, HDMI). Not in any flist. |
 | `AGENTS-build.md` | Thin pointer → **`build-platform/AGENTS.md`** (Bun + TypeScript automation spine: probe/tools/diag/verify/vendor/mb/tech/timings). |

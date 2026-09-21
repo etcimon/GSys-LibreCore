@@ -16,6 +16,7 @@ def main():
     source = out / 'source'
     source.mkdir()
     formal = os.environ.get('OOO_RENAME_FORMAL') == '1'
+    recovery = os.environ.get('OOO_RECOVERY_FORMAL') == '1'
     names = (['g6lc_rename.sv', 'g6lc_ooo_rename_props.sv', 'g6lc_ooo_rename.sby'] if formal else
              ['config_pkg.sv', 'g6lc64_smt2_config_pkg.sv', 'riscv_pkg.sv', 'ariane_pkg.sv',
               'g6lc_ooo_pkg.sv', 'g6lc_rename.sv', 'g6lc_rob.sv', 'g6lc_lsq.sv', 'g6lc_prf.sv',
@@ -32,10 +33,20 @@ def main():
     if negative:
         props = paths['g6lc_ooo_rename_props.sv']
         text = props.read_text()
-        old = "assert (dut.map_q[0] == '0);"
+        old = "assert (dut.map_q[0][0] == '0);"
         if text.count(old) != 1:
             raise RuntimeError('rename checker mutation site changed')
-        props.write_text(text.replace(old, "assert (dut.map_q[0] != '0);"))
+        props.write_text(text.replace(old, "assert (dut.map_q[0][0] != '0);"))
+    recovery_fault = os.environ.get('OOO_RECOVERY_FAULT') == '1'
+    if recovery_fault:
+        if not recovery:
+            raise ValueError('recovery fault requires recovery formal')
+        path = paths['g6lc_ooo_dispatch.sv']
+        text = path.read_text()
+        old = '.issue_ack_i     (iq_issue_ack),'
+        if text.count(old) != 1:
+            raise RuntimeError('recovery fault site changed')
+        path.write_text(text.replace(old, '.issue_ack_i     (issue_ack_i),'))
     (out / 'sources.json').write_text(json.dumps({n: hashlib.sha256(paths[n].read_bytes()).hexdigest()
                                                  for n in names}, indent=2))
     env = os.environ.copy()
@@ -81,6 +92,57 @@ def main():
                        + definitions + '\nendpackage\n'
                        + 'module g6lc_ooo_live_review import g6lc_ooo_review_types::*; (\n' + ports + '\n);\n'
                        + 'g6lc_ooo_dispatch #(.CVA6Cfg(C),.scoreboard_entry_t(sbe_t)) dut(.*);\nendmodule\n')
+    if recovery:
+        checks = r'''
+  logic past_valid = 0;
+  (* keep *) logic recovery_seen_q = 0;
+  integer retained;
+  always_comb begin
+    retained = 0;
+    for (int e = 0; e < C.IqEntries; e++)
+      retained += int'(dut.i_iq.q_chain[e].valid);
+  end
+  always_ff @(posedge clk_i) begin
+    past_valid <= 1;
+    if (!past_valid) assume (!rst_ni);
+    else assume (rst_ni);
+    if (rst_ni) begin
+      if (flush_i || flush_unissued_i)
+        assert (issue_valid_o == 0 && dut.iq_issue_ack == 0 && dispatch_ack_o == 0);
+      if (flush_unissued_i && !flush_i) begin
+        for (int e = 0; e < C.IqEntries; e++)
+          assert (dut.i_iq.q_after_issue[e] == dut.i_iq.q_chain[e]);
+        assert (int'(dut.i_iq.count_d) == retained);
+      end
+      if (flush_unissued_i && !flush_i && |dut.iq_issue_valid && |issue_ack_i)
+        recovery_seen_q <= 1;
+    end
+  end
+'''
+        text = wrapper.read_text()
+        wrapper.write_text(text.replace('endmodule\n', checks + '\nendmodule\n'))
+        common = ('read_slang --std 1800-2017 --top g6lc_ooo_live_review -DFORMAL '
+                  + ' '.join(str(source / n) for n in names if n.endswith('.sv') and not n.startswith('tb_'))
+                  + ' ' + str(wrapper) + '\nprep -top g6lc_ooo_live_review\n'
+                  + 'async2sync\nflatten\nchformal -lower\nmemory_map\nopt\n')
+        results = []
+        for mode in (['fault'] if recovery_fault else ['prove', 'cover']):
+            witness = out / (mode + '-witness.json')
+            goal = '-prove recovery_seen_q 0' if mode == 'cover' else '-prove-asserts'
+            script = out / (mode + '.ys')
+            script.write_text(common + f'sat -seq 4 -set-assumes {goal} -verify -show-ports -dump_json {witness}\n')
+            with (out / (mode + '.log')).open('w') as log:
+                rc = subprocess.run(['yosys', '-s', str(script)], cwd=source, env=env,
+                                    stdout=log, stderr=subprocess.STDOUT, timeout=300).returncode
+            text = (out / (mode + '.log')).read_text()
+            matched = (rc == 0 and 'no model found: SUCCESS!' in text) if mode == 'prove' else (
+                rc != 0 and 'model found: FAIL!' in text and witness.is_file())
+            results.append({'mode': mode, 'rc': rc, 'matched': matched,
+                            'depth': 4, 'scope': 'live dispatch recovery handshake and IQ retention, NH1 NP2 IQ8'})
+            (out / 'result.json').write_text(json.dumps(results, indent=2))
+            if not matched:
+                raise RuntimeError('recovery formal outcome mismatch: ' + mode)
+        return
     script = out / 'synth.ys'
     script.write_text('read_slang --std 1800-2017 --top g6lc_ooo_live_review '
                       + ' '.join(str(source / n) for n in names if n.endswith('.sv') and not n.startswith('tb_'))

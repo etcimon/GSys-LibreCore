@@ -26,6 +26,78 @@ WIP snapshot (SMT2 / QEMU / 100 TOPS / PCIe vs OoO·H·RVV·stream):
 
 ---
 
+## Reopened SMT2+OoO foundation (2026-09-19)
+
+The user has reopened dual-hart work. FP committed mapping/physical zero, per-hart
+reclaim/dispatch identity and commit-time CSR/AMO wakeup are repaired with directed
+controls. Accepted OoO WFI now creates a precise park boundary; OoO no longer
+inherits legacy speculative-store retention across a full flush. Together these
+advance an isolated NH2 integer model to startup PASS664 and LR/SC consumer passes,
+with negative controls. The single-hart FP recovery/status regions match Spike in
+order (199/200 retirements). See the current out-of-order record for exact pins.
+
+This does not enable a default target or remove FP/hart guards. Next gates are
+current structural verification, complete memory-order/late-result ownership,
+traps/interrupts, FP across harts and full-core reference/firmware qualification.
+Mixed residency must precede elastic scheduling/overlap claims; coarse handoff is
+still the measured envelope. Later hierarchy and Linux sign-off tasks stay open.
+
+## Two-issue OoO recovery increment (2026-09-19)
+
+The integer two-issue loop blocker is repaired at the dispatch/IRO acceptance seam:
+a younger redirect suppressed FU execution while an older ready IQ entry was still
+acknowledged and removed. Offers and IQ consumption now share recovery eligibility;
+selective cancellation, store-age ordering and both issue ports are retained.
+Frozen-ELF stage5/stage15/ooo_mem_dep pairs change from timeout to974/883/1057 cycles.
+All16 staged probes and the ILP control pass. This advances the legal integer
+integration gate, not the FP/hart enablement or physical/ISA promotion gates.
+Current tests, formal/structural limits and superseded diagnoses live in
+`out-of-order/README.md`; no single-issue workaround is promoted.
+
+## Shared-core capacity refinement (2026-09-19)
+
+The active implementation plan now treats SMT load balancing as intra-core resource
+arbitration, not equal thread counts across independent CPUs. Existing cpu-map
+siblings remain logical CPUs within one physical core. Promotion order:
+
+1. **COMPLETE (2026-09-19).** Fixed-work measurement with both role orders and
+   same-hart solo controls, separating overlap, batch makespan and finished-worker
+   bookkeeping. Selected cycles are not accepted work, and a short response latency is
+   not a cache-hit oracle — the strided loads were later confirmed to be misses.
+   Measured cost of a sibling: halted in WFI 1.01x (free); spinning on a lock 2.16x,
+   reduced to 1.37x by the Zihintpause yield hint added in step 3; genuinely runnable
+   ~2x per hart with batch 0.90-0.93 and zero instruction-level overlap, worst for the
+   dependency-limited pairing (0.8985) that SMT is supposed to favour. Memory pressure
+   makes it monotonically worse (0.956 -> 0.903 from depth 16 to 256) while load
+   latency stays at 7 cycles throughout, so the loss is unoverlapped serialisation
+   rather than interference.
+2. Qualify minimal read-only HPM/SBI hint ownership. The HPM counters were core-scoped
+   where the ISA requires per-hart CSRs; that is now repaired and re-measured (per-hart
+   banks, per-hart OF/LCOFI, correct own-hart counting and no cross-switch leakage).
+   SBI PMU mapping and counter save/restore remain unqualified before exposing hints.
+3. Add the yield/pause hint. This is the ONLY arbitration item that pays off before
+   mixed residency: a spinning waiter costs the lock holder 2.3456x while producing
+   nothing, recoverable by admission control alone. Key on the architectural hint only.
+4. Complete per-hart OoO namespaces and recovery, then static RS/IQ reservations
+   with an elastic free-capacity pool. Preserve whole-group allocation and per-hart
+   commit order; no eviction of live allocations to meet a new quota.
+5. Only AFTER mixed residency, evaluate biased fetch, opportunistic whole groups,
+   mixed-lane supply and FU-aware fallback. Measured: the dependency-limited pairing
+   returns 0.8985 — worse than compute/memory — with zero instruction-level overlap and
+   every handoff already firing on anti-starvation, so these mechanisms have no headroom
+   on the current drained handoff and a gain measured before Phase 4 is an artifact.
+   That handoff also cannot hide a pending miss by issuing the sibling early.
+6. Add optional coarse QoS admission budgets only with minimum progress, safe
+   completion/drain paths, static fallback and a measured shared-core benefit.
+   Linux affinity/placement must account for shared capacity rather than assuming
+   that each added sibling supplies another full core.
+
+No policy default, PMU ABI, ISA/DTS capability or OoO hart/FP guard changes in this
+measurement increment. The one RTL change is the per-hart HPM/Sscofpmf banking repair
+in step 2, which is a conformance fix rather than a policy change and preserved the
+dual-hart OpenSBI boot at its exact 12,765,628 cycles. Detailed contracts:
+multi-threading and out-of-order records.
+
 ## Broad RTL path review (2026-09-16)
 
 This pass follows live control/data paths across issue/scoreboard/commit, OoO

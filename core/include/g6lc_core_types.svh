@@ -101,6 +101,14 @@
   logic [7:0]                       p_rs1;                                     \
   logic [7:0]                       p_rs2;                                     \
   logic [7:0]                       p_rd;                                      \
+  /* FP physical tags. Separate from the integer ones because the split       */\
+  /* register class indexes a different file: one shared tag would force the  */\
+  /* consumer to re-derive the operand class to know which file to read.      */\
+  /* p_frs3 has no integer counterpart -- only FP has a third source.         */\
+  logic [7:0]                       p_frs1;                                    \
+  logic [7:0]                       p_frs2;                                    \
+  logic [7:0]                       p_frs3;                                    \
+  logic [7:0]                       p_frd;                                     \
   logic                             ooo_renamed;                               \
 }
 

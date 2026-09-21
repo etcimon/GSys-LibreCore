@@ -12,6 +12,635 @@ is the queue, not the design.
 | Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
+## Contract-first continuation (2026-09-21) — authoritative over the block below
+
+The OoO/SMT2 work now follows `core/ooo/AGENTS-ooo-contract.md` and `core/ooo/AGENTS-ooo-plan.md`
+(tranches T0–T6: archive/checkpoint; age namespace + memory-order validation; CSR FIFO + store
+reservation + dispatch-time memdep; fetch token kill; non-compacting IQ; single-hart FP SKU;
+per-hart ROB partition). The investigation history moved verbatim to
+`architecture/out-of-order/log-2026-09.md`. Items below remain valid evidence and residuals; their
+next actions are superseded by the tranche exits.
+
+- [x] T0: history archived (6,292 lines, round-trip byte-identical), contract + plan written,
+  `AGENTS.md` §2 row added.
+- [ ] T0: checkpoint commit of the verified worktree after user review (no push).
+- [ ] T1 … T6 per the plan file; review point after T1.
+
+## Active stability-first review — authoritative next change sets
+
+This block supersedes conflicting causal conclusions, completed-checkbox claims and next actions
+in the historical investigation below. Preserve its raw run results; do not reuse its latest
+narrative as proof. Detailed contracts, files, dependency order and exit gates are in the active
+plan `C:/Users/etcim/.devin/plans/plan-ea69493e7a14829a.md`, section
+"Stability-first reassessment", and `architecture/out-of-order/README.md`.
+
+- [x] Read the complete coding/runtime-learning philosophies, all three reasoning guides and
+  complete plan, plus the relevant SPEC/VALUES/NEGATIVE/SMT-LEGACY/firmware references.
+  Historical fetch_A/smt_legacy never become active build inputs; shared support is core/smt.
+- [x] Locate a missing anchor-comparison input using read-only proxy metadata inspection, not
+  another soak. Passing model f35d0e10... has split-counter.vlt in its generated Verilator
+  command; failing truezero145c8d74... does not. Evidence:
+  `stability-reassessment-work-ver-smt2-{loadcancel-v2,truezero-v1}-recipe-v1/audit.json` under
+  the configured C: artifact root. Both inspected firmware hashes and corrected runtime agree.
+  The control is already documented in AGENTS.md and the plan's frozen-anchor section.
+- [x] Reopen unsupported elimination claims: deterministic failures do not exclude a deterministic
+  tool/scheduling defect; synthesis translate_off does not remove simulation assertions;
+  same VA is not request identity; three-vs-eight cycles is not a cache latency bound;
+  a wired flush is not an end-to-end proof; OoO-off failure is not general backend exoneration.
+  With FtqDepth=8, npc_d=next_block(mtvec) is compatible with an active exception redirect.
+- [x] Audit the reverted alignment-qualified checker: RV64 offsets with low two bits zero are
+  0/4 (always <5); even offsets are 0/2/4/6 (always <7). Those weakened antecedents cannot
+  detect the claimed error. The current source has the original fatal assertions restored.
+- [x] **S0 attribution settled by single-axis experiment.** Two builds from ONE unmodified source
+  state, differing only in the pinned `split-counter.vlt` (`SOFT_LADDER_BUILD_VLT_ARGS`), soaked
+  serially on frozen `fw_payload.elf` `6b2bad99...`: control-present `480ceed1...` reports
+  `SUCCESS (tohost=0) after 12765628 cycles` with hart0=333635/hart1=8932406 (exactly the historical
+  anchor); control-absent `70da7cac...` stops at `pmp_entry.sv:81` cycle 12731487. The recurring stop
+  is the omitted qualified lzc split_var control, not session RTL. No PMP/assertion/vendor/waiver
+  edit; control stays opt-in. Artifacts `s0-recipe-{ctl,noctl}-v1`. Every attribution from the
+  earlier recipe-mismatched builds — including the frontend-source bisect — is retroactively void.
+- [x] **S0 residual (a): reference divergence explained; the retained reference is stale.** pc
+  `0x80008662` holds `0x1607b52f` = `lr.d.aqrl x10,(x15)` (AMO opcode, funct5 `00010`=LR, funct3
+  `011`). An LR performs no memory write, so the reference's two-value `mem 0x80046088 0x0` is a
+  phantom store; current traces correctly omit it because `cva6_rvfi.sv` clears `lsu_wmask` for
+  `AMO_LRW`/`AMO_LRD`. Divergence lands on the FIRST LR retirement, as that repair's comment predicts.
+  The `opensbi-amo-ready-dual-20260919` reference predates the repair and must be retired.
+- [x] **S0 residual (c): repeatability measured; compiler-control attribution ESTABLISHED.** 8-run
+  matrix, serial, idle builder, runner pinned `ad4561bf...`, references unset. ctl 5/5
+  `outcome: pass` + `strictDualPassed: true` at 12,765,628 (333,635/8,932,406 identical every run);
+  noctl 3/3 `outcome: error` rc=255 at `pmp_entry.sv:81` @ 12,731,487. Zero overlap, one varied axis.
+  The anchor is now runner-certified for the ctl arm. Tags `s0-repeat-{ctl-r1..r5,noctl-r1..r3}`.
+  NOTE — retraction of a retraction: `*** SUCCESS *** (tohost = 0)` and the
+  `[trapdump]`/`[walk]`/`[hangpc]` markers appear in all five CERTIFIED PASSES; they are unconditional
+  end-of-sim dumps, not hang indicators, and this harness prints `tohost = 0` on success. Calibrate a
+  marker on a known-good run before reading meaning into it. Still true: take verdicts from the
+  runner's `outcome`, not stdout.
+- [ ] **S0 early termination:** preserve both incomplete runs (1,531,692 and 3,573,269 cycles).
+  The latter matches 4,870,657 lines of the passing trace prefix; no architectural divergence or
+  population flake rate follows. Automatic proxy pkill calls are removed with regression tests,
+  but historical signal sender/cause is unproven. Keep incomplete as nonpass, not retry-to-green.
+- [x] **S0 runner-certified observations and replay baseline:** five controlled runs emitted pass
+  and strictDualPassed; the retained r1 trace is pinned as a same-model replay baseline only.
+  Different invocations are not independent architecture checks. Old reference remains retained.
+- [x] **S0 remote runner validation:** exact-path/compiler-hash preflight refusal verified on
+  target (`s0-refuse-ctl-v2` refused before launch, simulationStarted=false, no trial dir);
+  streamed strict-store/reference-prefix checks (`s0-cert-safe-par-v1` pass, 18,532,093 lines);
+  structured mismatch results kept pass/incomplete/error distinct; pre-launch invocation captured.
+- [ ] **S0 build-time recipe attestation:** fresh build manifests must record the generated
+  command/dependency recipe; the pinned `s0-recipe-ctl-v1` manifest predates attestation and stays
+  explicitly labelled (`buildRecipeAttested: false`). This residual is not closed.
+- [ ] **S0/S2 RVFI memory contract:** LR write suppression is correct, but LOAD-only lsu_rmask
+  leaves LR read/address visibility unqualified. Check LR/SC/AMO masks, addresses and committed
+  ownership independently before promoting any retirement reference to an architectural oracle.
+- [x] **Remote resource execution policy:** capacity measured; up to 12 aggregate compiler jobs,
+  three isolated -j4 leaf lanes, separate multi-script outputs, and non-destructive overlap refusal.
+  Preserve pinned simulation threading and all S1–S5/deferred gates.
+
+Parallel baseline evidence (2026-09-21): 18 isolated jobs ran with at most three concurrent lanes.
+`s0-cert-safe-par-v1` completed strict dual-hart work at 12,765,628 cycles (333,635/8,932,406
+retirements), and all 18,532,093 reference lines matched; the reference is same-model replay only.
+`s0-refuse-ctl-v2` emitted refused/simulationStarted=false without a trial directory. Captured-log
+checker regression retained one pass, two incomplete and one error outcome rather than masking them.
+The old model manifest explicitly lacks build-time recipe attestation; that S0 residual is not closed.
+
+WB-owner, drop, LSQ, rename, FP/hart rename, pending-store, WFI and fetch-queue leaf baselines passed
+their existing positive/negative contracts. Dispatch scenario18 exposed an ID-reuse stale-value
+failure at the leaf; real FU lifetime reachability still needs checking. CSR late-result scenarios
+had a stale fixture commit head (cp0 versus producer1), and drain synthesis had a stale wrapper
+missing pause_hint_i. Eight scoped follow-up jobs completed under the same three-lane budget:
+`s23-par-dispatch-v2` (28 matched), `s23-par-lateresult-v2` (14 matched), its restored-defect
+mutation (one detected), and `s23-par-latewake-v2` (four matched) pass their fixture contracts.
+`s3-par-drain-v2` matched all 16 simulation controls; live-port synthesis has 250 cells, no latches
+and zero SCCs. PMP simulation, decoder mutation and 32/56-bit proof checks also matched. The runtime
+path was resolved literally from the pinned runtime JSON; its privateRoot is the non-rebuild path,
+so the reported v1 path deviation was not real. No S1–S5 architectural closure or promotion follows.
+Historical incomplete runs and the TID-reuse failure stay open.
+- [ ] **S1: precise frontend/I$/LSU recovery as one contract pass.** Replace address-only killed-
+  response reasoning with accepted-request lifetime and independently checked completion/kill
+  ownership. Cover response/new request/kill overlap, same-VA refetch, multiple kills, miss/PTW,
+  prefetch/loop supply, hart switch, replay and split targets. Keep frozen layout failures and
+  validate observer non-interference. The current kill_drop patch is a local candidate, not closed.
+- [ ] **S1 assertion/test obligation: do NOT reapply the old aligned-offset antecedent patch.**
+  Check precise misalignment cause/PC/configured tval, no destination or forbidden device effect,
+  and no trap from cancelled work. Fault-inject missing exception/kill and bad completion to prove
+  detection. Stage32-34 historical passes used a different model/checker; current qualification
+  is open. Make TvalEn expectations explicit (g6lc64_ooo_int sets it to1), and make layout variants
+  reproducible rather than claiming stage34 changes only one branch-target co-factor.
+- [x] **S2 FP result ownership after ID reuse (boundary-level).** Real `fpu_wrap`+`controller`+
+  `scoreboard` fixture reproduced a cancelled FDIV result landing on a reused slot at8 and16
+  entries (`s2-fp-lifetime-s{8,16}-beh-v1`);32 entries drained before reuse. `fpu_wrap.sv` now owns
+  each live token until the raw result drains, treats cancel/flush as sticky cancellation, holds
+  same-ID replacements and suppresses cancelled results; `ex_stage.sv` forwards the mask.
+  `s2-fp-owner-{s8,s16,s32,inorder-s8}-v1` all matched; `s2-fp-owner-mut-s8-v1` detects the restored
+  defect. Strict `-Werror-UNOPTFLAT` build (`s2-fp-owner-strict-s32-v1`) stays blocked by existing
+  scoreboard/FPnew loops: OPEN structural gate, not waived. Full-core FP+OoO remains unqualified.
+  Structural gate `s2-fp-owner-verify-v1`: remote lint PASS (cv64a6_imafdc_sv39 8/8, cv32a65x 54/54
+  versus the gate's own remote baselines) and synth PASS (32/5 warnings); no warning names the new
+  logic. Strict standalone slang elaboration SKIPPED on the builder (gate rc4, not accepted with
+  --allow-skips). `s23-par-rename-fp-h2-v2` 4/4 matched, no leaf drift.
+- [x] **S2 divider result ownership after ID reuse (boundary-level).** Same fixture with the real
+  `mult`/`serdiv` path reproduced a cancelled DIVU result on a reused slot at8/16 entries
+  (`s2-div-lifetime-s{8,16}-v1`, return cycle28 versus reuse13/21). `mult.sv` now keeps a per-slot
+  divider owner table (`div_idle_q` shadows serdiv acceptance because `in_rdy_o` is low in the
+  accepting cycle), refuses a divide whose ID is live or cancelled, and suppresses cancelled results
+  before the FLU mux; the single-cycle multiplier needs no table. Correction recorded: FPnew and
+  serdiv DISCARD in-flight tokens on full flush (FFLARNC clears, serdiv flush→IDLE), so ownership
+  must clear on flush; a sticky-until-drain rule would deadlock the next same-ID producer. Scenario5
+  (full flush then same-ID replacement) is the discriminator and passes in `s2-{fp,div}-owner-*-v2/v4`;
+  both retention mutations reproduce the stale completion. Boundary caveat: the fixture now waits for
+  `ready` before a same-ID replacement, matching the issue stage's flu_ready hold, so a request pulsed
+  into a busy divider is not exercised. Gate `s2-owner-verify-v2`: lint8/54, synth32/5, no new
+  warnings; strict slang still skipped on the builder. Full-core MULT/FP+OoO remain unqualified.
+- [ ] **S2 dispatch-leaf scenario18:** the leaf still accepts an ID-only late result for a new owner.
+  FP and divider now retain ownership at their producers; remaining producers to prove or protect:
+  LSU post-grant tombstones (retained), pending stores, CSR/AMO commit path, CVXIF and accelerator
+  writebacks. The leaf contract closes either when every producer is shown to retain ownership or
+  when owner identity is carried to dispatch. Do not weaken the scenario.
+- [ ] **S2: finish all-FU and pending-store lifetime ownership.** Enumerate every pre/post-accept
+  owner through cancellation and TID reuse, including divider/multiplier/FPU, commit-produced
+  CSR/AMO values and committed stores. Preserve pre-grant LSU cancellation evidence; extend
+  independent/mutation tests for byte/age forwarding, capacity, paired commit, fences/MMIO and
+  constrained LR/SC. Keep legal unconstrained SC divergence separately self-checking.
+- [ ] **S3: finish two-hart drained-handoff correctness.** Test both roles and owner namespaces,
+  CSR/MMU/SATP/ASID/PMP context, WFI/IPI/HSM, precise traps, FP f0/rs3/frm/fflags and memory
+  publication. Do not remove drain or infer mixed residency. Use per-hart reference order plus
+  allowed shared-memory outcomes; negative controls must catch peer corruption/lost wakeup.
+- [ ] **S4: final-source integrated qualification.** Target-correct integer/FP/dual-hart tests,
+  protected in-order boot, experimental OoO firmware, independent reference, formal/cover,
+  enabled whole-core lint/elaboration/synthesis, then separate physical/DFT gates. Default
+  cv32/cv64 smoke does not qualify OoO/SMT2; standalone slang remains an explicit open gate.
+- [ ] **S1/S4: independent kill checker and seam retirement.** A checker reading DUT kill_owed
+  cannot independently prove retained cancellation. Gate only a validated independent contract;
+  retain restored-defect mutations, then remove temporary G6LC_NO_KILL_PERSIST infrastructure.
+- [ ] **S5 deferred until coarse stability:** mixed-resident per-hart retirement/recovery/context
+  and resource ownership, then scheduler/fetch/issue policy measurements. No guard/default promotion.
+- [ ] Carry forward conditional FP widths, CASQ, PMU residuals, predictor/checkpoint arbitration,
+  coherence/invalidation/hierarchy/snoop obligations, Linux/compliance/liveness, STA/DFT/power
+  and joint useful-work performance qualification. These are not closed by S0-S4 or omitted.
+
+No RTL, firmware, configuration default or verification policy is changed by this review.
+
+## Historical investigation — pre-grant cancellation and subsequent probes (2026-09-20)
+
+This block supersedes conflicting closure/attribution below; earlier runs remain
+historical evidence, not results for subsequently changed RTL.
+
+- [x] Read the complete coding/runtime-learning philosophies, SMT2 reasoning trio,
+  full plan and applicable retired-fetch references. Keep fetch_B as the only build
+  frontend; no legacy predicates or firmware workarounds restored.
+- [x] Reproduce and locate the firmware failure before the final trap: cancelled
+  pre-grant stack loads survive in lsu_bypass and write reused byte-load/branch TIDs.
+  The old claim that late-TID stimulus is unreachable is superseded.
+- [x] Retain exact cancellation with queued loads under OoOEn and discard cancelled
+  heads without synthetic completion, preserving older cache tag/response duties.
+  Reuse existing metadata; no issue-width/ISA/DTS/guard change.
+- [x] Live boundary before failure, after positives/negatives, copied-source
+  cancellation mutation, and translation/forwarding/concurrent-response controls.
+  Artifacts: ooo-loadcancel-before-v2, after-v2, translation-v1, mutation-v1.
+- [x] 19 integer directed/regression cases match Spike; FP1469/1253 and its negative986
+  match; guarded startup663/LR-SC582/lock5883 pass and negative475 fails.
+- [x] Eight-step live queue/reference safety and cancellation/mask-release/drain
+  cover pass; the retained-cancellation mutation produces a formal counterexample.
+- [x] Strengthen experimental/default firmware provenance and explicit timeout
+  outcomes, retain source hash maps, and test positive/refusal cases (50 host tests).
+- [x] The first candidate's full firmware run reaches OpenSBI banner/HART Count2
+  and domain enumeration, then errors at time10,707,552 on load_unit.addr_offset0.
+  No boot PASS: ooo-osbi-loadcancel-full-v1 and its retained assertion trace tail.
+- [x] Correct-prediction-release self-critique fails on the first candidate and is
+  repaired without broad branch cancellation; final leaf56 and eight-step
+  safety/cover/mutation pass. Final live-port load-unit/bypass synth: zero latches/SCCs.
+- [x] Final integer model315f6a05... passes19 Spike comparisons. Protected boot
+  smt2-loadcancel-protected-v1 passes12,765,628 cycles,333,635/8,932,406; final
+  in-order rebuild is byte-identical (f35d0e10...). Final lint passes10/11 warnings.
+- [x] Localized the offset assertion: it is an INSTRUMENT defect, not an OoO signal.
+  Directed stage32 aborts in796 cycles on OoO and1582 in-order; the `$fatal` severity
+  and its "actually triggers a misaligned exception" comment are both upstream and
+  unmodified. Antecedents are now alignment-qualified; no exception/kill rule relaxed.
+  Witness `ooo-osbi-offset-witness-v1`: va=0x2f offset=7 tid=0 commit_tid=4, i.e. a load
+  YOUNGER than the commit head; `speculative=0` is uninformative at SpeculativeSb=0, and
+  the small-non-zero-address inference stays refused (five recorded reverts).
+- [x] Wrong-path misaligned load is architecturally invisible: stage33 passes915 cycles
+  Spike-matched with a failing negative; registered as ooo_load_misaligned_not_taken.
+- [x] Built a one-axis in-order control by allowlisting `OoOEn` in
+  isolated-config-overlay.py (both arms from one source state, no package edit):
+  `OoOEn:1->0` on g6lc64_ooo_int, model e02f1f2d..., 4 build warnings, clean.
+  The tool's uniqueness check correctly rejected my first pattern for also matching
+  `SliceOoOEn`; the pattern is now line-anchored.
+- [ ] **NEW, open — SHARED trap-restart defect, NOT OoO.** Two ELFs of the same source
+  differing only in branch immediates, deterministic across replays:
+  after-v2 -> OoO FAIL (restarts at 0x80000206, never enters mtvec) and in-order control
+  TIMEOUT (cause=4 raised, then no further retirement); phase-v1 -> OoO PASS907,
+  in-order PASS925. Since it reproduces at OoOEn=0, the two-issue OoO path is exonerated
+  and this must not be fixed inside or counted against the OoO increment. cause/mepc are
+  correct in both arms. Owner is the commit->frontend restart path; mechanism NOT
+  identified, no repair attempted. Keep stage32 out of the passing gates until resolved.
+  Restart source now OBSERVED via +smt_flow_trace (no rebuild): after the trap commits at
+  0x800001f8, the frontend allocates gen=11 at 0x80000206 — the sequential stream — and
+  0x800001fe/0x80000202 are never allocated, so PC-gen did not take the commit-supplied
+  mtvec 0x80000210. Owner: PC-gen priority between the commit exception PC and a
+  frontend-internal redirect (controller.sv already flags this seam in prose for
+  "early load-misalign/illegal"). Candidate co-factor: the failing ELF has TWO branches
+  sharing one target while the passing ELF has distinct targets. That candidate is now
+  REFUTED, not weakened: stage34 reproduces the geometry byte for byte (8-aligned faulting
+  load, 2-byte co-issued op, straddling 4-byte branch) WITH both branches sharing a target
+  and PASSES on both models, non-vacuously (trace shows the trap then mtvec 0x80000210).
+  What remains unexplained is narrower: the same shape fails with the shared target at
+  0x8000025e and passes at 0x8000027e, though both sit at offset6 of their 8-byte window
+  and are 2-byte aligned. No supported candidate remains; improve the observation rather
+  than patch. Do NOT reorder PC-gen priority — heaviest recorded negative history.
+  Stage34 registered as ooo_load_misaligned_shared_target to pin the geometry.
+  MECHANISM IDENTIFIED (observation improved, still no repair): the exception flush is
+  CORRECT in both arms (failing cycle=786, passing cycle=789, both flush=1
+  flush_unissued=1). The difference is what the frontend supplies next — failing arm
+  allocates 0x80000206 just 3 cycles after the flush, passing arm allocates mtvec
+  0x80000210 after 8 cycles. Eight cycles is a real redirect plus I$ access; three is too
+  few, so the failing arm delivers instruction supply that was ALREADY BUFFERED when the
+  flush asserted. The later mispredict to 0x8000025e is a consequence, not the fault.
+  CORRECTED same session (T9): the channel-3 "a queue entry survived the kill" reading is
+  WITHDRAWN. instr_queue.sv wires flush_i to both FIFOs and resets idx_ds_q/idx_is_q/
+  push_seq_q on the same condition, so the instruction queue IS cleared on flush and a
+  surviving entry is not an available explanation. Observed facts that stand: the flush is
+  correct in both arms; the failing arm's first post-flush allocation is a PRE-FLUSH-STREAM
+  PC (0x80000206) not mtvec; it arrives in 3 cycles vs 8 for the correct redirect; the later
+  mispredict and tohost=1 are downstream. NOT distinguished: delivery from a frontend
+  structure the flush does not reach (loop buffer, FTQ, I$ output register, realigner carry —
+  none inspected yet) versus PC-gen selecting the sequential PC. No owner named, no
+  mechanism claimed. INSPECTION DONE: every frontend structure holding a fetched instruction
+  or PC across flush_if is flush-qualified (instr_queue, realigner leftover, FTQ, loop
+  buffer, predictor, icache_valid_q, inflight_q). The ONLY non-flush-qualified state is
+  replay_q/replay_addr_q (frontend.sv:170-178), which also outranks the sequential step and
+  the prediction in npc_select — recorded as a latent asymmetry, but NOT this defect:
+  +fetch_win_trace shows rp=0 at the exception flush. DECISIVE NEGATIVE: the [win] line at
+  the exception flush is IDENTICAL in both arms (vaddr=0x80000208 k1=1 k2=1 fl=1 mp=0 rp=0
+  npc=0x80000218; failing t=799, passing t=802), so arch_valid is low in both and
+  "trap vector not selected at the flush" explains nothing. THREE candidates now eliminated,
+  none weakened: shared branch targets; a queue entry surviving the kill; replay_q /
+  arch_valid-at-flush. DIVERGENCE NOW ISOLATED to one cycle after the flush: the failing arm
+  ACCEPTS the I$ response for the window it just killed. failing t=799 kills 0x80000208
+  (k1=1 k2=1 take=0), then t=800 rsp=1 vaddr=0x80000208 take=1 bpf=1 vmask=0111 npc=0x80000248
+  — three instructions pushed and a prediction fired from a killed window; the t=804 mispredict
+  to the fail exit is its consequence. The passing arm accepts nothing until t=808, and accepts
+  0x80000210 = mtvec. Promise violated: a killed request's response must not be accepted after
+  the kill (kill_s1/kill_s2 are single-cycle, inflight_q is cleared by kill_s2 the same cycle,
+  and icache_take is no longer inhibited once fl=0). Channel3 at the RESPONSE boundary, not the
+  queue. Strongly supported by a matched deterministic pair but still a CANDIDATE: the chain is
+  CONFIRMED by instrument: +fetch_kill_check (frontend.sv, translate_off, report-only,
+  allowlisted in corev_apu/tb/g6lc_tb.cpp) reports EXACTLY ONCE on the failing arm —
+  "t=800 take=1 rsp_vaddr=0x80000208 killed_vaddr=0x80000208 same=1 npc=0x80000248" — and is
+  SILENT for the whole passing run. same=1 proves the accepted response is the killed address,
+  so this is not a frequent benign event. Chain closed by observation: killed response accepted
+  -> trap vector never fetched -> mispredict into the fail exit.
+- [x] Repair IMPLEMENTED: kill persistence in frontend.sv. kill_owed_q/kill_owed_addr_q remember a
+  killed in-flight fetch until its response is seen or a replacement is issued; icache_take is
+  gated by kill_drop, which drops a response only when its ADDRESS matches the killed one (an
+  address compare, not a decision from fetched data, so channel5 stays closed). No new clock or
+  reset; build clean at baseline 9 warnings, none added. Before/after on the frozen pair:
+  after-v2 FAIL -> PASS 906 with "take=0 drop=1 npc=0x80000218" once at t=800; phase-v1 PASS 907
+  unchanged with the checker silent. Regression: stages 17,20,22,25,29,30,31,32,33,34 Spike-matched
+  (918/913/936/959/896/894/906/906/927/902), stage 26 self-checking PASS 911 (it must NOT be
+  Spike-compared: its LR/store/SC sequence is unconstrained and both outcomes are legal — my
+  SPIKE=1 invocation produced a false FAIL). Cycles within ~3 of pre-repair.
+- [x] Cleared the kill-persistence repair of the anchor failure with a one-source-state control.
+  G6LC_NO_KILL_PERSIST disables only the drop (state and probe kept). Repair ON (3a1e9742...) and
+  repair OFF (64fcafec...) both stop at pmp_entry.sv:81 at EXACTLY 12,731,487 cycles — same
+  assertion instance, same cycle. The repair neither causes nor influences it; the earlier reading
+  "the repair regressed the anchor" is WITHDRAWN.
+- [x] Reconfirmed the anchor on the OLD model: work-ver-smt2-loadcancel-v2 still PASSES
+  (rc=0, 761s wall). So the anchor result is reproducible and the regression is real at the current
+  revision — not a stale or lucky earlier pass. Note the wall-time asymmetry: 761s for the old model
+  versus ~1243s for the new ones, explained by the added always_ff blocks (kill state + probe)
+  costing simulation time every cycle even with the plusarg off.
+- [x] FRONTEND FULLY EXCLUDED from the anchor regression. The G6LC_NO_KILL_PERSIST seam was widened
+  to remove the added STATE and PROBE as well as the drop, giving a genuine zero-delta frontend arm
+  (c196c15dd04275cc...). Four anchor runs: old loadcancel-v2 PASSES 12,765,628; repair-ON
+  (3a1e9742...), drop-disabled (64fcafec...) and zero-delta (c196c15d...) all stop at pmp_entry.sv:81
+  at EXACTLY 12,731,487. Same assertion instance, same cycle, three different builds. Neither the
+  kill-persistence drop, nor its flops, nor the probe is involved.
+- [x] Discarded a wall-time inference before using it: 1224s vs 761s is explained by the synthesis
+  gate running CONCURRENTLY on the same builder, not by added logic. Do not read run duration as
+  evidence while another job shares the machine.
+- [x] DELTA SET ESTABLISHED WITHOUT SIMULATION by diffing the per-file source hashes in the two build
+  manifests (689 sources each; smt2-loadcancel-v2 = passing, smt2-zerodelta-v1 = failing). Exactly
+  THREE files differ, no additions or removals:
+    core/fetch_B/frontend.sv   -- inert in the zero-delta arm by construction (ifdef'd out; only
+                                  `logic kill_drop; assign kill_drop = 1'b0;` and a constant-folded
+                                  `&& !kill_drop` remain)
+    core/load_unit.sv          -- assertion antecedents only, inside //pragma translate_off
+    corev_apu/tb/g6lc_tb.cpp   -- one plusarg allowlist string; cannot reach RTL
+  This also disposes of a trap: `git diff` against HEAD shows 42 insertions in load_unit.sv, but most
+  of those were ALREADY in the passing build (the cancellation repair), so the git diff is the wrong
+  delta to reason about. Use the manifest hash diff for build-to-build attribution.
+- [x] Checked the translate_off structure in load_unit.sv: ONE region, translate_off@758 ->
+  translate_on@796 -> endmodule@798, with the edit entirely inside it. No boundary was disturbed, so
+  the edit cannot be promoting real logic into or out of the stripped region. The added signals also
+  drive nothing. That edit is therefore inert too.
+- [x] Candidate "changed non-source input" EXCLUDED without simulation. Comparing the two anchor
+  result records, 706 of 712 hash/firmware/profile/boot/cycle keys are IDENTICAL; the only
+  differences are modelSha256, modelManifestSha256, logSha256 and the three source hashes. Firmware,
+  DTB, payload, profile, bootrom, plusargs and cycle cap all match. Also confirmed the passing model
+  is f35d0e10afd10fcb... — the true protected anchor, so the reconfirm was against the real baseline.
+- [x] Candidate "non-reproducible build" LARGELY REFUTED: three independent builds (different
+  verlibs and defines) all stop at EXACTLY 12,731,487. A non-deterministic build would vary. So the
+  build is deterministic and the failure IS source-determined — which means one of the three deltas
+  really is behavioural, contrary to inspection.
+- [x] Recoverability of the passing contents: frontend.sv's passing hash EQUALS HEAD (dc3746b8...),
+  so this session added the only changes there. load_unit.sv and g6lc_tb.cpp were ALREADY modified in
+  the passing build, so neither can be restored from git — reconstruct them by reverting only this
+  session's edits, not by checkout.
+- [x] g6lc_tb.cpp allowlist EXCLUDED by inspection: `verilog_plusargs[]` is NULL-terminated and
+  scanned with `while (*plusarg && ...)` (no hardcoded size or index), and the match is a prefix test
+  that can only make MORE args legal, never fewer. `verilog_plusargs_legal` latches only on an
+  UNrecognised arg. Adding one entry cannot change how the anchor's own plusargs are classified.
+- [x] SETTLED, and it matters beyond this bug: **Verilator does NOT strip translate_off regions in
+  this flow.** Proof by observation rather than by doc: pmp_entry.sv's assertions live inside a
+  `// synthesis translate_off` region (pmp_entry.sv:76) and they DID fire. So sim-only regions are
+  elaborated here. Consequence: the inertness of the load_unit.sv edit rests solely on the added
+  signals driving nothing — NOT on the region being stripped. Anyone relying on translate_off for
+  "this cannot affect the build" (AGENTS.md 2.5, carry-over checklist) should treat it as
+  "not synthesized" and not as "not elaborated in simulation".
+- [x] **RETRACTION: the "frontend exonerated by a zero-delta arm" conclusion was CONFOUNDED.** All
+  three arms that "failed identically" still carried an unaccounted load_unit.sv delta — the enriched
+  $fatal diagnostic added for the witness run, which I had never removed. So none of them was a
+  zero-delta test. Delta accounting that is not hash-verified against the passing build is not
+  accounting.
+- [x] load_unit.sv is now EXACTLY the passing build's content, verified by hash
+  (d875f9997d3a14baea84e65e373f472b4da9b270894aeae1dc8f321fd9201fd7). Achieved by removing BOTH the
+  enriched $fatal diagnostic AND the assertion-antecedent edit. NOTE: the antecedent repair is
+  therefore currently REVERTED in the worktree, so stages 32/33 will abort again until it is
+  re-applied — re-apply it once the anchor question is closed.
+- [x] With load_unit.sv clean and the kill-persistence repair ENABLED (model 70da7cac558b3618...),
+  the anchor STILL stops at pmp_entry.sv:81 at 12,731,487. Source now differs from the passing build
+  in only TWO files: core/fetch_B/frontend.sv and corev_apu/tb/g6lc_tb.cpp.
+- [x] TRUE single-delta test RUN (model 145c8d74c0f36a84...): load_unit.sv byte-identical to the
+  passing build AND G6LC_NO_KILL_PERSIST (frontend ifdef'd to nothing). The anchor STILL stops at
+  pmp_entry.sv:81 at 12,731,487. The kill-persistence repair is therefore exonerated — this time on a
+  clean arm, unlike the earlier confounded claim.
+- [ ] **NEXT: revert this session's 5-line g6lc_tb.cpp allowlist addition, keep the define, run the
+  anchor.** After that revert the only remaining difference from the passing build is frontend.sv's
+  inert residual (`logic kill_drop; assign kill_drop = 1'b0;` plus a constant-folded `&& !kill_drop`
+  and comments). PASS => the plusarg table affects the run, so inspect every consumer of
+  verilog_plusargs beyond the legality scan. FAIL => the residual or the BUILD owns it; then restore
+  frontend.sv to HEAD content (confirmed equal to the passing build, dc3746b8...) and rebuild — if
+  THAT still fails, the source is fully exonerated and the builder/environment is the culprit, which
+  would invalidate using this anchor as a gate until fixed.
+- [ ] Tally of builds: FIVE session builds all stop at exactly 12,731,487; the one pre-session build
+  passes at 12,765,628. Identical firmware/profile/DTB/bootrom/plusargs/cycle-cap (706/712 keys).
+- [ ] Superseded framing, kept for provenance: every one of the
+  three deltas has now been individually argued inert AND the build is deterministic AND the
+  non-source inputs are identical. Those four statements cannot all be true, so one of the
+  *arguments* is wrong, not merely the conclusion. Stop reasoning and MEASURE: the next action is the
+  single-delta build (revert only this session's load_unit.sv assertion edit, keep everything else)
+  because it is the only delta whose inertness argument depends on a claim about unused logic rather
+  than on a structural impossibility. If that restores the anchor, inspect what those added signals
+  actually elaborate to now that translate_off is known not to strip. If it does not, bisect the
+  frontend file content itself (not the ifdef arm) against its HEAD version, since HEAD is confirmed
+  to equal the passing content for that file.
+  Until settled, NOTHING at the current revision may be called qualified, and the kill-persistence
+  repair — though independently evidenced — must not be presented as qualified.
+- [ ] Superseded framing of the same item: the protected anchor no longer completes at this revision. It completed at
+  12,765,628 cycles earlier this session; it now stops on pmp_entry.sv:81 in the PTW's PMP
+  (outcome=error, strictDualPassed=false, timedOut=false). Not distinguished: an over-strict upstream
+  NAPOT check on a transient mid-update pmpaddr (OpenSBI writes pmpaddr and pmpcfg in separate
+  instructions, so a malformed pair is observable between them) versus a real wrong value. Do NOT
+  assume the over-strict reading just because this session opened with one. Bisection handed over:
+  the only behavioural RTL delta since the passing run is the frontend repair, and the control has
+  EXCLUDED it — so look at the non-behavioural edits (load_unit assertion antecedents are
+  translate_off; harness/test/tooling) or at whether the anchor was already latent. Not part of the
+  OoO increment.
+- [ ] Decide on promoting +fetch_kill_check from report-only to a fatal gate, after a full-suite
+  silence result. A fatal probe that fires in an unrelated configuration is worse than no probe.
+- [ ] Separate, latent (found during that inspection, not a live defect): replay_q and
+  replay_addr_q carry a pre-flush fetch address across flush_i and outrank the sequential
+  and prediction cases in npc_select. No observation yet shows it firing across a flush;
+  treat as a contract probe to be checked, not a repair to be made.
+  The in-order arm reprinted the cap banner `SUCCESS (tohost=0) after 20000 cycles` and
+  was correctly classified `timeout` — keep that H3 guard.
+- [x] Final-source OoO integer remote lint passes10 warnings against baseline11.
+- [ ] Collect final full-core synthesis (shell8add45), relaunched after the last
+  cancellation-source refinement. The earlier clean2-warning run is retained but
+  not borrowed for this source revision. Strict standalone slang remains a
+  separate unavailable gate; no skip waiver. The licensing diag is unregistered;
+  manual tier/header review does not constitute an automated licensing PASS.
+- [ ] Broaden pre-grant lifetime qualification to pending stores, all response/FU
+  types, non-power-of-two load geometries and bounded/unbounded formal properties.
+  Cross-hart memory, traps/interrupts, FP across harts and mixed residency stay open.
+- [ ] Audit earlier prose against current evidence: LR reservation survives LR
+  retirement; stage31 is below capacity; raw boot work split is not fairness;
+  stage26's legal SC divergence is not exact Spike matching. Current architecture
+  record and plan state these corrections. No new architectural claim follows.
+
+## Active continuation toward SMT2+OoO (2026-09-19)
+
+The user's latest request reopens the earlier deferred dual-hart work. The first
+milestone is coarse handoff, not mixed residency or guard promotion. Open
+`architecture/out-of-order/README.md`, FP lifetime / guarded SMT2 foundation, first.
+
+- [x] Collect the earlier integer recovery synthesis: clean, two warnings; strict
+  standalone-slang still SKIP, so no aggregate all-gates PASS.
+- [x] Repair FP committed-map updates and physical-zero storage, including f0.
+  Frozen fence test goes code8 failure -> PASS1471;199 ordered retirements match Spike.
+- [x] Repair FP hart-local reclaim and same-cycle physical ownership transfer.
+  Wire dispatch/commit hart identity into rename; shared pools and geometry checks.
+- [x] Separate completion from usable CSR/AMO data. Commit-time mirror wakes waiters;
+  early placeholders no longer do. CSR->ALU goes FAIL1247 -> PASS1251,200 matched
+  Spike retirements. Wrong-FMA control fails correctly with25 matched retirements.
+- [x] Repair OoO WFI's precise park boundary and exclude legacy SMT store keep/replay
+  rules from OoO. Before tests fail; WFI56 and store24 positive/negative records pass.
+- [x] First guarded two-hart integer startup: PASS664,47/73 retirements; frozen
+  negative FAIL630,48/61; observer off/on664. LR/SC RS1/RS2 PASS586, ALU PASS582,
+  negative FAIL475. No default target, FP/hart guard or firmware change.
+- [x] Final leaf sweep:122 matched records; WFI56/store24 controls, bounded recovery
+  and rename proofs,99,645-cell live-port synthesis with zero latches/SCCs. Final
+  integer S4/S5/S15/memdep/ILP and FP fence/status/negative ROIs all match Spike.
+- [x] Final protected SMT2 rebuild booted: strictDualPassed=true,12,765,628 cycles,
+  333,635/8,932,406 retirements, matching the anchor. No OoO boot claim.
+- [x] Full-core synthesis for the FP/WFI/store-recovery increment: PASS, clean with
+  two warnings (~54 min). Lint PASS at 10 warnings against baseline 11.
+- [x] Full-core lint and synthesis re-run against the FINAL RTL (after the store
+  admission, the LR/SC window repair and all three RVFI fixes): lint PASS 10 vs
+  baseline11, synth PASS clean with 2 warnings. Strict standalone-slang remains unavailable on the builder, so
+  the aggregate gate still reports incomplete and no skip-policy waiver is taken.
+  Earlier synthesis runs in this session predate later edits; do not cite them.
+- [x] OoO memory ordering in the LSU store buffer. Two contracts were violated and
+  are repaired behind `OoOEn`: (a) forwarding/hazard matched on address alone, so a
+  YOUNGER store could supply an older load; (b) the speculative queue was a FIFO in
+  ISSUE order, so same-address stores reached memory out of program order. Directed
+  stages17/18/19 go FAIL929 / FAIL949 / HANG -> PASS915/940/952 with Spike-matched
+  retirements; negatives fail 928/943/938; the in-order control passed throughout.
+  Leaf fixture 32 records. Regressions 878/974/883/1057/1109 and FP 1471/1251/988
+  unchanged; guarded dual-hart 664 / 586 / 582 / 475 unchanged; protected in-order
+  SMT2 boot re-run: strictDualPassed, 12,765,628 cycles, 333,635/8,932,406.
+  The hazard age filter is a LIVENESS requirement (stage19 hung before it).
+- [x] **Repaired a third, pre-existing defect: speculative store queue capacity
+  inversion.** Stage22 (ten outstanding stores, oldest data-delayed) hung at the cap
+  on both the new and the previous OoO model, while the in-order control passed at
+  1792. Eight younger stores filled `DEPTH_SPEC=8`, the oldest could never post, and
+  the queue drains only on in-order commit. Fixed by admitting stores at issue in
+  program order relative to each other in `g6lc_iq.sv` — an admission rule over
+  UNISSUED entries, so it does not reproduce the live-store-gate deadlock the file
+  warns about. Chosen over IQ capacity reservation: no new cross-module signal on
+  the issue path, and stores cannot retire out of order anyway. Measured ILP cost is
+  nil — all regressions identical, stages17-21 within one cycle. Stage22
+  TIMEOUT -> PASS933 and is now in the testlist.
+- [x] AMO ordering against out-of-order neighbours is SOUND. Stage23/24 pass on
+  their own checks; a second AMO (unforwardable, reads memory at commit) confirms
+  0x807 landed. An apparent defect was retracted as an instrument fault.
+- [x] **Repaired, verification infrastructure: RVFI operand capture under OoO.**
+  `cva6_rvfi.sv` latched rs1/rs2 at DISPATCH keyed by `issue_pointer`, but
+  `rvfi_rs1_o/rvfi_rs2_o` are the operands at ISSUE keyed by issue port. In order
+  they coincide; under OoO the IQ issues a different entry, so the join is invalid
+  and rs2 arrives as another instruction's value. AMO `mem_wdata` is computed from
+  it, so AMO memory effects were silently unchecked in trace comparison. Fixed by
+  exporting `rvfi_operand_valid_o`/`rvfi_operand_tid_o` from `issue_read_operands`
+  through `issue_stage`/`cva6.sv`/`rvfi_probes_instr_t`, and re-capturing under
+  `OoOEn` against the issuing trans_id; the in-order capture path is untouched.
+  AMO rows now match Spike (stages23/24 qualified on model `6180bbc8e219402c…`),
+  and all13 directed and regression programs still match with unchanged cycle
+  counts. Does not retract earlier results (different fields; no AMOs in those
+  programs). The comparator was NOT masked to achieve this.
+- [x] LR/SC against a still-speculative older store is SOUND (stage25, PASS956).
+  It exposed a second instrument fault: `lsu_wmask` keyed on `fu == STORE` alone
+  reported a memory write for load-reserved, which only reads. Probe now carries
+  `lsu_ctrl_op` and excludes `AMO_LRW`/`AMO_LRD`. All 14 directed and regression
+  programs then match Spike with unchanged cycle counts. A FAILED SC also writes
+  nothing; no directed test yet, named rather than assumed.
+- [x] **Repaired, pre-existing: a plain store following a load-reserved never
+  retired under OoO.** Stage26 (LR + store + SC) and stage27 (LR + store to an UNRELATED
+  address) both time out at the cap; in-order passes at1751/1736. The trace shows
+  the `lr.d` retiring normally and the next store never retiring, so it is not
+  reservation logic nor same-address ordering. Times out identically on all four
+  model generations including the pre-change baseline, so it is not from this
+  session. Existing dual-hart LR/SC tests pass because they place `sc.d` directly
+  after `lr.d` with no intervening plain store. Refined symptom: the store is
+  allocated (`alloc id=3`), becomes the commit head (`commit_ptr=3`), never writes
+  back, and ~24 instructions allocate behind it before dispatch stalls with the
+  ROB not full; no `store_offer` ever appears, so it never reaches the LSU.
+  A temporary store-unit probe settled the attribution in two corrections. It first
+  refuted my own weakening (`st_ready=0, sb_rdy=1, amo_rdy=0` — the amo buffer WAS
+  occupied, so `retire => ack => pop` was a bad inference), then refuted the
+  original hypothesis too: extending the probe showed `amo_ack=1` at cycle800, so
+  the buffer DOES drain, `st_ready` recovers and the store unit sits idle with
+  `valid_i` never rising. **The store unit is exonerated; the store is withheld
+  upstream and never presented to the LSU.** Stage28 (no fence) hangs identically,
+  so the fence flush/re-push is not required either. All of 26/27/28 time out on
+  all four model generations including the pre-change baseline, so the
+  store-admission rule from this session is NOT implicated. Root cause then found
+  on the upstream grant path and confirmed by the existing `issue_stall`
+  diagnostic: `lrsc=1` is the sole asserted blocker with every other term ready.
+  `lr_sc_pair_q` blocks non-SC STORE issue and closes only on SC issue or flush;
+  in-order always gets one while the LR is live, OoO need not, and an LR with no
+  SC is legal. Repaired under `OoOEn` by remembering the LR's trans_id and closing
+  the window when that LR is no longer live (`fwd_i.still_issued`) — no new port,
+  in-order path untouched. Stages26/27/28 now complete at 896/880/873 and are
+  registered. Stage26 stays self-checking only: the sequence is unconstrained so
+  the SC may legally succeed or fail (CVA6 fails, Spike succeeds).
+- [x] Failed-SC write mask (the case previously named as untested). Stage26 caught
+  a failed SC still reporting a memory write while the program's read-back proved
+  memory untouched. `mem_wmask` is now suppressed at commit when an SC reports
+  failure; the RTL memory-effect list becomes empty, matching the architecture.
+  Temporary store-unit probe removed.
+- [x] **Repaired: an uncommitted CSR wedged the whole FLU, stalling both harts.**
+  `SMT_LOCK` (both harts contending for one amoswap lock) times out at 200k cycles
+  with 35/39 retirements — both harts stalled, not spinning. In-order passes the
+  same frozen ELF in 7,392 cycles with 1,600/2,037 retirements. Not the
+  store-after-AMO path: stage29 (amoswap then store, the critical-section shape)
+  passes at 893 and matches Spike. Not the LR/SC window either (`lr_sc_pair_q` is
+  LR-only). Mechanism unidentified; no owner claimed. This bounds the dual-hart
+  OoO milestone: reset rendezvous and LR/SC consumers pass, but mutual exclusion
+  between harts does not, which is a prerequisite for OpenSBI/Linux on dual-hart
+  OoO. Trace narrows it: `flu_ready=0` forever with every scoreboard entry live,
+  and both harts still in the PROLOGUE (last PCs 0x80000066/0x80000060), so it is
+  not contention over the lock itself; `lrsc=0` clears the LR/SC repair. Two
+  single-hart candidates did not reproduce it: stage29 (amoswap+store, 893) and
+  stage30 (younger CSR ahead of an older FLU consumer, 896), both registered.
+  Root cause read from the code: `csr_buffer` is depth-1 and hart-agnostic and
+  holds `csr_ready` low from issue until COMMIT; `ex_stage` feeds that into
+  `flu_ready = csr_ready & mult_ready`, which IRO turns into "all FLU units busy"
+  for both harts. In order a CSR is effectively oldest when issued so it commits
+  promptly; out of order it can be stranded behind older FLU consumers while
+  younger work fills the scoreboard. Repaired in `g6lc_iq.sv`: a CSR issues only
+  when it is the oldest live instruction (`trans_id == commit_ptr_i`), restoring
+  the buffer's own depth-1 assumption. **Two-hart lock now passes on OoO at 5,883
+  cycles (1,600/1,952), faster than in-order's 7,392.** Cost: uniform +3 cycles on
+  the directed/regression set. All 19 programs still Spike-matched; dual-hart
+  startup/LR-SC and the FP suite unchanged.
+- [x] **Firmware on dual-hart OoO is now MEASURABLE** via an explicit
+  experimental-model mode in `run_opensbi_source_review.py`. The identity binding
+  stays mandatory (hash must match; only the field name `modelSha256` is now
+  accepted beside `executableSha256`), and two new refusals keep it honest: a
+  substituted model without `SOURCE_REVIEW_EXPERIMENTAL=1` is rejected, and the
+  flag without a substituted model is rejected. Default refusal verified. Results
+  carry `experimentalModel`, `protectedAnchor: false`, `modelQualificationOnly`,
+  `modelHarts` and the substitution list.
+- [ ] **OPEN: OpenSBI does NOT boot on dual-hart OoO.** First measurement hits the
+  16M cycle cap with `strictDualPassed: false`; hart0 retires 9,805,054 while
+  hart1 manages only 42,592 — inverted against the in-order anchor's
+  333,635/8,932,406 — and the hang pin shows `mcause1=0x1` (instruction access
+  fault) with `wfi1=1`, so hart1 faulted and parked. The banner says SUCCESS after
+  16000000 cycles, which is the cap, not completion. Next: trace hart1's fault PC
+  and the faulting fetch under OoO.
+- [x] Historical note: firmware on dual-hart OoO was previously blocked outright by
+  the identity guard. With two-hart mutual exclusion working, OpenSBI on the guarded
+  OoO dual-hart model was attempted and `run_opensbi_source_review.py` refused with
+  `source-profile model identity mismatch`: it binds the measured model to a
+  build manifest by `executableSha256` + `target`. The isolated OoO build carries
+  its own truthful record (`target: g6lc64_smt2`, `harts: 2`, `qualificationOnly`,
+  and a per-file original-vs-review SHA map of every guard substitution) but names
+  the hash `modelSha256`. Renaming that field would satisfy the check while
+  defeating its purpose — attributing an experimental, substituted build as the
+  protected source-profile anchor — so it was NOT done. Correct unblock: teach the
+  runner an explicit experimental-model mode that accepts the isolated record and
+  propagates `qualificationOnly` and the substitution map into the result, marking
+  it as not the protected anchor. That strengthens the control rather than eroding
+  it; it needs a decision before implementation.
+- [ ] Remaining dual-hart gates: late-TID reuse, traps/interrupts, FP across harts,
+  cross-hart memory ownership, independent reference and firmware runs. Also STA
+  for the added store-path age comparators, and a failed-SC trace case.
+- [ ] Mixed residency: per-owner recovery and memory obligations before elastic
+  sharing or scheduling performance work. Coarse startup is not mixed overlap.
+- [ ] FP and SMT+OoO guard promotion remains separate from these directed passes.
+
+## Active two-issue OoO recovery qualification (2026-09-19)
+
+This block supersedes the loop-hang hypotheses below. Contract and evidence:
+`architecture/out-of-order/README.md`, current two-issue recovery repair.
+
+- [x] Read the coding/runtime-learning philosophies, all three SMT2 reasoning
+  guides and the full active/historical plan. Preserve the fetch_B-only boundary;
+  do not transplant fetch_A/smt_legacy recovery heuristics.
+- [x] Reproduce and tag the first broken contract: a surviving older IQ entry is
+  acknowledged in the cycle IRO suppresses every FU-valid for a younger redirect.
+  The stuck tid4/gen11 is the load-result check, not the loop back-edge. Scoreboard
+  `issued` proves allocation only. No circular-age or FLU-port repair was justified.
+- [x] Repair the OoO dispatch seam: flush suppresses FU offers and actual offered
+  valids qualify IQ acceptance. New admission also stops on full flush; selective
+  younger cancellation and same-cycle wakeup remain live.
+- [x] Frozen-ELF before/after controls: stages5/15 and ooo_mem_dep time out on the
+  old model and pass at974/883/1057 cycles on the repaired TWO-issue model. Stage4
+  and ILP stay878/1109; all16 memory-probe stages pass. Recovered tid4/gen11 now
+  issues, writes back and retires. Stage15 observer on/off is883 cycles in both.
+- [x] Permanent dispatch recovery/held-ack/wakeup/full-flush/cancel regressions and
+  stage5/15 testlist entries; before-case fails. Frozen ELF replay, disassembly and
+  fail-closed run classification added to the existing runner;42 host tests pass.
+- [x] Recovery four-step live safety + reached cover + raw-ack fault counterexample;
+  existing12-step rename BMC and its negative;128 matched fixture/negative/guard
+  records. Live-port synthesis:99,359 generic cells, zero latches/SCCs.
+- [x] Full-core remote lint:10 warnings, baseline11. Strict standalone-slang is
+  still SKIP (no builder binary); aggregate gate is INCOMPLETE, not waived.
+- [x] Collected the recovery-era full-core synthesis: clean with two warnings.
+  Later foundation changes have a separate pending full-core regate above; the
+  live-port fixture's result is not a substitute.
+- [x] Fresh SMT2 rebuild is byte-identical to boot-qualified model34afc030...;
+  preserves its12,765,628-cycle strict dual boot, not a new firmware execution.
+- [x] Branch-chain oracle repaired: main now saves/restores its incoming ra.
+  Original ELF times out in-order too. Corrected test passes OoO1258/in-order1291;
+  wrong expected final count fails on both. This was not another RTL defect.
+- [ ] Resume FP qualification after these integer gates; hart/FP refusals remain.
+- [ ] Single-issue CASQ read-port elaboration remains a separate pending geometry
+  defect; changing the shipping OoO configuration to single issue is not the fix.
+
+No commit, feature-enable, scheduling-policy, issue-width or ISA/DTS change.
+
 ## Active P0–P2 continuation: contract re-evaluation
 
 The continuation reassessment in `architecture/remaining-upgrade-sequence.md`
@@ -1561,6 +2190,1159 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   49.9264%/50.0736%, max body-retirement gap76, weighted speedup0.90234 and worst
   slowdown2.21795x versus solo. Balanced observation is NOT throughput improvement,
   a starvation bound, saturation or Linux qualification. Modelc421aedc... unchanged.
+- [x] Phase1 service/handoff/RTT attribution (2026-09-19): read-only observers
+  `smt_sched_trace` (g6lc_thread_select.sv) and `smt_rtt_trace` (cva6.sv), both inside
+  translate_off, verified by source inspection; synthesized-netlist equivalence and
+  physical timing/area were not proved by that inspection.
+  smt2-balance-attr-final-20260919 on model 2ce91d639b964cfb…: served 2834/2831,
+  ready-denied 2831/2834, never-not-ready 0/0, longest denial 68, quiesce 332 (5.86%),
+  **83 starvation handoffs, 0 quantum, 0 miss, 0 abort**, drain wait exactly 3 cycles
+  each. The nominal quantum 128 is inert here; the starvation limit is the operative
+  control, since it counts waiting cycles and wins first. Cache RTT is still UNMEASURED
+  (register-only body; observer alive with 23 events, 0 in-window samples). Boot
+  preserved: opensbi-attribution-dual-v3-20260919 strictDualPassed=true at the identical
+  12,765,628 cycles and 333,635/8,932,406 retirements; startup and LR/SC regressions pass
+  on the same model; 27 unit tests.
+- [x] Defect: `core/id_stage.sv` had an UNGATED `[id-dbg]` $display writing ~134 MB into
+  every run log, hiding real output and costing the verdict reader time/memory. Now behind
+  plusarg `id_dbg_trace` (allowlisted). The earlier claim that it caused or contributed
+  to the collector's rc255 is unproven; that run's harness remained alive after the
+  connection failed. Keep the log-volume finding separate from transport failure.
+- [x] Added opt-in `SOFT_LADDER_BUILD_VLT_ARGS` (default empty) to soft-ladder-build-harness.sh
+  so a reviewed Verilator control (the pinned split_var .vlt) can be bound to one candidate
+  build without changing default build policy or any waiver.
+- [ ] Defect, NOT fixed: `testharness_proxy.py build --vthreads N` is silently ignored for
+  non-AI flavours (only plumbed as AI_MATRIX_VERILATOR_THREADS). It produced a 12-thread
+  model that the qualification runner correctly rejected. Use
+  `--env SOFT_LADDER_VERILATOR_THREADS=1`. Either plumb the flag or make it refuse.
+  Likewise the private Verilator runtime must be selected with `--env VERILATOR_ROOT=...`
+  or the model silently links the stock runtime and fails the runtime-header gate.
+- [x] Shared-core measurement correction (2026-09-19): core capacity is not equal
+  thread counts or selected-cycle shares. SMT_ASYM uses atomic last-publisher
+  completion so neither hart polls after finishing. Both role orders, RVC/norvc,
+  matched solo controls on both harts, exact64/0 own load counts and observer-off
+  replays pass (smt2-core-capacity{-norvc,}-20260919).12 positives/2 result negatives/
+  4 observer-equivalence controls;36 tooling tests. Fixed the oracle's ignored
+  foreign-role body and RTT outstanding-at-window-end accounting with failing tests.
+  RVC finite-batch ratios0.92859/0.92649; norvc0.92574/0.92733 versus matched serial
+  solo ROIs, so no throughput promotion. The earlier swapped compute tail5743 cycles
+  was polluted by a finished hart0 reporter spinning; corrected RVC tail ends at
+  3782 ROI cycles. No hardware policy changed. Seven-cycle RTT is not a cache-hit
+  oracle (retained hit=00/no-forward lookup samples); no cache-level claim follows.
+- [ ] Strict verification remains incomplete after the shared-core review: default
+  remote lint8/54 and synth32/5 warning passes; SMT2 lint1/synth31 passes (SMT2 lint
+  warnings lack a configured baseline). Standalone-slang checks are unavailable on
+  the builder, not accepted as passes. Fetch-IQ formal remains separately open.
+- [x] Phase1b counter-ownership probe MEASURED (2026-09-19), artifact
+  smt2-pmu-ownership-20260919: SMT_PMU writes distinct mhpmevent3 selectors in a
+  handshaked order. Hart1 reads back1 (hart0's) and hart0 reads back2 (hart1's), so
+  mhpmevent3 is SHARED; mscratch reads back0x100/0x101, proving the CSR bank works.
+  The banked-hypothesis arm and the value-corruption arm both fail as required
+  (3 arms, 1 positive + 2 failing-capable controls). Source: g6lc_smt_csr_bank muxes
+  perf_addr/data/we by active_hart_i into ONE perf_counters and broadcasts
+  scountovf/lcofi to all banks. RISC-V makes mhpmcounterN/mhpmeventN per-hart, so
+  this is a CONFORMANCE GAP at NrHarts>1 and a blocker for advertising any PMU or
+  fairness hint. Also: any HPM CSR write suppresses all counting that cycle; Sscofpmf
+  filtering uses the active hart's privilege on a shared counter; either hart can
+  clear a shared OF. mcycle/minstret are banked (minstret gated by commit hart_id),
+  but mcycle counts elapsed cycles in every bank and is NOT per-hart service.
+- [x] Gap CLOSED (2026-09-19): perf_counters banks generic_counter/mhpmevent/OF/
+  MINH/SINH/UINH by a new `hart_i` index sized from the existing CVA6Cfg.NrHarts (no
+  new config field; NH=1 unchanged), emits per-hart scountovf/lcofi, and g6lc_smt_csr_bank
+  routes element h to bank h instead of broadcasting. Only the owning bank increments,
+  so a peer's HPM CSR write no longer suppresses this hart's counting. Chosen over the
+  legal read-only-zero option, which would leave the second Linux CPU without counters.
+  Exact added state (NH-1)*MHPMCounterNum*(64+8+4) = 456 flops at NH=2; mapped area,
+  timing and power NOT measured. Evidence smt2-pmu-banked-v2-20260919 (model
+  80ad8af0...): countersArePerHart=true, banked signature (h0=1,h1=0) — hart0 keeps its
+  own write, hart1 never sees it — with the shared signature (2,1) as the failing
+  control. My initial (0,0) expectation was wrong and the run corrected it. Boot
+  preserved: opensbi-pmubank-dual-20260919 strictDualPassed=true, 12,765,628 cycles,
+  333,635/8,932,406. Four workload regressions pass, 36 unit tests, and lint/synth
+  warning counts unchanged on g6lc64_smt2 (1/31), cv64a6_imafdc_sv39 (8/32), cv32a65x (54/5).
+- [x] RV32 user-mode `hpmcounterNh` read repaired (2026-09-19, by inspection): the range
+  test used `>` so hpmcounter3h (0xC83) never matched, and the index subtracted the
+  MACHINE base CSR_MHPM_COUNTER_3H (0xB83) from a USER address, giving
+  0xC84-0xB83+1 = 258 — far outside the [1..MHPMCounterNum] counter array. LIVE, not
+  latent: `cv32a6_imac_sv32` is XLEN=32 with PerfCounterEn=1 and RVZihpm=1. That target
+  now lints clean remotely (85 warnings; no recorded baseline, so this is a pass and NOT
+  a no-regression comparison). RV64 is unaffected: the corrected branch body is guarded
+  by `riscv::XLEN == 32`, and the only other statement it reaches sets
+  `read_access_exception`, which perf_counters declares and assigns but never reads or
+  drives to a port — the architectural exception for RV64 hpmcounterNh comes from
+  csr_regfile. No directed RV32 counter test exists; adding one needs an RV32+Zihpm
+  simulation profile and is not covered by the current SMT2 flow.
+- [x] mcycle semantics checked against the spec of record, NOT a defect: "The mcycle CSR
+  counts the number of clock cycles executed by the processor core on which the hart is
+  running." Counting core cycles in every hart's bank is therefore conformant; it simply
+  cannot be read as that hart's service share. minstret ("instructions the hart has
+  retired") is per-hart and is gated by commit hart id, which matches.
+- [x] Event attribution MEASURED (2026-09-19), artifact smt2-pmuevt-attrib-20260919:
+  SMT_PMUEVT has both harts select "load accesses" in their own mhpmcounter3 and run
+  quotas of 256 and 768 loads in a window spanning many handoffs. Measured deltas are
+  EXACTLY 256 and 768 — own-hart only, no cross-hart inflation, and no dual-commit
+  undercount in this dependent loop. Bounds (not an exact count) are asserted because
+  the event ORs commit ports; the ~1024 shared/cross-attributed arm fails, as does the
+  corruption arm. So banking the selector is backed by correct per-hart counting.
+- [x] Cross-switch attribution MEASURED CLOSED (2026-09-19), artifact
+  smt2-pmumiss-isolation-20260919: SMT_PMUMISS has hart0 stride 64 times past the 32 KiB
+  D$ while hart1 issues NO memory access but runs long enough to be scheduled throughout.
+  hart0 = 64 D$ misses, hart1 = EXACTLY 0; the arm accepting a nonzero hart1 fails, so a
+  leak would be caught. Matches the RTL: wt_dcache_missunit pulses miss_o on
+  mshr_allocate and g6lc_icache on the accepted ifill — miss INITIATION, not refill
+  completion — and the drained handoff needs an empty scoreboard plus no pending stores
+  before switching, so a demand memory op cannot span a switch. A one-cycle handoff
+  boundary remains un-probed rather than proven impossible.
+  Side result: 64 misses for 64 strided accesses confirms the asym workload's stride
+  defeats the cache, so its ~7-cycle RTT is a fast-served MISS, not a hit — agreeing
+  with the independent WT lookup hit=00 evidence.
+- [ ] **FULL-CORE OoO DOES NOT SYNTHESIZE (2026-09-19) — found by building the legal
+  baseline.** Added `core/include/g6lc64_ooo_int_config_pkg.sv` (OoOEn=1, NrHarts=1,
+  all FP formats cleared so FpPresent=0): the FIRST full-core OoO configuration that
+  legally elaborates, since g6lc64_ooo trips !(OoOEn && FpPresent) and _server also
+  trips the hart guard. Registered: .licensing-tiers (R), REUSE.toml (Thales template
+  derivative group), diag-ooo-int-lint, warningBaselineRemote g6lc64_ooo_int=11.
+  LINT PASSES (11 warnings, no guard). SYNTHESIS FAILS: 435 `check -assert` problems,
+  a combinational cycle between `issue_read_operands.issue_ack` and
+  `i_ooo_dispatch.i_iq.issue_ack_i`.
+  LOOPS ARE REAL, not artefacts of the cheap check: the gate runs check -assert after
+  only `proc; opt -fast`, and yosys advises -force-detailed-loop-check to rule out
+  false positives. That precise run (a one-off check -assert -force-detailed-loop-check,
+  ~30 min; the synth gate itself was left unchanged) reported 497 problems — MORE than 435 — so the finding survives the
+  strictest available check.
+  MECHANISM: g6lc_iq reads issue_ack_i[grants] INSIDE its selection loop (low ack sets
+  grants=NrIssuePorts to "preserve age order"), while issue_read_operands derives
+  issue_ack_o[p] from the entry the IQ selected and forces ack[p]=0 when ack[p-1] is
+  low under SuperscalarEn. Selection depends on ack; ack depends on selection.
+  PRE-EXISTING AND STRUCTURAL, not from this package or the commit-mirror repair: the
+  component fixture synthesizes at zero SCCs precisely because tb_g6lc_review_dispatch
+  ties issue_ack_i to 2'b11, so the loop cannot form there. The documented
+  "a fixture PASS cannot replace this" case, now demonstrated.
+  FIXED (same day): select-then-confirm, NOT a registered ack. g6lc_iq presents the
+  oldest ready candidates as a pure function of queue state (advance `grants`
+  unconditionally) and consumes issue_ack_i only in a separate removal block driving
+  next-state, so the ack leaves the selection cone. No issue cycle lost.
+  Removal drops EXACTLY the acked ports, not a prefix. A prefix rule was written first
+  and was WRONG: with an earlier port un-acked it would keep an entry whose own port
+  WAS acked, which the consumer already took — duplicate issue next cycle. The
+  randomised IQ fixture (scenario 4, deliberately non-prefix ack patterns) caught it.
+  Exact-ack removal is correct for any pattern and assumes nothing about the consumer,
+  which matters since NrIssuePorts can exceed 1 with SuperscalarEn=0. Under
+  SuperscalarEn behaviour is unchanged (issue_read_operands already zeroes ack[p] when
+  ack[p-1] is low); dropping "stop scanning after a non-ack" only widens SELECTION.
+  RESULT on g6lc64_ooo_int: lint 11 warnings (baseline), synth CLEAN (2 warnings) —
+  was 435 problems / 497 detailed. Fixture regressions: 24/24 IQ cases pass including
+  the randomised ack scenario; dispatch default set, 11-14, 15-17 and scenario 19 pass
+  with REVIEW_RTL_LATERESULT_FAULT=1 still failing as required.
+  The tb reference model was updated to the new contract (present up to NP candidates;
+  remove exactly the acked ones).
+  STILL NOT a finished product: no independent-reference comparison, no boot, no FP.
+  Guards reframed: Phase 5 makes g6lc64_ooo ELABORATE; it was never what stopped the
+  integrated core from SYNTHESIZING.
+  NOTE: an external write at 17:29 clobbered this entry once; re-applied.
+- [x] PHASE 4 STEP 1 LANDED (2026-09-19): per-hart rename namespaces in g6lc_rename.
+  New NR_HARTS parameter (default 1). map_q/amap_q are [hart][arch]; hart_i per
+  dispatch port and commit_hart_i per commit port. free_q/busy_q UNCHANGED and SHARED
+  (shared pool is what makes SMT cheaper than two cores; busy is a property of a
+  physical register). Checkpoints record their owning hart (ckpt_hart_q) so recovery
+  restores only that hart's map, AND ckpt_alloc is marked only for same-hart
+  allocations — otherwise a peer hart's allocation after this branch would be squashed
+  by this branch's mispredict, reintroducing the aliasing through the RECOVERY path
+  rather than the map. x0 never consults the map, so physical 0 stays the shared zero;
+  reset gives hart h physicals 31*h+1..31*h+31 and the pool starts at 31*NH+1.
+  NR_HARTS=1 reproduces the old bindings exactly (map[0][i]=i, pool from 32) —
+  g6lc64_smt2 rebuilds BYTE-IDENTICAL (ba1f8f6a722829aa…).
+  PER-HART CHECKPOINT RINGS also landed: ckpt_head_q/ckpt_cnt_q are one ring per hart
+  over a static slice (CKPT_PER_HART = CKPT_DEPTH/NH). A shared ring cannot support
+  per-hart flush or independent recovery — removing one hart's checkpoints punches a
+  hole a head/count pair cannot represent. Capacity/alloc/retire/unwind all per hart;
+  the resolving hart comes from ckpt_hart_q[level], so no mispredict-hart input is
+  needed. mispredict_level_i is an ABSOLUTE slot while head/count are slice-relative,
+  so the unwind converts first. Note: slang rejects `slots_h[hart_i[p]]++` (variable-
+  indexed unpacked-array assignment target), so the per-hart group count is derived by
+  counting do_ckpt over ports instead — the formal build caught that.
+  Verified: rename/dispatch/drop/late-result fixtures pass; rename formal proof passes
+  and its checker-negative still yields a counterexample (mutation site re-pointed
+  from dut.map_q[0] to dut.map_q[0][0], since the index now means hart0's x0);
+  g6lc64_ooo_int lint 11 at baseline and synth clean.
+  OWNERSHIP + PER-HART FLUSH landed: owner_q[phys] records the owning hart (set at
+  allocation, seeded to the reset bindings). It is what makes flush_hart_i[h] possible
+  — the shared freelist records no owner, so a hart park/reset/trap could not otherwise
+  tell which registers to reclaim. Per-hart flush restores that hart's map from its own
+  amap, returns every physical it owns that its committed map no longer references, and
+  clears its checkpoints, leaving the peer live. Ownership is stale on a FREE register,
+  which is harmless (allocation overwrites; flush only reclaims non-free).
+  TESTED AT NrHarts=2 WITHOUT RELAXING THE GUARD: g6lc_rename is package-free, so
+  tb_g6lc_review_rename instantiates it at NR_HARTS=2 (REVIEW_RTL_RENAME_SMT=1,
+  -GNR_HARTS=2 -GPRF_ENTRIES=80 -GPRF_W=7; wider PRF needed since 31 committed
+  physicals per hart no longer fit in 40). Scenarios 11/12/13 = namespace isolation /
+  independent recovery / per-hart flush, with negative controls RENAME_HART_ALIAS,
+  RENAME_PEER_SQUASHED, RENAME_HART_FLUSH_SPILL. All 6 cases match — first genuine
+  NrHarts>1 evidence in the OoO path. Remaining 3 planned tests (no double allocation,
+  per-hart commit, per-hart late-WB) need IQ/ROB/LSQ hart tagging.
+  Three rename fault-injection sites had to be re-pointed after the rewrite (leak
+  accumulation now hart-qualified; release fault now clamps the per-hart retire count);
+  each was caught by its own control failing, not by inspection.
+  FULL-CORE RE-VERIFIED AFTER THE RENAME REWORK: g6lc64_ooo_int lint 11 warnings at
+  baseline and synth CLEAN (2 warnings) with per-hart maps, per-hart checkpoint rings,
+  ownership and per-hart flush all in place — so none of the Phase 4 work reintroduced
+  a combinational cycle. Docs updated: sku-matrix.mdx and core/out-of-order.mdx now
+  list g6lc64_ooo_int and state plainly that g6lc64_ooo / _server are REFUSED at
+  elaboration (FP guard / FP+hart guards), with the baseline marked as a bring-up and
+  verification profile rather than a qualified product. branding-g6lc.test.ts requires
+  the new package; 219 build-platform tests pass.
+  GUARD UNTOUCHED: check_cfg still refuses OoOEn && NrHarts>1 and the fixture negative
+  still fails to build. Remaining before the guard can move: IQ/ROB/LSQ hart tagging,
+  per-hart cancellation, and physical-register OWNERSHIP for per-hart flush.
+- [ ] PHASE 4 (NrHarts>1) SCOPED + VERIFICATION PLAN (2026-09-19), grounded in
+  g6lc_rename state. Guard still refuses OoO+SMT and the fixture negative confirms it
+  after every change in this pass (REVIEW_RTL_ILLEGAL=smt, -GHARTS=2, must fail to
+  build — it does; fp likewise). A per-hart test CANNOT be written yet because
+  g6lc_rename has no hart signal to address, so this is the spec to implement against.
+  STATE: map_q[31:0] and amap_q[31:0] are ONE namespace -> must go per hart (this is
+  the aliasing); free_q and busy_q are shared and STAY shared (a shared physical pool
+  is the point of SMT, and busy is a property of a physical register); ckpt_map_q
+  must be per hart or hart-tagged so a hart-1 mispredict cannot roll back hart 0;
+  rs1_i/rs2_i/rd_i and commit_rd_i need an accompanying hart id.
+  HARD PART = PER-HART FLUSH: the shared freelist records no owner, so parking or
+  resetting one hart cannot reclaim its physicals without new ownership state. Do NOT
+  split the freelist to dodge this — that gives up the shared-pool utilisation that
+  justifies SMT.
+  TESTS Phase 4 must satisfy, each with a failing control: (1) namespace isolation —
+  both harts write their own x5 and read back their own value (fails today by
+  construction; headline gate); (2) independent recovery — hart-1 mispredict leaves
+  hart 0 untouched; (3) no double allocation from the shared freelist; (4) per-hart
+  commit updates only that hart's architectural map; (5) per-hart flush reclaims
+  exactly that hart's physicals (needs the ownership state); (6) per-hart late-WB
+  invariant carried from the TID-reuse finding — a cancelled hart-1 result must never
+  complete, wake or supply data for hart 0, so each FU's suppression must hold PER
+  HART, not just per core.
+- [ ] PHASE 5 STEP 1 LANDED (2026-09-19): split FP register class in g6lc_rename behind
+  FPRF_ENTRIES/FPRF_W (0 = disabled, bit-identical). fmap_q/famap_q per hart,
+  ffree_q/fbusy_q as their own pool/busy table, fprs1_o/fprs2_o/fprd_o/fprd_old_o on
+  their own ports (the classes index different files, so one shared tag would force
+  the consumer to re-derive the class). Separate fwb_*/ffree_*/commit_is_fpr_i paths.
+  CHECKPOINTS STAY SHARED: splitting the FILES is not splitting the CONTROL — a branch
+  is one program-order event, so one checkpoint snapshots both maps and recovery
+  restores both; ckpt_falloc mirrors ckpt_alloc per pool.
+  The split is vindicated by the diff: every integer path guards rd!=0/prd!=0 and
+  reserves physical 0, while EVERY FP path deliberately has no such guard — f0 is an
+  ordinary writable register, its pool starts at 0, its writeback clears busy for
+  physical 0, and its committed map covers all 32 entries. A unified file would have
+  threaded that exception through shared logic.
+  Capacity is per pool, so an FP-heavy group cannot stall out integer allocation.
+  rs3 ADDED to rename (rs3_i/is_fpr_rs3_i -> fprs3_o/rs3_ready_o); the caller supplies
+  rs3_i from result[4:0] since there is no rs3 field. CLASS-CONFUSION GUARD: the
+  intra-group bypass matched rs1_i[p]==rd_i[e] on the architectural NUMBER alone, so
+  once FP exists an integer producer could satisfy an FP consumer (x5 vs f5 share a
+  number, different registers). do_alloc/do_falloc already separated the PRODUCERS;
+  the consumer side now carries !is_fpr_rsN and the FP bypass matches do_falloc. The
+  FP bypass omits the rd!=0 filter — an f0 producer must be visible to an f0 consumer.
+  FP CLASS TESTED AT FPRF_ENTRIES>0, not merely proven inert when off:
+  REVIEW_RTL_RENAME_FP=1 with -GFPRF_ENTRIES=64 -GFPRF_W=7 (again without relaxing
+  !(OoOEn && FpPresent)). Scenarios 20/21/22/23 = class isolation (x5 vs f5) /
+  f0-is-real / FP recovery restores the pre-branch map / rs3 renames + FP writeback
+  clears busy on FP physical 0; negative controls RENAME_FP_CLASS, RENAME_FP_F0,
+  RENAME_FP_RECOVER, RENAME_FP_RS3. All 8 cases match. Written BEFORE the dispatch FP
+  PRF on purpose: ~370 lines whose only prior evidence was "FP-off unchanged", and
+  building the PRF on untested rename logic would compound any error.
+  VERIFIED: rename + NR_HARTS=2 + dispatch fixtures pass; rename formal proof passes
+  with its checker-negative still failing; g6lc64_smt2 rebuilds BYTE-IDENTICAL.
+  NOT DONE (guard stays): FP PRF + rs3 read ports in g6lc_ooo_dispatch, the we_fpr
+  commit mirror, FLen-vs-XLEN width, fflags ordering. check_cfg still refuses
+  OoOEn && FpPresent.
+- [ ] PHASE 5 STEP 2 LANDED (2026-09-19): FP PRF + rs3 path in g6lc_ooo_dispatch.
+  Class selectors from is_rd_fpr/is_rs1_fpr/is_rs2_fpr/is_imm_fpr with rs3_a from
+  result[4:0]. need_rd NOW INCLUDES FP destinations (it previously excluded them
+  outright — that is what "no FP register class" meant in practice), and f0 is not
+  exempt the way x0 is. Added tid_is_fpr_q/tid_fprd_q/tid_fold_q per trans_id: a
+  writeback carries only a trans_id, so this tells the completion path which file to
+  write and which busy bit to clear (wb_value_valid / fwb_value_valid split on it).
+  FP PRF has THREE read ports TOTAL muxed to the lowest issue port holding a renamed
+  FP op, mirroring the in-order fp_raddr_pack[2:0]. Added issue_op_c_o/valid because
+  the rs3 VALUE cannot ride back in result. FP tags added to the scoreboard entry in
+  BOTH cva6.sv and the G6LC_SCOREBOARD_ENTRY_T macro (two definitions that must stay
+  in sync) plus the dispatch fixture's own minimal copy — the build found all three.
+  ** BYTE-IDENTITY INVARIANT LOST, replaced by a stronger check. ** Widening
+  scoreboard_entry_t changes every config's netlist including OoOEn=0: g6lc64_smt2 now
+  builds to 5a17785f8f309547… instead of ba1f8f6a722829aa…. That invariant had been
+  the cheap proof that OoO work cannot disturb SMT2, so losing it matters. Replaced by
+  re-running the dual-hart boot gate on the NEW model: strictDualPassed=true,
+  333,635/8,932,406 retirements, 12,765,628 cycles — all IDENTICAL. Behaviourally
+  neutral, proven not assumed.
+  STEP 2b ALSO LANDED: issue_read_operands prefers ooo_op_c_i for operand_c_regfile
+  when the op is renamed and is_imm_fpr, mirroring a/b. GPR rs3 (CVXIF offload, Zacas
+  AMOCAS rd-as-source) deliberately untouched — only the FP third operand is renamed.
+  g6lc64_ooo_int after all of it: lint 11 at baseline, synth CLEAN.
+  HONEST LIMIT: g6lc64_ooo_int has FpPresent=0, so its FP PRF elaborates with ONE
+  entry and the FP paths are inert. The synth shows the new code does not break the
+  integer config or reintroduce a loop; it does NOT show that an FP-enabled full core
+  synthesizes, and nothing can until the guard moves. Hence the module-level FP tests
+  at FPRF_ENTRIES=64.
+  OPEN COST: the four tags are unconditional (following the p_rs1/p_rs2/p_rd
+  precedent), so every scoreboard/IQ/ROB entry grows 32 bits even where FP OoO can
+  never be used. Conditional widths on (OoOEn && FpPresent) would recover that and
+  restore byte-identity, at the cost of conditional-width casts. Optimisation — should
+  be measured, not assumed.
+- [x] **CORRECTION (2026-09-19): the "testbench blocker" below was MY TARGET CHOICE,
+  not an infrastructure blocker.** Makefile picks TB_CPP by target NAME: g6lc* ->
+  corev_apu/tb/g6lc_tb.cpp, everything else -> ariane_tb.cpp. g6lc_tb.cpp is ALREADY
+  config-aware (G6LC_TB_BANKED defined only when NrHarts>1; G6LC_TB_H1(expr) evaluates
+  hart-1/gen_smt reads only on banked builds and compiles to 0 otherwise, with a
+  comment warning that a bare hart-1 read silently aliases hart-0 when non-banked).
+  Only ariane_tb.cpp has unguarded SMT2/AI probes, and AGENTS-todo ALREADY records
+  that ("non-g6lc cv* targets still can't use its hierarchy probes (needs same pass or
+  -DG6LC_TB_NO_HIER)") — so this was a KNOWN documented limitation of the cv* path that
+  I rediscovered and initially overstated as a new, wider blocker. Every g6lc* target,
+  including g6lc64_ooo_int, already builds its testbench at NrHarts=1.
+  AND the control needed no new target: g6lc64_smt2 has RVF=1/RVD=1, is in-order
+  (OoOEn=0) and already has a validated model.
+- [x] **FP TEST IS A QUALIFIED ORACLE (2026-09-19).** run_ooo_fp_review.py on the
+  in-order FP model (g6lc64_smt2): PASS "*** SUCCESS *** (tohost = 0) after 2308
+  cycles". Negative control FP_REVIEW_NEGATIVE=1 perturbs ONE expected constant — the
+  FMA result, a check reachable only if the FP path really ran — and the run FAILS
+  ("*** FAILED *** (tohost = 1) after 1747 cycles", different cycle count). The
+  negative matters more than the pass: a program that traps before its first check, or
+  whose FP ops never execute because mstatus.FS was left clear, exits 0 just as
+  convincingly. Runner extracts tohost from the linked binary rather than hard-coding
+  it and requires an explicit SUCCESS verdict.
+- [ ] **FP ON THE OoO PATH DOES NOT WORK YET (2026-09-19) — reproducible timeout.**
+  FP+OoO model built behind a temporary local guard relaxation (guards restored and
+  verified; g6lc64_ooo refuses again). TWO defects found:
+  (1) PRE-EXISTING CONFIG DEFECT, not FP: the model aborted at time 0 with
+  "load_unit.sv:745: DcacheIdWidth parameter is not wide enough to encode pending
+  loads". g6lc64_ooo and g6lc64_ooo_int set DcacheIdWidth=1 with NrLoadBufEntries=8
+  (needs 3). g6lc64_smt2 ALREADY carries the fix and the explanation ("G1n: hang-7
+  raised NrLoadBufEntries to 8; 1-bit D$ rid truncated") — it was never propagated to
+  the OoO packages, and nothing caught it because those configs could never reach
+  simulation (the assertion is translate_off, so lint and synth pass regardless).
+  Both set to 3. Exactly the defect class a runnable baseline exists to find.
+  (2) MY ORACLE WAS BROKEN, and the NEGATIVE CONTROL caught it: after the fix both the
+  positive AND the negative reported "*** SUCCESS *** (tohost = 0) after 2000000
+  cycles" — the cycle CAP. On timeout the driver still prints SUCCESS, so a hang is
+  textually indistinguishable from a pass. Without the negative control this would
+  have been reported as "FP works on OoO". run_ooo_fp_review.py now requires the
+  retired cycle count to be strictly below the cap.
+  RESULT WITH THE FIXED ORACLE: in-order FP (g6lc64_smt2) PASS 2,308 cycles; FP+OoO
+  (g6lc64_ooo) TIMEOUT at 2,000,000 cycles — does not complete.
+  ROOT CAUSE LOCATED (2026-09-19), and it is a gap in THIS Phase-5 work.
+  Discriminators: integer test on integer OoO PASS 1,109 cy; integer test on the
+  FP-ENABLED OoO model PASS 1,172 cy; FP test on the same model TIMEOUT. So neither FP
+  presence nor the OoO path is broken — FP INSTRUCTIONS trigger it. (An earlier reading
+  blamed a hang at npc=0x10040; that was a MISREAD — those [boot] lines are a capped
+  early-cycle trace, not the stall point.)
+  DEFECT: g6lc_iq is wired .wb_valid_i(wb_value_valid), and step 2 redefined that
+  signal as INTEGER completions only (`&& !tid_is_fpr_q[...]`), routing FP completions
+  to rename's FP busy table via fwb_valid_i but NEVER to the IQ's wakeup. An IQ entry
+  waiting on an FP producer is never woken, never issues, and the ROB head never
+  retires -> deadlock, exactly the observed timeout.
+  FIX APPLIED — DEADLOCK CLEARED. g6lc_iq now takes FPRF_W, fwb_valid_i/fwb_prd_i,
+  per-entry FP source tags (fprs1/2/3) and per-source class bits (fpr_rs1/2/3), plus an
+  rs3_rdy term. Each source wakes from its own class: integer on wb_prd_i WITH the
+  !=0 no-destination guard, FP on fwb_prd_i WITHOUT it (FP physical 0 is real). Same
+  split applied to the same-cycle dispatch capture so a new waiter cannot miss an FP
+  pulse. FP+OoO went from TIMEOUT at 2,000,000 cycles to completing in ~920.
+  SECOND DEFECT NOW EXPOSED UNDERNEATH: the program completes but fails its FIRST
+  check. Test extended to report the failing block as its exit code:
+  in-order FP SUCCESS 2,420 cy; FP+OoO FAILED (tohost=1) 920 cy = BLOCK 1, the FP
+  dependency chain (a straight fadd.d sequence — the simplest FP rename/wakeup case).
+  The SAME TAGGED BINARY passes in-order, so the test and its constants are sound and
+  the fault is in the OoO FP path.
+  BLOCK 1 DIAGNOSED AND FIXED (2026-09-19): FP OPERANDS WERE READ FROM THE WRONG FILE.
+  Dispatch assembled op_a/op_b from the INTEGER PRF only, and issue_read_operands
+  carried an explicit !(FpPresent && is_rs1_fpr(...)) exclusion sending every FP source
+  to the ARCHITECTURAL f-register file, which by construction holds no in-flight
+  renamed value -> a dependent fadd.d read a stale operand. Step 2 had wired the FP
+  file's THIRD read port to op_c and left rs1/rs2 on the integer path.
+  Fix: deliver FP sources from the FP physical file on the same op_a/op_b ports (with
+  FP writeback bypass, same for op_c) and drop the exclusion so the renamed value is
+  preferred for BOTH classes.
+  STRUCTURAL DECISION: the FP file has THREE read ports for the whole group, so at most
+  one issue port can read FP operands per cycle; a second FP consumer in the group is
+  HELD BACK rather than issued unreadable operands. The gate is applied to the IQ's RAW
+  valid, not issue_valid_o — fp_port_sel derives from the raw valid, so gating the
+  output would close a combinational loop through the signal being computed.
+  RESULT: block 1 PASSES. Evidence is indirect but sound — the negative control, whose
+  mutation is in BLOCK 2, now reports FAILED (tohost=2), so it executed block 1's
+  checks and got past them; before the fix it could not.
+  THIRD DEFECT REMAINS AND IT IS NONDETERMINISTIC. Added FP_REVIEW_STOP_AFTER=N bisect
+  (truncates after block N) — needed because a hang produces NO exit code, so unlike a
+  wrong result it cannot name its own block. Sweep does NOT converge:
+    stop2 SUCCESS | stop3 FAILED block3 | stop4 SUCCESS | stop5 FAILED exit 1337 |
+    stop6 FAILED block4
+  Blocks 1-2 pass consistently (incl. the chained FMA whose rs3 is an in-flight renamed
+  producer). Beyond that the SAME block passes or fails depending only on what code
+  FOLLOWS it — the signature of a scheduling-dependent race, not a deterministic logic
+  error. EXIT 1337 IS THE SHARPEST DATUM: not a block id, so s11 — an INTEGER register
+  — was corrupted. The fault is not confined to the FP class; it leaks into integer
+  state.
+  ** MY OWN INSTRUMENTATION WAS WRONG FIRST. ** The block id was CARRIED in s11 and
+  read at exit — in a test whose purpose is hunting register corruption. Exit 1337
+  proved s11 itself corruptible, so every block attribution was suspect. Test now
+  materialises the id AT each failure site (fail1:..fail7:, li a0,N); nothing carries
+  it through the code under test. Re-run with trustworthy ids gives a DIFFERENT and
+  still inconsistent picture:
+    stop2 FAILED block2 | stop3 FAILED BLOCK 1 | stop4 FAILED block2 |
+    stop5 SUCCESS | stop6 SUCCESS
+  Even block 1 fails under one truncation while the two LONGEST variants pass.
+  ** THE EARLIER "block 1 now passes" CONCLUSION IS WITHDRAWN ** — it rested on the
+  corrupted carrier. Corrected test still passes in-order (SUCCESS 2,322 cy), so the
+  oracle is sound; only the OoO attribution was wrong.
+  THREE HYPOTHESES ELIMINATED (do not re-derive):
+  1. FP destination also consumes an integer physical — DISPROVED by reading
+     g6lc_rename: allocation is mutually exclusive (`if (FP…) … else if (…)`).
+  2. tid_is_fpr_q goes stale so an integer op is treated as FP at commit (skipping its
+     map update and predecessor free) — DISPROVED by directed assertion
+     OOO_COMMIT_CLASS_STALE comparing tracked class vs committing opcode: NEVER FIRES.
+  3. FP physical 0 / f0 mishandled — DISPROVED in software: rewriting block 3's f0 to
+     f20 reproduces the failure BIT FOR BIT (same verdict, same 1,010 cycles).
+  ** CAUSE IS NOT FP — THE OoO MEMORY PATH HANGS ON ITS OWN (2026-09-19). **
+  Discriminator: run an existing INTEGER test that exercises memory on every model.
+    ooo_ilp_chain (pure ALU): in-order PASS 2,315 | ooo_int PASS 1,109 | ooo+FP PASS 1,172
+    ooo_mem_dep  (ld/st):     in-order PASS 2,168 | ooo_int TIMEOUT 400k | ooo+FP TIMEOUT 400k
+  ooo_mem_dep hangs on the INTEGER-ONLY OoO config — no FP in the design or the
+  program. The defect chased through the FP test is PRE-EXISTING IN THE OoO MEMORY
+  PATH, not introduced by Phase 5. Never observed because this core had never executed
+  a program until today, and ooo_ilp_chain is pure ALU work (which is why the first OoO
+  execution looked healthy).
+  THIS EXPLAINS THE NONDETERMINISM: the FP test is full of memory traffic (la/fsd/fld +
+  runtime), so truncating it changes the load/store pattern and with it whether the
+  memory defect is hit. "Same block passes or fails depending on what follows" is what
+  a memory-ordering stall looks like through a test not designed to isolate one.
+  CONSEQUENCES: (a) the two FP fixes stand on their own evidence (IQ FP wakeup turned a
+  hard hang into a completing run; FP operands were demonstrably read from the
+  ARCHITECTURAL f-regfile) — both real defects in code I wrote; (b) NO FP correctness
+  verdict can be drawn from the current FP runs in EITHER direction while the memory
+  path is broken underneath; (c) NEXT TARGET = ooo_mem_dep on g6lc64_ooo_int: FP-free,
+  deterministic, reproducible, on a config that is LEGAL TODAY and needs no guard
+  relaxation. Fix that before resuming FP bring-up.
+  MINIMAL REPRODUCTIONS (verif/tests/custom/ooo/ooo_mem_min.S, -DSTAGE=n, one construct
+  per stage) on g6lc64_ooo_int:
+    S1 store only .................. PASS 865 cy
+    S2 store + load a different line  PASS 860 cy
+    S3 store + load SAME address .... PASS 866 cy
+    S4 two stores, load the OLDER ... FAILED, WRONG DATA, 891 cy
+    S5 store/load in a loop ......... HANG at 200,000
+  S1-S3 passing is as informative as S4 failing: stores retire, loads complete, and
+  same-address store-to-load forwarding is CORRECT. The defect needs TWO LIVE STORES.
+  S5 is a SEPARATE failure (repeated LSQ allocate/free deadlocks) — recorded as two
+  defects until evidence links them.
+  HYPOTHESIS DISPROVED: S4 stores to 8(sp)/16(sp) which share a cache line, suggesting
+  line-granular forwarding. NOT SO — the LSQ hazard query uses same_word(...) plus a
+  byte-lane overlap test, so two different words cannot collide there. That same code
+  documents it is only the HAZARD decision: "the LSU store_buffer owns the byte-exact
+  data forward (full PA + be, both queues, commit handoff)". NEXT LOOK = the LSU
+  store_buffer data path, not the queue.
+  CHARACTERISED TO ONE CYCLE (2026-09-19). S4 compared two registers so either could
+  be at fault; splitting the check and varying ONLY the gap between load and consumer
+  isolates it:
+    S4  two stores, ld, consumer IMMEDIATELY after ... FAILS
+    S10 ONE store,  ld, consumer immediately after ... PASS
+    S8  two stores, ld, ONE nop, consumer ............ PASS
+    S9  two stores, ld, two nops, consumer ........... PASS
+    S6/S7 two stores, ld, multi-instr `li`, consumer . PASS
+  The fault needs BOTH a second live store AND a zero-cycle gap before the consumer,
+  and ONE independent instruction hides it. That is a ONE-CYCLE EARLY-WAKEUP: with two
+  stores live, a load's result reaches its consumer exactly one cycle before it is
+  correct.
+  WARNING FOR FUTURE PASSES: S6/S7 passed only because `li` of a 64-bit immediate
+  expands to several instructions and silently supplied the gap. The apparent "store
+  proximity doesn't matter" reading from S7 is therefore NOT evidence either way — the
+  gap, not the addressing, was doing the work.
+  MECHANISM READ FROM SOURCE: the LSQ computes a PRECISE data-availability gate
+  (stl_stall_o: matching older store with !data_v, or an older store whose address is
+  unresolved). g6lc_ooo_dispatch computes `mem_stall = md_stall || stl_stall` and then
+  passes **.mem_stall_i(1'b0)** to the IQ — the precise gate is CALCULATED AND
+  DISCARDED. That is deliberate and documented: feeding it back closes a combinational
+  loop (stl_stall <- ld_qaddr <- issue_valid_o <- the gate). The comment argues the
+  IQ's per-entry AGE gate covers it (a load is held while any OLDER store is live in
+  st_live_mask_i).
+  THE MEASUREMENT SAYS THAT SUBSTITUTION IS NOT EQUIVALENT. The age gate is a coarse
+  ORDERING proxy: it clears when the older store leaves the live mask, whereas
+  stl_stall tracks when the store's DATA is visible to the load path. With one store
+  those edges coincide closely enough; with TWO draining, the mask clears one cycle
+  before the store_buffer handoff makes data visible, and a load whose consumer is
+  immediately adjacent reads the stale value — exactly the "two live stores AND a
+  zero-cycle gap, one nop hides it" signature.
+  FIX SHAPE: NOT re-enabling stl_stall at select (that is the loop the comment rightly
+  refuses). It must act AFTER select — suppress the load's completion/writeback when
+  stl_stall says data was not available and let it re-issue, or register the gate and
+  hold the consumer's wakeup by a cycle. Both are real design work with a timing cost;
+  both gate on this five-instruction reproduction.
+  ** TESTED AND REFUTED (2026-09-19). ** The hypothesis predicted that a one-cycle
+  more conservative age gate would fix S4, so each store was held live an extra cycle
+  (st_live_mask | st_live_mask_q; loads only, so it cannot stall the store drain).
+  RESULT WAS WORSE: S3 PASS 866 -> FAILED tohost=0x40002000; S10 PASS 866 -> FAILED
+  0x40002000; S4 still FAILED; S5 still HANG. Two previously-passing stages broke and
+  the exit value is not a program exit code, so the intervention introduced a
+  DIFFERENT fault rather than exposing the original. REVERTED, and the baseline
+  re-measured to confirm exact restoration (S3 PASS 866, S4 FAILED, S10 PASS 866).
+  So "the age gate clears one cycle early" does NOT survive contact with the design.
+  FOURTH HYPOTHESIS ELIMINATED BY TEST rather than argument (with FP-physical double
+  allocation, stale tid_is_fpr_q, f0/physical-0). THAT PATTERN IS THE CONCLUSION: the
+  OoO memory path is not yielding to source-level reasoning. NEXT STEP = WAVEFORM
+  evidence from the five-instruction S4 reproduction (the cycle at which the load's
+  data is sampled vs when the store's data becomes visible), NOT a fifth guess.
+  ** TRACED (2026-09-19): THE PROTECTION WINDOW ENDS AT COMMIT, BUT VISIBILITY LAGS. **
+  Temporary $display probe in g6lc_lsq (SINCE REMOVED — the testharness whitelists
+  plusargs so it could not be gated) recorded what the queue actually decides. S4:
+    814 ST alloc slot=0 id=15
+    816 ST upd   slot=0 id=15 addr=...21d8 data_v=1 data=aaaaaaaabbbbbbbb
+    817 ST upd   slot=1 id=16 addr=...21e0 data_v=1 data=ccccccccdddddddd
+    818 ST free  slot=0 id=15        <-- store leaves the LSQ
+    819 ST free  slot=1 id=16
+    820 LD query id=17 addr=...21d8 -> stall=0 fwd=0 data=0
+  The load queries the SAME ADDRESS as store id=15, two cycles after it was freed. No
+  match => forwards nothing, stalls nothing, goes to memory.
+  Stores are freed from the LSQ AT COMMIT, but a committed store's data is still in the
+  LSU store_buffer and has not reached the cache. The LSQ's protection window closes at
+  commit while VISIBILITY lags behind it, and nothing covers the gap.
+  ACCOUNTS FOR EVERYTHING, including what killed the earlier hypotheses: two live
+  stores = two store_buffer entries = longer drain, so the load beats it; zero gap =
+  load immediately behind; one nop = the cycle the buffer needed. Also explains why
+  extending the live mask FAILED — the store is already GONE from the mask's source
+  when the load queries, so lingering changes the wrong edge.
+  TWO CORRECTIONS TO THAT READING, both from source:
+  (a) the trace's `data=0` is NOT the load's result — it is stl_data_o, the LSQ's own
+      forward value, and g6lc_ooo_dispatch leaves that port UNCONNECTED
+      (`.stl_data_o ()`), exactly as the LSQ comment says (observability only). The
+      trace shows what the QUEUE concluded, not what the load received.
+  (b) that also RULES OUT the next obvious candidate — that the OoO path completes
+      loads from the LSQ forward instead of the store buffer's. It does not; only
+      stl_forward_o propagates, and only as observability.
+  So the data path is the LSU's in BOTH configs, and store_buffer's
+  page_offset_matches_o scans BOTH the speculative and commit queues plus the incoming
+  store, which on the face of it should cover the post-commit window in either core.
+  WHY THE OoO CORE NEVERTHELESS READS STALE DATA IS NOT YET EXPLAINED — the LSQ trace
+  narrowed WHERE to look without settling the mechanism.
+  ** THE IN-ORDER/OoO COMPARISON IS CONFOUNDED BY NrHarts (2026-09-19). ** Three
+  store-to-load forwarding protections in store_buffer.sv are gated on
+  `CVA6Cfg.SuperscalarEn && CVA6Cfg.NrHarts > 1`: the fwd_keep marking on a spec entry
+  a live load forwarded from; the companion rule that such an entry must drain rather
+  than be cancelled (G1ah); and the g1ao_hold fallback that re-supplies data when the
+  byte merge finds nothing. Their comments date them to the SMT2 work.
+    g6lc64_smt2   (the "in-order control"): SuperscalarEn=1 NrHarts=2 -> ACTIVE
+    g6lc64_ooo_int(the subject)           : SuperscalarEn=1 NrHarts=1 -> DISABLED
+  So control and subject differ in NrHarts as well as OoOEn, and that difference gates
+  exactly the store-to-load machinery under suspicion. EVERY "passes in-order, fails
+  in OoO" STATEMENT ABOVE IS CONFOUNDED — the discriminating variable may be NrHarts,
+  not out-of-order execution.
+  ** CONFOUND TESTED — THE OoO CONCLUSION SURVIVES (2026-09-19). ** Clean control =
+  g6lc64_ooo_int with ONLY OoOEn flipped to 0: identical NrHarts=1, SuperscalarEn=1,
+  identical everything else, so the store_buffer protections stay DISABLED IN BOTH
+  ARMS and the single free variable is out-of-order execution.
+    stage  | OoOEn=1        | OoOEn=0 (same config)
+    S3     | PASS 866       | PASS 900
+    S4     | FAILED         | PASS 902
+    S5     | HANG           | PASS 1,041
+    S10    | PASS 866       | PASS 900
+  Both failures disappear when OoOEn alone is cleared. The NrHarts gating IS a real
+  methodological hazard (the earlier g6lc64_smt2 comparison genuinely was confounded)
+  but it is NOT the cause: with a single-variable control the defects are in the
+  OUT-OF-ORDER PATH, and the original conclusion stands on evidence rather than on the
+  accident of which baseline was convenient.
+  S5 is PROMOTED from "may or may not share a cause" to a SECOND OoO DEFECT: it too
+  passes in-order on the identical configuration.
+  ** LOCALISED (2026-09-19): THE STORE BUFFER FORWARDS THE WRONG DATA UNDER OoO. **
+  Temporary load_unit probe (SINCE REMOVED) logged forward inputs for every load on
+  BOTH arms of the OoOEn-only control. Same address ...21d8, same test, same binary:
+    in-order (passes): pom=1 fwd_v=1 fwd_be=full fwd_data=aaaaaaaabbbbbbbb  CORRECT
+    OoO      (fails) : pom=1 fwd_v=1 fwd_be=full fwd_data=0000000000000001  WRONG
+  HAZARD DETECTION IS NOT BROKEN — both arms match the page offset and raise a
+  full-coverage forward. What differs is the VALUE the store buffer supplies: the OoO
+  load is correctly told "an older store covers your bytes" and then handed the wrong
+  bytes.
+  THIS INVALIDATES THE FRAMING USED FOR SEVERAL ROUNDS: ordering, wakeup timing, and
+  the age-gate-vs-stl_stall question all ask whether the load is HELD LONG ENOUGH,
+  when the load is held correctly and simply receives bad data. It also explains why
+  one nop hides it — with a cycle of slack the entry is no longer read in the state
+  that produces the bad merge.
+  ** RETRACTED (2026-09-19): "the first store never reaches the store buffer" IS
+  WRONG. ** It came from a `grep … | tail -10` truncated at the TOP, which cut off the
+  line that disproves it. Re-reading the SAME log in full:
+    817 PUSH paddr=21d8 data=aaaaaaaabbbbbbbb tid=15
+    818 PUSH paddr=21e0 data=ccccccccdddddddd tid=16
+  BOTH STORES ARE PUSHED, correct addresses, correct data. An independent store_unit
+  FSM probe agrees: st_valid=1 at 818 with paddr=21d8 and again at 819 with
+  paddr=21e0. Nothing is dropped in dispatch, lsu_bypass, or store_unit.
+  ** THE LOAD READS THE WRONG ADDRESS — STALE BASE REGISTER (2026-09-19). ** Reading
+  the load-unit log WITHOUT truncation also removes the forwarding story. There is NO
+  LSU access to 21d8 anywhere near the test. What there is:
+    LSQ queries the test load (tid17) at 0x800221d8  <- correct
+    LSU access one cycle earlier          0x80022218
+    RESULT tid=17 data=0x1 follows it
+  The test opens with `addi sp, sp, -64`:
+    before the addi: sp=0x80022210 -> 8(sp) = 0x80022218
+    after  the addi: sp=0x800221d0 -> 8(sp) = 0x800221d8
+  0x80022218 IS 8(sp) COMPUTED WITH THE PRE-DECREMENT sp. The load's base register is
+  STALE: it read sp from before the stack adjustment, addressed a different word and
+  returned whatever lived there. The STORES used the CORRECT sp — which is why they
+  land at 21d8/21e0 and the load misses both.
+  SO THIS IS NOT A STORE-TO-LOAD FORWARDING DEFECT AT ANY LEVEL. It is a RAW HAZARD ON
+  THE LOAD'S rs1 THAT THE OoO OPERAND PATH DOES NOT HONOUR; the "full-coverage forward
+  of 0x1" is a CORRECT forward for a DIFFERENT address.
+  Explains the reproduction shape better than any previous theory: the two stores are
+  not the cause but the TIMING, spacing the load from `addi sp` enough to expose the
+  window — equally why one nop changes the outcome.
+  TWO PATHS COMPUTE THIS LOAD'S ADDRESS AND THEY DISAGREE: dispatch's AGU (LSQ query,
+  correct) vs issue_read_operands' operand_a (used by the LSU, stale). That
+  disagreement is the defect, squarely in the OoO operand delivery this work touched.
+  ** CONFIRMED (2026-09-19). ** Probe re-run carrying the trans_id ON THE ACCESS LINE,
+  so the load is identified explicitly rather than by adjacency:
+    821 ACCESS tid=17 vaddr=0x80022218   <- stale, pre-decrement 8(sp)
+    822 RESULT tid=17 data=0x1
+  tid17 is the same load the LSQ queried at 0x800221d8. The two address paths PROVABLY
+  disagree for one architectural instruction.
+  STATUS: ROOT CAUSE ESTABLISHED. The OoO load path delivers a STALE rs1 to the LSU
+  while dispatch's AGU uses the correct value. Everything downstream — "wrong
+  forwarded data", the two-store dependency, the one-nop sensitivity — follows from a
+  load issued against the WRONG ADDRESS.
+  ** FIXED (2026-09-19): THE SCOREBOARD FORWARD WAS OVERRIDING RENAMED OPERANDS. **
+  Both paths read the SAME signal (op_a_agu), so they could only diverge downstream —
+  and they do, in issue_read_operands:
+      if (forward_rs1[i]) fu_data_n[i].operand_a = rs1_res[i];   // ~line 928
+  The operand MUX takes operand_a_regfile (which correctly prefers the OoO PRF value)
+  and then lets the LEGACY SCOREBOARD FORWARD OVERWRITE IT. Renamed ops were
+  explicitly opted in:
+      if (CVA6Cfg.OoOEn && issue_instr_i[i].ooo_renamed) begin
+        // still allow scoreboard forward for same-cycle precision if valid
+        if (rs1_has_raw[i] && rs1_valid[i]) forward_rs1[i] = 1'b1;
+  The scoreboard is an IN-ORDER structure that does not track renaming, so its idea of
+  "the latest producer of sp" can be STALE for a renamed op — and it wins the MUX.
+  Exactly the measured symptom (load got the pre-addi sp).
+  Removing that opt-in fixes it:
+    S3 PASS 866 -> PASS 866 | S4 FAILED -> ** PASS 878 ** | S5 HANG -> HANG (still) |
+    S10 PASS 866 -> PASS 866;  ooo_ilp_chain unchanged 1,109 (no regression).
+  IN-ORDER PATH UNAFFECTED, verified BEHAVIOURALLY not by inspection: change sits
+  inside if (CVA6Cfg.OoOEn && …), and the qualified SMT2 dual-hart OpenSBI boot on a
+  freshly built model gives strictDualPassed=true, 333,635/8,932,406 retirements,
+  12,765,628 cycles — IDENTICAL to reference.
+- [ ] ** OoO DEFECT 2 (LOOP HANG): CAUSE CONFIRMED — THE IQ AGE GATE DEADLOCKS
+  (2026-09-19). ** Isolation in four cheap runs; neither ingredient alone hangs:
+    loop, no memory .............. PASS 959
+    loop, STORE only ............. PASS 956
+    loop, LOAD only .............. PASS 956
+    loop, STORE+LOAD same addr ... HANG
+  Trigger is DEPTH, not the dependence: 2 iters PASS 869 | 3 iters PASS 877 |
+  4 iters HANG | 16 iters HANG. Four iterations is ~28 instructions + prologue against
+  NrScoreboardEntries=32 — THE WINDOW FILLS.
+  CONFIRMED BY INTERVENTION: disabling the IQ older_st age gate (UNSOUND — removes
+  memory ordering; diagnostic only, reverted immediately) makes both complete:
+    4-iteration loop  HANG -> PASS 852
+    16-iteration loop HANG -> PASS 934
+  MECHANISM IMPLIED: a load is held because some store looks OLDER by the circular
+  compare
+    (TRANS_ID_BITS'(s) - commit_ptr_i) < (q_chain[e].sbe.trans_id - commit_ptr_i)
+  while IN-ORDER COMMIT cannot retire that store ahead of the load — neither makes
+  progress. A raw modular subtraction only orders correctly while every live trans_id
+  lies within ONE WINDOW of commit_ptr; once the loop spreads them around the circle a
+  YOUNGER store compares as OLDER. Explains the depth threshold and why BOTH a store
+  and a load are needed (the load's own stall is what fills the window).
+  ** …AND THE STATE DUMP OVERTURNED THAT READING (2026-09-19). ** Before designing a
+  fix, the queue was dumped periodically while stuck:
+    [iqd] 40014 cnt=0 commit_ptr=4 st_live=00000000
+    [iqd] 60014 cnt=0 commit_ptr=4 st_live=00000000
+  THE IQ IS EMPTY AND NO STORE IS LIVE. Nothing is held by the age gate at all — the
+  pipeline is fully DRAINED with commit_ptr frozen at 4, and the harness reports "a
+  core ran and then stopped retiring" with max INTRA-RUN retirement gap of only 20
+  cycles. The core executed, then stopped dead.
+  SO THE AGE-GATE CONCLUSION DOES NOT SURVIVE: an empty queue cannot be deadlocked by
+  a gate that only blocks queue entries. The disabling experiment CHANGED GLOBAL
+  TIMING AND MASKED the fault rather than removing its cause — same as one nop masked
+  defect 1. A passing result from an intervention is NOT proof of mechanism when the
+  intervention perturbs timing everywhere.
+  WHAT THE DUMP DOES ESTABLISH: the hang is NOT in the IQ, NOT in store-to-load
+  ordering, NOT in the LSQ — all idle.
+  THREE FURTHER PROBES CLOSED IT OUT. The LSQ LOAD queue is empty too (no outstanding
+  load). And dispatch reports:
+    disp_valid=01 ack=00 can_go=0 ren_stall=0 rob_full=1 iq_full=0 lsq_block=0 flush=0
+  ** THE FRONT END IS OFFERING INSTRUCTIONS; DISPATCH REFUSES BECAUSE THE ROB IS
+  FULL ** — with IQ empty, both LSQ queues empty, nothing in flight. Four iterations
+  is ~28 instructions + prologue against a 32-entry window: exactly where a ROB that
+  never frees entries wedges.
+  CHAIN: scoreboard head (commit_ptr=4) never completes -> commit never acks ->
+  g6lc_rob retires on retire_ack_i(commit_ack_i) so it never frees -> rob_full ->
+  dispatch blocks -> pipeline drains and stays drained.
+  SO THE DEFECT IS an instruction that ISSUES AND EXECUTES but whose COMPLETION NEVER
+  REACHES THE COMMIT POINT. Dumping the scoreboard head names it EXACTLY:
+    [sbd] head=4 issued=1 cancelled=0 done(valid)=0 fu=4 op=18 pc=0x800001ec
+  fu=4 is CTRL_FLOW and op=18 is NE -> this is the loop's bnez BACK-EDGE.
+  ** A BRANCH WAS ISSUED AND NEVER COMPLETED. ** It sits issued, not cancelled, never
+  marked valid/done, so commit can never pass it.
+  FITS EVERY CONSTRAINT: the loop is the only construct executing the same backward
+  branch repeatedly; >=4 iterations is where the predictor first mispredicts it; and a
+  stuck branch explains a DRAINED pipeline far better than any memory-ordering story —
+  the memory ops all finished, which is why IQ and both LSQ queues are empty.
+  STRUCTURAL MISMATCH FOUND WHILE CHASING THIS — REAL, BUT NOT THE CAUSE.
+  issue_read_operands derives port-p eligibility from issue_instr_i[p-1]:
+      for (p = 1; p < NrIssuePorts; p++) begin
+        fus_busy[p] = fus_busy[p-1];
+        fus_busy[p].csr = 1'b1;
+        unique case (issue_instr_i[p-1].fu)     // <- the PREVIOUS PORT
+          CTRL_FLOW: if (SuperscalarEn) fus_busy[p] = '1;
+  That is IN-ORDER multi-issue logic assuming the ports hold instructions ADJACENT IN
+  PROGRAM ORDER. The OoO IQ presents ANY two ready entries, so the port-1 mask is not
+  a sound filter under OoOEn. The FLU (branch/CSR/mult) is port-0 only, so with FLU
+  ready fus_busy[1].ctrl_flow=0 — a branch granted to port 1 would be acked, dropped
+  from the queue, and never executed. Matches the observed issued && !done branch.
+  ** TESTED AND IT IS NOT THE CAUSE. ** Restricting FLU-only ops to slot 0 and
+  serializing after a branch (NrIssuePorts=2, so the guard WAS live) changed nothing:
+  S5/S15 still hang, ooo_mem_dep still times out, S4 still passes at 878. REVERTED —
+  an unvalidated issue restriction costs bandwidth for no measured benefit.
+  Recorded as a LATENT SOUNDNESS RISK for when OoO + superscalar issue are both live.
+  ** THE FLU RETIRES ONE trans_id PER CYCLE; OoO CAN PRESENT TWO (2026-09-19). **
+  Extrapolating the branch path end to end (IQ -> issue_read_operands -> ex_stage ->
+  branch_unit -> flu_* -> scoreboard) exposes a sharper mismatch, and the RTL states
+  the invariant itself. issue_read_operands emits PER-PORT vectors (alu/branch/csr/aes
+  _valid_o); ex_stage combines them:
+      assign one_cycle_select = alu_valid_i | branch_valid_i | csr_valid_i | aes_valid_i;
+      assign flu_valid_o = |one_cycle_select | mult_valid;        // ONE valid
+      flu_trans_id_o = one_cycle_data.trans_id;                    // ONE trans_id
+      if (|branch_valid_i) flu_trans_id_o = branch_data.trans_id;  // branch wins
+  VECTOR IN, SCALAR OUT. If two FLU-bound one-cycle ops are selected in the same
+  cycle, ONE trans_id is written back and the OTHER COMPLETION IS LOST — and a lost
+  completion is exactly an entry left issued && !done, which wedges commit, fills the
+  ROB and drains the pipeline. That IS the measured state.
+  ex_stage documents the invariant: "If port0 is ALU and a later port is also
+  one-cycle, ALU0 must write port0's tid … Port1+ ALU uses ALU2 / FPU_WB." The design
+  assumes AT MOST ONE FLU-BOUND ONE-CYCLE OP PER CYCLE, achieved by routing port-1 ALU
+  to ALU2 and by the in-order fus_busy chain serialising the rest. The OoO IQ selects
+  any two ready entries and breaks it — same root as the port-eligibility mismatch,
+  one level deeper.
+  ** UNFINISHED CHECK ON THE EARLIER EXPERIMENT: ** forcing branches to slot 0 should,
+  by this analysis, have let the branch win the FLU (fus_busy[1]='1' after a port-0
+  CTRL_FLOW blocks the sibling). It did not clear the hang — but I concluded "the fix
+  failed" from the hang PERSISTING WITHOUT RE-PROBING WHICH INSTRUCTION WAS STUCK. If
+  this analysis is right the stuck entry should have CHANGED (to the sibling one-cycle
+  op that lost the FLU) — a different defect surfacing, not the same one persisting.
+  RE-RUN THE SCOREBOARD-HEAD DUMP WITH THAT GUARD IN PLACE; it distinguishes them.
+  THAT THEORY ALSO FAILS ON A CLOSER READ: fus_busy[p]='1' is applied after an ALU OR
+  a CTRL_FLOW on port p-1 under SuperscalarEn ("One ALU issue/cycle under SS until
+  dual-WB clean on OpenSBI"), and fu_busy[i] gates issue_ack[i]. So
+  issue_read_operands ALREADY serialises to one FLU-bound op per cycle whatever the IQ
+  presents — two FLU completions cannot be selected together. FIVE hypotheses down.
+
+- [x] ** CONFIRMED BY CONFIGURATION: THE HANG IS AN OoO x DUAL-ISSUE INTERACTION
+  (2026-09-19). ** Instead of a sixth site-specific theory, the CLASS was tested:
+  integer OoO with NrIssuePorts=1 and SuperscalarEn=0, everything else unchanged.
+    test                         2-issue OoO        single-issue OoO
+    stage 4 (two stores)         PASS 878           PASS 942
+    stage 5 (16-iter loop)       HANG               PASS 1,069
+    stage 15 (4-iter loop)       HANG               PASS 938
+    ooo_mem_dep                  TIMEOUT 400,000    PASS 1,151
+    ooo_ilp_chain                PASS 1,109         PASS 1,380
+    stages 3,10,11,12,13,14,16   pass               pass
+  EVERY stage and BOTH directed tests pass at single issue. The defect is NOT in the
+  OoO core proper — rename, IQ, ROB, LSQ and the memory path all behave — but in the
+  interaction between OoO selection and issue/execute structures that assume the two
+  ports carry PROGRAM-ORDER-ADJACENT instructions. The two catalogued mismatches
+  (fus_busy[p] from issue_instr_i[p-1]; scalar flu_valid_o/flu_trans_id_o behind a
+  vector one_cycle_select) are members of that class though neither alone is the
+  trigger.
+
+- [x] ** FIXED: iq_issue_valid USED BEFORE ITS DECLARATION in g6lc_ooo_dispatch. **
+  The IQ instantiation consumes it ~70 lines above where the FP work declared it.
+  Verilator accepts this; SLANG DOES NOT — so SYNTHESIS OF g6lc64_ooo_int WAS BROKEN
+  by the FP-operand work and the breakage was INVISIBLE TO EVERY SIMULATION RUN.
+  Declaration moved up. g6lc64_ooo_int now passes LINT (10 warnings, baseline 11) and
+  SYNTHESIS (clean, 2 warnings) again. Lesson: simulation cannot gate synthesis; the
+  verify sweep must be run after RTL edits, per AGENTS.md section 0.2.
+
+- [ ] ** PRE-EXISTING, FOUND BY THE SINGLE-ISSUE EXPERIMENT, NOT YET FIXED: **
+  issue_read_operands.sv:1304/1337/1341 index raddr_pack[2] UNCONDITIONALLY in the
+  Zacas CASQ phase-1 path. With NrIssuePorts=1 the pack is [1:0] and elaboration
+  fails ("cannot refer to element 2"). So SINGLE-ISSUE OoO SIMULATES CORRECTLY BUT
+  CANNOT BE SYNTHESISED until that indexing is bounded — which is why the config is
+  left at 2-issue rather than shipped as the working baseline.
+  FIX SHAPE: guard the CASQ phase-1 writes on (NrIssuePorts*OPERANDS_PER_INSTR > 2),
+  or size the pack by OPERANDS_PER_INSTR rather than assuming a second issue port.
+  SQUARELY PRE-EXISTING OoO, NOT PHASE 5 FALLOUT: S5 hung before the operand fix, the
+  ROB completes on wb_valid_i matched by trans_id (untouched by any FP edit), and
+  there is NO FP in this configuration at all.
+  LESSON (twice now): "age gate deadlocks" and before it "store-to-load forwarding"
+  were both adopted from a plausible mechanism PLUS ONE SUPPORTING EXPERIMENT THAT
+  PERTURBED TIMING GLOBALLY. The state dumps, which OBSERVE rather than perturb, have
+  been right every time.
+  Defect 1's fix is UNAFFECTED: it was confirmed by a targeted tid-tagged measurement
+  and by stage 4 passing, not by a timing perturbation.
+  METHOD NOTE: every conclusion in this investigation that came from a tail/head
+  truncated grep must be re-checked against the FULL log. Second self-inflicted
+  measurement error this session, after the s11 block-id carrier.
+  --- superseded text below ---
+  ** (superseded) UNDER OoO THE FIRST OF TWO CLOSE STORES NEVER REACHES
+  THE STORE BUFFER. ** Push probe on store_buffer's speculative-queue insert, both
+  arms of the OoOEn-only control, identical binary:
+    in-order (passes): PUSH 21d8 <- aaaaaaaabbbbbbbb (tid24) AND 21e0 <- cccc.. (tid25)
+    OoO      (fails) : PUSH 21e0 <- ccccccccdddddddd (tid16) ONLY
+  THE FIRST STORE IS LOST — not mis-ordered, not mis-forwarded, not early: it never
+  arrives. The LSQ had it correctly (slot0 id15 addr=21d8 data_v=1 data=aaaa..), so it
+  resolved inside the OoO queue and was dropped on the way to the LSU.
+  EXPLAINS EVERYTHING: wrong forwarded data (buffer never held aaaa.., so a later load
+  merges the stale 0x1 with full coverage); needs two live stores (with one there is
+  nothing to drop); one nop hides it (separating them lets both through); plausibly
+  the S5 loop hang (repeated drops); and why EVERY ordering-side hypothesis failed —
+  the load path was working correctly all along.
+  The earlier "LSQ protection window closes at commit" reading is NOT the cause: a
+  real property of the queue, but the defect is UPSTREAM of it.
+  FIRST CANDIDATE MECHANISM TESTED AND ELIMINATED: dispatch IS correctly per-port
+  (agu_valid[p], st_data[p], st_data_id[p] are vectors; the only scalar, vaddr_x, is
+  written and consumed inside one loop iteration). But the LSU has a single memory
+  pipe and the IQ select loop constrains only LOADS (behind older stores) — nothing
+  stops it granting two memory ops in one cycle. Looked like the drop.
+  Adding a one-memory-op-per-cycle grant to the IQ changed NOTHING: S4 still failed at
+  EXACTLY 894 cycles, S5 still hung, byte-identical to baseline. Identical cycle counts
+  => the gate NEVER FIRED => the two stores were never granted in the same cycle.
+  REVERTED.
+  So the store is lost between a correctly-presented dispatch handshake and the
+  store_buffer push, and NOT because two memory ops competed for the pipe.
+  DISPATCH PRESENTS BOTH STORES CORRECTLY (AGU probe, since removed):
+    816 AGU p=0 st=1 addr=21d8 tid=15 | st_data_v=1 data=aaaaaaaabbbbbbbb
+    817 AGU p=0 st=1 addr=21e0 tid=16 | st_data_v=1 data=ccccccccdddddddd
+    820 AGU p=0 st=0 addr=21d8 tid=17   <- the load
+  Both presented, both on PORT 0, on CONSECUTIVE CYCLES, each with valid addr+data.
+  Only tid=16 reaches the store buffer.
+  SHARPENS THE TRIGGER AND CORRECTS THE EARLIER GUESS: not two memory ops in one cycle
+  competing for one pipe — TWO STORES ON BACK-TO-BACK CYCLES, AND THE FIRST IS LOST.
+  The survivor is the SECOND, which is what an overwritten staging register does, not
+  what an arbiter does.
+  SO THE LOSS IS INSIDE THE LSU STORE PATH, between agu_valid/st_data_v at the
+  dispatch boundary and valid_i at store_buffer — load_store_unit / store_unit.
+  TWO STRUCTURAL FACTS BOUND THAT SPAN (read from source):
+   * store_unit IS A TWO-CYCLE FSM: IDLE asserts pop_st_o + translation_req_o and goes
+     to VALID_STORE; it cannot absorb a second store on the very next cycle.
+   * BACKPRESSURE EXISTS IN PRINCIPLE: lsu_ready_o is NOT constant — it comes from the
+     lsu_bypass queue (consumes pop_ld/pop_st, emits lsu_ctrl_o + ready_o), and
+     issue_read_operands genuinely honours it (!lsu_ready_i sets fus_busy[0].load/
+     .store, which gates issue_ack).
+  OPEN CONTRADICTION: both stores were ACKED by issue (that is what makes agu_valid
+  fire in dispatch), so lsu_ready_i was HIGH on both cycles — yet only one reached the
+  buffer. Either the bypass queue reported ready when it could not hold the store, or
+  it accepted both and lost one internally.
+  THE QUEUE RESOLVES THE CONTRADICTION AND IS NOT THE CULPRIT. lsu_bypass.sv:
+    assign empty = (status_cnt_q == 0);  assign ready_o = empty;
+  ready_o means EMPTY, not HAS SPACE, and status_cnt_q is REGISTERED. So both observed
+  cycles are legitimate:
+   816: queue empty, ready high, store1 accepted; store_unit is in IDLE so it asserts
+        pop_st the SAME cycle -> push and pop cancel, count stays 0, ready stays high.
+        Store1 is now INSIDE store_unit, in VALID_STORE.
+   817: ready still high, store2 accepted INTO THE QUEUE; store_unit busy in
+        VALID_STORE so it does not pop -> count rises, ready drops afterwards.
+  Both stores legitimately in flight: STORE1 HELD IN store_unit, STORE2 IN lsu_bypass.
+  Nothing overwritten; no ready signal lied. THIS INVERTS the earlier "overwritten
+  staging register" reading.
+  RELOCATES THE LOSS PRECISELY: the store that REACHES the buffer is STORE2 (via the
+  queue). STORE1 — the one store_unit had already accepted — IS THE ONE THAT
+  DISAPPEARS. So the defect is inside store_unit's VALID_STORE handling: not
+  arbitration, not the queue, not backpressure.
+  FINAL PROBE (one module, one state): store_unit's FSM for store1 — does it reach the
+  st_valid push at all, and if not, which of translation / store-buffer-space / flush
+  diverts it?
+  HARNESS DEFECT ALSO FIXED: a FAILED verdict was reported as timedOut because the
+  timeout test keyed on the absence of a SUCCESS cycle count. A completed failing run
+  is not a stall; conflating them hides the wrong-result signal the bisect depends on.
+  Guards restored/verified after each measurement; IQ + dispatch fixtures pass, FP-off
+  path unchanged.
+  WHY THE MODULE TESTS MISSED IT: rename's busy table WAS updated correctly, and that
+  is all those tests observe. The IQ wakeup path only exists at integration.
+- [ ] Superseded framing (kept for the record): corev_apu/tb/ariane_tb.cpp is
+  hard-bound to the g6lc64_smt2 hierarchy. Found by attempting the
+  in-order FP control run (cv64a6_imafdc_sv39): the build fails at C++ compile with
+  "Variane_testharness___024root has no member named …" for probes that exist only in
+  that configuration — i_smt_thread_select.gen_smt.active_q;
+  csr_regfile_i.gen_banked.gen_csr[0/1].i_csr.{mepc_q,mtvec_q,mcause_q,wfi_q};
+  i_ariane_regfile.gen_banked.gen_hart_bank[0/1].i_rf_bank.mem; the
+  i_sram.gen_cut[0]…i_tc_sram.sram cut names and the dual-hart b1/b2/b3, ra1/sp1/s01
+  locals derived from them.
+  The file ALREADY guards optional features this way (#if defined(G6LC_HAVE_LITEDRAM),
+  #if VM_TRACE) — the SMT2 probes were just never put behind one, because dual-hart is
+  the only config ever simulated through this harness.
+  CONSEQUENCE IS WIDER THAN PHASE5: it blocks the FP control run, the FP OoO bring-up,
+  AND the outstanding "full-core OoO baseline vs an independent reference" item — all
+  three need a model for a non-SMT2 target.
+  FIX (bounded, follows existing precedent): put the SMT2 hierarchy probes behind a
+  G6LC_HAVE_SMT2-style define supplied by the build for that target. Shared testbench
+  work — do it deliberately, not folded into an FP change.
+- [x] MEASURED (2026-09-19): THE FP-ENABLED FULL CORE ELABORATES AND SYNTHESIZES.
+  Guard temporarily disabled LOCALLY, measurement taken, BOTH sites restored and
+  verified (g6lc64_ooo refused again, no TEMPORARY markers left). Shipped legality
+  contract unchanged — evidence to inform the decision, not the decision.
+  g6lc64_ooo (RVF=RVD=1, OoOEn=1): lint 10 warnings NO GUARD FIRED; synth CLEAN
+  (32 warnings). FIRST TIME g6lc64_ooo HAS EVER ELABORATED — before Phase 5 it could
+  not pass check_cfg, so it had never been linted or synthesized at all. The split FP
+  class, FP PRF, rs3/op_c path and widened sbe hold at full-core scale with no
+  combinational loop.
+  SECOND GUARD FOUND: the refusal is enforced in TWO places — check_cfg AND an
+  elaboration $error inside g6lc_ooo_dispatch (gen_err_ooo_fp). Only the first was
+  known when Phase 5 was scoped. The dispatch guard's message is now FACTUALLY STALE
+  ("FP destinations are not renamed or tracked" — they now are). Both must be updated
+  together; the note above them is what caused them to be found rather than bypassed.
+  GUARD MESSAGES REWRITTEN in BOTH copies (check_cfg + g6lc_ooo_dispatch):
+  NrHarts>1 was "no per-hart rename namespace" -> now "OoO IQ/ROB/LSQ are hart-blind:
+  aliases memory ordering and forwarding"; FpPresent was "no FP register class" -> now
+  "FP register class is implemented but unqualified: no FP simulation or reference
+  comparison". A guard that misstates its reason is how a stale refusal outlives the
+  work AND how the real remaining risk gets lost — the hart case is sharper: per-hart
+  rename exists and is tested, but IQ/ROB/LSQ are hart-blind, so a load can be ordered
+  against and FORWARDED FROM the peer hart's speculative stores, which is a different
+  and more dangerous defect than a shared rename map. The refusal harness matches on
+  this text, so the rewording failed the illegal-config negatives immediately rather
+  than passing against a different guard; expectations updated to 'hart-blind' and
+  'implemented but unqualified'.
+  JUSTIFICATION FOR THE GUARD HAS CHANGED though the guard stays: no longer "there is
+  no FP register class" but "the FP class exists, elaborates and synthesizes, but has
+  never been simulated, booted, or compared against an independent reference". Weaker
+  and much more specific — that is what the next step must close.
+- [x] PHASE 5 STEP 4 RESOLVED (2026-09-19), both halves without new datapath.
+  fflags ORDERING IS CORRECT BY CONSTRUCTION: flags are not applied at execute; they
+  ride in the sbe as ex.cause[4:0] and commit_stage writes them to the CSR at COMMIT,
+  ORing port0/port1 in program order for a dual commit. OoO does not reorder commit
+  (the ROB retires in order), so the accumulation point is already ordered.
+  FLen > XLEN IS UNREACHABLE and now stated rather than latent: the OoO FP writeback
+  narrows the XLEN bus (fprf_wdata = wb_data_i[FLen-1:0]), so an FP result wider than
+  the integer datapath cannot be delivered. RV32+D is legal RISC-V but no configured
+  target does it (every RV32 package has RVD=0), and THE IN-ORDER PATH HAS THE
+  IDENTICAL CONSTRUCT (fp_wdata_pack = wdata_i[FLen-1:0]) — pre-existing, not
+  introduced here. Added `assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.FLen > Cfg.XLEN))`
+  rather than inventing a 64-bit-result-on-32-bit-bus mechanism for a config nobody
+  builds; widening the writeback bus is the fix if RV32+D is ever wanted. All existing
+  targets lint at their recorded baselines with it in place (cv64a6 8, cv32a65x 54,
+  g6lc64_ooo_int 11, g6lc64_smt2 1), so it excludes nothing that exists.
+  REMAINING = THE GUARD ITSELF. Every listed prerequisite is addressed, but relaxing a
+  legality guard is a deliberate decision: FP evidence is MODULE-LEVEL ONLY and no
+  full-core FP config has ever elaborated, let alone booted. Moving the guard STARTS
+  that qualification; it must not be recorded as completing it.
+- [x] PHASE 5 STEP 3 RESOLVED AS "NOT NEEDED" (2026-09-19) — better than adding the
+  port. The FP PRF needs NO commit-write mirror: the integer mirror exists only
+  because commit_stage SUBSTITUTES a value at commit (csr_rdata_i for CSR,
+  amo_resp_i.result for AMO) that never reaches wb_data_i. Neither CSR nor AMO has an
+  FP destination (is_rd_fpr excludes both), and for an FP destination commit_stage
+  writes plain commit_instr.result — the value the execute writeback already delivered
+  to the FP PRF. So no FP value is produced at commit and no FP write port is needed,
+  which matters because PRF ports are the measured area driver.
+  The soundness rests on the two classes being mutually exclusive at commit, enforced
+  by an if/else on is_rd_fpr in commit_stage — SOMEONE ELSE'S code, so it is pinned by
+  a translate_off assertion in dispatch (OOO_COMMIT_CLASS) rather than a comment: if it
+  broke, the integer mirror would silently write the integer PRF for an FP destination.
+  STEP 2 CONSTRAINTS VERIFIED IN SOURCE BEFORE CODING (neither is guessable):
+  (1) rs3 has NO field of its own — its architectural index rides in
+  `sbe.result[4:0]`, read by issue_read_operands as issue_instr_i[i].result[4:0].
+  is_imm_fpr covers FADD:FSUB as well as FMADD:FNMADD and vector pack ops (upstream
+  comment: "ternary operations encode the rs3 address in the imm field, also
+  add/sub"), so this is the COMMON case for FP compute, not an FMA corner. The
+  overload is disjoint by FU, which is what makes it workable: the dispatch AGU uses
+  sbe.result as the IMMEDIATE but only for fu==LOAD/STORE, and FP loads (FLD:FLB) are
+  is_rd_fpr WITHOUT being is_imm_fpr. Consequence: dispatch must rename result[4:0]
+  through the FP map and deliver the VALUE on a new issue_op_c_o path (the op_a/op_b
+  analogue), with issue_read_operands preferring it over operand_c_regfile — the value
+  cannot ride back in `result`, which still holds the register number.
+  (2) The in-order FP regfile has THREE READ PORTS TOTAL, not three per issue port:
+  fp_raddr_pack is [2:0], muxed to whichever issue port holds the FP op, so only one
+  FP instruction reads per cycle today. DECISION: mirror that in the OoO FP PRF (3
+  ports, muxed) rather than 3 per issue port. Measured PRF port cost (one write port =
+  7,681 cells, ~8.9%) makes the wide version expensive, and widening it would smuggle
+  a PERFORMANCE change in alongside a correctness feature. Dual-issue FP is a separate,
+  measurable decision.
+- [ ] PHASE 5 SCOPED (2026-09-19) from verified source, not guessed. g6lc_rename.sv has
+  NO FP notion (no is_rd_fpr/fpr/FpPresent); rename, busy table and freelist treat all
+  destinations as one integer class. Items: (1) rename keys on {is_fpr, rd} = 64 arch
+  entries, and the `prd != 0` / physical-0-means-no-destination convention must become
+  class-aware because integer x0 is hardwired zero while FP f0 is an ordinary writable
+  register; (2) FMA needs rs3 — issue_read_operands already has rs3/rs3_fpr/operand_c,
+  but g6lc_ooo_dispatch reads only NP*2 operands, so the PRF needs NP*3 read ports on
+  top of the commit write port just added; (3) THE NEW COMMIT MIRROR COVERS we_gpr_i
+  ONLY — commit_stage drives a separate we_fpr_o, so FP destinations would not be
+  mirrored; deliberate while FP is refused at elaboration, but part of Phase 5; (4) FP
+  is FLen wide vs XLEN PRF — equal for RV64D, not for RVF-only RV64, so widen or split;
+  (5) fflags ordering vs OoO retirement needs its own check.
+  OPEN DESIGN CHOICE, settle before coding: unified PRF (one freelist/write-port set,
+  but widened entries and the f0 exception threaded through shared logic) vs split
+  int/FP files (keeps the integer path bit-identical, which matters since OoOEn=0 must
+  stay bit-identical and the integer OoO path is the one under test, at the cost of a
+  second freelist and recovery structure).
+- [ ] DECISION (2026-09-19, user): do NOT add an integer-only OoO config; the
+  elaboration guard stays as the intended refusal and a legal full-core OoO baseline
+  waits for Phase5. Ordering: `g6lc64_ooo` already has NrHarts=1, so the hart guard
+  passes and the ONLY failure is `assert(!(OoOEn && FpPresent))` (RVF=RVD=1). So
+  PHASE 5 ALONE makes g6lc64_ooo legal and unblocks the full-core OoO baseline;
+  Phase 4 per-hart namespaces are needed for g6lc64_ooo_server (NrHarts=2) and for
+  mixed residency, not for this target. Independent paths, either order.
+- [x] **OoO DEFECT CONFIRMED AND REPAIRED (2026-09-19): CSR and LR results never reached
+  the PRF under OoOEn=1.** REPAIR: g6lc_ooo_dispatch mirrors the architectural commit
+  write into the PRF; issue_stage feeds it the same we_gpr_i/wdata_i the architectural
+  regfile gets, keyed by commit_prd[c] — the committing instruction's OWN physical
+  register, NOT a trans_id (keying on trans_id would reintroduce the aliasing the
+  TID-reuse invariant prevents). g6lc_prf gives the highest write port priority, so the
+  mirror is appended after the execute writebacks and architectural truth wins a clash.
+  Mirrors every committed write rather than decoding CSR/AMO, so the contract is
+  future-proof. No exclusivity proof existed for reusing a WB port at commit, so a port
+  was added and its cost MEASURED: one mirror port = 94,505 generic cells vs 97,439 for
+  one-per-commit-port (paired measurement; previously recorded baseline 86,824), state
+  6,250 bits and 0 latches/SCCs in all. Only commit port 0 can carry a commit-produced
+  value, so PRF_MIRROR=1 except under RVZacas (0 here) — saves 2,934 cells.
+  VERIFIED: scenario 19 passes; REVIEW_RTL_LATERESULT_FAULT=1 restores the defect and it
+  fails again; scenarios 11-14, 15-17 and the default dispatch set with negatives pass;
+  TID-reuse probe unchanged; g6lc64_smt2 rebuilds BYTE-IDENTICAL (ba1f8f6a722829aa…), so
+  the OoOEn=0 path and the dual-hart boot gate are untouched.
+- [x] Original finding, for history (2026-09-19): CSR and LR results never reach the PRF
+  under OoOEn=1. Artifact ooo-lateresult-confirmed-20260919 (matched=true vs expected error
+  DISPATCH_LATERESULT), tb_g6lc_review_dispatch scenario 19 via REVIEW_RTL_LATERESULT=1:
+  producer writes back only placeholder 0x0BAD, commit supplies architectural 0x1234,
+  and the renamed consumer READ 0x0BAD. Reachability verified end to end — including
+  issue_read_operands selecting `(OoOEn && ooo_renamed) ? ooo_op_a_i : rdata`, so the
+  PRF operand overrides the architectural regfile read. Chain: (1) g6lc_ooo_dispatch writes the
+  PRF only from the execute writeback bus (`prf_wdata[w]=wb_data_i[w]`), with NO
+  commit-time PRF write; (2) commit_stage substitutes the architectural result at
+  COMMIT into the ARCHITECTURAL regfile (`wdata_o[0]=csr_rdata_i` for CSR,
+  `=amo_resp_i.result` for AMO), overriding commit_instr.result and never touching
+  wb_data_i; (3) EVERY dispatched instruction is renamed
+  (`ooo_renamed = can_go && dispatch_valid_i[p]`, no CSR/AMO exclusion) and renamed
+  consumers read operands from the PRF; (4) no commit flush covers it — flush_commit_o
+  is asserted for SC and RMW but EXPLICITLY NOT for LR
+  (`if(!is_amo_lr(op)) flush_commit_o=...`), and not for CSR at all.
+  Result: a consumer renamed against a CSR read or an LR destination gets the
+  execute-stage placeholder with no flush to squash it. Same defect class as the
+  in-order LR bug already fixed; the in-order fix does NOT cover the OoO path.
+  Unlike the TID-reuse item below this is real on all three counts: fixture-confirmed
+  mechanism, verified reachability chain, and a masking invariant actively searched for
+  and found explicitly absent for exactly CSR and LR.
+  Repair direction once confirmed: deliver the architectural result to the PRF, either
+  as a real late writeback on the existing bus or a commit-time PRF write; do not add a
+  PRF write port without proving an existing one cannot be reused.
+- [x] **Supersession (2026-09-20): the following reachability conclusion was
+  incomplete.** The live firmware and bypass/load-unit reproducer demonstrate
+  cancelled pre-grant loads surviving TID reuse. The queue repair and bounded
+  checks are in the current reviewed increment above; all-FU coverage stays open.
+- [x] **Historical CORRECTED (2026-09-19): the TID-reuse finding below is a LATENT CONTRACT
+  DEPENDENCY, not a live defect.** FU survey shows no current writeback source can
+  produce the injected stimulus: `load_unit` keeps a STICKY per-slot `ldbuf_flushed_q`
+  (set for all slots on flush, for TID-matching slots on cancelled_mask_i) and frees a
+  slot ONLY when its response actually returns, so a flushed load's slot cannot be
+  reallocated while outstanding; `mult`/`serdiv` gate on `~flush_i`; ALU/branch/CSR have
+  no in-flight state; CvxifEn=0 in g6lc64_ooo_config_pkg. The load unit therefore
+  already implements repair option 2 one level down, which makes option 2 redundant at
+  dispatch and option 1 (generation tag on every FU writeback) unjustified.
+  REAL FINDING = hidden coupling: dispatch qualifies writebacks only with
+  `!cancelled_mask_i[wb_id_i[w]]`, released when the id is dropped, so it depends on an
+  unstated invariant — NO FU MAY PRESENT A WRITEBACK FOR A FLUSHED/CANCELLED trans_id,
+  enforced with state that survives the mask's release. Dispatch structurally CANNOT
+  detect the reuse case (the new owner is also awaiting a writeback), so only an
+  end-to-end generation tag could; that is the cost of relaxing the invariant.
+  ACTION: invariant now documented; re-check it for any new writeback source (CVXIF,
+  accelerator, Phase 4 mixed residency with per-hart cancellation). Scenario 18 is kept
+  as a contract probe recorded as an expected failure, not a passing gate.
+- [ ] Probe retained (2026-09-19): late writeback after trans_id reuse.
+  Artifact ooo-tidreuse-confirmed-20260919 (matched=true against expected error
+  DISPATCH_TIDREUSE). New `tb_g6lc_review_dispatch` scenario 18, selected by
+  REVIEW_RTL_TIDREUSE=1. g6lc_ooo_dispatch qualifies writebacks only with
+  `!cancelled_mask_i[wb_id_i[w]]`, indexed by trans_id; once a cancelled id is dropped
+  and reallocated, its cancel bit clears and a late result for the OLD owner is
+  indistinguishable from the NEW owner's completion. Measured: stale 0xDEAD woke the
+  new owner's consumer AND was supplied as its operand. Worse than a spurious wake —
+  the dropped victim's physical register is correctly freed and reallocated (scenario
+  16 proves that), so the stale result lands on the live owner's own register. My first
+  setup assertion demanded those registers differ; that was wrong and was removed.
+  Repair options, NEITHER implemented: (1) carry an allocation generation on the
+  writeback — exact, non-stalling, but widens every FU writeback interface; (2) do not
+  reuse a trans_id while a result for it may be outstanding — no interface change and
+  no new PRF port, but stalls id reuse and needs a bounded guarantee that every issued
+  FU operation returns or is positively killed, else it can deadlock. Option 2 preferred
+  on interface grounds once the drain guarantee is established.
+  OoOEn=0 remains default, so this is a PROMOTION BLOCKER, not a shipping defect.
+- [x] Memory-service sweep MEASURED (2026-09-19), artifacts smt2-memsweep-d{16,64,256}
+  -20260919 and -rtt-d{16,256}-: SMT2_REVIEW_MEM_DEPTH retargets the memory role
+  (stride 1024 over a 256 KiB buffer, expected sum recomputed per depth). Ratios
+  0.9557/0.9551 -> 0.9286/0.9265 -> 0.9028/0.9057 at depth 16/64/256, i.e. sharing gets
+  MONOTONICALLY WORSE with memory pressure, the opposite of the textbook SMT
+  expectation. RTT rules out interference: median AND max load latency are 7 cycles in
+  every configuration (depth 16 or 256, shared or solo, 16/189/256 paired samples), so
+  latency does not grow — only the serialised stall time does, unoverlapped.
+  Sizes the Phase 4 prize: ~7 idle cycles x 256 iterations is ~1800 cycles of idle
+  issue inside a 6853-cycle shared run. Existing switch-on-miss cannot take it —
+  MISS_STALL_THRESH is 32 SUSTAINED stall cycles with a 16-cycle blackout, so a 7-cycle
+  stall never qualifies; lowering it would not help since a drained handoff costs ~3
+  cycles plus refetch and would drain straight back. Only mixed residency can.
+  PHASE 1 CLOSED.
+- [x] Idle-sibling + per-hart IPI wake MEASURED (2026-09-19), artifact
+  smt2-ipi-wake-20260919: SMT_IPI parks hart1 in WFI (MSIE set, mstatus.MIE clear so it
+  resumes in place), runs hart0's 512-iteration body beside it, wakes the peer via its
+  own CLINT MSIP at 0x02000004, and has hart0 assert its OWN mip.MSIP stays clear so
+  per-hart routing is checked. Oracle refuses a halted peer retiring measured work
+  (unit test proves it bites). Result: 2082 vs 2061 cycles = 1.0102x, peer retired 0,
+  IPI woke only the target. 40 tooling tests.
+  PHASE 1 SET COMPLETE — cost is located: halted sibling 1.01x (free), spinning 2.16x
+  (-> 1.37x with the hint), runnable ~2x with batch 0.90-0.93 and zero overlap. The
+  penalty is time-slicing a RUNNABLE sibling, not SMT structure, so only Phase4 mixed
+  residency and the landed yield hint have anything to win.
+- [x] Zihintpause YIELD HINT IMPLEMENTED + qualified (2026-09-19), model ba1f8f6a...,
+  artifacts smt2-pausehint-lock-{nohint,hint-v2}-20260919 and
+  smt2-pausehint-inert-oldmodel-20260919. id_stage recovers PAUSE (0x0100000F; the
+  decoder folds it into a NOP) and pulses a per-hart hint; g6lc_thread_select holds a
+  sticky per-hart yield request, cleared on that hart's next ACTIVATION TRANSITION (a
+  plain active-cycle clear would erase the hint in the cycle it is set), and hands the
+  core to an UNPAUSED ready peer. Ranked below anti-starvation so it cannot deny the
+  service floor; needs an unpaused peer so two yielding harts cannot ping-pong;
+  advisory only. Gated by existing ZihintpauseEn && NrHarts>1 — no new config field.
+  Result: holder section 4462 -> 2837 cycles, 2.1618x -> 1.3719x, mutual exclusion
+  still proven. NO-OP CONTROL: pre-change model d3b95654 on identical source gives
+  4462/2148/2064/2066 exactly, so the RTL is inert without hints. Boot preserved at
+  12,765,628 cycles with 333,635/8,932,406. Lint/synth unchanged (smt2 1/31, cv64a6
+  8/32, cv32a65x 54/5); 38 tooling tests. Residual 1.37x is the starvation floor by
+  design. Note: drain_reason widened 3->4 bits, so the [smt-sched] trace and its parser
+  and fixtures moved to 4-bit reasons with `yield` as the new MSB.
+  NOT done: WFI-based yield, any Linux/firmware use, no scheduling default changed.
+- [ ] ORDERING (2026-09-19, evidence-driven): biased fetch, RS/IQ partitioning, leftover
+  front-end slots and FU issue fallback are now **Phase4-gated** in the plan. Three
+  paired batches bound the current design — symmetric 0.902, compute/memory 0.929/0.926,
+  dependency-limited 0.8985 — so the canonical SMT win case is the worst, with zero
+  instruction-level overlap and every handoff already on anti-starvation. Do NOT tune
+  those mechanisms before Phase4 mixed residency; a gain measured now is an artifact.
+  Only the yield/pause hint precedes Phase4 (lock holder pays 2.3456x for a waiter that
+  produces nothing, recoverable by admission control alone). Sequence: yield/pause hint
+  -> Phase4 mixed residency -> redistribution mechanisms + QoS.
+- [x] Dependency-limited pairing MEASURED (2026-09-19), artifact
+  smt2-dep-ceiling-v5-20260919: SMT_DEP reuses the asym oracle with roles `dep` (three
+  multiplies chained through one register per iteration) and `ind` (same instruction
+  count, independent destinations), 512 iterations, solo controls per role per hart.
+  Premise holds: solo dep=4123 cycles vs ind=3108 for 2560 body retirements = 0.62 vs
+  0.82 IPC, so genuine issue slack exists. Batch ratio 0.8985 in BOTH role orders —
+  worse than compute/memory (0.929/0.926). ROI windows overlap 6872 of 8048 cycles
+  while instruction-level overlap is zero.
+  KEY NEGATIVE RESULT: the canonical SMT win case returns nothing, so biased fetch,
+  quantum or starvation-limit tuning cannot capture idle issue slots; that needs both
+  harts RESIDENT and issuing at once (Phase 4 mixed residency). Only the yield/pause
+  hint from the lock result pays off before Phase 4.
+- [x] Lock holder vs spinning sibling MEASURED (2026-09-19), artifact
+  smt2-lock-holder-v2-20260919: SMT_LOCK gives both harts one AMO lock and identical
+  512-iteration critical sections with same-hart solo controls. The oracle checks the
+  sections are DISJOINT (mutual exclusion) and times them; a unit test proves it
+  refuses overlapping sections. Mutual exclusion holds (hart0 550-5395, hart1
+  5451-7598). hart0's section is 4846 cycles contended vs 2066 solo = 2.3456x slower
+  purely because the peer spins and produces nothing (~57% of capacity wasted);
+  hart1's later section is 2148 vs 2066 (1.0397x) since the peer had finished, so the
+  asymmetry is spinning, not a general sharing tax. Conclusion for policy: equalizing
+  sibling service is the wrong objective; a low-IPC hart may be a lock HOLDER to
+  protect while a spinning WAITER should yield. A yield/pause-aware admission hint
+  (explicit zihintpause/WFI, never inferred spin patterns or lock addresses) should
+  precede any IPC- or RTT-derived throttle. Not implemented. 38 tooling tests.
+- [ ] PMU residuals before any hint ABI: mcycle is elapsed time, not per-hart service
+  (conformant, see above); SBI PMU mapping and counter save/restore across context
+  switches are unqualified; an RV32+Zihpm profile is still needed to give the RV32
+  hpmcounterNh read fix a directed test. A translate_off assertion
+  in perf_counters now fails loudly if a committing hart differs from the attributed
+  hart — the Phase4 tripwire, since `commit_sel` still uses one commit_instr_i.hart_id
+  for every commit port and is valid only while a group stays single-hart.
+- [ ] Phase1b software hints: audit current ONE physical-core perf_counters block,
+  which has no hart-indexed counter/selector bank and no scheduler-reason inputs.
+  Qualify ownership, privilege/inhibit/overflow, programming races, task switches
+  and SBI PMU mappings before advertising eligible-unselected/accepted-work/coarse-
+  pressure hints. Sim-only observers are not software-accessible counters. Keep
+  hints coarse, privileged and optional; no new CSR/SBI number or ABI in this pass.
+- [ ] Intra-core policy path (active plan B1/Phases4/6/8/9): biased safe-boundary
+  fetch, minimum RS/IQ reservations plus elastic free credits, then opportunistic
+  whole groups and separately qualified mixed-lane/FU fallback. QoS limits new
+  admission only, preserving response/store/invalidation drain and progress floors.
+  Linux sees sibling logical CPUs sharing capacity, not two independent cores;
+  evaluate useful per-core throughput and tail bounds rather than equal task counts.
 - [ ] Adaptive extension to plan Phase6 is analysis only: bounded/hysteretic policy
   over legal candidates, static fallback, minimum service/credits, and no throttling
   of completions/store/invalidation drain. Current coarse handoff cannot hide an

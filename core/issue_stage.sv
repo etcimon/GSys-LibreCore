@@ -189,6 +189,9 @@ module issue_stage
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs1_o,
     // Information dedicated to RVFI - RVFI
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs2_o,
+    // RVFI: issuing identity for the operands above (see issue_read_operands)
+    output logic [CVA6Cfg.NrIssuePorts-1:0] rvfi_operand_valid_o,
+    output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rvfi_operand_tid_o,
     // Original instruction bits for AES
     output logic [5:0] orig_instr_aes_bits,
     // G1gq: commit-time JALR redirect to RF[rs1].
@@ -289,6 +292,8 @@ module issue_stage
   // ---------------------------------------------------------
   logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] ooo_op_a, ooo_op_b;
   logic [CVA6Cfg.NrIssuePorts-1:0] ooo_op_a_v, ooo_op_b_v;
+  logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.FLen-1:0] ooo_op_c;
+  logic [CVA6Cfg.NrIssuePorts-1:0] ooo_op_c_v;
 
   if (CVA6Cfg.OoOEn) begin : gen_full_ooo
     logic [CVA6Cfg.NrWbPorts-1:0] wb_exc_bits;
@@ -316,10 +321,16 @@ module issue_stage
         .issue_op_b_o     (ooo_op_b),
         .issue_op_a_valid_o(ooo_op_a_v),
         .issue_op_b_valid_o(ooo_op_b_v),
+        .issue_op_c_o     (ooo_op_c),
+        .issue_op_c_valid_o(ooo_op_c_v),
         .wb_valid_i       (wt_valid_i),
         .wb_id_i          (trans_id_i),
         .wb_data_i        (wbdata_i),
         .wb_exc_i         (wb_exc_bits),
+        // Mirror the architectural commit write into the PRF: CSR read data and
+        // the AMO/LR response are substituted at commit and never reach wb_data_i.
+        .commit_we_i      (we_gpr_i),
+        .commit_wdata_i   (wdata_i),
         .commit_ack_i     (commit_ack_i),
         .commit_instr_i   (commit_instr_o),
         .commit_ptr_i     (rvfi_commit_pointer_o[0]),
@@ -337,6 +348,8 @@ module issue_stage
     assign ooo_op_b   = '0;
     assign ooo_op_a_v = '0;
     assign ooo_op_b_v = '0;
+    assign ooo_op_c   = '0;
+    assign ooo_op_c_v = '0;
     assign ooo_rename_stall_o = 1'b0;
     assign ooo_iq_full_o      = 1'b0;
     assign ooo_rob_full_o     = 1'b0;
@@ -370,6 +383,8 @@ module issue_stage
     assign ooo_op_b   = '0;
     assign ooo_op_a_v = '0;
     assign ooo_op_b_v = '0;
+    assign ooo_op_c   = '0;
+    assign ooo_op_c_v = '0;
     assign ooo_rename_stall_o = 1'b0;
     assign ooo_iq_full_o      = 1'b0;
     assign ooo_rob_full_o     = 1'b0;
@@ -436,6 +451,8 @@ module issue_stage
       .fwd_i                   (fwd),
       .ooo_op_a_i              (ooo_op_a),
       .ooo_op_b_i              (ooo_op_b),
+      .ooo_op_c_i              (ooo_op_c),
+      .ooo_op_c_valid_i        (ooo_op_c_v),
       .ooo_op_a_valid_i        (ooo_op_a_v),
       .ooo_op_b_valid_i        (ooo_op_b_v),
       .fu_data_o               (fu_data_o),
@@ -487,6 +504,8 @@ module issue_stage
       .stall_issue_o,
       .rvfi_rs1_o              (rvfi_rs1_o),
       .rvfi_rs2_o              (rvfi_rs2_o),
+      .rvfi_operand_valid_o    (rvfi_operand_valid_o),
+      .rvfi_operand_tid_o      (rvfi_operand_tid_o),
       .orig_instr_aes_bits     (orig_instr_aes_bits),
       .g1gq_raddr_i            (g1gq_raddr),
       .g1gq_rhart_i            (g1gq_rhart),

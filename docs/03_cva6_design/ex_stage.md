@@ -58,6 +58,18 @@ there are no unresolved branches. With a single cycle operation all
 branches are resolved in the same cycle of issue which doesn't introduce
 any pipeline stalls.
 
+#### Floating-Point Unit Wrapper
+
+`fpu_wrap` adapts the issue handshake to FPnew's in-ready protocol. When `OoOEn` is set it also
+keeps a per-transaction-ID ownership table: an accepted FP operation owns its ID until the raw
+FPnew result handshake drains, a cancellation mask marks a live owner cancelled rather than
+forgetting it, and a cancelled owner's late result is not presented on the FPU writeback port. A
+full flush clears the table because FPnew discards its in-flight work on flush. A request that
+reuses a still-live ID waits in the existing hold register; a cancelled held request is discarded.
+The multiply/divide unit applies the same contract to the serial divider, whose result shares the
+fixed-latency writeback port. This keeps a wrong-path result from completing the slot's next owner.
+With `OoOEn` clear both units behave as before.
+
 #### Load Store Unit (LSU)
 
 ![Load/Store Unit](_static/lsu_blockdiagram.png)
@@ -144,6 +156,17 @@ stall as soon as it issued an instruction. In particular the LSU bypass
 is called that way because it is either bypassed or serves the load or
 store unit from its internal FIFO until they signal completion to the
 LSU bypass module.
+
+With the config-gated OoO backend, cancellation must cover the bypass queue as
+well as outstanding cache responses. A load may wait here long enough for its
+cancelled scoreboard transaction ID to be dropped and reused. Therefore, under
+`OoOEn`, `lsu_bypass` retains exact `cancelled_mask_i` membership in the queued
+load's existing `is_speculative_load_miss` bit. Later mask release cannot revive
+that request. The load unit removes a cancelled head without requesting memory or
+producing a completion, while preserving the tag/abort handshake and response of
+older accepted requests. Full flush and replacement clear the retained ownership
+normally. In-order behavior is unchanged; this is not a claim about mixed-hart
+residency or every functional unit's late-result path.
 
 ##### Load Unit {#par:load_unit}
 

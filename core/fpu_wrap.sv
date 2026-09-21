@@ -24,6 +24,7 @@ module fpu_wrap
     input  logic     clk_i,
     input  logic     rst_ni,
     input  logic     flush_i,
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
     input  logic     fpu_valid_i,
     output logic     fpu_ready_o,
     input  fu_data_t fu_data_i,
@@ -116,6 +117,38 @@ module fpu_wrap
 
     logic fpu_in_ready, fpu_in_valid;
     logic fpu_out_ready, fpu_out_valid;
+
+    logic [CVA6Cfg.TRANS_ID_BITS-1:0] result_tag, input_tag;
+    logic [CVA6Cfg.NR_SB_ENTRIES-1:0] owner_live_q, owner_cancelled_q;
+    logic input_owner_free, input_cancelled;
+    assign input_tag = state_q == STALL ? fpu_tag_q : fpu_tag_d;
+    assign input_owner_free = !CVA6Cfg.OoOEn || !owner_live_q[input_tag];
+    assign input_cancelled = CVA6Cfg.OoOEn && cancelled_mask_i[input_tag];
+    assign fpu_trans_id_o = result_tag;
+    if (CVA6Cfg.OoOEn) begin : gen_owner_lifetime
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          owner_live_q <= '0;
+          owner_cancelled_q <= '0;
+        end else if (flush_i) begin
+          owner_live_q <= '0;
+          owner_cancelled_q <= '0;
+        end else begin
+          owner_cancelled_q <= (owner_cancelled_q | cancelled_mask_i) & owner_live_q;
+          if (fpu_out_valid && fpu_out_ready) begin
+            owner_live_q[result_tag] <= 1'b0;
+            owner_cancelled_q[result_tag] <= 1'b0;
+          end
+          if (fpu_in_valid && fpu_in_ready) begin
+            owner_live_q[fpu_tag] <= 1'b1;
+            owner_cancelled_q[fpu_tag] <= 1'b0;
+          end
+        end
+      end
+    end else begin : gen_no_owner_lifetime
+      assign owner_live_q = '0;
+      assign owner_cancelled_q = '0;
+    end
 
     logic [4:0] fpu_status;
 
@@ -443,9 +476,9 @@ module fpu_wrap
         // Default state, ready for instructions
         READY: begin
           fpu_ready_o  = 1'b1;  // Act as if FPU ready
-          fpu_in_valid = fpu_valid_i;  // Forward input valid to FPU
+          fpu_in_valid = fpu_valid_i && input_owner_free && !input_cancelled;  // Forward input valid to FPU
           // There is a transaction but the FPU can't handle it
-          if (fpu_valid_i & ~fpu_in_ready) begin
+          if (fpu_valid_i && !input_cancelled && (!fpu_in_ready || !input_owner_free)) begin
             fpu_ready_o = 1'b0;  // No token given to Issue
             hold_inputs = 1'b1;  // save inputs to the holding register
             state_d     = STALL;  // stall future incoming requests
@@ -453,10 +486,10 @@ module fpu_wrap
         end
         // We're stalling the upstream (ready=0)
         STALL: begin
-          fpu_in_valid = 1'b1;  // we have data for the FPU
+          fpu_in_valid = input_owner_free && !input_cancelled;  // we have data for the FPU
           use_hold     = 1'b1;  // the data comes from the hold reg
           // Wait until it's consumed
-          if (fpu_in_ready) begin
+          if (input_cancelled || (input_owner_free && fpu_in_ready)) begin
             fpu_ready_o = 1'b1;  // Give a token to issue
             state_d     = READY;  // accept future requests
           end
@@ -552,7 +585,7 @@ module fpu_wrap
         .flush_i,
         .result_o,
         .status_o      (fpu_status),
-        .tag_o         (fpu_trans_id_o),
+        .tag_o         (result_tag),
         .out_valid_o   (fpu_out_valid),
         .out_ready_i   (fpu_out_ready),
         .busy_o        (  /* unused */),
@@ -571,7 +604,9 @@ module fpu_wrap
     assign fpu_out_ready = 1'b1;
 
     // Downstream valid from unit
-    assign fpu_valid_o = fpu_out_valid;
+    assign fpu_valid_o = fpu_out_valid && (!CVA6Cfg.OoOEn ||
+        (!flush_i && owner_live_q[result_tag] && !owner_cancelled_q[result_tag] &&
+         !cancelled_mask_i[result_tag]));
 
   end
 endmodule

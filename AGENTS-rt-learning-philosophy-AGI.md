@@ -468,6 +468,56 @@ not establish X-propagation behavior. Check the intended state domain, base
 case, active assertions and negative controls before changing the model; use
 representation changes to express the contract faithfully, not to evade it.
 
+### 10.5 Allocation is not execution: a recovery-handshake counterexample
+
+The two-issue integer OoO loop review initially treated scoreboard `issued=1`,
+an empty IQ, and missing branch writeback as proof that a branch executed and
+lost its completion. The field actually records allocation. Generation-tagged
+boundary observations subsequently showed an older ready instruction acknowledged
+while a younger redirect suppressed every outgoing FU-valid. IQ removal occurred;
+execution did not. A passing single-issue control and a passing age-gate-disabled
+control had changed the collision timing without locating the violated promise.
+
+```text
+JUDGEMENT · an event name does not establish its acceptance contract
+  GIVEN    A producer releases an owned object on an acknowledgement.
+  AND      The consumer suppresses its corresponding effect during recovery.
+  THEN     Check whether the acknowledgement still constitutes acceptance,
+           and whether surviving work retains an owner until retry.
+  UNLESS   The same object was legitimately cancelled or transferred elsewhere.
+  BECAUSE  RT-P1 and RT-P2 require boundary semantics and lifetime identity,
+           not an interpretation inferred from a signal name or an empty queue.
+```
+
+The repair qualifies offers and consumption together rather than changing queue
+age, port count or workload bytes. A leaf counterexample, same-ELF before/after
+core runs, observed eventual issue/WB/retirement, bounded safety with a reached
+cover, and a restored-ack fault control support this particular mechanism. See
+`architecture/out-of-order/README.md` for scope and artifacts. This is evidence
+for a reusable acceptance/conservation check, not proof that every timeout has
+this cause or that the whole OoO backend is architecturally qualified.
+
+### 10.6 A lifetime proof must include the owner before acceptance
+
+The OoO firmware reanalysis found that the earlier late-TID assessment had checked
+outstanding cache responses but not requests waiting for a cache grant. A cancelled
+stack load could remain queued, outlive release/reuse of its scoreboard TID, and
+then allocate a fresh response slot. Its stale result completed a different live
+instruction. Existing post-grant sticky cancellation was correct but insufficient.
+
+The discriminating artifact is a live bypass/load-unit test: cancel an ungranted
+request, release the external cancellation mask, then release backpressure and reuse
+the ID. The old path issues a stale request; retaining cancellation with the queued
+object prevents it. Separate controls preserve already accepted older responses,
+and a copied-source mutation detects loss of retention. A frozen firmware replay
+gets past the original fault, but broader boot and all-FU qualification are separate.
+
+Retain the conditional pattern: enumerate every owner from initial acceptance to
+final completion before claiming cancellation coverage. A proof about one owner's
+state cannot silently cover the interval before that owner acquired the object.
+Do not infer a frontend defect from the downstream instruction-access-fault pin.
+Evidence and exact run identities live in the out-of-order architecture record.
+
 ## 11. Evaluating capability improvement by segment
 
 Evaluate the procedure's externally checkable outputs, not a claimed inner

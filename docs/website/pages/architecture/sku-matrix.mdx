@@ -22,13 +22,31 @@ aid**, not a formal datasheet.
 | `cv64a6_imafdch_sv39` | 1–2 | Off | 1 | 1 | Off | H path | Off | Hypervisor-oriented without full server math |
 | `cv64a6_spec_deep` | ↑ | Off* | 1 | 1 | * | * | Off | Deep speculation knobs (`DeepSpecEn`) |
 | `g6lc64_smt2` | 1–2 | Off | **2** | 1 | Often on | Off | Off | Dual-thread bring-up |
-| `g6lc64_ooo` | **2** | **On** | 1 | 1 | Optional | Off | Off | Dual-issue OoO lite |
+| `g6lc64_ooo` | **2** | **On** | 1 | 1 | Optional | Off | Off | Dual-issue OoO lite — **refused at elaboration today** (see note) |
+| `g6lc64_ooo_int` | **2** | **On** | 1 | 1 | Optional | Off | Off | Integer-only OoO; the **only OoO package that legally elaborates** |
 | `g6lc64_ooo_server` | **4** | **On** | ≤2 | **2+** | **L2/L3 auto** | Check pkg | Off | Fat server OoO + multicore |
 | `g6lc64_server_math` | **2** | Off | 1 | **2** | **L2 auto** | **On** | Off | KVM/math host C-light |
 | `g6lc64_server_math_v` | **2** | Off | 1 | **2** | **L2 auto** | **On** | **On** | Same + Ara/RVV |
 | `cv64a6_imafdcv_sv39` | 1–2 | Off | 1 | 1 | Off | Off | **On** | Legacy vector-oriented |
 
 \*Deep-spec package details: open the package; not every deep-spec knob implies OoO.
+
+**OoO packages and the legality guards.** `config_pkg::check_cfg` refuses two
+combinations outright, because `core/ooo/**` has no floating-point register class and
+(outside rename) no notion of a hart, so either one aliases rather than merely
+under-performing:
+
+```
+assert (!(Cfg.OoOEn && Cfg.FpPresent));
+assert (!(Cfg.OoOEn && Cfg.NrHarts > 1));
+```
+
+`g6lc64_ooo` sets `RVF=RVD=1` and so trips the first; `g6lc64_ooo_server` sets
+`NrHarts=2` and trips both. `g6lc64_ooo_int` clears every FP format and keeps
+`NrHarts=1`, which is why it is currently the only OoO package that elaborates, lints
+and synthesizes. It is a **verification and bring-up baseline, not a qualified
+product**: it has no independent-reference comparison and no boot evidence. See
+`architecture/out-of-order/README.md`.
 
 ## 32-bit / FPGA-oriented (short list)
 

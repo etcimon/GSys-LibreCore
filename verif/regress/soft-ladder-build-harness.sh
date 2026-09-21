@@ -115,6 +115,11 @@ BUILD_CXXFLAGS="${SOFT_LADDER_BUILD_CXXFLAGS:-}"
 if [[ "$FETCH" == "B" ]]; then
   BUILD_CXXFLAGS="-DG6LC_FETCH_B ${BUILD_CXXFLAGS}"
 fi
+# Opt-in extra Verilator arguments, default none. Used to pin a reviewed
+# compiler control (e.g. a split_var .vlt) to one candidate build without
+# changing the default build policy or any repository waiver.
+BUILD_VLT_ARGS="${SOFT_LADDER_BUILD_VLT_ARGS:-}"
+[[ -n "$BUILD_VLT_ARGS" ]] && log "extra verilator args: $BUILD_VLT_ARGS"
 LINKER="${SOFT_LADDER_BUILD_LINKER:-}"
 
 if [[ -n "$LINKER" ]]; then
@@ -321,7 +326,7 @@ log "building; full log -> $BUILD_LOG"
 
 set +e
 make -s verilate \
-  verilator="verilator --no-timing -Wno-MODDUP -j $JOBS" \
+  verilator="verilator --no-timing -Wno-MODDUP -j $JOBS $BUILD_VLT_ARGS" \
   target="$TARGET" \
   ver-library="$VERLIB_DIR" \
   flist="$FLIST" \

@@ -1,5 +1,437 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
+module tb_g6lc_review_fp_lifetime;
+  import ariane_pkg::*;
+  `include "g6lc_core_types.svh"
+  parameter int NSB=32;
+  parameter bit EXPECT_CANCEL=0,OOO=1,DIVIDER=0;
+  localparam int TW=$clog2(NSB);
+  localparam fu_t PRODUCER=DIVIDER?MULT:FPU;
+  localparam fu_op PRODUCER_OP=DIVIDER?DIVU:FDIV;
+  localparam logic[63:0] PRODUCER_RESULT=DIVIDER?64'h1000000:64'h3fd5555555555555;
+  localparam logic[63:0] REPLACEMENT_RESULT=DIVIDER?64'h2000000:64'h3fe5555555555555;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.GPLEN=64;c.FLen=64;c.IS_XLEN64=1;
+    c.NrHarts=1;c.NrIssuePorts=2;c.NrCommitPorts=2;c.NrWbPorts=4;c.NrRgprPorts=2;
+    c.NR_SB_ENTRIES=NSB;c.TRANS_ID_BITS=TW;c.SuperscalarEn=1;c.SpeculativeSb=1;
+    c.OoOEn=OOO;c.FpPresent=1;c.RVF=1;c.RVD=1;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef `G6LC_BRANCHPREDICT_SBE_T(C) branchpredict_sbe_t;
+  typedef `G6LC_EXCEPTION_T(C) exception_t;
+  typedef `G6LC_SCOREBOARD_ENTRY_T(C) sbe_t;
+  typedef struct packed {
+    logic valid;logic[63:0] pc,target_address;logic is_mispredict,is_taken;
+    cf_t cf_type;logic hart_id,ckpt_restore;logic[TW-1:0] trans_id;
+  } bp_t;
+  typedef struct packed {
+    logic valid;logic[63:0] data;logic ex_valid;logic[TW-1:0] trans_id;
+  } wb_t;
+  typedef struct packed {
+    logic[NSB-1:0] still_issued;logic[TW-1:0] issue_pointer;
+    wb_t[3:0] wb;sbe_t[NSB-1:0] sbe;
+  } fwd_t;
+  typedef struct packed {
+    logic[TW-1:0] trans_id;fu_t fu;fu_op operation;
+    logic[63:0] operand_a,operand_b,imm;
+  } fu_typed_t;
+  logic clk=0,rst_n=0,flush_if,flush_id,flush_ex,flush_unissued,ex_event=0;
+  logic sb_full,sb_empty,commit_run=0;
+  logic[NSB-1:0] cancel;
+  logic[1:0] dv='0,da,iv,ia,ca,drop;
+  sbe_t[1:0] decoded='0,issued,committed;
+  logic[1:0][TW-1:0] ip,cp;
+  logic[3:0] wv;
+  logic[3:0][TW-1:0] wid;
+  logic[3:0][63:0] wd;
+  exception_t[3:0] wx;
+  bp_t branch='0;
+  fwd_t fwd;
+  fu_typed_t fp_data;
+  logic fp_ready,fp_valid,fp_early,fp_in,fpu_ready,fpu_valid,div_ready,div_valid;
+  logic[TW-1:0] fp_id,fpu_id,div_id,alu_id='0;
+  logic[63:0] fp_result,fpu_result,div_result;
+  logic alu_valid=0,branch_wb=0;
+  exception_t fp_ex;
+  int scenario,cycles=0,fp_accept_cycle=-1,fp_return_cycle=-1,reuse_cycle=-1,fp_returns=0;
+  bit negative,reused=0,old_seen=0;
+  always #5 clk=~clk;
+  assign ia=iv & {2{!flush_unissued}};
+  assign fp_in=da[0] && decoded[0].fu==PRODUCER;
+  assign fp_ready=DIVIDER?div_ready:fpu_ready;
+  assign fp_valid=DIVIDER?div_valid:fpu_valid;
+  assign fp_id=DIVIDER?div_id:fpu_id;
+  assign fp_result=DIVIDER?div_result:fpu_result;
+  always_comb begin
+    fp_data='0;fp_data.fu=PRODUCER;fp_data.operation=PRODUCER_OP;fp_data.trans_id=ip[0];
+    if(DIVIDER)begin
+      fp_data.operand_a=((scenario==3||scenario==5) && decoded[0].rd==9)?64'h8000000000000000:64'h4000000000000000;
+      fp_data.operand_b=64'h4000000000;
+    end else begin
+      fp_data.operand_a=((scenario==3||scenario==5) && decoded[0].rd==9)?64'h4000000000000000:64'h3ff0000000000000;
+      fp_data.operand_b=64'h4008000000000000;
+    end
+    wv='0;wid='0;wd='0;wx='0;
+    wv[0]=alu_valid||branch_wb;wid[0]=branch_wb?branch.trans_id:alu_id;wd[0]=64'h55;
+    wv[3]=fp_valid;wid[3]=fp_id;wd[3]=fp_result;wx[3]=fp_ex;
+    ca='0;
+    if(commit_run && (drop[0] || committed[0].valid))ca[0]=1;
+  end
+  always_ff @(posedge clk or negedge rst_n) begin
+    if(!rst_n)begin alu_valid<=0;alu_id<='0;end
+    else begin
+      alu_valid<=da[0] && decoded[0].fu==ALU && !flush_unissued;
+      if(da[0])alu_id<=ip[0];
+    end
+  end
+  always @(posedge clk) if(rst_n)begin
+    cycles<=cycles+1;
+    if(fp_in)begin
+      fp_accept_cycle=cycles;
+      $display("FP_OWNER_ACCEPT cycle=%0d tid=%0d ready=%b",cycles,ip[0],fp_ready);
+    end
+    if(fp_valid)begin
+      fp_returns++;
+      fp_return_cycle=cycles;
+      old_seen=1;
+      $display("FP_OWNER_RETURN cycle=%0d tid=%0d data=%h reused=%b",cycles,fp_id,fp_result,reused);
+      if(EXPECT_CANCEL && scenario==1)$fatal(1,"FP_OWNER_CANCELLED_RESPONSE");
+      if(fp_id!=TW'(1) || fp_result!=(((scenario==3||scenario==5)?REPLACEMENT_RESULT:PRODUCER_RESULT) ^ (negative?64'd1:64'd0)))
+        $fatal(1,"FP_OWNER_RESULT");
+      if(scenario==2)$fatal(1,"FP_OWNER_FULL_FLUSH_RESPONSE");
+      if(scenario==5 && !reused)$fatal(1,"FP_OWNER_FLUSHED_RESPONSE");
+    end
+  end
+  scoreboard #(.CVA6Cfg(C),.bp_resolve_t(bp_t),.exception_t(exception_t),
+    .scoreboard_entry_t(sbe_t),.forwarding_t(fwd_t),.writeback_t(wb_t),.rs3_len_t(logic[63:0])) sb(
+    .clk_i(clk),.rst_ni(rst_n),.sb_full_o(sb_full),.sb_empty_o(sb_empty),.spec_cancel_o(),
+    .cancelled_mask_o(cancel),.flush_unissued_instr_i(flush_unissued),.flush_i(flush_id),
+    .x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),.x_id_i('0),
+    .commit_instr_o(committed),.commit_drop_o(drop),.commit_ack_i(ca),
+    .decoded_instr_i(decoded),.orig_instr_i('0),.decoded_instr_valid_i(dv),.decoded_instr_ack_o(da),
+    .issue_instr_o(issued),.orig_instr_o(),.issue_instr_valid_o(iv),.issue_ack_i(ia),.fwd_o(fwd),
+    .resolved_branch_i(branch),.trans_id_i(wid),.wbdata_i(wd),.ex_i(wx),.wt_valid_i(wv),
+    .x_we_i(1'b0),.x_rd_i('0),.rvfi_issue_pointer_o(ip),.rvfi_commit_pointer_o(cp),
+    .g1mf_v_o(),.g1mf_rd_o(),.g1mf_line_o(),.g1mf_a3_o());
+  controller #(.CVA6Cfg(C),.bp_resolve_t(bp_t)) ctrl(
+    .clk_i(clk),.rst_ni(rst_n),.v_i(1'b0),.set_pc_commit_o(),.flush_if_o(flush_if),
+    .flush_unissued_instr_o(flush_unissued),.flush_id_o(flush_id),.flush_ex_o(flush_ex),
+    .flush_bp_o(),.flush_icache_o(),.flush_dcache_o(),.flush_dcache_ack_i(1'b0),
+    .flush_tlb_o(),.flush_tlb_vvma_o(),.flush_tlb_gvma_o(),.halt_csr_i(1'b0),.halt_acc_i(1'b0),
+    .halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(ex_event),.set_debug_pc_i(1'b0),
+    .resolved_branch_i(branch),.flush_csr_i(1'b0),.fence_i_i(1'b0),.fence_i(1'b0),
+    .sfence_vma_i(1'b0),.hfence_vvma_i(1'b0),.hfence_gvma_i(1'b0),.flush_commit_i(1'b0),
+    .flush_acc_i(1'b0),.smt_switch_i(1'b0));
+  fpu_wrap #(.CVA6Cfg(C),.exception_t(exception_t),.fu_data_t(fu_typed_t)) fpu(
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush_ex),.cancelled_mask_i(cancel),.fpu_valid_i(fp_in && !DIVIDER),.fpu_ready_o(fpu_ready),
+    .fu_data_i(fp_data),.fpu_fmt_i(2'b01),.fpu_rm_i(3'b000),.fpu_frm_i(3'b000),.fpu_prec_i('0),
+    .fpu_trans_id_o(fpu_id),.result_o(fpu_result),.fpu_valid_o(fpu_valid),
+    .fpu_exception_o(fp_ex),.fpu_early_valid_o(fp_early));
+  mult #(.CVA6Cfg(C),.fu_data_t(fu_typed_t)) divider(
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush_ex),.cancelled_mask_i(cancel),.fu_data_i(fp_data),.mult_valid_i(fp_in && DIVIDER),
+    .result_o(div_result),.mult_valid_o(div_valid),.mult_ready_o(div_ready),.mult_trans_id_o(div_id));
+  task automatic drive;@(negedge clk);endtask
+  task automatic offer(input fu_t fu,input fu_op op,input int rd,input int expected_tid);
+    decoded='0;decoded[0].fu=fu;decoded[0].op=op;decoded[0].rd=5'(rd);
+    decoded[0].pc=64'h80000000+64'(cycles)*4;dv=1;
+    #4;
+    if(da!=1 || ip[0]!=TW'(expected_tid))$fatal(1,"FP_OWNER_ALLOCATION tid=%0d expected=%0d ack=%b",ip[0],expected_tid,da);
+    drive();dv=0;
+  endtask
+  initial begin
+    scenario=0;negative=$test$plusargs("oracle_negative");
+    void'($value$plusargs("scenario=%d",scenario));
+    repeat(3)drive();rst_n=1;drive();
+    offer(CTRL_FLOW,NE,0,0);
+    if(!fp_ready)$fatal(1,"FP_OWNER_NOT_READY");
+    offer(PRODUCER,PRODUCER_OP,7,1);
+    if(scenario==0 || scenario==4)begin
+      if(scenario==4)begin
+        offer(CTRL_FLOW,NE,0,2);
+        offer(ALU,ADD,0,3);
+        branch.valid=1;branch.is_mispredict=1;branch.is_taken=1;branch.cf_type=Branch;
+        branch.trans_id=TW'(2);branch_wb=1;
+        #4;
+        if(flush_ex||cancel[1]||!cancel[3])$fatal(1,"FP_OWNER_OLDER_SETUP");
+        drive();branch='0;branch_wb=0;
+      end
+      repeat(160)drive();
+      if(fp_returns!=1)$fatal(1,"FP_OWNER_NORMAL_COMPLETION count=%0d",fp_returns);
+      $display("FP_OWNER_PASS scenario=%0d accept=%0d response=%0d",scenario,fp_accept_cycle,fp_return_cycle);
+    end else begin
+      if(scenario==1 || scenario==3)begin
+        branch.valid=1;branch.is_mispredict=1;branch.is_taken=1;branch.cf_type=Branch;
+        branch.trans_id='0;branch_wb=1;
+        #4;
+        if(flush_ex||flush_id||!flush_unissued||!cancel[1])$fatal(1,"FP_OWNER_SELECTIVE_SETUP");
+        drive();branch='0;branch_wb=0;commit_run=1;
+        drive();
+        for(int n=2;n<NSB;n++)offer(ALU,ADD,0,n);
+        offer(ALU,ADD,0,0);
+      end else if(scenario==2 || scenario==5)begin
+        ex_event=1;#4;
+        if(!flush_ex||!flush_id)$fatal(1,"FP_OWNER_FULL_FLUSH_SETUP");
+        drive();ex_event=0;commit_run=1;
+        offer(ALU,ADD,0,0);
+      end else $fatal(1,"FP_OWNER_SCENARIO");
+      if(scenario==3 || scenario==5)begin
+        while(!fp_ready)drive();
+        offer(PRODUCER,PRODUCER_OP,9,1);
+      end else offer(LOAD,LD,9,1);
+      reused=1;reuse_cycle=cycles;
+      $display("FP_OWNER_REUSE cycle=%0d old_seen=%b",reuse_cycle,old_seen);
+      repeat(160)begin
+        drive();#4;
+        if(cp[0]==TW'(1) && committed[0].fu==LOAD && committed[0].valid)
+          $fatal(1,"FP_OWNER_STALE_COMPLETION data=%h",committed[0].result);
+      end
+      if(scenario==1 && fp_returns!=(EXPECT_CANCEL?0:1))$fatal(1,"FP_OWNER_MISSING_RESPONSE");
+      if(scenario==2 && fp_returns!=0)$fatal(1,"FP_OWNER_FULL_FLUSH_RESPONSE");
+      if((scenario==3 || scenario==5) && fp_returns!=1)$fatal(1,"FP_OWNER_REPLACEMENT_MISSING");
+      if(scenario==1 && !EXPECT_CANCEL)
+        $display("FP_OWNER_NO_OVERLAP accept=%0d response=%0d reuse=%0d",fp_accept_cycle,fp_return_cycle,reuse_cycle);
+      else begin
+        if(negative)$fatal(1,"FP_OWNER_ORACLE_NEGATIVE");
+        $display("FP_OWNER_PASS scenario=%0d",scenario);
+      end
+    end
+    $finish;
+  end
+endmodule
+
+module tb_g6lc_review_load_cancel;
+  import ariane_pkg::*;
+  parameter bit OOO=1;
+  parameter int NLOAD=4;
+  parameter bit MMU=0;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64; c.VLEN=64; c.PLEN=56; c.PPNW=44; c.IS_XLEN64=1; c.XLEN_ALIGN_BYTES=3;
+    c.NR_SB_ENTRIES=8; c.TRANS_ID_BITS=3; c.NrLoadBufEntries=NLOAD;
+    c.DcacheIdWidth=2; c.DCACHE_INDEX_WIDTH=12; c.DCACHE_TAG_WIDTH=44;
+    c.OoOEn=OOO; c.MmuPresent=MMU; c.SpeculativeSb=1; c.SuperscalarEn=1;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef struct packed {
+    logic valid; logic [63:0] vaddr; logic [31:0] tinst;
+    logic hs_ld_st_inst,hlvx_inst,overflow,g_overflow;
+    logic [63:0] data,data_cmp,data_hi,data_cmp_hi; logic [7:0] be;
+    fu_t fu; fu_op operation; logic [2:0] trans_id;
+    logic is_speculative_load,is_speculative_load_miss;
+  } ctrl_t;
+  typedef struct packed {
+    logic valid; logic [63:0] cause,tval,tval2; logic [31:0] tinst; logic gva;
+  } exception_t;
+  typedef struct packed {logic valid,is_mispredict;} branch_t;
+  typedef struct packed {
+    logic data_we; logic [63:0] data_wdata; logic [7:0] cbo_op;
+    logic [11:0] address_index; logic [43:0] address_tag; logic [1:0] data_id;
+    logic data_wuser,data_req,kill_req,tag_valid; logic [7:0] data_be; logic [1:0] data_size;
+  } req_t;
+  typedef struct packed {logic data_gnt,data_rvalid; logic [1:0] data_rid; logic [63:0] data_rdata;} resp_t;
+  logic clk=0,rst_n=0,flush=0,in_valid=0,pop,ready,wb,match_page=0,dtlb_hit=1,fwd_valid=0;
+  logic [7:0] cancel='0;
+  logic [2:0] tid;
+  logic [63:0] result;
+  ctrl_t incoming='0,head;
+  branch_t branch='0;
+  req_t req;
+  resp_t resp='0;
+  exception_t ex;
+  int scenario;
+  bit negative;
+  logic [1:0] old_id,new_id;
+  lsu_bypass #(.CVA6Cfg(C),.lsu_ctrl_t(ctrl_t),.bp_resolve_t(branch_t)) queue (
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.lsu_req_i(incoming),
+    .lsu_req_valid_i(in_valid),.pop_ld_i(pop),.pop_st_i(1'b0),
+    .resolved_branch_i(branch),.lsu_ctrl_o(head),.ready_o(ready)
+`ifdef G6LC_REVIEW_CANCEL_PORT
+    ,.cancelled_mask_i(cancel)
+`endif
+  );
+  load_unit #(.CVA6Cfg(C),.dcache_req_i_t(req_t),.dcache_req_o_t(resp_t),
+    .exception_t(exception_t),.lsu_ctrl_t(ctrl_t)) dut (
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancel),
+    .valid_i(head.valid),.lsu_ctrl_i(head),.pop_ld_o(pop),.valid_o(wb),
+    .trans_id_o(tid),.result_o(result),.ex_o(ex),.mbe_i(1'b0),
+    .translation_req_o(),.vaddr_o(),.tinst_o(),.hs_ld_st_inst_o(),.hlvx_inst_o(),
+    .paddr_i(56'h80001000),.ex_i('0),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
+    .page_offset_o(),.load_paddr_o(),.load_paddr_valid_o(),.load_trans_id_o(),
+    .page_offset_matches_i(match_page),.store_buffer_empty_i(1'b0),
+    .st_fwd_valid_i(fwd_valid),.st_fwd_data_i(64'h12345666),.st_fwd_be_i(8'hff),
+    .commit_tran_id_i('0),.req_port_i(resp),.req_port_o(req),
+    .dcache_wbuffer_not_ni_i(1'b1),.dcache_wbuffer_empty_i(1'b0));
+  task automatic tick; clk=1;#2;clk=0;#2;endtask
+  task automatic offer(input int id,input fu_op op);
+    incoming='0;incoming.valid=1;incoming.fu=LOAD;incoming.operation=op;
+    incoming.trans_id=3'(id);incoming.vaddr=64'h80001000;incoming.be='1;in_valid=1;#2;
+  endtask
+  task automatic quiet; in_valid=0;incoming='0;#2;endtask
+  task automatic response(input logic [1:0] id,input int owner,input bit expected);
+    resp.data_rvalid=1;resp.data_rid=id;resp.data_rdata=64'h12345666;#2;
+    if(wb!==expected || (wb && (tid!=3'(owner) || result!=(negative?64'h67:64'h66))))
+      $fatal(1,"LOAD_CANCEL_RESPONSE owner=%0d tid=%0d wb=%b data=%h",owner,tid,wb,result);
+    tick();resp.data_rvalid=0;#2;
+  endtask
+  initial begin
+    scenario=0;void'($value$plusargs("scenario=%d",scenario));negative=$test$plusargs("oracle_negative");
+    #2;tick();rst_n=1;#2;
+    case(scenario)
+      0,1: begin
+        match_page=1;offer(3,LD);tick();quiet();
+        if(scenario==1)begin offer(4,LD);tick();quiet();cancel[4]=1;end
+        else cancel[3]=1;
+        #2;tick();cancel='0;
+        repeat(12)tick();
+        match_page=0;resp.data_gnt=1;
+        if(scenario==1)begin
+          while(!req.data_req)tick();
+          old_id=req.data_id;tick();#2;
+        end
+        repeat(4)begin #2;if(OOO && req.data_req)$fatal(1,"LOAD_CANCEL_STALE_REQUEST");tick();end
+        if(!ready)$fatal(1,"LOAD_CANCEL_QUEUE_NOT_DRAINED");
+      end
+      2:begin
+        offer(3,LD);cancel[3]=1;resp.data_gnt=1;#2;
+        if(OOO && req.data_req)$fatal(1,"LOAD_CANCEL_SAME_CYCLE_GRANT");
+        tick();quiet();cancel='0;tick();
+      end
+      3:begin
+        offer(3,LD);tick();quiet();cancel[3]=1;resp.data_gnt=1;#2;
+        if(OOO && req.data_req)$fatal(1,"LOAD_CANCEL_WAIT_GRANT");
+        tick();cancel='0;tick();
+      end
+      4:begin
+        resp.data_gnt=1;offer(3,LD);old_id=req.data_id;tick();quiet();tick();
+        cancel[3]=1;tick();cancel='0;
+        offer(3,LBU);new_id=req.data_id;tick();quiet();tick();
+        response(old_id,3,0);response(new_id,3,1);
+      end
+      5:begin
+        resp.data_gnt=1;offer(1,LBU);old_id=req.data_id;tick();
+        offer(3,LD);cancel[3]=1;#2;
+        if(!req.tag_valid || req.kill_req || (OOO && req.data_req))$fatal(1,"LOAD_CANCEL_OLDER_TAG");
+        tick();quiet();cancel='0;response(old_id,1,1);
+      end
+      6:begin
+        match_page=1;offer(3,LD);tick();quiet();flush=1;tick();flush=0;match_page=0;
+        resp.data_gnt=1;repeat(3)tick();
+        if(!ready || wb || req.data_req)$fatal(1,"LOAD_CANCEL_FULL_FLUSH");
+      end
+      7:begin
+        offer(1,LBU);incoming.is_speculative_load=1;branch='1;match_page=1;tick();
+        quiet();branch='0;tick();
+        match_page=0;resp.data_gnt=1;
+        repeat(3)begin
+          #2;if(req.data_req)old_id=req.data_id;
+          tick();
+        end
+        response(old_id,1,1);
+      end
+      8:begin
+        dtlb_hit=0;resp.data_gnt=1;offer(3,LBU);old_id=req.data_id;tick();quiet();
+        cancel[3]=1;#2;
+        if(!req.kill_req || !req.tag_valid || req.data_req || wb)$fatal(1,"LOAD_CANCEL_ABORT");
+        tick();cancel='0;dtlb_hit=1;response(old_id,3,0);
+      end
+      9:begin
+        dtlb_hit=0;offer(3,LBU);incoming.is_speculative_load=1;tick();quiet();
+        cancel[3]=1;#2;
+        if(!pop || req.data_req || wb)$fatal(1,"LOAD_CANCEL_WAIT_SPEC");
+        tick();cancel='0;dtlb_hit=1;tick();
+      end
+      10:begin
+        match_page=1;offer(3,LBU);tick();quiet();
+        cancel[3]=1;fwd_valid=1;#2;
+        if(!pop || wb || req.data_req)$fatal(1,"LOAD_CANCEL_FORWARD");
+        tick();cancel='0;fwd_valid=0;match_page=0;
+      end
+      11:begin
+        resp.data_gnt=1;offer(1,LBU);old_id=req.data_id;tick();quiet();tick();
+        offer(3,LBU);cancel[3]=1;#2;
+        response(old_id,1,1);quiet();cancel='0;tick();
+      end
+      12:begin
+        dtlb_hit=0;offer(3,LBU);incoming.is_speculative_load=1;
+        branch.valid=1;branch.is_mispredict=0;tick();quiet();branch='0;tick();#2;
+        if(!req.data_req)$fatal(1,"LOAD_CANCEL_CORRECT_RESOLVE_RELEASE");
+        dtlb_hit=1;resp.data_gnt=1;#2;new_id=req.data_id;tick();quiet();tick();
+        response(new_id,3,1);
+      end
+      default:$fatal(1,"LOAD_CANCEL_SCENARIO");
+    endcase
+    resp='0;match_page=0;repeat(2)tick();
+    resp.data_gnt=1;offer(3,LBU);new_id=req.data_id;
+    if(!req.data_req || !pop)$fatal(1,"LOAD_CANCEL_REUSE_ADMISSION");
+    tick();quiet();tick();response(new_id,3,1);
+    $display("LOAD_CANCEL_PASS scenario=%0d ooo=%0d",scenario,OOO);$finish;
+  end
+endmodule
+
+module tb_g6lc_review_load_cancel_props (
+  input logic clk_i,rst_ni,flush,request,pop,speculative,
+  input logic [3:0] cancel,
+  input logic [1:0] tid,
+  input logic [7:0] payload,
+  input logic branch_valid,branch_mispredict,
+  output logic seen_cancel=0,seen_release=0,seen_drain=0
+);
+  import ariane_pkg::*;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.NR_SB_ENTRIES=4;c.TRANS_ID_BITS=2;c.OoOEn=1;return c;
+  endfunction
+  typedef struct packed {
+    logic valid;fu_t fu;logic [1:0] trans_id;logic [7:0] payload;
+    logic is_speculative_load,is_speculative_load_miss;
+  } ctrl_t;
+  typedef struct packed {logic valid,is_mispredict;} branch_t;
+  ctrl_t incoming,head,expected;
+  ctrl_t [1:0] reference_q,reference_d;
+  logic [1:0] count_q=0,count_d;
+  logic ready,past_valid=0;
+  assign incoming='{valid:request,fu:LOAD,trans_id:tid,payload:payload,
+                    is_speculative_load:speculative,is_speculative_load_miss:1'b0};
+  lsu_bypass #(.CVA6Cfg(configuration()),.lsu_ctrl_t(ctrl_t),.bp_resolve_t(branch_t)) dut (
+    .clk_i,.rst_ni,.flush_i(flush),.cancelled_mask_i(cancel),.lsu_req_i(incoming),
+    .lsu_req_valid_i(request),.pop_ld_i(pop),.pop_st_i(1'b0),
+    .resolved_branch_i({branch_valid,branch_mispredict}),.lsu_ctrl_o(head),.ready_o(ready));
+  always_comb begin
+    expected=count_q==0?incoming:reference_q[0];
+    expected.is_speculative_load_miss |= expected.valid && cancel[expected.trans_id];
+    reference_d=reference_q;count_d=count_q;
+    if(pop && count_q!=0)begin reference_d[0]=reference_q[1];reference_d[1]='0;count_d--;end
+    if(request && !(pop && count_q==0))begin
+      reference_d[count_d[0]]=incoming;
+      if(speculative && branch_valid && !branch_mispredict)
+        reference_d[count_d[0]].is_speculative_load=0;
+      count_d++;
+    end
+    for(int i=0;i<2;i++)
+      if(i<int'(count_d) && cancel[reference_d[i].trans_id])reference_d[i].is_speculative_load_miss=1;
+    if(flush)begin reference_d='0;count_d=0;end
+  end
+  always_ff @(posedge clk_i)begin
+    past_valid<=1;
+    if(!past_valid)assume(!rst_ni);else assume(rst_ni);
+    if(!rst_ni)begin reference_q<='0;count_q<=0;end
+    else begin
+      assume(!request || count_q<2);
+      assume(!pop || count_q!=0 || request);
+      assert(count_q<=2);
+      assert(ready==(count_q==0));
+      if(expected.valid)assert(head==expected);else assert(!head.valid);
+      reference_q<=reference_d;count_q<=count_d;
+      if(expected.valid && cancel[expected.trans_id] && !pop && !flush)seen_cancel<=1;
+      if(seen_cancel && expected.valid && expected.is_speculative_load_miss && !cancel[expected.trans_id])seen_release<=1;
+      if(seen_release && pop && expected.valid && expected.is_speculative_load_miss && !flush)seen_drain<=1;
+    end
+  end
+endmodule
+
 module tb_g6lc_review_iq;
   import ariane_pkg::*;
   parameter int NP=2, DEPTH=8;
@@ -26,6 +458,9 @@ module tb_g6lc_review_iq;
   g6lc_iq #(.CVA6Cfg(C),.DEPTH(DEPTH),.PRF_W(4),.scoreboard_entry_t(sbe_t)) dut (
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancel),
     .disp_valid_i(dv),.disp_sbe_i(ds),.disp_orig_i(di),.disp_prs1_i(p1),.disp_prs2_i(p2),.disp_prd_i(pd),
+    .disp_fprs1_i('0),.disp_fprs2_i('0),.disp_fprs3_i('0),
+    .disp_fpr_rs1_i('0),.disp_fpr_rs2_i('0),.disp_fpr_rs3_i('0),
+    .disp_rs3_ready_i('1),.fwb_valid_i('0),.fwb_prd_i('0),
     .disp_rs1_ready_i(r1),.disp_rs2_ready_i(r2),.disp_ack_o(da),.full_o(full),.wb_valid_i(wv),.wb_prd_i(wp),
     .issue_sbe_o(is),.issue_orig_o(ii),.issue_prd_o(ip),.issue_valid_o(iv),.issue_ack_i(ia),.mem_stall_i(mem_stall),
     .st_live_mask_i('0),.commit_ptr_i('0));
@@ -60,8 +495,12 @@ module tb_g6lc_review_iq;
             expected_valid[port]=1;
             if (!iv[port] || is[port]!==e.s || (ii[port] ^ (negative?32'd1:32'd0))!==e.orig || ip[port]!==e.pd)
               $fatal(1,"IQ_ISSUE port=%0d expected_tid=%0d observed_tid=%0d",port,e.s.trans_id,is[port].trans_id);
-            if (ia[port]) begin remove_entry=1;port++;end
-            else port=NP;
+            // Contract since the ack was taken out of the IQ's selection cone:
+            // candidates are presented as a pure function of queue state, so a
+            // non-acked port no longer stops the scan. Exactly the acked ports
+            // are removed, for any ack pattern.
+            if (ia[port]) remove_entry=1;
+            port++;
           end
           if (!remove_entry) keep.push_back(e);
         end
@@ -178,7 +617,30 @@ endmodule
 // reveals the free list. No hierarchical probes.
 module tb_g6lc_review_rename;
   parameter int unsigned PRF_ENTRIES=40,PRF_W=6,NR_PORTS=2,NR_FREE=2,NR_WB=2,CKPT_DEPTH=2;
+  // Phase4: g6lc_rename is package-free, so the per-hart namespaces can be
+  // exercised here at NR_HARTS=2 WITHOUT relaxing check_cfg's
+  // !(OoOEn && NrHarts>1) refusal, which still governs the full core.
+  // PRF must hold 31 committed physicals per hart plus a rename pool.
+  parameter int unsigned NR_HARTS=1;
+  // Phase5: the split FP class is exercised here at FPRF_ENTRIES>0, again
+  // without relaxing check_cfg's !(OoOEn && FpPresent) refusal. FP needs 32
+  // committed physicals per hart (f0 is real, so 32 not 31) plus a pool.
+  parameter int unsigned FPRF_ENTRIES=0;
+  parameter int unsigned FPRF_W=1;
+  localparam int unsigned HID=(NR_HARTS<=1)?1:$clog2(NR_HARTS);
   logic clk=0,rst_n=0,flush=0,mispredict=0,enable=1;
+  logic [NR_PORTS-1:0] is_fpr_rd='0,is_fpr_rs1='0,is_fpr_rs2='0,is_fpr_rs3='0;
+  logic [NR_PORTS-1:0][4:0] rs3='0;
+  logic [NR_PORTS-1:0][FPRF_W-1:0] fprs1,fprs2,fprs3,fprd,fprd_old;
+  logic [NR_PORTS-1:0] rs3_rdy;
+  logic [NR_WB-1:0] fwb_v='0;
+  logic [NR_WB-1:0][FPRF_W-1:0] fwb_prd='0;
+  logic [NR_FREE-1:0] ffr='0,cm_is_fpr='0;
+  logic [NR_FREE-1:0][FPRF_W-1:0] ffr_prd='0,cm_fprd='0;
+  logic [FPRF_W-1:0] f_first,f_mid,f_spec0,f_spec1;
+  logic [NR_PORTS-1:0][HID-1:0] hid_p='0;
+  logic [NR_FREE-1:0][HID-1:0] cm_hart='0;
+  logic [NR_HARTS-1:0] fl_hart='0;
   logic [NR_PORTS-1:0] valid='0,need_rd='0,is_branch='0;
   logic [NR_PORTS-1:0][4:0] rs1='0,rs2='0,rd='0;
   logic [NR_PORTS-1:0][PRF_W-1:0] prs1,prs2,prd,prd_old;
@@ -197,14 +659,24 @@ module tb_g6lc_review_rename;
   logic [$clog2(CKPT_DEPTH+1)-1:0] mis_level='1;
   logic [NR_PORTS-1:0][$clog2(CKPT_DEPTH+1)-1:0] ckpt_id;
   g6lc_rename #(.PRF_ENTRIES(PRF_ENTRIES),.PRF_W(PRF_W),.NR_PORTS(NR_PORTS),
-                .NR_FREE(NR_FREE),.NR_WB(NR_WB),.CKPT_DEPTH(CKPT_DEPTH)) dut(
-    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.mispredict_i(mispredict),
+                .NR_FREE(NR_FREE),.NR_WB(NR_WB),.CKPT_DEPTH(CKPT_DEPTH),
+                .NR_HARTS(NR_HARTS),
+                .FPRF_ENTRIES(FPRF_ENTRIES),.FPRF_W(FPRF_W)) dut(
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.flush_hart_i(fl_hart),
+    .mispredict_i(mispredict),
     .mispredict_level_i(mis_level),
+    .hart_i(hid_p),
+    .is_fpr_rd_i(is_fpr_rd), .is_fpr_rs1_i(is_fpr_rs1), .is_fpr_rs2_i(is_fpr_rs2),
+    .rs3_i(rs3), .is_fpr_rs3_i(is_fpr_rs3), .fprs3_o(fprs3), .rs3_ready_o(rs3_rdy),
+    .fprs1_o(fprs1), .fprs2_o(fprs2), .fprd_o(fprd), .fprd_old_o(fprd_old),
+    .fwb_valid_i(fwb_v), .fwb_prd_i(fwb_prd),
+    .ffree_i(ffr), .ffree_prd_i(ffr_prd),
+    .commit_is_fpr_i(cm_is_fpr), .commit_fprd_i(cm_fprd),
     .valid_i(valid),.rs1_i(rs1),.rs2_i(rs2),.rd_i(rd),.need_rd_i(need_rd),
     .is_branch_i(is_branch),.prs1_o(prs1),.prs2_o(prs2),.prd_o(prd),
     .prd_old_o(prd_old),.rs1_ready_o(rs1_rdy),.rs2_ready_o(rs2_rdy),
     .ckpt_id_o(ckpt_id),.ckpt_retire_i(ckpt_ret),.stall_o(stall),
-    .commit_valid_i(cm_v),.commit_rd_i(cm_rd),.commit_prd_i(cm_prd),
+    .commit_valid_i(cm_v),.commit_hart_i(cm_hart),.commit_rd_i(cm_rd),.commit_prd_i(cm_prd),
     .wb_valid_i(wb_v),.wb_prd_i(wb_prd),.free_i(fr),.free_prd_i(fr_prd),.enable_i(enable));
   always #5 clk=~clk;
   task automatic drive; @(negedge clk); endtask
@@ -411,6 +883,184 @@ module tb_g6lc_review_rename;
         presample();
         if(prd[0]!==(negative?PRF_W'(0):first_alloc))
           $fatal(1,"RENAME_CKPT_ALLOC_LEAK got=%0d want=%0d",prd[0],first_alloc);
+      end
+      // ---- Phase4 per-hart namespaces (require -GNR_HARTS=2) --------------
+      // 1. Namespace isolation: both harts write their OWN x5 and must read
+      //    back their own physical. A single shared map aliases them, which is
+      //    precisely what the OoO+SMT elaboration guard exists to refuse.
+      11:begin
+        if(NR_HARTS<2)$fatal(1,"RENAME_NEEDS_NR_HARTS2");
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd5;hid_p[0]=0;
+        presample();first_alloc=prd[0];
+        if(first_alloc==0)$fatal(1,"RENAME_NO_ALLOC");
+        drive();idle();valid=2'b01;need_rd=2'b01;rd[0]=5'd5;hid_p[0]=1;
+        presample();mid_alloc=prd[0];
+        if(mid_alloc==0)$fatal(1,"RENAME_NO_ALLOC");
+        if(mid_alloc==first_alloc)$fatal(1,"RENAME_HART_SAME_PHYS p=%0d",mid_alloc);
+        // Hart 0 must still see its own mapping, not hart 1's.
+        drive();idle();rs1[0]=5'd5;valid=2'b01;hid_p[0]=0;
+        presample();
+        if(prs1[0]!==(negative?mid_alloc:first_alloc))
+          $fatal(1,"RENAME_HART_ALIAS hart0 got=%0d want=%0d",prs1[0],first_alloc);
+        drive();idle();rs1[0]=5'd5;valid=2'b01;hid_p[0]=1;
+        presample();
+        if(prs1[0]!==mid_alloc)
+          $fatal(1,"RENAME_HART_ALIAS hart1 got=%0d want=%0d",prs1[0],mid_alloc);
+      end
+      // 2. Independent recovery: hart 1 mispredicts; hart 0's rename survives.
+      //    A shared checkpoint ring or a hart-agnostic ckpt_alloc would squash
+      //    hart 0's allocation here.
+      12:begin
+        if(NR_HARTS<2)$fatal(1,"RENAME_NEEDS_NR_HARTS2");
+        // hart1 takes a branch (its own checkpoint)
+        drive();valid=2'b01;is_branch=2'b01;hid_p[0]=1;
+        drive();idle();
+        // hart0 allocates AFTER that branch
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd7;hid_p[0]=0;
+        presample();first_alloc=prd[0];
+        if(first_alloc==0)$fatal(1,"RENAME_NO_ALLOC");
+        drive();idle();
+        drive();mispredict=1;
+        drive();idle();rs1[0]=5'd7;valid=2'b01;hid_p[0]=0;
+        presample();
+        if(prs1[0]!==(negative?PRF_W'(0):first_alloc))
+          $fatal(1,"RENAME_PEER_SQUASHED got=%0d want=%0d",prs1[0],first_alloc);
+      end
+      // 3. Per-hart flush reclaims exactly that hart's physicals: hart 1's
+      //    uncommitted rename is reset to its architectural map while hart 0's
+      //    speculative rename stays live.
+      13:begin
+        if(NR_HARTS<2)$fatal(1,"RENAME_NEEDS_NR_HARTS2");
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd9;hid_p[0]=0;
+        presample();first_alloc=prd[0];
+        drive();idle();valid=2'b01;need_rd=2'b01;rd[0]=5'd9;hid_p[0]=1;
+        presample();mid_alloc=prd[0];
+        drive();idle();fl_hart=2'b10;
+        drive();idle();fl_hart='0;
+        // hart1 is back to its reset identity for x9 (not its flushed rename)
+        drive();idle();rs1[0]=5'd9;valid=2'b01;hid_p[0]=1;
+        presample();
+        if(prs1[0]===mid_alloc)
+          $fatal(1,"RENAME_HART_FLUSH_KEPT hart1 still maps %0d",mid_alloc);
+        // hart0's speculative rename must be untouched by the peer's flush
+        drive();idle();rs1[0]=5'd9;valid=2'b01;hid_p[0]=0;
+        presample();
+        if(prs1[0]!==(negative?PRF_W'(0):first_alloc))
+          $fatal(1,"RENAME_HART_FLUSH_SPILL hart0 got=%0d want=%0d",prs1[0],first_alloc);
+      end
+      // ---- Phase5 split FP register class (require -GFPRF_ENTRIES>0) -------
+      // 20. Class isolation: x5 and f5 share an architectural NUMBER but are
+      //     different registers. An integer producer of x5 must not satisfy an
+      //     FP consumer of f5, and the two must map to different files.
+      20:begin
+        if(FPRF_ENTRIES<32)$fatal(1,"RENAME_NEEDS_FPRF");
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd5;
+        presample();first_alloc=prd[0];
+        if(first_alloc==0)$fatal(1,"RENAME_NO_ALLOC");
+        drive();idle();valid=2'b01;need_rd=2'b01;rd[0]=5'd5;is_fpr_rd=2'b01;
+        presample();f_first=fprd[0];
+        drive();idle();is_fpr_rd='0;
+        // integer x5 must still read its own physical
+        drive();idle();rs1[0]=5'd5;valid=2'b01;
+        presample();
+        if(prs1[0]!==first_alloc)
+          $fatal(1,"RENAME_FP_CLASS int x5 got=%0d want=%0d",prs1[0],first_alloc);
+        // FP f5 must read the FP physical, from the FP file
+        drive();idle();rs1[0]=5'd5;valid=2'b01;is_fpr_rs1=2'b01;
+        presample();
+        if(fprs1[0]!==(negative?FPRF_W'(0):f_first))
+          $fatal(1,"RENAME_FP_CLASS fp f5 got=%0d want=%0d",fprs1[0],f_first);
+        if(rs1_rdy[0]!==1'b0)$fatal(1,"RENAME_FP_BUSY rdy=%b",rs1_rdy[0]);
+      end
+      // 21. f0 is an ordinary register: unlike x0 it must be renamed, tracked
+      //     busy and read back. The integer path's rd!=0 filters must not have
+      //     leaked into the FP path.
+      21:begin
+        if(FPRF_ENTRIES<32)$fatal(1,"RENAME_NEEDS_FPRF");
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd0;is_fpr_rd=2'b01;
+        presample();f_first=fprd[0];
+        drive();idle();rs1[0]=5'd0;valid=2'b01;is_fpr_rs1=2'b01;
+        presample();
+        if(fprs1[0]!==(negative?FPRF_W'(1):f_first))
+          $fatal(1,"RENAME_FP_F0 got=%0d want=%0d",fprs1[0],f_first);
+        // and it must be busy: an FP consumer of f0 waits for its producer
+        if(rs1_rdy[0]!==1'b0)$fatal(1,"RENAME_FP_F0_BUSY rdy=%b",rs1_rdy[0]);
+      end
+      // 22. FP recovery: a branch checkpoints BOTH maps, so an FP rename made
+      //     after the branch is undone and the pre-branch FP mapping returns.
+      22:begin
+        if(FPRF_ENTRIES<32)$fatal(1,"RENAME_NEEDS_FPRF");
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd7;is_fpr_rd=2'b01;
+        presample();f_first=fprd[0];
+        drive();idle();valid=2'b01;is_branch=2'b01;
+        drive();idle();
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd7;is_fpr_rd=2'b01;
+        presample();f_mid=fprd[0];
+        if(f_mid==f_first)$fatal(1,"RENAME_FP_SETUP realloc matched");
+        drive();idle();
+        drive();mispredict=1;
+        drive();idle();rs1[0]=5'd7;valid=2'b01;is_fpr_rs1=2'b01;
+        presample();
+        if(fprs1[0]!==(negative?f_mid:f_first))
+          $fatal(1,"RENAME_FP_RECOVER got=%0d want=%0d",fprs1[0],f_first);
+      end
+      // 23. rs3 renames from the FP map, and an FP writeback clears busy for
+      //     FP physical 0 as for any other (no rd!=0 guard on that path).
+      23:begin
+        if(FPRF_ENTRIES<32)$fatal(1,"RENAME_NEEDS_FPRF");
+        drive();valid=2'b01;need_rd=2'b01;rd[0]=5'd9;is_fpr_rd=2'b01;
+        presample();f_first=fprd[0];
+        drive();idle();rs3[0]=5'd9;valid=2'b01;is_fpr_rs3=2'b01;
+        presample();
+        if(fprs3[0]!==(negative?FPRF_W'(0):f_first))
+          $fatal(1,"RENAME_FP_RS3 got=%0d want=%0d",fprs3[0],f_first);
+        if(rs3_rdy[0]!==1'b0)$fatal(1,"RENAME_FP_RS3_BUSY rdy=%b",rs3_rdy[0]);
+        // writeback releases it
+        drive();idle();fwb_v[0]=1;fwb_prd[0]=f_first;
+        drive();idle();rs3[0]=5'd9;valid=2'b01;is_fpr_rs3=2'b01;
+        presample();
+        if(rs3_rdy[0]!==1'b1)$fatal(1,"RENAME_FP_RS3_WB still busy");
+      end
+      14,15:begin
+        if(NR_HARTS!=2)$fatal(1,"RENAME_HART_SETUP");
+        drive();valid=1;need_rd=1;rd[0]=1;hid_p[0]=scenario==14?0:1;
+        presample();first_alloc=prd[0];mid_alloc=prd_old[0];
+        drive();idle();wb_v=1;wb_prd[0]=first_alloc;
+        cm_v=1;cm_hart[0]=hid_p[0];cm_rd[0]=1;cm_prd[0]=first_alloc;
+        fr=1;fr_prd[0]=mid_alloc;
+        drive();idle();valid=1;need_rd=1;rd[0]=2;
+        hid_p[0]=scenario==14?1:0;fl_hart=scenario==14?1:2;
+        presample();if(prd[0]!=mid_alloc)$fatal(1,"RENAME_HART_SETUP reuse");
+        drive();idle();fl_hart=0;valid=1;rs1[0]=2;
+        presample();
+        if(prs1[0]!=mid_alloc||rs1_rdy[0]!==negative)
+          $fatal(1,"RENAME_HART_REALLOC_FLUSH tag=%0d ready=%b",prs1[0],rs1_rdy[0]);
+        drive();idle();valid=1;need_rd=1;rd[0]=3;
+        presample();if(prd[0]==mid_alloc)$fatal(1,"RENAME_HART_REALLOC_FREE");
+      end
+      24,25:begin
+        if(NR_HARTS!=2||FPRF_ENTRIES<68)$fatal(1,"RENAME_FP_HART_SETUP");
+        drive();valid=3;need_rd=3;is_fpr_rd=3;rd='0;hid_p[0]=0;hid_p[1]=1;
+        presample();f_first=fprd[0];f_mid=fprd[1];
+        if(f_first==f_mid)$fatal(1,"RENAME_FP_HART_SETUP alias");
+        drive();idle();fwb_v=3;fwb_prd[0]=f_first;fwb_prd[1]=f_mid;
+        drive();idle();fwb_v=0;cm_v=3;cm_is_fpr=3;cm_rd='0;
+        cm_hart[0]=0;cm_hart[1]=1;cm_fprd[0]=f_first;cm_fprd[1]=f_mid;
+        ffr=3;ffr_prd[0]=0;ffr_prd[1]=32;
+        drive();idle();ffr=0;cm_is_fpr=0;
+        valid=3;need_rd=3;is_fpr_rd=3;rd='0;hid_p[0]=0;hid_p[1]=1;
+        presample();f_spec0=fprd[0];f_spec1=fprd[1];
+        drive();idle();is_fpr_rd=0;fl_hart=scenario==24?1:2;
+        drive();idle();fl_hart=0;valid=3;is_fpr_rs1=3;rs1='0;
+        presample();
+        if(fprs1[0]!=(scenario==24?f_first:f_spec0)||
+           fprs1[1]!=(scenario==25?f_mid:f_spec1)||negative)
+          $fatal(1,"RENAME_FP_HART_FLUSH_MAP h0=%0d h1=%0d",fprs1[0],fprs1[1]);
+        if(rs1_rdy!=(scenario==24?2'b01:2'b10))$fatal(1,"RENAME_FP_HART_FLUSH_BUSY");
+        drive();idle();is_fpr_rs1=0;valid=1;need_rd=1;is_fpr_rd=1;
+        hid_p[0]=scenario==24?0:1;rd[0]=9;
+        presample();
+        if(fprd[0]!=(scenario==24?f_spec0:f_spec1))$fatal(1,"RENAME_FP_HART_FLUSH_FREE");
       end
       default:$fatal(1,"RENAME_SCENARIO");
     endcase
@@ -675,13 +1325,13 @@ module tb_g6lc_review_dispatch;
   function automatic config_pkg::cva6_cfg_t configuration();
     config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
     c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NrHarts=HARTS;c.NrCores=1;c.NrIssuePorts=2;c.NrCommitPorts=2;c.NrWbPorts=2;
-    c.FpPresent=FPEN;
-    c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.PrfEntries=40;c.RobEntries=8;c.IqEntries=8;
+    c.FpPresent=FPEN;c.FLen=FPEN?64:1;c.RVA=1;
+    c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.PrfEntries=HARTS>1?80:40;c.RobEntries=8;c.IqEntries=8;
     c.LsqLoadEntries=4;c.LsqStoreEntries=4;c.BPCkptDepth=2;c.OoOEn=1;
     c.MemDepPredEn=MDP;return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
-  typedef struct packed {fu_t fu;fu_op op;logic[4:0] rs1,rs2,rd;logic[3:0] trans_id;logic[63:0] pc,result;logic[7:0] p_rs1,p_rs2,p_rd;logic ooo_renamed;} sbe_t;
+  typedef struct packed {fu_t fu;fu_op op;logic[4:0] rs1,rs2,rd;logic[3:0] trans_id;logic[63:0] pc,result;logic[7:0] p_rs1,p_rs2,p_rd;logic[7:0] p_frs1,p_frs2,p_frs3,p_frd;logic ooo_renamed;logic hart_id;} sbe_t;
   logic clk=0,rst_n=0;
   logic[1:0] dv=0,da,iv;
   sbe_t[1:0] ds='0,issued;
@@ -696,13 +1346,18 @@ module tb_g6lc_review_dispatch;
   logic [1:0] wb_exc='0, op_a_valid, op_b_valid;
   sbe_t [1:0] cm_instr='0;
   logic [3:0] cp='0,mis_id='0;
-  logic mispredict=0, dispatch_flush=0;
+  logic mispredict=0, dispatch_flush=0, redirect_flush=0;
+  logic [1:0] issue_accept=2'b11;
+  // Architectural commit write, as commit_stage drives we_gpr_o/wdata_o.
+  logic [1:0] cm_we='0;
+  logic [1:0][63:0] cm_wdata='0;
   g6lc_ooo_dispatch #(.CVA6Cfg(C),.scoreboard_entry_t(sbe_t)) dut(
-    .clk_i(clk),.rst_ni(rst_n),.flush_i(dispatch_flush),.flush_unissued_i(1'b0),.cancelled_mask_i(cancel_mask),
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(dispatch_flush),.flush_unissued_i(redirect_flush),.cancelled_mask_i(cancel_mask),
     .dispatch_sbe_i(ds),.dispatch_orig_i('0),.dispatch_valid_i(dv),.dispatch_ack_o(da),
-    .issue_sbe_o(issued),.issue_orig_o(orig),.issue_valid_o(iv),.issue_ack_i(2'b11),
+    .issue_sbe_o(issued),.issue_orig_o(orig),.issue_valid_o(iv),.issue_ack_i(issue_accept),
     .issue_op_a_o(op_a),.issue_op_b_o(op_b),.issue_op_a_valid_o(op_a_valid),.issue_op_b_valid_o(op_b_valid),
     .wb_valid_i(wb_v),.wb_id_i(wb_id),.wb_data_i(wb_data),.wb_exc_i(wb_exc),
+    .commit_we_i(cm_we),.commit_wdata_i(cm_wdata),
     .commit_ack_i(cm_ack),.commit_instr_i(cm_instr),.commit_ptr_i(cp),
     .mispredict_i(mispredict),.mispredict_id_i(mis_id),
     .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o());
@@ -1008,6 +1663,223 @@ module tb_g6lc_review_dispatch;
               $fatal(1,"DISPATCH_DROP_CKPT physical=%0d expected=%0d",issued[0].p_rd,p9b);
           end
         end
+      end
+      18:begin
+        // Late writeback after trans_id REUSE. Unlike scenarios 13/14 the
+        // cancellation mask no longer identifies the stale result: the id has
+        // been handed to a live instruction, so wb_id alone cannot say whose
+        // completion this is. Contract under test: a result for a cancelled
+        // owner must not complete, wake or supply data for the id's NEW owner.
+        ds[0].fu=CTRL_FLOW;ds[0].op=BRANCH;ds[0].trans_id=1;dv=1;
+        presample();if(!da[0])$fatal(1,"DISPATCH_TIDREUSE_SETUP branch");
+        drive();dv=0;
+        ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=7;ds[0].trans_id=2;dv=1;
+        presample();if(!da[0])$fatal(1,"DISPATCH_TIDREUSE_SETUP victim");
+        drive();dv=0;
+        presample();
+        if(!iv[0]||issued[0].trans_id!=2)$fatal(1,"DISPATCH_TIDREUSE_SETUP victim issue");
+        p9a=issued[0].p_rd;
+        // Cancel the victim and retire the branch, then drop the victim so the
+        // id is architecturally free again and its cancel bit is released.
+        drive();cancel_mask=16'h0004;mispredict=1;mis_id=1;wb_v=1;wb_id=8'h01;
+        drive();mispredict=0;wb_v=0;
+        cm_instr='0;cm_instr[0].fu=CTRL_FLOW;cm_instr[0].trans_id=1;cm_ack=1;
+        drive();cm_ack=0;
+        cm_instr='0;cm_instr[0].fu=ALU;cm_instr[0].rd=7;cm_instr[0].trans_id=2;cm_ack=1;
+        drive();cm_ack=0;cancel_mask=0;
+        // New owner of id 2, plus a consumer that may only wake on its result.
+        ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=9;ds[0].trans_id=2;dv=1;
+        presample();if(!da[0])$fatal(1,"DISPATCH_TIDREUSE_SETUP new owner");
+        drive();dv=0;
+        presample();
+        if(!iv[0]||issued[0].trans_id!=2)$fatal(1,"DISPATCH_TIDREUSE_SETUP new owner issue");
+        p9b=issued[0].p_rd;
+        // The new owner legitimately inherits the dropped victim's physical
+        // register (scenario 16 proves that free is correct), so a stale result
+        // would land on the live owner's own register. That sharpens the hazard.
+        ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rs1=9;ds[0].rd=10;ds[0].trans_id=4;dv=1;
+        presample();if(!da[0])$fatal(1,"DISPATCH_TIDREUSE_SETUP consumer");
+        drive();dv=0;
+        // The cancelled owner's result finally returns, carrying only id 2.
+        drive();wb_v=1;wb_id[0]=2;wb_data={64'b0,64'hDEAD};wb_exc=0;
+        presample();
+        for(int p=0;p<2;p++)if(iv[p]&&issued[p].trans_id==4)begin
+          if(!negative)
+            $fatal(1,"DISPATCH_TIDREUSE stale result woke the new owner's consumer operand=%h",op_a[p]);
+        end
+        drive();wb_v=0;
+        // The new owner must still be able to complete on its OWN result.
+        drive();wb_v=1;wb_id[0]=2;wb_data={64'b0,64'h1234};
+        presample();seen=0;
+        for(int p=0;p<2;p++)if(iv[p]&&issued[p].trans_id==4)begin
+          seen++;
+          if(!op_a_valid[p]||op_a[p]!=64'h1234)
+            $fatal(1,"DISPATCH_TIDREUSE genuine result lost operand=%h",op_a[p]);
+        end
+        if(seen!=1&&!negative)$fatal(1,"DISPATCH_TIDREUSE no genuine wake");
+        drive();wb_v=0;
+      end
+      19:begin
+        // Architectural result produced at COMMIT, not by the execute writeback.
+        // Models CSR (commit_stage: wdata_o=csr_rdata_i) and LR (wdata_o=
+        // amo_resp_i.result), both of which override commit_instr.result and never
+        // appear on wb_data_i. Contract under test: a later consumer renamed against
+        // that destination must observe the ARCHITECTURAL value, because with
+        // OoOEn=1 issue_read_operands takes the PRF operand over the regfile read.
+        ds='0;ds[0].fu=CSR;ds[0].op=CSR_READ;ds[0].rd=7;ds[0].trans_id=1;dv=1;
+        presample();if(!da[0])$fatal(1,"DISPATCH_LATERESULT_SETUP producer");
+        drive();dv=0;
+        presample();
+        if(|iv)$fatal(1,"DISPATCH_CSR_HEAD_ONLY");
+        drive();cp=4'd1;
+        presample();
+        if(!iv[0]||issued[0].trans_id!=1)$fatal(1,"DISPATCH_LATERESULT_SETUP producer issue");
+        p9a=issued[0].p_rd;
+        if(p9a==0)$fatal(1,"DISPATCH_LATERESULT_SETUP no rename");
+        // Execute-stage writeback carries only the placeholder.
+        drive();wb_v=1;wb_id[0]=1;wb_data={64'b0,64'h0BAD};wb_exc=0;
+        drive();wb_v=0;
+        // Commit supplies the architectural value, as commit_stage does.
+        cm_instr='0;cm_instr[0].fu=CSR;cm_instr[0].op=CSR_READ;cm_instr[0].rd=7;cm_instr[0].trans_id=1;
+        cm_instr[0].result=64'h1234;cm_ack=1;
+        cm_we=2'b01;cm_wdata[0]=64'h1234;
+        drive();cm_ack=0;cm_we=0;
+        // A consumer renamed against the committed destination.
+        ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rs1=7;ds[0].rd=10;ds[0].trans_id=2;dv=1;
+        presample();if(!da[0])$fatal(1,"DISPATCH_LATERESULT_SETUP consumer");
+        drive();dv=0;
+        presample();seen=0;
+        for(int p=0;p<2;p++)if(iv[p]&&issued[p].trans_id==2)begin
+          seen++;
+          if(!op_a_valid[p])$fatal(1,"DISPATCH_LATERESULT consumer operand not valid");
+          if((op_a[p]^(negative?64'd1:64'd0))!=64'h1234)
+            $fatal(1,"DISPATCH_LATERESULT consumer read %h, architectural value is 1234",op_a[p]);
+        end
+        if(seen!=1)$fatal(1,"DISPATCH_LATERESULT_SETUP consumer did not issue");
+      end
+      20,22,23:begin
+        issue_accept=0;
+        ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=7;ds[0].trans_id=1;
+        ds[1].fu=CTRL_FLOW;ds[1].op=NE;ds[1].trans_id=2;dv=3;
+        presample();if(da!=3)$fatal(1,"DISPATCH_RECOVERY_SETUP");
+        drive();dv=0;issue_accept=3;
+        redirect_flush=1;dispatch_flush=(scenario==22);
+        if(scenario==23)cancel_mask=16'h0004;
+        presample();
+        if((|iv)!==negative)$fatal(1,"DISPATCH_RECOVERY_ISSUE valid=%b",iv);
+        if(|da)$fatal(1,"DISPATCH_RECOVERY_ALLOC");
+        drive();redirect_flush=0;dispatch_flush=0;
+        presample();
+        if(scenario==22)begin
+          if(|iv)$fatal(1,"DISPATCH_RECOVERY_FULL_FLUSH");
+        end else if(scenario==23)begin
+          if(iv!=1||issued[0].trans_id!=1)$fatal(1,"DISPATCH_RECOVERY_CANCEL_SCOPE");
+          drive();presample();if(|iv)$fatal(1,"DISPATCH_RECOVERY_DUPLICATE");
+        end else begin
+          if(iv!=3||issued[0].trans_id!=1||issued[1].trans_id!=2)
+            $fatal(1,"DISPATCH_RECOVERY_LOST valid=%b",iv);
+          drive();presample();
+          if(|iv)$fatal(1,"DISPATCH_RECOVERY_DUPLICATE");
+        end
+      end
+      21:begin
+        ds[0].fu=LOAD;ds[0].op=LD;ds[0].rd=7;ds[0].trans_id=1;dv=1;
+        presample();if(da!=1)$fatal(1,"DISPATCH_RECOVERY_SETUP producer");
+        drive();dv=0;
+        presample();if(iv!=1||issued[0].trans_id!=1)$fatal(1,"DISPATCH_RECOVERY_SETUP issue");
+        drive();issue_accept=0;
+        ds='0;ds[0].fu=CTRL_FLOW;ds[0].op=NE;ds[0].rs1=7;ds[0].trans_id=2;
+        ds[1].fu=CTRL_FLOW;ds[1].op=NE;ds[1].trans_id=3;dv=3;
+        presample();if(da!=3)$fatal(1,"DISPATCH_RECOVERY_SETUP branches");
+        drive();dv=0;issue_accept=3;
+        presample();if(iv!=1||issued[0].trans_id!=3)$fatal(1,"DISPATCH_RECOVERY_SETUP younger");
+        drive();redirect_flush=1;mispredict=1;mis_id=3;
+        wb_v=3;wb_id[0]=1;wb_id[1]=3;wb_data[0]=64'h1234;
+        ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=8;ds[0].trans_id=4;dv=1;
+        presample();
+        if((|iv)!==negative)$fatal(1,"DISPATCH_RECOVERY_WAKE valid=%b",iv);
+        if(|da)$fatal(1,"DISPATCH_RECOVERY_ALLOC");
+        drive();redirect_flush=0;mispredict=0;wb_v=0;dv=0;
+        presample();
+        if(iv!=1||issued[0].trans_id!=2||!op_a_valid[0]||op_a[0]!=64'h1234)
+          $fatal(1,"DISPATCH_RECOVERY_WAKE_LOST valid=%b tid=%0d data=%h",iv,issued[0].trans_id,op_a[0]);
+        drive();presample();if(|iv)$fatal(1,"DISPATCH_RECOVERY_DUPLICATE");
+      end
+      24,25,27:begin
+        if(!FPEN)$fatal(1,"DISPATCH_FP_SETUP");
+        ds[0].fu=FPU;ds[0].op=FADD;ds[0].rd=scenario==25?7:0;ds[0].trans_id=1;dv=1;
+        presample();if(da!=1)$fatal(1,"DISPATCH_FP_SETUP alloc");
+        drive();dv=0;
+        presample();if(iv!=1||issued[0].trans_id!=1)$fatal(1,"DISPATCH_FP_SETUP issue");
+        p9a=issued[0].p_frd;
+        drive();wb_v=1;wb_id[0]=1;wb_data={64'b0,64'h4031000000000000};
+        drive();wb_v=0;
+        cm_instr='0;cm_instr[0].fu=FPU;cm_instr[0].op=FADD;
+        cm_instr[0].rd=scenario==25?7:0;cm_instr[0].trans_id=1;cm_ack=1;
+        drive();cm_ack=0;
+        if(scenario==27)begin
+          ds='0;ds[0].fu=FPU;ds[0].op=FADD;ds[0].rd=7;ds[0].trans_id=2;dv=1;
+          presample();if(da!=1)$fatal(1,"DISPATCH_FP_SETUP zero allocation");
+          drive();dv=0;presample();
+          if(iv!=1||issued[0].p_frd!=0)$fatal(1,"DISPATCH_FP_SETUP physical zero");
+          p9a=issued[0].p_frd;
+          drive();wb_v=1;wb_id[0]=2;wb_data={64'b0,64'h4031000000000000};
+          drive();wb_v=0;cm_instr[0].rd=7;cm_instr[0].trans_id=2;cm_ack=1;
+          drive();cm_ack=0;
+        end
+        dispatch_flush=1;
+        drive();dispatch_flush=0;
+        ds='0;ds[0].fu=FPU;ds[0].op=FMUL;ds[0].rd=9;
+        ds[0].rs1=scenario==24?0:7;ds[0].trans_id=2;dv=1;
+        presample();if(da!=1)$fatal(1,"DISPATCH_FP_SETUP consumer");
+        drive();dv=0;presample();
+        if(iv!=1||issued[0].p_frs1!=p9a||!op_a_valid[0]||
+           (op_a[0]^(negative?64'd1:64'd0))!=64'h4031000000000000)
+          $fatal(1,"DISPATCH_FP_COMMIT_FLUSH tag=%0d wanted=%0d data=%h",issued[0].p_frs1,p9a,op_a[0]);
+      end
+      26:begin
+        if(HARTS!=2)$fatal(1,"DISPATCH_HART_SETUP");
+        for(int h=0;h<2;h++)begin
+          ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=5;ds[0].hart_id=1'(h);
+          ds[0].trans_id=4'(h+1);dv=1;
+          presample();if(da!=1)$fatal(1,"DISPATCH_HART_SETUP alloc");
+          drive();dv=0;presample();
+          if(iv!=1||issued[0].trans_id!=4'(h+1))$fatal(1,"DISPATCH_HART_SETUP issue");
+          drive();wb_v=1;wb_id[0]=4'(h+1);wb_data[0]=64'h1005+64'(h)*64'h1000;
+          drive();wb_v=0;
+          cm_instr='0;cm_instr[0].fu=ALU;cm_instr[0].op=ADD;cm_instr[0].rd=5;
+          cm_instr[0].hart_id=1'(h);cm_instr[0].trans_id=4'(h+1);cm_ack=1;
+          cm_we=1;cm_wdata[0]=64'h1005+64'(h)*64'h1000;
+          drive();cm_ack=0;cm_we=0;
+        end
+        dispatch_flush=1;drive();dispatch_flush=0;
+        ds='0;
+        for(int h=0;h<2;h++)begin
+          ds[h].fu=ALU;ds[h].op=ADD;ds[h].rs1=5;ds[h].hart_id=1'(h);ds[h].trans_id=4'(h+3);
+        end
+        dv=3;presample();if(da!=3)$fatal(1,"DISPATCH_HART_SETUP readers");
+        drive();dv=0;presample();
+        if(iv!=3||op_a[0]!=(negative?64'h2005:64'h1005)||op_a[1]!=64'h2005)
+          $fatal(1,"DISPATCH_HART_ARCH h0=%h h1=%h",op_a[0],op_a[1]);
+        if(issued[0].p_rs1==issued[1].p_rs1)$fatal(1,"DISPATCH_HART_PHYS_ALIAS");
+      end
+      28,29:begin
+        cp=4'd1;
+        ds[0].fu=scenario==28?CSR:STORE;ds[0].op=scenario==28?CSR_READ:AMO_LRD;
+        ds[0].rd=7;ds[0].trans_id=1;dv=1;
+        presample();if(da!=1)$fatal(1,"DISPATCH_LATE_WAKE_SETUP producer");
+        drive();dv=0;presample();if(iv!=1)$fatal(1,"DISPATCH_LATE_WAKE_SETUP issue");
+        drive();ds='0;ds[0].fu=ALU;ds[0].op=ADD;ds[0].rs1=7;ds[0].rd=8;ds[0].trans_id=2;dv=1;
+        wb_v=1;wb_id[0]=1;wb_data={64'b0,64'h0BAD};
+        presample();if(da!=1)$fatal(1,"DISPATCH_LATE_WAKE_SETUP consumer");
+        drive();dv=0;wb_v=0;presample();
+        if((|iv)!==negative)$fatal(1,"DISPATCH_LATE_WAKE_EARLY");
+        drive();cm_instr='0;cm_instr[0].fu=scenario==28?CSR:STORE;
+        cm_instr[0].op=scenario==28?CSR_READ:AMO_LRD;
+        cm_instr[0].rd=7;cm_instr[0].trans_id=1;cm_ack=1;cm_we=1;cm_wdata={64'b0,64'h1234};
+        presample();
+        if(iv!=1||issued[0].trans_id!=2||op_a[0]!=64'h1234)
+          $fatal(1,"DISPATCH_LATE_WAKE_COMMIT valid=%b data=%h",iv,op_a[0]);
       end
       default:$fatal(1,"DISPATCH_SCENARIO");
     endcase
@@ -1338,6 +2210,156 @@ endmodule
 // scenarios observe the port ordering (commit_instr_o[k].trans_id ==
 // commit_pointer_q[k]) and TID conservation across a full drain and a
 // wraparound, with no hierarchical probes.
+module tb_g6lc_review_store_recovery;
+  import ariane_pkg::*;
+  parameter int NH=2;
+  parameter bit OOO=1;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.PLEN=56;c.NrHarts=NH;c.SuperscalarEn=1;c.OoOEn=OOO;
+    c.NR_SB_ENTRIES=8;c.TRANS_ID_BITS=3;c.DCACHE_INDEX_WIDTH=12;c.DCACHE_TAG_WIDTH=44;
+    c.DCacheType=config_pkg::WT;return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef logic[7:0] cbo_t;
+  typedef struct packed {logic data_req,data_we,kill_req,tag_valid,data_id,data_wuser;
+    logic[11:0] address_index;logic[43:0] address_tag;logic[63:0] data_wdata;
+    logic[7:0] data_be;logic[1:0] data_size;cbo_t cbo_op;} req_t;
+  typedef struct packed {logic data_gnt,data_rvalid;} rsp_t;
+  logic clk=0,rst_n=0,flush=0,valid=0,commit=0,load_v=0;
+  logic[7:0] cancelled=0;
+  logic[2:0] tid=1;
+  // OoO program-order keys: the querying load's tid and the age anchor
+  // (oldest live instruction, which is also the tid commit is retiring).
+  logic[2:0] load_tid=7,commit_tid=0;
+  logic[55:0] address=56'h1010,load_address=56'h1010;
+  logic[63:0] data=64'hAAAA,fwd_data;
+  logic[7:0] fwd_be;
+  logic ready,commit_ready,empty,no_pending,fwd;
+  req_t req; rsp_t rsp='0;
+  int scenario;bit negative;
+  always #5 clk=~clk;
+  store_buffer #(.CVA6Cfg(C),.dcache_req_i_t(req_t),.dcache_req_o_t(rsp_t),.cbo_t(cbo_t)) dut(
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancelled),
+    .stall_st_pending_i(1'b0),.no_st_pending_o(no_pending),.store_buffer_empty_o(empty),
+    .page_offset_i(load_address[11:0]),.load_paddr_i(load_address),.load_paddr_valid_i(load_v),
+    .load_trans_id_i(load_tid),.commit_trans_id_i(commit_tid),
+    .dcache_wbuffer_empty_i(1'b1),.page_offset_matches_o(),.st_fwd_valid_o(fwd),
+    .st_fwd_data_o(fwd_data),.st_fwd_be_o(fwd_be),.commit_i(commit),
+    .commit_ready_o(commit_ready),.ready_o(ready),.valid_i(valid),.valid_without_flush_i(valid),
+    .paddr_i(address),.trans_id_i(tid),.rvfi_mem_paddr_o(),.data_i(data),.be_i(8'hff),
+    .data_size_i(2'b11),.cbo_op_i(CBO_NONE),.req_port_i(rsp),.req_port_o(req));
+  task automatic drive;@(negedge clk);endtask
+  initial begin
+    scenario=0;negative=$test$plusargs("oracle_negative");
+    void'($value$plusargs("scenario=%d",scenario));
+    repeat(2)drive();rst_n=1;drive();valid=1;drive();valid=0;
+    if(scenario==1)begin
+      load_v=1;#4;if(!fwd)$fatal(1,"STORE_RECOVERY_SETUP forward");
+      drive();load_v=0;cancelled=2;drive();cancelled=0;load_v=1;#4;
+      if(empty!==!negative||fwd)$fatal(1,"STORE_RECOVERY_CANCEL");
+    end else if(scenario==2)begin
+      commit_tid=1;commit=1;drive();commit=0;valid=1;tid=2;address=56'h1020;data=64'hBBBB;
+      drive();valid=0;flush=1;drive();flush=0;#4;
+      if(!req.data_req||req.data_wdata!=(negative?64'hBBBB:64'hAAAA))$fatal(1,"STORE_RECOVERY_COMMITTED");
+      rsp.data_gnt=1;drive();rsp.data_gnt=0;#4;
+      if(!empty)$fatal(1,"STORE_RECOVERY_COMMITTED leaked speculative store");
+    end else if(scenario==0||scenario==3)begin
+      flush=1;drive();flush=0;#4;
+      if(scenario==0)begin
+        if(empty!==!negative)$fatal(1,"STORE_RECOVERY_FLUSH");
+      end else begin
+        drive();valid=1;tid=2;address=56'h1020;data=64'hBBBB;
+        drive();valid=0;commit_tid=2;commit=1;drive();commit=0;#4;
+        if(!req.data_req||{req.address_tag,req.address_index}!=56'h1020||
+           req.data_wdata!=(negative?64'hAAAA:64'hBBBB))$fatal(1,"STORE_RECOVERY_REPLAY");
+      end
+    end else if(scenario==4)begin
+      // Contract A: a store YOUNGER than the querying load must not be
+      // observable by it, however exactly their addresses match.
+      flush=1;drive();flush=0;drive();
+      valid=1;tid=5;address=56'h1010;data=64'hCCCC;drive();valid=0;
+      load_address=56'h1010;load_tid=2;load_v=1;#4;
+      if(fwd!==negative)$fatal(1,"STORE_RECOVERY_YOUNGER_FWD");
+    end else if(scenario==5)begin
+      // Contract B: arrival order is issue order. The store handed to memory
+      // must be the program-order-oldest one, not the one that arrived first.
+      flush=1;drive();flush=0;drive();
+      valid=1;tid=3;address=56'h1030;data=64'hCCCC;drive();valid=0;
+      valid=1;tid=1;address=56'h1040;data=64'hDDDD;drive();valid=0;
+      commit_tid=1;commit=1;drive();commit=0;#4;
+      if(!req.data_req||{req.address_tag,req.address_index}!=(negative?56'h1030:56'h1040)||
+         req.data_wdata!=(negative?64'hCCCC:64'hDDDD))$fatal(1,"STORE_RECOVERY_PROGRAM_ORDER");
+    end else $fatal(1,"STORE_RECOVERY_SCENARIO");
+    $display("RTL_REVIEW_PASS store_recovery scenario=%0d",scenario);$finish;
+  end
+endmodule
+
+module tb_g6lc_review_wfi;
+  import ariane_pkg::*;
+  `include "g6lc_core_types.svh"
+  parameter bit OOO=1,RVA_EN=0;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.GPLEN=64;c.FLen=1;
+    c.NrIssuePorts=2;c.NrCommitPorts=2;c.NrWbPorts=2;c.NrHarts=1;
+    c.NR_SB_ENTRIES=8;c.TRANS_ID_BITS=3;c.OoOEn=OOO;c.RVA=RVA_EN;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef `G6LC_BRANCHPREDICT_SBE_T(C) branchpredict_sbe_t;
+  typedef `G6LC_EXCEPTION_T(C) exception_t;
+  typedef `G6LC_SCOREBOARD_ENTRY_T(C) sbe_t;
+  typedef struct packed {logic valid,is_mispredict,is_taken;cf_t cf_type;} bp_t;
+  logic clk=0,rst_n=0,halt=0;
+  sbe_t[1:0] entry='0;
+  exception_t csr_ex='0;
+  logic[1:0] drop='0,ack;
+  logic flush_commit,commit_csr,set_pc,flush_if,flush_id,flush_ex,flush_unissued;
+  int scenario;bit negative,expected;
+  always #5 clk=~clk;
+  commit_stage #(.CVA6Cfg(C),.exception_t(exception_t),.scoreboard_entry_t(sbe_t)) dut(
+    .clk_i(clk),.rst_ni(rst_n),.halt_i(halt),.flush_dcache_i(1'b0),.exception_o(),
+    .single_step_i(1'b0),.commit_instr_i(entry),.commit_drop_i(drop),.commit_ack_o(ack),
+    .commit_macro_ack_o(),.waddr_o(),.wdata_o(),.we_gpr_o(),.whart_o(),.we_fpr_o(),
+    .amo_resp_i('0),.pc_o(),.csr_op_o(),.csr_wdata_o(),.csr_rdata_i('0),
+    .csr_write_fflags_o(),.csr_exception_i(csr_ex),.commit_lsu_o(),.commit_lsu_ready_i(1'b1),
+    .commit_tran_id_o(),.amo_valid_commit_o(),.no_st_pending_i(1'b1),.commit_csr_o(commit_csr),
+    .fence_i_o(),.fence_o(),.flush_commit_o(flush_commit),.sfence_vma_o(),
+    .hfence_vvma_o(),.hfence_gvma_o(),.shared_tlb_flush_busy_i(1'b0),
+    .break_from_trigger_i(1'b0),.dirty_fp_state_o());
+  controller #(.CVA6Cfg(C),.bp_resolve_t(bp_t)) ctrl(
+    .clk_i(clk),.rst_ni(rst_n),.v_i(1'b0),.set_pc_commit_o(set_pc),.flush_if_o(flush_if),
+    .flush_unissued_instr_o(flush_unissued),.flush_id_o(flush_id),.flush_ex_o(flush_ex),
+    .flush_bp_o(),.flush_icache_o(),.flush_dcache_o(),.flush_dcache_ack_i(1'b0),
+    .flush_tlb_o(),.flush_tlb_vvma_o(),.flush_tlb_gvma_o(),.halt_csr_i(halt),
+    .halt_acc_i(1'b0),.halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(1'b0),
+    .set_debug_pc_i(1'b0),.resolved_branch_i('0),.flush_csr_i(1'b0),.fence_i_i(1'b0),
+    .fence_i(1'b0),.sfence_vma_i(1'b0),.hfence_vvma_i(1'b0),.hfence_gvma_i(1'b0),
+    .flush_commit_i(flush_commit),.flush_acc_i(1'b0),.smt_switch_i(1'b0));
+  initial begin
+    scenario=0;negative=$test$plusargs("oracle_negative");
+    void'($value$plusargs("scenario=%d",scenario));
+    repeat(2)@(negedge clk);rst_n=1;@(negedge clk);
+    entry[0].valid=1;entry[0].fu=CSR;entry[0].op=WFI;entry[0].pc=64'h80001000;
+    case(scenario)
+      0:begin end
+      1:drop=1;
+      2:csr_ex.valid=1;
+      3:halt=1;
+      4:entry[0].ex.valid=1;
+      5:entry[0].valid=0;
+      6:entry[0].op=CSR_READ;
+      default:$fatal(1,"WFI_SCENARIO");
+    endcase
+    #4;expected=OOO&&scenario==0;
+    if(flush_commit!=(expected^negative)||{set_pc,flush_if,flush_id,flush_ex,flush_unissued}!={5{expected}})
+      $fatal(1,"WFI_RETIRE_RECOVERY flush=%b ctrl=%b",flush_commit,{set_pc,flush_if,flush_id,flush_ex,flush_unissued});
+    if(scenario==0&&(ack!=1||!commit_csr))$fatal(1,"WFI_RETIRE_ACCEPT");
+    $display("RTL_REVIEW_PASS wfi scenario=%0d",scenario);$finish;
+  end
+endmodule
+
 module tb_g6lc_review_commit;
   import ariane_pkg::*;
   `include "g6lc_core_types.svh"

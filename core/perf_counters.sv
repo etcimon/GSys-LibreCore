@@ -16,7 +16,7 @@
 // ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
 // The original work of the copyright holders named above remains licensed
 // under the license stated above, and that grant is unaffected.
-// Modifications (c) 2026 Etienne Cimon: per-hart PMU event counters and LibreCore feature event sources.
+// Modifications (c) 2026 Etienne Cimon: per-hart PMU counter banks and LibreCore feature event sources.
 // The upstream notice above is prose and declares no SPDX identifier, so the
 // outbound offer is stated here as the file's single SPDX tag. See REUSE.toml.
 // Etienne Cimon offers this file AS A WHOLE under:
@@ -45,10 +45,14 @@ module perf_counters
     input logic we_i,  // write enable
     input logic [CVA6Cfg.XLEN-1:0] data_i,  // data to write
     output logic [CVA6Cfg.XLEN-1:0] data_o,  // data to read
-    // Sscofpmf: read-only OF vector for scountovf (bit i = OF of counter i)
-    output logic [31:0] scountovf_o,
-    // Sscofpmf: local counter-overflow interrupt pending (OR of OF bits)
-    output logic lcofi_o,
+    // Hart owning this access and this cycle's events. mhpmcounterN/mhpmeventN are
+    // per-hart architectural CSRs, so the state below is banked by it rather than
+    // shared; with one hart it is a constant 0 and the banks collapse to today's.
+    input logic [(CVA6Cfg.NrHarts <= 1 ? 1 : $clog2(CVA6Cfg.NrHarts))-1:0] hart_i,
+    // Sscofpmf: read-only OF vector for scountovf (bit i = OF of counter i), per hart
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][31:0] scountovf_o,
+    // Sscofpmf: local counter-overflow interrupt pending (OR of OF bits), per hart
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] lcofi_o,
     // from commit stage
     input  scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0] commit_instr_i,     // the instruction we want to commit
     input  logic [CVA6Cfg.NrCommitPorts-1:0]              commit_ack_i,       // acknowledge that we are indeed committing
@@ -103,24 +107,26 @@ module perf_counters
 
   typedef logic [11:0] csr_addr_t;
 
-  logic [63:0] generic_counter_d[MHPMCounterNum:1];
-  logic [63:0] generic_counter_q[MHPMCounterNum:1];
+  localparam int unsigned NH = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
+
+  logic [63:0] generic_counter_d[NH][MHPMCounterNum:1];
+  logic [63:0] generic_counter_q[NH][MHPMCounterNum:1];
 
   //internal signal to keep track of exception
   logic read_access_exception, update_access_exception;
 
   logic events[MHPMCounterNum:1];
   // Event selector (group+index). Width is MHPMEventWidth (8).
-  logic [MHPMEventWidth-1:0] mhpmevent_d[MHPMCounterNum:1];
-  logic [MHPMEventWidth-1:0] mhpmevent_q[MHPMCounterNum:1];
+  logic [MHPMEventWidth-1:0] mhpmevent_d[NH][MHPMCounterNum:1];
+  logic [MHPMEventWidth-1:0] mhpmevent_q[NH][MHPMCounterNum:1];
 
   // Sscofpmf state: OF + privilege-mode inhibit bits per HPM counter.
   // Layout mirrors the architectural mhpmeventN packing on RV64:
   //   [63] OF, [62] MINH, [61] SINH, [60] UINH; selector in the low bits.
-  logic of_d[MHPMCounterNum:1], of_q[MHPMCounterNum:1];
-  logic minh_d[MHPMCounterNum:1], minh_q[MHPMCounterNum:1];
-  logic sinh_d[MHPMCounterNum:1], sinh_q[MHPMCounterNum:1];
-  logic uinh_d[MHPMCounterNum:1], uinh_q[MHPMCounterNum:1];
+  logic of_d[NH][MHPMCounterNum:1], of_q[NH][MHPMCounterNum:1];
+  logic minh_d[NH][MHPMCounterNum:1], minh_q[NH][MHPMCounterNum:1];
+  logic sinh_d[NH][MHPMCounterNum:1], sinh_q[NH][MHPMCounterNum:1];
+  logic uinh_d[NH][MHPMCounterNum:1], uinh_q[NH][MHPMCounterNum:1];
   logic event_inhibited[MHPMCounterNum:1];
 
   // Event matrix: one 32-entry vector per group (see ariane_pkg::MHPMEvent*).
@@ -246,22 +252,28 @@ module perf_counters
 
   end
 
+  // Only the hart the events are attributed to can increment, so the selector
+  // mux stays single-copy and reads that hart's bank.
   for (genvar i = 1; i <= MHPMCounterNum; i++) begin : gen_event_sel
-    assign event_grp_sel[i] = mhpmevent_q[i][MHPMEventWidth-1:MHPMEventIdxWidth];
-    assign event_idx_sel[i] = mhpmevent_q[i][MHPMEventIdxWidth-1:0];
+    assign event_grp_sel[i] = mhpmevent_q[hart_i][i][MHPMEventWidth-1:MHPMEventIdxWidth];
+    assign event_idx_sel[i] = mhpmevent_q[hart_i][i][MHPMEventIdxWidth-1:0];
   end
 
   // Sscofpmf: scountovf bit i mirrors OF of mhpmcounter i (bits 0-2 hardwired 0;
   // only counters 3..MHPMCounterNum+2 exist here, indexed as 1..MHPMCounterNum).
   always_comb begin : scountovf_pack
     scountovf_o = '0;
+    lcofi_o     = '0;
     if (CVA6Cfg.SscofpmfEn) begin
-      for (int unsigned i = 1; i <= MHPMCounterNum; i++) begin
-        scountovf_o[i+2] = of_q[i];
+      for (int unsigned h = 0; h < NH; h++) begin
+        for (int unsigned i = 1; i <= MHPMCounterNum; i++) begin
+          scountovf_o[h][i+2] = of_q[h][i];
+        end
+        // Overflow is reported only to the owning hart, not broadcast.
+        lcofi_o[h] = |scountovf_o[h];
       end
     end
   end
-  assign lcofi_o = CVA6Cfg.SscofpmfEn ? (|scountovf_o) : 1'b0;
 
   always_comb begin : generic_counter
     generic_counter_d = generic_counter_q;
@@ -276,25 +288,29 @@ module perf_counters
     update_access_exception = 1'b0;
 
     // Privilege-mode event filtering (Sscofpmf MINH/SINH/UINH).
+    // priv_lvl_i/debug_mode_i/mcountinhibit_i are the active hart's, which is the
+    // hart these events are attributed to, so the filter reads its own bank.
     if (CVA6Cfg.SscofpmfEn) begin
       for (int unsigned i = 1; i <= MHPMCounterNum; i++) begin
         unique case (priv_lvl_i)
-          riscv::PRIV_LVL_M: event_inhibited[i] = minh_q[i];
-          riscv::PRIV_LVL_S: event_inhibited[i] = sinh_q[i];
-          riscv::PRIV_LVL_U: event_inhibited[i] = uinh_q[i];
+          riscv::PRIV_LVL_M: event_inhibited[i] = minh_q[hart_i][i];
+          riscv::PRIV_LVL_S: event_inhibited[i] = sinh_q[hart_i][i];
+          riscv::PRIV_LVL_U: event_inhibited[i] = uinh_q[hart_i][i];
           default:           event_inhibited[i] = 1'b0;
         endcase
       end
     end
 
     // Increment the non-inhibited counters with active events; set OF on wrap.
+    // Only the owning bank moves, so a peer's CSR write no longer suppresses
+    // this hart's counting and its events never land in the peer's counter.
     for (int unsigned i = 1; i <= MHPMCounterNum; i++) begin
       if ((!debug_mode_i) && (!we_i) && !event_inhibited[i]) begin
         if ((events[i]) == 1 && (!mcountinhibit_i[i+2])) begin
-          if (CVA6Cfg.SscofpmfEn && (&generic_counter_q[i])) begin
-            of_d[i] = 1'b1;
+          if (CVA6Cfg.SscofpmfEn && (&generic_counter_q[hart_i][i])) begin
+            of_d[hart_i][i] = 1'b1;
           end
-          generic_counter_d[i] = generic_counter_q[i] + 1'b1;
+          generic_counter_d[hart_i][i] = generic_counter_q[hart_i][i] + 1'b1;
         end
       end
     end
@@ -302,34 +318,36 @@ module perf_counters
     //Read
     if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3)) && (addr_i < ( csr_addr_t'(riscv::CSR_MHPM_COUNTER_3) + csr_addr_t'(MHPMCounterNum))) ) begin
       if (riscv::XLEN == 32) begin
-        data_o = CVA6Cfg.XLEN'(generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3+1][31:0]);
+        data_o = CVA6Cfg.XLEN'(generic_counter_q[hart_i][addr_i-riscv::CSR_MHPM_COUNTER_3+1][31:0]);
       end else begin
-        data_o = generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3+1];
+        data_o = generic_counter_q[hart_i][addr_i-riscv::CSR_MHPM_COUNTER_3+1];
       end
     end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H)) && (addr_i < ( csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H) + csr_addr_t'(MHPMCounterNum))) ) begin
       if (riscv::XLEN == 32) begin
-        data_o = CVA6Cfg.XLEN'(generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32]);
+        data_o = CVA6Cfg.XLEN'(generic_counter_q[hart_i][addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32]);
       end else begin
         read_access_exception = 1'b1;
       end
     end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_EVENT_3)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_EVENT_3) + csr_addr_t'(MHPMCounterNum))) ) begin
       // Pack architectural mhpmeventN: selector in low bits; OF/filter when Sscofpmf.
-      data_o = CVA6Cfg.XLEN'(mhpmevent_q[addr_i-riscv::CSR_MHPM_EVENT_3+1]);
+      data_o = CVA6Cfg.XLEN'(mhpmevent_q[hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1]);
       if (CVA6Cfg.SscofpmfEn && CVA6Cfg.IS_XLEN64) begin
-        data_o[63] = of_q[addr_i-riscv::CSR_MHPM_EVENT_3+1];
-        data_o[62] = minh_q[addr_i-riscv::CSR_MHPM_EVENT_3+1];
-        data_o[61] = sinh_q[addr_i-riscv::CSR_MHPM_EVENT_3+1];
-        data_o[60] = uinh_q[addr_i-riscv::CSR_MHPM_EVENT_3+1];
+        data_o[63] = of_q[hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1];
+        data_o[62] = minh_q[hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1];
+        data_o[61] = sinh_q[hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1];
+        data_o[60] = uinh_q[hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1];
       end
     end else if( (addr_i >= csr_addr_t'(riscv::CSR_HPM_COUNTER_3)) && (addr_i < (csr_addr_t'(riscv::CSR_HPM_COUNTER_3) + csr_addr_t'(MHPMCounterNum))) ) begin
       if (riscv::XLEN == 32) begin
-        data_o = CVA6Cfg.XLEN'(generic_counter_q[addr_i-riscv::CSR_HPM_COUNTER_3+1][31:0]);
+        data_o = CVA6Cfg.XLEN'(generic_counter_q[hart_i][addr_i-riscv::CSR_HPM_COUNTER_3+1][31:0]);
       end else begin
-        data_o = generic_counter_q[addr_i-riscv::CSR_HPM_COUNTER_3+1];
+        data_o = generic_counter_q[hart_i][addr_i-riscv::CSR_HPM_COUNTER_3+1];
       end
-    end else if( (addr_i > csr_addr_t'(riscv::CSR_HPM_COUNTER_3H)) && (addr_i < (csr_addr_t'(riscv::CSR_HPM_COUNTER_3H) + csr_addr_t'(MHPMCounterNum))) ) begin
+      // `>` excluded hpmcounter3h itself, and the index subtracted the MACHINE-mode
+      // base from a USER-mode address, indexing far outside the counter array.
+    end else if( (addr_i >= csr_addr_t'(riscv::CSR_HPM_COUNTER_3H)) && (addr_i < (csr_addr_t'(riscv::CSR_HPM_COUNTER_3H) + csr_addr_t'(MHPMCounterNum))) ) begin
       if (riscv::XLEN == 32) begin
-        data_o = CVA6Cfg.XLEN'(generic_counter_q[addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32]);
+        data_o = CVA6Cfg.XLEN'(generic_counter_q[hart_i][addr_i-riscv::CSR_HPM_COUNTER_3H+1][63:32]);
       end else begin
         read_access_exception = 1'b1;
       end
@@ -339,25 +357,25 @@ module perf_counters
     if (we_i) begin
       if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_COUNTER_3) + csr_addr_t'(MHPMCounterNum))) ) begin
         if (riscv::XLEN == 32) begin
-          generic_counter_d[addr_i-riscv::CSR_MHPM_COUNTER_3+1][31:0] = data_i[31:0];
+          generic_counter_d[hart_i][addr_i-riscv::CSR_MHPM_COUNTER_3+1][31:0] = data_i[31:0];
         end else begin
-          generic_counter_d[addr_i-riscv::CSR_MHPM_COUNTER_3+1] = data_i;
+          generic_counter_d[hart_i][addr_i-riscv::CSR_MHPM_COUNTER_3+1] = data_i;
         end
       end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H)) && (addr_i < (csr_addr_t'(riscv::CSR_MHPM_COUNTER_3H) + csr_addr_t'(MHPMCounterNum))) ) begin
         if (riscv::XLEN == 32) begin
-          generic_counter_d[addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32] = data_i[31:0];
+          generic_counter_d[hart_i][addr_i-riscv::CSR_MHPM_COUNTER_3H+1][63:32] = data_i[31:0];
         end else begin
           update_access_exception = 1'b1;
         end
       end else if( (addr_i >= csr_addr_t'(riscv::CSR_MHPM_EVENT_3)) && (addr_i < csr_addr_t'(riscv::CSR_MHPM_EVENT_3) + csr_addr_t'(MHPMCounterNum)) ) begin
         // WARL: selector always writable; OF/filter only with Sscofpmf.
         // Writing 0 to OF clears it (spec); writing 1 is ignored (sticky set).
-        mhpmevent_d[addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[MHPMEventWidth-1:0];
+        mhpmevent_d[hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[MHPMEventWidth-1:0];
         if (CVA6Cfg.SscofpmfEn && CVA6Cfg.IS_XLEN64) begin
-          if (!data_i[63]) of_d[addr_i-riscv::CSR_MHPM_EVENT_3+1] = 1'b0;
-          minh_d[addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[62];
-          sinh_d[addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[61];
-          uinh_d[addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[60];
+          if (!data_i[63]) of_d[hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1] = 1'b0;
+          minh_d[hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[62];
+          sinh_d[hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[61];
+          uinh_d[hart_i][addr_i-riscv::CSR_MHPM_EVENT_3+1] = data_i[60];
         end
       end
     end
@@ -366,12 +384,18 @@ module perf_counters
   //Registers
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      generic_counter_q <= '{default: 0};
-      mhpmevent_q       <= '{default: 0};
-      of_q              <= '{default: 0};
-      minh_q            <= '{default: 0};
-      sinh_q            <= '{default: 0};
-      uinh_q            <= '{default: 0};
+      // Explicit per-bank clear: a flat '{default:0} is not accepted for the
+      // two-dimensional unpacked banks.
+      for (int unsigned h = 0; h < NH; h++) begin
+        for (int unsigned i = 1; i <= MHPMCounterNum; i++) begin
+          generic_counter_q[h][i] <= '0;
+          mhpmevent_q[h][i]       <= '0;
+          of_q[h][i]              <= 1'b0;
+          minh_q[h][i]            <= 1'b0;
+          sinh_q[h][i]            <= 1'b0;
+          uinh_q[h][i]            <= 1'b0;
+        end
+      end
     end else begin
       generic_counter_q <= generic_counter_d;
       mhpmevent_q       <= mhpmevent_d;
@@ -381,12 +405,35 @@ module perf_counters
         sinh_q <= sinh_d;
         uinh_q <= uinh_d;
       end else begin
-        of_q   <= '{default: 0};
-        minh_q <= '{default: 0};
-        sinh_q <= '{default: 0};
-        uinh_q <= '{default: 0};
+        for (int unsigned h = 0; h < NH; h++) begin
+          for (int unsigned i = 1; i <= MHPMCounterNum; i++) begin
+            of_q[h][i]   <= 1'b0;
+            minh_q[h][i] <= 1'b0;
+            sinh_q[h][i] <= 1'b0;
+            uinh_q[h][i] <= 1'b0;
+          end
+        end
       end
     end
   end
+
+  //pragma translate_off
+  // Banking attributes every event and every CSR access to hart_i, which is the
+  // active hart. That is exact only while a committing group belongs to one hart,
+  // as the drained SMT handoff guarantees today. Mixed-hart retirement must
+  // revisit this before it can be enabled, so fail loudly instead of miscounting.
+  if (CVA6Cfg.NrHarts > 1) begin : gen_hart_attribution_check
+    always @(posedge clk_i) begin
+      if (rst_ni) begin
+        for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
+          assert (!commit_ack_i[p] || commit_instr_i[p].hart_id == hart_i)
+          else
+            $fatal(1, "perf_counters: commit hart %0d != attributed hart %0d",
+                   commit_instr_i[p].hart_id, hart_i);
+        end
+      end
+    end
+  end
+  //pragma translate_on
 
 endmodule

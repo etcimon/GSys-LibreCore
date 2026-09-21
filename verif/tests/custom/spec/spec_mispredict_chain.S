@@ -5,8 +5,14 @@
 # deep scoreboard window. Self-check; exit 0 on pass.
 # Works with DeepSpecEn=0/1 and OoOEn=0/1.
 
+#ifndef SPEC_CHAIN_EXPECTED
+#define SPEC_CHAIN_EXPECTED 18
+#endif
+
   .globl main
 main:
+  addi sp, sp, -16
+  sd   ra, 8(sp)
   li   t0, 0
   li   t1, 10
   li   t2, 0
@@ -34,11 +40,11 @@ main:
   addi t0, t0, 1
   j    3b
 4:
-  li   a0, 18
+  li   a0, SPEC_CHAIN_EXPECTED
   bne  t2, a0, fail
 
   li   a0, 0
-  ret
+  j    done
 
 leaf_inc:
   addi t2, t2, 1
@@ -46,4 +52,7 @@ leaf_inc:
 
 fail:
   li   a0, 1
+done:
+  ld   ra, 8(sp)
+  addi sp, sp, 16
   ret

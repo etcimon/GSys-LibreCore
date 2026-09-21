@@ -17,6 +17,247 @@ matching row here so "which spec chapter is this test protecting?" stays answera
 
 ---
 
+## Current qualification boundary for misalignment and recovery
+
+The results in the historical subsection below belong to its captured binaries, not the current
+load_unit source (whose original fatal antecedents have been restored). Do not reapply the old
+aligned-offset qualifications: they are tautological for the RV64 offset width. Replacement
+properties must detect a missing precise exception, a faulting destination write and an accepted
+cancelled completion; positive completion and wrong-expectation controls alone do not test them.
+
+Stage32/33 tval checks currently allow zero unconditionally, while g6lc64_ooo_int sets TvalEn=1.
+Make the expectation explicit per compiled configuration and keep a disabled-TvalEn control.
+Stage34 additionally changes alignment/handler content/layout; it is not a strict single-cofactor
+comparison. Preserve the frozen failing ELF, then create source-reproducible, disassembly-checked
+layout variants and an independent request-lifetime oracle for same-VA refetch and kill overlap.
+A failure in both backend modes does not prove a unique shared root cause or complete OoO safety.
+
+Read-only recipe captures `stability-reassessment-work-ver-smt2-{loadcancel-v2,truezero-v1}-recipe-v1`
+show that the old passing anchor includes the external split-counter.vlt compiler input and the
+failing truezero model omits it. Reuse `run_pmp_transition_review.py` with its positive/reference-
+negative/decoder-mutation controls; restore the complete pinned model recipe before firmware
+requalification. For a protected-anchor run, `SOURCE_REVIEW_COMPILER_CONTROL` is now mandatory:
+the runner refuses before simulator launch unless the control is supplied, exists, matches the
+pinned sha256 and appears in the model's generated `verFiles.dat`; `SOURCE_REVIEW_ALLOW_MISSING_CONTROL=1`
+waives the refusal but records `controlWaived` and forces `protectedAnchor: false`. Missing recipe
+inputs must be detected before claiming a matched comparison.
+No new simulation, proof or firmware PASS is claimed by this source/metadata review.
+
+## S0 qualification-tooling regression boundary (2026-09-21)
+
+`verif/regress/remote/test_testharness_proxy.py` covers compiler-control exact paths and hashes,
+preflight refusal before simulator launch, streamed strict-store completion, dropped/extra/changed
+reference lines, structured reference failures, and missing recipe evidence. Proxy regressions check
+non-destructive overlap refusal and isolated concurrent Python outputs. These are tooling checks,
+not extra ISA coverage. The retired LR reference contained a false write; the replacement checks
+same-model replay only. LR read masks/address attribution and independent memory effects remain open.
+Timing/SoC review: Python-only changes introduce no RTL timing, clock/reset, DTS or ISA change;
+existing MIT attribution is retained. Remote final outcomes are recorded separately, not inferred
+from these unit tests.
+
+The parallel continuation repaired verification fixtures, not the core: dispatch scenario19 now
+checks that a non-head CSR cannot issue, then advances the commit head before testing CSR_READ's
+architectural result. Scenarios28/29 supply the correct head for CSR/LR late-result wakeup.
+The restored commit-mirror defect is detected at the consumer-value assertion rather than setup.
+`run_smt_drain_review.py` exposes pause_hint_i and the target's ZihintpauseEn in its live-port
+synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
+dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
+
+## FP result ownership after transaction-ID reuse (2026-09-21)
+
+`tb_g6lc_review_fp_lifetime` in `verif/tb/core/tb_g6lc_rtl_review.sv` drives the real `fpu_wrap`,
+`controller` and `scoreboard` with decoded allocation and single-cycle ALU/commit stimulus. Run it
+through `run_ooo_fault_review.py` with `FAULT_REVIEW_FP_LIFETIME=1`, `FP_LIFETIME_NSB={8,16,32}`,
+`FP_LIFETIME_STANDARD_RECIPE=1` (the Makefile full-model warning recipe; `unoptflatGate: open`),
+`FP_LIFETIME_EXPECT_CANCEL=1` for the repaired contract, `FP_LIFETIME_MUTATE_CANCEL=1` for the
+restored-defect control, `FP_LIFETIME_OOO=0` for the in-order control and `FP_LIFETIME_DIVIDER=1`
+to drive the real `mult`/`serdiv` path (DIVU `2^62/2^38`, replacement `2^63/2^38`). Before the
+repair the selective-cancel scenario returned the cancelled FDIV/DIVU result under a reused ID at8
+and16 slots;32 slots drained before reuse and therefore does not exercise overlap. After the repair:
+normal, full-flush, selective-cancel, same-ID replacement, full-flush-then-replacement and
+older-survivor scenarios match with negatives detected, and both mutations reproduce the stale
+completion. The replacement scenarios wait for `ready` like the issue stage does, so a request
+pulsed into a busy divider is not covered. Strict
+`-Werror-UNOPTFLAT` builds remain blocked by existing scoreboard and vendored FPnew loops; that
+structural gate is open, not waived. No full-core reachability or FP+OoO guard promotion follows.
+
+## Historical misaligned-load tests (2026-09-20)
+
+`ooo_mem_min.S` stages32/33 are registered as `ooo_load_misaligned_trap` and
+`ooo_load_misaligned_not_taken`. Stage32 takes a misaligned `lw` architecturally and
+checks `mcause=4`, `mepc`, that the destination is unwritten, and that exactly one trap
+is taken; `mtval` is checked only when the target reports one, since `TvalEn` is not
+required by the envelope. Stage33 puts the same load on the **not-taken** side of a
+`divu`-delayed branch, so a wrong-path misaligned access must leave no architectural
+trace. Each clause has its own exit code (4=cause,5=tval,6=mepc,7=trap count,
+8=destination written) per the L4 one-fail-code-per-phase rule.
+
+Both aborted before the instrument repair (OoO796, in-order1582 cycles), which is how
+the oracle was shown invalid in both execution modes. Stage33 now passes at915 cycles
+with Spike-matched retirements and a failing negative. Stage32 currently discriminates a
+**wrong exception-redirect target** between two frozen ELFs that differ only in branch
+immediates; both are deterministic across replays, and the failing ELF is retained as
+the reproducer. Do not register stage32 as a passing gate until that finding is resolved.
+
+The in-order control for that finding is built with `SOFT_LADDER_OVERLAY=OoOEn=0` on
+`g6lc64_ooo_int` (`verif/regress/isolated-config-overlay.py` allowlists the field, anchored
+so it cannot match `SliceOoOEn`). Both arms therefore come from one recorded source state.
+The control reproduces the failure with out-of-order execution disabled — as a timeout after
+the exception rather than a wrong restart — which is what exonerates the OoO path. Its cap
+banner is again classified `timeout`, so keep the positive-completion requirement.
+
+## Pre-grant load cancellation and TID reuse (2026-09-20)
+
+`tb_g6lc_review_load_cancel` in `verif/tb/core/tb_g6lc_rtl_review.sv` instantiates
+the real LSU bypass and load unit. Run through the build-platform proxy with
+`verif/regress/remote/run_ooo_fault_review.py`, `FAULT_REVIEW_LEAF=1`, and data
+`core/lsu_bypass.sv`, `core/load_unit.sv`, `verif/tb/core/tb_g6lc_rtl_review.sv`.
+It checks head/tail cancellation before grant, simultaneous cancel/grant, TID reuse
+with delayed old responses, preservation of an older SEND_TAG/response, full flush
+and an unrelated branch resolution. Two/four response slots and OoO-off controls
+produce42 matched positive/negative records. The expanded translation/forwarding/
+concurrent-response matrix produces54 matched records. A final correct-prediction
+release discriminator fails on the first candidate and raises the passing final
+matrix to56 records after refinement. The old RTL fails the pre-grant case;
+`FAULT_REVIEW_MUTATE_QUEUED_CANCEL=1` independently removes sticky cancellation in
+a copied source and must fail the tail-retention case. Strict latch/UNOPTFLAT
+checks retain the previously qualified lzc split-variable compiler control.
+`FAULT_REVIEW_FORMAL=1` extracts `tb_g6lc_review_load_cancel_props` for an eight-step
+check against an independent shift queue, plus cancellation/mask-release/drain
+reachability and a copied-source mutation counterexample. Scope is the live
+2-entry bypass with4 TIDs, not full LSU liveness or all geometries.
+
+The same runner extracts bounded contexts from frozen `SOURCE_REVIEW_FLOW` runs,
+checks retirement counts and log/model/firmware identities, and can compare an
+observer-on retirement prefix exactly with its observer-off record. Firmware is
+an integration witness, not an ISA reference or a substitute for these controls.
+`test_testharness_proxy.py` also tests experimental/default model provenance,
+conflicting/missing hashes and explicit cap-timeout classification.
+
+## OoO memory-ordering directed tests (2026-09-20)
+
+`ooo_mem_min.S` gains STAGE17/18/19, registered in `testlist_ooo_l3.yaml` as
+`ooo_mem_order_younger_store`, `ooo_mem_order_store_store` and
+`ooo_mem_order_partial_overlap`. Each uses a `divu` to delay one operand so the
+intended overtaking actually happens, and each is self-checking. A
+`MEM_ORDER_NEGATIVE` define flips the expected value to give a wrong-expectation
+control. On the OoO model they went FAIL929 / FAIL949 / TIMEOUT before the repair
+and PASS915 / 940 / 952 after, matching Spike's ordered retirements; the negatives
+fail at 928/943/938. The same frozen ELFs pass on the in-order model throughout,
+which is what attributes the defects to the OoO path. Note the in-order model's
+retirement comparison is not usable as evidence here (dual-hart scope reports 51
+rows against Spike's 20); its self-checking verdict is.
+
+Stages20/21/22 extend the same file and are registered as
+`ooo_mem_order_delayed_older`, `ooo_mem_order_reorder_depth` and
+`ooo_mem_order_queue_capacity`. Stage20 is the converse of17 — an older store whose
+DATA is late must still be waited for — and catches an age filter that excludes too
+much. Stage21 confirms via `+smt_flow_trace` that the reordering really happens
+rather than the test passing vacuously. Stage22 exceeds the eight-deep speculative
+queue and previously deadlocked on both OoO models while the in-order control
+passed; it now passes at933.
+
+Stages23/24 (`ooo_amo_order`, `ooo_amo_memory_readback`) cover AMO ordering against
+out-of-order neighbours. Stage24's second `amoadd.d rd, x0, (addr)` is the
+authoritative probe: an AMO reads memory at commit and cannot be forwarded. They
+first exposed an RVFI mis-capture rather than a core fault; after that repair both
+are trace-compared and match Spike.
+
+Stage25 (`ooo_lrsc_speculative_store`) covers LR/SC against a still-speculative
+older store, and likewise first exposed an instrument fault rather than a core one:
+load-reserved was reported as writing memory because AMOs share the STORE path.
+
+Stages26/27/28 (`ooo_sc_fail_no_write`, `ooo_store_after_lr`,
+`ooo_store_after_lr_nofence`) cover a store that follows a load-reserved, which
+previously deadlocked under OoO on every model generation. Stage27 aims the store
+at an unrelated address and stage28 removes the fence and the SC, which together
+show the hang is neither reservation logic, nor same-address ordering, nor the
+flush. Stage26 is **self-checking only and not trace-compared**: a same-hart store
+between LR and SC makes the sequence unconstrained, so the SC may legally succeed
+or fail, and CVA6 and Spike legitimately differ. It asserts only that the SC's
+reported result and the resulting memory agree — which is how the failed-SC write
+mask defect was caught.
+
+Stages29/30/31 (`ooo_store_after_amo`, `ooo_csr_flu_order`,
+`ooo_admission_interaction`) cover the AMO/CSR issue seams. Stage31 exists as a
+self-critique: the program-order store rule and the CSR commit-head rule are
+independent gates on the same selection loop. Stage31 exercises their interaction
+with five stores; it does not reach the eight-entry speculative-store capacity,
+nor does its pass prove that every required gate overlap occurred. Stage22 remains
+the separate capacity-boundary test.
+
+`tb_g6lc_rtl_review.sv` store-recovery scenarios4 and5 add leaf coverage: a younger
+store must not be forwarded to an older load, and the program-order-oldest store
+must be the one handed to memory when arrival order is reversed. Both run on the
+OoO configurations only, since the age filter is disabled in-order; the fixture
+reports 32 matched records including negatives.
+
+## FP lifetime / coarse SMT2+OoO qualification (2026-09-19)
+
+`ooo_fp_recovery` and `ooo_fp_status_alu` in `testlist_ooo_l3.yaml` extend
+`ooo_fp_rename.S`. Frozen before/after FP recovery and CSR->ALU binaries change
+from explicit failures to1471/1251-cycle passes. `run_ooo_fp_review.py` compares
+ordered main-to-exit retirements against pinned remote Spike:199/200 rows including
+PC/opcode/privilege, GPR/FPR writes and stores; a frozen wrong-FMA control fails with
+25 identical failing rows. This is a directed ROI comparison, not a full ISA suite.
+The parser's loss/order/value/boundary controls are in `test_testharness_proxy.py`.
+
+`tb_g6lc_rtl_review.sv` adds dispatch24/25/27 (FP commit/full-flush/physical zero),
+26 (hart namespaces),28/29 (CSR/AMO commit-time wakeup), rename14/15 (owner transfer)
+and24/25 (FP hart flush). FP commit and zero-rule restored-defect controls operate
+only on copied RTL. The WFI commit/controller fixture covers OoO0/1 x RVA0/1 with
+seven acceptance/refusal conditions and checker negatives (56 records). The store
+fixture covers full flush, cancel after forward, committed preservation and replay
+on NH1 and guarded NH2 (24 records). Initial fixture/tool failures remain recorded:
+FADD operand A was not an FP input, and a missing local CBO typedef prevented a
+build; neither was silently counted as an RTL result.
+
+The guarded NH2 integer model passes `smt_dual_active.S` reset rendezvous at664
+cycles (47/73 retirements), rejects the frozen negative at630, and matches observer
+off/on. LR/SC RS1/RS2 pass586, ALU582; negative fails475. These use the existing
+coarse handoff and do not qualify mixed residency, OoO OpenSBI/Linux, or FP across
+harts. The source copies, private guard scope, runtime/model/ELF hashes and remaining
+structural gates are recorded in `architecture/out-of-order/README.md`. The final
+integer S4/S5/S15/memdep/ILP regions additionally match Spike24/121/35/173/244 rows.
+The final leaf sweep has122 matched records; the protected in-order SMT2 firmware
+boot reproduces12,765,628 cycles and333,635/8,932,406 retirements. It does not qualify
+OoO firmware.
+
+## OoO issue/recovery conservation checks (2026-09-19)
+
+`tb_g6lc_review_dispatch` scenarios20–23 in `verif/tb/core/tb_g6lc_rtl_review.sv`
+cover surviving work across redirect, simultaneous load writeback waking an older
+branch, full flush and selective cancellation. The external ack stays high during
+suppression to test actual IQ retention, not merely the presented valid. The
+existing `run_rtl_audit_review.py` default dispatch suite includes these cases and
+checker negatives. Before RTL fails scenario20 at `DISPATCH_RECOVERY_ISSUE`.
+
+`testlist_ooo_l3.yaml` registers `ooo_recovery_loop_4` and
+`ooo_recovery_loop_16`, compiling unchanged `ooo_mem_min.S` stages15/5. Exact ELF
+replays via `run_ooo_fp_review.py` compare the old and repaired two-issue models:
+timeout becomes PASS883/974 cycles; ooo_mem_dep becomes PASS1057. All16 staged
+memory probes pass; stage4 and ILP retain878/1109 cycles. The runner retains
+ELF/model hashes and disassembly, rejects cap banners as completion and classifies
+instrument errors separately. Host classifier/transport suite:42 tests pass.
+
+The stage15 after-trace binds allocation/issue/WB/retirement to tid4/gen11 and
+matches the observer-off883-cycle result. The completed regate has128 matched
+fixture/negative/guard records. `run_ooo_validation_review.py` with
+`OOO_RECOVERY_FORMAL=1` proves four-step live dispatch/IQ retention and reaches a
+nonempty recovery cover; `OOO_RECOVERY_FAULT=1` restores raw ack in an isolated copy
+and must produce a counterexample. Scope: NH1/NP2/IQ8/ROB8/PRF40/SB16. Existing
+rename12-step BMC and the four-step checker negative also pass their contracts.
+Live-port fixture synthesis is latch/SCC/check clean; full-core lint passes its
+10-warning/baseline11 check, while standalone strict elaboration remains skipped.
+
+`spec_mispredict_chain.S` had a separate oracle defect: nested calls overwrote main's
+return address. Its original ELF hangs on in-order too. An aligned ra-save frame
+restores correct return semantics without changing its branch/call workload.
+Corrected OoO/in-order tests pass1258/1291 cycles, while `SPEC_CHAIN_EXPECTED=19`
+wrong-result controls fail1260/1291. Both arms replay identical ELF per variant.
+These checks do not qualify full RISC-V/FP/SMT compliance or unbounded progress.
+Full-core structural results remain separately scoped in the architecture record.
+
 ## Issue-group order qualification (2026-09-18)
 
 `tb_g6lc_review_issue_order` in `verif/tb/core/tb_g6lc_rtl_review.sv`, driven through
@@ -202,6 +443,174 @@ retirement-service observations, not per-cycle readiness, bounded fairness, prov
 saturation, cache-RTT attribution or Linux qualification. No adaptive RTL is enabled.
 The existing reset-rendezvous and LR/SC modes re-pass both encodings and their
 negative controls: smt2-balance-{startup,lrsc}-regression-20260919.
+
+Attribution observers (2026-09-19): `smt_sched_trace` in g6lc_thread_select.sv and
+`smt_rtt_trace` in cva6.sv, both read-only inside translate_off; SMT2_REVIEW_ATTRIBUTION=1
+enables them and computes sched/RTT metrics over the measured common window. Parsers
+reject non-monotonic state, a switch without its decision, a mis-counted drain wait,
+overlapping decisions, a reissued load tag and a dead observer; a window that performs
+no load is reported, not rejected. 27 tooling tests pass. smt2-balance-attr-final-20260919:
+served 2834/2831 cycles, ready-denied 2831/2834, longest denial 68, quiesce 332, 83
+starvation handoffs with zero quantum/miss/abort, drain wait exactly 3 cycles each.
+Cache RTT is NOT measured by this workload (register-only body, zero in-window samples).
+Boot preservation on the instrumented model: opensbi-attribution-dual-v3-20260919,
+strictDualPassed=true, 12,765,628 cycles, 333,635/8,932,406 retirements.
+
+## Shared-core capacity measurement refinement (2026-09-19)
+
+SMT_ASYM in smt_dual_active.S now elects the last publisher atomically to check all
+active result/done words; early finishers park regardless of hart index. The previous
+fixed-hart polling reporter contaminated the swapped compute tail. The existing
+run_smt2_soak_review.py adds solo controls for each role on each hart, separate common/
+per-hart/core windows, observer-off replay for both shared arms, and exact64/0 per-role
+load counts. It compares a shared-core batch against matched solo work, not equal
+thread counts. Simulation-selected cycles are labelled as such, not useful service.
+
+smt2-core-capacity{-norvc,}-20260919:12 positive cases,2 failing-capable result controls,
+4 observer-off equivalence replays. RVC shared/solo-time ratios0.92859/0.92649;
+uncompressed0.92574/0.92733. No throughput win, saturation, PMU ABI or Linux claim.
+The model remains2ce91d..., preserving the independently recorded HSM baseline.
+36 unit tests include reproduced refusal of foreign-role work outside the expected
+span and RTT window-end accounting (later completion cannot erase an outstanding
+request at the measurement boundary). Cache-level attribution remains absent;
+7-cycle RTT is not a hit predicate. Existing tier-T headers retained; no new link set,
+RTL, ISA/DTS, timing, area or DFT change in this increment.
+Symmetric, startup and LR/SC modes re-pass with negatives on the same model in
+smt2-capacity-{balance,startup,lrsc}-regression-20260919. Default remote lint/synth
+passes at8/54 and32/5 warnings; SMT2 at1/31 (lint has no configured remote baseline).
+Both aggregate gates remain incomplete because standalone-slang checks are skipped
+on the builder; no --allow-skips promotion or verification-policy change.
+
+## SMT counter-ownership probe (2026-09-19)
+
+`SMT_PMU` in smt_dual_active.S, selected by SMT2_REVIEW_PMU=1, writes distinct
+mhpmevent3 selectors from each hart in a handshaked order and reports the peer-visible
+readback, with mscratch as the architecturally per-hart control. Three arms: the shared
+hypothesis passes, and both the banked hypothesis and a control-value corruption fail,
+so the probe discriminates the two designs rather than only confirming one.
+smt2-pmu-ownership-20260919 (pre-repair, SMT2_REVIEW_PMU_SHARED=1): hart1 observed1,
+hart0 observed2, mscratch0x100/0x101 — shared selector, banked mscratch.
+smt2-pmu-banked-v2-20260919 (post-repair, model80ad8af0...): hart0 observed1 and
+hart1 observed0, countersArePerHart=true, with the shared signature now the failing
+control. The banked signature is (1,0) rather than (0,0) because hart0 legitimately
+reads back its own earlier write; the run corrected that expectation. The default
+polarity expects per-hart banks, and SMT2_REVIEW_PMU_SHARED=1 reproduces the old one.
+Boot preserved on the repaired model: opensbi-pmubank-dual-20260919 strictDualPassed=
+true,12,765,628 cycles,333,635/8,932,406. Asym/balance/startup/LRSC regressions pass;
+36 tooling tests. A separate RV32 user-mode `hpmcounterNh` read defect (wrong
+comparison and wrong base constant, giving an out-of-bounds counter index) was fixed
+by inspection; it is live in `cv32a6_imac_sv32`, which now lints clean remotely, but
+no directed RV32 counter test exists because the SMT2 flow has no RV32+Zihpm profile.
+`SMT_PMUEVT` (SMT2_REVIEW_PMUEVT=1) then checks that the counts themselves are per-hart:
+both harts select "load accesses" and run quotas of 256/768 loads across many handoffs,
+reading their own mhpmcounter3 either side. smt2-pmuevt-attrib-20260919 measures exactly
+256 and 768, with the ~1024 shared/cross-attributed arm and a corruption arm both
+failing. Bounds are asserted rather than an exact count because the event ORs the commit
+ports. `SMT_PMUMISS` (SMT2_REVIEW_PMUMISS=1) closes the cross-switch case that commit-derived
+loads cannot reach: hart0 strides 64 times past the 32 KiB D$ while hart1 issues no
+memory access but stays schedulable throughout. smt2-pmumiss-isolation-20260919 measures
+hart0 = 64 misses and hart1 = exactly 0, with a leak-accepting arm and a corruption arm
+both failing. Still unqualified: SBI PMU mapping, counter save/restore across context
+switches, and an RV32+Zihpm profile for the RV32 hpmcounterNh read fix. mcycle is conformant by the spec's own wording ("clock cycles executed
+by the processor core on which the hart is running") and is not a per-hart service
+metric; minstret is per-hart and gated by commit hart id.
+
+## OoO commit-produced results never reach the PRF (2026-09-19)
+
+`tb_g6lc_review_dispatch` scenario 19 (`REVIEW_RTL_LATERESULT=1`) models CSR and LR,
+whose architectural results `commit_stage` substitutes at commit
+(`wdata_o=csr_rdata_i` / `amo_resp_i.result`) and which therefore never appear on the
+execute writeback bus. The producer writes back only placeholder 0x0BAD, commit
+supplies 0x1234, and a consumer renamed against that destination is checked.
+ooo-lateresult-confirmed-20260919 records matched=true against the expected failure
+`DISPATCH_LATERESULT`: **the consumer read 0x0BAD**. Now REPAIRED — dispatch mirrors the
+architectural commit write into the PRF keyed by `commit_prd`, scenario 19 passes, and
+`REVIEW_RTL_LATERESULT_FAULT=1` restores the missing mirror so it fails again.
+Reachability was verified in source
+— `g6lc_ooo_dispatch` writes the PRF only from `wb_data_i`, every dispatched
+instruction is renamed, `flush_commit_o` is asserted for SC/RMW but explicitly not for
+LR and not for CSR, and `issue_read_operands` prefers the PRF operand over the regfile
+read when renamed. Scenario 19 is now the positive gate with
+`REVIEW_RTL_LATERESULT_FAULT=1` as its failing control. `OoOEn=0` remains the default,
+and `g6lc64_smt2` rebuilds byte-identical, so no configured target changed.
+
+## OoO late writeback after trans_id reuse (2026-09-19)
+
+`tb_g6lc_review_dispatch` scenario 18 (`REVIEW_RTL_TIDREUSE=1`) reaches the case
+scenarios 11-14 cannot: it cancels a victim holding trans_id 2, retires the branch,
+drops the victim so the id and its physical register are freed, reallocates id 2 to a
+live instruction, adds a consumer of that instruction, and only then delivers the
+victim's late result. ooo-tidreuse-confirmed-20260919 records matched=true against the
+expected failure `DISPATCH_TIDREUSE`: the stale 0xDEAD woke the new owner's consumer and
+became its operand.
+
+**Interpretation corrected after an FU survey:** this is a latent contract dependency,
+not a live defect. No current writeback source can produce the stimulus — `load_unit`
+uses a sticky per-slot flushed flag and frees a slot only when its response returns,
+`mult`/`serdiv` gate on `~flush_i`, ALU/branch/CSR hold no in-flight state, and
+CvxifEn=0. Scenario 18 is therefore retained as a **contract probe**, recorded as an
+expected failure rather than a passing gate: it documents what dispatch would do if a
+future writeback source stopped suppressing flushed results, and is the regression that
+would catch it. No repair is implemented, and `OoOEn=0` remains the default.
+
+## SMT memory-service sweep (2026-09-19)
+
+`SMT2_REVIEW_MEM_DEPTH` retargets the asymmetric memory role (`ASYM_MEM_ITERS` /
+`ASYM_MEM_SUM`, stride 1024 over a 256 KiB buffer) so miss depth sweeps with everything
+else fixed; the expected checksum is recomputed per depth, so a wrong depth fails the
+oracle rather than silently measuring less work. smt2-memsweep-d{16,64,256}-20260919
+give ratios 0.9557/0.9551, 0.9286/0.9265 and 0.9028/0.9057 — monotonically worse with
+memory pressure. The -rtt- variants add the load observer: median and max latency are
+7 cycles in every configuration, so the degradation is serialisation, not interference.
+Depth 64 reproduces the previously recorded 0.929/0.926, so the sweep is consistent
+with the earlier fixed-depth result. No RTL changed; no policy qualified.
+
+## SMT idle sibling and per-hart IPI wake (2026-09-19)
+
+`SMT_IPI` (SMT2_REVIEW_IPI=1) parks hart1 in WFI with MSIE set and mstatus.MIE clear,
+runs hart0's fixed 512-iteration body beside it, then wakes the peer through its own
+CLINT MSIP slot; hart0 asserts its own mip.MSIP stays clear, checking per-hart IPI
+routing. Arms: wfi-sibling, solo0 baseline, and a result-corruption negative. The
+oracle refuses any run where the halted peer retires measured work, with a unit test
+supplying exactly that case. smt2-ipi-wake-20260919: 2082 vs 2061 cycles (1.0102x),
+peer retired zero, IPI woke only its target. Covers idle-sibling cost and MSIP routing
+only — no Linux IPI path, no timer/PLIC wake, no adaptive policy. 40 tooling tests.
+
+## SMT Zihintpause yield hint (2026-09-19)
+
+`SMT2_REVIEW_LOCK_PAUSE=1` adds a PAUSE (emitted as the raw 0x0100000F word, so the test
+does not depend on the assembler advertising zihintpause) to the waiter's spin loop in
+`SMT_LOCK`; everything else is identical, making the hint the single variable.
+smt2-pausehint-lock-nohint-20260919 vs -hint-v2-: holder section 4462 -> 2837 cycles
+(2.1618x -> 1.3719x) with mutual exclusion still asserted by the same oracle.
+smt2-pausehint-inert-oldmodel-20260919 is the no-op control: the pre-change model on the
+identical source reproduces 4462/2148/2064/2066 exactly, proving the RTL is inert when
+software never hints. Boot preserved (opensbi-pausehint-dual-20260919, 12,765,628
+cycles). The `[smt-sched]` reason field is now 4 bits with `yield` as MSB; the parser and
+its fixtures were updated, and the existing reason-accounting tests still pass.
+Not covered: WFI-based yield, Linux/firmware use, and the residual 1.37x is untuned.
+
+## SMT dependency-limited pairing (2026-09-19)
+
+`SMT_DEP` (SMT2_REVIEW_DEP=1) reuses `asym_metrics`/`asym_capacity` with roles `dep`
+(three multiplies chained through one register) and `ind` (same instruction count,
+independent destinations), 512 iterations, six arms plus a corruption negative. The
+body-PC map now keys on roles present in the binary, so an unassigned role compiled
+into the same image is still detected — a unit test pins that. smt2-dep-ceiling-v5-20260919:
+solo dep=4123 vs ind=3108 cycles (0.62 vs 0.82 IPC), shared batch ratio 0.8985 in both
+role orders. Measures forfeited issue slack only; qualifies no policy and changed no RTL.
+
+## SMT lock holder / spinning waiter (2026-09-19)
+
+`SMT_LOCK` (SMT2_REVIEW_LOCK=1) has both harts contend for one AMO lock with identical
+512-iteration critical sections, plus same-hart solo controls and a result-corruption
+negative. The oracle asserts the mutual-exclusion property — the sections must be
+disjoint in time — before measuring them, and a unit test feeds it overlapping sections
+to show it refuses them. smt2-lock-holder-v2-20260919: exclusion holds; the holder's
+section is 4846 cycles contended vs 2066 solo (2.3456x) while the waiter spins and
+retires only spin instructions, and the second holder runs at 1.0397x once the peer has
+finished. This measures wasted shared-core capacity under contention; it qualifies no
+scheduling policy, spin hint or Linux behaviour, and no RTL changed. 38 tooling tests.
 
 ## P0–P2 continuation qualification boundary
 

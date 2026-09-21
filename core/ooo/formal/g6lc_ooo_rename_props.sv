@@ -55,6 +55,14 @@ module g6lc_ooo_rename_props #(
       // Untagged resolve -> youngest checkpoint, the behaviour these
       // properties were written against.
       .mispredict_level_i('1),
+      .hart_i('0),
+      .flush_hart_i('0),
+      .is_fpr_rd_i('0), .is_fpr_rs1_i('0), .is_fpr_rs2_i('0),
+      .rs3_i('0), .is_fpr_rs3_i('0), .fprs3_o(), .rs3_ready_o(),
+      .fprs1_o(), .fprs2_o(), .fprd_o(), .fprd_old_o(),
+      .fwb_valid_i('0), .fwb_prd_i('0),
+      .ffree_i('0), .ffree_prd_i('0),
+      .commit_is_fpr_i('0), .commit_fprd_i('0),
       .valid_i,
       .rs1_i,
       .rs2_i,
@@ -72,6 +80,7 @@ module g6lc_ooo_rename_props #(
       // about branch recovery, not the checkpoint pool or flush lifetime.
       .ckpt_retire_i('0),
       .commit_valid_i('0),
+      .commit_hart_i('0),
       .commit_rd_i('0),
       .commit_prd_i('0),
       .stall_o,
@@ -123,8 +132,9 @@ module g6lc_ooo_rename_props #(
       // Checkpoint pointer stays in range [0, CKPT_DEPTH].
       assert (dut.ckpt_cnt_q <= CKPT_DEPTH[$clog2(CKPT_DEPTH+1)-1:0]);
       assert (dut.ckpt_head_q < CKPT_DEPTH[$clog2(CKPT_DEPTH+1)-1:0]);
-      // x0 stays identity phys 0.
-      assert (dut.map_q[0] == '0);
+      // x0 stays identity phys 0. map_q is now [hart][arch], so this indexes
+      // hart 0's x0 entry rather than the whole map.
+      assert (dut.map_q[0][0] == '0);
       // Successful dest alloc never returns phys 0.
       for (int unsigned p = 0; p < NR_PORTS; p++) begin
         if (enable_i && valid_i[p] && need_rd_i[p] && !stall_o)

@@ -71,6 +71,11 @@
      core(issue_stage_i__DOT__i_issue_read_operands__DOT__gen_asic_regfile__DOT__i_ariane_regfile__DOT__gen_single_bank__DOT__i_rf__DOT__mem)
 #  define G6LC_TB_H1(expr) 0u
 #endif
+#if defined(G6LC_TB_OOO)
+#  define G6LC_TB_LEGACY_HOLD(expr) 0u
+#else
+#  define G6LC_TB_LEGACY_HOLD(expr) G6LC_TB_H1(expr)
+#endif
 #include <stdio.h>
 #include <iostream>
 #include <iomanip>
@@ -110,10 +115,20 @@ static const char *verilog_plusargs[] = {
     // checker ever arms -- a silent-oracle failure mode, since a rejected plusarg
     // looks exactly like a check that found nothing.
     "fetch_i1_check", "smt_flow_trace", "smt_progress", "smt_mem_watch",
+    // Service/handoff attribution (core/smt/g6lc_thread_select.sv) and load
+    // round-trip observation (core/cva6.sv). Same allowlist rule as above.
+    "smt_sched_trace", "smt_rtt_trace",
+    // Early decode-supply trace (core/id_stage.sv), opt-in: ungated it floods
+    // the run log and hides everything else.
+    "id_dbg_trace",
     // Window lifecycle probe (core/fetch_B/frontend.sv). Same allowlist rule as
     // above: an unlisted plusarg is handed to HTIF, rejected, and the run dies
     // before the probe arms.
     "fetch_win_trace",
+    // Kill-persistence check (core/fetch_B/frontend.sv): reports a response
+    // accepted for a fetch whose request was already killed. Same allowlist
+    // rule as above.
+    "fetch_kill_check",
     // instr_queue order probe (core/fetch_B/instr_queue.sv).
     "iq_trace",
     // Fetch-supply observer (core/fetch_B/g6lc_fetch_dbg.sv). Same allowlist
@@ -1025,15 +1040,15 @@ done_processing:
               // Ports (load_paddr_i, st_fwd_*) are not public in the
               // Verilator v5.008 model. Internals g1ao_hold_* are.
               // g1ao_hold_* only survive DCE when SuperscalarEn && NrHarts>1.
-              unsigned hv = (unsigned)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(
+              unsigned hv = (unsigned)G6LC_TB_LEGACY_HOLD(top->rootp->G6LC_CVA6_C0(
                   ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_v_q));
-              unsigned hh = (unsigned)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(
+              unsigned hh = (unsigned)G6LC_TB_LEGACY_HOLD(top->rootp->G6LC_CVA6_C0(
                   ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_hit));
-              unsigned hbe = (unsigned)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(
+              unsigned hbe = (unsigned)G6LC_TB_LEGACY_HOLD(top->rootp->G6LC_CVA6_C0(
                   ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_be_q));
-              uint64_t hpa = (uint64_t)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(
+              uint64_t hpa = (uint64_t)G6LC_TB_LEGACY_HOLD(top->rootp->G6LC_CVA6_C0(
                   ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_pa_q));
-              uint64_t hdata = (uint64_t)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(
+              uint64_t hdata = (uint64_t)G6LC_TB_LEGACY_HOLD(top->rootp->G6LC_CVA6_C0(
                   ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_data_q));
               bool in_win = (cack & 1u) && g6lc_in_win(cpc, r.lo, r.hi);
               uint64_t filt = r.off;

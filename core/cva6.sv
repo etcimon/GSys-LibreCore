@@ -130,6 +130,13 @@ module cva6
       logic [7:0] p_rs1;
       logic [7:0] p_rs2;
       logic [7:0] p_rd;
+      // U6 Phase5 split FP class: its own tags, because the FP physical file
+      // is a separate array. p_frs3 has no integer counterpart -- only FP has
+      // a third source, and its architectural number arrives in result[4:0].
+      logic [7:0] p_frs1;
+      logic [7:0] p_frs2;
+      logic [7:0] p_frs3;
+      logic [7:0] p_frd;
       logic       ooo_renamed;  // tags valid for PRF operand path
     },
     localparam type writeback_t = struct packed {
@@ -521,6 +528,8 @@ module cva6
   logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.VLEN-1:0] rs2_forwarding_id_ex;  // unregistered version of fu_data_o.operandb
   logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs1;
   logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs2;
+  logic [CVA6Cfg.NrIssuePorts-1:0] rvfi_operand_valid;
+  logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rvfi_operand_tid;
 
   fu_data_t [CVA6Cfg.NrIssuePorts-1:0] fu_data_id_ex;
   alu_bypass_t alu_bypass_id_ex;
@@ -700,8 +709,8 @@ module cva6
   logic [11:0] addr_csr_perf;
   logic [CVA6Cfg.XLEN-1:0] data_csr_perf, data_perf_csr;
   logic we_csr_perf;
-  logic [31:0] scountovf_perf_csr;
-  logic lcofi_perf_csr;
+  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][31:0] scountovf_perf_csr;
+  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] lcofi_perf_csr;
 
   logic icache_flush_ctrl_cache;
   logic itlb_miss_ex_perf;
@@ -733,6 +742,7 @@ module cva6
   logic [CVA6Cfg.NrHarts-1:0] smt_hart_imiss;
   logic [CVA6Cfg.NrHarts-1:0] smt_hart_block;
   logic [CVA6Cfg.NrHarts-1:0] smt_hart_halt;
+  logic [CVA6Cfg.NrHarts-1:0] smt_pause_hint;
   logic [CVA6Cfg.NrHarts-1:0] smt_hart_enable;
   logic smt_fetch_fire;
   logic smt_issue_fire;
@@ -1060,6 +1070,7 @@ module cva6
       .hcbze_i             (hcbze),
       .hart_id_i           (hart_id_i),
       .smt_hart_id_i       (smt_active_hart),
+      .smt_pause_hint_o    (smt_pause_hint),
       .compressed_ready_i  (x_compressed_ready),
       .compressed_resp_i   (x_compressed_resp),
       .compressed_valid_o  (x_compressed_valid),
@@ -1322,6 +1333,7 @@ module cva6
       .hart_dmiss_i        (smt_hart_dmiss),
       .hart_imiss_i        (smt_hart_imiss),
       .hart_block_i        (smt_hart_block),
+      .pause_hint_i        (smt_pause_hint),
       .active_hart_o       (smt_active_hart),
       .switch_o            (smt_switch),
       .t0_extra_o          (smt_t0_extra),
@@ -1532,6 +1544,8 @@ module cva6
       .rvfi_commit_pointer_o(rvfi_commit_pointer),
       .rvfi_rs1_o           (rvfi_rs1),
       .rvfi_rs2_o           (rvfi_rs2),
+      .rvfi_operand_valid_o (rvfi_operand_valid),
+      .rvfi_operand_tid_o   (rvfi_operand_tid),
       .orig_instr_aes_bits  (orig_instr_aes)
   );
 
@@ -1906,6 +1920,7 @@ module cva6
         .we_i          (we_csr_perf),
         .data_i        (data_csr_perf),
         .data_o        (data_perf_csr),
+        .hart_i        (smt_active_hart),
         .scountovf_o   (scountovf_perf_csr),
         .lcofi_o       (lcofi_perf_csr),
         .commit_instr_i(commit_instr_id_commit),
@@ -1954,7 +1969,7 @@ module cva6
   else begin : gen_no_perf_counter
     assign data_perf_csr = '0;
     assign scountovf_perf_csr = '0;
-    assign lcofi_perf_csr = 1'b0;
+    assign lcofi_perf_csr = '0;
   end : gen_no_perf_counter
 
   // ------------
@@ -2536,6 +2551,8 @@ module cva6
 
       .rs1_i(rvfi_rs1),
       .rs2_i(rvfi_rs2),
+      .operand_valid_i(rvfi_operand_valid),
+      .operand_tid_i(rvfi_operand_tid),
 
       .commit_instr_i(commit_instr_id_commit),
       .commit_drop_i (commit_drop_id_commit),
@@ -2577,6 +2594,37 @@ module cva6
                  p, issue_entry_valid_id_issue[p], issue_entry_id_issue[p].hart_id,
                  issue_entry_id_issue[p].pc, fetch_valid_if_id[p], fetch_entry_if_id[p].hart_id,
                  fetch_entry_if_id[p].address);
+    end
+  end
+
+  // Read-only load round-trip observer on the core's load port. Requests are
+  // paired to responses by data_id/data_rid, which the load unit allocates from
+  // its load buffer, so an outstanding tag is unique. idx is the index half of
+  // the address, the part that is valid at grant; the tag arrives a cycle later
+  // and would be the wrong address here. Ownership is the scheduler's active
+  // hart: the LSU carries no hart id, and under the drained handoff in-flight
+  // work belongs to one hart, so the reader censors any sample whose request
+  // and response disagree rather than attributing it.
+  bit smt_rtt_trace;
+  int unsigned smt_rtt_cycle;
+  initial smt_rtt_trace = $test$plusargs("smt_rtt_trace");
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      smt_rtt_cycle = 0;
+    end else if (smt_rtt_trace) begin
+      smt_rtt_cycle = smt_rtt_cycle + 1;
+      if (dcache_req_ports_ex_cache[1].data_req && dcache_req_ports_cache_ex[1].data_gnt)
+        $display("[smt-rtt] req cycle=%0d tag=%0d idx=%h active=%0d", smt_rtt_cycle,
+                 dcache_req_ports_ex_cache[1].data_id,
+                 dcache_req_ports_ex_cache[1].address_index, smt_active_hart);
+      // kill_req applies to the most recent request, whose id the load unit
+      // retains; data_id already points at the next free slot by then.
+      if (dcache_req_ports_ex_cache[1].kill_req)
+        $display("[smt-rtt] kill cycle=%0d tag=%0d active=%0d", smt_rtt_cycle,
+                 ex_stage_i.lsu_i.i_load_unit.ldbuf_last_id_q, smt_active_hart);
+      if (dcache_req_ports_cache_ex[1].data_rvalid)
+        $display("[smt-rtt] resp cycle=%0d tag=%0d active=%0d", smt_rtt_cycle,
+                 dcache_req_ports_cache_ex[1].data_rid, smt_active_hart);
     end
   end
 `endif

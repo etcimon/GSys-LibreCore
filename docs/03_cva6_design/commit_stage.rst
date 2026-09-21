@@ -58,6 +58,31 @@ mask. Raw ROB retirement remains active so cancelled work can drain. Directed te
 cover cancellation on the first commit lane and alongside an older live retirement
 on the second-lane case. This is component qualification, not full OoO/SMT closure.
 
+OoO data readiness and halt boundaries
+-------------------------------------
+
+Execution completion is not necessarily operand availability. CSR and AMO results
+are selected at commit. The OoO path now suppresses their execution-stage value
+wakeup and uses the existing commit-time PRF write to release rename/IQ waiters.
+This adds a metadata wakeup channel, not another PRF data-write port. Integer
+results that are usable at execution and FP writebacks retain their existing path.
+
+FP committed-map updates include all architectural FP destinations, including f0.
+The FP physical file also retains physical register zero; only the integer PRF
+uses hardwired-zero behavior. Hart-local recovery restores both committed classes
+and reclaims physicals according to ownership after same-cycle allocation.
+
+WFI retires through the precise flush/restart path under OoO. Younger allocated
+work must be discarded before parking: otherwise halt blocks its retirement while
+the coarse-handoff scheduler waits for the scoreboard to empty. Cancelled,
+faulting, invalid or halted WFI entries do not initiate this restart. The existing
+next-PC path advances past the uncompressed WFI; no software-visible encoding or
+CSR change is introduced. OoO-off behavior is retained.
+
+These are directed and bounded integration repairs, not general mixed-hart OoO,
+FP compliance, unbounded liveness, scan, physical timing or power sign-off.
+Current evidence and remaining gates are in ``architecture/out-of-order/README.md``.
+
 WT retained-copy visibility
 --------------------------
 

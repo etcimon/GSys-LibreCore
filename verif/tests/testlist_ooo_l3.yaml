@@ -16,11 +16,175 @@ testlist:
     asm_tests: <path_var>/custom/ooo/ooo_ilp_chain.S
     description: "OoO multi-issue ILP + dependent chain + WAW/WAR rename stress"
 
+  - test: ooo_fp_rename
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_rename.S
+    description: "U6 Phase5 split FP register class: FP rename/wakeup, FMA rs3, f0-is-real, x5-vs-f5 class isolation, FP load/store, FP WAW"
+
+  - test: ooo_fp_recovery
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_rename.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DFP_RECOVERY_CHECK -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "FP committed mappings and physical-zero values survive a full fence restart"
+
+  - test: ooo_fp_status_alu
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_rename.S
+    gcc_opts: "-DFP_STATUS_CHECK -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "FP exception flags read through CSR and an ALU dependent on its commit-time result"
+
   - test: ooo_mem_dep
     iterations: 1
     <<: *common_test_config
     asm_tests: <path_var>/custom/ooo/ooo_mem_dep.S
     description: "OoO LSQ store-to-load / mem WAW / interleaved ALU+mem"
+
+  - test: ooo_recovery_loop_4
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=15 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Older load-dependent branch survives a younger redirect, four iterations"
+
+  - test: ooo_recovery_loop_16
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=5 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Sixteen-iteration checked store/load loop with out-of-order branch resolution"
+
+  - test: ooo_mem_order_younger_store
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=17 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "An address-delayed load must not observe a store that follows it in program order"
+
+  - test: ooo_mem_order_store_store
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=18 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Two same-address stores reach memory in program order when the younger resolves first"
+
+  - test: ooo_mem_order_partial_overlap
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=19 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "An older load must not deadlock against a younger partially overlapping store"
+
+  - test: ooo_mem_order_delayed_older
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=20 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A younger load waits for an older same-address store whose data is late (age filter must not over-filter)"
+
+  - test: ooo_mem_order_reorder_depth
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=21 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Five younger stores queued ahead of a data-delayed oldest store still commit in program order"
+
+  - test: ooo_mem_order_queue_capacity
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=22 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Ten outstanding stores against an eight-deep queue must not deadlock when the oldest store's data is late"
+
+  - test: ooo_amo_order
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=23 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "AMO observes an older late-data store, returns its value, and a younger load observes the AMO effect"
+
+  - test: ooo_amo_memory_readback
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=24 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A second AMO reads memory at commit (unforwardable) and confirms the first AMO's value actually landed"
+
+  - test: ooo_lrsc_speculative_store
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=25 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "LR observes an older late-data store, the SC still succeeds, and memory ends with the SC value"
+
+  # STAGE=26 is self-checking only and deliberately not trace-compared: a
+  # same-hart store between LR and SC makes the sequence unconstrained, so the
+  # SC may legally succeed or fail. CVA6 fails it, Spike succeeds; both are
+  # permitted, and the test asserts only that the SC result and memory agree.
+  - test: ooo_sc_fail_no_write
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=26 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A store-conditional's reported result and the resulting memory content must agree"
+
+  - test: ooo_store_after_lr
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=27 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A store following a load-reserved must still issue and retire"
+
+  - test: ooo_store_after_lr_nofence
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=28 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Same, with no fence and no SC: an LR that is never paired must not block later stores"
+
+  - test: ooo_store_after_amo
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=29 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A store following a non-LR AMO (amoswap) must issue and retire"
+
+  - test: ooo_csr_flu_order
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=30 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A CSR issued near an older FLU consumer must not wedge the shared fixed-latency unit"
+
+  - test: ooo_admission_interaction
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=31 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Program-order store admission and CSR commit-head admission compose with five stores below the eight-entry capacity"
+
+  - test: ooo_load_misaligned_trap
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=32 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A misaligned load must raise LD_ADDR_MISALIGNED with the faulting address and leave the destination unwritten, not abort simulation"
+
+  - test: ooo_load_misaligned_not_taken
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=33 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "The misaligned load is reached only on the taken path, so a wrong-path fetch of it must not produce an architectural trap"
+
+  - test: ooo_load_misaligned_shared_target
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=34 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Misaligned-load trap must reach mtvec when the faulting load is co-issued, followed by a window-straddling branch, and both consumer branches share one target"
 
   - test: l3_stride_stream
     iterations: 1

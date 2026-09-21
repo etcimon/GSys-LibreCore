@@ -15,6 +15,90 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ---
 
+## Precise misalignment and instruction recovery — qualification open
+
+The original load-offset assertions are currently restored. The earlier alignment-qualified
+checks were tautological for the tested offset width and cannot support a preserved-detection
+claim. Historical trap and wrong-path tests remain useful captured evidence, but current-source
+qualification requires non-vacuous precise-exception and bad-completion controls with explicit
+configuration-dependent trap-value expectations.
+
+A frontend kill-persistence candidate has local frozen-program before/after evidence, not full
+transaction-lifetime or cross-hart qualification. Request replacement, same-address refetch,
+response/kill overlap and independent observer coverage remain open. Failure with out-of-order
+execution disabled does not establish general backend exoneration.
+
+The repeated PMP assertion stop is now attributed to an omitted, already-qualified compiler control
+rather than to core RTL. Two models from one unmodified source state, differing only in that control,
+were soaked on identical frozen firmware: the controlled model completed the protected dual-hart
+workload at the historical length and retirement counts, and the uncontrolled model stopped at the
+recurring cycle. No protection logic or assertion was weakened. Attributions previously drawn from
+recipe-mismatched builds are void.
+
+The controlled model has runner-certified protected-workload observations. These are non-regression
+results, not a measurement of fetch-recovery activation. Same-model replay and host-tooling
+regressions do not add independent ISA coverage. Early termination remains unowned; complete LR
+read/address visibility, precise recovery and broad memory ownership remain open. No architecture,
+physical or guarded-feature status advances from qualification-tooling changes alone.
+
+## OoO FP result ownership (2026-09-21)
+
+**Directed repair; qualification remains partial.** A cancelled floating-point or serial-divide
+operation could return its result after its transaction ID was reused. The FPU wrapper and the
+multiply/divide unit now retain ownership until the raw result drains, suppress cancelled results,
+and clear ownership on a full flush because both units discard in-flight work then. Boundary
+fixtures show the defect before repair, detection of restored defects, and preserved replacement,
+flush-then-replacement and older-survivor completion. Strict combinational-loop structural checks,
+full-core reachability and FP/MULT+OoO promotion remain open.
+
+## OoO load cancellation lifetime (2026-09-20)
+
+**Directed repair; broader qualification remains partial.** A queued, not-yet-granted
+cancelled load could outlive scoreboard TID reuse and complete a different
+instruction. A live queue/load-unit reproducer fails before repair, passes afterward,
+and detects removal of retained cancellation. Controls preserve older responses,
+full flush and the in-order configuration. An eight-step queue check with an
+independent reference passes, its cancellation/drain cover is reached, and a
+retention mutation produces a counterexample. A frozen firmware replay gets past
+the original access-fault endpoint; full boot, all-FU late-result coverage, unbounded
+proof and physical timing remain separate gates. No feature guard is promoted.
+
+## OoO memory ordering (2026-09-20)
+
+**Directed qualification only.** Same-address store-to-load forwarding and
+store-to-store visibility order now have discriminating positive tests, negative
+controls, an in-order control and leaf fixtures under OoO. A liveness case that
+previously deadlocked completes. Cross-hart memory ownership, AMO/LR-SC ordering
+against speculative stores, wider misalignment cases and timing closure for the
+added comparators remain open; this is not general RVWMO conformance.
+
+## FP/CSR lifetime and coarse dual-hart increment (2026-09-19)
+
+**Directed and bounded qualification, not production promotion.** FP committed
+mapping, writable physical zero, hart-local reclaim and commit-time CSR/AMO operand
+availability have discriminating tests and directed single-hart Spike comparisons.
+WFI recovery and speculative-store flush/cancel lifetime have before failures and
+positive/negative component controls. A guarded integer two-hart OoO rendezvous and
+LR/SC consumer profiles pass under coarse handoff. Mixed residency, broad ISA/FP and
+memory-order qualification, late-ID reuse, firmware/reference completion and physical
+sign-off remain open. Existing feature refusals are not removed.
+
+## OoO issue/recovery conservation status (2026-09-19)
+
+**Directed two-issue integer repair; broader qualification remains partial.**
+A surviving older instruction no longer disappears when a younger redirect
+suppresses execution. Recovery/wakeup/cancellation/flush controls and exact-binary
+before/after runs cover the formerly hanging four/sixteen-iteration store/load
+loops and memory-dependence test. All sixteen staged probes pass; the ILP control
+is unchanged. Completion is distinct from timeout and instrument failure. No
+issue-width reduction, age-order relaxation, FP/hart guard removal or full ISA,
+SMT, physical-timing or unbounded-progress promotion follows. Bounded live recovery
+safety, a reached cover and restored-defect counterexample are qualified at their
+reduced geometry; broader fixture regressions and live-port structural synthesis
+pass. Standalone strict elaboration is still unavailable. A separate branch-chain
+test return-address bug is corrected and discriminates positive/negative outcomes
+on both execution modes.
+
 ## Issue-order increment status (2026-09-18)
 
 **Partial; no architectural coverage promotion.** The same-group dependency
@@ -69,6 +153,36 @@ fetch-IQ's assertion/witness failure remains open. OoO result/drop ownership has
 separate directed controls and live-port synthesis, not full-core qualification.
 SMT2 boot remains OoOEn=0; it does not promote hart/FP namespaces or imply balanced
 service while both harts are runnable.
+
+## Shared-core SMT measurement refinement (2026-09-19)
+
+**Measurement qualified within its directed scope; no ISA or Linux promotion.**
+Both role orders and both encodings check fixed compute/memory work with same-hart
+solo controls, last-publisher completion and observer equivalence. Reporter polling
+is no longer mistaken for productive sibling work. Core-time, selected residency,
+accepted-work claims and load RTT are kept distinct; outstanding requests are measured
+at the ROI boundary. Ratios below one do not justify a throughput gain. Software PMU
+hint ownership, mixed-hart OoO arbitration, broader memory service and physical PPA
+remain unqualified; the prior HSM profile stays the boot anchor.
+
+## SMT hardware performance counter status (2026-09-19)
+
+**Conformance gap found by directed measurement, then repaired and re-measured.**
+mhpmeventN/mhpmcounterN and the Sscofpmf OF/LCOFI state were shared between SMT harts
+where the ISA requires per-hart CSRs; each hart observed the other's selector write
+while the architecturally banked mscratch control behaved correctly. They are now
+banked per hart and the overflow report is routed to the owning hart only. The same
+probe carries both polarities, so the pre-repair signature is the post-repair failing
+control. Zicntr mcycle/minstret were already banked, though mcycle measures elapsed
+cycles rather than per-hart service. Counting is per-hart too, not just the
+selector: with both harts counting load accesses over very different quotas across many
+handoffs, each counter matched its own hart's work exactly. A separate RV32 user-mode
+high-word read defect was repaired by inspection. Cross-switch attribution is also
+measured clean: with one hart taking cache misses and the other issuing no memory
+access at all, the idle-memory hart's miss counter stays exactly zero, consistent with
+both miss events pulsing at initiation rather than refill. Still unqualified: SBI PMU
+mapping and counter save/restore, so scheduling-hint exposure to firmware or Linux
+remains blocked, and the RV32 high-word read fix has no directed test.
 
 ## P0–P2 continuation status
 

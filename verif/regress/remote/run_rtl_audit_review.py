@@ -108,12 +108,18 @@ def main():
     data=Path(os.environ['TH_DATA_DIR']);out=Path(os.environ['TH_OUT_DIR'])
     wb_fault=os.environ.get('REVIEW_RTL_WB_FAULT')=='1'
     drop_fault=os.environ.get('REVIEW_RTL_DROP_FAULT')
-    before=os.environ.get('REVIEW_RTL_BEFORE')=='1' or wb_fault or bool(drop_fault)
+    # Restores the missing commit-time PRF mirror, so scenario 19 must fail again.
+    lateresult_fault=os.environ.get('REVIEW_RTL_LATERESULT_FAULT')=='1'
+    before=os.environ.get('REVIEW_RTL_BEFORE')=='1' or wb_fault or bool(drop_fault) or lateresult_fault
     source=out/'source';source.mkdir()
     names=['config_pkg.sv','g6lc64_smt2_config_pkg.sv','riscv_pkg.sv','ariane_pkg.sv','g6lc_iq.sv','g6lc_bp_tage_table.sv','g6lc_bp_tage.sv','g6lc_bp_ghist.sv','g6lc_bp_ckpt.sv','g6lc_bp_ittage.sv','g6lc_l2_mshr.sv','g6lc_coherence_pkg.sv','g6lc_l3_inclusive_inv.sv','g6lc_cluster.sv','g6lc_core_types.svh','tb_g6lc_rtl_review.sv']
     # scoreboard.sv (and its smt_legacy/fetch_A helper packages) are only
     # needed by the commit kind; every other kind leaves that bench module
     # unelaborated, so the legacy files stay out of the payload.
+    if os.environ.get('REVIEW_RTL_STORE_RECOVERY')=='1':
+        names[-1:-1]=['store_buffer.sv']
+    if os.environ.get('REVIEW_RTL_WFI')=='1':
+        names[-1:-1]=['commit_stage.sv','controller.sv']
     if os.environ.get('REVIEW_RTL_COMMIT')=='1':
         names[-1:-1]=['g6lc_sb_keep.sv','g6lc_rvc_enc.sv','g6lc_fe_keep.sv','g6lc_jalr_usable.sv','g6lc_sib_cjalr.sv','scoreboard.sv']
     dispatch_mode=os.environ.get('REVIEW_RTL_DISPATCH')=='1' or os.environ.get('REVIEW_RTL_LSQ')=='1' or os.environ.get('REVIEW_RTL_RENAME')=='1'
@@ -137,8 +143,11 @@ def main():
         # per-level mask with the free list AND drop the accumulation, so
         # squashed becomes exactly (free at checkpoint) & ~(free now). Seeding
         # alone leaves the accumulation to re-add the later allocation.
+        # The accumulation is now hart-qualified (Phase4 per-hart namespaces),
+        # so the injection text tracks that form.
         accumulate = ("            for (int unsigned s = 0; s < CKPT_DEPTH; s++)\n"
-                      "              ckpt_alloc_d[s][picked] = 1'b1;")
+                      "              if (ckpt_hart_d[s] == hart_i[p]) "
+                      "ckpt_alloc_d[s][picked] = 1'b1;")
         for old, new in (
             ("          ckpt_alloc_d[ckpt_slot_c[p]] = '0;",
              "          ckpt_alloc_d[ckpt_slot_c[p]] = free_d;"),
@@ -167,14 +176,21 @@ def main():
     if rename_fault:
         assert rename_fault=='release' and os.environ.get('REVIEW_RTL_RENAME')=='1'
         path=source/'g6lc_rename.sv';text=path.read_text()
-        old='      n_ret = $countones(ckpt_retire_i);'
+        # Retirement is now counted per hart, so the fault clamps that hart's
+        # count to zero instead of the old single-ring $countones.
+        old="      if (n_ret > int'(ckpt_cnt_d[h])) n_ret = int'(ckpt_cnt_d[h]);"
         assert text.count(old)==1,'rename fault injection site changed'
         path.write_text(text.replace(old,'      n_ret = 0;'))
+    if lateresult_fault:
+        path=source/'g6lc_ooo_dispatch.sv';text=path.read_text()
+        old="      prf_we[CVA6Cfg.NrWbPorts+c]    = commit_we_i[c] && (commit_prd[c] != '0);"
+        assert text.count(old)==1,'late-result fault injection site changed'
+        path.write_text(text.replace(old,"      prf_we[CVA6Cfg.NrWbPorts+c]    = 1'b0;"))
     if wb_fault:
         path=source/'g6lc_ooo_dispatch.sv';text=path.read_text()
         for old,new in (
-            ('.wb_valid_i(wb_value_valid)', '.wb_valid_i(wb_valid_i)'),
-            ('.wb_valid_i      (wb_value_valid)', '.wb_valid_i      (wb_valid_i)'),
+            ('.wb_valid_i(data_wb_valid)', '.wb_valid_i(wb_valid_i)'),
+            ('.wb_valid_i      (data_wb_valid)', '.wb_valid_i      (wb_valid_i)'),
             ('if (wb_value_valid[w] && issue_sbe_o[p].ooo_renamed)',
              'if (wb_valid_i[w] && !wb_exc_i[w] && issue_sbe_o[p].ooo_renamed)')):
             assert text.count(old)==1,'writeback fault site changed'
@@ -186,6 +202,27 @@ def main():
         old=target+' commit_arch[c]'
         assert text.count(old)==1,'retirement fault site changed'
         path.write_text(text.replace(old,target+' commit_ack_i[c]'))
+    hart_dispatch=os.environ.get('REVIEW_RTL_HART_DISPATCH')=='1'
+    if hart_dispatch:
+        path=source/'g6lc_ooo_dispatch.sv';text=path.read_text()
+        old='  if (CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_smt'
+        assert text.count(old)==1,'hart qualification guard site changed'
+        path.write_text(text.replace(old,'  if (CVA6Cfg.NrHarts > 2) begin : gen_err_ooo_smt'))
+    fp_dispatch=os.environ.get('REVIEW_RTL_FP_DISPATCH')=='1'
+    fp_zero_fault=os.environ.get('REVIEW_RTL_FP_ZERO_FAULT')=='1'
+    fp_commit_fault=os.environ.get('REVIEW_RTL_FP_COMMIT_FAULT')=='1'
+    if fp_zero_fault or fp_commit_fault:
+        assert fp_dispatch,'FP fault requires the FP dispatch fixture'
+        path=source/'g6lc_ooo_dispatch.sv';text=path.read_text()
+        old=".ZERO_REG_ZERO(1'b0)" if fp_zero_fault else "(commit_is_fpr[c] || commit_instr_i[c].rd != 5'd0)"
+        new=".ZERO_REG_ZERO(1'b1)" if fp_zero_fault else "(!commit_is_fpr[c] && commit_instr_i[c].rd != 5'd0)"
+        assert text.count(old)==1,'FP fault site changed'
+        path.write_text(text.replace(old,new))
+    if fp_dispatch:
+        path=source/'g6lc_ooo_dispatch.sv';text=path.read_text()
+        old='  if (CVA6Cfg.FpPresent) begin : gen_err_ooo_fp'
+        assert text.count(old)==1,'FP qualification guard site changed'
+        path.write_text(text.replace(old,'  if (CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_fp'))
     hashes={name:digest(source/name) for name in names}
     (out/'sources.json').write_text(json.dumps(hashes,indent=2))
     cluster=(source/'g6lc_cluster.sv').read_text()
@@ -216,14 +253,36 @@ def main():
         # 2: a producer that honours it must lose no victim.
         if not before:cases+=[(1,None),(2,None)]
         configurations.append(('incl',f'n{nc}',[f'-GNC={nc}'],cases))
-    if os.environ.get('REVIEW_RTL_COMMIT')=='1':
+    if os.environ.get('REVIEW_RTL_STORE_RECOVERY')=='1':
+        configurations=[('store_recovery',f'nh{h}-ooo{o}',['-DG6LC_FETCH_B',f'-GNH={h}',f'-GOOO={o}'],
+                         [(n,None) for n in range(6 if o else 4)]) for h,o in ((1,0),(1,1),(2,1))]
+    elif os.environ.get('REVIEW_RTL_WFI')=='1':
+        configurations=[('wfi',f'ooo{o}-a{a}',['-DG6LC_FETCH_B',f'-GOOO={o}',f'-GRVA_EN={a}'],
+                         [(n,None) for n in range(7)]) for o in (0,1) for a in (0,1)]
+    elif os.environ.get('REVIEW_RTL_COMMIT')=='1':
         configurations=[('commit','p4',['-GNPC=4'],[(0,None),(1,None)])]
     elif os.environ.get('REVIEW_RTL_RENAME')=='1':
-        configurations=[('rename','direct',[],
-                         [(7,'RENAME_CKPT_NO_RELEASE')] if rename_fault
-                         else [(9,'RENAME_FLUSH_ARCH')] if flush_fault
-                         else [(10,'RENAME_CKPT_ALLOC_LEAK')] if leak_fault
-                         else [(n,None) for n in range(11)])]
+        # Phase4 per-hart namespaces. g6lc_rename is package-free, so NR_HARTS=2
+        # is exercised HERE without relaxing check_cfg's !(OoOEn && NrHarts>1)
+        # refusal, which still governs the full core. PRF holds 31 committed
+        # physicals per hart (62) plus a rename pool.
+        # Phase5 split FP class. FP needs 32 committed physicals per hart (f0 is
+        # real, so 32 not 31) plus a pool, hence the wider FP file.
+        if os.environ.get('REVIEW_RTL_RENAME_FP_SMT')=='1':
+            configurations=[('rename','fp-nh2',['-GNR_HARTS=2','-GPRF_ENTRIES=80','-GPRF_W=7',
+                                              '-GFPRF_ENTRIES=80','-GFPRF_W=7'],[(24,None),(25,None)])]
+        elif os.environ.get('REVIEW_RTL_RENAME_FP')=='1':
+            configurations=[('rename','fp',['-GFPRF_ENTRIES=64','-GFPRF_W=7'],
+                             [(n,None) for n in (20,21,22,23)])]
+        elif os.environ.get('REVIEW_RTL_RENAME_SMT')=='1':
+            configurations=[('rename','nh2',['-GNR_HARTS=2','-GPRF_ENTRIES=80','-GPRF_W=7'],
+                             [(n,None) for n in (11,12,13,14,15)])]
+        else:
+            configurations=[('rename','direct',[],
+                             [(7,'RENAME_CKPT_NO_RELEASE')] if rename_fault
+                             else [(9,'RENAME_FLUSH_ARCH')] if flush_fault
+                             else [(10,'RENAME_CKPT_ALLOC_LEAK')] if leak_fault
+                             else [(n,None) for n in range(11)])]
     elif os.environ.get('REVIEW_RTL_LSQ')=='1':
         configurations=[('lsq','direct',[],[(n,None) for n in range(12)])]
     elif os.environ.get('REVIEW_RTL_TAGE')=='1':
@@ -243,7 +302,9 @@ def main():
         # removed the circular comb settle that produced it: real trans_ids now
         # propagate (scenario 6 retires its store by genuine id match), so 6-8
         # run as real evidence with live negative controls.
-        if not before:cases+=[(2,None),(3,None),(6,None),(7,None),(8,None),(9,None),(10,None)]
+        if not before:cases+=[(2,None),(3,None),(6,None),(7,None),(8,None),(9,None),(10,None),(20,None),(21,None),(22,None),(23,None),(28,None),(29,None)]
+        if os.environ.get('REVIEW_RTL_RECOVERY')=='1':
+            cases=[(20,None),(21,None),(22,None),(23,None)]
         if os.environ.get('REVIEW_RTL_WB_OWNER')=='1':
             cases=[(n,('DISPATCH_WB_VALUE' if n==13 else 'DISPATCH_STALE_WAKE') if before else None)
                    for n in (11,12,13,14)]
@@ -251,8 +312,24 @@ def main():
             cases=[(n,('DISPATCH_DROP_ARCH','DISPATCH_DROP_FREE','DISPATCH_DROP_CKPT')[n-15] if before else None)
                    for n in (15,16,17)]
             if drop_fault:cases=[entry for entry in cases if entry[0]=={'map':15,'free':16,'checkpoint':17}[drop_fault]]
+        # Late writeback after trans_id reuse: the cancellation mask cannot
+        # identify the stale result once the id belongs to a live instruction.
+        if os.environ.get('REVIEW_RTL_TIDREUSE')=='1':
+            cases=[(18,'DISPATCH_TIDREUSE' if before else None)]
+        # Architectural result delivered at commit (CSR read, LR) never reaches the
+        # PRF, while a renamed consumer reads the PRF in preference to the regfile.
+        if os.environ.get('REVIEW_RTL_LATERESULT')=='1':
+            cases=[(19,'DISPATCH_LATERESULT' if before else None)]
+        if os.environ.get('REVIEW_RTL_LATE_WAKE')=='1':
+            cases=[(28,None),(29,None)]
         configurations=[('dispatch','n2',[],
                          [(10,'DISPATCH_LSQ_CREDIT')] if credit_fault else cases)]
+        if fp_dispatch:
+            configurations=[('dispatch','fp',['-GFPEN=1'],
+                             [(n,'DISPATCH_FP_COMMIT_FLUSH' if fp_commit_fault or (fp_zero_fault and n==27) else None)
+                              for n in (24,25,27)])]
+        if hart_dispatch:
+            configurations=[('dispatch','nh2',['-GHARTS=2'],[(26,None)])]
         # MemDepPredEn=1 elaboration/liveness. Feedback is promoted to an error:
         # a settled combinational cycle is not evidence of a working predictor.
         if os.environ.get('REVIEW_RTL_MEMDEP')=='1':
@@ -295,8 +372,13 @@ def main():
             with (work/'verilate.log').open('w') as log:
                 p=subprocess.run(strict_cmd,stdout=log,stderr=subprocess.STDOUT,timeout=180)
             text=(work/'verilate.log').read_text(errors='replace')
-            expected=('per-hart rename namespace' if illegal_kind=='smt'
-                      else 'no FP register class')
+            # Matched on the guard's own text, so a reworded refusal fails here
+            # rather than silently passing on a different guard. Both messages
+            # were narrowed once Phase 4/5 landed the mechanisms: the reasons
+            # are now "IQ/ROB/LSQ are hart-blind" and "FP class implemented but
+            # unqualified", not "the mechanism does not exist".
+            expected=('multi-hart integration is unqualified' if illegal_kind=='smt'
+                      else 'implemented but unqualified')
             refused=p.returncode!=0 and expected in text
             results.append({'kind':kind,'geometry':geometry,'scenario':None,
                             'illegalKind':illegal_kind,
@@ -315,15 +397,38 @@ def main():
         assert str(Path(runtime_info['originalRoot'])/'include/verilated_funcs.h') not in dependencies
         exe=model/'review-test'
         trials=[(scenario,False,error) for scenario,error in cases]
-        if not before and not rename_fault and not credit_fault and not flush_fault and not leak_fault:
-            if kind=='rename':trials+=[(0,True,'RENAME_MAP'),(1,True,'RENAME_OLDER_LOST'),(2,True,'RENAME_BUSY_RESURRECT'),(3,True,'RENAME_STALE_LEVEL'),(4,True,'RENAME_CKPT2_UNWIND'),(5,True,'RENAME_CKPT_FULL'),(6,True,'RENAME_EXCLUSIVE'),(7,True,'RENAME_CKPT_NO_RELEASE'),(8,True,'RENAME_RETIRE_WINDOW'),(9,True,'RENAME_FLUSH_ARCH'),(10,True,'RENAME_CKPT_ALLOC_LEAK')]
+        if not before and not rename_fault and not credit_fault and not flush_fault and not leak_fault and not fp_zero_fault and not fp_commit_fault:
+            # The nh2 geometry needs a bigger PRF (31 committed physicals per
+            # hart), so the single-hart negatives are not comparable there; it
+            # carries its own per-hart discriminators instead.
+            if kind=='store_recovery':
+                codes=('FLUSH','CANCEL','COMMITTED','REPLAY','YOUNGER_FWD','PROGRAM_ORDER')
+                trials += [(n,True,'STORE_RECOVERY_'+codes[n]) for n,_ in cases]
+            elif kind=='wfi':
+                trials += [(n,True,'WFI_RETIRE_RECOVERY') for n in range(7)]
+            elif kind=='rename' and os.environ.get('REVIEW_RTL_RENAME_FP_SMT')=='1':
+                trials += [(24,True,'RENAME_FP_HART_FLUSH_MAP'),(25,True,'RENAME_FP_HART_FLUSH_MAP')]
+            elif kind=='rename' and os.environ.get('REVIEW_RTL_RENAME_FP')=='1':
+                trials+=[(20,True,'RENAME_FP_CLASS'),(21,True,'RENAME_FP_F0'),
+                         (22,True,'RENAME_FP_RECOVER'),(23,True,'RENAME_FP_RS3')]
+            elif kind=='rename' and os.environ.get('REVIEW_RTL_RENAME_SMT')=='1':
+                trials+=[(11,True,'RENAME_HART_ALIAS'),(12,True,'RENAME_PEER_SQUASHED'),
+                         (13,True,'RENAME_HART_FLUSH_SPILL'),(14,True,'RENAME_HART_REALLOC_FLUSH'),
+                         (15,True,'RENAME_HART_REALLOC_FLUSH')]
+            elif kind=='rename':trials+=[(0,True,'RENAME_MAP'),(1,True,'RENAME_OLDER_LOST'),(2,True,'RENAME_BUSY_RESURRECT'),(3,True,'RENAME_STALE_LEVEL'),(4,True,'RENAME_CKPT2_UNWIND'),(5,True,'RENAME_CKPT_FULL'),(6,True,'RENAME_EXCLUSIVE'),(7,True,'RENAME_CKPT_NO_RELEASE'),(8,True,'RENAME_RETIRE_WINDOW'),(9,True,'RENAME_FLUSH_ARCH'),(10,True,'RENAME_CKPT_ALLOC_LEAK')]
             elif kind=='lsq':trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA'),(2,True,'LSQ_COMMIT_DOUBLE_FREE'),(3,True,'LSQ_STL_AGE'),(4,True,'LSQ_AGE_STALL'),(5,True,'LSQ_WRAP_DATA'),(6,True,'LSQ_BYTE_DISJOINT'),(7,True,'LSQ_BYTE_COVER'),(8,True,'LSQ_PARTIAL_NODATA'),(9,True,'LSQ_PARTIAL_MERGE'),(10,True,'LSQ_CANCEL_DROP'),(11,True,'LSQ_FLUSH')]
+            elif dispatch_mode and os.environ.get('REVIEW_RTL_LATE_WAKE')=='1':
+                trials += [(n,True,'DISPATCH_LATE_WAKE_EARLY') for n in (28,29)]
+            elif dispatch_mode and hart_dispatch:
+                trials += [(26,True,'DISPATCH_HART_ARCH')]
+            elif dispatch_mode and fp_dispatch:
+                trials += [(n,True,'DISPATCH_FP_COMMIT_FLUSH') for n in (24,25,27)]
             elif dispatch_mode:
                 trials+=([(n,True,('DISPATCH_DROP_ARCH','DISPATCH_DROP_FREE','DISPATCH_DROP_CKPT')[n-15]) for n in (15,16,17)]
                          if os.environ.get('REVIEW_RTL_DROP')=='1' else
                          [(n,True,'DISPATCH_WB_VALUE') for n in (11,12,13,14)]
                          if os.environ.get('REVIEW_RTL_WB_OWNER')=='1' else
-                         [(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER'),(6,True,'DISPATCH_STORE_WB_RETIRE'),(7,True,'DISPATCH_LOAD_UNBLOCKED'),(8,True,'DISPATCH_WRAP_ORDER'),(9,True,'DISPATCH_TAG_REUSE'),(10,True,'DISPATCH_LSQ_CREDIT')])
+                         [(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER'),(6,True,'DISPATCH_STORE_WB_RETIRE'),(7,True,'DISPATCH_LOAD_UNBLOCKED'),(8,True,'DISPATCH_WRAP_ORDER'),(9,True,'DISPATCH_TAG_REUSE'),(10,True,'DISPATCH_LSQ_CREDIT'),(20,True,'DISPATCH_RECOVERY_ISSUE'),(21,True,'DISPATCH_RECOVERY_WAKE'),(22,True,'DISPATCH_RECOVERY_ISSUE'),(23,True,'DISPATCH_RECOVERY_ISSUE'),(28,True,'DISPATCH_LATE_WAKE_EARLY'),(29,True,'DISPATCH_LATE_WAKE_EARLY')])
             elif kind=='tage':trials+=[(0,True,'TAGE_SLOT_BROADCAST'),(1,True,'TAGE_UPDATE_FOLD'),(2,True,'TAGE_BASE_ALIAS'),(3,True,'ITTAGE_SLOT_ALIAS')]
             elif kind=='ghist':trials+=[(0,True,'GHIST_FOLD_TRAIN')]
             elif kind=='ckpt':trials+=[(0,True,'CKPT_MULTI'),(1,True,'CKPT_DOUBLE_ADV'),(3,True,'CKPT_DESYNC_RV'),(5,True,'CKPT_DROPPED_OWNER'),(6,True,'CKPT_EMPTY_RESTORE_HEAD')]

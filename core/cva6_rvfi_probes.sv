@@ -38,6 +38,8 @@ module cva6_rvfi_probes
 
     input logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rs1_i,
     input logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rs2_i,
+    input logic [CVA6Cfg.NrIssuePorts-1:0] operand_valid_i,
+    input logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] operand_tid_i,
 
     input scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0] commit_instr_i,
     input logic [CVA6Cfg.NrCommitPorts-1:0] commit_drop_i,
@@ -81,6 +83,8 @@ module cva6_rvfi_probes
 
     instr.rs1 = rs1_i;
     instr.rs2 = rs2_i;
+    instr.operand_valid = operand_valid_i;
+    instr.operand_tid = operand_tid_i;
 
     instr.ex_commit_cause = ex_commit_i.cause;
     instr.ex_commit_valid = ex_commit_i.valid;
@@ -94,6 +98,7 @@ module cva6_rvfi_probes
 
     instr.lsu_ctrl_vaddr = lsu_ctrl_i.vaddr;
     instr.lsu_ctrl_fu = lsu_ctrl_i.fu;
+    instr.lsu_ctrl_op = lsu_ctrl_i.operation;
     instr.lsu_ctrl_be = lsu_ctrl_i.be;
     instr.lsu_ctrl_trans_id = lsu_ctrl_i.trans_id;
 

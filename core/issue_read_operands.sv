@@ -54,6 +54,10 @@ module issue_read_operands
     input logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] ooo_op_b_i,
     input logic [CVA6Cfg.NrIssuePorts-1:0]                   ooo_op_a_valid_i,
     input logic [CVA6Cfg.NrIssuePorts-1:0]                   ooo_op_b_valid_i,
+    // FP third operand from the OoO FP PRF (rs3). FLen wide, not XLEN: the FP
+    // class has its own width, which can exceed XLEN on RV32+D.
+    input logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.FLen-1:0] ooo_op_c_i,
+    input logic [CVA6Cfg.NrIssuePorts-1:0]                   ooo_op_c_valid_i,
     // FU data useful to execute instruction - EX_STAGE
     output fu_data_t [CVA6Cfg.NrIssuePorts-1:0] fu_data_o,
     // ALU to ALU bypass control - EX_STAGE
@@ -143,6 +147,11 @@ module issue_read_operands
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs1_o,
     // Information dedicated to RVFI - RVFI
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs2_o,
+    // RVFI: identity of the instruction whose operands are on rvfi_rs*_o this
+    // cycle. Under OoO the entry issued here is NOT the one being dispatched
+    // into the scoreboard, so the tracer cannot key these by dispatch port.
+    output logic [CVA6Cfg.NrIssuePorts-1:0] rvfi_operand_valid_o,
+    output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rvfi_operand_tid_o,
     // Original instruction bits for AES
     output logic [5:0] orig_instr_aes_bits,
     // G1gq: extra RF peek of commit JALR rs1
@@ -301,6 +310,8 @@ module issue_read_operands
     assign rs2_forwarding_o[i] = fu_data_n[i].operand_b[CVA6Cfg.VLEN-1:0];  //forwarding or unregistered rs2 value
     assign rvfi_rs1_o[i] = fu_data_n[i].operand_a;
     assign rvfi_rs2_o[i] = fu_data_n[i].operand_b;
+    assign rvfi_operand_valid_o[i] = issue_ack_o[i];
+    assign rvfi_operand_tid_o[i] = issue_instr_i[i].trans_id;
   end
 
   assign alu_bypass_o = alu_bypass_q;
@@ -623,10 +634,14 @@ module issue_read_operands
     for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
       // U5: renamed ops already waited in IQ — skip arch RAW stall (PRF ready)
       if (CVA6Cfg.OoOEn && issue_instr_i[i].ooo_renamed) begin
-        // still allow scoreboard forward for same-cycle precision if valid
-        if (rs1_has_raw[i] && rs1_valid[i]) forward_rs1[i] = 1'b1;
-        if (rs2_has_raw[i] && rs2_valid[i]) forward_rs2[i] = 1'b1;
-        if (rs3_has_raw[i] && rs3_valid[i]) forward_rs3[i] = 1'b1;
+        // CANDIDATE FIX under test: a renamed op's operands come from the PRF,
+        // which is authoritative. The scoreboard forward below OVERRIDES that
+        // value (`if (forward_rs1[i]) fu_data_n[i].operand_a = rs1_res[i]`),
+        // and the scoreboard's idea of the latest producer is an in-order
+        // structure that does not track renaming — so it can substitute a
+        // stale value for a correctly renamed operand. Measured symptom: a
+        // load addressed 8(sp) with the PRE-decrement sp while dispatch's AGU
+        // used the correct one.
       end else begin
       if (rs1_has_raw[i]) begin
         if (rs1_valid[i]) begin
@@ -1177,6 +1192,9 @@ module issue_read_operands
   // block non-SC STORE issue so intervening stores cannot clear AXI exclusive
   // reservation (axi_riscv_lrsc → forever-fail SC under OpenSBI cmpxchg).
   logic lr_sc_pair_q, lr_sc_pair_d;
+  // Identity of the LR that opened the window, so the window can be bounded by
+  // that instruction's own lifetime under OoO (see gen_lr_sc_pair below).
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0] lr_sc_tid_q, lr_sc_tid_d;
 
   // We can issue an instruction if we do not detect that any other instruction is writing the same
   // destination register.
@@ -1231,19 +1249,41 @@ module issue_read_operands
 
   always_comb begin : gen_lr_sc_pair
     lr_sc_pair_d = lr_sc_pair_q;
+    lr_sc_tid_d  = lr_sc_tid_q;
     if (CVA6Cfg.RVA) begin
       for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
         if (issue_instr_valid_i[p] && issue_ack_o[p] && !issue_instr_i[p].ex.valid) begin
-          if (ariane_pkg::is_amo_lr(issue_instr_i[p].op)) lr_sc_pair_d = 1'b1;
+          if (ariane_pkg::is_amo_lr(issue_instr_i[p].op)) begin
+            lr_sc_pair_d = 1'b1;
+            lr_sc_tid_d  = issue_instr_i[p].trans_id;
+          end
           if (ariane_pkg::is_amo_sc(issue_instr_i[p].op)) lr_sc_pair_d = 1'b0;
         end
       end
+      // The window must not outlive the LR that opened it.
+      //
+      // It is closed by an SC issue or a flush. Under in-order issue one of
+      // those always arrives while the LR is still live, so the window is
+      // inherently bounded. Out of order it is not: a program whose LR is not
+      // followed by an SC -- which is entirely legal -- leaves the window open,
+      // and every later non-SC store is then refused an issue acknowledge
+      // forever. The store is allocated, becomes the commit head and never
+      // issues, so nothing retires behind it. still_issued is cleared when the
+      // LR retires or is cancelled, which is precisely when the reservation it
+      // was protecting can no longer be completed by a younger SC.
+      if (CVA6Cfg.OoOEn && lr_sc_pair_q && !fwd_i.still_issued[lr_sc_tid_q])
+        lr_sc_pair_d = 1'b0;
     end
     if (flush_i) lr_sc_pair_d = 1'b0;
   end
   always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (!rst_ni) lr_sc_pair_q <= 1'b0;
-    else lr_sc_pair_q <= lr_sc_pair_d;
+    if (!rst_ni) begin
+      lr_sc_pair_q <= 1'b0;
+      lr_sc_tid_q  <= '0;
+    end else begin
+      lr_sc_pair_q <= lr_sc_pair_d;
+      lr_sc_tid_q  <= lr_sc_tid_d;
+    end
   end
 
   // ----------------------
@@ -1485,23 +1525,35 @@ module issue_read_operands
     end
 
     // U5 production: prefer PRF operand when renamed (bypassed WB already applied)
+    // The FP exclusion that used to sit here was wrong once the OoO FP
+    // register class existed: it sent every FP source to the ARCHITECTURAL
+    // f-register file, which by construction holds no in-flight renamed value,
+    // so a dependent fadd.d read a stale operand. Dispatch now supplies FP
+    // sources from the FP physical file on the same ports, and holds back a
+    // second FP consumer in the group rather than issuing it unreadable
+    // operands, so the renamed value is preferred for BOTH classes.
     assign operand_a_regfile[i] =
-        (CVA6Cfg.OoOEn && ooo_op_a_valid_i[i] && issue_instr_i[i].ooo_renamed &&
-         !(CVA6Cfg.FpPresent && is_rs1_fpr(issue_instr_i[i].op)))
+        (CVA6Cfg.OoOEn && ooo_op_a_valid_i[i] && issue_instr_i[i].ooo_renamed)
             ? ooo_op_a_i[i]
             : ((CVA6Cfg.FpPresent && is_rs1_fpr(
                 issue_instr_i[i].op
             )) ? {{CVA6Cfg.XLEN - CVA6Cfg.FLen{1'b0}}, fprdata[0]} : rdata[i*OPERANDS_PER_INSTR+0]);
     assign operand_b_regfile[i] =
-        (CVA6Cfg.OoOEn && ooo_op_b_valid_i[i] && issue_instr_i[i].ooo_renamed &&
-         !(CVA6Cfg.FpPresent && is_rs2_fpr(issue_instr_i[i].op)))
+        (CVA6Cfg.OoOEn && ooo_op_b_valid_i[i] && issue_instr_i[i].ooo_renamed)
             ? ooo_op_b_i[i]
             : ((CVA6Cfg.FpPresent && is_rs2_fpr(
                 issue_instr_i[i].op
             )) ? {{CVA6Cfg.XLEN - CVA6Cfg.FLen{1'b0}}, fprdata[1]} : rdata[i*OPERANDS_PER_INSTR+1]);
-    assign operand_c_regfile[i] = (OPERANDS_PER_INSTR == 3) ? ((CVA6Cfg.FpPresent && is_imm_fpr(
-        issue_instr_i[i].op
-    )) ? operand_c_fpr : operand_c_gpr[i]) : operand_c_fpr;
+    // U5 OoO: prefer the FP PRF's rs3 when the op is renamed, exactly as a and
+    // b already do. Only the FP third operand is renamed — the GPR rs3 path
+    // (CVXIF offload, Zacas AMOCAS rd-as-source) keeps the architectural read.
+    assign operand_c_regfile[i] =
+        (CVA6Cfg.OoOEn && ooo_op_c_valid_i[i] && issue_instr_i[i].ooo_renamed &&
+         CVA6Cfg.FpPresent && is_imm_fpr(issue_instr_i[i].op))
+            ? ooo_op_c_i[i]
+            : ((OPERANDS_PER_INSTR == 3) ? ((CVA6Cfg.FpPresent && is_imm_fpr(
+                issue_instr_i[i].op
+            )) ? operand_c_fpr : operand_c_gpr[i]) : operand_c_fpr);
   end
 
   // ----------------------

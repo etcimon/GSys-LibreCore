@@ -1,0 +1,96 @@
+# OoO + SMT2 step plan (companion to `AGENTS-ooo-contract.md`)
+
+Tranches run in order; each ends with the contract's exit row and a review point. Evidence names
+the run tags under the C: artifact root and `/opt/testharness/runs/`. Anything marked open stays
+open until its exit is met; nothing is promoted as a side effect of a passing run.
+
+## Evidence baseline (2026-09-21)
+
+- Protected in-order SMT2 anchor: `s0-repeat-ctl-r1..r5`, `s0-cert-safe-par-v1` — 12,765,628
+  cycles, 333,635/8,932,406 retirements, strict stores, replay baseline `260456…9ea` (same model,
+  not an independent oracle). PMP stop attributed to the omitted `split-counter.vlt` (3/3 noctl).
+- Runner: compiler-control preflight refusal, streamed trace checks, structured non-pass outcomes,
+  pre-launch invocation capture. Open: build-time recipe attestation for the pinned manifest.
+- FPU and divider result ownership: `s2-fp-owner-*-v4`, `s2-div-owner-*-v2`, mutations
+  `s2-*-owner-mut-*`; strict `-Werror-UNOPTFLAT` leaf blocked by pre-existing scoreboard/FPnew
+  loops (`s2-fp-owner-strict-s32-v1`) — open structural gate; strict slang skipped on the builder.
+- Leaf baselines all matched: dispatch, WB-owner, drop, LSQ, rename, FP/hart rename, store
+  recovery, WFI, fetch queue, drain sims + synth, PMP sim/mutation/proof.
+- Open defects and residuals: dispatch scenario 18 (id-only late result accepted); two anchor early
+  terminations (unowned; destructive proxy pkill removed); LR `lsu_rmask` visibility; kill
+  persistence never measured on the anchor; `replay_q` flush asymmetry; stage 34 layout co-factor;
+  `NrCommitPorts=4` requested while commit is two-wide.
+
+## T0 — split, archive, checkpoint
+
+1. Move the session plan history and the README investigation sections verbatim into
+   `architecture/out-of-order/log-2026-09.md`; README keeps status + reference tables + pointer.
+2. This contract and plan exist; `AGENTS.md` §2 gains the `core/ooo` guide row.
+3. One checkpoint commit (no push) of the verified worktree after review of message and file list.
+
+## T1 — age namespace and memory-order validation
+
+RTL: `g6lc_ooo_pkg::ooo_age_older(a,b,cp)`; replace inline compares in `g6lc_iq.sv` (store-age gate,
+store admission), `g6lc_lsq.sv` (CAM/STL), `core/store_buffer.sv` (`ooo_older`, `spec_visible`,
+insertion sort). Scoreboard exports its `issued` mask to the LSU seam; `translate_off` assertion:
+no age compare on a non-live tid. LSQ alias validation: on store `addr_valid`, scan younger loads
+with `addr_v` and byte-lane overlap that have already issued; raise `mem_violation` with the load
+tid; scoreboard marks the slot `replay`; `commit_stage` on a `replay` head performs no
+architectural write and asserts `flush_commit`; frontend adds a `replay` arch source that takes
+`pc_commit` **without** the +4 increment (`g6lc_fetch_pkg::arch_src_sel`).
+
+Verification: `core/ooo/formal/g6lc_ooo_age_props.sv` + `.sby` on a small LSQ/store_buffer bundle
+(age order = allocation order for live entries; committed entries older than any live; violation
+detection complete for one store/one load with symbolic addresses; negative witness when the scan
+is removed). `tb_g6lc_rtl_review.sv`: wrap-around age across the window, committed-store forward
+after tid recycle, violation → replay → correct value; negatives; mutations (drop the live
+assertion; drop the violation scan). Gates: strict `-Werror-UNOPTFLAT` build of the new leaf;
+`verify --lint --synth --remote` counts unchanged; `testlist_ooo_l3.yaml` on `g6lc64_ooo_int`.
+
+## T2 — leftover pipes and relaxed issue
+
+CSR: commit-order FIFO (depth `NrCommitPorts+1`) keyed by tid; `csr_ready` leaves `flu_ready`; IQ
+head rule kept as serialization only. Store: dispatch credit reserves a speculative-queue slot;
+`check_cfg` asserts `DEPTH_SPEC >= LsqStoreEntries` under `OoOEn`; drop `older_unissued_st` from
+select; keep PO drain and age forwarding. Memdep: prediction registered into the IQ entry at
+dispatch (`may_bypass`); select gate `is_ld && older_unresolved_st && !may_bypass`; T1 replay is
+the safety net. Tests: two-store/one-load matrix (orders × aliasing), CSR pairs with younger ALU
+and branch work in flight, WFI/flush interplay, negatives, mutations (remove reservation; force
+`may_bypass` without validation → caught by replay). Exit: leaf suite; Spike-ordered
+`g6lc64_ooo_int` smoke (`ooo_mem_dep.S`, `ooo_ilp_chain.S`); PMU group-1 shows no FLU freeze on
+CSR; `sparse_issue_lsu` FO4 not worse than T1.
+
+## T3 — fetch kill by request token
+
+`icache_dreq_t/drsp_t` gain a config-derived token; `g6lc_icache` returns the accepted token;
+frontend kills by token and drops the VA-equality kill; demand, FDIP, loop buffer, hart switch,
+same-VA refetch, same-cycle response/kill covered. Independent request/response ledger in the
+fixture. Precise-misalignment properties replace the reverted antecedents (cause/PC/`TvalEn`-aware
+tval, no destination write, no cancelled-work trap) with missing-exception and bad-completion
+mutations. Exit: frozen failing layout ELF repaired; layout variants reproducible; in-order and OoO
+arms; retire `G6LC_NO_KILL_PERSIST` after mutations are retained.
+
+## T4 — issue-queue timing structure
+
+Non-compacting ring with allocation-order age vector; oldest-ready select from registered age bits;
+payload held in place. FO4 screen before/after; typed INT/MEM/FP split only if `sparse_issue_lsu`
+still exceeds budget. Exit: identical directed results to T2; equal or fewer stall cycles; lint and
+synth counts; FO4 delta recorded.
+
+## T5 — FP SKU (single hart)
+
+`g6lc64_ooo`: rename + one FMA/cycle + commit-or-flags; cancelled-DIVSQRT mutation; Spike-ordered
+FP suite (`ooo_fp_rename.S`); remove `!(OoOEn && FpPresent)` for `NrHarts==1` only. Two-hart FP
+and lazy-FS wait for T6.
+
+## T6 — mixed-resident SMT2
+
+Per-hart commit heads (scoreboard/ROB), hart-tagged IQ/ROB/LSQ, per-hart STQ credits, shared PRF
+with per-hart floors, per-hart cancellation; drained handoff retired only after peer squash/trap
+isolation negatives pass; Phase 6 adaptive policy stays frozen. Guard removal is a separate decision.
+
+## Deferred
+
+Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,
+FP widths beyond `FLen <= XLEN`, four-wide retirement, adaptive scheduling policy, early-termination
+root cause (re-examined only if it recurs with the non-destructive proxy).

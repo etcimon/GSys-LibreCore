@@ -36,6 +36,7 @@ module lsu_bypass
     input logic rst_ni,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
     input logic flush_i,
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
 
     // TO_BE_COMPLETED - TO_BE_COMPLETED
     input lsu_ctrl_t lsu_req_i,
@@ -77,7 +78,8 @@ module lsu_bypass
     // we've got a valid LSU request
     if (lsu_req_valid_i) begin
       mem_n[write_pointer_q] = lsu_req_i;
-      if (lsu_req_i.is_speculative_load && resolved_branch_i.valid) begin
+      if (lsu_req_i.is_speculative_load && resolved_branch_i.valid &&
+          (!CVA6Cfg.OoOEn || !resolved_branch_i.is_mispredict)) begin
         if (resolved_branch_i.is_mispredict) begin
           // missprediction: mark speculative loads as misspredicted
           mem_n[write_pointer_q].is_speculative_load_miss = 1'b1;
@@ -106,6 +108,14 @@ module lsu_bypass
 
     if (pop_st_i && pop_ld_i) mem_n = '0;
 
+    if (CVA6Cfg.OoOEn) begin
+      for (int unsigned i = 0; i < 2; i++) begin
+        if (mem_n[i].valid && mem_n[i].fu == LOAD &&
+            cancelled_mask_i[mem_n[i].trans_id])
+          mem_n[i].is_speculative_load_miss = 1'b1;
+      end
+    end
+
     if (flush_i) begin
       status_cnt = '0;
       write_pointer = '0;
@@ -125,6 +135,9 @@ module lsu_bypass
     end else begin
       lsu_ctrl_o = mem_q[read_pointer_q];
     end
+    if (CVA6Cfg.OoOEn && lsu_ctrl_o.valid && lsu_ctrl_o.fu == LOAD &&
+        cancelled_mask_i[lsu_ctrl_o.trans_id])
+      lsu_ctrl_o.is_speculative_load_miss = 1'b1;
   end
 
   // registers

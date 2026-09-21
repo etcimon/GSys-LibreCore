@@ -12,6 +12,7 @@ module mult
     input  logic                                 rst_ni,
     // Flush - CONTROLLER
     input  logic                                 flush_i,
+    input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]     cancelled_mask_i,
     // FU data needed to execute instruction - ISSUE_STAGE
     input  fu_data_t                             fu_data_i,
     // Mult instruction is valid - ISSUE_STAGE
@@ -35,11 +36,15 @@ module mult
 
   logic div_valid_op;
   logic mul_valid_op;
+  logic div_owner_free, div_in_fire, div_out_fire, div_result_live, div_valid_raw;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] div_owner_live_q, div_owner_cancelled_q;
+  logic div_idle_q;
   // Input Arbitration
 
   assign mul_valid_op = ~flush_i && mult_valid_i && (fu_data_i.operation inside { MUL, MULH, MULHU, MULHSU, MULW, CLMUL, CLMULH, CLMULR });
 
-  assign div_valid_op = ~flush_i && mult_valid_i && (fu_data_i.operation inside { DIV, DIVU, DIVW, DIVUW, REM, REMU, REMW, REMUW });
+  assign div_owner_free = !CVA6Cfg.OoOEn || (!div_owner_live_q[fu_data_i.trans_id] && !cancelled_mask_i[fu_data_i.trans_id]);
+  assign div_valid_op = ~flush_i && mult_valid_i && div_owner_free && (fu_data_i.operation inside { DIV, DIVU, DIVW, DIVUW, REM, REMU, REMW, REMUW });
 
   // ---------------------
   // Output Arbitration
@@ -49,7 +54,44 @@ module mult
   assign div_ready_i = (mul_valid) ? 1'b0 : 1'b1;
   assign mult_trans_id_o = (mul_valid) ? mul_trans_id : div_trans_id;
   assign result_o = (mul_valid) ? mul_result : div_result;
+  assign div_result_live = !CVA6Cfg.OoOEn ||
+      (!flush_i && div_owner_live_q[div_trans_id] && !div_owner_cancelled_q[div_trans_id] &&
+       !cancelled_mask_i[div_trans_id]);
+  assign div_valid = div_valid_raw && div_result_live;
+  assign div_in_fire = div_valid_op && div_idle_q;
+  assign div_out_fire = div_valid_raw && div_ready_i;
   assign mult_valid_o = div_valid | mul_valid;
+  if (CVA6Cfg.OoOEn) begin : gen_div_owner_lifetime
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (~rst_ni) begin
+        div_owner_live_q <= '0;
+        div_owner_cancelled_q <= '0;
+      end else if (flush_i) begin
+        div_owner_live_q <= '0;
+        div_owner_cancelled_q <= '0;
+      end else begin
+        div_owner_cancelled_q <= (div_owner_cancelled_q | cancelled_mask_i) & div_owner_live_q;
+        if (div_out_fire) begin
+          div_owner_live_q[div_trans_id] <= 1'b0;
+          div_owner_cancelled_q[div_trans_id] <= 1'b0;
+        end
+        if (div_in_fire) begin
+          div_owner_live_q[fu_data_i.trans_id] <= 1'b1;
+          div_owner_cancelled_q[fu_data_i.trans_id] <= 1'b0;
+        end
+      end
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (~rst_ni) div_idle_q <= 1'b1;
+      else if (flush_i) div_idle_q <= 1'b1;
+      else if (div_out_fire) div_idle_q <= 1'b1;
+      else if (div_in_fire) div_idle_q <= 1'b0;
+    end
+  end else begin : gen_no_div_owner_lifetime
+    assign div_owner_live_q = '0;
+    assign div_owner_cancelled_q = '0;
+    assign div_idle_q = 1'b1;
+  end
   // mult_ready_o = division as the multiplication will unconditionally be ready to accept new requests
 
   // ---------------------
@@ -135,7 +177,7 @@ module mult
       .in_vld_i (div_valid_op),
       .in_rdy_o (mult_ready_o),
       .flush_i  (flush_i),
-      .out_vld_o(div_valid),
+      .out_vld_o(div_valid_raw),
       .out_rdy_i(div_ready_i),
       .id_o     (div_trans_id),
       .res_o    (result)

@@ -22,6 +22,53 @@ before submitting RTL.
 
 ---
 
+## 0. Fundamental bug-fixing and reverse-analysis philosophy
+
+When diagnosing a failure or inferring a mechanism from its effects, **weigh causal links before
+attributing a cause, and test the attribution before changing the implementation**:
+
+> Weigh the cause-to-effect links among candidate faults and the observed failure; do not treat the
+> first trace as naming the cause. Ranking those links by relative weight yields probable connections.
+> Reverse attribution is a later search: from the weighed effect, ask which still-weighted causes
+> would produce it, predict the next residual, and re-rank. Weighing does not itself retract a reverse
+> claim; the reasoning cycle does, by dropping weights the next trace fails to support. Change only
+> what remains probable after that pass.
+
+These statements form one reasoning cycle, not interchangeable shortcuts. A plausible forward link
+(`candidate fault → observed effect`) does not establish the reverse claim (`observed effect → that
+fault`): different faults can produce the same symptom, and one fault can produce several symptoms.
+Weights express relative evidential support under stated conditions, not invented numerical
+probabilities or proof of a unique root cause.
+
+1. **Establish the effect.** Reproduce the failure where feasible; identify the input, configuration,
+   instrument and observation boundary. Separate what the trace shows from what it suggests. The
+   first visible divergence is a search boundary, not automatic ownership of the defect.
+2. **Weigh the forward links.** For each plausible candidate, name the mechanism by which it could
+   produce the effect, its required conditions, supporting evidence and counter-evidence. Rank those
+   links against alternatives, including an instrument or harness fault when warranted. Do not count
+   repeated views of the same observation as independent support.
+3. **Search backward and predict.** From the effect as now assessed, ask which still-supported causes
+   could produce it. For each leading candidate, predict a distinguishing observation and the next
+   **residual** — the remaining deviation from expected behavior that the next check should expose
+   under that explanation. State what would reject the attribution before collecting the next trace;
+   choose the earliest faithful, lowest-cost check (§2.9–§2.10).
+4. **Re-rank through evidence.** Compare the next trace or focused test with those predictions. Reduce
+   or drop support for links whose required predictions fail, and revise or retract the reverse
+   claims that depended on them. A trace that cannot observe the predicted event is inconclusive,
+   not a refutation. Preserve the observations; change the attribution, not the evidence. Weighting
+   alone neither performs this retraction nor justifies retaining a claim after its support fails.
+5. **Change only the surviving mechanism.** After that pass, make the smallest justified correction
+   to what remains probable, with a failing regression where feasible and post-change verification.
+   If the candidates remain indistinguishable or none has adequate support, improve the observation
+   or state the unresolved uncertainty instead of patching the first plausible location. A moved or
+   hidden symptom is not confirmation; check the predicted residual and reopen the cycle if needed.
+
+Keep a concise record of the leading candidates, evidence, distinguishing prediction, next result
+and revised attribution. This is the debugging foundation for §2.10, not a substitute for the
+specification, the SoC prime directive or verification parity (§2.4).
+
+---
+
 ## 1. Core purpose
 
 CVA6 is not a simulator. It is synthesizable IP, taped out on real processes, booted into Linux, and
@@ -469,6 +516,9 @@ merge-ready. Prefer extending the ISA string and adding the corresponding `.dts`
 Every non-trivial change must pass this checklist before merge. Check items explicitly in the PR
 description or commit message.
 
+- [ ] **Evidence-weighted diagnosis (when applicable):** for bug fixes or reverse analysis, candidate
+      causal links were ranked, a distinguishing prediction was checked, and attribution was reassessed
+      before choosing the correction; the next residual and regression outcome were checked (§0).
 - [ ] **Synthesis clean:** `make synth` or equivalent completes with no new errors/latches.
 - [ ] **Timing target:** target frequency slack is positive in the reported corner; attach a timing
       report excerpt or a link to the CI run.
@@ -568,6 +618,6 @@ reliably for years.
 
 ---
 
-*Last updated: 2026-08-03 — structural FO4 soak §2.8 (path_class / BalanceMux / scale budgets),
-host `clean svt` hygiene, and build-platform cross-links. Living document; update when a new
-recurring pattern or approved exception emerges.*
+*Last updated: 2026-09-20 — evidence-weighted bug-fixing and reverse-analysis foundation (§0),
+with a matching review gate (§5). Living document; update when a new recurring pattern or approved
+exception emerges.*

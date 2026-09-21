@@ -1038,6 +1038,74 @@ def _canon_sha256(value) -> str:
     ).hexdigest()
 
 
+def build_recipe_record(rem: Remote, root: Path, args, verlib: str) -> dict:
+    """Capture the generated Verilator recipe for the manifest.
+
+    ``<Mdir>/Variane_testharness__verFiles.dat`` records the effective command
+    line Verilator ran and the complete input set it consumed, including any
+    external ``.vlt`` compiler controls. Pinning it in the manifest makes an
+    omitted control visible without a soak.
+    """
+    verlib_dir = f"{REMOTE_ROOT}/work/{verlib}"
+    verfiles = rem.out(
+        f"cat {shlex.quote(verlib_dir + '/Variane_testharness__verFiles.dat')}"
+    )
+    commands = re.findall(r'^C "(.*)"$', verfiles, re.M)
+    inputs = re.findall(r'^S\s+[^\n]*"([^"\n]+)"$', verfiles, re.M)
+    if len(commands) != 1 or not commands[0].strip() or not inputs:
+        die("generated Verilator command or source dependencies are missing/ambiguous")
+    command_line = commands[0]
+    entries = len(inputs)
+    try:
+        tokens = shlex.split(command_line)
+    except ValueError as error:
+        die(f"invalid generated Verilator command: {error}")
+    controls = []
+    for token in tokens:
+        if not token.endswith(".vlt"):
+            continue
+        digest = rem.out(
+            f"cd {REMOTE_ROOT}/repo && "
+            f"sha256sum {shlex.quote(token)} | awk '{{print $1}}'"
+        )
+        digest = digest.strip() if isinstance(digest, str) else digest
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            die(f"could not hash compiler control {token} (got '{digest}')")
+        controls.append({"path": token, "sha256": digest})
+    extra_args = ""
+    build_env = {}
+    for kv in getattr(args, "env", None) or []:
+        key, _, value = kv.partition("=")
+        if key == "SOFT_LADDER_BUILD_VLT_ARGS":
+            extra_args = value
+        elif key in ("SOFT_LADDER_ISOLATED", "SOFT_LADDER_OVERLAY"):
+            build_env[key] = value
+    version = rem.out(
+        f"sed -n 's/^.*verilator: *//p' {shlex.quote(verlib_dir + '/build.log')} | head -1"
+    ).strip()
+    if not version.startswith("Verilator "):
+        die("build log does not attest the Verilator version")
+    return {
+        "verilatorCommand": command_line,
+        "verFilesSha256": hashlib.sha256(verfiles.encode()).hexdigest(),
+        "verFilesEntries": entries,
+        "compilerControls": controls,
+        "extraVerilatorArgs": extra_args,
+        "buildEnv": build_env,
+        "defines": AI_FLAVOURS.get(args.flavour, {}).get("defines", ""),
+        "target": args.target,
+        "flavour": args.flavour,
+        "verlib": verlib,
+        "verilatorVersion": version or None,
+        "proxySha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "jobs": str(args.jobs or ("1" if args.flavour in AI_FLAVOURS else "nproc")),
+        "vthreads": str(
+            getattr(args, "vthreads", None)
+            or ("nproc" if args.flavour in AI_FLAVOURS else "harness")
+        ),
+    }
+
+
 def write_build_manifest(rem: Remote, root: Path, args, verlib: str) -> None:
     """Write a schema-1 build manifest to a repo-relative --manifest-out path."""
     rel = args.manifest_out.replace("\\", "/")
@@ -1076,6 +1144,7 @@ def write_build_manifest(rem: Remote, root: Path, args, verlib: str) -> None:
         "sourceSha256": _canon_sha256([[k, v] for k, v in sources.items()]),
         "configuration": configuration,
         "configSha256": _canon_sha256(configuration),
+        "recipe": build_recipe_record(rem, root, args, verlib),
         "executableSha256": exe_sha,
     }
     dest = root / rel
@@ -1280,7 +1349,6 @@ def _no_overlap_guard(rem: Remote, command: str = "") -> None:
 
 def cmd_run(rem: Remote, args) -> int:
     rem.start_master()
-    _kill_stranded_harnesses(rem)
     _no_overlap_guard(rem, "run")
     verlib, _ = flavour_info(args.flavour)
     if args.verlib:
@@ -1366,7 +1434,6 @@ def cmd_run(rem: Remote, args) -> int:
 
 def cmd_soak(rem: Remote, args) -> int:
     rem.start_master()
-    _kill_stranded_harnesses(rem)
     _no_overlap_guard(rem, "soak")
     verlib, _ = flavour_info(args.flavour)
     if args.verlib:
@@ -1424,7 +1491,6 @@ def cmd_di(rem: Remote, args) -> int:
     it would produce are not measurements. Bypass with --no-oracle-check.
     """
     rem.start_master()
-    _kill_stranded_harnesses(rem)
     _no_overlap_guard(rem, "di")
     root = repo_root()
     verlib, _ = flavour_info(args.flavour)
@@ -1935,7 +2001,6 @@ def cmd_shell(rem: Remote, args) -> int:
         # apply the same overlap guard so two consecutive shell invocations do not
         # both start heavy Variane/soft-ladder workloads.
         if re.search(r"Variane_testharness|soft-ladder", args.command):
-            _kill_stranded_harnesses(rem)
             _no_overlap_guard(rem, f"shell ({args.command[:60]}...)")
         timeout = args.timeout if args.timeout > 0 else DEFAULT_SHELL_TIMEOUT
         return rem.run(f"cd {REMOTE_ROOT} && {args.command}",
@@ -1988,23 +2053,26 @@ tag = os.environ.get("TH_PROXY_TAG", "py-runner")
 def run_one(script: Path) -> dict:
     log_path = out_dir / f"{script.stem}.log"
     t0 = time.time()
+    script_out = out_dir if len(script_files) == 1 else out_dir / script.stem
+    script_out.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env["TH_SCRIPT"] = str(script)
     env["TH_SCRIPT_NAME"] = script.stem
     env["TH_DATA_DIR"] = str(data_dir)
-    env["TH_OUT_DIR"] = str(out_dir)
+    env["TH_OUT_DIR"] = str(script_out)
     env["TH_RUN_DIR"] = str(run_dir)
     env["TH_PROXY_TAG"] = tag
     proc = subprocess.run(
         [sys.executable, "-u", str(script)],
-        cwd=run_dir,
+        cwd=run_dir if len(script_files) == 1 else script_out,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
     )
     log_path.write_text(proc.stdout)
-    return {"script": script.name, "rc": proc.returncode, "time": time.time() - t0}
+    return {"script": script.name, "rc": proc.returncode,
+            "time": time.time() - t0, "output": str(script_out)}
 
 
 script_files = sorted(
@@ -2018,7 +2086,9 @@ summary = {
     "scripts": [s.name for s in script_files],
 }
 t0_all = time.time()
-with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, threads)) as ex:
+workers = min(max(1, threads), max(1, len(script_files)), len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1))
+summary["workers"] = workers
+with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
     results = list(ex.map(run_one, script_files))
 summary["results"] = results
 summary["wall"] = time.time() - t0_all

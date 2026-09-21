@@ -971,12 +971,30 @@ package config_pkg;
     //  * need_rd excludes FP destinations from renaming, so with FpPresent the FP
     //    results are neither renamed nor tracked in the busy table, and an FP
     //    consumer can read a stale value.
-    // Refuse the combination until per-hart namespaces and an FP register class
-    // exist. Note g6lc64_ooo_server currently sets OoOEn=1 with NrHarts=2 and
-    // RVF/RVD=1, so it trips this deliberately: the configuration was unsound
-    // and silently so. See architecture/out-of-order/README.md.
+    // UPDATED 2026-09-19: both reasons are now narrower than when written, and
+    // the duplicate copies of these guards live in g6lc_ooo_dispatch.
+    //  * NrHarts: g6lc_rename IS per-hart now (maps, checkpoints, ownership,
+    //    per-hart flush, tested at NR_HARTS=2). What remains is that the IQ,
+    //    ROB and LSQ contain no hart signal at all, so memory ordering and
+    //    store-to-load forwarding still alias across harts.
+    //  * FpPresent: the split FP register class EXISTS and is tested at module
+    //    level, and the FP-enabled full core elaborates and synthesises clean.
+    //    What is missing is behavioural evidence — no FP simulation, no
+    //    independent-reference comparison.
+    // g6lc64_ooo_server sets OoOEn=1 with NrHarts=2 and RVF/RVD=1, so it trips
+    // both deliberately. See architecture/out-of-order/README.md.
     assert (!(Cfg.OoOEn && Cfg.NrHarts > 1));
     assert (!(Cfg.OoOEn && Cfg.FpPresent));
+    // The OoO FP writeback narrows the XLEN-wide writeback bus to FLen
+    // (g6lc_ooo_dispatch: fprf_wdata = wb_data_i[FLen-1:0]), so an FP result
+    // wider than the integer datapath cannot be delivered. RV32+D is legal
+    // RISC-V and would hit this; no configured target does it today, and the
+    // IN-ORDER path carries the identical construct
+    // (issue_read_operands: fp_wdata_pack = wdata_i[FLen-1:0]), so the limit is
+    // pre-existing rather than introduced here. Stated explicitly for the OoO
+    // path so such a configuration cannot be created silently; widening the
+    // writeback bus is the fix if RV32+D is ever wanted.
+    assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.FLen > Cfg.XLEN));
     // FSE deep speculation (DeepSpecEn=0 keeps legacy STQ depth / package depths).
     assert (!(Cfg.DeepSpecEn && !Cfg.SpeculativeSb));
     assert (!(Cfg.DeepSpecEn && Cfg.BPCkptDepth != 0 &&

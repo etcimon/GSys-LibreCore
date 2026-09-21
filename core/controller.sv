@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 08.05.2017
 // Description: Flush controller
 
@@ -243,7 +244,7 @@ module controller
       flush_unissued_instr_o = 1'b1;
       flush_id_o             = 1'b1;
       flush_ex_o             = 1'b1;
-    end else if (CVA6Cfg.RVA && flush_commit_i) begin
+    end else if ((CVA6Cfg.RVA || CVA6Cfg.OoOEn) && flush_commit_i) begin
       set_pc_commit_o        = 1'b1;
       flush_if_o             = 1'b1;
       flush_unissued_instr_o = 1'b1;

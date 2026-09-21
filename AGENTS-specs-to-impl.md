@@ -16,6 +16,117 @@ matching row here so the spec→code answer stays one hop away.
 
 ---
 
+## Precise misalignment and fetch recovery — open stability contracts
+
+`core/load_unit.sv` currently retains the original grant-time offset assertions and plain fatal
+messages. The earlier alignment-qualified antecedent edit was reverted and must not be restored
+as-is: for a three-bit RV64 offset, word alignment implies offset0/4 (<5), and half alignment
+implies offset0/2/4/6 (<7), making those checks tautological. The prior claim that detection
+strength was preserved is withdrawn. Under this core's declared misalignment policy, verify the
+precise cause/PC/configured tval, absence of destination or forbidden device effects, and cancellation
+of wrong-path exceptions. A valid replacement checker needs independent bad-completion and
+missing-exception/kill mutations; no checker weakening is approved here.
+
+A load-reserved reads memory and registers a reservation; it performs no store (`#ext:zalrsc`).
+`core/cva6_rvfi.sv` clears `lsu_wmask` for `AMO_LRW`/`AMO_LRD` because LR is dispatched down the
+STORE path with the other atomics, so the tracer previously emitted a write the architecture never
+performs. A full protected dual-hart boot confirms the effect at the first LR retirement
+(`lr.d.aqrl` at pc `0x80008662`): the older retained reference carries the phantom zero store and
+current traces do not. This is trace-visibility only; no architectural store behaviour changed. The
+failed-SC clause of the same repair suppresses the mask at commit where the outcome is known, and is
+a separate obligation not exercised by that observation.
+
+`core/fetch_B/frontend.sv` contains an unqualified kill-persistence candidate. It remembers one
+killed VA, clears it on a replacement request and gates response acceptance by equality. Local
+frozen-ELF evidence does not prove overlapping request/response ownership, same-address refetch,
+FDIP or cross-hart/context safety. Review the full transaction contract with
+`core/cache_subsystem/g6lc_icache.sv`; its READ path permits response/new-request overlap and
+its killed translation/miss states already own cancellation duties. An independent observer must
+not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
+legality guards. See the active S0-S4 plan for the implementation/verification change sets.
+
+## OoO cancelled FP result ownership (2026-09-21)
+
+Precise recovery requires that a cancelled instruction's late result never completes, wakes or
+supplies data for the scoreboard slot's next owner. `core/fpu_wrap.sv` now keeps a per-slot
+ownership table under `OoOEn`: a live FPnew token owns its transaction ID until the raw result
+handshake drains; cancellation (`cancelled_mask_i`) or a full flush marks that token cancelled
+instead of forgetting it; a cancelled token's result is suppressed at `fpu_valid_o`; a replacement
+request for a still-live ID is held in the existing protocol-inversion buffer, and a cancelled held
+request is discarded. Because FPnew clears its pipeline valids on a full flush, the table clears on
+flush too; a flushed token never drains, so retaining it would block the next same-ID operation.
+`core/mult.sv` applies the same contract to the serial divider (`div_owner_*`, `div_idle_q`), gating
+acceptance and the divider's FLU-port result; the single-cycle multiplier result cannot outlive
+scoreboard reuse and is untouched. `core/ex_stage.sv` forwards the existing scoreboard mask to both.
+In-order configurations reduce combinationally to the previous behaviour. Evidence is a real
+FU/controller/scoreboard boundary fixture with pre-fix stale completion at8/16 slots, mutation
+detection, replacement, flush-then-replacement and older-survivor controls; the strict UNOPTFLAT
+structural gate remains open, and full-core FP/MULT+OoO qualification is not claimed. Timing: the
+added path is a registered lookup of one mask bit and one table bit on accept/complete; no new
+clock, reset or memory port.
+
+## OoO cancelled-load lifetime before grant (2026-09-20)
+
+Base-ISA load semantics and precise recovery require cancellation to remain attached
+to an accepted instruction until every potential completion source has relinquished
+it. `core/lsu_bypass.sv` now retains exact cancelled-TID membership for queued loads
+under `OoOEn`; `core/load_unit.sv` discards a cancelled head without a memory grant,
+forwarded result or synthetic completion. Correct-prediction release of a waiting
+speculative load is preserved; only broad mispredict-based cancellation is replaced
+by the exact mask. `core/load_store_unit.sv` carries that mask to the queue.
+Post-grant response tombstones remain in
+place; older tag/response obligations are not dropped. This closes a reproduced
+pre-grant TID-reuse violation, not general FU or cross-hart lifetime qualification.
+No new architectural interface, state array, pipeline stage, clock or reset; the
+existing per-entry miss bit is reused. Cancellation lookup timing still needs STA.
+
+## OoO load/store memory ordering (2026-09-20)
+
+| Architectural obligation | Implementation seam | Qualified boundary |
+|---|---|---|
+| A load returns the value of the latest store preceding it in program order (`#memorymodel`, RVWMO same-address rules) | `core/store_buffer.sv` hazard + `st_fwd_merge`, keyed by circular trans_id distance from `commit_trans_id_i`; load identity added as `load_trans_id_i` via `load_unit`/`load_store_unit`/`store_unit` | Speculative entries are age-filtered; commit-queue entries stay exempt because they are architecturally older and their tids may be recycled. Directed same-word cases only. |
+| Same-address stores are coherence-ordered in program order | `core/store_buffer.sv` speculative queue insertion | Arrivals are placed by program order rather than appended in issue order, so the commit handoff and memory see program order. |
+| Forward progress under in-order commit | The same age filter on the hazard term | An older load must not stall on a younger store: that store cannot commit until the load retires. Verified by a directed case that previously hung. |
+| Forward progress at queue capacity | `core/ooo/g6lc_iq.sv` store admission: a store is not selected while an older store is still unissued | Younger stores cannot fill the commit-drained speculative queue ahead of an older store that has yet to post. Loads still issue out of order. Verified by a ten-store directed case that previously hung. |
+| Forward progress after LR (`#ext:a`) | `core/issue_read_operands.sv` LR/SC pair window, bounded under `OoOEn` by the LR's own `still_issued` lifetime | The window that blocks intervening non-SC stores closes when the LR retires or is cancelled, so an LR never paired with an SC — legal RISC-V — cannot block later stores forever. In-order behaviour unchanged. |
+| Forward progress with a shared fixed-latency unit | `core/ooo/g6lc_iq.sv`: a CSR is issued only when it is the oldest live instruction | `csr_buffer` is depth-1 and holds `csr_ready` low until commit, and `flu_ready = csr_ready & mult_ready` marks every FLU unit busy for both harts. Gating on the commit head restores the buffer's depth-1 assumption instead of weakening it. Unblocks two-hart mutual exclusion. |
+| A failed SC performs no memory write (`#ext:a`) | `core/cva6_rvfi.sv` `mem_wmask` suppressed at commit when an SC reports failure | Trace-visible only; the architectural behaviour was already correct. Without it the tracer reports a write the machine never performed. |
+
+All of it is gated on `CVA6Cfg.OoOEn`; the in-order path is unchanged and re-booted.
+No ISA, CSR, DTS, clock, reset or memory-port surface changes. The added comparators
+sit on the store write path and still need STA before promotion.
+
+## FP/CSR/WFI and guarded hart ownership (2026-09-19)
+
+| Architectural obligation | Implementation seam | Qualified boundary |
+|---|---|---|
+| FP f0 and FP register lifetime (`#ext:f`, `#ext:d`) | `core/ooo/g6lc_prf.sv` configurable zero behavior; dispatch FP committed-map update | FP instance retains physical zero; full flush restores committed FP state |
+| Architectural CSR/AMO results (`#ext:zicsr`, `#ext:a`) | `g6lc_ooo_dispatch.sv` late-result metadata and commit-time wakeup; `g6lc_iq.sv` wakeup-port count | Execution completion remains separate from usable operand data; no extra PRF data-write port |
+| Per-hart architectural state | `g6lc_rename.sv` FP ownership/reclaim and post-allocation owner checks; dispatch SBE hart plumbing | Shared pools with separate maps; coarse-handoff probes, not mixed-residency closure |
+| WFI / precise restart | `core/commit_stage.sv`, `core/controller.sv` | Accepted OoO WFI discards younger work before parking; existing next-PC mechanism; cancelled/faulting/invalid/stalled entries do not flush |
+| No speculative-store architectural effects (`#memorymodel`) | `core/store_buffer.sv`, `LEGACY_SMT_KEEP` | OoO full flush discards speculative stores while preserving committed queue; cancelled stores cannot survive through legacy keep/replay state |
+
+Existing config fields gate behavior; no ISA/CSR/DTS surface, clock/reset or pipeline
+stage is added. Metadata/mux/wakeup fanout changes require physical timing/power and
+DFT review. Production FP/hart refusals remain. Broader memory ordering and late-ID
+reuse are still open; named evidence and limits are in the architecture record.
+
+## OoO issue/recovery conservation (2026-09-19)
+
+Base-ISA control-flow and precise-recovery obligations require every surviving
+instruction to execute exactly once. `core/ooo/g6lc_ooo_dispatch.sv` now suppresses
+FU offers on full/unissued flush and qualifies the IQ's consume mask by the visible
+offer. A younger branch redirect previously let IRO acknowledge an older ready
+instruction while clearing its FU-valid, permanently losing that instruction.
+Scoreboard allocation, FU issue, WB and retirement are distinct contracts.
+
+Existing OoOEn/NH1 envelope, hart/FP guards and issue width are unchanged. The IQ
+store-age gate and selective cancelled-TID policy remain intact. No new state,
+clock/reset, macro, scan path, software interface or DTS capability; only flush/valid
+qualification in the existing issue cone. Physical timing/power and full ISA
+qualification remain open. Contract tests and named core evidence are in the
+companion test map and out-of-order architecture record.
+
 ## Issue-group program-order repair (2026-09-18)
 
 Base-ISA dynamic instruction order is independent of numerical PC order.
@@ -262,7 +373,8 @@ limits: `architecture/core-fetch/README.md`, circular IQ section.
 | Spec (anchor) | Status | Primary RTL loci | Config knob |
 |---|---|---|---|
 | Zicsr (CSRs) | implemented | `core/csr_regfile.sv`, `core/csr_buffer.sv` | — |
-| Zicntr / Zihpm (counters) | implemented | `core/perf_counters.sv`, `core/csr_regfile.sv` | `PerfCounterEn` |
+| Zihintpause (PAUSE) | implemented; **drives an SMT yield hint since 2026-09-19** | `core/decoder.sv` folds PAUSE into a NOP; `core/id_stage.sv` recovers the 0x0100000F encoding and pulses `smt_pause_hint_o` per hart; `core/smt/g6lc_thread_select.sv` holds a sticky yield request (cleared on that hart's next activation) and hands the core to an unpaused ready peer. Advisory only: ranked below anti-starvation, requires an unpaused peer, never gates readiness. Measured: lock holder 2.1618x -> 1.3719x; bit-identical behaviour when software never issues PAUSE. | `ZihintpauseEn`, `NrHarts` |
+| Zicntr / Zihpm (counters) | implemented; **per-hart banks repaired 2026-09-19** | `core/perf_counters.sv` banks generic_counter/mhpmevent/OF/MINH/SINH/UINH by `hart_i` (dimensioned from `CVA6Cfg.NrHarts`, NH=1 identical to before) and emits per-hart scountovf/lcofi; `core/smt/g6lc_smt_csr_bank.sv` routes element h to CSR bank h instead of broadcasting. Previously ONE shared block aliased mhpmeventN/mhpmcounterN across harts. Discriminating probe `SMT_PMU`: shared signature (2,1) before (smt2-pmu-ownership-20260919), banked signature (1,0) after (smt2-pmu-banked-v2-20260919), each with the other polarity as a failing control. Zicntr mcycle/minstret were already banked (minstret gated by `commit_instr_i.hart_id`); mcycle counts elapsed cycles in every bank, so it is not per-hart service. Events remain core-wide signals attributed to the active hart. Also repaired the RV32 user-mode `hpmcounterNh` read: the range test used `>` (so 0xC83 never matched) and the index subtracted the machine base 0xB83 from a user address, indexing outside the counter array; live in `cv32a6_imac_sv32` (XLEN=32, PerfCounterEn=1, RVZihpm=1), which now lints clean. RV64 unaffected — the branch body is `riscv::XLEN == 32` guarded and its only other statement sets the dead internal `read_access_exception`. | `PerfCounterEn`, `NrHarts` |
 | ↳ `mhpmeventN` selector encoding | implemented | 8-bit WARL, split `[7:5]`=group / `[4:0]`=index (`core/include/ariane_pkg.sv` `MHPMEvent*`); group 0 is the legacy 5-bit encoding unchanged; groups 1–7 reserved for feature upgrades (`core/perf_counters.sv`) | `MHPMCounterNum` |
 | M / Zmmul (mul/div) | implemented | `core/mult.sv`, `core/multiplier.sv`, `core/serdiv.sv` | `RVM`/`Zmmul` (target pkg) |
 | Zicond (cond. zero) | config | `core/alu.sv`, `core/decoder.sv` | `RVZicond` |
@@ -345,7 +457,7 @@ limits: `architecture/core-fetch/README.md`, circular IQ section.
 | Svpbmt (7.2) | **partial (config)** | PTE `pbmt` in `cva6_mmu.sv`; PTW legality; `menvcfg.PBMTE` / `pbmte_o` in `csr_regfile.sv` (LSU PMA force TBD) | `SvpbmtEn` |
 | Svadu / Svinval (7.3–7.4) | partial / absent | A/D mostly SW; no Svinval | — |
 | Sstc supervisor timer (8.8) | **implemented (config)** | `stimecmp` + `rtc_time_i` compare + STIP in `csr_regfile.sv`; CLINT mtime SoC-side | `SstcEn` (+ `rtc_time_i`) |
-| Sscofpmf (8.9) | **implemented (config)** | `perf_counters.sv` OF/LCOFI; `scountovf` in `csr_regfile.sv`; 8-bit mhpmevent (U8ᵃ) | `SscofpmfEn` |
+| Sscofpmf (8.9) | **implemented (config); per-hart OF/LCOFI since 2026-09-19** | `perf_counters.sv` OF/LCOFI now banked per hart and routed to the owning CSR bank only (previously broadcast, so an overflow was visible to both harts and either could clear it); `scountovf` in `csr_regfile.sv`; 8-bit mhpmevent (U8ᵃ). MINH/SINH/UINH filtering uses the active hart's privilege, which is the hart the events are attributed to. | `SscofpmfEn`, `NrHarts` |
 | Sh hypervisor extensions (ch9) | partial / config | `core/csr_regfile.sv`, `core/cva6_mmu/` | `RVH` |
 | Privileged listings / rationale (ch10, appA) | n/a | — | — |
 

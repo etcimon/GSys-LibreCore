@@ -9,7 +9,8 @@ module g6lc_prf #(
     parameter int unsigned PRF_ENTRIES = 48,
     parameter int unsigned NR_READ     = 4,
     parameter int unsigned NR_WRITE    = 2,
-    parameter int unsigned PRF_W       = 6
+    parameter int unsigned PRF_W       = 6,
+    parameter bit ZERO_REG_ZERO = 1'b1
 ) (
     input  logic clk_i,
     input  logic rst_ni,
@@ -25,12 +26,12 @@ module g6lc_prf #(
   // Combinational read with write-through (highest write port wins on clash)
   always_comb begin
     for (int unsigned r = 0; r < NR_READ; r++) begin
-      if (raddr_i[r] == '0) begin
+      if (ZERO_REG_ZERO && raddr_i[r] == '0) begin
         rdata_o[r] = '0;
       end else begin
         rdata_o[r] = mem_q[raddr_i[r]];
         for (int unsigned w = 0; w < NR_WRITE; w++) begin
-          if (we_i[w] && waddr_i[w] == raddr_i[r] && waddr_i[w] != '0)
+          if (we_i[w] && waddr_i[w] == raddr_i[r] && (!ZERO_REG_ZERO || waddr_i[w] != '0))
             rdata_o[r] = wdata_i[w];
         end
       end
@@ -42,7 +43,7 @@ module g6lc_prf #(
       mem_q <= '0;
     end else begin
       for (int unsigned w = 0; w < NR_WRITE; w++) begin
-        if (we_i[w] && waddr_i[w] != '0) mem_q[waddr_i[w]] <= wdata_i[w];
+        if (we_i[w] && (!ZERO_REG_ZERO || waddr_i[w] != '0)) mem_q[waddr_i[w]] <= wdata_i[w];
       end
     end
   end

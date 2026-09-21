@@ -13,6 +13,25 @@ write-back**. The issue stage handles step one, two and four.
 
 ![Ariane Scoreboard](_static/scoreboard.png)
 
+#### LibreCore config-gated OoO boundary
+
+The upstream in-order description below does not imply that scoreboard allocation
+is FU execution when `OoOEn` is selected. The OoO adapter owns renamed entries until
+an actual offer is acknowledged; recovery must suppress both offers and consumption.
+Integer and FP operands come from distinct physical namespaces, with class-qualified
+wakeup and bypass. FP physical zero is ordinary storage; integer physical zero is
+hardwired zero.
+
+CSR/AMO execution completion does not release operand waiters. Their usable values
+arrive through the existing commit-time PRF mirror, whose metadata now also wakes
+rename/IQ. The extra wakeup tag path is not an additional PRF data-write port. Hart
+identity accompanies dispatch and committed-map updates; pools remain shared.
+
+Directed FP reference and coarse-handoff dual-hart tests are recorded in
+`architecture/out-of-order/README.md`. FP/multi-hart default refusals remain pending
+broader qualification. No mixed-residency, timing, power or full ISA closure follows
+from these component and directed results.
+
 #### Issue
 
 When the issue stage gets a new decoded instruction it checks whether

@@ -108,6 +108,13 @@
   logic [Cfg.NrIssuePorts-1:0] is_compressed; \
   logic [Cfg.NrIssuePorts-1:0][Cfg.XLEN-1:0] rs1; \
   logic [Cfg.NrIssuePorts-1:0][Cfg.XLEN-1:0] rs2; \
+  /* Identity of the instruction whose operands are on rs1/rs2 this cycle.   */\
+  /* Under OoO that is the entry the IQ issued, not the one being dispatched.*/\
+  logic [Cfg.NrIssuePorts-1:0] operand_valid; \
+  logic [Cfg.NrIssuePorts-1:0][Cfg.TRANS_ID_BITS-1:0] operand_tid; \
+  /* LSU opcode: AMOs take the STORE path, but a load-reserved does not      */\
+  /* write memory, so fu alone cannot decide the RVFI write mask.            */\
+  ariane_pkg::fu_op lsu_ctrl_op; \
   logic [Cfg.NrCommitPorts-1:0][Cfg.VLEN-1:0] commit_instr_pc; \
   ariane_pkg::fu_op [Cfg.NrCommitPorts-1:0] commit_instr_op; \
   logic [Cfg.NrCommitPorts-1:0][ariane_pkg::REG_ADDR_SIZE-1:0] commit_instr_rs1; \
