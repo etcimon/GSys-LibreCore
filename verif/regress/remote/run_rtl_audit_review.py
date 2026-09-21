@@ -122,9 +122,11 @@ def main():
         names[-1:-1]=['commit_stage.sv','controller.sv']
     if os.environ.get('REVIEW_RTL_COMMIT')=='1':
         names[-1:-1]=['g6lc_sb_keep.sv','g6lc_rvc_enc.sv','g6lc_fe_keep.sv','g6lc_jalr_usable.sv','g6lc_sib_cjalr.sv','scoreboard.sv']
+    # g6lc_iq.sv is in the base source list and calls g6lc_ooo_pkg::ooo_age_*,
+    # so every cell needs the package ahead of it.
+    names[4:4]=['g6lc_ooo_pkg.sv']
     dispatch_mode=os.environ.get('REVIEW_RTL_DISPATCH')=='1' or os.environ.get('REVIEW_RTL_LSQ')=='1' or os.environ.get('REVIEW_RTL_RENAME')=='1'
     if dispatch_mode:
-        names[4:4]=['g6lc_ooo_pkg.sv']
         names+=['g6lc_rename.sv','g6lc_rob.sv','g6lc_lsq.sv','g6lc_prf.sv','g6lc_memdep.sv','g6lc_ooo_dispatch.sv']
     for name in names:shutil.copy2(data/name,source/name)
     # Fault control for the checkpoint-retirement repair: with retirement
@@ -284,7 +286,7 @@ def main():
                              else [(10,'RENAME_CKPT_ALLOC_LEAK')] if leak_fault
                              else [(n,None) for n in range(11)])]
     elif os.environ.get('REVIEW_RTL_LSQ')=='1':
-        configurations=[('lsq','direct',[],[(n,None) for n in range(12)])]
+        configurations=[('lsq','direct',[],[(n,None) for n in range(18)])]
     elif os.environ.get('REVIEW_RTL_TAGE')=='1':
         # Predictor-context ownership: per-slot tagged provider, update-fold
         # ownership, unaligned base/ITTAGE addressing, banked-GHR train folds.
@@ -416,7 +418,7 @@ def main():
                          (13,True,'RENAME_HART_FLUSH_SPILL'),(14,True,'RENAME_HART_REALLOC_FLUSH'),
                          (15,True,'RENAME_HART_REALLOC_FLUSH')]
             elif kind=='rename':trials+=[(0,True,'RENAME_MAP'),(1,True,'RENAME_OLDER_LOST'),(2,True,'RENAME_BUSY_RESURRECT'),(3,True,'RENAME_STALE_LEVEL'),(4,True,'RENAME_CKPT2_UNWIND'),(5,True,'RENAME_CKPT_FULL'),(6,True,'RENAME_EXCLUSIVE'),(7,True,'RENAME_CKPT_NO_RELEASE'),(8,True,'RENAME_RETIRE_WINDOW'),(9,True,'RENAME_FLUSH_ARCH'),(10,True,'RENAME_CKPT_ALLOC_LEAK')]
-            elif kind=='lsq':trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA'),(2,True,'LSQ_COMMIT_DOUBLE_FREE'),(3,True,'LSQ_STL_AGE'),(4,True,'LSQ_AGE_STALL'),(5,True,'LSQ_WRAP_DATA'),(6,True,'LSQ_BYTE_DISJOINT'),(7,True,'LSQ_BYTE_COVER'),(8,True,'LSQ_PARTIAL_NODATA'),(9,True,'LSQ_PARTIAL_MERGE'),(10,True,'LSQ_CANCEL_DROP'),(11,True,'LSQ_FLUSH')]
+            elif kind=='lsq':trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA'),(2,True,'LSQ_COMMIT_DOUBLE_FREE'),(3,True,'LSQ_STL_AGE'),(4,True,'LSQ_AGE_STALL'),(5,True,'LSQ_WRAP_DATA'),(6,True,'LSQ_BYTE_DISJOINT'),(7,True,'LSQ_BYTE_COVER'),(8,True,'LSQ_PARTIAL_NODATA'),(9,True,'LSQ_PARTIAL_MERGE'),(10,True,'LSQ_CANCEL_DROP'),(11,True,'LSQ_FLUSH'),(12,True,'LSQ_VIOLATION'),(13,True,'LSQ_VIOLATION_YOUNGER'),(14,True,'LSQ_VIOLATION_WRAP'),(15,True,'LSQ_VIOLATION_OLDEST'),(16,True,'LSQ_VIOLATION_DISJOINT'),(17,True,'LSQ_VIOLATION_SAMECYCLE')]
             elif dispatch_mode and os.environ.get('REVIEW_RTL_LATE_WAKE')=='1':
                 trials += [(n,True,'DISPATCH_LATE_WAKE_EARLY') for n in (28,29)]
             elif dispatch_mode and hart_dispatch:

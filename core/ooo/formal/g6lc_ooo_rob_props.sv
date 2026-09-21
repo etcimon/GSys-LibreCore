@@ -66,7 +66,13 @@ module g6lc_ooo_rob_props #(
   );
 
   // BMC/prove: start from a forced reset (no free-state induction trap).
-  initial assume (!rst_ni);
+  // `initial assume (!rst_ni)` is rejected by the slang frontend, so drive it
+  // from an initialised register.
+  logic rst_init_q = 1'b1;
+  always_ff @(posedge clk_i) rst_init_q <= 1'b0;
+  always_ff @(posedge clk_i) begin
+    if (rst_init_q) assume (!rst_ni);
+  end
 
   // Legal scoreboard tid indices.
   always_ff @(posedge clk_i) begin
@@ -85,7 +91,7 @@ module g6lc_ooo_rob_props #(
   wire [ROB_W:0]   count_w = dut.count_q;
   wire [ROB_W-1:0] head_w  = dut.head_q;
   wire [ROB_W-1:0] tail_w  = dut.tail_q;
-  wire [ROB_W-1:0] dist    = tail_w - head_w;
+  wire [ROB_W-1:0] dist_w  = tail_w - head_w;
 
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
@@ -95,7 +101,7 @@ module g6lc_ooo_rob_props #(
       assert (full_o == (count_w > ROB_ENTRIES[ROB_W:0] - NR_ALLOC[ROB_W:0]));
       // Circular-buffer occupancy identity.
       if (count_w != ROB_ENTRIES[ROB_W:0])
-        assert (count_w == (ROB_W+1)'(dist));
+        assert (count_w == (ROB_W+1)'(dist_w));
       else
         assert (tail_w == head_w);
     end

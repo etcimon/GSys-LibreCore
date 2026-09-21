@@ -80,6 +80,10 @@ module controller
     input logic hfence_gvma_i,
     // Flush request from commit stage - COMMIT_STAGE
     input logic flush_commit_i,
+    // Committing entry requests refetch from its own PC - COMMIT_STAGE
+    input logic replay_i,
+    // flush_commit_i is a memory-order replay: frontend refetches the same PC
+    output logic mem_replay_pc_o,
     // Flush request from accelerator - ACC_DISPATCHER
     input logic flush_acc_i,
     // U6.1 coarse-grain SMT switch: full pipeline flush, PC comes from PC bank
@@ -109,6 +113,7 @@ module controller
     flush_tlb_vvma_o       = 1'b0;
     flush_tlb_gvma_o       = 1'b0;
     flush_bp_o             = 1'b0;
+    mem_replay_pc_o        = 1'b0;
     // ------------
     // Mis-predict
     // ------------
@@ -250,6 +255,7 @@ module controller
       flush_unissued_instr_o = 1'b1;
       flush_id_o             = 1'b1;
       flush_ex_o             = 1'b1;
+      mem_replay_pc_o        = replay_i;
     end
 
     // ---------------------------------

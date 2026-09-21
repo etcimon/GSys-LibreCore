@@ -1,0 +1,36 @@
+# OoO age key + LSQ alias-validation formal — proves against live g6lc_lsq.
+# Uses yosys-slang so the config_pkg struct parameter elaborates.
+# Run: sby -f core/ooo/formal/g6lc_ooo_age.sby
+# Negative witness: verif/regress/remote/run_ooo_fault_review.py with
+# FAULT_REVIEW_AGE_FORMAL=1 AGE_FORMAL_MUTATE=1 removes the scan and expects FAIL.
+#
+# -DFORMAL is mandatory: the properties live under `ifdef FORMAL`, and a read
+# without the define elaborates a module with zero assertions that "passes".
+# The design_smt2/design_prep logs must show a nonzero assert count.
+
+[options]
+# BMC from forced reset (rst_init_q in props). Depth 14 covers a full window
+# fill (8 allocs), two retirements past the wrap point, two more allocations
+# and a resolving store when allocation and address updates overlap. It matches
+# the yosys-sat depth of the run_ooo_fault_review.py AGE_FORMAL harness, which
+# is the gate of record; abc bmc3 at depth 20 did not finish in 1200 s here.
+mode bmc
+depth 14
+
+[engines]
+# abc bmc3 alone: smtbmc z3 exhausted builder memory on this model and the
+# builder has no native yices. Add a solver only after measuring it.
+abc bmc3
+
+[script]
+# No --keep-hierarchy: every property lives in the props module and reads only
+# DUT ports, so flattening costs nothing and keeps the SMT model small.
+read_slang --std 1800-2017 --top g6lc_ooo_age_props -DFORMAL \
+    config_pkg.sv g6lc_ooo_pkg.sv g6lc_lsq.sv g6lc_ooo_age_props.sv
+prep -top g6lc_ooo_age_props
+
+[files]
+../../include/config_pkg.sv
+../g6lc_ooo_pkg.sv
+../g6lc_lsq.sv
+g6lc_ooo_age_props.sv

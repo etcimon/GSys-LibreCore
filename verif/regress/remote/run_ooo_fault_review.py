@@ -170,6 +170,49 @@ def run_formal():
     print(json.dumps(records, indent=2))
 
 
+def run_age_formal():
+    data, out = Path(os.environ['TH_DATA_DIR']), Path(os.environ['TH_OUT_DIR'])
+    source = out / 'source'
+    source.mkdir()
+    names = ['config_pkg.sv', 'g6lc_ooo_pkg.sv', 'g6lc_lsq.sv', 'g6lc_ooo_age_props.sv']
+    mutation = os.environ.get('AGE_FORMAL_MUTATE') == '1'
+    for name in names:
+        text = (data / name).read_text()
+        if mutation and name == 'g6lc_lsq.sv':
+            old = "    mem_violation_o = |viol_cand;"
+            if text.count(old) != 1:
+                raise ValueError('age formal mutation site changed')
+            text = text.replace(old, "    mem_violation_o = 1'b0;")
+        (source / name).write_text(text)
+    (out / 'sources.json').write_text(json.dumps({name: sha(source / name) for name in names}, indent=2))
+    top = 'g6lc_ooo_age_props'
+    depth = int(os.environ.get('AGE_FORMAL_DEPTH', '14'))
+    common = ('read_slang --std 1800-2017 --top ' + top + ' -DFORMAL ' +
+              ' '.join(str(source / name) for name in names) +
+              '\nprep -top ' + top + '\nasync2sync\nflatten\nchformal -cover -remove\nchformal -lower\nmemory_map\nopt\n' +
+              'select -assert-min 1 t:$assert\n')
+    records = []
+    for mode in (['mutation'] if mutation else ['prove', 'cover']):
+        witness = out / f'{mode}-witness.json'
+        script = out / f'{mode}.ys'
+        goal = '-prove viol 0' if mode == 'cover' else '-prove-asserts'
+        script.write_text(common + f'sat -seq {depth} -set-assumes {goal} -verify -show-ports -dump_json {witness}\n')
+        with (out / f'{mode}.log').open('w') as log:
+            rc = subprocess.run(['yosys', '-s', str(script)], stdout=log, stderr=subprocess.STDOUT,
+                                timeout=int(os.environ.get('AGE_FORMAL_TIMEOUT', '900'))).returncode
+        text = (out / f'{mode}.log').read_text()
+        asserts_present = 'select -assert-min' not in text or 'Assertion failed' not in text
+        matched = asserts_present and ((rc == 0 and 'no model found: SUCCESS!' in text) if mode == 'prove' else (
+            rc != 0 and 'model found: FAIL!' in text and witness.is_file()))
+        records.append({'mode': mode, 'depth': depth, 'rc': rc, 'matched': matched, 'assertsPresent': asserts_present,
+                        'scope': 'live g6lc_lsq (2 ld / 2 st, 8 slots) under a scoreboard window model: age key equals '
+                                 'allocation order, violation scan complete/sound/oldest; not a full LSU or core proof'})
+        (out / 'results.json').write_text(json.dumps(records, indent=2))
+        if not matched:
+            raise RuntimeError(f'age formal mismatch: {mode}')
+    print(json.dumps(records, indent=2))
+
+
 def run_synth():
     data, out = Path(os.environ['TH_DATA_DIR']), Path(os.environ['TH_OUT_DIR'])
     source = out / 'source'
@@ -369,6 +412,8 @@ def main():
         return run_synth()
     if os.environ.get('FAULT_REVIEW_FORMAL') == '1':
         return run_formal()
+    if os.environ.get('FAULT_REVIEW_AGE_FORMAL') == '1':
+        return run_age_formal()
     if os.environ.get('FAULT_REVIEW_LEAF') == '1':
         return run_leaf()
     source = Path(os.environ['FAULT_REVIEW_RUN'])

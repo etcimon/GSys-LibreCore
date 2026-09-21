@@ -63,6 +63,19 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## Age key and alias validation (2026-09-21, T1)
+
+`tb_g6lc_review_lsq` scenarios 12–17 (`REVIEW_RTL_LSQ=1`, 18 positives + 18 negatives): violation
+reported for a load resolved before an older overlapping store, none for a younger store, wrap
+across the tid window, oldest of two offending loads, byte-disjoint same word, and same-cycle
+store/load address arrival. `core/ooo/formal/g6lc_ooo_age.sby` (abc bmc3, depth 14, 74 asserts)
+proves the age key equals allocation order under the scoreboard window model, the scan is complete
+and sound and reports the oldest load; `run_ooo_fault_review.py FAULT_REVIEW_AGE_FORMAL=1` repeats
+that with yosys-sat (prove, reachable-violation cover, `AGE_FORMAL_MUTATE=1` removed-scan
+counterexample). Formal runs must show a nonzero assert count: the first runs, and the pre-existing
+ROB task, had elaborated zero assertions because `-DFORMAL` was missing. Full-core controls:
+integer-OoO frozen ELFs match Spike rows exactly, protected in-order anchor unchanged.
+
 ## FP result ownership after transaction-ID reuse (2026-09-21)
 
 `tb_g6lc_review_fp_lifetime` in `verif/tb/core/tb_g6lc_rtl_review.sv` drives the real `fpu_wrap`,

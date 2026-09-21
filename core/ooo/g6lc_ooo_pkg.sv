@@ -21,4 +21,21 @@ package g6lc_ooo_pkg;
     return (rob_entries <= 2) ? 1 : $clog2(rob_entries);
   endfunction
 
+  // Program-order key: circular trans_id distance from the oldest live slot.
+  // Sound only while both operands are scoreboard-live; width is the config's
+  // TRANS_ID_BITS so the modular subtraction wraps exactly like the scoreboard.
+  function automatic logic ooo_age_older(input int unsigned width, input logic [31:0] a,
+                                         input logic [31:0] b, input logic [31:0] cp);
+    logic [31:0] mask;
+    mask = (32'd1 << width) - 32'd1;
+    return ((a - cp) & mask) < ((b - cp) & mask);
+  endfunction
+
+  function automatic logic [31:0] ooo_age_dist(input int unsigned width, input logic [31:0] a,
+                                               input logic [31:0] cp);
+    logic [31:0] mask;
+    mask = (32'd1 << width) - 32'd1;
+    return (a - cp) & mask;
+  endfunction
+
 endpackage

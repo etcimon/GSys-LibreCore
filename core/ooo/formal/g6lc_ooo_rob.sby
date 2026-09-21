@@ -10,15 +10,20 @@ mode bmc
 depth 16
 
 [engines]
-smtbmc z3
+# abc bmc3: smtbmc z3 made no progress in 1200 s at 32 GB on this four-assert
+# model (2026-09-21); bit-level BMC finishes it.
+abc bmc3
 
 [script]
 # sv-elab/slang is integrated into Yosys from v0.67, so `read_slang` needs no
 # plugin. Loading one when the .so is absent is a hard error, and on a recent
 # Yosys the plugin would only shadow the built-in frontend -- so do not load it.
 # `build-platform tools install formal` provisions a Yosys new enough for this.
-# --keep-hierarchy so hierarchical asserts (dut.count_q) survive prep.
-read_slang --std 1800-2017 --keep-hierarchy --top g6lc_ooo_rob_props g6lc_rob.sv g6lc_ooo_rob_props.sv
+# No --keep-hierarchy: slang refuses a hierarchical reference (dut.count_q)
+# across a preserved boundary; the flattened design keeps the asserts.
+# -DFORMAL is mandatory: the properties live under `ifdef FORMAL`. Without it
+# this task elaborated zero assertions and reported PASS (found 2026-09-21).
+read_slang --std 1800-2017 --top g6lc_ooo_rob_props -DFORMAL g6lc_rob.sv g6lc_ooo_rob_props.sv
 prep -top g6lc_ooo_rob_props
 
 [files]

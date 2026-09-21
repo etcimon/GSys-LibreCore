@@ -171,6 +171,8 @@ module issue_stage
     output scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0] commit_instr_o,
     // Instruction is cancelled - COMMIT_STAGE
     output logic [CVA6Cfg.NrCommitPorts-1:0] commit_drop_o,
+    // Committing slot requests a refetch from its own PC - COMMIT_STAGE
+    output logic [CVA6Cfg.NrCommitPorts-1:0] commit_replay_o,
     // Commit acknowledge - COMMIT_STAGE
     input logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack_i,
     // Issue stall - PERF_COUNTERS
@@ -236,6 +238,9 @@ module issue_stage
 
   logic x_transaction_accepted_iro_sb, x_issue_writeback_iro_sb;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] x_id_iro_sb;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live;
+  logic mem_violation;
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0] mem_violation_id;
 
   // ---------------------------------------------------------
   // 2. Manage instructions in a scoreboard
@@ -255,6 +260,9 @@ module issue_stage
       .sb_empty_o              (sb_empty_o),
       .spec_cancel_o           (spec_cancel_o),
       .cancelled_mask_o        (cancelled_mask_o),
+      .sb_live_o               (sb_live),
+      .mem_violation_i         (mem_violation),
+      .mem_violation_id_i      (mem_violation_id),
       .flush_unissued_instr_i,
       .flush_i,
       .x_transaction_accepted_i(x_transaction_accepted_iro_sb),
@@ -262,6 +270,7 @@ module issue_stage
       .x_id_i                  (x_id_iro_sb),
       .commit_instr_o,
       .commit_drop_o,
+      .commit_replay_o,
       .commit_ack_i,
       .decoded_instr_i         (decoded_instr_i),
       .orig_instr_i,
@@ -309,6 +318,7 @@ module issue_stage
         .flush_i          (flush_i),
         .flush_unissued_i (flush_unissued_instr_i),
         .cancelled_mask_i (cancelled_mask_o),
+        .sb_live_i        (sb_live),
         .dispatch_sbe_i   (issue_instr_sb),
         .dispatch_orig_i  (orig_instr_sb),
         .dispatch_valid_i (issue_instr_valid_sb),
@@ -341,9 +351,13 @@ module issue_stage
         .iq_full_o        (ooo_iq_full_o),
         .lsq_stall_o      (ooo_lsq_stall_o),
         .rename_stall_o   (ooo_rename_stall_o),
-        .stl_forward_o    (ooo_stl_forward_o)
+        .stl_forward_o    (ooo_stl_forward_o),
+        .mem_violation_o    (mem_violation),
+        .mem_violation_id_o (mem_violation_id)
     );
   end else if (CVA6Cfg.SliceOoOEn) begin : gen_slice_ooo
+    assign mem_violation    = 1'b0;
+    assign mem_violation_id = '0;
     assign ooo_op_a   = '0;
     assign ooo_op_b   = '0;
     assign ooo_op_a_v = '0;
@@ -376,6 +390,8 @@ module issue_stage
     );
   end else begin : gen_inorder_issue
     // Netlist-identity path: SB dispatch is FU issue
+    assign mem_violation    = 1'b0;
+    assign mem_violation_id = '0;
     assign issue_instr_iro = issue_instr_sb;
     assign orig_instr_iro  = orig_instr_sb;
     assign issue_ack_sb    = issue_ack_iro;

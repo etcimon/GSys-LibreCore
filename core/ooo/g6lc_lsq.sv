@@ -20,6 +20,8 @@ module g6lc_lsq #(
     input  logic flush_i,
     // U5 production: drop entries whose SB tid was cancelled
     input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]            cancelled_mask_i,
+    // Scoreboard issued mask (assertions only)
+    input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]            sb_live_i,
     // Multi-port allocate at dispatch
     input  logic [NR_ALLOC-1:0]                         ld_alloc_i,
     input  logic [NR_ALLOC-1:0]                         st_alloc_i,
@@ -67,7 +69,9 @@ module g6lc_lsq #(
     output logic        stl_forward_o,
     output logic [CVA6Cfg.XLEN-1:0] stl_data_o,
     output logic        stl_stall_o,
-    output logic        lsq_busy_o
+    output logic        lsq_busy_o,
+    output logic        mem_violation_o,
+    output logic [CVA6Cfg.TRANS_ID_BITS-1:0] mem_violation_id_o
 );
 
   typedef struct packed {
@@ -85,6 +89,7 @@ module g6lc_lsq #(
     logic                             addr_v;
     logic [CVA6Cfg.TRANS_ID_BITS-1:0] id;
     logic [CVA6Cfg.PLEN-1:0]          addr;
+    logic [1:0]                       size;
   } ld_ent_t;
 
   st_ent_t [ST_ENTRIES-1:0] st_q, st_d;
@@ -161,6 +166,7 @@ module g6lc_lsq #(
             ld_d[i].addr_v = 1'b0;
             ld_d[i].id = alloc_id_i[p];
             ld_d[i].addr = '0;
+            ld_d[i].size = '0;
             placed = 1'b1;
           end
         end
@@ -197,6 +203,7 @@ module g6lc_lsq #(
             if (ld_q[i].valid && ld_q[i].id == addr_id_i[u]) begin
               ld_d[i].addr_v = 1'b1;
               ld_d[i].addr   = addr_i[u];
+              ld_d[i].size   = addr_size_i[u];
             end
         end
       end
@@ -300,9 +307,11 @@ module g6lc_lsq #(
       found_match = 1'b0;
       best        = 0;
       best_dist   = '0;
-      ld_dist     = ld_query_id_i - commit_ptr_i;
+      ld_dist     = CVA6Cfg.TRANS_ID_BITS'(g6lc_ooo_pkg::ooo_age_dist(
+                        CVA6Cfg.TRANS_ID_BITS, 32'(ld_query_id_i), 32'(commit_ptr_i)));
       for (int unsigned i = 0; i < ST_ENTRIES; i++) begin
-        sdist = st_q[i].id - commit_ptr_i;
+        sdist = CVA6Cfg.TRANS_ID_BITS'(g6lc_ooo_pkg::ooo_age_dist(
+                    CVA6Cfg.TRANS_ID_BITS, 32'(st_q[i].id), 32'(commit_ptr_i)));
         if (st_q[i].valid && sdist < ld_dist) begin
           if (!st_q[i].addr_v) begin
             // Unresolved OLDER store may yet alias: stall regardless of any
@@ -334,6 +343,58 @@ module g6lc_lsq #(
     end
   end
 
+  // Alias validation: a store address arriving after a younger load already
+  // resolved (and therefore read) overlapping bytes means that load may hold
+  // stale data. Report the oldest such load; replaying it squashes the rest.
+  logic [LD_ENTRIES-1:0] viol_cand;
+  always_comb begin
+    automatic logic [LANES-1:0] sbe_v, lbe_v;
+    automatic logic [CVA6Cfg.PLEN-1:0] ld_addr_now;
+    automatic logic [1:0] ld_size_now;
+    automatic logic ld_addr_v_now;
+    automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] best_id;
+    automatic logic [31:0] best_dist, this_dist;
+    viol_cand = '0;
+    sbe_v = '0;
+    lbe_v = '0;
+    ld_addr_now = '0;
+    ld_size_now = '0;
+    ld_addr_v_now = 1'b0;
+    best_id = '0;
+    best_dist = 32'hFFFF_FFFF;
+    this_dist = '0;
+    for (int unsigned u = 0; u < NR_UPDATE; u++) begin
+      if (addr_valid_i[u] && addr_is_st_i[u]) begin
+        sbe_v = lane_be(addr_i[u], addr_size_i[u]);
+        for (int unsigned j = 0; j < LD_ENTRIES; j++) begin
+          ld_addr_v_now = ld_q[j].addr_v;
+          ld_addr_now   = ld_q[j].addr;
+          ld_size_now   = ld_q[j].size;
+          for (int unsigned v = 0; v < NR_UPDATE; v++)
+            if (addr_valid_i[v] && !addr_is_st_i[v] && ld_q[j].valid && ld_q[j].id == addr_id_i[v]) begin
+              ld_addr_v_now = 1'b1;
+              ld_addr_now   = addr_i[v];
+              ld_size_now   = addr_size_i[v];
+            end
+          lbe_v = lane_be(ld_addr_now, ld_size_now);
+          if (ld_q[j].valid && ld_addr_v_now &&
+              g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(addr_id_i[u]), 32'(ld_q[j].id), 32'(commit_ptr_i)) &&
+              same_word(ld_addr_now, addr_i[u]) && ((sbe_v & lbe_v) != '0))
+            viol_cand[j] = 1'b1;
+        end
+      end
+    end
+    mem_violation_o = |viol_cand;
+    for (int unsigned j = 0; j < LD_ENTRIES; j++) begin
+      this_dist = g6lc_ooo_pkg::ooo_age_dist(CVA6Cfg.TRANS_ID_BITS, 32'(ld_q[j].id), 32'(commit_ptr_i));
+      if (viol_cand[j] && this_dist < best_dist) begin
+        best_dist = this_dist;
+        best_id = ld_q[j].id;
+      end
+    end
+    mem_violation_id_o = best_id;
+  end
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       st_q <= '0;
@@ -343,5 +404,16 @@ module g6lc_lsq #(
       ld_q <= ld_d;
     end
   end
+
+  //pragma translate_off
+  for (genvar i = 0; i < ST_ENTRIES; i++) begin : gen_st_live_assert
+    ooo_lsq_st_live: assert property (@(posedge clk_i) disable iff (!rst_ni)
+        st_q[i].valid |-> sb_live_i[st_q[i].id]);
+  end
+  for (genvar i = 0; i < LD_ENTRIES; i++) begin : gen_ld_live_assert
+    ooo_lsq_ld_live: assert property (@(posedge clk_i) disable iff (!rst_ni)
+        ld_q[i].valid |-> sb_live_i[ld_q[i].id]);
+  end
+  //pragma translate_on
 
 endmodule

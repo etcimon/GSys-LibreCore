@@ -134,7 +134,7 @@ module store_buffer
   // ahead of first use: Verilator tolerates a later declaration, slang does not.
   function automatic logic ooo_older(input logic [CVA6Cfg.TRANS_ID_BITS-1:0] a,
                                      input logic [CVA6Cfg.TRANS_ID_BITS-1:0] b);
-    return (a - commit_trans_id_i) < (b - commit_trans_id_i);
+    return g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(a), 32'(b), 32'(commit_trans_id_i));
   endfunction
 
   // Visibility of a *speculative* store to the querying load. Commit-queue

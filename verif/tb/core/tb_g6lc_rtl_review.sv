@@ -107,9 +107,10 @@ module tb_g6lc_review_fp_lifetime;
   scoreboard #(.CVA6Cfg(C),.bp_resolve_t(bp_t),.exception_t(exception_t),
     .scoreboard_entry_t(sbe_t),.forwarding_t(fwd_t),.writeback_t(wb_t),.rs3_len_t(logic[63:0])) sb(
     .clk_i(clk),.rst_ni(rst_n),.sb_full_o(sb_full),.sb_empty_o(sb_empty),.spec_cancel_o(),
-    .cancelled_mask_o(cancel),.flush_unissued_instr_i(flush_unissued),.flush_i(flush_id),
+    .cancelled_mask_o(cancel),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),
+    .flush_unissued_instr_i(flush_unissued),.flush_i(flush_id),
     .x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),.x_id_i('0),
-    .commit_instr_o(committed),.commit_drop_o(drop),.commit_ack_i(ca),
+    .commit_instr_o(committed),.commit_drop_o(drop),.commit_replay_o(),.commit_ack_i(ca),
     .decoded_instr_i(decoded),.orig_instr_i('0),.decoded_instr_valid_i(dv),.decoded_instr_ack_o(da),
     .issue_instr_o(issued),.orig_instr_o(),.issue_instr_valid_o(iv),.issue_ack_i(ia),.fwd_o(fwd),
     .resolved_branch_i(branch),.trans_id_i(wid),.wbdata_i(wd),.ex_i(wx),.wt_valid_i(wv),
@@ -123,7 +124,7 @@ module tb_g6lc_review_fp_lifetime;
     .halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(ex_event),.set_debug_pc_i(1'b0),
     .resolved_branch_i(branch),.flush_csr_i(1'b0),.fence_i_i(1'b0),.fence_i(1'b0),
     .sfence_vma_i(1'b0),.hfence_vvma_i(1'b0),.hfence_gvma_i(1'b0),.flush_commit_i(1'b0),
-    .flush_acc_i(1'b0),.smt_switch_i(1'b0));
+    .replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0));
   fpu_wrap #(.CVA6Cfg(C),.exception_t(exception_t),.fu_data_t(fu_typed_t)) fpu(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush_ex),.cancelled_mask_i(cancel),.fpu_valid_i(fp_in && !DIVIDER),.fpu_ready_o(fpu_ready),
     .fu_data_i(fp_data),.fpu_fmt_i(2'b01),.fpu_rm_i(3'b000),.fpu_frm_i(3'b000),.fpu_prec_i('0),
@@ -463,7 +464,7 @@ module tb_g6lc_review_iq;
     .disp_rs3_ready_i('1),.fwb_valid_i('0),.fwb_prd_i('0),
     .disp_rs1_ready_i(r1),.disp_rs2_ready_i(r2),.disp_ack_o(da),.full_o(full),.wb_valid_i(wv),.wb_prd_i(wp),
     .issue_sbe_o(is),.issue_orig_o(ii),.issue_prd_o(ip),.issue_valid_o(iv),.issue_ack_i(ia),.mem_stall_i(mem_stall),
-    .st_live_mask_i('0),.commit_ptr_i('0));
+    .st_live_mask_i('0),.commit_ptr_i('0),.sb_live_i('1));
   task automatic tick;
     clk=1; #2; clk=0; #2;
   endtask
@@ -1092,13 +1093,14 @@ module tb_g6lc_review_lsq;
   logic [3:0] ld_id='0,commit_ptr='0;
   logic flush='0;
   logic [15:0] cancel_mask='0;
-  logic pend,fwd,stall,busy,ldf,stf;
+  logic pend,fwd,stall,busy,ldf,stf,viol;
   logic [2:0] ldfree,stfree;
   logic [15:0] st_mask;
   logic [63:0] fwd_data;
+  logic [3:0] viol_id;
   int scenario;bit negative;
   g6lc_lsq #(.CVA6Cfg(C),.LD_ENTRIES(4),.ST_ENTRIES(4),.NR_ALLOC(2),.NR_UPDATE(2)) dut(
-    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancel_mask),
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancel_mask),.sb_live_i('1),
     .ld_alloc_i(ld_alloc),.st_alloc_i(st_alloc),.alloc_id_i(alloc_id),
     .ld_full_o(ldf),.st_full_o(stf),.ld_free_o(ldfree),.st_free_o(stfree),
     .addr_valid_i(addr_v),.addr_id_i(addr_id),.addr_i(addr),
@@ -1109,12 +1111,26 @@ module tb_g6lc_review_lsq;
     .ld_query_i(ld_query),.ld_query_addr_i(ld_addr),.ld_query_size_i(ld_size),
     .ld_query_id_i(ld_id),
     .st_live_mask_o(st_mask),.store_pending_o(pend),.stl_forward_o(fwd),
-    .stl_data_o(fwd_data),.stl_stall_o(stall),.lsq_busy_o(busy));
+    .stl_data_o(fwd_data),.stl_stall_o(stall),.lsq_busy_o(busy),
+    .mem_violation_o(viol),.mem_violation_id_o(viol_id));
   // Same clocking discipline as the dispatch fixture: free-running clock, drive
   // on the falling edge, sample after the rising edge settles.
   always #5 clk = ~clk;
   task automatic drive; @(negedge clk); endtask
   task automatic presample; #4; endtask
+  // Alias-validation stimulus: a load whose address is already known, then a
+  // store address arriving on port 0. The load's address may arrive on port 1
+  // in the same cycle as the store when same_cycle is set.
+  task automatic resolve_load(input logic [3:0] id,input logic [55:0] a,input logic [1:0] sz);
+    addr_v=2'b01;addr_is_st=2'b00;addr_id[0]=id;addr[0]=a;addr_size[0]=sz;
+    drive();addr_v='0;addr_id='0;addr='0;addr_size='0;
+  endtask
+  task automatic resolve_store(input logic [3:0] id,input logic [55:0] a,input logic [1:0] sz,
+                               input bit same_cycle=0,input logic [3:0] ld=4'd0,
+                               input logic [55:0] la=56'd0,input logic [1:0] lsz=2'b11);
+    addr_v=same_cycle?2'b11:2'b01;addr_is_st=2'b01;addr_id[0]=id;addr[0]=a;addr_size[0]=sz;
+    if(same_cycle)begin addr_id[1]=ld;addr[1]=la;addr_size[1]=lsz;end
+  endtask
   initial begin
     scenario=0;negative=$test$plusargs("oracle_negative");
     void'($value$plusargs("scenario=%d",scenario));
@@ -1306,6 +1322,81 @@ module tb_g6lc_review_lsq;
         if(pend!==(negative?1'b1:1'b0)||busy)
           $fatal(1,"LSQ_FLUSH pend=%b busy=%b",pend,busy);
       end
+      // Alias validation: the load (tid 2) resolved before the OLDER store
+      // (tid 1) whose bytes it overlaps, so its value may be stale. The scan
+      // must report the load in the cycle the store address arrives.
+      12:begin
+        st_alloc=2'b01;alloc_id[0]=4'd1;ld_alloc=2'b10;alloc_id[1]=4'd2;
+        drive();st_alloc='0;ld_alloc='0;alloc_id='0;
+        resolve_load(4'd2,56'h2000,2'b11);
+        presample();
+        if(viol)$fatal(1,"LSQ_VIOLATION_EARLY");
+        resolve_store(4'd1,56'h2000,2'b11);
+        presample();
+        if(viol!==(negative?1'b0:1'b1)||(viol&&viol_id!==4'd2))
+          $fatal(1,"LSQ_VIOLATION viol=%b id=%0d",viol,viol_id);
+        addr_v='0;
+      end
+      // A YOUNGER store (tid 3) resolving after the load (tid 2) is program
+      // order, not a violation.
+      13:begin
+        ld_alloc=2'b01;alloc_id[0]=4'd2;st_alloc=2'b10;alloc_id[1]=4'd3;
+        drive();st_alloc='0;ld_alloc='0;alloc_id='0;
+        resolve_load(4'd2,56'h2000,2'b11);
+        resolve_store(4'd3,56'h2000,2'b11);
+        presample();
+        if(viol!==(negative?1'b1:1'b0))$fatal(1,"LSQ_VIOLATION_YOUNGER viol=%b",viol);
+        addr_v='0;
+      end
+      // Wraparound: commit_ptr=14, store tid 15 is OLDER than load tid 0.
+      14:begin
+        commit_ptr=4'd14;
+        st_alloc=2'b01;alloc_id[0]=4'd15;ld_alloc=2'b10;alloc_id[1]=4'd0;
+        drive();st_alloc='0;ld_alloc='0;alloc_id='0;
+        resolve_load(4'd0,56'h2008,2'b11);
+        resolve_store(4'd15,56'h2008,2'b11);
+        presample();
+        if(viol!==(negative?1'b0:1'b1)||(viol&&viol_id!==4'd0))
+          $fatal(1,"LSQ_VIOLATION_WRAP viol=%b id=%0d",viol,viol_id);
+        addr_v='0;commit_ptr='0;
+      end
+      // Two resolved loads (tids 2 and 3) overlap the store (tid 1): the OLDEST
+      // offending load is reported, because replaying it squashes the other.
+      15:begin
+        st_alloc=2'b01;alloc_id[0]=4'd1;ld_alloc=2'b10;alloc_id[1]=4'd2;
+        drive();st_alloc='0;ld_alloc='0;alloc_id='0;
+        ld_alloc=2'b01;alloc_id[0]=4'd3;
+        drive();ld_alloc='0;alloc_id='0;
+        resolve_load(4'd3,56'h2000,2'b11);
+        resolve_load(4'd2,56'h2000,2'b11);
+        resolve_store(4'd1,56'h2000,2'b11);
+        presample();
+        if(!viol||viol_id!==(negative?4'd3:4'd2))
+          $fatal(1,"LSQ_VIOLATION_OLDEST viol=%b id=%0d",viol,viol_id);
+        addr_v='0;
+      end
+      // Byte-disjoint in the same word: SB at 0x2000 versus LH at 0x2002.
+      16:begin
+        st_alloc=2'b01;alloc_id[0]=4'd1;ld_alloc=2'b10;alloc_id[1]=4'd2;
+        drive();st_alloc='0;ld_alloc='0;alloc_id='0;
+        resolve_load(4'd2,56'h2002,2'b01);
+        resolve_store(4'd1,56'h2000,2'b00);
+        presample();
+        if(viol!==(negative?1'b1:1'b0))$fatal(1,"LSQ_VIOLATION_DISJOINT viol=%b",viol);
+        addr_v='0;
+      end
+      // Same cycle: the load address (port 1) and the older store address
+      // (port 0) arrive together; the load has still read before the store
+      // was visible, so it is a violation.
+      17:begin
+        st_alloc=2'b01;alloc_id[0]=4'd1;ld_alloc=2'b10;alloc_id[1]=4'd2;
+        drive();st_alloc='0;ld_alloc='0;alloc_id='0;
+        resolve_store(4'd1,56'h2000,2'b11,1,4'd2,56'h2000,2'b11);
+        presample();
+        if(viol!==(negative?1'b0:1'b1)||(viol&&viol_id!==4'd2))
+          $fatal(1,"LSQ_VIOLATION_SAMECYCLE viol=%b id=%0d",viol,viol_id);
+        addr_v='0;
+      end
       default:$fatal(1,"LSQ_SCENARIO");
     endcase
     $display("RTL_REVIEW_PASS lsq scenario=%0d",scenario);$finish;
@@ -1353,6 +1444,7 @@ module tb_g6lc_review_dispatch;
   logic [1:0][63:0] cm_wdata='0;
   g6lc_ooo_dispatch #(.CVA6Cfg(C),.scoreboard_entry_t(sbe_t)) dut(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(dispatch_flush),.flush_unissued_i(redirect_flush),.cancelled_mask_i(cancel_mask),
+    .sb_live_i('1),
     .dispatch_sbe_i(ds),.dispatch_orig_i('0),.dispatch_valid_i(dv),.dispatch_ack_o(da),
     .issue_sbe_o(issued),.issue_orig_o(orig),.issue_valid_o(iv),.issue_ack_i(issue_accept),
     .issue_op_a_o(op_a),.issue_op_b_o(op_b),.issue_op_a_valid_o(op_a_valid),.issue_op_b_valid_o(op_b_valid),
@@ -1360,7 +1452,8 @@ module tb_g6lc_review_dispatch;
     .commit_we_i(cm_we),.commit_wdata_i(cm_wdata),
     .commit_ack_i(cm_ack),.commit_instr_i(cm_instr),.commit_ptr_i(cp),
     .mispredict_i(mispredict),.mispredict_id_i(mis_id),
-    .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o());
+    .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o(),
+    .mem_violation_o(),.mem_violation_id_o());
   // Free-running clock. The clock must NOT be driven from the stimulus process:
   // the previous hand-rolled `tick` (clk=1;#2;clk=0;#2) made results depend on
   // the simulator's optimisation level, which destroyed the fixture's value as
@@ -2320,12 +2413,12 @@ module tb_g6lc_review_wfi;
   always #5 clk=~clk;
   commit_stage #(.CVA6Cfg(C),.exception_t(exception_t),.scoreboard_entry_t(sbe_t)) dut(
     .clk_i(clk),.rst_ni(rst_n),.halt_i(halt),.flush_dcache_i(1'b0),.exception_o(),
-    .single_step_i(1'b0),.commit_instr_i(entry),.commit_drop_i(drop),.commit_ack_o(ack),
+    .single_step_i(1'b0),.commit_instr_i(entry),.commit_drop_i(drop),.commit_replay_i('0),.commit_ack_o(ack),
     .commit_macro_ack_o(),.waddr_o(),.wdata_o(),.we_gpr_o(),.whart_o(),.we_fpr_o(),
     .amo_resp_i('0),.pc_o(),.csr_op_o(),.csr_wdata_o(),.csr_rdata_i('0),
     .csr_write_fflags_o(),.csr_exception_i(csr_ex),.commit_lsu_o(),.commit_lsu_ready_i(1'b1),
     .commit_tran_id_o(),.amo_valid_commit_o(),.no_st_pending_i(1'b1),.commit_csr_o(commit_csr),
-    .fence_i_o(),.fence_o(),.flush_commit_o(flush_commit),.sfence_vma_o(),
+    .fence_i_o(),.fence_o(),.flush_commit_o(flush_commit),.replay_o(),.sfence_vma_o(),
     .hfence_vvma_o(),.hfence_gvma_o(),.shared_tlb_flush_busy_i(1'b0),
     .break_from_trigger_i(1'b0),.dirty_fp_state_o());
   controller #(.CVA6Cfg(C),.bp_resolve_t(bp_t)) ctrl(
@@ -2336,7 +2429,7 @@ module tb_g6lc_review_wfi;
     .halt_acc_i(1'b0),.halt_frontend_o(),.halt_o(),.eret_i(1'b0),.ex_valid_i(1'b0),
     .set_debug_pc_i(1'b0),.resolved_branch_i('0),.flush_csr_i(1'b0),.fence_i_i(1'b0),
     .fence_i(1'b0),.sfence_vma_i(1'b0),.hfence_vvma_i(1'b0),.hfence_gvma_i(1'b0),
-    .flush_commit_i(flush_commit),.flush_acc_i(1'b0),.smt_switch_i(1'b0));
+    .flush_commit_i(flush_commit),.replay_i(1'b0),.mem_replay_pc_o(),.flush_acc_i(1'b0),.smt_switch_i(1'b0));
   initial begin
     scenario=0;negative=$test$plusargs("oracle_negative");
     void'($value$plusargs("scenario=%d",scenario));
@@ -2449,10 +2542,11 @@ module tb_g6lc_review_commit;
       .scoreboard_entry_t(scoreboard_entry_t),.forwarding_t(forwarding_t),
       .writeback_t(writeback_t),.rs3_len_t(rs3_len_t)) dut (
     .clk_i(clk),.rst_ni(rst_n),.sb_full_o(sb_full),.sb_empty_o(),.spec_cancel_o(spec_cancel),
-    .cancelled_mask_o(cancelled_mask),.flush_unissued_instr_i(flush_unissued),
+    .cancelled_mask_o(cancelled_mask),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),
+    .flush_unissued_instr_i(flush_unissued),
     .flush_i(flush),.x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),
     .x_id_i('0),.commit_instr_o(commit_instr),.commit_drop_o(commit_drop),
-    .commit_ack_i(commit_ack),.decoded_instr_i(decoded),.orig_instr_i(orig),
+    .commit_replay_o(),.commit_ack_i(commit_ack),.decoded_instr_i(decoded),.orig_instr_i(orig),
     .decoded_instr_valid_i(decoded_valid),.decoded_instr_ack_o(decoded_ack),
     .issue_instr_o(issue_instr),.orig_instr_o(orig_o),
     .issue_instr_valid_o(issue_valid),.issue_ack_i(issue_ack),.fwd_o(fwd),

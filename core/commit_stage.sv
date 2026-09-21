@@ -39,6 +39,7 @@ module commit_stage
     input scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0] commit_instr_i,
     // The instruction is cancelled - ISSUE_STAGE
     input logic [CVA6Cfg.NrCommitPorts-1:0] commit_drop_i,
+    input logic [CVA6Cfg.NrCommitPorts-1:0] commit_replay_i,
     // Acknowledge that we are indeed committing - ISSUE_STAGE
     output logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack_o,
     // Acknowledge that we are indeed committing - CSR_REGFILE
@@ -85,6 +86,8 @@ module commit_stage
     output logic fence_o,
     // Request a pipeline flush - CONTROLLER
     output logic flush_commit_o,
+    // A dropped entry requests refetch from its own PC (memory-order replay)
+    output logic replay_o,
     // Flush TLBs and pipeline - CONTROLLER
     output logic sfence_vma_o,
     // TO_BE_COMPLETED - CONTROLLER
@@ -202,11 +205,16 @@ module commit_stage
     hfence_gvma_o = 1'b0;
     csr_write_fflags_o = 1'b0;
     flush_commit_o = 1'b0;
+    replay_o = 1'b0;
 
     // SpeculativeSb: drop cancelled entries with no architectural side-effects.
     // Must not wait on LSU/AMO readiness (store path used to stall even on drop).
     if (commit_drop_i[0] && !halt_i) begin
       commit_ack_o[0] = 1'b1;
+      if (commit_replay_i[0]) begin
+        flush_commit_o = 1'b1;
+        replay_o = 1'b1;
+      end
       // A dropped entry is squashed: it performs no architectural write.
       // firmware-boot-principles.md SE red line "Cancelled writeback" -- forcing
       // a GPR write for a cancelled CTRL_FLOW/LOAD makes speculation visible
@@ -398,6 +406,7 @@ module commit_stage
       // mtval=0x12b2a. Not a dual-commit residual; see ITERATION.md.
       if (commit_ack_o[0] && commit_instr_i[1].valid
                                 && !halt_i
+                                && !commit_replay_i[0] && !commit_replay_i[1]
                                 && !(commit_instr_i[0].fu inside {CSR})
                                 && !flush_dcache_i
                                 && !(CVA6Cfg.RVA && instr_0_is_amo)

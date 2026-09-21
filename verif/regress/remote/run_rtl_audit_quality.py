@@ -41,7 +41,7 @@ module leaf import ariane_pkg::*; import audit_types::*;
  .disp_prs1_i(p1),.disp_prs2_i(p2),.disp_prd_i(pd),.disp_rs1_ready_i(r1),.disp_rs2_ready_i(r2),
  .disp_ack_o(da),.full_o(full),.wb_valid_i(wv),.wb_prd_i(wp),.issue_sbe_o(issued),.issue_orig_o(instruction),
  .issue_prd_o(ip),.issue_valid_o(iv),.issue_ack_i(ia),.mem_stall_i(mem_stall),
- .st_live_mask_i('0),.commit_ptr_i('0));
+ .st_live_mask_i('0),.commit_ptr_i('0),.sb_live_i('1));
 `ifdef AUDIT_FORMAL
  logic history_valid=0;
  always_ff @(posedge clk_i)begin
@@ -183,13 +183,13 @@ module dispatch_tid_check
   ds[0].op=SD;ds[1].op=SD;
  end
  g6lc_ooo_dispatch #(.CVA6Cfg(cfg()),.scoreboard_entry_t(sbe_t)) dut(
-  .clk_i,.rst_ni,.flush_i(1'b0),.flush_unissued_i(1'b0),.cancelled_mask_i('0),
+  .clk_i,.rst_ni,.flush_i(1'b0),.flush_unissued_i(1'b0),.cancelled_mask_i('0),.sb_live_i('1),
   .dispatch_sbe_i(ds),.dispatch_orig_i('0),.dispatch_valid_i(dv),.dispatch_ack_o(),
   .issue_sbe_o(),.issue_orig_o(),.issue_valid_o(),.issue_ack_i(2'b11),
   .issue_op_a_o(),.issue_op_b_o(),.issue_op_a_valid_o(),.issue_op_b_valid_o(),
   .wb_valid_i('0),.wb_id_i('0),.wb_data_i('0),.wb_exc_i('0),
   .commit_ack_i('0),.commit_instr_i('0),.commit_ptr_i('0),.mispredict_i(1'b0),.mispredict_id_i('0),
-  .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o());
+  .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o(),.mem_violation_o(),.mem_violation_id_o());
  // Purely combinational, so a single step settles it.
  always_comb begin
   assert(dut.alloc_ids[0]==ds[0].trans_id);
@@ -246,7 +246,7 @@ module iq_age_check
   .disp_prd_i('0),.disp_rs1_ready_i(1'b1),.disp_rs2_ready_i(1'b1),.disp_ack_o(da),
   .full_o(),.wb_valid_i('0),.wb_prd_i('0),
   .issue_sbe_o(),.issue_orig_o(),.issue_prd_o(),.issue_valid_o(iv),.issue_ack_i(1'b1),
-  .mem_stall_i(1'b0),.st_live_mask_i(smask),.commit_ptr_i(cp));
+  .mem_stall_i(1'b0),.st_live_mask_i(smask),.commit_ptr_i(cp),.sb_live_i('1));
  always_ff @(posedge clk_i)begin
   if(rst_ni&&started)begin
    // ltid is baked into the queued entry at dispatch; smask/cp are free per

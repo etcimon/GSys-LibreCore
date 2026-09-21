@@ -52,6 +52,8 @@ module frontend
     input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] commit_hart_i,
     // COMMIT PC - COMMIT
     input logic [CVA6Cfg.VLEN-1:0] pc_commit_i,
+    // Memory-order replay: refetch the committing PC instead of pc+4 - CONTROLLER
+    input logic mem_replay_pc_i,
     // Exception event - COMMIT
     input logic ex_valid_i,
     // Mispredict event and next PC - EXECUTE
@@ -467,7 +469,7 @@ module frontend
   // if commit is halted just take the PC of the instruction sitting there
   // +4 is unconditional because no CSR/AMO has a compressed form, so this can
   // never land mid-instruction the way a blind +4 would elsewhere in fetch.
-  assign commit_next_pc = pc_commit_i + (halt_i ? '0 : {{CVA6Cfg.VLEN - 3{1'b0}}, 3'b100});
+  assign commit_next_pc = pc_commit_i + ((halt_i || mem_replay_pc_i) ? '0 : {{CVA6Cfg.VLEN - 3{1'b0}}, 3'b100});
   assign debug_halt_pc = CVA6Cfg.DmBaseAddress[CVA6Cfg.VLEN-1:0]
                          + CVA6Cfg.HaltAddress[CVA6Cfg.VLEN-1:0];
 

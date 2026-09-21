@@ -33,10 +33,14 @@ protected default and the SMT2 OpenSBI anchor runs with `OoOEn=0`.
   `(a - commit_ptr) < (b - commit_ptr)` ⇒ `a` older than `b`.
 - Soundness condition: every compared entry is **scoreboard-live**. Committed store-queue entries
   are never age-compared; they are older than any live instruction by construction.
-- Today the condition is implicit at six sites (`g6lc_iq.sv` ×2, `g6lc_lsq.sv`,
-  `core/store_buffer.sv` ×3). T1 makes it one function in `g6lc_ooo_pkg`, one live/committed
-  flag semantics, an assertion against the scoreboard `issued` mask, and an SBY proof. `{gen,tid}`
-  widening is the fallback if the proof fails, not the default.
+- T1 (2026-09-21): one function, `g6lc_ooo_pkg::ooo_age_older/ooo_age_dist`, used at all six
+  sites (`g6lc_iq.sv` ×2, `g6lc_lsq.sv` CAM, `core/store_buffer.sv` `ooo_older` which feeds
+  `spec_visible` and the insertion sort). IQ and LSQ entries assert `sb_live_i[tid]` (scoreboard
+  `issued`) under `translate_off`; the store-buffer copy of that assertion waits for T2, which
+  plumbs the LSU seam anyway. Proof: `core/ooo/formal/g6lc_ooo_age.sby` (abc bmc3, depth 14,
+  74 asserts) and the yosys-sat harness `run_ooo_fault_review.py FAULT_REVIEW_AGE_FORMAL=1`
+  (prove SUCCESS depth 14, cover of a reachable violation, removed-scan mutation FAIL with
+  witness). `{gen,tid}` widening was not needed.
 
 ## 3. Kill identities
 
@@ -45,7 +49,7 @@ protected default and the SMT2 OpenSBI anchor runs with `OoOEn=0`.
 | Branch mispredict | scoreboard `cancelled_mask` (sticky per slot + same-cycle window) | IQ, ROB, LSQ, PRF write gate, FU owner tables, LSU pre-grant queue |
 | Full flush (exception, fence, CSR side effect, WFI under OoO) | `flush_i` | FPnew and serdiv discard in-flight work, so owner tables clear; LSU tombstones stay |
 | Fetch redirect | today: killed VA + "forget on replacement" (`frontend.sv` kill persistence) | **open** — T3 replaces it with a request token through `icache_dreq/drsp` |
-| Memory-order violation | **absent** | T1 adds store-address arrival → younger issued load → `replay` at commit |
+| Memory-order violation | `g6lc_lsq` scan: a store address arriving after a younger load resolved overlapping bytes reports the oldest such load (`mem_violation_o`); the scoreboard marks the slot `cancelled + replay`; commit drops it, asserts `flush_commit`, and the frontend refetches `pc_commit` without increment (`mem_replay_pc`) | leaf-qualified (LSQ scenarios 12–17, formal); the full-core path is inert until T2 lets a load bypass an older store |
 | Hart handoff | drained: no issued work crosses | T6 replaces drain with per-hart cancellation identity |
 
 A cancelled instruction's late result must never complete, wake or supply data for the slot's next
@@ -57,7 +61,7 @@ result, so the remaining producers (pending stores, CSR/AMO commit path, CVXIF/a
 | May issue out of program order | Stays singleton / ordered | Reason |
 |---|---|---|
 | ALU, branch, multiply, FP (single hart) | CSR: only at the commit head | depth-1 `csr_buffer`; T2 keeps head-ordering as serialization and removes the FLU freeze |
-| Loads past **resolved non-aliasing** older stores — after T1 validation + T2 relaxation | Loads today wait for every older live store | no alias validation exists yet |
+| Loads past **resolved non-aliasing** older stores — after T2 relaxation | Loads today wait for every older live store | alias validation and replay exist since T1 but nothing bypasses yet |
 | — | Stores issue in program order today | one-deep store translation pipe; T2 reserves the spec-queue slot at dispatch and drops PO *issue*, keeps PO drain |
 | — | AMO buffer depth 1, CVXIF port 0 only | unchanged |
 
@@ -82,7 +86,7 @@ T4 removes.
 | Tranche | Exit (positive + negative + mutation + structural) |
 |---|---|
 | T0 | history archived verbatim; this contract and the plan exist; checkpoint commit reviewed |
-| T1 | age function used at all six sites; live-tid assertion; SBY age/violation proof with a negative witness; replay path leaf-tested; lint/synth counts unchanged |
+| T1 | **met 2026-09-21**: age function at all six sites; IQ/LSQ live-tid assertions; `g6lc_ooo_age.sby` PASS (74 asserts, depth 14) + sat prove/cover/mutation; LSQ scenarios 12–17 positive/negative; dispatch 28/28, LSU 32/32, WFI 56/56, commit 3/3 unchanged; integer-OoO frozen ELFs Spike-identical; protected in-order anchor 12,765,628 / 333,635 / 8,932,406; lint 8/54, synth 32/5 unchanged. Found and fixed: `g6lc_ooo_rob.sby` had proved zero assertions (no `-DFORMAL`, `dist` keyword, hierarchy flag); now abc bmc3 PASS with 4 asserts. Attributed: +3 cycles on every integer-OoO ELF versus the 09-19 baselines is the CSR-at-commit-head issue rule inside `48c729e51` (younger ALU ops pass the waiting `csrw` at the exit epilogue); T2 removes it |
 | T2 | CSR FIFO and store reservation leaf-tested; loads bypass resolved non-aliasing stores; Spike-ordered `g6lc64_ooo_int` smoke; PMU shows no FLU freeze on CSR |
 | T3 | token kill; frozen failing layout repaired; independent observer; `G6LC_NO_KILL_PERSIST` retired |
 | T4 | non-compacting IQ; same directed results; FO4 delta recorded |

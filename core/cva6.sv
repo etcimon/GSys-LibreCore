@@ -634,7 +634,10 @@ module cva6
   // --------------
   scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0] commit_instr_id_commit;
   logic [CVA6Cfg.NrCommitPorts-1:0] commit_drop_id_commit;
+  logic [CVA6Cfg.NrCommitPorts-1:0] commit_replay_id_commit;
   logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack_commit_id;
+  logic replay_commit_controller;
+  logic mem_replay_pc_ctrl_pcgen;
 
   // --------------
   // RVFI
@@ -864,6 +867,7 @@ module cva6
       .set_pc_commit_i    (set_pc_ctrl_pcgen),
 `ifdef G6LC_FETCH_B
       .commit_hart_i      (whart_commit_id[0]),
+      .mem_replay_pc_i    (mem_replay_pc_ctrl_pcgen),
 `endif
       .pc_commit_i        (pc_commit),
       .ex_valid_i         (ex_commit.valid),
@@ -1531,6 +1535,7 @@ module cva6
       .we_fpr_i             (we_fpr_commit_id),
       .commit_instr_o       (commit_instr_id_commit),
       .commit_drop_o        (commit_drop_id_commit),
+      .commit_replay_o      (commit_replay_id_commit),
       .commit_ack_i         (commit_ack_commit_id),
       // Performance Counters
       .stall_issue_o        (stall_issue),
@@ -1747,6 +1752,7 @@ module cva6
       .single_step_i          (single_step_csr_commit || single_step_acc_commit),
       .commit_instr_i         (commit_instr_id_commit),
       .commit_drop_i          (commit_drop_id_commit),
+      .commit_replay_i        (commit_replay_id_commit),
       .commit_ack_o           (commit_ack_commit_id),
       .commit_macro_ack_o     (commit_macro_ack),
       .waddr_o                (waddr_commit_id),
@@ -1771,6 +1777,7 @@ module cva6
       .fence_i_o              (fence_i_commit_controller),
       .fence_o                (fence_commit_controller),
       .flush_commit_o         (flush_commit),
+      .replay_o               (replay_commit_controller),
       .sfence_vma_o           (sfence_vma_commit_controller),
       .hfence_vvma_o          (hfence_vvma_commit_controller),
       .hfence_gvma_o          (hfence_gvma_commit_controller),
@@ -2023,6 +2030,8 @@ module cva6
       .hfence_vvma_i         (hfence_vvma_commit_controller),
       .hfence_gvma_i         (hfence_gvma_commit_controller),
       .flush_commit_i        (flush_commit),
+      .replay_i              (replay_commit_controller),
+      .mem_replay_pc_o       (mem_replay_pc_ctrl_pcgen),
       .flush_acc_i           (flush_acc)
   );
 

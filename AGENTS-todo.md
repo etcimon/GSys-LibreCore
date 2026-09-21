@@ -23,8 +23,20 @@ next actions are superseded by the tranche exits.
 
 - [x] T0: history archived (6,292 lines, round-trip byte-identical), contract + plan written,
   `AGENTS.md` §2 row added.
-- [ ] T0: checkpoint commit of the verified worktree after user review (no push).
-- [ ] T1 … T6 per the plan file; review point after T1.
+- [x] T0: checkpoint commit `48c729e51` (71 files, no push).
+- [x] T1: age key + LSQ alias validation + commit replay; exit met (see contract). Formal
+  correction: `g6lc_ooo_rob.sby` had proved zero assertions; fixed with `-DFORMAL`, `dist_w`,
+  flattening and abc bmc3.
+- [x] Attributed the uniform +3 cycles on integer-OoO ELFs (`bis-*-v1`, seven isolated builds):
+  not the frontend, not mult/fpu_wrap/ex_stage; it is the OoO issue-side closure of `48c729e51`
+  (`g6lc_iq`/`g6lc_ooo_dispatch`/`g6lc_rename`/issue/id). First divergence at the exit epilogue
+  `csrw mstatus`: the CSR-at-commit-head issue rule lets younger ALU ops issue first, delaying the
+  flush-causing CSR by two cycles plus one refetch. That rule is the 09-20 repair for an
+  uncommitted CSR wedging the whole FLU; the cycles are its price and T2's per-tid CSR table is
+  the mechanism that removes both the wedge and the wait. Also found: pure parent `e64864263`
+  FAILS stage 4 at 894 cycles (x15 wrong); the 09-19/20 doc baselines were measured on the
+  pre-commit worktree, so "878/1109" is the pre-head-rule worktree, not a committed state.
+- [ ] T2 … T6 per the plan file; review point before T2.
 
 ## Active stability-first review — authoritative next change sets
 

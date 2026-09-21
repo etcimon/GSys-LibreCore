@@ -113,6 +113,7 @@ core/cva6_mmu/cva6_ptw.sv
 core/ariane_regfile_ff.sv
 core/scoreboard.sv
 core/raw_checker.sv
+core/ooo/g6lc_ooo_pkg.sv
 core/store_buffer.sv
 core/cva6_fifo_v3.sv
 core/amo_buffer.sv

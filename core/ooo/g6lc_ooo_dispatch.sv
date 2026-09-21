@@ -40,6 +40,8 @@ module g6lc_ooo_dispatch
     input  logic flush_unissued_i,
     // Younger wrong-path SB slots (SpeculativeSb cancel + same-cycle bmiss)
     input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]                   cancelled_mask_i,
+    // Scoreboard issued mask (IQ/LSQ liveness assertions)
+    input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]                   sb_live_i,
     input  scoreboard_entry_t [CVA6Cfg.NrIssuePorts-1:0]       dispatch_sbe_i,
     input  logic              [CVA6Cfg.NrIssuePorts-1:0][31:0] dispatch_orig_i,
     input  logic              [CVA6Cfg.NrIssuePorts-1:0]       dispatch_valid_i,
@@ -83,7 +85,9 @@ module g6lc_ooo_dispatch
     output logic iq_full_o,
     output logic lsq_stall_o,
     output logic rename_stall_o,
-    output logic stl_forward_o
+    output logic stl_forward_o,
+    output logic mem_violation_o,
+    output logic [CVA6Cfg.TRANS_ID_BITS-1:0]             mem_violation_id_o
 );
 
   localparam int unsigned ROB_N = (CVA6Cfg.RobEntries == 0) ? CVA6Cfg.NR_SB_ENTRIES
@@ -623,7 +627,8 @@ module g6lc_ooo_dispatch
       // until then the predictor trains and reports, and does not gate issue.
       .mem_stall_i     (1'b0),
       .st_live_mask_i  (st_live_mask),
-      .commit_ptr_i    (commit_ptr_i)
+      .commit_ptr_i    (commit_ptr_i),
+      .sb_live_i       (sb_live_i)
   );
 
   // Block PRF writeback for cancelled SB slots (wrong-path after mispredict)
@@ -895,6 +900,7 @@ module g6lc_ooo_dispatch
       .rst_ni,
       .flush_i,
       .cancelled_mask_i,
+      .sb_live_i   (sb_live_i),
       .ld_alloc_i (ld_alloc),
       .st_alloc_i (st_alloc),
       .alloc_id_i (alloc_ids),
@@ -925,7 +931,9 @@ module g6lc_ooo_dispatch
       .stl_forward_o(stl_fwd),
       .stl_data_o   (),
       .stl_stall_o  (stl_stall),
-      .lsq_busy_o   (lsq_busy)
+      .lsq_busy_o   (lsq_busy),
+      .mem_violation_o    (mem_violation_o),
+      .mem_violation_id_o (mem_violation_id_o)
   );
 
   // Multi-port store train + observed-dependence train; clear on full flush or mispredict

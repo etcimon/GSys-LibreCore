@@ -41,6 +41,15 @@ regressions do not add independent ISA coverage. Early termination remains unown
 read/address visibility, precise recovery and broad memory ownership remain open. No architecture,
 physical or guarded-feature status advances from qualification-tooling changes alone.
 
+## OoO age key and memory-order replay (2026-09-21)
+
+**Leaf-proven and directed; full-core path inert until loads may bypass stores.** One
+program-order key is shared by the issue queue, load/store queue and store buffer; the load/store
+queue detects a load that read before an older overlapping store resolved and the pipeline can
+replay it from commit. Formal evidence is non-vacuous (assert counts recorded); a pre-existing ROB
+proof that had checked nothing was corrected. Full-core bypass, store-buffer liveness assertion and
+timing remain open.
+
 ## OoO FP result ownership (2026-09-21)
 
 **Directed repair; qualification remains partial.** A cancelled floating-point or serial-divide

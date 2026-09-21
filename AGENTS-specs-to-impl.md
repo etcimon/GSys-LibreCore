@@ -45,6 +45,21 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## OoO age key and memory-order replay (2026-09-21, T1)
+
+Precise memory ordering under speculation (`#memorymodel`) needs one sound program-order key and
+a way to undo a load that read before an older store's address was known. `g6lc_ooo_pkg` now
+holds `ooo_age_older/ooo_age_dist` (circular `trans_id` distance from the commit pointer, sound
+only for scoreboard-live operands); `g6lc_iq.sv`, `g6lc_lsq.sv` and `core/store_buffer.sv` call
+it instead of inlining the compare, and IQ/LSQ entries assert liveness against the scoreboard
+`issued` mask. `g6lc_lsq.sv` scans resolving store addresses against younger resolved loads and
+reports the oldest overlapping load; `core/scoreboard.sv` marks that slot cancelled + `replay`;
+`core/commit_stage.sv` drops it with `flush_commit`; `core/controller.sv` raises `mem_replay_pc`;
+`core/fetch_B/frontend.sv` refetches `pc_commit` without the +4. Nothing bypasses an older store
+yet, so the full-core path is inert; the leaf contract is proven (`core/ooo/formal/g6lc_ooo_age.sby`,
+sat harness) and directed. In-order configurations tie every new signal low. Timing: the scan is a
+bounded `NR_UPDATE × LD_ENTRIES` lane compare on registered load state; no new clock, reset or port.
+
 ## OoO cancelled FP result ownership (2026-09-21)
 
 Precise recovery requires that a cancelled instruction's late result never completes, wakes or

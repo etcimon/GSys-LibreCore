@@ -47,10 +47,32 @@ after tid recycle, violation → replay → correct value; negatives; mutations 
 assertion; drop the violation scan). Gates: strict `-Werror-UNOPTFLAT` build of the new leaf;
 `verify --lint --synth --remote` counts unchanged; `testlist_ooo_l3.yaml` on `g6lc64_ooo_int`.
 
+### T1 result (2026-09-21)
+
+Exit met; see the contract's exit table. Evidence tags: `t1-lsq-viol-v1` (36/36),
+`t1-dispatch-regress-v1` (28/28), `t1-lsu-regress-v1` (32/32), `t1-lsu-regress-wfi-v1` (56/56),
+`t1-lsu-regress-commit-v1` (3/3), `t1-age-sat-v2` (prove+cover), `t1-age-sat-mut-v2`,
+`t1-age-sby-v3` (PASS, 74 asserts), `t1-rob-sby-v3` (PASS, 4 asserts),
+`t1-ooo-int-fpreview-*-v1` (Spike rows identical; stages 32/33 still abort on the reverted
+misalignment assertion, unchanged), `t1-anchor-inorder-v1` (pass), `t1-verify-v2` (8/54, 32/5).
+Corrections made on the way: the first age SBY/sat runs were vacuous (no `-DFORMAL`) and used a
+reset idiom slang rejects; the same defects made the pre-existing ROB task vacuous. Both fixed;
+the builder has no native yices and z3 exhausts memory on these models, so abc bmc3 is the engine
+of record. The uniform +3 cycles on integer-OoO ELFs (`bis-*-v1`, seven isolated builds) is the
+price of the CSR-at-commit-head issue rule inside `48c729e51`: at the exit `csrw mstatus`,
+younger ALU ops issue ahead of the waiting CSR, delaying its flush by two cycles plus a refetch.
+Architecturally identical; T2's per-tid CSR table removes the wait together with the FLU wedge.
+Pure parent `e64864263` fails stage 4 (894 cycles, wrong x15), so the 09-19/20 baselines came
+from the pre-commit worktree.
+Deferred to T2: store-buffer live-tid assertion (needs the LSU seam port), same-cycle
+store/load address cases beyond two ports.
+
 ## T2 — leftover pipes and relaxed issue
 
-CSR: commit-order FIFO (depth `NrCommitPorts+1`) keyed by tid; `csr_ready` leaves `flu_ready`; IQ
-head rule kept as serialization only. Store: dispatch credit reserves a speculative-queue slot;
+CSR: small per-tid address table (depth 2–4, tid-tagged, looked up by the committing tid) replaces
+the depth-1 `csr_buffer`; `csr_ready` (table full) gates only CSR issue and leaves `flu_ready`;
+the IQ commit-head rule for CSR is dropped, since the CSR reads and side-effects already happen at
+in-order commit and its write operand comes from the renamed file. This recovers the +3 cycles. Store: dispatch credit reserves a speculative-queue slot;
 `check_cfg` asserts `DEPTH_SPEC >= LsqStoreEntries` under `OoOEn`; drop `older_unissued_st` from
 select; keep PO drain and age forwarding. Memdep: prediction registered into the IQ entry at
 dispatch (`may_bypass`); select gate `is_ld && older_unresolved_st && !may_bypass`; T1 replay is

@@ -34,6 +34,12 @@ module scoreboard #(
     // U5 production: per-SB-slot cancel mask (sticky cancelled | same-cycle bmiss window)
     // OoO IQ/ROB/LSQ squash younger wrong-path ops without full-pipe flush.
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              cancelled_mask_o,
+    // Per-slot issued mask (OoO IQ/LSQ liveness assertions)
+    output logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              sb_live_o,
+    // LSQ alias validation: youngest load that read bytes an older store
+    // resolved later - OoO only, tied low in order.
+    input  logic                                          mem_violation_i,
+    input  logic              [CVA6Cfg.TRANS_ID_BITS-1:0] mem_violation_id_i,
     // Prevent from issuing - CONTROLLER
     input  logic                                          flush_unissued_instr_i,
     // Flush whole scoreboard - CONTROLLER
@@ -50,6 +56,8 @@ module scoreboard #(
     output scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0] commit_instr_o,
     // Instruction is cancelled - COMMIT_STAGE
     output logic              [CVA6Cfg.NrCommitPorts-1:0] commit_drop_o,
+    // Committing slot requests a refetch from its own PC - COMMIT_STAGE
+    output logic              [CVA6Cfg.NrCommitPorts-1:0] commit_replay_o,
     // Commit acknowledge - COMMIT_STAGE
     input  logic              [CVA6Cfg.NrCommitPorts-1:0] commit_ack_i,
 
@@ -108,6 +116,7 @@ module scoreboard #(
   typedef struct packed {
     logic issued;  // this bit indicates whether we issued this instruction e.g.: if it is valid
     logic cancelled;  // this instruction was cancelled (speculative scoreboard)
+    logic replay;  // memory-order violation: commit refetches from this PC
     logic is_rd_fpr_flag;  // redundant meta info, added for speed
     scoreboard_entry_t sbe;  // this is the score board entry we will send to ex
   } sb_mem_t;
@@ -134,6 +143,7 @@ module scoreboard #(
     // A cancelled entry still occupies its slot and still retires in order as
     // a commit_drop, but it must never source a forward: it is wrong-path.
     assign still_issued[i] = mem_q[i].issued & ~mem_q[i].cancelled;
+    assign sb_live_o[i] = mem_q[i].issued;
   end
 
   always_comb begin
@@ -158,6 +168,7 @@ module scoreboard #(
       commit_instr_o[i] = mem_q[commit_pointer_q[i]].sbe;
       commit_instr_o[i].trans_id = commit_pointer_q[i];
       commit_drop_o[i] = mem_q[commit_pointer_q[i]].cancelled;
+      commit_replay_o[i] = mem_q[commit_pointer_q[i]].replay;
     end
   end
 
@@ -189,9 +200,11 @@ module scoreboard #(
   initial sb_alloc_en = $test$plusargs("sb_alloc");
 //pragma translate_on
   always_comb begin : issue_fifo
+    automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] cid;
     // default assignment
     mem_n     = mem_q;
     num_issue = '0;
+    cid       = '0;
 
     // if we got an acknowledge from the issue stage, put this scoreboard entry in the queue
     for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
@@ -222,6 +235,7 @@ module scoreboard #(
         mem_n[issue_pointer[i]] = '{
             issued: 1'b1,
             cancelled: 1'b0,
+            replay: 1'b0,
             is_rd_fpr_flag: CVA6Cfg.FpPresent && ariane_pkg::is_rd_fpr(decoded_instr_i[i].op),
             sbe: decoded_instr_i[i]
         };
@@ -318,7 +332,6 @@ module scoreboard #(
     // alone does not drop already-issued wrong-path ops (e.g. post-ret alias
     // jal); commit_drop of cancelled entries has no RF/LSU side-effects.
     if (bmiss) begin
-      automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] cid;
       cid = after_flu_wb;
       for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
         if (cid == issue_pointer[0]) break;
@@ -374,6 +387,14 @@ module scoreboard #(
       end
     end
 
+    // Memory-order violation: the load keeps its slot, retires as a drop and
+    // asks commit to refetch from its own PC.
+    if (CVA6Cfg.OoOEn && mem_violation_i && mem_q[mem_violation_id_i].issued) begin
+      mem_n[mem_violation_id_i].cancelled = 1'b1;
+      mem_n[mem_violation_id_i].replay    = 1'b1;
+      mem_n[mem_violation_id_i].sbe.valid = 1'b1;
+    end
+
     // ------------
     // Commit Port
     // ------------
@@ -383,6 +404,7 @@ module scoreboard #(
         // this instruction is no longer in issue e.g.: it is considered finished
         mem_n[commit_pointer_q[i]].issued    = 1'b0;
         mem_n[commit_pointer_q[i]].cancelled = 1'b0;
+        mem_n[commit_pointer_q[i]].replay    = 1'b0;
         mem_n[commit_pointer_q[i]].sbe.valid = 1'b0;
       end
     end
@@ -395,6 +417,7 @@ module scoreboard #(
         // set all valid flags for all entries to zero
         mem_n[i].issued       = 1'b0;
         mem_n[i].cancelled    = 1'b0;
+        mem_n[i].replay       = 1'b0;
         mem_n[i].sbe.valid    = 1'b0;
         mem_n[i].sbe.ex.valid = 1'b0;
       end
@@ -434,12 +457,13 @@ module scoreboard #(
   // The same-cycle mask must match that policy — previously it always skipped
   // LOAD, so ldbuf still completed wrong-path byte-loads before sticky latch.
   always_comb begin : gen_cancelled_mask
+    automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] cid;
     cancelled_mask_o = '0;
+    cid              = '0;
     for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
       cancelled_mask_o[i] = mem_q[i].cancelled;
     end
     if (bmiss) begin
-      automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] cid;
       cid = after_flu_wb;
       for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
         if (cid == issue_pointer[0]) break;

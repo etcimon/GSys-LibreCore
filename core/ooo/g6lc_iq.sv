@@ -59,7 +59,9 @@ module g6lc_iq
     // the commit pointer anchoring the circular age order. A load waits only
     // for stores OLDER than itself; younger stores can never alias it.
     input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              st_live_mask_i,
-    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0]              commit_ptr_i
+    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0]              commit_ptr_i,
+    // Scoreboard issued mask (assertions only)
+    input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              sb_live_i
 );
 
   localparam int unsigned DW = (DEPTH <= 1) ? 1 : $clog2(DEPTH + 1);
@@ -172,8 +174,8 @@ module g6lc_iq
       older_st = 1'b0;
       for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
         if (st_live_mask_i[s] &&
-            (CVA6Cfg.TRANS_ID_BITS'(s) - commit_ptr_i) <
-            (q_chain[e].sbe.trans_id - commit_ptr_i))
+            g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(s),
+                                        32'(q_chain[e].sbe.trans_id), 32'(commit_ptr_i)))
           older_st = 1'b1;
       // Stores issue in program order relative to each other.
       //
@@ -195,8 +197,9 @@ module g6lc_iq
       older_unissued_st = 1'b0;
       for (int unsigned o = 0; o < DEPTH; o++)
         if ((o != e) && q_chain[o].valid && (q_chain[o].sbe.fu == STORE) &&
-            (q_chain[o].sbe.trans_id - commit_ptr_i) <
-            (q_chain[e].sbe.trans_id - commit_ptr_i))
+            g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS,
+                                        32'(q_chain[o].sbe.trans_id),
+                                        32'(q_chain[e].sbe.trans_id), 32'(commit_ptr_i)))
           older_unissued_st = 1'b1;
       // A CSR issues only when it is the oldest live instruction.
       //
@@ -314,5 +317,12 @@ module g6lc_iq
       count_q <= count_d;
     end
   end
+
+  //pragma translate_off
+  for (genvar e = 0; e < DEPTH; e++) begin : gen_iq_live_assert
+    ooo_iq_entry_live: assert property (@(posedge clk_i) disable iff (!rst_ni)
+        q_q[e].valid |-> sb_live_i[q_q[e].sbe.trans_id]);
+  end
+  //pragma translate_on
 
 endmodule

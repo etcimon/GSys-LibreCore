@@ -148,6 +148,7 @@ module g6lc_fetch_hold_props #(
       .halt_i,
       .set_pc_commit_i,
       .pc_commit_i,
+      .mem_replay_pc_i (1'b0),
       .ex_valid_i,
       .resolved_branch_i,
       .eret_i,

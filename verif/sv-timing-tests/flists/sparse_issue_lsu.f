@@ -9,4 +9,5 @@ ${CVA6_REPO_DIR}/core/issue_read_operands.sv
 ${CVA6_REPO_DIR}/core/scoreboard.sv
 ${CVA6_REPO_DIR}/core/load_unit.sv
 ${CVA6_REPO_DIR}/core/store_unit.sv
+${CVA6_REPO_DIR}/core/ooo/g6lc_ooo_pkg.sv
 ${CVA6_REPO_DIR}/core/store_buffer.sv
