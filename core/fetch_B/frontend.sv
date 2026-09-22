@@ -835,52 +835,36 @@ module frontend
   assign leftover_kill = is_mispredict | flush_i | (replay & ~leftover_slot0_push)
       | leftover_branch_bp_fire;
 
-  // Kill persistence. kill_s1/kill_s2 are single-cycle and are also sent to the
-  // I$, but a response already past those stages cannot be killed there, so it
-  // still returns — one cycle later in the observed case. Clearing inflight_q in
-  // the kill cycle then leaves the frontend with no record that a response is
-  // still owed, and icache_take carries no kill term, so the stale window is
-  // accepted: it pushes pre-flush instructions and fires a prediction from them,
-  // which moves npc off an exception's trap vector. Evidence and the matched
-  // passing arm are in architecture/out-of-order/README.md; it reproduces with
-  // OoOEn=0, so this is not out-of-order-specific.
-  //
-  // Remember the killed fetch until its response is seen or a replacement fetch
-  // is issued, and drop only a response whose address matches the killed one.
-  // The address match is what keeps this from dropping a legitimate return: the
-  // state is live only in the window between the kill and the next request, and
-  // it compares addresses, not fetched data.
-  // The seam covers the STATE as well as the drop, so the disabled arm carries a
-  // genuinely zero frontend delta (kill_drop folds to a constant and the added
-  // flops do not exist). Needed because the anchor moved between builds whose
-  // only differences were supposed to be behaviour-free, so the control has to
-  // remove the added logic itself, not merely its effect.
-  logic kill_drop;
-`ifdef G6LC_NO_KILL_PERSIST
-  assign kill_drop = 1'b0;
-`else
-  logic kill_owed_q;
-  logic [CVA6Cfg.VLEN-1:0] kill_owed_addr_q;
-
+  // Response ownership by request token. Every accepted I$ request carries a
+  // 2-bit token; the frontend wants exactly one outstanding token and takes a
+  // response only when its token matches. A kill (kill_s1 or kill_s2) with
+  // nothing new accepted forgets the outstanding token, and a request accepted
+  // in a kill cycle is itself unwanted, so a response the I$ still returns for
+  // a killed or redirected request is dropped by identity, not by address.
+  logic [1:0] req_token_q, want_token_q;
+  logic       want_valid_q, icache_accept, kill_drop;
+  assign icache_accept = icache_dreq_o.req & icache_dreq_i.ready;
+  assign icache_dreq_o.token = req_token_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
-      kill_owed_q      <= 1'b0;
-      kill_owed_addr_q <= '0;
-    end else if (kill_s2 && inflight_q) begin
-      kill_owed_q      <= 1'b1;
-      kill_owed_addr_q <= inflight_addr_q;
-    end else if (FtqEn ? demand_fire : if_ready) begin
-      // a replacement fetch was issued: stop attributing returns to the old one
-      kill_owed_q <= 1'b0;
-    end else if (icache_dreq_i.valid) begin
-      // the owed response has now been seen, taken or dropped
-      kill_owed_q <= 1'b0;
+      req_token_q  <= '0;
+      want_token_q <= '0;
+      want_valid_q <= 1'b0;
+    end else begin
+      if (icache_accept) req_token_q <= req_token_q + 1'b1;
+      if (kill_s2) begin
+        want_valid_q <= 1'b0;
+        if (icache_accept) want_token_q <= req_token_q;
+      end else if (icache_accept) begin
+        want_valid_q <= 1'b1;
+        want_token_q <= req_token_q;
+      end else if (icache_dreq_i.valid && icache_dreq_i.token == want_token_q) begin
+        want_valid_q <= 1'b0;
+      end
     end
   end
-
-  assign kill_drop = kill_owed_q && icache_dreq_i.valid
-      && (icache_dreq_i.vaddr == kill_owed_addr_q);
-`endif
+  assign kill_drop = icache_dreq_i.valid
+      && !(want_valid_q && icache_dreq_i.token == want_token_q);
 
   // I10: bank the accepted I$ address when switch kills it, not next_block.
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -1287,37 +1271,28 @@ module frontend
   // KILL-PERSISTENCE CHECK (`+fetch_kill_check`).
   //
   // Contract under test: a fetch whose request was killed must never have its
-  // response accepted. `kill_s1`/`kill_s2` assert for the kill cycle only, and
-  // `inflight_q` is cleared by `kill_s2` in that same cycle, so a response
-  // returning on a LATER cycle meets a frontend that no longer tracks it and an
-  // `icache_take` that carries no kill term at all.
-  //
-  // `kill_pend_q` remembers "an outstanding fetch was killed and has not been
-  // replaced". A genuine redirect clears it by issuing a new request, so the
-  // correct sequence never reports; only a stale response being taken does.
-  //
-  // Now observes the real kill-persistence state rather than a private copy, so
-  // it reports exactly the violation the repair removes: a response accepted for
-  // a fetch whose request was killed. After the repair it must stay silent on
-  // both arms of the matched pair, which makes it the regression detector for
-  // this contract. Still report-only rather than fatal: promoting it to a gate
+  // response accepted. Under token ownership a response is wanted only while
+  // `want_valid_q` holds and its token matches `want_token_q`, and
+  // `icache_take` is gated by `kill_drop` — exactly "valid and not the wanted
+  // token" — so a take of an unwanted response cannot occur. This probe
+  // reports it if a future change lets it: the regression detector for this
+  // contract. Still report-only rather than fatal: promoting it to a gate
   // is a separate decision that needs a full-suite silence result first, and a
   // fatal probe that fires in an unrelated configuration would be worse than no
   // probe at all.
   // -------------------------------------------------------------------------
-`ifndef G6LC_NO_KILL_PERSIST
   logic kcheck_en;
   initial kcheck_en = $test$plusargs("fetch_kill_check");
 
   // verilog_lint: waive always-ff-non-reset
   always_ff @(posedge clk_i) begin
-    if (rst_ni && kcheck_en && kill_owed_q && icache_dreq_i.valid) begin
-      $display("[killchk] t=%0t take=%b drop=%b rsp_vaddr=%h killed_vaddr=%h same=%b npc=%h",
-               $time, icache_take, kill_drop, icache_dreq_i.vaddr, kill_owed_addr_q,
-               (icache_dreq_i.vaddr == kill_owed_addr_q), npc_d);
+    if (rst_ni && kcheck_en && icache_dreq_i.valid && icache_take
+        && !(want_valid_q && icache_dreq_i.token == want_token_q)) begin
+      $display("[killchk] t=%0t UNWANTED TAKE rsp_vaddr=%h rsp_tok=%0d want=%b want_tok=%0d npc=%h",
+               $time, icache_dreq_i.vaddr, icache_dreq_i.token,
+               want_valid_q, want_token_q, npc_d);
     end
   end
-`endif
 
   // verilog_lint: waive always-ff-non-reset
   always_ff @(posedge clk_i) begin

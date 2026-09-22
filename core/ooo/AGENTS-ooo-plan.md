@@ -107,6 +107,23 @@ tval, no destination write, no cancelled-work trap) with missing-exception and b
 mutations. Exit: frozen failing layout ELF repaired; layout variants reproducible; in-order and OoO
 arms; retire `G6LC_NO_KILL_PERSIST` after mutations are retained.
 
+### T3 result (2026-09-21)
+
+Exit met; see the contract's exit table. Tags: `t3-fetch-token-v2` (PASS, 4 asserts),
+`t3-fetch-token-mut-v2` (FAIL at frame 4 on the killed-response assert), `t3-load-misalign-v7`
+(60/60), `t3-load-misalign-mut-kill-v8` / `-ex-v8` (detected), `t3-fetch-regress-{queue,synth}-v1`,
+`t3-ooo-int-fpreview-*-v2` (32/33/34 pass 869/899/869; others unchanged), `t3-anchor-inorder-v2`
+(exact), `t3-verify-v2` (6/6 local incl. strict slang). Corrections during the tranche: the token
+properties had to take stimulus through ports (an undriven internal `logic` is split into
+independent free variables by the slang frontend, which made the ledger incoherent); my
+misalignment fixture first modelled the D$ wrongly (`wt_dcache_ctrl` answers a killed request
+with a dummy rvalid in the kill cycle) and an implementation attempt adapted protected
+`load_unit.sv` to it — reverted, fixture corrected, RTL kept to the translate_off properties only.
+Pre-existing findings, not T3-caused and reproduced on HEAD: `g6lc_fetch_hold.sby` fails (frame 4,
+"request is the held target") and `g6lc_fetch_iq.sby` bmc fails (frame 3, I6 non-interference,
+regression after the 09-15 instr_queue changes); both stay open with owners in T4 pre-work.
+Remote `verify` still skips strict slang; the local gate covers it.
+
 ## T4 — issue-queue timing structure
 
 Non-compacting ring with allocation-order age vector; oldest-ready select from registered age bits;

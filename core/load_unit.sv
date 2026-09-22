@@ -759,19 +759,34 @@ module load_unit
   initial
     assert (CVA6Cfg.DcacheIdWidth >= REQ_ID_BITS)
     else $fatal(1, "DcacheIdWidth parameter is not wide enough to encode pending loads");
-  // check invalid offsets, but only issue a warning as these conditions actually trigger a load address misaligned exception
-  addr_offset0 :
+  // A misaligned load is granted before its exception is known, so a
+  // misaligned offset in the load buffer is legal. The contract is precise
+  // delivery: the entry completes once, with the misaligned exception, and its
+  // data return is killed rather than retired. The killed request is answered
+  // by the data cache with a dummy rvalid in the kill cycle.
+  function automatic logic offset_misaligned(input ariane_pkg::fu_op op,
+                                             input logic [CVA6Cfg.XLEN_ALIGN_BYTES-1:0] off);
+    unique case (op)
+      ariane_pkg::LW, ariane_pkg::LWU: return off[1:0] != 2'b00;
+      ariane_pkg::LH, ariane_pkg::LHU: return off[0] != 1'b0;
+      ariane_pkg::LD:                  return CVA6Cfg.IS_XLEN64 && |off;
+      default:                         return 1'b0;
+    endcase
+  endfunction
+  misaligned_entry_excepts :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
-        ldbuf_w |->  (ldbuf_wdata.operation inside {ariane_pkg::LW, ariane_pkg::LWU}) |-> 32'(ldbuf_wdata.address_offset) < 32'd5)
-  else $fatal(1, "invalid address offset used with {LW, LWU}");
-  addr_offset1 :
+      ldbuf_w && offset_misaligned(ldbuf_wdata.operation, ldbuf_wdata.address_offset)
+      |=> valid_o && ex_o.valid && ex_o.cause == riscv::LD_ADDR_MISALIGNED && req_port_o.kill_req)
+  else $error("misaligned load buffer entry did not complete with LD_ADDR_MISALIGNED and a killed request");
+  misaligned_entry_no_data :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
-        ldbuf_w |->  (ldbuf_wdata.operation inside {ariane_pkg::LH, ariane_pkg::LHU}) |-> 32'(ldbuf_wdata.address_offset) < 32'd7)
-  else $fatal(1, "invalid address offset used with {LH, LHU}");
-  addr_offset2 :
+      ldbuf_r && valid_o && !ex_o.valid |-> !offset_misaligned(ldbuf_rdata.operation, ldbuf_rdata.address_offset))
+  else $error("misaligned load buffer entry retired with data");
+  misaligned_tval :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
-        ldbuf_w |->  (ldbuf_wdata.operation inside {ariane_pkg::LB, ariane_pkg::LBU}) |-> 32'(ldbuf_wdata.address_offset) < 32'd8)
-  else $fatal(1, "invalid address offset used with {LB, LBU}");
+      valid_o && ex_o.valid && ex_o.cause == riscv::LD_ADDR_MISALIGNED
+      |-> (CVA6Cfg.TvalEn ? ex_o.tval[CVA6Cfg.XLEN_ALIGN_BYTES-1:0] != '0 : ex_o.tval == '0))
+  else $error("misaligned load tval does not follow TvalEn");
   //pragma translate_on
 
 endmodule

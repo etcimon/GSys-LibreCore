@@ -41,6 +41,15 @@ regressions do not add independent ISA coverage. Early termination remains unown
 read/address visibility, precise recovery and broad memory ownership remain open. No architecture,
 physical or guarded-feature status advances from qualification-tooling changes alone.
 
+## Fetch-response ownership and precise load misalignment (2026-09-21)
+
+**Proven at the frontend boundary and exercised on firmware; two older fetch proofs found
+failing.** Fetch responses are owned by request token rather than address, with a bounded proof
+against an independent ledger and a mutation witness; the frozen failing layout passes. Misaligned
+loads are checked for precise single delivery with kill and tval semantics instead of aborting the
+simulator. Two pre-existing fetch proofs (redirect hold, queue non-interference) fail on HEAD and
+remain open.
+
 ## OoO CSR table, store reservation and load bypass (2026-09-21)
 
 **Leaf-qualified and exercised on the integer-OoO firmware vehicle; not release-qualified.** CSR

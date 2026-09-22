@@ -68,6 +68,7 @@ module cva6
       logic                    kill_s1;  // kill the current request
       logic                    kill_s2;  // kill the last request
       logic                    spec;     // request is speculative
+      logic [1:0]              token;    // response ownership token
       logic [CVA6Cfg.VLEN-1:0] vaddr;    // 1st cycle: 12 bit index is taken for lookup
     },
     localparam type icache_drsp_t = struct packed {
@@ -75,6 +76,7 @@ module cva6
       logic                                valid;  // signals a valid read
       logic [CVA6Cfg.FETCH_WIDTH-1:0]      data;   // 2+ cycle out: tag
       logic [CVA6Cfg.FETCH_USER_WIDTH-1:0] user;   // User bits
+      logic [1:0]                          token;  // accepted request's token
       logic [CVA6Cfg.VLEN-1:0]             vaddr;  // virtual address out
       exception_t                          ex;     // we've encountered an exception
     },

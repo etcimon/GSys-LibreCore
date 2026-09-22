@@ -234,6 +234,18 @@ module g6lc_icache
   // loop through the branch-predictor same-window check.
   assign dreq_o.vaddr   = vaddr_q;
 
+  // Echo the accepted request's ownership token on the response so the
+  // frontend can distinguish a stale return from a same-address refetch.
+  logic [1:0] token_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      token_q <= '0;
+    end else if (dreq_o.ready & dreq_i.req) begin
+      token_q <= dreq_i.token;
+    end
+  end
+  assign dreq_o.token   = token_q;
+
   // invalidations take two cycles
   assign inv_d          = inv_en;
 

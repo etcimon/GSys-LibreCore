@@ -1546,6 +1546,9 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       "core/ooo/formal/g6lc_ooo_rob.sby",
       "core/ooo/formal/g6lc_ooo_cancel.sby",
       "core/ooo/formal/g6lc_ooo_rename.sby",
+      // T1: the program-order key and the LSQ alias-validation scan against the
+      // live g6lc_lsq under a scoreboard-window model (abc bmc3, 74 asserts).
+      "core/ooo/formal/g6lc_ooo_age.sby",
       // g6lc_ooo_rename_cover.sby is path-checked only: local yices cover PASS
       // (alloc/dual/exhaust/ckpt); testharness has no yices and z3 timed out.
       // Fetch bounded formal (M2 in architecture/AGENTS-g6lc-opensbi-dev-heuristics.md
@@ -1579,6 +1582,9 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // I6 clause 1: FIFO insertion order (discharges IQ pseq_monotone), then
       // live-queue age-select / monotone issue.
       "core/fetch_B/formal/cva6_fifo_v3_order.sby",
+      // T3: fetch-response ownership by request token against the live
+      // frontend with an independent I$ ledger; stimulus enters through ports.
+      "core/fetch_B/formal/g6lc_fetch_token.sby",
     ],
     formal: {
       // null = one sby process per host core, and tasks dispatched concurrently.
@@ -1932,6 +1938,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "core/ooo/formal/g6lc_ooo_rob.sby",
           "core/ooo/formal/g6lc_ooo_rename.sby",
           "core/ooo/formal/g6lc_ooo_rename_cover.sby",
+          "core/ooo/formal/g6lc_ooo_age.sby",
+          "core/ooo/formal/g6lc_ooo_age_props.sv",
         ],
       },
       // --- core: fetch bounded formal present (L2 rung) --------------------
@@ -1951,6 +1959,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           "core/fetch_B/formal/g6lc_fetch_smt_props.sv",
           "core/fetch_B/formal/g6lc_fetch_geo.sby",
           "core/fetch_B/formal/g6lc_fetch_geo_props.sv",
+          "core/fetch_B/formal/g6lc_fetch_token.sby",
+          "core/fetch_B/formal/g6lc_fetch_token_props.sv",
           "core/fetch_B/formal/g6lc_fetch_realign.sby",
           "core/fetch_B/formal/g6lc_fetch_realign_props.sv",
           "core/fetch_B/formal/g6lc_fetch_iq.sby",

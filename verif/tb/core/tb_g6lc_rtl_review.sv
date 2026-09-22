@@ -213,6 +213,7 @@ module tb_g6lc_review_load_cancel;
     c.NR_SB_ENTRIES=8; c.TRANS_ID_BITS=3; c.NrLoadBufEntries=NLOAD;
     c.DcacheIdWidth=2; c.DCACHE_INDEX_WIDTH=12; c.DCACHE_TAG_WIDTH=44;
     c.OoOEn=OOO; c.MmuPresent=MMU; c.SpeculativeSb=1; c.SuperscalarEn=1;
+    c.TvalEn=1;
     return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
@@ -241,9 +242,9 @@ module tb_g6lc_review_load_cancel;
   branch_t branch='0;
   req_t req;
   resp_t resp='0;
-  exception_t ex;
+  exception_t ex,ex_in='0;
   int scenario;
-  bit negative;
+  bit negative,killed=0,seen_ex=0;
   logic [1:0] old_id,new_id;
   lsu_bypass #(.CVA6Cfg(C),.lsu_ctrl_t(ctrl_t),.bp_resolve_t(branch_t)) queue (
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.lsu_req_i(incoming),
@@ -259,7 +260,7 @@ module tb_g6lc_review_load_cancel;
     .valid_i(head.valid),.lsu_ctrl_i(head),.pop_ld_o(pop),.valid_o(wb),
     .trans_id_o(tid),.result_o(result),.ex_o(ex),.mbe_i(1'b0),
     .translation_req_o(),.vaddr_o(),.tinst_o(),.hs_ld_st_inst_o(),.hlvx_inst_o(),
-    .paddr_i(56'h80001000),.ex_i('0),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
+    .paddr_i(56'h80001000),.ex_i(ex_in),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
     .page_offset_o(),.load_paddr_o(),.load_paddr_valid_o(),.load_trans_id_o(),
     .page_offset_matches_i(match_page),.store_buffer_empty_i(1'b0),
     .st_fwd_valid_i(fwd_valid),.st_fwd_data_i(64'h12345666),.st_fwd_be_i(8'hff),
@@ -361,6 +362,31 @@ module tb_g6lc_review_load_cancel;
         if(!req.data_req)$fatal(1,"LOAD_CANCEL_CORRECT_RESOLVE_RELEASE");
         dtlb_hit=1;resp.data_gnt=1;#2;new_id=req.data_id;tick();quiet();tick();
         response(new_id,3,1);
+      end
+      // Precise misalignment: a LW at offset 2 is granted before its exception
+      // is known, so the misaligned offset legitimately enters the load buffer.
+      // The contract is that the load completes ONCE, with LD_ADDR_MISALIGNED
+      // and the faulting address as tval, that its D$ request is killed, and
+      // that the late data return never produces a second, data-carrying
+      // completion.
+      // The data cache answers a killed request with a dummy rvalid in the kill
+      // cycle (wt_dcache_ctrl); an unkilled request returns its data later.
+      13:begin
+        resp.data_gnt=1;offer(3,LW);incoming.vaddr=64'h80001002;#2;
+        if(!req.data_req)$fatal(1,"LOAD_MISALIGN_SETUP grant");
+        old_id=req.data_id;tick();quiet();
+        ex_in.valid=1;ex_in.cause=64'd4;ex_in.tval=64'h80001002;#1;
+        killed=req.kill_req;
+        resp.data_rvalid=killed;resp.data_rid=old_id;resp.data_rdata=64'hBAD0BAD0;#1;
+        if(wb && !ex.valid)$fatal(1,"LOAD_MISALIGN_DATA_COMPLETION tid=%0d data=%h",tid,result);
+        seen_ex=wb && ex.valid && ex.cause==64'd4 && ex.tval==64'h80001002 && tid==3'd3;
+        tick();ex_in='0;resp.data_rvalid=0;#2;
+        if(!killed)begin
+          resp.data_rvalid=1;resp.data_rid=old_id;resp.data_rdata=64'hBAD0BAD0;#2;
+          if(wb && !ex.valid)$fatal(1,"LOAD_MISALIGN_DATA_COMPLETION tid=%0d data=%h",tid,result);
+          tick();resp.data_rvalid=0;#2;
+        end
+        if(seen_ex!==!negative)$fatal(1,"LOAD_MISALIGN_EXCEPTION seen=%b killed=%b",seen_ex,killed);
       end
       default:$fatal(1,"LOAD_CANCEL_SCENARIO");
     endcase

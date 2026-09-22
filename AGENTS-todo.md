@@ -40,7 +40,13 @@ next actions are superseded by the tranche exits.
   issue OoO), loads wait only on unresolved older stores, dispatch-time memdep bypass with replay
   safety net; exit met (contract table). Stage 35 shows replay end-to-end. Dispatch scenario 18
   remains the open leaf finding (identical at T1 HEAD).
-- [ ] T3 … T6 per the plan file; review point before T3.
+- [x] T3: fetch kill by request token (ledger proof + mutation), precise-misalignment properties
+  (stages 32/33/34 now pass), `G6LC_NO_KILL_PERSIST` retired; exit met (contract table).
+- [ ] Pre-existing formal regressions found by T3, reproduced on HEAD: `g6lc_fetch_hold.sby`
+  fails at frame 4 (request address vs held target) and `g6lc_fetch_iq.sby` bmc fails at frame 3
+  (I6 non-interference) — both after the 09-15 instr_queue/frontend changes. Owner: T4 pre-work;
+  do not weaken the properties.
+- [ ] T4 … T6 per the plan file; review point before T4.
 
 ## Active stability-first review — authoritative next change sets
 

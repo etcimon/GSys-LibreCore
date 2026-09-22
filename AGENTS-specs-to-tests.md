@@ -63,6 +63,20 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## Fetch token and precise misalignment (2026-09-21, T3)
+
+`core/fetch_B/formal/g6lc_fetch_token.sby` (abc bmc3, depth 10, 4 asserts) proves against the live
+frontend, with an independent I$ ledger in the properties, that every taken response is the
+outstanding, unkilled request's; `run_fetch_formal.py REVIEW_FORMAL_TASK=g6lc_fetch_token` runs it
+and `REVIEW_FORMAL_TOKEN_MUTATE=1` removes the take gate and must yield a counterexample. The
+frozen stage-32 layout pair and stages 32/33/34 pass Spike-compared on `g6lc64_ooo_int`.
+`tb_g6lc_review_load_cancel` scenario 13 (`FAULT_REVIEW_LEAF=1`, OoO and in-order, MMU on, TvalEn
+on) drives a misaligned LW, models the data cache's dummy rvalid on kill, and checks a single
+exception completion with cause 4 and the faulting tval; `FAULT_REVIEW_MUTATE_MISALIGN=kill|ex`
+must be caught (by the `misaligned_entry_excepts` property and by the fixture respectively).
+Fetch queue/synth cells unchanged. Open, pre-existing: `g6lc_fetch_hold.sby` and `g6lc_fetch_iq.sby`
+(bmc) fail on HEAD before T3.
+
 ## CSR table, store reservation and load bypass (2026-09-21, T2)
 
 `tb_g6lc_review_csrbuf` (`REVIEW_RTL_CSRBUF=1`): younger-first CSR issue with in-order address

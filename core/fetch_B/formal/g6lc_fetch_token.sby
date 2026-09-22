@@ -1,0 +1,50 @@
+# Fetch-response ownership by request token (bounded) against the LIVE frontend.
+#
+# The properties file carries an independent ledger of the I$ contract; the
+# frontend's want_valid_q/want_token_q are checked against it, never used as the
+# oracle. Depth covers request -> kill -> same-address refetch -> stale return
+# -> wanted return. -DFORMAL is mandatory (assert count must be nonzero).
+#
+# Run: sby -f core/fetch_B/formal/g6lc_fetch_token.sby
+# Wired into build-platform verify.formalTasks (cva6-build verify --formal).
+
+[options]
+mode bmc
+depth 10
+
+[engines]
+abc bmc3
+
+[script]
+read_slang --std 1800-2017 --allow-use-before-declare --top g6lc_fetch_token_props -DFORMAL \
+    g6lc64_smt2_config_pkg.sv config_pkg.sv riscv_pkg.sv ariane_pkg.sv g6lc_fetch_pkg.sv cva6_fifo_v3.sv instr_realign.sv instr_scan.sv instr_queue.sv bht.sv bht2lvl.sv btb.sv ras.sv g6lc_bp_ckpt.sv g6lc_bp_ghist.sv g6lc_bp_gshare.sv g6lc_bp_ittage.sv g6lc_bp_loop.sv g6lc_bp_statcor.sv g6lc_bp_tage_table.sv g6lc_bp_tage.sv g6lc_bp_top.sv g6lc_fdip.sv g6lc_ftq.sv g6lc_loop_buffer.sv frontend.sv g6lc_fetch_token_props.sv
+prep -top g6lc_fetch_token_props
+
+[files]
+../../include/g6lc64_smt2_config_pkg.sv
+../../include/config_pkg.sv
+../../include/riscv_pkg.sv
+../../include/ariane_pkg.sv
+../g6lc_fetch_pkg.sv
+../../cva6_fifo_v3.sv
+../instr_realign.sv
+../instr_scan.sv
+../instr_queue.sv
+../../frontend/bht.sv
+../../frontend/bht2lvl.sv
+../../frontend/btb.sv
+../../frontend/ras.sv
+../../frontend/g6lc_bp_ckpt.sv
+../../frontend/g6lc_bp_ghist.sv
+../../frontend/g6lc_bp_gshare.sv
+../../frontend/g6lc_bp_ittage.sv
+../../frontend/g6lc_bp_loop.sv
+../../frontend/g6lc_bp_statcor.sv
+../../frontend/g6lc_bp_tage_table.sv
+../../frontend/g6lc_bp_tage.sv
+../../frontend/g6lc_bp_top.sv
+../../frontend/g6lc_fdip.sv
+../../frontend/g6lc_ftq.sv
+../../frontend/g6lc_loop_buffer.sv
+../frontend.sv
+g6lc_fetch_token_props.sv

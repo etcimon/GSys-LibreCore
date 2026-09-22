@@ -78,7 +78,23 @@ def run_leaf():
         if text.count(old) != 1:
             raise ValueError('queued-cancellation mutation site changed')
         path.write_text(text.replace(old, "          mem_n[i].is_speculative_load_miss = 1'b0;"))
-    pins = {'sources': hashes, 'before': before, 'queuedCancelMutation': mutation,
+    # Precise-misalignment mutations: 'kill' keeps the D$ request alive after the
+    # exception (a late data completion must be caught); 'ex' drops the exception
+    # completion itself (the load would retire silently).
+    misalign_mutation = os.environ.get('FAULT_REVIEW_MUTATE_MISALIGN')
+    if misalign_mutation:
+        path = source / 'load_unit.sv'
+        text = path.read_text()
+        old, new = {
+            'kill': ("        if (ex_i.valid) begin\n          req_port_o.kill_req = 1'b1;\n        end\n",
+                     "        if (ex_i.valid) begin\n          req_port_o.kill_req = 1'b0;\n        end\n"),
+            'ex': ("        valid_o    = 1'b1;\n        ex_o.valid = 1'b1;\n      end\n    end\n",
+                   "        valid_o    = 1'b1;\n        ex_o.valid = 1'b0;\n      end\n    end\n"),
+        }[misalign_mutation]
+        if text.count(old) != 1:
+            raise ValueError('misalignment mutation site changed')
+        path.write_text(text.replace(old, new))
+    pins = {'sources': hashes, 'before': before, 'queuedCancelMutation': mutation, 'misalignMutation': misalign_mutation,
             'compiledSources': {p.name: sha(p) for p in source.glob('*.sv')},
             'runnerSha256': sha(Path(__file__)),
             'compilerControlSha256': sha(Path('/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt')),
@@ -86,7 +102,7 @@ def run_leaf():
     (out / 'inputs.json').write_text(json.dumps(pins, indent=2))
     env = dict(os.environ, VERILATOR_ROOT=str(runtime))
     records = []
-    for ooo, nload, mmu in ([(1, 4, 0)] if before or mutation else [(1, 2, 0), (1, 4, 1), (0, 4, 1)]):
+    for ooo, nload, mmu in ([(1, 4, 0)] if before or mutation else [(1, 4, 1), (0, 4, 1)] if misalign_mutation else [(1, 2, 0), (1, 4, 1), (0, 4, 1)]):
         work = out / f'ooo{ooo}-loads{nload}-mmu{mmu}'
         work.mkdir()
         model = work / 'model'
@@ -106,14 +122,18 @@ def run_leaf():
         deps = '\n'.join(p.read_text() for p in model.glob('*.d'))
         if str(runtime / 'include/verilated_funcs.h') not in deps:
             raise ValueError('compiled runtime identity missing')
-        scenarios = [1] if mutation else [0, 4, 6] if before else list(range(13)) if ooo and mmu else list(range(8)) + [10, 11] if ooo else [2, 3, 4, 5, 6]
+        scenarios = [1] if mutation else [13] if misalign_mutation else [0, 4, 6] if before else list(range(14)) if ooo and mmu else list(range(8)) + [10, 11] if ooo else [2, 3, 4, 5, 6, 13]
         for case in scenarios:
-            for negative in ([False] if before or mutation else [False, True]):
+            for negative in ([False] if before or mutation or misalign_mutation else [False, True]):
                 cmd = [str(model / 'review-test'), f'+scenario={case}'] + (['+oracle_negative'] if negative else [])
                 result = subprocess.run(cmd, cwd=work, capture_output=True, text=True, timeout=15)
                 text = result.stdout + result.stderr
                 (work / f'case{case}-negative{int(negative)}.log').write_text(text)
-                expected = 'LOAD_CANCEL_STALE_REQUEST' if (before and case == 0) or mutation else 'LOAD_CANCEL_RESPONSE' if negative else None
+                expected = ('LOAD_CANCEL_STALE_REQUEST' if (before and case == 0) or mutation else
+                            {'kill': 'misaligned load buffer entry did not complete with LD_ADDR_MISALIGNED and a killed request',
+                             'ex': 'LOAD_MISALIGN_DATA_COMPLETION'}[misalign_mutation] if misalign_mutation else
+                            'LOAD_MISALIGN_EXCEPTION' if negative and case == 13 else
+                            'LOAD_CANCEL_RESPONSE' if negative else None)
                 matched = (result.returncode != 0 and expected in text and 'LOAD_CANCEL_PASS' not in text) if expected else (
                     result.returncode == 0 and text.count('LOAD_CANCEL_PASS') == 1 and '%Error' not in text)
                 records.append({'ooo': ooo, 'loads': nload, 'mmu': mmu, 'scenario': case, 'negative': negative,

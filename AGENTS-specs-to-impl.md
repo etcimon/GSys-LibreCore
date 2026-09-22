@@ -45,6 +45,20 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## Fetch-response ownership by token and precise misalignment (2026-09-21, T3)
+
+Precise control-flow recovery requires that a redirected or flushed fetch never delivers its
+window to decode. `core/cva6.sv` adds a 2-bit `token` to `icache_dreq_t`/`icache_drsp_t`;
+`core/cache_subsystem/g6lc_icache.sv` latches it with the accepted address and echoes it on the
+response; `core/fetch_B/frontend.sv` wants one outstanding token, drops it on any kill and takes a
+response only on token match, replacing the VA-equality kill persistence (and its
+`G6LC_NO_KILL_PERSIST` seam). This is on the in-order path too. Precise load misalignment
+(`#ld_st_misaligned` behaviour under the trap policy): `core/load_unit.sv` no longer asserts on the
+captured offset (a misaligned request is legitimately granted before its exception is known); it
+now asserts, under `translate_off`, that a misaligned load-buffer entry completes once with
+`LD_ADDR_MISALIGNED` and a killed request, never retires with data, and carries tval according to
+`TvalEn`. No functional RTL changed in `load_unit.sv`.
+
 ## OoO CSR table, store reservation and load bypass (2026-09-21, T2)
 
 CSR accesses (`#csrinsts`) take their read value and apply their write at in-order commit, so

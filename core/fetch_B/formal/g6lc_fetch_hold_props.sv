@@ -106,6 +106,7 @@ module g6lc_fetch_hold_props #(
     logic            kill_s1;
     logic            kill_s2;
     logic            spec;
+    logic [1:0]      token;
     logic [VLEN-1:0] vaddr;
   } idreq_t;
 
@@ -114,6 +115,7 @@ module g6lc_fetch_hold_props #(
     logic            valid;
     logic [FW-1:0]   data;
     logic [FUW-1:0]  user;
+    logic [1:0]      token;
     logic [VLEN-1:0] vaddr;
     exc_t            ex;
   } idrsp_t;
@@ -168,6 +170,19 @@ module g6lc_fetch_hold_props #(
     if (rst_ni) begin
       assume (icache_dreq_i.vaddr[AB-1:0] == '0);
       assume (trap_vector_base_i[0] == 1'b0);
+    end
+  end
+
+  // Token ledger: the environment returns the token of the last accepted
+  // request, which is what a real I$ echoes on its response.
+  logic [1:0] tok_q;
+  always_ff @(posedge clk_i)
+    if (icache_dreq_o.req && icache_dreq_i.ready)
+      tok_q <= icache_dreq_o.token;
+
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      assume (!icache_dreq_i.valid || icache_dreq_i.token == tok_q);
     end
   end
 

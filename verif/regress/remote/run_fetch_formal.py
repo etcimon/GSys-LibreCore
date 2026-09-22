@@ -137,6 +137,49 @@ def sat_prove(formal, out, name, task_timeout):
     return 0 if matched else 1
 
 
+def token_bmc(formal, out, task_timeout):
+    """Fetch-response ownership by request token: single-task sby bmc against the
+    live frontend with an independent I$ ledger. The negative removes the
+    frontend's take gate so a killed response is accepted; the ledger must then
+    produce a counterexample, or the proof is vacuous."""
+    mutate = os.environ.get("REVIEW_FORMAL_TOKEN_MUTATE") == "1"
+    record = {"mode": "token-bmc", "negativeControl": mutate, "timeoutSeconds": task_timeout}
+    if mutate:
+        frontend = formal / "../frontend.sv"
+        original = frontend.read_text()
+        before = "      && !kill_drop\n"
+        after = "      && 1'b1\n"
+        if original.count(before) != 1:
+            raise ValueError("token take-gate mutation site changed")
+        frontend.write_text(original.replace(before, after))
+        record["mutation"] = {"before": before, "after": after,
+                              "originalSha256": hashlib.sha256(original.encode()).hexdigest()}
+    log_path = out / "g6lc_fetch_token-bmc.log"
+    with log_path.open("w") as log:
+        proc = subprocess.Popen(["sby", "-f", "g6lc_fetch_token.sby"], cwd=formal,
+                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            rc = proc.wait(timeout=task_timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGTERM)
+            proc.wait()
+            rc = 124
+    text = log_path.read_text()
+    asserts = 0
+    ywa = formal / "g6lc_fetch_token/model/design_aiger.ywa"
+    aiger_log = formal / "g6lc_fetch_token/model/design_aiger.log"
+    if ywa.is_file():
+        asserts = len(json.loads(ywa.read_text()).get("asserts", []))
+    elif aiger_log.is_file():
+        found = re.search(r"(\d+)\s+\$?asserts?", aiger_log.read_text())
+        asserts = int(found[1]) if found else 0
+    record.update(rc=rc, assertCount=asserts,
+                  matched=(rc != 0 and rc != 124 and "FAIL" in text and asserts > 0) if mutate else
+                          (rc == 0 and "PASS" in text and asserts > 0))
+    (out / "result.json").write_text(json.dumps([record], indent=2))
+    return 0 if record["matched"] else 1
+
+
 def main():
     data = Path(os.environ["TH_DATA_DIR"])
     out = Path(os.environ["TH_OUT_DIR"])
@@ -151,7 +194,7 @@ def main():
     task_timeout = int(os.environ.get("REVIEW_FORMAL_TIMEOUT", "120"))
     if not 120 <= task_timeout <= 600:
         raise ValueError("formal timeout outside 120..600 seconds")
-    if selected not in {"", "g6lc_fetch_iq", "g6lc_fetch_realign", "g6lc_fetch_iq_order", "g6lc_fetch_smt"}:
+    if selected not in {"", "g6lc_fetch_iq", "g6lc_fetch_realign", "g6lc_fetch_iq_order", "g6lc_fetch_smt", "g6lc_fetch_token"}:
         raise ValueError("unknown formal task")
     names = [selected] if selected else ["g6lc_fetch_realign", "g6lc_fetch_iq"]
     for name in names:
@@ -169,6 +212,10 @@ def main():
             shutil.copy2(src, dst)
             hashes[str(dst.relative_to(out))] = hashlib.sha256(dst.read_bytes()).hexdigest()
     (out / "sources.json").write_text(json.dumps(hashes, indent=2))
+    if selected == "g6lc_fetch_token":
+        if modes is not None:
+            raise ValueError("the token task is single-mode bmc")
+        return token_bmc(formal, out, task_timeout)
     if os.environ.get("REVIEW_FORMAL_NEGATIVE") == "1" and os.environ.get("REVIEW_FORMAL_SAT_PROVE") != "1":
         raise ValueError("instruction mutation is available only for SAT prove")
     if os.environ.get("REVIEW_FORMAL_SAT_PROVE") == "1" or os.environ.get("REVIEW_FORMAL_SAT_COVER") == "1":
