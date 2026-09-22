@@ -68,7 +68,13 @@ next actions are superseded by the tranche exits.
   the I$. `ooo_fetch_head_reuse_int` now passes Spike-identically on in-order, integer-OoO and FP
   FtqDepth=4 models; frozen ELFs cycle-identical; anchor exact.
 - [ ] T5 (partial): FP suite green on the qualification build; owner-retention mutation inert at
-  core level (structural: 32 SB entries, drop at head) — decide the bar; guard stays until then.
+  core level at SB=32 and at SB=16 (window reached, but every stale publish lands on a
+  commit-dropped slot and the fpu_wrap `was_cancelled` layer masks it besides) — decide the bar;
+  guard stays until then.
+- [ ] **SB=16 stall:** `ooo_fp_cancel_tid_reuse` times out at 2M cycles on the unmutated
+  `g6lc64_ooo` + `NrScoreboardEntries=16` qualification variant (fetch parked at `0x10040`; stages
+  1/10/11 pass there). Legal geometry — classify (scoreboard-depth livelock vs stall) with a flow
+  trace before any FP guard decision.
 - [ ] Confirm the smt2 anchor model's boot-vector replay on a single-hart directed ELF is hart 1's
   boot (dual-hart model artifact), not a redirect fault.
 - [ ] T6 per the plan file.

@@ -64,6 +64,15 @@ ALLOWED = {
         re.compile(r"(^\s+FtqDepth:\s*unsigned'\()([0-9]+)(\))", re.M),
         r"[0-9]+",
     ),
+    # OoO scoreboard depth (NR_SB_ENTRIES / TRANS_ID_BITS derive from it;
+    # RobEntries/PrfEntries/IqEntries=0 derive from it in build_config_pkg).
+    # The field value is a localparam reference in the shipped packages, so
+    # the replaced span accepts an identifier as well as a literal.
+    "NrScoreboardEntries": (
+        re.compile(r"(^\s+NrScoreboardEntries:\s*unsigned'\()"
+                   r"([A-Za-z_][A-Za-z0-9_]*|[0-9]+)(\))", re.M),
+        r"[0-9]+",
+    ),
 }
 
 EXEC_DRAM_LEN_MAX = 0x4000_0000

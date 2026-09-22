@@ -168,8 +168,16 @@ stages 1/9/10 (diag: 16 stale publishes on stage 10 all landed ~16 cycles before
 owner arrived — architecturally invisible at 32 scoreboard entries; the S2 leaf catches the same
 needle). Found on the way: the FTQ replay defect (fixed, see contract) and its rare residual; the
 smt2 anchor model run single-hart on a directed ELF replays the boot vector once (dual-hart model,
-hart 1's boot — artifact, not a core fault, to confirm). Decision pending: whether leaf-only
-detection plus the structural argument meets the bar for removing the single-hart guard.
+hart 1's boot — artifact, not a core fault, to confirm). A 16-entry-scoreboard qualification
+variant (`NrScoreboardEntries=16` overlay, `t5-sb16-fp-*`) was tried to open the reuse window the
+S2 leaf had shown: the window IS reached (17 stale returns, each ~13 cycles after the tag's new
+owner was allocated) but every stale publish still lands on a slot the commit head has already
+dropped ~4 cycles earlier, and the `fpu_wrap` gate's own `was_cancelled` layer masks it besides —
+the mutation stays inert at core level. Decision pending: whether leaf-only detection plus this
+two-layer structural argument meets the bar for removing the single-hart guard. **New finding**: on
+the SB=16 variant, `ooo_fp_cancel_tid_reuse` (stage 9) stops retiring and times out at the 2M cap
+on the unmutated model (fetch parked at `0x10040`); stage 1/10/11 pass there. A 16-entry
+scoreboard is a legal configuration, so this is a qualification finding in its own right — open.
 
 ## T6 — mixed-resident SMT2
 
