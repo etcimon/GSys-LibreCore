@@ -540,6 +540,7 @@ module cva6
   logic [CVA6Cfg.NrIssuePorts-1:0][31:0] tinst_ex;
   // fixed latency units
   logic flu_ready_ex_id;
+  logic csr_ready_ex_id;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] flu_trans_id_ex_id;
   logic flu_valid_ex_id;
   logic [CVA6Cfg.XLEN-1:0] flu_result_ex_id;
@@ -790,6 +791,7 @@ module cva6
   logic sb_full;
   logic spec_cancel;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_cancelled_mask;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_mask;
   // U5 OoO PMU probes (0 when OoOEn=0)
   logic ooo_rename_stall, ooo_iq_full, ooo_rob_full, ooo_lsq_stall, ooo_stl_forward;
 
@@ -1444,6 +1446,7 @@ module cva6
       .sb_empty_o              (smt_sb_empty),
       .spec_cancel_o           (spec_cancel),
       .cancelled_mask_o        (sb_cancelled_mask),
+      .sb_live_o               (sb_live_mask),
       .flush_unissued_instr_i  (flush_unissued_instr_ctrl_id),
       .flush_i                 (flush_ctrl_id),
       .stall_i                 (stall_acc_id),
@@ -1479,6 +1482,7 @@ module cva6
       .tinst_o                 (tinst_ex),
       // fixed latency unit ready
       .flu_ready_i             (flu_ready_ex_id),
+      .csr_ready_i             (csr_ready_ex_id),
       // ALU
       .alu_valid_o             (alu_valid_id_ex),
       .aes_valid_o             (aes_valid_id_ex),
@@ -1602,6 +1606,7 @@ module cva6
       .debug_mode_i(debug_mode),
       .flush_i(flush_ctrl_ex),
       .cancelled_mask_i(sb_cancelled_mask),
+      .sb_live_i(sb_live_mask),
       .rs1_forwarding_i(rs1_forwarding_id_ex),
       .rs2_forwarding_i(rs2_forwarding_id_ex),
       .fu_data_i(fu_data_id_ex),
@@ -1617,6 +1622,7 @@ module cva6
       .flu_valid_o(flu_valid_ex_id),
       .flu_exception_o(flu_exception_ex_id),
       .flu_ready_o(flu_ready_ex_id),
+      .csr_ready_o(csr_ready_ex_id),
       // ALU
       .alu_valid_i(alu_valid_id_ex),
       .orig_instr_aes_i(orig_instr_aes),

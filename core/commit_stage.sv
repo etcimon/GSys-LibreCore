@@ -383,6 +383,12 @@ module commit_stage
             we_gpr_o[0] = amo_resp_i.ack;
           end
         end
+
+        // The OoO csr_buffer frees an entry on each csr_commit_i pulse, so the
+        // pulse must coincide with the real commit: FENCE/SFENCE hold the head
+        // for store/TLB drain and would otherwise re-fire the release on an
+        // already-freed entry. In-order mode is unchanged (ack == same cycle).
+        commit_csr_o = commit_csr_o && commit_ack_o[0];
       end
     end
 

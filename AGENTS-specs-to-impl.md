@@ -45,6 +45,23 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## OoO CSR table, store reservation and load bypass (2026-09-21, T2)
+
+CSR accesses (`#csrinsts`) take their read value and apply their write at in-order commit, so
+their issue order is free: under `OoOEn` `core/csr_buffer.sv` becomes a two-entry per-tid address
+table looked up by the committing tid (`csr_commit_tid_i`), cancelled entries drop, and
+`core/ex_stage.sv` keeps `csr_ready` out of `flu_ready`; `core/issue_read_operands.sv` marks only
+the CSR unit busy on `csr_ready_i`. The in-order path is bit-identical. `g6lc_iq.sv` head-gates
+only fence/system CSR-class ops. Memory ordering (`#memorymodel`): an LSQ store entry is the
+reservation of a store-buffer speculative slot and lives until commit (`g6lc_lsq.sv`;
+`g6lc_ooo_dispatch.sv` refuses `LsqStoreEntries > DEPTH_SPEC`), so stores issue out of order and
+drain in order; a load waits only on older stores whose address is unresolved
+(`st_unresolved_mask_o`), and a dispatch-time store-set verdict (`g6lc_memdep.sv`, trained by the
+violating load's PC) may let it bypass those too, with the T1 violation scan and commit replay as
+the safety net. A completed load holds its entry while an older store is unresolved. In-order
+configurations tie every new signal low. Timing: the unresolved-store scan replaces the live-store
+scan (same width); the CSR table adds a two-entry tid compare on issue and commit.
+
 ## OoO age key and memory-order replay (2026-09-21, T1)
 
 Precise memory ordering under speculation (`#memorymodel`) needs one sound program-order key and

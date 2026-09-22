@@ -3,7 +3,10 @@
 //
 // U5.4 / FSE S3 store-set memory dependence predictor.
 // - Trains on store dispatch (multi-port)
-// - Trains load PCs when LSQ observes dependence (older store / STL stall)
+// - Trains load PCs on a real memory-order violation (train_valid_i/train_pc_i
+//   carry the LSQ's violating-load report)
+// - Queried at dispatch (ld_query_i/ld_pc_i); the verdict relaxes the IQ's
+//   older-unresolved-store gate for the dispatched load only
 // - Flushes on full flush or mispredict (caller ORs mispredict into flush_i)
 // When enable_i=0 (MemDepPredEn=0 and not forced by OoO), never stalls.
 
@@ -19,11 +22,12 @@ module g6lc_memdep #(
     // Train: store dispatch
     input  logic [NR_TRAIN-1:0]                    st_valid_i,
     input  logic [NR_TRAIN-1:0][CVA6Cfg.VLEN-1:0]  st_pc_i,
-    // Query: load about to issue
+    // Query: load about to dispatch
     input  logic                     ld_query_i,
     input  logic [CVA6Cfg.VLEN-1:0]  ld_pc_i,
-    // Observed dependence this cycle (store pending && stl_stall)
-    input  logic                     dep_observe_i,
+    // Observed memory-order violation this cycle, with the violating load's PC
+    input  logic                     train_valid_i,
+    input  logic [CVA6Cfg.VLEN-1:0]  train_pc_i,
     input  logic                     store_pending_i,
     output logic                     stall_o,
     output logic                     predict_o
@@ -58,13 +62,14 @@ module g6lc_memdep #(
           set_ssid_d[idx(st_pc_i[t])]  = ssid(st_pc_i[t]);
         end
       end
-      // FSE S3: train load side on observed LSQ dependence
-      if (dep_observe_i && ld_query_i) begin
-        ld_wait_d[idx(ld_pc_i)] = 1'b1;
-        set_valid_d[idx(ld_pc_i)] = 1'b1;
-        set_ssid_d[idx(ld_pc_i)]  = ssid(ld_pc_i);
+      // Train the load side on a real violation: the violating load's PC (not
+      // whichever load happens to be querying this cycle) is marked wait-on-store.
+      if (train_valid_i) begin
+        ld_wait_d[idx(train_pc_i)] = 1'b1;
+        set_valid_d[idx(train_pc_i)] = 1'b1;
+        set_ssid_d[idx(train_pc_i)]  = ssid(train_pc_i);
         for (int unsigned t = 0; t < NR_TRAIN; t++)
-          if (st_valid_i[t]) set_ssid_d[idx(ld_pc_i)] = ssid(st_pc_i[t]);
+          if (st_valid_i[t]) set_ssid_d[idx(train_pc_i)] = ssid(st_pc_i[t]);
       end
     end
 

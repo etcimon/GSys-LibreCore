@@ -38,4 +38,19 @@ package g6lc_ooo_pkg;
     return (a - cp) & mask;
   endfunction
 
+  // Keep in lockstep with store_buffer.sv's DEPTH_SPEC: an LSQ store credit
+  // reserves a speculative-queue slot, so g6lc_ooo_dispatch refuses a
+  // configuration whose store queue outnumbers the slots it reserves. The
+  // non-DeepSpec fallback is ariane_pkg::DEPTH_SPEC (=4), inlined as a literal
+  // so this package does not import ariane_pkg.
+  function automatic int unsigned ooo_spec_store_depth(input config_pkg::cva6_cfg_t cfg);
+    int unsigned clamped;
+    if (!cfg.DeepSpecEn) return 4;
+    clamped = (cfg.MaxOutstandingStores < 4) ? 4 :
+              (cfg.MaxOutstandingStores > 16) ? 16 : cfg.MaxOutstandingStores;
+    if (clamped <= 4) return 4;
+    if (clamped <= 8) return 8;
+    return 16;
+  endfunction
+
 endpackage

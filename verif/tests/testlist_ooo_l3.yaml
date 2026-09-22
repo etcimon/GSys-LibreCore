@@ -165,6 +165,27 @@ testlist:
     gcc_opts: "-DSTAGE=31 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
     description: "Program-order store admission and CSR commit-head admission compose with five stores below the eight-entry capacity"
 
+  - test: ooo_mem_bypass_late_store_addr
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=35 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A younger load that bypasses an older store whose address is late is replayed when the store resolves to the same bytes"
+
+  - test: ooo_mem_bypass_disjoint
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=36 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A younger load to a disjoint address does not wait for an older store whose address is late"
+
+  - test: ooo_csr_no_flu_freeze
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=37 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Two CSR accesses with independent ALU work between them read and write in order without freezing the ALU"
+
   - test: ooo_load_misaligned_trap
     iterations: 1
     <<: *common_test_config

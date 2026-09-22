@@ -85,6 +85,7 @@ module g6lc_ooo_age_props #(
       .ld_alloc_i        (do_alloc && !alloc_is_st_i),
       .st_alloc_i        (do_alloc && alloc_is_st_i),
       .alloc_id_i        (alloc_ptr_q),
+      .alloc_pc_i        ('0),
       .ld_full_o         (ld_full),
       .st_full_o         (st_full),
       .ld_free_o         (ld_free),
@@ -108,13 +109,15 @@ module g6lc_ooo_age_props #(
       .ld_query_size_i   (2'b11),
       .ld_query_id_i     ('0),
       .st_live_mask_o    (st_live_mask),
+      .st_unresolved_mask_o(),
       .store_pending_o   (pend),
       .stl_forward_o     (fwd),
       .stl_data_o        (fwd_data),
       .stl_stall_o       (stall),
       .lsq_busy_o        (busy),
       .mem_violation_o   (viol),
-      .mem_violation_id_o(viol_id)
+      .mem_violation_id_o(viol_id),
+      .mem_violation_pc_o()
   );
 
   // Force a reset in the first cycle. `initial assume (!rst_ni)` is rejected by

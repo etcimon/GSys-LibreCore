@@ -442,12 +442,13 @@ module tb_g6lc_review_iq;
     return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
-  typedef struct packed {fu_t fu; logic [3:0] trans_id; logic [31:0] pc;} sbe_t;
+  typedef struct packed {fu_t fu; fu_op op; logic [3:0] trans_id; logic [31:0] pc;} sbe_t;
   typedef struct packed {sbe_t s; logic [31:0] orig; logic [3:0] p1,p2,pd; bit r1,r2;} entry_t;
   entry_t reference_q[$];
   logic clk=0,rst_n=0,flush=0,mem_stall=0,full;
-  logic [15:0] cancel='0;
-  logic [NP-1:0] dv='0,da,iv,ia='0,r1='0,r2='0;
+  logic [15:0] cancel='0,st_unresolved='0,st_live='0;
+  logic [3:0] commit_ptr='0;
+  logic [NP-1:0] dv='0,da,iv,ia='0,r1='0,r2='0,bypass='0;
   sbe_t [NP-1:0] ds,is;
   logic [NP-1:0][31:0] di,ii;
   logic [NP-1:0][3:0] p1,p2,pd,ip;
@@ -462,14 +463,26 @@ module tb_g6lc_review_iq;
     .disp_fprs1_i('0),.disp_fprs2_i('0),.disp_fprs3_i('0),
     .disp_fpr_rs1_i('0),.disp_fpr_rs2_i('0),.disp_fpr_rs3_i('0),
     .disp_rs3_ready_i('1),.fwb_valid_i('0),.fwb_prd_i('0),
-    .disp_rs1_ready_i(r1),.disp_rs2_ready_i(r2),.disp_ack_o(da),.full_o(full),.wb_valid_i(wv),.wb_prd_i(wp),
+    .disp_rs1_ready_i(r1),.disp_rs2_ready_i(r2),.disp_may_bypass_i(bypass),.disp_ack_o(da),.full_o(full),
+    .wb_valid_i(wv),.wb_prd_i(wp),
     .issue_sbe_o(is),.issue_orig_o(ii),.issue_prd_o(ip),.issue_valid_o(iv),.issue_ack_i(ia),.mem_stall_i(mem_stall),
-    .st_live_mask_i('0),.commit_ptr_i('0),.sb_live_i('1));
+    .st_live_mask_i(st_live),.st_unresolved_mask_i(st_unresolved),.commit_ptr_i(commit_ptr),.sb_live_i('1));
   task automatic tick;
     clk=1; #2; clk=0; #2;
   endtask
   task automatic clear_inputs;
-    flush=0;mem_stall=0;cancel='0;dv='0;ds='0;di='0;p1='0;p2='0;pd='0;r1='0;r2='0;wv='0;wp='0;
+    flush=0;mem_stall=0;cancel='0;dv='0;ds='0;di='0;p1='0;p2='0;pd='0;r1='0;r2='0;wv='0;wp='0;bypass='0;
+  endtask
+  // Direct gate checks (scenarios 5-9): dispatch one entry, then read the
+  // presented issue valid for it against the expected gate verdict.
+  task automatic offer_op(input int id,input fu_t fu,input fu_op op,input bit may_bypass);
+    dv[0]=1;ds[0]='{fu:fu,op:op,trans_id:4'(id),pc:32'h1000+32'(id)*4};
+    di[0]=32'h13000000+32'(id);p1[0]=0;p2[0]=0;pd[0]=4'(id);r1[0]=1;r2[0]=1;bypass[0]=may_bypass;
+    tick();clear_inputs();#2;
+  endtask
+  task automatic expect_issue(input bit want,input string tag);
+    if(iv[0]!==(want^negative))$fatal(1,"%s iv=%b",tag,iv[0]);
+    checked++;
   endtask
   task automatic reset;
     rst_n=0;ia='0;clear_inputs();reference_q.delete();#2;tick();rst_n=1;#2;
@@ -522,7 +535,7 @@ module tb_g6lc_review_iq;
   endtask
   task automatic offer(input int port, input int id, input fu_t fu,
                        input int src, input int dst, input bit ready);
-    dv[port]=1;ds[port]='{fu:fu,trans_id:4'(id),pc:32'h1000+32'(id)*4};
+    dv[port]=1;ds[port]='{fu:fu,op:ADD,trans_id:4'(id),pc:32'h1000+32'(id)*4};
     di[port]=32'h13000000+32'(id);p1[port]=4'(src);p2[port]=0;pd[port]=4'(dst);r1[port]=ready;r2[port]=1;
   endtask
   initial begin
@@ -548,6 +561,40 @@ module tb_g6lc_review_iq;
           step();
         end
         clear_inputs();flush=1;step();
+      end
+      // A load behind an older UNRESOLVED store waits unless it may bypass;
+      // once the store resolves the load goes.
+      5:begin
+        st_live[1]=1;st_unresolved[1]=1;
+        offer_op(2,LOAD,LD,0);expect_issue(0,"IQ_UNRESOLVED_GATE");
+        st_unresolved[1]=0;#2;expect_issue(1,"IQ_UNRESOLVED_GATE");
+      end
+      // The dispatch-time prediction lets the same load pass the unresolved store.
+      6:begin
+        st_live[1]=1;st_unresolved[1]=1;
+        offer_op(2,LOAD,LD,1);expect_issue(1,"IQ_BYPASS");
+      end
+      // A RESOLVED older store never blocks a load: forwarding owns that case.
+      7:begin
+        st_live[1]=1;st_unresolved[1]=0;
+        offer_op(2,LOAD,LD,0);expect_issue(1,"IQ_RESOLVED_PASS");
+      end
+      // A ready younger store issues ahead of an older not-ready store: the
+      // dispatch-time slot reservation replaced program-order store issue.
+      8:begin
+        dv[0]=1;ds[0]='{fu:STORE,op:SD,trans_id:4'd1,pc:32'h1004};di[0]=32'h13000001;pd[0]=4'd1;r1[0]=0;r2[0]=1;
+        tick();clear_inputs();
+        offer_op(3,STORE,SD,0);expect_issue(1,"IQ_STORE_OOO");
+        if(is[0].trans_id!==4'd3)$fatal(1,"IQ_STORE_OOO tid=%0d",is[0].trans_id);
+      end
+      // CSR accesses no longer wait for the commit head; fence-class system ops
+      // still do.
+      9:begin
+        commit_ptr=4'd0;
+        offer_op(3,CSR,CSR_WRITE,0);expect_issue(1,"IQ_CSR_HEAD");
+        ia='1;tick();ia='0;#2;
+        offer_op(5,CSR,SFENCE_VMA,0);expect_issue(0,"IQ_CSR_HEAD");
+        commit_ptr=4'd5;#2;expect_issue(1,"IQ_CSR_HEAD");
       end
       default:$fatal(1,"IQ_SCENARIO");
     endcase
@@ -1071,6 +1118,92 @@ endmodule
 
 // Bisect fixture: drives g6lc_lsq directly with an explicit allocation id, so a
 // failure here isolates the LSQ itself rather than the dispatch id plumbing.
+// Per-tid CSR address table (T2). Under OoOEn a CSR access issues whenever a
+// table entry is free and its address is looked up by the COMMITTING tid, so
+// two CSRs may issue out of program order and still commit their own
+// addresses in order; ready is a table credit, not a whole-FLU freeze. With
+// OoOEn clear the module is the historical depth-1 buffer.
+module tb_g6lc_review_csrbuf;
+  import ariane_pkg::*;
+  parameter bit OOO=1;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.NR_SB_ENTRIES=8;c.TRANS_ID_BITS=3;c.OoOEn=OOO;return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef struct packed {logic [2:0] trans_id;logic [63:0] operand_a,operand_b;} fu_t2;
+  logic clk=0,rst_n=0,flush=0,valid=0,commit=0,ready;
+  logic [2:0] commit_tid='0;
+  logic [7:0] cancel='0;
+  logic [11:0] addr;
+  logic [63:0] result;
+  fu_t2 data='0;
+  int scenario;bit negative;
+  always #5 clk=~clk;
+  csr_buffer #(.CVA6Cfg(C),.fu_data_t(fu_t2)) dut(
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancel),.fu_data_i(data),
+    .csr_ready_o(ready),.csr_valid_i(valid),.csr_result_o(result),
+    .csr_commit_i(commit),.csr_commit_tid_i(commit_tid),.csr_addr_o(addr));
+  task automatic drive;@(negedge clk);endtask
+  // Ready is sampled before the request is presented, as issue does: the
+  // in-order buffer drops ready in the very cycle it accepts a CSR.
+  task automatic issue(input logic [2:0] tid,input logic [11:0] a);
+    #1;if(!ready)$fatal(1,"CSRBUF_NOT_READY tid=%0d",tid);
+    data.trans_id=tid;data.operand_b=64'(a);data.operand_a=64'h100+64'(tid);valid=1;
+    drive();valid=0;
+  endtask
+  task automatic retire(input logic [2:0] tid,input logic [11:0] want,input string tag);
+    commit=1;commit_tid=tid;#1;
+    if(addr!==(want^(negative?12'd1:12'd0)))$fatal(1,"%s tid=%0d addr=%h want=%h",tag,tid,addr,want);
+    drive();commit=0;
+  endtask
+  initial begin
+    scenario=0;negative=$test$plusargs("oracle_negative");
+    void'($value$plusargs("scenario=%d",scenario));
+    repeat(2)drive();rst_n=1;drive();
+    case(scenario)
+      // Two CSRs issue younger-first; each commits its own address in program
+      // order.
+      0:begin
+        issue(3'd5,12'h300);issue(3'd3,12'h305);
+        retire(3'd3,12'h305,"CSRBUF_ADDR");retire(3'd5,12'h300,"CSRBUF_ADDR");
+        #1;if(!ready)$fatal(1,"CSRBUF_ADDR ready after drain");
+      end
+      // Ready is the table credit: two outstanding entries deassert it, one
+      // commit restores it.
+      1:begin
+        issue(3'd1,12'h300);issue(3'd2,12'h301);#1;
+        if(ready!==negative)$fatal(1,"CSRBUF_READY full ready=%b",ready);
+        retire(3'd1,12'h300,"CSRBUF_READY");#1;
+        if(!ready)$fatal(1,"CSRBUF_READY after commit ready=%b",ready);
+      end
+      // A cancelled CSR leaves the table without a commit and frees its credit.
+      2:begin
+        issue(3'd1,12'h300);issue(3'd2,12'h301);
+        cancel=8'h04;drive();cancel='0;#1;
+        if(ready!==!negative)$fatal(1,"CSRBUF_CANCEL ready=%b",ready);
+        retire(3'd1,12'h300,"CSRBUF_CANCEL");
+      end
+      // Full flush empties the table.
+      3:begin
+        issue(3'd1,12'h300);issue(3'd2,12'h301);
+        flush=1;drive();flush=0;#1;
+        if(ready!==!negative)$fatal(1,"CSRBUF_FLUSH ready=%b",ready);
+        issue(3'd4,12'h302);retire(3'd4,12'h302,"CSRBUF_FLUSH");
+      end
+      // In-order identity: one uncommitted CSR holds ready low until commit.
+      4:begin
+        issue(3'd1,12'h300);#1;
+        if(ready!==negative)$fatal(1,"CSRBUF_INORDER ready=%b",ready);
+        retire(3'd1,12'h300,"CSRBUF_INORDER");#1;
+        if(!ready)$fatal(1,"CSRBUF_INORDER ready after commit");
+      end
+      default:$fatal(1,"CSRBUF_SCENARIO");
+    endcase
+    $display("RTL_REVIEW_PASS csrbuf scenario=%0d",scenario);$finish;
+  end
+endmodule
+
 module tb_g6lc_review_lsq;
   import ariane_pkg::*;
   function automatic config_pkg::cva6_cfg_t configuration();
@@ -1095,13 +1228,13 @@ module tb_g6lc_review_lsq;
   logic [15:0] cancel_mask='0;
   logic pend,fwd,stall,busy,ldf,stf,viol;
   logic [2:0] ldfree,stfree;
-  logic [15:0] st_mask;
+  logic [15:0] st_mask,st_unresolved;
   logic [63:0] fwd_data;
   logic [3:0] viol_id;
   int scenario;bit negative;
   g6lc_lsq #(.CVA6Cfg(C),.LD_ENTRIES(4),.ST_ENTRIES(4),.NR_ALLOC(2),.NR_UPDATE(2)) dut(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancel_mask),.sb_live_i('1),
-    .ld_alloc_i(ld_alloc),.st_alloc_i(st_alloc),.alloc_id_i(alloc_id),
+    .ld_alloc_i(ld_alloc),.st_alloc_i(st_alloc),.alloc_id_i(alloc_id),.alloc_pc_i('0),
     .ld_full_o(ldf),.st_full_o(stf),.ld_free_o(ldfree),.st_free_o(stfree),
     .addr_valid_i(addr_v),.addr_id_i(addr_id),.addr_i(addr),
     .addr_is_st_i(addr_is_st),.addr_size_i(addr_size),
@@ -1110,9 +1243,9 @@ module tb_g6lc_review_lsq;
     .commit_st_i(commit_st),.commit_id_i(commit_id),.commit_ptr_i(commit_ptr),
     .ld_query_i(ld_query),.ld_query_addr_i(ld_addr),.ld_query_size_i(ld_size),
     .ld_query_id_i(ld_id),
-    .st_live_mask_o(st_mask),.store_pending_o(pend),.stl_forward_o(fwd),
+    .st_live_mask_o(st_mask),.st_unresolved_mask_o(st_unresolved),.store_pending_o(pend),.stl_forward_o(fwd),
     .stl_data_o(fwd_data),.stl_stall_o(stall),.lsq_busy_o(busy),
-    .mem_violation_o(viol),.mem_violation_id_o(viol_id));
+    .mem_violation_o(viol),.mem_violation_id_o(viol_id),.mem_violation_pc_o());
   // Same clocking discipline as the dispatch fixture: free-running clock, drive
   // on the falling edge, sample after the rising edge settles.
   always #5 clk = ~clk;
@@ -1138,7 +1271,9 @@ module tb_g6lc_review_lsq;
     rst_n=1;
     drive();
     case(scenario)
-      // A store's completion, matched by its own id, must retire its entry.
+      // A store's entry is the reservation of its speculative-queue slot: its
+      // writeback completion keeps the entry, and only its commit (matched by
+      // id) releases it.
       0:begin
         st_alloc=2'b01;alloc_id[0]=4'd1;
         drive();st_alloc='0;alloc_id='0;
@@ -1148,7 +1283,11 @@ module tb_g6lc_review_lsq;
         drive();cmpl_v=2'b01;cmpl_st=2'b01;cmpl_id[0]=4'd1;
         drive();cmpl_v='0;cmpl_st='0;cmpl_id='0;
         presample();
-        if(pend!==(negative?1'b1:1'b0))$fatal(1,"LSQ_WB_RETIRE pend=%b",pend);
+        if(pend!==(negative?1'b0:1'b1))$fatal(1,"LSQ_WB_RETIRE pend=%b",pend);
+        commit_st=2'b01;commit_id[0]=4'd1;
+        drive();commit_st='0;commit_id='0;
+        presample();
+        if(pend)$fatal(1,"LSQ_COMMIT_RELEASE pend=%b",pend);
         if(st_mask!=='0)$fatal(1,"LSQ_MASK_CLEAR got=%h",st_mask);
       end
       // Address then data, both matched by id, must enable forwarding.
@@ -1397,6 +1536,20 @@ module tb_g6lc_review_lsq;
           $fatal(1,"LSQ_VIOLATION_SAMECYCLE viol=%b id=%0d",viol,viol_id);
         addr_v='0;
       end
+      // The unresolved mask names only stores whose address is unknown: store 1
+      // resolves, store 3 does not, and both stay live until commit.
+      18:begin
+        st_alloc=2'b11;alloc_id[0]=4'd1;alloc_id[1]=4'd3;
+        drive();st_alloc='0;alloc_id='0;
+        presample();
+        if(st_unresolved!==16'h000A)$fatal(1,"LSQ_UNRESOLVED_MASK got=%h want=000a",st_unresolved);
+        addr_v=2'b01;addr_is_st=2'b01;addr_id[0]=4'd1;addr[0]=56'h2000;addr_size[0]=2'b11;
+        drive();addr_v='0;addr_is_st='0;addr_id='0;
+        presample();
+        if(st_unresolved!==(negative?16'h000A:16'h0008))
+          $fatal(1,"LSQ_UNRESOLVED_MASK got=%h want=0008",st_unresolved);
+        if(st_mask!==16'h000A)$fatal(1,"LSQ_UNRESOLVED_LIVE got=%h want=000a",st_mask);
+      end
       default:$fatal(1,"LSQ_SCENARIO");
     endcase
     $display("RTL_REVIEW_PASS lsq scenario=%0d",scenario);$finish;
@@ -1510,12 +1663,18 @@ module tb_g6lc_review_dispatch;
         end
         if(seen_st!=1||seen_ld!=(negative?2:1))$fatal(1,"DISPATCH_STORE_PAIR a=%0d b=%0d",seen_st,seen_ld);
       end
-      // Ordering guard: the load must not issue while an older store address is
-      // unresolved. No writeback is supplied, so the store never resolves.
+      // Ordering guard: the load must not issue while an older store's ADDRESS
+      // is unresolved. The store's base register is produced by an ALU that
+      // never writes back, so the store cannot issue and stays unresolved.
+      // Without a dispatch-time bypass prediction the load waits; with the
+      // predictor enabled and cold it bypasses (the LSQ scan then owns safety).
       3:begin
-        ds[0].fu=STORE;ds[0].op=SD;ds[0].pc=64'h1000;ds[0].trans_id=1;
-        ds[1].fu=LOAD;ds[1].op=LD;ds[1].pc=64'h1004;ds[1].trans_id=2;dv=2'b11;
+        ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=5'd5;ds[0].pc=64'h0ffc;ds[0].trans_id=0;
+        ds[1].fu=STORE;ds[1].op=SD;ds[1].rs1=5'd5;ds[1].pc=64'h1000;ds[1].trans_id=1;dv=2'b11;
         presample();if(!da[0]||!da[1])$fatal(1,"DISPATCH_ADMISSION");
+        drive();dv=0;ds[0]='0;ds[1]='0;
+        ds[0].fu=LOAD;ds[0].op=LD;ds[0].rs1=5'd6;ds[0].pc=64'h1004;ds[0].trans_id=2;dv=2'b01;
+        presample();if(!da[0])$fatal(1,"DISPATCH_ADMISSION2");
         drive();dv=0;
         repeat(8)begin
           presample();
@@ -1525,10 +1684,11 @@ module tb_g6lc_review_dispatch;
           end
           drive();
         end
-        if(seen_st!=1)$fatal(1,"DISPATCH_STORE_PROGRESS scenario=3 issued=%0d",seen_st);
-        if(seen_ld!=(negative?1:0))$fatal(1,"DISPATCH_LOAD_ORDER load_issued=%0d",seen_ld);
+        if(seen_st!=0)$fatal(1,"DISPATCH_STORE_PROGRESS scenario=3 issued=%0d",seen_st);
+        if(seen_ld!=((MDP?1:0)^negative))$fatal(1,"DISPATCH_LOAD_ORDER load_issued=%0d",seen_ld);
       end
-      // Writeback of a store's own trans_id must retire its LSQ entry.
+      // A store's LSQ entry is its speculative-queue reservation: its own
+      // writeback keeps the entry, and only its commit (by trans_id) releases it.
       6:begin
         ds[0].fu=STORE;ds[0].op=SD;ds[0].pc=64'h1000;ds[0].trans_id=1;dv=2'b01;
         presample();if(!da[0])$fatal(1,"DISPATCH_ADMISSION");
@@ -1540,8 +1700,12 @@ module tb_g6lc_review_dispatch;
         presample();
         drive();wb_v='0;wb_id='0;
         presample();
-        if(dut.store_pend!==(negative?1'b1:1'b0))
+        if(dut.store_pend!==(negative?1'b0:1'b1))
           $fatal(1,"DISPATCH_STORE_WB_RETIRE store_pend=%b",dut.store_pend);
+        cm_instr='0;cm_instr[0].fu=STORE;cm_instr[0].op=SD;cm_instr[0].trans_id=1;cm_ack=2'b01;
+        drive();cm_ack='0;
+        presample();
+        if(dut.store_pend)$fatal(1,"DISPATCH_STORE_COMMIT_RELEASE store_pend=%b",dut.store_pend);
       end
       // Age-aware gate: a load dispatched BEFORE a store is older than it, so
       // the pending store must not block the load's issue. Both dispatch in
@@ -1561,22 +1725,29 @@ module tb_g6lc_review_dispatch;
         end
         if(seen_ld!=(negative?0:1))$fatal(1,"DISPATCH_LOAD_UNBLOCKED ld=%0d",seen_ld);
       end
-      // Wraparound: with cp=14 the store at tid 15 (dist 1) is OLDER than the
-      // load at tid 0 (dist 2) and still blocks it; a naive compare would pass.
+      // Wraparound: with cp=14 the UNRESOLVED store at tid 15 (dist 1) is OLDER
+      // than the load at tid 0 (dist 2) and still blocks it; a naive compare
+      // would pass. The store's base register comes from an ALU at tid 14 that
+      // never writes back, so the store cannot issue or resolve.
       8:begin
         cp=4'd14;
-        ds[0].fu=STORE;ds[0].op=SD;ds[0].pc=64'h1000;ds[0].trans_id=15;dv=2'b01;
-        presample();if(!da[0])$fatal(1,"DISPATCH_ADMISSION");
-        drive();dv=0;
-        ds[0].fu=LOAD;ds[0].op=LD;ds[0].pc=64'h1004;ds[0].trans_id=0;dv=2'b01;
+        ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=5'd5;ds[0].pc=64'h0ffc;ds[0].trans_id=14;
+        ds[1].fu=STORE;ds[1].op=SD;ds[1].rs1=5'd5;ds[1].pc=64'h1000;ds[1].trans_id=15;dv=2'b11;
+        presample();if(!da[0]||!da[1])$fatal(1,"DISPATCH_ADMISSION");
+        drive();dv=0;ds[0]='0;ds[1]='0;
+        ds[0].fu=LOAD;ds[0].op=LD;ds[0].rs1=5'd6;ds[0].pc=64'h1004;ds[0].trans_id=0;dv=2'b01;
         presample();if(!da[0])$fatal(1,"DISPATCH_ADMISSION2");
         drive();dv=0;
         repeat(8)begin
           presample();
-          for(int p=0;p<2;p++)if(iv[p]&&issued[p].trans_id==4'd0)seen_ld++;
+          for(int p=0;p<2;p++)begin
+            if(iv[p]&&issued[p].trans_id==4'd15)seen_st++;
+            if(iv[p]&&issued[p].trans_id==4'd0)seen_ld++;
+          end
           drive();
         end
-        if(seen_ld!=(negative?1:0))$fatal(1,"DISPATCH_WRAP_ORDER ld=%0d",seen_ld);
+        if(seen_st!=0)$fatal(1,"DISPATCH_STORE_PROGRESS scenario=8 issued=%0d",seen_st);
+        if(seen_ld!=((MDP?1:0)^negative))$fatal(1,"DISPATCH_WRAP_ORDER ld=%0d",seen_ld);
       end
       // Branch-tag plumbing: the OLDER branch's resolve must unwind rename to
       // ITS checkpoint, not the youngest. Observable through top-level ports:
@@ -1819,14 +1990,14 @@ module tb_g6lc_review_dispatch;
         // appear on wb_data_i. Contract under test: a later consumer renamed against
         // that destination must observe the ARCHITECTURAL value, because with
         // OoOEn=1 issue_read_operands takes the PRF operand over the regfile read.
+        // A plain CSR access no longer waits for the commit head (the per-tid
+        // csr_buffer table holds its address); the value still arrives at commit.
         ds='0;ds[0].fu=CSR;ds[0].op=CSR_READ;ds[0].rd=7;ds[0].trans_id=1;dv=1;
         presample();if(!da[0])$fatal(1,"DISPATCH_LATERESULT_SETUP producer");
         drive();dv=0;
         presample();
-        if(|iv)$fatal(1,"DISPATCH_CSR_HEAD_ONLY");
-        drive();cp=4'd1;
-        presample();
         if(!iv[0]||issued[0].trans_id!=1)$fatal(1,"DISPATCH_LATERESULT_SETUP producer issue");
+        cp=4'd1;
         p9a=issued[0].p_rd;
         if(p9a==0)$fatal(1,"DISPATCH_LATERESULT_SETUP no rename");
         // Execute-stage writeback carries only the placeholder.
@@ -2334,6 +2505,7 @@ module tb_g6lc_review_store_recovery;
   always #5 clk=~clk;
   store_buffer #(.CVA6Cfg(C),.dcache_req_i_t(req_t),.dcache_req_o_t(rsp_t),.cbo_t(cbo_t)) dut(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancelled),
+    .sb_live_i('1),
     .stall_st_pending_i(1'b0),.no_st_pending_o(no_pending),.store_buffer_empty_o(empty),
     .page_offset_i(load_address[11:0]),.load_paddr_i(load_address),.load_paddr_valid_i(load_v),
     .load_trans_id_i(load_tid),.commit_trans_id_i(commit_tid),

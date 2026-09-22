@@ -58,6 +58,15 @@ there are no unresolved branches. With a single cycle operation all
 branches are resolved in the same cycle of issue which doesn't introduce
 any pipeline stalls.
 
+#### CSR Buffer
+
+The CSR buffer holds the address of a CSR instruction from issue until commit, where the
+CSR file is read or written. In order it is a single entry and its ready signal folds into the
+fixed-latency unit's ready. With `OoOEn` it is a two-entry table indexed by transaction ID: a
+second CSR may issue while an older one awaits commit, the committing instruction looks up its
+own address by ID, cancelled entries are dropped, and the table credit gates only CSR issue,
+so a pending CSR no longer stalls ALU or branch issue.
+
 #### Floating-Point Unit Wrapper
 
 `fpu_wrap` adapts the issue handshake to FPnew's in-ready protocol. When `OoOEn` is set it also

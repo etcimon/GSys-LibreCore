@@ -142,6 +142,12 @@ module g6lc_ooo_dispatch
     $error("OoO FP register class is implemented but unqualified: full release qualification is pending.");
   end
 
+  // An LSQ store entry is the reservation of a store_buffer speculative-queue
+  // slot held until commit; granting more credits than slots strands stores.
+  if (ST_N > ooo_spec_store_depth(CVA6Cfg)) begin : gen_err_ooo_st_credits
+    $error("LSQ store credits exceed the speculative store queue: reservation unsound");
+  end
+
   logic [NP-1:0] need_rd, is_br, is_ld, is_st;
   logic [NP-1:0][HID_W-1:0] dispatch_hart;
   logic [CVA6Cfg.NrCommitPorts-1:0][HID_W-1:0] commit_hart;
@@ -209,8 +215,19 @@ module g6lc_ooo_dispatch
   logic rob_full, iq_full, ld_full, st_full;
   logic [$clog2(CVA6Cfg.LsqLoadEntries+1)-1:0] ld_free;
   logic [$clog2(CVA6Cfg.LsqStoreEntries+1)-1:0] st_free;
-  logic store_pend, stl_fwd, stl_stall, lsq_busy, md_stall, mem_stall;
-  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] st_live_mask;
+  logic store_pend, stl_fwd, stl_stall, lsq_busy, md_stall, md_predict, mem_stall;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] st_live_mask, st_unresolved_mask;
+  logic [CVA6Cfg.VLEN-1:0] mem_violation_pc;
+  // Dispatch-time memory-dependence verdict captured into each IQ entry. The
+  // predictor has a single query port, so only a load on dispatch port 0 is
+  // queried; a same-group load on a later port conservatively keeps
+  // may_bypass=0. Without the predictor no load bypasses an unresolved older
+  // store.
+  logic [NP-1:0] may_bypass;
+  always_comb begin
+    may_bypass = '0;
+    if (CVA6Cfg.MemDepPredEn) may_bypass[0] = !md_predict;
+  end
 
   assign rob_full_o = rob_full;
   assign iq_full_o  = iq_full;
@@ -564,19 +581,10 @@ module g6lc_ooo_dispatch
   logic [1:0]              ld_qsize;
   logic [CVA6Cfg.NrWbPorts-1:0] complete_is_st;
 
-  // IQ (mem_stall from LSQ/memdep below — combinational loop risk:
-  // mem_stall uses issue_valid; IQ uses mem_stall. Break: mem_stall only from
-  // LSQ state + memdep on issue candidate ports is OK if stl uses registered
-  // LSQ and memdep table. issue_valid is comb from IQ; stl_stall uses ld_query
-  // which is issue_valid. That forms IQ→mem_stall→IQ. Mitigate: mem_stall for
-  // select uses only older_st/md from registered state + ld_full, NOT stl_stall
-  // of current select. STL applied as post-select recheck / op forward only.
-
-  // Prefer: stall mem issue when memdep predicts or an OLDER store is pending.
-  // md_stall and the registered st_live_mask/commit_ptr are safe inside the IQ
-  // select; the load's own trans_id is not available here (it is a select
-  // result), so the per-entry age comparison lives inside g6lc_iq and this
-  // path stays free of the issue_valid → stall → issue_valid loop.
+  // Issue gating no longer consumes mem_stall: loads are ordered by the IQ's
+  // per-entry older-UNRESOLVED-store gate (registered LSQ state + dispatch-time
+  // may_bypass), so nothing combinational feeds back into issue selection.
+  // mem_stall survives only as the lsq_stall_o PMU probe.
   assign mem_stall = md_stall || stl_stall;
 
   g6lc_iq #(
@@ -599,6 +607,7 @@ module g6lc_ooo_dispatch
       .disp_prd_i      (prd),
       .disp_rs1_ready_i(rs1_rdy),
       .disp_rs2_ready_i(rs2_rdy),
+      .disp_may_bypass_i(may_bypass),
       // FP wakeup: an entry waiting on an FP producer must see the FP
       // writeback, not the integer one.
       .disp_rs3_ready_i(rs3_rdy),
@@ -616,17 +625,13 @@ module g6lc_ooo_dispatch
       .issue_prd_o     (issue_prd),
       .issue_valid_o   (iq_issue_valid),
       .issue_ack_i     (iq_issue_ack),
-      // Not md_stall: the predictor's stall is a combinational function of this
-      // IQ's own issue outputs (its query is the selected load), so feeding it
-      // back into selection is a real cycle, which MemDepPredEn=1 exposes. It is
-      // also wrongly conservative — store_pending is global, so it blocks a load
-      // whose only pending stores are YOUNGER and cannot alias it. Safety comes
-      // from the per-entry age gate below (st_live_mask/commit_ptr), which
-      // already blocks a load behind every older store. A predictor that
-      // RELAXES that gate needs an alias proof and its own dispatch-time query;
-      // until then the predictor trains and reports, and does not gate issue.
+      // Issue-time stalls are all captured at dispatch now: the predictor is
+      // queried there (may_bypass) and the age gate below reads only
+      // registered LSQ state, so nothing feeds issue_valid back into
+      // selection.
       .mem_stall_i     (1'b0),
       .st_live_mask_i  (st_live_mask),
+      .st_unresolved_mask_i(st_unresolved_mask),
       .commit_ptr_i    (commit_ptr_i),
       .sb_live_i       (sb_live_i)
   );
@@ -881,11 +886,13 @@ module g6lc_ooo_dispatch
 
   logic [NP-1:0] ld_alloc, st_alloc;
   logic [NP-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] alloc_ids;
+  logic [NP-1:0][CVA6Cfg.VLEN-1:0] alloc_pcs;
   always_comb begin
     for (int unsigned p = 0; p < NP; p++) begin
       ld_alloc[p]  = dispatch_ack_o[p] && is_ld[p];
       st_alloc[p]  = dispatch_ack_o[p] && is_st[p];
       alloc_ids[p] = dispatch_sbe_i[p].trans_id;
+      alloc_pcs[p] = dispatch_sbe_i[p].pc;
     end
   end
 
@@ -904,6 +911,7 @@ module g6lc_ooo_dispatch
       .ld_alloc_i (ld_alloc),
       .st_alloc_i (st_alloc),
       .alloc_id_i (alloc_ids),
+      .alloc_pc_i (alloc_pcs),
       .ld_full_o  (ld_full),
       .st_full_o  (st_full),
       .ld_free_o  (ld_free),
@@ -927,13 +935,15 @@ module g6lc_ooo_dispatch
       .ld_query_size_i(ld_qsize),
       .ld_query_id_i  (issue_sbe_o[0].trans_id),
       .st_live_mask_o (st_live_mask),
+      .st_unresolved_mask_o(st_unresolved_mask),
       .store_pending_o(store_pend),
       .stl_forward_o(stl_fwd),
       .stl_data_o   (),
       .stl_stall_o  (stl_stall),
       .lsq_busy_o   (lsq_busy),
       .mem_violation_o    (mem_violation_o),
-      .mem_violation_id_o (mem_violation_id_o)
+      .mem_violation_id_o (mem_violation_id_o),
+      .mem_violation_pc_o (mem_violation_pc)
   );
 
   // Multi-port store train + observed-dependence train; clear on full flush or mispredict
@@ -957,12 +967,18 @@ module g6lc_ooo_dispatch
       .enable_i(CVA6Cfg.MemDepPredEn),
       .st_valid_i(memdep_st_v),
       .st_pc_i   (memdep_st_pc),
-      .ld_query_i(issue_valid_o[0] && issue_sbe_o[0].fu == LOAD),
-      .ld_pc_i   (issue_sbe_o[0].pc),
-      .dep_observe_i(stl_stall || (store_pend && issue_valid_o[0] && issue_sbe_o[0].fu == LOAD)),
+      // Dispatch-time query, port 0 only (single query port): the verdict is
+      // captured into the IQ entry as may_bypass, so no issue-time feedback
+      // exists and MemDepPredEn cannot close a combinational loop.
+      .ld_query_i(dispatch_valid_i[0] && is_ld[0] && can_go),
+      .ld_pc_i   (dispatch_sbe_i[0].pc),
+      // Train on a real memory-order violation, keyed by the violating load's
+      // PC — not by whichever load happens to be querying this cycle.
+      .train_valid_i(mem_violation_o),
+      .train_pc_i  (mem_violation_pc),
       .store_pending_i(store_pend),
       .stall_o   (md_stall),
-      .predict_o ()
+      .predict_o (md_predict)
   );
 
   assign lsq_stall_o = mem_stall || lsq_disp_block;

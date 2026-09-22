@@ -63,6 +63,20 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## CSR table, store reservation and load bypass (2026-09-21, T2)
+
+`tb_g6lc_review_csrbuf` (`REVIEW_RTL_CSRBUF=1`): younger-first CSR issue with in-order address
+lookup, ready as table credit, cancel drop, flush, and the in-order depth-1 identity; positives and
+negatives. `tb_g6lc_review_iq` scenarios 5–9: unresolved-store gate, dispatch-time bypass, resolved
+store passes, younger store issues before an older not-ready store, CSR issues off-head while
+SFENCE waits. `tb_g6lc_review_lsq` 0 and 18: store entry held to commit, unresolved mask. Dispatch
+3/6/8/19 rewritten to the new contract (store made unresolvable through a busy base register;
+`MDP` flips the expected verdict). Firmware (`testlist_ooo_l3.yaml`): `ooo_mem_bypass_late_store_addr`
+(stage 35, replay observed as `drop=1 replay=1` then retirement), `ooo_mem_bypass_disjoint` (36),
+`ooo_csr_no_flu_freeze` (37); `MEM_ORDER_NEGATIVE` builds fail with exit 3/3/1. Frozen stages
+4–31, ILP and memdep remain Spike-identical; 32/33 still abort on the reverted misalignment
+assertion (T3).
+
 ## Age key and alias validation (2026-09-21, T1)
 
 `tb_g6lc_review_lsq` scenarios 12–17 (`REVIEW_RTL_LSQ=1`, 18 positives + 18 negatives): violation

@@ -41,6 +41,8 @@ module issue_stage
     output logic spec_cancel_o,
     // U5 production: SB cancel mask for OoO squash
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_o,
+    // Scoreboard issued mask - EX_STAGE (store-buffer liveness assertion)
+    output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_o,
     // Prevent from issuing - CONTROLLER
     input logic flush_unissued_instr_i,
     // Flush whole scoreboard - CONTROLLER
@@ -81,6 +83,8 @@ module issue_stage
     output logic [CVA6Cfg.NrIssuePorts-1:0][31:0] tinst_o,
     // Fixed Latency Unit is ready - EX_STAGE
     input logic flu_ready_i,
+    // CSR buffer admission credit - EX_STAGE (OoO only)
+    input logic csr_ready_i,
     // ALU output is valid - EX_STAGE
     output logic [CVA6Cfg.NrIssuePorts-1:0] alu_valid_o,
     // AES output is valid - EX_STAGE
@@ -239,6 +243,7 @@ module issue_stage
   logic x_transaction_accepted_iro_sb, x_issue_writeback_iro_sb;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] x_id_iro_sb;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live;
+  assign sb_live_o = sb_live;
   logic mem_violation;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] mem_violation_id;
 
@@ -480,6 +485,7 @@ module issue_stage
       .is_zcmt_o,
       .is_compressed_instr_o,
       .flu_ready_i             (flu_ready_i),
+      .csr_ready_i             (csr_ready_i),
       .alu_valid_o             (alu_valid_o),
       .aes_valid_o             (aes_valid_o),
       .branch_valid_o          (branch_valid_o),

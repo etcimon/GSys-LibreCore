@@ -668,6 +668,66 @@ main:
   mret
 .Lalias_done:
 
+#elif STAGE == 35
+  # Older store with a LATE ADDRESS (a divide feeds the base register) and a
+  # younger same-address load whose address is known at once. A load allowed
+  # past the unresolved store reads the pre-existing value and must be replayed
+  # when the store address arrives; the architectural result is the store's.
+  li   t5, 0xBEEF
+  sd   t5, 0(sp)
+  fence rw, rw
+  li   t1, 0x7fffffffffffffff
+  li   t2, 3
+  divu t3, t1, t2
+  andi t3, t3, 0
+  add  t4, sp, t3
+  li   t0, 0x1234
+  sd   t0, 0(t4)
+  ld   t6, 0(sp)
+#ifdef MEM_ORDER_NEGATIVE
+  xori t0, t0, 1
+#endif
+  bne  t6, t0, fail_t2
+
+#elif STAGE == 36
+  # Same shape, disjoint addresses: the load must NOT wait for the late store
+  # and must read its own location's value.
+  li   t5, 0xBEEF
+  sd   t5, 8(sp)
+  fence rw, rw
+  li   t1, 0x7fffffffffffffff
+  li   t2, 3
+  divu t3, t1, t2
+  andi t3, t3, 0
+  add  t4, sp, t3
+  li   t0, 0x1234
+  sd   t0, 0(t4)
+  ld   t6, 8(sp)
+#ifdef MEM_ORDER_NEGATIVE
+  xori t5, t5, 1
+#endif
+  bne  t6, t5, fail_t2
+
+#elif STAGE == 37
+  # Two CSR accesses with independent ALU work between them: the second CSR
+  # must not freeze the ALU behind the first, and both must read/write in order.
+  li   t0, 0x40
+  csrw mscratch, t0
+  li   t1, 7
+  addi t1, t1, 1
+  csrr t2, mscratch
+  addi t1, t1, 1
+  li   t3, 0x80
+  csrw mscratch, t3
+  csrr t4, mscratch
+  li   t5, 9
+#ifdef MEM_ORDER_NEGATIVE
+  addi t1, t1, 1
+#endif
+  bne  t1, t5, fail
+  bne  t2, t0, fail_t2
+  bne  t4, t3, fail_t2
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".

@@ -17,14 +17,15 @@ protected default and the SMT2 OpenSBI anchor runs with `OoOEn=0`.
 |---|---|---|---|
 | Scoreboard | `core/scoreboard.sv` | slot allocation in program order, `trans_id`, in-order commit pointer, younger-than-branch cancel mask | live (in-order baseline) |
 | Rename / RAT / free list | `g6lc_rename.sv`, `g6lc_rat.sv`, `g6lc_freelist.sv` | architectural→physical maps per hart, checkpoints per branch, busy bits | leaf-qualified (integer, FP class, NrHarts=2 maps) |
-| Issue queue | `g6lc_iq.sv` | operand readiness, oldest-ready select up to `NrIssuePorts` | live; compacting; store-age gate blocks a load behind every older live store |
+| Issue queue | `g6lc_iq.sv` | operand readiness, oldest-ready select up to `NrIssuePorts` | live; compacting; a load waits only on older **unresolved** stores unless its dispatch-time `may_bypass` verdict clears it; stores issue out of order; only fence/system CSR-class ops wait for the commit head (T2) |
 | ROB | `g6lc_rob.sv` | completion-by-tid shadow of the scoreboard | live; not the commit authority |
-| LSQ | `g6lc_lsq.sv` | load/store entries allocated at dispatch, live AGU addresses, store data, CAM/STL hazard verdict | leaf-qualified for forwarding/credits; **no alias validation** |
-| Store buffer | `core/store_buffer.sv` | speculative queue (age-sorted under OoO) and committed queue; byte-exact forward | live; committed entries exempt from age compare |
+| LSQ | `g6lc_lsq.sv` | load/store entries allocated at dispatch, live AGU addresses, store data, CAM/STL hazard verdict, alias validation (`mem_violation`) | leaf-qualified + formal; a store entry is the reservation of its speculative-queue slot and lives until commit; a completed load stays until no older store is unresolved (T2) |
+| Store buffer | `core/store_buffer.sv` | speculative queue (age-sorted under OoO) and committed queue; byte-exact forward | live; committed entries exempt from age compare; speculative entries assert scoreboard liveness (T2) |
+| Memdep predictor | `g6lc_memdep.sv` | store-set table queried at **dispatch** (port 0), trained on real violations by the violating load's PC | live under `MemDepPredEn`; without it no load bypasses an unresolved store |
 | PRF | `g6lc_prf.sv` | write-through physical file, integer and FP classes | leaf-qualified |
 | FU owner tables | `core/fpu_wrap.sv`, `core/mult.sv` | one live token per tid for FPnew and the serial divider; cancelled result suppression; flush clears | leaf-qualified (8/16 slots; 32 does not exercise overlap) |
 | LSU tombstones | `core/lsu_bypass.sv`, `core/load_unit.sv` | pre-grant cancellation retention, post-grant response tombstones | leaf-qualified |
-| CSR buffer | `core/csr_buffer.sv` | depth-1 address hold from issue to commit; holds `flu_ready` low | live; **singleton, freezes all FLU issue** |
+| CSR buffer | `core/csr_buffer.sv` | in order: depth-1 address hold (bit-identical); under `OoOEn`: two-entry per-tid address table looked up by the committing tid, credit gates only CSR issue | leaf-qualified (T2); the FLU no longer freezes on a pending CSR |
 | Thread select | `core/smt/g6lc_thread_select.sv` | drained coarse handoff between harts | leaf-qualified sims + live-port synthesis |
 
 ## 2. Age
@@ -49,7 +50,7 @@ protected default and the SMT2 OpenSBI anchor runs with `OoOEn=0`.
 | Branch mispredict | scoreboard `cancelled_mask` (sticky per slot + same-cycle window) | IQ, ROB, LSQ, PRF write gate, FU owner tables, LSU pre-grant queue |
 | Full flush (exception, fence, CSR side effect, WFI under OoO) | `flush_i` | FPnew and serdiv discard in-flight work, so owner tables clear; LSU tombstones stay |
 | Fetch redirect | today: killed VA + "forget on replacement" (`frontend.sv` kill persistence) | **open** — T3 replaces it with a request token through `icache_dreq/drsp` |
-| Memory-order violation | `g6lc_lsq` scan: a store address arriving after a younger load resolved overlapping bytes reports the oldest such load (`mem_violation_o`); the scoreboard marks the slot `cancelled + replay`; commit drops it, asserts `flush_commit`, and the frontend refetches `pc_commit` without increment (`mem_replay_pc`) | leaf-qualified (LSQ scenarios 12–17, formal); the full-core path is inert until T2 lets a load bypass an older store |
+| Memory-order violation | `g6lc_lsq` scan: a store address arriving after a younger load resolved overlapping bytes reports the oldest such load (`mem_violation_o`); the scoreboard marks the slot `cancelled + replay`; commit drops it, asserts `flush_commit`, and the frontend refetches `pc_commit` without increment (`mem_replay_pc`) | leaf-qualified (LSQ 12–17, formal) and exercised end-to-end on `g6lc64_ooo_int` since T2 (stage 35: `drop=1 replay=1` then clean retirement, Spike-identical) |
 | Hart handoff | drained: no issued work crosses | T6 replaces drain with per-hart cancellation identity |
 
 A cancelled instruction's late result must never complete, wake or supply data for the slot's next
@@ -60,10 +61,11 @@ result, so the remaining producers (pending stores, CSR/AMO commit path, CVXIF/a
 
 | May issue out of program order | Stays singleton / ordered | Reason |
 |---|---|---|
-| ALU, branch, multiply, FP (single hart) | CSR: only at the commit head | depth-1 `csr_buffer`; T2 keeps head-ordering as serialization and removes the FLU freeze |
-| Loads past **resolved non-aliasing** older stores — after T2 relaxation | Loads today wait for every older live store | alias validation and replay exist since T1 but nothing bypasses yet |
-| — | Stores issue in program order today | one-deep store translation pipe; T2 reserves the spec-queue slot at dispatch and drops PO *issue*, keeps PO drain |
-| — | AMO buffer depth 1, CVXIF port 0 only | unchanged |
+| ALU, branch, multiply, FP (single hart) | fence/system CSR-class ops (SFENCE/HFENCE/FENCE/WFI/xRET): only at the commit head | their side effects are global; `ex_stage` snapshots fence operands at issue |
+| CSR read/write/set/clear (T2) | — | two-entry per-tid `csr_buffer`; value read/written at in-order commit; write operand from the renamed file |
+| Loads past **resolved** older stores (T2) | Loads wait on older **unresolved** stores unless `may_bypass` | the store buffer forwards byte-exactly from resolved stores; bypassing an unresolved one relies on the T1 violation scan + replay |
+| Stores relative to each other (T2) | Stores drain to memory in program order | LSQ store entry = spec-queue slot reservation held to commit; `check`: `LsqStoreEntries <= DEPTH_SPEC` (`gen_err_ooo_st_credits`) |
+| — | AMO buffer depth 1, CVXIF port 0 only; one store translation pipe | unchanged |
 
 ## 5. Timing cones of record (FO4 screen, not STA)
 
@@ -87,7 +89,7 @@ T4 removes.
 |---|---|
 | T0 | history archived verbatim; this contract and the plan exist; checkpoint commit reviewed |
 | T1 | **met 2026-09-21**: age function at all six sites; IQ/LSQ live-tid assertions; `g6lc_ooo_age.sby` PASS (74 asserts, depth 14) + sat prove/cover/mutation; LSQ scenarios 12–17 positive/negative; dispatch 28/28, LSU 32/32, WFI 56/56, commit 3/3 unchanged; integer-OoO frozen ELFs Spike-identical; protected in-order anchor 12,765,628 / 333,635 / 8,932,406; lint 8/54, synth 32/5 unchanged. Found and fixed: `g6lc_ooo_rob.sby` had proved zero assertions (no `-DFORMAL`, `dist` keyword, hierarchy flag); now abc bmc3 PASS with 4 asserts. Attributed: +3 cycles on every integer-OoO ELF versus the 09-19 baselines is the CSR-at-commit-head issue rule inside `48c729e51` (younger ALU ops pass the waiting `csrw` at the exit epilogue); T2 removes it |
-| T2 | CSR FIFO and store reservation leaf-tested; loads bypass resolved non-aliasing stores; Spike-ordered `g6lc64_ooo_int` smoke; PMU shows no FLU freeze on CSR |
+| T2 | **met 2026-09-21**: csrbuf 10/10 (OoO + in-order identity); IQ 10 scenarios × 4 geometries; LSQ 19+19; dispatch 28/28 on n2 and mdp1 (`-Werror-UNOPTFLAT`); store-recovery/WFI/commit unchanged; age formal PASS (74 asserts) + sat/mutation; `g6lc64_ooo_int` frozen ELFs Spike-identical with stage 35 showing `replay=1` drop then clean retirement, stages 36/37 pass, negatives fail 3/3/1; ILP 1117 (from 1112 — the CSR wait is gone but the exit `csrw` now flushes younger issued work; T4 measures), memdep 1021 (from 1060), s4 842 (from 881); protected in-order anchor 12,765,628 / 333,635 / 8,932,406; lint 8/54, synth 32/5; FO4 screen unchanged (sparse cones exclude IQ/LSQ). Found on the way: completed loads must stay in the LSQ while an older store is unresolved or the violation scan has nothing to replay (stage 20 caught it). Open: dispatch scenario 18 (unchanged since T1) |
 | T3 | token kill; frozen failing layout repaired; independent observer; `G6LC_NO_KILL_PERSIST` retired |
 | T4 | non-compacting IQ; same directed results; FO4 delta recorded |
 | T5 | FP guard removed for `NrHarts==1` only |

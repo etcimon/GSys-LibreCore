@@ -42,6 +42,8 @@ module ex_stage
     input logic flush_i,
     // FSE S4: younger-only LSU cancel (from scoreboard)
     input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
+    // Scoreboard issued mask (store-buffer liveness assertion) - ISSUE_STAGE
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_i,
     // Debug mode is enabled - CSR_REGFILE
     input logic debug_mode_i,
     // rs1 forwarding - ISSUE_STAGE
@@ -70,6 +72,8 @@ module ex_stage
     output exception_t flu_exception_o,
     // FLU is ready - ISSUE_STAGE
     output logic flu_ready_o,
+    // CSR buffer admission credit - ISSUE_STAGE (OoO CSR hazard)
+    output logic csr_ready_o,
     // FLU result is valid - ISSUE_STAGE
     output logic flu_valid_o,
     // ALU instruction is valid - ISSUE_STAGE
@@ -406,11 +410,13 @@ module ex_stage
       .clk_i,
       .rst_ni,
       .flush_i,
+      .cancelled_mask_i,
       .fu_data_i   (one_cycle_data),
       .csr_valid_i (|csr_valid_i),
       .csr_ready_o (csr_ready),
       .csr_result_o(csr_result),
       .csr_commit_i,
+      .csr_commit_tid_i(commit_tran_id_i),
       .csr_addr_o
   );
 
@@ -447,9 +453,13 @@ module ex_stage
   end
 
   // ready flags for FLU
+  // OoO: csr_ready gates only the CSR hazard in issue_read_operands, not the
+  // whole FLU — the dual-entry buffer holds two outstanding CSRs, so a pending
+  // one no longer stops ALU/branch issue.
   always_comb begin
-    flu_ready_o = csr_ready & mult_ready;
+    flu_ready_o = mult_ready & (CVA6Cfg.OoOEn ? 1'b1 : csr_ready);
   end
+  assign csr_ready_o = csr_ready;
 
   // 4. Multiplication (Sequential)
   fu_data_t mult_data;
@@ -602,6 +612,7 @@ module ex_stage
       .rst_ni,
       .flush_i,
       .cancelled_mask_i,
+      .sb_live_i,
       .stall_st_pending_i,
       .no_st_pending_o,
       .shared_tlb_flush_busy_o(shared_tlb_flush_busy_o),

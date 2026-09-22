@@ -76,6 +76,8 @@ module issue_read_operands
     output logic is_compressed_instr_o,
     // Fixed Latency Unit is ready - EX_STAGE
     input logic flu_ready_i,
+    // CSR buffer admission credit - EX_STAGE (OoO only)
+    input logic csr_ready_i,
     // ALU output is valid - EX_STAGE
     output logic [CVA6Cfg.NrIssuePorts-1:0] alu_valid_o,
     // AES output is valid - EX_STAGE
@@ -366,6 +368,10 @@ module issue_read_operands
       fus_busy[0].csr = 1'b1;
       fus_busy[0].mult = 1'b1;
     end
+
+    // OoO: the CSR buffer holds two outstanding entries, so csr_ready is a
+    // table credit and no longer rides flu_ready_i (which would block ALU/CF).
+    if (CVA6Cfg.OoOEn && !csr_ready_i) fus_busy[0].csr = 1'b1;
 
     // after a multiplication was issued we can only issue another multiplication
     // otherwise we will get contentions on the fixed latency bus

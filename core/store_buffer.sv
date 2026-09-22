@@ -28,6 +28,9 @@ module store_buffer
     input logic flush_i,  // full flush: drop all speculative stores
     // FSE S4: younger-only cancel (SB cancelled TIDs); does not touch commit queue
     input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
+    // Scoreboard issued mask: an OoO speculative entry is a reservation whose
+    // scoreboard slot must still be live (assertion only)
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_i,
     input logic stall_st_pending_i,  // Stall issuing non-speculative request
     output logic         no_st_pending_o, // non-speculative queue is empty (e.g.: everything is committed to the memory hierarchy)
     output logic         store_buffer_empty_o, // there is no store pending in neither the speculative unit or the non-speculative queue
@@ -801,6 +804,21 @@ module store_buffer
                    !ooo_younger_spec_hit)
   else $error("[Speculative Queue] OoO load tid %0d forwarded from a younger store",
               load_trans_id_i);
+
+  // OoO reservation liveness: every valid speculative-queue entry names a
+  // scoreboard slot that is still issued/live. A reservation outliving its
+  // slot (or never backed by one) means the hold-to-commit credit accounting
+  // leaked.
+  if (CVA6Cfg.OoOEn) begin : gen_sb_live_assert
+    for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_spec_entry_live
+      ooo_spec_entry_live :
+      assert property (@(posedge clk_i) disable iff (!rst_ni)
+                       speculative_queue_q[i].valid |->
+                       sb_live_i[speculative_queue_q[i].trans_id])
+      else $error("[Speculative Queue] entry %0d holds tid %0d whose scoreboard slot is not live",
+                  i, speculative_queue_q[i].trans_id);
+    end
+  end
   //pragma translate_on
 endmodule
 

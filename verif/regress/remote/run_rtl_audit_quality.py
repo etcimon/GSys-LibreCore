@@ -18,7 +18,7 @@ IQ = r'''
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 package audit_types;
-  typedef struct packed {ariane_pkg::fu_t fu;logic[3:0] trans_id;logic[31:0] pc;} sbe_t;
+  typedef struct packed {ariane_pkg::fu_t fu;ariane_pkg::fu_op op;logic[3:0] trans_id;logic[31:0] pc;} sbe_t;
 endpackage
 module leaf import ariane_pkg::*; import audit_types::*;
 #(parameter int NP=2,D=8,PW=4)(input logic clk_i,rst_ni,flush,mem_stall,
@@ -39,9 +39,10 @@ module leaf import ariane_pkg::*; import audit_types::*;
  g6lc_iq #(.CVA6Cfg(cfg()),.DEPTH(D),.PRF_W(PW),.scoreboard_entry_t(sbe_t)) dut(
  .clk_i,.rst_ni,.flush_i(flush),.cancelled_mask_i(cancel),.disp_valid_i(dv),.disp_sbe_i(ds),.disp_orig_i(di),
  .disp_prs1_i(p1),.disp_prs2_i(p2),.disp_prd_i(pd),.disp_rs1_ready_i(r1),.disp_rs2_ready_i(r2),
+ .disp_may_bypass_i('0),
  .disp_ack_o(da),.full_o(full),.wb_valid_i(wv),.wb_prd_i(wp),.issue_sbe_o(issued),.issue_orig_o(instruction),
  .issue_prd_o(ip),.issue_valid_o(iv),.issue_ack_i(ia),.mem_stall_i(mem_stall),
- .st_live_mask_i('0),.commit_ptr_i('0),.sb_live_i('1));
+ .st_live_mask_i('0),.st_unresolved_mask_i('0),.commit_ptr_i('0),.sb_live_i('1));
 `ifdef AUDIT_FORMAL
  logic history_valid=0;
  always_ff @(posedge clk_i)begin
@@ -244,9 +245,10 @@ module iq_age_check
   .clk_i,.rst_ni,.flush_i(1'b0),.cancelled_mask_i('0),
   .disp_valid_i(dv),.disp_sbe_i(ds),.disp_orig_i('0),.disp_prs1_i('0),.disp_prs2_i('0),
   .disp_prd_i('0),.disp_rs1_ready_i(1'b1),.disp_rs2_ready_i(1'b1),.disp_ack_o(da),
+  .disp_may_bypass_i('0),
   .full_o(),.wb_valid_i('0),.wb_prd_i('0),
   .issue_sbe_o(),.issue_orig_o(),.issue_prd_o(),.issue_valid_o(iv),.issue_ack_i(1'b1),
-  .mem_stall_i(1'b0),.st_live_mask_i(smask),.commit_ptr_i(cp),.sb_live_i('1));
+  .mem_stall_i(1'b0),.st_live_mask_i(smask),.st_unresolved_mask_i(smask),.commit_ptr_i(cp),.sb_live_i('1));
  always_ff @(posedge clk_i)begin
   if(rst_ni&&started)begin
    // ltid is baked into the queued entry at dispatch; smask/cp are free per

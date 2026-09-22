@@ -41,6 +41,14 @@ regressions do not add independent ISA coverage. Early termination remains unown
 read/address visibility, precise recovery and broad memory ownership remain open. No architecture,
 physical or guarded-feature status advances from qualification-tooling changes alone.
 
+## OoO CSR table, store reservation and load bypass (2026-09-21)
+
+**Leaf-qualified and exercised on the integer-OoO firmware vehicle; not release-qualified.** CSR
+accesses issue without freezing the fixed-latency unit, stores issue out of order behind a
+dispatch-time slot reservation, and loads pass resolved stores and, with the predictor, unresolved
+ones, with replay proven end-to-end. In-order behaviour is unchanged. Timing and full-core
+qualification remain open.
+
 ## OoO age key and memory-order replay (2026-09-21)
 
 **Leaf-proven and directed; full-core path inert until loads may bypass stores.** One

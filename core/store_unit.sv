@@ -31,6 +31,8 @@ module store_unit
     input logic flush_i,
     // FSE S4: younger-only cancel mask for STQ
     input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
+    // Scoreboard issued mask (store-buffer reservation liveness assertion)
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_i,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
     input logic stall_st_pending_i,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
@@ -445,6 +447,7 @@ module store_unit
       .rst_ni,
       .flush_i,
       .cancelled_mask_i,
+      .sb_live_i,
       .stall_st_pending_i,
       .no_st_pending_o,
       .store_buffer_empty_o,

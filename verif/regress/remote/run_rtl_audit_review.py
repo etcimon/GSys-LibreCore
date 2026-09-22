@@ -122,6 +122,8 @@ def main():
         names[-1:-1]=['commit_stage.sv','controller.sv']
     if os.environ.get('REVIEW_RTL_COMMIT')=='1':
         names[-1:-1]=['g6lc_sb_keep.sv','g6lc_rvc_enc.sv','g6lc_fe_keep.sv','g6lc_jalr_usable.sv','g6lc_sib_cjalr.sv','scoreboard.sv']
+    if os.environ.get('REVIEW_RTL_CSRBUF')=='1':
+        names[-1:-1]=['csr_buffer.sv']
     # g6lc_iq.sv is in the base source list and calls g6lc_ooo_pkg::ooo_age_*,
     # so every cell needs the package ahead of it.
     names[4:4]=['g6lc_ooo_pkg.sv']
@@ -242,7 +244,7 @@ def main():
     rtl=[str(source/name) for name in names if name!='g6lc_cluster.sv' and not name.endswith('.svh')]+[str(source/'incl.sv')]
     configurations=[]
     for np,d in ([(2,8)] if before else [(1,8),(2,8),(4,8),(2,16)]):
-        cases=[(0,None),(1,'IQ_VALID'),(2,'IQ_ISSUE'),(3,'IQ_CREDIT')] if before else [(n,None) for n in range(5)]
+        cases=[(0,None),(1,'IQ_VALID'),(2,'IQ_ISSUE'),(3,'IQ_CREDIT')] if before else [(n,None) for n in range(10)]
         configurations.append(('iq',f'n{np}-d{d}',[f'-GNP={np}',f'-GDEPTH={d}'],cases))
     for d,nw in ([(4,2)] if before else [(2,1),(4,2),(8,3)]):
         cases=[(0,None),(1,'MSHR_ADMISSION'),(2,'MSHR_ADMISSION'),(3,'MSHR_RETENTION'),(4,None)] if before else [(n,None) for n in range(5)]
@@ -286,7 +288,12 @@ def main():
                              else [(10,'RENAME_CKPT_ALLOC_LEAK')] if leak_fault
                              else [(n,None) for n in range(11)])]
     elif os.environ.get('REVIEW_RTL_LSQ')=='1':
-        configurations=[('lsq','direct',[],[(n,None) for n in range(18)])]
+        configurations=[('lsq','direct',[],[(n,None) for n in range(19)])]
+    elif os.environ.get('REVIEW_RTL_CSRBUF')=='1':
+        # Per-tid CSR address table: out-of-order issue, commit-order lookup,
+        # ready as table credit, cancel/flush drop; depth-1 identity in order.
+        configurations=[('csrbuf','ooo',['-GOOO=1'],[(n,None) for n in range(4)]),
+                        ('csrbuf','inorder',['-GOOO=0'],[(4,None)])]
     elif os.environ.get('REVIEW_RTL_TAGE')=='1':
         # Predictor-context ownership: per-slot tagged provider, update-fold
         # ownership, unaligned base/ITTAGE addressing, banked-GHR train folds.
@@ -418,7 +425,7 @@ def main():
                          (13,True,'RENAME_HART_FLUSH_SPILL'),(14,True,'RENAME_HART_REALLOC_FLUSH'),
                          (15,True,'RENAME_HART_REALLOC_FLUSH')]
             elif kind=='rename':trials+=[(0,True,'RENAME_MAP'),(1,True,'RENAME_OLDER_LOST'),(2,True,'RENAME_BUSY_RESURRECT'),(3,True,'RENAME_STALE_LEVEL'),(4,True,'RENAME_CKPT2_UNWIND'),(5,True,'RENAME_CKPT_FULL'),(6,True,'RENAME_EXCLUSIVE'),(7,True,'RENAME_CKPT_NO_RELEASE'),(8,True,'RENAME_RETIRE_WINDOW'),(9,True,'RENAME_FLUSH_ARCH'),(10,True,'RENAME_CKPT_ALLOC_LEAK')]
-            elif kind=='lsq':trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA'),(2,True,'LSQ_COMMIT_DOUBLE_FREE'),(3,True,'LSQ_STL_AGE'),(4,True,'LSQ_AGE_STALL'),(5,True,'LSQ_WRAP_DATA'),(6,True,'LSQ_BYTE_DISJOINT'),(7,True,'LSQ_BYTE_COVER'),(8,True,'LSQ_PARTIAL_NODATA'),(9,True,'LSQ_PARTIAL_MERGE'),(10,True,'LSQ_CANCEL_DROP'),(11,True,'LSQ_FLUSH'),(12,True,'LSQ_VIOLATION'),(13,True,'LSQ_VIOLATION_YOUNGER'),(14,True,'LSQ_VIOLATION_WRAP'),(15,True,'LSQ_VIOLATION_OLDEST'),(16,True,'LSQ_VIOLATION_DISJOINT'),(17,True,'LSQ_VIOLATION_SAMECYCLE')]
+            elif kind=='lsq':trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA'),(2,True,'LSQ_COMMIT_DOUBLE_FREE'),(3,True,'LSQ_STL_AGE'),(4,True,'LSQ_AGE_STALL'),(5,True,'LSQ_WRAP_DATA'),(6,True,'LSQ_BYTE_DISJOINT'),(7,True,'LSQ_BYTE_COVER'),(8,True,'LSQ_PARTIAL_NODATA'),(9,True,'LSQ_PARTIAL_MERGE'),(10,True,'LSQ_CANCEL_DROP'),(11,True,'LSQ_FLUSH'),(12,True,'LSQ_VIOLATION'),(13,True,'LSQ_VIOLATION_YOUNGER'),(14,True,'LSQ_VIOLATION_WRAP'),(15,True,'LSQ_VIOLATION_OLDEST'),(16,True,'LSQ_VIOLATION_DISJOINT'),(17,True,'LSQ_VIOLATION_SAMECYCLE'),(18,True,'LSQ_UNRESOLVED_MASK')]
             elif dispatch_mode and os.environ.get('REVIEW_RTL_LATE_WAKE')=='1':
                 trials += [(n,True,'DISPATCH_LATE_WAKE_EARLY') for n in (28,29)]
             elif dispatch_mode and hart_dispatch:
@@ -434,8 +441,11 @@ def main():
             elif kind=='tage':trials+=[(0,True,'TAGE_SLOT_BROADCAST'),(1,True,'TAGE_UPDATE_FOLD'),(2,True,'TAGE_BASE_ALIAS'),(3,True,'ITTAGE_SLOT_ALIAS')]
             elif kind=='ghist':trials+=[(0,True,'GHIST_FOLD_TRAIN')]
             elif kind=='ckpt':trials+=[(0,True,'CKPT_MULTI'),(1,True,'CKPT_DOUBLE_ADV'),(3,True,'CKPT_DESYNC_RV'),(5,True,'CKPT_DROPPED_OWNER'),(6,True,'CKPT_EMPTY_RESTORE_HEAD')]
+            elif kind=='csrbuf':
+                trials+=[(n,True,('CSRBUF_ADDR','CSRBUF_READY','CSRBUF_CANCEL','CSRBUF_FLUSH','CSRBUF_INORDER')[n]) for n,_ in cases]
             else:
                 trials.append((0,True,{'iq':'IQ_ISSUE','mshr':'MSHR_ADMISSION','decay':'TAGE_DECAY','incl':'L3_PAYLOAD','commit':'COMMIT4_TID'}[kind]))
+                if kind=='iq':trials+=[(5,True,'IQ_UNRESOLVED_GATE'),(6,True,'IQ_BYPASS'),(7,True,'IQ_RESOLVED_PASS'),(8,True,'IQ_STORE_OOO'),(9,True,'IQ_CSR_HEAD')]
                 if kind=='incl':trials+=[(1,True,'L3_EVICT_NO_BACKPRESSURE'),(2,True,'L3_EVICT_LOST_B')]
         for scenario,negative,error in trials:
             cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])+(['+vcd'] if os.environ.get('REVIEW_RTL_TRACE')=='1' else [])

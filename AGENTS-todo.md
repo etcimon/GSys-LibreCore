@@ -36,7 +36,11 @@ next actions are superseded by the tranche exits.
   the mechanism that removes both the wedge and the wait. Also found: pure parent `e64864263`
   FAILS stage 4 at 894 cycles (x15 wrong); the 09-19/20 doc baselines were measured on the
   pre-commit worktree, so "878/1109" is the pre-head-rule worktree, not a committed state.
-- [ ] T2 … T6 per the plan file; review point before T2.
+- [x] T2: per-tid CSR table out of `flu_ready`, LSQ store entry as spec-slot reservation (stores
+  issue OoO), loads wait only on unresolved older stores, dispatch-time memdep bypass with replay
+  safety net; exit met (contract table). Stage 35 shows replay end-to-end. Dispatch scenario 18
+  remains the open leaf finding (identical at T1 HEAD).
+- [ ] T3 … T6 per the plan file; review point before T3.
 
 ## Active stability-first review — authoritative next change sets
 

@@ -631,10 +631,11 @@ module scoreboard #(
       smt_flow_idle = (|commit_ack_i || flush_i) ? 0 : smt_flow_idle + 1;
       for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++)
         if (commit_ack_i[p])
-          $display("[smt-flow] retire cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h valid=%b drop=%b ex=%b",
+          $display("[smt-flow] retire cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h valid=%b drop=%b ex=%b replay=%b",
                    smt_flow_cycle, p, commit_pointer_q[p], smt_flow_generation[commit_pointer_q[p]],
                    commit_instr_o[p].hart_id, commit_instr_o[p].pc, commit_instr_o[p].valid,
-                   commit_drop_o[p], commit_instr_o[p].ex.valid);
+                   commit_drop_o[p], commit_instr_o[p].ex.valid,
+                   mem_q[commit_pointer_q[p]].replay);
       for (int p = 0; p < CVA6Cfg.NrWbPorts; p++)
         if (wt_valid_i[p])
           $display("[smt-flow] wb cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h issued=%b cancelled=%b data=%h ex=%b",

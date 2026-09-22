@@ -6,6 +6,10 @@
 //   * Same-cycle WB tag wakeup
 //   * Same-cycle dispatch/WB capture without speculative issue-time wakeup
 //   * mem_stall only blocks LOAD; STORE/ALU/MULT/CTRL issue under mem pressure
+//   * Loads wait only on older UNRESOLVED stores; a dispatch-time memdep
+//     verdict (may_bypass) lets a predicted-independent load pass them
+//   * CSR data ops issue freely against the dual-entry csr_buffer credit;
+//     only fence/system CSR-class ops still wait for the commit head
 //   * Dual-grant oldest-ready up to NrIssuePorts
 
 module g6lc_iq
@@ -34,6 +38,9 @@ module g6lc_iq
     input  logic [CVA6Cfg.NrIssuePorts-1:0][PRF_W-1:0]   disp_prd_i,
     input  logic [CVA6Cfg.NrIssuePorts-1:0]               disp_rs1_ready_i,
     input  logic [CVA6Cfg.NrIssuePorts-1:0]               disp_rs2_ready_i,
+    // Dispatch-time memdep verdict: a load predicted independent may issue
+    // past an older store whose address is still unresolved.
+    input  logic [CVA6Cfg.NrIssuePorts-1:0]               disp_may_bypass_i,
     // FP source tags + per-source class. rs3 is FP-only (FMA), so it has no
     // integer counterpart and its readiness is tracked separately.
     input  logic [CVA6Cfg.NrIssuePorts-1:0][FPRF_W-1:0]  disp_fprs1_i,
@@ -55,10 +62,13 @@ module g6lc_iq
     output logic [CVA6Cfg.NrIssuePorts-1:0]               issue_valid_o,
     input  logic [CVA6Cfg.NrIssuePorts-1:0]               issue_ack_i,
     input  logic                                         mem_stall_i,
-    // Store age gate: live store trans_ids (one bit per scoreboard slot) and
-    // the commit pointer anchoring the circular age order. A load waits only
-    // for stores OLDER than itself; younger stores can never alias it.
+    // occupancy observability
     input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              st_live_mask_i,
+    // Store age gate: live store trans_ids whose address is still UNRESOLVED
+    // (one bit per scoreboard slot) and the commit pointer anchoring the
+    // circular age order. A load waits only for unresolved stores OLDER than
+    // itself; resolved stores are the store_buffer's forwarding domain.
+    input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              st_unresolved_mask_i,
     input  logic [CVA6Cfg.TRANS_ID_BITS-1:0]              commit_ptr_i,
     // Scoreboard issued mask (assertions only)
     input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              sb_live_i
@@ -80,6 +90,7 @@ module g6lc_iq
     logic               fpr_rs1;
     logic               fpr_rs2;
     logic               fpr_rs3;
+    logic               may_bypass;
     scoreboard_entry_t  sbe;
     logic [31:0]        orig;
   } iq_entry_t;
@@ -154,69 +165,42 @@ module g6lc_iq
     for (int unsigned e = 0; e < DEPTH; e++) begin
       automatic logic ready;
       automatic logic is_ld;
-      automatic logic older_st;
-      automatic logic is_st;
+      automatic logic older_unresolved_st;
       automatic logic is_csr;
-      automatic logic older_unissued_st;
       // rs3 participates only when the entry actually has an FP third source;
       // otherwise rs3_rdy is set at dispatch and the term is inert.
       ready  = q_chain[e].valid && q_chain[e].rs1_rdy && q_chain[e].rs2_rdy &&
                q_chain[e].rs3_rdy;
-      // mem_stall_i (memdep) gates LOADs only. A STORE allocates its LSQ entry
-      // at dispatch and the live-store mask is derived from that entry, so
-      // gating STORE here would block the issue -> AGU -> WB path that is the
-      // only way to resolve and free it: the first store would deadlock
-      // permanently.
+      // mem_stall_i gates LOADs only. A STORE allocates its LSQ entry at
+      // dispatch and the live-store mask is derived from that entry, so gating
+      // STORE here would block the issue -> AGU -> WB path that is the only
+      // way to resolve and free it: the first store would deadlock permanently.
       is_ld  = (q_chain[e].sbe.fu == LOAD);
       // Age-aware store gate: only a store OLDER than this load (closer to the
-      // commit pointer in the circular trans_id window) may block it. A load
-      // whose pending stores are all younger issues freely.
-      older_st = 1'b0;
+      // commit pointer in the circular trans_id window) whose address is still
+      // unresolved may block it. Resolved older stores are covered by the
+      // store_buffer's forwarding compare, and stores the dispatch-time
+      // predictor cleared (may_bypass) issue past an unresolved one.
+      older_unresolved_st = 1'b0;
       for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
-        if (st_live_mask_i[s] &&
+        if (st_unresolved_mask_i[s] &&
             g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(s),
                                         32'(q_chain[e].sbe.trans_id), 32'(commit_ptr_i)))
-          older_st = 1'b1;
-      // Stores issue in program order relative to each other.
+          older_unresolved_st = 1'b1;
+      // Store ordering between themselves moved to the LSQ hold-to-commit
+      // reservation: an issued store's slot is held until its commit releases
+      // it, so a younger store that fills the queue first can no longer strand
+      // an older one. No program-order admission rule is needed here.
       //
-      // This is an ADMISSION rule, not the live-store gate warned about above:
-      // it looks only at stores still waiting HERE, never at the entry itself
-      // or at stores already issued. The oldest unissued store therefore never
-      // has an older unissued store, so it always proceeds and the rule cannot
-      // deadlock the way a live-store gate would.
-      //
-      // Needed because the speculative store queue drains only on commit, and
-      // commit is in program order. If younger stores whose operands resolved
-      // first could fill that queue while an older store is still waiting, the
-      // older store could never post, so nothing could retire and nothing could
-      // drain. Refusing them later -- in store_buffer.ready_o or store_unit --
-      // does not work: the refused store then occupies the one-deep store pipe
-      // and blocks the older store from issuing at all. Loads are unaffected
-      // and still issue out of order.
-      is_st = (q_chain[e].sbe.fu == STORE);
-      older_unissued_st = 1'b0;
-      for (int unsigned o = 0; o < DEPTH; o++)
-        if ((o != e) && q_chain[o].valid && (q_chain[o].sbe.fu == STORE) &&
-            g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS,
-                                        32'(q_chain[o].sbe.trans_id),
-                                        32'(q_chain[e].sbe.trans_id), 32'(commit_ptr_i)))
-          older_unissued_st = 1'b1;
-      // A CSR issues only when it is the oldest live instruction.
-      //
-      // csr_buffer is depth-1 and hart-agnostic, and it holds csr_ready low from
-      // issue until the CSR COMMITS. ex_stage feeds that into
-      // flu_ready_o = csr_ready & mult_ready, which issue_read_operands turns
-      // into "every FLU unit is busy" -- ALU and branch included, for every hart.
-      // So an uncommitted CSR stops all fixed-latency issue. In order that is
-      // harmless because a CSR is effectively the oldest instruction when it
-      // issues, so it commits promptly. Out of order it need not be: younger
-      // work can fill the scoreboard while the CSR waits behind older
-      // instructions that themselves need the FLU, and nothing can then retire.
-      // Gating on the commit head keeps the buffer's depth-1 assumption true.
+      // Fence/system CSR-class ops still issue only at the commit head (their
+      // side effects are global). Plain CSR accesses are covered by the
+      // dual-entry csr_buffer's credit in issue_read_operands instead.
       is_csr = (q_chain[e].sbe.fu == CSR);
-      if (ready && !(is_ld && (mem_stall_i || older_st)) &&
-          !(is_st && older_unissued_st) &&
-          !(is_csr && (q_chain[e].sbe.trans_id != commit_ptr_i)) &&
+      if (ready && !(is_ld && (mem_stall_i ||
+                              (older_unresolved_st && !q_chain[e].may_bypass))) &&
+          !(is_csr &&
+            !(q_chain[e].sbe.op inside {CSR_READ, CSR_WRITE, CSR_SET, CSR_CLEAR}) &&
+            (q_chain[e].sbe.trans_id != commit_ptr_i)) &&
           grants < CVA6Cfg.NrIssuePorts) begin
         issue_valid_o[grants] = 1'b1;
         issue_sbe_o[grants]   = q_chain[e].sbe;
@@ -296,6 +280,7 @@ module g6lc_iq
         q_d[count_d].fpr_rs3 = disp_fpr_rs3_i[p];
         q_d[count_d].sbe     = disp_sbe_i[p];
         q_d[count_d].orig    = disp_orig_i[p];
+        q_d[count_d].may_bypass = disp_may_bypass_i[p];
         // Rename readiness is retained, including same-cycle WB above;
         // a newly dispatched waiter must not miss its writeback pulse.
         count_d = count_d + 1'b1;

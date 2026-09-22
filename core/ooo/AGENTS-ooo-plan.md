@@ -82,6 +82,21 @@ and branch work in flight, WFI/flush interplay, negatives, mutations (remove res
 `g6lc64_ooo_int` smoke (`ooo_mem_dep.S`, `ooo_ilp_chain.S`); PMU group-1 shows no FLU freeze on
 CSR; `sparse_issue_lsu` FO4 not worse than T1.
 
+### T2 result (2026-09-21)
+
+Exit met; see the contract's exit table. Tags: `t2-csrbuf-v2`, `t2-iq-v1`, `t2-lsq-v1`,
+`t2-dispatch-v4`, `t2-dispatch-mdp-v4`, `t2-dispatch-lateresult-v3`, `t2-lsu-v1`,
+`t2-age-sat-v2`, `t2-age-sby-v2`, `t2-ooo-int-fpreview-*-v3/v4`, `t2-anchor-inorder-v3`,
+`t2-verify-v2`. Design corrections made during the tranche: a completed load keeps its LSQ entry
+while any older store is unresolved (otherwise the violation scan has no record to replay; frozen
+stage 20 exposed it); the in-order `csr_buffer` expression is bit-identical to before and an
+implementation attempt to relax it for a fixture was reverted — protected-path RTL is never
+adapted to an oracle. Oracles that encoded the pre-T2 contract (dispatch 3/6/8/19) were rewritten
+to the new one and their negatives retained. Cycle effects on the frozen ELFs: memdep 1060→1021,
+s4 881→842, ILP 1112→1117 (the exit `csrw` no longer waits but its flush now discards younger
+issued work; T4 measures before touching it). Deferred: the memdep query serves dispatch port 0
+only (a same-group second load keeps `may_bypass=0`); stores still use one translation pipe.
+
 ## T3 — fetch kill by request token
 
 `icache_dreq_t/drsp_t` gain a config-derived token; `g6lc_icache` returns the accepted token;
