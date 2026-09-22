@@ -1,7 +1,8 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
-// U5.3 unified issue queue — stationary entries, age matrix, rank select.
+// U5.3 unified issue queue — stationary entries, age matrix, cascaded
+// oldest-first grant; rank kept as the sim-only reference.
 // Bottleneck optimizations:
 //   * Same-cycle WB tag wakeup
 //   * Same-cycle dispatch/WB capture without speculative issue-time wakeup
@@ -12,10 +13,10 @@
 //     only fence/system CSR-class ops still wait for the commit head
 //   * Dual-grant oldest-ready up to NrIssuePorts
 //   * Entries never move: relative age lives in a DEPTH x DEPTH `older`
-//     matrix and selection ranks the ready entries by it. The previous
-//     compacting layout rebuilt the whole queue every cycle — a DEPTH-wide
-//     mux tree on the entry payload. The matrix costs DEPTH^2 one-bit flops
-//     and no payload movement at all.
+//     matrix and selection grants ports in oldest-first order by cascade.
+//     The previous compacting layout rebuilt the whole queue every cycle —
+//     a DEPTH-wide mux tree on the entry payload. The matrix costs DEPTH^2
+//     one-bit flops and no payload movement at all.
 
 module g6lc_iq
   import ariane_pkg::*;
@@ -107,7 +108,7 @@ module g6lc_iq
   logic [DEPTH-1:0][DEPTH-1:0] older_q, older_d;
   logic [DW-1:0] count_q, count_d;
   logic [DEPTH-1:0] ready;
-  logic [DEPTH-1:0][DW-1:0] rank;
+  logic [CVA6Cfg.NrIssuePorts-1:0][DEPTH-1:0] grant;
   logic [DEPTH-1:0] valid_after;
 
   assign full_o = (int'(count_q) + CVA6Cfg.NrIssuePorts > DEPTH);
@@ -166,6 +167,33 @@ module g6lc_iq
   // logic, so the cycle is broken without costing an issue cycle.
   localparam int unsigned EW = (DEPTH <= 1) ? 1 : $clog2(DEPTH);
   logic [CVA6Cfg.NrIssuePorts-1:0][EW-1:0] slot_entry;
+  // Cascaded oldest-first grant: port p takes the ready entry with no
+  // remaining entry older than it (col_e is the transposed age matrix),
+  // then that entry leaves the pool. The grant set is identical to the
+  // rank==p selection it replaces — the p-th oldest ready entry, the same
+  // grants the compacting layout produced by scanning slots in order; the
+  // sim-only rank popcount (ooo_iq_grant_is_rank) pins the two together.
+  logic [DEPTH-1:0][DEPTH-1:0] older_t;
+  for (genvar e = 0; e < DEPTH; e++) begin : gen_older_t
+    for (genvar o = 0; o < DEPTH; o++) begin : gen_older_t_o
+      assign older_t[e][o] = older_q[o][e];
+    end
+  end
+  for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_grant
+    // Per-scope pool nets: rem for port p is a distinct signal, so the
+    // cascade chain is acyclic at signal granularity (a shared pool array
+    // reads as a false combinational loop to the simulator).
+    logic [DEPTH-1:0] rem, g;
+    if (p == 0) begin : gen_first
+      assign rem = ready;
+    end else begin : gen_next
+      assign rem = gen_grant[p-1].rem & ~gen_grant[p-1].g;
+    end
+    for (genvar e = 0; e < DEPTH; e++) begin : gen_grant_e
+      assign g[e] = rem[e] && !(|(rem & older_t[e]));
+    end
+    assign grant[p] = g;
+  end
   always_comb begin
     issue_sbe_o   = '0;
     issue_orig_o  = '0;
@@ -216,21 +244,13 @@ module g6lc_iq
             !(q_chain[e].sbe.op inside {CSR_READ, CSR_WRITE, CSR_SET, CSR_CLEAR}) &&
             (q_chain[e].sbe.trans_id != commit_ptr_i));
     end
-    // rank[e] = number of READY entries older than e. Port p is granted the
-    // unique ready entry whose rank equals p — the p-th oldest ready entry,
-    // the same grant set the compacting layout produced by scanning slots in
-    // order. The age matrix is a strict total order over the live entries
-    // (ooo_iq_age_acyclic/ooo_iq_age_total below), so ready ranks are
-    // 0..R-1 with no ties (ooo_iq_rank_unique).
-    for (int unsigned e = 0; e < DEPTH; e++) begin
-      rank[e] = '0;
-      for (int unsigned o = 0; o < DEPTH; o++)
-        if (ready[o] && older_q[o][e]) rank[e] = rank[e] + DW'(1);
-    end
+    // The age matrix is a strict total order over the live entries
+    // (ooo_iq_age_acyclic/ooo_iq_age_total below), so the cascade's
+    // no-older match is unique per port.
     for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
+      issue_valid_o[p] = |grant[p];
       for (int unsigned e = 0; e < DEPTH; e++) begin
-        if (ready[e] && rank[e] == DW'(p)) begin
-          issue_valid_o[p] = 1'b1;
+        if (grant[p][e]) begin
           issue_sbe_o[p]   = q_chain[e].sbe;
           issue_orig_o[p]  = q_chain[e].orig;
           issue_prd_o[p]   = q_chain[e].prd;
@@ -388,15 +408,29 @@ module g6lc_iq
         ooo_iq_entry_live: assert (!q_q[e].valid || sb_live_i[q_q[e].sbe.trans_id]);
     end
   end
-  // The age matrix is a strict total order over the live entries, so each
-  // port's rank selects at most one entry.
-  for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_iq_rank_assert
-    logic [DEPTH-1:0] rank_match;
-    for (genvar e = 0; e < DEPTH; e++)
-      assign rank_match[e] = ready[e] && (rank[e] == DW'(p));
+  // The rank popcount is the sim-only reference for the cascade: rank[e]
+  // counts the ready entries older than e, so grant[p][e] must equal
+  // ready && rank==p exactly.
+  logic [DEPTH-1:0][DW-1:0] rank;
+  always_comb begin
+    for (int unsigned e = 0; e < DEPTH; e++) begin
+      rank[e] = '0;
+      for (int unsigned o = 0; o < DEPTH; o++)
+        if (ready[o] && older_q[o][e]) rank[e] = rank[e] + DW'(1);
+    end
+  end
+  for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_iq_grant_assert
+    for (genvar e = 0; e < DEPTH; e++) begin : gen_iq_grant_rank
+      always_ff @(posedge clk_i) begin
+        if (rst_ni)
+          ooo_iq_grant_is_rank: assert (grant[p][e] == (ready[e] && rank[e] == DW'(p)));
+      end
+    end
+    // The no-older-ready match is unique per port: at most one entry is
+    // granted to each issue port per cycle.
     always_ff @(posedge clk_i) begin
       if (rst_ni)
-        ooo_iq_rank_unique: assert ($onehot0(rank_match));
+        ooo_iq_rank_unique: assert ($onehot0(grant[p]));
     end
   end
   for (genvar a = 0; a < DEPTH; a++) begin : gen_iq_age_a

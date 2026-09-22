@@ -145,9 +145,12 @@ AGENTS-todo), the same-cycle architectural supersede exempted from "request is t
 (I8 priority), and `redirect_accept` added as a release leg with a new assert that re-acceptance
 keeps `redirect_pend_q`; `g6lc_fetch_iq` needed the two payloads constrained to agree on the CF
 class per slot (`instr_queue.is_ctrl_instr`, mirrored in the props), which is the raw-opcode throttle
-contract SPEC.md had left open. Deferred: **T4b** select-cone timing (the rank popcount replaced the
-payload mux as the module max, +3 FO4 net; cascaded grant or registered rank before T5), and the IQ
-cover task still times out under z3.
+contract SPEC.md had left open. **T4b (same day)**: the rank popcount had replaced the payload mux as
+the module max (27.0, +3 net); a cascaded oldest-first grant with per-port pool nets (a shared pool
+array read as a false loop) brought the select cone to 16.0 with the rank kept sim-only as the
+reference (`ooo_iq_grant_is_rank`); tags `t4b-iq-v3` 64/64, `t4b-dispatch-v1`/`-mdp-v1` 28/28,
+`t4b-ooo-int-fpreview-*-v1` ten stages cycle-identical, `t4b-fo4-after`, `t4b-verify-v1`. Open: the
+IQ cover task still times out under z3; `g6lc_ooo_dispatch` at 30.0 is the slice's worst cone.
 
 ## T5 — FP SKU (single hart)
 

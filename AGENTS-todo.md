@@ -49,11 +49,12 @@ next actions are superseded by the tranche exits.
   frontend has a pending redirect (`redirect_pend_q`); the RTL exports only the trap case as
   `smt_trap_hold_o`. Prove it on `g6lc_thread_select` or widen the hold export; until then the hold
   proof assumes it (`g6lc_fetch_hold_props.sv`).
-- [x] T4 (structural half): stationary IQ with age matrix; all fixtures and ten frozen ELFs
-  cycle-identical; FO4 payload path −9, select cone now the module max at 27/32 (+3 net).
-- [ ] **T4b (before T5):** select-cone timing — cascaded oldest-first grant or registered rank so
-  the popcount leaves the wakeup→select path; re-measure on `sparse_ooo_issue`. IQ cover task
-  (`g6lc_fetch_iq.sby cover`) still times out under z3.
+- [x] T4: stationary IQ with age matrix; all fixtures and ten frozen ELFs cycle-identical; FO4
+  payload path 23.97 → 14.97.
+- [x] T4b: cascaded oldest-first grant; select cone 27.0 → 16.0 (IQ module max 16.0); rank kept as
+  the sim-only reference assert; fixtures/firmware cycle-identical.
+- [ ] IQ cover task (`g6lc_fetch_iq.sby cover`) still times out under z3; `g6lc_ooo_dispatch` at
+  30.0 adj FO4 is the OoO slice's worst cone (budget 32) — next timing owner after T5.
 - [ ] T5 … T6 per the plan file; review point before T5.
 
 ## Active stability-first review — authoritative next change sets
@@ -4415,14 +4416,62 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
   power cell. Lease-aware retire is still open.
 - [ ] A1: trusted fabric source/domain enforcement for control **and RAM**;
   constant testharness hart tags are not authority. No guest grant from PROT
-  or an assumed AXI ID. An exec cancel that still completes remains open.
-- [ ] A1: audit narrow-read/atomic policy on firmware RAM. RAM write-drain/
-  lane-strobe fixes are implemented below; the separate AXI4-Lite bridge still
-  needs early-B/burst drain and split-write error aggregation. Integrate fault
-  reporting and coordinated fabric reset for quarantined transactions.
-- [ ] A1: hardware map validity initialization/scrub (SimInit is not reset),
-  mapping/program/SG pinning and retirement, immutable command/program storage,
-  no stale data across reset/context changes, held cancellation/completion.
+  or an assumed AXI ID.
+- [x] A1 exec cancel completion. `g6lc_apu_exec_bind` turns an accepted op
+  into a held completion with status CANCELLED instead of returning to idle.
+  A completion that already finished stays unchanged until acknowledged.
+  A disabled exec op is not ready. The mailbox keeps a handed-off job busy
+  until that completion, and records CANCELLED for a GO that was never
+  accepted. Remote 2026-09-22: **5 cases / 26 checks / 45 clocks**,
+  errors=0. Bind fixture synth, no latches: disabled ports only; enabled
+  **25,829 cells / 4,006 flip-flops**.
+- [x] A1 xbar drain pins. `g6lc_apu_xbar` exports device-reset and
+  queue-stop and takes backend idle and teardown-done. A firmware ACK
+  does not drop a pin while the selected queue is busy, or while device
+  reset is waiting on teardown. Enable=0 holds both requests at 0.
+  `g6lc_apu_th_load` still drives idle and done high, so the cookie path
+  is unchanged. Remote 2026-09-22: **5 cases / 29 checks / 84 clocks**,
+  errors=0. Xbar fixture synth, no latches: Enable=0 **124 cells / 16
+  flip-flops**; Enable=1 **23,361 / 2,477**.
+- [x] A1 truthful exec geometry. An enabled device must name 4 threads,
+  8 registers, 16 instruction words, and 64 data words. The cluster arrays
+  and the debug/job indices are those widths. Register counts 0/4/16/32,
+  DMEM counts 0/16/32/128/256, and thread counts 0/2/8 are illegal whether
+  or not exec is selected. A disabled device is still legal. Register 7
+  takes a poke and register 0 stays zero; DMEM words 0 and 63 read zero
+  after reset. Memory plus exec stays illegal. Remote 2026-09-22:
+  **5 cases / 43 checks / 9 clocks**, errors=0. Exec fixture synth, no
+  latches: Enable=0 ports only; Enable=1 **25,430 cells / 3,888
+  flip-flops**. `tc_sram`, program bounds, context scrub, and DFT remain
+  open.
+- [x] A1 lease-aware retire. A mapping slot and the command snapshot stay
+  published while `child_idle_i` is low. Insert, invalidate, and command
+  release wait for that pin. A one-cycle invalidate or release is applied
+  once the child is idle. The memory wrapper ties the pin to read, write,
+  and SG idle. The SG table stays visible through invalidate until its
+  list reader and fragment DMA are idle and the unit is not mid-query.
+  Remote 2026-09-22: storage **36 cases / 170 checks / 668 clocks**;
+  SG entries=64 **122 cases / 6,593 checks / 11,352 clocks**; errors=0.
+  Storage post-synth: disabled ports only; enabled **1,296 cells / 91
+  flip-flops**. SG post-synth, no latches: disabled ports only; enabled
+  **58,237 cells / 13,266 flip-flops**, one memory before mapping.
+  Raw mailbox mappings and a handle resolver remain open.
+- [x] A1 AXI4-Lite burst drain and split-write errors. A rejected write
+  accepts every `AWLEN+1` beat before B, and a rejected read returns every
+  `ARLEN+1` beat with RLAST only on the last. B is withheld while write
+  data is outstanding. A WLAST that does not match the count quarantines
+  the bridge until reset. A split store keeps the low half's error when
+  the high half returns OKAY. Remote 2026-09-22: **9 cases / 47 checks /
+  95 clocks**, errors=0. Bridge fixture synth, no latches: Enable=0
+  **234 cells / 16 flip-flops**; Enable=1 **1,606 cells / 266
+  flip-flops**. Not a general downsizer.
+- [ ] A1: audit narrow-read/atomic policy on firmware RAM. RAM write-drain
+  and the AXI4-Lite burst drain are in. Integrate fault reporting and
+  coordinated fabric reset for a quarantined transaction that is still
+  outstanding at a target.
+- [ ] A1: immutable command/program storage beyond the held snapshot, and no
+  stale program data left readable across reset. Slot publication and the
+  idle lease pin are already in.
 - [ ] A2: real pinned OpenSBI → S-mode service and Linux. Current DTS next-mode=3,
   direct reset, cookie, `fw_ready=#1` / synthesis constant and UART/CLINT/PLIC
   stubs do not prove this. Add verified loader/BSS/traps/cache sync/protection,
@@ -4433,7 +4482,8 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
 - [ ] A4: combine memory and exec (currently mutually selected), handle-only
   protected LSU, real vertex/coverage/interpolation/sampler/fragment/output,
   context isolation and a cache-visible common surface. Current local storage
-  is resettable arrays, not tc_sram; make exec geometry and DFT claims truthful.
+  is resettable arrays, not tc_sram. Exec geometry now matches that file.
+  DFT claims remain open.
 - [ ] A5: unchanged Linux/Mesa EGL/GLES2 shader/data-dependent output on RTL,
   no software fallback, raw+PPM evidence; BIOS same-device scene and quiesced
   client handoff. Optional BIOS-managed provisioning is a separate integration

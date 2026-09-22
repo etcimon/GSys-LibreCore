@@ -45,8 +45,8 @@ physical or guarded-feature status advances from qualification-tooling changes a
 
 **Structurally leaf-qualified; behaviour unchanged by construction and by measurement.** The issue
 queue no longer moves entries; every directed and firmware result is cycle-identical. The structural
-timing screen improved the payload path and moved the maximum into the select cone, which stays
-under budget and is recorded as the next timing task. Both fetch proofs that had been failing pass
+timing screen improved the payload path, and the cascaded grant brought the select cone below where
+the compacting design stood (module max 23.97 → 16.0). Both fetch proofs that had been failing pass
 again with corrected environments; the hart-switch-vs-pending-redirect selector contract is now an
 explicit open obligation rather than an implicit assumption.
 

@@ -53,8 +53,10 @@ relative age in a DEPTH×DEPTH matrix; issue selection ranks the ready entries b
 takes the lowest free slot with port order breaking same-cycle ties. The issue predicate (operand
 readiness, unresolved-older-store gate, dispatch-time bypass, fence/system head rule) is unchanged,
 and every frozen firmware probe retires cycle-identically. Timing: the DEPTH-wide payload mux tree of
-the compacting layout is gone (23.97 → 14.97 FO4 on the sparse OoO slice); the select cone now
-carries a per-entry popcount and is the module maximum at 27.0 of a 32 budget (T4b owns it).
+the compacting layout is gone (23.97 → 14.97 FO4 on the sparse OoO slice); the select is a cascaded
+oldest-first grant (port p takes the remaining ready entry with no older remaining entry), 16.0 FO4,
+with the per-entry rank popcount kept under `translate_off` as the reference the grant is asserted
+against.
 
 ## Fetch-response ownership by token and precise misalignment (2026-09-21, T3)
 
