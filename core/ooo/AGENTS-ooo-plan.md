@@ -158,6 +158,19 @@ IQ cover task still times out under z3; `g6lc_ooo_dispatch` at 30.0 is the slice
 FP suite (`ooo_fp_rename.S`); remove `!(OoOEn && FpPresent)` for `NrHarts==1` only. Two-hart FP
 and lazy-FS wait for T6.
 
+### T5 status (2026-09-21, partial)
+
+Qualification build `g6lc64_ooo` + `G6LC_OOO_FP_QUALIFY` (the define exists only for this; both the
+`check_cfg` assert and the dispatch `$error` stay for production, and multi-hart FP has its own
+unconditional guard). Evidence: `t5-fh-fix-fp-v1` 13/13 FP positives Spike-identical, 10/10
+negatives report their stage id, alias mutation detected on stage 4, owner mutation inert on
+stages 1/9/10 (diag: 16 stale publishes on stage 10 all landed ~16 cycles before the slot's next
+owner arrived — architecturally invisible at 32 scoreboard entries; the S2 leaf catches the same
+needle). Found on the way: the FTQ replay defect (fixed, see contract) and its rare residual; the
+smt2 anchor model run single-hart on a directed ELF replays the boot vector once (dual-hart model,
+hart 1's boot — artifact, not a core fault, to confirm). Decision pending: whether leaf-only
+detection plus the structural argument meets the bar for removing the single-hart guard.
+
 ## T6 — mixed-resident SMT2
 
 Per-hart commit heads (scoreboard/ROB), hart-tagged IQ/ROB/LSQ, per-hart STQ credits, shared PRF

@@ -55,7 +55,18 @@ next actions are superseded by the tranche exits.
   the sim-only reference assert; fixtures/firmware cycle-identical.
 - [ ] IQ cover task (`g6lc_fetch_iq.sby cover`) still times out under z3; `g6lc_ooo_dispatch` at
   30.0 adj FO4 is the OoO slice's worst cone (budget 32) — next timing owner after T5.
-- [ ] T5 … T6 per the plan file; review point before T5.
+- [x] **Fetch (FtqDepth != 0 only): instruction-queue replay did not flush the FTQ/FDIP** → stale
+  sequential entries served ahead of the refused window → one window skipped (OoO) or livelock
+  (in order). Found by `ooo_fp_cancel_head_reuse` / `ooo_fetch_head_reuse_int`; fixed in
+  `frontend.sv` (replay is a reseed like bp_fire). Protected `g6lc64_smt2` has FtqDepth=0 and was
+  never exposed; anchor exact after the fix.
+- [ ] **Residual fetch loss:** `ooo_fetch_head_reuse_int` still loses a whole two-window block in
+  2–4 of 128 iterations on FtqDepth=4 (OoO and in order). Needs a VCD at the loss; same class.
+- [ ] T5 (partial): FP suite green on the qualification build; owner-retention mutation inert at
+  core level (structural: 32 SB entries, drop at head) — decide the bar; guard stays until then.
+- [ ] Confirm the smt2 anchor model's boot-vector replay on a single-hart directed ELF is hart 1's
+  boot (dual-hart model artifact), not a redirect fault.
+- [ ] T6 per the plan file.
 
 ## Active stability-first review — authoritative next change sets
 
@@ -4414,9 +4425,29 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
   ports only. Enabled pre-map `memory_collect` keeps 2 memories; synth is
   **1,270 cells / 89 flip-flops**. The clock-gate latch is the existing
   power cell. Lease-aware retire is still open.
-- [ ] A1: trusted fabric source/domain enforcement for control **and RAM**;
-  constant testharness hart tags are not authority. No guest grant from PROT
-  or an assumed AXI ID.
+- [x] A1 reserved-hart check for control and firmware RAM. The compare
+  takes the supplied hart. Firmware RAM captures it at AW/AR accept, so a
+  later pin change does not retag the beat. Hart 0 is SLVERR and leaves
+  the canonical word unchanged. PROT `3'b111` with a nonzero AXI id still
+  completes for hart 1, and privileged PROT does not admit hart 0. Remote
+  2026-09-22: grant **18 checks / 12 clocks**; fwram **52 cases / 5,739
+  checks / 5,479 clocks**, errors=0. 4 KiB fixture synth, no latches:
+  Enable=0 **245 cells / 16 flip-flops**; Enable=1 **106,018 cells /
+  32,941 flip-flops**, one `$mem_v2` before mapping. The CVA6 cookie was
+  not re-run.
+- [x] A1 per-master provenance before cluster aggregation. `g6lc_apu_src_guard`
+  finishes a non-firmware hart's RAM or control transaction locally, so
+  the hub never sees it. The firmware hart is a wire. A sign-extended
+  alias is not treated as the window. Remote 2026-09-22: **4 cases / 31
+  checks / 60 clocks**, errors=0. Synth, no latches: firmware hart is
+  **6 ports / no cells**; application hart is **2,193 cells / 29
+  flip-flops**. `g6lc_apu_xbar_hart` takes the crossbar's prepended port
+  index. The cluster port is the firmware hart. Debug and DMA are hart 0.
+  The master's low ID bits are not a hart. **5 checks**, errors=0. The
+  CVA6 cookie was not re-run.
+- [ ] A1: L2 line-fill requests are not tagged with a hart. Window traffic
+  from a non-firmware hart does not reach the cache. A fill that the
+  firmware hart itself caused is still that hart's traffic.
 - [x] A1 exec cancel completion. `g6lc_apu_exec_bind` turns an accepted op
   into a held completion with status CANCELLED instead of returning to idle.
   A completion that already finished stays unchanged until acknowledged.
@@ -4455,7 +4486,8 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
   Storage post-synth: disabled ports only; enabled **1,296 cells / 91
   flip-flops**. SG post-synth, no latches: disabled ports only; enabled
   **58,237 cells / 13,266 flip-flops**, one memory before mapping.
-  Raw mailbox mappings and a handle resolver remain open.
+  Command DMA now uses the published slot. Scatter-gather and the used
+  ring still take raw maps.
 - [x] A1 AXI4-Lite burst drain and split-write errors. A rejected write
   accepts every `AWLEN+1` beat before B, and a rejected read returns every
   `ARLEN+1` beat with RLAST only on the last. B is withheld while write
@@ -4465,10 +4497,79 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
   95 clocks**, errors=0. Bridge fixture synth, no latches: Enable=0
   **234 cells / 16 flip-flops**; Enable=1 **1,606 cells / 266
   flip-flops**. Not a general downsizer.
-- [ ] A1: audit narrow-read/atomic policy on firmware RAM. RAM write-drain
-  and the AXI4-Lite burst drain are in. Integrate fault reporting and
-  coordinated fabric reset for a quarantined transaction that is still
-  outstanding at a target.
+- [x] A1 narrow, 4 KiB, exclusive, and ATOP policy on firmware RAM.
+  A narrow read is one size-aligned beat. A byte store does not write.
+  A 64-bit fill that crosses a 4 KiB page is SLVERR for every beat; a
+  fill that ends on the boundary completes. Exclusive lock and ATOP do
+  not modify SRAM and never return EXOKAY. AtomicLoad, AtomicSwap, and
+  AtomicCompare also return one R. `fault_o` stays high with no response
+  while a mismatched WLAST is outstanding. Reset clears it, the store
+  has not landed, and the next store completes. Remote 2026-09-22:
+  **56 cases / 5,799 checks / 5,631 clocks**, errors=0. 4 KiB fixture
+  synth, no latches: Enable=0 **274 cells / 17 flip-flops**; Enable=1
+  **106,176 cells / 32,943 flip-flops**, one `$mem_v2` before mapping.
+  `g6lc_apu_th_load` forwards `ram_fault_o`. The CVA6 cookie was not re-run.
+- [x] A1 supervisor for a quarantined firmware-RAM master.
+  `g6lc_apu_fault_sup` asserts `reset_o` on the clock after `ram_fault_o`
+  and holds it until the pin is low. There is no timeout. The module's
+  own reset is the pad `rst_ni`. That request gates `rstgen`, so
+  `ndmreset_n` resets the crossbar and the RAM together. SRAM is not
+  cleared. A legal store does not request reset. A mismatched WLAST
+  produces no B, the old word stays, and the next store completes. A
+  fault that stays high keeps reset asserted. Enable=0 holds the request
+  at 0. Remote 2026-09-22: **3 cases / 18 checks / 54 clocks**, errors=0.
+  Fixture synth, no latches: Enable=0 **4 ports / no cells**; Enable=1
+  **1 cell / 1 flip-flop**. The CVA6 cookie was not re-run. L2 line fills
+  are still not tagged.
+- [x] A1 scheduler for memory and exec together. `g6lc_apu_sched` is one
+  mailbox. Each op is presented to the memory client or to exec, and not
+  to both in the same cycle. A mapping insert and lookup complete, a
+  local LDI/HALT job peeks 10, and the mapping is still there afterward.
+  Exec does not read the mapping. No DMA runs in that proof profile.
+  `ApuHarness` keeps exec and the memory clients off. `ApuSchedBoth` is
+  not the boot config. Remote 2026-09-22: **4 cases / 107 checks / 161
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **10 ports /
+  no cells**; Enable=1 **28,966 cells / 4,839 flip-flops**. The exec-only
+  compositor is unchanged: **64 cases / 518 checks / 3,071 clocks**.
+  The CVA6 cookie was not re-run.
+- [x] Command DMA pins the published slot. `APU_MEM_CMD_DMA` looks up
+  resource, context, and epoch and reads that mapping. The mailbox base
+  is not the address. An unknown id and a stale epoch issue no read. A
+  pin dropped while idle makes the next command DMA of that id fail
+  closed. A command-read word already on the bus stays until it is
+  taken. Exec `LD`/`ST` stays local DMEM. Scatter-gather and the used
+  ring still take raw maps. Remote 2026-09-22: **10 cases / 19 checks /
+  227 clocks**, errors=0. Mem fixture synth: Enable=0 **35 ports / no
+  cells**; Enable=1 **48,788 cells / 12,119 flip-flops**, final netlist
+  has no latch cells. The CVA6 cookie was not re-run.
+- [x] One-sample triangle coverage. `g6lc_apu_cover` reports covered or
+  not and the integer edge weights for one point. Weights sum to the
+  signed area. A top or left edge of the counterclockwise winding is
+  included; a bottom edge and a diagonal are not. Moving one vertex
+  across the sample flips coverage and leaves the color word unchanged.
+  A zero-area triangle misses. `CoverEn` stays 0 on the shipped profiles
+  and does not legalize virgl. The unit is not in the testharness.
+  Remote 2026-09-22: **9 cases / 78 checks / 40 clocks**, errors=0.
+  Fixture synth, no latches: Enable=0 **8 ports / no cells**; Enable=1
+  **22,506 cells / 174 flip-flops**. The CVA6 cookie was not re-run.
+- [x] One RGBA8 pixel from coverage weights. `g6lc_apu_frag` writes
+  byte0 red at `y * stride + x * 4`. Channels round half up. A miss and
+  a fault leave the stored bytes unchanged. The 4×2 image is
+  `32'hFF0000FF` at `(0,0)`, `32'hFF404080` at `(1,0)`, and zeros
+  elsewhere. `FragEn` stays 0 and does not legalize virgl. The unit is
+  not in the testharness and is not the HDMI buffer. Remote 2026-09-22:
+  **8 cases / 41 checks / 309 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **12 ports / no cells**; Enable=1 **21,762 cells /
+  527 flip-flops**. The CVA6 cookie was not re-run.
+- [x] One unfiltered texel into that pixel. The texel image is the single
+  RGBA8 at `(0,0)`. A covered sample stores it at `y * stride + x * 4`.
+  Any other coordinate is a fault. A coverage miss does not fetch. The
+  texel `32'hFF80FF40` lands at `(2,0)` and leaves the blend and solid
+  pixels unchanged. No filter and no wrap. `TexelEn` stays 0 and does
+  not legalize virgl. The TEX opcode still returns `-26`. Remote
+  2026-09-22: **12 cases / 58 checks / 331 clocks**, errors=0. Fixture
+  synth, no latches: Enable=0 **12 ports / no cells**; Enable=1
+  **22,141 cells / 559 flip-flops**. The CVA6 cookie was not re-run.
 - [ ] A1: immutable command/program storage beyond the held snapshot, and no
   stale program data left readable across reset. Slot publication and the
   idle lease pin are already in.
@@ -4476,14 +4577,64 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
   direct reset, cookie, `fw_ready=#1` / synthesis constant and UART/CLINT/PLIC
   stubs do not prove this. Add verified loader/BSS/traps/cache sync/protection,
   service-ready and failed-image/restart behavior; reserve hart/memory in Linux.
-- [ ] A3: standard virtqueue/virgl decoder and one host/CVA6 semantic compiler.
-  RISC-V opcode-only parsing plus frozen MOV is a blocker; IN/OUT/CONST aliasing,
-  vec4/swizzle/write-mask semantics and mandatory Mesa limits remain unsatisfied.
-- [ ] A4: combine memory and exec (currently mutually selected), handle-only
-  protected LSU, real vertex/coverage/interpolation/sampler/fragment/output,
-  context isolation and a cache-visible common surface. Current local storage
-  is resettable arrays, not tc_sram. Exec geometry now matches that file.
-  DFT claims remain open.
+- [ ] A3: standard virtqueue/virgl decoder. The host and CVA6 share
+  `g6lc_apu_tgsi_compile` for this subset (2026-09-22, tgsi-cc 14 checks /
+  21,093 clocks, cookie `0x600D000B`). `IN`/`OUT`/`CONST` aliasing,
+  vec4/write-mask semantics, and mandatory Mesa limits remain unsatisfied.
+  `RESOURCE_CREATE_2D` payload decode and the fence echo are in
+  (2026-09-22, vgpu cmd 10 cases / 41 checks / 44 clocks). One local
+  used element and its interrupt are in. One local avail descriptor
+  is walked and supplies that command. One backing entry is stored
+  for an existing resource. One read of that entry is in the
+  resource. A descriptor chain, the guest-memory used ring, and draw
+  remain open.
+  The TEX opcode still returns `-26`.
+- [x] One local used element and its interrupt. The element is stored
+  before `used.idx` advances. IRQ rises with the index and falls on ack.
+  A cancel before the index does not publish. After a fenced
+  `RESOURCE_CREATE_2D`, descriptor 4 length 24 is element 0 and the index
+  is 1. Queue length 8. No avail walk and no guest-memory write.
+  `UsedEn` stays 0. Remote 2026-09-22: **5 cases / 31 checks / 37
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **16 ports /
+  no cells**; Enable=1 **1,342 cells / 613 flip-flops**. The CVA6 cookie
+  was not re-run.
+- [x] One local avail descriptor. The driver may publish only the next
+  index. A walk returns that descriptor's 40-byte command. `NEXT`,
+  `WRITE`, and `INDIRECT` fault and do not consume the slot. A length
+  other than 40 faults the same way. A later post is not reached while
+  that fault stays at the head. Descriptor 4's `RESOURCE_CREATE_2D`
+  decodes to `OK_NODATA` with the fence and resource 7, and the local
+  used ring publishes that id as element 0. No chain and no guest-memory
+  read. `AvailEn` stays 0. Remote 2026-09-22: **17 cases / 77 checks /
+  93 clocks**, errors=0. Fixture synth, no latches: Enable=0 **10 ports /
+  no cells**; Enable=1 **7,731 cells / 3,356 flip-flops**. The CVA6
+  cookie was not re-run.
+- [x] One resource-attach backing entry. `RESOURCE_ATTACH_BACKING`
+  stores one memory entry when the resource already exists,
+  `nr_entries` is 1, and the length is `width * height * 4`. A second
+  attach returns `ERR_UNSPEC` and does not replace it. An unknown id,
+  a zero or misaligned address, a wrapping range, and any other
+  command type store nothing. Resource 7 keeps `64'h8800_1000` for 32
+  bytes. The unit does not read guest memory. `BackEn` stays 0.
+  Remote 2026-09-22: **19 cases / 138 checks / 99 clocks**, errors=0.
+  Fixture synth, no latches: Enable=0 **12 ports / no cells**;
+  Enable=1 **8,782 cells / 363 flip-flops**. The CVA6 cookie was not
+  re-run.
+- [x] One read of the stored backing entry. `TRANSFER_TO_HOST_2D`
+  copies that entry into the resource when the rectangle is the whole
+  resource and the offset is 0. A mismatched or failed response does
+  not change the image. The 4×2 resource keeps 32 bytes from
+  `64'h8800_1000`. The 1×1 resource keeps 4 bytes and clears the rest.
+  There is no guest write. `XferEn` stays 0. Remote 2026-09-22:
+  **13 cases / 121 checks / 91 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **24 ports / no cells**; Enable=1 **10,086 cells /
+  974 flip-flops**. The CVA6 cookie was not re-run.
+- [ ] A4: handle-only protected LSU on top of the memory/exec scheduler,
+  vertex fetch, interpolation across a primitive, and a filtered sampler.
+  One-sample coverage, one RGBA8 pixel, and one unfiltered texel are in.
+  Context isolation and a cache-visible common surface remain open.
+  Current local storage is resettable arrays, not tc_sram. Exec geometry
+  now matches that file. DFT claims remain open.
 - [ ] A5: unchanged Linux/Mesa EGL/GLES2 shader/data-dependent output on RTL,
   no software fallback, raw+PPM evidence; BIOS same-device scene and quiesced
   client handoff. Optional BIOS-managed provisioning is a separate integration

@@ -45,6 +45,18 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## Fetch-target-queue replay reseed (2026-09-21, T5 finding)
+
+Instruction-stream integrity (`#instr_fetch`): when the instruction queue refuses a window and asks
+for a replay, `core/fetch_B/frontend.sv` now treats `replay_q` as a reseed on FTQ-enabled
+configurations — FTQ and FDIP are flushed, the stale head is not demanded, and `seq_base` rewinds
+to `replay_addr_q` so the refused window is pushed and stepped from in the same cycle; in-flight
+responses to the dropped entries are killed by token. Before this the stale sequential entries ahead
+of the refused window were served first, delivering windows out of accepted-stream order, and the
+queue's per-slot FIFOs lost alignment (a window skipped, or a permanent re-offer). `FtqDepth=0`
+configurations are bit-identical. The single-hart OoO+FP elaboration guard gained a
+qualification-only bypass define (`G6LC_OOO_FP_QUALIFY`) and an unconditional multi-hart FP guard.
+
 ## OoO issue queue without compaction (2026-09-21, T4)
 
 No ISA-visible behaviour changes. `core/ooo/g6lc_iq.sv` keeps entries stationary and records

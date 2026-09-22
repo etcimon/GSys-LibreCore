@@ -41,6 +41,15 @@ regressions do not add independent ISA coverage. Early termination remains unown
 read/address visibility, precise recovery and broad memory ownership remain open. No architecture,
 physical or guarded-feature status advances from qualification-tooling changes alone.
 
+## FP OoO behaviour and the fetch-target-queue replay defect (2026-09-21)
+
+**FP out-of-order behaviour has Spike-compared directed evidence on a qualification-only build; the
+production guard stays.** The suite found a real frontend defect on every FTQ-enabled configuration
+(a queue replay did not flush the FTQ, skipping a window or livelocking); it is fixed with the
+protected configuration untouched and exact, and a rarer residual of the same class remains open.
+The FPU ownership mutation is caught at leaf level but is structurally unreachable at core level
+in this geometry; the bar for lifting the single-hart FP guard is not yet decided.
+
 ## OoO issue queue structure and fetch proof repair (2026-09-21)
 
 **Structurally leaf-qualified; behaviour unchanged by construction and by measurement.** The issue

@@ -218,3 +218,80 @@ testlist:
     <<: *common_test_config
     asm_tests: <path_var>/custom/spec/spec_mispredict_chain.S
     description: "FSE S2/S3: nested branches + RAS call/ret under deep window"
+
+  - test: ooo_fp_cancel_divsqrt
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DSTAGE=1 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Cancelled long-latency fdiv/fsqrt under a mispredicted branch never reaches the correct-path owner of the same FP destination"
+
+  - test: ooo_fp_fflags_commit_order
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DSTAGE=2 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "fflags accumulate in commit order: a csrr between an older slow flag-setter and a younger fast one sees only the older flags"
+
+  - test: ooo_fp_fma_rs3_late
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DSTAGE=3 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "FMA rs3 waits on a long-latency fdiv producer, chained through a renamed rs1"
+
+  - test: ooo_fp_store_late_data_bypass
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DSTAGE=4 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "FP store with a late address and a younger fld of the same address: bypass, alias validation and replay on the FP class"
+
+  - test: ooo_fp_fs_off_trap
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DSTAGE=5 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "mstatus.FS=Off: an FP op traps illegal precisely, younger work is discarded, FP state re-enabled afterwards"
+
+  - test: ooo_fp_cross_class_moves
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DSTAGE=6 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "fmv.x.d / fmv.d.x cross-class moves interleaved with integer work"
+
+  - test: ooo_fp_nv_convert
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DSTAGE=7 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "NV flag from fcvt.w.d on NaN with an integer consumer of the converted value"
+
+  - test: ooo_fp_store_late_data_order
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DSTAGE=8 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "FP store with late data (fdiv) and a younger fld of the same address: store-to-load ordering on FP data"
+
+  - test: ooo_fp_cancel_tid_reuse
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DSTAGE=9 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Scoreboard-slot reuse under a cancelled fdiv/fsqrt: a fast correct path allocates past the 32-entry window so a stale result escaping FPU ownership corrupts a live owner"
+
+  - test: ooo_fp_cancel_head_reuse
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-march=rv64imafdc_zicsr_zifencei -DSTAGE=10 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Cancelled fdiv/fsqrt dropped at the commit head while still in the FPU; 64 fast integer allocations reuse its slot so a stale result escaping ownership corrupts a live integer owner"
+
+  - test: ooo_fetch_head_reuse_int
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_fp_ooo.S
+    gcc_opts: "-DSTAGE=11 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Integer twin of ooo_fp_cancel_head_reuse (fence, LCG branch, wrong-path divu, 64 fast adds): partitions the committed-path fetch-window loss from the FP backend"

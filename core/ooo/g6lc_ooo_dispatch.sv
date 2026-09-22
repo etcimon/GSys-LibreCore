@@ -134,13 +134,24 @@ module g6lc_ooo_dispatch
     // ordered against (and forwarded from) the peer hart's speculative stores.
     $error("OoO multi-hart integration is unqualified: mixed residency and recovery ownership remain open.");
   end
+  if (CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_fp_mh
+    // Hart-tagged LSQ and lazy-FS per-hart tracking are the T6 work item; an
+    // FP register class on a multi-hart OoO configuration stays illegal even
+    // for the single-hart qualification build below.
+    $error("OoO FP with more than one hart is unqualified: hart-tagged LSQ and lazy-FS are T6.");
+  end
+`ifndef G6LC_OOO_FP_QUALIFY
   if (CVA6Cfg.FpPresent) begin : gen_err_ooo_fp
     // The FP class is implemented and tested at module level, and the
     // FP-enabled full core elaborates and synthesises clean. What is missing is
     // behavioural evidence: no FP program has been simulated on this path, and
     // there is no independent-reference comparison.
+    // G6LC_OOO_FP_QUALIFY exists only for the T5 qualification build that
+    // produces that evidence; it is removed by the T5 commit once the suite
+    // passes, so production builds keep this elaboration guard.
     $error("OoO FP register class is implemented but unqualified: full release qualification is pending.");
   end
+`endif
 
   // An LSQ store entry is the reservation of a store_buffer speculative-queue
   // slot held until commit; granting more credits than slots strands stores.

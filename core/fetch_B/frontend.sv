@@ -650,7 +650,10 @@ module frontend
   // -------------------
   // The sequential step is taken from the predicted target when a prediction
   // fires this cycle, else from the current NPC (boot address out of reset).
-  assign seq_base = npc_rst_load_q ? boot_addr_i : (bp_fire ? predict_address : npc_q);
+  // With an FTQ the replay is a reseed like bp_fire: the refused window is
+  // presented, pushed and stepped from in the same cycle.
+  assign seq_base = npc_rst_load_q ? boot_addr_i : bp_fire ? predict_address :
+      (FtqEn && replay_q) ? replay_addr_q : npc_q;
   // I8: I$ address follows the same encoder as npc_d. Restore-first here
   // outranked trap/commit (I4y) and could present a banked data VA.
   assign fetch_address = arch_valid ? arch_pc :
@@ -660,7 +663,7 @@ module frontend
     if (arch_valid) npc_d = arch_step ? next_block(arch_pc) : arch_pc;
     // re-present the redirect target until its block has been registered
     else if (redirect_hold) npc_d = redirect_pc_q;
-    else if (replay_q) npc_d = replay_addr_q;
+    else if (replay_q && !FtqEn) npc_d = replay_addr_q;
     else if (if_ready) npc_d = next_block(seq_base);
     else if (bp_fire) npc_d = predict_address;
     else npc_d = seq_base;
@@ -712,14 +715,22 @@ module frontend
       else if (flush_i && !arch_reseed) cf_hold_q <= 1'b0;
     end
 
+    // An instruction-queue replay leaves stale sequential entries ahead of the
+    // refused window in the FTQ, which would be served first and deliver
+    // windows out of accepted-stream order, breaking the queue's per-slot FIFO
+    // alignment. A replay is therefore a reseed like bp_fire: the FTQ and FDIP
+    // are flushed, the stale head is not demanded, and seq_base rewinds npc to
+    // replay_addr_q so the refused window is pushed and stepped from in the
+    // same cycle. kill_s1 already carries replay_q, so the in-flight responses
+    // to the dropped pre-flush entries are killed by token.
     // A reseed flushes and refills the queue, so treat that cycle as having free
     // space even if the pre-flush queue was full or held.
-    assign if_ready = (~ftq_full | bp_fire | arch_reseed) & instr_queue_ready
-                      & ~halt_frontend_i & (~cf_hold_q | bp_fire | arch_reseed);
+    assign if_ready = (~ftq_full | bp_fire | arch_reseed | replay_q) & instr_queue_ready
+                      & ~halt_frontend_i & (~cf_hold_q | bp_fire | arch_reseed | replay_q);
     // Demand the I$ only when the loop buffer cannot supply the queue head. The
     // reseed is registered, so the same-cycle head is still the pre-flush one.
     assign demand_req = ftq_head_valid & instr_queue_ready & ~halt_frontend_i & ~lbuf_hit
-                        & ~bp_fire & ~arch_reseed & ~flush_i;
+                        & ~bp_fire & ~arch_reseed & ~flush_i & ~replay_q;
     assign demand_fire = demand_req & icache_dreq_i.ready;
     // Pop only when the I$ accepts a demand request that is not being killed: a
     // pop under kill_s2 drops the redirect target and discards the miss return.
@@ -736,7 +747,7 @@ module frontend
         .clk_i,
         .rst_ni,
         // sequential addresses queued behind a taken CF must not be drained
-        .flush_i      (flush_i | is_mispredict | bp_fire),
+        .flush_i      (flush_i | is_mispredict | bp_fire | replay_q),
         .push_i       (ftq_push),
         .push_vaddr_i (ftq_push_vaddr),
         .push_taken_i (bp_fire),
@@ -762,7 +773,7 @@ module frontend
       ) i_fdip (
           .clk_i,
           .rst_ni,
-          .flush_i        (flush_i | is_mispredict | bp_fire),
+          .flush_i        (flush_i | is_mispredict | bp_fire | replay_q),
           .enable_i       (1'b1),
           .peek_valid_i   (ftq_peek_valid),
           .peek_vaddr_i   (ftq_peek_vaddr),

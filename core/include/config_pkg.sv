@@ -984,7 +984,13 @@ package config_pkg;
     // g6lc64_ooo_server sets OoOEn=1 with NrHarts=2 and RVF/RVD=1, so it trips
     // both deliberately. See architecture/out-of-order/README.md.
     assert (!(Cfg.OoOEn && Cfg.NrHarts > 1));
+`ifndef G6LC_OOO_FP_QUALIFY
+    // Single-hart FP stays illegal in production. G6LC_OOO_FP_QUALIFY exists
+    // only for the T5 qualification build that produces the behavioural
+    // evidence; it is removed by the T5 commit once the suite passes.
+    // Multi-hart FP remains illegal regardless via the NrHarts leg above.
     assert (!(Cfg.OoOEn && Cfg.FpPresent));
+`endif
     // The OoO FP writeback narrows the XLEN-wide writeback bus to FLen
     // (g6lc_ooo_dispatch: fprf_wdata = wb_data_i[FLen-1:0]), so an FP result
     // wider than the integer datapath cannot be delivered. RV32+D is legal

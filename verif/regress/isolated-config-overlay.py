@@ -45,6 +45,25 @@ ALLOWED = {
         re.compile(r"(^\s+OoOEn:\s*bit'\()([01])(\))", re.M),
         r"[01]",
     ),
+    # Fetch-supply knobs for the committed-path fetch-window-loss partition:
+    # each isolates one speculative supplier (loop-buffer injection /
+    # fetch-directed I-prefetch) so a hole in the retire stream can be blamed
+    # on the exact supply path. Anchored field-line patterns cannot match the
+    # LoopBufEntries/FdipDistance siblings.
+    "LoopBufEn": (
+        re.compile(r"(^\s+LoopBufEn:\s*bit'\()([01])(\))", re.M),
+        r"[01]",
+    ),
+    "FdipEn": (
+        re.compile(r"(^\s+FdipEn:\s*bit'\()([01])(\))", re.M),
+        r"[01]",
+    ),
+    # Fetch-target-queue depth for the same partition: 0 selects the direct
+    # NPC/I$ path (gen_no_ftq) instead of demand-fetch draining a queue head.
+    "FtqDepth": (
+        re.compile(r"(^\s+FtqDepth:\s*unsigned'\()([0-9]+)(\))", re.M),
+        r"[0-9]+",
+    ),
 }
 
 EXEC_DRAM_LEN_MAX = 0x4000_0000

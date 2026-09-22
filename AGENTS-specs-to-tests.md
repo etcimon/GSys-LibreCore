@@ -63,6 +63,21 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## FP OoO suite and the FTQ replay finding (2026-09-21, T5)
+
+`verif/tests/custom/ooo/ooo_fp_ooo.S` stages 1–11 (`testlist_ooo_l3.yaml` `ooo_fp_*`,
+`ooo_fetch_head_reuse_int`): cancelled fdiv/fsqrt under mispredicts (1, 9, 10), commit-order
+fflags (2), FMA rs3 on a late producer (3), late-address and late-data FP stores with a younger fld
+(4, 8), FS=Off precise trap (5), cross-class moves (6), NV on convert (7), and the integer twin of
+stage 10 (11). `-DFP_NEGATIVE` inverts each final check. On the qualification build all FP stages
+pass Spike-identically and every negative reports its id; the LSQ alias mutation is caught by
+stage 4; the FPU owner mutation is inert at core level (leaf fixture catches it). Stage 10 exposed
+the FTQ replay defect (tohost=10, one window per iteration lost); stage 11 reproduced it on
+integer-only and in-order FtqDepth=4 models (livelock in order) and passes on FtqDepth=0 overlays.
+After the fix: stage 10 passes, the livelock is gone, frozen integer ELFs are Spike-identical
+(stage 20 −1 cycle), anchor exact, fetch cells and proofs (token also at FTQD=4) pass; stage 11
+still loses a two-window block in 2–4 of 128 iterations — open.
+
 ## OoO issue queue without compaction; fetch proofs repaired (2026-09-21, T4)
 
 `tb_g6lc_review_iq` 10 scenarios × 4 geometries with negatives (the random scenario compares against
