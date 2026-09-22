@@ -41,6 +41,15 @@ regressions do not add independent ISA coverage. Early termination remains unown
 read/address visibility, precise recovery and broad memory ownership remain open. No architecture,
 physical or guarded-feature status advances from qualification-tooling changes alone.
 
+## OoO issue queue structure and fetch proof repair (2026-09-21)
+
+**Structurally leaf-qualified; behaviour unchanged by construction and by measurement.** The issue
+queue no longer moves entries; every directed and firmware result is cycle-identical. The structural
+timing screen improved the payload path and moved the maximum into the select cone, which stays
+under budget and is recorded as the next timing task. Both fetch proofs that had been failing pass
+again with corrected environments; the hart-switch-vs-pending-redirect selector contract is now an
+explicit open obligation rather than an implicit assumption.
+
 ## Fetch-response ownership and precise load misalignment (2026-09-21)
 
 **Proven at the frontend boundary and exercised on firmware; two older fetch proofs found

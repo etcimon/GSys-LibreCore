@@ -143,6 +143,22 @@ DEFAULT_PROFILE_SPECS: list[dict] = [
         "notes": "Issue/scoreboard + LSU units — best-measure FO4 on mid/back-end core",
     },
     {
+        "id": "sparse_ooo_issue",
+        "flist": "verif/sv-timing-tests/flists/sparse_ooo_issue.f",
+        "modules": [
+            "g6lc_iq",
+            "g6lc_lsq",
+            "g6lc_memdep",
+            "g6lc_rename",
+            "g6lc_prf",
+            "g6lc_rob",
+            "g6lc_ooo_dispatch",
+        ],
+        "param_map": "verif/sv-timing-tests/param-maps/cv64a6_imafdc_xlen64.json",
+        "soft_missing": True,
+        "notes": "OoO issue slice (IQ select/age, LSQ CAM, rename) — FO4 screen for core/ooo/AGENTS-ooo-plan T4",
+    },
+    {
         "id": "full_core",
         "flist": "verif/sv-timing-tests/flists/full_core.f",
         "modules": [],

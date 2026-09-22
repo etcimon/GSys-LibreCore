@@ -63,6 +63,19 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## OoO issue queue without compaction; fetch proofs repaired (2026-09-21, T4)
+
+`tb_g6lc_review_iq` 10 scenarios × 4 geometries with negatives (the random scenario compares against
+the age-ordered reference model), dispatch cells n2/mdp1, ten frozen `g6lc64_ooo_int` ELFs
+cycle-identical to T3, protected anchor exact, lint/synth unchanged; FO4 before/after on the new
+`sparse_ooo_issue` soak profile (`verif/sv-timing-tests/flists/sparse_ooo_issue.f`).
+`core/fetch_B/formal/g6lc_fetch_hold.sby` passes again (7 asserts) after the harness took stimulus
+through ports, connected the SMT ports under an explicit `no restore while redirect_pend_q`
+assumption, exempted the same-cycle architectural supersede from the held-target check and added
+`redirect_accept` as a release leg with a re-acceptance-keeps-pend assert. `g6lc_fetch_iq.sby` bmc
+passes (9 asserts) with the payloads constrained to agree per slot on the CF class; its cover task
+still times out under z3 (pre-existing).
+
 ## Fetch token and precise misalignment (2026-09-21, T3)
 
 `core/fetch_B/formal/g6lc_fetch_token.sby` (abc bmc3, depth 10, 4 asserts) proves against the live
@@ -1202,7 +1215,7 @@ adds `tb_g6lc_apu_cva6_cookie.sv` (CVA6 hart 1 mailbox run to cookie
 adds `tb_g6lc_apu_cva6_tgsi.sv` (pre-encoded MOV job cookie `0x600D000B`).
 `run-cva6-tgsi-cc.sh` reuses that TB with `apu_tgsi_cc.hex` (compiler +
 job linked on CVA6; TEX fail then MOV; cookie `0x600D000B`). Directed
-`tb_g6lc_apu_fwram.sv` case 6 covers size-0/1 and sign-ext PA.
+`tb_g6lc_apu_fwram.sv` case 6 covers size-0/1. Sign-extended and bit-32 aliases are SLVERR (49/5710/5389, 2026-09-22), not accepted as the window.
 `run-cva6-osbi-boot.sh` adds `tb_g6lc_apu_cva6_osbi_boot.sv` (hart 0
 fetches DRAM lo `0x80000000`; hart 1 firmware RAM; not a real OpenSBI ELF).
 `run-cva6-osbi-uart.sh` adds `tb_g6lc_apu_cva6_osbi_uart.sv` (DRAM-lo
@@ -1273,6 +1286,23 @@ Build-platform `verify --lint --formal --sim --synth --target g6lc64_stream8
 --dry-run` executes no verification; its success exit is not gate evidence.
 It currently chooses local tools/core suites rather than the required APU
 remote path. No BIOS source, Linux helper or journal-format changes were made.
+
+## HDMI scanout leaf (non-ISA, 2026-09-22)
+
+`verif/tb/hdmi/run-hdmi-scanout.sh` runs `simplefb_model.py`, builds the
+scanout, line-buffer, TMDS, and shift testbenches, then lints and
+generic-synths each module at `HdmiEn=0` and `HdmiEn=1`. Remote rc=0.
+Scanout: 8 checks / 307200 pixels. Line buffer: 4 checks / 307200 pixels,
+one INCR burst of length 159, and the disabled block issues no AR. TMDS:
+6 checks / 307200 pixels. Shift: 4 checks / 307200 pixels / 384044 words,
+bit 0 first, and the disabled shifter stays at zero. `HdmiEn=0` is ports
+only. `HdmiEn=1` scanout is 328 cells / 42 flip-flops; the line buffer is
+67133 cells / 32846 flip-flops; TMDS is 1597 cells / 324 flip-flops; the
+shifter is 60 cells / 30 flip-flops. No latches.
+`simplefb_model.py` checks `g6lc-simplefb.dtsi`: 16 checks / 307200
+pixels, and no board DTS includes the node. This is not a booted
+simpledrm, a differential PHY, or a 3D surface. Counts are in
+`architecture/uncore/hdmi-display.md`.
 
 ## Running the suites (single orchestrator)
 

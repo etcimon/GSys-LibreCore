@@ -1,7 +1,7 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
-// U5.3 unified issue queue — compacting age-ordered multi-grant ready select.
+// U5.3 unified issue queue — stationary entries, age matrix, rank select.
 // Bottleneck optimizations:
 //   * Same-cycle WB tag wakeup
 //   * Same-cycle dispatch/WB capture without speculative issue-time wakeup
@@ -11,6 +11,11 @@
 //   * CSR data ops issue freely against the dual-entry csr_buffer credit;
 //     only fence/system CSR-class ops still wait for the commit head
 //   * Dual-grant oldest-ready up to NrIssuePorts
+//   * Entries never move: relative age lives in a DEPTH x DEPTH `older`
+//     matrix and selection ranks the ready entries by it. The previous
+//     compacting layout rebuilt the whole queue every cycle — a DEPTH-wide
+//     mux tree on the entry payload. The matrix costs DEPTH^2 one-bit flops
+//     and no payload movement at all.
 
 module g6lc_iq
   import ariane_pkg::*;
@@ -96,7 +101,14 @@ module g6lc_iq
   } iq_entry_t;
 
   iq_entry_t [DEPTH-1:0] q_q, q_wake, q_chain, q_after_issue, q_d;
+  // Relative age: older_q[o][e] = "entry o is older than entry e". Entries
+  // are stationary; this matrix replaces slot index as the age order. Only
+  // bits between two live entries are meaningful.
+  logic [DEPTH-1:0][DEPTH-1:0] older_q, older_d;
   logic [DW-1:0] count_q, count_d;
+  logic [DEPTH-1:0] ready;
+  logic [DEPTH-1:0][DW-1:0] rank;
+  logic [DEPTH-1:0] valid_after;
 
   assign full_o = (int'(count_q) + CVA6Cfg.NrIssuePorts > DEPTH);
 
@@ -155,22 +167,23 @@ module g6lc_iq
   localparam int unsigned EW = (DEPTH <= 1) ? 1 : $clog2(DEPTH);
   logic [CVA6Cfg.NrIssuePorts-1:0][EW-1:0] slot_entry;
   always_comb begin
-    automatic int unsigned grants;
     issue_sbe_o   = '0;
     issue_orig_o  = '0;
     issue_prd_o   = '0;
     issue_valid_o = '0;
     slot_entry    = '0;
-    grants = 0;
+    // Issue predicate, identical to the compacting design: operand
+    // readiness, the load/store ordering gates, and the commit-head rule
+    // for fence/system CSR-class ops. Selection below only re-derives the
+    // AGE order; it never changes which entries pass this predicate.
     for (int unsigned e = 0; e < DEPTH; e++) begin
-      automatic logic ready;
       automatic logic is_ld;
       automatic logic older_unresolved_st;
       automatic logic is_csr;
       // rs3 participates only when the entry actually has an FP third source;
       // otherwise rs3_rdy is set at dispatch and the term is inert.
-      ready  = q_chain[e].valid && q_chain[e].rs1_rdy && q_chain[e].rs2_rdy &&
-               q_chain[e].rs3_rdy;
+      ready[e] = q_chain[e].valid && q_chain[e].rs1_rdy && q_chain[e].rs2_rdy &&
+                 q_chain[e].rs3_rdy;
       // mem_stall_i gates LOADs only. A STORE allocates its LSQ entry at
       // dispatch and the live-store mask is derived from that entry, so gating
       // STORE here would block the issue -> AGU -> WB path that is the only
@@ -196,18 +209,33 @@ module g6lc_iq
       // side effects are global). Plain CSR accesses are covered by the
       // dual-entry csr_buffer's credit in issue_read_operands instead.
       is_csr = (q_chain[e].sbe.fu == CSR);
-      if (ready && !(is_ld && (mem_stall_i ||
-                              (older_unresolved_st && !q_chain[e].may_bypass))) &&
+      ready[e] = ready[e] &&
+          !(is_ld && (mem_stall_i ||
+                      (older_unresolved_st && !q_chain[e].may_bypass))) &&
           !(is_csr &&
             !(q_chain[e].sbe.op inside {CSR_READ, CSR_WRITE, CSR_SET, CSR_CLEAR}) &&
-            (q_chain[e].sbe.trans_id != commit_ptr_i)) &&
-          grants < CVA6Cfg.NrIssuePorts) begin
-        issue_valid_o[grants] = 1'b1;
-        issue_sbe_o[grants]   = q_chain[e].sbe;
-        issue_orig_o[grants]  = q_chain[e].orig;
-        issue_prd_o[grants]   = q_chain[e].prd;
-        slot_entry[grants]    = EW'(e);
-        grants++;
+            (q_chain[e].sbe.trans_id != commit_ptr_i));
+    end
+    // rank[e] = number of READY entries older than e. Port p is granted the
+    // unique ready entry whose rank equals p — the p-th oldest ready entry,
+    // the same grant set the compacting layout produced by scanning slots in
+    // order. The age matrix is a strict total order over the live entries
+    // (ooo_iq_age_acyclic/ooo_iq_age_total below), so ready ranks are
+    // 0..R-1 with no ties (ooo_iq_rank_unique).
+    for (int unsigned e = 0; e < DEPTH; e++) begin
+      rank[e] = '0;
+      for (int unsigned o = 0; o < DEPTH; o++)
+        if (ready[o] && older_q[o][e]) rank[e] = rank[e] + DW'(1);
+    end
+    for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
+      for (int unsigned e = 0; e < DEPTH; e++) begin
+        if (ready[e] && rank[e] == DW'(p)) begin
+          issue_valid_o[p] = 1'b1;
+          issue_sbe_o[p]   = q_chain[e].sbe;
+          issue_orig_o[p]  = q_chain[e].orig;
+          issue_prd_o[p]   = q_chain[e].prd;
+          slot_entry[p]    = EW'(e);
+        end
       end
     end
     // Accepted issue does not wake retained entries; actual writeback does.
@@ -228,85 +256,161 @@ module g6lc_iq
     for (int unsigned g = 0; g < CVA6Cfg.NrIssuePorts; g++)
       if (issue_valid_o[g] && issue_ack_i[g]) q_after_issue[slot_entry[g]].valid = 1'b0;
   end
+  for (genvar e = 0; e < DEPTH; e++) begin : gen_valid_after
+    assign valid_after[e] = q_after_issue[e].valid;
+  end
 
-  // 4) Compact + dispatch
+  // 4) Dispatch: entries are stationary — a newcomer takes the lowest free
+  //    slot and the age matrix records that every still-live entry is older
+  //    than it (dispatch port order breaks same-cycle ties).
   always_comb begin
-    iq_entry_t [DEPTH-1:0] compact;
-    int unsigned wptr;
-    compact = '0;
-    wptr = 0;
-    for (int unsigned e = 0; e < DEPTH; e++) begin
-      if (q_after_issue[e].valid) begin
-        compact[wptr] = q_after_issue[e];
-        wptr++;
+    automatic logic [DEPTH-1:0] free;
+    automatic logic [CVA6Cfg.NrIssuePorts-1:0][EW-1:0] alloc_slot;
+    automatic logic [CVA6Cfg.NrIssuePorts-1:0] alloc;
+    automatic int unsigned slot;
+    q_d = q_after_issue;
+    older_d = older_q;
+    // Removed entries (squashed, issue-acked, or never valid) lose their row
+    // and column so stale age bits can never influence a future rank.
+    for (int unsigned r = 0; r < DEPTH; r++) begin
+      if (!valid_after[r]) begin
+        older_d[r] = '0;
+        for (int unsigned o = 0; o < DEPTH; o++) older_d[o][r] = 1'b0;
       end
     end
-    q_d = compact;
-    count_d = DW'(wptr);
     disp_ack_o = '0;
+    free = ~valid_after;
+    alloc = '0;
+    alloc_slot = '0;
+    slot = 0;
     for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
-      if (disp_valid_i[p] && count_d < DEPTH[DW-1:0]) begin
+      if (disp_valid_i[p]) begin
+        for (int unsigned e = 0; e < DEPTH; e++) begin
+          if (free[e] && !alloc[p]) begin
+            alloc[p] = 1'b1;
+            alloc_slot[p] = EW'(e);
+            free[e] = 1'b0;
+          end
+        end
+      end
+    end
+    for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
+      if (alloc[p]) begin
+        slot = int'(alloc_slot[p]);
         disp_ack_o[p] = 1'b1;
-        q_d[count_d].valid   = 1'b1;
-        q_d[count_d].rs1_rdy = disp_rs1_ready_i[p];
-        q_d[count_d].rs2_rdy = disp_rs2_ready_i[p];
-        q_d[count_d].rs3_rdy = disp_rs3_ready_i[p];
+        q_d[slot].valid   = 1'b1;
+        q_d[slot].rs1_rdy = disp_rs1_ready_i[p];
+        q_d[slot].rs2_rdy = disp_rs2_ready_i[p];
+        q_d[slot].rs3_rdy = disp_rs3_ready_i[p];
         for (int unsigned w = 0; w < NR_WB; w++) begin
           // Same-cycle writeback capture, per class: a newly dispatched waiter
           // must not miss the pulse that would have woken it.
           if (wb_valid_i[w] && wb_prd_i[w] != '0) begin
             if (!disp_fpr_rs1_i[p] && disp_prs1_i[p] == wb_prd_i[w])
-              q_d[count_d].rs1_rdy = 1'b1;
+              q_d[slot].rs1_rdy = 1'b1;
             if (!disp_fpr_rs2_i[p] && disp_prs2_i[p] == wb_prd_i[w])
-              q_d[count_d].rs2_rdy = 1'b1;
+              q_d[slot].rs2_rdy = 1'b1;
           end
           if (fwb_valid_i[w]) begin
             if (disp_fpr_rs1_i[p] && disp_fprs1_i[p] == fwb_prd_i[w])
-              q_d[count_d].rs1_rdy = 1'b1;
+              q_d[slot].rs1_rdy = 1'b1;
             if (disp_fpr_rs2_i[p] && disp_fprs2_i[p] == fwb_prd_i[w])
-              q_d[count_d].rs2_rdy = 1'b1;
+              q_d[slot].rs2_rdy = 1'b1;
             if (disp_fpr_rs3_i[p] && disp_fprs3_i[p] == fwb_prd_i[w])
-              q_d[count_d].rs3_rdy = 1'b1;
+              q_d[slot].rs3_rdy = 1'b1;
           end
         end
-        q_d[count_d].prs1    = disp_prs1_i[p];
-        q_d[count_d].prs2    = disp_prs2_i[p];
-        q_d[count_d].prd     = disp_prd_i[p];
-        q_d[count_d].fprs1   = disp_fprs1_i[p];
-        q_d[count_d].fprs2   = disp_fprs2_i[p];
-        q_d[count_d].fprs3   = disp_fprs3_i[p];
-        q_d[count_d].fpr_rs1 = disp_fpr_rs1_i[p];
-        q_d[count_d].fpr_rs2 = disp_fpr_rs2_i[p];
-        q_d[count_d].fpr_rs3 = disp_fpr_rs3_i[p];
-        q_d[count_d].sbe     = disp_sbe_i[p];
-        q_d[count_d].orig    = disp_orig_i[p];
-        q_d[count_d].may_bypass = disp_may_bypass_i[p];
+        q_d[slot].prs1    = disp_prs1_i[p];
+        q_d[slot].prs2    = disp_prs2_i[p];
+        q_d[slot].prd     = disp_prd_i[p];
+        q_d[slot].fprs1   = disp_fprs1_i[p];
+        q_d[slot].fprs2   = disp_fprs2_i[p];
+        q_d[slot].fprs3   = disp_fprs3_i[p];
+        q_d[slot].fpr_rs1 = disp_fpr_rs1_i[p];
+        q_d[slot].fpr_rs2 = disp_fpr_rs2_i[p];
+        q_d[slot].fpr_rs3 = disp_fpr_rs3_i[p];
+        q_d[slot].sbe     = disp_sbe_i[p];
+        q_d[slot].orig    = disp_orig_i[p];
+        q_d[slot].may_bypass = disp_may_bypass_i[p];
         // Rename readiness is retained, including same-cycle WB above;
         // a newly dispatched waiter must not miss its writeback pulse.
-        count_d = count_d + 1'b1;
+        //
+        // Age: every entry still live after this cycle's issue removals is
+        // older than the newcomer; the newcomer is older than nobody.
+        for (int unsigned o = 0; o < DEPTH; o++)
+          older_d[o][slot] = valid_after[o];
+        older_d[slot] = '0;
       end
     end
+    // Same-cycle dispatches order by port: port 0's slot is older than
+    // port 1's, matching the compacting layout's append order.
+    for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+      for (int unsigned q = p + 1; q < CVA6Cfg.NrIssuePorts; q++)
+        if (alloc[p] && alloc[q]) older_d[alloc_slot[p]][alloc_slot[q]] = 1'b1;
     if (flush_i) begin
       q_d = '0;
-      count_d = '0;
+      older_d = '0;
       disp_ack_o = '0;
     end
+  end
+
+  // Live count of the resolved next state — an unconditional single-assignment
+  // block so the popcount cannot infer a latch.
+  always_comb begin
+    count_d = '0;
+    for (int unsigned e = 0; e < DEPTH; e++)
+      count_d = count_d + DW'(q_d[e].valid);
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       q_q <= '0;
+      older_q <= '0;
       count_q <= '0;
     end else begin
       q_q <= q_d;
+      older_q <= older_d;
       count_q <= count_d;
     end
   end
 
   //pragma translate_off
+  // Immediate posedge assertions: `assert property` makes Verilator snapshot
+  // every referenced signal into __Vsampled, and for the unpacked q_q array
+  // that snapshot is a __Vilp copy loop whose DepSet partitioning can emit
+  // the loop ahead of the variable's declaration (the use-before-decl codegen
+  // defect already documented for scoreboard.sv's commit SVA). Immediate
+  // assertions read live values — for flop state the same values a clocked
+  // property would sample.
   for (genvar e = 0; e < DEPTH; e++) begin : gen_iq_live_assert
-    ooo_iq_entry_live: assert property (@(posedge clk_i) disable iff (!rst_ni)
-        q_q[e].valid |-> sb_live_i[q_q[e].sbe.trans_id]);
+    always_ff @(posedge clk_i) begin
+      if (rst_ni)
+        ooo_iq_entry_live: assert (!q_q[e].valid || sb_live_i[q_q[e].sbe.trans_id]);
+    end
+  end
+  // The age matrix is a strict total order over the live entries, so each
+  // port's rank selects at most one entry.
+  for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_iq_rank_assert
+    logic [DEPTH-1:0] rank_match;
+    for (genvar e = 0; e < DEPTH; e++)
+      assign rank_match[e] = ready[e] && (rank[e] == DW'(p));
+    always_ff @(posedge clk_i) begin
+      if (rst_ni)
+        ooo_iq_rank_unique: assert ($onehot0(rank_match));
+    end
+  end
+  for (genvar a = 0; a < DEPTH; a++) begin : gen_iq_age_a
+    for (genvar b = 0; b < DEPTH; b++) begin : gen_iq_age_b
+      if (a != b) begin
+        always_ff @(posedge clk_i) begin
+          if (rst_ni) begin
+            ooo_iq_age_acyclic: assert (!(older_q[a][b] && older_q[b][a]));
+            ooo_iq_age_total: assert (!(q_q[a].valid && q_q[b].valid) ||
+                                      (older_q[a][b] != older_q[b][a]));
+          end
+        end
+      end
+    end
   end
   //pragma translate_on
 

@@ -42,11 +42,19 @@ next actions are superseded by the tranche exits.
   remains the open leaf finding (identical at T1 HEAD).
 - [x] T3: fetch kill by request token (ledger proof + mutation), precise-misalignment properties
   (stages 32/33/34 now pass), `G6LC_NO_KILL_PERSIST` retired; exit met (contract table).
-- [ ] Pre-existing formal regressions found by T3, reproduced on HEAD: `g6lc_fetch_hold.sby`
-  fails at frame 4 (request address vs held target) and `g6lc_fetch_iq.sby` bmc fails at frame 3
-  (I6 non-interference) — both after the 09-15 instr_queue/frontend changes. Owner: T4 pre-work;
-  do not weaken the properties.
-- [ ] T4 … T6 per the plan file; review point before T4.
+- [x] Pre-existing fetch proof failures found by T3 closed on the property side after reading the
+  counterexamples (hold: port stimulus, SMT ports under an explicit selector contract, I8 supersede
+  exemption, `redirect_accept` release leg + pend-kept assert; IQ: payloads agree on CF class).
+- [ ] **Selector obligation (S3/T6):** the thread selector must never restore a hart while the
+  frontend has a pending redirect (`redirect_pend_q`); the RTL exports only the trap case as
+  `smt_trap_hold_o`. Prove it on `g6lc_thread_select` or widen the hold export; until then the hold
+  proof assumes it (`g6lc_fetch_hold_props.sv`).
+- [x] T4 (structural half): stationary IQ with age matrix; all fixtures and ten frozen ELFs
+  cycle-identical; FO4 payload path −9, select cone now the module max at 27/32 (+3 net).
+- [ ] **T4b (before T5):** select-cone timing — cascaded oldest-first grant or registered rank so
+  the popcount leaves the wakeup→select path; re-measure on `sparse_ooo_issue`. IQ cover task
+  (`g6lc_fetch_iq.sby cover`) still times out under z3.
+- [ ] T5 … T6 per the plan file; review point before T5.
 
 ## Active stability-first review — authoritative next change sets
 
@@ -4380,11 +4388,35 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
 
 **Remaining gates (not implied by the implemented corrections):**
 
+- [x] A1 epoch across the AXI4 buffer. `g6lc_apu_axi4_lite` latches the
+  admission epoch at AW/AR accept, and the lite wrapper stamps that epoch
+  while the beat is presented. A guest reset during a split control write
+  returns SLVERR and leaves queue select unchanged. Direct lite masters still
+  stamp the live epoch. Remote 2026-09-22: th **13 cases / 73 checks / 271
+  clocks**, sys 5/148/669, soc 16/44, attach 4/32/77, axi-lite 318/1601.
+  `g6lc_apu_th_fixture` synth, no latches: Enable=0 **124 cells / 16
+  flip-flops**; Enable=1 **24,294 / 2,797**.
+- [x] A1 firmware-RAM physical window. `in_win` and the SRAM index use the
+  full 64-bit offset from `FirmwareRamBase`. Sign-extended
+  `0xffffffff90000000` and bit-32 `0x190000000` reads and writes are SLVERR
+  and leave the canonical word unchanged. A wrapping span is rejected.
+  Remote 2026-09-22: **49 cases / 5,710 checks / 5,389 clocks**, errors=0.
+  4 KiB synth, no latches, one `$mem_v2` enabled and zero disabled: Enable=0
+  **245 cells / 16 flip-flops**; Enable=1 **105,946 / 32,940**. Not a source
+  grant and not a re-run of the CVA6 cookie.
+- [x] A1 mapping publication. `g6lc_apu_storage` keeps one flop per resource
+  slot. Lookup, duplicate detection, and invalidate match that bit, not the
+  SRAM valid flag and not `SimInit`. Reset and the invalidate pin clear the
+  bits. A warm reset hides a mapping that is still sitting in SRAM, and a
+  word written only into the array is not returned. Remote 2026-09-22:
+  **32 cases / 150 checks / 590 clocks**, errors=0. Disabled fixture is
+  ports only. Enabled pre-map `memory_collect` keeps 2 memories; synth is
+  **1,270 cells / 89 flip-flops**. The clock-gate latch is the existing
+  power cell. Lease-aware retire is still open.
 - [ ] A1: trusted fabric source/domain enforcement for control **and RAM**;
-  constant testharness hart tags are not authority. Carry epochs across AXI4
-  buffering, not only AXI-Lite. No guest grant from PROT or an assumed AXI ID.
-- [ ] A1: remove RAM upper-address aliases with full-PA bounds and correct
-  compiler/linker/translation; audit narrow-read/atomic policy. RAM write-drain/
+  constant testharness hart tags are not authority. No guest grant from PROT
+  or an assumed AXI ID. An exec cancel that still completes remains open.
+- [ ] A1: audit narrow-read/atomic policy on firmware RAM. RAM write-drain/
   lane-strobe fixes are implemented below; the separate AXI4-Lite bridge still
   needs early-B/burst drain and split-write error aggregation. Integrate fault
   reporting and coordinated fabric reset for quarantined transactions.
@@ -4470,6 +4502,33 @@ command firmware but no CPU rendering.
 - [ ] P1/P2 independently gated APU execution and protected firmware.
 - [ ] P3 real unchanged Linux/Mesa GLES2 shader-to-RTL readback, plus BIOS client.
 - [ ] P4 feature conformance/gaming measurements; P5 separate HDMI and DP scanout.
+- [x] HDMI line-buffer leaf, not P5. `g6lc_hdmi_scanout` and `g6lc_hdmi_linebuf`,
+      `HdmiEn` default 0, independent of `ApuOff` / `ExecEn` / `MatrixEn`.
+      Remote `verif/tb/hdmi/run-hdmi-scanout.sh` rc=0: scanout 8 checks /
+      307200 pixels; line buffer 4 checks / 307200 pixels; disabled line
+      buffer issues no AR. `HdmiEn=0` is ports only. `HdmiEn=1` scanout is
+      328 cells / 42 flip-flops; line buffer is 67133 cells / 32846
+      flip-flops after generic map with no SRAM macro and no latches.
+      The line-buffer leaf stops at the pixel port. Not simpledrm-on-hardware
+      and not a 3D surface.
+- [x] HDMI TMDS symbol leaf, not P5. `g6lc_hdmi_tmds` encodes the scanner
+      pixel into parallel 10-bit symbols: HSYNC/VSYNC in blanking, eight
+      video-preamble characters, two video guard characters, then the active
+      pixels. No audio or data island. The symbol leaf stops before the shift. Remote
+      `tb_g6lc_hdmi_tmds` rc=0: 6 checks / 307200 pixels. `HdmiEn=0` is
+      ports only. `HdmiEn=1` is 1597 cells / 324 flip-flops, no latches.
+      Not a board PHY and not a 3D surface.
+- [x] HDMI 10× shift, not P5. `g6lc_hdmi_ser` sends bit 0 of each TMDS
+      symbol on `load_i`, then bits 1..9, on the bit clock. Single-ended.
+      Remote `tb_g6lc_hdmi_ser` rc=0: 4 checks / 307200 pixels / 384044
+      words. `HdmiEn=0` is ports only. `HdmiEn=1` is 60 cells / 30
+      flip-flops, no latches. No PLL and no differential pair.
+- [x] HDMI simple-framebuffer model, not P5 and not a booted guest.
+      `corev_apu/hdmi/g6lc-simplefb.dtsi` is opt-in: `0x8ef00000` /
+      `0x96000`, 640×480, stride 1280, `r5g6b5`, `no-map`, below the AI
+      pool. No board DTS includes it. `simplefb_model.py` rc=0: 16 checks
+      / 307200 pixels. The byte at `base + y*stride + x*2` is the pixel
+      the line buffer bursts.
 
 No core or AI RTL, ISA, DTS or production capability mask changed in the P0 pass.
 
@@ -4874,6 +4933,13 @@ Priors: `architecture/uncore/apu-firmware-ram.md`,
       Remote `run-cva6-cookie.sh` rc=0: **`tb_g6lc_apu_cva6_cookie` 14
       checks / 1,835 clocks**, cookie `0x600D000A`. fw synth enabled
       46,854 / 7,131; disabled 522 / 162. Not OpenSBI, not TEX.
+- [x] Memory plus exec is rejected, not a silent memory win.
+      `apu_mem_exec_split` fails a resource table or a DMA read combined
+      with `ExecEn`; each client alone stays legal. The illegal wrapper
+      branch raises `bus_fault` and errors the mailbox. Remote
+      `run-th-exec.sh` rc=0: **64 cases / 518 checks / 3,071 clocks**.
+      4 KiB screening: disabled 355 cells / 28 flip-flops; enabled
+      156,263 / 40,180. No latches. Not a combined scheduler.
 - [x] Testharness compositor exec bind: `g6lc_apu_sys` `ExecEn && !MemEn`
       mailbox + `g6lc_apu_exec_bind`. AXI4 control TID+IADD peek 10/11.
       `ApuHarness.ExecEn` stays 0. Remote `run-th-exec.sh` rc=0:

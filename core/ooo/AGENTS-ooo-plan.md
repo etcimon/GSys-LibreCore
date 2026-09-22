@@ -131,6 +131,24 @@ payload held in place. FO4 screen before/after; typed INT/MEM/FP split only if `
 still exceeds budget. Exit: identical directed results to T2; equal or fewer stall cycles; lint and
 synth counts; FO4 delta recorded.
 
+### T4 result (2026-09-21)
+
+Exit met for the structural half; numbers in the contract's exit table and §5. Tags: `t4-iq-v1` /
+`t4-iq-default-opt-v1` (64/64), `t4-dispatch-v1` + `-mdp-v1` (28/28), `t4-ooo-int-fpreview-*-v1`
+(ten stages cycle-identical to T3), `t4-fo4-before` / `t4-fo4-after` (`sparse_ooo_issue`),
+`t4-verify-v1`, `t4-anchor-inorder-v1` (exact; in-order model bit-identical to T3 since the smt2
+flist does not carry `g6lc_iq`). Pre-work closed the two fetch proofs found failing in T3 on the
+property side, each after reading the counterexample: `g6lc_fetch_hold` needed port-based stimulus,
+the SMT ports connected under an explicit selector contract (`no restore while redirect_pend_q` —
+the RTL exports only the trap case as `smt_trap_hold_o`; the general case is now an obligation in
+AGENTS-todo), the same-cycle architectural supersede exempted from "request is the held target"
+(I8 priority), and `redirect_accept` added as a release leg with a new assert that re-acceptance
+keeps `redirect_pend_q`; `g6lc_fetch_iq` needed the two payloads constrained to agree on the CF
+class per slot (`instr_queue.is_ctrl_instr`, mirrored in the props), which is the raw-opcode throttle
+contract SPEC.md had left open. Deferred: **T4b** select-cone timing (the rank popcount replaced the
+payload mux as the module max, +3 FO4 net; cascaded grant or registered rank before T5), and the IQ
+cover task still times out under z3.
+
 ## T5 — FP SKU (single hart)
 
 `g6lc64_ooo`: rename + one FMA/cycle + commit-or-flags; cancelled-DIVSQRT mutation; Spike-ordered

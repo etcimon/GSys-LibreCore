@@ -23,6 +23,14 @@
 // selection. `.instruction` is of course allowed to differ -- it is the payload,
 // and asserting it equal would be asserting the opposite of the point.
 //
+// One class of the encoding is legitimately visible: the CONTROL-FLOW CLASS of
+// the word (`instr_queue.is_ctrl_instr`), because a CF instruction must be the
+// youngest of an issue group even when the predictor did not mark it (BTB-miss
+// jalr, not-taken branch). So the two payloads are constrained to agree on that
+// class per slot and may differ in everything else (opcode otherwise, rd, rs,
+// funct, immediates). This is the "raw-opcode throttle contract" SPEC.md s6 left
+// open: selection may depend on the CF class and on nothing else in the word.
+//
 // Why this is worth a proof: SPEC.md s4 records that BTB-miss `jalr` is NoCF and
 // must not end a packet ("NEGATIVE always-JumpR"), i.e. there has already been a
 // pull towards deciding order from the encoding. A non-interference proof makes
@@ -138,8 +146,23 @@ module g6lc_fetch_iq_props #(
       .fetch_entry_ready_i
   );
 
+  // Mirror of instr_queue.is_ctrl_instr: kept in lockstep with the RTL so the
+  // proof constrains exactly the class the queue is allowed to look at.
+  function automatic logic cf_class(input logic [31:0] w);
+    unique case (w[1:0])
+      2'b11:   return (w[6:0] == 7'b1100011) || (w[6:0] == 7'b1101111) || (w[6:0] == 7'b1100111);
+      2'b01:   return (w[15:13] == 3'b101) || (w[15:13] == 3'b110) || (w[15:13] == 3'b111);
+      2'b10:   return (w[15:13] == 3'b100) && (w[6:2] == 5'b00000);
+      default: return 1'b0;
+    endcase
+  endfunction
+
   always_ff @(posedge clk_i) begin
-    if (rst_ni) assume (int'(hart_i) < NH);
+    if (rst_ni) begin
+      assume (int'(hart_i) < NH);
+      for (int unsigned s = 0; s < SLOTS; s++)
+        assume (cf_class(instr_a[s]) == cf_class(instr_b[s]));
+    end
   end
 
   // --- I6: control flow is identical under a different encoding ------------

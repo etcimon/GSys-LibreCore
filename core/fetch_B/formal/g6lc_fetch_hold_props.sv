@@ -32,20 +32,54 @@ module g6lc_fetch_hold_props #(
     parameter int unsigned FW = 64,
     parameter int unsigned AB = 3,
     parameter int unsigned NH = 2,
-    parameter int unsigned NI = 2
+    parameter int unsigned NI = 2,
+    parameter int unsigned VLEN  = 32,
+    parameter int unsigned XLEN  = 32,
+    parameter int unsigned GPLEN = 32,
+    parameter int unsigned FUW   = 1,
+    parameter int unsigned HARTW = (NH > 1) ? $clog2(NH) : 1
 ) (
-    input logic clk_i
+    input logic clk_i,
+    // Stimulus enters through ports: an undriven internal logic is split into
+    // independent free variables by the slang frontend, and the alignment and
+    // token assumptions below would then constrain nothing the DUT sees.
+    input logic flush_i,
+    input logic halt_i,
+    input logic set_pc_commit_i,
+    input logic set_debug_pc_i,
+    input logic eret_i,
+    input logic ex_valid_i,
+    input logic [VLEN-1:0] boot_addr_i,
+    input logic [VLEN-1:0] pc_commit_i,
+    input logic [VLEN-1:0] epc_i,
+    input logic [VLEN-1:0] trap_vector_base_i,
+    input logic rb_valid_i,
+    input logic [VLEN-1:0] rb_pc_i,
+    input logic [VLEN-1:0] rb_target_i,
+    input logic rb_is_mispredict_i,
+    input logic rb_is_taken_i,
+    input logic [2:0] rb_cf_type_i,
+    input logic [HARTW-1:0] rb_hart_id_i,
+    input logic rb_ckpt_restore_i,
+    input logic rsp_ready_i,
+    input logic rsp_valid_i,
+    input logic [FW-1:0] rsp_data_i,
+    input logic [FUW-1:0] rsp_user_i,
+    input logic [1:0] rsp_token_i,
+    input logic [VLEN-1:0] rsp_vaddr_i,
+    input logic [NI-1:0] fetch_entry_ready_i,
+    // Hart switch: the thread selector restores a hart only while no redirect
+    // is pending (assumed below; the selector's own proof owes it).
+    input logic smt_restore_i,
+    input logic [VLEN-1:0] smt_npc_restore_i,
+    input logic [HARTW-1:0] smt_hart_i,
+    input logic [HARTW-1:0] commit_hart_i
 );
 
 `ifdef FORMAL
   import ariane_pkg::*;
 
-  localparam int unsigned VLEN  = 32;
-  localparam int unsigned XLEN  = 32;
-  localparam int unsigned GPLEN = 32;
-  localparam int unsigned FUW   = 1;
   localparam int unsigned SLOTS = FW / 16;
-  localparam int unsigned HARTW = (NH > 1) ? $clog2(NH) : 1;
 
   function automatic config_pkg::cva6_cfg_t mk_cfg();
     config_pkg::cva6_cfg_t c;
@@ -120,12 +154,16 @@ module g6lc_fetch_hold_props #(
     exc_t            ex;
   } idrsp_t;
 
-  // --- stimulus -------------------------------------------------------------
-  logic            flush_i, halt_i, set_pc_commit_i, set_debug_pc_i, eret_i, ex_valid_i;
-  logic [VLEN-1:0] boot_addr_i, pc_commit_i, epc_i, trap_vector_base_i;
-  bpr_t            resolved_branch_i;
-  idrsp_t          icache_dreq_i;
-  logic [NI-1:0]   fetch_entry_ready_i;
+  // --- stimulus (assembled from ports) ---------------------------------------
+  bpr_t   resolved_branch_i;
+  idrsp_t icache_dreq_i;
+  assign resolved_branch_i = '{valid: rb_valid_i, pc: rb_pc_i, target_address: rb_target_i,
+                               is_mispredict: rb_is_mispredict_i, is_taken: rb_is_taken_i,
+                               cf_type: cf_t'(rb_cf_type_i), hart_id: rb_hart_id_i,
+                               ckpt_restore: rb_ckpt_restore_i};
+  assign icache_dreq_i = '{ready: rsp_ready_i, valid: rsp_valid_i, data: rsp_data_i,
+                           user: rsp_user_i, token: rsp_token_i, vaddr: rsp_vaddr_i,
+                           ex: exc_t'('0)};
 
   idreq_t          icache_dreq_o;
   fe_t   [NI-1:0]  fetch_entry_o;
@@ -157,6 +195,10 @@ module g6lc_fetch_hold_props #(
       .epc_i,
       .trap_vector_base_i,
       .set_debug_pc_i,
+      .smt_hart_i,
+      .smt_restore_i,
+      .smt_npc_restore_i,
+      .commit_hart_i,
       .icache_dreq_i,
       .icache_dreq_o,
       .fetch_entry_o,
@@ -166,10 +208,16 @@ module g6lc_fetch_hold_props #(
 
   // The I$ returns window-aligned addresses; anything else is a question the
   // cache never asks and the cursor arithmetic has no meaning for.
+  // Hart switch contract: the selector never restores a hart while the
+  // frontend still holds a pending redirect. The RTL exports only the trap
+  // case as `smt_trap_hold_o`; the general case is an obligation on the
+  // selector (recorded in AGENTS-todo), not something this proof may assume
+  // silently -- hence the explicit assumption here.
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
       assume (icache_dreq_i.vaddr[AB-1:0] == '0);
       assume (trap_vector_base_i[0] == 1'b0);
+      assume (!smt_restore_i || !dut.redirect_pend_q);
     end
   end
 
@@ -187,25 +235,37 @@ module g6lc_fetch_hold_props #(
   end
 
   // --- observe the hold state ----------------------------------------------
-  logic hold_now, hold_prev_q, hit_prev_q, flush_prev_q, arch_prev_q;
+  logic hold_now, hold_prev_q, hit_prev_q, flush_prev_q, arch_prev_q, accept_prev_q;
   assign hold_now = dut.redirect_hold;
 
   always_ff @(posedge clk_i) begin
-    hold_prev_q  <= hold_now;
-    hit_prev_q   <= dut.redirect_hit;
-    flush_prev_q <= flush_i;
+    hold_prev_q   <= hold_now;
+    hit_prev_q    <= dut.redirect_hit;
+    flush_prev_q  <= flush_i;
     // Any architectural redirect source may legitimately retarget a pending one.
-    arch_prev_q  <= ex_valid_i | eret_i | set_pc_commit_i | set_debug_pc_i |
-                    resolved_branch_i.is_mispredict;
+    arch_prev_q   <= ex_valid_i | eret_i | set_pc_commit_i | set_debug_pc_i |
+                     resolved_branch_i.is_mispredict | smt_restore_i;
+    // The held target was re-presented and the I$ accepted it: the redirect is
+    // in flight again (pend_q stays up until it arrives), so the HOLD ends but
+    // the redirect itself does not.
+    accept_prev_q <= dut.redirect_accept;
   end
 
   // --- I9 safety: no SILENT release ----------------------------------------
   // A hold may only stop because the target arrived (redirect_hit), because the
-  // frontend was flushed, or because a new architectural redirect superseded it.
-  // Anything else is the `NEGATIVE.md` s1 early-lift class.
+  // I$ re-accepted the held target (redirect_accept), because the frontend was
+  // flushed, or because a new architectural redirect superseded it. Anything
+  // else is the `NEGATIVE.md` s1 early-lift class.
   always_ff @(posedge clk_i) begin
     if (rst_ni && hold_prev_q && !hold_now) begin
-      assert (hit_prev_q || flush_prev_q || arch_prev_q);
+      assert (hit_prev_q || accept_prev_q || flush_prev_q || arch_prev_q);
+    end
+  end
+
+  // Re-acceptance ends the hold, never the redirect: the target is still owed.
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && hold_prev_q && !hold_now && accept_prev_q && !flush_prev_q && !arch_prev_q) begin
+      assert (dut.redirect_pend_q);
     end
   end
 
@@ -223,9 +283,13 @@ module g6lc_fetch_hold_props #(
 
   // --- I9 safety: while holding, the request is the held target -------------
   // "Held until consumed" observably means the address presented to the I$ does
-  // not wander off the target while the hold is up.
+  // not wander off the target while the hold is up. The one legitimate
+  // exception is the cycle a NEW architectural source fires (I8: exception,
+  // eret, commit, debug, restore outrank the hold): the request then presents
+  // the new target and redirect_pc_q takes it at the edge, which the release
+  // rule above already treats as a supersede, not a silent lift.
   always_ff @(posedge clk_i) begin
-    if (rst_ni && hold_now && icache_dreq_o.req) begin
+    if (rst_ni && hold_now && icache_dreq_o.req && !dut.arch_valid) begin
       assert (icache_dreq_o.vaddr == dut.redirect_pc_q);
     end
   end

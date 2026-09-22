@@ -17,7 +17,7 @@ protected default and the SMT2 OpenSBI anchor runs with `OoOEn=0`.
 |---|---|---|---|
 | Scoreboard | `core/scoreboard.sv` | slot allocation in program order, `trans_id`, in-order commit pointer, younger-than-branch cancel mask | live (in-order baseline) |
 | Rename / RAT / free list | `g6lc_rename.sv`, `g6lc_rat.sv`, `g6lc_freelist.sv` | architectural→physical maps per hart, checkpoints per branch, busy bits | leaf-qualified (integer, FP class, NrHarts=2 maps) |
-| Issue queue | `g6lc_iq.sv` | operand readiness, oldest-ready select up to `NrIssuePorts` | live; compacting; a load waits only on older **unresolved** stores unless its dispatch-time `may_bypass` verdict clears it; stores issue out of order; only fence/system CSR-class ops wait for the commit head (T2) |
+| Issue queue | `g6lc_iq.sv` | operand readiness, oldest-ready select up to `NrIssuePorts` | live; **stationary entries with a DEPTH² age matrix and rank select (T4)** — no payload movement; a load waits only on older **unresolved** stores unless its dispatch-time `may_bypass` verdict clears it; stores issue out of order; only fence/system CSR-class ops wait for the commit head (T2) |
 | ROB | `g6lc_rob.sv` | completion-by-tid shadow of the scoreboard | live; not the commit authority |
 | LSQ | `g6lc_lsq.sv` | load/store entries allocated at dispatch, live AGU addresses, store data, CAM/STL hazard verdict, alias validation (`mem_violation`) | leaf-qualified + formal; a store entry is the reservation of its speculative-queue slot and lives until commit; a completed load stays until no older store is unresolved (T2) |
 | Store buffer | `core/store_buffer.sv` | speculative queue (age-sorted under OoO) and committed queue; byte-exact forward | live; committed entries exempt from age compare; speculative entries assert scoreboard liveness (T2) |
@@ -69,10 +69,13 @@ result, so the remaining producers (pending stores, CSR/AMO commit path, CVXIF/a
 
 ## 5. Timing cones of record (FO4 screen, not STA)
 
-`sparse_issue_lsu` (IQ select, store-age scan, LSQ CAM), `sparse_ex` (FLU mux, owner-table
-lookups). Budget ≈ 32 FO4 at 1.25 GHz / `fo4_ps=20` / margin 0.2. Every tranche records the screen
-before and after; a screen never closes timing. Compaction of the IQ each cycle is the known cost
-T4 removes.
+`sparse_ooo_issue` (IQ wakeup→ready→rank→grant, unresolved-store scan, LSQ CAM, rename, dispatch),
+`sparse_issue_lsu` (in-order issue, scoreboard, LSU), `sparse_ex` (FLU mux, owner-table lookups).
+Budget ≈ 32 FO4 at 1.25 GHz / `fo4_ps=20` / margin 0.2. Every tranche records the screen before and
+after; a screen never closes timing. T4 removed the IQ payload compaction (23.97 → 14.97 adj FO4);
+the IQ maximum is now the select cone at 27.0 (rank popcount inside wakeup→select), and
+`g6lc_ooo_dispatch` at 30.0 is the slice's worst cone. T4b owns the select cone before T5 widens the
+wakeup CAM with FP.
 
 ## 6. Configuration guards and the evidence that removes each
 
@@ -91,7 +94,7 @@ T4 removes.
 | T1 | **met 2026-09-21**: age function at all six sites; IQ/LSQ live-tid assertions; `g6lc_ooo_age.sby` PASS (74 asserts, depth 14) + sat prove/cover/mutation; LSQ scenarios 12–17 positive/negative; dispatch 28/28, LSU 32/32, WFI 56/56, commit 3/3 unchanged; integer-OoO frozen ELFs Spike-identical; protected in-order anchor 12,765,628 / 333,635 / 8,932,406; lint 8/54, synth 32/5 unchanged. Found and fixed: `g6lc_ooo_rob.sby` had proved zero assertions (no `-DFORMAL`, `dist` keyword, hierarchy flag); now abc bmc3 PASS with 4 asserts. Attributed: +3 cycles on every integer-OoO ELF versus the 09-19 baselines is the CSR-at-commit-head issue rule inside `48c729e51` (younger ALU ops pass the waiting `csrw` at the exit epilogue); T2 removes it |
 | T2 | **met 2026-09-21**: csrbuf 10/10 (OoO + in-order identity); IQ 10 scenarios × 4 geometries; LSQ 19+19; dispatch 28/28 on n2 and mdp1 (`-Werror-UNOPTFLAT`); store-recovery/WFI/commit unchanged; age formal PASS (74 asserts) + sat/mutation; `g6lc64_ooo_int` frozen ELFs Spike-identical with stage 35 showing `replay=1` drop then clean retirement, stages 36/37 pass, negatives fail 3/3/1; ILP 1117 (from 1112 — the CSR wait is gone but the exit `csrw` now flushes younger issued work; T4 measures), memdep 1021 (from 1060), s4 842 (from 881); protected in-order anchor 12,765,628 / 333,635 / 8,932,406; lint 8/54, synth 32/5; FO4 screen unchanged (sparse cones exclude IQ/LSQ). Found on the way: completed loads must stay in the LSQ while an older store is unresolved or the violation scan has nothing to replay (stage 20 caught it). Open: dispatch scenario 18 (unchanged since T1) |
 | T3 | **met 2026-09-21**: token kill with the ledger proof and mutation witness; frozen s32 layout pair 869/868 pass; stages 32/33/34 pass Spike-compared (869/899/869) where they aborted before; `load_unit.sv` misalignment assertions replaced by precise-delivery properties (`misaligned_entry_excepts/no_data/tval`), leaf scenario 13 with kill/ex mutations detected; `G6LC_NO_KILL_PERSIST` retired; anchor exact; verify 6/6 locally incl. strict slang (lint 263/58, synth 32/5). Found pre-existing: `g6lc_fetch_hold` fails at frame 4 and `g6lc_fetch_iq` bmc at frame 3 on HEAD too — open formal regressions, owner T4 pre-work |
-| T4 | non-compacting IQ; same directed results; FO4 delta recorded |
+| T4 | **met 2026-09-21** (structural half): stationary IQ with age matrix; IQ 64/64, dispatch 28/28 ×2, ten frozen ELFs cycle-identical, anchor exact, lint/synth unchanged; FO4 before/after recorded in §5 (+3.03 module max, payload −9.0, select cone +11.0). Store-age scan and FP `rs3` remain inside the select predicate — costed, not removed. Fetch proofs repaired on the property side: hold 7 asserts PASS, IQ non-interference 9 asserts PASS. Open: T4b select cone; IQ cover task timeout |
 | T5 | FP guard removed for `NrHarts==1` only |
 | T6 | both harts perform checked work concurrently; drained handoff retired only after peer-isolation negatives |
 
