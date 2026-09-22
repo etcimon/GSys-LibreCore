@@ -60,8 +60,13 @@ next actions are superseded by the tranche exits.
   (in order). Found by `ooo_fp_cancel_head_reuse` / `ooo_fetch_head_reuse_int`; fixed in
   `frontend.sv` (replay is a reseed like bp_fire). Protected `g6lc64_smt2` has FtqDepth=0 and was
   never exposed; anchor exact after the fix.
-- [ ] **Residual fetch loss:** `ooo_fetch_head_reuse_int` still loses a whole two-window block in
-  2–4 of 128 iterations on FtqDepth=4 (OoO and in order). Needs a VCD at the loss; same class.
+- [x] **Residual fetch loss** (root cause from the negedge trace): an FDIP prefetch response was
+  consumed as supply — `icache_take` had no term distinguishing a prefetch response, so when the
+  head's demand was refused by the I$ and the prefetch for head+DISTANCE was accepted instead, its
+  response was offered as the next window and the head was skipped. Fixed in `frontend.sv`: the
+  outstanding token remembers it belongs to a prefetch (`want_pf_q`) and such a response only warms
+  the I$. `ooo_fetch_head_reuse_int` now passes Spike-identically on in-order, integer-OoO and FP
+  FtqDepth=4 models; frozen ELFs cycle-identical; anchor exact.
 - [ ] T5 (partial): FP suite green on the qualification build; owner-retention mutation inert at
   core level (structural: 32 SB entries, drop at head) — decide the bar; guard stays until then.
 - [ ] Confirm the smt2 anchor model's boot-vector replay on a single-hart directed ELF is hart 1's

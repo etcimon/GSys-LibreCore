@@ -45,8 +45,9 @@ physical or guarded-feature status advances from qualification-tooling changes a
 
 **FP out-of-order behaviour has Spike-compared directed evidence on a qualification-only build; the
 production guard stays.** The suite found a real frontend defect on every FTQ-enabled configuration
-(a queue replay did not flush the FTQ, skipping a window or livelocking); it is fixed with the
-protected configuration untouched and exact, and a rarer residual of the same class remains open.
+(a queue replay did not flush the FTQ, and a prefetch response could be consumed as supply —
+skipping a window or livelocking); both causes are fixed with the protected configuration untouched
+and exact, and the directed reproducer now passes on every affected configuration.
 The FPU ownership mutation is caught at leaf level but is structurally unreachable at core level
 in this geometry; the bar for lifting the single-hart FP guard is not yet decided.
 

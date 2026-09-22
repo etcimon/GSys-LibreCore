@@ -53,9 +53,13 @@ configurations — FTQ and FDIP are flushed, the stale head is not demanded, and
 to `replay_addr_q` so the refused window is pushed and stepped from in the same cycle; in-flight
 responses to the dropped entries are killed by token. Before this the stale sequential entries ahead
 of the refused window were served first, delivering windows out of accepted-stream order, and the
-queue's per-slot FIFOs lost alignment (a window skipped, or a permanent re-offer). `FtqDepth=0`
-configurations are bit-identical. The single-hart OoO+FP elaboration guard gained a
-qualification-only bypass define (`G6LC_OOO_FP_QUALIFY`) and an unconditional multi-hart FP guard.
+queue's per-slot FIFOs lost alignment (a window skipped, or a permanent re-offer). A second cause of
+the same symptom: `icache_take` did not distinguish an FDIP prefetch response from the demand
+response, so when the head's demand was refused and the prefetch for head+DISTANCE was accepted, the
+prefetch's data was consumed as the next window; the outstanding token now records that it belongs
+to a prefetch (`want_pf_q`) and such a response only warms the I$. `FtqDepth=0` configurations are
+bit-identical. The single-hart OoO+FP elaboration guard gained a qualification-only bypass define
+(`G6LC_OOO_FP_QUALIFY`) and an unconditional multi-hart FP guard.
 
 ## OoO issue queue without compaction (2026-09-21, T4)
 

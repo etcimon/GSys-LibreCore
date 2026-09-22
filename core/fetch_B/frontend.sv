@@ -852,8 +852,10 @@ module frontend
   // nothing new accepted forgets the outstanding token, and a request accepted
   // in a kill cycle is itself unwanted, so a response the I$ still returns for
   // a killed or redirected request is dropped by identity, not by address.
+  // A prefetch response is dropped the same way by ownership: it only warms
+  // the I$, and the demand for the same window later hits the warmed I$.
   logic [1:0] req_token_q, want_token_q;
-  logic       want_valid_q, icache_accept, kill_drop;
+  logic       want_valid_q, want_pf_q, icache_accept, kill_drop;
   assign icache_accept = icache_dreq_o.req & icache_dreq_i.ready;
   assign icache_dreq_o.token = req_token_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -861,21 +863,26 @@ module frontend
       req_token_q  <= '0;
       want_token_q <= '0;
       want_valid_q <= 1'b0;
+      want_pf_q    <= 1'b0;
     end else begin
       if (icache_accept) req_token_q <= req_token_q + 1'b1;
       if (kill_s2) begin
         want_valid_q <= 1'b0;
-        if (icache_accept) want_token_q <= req_token_q;
+        if (icache_accept) begin
+          want_token_q <= req_token_q;
+          want_pf_q    <= FtqEn && pf_req && !demand_req;
+        end
       end else if (icache_accept) begin
         want_valid_q <= 1'b1;
         want_token_q <= req_token_q;
+        want_pf_q    <= FtqEn && pf_req && !demand_req;
       end else if (icache_dreq_i.valid && icache_dreq_i.token == want_token_q) begin
         want_valid_q <= 1'b0;
       end
     end
   end
   assign kill_drop = icache_dreq_i.valid
-      && !(want_valid_q && icache_dreq_i.token == want_token_q);
+      && !(want_valid_q && icache_dreq_i.token == want_token_q && !want_pf_q);
 
   // I10: bank the accepted I$ address when switch kills it, not next_block.
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -1298,7 +1305,7 @@ module frontend
   // verilog_lint: waive always-ff-non-reset
   always_ff @(posedge clk_i) begin
     if (rst_ni && kcheck_en && icache_dreq_i.valid && icache_take
-        && !(want_valid_q && icache_dreq_i.token == want_token_q)) begin
+        && !(want_valid_q && icache_dreq_i.token == want_token_q && !want_pf_q)) begin
       $display("[killchk] t=%0t UNWANTED TAKE rsp_vaddr=%h rsp_tok=%0d want=%b want_tok=%0d npc=%h",
                $time, icache_dreq_i.vaddr, icache_dreq_i.token,
                want_valid_q, want_token_q, npc_d);

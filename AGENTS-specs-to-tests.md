@@ -75,8 +75,11 @@ stage 4; the FPU owner mutation is inert at core level (leaf fixture catches it)
 the FTQ replay defect (tohost=10, one window per iteration lost); stage 11 reproduced it on
 integer-only and in-order FtqDepth=4 models (livelock in order) and passes on FtqDepth=0 overlays.
 After the fix: stage 10 passes, the livelock is gone, frozen integer ELFs are Spike-identical
-(stage 20 −1 cycle), anchor exact, fetch cells and proofs (token also at FTQD=4) pass; stage 11
-still loses a two-window block in 2–4 of 128 iterations — open.
+(stage 20 −1 cycle), anchor exact, fetch cells and proofs (token also at FTQD=4) pass. The
+remaining two-window loss in stage 11 was traced by a negedge-sampled VCD to prefetch responses
+consumed as supply; after the `want_pf_q` fix stage 11 passes Spike-identically on in-order,
+integer-OoO and FP FtqDepth=4 models, the ten frozen ELFs are cycle-identical, the FP suite and
+its negatives are unchanged, `+fetch_kill_check` is silent, and the anchor is exact.
 
 ## OoO issue queue without compaction; fetch proofs repaired (2026-09-21, T4)
 
