@@ -44,7 +44,10 @@ pub use ecdsa::ecdsa_p256_sha256_verify;
 pub use entropy::{entropy_health, Entropy, FixtureEntropy, HmacDrbg, NoEntropy, VirtioRng};
 pub use gcm::{open as aes128_gcm_open, seal as aes128_gcm_seal, tls13_nonce};
 pub use handshake::{complete_tls12_ecdhe_gcm, complete_tls13_1rtt, Traffic12, Traffic13};
-pub use hello::{client_hello, client_hello_with, is_web_compatible, offers_tls12_fallback};
+pub use hello::{
+    client_hello, client_hello_for_peer, client_hello_no_sni, client_hello_with, is_web_compatible,
+    offers_tls12_fallback,
+};
 pub use hkdf::{
     derive_secret, expand as hkdf_expand, expand_label as hkdf_expand_label,
     extract as hkdf_extract, hkdf, traffic_keys as tls13_traffic_keys,
@@ -131,7 +134,10 @@ pub fn https_get(url: &str) -> String {
         .split('/')
         .next()
         .unwrap_or(url);
-    let hello = client_hello(host);
+    let hello = match client_hello_for_peer(host) {
+        Ok(hello) => hello,
+        Err(e) => return format!("HTTPS-GET {url} {e}"),
+    };
     let compat = if is_web_compatible(&hello) {
         "rsa+ecdsa"
     } else {
@@ -199,6 +205,10 @@ mod tests {
         assert!(s.contains("gsys.dev"), "{s}");
         assert!(s.contains("rsa+ecdsa"), "{s}");
         assert!(!s.to_lowercase().contains("openssl"), "{s}");
+        let ip = https_get("https://127.0.0.1/");
+        let bare = client_hello_for_peer("127.0.0.1").unwrap();
+        assert!(ip.contains("rsa+ecdsa"), "{ip}");
+        assert!(ip.contains(&format!("hello={}", bare.len())), "{ip}");
     }
 
     #[test]

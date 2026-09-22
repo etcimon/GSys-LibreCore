@@ -173,6 +173,40 @@ pub fn drives(ports: &Ports) -> Vec<VolumeInfo> {
         .unwrap_or_default()
 }
 
+/// Read-only disk rows for the Devices page. Size is omitted: a volume port
+/// does not report capacity. Bootable means a loader file was listed, not guessed.
+pub fn disk_json(ports: &Ports) -> String {
+    let mut body = String::from("{\"disks\":[");
+    for (i, v) in drives(ports).iter().enumerate() {
+        if i > 0 {
+            body.push(',');
+        }
+        let proof = boot_proof(ports, &v.id);
+        body.push_str("{\"name\":");
+        body.push_str(&g6b_spec::quote_json(&v.id));
+        body.push_str(",\"fs\":");
+        body.push_str(&g6b_spec::quote_json(&v.fs));
+        body.push_str(",\"size\":\"\",\"bootable\":");
+        body.push_str(if proof.is_some() { "true" } else { "false" });
+        body.push_str(",\"proof\":");
+        body.push_str(&g6b_spec::quote_json(
+            proof.as_deref().unwrap_or("no loader read"),
+        ));
+        body.push('}');
+    }
+    body.push_str("]}");
+    body
+}
+
+fn boot_proof(ports: &Ports, id: &str) -> Option<String> {
+    let vp = ports.volumes.as_ref()?;
+    let ents = vp.list(id, "/EFI/BOOT").ok()?;
+    let hit = ents
+        .iter()
+        .find(|e| !e.dir && e.name.eq_ignore_ascii_case("BOOTRISCV64.EFI"))?;
+    Some(format!("/EFI/BOOT/{} {}B", hit.name, hit.size))
+}
+
 /// `Drv` listing as text, ZealOS-shaped (`DRIVE:  fs  role`).
 pub fn drives_text(ports: &Ports) -> String {
     let vols = drives(ports);
@@ -287,6 +321,26 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn disk_json_names_the_loader_it_actually_listed() {
+        let p = Ports::default().with_volumes(
+            MemVolumes::new()
+                .volume("KEY-FAT", "fat32", "key")
+                .volume("DATA", "ext4", "key")
+                .file("KEY-FAT", "/EFI/BOOT/BOOTRISCV64.EFI", vec![0; 64])
+                .file("DATA", "/etc/os-release", b"NAME=x\n".to_vec()),
+        );
+        let json = disk_json(&p);
+        assert!(json.contains("\"name\":\"KEY-FAT\""));
+        assert!(json.contains("\"fs\":\"fat32\""));
+        assert!(json.contains("\"bootable\":true"));
+        assert!(json.contains("BOOTRISCV64.EFI 64B"), "{json}");
+        assert!(json.contains("\"name\":\"DATA\""));
+        assert!(json.contains("\"bootable\":false"));
+        assert!(json.contains("no loader read"));
+        assert!(json.contains("\"size\":\"\""));
     }
 
     #[test]

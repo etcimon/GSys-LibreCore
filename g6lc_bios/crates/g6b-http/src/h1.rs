@@ -59,7 +59,7 @@ pub fn parse(raw: &[u8]) -> Result<Request, String> {
         if name.is_empty()
             || name
                 .bytes()
-                .any(|b| b < 33 || b > 126 || b == b'(' || b == b')')
+                .any(|b| !(33..=126).contains(&b) || b == b'(' || b == b')')
         {
             return Err("http1: header name".into());
         }

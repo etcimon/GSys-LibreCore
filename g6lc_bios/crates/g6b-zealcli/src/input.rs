@@ -31,6 +31,10 @@ pub enum Key {
     PageDown,
     /// Function key 1..=12.
     Fn(u8),
+    /// Ctrl+C — copy into the session clipboard. Not the host clipboard.
+    Copy,
+    /// Ctrl+V — paste the session clipboard.
+    Paste,
 }
 
 /// Pointer event, only consumed when `kernel.cli.mouse` is compiled.
@@ -125,7 +129,14 @@ const PUNCT: &[(u16, char, char)] = &[
 
 /// Decode one Linux keycode. `None` for codes with no CLI meaning (modifiers,
 /// media keys, pointer buttons) — the caller drops them instead of guessing.
-pub fn from_linux_keycode(code: u16, shift: bool) -> Option<Key> {
+pub fn from_linux_keycode(code: u16, shift: bool, ctrl: bool) -> Option<Key> {
+    if ctrl {
+        return match code {
+            46 => Some(Key::Copy),
+            47 => Some(Key::Paste),
+            _ => None,
+        };
+    }
     match code {
         KEY_ESC => return Some(Key::Esc),
         KEY_BACKSPACE => return Some(Key::Backspace),
@@ -162,6 +173,11 @@ pub fn from_linux_keycode(code: u16, shift: bool) -> Option<Key> {
 /// Linux `KEY_LEFTSHIFT` / `KEY_RIGHTSHIFT` — the caller tracks the modifier.
 pub fn is_shift_keycode(code: u16) -> bool {
     code == 42 || code == 54
+}
+
+/// Linux `KEY_LEFTCTRL` / `KEY_RIGHTCTRL`.
+pub fn is_ctrl_keycode(code: u16) -> bool {
+    code == 29 || code == 97
 }
 
 /// The command line: one row of editable text plus a bounded history.
@@ -305,8 +321,25 @@ impl Editor {
                 }
                 Edit::Submit(line)
             }
-            Key::Tab | Key::Fn(_) => Edit::Ignored,
+            Key::Tab | Key::Fn(_) | Key::Copy | Key::Paste => Edit::Ignored,
         }
+    }
+
+    /// Insert `text` at the cursor, stopping at the line cap.
+    pub fn insert_text(&mut self, text: &str) -> Edit {
+        if text.is_empty() {
+            return Edit::Ignored;
+        }
+        let room = self.max_len.saturating_sub(self.buf.chars().count());
+        if room == 0 {
+            return Edit::Ignored;
+        }
+        let chunk: String = text.chars().take(room).collect();
+        let at = self.byte_at(self.cursor);
+        self.buf.insert_str(at, &chunk);
+        self.cursor += chunk.chars().count();
+        self.walk = None;
+        Edit::Changed
     }
 
     fn walk_history(&mut self, delta: i32) -> Edit {
@@ -354,18 +387,22 @@ mod tests {
     fn usb_and_virtio_share_one_keycode_alphabet() {
         // QEMU `sendkey a` / `ret` / `down` — the same codes a USB HID
         // keyboard produces through the HID layer.
-        assert_eq!(from_linux_keycode(30, false), Some(Key::Char('a')));
-        assert_eq!(from_linux_keycode(30, true), Some(Key::Char('A')));
-        assert_eq!(from_linux_keycode(28, false), Some(Key::Enter));
-        assert_eq!(from_linux_keycode(108, false), Some(Key::Down));
-        assert_eq!(from_linux_keycode(104, false), Some(Key::PageUp));
-        assert_eq!(from_linux_keycode(2, true), Some(Key::Char('!')));
-        assert_eq!(from_linux_keycode(53, false), Some(Key::Char('/')));
-        assert_eq!(from_linux_keycode(59, false), Some(Key::Fn(1)));
+        assert_eq!(from_linux_keycode(30, false, false), Some(Key::Char('a')));
+        assert_eq!(from_linux_keycode(30, true, false), Some(Key::Char('A')));
+        assert_eq!(from_linux_keycode(28, false, false), Some(Key::Enter));
+        assert_eq!(from_linux_keycode(108, false, false), Some(Key::Down));
+        assert_eq!(from_linux_keycode(104, false, false), Some(Key::PageUp));
+        assert_eq!(from_linux_keycode(2, true, false), Some(Key::Char('!')));
+        assert_eq!(from_linux_keycode(53, false, false), Some(Key::Char('/')));
+        assert_eq!(from_linux_keycode(59, false, false), Some(Key::Fn(1)));
+        assert_eq!(from_linux_keycode(46, false, true), Some(Key::Copy));
+        assert_eq!(from_linux_keycode(47, false, true), Some(Key::Paste));
+        assert_eq!(from_linux_keycode(46, false, false), Some(Key::Char('c')));
         // Modifiers and pointer buttons are not keys.
         assert!(is_shift_keycode(42) && is_shift_keycode(54));
-        assert_eq!(from_linux_keycode(42, false), None);
-        assert_eq!(from_linux_keycode(0x110, false), None);
+        assert!(is_ctrl_keycode(29) && is_ctrl_keycode(97));
+        assert_eq!(from_linux_keycode(42, false, false), None);
+        assert_eq!(from_linux_keycode(0x110, false, false), None);
     }
 
     /// The guest container decodes the same alphabet from the same codes. If
@@ -375,7 +412,7 @@ mod tests {
     fn host_and_guest_keymaps_agree() {
         for code in 0u16..128 {
             let guest = g6b_asm::cli::keycode_ascii(code as u8);
-            match from_linux_keycode(code, false) {
+            match from_linux_keycode(code, false, false) {
                 Some(Key::Char(c)) if c.is_ascii() => assert_eq!(
                     guest, c as u8,
                     "keycode {code}: host types {c:?}, guest types {:?}",

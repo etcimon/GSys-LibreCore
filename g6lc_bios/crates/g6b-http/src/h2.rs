@@ -408,7 +408,7 @@ pub fn parse_exchange(raw: &[u8]) -> Result<H2Exchange, String> {
                             return Err("h2: push refused".into());
                         }
                         if id == 5 {
-                            if val < 16384 || val > 16_777_215 {
+                            if !(16384..=16_777_215).contains(&val) {
                                 return Err("h2: max frame".into());
                             }
                             max_frame = max_frame.min(val as usize);
@@ -740,7 +740,7 @@ impl H2Session {
                             self.max_streams = val.min(32);
                         }
                         if id == 5 {
-                            if val < 16384 || val > 16_777_215 {
+                            if !(16384..=16_777_215).contains(&val) {
                                 return Err("h2: max frame".into());
                             }
                             self.max_frame = self.max_frame.min(val as usize);

@@ -902,9 +902,9 @@ fn await_reachability(m: &Module) -> Vec<bool> {
     let mut reaches = vec![false; n];
     let mut callers: Vec<Vec<u32>> = vec![Vec::new(); n];
     let mut stack = Vec::new();
-    for i in 0..m.imports.len() {
+    for (i, reach) in reaches.iter_mut().enumerate().take(m.imports.len()) {
         if is_await_import(m, i as u32) {
-            reaches[i] = true;
+            *reach = true;
             stack.push(i as u32);
         }
     }

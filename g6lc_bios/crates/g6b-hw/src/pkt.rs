@@ -117,26 +117,22 @@ impl VirtioNetDma {
                 return Err("virtio-net dma: TX desc".into());
             }
             let frame = self.mem[off..off + n].to_vec();
-            match self.tcp.push(&frame)? {
-                Some(f) => {
-                    let rx_idx = avail_idx(&self.mem, VNET_RX_AVAIL);
-                    if self.rx_used == rx_idx {
-                        return Err("virtio-net dma: no RX buffer".into());
-                    }
-                    let rh = avail_head(&self.mem, VNET_RX_AVAIL, self.rx_used);
-                    let (raddr, rlen, flags) =
-                        read_desc(&self.mem, VNET_RX_DESC + rh as usize * 16);
-                    if flags & VNET_DESC_WRITE == 0 {
-                        return Err("virtio-net dma: RX not WRITE".into());
-                    }
-                    let copy = f.len().min(rlen as usize);
-                    let roff = raddr as usize;
-                    self.mem[roff..roff + copy].copy_from_slice(&f[..copy]);
-                    self.last_rx_len = copy as u32;
-                    publish_used(&mut self.mem, VNET_RX_USED, self.rx_used, rh, copy as u32);
-                    self.rx_used = self.rx_used.wrapping_add(1);
+            if let Some(f) = self.tcp.push(&frame)? {
+                let rx_idx = avail_idx(&self.mem, VNET_RX_AVAIL);
+                if self.rx_used == rx_idx {
+                    return Err("virtio-net dma: no RX buffer".into());
                 }
-                None => {}
+                let rh = avail_head(&self.mem, VNET_RX_AVAIL, self.rx_used);
+                let (raddr, rlen, flags) = read_desc(&self.mem, VNET_RX_DESC + rh as usize * 16);
+                if flags & VNET_DESC_WRITE == 0 {
+                    return Err("virtio-net dma: RX not WRITE".into());
+                }
+                let copy = f.len().min(rlen as usize);
+                let roff = raddr as usize;
+                self.mem[roff..roff + copy].copy_from_slice(&f[..copy]);
+                self.last_rx_len = copy as u32;
+                publish_used(&mut self.mem, VNET_RX_USED, self.rx_used, rh, copy as u32);
+                self.rx_used = self.rx_used.wrapping_add(1);
             }
             publish_used(&mut self.mem, VNET_TX_USED, self.tx_seen, head, n as u32);
             self.tx_seen = self.tx_seen.wrapping_add(1);

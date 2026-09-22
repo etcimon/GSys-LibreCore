@@ -137,7 +137,7 @@ pub const COMMANDS: &[Command] = &[
         name: "vi",
         aliases: &["view", "Vi", "Ed"],
         usage: "vi file",
-        help: "read-only viewer (:q to close)",
+        help: "view a file; :w only on a mount -w volume",
         gate: Gate::Vi,
     },
     Command {

@@ -104,6 +104,10 @@ pub struct Session {
     update: Option<Update>,
     mode: Mode,
     shift: bool,
+    /// Ctrl held. Ctrl+C / Ctrl+V use [`Self::clipboard`], not the host OS.
+    ctrl: bool,
+    /// Session clipboard. Never the host clipboard.
+    clipboard: String,
     /// The entry the picker took, kept for the kernel after `Action::Boot`.
     picked: Option<BootEntry>,
     /// The path the open viewer came from, so `:w` knows where to save.
@@ -155,6 +159,8 @@ impl Session {
             update: None,
             mode: Mode::Shell,
             shift: false,
+            ctrl: false,
+            clipboard: String::new(),
             picked: None,
             viewer_path: None,
             spec: spec.clone(),
@@ -230,6 +236,19 @@ impl Session {
         &self.ports
     }
 
+    /// Pending setup writes, same document the page and the console share.
+    pub fn pending_json(&self) -> String {
+        self.overlay.pending_json(&self.spec)
+    }
+
+    /// Install a saved patch into this session and remember it as `/settings.json`.
+    pub fn import_settings_patch(&mut self, patch: &str) -> Result<usize, String> {
+        let n = self.overlay.load_patch(&self.spec, patch)?;
+        self.files
+            .insert("/settings.json".into(), patch.to_string());
+        Ok(n)
+    }
+
     /// The autoboot picker, while it owns the screen.
     pub fn picker(&self) -> Option<&AutoBoot> {
         match &self.mode {
@@ -271,10 +290,14 @@ impl Session {
             self.shift = pressed;
             return Action::Continue;
         }
+        if input::is_ctrl_keycode(code) {
+            self.ctrl = pressed;
+            return Action::Continue;
+        }
         if !pressed {
             return Action::Continue;
         }
-        match input::from_linux_keycode(code, self.shift) {
+        match input::from_linux_keycode(code, self.shift, self.ctrl) {
             Some(k) => self.key(k),
             None => Action::Continue,
         }
@@ -282,6 +305,24 @@ impl Session {
 
     /// One decoded key.
     pub fn key(&mut self, k: Key) -> Action {
+        if k == Key::Copy {
+            self.clipboard = match &self.mode {
+                Mode::Viewer(v) => v.copy_line(),
+                _ => self.editor.line().to_string(),
+            };
+            return Action::Continue;
+        }
+        if k == Key::Paste {
+            let clip = self.clipboard.clone();
+            if let Mode::Viewer(v) = &mut self.mode {
+                if !v.paste_text(&clip) {
+                    v.note("E45: 'readonly' — paste refused");
+                }
+            } else {
+                self.editor.insert_text(&clip);
+            }
+            return Action::Continue;
+        }
         if let Mode::Viewer(v) = &mut self.mode {
             match v.key(k) {
                 ViAction::Stay => {}
@@ -1049,9 +1090,17 @@ impl Session {
         if !self.settings_via(via) {
             return format!("load: `{via}` is not a compiled transport\n");
         }
-        // Import is a *reported* transport action: the running image is not
-        // re-parameterized, the patch is handed to the next build/boot.
-        format!("SETTINGS-IMPORT via={via} (applies on the next boot; nothing live is rewritten)\n")
+        // The running image is not re-parameterized. The patch stored by
+        // `save` is loaded into the overlay for the next boot/build.
+        let Some(patch) = self.files.get("/settings.json").cloned() else {
+            return format!("SETTINGS-IMPORT-REFUSED via={via} no /settings.json\n");
+        };
+        match self.overlay.load_patch(&self.spec, &patch) {
+            Ok(n) => format!(
+                "SETTINGS-IMPORT via={via} rows={n} (applies on the next boot; nothing live is rewritten)\n"
+            ),
+            Err(e) => format!("SETTINGS-IMPORT-REFUSED via={via} {e}\n"),
+        }
     }
 
     fn settings_via(&self, via: &str) -> bool {
@@ -1201,9 +1250,16 @@ impl Session {
                 let Some(mut u) = self.update.take() else {
                     return "fw: nothing staged\n".into();
                 };
-                let out = match u.apply(&mut self.ports) {
-                    Ok(o) => format!("{o}\n"),
-                    Err(e) => format!("{e}\n"),
+                let out = if arg.trim().is_empty() {
+                    match u.apply(&mut self.ports) {
+                        Ok(o) => format!("{o}\n"),
+                        Err(e) => format!("{e}\n"),
+                    }
+                } else {
+                    match u.confirm(&mut self.ports, arg.trim()) {
+                        Ok(o) => format!("{o}\n"),
+                        Err(e) => format!("{e}\n"),
+                    }
                 };
                 self.update = Some(u);
                 out
@@ -1281,7 +1337,14 @@ fn holyc_shell_command(line: &str) -> Option<String> {
         "FwUpdate" => format!("fw update {}", args.first().cloned().unwrap_or_default()),
         "FwStatus" => "fw".to_string(),
         "FwPoll" => "fw poll".to_string(),
-        "FwApply" => "fw apply".to_string(),
+        "FwApply" => {
+            let digest = args.first().cloned().unwrap_or_default();
+            if digest.is_empty() {
+                "fw apply".to_string()
+            } else {
+                format!("fw apply {digest}")
+            }
+        }
         "FwCancel" => "fw cancel".to_string(),
         _ => return None,
     };
@@ -1378,6 +1441,177 @@ mod tests {
             })
             .with_flash(MemFlash::default());
         Session::with_ports(&spec(profile), ports)
+    }
+
+    #[test]
+    fn vi_writes_a_fat32_mount_and_refuses_the_same_file_read_only() {
+        use crate::input::Key;
+        use crate::ports::{DriveInfo, EditTerms, Entry, MountInfo, MountPort, VolumeSlot};
+        use std::collections::BTreeMap;
+        struct Fat {
+            files: BTreeMap<String, Vec<u8>>,
+            rw: bool,
+            live: bool,
+        }
+        impl MountPort for Fat {
+            fn drives(&mut self) -> Vec<DriveInfo> {
+                vec![DriveInfo {
+                    id: "disk0".into(),
+                    model: "fixture".into(),
+                    bytes: 8 * 1024 * 1024,
+                    scheme: "gpt".into(),
+                    warnings: Vec::new(),
+                }]
+            }
+            fn volumes(&mut self, drive: &str) -> Result<Vec<VolumeSlot>, String> {
+                if drive != "disk0" {
+                    return Ok(Vec::new());
+                }
+                Ok(vec![VolumeSlot {
+                    drive: "disk0".into(),
+                    index: 1,
+                    name: "fat".into(),
+                    fs: "fat32".into(),
+                    label: "KEY".into(),
+                    kind: "linux-filesystem".into(),
+                    bytes: 8 * 1024 * 1024,
+                    mountable: true,
+                    write_block: None,
+                    evidence: "FAT32".into(),
+                }])
+            }
+            fn mounts(&mut self) -> Vec<MountInfo> {
+                if !self.live {
+                    return Vec::new();
+                }
+                vec![MountInfo {
+                    name: "fat".into(),
+                    drive: "disk0".into(),
+                    index: 1,
+                    fs: "fat32".into(),
+                    label: "KEY".into(),
+                    rw: self.rw,
+                    why_ro: if self.rw {
+                        None
+                    } else {
+                        Some("mounted read-only".into())
+                    },
+                    os: None,
+                }]
+            }
+            fn mount(
+                &mut self,
+                drive: &str,
+                index: u32,
+                _name: &str,
+                rw: bool,
+            ) -> Result<MountInfo, String> {
+                if drive != "disk0" || index != 1 {
+                    return Err("no such partition".into());
+                }
+                self.live = true;
+                self.rw = rw;
+                Ok(self.mounts().remove(0))
+            }
+            fn umount(&mut self, name: &str) -> Result<(), String> {
+                if name != "fat" || !self.live {
+                    return Err("not mounted".into());
+                }
+                self.live = false;
+                Ok(())
+            }
+            fn list(&mut self, _mount: &str, _path: &str) -> Result<Vec<Entry>, String> {
+                Ok(self
+                    .files
+                    .keys()
+                    .map(|p| Entry::file(p.trim_start_matches('/'), self.files[p].len() as u64))
+                    .collect())
+            }
+            fn read(&mut self, _mount: &str, path: &str) -> Result<Vec<u8>, String> {
+                self.files
+                    .get(path)
+                    .cloned()
+                    .ok_or_else(|| format!("no such file {path}"))
+            }
+            fn edit_budget(&mut self, _mount: &str, path: &str) -> Result<EditTerms, String> {
+                let exists = self.files.contains_key(path);
+                Ok(EditTerms {
+                    fs: "fat32".into(),
+                    exists,
+                    size: self.files.get(path).map(|b| b.len() as u64).unwrap_or(0),
+                    writable: self.rw,
+                    max_bytes: Some(4096),
+                    can_create: self.rw,
+                    can_grow: self.rw,
+                    why: if self.rw {
+                        None
+                    } else {
+                        Some("mounted read-only".into())
+                    },
+                    summary: if self.rw {
+                        "fat32 rw <=4096B".into()
+                    } else {
+                        "fat32 ro".into()
+                    },
+                })
+            }
+            fn write(&mut self, _mount: &str, path: &str, data: &[u8]) -> Result<(), String> {
+                if !self.rw {
+                    return Err("mounted read-only".into());
+                }
+                if data.len() > 4096 {
+                    return Err("4096 byte fat32 cap".into());
+                }
+                self.files.insert(path.to_string(), data.to_vec());
+                Ok(())
+            }
+            fn mkdir(&mut self, _: &str, _: &str) -> Result<(), String> {
+                Err("mkdir not in this fixture".into())
+            }
+            fn remove(&mut self, _: &str, _: &str) -> Result<(), String> {
+                Err("remove not in this fixture".into())
+            }
+            fn os_info(&mut self, _: &str) -> Option<String> {
+                None
+            }
+        }
+        let mut files = BTreeMap::new();
+        files.insert("/notes.txt".into(), b"hello\n".to_vec());
+        let fat = Fat {
+            files,
+            rw: false,
+            live: false,
+        };
+        let mut s = Session::with_ports(&spec("barebone"), Ports::default().with_mounts(fat));
+        let mounted = s.eval("mount -w disk0:1 as fat").1;
+        assert!(mounted.contains("rw"), "{mounted}");
+        assert!(s.eval("vi fat:/notes.txt").1.is_empty());
+        assert!(s.in_viewer());
+        s.key(Key::Char('A'));
+        s.key(Key::Char('!'));
+        s.key(Key::Esc);
+        for c in ":w".chars() {
+            s.key(Key::Char(c));
+        }
+        s.key(Key::Enter);
+        let frame = s.vga_text();
+        assert!(frame.contains("written and verified"), "{frame}");
+        s.key(Key::Char('q'));
+        let back = s.eval("cat fat:/notes.txt").1;
+        assert_eq!(back, "hello!\n", "{back}");
+        let off = s.eval("umount fat").1;
+        assert!(off.contains("umounted"), "{off}");
+        let ro = s.eval("mount disk0:1 as fat").1;
+        assert!(ro.contains("ro"), "{ro}");
+        assert!(s.eval("vi fat:/notes.txt").1.is_empty());
+        for c in ":w".chars() {
+            s.key(Key::Char(c));
+        }
+        s.key(Key::Enter);
+        let refused = s.vga_text();
+        assert!(refused.contains("readonly"), "{refused}");
+        s.key(Key::Char('q'));
+        assert_eq!(s.eval("cat fat:/notes.txt").1, "hello!\n");
     }
 
     #[test]
@@ -1479,6 +1713,23 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_c_copies_the_line_and_ctrl_v_pastes_it() {
+        let mut s = sess();
+        // hello: h e l l o
+        for code in [35u16, 18, 38, 38, 24] {
+            s.keycode(code, true);
+        }
+        s.keycode(29, true);
+        s.keycode(46, true);
+        s.keycode(29, false);
+        s.keycode(1, true);
+        s.keycode(29, true);
+        s.keycode(47, true);
+        let row = s.render()[VGA_ROWS - 1].clone();
+        assert!(row.contains("hello"), "{row}");
+    }
+
+    #[test]
     fn help_and_manual_track_the_compiled_build() {
         let mut s = sess();
         let (_, out) = s.eval("help");
@@ -1541,6 +1792,13 @@ mod tests {
         assert!(saved.contains("SETTINGS-EXPORT via=uart"), "{saved}");
         assert!(saved.contains("\"next\":\"edk2\""), "{saved}");
         assert!(s.eval("cat /settings.json").1.contains("edk2"));
+        assert!(s.eval("set boot.next opensbi").1.contains("opensbi"));
+        let loaded = s.eval("load uart").1;
+        assert!(loaded.contains("SETTINGS-IMPORT via=uart"), "{loaded}");
+        assert!(
+            s.eval("get boot.next").1.contains("edk2"),
+            "load restores the saved patch"
+        );
         assert!(s
             .eval("save carrier-pigeon")
             .1

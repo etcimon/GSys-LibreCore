@@ -211,6 +211,66 @@
         },
         {
           "kind": "text",
+          "id": "net-apply",
+          "value": "Ethernet net0"
+        },
+        {
+          "kind": "text",
+          "id": "net-link-up",
+          "value": "Link up"
+        },
+        {
+          "kind": "text",
+          "id": "net-link-down",
+          "value": "Link down"
+        },
+        {
+          "kind": "text",
+          "id": "net-nat",
+          "value": "NAT"
+        },
+        {
+          "kind": "text",
+          "id": "net-addr",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "net-gw",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "net-dns",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "net-static",
+          "value": "Static"
+        },
+        {
+          "kind": "text",
+          "id": "wifi-catalog",
+          "value": "wifi: no adapter (catalog only, not associated)"
+        },
+        {
+          "kind": "text",
+          "id": "disk-title",
+          "value": "Volumes"
+        },
+        {
+          "kind": "text",
+          "id": "disk-table",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "disk-body",
+          "value": ""
+        },
+        {
+          "kind": "text",
           "id": "menu-boot",
           "value": ""
         },
@@ -222,6 +282,26 @@
         {
           "kind": "text",
           "id": "menu-boot-body",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "g6b-slot-boot-media",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "boot-entries-title",
+          "value": "Boot media"
+        },
+        {
+          "kind": "text",
+          "id": "boot-entries",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "boot-entries-body",
           "value": ""
         },
         {
@@ -238,6 +318,121 @@
           "kind": "text",
           "id": "menu-settings-body",
           "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "settings-pending",
+          "value": "no pending settings writes"
+        },
+        {
+          "kind": "text",
+          "id": "g6b-slot-save",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "settings-save",
+          "value": "Save"
+        },
+        {
+          "kind": "text",
+          "id": "g6b-slot-load",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "settings-load",
+          "value": "Load"
+        },
+        {
+          "kind": "text",
+          "id": "g6b-slot-fw",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "fw-title",
+          "value": "Firmware"
+        },
+        {
+          "kind": "text",
+          "id": "fw-src",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "fw-stage",
+          "value": "Stage"
+        },
+        {
+          "kind": "text",
+          "id": "fw-digest",
+          "value": "digest: (none)"
+        },
+        {
+          "kind": "text",
+          "id": "fw-commit",
+          "value": "Commit"
+        },
+        {
+          "kind": "text",
+          "id": "g6b-slot-manual",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "manual-open",
+          "value": "Open manual"
+        },
+        {
+          "kind": "text",
+          "id": "manual-window",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "manual-title",
+          "value": "Manual"
+        },
+        {
+          "kind": "text",
+          "id": "manual-loc",
+          "value": "https://docs.gsys.dev/librecore/bios"
+        },
+        {
+          "kind": "text",
+          "id": "manual-status",
+          "value": "manual closed"
+        },
+        {
+          "kind": "text",
+          "id": "g6b-slot-console",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "console-open",
+          "value": "Open console"
+        },
+        {
+          "kind": "text",
+          "id": "console-window",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "console-title",
+          "value": "Console"
+        },
+        {
+          "kind": "text",
+          "id": "cli-screen",
+          "value": ""
+        },
+        {
+          "kind": "text",
+          "id": "console-close",
+          "value": "Close"
         },
         {
           "kind": "text",
@@ -282,6 +477,16 @@
         {
           "kind": "visible",
           "id": "menu-settings",
+          "on": false
+        },
+        {
+          "kind": "visible",
+          "id": "manual-window",
+          "on": false
+        },
+        {
+          "kind": "visible",
+          "id": "console-window",
           "on": false
         }
       ]

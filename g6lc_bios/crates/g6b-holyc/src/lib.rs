@@ -814,7 +814,7 @@ impl Program {
                     .first()
                     .map(|a| self.eval_str(a))
                     .unwrap_or_else(|| "localhost".into());
-                let ch = g6b_tls::client_hello(&h);
+                let ch = g6b_tls::client_hello_for_peer(&h)?;
                 let sh = g6b_tls::server_handshake(&ch)?;
                 Ok(Some(format!(
                     "TLS-SERVERHELLO host={h} bytes={}\n",
@@ -844,7 +844,7 @@ impl Program {
                     .first()
                     .map(|a| self.eval_str(a))
                     .unwrap_or_else(|| "localhost".into());
-                let hello = g6b_tls::client_hello(&h);
+                let hello = g6b_tls::client_hello_for_peer(&h)?;
                 Ok(Some(format!(
                     "TLS-CLIENTHELLO host={h} bytes={} web={}\n",
                     hello.len(),
@@ -2004,6 +2004,28 @@ U0 WriteSection(U8 *name) { Print("x"); }
             ReplResult::Output(s) => assert!(s.contains("TLS-SERVERHELLO"), "{s}"),
             other => panic!("{other:?}"),
         }
+        let ip_hello = g6b_tls::client_hello_for_peer("127.0.0.1").unwrap();
+        match p.repl(r#"TlsClientHello("127.0.0.1");"#).unwrap() {
+            ReplResult::Output(s) => {
+                assert!(s.contains("TLS-CLIENTHELLO host=127.0.0.1"), "{s}");
+                assert!(s.contains("web=true"), "{s}");
+                assert!(s.contains(&format!("bytes={}", ip_hello.len())), "{s}");
+            }
+            other => panic!("{other:?}"),
+        }
+        match p.repl(r#"TlsServerHello("127.0.0.1");"#).unwrap() {
+            ReplResult::Output(s) => assert!(s.contains("TLS-SERVERHELLO host=127.0.0.1"), "{s}"),
+            other => panic!("{other:?}"),
+        }
+        match p.repl(r#"HttpsGet("https://127.0.0.1/");"#).unwrap() {
+            ReplResult::Output(s) => {
+                assert!(s.contains("rsa+ecdsa"), "{s}");
+                assert!(s.contains(&format!("hello={}", ip_hello.len())), "{s}");
+            }
+            other => panic!("{other:?}"),
+        }
+        let refused = p.repl(r#"TlsClientHello("a..b");"#).unwrap_err();
+        assert!(refused.contains("sni"), "{refused}");
         match p.repl(r#"UsbFlash("openwrt.bin");"#).unwrap() {
             ReplResult::Output(s) => assert!(s.contains("USB-FLASH fat32"), "{s}"),
             other => panic!("{other:?}"),

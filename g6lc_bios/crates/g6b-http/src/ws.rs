@@ -134,7 +134,7 @@ pub fn decode_frame(raw: &[u8]) -> Result<(u8, Vec<u8>), String> {
     if !matches!(opcode, 1 | 8 | 9 | 10) {
         return Err("ws: opcode".into());
     }
-    if matches!(opcode, 8 | 9 | 10) && raw[0] & 0x80 == 0 {
+    if matches!(opcode, 8..=10) && raw[0] & 0x80 == 0 {
         return Err("ws: control fin".into());
     }
     let masked = raw[1] & 0x80 != 0;
@@ -149,7 +149,7 @@ pub fn decode_frame(raw: &[u8]) -> Result<(u8, Vec<u8>), String> {
     } else if len == 127 {
         return Err("ws: 64-bit length refused".into());
     }
-    if matches!(opcode, 8 | 9 | 10) && len > 125 {
+    if matches!(opcode, 8..=10) && len > 125 {
         return Err("ws: control too long".into());
     }
     if len > MAX_FRAME {

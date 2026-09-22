@@ -8,7 +8,7 @@
  * Export: memory, _start.
  */
 
-import type { FetchOp, SvelteFile, TextOp, VisibleOp } from "./parse.ts";
+import { parseMarkupTree, type FetchOp, type MarkupNode, type SvelteFile, type TextOp, type VisibleOp } from "./parse.ts";
 
 export function emitWasm(files: SvelteFile[]): Uint8Array {
   const texts: TextOp[] = [];
@@ -36,10 +36,37 @@ export function emitWasm(files: SvelteFile[]): Uint8Array {
       }
     }
   }
+  // The guest glyph face is a flat row table. `hidden` on a section does not
+  // hide the text rows of its children, so those ids are hidden explicitly.
+  // This list is wasm-only: stamping `hidden` onto the HTML would break row injection.
+  for (const id of glyphHiddenTextIds(files, new Set(texts.map((op) => op.id)))) {
+    const prior = visible.findIndex((op) => op.id === id);
+    if (prior >= 0) visible.splice(prior, 1);
+    visible.push({ kind: "visible", id, on: false });
+  }
   if (texts.length === 0) {
     texts.push({ kind: "text", id: "status", value: "UI-BOOT" });
   }
   return encode(texts, fetches, visible, awaits);
+}
+
+function glyphHiddenTextIds(files: SvelteFile[], textIds: Set<string>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const walk = (node: MarkupNode | string, hidden: boolean) => {
+    if (typeof node === "string") return;
+    const now = hidden || Object.hasOwn(node.attrs, "hidden");
+    const id = node.attrs.id;
+    if (now && id && textIds.has(id) && !seen.has(id)) {
+      seen.add(id);
+      out.push(id);
+    }
+    for (const child of node.children) walk(child, now);
+  };
+  for (const file of files) {
+    for (const root of parseMarkupTree(file.src)) walk(root, false);
+  }
+  return out;
 }
 
 function encode(texts: TextOp[], fetches: FetchOp[], visible: VisibleOp[], awaits: number): Uint8Array {

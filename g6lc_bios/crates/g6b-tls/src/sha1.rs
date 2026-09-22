@@ -34,7 +34,7 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
             w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
         }
         let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-        for i in 0..80 {
+        for (i, word) in w.iter().enumerate() {
             let (f, k) = if i < 20 {
                 ((b & c) | ((!b) & d), 0x5a82_7999)
             } else if i < 40 {
@@ -48,7 +48,7 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
-                .wrapping_add(w[i]);
+                .wrapping_add(*word);
             e = d;
             d = c;
             c = rol(b, 30);

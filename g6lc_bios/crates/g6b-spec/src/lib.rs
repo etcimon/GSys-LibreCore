@@ -13,7 +13,10 @@ pub mod menu;
 mod profile;
 
 pub use json::{parse_json, quote_json, stringify_json, Json};
-pub use menu::{Menu, MenuItem, SettingKind, Writable, WRITABLE};
+pub use menu::{
+    listed_boot_entries_json, listed_boot_entries_rows_html, wifi_catalog_line, Menu, MenuItem,
+    SettingKind, Writable, WRITABLE,
+};
 pub use profile::BiosProfile;
 
 /// How an ISA extension is present in the spec.

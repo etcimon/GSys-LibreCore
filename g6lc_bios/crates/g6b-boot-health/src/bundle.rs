@@ -137,7 +137,7 @@ mod tests {
         b
     }
 
-    fn ok_bundle<'a>(img: &'a [u8]) -> Bundle<'a> {
+    fn ok_bundle(img: &[u8]) -> Bundle<'_> {
         Bundle {
             image: img,
             initrd: Some(b"initrd"),

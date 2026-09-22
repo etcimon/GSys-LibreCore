@@ -7,18 +7,21 @@
 
 #![allow(missing_docs)]
 
-use g6b_css::Engine;
 use g6b_dom::{Event, EventHost, EventInit, Node};
 use g6b_holyc::{eval_src, Program, ReplResult};
-use g6b_html::{parse, script_sources, to_uart_lines};
+use g6b_html::{parse, to_uart_lines};
 use g6b_http::Router;
 use g6b_js::{HostDispatch, JsValue, LodashError, LodashParam, Op};
 use g6b_spec::{parse_json, stringify_json, BoardSpec, Json};
 use g6b_wasm::{Host, Ldexec, LdexecInit, LibwasmValue, ObjectKind, ObjectTable};
 use std::collections::BTreeMap;
 
+mod actions;
 pub mod bootctl;
 pub mod browser;
+mod fetch_extra;
+mod session;
+pub use session::BrowserSession;
 pub mod task_services;
 pub mod tasks;
 pub mod timers;
@@ -59,6 +62,9 @@ pub const REPL_BANNER: &str = "G6LC-BIOS HOLYC-REPL proto=holyc-repl backend=ssh
 
 /// Post-delegate mailbox loopback (not a netdev).
 pub const LOOPBACK_BANNER: &str = "G6LC-BIOS LOOPBACK-MBOX proto=holyc-repl not_netdev=1";
+
+/// The one remote page the setup UI may open. Not a browser, not eight tabs.
+pub const BIOS_MANUAL_URL: &str = "https://docs.gsys.dev/librecore/bios";
 
 /// g6b-wasm Host: DOM + kernel HTTP router (browser-ui `_start` imports).
 struct KernelHost<'a> {
@@ -1002,6 +1008,15 @@ impl<'a> KernelHost<'a> {
         if child == parent || self.handle_is_ancestor(child, parent) {
             // Node.webidl appendChild [Throws] → DOMException.HIERARCHY_REQUEST_ERR.
             return Err(g6b_wasm::hierarchy_request_append_child());
+        }
+        // Adopted shell nodes stay where the page put them. A fresh node
+        // parented under an adopted shell node would duplicate chrome the
+        // document already has (tables, sections). Rows the shell already
+        // carries are adopted by id before this append.
+        if self.session_paths.contains_key(&child) || self.session_paths.contains_key(&parent) {
+            self.diagnostics
+                .push(format!("WASM-APPEND-ADOPTED p={parent} c={child}"));
+            return Ok(0);
         }
         if self.handles.len() + 2 >= g6b_wasm::MAX_OBJECTS {
             return Err("WASM DOM handle budget exceeded".into());
@@ -3551,6 +3566,32 @@ impl Host for KernelHost<'_> {
                 .push("WASM-SET-PROPERTY-REFUSED src".into());
             return Err("WASM src must be a local /ui/ image path".into());
         }
+        // The shell page is already in the document. A cell `setProperty(id)`
+        // for an id that exists adopts that node, so `_start` does not build
+        // a second setup page under `#libwasm-root`.
+        if key == "id" {
+            if let Some(path) = path_from_root(self.dom, value) {
+                let same = self.session_paths.get(&obj).is_some_and(|p| p == &path);
+                if !same {
+                    // The shipped cell appends the element, then sets its id.
+                    // Drop that empty staging node so the mount does not keep
+                    // a blank `<main>` beside the shell page.
+                    if let Some(&old_parent) = self.placements.get(&obj) {
+                        let _ = self.detach_child(old_parent, obj);
+                    }
+                    self.session_paths.insert(obj, path);
+                    self.diagnostics
+                        .push(format!("WASM-ADOPT-ID {value} -> {obj}"));
+                }
+                return Ok(());
+            }
+        }
+        if (key == "innerText" || key == "textContent") && self.session_paths.contains_key(&obj) {
+            let structured = self.node(obj)?.children.iter().any(|c| c.name != "#text");
+            if structured {
+                return Ok(());
+            }
+        }
         let n = self.node_mut(obj)?;
         match key {
             "innerText" | "textContent" => n.set_inner_text(value),
@@ -4243,7 +4284,7 @@ pub struct ScanoutPresent {
 }
 
 /// Guest intern table for one iframe session. Not the shell `WasmUi` table.
-struct FrameGuest {
+pub(crate) struct FrameGuest {
     intern: SessionIntern,
     objects: ObjectTable<LibwasmValue>,
     window: i32,
@@ -4300,46 +4341,6 @@ fn intern_session_var(var: &SessionVar) -> Option<LibwasmValue> {
     }
 }
 
-pub struct BrowserSession {
-    pub dom: Node,
-    pub program: Program,
-    pub diagnostics: Vec<String>,
-    pub wasm_executed: bool,
-    pub task_services: Option<task_services::TaskServices>,
-    pub hit_boxes: Vec<g6b_css::render::HitBox>,
-    pub event_host: BrowserEventHost,
-    /// Loaded svelte-d LDC application (persistent instance).
-    pub wasm_ui: Option<WasmUi>,
-    /// Which UI surface feeds the scanout. Starts at the BoardSpec default
-    /// (which follows the highest-priority output's class) and is flipped by
-    /// the `#disp-toggle` control or `DisplaySurface` in the HolyC lane.
-    pub surface: g6b_spec::Surface,
-    selected_menu: String,
-    field_focus: BTreeMap<String, usize>,
-    /// B92 session pool (`g6b-iframe`). Window/tab chrome is Svelte.
-    /// Kernel registers hooks and fulfills [`HostNeed`] GETs.
-    frames: FrameEngine,
-    /// Test / adapter bodies for armed outbound `http(s):` (never `/bios`).
-    outbound_stubs: BTreeMap<String, (u16, String)>,
-    /// Per-tab guest object tables (B92e). Never the shell `WasmUi` table.
-    frame_guests: [Option<FrameGuest>; MAX_TABS_PER_WINDOW],
-    async_scripts: g6b_js::AsyncScheduler,
-    spec: BoardSpec,
-    /// Live CSS engine. Parsed once; `paint(&Node)` is the raster (B88).
-    css: Option<Engine>,
-    timers: crate::timers::TimerHeap,
-    now_ns: u64,
-    /// Modelled `__scan_fb` (X8R8G8B8). Host blit of Canvas32 dirty tiles (B90).
-    pub scan_fb: Vec<u8>,
-    scan_fb_w: u32,
-    scan_fb_h: u32,
-    /// Last virtio-gpu transfer listing (empty tiles → skip-if-clean).
-    last_transfer: String,
-    last_tiles: Vec<g6b_css::DirtyRegion>,
-    /// Post-boot lazy adapter session. Not started from `_start`.
-    pub hw: g6b_hw::HwSession,
-}
-
 pub fn install_boot_inventory(
     spec: &BoardSpec,
     router: &mut Router,
@@ -4388,96 +4389,6 @@ pub fn install_boot_inventory(
 }
 
 impl BrowserSession {
-    pub fn new(spec: &BoardSpec) -> Result<Self, String> {
-        Self::with_volumes(spec, DirVolumes::new())
-    }
-
-    pub fn with_volumes(spec: &BoardSpec, volumes: DirVolumes) -> Result<Self, String> {
-        let mut program = load_program(spec)?;
-        install_boot_inventory(spec, &mut program.router, &volumes)?;
-        Self::from_program(spec, program)
-    }
-
-    fn from_program(spec: &BoardSpec, program: Program) -> Result<Self, String> {
-        let mut session = Self {
-            dom: g6b_html::parse_checked(&session_page_html(spec))?,
-            program,
-            diagnostics: Vec::new(),
-            wasm_executed: false,
-            task_services: if spec.kernel.tasking.enable {
-                Some(task_services::TaskServices::new(spec).map_err(|error| error.to_string())?)
-            } else {
-                None
-            },
-            hit_boxes: Vec::new(),
-            event_host: BrowserEventHost::default(),
-            wasm_ui: None,
-            surface: g6b_spec::Surface::Vga,
-            selected_menu: spec.kernel.start_menu.clone(),
-            field_focus: BTreeMap::new(),
-            frames: {
-                let mut frames = FrameEngine::new();
-                if spec.kernel.usb.enable && spec.kernel.usb.key {
-                    let mut vols: Vec<String> = Vec::new();
-                    if spec.kernel.usb.fs_fat32 {
-                        vols.push("fat32".into());
-                    }
-                    if spec.kernel.usb.fs_ntfs {
-                        vols.push("ntfs".into());
-                    }
-                    if spec.kernel.usb.fs_ext4 {
-                        vols.push("ext4".into());
-                    }
-                    if spec.kernel.usb.fs_btrfs {
-                        vols.push("btrfs".into());
-                    }
-                    frames.register_hook(g6b_iframe::AppHook::files_volumes(vols));
-                }
-                // Outbound stays off until `g6b-hw` announces net support.
-                frames.set_outbound(false);
-                frames
-            },
-            hw: g6b_hw::HwSession::from_board(spec),
-            frame_guests: std::array::from_fn(|_| None),
-            outbound_stubs: BTreeMap::new(),
-            async_scripts: g6b_js::AsyncScheduler::default(),
-            spec: spec.clone(),
-            css: None,
-            timers: crate::timers::TimerHeap::new(),
-            now_ns: 0,
-            scan_fb: Vec::new(),
-            scan_fb_w: 0,
-            scan_fb_h: 0,
-            last_transfer: String::new(),
-            last_tiles: Vec::new(),
-        };
-        if spec.kernel.js == "aot" {
-            for src in script_sources(&session.dom) {
-                session.execute_script(&src)?;
-            }
-        }
-        if spec.kernel.wasm.enable {
-            // The LDC/libwasm cell is the only UI wasm. The MVP encoder
-            // artifact is a compiler demonstration and a guest VGA-glyph
-            // lowering input — never a silent host fallback.
-            if libwasm_lane(spec) {
-                session.run_libwasm_start()?;
-            } else if spec.kernel.ui == "svelte-d" && spec.kernel.js == "aot" {
-                return Err(
-                    "svelte-d UI requires the LDC libwasm cell (kernel.wasm + http.files.wasm)"
-                        .into(),
-                );
-            }
-            session.refresh()?;
-        }
-        session.select_menu(&spec.kernel.start_menu)?;
-        if let Some(svc) = session.task_services.as_mut() {
-            let _ = svc.ensure_ui();
-            session.diagnostics.push("UI-HART ready".into());
-        }
-        Ok(session)
-    }
-
     /// Run the shipped LDC/libwasm cell (`browser-ui/out/bios-ui-libwasm.wasm`)
     /// against a fresh `<div>` mount under `#libwasm-root`. The mount is a
     /// child path inside `self.dom`, so the guest's `fetch` calls can paint
@@ -4521,6 +4432,9 @@ impl BrowserSession {
         self.diagnostics.extend(diagnostics);
         self.diagnostics.push("WASM-INTERPRETER _start".into());
         self.wasm_executed = true;
+        // Drop the cell's second page before id lookup, so g6b_listen binds
+        // the shell tabs that paint and take clicks.
+        strip_cell_page_clone(&mut self.dom);
         self.apply_pending_wasm_listeners(&pending)?;
         self.apply_pending_event_delegates(&delegates)?;
         for id in &removals {
@@ -4531,6 +4445,19 @@ impl BrowserSession {
             .any(|(_, ty, lid, _)| ty == "click" && *lid == 0)
         {
             self.bind_cell_clicks();
+        }
+        // Boot-media buttons live on the setup shell, not in the cell's
+        // `g6b_listen` list. Bind them even when the cell owns the tabs.
+        let mut picks = Vec::new();
+        collect_attr_ids(&self.dom, "data-boot", &mut picks);
+        collect_attr_ids(&self.dom, "data-settings", &mut picks);
+        collect_attr_ids(&self.dom, "data-net", &mut picks);
+        collect_attr_ids(&self.dom, "data-fw", &mut picks);
+        collect_attr_ids(&self.dom, "data-manual", &mut picks);
+        collect_attr_ids(&self.dom, "data-console", &mut picks);
+        collect_attr_ids(&self.dom, "data-setting-apply", &mut picks);
+        for id in &picks {
+            let _ = self.add_event_listener_by_id(id, "click", false, Listener::Cell);
         }
         Ok(())
     }
@@ -4547,12 +4474,6 @@ impl BrowserSession {
         }
         self.diagnostics
             .push("WASM-CELL-LISTEN tabs+refresh".into());
-    }
-
-    fn paint_status(&mut self, fallback: &str) {
-        // Status text is owned by the BIOS UI. Record the fallback on the
-        // serial/diagnostic ring only.
-        self.diagnostics.push(format!("UI-STATUS {fallback}"));
     }
 
     /// When `g6b-hw` first listens, announce adapters through the kernel:
@@ -4759,7 +4680,13 @@ impl BrowserSession {
             req.host, req.port
         ));
         let out = if req.https {
-            let hello = g6b_tls::client_hello(&req.host);
+            // IP literals stay the TCP peer. RFC 6066 forbids them in SNI.
+            let hello = if req.host.parse::<std::net::IpAddr>().is_ok() {
+                let mut rng = g6b_tls::FixtureEntropy::TEST;
+                g6b_tls::client_hello_no_sni(&mut rng)?
+            } else {
+                g6b_tls::client_hello(&req.host)
+            };
             self.hw_tcp_send_all(sock, &hello)?;
             let rec = self.hw_tcp_recv_until(sock, 5, false)?;
             let kind = g6b_tls::tls_record_kind(&rec).unwrap_or("unknown");
@@ -4966,7 +4893,171 @@ impl BrowserSession {
         Ok(())
     }
 
+    /// Devices-panel ethernet actions. Empty static address and empty host
+    /// adapter name are refused. NAT does not program a host NIC.
+    fn net_apply(&mut self, action: &str) -> String {
+        let line = match action {
+            "link-up" => "HwLink(\"net0\",\"up\")".to_string(),
+            "link-down" => "HwLink(\"net0\",\"down\")".to_string(),
+            "nat" => "HwConfig(\"net0\",\"nat\")".to_string(),
+            "static" => {
+                let addr = input_value(&self.dom, "net-addr");
+                if addr.is_empty() {
+                    return "NET-REFUSED static address required\n".into();
+                }
+                let gw = input_value(&self.dom, "net-gw");
+                let dns = input_value(&self.dom, "net-dns");
+                let mut out = self.hw_line(&format!("HwIfconfig(\"net0\",\"{addr}\")"));
+                if !gw.is_empty() {
+                    out.push('\n');
+                    out.push_str(&self.hw_line(&format!("HwRoute(\"net0\",\"default\",\"{gw}\")")));
+                }
+                if !dns.is_empty() {
+                    out.push('\n');
+                    out.push_str(&self.hw_line(&format!("HwDns(\"net0\",\"{dns}\")")));
+                }
+                out.push('\n');
+                out.push_str(&self.hw_line("HwLink(\"net0\",\"up\")"));
+                return out;
+            }
+            other => return format!("NET-REFUSED unknown action {other}\n"),
+        };
+        self.hw_line(&line)
+    }
+
+    fn hw_line(&mut self, line: &str) -> String {
+        match self.holyc_request(line) {
+            Ok(ReplResult::Output(text)) => text,
+            Ok(other) => format!("{other:?}\n"),
+            Err(error) => format!("NET-ERR {error}\n"),
+        }
+    }
+
+    /// Settings-panel firmware. Stage runs the CLI poll machine to a terminal
+    /// phase. Commit requires the digest the operator was shown.
+    fn firmware_invoke(&mut self, line: &str) -> Option<String> {
+        let (name, args) = g6b_hw::parse_invoke(line)?;
+        if !matches!(
+            name.as_str(),
+            "FwUpdate" | "FwStatus" | "FwPoll" | "FwApply" | "FwCancel"
+        ) {
+            return None;
+        }
+        if !self.spec.kernel.cli.fw {
+            return Some("`fw` is not in this build (kernel.cli.fw is off)\n".into());
+        }
+        if name == "FwApply" {
+            let shown = args.first().map(String::as_str).unwrap_or("");
+            if shown.is_empty() || shown == "(none)" || shown == "digest: (none)" {
+                return Some("fw: digest not shown; commit refused\n".into());
+            }
+            let (_action, out) = self.shell.eval(&format!("fw apply {shown}"));
+            return Some(out);
+        }
+        if name == "FwUpdate" {
+            let src = args.first().map(String::as_str).unwrap_or("");
+            let (_action, armed) = self.shell.eval(&format!("fw update {src}"));
+            if !armed.contains("fw ") {
+                return Some(armed);
+            }
+            let (_action, ran) = self.shell.eval("fw run");
+            return Some(format!("{armed}{ran}"));
+        }
+        let (_action, out) = self.shell.eval(line);
+        Some(out)
+    }
+
+    /// Text face of the one CLI session. The page paints this; the kernel does not.
+    pub fn console_text(&self) -> String {
+        self.shell.vga_text()
+    }
+
+    /// Run one CLI line on the session the console window shows.
+    pub fn console_submit(&mut self, line: &str) -> String {
+        self.shell.eval(line).1
+    }
+
+    fn console_set(&mut self, open: bool) {
+        self.console_open = open;
+    }
+
+    /// One lookup window. Unarmed boards store the URL and do not fetch.
+    fn open_manual(&mut self) -> String {
+        let url = BIOS_MANUAL_URL;
+        if self.spec.kernel.http.outbound {
+            self.frames.set_outbound(true);
+        }
+        let _ = self.ensure_iframe_session(0);
+        let _ = self.navigate_browser_tab(0, url);
+        match self.iframe_session(0).map(|s| s.load.clone()) {
+            Some(g6b_iframe::SessionLoad::Error(e)) => e,
+            Some(g6b_iframe::SessionLoad::Http(n)) => format!("manual http {n}"),
+            Some(other) => other.status_word(),
+            None => "manual: no session".into(),
+        }
+    }
+
+    /// Read the Set control for `menu.id` and store it in the overlay.
+    /// The compiled row text is left alone.
+    fn apply_setting_control(&mut self, key: &str) -> String {
+        let eid = format!("edit-{}", key.replace('.', "-"));
+        let value = setting_control_value(&self.dom, &eid);
+        if value.is_empty() {
+            return format!("SET-REFUSED {key} has no value\n");
+        }
+        self.shell.eval(&format!("set {key} {value}")).1
+    }
+
+    /// `SettingSet` / `SettingsExport` / `SettingsImport` go to the one CLI session.
+    fn settings_invoke(&mut self, line: &str) -> Option<String> {
+        let (name, args) = g6b_hw::parse_invoke(line)?;
+        let cmd = match name.as_str() {
+            "SettingSet" => {
+                let key = args.first().map(String::as_str).unwrap_or("");
+                let value = args.get(1).map(String::as_str).unwrap_or("");
+                if key.is_empty() {
+                    return Some("set:  <value>\n".into());
+                }
+                format!("set {key} {value}")
+            }
+            "SettingsExport" => {
+                format!(
+                    "save {}",
+                    args.first().map(String::as_str).unwrap_or("uart")
+                )
+            }
+            "SettingsImport" => {
+                format!(
+                    "load {}",
+                    args.first().map(String::as_str).unwrap_or("uart")
+                )
+            }
+            _ => return None,
+        };
+        Some(self.shell.eval(&cmd).1)
+    }
+
+    /// Load a saved patch into the shared overlay. The running spec stays.
+    pub fn import_settings_patch(&mut self, patch: &str) -> Result<usize, String> {
+        self.shell.import_settings_patch(patch)
+    }
+
+    /// The setup command the native page posts to `/bios/holyc`.
+    /// Same interpreter as [`Self::holyc_request`].
+    pub fn submit_setup_line(&mut self, line: &str) -> Result<String, String> {
+        match self.holyc_request(line)? {
+            ReplResult::Output(text) => Ok(text),
+            ReplResult::Exit => Err("HolyC session exited".into()),
+        }
+    }
+
     pub fn holyc_request(&mut self, line: &str) -> Result<ReplResult, String> {
+        if let Some(out) = self.firmware_invoke(line) {
+            return Ok(ReplResult::Output(out));
+        }
+        if let Some(out) = self.settings_invoke(line) {
+            return Ok(ReplResult::Output(out));
+        }
         if g6b_hw::is_hw_invoke(line) {
             let out = g6b_hw::eval_instant(&mut self.hw, line);
             self.apply_hw_support();
@@ -5249,82 +5340,10 @@ impl BrowserSession {
         &self.last_tiles
     }
 
-    /// Live CSS paint of the Svelte tree. No HTML serialize/parse.
-    pub fn paint_css(&mut self) -> Result<g6b_css::render32::Render32Output, String> {
-        let w = self.spec.kernel.gr.w.max(320);
-        let h = self.spec.kernel.gr.h.max(200);
-        self.paint_css_at(w, h)
-    }
-
-    /// Live CSS paint at an explicit canvas size (GPU scanout geometry).
-    pub fn paint_css_at(
-        &mut self,
-        w: u32,
-        h: u32,
-    ) -> Result<g6b_css::render32::Render32Output, String> {
-        self.ensure_engine(w, h)?;
-        let mut engine = self.css.take().ok_or("css engine missing")?;
-        let targets = live_paint_targets(&self.dom);
-        let painted = engine.paint_nodes(&targets, false);
-        self.css = Some(engine);
-        let painted = painted?;
-        let mut hits = painted.hit_boxes.clone();
-        remap_hit_paths(&self.dom, &mut hits);
-        self.hit_boxes = hits.clone();
-        Ok(g6b_css::render32::Render32Output {
-            canvas: painted.canvas,
-            hit_boxes: hits,
-        })
-    }
-
-    /// [`Self::paint_css_at`] with the `Canvas32` display-list recorder armed
-    /// — the `__web_dl` pack lane (`dl_pack`). The op vec is the paint log
-    /// `DlPaint` replays guest-side; the canvas is the pixel-exact reference
-    /// the packer's `TILEPX` relief diffs against.
-    pub fn paint_css_dl_at(
-        &mut self,
-        w: u32,
-        h: u32,
-    ) -> Result<
-        (
-            g6b_css::render32::Render32Output,
-            Vec<g6b_gr::canvas32::DlOp>,
-        ),
-        String,
-    > {
-        self.ensure_engine(w, h)?;
-        let mut engine = self.css.take().ok_or("css engine missing")?;
-        let targets = live_paint_targets(&self.dom);
-        let painted = engine.paint_nodes_dl(&targets);
-        self.css = Some(engine);
-        let (painted, ops) = painted?;
-        let mut hits = painted.hit_boxes.clone();
-        remap_hit_paths(&self.dom, &mut hits);
-        self.hit_boxes = hits.clone();
-        Ok((
-            g6b_css::render32::Render32Output {
-                canvas: painted.canvas,
-                hit_boxes: hits,
-            },
-            ops,
-        ))
-    }
-
-    fn ensure_engine(&mut self, w: u32, h: u32) -> Result<(), String> {
-        let w = w.max(320);
-        let h = h.max(200);
-        if self.css.is_none() {
-            let css = live_css(&self.dom, &self.spec)?;
-            let fonts = g6b_css::FontSet::default_set().map_err(|e| format!("{e:?}"))?;
-            let assets = session_assets(&self.spec);
-            self.css = Some(Engine::new(&css, w, h, assets, fonts)?);
-        } else if let Some(engine) = self.css.as_mut() {
-            engine.set_viewport(w, h);
-        }
-        Ok(())
-    }
-
     fn kernel_fetch(&mut self, method: &str, url: &str) -> g6b_http::Response {
+        if let Some(extra) = self.extra_fetch(url) {
+            return extra;
+        }
         if url.starts_with("http://") || url.starts_with("https://") {
             if !self.spec.kernel.http.outbound {
                 return g6b_http::Response::file(403, "text/plain", "outbound fetch disabled");
@@ -5384,59 +5403,6 @@ impl BrowserSession {
         p
     }
 
-    pub fn select_menu(&mut self, id: &str) -> Result<(), String> {
-        if !g6b_ui::MENUS.iter().any(|face| face.id == id) {
-            return Err(format!("unknown menu {id}"));
-        }
-        for face in g6b_ui::MENUS {
-            let mut found = false;
-            let show = face.id == id;
-            each_id(&mut self.dom, &format!("menu-{}", face.id), &mut |panel| {
-                found = true;
-                panel.set_visible(show);
-                Ok(())
-            })?;
-            if !found {
-                return Err(format!("missing menu {}", face.id));
-            }
-        }
-        if self.selected_menu != id {
-            self.async_scripts.cancel_all();
-        }
-        self.selected_menu = id.into();
-        self.paint_live_tabs(id)?;
-        self.focus_field(0)?;
-        Ok(())
-    }
-
-    /// Restyle the live Svelte tab strip (`bios-tab-active`, aria) so goosie
-    /// plus GLES2 present the selected menu. Every node with that id is
-    /// updated (static shell and LDC cell tree).
-    fn paint_live_tabs(&mut self, id: &str) -> Result<(), String> {
-        for face in g6b_ui::MENUS {
-            let active = face.id == id;
-            each_id(&mut self.dom, &format!("tab-{}", face.id), &mut |tab| {
-                tab.set_attribute(
-                    "class",
-                    if active {
-                        "bios-tab bios-tab-active"
-                    } else {
-                        "bios-tab"
-                    },
-                )?;
-                tab.set_attribute("aria-selected", if active { "true" } else { "false" })?;
-                tab.set_attribute("tabindex", if active { "0" } else { "-1" })?;
-                if active {
-                    tab.set_attribute("aria-current", "page")?;
-                } else {
-                    tab.remove_attribute("aria-current");
-                }
-                Ok(())
-            })?;
-        }
-        Ok(())
-    }
-
     fn focus_field(&mut self, delta: i32) -> Result<bool, String> {
         fn collect(node: &Node, ids: &mut Vec<String>) {
             if node.hidden {
@@ -5489,6 +5455,12 @@ impl BrowserSession {
     }
 
     pub fn handle_key(&mut self, key: &str) -> Result<bool, String> {
+        if self.console_open {
+            if let Some(k) = ui_key_to_shell(key) {
+                self.shell.key(k);
+            }
+            return Ok(true);
+        }
         if matches!(key, "ArrowUp" | "ArrowDown" | "Tab") {
             return self.focus_field(if key == "ArrowUp" { -1 } else { 1 });
         }
@@ -5874,6 +5846,9 @@ impl BrowserSession {
             self.paint_status("UI-BOOT: values refreshed; read-only setup");
             return Ok(());
         }
+        if self.shell_click(id)? {
+            return Ok(());
+        }
         let menu = find_node_by_id(&self.dom, id)
             .and_then(|n| n.get_attribute("data-menu-link").map(str::to_string));
         let Some(menu) = menu else {
@@ -5889,6 +5864,59 @@ impl BrowserSession {
         }
         self.paint_status(&format!("UI-BOOT: {menu} menu; read-only setup"));
         Ok(())
+    }
+}
+
+fn setting_control_value(dom: &Node, id: &str) -> String {
+    let Some(node) = find_node_by_id(dom, id) else {
+        return String::new();
+    };
+    if let Some(v) = node.get_attribute("value") {
+        if !v.is_empty() {
+            return v.to_string();
+        }
+    }
+    node.children
+        .iter()
+        .find(|c| c.name.eq_ignore_ascii_case("option"))
+        .map(|opt| {
+            opt.get_attribute("value")
+                .map(str::to_string)
+                .unwrap_or_else(|| opt.inner_text())
+        })
+        .unwrap_or_default()
+}
+
+fn ui_key_to_shell(key: &str) -> Option<g6b_zealcli::Key> {
+    use g6b_zealcli::Key;
+    match key {
+        "ArrowUp" => Some(Key::Up),
+        "ArrowDown" => Some(Key::Down),
+        "ArrowLeft" => Some(Key::Left),
+        "ArrowRight" => Some(Key::Right),
+        "Enter" => Some(Key::Enter),
+        "Backspace" => Some(Key::Backspace),
+        "Escape" => Some(Key::Esc),
+        "Tab" => Some(Key::Tab),
+        other if other.chars().count() == 1 => other.chars().next().map(Key::Char),
+        _ => None,
+    }
+}
+
+fn input_value(dom: &Node, id: &str) -> String {
+    find_node_by_id(dom, id)
+        .and_then(|n| n.get_attribute("value").map(str::to_string))
+        .unwrap_or_default()
+}
+
+fn collect_attr_ids(node: &Node, attr: &str, out: &mut Vec<String>) {
+    if node.get_attribute(attr).is_some() {
+        if let Some(id) = node.id.as_deref() {
+            out.push(id.to_string());
+        }
+    }
+    for child in &node.children {
+        collect_attr_ids(child, attr, out);
     }
 }
 
@@ -5946,6 +5974,24 @@ fn body_node(node: &mut Node) -> Option<&mut Node> {
     None
 }
 
+/// DFS path that does not enter `#libwasm-root`.
+fn walk_outside_mount(node: &Node, id: &str, path: &mut Vec<usize>) -> Option<Vec<usize>> {
+    if node.id.as_deref() == Some("libwasm-root") {
+        return None;
+    }
+    if node.id.as_deref() == Some(id) {
+        return Some(path.clone());
+    }
+    for (i, child) in node.children.iter().enumerate() {
+        path.push(i);
+        if let Some(found) = walk_outside_mount(child, id, path) {
+            return Some(found);
+        }
+        path.pop();
+    }
+    None
+}
+
 fn path_to_id(root: &Node, id: &str) -> Option<Vec<usize>> {
     fn walk(node: &Node, id: &str, path: &mut Vec<usize>) -> Option<Vec<usize>> {
         if node.id.as_deref() == Some(id) {
@@ -5976,6 +6022,11 @@ fn path_to_id(root: &Node, id: &str) -> Option<Vec<usize>> {
         None
     }
     if let Some(body) = find_body(root, &mut Vec::new()) {
+        // The painted page is the shell. A cell copy under `#libwasm-root`
+        // must not win an id lookup while the shell still has that id.
+        if let Some(path) = walk_outside_mount(body, id, &mut Vec::new()) {
+            return Some(path);
+        }
         if let Some(mut mount_path) = walk(body, "libwasm-root", &mut Vec::new()) {
             if let Some(mount) = node_at(body, &mount_path) {
                 if let Some(path) = walk(mount, id, &mut Vec::new()) {
@@ -6664,19 +6715,21 @@ fn collect_style_text(node: &Node, out: &mut String) {
     }
 }
 
-/// Visual root for `Engine::paint`: the LDC cell's `<main>` under
-/// `#libwasm-spa` when present, otherwise the document `<body>`.
-///
-/// The cell mounts under `#libwasm-root` and owns the complete Svelte chrome
-/// and menu rows. Prefer that live tree over the static shell so screenshots
-/// exercise the DOM produced by D/WASM, not the pre-populated HTML fallback.
-/// Before a cell mounts, the direct `<main>` child of `#libwasm-spa` remains
-/// the fallback; a document without that wrapper uses its `<body>`.
+/// Visual root for `Engine::paint`: the setup shell `<main id="bios-ui">`
+/// that is not under `#libwasm-root`. The cell may still run fetches, but it
+/// must not be a second copy of the page.
 fn live_paint_root(dom: &Node) -> &Node {
-    if let Some(cell) = find_node_by_id(dom, "libwasm-root")
-        .and_then(|mount| first_descendant_by_name(mount, "main"))
-    {
-        return cell;
+    fn walk(node: &Node, in_mount: bool) -> Option<&Node> {
+        if node.id.as_deref() == Some("libwasm-root") {
+            return node.children.iter().find_map(|c| walk(c, true));
+        }
+        if !in_mount && node.id.as_deref() == Some("bios-ui") {
+            return Some(node);
+        }
+        node.children.iter().find_map(|c| walk(c, in_mount))
+    }
+    if let Some(shell) = walk(dom, false) {
+        return shell;
     }
     if let Some(spa) = find_node_by_id(dom, "libwasm-spa") {
         for c in &spa.children {
@@ -6686,6 +6739,30 @@ fn live_paint_root(dom: &Node) -> &Node {
         }
     }
     first_descendant_by_name(dom, "body").unwrap_or(dom)
+}
+
+/// Remove `<main id="bios-ui">` nodes that the cell appended under `#libwasm-root`.
+fn strip_cell_page_clone(dom: &mut Node) {
+    fn walk(node: &mut Node, in_mount: bool) {
+        if in_mount {
+            node.children.retain(|c| c.id.as_deref() != Some("bios-ui"));
+        }
+        let here = node.id.as_deref() == Some("libwasm-root");
+        for child in &mut node.children {
+            walk(child, in_mount || here);
+        }
+    }
+    walk(dom, false);
+}
+
+#[cfg(test)]
+fn count_nodes_with_id(node: &Node, id: &str) -> usize {
+    let here = usize::from(node.id.as_deref() == Some(id));
+    here + node
+        .children
+        .iter()
+        .map(|c| count_nodes_with_id(c, id))
+        .sum::<usize>()
 }
 
 fn node_has_id(node: &Node, id: &str) -> bool {
@@ -7891,6 +7968,11 @@ pub fn ui_ppm32_output_at(
     h: u32,
 ) -> Result<g6b_css::render32::Render32Output, String> {
     let mut session = BrowserSession::new(spec)?;
+    if let Ok(menu) = std::env::var("G6B_SETUP_MENU") {
+        if !menu.is_empty() {
+            let _ = session.select_menu(&menu);
+        }
+    }
     session.paint_css_at(w.max(320), h.max(200))
 }
 
@@ -8931,6 +9013,373 @@ mod tests {
     }
 
     #[test]
+    fn status_fetches_do_not_write_the_nodes() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let _ = session.console_submit("set boot.autoboot_order os-first");
+        let pending = session.kernel_fetch("GET", "/bios/settings/pending");
+        assert_eq!(pending.status, 200);
+        assert!(
+            pending.body_str().contains("os-first"),
+            "{}",
+            pending.body_str()
+        );
+        let fw = session.kernel_fetch("GET", "/bios/fw/status");
+        assert_eq!(fw.status, 200);
+        let hw = session.kernel_fetch("GET", "/bios/hw/stat");
+        assert_eq!(hw.status, 200);
+        assert!(hw.body_str().contains("\"nat\""), "{}", hw.body_str());
+        assert_eq!(
+            find_node_by_id(&session.dom, "settings-pending")
+                .unwrap()
+                .inner_text(),
+            "no pending settings writes"
+        );
+        assert_eq!(
+            find_node_by_id(&session.dom, "fw-digest")
+                .unwrap()
+                .inner_text(),
+            "digest: (none)"
+        );
+    }
+
+    #[test]
+    fn disk_list_is_fetched_and_not_written_into_the_page() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        assert!(g6b_ui::setup_html(&spec).contains("id=\"disk-body\""));
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let resp = session.kernel_fetch("GET", "/bios/disk");
+        assert_eq!(resp.status, 200);
+        let body = resp.body_str();
+        assert!(body.starts_with("{\"disks\":"), "{body}");
+        assert_eq!(
+            find_node_by_id(&session.dom, "disk-body")
+                .unwrap()
+                .inner_text(),
+            ""
+        );
+    }
+
+    #[test]
+    fn writable_boot_order_control_sets_the_overlay_not_the_row() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let html = g6b_ui::setup_html(&spec);
+        assert!(html.contains("id=\"edit-boot-autoboot_order\""));
+        assert!(html.contains("value=\"os-first\""));
+        assert!(html.contains("value=\"payload-first\""));
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let row = find_node_by_id(&session.dom, "row-boot-autoboot_order").unwrap();
+        assert_eq!(row.inner_text(), "live-first");
+        session
+            .dom
+            .get_element_by_id("edit-boot-autoboot_order")
+            .unwrap()
+            .set_attribute("value", "os-first")
+            .unwrap();
+        let out = session.apply_setting_control("boot.autoboot_order");
+        assert!(out.contains("os-first"), "{out}");
+        assert_eq!(
+            find_node_by_id(&session.dom, "row-boot-autoboot_order")
+                .unwrap()
+                .inner_text(),
+            "live-first"
+        );
+    }
+
+    #[test]
+    fn console_help_matches_the_vga_prompt_and_close_keeps_the_overlay() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let html = g6b_ui::setup_html(&spec);
+        assert!(html.contains("id=\"cli-screen\""), "{html}");
+        assert!(html.contains("id=\"console-open\""));
+        let mut off = spec.clone();
+        off.kernel.cli.enable = false;
+        assert!(!g6b_ui::setup_html(&off).contains("id=\"console-open\""));
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let mut vga = crate::zealcli::session(&spec);
+        assert_eq!(session.console_submit("help"), vga.eval("help").1);
+        let set = session.console_submit("set boot.autoboot_order os-first");
+        assert!(set.contains("os-first"), "{set}");
+        session.console_set(true);
+        assert!(session.handle_key("ArrowRight").unwrap());
+        assert!(session.handle_key("h").unwrap());
+        assert!(find_node_by_id(&session.dom, "menu-cpu").unwrap().hidden);
+        let screen = session.kernel_fetch("GET", "/bios/cli/screen");
+        assert_eq!(screen.status, 200);
+        assert!(screen.body_str().contains('h'), "{}", screen.body_str());
+        assert_eq!(
+            find_node_by_id(&session.dom, "cli-screen")
+                .unwrap()
+                .inner_text(),
+            ""
+        );
+        session.console_set(false);
+        let got = session.console_submit("get boot.autoboot_order");
+        assert!(got.contains("os-first"), "{got}");
+        assert!(got.contains("pending"), "{got}");
+        let exported = session.holyc_request(r#"SettingsExport("uart")"#).unwrap();
+        let g6b_holyc::ReplResult::Output(exp) = exported else {
+            panic!("export");
+        };
+        assert!(exp.contains("os-first"), "{exp}");
+    }
+
+    #[test]
+    fn console_key_post_returns_the_screen_and_leaves_the_node_empty() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let closed = session.cli_post("/bios/cli", "key h").unwrap();
+        assert_eq!(closed.status, 409, "{}", closed.body_str());
+        let opened = session.cli_post("/bios/cli", "open").unwrap();
+        assert_eq!(opened.status, 200);
+        let typed = session.cli_post("/bios/cli", "key h").unwrap();
+        assert_eq!(typed.status, 200);
+        assert!(typed.body_str().contains('h'), "{}", typed.body_str());
+        assert_eq!(
+            find_node_by_id(&session.dom, "cli-screen")
+                .unwrap()
+                .inner_text(),
+            ""
+        );
+        assert!(
+            find_node_by_id(&session.dom, "menu-cpu").unwrap().hidden,
+            "a console key must not change the setup tab"
+        );
+        let mut off = spec.clone();
+        off.kernel.cli.enable = false;
+        let mut disabled = BrowserSession::new(&off).unwrap();
+        assert_eq!(disabled.cli_post("/bios/cli", "open").unwrap().status, 404);
+    }
+
+    #[test]
+    fn manual_window_is_one_session_and_fails_closed() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let html = g6b_ui::setup_html(&spec);
+        assert!(html.contains("id=\"manual-open\""), "{html}");
+        assert!(html.contains("id=\"manual-window\""));
+        assert!(!html.contains("<iframe"), "{html}");
+        let mut off = spec.clone();
+        off.kernel.http.outbound = false;
+        let closed_html = g6b_ui::setup_html(&off);
+        assert!(
+            !closed_html.contains("id=\"manual-open\""),
+            "unarmed profile has no manual button"
+        );
+        let mut session = BrowserSession::new(&spec).unwrap();
+        session.stub_outbound(BIOS_MANUAL_URL, 200, "<p>manual</p>");
+        let opened = session.open_manual();
+        assert!(opened.contains("200"), "{opened}");
+        let tab = session.iframe_session(0).unwrap();
+        assert_eq!(tab.location, BIOS_MANUAL_URL);
+        assert_eq!(tab.load, g6b_iframe::SessionLoad::Http(200));
+        assert!(session.iframe_session(1).is_none());
+        assert_eq!(
+            find_node_by_id(&session.dom, "manual-status")
+                .unwrap()
+                .inner_text(),
+            "manual closed"
+        );
+        let mut closed = BrowserSession::new(&off).unwrap();
+        let denied = closed.open_manual();
+        assert!(denied.contains("outbound fetch disabled"), "{denied}");
+        let tab = closed.iframe_session(0).unwrap();
+        assert_eq!(tab.location, BIOS_MANUAL_URL);
+        assert!(
+            closed
+                .diagnostics
+                .iter()
+                .all(|d| !d.contains("KERNEL-FETCH https")),
+            "{:?}",
+            closed.diagnostics
+        );
+        assert!(find_node_by_id(&closed.dom, "manual-status").is_none());
+    }
+
+    #[test]
+    fn firmware_commit_waits_for_a_digest_and_refuses_cleartext() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let html = g6b_ui::setup_html(&spec);
+        assert!(html.contains("id=\"fw-stage\""), "{html}");
+        assert!(html.contains("id=\"fw-commit\""));
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let early = session.holyc_request(r#"FwApply("")"#).unwrap();
+        let g6b_holyc::ReplResult::Output(early_text) = early else {
+            panic!("apply");
+        };
+        assert!(
+            early_text.contains("digest not shown") || early_text.contains("nothing staged"),
+            "{early_text}"
+        );
+        let clear = session
+            .holyc_request(r#"FwUpdate("http://fw.example/bios.elf")"#)
+            .unwrap();
+        let g6b_holyc::ReplResult::Output(clear_text) = clear else {
+            panic!("http");
+        };
+        assert!(clear_text.contains("https"), "{clear_text}");
+        assert_eq!(
+            find_node_by_id(&session.dom, "fw-digest")
+                .unwrap()
+                .inner_text(),
+            "digest: (none)"
+        );
+        let mut off = spec.clone();
+        off.kernel.cli.fw = false;
+        let mut bare = BrowserSession::new(&off).unwrap();
+        let denied = bare
+            .holyc_request(r#"FwUpdate("https://fw.example/bios.elf")"#)
+            .unwrap();
+        let g6b_holyc::ReplResult::Output(denied_text) = denied else {
+            panic!("off");
+        };
+        assert!(denied_text.contains("kernel.cli.fw"), "{denied_text}");
+    }
+
+    #[test]
+    fn devices_nat_stays_off_the_host_nic_and_static_needs_an_address() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let html = g6b_ui::setup_html(&spec);
+        assert!(html.contains("id=\"net-nat\""));
+        assert!(html.contains("id=\"wifi-catalog\""));
+        assert!(!html.to_ascii_lowercase().contains("ssid"), "{html}");
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let nat = session.holyc_request(r#"HwConfig("net0","nat")"#).unwrap();
+        let g6b_holyc::ReplResult::Output(nat_text) = nat else {
+            panic!("nat");
+        };
+        assert!(
+            nat_text.contains("HW-OK") || nat_text.contains("nat"),
+            "{nat_text}"
+        );
+        assert!(
+            session.hw.env_untouched(),
+            "NAT must not program a host NIC"
+        );
+        let missing = session.net_apply("static");
+        assert!(missing.contains("NET-REFUSED"), "{missing}");
+        assert!(session.hw.env_untouched());
+        let status = find_node_by_id(&session.dom, "hw-nat-status")
+            .map(|n| n.inner_text())
+            .unwrap_or_default();
+        assert!(
+            status.is_empty() || status == "hw idle",
+            "kernel must not fill #hw-nat-status: {status}"
+        );
+        let refused = session.holyc_request(r#"HwHostApply("net0","")"#).unwrap();
+        let g6b_holyc::ReplResult::Output(refused_text) = refused else {
+            panic!("host apply");
+        };
+        assert!(
+            refused_text.contains("adapter name") || refused_text.contains("HW-ERR"),
+            "{refused_text}"
+        );
+        assert!(session.hw.env_untouched());
+        let argv = qemu_dual_band_argv(&spec).join(" ");
+        assert!(!argv.contains("-netdev"), "{argv}");
+        assert!(!argv.contains("virtio-net"), "{argv}");
+    }
+
+    #[test]
+    fn settings_export_round_trip_does_not_rewrite_the_row() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let set = session
+            .holyc_request(r#"SettingSet("boot.autoboot_order","os-first")"#)
+            .unwrap();
+        let g6b_holyc::ReplResult::Output(set_text) = set else {
+            panic!("set");
+        };
+        assert!(set_text.contains("os-first"), "{set_text}");
+        assert_eq!(
+            find_node_by_id(&session.dom, "row-boot-autoboot_order")
+                .unwrap()
+                .inner_text(),
+            "live-first"
+        );
+        let exported = session.holyc_request(r#"SettingsExport("uart")"#).unwrap();
+        let g6b_holyc::ReplResult::Output(exp) = exported else {
+            panic!("export");
+        };
+        assert!(exp.contains("SETTINGS-EXPORT via=uart"), "{exp}");
+        assert!(exp.contains("os-first"), "{exp}");
+        let patch = exp[exp.find("{\"schema_version\"").expect("patch")..].trim();
+        let mut fresh = BrowserSession::new(&spec).unwrap();
+        fresh.import_settings_patch(patch).unwrap();
+        let again = fresh.holyc_request(r#"SettingsExport("uart")"#).unwrap();
+        let g6b_holyc::ReplResult::Output(again_text) = again else {
+            panic!("fresh export");
+        };
+        assert!(again_text.contains("os-first"), "{again_text}");
+        assert_eq!(
+            find_node_by_id(&fresh.dom, "row-boot-autoboot_order")
+                .unwrap()
+                .inner_text(),
+            "live-first"
+        );
+    }
+
+    #[test]
+    fn native_setup_post_matches_holyc_request_pending() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let line = r#"SettingSet("boot.autoboot_order","os-first")"#;
+        let mut via_request = BrowserSession::new(&spec).unwrap();
+        via_request.holyc_request(line).unwrap();
+        let mut via_page = BrowserSession::new(&spec).unwrap();
+        let resp = via_page
+            .setup_post("/bios/holyc", line)
+            .expect("native page posts /bios/holyc");
+        assert_eq!(resp.status, 200, "{}", resp.body_str());
+        assert!(resp.body_str().contains("os-first"), "{}", resp.body_str());
+        assert_eq!(
+            via_request.shell.pending_json(),
+            via_page.shell.pending_json()
+        );
+        assert!(
+            via_page.shell.pending_json().contains("os-first"),
+            "{}",
+            via_page.shell.pending_json()
+        );
+        assert_eq!(
+            find_node_by_id(&via_page.dom, "row-boot-autoboot_order")
+                .unwrap()
+                .inner_text(),
+            "live-first"
+        );
+        assert!(via_page.setup_post("/bios/menu/main", line).is_none());
+        let refused = via_page.setup_post("/bios/holyc", "\n").unwrap();
+        assert_eq!(refused.status, 400);
+    }
+
+    #[test]
+    fn boot_media_is_on_the_boot_panel_and_bootselect_does_not_rewrite_rows() {
+        let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let resp = g6b_http::Router::from_spec(&spec).fetch_get("/bios/boot/entries");
+        assert_eq!(resp.status, 200);
+        assert!(resp.body_str().contains("\"id\":\"bios-ui\""));
+        assert!(resp.body_str().contains("\"order\":\"live-first\""));
+        let mut session = BrowserSession::new(&spec).unwrap();
+        let before = find_node_by_id(&session.dom, "row-boot-autoboot_order")
+            .expect("autoboot_order row")
+            .inner_text();
+        assert_eq!(before, "live-first");
+        assert!(find_node_by_id(&session.dom, "boot-pick-bios-ui").is_some());
+        let picked = session
+            .holyc_request("BootSelect(\"bios-ui\")")
+            .expect("BootSelect");
+        let g6b_holyc::ReplResult::Output(text) = picked else {
+            panic!("BootSelect output");
+        };
+        assert!(text.contains("bios-ui"), "{text}");
+        assert_eq!(
+            find_node_by_id(&session.dom, "row-boot-autoboot_order")
+                .unwrap()
+                .inner_text(),
+            before,
+            "kernel must not rewrite the boot row"
+        );
+    }
+
+    #[test]
     fn shipped_ldc_cell_emits_g6b_listen_and_jscallback() {
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
         let mut session = BrowserSession::new(&spec).unwrap();
@@ -9862,7 +10311,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_thread_dom_event_throws_into_try_await_catch_with_jit_stack() {
+    fn ui_thread_dom_event_throw_stack_and_await_in_try_is_refused() {
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
         let mut session = BrowserSession::new(&spec).unwrap();
         let bytes = g6b_wasm::asyncify_wat(g6b_wasm::UI_EVENT_THROW_WAT)
@@ -9909,33 +10358,13 @@ mod tests {
             host.diagnostics
         );
 
-        host.diagnostics.clear();
         let ay = g6b_wasm::Asyncify::new(&module).expect("asyncify exports");
-        let data = 1024u32;
-        let slot = match ay
-            .step(&mut module, surrounding, &[], data, 4096, &mut host)
-            .expect("await unwind")
-        {
-            g6b_wasm::Step::Sleeping { slot, .. } => slot,
-            other => panic!("expected Sleeping, {other:?}"),
-        };
-        g6b_wasm::Host::resolve_slot(&mut host, slot).expect("wrapExportFn settle");
-        match ay
-            .resume(&mut module, surrounding, &[], data, 4096, &mut host)
-            .expect("rewind into event throw, caught outside")
-        {
-            g6b_wasm::Step::Done(v) => assert_eq!(v, vec![1], "try/await/catch returns 1"),
-            other => panic!("expected Done(1), {other:?}"),
-        }
+        let err = ay
+            .step(&mut module, surrounding, &[], 1024, 4096, &mut host)
+            .expect_err("await inside try");
         assert!(
-            host.diagnostics
-                .iter()
-                .any(|d| d.contains("WASM-THROW-STACK")
-                    && d.contains("thrower")
-                    && d.contains("on_click")
-                    && d.contains("surrounding")),
-            "caught outside the event: {:?}",
-            host.diagnostics
+            err.contains("await inside try"),
+            "rewind is not a landing pad: {err}"
         );
     }
 
@@ -9956,7 +10385,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_thread_try_table_throw_in_await_has_jit_stack() {
+    fn ui_thread_try_table_await_is_refused() {
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
         let mut session = BrowserSession::new(&spec).unwrap();
         let bytes = g6b_wasm::asyncify_wat(g6b_wasm::TRY_TABLE_AWAIT_WAT)
@@ -9971,32 +10400,17 @@ mod tests {
         let mut timers = crate::timers::TimerHeap::new();
         let mut host = kernel_host_for_try_table(&mut session, &spec, &mut timers);
         let ay = g6b_wasm::Asyncify::new(&module).expect("asyncify exports");
-        let slot = match ay
+        let err = ay
             .step(&mut module, throw_in_await, &[], 1024, 4096, &mut host)
-            .expect("await unwind")
-        {
-            g6b_wasm::Step::Sleeping { slot, .. } => slot,
-            other => panic!("expected Sleeping, {other:?}"),
-        };
-        g6b_wasm::Host::resolve_slot(&mut host, slot).expect("wrapExportFn settle");
-        match ay
-            .resume(&mut module, throw_in_await, &[], 1024, 4096, &mut host)
-            .expect("rewind then throw lands on try_table dest")
-        {
-            g6b_wasm::Step::Done(v) => assert_eq!(v, vec![7]),
-            other => panic!("expected Done(7), {other:?}"),
-        }
+            .expect_err("await inside try_table");
         assert!(
-            host.diagnostics
-                .iter()
-                .any(|d| d.contains("WASM-THROW-STACK") && d.contains("throw_in_await")),
-            "simple throw in await: {:?}",
-            host.diagnostics
+            err.contains("await inside try"),
+            "rewind is not a landing pad: {err}"
         );
     }
 
     #[test]
-    fn ui_thread_async_dom_event_awaits_then_thrower_caught() {
+    fn ui_thread_async_dom_event_await_in_try_is_refused() {
         let spec = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
         let mut session = BrowserSession::new(&spec).unwrap();
         let bytes = g6b_wasm::asyncify_wat(g6b_wasm::TRY_TABLE_AWAIT_WAT)
@@ -10011,29 +10425,12 @@ mod tests {
         let mut timers = crate::timers::TimerHeap::new();
         let mut host = kernel_host_for_try_table(&mut session, &spec, &mut timers);
         let ay = g6b_wasm::Asyncify::new(&module).expect("asyncify exports");
-        let slot = match ay
+        let err = ay
             .step(&mut module, dom_event, &[], 1024, 4096, &mut host)
-            .expect("domEvent await unwinds")
-        {
-            g6b_wasm::Step::Sleeping { slot, .. } => slot,
-            other => panic!("expected Sleeping, {other:?}"),
-        };
-        g6b_wasm::Host::resolve_slot(&mut host, slot).expect("wrapExportFn settle");
-        match ay
-            .resume(&mut module, dom_event, &[], 1024, 4096, &mut host)
-            .expect("rewind into thrower, caught in event try_table")
-        {
-            g6b_wasm::Step::Done(v) => assert_eq!(v, vec![1]),
-            other => panic!("expected Done(1), {other:?}"),
-        }
+            .expect_err("await inside try_table");
         assert!(
-            host.diagnostics
-                .iter()
-                .any(|d| d.contains("WASM-THROW-STACK")
-                    && d.contains("thrower")
-                    && (d.contains("on_click") || d.contains("domEvent"))),
-            "async DOM event stack: {:?}",
-            host.diagnostics
+            err.contains("await inside try"),
+            "rewind is not a landing pad: {err}"
         );
     }
 
@@ -10083,17 +10480,21 @@ mod tests {
     }
 
     #[test]
-    fn live_svelte_root_and_all_menu_rows_come_from_the_ldc_cell() {
+    fn live_svelte_root_is_the_shell_and_menu_ids_are_unique() {
         let spec =
             BoardSpec::from_json_str(include_str!("../../../fixtures/g6lc64-web-autoboot.json"))
                 .unwrap();
         let mut session = BrowserSession::new(&spec).unwrap();
         assert!(session.wasm_executed);
+        let shell = find_node_by_id(&session.dom, "bios-ui").unwrap();
+        assert!(std::ptr::eq(live_paint_root(&session.dom), shell));
+        assert_eq!(count_nodes_with_id(&session.dom, "menu-cpu"), 1);
+        assert_eq!(count_nodes_with_id(&session.dom, "bios-ui"), 1);
         let mount = find_node_by_id(&session.dom, "libwasm-root").unwrap();
-        let cell = first_descendant_by_name(mount, "main").unwrap();
-        assert!(std::ptr::eq(live_paint_root(&session.dom), cell));
+        assert_eq!(count_nodes_with_id(mount, "menu-cpu"), 0);
+        assert_eq!(count_nodes_with_id(mount, "bios-ui"), 0);
         for menu in spec.menus() {
-            let body = find_node_by_id(cell, &format!("menu-{}-body", menu.id)).unwrap();
+            let body = find_node_by_id(&session.dom, &format!("menu-{}-body", menu.id)).unwrap();
             for item in menu.items {
                 assert!(
                     body.inner_text().contains(&item.label),
@@ -10109,21 +10510,15 @@ mod tests {
                 );
             }
         }
-        let main = session.paint_css_at(1280, 900).unwrap();
-        session.handle_key("ArrowRight").unwrap();
-        let cpu = session.paint_css_at(1280, 900).unwrap();
-        assert_eq!(session.selected_menu, "cpu");
-        assert_ne!(main.canvas.to_ppm(), cpu.canvas.to_ppm());
-        assert!(!cpu
-            .hit_boxes
-            .iter()
-            .any(|hit| hit.id.as_deref() == Some("main-title")));
-        assert!(cpu
-            .hit_boxes
-            .iter()
-            .any(|hit| hit.id.as_deref() == Some("cpu-title")));
-        session.handle_key("F10").unwrap();
-        assert_eq!(session.selected_menu, "cpu");
+        session.select_menu("boot").unwrap();
+        let painted = session.paint_css_at(1280, 900).unwrap();
+        assert!(
+            painted
+                .hit_boxes
+                .iter()
+                .any(|hit| hit.id.as_deref() == Some("boot-title") && hit.w > 0 && hit.h > 0),
+            "boot title on the shell has a hit box"
+        );
     }
 
     #[test]
@@ -11231,7 +11626,7 @@ mod tests {
     }
 
     #[test]
-    fn libwasm_session_builds_static_tree() {
+    fn libwasm_session_adopts_the_shell_instead_of_a_second_page() {
         if !g6b_wasm::bios_ui_libwasm_live() {
             // The LDC/libwasm artifact is a build-time input; when it is not
             // shipped this check is vacuous rather than a failure.
@@ -11242,10 +11637,9 @@ mod tests {
         let mut dom =
             g6b_html::parse_checked(&g6b_ui::setup_html_libwasm(&spec, "/ui/ui-libwasm.wasm"))
                 .unwrap();
-        // The guest's handle 1 is a fresh `<div>` mount under `libwasm-root`;
-        // `mount_path` keeps handle-1 resolution separate from the page DOM so
-        // guest `fetch` paints the setup panels while the Svelte tree stages
-        // under the mount.
+        // Handle 1 starts as a fresh `<div>` under `#libwasm-root`. When the
+        // cell sets `id=bios-ui` and that id is already the shell, the handle
+        // adopts the shell and later appends do not clone the page.
         let root_path = path_from_root(&dom, "libwasm-root").expect("libwasm-root in libwasm page");
         let mount_path = {
             let root = node_at_mut(&mut dom, &root_path).unwrap();
@@ -11274,11 +11668,19 @@ mod tests {
         let diagnostics = host.diagnostics.clone();
         drop(host);
         let mount = node_at(&dom, &mount_path).unwrap();
-        let nodes = count_dom(mount);
-        assert!(
-            nodes >= 80,
-            "libwasm tree has {nodes} nodes; diagnostics: {diagnostics:?}"
+        assert_eq!(
+            count_dom(mount),
+            1,
+            "mount stays empty; diagnostics: {diagnostics:?}"
         );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.contains("WASM-ADOPT-ID bios-ui")),
+            "{diagnostics:?}"
+        );
+        assert_eq!(count_nodes_with_id(&dom, "bios-ui"), 1);
+        assert_eq!(count_nodes_with_id(&dom, "menu-cpu"), 1);
     }
 
     #[test]

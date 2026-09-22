@@ -376,10 +376,13 @@ pub struct KernelNet {
     /// 1-RTT PSK tickets. 0-RTT is not stored.
     tls_sessions: g6b_tls::SessionCache,
     /// Empty / missing store fails closed for `verify_https_peer`.
+    /// The store is attached from tests; the firmware image has no roots yet.
+    #[cfg_attr(not(test), allow(dead_code))]
     trust: Option<CertStore>,
 }
 
 #[derive(Clone, Debug)]
+#[cfg_attr(not(test), allow(dead_code))]
 enum TlsEntropyKind {
     Fixture(FixtureEntropy),
     Virtio(VirtioRng),
@@ -415,14 +418,17 @@ impl KernelNet {
         }
     }
 
+    #[cfg(test)]
     fn use_test_entropy(&mut self) {
         self.tls_rng = Some(TlsEntropyKind::Fixture(FixtureEntropy::TEST));
     }
 
+    #[cfg(test)]
     fn use_virtio_rng(&mut self, bytes: Vec<u8>) {
         self.tls_rng = Some(TlsEntropyKind::Virtio(VirtioRng::from_device(bytes)));
     }
 
+    #[cfg(test)]
     fn use_virtio_rng_extracted(&mut self, bytes: &[u8]) -> Result<(), String> {
         self.tls_rng = Some(TlsEntropyKind::Virtio(VirtioRng::from_device_extracted(
             bytes,
@@ -431,6 +437,7 @@ impl KernelNet {
     }
 
     /// Isolated-NAT OCSP POST bytes. HTTPS and public hosts fail closed.
+    #[cfg(test)]
     fn ocsp_http_plan(url: &str, serial: &[u8]) -> Result<Vec<u8>, String> {
         let u = g6b_http::ocsp_plan(url)?;
         Ok(g6b_http::ocsp_http_post(
@@ -439,10 +446,12 @@ impl KernelNet {
         ))
     }
 
+    #[cfg(test)]
     fn attach_trust(&mut self, store: CertStore) {
         self.trust = Some(store);
     }
 
+    #[cfg(test)]
     fn verify_https_peer(
         &self,
         host: &str,
@@ -454,11 +463,13 @@ impl KernelNet {
         store.verify_chain(&chain, host, clock)
     }
 
+    #[cfg(test)]
     fn remember_ticket(&mut self, ticket: g6b_tls::Ticket) {
         self.tls_sessions.store(ticket);
     }
 
     /// After a 1-RTT handshake, install NewSessionTicket for this host.
+    #[cfg(test)]
     fn install_server_ticket(
         &mut self,
         host: &str,
@@ -513,15 +524,18 @@ impl KernelNet {
     }
 
     /// Test seam: next `poll` fails before packet/socket I/O.
+    #[cfg(test)]
     fn hold_watchdog(&mut self) {
         self.wdt_hold = true;
     }
 
+    #[cfg(test)]
     fn drop_link(&mut self) {
         let id = self.hw.primary_net_id();
         let _ = self.hw.apply_link(&id, "down");
     }
 
+    #[cfg(test)]
     fn unplug(&mut self) {
         let _ = self
             .hw
@@ -529,6 +543,7 @@ impl KernelNet {
         let _ = self.hw.drain_one();
     }
 
+    #[cfg(test)]
     fn force_dst(&mut self, handle: u32, ip: [u8; 4]) {
         if let Some(job) = self.job_mut(handle) {
             job.dst = Some(ip);
@@ -631,7 +646,12 @@ impl NetPort for KernelNet {
             } else {
                 // TLS 1.2 ECDHE-GCM hello (supported_versions 1.2). Avoids schoolbook
                 // X25519 on the first GET; 1.3 is used once a ticket/pk exists.
-                g6b_tls::client_hello_with(&req.host, rng)?
+                // An IP literal is the TCP peer only — RFC 6066 forbids it in SNI.
+                if req.host.parse::<std::net::IpAddr>().is_ok() {
+                    g6b_tls::client_hello_no_sni(rng)?
+                } else {
+                    g6b_tls::client_hello_with(&req.host, rng)?
+                }
             }
         } else {
             g6b_http::outbound::http1_get_request(&req)
@@ -1692,6 +1712,8 @@ mod tests {
         let handle2 = net.get("https://127.0.0.1/fw.elf").expect("second");
         let hello2 = net.job(handle2).and_then(|j| j.tx.clone()).expect("hello2");
         assert!(hello2.windows(2).any(|w| w == [0x00, 0x29]));
+        assert!(!hello.windows(9).any(|w| w == b"127.0.0.1"));
+        assert!(!hello2.windows(9).any(|w| w == b"127.0.0.1"));
         let mut nst = vec![0x04, 0x00, 0x00, 0x11];
         nst.extend_from_slice(&0x1eu32.to_be_bytes());
         nst.extend_from_slice(&0u32.to_be_bytes());
@@ -1704,6 +1726,7 @@ mod tests {
         let h3 = net.get("https://10.0.2.2/fw.elf").expect("nst host");
         let hello3 = net.job(h3).and_then(|j| j.tx.clone()).expect("hello3");
         assert!(hello3.windows(2).any(|w| w == [0x00, 0x29]));
+        assert!(!hello3.windows(8).any(|w| w == b"10.0.2.2"));
     }
 
     #[test]

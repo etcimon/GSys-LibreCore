@@ -880,7 +880,7 @@ fn err(status: u16, msg: &str) -> Response {
     Response::json(status, &format!("{{\"error\":\"{msg}\"}}"))
 }
 
-fn json_str<'a>(req: &'a Request, k: &str) -> Option<String> {
+fn json_str(req: &Request, k: &str) -> Option<String> {
     let s = std::str::from_utf8(&req.body).ok()?;
     parse_json(s).ok()?.get(k).as_str().map(str::to_string)
 }
@@ -948,7 +948,7 @@ fn cookie<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
         let part = part.trim();
         if let Some((n, v)) = part.split_once('=') {
             if n == name {
-                if v.bytes().any(|b| b < 33 || b > 126) {
+                if v.bytes().any(|b| !(33..=126).contains(&b)) {
                     return None;
                 }
                 return Some(v);

@@ -217,10 +217,10 @@ fn dns_match(pat: &str, host: &str) -> bool {
         if rest.is_empty() || rest.contains('*') || rest.starts_with('.') {
             return false;
         }
-        match host.split_once('.') {
-            Some((a, b)) if !a.is_empty() && !a.contains('.') && b == rest => true,
-            _ => false,
-        }
+        matches!(
+            host.split_once('.'),
+            Some((a, b)) if !a.is_empty() && !a.contains('.') && b == rest
+        )
     } else {
         p == host
     }
@@ -504,13 +504,14 @@ fn leap(y: i32) -> bool {
 
 fn unix_utc(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> u64 {
     let mut days: i64 = 0;
-    let yy0 = y.min(9999).max(1970);
+    let yy0 = y.clamp(1970, 9999);
     for yy in 1970..yy0 {
         days += if leap(yy) { 366 } else { 365 };
     }
     const MD: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    for i in 0..(m as usize).saturating_sub(1).min(11) {
-        days += MD[i];
+    let months = (m as usize).saturating_sub(1).min(11);
+    for (i, days_in_month) in MD.iter().enumerate().take(months) {
+        days += days_in_month;
         if i == 1 && leap(y) {
             days += 1;
         }
@@ -519,9 +520,9 @@ fn unix_utc(y: i32, m: u32, d: u32, h: u32, mi: u32, s: u32) -> u64 {
     (days * 86400 + h as i64 * 3600 + mi as i64 * 60 + s as i64) as u64
 }
 
-fn spki(
-    seq: &[u8],
-) -> Result<(&'static str, Option<RsaPub>, Option<([u8; 32], [u8; 32])>), String> {
+type SpkiParts = (&'static str, Option<RsaPub>, Option<([u8; 32], [u8; 32])>);
+
+fn spki(seq: &[u8]) -> Result<SpkiParts, String> {
     let ch = asn1::children(seq)?;
     if ch.len() != 2 || ch[0].tag != SEQ || ch[1].tag != BITS {
         return Err("x509: spki".into());
@@ -702,7 +703,7 @@ fn eku_oids(der: &[u8], eku: &mut Vec<Vec<u8>>) -> Result<(), String> {
 
 fn ski_bytes(der: &[u8]) -> Result<Vec<u8>, String> {
     match asn1::expect(der, OCTET) {
-        Ok((oct, rest)) if rest.is_empty() => Ok(oct.value.to_vec()),
+        Ok((oct, [])) => Ok(oct.value.to_vec()),
         _ => Ok(der.to_vec()),
     }
 }

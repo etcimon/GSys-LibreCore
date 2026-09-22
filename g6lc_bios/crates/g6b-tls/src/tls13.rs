@@ -353,14 +353,7 @@ pub fn client_hello_tls13(random: &[u8; 32], pk: &[u8; 32], host: &str) -> Vec<u
     body.extend_from_slice(&[0x00, 0x06, 0x13, 0x01, 0xc0, 0x2f, 0xc0, 0x2b]);
     body.extend_from_slice(&[0x01, 0x00]);
     let mut ext = Vec::new();
-    let hb = host.as_bytes();
-    let mut sni = vec![0x00];
-    sni.extend_from_slice(&(hb.len() as u16).to_be_bytes());
-    sni.extend_from_slice(hb);
-    let mut sni_list = Vec::new();
-    sni_list.extend_from_slice(&(sni.len() as u16).to_be_bytes());
-    sni_list.extend(sni);
-    push_ext(&mut ext, 0x0000, &sni_list);
+    push_server_name(&mut ext, host);
     push_ext(&mut ext, 0x000a, &[0x00, 0x06, 0x00, 0x1d, 0x00, 0x17]);
     push_ext(
         &mut ext,
@@ -396,14 +389,7 @@ pub fn client_hello_tls13_psk(
     body.extend_from_slice(&[0x00, 0x06, 0x13, 0x01, 0xc0, 0x2f, 0xc0, 0x2b]);
     body.extend_from_slice(&[0x01, 0x00]);
     let mut ext = Vec::new();
-    let hb = host.as_bytes();
-    let mut sni = vec![0x00];
-    sni.extend_from_slice(&(hb.len() as u16).to_be_bytes());
-    sni.extend_from_slice(hb);
-    let mut sni_list = Vec::new();
-    sni_list.extend_from_slice(&(sni.len() as u16).to_be_bytes());
-    sni_list.extend(sni);
-    push_ext(&mut ext, 0x0000, &sni_list);
+    push_server_name(&mut ext, host);
     push_ext(&mut ext, 0x000a, &[0x00, 0x06, 0x00, 0x1d, 0x00, 0x17]);
     push_ext(
         &mut ext,
@@ -441,6 +427,21 @@ pub fn client_hello_tls13_psk(
     let binder = crate::session::psk_binder(&ticket.psk, &hs[..cut])?;
     hs[cut + 3..].copy_from_slice(&binder);
     Ok(hs)
+}
+
+/// RFC 6066 forbids an IP literal in server_name. A DNS name is still sent.
+fn push_server_name(ext: &mut Vec<u8>, host: &str) {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return;
+    }
+    let hb = host.as_bytes();
+    let mut sni = vec![0x00];
+    sni.extend_from_slice(&(hb.len() as u16).to_be_bytes());
+    sni.extend_from_slice(hb);
+    let mut sni_list = Vec::new();
+    sni_list.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+    sni_list.extend(sni);
+    push_ext(ext, 0x0000, &sni_list);
 }
 
 fn push_ext(ext: &mut Vec<u8>, id: u16, data: &[u8]) {
@@ -590,6 +591,34 @@ mod tests {
         let h2_at = ch.windows(2).position(|w| w == b"h2").unwrap();
         let h11_at = ch.windows(8).position(|w| w == b"http/1.1").unwrap();
         assert!(h2_at < h11_at, "h2 preferred over http/1.1");
+    }
+
+    #[test]
+    fn tls13_hello_omits_sni_for_an_ip_and_binds_the_psk() {
+        let pk = [0x22u8; 32];
+        let rnd = [0x11u8; 32];
+        let named = client_hello_tls13(&rnd, &pk, "server");
+        let ip = client_hello_tls13(&rnd, &pk, "127.0.0.1");
+        let v6 = client_hello_tls13(&rnd, &pk, "::1");
+        assert!(named.windows(6).any(|w| w == b"server"));
+        assert!(!ip.windows(9).any(|w| w == b"127.0.0.1"));
+        assert!(!v6.windows(3).any(|w| w == b"::1"));
+        assert_eq!(ip, v6);
+        assert_eq!(named.len(), ip.len() + 9 + "server".len());
+        assert!(offers_tls13(&ip));
+        assert_eq!(parse_x25519_share(&ip).unwrap(), pk);
+
+        let t = crate::session::issue_ticket("127.0.0.1", &[7u8; 32], &[0, 0], b"ticket-1", &pk)
+            .unwrap();
+        let resumed = client_hello_tls13_psk(&rnd, &pk, "127.0.0.1", &t).unwrap();
+        assert!(!resumed.windows(9).any(|w| w == b"127.0.0.1"));
+        assert!(resumed.windows(2).any(|w| w == [0x00, 0x29]));
+        assert!(!resumed.windows(2).any(|w| w == [0x00, 0x2a]));
+        let binder = crate::session::psk_binder(&t.psk, &resumed[..resumed.len() - 35]).unwrap();
+        assert_eq!(&resumed[resumed.len() - 32..], &binder);
+        let named_psk = client_hello_tls13_psk(&rnd, &pk, "gsys.dev", &t).unwrap();
+        assert!(named_psk.windows(8).any(|w| w == b"gsys.dev"));
+        assert_eq!(named_psk.len(), resumed.len() + 9 + "gsys.dev".len());
     }
 
     #[test]

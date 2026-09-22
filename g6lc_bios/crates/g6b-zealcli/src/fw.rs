@@ -260,6 +260,21 @@ impl Update {
         }
     }
 
+    /// Commit only when `shown` is the digest from [`Self::stage`]. A mismatch
+    /// leaves the image staged and does not call the flash commit.
+    pub fn confirm(&mut self, ports: &mut Ports, shown: &str) -> Result<String, String> {
+        if self.phase != Phase::Ready || self.digest.is_empty() {
+            return Err(format!(
+                "fw: digest not shown; commit refused (phase {})",
+                self.phase.as_str()
+            ));
+        }
+        if shown != self.digest {
+            return Err("fw: digest mismatch; commit refused".into());
+        }
+        self.apply(ports)
+    }
+
     /// Commit the staged image. Only legal from [`Phase::Ready`] — a fetch in
     /// flight is never applied.
     pub fn apply(&mut self, ports: &mut Ports) -> Result<String, String> {
@@ -495,7 +510,11 @@ mod tests {
             up.poll(&mut ports);
         }
         assert_eq!(up.phase(), Phase::Ready, "{:?}", up.log());
-        up.apply(&mut ports).unwrap();
+        let digest = up.digest().to_string();
+        let err = up.confirm(&mut ports, "0000").unwrap_err();
+        assert!(err.contains("mismatch"), "{err}");
+        assert_eq!(up.phase(), Phase::Ready);
+        up.confirm(&mut ports, &digest).unwrap();
         assert_eq!(up.phase(), Phase::Applied);
     }
 

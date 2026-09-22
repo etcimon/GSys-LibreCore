@@ -238,13 +238,14 @@ pub const EXT_EVGETOPTB: u32 = 34;
 pub const EXT_EVGETOPTD: u32 = 35;
 
 /// M3 bounds — sized to the shipped `bios-ui-libwasm` cell (252 funcs,
-/// ~69k records, 17 mem pages, ≤845 locals, 62-entry table). These are the
-/// guest-side fences; the host predecoder (`jcode::encode`) fails closed
-/// against them before an image is ever embedded.
+/// ~69k records, 17 mem pages, 1057 locals in one frame, 62-entry table).
+/// These are the guest-side fences; the host predecoder (`jcode::encode`)
+/// fails closed against them before an image is ever embedded.
 pub const MAX_JIT_FUNCS: usize = 256;
 pub const MAX_JIT_GLOBALS: usize = 128;
-/// Locals per function — the libwasm Svelte compiler emits frames up to ~845.
-pub const MAX_JIT_LOCALS: usize = 1024;
+/// Locals per function. The shipped cell's largest frame is 1057; the
+/// decoder's own ceiling is 4096.
+pub const MAX_JIT_LOCALS: usize = 2048;
 /// Records across all functions — the shipped cell decodes to ~69k.
 pub const MAX_JIT_RECORDS: usize = 131_072;
 /// Linear-memory pages — the cell wants 17; 64 matches `MAX_MEMORY_PAGES`.

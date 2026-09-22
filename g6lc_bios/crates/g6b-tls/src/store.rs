@@ -119,12 +119,11 @@ impl CertStore {
                 return Err("tls: untrusted".into());
             }
         }
-        if chain.len() == 1 {
-            if !verify_signature(leaf, leaf)
-                && !self.roots.iter().any(|r| verify_signature(leaf, r))
-            {
-                return Err("tls: cert signature".into());
-            }
+        if chain.len() == 1
+            && !verify_signature(leaf, leaf)
+            && !self.roots.iter().any(|r| verify_signature(leaf, r))
+        {
+            return Err("tls: cert signature".into());
         }
         Ok(())
     }

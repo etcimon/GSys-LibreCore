@@ -40,6 +40,27 @@ pub fn client_hello_with(host: &str, rng: &mut dyn Entropy) -> Result<Vec<u8>, S
     if host.contains('/') || host.contains('\\') || host.contains('@') || host.contains('_') {
         return Err("tls: sni".into());
     }
+    client_hello_build(Some(host), rng)
+}
+
+/// ClientHello with no server_name. RFC 6066 forbids an IP literal in SNI;
+/// the TCP peer can still be that address.
+pub fn client_hello_no_sni(rng: &mut dyn Entropy) -> Result<Vec<u8>, String> {
+    client_hello_build(None, rng)
+}
+
+/// ClientHello for a peer name. An IP literal omits SNI. Any other name is
+/// the server_name, or `tls: sni` when that name is refused.
+pub fn client_hello_for_peer(host: &str) -> Result<Vec<u8>, String> {
+    let mut rng = FixtureEntropy::TEST;
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        client_hello_no_sni(&mut rng)
+    } else {
+        client_hello_with(host, &mut rng)
+    }
+}
+
+fn client_hello_build(host: Option<&str>, rng: &mut dyn Entropy) -> Result<Vec<u8>, String> {
     let mut rnd = [0u8; 32];
     rng.fill(&mut rnd)?;
     let mut body = Vec::new();
@@ -54,16 +75,17 @@ pub fn client_hello_with(host: &str, rng: &mut dyn Entropy) -> Result<Vec<u8>, S
     }
     body.extend_from_slice(&[0x01, 0x00]); // null compression
     let mut ext = Vec::new();
-    // SNI
-    let hb = host.as_bytes();
-    let mut sni = Vec::new();
-    sni.push(0x00); // host_name
-    sni.extend_from_slice(&(hb.len() as u16).to_be_bytes());
-    sni.extend_from_slice(hb);
-    let mut sni_list = Vec::new();
-    sni_list.extend_from_slice(&(sni.len() as u16).to_be_bytes());
-    sni_list.extend(sni);
-    ext_push(&mut ext, 0x0000, &sni_list);
+    if let Some(host) = host {
+        let hb = host.as_bytes();
+        let mut sni = Vec::new();
+        sni.push(0x00); // host_name
+        sni.extend_from_slice(&(hb.len() as u16).to_be_bytes());
+        sni.extend_from_slice(hb);
+        let mut sni_list = Vec::new();
+        sni_list.extend_from_slice(&(sni.len() as u16).to_be_bytes());
+        sni_list.extend(sni);
+        ext_push(&mut ext, 0x0000, &sni_list);
+    }
     // elliptic_curves: secp256r1
     ext_push(&mut ext, 0x000a, &[0x00, 0x02, 0x00, 0x17]);
     // ec_point_formats: uncompressed
@@ -180,5 +202,25 @@ mod tests {
         assert!(client_hello_with("a_b.example", &mut rng)
             .unwrap_err()
             .contains("sni"));
+        let named = client_hello("gsys.dev");
+        let mut rng = FixtureEntropy::TEST;
+        let bare = client_hello_no_sni(&mut rng).unwrap();
+        let ip = client_hello_for_peer("127.0.0.1").unwrap();
+        let v6 = client_hello_for_peer("::1").unwrap();
+        assert_eq!(ip, bare);
+        assert_eq!(v6, bare);
+        assert!(!ip.windows(9).any(|w| w == b"127.0.0.1"));
+        assert_eq!(client_hello_for_peer("gsys.dev").unwrap(), named);
+        assert!(client_hello_for_peer("").unwrap_err().contains("sni"));
+        assert!(client_hello_for_peer("127.0.0.1:443")
+            .unwrap_err()
+            .contains("sni"));
+        assert!(is_web_compatible(&bare));
+        assert_eq!(
+            named.len(),
+            bare.len() + 9 + "gsys.dev".len(),
+            "omitted SNI is the extension header plus the name"
+        );
+        assert!(!bare.windows(8).any(|w| w == b"gsys.dev"));
     }
 }

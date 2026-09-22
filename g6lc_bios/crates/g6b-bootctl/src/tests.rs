@@ -186,19 +186,16 @@ fn interrupted_nominate_never_clears_inhibit() {
         mem.fail_at = Some(mem.operations + operation);
         let _ = journal.nominate_inactive(&mut mem);
         mem.fail_at = None;
-        match Journal::load(&mut mem, Domain::Linux) {
-            Ok(reload) => {
-                assert!(
-                    matches!(reload.decision(&TARGET, READY), Decision::Stay(_)),
-                    "operation {operation}: {:?}",
-                    reload.decision(&TARGET, READY)
-                );
-                assert!(
-                    reload.record().may_select().is_err(),
-                    "operation {operation}"
-                );
-            }
-            Err(_) => {}
+        if let Ok(reload) = Journal::load(&mut mem, Domain::Linux) {
+            assert!(
+                matches!(reload.decision(&TARGET, READY), Decision::Stay(_)),
+                "operation {operation}: {:?}",
+                reload.decision(&TARGET, READY)
+            );
+            assert!(
+                reload.record().may_select().is_err(),
+                "operation {operation}"
+            );
         }
     }
     for prefix in [0, 1, 20, 32, SLOT_BYTES - 1] {

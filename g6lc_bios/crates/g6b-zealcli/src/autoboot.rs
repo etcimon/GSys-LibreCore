@@ -680,4 +680,25 @@ mod tests {
         let frame = ab.render(80, 10);
         assert!(frame.join("\n").contains("Setup"), "{frame:?}");
     }
+
+    #[test]
+    fn entries_json_matches_the_picker_with_no_volumes() {
+        let full = spec("os-first", true, 2000);
+        let json = g6b_spec::listed_boot_entries_json(&full);
+        let ids: Vec<_> = entries(&full, &Ports::default())
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, vec!["payload".to_string(), "bios-ui".to_string()]);
+        assert!(json.contains("\"order\":\"os-first\""), "{json}");
+        assert!(json.contains("\"id\":\"bios-ui\""));
+        let bare_ids: Vec<_> = entries(&spec("live-first", false, 0), &Ports::default())
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(bare_ids, vec!["payload".to_string()]);
+        assert!(
+            !g6b_spec::listed_boot_entries_json(&spec("live-first", false, 0)).contains("bios-ui")
+        );
+    }
 }

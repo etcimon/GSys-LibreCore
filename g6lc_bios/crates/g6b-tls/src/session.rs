@@ -47,6 +47,10 @@ impl SessionCache {
     pub fn len(&self) -> usize {
         self.by_host.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.by_host.is_empty()
+    }
 }
 
 /// HKDF-Extract(0, PSK).
@@ -155,6 +159,7 @@ pub fn psk_binder(psk: &[u8; 32], truncated_ch: &[u8]) -> Result<[u8; HASH_LEN],
     Ok(hmac_sha256(&fk, &sha256(truncated_ch)))
 }
 
+#[cfg(test)]
 fn arr32(v: &[u8]) -> [u8; 32] {
     let mut a = [0u8; 32];
     a.copy_from_slice(&v[..32]);

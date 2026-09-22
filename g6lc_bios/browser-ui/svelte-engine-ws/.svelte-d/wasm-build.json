@@ -10,8 +10,8 @@
   "provenance": {
     "schema": "g6lc-libwasm-artifact/v1",
     "abi": "g6lc-libwasm-dom-shell-fx/v1",
-    "inputs": "989613f4721fc5ef681776d8c05a55bb79f91cac44f6e4b5590b530eddd57bd7",
-    "sha256": "948a083f13552338cbfe440588910c4a5c5669ecb58b5fcbdd4c6ed05404a05c",
+    "inputs": "b9de77e35aa277c8078f652ca6bea340a5c6acfe0e77e381611fe3ac21bc9017",
+    "sha256": "8826abbf9e80da10cfbe6d5025a117677d118107795d150918419952e440305b",
     "buildType": "release",
     "compiler": "LDC - the LLVM D compiler (1.43.0-beta1):",
     "imports": [

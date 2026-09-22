@@ -343,10 +343,12 @@ mod tests {
 
     #[test]
     fn zk_live_emits_scalar_crypto() {
-        let mut isa = Isa::default();
-        isa.zkne = ExtStatus::Live;
-        isa.zknh = ExtStatus::Live;
-        isa.zbkc = ExtStatus::Live;
+        let isa = Isa {
+            zkne: ExtStatus::Live,
+            zknh: ExtStatus::Live,
+            zbkc: ExtStatus::Live,
+            ..Isa::default()
+        };
         let m = lib(&tls_on(), &isa);
         let s = m.to_asm();
         assert!(s.contains("aes64esm"), "{s}");

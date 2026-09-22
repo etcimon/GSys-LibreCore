@@ -375,6 +375,12 @@ pub struct RfbClient {
     pub pixels: Option<Vec<u8>>,
 }
 
+impl Default for RfbClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RfbClient {
     pub fn new() -> Self {
         Self {

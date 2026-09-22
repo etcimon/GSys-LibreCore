@@ -52,7 +52,7 @@ pub fn take(buf: &[u8]) -> Result<(Tlv<'_>, &[u8]), String> {
     ))
 }
 
-pub fn expect<'a>(buf: &'a [u8], tag: u8) -> Result<(Tlv<'a>, &'a [u8]), String> {
+pub fn expect(buf: &[u8], tag: u8) -> Result<(Tlv<'_>, &[u8]), String> {
     let (t, rest) = take(buf)?;
     if t.tag != tag {
         return Err("der: tag".into());

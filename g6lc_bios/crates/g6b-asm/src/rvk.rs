@@ -64,19 +64,13 @@ pub fn sha256sig1(x: u32) -> u32 {
 
 fn unpack(lo: u64, hi: u64) -> [u8; 16] {
     let mut s = [0u8; 16];
-    for i in 0..8 {
-        s[i] = (lo >> (8 * i)) as u8;
-        s[8 + i] = (hi >> (8 * i)) as u8;
-    }
+    s[..8].copy_from_slice(&lo.to_le_bytes());
+    s[8..].copy_from_slice(&hi.to_le_bytes());
     s
 }
 
 fn pack_lo(s: &[u8; 16]) -> u64 {
-    let mut lo = 0u64;
-    for i in 0..8 {
-        lo |= (s[i] as u64) << (8 * i);
-    }
-    lo
+    u64::from_le_bytes(s[..8].try_into().unwrap())
 }
 
 fn shift_rows_sub(s: &mut [u8; 16]) {

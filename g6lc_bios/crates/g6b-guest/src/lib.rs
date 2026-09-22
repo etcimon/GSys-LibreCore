@@ -115,7 +115,7 @@ pub fn dispatch(frame: &mut [u8; NATIVE_FRAME_BYTES]) -> Status {
     status
 }
 
-fn span_bytes<'a>(frame: &'a [u8; NATIVE_FRAME_BYTES], span: Span, need: u64) -> Option<&'a [u8]> {
+fn span_bytes(frame: &[u8; NATIVE_FRAME_BYTES], span: Span, need: u64) -> Option<&[u8]> {
     if span.length < need {
         return None;
     }

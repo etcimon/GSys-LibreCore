@@ -191,6 +191,14 @@ impl Router {
         for m in spec.menus() {
             r.insert("GET", &format!("/bios/menu/{}", m.id), "bios", m.json());
         }
+        if spec.kernel.cli.autoboot.enable {
+            r.insert(
+                "GET",
+                "/bios/boot/entries",
+                "bios",
+                g6b_spec::listed_boot_entries_json(spec),
+            );
+        }
         // Display outputs and the VGA/GPU surface split. GET always exists so a
         // UI can report which output won; POST is only registered when both
         // surfaces are actually reachable, so toggling cannot be offered on a

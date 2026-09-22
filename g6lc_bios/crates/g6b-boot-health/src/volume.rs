@@ -385,7 +385,7 @@ mod tests {
         MemBlock::new(raw)
     }
 
-    fn artifact<'a>(vol: &'a Volume, role: Role) -> &'a Artifact {
+    fn artifact(vol: &Volume, role: Role) -> &Artifact {
         vol.artifacts
             .iter()
             .find(|a| a.role == role)

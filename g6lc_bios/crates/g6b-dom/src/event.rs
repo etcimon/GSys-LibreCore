@@ -209,7 +209,7 @@ fn snapshot_stamps(root: &Node, path: &[usize]) -> Vec<u64> {
     out
 }
 
-fn find_stamp<'a>(node: &'a mut Node, stamp: u64) -> Option<&'a mut Node> {
+fn find_stamp(node: &mut Node, stamp: u64) -> Option<&mut Node> {
     if node.stamp == stamp {
         return Some(node);
     }

@@ -104,7 +104,7 @@ pub fn poll(frame: &mut [u8; NATIVE_FRAME_BYTES], quota: u32, now: u32) -> [u8; 
                 units += 1;
             }
             Some((IRQ_SLOW, token)) => {
-                admit_job(frame, 0, IRQ_SLOW, token.max(1).min(32), token);
+                admit_job(frame, 0, IRQ_SLOW, token.clamp(1, 32), token);
                 units += 1;
             }
             Some(_) => units += 1,

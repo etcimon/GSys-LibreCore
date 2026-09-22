@@ -885,6 +885,13 @@ fn serve_http(spec: &g6b_spec::BoardSpec, args: &[String]) -> ExitCode {
     }
     let router = g6b_http::Router::from_spec(spec);
     let mut store = g6b_pglite::StoreRegistry::from_spec(spec);
+    let mut session = match g6b_kernel::BrowserSession::new(spec) {
+        Ok(session) => session,
+        Err(e) => {
+            eprintln!("g6b: {e}");
+            return ExitCode::from(1);
+        }
+    };
     let once = flag_present(args, "--once");
     loop {
         let (stream, _) = match listener.accept() {
@@ -894,7 +901,7 @@ fn serve_http(spec: &g6b_spec::BoardSpec, args: &[String]) -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-        if let Err(e) = handle_http_conn(stream, &router, spec, Some(&mut store)) {
+        if let Err(e) = handle_http_conn(stream, &router, spec, Some(&mut store), &mut session) {
             eprintln!("g6b: http: {e}");
         }
         if once {
@@ -1136,16 +1143,37 @@ fn handle_http_conn(
     router: &g6b_http::Router,
     spec: &g6b_spec::BoardSpec,
     store: Option<&mut dyn g6b_pglite::StorePort>,
+    session: &mut g6b_kernel::BrowserSession,
 ) -> Result<(), String> {
     let request =
         read_http_request(&mut stream, HTTP_IO_TIMEOUT, Some(spec)).map_err(|e| e.to_string())?;
-    let mut response = router.handle_bytes_store(&request, store)?;
+    let response = dispatch_http(&request, router, store, session)?;
+    write_http_response(&mut stream, &response, HTTP_IO_TIMEOUT).map_err(|e| e.to_string())
+}
+
+fn dispatch_http(
+    request: &[u8],
+    router: &g6b_http::Router,
+    store: Option<&mut dyn g6b_pglite::StorePort>,
+    session: &mut g6b_kernel::BrowserSession,
+) -> Result<Vec<u8>, String> {
+    let setup = if let Ok(req) = g6b_http::parse(request) {
+        let body = String::from_utf8_lossy(&req.body).into_owned();
+        session.serve_setup(&req.method, &req.path, &body)
+    } else {
+        None
+    };
+    let mut response = if let Some(resp) = setup {
+        g6b_http::h1::encode(&resp)
+    } else {
+        router.handle_bytes_store(request, store)?
+    };
     if response.starts_with(b"HTTP/1.") {
         if let Some(end) = response.windows(2).position(|w| w == b"\r\n") {
             response.splice(end + 2..end + 2, b"Connection: close\r\n".iter().copied());
         }
     }
-    write_http_response(&mut stream, &response, HTTP_IO_TIMEOUT).map_err(|e| e.to_string())
+    Ok(response)
 }
 
 fn serve_holyc(spec: &g6b_spec::BoardSpec, args: &[String], loopback: bool) -> ExitCode {
@@ -1523,6 +1551,44 @@ mod tests {
         let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let (server, _) = listener.accept().unwrap();
         (client, server)
+    }
+
+    #[test]
+    fn http_serve_setup_post_is_the_live_session() {
+        let spec =
+            g6b_spec::BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let router = g6b_http::Router::from_spec(&spec);
+        let mut store = g6b_pglite::StoreRegistry::from_spec(&spec);
+        let mut session = g6b_kernel::BrowserSession::new(&spec).unwrap();
+        let body = r#"SettingSet("boot.autoboot_order","os-first")"#;
+        let raw = format!(
+            "POST /bios/holyc HTTP/1.1\r\nHost: bios\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        );
+        let posted =
+            dispatch_http(raw.as_bytes(), &router, Some(&mut store), &mut session).unwrap();
+        let posted = String::from_utf8_lossy(&posted);
+        assert!(posted.starts_with("HTTP/1.1 200"), "{posted}");
+        assert!(posted.contains("os-first"), "{posted}");
+        let pending = dispatch_http(
+            b"GET /bios/settings/pending HTTP/1.1\r\nHost: bios\r\n\r\n",
+            &router,
+            Some(&mut store),
+            &mut session,
+        )
+        .unwrap();
+        let pending = String::from_utf8_lossy(&pending);
+        assert!(pending.contains("os-first"), "{pending}");
+        let page = dispatch_http(
+            b"GET /ui/index.html HTTP/1.1\r\nHost: bios\r\n\r\n",
+            &router,
+            Some(&mut store),
+            &mut session,
+        )
+        .unwrap();
+        let page = String::from_utf8_lossy(&page);
+        assert!(page.starts_with("HTTP/1.1 200"), "{page}");
+        assert!(page.contains("id=\"bios-ui\""), "{page}");
     }
 
     #[test]

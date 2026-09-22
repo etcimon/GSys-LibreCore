@@ -414,6 +414,48 @@ pub fn setup_html_libwasm(spec: &BoardSpec, libwasm_url: &str) -> String {
     setup_html_ext(spec, Some(libwasm_url))
 }
 
+/// Empty the interior of `<div id="{id}">…</div>`. The wrapper stays, so a
+/// later `</section>` on the settings page is not consumed.
+fn clear_slot(html: &mut String, id: &str) {
+    let open = format!("<div id=\"{id}\">");
+    let Some(at) = html.find(&open) else {
+        return;
+    };
+    let inner = at + open.len();
+    let Some(rel) = html[inner..].find("</div>") else {
+        return;
+    };
+    html.replace_range(inner..inner + rel, "");
+}
+
+fn setting_control(menu: &str, id: &str, w: &g6b_spec::Writable) -> String {
+    let key = format!("{menu}.{id}");
+    let eid = format!("edit-{menu}-{id}");
+    let apply = format!("apply-{menu}-{id}");
+    let field = match w.kind {
+        g6b_spec::SettingKind::Enum(list) => {
+            let mut s = format!("<select id=\"{eid}\" data-setting=\"{key}\">");
+            for opt in list {
+                s.push_str(&format!("<option value=\"{opt}\">{opt}</option>"));
+            }
+            s.push_str("</select>");
+            s
+        }
+        g6b_spec::SettingKind::Bool => format!(
+            "<select id=\"{eid}\" data-setting=\"{key}\"><option value=\"yes\">yes</option><option value=\"no\">no</option></select>"
+        ),
+        g6b_spec::SettingKind::U32 { min, max } => format!(
+            "<input id=\"{eid}\" data-setting=\"{key}\" value=\"\" placeholder=\"{min}..={max}\">"
+        ),
+        g6b_spec::SettingKind::Text { max } => format!(
+            "<input id=\"{eid}\" data-setting=\"{key}\" value=\"\" placeholder=\"<= {max}\">"
+        ),
+    };
+    format!(
+        "<td>{field}<button id=\"{apply}\" type=\"button\" data-setting-apply=\"{key}\">Set</button></td>"
+    )
+}
+
 fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
     let files = &spec.kernel.http.files;
     let root = escape_html(files.root.trim_end_matches('/'));
@@ -534,8 +576,15 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
         let mut rows = String::new();
         for item in &menu.items {
             let id = escape_html(&item.id);
+            let control = if item.writable {
+                spec.writable(menu.id, &item.id)
+                    .map(|w| setting_control(menu.id, &item.id, w))
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
             rows.push_str(&format!(
-                "<tr id=\"field-{}-{id}\" class=\"bios-field\" data-field=\"{id}\" data-item=\"{id}\" data-writable=\"{}\" tabindex=\"-1\"><td id=\"label-{}-{id}\">{}</td><td id=\"row-{}-{id}\">{}</td></tr>\n",
+                "<tr id=\"field-{}-{id}\" class=\"bios-field\" data-field=\"{id}\" data-item=\"{id}\" data-writable=\"{}\" tabindex=\"-1\"><td id=\"label-{}-{id}\">{}</td><td id=\"row-{}-{id}\">{}</td>{control}</tr>\n",
                 menu.id,
                 item.writable,
                 menu.id,
@@ -548,6 +597,41 @@ fn setup_html_ext(spec: &BoardSpec, libwasm_url: Option<&str>) -> String {
             &format!("<tbody id=\"menu-{}-body\"></tbody>", menu.id),
             &format!("<tbody id=\"menu-{}-body\">\n{}</tbody>", menu.id, rows),
         );
+    }
+
+    // Boot media is the same list the CLI picker uses. Omitted when the
+    // picker is not compiled. The kernel does not fill these nodes later.
+    if spec.kernel.cli.autoboot.enable {
+        let rows = g6b_spec::listed_boot_entries_rows_html(spec);
+        html = html.replace(
+            "<tbody id=\"boot-entries-body\"></tbody>",
+            &format!("<tbody id=\"boot-entries-body\">\n{rows}</tbody>"),
+        );
+    } else {
+        clear_slot(&mut html, "g6b-slot-boot-media");
+    }
+
+    if let Some(start) = html.find("wifi: no adapter (catalog only, not associated)") {
+        let line = g6b_spec::wifi_catalog_line(spec);
+        let end = start + "wifi: no adapter (catalog only, not associated)".len();
+        html.replace_range(start..end, &line);
+    }
+
+    // Gates empty a slot. They do not search for the next button or section.
+    if !spec.kernel.cli.enable {
+        clear_slot(&mut html, "g6b-slot-console");
+    }
+    if !spec.kernel.http.outbound {
+        clear_slot(&mut html, "g6b-slot-manual");
+    }
+    if !spec.kernel.cli.fw {
+        clear_slot(&mut html, "g6b-slot-fw");
+    }
+    if !spec.kernel.settings.enable || !spec.kernel.settings.export {
+        clear_slot(&mut html, "g6b-slot-save");
+    }
+    if !spec.kernel.settings.enable || !spec.kernel.settings.import {
+        clear_slot(&mut html, "g6b-slot-load");
     }
 
     // Conditional utility panels, display toggle, worker/fx/libwasm chrome.
@@ -939,6 +1023,76 @@ mod tests {
         let html = setup_html_libwasm(&spec, "/ui/ui-libwasm.wasm");
         assert!(!html.contains("data-libwasm-url="));
         assert!(html.contains("id=\"row-cpu-cores\""));
+    }
+
+    fn quoted_ids(src: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut rest = src;
+        while let Some(at) = rest.find("id=\"") {
+            rest = &rest[at + 4..];
+            let Some(end) = rest.find('"') else { break };
+            out.push(rest[..end].to_string());
+            rest = &rest[end + 1..];
+        }
+        out
+    }
+
+    #[test]
+    fn index_html_keeps_every_app_svelte_id() {
+        let app = include_str!("../../../browser-ui/src/App.svelte");
+        let html = include_str!("../../../browser-ui/out/index.html");
+        for id in quoted_ids(app) {
+            assert!(
+                html.contains(&format!("id=\"{id}\"")),
+                "browser-ui/out/index.html is missing id={id} from App.svelte"
+            );
+        }
+    }
+
+    #[test]
+    fn feature_slots_drop_their_controls_and_keep_settings() {
+        let mut spec =
+            BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        spec.kernel.http.outbound = false;
+        spec.kernel.cli.enable = false;
+        spec.kernel.cli.fw = false;
+        spec.kernel.cli.autoboot.enable = false;
+        let html = setup_html(&spec);
+        assert!(!html.contains("id=\"manual-open\""), "{html}");
+        assert!(!html.contains("id=\"console-open\""));
+        assert!(!html.contains("id=\"fw-stage\""));
+        assert!(!html.contains("id=\"boot-entries-title\""));
+        assert!(html.contains("id=\"settings-title\""));
+        assert!(html.contains("id=\"menu-settings\""));
+        assert!(html.contains("id=\"g6b-slot-manual\""));
+    }
+
+    #[test]
+    fn boot_media_table_matches_the_cli_picker() {
+        let full = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"full"}"#).unwrap();
+        let html = setup_html(&full);
+        assert!(html.contains("id=\"boot-entries-title\""), "{html}");
+        assert!(html.contains("id=\"boot-pick-payload\""));
+        assert!(html.contains("id=\"boot-pick-bios-ui\""));
+        assert!(html.contains("id=\"settings-save\""));
+        assert!(html.contains("id=\"settings-load\""));
+        assert!(html.contains("the running S-mode payload"));
+        assert!(html.contains("web stack compiled"));
+        let mut off = full.clone();
+        off.kernel.cli.autoboot.enable = false;
+        let html = setup_html(&off);
+        assert!(
+            !html.contains("id=\"boot-entries-title\""),
+            "picker off omits the table: {html}"
+        );
+        let bare =
+            BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"barebone"}"#).unwrap();
+        let html = setup_html(&bare);
+        assert!(html.contains("id=\"boot-pick-payload\""));
+        assert!(
+            !html.contains("id=\"boot-pick-bios-ui\""),
+            "no web stack, no BIOS UI row"
+        );
     }
 
     #[test]

@@ -318,7 +318,7 @@ impl FnEnc {
                     let n = catch_dest.len();
                     let mut landings = Vec::with_capacity(n);
                     for &(label, nparams, _) in &catch_dest {
-                        landings.push(self.at() as u32);
+                        landings.push(self.at());
                         let dest_h = if (label as usize) < nctrl {
                             ctrl_height(&self.ctrls[nctrl - 1 - label as usize])
                         } else {

@@ -37,6 +37,114 @@ impl MenuItem {
     }
 }
 
+/// One boot-picker row that does not depend on a volume probe.
+pub struct ListedBootEntry {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub evidence: &'static str,
+    pub device: &'static str,
+    pub medium: &'static str,
+    pub stage: &'static str,
+}
+
+/// Payload, then BIOS UI when the web stack is compiled. Empty when the
+/// picker is off. Volume media is discovered by zealcli, not invented here.
+pub fn listed_boot_entries(spec: &crate::BoardSpec) -> Vec<ListedBootEntry> {
+    if !spec.kernel.cli.autoboot.enable {
+        return Vec::new();
+    }
+    let mut out = vec![ListedBootEntry {
+        id: "payload",
+        name: "Setup (this payload)",
+        evidence: "the running S-mode payload",
+        device: "",
+        medium: "os",
+        stage: "opensbi",
+    }];
+    if spec.autoboot_offers_bios_ui() {
+        out.push(ListedBootEntry {
+            id: "bios-ui",
+            name: "BIOS UI (browser)",
+            evidence: "web stack compiled",
+            device: "",
+            medium: "os",
+            stage: "opensbi",
+        });
+    }
+    out
+}
+
+/// `GET /bios/boot/entries` body. Same ids as the CLI picker with no volumes.
+pub fn listed_boot_entries_json(spec: &crate::BoardSpec) -> String {
+    let mut body = String::from("{\"order\":");
+    body.push_str(&crate::quote_json(spec.boot_order().as_str()));
+    body.push_str(",\"entries\":[");
+    for (i, e) in listed_boot_entries(spec).iter().enumerate() {
+        if i > 0 {
+            body.push(',');
+        }
+        body.push_str("{\"id\":");
+        body.push_str(&crate::quote_json(e.id));
+        body.push_str(",\"name\":");
+        body.push_str(&crate::quote_json(e.name));
+        body.push_str(",\"evidence\":");
+        body.push_str(&crate::quote_json(e.evidence));
+        body.push_str(",\"device\":");
+        body.push_str(&crate::quote_json(e.device));
+        body.push_str(",\"volume\":\"\",\"medium\":");
+        body.push_str(&crate::quote_json(e.medium));
+        body.push_str(",\"stage\":");
+        body.push_str(&crate::quote_json(e.stage));
+        body.push('}');
+    }
+    body.push_str("]}");
+    body
+}
+
+/// Rows for `#boot-entries-body`. Empty when the picker is off.
+pub fn listed_boot_entries_rows_html(spec: &crate::BoardSpec) -> String {
+    let mut html = String::new();
+    for e in listed_boot_entries(spec) {
+        let id = e.id;
+        html.push_str(&format!(
+            "<tr id=\"boot-entry-{id}\" data-boot=\"{id}\"><td id=\"boot-name-{id}\">{}</td><td id=\"boot-proof-{id}\">{}</td><td id=\"boot-device-{id}\">{}</td><td><button id=\"boot-pick-{id}\" type=\"button\" data-boot=\"{id}\">Boot</button></td></tr>\n",
+            html_escape(e.name),
+            html_escape(e.evidence),
+            html_escape(e.device),
+        ));
+    }
+    html
+}
+
+/// Wi-Fi row for the Devices panel. Lists compiled adapters only.
+/// No SSID and no association state — those calls do not exist yet.
+pub fn wifi_catalog_line(spec: &crate::BoardSpec) -> String {
+    let rows: Vec<String> = spec
+        .peripherals
+        .iter()
+        .filter(|p| p.class.eq_ignore_ascii_case("wifi"))
+        .map(|p| {
+            if p.model.is_empty() {
+                p.id.clone()
+            } else {
+                format!("{} {}", p.id, p.model)
+            }
+        })
+        .collect();
+    if rows.is_empty() {
+        "wifi: no adapter (catalog only, not associated)".into()
+    } else {
+        format!("wifi: {} (catalog only, not associated)", rows.join(", "))
+    }
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 impl Menu {
     pub fn json(&self) -> String {
         let items: Vec<String> = self
@@ -352,6 +460,12 @@ impl BoardSpec {
     }
 }
 
+fn push_ext(items: &mut Vec<MenuItem>, id: &str, label: &str, st: ExtStatus) {
+    if st != ExtStatus::Absent {
+        items.push(MenuItem::row(id, label, live(st)));
+    }
+}
+
 fn live(st: ExtStatus) -> &'static str {
     match st {
         ExtStatus::Live => "live",
@@ -383,26 +497,39 @@ fn menu_main(spec: &BoardSpec) -> Menu {
 }
 
 fn menu_cpu(spec: &BoardSpec) -> Menu {
+    let mut items = vec![
+        MenuItem::row("cores", "Cores", spec.cores.to_string()),
+        MenuItem::row("threads", "Threads/core", spec.threads.to_string()),
+        MenuItem::row("harts", "Logical harts", spec.harts.to_string()),
+        MenuItem::row("topology", "Topology", spec.topology_kind()),
+        MenuItem::row("smt", "SMT", yn(spec.smt())),
+        MenuItem::row("stream", "Stream plane", yn(spec.geo.stream)),
+        MenuItem::row("issue", "Issue ports", spec.geo.issue_ports.to_string()),
+        MenuItem::row("ooo", "Out-of-order", yn(spec.geo.ooo)),
+        MenuItem::row("hypervisor", "Hypervisor (H)", live(spec.isa.h)),
+        MenuItem::row("rvv", "RVV", live(spec.isa.v)),
+        MenuItem::row("zkne", "Zkne (AES)", live(spec.isa.zkne)),
+        MenuItem::row("zknh", "Zknh (SHA)", live(spec.isa.zknh)),
+        MenuItem::row("zbkc", "Zbkc (clmul)", live(spec.isa.zbkc)),
+        MenuItem::row("cpu_hz", "CPU Hz", spec.kernel.params.cpu_hz.to_string()),
+        MenuItem::row("gl_accel", "GL accel", spec.proxy_accel().as_str()),
+    ];
+    // Present only when the bit is on. TLB depth is not on BoardSpec, so it is
+    // not shown as a made-up count.
+    push_ext(
+        &mut items,
+        "zicboz",
+        "Cache blocks (Zicboz)",
+        spec.isa.zicboz,
+    );
+    push_ext(&mut items, "zba", "Zba", spec.isa.zba);
+    push_ext(&mut items, "zbb", "Zbb", spec.isa.zbb);
+    push_ext(&mut items, "f", "F", spec.isa.f);
+    push_ext(&mut items, "d", "D", spec.isa.d);
     Menu {
         id: "cpu",
         title: "CPU",
-        items: vec![
-            MenuItem::row("cores", "Cores", spec.cores.to_string()),
-            MenuItem::row("threads", "Threads/core", spec.threads.to_string()),
-            MenuItem::row("harts", "Logical harts", spec.harts.to_string()),
-            MenuItem::row("topology", "Topology", spec.topology_kind()),
-            MenuItem::row("smt", "SMT", yn(spec.smt())),
-            MenuItem::row("stream", "Stream plane", yn(spec.geo.stream)),
-            MenuItem::row("issue", "Issue ports", spec.geo.issue_ports.to_string()),
-            MenuItem::row("ooo", "Out-of-order", yn(spec.geo.ooo)),
-            MenuItem::row("hypervisor", "Hypervisor (H)", live(spec.isa.h)),
-            MenuItem::row("rvv", "RVV", live(spec.isa.v)),
-            MenuItem::row("zkne", "Zkne (AES)", live(spec.isa.zkne)),
-            MenuItem::row("zknh", "Zknh (SHA)", live(spec.isa.zknh)),
-            MenuItem::row("zbkc", "Zbkc (clmul)", live(spec.isa.zbkc)),
-            MenuItem::row("cpu_hz", "CPU Hz", spec.kernel.params.cpu_hz.to_string()),
-            MenuItem::row("gl_accel", "GL accel", spec.proxy_accel().as_str()),
-        ],
+        items,
     }
 }
 
@@ -481,6 +608,13 @@ fn menu_devices(spec: &BoardSpec) -> Menu {
             },
         ),
     ];
+    if spec.uncore.storage {
+        items.push(MenuItem::row(
+            "disk",
+            "Disk",
+            "present; partition table is read-only",
+        ));
+    }
     for p in &spec.peripherals {
         items.push(MenuItem::row(
             &p.id,
@@ -823,5 +957,30 @@ mod tests {
         let smt = cpu.items.iter().find(|i| i.id == "smt").unwrap();
         assert_eq!(smt.value, "yes");
         assert!(spec.menus_index_json().contains("\"id\":\"uncore\""));
+    }
+
+    #[test]
+    fn cache_and_disk_rows_appear_only_when_the_feature_is_on() {
+        let off = BoardSpec::from_json_str(r#"{"schema_version":1,"profile":"embedded"}"#).unwrap();
+        let cpu = off.menu("cpu").unwrap();
+        assert!(cpu.items.iter().all(|i| i.id != "zicboz"));
+        let devices = off.menu("devices").unwrap();
+        assert!(devices.items.iter().all(|i| i.id != "disk"));
+        let mut on = off;
+        on.isa.zicboz = ExtStatus::Live;
+        on.uncore.storage = true;
+        let cpu = on.menu("cpu").unwrap();
+        let row = cpu.items.iter().find(|i| i.id == "zicboz").unwrap();
+        assert_eq!(row.value, "live");
+        assert!(!row.writable);
+        let disk = on
+            .menu("devices")
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|i| i.id == "disk")
+            .unwrap();
+        assert!(disk.value.contains("read-only"));
+        assert!(!disk.writable);
     }
 }

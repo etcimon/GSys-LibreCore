@@ -1,13 +1,13 @@
 {
   "schema": "g6lc-browser-products/v1",
   "files": {
-    "bios-ui.wasm": "74fb453f68e75f369928ff8ca2ecd391119b6d8876b5abc7b0f298a3d31facb7",
-    "bios-ui.js": "19b4eb4da1a4355a22155082fddc0d69b501884cf22ac71a842d0522a6b92bc6",
-    "kernel.js": "0afab9c718d8d65cc6dbef8221088d3820af5d22a9ac86dad92e86a1003d6f0d",
+    "bios-ui.wasm": "692b3b83c59f9c2e5ba4ff01c2e252db42e9a9d262c98ecdce750ac3a764df56",
+    "bios-ui.js": "642ecbc64dc17906f7e2dd242c783e847879baab6bb27587cb8c01e2985c90ab",
+    "kernel.js": "939f7a3f9ccf2a23f29d8be5cae50b8073a52cad212f8a235319ddd608190a02",
     "worker.js": "ae38aa0b7010caca57f2ed751451a080541a75fc043f679d41418f3d5f014fdc",
     "bios-ui.css": "a55fc887185669a29fffaa75c31c89a267dafe5c7d30721167bf0f3d2502857c",
-    "index.html": "fb51d2aa722a5c1b37fd55f7718633976d983cf218a287412ba89924b0ffbb7b",
-    "bios-ui-libwasm.wasm": "948a083f13552338cbfe440588910c4a5c5669ecb58b5fcbdd4c6ed05404a05c"
+    "index.html": "f4c93fa6c92e4a3d10a4942eb9a77da822cd5569150c8b2e52e928eb55f19af6",
+    "bios-ui-libwasm.wasm": "8826abbf9e80da10cfbe6d5025a117677d118107795d150918419952e440305b"
   },
   "libwasmAvailable": true
 }

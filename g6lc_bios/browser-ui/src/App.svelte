@@ -51,18 +51,63 @@
     <table>
       <tbody id="menu-devices-body"></tbody>
     </table>
+    <p id="net-apply">Ethernet net0</p>
+    <button id="net-link-up" type="button" data-net="link-up">Link up</button>
+    <button id="net-link-down" type="button" data-net="link-down">Link down</button>
+    <button id="net-nat" type="button" data-net="nat">NAT</button>
+    <input id="net-addr" type="text" value="">
+    <input id="net-gw" type="text" value="">
+    <input id="net-dns" type="text" value="">
+    <button id="net-static" type="button" data-net="static">Static</button>
+    <p id="wifi-catalog">wifi: no adapter (catalog only, not associated)</p>
+    <p id="disk-title">Volumes</p>
+    <table id="disk-table">
+      <tbody id="disk-body"></tbody>
+    </table>
   </section>
   <section id="menu-boot" data-menu="boot" aria-labelledby="boot-title" hidden>
     <h2 id="boot-title">Boot</h2>
     <table>
       <tbody id="menu-boot-body"></tbody>
     </table>
+    <div id="g6b-slot-boot-media">
+    <p id="boot-entries-title">Boot media</p>
+    <table id="boot-entries">
+      <tbody id="boot-entries-body"></tbody>
+    </table>
+    </div>
   </section>
   <section id="menu-settings" data-menu="settings" aria-labelledby="settings-title" hidden>
     <h2 id="settings-title">Settings</h2>
     <table>
       <tbody id="menu-settings-body"></tbody>
     </table>
+    <p id="settings-pending">no pending settings writes</p>
+    <div id="g6b-slot-save"><button id="settings-save" type="button" data-settings="save">Save</button></div>
+    <div id="g6b-slot-load"><button id="settings-load" type="button" data-settings="load">Load</button></div>
+    <div id="g6b-slot-fw">
+    <p id="fw-title">Firmware</p>
+    <input id="fw-src" type="text" value="">
+    <button id="fw-stage" type="button" data-fw="stage">Stage</button>
+    <p id="fw-digest">digest: (none)</p>
+    <button id="fw-commit" type="button" data-fw="commit">Commit</button>
+    </div>
+    <div id="g6b-slot-manual">
+    <button id="manual-open" type="button" data-manual="open">Open manual</button>
+    <section id="manual-window" hidden>
+      <p id="manual-title">Manual</p>
+      <p id="manual-loc">https://docs.gsys.dev/librecore/bios</p>
+      <p id="manual-status">manual closed</p>
+    </section>
+    </div>
+    <div id="g6b-slot-console">
+    <button id="console-open" type="button" data-console="open">Open console</button>
+    <section id="console-window" hidden>
+      <p id="console-title">Console</p>
+      <pre id="cli-screen"></pre>
+      <button id="console-close" type="button" data-console="close">Close</button>
+    </section>
+    </div>
   </section>
 
   <div id="g6b-ui-conditional"></div>

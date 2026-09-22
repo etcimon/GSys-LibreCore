@@ -1890,7 +1890,12 @@ fn step(
             let a = x[rs1 as usize];
             let v = match f3 {
                 0 => a.wrapping_add(imm as u64),
-                1 if f7 == 0 => a << (shamt(w, xlen)),
+                // slli. RV64's shamt is 6 bits, so bit 25 (funct7's low bit) is
+                // shamt[5]: funct7 is 0 for shifts 0..31 and 1 for 32..63.
+                // funct6 stays 0, which keeps this off sha256 (0x08) and
+                // aes64ks1i (0x19). RV32's shamt is 5 bits and funct7 must be 0.
+                // VioCmd's 16-bit avail.idx mask is `slli`/`srli` by xlen-16.
+                1 if f7 & 0x7e == 0 && (xlen == 64 || f7 == 0) => a << shamt(w, xlen),
                 1 if f7 == 0x08 => match rs2 {
                     0 => sha256sum0(a as u32) as u64,
                     1 => sha256sum1(a as u32) as u64,
@@ -1999,7 +2004,7 @@ fn step(
                 (0, 1) => a.wrapping_mul(b),
                 (3, 1) => {
                     if xlen == 32 {
-                        ((u64::from(a as u32) * u64::from(b as u32)) >> 32) as u64
+                        (u64::from(a as u32) * u64::from(b as u32)) >> 32
                     } else {
                         ((a as u128 * b as u128) >> 64) as u64
                     }
@@ -3118,8 +3123,8 @@ fn blk_notify(csr: &mut Csr, ram: &mut [u8], base: u64) {
         } else if ty == crate::encode::VIO_BLK_T_OUT as u32 {
             const FW_B: u64 = crate::vio::BLK_FW_B_LBA as u64;
             const FW_N: u64 = crate::vio::BLK_FW_SECTORS as u64;
-            let journal = sector >= JRN && sector < JRN + JRN_N;
-            let inactive = sector >= FW_B && sector < FW_B + FW_N;
+            let journal = (JRN..JRN + JRN_N).contains(&sector);
+            let inactive = (FW_B..FW_B + FW_N).contains(&sector);
             if (journal || inactive)
                 && start + want <= csr.blk_image.len()
                 && (flags1 & crate::encode::VIO_DESC_WRITE) == 0
@@ -3690,7 +3695,7 @@ fn net_http_reply(
         return None;
     }
     let tot =
-        u16::from(load_u8(ram, base, eth + 16)?) << 8 | u16::from(load_u8(ram, base, eth + 17)?);
+        (u16::from(load_u8(ram, base, eth + 16)?) << 8) | u16::from(load_u8(ram, base, eth + 17)?);
     if tot <= 40 {
         return None;
     }
@@ -6223,6 +6228,69 @@ mod tests {
         TASK_SWITCH,
     };
     use crate::{Addr, Node, Op, Purpose};
+
+    #[test]
+    fn rv64_slli_by_48_masks_to_sixteen_bits() {
+        // VioCmd: `slli t1, t1, xlen-16` then `srli` the same amount. The
+        // RV64 encoding is funct7=1 (0x03031313 for t1), which is still slli.
+        let w = crate::encode::slli(crate::encode::T1, crate::encode::T1, 48);
+        assert_eq!(w, 0x0303_1313);
+        let t1 = crate::encode::T1 as usize;
+        let mut x = [0u64; 32];
+        x[t1] = 0x1_0001;
+        let mut pc = 0u64;
+        let mut csr = Csr::default();
+        let mut ram = [0u8; 8];
+        let mut console = String::new();
+        let mut polls = 0u32;
+        match step(
+            64,
+            &mut x,
+            &mut pc,
+            &mut csr,
+            &mut ram,
+            0,
+            w,
+            &mut console,
+            &mut polls,
+        ) {
+            Step::Cont => {}
+            Step::Halt(h) => panic!("slli 48 halted: {h:?}"),
+        }
+        assert_eq!(x[t1], 1u64 << 48);
+        assert_eq!(pc, 4);
+        let back = crate::encode::srli(crate::encode::T1, crate::encode::T1, 48);
+        match step(
+            64,
+            &mut x,
+            &mut pc,
+            &mut csr,
+            &mut ram,
+            0,
+            back,
+            &mut console,
+            &mut polls,
+        ) {
+            Step::Cont => {}
+            Step::Halt(h) => panic!("srli 48 halted: {h:?}"),
+        }
+        assert_eq!(x[t1], 1);
+        match step(
+            32,
+            &mut x,
+            &mut pc,
+            &mut csr,
+            &mut ram,
+            0,
+            w,
+            &mut console,
+            &mut polls,
+        ) {
+            Step::Halt(Halt::Unimp(got)) => assert_eq!(got, w),
+            Step::Halt(h) => panic!("rv32 slli funct7=1 halted as {h:?}"),
+            Step::Cont => panic!("rv32 accepted a 6-bit slli"),
+        }
+    }
 
     const TASK_BASE: u64 = 0x1000;
 

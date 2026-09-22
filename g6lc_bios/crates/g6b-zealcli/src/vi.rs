@@ -1,15 +1,14 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 
-//! A light **read-only** vi, in its own module.
+//! A light vi, in its own module.
 //!
 //! Firmware setup has to show a config file, a boot policy, a manual page or a
-//! staged image header without becoming an editor: an editor in a BIOS is a way
-//! to corrupt a volume with one stray key. So this viewer implements the motions
-//! (`h j k l`, `0 $`, `gg G`, `Ctrl-F/B`, `/` + `n N`), `:set number`, and
-//! `:q`, and answers every mutating key with vi's own read-only refusal instead
-//! of pretending to edit. It borrows the container geometry: the last row is the
-//! status/command line, which is the same bottom line the shell prompt uses.
+//! staged image header. Editing is allowed only when the session opened the
+//! file on a writable mount (`mount -w`). Everywhere else the motions still
+//! work (`h j k l`, `0 $`, `gg G`, `Ctrl-F/B`, `/` + `n N`, `:set number`,
+//! `:q`) and every mutating key gets vi's own read-only refusal. The last row
+//! is the status line, the same bottom line the shell prompt uses.
 
 use crate::input::Key;
 use crate::screen::truncate;
@@ -257,6 +256,32 @@ impl Vi {
         self.writable
     }
 
+    /// The cursor line, for Ctrl+C. Not a visual-mode selection.
+    pub fn copy_line(&self) -> String {
+        self.lines.get(self.cur).cloned().unwrap_or_default()
+    }
+
+    /// Insert `text` at the cursor when the buffer may be saved.
+    pub fn paste_text(&mut self, text: &str) -> bool {
+        if !self.writable || text.is_empty() {
+            return false;
+        }
+        if self.lines.is_empty() {
+            self.lines.push(String::new());
+        }
+        let cur = self.cur.min(self.lines.len() - 1);
+        let at = self.col.min(self.lines[cur].chars().count());
+        let byte = self.lines[cur]
+            .char_indices()
+            .nth(at)
+            .map(|(i, _)| i)
+            .unwrap_or(self.lines[cur].len());
+        self.lines[cur].insert_str(byte, text);
+        self.col = at + text.chars().count();
+        self.dirty = true;
+        true
+    }
+
     pub fn dirty(&self) -> bool {
         self.dirty
     }
@@ -393,7 +418,13 @@ impl Vi {
                 self.enter_insert(false);
             }
             Key::Char('A') if self.writable => {
-                self.col = self.line_len();
+                // Past the last cell, so the next character is appended.
+                // `$` stays on the last character (`line_len`).
+                self.col = self
+                    .lines
+                    .get(self.cur)
+                    .map(|l| l.chars().count())
+                    .unwrap_or(0);
                 self.enter_insert(false);
             }
             Key::Char('o') if self.writable => {

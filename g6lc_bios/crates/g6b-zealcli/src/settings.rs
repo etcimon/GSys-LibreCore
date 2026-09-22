@@ -101,6 +101,51 @@ impl Overlay {
         out
     }
 
+    /// Read a patch from [`Overlay::patch_json`] into this overlay. Does not
+    /// rewrite the running BoardSpec; the next boot/build applies the patch.
+    pub fn load_patch(&mut self, spec: &BoardSpec, patch: &str) -> Result<usize, String> {
+        let json = g6b_spec::parse_json(patch).map_err(|e| format!("settings patch: {e}"))?;
+        let mut n = 0;
+        for w in spec.writables() {
+            let value = json_path(&json, w.path);
+            let text = match value {
+                g6b_spec::Json::Null => continue,
+                g6b_spec::Json::Str(s) => s.clone(),
+                g6b_spec::Json::Bool(true) => "yes".into(),
+                g6b_spec::Json::Bool(false) => "no".into(),
+                g6b_spec::Json::Int(i) => i.to_string(),
+                _ => return Err(format!("settings patch: {} is not a value", w.path)),
+            };
+            self.set(spec, &format!("{}.{}", w.menu, w.id), &text)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Pending rows for `GET /bios/settings/pending`.
+    pub fn pending_json(&self, spec: &BoardSpec) -> String {
+        let mut body = String::from("{\"pending\":[");
+        for (i, (key, value)) in self.edits.iter().enumerate() {
+            if i > 0 {
+                body.push(',');
+            }
+            let path = key
+                .split_once('.')
+                .and_then(|(m, id)| spec.writable(m, id))
+                .map(|w| w.path)
+                .unwrap_or("");
+            body.push_str("{\"id\":");
+            body.push_str(&g6b_spec::quote_json(key));
+            body.push_str(",\"value\":");
+            body.push_str(&g6b_spec::quote_json(value));
+            body.push_str(",\"path\":");
+            body.push_str(&g6b_spec::quote_json(path));
+            body.push('}');
+        }
+        body.push_str("]}");
+        body
+    }
+
     /// Apply a patch produced by [`Overlay::patch_json`] on top of a BoardSpec
     /// JSON document, i.e. what `SettingsImport` hands the next build.
     pub fn summary(&self, spec: &BoardSpec) -> String {
@@ -160,6 +205,14 @@ pub fn writable_table(spec: &BoardSpec) -> String {
         ));
     }
     s
+}
+
+fn json_path<'a>(json: &'a g6b_spec::Json, path: &str) -> &'a g6b_spec::Json {
+    let mut cur = json;
+    for part in path.split('.') {
+        cur = cur.get(part);
+    }
+    cur
 }
 
 fn render(w: &Writable, value: &str) -> String {
@@ -289,6 +342,23 @@ mod tests {
         let empty = Overlay::default();
         assert!(empty.summary(&spec).contains("no pending"));
         assert_eq!(empty.patch_json(&spec), "{\"schema_version\":1}");
+        let mut fresh = Overlay::default();
+        let n = fresh.load_patch(&spec, &patch).unwrap();
+        assert!(n >= 4, "{n}");
+        assert!(
+            fresh
+                .effective(&spec, "boot.autoboot_order")
+                .unwrap_or_else(|_| fresh.effective(&spec, "boot.next").unwrap())
+                .contains("pending")
+                || fresh
+                    .effective(&spec, "boot.next")
+                    .unwrap()
+                    .contains("u-boot")
+        );
+        assert!(fresh
+            .effective(&spec, "boot.next")
+            .unwrap()
+            .contains("u-boot"));
     }
 
     #[test]

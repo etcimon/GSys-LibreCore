@@ -126,7 +126,7 @@ fn ocsp_ymdhms(y: i32, rest: &str) -> Result<u64, String> {
     let mi: u32 = rest[6..8].parse().map_err(|_| "ocsp: time")?;
     let s: u32 = rest[8..10].parse().map_err(|_| "ocsp: time")?;
     let mut days: i64 = 0;
-    let yy0 = y.min(9999).max(1970);
+    let yy0 = y.clamp(1970, 9999);
     for yy in 1970..yy0 {
         days += if yy % 4 == 0 && (yy % 100 != 0 || yy % 400 == 0) {
             366
@@ -135,8 +135,9 @@ fn ocsp_ymdhms(y: i32, rest: &str) -> Result<u64, String> {
         };
     }
     const MD: [i64; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-    for i in 0..(m as usize).saturating_sub(1).min(11) {
-        days += MD[i];
+    let months = (m as usize).saturating_sub(1).min(11);
+    for (i, days_in_month) in MD.iter().enumerate().take(months) {
+        days += days_in_month;
         if i == 1 && y % 4 == 0 {
             days += 1;
         }

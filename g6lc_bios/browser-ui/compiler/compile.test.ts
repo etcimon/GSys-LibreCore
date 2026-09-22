@@ -8,7 +8,7 @@ import { catalogJson, marker, refuseKit } from "./constructs.ts";
 import { compileProject, loadProject, projectCss, projectHtml } from "./index.ts";
 import { emitWasm } from "./emit-wasm.ts";
 import { printG6bJs, printGeneratedTs } from "./print-ts.ts";
-import { createWasmHost, createBrowserApp, createLibwasmHost, createParticleBackground, createRenderInspector, createBrowserContext, createPgliteWasm } from "../src/kernel.ts";
+import { createWasmHost, createBrowserApp, createLibwasmHost, createParticleBackground, createRenderInspector, createBrowserContext, createPgliteWasm, blockSecretClipboard, applySetupFaces } from "../src/kernel.ts";
 import { createIframe, localFrameUrl, canonicalizeAppUrl, planNavigate, parseVarsAttr, filterSessionVars, sessionVarNameAllowed } from "../src/iframe.ts";
 import { isLdc143Text, resolveToolchain } from "./ldc.ts";
 import { parseMarkupTree, parseSvelte } from "./parse.ts";
@@ -129,6 +129,88 @@ describe("browser DOM and import ABI", () => {
     expect(() => parseSvelte("src/Bad.svelte", '{#if unknown}<p id="x">x</p>{/if}')).toThrow();
   });
 
+  test("an open console paints each key into the screen", async () => {
+    const ui = new TestNode("bios-ui");
+    const status = new TestNode("status");
+    const win = new TestNode("console-window");
+    win.hidden = true;
+    const screen = new TestNode("cli-screen");
+    const open = new TestNode("console-open");
+    open.setAttribute("data-console", "open");
+    const calls = [];
+    const fetchFn = async (url, init) => {
+      calls.push({ url, body: init && init.body });
+      if (url === "/bios/cli" && init && init.body === "open") return { ok: true, text: async () => "g6lc> " };
+      if (url === "/bios/cli" && init && init.body === "key h") return { ok: true, text: async () => "g6lc> h" };
+      return { ok: true, text: async () => "" };
+    };
+    const app = createBrowserApp(testDocument([ui, status, win, screen, open]), fetchFn);
+    await app.start();
+    await open.listeners.get("click")({ preventDefault() {} });
+    expect(screen.textContent).toBe("g6lc> ");
+    await app.handleKey({ key: "h", preventDefault() {} });
+    expect(calls.some((call) => call.url === "/bios/cli" && call.body === "key h")).toBe(true);
+    expect(screen.textContent).toBe("g6lc> h");
+    expect(win.hidden).toBe(false);
+  });
+
+  test("native Set posts the SettingSet line the BIOS session runs", async () => {
+    const ui = new TestNode("bios-ui");
+    const status = new TestNode("status");
+    const pending = new TestNode("settings-pending");
+    const edit = new TestNode("edit-boot-autoboot_order");
+    edit.value = "os-first";
+    const button = new TestNode("set-boot-autoboot_order");
+    button.setAttribute("data-setting-apply", "boot.autoboot_order");
+    const calls = [];
+    const fetchFn = async (url, init) => {
+      calls.push({ url, init });
+      if (url === "/bios/settings/pending") {
+        return { ok: true, text: async () => '{"pending":[{"id":"boot.autoboot_order","value":"os-first"}]}' };
+      }
+      return { ok: true, text: async () => "set boot.autoboot_order os-first\n" };
+    };
+    const app = createBrowserApp(testDocument([ui, status, pending, edit, button]), fetchFn);
+    await app.start();
+    await button.listeners.get("click")({ preventDefault() {} });
+    const post = calls.find((call) => call.url === "/bios/holyc");
+    expect(post.init.method).toBe("POST");
+    expect(post.init.body).toBe('SettingSet("boot.autoboot_order","os-first")');
+    expect(status.textContent).toContain("os-first");
+    expect(pending.textContent).toContain("boot.autoboot_order = os-first (pending)");
+  });
+
+  test("glyph rows hide text inside a hidden section without stamping the HTML", async () => {
+    const file = parseSvelte("src/Panels.svelte", `<main>
+      <h2 id="main-title">Main</h2>
+      <a id="tab-cpu">CPU</a>
+      <section id="menu-cpu" hidden>
+        <h2 id="cpu-title">CPU</h2>
+        <p id="net-apply">Ethernet net0</p>
+      </section>
+    </main>`);
+    const main = new TestNode("main-title");
+    const tab = new TestNode("tab-cpu");
+    const cpu = new TestNode("cpu-title");
+    const net = new TestNode("net-apply");
+    const host = createWasmHost(testDocument([main, tab, cpu, net]), new Set(), async () => {});
+    const { instance } = await WebAssembly.instantiate(emitWasm([file]), host.imports);
+    host.bind(instance.exports.memory);
+    (instance.exports._start as Function)();
+    expect(main.hidden).toBe(false);
+    expect(main.textContent).toBe("Main");
+    expect(tab.hidden).toBe(false);
+    expect(tab.textContent).toBe("CPU");
+    expect(cpu.hidden).toBe(true);
+    expect(cpu.textContent).toBe("CPU");
+    expect(net.hidden).toBe(true);
+    expect(net.textContent).toBe("Ethernet net0");
+    const html = projectHtml([file]);
+    expect(html).toContain('<h2 id="cpu-title">CPU</h2>');
+    expect(html).not.toContain('id="cpu-title" hidden');
+    expect(html).toContain('<section id="menu-cpu" hidden>');
+  });
+
   test("emitted WASM executes if/else visibility with text and fetch imports intact", async () => {
     for (const show of [false, true]) {
       const file = parseSvelte("src/Conditional.svelte", `<script>
@@ -169,6 +251,43 @@ fetchBios("/bios/menu/cpu");
     expect(html).toContain('<p id="second-text">second</p>\n</section>');
   });
 
+  test("setup faces paint pending, digest, nat, console, and disks", () => {
+    const nodes: Record<string, { textContent: string }> = {
+      "settings-pending": { textContent: "no pending settings writes" },
+      "cli-screen": { textContent: "" },
+      "fw-digest": { textContent: "digest: (none)" },
+      "hw-nat-status": { textContent: "" },
+      "disk-body": { textContent: "" },
+    };
+    const doc = { getElementById: (id: string) => nodes[id] || null };
+    applySetupFaces(doc, {
+      pending: '{"pending":[{"id":"boot.autoboot_order","value":"os-first"}]}',
+      screen: "> help\n",
+      fw: "fw ready sha256=abcd\n",
+      hw: '{"nat":"isolated","phase":"up"}',
+      disk: '{"disks":[{"name":"KEY-FAT","fs":"fat32","size":"","proof":"no loader read"}]}',
+    });
+    expect(nodes["settings-pending"].textContent).toContain("os-first");
+    expect(nodes["cli-screen"].textContent).toContain("help");
+    expect(nodes["fw-digest"].textContent).toBe("sha256=abcd");
+    expect(nodes["hw-nat-status"].textContent).toContain("isolated");
+    expect(nodes["disk-body"].textContent).toContain("KEY-FAT");
+  });
+
+  test("password fields are kept off the platform clipboard", () => {
+    expect(blockSecretClipboard({ getAttribute: (n: string) => n === "type" ? "password" : null })).toBe(true);
+    expect(blockSecretClipboard({ getAttribute: (n: string) => n === "type" ? "text" : null })).toBe(false);
+    expect(blockSecretClipboard({ getAttribute: () => null })).toBe(false);
+  });
+
+  const setupFaceUrls = [
+    "/bios/settings/pending",
+    "/bios/cli/screen",
+    "/bios/disk",
+    "/bios/fw/status",
+    "/bios/hw/stat",
+  ];
+
   test("native start menu CPU works with the browser fetch proxy disabled", async () => {
     const ui = new TestNode("bios-ui", { "data-start-menu": "cpu" });
     const status = new TestNode("status");
@@ -184,7 +303,10 @@ fetchBios("/bios/menu/cpu");
     expect(status.textContent).toContain("Static view");
     await app.navigate("main");
     await app.refresh();
-    expect(reads).toEqual([]);
+    // Menu navigation still paints the five status faces. A disabled proxy
+    // throws; the painter swallows that and does not request a menu or a write.
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((url) => setupFaceUrls.includes(url))).toBe(true);
   });
 
   test("BIOS keyboard navigation wraps without intercepting editing or issuing writes", async () => {
@@ -206,7 +328,8 @@ fetchBios("/bios/menu/cpu");
     await app.handleKey({ key: "F10", repeat: true, preventDefault });
     await app.handleKey({ key: "Delete", preventDefault });
     await app.handleKey({ key: "F10", preventDefault() {} });
-    expect(reads).toEqual([]);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((url) => setupFaceUrls.includes(url))).toBe(true);
     expect(ui.listeners.has("keydown")).toBe(true);
   });
 
@@ -348,7 +471,8 @@ fetchBios("/bios/menu/cpu");
     expect(cpu.hidden).toBe(false);
     expect(value.textContent).toBe("64");
     expect(flag.textContent).toBe("Read-only");
-    expect(urls.every((url) => url.startsWith("/bios/menu/"))).toBe(true);
+    expect(urls.some((url) => url.startsWith("/bios/menu/"))).toBe(true);
+    expect(urls.every((url) => url.startsWith("/bios/menu/") || setupFaceUrls.includes(url))).toBe(true);
   });
 
   test("WASM failures restore the static view and report errors", async () => {
