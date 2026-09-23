@@ -163,6 +163,32 @@ module g6lc_smt_csr_bank
     output logic [CVA6Cfg.XLEN-1:0] perf_data_o,
     input  logic [CVA6Cfg.XLEN-1:0] perf_data_i,
     output logic perf_we_o,
+    // T6b-3a: per-bank architectural context for per-lane decode selection
+    // under mixed residency (each decode lane picks by fetch_entry_i.hart_id;
+    // unused when NrHarts==1 or SmtDrainedHandoff — the scalars stay).
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] tvm_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] tw_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] vtw_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] tsr_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] hu_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] debug_mode_b_o,
+    output riscv::xs_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] fs_b_o,
+    output riscv::xs_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] vfs_b_o,
+    output riscv::xs_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] vs_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][2:0] frm_b_o,
+    output riscv::cbie_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] mcbie_b_o,
+    output riscv::cbie_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] scbie_b_o,
+    output riscv::cbie_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] hcbie_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] mcbcfe_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] scbcfe_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] hcbcfe_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] mcbze_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] scbze_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] hcbze_b_o,
+    output jvt_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] jvt_b_o,
+    // Per-bank count-inhibit for the PMU (each event bank is inhibited only
+    // by its own hart's mcountinhibit).
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][31:0] mcountinhibit_b_o,
     // Per-hart overflow state: bank h sees only its own counters' OF/LCOFI.
     input  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][31:0] scountovf_i,
     input  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] lcofi_i,
@@ -305,6 +331,28 @@ module g6lc_smt_csr_bank
     assign priv_lvl_b_o[0]   = priv_lvl_o;
     assign v_b_o[0]          = v_o;
     assign v_commit_o        = v_o;
+    // T6b-3a single-hart ties: the _b arrays collapse onto the scalars.
+    assign tvm_b_o[0]        = tvm_o;
+    assign tw_b_o[0]         = tw_o;
+    assign vtw_b_o[0]        = vtw_o;
+    assign tsr_b_o[0]        = tsr_o;
+    assign hu_b_o[0]         = hu_o;
+    assign debug_mode_b_o[0] = debug_mode_o;
+    assign fs_b_o[0]         = fs_o;
+    assign vfs_b_o[0]        = vfs_o;
+    assign vs_b_o[0]         = vs_o;
+    assign frm_b_o[0]        = frm_o;
+    assign mcbie_b_o[0]      = mcbie_o;
+    assign scbie_b_o[0]      = scbie_o;
+    assign hcbie_b_o[0]      = hcbie_o;
+    assign mcbcfe_b_o[0]     = mcbcfe_o;
+    assign scbcfe_b_o[0]     = scbcfe_o;
+    assign hcbcfe_b_o[0]     = hcbcfe_o;
+    assign mcbze_b_o[0]      = mcbze_o;
+    assign scbze_b_o[0]      = scbze_o;
+    assign hcbze_b_o[0]      = hcbze_o;
+    assign jvt_b_o[0]        = jvt_o;
+    assign mcountinhibit_b_o[0] = mcountinhibit_o;
     assign fet_satp_ppn_o    = satp_ppn_o;
     assign fet_asid_o        = asid_o;
     assign fet_vsatp_ppn_o   = vsatp_ppn_o;
@@ -513,6 +561,29 @@ module g6lc_smt_csr_bank
       assign irq_ctrl_b_o[h] = irq_ctrl_b[h];
       assign priv_lvl_b_o[h] = priv_b[h];
       assign v_b_o[h]        = v_b[h];
+      // T6b-3a: per-bank decode context for the per-lane selection in
+      // id_stage, and the per-bank count-inhibit for the PMU.
+      assign tvm_b_o[h]        = tvm_b[h];
+      assign tw_b_o[h]         = tw_b[h];
+      assign vtw_b_o[h]        = vtw_b[h];
+      assign tsr_b_o[h]        = tsr_b[h];
+      assign hu_b_o[h]         = hu_b[h];
+      assign debug_mode_b_o[h] = dbg_mode_b[h];
+      assign fs_b_o[h]         = fs_b[h];
+      assign vfs_b_o[h]        = vfs_b[h];
+      assign vs_b_o[h]         = vs_b[h];
+      assign frm_b_o[h]        = frm_b[h];
+      assign mcbie_b_o[h]      = mcbie_b[h];
+      assign scbie_b_o[h]      = scbie_b[h];
+      assign hcbie_b_o[h]      = hcbie_b[h];
+      assign mcbcfe_b_o[h]     = mcbcfe_b[h];
+      assign scbcfe_b_o[h]     = scbcfe_b[h];
+      assign hcbcfe_b_o[h]     = hcbcfe_b[h];
+      assign mcbze_b_o[h]      = mcbze_b[h];
+      assign scbze_b_o[h]      = scbze_b[h];
+      assign hcbze_b_o[h]      = hcbze_b[h];
+      assign jvt_b_o[h]        = jvt_b[h];
+      assign mcountinhibit_b_o[h] = mcountinh_b[h];
     end
 
     // Mux by active hart (fetch/decode privilege view).
@@ -608,9 +679,11 @@ module g6lc_smt_csr_bank
       ai_issue_ok_o            = ai_issue_ok_b[active_hart_i];
       ai_q_en_o                = ai_q_en_b[active_hart_i];
       ai_qid_o                 = ai_qid_b[active_hart_i];
-      perf_addr_o              = perf_addr_b[active_hart_i];
-      perf_data_o              = perf_data_b[active_hart_i];
-      perf_we_o                = perf_we_b[active_hart_i];
+      // T6b-3a: the HPM CSR access is a committing op — it belongs to the
+      // committing instruction's hart, not the fetch-active hart.
+      perf_addr_o              = perf_addr_b[commit_instr_i.hart_id];
+      perf_data_o              = perf_data_b[commit_instr_i.hart_id];
+      perf_we_o                = perf_we_b[commit_instr_i.hart_id];
       pmpcfg_o                 = pmpcfg_b[lsu_chk_hart_i];
       pmpaddr_o                = pmpaddr_b[lsu_chk_hart_i];
       fet_pmpcfg_o             = pmpcfg_b[active_hart_i];
@@ -632,6 +705,16 @@ module g6lc_smt_csr_bank
       assert property (@(posedge clk_i) disable iff (!rst_ni)
           (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) |-> (mbe_b[h] == mbe_b[0]))
       else $error("[smt-csr-bank] mbe mismatch across resident hart banks (%0d)", h);
+    end
+    // T6b-3a: external debug under mixed residency is unsupported — the debug
+    // side-band (debug_req_i, set_debug_pc, single_step, triggers) is owned
+    // by the active hart while commits may belong to a peer.
+    for (genvar h = 0; h < NH; h++) begin : g6lc_mixed_no_debug_check
+      g6lc_mixed_no_debug :
+      assert property (@(posedge clk_i) disable iff (!rst_ni)
+          (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff)
+          |-> (!debug_req_i && !dbg_mode_b[h]))
+      else $error("[smt-csr-bank] external debug under mixed residency is unsupported (bank %0d)", h);
     end
     //pragma translate_on
   end

@@ -708,6 +708,18 @@ module cva6
   irq_ctrl_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] irq_ctrl_b;
   riscv::priv_lvl_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] priv_lvl_b;
   logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] v_b;
+  // T6b-3a: the rest of the per-hart decode context (per-lane select in
+  // id_stage under mixed residency; scalar outputs above stay the drained /
+  // non-lane view).
+  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] tvm_b, tw_b, vtw_b, tsr_b, hu_b;
+  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] debug_mode_b;
+  riscv::xs_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] fs_b, vfs_b, vs_b;
+  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][2:0] frm_b;
+  riscv::cbie_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] mcbie_b, scbie_b, hcbie_b;
+  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] mcbcfe_b, scbcfe_b, hcbcfe_b;
+  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] mcbze_b, scbze_b, hcbze_b;
+  jvt_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] jvt_b;
+  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][31:0] mcountinhibit_b;
   logic v_commit_csr;
   logic mbe_commit_csr;
   logic dcache_en_csr_nbdcache;
@@ -883,6 +895,14 @@ module cva6
   // Frontend
   // --------------
   logic [CVA6Cfg.VLEN-1:0] smt_npc_live;
+  // T6b-3b: oldest undelivered fetch position (redirect pend > in-flight
+  // parcel > NPC cursor) — the frontier a killed fetch stream restarts from.
+  logic [CVA6Cfg.VLEN-1:0] smt_fetch_frontier;
+  // T6b-3b: oldest undelivered instruction per hart inside the instruction
+  // queue — the port view reaches only NrIssuePorts positions, so queued peer
+  // entries deeper than the presented slots need this explicit frontier.
+  logic [CVA6Cfg.NrHarts-1:0] smt_queue_oldest_valid;
+  logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0] smt_queue_oldest_pc;
   logic [CVA6Cfg.VLEN-1:0] smt_restart_pc;
   logic smt_restart_valid;
   logic [HART_ID_BITS-1:0] smt_outgoing_hart;
@@ -938,6 +958,9 @@ module cva6
       .smt_restore_i      (smt_pc_restore),
       .smt_npc_restore_i  (smt_npc_restore),
       .npc_q_o            (smt_npc_live),
+      .fetch_frontier_pc_o(smt_fetch_frontier),
+      .queue_oldest_valid_o(smt_queue_oldest_valid),
+      .queue_oldest_pc_o  (smt_queue_oldest_pc),
       .smt_trap_hold_o    (smt_trap_hold),
       .icache_dreq_o      (icache_dreq_if_cache),
       .icache_dreq_i      (icache_dreq_cache_if),
@@ -978,7 +1001,10 @@ module cva6
       selected = g6lc_fetch_pkg::restart_frontier(
           CVA6Cfg.NrIssuePorts, 8'(smt_outgoing_hart),
           decode_valid, decode_hart, decode_pc, queue_valid, queue_hart, queue_pc,
-          '{valid: 1'b1, pc: 64'(smt_npc_live)},
+          // Mixed residency counts a killed pend/in-flight parcel as the
+          // outgoing hart's frontier; drained keeps the proven snap view.
+          '{valid: 1'b1, pc: 64'(CVA6Cfg.SmtDrainedHandoff
+                                 ? smt_npc_live : smt_fetch_frontier)},
           smt_switch && resolved_branch.valid && resolved_branch.is_mispredict,
           8'(resolved_branch.hart_id), 64'(resolved_branch.target_address));
     end
@@ -1042,26 +1068,57 @@ module cva6
       smt_arch_redirect_hart = whart_commit_id[0];
       smt_arch_redirect_pc = trap_vector_base_commit_pcgen;
     end
+    // T6b-3b: an inactive hart's mispredict is the only redirect without a
+    // commit-side owner. When no commit redirect owns this cycle, bank its
+    // target on the primary port so the second port can carry the peer
+    // restart the same (partial) flush requires. Dead under drained
+    // residency — an inactive hart never resolves a branch there — and on
+    // every full flush, whose sources all claim this port first.
+    if (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff &&
+        !smt_arch_redirect_valid && resolved_branch.valid &&
+        resolved_branch.is_mispredict &&
+        resolved_branch.hart_id != smt_active_hart) begin
+      smt_arch_redirect_valid = 1'b1;
+      smt_arch_redirect_hart = resolved_branch.hart_id;
+      smt_arch_redirect_pc = resolved_branch.target_address;
+    end
   end
 
-  // T6b-2a: peer-hart restart on a full flush. flush_ctrl_id empties BOTH
-  // harts' scoreboard entries; the hart that did not own the flush restarts
-  // at its scoreboard head (oldest entry it lost), or — when it has no live
-  // entry — at its surviving fetch/decode frontier sampled on the flush
-  // cycle, so nothing already fetched is lost. Mixed residency only: the
-  // whole cone constant-folds under SmtDrainedHandoff and NrHarts==1.
+  // T6b-2a/T6b-3b: peer-hart restart on a flush. A FULL flush (flush_ctrl_id)
+  // empties BOTH harts' scoreboard entries; the hart that did not own the
+  // flush restarts at its scoreboard head (oldest entry it lost), or — when
+  // it has no live entry — at its surviving fetch/decode frontier. A PARTIAL
+  // flush — flush_if/flush_unissued without flush_ctrl_id, which under
+  // fetch_B is a branch mispredict (the hart switch is excluded: the outgoing
+  // hart's frontier is already transported by gen_smt_restart_frontier) —
+  // globally kills the same pre-dispatch state while BOTH harts' scoreboard
+  // entries survive, so the peer restarts at its pre-dispatch frontier only,
+  // never sb_head: its scoreboard entries were not lost. The fetch-side
+  // candidate is the oldest undelivered fetch position (armed redirect
+  // target > in-flight parcel > NPC cursor), so a parcel killed in flight is
+  // refetched instead of skipped. Mixed residency only: the whole cone
+  // constant-folds under SmtDrainedHandoff and NrHarts==1.
 `ifdef G6LC_FETCH_B
   if (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin : gen_peer_restart
     logic [7:0] pr_decode_valid, pr_queue_valid;
     logic [7:0][7:0] pr_decode_hart, pr_queue_hart;
     logic [7:0][63:0] pr_decode_pc, pr_queue_pc;
     logic [HART_ID_BITS-1:0] fault_hart;
+    logic partial_kill;
     g6lc_fetch_pkg::restart_t pr_selected;
+    // A pre-dispatch kill that is neither a full flush nor the hart switch.
+    // Under fetch_B the only such source is a branch mispredict — the
+    // predicted-correct E3 kill is compiled out — so the flush owner is the
+    // resolving hart (witnessed by t6b3_partial_owner).
+    assign partial_kill = (flush_ctrl_if || flush_unissued_instr_ctrl_id) &&
+                          !flush_ctrl_id && !smt_switch;
     always_comb begin
-      // The flush owner: the commit-side redirect's target hart, or the
-      // committing hart when the flush carries no bank redirect.
-      fault_hart = smt_arch_redirect_valid ? smt_arch_redirect_hart
-                                           : whart_commit_id[0];
+      // The flush owner: the resolving hart on a partial flush, else the
+      // commit-side redirect's target hart, else the committing hart when
+      // the flush carries no bank redirect.
+      fault_hart = partial_kill ? HART_ID_BITS'(resolved_branch.hart_id)
+                   : smt_arch_redirect_valid ? smt_arch_redirect_hart
+                                             : whart_commit_id[0];
       pr_decode_valid = '0;
       pr_queue_valid = '0;
       pr_decode_hart = '0;
@@ -1069,33 +1126,44 @@ module cva6
       pr_decode_pc = '0;
       pr_queue_pc = '0;
       for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
-        pr_decode_valid[p] = flush_ctrl_id && issue_entry_valid_id_issue[p];
+        pr_decode_valid[p] = (flush_ctrl_id || partial_kill) &&
+                             issue_entry_valid_id_issue[p];
         pr_decode_hart[p] = 8'(issue_entry_id_issue[p].hart_id);
         pr_decode_pc[p] = 64'(issue_entry_id_issue[p].pc);
-        pr_queue_valid[p] = flush_ctrl_id && fetch_valid_if_id[p];
-        pr_queue_hart[p] = 8'(fetch_entry_if_id[p].hart_id);
-        pr_queue_pc[p] = 64'(fetch_entry_if_id[p].address);
       end
       // The lowest-index hart other than the flush owner — exact for NH==2;
       // NH>2 would restart one peer per flush (no such configuration exists).
       peer_restart_hart = '0;
       for (int h = CVA6Cfg.NrHarts - 1; h >= 0; h--)
         if (h != int'(fault_hart)) peer_restart_hart = HART_ID_BITS'(h);
+      // Queue-side candidate: the port view reaches only NrIssuePorts
+      // positions, so a peer's entries queued deeper behind the faulting
+      // hart's presented slots would be killed invisibly. The per-hart
+      // pending-FIFO head is the peer's oldest undelivered instruction and
+      // subsumes the port entries (undelivered themselves).
+      pr_queue_valid[0] = (flush_ctrl_id || partial_kill) &&
+                          smt_queue_oldest_valid[peer_restart_hart];
+      pr_queue_hart[0]  = 8'(peer_restart_hart);
+      pr_queue_pc[0]    = 64'(smt_queue_oldest_pc[peer_restart_hart]);
       pr_selected = g6lc_fetch_pkg::restart_frontier(
           CVA6Cfg.NrIssuePorts, 8'(peer_restart_hart),
           pr_decode_valid, pr_decode_hart, pr_decode_pc,
           pr_queue_valid, pr_queue_hart, pr_queue_pc,
-          // The live NPC is a frontier only for the hart the frontend is
+          // The fetch state is a frontier only for the hart the frontend is
           // actually fetching; an inactive peer keeps its banked PC.
           '{valid: peer_restart_hart == smt_active_hart,
-            pc: 64'(smt_npc_live)},
+            pc: 64'(smt_fetch_frontier)},
           1'b0, '0, '0);
     end
-    assign peer_restart_pc = sb_head_valid[peer_restart_hart]
+    // sb_head is a frontier only on a full flush: on a partial flush the
+    // peer's scoreboard entries survive the same-hart cancel and restarting
+    // from them would duplicate live work.
+    assign peer_restart_pc = flush_ctrl_id && sb_head_valid[peer_restart_hart]
                              ? sb_head_pc[peer_restart_hart]
                              : CVA6Cfg.VLEN'(pr_selected.pc);
-    assign peer_restart_valid = flush_ctrl_id &&
-        (sb_head_valid[peer_restart_hart] || pr_selected.valid);
+    assign peer_restart_valid = (flush_ctrl_id &&
+        (sb_head_valid[peer_restart_hart] || pr_selected.valid)) ||
+        (partial_kill && pr_selected.valid);
     assign peer_restart_active = peer_restart_valid &&
         (peer_restart_hart == smt_active_hart);
   end else begin : gen_no_peer_restart
@@ -1228,6 +1296,27 @@ module cva6
       .irq_ctrl_b_i        (irq_ctrl_b),
       .priv_lvl_b_i        (priv_lvl_b),
       .v_b_i               (v_b),
+      // T6b-3a: per-hart decode context for the remaining per-lane selects.
+      .tvm_b_i             (tvm_b),
+      .tw_b_i              (tw_b),
+      .vtw_b_i             (vtw_b),
+      .tsr_b_i             (tsr_b),
+      .hu_b_i              (hu_b),
+      .debug_mode_b_i      (debug_mode_b),
+      .fs_b_i              (fs_b),
+      .vfs_b_i             (vfs_b),
+      .vs_b_i              (vs_b),
+      .frm_b_i             (frm_b),
+      .mcbie_b_i           (mcbie_b),
+      .scbie_b_i           (scbie_b),
+      .hcbie_b_i           (hcbie_b),
+      .mcbcfe_b_i          (mcbcfe_b),
+      .scbcfe_b_i          (scbcfe_b),
+      .hcbcfe_b_i          (hcbcfe_b),
+      .mcbze_b_i           (mcbze_b),
+      .scbze_b_i           (scbze_b),
+      .hcbze_b_i           (hcbze_b),
+      .jvt_b_i             (jvt_b),
       .debug_mode_i        (debug_mode),
       .tvm_i               (tvm_csr_id),
       .tw_i                (tw_csr_id),
@@ -2043,6 +2132,28 @@ module cva6
       .priv_lvl_b_o            (priv_lvl_b),
       .v_b_o                   (v_b),
       .v_commit_o              (v_commit_csr),
+      // T6b-3a: per-bank decode context + per-bank count-inhibit for the PMU.
+      .tvm_b_o                 (tvm_b),
+      .tw_b_o                  (tw_b),
+      .vtw_b_o                 (vtw_b),
+      .tsr_b_o                 (tsr_b),
+      .hu_b_o                  (hu_b),
+      .debug_mode_b_o          (debug_mode_b),
+      .fs_b_o                  (fs_b),
+      .vfs_b_o                 (vfs_b),
+      .vs_b_o                  (vs_b),
+      .frm_b_o                 (frm_b),
+      .mcbie_b_o               (mcbie_b),
+      .scbie_b_o               (scbie_b),
+      .hcbie_b_o               (hcbie_b),
+      .mcbcfe_b_o              (mcbcfe_b),
+      .scbcfe_b_o              (scbcfe_b),
+      .hcbcfe_b_o              (hcbcfe_b),
+      .mcbze_b_o               (mcbze_b),
+      .scbze_b_o               (scbze_b),
+      .hcbze_b_o               (hcbze_b),
+      .jvt_b_o                 (jvt_b),
+      .mcountinhibit_b_o       (mcountinhibit_b),
       .en_translation_o        (enable_translation_csr_ex),
       .en_g_translation_o      (enable_g_translation_csr_ex),
       .en_ld_st_translation_o  (en_ld_st_translation_csr_ex),
@@ -2141,12 +2252,15 @@ module cva6
         .clk_i         (clk_i),
         .rst_ni        (rst_ni),
         .debug_mode_i  (debug_mode),
-        .priv_lvl_i    (priv_lvl),
+        .priv_lvl_b_i  (priv_lvl_b),
         .addr_i        (addr_csr_perf),
         .we_i          (we_csr_perf),
         .data_i        (data_csr_perf),
         .data_o        (data_perf_csr),
         .hart_i        (smt_active_hart),
+        // T6b-3a: the HPM CSR access belongs to the committing op's hart —
+        // the same hart that selects the bank's perf_* sideband.
+        .csr_hart_i    (commit_instr_id_commit[0].hart_id),
         .scountovf_o   (scountovf_perf_csr),
         .lcofi_o       (lcofi_perf_csr),
         .commit_instr_i(commit_instr_id_commit),
@@ -2189,7 +2303,7 @@ module cva6
         .miss_vld_bits_i    (miss_vld_bits),
         .i_tlb_flush_i      (flush_tlb_ctrl_ex),
         .stall_issue_i      (stall_issue),
-        .mcountinhibit_i    (mcountinhibit_csr_perf)
+        .mcountinhibit_b_i  (mcountinhibit_b)
     );
   end : gen_perf_counter
   else begin : gen_no_perf_counter
@@ -2826,6 +2940,50 @@ module cva6
                  issue_entry_id_issue[p].pc, fetch_valid_if_id[p], fetch_entry_if_id[p].hart_id,
                  fetch_entry_if_id[p].address);
     end
+    // T6b-3b diagnostic (window-gated): which kill eats a pre-dispatch parcel,
+    // and what the peer-restart frontier can see at that instant. Prints on
+    // every pre-dispatch kill, every I$ request accept, every I$ response
+    // (taken or dropped), and every queue->ID transfer.
+    if (rst_ni && smt_handoff_trace && $time > 64'd1040000) begin
+      if (flush_ctrl_if || flush_unissued_instr_ctrl_id || flush_ctrl_id) begin
+        $display("[smt-probe] kill t=%0t fif=%b uniss=%b fid=%b rb=%b misp=%b rb_h=%0d ex=%b eret=%b spc=%b replay=%b sw=%b act=%0d",
+                 $time, flush_ctrl_if, flush_unissued_instr_ctrl_id, flush_ctrl_id,
+                 resolved_branch.valid, resolved_branch.is_mispredict,
+                 resolved_branch.hart_id, ex_commit.valid, eret,
+                 set_pc_ctrl_pcgen, mem_replay_pc_ctrl_pcgen, smt_switch,
+                 smt_active_hart);
+        $display("[smt-probe] killfe t=%0t npc=%h infl=%b ia=%h pend=%b ppc=%h sb0=%b sb0pc=%h sb1=%b sb1pc=%h pr=%b prh=%0d prpc=%h",
+                 $time, i_frontend.npc_q, i_frontend.inflight_q,
+                 i_frontend.inflight_addr_q, i_frontend.redirect_pend_q,
+                 i_frontend.redirect_pc_q, sb_head_valid[0], sb_head_pc[0],
+                 sb_head_valid[CVA6Cfg.NrHarts-1], sb_head_pc[CVA6Cfg.NrHarts-1],
+                 peer_restart_valid,
+                 peer_restart_hart, peer_restart_pc);
+        for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+          $display("[smt-probe] frontier t=%0t port=%0d decode_v=%b decode_h=%0d decode_pc=%h queue_v=%b queue_h=%0d queue_pc=%h",
+                   $time, p, issue_entry_valid_id_issue[p],
+                   issue_entry_id_issue[p].hart_id, issue_entry_id_issue[p].pc,
+                   fetch_valid_if_id[p], fetch_entry_if_id[p].hart_id,
+                   fetch_entry_if_id[p].address);
+      end
+      if (icache_dreq_if_cache.req && icache_dreq_cache_if.ready)
+        $display("[smt-probe] req t=%0t va=%h tok=%0d k1=%b k2=%b act=%0d",
+                 $time, icache_dreq_if_cache.vaddr, icache_dreq_if_cache.token,
+                 icache_dreq_if_cache.kill_s1, icache_dreq_if_cache.kill_s2,
+                 smt_active_hart);
+      if (icache_dreq_cache_if.valid)
+        $display("[smt-probe] resp t=%0t va=%h tok=%0d take=%b kd=%b wv=%b wt=%0d wpf=%b infl=%b ia=%h npc=%h act=%0d",
+                 $time, icache_dreq_cache_if.vaddr, icache_dreq_cache_if.token,
+                 i_frontend.icache_take, i_frontend.kill_drop,
+                 i_frontend.want_valid_q, i_frontend.want_token_q,
+                 i_frontend.want_pf_q, i_frontend.inflight_q,
+                 i_frontend.inflight_addr_q, i_frontend.npc_q, smt_active_hart);
+      for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+        if (fetch_valid_if_id[p] && fetch_ready_id_if[p])
+          $display("[smt-probe] pop t=%0t port=%0d h=%0d pc=%h",
+                   $time, p, fetch_entry_if_id[p].hart_id,
+                   fetch_entry_if_id[p].address);
+    end
   end
 
   // Drained-handoff witness (T6a): integer multi-hart OoO is legal precisely
@@ -2852,6 +3010,62 @@ module cva6
         (lsu_ctx_hart == smt_active_hart) && (lsu_chk_ctx_hart == smt_active_hart))
     else $error("t6b2b: lsu_ctx_hart/lsu_chk_ctx_hart diverged from active hart under drained handoff");
   end
+
+  // T6b-3b residency statistics (+smt_mixed_stats): the evidence that mixed
+  // residency actually happened. Counts cycles with every hart holding a
+  // live scoreboard entry (sb_head_valid), commits whose owning hart is not
+  // the active fetch hart, and per-hart retirements.
+  if (CVA6Cfg.NrHarts > 1) begin : gen_smt_mixed_stats
+    bit smt_mixed_stats;
+    longint unsigned smt_ms_both_resident, smt_ms_nonactive_commit;
+    longint unsigned smt_ms_retired[CVA6Cfg.NrHarts];
+    initial begin
+      smt_mixed_stats = $test$plusargs("smt_mixed_stats");
+      smt_ms_both_resident = 0;
+      smt_ms_nonactive_commit = 0;
+      for (int h = 0; h < CVA6Cfg.NrHarts; h++) smt_ms_retired[h] = 0;
+    end
+    always @(posedge clk_i) begin
+      if (rst_ni && smt_mixed_stats) begin
+        if (&sb_head_valid) smt_ms_both_resident++;
+        for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
+          if (commit_ack[p]) begin
+            if (commit_instr_id_commit[p].hart_id != smt_active_hart)
+              smt_ms_nonactive_commit++;
+            if (smt_retire_valid[p]) smt_ms_retired[smt_retire_hart[p]]++;
+          end
+        end
+      end
+    end
+    final begin
+      if (smt_mixed_stats) begin
+        $display("[smt-mixed] both_resident_cycles=%0d nonactive_commits=%0d",
+                 smt_ms_both_resident, smt_ms_nonactive_commit);
+        for (int h = 0; h < CVA6Cfg.NrHarts; h++)
+          $display("[smt-mixed] retired hart %0d = %0d", h, smt_ms_retired[h]);
+      end
+    end
+  end
+
+`ifdef G6LC_FETCH_B
+  // T6b-3b: the partial-flush restart contract. The kill set is uniform —
+  // every flush_unissued source also raises flush_if, so no queue/decode
+  // entry can survive a kill that reached the issue stage — and a
+  // pre-dispatch kill that is neither a full flush nor the hart switch is a
+  // branch mispredict, whose resolving hart owns the peer restart.
+  t6b3_kill_set_uniform : assert property (
+      @(posedge clk_i) disable iff (!rst_ni)
+      flush_unissued_instr_ctrl_id |-> flush_ctrl_if)
+  else $error("t6b3: flush_unissued without flush_if broke kill-set uniformity");
+
+  if (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin : gen_t6b3_partial_flush
+    t6b3_partial_owner : assert property (
+        @(posedge clk_i) disable iff (!rst_ni)
+        (flush_ctrl_if || flush_unissued_instr_ctrl_id) && !flush_ctrl_id && !smt_switch
+        |-> (resolved_branch.valid && resolved_branch.is_mispredict))
+    else $error("t6b3: partial flush without a mispredict owner — peer restart hart undefined");
+  end
+`endif
 
   // Read-only load round-trip observer on the core's load port. Requests are
   // paired to responses by data_id/data_rid, which the load unit allocates from

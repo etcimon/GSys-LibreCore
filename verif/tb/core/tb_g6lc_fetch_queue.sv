@@ -55,6 +55,8 @@ module tb_g6lc_fetch_queue;
   logic [63:0] replay_addr;
   entry_t [ISSUE-1:0] entry;
   logic [ISSUE-1:0] entry_valid, entry_ready;
+  logic [HARTS-1:0] q_oldest_valid;
+  logic [HARTS-1:0][63:0] q_oldest_pc;
   entry_t expected[$];
   int unsigned accepted = 0, retired = 0, discarded = 0, serial = 0;
   int unsigned sparse = 0, stalled = 0, flushed = 0, dual = 0, branches = 0;
@@ -70,7 +72,8 @@ module tb_g6lc_fetch_queue;
     .exception_addr_i(exception_addr), .exception_gpaddr_i('0), .exception_tinst_i('0),
     .exception_gva_i(1'b0), .predict_address_i(prediction), .cf_type_i(cf),
     .replay_o(replay), .replay_addr_o(replay_addr),
-    .fetch_entry_o(entry), .fetch_entry_valid_o(entry_valid), .fetch_entry_ready_i(entry_ready)
+    .fetch_entry_o(entry), .fetch_entry_valid_o(entry_valid), .fetch_entry_ready_i(entry_ready),
+    .queue_oldest_valid_o(q_oldest_valid), .queue_oldest_pc_o(q_oldest_pc)
   );
 
   task automatic step(input logic [SLOTS-1:0] mask,
@@ -234,6 +237,73 @@ module tb_g6lc_fetch_queue;
       step(SLOTS'(1) << (n % SLOTS), '1, 0, n % HARTS);
     long_accepted = accepted - long_accepted;
     repeat (SLOTS * 8 + 2) step('0, '1);
+    // --- T6b-3b deep-queue frontier (mixed geometries only) --------------
+    // Raw drives: a peer's entries queued deeper than the ISSUE port
+    // positions are invisible to the port view; the per-hart pending head
+    // must track them. A final squash re-syncs the DUT with the empty
+    // expected model (raw pushes are untracked by design).
+    if (HARTS > 1) begin : gen_deep_frontier
+      logic [63:0] base0, base1, base2;
+      hart = '0; valid = '1; entry_ready = '0; flush = 0; leftover = 0;
+      exception = FE_NONE; cf = '0; prediction = '0;
+      base0 = 64'h80100000;
+      for (int s = 0; s < SLOTS; s++) begin
+        instr[s] = 32'h00000013;
+        addr[s] = base0 + 64'(s * 4);
+      end
+      #5; clk = 1; #5; clk = 0;
+      base1 = 64'h80200000;
+      hart = HW'(1);
+      for (int s = 0; s < SLOTS; s++) begin
+        instr[s] = 32'h00000001;   // c.nop — compressed spacing, stride 2
+        addr[s] = base1 + 64'(s * 2);
+      end
+      #5; clk = 1; #5; clk = 0; valid = '0;
+      #1;
+      // The ports still show hart 0; hart 1's pending head is its first PC.
+      if (!(entry_valid[0] && entry[0].hart_id == 0 && entry[0].address == base0))
+        $fatal(1, "IQ_OLDEST_PORTS hart=%0d pc=%h want=%h",
+               entry[0].hart_id, entry[0].address, base0);
+      if ($test$plusargs("iq_oldest_neg")) begin
+        if (q_oldest_pc[1] == base1)
+          $fatal(1, "IQ_OLDEST_H1 head=%h want != %h", q_oldest_pc[1], base1);
+      end else if (!q_oldest_valid[1] || q_oldest_pc[1] !== base1)
+        $fatal(1, "IQ_OLDEST_H1 head=%h valid=%b want=%h",
+               q_oldest_pc[1], q_oldest_valid[1], base1);
+      // Drain hart 0's SLOTS entries, then deliver exactly one hart-1
+      // instruction (compressed stride): the head advances exactly one.
+      entry_ready = '1;
+      for (int n = 0; n < (SLOTS + ISSUE - 1) / ISSUE; n++) begin
+        #5; clk = 1; #5; clk = 0;
+      end
+      entry_ready = ISSUE'(1);
+      #5;
+      if (!(entry_valid[0] && entry[0].hart_id == 1 && entry[0].address == base1))
+        $fatal(1, "IQ_OLDEST_H1_FIRST hart=%0d pc=%h want=%h",
+               entry[0].hart_id, entry[0].address, base1);
+      clk = 1; #5; clk = 0;
+      #1;
+      if (!q_oldest_valid[1] || q_oldest_pc[1] !== base1 + 64'd2)
+        $fatal(1, "IQ_OLDEST_H1_ADV head=%h want=%h", q_oldest_pc[1], base1 + 2);
+      // Drain the rest, then a full-width packet: same advance rule.
+      entry_ready = '1;
+      for (int n = 0; n < SLOTS; n++) begin
+        #5; clk = 1; #5; clk = 0;
+      end
+      base2 = 64'h80300000;
+      hart = HW'(1); valid = '1; entry_ready = '0;
+      for (int s = 0; s < SLOTS; s++) begin
+        instr[s] = 32'h00000013;
+        addr[s] = base2 + 64'(s * 4);
+      end
+      #5; clk = 1; #5; clk = 0; valid = '0;
+      entry_ready = ISSUE'(1);
+      #5; clk = 1; #5; clk = 0;
+      #1;
+      if (!q_oldest_valid[1] || q_oldest_pc[1] !== base2 + 64'd4)
+        $fatal(1, "IQ_OLDEST_H1_FULL head=%h want=%h", q_oldest_pc[1], base2 + 4);
+      step('0, '0, 1);
+    end
     if (expected.size() != 0 || accepted != retired + discarded ||
         long_accepted <= 65536 || (SLOTS > 1 && (sparse == 0 || partial == 0)) ||
         stalled == 0 || flushed == 0 || target_full == 0 || faults == 0 || concurrent == 0 ||

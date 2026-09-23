@@ -96,9 +96,13 @@ next actions are superseded by the tranche exits.
   parallel `sb_head_pc`). T6b-2b landed (per-access translation/privilege/PMP context: CSR bank
   LSU context by request hart, PMP by check-stage hart, MMU replays the registered request context
   in its check stage, hart-tagged TLBs, per-lane decode interrupts, WFI parks only its hart; drained
-  records exact). Open: T6b-3 `SmtDrainedHandoff=0` firmware gate + isolation negatives — first
-  probe stops at cycle 280 on the planted `perf_counters` attribution check (events must bank by
-  the committing hart); T6b-4 performance (partitioned heads, PRF floors).
+  records exact). T6b-3 landed (ownership completion: per-lane decode CSR context, PMU banks by
+  committing hart, commit-hart CSR access; partial-flush peer restart at the surviving frontier
+  incl. the per-hart oldest queued entry) — **first `SmtDrainedHandoff=0` pass of the dual-hart
+  profile: 10,602,826 cycles, strictDual, 105k non-active commits, zero assertions** (experimental
+  provenance; `G6LC_OOO_SMT_MIXED_QUALIFY` stays). Open: T6b-3 exit still needs the isolation
+  negatives run at core level (peer store/TLB/PMP/interrupt) and a Spike-compared dual-hart trace;
+  T6b-4 performance (hart-selective kill / per-hart fetch queues, partitioned heads, PRF floors).
 - [ ] T6b mixed residency per the plan file (after T6a).
 
 ## Active stability-first review — authoritative next change sets

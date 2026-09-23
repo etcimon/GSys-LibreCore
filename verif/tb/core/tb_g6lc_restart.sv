@@ -19,6 +19,7 @@ module tb_g6lc_restart;
   logic [63:0] redirect_pc=0;
   logic redirect2_valid=0, redirect2_hart=0;
   logic [63:0] redirect2_pc=0;
+  g6lc_fetch_pkg::restart_t fr;
   bit negative;
   g6lc_smt_pc_bank #(.CVA6Cfg(cfg(2))) dut (
     .clk_i(clk),.rst_ni(rst_n),.boot_addr_i(64'h10000),
@@ -95,6 +96,72 @@ module tb_g6lc_restart;
     tick(); redirect_valid=0; redirect2_valid=0; tick();
     active=1; switch_req=1; check(64'h7100); tick(); switch_req=0; tick();
     active=0; switch_req=1; check(64'h7000); tick(); switch_req=0; tick();
+    // --- T6b-3b: partial-flush peer restart ---------------------------------
+    // F-A: hart0's mispredict while hart1 holds decode-stage PC X and queue
+    // PC X+4 — the peer's frontier is X (the decode entry wins; the mispredict
+    // redirect is for hart0 and must not retarget hart1's frontier).
+    fr = g6lc_fetch_pkg::restart_frontier(
+        2, 8'd1,
+        8'b00000001, '{0:8'd1, default:'0}, '{0:64'h8c30, default:'0},
+        8'b00000001, '{0:8'd1, default:'0}, '{0:64'h8c34, default:'0},
+        '{valid: 1'b1, pc: 64'h8c38},
+        1'b1, 8'd0, 64'h7000);
+    if (!fr.valid || fr.pc != 64'h8c30)
+      $fatal(1,"RESTART_FRONTIER_DECODE got=%h",fr.pc);
+    // F-B: the killed-parcel gap — hart1's only surviving frontier is the
+    // fetch-side transport (the in-flight request killed mid-flight). It must
+    // restart there, never at the fetch-ahead cursor.
+    fr = g6lc_fetch_pkg::restart_frontier(
+        2, 8'd1, '0, '0, '0, '0, '0, '0,
+        '{valid: 1'b1, pc: 64'h8c2e}, 1'b0, '0, '0);
+    if (!fr.valid || fr.pc != 64'h8c2e)
+      $fatal(1,"RESTART_FRONTIER_INFLIGHT got=%h",fr.pc);
+    // F-C: a queue entry still outranks the fetch-side transport — the queue
+    // head is fetch-order older than any live fetch position.
+    fr = g6lc_fetch_pkg::restart_frontier(
+        2, 8'd1, '0, '0, '0,
+        8'b00000001, '{0:8'd1, default:'0}, '{0:64'h8c30, default:'0},
+        '{valid: 1'b1, pc: 64'h8c2e}, 1'b0, '0, '0);
+    if (!fr.valid || fr.pc != 64'h8c30)
+      $fatal(1,"RESTART_FRONTIER_QUEUE got=%h",fr.pc);
+    // P-D: the partial-flush cycle — hart0's mispredict rides the primary
+    // port while hart1's peer restart takes the second; both banks land in
+    // the same cycle. +mut_no_peer drops the second-port write, modelling the
+    // peer leg removed: hart1's bank keeps its stale PC and the check fails.
+    redirect_valid=1; redirect_hart=0; redirect_pc=64'hb000;
+    if (!$test$plusargs("mut_no_peer")) begin
+      redirect2_valid=1; redirect2_hart=1; redirect2_pc=64'h8c2e;
+    end
+    tick(); redirect_valid=0; redirect2_valid=0; tick();
+    active=1; switch_req=1; #2;
+    // With the peer leg removed the bank keeps its stale value and this
+    // check fails — the runner matches RESTART_PEER_MISP for +mut_no_peer.
+    if (restored_pc != 64'h8c2e)
+      $fatal(1,"RESTART_PEER_MISP hart1 bank got=%h want=8c2e",restored_pc);
+    tick(); switch_req=0; tick();
+    active=0; switch_req=1; check(64'hb000); tick(); switch_req=0; tick();
+    // P-E: deep-queue peer frontier — the peer's only surviving entries sit
+    // deeper than the NrIssuePorts port positions (queued behind the faulting
+    // hart's presented slots, invisible to the port view). The per-hart
+    // pending-FIFO head is the frontier — modelled here as the queue
+    // candidate; the peer is inactive so no fetch transport exists. With the
+    // candidate dropped (+mut_no_deep) nothing lands in the peer's bank and
+    // its stale PC survives — the killed-window loss this fix closes.
+    fr = g6lc_fetch_pkg::restart_frontier(
+        2, 8'd1, '0, '0, '0,
+        $test$plusargs("mut_no_deep") ? 8'b0 : 8'b00000001,
+        '{0:8'd1, default:'0}, '{0:64'h9500, default:'0},
+        '{valid: 1'b0, pc: '0},
+        1'b0, '0, '0);
+    if (fr.valid) begin
+      redirect2_valid=1; redirect2_hart=1; redirect2_pc=fr.pc;
+    end
+    tick(); redirect2_valid=0; tick();
+    active=1; switch_req=1; #2;
+    if (restored_pc != 64'h9500)
+      $fatal(1,"RESTART_PEER_DEEP hart1 bank got=%h want=9500",restored_pc);
+    tick(); switch_req=0; tick();
+    active=0; switch_req=1; check(64'hb000); tick(); switch_req=0; tick();
     $display("RESTART_BANK_PASS");
     $finish;
   end

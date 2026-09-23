@@ -148,6 +148,9 @@ static const char *verilog_plusargs[] = {
     // come out as exit 126. Same allowlist rule -- unlisted means HTIF kills the
     // run, which would look like the control working.
     "mc_hang_fault",
+    // Mixed-residency statistics probe (core/cva6.sv): prints residency and
+    // per-hart commit counters at $finish. Same allowlist rule as above.
+    "smt_mixed_stats",
     nullptr};
 
 extern dtm_t* dtm;

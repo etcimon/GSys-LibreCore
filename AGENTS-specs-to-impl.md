@@ -45,6 +45,26 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## Mixed-resident ownership completion and partial-flush peer restart (2026-09-23, T6b-3)
+
+Every remaining active-hart-keyed CSR view is classified by its sampling point (`#priv-csrs`,
+`#hpm-counters`, `#interrupts`): decode-time state (`tvm/tw/vtw/tsr/hu`, `fs/vfs/vs/frm`,
+`debug_mode`, CBO/pbmt permissions, `jvt`) is selected per decode lane by the fetch entry's hart
+(`core/id_stage.sv`); the PMU (`core/perf_counters.sv`) banks commit-derived events by the
+committing port's hart, exception/eret by commit port 0's hart, resolved-branch events by the
+branch's hart, and frontend/structural events by the active hart (documented approximation), with
+per-bank `mcountinhibit`/privilege filtering and the CSR access keyed by the committing hart; the
+planted "commit hart == active hart" fatal is gone. Recovery: a branch mispredict raises
+`flush_if`/`flush_unissued` globally (`core/controller.sv`), so under mixed residency the peer hart
+restarts at its surviving pre-dispatch frontier — decode entries, the oldest undelivered queue entry
+of that hart (`core/fetch_B/instr_queue.sv` per-hart pending-address FIFO; the output ports alone
+miss entries queued deeper), and the fetch frontier (armed redirect > in-flight parcel > cursor,
+`core/fetch_B/frontend.sv`) when it is the fetch hart — never its scoreboard head, whose entries
+survive the same-hart cancel (`core/cva6.sv` `gen_peer_restart`); an inactive hart's mispredict
+banks its target on the primary port. Drained and single-hart configurations constant-fold every
+leg. Out of scope: external debug under mixed residency (asserted absent); hart-selective kill and
+per-hart fetch queues are the T6b-4 performance form.
+
 ## Per-access translation/privilege/PMP context (2026-09-23, T6b-2b)
 
 Virtual-memory and PMP checks in the requesting hart's context (`#virtual-memory` satp/ASID

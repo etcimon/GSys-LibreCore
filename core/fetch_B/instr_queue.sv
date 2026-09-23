@@ -73,7 +73,13 @@ module instr_queue
     // Handshake's valid with ID_STAGE - ID_STAGE
     output logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_valid_o,
     // Handshake's ready with ID_STAGE - ID_STAGE
-    input logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_ready_i
+    input logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_ready_i,
+    // T6b-3b: oldest undelivered instruction per hart (the mixed-residency
+    // restart frontier). The port view only reaches NrIssuePorts positions —
+    // a peer hart's entries queued deeper than them are invisible to it.
+    // '0 in single-hart and drained-handoff configurations.
+    output logic [CVA6Cfg.NrHarts-1:0] queue_oldest_valid_o,
+    output logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0] queue_oldest_pc_o
 );
 
   localparam g6lc_fetch_pkg::fetch_geo_t Geo = g6lc_fetch_pkg::geo(CVA6Cfg);
@@ -82,6 +88,9 @@ module instr_queue
   localparam int unsigned NrIssue = Geo.issue;
   localparam int unsigned IdxW = Geo.log2_slots;
   localparam int unsigned HidW = Geo.hart_idx_w;
+  // Per-slot instruction FIFO depth — the pending-frontier FIFOs below derive
+  // their capacity from it (slots × depth = the queue's total occupancy).
+  localparam int unsigned IFifoDepth = 8;
 
   typedef logic [IdxW-1:0] fifo_idx_t;
   // NrFifo is a power of two, so a truncating mask is a modulo
@@ -468,7 +477,7 @@ module instr_queue
     // t=125002 replay=1 full=8). Dual-issue drain vs 4-wide leftover.
     cva6_fifo_v3 #(
         .FPGA_ALTERA(CVA6Cfg.FpgaAlteraEn),
-        .DEPTH(8),
+        .DEPTH(IFifoDepth),
         .dtype(instr_data_t),
         .FPGA_EN(CVA6Cfg.FpgaEn)
     ) i_fifo_instr_data (
@@ -511,6 +520,109 @@ module instr_queue
       .data_o    (address_out),
       .pop_i     (pop_address)
   );
+
+  // ----------------------
+  // Per-hart pending frontier (T6b-3b)
+  // ----------------------
+  // The output ports expose only NrIssue positions; a peer hart's entries
+  // queued deeper behind the presented slots are invisible to the restart
+  // frontier. Keep one address FIFO per hart, pushed in push order and popped
+  // once per delivered instruction of that hart — per-hart delivery order is
+  // push order (compact insertion is program order and a packet is single-
+  // hart), so the head is exactly that hart's oldest undelivered instruction.
+  // Mixed residency only: the whole block constant-folds to a '0 tie under
+  // SmtDrainedHandoff and NrHarts==1.
+  if (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin : gen_pend_frontier
+    localparam int unsigned PendDepth = NrFifo * IFifoDepth;
+    localparam int unsigned PAW = (PendDepth > 1) ? $clog2(PendDepth) : 1;
+    localparam int unsigned PopW = (NrIssue > 1) ? $clog2(NrIssue + 1) : 1;
+
+    logic [CVA6Cfg.NrHarts-1:0][PendDepth-1:0][CVA6Cfg.VLEN-1:0] pend_mem;
+    logic [CVA6Cfg.NrHarts-1:0][PAW-1:0] pend_wr_q, pend_rd_q;
+    logic [CVA6Cfg.NrHarts-1:0][PAW:0] pend_cnt_q;
+
+    // Pushed FIFOs are contiguous from idx_is_q (compact insertion), so the
+    // k-th pushed instruction's PC is instr_data_in[(idx_is_q + k) mod NrFifo]
+    // for k < shamt — already in push order.
+    logic [NrFifo-1:0][CVA6Cfg.VLEN-1:0] push_addr;
+    for (genvar k = 0; k < NrFifo; k++) begin : gen_push_addr
+      assign push_addr[k] =
+          instr_data_in[fifo_idx_t'((idx_is_q + fifo_idx_t'(k)) & IdxMask)].pc;
+    end
+
+    // Deliveries per hart this cycle: fire_prefix is the queue's actual pop —
+    // a port handshake without the earlier prefix pops nothing, so valid&ready
+    // alone is not a delivery.
+    logic [CVA6Cfg.NrHarts-1:0][PopW-1:0] pop_cnt;
+    always_comb begin : gen_pend_pop
+      pop_cnt = '0;
+      for (int unsigned h = 0; h < CVA6Cfg.NrHarts; h++) begin
+        for (int unsigned p = 0; p < NrIssue; p++) begin
+          if (fire_prefix[p] && fetch_entry_o[p].hart_id == HidW'(h))
+            pop_cnt[h] = pop_cnt[h] + PopW'(1);
+        end
+      end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : gen_pend_ptrs
+      if (!rst_ni) begin
+        pend_wr_q <= '0;
+        pend_rd_q <= '0;
+        pend_cnt_q <= '0;
+      end else if (flush_i) begin
+        pend_wr_q <= '0;
+        pend_rd_q <= '0;
+        pend_cnt_q <= '0;
+      end else begin
+        for (int unsigned h = 0; h < CVA6Cfg.NrHarts; h++) begin
+          if (|shamt && hart_i == HidW'(h)) begin
+            for (int unsigned k = 0; k < NrFifo; k++) begin
+              if (k < int'(shamt))
+                pend_mem[h][pend_wr_q[h] + PAW'(k)] <= push_addr[k];
+            end
+            pend_wr_q[h] <= pend_wr_q[h] + PAW'(shamt);
+            pend_cnt_q[h] <= pend_cnt_q[h] + (PAW + 1)'(shamt) - (PAW + 1)'(pop_cnt[h]);
+          end else begin
+            pend_cnt_q[h] <= pend_cnt_q[h] - (PAW + 1)'(pop_cnt[h]);
+          end
+          pend_rd_q[h] <= pend_rd_q[h] + PAW'(pop_cnt[h]);
+        end
+      end
+    end
+
+    for (genvar h = 0; h < CVA6Cfg.NrHarts; h++) begin : gen_pend_out
+      assign queue_oldest_valid_o[h] = |pend_cnt_q[h];
+      assign queue_oldest_pc_o[h] = pend_mem[h][pend_rd_q[h]];
+    end
+
+//pragma translate_off
+    // Delivery order is push order per hart: the rank-th same-hart delivery
+    // this cycle must read the rank-th pending entry from the head.
+    always @(posedge clk_i) begin : gen_pend_order_check
+      if (rst_ni && !flush_i) begin
+        for (int unsigned p = 0; p < NrIssue; p++) begin
+          int unsigned rank;
+          rank = 0;
+          for (int unsigned q = 0; q < p; q++) begin
+            if (fire_prefix[q] &&
+                fetch_entry_o[q].hart_id == fetch_entry_o[p].hart_id)
+              rank++;
+          end
+          if (fire_prefix[p]) begin
+            assert (fetch_entry_o[p].address ==
+                    pend_mem[int'(fetch_entry_o[p].hart_id)]
+                            [pend_rd_q[int'(fetch_entry_o[p].hart_id)] + PAW'(rank)])
+            else $error("[instr_queue] pending-frontier order broke: port %0d hart %0d pc %h",
+                        p, fetch_entry_o[p].hart_id, fetch_entry_o[p].address);
+          end
+        end
+      end
+    end
+//pragma translate_on
+  end else begin : gen_no_pend_frontier
+    assign queue_oldest_valid_o = '0;
+    assign queue_oldest_pc_o = '0;
+  end
 
   // ----------------------
   // Pointers

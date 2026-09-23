@@ -95,8 +95,19 @@ def main():
             record["negativeDetected"] = (negative.returncode != 0
                                           and "order/data mismatch" in neg_text
                                           and "FETCH_QUEUE_PASS" not in neg_text)
+            # T6b-3b: the deep-queue frontier check inverted — mixed-residency
+            # geometries must abort at IQ_OLDEST_H1.
+            iqneg = subprocess.run([str(exe), "+iq_oldest_neg"], capture_output=True,
+                                   text=True, env={"PATH": "/usr/bin:/bin"}, timeout=30)
+            iqneg_text = iqneg.stdout + iqneg.stderr
+            (work / "sim-iq-oldest-neg.log").write_text(iqneg_text)
+            record["negativeOldestDetected"] = (
+                harts == 1
+                or (iqneg.returncode != 0 and "IQ_OLDEST_H1" in iqneg_text
+                    and "FETCH_QUEUE_PASS" not in iqneg_text))
             record["pass"] = (result.returncode == 0 and text.count("FETCH_QUEUE_PASS ") == 1
-                              and record["negativeDetected"])
+                              and record["negativeDetected"]
+                              and record["negativeOldestDetected"])
         else:
             record["pass"] = False
             print(f"s{slots}/i{issue}/h{harts}/c{rvc}: dep check failed "

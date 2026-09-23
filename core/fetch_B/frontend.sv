@@ -79,6 +79,16 @@ module frontend
     input logic [CVA6Cfg.VLEN-1:0] peer_restart_pc_i,
     // Live NPC for PC bank snapshot - SMT
     output logic [CVA6Cfg.VLEN-1:0] npc_q_o,
+    // T6b-3b: oldest undelivered fetch position for the SMT restart frontier -
+    // the armed redirect target, else the accepted in-flight request, else the
+    // NPC cursor. A kill that drops an in-flight parcel must still restart
+    // from it, never from the fetch-ahead cursor.
+    output logic [CVA6Cfg.VLEN-1:0] fetch_frontier_pc_o,
+    // T6b-3b: oldest undelivered instruction per hart inside the instruction
+    // queue — the port view only reaches NrIssuePorts positions; deeper queued
+    // peer entries would be dropped by a kill with no restart frontier.
+    output logic [CVA6Cfg.NrHarts-1:0] queue_oldest_valid_o,
+    output logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0] queue_oldest_pc_o,
     // A trap redirect is fetched but not yet registered: suppress hart switch - SMT
     output logic smt_trap_hold_o,
     // Handshake between CACHE and FRONTEND (fetch) - CACHES
@@ -926,6 +936,12 @@ module frontend
   assign snap_nb = g6lc_fetch_pkg::snap_pc(SmtEn && smt_restore_i, inflight_q,
       64'(inflight_addr_q), 64'(npc_q));
   assign npc_q_o = snap_nb[CVA6Cfg.VLEN-1:0];
+  // Stream order is: an armed redirect target (requests re-issue from it),
+  // then the accepted in-flight request, then the NPC cursor. npc_q already
+  // equals redirect_pc_q while the hold re-presents it; pend still leads so a
+  // kill between request-accept and response keeps the refused window.
+  assign fetch_frontier_pc_o = redirect_pend_q ? redirect_pc_q
+      : inflight_q ? inflight_addr_q : npc_q;
 
   // assert on branch, deassert when resolved; prefetches are always speculative
   logic speculative_q, speculative_d;
@@ -1281,7 +1297,9 @@ module frontend
       .replay_addr_o      (replay_addr),
       .fetch_entry_o      (fetch_entry_o),         // to back-end
       .fetch_entry_valid_o(fetch_entry_valid_o),   // to back-end
-      .fetch_entry_ready_i(fetch_entry_ready_i)    // to back-end
+      .fetch_entry_ready_i(fetch_entry_ready_i),   // to back-end
+      .queue_oldest_valid_o(queue_oldest_valid_o),
+      .queue_oldest_pc_o  (queue_oldest_pc_o)
   );
 
 //pragma translate_off

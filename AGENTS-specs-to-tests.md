@@ -63,6 +63,27 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## Mixed-resident ownership completion and partial-flush peer restart (2026-09-23, T6b-3)
+
+**First `SmtDrainedHandoff=0` pass of the protected dual-hart OpenSBI/HSM profile** on
+`g6lc64_smt2_ooo_int` with `G6LC_OOO_SMT_MIXED_QUALIFY` (experimental provenance, never an anchor):
+strictDual pass in **10,602,826 cycles** (drained: 10,696,498), `both_resident_cycles=60,711`,
+`nonactive_commits=105,303`, retired 356,213 / 8,936,471, zero assertion hits. Before the fix the
+same profile deadlocked at ~1.07M cycles: a hart-0 mispredict discarded hart 1's in-flight
+`addi sp,sp,-16` (`0x80008c2e`), sp drifted +0x10, `ret` to PC 0, OpenSBI's console lock
+self-deadlocked. Leaves: `csrbank` 12/12 (commit-hart perf/csr access, per-bank `_b` arrays),
+`perf` 8/8 (two harts acking in one cycle → one increment per bank, per-bank inhibit, CSR read by
+`csr_hart`), restart leaf `RESTART_PEER_MISP` (mispredict of hart 0 → hart 1's bank gets its decode
+PC; mutation `mut_no_peer` fails) and `RESTART_PEER_DEEP` (peer entries only deep in the queue →
+bank gets the deep PC; `mut_no_deep` falls back to the cursor and fails), fetch-queue cell 5/5 with
+`IQ_OLDEST_H1` negatives; hold proof carries the fetch-frontier contract (PASS), token FTQD 0/4 and
+redirect PASS, `g6lc_fetch_iq` bmc PASS (its cover mode is a pre-existing z3 timeout). Regressions
+exact: integer probes ×10 + s11, FP suite 13 + 10 negatives, drained dual-hart 10,696,498, anchor
+12,765,628; lint 8/54, synth 32/5; FO4 `sparse_ooo_issue` unchanged (no frontend source in that
+fileset). Coverage boundary: the deep-queue interleaving never materialised in the spin-loop
+profile — the leaf oracles carry it; the mixed profile is a firmware pass, not a Spike-compared
+dual-hart trace.
+
 ## Per-access translation/privilege/PMP context (2026-09-23, T6b-2b)
 
 `csrbank` leaf (`REVIEW_RTL_CSRBANK`, drained + mixed): LSU outputs follow `lsu_hart_i`, PMP pair

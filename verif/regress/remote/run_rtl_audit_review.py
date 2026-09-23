@@ -112,7 +112,7 @@ def main():
     lateresult_fault=os.environ.get('REVIEW_RTL_LATERESULT_FAULT')=='1'
     before=os.environ.get('REVIEW_RTL_BEFORE')=='1' or wb_fault or bool(drop_fault) or lateresult_fault
     source=out/'source';source.mkdir()
-    names=['config_pkg.sv','g6lc64_smt2_config_pkg.sv','riscv_pkg.sv','ariane_pkg.sv','g6lc_iq.sv','g6lc_bp_tage_table.sv','g6lc_bp_tage.sv','g6lc_bp_ghist.sv','g6lc_bp_ckpt.sv','g6lc_bp_ittage.sv','g6lc_l2_mshr.sv','g6lc_coherence_pkg.sv','g6lc_l3_inclusive_inv.sv','g6lc_cluster.sv','g6lc_core_types.svh','tb_g6lc_rtl_review.sv']
+    names=['config_pkg.sv','g6lc64_smt2_config_pkg.sv','riscv_pkg.sv','ariane_pkg.sv','g6lc_iq.sv','g6lc_bp_tage_table.sv','g6lc_bp_tage.sv','g6lc_bp_ghist.sv','g6lc_bp_ckpt.sv','g6lc_bp_ittage.sv','g6lc_l2_mshr.sv','g6lc_coherence_pkg.sv','g6lc_l3_inclusive_inv.sv','g6lc_cluster.sv','g6lc_core_types.svh','rvfi_types.svh','tb_g6lc_rtl_review.sv']
     # scoreboard.sv (and its smt_legacy/fetch_A helper packages) are only
     # needed by the commit kind; every other kind leaves that bench module
     # unelaborated, so the legacy files stay out of the payload.
@@ -130,6 +130,8 @@ def main():
         # triggers_pkg first: trigger_module/csr_regfile import it.
         names[-1:-1]=['triggers_pkg.sv','g6lc_smt_csr_bank.sv','csr_regfile.sv',
                       'trigger_module.sv','rvfi_types.svh']
+    if os.environ.get('REVIEW_RTL_PERF')=='1':
+        names[-1:-1]=['perf_counters.sv']
     if os.environ.get('REVIEW_RTL_TLB')=='1':
         names[-1:-1]=['cva6_tlb.sv','cf_math_pkg.sv','lzc.sv','rvfi_types.svh']
     if os.environ.get('REVIEW_RTL_STLB')=='1':
@@ -333,8 +335,17 @@ def main():
         # T6b-2b: LSU context follows lsu_hart_i, the PMP pair lsu_chk_hart_i,
         # fetch context stays on active_hart_i; drained keeps the global WFI
         # halt, mixed parks only the owning hart.
-        configurations=[('csrbank','drained',['-GDRAINED=1'],[(0,None),(1,None)]),
-                        ('csrbank','mixed',['-GDRAINED=0'],[(0,None),(2,None)])]
+        # T6b-3a adds scenario 3: the PMU sideband and csr_rdata bank by the
+        # committing hart, and the *_b arrays expose each bank's own context.
+        configurations=[('csrbank','drained',['-GDRAINED=1'],[(0,None),(1,None),(3,None)]),
+                        ('csrbank','mixed',['-GDRAINED=0'],[(0,None),(2,None),(3,None)])]
+    elif os.environ.get('REVIEW_RTL_PERF')=='1':
+        # T6b-3a: per-hart PMU event banking — commit-derived events land in
+        # the committing hart's bank, mcountinhibit is per bank, and the HPM
+        # CSR access banks by csr_hart_i. Drained geometry keeps today's
+        # counts (both ports hart 0).
+        configurations=[('perf','mixed',['-GDRAINED=0'],[(0,None),(1,None),(2,None)]),
+                        ('perf','drained',['-GDRAINED=1'],[(3,None)])]
     elif os.environ.get('REVIEW_RTL_TLB')=='1':
         # T6b-2b: private-TLB hart tag — per-hart isolation under mixed
         # residency, drained keeps shared first-match behaviour.
@@ -518,7 +529,12 @@ def main():
             elif kind=='csrbank':
                 trials+=[(0,True,'CSRBANK_LSU_ENTR'),
                          (1,True,'CSRBANK_WFI_HALT') if geometry=='drained'
-                         else (2,True,'CSRBANK_WFI_HALT')]
+                         else (2,True,'CSRBANK_WFI_HALT'),
+                         (3,True,'CSRBANK_PERF_HART')]
+            elif kind=='perf':
+                trials+=([(0,True,'PERF_BANK1_RETIRE'),(1,True,'PERF_INHIBIT_B1'),
+                          (2,True,'PERF_CSR_HART')] if geometry=='mixed'
+                         else [(3,True,'PERF_DRAIN_B0')])
             elif kind=='tlb':
                 trials+=([(0,True,'TLB_HART0_OWN'),(1,True,'TLB_HART1_MISS')] if geometry=='mixed'
                          else [(2,True,'TLB_HART1_SHARED')])

@@ -3504,6 +3504,7 @@ module tb_g6lc_review_csrbank;
     // leaves them 0, which silently drops satp_t's mode field).
     c.ModeW=4;c.ASIDW=16;c.VMIDW=14;
     c.NrPMPEntries=4;
+    c.RVZCMT=1;  // scenario 3 programs per-bank jvt
     return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
@@ -3515,8 +3516,10 @@ module tb_g6lc_review_csrbank;
   typedef `RVFI_PROBES_CSR_T(C) rvfi_csr_t;
 
   // Context set A (bank 0) / set B (bank 1).
-  localparam logic[63:0] MSTATUS_A=64'h20800;   // MPRV=1, MPP=S
-  localparam logic[63:0] MSTATUS_B=64'hE1800;   // MPRV=1, MPP=M, SUM=1, MXR=1
+  localparam logic[63:0] MSTATUS_A=64'h120800;   // MPRV=1, MPP=S, TVM=1
+  localparam logic[63:0] MSTATUS_B=64'h6E1800;   // MPRV=1, MPP=M, SUM=1, MXR=1, TW=1, TSR=1
+  localparam logic[63:0] JVT_A=64'h0000_1234_5678_9A40;
+  localparam logic[63:0] JVT_B=64'h0000_0ABC_DEF0_1280;
   localparam logic[63:0] SATP_A=(64'd8<<60)|(64'd1<<44)|64'hABCDE;
   localparam logic[63:0] SATP_B=(64'd8<<60)|(64'd2<<44)|64'h12345;
   localparam logic[63:0] MIE_A=64'h888,MIE_B=64'h222;
@@ -3554,6 +3557,13 @@ module tb_g6lc_review_csrbank;
   riscv::priv_lvl_t[1:0] priv_lvl_b;
   logic[1:0] v_b;
   logic mbe_o,v_commit_o;
+  // T6b-3a probes.
+  logic[1:0] tvm_b,tw_b,vtw_b,tsr_b,hu_b;
+  jvt_t[1:0] jvt_b;
+  logic tvm_act;
+  logic[11:0] perf_addr;
+  logic perf_we;
+  logic[63:0] csr_rdata;
   int scenario;bit negative;
   always #5 clk=~clk;
 
@@ -3565,7 +3575,7 @@ module tb_g6lc_review_csrbank;
     .flush_o(),.halt_csr_o(halt_csr),.hart_halt_o(hart_halt),
     .commit_instr_i(commit_i),.commit_ack_i(commit_ack),
     .boot_addr_i('0),.hart_id_base_i('0),.ex_i(ex_i),
-    .csr_op_i(csr_op),.csr_addr_i(csr_addr),.csr_wdata_i(csr_wdata),.csr_rdata_o(),
+    .csr_op_i(csr_op),.csr_addr_i(csr_addr),.csr_wdata_i(csr_wdata),.csr_rdata_o(csr_rdata),
     .dirty_fp_state_i(1'b0),.csr_write_fflags_i(1'b0),.dirty_v_state_i(1'b0),
     .pc_i('0),.csr_exception_o(),.epc_o(),.eret_o(),.trap_vector_base_o(),
     .priv_lvl_o(),.mbe_o(mbe_o),.v_o(),
@@ -3588,11 +3598,17 @@ module tb_g6lc_review_csrbank;
     .mbe_commit_o(mbe_commit_o),
     .mcbie_o(),.scbie_o(),.hcbie_o(),.mcbcfe_o(),.scbcfe_o(),.hcbcfe_o(),
     .mcbze_o(),.scbze_o(),.hcbze_o(),.pbmte_o(),.set_debug_pc_o(),
-    .tvm_o(),.tw_o(),.vtw_o(),.tsr_o(),.hu_o(),.debug_mode_o(),.single_step_o(),
+    .tvm_o(tvm_act),.tw_o(),.vtw_o(),.tsr_o(),.hu_o(),.debug_mode_o(),.single_step_o(),
+    // T6b-3a: per-bank decode context + PMU inhibit; sampled in scenario 3.
+    .tvm_b_o(tvm_b),.tw_b_o(tw_b),.vtw_b_o(vtw_b),.tsr_b_o(tsr_b),.hu_b_o(hu_b),
+    .debug_mode_b_o(),.fs_b_o(),.vfs_b_o(),.vs_b_o(),.frm_b_o(),
+    .mcbie_b_o(),.scbie_b_o(),.hcbie_b_o(),.mcbcfe_b_o(),.scbcfe_b_o(),.hcbcfe_b_o(),
+    .mcbze_b_o(),.scbze_b_o(),.hcbze_b_o(),.jvt_b_o(jvt_b),
+    .mcountinhibit_b_o(),
     .icache_en_o(),.dcache_en_o(),.acc_cons_en_o(),
     .ai_aicfg_o(),.ai_ais_o(),.ai_issue_ok_o(),.ai_q_en_o(),.ai_qid_o(),
     .dirty_ai_state_i(1'b0),.ai_setcfg_we_i(1'b0),.ai_setcfg_wdata_i('0),
-    .perf_addr_o(),.perf_data_o(),.perf_data_i('0),.perf_we_o(),
+    .perf_addr_o(perf_addr),.perf_data_o(),.perf_data_i('0),.perf_we_o(perf_we),
     .scountovf_i('0),.lcofi_i('0),
     .pmpcfg_o(pmpcfg),.pmpaddr_o(pmpaddr),
     .fet_pmpcfg_o(fet_pmpcfg),.fet_pmpaddr_o(fet_pmpaddr),
@@ -3635,8 +3651,10 @@ module tb_g6lc_review_csrbank;
     // Program bank 0 = set A, bank 1 = set B, each through its own commit path.
     csr_write(0,12'h300,MSTATUS_A);csr_write(0,12'h180,SATP_A);
     csr_write(0,12'h304,MIE_A);csr_write(0,12'h3A0,PMPCFG_A);csr_write(0,12'h3B0,PMPADDR_A);
+    csr_write(0,12'h017,JVT_A);
     csr_write(1,12'h300,MSTATUS_B);csr_write(1,12'h180,SATP_B);
     csr_write(1,12'h304,MIE_B);csr_write(1,12'h3A0,PMPCFG_B);csr_write(1,12'h3B0,PMPADDR_B);
+    csr_write(1,12'h017,JVT_B);
     repeat(2)@(negedge clk);
     if(scenario==0)begin
       // active_hart=0: fetch context is always set A.
@@ -3691,8 +3709,190 @@ module tb_g6lc_review_csrbank;
       wfi_commit(1);repeat(2)@(negedge clk);
       chk1("CSRBANK_WFI_HALT",halt_csr,1'b0);
       chk64("CSRBANK_WFI_VEC",{62'b0,hart_halt},64'd2);
+    end else if(scenario==3)begin
+      // T6b-3a: commit-hart ownership of the PMU sideband and per-bank
+      // decode context. active_hart=0 throughout; a commit on hart 1 must
+      // drive bank 1's perf signals and bank 1's CSR read data.
+      active_hart=0;lsu_hart=0;lsu_chk_hart=0;
+      @(negedge clk);
+      commit_i='0;commit_i.valid=1;commit_i.hart_id=1'd1;
+      csr_op=CSR_WRITE;csr_addr=12'hB03;csr_wdata=64'h5;commit_ack=2'b11;
+      #1;
+      chk1 ("CSRBANK_PERF_HART",perf_we,1'b1);
+      chk64("CSRBANK_PERF_ADDR",{52'b0,perf_addr},64'hB03);
+      @(negedge clk);
+      commit_ack='0;
+      // Read mie as a commit on hart 1: bank 1's value, not bank 0's (mie is
+      // a plain R/W register — readback equals the written bits).
+      csr_op=CSR_SET;csr_addr=12'h304;csr_wdata='0;commit_ack=2'b11;#1;
+      chk64("CSRBANK_RDATA_HART",csr_rdata,MIE_B);
+      @(negedge clk);
+      csr_op=ADD;commit_ack='0;commit_i='0;
+      // The _b arrays expose each bank's own decode context.
+      chk1 ("CSRBANK_TVM_B0",tvm_b[0],1'b1);chk1("CSRBANK_TVM_B1",tvm_b[1],1'b0);
+      chk1 ("CSRBANK_TW_B1",tw_b[1],1'b1);chk1("CSRBANK_TW_B0",tw_b[0],1'b0);
+      chk1 ("CSRBANK_TSR_B1",tsr_b[1],1'b1);chk1("CSRBANK_TSR_B0",tsr_b[0],1'b0);
+      chk64("CSRBANK_JVT_B0",{6'b0,jvt_b[0].base},JVT_A>>6);
+      chk64("CSRBANK_JVT_B1",{6'b0,jvt_b[1].base},JVT_B>>6);
+      // Scalars still follow the active hart.
+      chk1 ("CSRBANK_TVM_ACT",tvm_act,tvm_b[0]);
     end else $fatal(1,"CSRBANK_SCENARIO");
     $display("RTL_REVIEW_PASS csrbank scenario=%0d drained=%0d",scenario,DRAINED);
+    $finish;
+  end
+endmodule
+
+// ======================================================================
+// Leaf: perf_counters — T6b-3a per-hart event banking.
+// Commit-derived events land in the committing hart's bank; the HPM CSR
+// access banks by csr_hart_i; mcountinhibit is per bank.
+// ======================================================================
+module tb_g6lc_review_perf;
+  import ariane_pkg::*;
+  `include "g6lc_core_types.svh"
+  parameter int DRAINED=0;
+  localparam int HARTS=2;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.GPLEN=64;c.IS_XLEN64=1;
+    c.NrHarts=HARTS;c.SmtDrainedHandoff=DRAINED;
+    c.NrIssuePorts=2;c.NrCommitPorts=2;c.NrWbPorts=2;c.NrRgprPorts=2;
+    c.NR_SB_ENTRIES=8;c.TRANS_ID_BITS=3;
+    c.RVS=1;c.RVU=1;c.RVA=1;c.MmuPresent=1;
+    c.DCACHE_SET_ASSOC=8;c.DcacheIdWidth=4;
+    c.DCACHE_INDEX_WIDTH=12;c.DCACHE_TAG_WIDTH=44;c.DCACHE_USER_WIDTH=1;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  localparam int HW = (C.NrHarts <= 1) ? 1 : $clog2(C.NrHarts);
+  typedef `G6LC_BRANCHPREDICT_SBE_T(C) branchpredict_sbe_t;
+  typedef `G6LC_EXCEPTION_T(C) exception_t;
+  typedef `G6LC_SCOREBOARD_ENTRY_T(C) sbe_t;
+  typedef struct packed {
+    logic                    valid;
+    logic [C.VLEN-1:0]       pc;
+    logic [C.VLEN-1:0]       target_address;
+    logic                    is_mispredict;
+    logic                    is_taken;
+    cf_t                     cf_type;
+    logic [HW-1:0]           hart_id;
+    logic                    ckpt_restore;
+    logic [C.TRANS_ID_BITS-1:0] trans_id;
+  } bp_t;
+  typedef struct packed {logic req;logic[C.VLEN-1:0] vaddr;} icache_dreq_t;
+  typedef struct packed {
+    logic[C.DCACHE_INDEX_WIDTH-1:0] address_index;
+    logic[C.DCACHE_TAG_WIDTH-1:0]   address_tag;
+    logic[C.XLEN-1:0]               data_wdata;
+    logic[C.DCACHE_USER_WIDTH-1:0]  data_wuser;
+    logic                           data_req;
+    logic                           data_we;
+    logic[(C.XLEN/8)-1:0]           data_be;
+    logic[1:0]                      data_size;
+    logic[C.DcacheIdWidth-1:0]      data_id;
+    logic                           kill_req;
+    logic                           tag_valid;
+    logic[7:0]                      cbo_op;
+  } dcache_req_i_t;
+  localparam int NumPorts=3;
+
+  // CSR addresses and event encodings (see riscv_pkg / ariane_pkg).
+  localparam logic[11:0] A_MHPMCTR3=12'hB03,A_MHPMEV3=12'h323;
+  localparam logic[63:0] EV_INT=64'd20;      // legacy group, idx 20 = integer instr
+  localparam logic[63:0] EV_LOAD=64'd5;      // idx 5 = load accesses
+
+  logic clk=0,rst_n=0;
+  sbe_t[1:0] commit_sbe='0;
+  logic[1:0] commit_ack='0;
+  logic[11:0] addr_i='0;
+  logic we_i=0;
+  logic[63:0] data_i='0,data_o;
+  logic[HW-1:0] csr_hart='0;
+  riscv::priv_lvl_t[HARTS-1:0] priv_lvl_b='{default:riscv::PRIV_LVL_M};
+  logic[HARTS-1:0][31:0] mcinhibit='0;
+  int scenario;bit negative;
+  always #5 clk=~clk;
+
+  perf_counters #(.CVA6Cfg(C),.NumPorts(NumPorts),.bp_resolve_t(bp_t),
+      .exception_t(exception_t),.scoreboard_entry_t(sbe_t),
+      .icache_dreq_t(icache_dreq_t),.dcache_req_i_t(dcache_req_i_t),
+      .dcache_req_o_t(logic)) dut(
+    .clk_i(clk),.rst_ni(rst_n),.debug_mode_i(1'b0),
+    .priv_lvl_b_i(priv_lvl_b),
+    .addr_i(addr_i),.we_i(we_i),.data_i(data_i),.data_o(data_o),
+    .hart_i('0),.csr_hart_i(csr_hart),
+    .commit_instr_i(commit_sbe),.commit_ack_i(commit_ack),
+    .l1_icache_miss_i(1'b0),.itlb_miss_i(1'b0),.dtlb_miss_i(1'b0),
+    .ex_i('0),.eret_i(1'b0),
+    .resolved_branch_i('0),.branch_exceptions_i('0),
+    .l1_icache_access_i('0),.l1_dcache_access_i('{default:'0}),
+    .l1_dcache_miss_i(1'b0),.miss_vld_bits_i('0),
+    .i_tlb_flush_i(1'b0),.sb_full_i(1'b0),.if_empty_i(1'b0),
+    .stall_issue_i(1'b0),
+    .ooo_rename_stall_i(1'b0),.ooo_rob_full_i(1'b0),.ooo_iq_full_i(1'b0),
+    .ooo_lsq_stall_i(1'b0),.ooo_stl_forward_i(1'b0),.spec_cancel_i(1'b0),
+    .ai_pmu_op_i(1'b0),.ai_pmu_mma_i(1'b0),.ai_pmu_post_i(1'b0),
+    .ai_pmu_t0_i(1'b0),.ai_pmu_busy_i(1'b0),
+    .l3_miss_i(1'b0),.l3_hit_i(1'b0),.pf_issue_i(1'b0),.pf_train_i(1'b0),
+    .l2_miss_i(1'b0),
+    .dcache_wbuf_void_ack_i(1'b0),.dcache_wbuf_fixup_write_i(1'b0),
+    .dcache_wbuf_fixup_inval_i(1'b0),.dcache_wbuf_fixup_full_i(1'b0),
+    .mcountinhibit_b_i(mcinhibit));
+
+  task automatic chk64(input string n,input logic[63:0] v,input logic[63:0] e);
+    if(v!==(negative?(e^64'd1):e))$fatal(1,"%s got=%h exp=%h",n,v,e);
+  endtask
+
+  // HPM CSR write to bank h (the access bank is csr_hart_i, as the bank
+  // drives it from the committing hart).
+  task automatic pwrite(input int h,input logic[11:0] a,input logic[63:0] d);
+    @(negedge clk);csr_hart=HW'(h);addr_i=a;data_i=d;we_i=1;
+    @(negedge clk);we_i=0;
+  endtask
+  task automatic setrd(input int h,input logic[11:0] a);
+    @(negedge clk);we_i=0;csr_hart=HW'(h);addr_i=a;#1;
+  endtask
+  // One commit cycle: port p retires an ALU op of hart hp.
+  task automatic commit2(input int h0,input int h1);
+    @(negedge clk);
+    commit_sbe='0;
+    commit_sbe[0].valid=1;commit_sbe[0].fu=ALU;commit_sbe[0].hart_id=HW'(h0);
+    commit_sbe[1].valid=1;commit_sbe[1].fu=ALU;commit_sbe[1].hart_id=HW'(h1);
+    commit_ack=2'b11;
+    @(negedge clk);commit_ack='0;commit_sbe='0;
+  endtask
+
+  initial begin
+    if(!$value$plusargs("scenario=%d",scenario))scenario=0;
+    negative=$test$plusargs("oracle_negative");
+    repeat(4)@(negedge clk);rst_n=1;repeat(4)@(negedge clk);
+    // Both banks select the integer-instructions event on mhpmcounter3.
+    pwrite(0,A_MHPMEV3,EV_INT);pwrite(1,A_MHPMEV3,EV_INT);
+    if(scenario==0)begin
+      // Same-cycle commits on both harts: each bank counts its own retire.
+      commit2(0,1);repeat(2)@(negedge clk);
+      setrd(1,A_MHPMCTR3);chk64("PERF_BANK1_RETIRE",data_o,64'd1);
+      setrd(0,A_MHPMCTR3);chk64("PERF_BANK0_RETIRE",data_o,64'd1);
+    end else if(scenario==1)begin
+      // mcountinhibit is per bank: inhibiting bank 1 never touches bank 0.
+      mcinhibit[1][3]=1'b1;  // mhpmcounter3 sits at inhibit bit i+2 = 3
+      commit2(0,1);repeat(2)@(negedge clk);
+      setrd(1,A_MHPMCTR3);chk64("PERF_INHIBIT_B1",data_o,64'd0);
+      setrd(0,A_MHPMCTR3);chk64("PERF_UNINHIBIT_B0",data_o,64'd1);
+    end else if(scenario==2)begin
+      // The HPM CSR access is banked by csr_hart_i.
+      pwrite(1,A_MHPMCTR3,64'h42);
+      setrd(1,A_MHPMCTR3);chk64("PERF_CSR_HART",data_o,64'h42);
+      setrd(0,A_MHPMCTR3);chk64("PERF_CSR_PEER",data_o,64'd0);
+    end else if(scenario==3 && DRAINED)begin
+      // Drained geometry: every commit belongs to hart 0 — today's counts.
+      // The event is one bit per bank per cycle, so two same-hart ports still
+      // count +1, exactly as the pre-banked design did.
+      commit2(0,0);repeat(2)@(negedge clk);
+      setrd(0,A_MHPMCTR3);chk64("PERF_DRAIN_B0",data_o,64'd1);
+      setrd(1,A_MHPMCTR3);chk64("PERF_DRAIN_B1",data_o,64'd0);
+    end else $fatal(1,"PERF_SCENARIO");
+    $display("RTL_REVIEW_PASS perf scenario=%0d drained=%0d",scenario,DRAINED);
     $finish;
   end
 endmodule

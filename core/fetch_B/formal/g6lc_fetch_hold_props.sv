@@ -172,6 +172,7 @@ module g6lc_fetch_hold_props #(
   idreq_t          icache_dreq_o;
   fe_t   [NI-1:0]  fetch_entry_o;
   logic  [NI-1:0]  fetch_entry_valid_o;
+  logic  [VLEN-1:0] fetch_frontier_pc;
 
   logic rst_init_q = 1'b1;
   logic rst_ni;
@@ -204,6 +205,7 @@ module g6lc_fetch_hold_props #(
       .smt_npc_restore_i,
       .peer_restart_valid_i,
       .peer_restart_pc_i,
+      .fetch_frontier_pc_o(fetch_frontier_pc),
       .commit_hart_i,
       .icache_dreq_i,
       .icache_dreq_o,
@@ -369,6 +371,23 @@ module g6lc_fetch_hold_props #(
     end
     if (rst_ni && peer_outranked_q) begin
       assert (dut.redirect_pc_q == peer_commit_pc_q);
+    end
+  end
+
+  // --- T6b-3b: the restart frontier's fetch-side candidate ------------------
+  // cva6's peer restart samples this output as the killed fetch stream's
+  // frontier. While a redirect is owed it is the redirect target — the
+  // oldest undelivered position; with an accepted request still in flight it
+  // is that parcel; otherwise the NPC cursor. A parcel killed in flight is
+  // therefore never skipped by the restart (the 0x80008c2e loss).
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      if (dut.redirect_pend_q)
+        assert (fetch_frontier_pc == dut.redirect_pc_q);
+      else if (dut.inflight_q)
+        assert (fetch_frontier_pc == dut.inflight_addr_q);
+      else
+        assert (fetch_frontier_pc == dut.npc_q);
     end
   end
 

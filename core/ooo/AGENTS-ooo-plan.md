@@ -365,6 +365,153 @@ parks only the committing hart via `hart_halt_o[h]`; drained keeps the global ha
 sharing), `mmuctx` (per-hart walks + check-stage skew incl. translation-enable) with
 `G6LC_MUT_TLB_NO_HART_TAG`/`G6LC_MUT_MMU_LIVE_CTX` expected-failure cells.
 
+**T6b-3a design notes.** The rule for every `active_hart_i`-keyed bank output: classify by *when
+the consumer samples it* — decode-time → per lane by `fetch_entry_i[i].hart_id`
+(`SMT_MIXED_DECODE`); LSU-time → `lsu_hart_i`; commit-time → `commit_instr_i.hart_id`;
+frontend/fetch-time → `active_hart_i` (unchanged). Landed:
+
+* **PMU (`perf_counters`).** The planted `gen_hart_attribution_check` fatal ("commits belong to
+  the active hart") was the mechanism, not a check — deleted. Every event is now banked by its
+  true owner: commit-derived events (int/fp/load/store/branch/call/ret, ex/eret by port 0's
+  hart) land in the committing instruction's bank; resolved-branch events (and the FLU branch
+  exception, which shares the resolving instruction — documented approximation) bank by
+  `resolved_branch_i.hart_id`; frontend/structural events (I$/ITLB/DTLB/D$ miss, if_empty,
+  stalls, L2/L3/PF, AI, write-buffer, `ooo_*`) stay on `hart_i` (active hart — documented
+  approximation, they observe shared frontend state). Each bank owns its own `mhpmevent`
+  selector copy (`event_group[h]`/`events[i][h]` per hart), so a counter can never count a
+  peer's event; `mcountinhibit` and the Sscofpmf `minh/sinh/uinh` filter are per bank
+  (`mcountinhibit_b_i`, `priv_lvl_b_i`). The HPM CSR access banks by `csr_hart_i` (=
+  `commit_instr_i[0].hart_id`), matching the bank's `perf_*` mux — under drained/single-hart
+  every select collapses onto the active hart and counts are identical.
+* **Decode (`id_stage`).** `SMT_MIXED_DECODE` now selects `tvm/tw/vtw/tsr/hu/fs/vfs/vs/frm/
+  debug_mode/mcbie/scbie/hcbie/mcbcfe/scbcfe/hcbcfe/mcbze/scbze/hcbze` per lane from the bank's
+  new `*_b_o` arrays; `jvt` (Zcmt table base) follows the instruction's hart.
+* **Remaining outputs classified:** `icache_en`/`dcache_en`/`acc_cons_en`/`ai_*` are global
+  resources → active hart (documented); `rvfi_csr_o` is trace-only → active hart (documented);
+  `mbe` stays request/commit-hart owned (differing endianness unsupported, asserted). **External
+  debug under mixed residency is unsupported (T6b)** — the debug side-band
+  (`debug_req_i`/`set_debug_pc`/`single_step`/triggers) is active-hart-owned; the bank asserts
+  `debug_req_i` never arrives and `debug_mode` is never entered under `!SmtDrainedHandoff`.
+  `switch_i` on the bank is a dead input (no consumer — switching lives in `smt_switch`); left
+  wired, no behaviour. `pbmte` is a dead wire top-level (no consumer), unchanged.
+* **T6b-3b probe.** `+smt_mixed_stats` (translate_off, `gen_smt_mixed_stats` in cva6.sv) prints
+  at `$finish`: cycles with every hart holding a live scoreboard head, commits by non-active
+  harts, and per-hart retired counts — the residency witness for the first real
+  `SmtDrainedHandoff=0` run.
+
+**T6b-3b design notes — partial-flush peer restart and the fetch frontier.** The first mixed
+gate run (both_resident=59260, nonactive_commits=293066, 210k handoffs) died as
+`cycle-budget` with a fully traced mechanism: a hart-0 commit-side full flush killed hart 1's
+just-restored in-flight request for `0x80008c2e` (`addi sp,sp,-16`, the
+`sbi_scratch_alloc_offset` prologue) at t=1,067,561; the peer restart fired
+(`prh=1`) but its frontier resolved `0x80008c30` — the fetch-ahead NPC — because the
+fetch-side candidate (`snap_pc`) substitutes the in-flight parcel only while
+`smt_restore_i` is asserted, and the armed `redirect_pend` target was invisible to it.
+The stream resumed one instruction late → +0x10 stack skew → `ld ra,40(sp)` from an
+unwritten slot → `ret` to PC 0 → OpenSBI fatal path → `spin_lock(&console_out_lock)`
+self-deadlock. Two defects, one family:
+
+1. **Partial-flush peer restart (the briefed leg).** `flush_ctrl_if`/`flush_unissued` are
+   global kills of *both* harts' pre-dispatch state (frontend in-flight, `instr_queue`,
+   ID-stage issue registers). Scoreboard cancel and rename restore are correctly same-hart,
+   but the T6b-2a peer restart required `flush_ctrl_id` — a peer's undispatched work killed
+   by a mispredict (no full flush) was dropped with no refetch. `gen_peer_restart` now
+   treats `(flush_if || flush_unissued) && !flush_ctrl_id && !smt_switch` as a peer kill:
+   the owner is `resolved_branch.hart_id` (under fetch_B the only partial source is a
+   mispredict — the E3 predicted-correct kill is compiled out; witnessed by
+   `t6b3_partial_owner`), the peer restarts at its *pre-dispatch frontier only*
+   (decode/queue entries plus the fetch-side candidate iff the peer is the active fetch
+   hart), **never `sb_head`** — its scoreboard entries survive the same-hart cancel.
+   Same-cycle routing: an inactive hart's mispredict banks its target on the primary port
+   (new lowest-priority leg, dead under drained and whenever a commit redirect owns the
+   port — `misp_outranked` semantics), the peer restart keeps the second port, and
+   `peer_restart_active` reseeds the frontend via `SRC_PEER` when the peer is the fetch
+   hart. Kill-set uniformity needs no force: every controller leg raising
+   `flush_unissued` already raises `flush_if` under fetch_B (asserted:
+   `t6b3_kill_set_uniform`). `smt_switch` is excluded — the outgoing hart's frontier is
+   already transported by `gen_smt_restart_frontier`.
+2. **Fetch frontier export (the observed instance).** The frontend exports
+   `fetch_frontier_pc_o = redirect_pend ? redirect_pc : inflight ? inflight_addr : npc` —
+   the oldest undelivered fetch position in stream order (an armed redirect target
+   precedes every parcel issued after it; queued parcels are always fetch-order older, so
+   `restart_frontier`'s decode > queue > transport ordering stays sound). The peer
+   restart's transport uses it whenever the peer is the active hart, and the switch
+   transport uses it under mixed residency (drained keeps `smt_npc_live` — constant-fold,
+   bit-identical). This is what recovered `0x80008c2e`: `prpc` now lands the killed
+   parcel, not the cursor past it.
+
+**Flush-consumer audit (OoO build).** `flush_ctrl_if` kills — all global, all pre-dispatch:
+frontend in-flight/FTQ/BP-pend, `instr_queue` + `id_stage` issue registers, `smt_hart_state`
+miss bookkeeping, `smt_thread_select` (suppresses a same-cycle switch, resets the quantum —
+scheduling only). `flush_unissued` — scoreboard allocation gate + same-hart-filtered
+younger-cancel (selective), `g6lc_ooo_dispatch` `can_go`/`issue_valid` masking (stall only,
+no state clear), `issue_read_operands` register kill (**global and post-dispatch, but
+instantiated only in `gen_inorder_issue` — absent under `OoOEn` → not a defect here**),
+`acc_dispatcher` and tracer/RVFI probes (accelerator + observability). `flush_ctrl_id` is the
+only backend-clearing signal (scoreboard/ROB/IQ/LSQ/rename `flush_i`). No consumer outside
+the pre-dispatch region reacts to `flush_unissued` under OoO — the second-defect class the
+brief asked to rule out is absent in this configuration; `issue_read_operands` is flagged
+for the in-order config. Hart-selective kill (restart only the faulting hart's frontier)
+is deferred to T6b-4 as the performance form.
+
+**T6b-3b gate result.** With both fixes in, the mixed-residency profile
+(`SmtDrainedHandoff=0`, `+smt_flow_trace +smt_mixed_stats`) **passes strictDual**:
+`*** SUCCESS *** (tohost = 0) after 10602826 cycles`, `both_resident_cycles=60711`,
+`nonactive_commits=105303`, retiredByHart {0:356213, 1:8936471} — the first
+`SmtDrainedHandoff=0` pass of the dual-hart OpenSBI profile (drained record:
+10,696,498). Zero assertion hits across 10.6M cycles.
+
+**T6b-3c design notes — the deep-queue frontier (pending FIFO).** Review found the
+remaining hole in the same family: `instr_queue` is `NrFifo` per-slot `cva6_fifo_v3`
+(DEPTH 8) with `hart` stamped per instruction, so both harts' entries interleave —
+but `restart_frontier`'s queue view only reached the `NrIssuePorts` output
+positions. Scenario: switch 1→0 while decode is stalled; hart-1 entries hold the
+ports, hart-0 entries queue deeper; hart 1 (resident) mispredicts → `flush_if`
+kills hart 0's deeper entries, hart 0's candidates are the hart-1 port entries and
+`smt_fetch_frontier` (its fetch cursor, *past* the queued entries) → lost
+instructions. Harmless in the spin-loop profile, fatal in real code; the T6b-2a
+full-flush leg had the same hole when the peer had no scoreboard entry.
+
+Fix (mixed-residency generate only, `NrHarts>1 && !SmtDrainedHandoff` — '0 tie
+elsewhere): `instr_queue` keeps a per-hart *pending-address FIFO* in push order —
+push `{pc}` per instruction push (pushed FIFOs are contiguous from `idx_is_q`, so
+lane k of the push is `instr_data_in[(idx_is_q+k) mod NrFifo]`), pop once per
+delivered instruction of that hart (`fire_prefix` per port — the queue's actual
+pop; a bare `valid & ready` without the prefix pops nothing), flush on `flush_i`,
+depth `NrFifo × IFifoDepth` (slots × per-slot depth — the queue's total
+occupancy). Per-hart delivery order is push order (compact insertion is program
+order, a packet is single-hart), so `queue_oldest_*_o[h]` — exported through
+`frontend` to `cva6.sv` — is exactly hart h's oldest undelivered instruction;
+asserted translate_off per firing port (ranked within same-hart deliveries). In
+`gen_peer_restart` the queue-side candidate for the peer is now this head —
+replacing the port view under mixed for BOTH the partial leg and the T6b-2a
+full-flush leg — decode entries and the fetch frontier are unchanged. The
+switch-transport frontier (`gen_smt_restart_frontier`) is deliberately
+untouched: the queue is not flushed at a switch, so nothing is lost there.
+Oracles: fetch-queue cell `IQ_OLDEST_H1`/`IQ_OLDEST_H1_ADV`/`IQ_OLDEST_H1_FULL`
+(+`iq_oldest_neg` expected failure), restart leaf `RESTART_PEER_DEEP`
+(+`mut_no_deep` expected failure). The per-hart-queue redesign — hart-selective
+kill and no shared queue — stays T6b-4.
+
+**T6b-3c gate result (new-source models, all rebuilt 0-warning):** mixed profile
+on `work-ver-t6b3-mixed-v1` (sha `6fea4c9a`) `outcome=pass`,
+`strictDualPassed=true`, `*** SUCCESS *** (tohost = 0) after 10602826 cycles`,
+`both_resident_cycles=60711`, `nonactive_commits=105303`, retiredByHart
+{0:356213, 1:8936471} — identical to the 3b gate (the deep-queue interleaving
+never materialized in the spin-loop profile, as predicted; the leaf oracles are
+the coverage). Drained dual `*** SUCCESS *** ... after 10696498 cycles` exact,
+anchor `... after 12765628 cycles` exact, frozen int 11/11 cycle-identical
+(s11=11256), FP 13/10, restart leaf positive + `mut_no_deep`/`mut_no_peer`
+expected failures correct, fetch-queue cell 5/5 + `iq_oldest_neg` expected
+failure, hold/token(FTQD0,FTQD4)/redirect proofs PASS, `g6lc_fetch_iq` bmc PASS
+(cover task: z3 cover-mode on the two-instance self-composition cone — timed
+out at 600s and 900s both with and without the pend FIFO in the envelope;
+pre-existing cost, never completed in this campaign). `verify --lint --synth`
+8/54 lint baselines, 32/5 synth clean. FO4 `sparse_ooo_issue`: unchanged by
+construction — the fileset is 12 files / modules {g6lc_lsq, g6lc_memdep,
+g6lc_ooo_dispatch, g6lc_prf, g6lc_rename, g6lc_rob, g6lc_iq}; no fetch_B source
+is analyzed.
+
 **Slices.** T6b-1 config bit + drain gate seam, hart-tagged LSQ/store-buffer/IQ ordering,
 `sb_head_pc`, leaf oracles (drain gate still on: every existing result must reproduce). T6b-2
 recovery and frontend per-hart state (flush restart, inactive-hart redirects, per-hart filter),

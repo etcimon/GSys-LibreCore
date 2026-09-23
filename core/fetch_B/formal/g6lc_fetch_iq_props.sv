@@ -80,6 +80,11 @@ module g6lc_fetch_iq_props #(
     c.RVC                  = 1'b1;
     c.NrHarts              = NH;
     c.NrIssuePorts         = NI;
+    // The T6b-3c per-hart pending frontier is observability-only — it never
+    // feeds back into queue control — so this proof's envelope runs drained:
+    // the ~4kflop shadow FIFO would only slow the cover task, not change what
+    // is proven.
+    c.SmtDrainedHandoff    = 1'b1;
     return c;
   endfunction
 

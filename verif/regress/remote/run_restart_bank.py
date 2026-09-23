@@ -16,7 +16,8 @@ def main():
     source.mkdir()
     inputs = []
     hashes = {}
-    for name in ['config_pkg.sv', 'g6lc_smt_pc_bank.sv', 'tb_g6lc_restart.sv']:
+    for name in ['config_pkg.sv', 'g6lc_fetch_pkg.sv', 'g6lc_smt_pc_bank.sv',
+                 'tb_g6lc_restart.sv']:
         dest = source / name
         shutil.copy2(data / name, dest)
         inputs.append(str(dest))
@@ -40,15 +41,27 @@ def main():
         print((out / 'build.log').read_text()[-6000:])
         raise RuntimeError('restart bank build failed')
     before = os.environ.get('RESTART_BANK_BEFORE') == '1'
-    for negative in ([False] if before or fault else [False, True]):
-        args = [str(out / 'model/restart-test')] + (['+oracle_negative'] if negative else [])
-        run = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    passes = [([], 'sim-negative0.log',
+               lambda rc, text: rc == 0 and text.count('RESTART_BANK_PASS') == 1)]
+    if not before and not fault:
+        passes += [
+            (['+oracle_negative'], 'sim-negative1.log',
+             lambda rc, text: rc != 0 and 'RESTART_ARCH_PC' in text),
+            # T6b-3b: with the peer restart leg removed the peer bank keeps
+            # its stale PC — RESTART_PEER_MISP must fire.
+            (['+mut_no_peer'], 'sim-mut-no-peer.log',
+             lambda rc, text: rc != 0 and 'RESTART_PEER_MISP' in text),
+            # With the deep-queue candidate dropped the peer has no frontier
+            # — RESTART_PEER_DEEP must fire.
+            (['+mut_no_deep'], 'sim-mut-no-deep.log',
+             lambda rc, text: rc != 0 and 'RESTART_PEER_DEEP' in text)]
+    for args_extra, log_name, matched in passes:
+        run = subprocess.run([str(out / 'model/restart-test'), *args_extra],
+                             capture_output=True, text=True, timeout=30)
         text = run.stdout + run.stderr
-        (out / f'sim-negative{int(negative)}.log').write_text(text)
+        (out / log_name).write_text(text)
         print(text)
-        matched = (run.returncode != 0 and 'RESTART_ARCH_PC' in text) if before or fault or negative else (
-            run.returncode == 0 and text.count('RESTART_BANK_PASS') == 1)
-        if not matched:
+        if not matched(run.returncode, text):
             raise RuntimeError('restart bank test failed')
     if not before and not fault:
         wrapper = source / 'pc_bank_synth.sv'

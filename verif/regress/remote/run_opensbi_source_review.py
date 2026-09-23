@@ -407,6 +407,8 @@ def execute(model, record, out):
             '+debug_disable', '+quiet_axi', '+smt_progress', '+tohost_addr=0x' + addresses[0], str(elf)]
     if os.environ.get('SOURCE_REVIEW_FLOW') == '1':
         args.insert(-1, '+smt_flow_trace')
+    if os.environ.get('SOURCE_REVIEW_MIXED_STATS') == '1':
+        args.insert(-1, '+smt_mixed_stats')
     if os.environ.get('SOURCE_REVIEW_MEM_WATCH'):
         watch = int(os.environ['SOURCE_REVIEW_MEM_WATCH'], 0)
         if not 0 <= watch < 1 << 56:
