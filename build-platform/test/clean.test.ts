@@ -333,6 +333,7 @@ test("resolveTimingsOutputDir lays out compile package paths", () => {
   });
   expect(layout.portableF.endsWith("portable.f")).toBe(true);
   expect(layout.analyzeJson.endsWith("analyze.json")).toBe(true);
+  expect(layout.areaJson.endsWith("area-report.json")).toBe(true);
   expect(layout.cache.endsWith("ir.sqlite")).toBe(true);
   expect(layout.correctedDir.endsWith("corrected")).toBe(true);
   writeTimingsStamp(layout, {

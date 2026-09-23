@@ -26,7 +26,7 @@ pub use crc::{crc32c_hex, digest_files, file_crc32c_hex, FileDigest, CRC_ALGO};
 pub use fingerprint::{design_cache_key, module_crc_set, pp_fingerprint, sha256_hex};
 pub use store::{
     compute_design_key, compute_pp_fingerprint, crc_set_for_file, CacheConfig, CacheCounts,
-    CacheStats, ModuleIrBlob, TimingCache, CACHE_SCHEMA_VERSION,
+    CacheStats, ModuleIrBlob, TimingCache, AREA_SCHEMA, CACHE_SCHEMA_VERSION,
 };
 pub use sv_timing_core::IR_VERSION;
 

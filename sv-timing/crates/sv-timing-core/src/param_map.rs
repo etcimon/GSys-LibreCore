@@ -46,12 +46,11 @@ impl ParamMap {
 
     /// Parse JSON object text.
     pub fn parse_json(text: &str) -> CoreResult<Self> {
-        let v: Value = serde_json::from_str(text).map_err(|e| {
-            CoreError::InvalidOptions(format!("param-map JSON: {e}"))
-        })?;
-        let obj = v.as_object().ok_or_else(|| {
-            CoreError::InvalidOptions("param-map must be a JSON object".into())
-        })?;
+        let v: Value = serde_json::from_str(text)
+            .map_err(|e| CoreError::InvalidOptions(format!("param-map JSON: {e}")))?;
+        let obj = v
+            .as_object()
+            .ok_or_else(|| CoreError::InvalidOptions("param-map must be a JSON object".into()))?;
         let mut entries = BTreeMap::new();
         for (k, val) in obj {
             entries.insert(k.clone(), val.clone());
@@ -100,11 +99,10 @@ impl ParamMap {
     pub fn get_u32(&self, key: &str) -> Option<u32> {
         let v = self.get(key)?;
         match v {
-            Value::Number(n) => n.as_u64().map(|u| u as u32).or_else(|| {
-                n.as_i64()
-                    .filter(|i| *i >= 0)
-                    .map(|i| i as u32)
-            }),
+            Value::Number(n) => n
+                .as_u64()
+                .map(|u| u as u32)
+                .or_else(|| n.as_i64().filter(|i| *i >= 0).map(|i| i as u32)),
             Value::String(s) => s.trim().parse().ok(),
             Value::Bool(b) => Some(if *b { 1 } else { 0 }),
             _ => None,
@@ -148,12 +146,39 @@ impl ParamMap {
     pub fn keys(&self) -> Vec<String> {
         self.entries.keys().cloned().collect()
     }
+
+    /// Sorted `key=value` lines. Numbers use [`serde_json::Number`]'s `Display`,
+    /// so JSON `64` and `64.0` stay distinct.
+    pub fn value_canonical(&self) -> String {
+        let mut lines = Vec::new();
+        for (key, value) in &self.entries {
+            lines.push(format!("{key}={}", canonical_param_value(value)));
+        }
+        lines.join("\n")
+    }
+}
+
+fn canonical_param_value(value: &Value) -> String {
+    match value {
+        Value::Number(number) => number.to_string(),
+        Value::Bool(true) => "true".to_string(),
+        Value::Bool(false) => "false".to_string(),
+        Value::String(text) => text.clone(),
+        Value::Null => "null".to_string(),
+        other => other.to_string(),
+    }
 }
 
 fn value_to_sv_token(v: &Value) -> String {
     match v {
         Value::Number(n) => n.to_string(),
-        Value::Bool(b) => if *b { "1".into() } else { "0".into() },
+        Value::Bool(b) => {
+            if *b {
+                "1".into()
+            } else {
+                "0".into()
+            }
+        }
         Value::String(s) => s.clone(),
         Value::Null => String::new(),
         _ => v.to_string(),
@@ -174,5 +199,14 @@ mod tests {
         let m2 = ParamMap::new().with_assume_xlen(64);
         let d2 = m2.substitute_text("[CVA6Cfg.XLEN-1:0]");
         assert_eq!(d2, "[63:0]", "{d2}");
+    }
+
+    #[test]
+    fn number_display_keeps_64_and_64_0_distinct() {
+        let integer = ParamMap::parse_json(r#"{"W":64}"#).unwrap();
+        let float = ParamMap::parse_json(r#"{"W":64.0}"#).unwrap();
+        assert_eq!(integer.value_canonical(), "W=64");
+        assert_eq!(float.value_canonical(), "W=64.0");
+        assert_ne!(integer.value_canonical(), float.value_canonical());
     }
 }

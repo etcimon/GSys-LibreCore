@@ -118,8 +118,7 @@ impl Default for CleanlinessWeights {
 impl CleanlinessWeights {
     /// \(C = w_{ff} D_{ff} + w_{comb} D_{comb} - w_a A - w_t 1[\neg pass]\).
     pub fn score(self, d_ff: f64, d_comb: f64, aggressiveness: f64, timing_pass: bool) -> f64 {
-        self.always_ff * d_ff.clamp(0.0, 1.0)
-            + self.always_comb * d_comb.clamp(0.0, 1.0)
+        self.always_ff * d_ff.clamp(0.0, 1.0) + self.always_comb * d_comb.clamp(0.0, 1.0)
             - self.aggressiveness * aggressiveness.clamp(0.0, 1.0)
             - if timing_pass { 0.0 } else { self.timing_fail }
     }
@@ -186,9 +185,7 @@ impl ModuleSolution {
         match kind {
             OpportunityKind::InsertReg => spec.jit_reg || spec.multi_cut,
             OpportunityKind::SplitAssign => spec.comb_split || spec.comb_exclusive,
-            OpportunityKind::BalanceMux => {
-                spec.comb_exclusive || spec.ff_factor || spec.comb_split
-            }
+            OpportunityKind::BalanceMux => spec.comb_exclusive || spec.ff_factor || spec.comb_split,
         }
     }
 }
@@ -526,7 +523,10 @@ pub fn explore_module(
     let rationale = if chosen.timing_pass {
         format!(
             "argmax C among timing-pass sets → {} C={:.3} D_ff={:.2} D_comb={:.2} A={:.2}",
-            chosen.label, chosen.cleanliness, chosen.always_ff_density, chosen.always_comb_density,
+            chosen.label,
+            chosen.cleanliness,
+            chosen.always_ff_density,
+            chosen.always_comb_density,
             chosen.aggressiveness
         )
     } else {
@@ -624,8 +624,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         }
     }
@@ -889,8 +892,16 @@ mod tests {
         assert_eq!(sol.chosen, AlgoSetId::SeqPlusComb, "{}", sol.rationale);
         assert!(sol.timing_pass);
         assert!(sol.feasible);
-        assert!(sol.always_ff_density > 0.4, "ff density {}", sol.always_ff_density);
-        assert!(sol.always_comb_density > 0.4, "comb density {}", sol.always_comb_density);
+        assert!(
+            sol.always_ff_density > 0.4,
+            "ff density {}",
+            sol.always_ff_density
+        );
+        assert!(
+            sol.always_comb_density > 0.4,
+            "comb density {}",
+            sol.always_comb_density
+        );
         assert!(sol.allows_opportunity(OpportunityKind::BalanceMux));
         assert!(!sol.allows_opportunity(OpportunityKind::InsertReg));
     }
@@ -904,7 +915,9 @@ mod tests {
         let mut m = empty_module("alu", nodes);
         m.regions.insert(0, comb_region(0, vec![0]));
         design.modules.insert(0, m);
-        design.paths.push(path(1, 0, 40.0, budget, PathClassKind::Plain, false));
+        design
+            .paths
+            .push(path(1, 0, 40.0, budget, PathClassKind::Plain, false));
         let sol = explore_module(
             &design,
             design.modules.get(&0).unwrap(),
@@ -950,7 +963,12 @@ mod tests {
             CleanlinessWeights::default(),
         );
         assert_ne!(sol.chosen, AlgoSetId::JitDatapath, "{}", sol.rationale);
-        assert_ne!(sol.chosen, AlgoSetId::AggressivePipeline, "{}", sol.rationale);
+        assert_ne!(
+            sol.chosen,
+            AlgoSetId::AggressivePipeline,
+            "{}",
+            sol.rationale
+        );
         assert!(!sol.allows_opportunity(OpportunityKind::InsertReg));
         assert!(
             matches!(
@@ -1013,7 +1031,10 @@ mod tests {
         let w = CleanlinessWeights::default();
         let clean = w.score(0.8, 0.8, 0.10, true);
         let dirty = w.score(0.2, 0.2, 0.95, true);
-        assert!(clean > dirty, "density must beat aggressiveness: {clean} vs {dirty}");
+        assert!(
+            clean > dirty,
+            "density must beat aggressiveness: {clean} vs {dirty}"
+        );
         let fail = w.score(0.8, 0.8, 0.10, false);
         assert!(clean > fail, "timing fail must penalize: {clean} vs {fail}");
     }
@@ -1056,7 +1077,12 @@ mod tests {
             CleanlinessWeights::default(),
         );
         assert_ne!(sol.chosen, AlgoSetId::JitDatapath, "{}", sol.rationale);
-        assert_ne!(sol.chosen, AlgoSetId::AggressivePipeline, "{}", sol.rationale);
+        assert_ne!(
+            sol.chosen,
+            AlgoSetId::AggressivePipeline,
+            "{}",
+            sol.rationale
+        );
         assert!(
             !sol.allows_opportunity(OpportunityKind::InsertReg),
             "mixed winner must stay S3: {}",

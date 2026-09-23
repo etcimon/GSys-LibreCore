@@ -21,11 +21,7 @@ use crate::ir::{AssignKind, NodeId, TimingModule};
 
 /// Strip bit/part selects so `rdata[31:0]` and `foo_d[i]` share one name.
 pub fn ident_base(name: &str) -> String {
-    name.split('[')
-        .next()
-        .unwrap_or(name)
-        .trim()
-        .to_string()
+    name.split('[').next().unwrap_or(name).trim().to_string()
 }
 
 /// Per-variable reference counters in one procedural region.
@@ -130,11 +126,7 @@ impl RefOrderTree {
             let Some(n) = module.nodes.get(&nid) else {
                 continue;
             };
-            let lhs = n
-                .lhs
-                .as_deref()
-                .map(ident_base)
-                .filter(|s| !s.is_empty());
+            let lhs = n.lhs.as_deref().map(ident_base).filter(|s| !s.is_empty());
 
             let mut reads: Vec<String> = Vec::new();
             if let Some(ref ex) = n.rhs_expr {
@@ -339,11 +331,7 @@ pub fn extend_seed_auto_const(module: &TimingModule, seed: &mut ConstSeed) {
 /// aliases of those nets). `ident + (y << K)` then bills as a field insert.
 /// Exclusive `t = y << K` temps (BalanceMux shift staging) make
 /// `aligned + t` a field insert with matching `K`.
-fn extend_seed_aligned(
-    module: &TimingModule,
-    tree: &RefOrderTree,
-    seed: &mut ConstSeed,
-) {
+fn extend_seed_aligned(module: &TimingModule, tree: &RefOrderTree, seed: &mut ConstSeed) {
     let mut exclusive: Vec<(String, Expr)> = Vec::new();
     for n in module.nodes.values() {
         if !matches!(
@@ -500,13 +488,7 @@ mod tests {
         }
     }
 
-    fn node(
-        id: u32,
-        lhs: &str,
-        rhs: &str,
-        op: OperatorClass,
-        fo4: f64,
-    ) -> IrNode {
+    fn node(id: u32, lhs: &str, rhs: &str, op: OperatorClass, fo4: f64) -> IrNode {
         IrNode {
             id,
             op_class: Some(op),
@@ -534,7 +516,10 @@ mod tests {
     fn write_only_next_state_has_no_forward_edge() {
         let mut nodes = Map::new();
         nodes.insert(0, node(0, "state_d", "IDLE", OperatorClass::Other, 1.0));
-        nodes.insert(1, node(1, "cnt_d", "cnt_q - 1", OperatorClass::AddSub, 10.0));
+        nodes.insert(
+            1,
+            node(1, "cnt_d", "cnt_q - 1", OperatorClass::AddSub, 10.0),
+        );
         let m = TimingModule {
             id: 0,
             name: "axi_adapter".into(),
@@ -546,8 +531,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -573,8 +561,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -595,7 +586,14 @@ mod tests {
         assert_eq!(uncertain.procedural_depth(), 1);
         assert!(!uncertain.procedural_ok);
 
-        sequential.nodes.get_mut(&0).unwrap().gate.as_mut().unwrap().is_comb = true;
+        sequential
+            .nodes
+            .get_mut(&0)
+            .unwrap()
+            .gate
+            .as_mut()
+            .unwrap()
+            .is_comb = true;
         assert!(RefOrderTree::from_nodes(&sequential, &[0, 1]).procedural_ok);
     }
 
@@ -628,8 +626,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -666,8 +667,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0]);
@@ -677,7 +681,8 @@ mod tests {
             t.calls
         );
         assert!(
-            t.params.contains_key("WIDTH") || t.calls.values().any(|c| c.param_uses.contains_key("WIDTH")),
+            t.params.contains_key("WIDTH")
+                || t.calls.values().any(|c| c.param_uses.contains_key("WIDTH")),
             "params={:?} calls={:?}",
             t.params,
             t.calls
@@ -708,8 +713,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -719,14 +727,8 @@ mod tests {
             seed.looks_const("k_alias"),
             "ident alias of const must seed k_alias"
         );
-        assert!(
-            !seed.looks_const("y"),
-            "a+k is not expression-less"
-        );
-        assert!(
-            !seed.looks_const("a"),
-            "undriven ident must stay runtime"
-        );
+        assert!(!seed.looks_const("y"), "a+k is not expression-less");
+        assert!(!seed.looks_const("a"), "undriven ident must stay runtime");
         assert_eq!(
             crate::expr::Expr::parse("a + k_alias").dominant_op_class_latticed(&seed),
             crate::ir::OperatorClass::LogicBit,
@@ -764,8 +766,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -813,8 +818,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -866,8 +874,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -884,10 +895,8 @@ mod tests {
             "named aligned + (y<<LOG) must not be CPA"
         );
         assert_eq!(
-            crate::expr::Expr::parse(
-                "wrap_boundary + ((ax_req_q.len + 1) << LOG_NR_BYTES)"
-            )
-            .dominant_op_class_latticed(&seed),
+            crate::expr::Expr::parse("wrap_boundary + ((ax_req_q.len + 1) << LOG_NR_BYTES)")
+                .dominant_op_class_latticed(&seed),
             crate::ir::OperatorClass::AddSub,
             "wrap ident from a call must stay CPA"
         );
@@ -934,8 +943,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();

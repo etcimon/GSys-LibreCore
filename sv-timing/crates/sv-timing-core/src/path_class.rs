@@ -179,10 +179,7 @@ pub fn classify_and_adjust_paths(
     let mut updates: Vec<(usize, PathException)> = Vec::new();
 
     for (idx, path) in design.paths.iter().enumerate() {
-        let mod_name = mod_names
-            .get(&path.module)
-            .cloned()
-            .unwrap_or_default();
+        let mod_name = mod_names.get(&path.module).cloned().unwrap_or_default();
         let module = design.modules.get(&path.module);
         let lhs_hist = lhs_histogram(module, &path.nodes);
         let sig = path_signature(&mod_name, path.region_id, &path.nodes, &lhs_hist);
@@ -262,7 +259,8 @@ pub fn classify_and_adjust_paths(
             ) && (h.adjusted_fo4 + 1e-9 < raw
                 || matches!(h.path_class, PathClassKind::AtomicOverBudget));
             if reusable
-                && module.is_some_and(|m| classification_scratch(m, &path.nodes, budget).procedural_ok)
+                && module
+                    .is_some_and(|m| classification_scratch(m, &path.nodes, budget).procedural_ok)
             {
                 // Scale if node FO4 changed proportionally; else use absolute if close.
                 let adjusted = if matches!(h.path_class, PathClassKind::AtomicOverBudget) {
@@ -300,7 +298,8 @@ pub fn classify_and_adjust_paths(
         }
 
         // --- expensive detectors (high FO4 only) ---
-        let (best, attempted) = scan_deflate_detectors(module, &path.nodes, raw, budget, model, true);
+        let (best, attempted) =
+            scan_deflate_detectors(module, &path.nodes, raw, budget, model, true);
 
         if let Some((class, mut adj, conf, mut ev)) = best {
             if class != PathClassKind::AtomicOverBudget {
@@ -519,9 +518,7 @@ fn hottest_over_budget_atomic(
         if !matches!(cls, OperatorClass::Mul | OperatorClass::DivRem) {
             continue;
         }
-        if n.fo4_cost > budget + 1e-9
-            && worst.map(|(_, c, _)| n.fo4_cost > c).unwrap_or(true)
-        {
+        if n.fo4_cost > budget + 1e-9 && worst.map(|(_, c, _)| n.fo4_cost > c).unwrap_or(true) {
             worst = Some((*id, n.fo4_cost, cls));
         }
     }
@@ -570,9 +567,11 @@ fn classification_scratch(
             .collect();
         if !sequential_nodes.is_empty() {
             let tree = RefOrderTree::from_nodes(module, nodes);
-            if tree.edges.iter().any(|edge| {
-                sequential_nodes.contains(&nodes[edge.from_stmt as usize])
-            }) {
+            if tree
+                .edges
+                .iter()
+                .any(|edge| sequential_nodes.contains(&nodes[edge.from_stmt as usize]))
+            {
                 scratch.procedural_ok = false;
             }
         }
@@ -789,9 +788,7 @@ fn is_sequential_next_state_bundle(
     tree: Option<&RefOrderTree>,
 ) -> bool {
     let ns = by_lhs.keys().filter(|k| lhs_is_next_state(k)).count();
-    let wo = tree
-        .map(|t| t.write_only_lhs(by_lhs.keys()))
-        .unwrap_or(0);
+    let wo = tree.map(|t| t.write_only_lhs(by_lhs.keys())).unwrap_or(0);
     let parallel = tree
         .map(|t| t.procedural_depth() == 0 && by_lhs.len() >= 4)
         .unwrap_or(false);
@@ -804,10 +801,7 @@ fn lhs_base(lhs: &str) -> String {
 }
 
 /// True when path nodes come from two or more regions (P5 compose).
-fn path_spans_multiple_regions(
-    module: Option<&crate::ir::TimingModule>,
-    nodes: &[NodeId],
-) -> bool {
+fn path_spans_multiple_regions(module: Option<&crate::ir::TimingModule>, nodes: &[NodeId]) -> bool {
     let Some(m) = module else {
         return false;
     };
@@ -828,10 +822,7 @@ fn path_spans_multiple_regions(
 
 /// True when a composed path is a next-state / write-only FSM, not a serial
 /// named-temp datapath. IndependentLhsBundle is the right deflation there.
-fn composed_is_next_state_fsm(
-    module: Option<&crate::ir::TimingModule>,
-    nodes: &[NodeId],
-) -> bool {
+fn composed_is_next_state_fsm(module: Option<&crate::ir::TimingModule>, nodes: &[NodeId]) -> bool {
     let Some(m) = module else {
         return false;
     };
@@ -864,12 +855,7 @@ fn deflate_or_raw(
     let (best, attempted) = scan_deflate_detectors(module, nodes, raw, budget, model, false);
     match best {
         Some((_, adj, conf, ev)) => (adj, conf, ev, attempted),
-        None => (
-            raw,
-            1.0,
-            "no exclusive/dense deflation".into(),
-            attempted,
-        ),
+        None => (raw, 1.0, "no exclusive/dense deflation".into(), attempted),
     }
 }
 
@@ -1322,9 +1308,7 @@ pub fn hints_from_exceptions(exceptions: &[PathException]) -> BTreeMap<String, P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{
-        IrNode, PathEndpoint, PathKind, TimingModule, TimingPath, TimingTarget,
-    };
+    use crate::ir::{IrNode, PathEndpoint, PathKind, TimingModule, TimingPath, TimingTarget};
     use crate::loc::{OriginKind, SourceLoc};
     use std::collections::BTreeMap as Map;
 
@@ -1368,7 +1352,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -1385,8 +1369,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -1481,8 +1468,17 @@ mod tests {
         classify_and_adjust_paths(&mut design, &model, None);
         assert!(design.paths[0].total_fo4 < 80.0);
         let hints = hints_from_exceptions(&design.path_exceptions);
-        design.modules.get_mut(&0).unwrap().nodes.get_mut(&0).unwrap()
-            .gate.as_mut().unwrap().is_comb = false;
+        design
+            .modules
+            .get_mut(&0)
+            .unwrap()
+            .nodes
+            .get_mut(&0)
+            .unwrap()
+            .gate
+            .as_mut()
+            .unwrap()
+            .is_comb = false;
         design.paths[0].total_fo4 = 80.0;
         design.paths[0].total_fo4_raw = None;
         design.paths[0].path_class = PathClassKind::Plain;
@@ -1503,20 +1499,23 @@ mod tests {
             for node in module.nodes.values_mut() {
                 node.gate = None;
             }
-            module.regions.insert(0, crate::ir::CombRegion {
-                id: 0,
-                module: 0,
-                kind: crate::ir::RegionKind::AlwaysFf,
-                label: None,
-                gate: crate::ir::GateInfo {
-                    is_comb: false,
-                    ..crate::ir::GateInfo::default()
+            module.regions.insert(
+                0,
+                crate::ir::CombRegion {
+                    id: 0,
+                    module: 0,
+                    kind: crate::ir::RegionKind::AlwaysFf,
+                    label: None,
+                    gate: crate::ir::GateInfo {
+                        is_comb: false,
+                        ..crate::ir::GateInfo::default()
+                    },
+                    nodes: (0..20).collect(),
+                    total_fo4: 80.0,
+                    loc_span: loc(),
+                    multi_cycle: false,
                 },
-                nodes: (0..20).collect(),
-                total_fo4: 80.0,
-                loc_span: loc(),
-                multi_cycle: false,
-            });
+            );
             let scratch = ParallelScratch::schedule_for_region(
                 module,
                 &module.regions[&0],
@@ -1578,7 +1577,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -1605,7 +1604,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -1622,8 +1621,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -1737,7 +1739,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -1754,8 +1756,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -1818,7 +1823,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -1835,8 +1840,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -1900,7 +1908,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -1917,8 +1925,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -2041,12 +2052,17 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
-        design.module_names.insert("g6lc_server_prefetcher".into(), 0);
+        design
+            .module_names
+            .insert("g6lc_server_prefetcher".into(), 0);
         let start = PathEndpoint::RegClock { cell: 0 };
         let end = PathEndpoint::RegData { cell: 1 };
         design.paths.push(TimingPath {
@@ -2149,8 +2165,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -2239,8 +2258,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -2346,8 +2368,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -2476,8 +2501,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -2548,7 +2576,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -2574,7 +2602,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -2591,8 +2619,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -2639,7 +2670,14 @@ mod tests {
         // clint rdata / rdata[31:0] / rdata[63:32] are one result mux.
         let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
         let mut nodes = Map::new();
-        let slices = ["rdata", "rdata[31:0]", "rdata[63:32]", "rdata", "rdata[31:0]", "rdata[63:32]"];
+        let slices = [
+            "rdata",
+            "rdata[31:0]",
+            "rdata[63:32]",
+            "rdata",
+            "rdata[31:0]",
+            "rdata[63:32]",
+        ];
         for (i, lhs) in slices.iter().enumerate() {
             let i = i as u32;
             nodes.insert(
@@ -2663,7 +2701,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: Some("register_address".into()),
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -2680,8 +2718,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -2743,7 +2784,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: Some("state_q".into()),
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -2760,8 +2801,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -2839,8 +2883,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -2907,7 +2954,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
             ids.push(i);
@@ -2925,8 +2972,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -2993,14 +3043,18 @@ mod tests {
                     width_defaulted: true,
                     reads_reg: false,
                     lhs: Some("state_d".into()),
-                    rhs: Some(if i == 3 { "a * b".into() } else { "ST_IDLE".into() }),
+                    rhs: Some(if i == 3 {
+                        "a * b".into()
+                    } else {
+                        "ST_IDLE".into()
+                    }),
                     lhs_expr: None,
                     rhs_expr: None,
                     case_labels: vec![format!("{i}")],
                     case_is_default: i == 11,
                     case_selector: Some("state_q".into()),
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -3017,8 +3071,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -3150,8 +3207,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -3254,8 +3314,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -3359,8 +3422,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -3473,8 +3539,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );

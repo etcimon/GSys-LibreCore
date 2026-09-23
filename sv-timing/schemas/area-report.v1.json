@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sv-timing.local/schemas/area-report.v1.json",
+  "title": "sv-timing area report v1",
+  "description": "Structural area and structural frequency for one inclusion. Not static timing analysis and not a mapped cell count.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "disclaimer",
+    "area_model",
+    "measurement",
+    "ir_version",
+    "cost_model",
+    "fo4_ps",
+    "budget_margin",
+    "target_mhz",
+    "design_key",
+    "area_key",
+    "inclusion",
+    "metrics",
+    "marks",
+    "gaps",
+    "tree",
+    "tree_truncated",
+    "rank_exclusive_area",
+    "rank_exclusive_delay",
+    "rank_perf_per_area",
+    "off_path_area_au",
+    "on_path",
+    "path_classes",
+    "compare",
+    "hints",
+    "stats"
+  ],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "disclaimer": { "type": "string" },
+    "area_model": { "type": "string" },
+    "measurement": { "type": "string" },
+    "ir_version": { "type": "string" },
+    "cost_model": { "type": "string" },
+    "fo4_ps": { "type": "number" },
+    "budget_margin": { "type": "number" },
+    "target_mhz": { "type": "number" },
+    "design_key": { "type": "string" },
+    "area_key": { "type": "string" },
+    "inclusion": { "type": "string" },
+    "metrics": {
+      "type": "object",
+      "required": [
+        "area_au",
+        "delay_fo4",
+        "perf_mhz",
+        "perf_per_area",
+        "perf_basis",
+        "perf_multicycle_mhz",
+        "perf_state",
+        "null_reason"
+      ],
+      "properties": {
+        "area_au": { "type": ["number", "null"] },
+        "delay_fo4": { "type": ["number", "null"] },
+        "perf_mhz": { "type": ["number", "null"] },
+        "perf_per_area": { "type": ["number", "null"] },
+        "perf_basis": { "type": "string" },
+        "perf_multicycle_mhz": { "type": ["number", "null"] },
+        "perf_state": { "enum": ["finite", "unbounded", "empty"] },
+        "null_reason": {
+          "type": ["string", "null"],
+          "enum": ["empty_inclusion", "zero_area", "zero_delay", "no_primary_path", null]
+        }
+      }
+    },
+    "marks": {
+      "type": "object",
+      "required": ["model", "basis", "measured", "tasks"],
+      "properties": {
+        "model": { "const": "area-asm-marks-v1" },
+        "basis": { "const": "asm_cycle_count" },
+        "measured": { "type": "boolean" },
+        "note": { "type": "string" },
+        "tasks": { "type": "array" }
+      }
+    },
+    "gaps": {
+      "type": "object",
+      "required": [
+        "n_width_defaulted",
+        "n_generate_unresolved",
+        "n_opaque_child",
+        "n_body_unlowered",
+        "n_storage_unrecorded",
+        "n_instance_params_unrecorded",
+        "n_config_unresolved",
+        "n_cross_path_unresolved",
+        "n_field_absent",
+        "attribution_gaps"
+      ],
+      "properties": {
+        "n_width_defaulted": { "type": "integer" },
+        "n_generate_unresolved": { "type": "integer" },
+        "n_opaque_child": { "type": "integer" },
+        "n_body_unlowered": { "type": "integer" },
+        "n_storage_unrecorded": { "type": "integer" },
+        "n_instance_params_unrecorded": { "type": "integer" },
+        "n_config_unresolved": { "type": "integer" },
+        "n_cross_path_unresolved": { "type": "integer" },
+        "n_field_absent": { "type": "integer" },
+        "attribution_gaps": {
+          "type": "integer",
+          "description": "Failed overlay keys, missing cross-path ids, and absent lower fields. Policy counters are not included."
+        }
+      }
+    },
+    "tree": { "type": "array" },
+    "tree_truncated": { "type": "integer" },
+    "rank_exclusive_area": { "type": "array" },
+    "rank_exclusive_delay": { "type": "array" },
+    "rank_perf_per_area": { "type": "array" },
+    "off_path_area_au": { "type": ["number", "null"] },
+    "on_path": { "type": "array" },
+    "path_classes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["module", "class"],
+        "properties": {
+          "module": { "type": "string" },
+          "class": { "type": "string" }
+        }
+      }
+    },
+    "compare": { "type": "null" },
+    "hints": { "type": "array" },
+    "stats": {
+      "type": "object",
+      "required": ["area_hit", "nodes", "gaps"],
+      "properties": {
+        "area_hit": { "type": "boolean" },
+        "nodes": { "type": "integer" },
+        "gaps": { "type": "integer" }
+      }
+    }
+  }
+}

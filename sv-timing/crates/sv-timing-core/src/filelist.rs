@@ -43,11 +43,7 @@ impl FileList {
 
     /// Merge another list (files append with dedupe; incdirs/defines extend).
     pub fn extend(&mut self, other: FileList) {
-        let mut seen: BTreeSet<String> = self
-            .files
-            .iter()
-            .map(|p| normalize_key(p))
-            .collect();
+        let mut seen: BTreeSet<String> = self.files.iter().map(|p| normalize_key(p)).collect();
         for f in other.files {
             let k = normalize_key(&f);
             if seen.insert(k) {
@@ -60,11 +56,7 @@ impl FileList {
             }
         }
         for def in other.defines {
-            if !self
-                .defines
-                .iter()
-                .any(|(n, v)| n == &def.0 && v == &def.1)
-            {
+            if !self.defines.iter().any(|(n, v)| n == &def.0 && v == &def.1) {
                 self.defines.push(def);
             }
         }
@@ -388,7 +380,11 @@ mod tests {
         let sv = dir.join("b.sv");
         std::fs::write(&sv, "module b; endmodule\n").unwrap();
         std::fs::write(&leaf, "b.sv\n").unwrap();
-        std::fs::write(&top, format!("-f {}\n", leaf.file_name().unwrap().to_string_lossy())).unwrap();
+        std::fs::write(
+            &top,
+            format!("-f {}\n", leaf.file_name().unwrap().to_string_lossy()),
+        )
+        .unwrap();
         let list = load_filelist_default(&top).expect("load");
         assert_eq!(list.files.len(), 1);
         assert!(list.files[0].ends_with("b.sv"));

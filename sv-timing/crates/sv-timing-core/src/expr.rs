@@ -393,11 +393,7 @@ impl Expr {
                 paren_if_needed(right)
             ),
             Expr::Call { name, args } => {
-                let inner = args
-                    .iter()
-                    .map(|a| a.emit())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let inner = args.iter().map(|a| a.emit()).collect::<Vec<_>>().join(", ");
                 format!("{name}({inner})")
             }
         }
@@ -550,9 +546,7 @@ impl Expr {
                     .max(index.fo4_critical_cost_latticed(base, seed))
             }
             Expr::Call { name, args } => {
-                if is_elab_system_fn(name)
-                    && args.iter().all(|a| a.const_class(seed).is_const())
-                {
+                if is_elab_system_fn(name) && args.iter().all(|a| a.const_class(seed).is_const()) {
                     return 0.0;
                 }
                 let call_op = user_function_op_class(name, args.len());
@@ -596,9 +590,9 @@ impl Expr {
                 .const_class(seed)
                 .join_arith(then_e.const_class(seed))
                 .join_arith(else_e.const_class(seed)),
-            Expr::Concat { parts } => parts.iter().fold(ConstClass::Const, |a, p| {
-                a.join_arith(p.const_class(seed))
-            }),
+            Expr::Concat { parts } => parts
+                .iter()
+                .fold(ConstClass::Const, |a, p| a.join_arith(p.const_class(seed))),
             Expr::Replicate { count: _, body } => body.const_class(seed),
             Expr::Index { base, index } => {
                 if is_constant_range_select(index) {
@@ -607,16 +601,16 @@ impl Expr {
                     base.const_class(seed)
                         .join_arith(base_idx.const_class(seed))
                 } else {
-                    base.const_class(seed)
-                        .join_arith(index.const_class(seed))
+                    base.const_class(seed).join_arith(index.const_class(seed))
                 }
             }
             Expr::Call { name, args } => {
-                if is_elab_system_fn(name)
-                    && args.iter().all(|a| a.const_class(seed).is_const())
-                {
+                if is_elab_system_fn(name) && args.iter().all(|a| a.const_class(seed).is_const()) {
                     ConstClass::Const
-                } else if args.iter().any(|a| a.const_class(seed) == ConstClass::Runtime) {
+                } else if args
+                    .iter()
+                    .any(|a| a.const_class(seed) == ConstClass::Runtime)
+                {
                     ConstClass::Runtime
                 } else {
                     ConstClass::Unknown
@@ -727,7 +721,10 @@ impl Expr {
     /// Parallel arms contribute only the heavier child's spine.
     ///
     /// Sum of base costs equals [`Self::fo4_critical_cost`] for pure trees.
-    pub fn critical_spine_ops(&self, base: &dyn Fn(OperatorClass) -> f64) -> Vec<(OperatorClass, f64)> {
+    pub fn critical_spine_ops(
+        &self,
+        base: &dyn Fn(OperatorClass) -> f64,
+    ) -> Vec<(OperatorClass, f64)> {
         self.critical_spine_ops_latticed(base, &ConstSeed::heuristic())
     }
 
@@ -858,7 +855,11 @@ impl Expr {
     /// True when a single operator on the critical spine exceeds `budget_fo4`.
     ///
     /// Such ops cannot be shortened by InsertReg alone (atomic FO4).
-    pub fn has_atomic_over_budget(&self, base: &dyn Fn(OperatorClass) -> f64, budget_fo4: f64) -> bool {
+    pub fn has_atomic_over_budget(
+        &self,
+        base: &dyn Fn(OperatorClass) -> f64,
+        budget_fo4: f64,
+    ) -> bool {
         self.critical_spine_ops(base)
             .into_iter()
             .any(|(_, c)| c > budget_fo4 + 1e-9)
@@ -899,7 +900,10 @@ impl Expr {
                     Expr::Literal { text } => parse_unsized_decimal(text).unwrap_or(1),
                     _ => return None,
                 };
-                Some(c.saturating_mul(body.width_class_hint().unwrap_or(1)).max(1))
+                Some(
+                    c.saturating_mul(body.width_class_hint().unwrap_or(1))
+                        .max(1),
+                )
             }
             Expr::Unary { arg, .. } => arg.width_class_hint(),
             Expr::PartSelect { .. } => None,
@@ -911,13 +915,13 @@ impl Expr {
                     _ => None,
                 }
             }
-            Expr::Ternary {
-                then_e, else_e, ..
-            } => match (then_e.width_class_hint(), else_e.width_class_hint()) {
-                (Some(a), Some(b)) if a == b => Some(a),
-                (Some(a), None) | (None, Some(a)) => Some(a),
-                _ => None,
-            },
+            Expr::Ternary { then_e, else_e, .. } => {
+                match (then_e.width_class_hint(), else_e.width_class_hint()) {
+                    (Some(a), Some(b)) if a == b => Some(a),
+                    (Some(a), None) | (None, Some(a)) => Some(a),
+                    _ => None,
+                }
+            }
             Expr::Ident { .. } | Expr::Opaque { .. } | Expr::Call { .. } => None,
         }
     }
@@ -1010,9 +1014,7 @@ impl Expr {
                 then_e,
                 else_e,
             } => 1 + cond.depth().max(then_e.depth()).max(else_e.depth()),
-            Expr::Concat { parts } => {
-                1 + parts.iter().map(|p| p.depth()).max().unwrap_or(0)
-            }
+            Expr::Concat { parts } => 1 + parts.iter().map(|p| p.depth()).max().unwrap_or(0),
             Expr::Replicate { count, body } => 1 + count.depth().max(body.depth()),
             Expr::Call { args, .. } => 1 + args.iter().map(|a| a.depth()).max().unwrap_or(0),
         }
@@ -1049,7 +1051,10 @@ impl Expr {
             let p = Expr::parse(rhs);
             if p.op_node_count() == 0 && !rhs.trim().is_empty() {
                 // pure ident/literal ok
-                if !rhs.chars().all(|c| c.is_ascii_alphanumeric() || "_$ ".contains(c)) {
+                if !rhs
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "_$ ".contains(c))
+                {
                     return None;
                 }
             }
@@ -1314,11 +1319,7 @@ impl ExprStagePlan {
         // Unique begin label: prefer top wire, else first staged wire.
         let block = top_wire
             .map(|t| format!("{t}_stage"))
-            .or_else(|| {
-                self.wires
-                    .first()
-                    .map(|(n, _)| format!("{n}_stage"))
-            })
+            .or_else(|| self.wires.first().map(|(n, _)| format!("{n}_stage")))
             .unwrap_or_else(|| "svt_balance_mux_stage".into());
         let mut b = String::new();
         b.push_str("  // --- BalanceMux arm staging (latency-neutral) ---\n");
@@ -1346,10 +1347,7 @@ impl ExprStagePlan {
 fn flatten_assoc(op: &str, e: &Expr, out: &mut Vec<Expr>) {
     match e {
         Expr::Binary {
-            op: o,
-            left,
-            right,
-            ..
+            op: o, left, right, ..
         } if o == op && Expr::is_associative_binary_op(o) => {
             flatten_assoc(op, left, out);
             flatten_assoc(op, right, out);
@@ -1503,7 +1501,7 @@ fn is_fmt_scale_fn(name: &str) -> bool {
 /// User function FO4 class. `fmt_row_bytes` is a mux-of-shifts. Unknown
 /// calls stay Other: billing every 2-arg call as Mux re-inflated gemm
 /// next-state (v49 12→15). Wrap/convert bodies are a later inline pass.
-fn user_function_op_class(name: &str, _nargs: usize) -> OperatorClass {
+pub fn user_function_op_class(name: &str, _nargs: usize) -> OperatorClass {
     if is_fmt_scale_fn(name) {
         OperatorClass::Mux
     } else {
@@ -1536,7 +1534,7 @@ fn is_literal_power_of_two_mul(op: &str, left: &Expr, right: &Expr) -> bool {
 /// **divisor** is Const (`8`, `WIDTH`, `HPDcacheCfg.u.dataWaysPerRamWord`) is
 /// a shift or bit-select, not a 120 FO4 SRT divider. `8 / a` (runtime divisor)
 /// stays [`OperatorClass::DivRem`].
-fn billed_binary_class(
+pub fn billed_binary_class(
     op: &str,
     op_class: OperatorClass,
     left: &Expr,
@@ -1550,7 +1548,9 @@ fn billed_binary_class(
     }
     // `x * fmt_row_bytes(...)` / `elems * ai_fmt_bytes()` is a shift, not Mul.
     // Do not use this to parse general `32'(expr)` (gemm v25 regression).
-    if matches!(op_class, OperatorClass::Mul) && op == "*" && (is_fmt_scale_call(left) || is_fmt_scale_call(right))
+    if matches!(op_class, OperatorClass::Mul)
+        && op == "*"
+        && (is_fmt_scale_call(left) || is_fmt_scale_call(right))
     {
         return OperatorClass::ShiftConst;
     }
@@ -1626,9 +1626,9 @@ fn billed_binary_class(
 /// Ternary whose *arms* are Const (the condition may be runtime).
 fn is_const_select_mux(e: &Expr, seed: &ConstSeed) -> bool {
     match e {
-        Expr::Ternary {
-            then_e, else_e, ..
-        } => then_e.const_class(seed).is_const() && else_e.const_class(seed).is_const(),
+        Expr::Ternary { then_e, else_e, .. } => {
+            then_e.const_class(seed).is_const() && else_e.const_class(seed).is_const()
+        }
         _ => false,
     }
 }
@@ -2016,9 +2016,7 @@ fn dominant_op_class_measured_seeded(e: &Expr, seed: &ConstSeed) -> OperatorClas
                 }
             }
             Expr::Call { name, args, .. } => {
-                if is_elab_system_fn(name)
-                    && args.iter().all(|a| a.const_class(seed).is_const())
-                {
+                if is_elab_system_fn(name) && args.iter().all(|a| a.const_class(seed).is_const()) {
                     // P1 $clog2/$bits of constants — not an operator class.
                 } else {
                     f(user_function_op_class(name, args.len()));
@@ -2079,7 +2077,8 @@ pub fn classify_binary_op(sym: &str) -> OperatorClass {
     }
 }
 
-fn classify_unary(op: &str) -> OperatorClass {
+/// Class billed for a unary operator.
+pub fn classify_unary(op: &str) -> OperatorClass {
     match op.trim() {
         "~" | "!" | "&" | "|" | "^" | "~&" | "~|" | "~^" | "^~" => OperatorClass::LogicBit,
         "-" | "+" => OperatorClass::AddSub,
@@ -2275,7 +2274,8 @@ impl<'a> Parser<'a> {
 
     fn parse_unary(&mut self) -> Option<Expr> {
         self.skip_ws();
-        if let Some(op) = self.match_op(&["~&", "~|", "~^", "^~", "~", "!", "-", "+", "&", "|", "^"])
+        if let Some(op) =
+            self.match_op(&["~&", "~|", "~^", "^~", "~", "!", "-", "+", "&", "|", "^"])
         {
             let arg = self.parse_unary()?;
             return Some(Expr::Unary {
@@ -2299,7 +2299,8 @@ impl<'a> Parser<'a> {
                     let index = if let Some(sel) = self.match_op(&["+:", "-:"]) {
                         let width = self.parse_expr()?;
                         Expr::PartSelect {
-                            kind: PartSelectKind::from_op(&sel).unwrap_or(PartSelectKind::IndexedPlus),
+                            kind: PartSelectKind::from_op(&sel)
+                                .unwrap_or(PartSelectKind::IndexedPlus),
                             left: Box::new(idx),
                             right: Box::new(width),
                         }
@@ -2407,7 +2408,9 @@ impl<'a> Parser<'a> {
             // Unsized `'(1)` / `'(LINE_B)` — same collapse rules as `W'(…)`.
             b'\'' if self.src.get(self.i + 1) == Some(&b'(') => self.try_collapse_width_cast(),
             b'\'' | b'0'..=b'9' => self.parse_literal(),
-            c if c == b'_' || c.is_ascii_alphabetic() || c == b'$' => self.parse_ident_or_call_name(),
+            c if c == b'_' || c.is_ascii_alphabetic() || c == b'$' => {
+                self.parse_ident_or_call_name()
+            }
             _ => {
                 // consume one char as opaque
                 let start = self.i;
@@ -2509,9 +2512,7 @@ impl<'a> Parser<'a> {
             let c = self.src[self.i];
             if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c == b'.' {
                 self.i += 1;
-            } else if c == b':'
-                && self.src.get(self.i + 1) == Some(&b':')
-            {
+            } else if c == b':' && self.src.get(self.i + 1) == Some(&b':') {
                 // package/class scope: pkg::name
                 self.i += 2;
             } else {
@@ -2588,10 +2589,7 @@ mod tests {
         // genvar index scale like load_unit sign-bit / issue rdata index
         let scale = Expr::parse("(i + 1) * 8 - 1");
         let c = scale.fo4_critical_cost(&base);
-        assert!(
-            c < 30.0,
-            "addr scale must not cost full mul, got {c}"
-        );
+        assert!(c < 30.0, "addr scale must not cost full mul, got {c}");
         assert_ne!(scale.dominant_op_class(), OperatorClass::Mul);
         let data = Expr::parse("operand_a_i * operand_b_i");
         assert!(data.fo4_critical_cost(&base) >= 56.0);
@@ -2607,8 +2605,7 @@ mod tests {
         // Same expression is elaboration when VpnLen is a module localparam.
         let seeded = ConstSeed::from_names(["VpnLen", "PtLevels"]);
         assert_eq!(
-            Expr::parse("(VpnLen / PtLevels) * VpnLen")
-                .fo4_critical_cost_latticed(&base, &seeded),
+            Expr::parse("(VpnLen / PtLevels) * VpnLen").fo4_critical_cost_latticed(&base, &seeded),
             0.0
         );
         assert_ne!(
@@ -2642,7 +2639,11 @@ mod tests {
         let e = Expr::parse(text);
         assert_eq!(e.dominant_op_class(), class, "{text}: {e:?}");
         assert_eq!(e.fo4_critical_cost(&arithmetic_base), cost, "{text}");
-        assert_eq!(e.fo4_critical_cost_as_index(&arithmetic_base), cost, "{text}");
+        assert_eq!(
+            e.fo4_critical_cost_as_index(&arithmetic_base),
+            cost,
+            "{text}"
+        );
         assert!(cost <= e.fo4_cost(&arithmetic_base), "{text}");
         let spine = e.critical_spine_ops(&arithmetic_base);
         assert_eq!(
@@ -2676,7 +2677,11 @@ mod tests {
                 ("/", OperatorClass::DivRem),
                 ("%", OperatorClass::DivRem),
             ] {
-                assert_arithmetic_cost(&format!("{left} {op} {right}"), class, arithmetic_base(class));
+                assert_arithmetic_cost(
+                    &format!("{left} {op} {right}"),
+                    class,
+                    arithmetic_base(class),
+                );
             }
         }
     }
@@ -2789,9 +2794,7 @@ mod tests {
             cast1.fo4_critical_cost(&arithmetic_base)
         );
         // Must not parse general `32'(expr)` (gemm `32'(n-1)*row+k` regression).
-        let gemm = Expr::parse(
-            "32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes",
-        );
+        let gemm = Expr::parse("32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes");
         assert_ne!(
             gemm.dominant_op_class(),
             OperatorClass::Mul,
@@ -2862,16 +2865,13 @@ mod tests {
         // Based literals still parse (`32'hff` must not become a width-cast).
         assert_eq!(Expr::parse("32'hff").width_class_hint(), Some(32));
         assert_eq!(
-            Expr::parse("32'(CBOZ_LINE_B)")
-                .const_class(&ConstSeed::heuristic()),
+            Expr::parse("32'(CBOZ_LINE_B)").const_class(&ConstSeed::heuristic()),
             ConstClass::Const,
             "32'(SCREAMING) must collapse to the const ident"
         );
 
         // delay-v19 guard: general `(W)'(expr)` must not expose the inner Mul.
-        let gemm = Expr::parse(
-            "32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes",
-        );
+        let gemm = Expr::parse("32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes");
         assert_ne!(
             gemm.dominant_op_class(),
             OperatorClass::Mul,
@@ -2971,9 +2971,8 @@ mod tests {
             "flag invert + const-then chain: {} {inv:?}",
             inv.fo4_critical_cost(&arithmetic_base)
         );
-        let with_call = Expr::parse(
-            "n ? 32'h7fc00000 : i ? 32'h7f800000 : (!f) ? 32'd0 : pack(sum, exp)",
-        );
+        let with_call =
+            Expr::parse("n ? 32'h7fc00000 : i ? 32'h7f800000 : (!f) ? 32'd0 : pack(sum, exp)");
         assert!(
             with_call.fo4_critical_cost(&arithmetic_base) < 6.0,
             "const-then + call still chained: {} {with_call:?}",
@@ -3096,9 +3095,7 @@ mod tests {
             OperatorClass::AddSub
         );
         // axi2mem: `{{LOG}{1'b0}}` wraps the replicate count in a one-part concat.
-        let axi_pad = Expr::parse(
-            "{addr[AXI_ADDR_WIDTH-1:LOG_NR_BYTES], {{LOG_NR_BYTES}{1'b0}}}",
-        );
+        let axi_pad = Expr::parse("{addr[AXI_ADDR_WIDTH-1:LOG_NR_BYTES], {{LOG_NR_BYTES}{1'b0}}}");
         assert_eq!(
             axi_pad.zero_pad_align_key().as_deref(),
             Some("LOG_NR_BYTES"),
@@ -3262,7 +3259,10 @@ mod tests {
         );
 
         // The selected base is still measured through a constant slice.
-        assert_eq!(Expr::parse("WIDTH * 3").fo4_critical_cost(&arithmetic_base), 0.0);
+        assert_eq!(
+            Expr::parse("WIDTH * 3").fo4_critical_cost(&arithmetic_base),
+            0.0
+        );
         assert_eq!(
             Expr::parse("3 * PRECISION_BITS + 4").fo4_critical_cost(&arithmetic_base),
             0.0
@@ -3277,9 +3277,7 @@ mod tests {
         );
         // Runtime * const (non power-of-two) stays a multiply. Runtime / const
         // divisor is a shift (delay-v14), not a 120 FO4 divider.
-        assert!(
-            Expr::parse("a * WIDTH").fo4_critical_cost(&arithmetic_base) >= 56.0
-        );
+        assert!(Expr::parse("a * WIDTH").fo4_critical_cost(&arithmetic_base) >= 56.0);
         let cnt_half = Expr::parse("(cnt + 1) / 2");
         assert_ne!(cnt_half.dominant_op_class(), OperatorClass::DivRem);
         assert!(
@@ -3340,7 +3338,9 @@ mod tests {
         let mul = Expr::parse("(a + b) * (c + d)");
         let ms = mul.critical_spine_ops(&base);
         assert!(
-            ms.last().map(|(c, _)| *c == OperatorClass::Mul).unwrap_or(false),
+            ms.last()
+                .map(|(c, _)| *c == OperatorClass::Mul)
+                .unwrap_or(false),
             "ms={ms:?}"
         );
         assert!(mul.has_atomic_over_budget(&base, 32.0));
@@ -3430,14 +3430,22 @@ mod tests {
         let bal = e.rebalance_associative();
         let s = bal.emit();
         // All leaves preserved
-        assert!(s.contains("64'hff") || s.contains("64'hFF") || s.contains("64"), "{s}");
+        assert!(
+            s.contains("64'hff") || s.contains("64'hFF") || s.contains("64"),
+            "{s}"
+        );
         // Depth should still be finite; equal-width 1-bit runs may balance
         assert!(bal.depth() >= 2, "depth={}", bal.depth());
         // Full equal-width chain still balances
         let e2 = Expr::parse("1'b0 | 1'b1 | 1'b0 | 1'b1 | 1'b0 | 1'b1 | 1'b0 | 1'b1");
         let d0 = e2.depth();
         let b2 = e2.rebalance_associative();
-        assert!(b2.depth() < d0, "equal-width should balance {} -> {}", d0, b2.depth());
+        assert!(
+            b2.depth() < d0,
+            "equal-width should balance {} -> {}",
+            d0,
+            b2.depth()
+        );
     }
 
     #[test]

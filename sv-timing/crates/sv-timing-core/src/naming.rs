@@ -307,19 +307,18 @@ mod tests {
 
     #[test]
     fn mangle_keywords_and_digits() {
-        assert_eq!(mangle_identifier("module", MangleStyle::SafeIdent), "_svt_module");
-        assert!(mangle_identifier("1wire", MangleStyle::SafeIdent).starts_with('_'));
         assert_eq!(
-            mangle_identifier("a-b", MangleStyle::SafeIdent),
-            "a_b"
+            mangle_identifier("module", MangleStyle::SafeIdent),
+            "_svt_module"
         );
+        assert!(mangle_identifier("1wire", MangleStyle::SafeIdent).starts_with('_'));
+        assert_eq!(mangle_identifier("a-b", MangleStyle::SafeIdent), "a_b");
     }
 
     #[test]
     fn demangle_trace_roundtrip() {
         let mut nt = NameTable::new();
-        let (id, name) =
-            nt.alloc_signal("m", "x", SignalNameTag::SplitWire { index: 0 }, loc());
+        let (id, name) = nt.alloc_signal("m", "x", SignalNameTag::SplitWire { index: 0 }, loc());
         let o = nt.demangle_trace(&name).expect("origin");
         assert_eq!(o.name, name);
         assert!(nt.signals.contains_key(&id));

@@ -632,6 +632,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sv-timing-area"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde_json",
+ "sha2",
+ "sv-timing-core",
+ "thiserror",
+]
+
+[[package]]
 name = "sv-timing-cache"
 version = "0.1.0"
 dependencies = [
@@ -654,6 +665,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "sv-timing-area",
  "sv-timing-cache",
  "sv-timing-core",
  "sv-timing-emit",

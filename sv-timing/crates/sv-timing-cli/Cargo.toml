@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 sv-timing-core = { workspace = true }
 sv-timing-cache = { workspace = true }
+sv-timing-area = { workspace = true }
 sv-timing-transform = { workspace = true }
 sv-timing-emit = { workspace = true }
 anyhow = { workspace = true }

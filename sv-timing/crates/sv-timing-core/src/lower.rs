@@ -13,15 +13,13 @@ use sv_parser::{unwrap_node, Locate, RefNode, SyntaxTree};
 use crate::error::CoreResult;
 use crate::expr::Expr;
 use crate::ir::{
-    AssignKind, CombRegion, CrossModulePath, EdgeKind, GateInfo, GenerateLoop, IrNode, ModuleId,
-    ModuleInstance, ModulePort, NodeId, OperatorClass, PathEndpoint, PathId, PortConnection,
-    RegionId, RegionKind, ResetInfo, TimingDesign, TimingModule, TimingPackage, TimingPath,
-    TimingTarget, TypedParameter,
+    AssignKind, CombRegion, CrossModulePath, DeclSite, EdgeKind, FunctionBody, GateInfo,
+    GenerateLoop, IrNode, ModuleId, ModuleInstance, ModulePort, NodeId, OperatorClass,
+    PathEndpoint, PathId, PortConnection, RegionId, RegionKind, ResetInfo, TimingDesign,
+    TimingModule, TimingPackage, TimingPath, TimingTarget, TypedParameter,
 };
 use crate::loc::{LineIndex, OriginKind, SourceLoc};
-use crate::measure::{
-    attribute_costs, max_freq_mhz_for_path, CostModel,
-};
+use crate::measure::{attribute_costs, max_freq_mhz_for_path, CostModel};
 use crate::naming::NameTable;
 use crate::param_map::ParamMap;
 use crate::parse::{parse_paths, ParseOptions, ParsedFile, ParsedUnit};
@@ -72,7 +70,11 @@ pub struct AnalyzeOutput {
 }
 
 /// Parse paths and lower to IR (full analyze pipeline through opportunities).
-pub fn analyze_files(paths: &[std::path::PathBuf], parse: &ParseOptions, lower: &LowerOptions) -> CoreResult<AnalyzeOutput> {
+pub fn analyze_files(
+    paths: &[std::path::PathBuf],
+    parse: &ParseOptions,
+    lower: &LowerOptions,
+) -> CoreResult<AnalyzeOutput> {
     let unit = parse_paths(paths, parse)?;
     let mut out = lower_unit(&unit, lower)?;
     out.skipped_files = unit.skipped.clone();
@@ -256,10 +258,7 @@ fn stitch_cross_module_paths(design: &mut TimingDesign, next_path: &mut PathId) 
             .collect();
 
         let (stitch_kind, via_ports, bridge_nets, rationale_extra) = if !bridges.is_empty() {
-            let via: Vec<String> = bridges
-                .iter()
-                .map(|(f, a)| format!("{f}={a}"))
-                .collect();
+            let via: Vec<String> = bridges.iter().map(|(f, a)| format!("{f}={a}")).collect();
             let nets: Vec<String> = bridges.iter().map(|(_, a)| a.clone()).collect();
             let extra = if bridged_to_parent_io.is_empty() {
                 "child output(s) driven onto parent nets"
@@ -376,7 +375,7 @@ fn lower_file(
     // Packages first (localparams + functions) — independent of module filter.
     for node in tree {
         if let RefNode::PackageDeclaration(pkg) = node {
-            if let Some(tp) = extract_package(tree, li, &path_str, pkg) {
+            if let Some(tp) = extract_package(tree, li, &path_str, &file.bytes, pkg) {
                 names.reserve(&tp.name, &tp.name);
                 design.packages.insert(tp.name.clone(), tp);
             }
@@ -403,8 +402,16 @@ fn lower_file(
         let mid = *next_module;
         *next_module += 1;
 
-        let parameters = collect_typed_parameters_in(tree, scope.nodes.iter().cloned());
-        let ports = collect_module_ports_in(tree, scope.nodes.iter().cloned());
+        let parameters =
+            collect_typed_parameters_in(tree, &file.bytes, scope.nodes.iter().cloned());
+        let ports = collect_module_ports_in(tree, &file.bytes, scope.nodes.iter().cloned());
+        let decls = collect_decl_sites(
+            tree,
+            li,
+            &path_str,
+            &file.bytes,
+            scope.nodes.iter().cloned(),
+        );
         let gen_loops = collect_genvar_loops_in(tree, li, &path_str, scope.nodes.iter().cloned());
         let insts = collect_module_instances_in(
             tree,
@@ -426,8 +433,15 @@ fn lower_file(
             ports,
             gen_loops,
             functions: collect_function_names_in(tree, scope.nodes.iter().cloned()),
+            function_bodies: collect_function_bodies(
+                tree,
+                &file.bytes,
+                scope.nodes.iter().cloned(),
+            ),
             package_imports: collect_package_imports_in(tree, scope.nodes.iter().cloned()),
             instances: insts.clone(),
+            decls,
+            config_branch: module_has_config_branch(scope.nodes.iter().cloned()),
             loc: mod_loc,
         };
         design.instances.extend(insts);
@@ -712,6 +726,7 @@ where
                 child_module: None,
                 connections,
                 loc: loc.clone(),
+                param_override_present: Some(mi.nodes.1.is_some()),
             });
         }
     }
@@ -728,7 +743,10 @@ fn instance_name_of(tree: &SyntaxTree, hier: &sv_parser::HierarchicalInstance) -
     None
 }
 
-fn port_connections_of(tree: &SyntaxTree, hier: &sv_parser::HierarchicalInstance) -> Vec<PortConnection> {
+fn port_connections_of(
+    tree: &SyntaxTree,
+    hier: &sv_parser::HierarchicalInstance,
+) -> Vec<PortConnection> {
     let mut conns = Vec::new();
     for node in hier {
         if let RefNode::NamedPortConnectionIdentifier(npc) = node {
@@ -758,6 +776,7 @@ fn extract_package(
     tree: &SyntaxTree,
     li: &LineIndex,
     path_str: &str,
+    bytes: &[u8],
     pkg: &sv_parser::PackageDeclaration,
 ) -> Option<TimingPackage> {
     let name = module_name(tree, unwrap_node!(pkg, PackageIdentifier))?;
@@ -767,6 +786,7 @@ fn extract_package(
         file: path_str.into(),
         localparams: collect_localparam_names_in(tree, pkg),
         functions: collect_function_names_in(tree, pkg),
+        function_bodies: collect_function_bodies(tree, bytes, pkg),
         typedefs: collect_typedef_names_in(tree, pkg),
         loc,
     })
@@ -812,7 +832,11 @@ fn hierarchical_path(root: &str, member: &str) -> String {
 ///
 /// Scope pieces come from AST `PackageScope` / `ClassType` / type identifiers
 /// (anything that appears as the left of `::`), never a hard-coded package list.
-fn collect_typed_parameters_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<TypedParameter>
+fn collect_typed_parameters_in<'a, T>(
+    tree: &'a SyntaxTree,
+    bytes: &[u8],
+    root: T,
+) -> Vec<TypedParameter>
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
@@ -822,6 +846,7 @@ where
     for node in root {
         match node {
             RefNode::ParameterDeclarationParam(p) => {
+                let default_text = integer_after_eq(bytes, locate_byte_span(p));
                 let mut param_ids: Vec<String> = Vec::new();
                 let mut type_ids: Vec<String> = Vec::new();
                 let mut default_ids: Vec<String> = Vec::new();
@@ -839,8 +864,7 @@ where
                     }
                     match n {
                         RefNode::ParameterIdentifier(pi) => {
-                            if let Some(s) =
-                                identifier_str(tree, RefNode::ParameterIdentifier(pi))
+                            if let Some(s) = identifier_str(tree, RefNode::ParameterIdentifier(pi))
                             {
                                 if !saw_eq {
                                     param_ids.push(s);
@@ -895,8 +919,7 @@ where
                 }
                 let name = param_ids.last().cloned();
                 if let Some(name) = name {
-                    let tpath: Vec<String> =
-                        type_ids.into_iter().filter(|t| t != &name).collect();
+                    let tpath: Vec<String> = type_ids.into_iter().filter(|t| t != &name).collect();
                     let type_ref = scoped_path(&tpath);
                     let default_expr = scoped_path(&default_ids);
                     if seen.insert(name.clone()) {
@@ -905,11 +928,13 @@ where
                             is_type_parameter: false,
                             type_ref,
                             default_expr,
+                            default_text,
                         });
                     }
                 }
             }
             RefNode::ParameterDeclarationType(p) => {
+                let default_text = integer_after_eq(bytes, locate_byte_span(p));
                 // parameter type T = default (default may be scope::type)
                 let mut names = Vec::new();
                 let mut default_tokens = Vec::new();
@@ -952,14 +977,14 @@ where
                             name: name.clone(),
                             is_type_parameter: true,
                             type_ref: None,
-                            default_expr: scoped_path(&default_tokens)
-                                .or_else(|| {
-                                    if default_tokens.is_empty() {
-                                        None
-                                    } else {
-                                        Some(default_tokens.join("::"))
-                                    }
-                                }),
+                            default_expr: scoped_path(&default_tokens).or_else(|| {
+                                if default_tokens.is_empty() {
+                                    None
+                                } else {
+                                    Some(default_tokens.join("::"))
+                                }
+                            }),
+                            default_text,
                         });
                     }
                 }
@@ -970,8 +995,185 @@ where
     out
 }
 
+fn type_before_name(text: &str, var_name: &str) -> Option<String> {
+    let mut outside = String::new();
+    let mut depth = 0i32;
+    for ch in text.chars() {
+        match ch {
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            _ if depth == 0 => outside.push(ch),
+            _ => {}
+        }
+    }
+    let idents: Vec<&str> = outside
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .filter(|token| !token.is_empty())
+        .collect();
+    let pos = idents.iter().position(|token| *token == var_name)?;
+    if pos == 0 {
+        return None;
+    }
+    let candidate = idents[pos - 1];
+    if candidate == "var" {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+fn integer_after_eq(bytes: &[u8], span: Option<(u32, u32)>) -> Option<String> {
+    let (start, end) = span?;
+    let text = span_text(bytes, (start, end))?;
+    let rhs = text.split_once('=')?.1;
+    let rhs = rhs.trim().trim_end_matches([';', ',']).trim();
+    if rhs.parse::<i64>().is_ok() {
+        Some(rhs.to_string())
+    } else {
+        None
+    }
+}
+
+fn span_text(bytes: &[u8], span: (u32, u32)) -> Option<String> {
+    let start = span.0 as usize;
+    let end = span.1 as usize;
+    if end > bytes.len() || start > end {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&bytes[start..end])
+        .trim()
+        .to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn packed_dimension_text<'a, T>(bytes: &[u8], root: T) -> Option<String>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut parts = Vec::new();
+    for node in root {
+        if let RefNode::PackedDimension(dim) = node {
+            if let Some(span) = locate_byte_span(dim) {
+                if let Some(text) = span_text(bytes, span) {
+                    parts.push(text);
+                }
+            }
+        }
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(""))
+    }
+}
+
+fn unpacked_dimension_text<'a, T>(bytes: &[u8], root: T) -> String
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut parts = Vec::new();
+    for node in root {
+        if let RefNode::UnpackedDimension(dim) = node {
+            if let Some(span) = locate_byte_span(dim) {
+                if let Some(text) = span_text(bytes, span) {
+                    parts.push(text);
+                }
+            }
+        }
+    }
+    parts.join("")
+}
+
+fn module_has_config_branch<'a, T>(root: T) -> bool
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    root.into_iter().any(|node| {
+        matches!(
+            node,
+            RefNode::ConditionalStatement(_) | RefNode::IfGenerateConstruct(_)
+        )
+    })
+}
+
+fn collect_decl_sites<'a, T>(
+    tree: &'a SyntaxTree,
+    li: &LineIndex,
+    path_str: &str,
+    bytes: &[u8],
+    root: T,
+) -> Vec<DeclSite>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut out = Vec::new();
+    for node in root {
+        let RefNode::DataDeclaration(decl) = node else {
+            continue;
+        };
+        let sv_parser::DataDeclaration::Variable(var) = decl else {
+            continue;
+        };
+        let var = var.as_ref();
+        let loc = first_locate_loc(tree, li, path_str, var);
+        let data_type = &var.nodes.3;
+        let assignments = &var.nodes.4;
+        let mut type_name = String::new();
+        for child in data_type {
+            if let RefNode::TypeIdentifier(id) = child {
+                if let Some(name) = identifier_str(tree, RefNode::TypeIdentifier(id)) {
+                    type_name = name;
+                    break;
+                }
+            }
+            if type_name.is_empty() {
+                if let Some(name) = identifier_str(tree, child) {
+                    if matches!(name.as_str(), "logic" | "bit" | "reg" | "wire") {
+                        type_name = name;
+                    }
+                }
+            }
+        }
+        let mut names = Vec::new();
+        for child in assignments {
+            if let RefNode::VariableIdentifier(id) = child {
+                if let Some(name) = identifier_str(tree, RefNode::VariableIdentifier(id)) {
+                    names.push(name);
+                }
+            }
+        }
+        if let Some(span) = locate_byte_span(var) {
+            if let Some(text) = span_text(bytes, span) {
+                if let Some(name) = names.first() {
+                    if let Some(found) = type_before_name(&text, name) {
+                        type_name = found;
+                    }
+                }
+            }
+        }
+        if type_name.is_empty() {
+            type_name = "logic".to_string();
+        }
+        let packed = packed_dimension_text(bytes, data_type).unwrap_or_default();
+        let unpacked = unpacked_dimension_text(bytes, assignments);
+        for name in names {
+            out.push(DeclSite {
+                name,
+                type_name: type_name.clone(),
+                packed_text: packed.clone(),
+                unpacked_text: unpacked.clone(),
+                loc: loc.clone(),
+            });
+        }
+    }
+    out
+}
+
 /// Port list: direction + type + optional hierarchical packed dims (`root.member`).
-fn collect_module_ports_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<ModulePort>
+fn collect_module_ports_in<'a, T>(tree: &'a SyntaxTree, bytes: &[u8], root: T) -> Vec<ModulePort>
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
@@ -980,6 +1182,7 @@ where
 
     for node in root {
         if let RefNode::AnsiPortDeclaration(port) = node {
+            let dimension_text = packed_dimension_text(bytes, port);
             let mut direction = "unknown".to_string();
             let mut type_name: Option<String> = None;
             let mut name: Option<String> = None;
@@ -1064,6 +1267,7 @@ where
                         type_name,
                         packed_dims: dims,
                         uses_hierarchical,
+                        dimension_text,
                     });
                 }
             }
@@ -1136,9 +1340,7 @@ where
                         }
                     }
                     RefNode::GenerateBlockIdentifier(g) => {
-                        if let Some(s) =
-                            identifier_str(tree, RefNode::GenerateBlockIdentifier(g))
-                        {
+                        if let Some(s) = identifier_str(tree, RefNode::GenerateBlockIdentifier(g)) {
                             if s != genvar {
                                 label = Some(s);
                             }
@@ -1148,10 +1350,9 @@ where
                         if label.is_none() {
                             for b in gb {
                                 if let RefNode::GenerateBlockIdentifier(g) = b {
-                                    if let Some(s) = identifier_str(
-                                        tree,
-                                        RefNode::GenerateBlockIdentifier(g),
-                                    ) {
+                                    if let Some(s) =
+                                        identifier_str(tree, RefNode::GenerateBlockIdentifier(g))
+                                    {
                                         if s != genvar {
                                             label = Some(s);
                                             break;
@@ -1214,9 +1415,7 @@ where
                 match n {
                     RefNode::VariableIdentifier(v) => {
                         if !saw {
-                            if let Some(s) =
-                                identifier_str(tree, RefNode::VariableIdentifier(v))
-                            {
+                            if let Some(s) = identifier_str(tree, RefNode::VariableIdentifier(v)) {
                                 idx = s;
                                 saw = true;
                             }
@@ -1272,6 +1471,118 @@ where
         }
     }
     names
+}
+
+fn collect_function_bodies<'a, T>(tree: &'a SyntaxTree, bytes: &[u8], root: T) -> Vec<FunctionBody>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let constants = integer_bindings(&String::from_utf8_lossy(bytes));
+    let mut out = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    for node in root {
+        let RefNode::FunctionDeclaration(func) = node else {
+            continue;
+        };
+        let Some(name) = function_decl_name(tree, func) else {
+            continue;
+        };
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let text = locate_byte_span(func)
+            .and_then(|span| span_text(bytes, span))
+            .unwrap_or_default();
+        out.push(FunctionBody {
+            name,
+            return_expr: return_expr_text(&text).unwrap_or_default(),
+            return_dimension: return_dimension_text(bytes, func),
+            constants: constants.clone(),
+        });
+    }
+    out
+}
+
+fn return_dimension_text<'a, T>(bytes: &[u8], root: T) -> String
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut name_at: Option<u32> = None;
+    let mut dims = Vec::new();
+    for node in root {
+        match node {
+            RefNode::FunctionIdentifier(id) => {
+                if name_at.is_none() {
+                    name_at = locate_byte_span(id).map(|(start, _)| start);
+                }
+            }
+            RefNode::PackedDimension(dim) => {
+                if let Some((start, end)) = locate_byte_span(dim) {
+                    if let Some(text) = span_text(bytes, (start, end)) {
+                        dims.push((start, text));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(name_at) = name_at else {
+        return String::new();
+    };
+    dims.sort_by_key(|(start, _)| *start);
+    dims.into_iter()
+        .filter(|(start, _)| *start < name_at)
+        .map(|(_, text)| text)
+        .collect()
+}
+
+fn function_decl_name<'a, T>(tree: &'a SyntaxTree, func: T) -> Option<String>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    for node in func {
+        if let RefNode::FunctionIdentifier(id) = node {
+            return identifier_str(tree, RefNode::FunctionIdentifier(id));
+        }
+    }
+    None
+}
+
+fn return_expr_text(text: &str) -> Option<String> {
+    let rest = text.split("return").nth(1)?;
+    let expr = rest.split(';').next()?.trim();
+    if expr.is_empty() {
+        None
+    } else {
+        Some(expr.to_string())
+    }
+}
+
+fn integer_bindings(text: &str) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    for stmt in text.split(';') {
+        let Some((lhs, rhs)) = stmt.rsplit_once('=') else {
+            continue;
+        };
+        let rhs = rhs.trim().trim_end_matches([';', ',']).trim();
+        let Ok(value) = rhs.parse::<i64>() else {
+            continue;
+        };
+        let Some(name) = lhs.split_whitespace().last() else {
+            continue;
+        };
+        let name = name.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_');
+        if name.is_empty()
+            || !name
+                .chars()
+                .next()
+                .is_some_and(|ch| ch.is_ascii_alphabetic())
+        {
+            continue;
+        }
+        out.push((name.to_string(), value));
+    }
+    out
 }
 
 fn collect_function_names_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<String>
@@ -1619,7 +1930,11 @@ fn case_expression_text(
         }
     }
     if let (Some(s), Some(e)) = (start, end) {
-        let span = Locate { offset: s as usize, line: 0, len: (e - s) as usize };
+        let span = Locate {
+            offset: s as usize,
+            line: 0,
+            len: (e - s) as usize,
+        };
         if let Some(text) = tree.get_str(&span) {
             let t = text.trim().to_string();
             if !t.is_empty() {
@@ -1706,7 +2021,11 @@ fn case_item_expression_text(
         }
     }
     if let (Some(s), Some(e)) = (start, end) {
-        let span = Locate { offset: s as usize, line: 0, len: (e - s) as usize };
+        let span = Locate {
+            offset: s as usize,
+            line: 0,
+            len: (e - s) as usize,
+        };
         if let Some(text) = tree.get_str(&span) {
             let t = text.trim().to_string();
             if !t.is_empty() {
@@ -1808,7 +2127,11 @@ where
         }
     }
     let (lhs, rhs) = if let (Some(s), Some(e)) = (start, end) {
-        let span = Locate { offset: s as usize, line: 0, len: (e - s) as usize };
+        let span = Locate {
+            offset: s as usize,
+            line: 0,
+            len: (e - s) as usize,
+        };
         let text = tree.get_str(&span)?;
         let source_start = loc.byte_start as usize;
         if loc.origin == OriginKind::UserFile
@@ -1843,18 +2166,12 @@ fn split_assign_text(text: &str) -> (Option<String>, Option<String>) {
     let t = text.trim().trim_end_matches(';').trim();
     // NBA first
     if let Some((l, r)) = t.split_once("<=") {
-        return (
-            Some(l.trim().to_string()),
-            Some(r.trim().to_string()),
-        );
+        return (Some(l.trim().to_string()), Some(r.trim().to_string()));
     }
     if let Some((l, r)) = t.split_once('=') {
-        // avoid == 
+        // avoid ==
         if !l.ends_with('=') && !l.ends_with('!') && !l.ends_with('<') && !l.ends_with('>') {
-            return (
-                Some(l.trim().to_string()),
-                Some(r.trim().to_string()),
-            );
+            return (Some(l.trim().to_string()), Some(r.trim().to_string()));
         }
     }
     (None, Some(t.to_string()))
@@ -1884,8 +2201,8 @@ where
             // Indexed `[base +: width]` / `[base -: width]`: width only (base may be runtime).
             RefNode::IndexedRange(x) => locate_byte_span(&x.nodes.2),
             // `{count{body}}`: count is LRM-constant; body may be datapath.
-            RefNode::MultipleConcatenation(x) => locate_byte_span(&x.nodes.0.nodes.1.0),
-            RefNode::ConstantMultipleConcatenation(x) => locate_byte_span(&x.nodes.0.nodes.1.0),
+            RefNode::MultipleConcatenation(x) => locate_byte_span(&x.nodes.0.nodes.1 .0),
+            RefNode::ConstantMultipleConcatenation(x) => locate_byte_span(&x.nodes.0.nodes.1 .0),
             // Generate-for header (init / condition / step) is elaboration-constant.
             RefNode::GenvarInitialization(x) => locate_byte_span(x),
             RefNode::GenvarExpression(x) => locate_byte_span(x),
@@ -2132,7 +2449,12 @@ where
     }
 }
 
-fn locate_to_source(tree: &SyntaxTree, line_index: &LineIndex, path_str: &str, loc: &Locate) -> SourceLoc {
+fn locate_to_source(
+    tree: &SyntaxTree,
+    line_index: &LineIndex,
+    path_str: &str,
+    loc: &Locate,
+) -> SourceLoc {
     // Prefer origin map from preprocessor when available (via line_index path).
     let (start, origin) = match tree.get_origin(loc) {
         Some((path, offset)) if path == &line_index.path => (offset as u32, OriginKind::UserFile),
@@ -2177,25 +2499,39 @@ mod tests {
     fn analyze_inline_source(text: &str) -> AnalyzeOutput {
         let path = PathBuf::from("origin_test.sv");
         let defines: sv_parser::Defines = Default::default();
-        let (tree, _) = sv_parser::parse_sv_str(
-            text, &path, &defines, &[] as &[PathBuf], false, false,
-        ).expect("parse inline source");
+        let (tree, _) =
+            sv_parser::parse_sv_str(text, &path, &defines, &[] as &[PathBuf], false, false)
+                .expect("parse inline source");
         let file = ParsedFile {
             path: path.clone(),
             bytes: text.as_bytes().to_vec(),
             line_index: LineIndex::from_bytes(path, text.as_bytes()),
             tree,
         };
-        lower_unit(&ParsedUnit { files: vec![file], skipped: vec![] }, &LowerOptions::default())
-            .expect("lower inline source")
+        lower_unit(
+            &ParsedUnit {
+                files: vec![file],
+                skipped: vec![],
+            },
+            &LowerOptions::default(),
+        )
+        .expect("lower inline source")
     }
 
     #[test]
     fn preprocessing_preserves_assignment_text_and_original_anchor() {
         let text = "`ifdef OMITTED\n////////////////////////////\nwire unused;\n`endif\nmodule origin_test(input logic [31:0] a, b, output logic [31:0] y);\nassign y = a / b;\nendmodule\n";
         let out = analyze_inline_source(text);
-        let module = out.design.modules.values().find(|m| m.name == "origin_test").unwrap();
-        let node = module.nodes.values().find(|n| n.lhs.as_deref() == Some("y"))
+        let module = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "origin_test")
+            .unwrap();
+        let node = module
+            .nodes
+            .values()
+            .find(|n| n.lhs.as_deref() == Some("y"))
             .expect("assignment must survive preprocessing");
         assert_eq!(node.rhs.as_deref(), Some("a / b"));
         assert_eq!(node.op_class, Some(OperatorClass::DivRem));
@@ -2207,8 +2543,16 @@ mod tests {
     fn macro_expansion_supplies_rhs_without_claiming_editable_origin() {
         let text = "`define OP a * b\nmodule origin_test(input logic [31:0] a, b, output logic [31:0] y);\nassign y = `OP;\nendmodule\n";
         let out = analyze_inline_source(text);
-        let module = out.design.modules.values().find(|m| m.name == "origin_test").unwrap();
-        let node = module.nodes.values().find(|n| n.lhs.as_deref() == Some("y"))
+        let module = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "origin_test")
+            .unwrap();
+        let node = module
+            .nodes
+            .values()
+            .find(|n| n.lhs.as_deref() == Some("y"))
             .expect("macro assignment");
         assert_eq!(node.rhs.as_deref(), Some("a * b"));
         assert_eq!(node.op_class, Some(OperatorClass::Mul));
@@ -2225,7 +2569,11 @@ mod tests {
         opts.cost_model = default_fo4_v1_embedded();
         opts.module_filter = vec!["comb_adder_cloud".into()];
         let out = analyze_files(&[path], &ParseOptions::default(), &opts).expect("analyze");
-        assert!(out.design.modules.values().any(|m| m.name == "comb_adder_cloud"));
+        assert!(out
+            .design
+            .modules
+            .values()
+            .any(|m| m.name == "comb_adder_cloud"));
         assert!(
             !out.design.paths.is_empty(),
             "expected at least one path from + operators"
@@ -2288,7 +2636,11 @@ mod tests {
         assert_ne!(repl.op_class, Some(OperatorClass::Mul));
         let prod = lhs_of("prod_o");
         assert_eq!(prod.op_class, Some(OperatorClass::Mul));
-        assert!(prod.fo4_cost >= 50.0, "real mul under-counted {}", prod.fo4_cost);
+        assert!(
+            prod.fo4_cost >= 50.0,
+            "real mul under-counted {}",
+            prod.fo4_cost
+        );
         let idx = lhs_of("idx_o");
         assert_eq!(idx.op_class, Some(OperatorClass::Mul));
         assert!(
@@ -2316,7 +2668,9 @@ mod tests {
             .find(|m| m.name == "genvar_lattice")
             .expect("genvar_lattice");
         assert!(
-            m.gen_loops.iter().any(|g| g.genvar == "i" && g.loc.byte_end > g.loc.byte_start),
+            m.gen_loops
+                .iter()
+                .any(|g| g.genvar == "i" && g.loc.byte_end > g.loc.byte_start),
             "expected generate-loop span for i, got {:?}",
             m.gen_loops
         );
@@ -2374,7 +2728,10 @@ mod tests {
             !leaf_ports.iter().any(|p| *p == "p_i" || *p == "q_o"),
             "leaf_a inherited holder_b ports: {leaf_ports:?}"
         );
-        assert!(holder_ports.contains(&"p_i"), "holder ports={holder_ports:?}");
+        assert!(
+            holder_ports.contains(&"p_i"),
+            "holder ports={holder_ports:?}"
+        );
         assert!(
             !holder_ports
                 .iter()
@@ -2652,10 +3009,7 @@ mod tests {
 
         // At least one package with typedefs (scoped types for ports/params)
         assert!(
-            out.design
-                .packages
-                .values()
-                .any(|p| !p.typedefs.is_empty()),
+            out.design.packages.values().any(|p| !p.typedefs.is_empty()),
             "expected package typedefs, packages={:?}",
             out.design.packages.keys().collect::<Vec<_>>()
         );
@@ -2677,7 +3031,10 @@ mod tests {
         assert!(
             m.parameters.iter().any(|p| {
                 !p.is_type_parameter
-                    && p.type_ref.as_ref().map(|t| t.contains("::")).unwrap_or(false)
+                    && p.type_ref
+                        .as_ref()
+                        .map(|t| t.contains("::"))
+                        .unwrap_or(false)
                     && p.default_expr
                         .as_ref()
                         .map(|t| t.contains("::"))
@@ -2754,7 +3111,9 @@ mod tests {
             .get("cva6_style_pkg")
             .expect("package cva6_style_pkg");
         assert!(
-            p.localparams.iter().any(|n| n.contains("PKG_DEPTH") || n == "PKG_DEPTH"),
+            p.localparams
+                .iter()
+                .any(|n| n.contains("PKG_DEPTH") || n == "PKG_DEPTH"),
             "pkg localparams={:?}",
             p.localparams
         );
@@ -2795,15 +3154,21 @@ mod tests {
         assert_eq!(ff.gate.reset_name.as_deref(), Some("rst_ni"));
         assert_eq!(ff.gate.reset_edge, Some(EdgeKind::Negedge));
         assert!(
-            ff.gate.reset.as_ref().map(|r| r.asynchronous).unwrap_or(false),
+            ff.gate
+                .reset
+                .as_ref()
+                .map(|r| r.asynchronous)
+                .unwrap_or(false),
             "async reset expected"
         );
 
-        let comb = m
-            .regions
-            .values()
-            .find(|r| r.kind == RegionKind::AlwaysComb && r.label.as_deref() == Some("comb_datapath"));
-        assert!(comb.is_some(), "expected named always_comb begin : comb_datapath");
+        let comb = m.regions.values().find(|r| {
+            r.kind == RegionKind::AlwaysComb && r.label.as_deref() == Some("comb_datapath")
+        });
+        assert!(
+            comb.is_some(),
+            "expected named always_comb begin : comb_datapath"
+        );
         assert!(!out.design.paths.is_empty());
     }
 
@@ -2910,7 +3275,10 @@ mod tests {
             bridged.via_ports
         );
         assert!(
-            bridged.bridge_nets.iter().any(|n| n.contains("y_leaf") || n == "y_leaf_o"),
+            bridged
+                .bridge_nets
+                .iter()
+                .any(|n| n.contains("y_leaf") || n == "y_leaf_o"),
             "bridge_nets={:?}",
             bridged.bridge_nets
         );
@@ -2947,7 +3315,9 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(
-            labeled.iter().any(|n| n.case_labels.iter().any(|l| l == "ADD")),
+            labeled
+                .iter()
+                .any(|n| n.case_labels.iter().any(|l| l == "ADD")),
             "expected ADD label, labeled={:?}",
             labeled.iter().map(|n| &n.case_labels).collect::<Vec<_>>()
         );
@@ -2991,11 +3361,17 @@ mod tests {
             "nested unique case labels missing: {:?}",
             m.nodes
                 .values()
-                .map(|n| (n.lhs.clone(), n.case_labels.clone(), n.case_selector.clone()))
+                .map(|n| (
+                    n.lhs.clone(),
+                    n.case_labels.clone(),
+                    n.case_selector.clone()
+                ))
                 .collect::<Vec<_>>()
         );
         assert!(
-            labeled.iter().any(|n| n.case_labels.iter().any(|l| l == "ROL")),
+            labeled
+                .iter()
+                .any(|n| n.case_labels.iter().any(|l| l == "ROL")),
             "expected ROL"
         );
         assert!(
@@ -3022,11 +3398,7 @@ mod tests {
             .values()
             .find(|m| m.name == "proj_leaf")
             .expect("proj_leaf");
-        let with_expr: Vec<_> = m
-            .nodes
-            .values()
-            .filter(|n| n.rhs_expr.is_some())
-            .collect();
+        let with_expr: Vec<_> = m.nodes.values().filter(|n| n.rhs_expr.is_some()).collect();
         assert!(
             !with_expr.is_empty(),
             "expected rhs_expr trees on leaf assigns"
@@ -3115,8 +3487,7 @@ mod tests {
             .find(|m| m.name == "handshake_bank")
             .expect("handshake_bank");
         let restore_locked = out.design.paths.iter().any(|p| {
-            p.module == bank.id
-                && crate::pass_strategy::path_is_handshake_locked(&out.design, p)
+            p.module == bank.id && crate::pass_strategy::path_is_handshake_locked(&out.design, p)
         });
         assert!(
             restore_locked,
@@ -3185,7 +3556,12 @@ mod tests {
                 .paths
                 .iter()
                 .filter(|p| !p.multi_cycle && p.total_fo4 > 20.0)
-                .map(|p| (p.path_class, p.total_fo4, p.class_note.clone(), p.nodes.len()))
+                .map(|p| (
+                    p.path_class,
+                    p.total_fo4,
+                    p.class_note.clone(),
+                    p.nodes.len()
+                ))
                 .collect::<Vec<_>>()
         );
     }
@@ -3271,7 +3647,10 @@ mod tests {
         assert!(
             m.gen_loops.iter().any(|g| g.genvar == "w"),
             "expected comb-for index w, got {:?}",
-            m.gen_loops.iter().map(|g| g.genvar.as_str()).collect::<Vec<_>>()
+            m.gen_loops
+                .iter()
+                .map(|g| g.genvar.as_str())
+                .collect::<Vec<_>>()
         );
         for n in m.nodes.values() {
             assert_ne!(
@@ -3333,7 +3712,12 @@ mod tests {
                 .paths
                 .iter()
                 .filter(|p| p.module == m.id)
-                .map(|p| (p.total_fo4, p.nodes.len(), p.path_class, p.class_note.clone()))
+                .map(|p| (
+                    p.total_fo4,
+                    p.nodes.len(),
+                    p.path_class,
+                    p.class_note.clone()
+                ))
                 .collect::<Vec<_>>()
         );
         for p in out.design.paths.iter().filter(|p| p.module == m.id) {

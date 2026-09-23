@@ -1,0 +1,19 @@
+# area-v1.toml — structural area key names for sv-timing-area.
+# Numbers in this file are an uncalibrated placeholder.
+# They are not a mapped-netlist measurement and are not accepted area.
+# The first frozen table is a host calibration. Until that artifact exists,
+# tests may parse these keys and apply the multiply formula to the loaded
+# weights. Tests must not treat the numbers as accepted area.
+version = "area-v1"
+logic_bit = 1.0
+compare = 1.0
+shift_const = 1.0
+shift_var = 1.0
+add_sub = 1.0
+mux = 1.0
+priority_mux_per_level = 1.0
+concat = 1.0
+other = 1.0
+flop = 1.0
+mul_at_w32 = 32.0
+div_rem_per_bit = 1.0

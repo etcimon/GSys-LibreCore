@@ -218,10 +218,7 @@ pub fn plan_from_design(design: &TimingDesign) -> PassPlan {
             artifacts.len()
         )
     } else {
-        format!(
-            "S0 clean. Schedule S1–S5 over {:?}",
-            counts
-        )
+        format!("S0 clean. Schedule S1–S5 over {:?}", counts)
     };
     PassPlan {
         artifacts,
@@ -410,15 +407,13 @@ fn output_assign_aliases(module: &TimingModule) -> Vec<(String, String)> {
     out
 }
 
-fn drives_output(
-    outputs: &BTreeSet<String>,
-    aliases: &[(String, String)],
-    q: &str,
-) -> bool {
+fn drives_output(outputs: &BTreeSet<String>, aliases: &[(String, String)], q: &str) -> bool {
     if outputs.contains(q) {
         return true;
     }
-    aliases.iter().any(|(src, dst)| src == q && outputs.contains(dst))
+    aliases
+        .iter()
+        .any(|(src, dst)| src == q && outputs.contains(dst))
 }
 
 fn aliases_of(aliases: &[(String, String)], q: &str) -> Vec<String> {
@@ -495,9 +490,7 @@ fn index_ident(e: &Expr) -> Option<String> {
             Expr::Ident { name } => Some(ident_base(name)),
             _ => index_ident(index),
         },
-        Expr::Ternary {
-            then_e, else_e, ..
-        } => index_ident(then_e).or_else(|| index_ident(else_e)),
+        Expr::Ternary { then_e, else_e, .. } => index_ident(then_e).or_else(|| index_ident(else_e)),
         _ => None,
     }
 }
@@ -513,9 +506,7 @@ fn index_mem_base(e: &Expr) -> String {
             }
         }
         Expr::Ident { name } => ident_base(name),
-        Expr::Ternary {
-            then_e, else_e, ..
-        } => {
+        Expr::Ternary { then_e, else_e, .. } => {
             let a = index_mem_base(then_e);
             if !a.is_empty() {
                 a
@@ -678,8 +669,7 @@ pub fn is_resilient_datapath(design: &TimingDesign, path: &TimingPath) -> bool {
 /// [`s4_sibling_span_pending`] for the bounded extra pass.
 pub fn s4_has_pending_resilient(design: &TimingDesign) -> bool {
     design.paths.iter().any(|p| {
-        p.slack_fo4 < 0.0
-            && exception_policy(design, p).is_some_and(|e| e.admit_insert_reg)
+        p.slack_fo4 < 0.0 && exception_policy(design, p).is_some_and(|e| e.admit_insert_reg)
     })
 }
 
@@ -931,13 +921,15 @@ mod tests {
         // Incidental P10 class_note on a gemm-shaped cone (shared always_ff
         // with a status pulse) must not starve S4 — path 3131.
         let mut p10 = plain_regtoreg(161.5, 144, budget);
-        p10.class_note = Some("P10 handshake lock (same-edge pulse+index; InsertReg refuse)".into());
+        p10.class_note =
+            Some("P10 handshake lock (same-edge pulse+index; InsertReg refuse)".into());
         let ex = exception_policy(&d, &p10).expect("resilient despite note");
         assert_eq!(ex.kind, ExceptionPolicyKind::ResilientDatapath);
         assert!(ex.admit_insert_reg);
         assert!(!admits_insert_reg(&p10), "default gate still refuses");
         let mut shallow_p10 = plain_regtoreg(15.0, 4, budget);
-        shallow_p10.class_note = Some("P10 handshake lock (same-edge pulse+index; InsertReg refuse)".into());
+        shallow_p10.class_note =
+            Some("P10 handshake lock (same-edge pulse+index; InsertReg refuse)".into());
         let ex = exception_policy(&d, &shallow_p10).expect("shallow handshake");
         assert_eq!(ex.kind, ExceptionPolicyKind::HandshakeLock);
         assert!(!ex.admit_insert_reg);
@@ -960,14 +952,20 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: crate::loc::SourceLoc::file_start("lzc.sv"),
         };
         m.id = 0;
         d.modules.insert(0, m);
         d.paths.push(p.clone());
-        assert!(!is_resilient_datapath(&d, &p), "lzc must not take InsertReg");
+        assert!(
+            !is_resilient_datapath(&d, &p),
+            "lzc must not take InsertReg"
+        );
     }
 
     #[test]
@@ -1013,13 +1011,19 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: crate::loc::SourceLoc::file_start("axi2mem.sv"),
             },
         );
         d.paths.push(p.clone());
-        assert!(!is_resilient_datapath(&d, &p), "WRAP adder must not InsertReg");
+        assert!(
+            !is_resilient_datapath(&d, &p),
+            "WRAP adder must not InsertReg"
+        );
         let d_gemm = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
         let gemm = plain_regtoreg(18.5, 4, budget);
         assert!(is_resilient_datapath(&d_gemm, &gemm));
@@ -1048,8 +1052,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: crate::loc::SourceLoc::file_start("policy.sv"),
             },
         );

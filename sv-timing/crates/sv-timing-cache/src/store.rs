@@ -19,6 +19,9 @@ use crate::fingerprint::{module_crc_set, pp_fingerprint};
 /// Cache schema version (meta.schema_version).
 pub const CACHE_SCHEMA_VERSION: &str = "1";
 
+/// Area-report schema (meta.area_schema). Independent of the IR schema.
+pub const AREA_SCHEMA: &str = "1";
+
 /// Cached module payload (IR + paths belonging to that module).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleIrBlob {
@@ -26,6 +29,9 @@ pub struct ModuleIrBlob {
     pub module: TimingModule,
     /// Paths extracted for this module at lower time.
     pub paths: Vec<TimingPath>,
+    /// Lower fields this blob was written with. Empty on a pre-field row.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emitted_lower_fields: Vec<String>,
 }
 
 /// Configuration for opening a cache DB.
@@ -221,18 +227,24 @@ CREATE TABLE IF NOT EXISTS module_path_profile (
 CREATE INDEX IF NOT EXISTS idx_files_crc ON files(crc);
 CREATE INDEX IF NOT EXISTS idx_file_modules_module ON file_modules(module_name);
 CREATE INDEX IF NOT EXISTS idx_paths_run ON paths(run_id);
+CREATE TABLE IF NOT EXISTS area_reports (
+  design_key TEXT NOT NULL,
+  area_key TEXT NOT NULL,
+  report_blob BLOB NOT NULL,
+  stored_at TEXT NOT NULL,
+  PRIMARY KEY (design_key, area_key)
+);
+CREATE INDEX IF NOT EXISTS idx_area_reports_design ON area_reports(design_key, stored_at);
 "#,
             )
             .map_err(map_sql)?;
 
         self.meta_set("schema_version", CACHE_SCHEMA_VERSION)?;
+        self.meta_set("area_schema", AREA_SCHEMA)?;
         self.meta_set("ir_version", IR_VERSION)?;
         self.meta_set("parser_version", PARSER_PIN_HINT)?;
         self.meta_set("crc_algo", CRC_ALGO)?;
-        self.meta_set(
-            "keep_last_n_runs",
-            &self.config.keep_last_n.to_string(),
-        )?;
+        self.meta_set("keep_last_n_runs", &self.config.keep_last_n.to_string())?;
         if self.meta_get("created_at")?.is_none() {
             self.meta_set("created_at", &now_rfc3339())?;
         }
@@ -386,11 +398,7 @@ CREATE INDEX IF NOT EXISTS idx_paths_run ON paths(run_id);
     }
 
     /// Lookup module IR by name + crc_set.
-    pub fn get_module(
-        &self,
-        module_name: &str,
-        crc_set: &str,
-    ) -> CoreResult<Option<ModuleIrBlob>> {
+    pub fn get_module(&self, module_name: &str, crc_set: &str) -> CoreResult<Option<ModuleIrBlob>> {
         let blob: Option<Vec<u8>> = self
             .conn
             .query_row(
@@ -403,8 +411,8 @@ CREATE INDEX IF NOT EXISTS idx_paths_run ON paths(run_id);
         match blob {
             None => Ok(None),
             Some(b) => {
-                let m: ModuleIrBlob =
-                    serde_json::from_slice(&b).map_err(|e| CoreError::InvalidOptions(e.to_string()))?;
+                let m: ModuleIrBlob = serde_json::from_slice(&b)
+                    .map_err(|e| CoreError::InvalidOptions(e.to_string()))?;
                 Ok(Some(m))
             }
         }
@@ -478,6 +486,51 @@ CREATE INDEX IF NOT EXISTS idx_paths_run ON paths(run_id);
             )
             .map_err(map_sql)?;
         self.put_path_classes(design_key, design)?;
+        Ok(())
+    }
+
+    /// Load an area-report blob. The cache does not interpret the bytes.
+    pub fn get_area_report(&self, design_key: &str, area_key: &str) -> CoreResult<Option<Vec<u8>>> {
+        let blob: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT report_blob FROM area_reports WHERE design_key = ?1 AND area_key = ?2",
+                params![design_key, area_key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_sql)?;
+        Ok(blob)
+    }
+
+    /// Store an area-report blob and keep the newest 10 rows for `design_key`.
+    ///
+    /// The design row is not deleted. Callers must not store a report when the
+    /// design is missing a lower field the area key claims.
+    pub fn put_area_report(&self, design_key: &str, area_key: &str, blob: &[u8]) -> CoreResult<()> {
+        self.conn
+            .execute(
+                "INSERT INTO area_reports(design_key, area_key, report_blob, stored_at)
+                 VALUES(?1, ?2, ?3, ?4)
+                 ON CONFLICT(design_key, area_key) DO UPDATE SET
+                   report_blob = excluded.report_blob,
+                   stored_at = excluded.stored_at",
+                params![design_key, area_key, blob, now_rfc3339()],
+            )
+            .map_err(map_sql)?;
+        self.conn
+            .execute(
+                "DELETE FROM area_reports
+                 WHERE design_key = ?1
+                 AND rowid NOT IN (
+                   SELECT rowid FROM area_reports
+                   WHERE design_key = ?1
+                   ORDER BY stored_at DESC, rowid DESC
+                   LIMIT 10
+                 )",
+                params![design_key],
+            )
+            .map_err(map_sql)?;
         Ok(())
     }
 
@@ -570,8 +623,7 @@ CREATE INDEX IF NOT EXISTS idx_paths_run ON paths(run_id);
             e.6 = e.6.max(ex.adjusted_fo4);
         }
         let summary = sv_timing_core::path_class_summary(design);
-        let summary_json =
-            serde_json::to_string(&summary).unwrap_or_else(|_| "{}".into());
+        let summary_json = serde_json::to_string(&summary).unwrap_or_else(|_| "{}".into());
         for (mod_name, (n, n_ex, n_at, n_pl, n_ub, max_r, max_a)) in per_mod {
             self.conn
                 .execute(
@@ -687,9 +739,7 @@ CREATE INDEX IF NOT EXISTS idx_paths_run ON paths(run_id);
         let old: Vec<String> = {
             let mut stmt = self
                 .conn
-                .prepare(
-                    "SELECT run_id FROM runs ORDER BY finished_at DESC LIMIT -1 OFFSET ?1",
-                )
+                .prepare("SELECT run_id FROM runs ORDER BY finished_at DESC LIMIT -1 OFFSET ?1")
                 .map_err(map_sql)?;
             let rows = stmt
                 .query_map(params![n], |row| row.get(0))
@@ -727,7 +777,10 @@ CREATE INDEX IF NOT EXISTS idx_paths_run ON paths(run_id);
     fn count(&self, table: &str) -> CoreResult<u64> {
         // table names are internal only
         let q = format!("SELECT COUNT(*) FROM {table}");
-        let n: i64 = self.conn.query_row(&q, [], |row| row.get(0)).map_err(map_sql)?;
+        let n: i64 = self
+            .conn
+            .query_row(&q, [], |row| row.get(0))
+            .map_err(map_sql)?;
         Ok(n as u64)
     }
 }
@@ -771,11 +824,7 @@ pub fn crc_set_for_file(path: &str, crc: &str) -> String {
 }
 
 /// design key helper.
-pub fn compute_design_key(
-    pp_fp: &str,
-    filter: &[String],
-    digests: &[FileDigest],
-) -> String {
+pub fn compute_design_key(pp_fp: &str, filter: &[String], digests: &[FileDigest]) -> String {
     compute_design_key_with_params(pp_fp, filter, digests, &[])
 }
 
@@ -862,8 +911,11 @@ mod tests {
             ports: Vec::new(),
             gen_loops: Vec::new(),
             functions: Vec::new(),
+            function_bodies: Vec::new(),
             package_imports: Vec::new(),
             instances: Vec::new(),
+            decls: Vec::new(),
+            config_branch: false,
             loc: SourceLoc {
                 file: "m.sv".into(),
                 start_line: 1,
@@ -878,6 +930,10 @@ mod tests {
         let blob = ModuleIrBlob {
             module: modu,
             paths: vec![],
+            emitted_lower_fields: sv_timing_core::emitted_lower_field_names()
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
         };
         let cs = crc_set_for_file("m.sv", "deadbeef");
         cache.put_module("m", "m.sv", &cs, &blob).unwrap();
@@ -901,6 +957,24 @@ mod tests {
         cache.put_design("key1", "fo4-v1", &design).unwrap();
         let got = cache.get_design("key1", "fo4-v1").unwrap().unwrap();
         assert_eq!(got.target.target_mhz, 1000.0);
+        let blob = b"area-report";
+        cache.put_area_report("key1", "a0", blob).unwrap();
+        assert_eq!(
+            cache.get_area_report("key1", "a0").unwrap().as_deref(),
+            Some(blob.as_slice())
+        );
+        for i in 1..=11 {
+            cache
+                .put_area_report("key1", &format!("a{i}"), format!("blob{i}").as_bytes())
+                .unwrap();
+        }
+        assert!(cache.get_area_report("key1", "a0").unwrap().is_none());
+        assert!(cache.get_area_report("key1", "a1").unwrap().is_none());
+        assert_eq!(
+            cache.get_area_report("key1", "a11").unwrap().as_deref(),
+            Some(b"blob11".as_slice())
+        );
+        assert!(cache.get_design("key1", "fo4-v1").unwrap().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -928,8 +1002,7 @@ mod tests {
         let db = dir.join("pc.sqlite");
         let cache = TimingCache::open(CacheConfig::at(&db)).unwrap();
 
-        let mut design =
-            sv_timing_core::TimingDesign::empty(TimingTarget::new(1000.0, 20.0, 0.2));
+        let mut design = sv_timing_core::TimingDesign::empty(TimingTarget::new(1000.0, 20.0, 0.2));
         let ex = |class: PathClassKind, adjusted: f64| PathException {
             path_id: 7,
             module_name: "m".into(),

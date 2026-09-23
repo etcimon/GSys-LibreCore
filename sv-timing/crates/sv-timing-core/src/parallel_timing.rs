@@ -502,8 +502,7 @@ pub fn fill_design_parallel_timing(design: &mut TimingDesign) {
             if board.regions.contains_key(&path.region_id) {
                 continue;
             }
-            let scratch =
-                ParallelScratch::schedule(module, &path.nodes, budget, &empty_callees);
+            let scratch = ParallelScratch::schedule(module, &path.nodes, budget, &empty_callees);
             for (fname, ft) in &scratch.functions {
                 fn_latency.insert(fname.clone(), ft.latency_fo4);
             }
@@ -538,8 +537,7 @@ pub fn fill_design_parallel_timing(design: &mut TimingDesign) {
                 if module.regions.contains_key(&path.region_id) {
                     continue;
                 }
-                let scratch =
-                    ParallelScratch::schedule(module, &path.nodes, budget, &fn_latency);
+                let scratch = ParallelScratch::schedule(module, &path.nodes, budget, &fn_latency);
                 board.keep_region_scratch(path.region_id, scratch, false);
             }
         }
@@ -608,8 +606,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec!["foo".into()],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         }
     }
@@ -705,19 +706,18 @@ mod tests {
             .values()
             .find(|r| r.kind == RegionKind::AlwaysFf)
             .unwrap();
-        let scratch = ParallelScratch::schedule_for_region(
-            module,
-            region,
-            &design.target,
-            &BTreeMap::new(),
-        );
+        let scratch =
+            ParallelScratch::schedule_for_region(module, region, &design.target, &BTreeMap::new());
         let consumer = scratch
             .ops
             .iter()
             .find(|op| module.nodes[&op.node_id].lhs.as_deref() == Some("q"))
             .unwrap();
         assert!(scratch.dep_edges > 0);
-        assert!(consumer.asap_start > 0.0, "blocking temporary must still chain");
+        assert!(
+            consumer.asap_start > 0.0,
+            "blocking temporary must still chain"
+        );
         assert!(!scratch.procedural_ok);
         assert!(scratch.jit_cuts_on_clock().is_empty());
     }
@@ -731,12 +731,8 @@ mod tests {
             .values()
             .find(|r| r.kind == RegionKind::AlwaysFf)
             .unwrap();
-        let scratch = ParallelScratch::schedule_for_region(
-            module,
-            region,
-            &design.target,
-            &BTreeMap::new(),
-        );
+        let scratch =
+            ParallelScratch::schedule_for_region(module, region, &design.target, &BTreeMap::new());
         assert!(scratch.clock.is_sequential());
         assert!(scratch.procedural_ok);
         assert_eq!(scratch.dep_edges, 0);
@@ -750,12 +746,8 @@ mod tests {
         nodes.insert(1, node(1, "q", "t + b", 10.0));
         let module = module_with(nodes);
         let target = TimingTarget::new(4000.0, 20.0, 0.2);
-        let mut scratch = ParallelScratch::schedule(
-            &module,
-            &[0, 1],
-            target.budget_fo4,
-            &BTreeMap::new(),
-        );
+        let mut scratch =
+            ParallelScratch::schedule(&module, &[0, 1], target.budget_fo4, &BTreeMap::new());
         assert!(scratch.procedural_ok);
         assert_eq!(scratch.dep_edges, 1);
         assert_eq!(scratch.makespan_fo4, 20.0);

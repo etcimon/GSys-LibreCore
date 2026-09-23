@@ -13,6 +13,7 @@ members = [
     "crates/sv-timing-transform",
     "crates/sv-timing-emit",
     "crates/sv-timing-cli",
+    "crates/sv-timing-area",
 ]
 # Nested parser submodule is path-only. Never auto-include it in `cargo test --workspace`.
 exclude = [
@@ -36,6 +37,7 @@ sv-timing-core = { path = "crates/sv-timing-core" }
 sv-timing-cache = { path = "crates/sv-timing-cache" }
 sv-timing-transform = { path = "crates/sv-timing-transform" }
 sv-timing-emit = { path = "crates/sv-timing-emit" }
+sv-timing-area = { path = "crates/sv-timing-area" }
 
 # Submodule etcimon/sv-parser (refreshed via `svt vendor-sv-parser`)
 sv-parser = { path = "crates/sv-parser/sv-parser" }

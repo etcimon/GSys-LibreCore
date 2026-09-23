@@ -6,19 +6,22 @@
 
 #![forbid(unsafe_code)]
 
+mod area_cmd;
+mod opt_cmd;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use sv_timing_cache::{
-    analyze_with_cache, CacheConfig, CacheCounts, TimingCache, CRC_ALGO, CACHE_SCHEMA_VERSION,
+    analyze_with_cache, CacheConfig, CacheCounts, TimingCache, CACHE_SCHEMA_VERSION, CRC_ALGO,
 };
 use sv_timing_core::{
     analyze_files, banner, build_relocation_plan, debug_snapshot_pass, frequency_closure,
     load_filelist_default, load_fo4_v1_default, path_class_summary, rank_paths_by_slack,
     resolve_opt, sta_hints_from_design, AlgoTrace, CacheMode, CutStrategy, DebugOptions, FileList,
-    LowerOptions, NameTable, OptEffort, OptLevel, OptOptions, OptOverrides, ParamMap,
-    ParseOptions, TimingDesign, TimingTarget, IR_VERSION, MEASUREMENT_VERSION, PARSER_PIN_HINT,
+    LowerOptions, NameTable, OptEffort, OptLevel, OptOptions, OptOverrides, ParamMap, ParseOptions,
+    TimingDesign, TimingTarget, IR_VERSION, MEASUREMENT_VERSION, PARSER_PIN_HINT,
 };
 // build_relocation_plan used for analyze + correct residual plan
 use sv_timing_emit::{
@@ -217,6 +220,126 @@ enum Commands {
         #[command(flatten)]
         opt: OptArgs,
     },
+    /// Structural area and structural frequency. Does not rewrite timing.
+    Area {
+        /// Source files (repeatable).
+        #[arg(long = "file", short = 'f')]
+        files: Vec<PathBuf>,
+        /// File list (one path per line; # comments allowed).
+        #[arg(long = "files-from")]
+        files_from: Option<PathBuf>,
+        /// Include directories.
+        #[arg(long = "incdir", short = 'I')]
+        incdirs: Vec<PathBuf>,
+        /// Defines NAME or NAME=VAL. A define compare is a second process.
+        #[arg(long = "define", short = 'D')]
+        defines: Vec<String>,
+        /// Module roots to report (required unless --all-modules).
+        #[arg(long = "modules")]
+        modules: Option<String>,
+        /// Report every module in the file list.
+        #[arg(long = "all-modules")]
+        all_modules: bool,
+        /// Target frequency MHz. Same default as analyze, not correct.
+        #[arg(long = "target-mhz", default_value_t = 1000.0)]
+        target_mhz: f64,
+        /// FO4 picoseconds. Same default as analyze.
+        #[arg(long = "fo4-ps", default_value_t = 20.0)]
+        fo4_ps: f64,
+        /// Budget margin 0..1. Same default as analyze.
+        #[arg(long = "budget-margin", default_value_t = 0.2)]
+        budget_margin: f64,
+        /// SQLite cache. Area rows are stored beside the timing IR.
+        #[arg(long = "cache")]
+        cache: Option<PathBuf>,
+        /// Write area-report.v1 JSON.
+        #[arg(long = "json-out")]
+        json_out: Option<PathBuf>,
+        /// Host param map JSON.
+        #[arg(long = "param-map")]
+        param_map: Option<PathBuf>,
+        /// Alias for `--param-map`.
+        #[arg(long = "cfg-snapshot")]
+        cfg_snapshot: Option<PathBuf>,
+        /// Second param map. Runs a second analyze and diffs the area reports.
+        #[arg(long = "compare-param-map")]
+        compare_param_map: Option<PathBuf>,
+        /// Inject common XLEN keys into the param map.
+        #[arg(long = "assume-xlen")]
+        assume_xlen: Option<u32>,
+        /// Repeatable inclusion (`subtree:`, `path-kind:`, `path-class:`, `allow:`, `deny:`, or `all`).
+        #[arg(long = "inclusion")]
+        inclusion: Vec<String>,
+        /// Area-only ternary overlay, `KEY=VALUE`. Does not change FO4.
+        #[arg(long = "config-overlay")]
+        config_overlay: Vec<String>,
+        /// Rank cap. Default 20.
+        #[arg(long = "top", default_value_t = 20)]
+        top: usize,
+        /// Sort key for the module tree: `area`, `perf`, or `perf-per-area`.
+        #[arg(long = "metric", default_value = "area")]
+        metric: String,
+        /// Second inclusion over the same design.
+        #[arg(long = "compare-inclusion")]
+        compare_inclusion: Option<String>,
+        /// Recompute instead of reading the design or area cache.
+        #[arg(long = "force", default_value_t = false)]
+        force: bool,
+        /// Area table id. The packaged table is `area-v1`.
+        #[arg(long = "area-model", default_value = "area-v1")]
+        area_model: String,
+        /// Attach one optimization task folder to the area report.
+        #[arg(long = "opt-task")]
+        opt_task: Option<PathBuf>,
+        /// Attach every task folder under this directory.
+        #[arg(long = "opt-root")]
+        opt_root: Option<PathBuf>,
+        /// Exit 4 when a failure counter is nonzero. Width and loops do not count.
+        #[arg(long = "strict-attribution", default_value_t = false)]
+        strict_attribution: bool,
+        /// Package mode: `off` (default) or `packages`.
+        #[arg(long = "package-mode", default_value = "off")]
+        package_mode: String,
+        /// Skip files the parser rejects.
+        #[arg(long = "allow-parse-errors", default_value_t = false)]
+        allow_parse_errors: bool,
+    },
+    /// Score optimization task folders from assembly cycle counts and area snapshots.
+    Optimize {
+        /// One task directory containing task.json.
+        #[arg(long = "task")]
+        task: Option<PathBuf>,
+        /// Directory whose children are task folders.
+        #[arg(long = "root")]
+        root: Option<PathBuf>,
+        /// Write the decision JSON under the current directory.
+        #[arg(long = "json-out")]
+        json_out: Option<PathBuf>,
+        /// Append a measured RTL snapshot instead of only printing the score.
+        #[arg(long = "record", default_value_t = false)]
+        record: bool,
+        /// Name of the snapshot being recorded.
+        #[arg(long = "change")]
+        change: Option<String>,
+        /// Configuration entry `key=value`. Repeat for each knob.
+        #[arg(long = "config")]
+        config: Vec<String>,
+        /// Assembly result `test-id=cycles`. Repeat for each test.
+        #[arg(long = "cycles")]
+        cycles: Vec<String>,
+        /// Soak log: JSON `tests` array, or lines `test-id cycles`.
+        #[arg(long = "cycles-file")]
+        cycles_file: Option<PathBuf>,
+        /// Module whose exclusive area is copied out of `--area-report`.
+        #[arg(long = "module")]
+        modules: Vec<String>,
+        /// Area report JSON for this RTL snapshot.
+        #[arg(long = "area-report")]
+        area_report: Option<PathBuf>,
+        /// Drop an example series and start a measured one.
+        #[arg(long = "replace-example", default_value_t = false)]
+        replace_example: bool,
+    },
     /// Auto-correct: analyze sources then multi-pass transform (dry-run by default).
     Correct {
         /// Source files (repeatable).
@@ -404,7 +527,10 @@ fn write_analyze_algo_trace(
             ("failing_primary", serde_json::json!(failing)),
             ("worst_all_fo4", serde_json::json!(worst_all)),
             ("class_counts", serde_json::json!(summary.counts)),
-            ("class_adjusted_paths", serde_json::json!(summary.adjusted_paths)),
+            (
+                "class_adjusted_paths",
+                serde_json::json!(summary.adjusted_paths),
+            ),
         ]),
     );
     t.emit(
@@ -414,7 +540,10 @@ fn write_analyze_algo_trace(
             ("cards", serde_json::json!(plan.summary.cards)),
             ("t3_only", serde_json::json!(plan.summary.t3_only_cards)),
             ("by_pattern", serde_json::json!(plan.summary.by_pattern)),
-            ("auto_correct_options", serde_json::json!(plan.summary.auto_correct_options)),
+            (
+                "auto_correct_options",
+                serde_json::json!(plan.summary.auto_correct_options),
+            ),
         ]),
     );
     // Hottest failing cards (cap so full_core stays readable).
@@ -434,8 +563,14 @@ fn write_analyze_algo_trace(
                 ("class", serde_json::json!(format!("{:?}", card.path_class))),
                 ("fo4", serde_json::json!(card.total_fo4)),
                 ("slack", serde_json::json!(card.slack_fo4)),
-                ("preferred", serde_json::json!(preferred.map(|o| o.id.clone()))),
-                ("tier", serde_json::json!(preferred.map(|o| format!("{:?}", o.tier)))),
+                (
+                    "preferred",
+                    serde_json::json!(preferred.map(|o| o.id.clone())),
+                ),
+                (
+                    "tier",
+                    serde_json::json!(preferred.map(|o| format!("{:?}", o.tier))),
+                ),
                 ("file", serde_json::json!(card.primary_loc.file)),
                 ("line", serde_json::json!(card.primary_loc.start_line)),
             ]),
@@ -807,7 +942,10 @@ fn design_to_analyze_json(
 }
 
 fn package_mode_on(s: &str) -> bool {
-    matches!(s.trim().to_ascii_lowercase().as_str(), "packages" | "on" | "true" | "1")
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "packages" | "on" | "true" | "1"
+    )
 }
 
 fn build_param_map(
@@ -873,6 +1011,152 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        Commands::Area {
+            files,
+            files_from,
+            incdirs,
+            defines,
+            modules,
+            all_modules,
+            target_mhz,
+            fo4_ps,
+            budget_margin,
+            cache,
+            json_out,
+            param_map,
+            cfg_snapshot,
+            compare_param_map,
+            assume_xlen,
+            inclusion,
+            config_overlay,
+            top,
+            metric,
+            compare_inclusion,
+            force,
+            area_model,
+            opt_task,
+            opt_root,
+            strict_attribution,
+            package_mode,
+            allow_parse_errors,
+        } => {
+            if !all_modules
+                && modules
+                    .as_ref()
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true)
+            {
+                eprintln!("error: area requires --modules <a,b> or --all-modules");
+                return ExitCode::from(2);
+            }
+            let project = match load_project_inputs(files, files_from, incdirs, defines) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            if project.files.is_empty() {
+                eprintln!("error: no input files (use --file / --files-from)");
+                return ExitCode::from(2);
+            }
+            let cache = match cache
+                .map(|path| area_cmd::contain_output(&path))
+                .transpose()
+            {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            let json_out = match json_out
+                .map(|path| area_cmd::contain_output(&path))
+                .transpose()
+            {
+                Ok(path) => path,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            let param_map = match build_param_map(param_map, cfg_snapshot, assume_xlen) {
+                Ok(map) => map,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(1);
+                }
+            };
+            let compare_map = match compare_param_map {
+                Some(path) => match ParamMap::load_path(&path) {
+                    Ok(map) => Some(map),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return ExitCode::from(1);
+                    }
+                },
+                None => None,
+            };
+            let module_filter = if all_modules {
+                Vec::new()
+            } else {
+                parse_module_list(modules.as_deref().unwrap_or(""))
+            };
+            let defines = project.defines_for_parse();
+            area_cmd::run(area_cmd::AreaRun {
+                files: project.files,
+                incdirs: project.incdirs,
+                defines,
+                module_filter,
+                target_mhz,
+                fo4_ps,
+                budget_margin,
+                cache,
+                json_out,
+                param_map,
+                compare_map,
+                inclusion,
+                config_overlay,
+                strict_attribution,
+                top,
+                metric,
+                compare_inclusion,
+                force,
+                area_model,
+                opt_task,
+                opt_root,
+                package_mode: package_mode_on(&package_mode),
+                allow_parse_errors,
+            })
+        }
+        Commands::Optimize {
+            task,
+            root,
+            json_out,
+            record,
+            change,
+            config,
+            cycles,
+            cycles_file,
+            modules,
+            area_report,
+            replace_example,
+        } => {
+            if record {
+                opt_cmd::record(opt_cmd::RecordArgs {
+                    task,
+                    change,
+                    config,
+                    cycles,
+                    cycles_file,
+                    modules,
+                    area_report,
+                    replace_example,
+                })
+            } else {
+                opt_cmd::run(task, root, json_out)
+            }
+        }
         Commands::Analyze {
             files,
             files_from,
@@ -900,7 +1184,12 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            if !all_modules && modules.as_ref().map(|s| s.trim().is_empty()).unwrap_or(true) {
+            if !all_modules
+                && modules
+                    .as_ref()
+                    .map(|s| s.trim().is_empty())
+                    .unwrap_or(true)
+            {
                 eprintln!(
                     "error: analyze requires --modules <a,b> or --all-modules (see AGENTS.md / DESIGN.md KD17)"
                 );
@@ -968,7 +1257,8 @@ fn main() -> ExitCode {
                             cached.stats.design_hit,
                             cached.stats.files_content_stable,
                             cached.stats.files_changed,
-                            &cached.stats.pp_fingerprint[..12.min(cached.stats.pp_fingerprint.len())]
+                            &cached.stats.pp_fingerprint
+                                [..12.min(cached.stats.pp_fingerprint.len())]
                         );
                         Ok((cached.output, Some(cached.stats), cached.from_cache))
                     }
@@ -1152,7 +1442,11 @@ fn main() -> ExitCode {
             // is filled after analyze from discovered module names.
             let mut policy = PassPolicy::from_opt(
                 opt.clone(),
-                if all_modules { Vec::new() } else { allow.clone() },
+                if all_modules {
+                    Vec::new()
+                } else {
+                    allow.clone()
+                },
                 allow_latency,
             );
             // Lean emit (default soak) does not rewrite origin assigns. Do not
@@ -1177,78 +1471,77 @@ fn main() -> ExitCode {
             };
             let base_package_mode = package_mode_on(&package_mode);
 
-            let (design, names, source_pairs, allow) = if paths.is_empty()
-                || (!all_modules && allow.is_empty())
-            {
-                let target = TimingTarget::new(target_mhz, fo4_ps, budget_margin);
-                (
-                    TimingDesign::empty(target),
-                    NameTable::new(),
-                    Vec::new(),
-                    allow,
-                )
-            } else {
-                let parse_opts = ParseOptions {
-                    include_paths: project.incdirs.clone(),
-                    defines: project.defines_for_parse(),
-                    ignore_include_error: false,
-                    jobs: opt.jobs,
-                    allow_parse_errors,
-                };
-                let module_filter = if all_modules {
-                    Vec::new()
+            let (design, names, source_pairs, allow) =
+                if paths.is_empty() || (!all_modules && allow.is_empty()) {
+                    let target = TimingTarget::new(target_mhz, fo4_ps, budget_margin);
+                    (
+                        TimingDesign::empty(target),
+                        NameTable::new(),
+                        Vec::new(),
+                        allow,
+                    )
                 } else {
-                    allow.clone()
-                };
-                let mut lower = LowerOptions {
-                    target: TimingTarget::new(target_mhz, fo4_ps, budget_margin),
-                    cost_model: load_fo4_v1_default(),
-                    module_filter,
-                    param_map: base_param_map.clone(),
-                    package_mode: base_package_mode,
-                    opt: opt.clone(),
-                };
-                lower.cost_model.id = "fo4-v1".into();
-                match analyze_files(&paths, &parse_opts, &lower) {
-                    Ok(out) => {
-                        println!(
-                            "  analyzed modules={} paths={} opportunities={} files={}",
-                            out.design.modules.len(),
-                            out.design.paths.len(),
-                            out.design.opportunities.len(),
-                            paths.len()
-                        );
-                        for m in out.design.modules.values() {
+                    let parse_opts = ParseOptions {
+                        include_paths: project.incdirs.clone(),
+                        defines: project.defines_for_parse(),
+                        ignore_include_error: false,
+                        jobs: opt.jobs,
+                        allow_parse_errors,
+                    };
+                    let module_filter = if all_modules {
+                        Vec::new()
+                    } else {
+                        allow.clone()
+                    };
+                    let mut lower = LowerOptions {
+                        target: TimingTarget::new(target_mhz, fo4_ps, budget_margin),
+                        cost_model: load_fo4_v1_default(),
+                        module_filter,
+                        param_map: base_param_map.clone(),
+                        package_mode: base_package_mode,
+                        opt: opt.clone(),
+                    };
+                    lower.cost_model.id = "fo4-v1".into();
+                    match analyze_files(&paths, &parse_opts, &lower) {
+                        Ok(out) => {
                             println!(
-                                "    module {} file={} nodes={}",
-                                m.name,
-                                m.file,
-                                m.nodes.len()
+                                "  analyzed modules={} paths={} opportunities={} files={}",
+                                out.design.modules.len(),
+                                out.design.paths.len(),
+                                out.design.opportunities.len(),
+                                paths.len()
                             );
-                        }
-                        let mut sources = Vec::new();
-                        for p in &paths {
-                            if let Ok(text) = std::fs::read_to_string(p) {
-                                sources.push((p.clone(), text));
+                            for m in out.design.modules.values() {
+                                println!(
+                                    "    module {} file={} nodes={}",
+                                    m.name,
+                                    m.file,
+                                    m.nodes.len()
+                                );
                             }
+                            let mut sources = Vec::new();
+                            for p in &paths {
+                                if let Ok(text) = std::fs::read_to_string(p) {
+                                    sources.push((p.clone(), text));
+                                }
+                            }
+                            let allow_resolved = if all_modules {
+                                out.design
+                                    .modules
+                                    .values()
+                                    .map(|m| m.name.clone())
+                                    .collect()
+                            } else {
+                                allow
+                            };
+                            (out.design, out.names, sources, allow_resolved)
                         }
-                        let allow_resolved = if all_modules {
-                            out.design
-                                .modules
-                                .values()
-                                .map(|m| m.name.clone())
-                                .collect()
-                        } else {
-                            allow
-                        };
-                        (out.design, out.names, sources, allow_resolved)
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            return ExitCode::from(1);
+                        }
                     }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        return ExitCode::from(1);
-                    }
-                }
-            };
+                };
 
             // Re-apply allowlist on policy after all-modules resolve
             // (`policy` is already `mut`; a rebinding here is redundant.)
@@ -1344,8 +1637,7 @@ fn main() -> ExitCode {
             let mut post_analyze_valid = false;
 
             if !dry && !source_pairs.is_empty() && !ctx.trace.records.is_empty() {
-                let dir =
-                    emit_root.unwrap_or_else(|| PathBuf::from(".sv-timing-out/corrected"));
+                let dir = emit_root.unwrap_or_else(|| PathBuf::from(".sv-timing-out/corrected"));
                 let emit_policy = EmitPolicy {
                     tool: "sv-timing".into(),
                     run_id: "correct".into(),
@@ -1374,12 +1666,7 @@ fn main() -> ExitCode {
                     real_cut_feeds,
                     emit_balance_mux_rtl: real_cut_feeds || emit_balance_mux_rtl,
                 };
-                match emit_project_autocorrect(
-                    &source_pairs,
-                    &ctx.trace,
-                    &emit_policy,
-                    proj_opts,
-                ) {
+                match emit_project_autocorrect(&source_pairs, &ctx.trace, &emit_policy, proj_opts) {
                     Ok(proj) => {
                         println!("out_dir={}", proj.out_dir);
                         if let Some(fl) = &proj.filelist_path {
@@ -1548,7 +1835,9 @@ fn main() -> ExitCode {
                                         ));
                                         post_analyze_valid = !post.design.paths.is_empty()
                                             && post.skipped_files.is_empty()
-                                            && rep.reparse_ok && rep.structural_ok && rep.joint_ok;
+                                            && rep.reparse_ok
+                                            && rep.structural_ok
+                                            && rep.joint_ok;
                                         if let Some(report) = post_analyze_json.as_mut() {
                                             report["skipped_files"] = serde_json::json!(post.skipped_files.iter()
                                                 .map(|f| serde_json::json!({"path": f.path, "message": f.message}))
@@ -1603,8 +1892,8 @@ fn main() -> ExitCode {
                 }
             }
 
-            let emitted_validation_failed = !dry && !paths.is_empty()
-                && emit_dir_s.is_some() && !post_analyze_valid;
+            let emitted_validation_failed =
+                !dry && !paths.is_empty() && emit_dir_s.is_some() && !post_analyze_valid;
             let min_dens = min_density_score_for_trace(&ctx.trace);
             let density_ok = ctx.trace.records.is_empty() || density.score() >= min_dens;
 
@@ -1785,11 +2074,7 @@ fn main() -> ExitCode {
                 }
             };
 
-            let files: Vec<String> = snap
-                .files
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect();
+            let files: Vec<String> = snap.files.iter().map(|p| p.display().to_string()).collect();
             let dir = out_dir.join(&tag);
             println!("{}", banner());
             println!("debug-export dir={}", dir.display());

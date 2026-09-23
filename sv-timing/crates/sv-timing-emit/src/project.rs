@@ -321,6 +321,7 @@ pub fn synthesize_project(
                         type_name: Some("logic".into()),
                         packed_dims: None,
                         uses_hierarchical: false,
+                        dimension_text: None,
                     },
                     ModulePort {
                         name: "rst_ni".into(),
@@ -328,6 +329,7 @@ pub fn synthesize_project(
                         type_name: Some("logic".into()),
                         packed_dims: None,
                         uses_hierarchical: false,
+                        dimension_text: None,
                     },
                     ModulePort {
                         name: "d_i".into(),
@@ -335,6 +337,7 @@ pub fn synthesize_project(
                         type_name: Some("logic".into()),
                         packed_dims: Some("[63:0]".into()),
                         uses_hierarchical: false,
+                        dimension_text: None,
                     },
                     ModulePort {
                         name: "q_o".into(),
@@ -342,12 +345,16 @@ pub fn synthesize_project(
                         type_name: Some("logic".into()),
                         packed_dims: Some("[63:0]".into()),
                         uses_hierarchical: false,
+                        dimension_text: None,
                     },
                 ],
                 gen_loops: Vec::new(),
                 functions: Vec::new(),
+                function_bodies: Vec::new(),
                 package_imports: Vec::new(),
                 instances: Vec::new(),
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc.clone(),
             };
             tm.regions.insert(

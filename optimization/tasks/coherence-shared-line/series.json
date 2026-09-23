@@ -1,0 +1,18 @@
+{
+  "example": false,
+  "series": [
+    {
+      "change": "rtl-baseline",
+      "config": { "coherence": "on", "cores": "1" },
+      "area_au": 904,
+      "modules": {
+        "g6lc_coherence_hub": 260,
+        "g6lc_inval_bus": 16,
+        "g6lc_l1_inv_adapter": 68,
+        "g6lc_lr_sc_tracker": 560,
+        "g6lc_snoop_filter": 0
+      },
+      "tests": []
+    }
+  ]
+}

@@ -11,8 +11,10 @@
 //! exclusive/dense/bundle exploration; lanes only gate InsertReg vs T3.
 
 use crate::ir::{TimingDesign, TimingPath};
+use crate::pass_strategy::{
+    is_resilient_datapath, path_has_indexed_restore, path_is_handshake_locked,
+};
 use crate::path_class::PathClassKind;
-use crate::pass_strategy::{is_resilient_datapath, path_has_indexed_restore, path_is_handshake_locked};
 use crate::ref_order::RefOrderTree;
 
 /// Virtual concern a path belongs to (4 GHz worklist routing).
@@ -96,9 +98,7 @@ pub fn cone_lane(design: &TimingDesign, path: &TimingPath) -> ConeLane {
         return ConeLane::NextStateFsm;
     }
     match path.path_class {
-        PathClassKind::ExclusiveCaseMux | PathClassKind::ExclusiveIfChain => {
-            ConeLane::ExclusiveMux
-        }
+        PathClassKind::ExclusiveCaseMux | PathClassKind::ExclusiveIfChain => ConeLane::ExclusiveMux,
         PathClassKind::IndependentLhsBundle | PathClassKind::DenseControlCone => {
             let tree = RefOrderTree::from_nodes(module, &path.nodes);
             let write_only = tree.vars.values().filter(|v| v.is_write_only()).count();

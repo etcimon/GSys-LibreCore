@@ -7,6 +7,7 @@
 //   timings flist               flatten verify flist → portable .f
 //   timings compile|analyze     flist + analyze into --output out-dir
 //   timings correct             flist + correct (optional --emit into out-dir)
+//   timings area               flist + area report into <output>/area-report.json
 //   timings validate            structural check of a precompile out-dir
 //
 // --output / -o / --out  : compile target directory (portable.f + JSON + cache + stamp)
@@ -37,6 +38,7 @@ import {
 import { readFileSync as readFileSyncNode } from "node:fs";
 import {
   buildSvTimingAnalyzeArgs,
+  buildSvTimingAreaArgs,
   buildSvTimingCorrectArgs,
   buildSvtRunCommand,
   formatTimingsDashboardLines,
@@ -92,7 +94,7 @@ function buildEnv(
 async function runAnalyzeOrCorrect(
   ctx: PlatformContext,
   args: CommandArgs,
-  kind: "analyze" | "correct" | "compile",
+  kind: "analyze" | "correct" | "compile" | "area",
 ): Promise<number> {
   const { logger } = ctx;
   const flags = args.flags;
@@ -127,9 +129,31 @@ async function runAnalyzeOrCorrect(
       ? Number(assumeXlenRaw)
       : (ctx.config.soc.xlen as number | undefined);
   const autoParamMap = !flagBool(flags, "no-param-map");
+  const budgetMarginRaw = flagStr(flags, "budget-margin");
+  const budgetMargin =
+    budgetMarginRaw != null && Number.isFinite(Number(budgetMarginRaw))
+      ? Number(budgetMarginRaw)
+      : undefined;
+  const compareParamMap = flagStr(flags, "compare-param-map");
+  const inclusionRaw = flagStr(flags, "inclusion");
+  const overlayRaw = flagStr(flags, "config-overlay");
+  const topRaw = flagStr(flags, "top");
+  const top =
+    topRaw != null && Number.isFinite(Number(topRaw)) ? Number(topRaw) : undefined;
+  const strictAttribution = flagBool(flags, "strict-attribution");
+  const allowParseErrors = flagBool(flags, "allow-parse-errors");
+  const metricRaw = flagStr(flags, "metric");
+  const metric =
+    metricRaw === "area" || metricRaw === "perf" || metricRaw === "perf-per-area"
+      ? metricRaw
+      : undefined;
+  const compareInclusion = flagStr(flags, "compare-inclusion");
+  const areaModel = flagStr(flags, "area-model");
+  const force = flagBool(flags, "force");
 
   // compile is analyze with a guaranteed out-dir layout
-  const runKind: "analyze" | "correct" = kind === "correct" ? "correct" : "analyze";
+  const runKind: "analyze" | "correct" | "area" =
+    kind === "correct" ? "correct" : kind === "area" ? "area" : "analyze";
 
   if (!allModules && (!modules || modules.length === 0)) {
     logger.error(
@@ -166,7 +190,11 @@ async function runAnalyzeOrCorrect(
   // json-out may still override the report path; otherwise canonical under layout.
   const reportJson =
     jsonOutOverride ??
-    (runKind === "analyze" ? layout.analyzeJson : layout.correctJson);
+    (runKind === "analyze"
+      ? layout.analyzeJson
+      : runKind === "area"
+        ? layout.areaJson
+        : layout.correctJson);
   const portablePath = layout.portableF;
   const cachePath = cacheOverride ?? layout.cache;
   const emitDir = runKind === "correct" && emit ? layout.correctedDir : undefined;
@@ -219,7 +247,31 @@ async function runAnalyzeOrCorrect(
           assumeXlen,
           packageMode: packageMode ?? "packages",
         })
-      : buildSvTimingCorrectArgs({
+      : runKind === "area"
+        ? buildSvTimingAreaArgs({
+            portableFlist: portable.portablePath,
+            modules,
+            allModules,
+            targetMhz: mhz,
+            fo4Ps: fo4,
+            budgetMargin,
+            cache: cachePath,
+            jsonOut: reportJson,
+            paramMap: paramMapPath,
+            compareParamMap,
+            assumeXlen,
+            packageMode: packageMode ?? "packages",
+            inclusion: inclusionRaw ? [inclusionRaw] : undefined,
+            configOverlay: overlayRaw ? [overlayRaw] : undefined,
+            top,
+            metric,
+            compareInclusion,
+            areaModel,
+            force,
+            strictAttribution,
+            allowParseErrors,
+          })
+        : buildSvTimingCorrectArgs({
           portableFlist: portable.portablePath,
           modules,
           allModules,
@@ -300,6 +352,31 @@ async function runAnalyzeOrCorrect(
     return result.code || 1;
   }
 
+  // Area shares the out-dir cache. It does not satisfy the analyze/correct
+  // package check, and it does not feed the FO4 dashboard.
+  if (runKind === "area") {
+    if (asJson) {
+      logger.raw(
+        JSON.stringify(
+          {
+            ok: true,
+            kind,
+            output: layout.dir,
+            reportJson,
+            stamp: layout.stamp,
+          },
+          null,
+          2,
+        ) + "\n",
+      );
+    } else {
+      logger.success(`sv-timing area OK → ${reportJson}`);
+      logger.success(`out-dir  : ${layout.dir}`);
+      logger.info(`stamp    : ${layout.stamp}`);
+    }
+    return 0;
+  }
+
   // Post-compile structural check when using a unified out-dir
   const validation = validateTimingsOutDir(ctx, {
     fromTiming: layout.dir,
@@ -350,7 +427,7 @@ export const timingsCommand: Command = {
   summary:
     "Host adapter for sv-timing: compile/analyze/correct to --output, validate --from-timing.",
   usage:
-    "bun run src/cli/index.ts timings [status|doctor|flist|compile|analyze|correct|validate|summary|dashboard|sta-handoff|correlate|fo4-golden|retune-propose|parse-bench-log|lab-run] [options…]",
+    "bun run src/cli/index.ts timings [status|doctor|flist|compile|analyze|area|correct|validate|summary|dashboard|sta-handoff|correlate|fo4-golden|retune-propose|parse-bench-log|lab-run] [options…]",
   details:
     "Prepares monorepo flists for the independent sv-timing package and spawns\n" +
     "its CLI via `python tools/svt.py run -- …`. Never links monorepo code into\n" +
@@ -360,6 +437,7 @@ export const timingsCommand: Command = {
     "  timings flist      flatten → portable.f (use --output DIR for package layout)\n" +
     "  timings compile    analyze into a full --output out-dir (portable+JSON+cache+stamp)\n" +
     "  timings analyze    same as compile (alias; prefers --output over ad-hoc --json-out)\n" +
+    "  timings area       structural area into <output>/area-report.json (same cache; no rewrite)\n" +
     "  timings correct    correct (+ optional --emit into <output>/corrected)\n" +
     "  timings validate   structural check of a precompile out-dir (--from-timing)\n" +
     "  timings summary    soak dashboard from analyze.json (alias: dashboard)\n" +
@@ -385,6 +463,7 @@ export const timingsCommand: Command = {
     "bun run src/cli/index.ts timings compile --modules alu --output workspace/build/sv-timing/alu-pack",
     "bun run src/cli/index.ts timings compile --all-modules -o build/my-timings --target-mhz 1250",
     "bun run src/cli/index.ts timings analyze --modules alu --output out/t1",
+    "bun run src/cli/index.ts timings area --modules alu --output out/t1",
     "bun run src/cli/index.ts timings correct --modules alu --allow-latency --emit -o out/t1",
     "bun run src/cli/index.ts timings validate --from-timing out/t1",
     "bun run src/cli/index.ts timings summary --from-timing out/t1",
@@ -971,17 +1050,17 @@ export const timingsCommand: Command = {
       return 0;
     }
 
-    if (sub === "compile" || sub === "analyze" || sub === "correct") {
+    if (sub === "compile" || sub === "analyze" || sub === "correct" || sub === "area") {
       return runAnalyzeOrCorrect(
         ctx,
         args,
-        sub === "compile" ? "compile" : sub === "correct" ? "correct" : "analyze",
+        sub === "compile" ? "compile" : sub === "correct" ? "correct" : sub === "area" ? "area" : "analyze",
       );
     }
 
     logger.error(`unknown timings subcommand: ${sub}`);
     logger.info(
-      "Use: timings status | doctor | flist | compile | analyze | correct | validate | summary | sta-handoff | correlate | fo4-golden | retune-propose | parse-bench-log | lab-run",
+      "Use: timings status | doctor | flist | compile | analyze | area | correct | validate | summary | sta-handoff | correlate | fo4-golden | retune-propose | parse-bench-log | lab-run",
     );
     return 2;
   },

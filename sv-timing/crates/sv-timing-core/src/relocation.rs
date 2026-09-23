@@ -199,8 +199,8 @@ pub fn build_relocation_plan(design: &TimingDesign) -> RelocationPlan {
 
     for path in &design.paths {
         let primary_fail = !path.multi_cycle && path.slack_fo4 < 0.0;
-        let soft_atomic = path.multi_cycle
-            && matches!(path.path_class, PathClassKind::AtomicOverBudget);
+        let soft_atomic =
+            path.multi_cycle && matches!(path.path_class, PathClassKind::AtomicOverBudget);
         if !primary_fail && !soft_atomic {
             continue;
         }
@@ -352,10 +352,7 @@ pub fn scale_correct_budget(
     let soft_atomic = design
         .paths
         .iter()
-        .filter(|p| {
-            p.multi_cycle
-                && matches!(p.path_class, PathClassKind::AtomicOverBudget)
-        })
+        .filter(|p| p.multi_cycle && matches!(p.path_class, PathClassKind::AtomicOverBudget))
         .count();
 
     // Small designs: keep dials (sparse_ex ~10 paths over budget).
@@ -384,10 +381,8 @@ pub fn scale_correct_budget(
     let width = width.clamp(base_worklist.max(8), 256);
 
     // Passes: base + 3·log2(failing) + log2(modules)
-    let passes = (base_passes as f64
-        + 3.0 * fail_f.log2().max(0.0)
-        + mod_f.log2().max(0.0))
-    .ceil() as u32;
+    let passes =
+        (base_passes as f64 + 3.0 * fail_f.log2().max(0.0) + mod_f.log2().max(0.0)).ceil() as u32;
     let passes = passes.clamp(base_passes.max(8), 192);
 
     // Idle: larger residual sets need more consecutive skips before abort
@@ -400,8 +395,7 @@ pub fn scale_correct_budget(
 
     // Batch: apply several *distinct modules* before remeasure so coverage
     // scales with √modules rather than 1-path-per-remeasure thrash.
-    let batch = (1.0 + (mod_f.sqrt() * 0.75) + (fail_f / 80.0).min(6.0))
-        .ceil() as usize;
+    let batch = (1.0 + (mod_f.sqrt() * 0.75) + (fail_f / 80.0).min(6.0)).ceil() as usize;
     let batch = batch.clamp(2, 16);
 
     CorrectScale {
@@ -462,8 +456,7 @@ fn stratify_cards_by_pattern_and_module(cards: Vec<RelocationCard>) -> Vec<Reloc
         mod_vecs.sort_by(|a, b| {
             let fa = a.first().map(|c| c.total_fo4).unwrap_or(0.0);
             let fb = b.first().map(|c| c.total_fo4).unwrap_or(0.0);
-            fb.partial_cmp(&fa)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
         });
         let mut idxs = vec![0usize; mod_vecs.len()];
         let mut flat = Vec::new();
@@ -788,7 +781,10 @@ fn options_for_path(
                 true,
                 0.65,
                 "low",
-                vec!["independent_lhs_bundle".into(), "balance_mux_on_path".into()],
+                vec![
+                    "independent_lhs_bundle".into(),
+                    "balance_mux_on_path".into(),
+                ],
                 "Measurement already max-field; BalanceMux only if residual over budget".into(),
             ));
             opts.push(scored_option(
@@ -849,10 +845,7 @@ fn options_for_path(
                 true,
                 0.65,
                 "medium",
-                vec![
-                    "schedule_pipeline_cuts".into(),
-                    "insert_register".into(),
-                ],
+                vec!["schedule_pipeline_cuts".into(), "insert_register".into()],
                 "Only for plain cones — adds architectural latency; GateInfo required".into(),
             ));
         }
@@ -934,8 +927,10 @@ fn scored_option(
     let lat_pen = latency_delta as f64 * 0.25;
     let leverage = ((fo4_before - expected_after).max(0.0) / fo4_before.max(1.0)).clamp(0.0, 1.0);
     // Measure-only keep options get small base score so they sort after real gains.
-    let base = if matches!(kind, RelocationKind::MeasureRelocate | RelocationKind::SoftMulticycle)
-        && (fo4_before - expected_after).abs() < 1e-6
+    let base = if matches!(
+        kind,
+        RelocationKind::MeasureRelocate | RelocationKind::SoftMulticycle
+    ) && (fo4_before - expected_after).abs() < 1e-6
     {
         0.15 * confidence
     } else {
@@ -1017,8 +1012,8 @@ mod tests {
         IrNode, OperatorClass, PathEndpoint, PathKind, TimingModule, TimingPath, TimingTarget,
     };
     use crate::loc::{OriginKind, SourceLoc};
-    use crate::path_class::{classify_and_adjust_paths, PathClassKind};
     use crate::measure::CostModel;
+    use crate::path_class::{classify_and_adjust_paths, PathClassKind};
     use std::collections::BTreeMap;
 
     fn loc() -> SourceLoc {
@@ -1060,7 +1055,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-            assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -1077,8 +1072,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -1112,13 +1110,24 @@ mod tests {
         );
         // Sparse-scale budget stays near base dials.
         let sc = scale_correct_budget(&design, 4, 16);
-        assert!(sc.worklist_width >= 4 && sc.worklist_width <= 256, "width={}", sc.worklist_width);
-        assert!(sc.max_passes >= 16 && sc.max_passes <= 192, "passes={}", sc.max_passes);
+        assert!(
+            sc.worklist_width >= 4 && sc.worklist_width <= 256,
+            "width={}",
+            sc.worklist_width
+        );
+        assert!(
+            sc.max_passes >= 16 && sc.max_passes <= 192,
+            "passes={}",
+            sc.max_passes
+        );
         assert_eq!(sc.batch_size, 1, "sparse batch stays 1");
         assert_eq!(sc.idle_limit, 8);
         let card = plan.cards.iter().find(|c| c.path_id == 41).expect("card");
         assert_eq!(card.pattern, RelocationPattern::ExclusiveSelect);
-        assert!(card.options.iter().any(|o| o.kind == RelocationKind::BalanceMux));
+        assert!(card
+            .options
+            .iter()
+            .any(|o| o.kind == RelocationKind::BalanceMux));
         assert!(card
             .options
             .iter()
@@ -1144,8 +1153,11 @@ mod tests {
                     ports: vec![],
                     gen_loops: vec![],
                     functions: vec![],
+                    function_bodies: Vec::new(),
                     package_imports: vec![],
                     instances: vec![],
+                    decls: Vec::new(),
+                    config_branch: false,
                     loc: loc(),
                 },
             );
@@ -1183,7 +1195,11 @@ mod tests {
         }
         let sc = scale_correct_budget(&design, 8, 16);
         assert!(sc.worklist_width >= 8, "width={}", sc.worklist_width);
-        assert!(sc.batch_size >= 2, "batch should grow, got {}", sc.batch_size);
+        assert!(
+            sc.batch_size >= 2,
+            "batch should grow, got {}",
+            sc.batch_size
+        );
         assert!(sc.idle_limit >= 8, "idle={}", sc.idle_limit);
         assert!(sc.apply_cap >= 2);
         assert!(sc.max_passes >= 16);
@@ -1229,7 +1245,7 @@ mod tests {
                 case_is_default: false,
                 case_selector: None,
                 fo4_locked: false,
-            assign_kind: Default::default(),
+                assign_kind: Default::default(),
             },
         );
         design.modules.insert(
@@ -1245,8 +1261,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );
@@ -1274,7 +1293,11 @@ mod tests {
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let plan = build_relocation_plan(&design);
-        let card = plan.cards.iter().find(|c| c.path_id == 1).expect("atomic card");
+        let card = plan
+            .cards
+            .iter()
+            .find(|c| c.path_id == 1)
+            .expect("atomic card");
         assert_eq!(card.pattern, RelocationPattern::AtomicOp);
         assert!(card
             .options
@@ -1292,8 +1315,15 @@ mod tests {
             .iter()
             .find(|o| o.kind == RelocationKind::ArchMulticycle)
             .expect("arch option");
-        assert_eq!(arch.latency_delta, 1, "56 FO4 over a 32 FO4 budget is 2 stages");
-        assert!(arch.rationale.contains("2 internal stage"), "{}", arch.rationale);
+        assert_eq!(
+            arch.latency_delta, 1,
+            "56 FO4 over a 32 FO4 budget is 2 stages"
+        );
+        assert!(
+            arch.rationale.contains("2 internal stage"),
+            "{}",
+            arch.rationale
+        );
     }
 
     /// The T3 requirement must scale with the target, which is what makes it usable
@@ -1356,7 +1386,8 @@ mod tests {
                 "per-stage FO4 cannot exceed the whole operator"
             );
             assert!(
-                arch.rationale.contains(&format!("{want_stages} internal stage")),
+                arch.rationale
+                    .contains(&format!("{want_stages} internal stage")),
                 "{}",
                 arch.rationale
             );
@@ -1399,8 +1430,11 @@ mod tests {
             ports: vec![],
             gen_loops: vec![],
             functions: vec![],
+            function_bodies: Vec::new(),
             package_imports: vec![],
             instances: vec![],
+            decls: Vec::new(),
+            config_branch: false,
             loc: loc(),
         }
     }

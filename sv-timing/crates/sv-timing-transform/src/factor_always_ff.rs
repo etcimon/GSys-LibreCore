@@ -303,8 +303,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(),
             },
         );

@@ -6,7 +6,7 @@
 // Lives in build-platform (host), not inside sv-timing crates. Responsibilities:
 //   1. Flatten monorepo / EDA flists (env + nested -F) via eda.flattenFlist
 //   2. Write a portable `.f` the package CLI understands (+incdir+, paths)
-//   3. Build argv for `sv-timing` analyze / correct (spawned by the host)
+//   3. Build argv for `sv-timing` analyze / correct / area (spawned by the host)
 //
 // The package itself remains monorepo-independent: hosts prepare inputs and
 // consume JSON / emit trees. See sv-timing/AGENTS-host.md.
@@ -26,11 +26,11 @@ import { flattenFlist, posixPath, type FlatManifest } from "./eda.ts";
 //
 //   <output>/
 //     portable.f
-//     analyze.json | correct.json
+//     analyze.json | correct.json | area-report.json
 //     param-map.json
-//     ir.sqlite          (optional IR cache)
+//     ir.sqlite          (optional IR cache, shared with area rows)
 //     stamp.json         (host metadata)
-//     corrected/         (optional emit tree)
+//     corrected/         (optional emit tree; area does not emit)
 //
 
 export interface TimingsOutputLayout {
@@ -39,6 +39,8 @@ export interface TimingsOutputLayout {
   portableF: string;
   analyzeJson: string;
   correctJson: string;
+  /** Structural area report. Not an analyze-result document. */
+  areaJson: string;
   paramMap: string;
   cache: string;
   stamp: string;
@@ -83,6 +85,7 @@ export function resolveTimingsOutputDir(
     portableF: posixPath(join(dir, "portable.f")),
     analyzeJson: posixPath(join(dir, "analyze.json")),
     correctJson: posixPath(join(dir, "correct.json")),
+    areaJson: posixPath(join(dir, "area-report.json")),
     paramMap: posixPath(join(dir, "param-map.json")),
     cache: posixPath(join(dir, "ir.sqlite")),
     stamp: posixPath(join(dir, "stamp.json")),
@@ -91,7 +94,7 @@ export function resolveTimingsOutputDir(
 }
 
 export interface TimingsStamp {
-  kind: "analyze" | "correct" | "compile";
+  kind: "analyze" | "correct" | "compile" | "area";
   target: string;
   targetMhz?: number;
   modules?: string[];
@@ -813,6 +816,97 @@ export function buildSvTimingCorrectArgs(opts: {
 }
 
 /**
+ * Build argv for the sv-timing CLI (`area`). Does not spawn.
+ * The numbers below are the caller's CLI knobs. This function does not
+ * read the area table and does not compute area or frequency.
+ */
+export function buildSvTimingAreaArgs(opts: {
+  portableFlist: string;
+  modules?: string[];
+  allModules?: boolean;
+  targetMhz?: number;
+  fo4Ps?: number;
+  budgetMargin?: number;
+  cache?: string;
+  jsonOut?: string;
+  paramMap?: string;
+  compareParamMap?: string;
+  assumeXlen?: number;
+  packageMode?: "off" | "packages";
+  inclusion?: string[];
+  configOverlay?: string[];
+  top?: number;
+  metric?: "area" | "perf" | "perf-per-area";
+  compareInclusion?: string;
+  areaModel?: string;
+  force?: boolean;
+  strictAttribution?: boolean;
+  allowParseErrors?: boolean;
+}): string[] {
+  const args = ["area", "--files-from", opts.portableFlist];
+  if (opts.allModules) {
+    args.push("--all-modules");
+  } else if (opts.modules && opts.modules.length > 0) {
+    args.push("--modules", opts.modules.join(","));
+  }
+  if (opts.targetMhz !== undefined) {
+    args.push("--target-mhz", String(opts.targetMhz));
+  }
+  if (opts.fo4Ps !== undefined) {
+    args.push("--fo4-ps", String(opts.fo4Ps));
+  }
+  if (opts.budgetMargin !== undefined) {
+    args.push("--budget-margin", String(opts.budgetMargin));
+  }
+  if (opts.cache) {
+    args.push("--cache", opts.cache);
+  }
+  if (opts.jsonOut) {
+    args.push("--json-out", opts.jsonOut);
+  }
+  if (opts.paramMap) {
+    args.push("--param-map", opts.paramMap);
+  }
+  if (opts.compareParamMap) {
+    args.push("--compare-param-map", opts.compareParamMap);
+  }
+  if (opts.assumeXlen !== undefined) {
+    args.push("--assume-xlen", String(opts.assumeXlen));
+  }
+  if (opts.packageMode) {
+    args.push("--package-mode", opts.packageMode);
+  }
+  for (const spec of opts.inclusion ?? []) {
+    if (spec.length > 0) args.push("--inclusion", spec);
+  }
+  for (const spec of opts.configOverlay ?? []) {
+    if (spec.length > 0) args.push("--config-overlay", spec);
+  }
+  if (opts.top !== undefined) {
+    args.push("--top", String(opts.top));
+  }
+  if (opts.metric) {
+    args.push("--metric", opts.metric);
+  }
+  if (opts.compareInclusion) {
+    args.push("--compare-inclusion", opts.compareInclusion);
+  }
+  if (opts.areaModel) {
+    args.push("--area-model", opts.areaModel);
+  }
+  if (opts.strictAttribution) {
+    args.push("--strict-attribution");
+  }
+  if (opts.allowParseErrors) {
+    args.push("--allow-parse-errors");
+  }
+  if (opts.force) {
+    args.push("--force");
+  }
+  return args;
+}
+
+/**
  * Write a host param-map JSON for sv-timing (`--param-map`).
  * Keys are free-form; XLEN-related entries help hierarchical dims.
  */
@@ -1042,7 +1136,15 @@ export function validateTimingsOutDir(
   if (!reportJson) {
     try {
       for (const name of readdirSync(dir)) {
-        if (!name.endsWith(".json") || name === "param-map.json") continue;
+        if (
+          !name.endsWith(".json") ||
+          name === "param-map.json" ||
+          name === "area-report.json" ||
+          name === "stamp.json" ||
+          name === "soak-dashboard.json"
+        ) {
+          continue;
+        }
         const p = join(dir, name);
         try {
           const raw = readFileSync(p, "utf8");

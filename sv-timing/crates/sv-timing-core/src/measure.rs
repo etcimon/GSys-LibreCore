@@ -96,7 +96,12 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
     let seeds: BTreeMap<crate::ir::ModuleId, ConstSeed> = design
         .modules
         .iter()
-        .map(|(id, m)| (*id, ConstSeed::from_names(design.elaboration_const_names(m))))
+        .map(|(id, m)| {
+            (
+                *id,
+                ConstSeed::from_names(design.elaboration_const_names(m)),
+            )
+        })
         .collect();
     for module in design.modules.values_mut() {
         let mut base_seed = seeds
@@ -208,8 +213,7 @@ pub fn refresh_primary_locs(design: &mut TimingDesign) {
                 n.op_class,
                 Some(OperatorClass::Mul) | Some(OperatorClass::DivRem)
             );
-            let take = c > best_cost + 1e-9
-                || ((c - best_cost).abs() < 1e-9 && atomic);
+            let take = c > best_cost + 1e-9 || ((c - best_cost).abs() < 1e-9 && atomic);
             if take {
                 best_cost = c;
                 best_loc = Some(n.loc.clone());
@@ -356,13 +360,9 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         if nodes.is_empty() || existing.contains(&nodes) {
             continue;
         }
-        let launch = nodes.iter().any(|id| {
-            module
-                .nodes
-                .get(id)
-                .map(|n| n.reads_reg)
-                .unwrap_or(false)
-        });
+        let launch = nodes
+            .iter()
+            .any(|id| module.nodes.get(id).map(|n| n.reads_reg).unwrap_or(false));
         let lhs = module
             .nodes
             .get(&sink)
@@ -465,25 +465,29 @@ fn ident_tokens(s: &str) -> Vec<String> {
         if c.is_ascii_alphanumeric() || c == '_' {
             cur.push(c);
         } else if !cur.is_empty() {
-            if cur.chars().next().is_some_and(|x| x.is_ascii_alphabetic() || x == '_') {
+            if cur
+                .chars()
+                .next()
+                .is_some_and(|x| x.is_ascii_alphabetic() || x == '_')
+            {
                 out.push(std::mem::take(&mut cur));
             } else {
                 cur.clear();
             }
         }
     }
-    if !cur.is_empty() && cur.chars().next().is_some_and(|x| x.is_ascii_alphabetic() || x == '_')
+    if !cur.is_empty()
+        && cur
+            .chars()
+            .next()
+            .is_some_and(|x| x.is_ascii_alphabetic() || x == '_')
     {
         out.push(cur);
     }
     out
 }
 
-fn longest_comb_path(
-    module: &TimingModule,
-    comb: &BTreeSet<NodeId>,
-    sink: NodeId,
-) -> Vec<NodeId> {
+fn longest_comb_path(module: &TimingModule, comb: &BTreeSet<NodeId>, sink: NodeId) -> Vec<NodeId> {
     let mut best_pred: BTreeMap<NodeId, Option<NodeId>> = BTreeMap::new();
     let mut best_cost: BTreeMap<NodeId, f64> = BTreeMap::new();
     fn dfs(
@@ -500,7 +504,11 @@ fn longest_comb_path(
         if !visiting.insert(id) {
             return 0.0;
         }
-        let self_c = module.nodes.get(&id).map(|n| n.fo4_cost.max(0.0)).unwrap_or(0.0);
+        let self_c = module
+            .nodes
+            .get(&id)
+            .map(|n| n.fo4_cost.max(0.0))
+            .unwrap_or(0.0);
         let mut pred = None;
         let mut pred_c = 0.0_f64;
         if let Some(n) = module.nodes.get(&id) {
@@ -637,7 +645,9 @@ pub fn frequency_closure(design: &TimingDesign) -> FrequencyClosure {
         // under budget says nothing; a fragment over budget is still reported
         // in `intoout_failing` but `closes` follows flop-to-flop paths.
         closes: regtoreg_failing == 0 && reg_to_reg > 0,
-        max_freq_mhz: worst.map(|p| p.max_freq_mhz).unwrap_or(design.target.target_mhz),
+        max_freq_mhz: worst
+            .map(|p| p.max_freq_mhz)
+            .unwrap_or(design.target.target_mhz),
         failing_paths: failing,
         reg_to_reg_paths: reg_to_reg,
         intoout_failing,
@@ -772,7 +782,11 @@ pub fn sta_hints_from_design(design: &TimingDesign, top_n: usize) -> Vec<StaHint
         a.slack_fo4
             .partial_cmp(&b.slack_fo4)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| b.total_fo4.partial_cmp(&a.total_fo4).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| {
+                b.total_fo4
+                    .partial_cmp(&a.total_fo4)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
     for p in xpaths.iter().take(top_n.max(1)) {
         hints.push(StaHint {
@@ -845,15 +859,15 @@ pub fn tag_multi_cycle_paths(design: &mut TimingDesign) {
         // named datapath assign chain (gemm c_span) is P8, not multi-cycle.
         let budget = design.target.budget_fo4;
         let mul_heavy = path.nodes.iter().any(|id| {
-            module.nodes.get(id).map(|n| {
-                n.op_class == Some(OperatorClass::Mul) && n.fo4_cost >= (budget * 2.0).max(50.0)
-            }).unwrap_or(false)
+            module
+                .nodes
+                .get(id)
+                .map(|n| {
+                    n.op_class == Some(OperatorClass::Mul) && n.fo4_cost >= (budget * 2.0).max(50.0)
+                })
+                .unwrap_or(false)
         });
-        if mul_heavy
-            && (nlow.contains("mul")
-                || nlow.contains("mult")
-                || nlow.contains("fpnew"))
-        {
+        if mul_heavy && (nlow.contains("mul") || nlow.contains("mult") || nlow.contains("fpnew")) {
             path.multi_cycle = true;
         }
     }
@@ -1051,7 +1065,12 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
                         &empty,
                     )
                 } else {
-                    crate::parallel_timing::ParallelScratch::schedule(m, &path.nodes, budget, &empty)
+                    crate::parallel_timing::ParallelScratch::schedule(
+                        m,
+                        &path.nodes,
+                        budget,
+                        &empty,
+                    )
                 };
                 &computed
             };
@@ -1145,11 +1164,7 @@ pub fn remeasure_path_slacks_with_hints(
     }
     tag_multi_cycle_paths(design);
     let model = CostModel::default();
-    let hint_ref = if hints.is_empty() {
-        None
-    } else {
-        Some(&hints)
-    };
+    let hint_ref = if hints.is_empty() { None } else { Some(&hints) };
     crate::path_class::classify_and_adjust_paths(design, &model, hint_ref);
     crate::pass_strategy::tag_handshake_locks(design);
     crate::parallel_timing::fill_design_parallel_timing(design);
@@ -1195,14 +1210,8 @@ mod tests {
     }
 
     fn sample_path(id: PathId, slack: f64, fo4: f64) -> TimingPath {
-        let start = PathEndpoint::InputPort {
-            module: 0,
-            port: 0,
-        };
-        let end = PathEndpoint::OutputPort {
-            module: 0,
-            port: 1,
-        };
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
         TimingPath {
             id,
             region_id: 0,
@@ -1239,14 +1248,8 @@ mod tests {
             id: 1,
             region_id: 0,
             module: 0,
-            start: crate::ir::PathEndpoint::InputPort {
-                module: 0,
-                port: 0,
-            },
-            end: crate::ir::PathEndpoint::OutputPort {
-                module: 0,
-                port: 0,
-            },
+            start: crate::ir::PathEndpoint::InputPort { module: 0, port: 0 },
+            end: crate::ir::PathEndpoint::OutputPort { module: 0, port: 0 },
             path_kind: crate::ir::PathKind::InToOut,
             startpoint: "m.in0".into(),
             endpoint: "m.out0".into(),
@@ -1388,7 +1391,10 @@ mod tests {
         p.nodes = vec![1];
         design.paths.push(p);
         let ops = suggest_opportunities(&design);
-        assert!(ops.is_empty(), "multi_cycle paths must not yield insert/split ops");
+        assert!(
+            ops.is_empty(),
+            "multi_cycle paths must not yield insert/split ops"
+        );
     }
 
     #[test]
@@ -1477,8 +1483,11 @@ mod tests {
                 ports: vec![],
                 gen_loops: vec![],
                 functions: vec![],
+                function_bodies: Vec::new(),
                 package_imports: vec![],
                 instances: vec![],
+                decls: Vec::new(),
+                config_branch: false,
                 loc: loc(1),
             },
         );
@@ -1529,7 +1538,11 @@ mod tests {
                 .iter()
                 .map(|p| format!(
                     "id={} kind={:?} fo4={:.1} nodes={} note={:?}",
-                    p.id, p.path_kind, p.total_fo4, p.nodes.len(), p.class_note
+                    p.id,
+                    p.path_kind,
+                    p.total_fo4,
+                    p.nodes.len(),
+                    p.class_note
                 ))
                 .collect::<Vec<_>>()
         );

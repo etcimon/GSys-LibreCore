@@ -45,7 +45,8 @@ pub struct DebugExport {
 /// Dump timing IR as pretty JSON.
 pub fn debug_dump_ir_json(design: &TimingDesign, path: impl AsRef<Path>) -> CoreResult<()> {
     let path = path.as_ref();
-    let body = serde_json::to_vec_pretty(design).map_err(|e| CoreError::InvalidOptions(e.to_string()))?;
+    let body =
+        serde_json::to_vec_pretty(design).map_err(|e| CoreError::InvalidOptions(e.to_string()))?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| CoreError::Io {
             path: parent.to_path_buf(),
@@ -153,8 +154,15 @@ mod tests {
         let design = TimingDesign::empty(TimingTarget::new(1000.0, 20.0, 0.2));
         let ranked = RankedPaths::default();
         let names = NameTable::new();
-        let exp = debug_snapshot_pass(&dir, "pass0", &design, &ranked, &names, &DebugOptions::default())
-            .expect("snapshot");
+        let exp = debug_snapshot_pass(
+            &dir,
+            "pass0",
+            &design,
+            &ranked,
+            &names,
+            &DebugOptions::default(),
+        )
+        .expect("snapshot");
         assert_eq!(exp.files.len(), 3);
         for f in &exp.files {
             assert!(f.is_file(), "missing {}", f.display());

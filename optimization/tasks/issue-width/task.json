@@ -1,0 +1,13 @@
+{
+  "id": "issue-width",
+  "summary": "Open task. A wider issue path should cut cpu_ilp cycles. No soak has been recorded.",
+  "tests": [
+    {
+      "id": "cpu_ilp",
+      "lane": "cpu",
+      "work": 64,
+      "configs": ["alu", "issue"],
+      "asm": "asm/cpu_ilp.S"
+    }
+  ]
+}

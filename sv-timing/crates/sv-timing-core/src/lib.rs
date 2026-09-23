@@ -21,6 +21,8 @@
 //! `sv-timing-emit`. See `architecture/AUTO-CORRECT-CORE-API.md`.
 
 pub mod algo_trace;
+pub mod cleanliness;
+pub mod cone_lane;
 pub mod cost_table;
 pub mod debug_export;
 pub mod error;
@@ -32,18 +34,21 @@ pub mod lower;
 pub mod measure;
 pub mod naming;
 pub mod opt;
+pub mod parallel_timing;
 pub mod param_map;
 pub mod parse;
-pub mod path_class;
-pub mod cone_lane;
-pub mod ref_order;
-pub mod parallel_timing;
-pub mod cleanliness;
 pub mod pass_strategy;
+pub mod path_class;
+pub mod ref_order;
 pub mod relocation;
 pub mod version;
 
 pub use algo_trace::{AlgoTrace, AlgoTraceEvent};
+pub use cleanliness::{
+    algo_set_catalog, explore_module, fill_design_cleanliness, AlgoSetCandidate, AlgoSetId,
+    AlgoSetSpec, CleanlinessWeights, ModuleSolution,
+};
+pub use cone_lane::{cone_lane, ConeLane};
 pub use cost_table::{
     default_fo4_v1_embedded, load_cost_model_path, load_fo4_v1_default, parse_fo4_toml,
 };
@@ -53,7 +58,8 @@ pub use debug_export::{
 };
 pub use error::{CoreError, CoreResult};
 pub use expr::{
-    classify_binary_op, ConstClass, ConstSeed, Expr, ExprStagePlan, PartSelectKind,
+    billed_binary_class, classify_binary_op, classify_unary, user_function_op_class, ConstClass,
+    ConstSeed, Expr, ExprStagePlan, PartSelectKind,
 };
 pub use filelist::{
     load_filelist, load_filelist_default, write_filelist, FileList, FileListOptions,
@@ -64,40 +70,9 @@ pub use lower::{analyze_files, lower_unit, AnalyzeOutput, LowerOptions};
 pub use measure::{
     attribute_costs, compose_reg_to_reg_paths, frequency_closure, line_cost_map,
     max_freq_mhz_for_path, rank_paths_by_slack, rank_regions_by_cost, refresh_primary_locs,
-    remeasure_path_slacks, remeasure_path_slacks_with_hints,
-    sta_hints_from_design, suggest_opportunities, tag_multi_cycle_paths, CostModel,
-    FrequencyClosure, RankedPaths, StaHint,
-};
-pub use path_class::{
-    classify_and_adjust_paths, hints_from_exceptions, path_class_summary, path_signature,
-    PathClassHint, PathClassKind, PathClassSummary, PathException, PatternAttempt,
-    PATH_CLASS_DETECTOR_VERSION,
-};
-pub use cone_lane::{cone_lane, ConeLane};
-pub use ref_order::{
-    extend_seed_auto_const, ident_base, CallRefCount, RefOrderTree, VarRefCount,
-};
-pub use parallel_timing::{
-    fill_design_parallel_timing, ClockDomain, FunctionTiming, ModuleParallelTiming, ParallelScratch,
-    ScratchOp,
-};
-pub use cleanliness::{
-    algo_set_catalog, explore_module, fill_design_cleanliness, AlgoSetCandidate, AlgoSetId,
-    AlgoSetSpec, CleanlinessWeights, ModuleSolution,
-};
-pub use pass_strategy::{
-    admits_insert_reg, classify_path, exception_policy, is_latency_neutral_kind,
-    is_resilient_datapath, is_shallow_over_budget, path_has_indexed_restore,
-    path_has_span_family_lhs, path_is_handshake_locked, path_span_lhs_all_cut,
-    plan_from_design, s4_has_pending_resilient, s4_sibling_span_pending,
-    span_family_lhs_on_path, tag_handshake_locks, ExceptionPolicy,
-    ExceptionPolicyKind, PassPlan, PatternHit, PatternId,
-};
-pub use relocation::{
-    build_relocation_plan, is_measure_only, opportunity_to_relocation_kind,
-    preferred_actionable_kind, relocation_to_opportunity_kind, scale_correct_budget,
-    CorrectScale, RelocationCard, RelocationKind, RelocationOption, RelocationPattern,
-    RelocationPlan, RelocationSummary, RelocationTier, RELOCATION_PLAN_SCHEMA,
+    remeasure_path_slacks, remeasure_path_slacks_with_hints, sta_hints_from_design,
+    suggest_opportunities, tag_multi_cycle_paths, CostModel, FrequencyClosure, RankedPaths,
+    StaHint,
 };
 pub use naming::{
     mangle_identifier, MangleStyle, NameKind, NameOrigin, NamePolicy, NameTable, SignalNameTag,
@@ -105,8 +80,31 @@ pub use naming::{
 pub use opt::{
     resolve as resolve_opt, CacheMode, CutStrategy, OptEffort, OptLevel, OptOptions, OptOverrides,
 };
+pub use parallel_timing::{
+    fill_design_parallel_timing, ClockDomain, FunctionTiming, ModuleParallelTiming,
+    ParallelScratch, ScratchOp,
+};
 pub use param_map::ParamMap;
 pub use parse::{parse_one, parse_paths, ParseOptions, ParsedFile, ParsedUnit};
+pub use pass_strategy::{
+    admits_insert_reg, classify_path, exception_policy, is_latency_neutral_kind,
+    is_resilient_datapath, is_shallow_over_budget, path_has_indexed_restore,
+    path_has_span_family_lhs, path_is_handshake_locked, path_span_lhs_all_cut, plan_from_design,
+    s4_has_pending_resilient, s4_sibling_span_pending, span_family_lhs_on_path,
+    tag_handshake_locks, ExceptionPolicy, ExceptionPolicyKind, PassPlan, PatternHit, PatternId,
+};
+pub use path_class::{
+    classify_and_adjust_paths, hints_from_exceptions, path_class_summary, path_signature,
+    PathClassHint, PathClassKind, PathClassSummary, PathException, PatternAttempt,
+    PATH_CLASS_DETECTOR_VERSION,
+};
+pub use ref_order::{extend_seed_auto_const, ident_base, CallRefCount, RefOrderTree, VarRefCount};
+pub use relocation::{
+    build_relocation_plan, is_measure_only, opportunity_to_relocation_kind,
+    preferred_actionable_kind, relocation_to_opportunity_kind, scale_correct_budget, CorrectScale,
+    RelocationCard, RelocationKind, RelocationOption, RelocationPattern, RelocationPlan,
+    RelocationSummary, RelocationTier, RELOCATION_PLAN_SCHEMA,
+};
 pub use version::{IR_VERSION, MEASUREMENT_VERSION, PACKAGE_VERSION, PARSER_PIN_HINT};
 
 /// Library identity for report banners.

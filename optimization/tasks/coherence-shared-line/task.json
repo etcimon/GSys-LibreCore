@@ -1,0 +1,20 @@
+{
+  "id": "coherence-shared-line",
+  "summary": "Decide whether a coherence-path RTL change is worth the area it adds.",
+  "tests": [
+    {
+      "id": "coherence_shared_line",
+      "lane": "coherence",
+      "work": 2,
+      "configs": ["coherence", "l2", "cores"],
+      "asm": "asm/coherence_shared_line.S"
+    },
+    {
+      "id": "cpu_ilp",
+      "lane": "cpu",
+      "work": 64,
+      "configs": ["alu", "issue"],
+      "asm": "asm/cpu_ilp.S"
+    }
+  ]
+}

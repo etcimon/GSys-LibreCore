@@ -1,0 +1,25 @@
+{
+  "example": true,
+  "series": [
+    {
+      "change": "baseline",
+      "config": { "coherence": "on", "cores": "2" },
+      "area_au": 1000,
+      "modules": { "coherence": 80 },
+      "tests": [
+        { "id": "coherence_shared_line", "cycles": 2000 },
+        { "id": "cpu_ilp", "cycles": 400 }
+      ]
+    },
+    {
+      "change": "snoop-filter",
+      "config": { "coherence": "on", "cores": "2" },
+      "area_au": 1120,
+      "modules": { "coherence": 200 },
+      "tests": [
+        { "id": "coherence_shared_line", "cycles": 1200 },
+        { "id": "cpu_ilp", "cycles": 400 }
+      ]
+    }
+  ]
+}

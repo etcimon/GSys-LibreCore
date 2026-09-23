@@ -14,6 +14,27 @@ use crate::loc::SourceLoc;
 
 /// Opaque stable ids (allocated by lower / NameTable).
 pub type ModuleId = u32;
+/// Field names the current lowerer writes onto instances and designs.
+///
+/// Sorted. Cache keys and module blobs record this list. A loaded blob whose
+/// list does not contain every name was lowered by an older binary.
+pub fn emitted_lower_field_names() -> &'static [&'static str] {
+    &[
+        "config_branch",
+        "decls",
+        "default_text",
+        "fn_bodies",
+        "param_override_present",
+    ]
+}
+
+/// True when `stored` contains every name from [`emitted_lower_field_names`].
+pub fn lower_fields_cover(stored: &[String]) -> bool {
+    emitted_lower_field_names()
+        .iter()
+        .all(|name| stored.iter().any(|stored_name| stored_name == *name))
+}
+
 /// Signal / net / variable id within a design.
 pub type SignalId = u32;
 /// Operator or statement node id.
@@ -159,7 +180,9 @@ impl PathKind {
     pub fn from_endpoints(start: &PathEndpoint, end: &PathEndpoint) -> Self {
         use PathEndpoint::*;
         match (start, end) {
-            (RegClock { .. } | RegData { .. }, RegData { .. } | RegClock { .. }) => PathKind::RegToReg,
+            (RegClock { .. } | RegData { .. }, RegData { .. } | RegClock { .. }) => {
+                PathKind::RegToReg
+            }
             (InputPort { .. }, OutputPort { .. }) => PathKind::InToOut,
             (InputPort { .. }, RegData { .. } | RegClock { .. }) => PathKind::InToReg,
             (RegClock { .. } | RegData { .. }, OutputPort { .. }) => PathKind::RegToOut,
@@ -439,6 +462,39 @@ pub struct TypedParameter {
     pub type_ref: Option<String>,
     /// Default expression, often `scope::name` when scoped.
     pub default_expr: Option<String>,
+    /// Integer default text (`48`). Absent when the default is not an integer.
+    /// `None` on an older blob means the field was not written.
+    #[serde(default)]
+    pub default_text: Option<String>,
+}
+
+/// A function body kept off the delay graph. `attribute_costs` does not read it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionBody {
+    /// Function name.
+    pub name: String,
+    /// Text of the `return` expression. Empty when the function has no return.
+    pub return_expr: String,
+    /// Packed return dimension source, such as `[PKG_WIDTH-1:0]`.
+    pub return_dimension: String,
+    /// Integer `name = value` bindings visible in the enclosing scope.
+    pub constants: Vec<(String, i64)>,
+}
+
+/// One variable or net declaration. An empty vector that this lowerer wrote
+/// is not the same as a missing vector on an older blob.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeclSite {
+    /// Variable name.
+    pub name: String,
+    /// Type name (`logic`, or a user type such as `slot_t`).
+    pub type_name: String,
+    /// Packed dimension source, including literals (`[63:0]`, `[DEPTH-1:0][WIDTH-1:0]`).
+    pub packed_text: String,
+    /// Unpacked dimension source. Empty when there is none.
+    pub unpacked_text: String,
+    /// Source locus.
+    pub loc: SourceLoc,
 }
 
 /// ANSI/non-ANSI port summary for typed / parameterized ports.
@@ -455,6 +511,9 @@ pub struct ModulePort {
     /// True when packed dims / type sizing use hierarchical `root.member` form
     /// (parameter or struct field access), independent of any particular SoC.
     pub uses_hierarchical: bool,
+    /// Packed dimension source text. Not parsed from [`Self::packed_dims`].
+    #[serde(default)]
+    pub dimension_text: Option<String>,
 }
 
 /// `for (genvar i = 0; i < …; i++)` generate loop.
@@ -498,6 +557,12 @@ pub struct ModuleInstance {
     pub connections: Vec<PortConnection>,
     /// Source locus of the instantiation.
     pub loc: SourceLoc,
+    /// `Some(true)` when the instantiation has `#(...)`.
+    /// `Some(false)` when it does not.
+    /// `None` means the JSON field was absent (an older blob). That is not
+    /// `Some(false)`.
+    #[serde(default)]
+    pub param_override_present: Option<bool>,
 }
 
 /// Hierarchical timing path: child path + parent path through an instance.
@@ -562,10 +627,20 @@ pub struct TimingModule {
     pub gen_loops: Vec<GenerateLoop>,
     /// Function names declared in the module.
     pub functions: Vec<String>,
+    /// Function bodies. Empty when this lowerer saw none. Not a delay input.
+    #[serde(default)]
+    pub function_bodies: Vec<FunctionBody>,
     /// `import pkg::*` / package scopes referenced (any package name).
     pub package_imports: Vec<String>,
     /// Module instances nested in this module body.
     pub instances: Vec<ModuleInstance>,
+    /// Variable and net declarations. Empty when this lowerer saw none.
+    #[serde(default)]
+    pub decls: Vec<DeclSite>,
+    /// True when the module contains a procedural `if` or a generate-`if`.
+    /// Area keeps both arms. Delay does not read this flag.
+    #[serde(default)]
+    pub config_branch: bool,
     /// Source span of module header.
     pub loc: SourceLoc,
 }
@@ -576,7 +651,9 @@ impl TimingModule {
         let b = loc.byte_start;
         self.gen_loops
             .iter()
-            .filter(|g| g.loc.byte_end > g.loc.byte_start && b >= g.loc.byte_start && b < g.loc.byte_end)
+            .filter(|g| {
+                g.loc.byte_end > g.loc.byte_start && b >= g.loc.byte_start && b < g.loc.byte_end
+            })
             .map(|g| g.genvar.clone())
             .collect()
     }
@@ -593,6 +670,9 @@ pub struct TimingPackage {
     pub localparams: Vec<String>,
     /// Function names.
     pub functions: Vec<String>,
+    /// Function bodies. Not a delay input.
+    #[serde(default)]
+    pub function_bodies: Vec<FunctionBody>,
     /// Typedef / struct type names.
     pub typedefs: Vec<String>,
     /// Source span.
@@ -640,8 +720,17 @@ pub struct TimingDesign {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub module_cleanliness: BTreeMap<String, crate::cleanliness::ModuleSolution>,
     /// Pre-pass plan (P1–P9). Artifacts abort correct.
-    #[serde(default, skip_serializing_if = "crate::pass_strategy::PassPlan::is_empty_plan")]
+    #[serde(
+        default,
+        skip_serializing_if = "crate::pass_strategy::PassPlan::is_empty_plan"
+    )]
     pub pass_plan: crate::pass_strategy::PassPlan,
+    /// Lower-emitted field names stored with this design.
+    ///
+    /// Absent or empty on a blob that predates the field. A missing name is
+    /// not the same as a design that was lowered without instances.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub emitted_lower_fields: Vec<String>,
     /// Versions.
     pub versions: VersionBanner,
 }
@@ -664,6 +753,10 @@ impl TimingDesign {
             parallel_timing: BTreeMap::new(),
             module_cleanliness: BTreeMap::new(),
             pass_plan: crate::pass_strategy::PassPlan::default(),
+            emitted_lower_fields: emitted_lower_field_names()
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect(),
             versions: VersionBanner {
                 package: crate::PACKAGE_VERSION.to_string(),
                 ir: crate::IR_VERSION.to_string(),

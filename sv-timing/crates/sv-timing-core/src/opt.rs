@@ -35,8 +35,14 @@ impl OptLevel {
     /// Parse `0|1|2|3|s|z` with optional leading `-O` / `O`.
     pub fn parse(s: &str) -> Option<Self> {
         let t = s.trim();
-        let t = t.strip_prefix("-O").or_else(|| t.strip_prefix("-o")).unwrap_or(t);
-        let t = t.strip_prefix('O').or_else(|| t.strip_prefix('o')).unwrap_or(t);
+        let t = t
+            .strip_prefix("-O")
+            .or_else(|| t.strip_prefix("-o"))
+            .unwrap_or(t);
+        let t = t
+            .strip_prefix('O')
+            .or_else(|| t.strip_prefix('o'))
+            .unwrap_or(t);
         match t.to_ascii_lowercase().as_str() {
             "0" => Some(OptLevel::O0),
             "1" => Some(OptLevel::O1),
@@ -298,7 +304,10 @@ impl OptOptions {
             aw = self.area_weight,
             ra = u8::from(self.allow_reassoc),
             ef = self.effort.as_str(),
-            jb = self.jobs.map(|j| j.to_string()).unwrap_or_else(|| "auto".into()),
+            jb = self
+                .jobs
+                .map(|j| j.to_string())
+                .unwrap_or_else(|| "auto".into()),
             cm = self.cache_mode.as_str(),
         )
     }
@@ -440,10 +449,19 @@ mod tests {
             assert!((o.area_weight - aw).abs() < 1e-9, "{lvl} area_weight");
             assert!(!o.allow_reassoc, "{lvl} must not enable reassoc by preset");
         }
-        assert_eq!(OptOptions::preset(OptLevel::O3).cut_strategy, CutStrategy::BudgetFit);
-        assert_eq!(OptOptions::preset(OptLevel::O2).cut_strategy, CutStrategy::CostBalanced);
+        assert_eq!(
+            OptOptions::preset(OptLevel::O3).cut_strategy,
+            CutStrategy::BudgetFit
+        );
+        assert_eq!(
+            OptOptions::preset(OptLevel::O2).cut_strategy,
+            CutStrategy::CostBalanced
+        );
         // `-Os` is flop-minimal, so it also fills stages to the budget.
-        assert_eq!(OptOptions::preset(OptLevel::Os).cut_strategy, CutStrategy::BudgetFit);
+        assert_eq!(
+            OptOptions::preset(OptLevel::Os).cut_strategy,
+            CutStrategy::BudgetFit
+        );
         assert_eq!(OptOptions::preset(OptLevel::O3).effort, OptEffort::Thorough);
         assert_eq!(OptOptions::preset(OptLevel::O0).effort, OptEffort::Fast);
     }
@@ -498,7 +516,10 @@ mod tests {
 
     #[test]
     fn oz_stays_stateless_unless_overridden() {
-        assert_eq!(resolve(OptLevel::Oz, &OptOverrides::default()).max_stages_per_region, 0);
+        assert_eq!(
+            resolve(OptLevel::Oz, &OptOverrides::default()).max_stages_per_region,
+            0
+        );
         let forced = resolve(
             OptLevel::Oz,
             &OptOverrides {
@@ -506,7 +527,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        assert_eq!(forced.max_stages_per_region, 2, "explicit override is honored");
+        assert_eq!(
+            forced.max_stages_per_region, 2,
+            "explicit override is honored"
+        );
     }
 
     #[test]
@@ -527,7 +551,11 @@ mod tests {
         let mut jobs = base.clone();
         jobs.jobs = Some(8);
         assert_eq!(base.analysis_digest(), jobs.analysis_digest());
-        assert_ne!(base.digest(), jobs.digest(), "reporting digest still records it");
+        assert_ne!(
+            base.digest(),
+            jobs.digest(),
+            "reporting digest still records it"
+        );
         // Transform-only dials likewise.
         let mut transform = base.clone();
         transform.max_passes = 99;

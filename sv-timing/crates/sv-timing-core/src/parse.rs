@@ -85,9 +85,7 @@ pub struct ParsedUnit {
 fn build_defines(opts: &ParseOptions) -> Defines {
     let mut map: Defines = HashMap::new();
     for (name, val) in &opts.defines {
-        let text = val
-            .as_ref()
-            .map(|v| DefineText::new(v.clone(), None));
+        let text = val.as_ref().map(|v| DefineText::new(v.clone(), None));
         let define = Define::new(name.clone(), vec![], text);
         map.insert(name.clone(), Some(define));
     }
@@ -341,9 +339,9 @@ fn parse_one_file(
 pub fn parse_one(path: impl AsRef<Path>, opts: &ParseOptions) -> CoreResult<ParsedFile> {
     let p = path.as_ref().to_path_buf();
     let mut unit = parse_paths(&[p], opts)?;
-    unit.files.pop().ok_or_else(|| {
-        CoreError::InvalidOptions("parser returned no files".into())
-    })
+    unit.files
+        .pop()
+        .ok_or_else(|| CoreError::InvalidOptions("parser returned no files".into()))
 }
 
 #[cfg(test)]
@@ -455,7 +453,10 @@ mod tests {
         );
         assert_eq!(regions, 1);
         assert!(!masked.contains("dead"), "sim-only cone survived: {masked}");
-        assert!(masked.contains("live0") && masked.contains("live1"), "{masked}");
+        assert!(
+            masked.contains("live0") && masked.contains("live1"),
+            "{masked}"
+        );
 
         // A quoted pragma must not open a region, and prose must not either.
         let (quoted, regions) = mask_translate_off(
@@ -468,7 +469,10 @@ mod tests {
         let (open, regions) =
             mask_translate_off("module m;\n// pragma translate_off\nassign dead = b;\nendmodule\n");
         assert_eq!(regions, 1);
-        assert!(!open.contains("dead") && !open.contains("endmodule"), "{open}");
+        assert!(
+            !open.contains("dead") && !open.contains("endmodule"),
+            "{open}"
+        );
     }
 
     #[test]
@@ -522,8 +526,7 @@ mod tests {
         if !f.exists() {
             return;
         }
-        parse_paths(&[f], &ParseOptions::default())
-            .expect("banner // comments must parse");
+        parse_paths(&[f], &ParseOptions::default()).expect("banner // comments must parse");
     }
 
     #[test]
@@ -574,12 +577,10 @@ mod tests {
         }
         let opts = ParseOptions::default();
         let parsed = parse_one(&path, &opts).expect("parse fixture");
-        assert!(
-            parsed
-                .path
-                .file_name()
-                .is_some_and(|n| n == "comb_adder_cloud.sv")
-        );
+        assert!(parsed
+            .path
+            .file_name()
+            .is_some_and(|n| n == "comb_adder_cloud.sv"));
         let (l, c) = parsed.line_index.line_col(0);
         assert_eq!((l, c), (1, 1));
         // Tree must expose non-empty source text for the file.

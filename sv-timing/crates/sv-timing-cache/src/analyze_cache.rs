@@ -17,8 +17,7 @@ use sv_timing_core::{
 use crate::crc::{digest_files, FileDigest};
 use crate::pathkey::PathIndex;
 use crate::store::{
-    compute_pp_fingerprint, crc_set_for_file, CacheStats, ModuleIrBlob,
-    TimingCache,
+    compute_pp_fingerprint, crc_set_for_file, CacheStats, ModuleIrBlob, TimingCache,
 };
 
 /// Result of cached analyze.
@@ -68,7 +67,10 @@ pub fn analyze_with_cache(
     // with param keys). Only `analysis_digest()` participates: thread count and the
     // transform dials cannot change an analyze result, so they must not evict the cache.
     let mut param_keys = lower.param_map.keys();
-    param_keys.push(format!("#measurement={}", sv_timing_core::MEASUREMENT_VERSION));
+    param_keys.push(format!(
+        "#measurement={}",
+        sv_timing_core::MEASUREMENT_VERSION
+    ));
     param_keys.push(format!(
         "#path_class={}",
         sv_timing_core::PATH_CLASS_DETECTOR_VERSION
@@ -86,8 +88,20 @@ pub fn analyze_with_cache(
     // ai_island module from the report.
     param_keys.push(format!("#allow_parse_errors={}", parse.allow_parse_errors));
     param_keys.push(format!("#package_mode={}", lower.package_mode));
-    let design_key =
-        crate::store::compute_design_key_with_params(&pp_fp, &lower.module_filter, &digests, &param_keys);
+    param_keys.push(format!(
+        "#lower_fields={}",
+        sv_timing_core::emitted_lower_field_names().join(",")
+    ));
+    param_keys.push(format!(
+        "#param_values={}",
+        crate::fingerprint::sha256_hex(lower.param_map.value_canonical().as_bytes())
+    ));
+    let design_key = crate::store::compute_design_key_with_params(
+        &pp_fp,
+        &lower.module_filter,
+        &digests,
+        &param_keys,
+    );
 
     let mut stats = CacheStats {
         pp_fingerprint: pp_fp.clone(),
@@ -98,34 +112,40 @@ pub fn analyze_with_cache(
 
     // --- full design short-circuit ---
     if let Some(mut design) = cache.get_design(&design_key, &lower.cost_model.id)? {
-        design.target = lower.target.clone();
-        // Path-class table short-circuits exclusive detectors for known signatures.
-        let class_hints = cache
-            .get_path_class_hints(&design_key)
-            .unwrap_or_default();
-        if class_hints.is_empty() {
-            remeasure_path_slacks(&mut design);
+        if !sv_timing_core::lower_fields_cover(&design.emitted_lower_fields) {
+            // Short design blob: fall through and rebuild. Do not return it.
         } else {
-            remeasure_path_slacks_with_hints(&mut design, Some(&class_hints));
+            design.target = lower.target.clone();
+            // Path-class table short-circuits exclusive detectors for known signatures.
+            let class_hints = cache.get_path_class_hints(&design_key).unwrap_or_default();
+            if class_hints.is_empty() {
+                remeasure_path_slacks(&mut design);
+            } else {
+                remeasure_path_slacks_with_hints(&mut design, Some(&class_hints));
+            }
+            design.versions.cost_model = lower.cost_model.id.clone();
+            design.versions.ir = IR_VERSION.to_string();
+            stats.design_hit = true;
+            stats.module_hits = design.modules.len() as u32;
+            let mut names = NameTable::new();
+            for m in design.modules.values() {
+                names.reserve(&m.name, &m.name);
+            }
+            let run_id = format!("hit-{}", stats.pp_fingerprint.get(..12).unwrap_or("x"));
+            let mod_names: Vec<String> = design.module_names.keys().cloned().collect();
+            cache.record_run(&run_id, "analyze", "ok_design_hit", &mod_names)?;
+            // Refresh path_class denorm (in case classification refined).
+            let _ = cache.put_path_classes(&design_key, &design);
+            return Ok(CachedAnalyzeOutput {
+                output: AnalyzeOutput {
+                    design,
+                    names,
+                    skipped_files: Vec::new(),
+                },
+                stats,
+                from_cache: true,
+            });
         }
-        design.versions.cost_model = lower.cost_model.id.clone();
-        design.versions.ir = IR_VERSION.to_string();
-        stats.design_hit = true;
-        stats.module_hits = design.modules.len() as u32;
-        let mut names = NameTable::new();
-        for m in design.modules.values() {
-            names.reserve(&m.name, &m.name);
-        }
-        let run_id = format!("hit-{}", stats.pp_fingerprint.get(..12).unwrap_or("x"));
-        let mod_names: Vec<String> = design.module_names.keys().cloned().collect();
-        cache.record_run(&run_id, "analyze", "ok_design_hit", &mod_names)?;
-        // Refresh path_class denorm (in case classification refined).
-        let _ = cache.put_path_classes(&design_key, &design);
-        return Ok(CachedAnalyzeOutput {
-            output: AnalyzeOutput { design, names, skipped_files: Vec::new() },
-            stats,
-            from_cache: true,
-        });
     }
 
     // --- module-granular path ---
@@ -161,7 +181,16 @@ pub fn analyze_with_cache(
 
     if contrib.is_empty() {
         // Cold: full reparse
-        return full_rebuild(paths, parse, lower, cache, &digests, &pp_fp, &design_key, stats);
+        return full_rebuild(
+            paths,
+            parse,
+            lower,
+            cache,
+            &digests,
+            &pp_fp,
+            &design_key,
+            stats,
+        );
     }
 
     for (mod_name, files) in &contrib {
@@ -189,11 +218,11 @@ pub fn analyze_with_cache(
         }
         let cs = crate::fingerprint::module_crc_set(&pairs);
         match cache.get_module(mod_name, &cs)? {
-            Some(blob) => {
+            Some(blob) if sv_timing_core::lower_fields_cover(&blob.emitted_lower_fields) => {
                 stats.module_hits += 1;
                 hit_blobs.push(blob);
             }
-            None => {
+            Some(_) | None => {
                 stats.module_misses += 1;
                 miss_modules.insert(mod_name.clone());
                 for (p, _) in pairs {
@@ -258,7 +287,11 @@ pub fn analyze_with_cache(
         let mod_names: Vec<String> = design.module_names.keys().cloned().collect();
         cache.record_run(&run_id, "analyze", "ok_module_hits", &mod_names)?;
         return Ok(CachedAnalyzeOutput {
-            output: AnalyzeOutput { design, names, skipped_files: Vec::new() },
+            output: AnalyzeOutput {
+                design,
+                names,
+                skipped_files: Vec::new(),
+            },
             stats,
             from_cache: true,
         });
@@ -285,7 +318,16 @@ pub fn analyze_with_cache(
     };
 
     if miss_paths.is_empty() {
-        return full_rebuild(paths, parse, lower, cache, &digests, &pp_fp, &design_key, stats);
+        return full_rebuild(
+            paths,
+            parse,
+            lower,
+            cache,
+            &digests,
+            &pp_fp,
+            &design_key,
+            stats,
+        );
     }
 
     let mut miss_lower = lower.clone();
@@ -295,7 +337,9 @@ pub fn analyze_with_cache(
     }
 
     let miss_out = analyze_files(&miss_paths, parse, &miss_lower)?;
-    stats.module_misses = stats.module_misses.max(miss_out.design.modules.len() as u32);
+    stats.module_misses = stats
+        .module_misses
+        .max(miss_out.design.modules.len() as u32);
     // Parse skips happen during the miss reparse; carry them to the report.
     let skipped_files = miss_out.skipped_files.clone();
 
@@ -311,11 +355,15 @@ pub fn analyze_with_cache(
         for (k, v) in miss_out.design.packages {
             design.packages.insert(k, v);
         }
-        merge_miss_into(&mut design, &mut names, MissSlice {
-            modules: miss_out.design.modules,
-            module_names: miss_out.design.module_names,
-            paths: miss_out.design.paths,
-        });
+        merge_miss_into(
+            &mut design,
+            &mut names,
+            MissSlice {
+                modules: miss_out.design.modules,
+                module_names: miss_out.design.module_names,
+                paths: miss_out.design.paths,
+            },
+        );
         remeasure_path_slacks(&mut design);
         design.opportunities = sv_timing_core::suggest_opportunities(&design);
         design.versions.cost_model = lower.cost_model.id.clone();
@@ -436,6 +484,17 @@ fn assemble_from_hits(hits: &[ModuleIrBlob], lower: &LowerOptions) -> TimingDesi
     }
     design.versions.cost_model = lower.cost_model.id.clone();
     design.versions.ir = IR_VERSION.to_string();
+    let covered = hits
+        .iter()
+        .all(|blob| sv_timing_core::lower_fields_cover(&blob.emitted_lower_fields));
+    design.emitted_lower_fields = if covered {
+        sv_timing_core::emitted_lower_field_names()
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
     design
 }
 
@@ -495,6 +554,7 @@ fn commit_all(
         let blob = ModuleIrBlob {
             module: m.clone(),
             paths: paths_for_mod,
+            emitted_lower_fields: design.emitted_lower_fields.clone(),
         };
         cache.put_module(&m.name, &path_str, &cs, &blob)?;
         fm_pairs.push((path_str, m.name.clone()));
@@ -568,6 +628,121 @@ mod tests {
     }
 
     #[test]
+    fn lower_fields_miss_rebuilds() {
+        let dir = std::env::temp_dir().join(format!(
+            "svt_lf_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sv = dir.join("parent.sv");
+        std::fs::write(
+            &sv,
+            "module child #(parameter int W = 1) (input logic [7:0] a, output logic [7:0] y);\n\
+             assign y = a;\nendmodule\n\
+             module parent(input logic [7:0] a, output logic [7:0] y, output logic [7:0] z);\n\
+             child #(.W(8)) u_over (.a(a), .y(y));\n\
+             child u_plain (.a(a), .y(z));\nendmodule\n",
+        )
+        .unwrap();
+        let db = dir.join("ir.sqlite");
+        let mut cache = TimingCache::open(crate::store::CacheConfig::at(&db)).unwrap();
+        let parse = ParseOptions::default();
+        let mut lower = LowerOptions {
+            target: TimingTarget::new(1000.0, 20.0, 0.2),
+            cost_model: load_fo4_v1_default(),
+            module_filter: vec!["parent".into(), "child".into()],
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let paths = vec![sv];
+
+        let fresh = analyze_with_cache(&paths, &parse, &lower, &mut cache).expect("fresh");
+        let over = fresh
+            .output
+            .design
+            .instances
+            .iter()
+            .find(|inst| inst.instance_name == "u_over")
+            .expect("u_over");
+        let plain = fresh
+            .output
+            .design
+            .instances
+            .iter()
+            .find(|inst| inst.instance_name == "u_plain")
+            .expect("u_plain");
+        assert_eq!(over.param_override_present, Some(true));
+        assert_eq!(plain.param_override_present, Some(false));
+
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let rows: Vec<(String, String, String, Vec<u8>)> = conn
+            .prepare("SELECT module_name, file_path, crc_set, ir_blob FROM modules")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        for (name, file_path, crc_set, bytes) in rows {
+            let mut blob: crate::store::ModuleIrBlob = serde_json::from_slice(&bytes).unwrap();
+            blob.emitted_lower_fields.clear();
+            cache
+                .put_module(&name, &file_path, &crc_set, &blob)
+                .unwrap();
+        }
+        conn.execute("DELETE FROM designs", []).unwrap();
+        drop(conn);
+
+        let rebuilt = analyze_with_cache(&paths, &parse, &lower, &mut cache).expect("rebuild");
+        assert!(!rebuilt.stats.design_hit);
+        for inst in &rebuilt.output.design.instances {
+            assert!(
+                inst.param_override_present.is_some(),
+                "{} decoded as absent",
+                inst.instance_name
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn param_value_64_and_64_0_change_design_key() {
+        let dir = std::env::temp_dir().join(format!(
+            "svt_pv_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sv = write_mod(&dir, "wmod", "  always_comb y = a + b;");
+        let db = dir.join("ir.sqlite");
+        let mut cache = TimingCache::open(crate::store::CacheConfig::at(&db)).unwrap();
+        let parse = ParseOptions::default();
+        let mut lower = LowerOptions {
+            target: TimingTarget::new(1000.0, 20.0, 0.2),
+            cost_model: load_fo4_v1_default(),
+            module_filter: vec!["wmod".into()],
+            ..Default::default()
+        };
+        lower.param_map.insert("W", serde_json::json!(64));
+        let integer = analyze_with_cache(&[sv.clone()], &parse, &lower, &mut cache).unwrap();
+        lower
+            .param_map
+            .insert("W", serde_json::from_str("64.0").unwrap());
+        let float = analyze_with_cache(&[sv], &parse, &lower, &mut cache).unwrap();
+        assert_ne!(integer.stats.design_key, float.stats.design_key);
+        assert!(!float.stats.design_hit);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn opt_level_change_invalidates_design_key() {
         let dir = std::env::temp_dir().join(format!(
             "svt_opt_{}",
@@ -601,8 +776,14 @@ mod tests {
         let mut other = lower.clone();
         other.opt = sv_timing_core::OptOptions::preset(sv_timing_core::OptLevel::O3);
         let r3 = analyze_with_cache(&paths, &parse, &other, &mut cache).expect("opt change");
-        assert_ne!(r2.stats.design_key, r3.stats.design_key, "dial digest must key the design");
-        assert!(!r3.stats.design_hit, "-O change must not reuse the -O2 blob");
+        assert_ne!(
+            r2.stats.design_key, r3.stats.design_key,
+            "dial digest must key the design"
+        );
+        assert!(
+            !r3.stats.design_hit,
+            "-O change must not reuse the -O2 blob"
+        );
 
         // Thread count cannot change a result, so it must NOT evict the cache.
         let mut jobs = lower.clone();
@@ -660,7 +841,10 @@ mod tests {
         .unwrap();
 
         let r3 = analyze_with_cache(&paths, &parse, &lower, &mut cache).expect("partial");
-        assert!(!r3.stats.design_hit, "design key must change when moda changes");
+        assert!(
+            !r3.stats.design_hit,
+            "design key must change when moda changes"
+        );
         // modb IR hit, moda miss → partial reparse
         assert!(
             r3.stats.module_hits >= 1,
