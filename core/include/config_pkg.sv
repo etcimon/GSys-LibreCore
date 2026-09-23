@@ -538,6 +538,9 @@ package config_pkg;
     int unsigned SliceMaxRunahead;    // max A-ahead-of-B in-flight
     // U5 full OoO production path (config-gated; illegal with SliceOoOEn)
     bit          OoOEn;
+    // T6b: when 1 the SMT thread selector switches only on a drained backend
+    // (scoreboard and store queues empty); 0 permits mixed residency.
+    bit          SmtDrainedHandoff;
     // FSE: deep speculation depth plane (architecture/speculative-execution/)
     // 0 = legacy STQ depth 4 + package-stated buffers; 1 = auto floors + deeper STQ
     bit          DeepSpecEn;
@@ -698,6 +701,7 @@ package config_pkg;
     int unsigned SliceBiqDepth;
     int unsigned SliceMaxRunahead;
     bit          OoOEn;
+    bit          SmtDrainedHandoff;
     int unsigned RobEntries;
     int unsigned PrfEntries;
     int unsigned IqEntries;
@@ -991,6 +995,13 @@ package config_pkg;
     // strictDual on g6lc64_smt2_ooo_int and the in-order anchor is exact.
     // FP multi-hart is refused pending hart-tagged lazy-FS (T6b).
     assert (!(Cfg.OoOEn && Cfg.NrHarts > 1 && Cfg.FpPresent));
+    // Mixed residency is T6b and stays qualification-gated: clearing the drain
+    // gate is legal only on an OoO multi-hart configuration, and until the T6b
+    // exit only behind the G6LC_OOO_SMT_MIXED_QUALIFY define.
+    assert (Cfg.SmtDrainedHandoff || (Cfg.OoOEn && Cfg.NrHarts > 1));
+`ifndef G6LC_OOO_SMT_MIXED_QUALIFY
+    assert (Cfg.SmtDrainedHandoff);
+`endif
 `ifndef G6LC_OOO_FP_QUALIFY
     // Single-hart FP stays illegal in production. G6LC_OOO_FP_QUALIFY exists
     // only for the T5 qualification build that produces the behavioural

@@ -935,6 +935,9 @@ module issue_read_operands
             {{CVA6Cfg.XLEN - CVA6Cfg.FLen{1'b0}}, operand_c_regfile[i]} : issue_instr_i[i].result;
       end
       fu_data_n[i].trans_id  = issue_instr_i[i].trans_id;
+      // T6b: carry the issuing instruction's hart so the LSU can tag the
+      // store's speculative-buffer entry and the load's forward query.
+      fu_data_n[i].hart      = issue_instr_i[i].hart_id;
       fu_data_n[i].fu        = issue_instr_i[i].fu;
       fu_data_n[i].operation = issue_instr_i[i].op;
       if (CVA6Cfg.RVH) begin

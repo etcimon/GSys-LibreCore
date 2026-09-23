@@ -228,7 +228,7 @@ module tb_g6lc_review_load_cancel;
     logic valid; logic [63:0] vaddr; logic [31:0] tinst;
     logic hs_ld_st_inst,hlvx_inst,overflow,g_overflow;
     logic [63:0] data,data_cmp,data_hi,data_cmp_hi; logic [7:0] be;
-    fu_t fu; fu_op operation; logic [2:0] trans_id;
+    fu_t fu; fu_op operation; logic [2:0] trans_id; logic hart;
     logic is_speculative_load,is_speculative_load_miss;
   } ctrl_t;
   typedef struct packed {
@@ -269,7 +269,7 @@ module tb_g6lc_review_load_cancel;
     .trans_id_o(tid),.result_o(result),.ex_o(ex),.mbe_i(1'b0),
     .translation_req_o(),.vaddr_o(),.tinst_o(),.hs_ld_st_inst_o(),.hlvx_inst_o(),
     .paddr_i(56'h80001000),.ex_i(ex_in),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
-    .page_offset_o(),.load_paddr_o(),.load_paddr_valid_o(),.load_trans_id_o(),
+    .page_offset_o(),.load_paddr_o(),.load_paddr_valid_o(),.load_trans_id_o(),.load_hart_o(),
     .page_offset_matches_i(match_page),.store_buffer_empty_i(1'b0),.no_st_pending_i(nsp),
     .st_fwd_valid_i(fwd_valid),.st_fwd_data_i(64'h12345666),.st_fwd_be_i(8'hff),
     .commit_tran_id_i('0),.req_port_i(resp),.req_port_o(req),
@@ -496,7 +496,7 @@ module tb_g6lc_review_iq;
     return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
-  typedef struct packed {fu_t fu; fu_op op; logic [3:0] trans_id; logic [31:0] pc;} sbe_t;
+  typedef struct packed {fu_t fu; fu_op op; logic [3:0] trans_id; logic hart_id; logic [31:0] pc;} sbe_t;
   typedef struct packed {sbe_t s; logic [31:0] orig; logic [3:0] p1,p2,pd; bit r1,r2;} entry_t;
   entry_t reference_q[$];
   logic clk=0,rst_n=0,flush=0,mem_stall=0,full;
@@ -520,7 +520,7 @@ module tb_g6lc_review_iq;
     .disp_rs1_ready_i(r1),.disp_rs2_ready_i(r2),.disp_may_bypass_i(bypass),.disp_ack_o(da),.full_o(full),
     .wb_valid_i(wv),.wb_prd_i(wp),
     .issue_sbe_o(is),.issue_orig_o(ii),.issue_prd_o(ip),.issue_valid_o(iv),.issue_ack_i(ia),.mem_stall_i(mem_stall),
-    .st_live_mask_i(st_live),.st_unresolved_mask_i(st_unresolved),.commit_ptr_i(commit_ptr),.sb_live_i('1));
+    .st_live_mask_i(st_live),.st_unresolved_mask_i(st_unresolved),.st_hart_mask_i(st_live),.commit_ptr_i(commit_ptr),.sb_live_i('1));
   task automatic tick;
     clk=1; #2; clk=0; #2;
   endtask
@@ -530,7 +530,7 @@ module tb_g6lc_review_iq;
   // Direct gate checks (scenarios 5-9): dispatch one entry, then read the
   // presented issue valid for it against the expected gate verdict.
   task automatic offer_op(input int id,input fu_t fu,input fu_op op,input bit may_bypass);
-    dv[0]=1;ds[0]='{fu:fu,op:op,trans_id:4'(id),pc:32'h1000+32'(id)*4};
+    dv[0]=1;ds[0]='{fu:fu,op:op,trans_id:4'(id),hart_id:1'b0,pc:32'h1000+32'(id)*4};
     di[0]=32'h13000000+32'(id);p1[0]=0;p2[0]=0;pd[0]=4'(id);r1[0]=1;r2[0]=1;bypass[0]=may_bypass;
     tick();clear_inputs();#2;
   endtask
@@ -589,7 +589,7 @@ module tb_g6lc_review_iq;
   endtask
   task automatic offer(input int port, input int id, input fu_t fu,
                        input int src, input int dst, input bit ready);
-    dv[port]=1;ds[port]='{fu:fu,op:ADD,trans_id:4'(id),pc:32'h1000+32'(id)*4};
+    dv[port]=1;ds[port]='{fu:fu,op:ADD,trans_id:4'(id),hart_id:1'b0,pc:32'h1000+32'(id)*4};
     di[port]=32'h13000000+32'(id);p1[port]=4'(src);p2[port]=0;pd[port]=4'(dst);r1[port]=ready;r2[port]=1;
   endtask
   initial begin
@@ -636,7 +636,7 @@ module tb_g6lc_review_iq;
       // A ready younger store issues ahead of an older not-ready store: the
       // dispatch-time slot reservation replaced program-order store issue.
       8:begin
-        dv[0]=1;ds[0]='{fu:STORE,op:SD,trans_id:4'd1,pc:32'h1004};di[0]=32'h13000001;pd[0]=4'd1;r1[0]=0;r2[0]=1;
+        dv[0]=1;ds[0]='{fu:STORE,op:SD,trans_id:4'd1,hart_id:1'b0,pc:32'h1004};di[0]=32'h13000001;pd[0]=4'd1;r1[0]=0;r2[0]=1;
         tick();clear_inputs();
         offer_op(3,STORE,SD,0);expect_issue(1,"IQ_STORE_OOO");
         if(is[0].trans_id!==4'd3)$fatal(1,"IQ_STORE_OOO tid=%0d",is[0].trans_id);
@@ -1260,15 +1260,19 @@ endmodule
 
 module tb_g6lc_review_lsq;
   import ariane_pkg::*;
+  // T6b hart-tag cell: HARTS=1 reproduces the single-hart geometry; HARTS=2
+  // runs the same scenarios on hart 0 plus the cross-hart suite 19-24.
+  parameter int unsigned HARTS=1;
   function automatic config_pkg::cva6_cfg_t configuration();
     config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
-    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.NrWbPorts=2;
+    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NrHarts=HARTS;c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.NrWbPorts=2;
     c.NrCommitPorts=2;return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
   logic clk=0,rst_n=0;
   logic [1:0] ld_alloc='0,st_alloc='0,addr_v='0,addr_is_st='0,st_data_v='0,cmpl_v='0,cmpl_st='0;
   logic [1:0][3:0] alloc_id='0,addr_id='0,st_data_id='0,cmpl_id='0;
+  logic [1:0] alloc_hart='0;
   logic [1:0][55:0] addr='0;
   logic [1:0][1:0] addr_size='0;
   logic [1:0][63:0] st_data='0;
@@ -1278,17 +1282,20 @@ module tb_g6lc_review_lsq;
   logic [55:0] ld_addr='0;
   logic [1:0] ld_size=2'b11;
   logic [3:0] ld_id='0,commit_ptr='0;
+  logic ld_hart='0;
   logic flush='0;
   logic [15:0] cancel_mask='0;
   logic pend,fwd,stall,busy,ldf,stf,viol;
   logic [2:0] ldfree,stfree;
   logic [15:0] st_mask,st_unresolved;
+  logic [HARTS-1:0][15:0] st_hart_mask;
   logic [63:0] fwd_data;
   logic [3:0] viol_id;
   int scenario;bit negative;
   g6lc_lsq #(.CVA6Cfg(C),.LD_ENTRIES(4),.ST_ENTRIES(4),.NR_ALLOC(2),.NR_UPDATE(2)) dut(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancel_mask),.sb_live_i('1),
-    .ld_alloc_i(ld_alloc),.st_alloc_i(st_alloc),.alloc_id_i(alloc_id),.alloc_pc_i('0),
+    .ld_alloc_i(ld_alloc),.st_alloc_i(st_alloc),.alloc_id_i(alloc_id),.alloc_hart_i(alloc_hart),
+    .alloc_pc_i('0),
     .ld_full_o(ldf),.st_full_o(stf),.ld_free_o(ldfree),.st_free_o(stfree),
     .addr_valid_i(addr_v),.addr_id_i(addr_id),.addr_i(addr),
     .addr_is_st_i(addr_is_st),.addr_size_i(addr_size),
@@ -1296,8 +1303,9 @@ module tb_g6lc_review_lsq;
     .complete_valid_i(cmpl_v),.complete_id_i(cmpl_id),.complete_is_st_i(cmpl_st),
     .commit_st_i(commit_st),.commit_id_i(commit_id),.commit_ptr_i(commit_ptr),
     .ld_query_i(ld_query),.ld_query_addr_i(ld_addr),.ld_query_size_i(ld_size),
-    .ld_query_id_i(ld_id),
-    .st_live_mask_o(st_mask),.st_unresolved_mask_o(st_unresolved),.store_pending_o(pend),.stl_forward_o(fwd),
+    .ld_query_id_i(ld_id),.ld_query_hart_i(ld_hart),
+    .st_live_mask_o(st_mask),.st_unresolved_mask_o(st_unresolved),
+    .st_hart_mask_o(st_hart_mask),.store_pending_o(pend),.stl_forward_o(fwd),
     .stl_data_o(fwd_data),.stl_stall_o(stall),.lsq_busy_o(busy),
     .mem_violation_o(viol),.mem_violation_id_o(viol_id),.mem_violation_pc_o());
   // Same clocking discipline as the dispatch fixture: free-running clock, drive
@@ -1603,6 +1611,91 @@ module tb_g6lc_review_lsq;
         if(st_unresolved!==(negative?16'h000A:16'h0008))
           $fatal(1,"LSQ_UNRESOLVED_MASK got=%h want=0008",st_unresolved);
         if(st_mask!==16'h000A)$fatal(1,"LSQ_UNRESOLVED_LIVE got=%h want=000a",st_mask);
+      end
+      // ---- T6b hart-tag scenarios (HARTS=2 only) ----
+      // L-A: a peer hart's unresolved older store must not stall or forward
+      // to this hart's load — peer stores become visible only at commit.
+      19:begin
+        if(HARTS!=2)$fatal(1,"LSQ_HART_SETUP");
+        st_alloc=2'b01;alloc_id[0]=4'd1;alloc_hart[0]=1'b0;
+        drive();st_alloc='0;alloc_id='0;alloc_hart='0;
+        ld_query=1;ld_addr=56'h2000;ld_id=4'd2;ld_hart=1'b1;
+        presample();
+        if(stall!==negative||fwd)
+          $fatal(1,"LSQ_HART_PEER_STALL fwd=%b stall=%b",fwd,stall);
+        ld_query=0;ld_hart='0;
+      end
+      // L-B: the same-hart unresolved older store still stalls.
+      20:begin
+        if(HARTS!=2)$fatal(1,"LSQ_HART_SETUP");
+        st_alloc=2'b01;alloc_id[0]=4'd1;alloc_hart[0]=1'b1;
+        drive();st_alloc='0;alloc_id='0;alloc_hart='0;
+        ld_query=1;ld_addr=56'h2000;ld_id=4'd2;ld_hart=1'b1;
+        presample();
+        if(stall!==!negative||fwd)
+          $fatal(1,"LSQ_HART_OWN_STALL fwd=%b stall=%b",fwd,stall);
+        ld_query=0;ld_hart='0;
+      end
+      // L-C: a resolved peer store does not forward to this hart; the same
+      // store does forward to its own hart's load.
+      21:begin
+        if(HARTS!=2)$fatal(1,"LSQ_HART_SETUP");
+        st_alloc=2'b01;alloc_id[0]=4'd1;alloc_hart[0]=1'b0;
+        drive();st_alloc='0;alloc_id='0;alloc_hart='0;
+        addr_v=2'b01;addr_is_st=2'b01;addr_id[0]=4'd1;addr[0]=56'h2000;addr_size[0]=2'b11;
+        drive();addr_v='0;addr_is_st='0;addr_id='0;
+        st_data_v=2'b01;st_data_id[0]=4'd1;st_data[0]=64'hDDDD;
+        drive();st_data_v='0;st_data_id='0;
+        ld_query=1;ld_addr=56'h2000;ld_id=4'd2;ld_hart=1'b1;
+        presample();
+        if((fwd||stall)!==(negative?1'b1:1'b0))
+          $fatal(1,"LSQ_HART_PEER_FWD fwd=%b stall=%b",fwd,stall);
+        ld_hart=1'b0;
+        presample();
+        if(!fwd||stall||fwd_data!==64'hDDDD)
+          $fatal(1,"LSQ_HART_OWN_FWD fwd=%b stall=%b data=%h",fwd,stall,fwd_data);
+        ld_query=0;ld_hart='0;
+      end
+      // L-D: an OLDER peer-hart store resolving after this hart's load read is
+      // no memory-order violation — the queues are per-hart ordered.
+      22:begin
+        if(HARTS!=2)$fatal(1,"LSQ_HART_SETUP");
+        st_alloc=2'b01;alloc_id[0]=4'd1;alloc_hart[0]=1'b0;
+        ld_alloc=2'b10;alloc_id[1]=4'd2;alloc_hart[1]=1'b1;
+        drive();st_alloc='0;ld_alloc='0;alloc_id='0;alloc_hart='0;
+        resolve_load(4'd2,56'h2000,2'b11);
+        resolve_store(4'd1,56'h2000,2'b11);
+        presample();
+        if(viol!==negative)$fatal(1,"LSQ_HART_PEER_VIOL viol=%b",viol);
+        addr_v='0;
+      end
+      // L-E: the same-hart older store resolving late still reports the
+      // violation against the load that already read.
+      23:begin
+        if(HARTS!=2)$fatal(1,"LSQ_HART_SETUP");
+        st_alloc=2'b01;alloc_id[0]=4'd1;alloc_hart[0]=1'b1;
+        ld_alloc=2'b10;alloc_id[1]=4'd2;alloc_hart[1]=1'b1;
+        drive();st_alloc='0;ld_alloc='0;alloc_id='0;alloc_hart='0;
+        resolve_load(4'd2,56'h2000,2'b11);
+        resolve_store(4'd1,56'h2000,2'b11);
+        presample();
+        if(viol!==!negative||(viol&&viol_id!==4'd2))
+          $fatal(1,"LSQ_HART_OWN_VIOL viol=%b id=%0d",viol,viol_id);
+        addr_v='0;
+      end
+      // L-F: the unresolved mask is global; the per-hart masks partition it.
+      24:begin
+        if(HARTS!=2)$fatal(1,"LSQ_HART_SETUP");
+        st_alloc=2'b01;alloc_id[0]=4'd2;alloc_hart[0]=1'b0;
+        drive();st_alloc='0;alloc_id='0;alloc_hart='0;
+        st_alloc=2'b01;alloc_id[0]=4'd5;alloc_hart[0]=1'b1;
+        drive();st_alloc='0;alloc_id='0;alloc_hart='0;
+        presample();
+        if(st_unresolved!==(negative?16'hFFFF:16'h0024))
+          $fatal(1,"LSQ_HART_MASK unresolved=%h want=0024",st_unresolved);
+        if(st_hart_mask[0]!==16'h0004||st_hart_mask[1]!==16'h0020)
+          $fatal(1,"LSQ_HART_MASK hart0=%h hart1=%h want=0004/0020",
+                 st_hart_mask[0],st_hart_mask[1]);
       end
       default:$fatal(1,"LSQ_SCENARIO");
     endcase
@@ -2201,6 +2294,51 @@ module tb_g6lc_review_dispatch;
         if(iv!=1||issued[0].trans_id!=2||op_a[0]!=64'h1234)
           $fatal(1,"DISPATCH_LATE_WAKE_COMMIT valid=%b data=%h",iv,op_a[0]);
       end
+      // D-A (T6b): a PEER hart's unresolved older store must not block this
+      // hart's load. Same shape as scenario 3 — the store's base comes from
+      // an ALU that never writes back, so the store stays unresolved — but
+      // the load belongs to hart 1 while the store is hart 0.
+      30:begin
+        if(HARTS!=2)$fatal(1,"DISPATCH_HART_SETUP");
+        ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=5'd5;ds[0].pc=64'h0ffc;ds[0].trans_id=0;ds[0].hart_id=0;
+        ds[1].fu=STORE;ds[1].op=SD;ds[1].rs1=5'd5;ds[1].pc=64'h1000;ds[1].trans_id=1;ds[1].hart_id=0;dv=2'b11;
+        presample();if(!da[0]||!da[1])$fatal(1,"DISPATCH_ADMISSION");
+        drive();dv=0;ds[0]='0;ds[1]='0;
+        ds[0].fu=LOAD;ds[0].op=LD;ds[0].rs1=5'd6;ds[0].pc=64'h1004;ds[0].trans_id=2;ds[0].hart_id=1;dv=2'b01;
+        presample();if(!da[0])$fatal(1,"DISPATCH_ADMISSION2");
+        drive();dv=0;
+        repeat(8)begin
+          presample();
+          for(int p=0;p<2;p++)if(iv[p])begin
+            if(issued[p].trans_id==4'd1)seen_st++;
+            if(issued[p].trans_id==4'd2)seen_ld++;
+          end
+          drive();
+        end
+        if(seen_st!=0)$fatal(1,"DISPATCH_STORE_PROGRESS scenario=30 issued=%0d",seen_st);
+        if(seen_ld!=(1^negative))$fatal(1,"DISPATCH_HART_LOAD_PEER ld=%0d",seen_ld);
+      end
+      // D-B (T6b): the same-hart unresolved older store still blocks.
+      31:begin
+        if(HARTS!=2)$fatal(1,"DISPATCH_HART_SETUP");
+        ds[0].fu=ALU;ds[0].op=ADD;ds[0].rd=5'd5;ds[0].pc=64'h0ffc;ds[0].trans_id=0;ds[0].hart_id=1;
+        ds[1].fu=STORE;ds[1].op=SD;ds[1].rs1=5'd5;ds[1].pc=64'h1000;ds[1].trans_id=1;ds[1].hart_id=1;dv=2'b11;
+        presample();if(!da[0]||!da[1])$fatal(1,"DISPATCH_ADMISSION");
+        drive();dv=0;ds[0]='0;ds[1]='0;
+        ds[0].fu=LOAD;ds[0].op=LD;ds[0].rs1=5'd6;ds[0].pc=64'h1004;ds[0].trans_id=2;ds[0].hart_id=1;dv=2'b01;
+        presample();if(!da[0])$fatal(1,"DISPATCH_ADMISSION2");
+        drive();dv=0;
+        repeat(8)begin
+          presample();
+          for(int p=0;p<2;p++)if(iv[p])begin
+            if(issued[p].trans_id==4'd1)seen_st++;
+            if(issued[p].trans_id==4'd2)seen_ld++;
+          end
+          drive();
+        end
+        if(seen_st!=0)$fatal(1,"DISPATCH_STORE_PROGRESS scenario=31 issued=%0d",seen_st);
+        if(seen_ld!=((MDP?1:0)^negative))$fatal(1,"DISPATCH_HART_LOAD_OWN ld=%0d",seen_ld);
+      end
       default:$fatal(1,"DISPATCH_SCENARIO");
     endcase
     $display("RTL_REVIEW_PASS dispatch scenario=%0d",scenario);$finish;
@@ -2552,6 +2690,8 @@ module tb_g6lc_review_store_recovery;
   // OoO program-order keys: the querying load's tid and the age anchor
   // (oldest live instruction, which is also the tid commit is retiring).
   logic[2:0] load_tid=7,commit_tid=0;
+  // T6b: store/load hart tags — inert at NH==1 or OOO==0.
+  logic st_hart=0,load_hart=0;
   logic[55:0] address=56'h1010,load_address=56'h1010;
   logic[63:0] data=64'hAAAA,fwd_data;
   logic[7:0] fwd_be;
@@ -2565,6 +2705,7 @@ module tb_g6lc_review_store_recovery;
     .stall_st_pending_i(1'b0),.no_st_pending_o(no_pending),.store_buffer_empty_o(empty),
     .page_offset_i(load_address[11:0]),.load_paddr_i(load_address),.load_paddr_valid_i(load_v),
     .load_trans_id_i(load_tid),.commit_trans_id_i(commit_tid),
+    .load_hart_i(load_hart),.st_hart_i(st_hart),
     .dcache_wbuffer_empty_i(1'b1),.page_offset_matches_o(),.st_fwd_valid_o(fwd),
     .st_fwd_data_o(fwd_data),.st_fwd_be_o(fwd_be),.commit_i(commit),
     .commit_ready_o(commit_ready),.ready_o(ready),.valid_i(valid),.valid_without_flush_i(valid),
@@ -2611,6 +2752,24 @@ module tb_g6lc_review_store_recovery;
       commit_tid=1;commit=1;drive();commit=0;#4;
       if(!req.data_req||{req.address_tag,req.address_index}!=(negative?56'h1030:56'h1040)||
          req.data_wdata!=(negative?64'hCCCC:64'hDDDD))$fatal(1,"STORE_RECOVERY_PROGRAM_ORDER");
+    end else if(scenario==6)begin
+      // T6b: a peer hart's speculative store must not forward to this hart's
+      // load — peer stores become visible only at commit.
+      if(NH!=2||!OOO)$fatal(1,"STORE_RECOVERY_HART_SETUP");
+      flush=1;drive();flush=0;drive();
+      valid=1;tid=1;st_hart=1;address=56'h1010;data=64'hEEEE;drive();valid=0;st_hart=0;
+      load_address=56'h1010;load_tid=2;load_hart=0;load_v=1;#4;
+      if(fwd!==negative)$fatal(1,"STORE_RECOVERY_HART_PEER_FWD fwd=%b",fwd);
+      drive();load_v=0;
+    end else if(scenario==7)begin
+      // T6b: the same-hart store still forwards under the ownership rule.
+      if(NH!=2||!OOO)$fatal(1,"STORE_RECOVERY_HART_SETUP");
+      flush=1;drive();flush=0;drive();
+      valid=1;tid=1;st_hart=1;address=56'h1010;data=64'hEEEE;drive();valid=0;st_hart=0;
+      load_address=56'h1010;load_tid=2;load_hart=1;load_v=1;#4;
+      if(fwd!==!negative||fwd_data!==64'hEEEE)
+        $fatal(1,"STORE_RECOVERY_HART_OWN_FWD fwd=%b data=%h",fwd,fwd_data);
+      drive();load_v=0;load_hart=0;
     end else $fatal(1,"STORE_RECOVERY_SCENARIO");
     $display("RTL_REVIEW_PASS store_recovery scenario=%0d",scenario);$finish;
   end

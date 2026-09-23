@@ -26,6 +26,9 @@ module g6lc_lsq #(
     input  logic [NR_ALLOC-1:0]                         ld_alloc_i,
     input  logic [NR_ALLOC-1:0]                         st_alloc_i,
     input  logic [NR_ALLOC-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] alloc_id_i,
+    // T6b: allocating op's SMT hart. Entries order, forward and replay only
+    // within their own hart (mixed residency); constant-0 when NrHarts==1.
+    input  logic [NR_ALLOC-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] alloc_hart_i,
     // Allocating op's PC (loads only need it: reported on a memory-order
     // violation so the memdep predictor can train on the violating load).
     input  logic [NR_ALLOC-1:0][CVA6Cfg.VLEN-1:0]       alloc_pc_i,
@@ -65,12 +68,19 @@ module g6lc_lsq #(
     input  logic [CVA6Cfg.PLEN-1:0] ld_query_addr_i,
     input  logic [1:0]  ld_query_size_i,
     input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] ld_query_id_i,
+    // T6b: querying load's SMT hart — the query sees only the load's own
+    // hart's stores. Constant-0 when NrHarts==1.
+    input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] ld_query_hart_i,
     // Live store tids (one bit per scoreboard slot) for the issue queue's
     // per-entry age gate.
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] st_live_mask_o,
     // Same keying restricted to stores whose address is still unresolved:
     // only those can still alias a younger load that has not yet run its CAM.
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] st_unresolved_mask_o,
+    // T6b: st_live_mask_o partitioned by owning hart — st_hart_mask_o[h] is
+    // the live stores that hart h's loads must order against. The IQ masks
+    // the unresolved gate with the entry's own hart.
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][CVA6Cfg.NR_SB_ENTRIES-1:0] st_hart_mask_o,
     output logic        store_pending_o,
     output logic        stl_forward_o,
     output logic [CVA6Cfg.XLEN-1:0] stl_data_o,
@@ -82,11 +92,14 @@ module g6lc_lsq #(
     output logic [CVA6Cfg.VLEN-1:0]          mem_violation_pc_o
 );
 
+  localparam int unsigned HID_W = $clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2);
+
   typedef struct packed {
     logic                             valid;
     logic                             addr_v;
     logic                             data_v;
     logic [CVA6Cfg.TRANS_ID_BITS-1:0] id;
+    logic [HID_W-1:0]                 hart;
     logic [CVA6Cfg.PLEN-1:0]          addr;
     logic [CVA6Cfg.XLEN-1:0]          data;
     logic [1:0]                       size;
@@ -100,6 +113,7 @@ module g6lc_lsq #(
     // violation scan can replay. Released once no older store can resolve.
     logic                             done;
     logic [CVA6Cfg.TRANS_ID_BITS-1:0] id;
+    logic [HID_W-1:0]                 hart;
     logic [CVA6Cfg.PLEN-1:0]          addr;
     logic [1:0]                       size;
     logic [CVA6Cfg.VLEN-1:0]          pc;
@@ -179,6 +193,7 @@ module g6lc_lsq #(
             ld_d[i].addr_v = 1'b0;
             ld_d[i].done = 1'b0;
             ld_d[i].id = alloc_id_i[p];
+            ld_d[i].hart = alloc_hart_i[p];
             ld_d[i].addr = '0;
             ld_d[i].size = '0;
             ld_d[i].pc = alloc_pc_i[p];
@@ -194,6 +209,7 @@ module g6lc_lsq #(
             st_d[i].addr_v = 1'b0;
             st_d[i].data_v = 1'b0;
             st_d[i].id = alloc_id_i[p];
+            st_d[i].hart = alloc_hart_i[p];
             st_d[i].addr = '0;
             st_d[i].data = '0;
             st_d[i].size = 2'b10;
@@ -250,7 +266,7 @@ module g6lc_lsq #(
       older_unresolved = 1'b0;
       if (ld_q[i].valid && ld_d[i].done) begin
         for (int unsigned j = 0; j < ST_ENTRIES; j++)
-          if (st_d[j].valid && !st_d[j].addr_v &&
+          if (st_d[j].valid && !st_d[j].addr_v && st_d[j].hart == ld_q[i].hart &&
               g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(st_d[j].id), 32'(ld_q[i].id), 32'(commit_ptr_i)))
             older_unresolved = 1'b1;
         if (!older_unresolved) ld_d[i].valid = 1'b0;
@@ -290,11 +306,13 @@ module g6lc_lsq #(
     lsq_busy_o = 1'b0;
     st_live_mask_o = '0;
     st_unresolved_mask_o = '0;
+    st_hart_mask_o = '0;
     for (int unsigned i = 0; i < ST_ENTRIES; i++)
       if (st_q[i].valid) begin
         store_pending_o = 1'b1;
         lsq_busy_o = 1'b1;
         st_live_mask_o[st_q[i].id] = 1'b1;
+        st_hart_mask_o[st_q[i].hart][st_q[i].id] = 1'b1;
         if (!st_q[i].addr_v) st_unresolved_mask_o[st_q[i].id] = 1'b1;
       end
     for (int unsigned i = 0; i < LD_ENTRIES; i++)
@@ -341,7 +359,7 @@ module g6lc_lsq #(
       for (int unsigned i = 0; i < ST_ENTRIES; i++) begin
         sdist = CVA6Cfg.TRANS_ID_BITS'(g6lc_ooo_pkg::ooo_age_dist(
                     CVA6Cfg.TRANS_ID_BITS, 32'(st_q[i].id), 32'(commit_ptr_i)));
-        if (st_q[i].valid && sdist < ld_dist) begin
+        if (st_q[i].valid && st_q[i].hart == ld_query_hart_i && sdist < ld_dist) begin
           if (!st_q[i].addr_v) begin
             // Unresolved OLDER store may yet alias: stall regardless of any
             // resolved match (the unresolved one could be the true producer).
@@ -383,6 +401,7 @@ module g6lc_lsq #(
     automatic logic ld_addr_v_now;
     automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] best_id;
     automatic logic [CVA6Cfg.VLEN-1:0] best_pc;
+    automatic logic [HID_W-1:0] st_hart_now;
     automatic logic [31:0] best_dist, this_dist;
     viol_cand = '0;
     sbe_v = '0;
@@ -397,6 +416,12 @@ module g6lc_lsq #(
     for (int unsigned u = 0; u < NR_UPDATE; u++) begin
       if (addr_valid_i[u] && addr_is_st_i[u]) begin
         sbe_v = lane_be(addr_i[u], addr_size_i[u]);
+        // Hart of the resolving store: a peer hart's store never aliases this
+        // hart's loads. (Stores keep their entry until commit, so the lookup
+        // always finds the entry that allocated addr_id_i[u].)
+        st_hart_now = '0;
+        for (int unsigned k = 0; k < ST_ENTRIES; k++)
+          if (st_q[k].valid && st_q[k].id == addr_id_i[u]) st_hart_now = st_q[k].hart;
         for (int unsigned j = 0; j < LD_ENTRIES; j++) begin
           ld_addr_v_now = ld_q[j].addr_v;
           ld_addr_now   = ld_q[j].addr;
@@ -408,7 +433,7 @@ module g6lc_lsq #(
               ld_size_now   = addr_size_i[v];
             end
           lbe_v = lane_be(ld_addr_now, ld_size_now);
-          if (ld_q[j].valid && ld_addr_v_now &&
+          if (ld_q[j].valid && ld_addr_v_now && ld_q[j].hart == st_hart_now &&
               g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(addr_id_i[u]), 32'(ld_q[j].id), 32'(commit_ptr_i)) &&
               same_word(ld_addr_now, addr_i[u]) && ((sbe_v & lbe_v) != '0))
             viol_cand[j] = 1'b1;

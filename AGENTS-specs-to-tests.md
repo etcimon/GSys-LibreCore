@@ -63,6 +63,19 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## Hart-owned memory ordering (2026-09-23, T6b-1)
+
+LSQ fixture `HARTS=2` (`lsq/nh2`): scenarios 19–24 — a peer hart's unresolved older store neither
+stalls nor forwards to this hart's load (19) while the same-hart one stalls (20); a resolved peer
+store does not forward but forwards to its own hart (21); an older peer store resolving after this
+hart's load read is no violation (22) while the same-hart one is, with the load's id (23); the
+per-hart masks partition the unresolved mask (24) — each with an inverted negative arm, 88 records
+matched (single-hart suite repeated at `HARTS=2` on hart 0). Dispatch `legal-smt` 30/31: a peer
+hart's unresolved store does not block this hart's load, the same-hart one does. Store-recovery
+`nh2-ooo1` 6/7: peer speculative store not forwarded, own store forwarded. Age formal PASS (5).
+Unchanged: frozen int ELFs, s11, FP suite (cycle-identical), dual-hart profile 10,696,498, anchor
+exact (`b08f9211…`), lint/synth baseline, FO4 within budget (`g6lc_lsq` 26→28).
+
 ## Integer multi-hart OoO legal (2026-09-23, T6a closure)
 
 With the guard gone: rename nh2 10/10, dispatch `legal-smt` (no define) 14/14, `illegal-smt` now

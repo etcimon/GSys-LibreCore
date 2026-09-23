@@ -41,6 +41,14 @@ regressions do not add independent ISA coverage. Early termination remains unown
 read/address visibility, precise recovery and broad memory ownership remain open. No architecture,
 physical or guarded-feature status advances from qualification-tooling changes alone.
 
+## Hart-owned memory ordering for mixed residency (2026-09-23, T6b-1)
+
+**Foundations landed, mixed residency still refused.** Loads now order against, forward from and
+replay for their own hart's stores only, at leaf level with positives and negatives, and every
+existing single-hart and drained-handoff result reproduces. Mixed residency (`SmtDrainedHandoff=0`)
+remains illegal outside the qualification define until T6b-2/3 deliver per-hart recovery, frontend
+state and the concurrent-work firmware gate.
+
 ## OoO with two harts under the drained handoff (2026-09-22)
 
 **Integration gate passed and the refusal lifted (2026-09-23): `g6lc64_smt2_ooo_int` is a production

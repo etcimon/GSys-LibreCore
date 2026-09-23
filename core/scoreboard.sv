@@ -36,6 +36,11 @@ module scoreboard #(
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              cancelled_mask_o,
     // Per-slot issued mask (OoO IQ/LSQ liveness assertions)
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              sb_live_o,
+    // T6b: per-hart head of the live ring — PC of the oldest issued entry of
+    // each hart, found scanning from commit_pointer_q[0] in ring order.
+    // T6b-2 recovery restarts each hart at this PC; unused until then.
+    output logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0]  sb_head_pc_o,
+    output logic [CVA6Cfg.NrHarts-1:0]                    sb_head_valid_o,
     // LSQ alias validation: youngest load that read bytes an older store
     // resolved later - OoO only, tied low in order.
     input  logic                                          mem_violation_i,
@@ -161,6 +166,26 @@ module scoreboard #(
 
   assign sb_full_o = issue_full[0];
   assign sb_empty_o = sb_issued_cnt == '0;
+
+  // T6b: per-hart oldest live instruction. commit_pointer_q[0] is the oldest
+  // live slot, so the first issued entry each hart owns in ring order from it
+  // is that hart's head. NrHarts==1 folds to the commit head's PC.
+  always_comb begin
+    automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] slot;
+    automatic logic [CVA6Cfg.NrHarts-1:0] found;
+    slot = commit_pointer_q[0];
+    found = '0;
+    sb_head_valid_o = '0;
+    sb_head_pc_o = '0;
+    for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
+      if (mem_q[slot].issued && !found[mem_q[slot].sbe.hart_id]) begin
+        found[mem_q[slot].sbe.hart_id] = 1'b1;
+        sb_head_valid_o[mem_q[slot].sbe.hart_id] = 1'b1;
+        sb_head_pc_o[mem_q[slot].sbe.hart_id] = mem_q[slot].sbe.pc;
+      end
+      slot = slot + 1'b1;
+    end
+  end
 
   // output commit instruction directly
   always_comb begin : commit_ports

@@ -88,10 +88,12 @@ next actions are superseded by the tranche exits.
 - [x] **Guard decisions (2026-09-23):** integer multi-hart OoO refusal lifted — `g6lc64_smt2_ooo_int`
   is a production package (define-free build passes the dual-hart profile identically); single-hart
   OoO+FP guard kept (owner mutation unobservable at core level). FP multi-hart stays refused.
-- [ ] **T6b mixed-resident SMT2:** contract written in `core/ooo/AGENTS-ooo-plan.md` (per-hart
-  scoreboard windows and age namespaces, per-hart flush, LSQ/store credits and PRF floors per hart,
-  per-hart frontend filter state, `SmtDrainedHandoff` policy bit; oracles and exits listed). Slices
-  T6b-1..4 not started.
+- [ ] **T6b mixed-resident SMT2** (contract revised to a shared ring with hart-owned rules;
+  `core/ooo/AGENTS-ooo-plan.md`). T6b-1 landed 2026-09-23: `SmtDrainedHandoff` config bit + drain
+  seam, hart-tagged LSQ/store-buffer/IQ ordering, `sb_head_pc` export, leaf oracles; everything
+  reproduced with the gate on. Open: T6b-2 recovery/frontend per-hart state (make `sb_head_pc`
+  incremental first), T6b-3 `SmtDrainedHandoff=0` firmware gate + isolation negatives, T6b-4
+  performance (partitioned heads, PRF floors).
 - [ ] T6b mixed residency per the plan file (after T6a).
 
 ## Active stability-first review — authoritative next change sets

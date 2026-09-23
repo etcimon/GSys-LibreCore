@@ -247,6 +247,7 @@ package cva6_config_pkg;
       SliceMaxRunahead: unsigned'(0),
       // 4-issue full OoO (depths 0 → scale with issue width in build_config)
       OoOEn: bit'(1),
+      SmtDrainedHandoff: bit'(1),
       DeepSpecEn: bit'(1),
       RobEntries: unsigned'(0),
       PrfEntries: unsigned'(0),

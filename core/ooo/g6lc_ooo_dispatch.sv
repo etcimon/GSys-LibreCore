@@ -228,6 +228,7 @@ module g6lc_ooo_dispatch
   logic [$clog2(CVA6Cfg.LsqStoreEntries+1)-1:0] st_free;
   logic store_pend, stl_fwd, stl_stall, lsq_busy, md_stall, md_predict, mem_stall;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] st_live_mask, st_unresolved_mask;
+  logic [NH-1:0][CVA6Cfg.NR_SB_ENTRIES-1:0] st_hart_mask;
   logic [CVA6Cfg.VLEN-1:0] mem_violation_pc;
   // Dispatch-time memory-dependence verdict captured into each IQ entry. The
   // predictor has a single query port, so only a load on dispatch port 0 is
@@ -643,6 +644,8 @@ module g6lc_ooo_dispatch
       .mem_stall_i     (1'b0),
       .st_live_mask_i  (st_live_mask),
       .st_unresolved_mask_i(st_unresolved_mask),
+      // T6b: mask the unresolved-store gate with the entry's own hart.
+      .st_hart_mask_i  (st_hart_mask),
       .commit_ptr_i    (commit_ptr_i),
       .sb_live_i       (sb_live_i)
   );
@@ -922,6 +925,7 @@ module g6lc_ooo_dispatch
       .ld_alloc_i (ld_alloc),
       .st_alloc_i (st_alloc),
       .alloc_id_i (alloc_ids),
+      .alloc_hart_i(dispatch_hart),
       .alloc_pc_i (alloc_pcs),
       .ld_full_o  (ld_full),
       .st_full_o  (st_full),
@@ -945,8 +949,12 @@ module g6lc_ooo_dispatch
       .ld_query_addr_i(ld_qaddr),
       .ld_query_size_i(ld_qsize),
       .ld_query_id_i  (issue_sbe_o[0].trans_id),
+      // T6b: the issuing load's hart — the query orders only against the
+      // load's own hart's stores.
+      .ld_query_hart_i(HID_W'(issue_sbe_o[0].hart_id)),
       .st_live_mask_o (st_live_mask),
       .st_unresolved_mask_o(st_unresolved_mask),
+      .st_hart_mask_o (st_hart_mask),
       .store_pending_o(store_pend),
       .stl_forward_o(stl_fwd),
       .stl_data_o   (),

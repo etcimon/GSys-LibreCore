@@ -75,6 +75,11 @@ module g6lc_iq
     // circular age order. A load waits only for unresolved stores OLDER than
     // itself; resolved stores are the store_buffer's forwarding domain.
     input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              st_unresolved_mask_i,
+    // T6b: the live-store mask partitioned by owning hart. Under mixed
+    // residency a load waits only on ITS hart's unresolved stores; the mask
+    // is an AND in front of the existing age gate, never part of selection.
+    // When NrHarts==1 the term constant-folds away.
+    input  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][CVA6Cfg.NR_SB_ENTRIES-1:0] st_hart_mask_i,
     input  logic [CVA6Cfg.TRANS_ID_BITS-1:0]              commit_ptr_i,
     // Scoreboard issued mask (assertions only)
     input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              sb_live_i
@@ -225,6 +230,8 @@ module g6lc_iq
       older_unresolved_st = 1'b0;
       for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
         if (st_unresolved_mask_i[s] &&
+            (CVA6Cfg.NrHarts <= 1 ||
+             st_hart_mask_i[q_chain[e].sbe.hart_id][s]) &&
             g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(s),
                                         32'(q_chain[e].sbe.trans_id), 32'(commit_ptr_i)))
           older_unresolved_st = 1'b1;

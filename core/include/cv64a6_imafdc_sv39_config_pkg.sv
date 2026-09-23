@@ -234,6 +234,7 @@ package cva6_config_pkg;
       SliceBiqDepth: unsigned'(0),
       SliceMaxRunahead: unsigned'(0),
       OoOEn: bit'(0),
+      SmtDrainedHandoff: bit'(1),
       // Stream fill→verify (mini_stream / mc_stream_plane): with DeepSpecEn=0 the
       // store-buffer commit queue is only DEPTH_COMMIT=4 (ariane_pkg). Dense ST
       // sequences of ≥5 dwords (40B+) then LD hang forever without a FENCE —

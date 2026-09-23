@@ -43,6 +43,10 @@ module issue_stage
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_o,
     // Scoreboard issued mask - EX_STAGE (store-buffer liveness assertion)
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_o,
+    // T6b: per-hart head of the live scoreboard ring — oldest issued entry's
+    // PC per hart. T6b-2 recovery consumes it; exported here for wiring.
+    output logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0] sb_head_pc_o,
+    output logic [CVA6Cfg.NrHarts-1:0] sb_head_valid_o,
     // Prevent from issuing - CONTROLLER
     input logic flush_unissued_instr_i,
     // Flush whole scoreboard - CONTROLLER
@@ -266,6 +270,8 @@ module issue_stage
       .spec_cancel_o           (spec_cancel_o),
       .cancelled_mask_o        (cancelled_mask_o),
       .sb_live_o               (sb_live),
+      .sb_head_pc_o            (sb_head_pc_o),
+      .sb_head_valid_o         (sb_head_valid_o),
       .mem_violation_i         (mem_violation),
       .mem_violation_id_i      (mem_violation_id),
       .flush_unissued_instr_i,

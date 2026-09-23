@@ -268,9 +268,56 @@ Negatives: each isolation rule mutated (mask dropped) must be caught by (1)/(4).
 anchor exact with the drain gate on (bit-identical path), lint/synth at baseline, FO4 screen within
 budget for the per-hart masks (they enter the select cone only as an AND on the age matrix).
 
-**Slices.** T6b-1 hart-tagged scoreboard windows + per-hart flush (no policy change — drain gate
-still on, so behaviour identical; leaf oracles only). T6b-2 LSQ/store credits per hart. T6b-3 PRF
-floors. T6b-4 frontend per-hart filter state and the `SmtDrainedHandoff=0` policy; firmware gate.
+**Revision (2026-09-23, before implementation): shared ring first, partition later.** The
+partitioned-window design above halves each hart's window even when one hart is resident and
+rewrites commit. The legacy in-order SMT already ran both harts in *one* scoreboard ring with a
+single in-order commit head (the younger-cancel is same-hart filtered for that reason), and that
+is architecturally sufficient: each hart's instructions commit in its own program order, the
+interleaving is free, and a slow head only costs the peer throughput (head-of-line blocking), not
+correctness. T6b therefore keeps one ring and one commit head and makes the *ownership* rules
+hart-aware; the partitioned ROB / per-hart heads and PRF floors become a performance tranche
+after the exit. What is correctness-relevant with a shared ring:
+
+- **LSQ / store buffer:** a load orders against, forwards from, and replays for stores of its own
+  hart only; peer stores become visible at drain (commit queue), exactly like another core's. A
+  speculative peer store must never be forwarded (it may be squashed). `st_unresolved_mask` is
+  consumed by the IQ per hart (`st_hart_mask[h]`).
+- **Recovery:** mispredict cancel is already same-hart. Trap/replay flush stays global; the
+  *non-faulting* hart restarts fetch at the PC of its oldest squashed entry (`sb_head_pc[h]`,
+  exported by the scoreboard), the faulting hart at its vector/replay PC.
+- **Frontend:** one fetch slot per cycle (the existing switch, without the drain wait when
+  `SmtDrainedHandoff=0`); a redirect/trap/replay for the hart that is *not* fetching updates its
+  PC bank instead of being dropped; the mispredict target filter is per hart.
+- **Commit-side per-hart state:** interrupt sampling and CSR bank by the *committing* hart; WFI
+  parks the hart (thread select `hart_block`) instead of halting the core.
+- **Config:** `SmtDrainedHandoff` (bit, default 1 = today's behaviour, bit-identical for every
+  existing package); `0` legal only with `OoOEn && NrHarts > 1` and, until the T6b exit,
+  only behind `G6LC_OOO_SMT_MIXED_QUALIFY`.
+
+**T6b-1 status (2026-09-23): landed, drain gate on, every result reproduced.** `SmtDrainedHandoff`
+exists in every package (default 1; `check_cfg` refuses 0 outside OoO multi-hart and, until the
+exit, outside `G6LC_OOO_SMT_MIXED_QUALIFY`); the thread selector's `drain_ready` is the seam.
+LSQ entries carry `hart`: unresolved-store wait, forwarding and the violation scan are same-hart
+(`st_hart_mask_o[h]` partitions the live stores; the IQ ANDs it in front of the age gate);
+`lsu_ctrl_t`/`fu_data_t` carry `hart` so the store buffer's *speculative* forwarding is same-hart
+under `OoOEn && NrHarts > 1` (the committed queue is not filtered); the scoreboard exports
+`sb_head_pc_o[h]`/`sb_head_valid_o[h]` (oldest issued entry per hart, scanned from the commit
+pointer — a 32-deep serial scan; **it must be made incremental before T6b-2 consumes it**, it has
+no consumer today so synthesis trims it). Evidence: LSQ 88 records (19 direct + 25 nh2, negatives),
+dispatch n2/mdp 28+28, legal-smt 6 (D-A/D-B), store-recovery 36 incl. the new peer/own forward
+cells, IQ 4 geometries, age formal PASS (5 asserts), frozen int ELFs + s11 cycle-identical, FP
+suite cycle-identical, dual-hart profile strictDual 10,696,498 (17,138 handoffs all drained,
+witness silent), anchor exact on the post-fix model `b08f9211…`, lint 8/54, synth 32/5, FO4
+`g6lc_iq` 16.0 / `g6lc_lsq` 26→28 / dispatch 30.0 (budget 32). Caveat recorded: the three
+functional models were built one inert one-line lint fix (`a_hart` default init) before the
+anchor model; the anchor is post-fix.
+
+**Slices.** T6b-1 config bit + drain gate seam, hart-tagged LSQ/store-buffer/IQ ordering,
+`sb_head_pc`, leaf oracles (drain gate still on: every existing result must reproduce). T6b-2
+recovery and frontend per-hart state (flush restart, inactive-hart redirects, per-hart filter),
+commit-side per-hart interrupt/CSR/WFI. T6b-3 the `SmtDrainedHandoff=0` firmware gate with the
+concurrent-work probe and the isolation negatives. T6b-4 (performance, after exit) partitioned
+heads and PRF floors.
 
 ## Deferred
 

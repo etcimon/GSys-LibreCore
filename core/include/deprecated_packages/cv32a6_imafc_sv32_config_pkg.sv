@@ -221,6 +221,7 @@ package cva6_config_pkg;
       SliceBiqDepth: unsigned'(0),
       SliceMaxRunahead: unsigned'(0),
       OoOEn: bit'(0),
+      SmtDrainedHandoff: bit'(1),
       RobEntries: unsigned'(0),
       PrfEntries: unsigned'(0),
       IqEntries: unsigned'(0),

@@ -78,6 +78,9 @@ module load_unit
     // observed by a load that follows it in program order; under OoO issue the
     // store buffer can hold younger stores, so an address match is not enough.
     output logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id_o,
+    // T6b: hart of the querying load — the store buffer's speculative
+    // forwarding is same-hart only under OoO multi-hart. Constant-0 else.
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] load_hart_o,
     // Indicates if the page offset matches a store unit entry - STORE_UNIT
     input logic page_offset_matches_i,
     // Store buffer is empty - STORE_UNIT
@@ -237,6 +240,7 @@ module load_unit
   assign load_paddr_valid_o = valid_i;
   assign load_paddr_o = CVA6Cfg.PLEN'(lsu_ctrl_i.vaddr);
   assign load_trans_id_o = lsu_ctrl_i.trans_id;
+  assign load_hart_o = lsu_ctrl_i.hart;
   // feed-through the virtual address for VA translation
   assign vaddr_o = lsu_ctrl_i.vaddr;
   assign hs_ld_st_inst_o = CVA6Cfg.RVH ? lsu_ctrl_i.hs_ld_st_inst : 1'b0;

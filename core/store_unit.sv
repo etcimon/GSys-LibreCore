@@ -87,6 +87,9 @@ module store_unit
     // instruction (age anchor). Both are inert when OoOEn is 0.
     input logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id_i,
     input logic [CVA6Cfg.TRANS_ID_BITS-1:0] commit_tran_id_i,
+    // T6b: querying load's hart — speculative forwarding is same-hart only
+    // under OoO multi-hart. Constant-0 otherwise.
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] load_hart_i,
     // R3a cont.13: D$ wbuffer empty for STQ page-offset sticky release
     input logic dcache_wbuffer_empty_i,
     // Address check result - load_unit
@@ -162,6 +165,8 @@ module store_unit
   cbo_t cbo_op_d, cbo_op_q;
 
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_n, trans_id_q;
+  // T6b: hart of the in-flight store, registered alongside its tid.
+  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] st_hart_n, st_hart_q;
 
   // U7ᶜ cbo.zero full cache-block expand (Zicboz / memcpy-class zeroing)
   // Beats = line_bytes / native store width. Address aligned to block base.
@@ -197,6 +202,7 @@ module store_unit
     pop_st_o               = 1'b0;
     ex_o                   = ex_i;
     trans_id_n             = lsu_ctrl_i.trans_id;
+    st_hart_n              = lsu_ctrl_i.hart;
     state_d                = state_q;
     cboz_beat_d            = cboz_beat_q;
     cboz_base_d            = cboz_base_q;
@@ -456,6 +462,8 @@ module store_unit
       .load_paddr_valid_i,
       .load_trans_id_i,
       .commit_trans_id_i(commit_tran_id_i),
+      .load_hart_i,
+      .st_hart_i            (st_hart_q),
       .dcache_wbuffer_empty_i,
       .page_offset_matches_o,
       .st_fwd_valid_o,
@@ -525,6 +533,7 @@ module store_unit
       st_is_quad_q  <= 1'b0;
       st_data_size_q <= '0;
       trans_id_q     <= '0;
+      st_hart_q      <= '0;
       amo_op_q       <= AMO_NONE;
       cbo_op_q       <= ariane_pkg::CBO_NONE;
       cboz_beat_q    <= '0;
@@ -542,6 +551,7 @@ module store_unit
         st_is_quad_q <= CVA6Cfg.RVZacas && (lsu_ctrl_i.operation == ariane_pkg::AMO_CASQ);
       end
       trans_id_q     <= trans_id_n;
+      st_hart_q      <= st_hart_n;
       st_data_size_q <= st_data_size_n;
       amo_op_q       <= amo_op_d;
       cbo_op_q       <= cbo_op_d;

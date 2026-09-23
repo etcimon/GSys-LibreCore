@@ -260,7 +260,8 @@ def main():
         configurations.append(('incl',f'n{nc}',[f'-GNC={nc}'],cases))
     if os.environ.get('REVIEW_RTL_STORE_RECOVERY')=='1':
         configurations=[('store_recovery',f'nh{h}-ooo{o}',['-DG6LC_FETCH_B',f'-GNH={h}',f'-GOOO={o}'],
-                         [(n,None) for n in range(6 if o else 4)]) for h,o in ((1,0),(1,1),(2,1))]
+                         [(n,None) for n in range(8 if (h,o)==(2,1) else 6 if o else 4)])
+                        for h,o in ((1,0),(1,1),(2,1))]
     elif os.environ.get('REVIEW_RTL_WFI')=='1':
         configurations=[('wfi',f'ooo{o}-a{a}',['-DG6LC_FETCH_B',f'-GOOO={o}',f'-GRVA_EN={a}'],
                          [(n,None) for n in range(7)]) for o in (0,1) for a in (0,1)]
@@ -289,7 +290,10 @@ def main():
                              else [(10,'RENAME_CKPT_ALLOC_LEAK')] if leak_fault
                              else [(n,None) for n in range(11)])]
     elif os.environ.get('REVIEW_RTL_LSQ')=='1':
-        configurations=[('lsq','direct',[],[(n,None) for n in range(19)])]
+        # T6b: nh2 runs the full single-hart suite (all ops hart 0 — must match
+        # HARTS=1) plus the cross-hart scenarios 19-24.
+        configurations=[('lsq','direct',[],[(n,None) for n in range(19)]),
+                        ('lsq','nh2',['-GHARTS=2'],[(n,None) for n in range(25)])]
     elif os.environ.get('REVIEW_RTL_CSRBUF')=='1':
         # Per-tid CSR address table: out-of-order issue, commit-order lookup,
         # ready as table credit, cancel/flush drop; depth-1 identity in order.
@@ -343,7 +347,9 @@ def main():
         # T6a positive counterpart to the illegal cells: integer -GHARTS=2 must
         # elaborate and run the hart scenario plus the standard negative battery.
         if os.environ.get('REVIEW_RTL_LEGAL_SMT')=='1':
-            configurations=[('dispatch','legal-smt',['-GHARTS=2'],[(26,None)])]
+            # T6b: + the peer-hart / same-hart unresolved-store ordering cells.
+            configurations=[('dispatch','legal-smt',['-GHARTS=2'],
+                             [(26,None),(30,None),(31,None)])]
         # MemDepPredEn=1 elaboration/liveness. Feedback is promoted to an error:
         # a settled combinational cycle is not evidence of a working predictor.
         if os.environ.get('REVIEW_RTL_MEMDEP')=='1':
@@ -418,7 +424,8 @@ def main():
             # hart), so the single-hart negatives are not comparable there; it
             # carries its own per-hart discriminators instead.
             if kind=='store_recovery':
-                codes=('FLUSH','CANCEL','COMMITTED','REPLAY','YOUNGER_FWD','PROGRAM_ORDER')
+                codes=('FLUSH','CANCEL','COMMITTED','REPLAY','YOUNGER_FWD','PROGRAM_ORDER',
+                       'HART_PEER_FWD','HART_OWN_FWD')
                 trials += [(n,True,'STORE_RECOVERY_'+codes[n]) for n,_ in cases]
             elif kind=='wfi':
                 trials += [(n,True,'WFI_RETIRE_RECOVERY') for n in range(7)]
@@ -432,9 +439,18 @@ def main():
                          (13,True,'RENAME_HART_FLUSH_SPILL'),(14,True,'RENAME_HART_REALLOC_FLUSH'),
                          (15,True,'RENAME_HART_REALLOC_FLUSH')]
             elif kind=='rename':trials+=[(0,True,'RENAME_MAP'),(1,True,'RENAME_OLDER_LOST'),(2,True,'RENAME_BUSY_RESURRECT'),(3,True,'RENAME_STALE_LEVEL'),(4,True,'RENAME_CKPT2_UNWIND'),(5,True,'RENAME_CKPT_FULL'),(6,True,'RENAME_EXCLUSIVE'),(7,True,'RENAME_CKPT_NO_RELEASE'),(8,True,'RENAME_RETIRE_WINDOW'),(9,True,'RENAME_FLUSH_ARCH'),(10,True,'RENAME_CKPT_ALLOC_LEAK')]
-            elif kind=='lsq':trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA'),(2,True,'LSQ_COMMIT_DOUBLE_FREE'),(3,True,'LSQ_STL_AGE'),(4,True,'LSQ_AGE_STALL'),(5,True,'LSQ_WRAP_DATA'),(6,True,'LSQ_BYTE_DISJOINT'),(7,True,'LSQ_BYTE_COVER'),(8,True,'LSQ_PARTIAL_NODATA'),(9,True,'LSQ_PARTIAL_MERGE'),(10,True,'LSQ_CANCEL_DROP'),(11,True,'LSQ_FLUSH'),(12,True,'LSQ_VIOLATION'),(13,True,'LSQ_VIOLATION_YOUNGER'),(14,True,'LSQ_VIOLATION_WRAP'),(15,True,'LSQ_VIOLATION_OLDEST'),(16,True,'LSQ_VIOLATION_DISJOINT'),(17,True,'LSQ_VIOLATION_SAMECYCLE'),(18,True,'LSQ_UNRESOLVED_MASK')]
+            elif kind=='lsq':
+                trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA'),(2,True,'LSQ_COMMIT_DOUBLE_FREE'),(3,True,'LSQ_STL_AGE'),(4,True,'LSQ_AGE_STALL'),(5,True,'LSQ_WRAP_DATA'),(6,True,'LSQ_BYTE_DISJOINT'),(7,True,'LSQ_BYTE_COVER'),(8,True,'LSQ_PARTIAL_NODATA'),(9,True,'LSQ_PARTIAL_MERGE'),(10,True,'LSQ_CANCEL_DROP'),(11,True,'LSQ_FLUSH'),(12,True,'LSQ_VIOLATION'),(13,True,'LSQ_VIOLATION_YOUNGER'),(14,True,'LSQ_VIOLATION_WRAP'),(15,True,'LSQ_VIOLATION_OLDEST'),(16,True,'LSQ_VIOLATION_DISJOINT'),(17,True,'LSQ_VIOLATION_SAMECYCLE'),(18,True,'LSQ_UNRESOLVED_MASK')]
+                if geometry=='nh2':
+                    trials+=[(19,True,'LSQ_HART_PEER_STALL'),(20,True,'LSQ_HART_OWN_STALL'),
+                             (21,True,'LSQ_HART_PEER_FWD'),(22,True,'LSQ_HART_PEER_VIOL'),
+                             (23,True,'LSQ_HART_OWN_VIOL'),(24,True,'LSQ_HART_MASK')]
             elif dispatch_mode and os.environ.get('REVIEW_RTL_LATE_WAKE')=='1':
                 trials += [(n,True,'DISPATCH_LATE_WAKE_EARLY') for n in (28,29)]
+            elif dispatch_mode and os.environ.get('REVIEW_RTL_LEGAL_SMT')=='1':
+                trials += [(26,True,'DISPATCH_HART_ARCH'),
+                           (30,True,'DISPATCH_HART_LOAD_PEER'),
+                           (31,True,'DISPATCH_HART_LOAD_OWN')]
             elif dispatch_mode and hart_dispatch:
                 trials += [(26,True,'DISPATCH_HART_ARCH')]
             elif dispatch_mode and fp_dispatch:

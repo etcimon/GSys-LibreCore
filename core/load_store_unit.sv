@@ -248,6 +248,9 @@ module load_store_unit
   logic [         CVA6Cfg.PLEN-1:0] load_paddr;
   logic                             load_paddr_valid;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id;
+  // T6b: hart of the querying load for the store buffer's same-hart
+  // speculative-forward filter.
+  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] load_hart;
   logic                             st_fwd_valid;
   logic [         CVA6Cfg.XLEN-1:0] st_fwd_data;
   logic [     (CVA6Cfg.XLEN/8)-1:0] st_fwd_be;
@@ -569,6 +572,7 @@ module load_store_unit
       .load_paddr_i         (load_paddr),
       .load_paddr_valid_i   (load_paddr_valid),
       .load_trans_id_i      (load_trans_id),
+      .load_hart_i          (load_hart),
       .commit_tran_id_i,
       .dcache_wbuffer_empty_i,
       .page_offset_matches_o(page_offset_matches),
@@ -621,6 +625,7 @@ module load_store_unit
       .load_paddr_o         (load_paddr),
       .load_paddr_valid_o   (load_paddr_valid),
       .load_trans_id_o      (load_trans_id),
+      .load_hart_o          (load_hart),
       .page_offset_matches_i(page_offset_matches),
       .store_buffer_empty_i (store_buffer_empty),
       .no_st_pending_i      (no_st_pending_o),
@@ -912,6 +917,7 @@ module load_store_unit
     fu_data_i.fu,
     fu_data_i.operation,
     fu_data_i.trans_id,
+    fu_data_i.hart,
     speculative_load_i,
     1'b0
   };

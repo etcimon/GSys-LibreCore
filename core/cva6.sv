@@ -196,6 +196,10 @@ module cva6
       fu_t                              fu;
       fu_op                             operation;
       logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;
+      // T6b: owning SMT hart of the load/store (0 when NrHarts==1) — the
+      // store buffer's speculative forwarding is same-hart only under OoO
+      // multi-hart.
+      logic [HART_ID_BITS-1:0]          hart;
       logic                             is_speculative_load;
       logic                             is_speculative_load_miss;
     },
@@ -215,6 +219,9 @@ module cva6
       logic [CVA6Cfg.XLEN-1:0]          operand_b_hi;
       logic [CVA6Cfg.XLEN-1:0]          operand_c_hi;
       logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;
+      // T6b: issuing instruction's SMT hart, carried into the LSU so store
+      // ownership is known (0 when NrHarts==1).
+      logic [HART_ID_BITS-1:0]          hart;
     },
 
     localparam type icache_req_t = struct packed {
@@ -620,6 +627,11 @@ module cva6
   logic lsu_commit_commit_ex;
   logic lsu_commit_ready_ex_commit;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] lsu_commit_trans_id;
+  // T6b: per-hart head of the live scoreboard ring (oldest issued entry's PC
+  // per hart). Wired out of the scoreboard for T6b-2 recovery restart; no
+  // consumer exists yet.
+  logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0] sb_head_pc;
+  logic [CVA6Cfg.NrHarts-1:0] sb_head_valid;
   logic stall_st_pending_ex;
   logic no_st_pending_ex;
   logic no_st_pending_commit;
@@ -1331,7 +1343,12 @@ module cva6
       .issue_fire_i        (smt_issue_fire),
       .flush_i             (flush_ctrl_if),
       .hold_i              (smt_switch_hold),
-      .drain_ready_i       (smt_sb_empty && no_st_pending_commit && !flush_ctrl_id),
+      // T6b seam: with SmtDrainedHandoff=1 the selector may switch only on a
+      // drained backend (today's coarse handoff). With 0 the switch becomes a
+      // fetch-slot policy and hart-tagged ownership (LSQ/store buffer/IQ) keeps
+      // the two resident streams disjoint.
+      .drain_ready_i       (CVA6Cfg.SmtDrainedHandoff ?
+                            (smt_sb_empty && no_st_pending_commit && !flush_ctrl_id) : 1'b1),
       .quiesce_o           (smt_quiesce),
       .id_uniss_i          (issue_entry_valid_id_issue[0]),
       .iq_valid_i          (fetch_valid_if_id[0]),
@@ -1449,6 +1466,10 @@ module cva6
       .spec_cancel_o           (spec_cancel),
       .cancelled_mask_o        (sb_cancelled_mask),
       .sb_live_o               (sb_live_mask),
+      // T6b: per-hart oldest-live PC, exported for the T6b-2 recovery
+      // restart; no consumer yet.
+      .sb_head_pc_o            (sb_head_pc),
+      .sb_head_valid_o         (sb_head_valid),
       .flush_unissued_instr_i  (flush_unissued_instr_ctrl_id),
       .flush_i                 (flush_ctrl_id),
       .stall_i                 (stall_acc_id),
@@ -2619,7 +2640,7 @@ module cva6
   // switch ever fired with OoO state resident, the hart-blind IQ/ROB/LSQ would
   // silently alias work across harts — report it here. The generate guard also
   // keeps the hierarchical references legal when OoOEn=0.
-  if (CVA6Cfg.OoOEn && CVA6Cfg.NrHarts > 1) begin : gen_ooo_switch_drained
+  if (CVA6Cfg.OoOEn && CVA6Cfg.NrHarts > 1 && CVA6Cfg.SmtDrainedHandoff) begin : gen_ooo_switch_drained
     ooo_switch_drained: assert property (
         @(posedge clk_i) disable iff (!rst_ni)
         smt_switch |-> (smt_sb_empty && no_st_pending_commit

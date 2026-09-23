@@ -46,6 +46,10 @@ module store_buffer
     // are inert when OoOEn is 0.
     input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id_i,
     input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] commit_trans_id_i,
+    // T6b: hart of the querying load. Under OoO multi-hart a load forwards
+    // only from its OWN hart's speculative stores; a peer hart's store is not
+    // visible until commit. Constant-0 otherwise (single hart / in-order).
+    input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] load_hart_i,
     // R3a cont.13: D$ write buffer empty — sticky [11:0] match must outlive
     // STQ→wbuffer handoff so post-return loads of *nextoffset see the store.
     input  logic                    dcache_wbuffer_empty_i,
@@ -66,6 +70,8 @@ module store_buffer
 
     input  logic [CVA6Cfg.PLEN-1:0]  paddr_i,         // physical address of store which needs to be placed in the queue
     input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_i, // scoreboard tid (FSE S4 younger cancel)
+    // T6b: hart of the arriving store, recorded on its speculative entry.
+    input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] st_hart_i,
     output logic [CVA6Cfg.PLEN-1:0] rvfi_mem_paddr_o,
     input logic [CVA6Cfg.XLEN-1:0] data_i,  // data which is placed in the queue
     input logic [(CVA6Cfg.XLEN/8)-1:0] be_i,  // byte enable in
@@ -99,6 +105,12 @@ module store_buffer
             (CVA6Cfg.MaxOutstandingStores > 8) ? 8 : CVA6Cfg.MaxOutstandingStores)
       : int'(ariane_pkg::DEPTH_COMMIT);
 
+  localparam int unsigned HID_W = $clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2);
+  // T6b: speculative forwarding is same-hart only when two OoO harts can be
+  // resident. The committed queue is NOT filtered — a committed store is
+  // architectural and visible to every hart.
+  localparam bit HART_OWN = CVA6Cfg.OoOEn && CVA6Cfg.NrHarts > 1;
+
   // the store queue has two parts:
   // 1. Speculative queue
   // 2. Commit queue which is non-speculative, e.g.: the store will definitely happen.
@@ -109,6 +121,7 @@ module store_buffer
     logic [1:0] data_size;
     cbo_t cbo_op;
     logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;  // FSE S4: for younger-only cancel
+    logic [HID_W-1:0] hart;  // T6b: owning hart (speculative queue only)
     logic valid;  // this entry is valid, we need this for checking if the address offset matches
     logic wait_rvalid;  // need to wait for rvalid...
     // G1ah: this spec entry already forwarded to a load. SMT+SS flush/cancel
@@ -162,6 +175,7 @@ module store_buffer
     automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] a_be;
     automatic logic [DEPTH_SPEC-1:0][1:0] a_sz;
     automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] a_tid;
+    automatic logic [DEPTH_SPEC-1:0][HID_W-1:0] a_hart;
     automatic logic [DEPTH_SPEC-1:0] a_wr, a_fk;
     automatic cbo_t a_cbo[DEPTH_SPEC];
     speculative_status_cnt      = speculative_status_cnt_q;
@@ -177,6 +191,7 @@ module store_buffer
     a_be    = '0;
     a_sz    = '0;
     a_tid   = '0;
+    a_hart  = '0;
     a_wr    = '0;
     a_fk    = '0;
     for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
@@ -196,6 +211,7 @@ module store_buffer
       speculative_queue_n[speculative_write_pointer_q].valid = 1'b1;
       speculative_queue_n[speculative_write_pointer_q].cbo_op = cbo_op_i;
       speculative_queue_n[speculative_write_pointer_q].trans_id = trans_id_i;
+      speculative_queue_n[speculative_write_pointer_q].hart = st_hart_i;
       speculative_queue_n[speculative_write_pointer_q].wait_rvalid = 1'b0;
       speculative_queue_n[speculative_write_pointer_q].fwd_keep =
           LEGACY_SMT_KEEP &&
@@ -236,6 +252,7 @@ module store_buffer
       a_be   = '0;
       a_sz   = '0;
       a_tid  = '0;
+      a_hart = '0;
       a_wr   = '0;
       a_fk   = '0;
       for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
@@ -249,6 +266,7 @@ module store_buffer
           a_sz[k]     = speculative_queue_n[src].data_size;
           a_cbo[k]    = speculative_queue_n[src].cbo_op;
           a_tid[k]    = speculative_queue_n[src].trans_id;
+          a_hart[k]   = speculative_queue_n[src].hart;
           a_wr[k]     = speculative_queue_n[src].wait_rvalid;
           a_fk[k]     = speculative_queue_n[src].fwd_keep;
         end
@@ -271,6 +289,7 @@ module store_buffer
           speculative_queue_n[k].data_size   = a_sz[dst];
           speculative_queue_n[k].cbo_op      = a_cbo[dst];
           speculative_queue_n[k].trans_id    = a_tid[dst];
+          speculative_queue_n[k].hart        = a_hart[dst];
           speculative_queue_n[k].wait_rvalid = a_wr[dst];
           speculative_queue_n[k].fwd_keep    = a_fk[dst];
           speculative_queue_n[k].valid       = 1'b1;
@@ -310,6 +329,7 @@ module store_buffer
       a_be   = '0;
       a_sz   = '0;
       a_tid  = '0;
+      a_hart = '0;
       a_wr   = '0;
       a_fk   = '0;
       for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
@@ -334,6 +354,7 @@ module store_buffer
             a_sz[dst]   = speculative_queue_n[src].data_size;
             a_cbo[dst]  = speculative_queue_n[src].cbo_op;
             a_tid[dst]  = speculative_queue_n[src].trans_id;
+            a_hart[dst] = speculative_queue_n[src].hart;
             a_wr[dst]   = speculative_queue_n[src].wait_rvalid;
             a_fk[dst]   = speculative_queue_n[src].fwd_keep;
             dst  = dst + 1'b1;
@@ -351,6 +372,7 @@ module store_buffer
           speculative_queue_n[k].data_size   = a_sz[k];
           speculative_queue_n[k].cbo_op      = a_cbo[k];
           speculative_queue_n[k].trans_id    = a_tid[k];
+          speculative_queue_n[k].hart        = a_hart[k];
           speculative_queue_n[k].wait_rvalid = a_wr[k];
           speculative_queue_n[k].fwd_keep    = a_fk[k];
           speculative_queue_n[k].valid       = 1'b1;
@@ -568,6 +590,7 @@ module store_buffer
         sidx = speculative_read_pointer_q + $clog2(DEPTH_SPEC)'(k);
         if (speculative_queue_q[sidx].valid &&
             spec_visible(speculative_queue_q[sidx].trans_id) &&
+            (!HART_OWN || speculative_queue_q[sidx].hart == load_hart_i) &&
             pa_eq(speculative_queue_q[sidx].address, load_paddr_i)) begin
           for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
             if (speculative_queue_q[sidx].be[b]) begin
@@ -578,6 +601,7 @@ module store_buffer
         end
       end
       if (valid_without_flush_i && spec_visible(trans_id_i) &&
+          (!HART_OWN || st_hart_i == load_hart_i) &&
           pa_eq(paddr_i, load_paddr_i)) begin
         for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
           if (be_i[b]) begin

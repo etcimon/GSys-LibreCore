@@ -45,6 +45,18 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## Hart-owned memory ordering (2026-09-23, T6b-1)
+
+Multi-hart memory model (`#memorymodel`, per-hart program order): `core/ooo/g6lc_lsq.sv` tags every
+entry with its hart and restricts the unresolved-store wait, store-to-load forwarding and the
+violation scan to the load's hart; `st_hart_mask_o[h]` partitions the live stores for
+`core/ooo/g6lc_iq.sv`'s unresolved-store gate; `core/store_buffer.sv` records the hart of each
+speculative entry and, under `OoOEn && NrHarts > 1`, forwards only same-hart speculative stores
+(`lsu_ctrl_t`/`fu_data_t` carry `hart` through `issue_read_operands`, `load_unit`, `store_unit`,
+`load_store_unit`); `core/scoreboard.sv` exports the oldest live PC per hart. New config field
+`SmtDrainedHandoff` (all packages 1) with `check_cfg` legality; `cva6.sv` ties the thread selector's
+`drain_ready` to it. Single-hart and drained configurations are behaviourally unchanged.
+
 ## Integer multi-hart OoO legal (2026-09-23, T6a closure)
 
 `core/include/config_pkg.sv` `check_cfg` keeps only `!(OoOEn && NrHarts > 1 && FpPresent)`;

@@ -73,6 +73,13 @@ ALLOWED = {
                    r"([A-Za-z_][A-Za-z0-9_]*|[0-9]+)(\))", re.M),
         r"[0-9]+",
     ),
+    # T6b drain gate: 1 = coarse handoff (default, today's behaviour), 0 =
+    # mixed residency, legal only on OoO multi-hart behind the
+    # G6LC_OOO_SMT_MIXED_QUALIFY define — check_cfg still decides legality.
+    "SmtDrainedHandoff": (
+        re.compile(r"(^\s+SmtDrainedHandoff:\s*bit'\()([01])(\))", re.M),
+        r"[01]",
+    ),
 }
 
 EXEC_DRAM_LEN_MAX = 0x4000_0000
