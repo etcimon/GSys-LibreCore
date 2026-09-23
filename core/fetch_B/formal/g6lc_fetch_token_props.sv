@@ -266,6 +266,22 @@ module g6lc_fetch_token_props #(
       cover (accept && respond);
     end
   end
+
+  // --- FTQ liveness pin: a prediction that could not push its target must not
+  // arm the control-flow hold, otherwise nothing is ever demanded again (the
+  // FTQ was flushed by the same prediction). Only the FTQ path has the hold.
+  if (FTQD != 0) begin : gen_ftq_hold_pin
+    logic bp_unpushed_q;
+    always_ff @(posedge clk_i) begin
+      // ... and the hold was down, so the only thing that could raise it is
+      // this very prediction.
+      bp_unpushed_q <= rst_ni && dut.bp_fire && !dut.ftq_push && !dut.gen_ftq.cf_hold_q;
+    end
+    always_ff @(posedge clk_i) begin
+      if (rst_ni && bp_unpushed_q) assert (!dut.gen_ftq.cf_hold_q);
+      if (rst_ni) cover (bp_unpushed_q);
+    end
+  end
 `endif
 
 endmodule

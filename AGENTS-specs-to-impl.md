@@ -45,6 +45,15 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## Control-flow hold armed only by a pushed target (2026-09-23, SB=16 finding)
+
+Instruction-stream liveness (`#instr_fetch`): in `core/fetch_B/frontend.sv` (FTQ path only) the
+control-flow hold `cf_hold_q` is armed on `bp_fire`/`arch_reseed` only when the fetch-target queue
+actually took the target (`ftq_push`). A prediction firing while the instruction queue is not ready
+leaves its target in `npc_q`; arming the hold then waited for a response no request would produce,
+because the same prediction had flushed the queue, and the frontend fell silent. `FtqDepth=0`
+configurations elaborate no hold and are byte-identical.
+
 ## Outranked branch resolution (2026-09-23, T6a finding)
 
 Control-flow precision (`#instr_fetch`, exception/redirect ordering): `core/fetch_B/frontend.sv`

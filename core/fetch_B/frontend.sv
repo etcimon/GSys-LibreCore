@@ -719,9 +719,15 @@ module frontend
     // (FtqDepth == 0) relies on kill_s2 racing that instead.
     logic cf_hold_q;
 
+    // The hold is armed only when the redirect target was actually pushed: a
+    // prediction firing while the instruction queue is not ready leaves the
+    // target in npc_q instead (npc_select), and holding then would wait for a
+    // response no request will ever produce — the FTQ was just flushed, so
+    // nothing is demanded and the frontend falls silent. Seen on a 16-entry
+    // scoreboard, whose backpressure fills the queue at a predicted back-edge.
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) cf_hold_q <= 1'b0;
-      else if (bp_fire || arch_reseed) cf_hold_q <= 1'b1;
+      else if ((bp_fire || arch_reseed) && ftq_push) cf_hold_q <= 1'b1;
       else if (icache_valid_q) cf_hold_q <= 1'b0;  // redirect fetch presented
       else if (flush_i && !arch_reseed) cf_hold_q <= 1'b0;
     end

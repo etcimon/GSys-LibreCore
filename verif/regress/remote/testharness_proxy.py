@@ -2171,7 +2171,13 @@ def cmd_py(rem: Remote, args) -> int:
         except OSError:
             pass
 
-    env_pieces = [shlex.quote(kv) for kv in (args.env or [])]
+    # Quote the value only: a quoted `KEY=VALUE` word is a command to the
+    # shell, not an assignment, so a value with spaces (plusarg lists) used to
+    # fail with rc=127.
+    env_pieces = []
+    for kv in (args.env or []):
+        key, sep, value = kv.partition("=")
+        env_pieces.append(f"{key}={shlex.quote(value)}" if sep else shlex.quote(kv))
     env_prefix = " ".join(env_pieces)
 
     log(f"py: running {len(scripts)} script(s) with {args.threads} thread(s) -> {rundir}")

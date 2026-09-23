@@ -63,6 +63,18 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## Control-flow hold armed only by a pushed target (2026-09-23, SB=16 finding)
+
+`g6lc_fetch_token_props.sv` gains, for `FTQD != 0`, the pin "a prediction that could not push its
+target, with the hold down, does not raise the hold": FTQD=4 PASS with 5 asserts
+(`t6a-token-ftqd4-hold-v2`), the pre-fix arming fails it at frame 5 (`…-mut-v2`), FTQD=0 unchanged at
+4. Firmware: `ooo_fp_cancel_tid_reuse` on the `NrScoreboardEntries=16` qualification variant, which
+timed out at 2M cycles with the frontend silent after the predicted back-edge at `0x80000380`
+(`+fetch_win_trace`: last event `bpf=1 iqr=0`, then nothing), now passes Spike-compared in 5,279
+cycles; stages 1/10/11 unchanged there; the ten frozen integer probes, s11 and the FP suite are
+cycle-identical on rebuilt `FtqDepth=4` models; the `FtqDepth=0` anchor and `g6lc64_smt2_ooo_int`
+models rebuild byte-identical (`f10a5a60…`, `3ffa73b7…`), so their results stand.
+
 ## Outranked branch resolution (2026-09-23, T6a finding)
 
 `g6lc_fetch_hold` (bmc, live frontend, g6lc64_smt2 geometry) gains: a valid mispredict for the

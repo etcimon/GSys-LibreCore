@@ -71,10 +71,12 @@ next actions are superseded by the tranche exits.
   core level at SB=32 and at SB=16 (window reached, but every stale publish lands on a
   commit-dropped slot and the fpu_wrap `was_cancelled` layer masks it besides) — decide the bar;
   guard stays until then.
-- [ ] **SB=16 stall:** `ooo_fp_cancel_tid_reuse` times out at 2M cycles on the unmutated
-  `g6lc64_ooo` + `NrScoreboardEntries=16` qualification variant (fetch parked at `0x10040`; stages
-  1/10/11 pass there). Legal geometry — classify (scoreboard-depth livelock vs stall) with a flow
-  trace before any FP guard decision.
+- [x] **SB=16 stall** classified and fixed: a prediction firing while the instruction queue was not
+  ready (backpressure from the 16-entry scoreboard at the loop back-edge) armed the FTQ control-flow
+  hold although its target was never pushed; with the queue flushed by the same prediction nothing
+  was ever demanded again. `frontend.sv` arms the hold only on a pushed target; FTQD=4 token proof
+  pinned (5 asserts, old behaviour fails); s9 on SB=16 now 5,279 cycles Spike-compared; FtqDepth=0
+  models byte-identical.
 - [ ] Confirm the smt2 anchor model's boot-vector replay on a single-hart directed ELF is hart 1's
   boot (dual-hart model artifact), not a redirect fault.
 - [x] **T6a (OoO under the drained SMT2 handoff) — integration gate PASSED** after two OoO-only
