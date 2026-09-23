@@ -63,6 +63,22 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## Per-access translation/privilege/PMP context (2026-09-23, T6b-2b)
+
+`csrbank` leaf (`REVIEW_RTL_CSRBANK`, drained + mixed): LSU outputs follow `lsu_hart_i`, PMP pair
+`lsu_chk_hart_i`, fetch outputs `active_hart_i`; drained WFI halts commit, mixed WFI parks only its
+hart — 8/8, negatives `CSRBANK_LSU_ENTR`/`CSRBANK_WFI_HALT`. `tlb`/`stlb` leaves: same VPN+ASID
+filled by both harts → each hart reads its own PPN under mixed, first-match sharing under drained
+— 6/6 each with negatives. `mmuctx` leaf on `cva6_mmu` with a PTW memory model (gigapage leaves,
+two roots): per-hart walks/hits, check-stage skew (hart 0 S-mode SUM=0 request followed one cycle
+later by hart 1 U-mode → hart 0 still faults, hart 1 clean; mirror; translation-enable skew) — 8/8;
+mutations `G6LC_MUT_TLB_NO_HART_TAG` (fails at `MMUCTX_WALK_H1`) and `G6LC_MUT_MMU_LIVE_CTX` (fails
+at `MMUCTX_SKEW_H0_FAULT`). Regressions exact: integer probes ×10 + s11, FP suite 13 + 10 negatives,
+dual-hart drained 10,696,498 (8,792,612 / 465,543), anchor 12,765,628; lint 8/54, synth 32/5; FO4
+screens unchanged (single-hart profile — the mixed-mode PMP mux is one 2:1 level with a registered
+select, not screened: no SMT2 param-map exists). First `SmtDrainedHandoff=0` probe stops at cycle
+280 on the planted `perf_counters` attribution check (commit hart ≠ active hart) — T6b-3 start.
+
 ## Per-hart recovery plumbing (2026-09-23, T6b-2a)
 
 `sbhead` leaf (`REVIEW_RTL_SBHEAD`): interleaved two-hart allocation/commit heads, ring wrap at

@@ -45,6 +45,10 @@ module cva6_tlb
     input logic lu_access_i,
     input logic [CVA6Cfg.ASID_WIDTH-1:0] lu_asid_i,
     input logic [CVA6Cfg.VMID_WIDTH-1:0] lu_vmid_i,
+    // T6b-2b: requesting SMT hart. Lookups additionally require the stored hart
+    // tag to match only when NrHarts > 1 && !SmtDrainedHandoff (drained SMT2
+    // deliberately keeps sharing entries across harts with equal ASIDs).
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] lu_hart_i,
     input logic [CVA6Cfg.VLEN-1:0] lu_vaddr_i,
     output logic [CVA6Cfg.GPLEN-1:0] lu_gpaddr_o,
     output pte_cva6_t lu_content_o,
@@ -57,9 +61,13 @@ module cva6_tlb
     output logic lu_hit_o
 );
   // SV39 defines three levels of page tables
+  localparam bit HART_TAG = (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;
   struct packed {
     logic [CVA6Cfg.ASID_WIDTH-1:0] asid;
     logic [CVA6Cfg.VMID_WIDTH-1:0] vmid;
+    // T6b-2b: owning SMT hart. Compared only when HART_TAG (mixed residency);
+    // otherwise written but ignored so drained/single-hart hits are unchanged.
+    logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] hart;
     // VPN is:
     // [0] -> VPN0
     // [1] -> VPN1
@@ -87,6 +95,7 @@ module cva6_tlb
   logic [TLB_ENTRIES-1:0] replace_en;  // replace the following entry, set by replacement strategy
   logic [TLB_ENTRIES-1:0] match_asid;
   logic [TLB_ENTRIES-1:0] match_vmid;
+  logic [TLB_ENTRIES-1:0] match_hart;
   logic [TLB_ENTRIES-1:0][CVA6Cfg.PtLevels-1:0] page_match;
   logic [TLB_ENTRIES-1:0][HYP_EXT:0][CVA6Cfg.PtLevels-1:0] vpage_match;
   logic [TLB_ENTRIES-1:0][CVA6Cfg.PtLevels-2:0] is_page_o;
@@ -192,6 +201,7 @@ module cva6_tlb
     lu_is_page_o   = '{default: 0};
     match_asid     = '{default: 0};
     match_vmid     = CVA6Cfg.RVH ? '{default: 0} : '{default: 1};
+    match_hart     = '{default: 0};
     match_stage    = '{default: 0};
     g_content      = '{default: 0};
     lu_gpaddr_o    = '{default: 0};
@@ -206,6 +216,16 @@ module cva6_tlb
         match_vmid[i] = (lu_vmid_i == tags_q[i].vmid && g_st_enbl_i) || !g_st_enbl_i;
       end
 
+      // T6b-2b: under mixed residency a TLB entry is private to its owning
+      // hart; the compare constant-folds to 1 for single-hart and drained
+      // SMT2 (which intentionally shares entries across harts).
+`ifdef G6LC_MUT_TLB_NO_HART_TAG
+      // Review-only mutation: the hart tag never discriminates.
+      match_hart[i] = 1'b1;
+`else
+      match_hart[i] = HART_TAG ? (tags_q[i].hart == lu_hart_i) : 1'b1;
+`endif
+
       // Check if that S-stage and G-stage modes corresponds, and that
       // and virtualization mode is on/off
       match_stage[i] = tags_q[i].v_st_enbl[HYP_EXT*2:0] == v_st_enbl[HYP_EXT*2:0];
@@ -214,9 +234,10 @@ module cva6_tlb
       // - tag is valid
       // - asid matches
       // - vmid matches
+      // - hart matches (mixed residency only)
       // - virtualisations / S-stage / G-stage matches
       // - there exists a PT level for which and entry exists and corresponding VPN(s) match
-      if (tags_q[i].valid && match_asid[i] && match_vmid[i] && match_stage[i] && (|level_match[i] || napot_tag_match[i])) begin
+      if (tags_q[i].valid && match_asid[i] && match_vmid[i] && match_hart[i] && match_stage[i] && (|level_match[i] || napot_tag_match[i])) begin
         lu_is_page_o = is_page_o[i];
         lu_content_o = content_q[i].pte;
         lu_hit_o     = 1'b1;
@@ -395,6 +416,7 @@ module cva6_tlb
         tags_n[i] = {
           update_i.asid,
           update_i.vmid,
+          update_i.hart,
           // Zero-extended VPN to fit the tag width
           ((CVA6Cfg.PtLevels + HYP_EXT) * (CVA6Cfg.VpnLen / CVA6Cfg.PtLevels))'(vpn_to_store),
           update_i.is_page,

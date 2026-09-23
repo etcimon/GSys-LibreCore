@@ -71,6 +71,9 @@ module cva6_ptw
     input logic [CVA6Cfg.VLEN-1:0] shared_tlb_vaddr_i,
 
     input logic itlb_req_i,
+    // T6b-2b: SMT hart owning this walk (fetch hart for ITLB walks, LSU
+    // request hart for data walks), already context-selected by the caller.
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] req_hart_i,
 
     // from CSR file
     input logic [CVA6Cfg.PPNW-1:0] satp_ppn_i,   // ppn from satp
@@ -141,6 +144,8 @@ module cva6_ptw
   logic [CVA6Cfg.ASID_WIDTH-1:0] tlb_update_asid_q, tlb_update_asid_n;
   // register the VMID
   logic [CVA6Cfg.VMID_WIDTH-1:0] tlb_update_vmid_q, tlb_update_vmid_n;
+  // register the requesting SMT hart (T6b-2b)
+  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] tlb_update_hart_q, tlb_update_hart_n;
   // register the VPN we need to walk, SV39 defines a 39 bit virtual address
   logic [CVA6Cfg.VLEN-1:0] vaddr_q, vaddr_n;
   logic [HYP_EXT*2:0][CVA6Cfg.PtLevels-2:0][(CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)-1:0] vaddr_lvl;
@@ -233,6 +238,7 @@ module cva6_ptw
     // output the correct ASIDs
     shared_tlb_update_o.asid = tlb_update_asid_q;
     shared_tlb_update_o.vmid = CVA6Cfg.RVH ? tlb_update_vmid_q : '0;
+    shared_tlb_update_o.hart = tlb_update_hart_q;
     shared_tlb_update_o.vpn = vaddr_q[12+CVA6Cfg.VpnLen-1:12];
 
     bad_paddr_o = ptw_access_exception_o ? ptw_pptr_q : 'b0;
@@ -316,6 +322,7 @@ module cva6_ptw
     global_mapping_n        = global_mapping_q;
     // input registers
     tlb_update_asid_n       = tlb_update_asid_q;
+    tlb_update_hart_n       = tlb_update_hart_q;
     vaddr_n                 = vaddr_q;
     pptr                    = ptw_pptr_q;
 
@@ -395,6 +402,9 @@ module cva6_ptw
             tlb_update_asid_n = ld_st_v_i ? vs_asid_i : asid_i;
             if (CVA6Cfg.RVH) tlb_update_vmid_n = vmid_i;
           end
+          // Owner hart is latched once with the request and is stable for the
+          // whole (possibly multi-stage) walk.
+          tlb_update_hart_n = req_hart_i;
         end
       end
 
@@ -671,6 +681,7 @@ module cva6_ptw
       tag_valid_q       <= 1'b0;
       kill_req_q        <= 1'b0;
       tlb_update_asid_q <= '0;
+      tlb_update_hart_q <= '0;
       vaddr_q           <= '0;
       ptw_pptr_q        <= '0;
       global_mapping_q  <= 1'b0;
@@ -691,6 +702,7 @@ module cva6_ptw
       tag_valid_q       <= tag_valid_n;
       kill_req_q        <= kill_req_n;
       tlb_update_asid_q <= tlb_update_asid_n;
+      tlb_update_hart_q <= tlb_update_hart_n;
       vaddr_q           <= vaddr_n;
       global_mapping_q  <= global_mapping_n;
       //data_rdata_q      <= req_port_i.data_rdata;

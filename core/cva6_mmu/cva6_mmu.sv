@@ -86,6 +86,25 @@ module cva6_mmu
     input logic [CVA6Cfg.ASID_WIDTH-1:0] asid_to_be_flushed_i,
     input logic [CVA6Cfg.VMID_WIDTH-1:0] vmid_i,
     input logic [CVA6Cfg.VMID_WIDTH-1:0] vmid_to_be_flushed_i,
+    // T6b-2b: requesting SMT harts. fetch_hart_i is the active fetch hart,
+    // lsu_hart_i the hart owning the in-flight load/store translation request.
+    // With NrHarts==1 or SmtDrainedHandoff both select the same context.
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] fetch_hart_i,
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] lsu_hart_i,
+    // T6b-2b: fetch-side (active-hart) copies of the architectural context the
+    // PTW shares with the data path; the plain inputs carry the LSU request
+    // hart's context.
+    input logic [CVA6Cfg.ASID_WIDTH-1:0] fet_asid_i,
+    input logic [CVA6Cfg.ASID_WIDTH-1:0] fet_vs_asid_i,
+    input logic [CVA6Cfg.VMID_WIDTH-1:0] fet_vmid_i,
+    input logic [CVA6Cfg.PPNW-1:0] fet_satp_ppn_i,
+    input logic [CVA6Cfg.PPNW-1:0] fet_vsatp_ppn_i,
+    input logic [CVA6Cfg.PPNW-1:0] fet_hgatp_ppn_i,
+    input logic fet_mxr_i,
+    input logic fet_vmxr_i,
+    input logic fet_mbe_i,
+    input riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] fet_pmpcfg_i,
+    input logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] fet_pmpaddr_i,
     input logic [CVA6Cfg.VLEN-1:0] vaddr_to_be_flushed_i,
     input logic [CVA6Cfg.GPLEN-1:0] gpaddr_to_be_flushed_i,
 
@@ -134,6 +153,8 @@ module cva6_mmu
     logic [CVA6Cfg.VpnLen-1:0] vpn;
     logic [CVA6Cfg.ASID_WIDTH-1:0] asid;
     logic [CVA6Cfg.VMID_WIDTH-1:0] vmid;
+    // T6b-2b: owning SMT hart (matched only under mixed residency)
+    logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] hart;
     logic [HYP_EXT*2:0] v_st_enbl;  // v_i,g-stage enabled, s-stage enabled
     pte_cva6_t content;
     pte_cva6_t g_content;
@@ -181,8 +202,18 @@ module cva6_mmu
 
   assign itlb_lu_access = icache_areq_i.fetch_req;
   assign dtlb_lu_access = lsu_req_i & !misaligned_ex_i.valid;
-  assign itlb_lu_asid   = v_i ? vs_asid_i : asid_i;
+  // T6b-2b: instruction-side lookups use the fetch hart's context, data-side
+  // lookups the LSU request hart's.
+  assign itlb_lu_asid   = v_i ? fet_vs_asid_i : fet_asid_i;
   assign dtlb_lu_asid   = (ld_st_v_i || flush_tlb_vvma_i) ? vs_asid_i : asid_i;
+
+  // T6b-2b: the PTW's shared architectural context follows the walk owner.
+  // itlb_req identifies the owner side in the accept cycle (walking_instr is
+  // only registered one cycle later); afterwards walking_instr is stable for
+  // the rest of the walk. Single-hart/drained configurations present the same
+  // context on both sides so the select is transparent.
+  logic ptw_ctx_fet;
+  assign ptw_ctx_fet = ptw_active ? walking_instr : itlb_req;
 
 
   cva6_tlb #(
@@ -203,7 +234,8 @@ module cva6_mmu
       .update_i      (update_itlb),
       .lu_access_i   (itlb_lu_access),
       .lu_asid_i     (itlb_lu_asid),
-      .lu_vmid_i     (vmid_i),
+      .lu_vmid_i     (fet_vmid_i),
+      .lu_hart_i     (fetch_hart_i),
       .lu_vaddr_i    (icache_areq_i.fetch_vaddr),
       .lu_gpaddr_o   (itlb_gpaddr),
       .lu_content_o  (itlb_content),
@@ -235,6 +267,7 @@ module cva6_mmu
       .lu_access_i   (dtlb_lu_access),
       .lu_asid_i     (dtlb_lu_asid),
       .lu_vmid_i     (vmid_i),
+      .lu_hart_i     (lsu_hart_i),
       .lu_vaddr_i    (lsu_vaddr_i),
       .lu_gpaddr_o   (dtlb_gpaddr),
       .lu_content_o  (dtlb_content),
@@ -270,6 +303,9 @@ module cva6_mmu
       .dtlb_asid_i  (dtlb_lu_asid),
       .itlb_asid_i  (itlb_lu_asid),
       .lu_vmid_i    (vmid_i),
+      .itlb_vmid_i  (fet_vmid_i),
+      .itlb_hart_i  (fetch_hart_i),
+      .dtlb_hart_i  (lsu_hart_i),
       // from TLBs
       // did we miss?
       .itlb_access_i(itlb_lu_access),
@@ -338,9 +374,12 @@ module cva6_mmu
 
       .update_vaddr_o(update_vaddr),
 
-      .asid_i,
-      .vs_asid_i,
-      .vmid_i,
+      // T6b-2b: context of the walk owner — fetch hart for instruction walks,
+      // LSU request hart for data walks (transparent in single-hart/drained
+      // configurations where both sides carry identical values).
+      .asid_i   (ptw_ctx_fet ? fet_asid_i : asid_i),
+      .vs_asid_i(ptw_ctx_fet ? fet_vs_asid_i : vs_asid_i),
+      .vmid_i   (ptw_ctx_fet ? fet_vmid_i : vmid_i),
 
       // from shared TLB
       // did we miss?
@@ -349,19 +388,20 @@ module cva6_mmu
       .shared_tlb_vaddr_i (shared_tlb_vaddr),
 
       .itlb_req_i(itlb_req),
+      .req_hart_i(ptw_ctx_fet ? fetch_hart_i : lsu_hart_i),
 
-      .satp_ppn_i,
-      .vsatp_ppn_i,
-      .hgatp_ppn_i,
-      .mxr_i,
-      .vmxr_i,
-      .mbe_i(mbe_i),
+      .satp_ppn_i (ptw_ctx_fet ? fet_satp_ppn_i : satp_ppn_i),
+      .vsatp_ppn_i(ptw_ctx_fet ? fet_vsatp_ppn_i : vsatp_ppn_i),
+      .hgatp_ppn_i(ptw_ctx_fet ? fet_hgatp_ppn_i : hgatp_ppn_i),
+      .mxr_i      (ptw_ctx_fet ? fet_mxr_i : mxr_i),
+      .vmxr_i     (ptw_ctx_fet ? fet_vmxr_i : vmxr_i),
+      .mbe_i      (ptw_ctx_fet ? fet_mbe_i : mbe_i),
       // Performance counters
       .shared_tlb_miss_o(shared_tlb_miss),  //open for now
 
       // PMP
-      .pmpcfg_i   (pmpcfg_i),
-      .pmpaddr_i  (pmpaddr_i),
+      .pmpcfg_i   (ptw_ctx_fet ? fet_pmpcfg_i : pmpcfg_i),
+      .pmpaddr_i  (ptw_ctx_fet ? fet_pmpaddr_i : pmpaddr_i),
       .bad_paddr_o(ptw_bad_paddr),
       .bad_gpaddr_o(ptw_bad_gpaddr)
   );
@@ -518,6 +558,46 @@ module cva6_mmu
   logic [CVA6Cfg.PtLevels-2:0] dtlb_is_page_n, dtlb_is_page_q;
   exception_t misaligned_ex_n, misaligned_ex_q;
 
+  // T6b-2b: the data-side permission check runs one cycle after the DTLB
+  // lookup on the registered request (*_q) — under mixed residency the live
+  // architectural context may already belong to the peer hart, so the check
+  // stage replays the context captured with the request.
+  localparam bit HART_CTX = (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;
+  logic           ctx_en_ld_st_translation_q;
+  logic           ctx_en_ld_st_g_translation_q;
+  riscv::priv_lvl_t ctx_ld_st_priv_lvl_q;
+  logic           ctx_ld_st_v_q;
+  logic           ctx_sum_q, ctx_vs_sum_q;
+  logic           ctx_mxr_q, ctx_vmxr_q;
+  logic           chk_en_ld_st_translation;
+  logic           chk_en_ld_st_g_translation;
+  riscv::priv_lvl_t chk_ld_st_priv_lvl;
+  logic           chk_ld_st_v;
+  logic           chk_sum, chk_vs_sum;
+  logic           chk_mxr, chk_vmxr;
+
+`ifdef G6LC_MUT_MMU_LIVE_CTX
+  // Review-only mutation: check stage uses the live (possibly peer-hart)
+  // context instead of the context registered with the request.
+  assign chk_en_ld_st_translation   = en_ld_st_translation_i;
+  assign chk_en_ld_st_g_translation = en_ld_st_g_translation_i;
+  assign chk_ld_st_priv_lvl         = ld_st_priv_lvl_i;
+  assign chk_ld_st_v                = ld_st_v_i;
+  assign chk_sum                    = sum_i;
+  assign chk_vs_sum                 = vs_sum_i;
+  assign chk_mxr                    = mxr_i;
+  assign chk_vmxr                   = vmxr_i;
+`else
+  assign chk_en_ld_st_translation   = HART_CTX ? ctx_en_ld_st_translation_q : en_ld_st_translation_i;
+  assign chk_en_ld_st_g_translation = HART_CTX ? ctx_en_ld_st_g_translation_q : en_ld_st_g_translation_i;
+  assign chk_ld_st_priv_lvl         = HART_CTX ? ctx_ld_st_priv_lvl_q : ld_st_priv_lvl_i;
+  assign chk_ld_st_v                = HART_CTX ? ctx_ld_st_v_q : ld_st_v_i;
+  assign chk_sum                    = HART_CTX ? ctx_sum_q : sum_i;
+  assign chk_vs_sum                 = HART_CTX ? ctx_vs_sum_q : vs_sum_i;
+  assign chk_mxr                    = HART_CTX ? ctx_mxr_q : mxr_i;
+  assign chk_vmxr                   = HART_CTX ? ctx_vmxr_q : vmxr_i;
+`endif
+
   // check if we need to do translation or if we are always ready (e.g.: we are not translating anything)
   assign lsu_dtlb_hit_o = (en_ld_st_translation_i || en_ld_st_g_translation_i) ? dtlb_lu_hit : 1'b1;
 
@@ -545,16 +625,16 @@ module cva6_mmu
 
     // Check if the User flag is set, then we may only access it in supervisor mode
     // if SUM is enabled
-    daccess_err = en_ld_st_translation_i &&
-              ((ld_st_priv_lvl_i == riscv::PRIV_LVL_S && (ld_st_v_i ? !vs_sum_i : !sum_i ) && dtlb_pte_q.u) || // SUM is not set and we are trying to access a user page in supervisor mode
-    (ld_st_priv_lvl_i == riscv::PRIV_LVL_U && !dtlb_pte_q.u));
+    daccess_err = chk_en_ld_st_translation &&
+              ((chk_ld_st_priv_lvl == riscv::PRIV_LVL_S && (chk_ld_st_v ? !chk_vs_sum : !chk_sum ) && dtlb_pte_q.u) || // SUM is not set and we are trying to access a user page in supervisor mode
+    (chk_ld_st_priv_lvl == riscv::PRIV_LVL_U && !dtlb_pte_q.u));
 
     if (CVA6Cfg.RVH) begin
       lsu_tinst_n = lsu_tinst_i;
       hs_ld_st_inst_n = hs_ld_st_inst_i;
       lsu_gpaddr_n[(CVA6Cfg.IS_XLEN32 ? CVA6Cfg.VLEN: CVA6Cfg.GPLEN)-1:0] = dtlb_gpaddr[(CVA6Cfg.IS_XLEN32 ? CVA6Cfg.VLEN: CVA6Cfg.GPLEN)-1:0];
       csr_hs_ld_st_inst_o = hs_ld_st_inst_i || hs_ld_st_inst_q;
-      d_g_st_access_err = en_ld_st_g_translation_i && !dtlb_gpte_q.u;
+      d_g_st_access_err = chk_en_ld_st_g_translation && !dtlb_gpte_q.u;
       dtlb_gpte_n = dtlb_g_content;
     end
 
@@ -562,12 +642,12 @@ module cva6_mmu
     lsu_dtlb_ppn_o        = (CVA6Cfg.PPNW)'(lsu_vaddr_n[((CVA6Cfg.PLEN > CVA6Cfg.VLEN) ? CVA6Cfg.VLEN -1: CVA6Cfg.PLEN -1 ):12]);
 
     // translation is enabled and no misaligned exception occurred
-    if ((en_ld_st_translation_i || en_ld_st_g_translation_i) && !misaligned_ex_q.valid) begin
+    if ((chk_en_ld_st_translation || chk_en_ld_st_g_translation) && !misaligned_ex_q.valid) begin
       lsu_valid_o = 1'b0;
 
       lsu_dtlb_ppn_o = (en_ld_st_g_translation_i && CVA6Cfg.RVH) ? dtlb_g_content.ppn : dtlb_content.ppn;
       lsu_paddr_o = {
-        (en_ld_st_g_translation_i && CVA6Cfg.RVH) ? dtlb_gpte_q.ppn : dtlb_pte_q.ppn,
+        (chk_en_ld_st_g_translation && CVA6Cfg.RVH) ? dtlb_gpte_q.ppn : dtlb_pte_q.ppn,
         lsu_vaddr_q[11:0]
       };
 
@@ -604,7 +684,7 @@ module cva6_mmu
         if (lsu_is_store_q) begin
           // check if the page is write-able and we are not violating privileges
           // also check if the dirty flag is set
-          if(CVA6Cfg.RVH && en_ld_st_g_translation_i && (!dtlb_gpte_q.w || d_g_st_access_err || !dtlb_gpte_q.d)) begin
+          if(CVA6Cfg.RVH && chk_en_ld_st_g_translation && (!dtlb_gpte_q.w || d_g_st_access_err || !dtlb_gpte_q.d)) begin
             lsu_exception_o.cause = riscv::STORE_GUEST_PAGE_FAULT;
             lsu_exception_o.valid = 1'b1;
             if (CVA6Cfg.TvalEn)
@@ -614,9 +694,9 @@ module cva6_mmu
             if (CVA6Cfg.RVH) begin
               lsu_exception_o.tval2 = CVA6Cfg.GPLEN'(lsu_gpaddr_q[(CVA6Cfg.IS_XLEN32 ? CVA6Cfg.VLEN : CVA6Cfg.GPLEN)-1:0]);
               lsu_exception_o.tinst = '0;
-              lsu_exception_o.gva = ld_st_v_i;
+              lsu_exception_o.gva = chk_ld_st_v;
             end
-          end else if ((en_ld_st_translation_i || !CVA6Cfg.RVH) && (!dtlb_pte_q.w || daccess_err || canonical_addr_check || !dtlb_pte_q.d)) begin
+          end else if ((chk_en_ld_st_translation || !CVA6Cfg.RVH) && (!dtlb_pte_q.w || daccess_err || canonical_addr_check || !dtlb_pte_q.d)) begin
             lsu_exception_o.cause = riscv::STORE_PAGE_FAULT;
             lsu_exception_o.valid = 1'b1;
             if (CVA6Cfg.TvalEn)
@@ -626,7 +706,7 @@ module cva6_mmu
             if (CVA6Cfg.RVH) begin
               lsu_exception_o.tval2 = '0;
               lsu_exception_o.tinst = lsu_tinst_q;
-              lsu_exception_o.gva   = ld_st_v_i;
+              lsu_exception_o.gva   = chk_ld_st_v;
             end
           end
           // this is a load
@@ -641,7 +721,7 @@ module cva6_mmu
             if (CVA6Cfg.RVH) begin
               lsu_exception_o.tval2 = CVA6Cfg.GPLEN'(lsu_gpaddr_q[(CVA6Cfg.IS_XLEN32 ? CVA6Cfg.VLEN : CVA6Cfg.GPLEN)-1:0]);
               lsu_exception_o.tinst = '0;
-              lsu_exception_o.gva = ld_st_v_i;
+              lsu_exception_o.gva = chk_ld_st_v;
             end
             // check for sufficient access privileges - throw a page fault if necessary
           end else if (daccess_err || canonical_addr_check) begin
@@ -654,7 +734,7 @@ module cva6_mmu
             if (CVA6Cfg.RVH) begin
               lsu_exception_o.tval2 = '0;
               lsu_exception_o.tinst = lsu_tinst_q;
-              lsu_exception_o.gva   = ld_st_v_i;
+              lsu_exception_o.gva   = chk_ld_st_v;
             end
           end
         end
@@ -681,7 +761,7 @@ module cva6_mmu
               if (CVA6Cfg.RVH) begin
                 lsu_exception_o.tval2 = ptw_bad_gpaddr[CVA6Cfg.GPLEN-1:0];
                 lsu_exception_o.tinst = (ptw_err_at_g_int_st ? (CVA6Cfg.IS_XLEN64 ? riscv::READ_64_PSEUDOINSTRUCTION : riscv::READ_32_PSEUDOINSTRUCTION) : '0);
-                lsu_exception_o.gva = ld_st_v_i;
+                lsu_exception_o.gva = chk_ld_st_v;
               end
             end else begin
               lsu_exception_o.cause = riscv::STORE_PAGE_FAULT;
@@ -693,7 +773,7 @@ module cva6_mmu
               if (CVA6Cfg.RVH) begin
                 lsu_exception_o.tval2 = '0;
                 lsu_exception_o.tinst = lsu_tinst_q;
-                lsu_exception_o.gva   = ld_st_v_i;
+                lsu_exception_o.gva   = chk_ld_st_v;
               end
             end
           end else begin
@@ -707,7 +787,7 @@ module cva6_mmu
               if (CVA6Cfg.RVH) begin
                 lsu_exception_o.tval2 = ptw_bad_gpaddr[CVA6Cfg.GPLEN-1:0];
                 lsu_exception_o.tinst = (ptw_err_at_g_int_st ? (CVA6Cfg.IS_XLEN64 ? riscv::READ_64_PSEUDOINSTRUCTION : riscv::READ_32_PSEUDOINSTRUCTION) : '0);
-                lsu_exception_o.gva = ld_st_v_i;
+                lsu_exception_o.gva = chk_ld_st_v;
               end
             end else begin
               lsu_exception_o.cause = riscv::LOAD_PAGE_FAULT;
@@ -719,7 +799,7 @@ module cva6_mmu
               if (CVA6Cfg.RVH) begin
                 lsu_exception_o.tval2 = '0;
                 lsu_exception_o.tinst = lsu_tinst_q;
-                lsu_exception_o.gva   = ld_st_v_i;
+                lsu_exception_o.gva   = chk_ld_st_v;
               end
             end
           end
@@ -746,7 +826,7 @@ module cva6_mmu
             if (CVA6Cfg.RVH) begin
               lsu_exception_o.tval2 = '0;
               lsu_exception_o.tinst = lsu_tinst_q;
-              lsu_exception_o.gva   = ld_st_v_i;
+              lsu_exception_o.gva   = chk_ld_st_v;
             end
           end
         end
@@ -770,6 +850,16 @@ module cva6_mmu
       lsu_tinst_q     <= '0;
       hs_ld_st_inst_q <= '0;
       misaligned_ex_q <= '0;
+      if (HART_CTX) begin
+        ctx_en_ld_st_translation_q   <= '0;
+        ctx_en_ld_st_g_translation_q <= '0;
+        ctx_ld_st_priv_lvl_q         <= riscv::PRIV_LVL_M;
+        ctx_ld_st_v_q                <= '0;
+        ctx_sum_q                    <= '0;
+        ctx_vs_sum_q                 <= '0;
+        ctx_mxr_q                    <= '0;
+        ctx_vmxr_q                   <= '0;
+      end
     end else begin
       lsu_vaddr_q     <= lsu_vaddr_n;
       lsu_req_q       <= lsu_req_n;
@@ -778,6 +868,16 @@ module cva6_mmu
       lsu_is_store_q  <= lsu_is_store_n;
       dtlb_is_page_q  <= dtlb_is_page_n;
       misaligned_ex_q <= misaligned_ex_n;
+      if (HART_CTX) begin
+        ctx_en_ld_st_translation_q   <= en_ld_st_translation_i;
+        ctx_en_ld_st_g_translation_q <= en_ld_st_g_translation_i;
+        ctx_ld_st_priv_lvl_q         <= ld_st_priv_lvl_i;
+        ctx_ld_st_v_q                <= ld_st_v_i;
+        ctx_sum_q                    <= sum_i;
+        ctx_vs_sum_q                 <= vs_sum_i;
+        ctx_mxr_q                    <= mxr_i;
+        ctx_vmxr_q                   <= vmxr_i;
+      end
 
       if (CVA6Cfg.RVH) begin
         lsu_tinst_q     <= lsu_tinst_n;
@@ -787,4 +887,24 @@ module cva6_mmu
       end
     end
   end
+
+  //pragma translate_off
+  // T6b-2b: the LSU request hart — and therefore every data-side architectural
+  // context input muxed by it — must not change while a data page-table walk
+  // is in flight (the LSU holds its request for the whole walk).
+  g6lc_dtlb_walk_hart_stable :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (ptw_active && !walking_instr && lsu_req_i && $past(lsu_req_i))
+      |-> $stable(lsu_hart_i))
+  else $error("[mmu] lsu_hart_i changed during an active data PTW walk");
+  // While the LSU holds its request for a data walk, the architectural
+  // context registered with it (ctx_*_q) must stay equal to the live inputs
+  // the walk itself consumes.
+  g6lc_dtlb_walk_ctx_stable :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (HART_CTX && ptw_active && !walking_instr && lsu_req_i && $past(lsu_req_i))
+      |-> $stable({en_ld_st_translation_i, en_ld_st_g_translation_i,
+                  ld_st_priv_lvl_i, ld_st_v_i, sum_i, vs_sum_i, mxr_i, vmxr_i}))
+  else $error("[mmu] LSU architectural context changed during an active data PTW walk");
+  //pragma translate_on
 endmodule

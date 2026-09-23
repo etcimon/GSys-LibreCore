@@ -344,6 +344,27 @@ token/redirect proofs PASS, dispatch/LSQ/IQ cells unchanged, frozen int + s11 an
 cycle-identical, dual-hart profile 10,696,498 (unchanged), anchor exact (`6b06ac40…`), lint 8/54,
 synth 32/5, FO4 unchanged in both screens.
 
+**T6b-2b design notes.** Per-access architectural context: the CSR bank exports an LSU context set
+(`en_ld_st_translation`, `ld_st_priv_lvl`, `ld_st_v`, `sum`/`vs_sum`, `mxr`/`vmxr`, `satp`/`asid`,
+`vsatp`/`vs_asid`, `hgatp`/`vmid`, `mbe`) muxed by `lsu_hart_i` plus a `fet_*` copy muxed by
+`active_hart_i`; `pmpcfg_o`/`pmpaddr_o` alone select by `lsu_chk_hart_i` because the PMP data check
+runs one cycle after the request on the registered address. The MMU registers the whole request
+context (`ctx_*_q`, every cycle alongside `lsu_req_q`) and replays it through `chk_*` in every
+check-stage expression; lookup-side uses (DTLB hit/PPN, TLB stage-enable, `canonical_addr_check`,
+PTW inputs) stay live. TLB entries carry a hart tag compared only when `NrHarts>1 &&
+!SmtDrainedHandoff` (`HART_TAG`/`HART_CTX` localparams constant-fold elsewhere); flushes stay
+global. **Unsupported in mixed residency:** differing `mbe` across resident harts (bank asserts all
+banks agree) — the LSU formats data with the request hart's endianness while the drain path uses the
+committing hart's. **Known pre-existing limitation (out of T6b scope):** under the drained handoff
+(`SmtDrainedHandoff=1`) TLB entries are shared across harts with equal ASIDs — the tag compare
+folds away and first-match behaviour is preserved by oracle. Interrupts are taken per fetch lane in
+decode (`irq_ctrl_b_o`/`priv_lvl_b_o`/`v_b_o` per-hart arrays); there is no commit-stage interrupt
+context (`irq_ctrl_commit_o` removed — no consumer). Under mixed residency `halt_csr_o=0` and a WFI
+parks only the committing hart via `hart_halt_o[h]`; drained keeps the global halt. Oracles:
+`csrbank` (context select + WFI, drained and mixed), `tlb`/`stlb` (hart isolation + drained
+sharing), `mmuctx` (per-hart walks + check-stage skew incl. translation-enable) with
+`G6LC_MUT_TLB_NO_HART_TAG`/`G6LC_MUT_MMU_LIVE_CTX` expected-failure cells.
+
 **Slices.** T6b-1 config bit + drain gate seam, hart-tagged LSQ/store-buffer/IQ ordering,
 `sb_head_pc`, leaf oracles (drain gate still on: every existing result must reproduce). T6b-2
 recovery and frontend per-hart state (flush restart, inactive-hart redirects, per-hart filter),

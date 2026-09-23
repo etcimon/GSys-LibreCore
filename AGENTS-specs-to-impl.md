@@ -45,6 +45,23 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## Per-access translation/privilege/PMP context (2026-09-23, T6b-2b)
+
+Virtual-memory and PMP checks in the requesting hart's context (`#virtual-memory` satp/ASID
+scoping, `#sum-mxr` SUM/MXR, `#pmp` per-hart PMP CSRs, `#interrupts` per-hart delivery): the CSR
+bank (`core/smt/g6lc_smt_csr_bank.sv`) muxes the load/store context (`en_ld_st_translation`,
+`ld_st_priv_lvl`, `ld_st_v`, `sum`/`vs_sum`, `mxr`/`vmxr`, `satp`/`asid`, `vsatp`/`vs_asid`,
+`hgatp`/`vmid`, `mbe`) by the LSU request hart, the PMP pair by the check-stage hart, a `fet_*`
+copy by the active fetch hart; xepc/xtvec/eret/CSR-flush by the committing hart. The MMU
+(`core/cva6_mmu/cva6_mmu.sv`) registers the request context alongside `lsu_req_q` and replays it in
+the check stage (the load unit pops the request in the lookup cycle, so the live context may
+already be the peer's); PTW walks in the walk owner's context; private and shared TLB entries
+carry a hart tag compared only when `NrHarts>1 && !SmtDrainedHandoff`. Interrupts are taken per
+decode lane by `fetch_entry.hart_id`; under mixed residency a WFI parks only its hart. Drained and
+single-hart configurations constant-fold every new leg (anchor and dual-hart records exact).
+Unsupported in mixed residency: differing `mbe` across resident harts (asserted). Pre-existing,
+out of scope: drained SMT2 shares TLB entries across harts with equal ASIDs.
+
 ## Per-hart recovery plumbing (2026-09-23, T6b-2a)
 
 Trap/eret/replay restart per hart (`#priv-csrs` xepc/xtvec semantics, `#instr_fetch`): in

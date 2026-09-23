@@ -93,9 +93,12 @@ next actions are superseded by the tranche exits.
   seam, hart-tagged LSQ/store-buffer/IQ ordering, `sb_head_pc` export, leaf oracles; everything
   reproduced with the gate on. T6b-2a landed (per-hart recovery plumbing: committing-hart bank
   redirects, replay banks pc, inactive-hart mispredict → bank, peer restart on a global flush,
-  parallel `sb_head_pc`). Open: T6b-2b per-access translation/privilege context (CSR bank exports
-  the LSU context per hart, MMU selects by request hart, TLB hart tag), T6b-3 `SmtDrainedHandoff=0`
-  firmware gate + isolation negatives, T6b-4 performance (partitioned heads, PRF floors).
+  parallel `sb_head_pc`). T6b-2b landed (per-access translation/privilege/PMP context: CSR bank
+  LSU context by request hart, PMP by check-stage hart, MMU replays the registered request context
+  in its check stage, hart-tagged TLBs, per-lane decode interrupts, WFI parks only its hart; drained
+  records exact). Open: T6b-3 `SmtDrainedHandoff=0` firmware gate + isolation negatives — first
+  probe stops at cycle 280 on the planted `perf_counters` attribution check (events must bank by
+  the committing hart); T6b-4 performance (partitioned heads, PRF floors).
 - [ ] T6b mixed residency per the plan file (after T6a).
 
 ## Active stability-first review — authoritative next change sets

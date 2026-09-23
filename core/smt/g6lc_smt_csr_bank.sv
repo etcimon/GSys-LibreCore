@@ -8,6 +8,9 @@
 //   - Commit/exception/CSR-op gated by commit_instr.hart_id (fine-grain drain)
 //   - Async IRQ/timer: per-hart lines (Linux CLINT/PLIC context identity)
 //   - Architectural outputs muxed by active_hart_i (fetch/decode privilege view)
+//   - T6b-2b: load/store-side outputs muxed by lsu_hart_i (requesting hart);
+//     fet_* copies keep the fetch/PTW-I side on active_hart_i. Under
+//     SmtDrainedHandoff lsu_hart_i == active_hart_i so behaviour is unchanged.
 //
 // mhartid for bank h = hart_id_base_i + h (software-visible thread ids).
 // When NrHarts==1, time_irq_i/ipi_i/irq_i widths collapse to the legacy scalars.
@@ -28,6 +31,17 @@ module g6lc_smt_csr_bank
     input  logic clk_i,
     input  logic rst_ni,
     input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] active_hart_i,
+    // T6b-2b: hart owning the current load/store translation request. All
+    // LSU-side architectural outputs (translation mode, ld/st privilege,
+    // sum/mxr, satp/asid family, mbe) select by this hart — the PMP pair
+    // selects by lsu_chk_hart_i instead; fetch/decode outputs stay on
+    // active_hart_i.
+    input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] lsu_hart_i,
+    // T6b-2b: hart owning the LSU check-stage context. The data PMP check
+    // runs one cycle after the translation request, so pmpcfg_o/pmpaddr_o
+    // select by this (registered) hart while everything else stays on
+    // lsu_hart_i. Equals lsu_hart_i when NrHarts==1 or SmtDrainedHandoff.
+    input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] lsu_chk_hart_i,
     input  logic switch_i,  // gate commit during switch cycle
 
     // Per-hart CLINT timer / IPI (index = local SMT bank)
@@ -67,6 +81,16 @@ module g6lc_smt_csr_bank
     output logic [6:0] fprec_o,
     output riscv::xs_t vs_o,
     output irq_ctrl_t irq_ctrl_o,
+    // T6b-2b: per-hart interrupt context for per-lane decode selection under
+    // mixed residency (unused when SmtDrainedHandoff or NrHarts==1).
+    output irq_ctrl_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] irq_ctrl_b_o,
+    // T6b-2b: per-hart privilege/virtualization state for the same per-lane
+    // decode selection (the interrupt delivery check reads priv_lvl/v).
+    output riscv::priv_lvl_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] priv_lvl_b_o,
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] v_b_o,
+    // T6b-2b: committing hart's virtualization bit (controller sfence.vma
+    // legality), keyed by commit_instr_i.hart_id like csr_rdata_o.
+    output logic v_commit_o,
     output logic en_translation_o,
     output logic en_g_translation_o,
     output logic en_ld_st_translation_o,
@@ -84,6 +108,22 @@ module g6lc_smt_csr_bank
     output logic [CVA6Cfg.ASID_WIDTH-1:0] vs_asid_o,
     output logic [CVA6Cfg.PPNW-1:0] hgatp_ppn_o,
     output logic [CVA6Cfg.VMID_WIDTH-1:0] vmid_o,
+    // T6b-2b: fetch-side copies of the translation context, always selected by
+    // active_hart_i. The MMU shares satp/asid/vmid/mbe/PMP between the ITLB
+    // path (fetch hart) and the LSU/PTW data path (lsu_hart_i); these outputs
+    // feed the I-side and the instruction page-table walk.
+    output logic [CVA6Cfg.PPNW-1:0] fet_satp_ppn_o,
+    output logic [CVA6Cfg.ASID_WIDTH-1:0] fet_asid_o,
+    output logic [CVA6Cfg.PPNW-1:0] fet_vsatp_ppn_o,
+    output logic [CVA6Cfg.ASID_WIDTH-1:0] fet_vs_asid_o,
+    output logic [CVA6Cfg.PPNW-1:0] fet_hgatp_ppn_o,
+    output logic [CVA6Cfg.VMID_WIDTH-1:0] fet_vmid_o,
+    output logic fet_mxr_o,
+    output logic fet_vmxr_o,
+    output logic fet_mbe_o,
+    // Commit-side data endianness (dcache store-buffer drain path): keyed by
+    // the committing hart, like csr_rdata_o.
+    output logic mbe_commit_o,
     output riscv::cbie_t mcbie_o,
     output riscv::cbie_t scbie_o,
     output riscv::cbie_t hcbie_o,
@@ -128,6 +168,10 @@ module g6lc_smt_csr_bank
     input  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] lcofi_i,
     output riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] pmpcfg_o,
     output logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] pmpaddr_o,
+    // T6b-2b: active-hart PMP set for the instruction-fetch check (the data
+    // check uses the lsu_chk_hart_i-selected pmpcfg_o/pmpaddr_o pair).
+    output riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] fet_pmpcfg_o,
+    output logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] fet_pmpaddr_o,
     output logic [31:0] mcountinhibit_o,
     output rvfi_probes_csr_t rvfi_csr_o,
     output jvt_t jvt_o,
@@ -256,6 +300,23 @@ module g6lc_smt_csr_bank
         .break_from_trigger_o
     );
     assign hart_halt_o = halt_csr_o;  // width-1 vector
+    // T6b-2b single-hart ties: LSU and fetch context collapse onto the one bank.
+    assign irq_ctrl_b_o[0]   = irq_ctrl_o;
+    assign priv_lvl_b_o[0]   = priv_lvl_o;
+    assign v_b_o[0]          = v_o;
+    assign v_commit_o        = v_o;
+    assign fet_satp_ppn_o    = satp_ppn_o;
+    assign fet_asid_o        = asid_o;
+    assign fet_vsatp_ppn_o   = vsatp_ppn_o;
+    assign fet_vs_asid_o     = vs_asid_o;
+    assign fet_hgatp_ppn_o   = hgatp_ppn_o;
+    assign fet_vmid_o        = vmid_o;
+    assign fet_mxr_o         = mxr_o;
+    assign fet_vmxr_o        = vmxr_o;
+    assign fet_mbe_o         = mbe_o;
+    assign mbe_commit_o      = mbe_o;
+    assign fet_pmpcfg_o      = pmpcfg_o;
+    assign fet_pmpaddr_o     = pmpaddr_o;
   end else begin : gen_banked
     // Fine-grain SMT: commit-side ops select the *committing instruction's*
     // hart bank (allows drain after switch). Privilege outputs mux by active
@@ -449,6 +510,9 @@ module g6lc_smt_csr_bank
     // Per-hart WFI for thread select (not sticky-active-only).
     for (genvar h = 0; h < NH; h++) begin : gen_halt_pack
       assign hart_halt_o[h] = halt_b[h];
+      assign irq_ctrl_b_o[h] = irq_ctrl_b[h];
+      assign priv_lvl_b_o[h] = priv_b[h];
+      assign v_b_o[h]        = v_b[h];
     end
 
     // Mux by active hart (fetch/decode privilege view).
@@ -456,17 +520,35 @@ module g6lc_smt_csr_bank
     // Mux by committing hart, not fetch-active. TRACE: hart0
     // csrr mhartid @7ac retired a0=1 (bank 1) so 7be would
     // skip scratch_init. Not leftover keep. Not +8 hold.
+    // T6b-2b: the load/store-side outputs (translation enable, ld/st
+    // privilege, sum/mxr, satp/asid family, mbe) mux by lsu_hart_i —
+    // the hart owning the LSU translation request; the PMP pair muxes by
+    // lsu_chk_hart_i (check-stage hart). The fet_* copies keep the
+    // I-side (ITLB, fetch PMP, fetch-side PTW context) on active_hart_i.
+    // Under SmtDrainedHandoff lsu_hart_i is tied to the active hart upstream,
+    // so every output is bit-identical to the drained implementation.
     always_comb begin
-      flush_o                  = flush_b[active_hart_i];
-      halt_csr_o               = halt_b[active_hart_i];
+      // CSR-write side-effect flush belongs to the committing hart
+      flush_o                  = flush_b[commit_instr_i.hart_id];
+      // WFI: under drained handoff the whole backend is empty at a switch, so
+      // a WFI's halt still gates the commit stage globally. Under mixed
+      // residency only the per-hart hart_halt_o parks the owning hart in the
+      // thread selector (hart_block_i) — a WFI on one hart must never halt
+      // the peer's commit.
+      halt_csr_o               = CVA6Cfg.SmtDrainedHandoff ? halt_b[active_hart_i] : 1'b0;
       csr_rdata_o              = csr_rdata_b[commit_instr_i.hart_id];
       csr_exception_o          = csr_ex_b[commit_instr_i.hart_id];
-      epc_o                    = epc_b[active_hart_i];
-      eret_o                   = eret_b[active_hart_i];
-      trap_vector_base_o       = tvec_b[active_hart_i];
+      // T6b-2b: xRET/exception/trap side-band outputs belong to the committing
+      // instruction's hart (they are only valid for that bank anyway — the
+      // peer bank's commit port is idle-gated). Identical under drained
+      // handoff where the committing hart is always the active hart.
+      epc_o                    = epc_b[commit_instr_i.hart_id];
+      eret_o                   = eret_b[commit_instr_i.hart_id];
+      trap_vector_base_o       = tvec_b[commit_instr_i.hart_id];
       priv_lvl_o               = priv_b[active_hart_i];
-      mbe_o                    = mbe_b[active_hart_i];
+      mbe_o                    = mbe_b[lsu_hart_i];
       v_o                      = v_b[active_hart_i];
+      v_commit_o               = v_b[commit_instr_i.hart_id];
       fs_o                     = fs_b[active_hart_i];
       vfs_o                    = vfs_b[active_hart_i];
       fflags_o                 = fflags_b[active_hart_i];
@@ -474,22 +556,32 @@ module g6lc_smt_csr_bank
       fprec_o                  = fprec_b[active_hart_i];
       vs_o                     = vs_b[active_hart_i];
       irq_ctrl_o               = irq_ctrl_b[active_hart_i];
+      mbe_commit_o             = mbe_b[commit_instr_i.hart_id];
       en_translation_o         = en_tr_b[active_hart_i];
       en_g_translation_o       = en_gtr_b[active_hart_i];
-      en_ld_st_translation_o   = en_ld_tr_b[active_hart_i];
-      en_ld_st_g_translation_o = en_ld_gtr_b[active_hart_i];
-      ld_st_priv_lvl_o         = ld_st_priv_b[active_hart_i];
-      ld_st_v_o                = ld_st_v_b[active_hart_i];
-      sum_o                    = sum_b[active_hart_i];
-      vs_sum_o                 = vs_sum_b[active_hart_i];
-      mxr_o                    = mxr_b[active_hart_i];
-      vmxr_o                   = vmxr_b[active_hart_i];
-      satp_ppn_o               = satp_b[active_hart_i];
-      asid_o                   = asid_b[active_hart_i];
-      vsatp_ppn_o              = vsatp_b[active_hart_i];
-      vs_asid_o                = vs_asid_b[active_hart_i];
-      hgatp_ppn_o              = hgatp_b[active_hart_i];
-      vmid_o                   = vmid_b[active_hart_i];
+      en_ld_st_translation_o   = en_ld_tr_b[lsu_hart_i];
+      en_ld_st_g_translation_o = en_ld_gtr_b[lsu_hart_i];
+      ld_st_priv_lvl_o         = ld_st_priv_b[lsu_hart_i];
+      ld_st_v_o                = ld_st_v_b[lsu_hart_i];
+      sum_o                    = sum_b[lsu_hart_i];
+      vs_sum_o                 = vs_sum_b[lsu_hart_i];
+      mxr_o                    = mxr_b[lsu_hart_i];
+      vmxr_o                   = vmxr_b[lsu_hart_i];
+      satp_ppn_o               = satp_b[lsu_hart_i];
+      asid_o                   = asid_b[lsu_hart_i];
+      vsatp_ppn_o              = vsatp_b[lsu_hart_i];
+      vs_asid_o                = vs_asid_b[lsu_hart_i];
+      hgatp_ppn_o              = hgatp_b[lsu_hart_i];
+      vmid_o                   = vmid_b[lsu_hart_i];
+      fet_satp_ppn_o           = satp_b[active_hart_i];
+      fet_asid_o               = asid_b[active_hart_i];
+      fet_vsatp_ppn_o          = vsatp_b[active_hart_i];
+      fet_vs_asid_o            = vs_asid_b[active_hart_i];
+      fet_hgatp_ppn_o          = hgatp_b[active_hart_i];
+      fet_vmid_o               = vmid_b[active_hart_i];
+      fet_mxr_o                = mxr_b[active_hart_i];
+      fet_vmxr_o               = vmxr_b[active_hart_i];
+      fet_mbe_o                = mbe_b[active_hart_i];
       mcbie_o                  = mcbie_b[active_hart_i];
       scbie_o                  = scbie_b[active_hart_i];
       hcbie_o                  = hcbie_b[active_hart_i];
@@ -519,14 +611,29 @@ module g6lc_smt_csr_bank
       perf_addr_o              = perf_addr_b[active_hart_i];
       perf_data_o              = perf_data_b[active_hart_i];
       perf_we_o                = perf_we_b[active_hart_i];
-      pmpcfg_o                 = pmpcfg_b[active_hart_i];
-      pmpaddr_o                = pmpaddr_b[active_hart_i];
+      pmpcfg_o                 = pmpcfg_b[lsu_chk_hart_i];
+      pmpaddr_o                = pmpaddr_b[lsu_chk_hart_i];
+      fet_pmpcfg_o             = pmpcfg_b[active_hart_i];
+      fet_pmpaddr_o            = pmpaddr_b[active_hart_i];
       mcountinhibit_o          = mcountinh_b[active_hart_i];
       rvfi_csr_o               = rvfi_b[active_hart_i];
       jvt_o                    = jvt_b[active_hart_i];
       debug_from_trigger_o     = dbg_trig_b[active_hart_i];
       break_from_trigger_o     = brk_trig_b[active_hart_i];
     end
+
+    //pragma translate_off
+    // T6b-2b: per-hart data endianness is unsupported — the LSU formats
+    // load/store data with mbe_o (request hart) and the store buffer drain
+    // with mbe_commit_o (committing hart); both are only correct if every
+    // resident bank agrees on mbe.
+    for (genvar h = 1; h < NH; h++) begin : g6lc_mbe_agree_check
+      g6lc_mbe_agree :
+      assert property (@(posedge clk_i) disable iff (!rst_ni)
+          (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) |-> (mbe_b[h] == mbe_b[0]))
+      else $error("[smt-csr-bank] mbe mismatch across resident hart banks (%0d)", h);
+    end
+    //pragma translate_on
   end
 
 endmodule

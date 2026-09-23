@@ -3475,3 +3475,681 @@ module tb_g6lc_review_sbhead;
     $finish;
   end
 endmodule
+
+// ======================================================================
+// T6b-2b: per-access architectural context in the banked CSR regfile.
+// Bank 0 is programmed with context set A and bank 1 with set B through each
+// hart's commit CSR-write path. The LSU-side outputs must follow lsu_hart_i,
+// the PMP pair lsu_chk_hart_i, the fetch-side outputs active_hart_i, and a
+// WFI must park only its own hart under mixed residency while the drained
+// handoff keeps the global halt_csr_o. +oracle_negative flips every
+// expectation (must fatal).
+// ======================================================================
+module tb_g6lc_review_csrbank;
+  import ariane_pkg::*;
+  `include "g6lc_core_types.svh"
+  `include "rvfi_types.svh"
+  parameter int DRAINED=1;
+  localparam int HARTS=2;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.GPLEN=64;c.IS_XLEN64=1;
+    c.NrHarts=HARTS;c.SmtDrainedHandoff=DRAINED;
+    c.NrIssuePorts=2;c.NrCommitPorts=2;c.NrWbPorts=2;c.NrRgprPorts=2;
+    c.NR_SB_ENTRIES=8;c.TRANS_ID_BITS=3;
+    c.RVS=1;c.RVU=1;c.RVA=1;c.MmuPresent=1;
+    c.MODE_SV=config_pkg::ModeSv39;c.PtLevels=3;c.VpnLen=27;c.SV=39;
+    c.PPNW=44;c.GPPNW=44;c.ASID_WIDTH=16;c.VMID_WIDTH=14;
+    // Derived-width fields as build_config_pkg computes them (cva6_cfg_empty
+    // leaves them 0, which silently drops satp_t's mode field).
+    c.ModeW=4;c.ASIDW=16;c.VMIDW=14;
+    c.NrPMPEntries=4;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef `G6LC_BRANCHPREDICT_SBE_T(C) branchpredict_sbe_t;
+  typedef `G6LC_EXCEPTION_T(C) exception_t;
+  typedef `G6LC_SCOREBOARD_ENTRY_T(C) sbe_t;
+  typedef `G6LC_IRQ_CTRL_T(C) irq_ctrl_t;
+  typedef struct packed {logic[C.XLEN-7:0] base;logic[5:0] mode;} jvt_t;
+  typedef `RVFI_PROBES_CSR_T(C) rvfi_csr_t;
+
+  // Context set A (bank 0) / set B (bank 1).
+  localparam logic[63:0] MSTATUS_A=64'h20800;   // MPRV=1, MPP=S
+  localparam logic[63:0] MSTATUS_B=64'hE1800;   // MPRV=1, MPP=M, SUM=1, MXR=1
+  localparam logic[63:0] SATP_A=(64'd8<<60)|(64'd1<<44)|64'hABCDE;
+  localparam logic[63:0] SATP_B=(64'd8<<60)|(64'd2<<44)|64'h12345;
+  localparam logic[63:0] MIE_A=64'h888,MIE_B=64'h222;
+  // NA4 is never supported, NAPOT needs PMPNapotEn, and a locked entry
+  // blocks the pmpaddr write — use unlocked TOR forms.
+  localparam logic[63:0] PMPCFG_A=64'h0F,PMPCFG_B=64'h0D;
+  localparam logic[63:0] PMPADDR_A=64'h222,PMPADDR_B=64'h777;
+
+  logic clk=0,rst_n=0;
+  logic active_hart=0,lsu_hart=0,lsu_chk_hart=0;
+  logic halt_csr;
+  logic[1:0] hart_halt;
+  sbe_t commit_i='0;
+  logic[1:0] commit_ack='0;
+  exception_t ex_i='0;
+  fu_op csr_op=ADD;
+  logic[11:0] csr_addr='0;
+  logic[63:0] csr_wdata='0;
+  logic en_ld_tr,en_ld_gtr;
+  riscv::priv_lvl_t ld_st_priv;
+  logic ld_st_v,sum_o,vs_sum_o,mxr_o,vmxr_o;
+  logic[43:0] satp_ppn,fet_satp_ppn;
+  logic[15:0] asid_o,fet_asid_o;
+  logic[43:0] vsatp_ppn,hgatp_ppn;
+  logic[15:0] vs_asid_o;
+  logic[13:0] vmid_o;
+  logic[43:0] fet_vsatp_ppn,fet_hgatp_ppn;
+  logic[15:0] fet_vs_asid_o;
+  logic[13:0] fet_vmid_o;
+  logic fet_mxr_o,fet_vmxr_o,fet_mbe_o,mbe_commit_o;
+  riscv::pmpcfg_t[3:0] pmpcfg,fet_pmpcfg;
+  logic[3:0][53:0] pmpaddr,fet_pmpaddr;
+  irq_ctrl_t irq_ctrl;
+  irq_ctrl_t[1:0] irq_ctrl_b;
+  riscv::priv_lvl_t[1:0] priv_lvl_b;
+  logic[1:0] v_b;
+  logic mbe_o,v_commit_o;
+  int scenario;bit negative;
+  always #5 clk=~clk;
+
+  g6lc_smt_csr_bank #(.CVA6Cfg(C),.exception_t(exception_t),.jvt_t(jvt_t),
+      .irq_ctrl_t(irq_ctrl_t),.scoreboard_entry_t(sbe_t),.rvfi_probes_csr_t(rvfi_csr_t)) dut(
+    .clk_i(clk),.rst_ni(rst_n),
+    .active_hart_i(active_hart),.lsu_hart_i(lsu_hart),.lsu_chk_hart_i(lsu_chk_hart),
+    .switch_i(1'b0),.time_irq_i('0),.rtc_time_i('0),
+    .flush_o(),.halt_csr_o(halt_csr),.hart_halt_o(hart_halt),
+    .commit_instr_i(commit_i),.commit_ack_i(commit_ack),
+    .boot_addr_i('0),.hart_id_base_i('0),.ex_i(ex_i),
+    .csr_op_i(csr_op),.csr_addr_i(csr_addr),.csr_wdata_i(csr_wdata),.csr_rdata_o(),
+    .dirty_fp_state_i(1'b0),.csr_write_fflags_i(1'b0),.dirty_v_state_i(1'b0),
+    .pc_i('0),.csr_exception_o(),.epc_o(),.eret_o(),.trap_vector_base_o(),
+    .priv_lvl_o(),.mbe_o(mbe_o),.v_o(),
+    .acc_fflags_ex_i('0),.acc_fflags_ex_valid_i(1'b0),
+    .fs_o(),.vfs_o(),.fflags_o(),.frm_o(),.fprec_o(),.vs_o(),
+    .irq_ctrl_o(irq_ctrl),.irq_ctrl_b_o(irq_ctrl_b),
+    .priv_lvl_b_o(priv_lvl_b),.v_b_o(v_b),.v_commit_o(v_commit_o),
+    .en_translation_o(),.en_g_translation_o(),
+    .en_ld_st_translation_o(en_ld_tr),.en_ld_st_g_translation_o(en_ld_gtr),
+    .ld_st_priv_lvl_o(ld_st_priv),.ld_st_v_o(ld_st_v),
+    .csr_hs_ld_st_inst_i(1'b0),
+    .sum_o(sum_o),.vs_sum_o(vs_sum_o),.mxr_o(mxr_o),.vmxr_o(vmxr_o),
+    .satp_ppn_o(satp_ppn),.asid_o(asid_o),
+    .vsatp_ppn_o(vsatp_ppn),.vs_asid_o(vs_asid_o),
+    .hgatp_ppn_o(hgatp_ppn),.vmid_o(vmid_o),
+    .fet_satp_ppn_o(fet_satp_ppn),.fet_asid_o(fet_asid_o),
+    .fet_vsatp_ppn_o(fet_vsatp_ppn),.fet_vs_asid_o(fet_vs_asid_o),
+    .fet_hgatp_ppn_o(fet_hgatp_ppn),.fet_vmid_o(fet_vmid_o),
+    .fet_mxr_o(fet_mxr_o),.fet_vmxr_o(fet_vmxr_o),.fet_mbe_o(fet_mbe_o),
+    .mbe_commit_o(mbe_commit_o),
+    .mcbie_o(),.scbie_o(),.hcbie_o(),.mcbcfe_o(),.scbcfe_o(),.hcbcfe_o(),
+    .mcbze_o(),.scbze_o(),.hcbze_o(),.pbmte_o(),.set_debug_pc_o(),
+    .tvm_o(),.tw_o(),.vtw_o(),.tsr_o(),.hu_o(),.debug_mode_o(),.single_step_o(),
+    .icache_en_o(),.dcache_en_o(),.acc_cons_en_o(),
+    .ai_aicfg_o(),.ai_ais_o(),.ai_issue_ok_o(),.ai_q_en_o(),.ai_qid_o(),
+    .dirty_ai_state_i(1'b0),.ai_setcfg_we_i(1'b0),.ai_setcfg_wdata_i('0),
+    .perf_addr_o(),.perf_data_o(),.perf_data_i('0),.perf_we_o(),
+    .scountovf_i('0),.lcofi_i('0),
+    .pmpcfg_o(pmpcfg),.pmpaddr_o(pmpaddr),
+    .fet_pmpcfg_o(fet_pmpcfg),.fet_pmpaddr_o(fet_pmpaddr),
+    .mcountinhibit_o(),.rvfi_csr_o(),.jvt_o(),.debug_from_trigger_o(),
+    .vaddr_from_lsu_i('0),.orig_instr_i('0),.store_result_i('0),
+    .irq_i('0),.ipi_i('0),.debug_req_i(1'b0),
+    .break_from_trigger_o());
+
+  task automatic chk1(input string n,input logic v,input logic e);
+    if(v!==(negative?!e:e))$fatal(1,"%s got=%b exp=%b",n,v,e);
+  endtask
+  task automatic chk64(input string n,input logic[63:0] v,input logic[63:0] e);
+    if(v!==(negative?(e^64'd1):e))$fatal(1,"%s got=%h exp=%h",n,v,e);
+  endtask
+  task automatic chkpriv(input string n,input riscv::priv_lvl_t v,input riscv::priv_lvl_t e);
+    if(v!==(negative?(e==riscv::PRIV_LVL_M?riscv::PRIV_LVL_S:riscv::PRIV_LVL_M):e))
+      $fatal(1,"%s got=%0d exp=%0d",n,v,e);
+  endtask
+
+  task automatic csr_write(input int hart,input logic[11:0] addr,input logic[63:0] wdata);
+    @(negedge clk);
+    commit_i='0;commit_i.valid=1;commit_i.hart_id=1'(hart);
+    csr_op=CSR_WRITE;csr_addr=addr;csr_wdata=wdata;commit_ack=2'b11;
+    @(negedge clk);
+    csr_op=ADD;commit_ack='0;commit_i='0;
+  endtask
+
+  task automatic wfi_commit(input int hart);
+    @(negedge clk);
+    commit_i='0;commit_i.valid=1;commit_i.hart_id=1'(hart);
+    csr_op=WFI;commit_ack=2'b11;
+    @(negedge clk);
+    csr_op=ADD;commit_ack='0;commit_i='0;
+  endtask
+
+  initial begin
+    if(!$value$plusargs("scenario=%d",scenario))scenario=0;
+    negative=$test$plusargs("oracle_negative");
+    repeat(4)@(negedge clk);rst_n=1;repeat(4)@(negedge clk);
+    // Program bank 0 = set A, bank 1 = set B, each through its own commit path.
+    csr_write(0,12'h300,MSTATUS_A);csr_write(0,12'h180,SATP_A);
+    csr_write(0,12'h304,MIE_A);csr_write(0,12'h3A0,PMPCFG_A);csr_write(0,12'h3B0,PMPADDR_A);
+    csr_write(1,12'h300,MSTATUS_B);csr_write(1,12'h180,SATP_B);
+    csr_write(1,12'h304,MIE_B);csr_write(1,12'h3A0,PMPCFG_B);csr_write(1,12'h3B0,PMPADDR_B);
+    repeat(2)@(negedge clk);
+    if(scenario==0)begin
+      // active_hart=0: fetch context is always set A.
+      active_hart=0;
+      // lsu=0, chk=0: everything set A.
+      lsu_hart=0;lsu_chk_hart=0;@(negedge clk);
+      chk1 ("CSRBANK_LSU_ENTR",en_ld_tr,1'b1);
+      chkpriv("CSRBANK_LSU_PRIV",ld_st_priv,riscv::PRIV_LVL_S);
+      chk1 ("CSRBANK_LSU_SUM",sum_o,1'b0);chk1("CSRBANK_LSU_MXR",mxr_o,1'b0);
+      chk64("CSRBANK_LSU_SATP",{20'b0,satp_ppn},SATP_A[43:0]);
+      chk64("CSRBANK_LSU_ASID",{48'b0,asid_o},64'd1);
+      chk64("CSRBANK_LSU_PMPCFG",{56'b0,pmpcfg[0]},PMPCFG_A&64'hFF);
+      chk64("CSRBANK_LSU_PMPA",{10'b0,pmpaddr[0]},PMPADDR_A);
+      // lsu=1, chk=1: LSU context set B.
+      lsu_hart=1;lsu_chk_hart=1;@(negedge clk);
+      chk1 ("CSRBANK_LSU_ENTR",en_ld_tr,1'b0);
+      chkpriv("CSRBANK_LSU_PRIV",ld_st_priv,riscv::PRIV_LVL_M);
+      chk1 ("CSRBANK_LSU_SUM",sum_o,1'b1);chk1("CSRBANK_LSU_MXR",mxr_o,1'b1);
+      chk64("CSRBANK_LSU_SATP",{20'b0,satp_ppn},SATP_B[43:0]);
+      chk64("CSRBANK_LSU_ASID",{48'b0,asid_o},64'd2);
+      chk64("CSRBANK_LSU_PMPCFG",{56'b0,pmpcfg[0]},PMPCFG_B&64'hFF);
+      chk64("CSRBANK_LSU_PMPA",{10'b0,pmpaddr[0]},PMPADDR_B);
+      // lsu=0 but chk=1: lookup context A, check-stage PMP set B.
+      lsu_hart=0;lsu_chk_hart=1;@(negedge clk);
+      chk1 ("CSRBANK_LSU_ENTR",en_ld_tr,1'b1);
+      chkpriv("CSRBANK_LSU_PRIV",ld_st_priv,riscv::PRIV_LVL_S);
+      chk64("CSRBANK_LSU_SATP",{20'b0,satp_ppn},SATP_A[43:0]);
+      chk64("CSRBANK_CHK_PMPCFG",{56'b0,pmpcfg[0]},PMPCFG_B&64'hFF);
+      chk64("CSRBANK_CHK_PMPA",{10'b0,pmpaddr[0]},PMPADDR_B);
+      // Fetch context: always set A while active_hart=0.
+      chk64("CSRBANK_FET_SATP",{20'b0,fet_satp_ppn},SATP_A[43:0]);
+      chk64("CSRBANK_FET_ASID",{48'b0,fet_asid_o},64'd1);
+      chk64("CSRBANK_FET_PMPCFG",{56'b0,fet_pmpcfg[0]},PMPCFG_A&64'hFF);
+      chk64("CSRBANK_FET_PMPA",{10'b0,fet_pmpaddr[0]},PMPADDR_A);
+      // Interrupt context follows the fetch hart; the per-hart array exposes both.
+      chk64("CSRBANK_IRQ_MIE",irq_ctrl.mie,MIE_A);
+      chk64("CSRBANK_IRQ_B0",irq_ctrl_b[0].mie,MIE_A);
+      chk64("CSRBANK_IRQ_B1",irq_ctrl_b[1].mie,MIE_B);
+      active_hart=1;@(negedge clk);
+      chk64("CSRBANK_IRQ_MIE",irq_ctrl.mie,MIE_B);
+      chk64("CSRBANK_FET_SATP",{20'b0,fet_satp_ppn},SATP_B[43:0]);
+      active_hart=0;@(negedge clk);
+    end else if(scenario==1 && DRAINED)begin
+      // Drained handoff: a WFI on the active hart halts the commit stage globally.
+      active_hart=0;lsu_hart=0;lsu_chk_hart=0;
+      wfi_commit(0);repeat(2)@(negedge clk);
+      chk1("CSRBANK_WFI_HALT",halt_csr,1'b1);
+      chk64("CSRBANK_WFI_VEC",{62'b0,hart_halt},64'd1);
+    end else if(scenario==2 && !DRAINED)begin
+      // Mixed residency: a WFI on hart 1 parks only hart 1.
+      active_hart=0;lsu_hart=0;lsu_chk_hart=0;
+      wfi_commit(1);repeat(2)@(negedge clk);
+      chk1("CSRBANK_WFI_HALT",halt_csr,1'b0);
+      chk64("CSRBANK_WFI_VEC",{62'b0,hart_halt},64'd2);
+    end else $fatal(1,"CSRBANK_SCENARIO");
+    $display("RTL_REVIEW_PASS csrbank scenario=%0d drained=%0d",scenario,DRAINED);
+    $finish;
+  end
+endmodule
+
+// ======================================================================
+// T6b-2b leaf: hart tag in the private TLB. Under mixed residency an entry
+// is private to its filling hart; under the drained handoff the tag is
+// ignored and entries stay shared across harts (today's behaviour).
+// ======================================================================
+module tb_g6lc_review_tlb;
+  import ariane_pkg::*;
+  `include "g6lc_core_types.svh"
+  parameter int DRAINED=0;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.GPLEN=64;c.IS_XLEN64=1;
+    c.NrHarts=2;c.SmtDrainedHandoff=DRAINED;
+    c.PtLevels=3;c.VpnLen=27;c.SV=39;c.PPNW=44;c.GPPNW=44;
+    c.ASID_WIDTH=16;c.VMID_WIDTH=14;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef struct packed {
+    logic n;logic[1:0] pbmt;logic[6:0] reserved;logic[C.PPNW-1:0] ppn;
+    logic[1:0] rsw;logic d,a,g,u,x,w,r,v;
+  } pte_t;
+  typedef struct packed {
+    logic valid;logic is_napot_64k;logic[C.PtLevels-2:0][0:0] is_page;
+    logic[C.VpnLen-1:0] vpn;logic[C.ASID_WIDTH-1:0] asid;
+    logic[C.VMID_WIDTH-1:0] vmid;logic hart;
+    logic v_st_enbl;pte_t content;pte_t g_content;
+  } upd_t;
+
+  localparam logic[C.VLEN-1:0] VA=64'h0000_0000_4000_0000;
+  localparam logic[C.PPNW-1:0] P0=44'h0000_0011_1111,P1=44'h0000_0022_2222;
+
+  logic clk=0,rst_n=0;
+  upd_t upd='0;
+  logic lu_access=0,lu_hart=0;
+  logic[C.ASID_WIDTH-1:0] lu_asid='0;
+  logic[C.VMID_WIDTH-1:0] lu_vmid='0;
+  logic[C.VLEN-1:0] lu_vaddr='0;
+  logic lu_hit;
+  pte_t lu_content,lu_gcontent;
+  logic[C.PtLevels-2:0] lu_is_page;
+  int scenario;bit negative;
+  always #5 clk=~clk;
+
+  cva6_tlb #(.CVA6Cfg(C),.pte_cva6_t(pte_t),.tlb_update_cva6_t(upd_t),
+      .TLB_ENTRIES(4),.HYP_EXT(0)) dut(
+    .clk_i(clk),.rst_ni(rst_n),
+    .flush_i(1'b0),.flush_vvma_i(1'b0),.flush_gvma_i(1'b0),
+    .s_st_enbl_i(1'b1),.g_st_enbl_i(1'b0),.v_i(1'b0),
+    .update_i(upd),
+    .lu_access_i(lu_access),.lu_asid_i(lu_asid),.lu_vmid_i(lu_vmid),
+    .lu_hart_i(lu_hart),.lu_vaddr_i(lu_vaddr),
+    .lu_gpaddr_o(),.lu_content_o(lu_content),.lu_g_content_o(lu_gcontent),
+    .asid_to_be_flushed_i('0),.vmid_to_be_flushed_i('0),
+    .vaddr_to_be_flushed_i('0),.gpaddr_to_be_flushed_i('0),
+    .lu_is_page_o(lu_is_page),.lu_hit_o(lu_hit));
+
+  task automatic fill(input int hart,input logic[C.PPNW-1:0] ppn);
+    @(negedge clk);
+    upd='0;upd.valid=1;upd.vpn=C.VpnLen'(VA>>12);upd.asid=16'd1;upd.hart=1'(hart);
+    upd.v_st_enbl=1'b1;upd.is_page=2'b01;
+    upd.content='0;upd.content.ppn=ppn;upd.content.v=1;upd.content.r=1;
+    upd.content.w=1;upd.content.x=1;upd.content.a=1;upd.content.d=1;upd.content.u=1;
+    lu_vaddr=VA;lu_asid=16'd1;lu_hart=1'(hart);
+    @(negedge clk);upd='0;
+  endtask
+
+  // inv marks the scenario's discriminating check: only it inverts under
+  // +oracle_negative, so the run fatals on the labelled expectation.
+  task automatic chk_ppn(input int hart,input logic[C.PPNW-1:0] exp,input bit hit,
+                         input string n,input bit inv);
+    @(negedge clk);
+    lu_vaddr=VA;lu_asid=16'd1;lu_hart=1'(hart);lu_access=1;
+    #1;
+    if(lu_hit!==(inv?!hit:hit))$fatal(1,"%s hit=%b exp=%b",n,lu_hit,hit);
+    if(lu_hit && lu_content.ppn!==(inv?exp^44'd1:exp))
+      $fatal(1,"%s ppn=%h exp=%h",n,lu_content.ppn,exp);
+    @(negedge clk);lu_access=0;
+  endtask
+
+  initial begin
+    if(!$value$plusargs("scenario=%d",scenario))scenario=0;
+    negative=$test$plusargs("oracle_negative");
+    repeat(4)@(negedge clk);rst_n=1;repeat(2)@(negedge clk);
+    if(scenario==0 && !DRAINED)begin
+      fill(0,P0);
+      // A hit marks the filled way as recently used so the next PLRU victim
+      // is a different entry (fills alone never touch the PLRU tree).
+      chk_ppn(0,P0,1,"TLB_HART0_WARM",0);
+      fill(1,P1);
+      chk_ppn(0,P0,1,"TLB_HART0_OWN",negative);
+      chk_ppn(1,P1,1,"TLB_HART1_OWN",0);
+    end else if(scenario==1 && !DRAINED)begin
+      fill(0,P0);
+      chk_ppn(0,P0,1,"TLB_HART0_OWN",0);
+      chk_ppn(1,P0,0,"TLB_HART1_MISS",negative);
+    end else if(scenario==2 && DRAINED)begin
+      // Drained handoff: the tag is ignored and the shared entry serves both
+      // harts — exactly today's first-match behaviour.
+      fill(0,P0);
+      chk_ppn(0,P0,1,"TLB_HART0_SHARED",0);
+      chk_ppn(1,P0,1,"TLB_HART1_SHARED",negative);
+    end else $fatal(1,"TLB_SCENARIO");
+    $display("RTL_REVIEW_PASS tlb scenario=%0d drained=%0d",scenario,DRAINED);
+    $finish;
+  end
+endmodule
+
+// ======================================================================
+// T6b-2b leaf: hart tag in the shared TLB (same isolation/sharing oracle as
+// the private TLB leaf, through the shared-TLB lookup/update handshake).
+// ======================================================================
+module tb_g6lc_review_stlb;
+  import ariane_pkg::*;
+  `include "g6lc_core_types.svh"
+  parameter int DRAINED=0;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.GPLEN=64;c.IS_XLEN64=1;
+    c.NrHarts=2;c.SmtDrainedHandoff=DRAINED;
+    c.PtLevels=3;c.VpnLen=27;c.SV=39;c.PPNW=44;c.GPPNW=44;
+    c.ASID_WIDTH=16;c.VMID_WIDTH=14;
+    c.UseSharedTlb=1;c.SharedTlbDepth=64;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef struct packed {
+    logic n;logic[1:0] pbmt;logic[6:0] reserved;logic[C.PPNW-1:0] ppn;
+    logic[1:0] rsw;logic d,a,g,u,x,w,r,v;
+  } pte_t;
+  typedef struct packed {
+    logic valid;logic is_napot_64k;logic[C.PtLevels-2:0][0:0] is_page;
+    logic[C.VpnLen-1:0] vpn;logic[C.ASID_WIDTH-1:0] asid;
+    logic[C.VMID_WIDTH-1:0] vmid;logic hart;
+    logic v_st_enbl;pte_t content;pte_t g_content;
+  } upd_t;
+
+  localparam logic[C.VLEN-1:0] VA=64'h0000_0000_4000_0000;
+  localparam logic[C.PPNW-1:0] P0=44'h0000_0011_1111,P1=44'h0000_0022_2222;
+
+  logic clk=0,rst_n=0;
+  upd_t upd='0,dtlb_update;
+  logic dtlb_access=0,dtlb_hart=0,dtlb_hit_i=0;
+  logic[C.ASID_WIDTH-1:0] dtlb_asid='0;
+  logic[C.VLEN-1:0] dtlb_vaddr='0;
+  int scenario;bit negative;
+  always #5 clk=~clk;
+
+  cva6_shared_tlb #(.CVA6Cfg(C),.pte_cva6_t(pte_t),.tlb_update_cva6_t(upd_t),
+      .SHARED_TLB_WAYS(2),.HYP_EXT(0)) dut(
+    .clk_i(clk),.rst_ni(rst_n),
+    .flush_i(1'b0),.flush_vvma_i(1'b0),.flush_gvma_i(1'b0),
+    .s_st_enbl_i(1'b1),.g_st_enbl_i(1'b0),.v_i(1'b0),
+    .s_ld_st_enbl_i(1'b1),.g_ld_st_enbl_i(1'b0),.ld_st_v_i(1'b0),
+    .dtlb_asid_i(dtlb_asid),.itlb_asid_i('0),
+    .lu_vmid_i('0),.itlb_vmid_i('0),
+    .itlb_hart_i('0),.dtlb_hart_i(dtlb_hart),
+    .itlb_access_i(1'b0),.itlb_hit_i(1'b0),.itlb_vaddr_i('0),
+    .dtlb_access_i(dtlb_access),.dtlb_hit_i(dtlb_hit_i),.dtlb_vaddr_i(dtlb_vaddr),
+    .shared_tlb_miss_i(1'b1),
+    .asid_to_be_flushed_i('0),.vaddr_to_be_flushed_i('0),
+    .vmid_to_be_flushed_i('0),.gpaddr_to_be_flushed_i('0),
+    .itlb_update_o(),.dtlb_update_o(dtlb_update),
+    .itlb_miss_o(),.dtlb_miss_o(),.flush_busy_o(),
+    .shared_tlb_access_o(),.shared_tlb_hit_o(),.shared_tlb_vaddr_o(),
+    .itlb_req_o(),.shared_tlb_update_i(upd));
+
+  task automatic fill(input int hart,input logic[C.PPNW-1:0] ppn);
+    @(negedge clk);
+    upd='0;upd.valid=1;upd.vpn=C.VpnLen'(VA>>12);upd.asid=16'd1;upd.hart=1'(hart);
+    upd.v_st_enbl=1'b1;upd.is_page=2'b01;
+    upd.content='0;upd.content.ppn=ppn;upd.content.v=1;upd.content.r=1;
+    upd.content.w=1;upd.content.x=1;upd.content.a=1;upd.content.d=1;upd.content.u=1;
+    @(negedge clk);upd='0;repeat(2)@(negedge clk);
+  endtask
+
+  // The update is a single combinational cycle after the tag read — latch it
+  // over a bounded window rather than sampling at one negedge. inv marks the
+  // scenario's discriminating check (see the private-TLB leaf).
+  task automatic chk_ppn(input int hart,input logic[C.PPNW-1:0] exp,input bit hit,
+                         input string n,input bit inv);
+    upd_t got;
+    got='0;
+    @(negedge clk);
+    dtlb_vaddr=VA;dtlb_asid=16'd1;dtlb_hart=1'(hart);dtlb_access=1;
+    for(int c=0;c<8;c++)begin
+      @(negedge clk);
+      if(c==0)dtlb_access=0;
+      if(dtlb_update.valid)got=dtlb_update;
+    end
+    if(got.valid!==(inv?!hit:hit))
+      $fatal(1,"%s update_valid=%b exp=%b",n,got.valid,hit);
+    if(got.valid && got.content.ppn!==(inv?exp^44'd1:exp))
+      $fatal(1,"%s ppn=%h exp=%h",n,got.content.ppn,exp);
+  endtask
+
+  initial begin
+    if(!$value$plusargs("scenario=%d",scenario))scenario=0;
+    negative=$test$plusargs("oracle_negative");
+    repeat(4)@(negedge clk);rst_n=1;repeat(2)@(negedge clk);
+    if(scenario==0 && !DRAINED)begin
+      fill(0,P0);fill(1,P1);
+      chk_ppn(0,P0,1,"STLB_HART0_OWN",negative);
+      chk_ppn(1,P1,1,"STLB_HART1_OWN",0);
+    end else if(scenario==1 && !DRAINED)begin
+      fill(0,P0);
+      chk_ppn(0,P0,1,"STLB_HART0_OWN",0);
+      chk_ppn(1,P0,0,"STLB_HART1_MISS",negative);
+    end else if(scenario==2 && DRAINED)begin
+      fill(0,P0);
+      chk_ppn(0,P0,1,"STLB_HART0_SHARED",0);
+      chk_ppn(1,P0,1,"STLB_HART1_SHARED",negative);
+    end else $fatal(1,"STLB_SCENARIO");
+    $display("RTL_REVIEW_PASS stlb scenario=%0d drained=%0d",scenario,DRAINED);
+    $finish;
+  end
+endmodule
+
+// ======================================================================
+// T6b-2b leaf: check-stage context in the MMU. The data permission check
+// runs one cycle after the DTLB lookup on the registered request — the
+// context registered with the request (ctx_*_q) must be used, not the live
+// inputs of the next hart's request. A tiny PTW memory model answers the
+// page-table reads; each hart's satp root points at a different gigapage
+// leaf so walks prove per-hart translation. Review-only mutations:
+//   G6LC_MUT_TLB_NO_HART_TAG — TLB hart tag ignored (scenario 0 flips)
+//   G6LC_MUT_MMU_LIVE_CTX  — check stage uses live context (1/3 flip)
+// ======================================================================
+module tb_g6lc_review_mmuctx;
+  import ariane_pkg::*;
+  `include "g6lc_core_types.svh"
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.VLEN=64;c.PLEN=56;c.GPLEN=64;c.IS_XLEN64=1;
+    c.NrHarts=2;c.SmtDrainedHandoff=0;
+    c.PtLevels=3;c.VpnLen=27;c.SV=39;c.PPNW=44;c.GPPNW=44;
+    c.ASID_WIDTH=16;c.VMID_WIDTH=14;
+    c.InstrTlbEntries=4;c.DataTlbEntries=4;
+    c.DCACHE_INDEX_WIDTH=12;c.DCACHE_TAG_WIDTH=44;
+    c.DcacheIdWidth=4;c.DCACHE_USER_WIDTH=1;c.MEM_TID_WIDTH=2;
+    c.NrPMPEntries=0;
+    c.SharedTlbDepth=64;  // instantiated unconditionally inside cva6_mmu
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  typedef `G6LC_EXCEPTION_T(C) exception_t;
+  typedef struct packed {
+    logic fetch_valid;logic[C.PLEN-1:0] fetch_paddr;exception_t fetch_exception;
+  } icache_areq_t;
+  typedef struct packed {logic fetch_req;logic[C.VLEN-1:0] fetch_vaddr;} icache_arsp_t;
+  typedef struct packed {
+    logic[C.DCACHE_INDEX_WIDTH-1:0] address_index;
+    logic[C.DCACHE_TAG_WIDTH-1:0]   address_tag;
+    logic[C.XLEN-1:0]               data_wdata;
+    logic[C.DCACHE_USER_WIDTH-1:0]  data_wuser;
+    logic                           data_req;
+    logic                           data_we;
+    logic[(C.XLEN/8)-1:0]           data_be;
+    logic[1:0]                      data_size;
+    logic[C.DcacheIdWidth-1:0]      data_id;
+    logic                           kill_req;
+    logic                           tag_valid;
+    logic[7:0]                      cbo_op;  // cbo_t (logic[7:0] in cva6)
+  } dcache_req_i_t;
+  typedef struct packed {
+    logic data_gnt;logic data_rvalid;
+    logic[C.DcacheIdWidth-1:0] data_rid;
+    logic[C.XLEN-1:0] data_rdata;
+    logic[C.DCACHE_USER_WIDTH-1:0] data_ruser;
+  } dcache_req_o_t;
+
+  localparam logic[C.VLEN-1:0] VA=64'h0000_0000_4000_0000;  // vpn2 index 1
+  localparam logic[C.PPNW-1:0] SATP_A=44'h0000_0020_00,SATP_B=44'h0000_0040_00;
+  localparam logic[25:0] PHIA=26'hABC,PHIB=26'h123;    // gigapage PPN[43:18]
+  localparam logic[C.PLEN-1:0] EXP_A=(C.PLEN'(PHIA)<<30)|(C.PLEN'(VA)&56'h3FFFFFFF);
+  localparam logic[C.PLEN-1:0] EXP_B=(C.PLEN'(PHIB)<<30)|(C.PLEN'(VA)&56'h3FFFFFFF);
+
+  logic clk=0,rst_n=0;
+  // Request stream.
+  logic lsu_req=0,lsu_is_store=0,lsu_hart=0;
+  logic[C.VLEN-1:0] lsu_vaddr='0;
+  // Two context sets, muxed by lsu_hart exactly as the CSR bank does.
+  logic[1:0] ctx_en_tr='0;
+  riscv::priv_lvl_t[1:0] ctx_priv='{riscv::PRIV_LVL_M,riscv::PRIV_LVL_M};
+  logic[1:0] ctx_sum='0,ctx_mxr='0;
+  logic[1:0][C.PPNW-1:0] ctx_satp='0;
+  logic[1:0][C.ASID_WIDTH-1:0] ctx_asid='0;
+  // MMU outputs.
+  logic dtlb_hit,lsu_valid;
+  logic[C.PPNW-1:0] dtlb_ppn;
+  logic[C.PLEN-1:0] lsu_paddr;
+  exception_t lsu_exception;
+  // PTW memory model: grant combinationally, return the PTE one cycle later.
+  dcache_req_i_t req_o;
+  dcache_req_o_t req_i;
+  logic req_rvalid=0;
+  logic[63:0] req_rdata='0;
+  logic[63:0] pmem[longint unsigned];
+  int scenario;bit negative;
+  always #5 clk=~clk;
+
+  always_comb begin
+    req_i='0;
+    req_i.data_gnt=req_o.data_req;
+    req_i.data_rvalid=req_rvalid;
+    req_i.data_rdata=req_rdata;
+  end
+  always_ff @(posedge clk)begin
+    req_rvalid<=req_o.data_req&&req_i.data_gnt;
+    if(req_o.data_req&&req_i.data_gnt)
+      req_rdata<=pmem[longint'({req_o.address_tag,req_o.address_index})];
+  end
+
+  function automatic logic[63:0] leaf_pte(input logic[25:0] ppn_hi);
+    // Sv39 gigapage leaf: V=R=W=X=U=A=D=1; PPN[17:0] ignored by hardware.
+    logic[63:0] p;
+    p='0;p[0]=1;p[1]=1;p[2]=1;p[3]=1;p[4]=1;p[6]=1;p[7]=1;
+    p[53:10]={ppn_hi,18'b0};
+    return p;
+  endfunction
+
+  cva6_mmu #(.CVA6Cfg(C),.icache_areq_t(icache_areq_t),.icache_arsp_t(icache_arsp_t),
+      .dcache_req_i_t(dcache_req_i_t),.dcache_req_o_t(dcache_req_o_t),
+      .exception_t(exception_t),.HYP_EXT(0)) dut(
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(1'b0),
+    .enable_translation_i(1'b1),.enable_g_translation_i(1'b0),
+    .en_ld_st_translation_i(ctx_en_tr[lsu_hart]),.en_ld_st_g_translation_i(1'b0),
+    .icache_areq_i('0),.icache_areq_o(),
+    .misaligned_ex_i('0),
+    .lsu_req_i(lsu_req),.lsu_vaddr_i(lsu_vaddr),.lsu_tinst_i('0),
+    .lsu_is_store_i(lsu_is_store),.csr_hs_ld_st_inst_o(),
+    .lsu_dtlb_hit_o(dtlb_hit),.lsu_dtlb_ppn_o(dtlb_ppn),
+    .lsu_valid_o(lsu_valid),.lsu_paddr_o(lsu_paddr),.lsu_exception_o(lsu_exception),
+    .priv_lvl_i(riscv::PRIV_LVL_M),.v_i(1'b0),
+    .ld_st_priv_lvl_i(ctx_priv[lsu_hart]),.ld_st_v_i(1'b0),
+    .sum_i(ctx_sum[lsu_hart]),.vs_sum_i(1'b0),
+    .mxr_i(ctx_mxr[lsu_hart]),.vmxr_i(1'b0),.mbe_i(1'b0),
+    .hlvx_inst_i(1'b0),.hs_ld_st_inst_i(1'b0),
+    .satp_ppn_i(ctx_satp[lsu_hart]),.vsatp_ppn_i('0),.hgatp_ppn_i('0),
+    .asid_i(ctx_asid[lsu_hart]),.vs_asid_i('0),
+    .asid_to_be_flushed_i('0),.vmid_i('0),.vmid_to_be_flushed_i('0),
+    .fetch_hart_i('0),.lsu_hart_i(lsu_hart),
+    .fet_asid_i('0),.fet_vs_asid_i('0),.fet_vmid_i('0),
+    .fet_satp_ppn_i('0),.fet_vsatp_ppn_i('0),.fet_hgatp_ppn_i('0),
+    .fet_mxr_i(1'b0),.fet_vmxr_i(1'b0),.fet_mbe_i(1'b0),
+    .fet_pmpcfg_i('0),.fet_pmpaddr_i('0),
+    .vaddr_to_be_flushed_i('0),.gpaddr_to_be_flushed_i('0),
+    .flush_tlb_i(1'b0),.flush_tlb_vvma_i(1'b0),.flush_tlb_gvma_i(1'b0),
+    .shared_tlb_flush_busy_o(),.itlb_miss_o(),.dtlb_miss_o(),
+    .req_port_i(req_i),.req_port_o(req_o),
+    .pmpcfg_i('0),.pmpaddr_i('0));
+
+  task automatic setup();
+    // hart 0: S-mode, SUM=0, Sv39 root A; hart 1: U-mode, root B.
+    ctx_en_tr=2'b11;ctx_priv='{riscv::PRIV_LVL_U,riscv::PRIV_LVL_S};
+    ctx_sum=2'b00;ctx_mxr=2'b00;
+    ctx_satp='{SATP_B,SATP_A};ctx_asid='{16'd1,16'd1};
+    pmem[(longint'(SATP_A)<<12)+8]=leaf_pte(PHIA);
+    pmem[(longint'(SATP_B)<<12)+8]=leaf_pte(PHIB);
+  endtask
+
+  // Issue one request and hold it until the MMU answers (hit or walk).
+  task automatic request(input int hart,input logic[C.VLEN-1:0] va,
+                         output logic[C.PLEN-1:0] paddr,output exception_t ex);
+    lsu_req=1;lsu_hart=1'(hart);lsu_vaddr=va;lsu_is_store=0;
+    @(negedge clk);
+    while(!lsu_valid)@(negedge clk);
+    paddr=lsu_paddr;ex=lsu_exception;
+    lsu_req=0;
+  endtask
+
+  // inv marks the scenario's discriminating check: only it inverts under
+  // +oracle_negative, so the run fatals on the labelled expectation.
+  task automatic chk_paddr(input logic[C.PLEN-1:0] v,input logic[C.PLEN-1:0] e,
+                           input string n,input bit inv);
+    if(v!==(inv?e^56'd1:e))$fatal(1,"%s paddr=%h exp=%h",n,v,e);
+  endtask
+  task automatic chk_cause(input exception_t ex,input logic[63:0] cause,input bit vld,
+                           input string n,input bit inv);
+    if(ex.valid!==(inv?!vld:vld))$fatal(1,"%s ex.valid=%b exp=%b",n,ex.valid,vld);
+    if(ex.valid && ex.cause!==cause)$fatal(1,"%s cause=%h exp=%h",n,ex.cause,cause);
+  endtask
+
+  initial begin
+    logic[C.PLEN-1:0] pa;exception_t xe;
+    if(!$value$plusargs("scenario=%d",scenario))scenario=0;
+    negative=$test$plusargs("oracle_negative");
+    pmem.delete();
+    repeat(4)@(negedge clk);rst_n=1;repeat(2)@(negedge clk);setup();
+    if(scenario==0)begin
+      // Walk per hart, then hits: TLB hart tag at the MMU boundary.
+      @(negedge clk);request(0,VA,pa,xe);chk_paddr(pa,EXP_A,"MMUCTX_WALK_H0",negative);
+      request(1,VA,pa,xe);chk_paddr(pa,EXP_B,"MMUCTX_WALK_H1",0);
+      request(0,VA,pa,xe);chk_paddr(pa,EXP_A,"MMUCTX_HIT_H0",0);
+      request(1,VA,pa,xe);chk_paddr(pa,EXP_B,"MMUCTX_HIT_H1",0);
+    end else if(scenario==1)begin
+      // Warm both harts' entries first (same checks as scenario 0).
+      @(negedge clk);request(0,VA,pa,xe);chk_paddr(pa,EXP_A,"MMUCTX_WALK_H0",0);
+      request(1,VA,pa,xe);chk_paddr(pa,EXP_B,"MMUCTX_WALK_H1",0);
+      // Skew: cycle N hart0 S-mode SUM=0 request (U page → page fault),
+      // cycle N+1 hart1 U-mode request (clean). The check of hart0's request
+      // must replay hart0's registered context, not hart1's live U-mode.
+      @(negedge clk);
+      lsu_req=1;lsu_hart=0;lsu_vaddr=VA;lsu_is_store=0;
+      @(posedge clk); #1;  // A registered; B issued during A's check window.
+      lsu_hart=1;
+      @(negedge clk);
+      if(!lsu_valid)$fatal(1,"MMUCTX_SKEW_NO_RESP");
+      chk_cause(lsu_exception,riscv::LOAD_PAGE_FAULT,1,"MMUCTX_SKEW_H0_FAULT",negative);
+      chk_paddr(lsu_paddr,EXP_A,"MMUCTX_SKEW_H0_PADDR",0);
+      @(negedge clk);  // B registered at the posedge; its response is live now.
+      if(!lsu_valid)$fatal(1,"MMUCTX_SKEW_NO_RESP_B");
+      chk_cause(lsu_exception,'0,0,"MMUCTX_SKEW_H1_CLEAN",0);
+      chk_paddr(lsu_paddr,EXP_B,"MMUCTX_SKEW_H1_PADDR",0);
+      lsu_req=0;
+    end else if(scenario==2)begin
+      // Mirror: hart0 U-mode (clean) followed by hart1 S-mode SUM=0 (fault).
+      ctx_priv='{riscv::PRIV_LVL_S,riscv::PRIV_LVL_U};
+      @(negedge clk);request(0,VA,pa,xe);request(1,VA,pa,xe);
+      @(negedge clk);
+      lsu_req=1;lsu_hart=0;lsu_vaddr=VA;lsu_is_store=0;
+      @(posedge clk); #1;
+      lsu_hart=1;
+      @(negedge clk);
+      if(!lsu_valid)$fatal(1,"MMUCTX_MIR_NO_RESP");
+      chk_cause(lsu_exception,'0,0,"MMUCTX_MIR_H0_CLEAN",0);
+      chk_paddr(lsu_paddr,EXP_A,"MMUCTX_MIR_H0_PADDR",0);
+      @(negedge clk);
+      if(!lsu_valid)$fatal(1,"MMUCTX_MIR_NO_RESP_B");
+      chk_cause(lsu_exception,riscv::LOAD_PAGE_FAULT,1,"MMUCTX_MIR_H1_FAULT",negative);
+      chk_paddr(lsu_paddr,EXP_B,"MMUCTX_MIR_H1_PADDR",0);
+      lsu_req=0;
+    end else if(scenario==3)begin
+      // Translation enable is check-stage context too: hart1 issues a bare
+      // M-mode request right after hart0's translated request — hart0's
+      // response must still be the translated P0, not the identity map.
+      @(negedge clk);request(0,VA,pa,xe);request(1,VA,pa,xe);
+      ctx_en_tr=2'b01;ctx_priv='{riscv::PRIV_LVL_M,riscv::PRIV_LVL_U};
+      @(negedge clk);
+      lsu_req=1;lsu_hart=0;lsu_vaddr=VA;lsu_is_store=0;
+      @(posedge clk); #1;
+      lsu_hart=1;
+      @(negedge clk);
+      if(!lsu_valid)$fatal(1,"MMUCTX_EN_NO_RESP");
+      chk_cause(lsu_exception,'0,0,"MMUCTX_EN_H0_CLEAN",negative);
+      chk_paddr(lsu_paddr,EXP_A,"MMUCTX_EN_H0_PADDR",0);
+      @(negedge clk);
+      if(!lsu_valid)$fatal(1,"MMUCTX_EN_NO_RESP_B");
+      chk_cause(lsu_exception,'0,0,"MMUCTX_EN_H1_CLEAN",0);
+      chk_paddr(lsu_paddr,C.PLEN'(VA),"MMUCTX_EN_H1_BARE",0);
+      lsu_req=0;
+    end else $fatal(1,"MMUCTX_SCENARIO");
+    $display("RTL_REVIEW_PASS mmuctx scenario=%0d",scenario);
+    $finish;
+  end
+endmodule

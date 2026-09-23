@@ -126,6 +126,19 @@ def main():
         names[-1:-1]=['g6lc_sb_keep.sv','g6lc_rvc_enc.sv','g6lc_fe_keep.sv','g6lc_jalr_usable.sv','g6lc_sib_cjalr.sv','scoreboard.sv']
     if os.environ.get('REVIEW_RTL_CSRBUF')=='1':
         names[-1:-1]=['csr_buffer.sv']
+    if os.environ.get('REVIEW_RTL_CSRBANK')=='1':
+        # triggers_pkg first: trigger_module/csr_regfile import it.
+        names[-1:-1]=['triggers_pkg.sv','g6lc_smt_csr_bank.sv','csr_regfile.sv',
+                      'trigger_module.sv','rvfi_types.svh']
+    if os.environ.get('REVIEW_RTL_TLB')=='1':
+        names[-1:-1]=['cva6_tlb.sv','cf_math_pkg.sv','lzc.sv','rvfi_types.svh']
+    if os.environ.get('REVIEW_RTL_STLB')=='1':
+        names[-1:-1]=['cva6_shared_tlb.sv','cf_math_pkg.sv','lzc.sv','lfsr.sv','sram.sv',
+                      'tc_sram.sv','tc_sram_wrapper.sv','rvfi_types.svh']
+    if os.environ.get('REVIEW_RTL_MMUCTX')=='1':
+        names[-1:-1]=['cva6_mmu.sv','cva6_ptw.sv','pmp.sv','pmp_entry.sv',
+                      'cva6_tlb.sv','cva6_shared_tlb.sv','cf_math_pkg.sv','lzc.sv','lfsr.sv','sram.sv',
+                      'tc_sram.sv','tc_sram_wrapper.sv','rvfi_types.svh']
     # g6lc_iq.sv is in the base source list and calls g6lc_ooo_pkg::ooo_age_*,
     # so every cell needs the package ahead of it.
     names[4:4]=['g6lc_ooo_pkg.sv']
@@ -316,6 +329,33 @@ def main():
         # must reproduce the serial ring-order scan, including across a
         # commit-pointer wrap; hart-1-only traffic leaves hart 0 headless.
         configurations=[('sbhead','nh2',['-GHARTS=2','-GSBDEPTH=16'],[(n,None) for n in range(3)])]
+    elif os.environ.get('REVIEW_RTL_CSRBANK')=='1':
+        # T6b-2b: LSU context follows lsu_hart_i, the PMP pair lsu_chk_hart_i,
+        # fetch context stays on active_hart_i; drained keeps the global WFI
+        # halt, mixed parks only the owning hart.
+        configurations=[('csrbank','drained',['-GDRAINED=1'],[(0,None),(1,None)]),
+                        ('csrbank','mixed',['-GDRAINED=0'],[(0,None),(2,None)])]
+    elif os.environ.get('REVIEW_RTL_TLB')=='1':
+        # T6b-2b: private-TLB hart tag — per-hart isolation under mixed
+        # residency, drained keeps shared first-match behaviour.
+        configurations=[('tlb','mixed',['-GDRAINED=0'],[(0,None),(1,None)]),
+                        ('tlb','drained',['-GDRAINED=1'],[(2,None)])]
+    elif os.environ.get('REVIEW_RTL_STLB')=='1':
+        configurations=[('stlb','mixed',['-GDRAINED=0'],[(0,None),(1,None)]),
+                        ('stlb','drained',['-GDRAINED=1'],[(2,None)])]
+    elif os.environ.get('REVIEW_RTL_MMUCTX')=='1':
+        # T6b-2b: check-stage context skew — the data permission/PMP check on
+        # the registered request must replay the context captured with it.
+        # The mutation cells are expected-failure proofs of the oracle.
+        mut=os.environ.get('REVIEW_RTL_MUT','')
+        if mut=='tlbtag':
+            configurations=[('mmuctx','mut-tlbtag',['-DG6LC_MUT_TLB_NO_HART_TAG'],
+                             [(0,'MMUCTX_WALK_H1')])]
+        elif mut=='livectx':
+            configurations=[('mmuctx','mut-livectx',['-DG6LC_MUT_MMU_LIVE_CTX'],
+                             [(1,'MMUCTX_SKEW_H0_FAULT')])]
+        else:
+            configurations=[('mmuctx','mixed',[],[(n,None) for n in range(4)])]
     elif dispatch_mode:
         cases=[(0,None),(1,'DISPATCH_STORE_PROGRESS' if before else None)]
         # Scenarios 6-8 previously pinned the alloc_id_i -> 0 Verilator
@@ -475,6 +515,22 @@ def main():
                 trials+=[(n,True,('CSRBUF_ADDR','CSRBUF_READY','CSRBUF_CANCEL','CSRBUF_FLUSH','CSRBUF_INORDER')[n]) for n,_ in cases]
             elif kind=='sbhead':
                 trials+=[(0,True,'SBHEAD_ORDER'),(1,True,'SBHEAD_WRAP'),(2,True,'SBHEAD_HOLE')]
+            elif kind=='csrbank':
+                trials+=[(0,True,'CSRBANK_LSU_ENTR'),
+                         (1,True,'CSRBANK_WFI_HALT') if geometry=='drained'
+                         else (2,True,'CSRBANK_WFI_HALT')]
+            elif kind=='tlb':
+                trials+=([(0,True,'TLB_HART0_OWN'),(1,True,'TLB_HART1_MISS')] if geometry=='mixed'
+                         else [(2,True,'TLB_HART1_SHARED')])
+            elif kind=='stlb':
+                trials+=([(0,True,'STLB_HART0_OWN'),(1,True,'STLB_HART1_MISS')] if geometry=='mixed'
+                         else [(2,True,'STLB_HART1_SHARED')])
+            elif kind=='mmuctx':
+                # The mutation geometries run only their expected-failure
+                # positive trial; oracle_negative gets no extra arm there.
+                if geometry=='mixed':
+                    trials+=[(0,True,'MMUCTX_WALK_H0'),(1,True,'MMUCTX_SKEW_H0_FAULT'),
+                             (2,True,'MMUCTX_MIR_H1_FAULT'),(3,True,'MMUCTX_EN_H0_CLEAN')]
             else:
                 trials.append((0,True,{'iq':'IQ_ISSUE','mshr':'MSHR_ADMISSION','decay':'TAGE_DECAY','incl':'L3_PAYLOAD','commit':'COMMIT4_TID'}[kind]))
                 if kind=='iq':trials+=[(5,True,'IQ_UNRESOLVED_GATE'),(6,True,'IQ_BYPASS'),(7,True,'IQ_RESOLVED_PASS'),(8,True,'IQ_STORE_OOO'),(9,True,'IQ_CSR_HEAD')]

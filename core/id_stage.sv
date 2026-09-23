@@ -102,6 +102,13 @@ module id_stage #(
     input logic [1:0] irq_i,
     // Interrupt control status - CSR_REGFILE
     input irq_ctrl_t irq_ctrl_i,
+    // T6b-2b: per-hart interrupt/privilege context, selected per decode lane by
+    // fetch_entry_i[lane].hart_id under mixed residency. Unused (the scalars
+    // above are taken) when NrHarts==1 or SmtDrainedHandoff.
+    input logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][1:0] irq_b_i,
+    input irq_ctrl_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] irq_ctrl_b_i,
+    input riscv::priv_lvl_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] priv_lvl_b_i,
+    input logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] v_b_i,
     // Is current mode debug ? - CSR_REGFILE
     input logic debug_mode_i,
     // Trap virtual memory - CSR_REGFILE
@@ -430,6 +437,13 @@ module id_stage #(
 
   assign rvfi_is_compressed_o = is_compressed_rvc;
 
+  // T6b-2b: under mixed residency each decode lane may hold a different hart's
+  // instruction, so the interrupt-delivery check (irq lines, mie/mip/delegation
+  // and the privilege/virtualization qualifiers it reads) must follow the
+  // lane's own hart. Under drained handoff only the active hart's instructions
+  // reach decode, so the scalar active-hart inputs are used unchanged.
+  localparam bit SMT_MIXED_DECODE = (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;
+
   for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
     decoder #(
         .CVA6Cfg(CVA6Cfg),
@@ -441,8 +455,8 @@ module id_stage #(
         .INTERRUPTS(INTERRUPTS)
     ) decoder_i (
         .debug_req_i,
-        .irq_ctrl_i,
-        .irq_i,
+        .irq_ctrl_i                (SMT_MIXED_DECODE ? irq_ctrl_b_i[fetch_entry_i[i].hart_id] : irq_ctrl_i),
+        .irq_i                     (SMT_MIXED_DECODE ? irq_b_i[fetch_entry_i[i].hart_id] : irq_i),
         .pc_i                      (fetch_entry_i[i].address),
         .is_compressed_i           (is_compressed_deco[i]),
         .is_macro_instr_i          (is_macro_instr[i]),
@@ -455,8 +469,8 @@ module id_stage #(
         .compressed_instr_i        (fetch_entry_i[i].instruction[15:0]),
         .branch_predict_i          (fetch_entry_i[i].branch_predict),
         .ex_i                      (fetch_entry_i[i].ex),
-        .priv_lvl_i                (priv_lvl_i),
-        .v_i                       (v_i),
+        .priv_lvl_i                (SMT_MIXED_DECODE ? priv_lvl_b_i[fetch_entry_i[i].hart_id] : priv_lvl_i),
+        .v_i                       (SMT_MIXED_DECODE ? v_b_i[fetch_entry_i[i].hart_id] : v_i),
         .debug_mode_i              (debug_mode_i),
         .fs_i,
         .vfs_i,

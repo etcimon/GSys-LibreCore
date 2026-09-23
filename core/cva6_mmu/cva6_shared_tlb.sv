@@ -44,6 +44,14 @@ module cva6_shared_tlb #(
     input logic [CVA6Cfg.ASID_WIDTH-1:0] dtlb_asid_i,
     input logic [CVA6Cfg.ASID_WIDTH-1:0] itlb_asid_i,
     input logic [CVA6Cfg.VMID_WIDTH-1:0] lu_vmid_i,
+    // T6b-2b: VMID of the instruction-side requester (active hart context);
+    // lu_vmid_i keeps the data-side/flush context.
+    input logic [CVA6Cfg.VMID_WIDTH-1:0] itlb_vmid_i,
+    // T6b-2b: requesting SMT hart per side. The hart tag participates in the
+    // lookup match only when NrHarts > 1 && !SmtDrainedHandoff; drained SMT2
+    // intentionally keeps sharing entries across harts with equal ASIDs.
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] itlb_hart_i,
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] dtlb_hart_i,
 
     // from TLBs
     // did we miss?
@@ -91,9 +99,13 @@ module cva6_shared_tlb #(
     return out;
   endfunction
 
+  localparam bit HART_TAG = (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;
+
   typedef struct packed {
     logic [CVA6Cfg.ASID_WIDTH-1:0] asid;
     logic [CVA6Cfg.VMID_WIDTH-1:0] vmid;
+    // T6b-2b: owning SMT hart (compared only under mixed residency)
+    logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] hart;
     logic [CVA6Cfg.PtLevels+HYP_EXT-1:0][(CVA6Cfg.VpnLen/CVA6Cfg.PtLevels)-1:0] vpn;
     logic [CVA6Cfg.PtLevels-2:0][HYP_EXT:0] is_page;
     logic [HYP_EXT*2:0] v_st_enbl;  // v_i,g-stage enabled, s-stage enabled
@@ -167,6 +179,7 @@ module cva6_shared_tlb #(
 
   logic [SHARED_TLB_WAYS-1:0] match_asid;
   logic [SHARED_TLB_WAYS-1:0] match_vmid;
+  logic [SHARED_TLB_WAYS-1:0] match_hart;
   logic [SHARED_TLB_WAYS-1:0] match_stage;
 
   pte_cva6_t [SHARED_TLB_WAYS-1:0][HYP_EXT:0] pte;
@@ -176,6 +189,7 @@ module cva6_shared_tlb #(
 
   logic [CVA6Cfg.ASID_WIDTH-1:0] tlb_update_asid_q, tlb_update_asid_d;
   logic [CVA6Cfg.VMID_WIDTH-1:0] tlb_update_vmid_q, tlb_update_vmid_d;
+  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] tlb_update_hart_q, tlb_update_hart_d;
 
   logic shared_tlb_access_q, shared_tlb_access_d;
   logic shared_tlb_hit_d;
@@ -215,6 +229,7 @@ module cva6_shared_tlb #(
 
   assign shared_tag_wr.asid = shared_tlb_update_i.asid;
   assign shared_tag_wr.vmid = shared_tlb_update_i.vmid;
+  assign shared_tag_wr.hart = shared_tlb_update_i.hart;
   assign shared_tag_wr.is_page = shared_tlb_update_i.is_page;
   assign shared_tag_wr.v_st_enbl = v_st_enbl[i_req_q][HYP_EXT*2:0];
 
@@ -278,6 +293,7 @@ module cva6_shared_tlb #(
 
     tlb_update_asid_d   = tlb_update_asid_q;
     tlb_update_vmid_d   = tlb_update_vmid_q;
+    tlb_update_hart_d   = tlb_update_hart_q;
 
     shared_tlb_access_d = '0;
     shared_tlb_vaddr_d  = shared_tlb_vaddr_q;
@@ -304,7 +320,8 @@ module cva6_shared_tlb #(
       itlb_miss_o         = shared_tlb_miss_i;
       itlb_req_d          = 1'b1;
       tlb_update_asid_d   = itlb_asid_i;
-      tlb_update_vmid_d   = lu_vmid_i;
+      tlb_update_vmid_d   = itlb_vmid_i;
+      tlb_update_hart_d   = itlb_hart_i;
 
       shared_tlb_access_d = '1;
       shared_tlb_vaddr_d  = itlb_vaddr_i;
@@ -321,6 +338,7 @@ module cva6_shared_tlb #(
       dtlb_req_d          = 1'b1;
       tlb_update_asid_d   = dtlb_asid_i;
       tlb_update_vmid_d   = lu_vmid_i;
+      tlb_update_hart_d   = dtlb_hart_i;
 
       shared_tlb_access_d = '1;
       shared_tlb_vaddr_d  = dtlb_vaddr_i;
@@ -334,6 +352,7 @@ module cva6_shared_tlb #(
     itlb_update_o    = '0;
     match_asid       = '{default: 0};
     match_vmid       = CVA6Cfg.RVH ? '{default: 0} : '{default: 1};
+    match_hart       = HART_TAG ? '{default: 0} : '{default: 1};
 
 
     if (!CVA6Cfg.UseSharedTlb) begin
@@ -348,6 +367,7 @@ module cva6_shared_tlb #(
           itlb_update_o.v_st_enbl = v_st_enbl[i_req_q][HYP_EXT*2:0];
           itlb_update_o.asid = shared_tlb_update_i.asid;
           itlb_update_o.vmid = shared_tlb_update_i.vmid;
+          itlb_update_o.hart = shared_tlb_update_i.hart;
           itlb_update_o.is_napot_64k = shared_tlb_update_i.is_napot_64k;
 
         end else if (dtlb_req_q) begin
@@ -359,6 +379,7 @@ module cva6_shared_tlb #(
           dtlb_update_o.v_st_enbl = v_st_enbl[i_req_q][HYP_EXT*2:0];
           dtlb_update_o.asid = shared_tlb_update_i.asid;
           dtlb_update_o.vmid = shared_tlb_update_i.vmid;
+          dtlb_update_o.hart = shared_tlb_update_i.hart;
           dtlb_update_o.is_napot_64k = shared_tlb_update_i.is_napot_64k;
         end
       end
@@ -374,10 +395,19 @@ module cva6_shared_tlb #(
           match_vmid[i] = (tlb_update_vmid_q == shared_tag_rd[i].vmid && v_st_enbl[i_req_q][HYP_EXT]) || !v_st_enbl[i_req_q][HYP_EXT];
         end
 
+        // T6b-2b: shared entries are per-hart under mixed residency; the
+        // compare constant-folds to 1 otherwise (drained sharing is intended).
+`ifdef G6LC_MUT_TLB_NO_HART_TAG
+        // Review-only mutation: the hart tag never discriminates.
+        match_hart[i] = 1'b1;
+`else
+        match_hart[i] = HART_TAG ? (shared_tag_rd[i].hart == tlb_update_hart_q) : 1'b1;
+`endif
+
         // check if translation is a: S-Stage and G-Stage, S-Stage only or G-Stage only translation and virtualization mode is on/off
         match_stage[i] = shared_tag_rd[i].v_st_enbl == v_st_enbl[i_req_q][HYP_EXT*2:0];
 
-        if (shared_tag_valid[i] && match_asid[i] && match_vmid[i] && match_stage[i]) begin
+        if (shared_tag_valid[i] && match_asid[i] && match_vmid[i] && match_hart[i] && match_stage[i]) begin
           if (|level_match[i] || napot_tag_match[i]) begin
             shared_tlb_hit_d = 1'b1;
             // Prepare PTE with NAPOT patching if needed
@@ -395,6 +425,7 @@ module cva6_shared_tlb #(
               itlb_update_o.v_st_enbl = shared_tag_rd[i].v_st_enbl;
               itlb_update_o.asid = tlb_update_asid_q;
               itlb_update_o.vmid = tlb_update_vmid_q;
+              itlb_update_o.hart = tlb_update_hart_q;
               itlb_update_o.is_napot_64k = CVA6Cfg.SvnapotEn ? shared_tag_rd[i].is_napot_64k : 1'b0;
             end else if (dtlb_req_q) begin
               dtlb_update_o.valid = 1'b1;
@@ -405,6 +436,7 @@ module cva6_shared_tlb #(
               dtlb_update_o.v_st_enbl = shared_tag_rd[i].v_st_enbl;
               dtlb_update_o.asid = tlb_update_asid_q;
               dtlb_update_o.vmid = tlb_update_vmid_q;
+              dtlb_update_o.hart = tlb_update_hart_q;
               dtlb_update_o.is_napot_64k = CVA6Cfg.SvnapotEn ? shared_tag_rd[i].is_napot_64k : 1'b0;
             end
           end
@@ -419,6 +451,7 @@ module cva6_shared_tlb #(
       itlb_vpn_q <= '0;
       dtlb_vpn_q <= '0;
       tlb_update_asid_q <= '{default: 0};
+      tlb_update_hart_q <= '0;
       shared_tlb_access_q <= '0;
       shared_tlb_vaddr_q <= '0;
       shared_tag_valid_q <= '0;
@@ -439,6 +472,7 @@ module cva6_shared_tlb #(
       itlb_vpn_q <= itlb_vaddr_i[CVA6Cfg.SV-1:12];
       dtlb_vpn_q <= dtlb_vaddr_i[CVA6Cfg.SV-1:12];
       tlb_update_asid_q <= tlb_update_asid_d;
+      tlb_update_hart_q <= tlb_update_hart_d;
       shared_tlb_access_q <= shared_tlb_access_d;
       shared_tlb_vaddr_q <= shared_tlb_vaddr_d;
       shared_tag_valid_q <= shared_tag_valid_d;

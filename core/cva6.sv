@@ -703,6 +703,13 @@ module cva6
   logic tsr_csr_id;
   logic hu;
   irq_ctrl_t irq_ctrl_csr_id;
+  // T6b-2b: per-hart arrays for the per-lane
+  // decode interrupt check under mixed residency (SmtDrainedHandoff=0).
+  irq_ctrl_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] irq_ctrl_b;
+  riscv::priv_lvl_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] priv_lvl_b;
+  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] v_b;
+  logic v_commit_csr;
+  logic mbe_commit_csr;
   logic dcache_en_csr_nbdcache;
   logic csr_write_fflags_commit_cs;
   logic icache_en_csr;
@@ -711,6 +718,27 @@ module cva6
   logic single_step_csr_commit;
   riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] pmpcfg;
   logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] pmpaddr;
+  // T6b-2b: active-hart copies of the shared translation/PMP context for the
+  // instruction-fetch side (the LSU-side set above follows lsu_ctx_hart).
+  logic [CVA6Cfg.PPNW-1:0] fet_satp_ppn_csr_ex;
+  logic [CVA6Cfg.ASID_WIDTH-1:0] fet_asid_csr_ex;
+  logic [CVA6Cfg.PPNW-1:0] fet_vsatp_ppn_csr_ex;
+  logic [CVA6Cfg.ASID_WIDTH-1:0] fet_vs_asid_csr_ex;
+  logic [CVA6Cfg.PPNW-1:0] fet_hgatp_ppn_csr_ex;
+  logic [CVA6Cfg.VMID_WIDTH-1:0] fet_vmid_csr_ex;
+  logic fet_mxr_csr_ex;
+  logic fet_vmxr_csr_ex;
+  logic fet_mbe_csr_ex;
+  riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] fet_pmpcfg;
+  logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] fet_pmpaddr;
+  // T6b-2b: hart owning the in-flight LSU translation request and the
+  // bank-side LSU context select (== smt_active_hart unless mixed residency).
+  // lsu_chk_* is the check-stage copy (registered one cycle under mixed
+  // residency) that selects the PMP set in the bank.
+  logic [HART_ID_BITS-1:0] lsu_hart;
+  logic [HART_ID_BITS-1:0] lsu_chk_hart;
+  logic [HART_ID_BITS-1:0] lsu_ctx_hart;
+  logic [HART_ID_BITS-1:0] lsu_chk_ctx_hart;
   logic [31:0] mcountinhibit_csr_perf;
   //jvt
   jvt_t jvt;
@@ -744,6 +772,14 @@ module cva6
   // already receive the full per-hart irq_i[] vector (Linux CLINT/PLIC identity).
   logic [1:0] irq_active;
   assign irq_active = irq_i[smt_active_hart];
+  // T6b-2b: under mixed residency the LSU-side architectural context follows
+  // the hart owning the in-flight load/store translation request; under the
+  // drained handoff (and single-hart) it selects exactly today's active-hart
+  // context, so behaviour is bit-identical.
+  assign lsu_ctx_hart = (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff)
+                        ? lsu_hart : smt_active_hart;
+  assign lsu_chk_ctx_hart = (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff)
+                            ? lsu_chk_hart : smt_active_hart;
   logic                    smt_switch;
   logic                    smt_quiesce, smt_sb_empty;
   logic                    smt_t0_extra;
@@ -1186,6 +1222,12 @@ module cva6
       .vs_i                (vs),
       .irq_i               (irq_active),
       .irq_ctrl_i          (irq_ctrl_csr_id),
+      // T6b-2b: per-hart interrupt/privilege context for the per-lane decode
+      // interrupt check under mixed residency (unused inputs when drained).
+      .irq_b_i             (irq_i),
+      .irq_ctrl_b_i        (irq_ctrl_b),
+      .priv_lvl_b_i        (priv_lvl_b),
+      .v_b_i               (v_b),
       .debug_mode_i        (debug_mode),
       .tvm_i               (tvm_csr_id),
       .tw_i                (tw_csr_id),
@@ -1864,9 +1906,26 @@ module cva6
       .dcache_req_ports_o      (dcache_req_ports_ex_cache),
       .dcache_wbuffer_empty_i  (dcache_commit_wbuffer_empty),
       .dcache_wbuffer_not_ni_i (dcache_commit_wbuffer_not_ni),
-      // PMP
+      // PMP (LSU check-stage hart's set; == request hart's when the LSU holds
+      // a walk, and == the active hart's under drained/single-hart configs)
       .pmpcfg_i                (pmpcfg),
       .pmpaddr_i               (pmpaddr),
+      // T6b-2b: fetch-hart identity/context for the instruction-side
+      // TLB/PTW/PMP paths; lsu_hart_o reports the translation request owner.
+      .fetch_hart_i            (smt_active_hart),
+      .lsu_hart_o              (lsu_hart),
+      .lsu_chk_hart_o          (lsu_chk_hart),
+      .fet_asid_i              (fet_asid_csr_ex),
+      .fet_vs_asid_i           (fet_vs_asid_csr_ex),
+      .fet_vmid_i              (fet_vmid_csr_ex),
+      .fet_satp_ppn_i          (fet_satp_ppn_csr_ex),
+      .fet_vsatp_ppn_i         (fet_vsatp_ppn_csr_ex),
+      .fet_hgatp_ppn_i         (fet_hgatp_ppn_csr_ex),
+      .fet_mxr_i               (fet_mxr_csr_ex),
+      .fet_vmxr_i              (fet_vmxr_csr_ex),
+      .fet_mbe_i               (fet_mbe_csr_ex),
+      .fet_pmpcfg_i            (fet_pmpcfg),
+      .fet_pmpaddr_i           (fet_pmpaddr),
       //RVFI
       .rvfi_lsu_ctrl_o         (rvfi_lsu_ctrl),
       .rvfi_mem_paddr_o        (rvfi_mem_paddr)
@@ -1943,6 +2002,8 @@ module cva6
       .clk_i,
       .rst_ni,
       .active_hart_i           (smt_active_hart),
+      .lsu_hart_i              (lsu_ctx_hart),
+      .lsu_chk_hart_i          (lsu_chk_ctx_hart),
       .switch_i                (smt_switch),
       .time_irq_i,
       .rtc_time_i,
@@ -1978,6 +2039,10 @@ module cva6
       .fprec_o                 (fprec_csr_ex),
       .vs_o                    (vs),
       .irq_ctrl_o              (irq_ctrl_csr_id),
+      .irq_ctrl_b_o            (irq_ctrl_b),
+      .priv_lvl_b_o            (priv_lvl_b),
+      .v_b_o                   (v_b),
+      .v_commit_o              (v_commit_csr),
       .en_translation_o        (enable_translation_csr_ex),
       .en_g_translation_o      (enable_g_translation_csr_ex),
       .en_ld_st_translation_o  (en_ld_st_translation_csr_ex),
@@ -1995,6 +2060,16 @@ module cva6
       .vs_asid_o               (vs_asid_csr_ex),
       .hgatp_ppn_o             (hgatp_ppn_csr_ex),
       .vmid_o                  (vmid_csr_ex),
+      .fet_satp_ppn_o          (fet_satp_ppn_csr_ex),
+      .fet_asid_o              (fet_asid_csr_ex),
+      .fet_vsatp_ppn_o         (fet_vsatp_ppn_csr_ex),
+      .fet_vs_asid_o           (fet_vs_asid_csr_ex),
+      .fet_hgatp_ppn_o         (fet_hgatp_ppn_csr_ex),
+      .fet_vmid_o              (fet_vmid_csr_ex),
+      .fet_mxr_o               (fet_mxr_csr_ex),
+      .fet_vmxr_o              (fet_vmxr_csr_ex),
+      .fet_mbe_o               (fet_mbe_csr_ex),
+      .mbe_commit_o            (mbe_commit_csr),
       .irq_i,
       .ipi_i,
       .debug_req_i,
@@ -2025,6 +2100,8 @@ module cva6
       .lcofi_i                 (lcofi_perf_csr),
       .pmpcfg_o                (pmpcfg),
       .pmpaddr_o               (pmpaddr),
+      .fet_pmpcfg_o            (fet_pmpcfg),
+      .fet_pmpaddr_o           (fet_pmpaddr),
       .mcountinhibit_o         (mcountinhibit_csr_perf),
       .mcbie_o                 (mcbie),
       .scbie_o                 (scbie),
@@ -2140,8 +2217,9 @@ module cva6
   ) controller_i (
       .clk_i,
       .rst_ni,
-      // virtualization mode
-      .v_i                   (v),
+      // virtualization mode of the committing instruction's hart (T6b-2b;
+      // identical to the active hart under drained handoff)
+      .v_i                   (v_commit_csr),
       // flush ports
       .set_pc_commit_o       (set_pc_ctrl_pcgen),
       .flush_if_o            (flush_ctrl_if),
@@ -2255,7 +2333,9 @@ module cva6
         // to commit stage
         .dcache_amo_req_i  (amo_req),
         .dcache_amo_resp_o (amo_resp),
-        .mbe_i             (mbe),
+        // T6b-2b: the write-buffer/AMO drain path formats data with the
+        // committing hart's endianness (identical under drained handoff).
+        .mbe_i             (mbe_commit_csr),
         // from PTW, Load Unit  and Store Unit
         .dcache_miss_o     (dcache_miss_cache_perf),
         .miss_vld_bits_o   (miss_vld_bits),
@@ -2761,6 +2841,16 @@ module cva6
                         && issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rob.count_q == '0
                         && issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.count_q == '0))
     else $error("ooo_switch_drained: hart switch with OoO state resident");
+  end
+
+  // T6b-2b invariants on the per-access context split. Under the drained
+  // handoff every side-select collapses onto the active hart, so the LSU and
+  // commit views must equal the fetch view whenever they are sampled.
+  if (CVA6Cfg.SmtDrainedHandoff) begin : gen_t6b2b_drained_ctx
+    t6b2b_drained_lsu_ctx : assert property (
+        @(posedge clk_i) disable iff (!rst_ni)
+        (lsu_ctx_hart == smt_active_hart) && (lsu_chk_ctx_hart == smt_active_hart))
+    else $error("t6b2b: lsu_ctx_hart/lsu_chk_ctx_hart diverged from active hart under drained handoff");
   end
 
   // Read-only load round-trip observer on the core's load port. Requests are

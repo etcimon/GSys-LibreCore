@@ -172,6 +172,31 @@ module load_store_unit
     // PMP address - CSR_REGFILE
     input logic           [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] pmpaddr_i,
 
+    // T6b-2b: active fetch hart and hart owning the in-flight LSU translation
+    // request (0 while the MMU is lent to the accelerator). The LSU-side
+    // architectural inputs above carry the lsu_hart_o context; the fet_* set
+    // below carries the fetch_hart_i (active hart) context for the
+    // instruction-side TLB/PTW/PMP paths. With NrHarts==1 or
+    // SmtDrainedHandoff both select the same bank and the extra muxes are
+    // transparent.
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] fetch_hart_i,
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] lsu_hart_o,
+    // Hart owning the check-stage context: lsu_hart_o registered with the
+    // request under mixed residency, identical to lsu_hart_o otherwise. The
+    // bank selects the PMP set (checked one cycle after the lookup) with it.
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] lsu_chk_hart_o,
+    input logic [CVA6Cfg.ASID_WIDTH-1:0] fet_asid_i,
+    input logic [CVA6Cfg.ASID_WIDTH-1:0] fet_vs_asid_i,
+    input logic [CVA6Cfg.VMID_WIDTH-1:0] fet_vmid_i,
+    input logic [CVA6Cfg.PPNW-1:0] fet_satp_ppn_i,
+    input logic [CVA6Cfg.PPNW-1:0] fet_vsatp_ppn_i,
+    input logic [CVA6Cfg.PPNW-1:0] fet_hgatp_ppn_i,
+    input logic fet_mxr_i,
+    input logic fet_vmxr_i,
+    input logic fet_mbe_i,
+    input riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] fet_pmpcfg_i,
+    input logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] fet_pmpaddr_i,
+
     // RVFI information - RVFI
     output lsu_ctrl_t                    rvfi_lsu_ctrl_o,
     // RVFI information - RVFI
@@ -333,6 +358,20 @@ module load_store_unit
         .flush_tlb_vvma_i,
         .flush_tlb_gvma_i,
 
+        .fetch_hart_i   (fetch_hart_i),
+        .lsu_hart_i     (lsu_hart_o),
+        .fet_asid_i     (fet_asid_i),
+        .fet_vs_asid_i  (fet_vs_asid_i),
+        .fet_vmid_i     (fet_vmid_i),
+        .fet_satp_ppn_i (fet_satp_ppn_i),
+        .fet_vsatp_ppn_i(fet_vsatp_ppn_i),
+        .fet_hgatp_ppn_i(fet_hgatp_ppn_i),
+        .fet_mxr_i      (fet_mxr_i),
+        .fet_vmxr_i     (fet_vmxr_i),
+        .fet_mbe_i      (fet_mbe_i),
+        .fet_pmpcfg_i   (fet_pmpcfg_i),
+        .fet_pmpaddr_i  (fet_pmpaddr_i),
+
         .itlb_miss_o(itlb_miss_o),
         .dtlb_miss_o(dtlb_miss_o),
         .shared_tlb_flush_busy_o(shared_tlb_flush_busy_o),
@@ -394,6 +433,29 @@ module load_store_unit
   // PMP
   // ------------------
 
+  // T6b-2b: check-stage context. The PMP data check runs on the registered
+  // (post-translation) address, one cycle after the request; under mixed
+  // residency the live architectural inputs may already belong to the peer
+  // hart, so the request's own context is replayed.
+  localparam bit HART_CTX = (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;
+  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] chk_hart_q;
+  riscv::priv_lvl_t chk_ld_st_priv_lvl_q;
+  logic chk_ld_st_v_q;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (~rst_ni) begin
+      chk_hart_q           <= '0;
+      chk_ld_st_priv_lvl_q <= riscv::PRIV_LVL_M;
+      chk_ld_st_v_q        <= 1'b0;
+    end else if (HART_CTX) begin
+      chk_hart_q           <= lsu_hart_o;
+      chk_ld_st_priv_lvl_q <= ld_st_priv_lvl_i;
+      chk_ld_st_v_q        <= ld_st_v_i;
+    end
+  end
+
+  assign lsu_chk_hart_o = HART_CTX ? chk_hart_q : lsu_hart_o;
+
   pmp_data_if #(
       .CVA6Cfg      (CVA6Cfg),
       .icache_areq_t(icache_areq_t),
@@ -414,10 +476,12 @@ module load_store_unit
       .lsu_exception_o     (mmu_exception),
       .priv_lvl_i          (priv_lvl_i),
       .v_i                 (v_i),
-      .ld_st_priv_lvl_i    (ld_st_priv_lvl_i),
-      .ld_st_v_i           (ld_st_v_i),
+      .ld_st_priv_lvl_i    (HART_CTX ? chk_ld_st_priv_lvl_q : ld_st_priv_lvl_i),
+      .ld_st_v_i           (HART_CTX ? chk_ld_st_v_q : ld_st_v_i),
       .pmpcfg_i            (pmpcfg_i),
-      .pmpaddr_i           (pmpaddr_i)
+      .pmpaddr_i           (pmpaddr_i),
+      .fet_pmpcfg_i        (fet_pmpcfg_i),
+      .fet_pmpaddr_i       (fet_pmpaddr_i)
   );
 
   // ------------------
@@ -449,6 +513,8 @@ module load_store_unit
       st_translation_req               = cva6_st_translation_req;
       translation_req                  = cva6_translation_req;
       mmu_vaddr                        = cva6_mmu_vaddr;
+      // T6b-2b: CVA6 translation requests are owned by the bypass head's hart
+      lsu_hart_o                       = lsu_ctrl.hart;
       // MMU output
       cva6_translation_valid           = translation_valid;
       cva6_mmu_paddr                   = mmu_paddr;
@@ -482,6 +548,8 @@ module load_store_unit
           st_translation_req               = acc_mmu_req_i.acc_mmu_is_store;
           translation_req                  = acc_mmu_req_i.acc_mmu_req;
           mmu_vaddr                        = acc_mmu_req_i.acc_mmu_vaddr;
+          // Accelerator translations are not owned by any SMT hart
+          lsu_hart_o                       = '0;
           // MMU output
           acc_mmu_resp_o.acc_mmu_valid     = translation_valid;
           acc_mmu_resp_o.acc_mmu_paddr     = mmu_paddr;
@@ -512,6 +580,7 @@ module load_store_unit
     assign st_translation_req     = cva6_st_translation_req;
     assign translation_req        = cva6_translation_req;
     assign mmu_vaddr              = cva6_mmu_vaddr;
+    assign lsu_hart_o             = lsu_ctrl.hart;
     // MMU output
     assign cva6_translation_valid = translation_valid;
     assign cva6_mmu_paddr         = mmu_paddr;
@@ -942,5 +1011,15 @@ module load_store_unit
   );
 
   assign rvfi_lsu_ctrl_o = lsu_ctrl;
+
+  //pragma translate_off
+  // T6b-2b: while a data page-table walk is in flight the LSU holds its
+  // request — the registered check-stage hart must equal the request hart,
+  // so the PMP data check replays the same bank the request looked up.
+  g6lc_chk_hart_walk_match :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (HART_CTX && dtlb_miss_o) |=> (lsu_chk_hart_o == lsu_hart_o))
+  else $error("[lsu] check-stage hart diverged from request hart during a data PTW walk");
+  //pragma translate_on
 
 endmodule

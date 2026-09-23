@@ -251,6 +251,26 @@ module ex_stage
     input riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] pmpcfg_i,
     // Report the PMP addresses - CSR_REGFILE
     input logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] pmpaddr_i,
+    // T6b-2b: active fetch hart and hart owning the in-flight LSU translation
+    // request; the LSU-side inputs above carry the request hart's context, the
+    // fet_* set below the fetch hart's. Identical values when NrHarts==1 or
+    // SmtDrainedHandoff.
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] fetch_hart_i,
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] lsu_hart_o,
+    // T6b-2b: check-stage context hart (registered lsu_hart_o under mixed
+    // residency, identical otherwise); selects the PMP set in the bank.
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] lsu_chk_hart_o,
+    input logic [CVA6Cfg.ASID_WIDTH-1:0] fet_asid_i,
+    input logic [CVA6Cfg.ASID_WIDTH-1:0] fet_vs_asid_i,
+    input logic [CVA6Cfg.VMID_WIDTH-1:0] fet_vmid_i,
+    input logic [CVA6Cfg.PPNW-1:0] fet_satp_ppn_i,
+    input logic [CVA6Cfg.PPNW-1:0] fet_vsatp_ppn_i,
+    input logic [CVA6Cfg.PPNW-1:0] fet_hgatp_ppn_i,
+    input logic fet_mxr_i,
+    input logic fet_vmxr_i,
+    input logic fet_mbe_i,
+    input riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] fet_pmpcfg_i,
+    input logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] fet_pmpaddr_i,
     // Information dedicated to RVFI - RVFI
     output lsu_ctrl_t rvfi_lsu_ctrl_o,
     // Information dedicated to RVFI - RVFI
@@ -675,6 +695,20 @@ module ex_stage
       .tinst_i                (lsu_tinst),
       .pmpcfg_i,
       .pmpaddr_i,
+      .fetch_hart_i           (fetch_hart_i),
+      .lsu_hart_o             (lsu_hart_o),
+      .lsu_chk_hart_o         (lsu_chk_hart_o),
+      .fet_asid_i             (fet_asid_i),
+      .fet_vs_asid_i          (fet_vs_asid_i),
+      .fet_vmid_i             (fet_vmid_i),
+      .fet_satp_ppn_i         (fet_satp_ppn_i),
+      .fet_vsatp_ppn_i        (fet_vsatp_ppn_i),
+      .fet_hgatp_ppn_i        (fet_hgatp_ppn_i),
+      .fet_mxr_i              (fet_mxr_i),
+      .fet_vmxr_i             (fet_vmxr_i),
+      .fet_mbe_i              (fet_mbe_i),
+      .fet_pmpcfg_i           (fet_pmpcfg_i),
+      .fet_pmpaddr_i          (fet_pmpaddr_i),
       .rvfi_lsu_ctrl_o,
       .rvfi_mem_paddr_o
   );

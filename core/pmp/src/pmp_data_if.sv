@@ -35,9 +35,13 @@ module pmp_data_if
     input logic v_i,
     input riscv::priv_lvl_t ld_st_priv_lvl_i,
     input logic ld_st_v_i,
-    // PMP
+    // PMP (load/store request hart's context — T6b-2b)
     input riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] pmpcfg_i,
-    input logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] pmpaddr_i
+    input logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] pmpaddr_i,
+    // PMP (fetch hart's context — identical values under NrHarts==1 or
+    // SmtDrainedHandoff)
+    input riscv::pmpcfg_t [avoid_neg(CVA6Cfg.NrPMPEntries-1):0] fet_pmpcfg_i,
+    input logic [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] fet_pmpaddr_i
 );
   // virtual address causing the exception
   logic [CVA6Cfg.XLEN-1:0] fetch_vaddr_xlen, lsu_vaddr_xlen;
@@ -109,9 +113,9 @@ module pmp_data_if
       .priv_lvl_i   (priv_lvl_i),
       // we will always execute on the instruction fetch port
       .access_type_i(riscv::ACCESS_EXEC),
-      // Configuration
-      .conf_addr_i  (pmpaddr_i),
-      .conf_i       (pmpcfg_i),
+      // Configuration — fetch hart's PMP (T6b-2b)
+      .conf_addr_i  (fet_pmpaddr_i),
+      .conf_i       (fet_pmpcfg_i),
       .allow_o      (pmp_if_allow)
   );
 
@@ -187,7 +191,7 @@ module pmp_data_if
       if (priv_lvl_i == riscv::PRIV_LVL_M) begin
         no_locked_if <= 1'b1;
         for (int i = 0; i < CVA6Cfg.NrPMPEntries; i++) begin
-          if (pmpcfg_i[i].locked && pmpcfg_i[i].addr_mode != riscv::OFF) begin
+          if (fet_pmpcfg_i[i].locked && fet_pmpcfg_i[i].addr_mode != riscv::OFF) begin
             no_locked_if <= no_locked_if & 1'b0;
           end else no_locked_if <= no_locked_if & 1'b1;
         end
