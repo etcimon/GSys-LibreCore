@@ -128,12 +128,19 @@ module g6lc_ooo_dispatch
   // exist". Keep the messages honest about what is actually still missing,
   // because a guard that misstates its own reason is how a stale refusal
   // survives long after the work is done.
+  // Integer multi-hart OoO elaborates under the drained handoff: the thread
+  // selector switches only when the scoreboard and store queues are empty, so
+  // the hart-blind IQ/ROB/LSQ never hold work from two harts at once (asserted
+  // at the switch as ooo_switch_drained in cva6.sv). The T6a integration gate
+  // nevertheless failed — the protected dual-hart OpenSBI/HSM profile does not
+  // complete on g6lc64_smt2_ooo_int while its in-order twin does — so the
+  // refusal stays until that is understood. G6LC_OOO_SMT_QUALIFY exists only
+  // for the qualification builds that investigate it.
+`ifndef G6LC_OOO_SMT_QUALIFY
   if (CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_smt
-    // g6lc_rename is per-hart, but core/ooo/** outside it still contains no
-    // hart signal at all: the IQ, ROB and LSQ are hart-blind, so a load can be
-    // ordered against (and forwarded from) the peer hart's speculative stores.
-    $error("OoO multi-hart integration is unqualified: mixed residency and recovery ownership remain open.");
+    $error("OoO multi-hart integration is unqualified: the dual-hart firmware profile does not complete under the drained handoff (T6a).");
   end
+`endif
   if (CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_fp_mh
     // Hart-tagged LSQ and lazy-FS per-hart tracking are the T6 work item; an
     // FP register class on a multi-hart OoO configuration stays illegal even

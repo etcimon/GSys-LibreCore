@@ -45,6 +45,15 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## OoO under the drained SMT2 handoff (2026-09-22, T6a, guards retained)
+
+`core/cva6.sv` gains the translate_off witness `ooo_switch_drained` (a hart switch with OoO state
+resident is an error); `core/include/config_pkg.sv` and `core/ooo/g6lc_ooo_dispatch.sv` wrap the
+multi-hart OoO refusal in `G6LC_OOO_SMT_QUALIFY` for qualification builds only and keep the FP
+multi-hart refusal unconditional; `core/include/g6lc64_smt2_ooo_int_config_pkg.sv` is the
+qualification-only package; the Makefile derives `G6LC_TB_OOO` for the C++ harness from the target
+package. No ISA-visible behaviour changes; production configurations are unaffected.
+
 ## Fetch-target-queue replay reseed (2026-09-21, T5 finding)
 
 Instruction-stream integrity (`#instr_fetch`): when the instruction queue refuses a window and asks

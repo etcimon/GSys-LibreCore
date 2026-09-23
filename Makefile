@@ -128,6 +128,13 @@ G6LC_TB_NR_HARTS := $(shell grep -oE "NrHarts:[[:space:]]*unsigned'\([0-9]+\)" $
 ifneq ($(filter-out 0 1,$(G6LC_TB_NR_HARTS)),)
   CFLAGS := $(CFLAGS) -DG6LC_TB_BANKED
 endif
+# Under OoOEn the store buffer's legacy SMT hold state (g1ao_hold_*) is
+# elaborated away, so the banked probes that read it compile to 0 instead.
+# Anchored to the field line: SliceOoOEn precedes OoOEn in the struct.
+G6LC_TB_OOO_EN := $(shell grep -oE "^[[:space:]]+OoOEn:[[:space:]]*bit'\([01]\)" $(root-dir)core/include/$(target)_config_pkg.sv 2>/dev/null | grep -oE "[01]" | head -1)
+ifeq ($(G6LC_TB_OOO_EN),1)
+  CFLAGS := $(CFLAGS) -DG6LC_TB_OOO
+endif
 G6LC_TB_NR_CORES := $(shell grep -oE "NrCores:[[:space:]]*unsigned'\([0-9]+\)" $(root-dir)core/include/$(target)_config_pkg.sv 2>/dev/null | grep -oE "[0-9]+" | head -1)
 ifneq ($(filter-out 0 1,$(G6LC_TB_NR_CORES)),)
   CFLAGS := $(CFLAGS) -DG6LC_TB_CLUSTER

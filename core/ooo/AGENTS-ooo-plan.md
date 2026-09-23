@@ -185,6 +185,29 @@ Per-hart commit heads (scoreboard/ROB), hart-tagged IQ/ROB/LSQ, per-hart STQ cre
 with per-hart floors, per-hart cancellation; drained handoff retired only after peer squash/trap
 isolation negatives pass; Phase 6 adaptive policy stays frozen. Guard removal is a separate decision.
 
+### T6a status (2026-09-22): OoO under the drained handoff — integration gate FAILED
+
+Design: with `drain_ready = sb_empty && no_st_pending && !flush` every switch happens with the
+scoreboard (hence IQ/ROB/LSQ/CSR table/store buffer) empty and `g6lc_rename` already keeps per-hart
+maps, so the hart-blind OoO structures are safe under this policy. Delivered: `ooo_switch_drained`
+witness in `cva6.sv` (translate_off), the qualification-only package `g6lc64_smt2_ooo_int`
+(`g6lc64_smt2` + `OoOEn=1`, `RVF/RVD=0`, `LsqStoreEntries=4`), Makefile derivation of
+`G6LC_TB_OOO` from the target package (anchored field grep — `SliceOoOEn` aliases the naive one),
+`EXPERIMENTAL_TARGETS` admission in `run_opensbi_source_review.py`, rename/dispatch cells for two
+harts (rename nh2 10/10, fp-nh2 4/4, dispatch legal-smt 14/14 with the define, both illegal cells
+refused). Integration: the protected dual-hart OpenSBI/HSM profile (same firmware `6b2bad99`,
+same plusargs, 14M cap) on `g6lc64_smt2_ooo_int` **times out** — hart0 8,728,674 / hart1 458,082
+retirements, hart1 parked in WFI at `0x8000f72e`, hart0 in M-mode at `0x8000a130` with the last
+trap `mcause=3`; the `OoOEn=0` overlay of the same package **passes** (`strictDualPassed`,
+333,402 / 8,931,687), so the FP-less profile is not the cause. A 700k-cycle flow-traced rerun shows
+9,163 handoffs, every one with `empty=1 stores_clear=1` and the `ooo_switch_drained` witness
+silent — the drain precondition holds; what fails is progress of the non-boot hart after the boot
+hart's `sbi_hart_start`. That run also booted with the other hart winning the lottery (hart1 in C
+init, hart0 waiting at `0x800002f6`) although only `+smt_flow_trace` differs from the 14M run —
+a run-to-run divergence that has to be understood before the hang itself. Guards stay
+(`G6LC_OOO_SMT_QUALIFY` seam only); the in-order anchor model is byte-identical to the last exact
+anchor (`5608ef96…`) so the anchor result carries over; verify lint 8/54 and synth 32/5 unchanged.
+
 ## Deferred
 
 Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,

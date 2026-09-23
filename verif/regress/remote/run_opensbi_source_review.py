@@ -46,7 +46,11 @@ def source_passed(rc, log, trace, progress, tohost, seen):
 
 def validate_model_manifest(manifest, observed_hash, experimental):
     hashes = [manifest[key] for key in ('executableSha256', 'modelSha256') if key in manifest]
-    if not hashes or any(value != observed_hash for value in hashes) or manifest.get('target') != 'g6lc64_smt2':
+    target = manifest.get('target')
+    # A sibling target (same SoC profile, different backend) is admitted only
+    # as an experimental model; its manifest is a plain unsubstituted one.
+    sibling = target in EXPERIMENTAL_TARGETS
+    if not hashes or any(value != observed_hash for value in hashes) or (target != 'g6lc64_smt2' and not sibling):
         raise ValueError('model identity mismatch or conflicting executable hashes')
     sources = manifest.get('sources')
     if not isinstance(sources, dict) or not sources:
@@ -55,7 +59,7 @@ def validate_model_manifest(manifest, observed_hash, experimental):
     if not isinstance(qualification, bool):
         raise ValueError('qualificationOnly must be boolean')
     reviewed = 'modelSha256' in manifest or qualification or any(isinstance(v, dict) for v in sources.values())
-    if experimental != reviewed:
+    if experimental != (reviewed or sibling):
         raise ValueError('experimental mode and model provenance disagree')
     if reviewed:
         if not qualification or manifest.get('harts') != 2 or manifest.get('rc') != 0:
@@ -69,7 +73,7 @@ def validate_model_manifest(manifest, observed_hash, experimental):
         raise ValueError('invalid default source hashes')
     return {'experimentalModel': experimental, 'protectedAnchor': not experimental,
             'modelQualificationOnly': qualification, 'modelHarts': manifest.get('harts'),
-            'modelSourceHashes': sources}
+            'modelTarget': target, 'modelSourceHashes': sources}
 
 
 def source_outcome(rc, text, passed, cap):
@@ -94,6 +98,9 @@ def source_outcome(rc, text, passed, cap):
 
 EXPECTED_COMPILER_CONTROL_SHA256 = 'be176b279ada076a3459d8bd6509e0946ccf0994d5c35a092bede308bba8c8ff'
 EXPECTED_COMPILER_CONTROL_NAME = 'split-counter.vlt'
+# Sibling targets of the protected g6lc64_smt2 profile that may run the same
+# firmware as EXPERIMENTAL models only (SOURCE_REVIEW_EXPERIMENTAL=1).
+EXPERIMENTAL_TARGETS = frozenset({'g6lc64_smt2_ooo_int'})
 
 
 def compiler_control_failures(control, verfiles, exists, digest, waive):
@@ -175,7 +182,13 @@ def main():
     # hash as 'modelSha256' rather than 'executableSha256', so both names are
     # accepted -- but only the hash comparison decides, never the field name.
     attested = manifest.get('executableSha256') or manifest.get('modelSha256')
-    if attested != sha(model) or manifest.get('target') != 'g6lc64_smt2':
+    # The protected anchor is the g6lc64_smt2 build. A sibling target that
+    # keeps the same SoC profile but changes the backend (the integer OoO
+    # variant of T6a) may run the same firmware, but only as an EXPERIMENTAL
+    # model: it never carries the anchor claim and its target is recorded.
+    target = manifest.get('target')
+    experimental_target = target in EXPERIMENTAL_TARGETS
+    if attested != sha(model) or (target != 'g6lc64_smt2' and not experimental_target):
         raise RuntimeError('source-profile model identity mismatch')
     # A qualification build may substitute sources (for example to relax a config
     # legality guard). Such a model is NOT the protected source-profile anchor, and
@@ -188,15 +201,16 @@ def main():
         and entry.get('reviewSha256') != entry.get('originalSha256'))
     qualification_only = bool(manifest.get('qualificationOnly'))
     experimental = os.environ.get('SOURCE_REVIEW_EXPERIMENTAL') == '1'
-    if (substitutions or qualification_only) and not experimental:
+    if (substitutions or qualification_only or experimental_target) and not experimental:
         raise RuntimeError('substituted qualification model requires '
                            'SOURCE_REVIEW_EXPERIMENTAL=1')
-    if experimental and not (substitutions or qualification_only):
+    if experimental and not (substitutions or qualification_only or experimental_target):
         raise RuntimeError('experimental mode demanded but the manifest attests an '
                            'unsubstituted model')
     provenance = {'experimentalModel': experimental,
                   'protectedAnchor': not experimental,
                   'modelQualificationOnly': qualification_only,
+                  'modelTarget': target,
                   'modelHarts': manifest.get('harts'),
                   'modelSubstitutions': substitutions}
     provenance.update(validate_model_manifest(manifest, sha(model), experimental))

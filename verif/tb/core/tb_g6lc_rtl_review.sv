@@ -1597,7 +1597,9 @@ module tb_g6lc_review_dispatch;
     c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NrHarts=HARTS;c.NrCores=1;c.NrIssuePorts=2;c.NrCommitPorts=2;c.NrWbPorts=2;
     c.FpPresent=FPEN;c.FLen=FPEN?64:1;c.RVA=1;
     c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.PrfEntries=HARTS>1?80:40;c.RobEntries=8;c.IqEntries=8;
-    c.LsqLoadEntries=4;c.LsqStoreEntries=4;c.BPCkptDepth=2;c.OoOEn=1;
+    // Checkpoints are owned per hart, so a two-hart geometry keeps the same
+    // two outstanding branches per hart that the single-hart scenarios assume.
+    c.LsqLoadEntries=4;c.LsqStoreEntries=4;c.BPCkptDepth=2*HARTS;c.OoOEn=1;
     c.MemDepPredEn=MDP;return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();

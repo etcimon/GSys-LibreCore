@@ -2614,6 +2614,21 @@ module cva6
     end
   end
 
+  // Drained-handoff witness (T6a): integer multi-hart OoO is legal precisely
+  // because the thread selector only switches on a drained pipeline. If a
+  // switch ever fired with OoO state resident, the hart-blind IQ/ROB/LSQ would
+  // silently alias work across harts — report it here. The generate guard also
+  // keeps the hierarchical references legal when OoOEn=0.
+  if (CVA6Cfg.OoOEn && CVA6Cfg.NrHarts > 1) begin : gen_ooo_switch_drained
+    ooo_switch_drained: assert property (
+        @(posedge clk_i) disable iff (!rst_ni)
+        smt_switch |-> (smt_sb_empty && no_st_pending_commit
+                        && !issue_stage_i.gen_full_ooo.i_ooo_dispatch.lsq_busy
+                        && issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rob.count_q == '0
+                        && issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.count_q == '0))
+    else $error("ooo_switch_drained: hart switch with OoO state resident");
+  end
+
   // Read-only load round-trip observer on the core's load port. Requests are
   // paired to responses by data_id/data_rid, which the load unit allocates from
   // its load buffer, so an outstanding tag is unique. idx is the index half of

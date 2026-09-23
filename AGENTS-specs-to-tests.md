@@ -63,6 +63,17 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## OoO under the drained SMT2 handoff (2026-09-22, T6a)
+
+Two-hart leaf cells (`REVIEW_RTL_RENAME_SMT`, `REVIEW_RTL_RENAME_FP_SMT`, dispatch `legal-smt` with
+`-DG6LC_OOO_SMT_QUALIFY` incl. the negative battery, `illegal-smt`/`illegal-fp` refusals) pass. The
+protected dual-hart OpenSBI/HSM profile runs on the qualification-only `g6lc64_smt2_ooo_int` package
+through `run_opensbi_source_review.py` as an EXPERIMENTAL model (`EXPERIMENTAL_TARGETS`,
+`modelTarget` recorded, never an anchor): **timeout** at 14M cycles (8,728,674 / 458,082) versus
+**pass** on the `OoOEn=0` overlay of the same package (333,402 / 8,931,687). A 700k-cycle
+`SOURCE_REVIEW_FLOW=1` run counted 9,163 drained handoffs with the `ooo_switch_drained` witness
+silent. The in-order anchor model built from this tree is byte-identical to the last exact anchor.
+
 ## FP OoO suite and the FTQ replay finding (2026-09-21, T5)
 
 `verif/tests/custom/ooo/ooo_fp_ooo.S` stages 1–11 (`testlist_ooo_l3.yaml` `ooo_fp_*`,

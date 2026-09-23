@@ -41,6 +41,14 @@ regressions do not add independent ISA coverage. Early termination remains unown
 read/address visibility, precise recovery and broad memory ownership remain open. No architecture,
 physical or guarded-feature status advances from qualification-tooling changes alone.
 
+## OoO with two harts under the drained handoff (2026-09-22)
+
+**Not qualified; refusal retained.** The two-hart leaf cells pass and every observed hart switch is
+drained, but the protected dual-hart firmware profile does not complete on the out-of-order backend
+while it completes on the in-order twin of the same integer-only package. The failing progress of
+the non-boot hart and a run-to-run lottery divergence are the open items; the protected
+configuration is untouched and its anchor model byte-identical.
+
 ## FP OoO behaviour and the fetch-target-queue replay defect (2026-09-21)
 
 **FP out-of-order behaviour has Spike-compared directed evidence on a qualification-only build; the

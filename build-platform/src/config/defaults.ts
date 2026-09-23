@@ -1995,6 +1995,21 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
           warningBudget: 650,
         },
       },
+      {
+        // T6a: integer multi-hart OoO under the drained SMT2 handoff. RVF/RVD=0
+        // keeps FpPresent=0, so this is the multi-hart OoO package that legally
+        // elaborates (g6lc64_smt2+OoOEn with FP trips the fp_mh guard).
+        id: "diag-smt2-ooo-int-lint",
+        description: "Verilator lint of the integer-only SMT2 OoO g6lc64_smt2_ooo_int package.",
+        compartment: "ooo",
+        kind: "verilator-lint",
+        tools: ["verilator"],
+        optional: true,
+        verilator: {
+          target: "g6lc64_smt2_ooo_int",
+          warningBudget: 650,
+        },
+      },
       // --- ai: island / matrix / DRAM channels / tensor / qemu -------------
       {
         id: "diag-ai-cfg-paths",

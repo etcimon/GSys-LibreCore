@@ -208,10 +208,11 @@ def main():
         path.write_text(text.replace(old,target+' commit_ack_i[c]'))
     hart_dispatch=os.environ.get('REVIEW_RTL_HART_DISPATCH')=='1'
     if hart_dispatch:
-        path=source/'g6lc_ooo_dispatch.sv';text=path.read_text()
-        old='  if (CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_smt'
-        assert text.count(old)==1,'hart qualification guard site changed'
-        path.write_text(text.replace(old,'  if (CVA6Cfg.NrHarts > 2) begin : gen_err_ooo_smt'))
+        # T6a: the generic multi-hart guard is wrapped in G6LC_OOO_SMT_QUALIFY
+        # (the integration gate failed, so production still refuses); the hart
+        # cells build with that define instead of patching the guard away.
+        text=(source/'g6lc_ooo_dispatch.sv').read_text()
+        assert text.count('`ifndef G6LC_OOO_SMT_QUALIFY')==1,'hart qualification guard seam changed'
     fp_dispatch=os.environ.get('REVIEW_RTL_FP_DISPATCH')=='1'
     fp_zero_fault=os.environ.get('REVIEW_RTL_FP_ZERO_FAULT')=='1'
     fp_commit_fault=os.environ.get('REVIEW_RTL_FP_COMMIT_FAULT')=='1'
@@ -338,7 +339,12 @@ def main():
                              [(n,'DISPATCH_FP_COMMIT_FLUSH' if fp_commit_fault or (fp_zero_fault and n==27) else None)
                               for n in (24,25,27)])]
         if hart_dispatch:
-            configurations=[('dispatch','nh2',['-GHARTS=2'],[(26,None)])]
+            configurations=[('dispatch','nh2',['-GHARTS=2','-DG6LC_OOO_SMT_QUALIFY'],[(26,None)])]
+        # T6a qualification-build counterpart to the illegal cells: with the
+        # define, integer -GHARTS=2 must elaborate and run the hart scenario
+        # plus the standard negative battery.
+        if os.environ.get('REVIEW_RTL_LEGAL_SMT')=='1':
+            configurations=[('dispatch','legal-smt',['-GHARTS=2','-DG6LC_OOO_SMT_QUALIFY'],[(26,None)])]
         # MemDepPredEn=1 elaboration/liveness. Feedback is promoted to an error:
         # a settled combinational cycle is not evidence of a working predictor.
         if os.environ.get('REVIEW_RTL_MEMDEP')=='1':
@@ -352,6 +358,8 @@ def main():
             # expected message.
             illegal_kind=os.environ['REVIEW_RTL_ILLEGAL']
             assert illegal_kind in ('smt','fp')
+            # 'smt' is the generic multi-hart guard (gen_err_ooo_smt, no define);
+            # 'fp' is the single-hart FP guard (gen_err_ooo_fp).
             configurations=[('dispatch','illegal-'+illegal_kind,
                              ['-GHARTS=2'] if illegal_kind=='smt' else ['-GFPEN=1'],[])]
     results=[]
@@ -382,10 +390,9 @@ def main():
                 p=subprocess.run(strict_cmd,stdout=log,stderr=subprocess.STDOUT,timeout=180)
             text=(work/'verilate.log').read_text(errors='replace')
             # Matched on the guard's own text, so a reworded refusal fails here
-            # rather than silently passing on a different guard. Both messages
-            # were narrowed once Phase 4/5 landed the mechanisms: the reasons
-            # are now "IQ/ROB/LSQ are hart-blind" and "FP class implemented but
-            # unqualified", not "the mechanism does not exist".
+            # rather than silently passing on a different guard. The refusals
+            # are "multi-hart integration is unqualified" (T6a gate failed) and
+            # "FP class implemented but unqualified".
             expected=('multi-hart integration is unqualified' if illegal_kind=='smt'
                       else 'implemented but unqualified')
             refused=p.returncode!=0 and expected in text

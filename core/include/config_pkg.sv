@@ -983,7 +983,18 @@ package config_pkg;
     //    independent-reference comparison.
     // g6lc64_ooo_server sets OoOEn=1 with NrHarts=2 and RVF/RVD=1, so it trips
     // both deliberately. See architecture/out-of-order/README.md.
+    // Integer multi-hart OoO elaborates under the drained handoff (the thread
+    // selector switches only when the scoreboard and store queues are empty,
+    // asserted at the switch in cva6.sv as ooo_switch_drained), but the T6a
+    // integration gate failed: the protected dual-hart OpenSBI/HSM profile does
+    // not complete on g6lc64_smt2_ooo_int while its in-order twin does. The
+    // refusal therefore stays; G6LC_OOO_SMT_QUALIFY exists only for the
+    // qualification builds that investigate it. FP multi-hart is refused
+    // unconditionally pending hart-tagged lazy-FS (T6b).
+`ifndef G6LC_OOO_SMT_QUALIFY
     assert (!(Cfg.OoOEn && Cfg.NrHarts > 1));
+`endif
+    assert (!(Cfg.OoOEn && Cfg.NrHarts > 1 && Cfg.FpPresent));
 `ifndef G6LC_OOO_FP_QUALIFY
     // Single-hart FP stays illegal in production. G6LC_OOO_FP_QUALIFY exists
     // only for the T5 qualification build that produces the behavioural

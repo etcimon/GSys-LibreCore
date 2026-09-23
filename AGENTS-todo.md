@@ -77,7 +77,15 @@ next actions are superseded by the tranche exits.
   trace before any FP guard decision.
 - [ ] Confirm the smt2 anchor model's boot-vector replay on a single-hart directed ELF is hart 1's
   boot (dual-hart model artifact), not a redirect fault.
-- [ ] T6 per the plan file.
+- [ ] **T6a (OoO under the drained SMT2 handoff) — integration gate FAILED.** The protected
+  dual-hart OpenSBI/HSM profile times out on `g6lc64_smt2_ooo_int` (hart1 parked in WFI at
+  `0x8000f72e` after 458k retirements, hart0 spinning in M-mode) while the `OoOEn=0` overlay of the
+  same package passes strictDual (333,402 / 8,931,687). Every handoff is drained (witness silent), so
+  the loss is in hart-1 progress after `sbi_hart_start` (IPI/WFI wake under OoO?) — and two runs of
+  the same binary differing only in `+smt_flow_trace` booted with different lottery winners.
+  Multi-hart OoO stays refused behind `G6LC_OOO_SMT_QUALIFY`. Next: flow-traced run to the hang
+  with per-hart retirement streams split, compared against the in-order twin.
+- [ ] T6b mixed residency per the plan file (after T6a).
 
 ## Active stability-first review — authoritative next change sets
 
