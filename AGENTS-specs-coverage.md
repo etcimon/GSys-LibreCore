@@ -43,11 +43,12 @@ physical or guarded-feature status advances from qualification-tooling changes a
 
 ## OoO with two harts under the drained handoff (2026-09-22)
 
-**Not qualified; refusal retained.** The two-hart leaf cells pass and every observed hart switch is
-drained, but the protected dual-hart firmware profile does not complete on the out-of-order backend
-while it completes on the in-order twin of the same integer-only package. The failing progress of
-the non-boot hart and a run-to-run lottery divergence are the open items; the protected
-configuration is untouched and its anchor model byte-identical.
+**Integration gate passed (2026-09-23); production refusal retained pending the guard decision.**
+The two-hart leaf cells pass, every observed hart switch is drained, and — after fixing two defects
+that only out-of-order issue can expose (a same-cycle replay/mispredict that armed the fetch target
+filter, and a device load waiting on younger speculative stores) — the protected dual-hart firmware
+profile completes strictDual on the out-of-order backend, 16% faster than in order. The protected
+in-order configuration is untouched in behaviour: its anchor is exact on the rebuilt model.
 
 ## FP OoO behaviour and the fetch-target-queue replay defect (2026-09-21)
 

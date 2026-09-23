@@ -82,6 +82,12 @@ module load_unit
     input logic page_offset_matches_i,
     // Store buffer is empty - STORE_UNIT
     input logic store_buffer_empty_i,
+    // Committed store queue is empty (only speculative, hence younger, stores
+    // may remain) - STORE_UNIT. Under OoO the non-idempotent gate waits on this
+    // rather than on the whole buffer: a younger store that issued early sits in
+    // the speculative queue until *its* commit, which cannot precede the older
+    // load's, so waiting for it would deadlock.
+    input logic no_st_pending_i,
     // R3a: STQ store→load data forward - STORE_UNIT
     input logic                        st_fwd_valid_i,
     input logic [CVA6Cfg.XLEN-1:0]     st_fwd_data_i,
@@ -276,7 +282,8 @@ module load_unit
       CVA6Cfg, {{52 - CVA6Cfg.PPNW{1'b0}}, dtlb_ppn_i, 12'd0}
   );
   assign not_commit_time = commit_tran_id_i != lsu_ctrl_i.trans_id;
-  assign inflight_stores = (!dcache_wbuffer_not_ni_i || !store_buffer_empty_i);
+  assign inflight_stores = !dcache_wbuffer_not_ni_i ||
+                           (CVA6Cfg.OoOEn ? !no_st_pending_i : !store_buffer_empty_i);
   assign stall_ni = (inflight_stores || not_commit_time) && (paddr_ni && CVA6Cfg.NonIdemPotenceEn);
 
   // R3a: STQ data forward covers this load's bytes (lsu_ctrl.be already sized/aligned)

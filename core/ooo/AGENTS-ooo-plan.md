@@ -185,7 +185,25 @@ Per-hart commit heads (scoreboard/ROB), hart-tagged IQ/ROB/LSQ, per-hart STQ cre
 with per-hart floors, per-hart cancellation; drained handoff retired only after peer squash/trap
 isolation negatives pass; Phase 6 adaptive policy stays frozen. Guard removal is a separate decision.
 
-### T6a status (2026-09-22): OoO under the drained handoff — integration gate FAILED
+### T6a status (2026-09-23): integration gate PASSED after two OoO-only fixes
+
+The 14M-cycle flow trace located the failure: hart0's last real retirement at cycle 10,584,092 in
+`prints`, then an empty scoreboard (`issue_ptr == commit_ptr`, `decoded=00`) and a garbage npc.
+Two defects, both invisible in order: (1) a memory-order replay at commit and a younger branch's
+stale-data mispredict resolved in the same cycle; the commit source won `arch_src` but the
+mispredict still armed the target filter, so the replay window was rejected and fetch resumed at
+the squashed target, skipping `0x8000a10e–0x8000a120` (`frontend.sv`: `is_mispredict` qualified
+with `!misp_outranked`; `g6lc_fetch_hold` +1 property, PASS 8 asserts, gate-removed mutation fails
+at frame 3); (2) a device load at the commit head waited for the *whole* store buffer, which under
+OoO holds younger speculative stores until their own commit — a deadlock on the first UART poll
+with a speculative store behind it (`load_unit.sv`: OoO waits on the committed queue only;
+load leaf scenarios 14/15, 8/8, in-order unchanged 60/60). With both: the protected dual-hart
+profile on `g6lc64_smt2_ooo_int` **passes strictDual in 10,696,498 cycles** (8,792,612 /
+465,543; in order 12,765,628), `ooo_switch_drained` silent, and the protected in-order anchor is
+**exact** (`f10a5a60…`, 12,765,628, 333,635 / 8,932,406, control attested). Guard decision for
+integer multi-hart OoO is now the user's; the `G6LC_OOO_SMT_QUALIFY` seam stays until then.
+
+#### Earlier T6a record (2026-09-22): integration gate FAILED (superseded above)
 
 Design: with `drain_ready = sb_empty && no_st_pending && !flush` every switch happens with the
 scoreboard (hence IQ/ROB/LSQ/CSR table/store buffer) empty and `g6lc_rename` already keeps per-hart

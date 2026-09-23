@@ -207,6 +207,9 @@ module tb_g6lc_review_load_cancel;
   parameter bit OOO=1;
   parameter int NLOAD=4;
   parameter bit MMU=0;
+  // NI=1 declares the fixture's (zero) physical page non-idempotent so the
+  // commit-head gate of a device load can be exercised.
+  parameter bit NI=0;
   function automatic config_pkg::cva6_cfg_t configuration();
     config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
     c.XLEN=64; c.VLEN=64; c.PLEN=56; c.PPNW=44; c.IS_XLEN64=1; c.XLEN_ALIGN_BYTES=3;
@@ -214,6 +217,10 @@ module tb_g6lc_review_load_cancel;
     c.DcacheIdWidth=2; c.DCACHE_INDEX_WIDTH=12; c.DCACHE_TAG_WIDTH=44;
     c.OoOEn=OOO; c.MmuPresent=MMU; c.SpeculativeSb=1; c.SuperscalarEn=1;
     c.TvalEn=1;
+    if(NI)begin
+      c.NonIdemPotenceEn=1; c.NrNonIdempotentRules=1;
+      c.NonIdempotentAddrBase[0]=64'h0; c.NonIdempotentLength[0]=64'h1000_0000;
+    end
     return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
@@ -235,6 +242,7 @@ module tb_g6lc_review_load_cancel;
   } req_t;
   typedef struct packed {logic data_gnt,data_rvalid; logic [1:0] data_rid; logic [63:0] data_rdata;} resp_t;
   logic clk=0,rst_n=0,flush=0,in_valid=0,pop,ready,wb,match_page=0,dtlb_hit=1,fwd_valid=0;
+  logic nsp=1;  // committed store queue empty (speculative stores may remain)
   logic [7:0] cancel='0;
   logic [2:0] tid;
   logic [63:0] result;
@@ -262,7 +270,7 @@ module tb_g6lc_review_load_cancel;
     .translation_req_o(),.vaddr_o(),.tinst_o(),.hs_ld_st_inst_o(),.hlvx_inst_o(),
     .paddr_i(56'h80001000),.ex_i(ex_in),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
     .page_offset_o(),.load_paddr_o(),.load_paddr_valid_o(),.load_trans_id_o(),
-    .page_offset_matches_i(match_page),.store_buffer_empty_i(1'b0),
+    .page_offset_matches_i(match_page),.store_buffer_empty_i(1'b0),.no_st_pending_i(nsp),
     .st_fwd_valid_i(fwd_valid),.st_fwd_data_i(64'h12345666),.st_fwd_be_i(8'hff),
     .commit_tran_id_i('0),.req_port_i(resp),.req_port_o(req),
     .dcache_wbuffer_not_ni_i(1'b1),.dcache_wbuffer_empty_i(1'b0));
@@ -387,6 +395,26 @@ module tb_g6lc_review_load_cancel;
           tick();resp.data_rvalid=0;#2;
         end
         if(seen_ex!==!negative)$fatal(1,"LOAD_MISALIGN_EXCEPTION seen=%b killed=%b",seen_ex,killed);
+      end
+      // Non-idempotent load at the commit head while the store buffer is NOT
+      // empty. The speculative queue only ever holds stores younger than the
+      // head, so under OoO the device read must proceed once the committed
+      // queue has drained (nsp=1); waiting for the whole buffer deadlocks,
+      // because those younger stores commit only after this load. Committed
+      // stores still pending (nsp=0, the negative arm) must keep it waiting.
+      // The in-order gate is untouched: it still waits for the whole buffer.
+      // 14: committed queue drained (nsp=1): OoO requests, in-order still waits.
+      // 15: committed stores pending (nsp=0): nobody requests.
+      // The negative arm inverts the expectation.
+      14,15:begin
+        if(!NI)$fatal(1,"LOAD_NI_SCENARIO requires NI=1");
+        // The IDLE request is speculative and is killed once the translation
+        // shows a device page, so the observable is an unkilled tag phase.
+        nsp=(scenario==14);resp.data_gnt=1;offer(0,LBU);
+        killed=0;
+        repeat(8)begin #2;if(req.tag_valid && !req.kill_req)killed=1;tick();end
+        if(killed!==((OOO && nsp) ^ negative))$fatal(1,"LOAD_NI_HEAD_GATE tag=%b ooo=%0d nsp=%b",killed,OOO,nsp);
+        $display("LOAD_CANCEL_PASS scenario=%0d ooo=%0d ni=1 requested=%b",scenario,OOO,killed);$finish;
       end
       default:$fatal(1,"LOAD_CANCEL_SCENARIO");
     endcase

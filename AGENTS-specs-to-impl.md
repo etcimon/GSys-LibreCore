@@ -45,6 +45,27 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## Outranked branch resolution (2026-09-23, T6a finding)
+
+Control-flow precision (`#instr_fetch`, exception/redirect ordering): `core/fetch_B/frontend.sv`
+qualifies `is_mispredict` with `!misp_outranked` (exception, eret, or PC_COMMIT for the active
+hart in the same cycle). Such a branch is younger than the architectural redirect and squashed by it;
+previously its resolution still armed the mispredict target filter (`bp_pend_q/bp_tgt_q`), which then
+rejected the redirect's window and resumed fetch at the squashed branch's target, dropping the
+instructions between the replayed load and the branch. The commit-side redirect already outranked it
+in `arch_src`; only the side effects were unqualified. In-order configurations never see the two in
+one cycle. `g6lc_fetch_hold_props.sv` gains the corresponding I8 property.
+
+## Non-idempotent load gate under OoO (2026-09-23, T6a finding)
+
+PMA non-idempotent accesses (`#pma`, load ordering against outstanding stores): `core/load_unit.sv`
+gains `no_st_pending_i` (the store buffer's committed queue is empty) and, under `OoOEn`, gates a
+device load at the commit head on that instead of on `store_buffer_empty_i`; the D$ write-buffer
+NI check is unchanged and the in-order gate is bit-identical. Rationale: with out-of-order store
+issue a younger store can occupy the speculative queue before the older device load executes, and
+it only leaves at its own commit — after the load's — so the old gate deadlocked. Wired in
+`core/load_store_unit.sv` from the store unit's `no_st_pending_o`.
+
 ## OoO under the drained SMT2 handoff (2026-09-22, T6a, guards retained)
 
 `core/cva6.sv` gains the translate_off witness `ooo_switch_drained` (a hart switch with OoO state

@@ -623,6 +623,7 @@ module load_store_unit
       .load_trans_id_o      (load_trans_id),
       .page_offset_matches_i(page_offset_matches),
       .store_buffer_empty_i (store_buffer_empty),
+      .no_st_pending_i      (no_st_pending_o),
       .st_fwd_valid_i       (st_fwd_valid),
       .st_fwd_data_i        (st_fwd_data),
       .st_fwd_be_i          (st_fwd_be),

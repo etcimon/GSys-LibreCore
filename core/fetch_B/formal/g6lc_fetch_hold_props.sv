@@ -294,11 +294,34 @@ module g6lc_fetch_hold_props #(
     end
   end
 
+  // --- I8 safety: an outranked mispredict leaves no trace ---------------------
+  // A branch resolving in the cycle a commit-side redirect (or trap/eret) fires
+  // is younger than that redirect and squashed by it. It must not arm the
+  // mispredict target filter: absent a same-cycle prediction (the only other
+  // writer of bp_tgt_q), the filter target is unchanged the cycle after.
+  logic misp_outranked_q;
+  logic [VLEN-1:0] misp_tgt_before_q;
+  always_ff @(posedge clk_i) begin
+    // Same hart qualification as the frontend: a resolution for the other hart
+    // is not a redirect here, and PC_COMMIT reseeds only the active hart.
+    misp_outranked_q <= rst_ni && resolved_branch_i.valid && resolved_branch_i.is_mispredict &&
+                        rb_hart_id_i == smt_hart_i &&
+                        ((set_pc_commit_i && commit_hart_i == smt_hart_i) || ex_valid_i || eret_i) &&
+                        !dut.bp_fire;
+    misp_tgt_before_q <= dut.bp_tgt_q;
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && misp_outranked_q) begin
+      assert (dut.bp_tgt_q == misp_tgt_before_q);
+    end
+  end
+
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
       cover (hold_now);
       cover (hold_prev_q && !hold_now && hit_prev_q);
       cover (ex_valid_i);
+      cover (misp_outranked_q);
     end
   end
 `endif

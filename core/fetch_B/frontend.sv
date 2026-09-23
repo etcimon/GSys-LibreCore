@@ -448,7 +448,18 @@ module frontend
 
   assign resolution_for_active = g6lc_fetch_pkg::redirect_for_hart(
       SmtEn, resolved_branch_i.valid, 8'(resolved_branch_i.hart_id), 8'(smt_hart_i));
-  assign is_mispredict = resolution_for_active && resolved_branch_i.is_mispredict;
+  // A branch that resolves in the cycle an older architectural redirect fires
+  // (trap, eret, or a commit-side refetch such as the memory-order replay) is
+  // younger than that redirect and squashed by it. Its resolution must not arm
+  // the mispredict target filter (bp_pend/bp_tgt) or kill the redirect's
+  // fetch: with out-of-order issue the two do coincide (the replayed load's
+  // stale value fed the branch), and the armed filter then rejected the
+  // replay window and resumed at the squashed branch's target, skipping the
+  // instructions in between. In order the two never meet, so this is inert.
+  logic misp_outranked;
+  assign misp_outranked = ex_valid_i | eret_i |
+      g6lc_fetch_pkg::commit_for_hart(SmtEn, set_pc_commit_i, 8'(commit_hart_i), 8'(smt_hart_i));
+  assign is_mispredict = resolution_for_active && resolved_branch_i.is_mispredict && !misp_outranked;
 
   // Classic EX mispredict only. A matching taken Jump must not reseed the NPC:
   // re-fetching a call pushes the RAS twice.

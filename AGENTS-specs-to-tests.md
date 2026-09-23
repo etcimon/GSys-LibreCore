@@ -63,6 +63,30 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## Outranked branch resolution (2026-09-23, T6a finding)
+
+`g6lc_fetch_hold` (bmc, live frontend, g6lc64_smt2 geometry) gains: a valid mispredict for the
+active hart in a cycle with `ex_valid_i`, `eret_i`, or `set_pc_commit_i` for that hart, and no
+same-cycle prediction, leaves `bp_tgt_q` unchanged the next cycle. PASS with 8 asserts
+(`t6a-hold-outranked-v3`); the gate removed from `frontend.sv` gives a counterexample at frame 3
+(`t6a-hold-outranked-mut-v3`). The originating evidence is the 14M-cycle flow trace of the dual-hart
+profile: at cycle 10,584,078 `retire … pc=0x8000a10e drop=1 replay=1` and
+`control flush=1 … mispredict=1 target=0x8000a124` in the same cycle, followed by retirements from
+`0x8000a124` — the seven instructions from the replayed load to the branch were never re-executed;
+139 earlier writebacks onto dead slots (`wb … pc=0x8000a116 issued=0`) were the same replay's
+in-flight load returning late, harmless, and the in-order twin shows none.
+
+## Non-idempotent load gate under OoO (2026-09-23, T6a finding)
+
+`tb_g6lc_review_load_cancel` gains `NI=1` (the fixture's page declared non-idempotent) and scenarios
+14/15 (`FAULT_REVIEW_NI=1`): a device load at the commit head with a non-empty store buffer requests
+(unkilled tag phase) under OoO only when the committed queue is drained, never while committed stores
+are pending, and never in order while the buffer is non-empty; negatives invert each expectation.
+8/8 records on `ooo{1,0}-loads4-mmu1`; the 60-record load leaf is unchanged. The mechanism was read
+off the 14M-cycle flow trace of the dual-hart profile (`t6a-flow14m-ooo-int-v1`): last real
+retirement of hart0 at cycle 10,584,092, PC `0x8000a130` in `prints`, then no retirement and no drop
+for 3.4M cycles, hart1 asleep in `sbi_hsm_hart_wait` since cycle 1,282,010.
+
 ## OoO under the drained SMT2 handoff (2026-09-22, T6a)
 
 Two-hart leaf cells (`REVIEW_RTL_RENAME_SMT`, `REVIEW_RTL_RENAME_FP_SMT`, dispatch `legal-smt` with

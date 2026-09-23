@@ -102,7 +102,10 @@ def run_leaf():
     (out / 'inputs.json').write_text(json.dumps(pins, indent=2))
     env = dict(os.environ, VERILATOR_ROOT=str(runtime))
     records = []
-    for ooo, nload, mmu in ([(1, 4, 0)] if before or mutation else [(1, 4, 1), (0, 4, 1)] if misalign_mutation else [(1, 2, 0), (1, 4, 1), (0, 4, 1)]):
+    # Non-idempotent commit-head gate (T6a finding): the device load at the
+    # head must not wait for younger speculative stores under OoO.
+    ni_gate = os.environ.get('FAULT_REVIEW_NI') == '1'
+    for ooo, nload, mmu in ([(1, 4, 0)] if before or mutation else [(1, 4, 1), (0, 4, 1)] if misalign_mutation or ni_gate else [(1, 2, 0), (1, 4, 1), (0, 4, 1)]):
         work = out / f'ooo{ooo}-loads{nload}-mmu{mmu}'
         work.mkdir()
         model = work / 'model'
@@ -110,7 +113,7 @@ def run_leaf():
         command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1',
                    '-Wno-fatal', '-Werror-LATCH', '-Werror-UNOPTFLAT', *ports,
                    '/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt',
-                   '--top-module', top, f'-GOOO={ooo}', f'-GNLOAD={nload}', f'-GMMU={mmu}',
+                   '--top-module', top, f'-GOOO={ooo}', f'-GNLOAD={nload}', f'-GMMU={mmu}', f'-GNI={int(ni_gate)}',
                    '--Mdir', str(model), '-o', 'review-test',
                    *[str(source / p.name) for p in paths], str(source / 'bench.sv')]
         for name, cmd in [('verilate', command), ('build', ['make', '-C', str(model), '-f', f'V{top}.mk', '-j4'])]:
@@ -122,7 +125,7 @@ def run_leaf():
         deps = '\n'.join(p.read_text() for p in model.glob('*.d'))
         if str(runtime / 'include/verilated_funcs.h') not in deps:
             raise ValueError('compiled runtime identity missing')
-        scenarios = [1] if mutation else [13] if misalign_mutation else [0, 4, 6] if before else list(range(14)) if ooo and mmu else list(range(8)) + [10, 11] if ooo else [2, 3, 4, 5, 6, 13]
+        scenarios = [1] if mutation else [13] if misalign_mutation else [14, 15] if ni_gate else [0, 4, 6] if before else list(range(14)) if ooo and mmu else list(range(8)) + [10, 11] if ooo else [2, 3, 4, 5, 6, 13]
         for case in scenarios:
             for negative in ([False] if before or mutation or misalign_mutation else [False, True]):
                 cmd = [str(model / 'review-test'), f'+scenario={case}'] + (['+oracle_negative'] if negative else [])
@@ -132,6 +135,7 @@ def run_leaf():
                 expected = ('LOAD_CANCEL_STALE_REQUEST' if (before and case == 0) or mutation else
                             {'kill': 'misaligned load buffer entry did not complete with LD_ADDR_MISALIGNED and a killed request',
                              'ex': 'LOAD_MISALIGN_DATA_COMPLETION'}[misalign_mutation] if misalign_mutation else
+                            'LOAD_NI_HEAD_GATE' if negative and case in (14, 15) else
                             'LOAD_MISALIGN_EXCEPTION' if negative and case == 13 else
                             'LOAD_CANCEL_RESPONSE' if negative else None)
                 matched = (result.returncode != 0 and expected in text and 'LOAD_CANCEL_PASS' not in text) if expected else (
