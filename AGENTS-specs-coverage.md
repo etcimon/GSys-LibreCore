@@ -43,7 +43,8 @@ physical or guarded-feature status advances from qualification-tooling changes a
 
 ## OoO with two harts under the drained handoff (2026-09-22)
 
-**Integration gate passed (2026-09-23); production refusal retained pending the guard decision.**
+**Integration gate passed and the refusal lifted (2026-09-23): `g6lc64_smt2_ooo_int` is a production
+configuration.** The single-hart FP guard is kept by decision.
 The two-hart leaf cells pass, every observed hart switch is drained, and — after fixing two defects
 that only out-of-order issue can expose (a same-cycle replay/mispredict that armed the fetch target
 filter, and a device load waiting on younger speculative stores) — the protected dual-hart firmware

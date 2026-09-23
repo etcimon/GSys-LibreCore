@@ -226,6 +226,52 @@ a run-to-run divergence that has to be understood before the hang itself. Guards
 (`G6LC_OOO_SMT_QUALIFY` seam only); the in-order anchor model is byte-identical to the last exact
 anchor (`5608ef96…`) so the anchor result carries over; verify lint 8/54 and synth 32/5 unchanged.
 
+### T6a closure (2026-09-23)
+
+Guard lifted for integer multi-hart OoO (user decision): `check_cfg` keeps only the FP leg,
+`gen_err_ooo_smt` is gone, `g6lc64_smt2_ooo_int` is a production package. The single-hart FP guard
+stays (user decision). The SB=16 stage-9 stall was a third FTQ-path defect (control-flow hold armed
+by an unpushed prediction) — fixed, pinned in the FTQD=4 token proof, `FtqDepth=0` byte-identical.
+
+## T6b — mixed-resident SMT2: contract (design, 2026-09-23)
+
+**Goal.** Both harts hold work in the OoO backend at once; the thread selector no longer waits for
+`drain_ready` (the handoff becomes a fetch-slot policy, not a pipeline drain). **What must become
+hart-aware, and how:**
+
+| structure | today (drained) | T6b ownership rule |
+|---|---|---|
+| scoreboard / ROB | one `commit_pointer`, entries carry `hart_id` but the head is global | one circular window per hart (`commit_ptr[h]`, `issue_ptr[h]`) over a statically split entry range `[h*N/2, (h+1)*N/2)`; age key `{hart, dist_from_hart_head}`; cross-hart age is *undefined* and never compared — every age comparison site (`ooo_age_older/dist`, six sites from T1) receives entries of one hart only, asserted |
+| IQ | hart-blind stationary entries, one age matrix | entries carry `hart`; the age matrix is masked per hart (`older_t[e][j] &= same_hart[e][j]`); select stays one cone (oldest-ready across both harts is allowed to be *any* ready entry of the other hart — fairness, not correctness); wakeup is by physical register, already hart-disjoint via rename |
+| rename / PRF | per-hart maps, one pool, `flush_hart_i` tied off | `flush_hart_i[h]` driven by the per-hart recovery (below); per-hart **floors**: the pool refuses an allocation that would leave fewer than `PrfFloor` free registers for the *other* hart (`PRF_N - 31*NH - floors` is the shared slack); a hart at its floor stalls dispatch, never the peer |
+| LSQ / store buffer | hart-blind, program order by tid distance from the one head; speculative queue slots reserved by LSQ store entries | LSQ entries carry `hart`; the unresolved-store mask, alias scan and forwarding are computed *within the hart* (a load never waits on, forwards from, or replays for the peer's stores — different address spaces are not assumed, so cross-hart same-address ordering is the memory model's, i.e. none until commit); the speculative store queue gets **per-hart credits** (`DEPTH_SPEC/NH` each) so one hart's unresolved stores cannot starve the peer's reservations; the committed queue drains in commit order across harts (commit is still one stream) |
+| CSR table, FU owner tables | by tid | unchanged: tid is unique across harts (disjoint ranges) |
+| cancellation / recovery | `flush_i` is global; branch mispredict cancels by tid range from the resolving branch | `flush` becomes per hart: a trap, replay or mispredict of hart h squashes only entries with `hart==h` (mask = `hart_of[e]==h`), restores rename for h alone (`flush_hart_i[h]`), and redirects only h's fetch stream; the frontend already keys redirects by hart (`redirect_for_hart`, `commit_for_hart`) |
+| frontend | one active stream, PC bank per hart | two live streams need their own `bp_pend/redirect_pend` state per hart or a strict "one hart owns fetch per cycle with its own filter state" rule — T6b keeps **one fetch slot per cycle** (round-robin / policy) and duplicates only the redirect/target-filter registers per hart |
+| memdep predictor | PC-indexed, shared | index with `{hart, pc}` or flush on hart switch — choose `{hart,pc}` hashing (no correctness dependence, so perf-only) |
+
+**Oracles before RTL (lead-authored):** (1) dispatch leaf `HARTS=2` scenarios: two harts dispatch
+interleaved; a mispredict of hart 0 squashes only hart-0 entries (hart-1 IQ/ROB/LSQ entries, PRF
+mappings and store reservations untouched — checked through committed results); a trap on hart 1
+likewise; a hart-0 load never forwards from a hart-1 store to the same address and never replays for
+it; store-credit exhaustion by hart 0 leaves hart 1's reservation admissible; PRF floor: hart 0
+allocating to the floor leaves hart 1 dispatching. (2) LSQ leaf: same-address stores from both harts
+resident, each hart's loads see only their own; unresolved-store mask per hart. (3) Formal: the age
+namespace proof extended with a hart bit — `ooo_age_older` is never evaluated on entries of
+different harts (assume-guarantee on the callers). (4) Firmware: the protected dual-hart profile
+with the drain gate *off* (`SmtDrainedHandoff=0` config bit, default 1) must pass strictDual; plus
+a directed two-hart probe where one hart runs a mispredict/replay storm while the other runs a
+Spike-compared checksum — the checksum hart must be cycle-insensitive and value-exact. (5)
+Negatives: each isolation rule mutated (mask dropped) must be caught by (1)/(4).
+
+**Exit.** Both harts perform checked work concurrently (4 passes), all isolation negatives caught,
+anchor exact with the drain gate on (bit-identical path), lint/synth at baseline, FO4 screen within
+budget for the per-hart masks (they enter the select cone only as an AND on the age matrix).
+
+**Slices.** T6b-1 hart-tagged scoreboard windows + per-hart flush (no policy change — drain gate
+still on, so behaviour identical; leaf oracles only). T6b-2 LSQ/store credits per hart. T6b-3 PRF
+floors. T6b-4 frontend per-hart filter state and the `SmtDrainedHandoff=0` policy; firmware gate.
+
 ## Deferred
 
 Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,

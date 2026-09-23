@@ -63,6 +63,14 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## Integer multi-hart OoO legal (2026-09-23, T6a closure)
+
+With the guard gone: rename nh2 10/10, dispatch `legal-smt` (no define) 14/14, `illegal-smt` now
+the FP multi-hart refusal ('more than one hart is unqualified') and `illegal-fp` both refused; the
+define-free `g6lc64_smt2_ooo_int` build (`1974a1aa…`) passes the protected dual-hart profile
+strictDual in 10,696,498 cycles (8,792,612 / 465,543) — identical to the qualification build; lint
+8/54 and synth 32/5 at baseline.
+
 ## Control-flow hold armed only by a pushed target (2026-09-23, SB=16 finding)
 
 `g6lc_fetch_token_props.sv` gains, for `FTQD != 0`, the pin "a prediction that could not push its

@@ -85,8 +85,13 @@ next actions are superseded by the tranche exits.
   `misp_outranked`; hold proof +1 property, mutation caught), and a device load at the commit head
   waited on younger speculative stores (`load_unit.sv` OoO gate on `no_st_pending`; load leaf 14/15).
   Dual-hart profile strictDual in 10,696,498 cycles on `g6lc64_smt2_ooo_int`; anchor exact.
-- [ ] **Guard decision:** integer multi-hart OoO (`g6lc64_smt2_ooo_int`) still refused behind
-  `G6LC_OOO_SMT_QUALIFY`; the S3 integration gate is met — lifting it is the user's call.
+- [x] **Guard decisions (2026-09-23):** integer multi-hart OoO refusal lifted — `g6lc64_smt2_ooo_int`
+  is a production package (define-free build passes the dual-hart profile identically); single-hart
+  OoO+FP guard kept (owner mutation unobservable at core level). FP multi-hart stays refused.
+- [ ] **T6b mixed-resident SMT2:** contract written in `core/ooo/AGENTS-ooo-plan.md` (per-hart
+  scoreboard windows and age namespaces, per-hart flush, LSQ/store credits and PRF floors per hart,
+  per-hart frontend filter state, `SmtDrainedHandoff` policy bit; oracles and exits listed). Slices
+  T6b-1..4 not started.
 - [ ] T6b mixed residency per the plan file (after T6a).
 
 ## Active stability-first review — authoritative next change sets

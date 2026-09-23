@@ -45,6 +45,13 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## Integer multi-hart OoO legal (2026-09-23, T6a closure)
+
+`core/include/config_pkg.sv` `check_cfg` keeps only `!(OoOEn && NrHarts > 1 && FpPresent)`;
+`core/ooo/g6lc_ooo_dispatch.sv` drops `gen_err_ooo_smt` and keeps `gen_err_ooo_fp_mh`;
+`core/include/g6lc64_smt2_ooo_int_config_pkg.sv` is a production package. The drained handoff is
+the structural exclusion of mixed residency until T6b.
+
 ## Control-flow hold armed only by a pushed target (2026-09-23, SB=16 finding)
 
 Instruction-stream liveness (`#instr_fetch`): in `core/fetch_B/frontend.sv` (FTQ path only) the

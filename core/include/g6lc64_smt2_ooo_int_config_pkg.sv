@@ -8,14 +8,13 @@
 // Original Author: Jean-Roch COULON - Thales
 // U6.1 experimental SMT2 profile, integer-only OoO (T6a) — Etienne Cimon 2026
 //
-// QUALIFICATION-ONLY package for the T6a investigation: identical to
-// g6lc64_smt2 except OoOEn=1, RVF/RVD=0 (FpPresent computes to 0) and an
-// explicit LsqStoreEntries=4 (the speculative store queue is four deep without
-// DeepSpecEn). It elaborates only with +define+G6LC_OOO_SMT_QUALIFY: the T6a
-// integration gate failed (the protected dual-hart OpenSBI/HSM profile does
-// not complete on this package while the OoOEn=0 overlay of it passes), so
-// the check_cfg / dispatch refusals of multi-hart OoO stay in production.
-// FP multi-hart OoO is refused unconditionally pending T6b lazy-FS.
+// Dual-thread coarse-grain SMT profile with the integer out-of-order backend:
+// identical to g6lc64_smt2 except OoOEn=1, RVF/RVD=0 (FpPresent computes to 0)
+// and an explicit LsqStoreEntries=4 (the speculative store queue is four deep
+// without DeepSpecEn). Qualified 2026-09-23 (T6a): the protected dual-hart
+// OpenSBI/HSM profile completes strictDual on it in 10,696,498 cycles (the
+// in-order g6lc64_smt2 anchor takes 12,765,628) with every hart switch
+// drained. FP multi-hart OoO is refused pending T6b lazy-FS.
 // Default production packages keep NrHarts=1 (identity path).
 
 // ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
