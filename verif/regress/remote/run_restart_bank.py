@@ -54,7 +54,8 @@ def main():
         wrapper = source / 'pc_bank_synth.sv'
         wrapper.write_text('''module pc_bank_synth(
   input logic clk_i, rst_ni, active_hart_i, switch_i, redirect_valid_i, redirect_hart_i,
-  input logic [63:0] boot_addr_i, redirect_pc_i,
+  input logic redirect2_valid_i, redirect2_hart_i,
+  input logic [63:0] boot_addr_i, redirect_pc_i, redirect2_pc_i,
   input logic [1:0] retire_valid_i, retire_hart_i,
   input logic [1:0][63:0] retire_pc_i,
   output logic [63:0] npc_restore_o,

@@ -201,14 +201,19 @@ package g6lc_fetch_pkg;
   localparam logic [3:0] SRC_COMMIT  = 4'd4;
   localparam logic [3:0] SRC_RESTORE = 4'd5;
   localparam logic [3:0] SRC_MISP    = 4'd6;
+  // T6b-2a: peer-hart flush restart of the active fetch hart (mixed residency
+  // only) — below COMMIT, above debug/restore/mispredict.
+  localparam logic [3:0] SRC_PEER    = 4'd7;
 
-  // I8: exception > eret > pc-commit > debug > SMT restore > resolve.
-  // Restore must not outrank trap (post-pre-ladder I4y). en_restore const-folds.
+  // I8: exception > eret > pc-commit > peer restart > debug > SMT restore >
+  // resolve. Restore must not outrank trap (post-pre-ladder I4y).
+  // en_restore const-folds; peer is constant-0 on drained configurations.
   function automatic logic [3:0] arch_src_sel(
       input logic en_restore,
       input logic restore,
       input logic debug_en,
       input logic commit,
+      input logic peer,
       input logic ex,
       input logic eret,
       input logic misp
@@ -216,6 +221,7 @@ package g6lc_fetch_pkg;
     if (ex) arch_src_sel = SRC_EX;
     else if (eret) arch_src_sel = SRC_ERET;
     else if (commit) arch_src_sel = SRC_COMMIT;
+    else if (peer) arch_src_sel = SRC_PEER;
     else if (debug_en) arch_src_sel = SRC_DEBUG;
     else if (en_restore && restore) arch_src_sel = SRC_RESTORE;
     else if (misp) arch_src_sel = SRC_MISP;

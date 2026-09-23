@@ -21,6 +21,14 @@ module g6lc_smt_pc_bank
     input logic redirect_valid_i,
     input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] redirect_hart_i,
     input logic [CVA6Cfg.VLEN-1:0] redirect_pc_i,
+    // T6b-2a: second redirect write — the peer-hart restart on a full flush
+    // (or an inactive hart's mispredict) lands here so the faulting hart's
+    // own commit-side redirect on the primary port is not lost. The two ports
+    // always target different harts by construction; constant-0 when
+    // SmtDrainedHandoff or NrHarts==1.
+    input logic redirect2_valid_i,
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] redirect2_hart_i,
+    input logic [CVA6Cfg.VLEN-1:0] redirect2_pc_i,
     input logic [CVA6Cfg.NrCommitPorts-1:0] retire_valid_i,
     input logic [CVA6Cfg.NrCommitPorts-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] retire_hart_i,
     input logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.VLEN-1:0] retire_pc_i,
@@ -45,7 +53,11 @@ module g6lc_smt_pc_bank
     assign restore_o     = 1'b0;
     assign outgoing_hart_o = '0;
     logic _unused_alt;
-    assign _unused_alt = npc_alt_valid_i | (|npc_alt_i);
+    assign _unused_alt = npc_alt_valid_i | (|npc_alt_i) | redirect_valid_i |
+        (|redirect_hart_i) | (|redirect_pc_i) | redirect2_valid_i |
+        (|redirect2_hart_i) | (|redirect2_pc_i) | (|retire_valid_i) |
+        (|retire_hart_i) | (|retire_pc_i) | npc_live_valid_i | (|npc_live_i) |
+        switch_i | active_hart_i[0];
   end else begin : gen_banked
     logic [NH-1:0][CVA6Cfg.VLEN-1:0] npc_bank_q;
     logic [HID_W-1:0] prev_hart_q;
@@ -74,6 +86,10 @@ module g6lc_smt_pc_bank
           if (retire_valid_i[p]) npc_bank_q[retire_hart_i[p]] <= retire_pc_i[p];
         if (redirect_valid_i)
           npc_bank_q[redirect_hart_i] <= redirect_pc_i;
+        // T6b-2a: peer restart / inactive-hart mispredict. Targets a
+        // different hart than the primary redirect by construction.
+        if (redirect2_valid_i)
+          npc_bank_q[redirect2_hart_i] <= redirect2_pc_i;
 `else
         if (switch_i) begin
           if (npc_alt_valid_i && |npc_alt_i)

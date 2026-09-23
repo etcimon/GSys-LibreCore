@@ -73,7 +73,11 @@ module g6lc_fetch_hold_props #(
     input logic smt_restore_i,
     input logic [VLEN-1:0] smt_npc_restore_i,
     input logic [HARTW-1:0] smt_hart_i,
-    input logic [HARTW-1:0] commit_hart_i
+    input logic [HARTW-1:0] commit_hart_i,
+    // T6b-2a: peer-hart flush restart of the active hart (SRC_PEER), a free
+    // input here like every other redirect source.
+    input logic peer_restart_valid_i,
+    input logic [VLEN-1:0] peer_restart_pc_i
 );
 
 `ifdef FORMAL
@@ -198,6 +202,8 @@ module g6lc_fetch_hold_props #(
       .smt_hart_i,
       .smt_restore_i,
       .smt_npc_restore_i,
+      .peer_restart_valid_i,
+      .peer_restart_pc_i,
       .commit_hart_i,
       .icache_dreq_i,
       .icache_dreq_o,
@@ -244,7 +250,8 @@ module g6lc_fetch_hold_props #(
     flush_prev_q  <= flush_i;
     // Any architectural redirect source may legitimately retarget a pending one.
     arch_prev_q   <= ex_valid_i | eret_i | set_pc_commit_i | set_debug_pc_i |
-                     resolved_branch_i.is_mispredict | smt_restore_i;
+                     resolved_branch_i.is_mispredict | smt_restore_i |
+                     peer_restart_valid_i;
     // The held target was re-presented and the I$ accepted it: the redirect is
     // in flight again (pend_q stays up until it arrives), so the HOLD ends but
     // the redirect itself does not.
@@ -313,6 +320,55 @@ module g6lc_fetch_hold_props #(
   always_ff @(posedge clk_i) begin
     if (rst_ni && misp_outranked_q) begin
       assert (dut.bp_tgt_q == misp_tgt_before_q);
+    end
+  end
+
+  // --- T6b-2a SRC_PEER: peer restart registers its target -------------------
+  // With no higher-priority source the peer restart is the redirect: its PC is
+  // registered and presented. A same-cycle active-hart commit redirect
+  // outranks it (SRC_COMMIT > SRC_PEER).
+  logic peer_fire_q, peer_outranked_q;
+  logic [VLEN-1:0] peer_pc_q, peer_commit_pc_q;
+  always_ff @(posedge clk_i) begin
+    peer_fire_q <= rst_ni && peer_restart_valid_i && !ex_valid_i && !eret_i &&
+                   !g6lc_fetch_pkg::commit_for_hart(
+                       Cfg.NrHarts > 1, set_pc_commit_i,
+                       8'(commit_hart_i), 8'(smt_hart_i));
+    peer_outranked_q <= rst_ni && peer_restart_valid_i && !ex_valid_i && !eret_i &&
+                        g6lc_fetch_pkg::commit_for_hart(
+                            Cfg.NrHarts > 1, set_pc_commit_i,
+                            8'(commit_hart_i), 8'(smt_hart_i));
+    peer_pc_q        <= peer_restart_pc_i;
+    // mem_replay_pc_i is tied 0 in this fixture; commit_next_pc's halt term
+    // still applies.
+    peer_commit_pc_q <= pc_commit_i + (halt_i ? '0 : {{VLEN - 3{1'b0}}, 3'b100});
+  end
+  // The winning redirect presents its target combinationally the cycle it
+  // fires (fetch_address = arch_pc); the registered copy is checked on the
+  // next edge.
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && peer_restart_valid_i && !ex_valid_i && !eret_i &&
+        !g6lc_fetch_pkg::commit_for_hart(
+            Cfg.NrHarts > 1, set_pc_commit_i,
+            8'(commit_hart_i), 8'(smt_hart_i)) &&
+        icache_dreq_o.req) begin
+      assert (icache_dreq_o.vaddr == peer_restart_pc_i);
+    end
+    if (rst_ni && peer_restart_valid_i && !ex_valid_i && !eret_i &&
+        g6lc_fetch_pkg::commit_for_hart(
+            Cfg.NrHarts > 1, set_pc_commit_i,
+            8'(commit_hart_i), 8'(smt_hart_i)) &&
+        icache_dreq_o.req) begin
+      assert (icache_dreq_o.vaddr ==
+              pc_commit_i + (halt_i ? '0 : {{VLEN - 3{1'b0}}, 3'b100}));
+    end
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && peer_fire_q) begin
+      assert (dut.redirect_pc_q == peer_pc_q);
+    end
+    if (rst_ni && peer_outranked_q) begin
+      assert (dut.redirect_pc_q == peer_commit_pc_q);
     end
   end
 

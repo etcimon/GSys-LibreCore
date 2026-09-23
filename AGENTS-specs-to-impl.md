@@ -45,6 +45,16 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## Per-hart recovery plumbing (2026-09-23, T6b-2a)
+
+Trap/eret/replay restart per hart (`#priv-csrs` xepc/xtvec semantics, `#instr_fetch`): in
+`core/cva6.sv` the PC-bank redirect for eret and exceptions is keyed by the committing hart and a
+memory-order replay banks the committing PC itself; under mixed residency (`SmtDrainedHandoff=0`)
+an inactive hart's mispredict retargets its own bank and a global flush restarts the peer hart at
+its oldest squashed PC (`scoreboard.sv` per-hart head, now a parallel rotate/find-first) or its
+surviving frontier, through a second `g6lc_smt_pc_bank` write port and the frontend's `SRC_PEER`
+redirect source (below COMMIT). Drained and single-hart configurations constant-fold the new legs.
+
 ## Hart-owned memory ordering (2026-09-23, T6b-1)
 
 Multi-hart memory model (`#memorymodel`, per-hart program order): `core/ooo/g6lc_lsq.sv` tags every

@@ -858,6 +858,9 @@ module cva6
   logic [CVA6Cfg.NrHarts-1:0][4:0] g1lq_rd;
   logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:4] g1lq_line;
   logic [CVA6Cfg.NrHarts-1:0] g1lq_a3;
+  // declared ahead of i_frontend (slang requires declaration before use)
+  logic                        peer_restart_active;
+  logic [CVA6Cfg.VLEN-1:0]     peer_restart_pc;
 `ifdef G6LC_FETCH_B
   assign g1fh_csr_a0 = 1'b0;
   assign g1lq_v = '0;
@@ -884,6 +887,8 @@ module cva6
 `ifdef G6LC_FETCH_B
       .commit_hart_i      (whart_commit_id[0]),
       .mem_replay_pc_i    (mem_replay_pc_ctrl_pcgen),
+      .peer_restart_valid_i (peer_restart_active),
+      .peer_restart_pc_i    (peer_restart_pc),
 `endif
       .pc_commit_i        (pc_commit),
       .ex_valid_i         (ex_commit.valid),
@@ -958,6 +963,15 @@ module cva6
   logic smt_arch_redirect_valid;
   logic [HART_ID_BITS-1:0] smt_arch_redirect_hart;
   logic [CVA6Cfg.VLEN-1:0] smt_arch_redirect_pc;
+  // T6b-2a: mixed-residency recovery plumbing. The primary redirect port is
+  // owned by the faulting/committing hart; the second port carries the peer
+  // hart's flush restart or an inactive hart's mispredict. Constant-0 under
+  // SmtDrainedHandoff and NrHarts==1.
+  logic                        smt_arch_redirect2_valid;
+  logic [HART_ID_BITS-1:0]     smt_arch_redirect2_hart;
+  logic [CVA6Cfg.VLEN-1:0]     smt_arch_redirect2_pc;
+  logic                        peer_restart_valid;
+  logic [HART_ID_BITS-1:0]     peer_restart_hart;
   for (genvar p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin : gen_smt_retire_pc
     assign smt_retire_valid[p] = commit_ack[p] && !commit_drop_id_commit[p] &&
         !commit_instr_id_commit[p].ex.valid;
@@ -977,19 +991,115 @@ module cva6
     if (set_pc_ctrl_pcgen) begin
       smt_arch_redirect_valid = 1'b1;
       smt_arch_redirect_hart = whart_commit_id[0];
-      smt_arch_redirect_pc = pc_commit + CVA6Cfg.VLEN'(halt_ctrl ? 0 : 4);
+      // A memory-order replay refetches the committing PC itself, like halt —
+      // banking pc+4 would restart the hart one instruction late.
+      smt_arch_redirect_pc = pc_commit + CVA6Cfg.VLEN'(
+          (halt_ctrl || mem_replay_pc_ctrl_pcgen) ? 0 : 4);
     end
     if (eret) begin
       smt_arch_redirect_valid = 1'b1;
-      smt_arch_redirect_hart = smt_active_hart;
+      smt_arch_redirect_hart = whart_commit_id[0];
       smt_arch_redirect_pc = epc_commit_pcgen;
     end
     if (ex_commit.valid) begin
       smt_arch_redirect_valid = 1'b1;
-      smt_arch_redirect_hart = smt_active_hart;
+      smt_arch_redirect_hart = whart_commit_id[0];
       smt_arch_redirect_pc = trap_vector_base_commit_pcgen;
     end
   end
+
+  // T6b-2a: peer-hart restart on a full flush. flush_ctrl_id empties BOTH
+  // harts' scoreboard entries; the hart that did not own the flush restarts
+  // at its scoreboard head (oldest entry it lost), or — when it has no live
+  // entry — at its surviving fetch/decode frontier sampled on the flush
+  // cycle, so nothing already fetched is lost. Mixed residency only: the
+  // whole cone constant-folds under SmtDrainedHandoff and NrHarts==1.
+`ifdef G6LC_FETCH_B
+  if (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin : gen_peer_restart
+    logic [7:0] pr_decode_valid, pr_queue_valid;
+    logic [7:0][7:0] pr_decode_hart, pr_queue_hart;
+    logic [7:0][63:0] pr_decode_pc, pr_queue_pc;
+    logic [HART_ID_BITS-1:0] fault_hart;
+    g6lc_fetch_pkg::restart_t pr_selected;
+    always_comb begin
+      // The flush owner: the commit-side redirect's target hart, or the
+      // committing hart when the flush carries no bank redirect.
+      fault_hart = smt_arch_redirect_valid ? smt_arch_redirect_hart
+                                           : whart_commit_id[0];
+      pr_decode_valid = '0;
+      pr_queue_valid = '0;
+      pr_decode_hart = '0;
+      pr_queue_hart = '0;
+      pr_decode_pc = '0;
+      pr_queue_pc = '0;
+      for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
+        pr_decode_valid[p] = flush_ctrl_id && issue_entry_valid_id_issue[p];
+        pr_decode_hart[p] = 8'(issue_entry_id_issue[p].hart_id);
+        pr_decode_pc[p] = 64'(issue_entry_id_issue[p].pc);
+        pr_queue_valid[p] = flush_ctrl_id && fetch_valid_if_id[p];
+        pr_queue_hart[p] = 8'(fetch_entry_if_id[p].hart_id);
+        pr_queue_pc[p] = 64'(fetch_entry_if_id[p].address);
+      end
+      // The lowest-index hart other than the flush owner — exact for NH==2;
+      // NH>2 would restart one peer per flush (no such configuration exists).
+      peer_restart_hart = '0;
+      for (int h = CVA6Cfg.NrHarts - 1; h >= 0; h--)
+        if (h != int'(fault_hart)) peer_restart_hart = HART_ID_BITS'(h);
+      pr_selected = g6lc_fetch_pkg::restart_frontier(
+          CVA6Cfg.NrIssuePorts, 8'(peer_restart_hart),
+          pr_decode_valid, pr_decode_hart, pr_decode_pc,
+          pr_queue_valid, pr_queue_hart, pr_queue_pc,
+          // The live NPC is a frontier only for the hart the frontend is
+          // actually fetching; an inactive peer keeps its banked PC.
+          '{valid: peer_restart_hart == smt_active_hart,
+            pc: 64'(smt_npc_live)},
+          1'b0, '0, '0);
+    end
+    assign peer_restart_pc = sb_head_valid[peer_restart_hart]
+                             ? sb_head_pc[peer_restart_hart]
+                             : CVA6Cfg.VLEN'(pr_selected.pc);
+    assign peer_restart_valid = flush_ctrl_id &&
+        (sb_head_valid[peer_restart_hart] || pr_selected.valid);
+    assign peer_restart_active = peer_restart_valid &&
+        (peer_restart_hart == smt_active_hart);
+  end else begin : gen_no_peer_restart
+    assign peer_restart_valid  = 1'b0;
+    assign peer_restart_active = 1'b0;
+    assign peer_restart_hart   = '0;
+    assign peer_restart_pc     = '0;
+  end
+`else
+  assign peer_restart_valid  = 1'b0;
+  assign peer_restart_active = 1'b0;
+  assign peer_restart_hart   = '0;
+  assign peer_restart_pc     = '0;
+`endif
+
+  // T6b-2a: second bank write. A full flush restarts the peer hart; an
+  // inactive hart's mispredict retargets only its own bank (a same-hart
+  // commit redirect is older and already owns that slot's write). Both lose
+  // to the primary redirect only in the port sense — they write different
+  // banks.
+  always_comb begin
+    smt_arch_redirect2_valid = 1'b0;
+    smt_arch_redirect2_hart  = '0;
+    smt_arch_redirect2_pc    = '0;
+    if (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin
+      if (peer_restart_valid) begin
+        smt_arch_redirect2_valid = 1'b1;
+        smt_arch_redirect2_hart  = peer_restart_hart;
+        smt_arch_redirect2_pc    = peer_restart_pc;
+      end else if (resolved_branch.valid && resolved_branch.is_mispredict &&
+                   resolved_branch.hart_id != smt_active_hart &&
+                   !(smt_arch_redirect_valid &&
+                     smt_arch_redirect_hart == resolved_branch.hart_id)) begin
+        smt_arch_redirect2_valid = 1'b1;
+        smt_arch_redirect2_hart  = resolved_branch.hart_id;
+        smt_arch_redirect2_pc    = resolved_branch.target_address;
+      end
+    end
+  end
+
   g6lc_smt_pc_bank #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_pc_bank (
@@ -1001,6 +1111,9 @@ module cva6
       .redirect_valid_i(smt_arch_redirect_valid),
       .redirect_hart_i (smt_arch_redirect_hart),
       .redirect_pc_i   (smt_arch_redirect_pc),
+      .redirect2_valid_i(smt_arch_redirect2_valid),
+      .redirect2_hart_i (smt_arch_redirect2_hart),
+      .redirect2_pc_i   (smt_arch_redirect2_pc),
       .retire_valid_i  (smt_retire_valid),
       .retire_hart_i   (smt_retire_hart),
       .retire_pc_i     (smt_retire_pc),

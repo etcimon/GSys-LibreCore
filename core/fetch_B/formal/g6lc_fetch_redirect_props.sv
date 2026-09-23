@@ -14,6 +14,7 @@ module g6lc_fetch_redirect_props (
     input logic       restore,
     input logic       debug_en,
     input logic       commit,
+    input logic       peer,
     input logic       ex,
     input logic       eret,
     input logic       misp,
@@ -32,7 +33,7 @@ module g6lc_fetch_redirect_props (
   import g6lc_fetch_pkg::*;
 
   logic [3:0] sel;
-  logic [6:0] sel_hit;
+  logic [7:0] sel_hit;
   logic [3:0] sel_cnt;
   logic       any_src;
   logic       cfh;
@@ -40,8 +41,8 @@ module g6lc_fetch_redirect_props (
   logic       rehold;
 
   always_comb begin
-    sel     = arch_src_sel(en_restore, restore, debug_en, commit, ex, eret, misp);
-    any_src = ex || eret || commit || debug_en || (en_restore && restore) || misp;
+    sel     = arch_src_sel(en_restore, restore, debug_en, commit, peer, ex, eret, misp);
+    any_src = ex || eret || commit || peer || debug_en || (en_restore && restore) || misp;
     cfh     = commit_for_hart(en_smt, commit, commit_hart, active_hart);
     ret_ok  = bp_ret_ok(bp_pend, bp_same);
     rehold  = redirect_rehold(ftq, pend, lost, hit);
@@ -55,8 +56,9 @@ module g6lc_fetch_redirect_props (
     sel_hit[4] = (sel == SRC_COMMIT);
     sel_hit[5] = (sel == SRC_RESTORE);
     sel_hit[6] = (sel == SRC_MISP);
+    sel_hit[7] = (sel == SRC_PEER);
     sel_cnt    = 4'd0;
-    for (int unsigned s = 0; s < 7; s++) begin
+    for (int unsigned s = 0; s < 8; s++) begin
       if (sel_hit[s]) sel_cnt = sel_cnt + 4'd1;
     end
   end
@@ -78,7 +80,9 @@ module g6lc_fetch_redirect_props (
       if (ex) assert (sel == SRC_EX);
       if (!ex && eret) assert (sel == SRC_ERET);
       if (!ex && !eret && commit) assert (sel == SRC_COMMIT);
-      if (!ex && !eret && !commit && debug_en) assert (sel == SRC_DEBUG);
+      // T6b-2a: peer restart ranks just below commit, above debug/restore.
+      if (!ex && !eret && !commit && peer) assert (sel == SRC_PEER);
+      if (!ex && !eret && !commit && !peer && debug_en) assert (sel == SRC_DEBUG);
       // I4y: an SMT restore never outranks an exception entry.
       if (ex && restore) assert (sel == SRC_EX);
       // en.restore const-fold is honoured.
@@ -106,6 +110,7 @@ module g6lc_fetch_redirect_props (
       cover (sel == SRC_COMMIT);
       cover (sel == SRC_RESTORE);
       cover (sel == SRC_MISP);
+      cover (sel == SRC_PEER);
     end
   end
 `endif

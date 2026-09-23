@@ -17,12 +17,15 @@ module tb_g6lc_restart;
   logic [1:0][63:0] retire_pc='0;
   logic redirect_valid=0, redirect_hart=0;
   logic [63:0] redirect_pc=0;
+  logic redirect2_valid=0, redirect2_hart=0;
+  logic [63:0] redirect2_pc=0;
   bit negative;
   g6lc_smt_pc_bank #(.CVA6Cfg(cfg(2))) dut (
     .clk_i(clk),.rst_ni(rst_n),.boot_addr_i(64'h10000),
     .npc_live_i(live_pc),.npc_live_valid_i(1'b1),
     .retire_valid_i(retire_valid),.retire_hart_i(retire_hart),.retire_pc_i(retire_pc),
     .redirect_valid_i(redirect_valid),.redirect_hart_i(redirect_hart),.redirect_pc_i(redirect_pc),
+    .redirect2_valid_i(redirect2_valid),.redirect2_hart_i(redirect2_hart),.redirect2_pc_i(redirect2_pc),
     .active_hart_i(active),.switch_i(switch_req),.npc_alt_valid_i(1'b0),.npc_alt_i('0),
     .npc_restore_o(restored_pc),.restore_o(restored),.outgoing_hart_o(outgoing)
   );
@@ -31,6 +34,7 @@ module tb_g6lc_restart;
     .npc_live_i(live_pc),.npc_live_valid_i(1'b1),
     .retire_valid_i(retire_valid),.retire_hart_i('0),.retire_pc_i(retire_pc),
     .redirect_valid_i(redirect_valid),.redirect_hart_i(1'b0),.redirect_pc_i(redirect_pc),
+    .redirect2_valid_i(1'b0),.redirect2_hart_i('0),.redirect2_pc_i('0),
     .active_hart_i(1'b0),.switch_i(switch_req),.npc_alt_valid_i(1'b0),.npc_alt_i('0),
     .npc_restore_o(single_pc),.restore_o(single_restore),.outgoing_hart_o(single_outgoing)
   );
@@ -66,6 +70,31 @@ module tb_g6lc_restart;
     tick(); retire_valid=0;
     active=1; switch_req=1; check(64'ha004); tick(); switch_req=0; tick();
     active=0; switch_req=1; check(64'h9002); tick(); switch_req=0;
+    // --- T6b-2a: second redirect port (peer restart / inactive-hart mispredict)
+    // Banks now: hart0=0x9002, hart1=0xa004, active=0.
+    // P-A: a redirect2 for the INACTIVE hart writes only its bank — the active
+    // hart's restore view neither pulses nor moves.
+    redirect2_valid=1; redirect2_hart=1; redirect2_pc=64'h5000;
+    tick(); redirect2_valid=0; #2;
+    if (restored) $fatal(1,"RESTART_PEER_PULSE");
+    if ((restored_pc ^ (negative?64'd1:64'd0)) !== 64'h9002)
+      $fatal(1,"RESTART_PEER_NOACTIVE got=%h want=9002",restored_pc);
+    // The write lands: switching to hart 1 restores the redirect2 target.
+    active=1; switch_req=1; check(64'h5000); tick(); switch_req=0; tick();
+    active=0; switch_req=1; check(64'h9002); tick(); switch_req=0; tick();
+    // P-B: a redirect2 for the ACTIVE hart must not disturb the peer bank.
+    redirect2_valid=1; redirect2_hart=0; redirect2_pc=64'h6000;
+    tick(); redirect2_valid=0; #2;
+    if (restored) $fatal(1,"RESTART_PEER2_PULSE");
+    active=1; switch_req=1; check(64'h5000); tick(); switch_req=0; tick();
+    active=0; switch_req=1; check(64'h6000); tick(); switch_req=0; tick();
+    // P-C: the primary port keeps its semantics alongside port 2 — a same-cycle
+    // pair writes different banks.
+    redirect_valid=1; redirect_hart=0; redirect_pc=64'h7000;
+    redirect2_valid=1; redirect2_hart=1; redirect2_pc=64'h7100;
+    tick(); redirect_valid=0; redirect2_valid=0; tick();
+    active=1; switch_req=1; check(64'h7100); tick(); switch_req=0; tick();
+    active=0; switch_req=1; check(64'h7000); tick(); switch_req=0; tick();
     $display("RESTART_BANK_PASS");
     $finish;
   end

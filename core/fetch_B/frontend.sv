@@ -72,6 +72,11 @@ module frontend
     input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] smt_hart_i,
     input logic smt_restore_i,
     input logic [CVA6Cfg.VLEN-1:0] smt_npc_restore_i,
+    // T6b-2a: a global flush owned by the OTHER hart restarts this (active)
+    // hart's stream at its scoreboard head or surviving frontier. Mixed
+    // residency only — tied low on every drained configuration.
+    input logic peer_restart_valid_i,
+    input logic [CVA6Cfg.VLEN-1:0] peer_restart_pc_i,
     // Live NPC for PC bank snapshot - SMT
     output logic [CVA6Cfg.VLEN-1:0] npc_q_o,
     // A trap redirect is fetched but not yet registered: suppress hart switch - SMT
@@ -493,7 +498,7 @@ module frontend
       SmtEn, smt_restore_i, CVA6Cfg.DebugEn && set_debug_pc_i,
       g6lc_fetch_pkg::commit_for_hart(SmtEn, set_pc_commit_i,
           8'(commit_hart_i), 8'(smt_hart_i)),
-      ex_valid_i, eret_i, is_mispredict);
+      peer_restart_valid_i, ex_valid_i, eret_i, is_mispredict);
 
   always_comb begin : arch_redirect_select
     arch_valid  = 1'b1;
@@ -515,6 +520,9 @@ module frontend
         arch_pc     = commit_next_pc;
         arch_step   = FtqEn & ~halt_i;
         arch_reseed = flush_i;
+      end
+      g6lc_fetch_pkg::SRC_PEER: begin
+        arch_pc = peer_restart_pc_i;
       end
       g6lc_fetch_pkg::SRC_DEBUG: begin
         arch_pc   = debug_halt_pc;

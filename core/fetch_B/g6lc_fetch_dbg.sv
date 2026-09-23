@@ -52,6 +52,7 @@ module g6lc_fetch_dbg
     input logic smt_restore_i,
     input logic set_debug_pc_i,
     input logic set_pc_commit_i,
+    input logic peer_restart_i,
     input logic ex_valid_i,
     input logic eret_i,
     // ---- Fetch-supply neutral observation (P1 warm fetch) -----------------
@@ -186,8 +187,8 @@ module g6lc_fetch_dbg
     end
 
     snap.arch_src = arch_src_sel(En.restore, smt_restore_i,
-        CVA6Cfg.DebugEn && set_debug_pc_i, set_pc_commit_i, ex_valid_i,
-        eret_i, is_mispredict_i);
+        CVA6Cfg.DebugEn && set_debug_pc_i, set_pc_commit_i, peer_restart_i,
+        ex_valid_i, eret_i, is_mispredict_i);
 
     snap_in_win =
         (64'(snap.npc) >= fetch_snap_lo && 64'(snap.npc) <= fetch_snap_hi)
@@ -552,6 +553,7 @@ bind frontend g6lc_fetch_dbg #(
     .smt_restore_i      (smt_restore_i),
     .set_debug_pc_i     (set_debug_pc_i),
     .set_pc_commit_i    (set_pc_commit_i),
+    .peer_restart_i     (peer_restart_valid_i),
     .ex_valid_i         (ex_valid_i),
     .eret_i             (eret_i),
     .icache_req_i       (icache_dreq_o.req),

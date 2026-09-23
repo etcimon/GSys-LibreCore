@@ -122,6 +122,8 @@ def main():
         names[-1:-1]=['commit_stage.sv','controller.sv']
     if os.environ.get('REVIEW_RTL_COMMIT')=='1':
         names[-1:-1]=['g6lc_sb_keep.sv','g6lc_rvc_enc.sv','g6lc_fe_keep.sv','g6lc_jalr_usable.sv','g6lc_sib_cjalr.sv','scoreboard.sv']
+    if os.environ.get('REVIEW_RTL_SBHEAD')=='1':
+        names[-1:-1]=['g6lc_sb_keep.sv','g6lc_rvc_enc.sv','g6lc_fe_keep.sv','g6lc_jalr_usable.sv','g6lc_sib_cjalr.sv','scoreboard.sv']
     if os.environ.get('REVIEW_RTL_CSRBUF')=='1':
         names[-1:-1]=['csr_buffer.sv']
     # g6lc_iq.sv is in the base source list and calls g6lc_ooo_pkg::ooo_age_*,
@@ -309,6 +311,11 @@ def main():
         # head advance, restore drains younger wrong-path entries, overflow
         # desync gating, cross-window ordering.
         configurations=[('ckpt','d4',[],[(n,None) for n in range(7)])]
+    elif os.environ.get('REVIEW_RTL_SBHEAD')=='1':
+        # T6b-2a: per-hart oldest-issued head. The parallel rotate/find-first
+        # must reproduce the serial ring-order scan, including across a
+        # commit-pointer wrap; hart-1-only traffic leaves hart 0 headless.
+        configurations=[('sbhead','nh2',['-GHARTS=2','-GSBDEPTH=16'],[(n,None) for n in range(3)])]
     elif dispatch_mode:
         cases=[(0,None),(1,'DISPATCH_STORE_PROGRESS' if before else None)]
         # Scenarios 6-8 previously pinned the alloc_id_i -> 0 Verilator
@@ -466,6 +473,8 @@ def main():
             elif kind=='ckpt':trials+=[(0,True,'CKPT_MULTI'),(1,True,'CKPT_DOUBLE_ADV'),(3,True,'CKPT_DESYNC_RV'),(5,True,'CKPT_DROPPED_OWNER'),(6,True,'CKPT_EMPTY_RESTORE_HEAD')]
             elif kind=='csrbuf':
                 trials+=[(n,True,('CSRBUF_ADDR','CSRBUF_READY','CSRBUF_CANCEL','CSRBUF_FLUSH','CSRBUF_INORDER')[n]) for n,_ in cases]
+            elif kind=='sbhead':
+                trials+=[(0,True,'SBHEAD_ORDER'),(1,True,'SBHEAD_WRAP'),(2,True,'SBHEAD_HOLE')]
             else:
                 trials.append((0,True,{'iq':'IQ_ISSUE','mshr':'MSHR_ADMISSION','decay':'TAGE_DECAY','incl':'L3_PAYLOAD','commit':'COMMIT4_TID'}[kind]))
                 if kind=='iq':trials+=[(5,True,'IQ_UNRESOLVED_GATE'),(6,True,'IQ_BYPASS'),(7,True,'IQ_RESOLVED_PASS'),(8,True,'IQ_STORE_OOO'),(9,True,'IQ_CSR_HEAD')]

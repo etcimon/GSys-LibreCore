@@ -3326,3 +3326,152 @@ module tb_g6lc_review_smt_drain;
     $finish;
   end
 endmodule
+
+module tb_g6lc_review_sbhead;
+  import ariane_pkg::*;
+  `include "g6lc_core_types.svh"
+  // T6b-2a: per-hart oldest-issued head (sb_head_*). Parallel rotate /
+  // find-first must produce exactly the ring-order head the serial scan
+  // defined, including across a commit-pointer wrap.
+  parameter int HARTS=2;
+  parameter int SBDEPTH=16;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.NrIssuePorts=1; c.NrCommitPorts=1; c.NrWbPorts=1;
+    c.NR_SB_ENTRIES=SBDEPTH; c.TRANS_ID_BITS=$clog2(SBDEPTH);
+    c.XLEN=64; c.VLEN=64; c.GPLEN=64; c.FLen=64;
+    c.NrHarts=HARTS; c.NrRgprPorts=2; c.SuperscalarEn=0;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  localparam int NSB=C.NR_SB_ENTRIES;
+  localparam int HIDB=(C.NrHarts<=1)?1:$clog2(C.NrHarts);
+  typedef `G6LC_BRANCHPREDICT_SBE_T(C) branchpredict_sbe_t;
+  typedef `G6LC_EXCEPTION_T(C) exception_t;
+  typedef `G6LC_SCOREBOARD_ENTRY_T(C) scoreboard_entry_t;
+  typedef struct packed {
+    logic valid; logic [C.VLEN-1:0] pc; logic [C.VLEN-1:0] target_address;
+    logic is_mispredict; logic is_taken; cf_t cf_type;
+    logic [HIDB-1:0] hart_id; logic ckpt_restore;
+    logic [C.TRANS_ID_BITS-1:0] trans_id;
+  } bp_resolve_t;
+  typedef struct packed {
+    logic valid; logic [C.XLEN-1:0] data; logic ex_valid;
+    logic [C.TRANS_ID_BITS-1:0] trans_id;
+  } writeback_t;
+  typedef struct packed {
+    logic [NSB-1:0] still_issued;
+    logic [C.TRANS_ID_BITS-1:0] issue_pointer;
+    writeback_t [0:0] wb;
+    scoreboard_entry_t [NSB-1:0] sbe;
+  } forwarding_t;
+  typedef logic [C.XLEN-1:0] rs3_len_t;
+
+  logic clk=0,rst_n=0,flush=0,flush_unissued=0;
+  logic commit_ack=0;
+  scoreboard_entry_t [0:0] commit_instr;
+  scoreboard_entry_t [0:0] decoded='{default:'0},issue_instr;
+  logic [0:0][31:0] orig='0,orig_o;
+  logic [0:0] decoded_valid='0,decoded_ack,issue_valid,issue_ack='0;
+  logic [0:0] commit_drop;
+  forwarding_t fwd;
+  bp_resolve_t resolved='0;
+  logic [0:0][C.TRANS_ID_BITS-1:0] wb_tid='0;
+  logic [0:0][C.XLEN-1:0] wb_data='0;
+  exception_t [0:0] wb_ex='{default:'0};
+  logic [0:0] wt_valid='0;
+  logic [0:0][C.TRANS_ID_BITS-1:0] rvfi_issue,rvfi_commit;
+  logic [C.NrHarts-1:0] g1mf_v,g1mf_a3;
+  logic [C.NrHarts-1:0][4:0] g1mf_rd;
+  logic [C.NrHarts-1:0][C.VLEN-1:4] g1mf_line;
+  logic [C.NrHarts-1:0][C.VLEN-1:0] head_pc;
+  logic [C.NrHarts-1:0] head_v;
+  bit negative;
+  int scenario;
+
+  scoreboard #(.CVA6Cfg(C),.bp_resolve_t(bp_resolve_t),.exception_t(exception_t),
+      .scoreboard_entry_t(scoreboard_entry_t),.forwarding_t(forwarding_t),
+      .writeback_t(writeback_t),.rs3_len_t(rs3_len_t)) dut (
+    .clk_i(clk),.rst_ni(rst_n),.sb_full_o(),.sb_empty_o(),.spec_cancel_o(),
+    .cancelled_mask_o(),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),
+    .flush_unissued_instr_i(flush_unissued),
+    .flush_i(flush),.x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),
+    .x_id_i('0),.commit_instr_o(commit_instr),.commit_drop_o(commit_drop),
+    .commit_replay_o(),.commit_ack_i(commit_ack),.decoded_instr_i(decoded),
+    .orig_instr_i(orig),
+    .decoded_instr_valid_i(decoded_valid),.decoded_instr_ack_o(decoded_ack),
+    .issue_instr_o(issue_instr),.orig_instr_o(orig_o),
+    .issue_instr_valid_o(issue_valid),.issue_ack_i(issue_ack),.fwd_o(fwd),
+    .resolved_branch_i(resolved),.trans_id_i(wb_tid),.wbdata_i(wb_data),
+    .ex_i(wb_ex),.wt_valid_i(wt_valid),.x_we_i(1'b0),.x_rd_i('0),
+    .rvfi_issue_pointer_o(rvfi_issue),.rvfi_commit_pointer_o(rvfi_commit),
+    .sb_head_pc_o(head_pc),.sb_head_valid_o(head_v),
+    .g1mf_v_o(g1mf_v),.g1mf_rd_o(g1mf_rd),.g1mf_line_o(g1mf_line),
+    .g1mf_a3_o(g1mf_a3));
+
+  task automatic tick;clk=1; #2; clk=0; #2;endtask
+
+  // Allocate one instruction for hart h at pc. fu=NONE self-validates.
+  task automatic alloc(input int h,input logic [63:0] pc);
+    decoded='{default:'0};
+    decoded[0].fu=NONE;
+    decoded[0].pc=C.VLEN'(pc);
+    decoded[0].rd=5'd1;
+    decoded[0].hart_id=HIDB'(h);
+    decoded_valid=1'b1;
+    issue_ack=1'b1;
+    #2;
+    if(!issue_valid[0]||!decoded_ack[0]) $fatal(1,"SBHEAD_ALLOC pc=%h",pc);
+    tick();
+    decoded_valid='0;issue_ack='0;
+  endtask
+
+  task automatic commit;
+    commit_ack=1'b1; tick(); commit_ack=1'b0; #2;
+  endtask
+
+  task automatic chk_head(input int h,input logic [63:0] want,input string tag);
+    logic [63:0] want_adj;
+    want_adj=want ^ (negative?64'd4:64'd0);
+    if(head_v[h]!==1'b1) $fatal(1,"%s hart=%0d valid=0",tag,h);
+    if(head_pc[h]!==want_adj)
+      $fatal(1,"%s hart=%0d pc got=%h want=%h",tag,h,head_pc[h],want_adj);
+  endtask
+
+  task automatic chk_dead(input int h,input string tag);
+    if(head_v[h]!==(negative?1'b1:1'b0))
+      $fatal(1,"%s hart=%0d valid=%b",tag,h,head_v[h]);
+  endtask
+
+  initial begin
+    negative=$test$plusargs("oracle_negative");scenario=0;
+    void'($value$plusargs("scenario=%d",scenario));
+    #2;tick();rst_n=1;#2;
+    if(scenario==0)begin
+      // Interleaved harts: heads must track each hart's own oldest slot.
+      alloc(0,64'h100); alloc(1,64'h200); alloc(0,64'h104); alloc(1,64'h204);
+      chk_head(0,64'h100,"SBHEAD_ORDER"); chk_head(1,64'h200,"SBHEAD_ORDER");
+      commit(); commit();
+      chk_head(0,64'h104,"SBHEAD_STEP"); chk_head(1,64'h204,"SBHEAD_STEP");
+      commit(); commit();
+      chk_dead(0,"SBHEAD_DRAIN"); chk_dead(1,"SBHEAD_DRAIN");
+    end
+    else if(scenario==1)begin
+      // Wrap: commit pointer at 14, allocs land at 14 (h1), 15 (h0), 0 (h1).
+      for(int n=0;n<14;n++)begin alloc(0,64'h40+64'(n)*4); commit(); end
+      alloc(1,64'h300); alloc(0,64'h400); alloc(1,64'h304);
+      chk_head(0,64'h400,"SBHEAD_WRAP"); chk_head(1,64'h300,"SBHEAD_WRAP");
+      commit();
+      chk_head(1,64'h304,"SBHEAD_WRAP_STEP");
+    end
+    else if(scenario==2)begin
+      // Hart-1-only traffic: hart 0 has no live entry, so no head.
+      alloc(1,64'h500); alloc(1,64'h504);
+      chk_dead(0,"SBHEAD_HOLE");
+      chk_head(1,64'h500,"SBHEAD_HOLE_H1");
+    end
+    else $fatal(1,"SBHEAD_SCENARIO");
+    $display("RTL_REVIEW_PASS sbhead scenario=%0d harts=%0d sb=%0d",scenario,HARTS,SBDEPTH);
+    $finish;
+  end
+endmodule

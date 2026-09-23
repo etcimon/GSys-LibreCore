@@ -91,9 +91,11 @@ next actions are superseded by the tranche exits.
 - [ ] **T6b mixed-resident SMT2** (contract revised to a shared ring with hart-owned rules;
   `core/ooo/AGENTS-ooo-plan.md`). T6b-1 landed 2026-09-23: `SmtDrainedHandoff` config bit + drain
   seam, hart-tagged LSQ/store-buffer/IQ ordering, `sb_head_pc` export, leaf oracles; everything
-  reproduced with the gate on. Open: T6b-2 recovery/frontend per-hart state (make `sb_head_pc`
-  incremental first), T6b-3 `SmtDrainedHandoff=0` firmware gate + isolation negatives, T6b-4
-  performance (partitioned heads, PRF floors).
+  reproduced with the gate on. T6b-2a landed (per-hart recovery plumbing: committing-hart bank
+  redirects, replay banks pc, inactive-hart mispredict → bank, peer restart on a global flush,
+  parallel `sb_head_pc`). Open: T6b-2b per-access translation/privilege context (CSR bank exports
+  the LSU context per hart, MMU selects by request hart, TLB hart tag), T6b-3 `SmtDrainedHandoff=0`
+  firmware gate + isolation negatives, T6b-4 performance (partitioned heads, PRF floors).
 - [ ] T6b mixed residency per the plan file (after T6a).
 
 ## Active stability-first review — authoritative next change sets

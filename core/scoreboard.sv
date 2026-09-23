@@ -170,22 +170,64 @@ module scoreboard #(
   // T6b: per-hart oldest live instruction. commit_pointer_q[0] is the oldest
   // live slot, so the first issued entry each hart owns in ring order from it
   // is that hart's head. NrHarts==1 folds to the commit head's PC.
-  always_comb begin
+  // T6b-2a: parallel form — rotate each hart's issued mask into ring order,
+  // isolate the first set bit, rotate the index back, mux the PC once. No
+  // serial dependence and no per-iteration PC mux; the serial scan is kept
+  // below under translate_off as the equivalence reference.
+  localparam int unsigned SB_NH = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
+  always_comb begin : sb_head_scan
+    for (int unsigned h = 0; h < SB_NH; h++) begin
+      automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] rot;
+      automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] first;
+      automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0]  hit;
+      automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0]  slot;
+      rot = '0;
+      for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+        slot   = commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(i);
+        rot[i] = mem_q[slot].issued &&
+                 (mem_q[slot].sbe.hart_id == $bits(mem_q[slot].sbe.hart_id)'(h));
+      end
+      first = rot & (~rot + 1'b1);
+      hit   = '0;
+      for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++)
+        if (first[i]) hit = CVA6Cfg.TRANS_ID_BITS'(i);
+      slot               = commit_pointer_q[0] + hit;
+      sb_head_valid_o[h] = |rot;
+      sb_head_pc_o[h]    = (|rot) ? mem_q[slot].sbe.pc : '0;
+    end
+  end
+
+//pragma translate_off
+  // Serial reference (the T6b-1 implementation): the parallel scan above must
+  // agree with it every cycle.
+  logic [SB_NH-1:0][CVA6Cfg.VLEN-1:0] sb_head_pc_ref;
+  logic [SB_NH-1:0]                   sb_head_valid_ref;
+  always_comb begin : sb_head_ref
     automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] slot;
-    automatic logic [CVA6Cfg.NrHarts-1:0] found;
-    slot = commit_pointer_q[0];
-    found = '0;
-    sb_head_valid_o = '0;
-    sb_head_pc_o = '0;
+    automatic logic [SB_NH-1:0] found;
+    slot              = commit_pointer_q[0];
+    found             = '0;
+    sb_head_valid_ref = '0;
+    sb_head_pc_ref    = '0;
     for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
-      if (mem_q[slot].issued && !found[mem_q[slot].sbe.hart_id]) begin
-        found[mem_q[slot].sbe.hart_id] = 1'b1;
-        sb_head_valid_o[mem_q[slot].sbe.hart_id] = 1'b1;
-        sb_head_pc_o[mem_q[slot].sbe.hart_id] = mem_q[slot].sbe.pc;
+      if (mem_q[slot].issued && int'(mem_q[slot].sbe.hart_id) < SB_NH &&
+          !found[mem_q[slot].sbe.hart_id]) begin
+        found[mem_q[slot].sbe.hart_id]             = 1'b1;
+        sb_head_valid_ref[mem_q[slot].sbe.hart_id] = 1'b1;
+        sb_head_pc_ref[mem_q[slot].sbe.hart_id]    = mem_q[slot].sbe.pc;
       end
       slot = slot + 1'b1;
     end
   end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      assert (sb_head_valid_o == sb_head_valid_ref)
+      else $fatal(1, "sb_head_valid_o diverges from the serial reference");
+      assert (sb_head_pc_o == sb_head_pc_ref)
+      else $fatal(1, "sb_head_pc_o diverges from the serial reference");
+    end
+  end
+//pragma translate_on
 
   // output commit instruction directly
   always_comb begin : commit_ports

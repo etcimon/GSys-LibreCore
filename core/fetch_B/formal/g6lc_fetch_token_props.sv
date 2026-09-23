@@ -183,6 +183,8 @@ module g6lc_fetch_token_props #(
       .epc_i,
       .trap_vector_base_i,
       .set_debug_pc_i,
+      .peer_restart_valid_i (1'b0),
+      .peer_restart_pc_i    ('0),
       .icache_dreq_i,
       .icache_dreq_o,
       .fetch_entry_o,

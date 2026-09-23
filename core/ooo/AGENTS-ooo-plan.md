@@ -312,6 +312,38 @@ witness silent), anchor exact on the post-fix model `b08f9211…`, lint 8/54, sy
 functional models were built one inert one-line lint fix (`a_hart` default init) before the
 anchor model; the anchor is post-fix.
 
+**T6b-2 design (2026-09-23).** Reading `g6lc_smt_csr_bank`: commit, exceptions, CSR ops,
+interrupt lines and WFI (`hart_halt_o[h]`) are *already* per bank keyed by the committing hart —
+the in-order SMT needed that. What is keyed by the **active fetch hart** and therefore wrong under
+mixed residency: (a) the architectural view exported to EX/LSU/MMU (`priv_lvl`, `ld_st_priv_lvl`,
+`sum`, `mxr`, `satp_ppn`, `asid`, `en_ld_st_translation`) — a load of the non-fetching hart would
+translate and permission-check in the peer's context, and TLB entries are not hart-tagged, so two
+harts with equal ASIDs alias; (b) frontend redirects/traps/replays for the non-fetching hart are
+dropped (`redirect_for_hart`, `commit_for_hart`) instead of updating its PC bank; (c) a global
+flush does not restart the non-faulting hart. Slices: **T6b-2a** — incremental `sb_head_pc`
+(tracked, not scanned), redirect/trap/replay of the non-fetching hart → its PC bank, global-flush
+restart of the peer at `sb_head_pc[peer]` (or its frontier when it has no live entry), per-hart
+mispredict target filter; oracles: frontend/hart-state leaf with two harts (a resolution for the
+inactive hart lands in its bank and never disturbs the active stream; a flush caused by hart h
+restores the peer's bank to its head PC), the hold/token proofs unchanged, drained results
+reproduced. **T6b-2b** — per-access translation context: the CSR bank exports the LSU context per
+hart, the LSU/MMU select by the request's hart, D-TLB/shared-TLB entries carry a hart tag compared
+on lookup (or `SmtDrainedHandoff=0` is refused with `MmuPresent`); oracles: MMU leaf with two
+contexts (same VA, different satp → different PA; same ASID does not alias across harts), the
+existing MMU cells unchanged. Neither slice changes behaviour while `SmtDrainedHandoff=1`.
+
+**T6b-2a status (2026-09-23): landed, drain gate on, every result reproduced.** `cva6.sv`: the
+commit-side bank redirect is owned by the committing hart (eret/exception used the active hart),
+a memory-order replay banks `pc` not `pc+4`, and — mixed residency only — an inactive hart's
+mispredict retargets its own bank and a global flush restarts the peer at `sb_head_pc[peer]` or its
+surviving frontier (`peer_restart_*`, second PC-bank write port, frontend `SRC_PEER` ranked below
+COMMIT). `scoreboard.sv`: parallel per-hart head (rotate/find-first/rotate back) with the serial
+scan kept as a translate_off equivalence reference — scoreboard cone unchanged (24.79 adj FO4).
+Evidence: `sbhead` leaf 6/6, restart-bank leaf + negative + synth (0 latches), hold proof PASS,
+token/redirect proofs PASS, dispatch/LSQ/IQ cells unchanged, frozen int + s11 and FP suite
+cycle-identical, dual-hart profile 10,696,498 (unchanged), anchor exact (`6b06ac40…`), lint 8/54,
+synth 32/5, FO4 unchanged in both screens.
+
 **Slices.** T6b-1 config bit + drain gate seam, hart-tagged LSQ/store-buffer/IQ ordering,
 `sb_head_pc`, leaf oracles (drain gate still on: every existing result must reproduce). T6b-2
 recovery and frontend per-hart state (flush restart, inactive-hart redirects, per-hart filter),

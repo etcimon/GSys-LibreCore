@@ -63,6 +63,16 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## Per-hart recovery plumbing (2026-09-23, T6b-2a)
+
+`sbhead` leaf (`REVIEW_RTL_SBHEAD`): interleaved two-hart allocation/commit heads, ring wrap at
+the commit pointer, hart with no entry → invalid; negatives fatal (6/6). Restart-bank leaf
+(`tb_g6lc_restart`, `run_restart_bank.py`): a redirect for the inactive hart lands in its bank and
+leaves the active restore unchanged; negative `RESTART_ARCH_PC`; fixture synth 0 latches.
+`g6lc_fetch_hold` gains the `SRC_PEER` legs (peer restart fetched when no higher source; commit
+wins the same cycle) — PASS; token and redirect proofs PASS. All firmware and anchor records
+reproduce exactly (dual-hart 10,696,498; anchor 12,765,628 on `6b06ac40…`).
+
 ## Hart-owned memory ordering (2026-09-23, T6b-1)
 
 LSQ fixture `HARTS=2` (`lsq/nh2`): scenarios 19–24 — a peer hart's unresolved older store neither
