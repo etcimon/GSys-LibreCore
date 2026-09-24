@@ -1,0 +1,34 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+//
+// Opt-in simple-framebuffer for the 640x480 r5g6b5 scanout. Not included
+// by any board DTS. The region is a no-map carve-out of the existing
+// 256 MiB DRAM window, placed below the AI operand pool at 0x8f000000.
+// It is not a new MMIO aperture and not an FPGA address-map entry.
+//
+// Linux simplefb / simpledrm binds this node and inherits the bytes.
+// HdmiEn stays default off; the node does not enable the scanout.
+
+/ {
+  reserved-memory {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    ranges;
+
+    fb_reserved: framebuffer@8ef00000 {
+      reg = <0x0 0x8ef00000 0x0 0x96000>;
+      no-map;
+    };
+  };
+
+  framebuffer@8ef00000 {
+    compatible = "simple-framebuffer";
+    memory-region = <&fb_reserved>;
+    reg = <0x0 0x8ef00000 0x0 0x96000>;
+    width = <640>;
+    height = <480>;
+    stride = <1280>;
+    format = "r5g6b5";
+    status = "okay";
+  };
+};
