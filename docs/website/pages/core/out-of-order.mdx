@@ -1,15 +1,18 @@
 ---
 title: Out-of-Order Execution
-description: Production config-gated OoO backend (rename, IQ, ROB, LSQ) and slice-OoO path for GSys LibreCore.
+description: Config-gated OoO backend (rename, IQ, ROB, LSQ), slice-OoO path, and OoO coherence validation for GSys LibreCore.
 ---
 
 # Out-of-Order Execution
 
-Full multi-issue out-of-order is a **shipping, config-gated** backend on
+Full multi-issue out-of-order is a **config-gated** backend on
 GSys LibreCore. Minimal packages keep `OoOEn=0` for **netlist identity** with the
 in-order path — a product option, not a quality disclaimer.
 
-Authoritative detail: `architecture/out-of-order/README.md`.
+Authoritative detail: `architecture/out-of-order/README.md`, the contract
+`core/ooo/AGENTS-ooo-contract.md`, the working plan
+`core/ooo/AGENTS-ooo-plan.md`, and the running log
+`architecture/out-of-order/log-2026-09.md`.
 
 ## Two knobs
 
@@ -60,18 +63,52 @@ on; zeros when off. RVFI/commit observe tags via the scoreboard entry.
 
 | Package | Role |
 |---|---|
-| `g6lc64_ooo_server_config_pkg.sv` | Server: wide issue, multi-core×hart, L2/L3 auto, deep spec, memdep — **refused at elaboration** (FP *and* hart guards) |
-| `g6lc64_ooo_config_pkg.sv` | Dual-issue OoO lite (area-lean bring-up) — **refused at elaboration** (FP guard) |
-| `g6lc64_ooo_int_config_pkg.sv` | Integer-only OoO: the **only OoO package that elaborates, lints and synthesizes** today |
+| `g6lc64_ooo_int_config_pkg.sv` | Integer-only single-hart OoO — the bring-up/verification baseline: elaborates, lints and synthesizes clean |
+| `g6lc64_smt2_ooo_int_config_pkg.sv` | **Production** SMT2 over OoO: `NrHarts=2`, integer-only, drained-handoff residency, Sstc |
+| `g6lc64_ooo_int2_config_pkg.sv` | Two-core WT + L2 `COH_OOO` integration target — OoO coherence envelope, not a production profile |
+| `g6lc64_ooo_config_pkg.sv` | Dual-issue OoO lite (area-lean bring-up) — **refused in production** (single-hart FP leg) |
+| `g6lc64_ooo_server_config_pkg.sv` | Server: wide issue, multi-core×hart, L2/L3 auto, deep spec, memdep — **refused in production** (multi-hart FP leg) |
 | Default `cv64a6_imafdc_sv39` (etc.) | `OoOEn=0` identity |
 
-`check_cfg` refuses `OoOEn && FpPresent` and `OoOEn && NrHarts > 1`. These are
-**aliasing** gaps, not conservative ones: outside `g6lc_rename` the OoO block contains
-no hart signal at all, and it has no FP register class, so FP results are neither
-renamed nor tracked in the busy table. `g6lc64_ooo_int` clears every FP format and
-keeps `NrHarts=1`, which is what makes it legal. Treat it as a bring-up and
-verification baseline — it has no independent-reference comparison and no boot
-evidence, so it is not a qualified product.
+`check_cfg` legality for OoO (`core/include/config_pkg.sv`):
+
+```
+assert (!(Cfg.OoOEn && !Cfg.SpeculativeSb));
+assert (!(Cfg.OoOEn && Cfg.NrHarts > 1 && Cfg.FpPresent));   // multi-hart FP: always refused
+assert (Cfg.SmtDrainedHandoff || (Cfg.OoOEn && Cfg.NrHarts > 1));
+`ifndef G6LC_OOO_SMT_MIXED_QUALIFY
+assert (Cfg.SmtDrainedHandoff);                            // mixed residency: qualification-gated
+`endif
+`ifndef G6LC_OOO_FP_QUALIFY
+assert (!(Cfg.OoOEn && Cfg.FpPresent));                    // single-hart FP: refused in production
+`endif
+```
+
+`OoOEn && NrHarts > 1` is **no longer refused**: integer multi-hart OoO is legal
+under the **drained handoff** — the thread selector switches only when the
+scoreboard and store queues are empty (asserted at the switch in `cva6.sv` as
+`ooo_switch_drained`), so the hart-blind IQ/ROB/LSQ never hold two harts' work
+at once. The FP refusal remains an **aliasing** gap, not a conservative one: the
+OoO block has no FP register class, so FP results are neither renamed nor tracked
+in the busy table; multi-hart FP is refused outright pending hart-tagged lazy-FS.
+`g6lc64_ooo_int` clears every FP format and keeps `NrHarts=1`, which is what makes
+it legal — treat it as a bring-up and verification baseline, not a qualified
+product.
+
+## Physical-address load validation (COH_OOO)
+
+On the `COH_OOO` coherence fabric (`g6lc64_ooo_int2`) the load tag/check stage
+exports the **accepted physical address** of each granted load together with its
+saved TID, hart and access size (the legacy virtual `load_paddr_o` STQ key is not
+reused). The LSQ keeps that record until the load retires or is cancelled and
+checks it against physical store/load and load/load aliases, remote
+modifications, sibling-hart committed stores and TID reuse. A modification event
+holds load retirement for one cycle; matching loads are cancelled and replayed
+through the existing precise path, and PMA non-idempotent loads are never replay
+candidates. The uncertified early STQ forward shortcut is disabled in this mode.
+Contract and evidence: `core/ooo/AGENTS-ooo-contract.md` (physical validation
+candidate), `core/ooo/AGENTS-ooo-plan.md` T7/T7b, and the coherence envelope on
+[Multi-Core Cluster](../corev-apu/multi-core).
 
 ROB / IQ / LSQ / PRF depths scale from issue width when left at 0 in package
 builders (see `build_config_pkg` / package sources).
@@ -101,10 +138,12 @@ events. Prefer counters + RVFI when debugging mispredict or memory-order bugs.
 | Memdep / STL | `verif/tests/custom/ooo/ooo_mem_dep.S` |
 
 ```bash
-# The OoO target that actually elaborates end to end:
+# The OoO targets that elaborate end to end:
 g6lc-build verify --lint --synth --target g6lc64_ooo_int
-# These two are refused by check_cfg until the FP class (Phase 5) and the
-# per-hart namespaces (Phase 4) land; the refusal is the intended behaviour.
+g6lc-build verify --lint --synth --target g6lc64_smt2_ooo_int
+g6lc-build verify --lint --synth --target g6lc64_ooo_int2
+# These two are refused in production by the FP legs of check_cfg;
+# the refusal is the intended behaviour.
 g6lc-build verify --target g6lc64_ooo
 g6lc-build verify --target g6lc64_ooo_server
 g6lc-build test --suite ooo-l3-tests

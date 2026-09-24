@@ -36,7 +36,7 @@ build-platform-led SoC flow**: one typed configuration file (`.config.ts` at the
 repo root) parameterizes the core, the uncore (`corev_apu`), the board
 (`corev-mb`), vendored controllers/PHY, foundry technology adaptation, and
 optional structural timing analysis via `sv-timing`. Drive it with
-`g6lc-build` (permanent alias: `g6lc-build`).
+`g6lc-build` (legacy alias: `cva6-build`).
 
 The stack is intentionally **opt-in and additive**: the classic CVA6 core and
 manual flow remain available; LibreCore extensions and tooling sit beside them
@@ -58,11 +58,10 @@ than proprietary license managers and encrypted netlists.
 The navigation on the left follows the same layers as the project:
 
 - **Getting Started** — install the toolchain and run your first checks.
-- **Architecture & Worktree** — a high-level map of every top-level directory and
-  how they connect.
+- **Architecture & Worktree** — a high-level map of every top-level directory,
+  the [upgrade program](./architecture/upgrade-program), the
+  [SKU matrix](./architecture/sku-matrix), and the spec/DTS contract.
 - **CPU Core** — pipeline, config, and product features (OoO, SMT, H, RVV).
-- **Architecture** — worktree, [upgrade program](./architecture/upgrade-program),
-  [SKU matrix](./architecture/sku-matrix).
 - **corev_apu** — uncore/FPGA layer, L2/L3, multi-core cluster.
 - **corev-mb** — the motherboard/board layer and SKiDL-based PCB design flow.
 - **Technology / PDK** — foundry adaptation with NDA-protected PDK drop-ins.
@@ -106,6 +105,20 @@ reproducible review checklist. For an automated workflow, they provide a
 planning contract. This dual use is what makes the CVA6 knowledge graph
 different from a conventional wiki: it is written to be *executed* as well as
 read.
+
+### Where the reasoning lives
+
+The deep design rationale is kept in a small set of maintained documents rather
+than scattered across the site:
+
+- `AGENTS-coding-philosophy.md` — the engineering rules every RTL change is
+  authored and reviewed against.
+- `AGENTS-rt-learning-philosophy-AGI.md` — the evidence-bounded reasoning
+  extension for runtime-reflection experiments.
+- `sv-timing/ALGORITHMS-EXPERTS.md` — the per-algorithm expert briefs for the
+  structural timing pipeline.
+- `AGENTS-optimization-tool.md` — the contract for measured optimizations in
+  `optimization/`.
 
 Start with [Getting Started](./getting-started), or jump to the
 [worktree map](./architecture/worktree) if you want the big picture first.

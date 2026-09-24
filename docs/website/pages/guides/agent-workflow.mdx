@@ -154,6 +154,16 @@ consistent with the config before making irreversible changes. This discipline
 prevents the common agent failure of "I ran a command and now the workspace is
 in an unexpected state."
 
+## Deferred obligations are first-class
+
+`AGENTS-todo.md` is the live ledger of what is **knowingly not done** — release
+blockers, open residuals, and the evidence that would close each one. Status
+claims across the repo use the evidence-tier vocabulary (**leaf** / **gate** /
+**integration** / **boot** / **deferred**): a feature is never "done" without a
+tier, and a deferred obligation is never silently dropped — it is tracked. An
+agent that cannot close a task should record the obligation in `AGENTS-todo.md`
+rather than leave an implicit gap.
+
 ## Traceability updates
 
 For ISA-visible changes, the agent must update the living traceability files:

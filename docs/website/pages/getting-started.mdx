@@ -24,15 +24,15 @@ language-version managers and containerized build environments.
 ```bash
 # Linux / macOS / WSL / Git-Bash
 source ./setenv.sh
-g6lc-build status          # permanent alias: g6lc-build
+g6lc-build status          # legacy alias: cva6-build
 
 # Windows PowerShell
 . .\setenv.ps1
 g6lc-build status
 ```
 
-`setenv.sh` / `setenv.ps1` put **`g6lc-build`** (and the permanent alias
-`g6lc-build`) on your path and print the current SoC status. If Bun is not
+`setenv.sh` / `setenv.ps1` put **`g6lc-build`** (and the legacy alias
+`cva6-build`) on your path and print the current SoC status. If Bun is not
 installed, the scripts download it into `~/.bun` and add it to `PATH` for the
 current shell. This temporary PATH injection is deliberate: it means the
 bootstrap is non-destructive. The rest of the environment is unchanged, and a
@@ -124,7 +124,7 @@ LibreCore is developed **from the outside in**:
 
 1. **Config first** — edit `.config.ts` at the repo root; it is the single
    control surface.
-2. **Build platform** — `g6lc-build` (alias `g6lc-build`) translates config into
+2. **Build platform** — `g6lc-build` (legacy alias `cva6-build`) translates config into
    toolchain setup, simulation, board adaptation, vendor sync, and technology
    checks.
 3. **Layered directories** — `core/` is the CPU, `corev_apu/` is the on-die

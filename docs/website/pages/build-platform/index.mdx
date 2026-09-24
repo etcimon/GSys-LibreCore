@@ -44,6 +44,10 @@ probe → tools install / setup --install → probe install → diag → verify 
 | `vendor` | Uncore controller/PHY catalog sync |
 | `mb` | Motherboard select / design / check |
 | `tech` | Foundry technology optimization |
+| `remote` | Remote test-harness proxy — isolated upload + artifact pull (`remote py -- <runner>`) |
+| `tensor` | `ai-tensor` host-path pass-through |
+| `g6q` | `g6lc_qemu` pass-through |
+| `g6b` | `g6lc_bios` pass-through |
 | `clean` | Remove workspace outputs |
 | `config` | Print resolved configuration (`--json`) |
 

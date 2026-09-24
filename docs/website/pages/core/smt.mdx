@@ -23,11 +23,17 @@ Scaffold + bring-up: `architecture/multi-threading/`
 
 ## What the RTL guarantees
 
-1. **Per-hart arch state** — RF banks, CSR banks, PC bank, RAS banks, GHR banks  
-2. **Fine-grain switch** — IF flush + drop unissued; EX/scoreboard drain; BP
-   tables preserved where not banked  
-3. **Commit isolation** — CSR writes keyed by instruction `hart_id`  
-4. **Fetch view** — privilege / MMU CSR mux by active fetch hart  
+1. **Per-hart arch state** — RF banks, CSR banks, PC bank, RAS banks, GHR banks
+2. **Fine-grain, drain-friendly switch** — IF flush + drop unissued;
+   EX/scoreboard drain; BP tables preserved where not banked
+3. **Commit isolation** — CSR writes keyed by instruction `hart_id`
+4. **Fetch view** — privilege / MMU CSR mux by active fetch hart
+
+On OoO profiles (`OoOEn && NrHarts=2`), residency switches by **drained
+handoff**: the thread selector changes only when the scoreboard and store
+queues are empty, so the hart-blind OoO backend never interleaves two harts'
+work. Mixed residency (`SmtDrainedHandoff=0`) stays qualification-gated behind
+`G6LC_OOO_SMT_MIXED_QUALIFY`.
 
 Modules under `core/smt/` include thread select, hart state, banked RF, PC
 bank, and CSR bank helpers.
@@ -43,35 +49,38 @@ bank, and CSR bank helpers.
 ## Enable
 
 ```
-core/include/g6lc64_smt2_config_pkg.sv   # NrHarts=2, SMT_HYBRID, often L2
+core/include/g6lc64_smt2_config_pkg.sv         # NrHarts=2, SMT_HYBRID, in-order
+core/include/g6lc64_smt2_ooo_int_config_pkg.sv # NrHarts=2 over OoO, drained handoff (production)
+core/include/g6lc64_ooo_int2_config_pkg.sv     # two-core WT + L2 COH_OOO variant (integration target)
 ```
 
 ```bash
 g6lc-build verify --target g6lc64_smt2
+g6lc-build verify --target g6lc64_smt2_ooo_int
 g6lc-build test --suite smt-linux-boot-path   # if catalogued
 ```
 
 ## Bring-up sequence (product)
 
-1. Keep `NrHarts=1` green on default packages.  
-2. Select SMT2 package; bare-metal boot hart 0 only.  
-3. Park hart 1 in WFI; exercise switch-on-miss.  
-4. Dual-thread litmus / `rdcycle` before Linux.  
-5. OpenSBI `expected_harts` / domain for two harts.  
-6. Linux `maxcpus=2` smoke with validated DTS.  
+1. Keep `NrHarts=1` green on default packages.
+2. Select SMT2 package; bare-metal boot hart 0 only.
+3. Park hart 1 in WFI; exercise switch-on-miss.
+4. Dual-thread litmus / `rdcycle` before Linux.
+5. OpenSBI `expected_harts` / domain for two harts.
+6. Linux `maxcpus=2` smoke with validated DTS.
 
-DTS of record: `corev_apu/bootrom/ariane-smt2.dts`  
+DTS of record: `corev_apu/bootrom/ariane-smt2.dts`
 Validate: `build-platform/scripts/validate-cva6-dts.*` (after fetch-linux-dts).
 
 Software track: `software/smt2-linux/`.
 
 ## Known limits
 
-- **Shared BHT/BTB** (RAS/GHR banked) → mild cross-hart pollution  
+- **Shared BHT/BTB** (RAS/GHR banked) → mild cross-hart pollution
 - Dual-commit of **two different harts** in one cycle is not a specialized
-  product path (single CSR port discipline)  
+  product path (single CSR port discipline)
 - Full **KVM-on-SMT** is out of scope for SMT bring-up — use H/server packages
-  separately after bare-metal SMT is green  
+  separately after bare-metal SMT is green
 
 ## Verification suites (optional / residual)
 
@@ -85,7 +94,7 @@ Verilator surfaces.
 
 ## Related
 
-- [L2 / L3 Cache](../corev-apu/l2-l3-cache) — MLP for dual-hart traffic  
-- [Server Profiles](./server-profiles)  
-- [Upgrade Program](../architecture/upgrade-program)  
+- [L2 / L3 Cache](../corev-apu/l2-l3-cache) — MLP for dual-hart traffic
+- [Server Profiles](./server-profiles)
+- [Upgrade Program](../architecture/upgrade-program)
 - Spec-adjacent: precise traps + memory model across harts (`AGENTS-soc-readiness`)

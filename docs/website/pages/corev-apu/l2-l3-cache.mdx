@@ -10,7 +10,7 @@ path. This is an integration product, not an L1 rewrite. L1 remains in
 `core/cache_subsystem/`; L2/L3 live under `corev_apu/l2_cache/` and
 `corev_apu/l3_cache/`.
 
-Playbook: `agents/guides/AGENTS-l2l3-cache.md`.  
+Playbook: `agents/guides/AGENTS-l2l3-cache.md`.
 Scaffold status: `architecture/l2-l3-cache/README.md`.
 
 ## Hierarchy
@@ -34,20 +34,27 @@ Default on many packages: **`L2En=0`** (off). Server / OoO packages may auto-ena
 
 ## Product features (L2 done)
 
-- MSHR line merge  
-- Banked data arrays via **`tc_sram`**  
-- Non-cacheable bypass for MMIO / PMA  
-- Write-through + read-allocate policies as configured  
-- Parallel tags  
+- MSHR line merge with **concurrent fills** and hit-under-miss same-line waiter
+  merging
+- **Killed-fill retention** — a back-invalidated fill entry cannot be merged into
+  by a later reader
+- **Same-edge refill vs back-invalidation discard** — a fill landing on the edge
+  of its own kill is dropped
+- OoO-gated write-service fairness (`FAIR_WRITES` = `OoOEn`) and optional
+  per-set round-robin victim selection (`RR_EN`)
+- Banked data arrays via **`tc_sram`**
+- Non-cacheable bypass for MMIO / PMA
+- Write-through + read-allocate policies as configured
+- Parallel tags
 
 ## L3 + server prefetcher
 
 L3 reuses L2 engine structure at the next level. The **server prefetcher** sits
 on the L3→DRAM (or L2→DRAM) AXI edge:
 
-1. Next-line at configurable distance on demand miss  
-2. Multi-stream stride training  
-3. **Demand always wins** arbitration; prefetch only when AR is idle  
+1. Next-line at configurable distance on demand miss
+2. Multi-stream stride training
+3. **Demand always wins** arbitration; prefetch only when AR is idle
 
 Complements L1 HPDCACHE stride (`HwPrefetchEn`): L1 for tight loops, LLC edge
 for server streams (packet buffers, page copy, guest memory).
@@ -61,10 +68,10 @@ verification cost.
 
 ## Invariants
 
-- **RVWMO** preserved  
-- **PMA** — MMIO uncached via NC bypass  
-- **CBO** end-to-end when Zicbo* enabled  
-- Prefer **64 B lines** with `Zic64b` for software alignment  
+- **RVWMO** preserved
+- **PMA** — MMIO uncached via NC bypass
+- **CBO** end-to-end when Zicbo* enabled
+- Prefer **64 B lines** with `Zic64b` for software alignment
 
 ## DTS / software
 
@@ -81,7 +88,8 @@ geometry. Notes: `architecture/l2-l3-cache/dts-l3-prefetch.md`. Keep
 | Multi-core stream | `mc-stream-tests` (when catalogued) |
 
 ```bash
-g6lc-build verify --target g6lc64_ooo_server
+g6lc-build verify --target g6lc64_ooo_int2    # WT + L2 + COH_OOO cluster
+g6lc-build verify --target g6lc64_ooo_server  # refused in production (multi-hart FP leg)
 g6lc-build test --suite ooo-l3-tests
 ```
 
@@ -94,6 +102,6 @@ architecture README). Use counters when debugging thrash vs DRAM bandwidth.
 
 - [Server Profiles](../core/server-profiles)
 - [Out-of-Order](../core/out-of-order)
-- [SMT](../core/smt) — dual-hart MLP benefits from L2 MSHR  
-- Controllers: [Controllers & PHY](./controllers)  
+- [SMT](../core/smt) — dual-hart MLP benefits from L2 MSHR
+- Controllers: [Controllers & PHY](./controllers)
 - Spec: memory model / PMA / CMO under `agents/guides/AGENTS-l2l3-cache.md`

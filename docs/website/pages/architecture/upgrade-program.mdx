@@ -31,11 +31,11 @@ claiming a gate is “done” for a specific target package.
 | **U5** Full OoO | Rename / IQ / ROB / LSQ backend | `OoOEn` — identity when 0 |
 | **Multi-issue** | 2–8 issue ports | `NrIssuePorts` / `SuperscalarEn` |
 | **U6.0** L2 | Memory-side L2 under APU | `L2En` (often **off** by default) |
-| **U6.1** SMT2 | Dual hardware threads | `NrHarts=2`, `cv64a6_smt2_*` |
-| **U6.2** Multi-core hub | Multi-hart tile / coherence | `NrCores` + APU hub |
+| **U6.1** SMT2 | Dual hardware threads | `NrHarts=2`, `g6lc64_smt2`, `g6lc64_smt2_ooo_int` |
+| **U6.2** Multi-core hub | Multi-hart tile / coherence | `NrCores` + APU hub; `COH_OOO` on `g6lc64_ooo_int2` |
 | **U7** ISA extras | CBO / bitmanip / related | Decoder + cache policy |
 | **U9** Hypervisor + Sstc | KVM-oriented timer / VS | `RVH`, `Sstc`, server packages |
-| **U10** Server math | HPDCACHE + HWPF + L2 auto, RVB/Zicbo* | `cv64a6_server_math_*` |
+| **U10** Server math | HPDCACHE + HWPF + L2 auto, RVB/Zicbo* | `g6lc64_server_math{,_v}` |
 | **U10ᵇ** RVV / Ara | Vector attach | Partial — see vector guide |
 
 ## Layering principle
@@ -84,13 +84,15 @@ Package names evolve; treat these as **illustrative** and confirm against
 # In-order dual-issue-style / default Linux-class 64b
 g6lc-build config   # inspect soc.coreConfig
 
-# Full OoO production lite / server
-#   g6lc64_ooo  |  g6lc64_ooo_server
-g6lc-build verify --target g6lc64_ooo
+# Full OoO — legal targets today:
+#   g6lc64_ooo_int (baseline)  |  g6lc64_smt2_ooo_int (production SMT2)
+#   g6lc64_ooo_int2 (two-core COH_OOO integration)
+# g6lc64_ooo / g6lc64_ooo_server are refused in production (FP legs).
+g6lc-build verify --target g6lc64_ooo_int
 g6lc-build test --suite ooo-l3-tests   # optional, lengthy
 
 # SMT2
-#   g6lc64_smt2
+#   g6lc64_smt2 (in-order)  |  g6lc64_smt2_ooo_int (over OoO)
 g6lc-build verify --target g6lc64_smt2
 
 # Server math (H, Sstc, L2 auto, …)

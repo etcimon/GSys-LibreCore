@@ -42,3 +42,12 @@ documentation in the `AGENTS-*.md` files or the technical details in the layer
 sections; they explain how to move between those documents and how to decide
 which one to read first. For an automated agent, they are the high-level
 control flow; for a human, they are the onboarding and review checklist.
+
+## Deferred obligations are first-class
+
+Status claims in this project carry an evidence tier — **leaf** (module
+testbench), **gate** (isolated lint/synth archive gate), **integration**
+(composed multi-module benches), **boot** (OpenSBI/Linux execution evidence),
+or **deferred** (a named obligation still open). The deferred ledger is
+`AGENTS-todo.md`: it records what is knowingly not done and what evidence
+would close it, so a green testbench is never mistaken for a shipped feature.

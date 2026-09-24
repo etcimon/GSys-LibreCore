@@ -41,6 +41,47 @@ N × ariane (core tile)
 
 **N=1** remains identity: hub and multi-master paths stay inert.
 
+## Coherence policies
+
+`cva6_cfg_t.CohPolicy` selects the invalidation strategy (`coh_policy_t`):
+
+| Policy | Filter | Intent |
+|---|---|---|
+| `COH_WRITE_INVAL` | none — invalidate peer L1(s) on remote write | smallest / simplest clusters |
+| `COH_BROADCAST` | none — always broadcast invalidations | debug / filter-off bring-up |
+| `COH_FILTERED` | `g6lc_snoop_filter.sv` — tagged per-line presence filter | **default when `NrCores > 1`** |
+| `COH_OOO` | `g6lc_ooo_snoop_filter.sv` — SRAM-backed monotone sharer signatures (one-port `tc_sram`, cold sweep of `NR_ENTRIES` cycles) | OoO coherent fabric |
+
+`COH_OOO` is the envelope for out-of-order cores: `check_cfg` admits it only when
+`OoOEn && !FpPresent && L2En && NrCores > 1 && DCacheType == WT` and the I$/D$
+line widths match. On this fabric every load is revalidated against its accepted
+physical address until it retires — a modification event holds load retirement
+for one cycle and matching loads replay through the existing precise cancel
+path; PMA non-idempotent loads never replay. This is verified with directed
+LSQ/scoreboard tests, mutations and a bounded formal ledger; matched multicore
+firmware execution is still a deferred obligation, not an established result.
+
+Hub invariants held by `g6lc_coherence_hub.sv`:
+
+- AW/AR slot ownership; a writer's **B is withheld until the invalidation is
+  applied** (`slot_applied`), tracked by enqueue/dequeue sequence numbers on
+  `g6lc_inval_bus.sv`.
+- Atomic slot lifetime: a slot is retained until **both** its B and required
+  RLAST complete, in either order.
+- Per-core offered-B lock and per-slot same-(core, original-ID) B predecessor
+  masks preserve same-ID B ordering.
+- ATOP/lock classified as invalidating writers; full-width response-ID bounds.
+
+The composed hub + real `g6lc_l2_top` bench (`tb_g6lc_coherence_l2` in
+`verif/tb/l2/tb_g6lc_coherence_hub.sv`) shows the L2 refusing a reader's AR
+during a stalled write and admitting it after memory B, which excludes the
+standalone-slave stale-refill counterexample in this composition.
+
+Deferred (tracked, not closed): L1 application acknowledgement on non-WT
+consumers, local-CAS coverage, per-ID R ordering, matched multicore
+firmware/anchor/compliance runs, PMU/RVFI wiring, DFT/MBIST, timing/power/area
+sign-off, credit-bound MSHR sizing — see `AGENTS-todo.md`.
+
 ## Config and inference
 
 When geometry fields are **0**, `build_config_pkg` can infer L2/L3/prefetch and
@@ -77,7 +118,8 @@ Validate with `AGENTS-dts-validation.md` / `build-platform/scripts/validate-cva6
 | `dual-hart-ci` | Dual-hart CI path where catalogued |
 
 ```bash
-g6lc-build verify --target g6lc64_ooo_server
+g6lc-build verify --target g6lc64_ooo_int2    # two-core COH_OOO coherence cluster
+g6lc-build verify --target g6lc64_ooo_server  # refused in production (multi-hart FP leg)
 g6lc-build test --suite mc-stream-tests
 ```
 

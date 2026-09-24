@@ -65,6 +65,13 @@ Per-change gate aligned with `AGENTS.md` §0.2:
 ./build.sh verify --lint --target g6lc64_smt2
 ```
 
+The remote archive gate runs the same lint/synth axes on the test harness from
+an isolated source snapshot (the shared mirror is never rsynced):
+
+```bash
+g6lc-build verify --lint --synth --remote --target g6lc64_smt2_ooo_int
+```
+
 Use `verify` after RTL changes; use `test` for regression suites catalogued from
 `verif/regress`. Structural timing feedback is separate: see
 [Timings](./timings).

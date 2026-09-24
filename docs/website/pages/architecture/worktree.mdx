@@ -259,6 +259,27 @@ config-specific manuals and classical pipeline prose.
 - `perf-model/` — a Python performance model for micro-architecture
   exploration.
 
+## `software/` and the satellite projects
+
+- `software/` — OpenSBI / Linux reference software and payloads used by the
+  boot suites.
+- `g6lc_bios/` — firmware/BIOS project (driven by the `g6b` CLI pass-through).
+- `g6lc_qemu/` — QEMU models and native tensor evaluation notes (`g6q` CLI
+  pass-through).
+- `ai-tensor/` — tensor host path for the AI island (`tensor` CLI).
+- `quantum_ai/` — quantum-AI bridge notes and code.
+- `monorepo-soak/` — monorepo soak tests.
+
+## `optimization/`, `spyglass/`, `tools/`
+
+- `optimization/` — the measured-optimization ledger: `tasks/<id>/task.json`,
+  `series.json`, `mark_cycles`; governed by `AGENTS-optimization-tool.md`
+  (cycles and area must come from the same RTL snapshot; FO4 is the timing
+  screen, not the cycle metric).
+- `spyglass/` — Spyglass lint/CDC collateral.
+- `tools/` — helper scripts and pinned tool sources (`spike`,
+  `verilator-v5.008`).
+
 The remaining top-level directories are the support infrastructure. `specs/`
 holds the canonical RISC-V ISA Manual, making the project self-contained in its
 normative references. `config/` holds generated hardware configuration outputs.

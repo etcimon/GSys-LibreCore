@@ -19,11 +19,16 @@ Confirm exact filenames under `core/include/`.
 
 | Family | Intent | Typical stack |
 |---|---|---|
-| `g6lc64_ooo` | Dual-issue OoO lite | `OoOEn`, deep scoreboard, no fat multicore |
-| `g6lc64_ooo_server` | Server OoO | Wide issue, multi-core×hart, L2/L3 auto, memdep |
-| `g6lc64_smt2` | Dual-thread | `NrHarts=2`, hybrid switch, often L2 |
+| `g6lc64_ooo_int` | OoO bring-up baseline | `OoOEn`, integer-only, `NrHarts=1`, `NrCores=1` |
+| `g6lc64_smt2_ooo_int` | **Production** SMT2 over OoO | `OoOEn`, integer-only, `NrHarts=2`, drained handoff, WT D$, L2 |
+| `g6lc64_ooo_int2` | OoO coherence integration | `smt2_ooo_int` envelope + `NrCores=2`, `COH_OOO`, signature snoop filter |
+| `g6lc64_ooo` | Dual-issue OoO lite | `OoOEn` + FP — **refused in production** (single-hart FP leg) |
+| `g6lc64_ooo_server` | Server OoO | Wide issue, multi-core×hart, L2/L3 auto, memdep — **refused in production** (multi-hart FP leg) |
+| `g6lc64_smt2` | Dual-thread | `NrHarts=2`, hybrid switch, in-order, often L2 |
 | `g6lc64_server_math` | KVM / math host (C-light) | H+Sstc, RVB, Zicbo*, HWPF, HPDCACHE, L2 auto; RVV off until Ara |
 | `g6lc64_server_math_v` | + RVV | `VExtEn`, Ara attach; `CvxifEn` exclusive with accelerator path |
+| `g6lc64_stream8` | Stream8-class bring-up | In-order, `NrCores=2`, H+Sstc, Zacas W/D/Q |
+| `g6lc64_ai` | AI island | `stream8` envelope + `Xg6lcai` / `ai_island` |
 
 Default packages (e.g. `cv64a6_imafdc_sv39`) remain the **identity** path for
 integrators who want classic CVA6 behavior.
@@ -45,11 +50,11 @@ integrators who want classic CVA6 behavior.
 ```bash
 # .config.ts
 export default defineBuildConfig({
-  soc: { coreConfig: 'g6lc64_ooo_server' }, // example
+  soc: { coreConfig: 'g6lc64_server_math' }, // example
 })
 
 g6lc-build config
-g6lc-build verify --target g6lc64_ooo_server
+g6lc-build verify --target g6lc64_server_math
 ```
 
 Board selection (`g6lc-build mb select`) may pin `soc.*` via overlay — do not

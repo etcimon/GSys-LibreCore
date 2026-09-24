@@ -90,12 +90,34 @@ From the monorepo (host):
 | Artifact | Role |
 |---|---|
 | `sv-timing/AGENTS.md` | Agent entry + invariants |
+| `sv-timing/ALGORITHMS-EXPERTS.md` | Per-algorithm expert manual |
 | `sv-timing/architecture/DESIGN.md` | Full architecture (IR, cache, hosts) |
 | `sv-timing/architecture/OPTIMIZATION-LEVELS.md` | `-O0..-O3/-Os/-Oz` + dials |
 | `sv-timing/architecture/PERF-CACHE.md` | Throughput + pre-compiled cache |
 | `sv-timing/AGENTS-host.md` | Host boundary |
 | `sv-timing/AGENTS-todo.md` | Live implementation phase |
 | `architecture/sv-timing/` | Monorepo pointer only |
+
+## Reading order for contributors
+
+1. **`sv-timing/AGENTS.md`** — the package map and its invariants
+   (independence, host boundary, no monorepo deps).
+2. **`sv-timing/ALGORITHMS-EXPERTS.md`** — the expert manual. **Part 0**
+   defines the architectural objects (Budget, Path, Class, Lane, Pass stage),
+   the strategic / emit / remaining-gap invariants, and an implementation file
+   map. **Part I** covers the timing basis: A1 budget FO4, A2 the `fo4-v1`
+   cost table, A3 inverse max-frequency, A4 measurement versioning. Later parts
+   repeat one skeleton per algorithm: summary, low-level basics, high-level
+   basis, purpose, mutations, behavioural study, maintenance.
+3. **The architecture docs** — `DESIGN.md`, `OPTIMIZATION-LEVELS.md`,
+   `RELOCATION-ANALYSIS.md`, `FREQUENCY-CLOSURE.md`, `PERF-CACHE.md`,
+   `STA-HANDOFF.md`.
+
+The budget model is
+`budget_fo4 = (1000/target_mhz × 1000/fo4_ps) × (1 − margin)`; with the
+defaults `fo4_ps=20` and `margin=0.2` that is ~32 FO4 at 1250 MHz and ~20 FO4
+at 2000 MHz. **`--fo4-ps` is a process input** — quote it with every frequency
+claim, since it scales the whole budget linearly.
 
 ## Pages in this section
 
