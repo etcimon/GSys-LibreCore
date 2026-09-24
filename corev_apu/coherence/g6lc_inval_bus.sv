@@ -70,9 +70,13 @@ module g6lc_inval_bus
     logic          coalesce;
     logic [NC-1:0] merge_tail;
 
+    // Index of the most recently pushed entry, shared by the coalesce match
+    // and the coalesce write so the wrap decrement exists once per core.
+    logic [PTR_W-1:0] tail_m1[NC];
     for (genvar c = 0; c < NC; c++) begin : gen_status
       assign full[c]  = (count_q[c] == DP[PTR_W:0]);
       assign empty[c] = (count_q[c] == '0);
+      assign tail_m1[c] = (tail_q[c] == '0) ? PTR_W'(DP - 1) : tail_q[c] - 1'b1;
     end
 
     // Accept only if every target has room or a retainable matching tail
@@ -85,9 +89,8 @@ module g6lc_inval_bus
           if (inv_target_i[c]) begin
             // A departing sole entry cannot retain a new obligation
             if (!empty[c] &&
-                fifo_q[c][(tail_q[c] == 0) ? PTR_W'(DP-1) : PTR_W'(int'(tail_q[c])-1)].line_addr
-                  == inv_req_i.line_addr &&
-                fifo_q[c][(tail_q[c] == 0) ? PTR_W'(DP-1) : PTR_W'(int'(tail_q[c])-1)].valid &&
+                fifo_q[c][tail_m1[c]].line_addr == inv_req_i.line_addr &&
+                fifo_q[c][tail_m1[c]].valid &&
                 !(count_q[c] == 1 && inv_core_ready_i[c])) begin
               merge_tail[c] = 1'b1;
               coalesce = 1'b1;
@@ -129,27 +132,25 @@ module g6lc_inval_bus
       end else begin
         for (int unsigned c = 0; c < NC; c++) begin
           automatic logic do_push, do_pop;
-          automatic logic [PTR_W-1:0] tail_m1;
           do_push = 1'b0;
           do_pop  = inv_core_ready_i[c] & ~empty[c];
-          tail_m1 = (tail_q[c] == 0) ? PTR_W'(DP - 1) : PTR_W'(int'(tail_q[c]) - 1);
 
           if (inv_req_i.valid && inv_ready_o && inv_target_i[c]) begin
             if (merge_tail[c]) begin
               // Coalesce: OR flags into tail entry
-              fifo_q[c][tail_m1].dcache  <= fifo_q[c][tail_m1].dcache | inv_req_i.dcache;
-              fifo_q[c][tail_m1].icache  <= fifo_q[c][tail_m1].icache | inv_req_i.icache;
-              fifo_q[c][tail_m1].all_ways<= fifo_q[c][tail_m1].all_ways | inv_req_i.all_ways;
+              fifo_q[c][tail_m1[c]].dcache  <= fifo_q[c][tail_m1[c]].dcache | inv_req_i.dcache;
+              fifo_q[c][tail_m1[c]].icache  <= fifo_q[c][tail_m1[c]].icache | inv_req_i.icache;
+              fifo_q[c][tail_m1[c]].all_ways<= fifo_q[c][tail_m1[c]].all_ways | inv_req_i.all_ways;
             end else if (!full[c]) begin
               do_push = 1'b1;
               fifo_q[c][tail_q[c]] <= inv_req_i;
-              tail_q[c] <= PTR_W'((int'(tail_q[c]) + 1) % DP);
+              tail_q[c] <= (tail_q[c] == PTR_W'(DP - 1)) ? '0 : tail_q[c] + 1'b1;
             end
           end
 
           if (do_pop) begin
             fifo_q[c][head_q[c]].valid <= 1'b0;
-            head_q[c] <= PTR_W'((int'(head_q[c]) + 1) % DP);
+            head_q[c] <= (head_q[c] == PTR_W'(DP - 1)) ? '0 : head_q[c] + 1'b1;
           end
 
           enq_seq_q[c] <= enq_seq_q[c] + COH_INV_SEQ_W'(do_push);

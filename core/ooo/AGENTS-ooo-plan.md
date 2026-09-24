@@ -1016,6 +1016,44 @@ No new clock/reset domain, ISA/DTS capability or permission rule was added. Exis
 integration is preserved structurally, not newly signed off. Generic synthesis and directed tests
 do not establish foundry area, STA, power, useful-work speedup or production readiness.
 
+### T7e — deferred items closed after promotion (2026-09-24)
+
+**Per-ID R ordering.** Every AR is re-tagged with its slot index toward memory, so two reads
+from one core with the same original id become distinct downstream ids and the L2's
+hit-under-miss path may legally answer the younger one first; AXI still owes the core same-id
+R order. The hub now masks a core's AR request while an older AR slot of the same
+(core, original id) is live (`ar_same_id_live`), so the younger read is admitted only after
+the older R completes; another core with the same id and the same core with another id are
+not held. Scenario 25 `same_id_r_order` holds the younger AR for six cycles, admits the two
+non-conflicting reads, releases on the older RLAST and drains all three in order; the negative
+oracle and the restored defect (`REVIEW_HUB_B_FAULT=r-order`, guard removed) both fail with
+`HUB_R_ID_ORDER` (`ooocoh-r-order-after-r1`, `ooocoh-r-order-mutation-r1`). Lifetime set is
+now 46 records at 1/4/16 credits (`ooocoh-r-order-lifetime-r1`), original regression 16,
+three-core signature seam and hub synthesis pass, composed hub+L2 4/4, promoted cluster gate
+lint 24 / synth 7 warnings, 0 errors (`ooocoh-r-order-int2-r1`).
+
+**Structural FO4 screen (sv-timing, fo4_ps=20 ps, 1250 MHz, margin 0.2, budget 32.0 FO4).**
+Host adapter run over `core/Flist.cva6` plus `Flist.cluster` minus the two lint tops
+(`workspace/build/sv-timing/ooocoh-fo4-r{1,2,3}`). Hub worst 32.0 (three at-budget
+handshake-lock paths at the AR grant), signature filter 3.0, LSQ 24.0, WT miss unit 22.0,
+WT adapter 18.5, L2 top 20.5 — all within budget. `g6lc_inval_bus` started at 57.0: the
+`% DP` pointer advances were charged as dividers and the per-core loop body was summed
+serially. Replacing the modulo with wrap-compare increments (37.0) and hoisting `tail_m1` to
+one continuous assignment per core (33.5) leaves a residual 1.5 FO4 over budget attributed
+to the two independent 8-bit sequence-counter increments summed in statement order
+(`add_sub` 10.0 each). That is a `plain`-class screening artifact of independent non-blocking
+assignments, recorded here as a package-first follow-up for sv-timing's path classification,
+not as an RTL closure claim; STA sign-off remains open. Both inval-bus rewrites are
+behaviour-preserving and re-verified: leaf 10/10 (`ooocoh-inval-hoist-r1`), lifetime 46,
+regression 16, composed 4/4, promoted gate lint 24 / synth 7 warnings, 0 errors
+(`ooocoh-inval-hoist-int2-r1`).
+
+Still deferred: L1 application acknowledgement on non-WT consumers (outside the `COH_OOO`
+envelope, which requires WT), local-CAS notification coverage into the physical-load checker,
+matched multicore firmware/anchor/compliance runs, PMU/RVFI wiring of the hub event pins
+(currently unconnected in `g6lc_cluster`), DFT/MBIST binding of the signature SRAM,
+credit-bound MSHR sizing, timing/power/area sign-off, and any cycle/area gain claim.
+
 ## Deferred
 
 Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,

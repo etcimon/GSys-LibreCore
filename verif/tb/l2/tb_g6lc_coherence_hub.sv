@@ -1237,6 +1237,45 @@ module tb_g6lc_coherence_hub;
     if (count != 2) $fatal(1, "HUB_B_ID_ORDER_DRAIN");
   endtask
 
+  //  Same-(core, original id) reads must reach the core in issue order even
+  //  though the hub re-tags them with distinct slot ids toward memory. The
+  //  hub therefore withholds the younger AR while the older slot is live; a
+  //  different core with the same id and the same core with another id are
+  //  not held. The restored defect grants the younger AR immediately.
+  task automatic same_id_r_order;
+    id_t first_slot, other_core_slot, other_id_slot;
+    bit granted;
+    reset();
+    accept_read(0, 64'h1000, 4'h9, first_slot);
+    core_req[0].ar = ar(64'h2000, 4'h9);
+    core_req[0].ar_valid = 1;
+    memory_rsp.ar_ready = 1;
+    for (int n = 0; n < 6; n++) begin
+      #2;
+      granted = core_rsp[0].ar_ready ^ negative;
+      if (granted || memory_req.ar_valid) $fatal(1, "HUB_R_ID_ORDER younger AR granted");
+      tick();
+    end
+    core_req[0].ar_valid = 0;
+    memory_rsp.ar_ready = 0;
+    accept_read(1, 64'h3000, 4'h9, other_core_slot);
+    accept_read(0, 64'h4000, 4'h3, other_id_slot);
+    if (other_core_slot == first_slot || other_id_slot == first_slot ||
+        other_core_slot == other_id_slot) $fatal(1, "HUB_R_ID_ORDER slots");
+    return_read(0, first_slot, 4'h9, 64'h11);
+    core_req[0].ar = ar(64'h2000, 4'h9);
+    core_req[0].ar_valid = 1;
+    memory_rsp.ar_ready = 1;
+    #2;
+    if (!core_rsp[0].ar_ready || !memory_req.ar_valid || memory_req.ar.addr != 64'h2000)
+      $fatal(1, "HUB_R_ID_ORDER release");
+    tick();
+    core_req[0].ar_valid = 0;
+    memory_rsp.ar_ready = 0;
+    return_read(1, other_core_slot, 4'h9, 64'h22);
+    return_read(0, other_id_slot, 4'h3, 64'h33);
+  endtask
+
   task automatic full_id_space;
     id_t slots[OT];
     reset();
@@ -1276,6 +1315,7 @@ module tb_g6lc_coherence_hub;
       22: atomic_invalidation_publication(1);
       23: refill_during_write();
       24: same_id_b_order();
+      25: same_id_r_order();
       default: $fatal(1, "HUB_SCENARIO");
     endcase
     $display("HUB_PASS scenario=%0d", scenario);

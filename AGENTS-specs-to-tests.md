@@ -151,6 +151,13 @@ substitute for those gates.
   restores it; `REVIEW_COMPOSED_SCC=1` passes `scc -expect 0`. Scope: hub + real L2 + modeled WT
   invalidation consumer; not a CPU/L1/firmware simulation.
 
+- Scenario 25 `same_id_r_order` (`REVIEW_HUB_PUBLICATION_CASES=25`, lifetime set at 4/16
+  credits): younger same-(core, id) AR withheld until the older RLAST, non-conflicting reads
+  admitted, in-order drain; negative and `REVIEW_HUB_B_FAULT=r-order` fail with
+  `HUB_R_ID_ORDER` (`ooocoh-r-order-after-r1`, `ooocoh-r-order-mutation-r1`).
+- Inval-bus pointer/tail rewrites re-verified by the default leaf plan (10/10,
+  `ooocoh-inval-hoist-r1`), the hub lifetime/regression sets and the promoted gate.
+
 Promotion of `g6lc64_ooo_int2` followed the rights holder's acceptance of this review; no capacity
 reduction or performance claim follows. Application acknowledgement on non-WT consumers, matched
 firmware/compliance runs and physical gates remain deferred obligations.

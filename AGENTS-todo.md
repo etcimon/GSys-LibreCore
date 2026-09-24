@@ -39,10 +39,19 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `no-l2` reproduction, `fault-r6` self-inval mutation, `scc-r1` loop-freedom). New target
   `g6lc64_ooo_int2` (2 cores × 2 harts, integer OoO, WT, L2, `COH_OOO`, 128 signatures); the
   `G6LC_OOO_COH_QUALIFY` requirement is removed; legality asserts remain.
+- [x] Per-ID R ordering: the hub withholds a younger same-(core, original id) AR while the older
+  read slot is live; scenario 25 positive/negative/restored-defect controls, lifetime 46,
+  regression 16, composed 4/4 and the promoted gate (lint 24 / synth 7 warnings, 0 errors) pass
+  (`ooocoh-r-order-*-r1`). Remote lint baseline for `g6lc64_ooo_int2` recorded (24).
+- [x] Structural FO4 screen of the modified hub/filter/LSQ/WT/L2 files at fo4_ps=20, 1250 MHz:
+  all within the 32 FO4 budget except `g6lc_inval_bus`, brought from 57.0 to 33.5 by modulo-free
+  pointer advance and a hoisted `tail_m1`; the residual 1.5 FO4 is two independent counter
+  increments summed in statement order (screening artifact; sv-timing path-class follow-up).
+  Not STA; see `core/ooo/AGENTS-ooo-plan.md` T7e.
 - [ ] Deferred for unrestricted release (not implied by promotion): full-core L1 application
-  acknowledgement on HPDCACHE/non-WT consumers, local-CAS notification coverage, per-ID R ordering,
-  matched multicore firmware/anchor/compliance runs, PMU/RVFI, DFT/MBIST, FO4/timing/power/area
-  sign-off, and a measured remote warning baseline for `g6lc64_ooo_int2`.
+  acknowledgement on HPDCACHE/non-WT consumers, local-CAS notification coverage, matched
+  multicore firmware/anchor/compliance runs, PMU/RVFI wiring of the hub event pins, DFT/MBIST
+  binding of the signature SRAM, credit-bound MSHR sizing, and STA/power/area sign-off.
 - [ ] Credit-consistent L2 sizing with current concurrent-fill occupancy/lifetime proof.
 - [~] Accepted-physical-address validation is implemented as a guarded candidate through LSU/EX/
   issue/LSQ/scoreboard. The legacy virtual STQ key is not reused. The new tag-stage event saves

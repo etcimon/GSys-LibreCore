@@ -315,14 +315,22 @@ def hub_review(out, data, runtime_info, runtime):
         text = path.read_text()
         old, new = {
             'lock': ("b_offer_locked_q[c] <= 1'b1;", "b_offer_locked_q[c] <= 1'b0;"),
-            'order': ("b_predecessors_q[s] <= b_predecessors_d[s];", "b_predecessors_q[s] <= '0;")
+            'order': ("b_predecessors_q[s] <= b_predecessors_d[s];", "b_predecessors_q[s] <= '0;"),
+            # Restored defect: a younger same-(core, id) AR is granted while the
+            # older read slot is still live, so the L2 may answer it first.
+            'r-order': ("assign ar_req[c] = core_req_i[c].ar_valid && !ar_same_id_live[c];",
+                        "assign ar_req[c] = core_req_i[c].ar_valid;")
         }[b_fault]
         assert text.count(old) == 1, 'B mutation site changed'
         path.write_text(text.replace(old, new))
     inv_source = source / 'g6lc_inval_bus.sv'
     assert digest(inv_source) in {'2cafee7fbcda6f30274461a4486fd613698e61ef67691e08dda94b2ff0592945',
                                   # adds inv_enq_seq_o/inv_deq_seq_o delivery sequences
-                                  'bb43a41f43482bd7d937728ca4d20dee984ce47225f46f7ebfe4cdde637215da'} or \
+                                  'bb43a41f43482bd7d937728ca4d20dee984ce47225f46f7ebfe4cdde637215da',
+                                  # wrap-compare pointer advance instead of `% DP`
+                                  '054d606f80f4250e532f280baf7c5df1e961860b0ad24cc7133cecd45b6a2c72',
+                                  # shared per-core tail_m1 continuous assignment
+                                  '2818440e3679428319243d284fa589ca0a14e6da1270bcafde6ed4674a199bd6'} or \
         hashlib.sha256(inv_source.read_text().encode()).hexdigest() in {
         '6edb90f8d3c26d3d599ecb25ff87848b70400e62521c6b5f25229caa02bfd079',
         '2c18cbe614eef7767e08074ea3dadbd3bad018aa0712de3a50d09e694c62d30e'}
@@ -396,7 +404,8 @@ def hub_review(out, data, runtime_info, runtime):
                                (18, False, None), (18, True, 'HUB_B_BEFORE_INVAL'),
                                (19, False, None), (19, True, 'HUB_B_STABILITY'),
                                (20, False, None), (20, True, 'HUB_B_STABILITY'),
-                               (24, False, None), (24, True, 'HUB_B_ID_ORDER')]
+                               (24, False, None), (24, True, 'HUB_B_ID_ORDER'),
+                               (25, False, None), (25, True, 'HUB_R_ID_ORDER')]
         if ack_before:
             trials = [(14, False, 'HUB_B_BEFORE_INVAL')]
         if signature:
@@ -407,15 +416,16 @@ def hub_review(out, data, runtime_info, runtime):
                 trials += [(s, True, 'HUB_B_STABILITY') for s in (19, 20)]
         if publication:
             codes = {21:'HUB_ATOMIC_BEFORE_INVAL', 22:'HUB_ATOMIC_MISSING_INVAL',
-                     23:'HUB_STALE_REFILL_PUBLICATION', 24:'HUB_B_ID_ORDER'}
+                     23:'HUB_STALE_REFILL_PUBLICATION', 24:'HUB_B_ID_ORDER', 25:'HUB_R_ID_ORDER'}
             before = os.environ.get('REVIEW_HUB_PUBLICATION_BEFORE') == '1'
             selected = os.environ.get('REVIEW_HUB_PUBLICATION_CASES', '21,22,23')
             trials = [(int(s), False, codes[int(s)] if before else None) for s in selected.split(',')]
         if b_fault:
-            trials = [(24, False, 'HUB_B_ID_ORDER')] if b_fault == 'order' else [
-                (s, False, 'HUB_B_STABILITY') for s in (19, 20)]
+            trials = ([(24, False, 'HUB_B_ID_ORDER')] if b_fault == 'order' else
+                      [(25, False, 'HUB_R_ID_ORDER')] if b_fault == 'r-order' else
+                      [(s, False, 'HUB_B_STABILITY') for s in (19, 20)])
         elif publication and not before:
-            trials += [(int(s), True, codes[int(s)]) for s in selected.split(',') if int(s) in (21, 22, 24)]
+            trials += [(int(s), True, codes[int(s)]) for s in selected.split(',') if int(s) in (21, 22, 24, 25)]
         for scenario, negative, error in trials + ([] if lifetime or signature or ack_before or stability or publication else [(0, True, 'HUB_RESPONSE')]):
             cmd = [str(exe), f'+scenario={scenario}'] + (['+oracle_negative'] if negative else [])
             p = subprocess.run(cmd, cwd=work, capture_output=True, text=True, timeout=30)

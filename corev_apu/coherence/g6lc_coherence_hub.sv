@@ -130,9 +130,15 @@ module g6lc_coherence_hub
     logic [CID_W-1:0] sig_owner_q;
     logic [NC-1:0] sig_present, sig_present_q;
 
+    // Every AR is re-tagged with its slot index toward memory, so two reads
+    // from one core with the same original id become distinct ids downstream
+    // and the L2 may legally answer the younger one first (hit under miss).
+    // AXI still owes the core same-id R order, so a core's AR is not eligible
+    // while an older AR slot of the same (core, original id) is live.
+    logic [NC-1:0] ar_same_id_live;
     for (genvar c = 0; c < NC; c++) begin : gen_req
       assign aw_req[c] = core_req_i[c].aw_valid;
-      assign ar_req[c] = core_req_i[c].ar_valid;
+      assign ar_req[c] = core_req_i[c].ar_valid && !ar_same_id_live[c];
     end
 
     function automatic logic [CID_W-1:0] pick_rr(
@@ -261,6 +267,17 @@ module g6lc_coherence_hub
     end
     assign ar_ot_full = &slot_used;
     assign aw_ot_full = &slot_used;
+
+    always_comb begin
+      ar_same_id_live = '0;
+      for (int unsigned c = 0; c < NC; c++) begin
+        for (int unsigned s = 0; s < OT_MAX; s++) begin
+          if (ar_ot_q[s].valid && ar_ot_q[s].core == CID_W'(c) &&
+              ar_ot_q[s].orig_id == core_req_i[c].ar.id)
+            ar_same_id_live[c] = 1'b1;
+        end
+      end
+    end
 
     always_comb begin
       ar_have_free = 1'b0;
