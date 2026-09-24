@@ -56,7 +56,12 @@ module g6lc_apu_attach
   input  logic cfg_display_event_i,
   output logic bus_fault_o,
   output dma_req_t dma_req_o,
-  input  dma_rsp_t dma_rsp_i
+  input  dma_rsp_t dma_rsp_i,
+  input  logic guest_hold_i,
+  input  logic [31:0] guest_epoch_i,
+  input  logic ctrl_hold_i,
+  input  logic [31:0] ctrl_epoch_i,
+  output logic [31:0] epoch_o
 );
   localparam int unsigned PlicBit = ApuCfg.IrqSource - 1;
   localparam logic [63:0] GpioBase = 64'h0000_0000_4000_0000;
@@ -95,7 +100,8 @@ module g6lc_apu_attach
     .vq_state_o, .queue_enable_o, .backend_reset_req_o,
     .backend_queue_stop_req_o, .backend_reset_done_i, .backend_idle_i,
     .used_valid_i, .used_qid_i, .used_context_i, .used_fence_i, .used_len_i,
-    .used_ready_o, .cfg_display_event_i, .bus_fault_o, .dma_req_o, .dma_rsp_i
+    .used_ready_o, .cfg_display_event_i, .bus_fault_o, .dma_req_o, .dma_rsp_i,
+    .guest_hold_i, .guest_epoch_i, .ctrl_hold_i, .ctrl_epoch_i, .epoch_o
   );
 
   if (!ApuCfg.Enable) begin : gen_off

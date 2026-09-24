@@ -42,6 +42,12 @@ module g6lc_apu_xbar
   output logic [63:0] guest_end_o,
   output logic [63:0] control_base_o,
   output logic [63:0] control_end_o,
+  // Reset and queue-stop stay asserted until the platform reports the
+  // backend idle and, for device reset, teardown done. They are not tied off.
+  output logic backend_reset_req_o,
+  output logic [APU_NUM_QUEUES-1:0] backend_queue_stop_req_o,
+  input  logic backend_reset_done_i,
+  input  logic [APU_NUM_QUEUES-1:0] backend_idle_i,
   output dma_req_t dma_req_o,
   input  dma_rsp_t dma_rsp_i
 );
@@ -65,8 +71,8 @@ module g6lc_apu_xbar
       end_addr: ApuCfg.ControlBase + ApuCfg.ControlLength
   };
 
-  logic unused_girq, unused_cirq, unused_fault, unused_reset, unused_ready;
-  logic [APU_NUM_QUEUES-1:0] unused_qe, unused_stop;
+  logic unused_girq, unused_cirq, unused_fault, unused_ready;
+  logic [APU_NUM_QUEUES-1:0] unused_qe;
   apu_vq_state_t unused_vq [APU_NUM_QUEUES];
 
   g6lc_apu_th #(
@@ -82,8 +88,8 @@ module g6lc_apu_xbar
     .plic_irq_o, .plic_source_o,
     .guest_base_o, .guest_end_o, .control_base_o, .control_end_o,
     .vq_state_o(unused_vq), .queue_enable_o(unused_qe),
-    .backend_reset_req_o(unused_reset), .backend_queue_stop_req_o(unused_stop),
-    .backend_reset_done_i(1'b1), .backend_idle_i('1),
+    .backend_reset_req_o, .backend_queue_stop_req_o,
+    .backend_reset_done_i, .backend_idle_i,
     .used_valid_i(1'b0), .used_qid_i('0), .used_context_i('0),
     .used_fence_i('0), .used_len_i('0), .used_ready_o(unused_ready),
     .cfg_display_event_i(1'b0), .bus_fault_o(unused_fault),
@@ -91,6 +97,6 @@ module g6lc_apu_xbar
   );
 
   logic unused;
-  assign unused = unused_girq | unused_cirq | unused_fault | unused_reset |
-                  unused_ready | |unused_qe | |unused_stop | testmode_i;
+  assign unused = unused_girq | unused_cirq | unused_fault |
+                  unused_ready | |unused_qe | testmode_i;
 endmodule

@@ -35,14 +35,17 @@ static int expect_ok(const char *text, const uint32_t *want, unsigned nw)
   return 0;
 }
 
-static int expect_fail(const char *text)
+static int expect_rc(const char *text, int want)
 {
   uint32_t got[APU_TGSI_MAX_INST];
   unsigned n = 0;
   char err[80];
-  if (g6lc_apu_tgsi_compile(text, got, APU_TGSI_MAX_INST, &n, err, sizeof(err)) ==
-      0)
-    FAIL("expected reject");
+  int rc = g6lc_apu_tgsi_compile(text, got, APU_TGSI_MAX_INST, &n, err,
+                                 sizeof(err));
+  if (rc != want) {
+    printf("FAIL rc=%d want=%d\n", rc, want);
+    return 1;
+  }
   return 0;
 }
 
@@ -116,6 +119,25 @@ int main(void)
   if (expect_ok(movtemp, movtemp_w, 2) != 0)
     return 1;
 
+  static const char movsrc[] =
+      "FRAG\n"
+      "MOV TEMP[0], TEMP[2]\n"
+      "END\n";
+  static const uint32_t movsrc_w[] = {
+      APU_EX_ENC(APU_EX_MOV, 4, 6, 0, 0, 0, 0, 0), APU_EX_HALT_WORD};
+  if (expect_ok(movsrc, movsrc_w, 2) != 0)
+    return 1;
+
+  static const char imm_y[] =
+      "FRAG\n"
+      "IMM[0] FLT32 {0, 0.5, 1, 2}\n"
+      "MOV TEMP[0], IMM[0].yyyy\n"
+      "END\n";
+  static const uint32_t imm_y_w[] = {APU_EX_LDC_R4_WORD, 0x3f000000u,
+                                     APU_EX_HALT_WORD};
+  if (expect_ok(imm_y, imm_y_w, 3) != 0)
+    return 1;
+
   static const char imm_mov[] =
       "FRAG\n"
       "DCL TEMP[0]\n"
@@ -150,21 +172,22 @@ int main(void)
   if (expect_ok(imm_neg, imm_neg_w, 3) != 0)
     return 1;
 
-  if (expect_fail("FRAG\nDCL SAMP[0]\nTEX OUT[0], IN[0], SAMP[0], 2D\nEND\n") !=
-      0)
+  if (expect_rc("FRAG\nDCL SAMP[0]\nTEX OUT[0], IN[0], SAMP[0], 2D\nEND\n",
+                -26) != 0)
     return 1;
-  if (expect_fail("FRAG\nIF TEMP[0]\nEND\n") != 0)
+  if (expect_rc("FRAG\nIF TEMP[0]\nEND\n", -26) != 0)
     return 1;
-  if (expect_fail("FRAG\nADD OUT[0], -IN[0], IN[1]\nEND\n") != 0)
+  if (expect_rc("FRAG\nADD OUT[0], -IN[0], IN[1]\nEND\n", -1) != 0)
     return 1;
-  if (expect_fail("FRAG\nMOV TEMP[0], 0.3\nEND\n") != 0)
+  if (expect_rc("FRAG\nMOV TEMP[0], 0.3\nEND\n", -25) != 0)
     return 1;
-  if (expect_fail("FRAG\nMOV TEMP[0], IMM[0]\nEND\n") != 0)
+  if (expect_rc("FRAG\nMOV TEMP[0], IMM[0]\nEND\n", -25) != 0)
     return 1;
-  if (expect_fail("FRAG\nIMM[0] FLT32 {1.0, 0.0, 0.0, 1.0}\n"
-                  "MOV TEMP[0], IMM[0]\nEND\n") != 0)
+  if (expect_rc("FRAG\nIMM[0] FLT32 {1.0, 0.0, 0.0, 1.0}\n"
+                "MOV TEMP[0], IMM[0]\nEND\n",
+                -25) != 0)
     return 1;
-  if (expect_fail("") != 0)
+  if (expect_rc("", -27) != 0)
     return 1;
   puts("PASS tgsi_check");
   return 0;

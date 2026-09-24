@@ -47,7 +47,12 @@ module g6lc_apu_soc
   input  logic cfg_display_event_i,
   output logic bus_fault_o,
   output dma_req_t dma_req_o,
-  input  dma_rsp_t dma_rsp_i
+  input  dma_rsp_t dma_rsp_i,
+  input  logic guest_hold_i,
+  input  logic [31:0] guest_epoch_i,
+  input  logic ctrl_hold_i,
+  input  logic [31:0] ctrl_epoch_i,
+  output logic [31:0] epoch_o
 );
   logic aw_auth, ar_auth, fw_irq;
 
@@ -73,7 +78,8 @@ module g6lc_apu_soc
     .backend_reset_done_i, .backend_idle_i,
     .used_valid_i, .used_qid_i, .used_context_i, .used_fence_i, .used_len_i,
     .used_ready_o, .cfg_display_event_i, .bus_fault_o,
-    .dma_req_o, .dma_rsp_i
+    .dma_req_o, .dma_rsp_i,
+    .guest_hold_i, .guest_epoch_i, .ctrl_hold_i, .ctrl_epoch_i, .epoch_o
   );
 
   logic unused_fw;

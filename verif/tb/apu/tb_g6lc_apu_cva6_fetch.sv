@@ -87,6 +87,8 @@ module tb_g6lc_apu_cva6_fetch;
     .clk_i(clk),
     .rst_ni,
     .testmode_i(1'b1),
+    .aw_hart_i(32'd1),
+    .ar_hart_i(32'd1),
     .slv_req_i(core_req),
     .slv_rsp_o(core_rsp),
     .ram_rule_o(ram_rule),

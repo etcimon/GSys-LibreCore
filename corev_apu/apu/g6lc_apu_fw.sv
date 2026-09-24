@@ -69,7 +69,9 @@ module g6lc_apu_fw
     .backend_reset_done_i,
     .backend_idle_i(backend_idle_i & {APU_NUM_QUEUES{exec_idle}}),
     .used_valid_i, .used_qid_i, .used_context_i, .used_fence_i, .used_len_i,
-    .used_ready_o, .cfg_display_event_i, .mbox_req_o(mbox_req), .mbox_rsp_i(mbox_rsp)
+    .used_ready_o, .cfg_display_event_i, .mbox_req_o(mbox_req), .mbox_rsp_i(mbox_rsp),
+    .guest_hold_i(1'b0), .guest_epoch_i('0), .ctrl_hold_i(1'b0), .ctrl_epoch_i('0),
+    .epoch_o()
   );
 
   if (!ExecEn) begin : gen_off

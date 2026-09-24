@@ -166,7 +166,7 @@ parse_f32_bits(const char **ps, uint32_t *bits)
 TGSI_LEAF int parse_swizzle(const char **ps)
 {
   const char *s = *ps;
-  if (*s != '.')
+  if (tch(s, 0) != '.')
     return 0;
   s = pinc(s, 1);
   if (tch(s, 0) == 'x' && tch(s, 1) == 'y' && tch(s, 2) == 'z' && tch(s, 3) == 'w') {
@@ -215,7 +215,7 @@ TGSI_LEAF int parse_reg(const char **ps, unsigned *reg)
   } else {
     return -1;
   }
-  if (parse_u(&s, &idx) != 0 || *s != ']')
+  if (parse_u(&s, &idx) != 0 || tch(s, 0) != ']')
     return -1;
   s = pinc(s, 1);
   sw = parse_swizzle(&s);
@@ -238,14 +238,14 @@ TGSI_LEAF int parse_src(const char **ps, uint32_t imm[][4], unsigned imm_mask,
   o->neg = 0;
   o->is_imm = 0;
   o->bits = 0;
-  if (*s == '-' && !(tch(s, 1) >= '0' && tch(s, 1) <= '9') && tch(s, 1) != '.') {
+  if (tch(s, 0) == '-' && !(tch(s, 1) >= '0' && tch(s, 1) <= '9') && tch(s, 1) != '.') {
     o->neg = 1;
     s = pinc(s, 1);
     s = skip_ws(s);
   }
   if (tch(s, 0) == 'I' && tch(s, 1) == 'M' && tch(s, 2) == 'M' && tch(s, 3) == '[') {
     s = pinc(s, 4);
-    if (parse_u(&s, &idx) != 0 || *s != ']' || idx >= APU_TGSI_MAX_IMM)
+    if (parse_u(&s, &idx) != 0 || tch(s, 0) != ']' || idx >= APU_TGSI_MAX_IMM)
       return -1;
     s = pinc(s, 1);
     if ((imm_mask & (1u << idx)) == 0)
@@ -267,7 +267,7 @@ TGSI_LEAF int parse_src(const char **ps, uint32_t imm[][4], unsigned imm_mask,
     *ps = s;
     return 0;
   }
-  if ((*s >= '0' && *s <= '9') || *s == '-' || *s == '.') {
+  if ((tch(s, 0) >= '0' && tch(s, 0) <= '9') || tch(s, 0) == '-' || tch(s, 0) == '.') {
     if (parse_f32_bits(&s, &o->bits) != 0)
       return -1;
     o->is_imm = 1;
@@ -353,16 +353,16 @@ parse_imm_decl(const char **pp, uint32_t imm[][4], unsigned *mask)
   if (!(tch(p, 0) == 'I' && tch(p, 1) == 'M' && tch(p, 2) == 'M' && tch(p, 3) == '['))
     return 0;
   p = pinc(p, 4);
-  if (parse_u(&p, &idx) != 0 || *p != ']' || idx >= APU_TGSI_MAX_IMM)
+  if (parse_u(&p, &idx) != 0 || tch(p, 0) != ']' || idx >= APU_TGSI_MAX_IMM)
     return -1;
   p = skip_ws(pinc(p, 1));
-  if (*p == ',')
+  if (tch(p, 0) == ',')
     p = skip_ws(pinc(p, 1));
   if (!(tch(p, 0) == 'F' && tch(p, 1) == 'L' && tch(p, 2) == 'T' && tch(p, 3) == '3' &&
         tch(p, 4) == '2'))
     return -1;
   p = skip_ws(pinc(p, 5));
-  if (*p != '{')
+  if (tch(p, 0) != '{')
     return -1;
   p = pinc(p, 1);
   for (k = 0; k < 4; k++) {
@@ -371,13 +371,13 @@ parse_imm_decl(const char **pp, uint32_t imm[][4], unsigned *mask)
     imm[idx][k] = bits;
     p = skip_ws(p);
     if (k < 3) {
-      if (*p != ',')
+      if (tch(p, 0) != ',')
         return -1;
       p = pinc(p, 1);
     }
   }
   p = skip_ws(p);
-  if (*p != '}')
+  if (tch(p, 0) != '}')
     return -1;
   *mask |= 1u << idx;
   *pp = skip_ws(pinc(p, 1));
@@ -432,10 +432,9 @@ int g6lc_apu_tgsi_compile(const char *text, uint32_t *out, unsigned max,
   i = 0;
   saw_header = 0;
   while (tch(text, i) != '\0') {
-    unsigned start = i;
+    unsigned start = (unsigned)i;
     if (i > APU_TGSI_TEXT_CAP)
       return -18;
-#ifdef __riscv
     for (;;) {
       char c = tch(text, i);
       if (c == '\0' || c == '\n')
@@ -444,51 +443,18 @@ int g6lc_apu_tgsi_compile(const char *text, uint32_t *out, unsigned max,
       if (i > APU_TGSI_TEXT_CAP)
         return -18;
     }
-#else
-    while (tch(text, i) != '\0' && tch(text, i) != '\n') {
-      i++;
-      if (i > APU_TGSI_TEXT_CAP)
-        return -18;
-    }
-#endif
     {
       const char *p;
       int decl;
       if (tch(text, i) == '\n')
         i = i + 1u;
-#ifdef __riscv
-      /* continue-only walk C27'd @8210. No *p smash; tch tokens only. */
-      p = skip_ws(tptr(text, start));
-      if (tch(p, 0) == '\0' || tch(p, 0) == '#')
-        continue;
-      if (!saw_header) {
-        if ((tch(p, 0) == 'F' && tch(p, 1) == 'R' && tch(p, 2) == 'A' &&
-             tch(p, 3) == 'G') ||
-            (tch(p, 0) == 'V' && tch(p, 1) == 'E' && tch(p, 2) == 'R' &&
-             tch(p, 3) == 'T')) {
-          saw_header = 1;
-          continue;
-        }
-        return -20;
-      }
-      if (tch(p, 0) == 'D' && tch(p, 1) == 'C' && tch(p, 2) == 'L' &&
-          (tch(p, 3) == ' ' || tch(p, 3) == '\t'))
-        continue;
-      if (tch(p, 0) == 'T' && tch(p, 1) == 'E' && tch(p, 2) == 'X')
-        return -26;
-      if (tch(p, 0) == 'M' && tch(p, 1) == 'O' && tch(p, 2) == 'V')
-        return -1;
-      if (tch(p, 0) == 'E' && tch(p, 1) == 'N' && tch(p, 2) == 'D')
-        return -27;
-      return -26;
-#else
-      /* Parse in place. tptr so 0x9000xxxx + i is add, not addw. */
+      /* One parser on host and CVA6. tptr/tch so 0x9000xxxx + i is add. */
       p = tptr(text, start);
       p = skip_ws(p);
       if ((uint8_t)tch(text, 0) != 'F' && (uint8_t)tch(text, 0) != 'V' &&
           tch(text, 0) != '\0')
         return -14;
-      if (*p == '\0' || *p == '#')
+      if (tch(p, 0) == '\0' || tch(p, 0) == '#')
         continue;
       if (!saw_header) {
         if ((tch(p, 0) == 'F' && tch(p, 1) == 'R' && tch(p, 2) == 'A' && tch(p, 3) == 'G') ||
@@ -518,7 +484,7 @@ int g6lc_apu_tgsi_compile(const char *text, uint32_t *out, unsigned max,
           lk++;
         }
         p = skip_ws(p);
-        if (*p != ':') {
+        if (tch(p, 0) != ':') {
           set_err(err, err_len, "bad label");
           return -1;
         }
@@ -539,7 +505,7 @@ int g6lc_apu_tgsi_compile(const char *text, uint32_t *out, unsigned max,
           return -24;
         }
         p = skip_ws(p);
-        if (*p == ',')
+        if (tch(p, 0) == ',')
           p = pinc(p, 1);
         if (parse_src(&p, imm, imm_mask, &sa) != 0) {
           set_err(err, err_len, "MOV src");
@@ -572,14 +538,14 @@ int g6lc_apu_tgsi_compile(const char *text, uint32_t *out, unsigned max,
           return -1;
         }
         p = skip_ws(p);
-        if (*p == ',')
+        if (tch(p, 0) == ',')
           p = pinc(p, 1);
         if (parse_src(&p, imm, imm_mask, &sa) != 0) {
           set_err(err, err_len, "ADD src0");
           return -1;
         }
         p = skip_ws(p);
-        if (*p == ',')
+        if (tch(p, 0) == ',')
           p = pinc(p, 1);
         if (parse_src(&p, imm, imm_mask, &sb) != 0) {
           set_err(err, err_len, "ADD src1");
@@ -609,14 +575,14 @@ int g6lc_apu_tgsi_compile(const char *text, uint32_t *out, unsigned max,
           return -1;
         }
         p = skip_ws(p);
-        if (*p == ',')
+        if (tch(p, 0) == ',')
           p = pinc(p, 1);
         if (parse_src(&p, imm, imm_mask, &sa) != 0) {
           set_err(err, err_len, "SUB src0");
           return -1;
         }
         p = skip_ws(p);
-        if (*p == ',')
+        if (tch(p, 0) == ',')
           p = pinc(p, 1);
         if (parse_src(&p, imm, imm_mask, &sb) != 0) {
           set_err(err, err_len, "SUB src1");
@@ -646,14 +612,14 @@ int g6lc_apu_tgsi_compile(const char *text, uint32_t *out, unsigned max,
           return -1;
         }
         p = skip_ws(p);
-        if (*p == ',')
+        if (tch(p, 0) == ',')
           p = pinc(p, 1);
         if (parse_src(&p, imm, imm_mask, &sa) != 0) {
           set_err(err, err_len, "MUL src0");
           return -1;
         }
         p = skip_ws(p);
-        if (*p == ',')
+        if (tch(p, 0) == ',')
           p = pinc(p, 1);
         if (parse_src(&p, imm, imm_mask, &sb) != 0) {
           set_err(err, err_len, "MUL src1");
@@ -682,21 +648,21 @@ int g6lc_apu_tgsi_compile(const char *text, uint32_t *out, unsigned max,
           return -1;
         }
         p = skip_ws(p);
-        if (*p == ',')
+        if (tch(p, 0) == ',')
           p = pinc(p, 1);
         if (parse_src(&p, imm, imm_mask, &sa) != 0) {
           set_err(err, err_len, "MAD src0");
           return -1;
         }
         p = skip_ws(p);
-        if (*p == ',')
+        if (tch(p, 0) == ',')
           p = pinc(p, 1);
         if (parse_src(&p, imm, imm_mask, &sb) != 0) {
           set_err(err, err_len, "MAD src1");
           return -1;
         }
         p = skip_ws(p);
-        if (*p == ',')
+        if (tch(p, 0) == ',')
           p = pinc(p, 1);
         if (parse_src(&p, imm, imm_mask, &sc) != 0) {
           set_err(err, err_len, "MAD src2");
@@ -721,7 +687,6 @@ int g6lc_apu_tgsi_compile(const char *text, uint32_t *out, unsigned max,
       }
       set_err(err, err_len, "unsupported TGSI");
       return -26;
-#endif
     }
   }
   set_err(err, err_len, "missing END");

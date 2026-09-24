@@ -4,7 +4,11 @@
 // Protected resource mapping table and one immutable command snapshot.
 // Firmware inserts/looks up/invalidates mappings; command bytes are copied
 // from a trusted stream into tc_sram and cannot be mutated until release.
-// Optional ICG is power-only (IS_FUNCTIONAL=0) and does not drop SRAM state.
+// A mapping is published only while its slot bit is set. Those bits are
+// flops: reset clears them, and so does invalidate once child_idle_i is
+// high. SRAM contents alone are not a live mapping. A command snapshot and
+// a slot stay published while the child DMA is busy. Optional ICG is
+// power-only (IS_FUNCTIONAL=0) and does not drop SRAM state.
 
 module g6lc_apu_storage
   import g6lc_apu_cfg_pkg::*;
@@ -18,6 +22,9 @@ module g6lc_apu_storage
   input  logic enable_i,
   input  logic cancel_i,
   input  logic invalidate_i,
+  // High only when the DMA that may be using a mapping or the command
+  // snapshot is idle. Retire waits for this pin.
+  input  logic child_idle_i,
 
   input  logic            map_valid_i,
   output logic            map_ready_o,
@@ -115,22 +122,28 @@ module g6lc_apu_storage
     logic [63:0] cmd_wdata, cmd_rdata_word;
     logic [7:0] cmd_be;
     logic [3:0] stream_bytes, beat_bytes;
-    logic stream_bad, inval_match;
+    logic stream_bad, inval_match, scan_live;
     logic [0:0][255:0] map_rdata;
     logic [0:0][63:0] cmd_rdata;
 
+    logic drop_q, release_pend_q;
     assign kill = cancel_i || invalidate_i || !enable_i;
     assign idle_o = state_q == Idle && !fault_q;
     assign bus_fault_o = fault_q;
-    assign cmd_held_o = cmd_held_q && !invalidate_i && enable_i;
-    assign map_ready_o = MapEn && idle_o && !kill && rst_ni;
+    // The snapshot stays visible until a retire is allowed. child_idle_i
+    // low holds both this pin and the slot bits.
+    assign cmd_held_o = cmd_held_q;
+    assign map_ready_o = MapEn && idle_o && !kill && child_idle_i && rst_ni;
     assign lookup_ready_o = MapEn && idle_o && !kill && !map_valid_i && rst_ni;
-    assign inval_ready_o = MapEn && idle_o && !kill && !map_valid_i && !lookup_valid_i && rst_ni;
-    assign cmd_ready_o = CmdEn && idle_o && !kill && !cmd_held_q && !map_valid_i &&
-                         !lookup_valid_i && !inval_valid_i && rst_ni;
+    assign inval_ready_o = MapEn && idle_o && !kill && child_idle_i &&
+                           !map_valid_i && !lookup_valid_i && rst_ni;
+    assign cmd_ready_o = CmdEn && idle_o && !kill && child_idle_i && !cmd_held_q &&
+                         !map_valid_i && !lookup_valid_i && !inval_valid_i && rst_ni;
     assign cmd_data_ready_o = state_q == CmdFill && !kill && status_q == APU_DMA_OK;
-    assign cmd_rd_ready_o = CmdEn && idle_o && cmd_held_q && !kill && !map_valid_i &&
-                            !lookup_valid_i && !inval_valid_i && !cmd_valid_i && rst_ni;
+    // One result at a time. A new read waits until the presented word is taken.
+    assign cmd_rd_ready_o = CmdEn && idle_o && cmd_held_q && !rd_valid_q && !kill &&
+                            !map_valid_i && !lookup_valid_i && !inval_valid_i &&
+                            !cmd_valid_i && rst_ni;
     assign map_cpl_valid_o = state_q == Done && op_q == OpMap;
     assign lookup_cpl_valid_o = state_q == Done && op_q == OpLookup;
     assign inval_cpl_valid_o = state_q == Done && op_q == OpInval;
@@ -196,20 +209,42 @@ module g6lc_apu_storage
       assign map_req = !fault_q && status_q == APU_DMA_OK &&
                        (state_q == InsScanReq || state_q == InsWrite ||
                         state_q == LkReq || state_q == InvalReq || state_q == InvalWrite);
-      assign map_we = state_q == InsWrite || state_q == InvalWrite;
-      assign inval_match = scan_map.valid &&
+      assign map_we = child_idle_i && !kill &&
+                      (state_q == InsWrite || state_q == InvalWrite);
+      // Publication authority. SRAM SimInit is not a reset, and rst_ni does
+      // not scrub the array. A slot lookup or duplicate hit requires this bit.
+      localparam int SlotBits = $clog2(ApuCfg.MaxResources);
+      logic [ApuCfg.MaxResources-1:0] slot_live_q;
+      function automatic logic slot_live_at(input logic [31:0] slot);
+        if (slot >= ApuCfg.MaxResources) return 1'b0;
+        return slot_live_q[slot[SlotBits-1:0]];
+      endfunction
+      assign scan_live = slot_live_at(scan_q);
+      assign inval_match = scan_live &&
                            ((inval_q.mode == APU_INVAL_SLOT && scan_q == inval_q.slot) ||
                             (inval_q.mode == APU_INVAL_RESOURCE &&
                              scan_map.resource_id == inval_q.resource_id) ||
                             (inval_q.mode == APU_INVAL_CONTEXT &&
                              scan_map.context_id == inval_q.context_id) ||
                             inval_q.mode == APU_INVAL_ALL);
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) slot_live_q <= '0;
+        else if ((invalidate_i || drop_q) && child_idle_i) slot_live_q <= '0;
+        else if (state_q == InsWrite && !kill && child_idle_i)
+          slot_live_q[ins_q.slot[SlotBits-1:0]] <= 1'b1;
+        else if (state_q == InvalWrite && child_idle_i && !kill)
+          slot_live_q[scan_q[SlotBits-1:0]] <= 1'b0;
+      end
+      `ifndef SYNTHESIS
+      assert property (@(posedge clk_i) disable iff (!rst_ni)
+        !child_idle_i |=> slot_live_q == $past(slot_live_q));
+      `endif
       tc_clk_gating #(.IS_FUNCTIONAL(0)) i_map_icg (
         .clk_i, .en_i(testmode_i | ~idle_o | map_valid_i | lookup_valid_i | inval_valid_i),
         .test_en_i(testmode_i), .clk_o(map_clk)
       );
       tc_sram #(.NumWords(ApuCfg.MaxResources), .DataWidth(256), .NumPorts(1),
-                .Latency(1), .SimInit("zeros")) i_map (
+                .Latency(1), .SimInit("none")) i_map (
         .clk_i(map_clk), .rst_ni, .req_i(map_req), .we_i(map_we), .addr_i(map_addr),
         .wdata_i(map_wdata), .be_i({32{1'b1}}), .rdata_o(map_rdata)
       );
@@ -219,6 +254,7 @@ module g6lc_apu_storage
       assign map_req = 1'b0;
       assign map_we = 1'b0;
       assign inval_match = 1'b0;
+      assign scan_live = 1'b0;
       assign map_rdata = '0;
     end
 
@@ -279,10 +315,18 @@ module g6lc_apu_storage
         cmd_held_q <= 1'b0;
         rd_valid_q <= 1'b0;
         fault_q <= 1'b0;
+        drop_q <= 1'b0;
+        release_pend_q <= 1'b0;
       end else begin
-        if (invalidate_i || !enable_i) begin
+        if (invalidate_i) drop_q <= 1'b1;
+        else if (child_idle_i && drop_q) drop_q <= 1'b0;
+        // A one-cycle release or invalidate is remembered until the child
+        // DMA is idle, then the snapshot retires. A command-read word already
+        // presented stays until the consumer takes it.
+        if (child_idle_i && (invalidate_i || drop_q || !enable_i || release_pend_q)) begin
           cmd_held_q <= 1'b0;
-          rd_valid_q <= 1'b0;
+          cmd_bytes_q <= '0;
+          release_pend_q <= 1'b0;
         end
         if (kill && status_q == APU_DMA_OK && state_q != Idle &&
             state_q != Done && state_q != Halted)
@@ -338,8 +382,10 @@ module g6lc_apu_storage
                 // Drop illegal firmware reads; do not mutate the snapshot.
               end else state_q <= CmdReadReq;
             end else if (CmdEn && cmd_release_i && cmd_held_q) begin
-              cmd_held_q <= 1'b0;
-              cmd_bytes_q <= '0;
+              if (child_idle_i) begin
+                cmd_held_q <= 1'b0;
+                cmd_bytes_q <= '0;
+              end else release_pend_q <= 1'b1;
             end
           end
           InsScanReq: begin
@@ -349,7 +395,7 @@ module g6lc_apu_storage
           end
           InsScanCap: begin
             if (kill) state_q <= Done;
-            else if (scan_map.valid && scan_map.resource_id == ins_q.mapping.resource_id &&
+            else if (scan_live && scan_map.resource_id == ins_q.mapping.resource_id &&
                      scan_q != ins_q.slot) begin
               status_q <= APU_DMA_BAD_RESOURCE;
               state_q <= Done;
@@ -358,7 +404,10 @@ module g6lc_apu_storage
               state_q <= InsScanReq;
             end
           end
-          InsWrite: if (kill) state_q <= Done; else state_q <= Done;
+          InsWrite: begin
+            if (kill) state_q <= Done;
+            else if (child_idle_i) state_q <= Done;
+          end
           LkReq: begin
             if (kill) state_q <= Done;
             else if (scan_q >= ApuCfg.MaxResources) begin
@@ -369,7 +418,7 @@ module g6lc_apu_storage
           LkCap: begin
             if (kill) state_q <= Done;
             else begin
-              if (scan_map.valid && scan_map.resource_id == lk_q.resource_id) begin
+              if (scan_live && scan_map.resource_id == lk_q.resource_id) begin
                 found_q_valid <= 1'b1;
                 found_q <= scan_map;
                 found_slot_q <= scan_q;
@@ -399,8 +448,11 @@ module g6lc_apu_storage
             end
           end
           InvalWrite: begin
-            scan_q <= scan_q + 1;
-            state_q <= InvalReq;
+            if (kill) state_q <= Done;
+            else if (child_idle_i) begin
+              scan_q <= scan_q + 1;
+              state_q <= InvalReq;
+            end
           end
           CmdFill: begin
             if (kill) state_q <= Done;
@@ -455,6 +507,8 @@ module g6lc_apu_storage
       cmd_cpl_valid_o && !cmd_cpl_ready_i |=> cmd_cpl_valid_o && $stable(cmd_cpl_o));
     assert property (@(posedge clk_i) disable iff (!rst_ni)
       cmd_rd_data_valid_o && !cmd_rd_data_ready_i |=> cmd_rd_data_valid_o && $stable(cmd_rd_data_o));
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+      cmd_held_q && !child_idle_i |=> cmd_held_q);
     assert property (@(posedge clk_i) disable iff (!rst_ni)
       state_q != Idle |-> !map_ready_o && !lookup_ready_o && !cmd_ready_o);
     `endif

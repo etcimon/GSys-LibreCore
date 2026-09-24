@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: MIT
 //
 // Testharness compositor mailbox exec: ExecEn=1 && !MemEn binds native exec
-// under g6lc_apu_sys. AXI4 control TID+IADD peek 10/11. ApuHarness.ExecEn
-// stays 0. Not CVA6, not OpenSBI, not TEX, not FPGA.
+// under g6lc_apu_sys. Memory plus exec is legal in g6lc_apu_sched; this
+// fixture stays exec-only. AXI4 control TID+IADD peek 10/11.
+// ApuHarness.ExecEn stays 0. Not CVA6, not OpenSBI, not TEX.
 
 `timescale 1ns/1ps
 
@@ -38,6 +39,7 @@ module g6lc_apu_th_exec_fixture
   input  apu_dma_axi_req_t guest_req_i, control_req_i, ram_req_i,
   output apu_dma_axi_resp_t guest_rsp_o, control_rsp_o, ram_rsp_o,
   input  logic [31:0] control_aw_hart_i, control_ar_hart_i,
+  input  logic [31:0] ram_aw_hart_i, ram_ar_hart_i,
   input  logic [29:0] irq_sources_i,
   output logic [29:0] irq_sources_o,
   output logic plic_irq_o, fw_ready_o,
@@ -45,7 +47,8 @@ module g6lc_apu_th_exec_fixture
   output axi_pkg::xbar_rule_64_t guest_rule_o, control_rule_o, ram_rule_o,
          dram_lo_rule_o, dram_hi_rule_o,
   output apu_dma_axi_req_t dma_req_o,
-  input  apu_dma_axi_resp_t dma_rsp_i
+  input  apu_dma_axi_resp_t dma_rsp_i,
+  output logic ram_fault_o
 );
   g6lc_apu_th_load #(
     .ApuCfg(g6lc_th_exec_test_pkg::exec_cfg(Enable, ExecEn, RamBytes)),
@@ -70,6 +73,7 @@ module tb_g6lc_apu_th_exec;
   axi_pkg::xbar_rule_64_t off_guest, off_ctrl, off_ram, off_lo, off_hi;
   apu_dma_axi_req_t dma_req, off_dma;
   apu_dma_axi_resp_t dma_rsp;
+  logic ram_fault, off_ram_fault;
   int errors = 0, checks = 0, cycles = 0, cases = 0;
 
   assign zreq = '0;
@@ -79,24 +83,28 @@ module tb_g6lc_apu_th_exec;
     .guest_req_i(guest_req), .control_req_i(ctrl_req), .ram_req_i(zreq),
     .guest_rsp_o(guest_rsp), .control_rsp_o(ctrl_rsp), .ram_rsp_o(ram_rsp),
     .control_aw_hart_i(aw_hart), .control_ar_hart_i(ar_hart),
+    .ram_aw_hart_i(aw_hart), .ram_ar_hart_i(ar_hart),
     .irq_sources_i(irq_in), .irq_sources_o(irq_out),
     .plic_irq_o(plic), .fw_ready_o(fw_ready),
     .boot_addr_core_o(boot),
     .guest_rule_o(guest_rule), .control_rule_o(ctrl_rule), .ram_rule_o(ram_rule),
     .dram_lo_rule_o(dram_lo), .dram_hi_rule_o(dram_hi),
-    .dma_req_o(dma_req), .dma_rsp_i(dma_rsp)
+    .dma_req_o(dma_req), .dma_rsp_i(dma_rsp),
+    .ram_fault_o(ram_fault)
   );
   g6lc_apu_th_exec_fixture #(.Enable(0), .ExecEn(0)) i_off (
     .clk_i(clk), .rst_ni, .testmode_i(1'b1),
     .guest_req_i(zreq), .control_req_i(zreq), .ram_req_i(zreq),
     .guest_rsp_o(), .control_rsp_o(), .ram_rsp_o(),
     .control_aw_hart_i(aw_hart), .control_ar_hart_i(ar_hart),
+    .ram_aw_hart_i(aw_hart), .ram_ar_hart_i(ar_hart),
     .irq_sources_i(irq_in), .irq_sources_o(off_irq),
     .plic_irq_o(off_plic), .fw_ready_o(off_ready),
     .boot_addr_core_o(off_boot),
     .guest_rule_o(off_guest), .control_rule_o(off_ctrl), .ram_rule_o(off_ram),
     .dram_lo_rule_o(off_lo), .dram_hi_rule_o(off_hi),
-    .dma_req_o(off_dma), .dma_rsp_i(dma_rsp)
+    .dma_req_o(off_dma), .dma_rsp_i(dma_rsp),
+    .ram_fault_o(off_ram_fault)
   );
 
   always #5 clk = ~clk;
@@ -223,6 +231,26 @@ module tb_g6lc_apu_th_exec;
 
     cases = 1;
     check("ApuHarness exec stays off", harness.ExecEn === 1'b0);
+    begin
+      apu_cfg_t mem;
+      mem = g6lc_th_exec_test_pkg::exec_cfg(1'b1, 1'b0);
+      mem.MaxResources = 8;
+      mem.DmaWindowBase = 64'h8000_0000;
+      mem.DmaWindowBytes = 64'h0001_0000;
+      check("resource table without exec is legal", apu_cfg_legal(mem));
+      mem.ExecEn = 1'b1;
+      check("resource table plus exec is legal",
+            apu_cfg_legal(mem) && apu_mem_exec_split(mem));
+      mem.ExecEn = 1'b0;
+      mem.MaxResources = 0;
+      mem.DmaReadEn = 1'b1;
+      check("dma read without exec is legal", apu_cfg_legal(mem));
+      mem.ExecEn = 1'b1;
+      check("dma read plus exec is legal",
+            apu_cfg_legal(mem) && apu_mem_exec_split(mem));
+      check("exec without a memory client is legal",
+            apu_cfg_legal(g6lc_th_exec_test_pkg::exec_cfg(1'b1, 1'b1)));
+    end
     check("ctrl idx 11", ctrl_rule.idx == 11);
     check("hart 1 boots firmware RAM", boot[1] == 39'h90000000);
     check("DMA initiator idle",

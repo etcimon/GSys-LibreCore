@@ -40,6 +40,8 @@ module g6lc_apu_th_load
   output axi4_rsp_t ram_rsp_o,
   input  logic [HartIdWidth-1:0] control_aw_hart_i,
   input  logic [HartIdWidth-1:0] control_ar_hart_i,
+  input  logic [HartIdWidth-1:0] ram_aw_hart_i,
+  input  logic [HartIdWidth-1:0] ram_ar_hart_i,
   input  logic [NumSources-1:0] irq_sources_i,
   output logic [NumSources-1:0] irq_sources_o,
   output logic plic_irq_o,
@@ -51,7 +53,11 @@ module g6lc_apu_th_load
   output axi_pkg::xbar_rule_64_t dram_lo_rule_o,
   output axi_pkg::xbar_rule_64_t dram_hi_rule_o,
   output dma_req_t dma_req_o,
-  input  dma_rsp_t dma_rsp_i
+  input  dma_rsp_t dma_rsp_i,
+  // High while firmware RAM holds a quarantined transaction and withholds
+  // its response. g6lc_apu_fault_sup watches this pin from outside the
+  // fabric reset it requests.
+  output logic ram_fault_o
 );
   `ifndef SYNTHESIS
   initial begin
@@ -101,6 +107,8 @@ module g6lc_apu_th_load
 `endif
 
   logic [31:0] unused_src;
+  logic unused_reset;
+  logic [APU_NUM_QUEUES-1:0] unused_stop;
   g6lc_apu_xbar #(
     .ApuCfg(ApuCfg), .CoreCfg(CoreCfg), .GuestIdx(GuestIdx), .CtrlIdx(CtrlIdx),
     .HartIdWidth(HartIdWidth), .NumSources(NumSources),
@@ -114,15 +122,21 @@ module g6lc_apu_th_load
     .plic_irq_o, .plic_source_o(unused_src),
     .guest_rule_o, .control_rule_o,
     .guest_base_o(), .guest_end_o(), .control_base_o(), .control_end_o(),
+    .backend_reset_req_o(unused_reset), .backend_queue_stop_req_o(unused_stop),
+    .backend_reset_done_i(1'b1), .backend_idle_i('1),
     .dma_req_o, .dma_rsp_i
   );
+  logic unused_drain;
+  assign unused_drain = unused_reset | |unused_stop;
 
   g6lc_apu_fwram #(
     .ApuCfg(ApuCfg), .RamIdx(RamIdx), .HexFile(HexFile),
     .axi4_req_t(axi4_req_t), .axi4_rsp_t(axi4_rsp_t)
   ) i_fwram (
     .clk_i, .rst_ni, .testmode_i,
+    .aw_hart_i(ram_aw_hart_i), .ar_hart_i(ram_ar_hart_i),
     .slv_req_i(ram_req_i), .slv_rsp_o(ram_rsp_o),
-    .ram_rule_o, .ram_base_o(), .ram_end_o()
+    .ram_rule_o, .ram_base_o(), .ram_end_o(),
+    .fault_o(ram_fault_o)
   );
 endmodule

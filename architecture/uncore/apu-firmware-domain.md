@@ -11,16 +11,21 @@ and compiles shaders; only the dedicated APU executes graphics stages.
 | Seam | Present | Not established |
 |---|---|---|
 | Configuration | `apu_soc_legal`, `apu_domain_legal`, NAPOT/order helpers; two physical cores, `NrHarts=1` | Actual PMP programming or isolation |
-| Firmware placement | `ApuHarness`: hart 1, RAM `0x90000000` / 256 KiB, control `0x40002000` / 4 KiB | RAM access firewall, image authentication, production loader |
+| Firmware placement | `ApuHarness`: hart 1, RAM `0x90000000` / 256 KiB, control `0x40002000` / 4 KiB. RAM and control compare the supplied hart. A non-firmware core is stopped before the hub | Image authentication and a production loader. L2 line fills are not themselves tagged |
 | Application device | Guest `0x40001000` / 4 KiB; PLIC source 9 (AI remains source 8) | Working virgl device or coherent DMA |
 | Boot | `PerCoreBoot`, firmware hex preload and CVA6 commit/cookie tests | An OpenSBI-launched S-mode service surviving Linux boot |
 | Domain overlay | Opt-in `ariane-g6lc-apu.dts` includes `g6lc-apu-domain.dtsi` | Overlay selects `next-mode=3` (M-mode), not the intended S-mode payload |
-| Source grant | `g6lc_apu_grant` compares supplied source/hart and full control address | The testharness supplies a constant firmware tag; this is not authentication |
+| Source grant | Control and firmware RAM admit only the reserved hart. RAM captures that decision at AW/AR. AXI id and PROT are not arguments. Remote 2026-09-22: grant 18/12, fwram 52/5739/5479 | The testharness still stamps `ApuHarness.FirmwareHart` on every beat. That constant is bring-up wiring, not fabric authentication |
 
 The overlay's M-mode permissions and direct reset into firmware are diagnostic
 scaffolding, **not** the deployment contract. Do not enable the Linux GPU node or
 claim source isolation from these tests. A DT omission or `reserved-memory` alone
-is not access control. Firmware RAM currently has no source input at all.
+is not access control. Firmware RAM captures the supplied hart with AW and
+AR. Before the hub merges the cores, `g6lc_apu_src_guard` finishes a
+non-firmware hart's RAM or control transaction locally. The firmware hart
+is a wire. At the crossbar, the upper ID bits are the slave-port index.
+The cluster port is the firmware hart. Debug and DMA ports are hart 0.
+The master's low ID bits are not a hart.
 
 ## Target boot contract (not yet implemented)
 

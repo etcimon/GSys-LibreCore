@@ -40,15 +40,14 @@ module g6lc_apu_grant
     assign unused = clk_i | rst_ni | testmode_i | guest_irq_i | control_irq_i |
                     |aw_hart_i | |ar_hart_i | |aw_addr_i | |ar_addr_i;
   end else begin : gen_on
-    localparam logic FwOk = ApuCfg.FirmwareHart != APU_FW_HART_UNASSIGNED;
     function automatic logic in_control(input logic [63:0] addr);
       return addr >= ApuCfg.ControlBase &&
              (addr - ApuCfg.ControlBase) < ApuCfg.ControlLength;
     endfunction
-    assign control_aw_authorized_o = FwOk &&
-        aw_hart_i == HartIdWidth'(ApuCfg.FirmwareHart) && in_control(aw_addr_i);
-    assign control_ar_authorized_o = FwOk &&
-        ar_hart_i == HartIdWidth'(ApuCfg.FirmwareHart) && in_control(ar_addr_i);
+    assign control_aw_authorized_o =
+        apu_source_is_fw(ApuCfg, 32'(aw_hart_i)) && in_control(aw_addr_i);
+    assign control_ar_authorized_o =
+        apu_source_is_fw(ApuCfg, 32'(ar_hart_i)) && in_control(ar_addr_i);
     assign plic_irq_o = guest_irq_i;
     assign plic_source_o = 32'(ApuCfg.IrqSource);
     assign fw_irq_o = control_irq_i;

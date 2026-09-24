@@ -5,7 +5,9 @@
 // bridge. Accepts aligned 32-bit accesses (len=0, size=2) and aligned 64-bit
 // single-beat stores (len=0, size=3, addr[2:0]=0) which split into two 32-bit
 // lite writes. CVA6 WT may pack two 32-bit MMIO stores into one beat.
-// Default-off is a SLVERR error slave. Not a general downsizer.
+// Default-off is a SLVERR error slave. A rejected burst accepts every
+// AWLEN+1 or ARLEN+1 beat before its response. A split store keeps an
+// earlier half's error when the later half succeeds. Not a general downsizer.
 
 module g6lc_apu_axi4_lite
   import g6lc_apu_bus_pkg::*;
@@ -22,11 +24,28 @@ module g6lc_apu_axi4_lite
   input  axi4_req_t slv_req_i,
   output axi4_rsp_t slv_rsp_o,
   output lite_req_t lite_req_o,
-  input  lite_rsp_t lite_rsp_i
+  input  lite_rsp_t lite_rsp_i,
+  // Live admission epoch. Captured with AW/AR and held while the lite
+  // request is presented, so a later epoch change cannot retag the beat.
+  input  logic [31:0] epoch_i,
+  output logic hold_o,
+  output logic [31:0] admitted_o
 );
   typedef enum logic [3:0] {
-    Idle, WaitW, IssueW, WaitWB, SendB, IssueR, WaitRR, SendR, ErrB, ErrR
+    Idle, WaitW, DrainW, IssueW, WaitWB, SendB, IssueR, WaitRR, SendR,
+    ErrB, ErrR, Fault
   } state_e;
+
+  // The second half of a split store must not replace an error already
+  // recorded for the low half with OKAY.
+  function automatic logic [1:0] agg_bresp(
+    input logic [1:0] prev, next,
+    input logic keep_err
+  );
+    if (keep_err && prev != axi_pkg::RESP_OKAY && next == axi_pkg::RESP_OKAY)
+      return prev;
+    return next;
+  endfunction
 
   function automatic logic wr_ok(input axi4_req_t r);
     logic ok;
@@ -41,10 +60,12 @@ module g6lc_apu_axi4_lite
   endfunction
 
   localparam int unsigned IdW = $bits(slv_req_i.aw.id);
+  localparam int unsigned LenW = $bits(slv_req_i.aw.len);
 
   if (!Enable) begin : gen_off
     state_e state_q;
     logic [IdW-1:0] id_q;
+    logic [LenW-1:0] beats_q;
     always_comb begin
       slv_rsp_o = '0;
       unique case (state_q)
@@ -53,41 +74,65 @@ module g6lc_apu_axi4_lite
           slv_rsp_o.w_ready  = slv_req_i.aw_valid;
           slv_rsp_o.ar_ready = !slv_req_i.aw_valid;
         end
-        WaitW: slv_rsp_o.w_ready = 1'b1;
+        WaitW, DrainW: slv_rsp_o.w_ready = 1'b1;
         ErrB, SendB: begin
           slv_rsp_o.b_valid = 1'b1;
           slv_rsp_o.b.id = id_q;
           slv_rsp_o.b.resp = axi_pkg::RESP_SLVERR;
         end
-        default: begin
+        ErrR: begin
           slv_rsp_o.r_valid = 1'b1;
           slv_rsp_o.r.id = id_q;
           slv_rsp_o.r.resp = axi_pkg::RESP_SLVERR;
-          slv_rsp_o.r.last = 1'b1;
+          slv_rsp_o.r.last = (beats_q == '0);
         end
+        default: ;
       endcase
     end
     assign lite_req_o = '0;
+    assign hold_o = 1'b0;
+    assign admitted_o = '0;
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        state_q <= Idle; id_q <= '0;
+        state_q <= Idle; id_q <= '0; beats_q <= '0;
       end else unique case (state_q)
         Idle: begin
           if (slv_req_i.aw_valid && slv_rsp_o.aw_ready) begin
             id_q <= slv_req_i.aw.id;
-            state_q <= (slv_req_i.w_valid && slv_rsp_o.w_ready) ? ErrB : WaitW;
+            beats_q <= slv_req_i.aw.len;
+            state_q <= DrainW;
+            if (slv_req_i.w_valid && slv_rsp_o.w_ready) begin
+              if (slv_req_i.w.last != (slv_req_i.aw.len == '0)) state_q <= Fault;
+              else if (slv_req_i.aw.len == '0) state_q <= ErrB;
+              else beats_q <= slv_req_i.aw.len - 1'b1;
+            end
           end else if (slv_req_i.ar_valid && slv_rsp_o.ar_ready) begin
             id_q <= slv_req_i.ar.id;
+            beats_q <= slv_req_i.ar.len;
             state_q <= ErrR;
           end
         end
-        WaitW: if (slv_req_i.w_valid) state_q <= ErrB;
+        WaitW, DrainW: if (slv_req_i.w_valid && slv_rsp_o.w_ready) begin
+          if (slv_req_i.w.last != (beats_q == '0)) state_q <= Fault;
+          else if (beats_q == '0) state_q <= ErrB;
+          else beats_q <= beats_q - 1'b1;
+        end
         ErrB, SendB: if (slv_req_i.b_ready) state_q <= Idle;
-        default: if (slv_req_i.r_ready) state_q <= Idle;
+        ErrR: if (slv_req_i.r_ready) begin
+          if (beats_q == '0) state_q <= Idle;
+          else beats_q <= beats_q - 1'b1;
+        end
+        default: ;
       endcase
     end
     logic unused;
-    assign unused = testmode_i | |lite_rsp_i;
+    assign unused = testmode_i | |lite_rsp_i | (|epoch_i);
+    `ifndef SYNTHESIS
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+      state_q inside {WaitW, DrainW, Fault} |-> !slv_rsp_o.b_valid);
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+      state_q == ErrR && beats_q != '0 |-> slv_rsp_o.r_valid && !slv_rsp_o.r.last);
+    `endif
   end else begin : gen_on
     state_e state_q;
     logic [IdW-1:0] id_q;
@@ -96,8 +141,12 @@ module g6lc_apu_axi4_lite
     logic [7:0] wstrb_q;
     logic [3:0] strb_q;
     logic [1:0] resp_q;
-    logic hi, aw_h, w_h, size3_q, half_q;
+    logic [LenW-1:0] beats_q;
+    logic hi, aw_h, w_h, size3_q, half_q, low_done_q;
+    logic [31:0] epoch_aw_q, epoch_ar_q;
     assign hi = addr_q[2];
+    assign hold_o = (state_q == IssueW) || (state_q == IssueR);
+    assign admitted_o = (state_q == IssueR) ? epoch_ar_q : epoch_aw_q;
 
     always_comb begin
       slv_rsp_o = '0;
@@ -108,7 +157,7 @@ module g6lc_apu_axi4_lite
           slv_rsp_o.w_ready  = slv_req_i.aw_valid;
           slv_rsp_o.ar_ready = !slv_req_i.aw_valid;
         end
-        WaitW: slv_rsp_o.w_ready = 1'b1;
+        WaitW, DrainW: slv_rsp_o.w_ready = 1'b1;
         IssueW: begin
           lite_req_o.aw.addr = (size3_q && half_q) ? (addr_q + 64'd4) : addr_q;
           lite_req_o.aw.prot = 3'b000;
@@ -146,26 +195,31 @@ module g6lc_apu_axi4_lite
           slv_rsp_o.b.id = id_q;
           slv_rsp_o.b.resp = axi_pkg::RESP_SLVERR;
         end
-        default: begin
+        ErrR: begin
           slv_rsp_o.r_valid = 1'b1;
           slv_rsp_o.r.id = id_q;
           slv_rsp_o.r.resp = axi_pkg::RESP_SLVERR;
-          slv_rsp_o.r.last = 1'b1;
+          slv_rsp_o.r.last = (beats_q == '0);
         end
+        default: ;
       endcase
     end
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         state_q <= Idle; id_q <= '0; addr_q <= '0; data_q <= '0; strb_q <= '0;
-        wdata_q <= '0; wstrb_q <= '0; resp_q <= '0; aw_h <= 1'b0; w_h <= 1'b0;
-        size3_q <= 1'b0; half_q <= 1'b0;
+        wdata_q <= '0; wstrb_q <= '0; resp_q <= '0; beats_q <= '0;
+        aw_h <= 1'b0; w_h <= 1'b0;
+        size3_q <= 1'b0; half_q <= 1'b0; low_done_q <= 1'b0;
+        epoch_aw_q <= '0; epoch_ar_q <= '0;
       end else unique case (state_q)
         Idle: begin
-          aw_h <= 1'b0; w_h <= 1'b0; half_q <= 1'b0;
+          aw_h <= 1'b0; w_h <= 1'b0; half_q <= 1'b0; low_done_q <= 1'b0;
           if (slv_req_i.aw_valid && slv_rsp_o.aw_ready) begin
             id_q <= slv_req_i.aw.id;
             addr_q <= slv_req_i.aw.addr;
+            epoch_aw_q <= epoch_i;
+            beats_q <= slv_req_i.aw.len;
             size3_q <= slv_req_i.aw.size == 3'd3;
             if (slv_req_i.w_valid && slv_rsp_o.w_ready) begin
               wdata_q <= slv_req_i.w.data;
@@ -177,11 +231,17 @@ module g6lc_apu_axi4_lite
               half_q <= slv_req_i.aw.size == 3'd3 &&
                         slv_req_i.w.strb[3:0] == 4'h0 &&
                         slv_req_i.w.strb[7:4] != 4'h0;
-              state_q <= (wr_ok(slv_req_i) && slv_req_i.w.last) ? IssueW : ErrB;
-            end else state_q <= wr_ok(slv_req_i) ? WaitW : ErrB;
+              if (slv_req_i.w.last != (slv_req_i.aw.len == '0)) state_q <= Fault;
+              else if (slv_req_i.aw.len != '0) begin
+                beats_q <= slv_req_i.aw.len - 1'b1;
+                state_q <= DrainW;
+              end else state_q <= wr_ok(slv_req_i) ? IssueW : ErrB;
+            end else state_q <= wr_ok(slv_req_i) ? WaitW : DrainW;
           end else if (slv_req_i.ar_valid && slv_rsp_o.ar_ready) begin
             id_q <= slv_req_i.ar.id;
             addr_q <= slv_req_i.ar.addr;
+            epoch_ar_q <= epoch_i;
+            beats_q <= slv_req_i.ar.len;
             state_q <= rd_ok(slv_req_i) ? IssueR : ErrR;
           end
         end
@@ -192,7 +252,12 @@ module g6lc_apu_axi4_lite
           strb_q <= addr_q[2] ? slv_req_i.w.strb[7:4] : slv_req_i.w.strb[3:0];
           half_q <= size3_q && slv_req_i.w.strb[3:0] == 4'h0 &&
                     slv_req_i.w.strb[7:4] != 4'h0;
-          state_q <= slv_req_i.w.last ? IssueW : ErrB;
+          state_q <= slv_req_i.w.last ? IssueW : Fault;
+        end
+        DrainW: if (slv_req_i.w_valid && slv_rsp_o.w_ready) begin
+          if (slv_req_i.w.last != (beats_q == '0)) state_q <= Fault;
+          else if (beats_q == '0) state_q <= ErrB;
+          else beats_q <= beats_q - 1'b1;
         end
         IssueW: begin
           if (lite_req_o.aw_valid && lite_rsp_i.aw_ready) aw_h <= 1'b1;
@@ -200,17 +265,17 @@ module g6lc_apu_axi4_lite
           if ((aw_h || (lite_req_o.aw_valid && lite_rsp_i.aw_ready)) &&
               (w_h  || (lite_req_o.w_valid && lite_rsp_i.w_ready))) begin
             if (lite_rsp_i.b_valid) begin
-              resp_q <= lite_rsp_i.b.resp;
+              resp_q <= agg_bresp(resp_q, lite_rsp_i.b.resp, low_done_q);
               if (size3_q && !half_q && |wstrb_q[7:4]) begin
-                half_q <= 1'b1; aw_h <= 1'b0; w_h <= 1'b0;
+                half_q <= 1'b1; aw_h <= 1'b0; w_h <= 1'b0; low_done_q <= 1'b1;
               end else state_q <= SendB;
             end else state_q <= WaitWB;
           end
         end
         WaitWB: if (lite_rsp_i.b_valid && lite_req_o.b_ready) begin
-          resp_q <= lite_rsp_i.b.resp;
+          resp_q <= agg_bresp(resp_q, lite_rsp_i.b.resp, low_done_q);
           if (size3_q && !half_q && |wstrb_q[7:4]) begin
-            half_q <= 1'b1; aw_h <= 1'b0; w_h <= 1'b0;
+            half_q <= 1'b1; aw_h <= 1'b0; w_h <= 1'b0; low_done_q <= 1'b1;
             state_q <= IssueW;
           end else state_q <= SendB;
         end
@@ -223,10 +288,24 @@ module g6lc_apu_axi4_lite
         end
         SendR: if (slv_req_i.r_ready) state_q <= Idle;
         ErrB: if (slv_req_i.b_ready) state_q <= Idle;
-        default: if (slv_req_i.r_ready) state_q <= Idle;
+        ErrR: if (slv_req_i.r_ready) begin
+          if (beats_q == '0) state_q <= Idle;
+          else beats_q <= beats_q - 1'b1;
+        end
+        default: ;
       endcase
     end
     logic unused_tm;
     assign unused_tm = testmode_i;
+    `ifndef SYNTHESIS
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+      state_q inside {WaitW, DrainW, Fault} |-> !slv_rsp_o.b_valid);
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+      state_q == ErrR && beats_q != '0 |-> slv_rsp_o.r_valid && !slv_rsp_o.r.last);
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+      state_q inside {DrainW, ErrB, ErrR, Fault} |-> !lite_req_o.aw_valid &&
+                                                     !lite_req_o.w_valid &&
+                                                     !lite_req_o.ar_valid);
+    `endif
   end
 endmodule

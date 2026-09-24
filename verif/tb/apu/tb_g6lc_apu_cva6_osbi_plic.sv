@@ -407,6 +407,8 @@ module tb_g6lc_apu_cva6_osbi_plic;
     .axi4_rsp_t(ariane_axi::resp_t)
   ) i_rom (
     .clk_i(clk), .rst_ni, .testmode_i(1'b1),
+    .aw_hart_i(32'd1),
+    .ar_hart_i(32'd1),
     .slv_req_i(rom_req), .slv_rsp_o(rom_rsp),
     .ram_rule_o(), .ram_base_o(), .ram_end_o()
   );
@@ -418,6 +420,8 @@ module tb_g6lc_apu_cva6_osbi_plic;
     .axi4_rsp_t(ariane_axi::resp_t)
   ) i_ram (
     .clk_i(clk), .rst_ni, .testmode_i(1'b1),
+    .aw_hart_i(32'd1),
+    .ar_hart_i(32'd1),
     .slv_req_i(ram_req), .slv_rsp_o(ram_rsp),
     .ram_rule_o(), .ram_base_o(), .ram_end_o()
   );
@@ -429,6 +433,8 @@ module tb_g6lc_apu_cva6_osbi_plic;
     .axi4_rsp_t(ariane_axi::resp_t)
   ) i_dram (
     .clk_i(clk), .rst_ni, .testmode_i(1'b1),
+    .aw_hart_i(32'd1),
+    .ar_hart_i(32'd1),
     .slv_req_i(dram_req), .slv_rsp_o(dram_rsp),
     .ram_rule_o(), .ram_base_o(), .ram_end_o()
   );

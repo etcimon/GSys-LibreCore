@@ -1,8 +1,9 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 //
-// Frozen resident TGSI job: compile MOV, reject TEX. Separate from the
-// TID+IADD bring-up image. Not a virgl decoder and not EGL.
+// Resident TGSI job. The CVA6 image and the host call the same compiler.
+// TEX fails closed. Separate from the TID+IADD bring-up image.
+// Not a virgl decoder and not EGL.
 
 #ifndef G6LC_APU_TGSI_JOB_H
 #define G6LC_APU_TGSI_JOB_H

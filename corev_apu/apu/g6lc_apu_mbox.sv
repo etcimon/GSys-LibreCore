@@ -149,10 +149,8 @@ module g6lc_apu_mbox
       idx_q <= '0; stat_q <= '0; cpl0_q <= '0; cpl1_q <= '0; cpl2_q <= '0; cpl3_q <= '0;
       busy_q <= 1'b0; go_q <= 1'b0; op_q <= APU_MEM_NONE;
     end else begin
-      if (cancel_i) begin
-        busy_q <= 1'b0; go_q <= 1'b0;
-      end
-      if (go_q && op_ready_i) go_q <= 1'b0;
+      // A job the backend already took must finish, including a cancel
+      // completion. Drop only a GO that was never accepted.
       if (busy_q && op_cpl_valid_i) begin
         busy_q <= 1'b0;
         stat_q <= 32'(op_cpl_i.status);
@@ -166,7 +164,14 @@ module g6lc_apu_mbox
           mail_q[7] <= lookup_mapping_i.bytes[31:0];
           mail_q[8] <= lookup_mapping_i.bytes[63:32];
         end
+      end else if (cancel_i && go_q && busy_q) begin
+        go_q <= 1'b0;
+        busy_q <= 1'b0;
+        stat_q <= 32'(APU_DMA_CANCELLED);
+      end else if (cancel_i) begin
+        go_q <= 1'b0;
       end
+      if (go_q && op_ready_i && !cancel_i) go_q <= 1'b0;
       if (req_i.valid && req_i.write && !rsp_o.error) begin
         unique case (req_i.addr[15:0])
           ACTRL_MAIL_IDX: idx_q <= req_i.wdata;

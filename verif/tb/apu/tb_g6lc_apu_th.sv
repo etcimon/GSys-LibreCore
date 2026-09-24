@@ -318,6 +318,33 @@ module tb_g6lc_apu_th;
       check("split write retains AW authority", r == 32'(authorized));
     end
 
+    // Queue select accepts only 0 and 1. Admit a write of the other legal
+    // index, then bump the epoch before W so a retagged beat would stick.
+    cases++;
+    write_reg(1, APU_CONTROL_BASE + 64'(ACTRL_QUEUE_SEL), 0);
+    read_reg(1, APU_CONTROL_BASE + 64'(ACTRL_QUEUE_SEL), r);
+    check("fresh queue select sticks before the held beat", r == 32'd0);
+    read_reg(1, APU_CONTROL_BASE + 64'(ACTRL_EPOCH), r);
+    check("epoch is zero before the held beat", r == 32'd0);
+    check("device reset is idle before the held beat", reset_req == 1'b0);
+    @(negedge clk);
+    aw_hart = 32'd1;
+    req[1].aw.addr = APU_CONTROL_BASE + 64'(ACTRL_QUEUE_SEL);
+    req[1].aw.size = 3'd2; req[1].aw.len = '0; req[1].aw_valid = 1;
+    @(posedge clk); while (!rsp[1].aw_ready) @(posedge clk);
+    @(negedge clk); req[1].aw_valid = 0;
+    guest_write(VREG_STATUS, 32'h0);
+    check("guest status zero requests a reset", reset_req == 1'b1);
+    pack32(req[1].aw.addr, 32'd1, req[1].w.data, req[1].w.strb);
+    req[1].w.last = 1; req[1].w_valid = 1;
+    @(posedge clk); while (!rsp[1].w_ready) @(posedge clk);
+    @(negedge clk); req[1].w_valid = 0;
+    receive_write(1, RESP_SLVERR);
+    read_reg(1, APU_CONTROL_BASE + 64'(ACTRL_QUEUE_SEL), r);
+    check("stale AXI4 write keeps its admission epoch", r == 32'd0);
+    read_reg(1, APU_CONTROL_BASE, r);
+    check("new control read uses the live epoch", r == APU_CONTROL_MAGIC);
+
     if (errors != 0) $fatal(1, "APU th errors=%0d", errors);
     else begin
       $display("PASS tb_g6lc_apu_th cases=%0d checks=%0d cycles=%0d errors=0",

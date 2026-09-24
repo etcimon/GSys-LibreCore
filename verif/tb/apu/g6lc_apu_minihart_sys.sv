@@ -112,6 +112,8 @@ module g6lc_apu_minihart_sys
     .RamIdx(12)
   ) i_ram (
     .clk_i, .rst_ni, .testmode_i(1'b1),
+    .aw_hart_i(32'd1),
+    .ar_hart_i(32'd1),
     .slv_req_i(fwram_req), .slv_rsp_o(fwram_rsp),
     .ram_rule_o(ram_rule_o), .ram_base_o(), .ram_end_o()
   );

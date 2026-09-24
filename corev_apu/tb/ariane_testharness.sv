@@ -177,9 +177,18 @@ module ariane_testharness #(
     .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
   ) master[NB_MST-1:0]();
 
+`ifdef G6LC_APU
+  logic apu_ram_fault;
+  logic apu_fault_reset;
+`else
+  wire apu_fault_reset = 1'b0;
+`endif
+  // apu_fault_reset is requested by a supervisor that is NOT reset by
+  // ndmreset_n. Gating it here resets the fabric, including a quarantined
+  // RAM master, and the RAM fault clears because of that reset.
   rstgen i_rstgen_main (
     .clk_i        ( clk_i                ),
-    .rst_ni       ( rst_ni & (~ndmreset) ),
+    .rst_ni       ( rst_ni & (~ndmreset) & ~apu_fault_reset ),
     .test_mode_i  ( test_en              ),
     .rst_no       ( ndmreset_n           ),
     .init_no      (                      ) // keep open
@@ -859,6 +868,11 @@ module ariane_testharness #(
 `ifdef G6LC_APU
   // Opt-in APU load compositor: guest/control + firmware RAM + DRAM hole +
   // hart-1 boot PC. Testharness only stitches xbar masters. DMA stays idle.
+  // Hart pins come from the xbar port index in the upper ID bits.
+  // Port 0 is the cluster. The per-core guard has already kept every
+  // other hart out of these windows, so that port is the firmware hart.
+  // Debug and DMA ports are hart 0. The low ID bits are the master's own
+  // id, not a hart. AXI PROT is not an input.
   ariane_axi_soc::req_slv_t  apu_guest_req, apu_ctrl_req, apu_ram_req;
   ariane_axi_soc::resp_slv_t apu_guest_rsp, apu_ctrl_rsp, apu_ram_rsp;
   logic [ariane_soc::NumSources-1:0] apu_irq_vec_in, apu_irq_vec_out;
@@ -869,6 +883,30 @@ module ariane_testharness #(
   `AXI_ASSIGN_TO_REQ(apu_ram_req, master[APU_RAM_IDX])
   `AXI_ASSIGN_FROM_RESP(master[APU_RAM_IDX], apu_ram_rsp)
   assign apu_irq_vec_in = '0;
+  logic [31:0] apu_ram_aw_hart, apu_ram_ar_hart;
+  logic [31:0] apu_ctrl_aw_hart, apu_ctrl_ar_hart;
+  g6lc_apu_xbar_hart #(
+      .IdxW($clog2(ariane_soc::NrSlaves)),
+      .IdW(ariane_axi_soc::IdWidthSlave),
+      .FwHart(32'(g6lc_apu_cfg_pkg::ApuHarness.FirmwareHart)),
+      .ClusterPort(0)
+  ) i_ram_hart (
+      .aw_id_i(apu_ram_req.aw.id),
+      .ar_id_i(apu_ram_req.ar.id),
+      .aw_hart_o(apu_ram_aw_hart),
+      .ar_hart_o(apu_ram_ar_hart)
+  );
+  g6lc_apu_xbar_hart #(
+      .IdxW($clog2(ariane_soc::NrSlaves)),
+      .IdW(ariane_axi_soc::IdWidthSlave),
+      .FwHart(32'(g6lc_apu_cfg_pkg::ApuHarness.FirmwareHart)),
+      .ClusterPort(0)
+  ) i_ctrl_hart (
+      .aw_id_i(apu_ctrl_req.aw.id),
+      .ar_id_i(apu_ctrl_req.ar.id),
+      .aw_hart_o(apu_ctrl_aw_hart),
+      .ar_hart_o(apu_ctrl_ar_hart)
+  );
   g6lc_apu_th_load #(
     .ApuCfg(g6lc_apu_cfg_pkg::ApuHarness),
     .CoreCfg(CVA6Cfg),
@@ -890,15 +928,25 @@ module ariane_testharness #(
     .guest_req_i(apu_guest_req), .guest_rsp_o(apu_guest_rsp),
     .control_req_i(apu_ctrl_req), .control_rsp_o(apu_ctrl_rsp),
     .ram_req_i(apu_ram_req), .ram_rsp_o(apu_ram_rsp),
-    .control_aw_hart_i(32'(g6lc_apu_cfg_pkg::ApuHarness.FirmwareHart)),
-    .control_ar_hart_i(32'(g6lc_apu_cfg_pkg::ApuHarness.FirmwareHart)),
+    .control_aw_hart_i(apu_ctrl_aw_hart),
+    .control_ar_hart_i(apu_ctrl_ar_hart),
+    .ram_aw_hart_i(apu_ram_aw_hart),
+    .ram_ar_hart_i(apu_ram_ar_hart),
     .irq_sources_i(apu_irq_vec_in), .irq_sources_o(apu_irq_vec_out),
     .plic_irq_o(apu_irq), .fw_ready_o(apu_fw_ready),
     .boot_addr_core_o(cluster_boot),
     .guest_rule_o(apu_guest_rule), .control_rule_o(apu_ctrl_rule),
     .ram_rule_o(apu_ram_rule),
     .dram_lo_rule_o(apu_dram_lo_rule), .dram_hi_rule_o(apu_dram_hi_rule),
-    .dma_req_o(), .dma_rsp_i('0)
+    .dma_req_o(), .dma_rsp_i('0),
+    .ram_fault_o(apu_ram_fault)
+  );
+  // Pad reset, not ndmreset_n: this output gates ndmreset_n.
+  g6lc_apu_fault_sup #(.Enable(1'b1)) i_apu_fault (
+      .clk_i(clk_i),
+      .rst_ni(rst_ni),
+      .fault_i(apu_ram_fault),
+      .reset_o(apu_fault_reset)
   );
 `endif
 
@@ -1037,7 +1085,13 @@ module ariane_testharness #(
     // × multicore coherence for U6.2 / L3 hierarchy.
     .INCLUSIVE_L3   ( CVA6Cfg.L3En        ),
 `ifdef G6LC_APU
-    .PerCoreBoot    ( 1'b1                ),
+    .PerCoreBoot     ( 1'b1 ),
+    .SrcGuard        ( 1'b1 ),
+    .FwHart          ( 32'(g6lc_apu_cfg_pkg::ApuHarness.FirmwareHart) ),
+    .GuardRamBase    ( g6lc_apu_cfg_pkg::ApuHarness.FirmwareRamBase ),
+    .GuardRamBytes   ( g6lc_apu_cfg_pkg::ApuHarness.FirmwareRamBytes ),
+    .GuardCtrlBase   ( g6lc_apu_cfg_pkg::ApuHarness.ControlBase ),
+    .GuardCtrlBytes  ( g6lc_apu_cfg_pkg::ApuHarness.ControlLength ),
 `endif
     .AXI_ADDR_WIDTH ( ariane_axi::AddrWidth ),
     .AXI_DATA_WIDTH ( ariane_axi::DataWidth ),
@@ -1597,3 +1651,6 @@ module ariane_testharness #(
   );
 `endif
 endmodule
+
+`include "g6lc_apu_xbar_hart.sv"
+`include "../apu/g6lc_apu_fault_sup.sv"

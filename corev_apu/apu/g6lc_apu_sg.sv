@@ -77,7 +77,7 @@ module g6lc_apu_sg
     logic [3:0] word_left_q, byte_index_q;
     logic [127:0] entry_q;
     logic [64:0] total_next, entry_end, prior_end;
-    logic entry_ok, entry_overlap, child_cpl_ok;
+    logic entry_ok, entry_overlap, child_cpl_ok, sg_retire;
     logic ram_req, ram_we;
     logic [AddrWidth-1:0] ram_addr;
     logic [159:0] ram_wdata;
@@ -88,7 +88,11 @@ module g6lc_apu_sg
     assign idle_o = state_q == Idle && read_idle && fragment_idle_i && !bus_fault_o;
     assign load_ready_o = idle_o && !kill && rst_ni;
     assign query_ready_o = idle_o && !kill && !load_valid_i && rst_ni;
-    assign table_valid_o = valid_q && !invalidate_i && enable_i && !bus_fault_o;
+    // The table stays published through an invalidate until the list reader
+    // and the fragment DMA are both idle and this unit is not mid-query.
+    assign sg_retire = read_idle && fragment_idle_i &&
+                       (state_q == Idle || state_q == Done || state_q == Halted);
+    assign table_valid_o = valid_q && !bus_fault_o && (enable_i || !sg_retire);
     assign load_cpl_valid_o = state_q == Done && op_load_q;
     assign query_cpl_valid_o = state_q == Done && !op_load_q;
     assign load_cpl_o = load_cpl_valid_o ? apu_dma_read_cpl_t'{status: status_q,
@@ -192,7 +196,7 @@ module g6lc_apu_sg
         total_q <= 0; cursor_q <= 0; segment_start_q <= 0; segment_end_q <= 0; segment_base_q <= 0;
         word_q <= 0; word_left_q <= 0; byte_index_q <= 0; entry_q <= 0;
       end else begin
-        if (invalidate_i || !enable_i) valid_q <= 0;
+        if ((invalidate_i || !enable_i) && sg_retire) valid_q <= 0;
         if (kill && status_q == APU_DMA_OK && state_q != Idle && state_q != Done && state_q != Halted)
           status_q <= APU_DMA_CANCELLED;
         if (read_cpl_valid && read_cpl_ready) begin

@@ -35,12 +35,22 @@ module g6lc_apu_exec
   input  logic [31:0] dbg_wdata_i
 );
   localparam bit ExecEn = ApuCfg.Enable && ApuCfg.ExecEn;
-  localparam int unsigned N = 4;
-  localparam int unsigned R = 8;
-  localparam int unsigned M = ApuCfg.ExecMemWords == 0 ? 64 : ApuCfg.ExecMemWords;
+  localparam int unsigned N = APU_EXEC_THREADS;
+  localparam int unsigned R = APU_EXEC_REGS;
+  localparam int unsigned M = APU_EXEC_DMEM_WORDS;
 
   `ifndef SYNTHESIS
-  initial assert (apu_cfg_legal(ApuCfg)) else $fatal(1, "APU exec: invalid configuration");
+  initial begin
+    assert (apu_cfg_legal(ApuCfg)) else $fatal(1, "APU exec: invalid configuration");
+    assert (APU_EXEC_IMEM == APU_EXEC_IMEM_WORDS &&
+            $bits(imem_idx_i) == $clog2(APU_EXEC_IMEM_WORDS))
+      else $fatal(1, "APU exec: IMEM index is not 16 words");
+    assert ($bits(dbg_thread_i) == $clog2(APU_EXEC_THREADS) &&
+            $bits(dbg_reg_i) == $clog2(APU_EXEC_REGS))
+      else $fatal(1, "APU exec: register index is not 8 regs");
+    assert ($bits(dbg_dmem_idx_i) == $clog2(APU_EXEC_DMEM_WORDS))
+      else $fatal(1, "APU exec: DMEM index is not 64 words");
+  end
   `endif
 
   if (!ExecEn) begin : gen_off

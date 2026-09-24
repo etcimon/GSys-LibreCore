@@ -3,7 +3,8 @@
 //
 // Firmware-facing APU memory backend. Binds the mapping table, command
 // snapshot, SG walker, DMA leaves and used-ring publisher behind one AXI
-// master. One firmware operation at a time; reset/cancel wait for idle.
+// master. Command DMA reads the published slot, not the mailbox base.
+// One firmware operation at a time; reset/cancel wait for idle.
 
 module g6lc_apu_mem
   import g6lc_apu_cfg_pkg::*;
@@ -74,7 +75,8 @@ module g6lc_apu_mem
     assign axi_req_o = '0;
   end else begin : gen_on
     typedef enum logic [4:0] {
-      Idle, Issue, WaitCpl, FragIssue, FragData, FragWait, CmdIssue, CmdPump, CmdWait, Done
+      Idle, Issue, WaitCpl, FragIssue, FragData, FragWait,
+      CmdResolve, CmdIssue, CmdPump, CmdWait, Done
     } state_e;
     typedef enum logic [1:0] {RNone, RSg, RRd} rsel_e;
     typedef enum logic [1:0] {WNone, WWr, WQ} wsel_e;
@@ -82,12 +84,12 @@ module g6lc_apu_mem
     state_e state_q;
     apu_mem_op_e op_q;
     apu_map_cpl_t cpl_q;
-    apu_dma_mapping_t lmap_q, frag_map_q;
+    apu_dma_mapping_t lmap_q, frag_map_q, pin_q;
     apu_sg_fragment_t frag_q;
     apu_dma_read_req_t dma_req_q;
     logic [31:0] sink_off_q;
-    logic kill, children_idle, children_fault, fcv, crv, frag_fail_q, cmd_taken_q, rd_taken_q;
-    logic dma_done_q, st_done_q;
+    logic kill, children_idle, children_fault, fcv, crv, cr_hold_q, frag_fail_q, cmd_taken_q, rd_taken_q;
+    logic dma_done_q, st_done_q, pin_arm_q;
     rsel_e rsel_q, rsel;
     wsel_e wsel_q, wsel;
     apu_dma_write_data_t wrbeat_q;
@@ -135,7 +137,10 @@ module g6lc_apu_mem
                                cpl_q.status == APU_DMA_OK) ? lmap_q : '0;
 
     assign minst = insert_i;
-    assign look = lookup_i;
+    assign look = (state_q == CmdResolve) ? '{
+        resource_id: cmd_dma_i.resource_id, context_id: cmd_dma_i.context_id,
+        epoch: cmd_dma_i.epoch, write_access: 1'b0, tag: cmd_dma_i.tag
+    } : lookup_i;
     assign inval = inval_i;
     assign sgl = sg_load_i;
     assign list_m = sg_list_i;
@@ -145,7 +150,8 @@ module g6lc_apu_mem
     assign ureq = used_i;
 
     assign map_v = state_q == Issue && op_q == APU_MEM_MAP_INSERT;
-    assign lk_v  = state_q == Issue && op_q == APU_MEM_MAP_LOOKUP;
+    assign lk_v  = (state_q == Issue && op_q == APU_MEM_MAP_LOOKUP) ||
+                   (state_q == CmdResolve && !pin_arm_q);
     assign inv_v = state_q == Issue && op_q == APU_MEM_MAP_INVAL;
     assign sg_lv = state_q == Issue && op_q == APU_MEM_SG_LOAD;
     assign sg_qv = state_q == Issue && op_q == APU_MEM_SG_XFER;
@@ -161,7 +167,8 @@ module g6lc_apu_mem
                    (state_q == FragWait && !frag_q.write_access && rd_taken_q);
     assign wdv   = state_q == FragData;
     assign map_cr = state_q == WaitCpl && op_q == APU_MEM_MAP_INSERT;
-    assign lk_cr  = state_q == WaitCpl && op_q == APU_MEM_MAP_LOOKUP;
+    assign lk_cr  = (state_q == WaitCpl && op_q == APU_MEM_MAP_LOOKUP) ||
+                    (state_q == CmdResolve && pin_arm_q);
     assign inv_cr = state_q == WaitCpl && op_q == APU_MEM_MAP_INVAL;
     assign sg_lcr = op_q == APU_MEM_SG_LOAD &&
                     (state_q == WaitCpl || state_q == Done);
@@ -177,7 +184,7 @@ module g6lc_apu_mem
     assign crdr   = state_q == FragData;
 
     assign rdreq = (op_q == APU_MEM_CMD_DMA) ? cmd_dma_i : dma_req_q;
-    assign rdmap = (op_q == APU_MEM_CMD_DMA) ? cmd_map_i : frag_map_q;
+    assign rdmap = (op_q == APU_MEM_CMD_DMA) ? pin_q : frag_map_q;
     assign wrreq = dma_req_q;
     assign wrmap = frag_map_q;
     assign cdata = rddata;
@@ -213,9 +220,10 @@ module g6lc_apu_mem
       .cmd_rd_valid_i(crv || (state_q == Idle && cmd_rd_valid_i)),
       .cmd_rd_ready_o(crr), .cmd_rd_offset_i(crv ? crdoff : cmd_rd_offset_i),
       .cmd_rd_data_valid_o(crdv),
-      .cmd_rd_data_ready_i(crv ? crdr : cmd_rd_data_ready_i),
+      .cmd_rd_data_ready_i(cr_hold_q ? crdr : cmd_rd_data_ready_i),
       .cmd_rd_data_o(crddata),
-      .cmd_release_i(crel), .idle_o(st_idle), .cmd_held_o(st_held), .bus_fault_o(st_fault)
+      .cmd_release_i(crel), .child_idle_i(rd_idle && wr_idle && sg_idle),
+      .idle_o(st_idle), .cmd_held_o(st_held), .bus_fault_o(st_fault)
     );
     g6lc_apu_sg #(.ApuCfg(ApuCfg)) i_sg (
       .clk_i, .rst_ni, .testmode_i, .enable_i, .cancel_i, .invalidate_i,
@@ -309,10 +317,11 @@ module g6lc_apu_mem
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         state_q <= Idle; op_q <= APU_MEM_NONE; cpl_q <= '0; lmap_q <= '0;
+        pin_q <= '0; pin_arm_q <= 1'b0;
         frag_q <= '0; frag_map_q <= '0; dma_req_q <= '0; sink_off_q <= '0;
         wrbeat_q <= '0; rsel_q <= RNone; wsel_q <= WNone; crv <= 1'b0; fcv <= 1'b0;
         frag_fail_q <= 1'b0; cmd_taken_q <= 1'b0; rd_taken_q <= 1'b0;
-        dma_done_q <= 1'b0; st_done_q <= 1'b0;
+        dma_done_q <= 1'b0; st_done_q <= 1'b0; cr_hold_q <= 1'b0;
       end else begin
         if (rsel_q == RNone && rsel != RNone && axi_req_o.ar_valid && axi_rsp_i.ar_ready)
           rsel_q <= rsel;
@@ -326,12 +335,18 @@ module g6lc_apu_mem
           wsel_q <= WNone;
         if (fcv && fcr) fcv <= 1'b0;
         if (crv && crr) crv <= 1'b0;
+        // The request flop drops when storage accepts. The fragment still owns
+        // the returning word, so its ready stays the fragment ready.
+        if (crv && crr) cr_hold_q <= 1'b1;
+        else if (crdv && (cr_hold_q ? crdr : cmd_rd_data_ready_i)) cr_hold_q <= 1'b0;
+        if (state_q == CmdResolve && lk_v && lk_r) pin_arm_q <= 1'b1;
+        else if (state_q != CmdResolve) pin_arm_q <= 1'b0;
         unique case (state_q)
           Idle: if (op_valid_i && op_ready_o) begin
             op_q <= op_i; cpl_q <= '0; sink_off_q <= '0;
             cmd_taken_q <= 1'b0; rd_taken_q <= 1'b0; frag_fail_q <= 1'b0;
             dma_done_q <= 1'b0; st_done_q <= 1'b0;
-            state_q <= (op_i == APU_MEM_CMD_DMA) ? CmdIssue : Issue;
+            state_q <= (op_i == APU_MEM_CMD_DMA) ? CmdResolve : Issue;
           end
           Issue: begin
             if (kill) begin cpl_q.status <= APU_DMA_CANCELLED; state_q <= Done; end
@@ -378,6 +393,21 @@ module g6lc_apu_mem
               else begin sink_off_q <= sink_off_q + 32'd8; crv <= 1'b1; end
             end
           end
+          CmdResolve: begin
+            if (kill) begin
+              cpl_q.status <= APU_DMA_CANCELLED;
+              state_q <= Done;
+            end else if (pin_arm_q && lk_cv) begin
+              if (lcpl.status != APU_DMA_OK) begin
+                cpl_q.status <= lcpl.status;
+                cpl_q.tag <= cmd_dma_i.tag;
+                state_q <= Done;
+              end else begin
+                pin_q <= apu_handle_pin(lmap);
+                state_q <= CmdIssue;
+              end
+            end
+          end
           FragWait: begin
             if (rd_v && rd_r) rd_taken_q <= 1'b1;
             if (wr_v && wr_r) rd_taken_q <= 1'b1;
@@ -417,6 +447,9 @@ module g6lc_apu_mem
       op_cpl_valid_o && !op_cpl_ready_i |=> op_cpl_valid_o && $stable(op_cpl_o));
     assert property (@(posedge clk_i) disable iff (!rst_ni)
       state_q != Idle |-> !op_ready_o);
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+      rd_v && op_q == APU_MEM_CMD_DMA && cmd_map_i.base != pin_q.base |->
+      rdmap.base == pin_q.base && rdmap.resource_id == pin_q.resource_id);
     `endif
   end
 endmodule

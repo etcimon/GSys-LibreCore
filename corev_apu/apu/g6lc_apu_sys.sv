@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
 // SoC-facing APU wrapper: transport AXI-Lite plus the firmware mailbox.
-// Optional g6lc_apu_mem (MemEn) or native exec bind (ExecEn && !MemEn).
+// Memory alone, exec alone, or both under g6lc_apu_sched.
 // g6lc_apu_axi_lite stays transport-only. Default-off.
 
 module g6lc_apu_sys
@@ -43,12 +43,17 @@ module g6lc_apu_sys
   input  logic cfg_display_event_i,
   output logic bus_fault_o,
   output dma_req_t dma_req_o,
-  input  dma_rsp_t dma_rsp_i
+  input  dma_rsp_t dma_rsp_i,
+  input  logic guest_hold_i,
+  input  logic [31:0] guest_epoch_i,
+  input  logic ctrl_hold_i,
+  input  logic [31:0] ctrl_epoch_i,
+  output logic [31:0] epoch_o
 );
   localparam bit MemEn = ApuCfg.Enable &&
       (ApuCfg.MaxResources != 0 || ApuCfg.MaxCmdBytes != 0 ||
        ApuCfg.SgEn || ApuCfg.DmaReadEn || ApuCfg.DmaWriteEn);
-  localparam bit ExecEn = ApuCfg.Enable && ApuCfg.ExecEn && !MemEn;
+  localparam bit ExecWant = ApuCfg.Enable && ApuCfg.ExecEn;
 
   apu_reg_req_t mbox_req;
   apu_reg_rsp_t mbox_rsp;
@@ -58,6 +63,13 @@ module g6lc_apu_sys
   assign backend_reset_req_o = reset_req;
   assign backend_queue_stop_req_o = stop_req;
   assign control_irq_o = lite_irq || bus_fault_o;
+
+  `ifndef SYNTHESIS
+  initial begin
+    assert (apu_mem_exec_split(ApuCfg))
+      else $fatal(1, "APU sys: memory and exec are not a legal pair");
+  end
+  `endif
 
   g6lc_apu_axi_lite #(
     .ApuCfg(ApuCfg), .CoreCfg(CoreCfg), .axi_req_t(axi_req_t), .axi_rsp_t(axi_rsp_t)
@@ -70,10 +82,22 @@ module g6lc_apu_sys
     .backend_reset_done_i,
     .backend_idle_i(backend_idle_i & {APU_NUM_QUEUES{svc_idle}}),
     .used_valid_i, .used_qid_i, .used_context_i, .used_fence_i, .used_len_i,
-    .used_ready_o, .cfg_display_event_i, .mbox_req_o(mbox_req), .mbox_rsp_i(mbox_rsp)
+    .used_ready_o, .cfg_display_event_i, .mbox_req_o(mbox_req), .mbox_rsp_i(mbox_rsp),
+    .guest_hold_i, .guest_epoch_i, .ctrl_hold_i, .ctrl_epoch_i, .epoch_o
   );
 
-  if (MemEn) begin : gen_mem
+  if (MemEn && ExecWant) begin : gen_both
+    g6lc_apu_sched #(
+      .ApuCfg(ApuCfg), .Enable(1'b1),
+      .dma_req_t(dma_req_t), .dma_rsp_t(dma_rsp_t)
+    ) i_sched (
+      .clk_i, .rst_ni, .testmode_i,
+      .req_i(mbox_req), .rsp_o(mbox_rsp),
+      .cancel_i(reset_req),
+      .idle_o(svc_idle), .bus_fault_o,
+      .dma_req_o, .dma_rsp_i
+    );
+  end else if (MemEn) begin : gen_mem
     logic cmd_held;
     logic mem_idle;
     apu_mem_op_e op;
@@ -121,7 +145,7 @@ module g6lc_apu_sys
       .idle_o(mem_idle), .cmd_held_o(cmd_held), .bus_fault_o,
       .axi_req_o(dma_req_o), .axi_rsp_i(dma_rsp_i)
     );
-  end else if (ExecEn) begin : gen_exec
+  end else if (ExecWant) begin : gen_exec
     apu_mem_op_e op;
     apu_exec_job_t job;
     apu_map_cpl_t cpl;

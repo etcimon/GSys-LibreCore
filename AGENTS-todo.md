@@ -4610,6 +4610,1590 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
   2026-09-22: **12 cases / 58 checks / 331 clocks**, errors=0. Fixture
   synth, no latches: Enable=0 **12 ports / no cells**; Enable=1
   **22,141 cells / 559 flip-flops**. The CVA6 cookie was not re-run.
+- [x] The fragment unit reports one resource-image sample. `use_image`
+  copies the image bytes at `y * stride + x * 4`. Sample `(1,0)` is
+  `32'hA7A6A5A4` and leaves the solid and texel pixels in place. A miss
+  and a fault leave that pixel unchanged. Remote 2026-09-22:
+  **17 cases / 79 checks / 358 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **13 ports / no cells**; Enable=1 **24,803 cells /
+  559 flip-flops**. The CVA6 cookie was not re-run.
+- [x] One program changes that pixel. `use_prog` accepts the compiler's
+  `LDC` into r4 (`0xAA000000`) and an immediate of 0, 0.5, or 1.
+  Sample `(1,0)` changes from white `32'hFFFFFFFF` to gray
+  `32'hFF808080` when the immediate changes from 1.0 to 0.5. An
+  immediate of 2.0 and a non-`LDC` word do not write. `TEX` still
+  returns `-26`. The surface ceiling is 64×64. `(0,32)` stores that
+  gray and `(63,63)` stores white. `y = 64` does not write. The image
+  is a byte memory. Remote 2026-09-23: **46 cases / 196 checks / 529
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **16 ports /
+  no cells**; Enable=1 **2,384,119 cells / 262,456 flip-flops**. The CVA6
+  cookie was not re-run.
+- [x] One guest readback of that surface. `TRANSFER_FROM_HOST_3D`
+  writes the fragment image to the stored backing. The box is the
+  whole resource, the offset and level are 0, and the stride is tight.
+  `(0,0)` is `32'hFF0000FF`, `(1,0)` is gray `32'hFF808080`, and
+  `(2,0)` is the texel. A failed response can be retried. A second
+  readback does not replace the bytes. `SUBMIT_3D` stores nothing.
+  Resource 7, the 4×2 surface, lands at `64'h8800_5000`. The 64×64
+  surface lands at `64'h8800_C000`: gray at `(0,32)` and white at
+  `(63,63)`. The guest copy is a 32-byte beat, 512 beats for the full
+  image, and `wrote` rises after the last good beat. A 128-wide
+  resource is rejected. This is not a draw and not a descriptor chain.
+  `RdbEn` stays 0. Remote 2026-09-23: **52 cases / 1,169 checks /
+  9,024 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **27 ports / no cells**; Enable=1 **1,589,819 cells / 131,758
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] One `SUBMIT_3D` three-descriptor chain. Descriptor 0 is the
+  32-byte header at `64'h8800_A000`, descriptor 1 names the execbuffer
+  at `64'h8800_B000`, and descriptor 2 is the writable response at
+  `64'h8800_A800`. The header is read. The execbuffer is not read and
+  the response is not written. A 960-byte buffer is accepted. A second
+  submit does not replace the first. `INDIRECT` issues no read. This
+  is not a draw. `SubEn` stays 0. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. Remote 2026-09-23: **19 cases / 147 checks / 97 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **4,400 cells / 521 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] One read of the execbuffer named by that submit. The bytes arrive
+  32 at a time. `valid` rises after the last good beat. A failed beat
+  leaves `valid` clear and the read can be retried. A second read does
+  not replace the buffer. The 40-byte buffer keeps byte 0 and byte 36,
+  and the next word stays 0. The 960-byte buffer is 30 beats at
+  `64'h8800_B000`, with the last word at byte 956. The commands are
+  not decoded. `BufEn` stays 0. Remote 2026-09-23: **12 cases / 100
+  checks / 132 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **597,069 cells / 8,646
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The first command in that buffer. The header is
+  `cmd | object<<8 | body_dwords<<16`. The frozen stream starts with
+  `CREATE_OBJECT` surface: command 1, object 8, handle 1, resource 4,
+  format 2, and the next command at byte 24. A NOP records command 0
+  and stops at byte 4. A short buffer and a zero handle record nothing.
+  A second decode keeps the first command. `DecEn` stays 0. Remote
+  2026-09-23: **12 cases / 46 checks / 102 clocks**, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **1,064 cells / 364 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] The vertex shader create after that surface. Handle 2, stage 0,
+  TGSI length 125 including the NUL, token bound 300. The text starts
+  at byte 48 with `VERT` and stays in the execbuffer. The next command
+  starts at byte 176. A length that does not match the body records
+  nothing. A second decode keeps the first shader. `ShEn` stays 0.
+  Remote 2026-09-23: **14 cases / 56 checks / 133 clocks**, errors=0.
+  Fixture synth, no latches: Enable=0 **12 ports / no cells**;
+  Enable=1 **2,516 cells / 480 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The fragment shader create after the vertex shader. Handle 3,
+  stage 1, TGSI length 140 including the NUL, token bound 300. The
+  text starts at byte 200 with `FRAG` and stays in the execbuffer.
+  The next command starts at byte 340. The vertex shader record stays.
+  A second decode keeps the fragment shader. `FsEn` stays 0. Remote
+  2026-09-23: **18 cases / 71 checks / 212 clocks**, errors=0. Fixture
+  synth, no latches: Enable=0 **12 ports / no cells**; Enable=1
+  **2,428 cells / 480 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] The vertex-elements object after the fragment shader. Handle 4,
+  two attributes on buffer 0: position `R32G32B32A32_FLOAT` at offset
+  0 and uv `R32G32_FLOAT` at offset 16. The next command starts at
+  byte 380. The fragment shader record stays. A second decode keeps
+  the elements. `VeEn` stays 0. Remote 2026-09-23: **22 cases / 87
+  checks / 273 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **2,003 cells / 555
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The sampler view after the vertex elements. Handle 5 over
+  resource 1. Format `B8G8R8X8` and target 2D, layer 0, level 0,
+  identity swizzle `32'h00000688`. The next command starts at byte
+  408. The vertex-elements record stays. A second decode keeps the
+  view. This is not a texture sample. `SvEn` stays 0. Remote
+  2026-09-23: **32 cases / 117 checks / 428 clocks**, errors=0.
+  Fixture synth, no latches: Enable=0 **12 ports / no cells**;
+  Enable=1 **1,880 cells / 426 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The sampler state after the sampler view. Handle 6. Clamp-to-edge
+  wrap, linear min and mag filters, no mip filter (`32'h00002292`).
+  `max_lod` is 32.0 (`32'h42000000`). The next command starts at byte
+  448. The sampler-view record stays. A second decode keeps the state.
+  This is not a texture sample. `SsEn` stays 0. Remote 2026-09-23:
+  **37 cases / 125 checks / 498 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **12 ports / no cells**; Enable=1 **2,066 cells /
+  491 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The blend object after the sampler state. Handle 7. Color buffer
+  0 is `32'h78020010` (source factor ONE and color mask `0xf`). The
+  next command starts at byte 496. The sampler-state record stays. A
+  second decode keeps the blend object. This is not a draw. `BlEn`
+  stays 0. Remote 2026-09-23: **42 cases / 136 checks / 584 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no
+  cells**; Enable=1 **2,153 cells / 523 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The depth-stencil object after the blend object. Handle 8. The
+  four state words are 0, so depth and stencil stay off. The next
+  command starts at byte 520. The blend record stays. A second decode
+  keeps the object. This is not a depth test. `DsEn` stays 0. Remote
+  2026-09-23: **47 cases / 146 checks / 658 clocks**, errors=0.
+  Fixture synth, no latches: Enable=0 **12 ports / no cells**;
+  Enable=1 **1,713 cells / 298 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The rasterizer object after the depth-stencil object. Handle 9.
+  The eight state words are 0: fill both faces and cull none. The next
+  command starts at byte 560. The depth-stencil record stays. A second
+  decode keeps the object. This does not walk a triangle. `RzEn` stays
+  0. Remote 2026-09-23: **52 cases / 155 checks / 726 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no
+  cells**; Enable=1 **1,993 cells / 427 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The blend bind after the rasterizer object. `BIND_OBJECT` names
+  blend handle 7. The next command starts at byte 568. The rasterizer
+  record stays. A second decode keeps the bind. This does not draw.
+  `BbEn` stays 0. Remote 2026-09-23: **57 cases / 162 checks / 780
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **12 ports /
+  no cells**; Enable=1 **1,418 cells / 167 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The depth-stencil bind after the blend bind. `BIND_OBJECT` names
+  depth-stencil handle 8. Depth and stencil stay off. The next command
+  starts at byte 576. The blend bind stays. A second decode keeps the
+  bind. This does not test depth. `DbEn` stays 0. Remote 2026-09-23:
+  **62 cases / 167 checks / 818 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **12 ports / no cells**; Enable=1 **1,417 cells /
+  167 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The rasterizer bind after the depth-stencil bind. `BIND_OBJECT`
+  names rasterizer handle 9. Fill stays both faces and cull stays
+  none. The next command starts at byte 584. The depth-stencil bind
+  stays. A second decode keeps the bind. This does not walk a
+  triangle. `RbEn` stays 0. Remote 2026-09-23: **67 cases / 174
+  checks / 858 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **1,417 cells / 167
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The vertex-shader bind after the rasterizer bind. `BIND_SHADER`
+  names handle 2 at stage 0. The TGSI text stays in the execbuffer.
+  The next command starts at byte 596. The rasterizer bind stays. A
+  second decode keeps the bind. This does not translate the shader.
+  `VsbEn` stays 0. Remote 2026-09-23: **86 cases / 226 checks / 1105
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **12 ports /
+  no cells**; Enable=1 **1,489 cells / 208 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The fragment-shader bind after the vertex-shader bind. `BIND_SHADER`
+  names handle 3 at stage 1. The TGSI text stays in the execbuffer.
+  The next command starts at byte 608. The vertex-shader bind stays. A
+  second decode keeps the bind. This does not translate the shader.
+  `FsbEn` stays 0. Remote 2026-09-23: **92 cases / 240 checks / 1154
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **12 ports /
+  no cells**; Enable=1 **1,491 cells / 208 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The vertex-elements bind after the fragment-shader bind.
+  `BIND_OBJECT` names handle 4. The next command starts at byte 616.
+  The fragment-shader bind stays. A second decode keeps the bind. This
+  does not draw. `VebEn` stays 0. Remote 2026-09-23: **82 cases / 215
+  checks / 982 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **12 ports / no cells**; Enable=1 **1,417 cells / 167 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The sampler-state bind after the vertex-elements bind.
+  `BIND_SAMPLER_STATES` names fragment slot 0 and handle 6. The next
+  command starts at byte 632. The vertex-elements bind stays. A second
+  decode keeps the bind. This does not sample a texture. `SsbEn` stays
+  0. Remote 2026-09-23: **104 cases / 273 checks / 1260 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no cells**;
+  Enable=1 **1,599 cells / 273 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The sampler-view set after the sampler-state bind.
+  `SET_SAMPLER_VIEWS` names fragment slot 0 and handle 5. The next
+  command starts at byte 648. The sampler-state bind stays. A second
+  decode keeps the set. This does not sample a texture. `SvbEn` stays
+  0. Remote 2026-09-23: **110 cases / 290 checks / 1320 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no cells**;
+  Enable=1 **1,599 cells / 273 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The vertex inline write after the sampler-view set.
+  `RESOURCE_INLINE_WRITE` names resource 3 and 96 bytes. The first
+  float is `-1.0`. The other floats stay in the execbuffer. The next
+  command starts at byte 792. The sampler-view set stays. A second
+  decode keeps the write. This does not fetch vertices. `IwEn` stays 0.
+  Remote 2026-09-23: **116 cases / 319 checks / 1500 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no cells**;
+  Enable=1 **1,464 cells / 110 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The vertex-buffer set after the inline write. `SET_VERTEX_BUFFERS`
+  names stride 24, offset 0, and resource 3. The next command starts at
+  byte 808. The inline write stays. A second decode keeps the set. This
+  does not fetch vertices. `VbEn` stays 0. Remote 2026-09-23: **122
+  cases / 343 checks / 1638 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **12 ports / no cells**; Enable=1 **1,624 cells /
+  297 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The scissor after the vertex-buffer set. `SET_SCISSOR` keeps the
+  minimum at 0 and the box at 640 by 480. The next command starts at
+  byte 824. The vertex-buffer set stays. A second decode keeps the
+  scissor. A 64 by 64 box records nothing. This does not draw. `SciEn`
+  stays 0. Remote 2026-09-23: **128 cases / 359 checks / 1696 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no cells**;
+  Enable=1 **1,564 cells / 233 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The viewport after the scissor. `SET_VIEWPORT` keeps scale x at
+  320.0 and scale y at 240.0. The next command starts at byte 856. The
+  scissor stays. A second decode keeps the viewport. This does not
+  transform vertices. `VpEn` stays 0. Remote 2026-09-23, shared with
+  the framebuffer, the clear, and the draw: `tb_g6lc_apu_vgpu_tail`
+  **337 cases / 955 checks / 4733 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **12 ports / no cells**; Enable=1 **1,898 cells
+  / 394 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The framebuffer state after the viewport. `SET_FRAMEBUFFER` keeps
+  one color buffer and surface handle 1. The next command starts at
+  byte 872. The viewport stays. A second decode keeps the framebuffer
+  state. This does not attach memory. `FboEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_tail`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **1,590 cells / 265
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The clear after the framebuffer state. `CLEAR` keeps color 0 and
+  the color words 0.05, 0.05, 0.10, and 1.0. The next command starts
+  at byte 908. The framebuffer state stays. A second decode keeps the
+  clear. This does not write pixels. `ClrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_tail`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **2,103 cells / 522
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The draw after the clear. `DRAW_VBO` keeps count 4 and a triangle
+  strip. The command ends at byte 960, the end of this frozen
+  execbuffer. The clear stays. A second decode keeps the draw. This
+  does not walk a triangle. `DrwEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_tail`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **2,224 cells / 555
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`. `tb_g6lc_apu_vgpu_cmd` 15/62/73 was not re-run after
+  these cfg fields.
+- [x] The context create before the 3D resources. `CTX_CREATE` keeps
+  context 1 and the name `main`. The next record starts at byte 96.
+  A second decode keeps the context. This is not an OS context.
+  `CtxEn` stays 0. Remote 2026-09-23, shared with the resources, the
+  attaches, and the response: `tb_g6lc_apu_vgpu_ctl` **27 cases / 88
+  checks / 375 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **1,828 cells / 811
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The two `RESOURCE_CREATE_3D` records. Resource 4 is 640 by 480
+  `B8G8R8X8` with `Y_0_TOP`. Resource 3 is 96 bytes. The next record
+  starts at byte 240. A third create keeps the pair. This does not
+  allocate memory. `C3dEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_ctl`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **2,239 cells / 748
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The three `CTX_ATTACH` records. The order is resource 4, resource
+  3, then resource 1. The control prefix ends at byte 336. A fourth
+  attach keeps the three. This does not map guest memory. `AttEn`
+  stays 0. Same remote run `tb_g6lc_apu_vgpu_ctl`, errors=0. Fixture
+  synth, no latches: Enable=0 **12 ports / no cells**; Enable=1
+  **1,310 cells / 331 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] The scene submit response. The 24-byte header at `64'h8800_A800`
+  is `OK_NODATA`, the fence bit, fence `64'h1122334455667788`, and
+  context 1. It follows the attaches and the decoded draw. A failed
+  beat can be retried. A second store keeps the first. This does not
+  store a pixel. `RspEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_ctl`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **939 cells / 200
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The capset info request. `GET_CAPSET_INFO` index 0 records
+  `INVALID_PARAMETER`. A second decode keeps the refusal. This does
+  not publish a capset id. `NfoEn` stays 0. Remote 2026-09-23, shared
+  with the capset get, the scanout, and the flush:
+  `tb_g6lc_apu_vgpu_pre` **20 cases / 63 checks / 206 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **681 cells / 265 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The capset get after that refusal. `GET_CAPSET` for virgl id 1
+  version 1 records `INVALID_PARAMETER`. No blob is stored. A second
+  decode keeps the refusal. `CapEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_pre`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **1,209 cells / 329
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The scanout after the scene response. `SET_SCANOUT` keeps
+  scanout 0, resource 4, and the rectangle 0,0,640,480. A 64 by 64
+  rectangle records nothing. This is not a HDMI mode. `ScnEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_pre`, errors=0. Fixture synth, no
+  latches: Enable=0 **13 ports / no cells**; Enable=1 **1,135 cells /
+  522 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The flush of that scanout. `RESOURCE_FLUSH` keeps resource 4 and
+  640 by 480. A second decode keeps the flush. This does not present
+  a frame. `FluEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_pre`,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no
+  cells**; Enable=1 **1,698 cells / 554 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The scene descriptor chain. Descriptors 0, 1, and 2 are the
+  32-byte header, the 960-byte execbuffer, and the 24-byte response.
+  Only the next avail index is accepted, and it names descriptor 0.
+  `INDIRECT`, a jumped index, and a short execbuffer do not consume
+  the slot. `g6lc_apu_vgpu_avail` still rejects `NEXT`. `ChnEn` stays
+  0. Remote 2026-09-23, shared with the link and the used element:
+  `tb_g6lc_apu_vgpu_chn` **26 cases / 75 checks / 115 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **1,209 cells / 585 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The link of that chain to the recorded submit and the stored
+  response. The buffer and the response address agree. A 32-byte
+  submit links nothing. `CmxEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_chn`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **642 cells / 5
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The local used element for that link. Descriptor 0, length 24,
+  is stored before `used.idx` advances to 1. IRQ rises with the index
+  and falls on ack. A cancel before the index does not publish. This
+  does not write guest memory. `SunEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_chn`, errors=0. Fixture synth, no latches:
+  Enable=0 **16 ports / no cells**; Enable=1 **106 cells / 24
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The guest store of that scene element. Descriptor 0 and length
+  24 land at `64'h8800_D000`. A failed beat can be retried. A second
+  store keeps the first. This is not the element at `64'h8800_3000`.
+  `SuwEn` stays 0. Remote 2026-09-23, shared with the index store:
+  `tb_g6lc_apu_vgpu_sunw` **11 cases / 56 checks / 61 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **17 ports / no
+  cells**; Enable=1 **208 cells / 7 flip-flops**. The CVA6 cookie was
+  not re-run. The TEX opcode still returns `-26`.
+- [x] The guest store of that `used.idx`. The index 1 lands at
+  `64'h8800_E002` after the element. A second store keeps the first.
+  This is not `64'h8800_4002`. `SuxEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_sunw`, errors=0. Fixture synth, no latches:
+  Enable=0 **18 ports / no cells**; Enable=1 **214 cells / 7
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The clear color as RGBA8. Red and green 0.05 are 13, blue 0.10
+  is 26, and alpha is 255. The word is `32'hFF1A0D0D`, byte 0 red.
+  Another red word records nothing. `U8En` stays 0. Remote 2026-09-23,
+  shared with the corners and the read: `tb_g6lc_apu_vgpu_pix` **16
+  cases / 60 checks / 71 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **9 ports / no cells**; Enable=1 **283 cells / 6
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] Four corner samples of that clear inside the 64 by 64 ceiling.
+  The addresses are 0, 252, 16128, and 16380. The interior is not
+  written. The triangle is not walked. `PixEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_pix`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **328 cells / 38
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] A read of one stored corner. `(0,0)` and `(63,63)` return the
+  clear word. `(1,0)` is a miss. `(64,0)` is outside the ceiling.
+  `PxrEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_pix`, errors=0.
+  Fixture synth, no latches: Enable=0 **10 ports / no cells**;
+  Enable=1 **518 cells / 50 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The clear word covers the 64 by 64 ceiling. One word stands for
+  4096 samples. The samples are not stored one by one. A 64-high
+  scissor records nothing. The triangle is not walked. `FilEn` stays
+  0. Remote 2026-09-23, shared with the sample read:
+  `tb_g6lc_apu_vgpu_fil` **14 cases / 56 checks / 63 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **234 cells / 38 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] A read of one filled sample. `(1,0)` is address 4 and returns
+  the clear word. `(2,3)` is address 776. `(63,63)` is 16380.
+  `(64,0)` records nothing. `FrdEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_fil`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **412 cells / 48
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The 24 floats of the fullscreen quad. They start at byte 696.
+  Each vertex is `{x, y, 0, 1, u, v}` on the NDC square. A mismatched
+  float records nothing. This is not a transform. `QdEn` stays 0.
+  Remote 2026-09-23, shared with the coverage record and the sample
+  read: `tb_g6lc_apu_vgpu_qd` **14 cases / 52 checks / 113 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no
+  cells**; Enable=1 **697 cells / 22 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The NDC square covers the 64 by 64 ceiling. Viewport scales 320
+  and 240 map it onto 0..640 by 0..480, so all 4096 samples are
+  covered. The stored color stays `32'hFF1A0D0D`. The fragment shader
+  is not run. This is not `g6lc_apu_cover`. `CvEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_qd`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **255 cells /
+  70 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] A read of one covered sample. `(1,0)` is address 4 and returns
+  the clear word with the covered bit set. `(2,3)` is 776. `(63,63)`
+  is 16380. `(64,0)` records nothing. The corner reader still misses
+  `(1,0)`. `CvrEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_qd`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **419 cells / 49 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The vertex-shader TGSI text. Thirty-two dwords start at byte 48.
+  The program is the VERT passthrough. Length 125 includes the NUL.
+  A mismatched dword records nothing. This is not a translate.
+  `VstEn` stays 0. Remote 2026-09-23, shared with the fragment text
+  and the held sample: `tb_g6lc_apu_vgpu_vtx` **20 cases / 75 checks /
+  225 clocks**, errors=0. Fixture synth, no latches: Enable=0 **12
+  ports / no cells**; Enable=1 **751 cells / 12 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The fragment-shader TGSI text. Thirty-five dwords start at byte
+  200. The program is TEX. Length 140 includes the NUL. A mismatched
+  dword records nothing. TEX is not executed. `FstEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_vtx`, errors=0. Fixture synth, no
+  latches: Enable=0 **13 ports / no cells**; Enable=1 **809 cells /
+  13 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] One covered sample held at the clear word because that text is
+  TEX. `(1,0)` is address 4. `(2,3)` is 776. `(63,63)` is 16380.
+  `(64,0)` records nothing. The corner reader still misses `(1,0)`.
+  This is not `g6lc_apu_cover`. `HldEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_vtx`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **423 cells / 49
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] TEX bound to sampler view 5 on resource 1 and sampler state 6.
+  Both binds are fragment slot 0. The view is `B8G8R8X8`, 2D, identity
+  swizzle. The sampler is clamp-to-edge, linear, no mip filter. Another
+  resource records nothing. This does not fetch a texel. `TbnEn` stays
+  0. Remote 2026-09-23, shared with the refusal and the sample read:
+  `tb_g6lc_apu_vgpu_tbn` **15 cases / 57 checks / 67 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **14 ports / no
+  cells**; Enable=1 **747 cells / 101 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The bound sample is refused. Resource 1 has no texel image. The
+  record keeps the clear word `32'hFF1A0D0D` and a count of 4096.
+  `DenEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_tbn`, errors=0.
+  Fixture synth, no latches: Enable=0 **10 ports / no cells**;
+  Enable=1 **310 cells / 102 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] A read of one refused sample. `(1,0)` is address 4 and returns
+  the clear word with the refused bit set. `(2,3)` is 776. `(63,63)`
+  is 16380. `(64,0)` records nothing. The corner reader still misses
+  `(1,0)`. This is not `g6lc_apu_cover`. `DnrEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_tbn`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **452 cells / 49
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] VioScan `RESOURCE_CREATE_2D` for resource 1. Format 2 is
+  `B8G8R8X8` and the size is 640 by 480. Format 67 and a 64-wide image
+  record nothing. No pixels are stored. This is not
+  `g6lc_apu_vgpu_cmd`. `S2dEn` stays 0. Remote 2026-09-23, shared with
+  the backing entry and the transfer: `tb_g6lc_apu_vgpu_s2d` **15
+  cases / 54 checks / 169 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **245 cells /
+  11 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] One backing entry for that resource. The length is 1,228,800
+  bytes. A zero address and `32'h88001000` record nothing. The test
+  address is `32'h8800F000`, a stand-in, not the BIOS `__scan_fb`
+  address. The bytes are not read. `SbkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_s2d`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **504 cells / 75
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The transfer of that resource is the top band, 640 by 64. A
+  480-high rectangle records nothing. This is not the 64 by 64
+  ceiling. No byte is copied, and the refused clear word stays
+  `32'hFF1A0D0D`. `SxfEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_s2d`, errors=0. Fixture synth, no latches:
+  Enable=0 **14 ports / no cells**; Enable=1 **542 cells / 43
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] VioScan `SET_SCANOUT`. Scanout 0 names resource 1 at 640 by 480.
+  A 64 by 64 rectangle and resource 4 record nothing. Nothing is
+  presented. This is not `g6lc_apu_vgpu_scn`. `SscEn` stays 0. Remote
+  2026-09-23, shared with the flush and the sample:
+  `tb_g6lc_apu_vgpu_ssc` **17 cases / 61 checks / 153 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no
+  cells**; Enable=1 **349 cells / 11 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] VioScan `RESOURCE_FLUSH` of resource 1. The rectangle is the top
+  band, 640 by 64. A 480-high flush records nothing. Nothing is
+  presented. This is not `g6lc_apu_vgpu_flu`. `SflEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_ssc`, errors=0. Fixture synth, no
+  latches: Enable=0 **13 ports / no cells**; Enable=1 **432 cells /
+  11 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] One ceiling sample while that scanout is unpresented. `(1,0)` is
+  address 4 and the word stays `32'hFF1A0D0D`. `(2,3)` is 776.
+  `(63,63)` is 16380. `(64,0)` records nothing. No frame is presented.
+  `SprEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_ssc`, errors=0.
+  Fixture synth, no latches: Enable=0 **11 ports / no cells**;
+  Enable=1 **486 cells / 48 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The top band of resource 1 is read from its backing. 640 by 64 is
+  163,840 bytes, 5,120 beats of 32. The image is not stored. Beat 0's
+  low word is kept. A failed beat can be retried. The other bytes of
+  the 1,228,800-byte backing are not read. `BcpEn` stays 0. Remote
+  2026-09-23, shared with the report: `tb_g6lc_apu_vgpu_bcp` **10 cases
+  / 41 checks / 10,297 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **802 cells / 118
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The copied word sits beside the clear color. The scene word stays
+  `32'hFF1A0D0D`. The ceiling is not replaced. TEX is not executed.
+  `BcrEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_bcp`, errors=0.
+  Fixture synth, no latches: Enable=0 **9 ports / no cells**; Enable=1
+  **458 cells / 81 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] One texel from the copied band. `x` clamps to 639. `y` above 63
+  records nothing. At `(0,0)` clamp-to-edge linear uses that texel
+  alone, and the word must match the copy. A second tap is not
+  blended. `TapEn` stays 0. Remote 2026-09-23, shared with the corner
+  record and the ceiling read: `tb_g6lc_apu_vgpu_tap` **13 cases / 51
+  checks / 68 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **24 ports / no cells**; Enable=1 **1,471 cells / 105 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Ceiling pixel `(0,0)` stores that texel. In the test the word is
+  `32'hA5000000`. A second store keeps the first. `PxcEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_tap`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **189 cells /
+  37 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] A later ceiling read. `(0,0)` returns the texel. `(1,0)` and
+  `(63,63)` stay `32'hFF1A0D0D`. `(64,0)` records nothing. The fill
+  reader still returns the clear word at `(0,0)`. `PxqEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_tap`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **355 cells /
+  49 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Two taps on row 0 of the copied band. `s = x - 1/2`. `x = 0`
+  stays texel 0, `32'hA5000000`. `x = 1` is the half blend
+  `32'hD2008000`. `x = 7` is `32'h33445566`. `x` above 7 and `y`
+  other than 0 record nothing. `LinEn` stays 0. Remote 2026-09-23,
+  shared with the pair record: `tb_g6lc_apu_vgpu_lin` **11 cases / 41
+  checks / 63 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **25 ports / no cells**; Enable=1 **2,000 cells / 84 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The origin and the blended neighbor are kept. The origin matches
+  the corner store. The neighbor is not the clear word. The earlier
+  ceiling reader still returns the clear word at `(1,0)`. `LnrEn`
+  stays 0. Same remote run `tb_g6lc_apu_vgpu_lin`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1 **247
+  cells / 71 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] The row-0 blend spans the first two beats. `x = 8` blends texel 7
+  `32'h55667788` with texel 8 `32'hAABBCCDD` to `32'h8091A2B3`.
+  `x = 0` stays `32'hA5000000`. `x = 1` stays `32'hD2008000`. `x`
+  above 15 records nothing. `SpnEn` stays 0. Remote 2026-09-23,
+  shared with the span record: `tb_g6lc_apu_vgpu_spn` **11 cases / 39
+  checks / 68 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **25 ports / no cells**; Enable=1 **2,422 cells / 156 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The `x = 8` word is kept. A second store keeps the first.
+  `SpxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_spn`, errors=0.
+  Fixture synth, no latches: Enable=0 **10 ports / no cells**;
+  Enable=1 **130 cells / 37 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] `y = 1` blends row 0 with row 1. `t = y - 1/2`. `x = 0` is
+  `32'h53010202`. `x = 1` is `32'h6B024303`. The row-1 beat is
+  `64'h8800FA00`. `y = 0`, `y` above 1, and `x` above 1 record nothing.
+  `VlnEn` stays 0. Remote 2026-09-23, shared with the pair record:
+  `tb_g6lc_apu_vgpu_vln` **11 cases / 41 checks / 60 clocks**, errors=0.
+  Fixture synth, no latches: Enable=0 **26 ports / no cells**; Enable=1
+  **1,517 cells / 77 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] The two `y = 1` words are kept. `x = 0` differs from the row-0
+  origin. `x = 1` differs from the row-0 neighbor. A third record keeps
+  the pair. `VlrEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_vln`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no cells**;
+  Enable=1 **237 cells / 71 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] `y = 1` blends `x = 0..7` from beat 0 of row 0 and beat 0 of row
+  1. `x = 0` stays `32'h53010202`. `x = 1` stays `32'h6B024303`.
+  `x = 2` is `32'h42024203`. `x = 7` is `32'h1A222B33`. `x` above 7
+  records nothing. `VbxEn` stays 0. Remote 2026-09-23, shared with the
+  store: `tb_g6lc_apu_vgpu_vbx` **12 cases / 53 checks / 78 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **27 ports / no cells**;
+  Enable=1 **3,891 cells / 336 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The `y = 1` word at `x = 2` is kept. A second store keeps the
+  first. `VbrEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_vbx`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no cells**;
+  Enable=1 **129 cells / 37 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] `y = 1` blends `x = 0..15`, including the beat span. `x = 8` is
+  `32'h434C545D`. Row 0 at that column stays `32'h8091A2B3`. `x = 0`,
+  `x = 1`, and `x = 2` stay the stored words. `x = 15` is `32'h0`.
+  `x` above 15 records nothing. `VspEn` stays 0. Remote 2026-09-23,
+  shared with the store: `tb_g6lc_apu_vgpu_vsp` **13 cases / 63 checks
+  / 91 clocks**, errors=0. Fixture synth, no latches: Enable=0 **28
+  ports / no cells**; Enable=1 **3,388 cells / 185 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The `y = 1` word at `x = 8` is kept. A second store keeps the
+  first. `VsxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_vsp`,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no cells**;
+  Enable=1 **199 cells / 37 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] `y = 2` blends `x = 0..7` from beat 0 of row 1 and beat 0 of row
+  2. `x = 0` is `32'h79797A7A`. `x = 1` is `32'h42424343`. `x = 7` is
+  `32'h3C3C3C3C`. Row 2 is `64'h88010400`. `y = 1` and `x` above 7
+  record nothing. `Y2bEn` stays 0. Remote 2026-09-23, shared with the
+  pair: `tb_g6lc_apu_vgpu_y2b` **12 cases / 55 checks / 73 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **29 ports / no cells**;
+  Enable=1 **3,300 cells / 116 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The two `y = 2` words are kept. `x = 0` differs from the `y = 1`
+  sample `32'h53010202`. `x = 1` differs from `32'h6B024303`. A third
+  record keeps the pair. `Y2rEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_y2b`, errors=0. Fixture synth, no latches: Enable=0
+  **11 ports / no cells**; Enable=1 **241 cells / 71 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Any point of the 64 by 64 ceiling. The stored colors match.
+  `(9,0)` is `32'h555E666F`. `(8,2)` is `32'h17171718`. `(0,3)` is
+  `32'h78787878`. `(63,63)` is `32'h0`. `x` or `y` above 63 records
+  nothing. The image is not stored. All 4,096 points were checked.
+  `SmpEn` stays 0. Remote 2026-09-23, shared with the store:
+  `tb_g6lc_apu_vgpu_smp` **4,117 cases / 16,472 checks / 38,678
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **30 ports /
+  no cells**; Enable=1 **4,351 cells / 221 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The sample at `(0,3)` is kept. A second store keeps the first.
+  `SmxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_smp`, errors=0.
+  Fixture synth, no latches: Enable=0 **10 ports / no cells**;
+  Enable=1 **204 cells / 37 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The 64 by 64 ceiling is written to `32'h88040000`. 512 beats,
+  16,384 bytes. Beat 0 is the row-0 blend through `x = 7`. Beat 24
+  starts with `32'h78787878`. The last beat, at `64'h88043FE0`, is
+  `32'h0`. The image is not kept. `RbfEn` stays 0. Remote 2026-09-23,
+  shared with the record: `tb_g6lc_apu_vgpu_rbf` **7 cases / 35 checks
+  / 39,646 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **37 ports / no cells**; Enable=1 **5,129 cells / 620 flip-flops**,
+  including the sampler. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] The readback record keeps the first word, the beat count, and
+  the last address. A second store keeps the first. `RbkEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_rbf`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **318 cells /
+  111 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The 512 ceiling beats are read back from `32'h88040000`. Beat 0
+  is `32'hA5000000`. Beat 24 is `32'h78787878`. The last beat is at
+  `64'h88043FE0`. The image is not kept. `RdrEn` stays 0. Remote
+  2026-09-23, shared with the pair: `tb_g6lc_apu_vgpu_rdr` **7 cases /
+  30 checks / 1,066 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **909 cells / 147
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The two collected words are kept. They differ. A second store
+  keeps the first. `RdkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rdr`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **298 cells / 69
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The scene header and the 960-byte execbuffer are read from guest
+  memory. Header `64'h8800A000` is `SUBMIT_3D`, context 1, size 960.
+  The first command word is `32'h00050801`. Thirty beats end at
+  `64'h8800B3A0`. The response is not read. `g6lc_apu_vgpu_avail`
+  still rejects `NEXT`. `FetEn` stays 0. Remote 2026-09-23, shared
+  with the record: `tb_g6lc_apu_vgpu_fet` **8 cases / 33 checks / 113
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **19 ports
+  / no cells**; Enable=1 **834 cells / 81 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The submit type and the first command word are kept. A second
+  store keeps the first. `FekEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_fet`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **210 cells / 69
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The `DRAW_VBO` at byte 908 of the fetched execbuffer is read.
+  Beat 28 at `64'h8800B380` holds header `32'h000C0008`. Count is 4
+  and the primitive is a triangle strip. Beat 29 at `64'h8800B3A0`
+  holds one instance and max index 3. The draw is not executed.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `DrdEn` stays 0. Remote
+  2026-09-23, shared with the record: `tb_g6lc_apu_vgpu_drd` **13
+  cases / 59 checks / 81 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **19 ports / no cells**; Enable=1 **839 cells /
+  139 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The vertex count and the triangle-strip primitive are kept. A
+  second store keeps the first. `DrkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_drd`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **241 cells / 69
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The 24 NDC floats of the recognized draw are read from byte 696.
+  Beat 21 at `64'h8800B2A0` holds the first two. Beat 24 at
+  `64'h8800B300` holds the last six. The first float is
+  `32'hbf800000` and the last is `32'h3f800000`. They are not
+  transformed and the draw is not executed. `g6lc_apu_vgpu_avail`
+  still rejects `NEXT`. `QdrEn` stays 0. Remote 2026-09-23, shared
+  with the record: `tb_g6lc_apu_vgpu_qdr` **14 cases / 63 checks /
+  97 clocks**, errors=0. Fixture synth, no latches: Enable=0 **20
+  ports / no cells**; Enable=1 **1,109 cells / 143 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The first float and the last float are kept. They differ. A
+  second store keeps the first. `QdkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qdr`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **387 cells / 69
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The viewport at byte 824 of the fetched execbuffer is read.
+  Beat 25 at `64'h8800B320` holds header `32'h00070004`. Scale is
+  320 by 240. NDC −1 lands at 0 and NDC +1 lands at 640 and 480.
+  This is not a floating-point multiply and not a rasterizer.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `VwxEn` stays 0.
+  Remote 2026-09-23, shared with the record: `tb_g6lc_apu_vgpu_vwx`
+  **13 cases / 59 checks / 80 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **21 ports / no cells**; Enable=1 **1,000 cells /
+  140 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The scales and the window edges are kept. 640 and 480 differ.
+  A second store keeps the first. `VwkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_vwx`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **566 cells / 133
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The scissor at byte 808 of the fetched execbuffer is read. It
+  shares `64'h8800B320` with the viewport. The box is 640 by 480 and
+  matches the window edges. No pixel is clipped.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `CxrEn` stays 0. Remote
+  2026-09-23, shared with the record: `tb_g6lc_apu_vgpu_cxr` **13
+  cases / 59 checks / 71 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **22 ports / no cells**; Enable=1 **851 cells /
+  73 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The scissor width and height are kept. They differ. A second
+  store keeps the first. `CxkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_cxr`, errors=0. Fixture synth, no latches:
+  Enable=0 **13 ports / no cells**; Enable=1 **461 cells / 37
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The clear at byte 872 of the fetched execbuffer is read. Beat
+  27 at `64'h8800B360` holds header `32'h00080007` and the color
+  floats. Beat 28 at `64'h8800B380` holds depth 1. The packed word is
+  `32'hFF1A0D0D`. No pixel is written. `g6lc_apu_vgpu_avail` still
+  rejects `NEXT`. `CwrEn` stays 0. Remote 2026-09-23, shared with
+  the record: `tb_g6lc_apu_vgpu_cwr` **13 cases / 59 checks / 78
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **23 ports
+  / no cells**; Enable=1 **1,185 cells / 140 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The red, the blue, and the packed word are kept. Red and blue
+  differ. A second store keeps the first. `CwkEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_cwr`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **524 cells /
+  101 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The framebuffer at byte 856 of the fetched execbuffer is read.
+  Beat 26 at `64'h8800B340` holds header `32'h00030005` and one
+  color buffer. Beat 27 at `64'h8800B360` holds surface handle 1.
+  The clear word `32'hFF1A0D0D` stays with that surface. No memory
+  is attached. `g6lc_apu_vgpu_avail` still rejects `NEXT`. `FbrEn`
+  stays 0. Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_fbr` **13 cases / 59 checks / 78 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **24 ports / no
+  cells**; Enable=1 **1,130 cells / 171 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The color-buffer count, the surface handle, and the clear word
+  are kept. The word and the handle differ. A second store keeps
+  the first. `FbkEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_fbr`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **452 cells / 101 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The vertex-buffer set at byte 792 of the fetched execbuffer is
+  read. Beat 24 at `64'h8800B300` holds header `32'h00030006` and
+  stride 24. Beat 25 at `64'h8800B320` holds offset 0 and resource 3.
+  No vertices are fetched. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `VbfEn` stays 0. Remote 2026-09-23, shared with the
+  record: `tb_g6lc_apu_vgpu_vbf` **14 cases / 63 checks / 87
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **25 ports
+  / no cells**; Enable=1 **1,246 cells / 203 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The stride, the offset, and the resource are kept. Stride 24
+  and resource 3 differ. A second store keeps the first. `VbkEn`
+  stays 0. Same remote run `tb_g6lc_apu_vgpu_vbf`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **452 cells / 101 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] The inline write at byte 648 that holds the quad is read. Beat
+  20 at `64'h8800B280` holds header `32'h00230009` and resource 3.
+  Beat 21 at `64'h8800B2A0` holds length 96 and the first float.
+  The 96 bytes are not kept. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `IwrEn` stays 0. Remote 2026-09-23, shared with the
+  record: `tb_g6lc_apu_vgpu_iwr` **13 cases / 59 checks / 78
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **26 ports
+  / no cells**; Enable=1 **1,405 cells / 139 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The resource and the byte count are kept. They differ. A second
+  store keeps the first. `IwkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_iwr`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **449 cells / 69
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The sampler view at byte 632 of the fetched execbuffer is read.
+  Beat 19 at `64'h8800B260` holds header `32'h0003000A` and the
+  fragment stage. Beat 20 at `64'h8800B280` holds slot 0 and
+  sampler-view handle 5. No texture is bound.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `SvrEn` stays 0.
+  Remote 2026-09-23, shared with the record: `tb_g6lc_apu_vgpu_svr`
+  **15 cases / 67 checks / 91 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **27 ports / no cells**; Enable=1 **1,644 cells
+  / 204 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The stage, the slot, and the handle are kept. They differ. A
+  second store keeps the first. `SvkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_svr`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **612 cells / 101
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The sampler state at byte 616 of the fetched execbuffer is read.
+  It shares beat 19 at `64'h8800B260`. The header is `32'h00030012`.
+  The stage is fragment, the slot is 0, and the handle is 6. No
+  texture is bound. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `SsrEn` stays 0. Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_ssr` **15 cases / 67 checks / 85 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **28 ports / no
+  cells**; Enable=1 **1,926 cells / 201 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The stage, the slot, and the handle are kept. They differ, and
+  the handle is not the sampler-view handle. A second store keeps
+  the first. `SskEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_ssr`,
+  errors=0. Fixture synth, no latches: Enable=0 **13 ports / no
+  cells**; Enable=1 **778 cells / 101 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The vertex-element bind at byte 608 of the fetched execbuffer
+  is read. It is the first eight bytes of beat 19 at `64'h8800B260`.
+  The header is `32'h00010502` and the handle is 4. No vertices are
+  fetched. `g6lc_apu_vgpu_avail` still rejects `NEXT`. `VerEn` stays
+  0. Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_ver` **13 cases / 59 checks / 71 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **29 ports / no
+  cells**; Enable=1 **1,965 cells / 137 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The header and the handle are kept. They differ, and the handle
+  is not the sampler-state handle. A second store keeps the first.
+  `VekEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_ver`, errors=0.
+  Fixture synth, no latches: Enable=0 **13 ports / no cells**;
+  Enable=1 **651 cells / 69 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The fragment shader bind at byte 596 of the fetched execbuffer
+  is read. It is the last twelve bytes of beat 18 at `64'h8800B240`.
+  The header is `32'h0002001F`, the handle is 3, and the stage is
+  fragment. The shader is not run. `g6lc_apu_vgpu_avail` still
+  rejects `NEXT`. `FsrEn` stays 0. Remote 2026-09-23, shared with
+  the record: `tb_g6lc_apu_vgpu_fsr` **14 cases / 63 checks / 78
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **30 ports
+  / no cells**; Enable=1 **2,141 cells / 137 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The handle and the stage are kept. They differ, and the handle
+  is not the vertex-shader handle. A second store keeps the first.
+  `FskEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_fsr`, errors=0.
+  Fixture synth, no latches: Enable=0 **13 ports / no cells**;
+  Enable=1 **691 cells / 69 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The vertex shader bind at byte 584 of the fetched execbuffer is
+  read. It shares beat 18 at `64'h8800B240`. The header is
+  `32'h0002001F`, the handle is 2, and the stage is vertex. The
+  shader is not run. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `VsrEn` stays 0. Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_vsr` **14 cases / 63 checks / 78 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **31 ports / no
+  cells**; Enable=1 **2,401 cells / 137 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The handle and the stage are kept. They differ, and the handle
+  is not the fragment-shader handle. A second store keeps the first.
+  `VskEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_vsr`, errors=0.
+  Fixture synth, no latches: Enable=0 **13 ports / no cells**;
+  Enable=1 **745 cells / 69 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The rasterizer bind at byte 576 of the fetched execbuffer is
+  read. It is the first eight bytes of beat 18 at `64'h8800B240`.
+  The header is `32'h00010202` and the handle is 9. No triangle is
+  walked. `g6lc_apu_vgpu_avail` still rejects `NEXT`. `RzrEn` stays
+  0. Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_rzr` **13 cases / 59 checks / 71 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **32 ports / no
+  cells**; Enable=1 **2,568 cells / 137 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The header and the handle are kept. They differ, and the handle
+  is not the vertex-shader handle. A second store keeps the first.
+  `RzkEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_rzr`, errors=0.
+  Fixture synth, no latches: Enable=0 **13 ports / no cells**;
+  Enable=1 **682 cells / 69 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The depth-stencil bind at byte 568 of the fetched execbuffer is
+  read. It is the last eight bytes of beat 17 at `64'h8800B220`.
+  The header is `32'h00010302` and the handle is 8. No depth test is
+  run. `g6lc_apu_vgpu_avail` still rejects `NEXT`. `DbrEn` stays 0.
+  Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_dbr` **13 cases / 59 checks / 71 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **33 ports / no
+  cells**; Enable=1 **2,769 cells / 137 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The header and the handle are kept. They differ, and the handle
+  is not the rasterizer handle. A second store keeps the first.
+  `DbkEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_dbr`, errors=0.
+  Fixture synth, no latches: Enable=0 **13 ports / no cells**;
+  Enable=1 **686 cells / 69 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The blend bind at byte 560 of the fetched execbuffer is read.
+  It is sixteen bytes into beat 17 at `64'h8800B220`. The header is
+  `32'h00010102` and the handle is 7. No blend is applied.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `BbrEn` stays 0.
+  Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_bbr` **13 cases / 59 checks / 71 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **34 ports / no
+  cells**; Enable=1 **2,972 cells / 137 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The header and the handle are kept. They differ, and the handle
+  is not the depth-stencil handle. A second store keeps the first.
+  `BbkEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_bbr`, errors=0.
+  Fixture synth, no latches: Enable=0 **13 ports / no cells**;
+  Enable=1 **687 cells / 69 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The rasterizer object at byte 520 of the fetched execbuffer is
+  read. Beat 16 at `64'h8800B200` carries the header `32'h00090201`
+  and handle 9. Beat 17 at `64'h8800B220` carries the last four state
+  words. All eight state words are 0 and are not kept. No triangle is
+  walked. `g6lc_apu_vgpu_avail` still rejects `NEXT`. `RcrEn` stays 0.
+  Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_rcr` **15 cases / 67 checks / 89 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **35 ports / no
+  cells**; Enable=1 **3,536 cells / 139 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The header and the handle are kept. They differ, and the handle
+  is not the blend handle. A second store keeps the first. The eight
+  state words are not kept. `RckEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rcr`, errors=0. Fixture synth, no latches:
+  Enable=0 **13 ports / no cells**; Enable=1 **700 cells / 69
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The depth-stencil object at byte 496 of the fetched execbuffer
+  is read. Beat 15 at `64'h8800B1E0` carries the header
+  `32'h00050301` and handle 8. Beat 16 at `64'h8800B200` carries the
+  last two state words. All four state words are 0 and are not kept.
+  No depth test is run. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `DcrEn` stays 0. Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_dcr` **15 cases / 67 checks / 89 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **36 ports / no
+  cells**; Enable=1 **3,734 cells / 140 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The header and the handle are kept. They differ, and the handle
+  is not the rasterizer handle. A second store keeps the first. The
+  four state words are not kept. `DckEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_dcr`, errors=0. Fixture synth, no latches:
+  Enable=0 **13 ports / no cells**; Enable=1 **700 cells / 69
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The blend object at byte 448 of the fetched execbuffer is read.
+  Beat 14 at `64'h8800B1C0` carries the header `32'h000B0101`, handle
+  7, and color word `32'h78020010`. Beat 15 at `64'h8800B1E0` carries
+  the last four body words, and they are 0. Those zero words are not
+  kept. No blend is applied. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `BlrEn` stays 0. Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_blr` **16 cases / 71 checks / 96 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **37 ports / no
+  cells**; Enable=1 **4,308 cells / 203 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The header, the handle, and the color word are kept. The handle
+  is not the depth-stencil handle. A second store keeps the first.
+  The zero body words are not kept. `BlkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_blr`, errors=0. Fixture synth, no latches:
+  Enable=0 **13 ports / no cells**; Enable=1 **838 cells / 101
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The sampler-state object at byte 408 of the fetched execbuffer
+  is read. Beat 12 at `64'h8800B180` carries the header
+  `32'h00090701` and handle 6. Beat 13 at `64'h8800B1A0` carries wrap
+  word `32'h00002292` and max LOD `32'h42000000`. The other body
+  words are 0 and are not kept. No texture is bound.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `ScrEn` stays 0.
+  Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_scr` **17 cases / 75 checks / 109 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **38 ports / no
+  cells**; Enable=1 **4,899 cells / 267 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The header, the handle, the wrap word, and the max LOD are
+  kept. The handle is not the blend handle. A second store keeps the
+  first. The zero body words are not kept. `SckEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_scr`, errors=0. Fixture synth, no
+  latches: Enable=0 **13 ports / no cells**; Enable=1 **951 cells /
+  133 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The sampler view at byte 380 of the fetched execbuffer is read.
+  Beat 11 at `64'h8800B160` carries the header `32'h00060601`. Beat
+  12 at `64'h8800B180` carries handle 5, resource 1, format word
+  `32'h02000002`, and swizzle `32'h00000688`. Two body words are 0
+  and are not kept. No texture is bound. `g6lc_apu_vgpu_avail` still
+  rejects `NEXT`. `SvcEn` stays 0. Remote 2026-09-23, shared with
+  the record: `tb_g6lc_apu_vgpu_svc` **18 cases / 79 checks / 120
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **39 ports
+  / no cells**; Enable=1 **5,267 cells / 332 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The header, the handle, the resource, the format word, and the
+  swizzle are kept. The handle is not the sampler-state handle. A
+  second store keeps the first. The zero body words are not kept.
+  `VckEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_svc`, errors=0.
+  Fixture synth, no latches: Enable=0 **13 ports / no cells**;
+  Enable=1 **1,046 cells / 165 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The vertex-element object at byte 340 of the fetched execbuffer
+  is read. Beat 10 at `64'h8800B140` carries the header
+  `32'h00090501`, handle 4, and offset 0. Beat 11 at `64'h8800B160`
+  carries format 31, offset 16, and format 29. Four divisor words
+  are 0 and are not kept. No vertices are fetched.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `VecEn` stays 0.
+  Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_vec` **19 cases / 83 checks / 125 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **40 ports / no
+  cells**; Enable=1 **5,868 cells / 395 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The header, the handle, and the two offsets and formats are
+  kept. The handle is not the sampler-view handle. A second store
+  keeps the first. The divisor words are not kept. `VceEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_vec`, errors=0. Fixture synth,
+  no latches: Enable=0 **13 ports / no cells**; Enable=1 **1,135
+  cells / 197 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] The fragment-shader object at byte 176 of the fetched execbuffer
+  is read. Beat 5 at `64'h8800B0A0` carries the header
+  `32'h00280401`, handle 3, the fragment stage, and length 140.
+  Beat 6 at `64'h8800B0C0` carries token count 300 and text dword
+  `32'h47415246`. The rest of the text stays in the execbuffer. The
+  shader is not run. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `FscEn` stays 0. Remote 2026-09-23, shared with the vertex shader,
+  the surface, and the three records: `tb_g6lc_apu_vgpu_obj` **53
+  cases / 221 checks / 317 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **41 ports / no cells**; Enable=1 **6,794 cells /
+  396 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The header, the handle, the stage, the length, the token count,
+  and the first text dword are kept. A second store keeps the first.
+  The handle is not vertex-shader handle 2. `FceEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_obj`, errors=0. Fixture synth, no
+  latches: Enable=0 **13 ports / no cells**; Enable=1 **1,140 cells /
+  197 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The vertex-shader object at byte 24 of the fetched execbuffer
+  is read. Beat 0 at `64'h8800B000` carries the header
+  `32'h00250401` and handle 2. Beat 1 at `64'h8800B020` carries the
+  vertex stage, length 125, token count 300, and text dword
+  `32'h54524556`. The surface words in that first beat are not this
+  command. The shader is not run. `VscEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_obj`, errors=0. Fixture synth, no latches:
+  Enable=0 **42 ports / no cells**; Enable=1 **7,311 cells / 395
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The header, the handle, the stage, the length, the token count,
+  and the first text dword are kept. A second store keeps the first.
+  The handle is not fragment-shader handle 3. `VseEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_obj`, errors=0. Fixture synth, no
+  latches: Enable=0 **13 ports / no cells**; Enable=1 **1,017 cells /
+  197 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The surface object at byte 0 of the fetched execbuffer is read.
+  Beat 0 at `64'h8800B000` carries the header `32'h00050801`, handle
+  1, resource 4, and format 2. Two body words are 0 and are not kept.
+  No framebuffer is painted. `SfcEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_obj`, errors=0. Fixture synth, no latches:
+  Enable=0 **43 ports / no cells**; Enable=1 **6,753 cells / 265
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The header, the handle, the resource, and the format are kept.
+  A second store keeps the first. The handle is not vertex-shader
+  handle 2. `SfeEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_obj`,
+  errors=0. Fixture synth, no latches: Enable=0 **13 ports / no
+  cells**; Enable=1 **840 cells / 133 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The scene descriptor chain is read from guest memory. Beat 0 at
+  `64'h8800E100` carries descriptor 0 (header, NEXT to 1) and
+  descriptor 1 (960 bytes, NEXT to 2). Beat 1 carries descriptor 2,
+  a 24-byte WRITE at `64'h8800A800`. Beat 2 at `64'h8800E200` is
+  avail index 1 naming descriptor 0. INDIRECT, a broken link, and a
+  jumped index record nothing. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `NxcEn` stays 0. Remote 2026-09-23, shared with the
+  record: `tb_g6lc_apu_vgpu_nxc` **16 cases / 71 checks / 109
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **22 ports
+  / no cells**; Enable=1 **1,959 cells / 396 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The head, the avail index, the execbuffer, and the response are
+  kept. A second store keeps the first. The descriptor bytes are not
+  kept. `NxkEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_nxc`,
+  errors=0. Fixture synth, no latches: Enable=0 **13 ports / no
+  cells**; Enable=1 **921 cells / 197 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The completed-opcode list at `64'h8800E300` is read after the
+  scene chain. The count is 0 and the capset id is 0. A nonzero
+  count or virgl id 1 records nothing. No caps blob is stored. The
+  answer is `OK_NODATA`. The virgl capset request stays
+  `INVALID_PARAMETER`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `OlsEn` stays 0. Remote 2026-09-23, shared with the record:
+  `tb_g6lc_apu_vgpu_ols` **13 cases / 59 checks / 71 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **24 ports / no
+  cells**; Enable=1 **1,055 cells / 137 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The zero count, capset id 0, and the response are kept. A
+  second store keeps the first. No caps blob is kept. `OlkEn` stays
+  0. Same remote run `tb_g6lc_apu_vgpu_ols`, errors=0. Fixture synth,
+  no latches: Enable=0 **13 ports / no cells**; Enable=1 **557 cells
+  / 101 flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The scene clear word is written across a 64 by 64 guest window
+  at `64'h88020000`. Each beat is eight copies of `32'hFF1A0D0D`.
+  512 beats is 16384 bytes. The bytes are not kept in registers. A
+  64-high scissor records nothing. This is not the ceiling at
+  `32'h88040000`. The shader is not run. `g6lc_apu_vgpu_avail` still
+  rejects `NEXT`. `GpwEn` stays 0. Remote 2026-09-23, shared with
+  the end read and the record: `tb_g6lc_apu_vgpu_gpw` **16 cases /
+  73 checks / 1112 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **23 ports / no cells**; Enable=1 **766 cells / 18
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The first beat and the last beat at `64'h88023FE0` are read
+  back as the clear word. `(1,0)` is byte 4 of the first beat.
+  `GprEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_gpw`, errors=0.
+  Fixture synth, no latches: Enable=0 **22 ports / no cells**;
+  Enable=1 **1,212 cells / 75 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] The clear word and the two beat addresses are kept. A second
+  store keeps the first. `GpkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_gpw`, errors=0. Fixture synth, no latches:
+  Enable=0 **13 ports / no cells**; Enable=1 **873 cells / 165
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The guest response, the used element, and the used index are
+  written after that window. The response at `64'h8800A800` is
+  `OK_NODATA`, fence `64'h1122334455667788`, and context 1. The used
+  element at `64'h8800E400` is descriptor 0 and length 24. The used
+  index at `64'h8800E480` is 1. A 64-high scissor writes nothing.
+  The response bytes are not kept. This is not `g6lc_apu_vgpu_rsp`.
+  The shader is not run. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `GcwEn` stays 0. Remote 2026-09-23, shared with the read and the
+  record: `tb_g6lc_apu_vgpu_gcw` **22 cases / 96 checks / 127
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **22 ports
+  / no cells**; Enable=1 **995 cells / 14 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Those three beats are read back. Upper bytes of each beat are
+  not part of the check. `GcrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_gcw`, errors=0. Fixture synth, no latches:
+  Enable=0 **24 ports / no cells**; Enable=1 **1,867 cells / 365
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The response type, the fence, the used element, and the used
+  index are kept. A second store keeps the first. `GckEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_gcw`, errors=0. Fixture synth,
+  no latches: Enable=0 **15 ports / no cells**; Enable=1 **1,318
+  cells / 181 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] The used-buffer interrupt reason `32'h1` is written at
+  `64'h8800E500` after that completion, and the pin rises. Ack
+  lowers the pin and leaves the record. A cancel before the beat
+  writes nothing. This is not `g6lc_apu_vgpu_sun`. The pin is not
+  PLIC source 9. The shader is not run. `g6lc_apu_vgpu_avail` still
+  rejects `NEXT`. `ViwEn` stays 0. Remote 2026-09-23, shared with
+  the read and the record: `tb_g6lc_apu_vgpu_viw` **20 cases / 89
+  checks / 102 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **26 ports / no cells**; Enable=1 **888 cells / 24
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The reason is read back. Upper bytes are not part of the
+  check. `VirEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_viw`,
+  errors=0. Fixture synth, no latches: Enable=0 **23 ports / no
+  cells**; Enable=1 **897 cells / 88 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The reason and the used index are kept. A second store keeps
+  the first. `VikEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_viw`, errors=0. Fixture synth, no latches:
+  Enable=0 **13 ports / no cells**; Enable=1 **607 cells / 53
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The guest ack at `64'h8800E510` is `32'h1`, and the status word
+  at `64'h8800E500` is then written as `32'h0`. A config-only ack and
+  a zero ack write nothing. This does not drive the viw pin. The
+  shader is not run. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `VawEn` stays 0. Remote 2026-09-23, shared with the read and the
+  record: `tb_g6lc_apu_vgpu_vaw` **22 cases / 96 checks / 122
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **34 ports
+  / no cells**; Enable=1 **862 cells / 7 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The ack word and the cleared status are read back. Upper bytes
+  are not part of the check. `VarEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_vaw`, errors=0. Fixture synth, no latches:
+  Enable=0 **22 ports / no cells**; Enable=1 **816 cells / 155
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The ack, the cleared status, and the used index are kept. A
+  second store keeps the first. `VakEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_vaw`, errors=0. Fixture synth, no latches:
+  Enable=0 **13 ports / no cells**; Enable=1 **709 cells / 85
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] All 512 beats of the window at `64'h88020000` are the clear
+  word `32'hFF1A0D0D`. `(0,0)`, `(1,0)`, and `(63,63)` are that
+  word. The image is not kept. A 64-high scissor reads nothing.
+  This is not `g6lc_apu_vgpu_gpr`. The shader is not run.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `WfrEn` stays 0.
+  Remote 2026-09-23, shared with the record and the point:
+  `tb_g6lc_apu_vgpu_wfr` **21 cases / 86 checks / 2149 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **23 ports / no
+  cells**; Enable=1 **1,660 cells / 210 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Those three words and the beat count are kept. A second store
+  keeps the first. `WfkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_wfr`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **674 cells / 117
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] One in-range point is that clear word. `x` or `y` of 64
+  records nothing. A second store keeps the first. `WfxEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_wfr`, errors=0. Fixture synth,
+  no latches: Enable=0 **11 ports / no cells**; Enable=1 **299
+  cells / 51 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] The scanned window is copied to `64'h88030000`. 512 beats are
+  read and written. A beat that is not the clear word stops the
+  copy. This is not Mesa `glReadPixels`. The shader is not run.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `GbwEn` stays 0.
+  Remote 2026-09-23, shared with the read and the record:
+  `tb_g6lc_apu_vgpu_gbw` **19 cases / 84 checks / 2153 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **33 ports / no
+  cells**; Enable=1 **2,227 cells / 412 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The first and last beats of that buffer are the clear word.
+  `GbrEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_gbw`,
+  errors=0. Fixture synth, no latches: Enable=0 **20 ports / no
+  cells**; Enable=1 **1,080 cells / 75 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The clear word, the source, and the readback address are kept.
+  A second store keeps the first. `GbkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_gbw`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **935 cells / 181
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The readback buffer is a 64 by 64 rectangle, stride 256,
+  format `B8G8R8X8`, 16384 bytes. A 640 by 480 request records
+  nothing. This is not Mesa `glReadPixels`. The shader is not run.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `GbdEn` stays 0.
+  Remote 2026-09-23, shared with the lane and the record:
+  `tb_g6lc_apu_vgpu_gbd` **18 cases / 78 checks / 91 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **261 cells / 6 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] `(1,0)` and `(63,63)` in that buffer are the clear word.
+  `x` or `y` of 64 reads nothing. `GblEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_gbd`, errors=0. Fixture synth, no latches:
+  Enable=0 **22 ports / no cells**; Enable=1 **1,363 cells / 102
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The rectangle and the sampled lane are kept. A second store
+  keeps the first. `GbxEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_gbd`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **829 cells / 115
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode still
+  returns `-26`.
+- [x] The byte offset of a point is `y * 256 + x * 4`. Row 1 starts
+  at byte 256, address `64'h88030100`. `(1,0)` is byte 4.
+  `(63,63)` starts at byte 16380. `x` or `y` of 64 records nothing.
+  The shader is not run. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `GofEn` stays 0. Remote 2026-09-23, shared with the lane and the
+  record: `tb_g6lc_apu_vgpu_gof` **19 cases / 85 checks / 101
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **12
+  ports / no cells**; Enable=1 **406 cells / 20 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The lane at that offset is the clear word. `GboEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_gof`, errors=0. Fixture synth,
+  no latches: Enable=0 **21 ports / no cells**; Enable=1 **1,501
+  cells / 166 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] The offset and the lane are kept. A second store keeps the
+  first. `GbzEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_gof`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **540 cells / 99 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The clear word `32'hFF1A0D0D` sits in the readback as the bytes
+  0D 0D 1A FF. Byte 0 is red `8'h0D`. `(0,0)` and `(1,0)` are the
+  low two words of the beat at `64'h88030000`. `(63,63)` is the top
+  lane of `64'h88033FE0`. A 64-high scissor reads nothing. A first
+  byte of `8'hFF` records nothing. The image is not kept. The shader
+  is not run. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `ByrEn` stays 0.
+  Remote 2026-09-23, shared with the record and the first byte:
+  `tb_g6lc_apu_vgpu_byr` **17 cases / 71 checks / 86 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **22 ports / no
+  cells**; Enable=1 **1,083 cells / 11 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Those four channels are kept. A second store keeps the first.
+  `BykEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_byr`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **145 cells / 37 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] The first raw byte is red `8'h0D`. A first byte of `8'hFF`
+  records nothing. A second store keeps the first. `ByxEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_byr`, errors=0. Fixture synth,
+  no latches: Enable=0 **10 ports / no cells**; Enable=1 **125
+  cells / 45 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Row 1 of the readback, the beat at `64'h88030100`, starts
+  with red `8'h0D`. The format tag is `B8G8R8X8`. A 64-high
+  scissor, a 480-high rectangle, or another format reads nothing.
+  A blue first byte `8'h1A` or a high byte `8'hFF` records
+  nothing. This is later than the base-beat channels. The image
+  is not kept. The shader is not run. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `RyrEn` stays 0. Remote 2026-09-23, shared with the record and
+  the first byte: `tb_g6lc_apu_vgpu_ryr` **22 cases / 91 checks /
+  107 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **21 ports / no cells**; Enable=1 **877 cells / 9 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns
+  `-26`.
+- [x] Those row channels and the format tag are kept. A second
+  store keeps the first. `RykEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_ryr`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **260 cells / 69
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of row 1 is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `RyxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_ryr`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **211 cells / 77 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(1,1)` is byte 260, `(2,3)` is byte 776, and `(0,63)` is
+  byte 16128 in the readback. The lanes are the bytes 0D 0D 1A FF.
+  A 64-high scissor or a 480-high rectangle reads nothing. A blue
+  or high byte in the named lane stops the read. No triangle is
+  walked. The image is not kept. The shader is not run. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `TprEn` stays 0. Remote 2026-09-24, shared with the
+  record and the first byte: `tb_g6lc_apu_vgpu_tpr` **23 cases /
+  95 checks / 124 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **956 cells / 12
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Those three offsets and the channels are kept. A second
+  store keeps the first. `TpkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_tpr`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **418 cells / 117
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(0,63)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `TpxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_tpr`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **318 cells / 125 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(63,0)` in the readback is byte 252, lane 7 of the beat at
+  `64'h880300E0`. Byte 0 of that lane is red. `(0,63)` stays byte
+  16128. A swapped offset reads nothing. The image is not kept.
+  The shader is not run. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `X6rEn` stays 0.
+  Remote 2026-09-24, shared with the record and the first byte:
+  `tb_g6lc_apu_vgpu_x6r` **21 cases / 87 checks / 103 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **21 ports / no
+  cells**; Enable=1 **971 cells / 9 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] That offset and the channels are kept. A second store keeps
+  the first. `X6kEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_x6r`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **371 cells / 99
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(63,0)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `X6xEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_x6r`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **283 cells / 107 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(63,63)` in the readback is byte 16380, lane 7 of the beat
+  at `64'h88033FE0`. Byte 0 of that lane is red. The next byte is
+  16384. `(63,0)` stays byte 252 and `(0,63)` stays byte 16128.
+  A swapped offset reads nothing. The image is not kept. The
+  shader is not run. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `TcrEn` stays 0.
+  Remote 2026-09-24, shared with the record and the first byte:
+  `tb_g6lc_apu_vgpu_tcr` **22 cases / 91 checks / 107 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **22 ports / no
+  cells**; Enable=1 **1,032 cells / 9 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That offset and the channels are kept. A second store keeps
+  the first. `TckEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_tcr`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **380 cells / 99
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(63,63)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `TcxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_tcr`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **295 cells / 107 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(7,0)` in the readback is byte 28, lane 7 of the base beat
+  at `64'h88030000`. `(63,0)` stays byte 252 at `64'h880300E0`.
+  Putting offset 28 on `(63,0)` reads nothing. The image is not
+  kept. The shader is not run. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `P7rEn` stays 0.
+  Remote 2026-09-24, shared with the record and the first byte:
+  `tb_g6lc_apu_vgpu_p7r` **21 cases / 87 checks / 103 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **22 ports / no
+  cells**; Enable=1 **1,002 cells / 9 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That offset and the channels are kept. A second store keeps
+  the first. `P7kEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_p7r`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **369 cells / 99
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(7,0)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `P7xEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_p7r`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **277 cells / 107 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(8,0)` is byte 32 and `(15,0)` is byte 60, both in the
+  beat at `64'h88030020`. `(7,0)` stays byte 28 in the base beat.
+  Putting offset 32 on `(7,0)` reads nothing. The image is not
+  kept. The shader is not run. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `B1rEn` stays 0.
+  Remote 2026-09-24, shared with the record and the first byte:
+  `tb_g6lc_apu_vgpu_b1r` **21 cases / 87 checks / 103 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **21 ports / no
+  cells**; Enable=1 **955 cells / 9 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] Those two offsets and the channels are kept. A second store
+  keeps the first. `B1kEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_b1r`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **399 cells / 115
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(8,0)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `B1xEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_b1r`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **313 cells / 123 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(56,0)` is byte 224, lane 0 of the beat at `64'h880300E0`.
+  `(63,0)` stays byte 252, lane 7 of that same beat. Putting
+  offset 224 on `(63,0)`, or on the beat-1 record, reads nothing.
+  The image is not kept. The shader is not run. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `B7rEn` stays 0. Remote 2026-09-24, shared with the record and
+  the first byte: `tb_g6lc_apu_vgpu_b7r` **21 cases / 87 checks /
+  103 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **22 ports / no cells**; Enable=1 **1,016 cells / 9
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Those two offsets and the channels are kept. A second store
+  keeps the first. `B7kEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_b7r`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **421 cells / 115
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(56,0)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `B7xEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_b7r`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **321 cells / 123 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(16,0)` is byte 64 and `(23,0)` is byte 92, both in the
+  beat at `64'h88030040`. Putting offset 64 on `(56,0)` reads
+  nothing. The image is not kept. The shader is not run. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `B2rEn` stays 0. Remote 2026-09-24, shared with the
+  record and the first byte: `tb_g6lc_apu_vgpu_b2r` **21 cases /
+  87 checks / 103 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **983 cells / 9
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Those two offsets and the channels are kept. A second store
+  keeps the first. `B2kEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_b2r`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **413 cells / 115
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(16,0)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `B2xEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_b2r`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **313 cells / 123 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(24,0)` is byte 96 and `(31,0)` is byte 124, both in the
+  beat at `64'h88030060`. Putting offset 96 on `(16,0)` reads
+  nothing. The image is not kept. The shader is not run. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `B3rEn` stays 0. Remote 2026-09-24, shared with the
+  record and the first byte: `tb_g6lc_apu_vgpu_b3r` **21 cases /
+  87 checks / 103 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **976 cells / 9
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Those two offsets and the channels are kept. A second store
+  keeps the first. `B3kEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_b3r`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **417 cells / 115
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(24,0)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `B3xEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_b3r`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **317 cells / 123 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(32,0)` is byte 128 and `(39,0)` is byte 156, both in the
+  beat at `64'h88030080`. Putting offset 128 on `(24,0)` reads
+  nothing. The image is not kept. The shader is not run. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `B4rEn` stays 0. Remote 2026-09-24, shared with the
+  record and the first byte: `tb_g6lc_apu_vgpu_b4r` **21 cases /
+  87 checks / 103 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **979 cells / 9
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Those two offsets and the channels are kept. A second store
+  keeps the first. `B4kEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_b4r`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **413 cells / 115
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(32,0)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `B4xEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_b4r`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **313 cells / 123 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(40,0)` is byte 160 and `(47,0)` is byte 188, both in the
+  beat at `64'h880300A0`. Putting offset 160 on `(32,0)` reads
+  nothing. The image is not kept. The shader is not run. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `B5rEn` stays 0. Remote 2026-09-24, shared with the
+  record and the first byte: `tb_g6lc_apu_vgpu_b5r` **21 cases /
+  87 checks / 103 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **976 cells / 9
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Those two offsets and the channels are kept. A second store
+  keeps the first. `B5kEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_b5r`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **417 cells / 115
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(40,0)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `B5xEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_b5r`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **317 cells / 123 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `(48,0)` is byte 192 and `(55,0)` is byte 220, both in the
+  beat at `64'h880300C0`. Putting offset 192 on `(40,0)` reads
+  nothing. The image is not kept. The shader is not run. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `B6rEn` stays 0. Remote 2026-09-24, shared with the
+  record and the first byte: `tb_g6lc_apu_vgpu_b6r` **21 cases /
+  87 checks / 103 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **980 cells / 9
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Those two offsets and the channels are kept. A second store
+  keeps the first. `B6kEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_b6r`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **417 cells / 115
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(48,0)` is red `8'h0D`. A first byte of blue
+  `8'h1A` or of `8'hFF` records nothing. A second store keeps the
+  first. `B6xEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_b6r`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **317 cells / 123 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
 - [ ] A1: immutable command/program storage beyond the held snapshot, and no
   stale program data left readable across reset. Slot publication and the
   idle lease pin are already in.
@@ -4622,12 +6206,137 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
   21,093 clocks, cookie `0x600D000B`). `IN`/`OUT`/`CONST` aliasing,
   vec4/write-mask semantics, and mandatory Mesa limits remain unsatisfied.
   `RESOURCE_CREATE_2D` payload decode and the fence echo are in
-  (2026-09-22, vgpu cmd 10 cases / 41 checks / 44 clocks). One local
+  (2026-09-22, vgpu cmd 15 cases / 62 checks / 73 clocks; 64×64 is
+  recorded and 128-wide is rejected). One local
   used element and its interrupt are in. One local avail descriptor
   is walked and supplies that command. One backing entry is stored
   for an existing resource. One read of that entry is in the
-  resource. A descriptor chain, the guest-memory used ring, and draw
-  remain open.
+  resource. One published used element is written to guest memory.
+  `used.idx` is stored after that element. One `TRANSFER_FROM_HOST_3D`
+  writes the 4×2 fragment surface to guest memory. One `SUBMIT_3D`
+  three-descriptor chain is accepted and its 32-byte header is read.
+  The named execbuffer is read in 32-byte beats. The first command
+  is a surface create, followed by the two shaders, the
+  vertex-elements object, the sampler view, the sampler state, the
+  blend object, the depth-stencil object, the rasterizer object, the
+  blend bind, the depth-stencil bind, the rasterizer bind, and the
+  vertex-shader bind, the fragment-shader bind, the vertex-elements
+  bind, the sampler-state bind, the sampler-view set, and the vertex
+  inline write, the vertex-buffer set, the 640 by 480 scissor, the
+  viewport, the framebuffer state, the clear, and the draw record. The
+  frozen execbuffer ends at byte 960. Those records do not rasterize.
+  The control prefix records context 1, the two 3D resources, and the
+  three attaches, and the 24-byte scene response is stored. Capset
+  info and capset get record `INVALID_PARAMETER`. Scanout 0 and the
+  flush record resource 4 at 640 by 480 and do not present a frame.
+  A separate walker accepts the scene's three-descriptor chain and
+  publishes one local used element, then writes that element to
+  `64'h8800_D000` and `used.idx` 1 to `64'h8800_E002`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The clear color
+  `32'hFF1A0D0D` is stored at the four corners of the 64 by 64 ceiling,
+  and that same word stands for all 4096 samples. The 24 vertex
+  floats match the NDC square. Viewport scales 320 and 240 put that
+  square over 0..640 by 0..480, so every ceiling sample is covered.
+  The stored color stays `32'hFF1A0D0D`. The vertex-shader text is
+  the 32-dword VERT passthrough at byte 48. The fragment-shader text
+  is the 35-dword TEX program at byte 200. That program is bound to
+  sampler view 5 on resource 1 and sampler state 6. Resource 1 is a
+  640 by 480 `B8G8R8X8` image. Its backing length is 1,228,800 bytes
+  and its transfer is the top 640 by 64 band. Those 163,840 bytes are
+  read as 5,120 beats. The image is not stored. Ceiling `(0,0)` on
+  the later reader is the corner texel. `(1,0)` on that reader stays
+  the clear word. The blend reader at `(1,0)` is `32'hD2008000`.
+  The row-0 blend at `x = 8` is `32'h8091A2B3`. `y = 1`, `x = 0` is
+  `32'h53010202` and `y = 1`, `x = 1` is `32'h6B024303`. On that row,
+  `x = 2` is `32'h42024203` and `x = 7` is `32'h1A222B33`. `x = 8`
+  spans the beat and is `32'h434C545D`. `x = 15` is `32'h0`. `y = 2`,
+  `x = 0` is `32'h79797A7A` and `y = 2`, `x = 1` is `32'h42424343`.
+  Every point of the 64 by 64 ceiling can be sampled. `(0,3)` is
+  `32'h78787878`. Those points are written as 512 beats at
+  `32'h88040000`. Those beats are read back. Beat 0 is `32'hA5000000`
+  and beat 24 is `32'h78787878`. The scene header and the 960-byte
+  execbuffer are fetched. The first command word is `32'h00050801`.
+  The `DRAW_VBO` at byte 908 is recognized: count 4, triangle strip.
+  It is not executed. The 24 NDC floats at byte 696 are read. The
+  first is -1 and the last is +1. They are not transformed.
+  The viewport at byte 824 places that square on 0..640 by 0..480.
+  That placement is not a rasterizer. The scissor at byte 808 is that
+  same rectangle. No pixel is clipped. The clear at byte 872 packs
+  to `32'hFF1A0D0D`. No pixel is written. The framebuffer at byte
+  856 names one color buffer, surface 1. No memory is attached.
+  The vertex-buffer set at byte 792 is stride 24, offset 0, resource 3.
+  No vertices are fetched. The inline write at byte 648 names that
+  resource and 96 bytes. The floats are not kept.
+  The sampler view at byte 632 names fragment slot 0 and handle 5.
+  The sampler state at byte 616 names fragment slot 0 and handle 6.
+  The vertex-element bind at byte 608 names handle 4.
+  The fragment shader at byte 596 names handle 3.
+  The vertex shader at byte 584 names handle 2.
+  The rasterizer bind at byte 576 names handle 9.
+  The depth-stencil bind at byte 568 names handle 8.
+  The blend bind at byte 560 names handle 7.
+  The rasterizer object at byte 520 names handle 9. Its eight state
+  words are 0.
+  The depth-stencil object at byte 496 names handle 8. Its four state
+  words are 0.
+  The blend object at byte 448 names handle 7 and color word
+  `32'h78020010`.
+  The sampler-state object at byte 408 names handle 6, wrap word
+  `32'h00002292`, and max LOD `32'h42000000`.
+  The sampler view at byte 380 names handle 5, resource 1, format
+  `32'h02000002`, and swizzle `32'h00000688`.
+  The vertex-element object at byte 340 names handle 4, with format
+  31 at offset 0 and format 29 at offset 16.
+  The fragment-shader object at byte 176 names handle 3, fragment
+  stage, length 140, and text dword `32'h47415246`. The vertex-shader
+  object at byte 24 names handle 2, vertex stage, length 125, and
+  text dword `32'h54524556`. The surface object at byte 0 names
+  handle 1, resource 4, and format 2.
+  Guest descriptors at `64'h8800E100` link that header, the 960-byte
+  execbuffer, and the 24-byte response. Avail index 1 at
+  `64'h8800E200` names descriptor 0.
+  The completed-opcode list at `64'h8800E300` is count 0 and capset
+  id 0. The virgl capset stays refused.
+  A 64 by 64 guest window at `64'h88020000` is 512 beats of clear
+  word `32'hFF1A0D0D`. The shader is not run.
+  The guest response at `64'h8800A800` is `OK_NODATA` with fence
+  `64'h1122334455667788`. The used element at `64'h8800E400` is
+  descriptor 0 and length 24. The used index at `64'h8800E480` is 1.
+  The used-buffer interrupt reason at `64'h8800E500` is `32'h1`.
+  Ack lowers the pin.
+  The guest ack at `64'h8800E510` is `32'h1`, and the status word at
+  `64'h8800E500` is then `32'h0`.
+  All 512 beats of the window are that clear word. `(1,0)` is byte
+  4 of beat 0. `(63,63)` is the top lane of the last beat.
+  That window is copied to `64'h88030000`.
+  The copy is a 64 by 64 rectangle, 16384 bytes. `(1,0)` in that
+  buffer is byte 4. Row 1 starts at byte 256. `(63,63)` starts at
+  byte 16380.
+  The clear word sits in memory as the bytes 0D 0D 1A FF. Byte 0 is
+  red. A first byte of `8'hFF` records nothing.
+  Row 1 at `64'h88030100` starts with that same red byte. A blue
+  first byte records nothing.
+  `(1,1)` is byte 260, `(2,3)` is byte 776, and `(0,63)` is byte
+  16128. `(63,0)` is byte 252 at `64'h880300E0`. `(7,0)` is byte
+  28, lane 7 of `64'h88030000`. `(8,0)` is byte 32 and `(15,0)` is
+  byte 60, both in `64'h88030020`. `(56,0)` is byte 224, lane 0 of
+  `64'h880300E0`, and `(63,0)` stays byte 252, lane 7 of that beat.
+  `(16,0)` is byte 64 and `(23,0)` is byte 92, both in
+  `64'h88030040`. `(24,0)` is byte 96 and `(31,0)` is byte 124,
+  both in `64'h88030060`. `(32,0)` is byte 128 and `(39,0)` is
+  byte 156, both in `64'h88030080`. `(40,0)` is byte 160 and
+  `(47,0)` is byte 188, both in `64'h880300A0`. `(48,0)` is
+  byte 192 and `(55,0)` is byte 220, both in `64'h880300C0`.
+  `(63,63)` is byte 16380, lane 7 of
+  `64'h88033FE0`, and byte 0 there is red. Each of those lanes is the same red byte first.
+  No blend is applied. No depth test is run. No triangle is walked.
+  The shader is not run. No vertices are fetched. No texture is bound.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The image is not kept
+  in registers.
+  Scanout 0 names that resource at 640 by 480, and the
+  band flush does
+  not present a frame, so a covered sample stays that clear word.
+  The triangle is not walked.
   The TEX opcode still returns `-26`.
 - [x] One local used element and its interrupt. The element is stored
   before `used.idx` advances. IRQ rises with the index and falls on ack.
@@ -4665,19 +6374,49 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
   resource and the offset is 0. A mismatched or failed response does
   not change the image. The 4×2 resource keeps 32 bytes from
   `64'h8800_1000`. The 1×1 resource keeps 4 bytes and clears the rest.
-  There is no guest write. `XferEn` stays 0. Remote 2026-09-22:
-  **13 cases / 121 checks / 91 clocks**, errors=0. Fixture synth, no
-  latches: Enable=0 **24 ports / no cells**; Enable=1 **10,086 cells /
-  974 flip-flops**. The CVA6 cookie was not re-run.
+  There is no guest write. `XferEn` stays 0. One response stores one
+  32-byte beat. Remote 2026-09-23: **13 cases / 154 checks / 125
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **27 ports /
+  no cells**; Enable=1 **12,034 cells / 974 flip-flops**. The CVA6
+  cookie was not re-run.
+- [x] One guest write of the local used element. The store is 8 bytes,
+  descriptor id then length, and only after `used.idx` is nonzero. An
+  unpublished prefix is not written. A failed response does not mark
+  it written. A second store does not replace it. Descriptor 4 length
+  24 lands at `64'h8800_3000`. `used.idx` is not written. This is not
+  `g6lc_apu_queue`. `UwrEn` stays 0. Remote 2026-09-22: **10 cases /
+  74 checks / 66 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **1,701 cells / 262
+  flip-flops**. The CVA6 cookie was not re-run.
+- [x] One guest store of `used.idx`. The store is the 16-bit index,
+  only after the element write and only when the local index is
+  nonzero. A failed response does not mark it stored. A second store
+  does not replace it. Index 1 lands at `64'h8800_4002`. The element
+  is not written again. `UidxEn` stays 0. Remote 2026-09-22:
+  **11 cases / 82 checks / 76 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **19 ports / no cells**; Enable=1 **1,376 cells /
+  166 flip-flops**. The CVA6 cookie was not re-run.
+- [x] One covered sample from the 4×2 resource image. The address is
+  `y * stride + x * 4`. Sample `(1,0)` is `32'hA7A6A5A4`. A miss and a
+  fault leave the other pixels clear. This is not `g6lc_apu_frag`'s
+  memory and not a draw. `SurfEn` stays 0. The image is a byte memory.
+  Remote 2026-09-23: **7 cases / 46 checks / 69 clocks**, errors=0.
+  Fixture synth, no latches: Enable=0 **16 ports / no cells**;
+  Enable=1 **2,368,466 cells / 262,180 flip-flops**. The CVA6
+  cookie was not re-run.
 - [ ] A4: handle-only protected LSU on top of the memory/exec scheduler,
   vertex fetch, interpolation across a primitive, and a filtered sampler.
-  One-sample coverage, one RGBA8 pixel, and one unfiltered texel are in.
-  Context isolation and a cache-visible common surface remain open.
+  One-sample coverage, one RGBA8 pixel, one unfiltered texel, and one
+  resource-image sample in `g6lc_apu_rsurf` are in. That sample is not
+  `g6lc_apu_frag`'s memory. Context isolation and a cache-visible
+  common surface remain open.
   Current local storage is resettable arrays, not tc_sram. Exec geometry
   now matches that file. DFT claims remain open.
 - [ ] A5: unchanged Linux/Mesa EGL/GLES2 shader/data-dependent output on RTL,
-  no software fallback, raw+PPM evidence; BIOS same-device scene and quiesced
-  client handoff. Optional BIOS-managed provisioning is a separate integration
+  no software fallback. The exit image is the reduced `gles2-min` readback,
+  raw bytes plus a PPM. That objective orders the graphics lane only. BIOS
+  same-device scene and quiesced client handoff stay a separate client of the
+  same surface. Optional BIOS-managed provisioning is a separate integration
   test, not a second firmware. Linux health stays with the BIOS plan's live gate.
 - [ ] A6/A7: full advertised feature/error/exhaustion/CTS coverage, non-vacuous
   formal safety/liveness, AI/APU/config coexistence, gaming after correctness,

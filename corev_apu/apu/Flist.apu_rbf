@@ -1,0 +1,13 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// Write the 64 by 64 ceiling as 512 beats. The image is not kept.
+// Not on the testharness flist.
+
++incdir+${CVA6_REPO_DIR}/corev_apu/apu/include
+${CVA6_REPO_DIR}/core/include/config_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/include/g6lc_apu_cfg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgpu_smp.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgpu_rbf.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgpu_rbk.sv

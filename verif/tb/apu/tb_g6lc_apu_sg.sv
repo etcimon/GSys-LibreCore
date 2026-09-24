@@ -482,7 +482,8 @@ module tb_g6lc_apu_sg;
     saved_frag = frag; invalidate = 1;
     repeat (6) begin
       @(negedge clk);
-      check("invalidate holds offered fragment", fv && frag === saved_frag && !fc && !lr && !idle && !valid_table);
+      check("invalidate holds offered fragment and the table",
+            fv && frag === saved_frag && !fc && !lr && !idle && valid_table);
     end
     allow_fragment = 1; finish_query(APU_DMA_CANCELLED);
     check("cancelled offered fragment does no data work", stream_bytes == 0);

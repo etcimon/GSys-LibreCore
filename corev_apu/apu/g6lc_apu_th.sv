@@ -60,6 +60,8 @@ module g6lc_apu_th
   apu_axi_req_t guest_lite, control_lite;
   apu_axi_resp_t guest_lite_rsp, control_lite_rsp;
   logic [HartIdWidth-1:0] control_aw_hart_q, control_ar_hart_q;
+  logic guest_hold, ctrl_hold;
+  logic [31:0] guest_admitted, ctrl_admitted, epoch;
 
   if (Enable) begin : gen_source
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -82,13 +84,15 @@ module g6lc_apu_th
                        .axi4_rsp_t(axi4_rsp_t)) i_guest (
     .clk_i, .rst_ni, .testmode_i,
     .slv_req_i(guest_req_i), .slv_rsp_o(guest_rsp_o),
-    .lite_req_o(guest_lite), .lite_rsp_i(guest_lite_rsp)
+    .lite_req_o(guest_lite), .lite_rsp_i(guest_lite_rsp),
+    .epoch_i(epoch), .hold_o(guest_hold), .admitted_o(guest_admitted)
   );
   g6lc_apu_axi4_lite #(.Enable(Enable), .axi4_req_t(axi4_req_t),
                        .axi4_rsp_t(axi4_rsp_t)) i_control (
     .clk_i, .rst_ni, .testmode_i,
     .slv_req_i(control_req_i), .slv_rsp_o(control_rsp_o),
-    .lite_req_o(control_lite), .lite_rsp_i(control_lite_rsp)
+    .lite_req_o(control_lite), .lite_rsp_i(control_lite_rsp),
+    .epoch_i(epoch), .hold_o(ctrl_hold), .admitted_o(ctrl_admitted)
   );
   g6lc_apu_attach #(
     .ApuCfg(ApuCfg), .CoreCfg(CoreCfg), .HartIdWidth(HartIdWidth),
@@ -104,6 +108,8 @@ module g6lc_apu_th
     .vq_state_o, .queue_enable_o, .backend_reset_req_o,
     .backend_queue_stop_req_o, .backend_reset_done_i, .backend_idle_i,
     .used_valid_i, .used_qid_i, .used_context_i, .used_fence_i, .used_len_i,
-    .used_ready_o, .cfg_display_event_i, .bus_fault_o, .dma_req_o, .dma_rsp_i
+    .used_ready_o, .cfg_display_event_i, .bus_fault_o, .dma_req_o, .dma_rsp_i,
+    .guest_hold_i(guest_hold), .guest_epoch_i(guest_admitted),
+    .ctrl_hold_i(ctrl_hold), .ctrl_epoch_i(ctrl_admitted), .epoch_o(epoch)
   );
 endmodule

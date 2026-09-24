@@ -26,6 +26,7 @@ cp "$ROOT/verif/tb/apu/rom_spin.hex" "$OUT/rom_spin.hex"
   "$ROOT/verilator_config.vlt" \
   -f "$ROOT/core/Flist.cva6" \
   +incdir+"$ROOT/corev_apu/include" \
+  +incdir+"$ROOT/corev_apu/src" \
   +incdir+"$ROOT/corev_apu/apu/include" \
   +incdir+"$ROOT/corev_apu/register_interface/include" \
   +incdir+"$ROOT/vendor/pulp-platform/register_interface/include" \

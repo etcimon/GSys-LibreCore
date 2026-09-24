@@ -24,6 +24,15 @@ module g6lc_cluster
     // When set, boot_addr_core_i[c] is the reset PC for physical core c.
     // Default off: every core uses boot_addr_i (ROM). FPGA/Altera unused.
     parameter bit          PerCoreBoot = 1'b0,
+    // Per-core window guard, before the hub merges the cores. Default off.
+    // A core whose hart is not FwHart cannot send the RAM or control window
+    // into the hub. The firmware hart is a wire-through. FPGA/Altera unused.
+    parameter bit          SrcGuard = 1'b0,
+    parameter logic [31:0] FwHart = 32'hffff_ffff,
+    parameter logic [63:0] GuardRamBase = 64'h0,
+    parameter logic [63:0] GuardRamBytes = 64'h0,
+    parameter logic [63:0] GuardCtrlBase = 64'h0,
+    parameter logic [63:0] GuardCtrlBytes = 64'h0,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -68,6 +77,8 @@ module g6lc_cluster
 
   axi_req_t  [NC-1:0] core_req;
   axi_resp_t [NC-1:0] core_resp;
+  axi_req_t  [NC-1:0] guarded_req;
+  axi_resp_t [NC-1:0] guarded_resp;
   coh_inval_t [NC-1:0] inv_hub, inv_incl, inv_to_core;
   logic       [NC-1:0] inv_core_ready;
   logic [63:0]         l1_inv_addr [NC];
@@ -226,14 +237,42 @@ module g6lc_cluster
   assign ai_sb_ticket_o    = core_sb_ticket[0];
   assign ai_sb_desc_ptr_o  = core_sb_desc_ptr[0];
 
+  // Per-core guard in front of the hub. SrcGuard=0 is a wire.
+  localparam int unsigned HART_STRIDE =
+      (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
+  for (genvar c = 0; c < NC; c++) begin : gen_src
+    if (SrcGuard) begin : gen_guard
+      g6lc_apu_src_guard #(
+          .Hart      (32'(c * HART_STRIDE)),
+          .FwHart    (FwHart),
+          .RamBase   (GuardRamBase),
+          .RamBytes  (GuardRamBytes),
+          .CtrlBase  (GuardCtrlBase),
+          .CtrlBytes (GuardCtrlBytes),
+          .axi_req_t (axi_req_t),
+          .axi_resp_t(axi_resp_t)
+      ) i_guard (
+          .clk_i,
+          .rst_ni,
+          .up_req_i (core_req[c]),
+          .up_resp_o(core_resp[c]),
+          .dn_req_o (guarded_req[c]),
+          .dn_resp_i(guarded_resp[c])
+      );
+    end else begin : gen_wire
+      assign guarded_req[c]  = core_req[c];
+      assign core_resp[c]    = guarded_resp[c];
+    end
+  end
+
   // --------------------
   // Coherence hub
   // --------------------
   // S4: SKIP_HUB identity (s4-v-skiphub-minis) same stock HANG @40000 —
   // not the hub. Keep NC>1 hub on _v.
   if (NC <= 1 && IDENTITY_FAST) begin : gen_single
-    assign hub_mem_req   = core_req[0];
-    assign core_resp[0]  = hub_mem_resp;
+    assign hub_mem_req      = guarded_req[0];
+    assign guarded_resp[0]  = hub_mem_resp;
     assign inv_hub       = '{default: '0};
   end else begin : gen_hub
     g6lc_coherence_hub #(
@@ -255,8 +294,8 @@ module g6lc_cluster
     ) i_hub (
         .clk_i,
         .rst_ni,
-        .core_req_i       (core_req),
-        .core_resp_o      (core_resp),
+        .core_req_i       (guarded_req),
+        .core_resp_o      (guarded_resp),
         .mem_req_o        (hub_mem_req),
         .mem_resp_i       (hub_mem_resp),
         .inv_core_o       (inv_hub),
@@ -422,3 +461,5 @@ module g6lc_cluster
   assign _unused_incl_busy = incl_inv_busy;
 
 endmodule
+
+`include "g6lc_apu_src_guard.sv"

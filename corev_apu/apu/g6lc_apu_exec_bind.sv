@@ -26,9 +26,22 @@ module g6lc_apu_exec_bind
   output logic          idle_o
 );
   localparam bit ExecEn = ApuCfg.Enable && ApuCfg.ExecEn;
+  localparam int unsigned DmemIdxW = $clog2(APU_EXEC_DMEM_WORDS);
 
   `ifndef SYNTHESIS
-  initial assert (apu_cfg_legal(ApuCfg)) else $fatal(1, "APU exec bind: invalid configuration");
+  initial begin
+    apu_exec_job_t geom_job;
+    assert (apu_cfg_legal(ApuCfg))
+      else $fatal(1, "APU exec bind: invalid configuration");
+    assert ($bits(geom_job.idx) == $clog2(APU_EXEC_IMEM_WORDS))
+      else $fatal(1, "APU exec bind: IMEM index width");
+    assert ($bits(geom_job.regno) == $clog2(APU_EXEC_REGS))
+      else $fatal(1, "APU exec bind: register index width");
+    assert ($bits(geom_job.thread) == $clog2(APU_EXEC_THREADS))
+      else $fatal(1, "APU exec bind: thread index width");
+    assert (DmemIdxW == 6)
+      else $fatal(1, "APU exec bind: DMEM index width");
+  end
   `endif
 
   if (!ExecEn) begin : gen_off
@@ -51,18 +64,22 @@ module g6lc_apu_exec_bind
     logic take, take_err;
 
     assign idle_o = state_q == Idle && exec_idle;
-    assign take_err = op_valid_i && state_q == Idle && !apu_op_is_exec(op_i);
+    // A visible ready must accept. Disabled or cancel blocks an exec op
+    // instead of advertising ready and ignoring it.
+    assign take_err = op_valid_i && state_q == Idle && !cancel_i &&
+                      !apu_op_is_exec(op_i);
     assign take = op_valid_i && state_q == Idle && enable_i && !cancel_i &&
                   apu_op_is_exec(op_i) && exec_idle;
-    assign op_ready_o = state_q == Idle &&
-                        (exec_idle || !op_valid_i || !apu_op_is_exec(op_i));
+    assign op_ready_o = state_q == Idle && !cancel_i &&
+                        (!op_valid_i || !apu_op_is_exec(op_i) ||
+                         (enable_i && exec_idle));
     assign op_cpl_valid_o = state_q == Cpl;
     assign op_cpl_o = '{status: st_q, slot: '0, resource_id: data_q,
                         context_id: '0, epoch: '0, bytes: '0, tag: '0};
     assign start = take && op_i == APU_MEM_EXEC_RUN;
     assign shader = take ? exec_i.shader : job_q.shader;
-    assign imem_we = state_q == Pulse && op_q == APU_MEM_EXEC_IMEM;
-    assign dbg_we = state_q == Pulse && op_q == APU_MEM_EXEC_POKE;
+    assign imem_we = state_q == Pulse && op_q == APU_MEM_EXEC_IMEM && !cancel_i;
+    assign dbg_we = state_q == Pulse && op_q == APU_MEM_EXEC_POKE && !cancel_i;
 
     g6lc_apu_exec #(.ApuCfg(ApuCfg)) i_exec (
       .clk_i, .rst_ni, .testmode_i, .enable_i, .cancel_i,
@@ -70,7 +87,7 @@ module g6lc_apu_exec_bind
       .imem_we_i(imem_we), .imem_idx_i(job_q.idx), .imem_wdata_i(job_q.inst),
       .idle_o(exec_idle), .busy_o(exec_busy), .fault_o(exec_fault),
       .dbg_thread_i(job_q.thread), .dbg_reg_i(job_q.regno), .dbg_data_o(dbg_data),
-      .dbg_dmem_idx_i(job_q.data[5:0]), .dbg_dmem_o(dbg_dmem),
+      .dbg_dmem_idx_i(job_q.data[DmemIdxW-1:0]), .dbg_dmem_o(dbg_dmem),
       .dbg_we_i(dbg_we), .dbg_wdata_i(job_q.data)
     );
 
@@ -78,8 +95,11 @@ module g6lc_apu_exec_bind
       if (!rst_ni) begin
         state_q <= Idle; op_q <= APU_MEM_NONE; job_q <= '0;
         st_q <= APU_DMA_OK; data_q <= '0;
-      end else if (cancel_i) begin
-        state_q <= Idle; st_q <= APU_DMA_CANCELLED;
+      // An accepted op still completes. Cancel does not drop a held
+      // completion; the caller has to acknowledge it.
+      end else if (cancel_i && state_q != Idle && state_q != Cpl) begin
+        st_q <= APU_DMA_CANCELLED;
+        state_q <= Cpl;
       end else unique case (state_q)
         Idle: if (take_err) begin
           op_q <= op_i;
@@ -110,5 +130,12 @@ module g6lc_apu_exec_bind
 
     logic unused_b;
     assign unused_b = exec_busy | testmode_i;
+
+    `ifndef SYNTHESIS
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+      op_cpl_valid_o && !op_cpl_ready_i |=> op_cpl_valid_o && $stable(op_cpl_o));
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+      op_valid_i && op_ready_o && state_q == Idle |=> state_q != Idle);
+    `endif
   end
 endmodule

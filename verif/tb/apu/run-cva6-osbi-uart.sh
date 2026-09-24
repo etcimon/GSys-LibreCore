@@ -31,6 +31,7 @@ cp "$ROOT/verif/tb/apu/osbi_uart.hex" "$OUT/osbi_uart.hex"
   "$ROOT/verif/tb/apu/apu_axi.vlt" "$ROOT/verilator_config.vlt" \
   -f "$ROOT/core/Flist.cva6" \
   +incdir+"$ROOT/corev_apu/include" \
+  +incdir+"$ROOT/corev_apu/src" \
   +incdir+"$ROOT/corev_apu/apu/include" \
   +incdir+"$ROOT/corev_apu/register_interface/include" \
   +incdir+"$ROOT/vendor/pulp-platform/register_interface/include" \

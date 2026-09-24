@@ -87,7 +87,8 @@ module tb_g6lc_apu_mem;
   apu_dma_axi_resp_t axi_rsp;
   logic off_ordy, off_ocv, off_idle, off_held, off_fault, off_crr, off_crdv;
   apu_dma_axi_req_t off_axi;
-  int errors = 0, checks = 0, cycles = 0, cases = 0;
+  int errors = 0, checks = 0, cycles = 0, cases = 0, ar_n = 0;
+  logic [63:0] ar_addr;
   logic [7:0] memory [0:8191];
   logic r_active, rvalid, aw_seen, w_seen, bvalid, executed;
   logic [63:0] raddr;
@@ -121,7 +122,13 @@ module tb_g6lc_apu_mem;
     .axi_req_o(off_axi), .axi_rsp_i(axi_rsp)
   );
   always #5 clk = ~clk;
-  always @(posedge clk) cycles++;
+  always @(posedge clk) begin
+    cycles++;
+    if (rst_ni && axi_req.ar_valid && axi_rsp.ar_ready) begin
+      ar_n <= ar_n + 1;
+      ar_addr <= axi_req.ar.addr;
+    end
+  end
   initial begin #20000000; $fatal(1, "mem timeout case=%0d", cases); end
   always @(negedge clk) begin
     #1;
@@ -219,15 +226,18 @@ module tb_g6lc_apu_mem;
     cdma = '{resource_id: 11, context_id: 3, epoch: 5, offset: 0, bytes: 16, tag: 7};
     cmap = mkmap(11, WindowBase + 64'h200, 64);
     issue(APU_MEM_CMD_DMA, APU_DMA_OK);
+    check("command read uses the published slot",
+          ar_addr >= WindowBase + 64'h100 && ar_addr < WindowBase + 64'h110);
     check("cmd held", held);
     begin
       logic [63:0] word;
-      rdoff = 0; crv = 1; crdr = 0;
+      rdoff = 0; crdr = 0;
       @(negedge clk); while (!crr) @(negedge clk);
+      crv = 1;
       @(posedge clk); @(negedge clk); crv = 0;
       while (!crdv) @(negedge clk);
       word = rddata;
-      check("cmd byte0", word[7:0] == pattern(WindowBase + 64'h200));
+      check("cmd byte0", word[7:0] == pattern(WindowBase + 64'h100));
       crdr = 1; @(posedge clk); @(negedge clk); crdr = 0;
     end
     issue(APU_MEM_CMD_RELEASE, APU_DMA_OK);
@@ -249,6 +259,29 @@ module tb_g6lc_apu_mem;
     sgq.req = '{resource_id: 13, context_id: 3, epoch: 5, offset: 0, bytes: 32, tag: 9};
     sgq.write_access = 0;
     issue(APU_MEM_SG_XFER, APU_DMA_OK);
+
+    begin
+      int mark;
+      mark = ar_n;
+      cdma = '{resource_id: 99, context_id: 3, epoch: 5, offset: 0, bytes: 16, tag: 11};
+      cmap = mkmap(99, WindowBase + 64'h300, 64);
+      issue(APU_MEM_CMD_DMA, APU_DMA_BAD_RESOURCE);
+      check("missing handle issues no read", ar_n == mark);
+      mark = ar_n;
+      cdma.resource_id = 11;
+      cdma.epoch = 9;
+      cmap = mkmap(11, WindowBase + 64'h200, 64);
+      issue(APU_MEM_CMD_DMA, APU_DMA_STALE);
+      check("stale handle issues no read", ar_n == mark);
+      invalidate = 1;
+      repeat (2) @(posedge clk);
+      invalidate = 0;
+      @(posedge clk);
+      mark = ar_n;
+      cdma.epoch = 5;
+      issue(APU_MEM_CMD_DMA, APU_DMA_BAD_RESOURCE);
+      check("a dropped pin does not read the mailbox base", ar_n == mark);
+    end
 
     if (errors != 0) $fatal(1, "APU mem errors=%0d", errors);
     else begin

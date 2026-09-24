@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 //
 // Firmware RAM window: load apu_fw.hex at 0x90000000, cookie at 0x9003FF00,
-// CVA6 I$ 2-beat INCR fill. Not a CVA6 testharness boot.
+// CVA6 I$ 2-beat INCR fill. A reserved hart is captured at AW/AR. AXI id
+// and PROT are not authority. Not a CVA6 testharness boot.
 
 `timescale 1ns/1ps
 
@@ -22,10 +23,12 @@ module g6lc_apu_fwram_fixture
   import g6lc_apu_bus_pkg::*;
 #(parameter bit Enable = 1'b1, parameter int unsigned RamBytes = 0) (
   input  logic clk_i, rst_ni, testmode_i,
+  input  logic [31:0] aw_hart_i, ar_hart_i,
   input  apu_dma_axi_req_t slv_req_i,
   output apu_dma_axi_resp_t slv_rsp_o,
   output axi_pkg::xbar_rule_64_t ram_rule_o,
-  output logic [63:0] ram_base_o, ram_end_o
+  output logic [63:0] ram_base_o, ram_end_o,
+  output logic fault_o
 );
   g6lc_apu_fwram #(
     .ApuCfg(g6lc_fwram_test_pkg::ram_cfg(Enable, RamBytes)),
@@ -39,22 +42,28 @@ module tb_g6lc_apu_fwram;
   import g6lc_fwram_test_pkg::*;
   import axi_pkg::*;
   logic clk = 0, rst_ni = 0;
+  logic [31:0] aw_hart, ar_hart;
   apu_dma_axi_req_t [1:0] req;
   apu_dma_axi_resp_t [1:0] rsp;
   axi_pkg::xbar_rule_64_t ram_rule, off_rule;
   logic [63:0] ram_base, ram_end;
+  logic fault, off_fault;
   logic [31:0] image [256];
   int errors = 0, checks = 0, cycles = 0, cases = 0, nwords = 0;
 
   g6lc_apu_fwram_fixture i_on (
     .clk_i(clk), .rst_ni, .testmode_i(1'b1),
+    .aw_hart_i(aw_hart), .ar_hart_i(ar_hart),
     .slv_req_i(req[0]), .slv_rsp_o(rsp[0]),
-    .ram_rule_o(ram_rule), .ram_base_o(ram_base), .ram_end_o(ram_end)
+    .ram_rule_o(ram_rule), .ram_base_o(ram_base), .ram_end_o(ram_end),
+    .fault_o(fault)
   );
   g6lc_apu_fwram_fixture #(.Enable(0)) i_off (
     .clk_i(clk), .rst_ni, .testmode_i(1'b1),
+    .aw_hart_i(aw_hart), .ar_hart_i(ar_hart),
     .slv_req_i(req[1]), .slv_rsp_o(rsp[1]),
-    .ram_rule_o(off_rule), .ram_base_o(), .ram_end_o()
+    .ram_rule_o(off_rule), .ram_base_o(), .ram_end_o(),
+    .fault_o(off_fault)
   );
 
   always #5 clk = ~clk;
@@ -94,6 +103,7 @@ module tb_g6lc_apu_fwram;
     @(negedge clk);
     req[p].aw.addr = a; req[p].aw.size = size; req[p].aw.len = '0;
     req[p].aw.burst = BURST_INCR; req[p].aw.id = '0;
+    req[p].aw.lock = 1'b0; req[p].aw.atop = '0;
     req[p].w.data = wdata; req[p].w.strb = strb; req[p].w.last = 1'b1;
     req[p].aw_valid = 1; req[p].w_valid = 1;
     while (!aw_done || !w_done) begin
@@ -122,7 +132,7 @@ module tb_g6lc_apu_fwram;
       input logic [1:0] burst = BURST_INCR);
     @(negedge clk);
     req[p].ar.addr = a; req[p].ar.size = size; req[p].ar.len = len;
-    req[p].ar.burst = burst; req[p].ar.id = '0;
+    req[p].ar.burst = burst; req[p].ar.id = '0; req[p].ar.lock = 1'b0;
     req[p].ar_valid = 1;
     @(posedge clk);
     while (!rsp[p].ar_ready) @(posedge clk);
@@ -168,6 +178,140 @@ module tb_g6lc_apu_fwram;
     receive_read(p, a, data, expected);
   endtask
 
+  // AW is accepted before W. The hart pin may change in between. The id is
+  // the AXI id, checked on B, and is not a hart.
+  task automatic aw_then_w(
+      input logic [31:0] hart_aw, input logic [31:0] hart_w,
+      input logic [63:0] a, input logic [31:0] d,
+      input logic [3:0] id, input logic [2:0] prot,
+      input logic [1:0] expected);
+    logic [63:0] wdata;
+    logic [7:0] strb;
+    pack32(a, d, wdata, strb);
+    @(negedge clk);
+    aw_hart = hart_aw;
+    req[0].aw.addr = a; req[0].aw.size = 3'd2; req[0].aw.len = '0;
+    req[0].aw.burst = BURST_INCR; req[0].aw.id = id; req[0].aw.prot = prot;
+    req[0].aw_valid = 1'b1; req[0].w_valid = 1'b0;
+    @(posedge clk);
+    while (!rsp[0].aw_ready) @(posedge clk);
+    @(negedge clk);
+    req[0].aw_valid = 1'b0;
+    aw_hart = hart_w;
+    req[0].w.data = wdata; req[0].w.strb = strb; req[0].w.last = 1'b1;
+    req[0].w_valid = 1'b1;
+    @(posedge clk);
+    while (!rsp[0].w_ready) @(posedge clk);
+    @(negedge clk);
+    req[0].w_valid = 1'b0;
+    @(posedge clk);
+    while (!rsp[0].b_valid) @(posedge clk);
+    check("AXI B id", rsp[0].b.id == id && rsp[0].b.resp == expected);
+    @(negedge clk); req[0].b_ready = 1;
+    @(posedge clk); @(negedge clk); req[0].b_ready = 0;
+  endtask
+
+  task automatic write_id(
+      input logic [31:0] hart, input logic [63:0] a, input logic [31:0] d,
+      input logic [3:0] id, input logic [2:0] prot,
+      input logic [1:0] expected);
+    logic [63:0] wdata;
+    logic [7:0] strb;
+    bit aw_done, w_done;
+    pack32(a, d, wdata, strb);
+    aw_done = 0; w_done = 0;
+    @(negedge clk);
+    aw_hart = hart;
+    req[0].aw.addr = a; req[0].aw.size = 3'd2; req[0].aw.len = '0;
+    req[0].aw.burst = BURST_INCR; req[0].aw.id = id; req[0].aw.prot = prot;
+    req[0].w.data = wdata; req[0].w.strb = strb; req[0].w.last = 1'b1;
+    req[0].aw_valid = 1; req[0].w_valid = 1;
+    while (!aw_done || !w_done) begin
+      @(posedge clk);
+      if (req[0].aw_valid && rsp[0].aw_ready) aw_done = 1;
+      if (req[0].w_valid && rsp[0].w_ready) w_done = 1;
+      @(negedge clk);
+      if (aw_done) req[0].aw_valid = 0;
+      if (w_done) req[0].w_valid = 0;
+    end
+    @(posedge clk);
+    while (!rsp[0].b_valid) @(posedge clk);
+    check("AXI B id", rsp[0].b.id == id && rsp[0].b.resp == expected);
+    @(negedge clk); req[0].b_ready = 1;
+    @(posedge clk); @(negedge clk); req[0].b_ready = 0;
+  endtask
+
+  // AR is accepted, then the hart pin may change, before R.
+  task automatic capture_read(
+      input logic [31:0] hart_ar, input logic [31:0] hart_after,
+      input logic [63:0] a, input logic [3:0] id, input logic [2:0] prot,
+      input logic [1:0] expected, output logic [31:0] data);
+    logic [63:0] beat;
+    @(negedge clk);
+    ar_hart = hart_ar;
+    req[0].ar.addr = a; req[0].ar.size = 3'd2; req[0].ar.len = '0;
+    req[0].ar.burst = BURST_INCR; req[0].ar.id = id; req[0].ar.prot = prot;
+    req[0].ar_valid = 1'b1;
+    @(posedge clk);
+    while (!rsp[0].ar_ready) @(posedge clk);
+    @(negedge clk);
+    req[0].ar_valid = 1'b0;
+    ar_hart = hart_after;
+    @(posedge clk);
+    while (!rsp[0].r_valid) @(posedge clk);
+    beat = rsp[0].r.data;
+    check("AXI R id", rsp[0].r.id == id && rsp[0].r.resp == expected &&
+          rsp[0].r.last);
+    unpack32(a, beat, data);
+    @(negedge clk); req[0].r_ready = 1;
+    @(posedge clk); @(negedge clk); req[0].r_ready = 0;
+  endtask
+
+  // One plain or rejected store. want_r waits for the atomic read result.
+  task automatic store_once(
+      input int p, input logic [63:0] a, input logic [31:0] d,
+      input logic [2:0] size, input logic [7:0] strb,
+      input logic lock, input logic [5:0] atop, input bit want_r,
+      input logic [1:0] expected);
+    logic [63:0] wdata;
+    bit aw_done, w_done;
+    wdata = {32'h0, d};
+    aw_done = 0; w_done = 0;
+    @(negedge clk);
+    req[p].aw.addr = a; req[p].aw.size = size; req[p].aw.len = '0;
+    req[p].aw.burst = BURST_INCR; req[p].aw.id = 4'h3;
+    req[p].aw.lock = lock; req[p].aw.atop = atop;
+    req[p].w.data = wdata; req[p].w.strb = strb; req[p].w.last = 1'b1;
+    req[p].aw_valid = 1; req[p].w_valid = 1;
+    while (!aw_done || !w_done) begin
+      @(posedge clk);
+      if (req[p].aw_valid && rsp[p].aw_ready) aw_done = 1;
+      if (req[p].w_valid && rsp[p].w_ready) w_done = 1;
+      @(negedge clk);
+      if (aw_done) req[p].aw_valid = 0;
+      if (w_done) req[p].w_valid = 0;
+    end
+    @(posedge clk);
+    while (!rsp[p].b_valid) @(posedge clk);
+    check("store B", rsp[p].b.id == 4'h3 && rsp[p].b.resp == expected &&
+          rsp[p].b.resp != RESP_EXOKAY);
+    @(negedge clk); req[p].b_ready = 1;
+    @(posedge clk); @(negedge clk); req[p].b_ready = 0;
+    if (want_r) begin
+      @(posedge clk);
+      while (!rsp[p].r_valid) @(posedge clk);
+      check("atomic R", rsp[p].r.id == 4'h3 && rsp[p].r.resp == expected &&
+            rsp[p].r.resp != RESP_EXOKAY && rsp[p].r.last);
+      @(negedge clk); req[p].r_ready = 1;
+      @(posedge clk); @(negedge clk); req[p].r_ready = 0;
+    end else begin
+      repeat (3) begin
+        @(posedge clk);
+        check("store has no R", !rsp[p].r_valid);
+      end
+    end
+  endtask
+
   task automatic exercise_write(input int p, input logic [63:0] addr,
       input logic [7:0] len, input logic [2:0] size, input logic [7:0] strb,
       input int skew, input int bad_last, input logic [1:0] expected);
@@ -181,6 +325,7 @@ module tb_g6lc_apu_fwram;
       @(negedge clk);
       req[p].aw.addr = addr; req[p].aw.len = len; req[p].aw.size = size;
       req[p].aw.burst = BURST_INCR; req[p].aw.id = 5;
+      req[p].aw.lock = 1'b0; req[p].aw.atop = '0;
       req[p].aw_valid = !aw_done && tick >= (skew < 0 ? -skew : 0);
       if (aw_done) begin
         req[p].aw.addr = ~addr; req[p].aw.len = ~len;
@@ -242,6 +387,7 @@ module tb_g6lc_apu_fwram;
     logic [63:0] beat;
     integer i;
     req[0] = '0; req[1] = '0;
+    aw_hart = 32'd1; ar_hart = 32'd1;
     repeat (4) @(negedge clk);
     rst_ni = 1;
 
@@ -316,14 +462,22 @@ module tb_g6lc_apu_fwram;
     send_read(0, 64'h9000_0001, 3'd0);
     receive_beat(0, 64'h9000_0001, beat);
     check("size-0 auipc byte1", beat[15:8] == 8'hf1);
-    read_reg(0, 64'hFFFFFFFF9000_0000, r);
-    check("sign-ext PA auipc", r == 32'h0003_f117);
-    write_reg(0, 64'hFFFFFFFF9003_EFA0, 32'h4741_5246);
-    read_reg(0, 64'hFFFFFFFF9003_EFA0, r);
-    check("sign-ext stack FRAG", r == 32'h4741_5246);
-    send_read(0, 64'hFFFFFFFF9003_EFA0, 3'd0);
-    receive_beat(0, 64'hFFFFFFFF9003_EFA0, beat);
-    check("sign-ext stack lbu", beat[7:0] == 8'h46);
+    read_reg(0, 64'hFFFF_FFFF_9000_0000, r, 2);
+    check("sign-ext PA is outside the window", 1'b1);
+    write_reg(0, 64'hFFFF_FFFF_9000_0000, 32'h1111_1111, 2);
+    read_reg(0, 64'h9000_0000, r);
+    check("sign-ext write does not alias", r == 32'h0003_f117);
+    read_reg(0, 64'h1_9000_0000, r, 2);
+    check("upper PA bit is outside the window", 1'b1);
+    write_reg(0, 64'h1_9000_0000, 32'h2222_2222, 2);
+    read_reg(0, 64'h9000_0000, r);
+    check("upper-bit write does not alias", r == 32'h0003_f117);
+    send_read(0, 64'hFFFF_FFFF_9000_0000, 3'd3, 8'd1);
+    drain_read(0, 2);
+    check("sign-ext fill is rejected", 1'b1);
+    send_read(0, 64'hFFFF_FFFF_FFFF_FFF8, 3'd3, 8'd1);
+    drain_read(0, 2);
+    check("wrapping span is rejected", 1'b1);
 
     cases++;
     for (int p = 0; p < 2; p++) begin
@@ -392,6 +546,140 @@ module tb_g6lc_apu_fwram;
     send_read(0, 64'h9000_1000, 3'd3);
     receive_beat(0, 64'h9000_1000, beat);
     check("full-width write recovers after rejected bursts", beat == 64'h11223344_55667788);
+
+    cases++;
+    read_reg(0, 64'h9000_0000, r);
+    check("firmware hart reads the canonical word", r == 32'h0003_f117);
+    write_id(32'd0, 64'h9000_0000, 32'h1111_1111, 4'h0, 3'b000, RESP_SLVERR);
+    aw_hart = 32'd1; ar_hart = 32'd1;
+    read_reg(0, 64'h9000_0000, r);
+    check("other hart write leaves the canonical word", r == 32'h0003_f117);
+    capture_read(32'd0, 32'd0, 64'h9000_0000, 4'h0, 3'b000, RESP_SLVERR, r);
+    check("other hart read is SLVERR", 1'b1);
+    aw_hart = 32'd1; ar_hart = 32'd1;
+    read_reg(0, 64'h9000_0000, r);
+    check("canonical word stays after the denied read", r == 32'h0003_f117);
+
+    cases++;
+    aw_then_w(32'd1, 32'd0, 64'h9000_2000, 32'h6E7A_0001, 4'h0, 3'b000, RESP_OKAY);
+    aw_hart = 32'd1; ar_hart = 32'd1;
+    read_reg(0, 64'h9000_2000, r);
+    check("captured write grant survives a later hart pin", r == 32'h6E7A_0001);
+    aw_then_w(32'd0, 32'd1, 64'h9000_2000, 32'hD11E_D11E, 4'h0, 3'b000, RESP_SLVERR);
+    aw_hart = 32'd1; ar_hart = 32'd1;
+    read_reg(0, 64'h9000_2000, r);
+    check("later firmware hart cannot retag a denied write", r == 32'h6E7A_0001);
+    capture_read(32'd1, 32'd0, 64'h9000_2000, 4'h0, 3'b000, RESP_OKAY, r);
+    check("captured read grant survives a later hart pin", r == 32'h6E7A_0001);
+    capture_read(32'd0, 32'd1, 64'h9000_2000, 4'h0, 3'b000, RESP_SLVERR, r);
+    check("later firmware hart cannot retag a denied read", 1'b1);
+    aw_hart = 32'd1; ar_hart = 32'd1;
+    read_reg(0, 64'h9000_2000, r);
+    check("denied read leaves the captured word", r == 32'h6E7A_0001);
+
+    cases++;
+    write_id(32'd1, 64'h9000_2000, 32'hF107_F107, 4'h7, 3'b111, RESP_OKAY);
+    capture_read(32'd1, 32'd1, 64'h9000_2000, 4'hA, 3'b111, RESP_OKAY, r);
+    check("PROT and AXI id do not block the firmware hart", r == 32'hF107_F107);
+    write_id(32'd0, 64'h9000_2000, 32'hBAD0_BAD0, 4'h9, 3'b001, RESP_SLVERR);
+    aw_hart = 32'd1; ar_hart = 32'd1;
+    read_reg(0, 64'h9000_2000, r);
+    check("privileged PROT does not admit another hart", r == 32'hF107_F107);
+    capture_read(32'd0, 32'd0, 64'h9000_2000, 4'h9, 3'b001, RESP_SLVERR, r);
+    check("privileged PROT does not admit another hart read", 1'b1);
+    aw_hart = 32'd1; ar_hart = 32'd1;
+
+    cases++;
+    write_reg(0, 64'h9000_3000, 32'hAABB_CCDD);
+    send_read(0, 64'h9000_3002, 3'd1);
+    receive_beat(0, 64'h9000_3002, beat);
+    check("aligned halfword", beat[31:16] == 16'hAABB);
+    send_read(0, 64'h9000_3001, 3'd1);
+    receive_beat(0, 64'h9000_3001, beat, RESP_SLVERR);
+    check("misaligned halfword is SLVERR", 1'b1);
+    send_read(0, 64'h9000_3000, 3'd1, 8'd1);
+    drain_read(0, RESP_SLVERR);
+    check("narrow burst is SLVERR", 1'b1);
+    store_once(0, 64'h9000_3000, 32'h0000_005A, 3'd0, 8'h01, 1'b0, 6'h0, 1'b0,
+               RESP_SLVERR);
+    read_reg(0, 64'h9000_3000, r);
+    check("narrow store leaves the word", r == 32'hAABB_CCDD);
+
+    cases++;
+    write_reg(0, 64'h9000_0FF0, 32'h1111_0000);
+    write_reg(0, 64'h9000_0FF4, 32'h2222_0000);
+    write_reg(0, 64'h9000_0FF8, 32'h3333_0000);
+    write_reg(0, 64'h9000_0FFC, 32'h4444_0000);
+    send_read(0, 64'h9000_0FF0, 3'd3, 8'd1);
+    receive_beat(0, 64'h9000_0FF0, beat, RESP_OKAY, 0);
+    check("4 KiB fill stays on the page", beat == 64'h2222_0000_1111_0000);
+    receive_beat(0, 64'h9000_0FF8, beat, RESP_OKAY, 1);
+    check("4 KiB fill ends on the page", beat == 64'h4444_0000_3333_0000);
+    send_read(0, 64'h9000_0FF8, 3'd3, 8'd1);
+    drain_read(0, RESP_SLVERR);
+    check("burst that crosses 4 KiB is SLVERR", 1'b1);
+    send_read(0, 64'h9000_0FF8, 3'd3);
+    receive_beat(0, 64'h9000_0FF8, beat);
+    check("single beat at the page end stays", beat == 64'h4444_0000_3333_0000);
+
+    cases++;
+    store_once(0, 64'h9000_3000, 32'h1111_1111, 3'd2, 8'h0f, 1'b1, 6'h0, 1'b0,
+               RESP_SLVERR);
+    read_reg(0, 64'h9000_3000, r);
+    check("exclusive store does not write", r == 32'hAABB_CCDD);
+    @(negedge clk);
+    req[0].ar.addr = 64'h9000_3000; req[0].ar.size = 3'd2; req[0].ar.len = '0;
+    req[0].ar.burst = BURST_INCR; req[0].ar.id = 4'h1; req[0].ar.lock = 1'b1;
+    req[0].ar_valid = 1'b1;
+    @(posedge clk);
+    while (!rsp[0].ar_ready) @(posedge clk);
+    @(negedge clk); req[0].ar_valid = 1'b0;
+    @(posedge clk);
+    while (!rsp[0].r_valid) @(posedge clk);
+    check("exclusive read is SLVERR", rsp[0].r.resp == RESP_SLVERR &&
+          rsp[0].r.resp != RESP_EXOKAY && rsp[0].r.last && rsp[0].r.id == 4'h1);
+    @(negedge clk); req[0].r_ready = 1;
+    @(posedge clk); @(negedge clk); req[0].r_ready = 0;
+    store_once(0, 64'h9000_3000, 32'h2222_2222, 3'd2, 8'h0f, 1'b0,
+               ATOP_ATOMICSWAP, 1'b1, RESP_SLVERR);
+    read_reg(0, 64'h9000_3000, r);
+    check("atomic swap does not write", r == 32'hAABB_CCDD);
+    store_once(0, 64'h9000_3000, 32'h3333_3333, 3'd2, 8'h0f, 1'b0,
+               {ATOP_ATOMICSTORE, ATOP_LITTLE_END, ATOP_ADD}, 1'b0, RESP_SLVERR);
+    read_reg(0, 64'h9000_3000, r);
+    check("atomic store does not write", r == 32'hAABB_CCDD);
+    store_once(1, 64'h9000_3000, 32'h4444_4444, 3'd2, 8'h0f, 1'b0,
+               ATOP_ATOMICSWAP, 1'b1, RESP_SLVERR);
+    check("disabled atomic stays out of quarantine", !off_fault && !fault);
+
+    cases++;
+    write_reg(0, 64'h9000_4000, 32'h5150_0001);
+    @(negedge clk);
+    req[0].aw.addr = 64'h9000_4000; req[0].aw.size = 3'd2; req[0].aw.len = '0;
+    req[0].aw.burst = BURST_INCR; req[0].aw.id = 4'h0;
+    req[0].aw.lock = 1'b0; req[0].aw.atop = '0;
+    req[0].w.data = 64'hffff_ffff; req[0].w.strb = 8'h0f; req[0].w.last = 1'b0;
+    req[0].aw_valid = 1'b1; req[0].w_valid = 1'b1;
+    @(posedge clk);
+    while (!(rsp[0].aw_ready && rsp[0].w_ready)) @(posedge clk);
+    @(negedge clk); req[0].aw_valid = 1'b0; req[0].w_valid = 1'b0;
+    repeat (4) begin
+      @(posedge clk);
+      check("quarantine holds the outstanding store",
+            fault && !off_fault && !rsp[0].b_valid && !rsp[0].r_valid &&
+            !rsp[0].aw_ready && !rsp[0].ar_ready && !rsp[0].w_ready);
+    end
+    @(negedge clk); rst_ni = 1'b0; req[0] = '0; req[1] = '0;
+    repeat (3) @(negedge clk);
+    rst_ni = 1'b1;
+    @(posedge clk);
+    check("reset releases quarantine", !fault && !off_fault && rsp[0].aw_ready &&
+          !rsp[0].b_valid);
+    read_reg(0, 64'h9000_4000, r);
+    check("quarantined store did not land", r == 32'h5150_0001);
+    write_reg(0, 64'h9000_4000, 32'h5150_0002);
+    read_reg(0, 64'h9000_4000, r);
+    check("legal store works after reset", r == 32'h5150_0002);
 
     if (errors != 0) $fatal(1, "APU fwram errors=%0d", errors);
     $display("PASS tb_g6lc_apu_fwram cases=%0d checks=%0d cycles=%0d errors=0 nwords=%0d",

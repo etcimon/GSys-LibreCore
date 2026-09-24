@@ -1,7 +1,8 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 //
-// CVA6-resident TGSI job: TEX fail closed, then compile MOV and run it.
+// CVA6-resident TGSI job. The same compiler as the host: a mutated MOV,
+// an IMM swizzle, and rejected TEX/IF, then the MOV job runs.
 // Not linked into apu_fw.elf (TID+IADD) or the mini-hart pre-encoded image.
 // Not EGL. TEX still rejected.
 
@@ -108,6 +109,88 @@ int main(void)
   }
   if ((uint8_t)movw[0] != 'F') {
     *cookie = 0xC6000000u | (uint32_t)(uint8_t)movw[0];
+    return 1;
+  }
+  {
+    /* MOV TEMP[0], TEMP[2] is r4<-r6, not the TEMP[1] job word. */
+    volatile uint32_t alt[8];
+    unsigned an = 0;
+    alt[0] = 0x47415246u;
+    alt[1] = 0x564f4d0au;
+    alt[2] = 0x4d455420u;
+    alt[3] = 0x5d305b50u;
+    alt[4] = 0x4554202cu;
+    alt[5] = 0x325b504du;
+    alt[6] = 0x4e450a5du;
+    alt[7] = 0x00000a44u;
+    rc = g6lc_apu_tgsi_compile(
+        g6lc_apu_live_str((char *)(uintptr_t)alt), words, APU_TGSI_MAX_INST, &an,
+        err, sizeof(err));
+    words[0] = live_u32(&words[0], (uint32_t)rc);
+    words[1] = live_u32(&words[1], words[0]);
+    an = live_u32((uint32_t *)&an, words[1]);
+    if (rc != 0 || an != 2 ||
+        words[0] != APU_EX_ENC(APU_EX_MOV, 4, 6, 0, 0, 0, 0, 0) ||
+        words[0] == APU_TGSI_JOB_MOV_WORD || words[1] != APU_EX_HALT_WORD) {
+      *cookie = 0xD1000000u | (words[0] & 0xffffu);
+      return 1;
+    }
+  }
+  {
+    /* IMM[0].yyyy selects 0.5f. .xxxx of the same literal is 0. */
+    volatile uint32_t imms[16];
+    unsigned in = 0;
+    imms[0] = 0x47415246u;
+    imms[1] = 0x4d4d490au;
+    imms[2] = 0x205d305bu;
+    imms[3] = 0x33544c46u;
+    imms[4] = 0x307b2032u;
+    imms[5] = 0x2e30202cu;
+    imms[6] = 0x31202c35u;
+    imms[7] = 0x7d32202cu;
+    imms[8] = 0x564f4d0au;
+    imms[9] = 0x4d455420u;
+    imms[10] = 0x5d305b50u;
+    imms[11] = 0x4d49202cu;
+    imms[12] = 0x5d305b4du;
+    imms[13] = 0x7979792eu;
+    imms[14] = 0x4e450a79u;
+    imms[15] = 0x00000a44u;
+    rc = g6lc_apu_tgsi_compile(
+        g6lc_apu_live_str((char *)(uintptr_t)imms), words, APU_TGSI_MAX_INST,
+        &in, err, sizeof(err));
+    words[0] = live_u32(&words[0], (uint32_t)rc);
+    words[1] = live_u32(&words[1], words[0]);
+    words[2] = live_u32(&words[2], words[1]);
+    in = live_u32((uint32_t *)&in, words[2]);
+    if (rc != 0 || in != 3 || words[0] != APU_EX_LDC_R4_WORD ||
+        words[1] != 0x3f000000u || words[2] != APU_EX_HALT_WORD) {
+      *cookie = 0xD2000000u | (words[1] & 0xffffu);
+      return 1;
+    }
+  }
+  {
+    volatile uint32_t iff[6];
+    unsigned fn = 0;
+    iff[0] = 0x47415246u;
+    iff[1] = 0x2046490au;
+    iff[2] = 0x504d4554u;
+    iff[3] = 0x0a5d305bu;
+    iff[4] = 0x0a444e45u;
+    iff[5] = 0;
+    rc = g6lc_apu_tgsi_compile(
+        g6lc_apu_live_str((char *)(uintptr_t)iff), words, APU_TGSI_MAX_INST, &fn,
+        err, sizeof(err));
+    if (rc != -26) {
+      *cookie = 0xD3000000u | ((uint32_t)(-rc) & 0xffffu);
+      return 1;
+    }
+  }
+  rc = g6lc_apu_tgsi_compile(
+      g6lc_apu_live_str((char *)(uintptr_t)texw), words, APU_TGSI_MAX_INST, &n,
+      err, sizeof(err));
+  if (rc != -26) {
+    *cookie = 0xD4000000u | ((uint32_t)(-rc) & 0xffffu);
     return 1;
   }
   rc = g6lc_apu_tgsi_job_compile(

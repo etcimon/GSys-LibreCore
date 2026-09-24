@@ -39,13 +39,21 @@ module g6lc_apu_axi_lite
   // (APU_AXI=1) tie mbox_rsp_i to SLVERR so the existing control map is
   // unchanged. g6lc_apu_sys attaches the firmware backend here.
   output apu_reg_req_t mbox_req_o,
-  input  apu_reg_rsp_t mbox_rsp_i
+  input  apu_reg_rsp_t mbox_rsp_i,
+  // When a hold is set, that port's AW/AR were admitted upstream. Stamp the
+  // saved epoch instead of the live one. Direct lite masters leave both low.
+  input  logic guest_hold_i,
+  input  logic [31:0] guest_epoch_i,
+  input  logic ctrl_hold_i,
+  input  logic [31:0] ctrl_epoch_i,
+  output logic [31:0] epoch_o
 );
   apu_tagged_axi_req_t tagged_req [2];
   apu_tagged_axi_resp_t tagged_rsp [2];
   apu_tagged_reg_req_t reg_req [2];
   apu_reg_rsp_t reg_rsp [2];
   logic [31:0] epoch;
+  assign epoch_o = epoch;
 
   `ifndef SYNTHESIS
   initial begin
@@ -60,18 +68,21 @@ module g6lc_apu_axi_lite
   for (genvar p = 0; p < 2; p++) begin : gen_bridge
     axi_req_t bus_req;
     logic aw_auth, ar_auth;
+    logic [31:0] use_epoch;
     assign bus_req = p == 0 ? guest_req_i : control_req_i;
+    assign use_epoch = (p == 0 ? guest_hold_i : ctrl_hold_i) ?
+                       (p == 0 ? guest_epoch_i : ctrl_epoch_i) : epoch;
     assign aw_auth = p == 0 ? 1'b1 : control_aw_authorized_i;
     assign ar_auth = p == 0 ? 1'b1 : control_ar_authorized_i;
     always_comb begin
       tagged_req[p] = '0;
-      tagged_req[p].aw.addr = {epoch, aw_auth, bus_req.aw.addr};
+      tagged_req[p].aw.addr = {use_epoch, aw_auth, bus_req.aw.addr};
       tagged_req[p].aw.prot = bus_req.aw.prot;
       tagged_req[p].aw_valid = bus_req.aw_valid;
       tagged_req[p].w = bus_req.w;
       tagged_req[p].w_valid = bus_req.w_valid;
       tagged_req[p].b_ready = bus_req.b_ready;
-      tagged_req[p].ar.addr = {epoch, ar_auth, bus_req.ar.addr};
+      tagged_req[p].ar.addr = {use_epoch, ar_auth, bus_req.ar.addr};
       tagged_req[p].ar.prot = bus_req.ar.prot;
       tagged_req[p].ar_valid = bus_req.ar_valid;
       tagged_req[p].r_ready = bus_req.r_ready;

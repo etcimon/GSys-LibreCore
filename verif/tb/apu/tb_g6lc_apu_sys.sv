@@ -58,6 +58,12 @@ module g6lc_apu_sys_fixture
   output apu_dma_axi_req_t dma_req_o,
   input apu_dma_axi_resp_t dma_rsp_i
 );
+  logic guest_hold_i, ctrl_hold_i;
+  logic [31:0] guest_epoch_i, ctrl_epoch_i, epoch_o;
+  assign guest_hold_i = 1'b0;
+  assign ctrl_hold_i = 1'b0;
+  assign guest_epoch_i = '0;
+  assign ctrl_epoch_i = '0;
   g6lc_apu_sys #(
     .ApuCfg(g6lc_sys_test_pkg::sys_cfg(Enable)),
     .CoreCfg(g6lc_sys_test_pkg::sys_core())

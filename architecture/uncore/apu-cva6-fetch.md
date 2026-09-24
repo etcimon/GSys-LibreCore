@@ -15,8 +15,8 @@ cookie `0x600D000A`. That build retains five SELRANGE warnings in
 `core/issue_read_operands.sv`; it is not a warning-free full-core lint pass.
 Direct reset into firmware is M-mode execution unless a verified supervisor
 transition establishes otherwise. No cookie test here demonstrates a protected
-S-mode domain. `apu_tgsi_cc.hex` runs an opcode-only target stub plus frozen MOV
-emit, not the same semantic compiler as the host suite.
+S-mode domain. `apu_tgsi_cc.hex` runs the same TGSI compiler as the host
+suite (2026-09-22, 14 checks / 21,093 clocks, cookie `0x600D000B`).
 
 Keep these tests for bus/fetch regression, but stop multiplying peripheral-stub
 milestones as a proxy for Linux progress. The next boot gate is one real pinned
@@ -98,7 +98,7 @@ Remote Verilator 5.008 (2026-09-15):
 | `run-cva6-cookie.sh` | **`tb_g6lc_apu_cva6_cookie` 14 checks / 1,835 clocks**, cookie `0x600D000A` |
 | `run-cva6-th-cookie.sh` | **`tb_g6lc_apu_cva6_th_cookie` 14 checks / 1,835 clocks**, cookie `0x600D000A` (compositor `gen_exec`) |
 | `run-cva6-tgsi.sh` | **`tb_g6lc_apu_cva6_tgsi` 14 checks / 2,081 clocks**, cookie `0x600D000B` (pre-encoded MOV) |
-| `run-cva6-tgsi-cc.sh` | **`tb_g6lc_apu_cva6_tgsi` 14 checks / 10,511 clocks**, cookie `0x600D000B` (resident compile + frozen MOV emit) |
+| `run-cva6-tgsi-cc.sh` | **`tb_g6lc_apu_cva6_tgsi` 14 checks / 21,093 clocks**, cookie `0x600D000B` (same compiler as the host; 2026-09-22) |
 | `run-cva6-osbi-boot.sh` | **`tb_g6lc_apu_cva6_osbi_boot` 13 checks / 286 clocks** (hart 0 DRAM lo `0x80000000`, hart 1 firmware RAM) |
 | `run-cva6-osbi-uart.sh` | **`tb_g6lc_apu_cva6_osbi_uart` 12 checks / 288 clocks**, byte `0x41` (UART stub through compositor) |
 | `run-cva6-osbi-clint.sh` | **`tb_g6lc_apu_cva6_osbi_clint` 12 checks / 288 clocks**, word `0x1` (CLINT MSIP stub through compositor) |

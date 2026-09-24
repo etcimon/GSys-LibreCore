@@ -42,6 +42,12 @@ module g6lc_apu_axi_fixture
   apu_reg_req_t mbox_req;
   apu_reg_rsp_t mbox_rsp;
   assign mbox_rsp = '{rdata: '0, error: 1'b1, ready: mbox_req.valid};
+  logic guest_hold_i, ctrl_hold_i;
+  logic [31:0] guest_epoch_i, ctrl_epoch_i, epoch_o;
+  assign guest_hold_i = 1'b0;
+  assign ctrl_hold_i = 1'b0;
+  assign guest_epoch_i = '0;
+  assign ctrl_epoch_i = '0;
   g6lc_apu_axi_lite #(.ApuCfg(test_apu_cfg()), .CoreCfg(test_core_cfg())) i_dut (
     .*,
     .mbox_req_o(mbox_req),

@@ -412,6 +412,8 @@ module tb_g6lc_apu_cva6_cookie;
     .clk_i(clk),
     .rst_ni,
     .testmode_i(1'b1),
+    .aw_hart_i(32'd1),
+    .ar_hart_i(32'd1),
     .slv_req_i(rom_req),
     .slv_rsp_o(rom_rsp),
     .ram_rule_o(),
@@ -429,6 +431,8 @@ module tb_g6lc_apu_cva6_cookie;
     .clk_i(clk),
     .rst_ni,
     .testmode_i(1'b1),
+    .aw_hart_i(32'd1),
+    .ar_hart_i(32'd1),
     .slv_req_i(ram_req),
     .slv_rsp_o(ram_rsp),
     .ram_rule_o(),
@@ -462,6 +466,9 @@ module tb_g6lc_apu_cva6_cookie;
     .slv_req_i(ctrl4_req),
     .slv_rsp_o(ctrl4_rsp),
     .lite_req_o(ctrl_lite_req),
+    .epoch_i('0),
+    .hold_o(),
+    .admitted_o(),
     .lite_rsp_i(ctrl_lite_rsp)
   );
 

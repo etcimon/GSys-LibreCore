@@ -7,4 +7,5 @@ ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_storage.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_queue.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_mem.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_mbox.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_sched.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_sys.sv

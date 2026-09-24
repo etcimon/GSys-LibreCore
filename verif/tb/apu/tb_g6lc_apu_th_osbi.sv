@@ -108,12 +108,14 @@ module tb_g6lc_apu_th_osbi;
     .guest_req_i(zreq), .control_req_i(zreq), .ram_req_i(zreq),
     .guest_rsp_o(guest_rsp), .control_rsp_o(ctrl_rsp), .ram_rsp_o(ram_rsp),
     .control_aw_hart_i(aw_hart), .control_ar_hart_i(ar_hart),
+    .ram_aw_hart_i(aw_hart), .ram_ar_hart_i(ar_hart),
     .irq_sources_i(irq_in), .irq_sources_o(irq_out),
     .plic_irq_o(plic), .fw_ready_o(fw_ready),
     .boot_addr_core_o(boot),
     .guest_rule_o(guest_rule), .control_rule_o(ctrl_rule),
     .ram_rule_o(ram_rule), .dram_lo_rule_o(dram_lo), .dram_hi_rule_o(dram_hi),
-    .dma_req_o(dma_req), .dma_rsp_i(dma_rsp)
+    .dma_req_o(dma_req), .dma_rsp_i(dma_rsp),
+    .ram_fault_o()
   );
   g6lc_apu_th_load #(
     .ApuCfg(load_cfg(1'b0)),
@@ -129,12 +131,14 @@ module tb_g6lc_apu_th_osbi;
     .guest_req_i(zreq), .control_req_i(zreq), .ram_req_i(zreq),
     .guest_rsp_o(), .control_rsp_o(), .ram_rsp_o(),
     .control_aw_hart_i(aw_hart), .control_ar_hart_i(ar_hart),
+    .ram_aw_hart_i(aw_hart), .ram_ar_hart_i(ar_hart),
     .irq_sources_i(irq_in), .irq_sources_o(off_irq),
     .plic_irq_o(off_plic), .fw_ready_o(off_ready),
     .boot_addr_core_o(off_boot),
     .guest_rule_o(off_guest), .control_rule_o(off_ctrl),
     .ram_rule_o(off_ram), .dram_lo_rule_o(off_lo), .dram_hi_rule_o(off_hi),
-    .dma_req_o(off_dma), .dma_rsp_i(dma_rsp)
+    .dma_req_o(off_dma), .dma_rsp_i(dma_rsp),
+    .ram_fault_o()
   );
 
   assign rules[0] = '{idx: DebugIdx, start_addr: 64'h0, end_addr: 64'h1000};

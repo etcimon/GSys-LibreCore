@@ -403,6 +403,8 @@ module tb_g6lc_apu_cva6_th_cookie;
     .clk_i(clk),
     .rst_ni,
     .testmode_i(1'b1),
+    .aw_hart_i(32'd1),
+    .ar_hart_i(32'd1),
     .slv_req_i(rom_req),
     .slv_rsp_o(rom_rsp),
     .ram_rule_o(),
@@ -450,6 +452,8 @@ module tb_g6lc_apu_cva6_th_cookie;
     .ram_rsp_o(ram_rsp),
     .control_aw_hart_i(aw_hart),
     .control_ar_hart_i(ar_hart),
+    .ram_aw_hart_i(aw_hart),
+    .ram_ar_hart_i(ar_hart),
     .irq_sources_i(irq_in),
     .irq_sources_o(irq_out),
     .plic_irq_o(plic),
@@ -461,7 +465,8 @@ module tb_g6lc_apu_cva6_th_cookie;
     .dram_lo_rule_o(),
     .dram_hi_rule_o(),
     .dma_req_o(dma_req),
-    .dma_rsp_i(dma_rsp)
+    .dma_rsp_i(dma_rsp),
+    .ram_fault_o()
   );
 
   task automatic check(input string name, input logic ok);

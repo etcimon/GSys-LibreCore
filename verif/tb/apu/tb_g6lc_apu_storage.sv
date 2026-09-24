@@ -23,7 +23,7 @@ endpackage
 module g6lc_apu_storage_fixture
   import g6lc_apu_pkg::*;
 #(parameter bit Enable = 1) (
-  input logic clk_i, rst_ni, testmode_i, enable_i, cancel_i, invalidate_i,
+  input logic clk_i, rst_ni, testmode_i, enable_i, cancel_i, invalidate_i, child_idle_i,
   input logic map_valid_i,
   output logic map_ready_o,
   input apu_map_insert_t map_i,
@@ -69,7 +69,7 @@ module tb_g6lc_apu_storage;
   import g6lc_apu_pkg::*;
   import g6lc_storage_test_pkg::*;
   logic clk = 0, rst_ni = 0;
-  logic enable, cancel, invalidate;
+  logic enable, cancel, invalidate, child_idle = 1;
   logic mv, mr, mcv, mcr, lv, lr, lcv, lcr, iv, ir, icv, icr;
   logic cv, cr, dv, dr, ccv, ccr, rv, rr, rdv, rdr, rel;
   logic idle, held, fault;
@@ -90,7 +90,8 @@ module tb_g6lc_apu_storage;
 
   g6lc_apu_storage_fixture i_on (
     .clk_i(clk), .rst_ni, .testmode_i(1'b1), .enable_i(enable), .cancel_i(cancel),
-    .invalidate_i(invalidate), .map_valid_i(mv), .map_ready_o(mr), .map_i(minst),
+    .invalidate_i(invalidate), .child_idle_i(child_idle),
+    .map_valid_i(mv), .map_ready_o(mr), .map_i(minst),
     .map_cpl_valid_o(mcv), .map_cpl_ready_i(mcr), .map_cpl_o(mcpl),
     .lookup_valid_i(lv), .lookup_ready_o(lr), .lookup_i(look),
     .lookup_cpl_valid_o(lcv), .lookup_cpl_ready_i(lcr), .lookup_cpl_o(lcpl),
@@ -105,7 +106,8 @@ module tb_g6lc_apu_storage;
   );
   g6lc_apu_storage_fixture #(.Enable(0)) i_off (
     .clk_i(clk), .rst_ni, .testmode_i(1'b1), .enable_i(enable), .cancel_i(cancel),
-    .invalidate_i(invalidate), .map_valid_i(mv), .map_ready_o(off_mr), .map_i(minst),
+    .invalidate_i(invalidate), .child_idle_i(child_idle),
+    .map_valid_i(mv), .map_ready_o(off_mr), .map_i(minst),
     .map_cpl_valid_o(off_mcv), .map_cpl_ready_i(mcr), .map_cpl_o(),
     .lookup_valid_i(lv), .lookup_ready_o(off_lr), .lookup_i(look),
     .lookup_cpl_valid_o(off_lcv), .lookup_cpl_ready_i(lcr), .lookup_cpl_o(),
@@ -142,7 +144,7 @@ module tb_g6lc_apu_storage;
     @(negedge clk); rst_ni = 0; mv = 0; lv = 0; iv = 0; cv = 0; dv = 0; rv = 0; rel = 0;
     mcr = 0; lcr = 0; icr = 0; ccr = 0; rdr = 0;
     repeat (3) @(negedge clk);
-    rst_ni = 1; enable = 1; cancel = 0; invalidate = 0;
+    rst_ni = 1; enable = 1; cancel = 0; invalidate = 0; child_idle = 1;
   endtask
   task automatic do_insert(input apu_map_insert_t req, input apu_dma_status_e st);
     apu_map_cpl_t saved;
@@ -256,6 +258,20 @@ module tb_g6lc_apu_storage;
     do_inval('{mode: APU_INVAL_ALL, slot: 0, resource_id: 0, context_id: 0, tag: 18});
     do_lookup('{resource_id: 14, context_id: 21, epoch: 1, write_access: 0, tag: 19}, APU_DMA_BAD_RESOURCE);
 
+    do_insert('{slot: 4, mapping: mkmap(15, 21, 7, WindowBase + 64'h4000, 64), tag: 20}, APU_DMA_OK);
+    do_lookup('{resource_id: 15, context_id: 21, epoch: 7, write_access: 0, tag: 21}, APU_DMA_OK);
+    reset_all();
+    do_lookup('{resource_id: 15, context_id: 21, epoch: 7, write_access: 0, tag: 22}, APU_DMA_BAD_RESOURCE);
+    do_insert('{slot: 4, mapping: mkmap(15, 21, 8, WindowBase + 64'h4000, 64), tag: 23}, APU_DMA_OK);
+    do_lookup('{resource_id: 15, context_id: 21, epoch: 8, write_access: 0, tag: 24}, APU_DMA_OK);
+    @(negedge clk); invalidate = 1;
+    @(posedge clk); @(negedge clk); invalidate = 0;
+    do_lookup('{resource_id: 15, context_id: 21, epoch: 8, write_access: 0, tag: 25}, APU_DMA_BAD_RESOURCE);
+    reset_all();
+    i_on.i_dut.gen_on.gen_map.i_map.sram[1] =
+        apu_map_pack(mkmap(40, 21, 1, WindowBase, 32));
+    do_lookup('{resource_id: 40, context_id: 21, epoch: 1, write_access: 0, tag: 26}, APU_DMA_BAD_RESOURCE);
+
     fill_cmd(512, APU_DMA_LIMIT);
     fill_cmd(20, APU_DMA_OK);
     read_cmd(20);
@@ -270,6 +286,33 @@ module tb_g6lc_apu_storage;
     check("snapshot survives idle", held);
     repeat (8) @(negedge clk);
     read_cmd(12);
+
+    do_insert('{slot: 2, mapping: mkmap(16, 21, 3, WindowBase + 64'h200, 32), tag: 30},
+              APU_DMA_OK);
+    child_idle = 0;
+    @(negedge clk);
+    check("insert waits while the child DMA is busy", !mr);
+    check("inval waits while the child DMA is busy", !ir);
+    invalidate = 1;
+    repeat (4) @(negedge clk);
+    invalidate = 0;
+    do_lookup('{resource_id: 16, context_id: 21, epoch: 3, write_access: 0, tag: 31},
+               APU_DMA_OK);
+    child_idle = 1;
+    @(posedge clk); @(negedge clk);
+    do_lookup('{resource_id: 16, context_id: 21, epoch: 3, write_access: 0, tag: 32},
+               APU_DMA_BAD_RESOURCE);
+
+    fill_cmd(8, APU_DMA_OK);
+    child_idle = 0;
+    @(negedge clk);
+    check("command stays held while the child DMA is busy", held);
+    rel = 1; @(posedge clk); @(negedge clk); rel = 0;
+    repeat (3) @(negedge clk);
+    check("release waits for the child DMA", held);
+    child_idle = 1;
+    @(posedge clk); @(negedge clk);
+    check("release retires after the child DMA is idle", !held);
 
     if (errors != 0) $fatal(1, "APU storage errors=%0d", errors);
     else begin
