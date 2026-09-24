@@ -54,6 +54,9 @@ Each row is a BoardSpec gate. Off ⇒ no `#define`, no route, no IR object.
 | TLS ServerHello | `kernel.tls.serve` | small handshake | **yes** — first-party; not OpenSSL |
 | USB MSC host | `kernel.usb.enable` | small | **yes** — FAT32 flash default on; not a netdev |
 | `/bios/menu` `/bios/menu/{cpu,uncore,…}` | inferred topology/uncore | tiny JSON | **yes** — HolyC `MenuCpu` ≡ browser fetch |
+| `GET /bios/settings/pending` `/bios/cli/screen` `/bios/fw/status` `/bios/hw/stat` `/bios/disk` | live `BrowserSession` | tiny | **yes** — `serve_setup` / `extra_fetch`. The page paints the nodes. The kernel does not write those ids. CLI screen is 404 when `kernel.cli.enable` is off |
+| `POST /bios/holyc` | live `BrowserSession` | one line ≤ 480 bytes | **yes** — same text as `holyc_request` (`SettingSet`, `BootSelect`, …). Empty, multiline, or too long is 400 |
+| `POST /bios/cli` | live `BrowserSession` | `open` / `close` / `key <name>` | **yes** when `kernel.cli.enable` — 404 when the CLI is off, 409 for a key while closed |
 | `/bios/cpu` `/bios/uncore` | aliases | tiny | **yes** |
 | SvelteKit `load` / `hooks` / `handleFetch` | `kernel.ui=sveltekit` | Node/kit | **refused** |
 | Chromium / goja runtime | — | huge | **refused** |

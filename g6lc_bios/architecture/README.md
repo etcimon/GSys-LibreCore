@@ -7,6 +7,7 @@ validated against LibreCore (`PLAN.md` §0–§3).
 | Doc | Role |
 |---|---|
 | `PLAN.md` | Living plan + current state (B0–B59, B82–B93, rewrite-from-spec) |
+| `SETUP.md` | **Structure.** One setup document, two faces, slots, status painter, live `http-serve` session, glyph rows, guest fences the cell needs |
 | `plan-endpoint.md` | **Endpoint.** BIOS web engine: one BrowserSession, one LDC cell; B82–B91c landed, B92 later |
 | `plan-iframe.md` | Windowing, Firefox-like tabs, iframe sessions; chrome is Svelte, `g6b-iframe` is the session pool; local app path or remote URL (no `-netdev`) |
 | `KERNEL-RV.md` | TempleOS/ZealOS kernel services → RISC-V S-mode / OpenSBI / PLIC |

@@ -1,6 +1,10 @@
 # Extension point: `g6lc_bios`
 
 **Status:** B0–B52 plus later guest/web/CLI stages live in `g6lc_bios/`.
+The setup page is one shell document with a keyboard face and a browser
+face, a live `BrowserSession` on `g6b http-serve`, and an IP ClientHello
+that omits SNI (`9b5c140`). Structure:
+[`../../g6lc_bios/architecture/SETUP.md`](../../g6lc_bios/architecture/SETUP.md).
 Recovery program: `g6b-bootctl` / `g6b-runtime-abi` landed; native service
 callee ELF is labelled `native-service-callee-not-bootable-firmware` and
 QEMU-proved for `Capabilities`, in-frame `Poll`, and boot inhibit

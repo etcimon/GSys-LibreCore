@@ -102,13 +102,15 @@ USB flash listings require `usb.enable && usb.flash_fat32`; FileMgr requires
 filesystem flags. Clocks and USB-settings utilities use their own capability
 gates. Generated sample Svelte fragments never override those gates.
 
-All current `MenuItem.writable` values are false. These screens expose the
-same **compiled configuration** as HolyC, not a second editable configuration
-database. Flashing, persistent settings import/export and Linux hardware
-ownership transfer are not made real by displaying buttons; the browser
-therefore does not expose the router's historical canned mutation responses
-as working operations. Host tests compare every row against HolyC output
-across embedded/router/appliance/desktop/full profiles.
+Rows that are not in `g6b_spec::WRITABLE` are a view of the compiled
+configuration, the same text HolyC `Menu()` prints. A row that is in
+`WRITABLE` gets a Set control; the write goes to the zealcli overlay and
+does not change the compiled row until the next boot. The slot gates, the
+boot-media table, and the status painter are [`SETUP.md`](SETUP.md).
+Flashing, settings import/export, and Linux hardware ownership transfer are
+not made real by displaying a button when their gate is off. Host tests
+compare every row against HolyC output across
+embedded/router/appliance/desktop/full profiles.
 
 Fixtures: `g6lc64-smt2.json` (SMT2 dual-issue, H/V off as in `g6lc64_smt2_config_pkg`),
 `g6lc64-server.json` (2×2 harts, issue 2, OoO, stream, H+V, full uncore),

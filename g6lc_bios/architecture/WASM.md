@@ -421,6 +421,21 @@ box fallback) into the 4bpp `__gr_plane`. The boot log gains
 `KSTART-WASM-UI` and `KSTART-DOM` markers; the hart-0 call order ends
 `... jal WasmJit; jal WasmUi; park`.
 
+`DomPaint32` draws a text row when that row has the visible flag. A hidden
+setup section has no text row of its own, so the first-party encoder
+(`browser-ui/compiler/emit-wasm.ts` `glyphHiddenTextIds`) emits
+`set_visible(id, 0)` for the text ids under it. The HTML shell stays
+unmarked, because a `hidden` attribute on those descendants would hide the
+rows `g6b-ui` injects.
+`fixtures/g6lc64-web-hd.json` enables `kernel.wasm.jit` and leaves
+`guest_jit` false, so a QEMU screendump of that ELF is this glyph face, not
+the CSS page and not the LDC cell. The page layout is [`SETUP.md`](SETUP.md).
+
+The guest JIT fence `MAX_JIT_LOCALS` is 2048 because the shipped libwasm
+cell has a frame of 1057 locals (`g6b-asm` `jfmt.rs`). RV64 `slli` with a
+shift of 32 or more is a legal OP-IMM (funct7 low bit set). `VioCmd`'s
+16-bit `avail.idx` mask is that instruction. RV32 still requires funct7 = 0.
+
 `g6b_asm::exec` models `__ui_dom` (`smoke.dom_rows`) and the first painted
 word at the DOM origin (`smoke.dom_pix0`); `payload_memsz` covers the DOM BSS.
 `g6b-elf` smoke on `kernel.wasm.jit` specs shows `DOM| ` lines carrying the

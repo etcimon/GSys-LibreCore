@@ -196,6 +196,11 @@ outputs without their own linear window.
 `__ui_dom` rows at `DOM_Y0`, fetches 8×8 glyph bytes from `__font`, and writes
 foreground/background B8G8R8X8 pixels directly into the latched output
 framebuffer (`__disp.fb`, else `__scan_fb`) at the output's native geometry.
+A row is drawn only when it has both text and the visible flag. The setup
+page's hidden sections hide their text with `set_visible`, not by changing
+the HTML. A web-hd QEMU screendump is this glyph face of `bios-ui.wasm`.
+The styled page is the host CSS raster of the same board. Both are described
+as separate pictures in [`SETUP.md`](SETUP.md).
 
 **High-DPI text.** `DomPaint32` derives the *same* uniform scale `N` and centred
 letterbox as `FbExpand` — `N = min(W/low_w, H/low_h)`, capped at `dpi/96` in

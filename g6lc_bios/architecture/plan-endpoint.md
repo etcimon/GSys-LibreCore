@@ -54,14 +54,15 @@ register). The UI-thread `Host` interned those globals.
 `Role::Ui` / `ui_hart` run `BrowserSession::tick` when `kernel.tasking` is
 enabled (B89).
 
-The LDC `ready()` in `svelte-engine-ws/src-d/app.d` builds tabs and fills
-`tbody` from JSON. `App.svelte` `on:click` already lowers to `g6b_listen`
-in generated D. The **shipped** `bios-ui-libwasm.wasm` is older than that
-source: it does not export `jsCallback`, does not emit `g6b_listen`, and
-still inlines `getRoot() { return 1; }`. The host therefore
-`bind_cell_clicks` (`Listener::Cell`) and treats Rust `select_menu` as the
-default action. B91c is live on the interpreter for a cell that *does*
-export the seam; it is not yet live on the artifact FileServe advertises.
+The LDC `ready()` in `svelte-engine-ws/src-d/app.d` still builds tabs and
+fills `tbody` from JSON, and `App.svelte` `on:click` lowers to `g6b_listen`.
+The shipped `bios-ui-libwasm.wasm` does emit `g6b_listen` and `jsCallback`.
+On the kernel host that tree is not a second page: an id that already exists
+on the shell is adopted, and the append is dropped. Layout, slots, the
+status painter, and the live file-server session are [`SETUP.md`](SETUP.md).
+Rust `select_menu` remains the default action when the cell does not
+`preventDefault`. The B91c table above is the lane split; it is not a claim
+that the shipped cell lacks the listen seam.
 
 ---
 

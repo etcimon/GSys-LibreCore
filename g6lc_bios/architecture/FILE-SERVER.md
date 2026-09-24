@@ -30,6 +30,20 @@ Framing is first-party (`g6b-tls` ServerHello, RSA+ECDSA suites). Application
 records carry plaintext HTTP on the host stand-in; AES-GCM record cipher after
 Finished is a later increment. Not OpenSSL, not Botan linked.
 
+## Live setup session
+
+`g6b http-serve` constructs one `BrowserSession` beside the `Router` and
+the store registry, and keeps it for the process. `dispatch_http` calls
+`BrowserSession::serve_setup` before `Router::handle_bytes_store`.
+
+`POST /bios/holyc` and `POST /bios/cli`, and `GET` of
+`/bios/settings/pending`, `/bios/cli/screen`, `/bios/fw/status`,
+`/bios/hw/stat`, and `/bios/disk`, hit that session. Every other path,
+including `/ui/*`, `/bios/menu`, and `/bios/store`, stays on the router.
+`/bios/store` is still `StorePort` after parse, not a field of the session
+DOM. One request per connection, `Connection: close`. The page that paints
+those bodies is [`SETUP.md`](SETUP.md).
+
 ## Build gates
 
 | Flag | `#define` / feature | Default by profile |

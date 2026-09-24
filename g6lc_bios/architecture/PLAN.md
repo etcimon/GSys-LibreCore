@@ -9,6 +9,9 @@ way `specs/riscv-spec.html` names ISA. First-party code in `crates/**` is MIT
 and is generated or written against a BoardSpec. Nothing in `kernel-spec/` is
 compiled, flisted, or linked.
 
+Setup-page structure (one document, live session, status painter, glyph
+face) is [`SETUP.md`](SETUP.md). This file stays the changelog.
+
 Every inference drawn from TempleOS/ZealOS is **validated against the rest of
 LibreCore architecture** before it becomes a BoardSpec field, a generated
 `#define`, or an ELF byte. When the ancestor and LibreCore disagree, LibreCore

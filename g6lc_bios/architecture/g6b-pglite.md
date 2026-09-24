@@ -694,7 +694,7 @@ sequenceDiagram
   P-->>D: Results or error JSON
 ```
 
-**Single owner per process.** Live `Program` (`g6b-holyc`) owns `router: Router` and `builtin()` (`lib.rs:677+`); `g6b-holyc` has no `g6b-spec` dep today. `BrowserSession` (`g6b-kernel/src/lib.rs:3102`) owns `program` + `spec`. `g6b http-serve` (`g6b-cli/src/main.rs:318-356`) constructs a **stateless** `Router::from_spec` and never a `BrowserSession`. `KernelHost` borrows `router: &'a Router` immutably (`lib.rs:48,571`). Two owners would mean two catalogs; http-serve with no owner means POST has nowhere to put rows.
+**Single store owner per process.** Live `Program` (`g6b-holyc`) owns `router: Router` and `builtin()`. `BrowserSession` owns `program` + `spec`. `g6b http-serve` still constructs a stateless `Router::from_spec` for files and `/bios/menu`, and one `StoreRegistry` beside it for `/bios/store`. It also keeps one `BrowserSession` for setup posts and the five status GETs (`serve_setup` before the router). That session is not a second store catalog. `KernelHost` borrows `router: &'a Router` immutably. Two store owners would mean two catalogs; a store POST with no `StorePort` has nowhere to put rows.
 
 - **`StoreRegistry` lives on `Program`.** `g6b-holyc` gains `g6b-pglite`. BrowserSession shares it via `program`. HolyC `Store*` in `builtin()` sees the same map.
 - **`http-serve` constructs one `StoreRegistry` beside the `Router`** and threads `&mut dyn StorePort` into `handle_http_conn`.
