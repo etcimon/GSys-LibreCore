@@ -117,7 +117,9 @@ module g6lc_inval_bus_lint_top
     output coh_inval_t [NR_CORES-1:0] inv_core,
     input  logic       [NR_CORES-1:0] inv_core_ready,
     output logic                      inv_stall,
-    output logic                      inv_coalesce
+    output logic                      inv_coalesce,
+    output logic [NR_CORES-1:0][COH_INV_SEQ_W-1:0] inv_enq_seq,
+    output logic [NR_CORES-1:0][COH_INV_SEQ_W-1:0] inv_deq_seq
 );
 
   g6lc_inval_bus #(
@@ -131,7 +133,9 @@ module g6lc_inval_bus_lint_top
       .inv_core_o      (inv_core),
       .inv_core_ready_i(inv_core_ready),
       .inv_stall_o     (inv_stall),
-      .inv_coalesce_o  (inv_coalesce)
+      .inv_coalesce_o  (inv_coalesce),
+      .inv_enq_seq_o   (inv_enq_seq),
+      .inv_deq_seq_o   (inv_deq_seq)
   );
 endmodule
 

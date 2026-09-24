@@ -1,0 +1,310 @@
+// Copyright 2021 Thales DIS design services SAS
+//
+// Licensed under the Solderpad Hardware Licence, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// SPDX-License-Identifier: Apache-2.0 WITH SHL-2.0
+// You may obtain a copy of the License at https://solderpad.org/licenses/
+//
+// Original Author: Jean-Roch COULON - Thales
+// Two-core integer OoO WT coherence envelope (COH_OOO) — Etienne Cimon 2026
+//
+// Reduced integration envelope for the OoO coherence hub: identical to
+// g6lc64_smt2_ooo_int (dual-hart coarse-grain SMT, integer out-of-order
+// backend, RVF/RVD=0 so FpPresent computes to 0, LsqStoreEntries=4) except
+// NrCores=2 with CohPolicy=COH_OOO, the SRAM-backed snoop filter enabled at
+// 128 signature entries and a two-deep coherence invalidation queue. It keeps
+// the WT data cache, equal 128-bit I/D line widths, L2 enabled and L3 disabled,
+// which is exactly the legality envelope check_cfg requires for COH_OOO.
+// Default production packages keep NrCores=1 (identity path).
+
+// ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
+// The original work of the copyright holders named above remains licensed
+// under the license stated above, and that grant is unaffected.
+// Modifications (c) 2026 Etienne Cimon: two-core integer-OoO WT coherence profile derived from the Thales config package template.
+// Etienne Cimon offers this file AS A WHOLE under the dual licence below.
+// Expressed as a non-SPDX tag because SPDX has no operator for "whole is X,
+// portions remain Y"; the machine-readable form is in REUSE.toml.
+// Outbound-License: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+
+package cva6_config_pkg;
+
+  localparam CVA6ConfigXlen = 64;
+
+  localparam CVA6ConfigRVF = 0;
+  localparam CVA6ConfigRVD = 0;
+  localparam CVA6ConfigF16En = 0;
+  localparam CVA6ConfigF16AltEn = 0;
+  localparam CVA6ConfigF8En = 0;
+  localparam CVA6ConfigFVecEn = 0;
+
+  // 0, not inherited-1: CVXIF offload is wired for issue port 0 only, while the
+  // decoder withholds ex.valid for an illegal instruction so the coprocessor may
+  // claim the encoding first. On this 2-wide core an illegal instruction issued on
+  // port 1 therefore never traps and never retires. check_cfg now rejects the
+  // combination outright; this target has no coprocessor to offload to, so the
+  // knob goes to baseline rather than the assert being relaxed.
+  localparam CVA6ConfigCvxifEn = 0;
+  localparam CVA6ConfigCExtEn = 1;
+  localparam CVA6ConfigZcbExtEn = 1;
+  localparam CVA6ConfigZcmpExtEn = 0;
+  localparam CVA6ConfigAExtEn = 1;
+  localparam CVA6ConfigHExtEn = 0;
+  localparam CVA6ConfigBExtEn = 1;
+  localparam CVA6ConfigVExtEn = 0;
+  localparam CVA6ConfigRVZiCond = 1;
+
+  localparam CVA6ConfigAxiIdWidth = 4;
+  localparam CVA6ConfigAxiAddrWidth = 64;
+  localparam CVA6ConfigAxiDataWidth = 64;
+  localparam CVA6ConfigFetchUserEn = 0;
+  localparam CVA6ConfigFetchUserWidth = CVA6ConfigXlen;
+  localparam CVA6ConfigDataUserEn = 0;
+  localparam CVA6ConfigDataUserWidth = CVA6ConfigXlen;
+
+  localparam CVA6ConfigIcacheByteSize = 16384;
+  localparam CVA6ConfigIcacheSetAssoc = 4;
+  localparam CVA6ConfigIcacheLineWidth = 128;
+  localparam CVA6ConfigDcacheByteSize = 32768;
+  localparam CVA6ConfigDcacheSetAssoc = 8;
+  localparam CVA6ConfigDcacheLineWidth = 128;
+
+  localparam CVA6ConfigDcacheFlushOnFence = 1'b0;
+  localparam CVA6ConfigDcacheFlushOnFenceI = 1'b0;
+  localparam CVA6ConfigDcacheInvalidateOnFlush = 1'b0;
+
+  // G1n: hang-7 raised NrLoadBufEntries to 8; 1-bit D$ rid truncated
+  // ldbuf_windex (load_unit data_id → wt_dcache_ctrl id_q). P4 c.lw of
+  // the 0x70 line then retired another slot's rdata (a5=0x010dfeec).
+  // Match server_math / stream8 (clog2(8)=3). WT miss still uses RdTxId.
+  localparam CVA6ConfigDcacheIdWidth = 3;
+  localparam CVA6ConfigMemTidWidth = 2;
+
+  localparam CVA6ConfigWtDcacheWbufDepth = 8;
+  // SL-W gate-6: post-ACK fixup queue enabled with a small depth to exercise
+  // the full-queue hold path under SMT2 OpenSBI without over-committing area.
+  localparam CVA6ConfigWtDcacheFixupDepth = 2;
+  localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b0;
+
+  localparam CVA6ConfigNrScoreboardEntries = 8;
+
+  localparam CVA6ConfigNrLoadPipeRegs = 1;
+  localparam CVA6ConfigNrStorePipeRegs = 0;
+  // Hang-7 bisect (server_math): ldbuf=1 still hung; 8 matches multi-outstanding
+  // FDT walks. smt2 was left at 2 during dual-issue bring-up — raise with RAS.
+  localparam CVA6ConfigNrLoadBufEntries = 8;
+
+  // Hang-7: RASDepth=2 is tiny vs OpenSBI FDT call depth. Depth 16 previously
+  // unmasked load-misalign under server_math TAGE+ckpt; smt2 has BPCkptDepth=0
+  // and RAS-miss is now NoCF (frontend) so EX always corrects empty RAS. Use 16.
+  localparam CVA6ConfigRASDepth = 16;
+  localparam CVA6ConfigBTBEntries = 32;
+  localparam CVA6ConfigBHTEntries = 128;
+
+  localparam CVA6ConfigTvalEn = 1;
+
+  localparam CVA6ConfigNrPMPEntries = 8;
+
+  localparam CVA6ConfigPerfCounterEn = 1;
+
+  localparam config_pkg::cache_type_t CVA6ConfigDcacheType = config_pkg::WT;
+
+  localparam CVA6ConfigMmuPresent = 1;
+
+  localparam CVA6ConfigRvfiTrace = 1;
+
+  localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
+      XLEN: unsigned'(CVA6ConfigXlen),
+      VLEN: unsigned'(64),
+      FpgaEn: bit'(0),
+      FpgaAlteraEn: bit'(0),
+      TechnoCut: bit'(0),
+      SuperscalarEn: bit'(1),
+      NrIssuePorts: unsigned'(2),
+      ALUBypass: bit'(0),
+      NrCommitPorts: unsigned'(2),
+      AxiAddrWidth: unsigned'(CVA6ConfigAxiAddrWidth),
+      AxiDataWidth: unsigned'(CVA6ConfigAxiDataWidth),
+      AxiIdWidth: unsigned'(CVA6ConfigAxiIdWidth),
+      AxiUserWidth: unsigned'(CVA6ConfigDataUserWidth),
+      MemTidWidth: unsigned'(CVA6ConfigMemTidWidth),
+      NrLoadBufEntries: unsigned'(CVA6ConfigNrLoadBufEntries),
+      RVF: bit'(CVA6ConfigRVF),
+      RVD: bit'(CVA6ConfigRVD),
+      XF16: bit'(CVA6ConfigF16En),
+      XF16ALT: bit'(CVA6ConfigF16AltEn),
+      XF8: bit'(CVA6ConfigF8En),
+      RVA: bit'(CVA6ConfigAExtEn),
+      RVZacas: bit'(1),  // Zacas AMOCAS.W/D — Linux-boot DTS advertises zacas
+      RVB: bit'(CVA6ConfigBExtEn),
+      ZKN: bit'(1),
+      RVV: bit'(CVA6ConfigVExtEn),
+      RVC: bit'(CVA6ConfigCExtEn),
+      RVH: bit'(CVA6ConfigHExtEn),
+      RVZCB: bit'(CVA6ConfigZcbExtEn),
+      RVZCMT: bit'(0),
+      RVZCMP: bit'(CVA6ConfigZcmpExtEn),
+      XFVec: bit'(CVA6ConfigFVecEn),
+      CvxifEn: bit'(CVA6ConfigCvxifEn),
+      CoproType: config_pkg::COPRO_NONE,
+      AiCfg: config_pkg::AiCfgOff,
+      RVZiCond: bit'(CVA6ConfigRVZiCond),
+      RVZiCbom: bit'(1),
+      RVZiCboz: bit'(1),
+      RVZiCbop: bit'(1),
+      RVZicntr: bit'(1),
+      RVZihpm: bit'(1),
+      NrScoreboardEntries: unsigned'(CVA6ConfigNrScoreboardEntries),
+      PerfCounterEn: bit'(CVA6ConfigPerfCounterEn),
+      MmuPresent: bit'(CVA6ConfigMmuPresent),
+      RVS: bit'(1),
+      RVU: bit'(1),
+      SoftwareInterruptEn: bit'(1),
+      HaltAddress: 64'h800,
+      ExceptionAddress: 64'h808,
+      RASDepth: unsigned'(CVA6ConfigRASDepth),
+      BTBEntries: unsigned'(CVA6ConfigBTBEntries),
+      BPType: config_pkg::BHT,
+      BHTEntries: unsigned'(CVA6ConfigBHTEntries),
+      BHTHist: unsigned'(3),
+      BPGhistLen: unsigned'(0),
+      BPTageTables: unsigned'(0),
+      BPTageTableEntries: unsigned'(0),
+      BPTageTagBits: unsigned'(0),
+      BPLoopEn: bit'(0),
+      BPIndirectEn: bit'(0),
+      BPIndirectEntries: unsigned'(0),
+      BPStatCorEn: bit'(0),
+      BPCkptDepth: unsigned'(0),
+      DmBaseAddress: 64'h0,
+      TvalEn: bit'(CVA6ConfigTvalEn),
+      DirectVecOnly: bit'(0),
+      NrPMPEntries: unsigned'(CVA6ConfigNrPMPEntries),
+      PMPCfgRstVal: {64{64'h0}},
+      PMPAddrRstVal: {64{64'h0}},
+      PMPEntryReadOnly: 64'd0,
+      PMPNapotEn: bit'(1),
+      NOCType: config_pkg::NOC_TYPE_AXI4_ATOP,
+      NrNonIdempotentRules: unsigned'(2),
+      NonIdempotentAddrBase: 1024'({64'b0, 64'b0}),
+      NonIdempotentLength: 1024'({64'b0, 64'b0}),
+      // I4l: RV64 sign-extended DRAM alias (0xffff_ffff_8000_0000) so
+      // fdt_next_tag after fdt_offset_ptr is not an IAF at …8001_29f4.
+      // I4w: execute is *text*, not all of DRAM. 32 MiB still covered
+      // .rodata/FDT @0x8001e000 — I4ae nat s0=0x8001f801 is that window.
+      // I4ag: identity/sign-ext execute is .text only (ends 0x1d918);
+      // separate 4 KiB windows for fw_payload @0x80200000. I4v then
+      // refuses JALR into FDT/rodata. Cached stays 1 GiB.
+      // Page-0 is not text: a resolved ret@hsm to 0x81c was fetchable
+      // and decoded as garbage (nat HSM). Bootrom stays @0x10000.
+      // I11: resolve is still unfiltered; I19 only suppresses predict.
+      NrExecuteRegionRules: unsigned'(5),
+      ExecuteRegionAddrBase: 1024'({
+        64'hffff_ffff_8020_0000, 64'h8020_0000,
+        64'hffff_ffff_8000_0000, 64'h8000_0000,
+        64'h1_0000
+      }),
+      ExecuteRegionLength: 1024'({
+        64'h1000, 64'h1000,
+        64'h1e000, 64'h1e000,
+        64'h1_0000
+      }),
+      NrCachedRegionRules: unsigned'(2),
+      CachedRegionAddrBase: 1024'({64'hffff_ffff_8000_0000, 64'h8000_0000}),
+      CachedRegionLength: 1024'({64'h4000_0000, 64'h4000_0000}),
+      MaxOutstandingStores: unsigned'(7),
+      DebugEn: bit'(1),
+      SDTRIG: bit'(0),
+      Mcontrol6: bit'(0),
+      Icount: bit'(0),
+      Etrigger: bit'(0),
+      Itrigger: bit'(0),
+      AxiBurstWriteEn: bit'(0),
+      IcacheByteSize: unsigned'(CVA6ConfigIcacheByteSize),
+      IcacheSetAssoc: unsigned'(CVA6ConfigIcacheSetAssoc),
+      IcacheLineWidth: unsigned'(CVA6ConfigIcacheLineWidth),
+      DCacheType: CVA6ConfigDcacheType,
+      DcacheByteSize: unsigned'(CVA6ConfigDcacheByteSize),
+      DcacheSetAssoc: unsigned'(CVA6ConfigDcacheSetAssoc),
+      DcacheLineWidth: unsigned'(CVA6ConfigDcacheLineWidth),
+      DcacheFlushOnFence: unsigned'(CVA6ConfigDcacheFlushOnFence),
+      DcacheFlushOnFenceI: unsigned'(CVA6ConfigDcacheFlushOnFenceI),
+      DcacheInvalidateOnFlush: unsigned'(CVA6ConfigDcacheInvalidateOnFlush),
+      DataUserEn: unsigned'(CVA6ConfigDataUserEn),
+      WtDcacheWbufDepth: int'(CVA6ConfigWtDcacheWbufDepth),
+      WtDcacheFixupDepth: int'(CVA6ConfigWtDcacheFixupDepth),
+      WtDcacheFixupVoidKeepEn: bit'(CVA6ConfigWtDcacheFixupVoidKeepEn),
+      FetchUserWidth: unsigned'(CVA6ConfigFetchUserWidth),
+      FetchUserEn: unsigned'(CVA6ConfigFetchUserEn),
+      InstrTlbEntries: int'(16),
+      DataTlbEntries: int'(16),
+      UseSharedTlb: bit'(0),
+      SvnapotEn: bit'(1),
+      SstcEn: bit'(1),
+      SscofpmfEn: bit'(1),
+      ZihintpauseEn: bit'(1),
+      SvpbmtEn: bit'(1),
+      ZawrsEn: bit'(1),
+      L2En: bit'(1),
+      L2ByteSize: unsigned'(262144),
+      L2SetAssoc: unsigned'(8),
+      L2LineWidth: unsigned'(512),
+      L2MshrDepth: unsigned'(2),
+      L2DataBanks: unsigned'(4),
+      L2RoundRobinEn: bit'(0),
+      // U6.1 SMT2
+      NrHarts: unsigned'(2),
+      SmtPolicy: config_pkg::SMT_HYBRID,
+      SmtFetchQuantum: unsigned'(128),  // dual-ready RR; OpenSBI-scale (miss thrash fix)
+      SmtStarveLimit: unsigned'(64),
+      NrCores: unsigned'(2),
+      CohPolicy: config_pkg::COH_OOO,
+      SnoopFilterEn: bit'(1),
+      SnoopFilterEntries: unsigned'(128),
+      CohInvalDepth: unsigned'(2),
+      CohAxiStarveLimit: unsigned'(0),
+      WayPredEn: bit'(0),
+      WayPredEntries: unsigned'(0),
+      ReplPolicy: config_pkg::REPL_PLRU,
+      HwPrefetchEn: bit'(0),
+      HwPrefetchStreams: unsigned'(0),
+      DcacheMshrDepth: unsigned'(0),
+      FtqDepth: unsigned'(0),
+      FdipEn: bit'(0),
+      FdipDistance: unsigned'(0),
+      LoopBufEn: bit'(0),
+      LoopBufEntries: unsigned'(0),
+      SliceOoOEn: bit'(0),
+      SliceIstEntries: unsigned'(0),
+      SliceAiqDepth: unsigned'(0),
+      SliceBiqDepth: unsigned'(0),
+      SliceMaxRunahead: unsigned'(0),
+      OoOEn: bit'(1),
+      SmtDrainedHandoff: bit'(1),
+      DeepSpecEn: bit'(0),
+      RobEntries: unsigned'(0),
+      PrfEntries: unsigned'(0),
+      IqEntries: unsigned'(0),
+      LsqLoadEntries: unsigned'(0),
+      // An LSQ store entry reserves a store-buffer speculative slot held to
+      // commit; without DeepSpecEn that queue is four deep, so the credit
+      // count must not exceed it (gen_err_ooo_st_credits).
+      LsqStoreEntries: unsigned'(4),
+      MemDepPredEn: bit'(0),
+      OoORetireWidth: unsigned'(0),
+      L3En: bit'(0),
+      L3ByteSize: unsigned'(0),
+      L3SetAssoc: unsigned'(0),
+      L3LineWidth: unsigned'(0),
+      L3MshrDepth: unsigned'(0),
+      L3DataBanks: unsigned'(0),
+      ServerPrefetchEn: bit'(0),
+      ServerPfStreams: unsigned'(0),
+      ServerPfDistance: unsigned'(0),
+      SharedTlbDepth: int'(64),
+
+      NrLoadPipeRegs: int'(CVA6ConfigNrLoadPipeRegs),
+      NrStorePipeRegs: int'(CVA6ConfigNrStorePipeRegs),
+      DcacheIdWidth: int'(CVA6ConfigDcacheIdWidth)
+  };
+
+endpackage

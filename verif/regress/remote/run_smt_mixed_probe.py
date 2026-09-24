@@ -18,18 +18,72 @@ readout (RES words, per-hart PRT words incl. mhpmcounter deltas, ping-pong
 mismatch count, timer/TLB-witness counts) scraped from committed stores,
 plus the [smt-mixed] stats lines.
 """
+import hashlib
 import json
 import os
 import re
-import resource
 import subprocess
+import sys
 from pathlib import Path
 
+
+def probe_outcome(rec):
+    if rec.get("errors"):
+        return "fail"
+    if rec.get("rc") in (124, -15, -9) or rec.get("cycles", 0) >= rec["cycleBudget"]:
+        return "timeout"
+    if rec.get("rc") != 0 or rec.get("verdictCount") != 1 or \
+            rec.get("status") != "SUCCESS" or \
+            rec.get("tohostValue") not in ("0", "0x0", "0x1", "1"):
+        return "fail"
+    required = ("RES1",) if rec.get("solo") else ("RES0", "RES1")
+    words, payload = rec.get("resWords", {}), rec.get("prtWords", {})
+    if any(words.get(key) not in (None, "0x1") for key in required):
+        return "fail"
+    if payload.get("h1_csum") not in (None, 3287142068561700632):
+        return "fail"
+    if not rec.get("solo") and any(payload.get(key) not in (None, 0)
+                                   for key in ("h0_pp", "h0_tlb")):
+        return "fail"
+    fields = ("h1_csum",) if rec.get("solo") else ("h1_csum", "h0_pp", "h0_tlb")
+    if any(key not in words for key in required) or any(key not in payload for key in fields):
+        return "incomplete"
+    return "pass"
+
+
+def verdict_self_test():
+    good = {"status": "SUCCESS", "tohostValue": "0", "rc": 0,
+            "cycles": 100, "cycleBudget": 1000, "verdictCount": 1,
+            "solo": False, "resWords": {"RES0": "0x1", "RES1": "0x1"},
+            "prtWords": {"h1_csum": 3287142068561700632, "h0_pp": 0, "h0_tlb": 0},
+            "errors": []}
+    cases = [(good, "pass"), ({**good, "cycles": 1000}, "timeout"),
+             ({**good, "rc": 124}, "timeout"),
+             ({**good, "errors": ["Assertion failed"]}, "fail"),
+             ({**good, "resWords": {"RES0": "0x9", "RES1": "0x1"}}, "fail"),
+             ({**good, "resWords": {}}, "incomplete"),
+             ({**good, "prtWords": {"h1_csum": 1}}, "fail"),
+             ({**good, "verdictCount": 2}, "fail"),
+             ({**good, "solo": True, "resWords": {"RES1": "0x1"}}, "pass")]
+    for number, (record, expected) in enumerate(cases):
+        actual = probe_outcome(record)
+        assert actual == expected, (number, actual, expected)
+    print(f"PROBE_VERDICT_PASS cases={len(cases)}")
+
+
+if "--self-test" in sys.argv:
+    verdict_self_test()
+    raise SystemExit(0)
+
+import resource
+
 OUT = Path(os.environ["TH_OUT_DIR"])
-DATA = Path(os.environ["TH_DATA_DIR"])
-MODEL = os.environ["SMP_MODEL"]
-ELF_NAME = os.environ["SMP_ELF"]
-CAP = int(os.environ.get("SMP_CAP", "4000000"))
+REASSESS = os.environ.get("SMP_REASSESS_DIR")
+frozen = json.loads((Path(REASSESS) / "results.json").read_text()) if REASSESS else None
+DATA = Path(REASSESS).parent / "data" if REASSESS else Path(os.environ["TH_DATA_DIR"])
+MODEL = frozen["model"] if frozen else os.environ["SMP_MODEL"]
+ELF_NAME = frozen["elf"] if frozen else os.environ["SMP_ELF"]
+CAP = frozen["cycleBudget"] if frozen else int(os.environ.get("SMP_CAP", "4000000"))
 WALL = int(os.environ.get("SMP_WALL", "900"))
 
 elf = DATA / ELF_NAME
@@ -38,6 +92,15 @@ syms = subprocess.check_output(["riscv-none-elf-nm", "-n", str(elf)], text=True)
 tohost = re.search(r"^([0-9a-fA-F]+)\s+\w\s+tohost$", syms, re.M).group(1)
 res_addr = int(re.search(r"^([0-9a-fA-F]+)\s+\w\s+RES$", syms, re.M).group(1), 16)
 prt_addr = int(re.search(r"^([0-9a-fA-F]+)\s+\w\s+PRT$", syms, re.M).group(1), 16)
+solo_addr = int(re.search(r"^([0-9a-fA-F]+)\s+\w\s+probe_solo$", syms, re.M).group(1), 16)
+mode_dump = subprocess.check_output([
+    "riscv-none-elf-objdump", "-s", f"--start-address={solo_addr}",
+    f"--stop-address={solo_addr + 8}", str(elf)], text=True)
+mode_words = re.search(rf"^\s*{solo_addr:x}\s+([0-9a-fA-F]{{8}})\s+([0-9a-fA-F]{{8}})",
+                       mode_dump, re.M)
+assert mode_words, "missing probe_solo data"
+solo = int.from_bytes(bytes.fromhex(mode_words[1] + mode_words[2]), "little")
+assert solo in (0, 1), "invalid probe_solo mode"
 
 resource.setrlimit(resource.RLIMIT_STACK,
                    (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
@@ -59,27 +122,34 @@ env = {k: v for k, v in os.environ.items()
 env.update(CVA6_COOKIE_EXIT="0", CVA6_SOAK_EXIT="0", CVA6_WFI_EXIT="0",
            CVA6_TRAP_DUMP="1")
 
-with open(trial / "run.log", "w") as log:
-    try:
-        rc = subprocess.run(
-            ["timeout", "--signal=TERM", "--kill-after=15s", f"{WALL}s", *args],
-            stdout=log, stderr=subprocess.STDOUT, cwd=str(trial), env=env,
-            timeout=WALL + 60).returncode
-    except subprocess.TimeoutExpired:
-        rc = 124
+if frozen:
+    rc = frozen["rc"]
+    log_path = Path(REASSESS) / "trial" / "run.log"
+    args = frozen["command"]
+else:
+    log_path = trial / "run.log"
+    with log_path.open("w") as log:
+        try:
+            rc = subprocess.run(
+                ["timeout", "--signal=TERM", "--kill-after=15s", f"{WALL}s", *args],
+                stdout=log, stderr=subprocess.STDOUT, cwd=str(trial), env=env,
+                timeout=WALL + 60).returncode
+        except subprocess.TimeoutExpired:
+            rc = 124
 
-text = (trial / "run.log").read_text(errors="replace")
+raw_log = log_path.read_bytes()
+text = raw_log.decode(errors="replace")
 rec = {"elf": ELF_NAME, "model": MODEL, "rc": rc,
-       "cycleBudget": CAP, "command": args}
+       "cycleBudget": CAP, "command": args,
+       "reassessedFrom": REASSESS, "logSha256": hashlib.sha256(raw_log).hexdigest(),
+       "elfSha256": hashlib.sha256(elf.read_bytes()).hexdigest()}
 verdicts = re.findall(
     r"\*\*\* (SUCCESS|FAILED) \*\*\* \(tohost = (0x[0-9a-fA-F]+|[0-9]+)\)"
     r" after ([0-9]+) cycles", text)
 if verdicts:
     rec.update(status=verdicts[0][0], tohostValue=verdicts[0][1],
                cycles=int(verdicts[0][2]))
-rec["outcome"] = "pass" if rec.get("status") == "SUCCESS" and \
-    rec.get("tohostValue") in ("0", "0x0", "0x1", "1") else \
-    ("timeout" if rc in (124, -15, -9) or "Timed out" in text else "fail")
+rec.update(verdictCount=len(verdicts), solo=bool(solo), verdictVersion=2)
 # Architectural readout: last committed store to each RES/PRT word.
 stores = re.compile(
     r"\[smt-flow\] store_commit cycle=\d+ id=\d+ pa=([0-9a-fA-F]+) "
@@ -117,5 +187,6 @@ with open(trial / "retire_h1.txt", "w") as f1, \
             f"v={m.group(9)} d={m.group(10)} e={m.group(11)} "
             f"r={m.group(12)} c={m.group(1)}\n")
 rec["retireByHart"] = n
+rec["outcome"] = probe_outcome(rec)
 (OUT / "results.json").write_text(json.dumps(rec, indent=2))
 print(json.dumps(rec, indent=2))

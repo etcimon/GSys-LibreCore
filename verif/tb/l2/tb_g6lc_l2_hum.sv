@@ -25,6 +25,7 @@ module tb_g6lc_l2_hum;
 
   parameter bit CHAIN_L3=1'b0;
   parameter bit RR_EN=1'b0;
+  parameter bit FAIR_WRITES=1'b0;
   parameter int unsigned BYTE_SIZE   = 4096;
   parameter int unsigned SET_ASSOC   = 4;
   parameter int unsigned LINE_WIDTH  = 512;
@@ -73,6 +74,7 @@ module tb_g6lc_l2_hum;
       .MSHR_DEPTH  (MSHR_DEPTH),
       .DATA_BANKS  (DATA_BANKS),
       .RR_EN       (RR_EN),
+      .FAIR_WRITES (FAIR_WRITES),
       .AXI_ADDR_WIDTH (AW),
       .AXI_DATA_WIDTH (DW),
       .AXI_ID_WIDTH   (IDW),
@@ -178,12 +180,17 @@ module tb_g6lc_l2_hum;
     logic [7:0] len;
     int unsigned beat;
     int unsigned delay_cycles;
+    data_t salt;
   } read_job_t;
   read_job_t jobs[RD_DEPTH];
   int unsigned rd_head=0,rd_tail=0,rd_count=0;
   int unsigned mem_ar_count=0,mem_outstanding=0,mem_peak=0;
   logic memory_hold=1'b0;
   logic memory_ar_hold=1'b0;
+  // XORed into every beat of fills whose AR is accepted while it is nonzero:
+  // lets a scenario prove a refetch returned NEW data rather than the
+  // pre-invalidation copy. Latched into the job at AR acceptance.
+  data_t data_salt='0;
   int unsigned install_conflicts=0;
   logic atomic_r_hold=1'b0,memory_b_hold=1'b0;
   logic wr_active=1'b0,wr_data_done=1'b0,wr_b_pending=1'b0,wr_r_pending=1'b0,wr_r_issued=1'b0;
@@ -233,7 +240,8 @@ module tb_g6lc_l2_hum;
           mst_resp.r_valid <= 1'b1;
           mst_resp.r.id <= jobs[rd_head].id;
           mst_resp.r.resp <= axi_pkg::RESP_OKAY;
-          mst_resp.r.data <= reference_word(jobs[rd_head].addr + addr_t'(jobs[rd_head].beat*8));
+          mst_resp.r.data <= reference_word(jobs[rd_head].addr + addr_t'(jobs[rd_head].beat*8)) ^
+                             jobs[rd_head].salt;
           mst_resp.r.last <= (jobs[rd_head].beat==int'(jobs[rd_head].len));
           if(jobs[rd_head].beat==int'(jobs[rd_head].len))begin
             rd_head=(rd_head+1)%RD_DEPTH;rd_count--;
@@ -243,7 +251,7 @@ module tb_g6lc_l2_hum;
       if(take_ar)begin
         if(rd_count>=RD_DEPTH)$fatal(1,"HUM_MEMORY_OVERFLOW");
         jobs[rd_tail]='{addr:mst_req.ar.addr,id:mst_req.ar.id,len:mst_req.ar.len,
-                        beat:0,delay_cycles:MEM_LATENCY};
+                        beat:0,delay_cycles:MEM_LATENCY,salt:data_salt};
         rd_tail=(rd_tail+1)%RD_DEPTH;rd_count++;
         mem_ar_count++;mem_outstanding++;
         if(mem_outstanding>mem_peak)mem_peak=mem_outstanding;
@@ -299,6 +307,7 @@ module tb_g6lc_l2_hum;
     int unsigned len;
     logic [3:0]  cache;
     bit          lock;
+    data_t       salt;
   } stim_t;
 
   stim_t pending[$];
@@ -309,6 +318,11 @@ module tb_g6lc_l2_hum;
   int unsigned requested=0;
   int unsigned order[$];
   bit          negative;
+  // When set, a data mismatch on `stale_id` means the post-invalidation
+  // requester was served the killed entry's pre-invalidation fill — a stale
+  // merge — not an ordinary data error.
+  bit          stale_mode = 1'b0;
+  id_t         stale_id = '0;
   int unsigned start_cyc = 0, end_cyc = 0, cyc = 0;
   int          scenario;
 
@@ -330,6 +344,7 @@ module tb_g6lc_l2_hum;
                       input logic [3:0] cache = 4'b1111, input bit lock = 0);
     stim_t s;
     s.id = id; s.addr = a; s.len = len; s.cache = cache; s.lock = lock;
+    s.salt = data_salt;
     pending.push_back(s);
     requested++;
     expected_total += len + 1;
@@ -371,10 +386,15 @@ module tb_g6lc_l2_hum;
       automatic id_t rid = slv_resp.r.id;
       automatic data_t want;
       if(exp_head[rid]>=exp_tail[rid])$fatal(1,"HUM_UNEXPECTED_ID id=%0d",rid);
-      want=reference_beat(expected[rid][exp_head[rid]].addr,beats_seen[rid]);
+      want=reference_beat(expected[rid][exp_head[rid]].addr,beats_seen[rid]) ^
+           expected[rid][exp_head[rid]].salt;
       if(negative)want^=64'd1;
-      if(slv_resp.r.data!==want)
-        $fatal(1,"HUM_DATA id=%0d beat=%0d got=%h want=%h",rid,beats_seen[rid],slv_resp.r.data,want);
+      if(slv_resp.r.data!==want)begin
+        if(stale_mode && rid==stale_id)
+          $fatal(1,"HUM_STALE_MERGE id=%0d got=%h want=%h",rid,slv_resp.r.data,want);
+        else
+          $fatal(1,"HUM_DATA id=%0d beat=%0d got=%h want=%h",rid,beats_seen[rid],slv_resp.r.data,want);
+      end
       if(slv_resp.r.resp!==axi_pkg::RESP_OKAY)$fatal(1,"HUM_RESP");
       if(slv_resp.r.last!==(beats_seen[rid]==expected[rid][exp_head[rid]].len))
         $fatal(1,"HUM_LAST id=%0d beat=%0d",rid,beats_seen[rid]);
@@ -744,6 +764,83 @@ module tb_g6lc_l2_hum;
         push(4'd2,64'h30000,0);wait_done();
         if(l2_ar_count==l2_ar_mark)
           $fatal(1,"HUM_INCLUSION_STALE_HIT ar=%0d",l2_ar_count);
+      end
+      32: begin
+        push(4'd1,64'h40000,0);
+        while(!dut.gen_l2.inst_vld) @(negedge clk);
+        back_inval_addr=64'h40000;
+        back_inval_valid=1'b1;
+        @(negedge clk);
+        back_inval_valid=1'b0;
+        wait_done();
+        push(4'd2,64'h40000,0);
+        wait_done();
+        if(l2_ar_count!=2) $fatal(1,"HUM_INSTALL_INVAL_STALE ar=%0d",l2_ar_count);
+      end
+      33: begin
+        automatic int read_mark;
+        push(4'd1,64'h50000,0);
+        wait_done();
+        slv_req.b_ready=1'b1;
+        for(int n=0;n<32;n++) push(id_t'(1+(n%2)),64'h50000,0);
+        @(negedge clk);
+        read_mark=issued;
+        b_expected=1;
+        expected_bid=4'd8;
+        slv_req.aw='{id:4'd8,addr:64'h51000,len:0,size:3,
+                     burst:axi_pkg::BURST_INCR,cache:4'hf,default:'0};
+        slv_req.aw_valid=1'b1;
+        do begin
+          @(posedge clk);
+          if(issued-read_mark>1 && !slv_resp.aw_ready)
+            $fatal(1,"HUM_WRITE_STARVE grants=%0d",issued-read_mark);
+        end while(!slv_resp.aw_ready);
+        @(negedge clk);
+        slv_req.aw_valid=1'b0;
+        slv_req.w='{data:64'h1234,strb:'1,last:1'b1,user:'0};
+        slv_req.w_valid=1'b1;
+        do @(posedge clk); while(!slv_resp.w_ready);
+        @(negedge clk);
+        slv_req.w_valid=1'b0;
+        wait_done();
+        while(write_completed!=1) @(negedge clk);
+      end
+      // Stale merge: a read arriving AFTER a back-invalidation must not merge
+      // into the killed F_READY fill entry — it must refetch the line. The
+      // first fill is held unserved (slv r_ready low) so the entry sits in
+      // F_READY when the invalidation kills it; the second read must then
+      // launch a new master AR and receive the NEW (salted) fill data, while
+      // the pre-kill requester still drains the OLD fill.
+      34: begin
+        slv_req.r_ready = 1'b0;
+        push(4'd1, 64'h34000, 0);
+        while(!(mst_resp.r_valid && mst_resp.r.last)) @(negedge clk);
+        repeat(4) @(negedge clk);            // collect + install -> F_READY
+        back_inval_addr = 64'h34000;
+        back_inval_valid = 1'b1;
+        @(negedge clk);
+        back_inval_valid = 1'b0;
+        data_salt = 64'h00ff_00ff_00ff_00ff;
+        stale_mode = 1'b1;
+        stale_id = 4'd2;
+        l2_ar_mark = l2_ar_count;
+        push(4'd2, 64'h34000, 0);
+        begin
+          int unsigned guard = 0;
+          addr_t ar_addr = '0;
+          while (l2_ar_count == l2_ar_mark) begin
+            @(negedge clk);
+            guard++;
+            if (guard > 400)
+              $fatal(1, "HUM_STALE_MERGE no refetch ar=%0d", l2_ar_count);
+            if (mst_req.ar_valid && mst_resp.ar_ready) ar_addr = mst_req.ar.addr;
+          end
+          if (ar_addr != 64'h34000)
+            $fatal(1, "HUM_STALE_MERGE wrong addr=%h", ar_addr);
+        end
+        slv_req.r_ready = 1'b1;
+        wait_done();
+        if (merges != 0) $fatal(1, "HUM_STALE_MERGE merges=%0d", merges);
       end
       default: $fatal(1, "HUM_SCENARIO");
     endcase

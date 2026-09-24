@@ -30,6 +30,16 @@ module g6lc_coherence_hub
     parameter int unsigned AXI_STARVE_LIMIT     = 16,
     parameter int unsigned MAX_OUTSTANDING      = 4,  // shared AR/AW slots
     parameter coh_policy_t POLICY               = COH_FILTERED,
+    // Withhold the writer's B response until its invalidation obligation has
+    // been delivered to every target core (bus pop) plus INV_APPLY_LATENCY
+    // margin cycles for the target L1 to apply it. 0 selects the
+    // ack-before-invalidation compatibility mode.
+    parameter bit          ACK_AFTER_INVAL      = 1'b1,
+    // Extra settle cycles between bus delivery (pop edge E) and B forwarding.
+    // The WT L1 applies a popped invalidation during E+1 (array write at the
+    // E+1 edge), so the minimum safe B presentation is E+2 -- latency 0. The
+    // default of 1 adds one margin cycle.
+    parameter int unsigned INV_APPLY_LATENCY    = 1,
     parameter int unsigned AXI_ADDR_WIDTH       = 64,
     parameter int unsigned AXI_DATA_WIDTH       = 64,
     parameter int unsigned AXI_ID_WIDTH         = 4,
@@ -59,6 +69,7 @@ module g6lc_coherence_hub
     output logic                       coh_lr_kill_o
 );
 
+  localparam bit OOO_SF = (POLICY == COH_OOO) && SNOOP_FILTER_EN;
   localparam int unsigned NC     = (NR_CORES < 1) ? 1 : NR_CORES;
   localparam int unsigned CID_W  = (NC <= 1) ? 1 : $clog2(NC);
   localparam int unsigned ST_W   = (AXI_STARVE_LIMIT <= 1) ? 1 : $clog2(AXI_STARVE_LIMIT + 1);
@@ -70,6 +81,24 @@ module g6lc_coherence_hub
       (MAX_OUTSTANDING > OT_ID_CAP) ? OT_ID_CAP : MAX_OUTSTANDING;
   localparam int unsigned OT_W   = (OT_MAX <= 1) ? 1 : $clog2(OT_MAX);
   localparam int unsigned OT_CNT_W = (OT_MAX <= 1) ? 1 : $clog2(OT_MAX + 1);
+
+  if (NC > 1 && OOO_SF && OT_MAX < 2) begin : gen_bad_signature_credits
+    $error("OoO coherence signatures require at least two transaction credits");
+    //pragma translate_off
+`ifndef SYNTHESIS
+    initial $fatal(1, "OoO coherence signatures require at least two transaction credits");
+`endif
+    //pragma translate_on
+  end
+
+  if (INV_APPLY_LATENCY > 3) begin : gen_bad_inv_latency
+    $error("INV_APPLY_LATENCY must be in 0..3");
+    //pragma translate_off
+`ifndef SYNTHESIS
+    initial $fatal(1, "INV_APPLY_LATENCY must be in 0..3");
+`endif
+    //pragma translate_on
+  end
 
   if (NC <= 1) begin : gen_identity
     assign mem_req_o            = core_req_i[0];
@@ -96,6 +125,10 @@ module g6lc_coherence_hub
     logic aw_hold_q, ar_hold_q;
     logic [CID_W-1:0] aw_hold_owner_q, ar_hold_owner_q;
     logic [OT_W-1:0] aw_hold_slot_q, ar_hold_slot_q;
+    logic sig_initialized, sig_start, sig_pending_q, sig_done_q, sig_result_valid;
+    logic sig_alloc_ready, coh_block_ar;
+    logic [CID_W-1:0] sig_owner_q;
+    logic [NC-1:0] sig_present, sig_present_q;
 
     for (genvar c = 0; c < NC; c++) begin : gen_req
       assign aw_req[c] = core_req_i[c].aw_valid;
@@ -166,6 +199,10 @@ module g6lc_coherence_hub
         ar_winner = ar_hold_owner_q;
         ar_starve_force = 1'b0;
       end
+      if (OOO_SF && sig_pending_q) begin
+        aw_winner = sig_owner_q;
+        aw_starve_force = 1'b0;
+      end
     end
 
     assign coh_arb_starve_o = aw_starve_force | ar_starve_force;
@@ -182,10 +219,32 @@ module g6lc_coherence_hub
       logic                      b_done;
       logic [CID_W-1:0]          core;
       logic [AXI_ID_WIDTH-1:0]   orig_id;
+      // b_held: the mem-side B was consumed but is withheld from the core
+      // until the invalidation has been applied.
+      logic                                b_held;
+      logic [1:0]                          b_resp;
+      logic [AXI_USER_WIDTH-1:0]           b_user;
     } ot_entry_t;
+
+    // ACK-after-invalidation bookkeeping (AW slots only). Kept in a separate
+    // array because it is written by the invalidation process, which reads the
+    // bus's combinational accept path -- reading that path in the process that
+    // produces aw_fire would close a combinational loop.
+    //   inv_owed: an obligation exists that the bus has not accepted yet (it
+    //     lives in inv_pend); the slot must not ack until it is stamped.
+    //   inv_wait: cores whose delivery pop is still outstanding.
+    //   inv_need: per-core enqueue sequence number inv_deq_seq must reach.
+    //   inv_settle: saturating count of cycles since the last wait bit fell.
+    typedef struct packed {
+      logic                             inv_owed;
+      logic [NC-1:0]                    inv_wait;
+      logic [NC-1:0][COH_INV_SEQ_W-1:0] inv_need;
+      logic [1:0]                       inv_settle;
+    } inv_ot_t;
 
     ot_entry_t ar_ot_q[OT_MAX], ar_ot_d[OT_MAX];
     ot_entry_t aw_ot_q[OT_MAX], aw_ot_d[OT_MAX];
+    inv_ot_t   inv_ot_q[OT_MAX], inv_ot_d[OT_MAX];
     logic [OT_CNT_W-1:0] ar_ot_cnt_q, ar_ot_cnt_d, aw_ot_cnt_q, aw_ot_cnt_d;
     logic ar_ot_full, aw_ot_full;
     logic [OT_W-1:0] ar_free_slot, aw_free_slot;
@@ -220,7 +279,7 @@ module g6lc_coherence_hub
       end
       // Prefer distinct free slots when a new AR actually competes
       // (combinational tie-break: AW takes next free after AR's choice)
-      if (ar_have_free && aw_have_free && |ar_req && !ar_hold_q &&
+      if (ar_have_free && aw_have_free && |ar_req && !ar_hold_q && !coh_block_ar &&
           (ar_free_slot == aw_free_slot)) begin
         aw_have_free = 1'b0;
         for (int unsigned s = 0; s < OT_MAX; s++) begin
@@ -250,15 +309,61 @@ module g6lc_coherence_hub
     // registered retention occupancy below instead, which keeps the obligation
     // lossless without creating an AW<->inv combinational loop.
     logic inv_ready;
+    // Per-core delivery sequences exported by the invalidation bus.
+    logic [NC-1:0][COH_INV_SEQ_W-1:0] inv_enq_seq, inv_deq_seq;
 
     // Retained invalidation obligation for an already-accepted write.
     coh_inval_t    inv_pend_q, inv_pend_d;
     logic [NC-1:0] inv_pend_tgt_q, inv_pend_tgt_d;
     logic          inv_pend_valid_q, inv_pend_valid_d;
+    // AW slot that owns the retained obligation (valid only when the captured
+    // obligation was write-owned; guarded by the slot's inv_owed at stamp).
+    logic [OT_W-1:0] inv_pend_slot_q, inv_pend_slot_d;
+
+    // A write-owned obligation is not yet safe to ack even before it is
+    // stamped: between AW acceptance and bus acceptance the slot carries
+    // inv_owed, which keeps applied() false.
+    function automatic logic slot_applied(input inv_ot_t e);
+      return !ACK_AFTER_INVAL ||
+             (!e.inv_owed && (e.inv_wait == '0) &&
+              (e.inv_settle >= 2'(INV_APPLY_LATENCY)));
+    endfunction
+
+    logic [NC-1:0]   b_offer_locked_q;
+    logic [OT_W-1:0] b_offer_slot_q [NC];
+    logic [OT_W-1:0] b_offer_slot [NC];
+    logic [OT_MAX-1:0] b_predecessors_q [OT_MAX], b_predecessors_d [OT_MAX];
+    logic [OT_MAX-1:0] b_completed;
+
+    // Lowest-index held-B slot per core that may be presented this cycle.
+    logic [NC-1:0]   held_found;
+    logic [OT_W-1:0] held_slot [NC];
+
+    always_comb begin
+      held_found = '0;
+      for (int unsigned c = 0; c < NC; c++) held_slot[c] = '0;
+      for (int unsigned s = 0; s < OT_MAX; s++) begin
+        if (aw_ot_q[s].valid && aw_ot_q[s].b_held &&
+            (b_predecessors_q[s] == '0) &&
+            slot_applied(inv_ot_q[s]) && !held_found[aw_ot_q[s].core] &&
+            (!b_offer_locked_q[aw_ot_q[s].core] ||
+             b_offer_slot_q[aw_ot_q[s].core] == OT_W'(s))) begin
+          held_found[aw_ot_q[s].core] = 1'b1;
+          held_slot[aw_ot_q[s].core]  = OT_W'(s);
+        end
+      end
+    end
 
     // Combinational grant eligibility
     logic aw_grant, ar_grant;
     logic aw_fire, ar_fire, w_fire, b_fire, r_fire;
+    logic aw_may_invalidate;
+    assign aw_may_invalidate = core_req_i[aw_winner].aw.cache[1] ||
+        (|core_req_i[aw_winner].aw.atop) || core_req_i[aw_winner].aw.lock;
+    assign coh_block_ar = OOO_SF &&
+        (sig_pending_q || (!w_busy_q && |aw_req && !ar_hold_q));
+    assign sig_start = OOO_SF && sig_initialized && !sig_pending_q && !ar_hold_q &&
+        !w_busy_q && !inv_pend_valid_q && |aw_req && !aw_ot_full;
 
     always_comb begin
       logic [OT_W-1:0] bs, rs;
@@ -276,6 +381,7 @@ module g6lc_coherence_hub
       ar_fire     = 1'b0;
       w_fire      = 1'b0;
       b_fire      = 1'b0;
+      b_completed = '0;
       r_fire      = 1'b0;
       aw_rr_d     = aw_rr_q;
       ar_rr_d     = ar_rr_q;
@@ -291,6 +397,7 @@ module g6lc_coherence_hub
       for (int unsigned c = 0; c < NC; c++) begin
         aw_starve_d[c] = aw_starve_q[c];
         ar_starve_d[c] = ar_starve_q[c];
+        b_offer_slot[c] = '0;
         core_resp_o[c] = '0;
         core_resp_o[c].aw_ready = 1'b0;
         core_resp_o[c].w_ready  = 1'b0;
@@ -308,8 +415,9 @@ module g6lc_coherence_hub
       // retention slot is free, so its obligation cannot be dropped. This reads
       // only registered occupancy and the incoming cache attribute, never
       // inv_ready or aw_fire, so admission stays loop-free.
-      aw_grant = aw_hold_q || (|aw_req && !aw_ot_full && aw_have_free && !w_busy_q &&
-                               !(core_req_i[aw_winner].aw.cache[1] && inv_pend_valid_q));
+      aw_grant = (aw_hold_q || (|aw_req && !aw_ot_full && aw_have_free && !w_busy_q &&
+                               !(aw_may_invalidate && inv_pend_valid_q))) &&
+                 (!OOO_SF || (sig_pending_q && (sig_done_q || sig_result_valid)));
 
       if (aw_grant) begin
         mem_req_o.aw       = core_req_i[aw_winner].aw;
@@ -328,13 +436,15 @@ module g6lc_coherence_hub
         aw_ot_d[aw_free_slot].b_done   = 1'b0;
         aw_ot_d[aw_free_slot].core     = aw_winner;
         aw_ot_d[aw_free_slot].orig_id  = core_req_i[aw_winner].aw.id;
+        aw_ot_d[aw_free_slot].b_held     = 1'b0;
         w_owner_d = aw_winner;
         w_slot_d  = aw_free_slot;
         w_busy_d  = 1'b1;
       end
 
       // ---- AR path (independent of AW) — same valid/ready split ----
-      ar_grant = ar_hold_q || (|ar_req && !ar_ot_full && ar_have_free);
+      ar_grant = ar_hold_q || (|ar_req && !ar_ot_full && ar_have_free &&
+                              (!OOO_SF || (sig_initialized && sig_alloc_ready && !coh_block_ar)));
       if (ar_grant) begin
         mem_req_o.ar       = core_req_i[ar_winner].ar;
         // Mem-side id = OT slot (AR/AW share slot space; see slot_used above).
@@ -362,27 +472,69 @@ module g6lc_coherence_hub
         end
       end
 
+      // ---- Held-B presentation ----
+      // A B consumed while its invalidation was still in flight is offered to
+      // the core on the first cycle the slot reports applied(). The AXI
+      // response/user captured at consumption are replayed verbatim; only the
+      // original core id is restored, exactly like the passthrough below.
+      for (int unsigned c = 0; c < NC; c++) begin
+        if (held_found[c]) begin
+          b_offer_slot[c] = held_slot[c];
+          core_resp_o[c].b_valid = 1'b1;
+          core_resp_o[c].b.id    = aw_ot_q[held_slot[c]].orig_id;
+          core_resp_o[c].b.resp  = aw_ot_q[held_slot[c]].b_resp;
+          core_resp_o[c].b.user  = aw_ot_q[held_slot[c]].b_user;
+          if (core_req_i[c].b_ready) begin
+            b_fire = 1'b1;
+            b_completed[held_slot[c]] = 1'b1;
+            aw_ot_d[held_slot[c]].b_held = 1'b0;
+            if (aw_ot_q[held_slot[c]].expect_r) begin
+              // Keep slot until ATOP R is forwarded (amos injects R after B)
+              aw_ot_d[held_slot[c]].b_done = 1'b1;
+            end else begin
+              aw_ot_d[held_slot[c]].valid = 1'b0;
+              if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
+            end
+          end
+        end
+      end
+
       // ---- B response demux by OT slot id; restore original core id ----
       if (mem_resp_i.b_valid) begin
         // Compare full id against OT_MAX (do not truncate OT_MAX to OT_W bits —
         // when OT_MAX is a power of two that truncates to 0).
-        b_id_ok = (mem_resp_i.b.id < AXI_ID_WIDTH'(OT_MAX));
+        b_id_ok = ({1'b0, mem_resp_i.b.id} < (AXI_ID_WIDTH + 1)'(OT_MAX));
         bs      = OT_W'(mem_resp_i.b.id);
         if (b_id_ok && aw_ot_q[bs].valid) begin
           bc = aw_ot_q[bs].core;
-          core_resp_o[bc].b_valid = 1'b1;
-          core_resp_o[bc].b       = mem_resp_i.b;
-          core_resp_o[bc].b.id    = aw_ot_q[bs].orig_id;
-          mem_req_o.b_ready = core_req_i[bc].b_ready;
-          if (core_req_i[bc].b_ready) begin
-            b_fire = 1'b1;
-            if (aw_ot_q[bs].expect_r) begin
-              // Keep slot until ATOP R is forwarded (amos injects R after B)
-              aw_ot_d[bs].b_done = 1'b1;
-            end else begin
-              aw_ot_d[bs].valid = 1'b0;
-              if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
+          if ((b_predecessors_q[bs] == '0) &&
+              slot_applied(inv_ot_q[bs]) && !held_found[bc] &&
+              (!b_offer_locked_q[bc] || b_offer_slot_q[bc] == bs)) begin
+            // Fast path: obligation already delivered and settled (or the
+            // write carried none) -- forward B with no added latency.
+            b_offer_slot[bc] = bs;
+            core_resp_o[bc].b_valid = 1'b1;
+            core_resp_o[bc].b       = mem_resp_i.b;
+            core_resp_o[bc].b.id    = aw_ot_q[bs].orig_id;
+            mem_req_o.b_ready = core_req_i[bc].b_ready;
+            if (core_req_i[bc].b_ready) begin
+              b_fire = 1'b1;
+              b_completed[bs] = 1'b1;
+              if (aw_ot_q[bs].expect_r) begin
+                // Keep slot until ATOP R is forwarded (amos injects R after B)
+                aw_ot_d[bs].b_done = 1'b1;
+              end else begin
+                aw_ot_d[bs].valid = 1'b0;
+                if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
+              end
             end
+          end else begin
+            // Park the response: consume it from memory (resp/user captured)
+            // and replay it once the invalidation has been applied.
+            mem_req_o.b_ready  = 1'b1;
+            aw_ot_d[bs].b_held = 1'b1;
+            aw_ot_d[bs].b_resp = mem_resp_i.b.resp;
+            aw_ot_d[bs].b_user = mem_resp_i.b.user;
           end
         end else begin
           // Safety: free the mem response so a bad id cannot hang the interconnect
@@ -395,7 +547,7 @@ module g6lc_coherence_hub
       // data on R with the *AW* id — demux via aw_ot and free the slot here
       // (B may already have completed; see expect_r above).
       if (mem_resp_i.r_valid) begin
-        r_id_ok = (mem_resp_i.r.id < AXI_ID_WIDTH'(OT_MAX));
+        r_id_ok = ({1'b0, mem_resp_i.r.id} < (AXI_ID_WIDTH + 1)'(OT_MAX));
         rs      = OT_W'(mem_resp_i.r.id);
         if (r_id_ok && ar_ot_q[rs].valid) begin
           rc = ar_ot_q[rs].core;
@@ -413,14 +565,19 @@ module g6lc_coherence_hub
         end else if (r_id_ok && aw_ot_q[rs].valid && aw_ot_q[rs].expect_r) begin
           // Atomic R (ATOP load/swap/compare) — same core/id as parent AW
           rc = aw_ot_q[rs].core;
-          core_resp_o[rc].r_valid = 1'b1;
-          core_resp_o[rc].r       = mem_resp_i.r;
-          core_resp_o[rc].r.id    = aw_ot_q[rs].orig_id;
-          mem_req_o.r_ready = core_req_i[rc].r_ready;
-          if (core_req_i[rc].r_ready && mem_resp_i.r.last) begin
-            r_fire = 1'b1;
-            aw_ot_d[rs].valid = 1'b0;
-            if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
+          if (slot_applied(inv_ot_q[rs])) begin
+            core_resp_o[rc].r_valid = 1'b1;
+            core_resp_o[rc].r       = mem_resp_i.r;
+            core_resp_o[rc].r.id    = aw_ot_q[rs].orig_id;
+            mem_req_o.r_ready = core_req_i[rc].r_ready;
+            if (core_req_i[rc].r_ready && mem_resp_i.r.last) begin
+              r_fire = 1'b1;
+              aw_ot_d[rs].expect_r = 1'b0;
+              if (aw_ot_d[rs].b_done) begin
+                aw_ot_d[rs].valid = 1'b0;
+                if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
+              end
+            end
           end
         end else begin
           mem_req_o.r_ready = 1'b1;
@@ -443,6 +600,20 @@ module g6lc_coherence_hub
       end
     end
 
+    always_comb begin
+      for (int unsigned s = 0; s < OT_MAX; s++) begin
+        b_predecessors_d[s] = b_predecessors_q[s] & ~b_completed;
+      end
+      if (aw_fire) begin
+        for (int unsigned s = 0; s < OT_MAX; s++) begin
+          b_predecessors_d[aw_free_slot][s] = aw_ot_q[s].valid &&
+              !aw_ot_q[s].b_done && !b_completed[s] &&
+              (aw_ot_q[s].core == aw_winner) &&
+              (aw_ot_q[s].orig_id == core_req_i[aw_winner].aw.id);
+        end
+      end
+    end
+
     assign coh_split_conflict_o = w_busy_q && |aw_req && (aw_winner != w_owner_q) &&
                                   core_req_i[aw_winner].w_valid;
 
@@ -451,6 +622,7 @@ module g6lc_coherence_hub
         inv_pend_q       <= '0;
         inv_pend_tgt_q   <= '0;
         inv_pend_valid_q <= 1'b0;
+        inv_pend_slot_q  <= '0;
         aw_hold_q <= 1'b0;
         ar_hold_q <= 1'b0;
         aw_hold_owner_q <= '0;
@@ -465,17 +637,22 @@ module g6lc_coherence_hub
         w_busy_q    <= 1'b0;
         w_slot_q    <= '0;
         for (int unsigned s = 0; s < OT_MAX; s++) begin
-          ar_ot_q[s] <= '0;
-          aw_ot_q[s] <= '0;
+          ar_ot_q[s]  <= '0;
+          aw_ot_q[s]  <= '0;
+          inv_ot_q[s] <= '0;
+          b_predecessors_q[s] <= '0;
         end
         for (int unsigned c = 0; c < NC; c++) begin
           aw_starve_q[c] <= '0;
           ar_starve_q[c] <= '0;
+          b_offer_locked_q[c] <= 1'b0;
+          b_offer_slot_q[c] <= '0;
         end
       end else begin
         inv_pend_q       <= inv_pend_d;
         inv_pend_tgt_q   <= inv_pend_tgt_d;
         inv_pend_valid_q <= inv_pend_valid_d;
+        inv_pend_slot_q  <= inv_pend_slot_d;
         aw_hold_q <= aw_grant && !mem_resp_i.aw_ready;
         ar_hold_q <= ar_grant && !mem_resp_i.ar_ready;
         if (aw_grant && !mem_resp_i.aw_ready && !aw_hold_q) begin
@@ -494,12 +671,22 @@ module g6lc_coherence_hub
         w_busy_q    <= w_busy_d;
         w_slot_q    <= w_slot_d;
         for (int unsigned s = 0; s < OT_MAX; s++) begin
-          ar_ot_q[s] <= ar_ot_d[s];
-          aw_ot_q[s] <= aw_ot_d[s];
+          ar_ot_q[s]  <= ar_ot_d[s];
+          aw_ot_q[s]  <= aw_ot_d[s];
+          inv_ot_q[s] <= inv_ot_d[s];
+          b_predecessors_q[s] <= b_predecessors_d[s];
         end
         for (int unsigned c = 0; c < NC; c++) begin
           aw_starve_q[c] <= aw_starve_d[c];
           ar_starve_q[c] <= ar_starve_d[c];
+          if (core_resp_o[c].b_valid) begin
+            if (core_req_i[c].b_ready) begin
+              b_offer_locked_q[c] <= 1'b0;
+            end else if (!b_offer_locked_q[c]) begin
+              b_offer_locked_q[c] <= 1'b1;
+              b_offer_slot_q[c] <= b_offer_slot[c];
+            end
+          end
         end
       end
     end
@@ -507,8 +694,56 @@ module g6lc_coherence_hub
     // ================================================================
     // Snoop filter
     // ================================================================
-    logic [NC-1:0] sf_present;
-    logic          sf_hit, sf_over;
+    logic [NC-1:0] sf_present, legacy_sf_present;
+    logic          sf_hit, sf_over, legacy_sf_hit, legacy_sf_over;
+    assign sf_present = OOO_SF ? (sig_result_valid ? sig_present : sig_present_q) : legacy_sf_present;
+    assign sf_hit = OOO_SF ? 1'b0 : legacy_sf_hit;
+    assign sf_over = OOO_SF ? aw_fire : legacy_sf_over;
+
+    if (OOO_SF) begin : gen_ooo_coherence
+      g6lc_ooo_snoop_filter #(
+          .NR_CORES(NC), .NR_ENTRIES(SNOOP_FILTER_ENTRIES),
+          .LINE_BYTES(LINE_BYTES), .ADDR_WIDTH(AXI_ADDR_WIDTH)
+      ) i_signature (
+          .clk_i, .rst_ni,
+          .alloc_valid_i(ar_fire), .alloc_addr_i(core_req_i[ar_winner].ar.addr),
+          .alloc_core_i(ar_winner), .alloc_ready_o(sig_alloc_ready),
+          .lookup_valid_i(sig_start), .lookup_addr_i(core_req_i[aw_winner].aw.addr),
+          .lookup_ready_o(), .result_valid_o(sig_result_valid),
+          .present_o(sig_present), .ready_o(sig_initialized)
+      );
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          sig_pending_q <= 1'b0;
+          sig_done_q <= 1'b0;
+          sig_owner_q <= '0;
+          sig_present_q <= '1;
+        end else begin
+          if (sig_start) begin
+            sig_pending_q <= 1'b1;
+            sig_done_q <= 1'b0;
+            sig_owner_q <= aw_winner;
+          end
+          if (sig_result_valid) begin
+            sig_done_q <= 1'b1;
+            sig_present_q <= sig_present;
+          end
+          if (aw_fire) begin
+            sig_pending_q <= 1'b0;
+            sig_done_q <= 1'b0;
+          end
+        end
+      end
+    end else begin : gen_legacy_coherence
+      assign sig_initialized = 1'b1;
+      assign sig_alloc_ready = 1'b1;
+      assign sig_result_valid = 1'b0;
+      assign sig_present = '1;
+      assign sig_pending_q = 1'b0;
+      assign sig_done_q = 1'b0;
+      assign sig_owner_q = '0;
+      assign sig_present_q = '1;
+    end
     logic [AXI_ADDR_WIDTH-1:0] sf_lu_addr, sf_al_addr;
     logic [CID_W-1:0]          sf_al_core;
 
@@ -535,9 +770,9 @@ module g6lc_coherence_hub
         .clear_all_i   (1'b0),
         .lookup_valid_i(aw_fire),
         .lookup_addr_i (sf_lu_addr),
-        .present_o     (sf_present),
-        .lookup_hit_o  (sf_hit),
-        .overapprox_o  (sf_over)
+        .present_o     (legacy_sf_present),
+        .lookup_hit_o  (legacy_sf_hit),
+        .overapprox_o  (legacy_sf_over)
     );
 
     assign coh_sf_hit_o        = sf_hit;
@@ -565,8 +800,7 @@ module g6lc_coherence_hub
         .lr_valid_i   (lr_valid_i),
         .lr_addr_i    (lr_addr_i),
         .lr_core_i    (lr_core_i),
-        .store_valid_i(aw_fire && (is_atop_aw || is_lock_aw ||
-                                   core_req_i[aw_winner].aw.cache[1])),
+        .store_valid_i(aw_fire && aw_may_invalidate),
         .store_addr_i (core_req_i[aw_winner].aw.addr),
         .store_core_i (aw_winner),
         .store_is_sc_i(is_lock_aw && is_atop_aw),  // coarse SC hint
@@ -605,11 +839,16 @@ module g6lc_coherence_hub
     // Freshly generated obligation for the write accepted this cycle.
     coh_inval_t    inv_new;
     logic [NC-1:0] inv_new_target;
+    // Write-owned target subset (before the LR-kill union): distinguishes a
+    // write obligation that holds back B from a pure LR-kill, which stamps no
+    // slot.
+    logic [NC-1:0] inv_wr_target;
 
     always_comb begin
       inv_new        = '0;
       inv_new_target = '0;
-      if (aw_fire && core_req_i[aw_winner].aw.cache[1]) begin
+      inv_wr_target  = '0;
+      if (aw_fire && aw_may_invalidate) begin
         inv_new.valid     = 1'b1;
         inv_new.dcache    = 1'b1;
         inv_new.icache    = 1'b0;
@@ -617,10 +856,11 @@ module g6lc_coherence_hub
         inv_new.line_addr = coh_line_tag(core_req_i[aw_winner].aw.addr, LINE_BYTES);
         unique case (POLICY)
           COH_BROADCAST:
-            inv_new_target = {NC{1'b1}} & ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
+            inv_wr_target = {NC{1'b1}} & ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
           default:
-            inv_new_target = sf_present & ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
+            inv_wr_target = sf_present & ~({{NC-1{1'b0}}, 1'b1} << aw_winner);
         endcase
+        inv_new_target = inv_wr_target;
       end
       // Union LR-kill victims (they need D$ inv of the reserved line)
       if (lr_kill_v) begin
@@ -644,12 +884,16 @@ module g6lc_coherence_hub
       inv_pend_d       = inv_pend_q;
       inv_pend_tgt_d   = inv_pend_tgt_q;
       inv_pend_valid_d = inv_pend_valid_q;
+      inv_pend_slot_d  = inv_pend_slot_q;
       if (inv_pend_valid_q) begin
         if (inv_ready) inv_pend_valid_d = 1'b0;
       end else if (inv_new.valid && |inv_new_target && !inv_ready) begin
         inv_pend_valid_d = 1'b1;
         inv_pend_d       = inv_new;
         inv_pend_tgt_d   = inv_new_target;
+        // A write-owned capture remembers its AW slot; a pure LR-kill leaves a
+        // meaningless index that the inv_owed guard at stamp time rejects.
+        inv_pend_slot_d  = aw_free_slot;
       end
     end
 
@@ -665,6 +909,64 @@ module g6lc_coherence_hub
 
     assign coh_inv_fire_o = inv_req.valid & inv_ready & |inv_target;
 
+    // ---- Invalidation delivery bookkeeping (AW slots) ----
+    // A wait bit falls the cycle after the bus's deq sequence reaches the
+    // stamped enqueue sequence -- the pop edge E is visible at E+1 through
+    // deq_seq_q. Once all targets are delivered, the settle counter runs up to
+    // its cap; stamping below resets both fields for a fresh obligation. This
+    // block reads the combinational accept path (inv_ready, coh_inv_fire_o,
+    // inv_target, inv_enq_seq), which depends on aw_fire, so it must not share
+    // a process with the grant logic that produces aw_fire; it writes only
+    // inv_ot_d, which reaches the slots through inv_ot_q.
+    always_comb begin
+      logic [OT_W-1:0] ss;
+      logic            do_stamp;
+      do_stamp = 1'b0;
+      ss       = '0;
+      for (int unsigned s = 0; s < OT_MAX; s++) begin
+        inv_ot_d[s] = inv_ot_q[s];
+        for (int unsigned c = 0; c < NC; c++) begin
+          if (inv_ot_q[s].inv_wait[c] &&
+              inv_deq_seq[c] == inv_ot_q[s].inv_need[c])
+            inv_ot_d[s].inv_wait[c] = 1'b0;
+        end
+        inv_ot_d[s].inv_settle = (inv_ot_q[s].inv_wait == '0) ?
+            ((inv_ot_q[s].inv_settle == 2'd3) ? 2'd3 :
+             inv_ot_q[s].inv_settle + 2'd1) : 2'd0;
+      end
+      // Freshly accepted write: clean bookkeeping; inv_owed marks a
+      // write-owned obligation the bus could not take this cycle (it is
+      // captured by inv_pend and stamped into this slot on acceptance).
+      if (aw_fire) begin
+        inv_ot_d[aw_free_slot].inv_wait   = '0;
+        inv_ot_d[aw_free_slot].inv_need   = '0;
+        inv_ot_d[aw_free_slot].inv_settle = '0;
+        inv_ot_d[aw_free_slot].inv_owed   = |inv_wr_target && !inv_ready;
+      end
+      // The slot records its delivery obligation the moment the bus accepts
+      // it. A fresh obligation belongs to the write firing this cycle; a
+      // retained one is claimed by the slot in inv_pend_slot_q (the inv_owed
+      // guard ignores a stale slot index left by a pure LR-kill retention).
+      if (coh_inv_fire_o) begin
+        if (!inv_pend_valid_q) begin
+          if (aw_fire && |inv_wr_target) begin
+            do_stamp = 1'b1;
+            ss       = aw_free_slot;
+          end
+        end else if (inv_ot_q[inv_pend_slot_q].inv_owed) begin
+          do_stamp = 1'b1;
+          ss       = inv_pend_slot_q;
+        end
+        if (do_stamp) begin
+          inv_ot_d[ss].inv_wait   = inv_target;
+          inv_ot_d[ss].inv_settle = '0;
+          inv_ot_d[ss].inv_owed   = 1'b0;
+          for (int unsigned c = 0; c < NC; c++)
+            inv_ot_d[ss].inv_need[c] = inv_enq_seq[c];
+        end
+      end
+    end
+
     g6lc_inval_bus #(
         .NR_CORES   (NC),
         .DEPTH      (INVAL_DEPTH),
@@ -678,7 +980,9 @@ module g6lc_coherence_hub
         .inv_core_o      (inv_core_o),
         .inv_core_ready_i(inv_core_ready_i),
         .inv_stall_o     (),
-        .inv_coalesce_o  ()
+        .inv_coalesce_o  (),
+        .inv_enq_seq_o   (inv_enq_seq),
+        .inv_deq_seq_o   (inv_deq_seq)
     );
 
   end

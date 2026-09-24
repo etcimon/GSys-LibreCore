@@ -11,6 +11,7 @@
 //
 // Author: Florian Zaruba, ETH Zurich
 // Date: 19.04.2017
+// Modified by: Etienne Cimon
 // Description: Instantiation of all functional units residing in the execute stage
 
 
@@ -38,6 +39,11 @@ module ex_stage
     input logic clk_i,
     // Asynchronous reset active low - SUBSYSTEM
     input logic rst_ni,
+    output logic [1:0] phys_valid_o,
+    output logic [1:0][CVA6Cfg.PLEN-1:0] phys_addr_o,
+    output logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_o,
+    output logic [1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_o,
+    output logic [1:0][1:0] phys_size_o,
     // Fetch flush request - CONTROLLER
     input logic flush_i,
     // FSE S4: younger-only LSU cancel (from scoreboard)
@@ -633,6 +639,7 @@ module ex_stage
   ) lsu_i (
       .clk_i,
       .rst_ni,
+      .phys_valid_o, .phys_addr_o, .phys_id_o, .phys_hart_o, .phys_size_o,
       .flush_i,
       .cancelled_mask_i,
       .sb_live_i,

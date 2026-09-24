@@ -20,6 +20,9 @@
 // macros; without this include path its typedefs are undefined directives.
 +incdir+${CVA6_REPO_DIR}/corev_apu/include
 +incdir+${CVA6_REPO_DIR}/corev_apu/tb
+// g6lc_cluster.sv `include`s its sibling g6lc_apu_src_guard.sv; Verilator only
+// resolves that through an include path, not the including file's directory.
++incdir+${CVA6_REPO_DIR}/corev_apu/src
 
 // Clock-gating cell: instantiated by the coherence/cluster path but not on
 // core/Flist.cva6 (the core's own gating comes in through the testharness).
@@ -32,6 +35,7 @@ ${CVA6_REPO_DIR}/corev_apu/src/g6lc_axi_2to1_mux.sv
 ${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_coherence_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_inval_bus.sv
 ${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_snoop_filter.sv
+${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_ooo_snoop_filter.sv
 ${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_lr_sc_tracker.sv
 ${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_l1_inv_adapter.sv
 ${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_coherence_hub.sv

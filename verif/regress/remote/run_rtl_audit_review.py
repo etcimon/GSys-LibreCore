@@ -320,6 +320,8 @@ def main():
         # HARTS=1) plus the cross-hart scenarios 19-24.
         configurations=[('lsq','direct',[],[(n,None) for n in range(19)]),
                         ('lsq','nh2',['-GHARTS=2'],[(n,None) for n in range(25)])]
+        if os.environ.get('REVIEW_RTL_PHYSICAL_LSQ')=='1':
+            configurations=[('lsq','physical',['-GHARTS=2','-GPHYS=1'],[(n,None) for n in range(25,36)])]
     elif os.environ.get('REVIEW_RTL_CSRBUF')=='1':
         # Per-tid CSR address table: out-of-order issue, commit-order lookup,
         # ready as table credit, cancel/flush drop; depth-1 identity in order.
@@ -512,6 +514,8 @@ def main():
                          (13,True,'RENAME_HART_FLUSH_SPILL'),(14,True,'RENAME_HART_REALLOC_FLUSH'),
                          (15,True,'RENAME_HART_REALLOC_FLUSH')]
             elif kind=='rename':trials+=[(0,True,'RENAME_MAP'),(1,True,'RENAME_OLDER_LOST'),(2,True,'RENAME_BUSY_RESURRECT'),(3,True,'RENAME_STALE_LEVEL'),(4,True,'RENAME_CKPT2_UNWIND'),(5,True,'RENAME_CKPT_FULL'),(6,True,'RENAME_EXCLUSIVE'),(7,True,'RENAME_CKPT_NO_RELEASE'),(8,True,'RENAME_RETIRE_WINDOW'),(9,True,'RENAME_FLUSH_ARCH'),(10,True,'RENAME_CKPT_ALLOC_LEAK')]
+            elif kind=='lsq' and geometry=='physical':
+                trials += [(n,True,'LSQ_PHYSICAL') for n,_ in cases]
             elif kind=='lsq':
                 trials+=[(0,True,'LSQ_WB_RETIRE'),(1,True,'LSQ_STL_DATA'),(2,True,'LSQ_COMMIT_DOUBLE_FREE'),(3,True,'LSQ_STL_AGE'),(4,True,'LSQ_AGE_STALL'),(5,True,'LSQ_WRAP_DATA'),(6,True,'LSQ_BYTE_DISJOINT'),(7,True,'LSQ_BYTE_COVER'),(8,True,'LSQ_PARTIAL_NODATA'),(9,True,'LSQ_PARTIAL_MERGE'),(10,True,'LSQ_CANCEL_DROP'),(11,True,'LSQ_FLUSH'),(12,True,'LSQ_VIOLATION'),(13,True,'LSQ_VIOLATION_YOUNGER'),(14,True,'LSQ_VIOLATION_WRAP'),(15,True,'LSQ_VIOLATION_OLDEST'),(16,True,'LSQ_VIOLATION_DISJOINT'),(17,True,'LSQ_VIOLATION_SAMECYCLE'),(18,True,'LSQ_UNRESOLVED_MASK')]
                 if geometry=='nh2':

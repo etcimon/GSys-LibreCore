@@ -16,6 +16,62 @@ matching row here so the spec→code answer stays one hop away.
 
 ---
 
+## OoO coherence continuation — partial, qualification-gated (2026-09-24)
+
+RVWMO (`#memorymodel`) and atomic transport (`#ext:a`) require owned responses and coherent
+load values, not merely an invalidation notification. `corev_apu/coherence/g6lc_coherence_hub.sv`
+now retains an atomic slot until both B and required RLAST handshakes, regardless of order, and
+compares response IDs at a width that represents the whole slot capacity. Its optional `COH_OOO`
+branch uses `g6lc_ooo_snoop_filter.sv`: monotone acquisition signatures in one-port `tc_sram`,
+explicit cold initialization, and an owned lookup before AW admission. The first envelope is
+integer OoO, multiple WT cores, equal L1 line widths, with L2. **Promotion (2026-09-24, rights-
+holder decision after the composed hub+L2 review):** `core/include/g6lc64_ooo_int2_config_pkg.sv`
+selects `COH_OOO` for two integer OoO WT cores with L2 and no L3; `check_cfg` and `g6lc_cluster` no
+longer require `G6LC_OOO_COH_QUALIFY`. The legality assert and `gen_bad_ooo_coherence` remain, and
+the default targets and their packages are unchanged.
+
+`g6lc_l2_top.sv` suppresses installation on a same-cycle matching invalidation, with memory-port
+requests separated from conflict-dependent completion. `FAIR_WRITES` bounds competing read/serve
+choices before a pending write; the cluster enables it from `OoOEn` in L2 and L3, and the default
+in-order policy is unchanged. `core/cache_subsystem/wt_axi_adapter.sv` backpressures a D-cache R
+beat while an external invalidation owns the return decoder; an independent I-cache beat may pass.
+The decoder proof is source-extracted, not full-adapter temporal qualification.
+
+The guarded physical-validation candidate now exports owned tag/check-stage addresses from
+`load_unit.sv` and actual store-buffer admission addresses from `store_unit.sv`, through
+`load_store_unit.sv`, `ex_stage.sv`, `cva6.sv`, `issue_stage.sv` and `g6lc_ooo_dispatch.sv`.
+`g6lc_lsq.sv` retains those physical addresses until retirement/cancel, validates store/load and
+load/load aliases, and forms per-TID replay masks. The legacy virtual STQ-key output is unchanged;
+its uncertified forwarding shortcut is disabled only in the candidate. PMA-defined non-idempotent
+loads cannot be replayed. `scoreboard.sv` holds normal load retirement during modification
+validation and until PA certification, while exceptions and existing drops remain serviceable.
+Cancellation/replay is registered before precise retirement. The pending mask is registered-state
+only, not flush-dependent: the latter created a real commit/flush combinational loop.
+
+`wt_dcache_missunit.sv` retains invalidation kill state through an in-flight fill, including an
+allocation collision, so its old response can drain without reinstalling a stale line. Multicore WT
+and `COH_OOO` also prioritize invalidation over the flush array port while retaining sweep progress.
+The single-core legacy path remains the control. The WT adapter exports delivery-stage addresses;
+these and committed local cache-write events feed the candidate validation seam.
+
+The response-publication candidate adds per-target delivery-sequence tracking and delayed B
+release. Subsequent review repaired two additional AXI obligations in `g6lc_coherence_hub.sv`:
+a selected B slot remains owned while backpressured; predecessor masks prevent a younger response
+with the same core/original ID from bypassing an older held response. Atomic R delivery now also
+requires invalidation qualification, and ATOP/locked writes participate even with cache[1]==0.
+`wt_axi_adapter.sv` retains the displaced atomic invalidation's full physical address for replay;
+its tag/index projection is not used as a substitute PA. No permission rules or address mapping change.
+
+Publication is still unqualified: AW-time invalidation plus delayed W can permit stale refill under
+a legal standalone AXI read/write schedule. Whether the current serialized L2 excludes this schedule
+requires a composed proof. Fixed bus-pop settling does not establish completion for an arbitrarily
+buffered L1 endpoint. These are not waived by passing leaf synthesis or transport tests.
+
+Open: full physical-validation integration, invalidation-completion/publication visibility,
+atomic/local-CAS notification coverage, unequal outer/L1-line inclusion, credit-bound L2 sizing,
+multicore ISA integration, PMU integration and physical sign-off. No ISA/DTS capability, cache
+capacity, clock or reset domain changes. These scoped repairs do not establish complete RVWMO.
+
 ## Precise misalignment and fetch recovery — open stability contracts
 
 `core/load_unit.sv` currently retains the original grant-time offset assertions and plain fatal

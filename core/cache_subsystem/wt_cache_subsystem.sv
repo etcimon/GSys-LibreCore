@@ -10,6 +10,7 @@
 //
 // Author: Michael Schaffner <schaffner@iis.ee.ethz.ch>, ETH Zurich
 // Date: 15.08.2018
+// Modified by: Etienne Cimon
 // Description: Ariane cache subsystem that is compatible with the OpenPiton
 //              coherent memory system.
 //
@@ -78,7 +79,9 @@ module wt_cache_subsystem
     // Invalidations
     input logic [63:0] inval_addr_i,
     input logic inval_valid_i,
-    output logic inval_ready_o
+    output logic inval_ready_o,
+    output logic inval_apply_valid_o,
+    output logic [63:0] inval_apply_addr_o
     // TODO: interrupt interface
 );
 
@@ -194,6 +197,8 @@ module wt_cache_subsystem
   ///////////////////////////////////////////////////////
 
 `ifdef PITON_ARIANE
+  assign inval_apply_valid_o = 1'b0;
+  assign inval_apply_addr_o = '0;
   wt_l15_adapter #(
       .CVA6Cfg(CVA6Cfg),
       .dcache_req_t(dcache_req_t),
@@ -244,7 +249,8 @@ module wt_cache_subsystem
       .mbe_i            (mbe_i),
       .inval_addr_i     (inval_addr_i),
       .inval_valid_i    (inval_valid_i),
-      .inval_ready_o    (inval_ready_o)
+      .inval_ready_o    (inval_ready_o),
+      .inval_apply_valid_o, .inval_apply_addr_o
   );
 `endif
 

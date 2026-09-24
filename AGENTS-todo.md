@@ -12,6 +12,60 @@ is the queue, not the design.
 | Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
+## Integrated OoO coherence continuation (2026-09-24)
+
+Contract: `core/ooo/AGENTS-ooo-contract.md` §8. Rights-holder authorization for this work was
+explicitly confirmed by Etienne Cimon in the implementation session; it satisfies the tier-R
+prerequisite for this work under the existing dual license. No licensing policy was changed.
+
+- [x] Measurement-oracle controls and shared hub/L2 reproducers; independent T6b-4b work preserved.
+  The probe classifier has nine self-test controls; optimization kernels now include synchronization
+  and genuinely independent ALU operations. Their revised assembly ROI is still unmeasured.
+- [x] Hub response lifetime and full-ID-space bounds repaired after failing directed cases;
+  existing 16-record regression passes. L2 same-edge refill/invalidation repaired; OoO-gated
+  write-service fairness added in L2/L3. The 64-record L2 suite and small RR0/RR1 synthesis pass.
+- [~] `COH_OOO` SRAM signatures implemented and connected at the hub; production qualification
+  guard remains. Acquisition/reset/port tests, dropped-write mutation, ten-frame reduced proof
+  and reached cover pass. Three-core hub seam passes. Generic leaf synthesis at N2/E128 is
+  45,626→1,287 cells / 7,168→274 sequential cells; N4/E256 is 95,541→4,537 / 14,592→1,046.
+  SRAM byte-write/word padding is counted separately (4,096/8,192 port bits); the logical
+  signatures are 256/1,024 bits. These are latency-different leaf implementations, not whole-hub
+  or foundry area. Full acquisition
+  and visibility qualification remains open; see the contract §8 and tests map.
+- [x] Promoted for the reduced envelope by rights-holder decision (2026-09-24). Full-PA
+  retention, stable offered-B ownership, same-original-ID ordering and atomic-R qualification have
+  discriminating controls. The standalone read-during-delayed-write counterexample is excluded in
+  the actual hub+L2 composition (`ooocoh-composed-{small,mod-only,stalled,target}-r6/r8`, negatives,
+  `no-l2` reproduction, `fault-r6` self-inval mutation, `scc-r1` loop-freedom). New target
+  `g6lc64_ooo_int2` (2 cores × 2 harts, integer OoO, WT, L2, `COH_OOO`, 128 signatures); the
+  `G6LC_OOO_COH_QUALIFY` requirement is removed; legality asserts remain.
+- [ ] Deferred for unrestricted release (not implied by promotion): full-core L1 application
+  acknowledgement on HPDCACHE/non-WT consumers, local-CAS notification coverage, per-ID R ordering,
+  matched multicore firmware/anchor/compliance runs, PMU/RVFI, DFT/MBIST, FO4/timing/power/area
+  sign-off, and a measured remote warning baseline for `g6lc64_ooo_int2`.
+- [ ] Credit-consistent L2 sizing with current concurrent-fill occupancy/lifetime proof.
+- [~] Accepted-physical-address validation is implemented as a guarded candidate through LSU/EX/
+  issue/LSQ/scoreboard. The legacy virtual STQ key is not reused. The new tag-stage event saves
+  grant-time TID/hart/size and suppresses killed/faulted events; uncertified STQ forwarding is off
+  in `COH_OOO`. Loads keep their LSQ records until retirement/cancel. Physical store/load and
+  load/load aliases, modifications, both-hart replay and non-idempotent exclusion have directed
+  controls; a twelve-frame reduced ledger proof and reached cover pass, and restoring WB-time
+  release is detected. Core-side publication/atomic coverage and full multicore gates remain open.
+  Enabled-core synthesis exposed a commit/flush loop in pending-valid suppression; pending now
+  depends only on registered state, and the enabled candidate passed the repaired synthesis route.
+- [~] WT invalidation/response prerequisite: the source-extracted decoder reproduces a consumed
+  D-cache R beat that was not delivered while an external invalidation won. Ready now excludes
+  that collision; RVA0/RVA1 combinational proofs and negatives pass. The WT fill/invalidation
+  reproducer also caught stale installation and a flush-port collision. A fill-owned kill bit
+  suppresses installation while preserving its response; invalidation wins the flush write port
+  without advancing or prematurely finishing the sweep. This shared repair applies to multicore
+  WT and the `COH_OOO` candidate, preserving the single-core legacy control. Full adapter/atomic
+  conservation and commit-visible invalidation completion remain open.
+- [~] Isolated default-target lint/synth snapshots pass at 8/54 and 32/5 warning baselines;
+  user explicitly selected isolated snapshots instead of shared-mirror rsync deletion. Native
+  dry-run RESULT failures are not actual test failures or passes. Matched multicore integration,
+  full simulation/formal, scoped FO4, final source revalidation and physical gates remain open.
+
 ## Contract-first continuation (2026-09-21) — authoritative over the block below
 
 The OoO/SMT2 work now follows `core/ooo/AGENTS-ooo-contract.md` and `core/ooo/AGENTS-ooo-plan.md`

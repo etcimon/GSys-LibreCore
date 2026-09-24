@@ -76,6 +76,7 @@ SPDX-FileComment = "Upstream portions remain licensed Apache-2.0 WITH SHL-2.0; t
 path = [
   "core/include/g6lc64_smt2_config_pkg.sv",
   "core/include/g6lc64_smt2_ooo_int_config_pkg.sv",
+  "core/include/g6lc64_ooo_int2_config_pkg.sv",
   "core/include/g6lc64_ooo_config_pkg.sv",
   "core/include/g6lc64_ooo_int_config_pkg.sv",
   "core/include/g6lc64_ooo_server_config_pkg.sv",

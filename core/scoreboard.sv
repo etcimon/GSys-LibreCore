@@ -45,6 +45,9 @@ module scoreboard #(
     // resolved later - OoO only, tied low in order.
     input  logic                                          mem_violation_i,
     input  logic              [CVA6Cfg.TRANS_ID_BITS-1:0] mem_violation_id_i,
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_pending_i,
+    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_replay_i,
+    input logic phys_mod_i,
     // Prevent from issuing - CONTROLLER
     input  logic                                          flush_unissued_instr_i,
     // Flush whole scoreboard - CONTROLLER
@@ -369,6 +372,11 @@ module scoreboard #(
     for (int unsigned i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin
       commit_instr_o[i] = mem_q[commit_sel_slot[i]].sbe;
       commit_instr_o[i].trans_id = commit_sel_slot[i];
+      if (CVA6Cfg.CohPolicy == config_pkg::COH_OOO &&
+          !mem_q[commit_sel_slot[i]].cancelled && !mem_q[commit_sel_slot[i]].sbe.ex.valid &&
+          (phys_pending_i[commit_sel_slot[i]] ||
+           (phys_mod_i && mem_q[commit_sel_slot[i]].sbe.fu == ariane_pkg::LOAD)))
+        commit_instr_o[i].valid = 1'b0;
       commit_drop_o[i] = mem_q[commit_sel_slot[i]].cancelled;
       commit_replay_o[i] = mem_q[commit_sel_slot[i]].replay;
     end
@@ -595,6 +603,15 @@ module scoreboard #(
       mem_n[mem_violation_id_i].cancelled = 1'b1;
       mem_n[mem_violation_id_i].replay    = 1'b1;
       mem_n[mem_violation_id_i].sbe.valid = 1'b1;
+    end
+    if (CVA6Cfg.CohPolicy == config_pkg::COH_OOO) begin
+      for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+        if (phys_replay_i[i] && mem_q[i].issued && mem_q[i].sbe.fu == ariane_pkg::LOAD) begin
+          mem_n[i].cancelled = 1'b1;
+          mem_n[i].replay = 1'b1;
+          mem_n[i].sbe.valid = 1'b1;
+        end
+      end
     end
 
     // ------------

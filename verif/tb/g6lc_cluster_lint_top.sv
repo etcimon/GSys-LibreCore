@@ -23,11 +23,13 @@
 // makes the configuration legal while keeping the full cache hierarchy, SMT and
 // FP core in the elaboration. One field, chosen because the OoO backend has its
 // own leaf suites and its own refusal checks (review-ooo-illegal-*), whereas the
-// cache hierarchy had no gate coverage at all.
+// cache hierarchy had no gate coverage at all. Integer packages keep OoOEn: the
+// COH_OOO hub is only legal with the OoO backend present, and g6lc64_ooo_int2
+// exists precisely to put that hub under the gate.
 function automatic config_pkg::cva6_cfg_t uncore_lint_cfg();
   config_pkg::cva6_cfg_t c;
   c = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg);
-  c.OoOEn = 1'b0;
+  if (c.FpPresent) c.OoOEn = 1'b0;
 `ifdef SYNTHESIS
   // Synthesis smoke only: the generic BEHAVIOURAL tc_sram model cannot be
   // elaborated by the synthesis frontend at the production cache geometry (its
@@ -52,11 +54,14 @@ module g6lc_cluster_lint_top
     // minutes, which is too slow for a per-change gate, and the cache hierarchy
     // under test is identical either way. What shrinks is the hub's N-core
     // arbitration, which has its own leaf suites (review-incl-evict, the hub
-    // records) rather than no coverage.
+    // records) rather than no coverage. COH_OOO refuses a single core, so that
+    // policy synthesizes its package's core count (the opt-in int2 gate).
 `ifdef SYNTHESIS
-    parameter int unsigned NR_CORES = 1
+    parameter int unsigned NR_CORES =
+        (CVA6Cfg.CohPolicy == config_pkg::COH_OOO) ? CVA6Cfg.NrCores : 1
 `else
-    parameter int unsigned NR_CORES = 2
+    parameter int unsigned NR_CORES =
+        (CVA6Cfg.CohPolicy == config_pkg::COH_OOO) ? CVA6Cfg.NrCores : 2
 `endif
 );
   logic clk_i, rst_ni;

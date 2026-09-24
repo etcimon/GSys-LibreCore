@@ -10,6 +10,7 @@
 //
 // Author: Florian Zaruba, ETH Zurich
 // Date: 22.05.2017
+// Modified by: Etienne Cimon
 // Description: Store Unit, takes care of all store requests and atomic memory operations (AMOs)
 
 
@@ -27,6 +28,11 @@ module store_unit
     input logic clk_i,
     // Asynchronous reset active low - SUBSYSTEM
     input logic rst_ni,
+    output logic phys_valid_o,
+    output logic [CVA6Cfg.PLEN-1:0] phys_addr_o,
+    output logic [CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_o,
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_o,
+    output logic [1:0] phys_size_o,
     // Flush - CONTROLLER
     input logic flush_i,
     // FSE S4: younger-only cancel mask for STQ
@@ -437,6 +443,13 @@ module store_unit
   // Do not post an already-cancelled AMO (hang-7 younger-cancel race).
   assign amo_buffer_valid = st_valid & (CVA6Cfg.RVA && (amo_op_q != AMO_NONE)) &
                             !cancelled_mask_i[trans_id_q];
+
+  assign phys_valid_o = (CVA6Cfg.CohPolicy == config_pkg::COH_OOO) &&
+                        store_buffer_valid && !flush_i && !cancelled_mask_i[trans_id_q];
+  assign phys_addr_o = CVA6Cfg.CohPolicy == config_pkg::COH_OOO ? paddr_to_sb : '0;
+  assign phys_id_o = CVA6Cfg.CohPolicy == config_pkg::COH_OOO ? trans_id_q : '0;
+  assign phys_hart_o = CVA6Cfg.CohPolicy == config_pkg::COH_OOO ? st_hart_q : '0;
+  assign phys_size_o = CVA6Cfg.CohPolicy == config_pkg::COH_OOO ? st_data_size_q : '0;
 
   assign st_ready = store_buffer_ready & amo_buffer_ready;
   // Kill buffered AMO when its SB entry is younger-cancelled and not yet at commit.

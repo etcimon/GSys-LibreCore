@@ -108,6 +108,7 @@ module tb_g6lc_review_fp_lifetime;
     .scoreboard_entry_t(sbe_t),.forwarding_t(fwd_t),.writeback_t(wb_t),.rs3_len_t(logic[63:0])) sb(
     .clk_i(clk),.rst_ni(rst_n),.sb_full_o(sb_full),.sb_empty_o(sb_empty),.spec_cancel_o(),
     .cancelled_mask_o(cancel),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),
+    .phys_pending_i('0),.phys_replay_i('0),.phys_mod_i(1'b0),
     .flush_unissued_instr_i(flush_unissued),.flush_i(flush_id),
     .x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),.x_id_i('0),
     .commit_instr_o(committed),.commit_drop_o(drop),.commit_replay_o(),.commit_ack_i(ca),
@@ -208,6 +209,7 @@ module tb_g6lc_review_load_cancel;
   parameter bit OOO=1;
   parameter int NLOAD=4;
   parameter bit MMU=0;
+  parameter bit COH=0;
   // NI=1 declares the fixture's (zero) physical page non-idempotent so the
   // commit-head gate of a device load can be exercised.
   parameter bit NI=0;
@@ -217,6 +219,8 @@ module tb_g6lc_review_load_cancel;
     c.NR_SB_ENTRIES=8; c.TRANS_ID_BITS=3; c.NrLoadBufEntries=NLOAD;
     c.DcacheIdWidth=2; c.DCACHE_INDEX_WIDTH=12; c.DCACHE_TAG_WIDTH=44;
     c.OoOEn=OOO; c.MmuPresent=MMU; c.SpeculativeSb=1; c.SuperscalarEn=1;
+    c.CohPolicy=COH ? config_pkg::COH_OOO : config_pkg::COH_WRITE_INVAL;
+    c.NrHarts=COH ? 2 : 0;
     c.TvalEn=1;
     if(NI)begin
       c.NonIdemPotenceEn=1; c.NrNonIdempotentRules=1;
@@ -247,6 +251,10 @@ module tb_g6lc_review_load_cancel;
   logic [7:0] cancel='0;
   logic [2:0] tid;
   logic [63:0] result;
+  logic [55:0] translated_pa=56'h80001000,phys_addr;
+  logic phys_valid,phys_hart;
+  logic [2:0] phys_id;
+  logic [1:0] phys_size;
   ctrl_t incoming='0,head;
   branch_t branch='0;
   req_t req;
@@ -269,21 +277,34 @@ module tb_g6lc_review_load_cancel;
     .valid_i(head.valid),.lsu_ctrl_i(head),.pop_ld_o(pop),.valid_o(wb),
     .trans_id_o(tid),.result_o(result),.ex_o(ex),.mbe_i(1'b0),
     .translation_req_o(),.vaddr_o(),.tinst_o(),.hs_ld_st_inst_o(),.hlvx_inst_o(),
-    .paddr_i(56'h80001000),.ex_i(ex_in),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
+    .paddr_i(translated_pa),.ex_i(ex_in),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
     .page_offset_o(),.load_paddr_o(),.load_paddr_valid_o(),.load_trans_id_o(),.load_hart_o(),
     .page_offset_matches_i(match_page),.store_buffer_empty_i(1'b0),.no_st_pending_i(nsp),
     .st_fwd_valid_i(fwd_valid),.st_fwd_data_i(64'h12345666),.st_fwd_be_i(8'hff),
     .commit_tran_id_i('0),.req_port_i(resp),.req_port_o(req),
-    .dcache_wbuffer_not_ni_i(1'b1),.dcache_wbuffer_empty_i(1'b0));
+    .dcache_wbuffer_not_ni_i(1'b1),.dcache_wbuffer_empty_i(1'b0)
+`ifdef G6LC_REVIEW_PHYS_PORT
+    ,.phys_valid_o(phys_valid),.phys_addr_o(phys_addr),.phys_id_o(phys_id),
+    .phys_hart_o(phys_hart),.phys_size_o(phys_size)
+`endif
+  );
+`ifndef G6LC_REVIEW_PHYS_PORT
+  assign phys_valid=0;
+  assign phys_addr='0;
+  assign phys_id='0;
+  assign phys_hart=0;
+  assign phys_size='0;
+`endif
   task automatic tick; clk=1;#2;clk=0;#2;endtask
   task automatic offer(input int id,input fu_op op);
     incoming='0;incoming.valid=1;incoming.fu=LOAD;incoming.operation=op;
     incoming.trans_id=3'(id);incoming.vaddr=64'h80001000;incoming.be='1;in_valid=1;#2;
   endtask
   task automatic quiet; in_valid=0;incoming='0;#2;endtask
-  task automatic response(input logic [1:0] id,input int owner,input bit expected);
+  task automatic response(input logic [1:0] id,input int owner,input bit expected,
+                          input logic [63:0] value=64'h66);
     resp.data_rvalid=1;resp.data_rid=id;resp.data_rdata=64'h12345666;#2;
-    if(wb!==expected || (wb && (tid!=3'(owner) || result!=(negative?64'h67:64'h66))))
+    if(wb!==expected || (wb && (tid!=3'(owner) || result!=(value ^ 64'(negative)))))
       $fatal(1,"LOAD_CANCEL_RESPONSE owner=%0d tid=%0d wb=%b data=%h",owner,tid,wb,result);
     tick();resp.data_rvalid=0;#2;
   endtask
@@ -416,6 +437,65 @@ module tb_g6lc_review_load_cancel;
         repeat(8)begin #2;if(req.tag_valid && !req.kill_req)killed=1;tick();end
         if(killed!==((OOO && nsp) ^ negative))$fatal(1,"LOAD_NI_HEAD_GATE tag=%b ooo=%0d nsp=%b",killed,OOO,nsp);
         $display("LOAD_CANCEL_PASS scenario=%0d ooo=%0d ni=1 requested=%b",scenario,OOO,killed);$finish;
+      end
+      16:begin
+        if(!COH || !MMU)$fatal(1,"LOAD_PHYS_SCENARIO");
+        dtlb_hit=0;match_page=1;fwd_valid=1;translated_pa=56'h90001000;
+        offer(1,LBU);
+        repeat(3)begin
+          #2;
+          if(wb || pop)$fatal(1,"LOAD_UNCERTIFIED_FORWARD");
+          tick();quiet();
+        end
+        dtlb_hit=1;fwd_valid=0;match_page=0;resp.data_gnt=1;
+        for(int n=0;n<8 && !req.data_req;n++)tick();
+        if(!req.data_req)$fatal(1,"LOAD_PHYS_NO_PROGRESS");
+        old_id=req.data_id;tick();quiet();tick();
+        response(old_id,1,1);
+      end
+      17:begin
+        translated_pa=56'h90002000;resp.data_gnt=1;
+        offer(1,LBU);incoming.hart=1;incoming.vaddr=64'h40002000;#2;
+        old_id=req.data_id;tick();
+        offer(2,LD);incoming.hart=0;incoming.vaddr=64'h40005000;#2;
+        if(!phys_valid || phys_id!=1 || phys_hart!=1 || phys_size!=0 ||
+           (phys_addr ^ 56'(negative))!=56'h90002000)$fatal(1,"LOAD_PA_OWNER");
+        new_id=req.data_id;tick();quiet();translated_pa=56'ha0005000;#2;
+        if(!phys_valid || phys_id!=2 || phys_hart!=0 || phys_size!=3 ||
+           phys_addr!=56'ha0005000)$fatal(1,"LOAD_PA_SUCCESSOR");
+        tick();
+        if(phys_valid)$fatal(1,"LOAD_PA_DUPLICATE");
+        response(old_id,1,1);response(new_id,2,1,64'h12345666);
+      end
+      18:begin
+        resp.data_gnt=1;offer(1,LBU);old_id=req.data_id;tick();
+        offer(2,LBU);incoming.hart=1;cancel[1]=1;#2;
+        if(phys_valid)$fatal(1,"LOAD_PA_CANCEL");
+        new_id=req.data_id;tick();quiet();cancel='0;translated_pa=56'h90002000;#2;
+        if(!phys_valid || phys_id!=2 || phys_hart!=1 || phys_addr!=56'h90002000)
+          $fatal(1,"LOAD_PA_SUCCESSOR");
+        tick();response(old_id,1,0);response(new_id,2,1);
+      end
+      19:begin
+        resp.data_gnt=1;offer(1,LBU);incoming.hart=1;old_id=req.data_id;tick();
+        offer(3,LBU);cancel[3]=1;#2;
+        if(!phys_valid || phys_id!=1 || phys_hart!=1 || req.data_req)
+          $fatal(1,"LOAD_PA_PEER_CANCEL");
+        tick();quiet();cancel='0;response(old_id,1,1);
+      end
+      20:begin
+        resp.data_gnt=1;offer(1,LBU);old_id=req.data_id;tick();quiet();
+        ex_in.valid=1;ex_in.cause=5;#2;
+        if(phys_valid || !req.kill_req)$fatal(1,"LOAD_PA_FAULT");
+        resp.data_rvalid=1;resp.data_rid=old_id;#2;
+        if(!wb || !ex.valid || tid!=1)$fatal(1,"LOAD_PA_FAULT_COMPLETION");
+        tick();resp.data_rvalid=0;ex_in='0;
+      end
+      21:begin
+        resp.data_gnt=1;offer(1,LBU);old_id=req.data_id;tick();quiet();
+        flush=1;#2;
+        if(phys_valid)$fatal(1,"LOAD_PA_FLUSH");
+        tick();flush=0;tick();response(old_id,1,0);
       end
       default:$fatal(1,"LOAD_CANCEL_SCENARIO");
     endcase
@@ -1264,9 +1344,16 @@ module tb_g6lc_review_lsq;
   // T6b hart-tag cell: HARTS=1 reproduces the single-hart geometry; HARTS=2
   // runs the same scenarios on hart 0 plus the cross-hart suite 19-24.
   parameter int unsigned HARTS=1;
+  parameter bit PHYS=0;
   function automatic config_pkg::cva6_cfg_t configuration();
     config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
     c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NrHarts=HARTS;c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.NrWbPorts=2;
+    c.CohPolicy=PHYS ? config_pkg::COH_OOO : config_pkg::COH_WRITE_INVAL;
+    if(PHYS)begin
+      c.NonIdemPotenceEn=1;c.NrNonIdempotentRules=1;
+      c.NonIdempotentAddrBase[0]=64'he000;c.NonIdempotentLength[0]=64'h1000;
+    end
+    c.DCACHE_LINE_WIDTH=128;
     c.NrCommitPorts=2;return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
@@ -1292,6 +1379,11 @@ module tb_g6lc_review_lsq;
   logic [HARTS-1:0][15:0] st_hart_mask;
   logic [63:0] fwd_data;
   logic [3:0] viol_id;
+  logic [1:0] pv='0,ph='0,mv='0,commit_ld='0;
+  logic [1:0][3:0] pid='0;
+  logic [1:0][55:0] pa='0,ma='0;
+  logic [1:0][1:0] psz='0;
+  logic [15:0] ppending,preplay;
   int scenario;bit negative;
   g6lc_lsq #(.CVA6Cfg(C),.LD_ENTRIES(4),.ST_ENTRIES(4),.NR_ALLOC(2),.NR_UPDATE(2)) dut(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancel_mask),.sb_live_i('1),
@@ -1308,7 +1400,10 @@ module tb_g6lc_review_lsq;
     .st_live_mask_o(st_mask),.st_unresolved_mask_o(st_unresolved),
     .st_hart_mask_o(st_hart_mask),.store_pending_o(pend),.stl_forward_o(fwd),
     .stl_data_o(fwd_data),.stl_stall_o(stall),.lsq_busy_o(busy),
-    .mem_violation_o(viol),.mem_violation_id_o(viol_id),.mem_violation_pc_o());
+    .mem_violation_o(viol),.mem_violation_id_o(viol_id),.mem_violation_pc_o(),
+    .phys_valid_i(pv),.phys_addr_i(pa),.phys_id_i(pid),.phys_hart_i(ph),.phys_size_i(psz),
+    .mod_valid_i(mv),.mod_addr_i(ma),.commit_ld_i(commit_ld),
+    .phys_pending_o(ppending),.phys_replay_o(preplay));
   // Same clocking discipline as the dispatch fixture: free-running clock, drive
   // on the falling edge, sample after the rising edge settles.
   always #5 clk = ~clk;
@@ -1698,6 +1793,93 @@ module tb_g6lc_review_lsq;
           $fatal(1,"LSQ_HART_MASK hart0=%h hart1=%h want=0004/0020",
                  st_hart_mask[0],st_hart_mask[1]);
       end
+      25:begin
+        st_alloc=1;ld_alloc=2;alloc_id[0]=1;alloc_id[1]=2;
+        drive();st_alloc=0;ld_alloc=0;
+        addr_v=3;addr_is_st=1;addr_id[0]=1;addr_id[1]=2;addr[0]=56'h4000;addr[1]=56'h5000;
+        drive();addr_v=0;presample();
+        if(ppending!=16'h4 || st_unresolved!=16'h2)$fatal(1,"LSQ_PA_VIRTUAL");
+        drive();pv=1;pid[0]=2;pa[0]=56'h9000;psz[0]=3;
+        drive();pv=0;cmpl_v=1;cmpl_id[0]=2;
+        drive();cmpl_v=0;presample();
+        if(ldfree!=3 || ppending!=0)$fatal(1,"LSQ_PA_LIFETIME");
+        drive();pv=2;pid[1]=1;pa[1]=56'h9000;psz[1]=3;presample();
+        if(!viol || viol_id!=2)$fatal(1,"LSQ_PA_TRAIN");
+        if((preplay ^ (negative ? 16'h4 : 16'h0))!=16'h4)$fatal(1,"LSQ_PHYSICAL");
+      end
+      26:begin
+        st_alloc=1;ld_alloc=2;alloc_id[0]=1;alloc_id[1]=2;
+        drive();st_alloc=0;ld_alloc=0;
+        pv=3;pid[0]=2;pid[1]=1;pa[0]=56'ha000;pa[1]=56'h9000;psz='1;
+        presample();
+        if((preplay ^ (negative ? 16'h4 : 16'h0))!=0)$fatal(1,"LSQ_PHYSICAL");
+      end
+      27:begin
+        ld_alloc=1;alloc_id[0]=2;
+        drive();ld_alloc=0;pv=1;pid[0]=2;pa[0]=56'h9000;psz[0]=3;
+        drive();pv=0;cmpl_v=1;cmpl_id[0]=2;
+        drive();cmpl_v=0;mv=1;ma[0]=56'h9008;presample();
+        if(viol)$fatal(1,"LSQ_PA_SNOOP_TRAIN");
+        if((preplay ^ (negative ? 16'h4 : 16'h0))!=16'h4 || ldfree!=3)$fatal(1,"LSQ_PHYSICAL");
+        drive();mv=0;commit_ld=1;commit_id[0]=2;
+        drive();commit_ld=0;mv=1;presample();
+        if(preplay!=0 || ldfree!=4)$fatal(1,"LSQ_PA_RETIRE");
+      end
+      28:begin
+        st_alloc=1;ld_alloc=2;alloc_id[0]=1;alloc_id[1]=2;alloc_hart=2;
+        drive();st_alloc=0;ld_alloc=0;
+        pv=3;pid[0]=2;pid[1]=1;ph=1;pa[0]=56'h9000;pa[1]=56'h9000;psz='1;
+        presample();if(preplay!=0)$fatal(1,"LSQ_PA_PEER_SPEC");
+        drive();pv=0;mv=2;ma[1]=56'h9000;presample();
+        if((preplay ^ (negative ? 16'h4 : 16'h0))!=16'h4)$fatal(1,"LSQ_PHYSICAL");
+      end
+      29:begin
+        ld_alloc=1;alloc_id[0]=2;
+        drive();ld_alloc=0;pv=1;pid[0]=2;pa[0]=56'h9000;psz[0]=3;
+        drive();pv=0;cancel_mask=16'h4;
+        drive();cancel_mask=0;ld_alloc=1;alloc_hart=1;
+        drive();ld_alloc=0;pv=1;ph=0;
+        drive();pv=0;mv=1;ma[0]=56'h9000;presample();
+        if(ppending!=16'h4 || preplay!=0)$fatal(1,"LSQ_PA_STALE_HART");
+        drive();pv=1;ph=1;pa[0]=56'ha000;mv=0;
+        drive();pv=0;mv=1;ma[0]=56'ha000;presample();
+        if((preplay ^ (negative ? 16'h4 : 16'h0))!=16'h4)$fatal(1,"LSQ_PHYSICAL");
+      end
+      30:begin
+        ld_alloc=1;alloc_id[0]=2;
+        drive();ld_alloc=0;pv=1;pid[0]=2;pa[0]=56'h9000;psz[0]=3;
+        mv=1;ma[0]=56'h9000;presample();
+        if((preplay ^ (negative ? 16'h4 : 16'h0))!=16'h4)$fatal(1,"LSQ_PHYSICAL");
+      end
+      31:begin
+        ld_alloc=3;alloc_id[0]=2;alloc_id[1]=4;alloc_hart=2;
+        drive();ld_alloc=0;pv=1;pid[0]=2;pa[0]=56'h9000;psz[0]=3;
+        drive();pid[0]=4;ph[0]=1;
+        drive();pv=0;mv=1;ma[0]=56'h9000;presample();
+        if((preplay ^ (negative ? 16'h4 : 16'h0))!=16'h14)$fatal(1,"LSQ_PHYSICAL");
+      end
+      32:begin
+        st_alloc=1;ld_alloc=2;alloc_id[0]=1;alloc_id[1]=2;
+        drive();st_alloc=0;ld_alloc=0;
+        pv=3;pid[0]=2;pid[1]=1;pa[0]=56'h9002;pa[1]=56'h9000;psz[0]=1;psz[1]=0;
+        presample();
+        if((preplay ^ (negative ? 16'h4 : 16'h0))!=0)$fatal(1,"LSQ_PHYSICAL");
+      end
+      33:begin
+        ld_alloc=1;alloc_id[0]=2;
+        drive();ld_alloc=0;pv=1;pid[0]=2;pa[0]=56'he000;psz[0]=3;
+        drive();pv=0;mv=1;ma[0]=56'he000;presample();
+        if((preplay ^ (negative ? 16'h4 : 16'h0))!=0 || ppending!=0)
+          $fatal(1,"LSQ_PHYSICAL");
+      end
+      34,35:begin
+        ld_alloc=3;alloc_id[0]=2;alloc_id[1]=4;alloc_hart=(scenario==35)?2:0;
+        drive();ld_alloc=0;pv=1;pid[0]=4;ph[0]=(scenario==35);pa[0]=56'h9000;psz[0]=3;
+        drive();pv=0;cmpl_v=1;cmpl_id[0]=4;
+        drive();cmpl_v=0;pv=1;pid[0]=2;ph[0]=0;presample();
+        if((preplay ^ (negative ? 16'h10 : 16'h0))!=((scenario==34)?16'h10:16'h0) || viol)
+          $fatal(1,"LSQ_PHYSICAL");
+      end
       default:$fatal(1,"LSQ_SCENARIO");
     endcase
     $display("RTL_REVIEW_PASS lsq scenario=%0d",scenario);$finish;
@@ -1748,6 +1930,8 @@ module tb_g6lc_review_dispatch;
   g6lc_ooo_dispatch #(.CVA6Cfg(C),.scoreboard_entry_t(sbe_t)) dut(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(dispatch_flush),.flush_unissued_i(redirect_flush),.cancelled_mask_i(cancel_mask),
     .sb_live_i('1),
+    .phys_valid_i('0),.phys_addr_i('0),.phys_id_i('0),.phys_hart_i('0),.phys_size_i('0),
+    .mod_valid_i('0),.mod_addr_i('0),.phys_pending_o(),.phys_replay_o(),
     .dispatch_sbe_i(ds),.dispatch_orig_i('0),.dispatch_valid_i(dv),.dispatch_ack_o(da),
     .issue_sbe_o(issued),.issue_orig_o(orig),.issue_valid_o(iv),.issue_ack_i(issue_accept),
     .issue_op_a_o(op_a),.issue_op_b_o(op_b),.issue_op_a_valid_o(op_a_valid),.issue_op_b_valid_o(op_b_valid),
@@ -2968,6 +3152,7 @@ module tb_g6lc_review_commit;
       .writeback_t(writeback_t),.rs3_len_t(rs3_len_t)) dut (
     .clk_i(clk),.rst_ni(rst_n),.sb_full_o(sb_full),.sb_empty_o(),.spec_cancel_o(spec_cancel),
     .cancelled_mask_o(cancelled_mask),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),
+    .phys_pending_i('0),.phys_replay_i('0),.phys_mod_i(1'b0),
     .flush_unissued_instr_i(flush_unissued),
     .flush_i(flush),.x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),
     .x_id_i('0),.commit_instr_o(commit_instr),.commit_drop_o(commit_drop),
@@ -3433,6 +3618,7 @@ module tb_g6lc_review_sbhead;
       .writeback_t(writeback_t),.rs3_len_t(rs3_len_t)) dut (
     .clk_i(clk),.rst_ni(rst_n),.sb_full_o(),.sb_empty_o(),.spec_cancel_o(),
     .cancelled_mask_o(),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),
+    .phys_pending_i('0),.phys_replay_i('0),.phys_mod_i(1'b0),
     .flush_unissued_instr_i(flush_unissued),
     .flush_i(flush),.x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),
     .x_id_i('0),.commit_instr_o(commit_instr),.commit_drop_o(commit_drop),

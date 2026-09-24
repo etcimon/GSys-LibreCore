@@ -8,6 +8,7 @@ module g6lc_l3_top
   import g6lc_l3_pkg::*;
 #(
     parameter bit          Enable      = 1'b1,
+    parameter bit          FAIR_WRITES = 1'b0,
     parameter int unsigned BYTE_SIZE   = L3_DEFAULT_BYTE_SIZE,
     parameter int unsigned SET_ASSOC   = L3_DEFAULT_SET_ASSOC,
     parameter int unsigned LINE_WIDTH  = L3_DEFAULT_LINE_WIDTH,
@@ -41,6 +42,7 @@ module g6lc_l3_top
 
   g6lc_l2_top #(
       .Enable         (Enable),
+      .FAIR_WRITES    (FAIR_WRITES),
       .BYTE_SIZE      (BYTE_SIZE),
       .SET_ASSOC      (SET_ASSOC),
       .LINE_WIDTH     (LINE_WIDTH),

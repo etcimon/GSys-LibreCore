@@ -82,6 +82,8 @@ module g6lc_ooo_age_props #(
       .flush_i,
       .cancelled_mask_i  ('0),
       .sb_live_i         ('1),
+      .phys_valid_i('0), .phys_addr_i('0), .phys_id_i('0), .phys_hart_i('0), .phys_size_i('0),
+      .commit_ld_i('0), .mod_valid_i('0), .mod_addr_i('0), .phys_pending_o(), .phys_replay_o(),
       .ld_alloc_i        (do_alloc && !alloc_is_st_i),
       .st_alloc_i        (do_alloc && alloc_is_st_i),
       .alloc_id_i        (alloc_ptr_q),
@@ -242,4 +244,92 @@ module g6lc_ooo_age_props #(
   end
 `endif
 
+endmodule
+
+module g6lc_ooo_phys_props #(
+    parameter bit NEGATIVE = 1'b0
+) (
+    input logic clk_i,
+    input logic alloc_i, alloc_hart_i, phys_i, phys_hart_i, complete_i, retire_i, mod_i, flush_i,
+    input logic [1:0] alloc_id_i, phys_id_i, phys_line_i, complete_id_i, retire_id_i, mod_line_i,
+    input logic [3:0] cancel_i,
+    output logic saw_completed_snoop_o = 1'b0
+);
+  function automatic config_pkg::cva6_cfg_t cfg();
+    config_pkg::cva6_cfg_t c = config_pkg::cva6_cfg_empty;
+    c.XLEN=64;c.VLEN=32;c.PLEN=16;c.NrHarts=2;c.NR_SB_ENTRIES=4;c.TRANS_ID_BITS=2;
+    c.NrWbPorts=1;c.NrCommitPorts=1;c.DCACHE_LINE_WIDTH=128;
+    c.CohPolicy=config_pkg::COH_OOO;c.NrNonIdempotentRules=1;
+    c.NonIdempotentAddrBase[0]=64'h1030;c.NonIdempotentLength[0]=64'h10;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=cfg();
+  logic reset_q=1'b1;
+  wire rst_n=!reset_q;
+  always_ff @(posedge clk_i) reset_q<=1'b0;
+  logic [3:0] live_q,known_q,hart_q,done_q,pending,replay;
+  logic [3:0][1:0] line_q;
+  logic full;
+  logic [1:0] free_count;
+  wire allocate=alloc_i && !full && !live_q[alloc_id_i] && !flush_i;
+  wire retire=retire_i && live_q[retire_id_i] && !flush_i;
+  wire qualified=phys_i && live_q[phys_id_i] && hart_q[phys_id_i]==phys_hart_i;
+  wire [15:0] physical_address=16'h1000 | (16'(phys_line_i)<<4);
+  wire [15:0] modified_address=16'h1000 | (16'(mod_line_i)<<4);
+
+  g6lc_lsq #(.CVA6Cfg(C),.LD_ENTRIES(2),.ST_ENTRIES(2),.NR_ALLOC(1),.NR_UPDATE(1)) dut (
+      .clk_i,.rst_ni(rst_n),.flush_i,.cancelled_mask_i(cancel_i),.sb_live_i('1),
+      .ld_alloc_i(allocate),.st_alloc_i(1'b0),.alloc_id_i,.alloc_hart_i,.alloc_pc_i('0),
+      .ld_full_o(full),.st_full_o(),.ld_free_o(free_count),.st_free_o(),
+      .addr_valid_i(1'b0),.addr_id_i('0),.addr_i('0),.addr_is_st_i(1'b0),.addr_size_i('0),
+      .st_data_valid_i(1'b0),.st_data_id_i('0),.st_data_i('0),
+      .complete_valid_i(complete_i),.complete_id_i,.complete_is_st_i(1'b0),
+      .commit_st_i(1'b0),.commit_ld_i(retire),.commit_id_i(retire_id_i),.commit_ptr_i('0),
+      .ld_query_i(1'b0),.ld_query_addr_i('0),.ld_query_size_i('0),.ld_query_id_i('0),.ld_query_hart_i(1'b0),
+      .st_live_mask_o(),.st_unresolved_mask_o(),.st_hart_mask_o(),.store_pending_o(),
+      .stl_forward_o(),.stl_data_o(),.stl_stall_o(),.lsq_busy_o(),
+      .mem_violation_o(),.mem_violation_id_o(),.mem_violation_pc_o(),
+      .phys_valid_i({1'b0,phys_i}),.phys_id_i({2'b00,phys_id_i}),
+      .phys_hart_i({1'b0,phys_hart_i}),.phys_addr_i({16'b0,physical_address}),.phys_size_i(4'b0011),
+      .mod_valid_i({1'b0,mod_i}),.mod_addr_i({16'b0,modified_address}),
+      .phys_pending_o(pending),.phys_replay_o(replay)
+  );
+
+  always_ff @(posedge clk_i) begin
+    if(!rst_n || flush_i) begin
+      live_q<='0;known_q<='0;hart_q<='0;done_q<='0;line_q<='0;
+      saw_completed_snoop_o<=1'b0;
+    end else begin
+      if(allocate) begin
+        live_q[alloc_id_i]<=1'b1;known_q[alloc_id_i]<=1'b0;
+        hart_q[alloc_id_i]<=alloc_hart_i;done_q[alloc_id_i]<=1'b0;
+      end
+      if(qualified) begin known_q[phys_id_i]<=1'b1;line_q[phys_id_i]<=phys_line_i;end
+      if(complete_i && live_q[complete_id_i]) done_q[complete_id_i]<=1'b1;
+      for(int t=0;t<4;t++) begin
+        if(cancel_i[t] || (retire && retire_id_i==2'(t))) begin
+          live_q[t]<=1'b0;known_q[t]<=1'b0;done_q[t]<=1'b0;
+        end
+        if(live_q[t] && known_q[t] && done_q[t] && !cancel_i[t] && mod_i &&
+           mod_line_i==line_q[t] && line_q[t]!=3 && replay[t]) saw_completed_snoop_o<=1'b1;
+      end
+    end
+  end
+
+  always_ff @(posedge clk_i) begin
+    if(rst_n) begin
+      assert(int'(free_count)+int'($countones(live_q))==2);
+      assert(pending==(live_q & ~known_q));
+      for(int t=0;t<4;t++) begin
+        if(!live_q[t] || cancel_i[t] || flush_i) assert(!replay[t]);
+        if(live_q[t] && !cancel_i[t] && !flush_i) begin
+          if((known_q[t] || (qualified && phys_id_i==2'(t))) && mod_i && mod_line_i!=3 &&
+             mod_line_i==((qualified && phys_id_i==2'(t)) ? phys_line_i : line_q[t]))
+            assert(replay[t] ^ NEGATIVE);
+          if((qualified && phys_id_i==2'(t)) ? phys_line_i==3 : (known_q[t] && line_q[t]==3))
+            assert(!replay[t]);
+        end
+      end
+    end
+  end
 endmodule

@@ -11,6 +11,12 @@ package g6lc_coherence_pkg;
   localparam int unsigned COH_DEFAULT_SF_ENTRIES = 128;
   localparam int unsigned COH_DEFAULT_INVAL_DEPTH = 4;
 
+  // Delivery-sequence width for the per-core invalidation counters. The
+  // counters wrap freely; a waited-on sequence number is reached exactly once
+  // because the enqueue-dequeue distance never exceeds the FIFO depth and
+  // DEPTH <= 2**(COH_INV_SEQ_W-1) is asserted at elaboration.
+  localparam int unsigned COH_INV_SEQ_W = 8;
+
   // Compact invalidation command (OpenPiton L15-style fields)
   typedef struct packed {
     logic        valid;       // pulse/level: inv request present

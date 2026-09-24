@@ -62,6 +62,7 @@ def run_leaf():
              data / 'lsu_bypass.sv', data / 'load_unit.sv']
     hashes = {}
     for path in paths:
+        path = data / path.name if (data / path.name).is_file() else path
         (source / path.name).write_bytes(path.read_bytes())
         hashes[path.name] = sha(path)
     bench = (data / 'tb_g6lc_rtl_review.sv').read_text()
@@ -94,7 +95,22 @@ def run_leaf():
         if text.count(old) != 1:
             raise ValueError('misalignment mutation site changed')
         path.write_text(text.replace(old, new))
+    physical_mutation = os.environ.get('FAULT_REVIEW_PHYS_MUTATION')
+    physical_faults = {
+        'address': (17, 'assign phys_addr_o = paddr_i;', 'assign phys_addr_o = load_paddr_o;', 'LOAD_PA_OWNER'),
+        'owner': (17, 'assign phys_id_o = owner_q;', 'assign phys_id_o = lsu_ctrl_i.trans_id;', 'LOAD_PA_OWNER'),
+        'cancel': (18, '!ex_i.valid && !flush_i && !cancelled_mask_i[owner_q];',
+                   '!ex_i.valid && !flush_i;', 'LOAD_PA_CANCEL'),
+        'forward': (16, '(CVA6Cfg.CohPolicy != config_pkg::COH_OOO) &&', "1'b1 &&", 'LOAD_UNCERTIFIED_FORWARD'),
+    }
+    if physical_mutation:
+        _, old, new, _ = physical_faults[physical_mutation]
+        path = source / 'load_unit.sv'
+        text = path.read_text()
+        assert text.count(old) == 1, 'physical-owner mutation site changed'
+        path.write_text(text.replace(old, new))
     pins = {'sources': hashes, 'before': before, 'queuedCancelMutation': mutation, 'misalignMutation': misalign_mutation,
+            'physicalMutation': physical_mutation,
             'compiledSources': {p.name: sha(p) for p in source.glob('*.sv')},
             'runnerSha256': sha(Path(__file__)),
             'compilerControlSha256': sha(Path('/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt')),
@@ -105,15 +121,18 @@ def run_leaf():
     # Non-idempotent commit-head gate (T6a finding): the device load at the
     # head must not wait for younger speculative stores under OoO.
     ni_gate = os.environ.get('FAULT_REVIEW_NI') == '1'
-    for ooo, nload, mmu in ([(1, 4, 0)] if before or mutation else [(1, 4, 1), (0, 4, 1)] if misalign_mutation or ni_gate else [(1, 2, 0), (1, 4, 1), (0, 4, 1)]):
+    physical = os.environ.get('FAULT_REVIEW_PHYSICAL') == '1'
+    for ooo, nload, mmu in ([(1, 4, 1)] if physical else [(1, 4, 0)] if before or mutation else [(1, 4, 1), (0, 4, 1)] if misalign_mutation or ni_gate else [(1, 2, 0), (1, 4, 1), (0, 4, 1)]):
         work = out / f'ooo{ooo}-loads{nload}-mmu{mmu}'
         work.mkdir()
         model = work / 'model'
         ports = ['-DG6LC_REVIEW_CANCEL_PORT'] if 'cancelled_mask_i' in (source / 'lsu_bypass.sv').read_text() else []
+        if 'phys_valid_o' in (source / 'load_unit.sv').read_text():
+            ports.append('-DG6LC_REVIEW_PHYS_PORT')
         command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1',
                    '-Wno-fatal', '-Werror-LATCH', '-Werror-UNOPTFLAT', *ports,
                    '/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt',
-                   '--top-module', top, f'-GOOO={ooo}', f'-GNLOAD={nload}', f'-GMMU={mmu}', f'-GNI={int(ni_gate)}',
+                   '--top-module', top, f'-GOOO={ooo}', f'-GNLOAD={nload}', f'-GMMU={mmu}', f'-GNI={int(ni_gate)}', f'-GCOH={int(physical)}',
                    '--Mdir', str(model), '-o', 'review-test',
                    *[str(source / p.name) for p in paths], str(source / 'bench.sv')]
         for name, cmd in [('verilate', command), ('build', ['make', '-C', str(model), '-f', f'V{top}.mk', '-j4'])]:
@@ -125,14 +144,17 @@ def run_leaf():
         deps = '\n'.join(p.read_text() for p in model.glob('*.d'))
         if str(runtime / 'include/verilated_funcs.h') not in deps:
             raise ValueError('compiled runtime identity missing')
-        scenarios = [1] if mutation else [13] if misalign_mutation else [14, 15] if ni_gate else [0, 4, 6] if before else list(range(14)) if ooo and mmu else list(range(8)) + [10, 11] if ooo else [2, 3, 4, 5, 6, 13]
+        scenarios = [physical_faults[physical_mutation][0]] if physical_mutation else ([16] if before else list(range(16, 22))) if physical else [1] if mutation else [13] if misalign_mutation else [14, 15] if ni_gate else [0, 4, 6] if before else list(range(14)) if ooo and mmu else list(range(8)) + [10, 11] if ooo else [2, 3, 4, 5, 6, 13]
         for case in scenarios:
-            for negative in ([False] if before or mutation or misalign_mutation else [False, True]):
+            for negative in ([False] if before or mutation or misalign_mutation or physical_mutation else [False, True]):
                 cmd = [str(model / 'review-test'), f'+scenario={case}'] + (['+oracle_negative'] if negative else [])
                 result = subprocess.run(cmd, cwd=work, capture_output=True, text=True, timeout=15)
                 text = result.stdout + result.stderr
                 (work / f'case{case}-negative{int(negative)}.log').write_text(text)
-                expected = ('LOAD_CANCEL_STALE_REQUEST' if (before and case == 0) or mutation else
+                expected = (physical_faults[physical_mutation][3] if physical_mutation else
+                            'LOAD_PA_OWNER' if physical and case == 17 and negative else
+                            'LOAD_UNCERTIFIED_FORWARD' if physical and before else
+                            'LOAD_CANCEL_STALE_REQUEST' if (before and case == 0) or mutation else
                             {'kill': 'misaligned load buffer entry did not complete with LD_ADDR_MISALIGNED and a killed request',
                              'ex': 'LOAD_MISALIGN_DATA_COMPLETION'}[misalign_mutation] if misalign_mutation else
                             'LOAD_NI_HEAD_GATE' if negative and case in (14, 15) else
@@ -429,7 +451,55 @@ def run_fp_lifetime():
     return 0 if all(item['matched'] for item in results) else 1
 
 
+def run_physical_formal():
+    data, out = Path(os.environ['TH_DATA_DIR']), Path(os.environ['TH_OUT_DIR'])
+    source = out / 'source'
+    source.mkdir()
+    names = ['config_pkg.sv', 'g6lc_ooo_pkg.sv', 'g6lc_lsq.sv', 'g6lc_ooo_age_props.sv']
+    for name in names:
+        (source / name).write_bytes((data / name).read_bytes())
+    fault = os.environ.get('FAULT_REVIEW_PHYS_RETENTION') == '1'
+    if fault:
+        path = source / 'g6lc_lsq.sv'
+        text = path.read_text()
+        old = 'if (!PHYS_VALIDATE && ld_q[i].valid && ld_d[i].done) begin'
+        assert text.count(old) == 1
+        path.write_text(text.replace(old, 'if (ld_q[i].valid && ld_d[i].done) begin'))
+    (out / 'sources.json').write_text(json.dumps({name: sha(source / name) for name in names}, indent=2))
+    records = []
+    for negative in ([0] if fault else [0, 1]):
+        label = f'physical-negative{negative}'
+        script = (f'read_slang -DFORMAL --top g6lc_ooo_phys_props -GNEGATIVE={negative} ' +
+                  ' '.join(str(source / name) for name in names) +
+                  '; prep -top g6lc_ooo_phys_props; flatten; async2sync; chformal -lower; '
+                  'memory_map; opt -full; dffunmap; opt_clean; '
+                  f'write_rtlil {out}/{label}.il; '
+                  f'sat -seq 12 -prove-asserts -verify -show-ports -dump_vcd {out}/{label}.vcd')
+        with (out / f'{label}.log').open('w') as log:
+            rc = subprocess.run(['yosys', '-p', script], stdout=log,
+                                stderr=subprocess.STDOUT, timeout=180).returncode
+        text = (out / f'{label}.log').read_text()
+        failed = bool(negative or fault)
+        matched = (rc != 0 and 'model found: FAIL!' in text) if failed else \
+            (rc == 0 and 'no model found: SUCCESS!' in text and 'Import proof for assert' in text)
+        records.append({'negative': bool(negative), 'retentionFault': fault, 'depth': 12,
+                        'rc': rc, 'matched': matched})
+        (out / 'formal-results.json').write_text(json.dumps(records, indent=2))
+        assert matched, label
+    if not fault:
+        script = (f'read_rtlil {out}/physical-negative0.il; chformal -assert -remove; '
+                  'sat -seq 12 -prove saw_completed_snoop_o 0 -prove-skip 11 -verify '
+                  f'-show-ports -dump_vcd {out}/physical-cover.vcd')
+        with (out / 'physical-cover.log').open('w') as log:
+            rc = subprocess.run(['yosys', '-p', script], stdout=log,
+                                stderr=subprocess.STDOUT, timeout=180).returncode
+        assert rc != 0 and 'model found: FAIL!' in (out / 'physical-cover.log').read_text()
+    return 0
+
+
 def main():
+    if os.environ.get('FAULT_REVIEW_PHYS_FORMAL') == '1':
+        return run_physical_formal()
     if os.environ.get('FAULT_REVIEW_FP_LIFETIME') == '1':
         return run_fp_lifetime()
     if os.environ.get('FAULT_REVIEW_SYNTH') == '1':

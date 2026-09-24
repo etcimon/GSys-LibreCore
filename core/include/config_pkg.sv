@@ -88,6 +88,7 @@ package config_pkg;
 
   /// U6.2 multi-core coherence policy (SoC; ignored when NrCores==1)
   typedef enum logic [1:0] {
+    COH_OOO         = 2'd3,
     COH_WRITE_INVAL  = 2'd0,  // WT: remote write → invalidate peer L1(s)
     COH_BROADCAST    = 2'd1,  // always broadcast inv (filter off / debug)
     COH_FILTERED     = 2'd2   // snoop-filter guided inv (default when NrCores>1)
@@ -892,7 +893,10 @@ package config_pkg;
     // context budget scales with it, not with either factor. Both operands are
     // compile-time constants, so this belongs at elaboration.
     assert (Cfg.NrCores * Cfg.NrHarts <= CVA6_MAX_SW_HARTS);
-    assert (Cfg.CohPolicy inside {COH_WRITE_INVAL, COH_BROADCAST, COH_FILTERED});
+    assert (Cfg.CohPolicy inside {COH_WRITE_INVAL, COH_BROADCAST, COH_FILTERED, COH_OOO});
+    assert (Cfg.CohPolicy != COH_OOO ||
+            (Cfg.OoOEn && !Cfg.FpPresent && Cfg.L2En && Cfg.NrCores > 1 && Cfg.DCacheType == WT &&
+             Cfg.ICACHE_LINE_WIDTH == Cfg.DCACHE_LINE_WIDTH));
     assert (!(Cfg.NrCores > 1 && Cfg.SnoopFilterEn && Cfg.SnoopFilterEntries == 0));
     assert (Cfg.SnoopFilterEntries == 0 ||
             (2 ** $clog2(Cfg.SnoopFilterEntries) == Cfg.SnoopFilterEntries));

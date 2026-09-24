@@ -28,7 +28,8 @@ CONTRACT = {0: 'HUM_DATA', 1: 'HUM_DATA', 2: 'HUM_DATA', 3: 'HUM_DATA',
             17: 'HUM_DATA', 18: 'HUM_DATA', 19: 'HUM_DATA', 20: 'HUM_DATA',
             21: 'HUM_DATA', 22: 'HUM_DATA', 23: 'HUM_DATA', 24: 'HUM_DATA',
             25: 'HUM_DATA', 26: 'HUM_DATA', 27: 'HUM_DATA', 28: 'HUM_DATA',
-            29: 'HUM_DATA', 30: 'HUM_DATA', 31: 'HUM_DATA'}
+            29: 'HUM_DATA', 30: 'HUM_DATA', 31: 'HUM_DATA', 32: 'HUM_DATA',
+            33: 'HUM_DATA', 34: 'HUM_DATA'}
 
 
 def digest(path):
@@ -68,6 +69,22 @@ def main():
         'collect': (9, "collect_cnt_d             = collect_cnt_d + 1'b1;", "collect_cnt_d             = collect_cnt_q + 1'b1;", 'HUM_COLLECT_RETIRE_COUNT'),
         'issue': (10, "issued_cnt_d            = issued_cnt_d + 1'b1;", "issued_cnt_d            = issued_cnt_q + 1'b1;", 'HUM_ISSUE_RETIRE_COUNT'),
         'install': (11, 'tag_write  = !bank_conflict;', "tag_write  = 1'b1;", 'HUM_TAG_WITHOUT_DATA'),
+        'install_snoop': (32,
+            "  assign install_discard = fill_kill_q[inst_idx] ||\n"
+            "      (fill_ferr_q[inst_idx] != axi_pkg::RESP_OKAY) ||\n"
+            "      (l2_back_inval_valid_i &&\n"
+            "       line_align(fill_addr_q[inst_idx]) == line_align(l2_back_inval_addr_i)) ||\n"
+            "      (wr_inval_pend_q &&\n"
+            "       line_align(fill_addr_q[inst_idx]) == line_align(wr_inval_addr_q)) ||\n"
+            "      ((state_q == S_BYPASS_AW || state_q == S_BYPASS_W) &&\n"
+            "       line_align(fill_addr_q[inst_idx]) == line_align(addr_q));",
+            "  assign install_discard = fill_kill_q[inst_idx] ||\n"
+            "      (fill_ferr_q[inst_idx] != axi_pkg::RESP_OKAY);", 'HUM_INSTALL_INVAL_STALE'),
+        # A read after a back-invalidation merges into the killed F_READY fill
+        # and is served the stale pre-inval copy instead of refetching.
+        'merge': (34,
+            "      .merge_block_i     (fill_kill_q),",
+            "      .merge_block_i     ('0),", 'HUM_STALE_MERGE'),
     }
     assert not fault or (fault in faults and not baseline), 'invalid fault-control mode'
     assert not order_before or (not baseline and not fault), 'invalid order-before mode'
@@ -138,6 +155,7 @@ def main():
                       '-Werror-LATCH', '-Werror-UNOPTFLAT',
                       '-DL2TB_STATIC', *(['-GCHAIN_L3=1'] if chain else []),
                       *(['-GRR_EN=1'] if rr_sched else []),
+                      *(['-GFAIR_WRITES=1'] if os.environ.get('REVIEW_L2_FAIR_WRITES') == '1' else []),
                       '--top-module', 'tb_g6lc_l2_hum', '--Mdir', str(model),
                       '-o', 'hum-test', *rtl]),
         ('build', ['make', '-C', str(model), '-f', 'Vtb_g6lc_l2_hum.mk', '-j4',
@@ -156,7 +174,8 @@ def main():
             script = ('read_slang ' + ' '.join(str(source / n) for n in rtl_names[:-1]) +
                       ' -I' + str(source) + ' -DL2TB_STATIC -DL2TB_SYNTH --ignore-initial --ignore-assertions'
                       ' --top g6lc_l2_fixture -GBYTE_SIZE=512 -GSET_ASSOC=2'
-                      f' -GMSHR_DEPTH=2 -GDATA_BANKS=2 -GRR_EN={rr};'
+                      f' -GMSHR_DEPTH=2 -GDATA_BANKS=2 -GRR_EN={rr}'
+                      f' -GFAIR_WRITES={int(os.environ.get("REVIEW_L2_FAIR_WRITES") == "1")};'
                       ' hierarchy -check -top g6lc_l2_fixture; proc; opt; check -assert;'
                       ' synth -top g6lc_l2_fixture -noabc; check -assert;'
                       ' select -assert-none t:*dlatch* t:*DLATCH*')
@@ -172,6 +191,8 @@ def main():
     # cache-stack plan only; running it on the direct path would have nothing to
     # measure and its engagement check fails, which is the correct behaviour.
     CHAIN_ONLY = {31}
+    if os.environ.get('REVIEW_L2_FAIR_WRITES') != '1':
+        CHAIN_ONLY.add(33)
     plan = ([(0, 'HUM_NOT_ENGAGED'), (5, None), (6, None)] if baseline
             else [(s, None) for s in sorted(CONTRACT) if s not in CHAIN_ONLY])
     if fault: plan = [(faults[fault][0], faults[fault][3])]
@@ -185,6 +206,12 @@ def main():
                     else [(s,None) for s in [8,*range(12,30),31]])
     if rr_sched: plan=[(30,'HUM_RR_READ_LOST' if rr_fault else None)]
     if inval_before: plan=[(28,None),(29,'HUM_SELF_INVAL_LOST')]
+    if os.environ.get('REVIEW_L2_INSTALL_INVAL') == '1':
+        plan = [(32, 'HUM_INSTALL_INVAL_STALE' if
+                 os.environ.get('REVIEW_L2_INSTALL_INVAL_BEFORE') == '1' else None)]
+    if os.environ.get('REVIEW_L2_WRITE_FAIR') == '1':
+        plan = [(33, 'HUM_WRITE_STARVE' if
+                 os.environ.get('REVIEW_L2_WRITE_FAIR_BEFORE') == '1' else None)]
     for scenario, positive_error in plan:
         trials = [(False, positive_error)]
         if not (baseline or fault or order_before or atop_before or inval_before or rr_sched) \

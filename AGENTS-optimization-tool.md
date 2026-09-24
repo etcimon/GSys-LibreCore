@@ -95,7 +95,7 @@ The baseline area is 904 under `area-v1`. Exclusive area is hub 260, invalidatio
 
 - `asm/coherence_shared_line.S` is two harts and one cacheable line. Hart 0 times the path from seeing the first value through seeing the value written by the other hart. Work is 2 observations. Configurations: `coherence`, `l2`, `cores`.
 - `asm/cpu_ilp.S` is 64 dependent-free adds. It is there so an unrelated issue-path change is not credited to the coherence edit.
-- The checked-in series is an example: the coherence test falls from 2000 cycles to 1200 (benefit 0.4) while `cpu_ilp` stays at 400, and structural area rises by 120. The decision is `faster_more_area`. Replace those numbers before using the folder as evidence.
+- The fixture series under `sv-timing/fixtures/opt-tasks/` is the arithmetic example: the coherence test falls from 2000 cycles to 1200 (benefit 0.4) while `cpu_ilp` stays at 400, and structural area rises by 120. It is not the measured task series and is never performance evidence.
 
 `optimization/tasks/issue-width/` is an open task. It has the cpu assembly and no series, so a score says `unmeasured`.
 
@@ -104,6 +104,28 @@ The baseline area is 904 under `area-v1`. Exclusive area is hub 260, invalidatio
 Area in a task is the structural area report for that RTL snapshot, under `resources/area-v1.toml`. The same weights on two snapshots make the area delta the silicon change the model can see: storage bits, operators, and the modules named in the series. Absolute foundry cell counts wait until a mapped netlist retunes that table. Do not turn a placeholder area product into a pass/fail golden.
 
 Parameterized instances are still counted once until the parameters are specialized, so a replicated block can be smaller in the report than on silicon. The `instance_params=unrecorded` tag is that gap. Record the module you actually edited in `modules` so the decision still shows its exclusive area.
+
+### OoO coherence evidence boundary (2026-09-24)
+
+The historical coherence task row has `cores=1`, unresolved filter storage and no cycles; it
+cannot baseline an enabled multicore hub. The revised assembly kernels need a fresh checked
+execution and matched area snapshot before a new `series.json` record is admissible. Use two
+physical cores with one hart each for the two-participant shared-line kernel, or explicitly
+qualify another topology; two SMT harts on one physical core do not exercise the hub.
+
+The `ooocoh-signature-area-20260924-v2` artifact compares tagged and signature **leaf** synthesis:
+N2/E128 45,626→1,287 generic cells; N4/E256 95,541→4,537. These are not `area_au`, not whole-hub
+area, and not equal-latency implementations. Signature SRAM port storage includes byte-write and
+word padding (4,096/8,192 bits), distinct from logical signatures (256/1,024 bits). Keep generic
+cell counts, macro geometry, structural AU and foundry area in separate fields/artifacts; do not
+insert one unit into another's column. The task therefore remains `unmeasured`, not a speedup.
+
+The production-request review adds retained physical-address and ordered-response control state;
+its cost must be included in any future same-snapshot comparison. B-order dependency storage grows
+as the square of hub credits, independently of the signature savings. The standalone AW/invalidation/
+delayed-W refill counterexample blocks acceptance until repaired or excluded by a proved integration
+contract. Passing response tests or an explicit request to promote cannot substitute for correctness
+and matched useful-work measurements; the coherence task remains unmeasured and unpromoted.
 
 ## What this is not
 

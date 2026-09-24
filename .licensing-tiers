@@ -89,6 +89,7 @@ R   core/cache_subsystem/g6lc_icache.sv
 R   corev_apu/src/ariane.sv
 R   core/include/g6lc64_smt2_config_pkg.sv
 R   core/include/g6lc64_smt2_ooo_int_config_pkg.sv
+R   core/include/g6lc64_ooo_int2_config_pkg.sv
 R   core/include/g6lc64_ooo_config_pkg.sv
 R   core/include/g6lc64_ooo_int_config_pkg.sv
 R   core/include/g6lc64_ooo_server_config_pkg.sv

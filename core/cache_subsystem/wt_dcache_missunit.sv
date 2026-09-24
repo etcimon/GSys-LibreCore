@@ -166,8 +166,23 @@ module wt_dcache_missunit
   logic [DCACHE_CL_IDX_WIDTH-1:0] cnt_d, cnt_q;
   logic [NumPorts-1:0] miss_req_masked_d, miss_req_masked_q;
 
+  localparam bit COH_VALIDATE = CVA6Cfg.NrCores > 1 || CVA6Cfg.CohPolicy == config_pkg::COH_OOO;
   logic inv_vld, inv_vld_all, cl_write_en;
-  logic load_ack, store_ack, amo_ack;
+  logic fill_killed_q, load_ack, store_ack, amo_ack;
+  if (COH_VALIDATE) begin : gen_fill_kill
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) fill_killed_q <= 1'b0;
+      else begin
+        if (mshr_allocate || load_ack) fill_killed_q <= 1'b0;
+        if (inv_vld && (mshr_allocate || mshr_vld_q) &&
+            mshr_d.paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] ==
+            mem_rtrn_i.inv.idx[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH])
+          fill_killed_q <= 1'b1;
+      end
+    end
+  end else begin : gen_no_fill_kill
+    assign fill_killed_q = 1'b0;
+  end
 
   logic [NumPorts-1:0] mshr_rdrd_collision_d, mshr_rdrd_collision_q;
   logic [NumPorts-1:0] mshr_rdrd_collision;
@@ -178,7 +193,7 @@ module wt_dcache_missunit
   ///////////////////////////////////////////////////////
 
   assign cache_en_o = enable_q;
-  assign cnt_d = (flush_en) ? cnt_q + 1 : '0;
+  assign cnt_d = flush_en ? ((COH_VALIDATE && inv_vld) ? cnt_q : cnt_q + 1'b1) : '0;
   assign flush_done = (cnt_q == $bits(cnt_q)'(CVA6Cfg.DCACHE_NUM_WORDS - 1));
 
   // Per-port load vs in-flight store-TX collision. LZC always prefers lower
@@ -509,6 +524,7 @@ module wt_dcache_missunit
                          (cl_write_en) ? dcache_way_bin2oh(mshr_q.repl_way) : '0;
 
   assign wr_cl_idx_o =
+      (COH_VALIDATE && inv_vld) ? mem_rtrn_i.inv.idx[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
       (flush_en) ? cnt_q :
       (cas_inv)  ? amo_req_i.operand_a[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
       (inv_vld)  ? mem_rtrn_i.inv.idx[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] :
@@ -521,7 +537,7 @@ module wt_dcache_missunit
   assign wr_cl_data_be_o = (cl_write_en) ? '1 : '0;// we only write complete cachelines into the memory
 
   // only non-NC responses write to the cache
-  assign cl_write_en = load_ack & ~mshr_q.nc;
+  assign cl_write_en = load_ack & ~mshr_q.nc & ~fill_killed_q;
 
   ///////////////////////////////////////////////////////
   // main control logic for generating tx
@@ -648,7 +664,7 @@ module wt_dcache_missunit
       FLUSH: begin
         // internal flush signal
         flush_en = 1'b1;
-        if (flush_done) begin
+        if (flush_done && !(COH_VALIDATE && inv_vld)) begin
           state_d     = IDLE;
           flush_ack_o = flush_ack_q;
           flush_ack_d = 1'b0;

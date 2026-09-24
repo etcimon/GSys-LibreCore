@@ -253,6 +253,7 @@ def hub_quality(out, data):
     types_file = work / 'types.sv'
     types_file.write_text('// Copyright (c) 2026 Etienne Cimon\n// SPDX-License-Identifier: MIT\n' + types[0] + '\n')
     common = ' '.join(str(data / n) for n in source_names) + ' ' + str(types_file)
+    historical_common = ' '.join(str(original.parent / n) for n in source_names) + ' ' + str(types_file)
     results = []
     areas = []
     def run(label, script, expected=None):
@@ -269,8 +270,10 @@ def hub_quality(out, data):
         formal = work / (role + '.sv')
         text = HUB_FORMAL.replace('CORES=2, LIMIT=4',f'CORES={cores}, LIMIT={limit}')
         if negative: text=text.replace('NEGATIVE=0','NEGATIVE=1')
+        if role == 'before': text=text.replace('coh_sc_noresv_o', 'coh_sc_fail_o')
         formal.write_text(text)
-        script = f'read_slang --std 1800-2017 --top hub_contract {common} {rtl} {formal}\nprep -top hub_contract\nasync2sync\nchformal -lower\nflatten\nmemory_map\nopt -full\ndffunmap\nopt_clean -purge\nwrite_rtlil {role}.il\nsat -seq 8 -set-assumes -prove-asserts -show-ports -dump_vcd {role}.vcd -verify\n'
+        role_common = historical_common if role == 'before' else common
+        script = f'read_slang --std 1800-2017 --top hub_contract {role_common} {rtl} {formal}\nprep -top hub_contract\nasync2sync\nchformal -lower\nflatten\nmemory_map\nopt -full\ndffunmap\nopt_clean -purge\nwrite_rtlil {role}.il\nsat -seq 8 -set-assumes -prove-asserts -show-ports -dump_vcd {role}.vcd -verify\n'
         text = run(role,script,'proof did fail' if role in {'before','negative'} else None)
         assert ('model found: FAIL!' if role in {'before','negative'} else 'no model found: SUCCESS!') in text
     for goal in ['seen_pair','seen_credit']:
@@ -281,7 +284,12 @@ def hub_quality(out, data):
         wrapper.write_text(f'// Copyright (c) 2026 Etienne Cimon\n// SPDX-License-Identifier: MIT\nmodule leaf import config_pkg::*; import g6lc_coherence_pkg::*; import g6lc_l2_tb_pkg::*; (input logic clk_i,rst_ni, input req_t [{cores-1}:0] requests, input resp_t memory_response, input logic [{cores-1}:0] inv_ready, output resp_t [{cores-1}:0] responses, output req_t memory_request, output coh_inval_t [{cores-1}:0] invalidations, output logic [6:0] events); g6lc_coherence_hub #(.NR_CORES({cores}),.MAX_OUTSTANDING({limit}),.INVAL_DEPTH(2),.SNOOP_FILTER_EN(0),.SNOOP_FILTER_ENTRIES(4),.POLICY(COH_BROADCAST),.AXI_STARVE_LIMIT(16),.axi_req_t(req_t),.axi_resp_t(resp_t)) dut (.clk_i,.rst_ni,.core_req_i(requests),.core_resp_o(responses),.mem_req_o(memory_request),.mem_resp_i(memory_response),.inv_core_o(invalidations),.inv_core_ready_i(inv_ready),.lr_valid_i(1\'b0),.lr_addr_i(\'0),.lr_core_i(\'0),.coh_inv_fire_o(events[0]),.coh_sf_hit_o(events[1]),.coh_sf_overapprox_o(events[2]),.coh_arb_starve_o(events[3]),.coh_split_conflict_o(events[4]),.coh_sc_noresv_o(events[5]),.coh_lr_kill_o(events[6])); endmodule\n')
         for role,rtl in [('before',original),('after',candidate)]:
             label=f'synth-{role}-{cores}-{limit}'
-            run(label,f'read_slang --std 1800-2017 --top leaf {common} {rtl} {wrapper}\nsynth -top leaf -flatten\ncheck -assert\nwrite_json {label}.json\n')
+            role_common = historical_common if role == 'before' else common
+            role_wrapper = work / f'{label}.sv'
+            wrapper_text = wrapper.read_text()
+            if role == 'before': wrapper_text = wrapper_text.replace('coh_sc_noresv_o', 'coh_sc_fail_o')
+            role_wrapper.write_text(wrapper_text)
+            run(label,f'read_slang --std 1800-2017 --top leaf {role_common} {rtl} {role_wrapper}\nsynth -top leaf -flatten\ncheck -assert\nwrite_json {label}.json\n')
             cells=json.loads((work/(label+'.json')).read_text())['modules']['leaf']['cells']
             types=[c['type'] for c in cells.values()]
             latch=sum('LATCH' in t.upper() for t in types)
@@ -296,9 +304,28 @@ def hub_review(out, data, runtime_info, runtime):
     source = out / 'source'
     source.mkdir()
     names = ['config_pkg.sv', 'g6lc_coherence_pkg.sv', 'g6lc_inval_bus.sv', 'g6lc_snoop_filter.sv', 'g6lc_lr_sc_tracker.sv', 'g6lc_coherence_hub.sv', 'tb_g6lc_l2.sv', 'tb_g6lc_coherence_hub.sv']
+    signature = os.environ.get('REVIEW_HUB_SIGNATURE') == '1'
+    if signature:
+        names[1:1] = ['tc_sram.sv', 'g6lc_ooo_snoop_filter.sv']
     for name in names:
         shutil.copy2(data / name, source / name)
-    assert digest(source / 'g6lc_inval_bus.sv') == '2cafee7fbcda6f30274461a4486fd613698e61ef67691e08dda94b2ff0592945'
+    b_fault = os.environ.get('REVIEW_HUB_B_FAULT')
+    if b_fault:
+        path = source / 'g6lc_coherence_hub.sv'
+        text = path.read_text()
+        old, new = {
+            'lock': ("b_offer_locked_q[c] <= 1'b1;", "b_offer_locked_q[c] <= 1'b0;"),
+            'order': ("b_predecessors_q[s] <= b_predecessors_d[s];", "b_predecessors_q[s] <= '0;")
+        }[b_fault]
+        assert text.count(old) == 1, 'B mutation site changed'
+        path.write_text(text.replace(old, new))
+    inv_source = source / 'g6lc_inval_bus.sv'
+    assert digest(inv_source) in {'2cafee7fbcda6f30274461a4486fd613698e61ef67691e08dda94b2ff0592945',
+                                  # adds inv_enq_seq_o/inv_deq_seq_o delivery sequences
+                                  'bb43a41f43482bd7d937728ca4d20dee984ce47225f46f7ebfe4cdde637215da'} or \
+        hashlib.sha256(inv_source.read_text().encode()).hexdigest() in {
+        '6edb90f8d3c26d3d599ecb25ff87848b70400e62521c6b5f25229caa02bfd079',
+        '2c18cbe614eef7767e08074ea3dadbd3bad018aa0712de3a50d09e694c62d30e'}
     hashes = {name: digest(source / name) for name in names}
     types = re.findall(r'package g6lc_l2_tb_pkg;.*?endpackage', (source / 'tb_g6lc_l2.sv').read_text(), re.S)
     assert len(types) == 1
@@ -308,15 +335,31 @@ def hub_review(out, data, runtime_info, runtime):
     repaired = os.environ.get('REVIEW_HUB_RESERVATIONS') == '1'
     files = [str(source / name) for name in names[:-2]] + [str(source / 'types.sv'), str(source / names[-1])]
     records = []
-    for outstanding in ([4, 1] if repaired else [4]):
+    lifetime = os.environ.get('REVIEW_HUB_LIFETIME') == '1'
+    before_lifetime = os.environ.get('REVIEW_HUB_LIFETIME_BEFORE') == '1'
+    bad_signature = signature and os.environ.get('REVIEW_HUB_SIGNATURE_BAD_CREDITS') == '1'
+    # Restored-defect build: writer B returns before invalidation delivery.
+    ack_before = os.environ.get('REVIEW_HUB_ACK_BEFORE') == '1'
+    publication = os.environ.get('REVIEW_HUB_PUBLICATION') == '1'
+    stability = os.environ.get('REVIEW_HUB_B_STABILITY') == '1'
+    stability_before = os.environ.get('REVIEW_HUB_B_STABILITY_BEFORE') == '1'
+    for outstanding in ([1] if bad_signature else [4] if (signature or ack_before or stability or publication) else [4, 1, 16] if lifetime else [4, 1] if repaired else [4]):
         work = out / f'model-{outstanding}'
         work.mkdir()
-        command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1', '-Wno-fatal', '--top-module', 'tb_g6lc_coherence_hub', f'-GOT={outstanding}', '--Mdir', str(work), '-o', 'hub-test', *files]
+        command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1', '-Wno-fatal', '-Werror-LATCH', '-Werror-UNOPTFLAT', '-Werror-USERERROR', '--top-module', 'tb_g6lc_coherence_hub', f'-GOT={outstanding}', *(['-GOOO=1', '-GNC=3'] if signature else []), *(['-GACK_AFTER_INVAL=0'] if ack_before else []), '--Mdir', str(work), '-o', 'hub-test', *files]
         commands = [('verilate', command), ('build', ['make', '-C', str(work), '-f', 'Vtb_g6lc_coherence_hub.mk', '-j4', 'VERILATOR_ROOT=' + str(runtime)])]
         for label, cmd in commands:
             (work / (label + '-command.json')).write_text(json.dumps(cmd, indent=2))
             with (work / (label + '.log')).open('w') as log:
                 p = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT, timeout=180)
+            if bad_signature and label == 'verilate':
+                text = (work / (label + '.log')).read_text()
+                refused = p.returncode != 0 and 'require at least two transaction credits' in text
+                (out / 'results.json').write_text(json.dumps([{
+                    'configurationRefused': refused, 'outstandingLimit': outstanding,
+                    'rc': p.returncode, 'hubSha256': hashes['g6lc_coherence_hub.sv']}], indent=2))
+                assert refused, 'signature credit guard did not refuse elaboration'
+                return 0
             assert p.returncode == 0, label
         dependencies = '\n'.join(p.read_text(errors='replace') for p in work.glob('*.d'))
         assert str(runtime / 'include/verilated_funcs.h') in dependencies
@@ -336,16 +379,190 @@ def hub_review(out, data, runtime_info, runtime):
         else:
             expected = [None, 'HUB_AR_STABILITY', 'HUB_AW_STABILITY', 'HUB_ID_STABILITY', 'HUB_AW_CREDIT', 'HUB_INV_LOSS']
             trials = [(i, False, error) for i, error in enumerate(expected)]
-        for scenario, negative, error in trials + [(0, True, 'HUB_RESPONSE')]:
+        if lifetime:
+            trials = ([(10, False, 'HUB_ATOP_LIFETIME' if before_lifetime else None)]
+                      if outstanding < 16 else
+                      [(11, False, 'HUB_R_HOLD' if before_lifetime else None)])
+            if not before_lifetime:
+                trials.append((13, False, None))
+                # B-after-delivery lifetime scenarios. 15/16/18 keep more than
+                # one write slot occupied at once, so the single-credit build
+                # only runs the scenarios a parked B cannot deadlock.
+                trials += [(14, False, None), (14, True, 'HUB_B_BEFORE_INVAL'),
+                           (17, False, None), (17, True, 'HUB_B_FAST_PATH')]
+                if outstanding >= 4:
+                    trials += [(15, False, None), (15, True, 'HUB_B_HOLD'),
+                               (16, False, None), (16, True, 'HUB_B_BEFORE_INVAL'),
+                               (18, False, None), (18, True, 'HUB_B_BEFORE_INVAL'),
+                               (19, False, None), (19, True, 'HUB_B_STABILITY'),
+                               (20, False, None), (20, True, 'HUB_B_STABILITY'),
+                               (24, False, None), (24, True, 'HUB_B_ID_ORDER')]
+        if ack_before:
+            trials = [(14, False, 'HUB_B_BEFORE_INVAL')]
+        if signature:
+            trials = [(12, False, None), (12, True, 'HUB_SIGNATURE_TARGET')]
+        if stability:
+            trials = [(s, False, 'HUB_B_STABILITY' if stability_before else None) for s in (19, 20)]
+            if not stability_before:
+                trials += [(s, True, 'HUB_B_STABILITY') for s in (19, 20)]
+        if publication:
+            codes = {21:'HUB_ATOMIC_BEFORE_INVAL', 22:'HUB_ATOMIC_MISSING_INVAL',
+                     23:'HUB_STALE_REFILL_PUBLICATION', 24:'HUB_B_ID_ORDER'}
+            before = os.environ.get('REVIEW_HUB_PUBLICATION_BEFORE') == '1'
+            selected = os.environ.get('REVIEW_HUB_PUBLICATION_CASES', '21,22,23')
+            trials = [(int(s), False, codes[int(s)] if before else None) for s in selected.split(',')]
+        if b_fault:
+            trials = [(24, False, 'HUB_B_ID_ORDER')] if b_fault == 'order' else [
+                (s, False, 'HUB_B_STABILITY') for s in (19, 20)]
+        elif publication and not before:
+            trials += [(int(s), True, codes[int(s)]) for s in selected.split(',') if int(s) in (21, 22, 24)]
+        for scenario, negative, error in trials + ([] if lifetime or signature or ack_before or stability or publication else [(0, True, 'HUB_RESPONSE')]):
             cmd = [str(exe), f'+scenario={scenario}'] + (['+oracle_negative'] if negative else [])
             p = subprocess.run(cmd, cwd=work, capture_output=True, text=True, timeout=30)
             text = p.stdout + p.stderr
             (work / f'scenario-{scenario}-negative-{int(negative)}.log').write_text(text)
             matched = (p.returncode != 0 and error in text and 'HUB_PASS ' not in text) if error else (p.returncode == 0 and text.count('HUB_PASS ') == 1 and '%Error' not in text)
-            records.append({'outstandingLimit': outstanding, 'scenario': scenario, 'negativeControl': negative, 'expectedError': error, 'rc': p.returncode, 'matched': matched, 'executableSha256': digest(exe), 'hubSha256': hashes['g6lc_coherence_hub.sv'], 'strictQualification': False})
+            records.append({'outstandingLimit': outstanding, 'scenario': scenario, 'negativeControl': negative, 'ackBefore': ack_before, 'expectedError': error, 'rc': p.returncode, 'matched': matched, 'executableSha256': digest(exe), 'hubSha256': hashes['g6lc_coherence_hub.sv'], 'strictQualification': False})
             (out / 'results.json').write_text(json.dumps(records, indent=2))
             assert matched, (outstanding, scenario)
+    if os.environ.get('REVIEW_HUB_SYNTH') == '1':
+        cores = 3 if signature else 2
+        policy = 'config_pkg::COH_OOO' if signature else 'config_pkg::COH_BROADCAST'
+        wrapper = out / 'hub_leaf.sv'
+        wrapper.write_text(f'''module hub_leaf
+import g6lc_coherence_pkg::*;
+import g6lc_l2_tb_pkg::*;
+(input logic clk_i,rst_ni,
+ input req_t [{cores-1}:0] requests,input resp_t memory_response,
+ input logic [{cores-1}:0] inv_ready,
+ output resp_t [{cores-1}:0] responses,output req_t memory_request,
+ output coh_inval_t [{cores-1}:0] invalidations,output logic [6:0] events);
+g6lc_coherence_hub #(.NR_CORES({cores}),.MAX_OUTSTANDING(4),.INVAL_DEPTH(2),
+ .SNOOP_FILTER_EN({int(signature)}),.SNOOP_FILTER_ENTRIES(4),.POLICY({policy}),
+ .axi_req_t(req_t),.axi_resp_t(resp_t)) dut (
+ .clk_i,.rst_ni,.core_req_i(requests),.core_resp_o(responses),
+ .mem_req_o(memory_request),.mem_resp_i(memory_response),
+ .inv_core_o(invalidations),.inv_core_ready_i(inv_ready),
+ .lr_valid_i(1'b0),.lr_addr_i('0),.lr_core_i('0),
+ .coh_inv_fire_o(events[0]),.coh_sf_hit_o(events[1]),.coh_sf_overapprox_o(events[2]),
+ .coh_arb_starve_o(events[3]),.coh_split_conflict_o(events[4]),
+ .coh_sc_noresv_o(events[5]),.coh_lr_kill_o(events[6]));
+endmodule
+''')
+        script = ('read_slang --top hub_leaf ' + ' '.join(files[:-1]) + f' {wrapper}; '
+                  'synth -top hub_leaf -flatten; check -assert; stat')
+        (out / 'hub-synth.ys').write_text(script)
+        with (out / 'hub-synth.log').open('w') as log:
+            rc = subprocess.run(['yosys','-p',script],stdout=log,stderr=subprocess.STDOUT,timeout=300).returncode
+        log_text = (out / 'hub-synth.log').read_text()
+        (out / 'synth-result.json').write_text(json.dumps({'rc':rc,'signature':signature,
+            'cores':cores,'outstandingLimit':4,'passed':rc==0,
+            'wrapperSha256':digest(wrapper),'hubSha256':hashes['g6lc_coherence_hub.sv']},indent=2))
+        assert rc == 0 and 'found logic loop' not in log_text and 'Latch inferred' not in log_text
     assert all(digest(source / name) == value for name, value in hashes.items())
+    return 0
+
+
+def composed_review(out, data, runtime_info, runtime):
+    source = out / 'source'
+    source.mkdir()
+    names = ['config_pkg.sv','axi_pkg.sv','tc_sram.sv','g6lc_l2_pkg.sv',
+             'g6lc_l2_tag.sv','g6lc_l2_data.sv','g6lc_l2_mshr.sv','g6lc_l2_top.sv',
+             'g6lc_coherence_pkg.sv','g6lc_inval_bus.sv','g6lc_snoop_filter.sv',
+             'g6lc_ooo_snoop_filter.sv','g6lc_lr_sc_tracker.sv','g6lc_coherence_hub.sv',
+             'tb_g6lc_l2.sv','tb_g6lc_coherence_hub.sv']
+    for name in names:
+        shutil.copy2(data / name, source / name)
+    original = {name:digest(source/name) for name in names}
+    fault = os.environ.get('REVIEW_COMPOSED_FAULT')
+    if fault:
+        assert fault == 'self-inval'
+        path = source/'g6lc_l2_top.sv'
+        text = path.read_text()
+        old = '  assign tag_match_inval = l2_back_inval_valid_i | self_inval_req;'
+        assert text.count(old)==1
+        path.write_text(text.replace(old,'  assign tag_match_inval = l2_back_inval_valid_i;'))
+    hashes = {name:digest(source/name) for name in names}
+    types = re.findall(r'package g6lc_l2_tb_pkg;.*?endpackage', (source/'tb_g6lc_l2.sv').read_text(), re.S)
+    assert len(types)==1
+    (source/'types.sv').write_text(types[0]+'\n')
+    (out/'sources.json').write_text(json.dumps({'original':original,'effective':hashes,
+        'scope':'hub COH_OOO plus actual L2; modeled WT invalidation consumer; not CPU/ISA simulation'},indent=2))
+    (out/'runtime.json').write_text(json.dumps(runtime_info,indent=2))
+    env=dict(os.environ,VERILATOR_ROOT=str(runtime),VPATH=str(runtime/'include'))
+    profiles = {
+        'small': [],
+        'mod-only': ['-GCACHE_ATTR=2'],
+        'stalled': ['-GWRITE_DELAY=4','-GW_STALL=16','-GB_DELAY=16','-GINV_HOLD=64','-GR_HOLD=100','-GB_HOLD=96'],
+        'target': ['-GBYTE_SIZE=262144','-GSET_ASSOC=8','-GMSHR_DEPTH=2','-GDATA_BANKS=4'],
+        'no-l2': ['-GUSE_L2=0'],
+    }
+    chosen=os.environ.get('REVIEW_COMPOSED_PROFILE','small')
+    assert chosen in profiles and not (fault and chosen=='no-l2')
+    files=[str(source/n) for n in names[:-2]]+[str(source/'types.sv'),str(source/names[-1])]
+    model=out/'model'
+    if os.environ.get('REVIEW_COMPOSED_SCC')=='1':
+        bench=(source/'tb_g6lc_coherence_hub.sv').read_text().split('module tb_g6lc_coherence_l2;',1)[1]
+        instances='  g6lc_coherence_hub #(' + bench.split('  g6lc_coherence_hub #(',1)[1].split('  function automatic data_t other_word',1)[0]
+        wrapper=out/'composed_graph.sv'
+        wrapper.write_text('''module composed_graph import g6lc_coherence_pkg::*; import g6lc_l2_tb_pkg::*;
+(input logic clk,rst_n,input req_t[1:0] requests,input resp_t dram_rsp,
+ input logic[1:0] inv_ready,output resp_t[1:0] responses,output req_t dram_req,
+ output coh_inval_t[1:0] invalidations);
+localparam bit USE_L2=1;
+localparam int BYTE_SIZE=4096,SET_ASSOC=4,MSHR_DEPTH=4,DATA_BANKS=2;
+req_t hub_req;resp_t hub_rsp;
+''' + instances + '\nendmodule\n')
+        script='read_slang --top composed_graph ' + ' '.join(files[:-1]) + f' {wrapper}; hierarchy -check -top composed_graph; flatten; proc; opt; check -assert; scc -expect 0'
+        (out/'scc.ys').write_text(script)
+        with (out/'scc.log').open('w') as log:
+            rc=subprocess.run(['yosys','-p',script],stdout=log,stderr=subprocess.STDOUT,timeout=180).returncode
+        (out/'results.json').write_text(json.dumps({'sccRc':rc,'passed':rc==0,'scope':'signal-driven hub plus L2 combinational graph'}))
+        assert rc==0,'composed combinational graph'
+        return 0
+    control=out/'composed.vlt'
+    control.write_text('`verilator_config\n' + '\n'.join(
+        f'split_var -module "{module}" -var "{port}"' for module, ports in (
+            ('g6lc_coherence_hub',('mem_req_o','mem_resp_i','core_req_i','core_resp_o')),
+            ('g6lc_l2_top',('slv_req_i','slv_resp_o','mst_req_o','mst_resp_i')))
+        for port in ports) + '\nisolate_assignments -module "g6lc_coherence_hub" -var "mem_req_o"\n'
+        'isolate_assignments -module "g6lc_l2_top" -var "slv_resp_o"\n')
+    (out/'compiler-control.json').write_text(json.dumps({'sha256':digest(control)}))
+    # Struct-granular UNOPTFLAT across the hub/L2 AXI seam is not a bit-level
+    # loop: REVIEW_COMPOSED_SCC=1 proves the flattened graph has none.
+    command=['verilator','--cc','--main','--exe','--timing','--assert','--threads','1','--flatten',
+             '-Wno-fatal','-Werror-LATCH','-Werror-USERERROR',
+             str(control),'--top-module','tb_g6lc_coherence_l2',*profiles[chosen],
+             '--Mdir',str(model),'-o','composed-test',*files]
+    commands=[('verilate',command),('build',['make','-C',str(model),'-f','Vtb_g6lc_coherence_l2.mk','-j4'])]
+    for label, cmd in commands:
+        (out/f'{label}-command.json').write_text(json.dumps(cmd,indent=2))
+        with (out/f'{label}.log').open('w') as log:
+            rc=subprocess.run(cmd,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=300).returncode
+        assert rc==0,label
+    deps='\n'.join(p.read_text(errors='replace') for p in model.glob('*.d'))
+    assert str(runtime/'include/verilated_funcs.h') in deps
+    assert str(Path(runtime_info['originalRoot'])/'include/verilated_funcs.h') not in deps
+    exe=model/'composed-test'
+    records=[]
+    for scenario in ([0] if fault else [0,1]):
+        for negative in ([False] if fault or chosen=='no-l2' else [False,True]):
+            cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])
+            if os.environ.get('REVIEW_COMPOSED_DIAGNOSE')=='1':cmd.append('+diagnose')
+            result=subprocess.run(cmd,cwd=model,capture_output=True,text=True,timeout=30)
+            text=result.stdout+result.stderr
+            label=f'scenario-{scenario}-negative-{int(negative)}'
+            (out/f'{label}.log').write_text(text)
+            error='COH_L2_STALE_VALUE' if fault or (chosen=='no-l2' and scenario==0) else 'COH_L2_FINAL_VALUE' if negative else None
+            matched=(result.returncode!=0 and error in text and 'COH_L2_PASS' not in text) if error else (
+                result.returncode==0 and text.count('COH_L2_PASS')==1 and '%Error' not in text)
+            metrics=re.findall(r'COH_L2_PASS ([^\n]+)',text)
+            records.append({'profile':chosen,'fault':fault,'scenario':scenario,'negative':negative,
+                'expectedError':error,'rc':result.returncode,'matched':matched,'metrics':metrics,
+                'modelSha256':digest(exe)})
+            (out/'results.json').write_text(json.dumps(records,indent=2))
+            assert matched,label
+    assert all(digest(source/name)==value for name,value in hashes.items())
     return 0
 
 
@@ -363,7 +580,10 @@ def main():
     assert header_sha == 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
     canaries = Path('/opt/testharness/runs/review-private-runtime-rebuild-20260915/output/canaries.json')
     assert [(r['tag'], r['rc']) for r in json.loads(canaries.read_text())] == [('original', 1), ('fixed', 0)]
-    if os.environ.get('REVIEW_HUB_BASELINE') == '1' or os.environ.get('REVIEW_HUB_RESERVATIONS') == '1':
+    if os.environ.get('REVIEW_HUB_L2_COMPOSED') == '1':
+        return composed_review(out, data, runtime_info, runtime)
+    if os.environ.get('REVIEW_HUB_BASELINE') == '1' or os.environ.get('REVIEW_HUB_RESERVATIONS') == '1' or \
+            os.environ.get('REVIEW_HUB_ACK_BEFORE') == '1':
         if os.environ.get('REVIEW_HUB_BASELINE') == '1' and os.environ.get('REVIEW_HUB_RESERVATIONS') == '1':
             raise ValueError('select baseline or reservation repair, not both')
         return hub_review(out, data, runtime_info, runtime)

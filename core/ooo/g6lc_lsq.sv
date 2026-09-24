@@ -89,10 +89,22 @@ module g6lc_lsq #(
     output logic        mem_violation_o,
     output logic [CVA6Cfg.TRANS_ID_BITS-1:0] mem_violation_id_o,
     // PC of the reported violating load (memdep train input).
-    output logic [CVA6Cfg.VLEN-1:0]          mem_violation_pc_o
+    output logic [CVA6Cfg.VLEN-1:0]          mem_violation_pc_o,
+    input logic [1:0] phys_valid_i,
+    input logic [1:0][CVA6Cfg.PLEN-1:0] phys_addr_i,
+    input logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_i,
+    input logic [1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_i,
+    input logic [1:0][1:0] phys_size_i,
+    input logic [CVA6Cfg.NrCommitPorts-1:0] commit_ld_i,
+    input logic [1:0] mod_valid_i,
+    input logic [1:0][CVA6Cfg.PLEN-1:0] mod_addr_i,
+    output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_pending_o,
+    output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_replay_o
 );
 
   localparam int unsigned HID_W = $clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2);
+  localparam bit PHYS_VALIDATE = CVA6Cfg.CohPolicy == config_pkg::COH_OOO;
+  localparam int LINE_OFF = CVA6Cfg.DCACHE_LINE_WIDTH >= 8 ? $clog2(CVA6Cfg.DCACHE_LINE_WIDTH/8) : 4;
 
   typedef struct packed {
     logic                             valid;
@@ -228,7 +240,7 @@ module g6lc_lsq #(
 
     // Live AGU address / size
     for (int unsigned u = 0; u < NR_UPDATE; u++) begin
-      if (addr_valid_i[u]) begin
+      if (!PHYS_VALIDATE && addr_valid_i[u]) begin
         if (addr_is_st_i[u]) begin
           for (int unsigned i = 0; i < ST_ENTRIES; i++)
             if (st_q[i].valid && st_q[i].id == addr_id_i[u]) begin
@@ -254,6 +266,27 @@ module g6lc_lsq #(
       end
     end
 
+    if (PHYS_VALIDATE) begin
+      for (int unsigned i = 0; i < LD_ENTRIES; i++)
+        if (phys_valid_i[0] && ld_q[i].valid && sb_live_i[ld_q[i].id] &&
+            ld_q[i].id == phys_id_i[0] && ld_q[i].hart == phys_hart_i[0]) begin
+          ld_d[i].addr_v = 1'b1;
+          ld_d[i].addr = phys_addr_i[0];
+          ld_d[i].size = phys_size_i[0];
+        end
+      for (int unsigned i = 0; i < ST_ENTRIES; i++)
+        if (phys_valid_i[1] && st_q[i].valid && sb_live_i[st_q[i].id] &&
+            st_q[i].id == phys_id_i[1] && st_q[i].hart == phys_hart_i[1]) begin
+          st_d[i].addr_v = 1'b1;
+          st_d[i].addr = phys_addr_i[1];
+          st_d[i].size = phys_size_i[1];
+        end
+      for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++)
+        for (int unsigned i = 0; i < LD_ENTRIES; i++)
+          if (commit_ld_i[c] && ld_q[i].valid && ld_q[i].id == commit_id_i[c])
+            ld_d[i].valid = 1'b0;
+    end
+
     // Multi-WB complete marks LOADS done; the entry frees below once no older
     // store can still resolve an address against it. A store's entry is the
     // reservation of its speculative-queue slot: it must stay live until
@@ -271,7 +304,7 @@ module g6lc_lsq #(
     for (int unsigned i = 0; i < LD_ENTRIES; i++) begin
       automatic logic older_unresolved;
       older_unresolved = 1'b0;
-      if (ld_q[i].valid && ld_d[i].done) begin
+      if (!PHYS_VALIDATE && ld_q[i].valid && ld_d[i].done) begin
         for (int unsigned j = 0; j < ST_ENTRIES; j++)
           if (st_d[j].valid && !st_d[j].addr_v && (!LSQ_HART_OWN || st_d[j].hart == ld_q[i].hart) &&
               g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(st_d[j].id), 32'(ld_q[i].id), 32'(commit_ptr_i)))
@@ -376,8 +409,10 @@ module g6lc_lsq #(
             need_stall = 1'b1;
           end else begin
             sbe = lane_be(st_q[i].addr, st_q[i].size);
-            if (same_word(st_q[i].addr, ld_query_addr_i) &&
-                (sbe & ld_be) != '0) begin
+            if ((PHYS_VALIDATE ?
+                 ((st_q[i].addr & CVA6Cfg.PLEN'(4096-LANES)) ==
+                  (ld_query_addr_i & CVA6Cfg.PLEN'(4096-LANES))) :
+                 same_word(st_q[i].addr, ld_query_addr_i)) && (sbe & ld_be) != '0) begin
               // Byte overlap with an older store. Data still in flight means
               // the load must wait for the store to land in the LSU buffer.
               if (!st_q[i].data_v) need_stall = 1'b1;
@@ -392,7 +427,7 @@ module g6lc_lsq #(
           end
         end
       end
-      if (!need_stall && found_match) begin
+      if (!PHYS_VALIDATE && !need_stall && found_match) begin
         stl_forward_o = 1'b1;
         stl_data_o    = st_q[best].data;
       end
@@ -403,7 +438,7 @@ module g6lc_lsq #(
   // Alias validation: a store address arriving after a younger load already
   // resolved (and therefore read) overlapping bytes means that load may hold
   // stale data. Report the oldest such load; replaying it squashes the rest.
-  logic [LD_ENTRIES-1:0] viol_cand;
+  logic [LD_ENTRIES-1:0] viol_cand, phys_alias_cand;
   always_comb begin
     automatic logic [LANES-1:0] sbe_v, lbe_v;
     automatic logic [CVA6Cfg.PLEN-1:0] ld_addr_now;
@@ -413,7 +448,7 @@ module g6lc_lsq #(
     automatic logic [CVA6Cfg.VLEN-1:0] best_pc;
     automatic logic [HID_W-1:0] st_hart_now;
     automatic logic [31:0] best_dist, this_dist;
-    viol_cand = '0;
+    viol_cand = PHYS_VALIDATE ? phys_alias_cand : '0;
     sbe_v = '0;
     lbe_v = '0;
     ld_addr_now = '0;
@@ -424,7 +459,7 @@ module g6lc_lsq #(
     best_dist = 32'hFFFF_FFFF;
     this_dist = '0;
     for (int unsigned u = 0; u < NR_UPDATE; u++) begin
-      if (addr_valid_i[u] && addr_is_st_i[u]) begin
+      if (!PHYS_VALIDATE && addr_valid_i[u] && addr_is_st_i[u]) begin
         sbe_v = lane_be(addr_i[u], addr_size_i[u]);
         // Hart of the resolving store: a peer hart's store never aliases this
         // hart's loads. (Stores keep their entry until commit, so the lookup
@@ -461,6 +496,72 @@ module g6lc_lsq #(
     end
     mem_violation_id_o = best_id;
     mem_violation_pc_o = best_pc;
+  end
+
+  always_comb begin
+    phys_pending_o = '0;
+    if (PHYS_VALIDATE)
+      for (int unsigned l = 0; l < LD_ENTRIES; l++)
+        if (ld_q[l].valid && !ld_q[l].addr_v) phys_pending_o[ld_q[l].id] = 1'b1;
+  end
+
+  always_comb begin
+    automatic logic load_event, store_event, load_known, store_known, load_update_live;
+    automatic logic [CVA6Cfg.PLEN-1:0] load_addr, store_addr;
+    automatic logic [1:0] load_size, store_size;
+    phys_replay_o = '0;
+    phys_alias_cand = '0;
+    load_event = 1'b0;
+    load_update_live = 1'b0;
+    store_event = 1'b0;
+    load_known = 1'b0;
+    store_known = 1'b0;
+    load_addr = '0;
+    store_addr = '0;
+    load_size = '0;
+    store_size = '0;
+    if (PHYS_VALIDATE && !flush_i) begin
+      for (int unsigned r = 0; r < LD_ENTRIES; r++)
+        if (phys_valid_i[0] && ld_q[r].valid && sb_live_i[ld_q[r].id] &&
+            !cancelled_mask_i[ld_q[r].id] && phys_id_i[0] == ld_q[r].id &&
+            phys_hart_i[0] == ld_q[r].hart) load_update_live = 1'b1;
+      for (int unsigned l = 0; l < LD_ENTRIES; l++) begin
+        if (ld_q[l].valid && sb_live_i[ld_q[l].id] && !cancelled_mask_i[ld_q[l].id]) begin
+          load_event = phys_valid_i[0] && phys_id_i[0] == ld_q[l].id &&
+                       phys_hart_i[0] == ld_q[l].hart;
+          load_known = ld_q[l].addr_v || load_event;
+          load_addr = load_event ? phys_addr_i[0] : ld_q[l].addr;
+          load_size = load_event ? phys_size_i[0] : ld_q[l].size;
+          if (load_known && !config_pkg::is_inside_nonidempotent_regions(CVA6Cfg, 64'(load_addr))) begin
+            if (load_update_live && phys_hart_i[0] == ld_q[l].hart &&
+                g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(phys_id_i[0]),
+                                            32'(ld_q[l].id), 32'(commit_ptr_i)) &&
+                same_word(phys_addr_i[0], load_addr) &&
+                ((lane_be(phys_addr_i[0], phys_size_i[0]) & lane_be(load_addr, load_size)) != '0))
+              phys_replay_o[ld_q[l].id] = 1'b1;
+            for (int unsigned m = 0; m < 2; m++)
+              if (mod_valid_i[m] && ((load_addr >> LINE_OFF) == (mod_addr_i[m] >> LINE_OFF)))
+                phys_replay_o[ld_q[l].id] = 1'b1;
+            for (int unsigned s = 0; s < ST_ENTRIES; s++) begin
+              store_event = phys_valid_i[1] && phys_id_i[1] == st_q[s].id &&
+                            phys_hart_i[1] == st_q[s].hart;
+              store_known = st_q[s].addr_v || store_event;
+              store_addr = store_event ? phys_addr_i[1] : st_q[s].addr;
+              store_size = store_event ? phys_size_i[1] : st_q[s].size;
+              if (st_q[s].valid && sb_live_i[st_q[s].id] && !cancelled_mask_i[st_q[s].id] &&
+                  st_q[s].hart == ld_q[l].hart && store_known && (load_event || store_event) &&
+                  g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(st_q[s].id),
+                                              32'(ld_q[l].id), 32'(commit_ptr_i)) &&
+                  same_word(store_addr, load_addr) &&
+                  ((lane_be(store_addr, store_size) & lane_be(load_addr, load_size)) != '0)) begin
+                phys_replay_o[ld_q[l].id] = 1'b1;
+                phys_alias_cand[l] = 1'b1;
+              end
+            end
+          end
+        end
+      end
+    end
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin

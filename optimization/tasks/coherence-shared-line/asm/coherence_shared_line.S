@@ -33,8 +33,14 @@ mark_cycles:
   .globl _start
 _start:
   csrr t0, mhartid
-  bnez t0, hart1
+  beqz t0, hart0
+  li   t1, 1
+  beq  t0, t1, hart1
+park:
+  wfi
+  j    park
 
+hart0:
   li   s0, LINE
   li   s1, READY
   li   s2, FLAG
@@ -50,10 +56,14 @@ wait_ready:
   li   a0, 5
   ret
 see_seed:
+  fence r, rw
   csrr s4, mcycle
-  ld   t4, 0(s0)
+  sub  t6, s4, s4
+  add  t6, s0, t6
+  ld   t4, 0(t6)
   li   t5, SEED
   bne  t4, t5, fail_seed
+  fence rw, w
   sd   t1, 0(s2)
   li   t2, SPIN
 wait_cookie:
@@ -66,6 +76,9 @@ wait_cookie_spin:
   li   a0, 6
   ret
 see_cookie:
+  li   t5, 2
+  bne  t3, t5, fail_stale
+  fence r, rw
   ld   t4, 0(s0)
   csrr s5, mcycle
   sub  s5, s5, s4
@@ -93,20 +106,28 @@ wait_go:
   bnez t3, publish
   addi t2, t2, -1
   bnez t2, wait_go
-  li   a0, 0
+  li   a0, 8
   ret
 publish:
+  fence r, rw
   li   t4, SEED
   sd   t4, 0(s0)
+  fence rw, w
   li   t1, 1
   sd   t1, 0(s1)
+  li   t2, SPIN
 wait_flag:
   ld   t3, 0(s2)
   beq  t3, t1, overwrite
-  j    wait_flag
+  addi t2, t2, -1
+  bnez t2, wait_flag
+  li   a0, 7
+  ret
 overwrite:
+  fence r, rw
   li   t4, COOKIE
   sd   t4, 0(s0)
+  fence rw, w
   li   t5, 2
   sd   t5, 0(s2)
   li   a0, 0

@@ -36,6 +36,11 @@ module load_store_unit
     input logic clk_i,
     // Asynchronous reset active low - SUBSYSTEM
     input logic rst_ni,
+    output logic [1:0] phys_valid_o,
+    output logic [1:0][CVA6Cfg.PLEN-1:0] phys_addr_o,
+    output logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_o,
+    output logic [1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_o,
+    output logic [1:0][1:0] phys_size_o,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
     input logic flush_i,
     // FSE S4: SB cancelled TIDs for younger-only LSU recovery
@@ -610,6 +615,8 @@ module load_store_unit
   ) i_store_unit (
       .clk_i,
       .rst_ni,
+      .phys_valid_o(phys_valid_o[1]), .phys_addr_o(phys_addr_o[1]),
+      .phys_id_o(phys_id_o[1]), .phys_hart_o(phys_hart_o[1]), .phys_size_o(phys_size_o[1]),
       .flush_i,
       .cancelled_mask_i,
       .sb_live_i,
@@ -699,6 +706,8 @@ module load_store_unit
       .load_paddr_valid_o   (load_paddr_valid),
       .load_trans_id_o      (load_trans_id),
       .load_hart_o          (load_hart),
+      .phys_valid_o(phys_valid_o[0]), .phys_addr_o(phys_addr_o[0]),
+      .phys_id_o(phys_id_o[0]), .phys_hart_o(phys_hart_o[0]), .phys_size_o(phys_size_o[0]),
       .page_offset_matches_i(page_offset_matches),
       .store_buffer_empty_i (store_buffer_empty),
       .no_st_pending_i      (no_st_pending_o),

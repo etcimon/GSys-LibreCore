@@ -69,6 +69,8 @@ module tb_g6lc_lsq;
              .NR_ALLOC(NR_ALLOC), .NR_UPDATE(NR_UPDATE)) dut (
     .clk_i(clk), .rst_ni(rst_n), .flush_i(1'b0),
     .cancelled_mask_i(cancelled_mask), .sb_live_i(sb_live),
+    .phys_valid_i('0), .phys_addr_i('0), .phys_id_i('0), .phys_hart_i('0), .phys_size_i('0),
+    .commit_ld_i('0), .mod_valid_i('0), .mod_addr_i('0), .phys_pending_o(), .phys_replay_o(),
     .ld_alloc_i(ld_alloc), .st_alloc_i(st_alloc),
     .alloc_id_i(alloc_id), .alloc_hart_i(alloc_hart), .alloc_pc_i(alloc_pc),
     .ld_full_o(ld_full), .st_full_o(st_full),

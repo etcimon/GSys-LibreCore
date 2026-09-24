@@ -144,3 +144,99 @@ The OoO validation boundary must use accepted physical addresses and retain inst
 through retirement/cancellation and late responses. It must cover remote modifications and relevant
 sibling-hart committed stores without relying on the active fetch hart. Existing LSQ virtual-address
 hazard checks remain separate. New validation cannot be enabled merely by adding a hub selector.
+
+**Current implementation boundary:** `COH_OOO` has an SRAM-backed signature branch and explicit
+WT/integer/multicore legality checks, but `G6LC_OOO_COH_QUALIFY` is still mandatory. The SRAM
+uses byte writes in padded 32-bit words, not a bit-write-only macro. The lookup and initialization
+latencies are part of its cost. Leaf simulations, a reduced ten-frame proof, a reached conflict
+cover, dropped-update and observation negatives, and generic synthesis are recorded in T7 of the
+plan. These first-stage results do not alone close the physical-address/retirement or
+applied-invalidation contract above.
+
+**Physical validation candidate (continuation):** the load grant/tag boundary now exports the
+checked PA with a saved TID, hart and size; exception, flush and cancellation suppress that event.
+The legacy virtual `load_paddr_o` remains unchanged. `COH_OOO` disables its uncertified early STQ
+forward shortcut; physical cache/write-buffer forwarding is unchanged. Store-buffer admission
+exports its actual PA/owner. These events run through LSU/EX/core/issue/dispatch to the existing
+LSQ address storage, which is physical in this mode and retained until retirement or cancellation.
+The early issue query is only a conservative page-offset screen. Store/load physical aliases train
+the existing predictor; load/load ordering and external/local modifications replay without pretending
+to be store-predictor training. PMA-defined non-idempotent loads are never replay candidates.
+
+A modification event holds load retirement for its validation cycle; matching instructions receive
+sticky cancellation/replay on the following edge, then use the existing precise drop/restart path.
+This gives LSU tombstones a cycle to observe cancellation before the scoreboard slot is freed.
+Faults and already-cancelled entries still progress. The commit-facing PA-pending mask is derived
+only from registered LSQ state: clearing it combinationally on flush caused a real commit/flush
+loop in enabled-core synthesis and was rejected. WT return-decoder invalidation delivery and a
+registered committed-cache-write event feed the checker. Full publication ordering, atomic/local-CAS
+notification coverage, and multicore integration remain qualification obligations, not inferred
+from these wires or the leaf results.
+
+**Reduced promotion stage, authorized by the user (2026-09-24):** accept the current RTL as the
+integration baseline and continue verification without redesigning it merely to cover every generic
+endpoint. Integration acceptance is a separate milestone from unrestricted silicon production.
+For this milestone, use the existing two-source WT-style AXI path, `COH_OOO`, four hub credits,
+128 signature entries, L2 enabled and L3 disabled. Preserve source identity and require scoped
+positive, negative and counterfactual/mutation checks for write/refill publication, delivery and
+response stability. Check both modifiable-only traffic emitted by the current WT shim and
+allocate-enabled DRAM traffic; do not claim a cache-fill result from non-allocating transactions.
+A modeled WT invalidation consumer is transaction-path evidence, not a full-core/L1 proof.
+
+Generic slaves with L2 bypassed, arbitrarily buffered/non-WT invalidation consumers, broad parameter
+coverage, unbounded proofs, full firmware/compliance, PMU/DFT and physical sign-off are deferred
+for this integration milestone. Preserve their failures and obligations explicitly; deferral is not
+a pass or a claim of support. No assertion, result oracle, security/licensing control, or hardware
+qualification guard is weakened. Production defaults and `G6LC_OOO_COH_QUALIFY` remain unchanged;
+the existing opt-in mechanism is the way to exercise this accepted integration baseline.
+
+**Integration acceptance and promotion (2026-09-24, rights-holder decision):** the composed
+hub+L2 bench (`tb_g6lc_coherence_l2`, `REVIEW_HUB_L2_COMPOSED=1`) drives the unchanged `COH_OOO`
+hub into the actual `g6lc_l2_top` with a modeled WT invalidation consumer. With the L2 present the
+reader's AR is refused for the whole stalled-write window, admitted only after the memory B, and
+the refill returns the written value; the standalone-slave counterexample (scenario 23) is thereby
+excluded by the L2 admission rules for this composition. Evidence: small, modifiable-only (the
+current axi_shim attribute), stalled (W/B/invalidation/R/B holds) and target (256 KiB, 8-way,
+2 MSHR, 4 banks) profiles pass with their negative oracles; `-GUSE_L2=0` reproduces the stale
+refill; disconnecting the L2 self-invalidation restores `COH_L2_STALE_VALUE`; a signal-driven
+Yosys `scc -expect 0` proves the composed graph loop-free (Verilator's struct-granular UNOPTFLAT
+across the seam is therefore treated as a warning in that bench only).
+
+On that basis the rights holder accepted the review and promoted the RTL for the reduced envelope:
+`core/include/g6lc64_ooo_int2_config_pkg.sv` (two cores, two harts each, integer OoO, WT, equal
+128-bit lines, L2 on, L3 off, `COH_OOO`, 128 signature entries, two-deep invalidation queue) is a
+first-class target, and the `G6LC_OOO_COH_QUALIFY` requirement was removed from `check_cfg` and
+the cluster. The `COH_OOO` legality assert, `gen_bad_ooo_coherence`, default-target packages and
+all production defaults are unchanged. Promotion is a configuration-availability decision: the
+deferred obligations below remain open and are not implied to be satisfied.
+
+**Production promotion review (2026-09-24):** do not promote from B-delay leaf tests alone.
+The retained WT atomic invalidation now keeps its full PA, not merely an index widened to an
+address; only its cache-index output is sliced. Hub B offers retain their selected slot under
+backpressure, and per-slot predecessor masks preserve B completion order for a shared
+(core, original-ID) key. Dependencies clear on core B acceptance, not memory B capture; atomic
+slots whose B already completed do not hold younger Bs behind a late R. Atomic R is now subject
+to the same invalidation qualification as B. Potentially invalidating AW classification includes
+ATOP and locked writes even when cache[1] is zero.
+
+These repairs do not finish the publication contract. A legal standalone AXI slave can accept a
+read after an AW-triggered invalidation but before delayed W data, permitting an old refill with
+no later invalidation. Scenario 23 records this counterexample. The current L2 admission rules
+may exclude that schedule: prove the composed hub/L2/L1 contract rather than treating a generic
+hub test as an observed cluster failure or silently assuming the schedule impossible. WLAST
+acceptance into a buffer alone is not proof of global visibility. Fixed settling after a bus pop
+also cannot qualify an endpoint that acknowledges FIFO admission (notably the HPDCACHE retain
+path) with unbounded application delay. Full applied acknowledgement/visibility, local-CAS
+coverage, per-ID R ordering and multicore architectural qualification remain open obligations
+for unrestricted silicon release; the composed-L2 evidence above closes the scenario-23 question
+only for the accepted envelope. (Superseded on the guard: see the integration acceptance entry.)
+
+**Carry-over checklist:** configuration and source-level synthesis gates are present; no new clock,
+reset domain, latch or permission/address-masking rule was introduced. Existing scan/clock-test
+paths are unchanged. Signature SRAM lookup adds a registered admission dependency and the cold
+sweep costs `NR_ENTRIES` cycles; L2 install matching adds address comparisons. Both are timing/
+power review obligations, not closure claims. Existing hub filter/stall pins provide leaf observability;
+full PMU/RVFI integration, SRAM MBIST/ATPG binding, physical timing/power and the protected full-model
+identity/compliance gates remain open. No instruction, CSR, ISA string, memory map or DTS-visible
+cache capacity changed. Generic area and raw SRAM port geometry are recorded separately from
+physical area. The production guard cannot be removed on the strength of the current checkpoint.

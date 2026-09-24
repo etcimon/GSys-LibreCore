@@ -34,7 +34,16 @@ module g6lc_inval_bus
     //  stale line would see it high and conclude invalidations were being discarded.
     //  Both existing benches already bound it to a signal called `blocked`.
     output logic                               inv_stall_o,   // valid & ~ready (retried, not lost)
-    output logic                               inv_coalesce_o
+    output logic                               inv_coalesce_o,
+    // Per-core delivery sequences: enq counts accepted obligations (a coalesce
+    // merges flags and does NOT count), deq counts pops. The value presented
+    // here is the sequence number an obligation accepted THIS cycle will have
+    // once deq reaches it -- enq_seq+1 on a real push, the tail entry's own
+    // sequence on a coalesce. A consumer that stamps `need = inv_enq_seq_o`
+    // can then wait for inv_deq_seq_o == need to know the obligation left the
+    // FIFO (one pop per cycle, so equality is always observed).
+    output logic [NR_CORES-1:0][COH_INV_SEQ_W-1:0] inv_enq_seq_o,
+    output logic [NR_CORES-1:0][COH_INV_SEQ_W-1:0] inv_deq_seq_o
 );
 
   localparam int unsigned NC    = (NR_CORES < 1) ? 1 : NR_CORES;
@@ -47,11 +56,14 @@ module g6lc_inval_bus
     assign inv_core_o      = '{default: '0};
     assign inv_stall_o     = 1'b0;
     assign inv_coalesce_o  = 1'b0;
+    assign inv_enq_seq_o   = '0;
+    assign inv_deq_seq_o   = '0;
   end else begin : gen_multi
 
     coh_inval_t fifo_q[NC][DP];
     logic [PTR_W-1:0] head_q[NC], tail_q[NC];
     logic [PTR_W:0]   count_q[NC];  // 0..DP
+    logic [COH_INV_SEQ_W-1:0] enq_seq_q[NC], deq_seq_q[NC];
 
     logic [NC-1:0] full, empty;
     logic          can_accept;
@@ -91,13 +103,27 @@ module g6lc_inval_bus
     assign inv_stall_o    = inv_req_i.valid & ~inv_ready_o;
     assign inv_coalesce_o = inv_req_i.valid & coalesce & can_accept;
 
+    // An accepted obligation that does not merge is a real push (admission
+    // guarantees !full whenever a target does not merge). The enq sequence
+    // exported for this cycle counts it; a merge keeps the tail's own
+    // sequence because no new entry is created.
+    logic [NC-1:0] push_now;
+    for (genvar c = 0; c < NC; c++) begin : gen_seq
+      assign push_now[c]      = inv_req_i.valid && inv_ready_o &&
+                                inv_target_i[c] && !merge_tail[c];
+      assign inv_enq_seq_o[c] = enq_seq_q[c] + COH_INV_SEQ_W'(push_now[c]);
+      assign inv_deq_seq_o[c] = deq_seq_q[c];
+    end
+
     // Push / pop
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         for (int unsigned c = 0; c < NC; c++) begin
-          head_q[c]  <= '0;
-          tail_q[c]  <= '0;
-          count_q[c] <= '0;
+          head_q[c]   <= '0;
+          tail_q[c]   <= '0;
+          count_q[c]  <= '0;
+          enq_seq_q[c] <= '0;
+          deq_seq_q[c] <= '0;
           for (int unsigned d = 0; d < DP; d++) fifo_q[c][d] <= '0;
         end
       end else begin
@@ -126,6 +152,9 @@ module g6lc_inval_bus
             head_q[c] <= PTR_W'((int'(head_q[c]) + 1) % DP);
           end
 
+          enq_seq_q[c] <= enq_seq_q[c] + COH_INV_SEQ_W'(do_push);
+          deq_seq_q[c] <= deq_seq_q[c] + COH_INV_SEQ_W'(do_pop);
+
           unique case ({do_push, do_pop})
             2'b10: count_q[c] <= count_q[c] + 1'b1;
             2'b01: count_q[c] <= count_q[c] - 1'b1;
@@ -140,6 +169,16 @@ module g6lc_inval_bus
       assign inv_core_o[c] = empty[c] ? '0 : fifo_q[c][head_q[c]];
     end
 
+  end  // gen_multi
+
+  // The sequence counters wrap every 2**COH_INV_SEQ_W events; a consumer waits
+  // for an exact deq==need equality, so the outstanding enqueue-dequeue
+  // distance must stay strictly below half the range (one pop per cycle).
+  // pragma translate_off
+  initial begin
+    assert (DP <= 64) else
+      $fatal(1, "g6lc_inval_bus: DEPTH %0d exceeds 2**(COH_INV_SEQ_W-1)", DP);
   end
+  // pragma translate_on
 
 endmodule

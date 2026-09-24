@@ -1,4 +1,5 @@
 # Author: Florian Zaruba, ETH Zurich
+# Modified by: Etienne Cimon
 # Date: 03/19/2017
 # Description: Makefile for linting and testing Ariane.
 
@@ -196,6 +197,7 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/coherence/g6lc_coherence_pkg.sv                                    \
         corev_apu/coherence/g6lc_inval_bus.sv                                        \
         corev_apu/coherence/g6lc_snoop_filter.sv                                     \
+        corev_apu/coherence/g6lc_ooo_snoop_filter.sv                                 \
         corev_apu/coherence/g6lc_lr_sc_tracker.sv                                    \
         corev_apu/coherence/g6lc_l1_inv_adapter.sv                                   \
         corev_apu/coherence/g6lc_coherence_hub.sv                                    \

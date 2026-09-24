@@ -11,6 +11,7 @@
 // Author: Florian Zaruba    <zarubaf@iis.ee.ethz.ch>, ETH Zurich
 //         Michael Schaffner <schaffner@iis.ee.ethz.ch>, ETH Zurich
 // Date: 15.08.2018
+// Modified by: Etienne Cimon
 // Description: Load Unit, takes care of all load requests
 //
 // Contributor: Cesar Fuguet <cesar.fuguettortolero@cea.fr>, CEA List
@@ -104,7 +105,12 @@ module load_unit
     // Presence of non-idempotent operations in the D$ write buffer - CACHES
     input logic dcache_wbuffer_not_ni_i,
     // R3a cont.10: D$ write buffer empty (all committed stores visible in D$)
-    input logic dcache_wbuffer_empty_i
+    input logic dcache_wbuffer_empty_i,
+    output logic phys_valid_o,
+    output logic [CVA6Cfg.PLEN-1:0] phys_addr_o,
+    output logic [CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_o,
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_o,
+    output logic [1:0] phys_size_o
 );
   enum logic [3:0] {
     IDLE,
@@ -292,7 +298,8 @@ module load_unit
 
   // R3a: STQ data forward covers this load's bytes (lsu_ctrl.be already sized/aligned)
   logic st_fwd_covers;
-  assign st_fwd_covers = st_fwd_valid_i && (|lsu_ctrl_i.be) &&
+  assign st_fwd_covers = (CVA6Cfg.CohPolicy != config_pkg::COH_OOO) &&
+                         st_fwd_valid_i && (|lsu_ctrl_i.be) &&
                          ((st_fwd_be_i & lsu_ctrl_i.be) == lsu_ctrl_i.be);
 
   // R3a cont.14: cont.4/10 STQ-empty-for-all-loads under SpeculativeSb made
@@ -559,6 +566,40 @@ module load_unit
 
   // track the load data for later usage
   assign ldbuf_w = req_port_o.data_req & req_port_i.data_gnt;
+
+  if (CVA6Cfg.CohPolicy == config_pkg::COH_OOO) begin : gen_phys_owner
+    logic pending_q;
+    logic [CVA6Cfg.TRANS_ID_BITS-1:0] owner_q;
+    logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] hart_q;
+    logic [1:0] size_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        pending_q <= 1'b0;
+        owner_q <= '0;
+        hart_q <= '0;
+        size_q <= '0;
+      end else begin
+        pending_q <= ldbuf_w && !flush_i && !cancelled_mask_i[lsu_ctrl_i.trans_id];
+        if (ldbuf_w) begin
+          owner_q <= lsu_ctrl_i.trans_id;
+          hart_q <= lsu_ctrl_i.hart;
+          size_q <= extract_transfer_size(lsu_ctrl_i.operation);
+        end
+      end
+    end
+    assign phys_valid_o = pending_q && req_port_o.tag_valid && !req_port_o.kill_req &&
+                          !ex_i.valid && !flush_i && !cancelled_mask_i[owner_q];
+    assign phys_addr_o = paddr_i;
+    assign phys_id_o = owner_q;
+    assign phys_hart_o = hart_q;
+    assign phys_size_o = size_q;
+  end else begin : gen_no_phys_owner
+    assign phys_valid_o = 1'b0;
+    assign phys_addr_o = '0;
+    assign phys_id_o = '0;
+    assign phys_hart_o = '0;
+    assign phys_size_o = '0;
+  end
 
   // ---------------
   // Retire Load

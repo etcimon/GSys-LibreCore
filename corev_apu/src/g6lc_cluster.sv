@@ -75,6 +75,17 @@ module g6lc_cluster
       (CVA6Cfg.DCACHE_LINE_WIDTH != 0) ? CVA6Cfg.DCACHE_LINE_WIDTH / 8
                                        : COH_DEFAULT_LINE_BYTES;
 
+  if (CVA6Cfg.CohPolicy == COH_OOO &&
+      (!CVA6Cfg.OoOEn || CVA6Cfg.FpPresent || !CVA6Cfg.L2En || NC <= 1 || CVA6Cfg.DCacheType != WT ||
+       CVA6Cfg.ICACHE_LINE_WIDTH != CVA6Cfg.DCACHE_LINE_WIDTH)) begin : gen_bad_ooo_coherence
+    $error("OoO coherence requires multiple integer OoO WT cores with equal L1 lines and L2");
+    //pragma translate_off
+`ifndef SYNTHESIS
+    initial $fatal(1, "invalid OoO coherence configuration");
+`endif
+    //pragma translate_on
+  end
+
   axi_req_t  [NC-1:0] core_req;
   axi_resp_t [NC-1:0] core_resp;
   axi_req_t  [NC-1:0] guarded_req;
@@ -329,6 +340,7 @@ module g6lc_cluster
         .MSHR_DEPTH     (CVA6Cfg.L2MshrDepth != 0 ? CVA6Cfg.L2MshrDepth : 32'd8),
         .DATA_BANKS     (CVA6Cfg.L2DataBanks != 0 ? CVA6Cfg.L2DataBanks : 32'd4),
         .RR_EN          (CVA6Cfg.L2RoundRobinEn),
+        .FAIR_WRITES    (CVA6Cfg.OoOEn),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),
@@ -370,6 +382,7 @@ module g6lc_cluster
   if (CVA6Cfg.L3En) begin : gen_l3
     g6lc_l3_top #(
         .Enable         (1'b1),
+        .FAIR_WRITES    (CVA6Cfg.OoOEn),
         .BYTE_SIZE      (CVA6Cfg.L3ByteSize != 0 ? CVA6Cfg.L3ByteSize : 32'd2097152),
         .SET_ASSOC      (CVA6Cfg.L3SetAssoc != 0 ? CVA6Cfg.L3SetAssoc : 32'd16),
         .LINE_WIDTH     (CVA6Cfg.L3LineWidth != 0 ? CVA6Cfg.L3LineWidth :

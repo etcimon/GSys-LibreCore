@@ -861,6 +861,13 @@ module cva6
   logic spec_cancel;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_cancelled_mask;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_mask;
+  logic [1:0] mem_phys_valid, mem_mod_valid;
+  logic [1:0][CVA6Cfg.PLEN-1:0] mem_phys_addr, mem_mod_addr;
+  logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] mem_phys_id;
+  logic [1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] mem_phys_hart;
+  logic [1:0][1:0] mem_phys_size;
+  logic inval_apply_valid;
+  logic [63:0] inval_apply_addr;
   // U5 OoO PMU probes (0 when OoOEn=0)
   logic ooo_rename_stall, ooo_iq_full, ooo_rob_full, ooo_lsq_stall, ooo_stl_forward;
 
@@ -897,6 +904,29 @@ module cva6
   assign inval_addr  = acc_inval_valid ? acc_inval_addr : l1_inval_addr_i;
   assign inval_valid = acc_inval_valid | l1_inval_valid_i;
   assign l1_inval_ready_o = inval_ready & ~acc_inval_valid;
+  if (CVA6Cfg.DCacheType != config_pkg::WT) begin : gen_no_wt_apply
+    assign inval_apply_valid = 1'b0;
+    assign inval_apply_addr = '0;
+  end
+  assign mem_mod_valid[0] = (CVA6Cfg.CohPolicy == config_pkg::COH_OOO) && inval_apply_valid;
+  assign mem_mod_addr[0] = CVA6Cfg.PLEN'(inval_apply_addr);
+  if (CVA6Cfg.CohPolicy == config_pkg::COH_OOO) begin : gen_local_modification
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        mem_mod_valid[1] <= 1'b0;
+        mem_mod_addr[1] <= '0;
+      end else begin
+        mem_mod_valid[1] <= dcache_req_ports_ex_cache[2].data_req &&
+                            dcache_req_ports_cache_ex[2].data_gnt;
+        if (dcache_req_ports_ex_cache[2].data_req && dcache_req_ports_cache_ex[2].data_gnt)
+          mem_mod_addr[1] <= CVA6Cfg.PLEN'({dcache_req_ports_ex_cache[2].address_tag,
+                                          dcache_req_ports_ex_cache[2].address_index});
+      end
+    end
+  end else begin : gen_no_local_modification
+    assign mem_mod_valid[1] = 1'b0;
+    assign mem_mod_addr[1] = '0;
+  end
 
   // --------------
   // Frontend
@@ -1723,6 +1753,9 @@ module cva6
   ) issue_stage_i (
       .clk_i,
       .rst_ni,
+      .phys_valid_i(mem_phys_valid), .phys_addr_i(mem_phys_addr), .phys_id_i(mem_phys_id),
+      .phys_hart_i(mem_phys_hart), .phys_size_i(mem_phys_size),
+      .mod_valid_i(mem_mod_valid), .mod_addr_i(mem_mod_addr),
       .sb_full_o               (sb_full),
       .sb_empty_o              (smt_sb_empty),
       .spec_cancel_o           (spec_cancel),
@@ -1889,6 +1922,8 @@ module cva6
   ) ex_stage_i (
       .clk_i(clk_i),
       .rst_ni(rst_ni),
+      .phys_valid_o(mem_phys_valid), .phys_addr_o(mem_phys_addr), .phys_id_o(mem_phys_id),
+      .phys_hart_o(mem_phys_hart), .phys_size_o(mem_phys_size),
       .debug_mode_i(debug_mode),
       .flush_i(flush_ctrl_ex),
       .cancelled_mask_i(sb_cancelled_mask),
@@ -2497,7 +2532,8 @@ module cva6
         .noc_resp_i        (noc_resp_i),
         .inval_addr_i      (inval_addr),
         .inval_valid_i     (inval_valid),
-        .inval_ready_o     (inval_ready)
+        .inval_ready_o     (inval_ready),
+        .inval_apply_valid_o(inval_apply_valid), .inval_apply_addr_o(inval_apply_addr)
     );
   end else if (
         CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT ||

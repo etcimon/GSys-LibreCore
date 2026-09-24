@@ -1457,6 +1457,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // the production wiring, including the direct L2-to-L3 abutment, under the
       // gate.
       g6lc64_ooo_server: ["corev_apu/Flist.cluster"],
+      g6lc64_ooo_int2: ["corev_apu/Flist.cluster"],
     },
     waiverFile: "verilator_config.vlt",
     top: "cva6",
@@ -1464,6 +1465,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     topByTarget: {
       g6lc64_server_math_v: "g6lc_ara_lint_top",
       g6lc64_ooo_server: "g6lc_cluster_lint_top",
+      g6lc64_ooo_int2: "g6lc_cluster_lint_top",
     },
     // Default gate: full-feature 64-bit + minimal 32-bit. Production-heavy
     // packages (g6lc64_ooo / ooo_server, server_math, smt2, spec_deep) are
@@ -1637,6 +1639,9 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // and _server both trip check_cfg (FpPresent / NrHarts>1), so this is the
       // only OoO target whose warning count can be gated end to end today.
       g6lc64_ooo_int: 11,
+      // Two-core COH_OOO cluster lint (g6lc_cluster_lint_top), measured on the
+      // promotion archive gate ooocoh-promoted-int2-r5: WIDTH* only.
+      g6lc64_ooo_int2: 24,
     },
     failOnMissingBaseline: false,
   },
@@ -2007,6 +2012,18 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
         verilator: {
           target: "g6lc64_smt2_ooo_int",
+          warningBudget: 650,
+        },
+      },
+      {
+        id: "diag-ooo-int2-lint",
+        description: "Verilator lint of the two-core integer OoO coherence g6lc64_ooo_int2 package.",
+        compartment: "ooo",
+        kind: "verilator-lint",
+        tools: ["verilator"],
+        optional: true,
+        verilator: {
+          target: "g6lc64_ooo_int2",
           warningBudget: 650,
         },
       },

@@ -5,6 +5,7 @@ module tb_g6lc_coherence_hub;
   import g6lc_coherence_pkg::*;
   import g6lc_l2_tb_pkg::*;
   parameter int unsigned OT = 4;
+  parameter bit OOO = 1'b0;
   //  Overridable (-GSTARVE_LIMIT=N), because the override is UNREACHABLE at the
   //  production limit and can only be exercised by lowering it.
   //
@@ -31,6 +32,11 @@ module tb_g6lc_coherence_hub;
   //  it produces is the SHORTEST possible. Real memory is slower, so this sweeps
   //  the one variable that decides whether the starve override is reachable.
   parameter int unsigned MEM_STALL = 0;
+  //  ACK-after-invalidation control. 0 rebuilds the ack-before-invalidation
+  //  defect for the restored-defect mutation run; INV_LAT is the DUT's
+  //  INV_APPLY_LATENCY so scenario deadlines track the configured margin.
+  parameter bit ACK_AFTER_INVAL = 1;
+  parameter int unsigned INV_LAT = 1;
   logic clk = 0, rst_n = 0;
   req_t [NC-1:0] core_req;
   resp_t [NC-1:0] core_rsp;
@@ -44,8 +50,9 @@ module tb_g6lc_coherence_hub;
 
   g6lc_coherence_hub #(
     .NR_CORES(NC), .MAX_OUTSTANDING(OT), .INVAL_DEPTH(2),
-    .SNOOP_FILTER_EN(0), .SNOOP_FILTER_ENTRIES(4),
-    .POLICY(config_pkg::COH_BROADCAST), .AXI_STARVE_LIMIT(STARVE_LIMIT),
+    .SNOOP_FILTER_EN(OOO), .SNOOP_FILTER_ENTRIES(4),
+    .POLICY(OOO ? config_pkg::COH_OOO : config_pkg::COH_BROADCAST), .AXI_STARVE_LIMIT(STARVE_LIMIT),
+    .ACK_AFTER_INVAL(ACK_AFTER_INVAL), .INV_APPLY_LATENCY(INV_LAT),
     .axi_req_t(req_t), .axi_resp_t(resp_t)
   ) dut (
     .clk_i(clk), .rst_ni(rst_n), .core_req_i(core_req), .core_resp_o(core_rsp),
@@ -97,6 +104,7 @@ module tb_g6lc_coherence_hub;
     #2;
     tick();
     rst_n = 1;
+    if (OOO) repeat (5) tick();
     for (int c = 0; c < NC; c++) begin
       core_req[c].r_ready = 1;
       core_req[c].b_ready = 1;
@@ -242,9 +250,11 @@ module tb_g6lc_coherence_hub;
     core_req[core].r_ready = 0;
     repeat (2) begin
       #2;
-      if (!core_rsp[core].r_valid || core_rsp[1-core].r_valid ||
+      if (!core_rsp[core].r_valid ||
           core_rsp[core].r.id !== original || core_rsp[core].r.data !== data || memory_req.r_ready)
         $fatal(1, "HUB_R_HOLD");
+      for (int c = 0; c < NC; c++)
+        if (c != core && core_rsp[c].r_valid) $fatal(1, "HUB_R_PEER");
       tick();
     end
     core_req[core].r_ready = 1;
@@ -550,6 +560,692 @@ module tb_g6lc_coherence_hub;
     end
   endtask
 
+  task automatic atomic_lifetime;
+    id_t slot, reads[OT];
+    for (int order = 0; order < 3; order++) begin
+      reset();
+      core_req[0].aw = aw(64'h8000, 4'he);
+      core_req[0].aw.atop = 6'b100000;
+      core_req[0].aw_valid = 1;
+      memory_rsp.aw_ready = 1;
+      #2;
+      if (!core_rsp[0].aw_ready) $fatal(1, "HUB_ATOP_SETUP");
+      slot = memory_req.aw.id;
+      tick();
+      core_req[0].aw_valid = 0;
+      memory_rsp.aw_ready = 0;
+      core_req[0].w = '{data: 64'h991, strb: '1, last: 1, user: 0};
+      core_req[0].w_valid = 1;
+      memory_rsp.w_ready = 1;
+      #2;
+      if (!core_rsp[0].w_ready) $fatal(1, "HUB_ATOP_W");
+      tick();
+      core_req[0].w_valid = 0;
+      memory_rsp.w_ready = 0;
+      repeat (2 + INV_LAT) tick();
+      for (int n = 0; n < OT - 1; n++)
+        accept_read(1, 64'h9000 + 64'(n) * 64'd64, id_t'(n), reads[n]);
+      core_req[1].ar = ar(64'ha000, 4'hf);
+      core_req[1].ar_valid = 1;
+      memory_rsp.ar_ready = 1;
+      memory_rsp.r = '{id: slot, data: 64'h123456, resp: 0, last: 1, user: 0};
+      memory_rsp.b = '{id: slot, resp: 0, user: 0};
+      for (int phase = 0; phase < (order == 2 ? 1 : 2); phase++) begin
+        memory_rsp.r_valid = order == 2 || (order == 1 ? phase == 0 : phase == 1);
+        memory_rsp.b_valid = order == 2 || !memory_rsp.r_valid;
+        core_req[0].r_ready = 0;
+        core_req[0].b_ready = 0;
+        repeat (3) begin
+          #2;
+          if (memory_req.ar_valid || memory_req.r_ready || memory_req.b_ready)
+            $fatal(1, "HUB_ATOP_LIFETIME premature credit/accept order=%0d phase=%0d", order, phase);
+          if (memory_rsp.r_valid && (!core_rsp[0].r_valid || core_rsp[1].r_valid ||
+              core_rsp[0].r.id != 4'he || core_rsp[0].r.data != 64'h123456))
+            $fatal(1, "HUB_ATOP_R_OWNER");
+          if (memory_rsp.b_valid && (!core_rsp[0].b_valid || core_rsp[1].b_valid ||
+              core_rsp[0].b.id != 4'he)) $fatal(1, "HUB_ATOP_B_OWNER");
+          tick();
+        end
+        core_req[0].r_ready = 1;
+        core_req[0].b_ready = 1;
+        #2;
+        if ((memory_rsp.r_valid && !memory_req.r_ready) ||
+            (memory_rsp.b_valid && !memory_req.b_ready)) $fatal(1, "HUB_ATOP_ACCEPT");
+        tick();
+        memory_rsp.r_valid = 0;
+        memory_rsp.b_valid = 0;
+      end
+      #2;
+      if (!core_rsp[1].ar_ready || memory_req.ar.id != slot)
+        $fatal(1, "HUB_ATOP_RELEASE");
+      tick();
+      core_req[1].ar_valid = 0;
+      memory_rsp.ar_ready = 0;
+      return_read(1, slot, 4'hf, 64'h1122);
+      for (int n = 0; n < OT - 1; n++) return_read(1, reads[n], id_t'(n), 64'(n));
+    end
+  endtask
+
+  task automatic atomic_remaining_orders;
+    id_t atomic_slot;
+    id_t [OT-1:0] slots;
+    for (int together = 0; together < 2; together++) begin
+      reset();
+      core_req[0].aw = aw(64'h7300, 4'ha, 4'h0);
+      core_req[0].aw.atop = 6'h20;
+      core_req[0].aw_valid = 1;
+      memory_rsp.aw_ready = 1;
+      #2;
+      if (!core_rsp[0].aw_ready) $fatal(1, "HUB_ATOP_SETUP");
+      atomic_slot = memory_req.aw.id;
+      tick();
+      core_req[0].aw_valid = 0;
+      memory_rsp.aw_ready = 0;
+      core_req[0].w = '{data: 64'h45, strb: '1, last: 1, user: 0};
+      core_req[0].w_valid = 1;
+      memory_rsp.w_ready = 1;
+      tick();
+      core_req[0].w_valid = 0;
+      memory_rsp.w_ready = 0;
+      repeat (2 + INV_LAT) tick();
+      core_req[0].b_ready = 0;
+      core_req[0].r_ready = 0;
+      memory_rsp.b_valid = 1;
+      memory_rsp.b = '{id: atomic_slot, resp: 0, user: 0};
+      memory_rsp.r_valid = (together != 0);
+      memory_rsp.r = '{id: atomic_slot, data: 64'h54, resp: 0, last: 1, user: 0};
+      repeat (3) begin
+        #2;
+        if (!core_rsp[0].b_valid || core_rsp[0].b.id != 4'ha || memory_req.b_ready ||
+            (together != 0 && (!core_rsp[0].r_valid || memory_req.r_ready ||
+                              core_rsp[0].r.id != 4'ha || core_rsp[0].r.data != 64'h54)))
+          $fatal(1, "HUB_ATOP_COMPONENT_HOLD");
+        tick();
+      end
+      core_req[0].b_ready = 1;
+      core_req[0].r_ready = (together != 0);
+      tick();
+      memory_rsp.b_valid = 0;
+      memory_rsp.r_valid = 0;
+      if (together == 0) return_read(0, atomic_slot, 4'ha, 64'h54);
+      for (int n = 0; n < OT; n++) accept_read(1, 64'h8000 + 64'(n) * 128, id_t'(n), slots[n]);
+      for (int n = 0; n < OT; n++) return_read(1, slots[n], id_t'(n), 64'(n));
+    end
+  endtask
+
+  task automatic signature_hub;
+    id_t slot, write_slot;
+    aw_chan_t saved;
+    if (!OOO || NC != 3) $fatal(1, "HUB_SIGNATURE_GEOMETRY");
+    reset();
+    accept_read(0, 64'h4000, 4'd1, slot);
+    return_read(0, slot, 4'd1, 64'h101);
+    accept_read(1, 64'h4100, 4'd2, slot);
+    return_read(1, slot, 4'd2, 64'h102);
+    invalidation_ready = '0;
+    core_req[1].aw = aw(64'h4000, 4'd3, 4'hf);
+    core_req[1].aw_valid = 1;
+    for (int n = 0; n < 8 && !memory_req.aw_valid; n++) tick();
+    if (!memory_req.aw_valid) $fatal(1, "HUB_SIGNATURE_LOOKUP");
+    saved = memory_req.aw;
+    write_slot = saved.id;
+    core_req[2].ar = ar(64'h4040, 4'd4);
+    core_req[2].ar_valid = 1;
+    repeat (5) begin
+      tick();
+      if (!memory_req.aw_valid || memory_req.aw !== saved || core_rsp[2].ar_ready)
+        $fatal(1, "HUB_SIGNATURE_HELD");
+    end
+    memory_rsp.aw_ready = 1;
+    #2;
+    if (!core_rsp[1].aw_ready) $fatal(1, "HUB_SIGNATURE_ADMIT");
+    tick();
+    core_req[1].aw_valid = 0;
+    memory_rsp.aw_ready = 0;
+    memory_rsp.ar_ready = 1;
+    #2;
+    if (!core_rsp[2].ar_ready) $fatal(1, "HUB_SIGNATURE_AR_RESUME");
+    slot = memory_req.ar.id;
+    tick();
+    core_req[2].ar_valid = 0;
+    memory_rsp.ar_ready = 0;
+    core_req[1].w = '{data: 64'h103, strb: '1, last: 1, user: 0};
+    core_req[1].w_valid = 1;
+    memory_rsp.w_ready = 1;
+    tick();
+    core_req[1].w_valid = 0;
+    memory_rsp.w_ready = 0;
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id: write_slot, resp: 0, user: 0};
+    #2;
+    //  The writer's B may be consumed by the hub but must NOT reach core 1
+    //  until its invalidation has been delivered to core 0 (the signature
+    //  target) and INV_APPLY_LATENCY has elapsed. The previous check required
+    //  B in this same cycle -- that was the ack-before-invalidation defect
+    //  this scenario now pins as a failure.
+    if (core_rsp[1].b_valid) $fatal(1, "HUB_B_BEFORE_INVAL");
+    if (!memory_req.b_ready) $fatal(1, "HUB_SETUP B not consumed");
+    tick();
+    memory_rsp.b_valid = 0;
+    if (!(invalidations[0].valid ^ negative) || invalidations[1].valid ||
+        invalidations[2].valid || invalidations[0].line_addr != coh_line_tag(64'h4000, 64))
+      $fatal(1, "HUB_SIGNATURE_TARGET");
+    invalidation_ready = '1;
+    begin
+      int k;
+      k = -1;
+      for (int n = 0; n < 20; n++) begin
+        #2;
+        if (k < 0 && invalidations[0].valid && invalidation_ready[0]) k = n;
+        if (k >= 0 && n <= k + 1 + INV_LAT && core_rsp[1].b_valid)
+          $fatal(1, "HUB_B_BEFORE_INVAL k=%0d n=%0d", k, n);
+        if (k >= 0 && n == k + 2 + INV_LAT &&
+            (!core_rsp[1].b_valid || core_rsp[1].b.id != 4'd3))
+          $fatal(1, "HUB_SIGNATURE_B k=%0d", k);
+        tick();
+        if (k >= 0 && n >= k + 2 + INV_LAT) break;
+      end
+      if (k < 0) $fatal(1, "HUB_SIGNATURE_TARGET never delivered");
+    end
+    return_read(2, slot, 4'd4, 64'h104);
+  endtask
+
+  //  ------------------------------------------------------------------
+  //  ACK-after-invalidation scenarios (14-18).
+  //
+  //  Timing model: the invalidation-bus pop handshake for a target is observed
+  //  at sample cycle k (invalidations[t].valid && invalidation_ready[t]); the
+  //  pop lands at the edge ending that cycle. The deq sequence is visible one
+  //  cycle later, the L1 applies during the cycle after the pop edge, so the
+  //  writer's B is legal at sample k+2+INV_LAT and forbidden any earlier.
+  //  ------------------------------------------------------------------
+
+  task automatic drive_write(input int core, input addr_t addr, input id_t id,
+                             output id_t slot, input logic [3:0] cache = 4'b0010);
+    core_req[core].aw = aw(addr, id, cache);
+    core_req[core].aw_valid = 1;
+    memory_rsp.aw_ready = 1;
+    #2;
+    if (!memory_req.aw_valid || !core_rsp[core].aw_ready)
+      $fatal(1, "HUB_SETUP aw core=%0d", core);
+    slot = memory_req.aw.id;
+    tick();
+    core_req[core].aw_valid = 0;
+    memory_rsp.aw_ready = 0;
+    core_req[core].w = '{data: 64'h5a, strb: '1, last: 1, user: 0};
+    core_req[core].w_valid = 1;
+    memory_rsp.w_ready = 1;
+    #2;
+    if (!memory_req.w_valid || !core_rsp[core].w_ready)
+      $fatal(1, "HUB_SETUP w core=%0d", core);
+    tick();
+    core_req[core].w_valid = 0;
+    memory_rsp.w_ready = 0;
+  endtask
+
+  //  Scenario 14: B consumed early, withheld until delivery + apply latency.
+  task automatic write_ack_after_inval;
+    id_t slot;
+    int k, first_b;
+    bit seen_early;
+    reset();
+    invalidation_ready = 2'b01;
+    drive_write(0, 64'h4000, 4'h7, slot);
+    // B arrives two cycles after W -- long before the invalidation is consumed.
+    tick();
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id: slot, resp: 0, user: 0};
+    seen_early = 0;
+    #2;
+    if (core_rsp[0].b_valid) seen_early = 1;
+    if (!memory_req.b_ready) $fatal(1, "HUB_SETUP B not consumed");
+    tick();
+    memory_rsp.b_valid = 0;
+    k = -1;
+    first_b = -1;
+    for (int n = 0; n < 60; n++) begin
+      if (n == 12) invalidation_ready = 2'b11;
+      #2;
+      if (n < 12 && !invalidations[1].valid)
+        $fatal(1, "HUB_SETUP invalidation not presented while blocked");
+      if (invalidations[1].valid && invalidation_ready[1] && k < 0) k = n;
+      if (core_rsp[0].b_valid) begin
+        if (first_b < 0) first_b = n;
+        if (k < 0 || n <= k + 1 + INV_LAT) seen_early = 1;
+        if (core_rsp[0].b.id !== 4'h7 || core_rsp[0].b.resp != 0)
+          $fatal(1, "HUB_RESPONSE write identity");
+      end
+      if (k >= 0 && n == k + 2 + INV_LAT && !core_rsp[0].b_valid &&
+          first_b < 0 && !seen_early)
+        $fatal(1, "HUB_B_AFTER_INVAL_LATE k=%0d", k);
+      tick();
+      if (k >= 0 && n >= k + 2 + INV_LAT) break;
+    end
+    if (k < 0) $fatal(1, "HUB_SETUP invalidation never delivered");
+    if (negative) begin
+      if (!seen_early) $fatal(1, "HUB_B_BEFORE_INVAL");
+    end else if (seen_early)
+      $fatal(1, "HUB_B_BEFORE_INVAL first_b=%0d k=%0d", first_b, k);
+    $display("HUB_ACK_TIMING scenario=14 k=%0d first_b=%0d inv_lat=%0d",
+             k, first_b, INV_LAT);
+  endtask
+
+  //  Scenario 15: an unrelated writer's B must pass while another core's B is
+  //  held for a blocked invalidation.
+  task automatic write_ack_independent;
+    id_t slot_x, slot_y;
+    int k;
+    bit x_leak, x_seen, y_done;
+    reset();
+    invalidation_ready = 2'b01;  // core0 drains; core1 (X's target) is blocked
+    drive_write(0, 64'h5000, 4'h8, slot_x);   // targets core1 (blocked)
+    drive_write(1, 64'h9000, 4'h9, slot_y);   // targets core0 (ready)
+    // Return Y's B first: its obligation to core0 was already delivered, so it
+    // must not be delayed by X's held B.
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id: slot_y, resp: 0, user: 0};
+    y_done = 0;
+    x_leak = 0;
+    x_seen = 0;
+    for (int n = 0; n < 16 && !y_done; n++) begin
+      #2;
+      if (core_rsp[0].b_valid) begin
+        x_leak = 1;
+        x_seen = 1;
+      end
+      if (core_rsp[1].b_valid) begin
+        if (core_rsp[1].b.id !== 4'h9) $fatal(1, "HUB_RESPONSE write identity");
+        y_done = 1;
+      end
+      tick();
+    end
+    memory_rsp.b_valid = 0;
+    if (negative) begin
+      if (y_done) $fatal(1, "HUB_B_HOLD");
+    end else if (!y_done) $fatal(1, "HUB_B_HOLD");
+    // Now X's B: parked until core1's invalidation pops + settle.
+    memory_rsp.b = '{id: slot_x, resp: 0, user: 0};
+    memory_rsp.b_valid = 1;
+    #2;
+    if (!memory_req.b_ready) $fatal(1, "HUB_SETUP B not consumed");
+    tick();
+    memory_rsp.b_valid = 0;
+    k = -1;
+    for (int n = 0; n < 40; n++) begin
+      if (n == 6) invalidation_ready = 2'b11;
+      #2;
+      if (invalidations[1].valid && invalidation_ready[1] && k < 0) k = n;
+      if (core_rsp[0].b_valid) begin
+        x_seen = 1;
+        if (k < 0 || n <= k + 1 + INV_LAT) x_leak = 1;
+        if (core_rsp[0].b.id !== 4'h8) $fatal(1, "HUB_RESPONSE write identity");
+      end
+      if (k >= 0 && n == k + 2 + INV_LAT && !core_rsp[0].b_valid && !x_seen)
+        $fatal(1, "HUB_B_AFTER_INVAL_LATE k=%0d", k);
+      tick();
+      if (k >= 0 && n >= k + 2 + INV_LAT) break;
+    end
+    if (k < 0) $fatal(1, "HUB_SETUP invalidation never delivered");
+    if (!negative && x_leak) $fatal(1, "HUB_B_BEFORE_INVAL");
+    $display("HUB_ACK_TIMING scenario=15 k=%0d", k);
+  endtask
+
+  //  Scenario 16: two same-line writes coalesce to a single invalidation; both
+  //  Bs wait for the one pop and then drain lowest-slot-first.
+  task automatic write_ack_coalesce;
+    id_t slot0, slot1;
+    int k, b_count, pops;
+    bit seen_early;
+    reset();
+    invalidation_ready = 2'b01;
+    drive_write(0, 64'h6000, 4'h5, slot0);
+    drive_write(0, 64'h6000, 4'h6, slot1);
+    seen_early = 0;
+    // Both Bs arrive while the single coalesced obligation is still blocked.
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id: slot0, resp: 0, user: 0};
+    #2;
+    if (core_rsp[0].b_valid) seen_early = 1;
+    tick();
+    memory_rsp.b = '{id: slot1, resp: 0, user: 0};
+    #2;
+    if (core_rsp[0].b_valid) seen_early = 1;
+    tick();
+    memory_rsp.b_valid = 0;
+    k = -1;
+    b_count = 0;
+    pops = 0;
+    for (int n = 0; n < 60; n++) begin
+      if (n == 8) invalidation_ready = 2'b11;
+      #2;
+      if (invalidations[1].valid && invalidation_ready[1]) begin
+        if (k < 0) k = n;
+        pops++;
+      end
+      if (core_rsp[0].b_valid) begin
+        b_count++;
+        if (k < 0 || n <= k + 1 + INV_LAT) seen_early = 1;
+        if (b_count == 1 && core_rsp[0].b.id !== 4'h5)
+          $fatal(1, "HUB_B_COALESCE_LATE first b id=%h", core_rsp[0].b.id);
+        if (b_count == 2 && core_rsp[0].b.id !== 4'h6)
+          $fatal(1, "HUB_B_COALESCE_LATE second b id=%h", core_rsp[0].b.id);
+      end
+      if (k >= 0 && n == k + 1 && invalidations[1].valid && !seen_early)
+        $fatal(1, "HUB_B_COALESCE_LATE obligation was not coalesced");
+      if (k >= 0 && n == k + 3 + INV_LAT && b_count != 2 && !seen_early)
+        $fatal(1, "HUB_B_COALESCE_LATE k=%0d count=%0d", k, b_count);
+      tick();
+      if (k >= 0 && n >= k + 3 + INV_LAT) break;
+    end
+    if (k < 0) $fatal(1, "HUB_SETUP invalidation never delivered");
+    if (pops != 1) $fatal(1, "HUB_B_COALESCE_LATE pops=%0d", pops);
+    if (negative) begin
+      if (!seen_early) $fatal(1, "HUB_B_BEFORE_INVAL");
+    end else if (seen_early) $fatal(1, "HUB_B_BEFORE_INVAL");
+    $display("HUB_ACK_TIMING scenario=16 k=%0d pops=%0d", k, pops);
+  endtask
+
+  //  Scenario 17: when delivery and the apply latency are already in the past,
+  //  a memory B must reach the core in the SAME cycle -- zero added latency.
+  task automatic write_ack_fast_path;
+    id_t slot;
+    logic same_cycle;
+    reset();
+    // invalidation_ready stays '1: the obligation delivers immediately.
+    drive_write(0, 64'h7000, 4'ha, slot);
+    repeat (6) tick();
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id: slot, resp: 0, user: 0};
+    #2;
+    same_cycle = core_rsp[0].b_valid && core_rsp[0].b.id === 4'ha &&
+                 core_rsp[0].b.resp == 0 && memory_req.b_ready;
+    if (same_cycle == negative) $fatal(1, "HUB_B_FAST_PATH");
+    tick();
+    memory_rsp.b_valid = 0;
+  endtask
+
+  //  Scenario 18: three writes to different lines with the target blocked fill
+  //  INVAL_DEPTH=2; the third obligation is retained in inv_pend and its slot
+  //  is stamped only when the bus accepts it after the first pop.
+  task automatic write_ack_retained;
+    id_t slots[3];
+    int pops, b_count;
+    int b_cycle[3], pop_cycle[3];
+    bit seen_early;
+    reset();
+    invalidation_ready = 2'b01;
+    for (int i = 0; i < 3; i++)
+      drive_write(0, 64'h8000 + 64'(i) * 64'd64, id_t'(4'h5 + i), slots[i]);
+    for (int i = 0; i < 3; i++) begin
+      memory_rsp.b_valid = 1;
+      memory_rsp.b = '{id: slots[i], resp: 0, user: 0};
+      #2;
+      tick();
+    end
+    memory_rsp.b_valid = 0;
+    pops = 0;
+    b_count = 0;
+    seen_early = 0;
+    for (int i = 0; i < 3; i++) begin
+      b_cycle[i] = -1;
+      pop_cycle[i] = -1;
+    end
+    for (int n = 0; n < 80; n++) begin
+      if (n == 6) invalidation_ready = 2'b11;
+      #2;
+      if (invalidations[1].valid && invalidation_ready[1]) begin
+        if (pops < 3) pop_cycle[pops] = n;
+        pops++;
+      end
+      if (core_rsp[0].b_valid) begin
+        if (b_count < 3) b_cycle[b_count] = n;
+        b_count++;
+      end
+      tick();
+      if (b_count == 3 && pops >= 3) break;
+    end
+    for (int i = 0; i < 3; i++)
+      if (b_cycle[i] < 0 || pop_cycle[i] < 0 ||
+          b_cycle[i] < pop_cycle[i] + 2 + INV_LAT) seen_early = 1;
+    if (pops != 3 || b_count != 3)
+      $fatal(1, "HUB_B_RETAINED_LATE pops=%0d bs=%0d", pops, b_count);
+    if (negative) begin
+      if (!seen_early) $fatal(1, "HUB_B_BEFORE_INVAL");
+    end else if (seen_early)
+      $fatal(1, "HUB_B_BEFORE_INVAL pops=%0d,%0d,%0d bs=%0d,%0d,%0d",
+             pop_cycle[0], pop_cycle[1], pop_cycle[2],
+             b_cycle[0], b_cycle[1], b_cycle[2]);
+    $display("HUB_ACK_TIMING scenario=18 pops=%0d,%0d,%0d bs=%0d,%0d,%0d",
+             pop_cycle[0], pop_cycle[1], pop_cycle[2],
+             b_cycle[0], b_cycle[1], b_cycle[2]);
+  endtask
+
+  task automatic b_offer_stability(input bit held_offer);
+    id_t first_slot, offered_slot, later_slot;
+    resp_t saved;
+    reset();
+    if (NC != 2 || OT < 3) $fatal(1, "HUB_B_STABILITY_GEOMETRY");
+    core_req[0].b_ready = 0;
+    invalidation_ready = 2'b01;
+    if (held_offer) begin
+      drive_write(1, 64'h2000, 4'h2, first_slot, 4'b0000);
+      drive_write(0, 64'h4000, 4'h7, offered_slot);
+    end else begin
+      drive_write(0, 64'h4000, 4'h2, first_slot);
+      drive_write(0, 64'h5000, 4'h7, offered_slot, 4'b0000);
+    end
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id: held_offer ? offered_slot : first_slot, resp: 2, user: 1};
+    #2;
+    if (!memory_req.b_ready) $fatal(1, "HUB_B_STABILITY_SETUP_PARK");
+    tick(); memory_rsp.b_valid = 0;
+    if (held_offer) begin
+      invalidation_ready = '1;
+      repeat (6 + INV_LAT) tick();
+    end else begin
+      memory_rsp.b_valid = 1;
+      memory_rsp.b = '{id: offered_slot, resp: 0, user: 0};
+    end
+    #2;
+    if (!core_rsp[0].b_valid || core_rsp[0].b.id != 4'h7)
+      $fatal(1, "HUB_B_STABILITY_SETUP_OFFER");
+    saved = core_rsp[0];
+    tick();
+    if (held_offer) begin
+      memory_rsp.b_valid = 1;
+      memory_rsp.b = '{id: first_slot, resp: 0, user: 0};
+      #2;
+      if (!core_rsp[1].b_valid || !memory_req.b_ready)
+        $fatal(1, "HUB_B_STABILITY_SETUP_FREE");
+      tick(); memory_rsp.b_valid = 0;
+      drive_write(0, 64'h6000, 4'h9, later_slot, 4'b0000);
+      if (later_slot >= offered_slot) $fatal(1, "HUB_B_STABILITY_SETUP_REUSE");
+      memory_rsp.b_valid = 1;
+      memory_rsp.b = '{id: later_slot, resp: 0, user: 0};
+      #2;
+      if (!memory_req.b_ready) $fatal(1, "HUB_B_STABILITY_SETUP_LATER");
+      tick(); memory_rsp.b_valid = 0;
+    end else invalidation_ready = '1;
+    for (int n = 0; n < 8 + INV_LAT; n++) begin
+      #2;
+      if ((!core_rsp[0].b_valid || core_rsp[0].b !== saved.b) ^ negative)
+        $fatal(1, "HUB_B_STABILITY held=%0d n=%0d want=%h got=%h",
+               held_offer, n, saved.b, core_rsp[0].b);
+      tick();
+    end
+    core_req[0].b_ready = 1;
+    #2;
+    if (core_rsp[0].b !== saved.b) $fatal(1, "HUB_B_STABILITY_ACCEPT");
+    tick(); memory_rsp.b_valid = 0;
+    #2;
+    if (!core_rsp[0].b_valid || core_rsp[0].b.id != (held_offer ? 4'h9 : 4'h2))
+      $fatal(1, "HUB_B_STABILITY_DRAIN");
+    tick();
+  endtask
+
+  task automatic atomic_invalidation_publication(input bit uncached);
+    id_t slot;
+    bit r_done, b_done, take_r, take_b;
+    reset();
+    invalidation_ready = 2'b01;
+    core_req[0].aw = aw(64'h80004000, 4'h6, uncached ? 4'b0000 : 4'b0010);
+    core_req[0].aw.atop = 6'b100000;
+    core_req[0].aw_valid = 1;
+    memory_rsp.aw_ready = 1;
+    #2;
+    if (!memory_req.aw_valid || !core_rsp[0].aw_ready) $fatal(1, "HUB_ATOMIC_PUBLICATION_SETUP");
+    slot = memory_req.aw.id;
+    tick(); core_req[0].aw_valid = 0; memory_rsp.aw_ready = 0;
+    core_req[0].w = '{data:64'h123, strb:'1, last:1, user:0};
+    core_req[0].w_valid = 1; memory_rsp.w_ready = 1;
+    #2;
+    if (!core_rsp[0].w_ready) $fatal(1, "HUB_ATOMIC_PUBLICATION_W");
+    tick(); core_req[0].w_valid = 0; memory_rsp.w_ready = 0;
+    repeat (3) tick();
+    if (uncached && ((!invalidations[1].valid) ^ negative)) $fatal(1, "HUB_ATOMIC_MISSING_INVAL");
+    memory_rsp.r_valid = 1;
+    memory_rsp.r = '{id:slot, data:64'h88, resp:0, last:1, user:0};
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id:slot, resp:0, user:0};
+    r_done = 0; b_done = 0;
+    for (int n = 0; n < 24; n++) begin
+      if (n == 8) invalidation_ready = '1;
+      #2;
+      if (n < 8 && ((core_rsp[0].r_valid || core_rsp[0].b_valid) ^ negative))
+        $fatal(1, "HUB_ATOMIC_BEFORE_INVAL");
+      if (core_rsp[0].r_valid) begin
+        if (r_done || core_rsp[0].r.id != 4'h6 || core_rsp[0].r.data != 64'h88)
+          $fatal(1, "HUB_ATOMIC_PUBLICATION_R");
+        r_done = 1;
+      end
+      if (core_rsp[0].b_valid) begin
+        if (b_done || core_rsp[0].b.id != 4'h6) $fatal(1, "HUB_ATOMIC_PUBLICATION_B");
+        b_done = 1;
+      end
+      take_r = memory_rsp.r_valid && memory_req.r_ready;
+      take_b = memory_rsp.b_valid && memory_req.b_ready;
+      tick();
+      if (take_r) memory_rsp.r_valid = 0;
+      if (take_b) memory_rsp.b_valid = 0;
+      if (r_done && b_done) break;
+    end
+    if (!r_done || !b_done) $fatal(1, "HUB_ATOMIC_PUBLICATION_DRAIN");
+  endtask
+
+  task automatic refill_during_write;
+    id_t write_slot, read_slot;
+    bit read_pending, write_done, b_sent, core_b_seen, core_r_seen;
+    bit cache_valid, fill_killed, take_r, take_b;
+    logic [63:0] memory_value, read_value, cache_value;
+    reset();
+    memory_value = 64'h11; read_value = 0; cache_value = 0;
+    read_pending = 0; write_done = 0; b_sent = 0;
+    core_b_seen = 0; core_r_seen = 0; cache_valid = 0; fill_killed = 0;
+    read_slot = 0;
+    core_req[0].aw = aw(64'h80004000, 4'h6, 4'b0010);
+    core_req[0].aw_valid = 1; memory_rsp.aw_ready = 1;
+    #2;
+    if (!core_rsp[0].aw_ready) $fatal(1, "HUB_REFILL_PUBLICATION_SETUP");
+    write_slot = memory_req.aw.id;
+    tick(); core_req[0].aw_valid = 0;
+    for (int n = 0; n < 64; n++) begin
+      memory_rsp = '0;
+      memory_rsp.ar_ready = 1; memory_rsp.w_ready = 1;
+      memory_rsp.r_valid = read_pending;
+      memory_rsp.r = '{id:read_slot, data:read_value, resp:0, last:1, user:0};
+      memory_rsp.b_valid = write_done && !b_sent;
+      memory_rsp.b = '{id:write_slot, resp:0, user:0};
+      if (n == 5) begin
+        core_req[1].ar = ar(64'h80004000, 4'h7);
+        core_req[1].ar_valid = 1;
+      end
+      core_req[0].w_valid = n >= 16 && !write_done;
+      core_req[0].w = '{data:64'h22, strb:'1, last:1, user:0};
+      #2;
+      if (invalidations[1].valid && invalidation_ready[1]) begin
+        cache_valid = 0;
+        if (read_pending) fill_killed = 1;
+      end
+      if (core_rsp[1].r_valid) begin
+        if (core_r_seen || core_rsp[1].r.id != 4'h7) $fatal(1, "HUB_REFILL_PUBLICATION_R");
+        cache_value = core_rsp[1].r.data;
+        cache_valid = !fill_killed;
+        core_r_seen = 1;
+      end
+      if (core_rsp[0].b_valid) begin
+        if (cache_valid && cache_value != memory_value)
+          $fatal(1, "HUB_STALE_REFILL_PUBLICATION value=%h memory=%h", cache_value, memory_value);
+        core_b_seen = 1;
+      end
+      take_r = memory_rsp.r_valid && memory_req.r_ready;
+      take_b = memory_rsp.b_valid && memory_req.b_ready;
+      if (memory_req.ar_valid && memory_rsp.ar_ready) begin
+        read_slot = memory_req.ar.id;
+        read_value = memory_value;
+        read_pending = 1;
+        fill_killed = invalidations[1].valid && invalidation_ready[1];
+      end
+      if (memory_req.w_valid && memory_rsp.w_ready) begin
+        memory_value = memory_req.w.data;
+        write_done = 1;
+      end
+      begin
+        bit ar_taken;
+        ar_taken = core_req[1].ar_valid && core_rsp[1].ar_ready;
+        tick();
+        if (ar_taken) core_req[1].ar_valid = 0;
+      end
+      if (take_r) read_pending = 0;
+      if (take_b) b_sent = 1;
+      if (core_b_seen && core_r_seen) break;
+    end
+    if (!core_b_seen || !core_r_seen) $fatal(1, "HUB_REFILL_PUBLICATION_DRAIN");
+    if (cache_valid && cache_value != memory_value) $fatal(1, "HUB_STALE_REFILL_PUBLICATION");
+  endtask
+
+  task automatic same_id_b_order;
+    id_t first_slot, second_slot;
+    int count;
+    reset();
+    invalidation_ready = 2'b01;
+    drive_write(0, 64'h4000, 4'h5, first_slot);
+    drive_write(0, 64'h5000, 4'h5, second_slot, 4'b0000);
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id:first_slot, resp:2, user:1};
+    #2;
+    if (!memory_req.b_ready) $fatal(1, "HUB_B_ID_ORDER_SETUP");
+    tick();
+    memory_rsp.b = '{id:second_slot, resp:0, user:0};
+    #2;
+    if (core_rsp[0].b_valid) $fatal(1, "HUB_B_ID_ORDER");
+    if (!memory_req.b_ready) $fatal(1, "HUB_B_ID_ORDER_CAPTURE");
+    tick(); memory_rsp.b_valid = 0;
+    count = 0;
+    for (int n = 0; n < 24; n++) begin
+      if (n == 6) invalidation_ready = '1;
+      #2;
+      if (core_rsp[0].b_valid) begin
+        if (n < 6 || core_rsp[0].b.id != 4'h5 || count >= 2 ||
+            core_rsp[0].b.resp != (count == 0 ? 2 : 0) ||
+            core_rsp[0].b.user != ((count == 0) ^ negative))
+          $fatal(1, "HUB_B_ID_ORDER count=%0d resp=%h", count, core_rsp[0].b);
+        count++;
+      end
+      tick();
+      if (count == 2) break;
+    end
+    if (count != 2) $fatal(1, "HUB_B_ID_ORDER_DRAIN");
+  endtask
+
+  task automatic full_id_space;
+    id_t slots[OT];
+    reset();
+    for (int n = 0; n < OT; n++)
+      accept_read(n % 2, 64'h1000 + 64'(n) * 64'd64, id_t'(n), slots[n]);
+    for (int n = OT - 1; n >= 0; n--)
+      return_read(n % 2, slots[n], id_t'(n), 64'(n));
+  endtask
+
   initial begin
     scenario = 0;
     negative = $test$plusargs("oracle_negative");
@@ -565,9 +1261,263 @@ module tb_g6lc_coherence_hub;
       7: one_slot();
       8: reset_held();
       9: arbiter_fairness();
+      10: atomic_lifetime();
+      11: full_id_space();
+      12: signature_hub();
+      13: atomic_remaining_orders();
+      14: write_ack_after_inval();
+      15: write_ack_independent();
+      16: write_ack_coalesce();
+      17: write_ack_fast_path();
+      18: write_ack_retained();
+      19: b_offer_stability(0);
+      20: b_offer_stability(1);
+      21: atomic_invalidation_publication(0);
+      22: atomic_invalidation_publication(1);
+      23: refill_during_write();
+      24: same_id_b_order();
       default: $fatal(1, "HUB_SCENARIO");
     endcase
     $display("HUB_PASS scenario=%0d", scenario);
+    $finish;
+  end
+endmodule
+
+module tb_g6lc_coherence_l2;
+  import g6lc_coherence_pkg::*;
+  import g6lc_l2_tb_pkg::*;
+  parameter bit USE_L2=1;
+  parameter logic [3:0] CACHE_ATTR=4'hf;
+  parameter int BYTE_SIZE=4096, SET_ASSOC=4, MSHR_DEPTH=4, DATA_BANKS=2;
+  parameter int WRITE_DELAY=16, W_STALL=0, B_DELAY=0, INV_HOLD=0, R_HOLD=0, B_HOLD=0;
+  localparam addr_t ADDRESS=64'h80004000;
+  logic clk=0,rst_n=0;
+  req_t [1:0] requests;
+  logic rd_req_valid=0,rd_ready=0,wr_req_valid=0,wr_data_valid=0,wr_resp_ready=0;
+  ar_chan_t rd_req;
+  aw_chan_t wr_req;
+  w_chan_t wr_data;
+  resp_t [1:0] responses;
+  req_t hub_req,dram_req;
+  resp_t hub_rsp,dram_rsp;
+  coh_inval_t [1:0] invalidations;
+  logic [1:0] inv_ready='1;
+  logic rd_live,wr_live,wr_done;
+  id_t rd_id,wr_id;
+  addr_t rd_addr;
+  logic [7:0] rd_len,rd_beat;
+  data_t memory_value,rd_snapshot;
+  int rd_delay,b_delay;
+  int cycle=0,aw_cycle=-1,mem_b_cycle=-1,late_ar_cycle=-1,core_b_cycle=-1;
+  int read_count=0,read_beat=0,inv_count=0,apply_count=0,ar_blocked=0;
+  int first_inv_cycle=-1,last_apply_cycle=-1;
+  logic cache_valid=0,fill_live=0,fill_killed=0,fill_start=0,apply_pending=0;
+  data_t cache_value=0,fill_value=0;
+  bit negative;
+  int scenario;
+
+  g6lc_coherence_hub #(.NR_CORES(2),.MAX_OUTSTANDING(4),.INVAL_DEPTH(2),
+      .LINE_BYTES(16),.SNOOP_FILTER_EN(1),.SNOOP_FILTER_ENTRIES(128),
+      .POLICY(config_pkg::COH_OOO),.axi_req_t(req_t),.axi_resp_t(resp_t)) hub (
+      .clk_i(clk),.rst_ni(rst_n),.core_req_i(requests),.core_resp_o(responses),
+      .mem_req_o(hub_req),.mem_resp_i(hub_rsp),.inv_core_o(invalidations),
+      .inv_core_ready_i(inv_ready),.lr_valid_i(1'b0),.lr_addr_i('0),.lr_core_i('0),
+      .coh_inv_fire_o(),.coh_sf_hit_o(),.coh_sf_overapprox_o(),.coh_arb_starve_o(),
+      .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o());
+  g6lc_l2_top #(.Enable(USE_L2),.BYTE_SIZE(BYTE_SIZE),.SET_ASSOC(SET_ASSOC),
+      .LINE_WIDTH(512),.MSHR_DEPTH(MSHR_DEPTH),.DATA_BANKS(DATA_BANKS),.FAIR_WRITES(1),
+      .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
+      .axi_req_t(req_t),.axi_resp_t(resp_t)) l2 (
+      .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
+      .mst_req_o(dram_req),.mst_resp_i(dram_rsp),
+      .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
+      .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
+      .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o());
+
+  always_comb begin
+    requests='0;
+    requests[0].aw=wr_req;requests[0].aw_valid=wr_req_valid;
+    requests[0].w=wr_data;requests[0].w_valid=wr_data_valid;
+    requests[0].b_ready=wr_resp_ready;
+    requests[1].ar=rd_req;requests[1].ar_valid=rd_req_valid;
+    requests[1].r_ready=rd_ready;
+  end
+  function automatic data_t other_word(input addr_t addr);
+    return 64'h4400 | (addr & 64'h3f);
+  endfunction
+  function automatic ar_chan_t read_request(input id_t id);
+    ar_chan_t r;
+    r='0;r.addr=ADDRESS;r.id=id;r.len=1;r.size=3;r.burst=1;r.cache=CACHE_ATTR;
+    return r;
+  endfunction
+  always_comb begin
+    dram_rsp='0;
+    dram_rsp.ar_ready=!rd_live;
+    dram_rsp.aw_ready=!wr_live;
+    dram_rsp.w_ready=wr_live && !wr_done && cycle-aw_cycle>=WRITE_DELAY+W_STALL;
+    dram_rsp.b_valid=wr_live && wr_done && b_delay==0;
+    dram_rsp.b='{id:wr_id,resp:0,user:0};
+    dram_rsp.r_valid=rd_live && rd_delay==0;
+    dram_rsp.r='{id:rd_id,
+      data:(rd_addr+64'(rd_beat)*8==ADDRESS ? rd_snapshot : other_word(rd_addr+64'(rd_beat)*8)),
+      resp:0,last:rd_beat==rd_len,user:0};
+  end
+  always_ff @(posedge clk or negedge rst_n) begin
+    if(!rst_n) begin
+      rd_live<=0;wr_live<=0;wr_done<=0;rd_id<=0;wr_id<=0;
+      rd_addr<=0;rd_len<=0;rd_beat<=0;rd_delay<=0;b_delay<=0;
+      memory_value<=64'h11;rd_snapshot<=0;
+    end else begin
+      if(rd_delay>0)rd_delay<=rd_delay-1;
+      if(b_delay>0)b_delay<=b_delay-1;
+      if(dram_req.ar_valid && dram_rsp.ar_ready) begin
+        rd_live<=1;rd_id<=dram_req.ar.id;rd_addr<=dram_req.ar.addr;
+        rd_len<=dram_req.ar.len;rd_beat<=0;rd_delay<=3;rd_snapshot<=memory_value;
+      end
+      if(dram_rsp.r_valid && dram_req.r_ready) begin
+        if(dram_rsp.r.last)rd_live<=0;else rd_beat<=rd_beat+1'b1;
+      end
+      if(dram_req.aw_valid && dram_rsp.aw_ready) begin
+        if(dram_req.aw.addr!=ADDRESS || dram_req.aw.len!=0 || dram_req.aw.atop!=0)
+          $fatal(1,"COH_L2_MEMORY_AW");
+        wr_live<=1;wr_done<=0;wr_id<=dram_req.aw.id;
+      end
+      if(dram_req.w_valid && dram_rsp.w_ready) begin
+        if(!dram_req.w.last || dram_req.w.strb!='1)$fatal(1,"COH_L2_MEMORY_W");
+        memory_value<=dram_req.w.data;wr_done<=1;b_delay<=B_DELAY;
+      end
+      if(dram_rsp.b_valid && dram_req.b_ready)begin wr_live<=0;wr_done<=0;end
+    end
+  end
+  always @(posedge clk) begin
+    if(rst_n)begin
+      cycle++;
+      if(cycle>4000)begin
+        $display("COMPOSED_STALL aw=%0d inv=%0d apply=%0d mem_b=%0d core_b=%0d reads=%0d wr_live=%b wr_done=%b b_delay=%0d",
+          aw_cycle,first_inv_cycle,last_apply_cycle,mem_b_cycle,core_b_cycle,read_count,wr_live,wr_done,b_delay);
+        $display("COMPOSED_STALL core: aw_v=%b aw_r=%b w_v=%b w_r=%b b_v=%b b_r=%b inv_v=%b inv_r=%b",
+          wr_req_valid,responses[0].aw_ready,wr_data_valid,responses[0].w_ready,responses[0].b_valid,
+          wr_resp_ready,invalidations[1].valid,inv_ready[1]);
+        $display("COMPOSED_STALL hub->l2: aw_v=%b aw_r=%b w_v=%b w_r=%b b_v=%b b_r=%b ar_v=%b ar_r=%b r_v=%b r_r=%b",
+          hub_req.aw_valid,hub_rsp.aw_ready,hub_req.w_valid,hub_rsp.w_ready,hub_rsp.b_valid,hub_req.b_ready,
+          hub_req.ar_valid,hub_rsp.ar_ready,hub_rsp.r_valid,hub_req.r_ready);
+        $display("COMPOSED_STALL l2->mem: aw_v=%b aw_r=%b w_v=%b w_r=%b b_v=%b b_r=%b",
+          dram_req.aw_valid,dram_rsp.aw_ready,dram_req.w_valid,dram_rsp.w_ready,dram_rsp.b_valid,dram_req.b_ready);
+        $display("COMPOSED_STALL hub: w_busy=%b w_owner=%0d aw_hold=%b inv_pend_valid=%b sig_pending=%b slots=%h ar_hold=%b",
+          hub.gen_cluster.w_busy_q,hub.gen_cluster.w_owner_q,hub.gen_cluster.aw_hold_q,
+          hub.gen_cluster.inv_pend_valid_q,hub.gen_cluster.sig_pending_q,hub.gen_cluster.slot_used,hub.gen_cluster.ar_hold_q);
+        for(int s=0;s<4;s++)
+          $display("COMPOSED_STALL slot%0d aw_valid=%b b_held=%b b_done=%b expect_r=%b core=%0d inv_owed=%b inv_wait=%b settle=%0d pred=%b",
+            s,hub.gen_cluster.aw_ot_q[s].valid,hub.gen_cluster.aw_ot_q[s].b_held,hub.gen_cluster.aw_ot_q[s].b_done,
+            hub.gen_cluster.aw_ot_q[s].expect_r,hub.gen_cluster.aw_ot_q[s].core,hub.gen_cluster.inv_ot_q[s].inv_owed,
+            hub.gen_cluster.inv_ot_q[s].inv_wait,hub.gen_cluster.inv_ot_q[s].inv_settle,hub.gen_cluster.b_predecessors_q[s]);
+        $fatal(1,"COH_L2_WATCHDOG");
+      end
+      if($test$plusargs("diagnose") && cycle>=130 && cycle<150)begin
+        $display("COMPOSED_DIAG cycle=%0d ready=%b req=%b hub_input=%b ar_req=%b block=%b alloc_ready=%b free=%b winner=%b hub_ar=%b l2_ready=%b dram_ar=%b dram_ready=%b sf_ready=%b slots=%h",
+          cycle,responses[1].ar_ready,rd_req_valid,hub.core_req_i[1].ar_valid,
+          hub.gen_cluster.ar_req,hub.gen_cluster.coh_block_ar,hub.gen_cluster.sig_alloc_ready,
+          hub.gen_cluster.ar_have_free,hub.gen_cluster.ar_winner,hub_req.ar_valid,hub_rsp.ar_ready,
+          dram_req.ar_valid,dram_rsp.ar_ready,hub.gen_cluster.sig_initialized,hub.gen_cluster.slot_used);
+      end
+      if(wr_req_valid && responses[0].aw_ready)aw_cycle=cycle;
+      if(dram_rsp.b_valid && dram_req.b_ready)mem_b_cycle=cycle;
+      if(hub_req.ar_valid && !hub_rsp.ar_ready && aw_cycle>=0)ar_blocked++;
+      if(rd_req_valid && responses[1].ar_ready && read_count==1)late_ar_cycle=cycle;
+      if(fill_start)begin fill_live=1;fill_killed=0;cache_valid=0;end
+      if(apply_pending)begin
+        cache_valid=0;apply_count++;last_apply_cycle=cycle;
+        if(fill_live)fill_killed=1;
+      end
+      apply_pending=invalidations[1].valid && inv_ready[1];
+      if(apply_pending)begin
+        if(invalidations[1].line_addr!=coh_line_tag(ADDRESS,16))$fatal(1,"COH_L2_INVAL_ADDRESS");
+        inv_count++;if(first_inv_cycle<0)first_inv_cycle=cycle;
+      end
+      if(invalidations[0].valid)$fatal(1,"COH_L2_WRITER_TARGET");
+      if(responses[1].r_valid && rd_ready)begin
+        if(responses[1].r.id!=id_t'(read_count+1) || responses[1].r.resp!=0 ||
+           responses[1].r.last!=(read_beat==1))$fatal(1,"COH_L2_RESPONSE_OWNER");
+        if(read_beat==0)fill_value=responses[1].r.data;
+        else if(responses[1].r.data!=other_word(ADDRESS+8))$fatal(1,"COH_L2_RESPONSE_OFFSET");
+        if(responses[1].r.last)begin
+          cache_value=fill_value;cache_valid=!fill_killed;fill_live=0;read_count++;read_beat=0;
+        end else read_beat++;
+      end
+      if(responses[0].b_valid && wr_resp_ready)begin
+        if(core_b_cycle>=0 || responses[0].b.id!=4'h6 || responses[0].b.resp!=0)
+          $fatal(1,"COH_L2_B_OWNER");
+        if(apply_count!=1)$fatal(1,"COH_L2_B_BEFORE_APPLY");
+        if(cache_valid && cache_value!=64'h22)$fatal(1,"COH_L2_STALE_VALUE");
+        core_b_cycle=cycle;
+      end
+    end
+  end
+  assert property(@(posedge clk)disable iff(!rst_n)
+    responses[0].b_valid && !wr_resp_ready |=> responses[0].b_valid && $stable(responses[0].b))
+    else $fatal(1,"COH_L2_B_STABILITY");
+  assert property(@(posedge clk)disable iff(!rst_n)
+    responses[1].r_valid && !rd_ready |=> responses[1].r_valid && $stable(responses[1].r))
+    else $fatal(1,"COH_L2_R_STABILITY");
+
+  task automatic tick;#2;clk=1;#2;clk=0;#2;endtask
+  task automatic send_read(input id_t id);
+    rd_req=read_request(id);rd_req_valid=1;fill_start=1;
+    for(int n=0;n<2000;n++)begin
+      #1;
+      if(responses[1].ar_ready)begin tick();rd_req_valid=0;fill_start=0;return;end
+      tick();fill_start=0;
+    end
+    $fatal(1,"COH_L2_AR_TIMEOUT");
+  endtask
+  initial begin
+    negative=$test$plusargs("oracle_negative");
+    if(!$value$plusargs("scenario=%d",scenario))scenario=0;
+    repeat(3)tick();rst_n=1;repeat(132)tick();
+    wr_resp_ready=1;rd_ready=1;
+    send_read(1);
+    while(read_count!=1)tick();
+    if(!cache_valid || cache_value!=64'h11)$fatal(1,"COH_L2_WARMUP");
+    wr_req='0;
+    wr_req.addr=ADDRESS;wr_req.id=6;wr_req.size=3;
+    wr_req.burst=1;wr_req.cache=CACHE_ATTR;wr_req_valid=1;
+    inv_ready[1]=(INV_HOLD==0);wr_resp_ready=(B_HOLD==0);
+    while(aw_cycle<0)tick();
+    wr_req_valid=0;
+    for(int n=0;n<2000;n++)begin
+      bit ar_taken,w_taken;
+      wr_data_valid=cycle-aw_cycle>=WRITE_DELAY && !wr_done && mem_b_cycle<0;
+      wr_data='{data:64'h22,strb:'1,last:1,user:0};
+      inv_ready[1]=cycle-aw_cycle>=INV_HOLD;
+      wr_resp_ready=cycle-aw_cycle>=B_HOLD;
+      rd_ready=cycle-aw_cycle>=R_HOLD;
+      fill_start=0;
+      if(n==4 && scenario==0)begin
+        rd_req=read_request(2);rd_req_valid=1;fill_start=1;
+      end
+      #1;
+      ar_taken=rd_req_valid && responses[1].ar_ready;
+      w_taken=wr_data_valid && responses[0].w_ready;
+      tick();
+      if(ar_taken)rd_req_valid=0;
+      if(w_taken)wr_data_valid=0;
+      if(core_b_cycle>=0 && read_count==(scenario==0 ? 2 : 1))break;
+    end
+    fill_start=0;wr_data_valid=0;rd_ready=1;wr_resp_ready=1;inv_ready[1]=1;
+    if(core_b_cycle<0 || inv_count!=1 || apply_count!=1 || memory_value!=64'h22)
+      $fatal(1,"COH_L2_COMPLETION");
+    if(cache_valid && cache_value!=64'h22)$fatal(1,"COH_L2_STALE_VALUE");
+    if(USE_L2 && scenario==0 && (ar_blocked==0 || late_ar_cycle<mem_b_cycle))
+      $fatal(1,"COH_L2_ADMISSION_CONTRACT");
+    send_read(id_t'(read_count+1));
+    begin
+      int wanted;
+      wanted=scenario==0 ? 3 : 2;
+      while(read_count!=wanted)tick();
+    end
+    if(!cache_valid || cache_value!=(64'h22 ^ 64'(negative)))$fatal(1,"COH_L2_FINAL_VALUE");
+    $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d aw=%0d inv=%0d apply=%0d mem_b=%0d late_ar=%0d core_b=%0d blocked=%0d",
+      scenario,USE_L2,BYTE_SIZE,aw_cycle,first_inv_cycle,last_apply_cycle,mem_b_cycle,late_ar_cycle,core_b_cycle,ar_blocked);
     $finish;
   end
 endmodule

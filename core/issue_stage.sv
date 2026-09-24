@@ -34,6 +34,13 @@ module issue_stage
     input logic clk_i,
     // Asynchronous reset active low - SUBSYSTEM
     input logic rst_ni,
+    input logic [1:0] phys_valid_i,
+    input logic [1:0][CVA6Cfg.PLEN-1:0] phys_addr_i,
+    input logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_i,
+    input logic [1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_i,
+    input logic [1:0][1:0] phys_size_i,
+    input logic [1:0] mod_valid_i,
+    input logic [1:0][CVA6Cfg.PLEN-1:0] mod_addr_i,
     // Is scoreboard full - PERF_COUNTERS
     output logic sb_full_o,
     output logic sb_empty_o,
@@ -253,6 +260,7 @@ module issue_stage
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live;
   assign sb_live_o = sb_live;
   logic mem_violation;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_pending, phys_replay;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] mem_violation_id;
 
   // ---------------------------------------------------------
@@ -276,6 +284,7 @@ module issue_stage
       .sb_live_o               (sb_live),
       .sb_head_pc_o            (sb_head_pc_o),
       .sb_head_valid_o         (sb_head_valid_o),
+      .phys_pending_i(phys_pending), .phys_replay_i(phys_replay), .phys_mod_i(|mod_valid_i),
       .mem_violation_i         (mem_violation),
       .mem_violation_id_i      (mem_violation_id),
       .flush_unissued_instr_i,
@@ -331,6 +340,9 @@ module issue_stage
     ) i_ooo_dispatch (
         .clk_i,
         .rst_ni,
+        .phys_valid_i, .phys_addr_i, .phys_id_i, .phys_hart_i, .phys_size_i,
+        .mod_valid_i, .mod_addr_i,
+        .phys_pending_o(phys_pending), .phys_replay_o(phys_replay),
         .flush_i          (flush_i),
         .flush_unissued_i (flush_unissued_instr_i),
         .cancelled_mask_i (cancelled_mask_o),
@@ -376,6 +388,8 @@ module issue_stage
   end else if (CVA6Cfg.SliceOoOEn) begin : gen_slice_ooo
     assign mem_violation    = 1'b0;
     assign mem_violation_id = '0;
+    assign phys_pending = '0;
+    assign phys_replay = '0;
     assign ooo_op_a   = '0;
     assign ooo_op_b   = '0;
     assign ooo_op_a_v = '0;
@@ -410,6 +424,8 @@ module issue_stage
     // Netlist-identity path: SB dispatch is FU issue
     assign mem_violation    = 1'b0;
     assign mem_violation_id = '0;
+    assign phys_pending = '0;
+    assign phys_replay = '0;
     assign issue_instr_iro = issue_instr_sb;
     assign orig_instr_iro  = orig_instr_sb;
     assign issue_ack_sb    = issue_ack_iro;

@@ -15,6 +15,21 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ---
 
+## OoO coherence continuation — qualification open
+
+Atomic response transport and same-cycle cache refill/invalidation have additional directed
+positive/negative coverage. Conservative sharer signatures have reduced-geometry bounded safety
+and reached conflict coverage, plus a three-core transport seam test. The WT return decoder has
+an exhaustive combinational conservation check. None establishes full multicore RVWMO,
+full physical-load integration, invalidation/publication visibility or physical sign-off.
+The physical-validation candidate now has directed ownership/alias/cancel tests, a reduced
+bounded ledger proof with reached post-completion snoop coverage, and a real scoreboard/commit
+boundary check. WT fill-kill and invalidation/flush-port collisions have non-vacuous directed
+coverage. Additional sequential full-PA retention and AXI response-stability/order controls detect
+previously untested failures. Atomic response exclusion has directed coverage; a standalone
+write/refill-publication counterexample remains unresolved at the composition boundary.
+OoO coherence remains qualification-gated; architectural coverage is not promoted.
+
 ## Precise misalignment and instruction recovery — qualification open
 
 The original load-offset assertions are currently restored. The earlier alignment-qualified

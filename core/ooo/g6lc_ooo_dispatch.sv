@@ -36,6 +36,15 @@ module g6lc_ooo_dispatch
 ) (
     input  logic clk_i,
     input  logic rst_ni,
+    input logic [1:0] phys_valid_i,
+    input logic [1:0][CVA6Cfg.PLEN-1:0] phys_addr_i,
+    input logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_i,
+    input logic [1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_i,
+    input logic [1:0][1:0] phys_size_i,
+    input logic [1:0] mod_valid_i,
+    input logic [1:0][CVA6Cfg.PLEN-1:0] mod_addr_i,
+    output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_pending_o,
+    output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_replay_o,
     input  logic flush_i,
     input  logic flush_unissued_i,
     // Younger wrong-path SB slots (SpeculativeSb cancel + same-cycle bmiss)
@@ -899,11 +908,12 @@ module g6lc_ooo_dispatch
 
   // Store commit across every commit port, not just port 0: a store retiring on
   // a higher port would otherwise never release its LSQ entry.
-  logic [CVA6Cfg.NrCommitPorts-1:0] commit_st;
+  logic [CVA6Cfg.NrCommitPorts-1:0] commit_st, commit_ld;
   logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] commit_st_id;
   always_comb begin
     for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++) begin
       commit_st[c]    = commit_arch[c] && (commit_instr_i[c].fu == STORE);
+      commit_ld[c]    = commit_ack_i[c] && (commit_instr_i[c].fu == LOAD);
       commit_st_id[c] = commit_instr_i[c].trans_id;
     end
   end
@@ -929,6 +939,9 @@ module g6lc_ooo_dispatch
   ) i_lsq (
       .clk_i,
       .rst_ni,
+      .phys_valid_i, .phys_addr_i, .phys_id_i, .phys_hart_i, .phys_size_i,
+      .mod_valid_i, .mod_addr_i, .phys_pending_o, .phys_replay_o,
+      .commit_ld_i(commit_ld),
       .flush_i,
       .cancelled_mask_i,
       .sb_live_i   (sb_live_i),

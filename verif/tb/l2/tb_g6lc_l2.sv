@@ -1265,6 +1265,7 @@ module g6lc_l2_fixture
   parameter int unsigned SET_ASSOC = 4,
   parameter int unsigned RR_EN = 0,
   parameter int unsigned EQ_NEGATIVE = 0,
+  parameter bit FAIR_WRITES = 1'b0,
   parameter int unsigned MSHR_DEPTH = 4,
   parameter int unsigned DATA_BANKS = 2,
   parameter bit CHAIN_L3 = 1'b0
@@ -1303,6 +1304,7 @@ module g6lc_l2_fixture
     .MSHR_DEPTH(MSHR_DEPTH), .DATA_BANKS(DATA_BANKS),
 `ifndef L2TB_LEGACY
     .RR_EN(bit'(RR_EN)),
+    .FAIR_WRITES(FAIR_WRITES),
 `endif
     .axi_req_t(req_t), .axi_resp_t(resp_t)
   ) i_l2 (

@@ -19,20 +19,31 @@ mark_cycles:
   .section .text
   .globl main
 main:
+  li   a3, 1
   csrr s0, mcycle
-  li   t0, 0
-  li   t1, 1
-  li   t2, 64
-1:
-  add  t0, t0, t1
-  addi t2, t2, -1
-  bnez t2, 1b
+  .rept 8
+  add  t0, s0, a3
+  add  t1, s0, a3
+  add  t2, s0, a3
+  add  t3, s0, a3
+  add  t4, s0, a3
+  add  t5, s0, a3
+  add  t6, s0, a3
+  add  a1, s0, a3
+  .endr
   csrr s1, mcycle
   sub  s1, s1, s0
-  la   t3, mark_cycles
-  sd   s1, 0(t3)
-  li   a0, 64
+  la   a4, mark_cycles
+  sd   s1, 0(a4)
+  add  a0, s0, a3
   bne  t0, a0, fail
+  bne  t1, a0, fail
+  bne  t2, a0, fail
+  bne  t3, a0, fail
+  bne  t4, a0, fail
+  bne  t5, a0, fail
+  bne  t6, a0, fail
+  bne  a1, a0, fail
   li   a0, 0
   ret
 fail:

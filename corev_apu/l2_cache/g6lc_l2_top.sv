@@ -29,6 +29,7 @@ module g6lc_l2_top
     // all-valid sets the victim is a per-set pointer advanced past the
     // last-installed way. Default-off: RR_EN=0 folds to the legacy netlist.
     parameter bit          RR_EN       = 1'b0,
+    parameter bit          FAIR_WRITES = 1'b0,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -308,6 +309,18 @@ module g6lc_l2_top
   } state_e;
 
   state_e state_q, state_d;
+  logic write_turn_q, prefer_write;
+  assign prefer_write = FAIR_WRITES && write_turn_q && slv_req_i.aw_valid;
+  if (FAIR_WRITES) begin : gen_write_fairness
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) write_turn_q <= 1'b0;
+      else if (slv_req_i.aw_valid && slv_resp_o.aw_ready) write_turn_q <= 1'b0;
+      else if ((slv_req_i.ar_valid && slv_resp_o.ar_ready) ||
+               (state_q == S_IDLE && state_d == S_SERVE)) write_turn_q <= 1'b1;
+    end
+  end else begin : gen_legacy_write_priority
+    assign write_turn_q = 1'b0;
+  end
 
   // Captured request
   logic [AXI_ADDR_WIDTH-1:0] addr_q, addr_d;
@@ -494,6 +507,28 @@ module g6lc_l2_top
   end
   assign tag_probe_way = victim_way;
 
+  logic install_discard;
+  assign install_discard = fill_kill_q[inst_idx] ||
+      (fill_ferr_q[inst_idx] != axi_pkg::RESP_OKAY) ||
+      (l2_back_inval_valid_i &&
+       line_align(fill_addr_q[inst_idx]) == line_align(l2_back_inval_addr_i)) ||
+      (wr_inval_pend_q &&
+       line_align(fill_addr_q[inst_idx]) == line_align(wr_inval_addr_q)) ||
+      ((state_q == S_BYPASS_AW || state_q == S_BYPASS_W) &&
+       line_align(fill_addr_q[inst_idx]) == line_align(addr_q));
+  assign data_a_req = (state_q == S_TAG) && tag_hit && !(|mshr_id_match);
+  assign data_a_we = 1'b0;
+  assign data_a_idx = idx_of(addr_q);
+  assign data_a_way = data_a_req ? tag_way : way_q;
+  assign data_a_wdata = '0;
+  assign data_a_be = '1;
+  assign data_b_req = inst_vld && !install_discard;
+  assign data_b_we = data_b_req;
+  assign data_b_idx = data_b_req ? idx_of(fill_addr_q[inst_idx]) : idx_of(addr_q);
+  assign data_b_way = data_b_req ? fill_way_q[inst_idx] : way_q;
+  assign data_b_wdata = data_b_req ? fill_buf_q[inst_idx] : line_q;
+  assign data_b_be = '1;
+
   // AXI slave defaults
   always_comb begin
     // Slave response
@@ -524,18 +559,6 @@ module g6lc_l2_top
     tag_wvalid = 1'b1;
     tag_iway   = way_q;
 
-    data_a_req = 1'b0;
-    data_a_we  = 1'b0;
-    data_a_idx = idx_of(addr_q);
-    data_a_way = way_q;
-    data_a_wdata = '0;
-    data_a_be    = '1;
-    data_b_req = 1'b0;
-    data_b_we  = 1'b0;
-    data_b_idx = idx_of(addr_q);
-    data_b_way = way_q;
-    data_b_wdata = line_q;
-    data_b_be    = '1;
 
     mshr_alloc       = 1'b0;
     mshr_alloc_meta  = {addr_q[OFF_BITS-1:0], len_q, size_q};
@@ -617,7 +640,7 @@ module g6lc_l2_top
           // A deferred self-invalidation must land before any later request can
           // look up the line it covers.
           state_d = S_IDLE;
-        end else if (slv_req_i.ar_valid && (serve_turn_q || !serve_pend)) begin
+        end else if (slv_req_i.ar_valid && (serve_turn_q || !serve_pend) && !prefer_write) begin
           // Prefer reads (MLP); accept write when no AR
           slv_resp_o.ar_ready = 1'b1;
           addr_d      = slv_req_i.ar.addr;
@@ -642,7 +665,7 @@ module g6lc_l2_top
             l2_bypass_o = 1'b1;
             state_d = S_BYPASS_AR;
           end
-        end else if (serve_pend) begin
+        end else if (serve_pend && !prefer_write) begin
           // Oldest ready fill entry gets the response channel next. Its
           // primary's id/offset come from the entry itself (complete_idx is
           // already pointed at the fifo head below).
@@ -694,10 +717,6 @@ module g6lc_l2_top
           l2_hit_o = 1'b1;
           way_d    = tag_way;
           // Kick data read
-          data_a_req = 1'b1;
-          data_a_we  = 1'b0;
-          data_a_idx = idx_of(addr_q);
-          data_a_way = tag_way;
           state_d    = S_HIT_WAIT;
         end else begin
           l2_miss_o = 1'b1;
@@ -1005,7 +1024,7 @@ module g6lc_l2_top
     // later read silently. Both still become servable so attached waiters
     // drain, then the entry frees.
     if (inst_vld) begin
-      if (fill_kill_q[inst_idx] || (fill_ferr_q[inst_idx] != axi_pkg::RESP_OKAY)) begin
+      if (install_discard) begin
         fill_state_d[inst_idx] = F_READY;
       end else begin
         tag_write  = !bank_conflict;
@@ -1014,12 +1033,6 @@ module g6lc_l2_top
         tag_wtag   = tag_of(fill_addr_q[inst_idx]);
         tag_wvalid = 1'b1;
 
-        data_b_req   = 1'b1;
-        data_b_we    = 1'b1;
-        data_b_idx   = idx_of(fill_addr_q[inst_idx]);
-        data_b_way   = fill_way_q[inst_idx];
-        data_b_wdata = fill_buf_q[inst_idx];
-        data_b_be    = '1;
 
         if (!bank_conflict) begin
           fill_state_d[inst_idx] = F_READY;

@@ -853,6 +853,169 @@ commit-side per-hart interrupt/CSR/WFI. T6b-3 the `SmtDrainedHandoff=0` firmware
 concurrent-work probe and the isolation negatives. T6b-4 (performance, after exit) partitioned
 heads and PRF floors.
 
+## T7 — integrated OoO coherence continuation (2026-09-24; partial)
+
+Dependency order is the contract's §8: validated observation → transport/refill conservation →
+compact signatures and credit sizing → physical-load validation → whole-core coherence gates.
+The in-order path and every existing FP/mixed-SMT guard remain protected. No completion or
+production promotion follows from the leaf results below.
+
+1. **Observation and shared defects.** The mixed-probe classifier now requires transport success,
+   one early completion, checked RES/checksum words and no assertion errors; solo mode comes from
+   ELF data. `SMP_REASSESS_DIR` reclassifies a frozen run without executing the model and stamps
+   the input log/ELF hashes. The optimizer kernels gained release/acquire fences, bounded peer
+   waits, nonzero timeout results and independent ALU work anchored to the start-counter result.
+   Assembly ROI is unmeasured; the old 904-AU incomplete source report remains historical.
+2. **Transport and L2.** Hub atomic completion owns both B and RLAST in either order; response-ID
+   bounds use an extra bit. Old sources fail OT1/OT4 atomic and OT16 ID-space tests, candidates
+   pass. L2 installation loses to a same-edge matching invalidation. Its memory requests are
+   independent of conflict-dependent completion, avoiding an UNOPTFLAT cycle exposed during the
+   repair. `FAIR_WRITES` provides bounded arbitration opportunities for a pending write and is
+   selected by `OoOEn` for L2/L3; its state does not exist on the disabled path. The 64-record
+   HUM suite, negative controls and small RR0/RR1 synthesis pass with fairness enabled.
+3. **Signature implementation, not promotion.** `COH_OOO` selects a separate hub generate branch
+   and `g6lc_ooo_snoop_filter`: one-port, one-cycle `tc_sram`; one byte per core in padded 32-bit
+   words; monotone presence; an explicit `NR_ENTRIES`-cycle cold sweep; acquisition backpressure
+   during the lookup; and saved AW ownership until acceptance. The first envelope is integer OoO,
+   multiple WT cores, equal I/D L1 line widths and L2. WT word writes do not allocate new tags;
+   AR records every possible read acquisition, including speculative reads. `check_cfg` and the
+   cluster refuse unqualified use without `G6LC_OOO_COH_QUALIFY`. No production package enables it.
+   The signature branch requires at least two hub credits so a write-owned lookup cannot monopolize
+   the sole request slot; cluster credits stay at four. Verilator 5.008 downgrades static `$error`
+   under `-Wno-fatal`, so the new guard test uses `-Werror-USERERROR`; invalid/unqualified modes
+   also have simulation-fatal backstops. This is not a proof authorizing MSHR-depth reduction.
+   The reduced two-core/two-index ten-frame proof, reached alias cover, three-core simulation,
+   dropped-write mutation and three-core hub/negative seam checks are separate scoped evidence.
+4. **Measured area.** `ooocoh-signature-area-20260924-v2`: N2/E128 tagged→signature is
+   45,626→1,287 generic cells and 7,168→274 sequential cells; N4/E256 is 95,541→4,537 and
+   14,592→1,046. Logical signature bits are 256/1,024 but SRAM port storage is 4,096/8,192 bits
+   after byte/word padding. The implementations have different latency and initialization; no
+   cycle benefit, whole-hub saving or physical area follows. Do not substitute these counts for
+   `area_au` in an optimizer series. Matched fixed-work cycles are still owed.
+5. **Next ownership boundary, open.** The WT return decoder could acknowledge a D-cache R beat
+   while delivering only an external invalidation. Ready now excludes that collision; the actual
+   source-extracted decoder passes combinational proofs with RVA off/on and failing negatives.
+   This is not a full-adapter/fill-lifetime proof. Before wiring replay, export the accepted tag/
+   check-stage PA with its owner: existing `load_paddr_o` is a virtual STQ key, and current LSQ
+   entries can disappear at WB. Define same-cycle snoop/retirement, store-forwarded loads,
+   physical aliases, sibling-hart committed writes and TID reuse. An enqueue ack is not an
+   applied-invalidation ack. Unequal outer/L1-line inclusion also remains open.
+6. **Verification route.** User selected immutable run-local snapshots, not shared-mirror rsync
+   deletion. `run_ooo_coherence_gate.py --prepare <fresh.zip>` captures native generated lint/synth
+   scripts and their source/header closure; remote execution only substitutes the isolated source
+   and output roots, retaining hashes before/after. Default-target snapshots retain lint 8/54 and
+   synth 32/5; these are not whole-cluster simulation or standalone-slang passes. The historical
+   hub quality harness now pairs the archived hub with its archived dependency interfaces rather
+   than a hybrid of old/new port names; bounded reservation proofs, covers and synthesis pass.
+
+Credit-bound MSHR reduction, accepted-physical-address validation through retirement, applied-snoop
+visibility, full multicore integration, PMU/FO4/physical gates and final promotion remain unfinished.
+Artifacts are under the approved C: root with prefix `ooocoh-`; exact scopes are in the tests map.
+
+### T7b — physical validation and WT fill lifetime (candidate, not promoted)
+
+The grant/tag boundary now supplies an independent physical event (PA, TID, hart, size).
+A successor LSU head cannot rename the prior grant's event; cancellation/fault/flush suppress it.
+The old `load_paddr_o` remains a virtual STQ key. The new mode disables that uncertified forward
+shortcut rather than treating its width as proof of translation. `ooocoh-load-physical-before-20260924-v1`
+reproduces a forward completion before translation is certified. Twelve new producer outcomes,
+60 legacy load/cancellation outcomes, and address/owner/cancel/forward mutations are captured
+under `ooocoh-load-*`. This trades early STQ-forward performance for a sound initial envelope;
+restoring a physical-qualified shortcut is a separate, measured optimization.
+
+The physical event traverses LSU/EX/core/issue/dispatch to the existing LSQ records. In `COH_OOO`,
+AGU addresses do not certify them; early dependency checks use page offsets conservatively. A
+load's record survives WB until its architectural release or cancellation. Store/load aliases train
+memdep; late older-load aliases and modifications only replay. The masks retain every affected
+TID across harts, and PMA-defined non-idempotent loads are excluded from replay. A registered-state
+pending mask and a modification-cycle retirement hold feed the scoreboard; replay/cancellation
+becomes sticky before the existing precise drop path frees the slot. Exceptions are not stranded.
+
+`ooocoh-lsq-physical-v3` has 22 matched positive/negative outcomes; the legacy LSQ has 88.
+`ooocoh-retire-physical-v1` exercises the actual scoreboard plus commit_stage (8 outcomes), with
+pending/modification suppression mutations detected. `ooocoh-physical-ledger-formal-v1` proves
+occupancy, pending certification, live-owner and modification replay obligations to 12 frames with
+four transaction identities/two load entries, reaches a completed-load/snoop witness, and detects
+a checker negative. `ooocoh-physical-retention-mutation-v1` restores WB-time release and fails.
+These are bounded/leaf scopes, not full-core memory-model qualification.
+
+Enabled-core synthesis initially found 53 commit/flush loops: pending-valid suppression depended
+on flush, while pending fed commit validity. The correction separates pending into a registered-state
+only cone. `ooocoh-active-core-gate-v2` passes lint and synthesis (24/1 warnings). This is a single
+`cva6` top with the candidate ACTIVE, not multicore simulation: the snapshot privately overrides
+NrCores to two and policy to `COH_OOO`, records original/effective hashes and defines the existing
+qualification macro. No checked-in production package is modified. Default target checks retain
+8/54 lint and 32/5 synthesis baselines; input-default syntax rejected by Verilator 5.008 was removed
+and callers explicitly tie inactive ports rather than waiving the error.
+
+The WT fill fixture reproduces both invalidation-during-fill stale installation and invalidation
+lost to the flush array port. A fill-owned kill bit now prevents installation without losing the
+original response or byte offset; a subsequent fill starts clean. Invalidation wins over flushing
+while the scan retains its current index and cannot terminate on a diverted last-index write.
+The repair applies to multicore WT independently of issue policy, plus the `COH_OOO` candidate;
+the single-core legacy case is preserved. `ooocoh-wt-fill-after-v2` has 32 expected outcomes,
+including full sweep coverage and a last-index collision. The fixture uses live extracted bus types
+and a private packed-field `split_var` control to keep UNOPTFLAT fatal without altering RTL.
+
+The new core event is a delivery/apply-stage observation, not an end-to-end write-completion ack.
+Still open: simultaneous external/atomic self-invalidation conservation, local-CAS notification
+coverage, write visibility versus applied invalidations, full-stack MMU/permission and multicore
+execution, the protected OpenSBI anchor, capacity proof, and PMU/FO4/DFT/physical qualification.
+The production guard and unchanged MSHR depths are intentional until those gates close.
+
+### T7c — production-request review: not promoted
+
+The interrupted invalidation-delivery work is preserved. Its sequence counters, retained B payloads
+and fixed apply settling were not sufficient release evidence. New failing controls exposed lost
+upper PA bits in retained atomic invalidations, changing B payload under backpressure, and younger
+same-original-ID B responses bypassing older invalidation-blocked Bs. The retained address is now
+PLEN-wide; the index is a projection only. Per-core offered-slot ownership locks B through its
+handshake, and per-slot predecessor masks preserve B order for each core/original-ID key.
+Dependencies retire on core B acceptance, including B-before-R atomics, not on memory B capture.
+
+Atomic R now shares the invalidation qualification of B; a valid but blocked atomic cannot fall
+through the malformed-ID drain. AW cache[1], ATOP or lock use one invalidation predicate. Cache0
+atomic coverage is a generic-interface obligation: the actual core axi_shim emits CACHE_MODIFIABLE.
+
+Evidence: `ooocoh-self-pa-after-r1` has six-frame source-extracted state/apply proof, negative and
+cover, with truncation restored in `ooocoh-self-pa-mutation-r1`. Hub cases 19/20/24 have before,
+after and restored-omission evidence (`ooocoh-b-*-r1`). `ooocoh-atomic-order-after-r1` has six
+positive/negative records for atomic publication exclusion and same-ID order plus a signal-driven
+hub synthesis pass. `ooocoh-lifetime-review-r2` has 42 records across 1/4/16 credits;
+`ooocoh-hub-regression-review-r1` retains 16 original outcomes; the three-core signature seam and
+its synthesis pass in `ooocoh-signature-review-r1`. The old lifetime cases now begin after the
+invalidation settle interval because cache0 atomics acquire an obligation; their ownership checks
+remain intact, and distinct publication cases enforce the exclusion window.
+
+Fresh default and active single-core-top archive gates (`ooocoh-production-review-default-r1`,
+`ooocoh-production-review-active-r1`) pass at 8/54 and 32/5 default lint/synth warnings and 24/1
+active warnings. These are not cluster simulations. The first new hub synthesis wrapper had an
+unqualified enum name; it failed, was corrected, and its failed artifact was retained.
+
+**Composition result (T7d):** a standalone AXI slave permitting reads during delayed writes can
+refill old data after an AW-time invalidation and still see the writer's B later; scenario 23
+preserves this generic counterexample. `tb_g6lc_coherence_l2` composes the unchanged hub with the
+actual `g6lc_l2_top`: the L2 refuses the reader's AR for the entire stalled-write window
+(`blocked=14..33`), admits it one cycle after the memory B, and the refill returns the new value
+in the small, modifiable-only, stalled and 256 KiB/2-MSHR geometries, each with a negative oracle;
+`USE_L2=0` reproduces the stale refill and disconnecting the L2 self-invalidation restores it.
+A signal-driven Yosys `scc` check proves the composed graph loop-free. On this evidence the
+rights holder accepted the review and promoted `g6lc64_ooo_int2` (guard removed); the deferred
+items below stay open for unrestricted release. Do not reinterpret the generic-slave test as a
+demonstrated failure of the serialized L2, nor the composition result as coverage of other slaves. Neither moving the command to buffered WLAST acceptance alone nor
+adding arbitrary settle cycles is a proof of global visibility. FIFO-admission acknowledgements
+with unbounded consumer delay (HPDCACHE retain path) also cannot use fixed WT application latency
+as proof. Full CAS notification coverage, R-ID ordering, credit bound and multicore/firmware/
+compliance/PMU/DFT/FO4/physical gates remain open. No production package or qualification guard
+was changed.
+
+Timing/area note: added B order state is OT_MAX squared control bits, plus NC times (1+OT_W)
+offer-lock bits; the default four-credit geometry is small but the quadratic parameter scaling
+must be checked. The dependency reduction and selection predicates are in the B-valid cone.
+No new clock/reset domain, ISA/DTS capability or permission rule was added. Existing reset/scan
+integration is preserved structurally, not newly signed off. Generic synthesis and directed tests
+do not establish foundry area, STA, power, useful-work speedup or production readiness.
+
 ## Deferred
 
 Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,

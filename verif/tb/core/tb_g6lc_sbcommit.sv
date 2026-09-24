@@ -24,6 +24,7 @@ module tb_g6lc_sbcommit;
   import ariane_pkg::*;
   `include "g6lc_core_types.svh"
 
+  parameter bit PHYS=0;
   localparam int NSB = 8;
   localparam int TW  = $clog2(NSB);
 
@@ -35,6 +36,7 @@ module tb_g6lc_sbcommit;
     c.NR_SB_ENTRIES=NSB;c.TRANS_ID_BITS=TW;
     c.OoOEn=1;c.SuperscalarEn=1;c.SpeculativeSb=1;
     c.RVA=1;c.RVS=1;
+    c.CohPolicy=PHYS ? config_pkg::COH_OOO : config_pkg::COH_WRITE_INVAL;
     return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C  = cfg(0);  // MIXED
@@ -71,6 +73,10 @@ module tb_g6lc_sbcommit;
   logic flush=0, flush_unissued=0;
   logic mem_violation=0;
   logic [TW-1:0] mem_violation_id='0;
+  logic [NSB-1:0] phys_pending='0,phys_replay='0,live,cancelled;
+  logic phys_mod=0;
+  logic [1:0] writes;
+  exception_t commit_exception;
 
   // ---- mixed DUT ----
   logic [0:0] da, iv;
@@ -86,8 +92,9 @@ module tb_g6lc_sbcommit;
       .scoreboard_entry_t(sbe_t),.forwarding_t(fwd_t),.writeback_t(wb_t),
       .rs3_len_t(logic[63:0])) dut (
     .clk_i(clk),.rst_ni(rst_n),.sb_full_o(sb_full),.sb_empty_o(),
-    .spec_cancel_o(),.cancelled_mask_o(),.sb_live_o(),
+    .spec_cancel_o(),.cancelled_mask_o(cancelled),.sb_live_o(live),
     .sb_head_pc_o(),.sb_head_valid_o(),
+    .phys_pending_i(phys_pending),.phys_replay_i(phys_replay),.phys_mod_i(phys_mod),
     .mem_violation_i(mem_violation),.mem_violation_id_i(mem_violation_id),
     .flush_unissued_instr_i(flush_unissued),
     .flush_i(flush),.x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),
@@ -108,10 +115,10 @@ module tb_g6lc_sbcommit;
       .scoreboard_entry_t(sbe_t)) cs (
     .clk_i(clk),.rst_ni(rst_n),.halt_i(1'b0),.flush_dcache_i(1'b0),
     .flush_i(1'b0),
-    .exception_o(),.dirty_fp_state_o(),.single_step_i(1'b0),.step_hart_i('0),
+    .exception_o(commit_exception),.dirty_fp_state_o(),.single_step_i(1'b0),.step_hart_i('0),
     .commit_instr_i(commit_instr),.commit_drop_i(commit_drop),
     .commit_replay_i(commit_replay),.commit_ack_o(commit_ack),
-    .commit_macro_ack_o(),.waddr_o(),.wdata_o(),.we_gpr_o(),.whart_o(),
+    .commit_macro_ack_o(),.waddr_o(),.wdata_o(),.we_gpr_o(writes),.whart_o(),
     .we_fpr_o(),.amo_resp_i('0),.pc_o(),.csr_op_o(),.csr_wdata_o(),
     .csr_rdata_i('0),.csr_write_fflags_o(),.csr_exception_i('0),
     .commit_lsu_o(),.commit_lsu_ready_i(1'b1),.commit_tran_id_o(),
@@ -133,6 +140,7 @@ module tb_g6lc_sbcommit;
     .clk_i(clk),.rst_ni(rst_n),.sb_full_o(),.sb_empty_o(),
     .spec_cancel_o(),.cancelled_mask_o(),.sb_live_o(),
     .sb_head_pc_o(),.sb_head_valid_o(),
+    .phys_pending_i('0),.phys_replay_i('0),.phys_mod_i(1'b0),
     .mem_violation_i(mem_violation),.mem_violation_id_i(mem_violation_id),
     .flush_unissued_instr_i(flush_unissued),
     .flush_i(flush),.x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),
@@ -378,6 +386,54 @@ module tb_g6lc_sbcommit;
       if (reclaim !== TW'(3))
         $fatal(1, "SBC_PAIR_RECLAIM_JUMP got=%0d want=3", reclaim);
       $display("RTL_REVIEW_PASS sbcommit scenario=6");
+    end
+    else if (scenario == 7) begin
+      phys_pending=8'h02;
+      alloc(0,64'h100,ALU);alloc(1,64'h200,LOAD,0,LD);
+      wb(1);#1;
+      if(commit_ack[1]!==negative)$fatal(1,"SBC_PHYS_PENDING");
+      phys_pending=0;phys_mod=1;phys_replay=8'h02;#1;
+      if(commit_ack!=0 || writes!=0)$fatal(1,"SBC_PHYS_MOD");
+      tick();phys_mod=0;phys_replay=0;#1;
+      chk_offer(0,1,1,"SBC_PHYS_OWNER");
+      if(!commit_drop[0] || !commit_replay[0] || !cancelled[1] || writes[0])
+        $fatal(1,"SBC_PHYS_REPLAY");
+      tick();
+      if(live[1] || !live[0])$fatal(1,"SBC_PHYS_RELEASE");
+      $display("RTL_REVIEW_PASS sbcommit scenario=7");
+    end
+    else if (scenario == 8) begin
+      phys_pending=8'h02;phys_mod=1;
+      alloc(0,64'h100,ALU);alloc(1,64'h200,LOAD,0,LD);
+      wb(1,1);#1;
+      chk_offer(0,1,1,"SBC_PHYS_EXCEPTION_OWNER");
+      if(commit_exception.valid!==!negative || !commit_instr[0].valid || writes[0])
+        $fatal(1,"SBC_PHYS_EXCEPTION");
+      $display("RTL_REVIEW_PASS sbcommit scenario=8");
+    end
+    else if (scenario == 9) begin
+      phys_mod=1;
+      alloc(0,64'h100,LOAD,0,LD);wb(0);#1;
+      if(commit_ack[0] || writes[0])$fatal(1,"SBC_PHYS_MOD");
+      phys_mod=0;#1;
+      if(commit_ack[0]!==!negative || !writes[0] || commit_replay[0])
+        $fatal(1,"SBC_PHYS_PROGRESS");
+      tick();
+      if(live[0])$fatal(1,"SBC_PHYS_RELEASE");
+      $display("RTL_REVIEW_PASS sbcommit scenario=9");
+    end
+    else if (scenario == 10) begin
+      phys_pending=8'h03;
+      alloc(0,64'h100,LOAD,0,LD);alloc(1,64'h200,LOAD,0,LD);
+      wb(0);wb(1);phys_pending=0;phys_mod=1;phys_replay=8'h03;#1;
+      if(commit_ack!=0 || writes!=0)$fatal(1,"SBC_PHYS_MOD");
+      tick();phys_mod=0;phys_replay=0;#1;
+      if(commit_drop[0]!==!negative || !commit_replay[0] || commit_ack[1] || writes!=0)
+        $fatal(1,"SBC_PHYS_TWO_HARTS");
+      tick();#1;
+      chk_offer(0,1,1,"SBC_PHYS_SECOND_OWNER");
+      if(!commit_replay[0] || !commit_drop[0])$fatal(1,"SBC_PHYS_SECOND_REPLAY");
+      $display("RTL_REVIEW_PASS sbcommit scenario=10");
     end
     else $fatal(1, "SBC_SCENARIO");
     $finish;

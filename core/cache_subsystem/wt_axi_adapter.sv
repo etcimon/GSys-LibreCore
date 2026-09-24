@@ -10,6 +10,7 @@
 //
 // Author: Michael Schaffner <schaffner@iis.ee.ethz.ch>, ETH Zurich
 // Date: 08.08.2018
+// Modified by: Etienne Cimon
 // Description: adapter module to connect the L1D$ and L1I$ to a 64bit AXI bus.
 //
 
@@ -58,7 +59,9 @@ module wt_axi_adapter
     // Invalidations
     input  logic [63:0] inval_addr_i,
     input  logic        inval_valid_i,
-    output logic        inval_ready_o
+    output logic        inval_ready_o,
+    output logic        inval_apply_valid_o,
+    output logic [63:0] inval_apply_addr_o
 );
 
   // support up to 512bit cache lines
@@ -523,6 +526,12 @@ module wt_axi_adapter
   wt_cache_pkg::dcache_in_t dcache_rtrn_type_d, dcache_rtrn_type_q;
   dcache_inval_t dcache_rtrn_inv_d, dcache_rtrn_inv_q;
   logic dcache_sc_rtrn, axi_rd_last;
+  // Retained self-invalidation: the AMO invalidate pulse (arb_gnt) is a single
+  // cycle, so an external invalidation or an already pending one displaces the
+  // AMO's own DCACHE_INV_REQ. It is captured here and re-issued on the return
+  // path before any other return traffic.
+  logic self_inval_pend_q, self_inval_pend_d;
+  logic [CVA6Cfg.PLEN-1:0] self_inval_addr_q, self_inval_addr_d;
 
   always_comb begin : p_axi_rtrn_shift
     // output directly from regs
@@ -596,9 +605,10 @@ module wt_axi_adapter
 
   // decode virtual read channels of icache
   always_comb begin : p_axi_rtrn_decode
-    // we are not ready when invalidating
+    // we are not ready when invalidating (or a self-invalidation is pending)
     // note: b's are buffered separately
-    axi_rd_rdy        = ~invalidate;
+    axi_rd_rdy        = ~invalidate && !self_inval_pend_q &&
+                        !(inval_valid_i && axi_rd_id_out[0]);
 
     icache_rtrn_rd_en = 1'b0;
     icache_rtrn_vld_d = 1'b0;
@@ -618,11 +628,21 @@ module wt_axi_adapter
     dcache_rtrn_type_d = wt_cache_pkg::DCACHE_LOAD_ACK;
     b_pop              = 1'b0;
     dcache_sc_rtrn     = 1'b0;
+    self_inval_pend_d  = self_inval_pend_q;
+    self_inval_addr_d  = self_inval_addr_q;
 
     // External invalidation requests (from coprocessor). This is safe as
     // there are no other transactions when a coprocessor has pending stores.
     inval_ready_o      = 1'b0;
-    if (inval_valid_i) begin
+    if (CVA6Cfg.RVA && self_inval_pend_q) begin
+      // Retained self-invalidation: emit the displaced DCACHE_INV_REQ now.
+      // Ordinary read/write response consumption stays blocked this cycle.
+      dcache_rtrn_type_d    = wt_cache_pkg::DCACHE_INV_REQ;
+      dcache_rtrn_vld_d     = 1'b1;
+      dcache_rtrn_inv_d.all = 1'b1;
+      dcache_rtrn_inv_d.idx = self_inval_addr_q[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0];
+      self_inval_pend_d     = 1'b0;
+    end else if (inval_valid_i) begin
       inval_ready_o         = 1'b1;
       dcache_rtrn_type_d    = wt_cache_pkg::DCACHE_INV_REQ;
       dcache_rtrn_vld_d     = 1'b1;
@@ -688,6 +708,32 @@ module wt_axi_adapter
       end
     end
     //////////////////////////////////////
+    // An AMO invalidate pulse displaced by a pending self-invalidation or an
+    // external request is not lost: it is retained and emitted on a later
+    // cycle by the first branch above.
+    if (CVA6Cfg.RVA && invalidate && (self_inval_pend_q || inval_valid_i)) begin
+      self_inval_pend_d = 1'b1;
+      self_inval_addr_d = dcache_data.paddr;
+    end
+  end
+
+  if (CVA6Cfg.CohPolicy == config_pkg::COH_OOO) begin : gen_inval_apply
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        inval_apply_valid_o <= 1'b0;
+        inval_apply_addr_o <= '0;
+      end else begin
+        inval_apply_valid_o <= dcache_rtrn_vld_d &&
+                               dcache_rtrn_type_d == wt_cache_pkg::DCACHE_INV_REQ;
+        if (dcache_rtrn_vld_d && dcache_rtrn_type_d == wt_cache_pkg::DCACHE_INV_REQ)
+          inval_apply_addr_o <= self_inval_pend_q ? 64'(self_inval_addr_q) :
+                                inval_valid_i     ? inval_addr_i :
+                                                    64'(dcache_data.paddr);
+      end
+    end
+  end else begin : gen_no_inval_apply
+    assign inval_apply_valid_o = 1'b0;
+    assign inval_apply_addr_o = '0;
   end
 
   // remote invalidations are not supported yet (this needs a cache coherence protocol)
@@ -718,6 +764,8 @@ module wt_axi_adapter
       dcache_rtrn_inv_q      <= '0;
       amo_off_q              <= '0;
       amo_gen_r_q            <= 1'b0;
+      self_inval_pend_q      <= 1'b0;
+      self_inval_addr_q      <= '0;
     end else begin
       icache_first_q         <= icache_first_d;
       dcache_first_q         <= dcache_first_d;
@@ -733,6 +781,8 @@ module wt_axi_adapter
       dcache_rtrn_inv_q      <= dcache_rtrn_inv_d;
       amo_off_q              <= amo_off_d;
       amo_gen_r_q            <= amo_gen_r_d;
+      self_inval_pend_q      <= self_inval_pend_d;
+      self_inval_addr_q      <= self_inval_addr_d;
     end
   end
 
