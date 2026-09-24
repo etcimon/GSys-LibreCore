@@ -63,6 +63,33 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## T6b-4b: per-hart commit heads — leaves, mutations, measurement (2026-09-24)
+
+`verif/tb/core/tb_g6lc_sbcommit.sv` (`run_sbcommit_leaf.py`): the mixed-geometry scoreboard wired
+through a real `commit_stage`, a drained-geometry twin on the same stimulus. Scenarios 0-6: cross-hart
+hole + one-cycle reclaim jump; full ring with a hole refuses allocation (`SBC_NO_OVERWRITE`;
+`G6LC_MUT_SB_POPCOUNT_FREE` must fatal there); CSR head takes port 0 and suppresses the cross-hart
+ack only on its ack cycle; exception head never acked; replay head routed to port 0 with
+`commit_replay_o`; hart-A-only stream cycle-identical to the drained twin (`SBC_LEGACY_EQUIV`);
+`A0 A1 B0 B1` — B0 commits cross-hart while A0/A1 are incomplete, then the A0/A1 pair retires in one
+cycle. Translate-off invariants in `scoreboard.sv`: `SBC_PORT_HEAD`, `SBC_PROG_ORDER` (alloc-sequence
+stamp), `SBC_P1_PRIV`, `SBC_P1_XFLUSH`, `SBC_P1_FLUSH`, `SBC_RECLAIM_WIN`, `SBC_NO_OVERWRITE`.
+`tb_g6lc_rob.sv` (`run_rob_leaf.py`): out-of-ring-order tid frees keep `count_q` exact and re-anchor
+the head; `G6LC_MUT_ROB_POSITIONAL_FREE` caught; `g6lc_ooo_rob.sby` PASS with 4 elaborated asserts
+(the runner counts `$check` cells — a zero-assert PASS is an error). `tb_g6lc_rtl_review.sv`
+store-recovery scenario 8 (`STB_HEAD_STALL`, nh2-ooo1): a non-head store's commit stalls
+`commit_ready_o`, memory order stays head-first; csrbank scenario 4 (`CSRBANK_ACK_PORT`): a port-1
+ack for hart 1 bumps only bank 1's `#minstret`. Full-core: mixed probe hart-1 checksum
+`0x2d9e464b9adce718` exact with `cross_hart_port1_commits=24,086`, `hol_residual=26,215`
+(head not presented on any port), `store_head_mismatch_stall=0`; drained/anchor probes cycle-exact;
+OpenSBI dual-hart mixed 10,606,940, drained 10,696,498 exact, anchor 12,765,628 exact; integer
+11/11 cycle-identical; FP 14 + 10 negatives; lint 8/54, synth 32/5. The first mixed model failed
+the probe (`RES1=0x2`): a cross-hart port-1 retire on a full-flush cycle was refetched by the
+peer-restart frontier — the `flush_i` gate and `SBC_P1_FLUSH` pin it. Leaf runners now pick the
+deepest payload path deterministically (stale top-level copies in reused remote run dirs had
+shadowed fresh sources twice) and every shipped leaf's `sources.json` was hash-checked against the
+repo.
+
 ## T6b-3 exit: concurrent checked work, isolation negatives, first measurement (2026-09-23)
 
 `smt_mixed_probe` (`verif/tests/custom/multicore/`, runner `run_smt_mixed_probe.py`): hart 1 runs

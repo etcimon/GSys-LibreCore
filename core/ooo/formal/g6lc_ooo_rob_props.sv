@@ -37,6 +37,8 @@ module g6lc_ooo_rob_props #(
   logic [NR_ALLOC-1:0]             alloc_entry_i;
   logic [NR_RETIRE-1:0]            retire_entry_o;
 
+  logic [NR_RETIRE-1:0][TID_W-1:0] rob_retire_tid;
+
   g6lc_rob #(
       .ROB_ENTRIES(ROB_ENTRIES),
       .ROB_W      (ROB_W),
@@ -62,8 +64,14 @@ module g6lc_ooo_rob_props #(
       .retire_valid_o,
       .retire_entry_o,
       .retire_id_o,
-      .retire_ack_i
+      .retire_ack_i,
+      // In-order retire model: the acked tid is the presented head's.
+      .retire_tid_i  (rob_retire_tid)
   );
+
+  for (genvar pr = 0; pr < NR_RETIRE; pr++) begin : gen_ret_tid
+    assign rob_retire_tid[pr] = dut.rob_q[retire_id_o[pr]].tid;
+  end
 
   // BMC/prove: start from a forced reset (no free-state induction trap).
   // `initial assume (!rst_ni)` is rejected by the slang frontend, so drive it

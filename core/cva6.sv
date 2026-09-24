@@ -627,6 +627,13 @@ module cva6
   logic lsu_commit_commit_ex;
   logic lsu_commit_ready_ex_commit;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] lsu_commit_trans_id;
+  // T6b-4b: scoreboard reclaim pointer (oldest live slot) — the program-age
+  // anchor for dispatch/IQ/LSQ (inside issue_stage) and the store buffer.
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0] sb_reclaim;
+  // T6b-4b: committing hart per commit port (banked ack routing) and the
+  // per-hart dcsr.step vector for cross-hart port-1 gating.
+  logic [CVA6Cfg.NrCommitPorts-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] commit_hart;
+  logic [CVA6Cfg.NrHarts-1:0] smt_step_b;
   // T6b: per-hart head of the live scoreboard ring (oldest issued entry's PC
   // per hart). Wired out of the scoreboard for T6b-2 recovery restart; no
   // consumer exists yet.
@@ -1829,6 +1836,7 @@ module cva6
       //RVFI
       .rvfi_issue_pointer_o (rvfi_issue_pointer),
       .rvfi_commit_pointer_o(rvfi_commit_pointer),
+      .reclaim_ptr_o         (sb_reclaim),
       .rvfi_rs1_o           (rvfi_rs1),
       .rvfi_rs2_o           (rvfi_rs2),
       .rvfi_operand_valid_o (rvfi_operand_valid),
@@ -1934,6 +1942,7 @@ module cva6
       .lsu_commit_i            (lsu_commit_commit_ex),           // from commit
       .lsu_commit_ready_o      (lsu_commit_ready_ex_commit),     // to commit
       .commit_tran_id_i        (lsu_commit_trans_id),            // from commit
+      .oldest_live_tid_i       (sb_reclaim),
       .stall_st_pending_i      (stall_st_pending_ex),
       .shared_tlb_flush_busy_o (shared_tlb_flush_busy_ex),
       .no_st_pending_o         (no_st_pending_ex),
@@ -2048,9 +2057,11 @@ module cva6
       .rst_ni,
       .halt_i                 (halt_ctrl),
       .flush_dcache_i         (dcache_flush_ctrl_cache),
+      .flush_i                (flush_ctrl_id),
       .exception_o            (ex_commit),
       .dirty_fp_state_o       (dirty_fp_state),
       .single_step_i          (single_step_csr_commit || single_step_acc_commit),
+      .step_hart_i            (smt_step_b),
       .commit_instr_i         (commit_instr_id_commit),
       .commit_drop_i          (commit_drop_id_commit),
       .commit_replay_i        (commit_replay_id_commit),
@@ -2087,6 +2098,11 @@ module cva6
 
   assign commit_ack = commit_macro_ack & ~commit_drop_id_commit;
 
+  // T6b-4b: each port's committing hart for banked ack routing.
+  for (genvar cmt_h = 0; cmt_h < CVA6Cfg.NrCommitPorts; cmt_h++) begin : gen_commit_hart
+    assign commit_hart[cmt_h] = commit_instr_id_commit[cmt_h].hart_id;
+  end
+
   // ---------
   // CSR (U6.1: banked via cva6_smt_csr_bank when NrHarts>1)
   // ---------
@@ -2112,6 +2128,7 @@ module cva6
       .hart_halt_o             (smt_csr_hart_halt),
       .commit_instr_i          (commit_instr_id_commit[0]),
       .commit_ack_i            (commit_ack),
+      .commit_hart_i           (commit_hart),
       .boot_addr_i             (boot_addr_i[CVA6Cfg.VLEN-1:0]),
       .hart_id_base_i          (hart_id_i[CVA6Cfg.XLEN-1:0]),
       .ex_i                    (ex_commit),
@@ -2203,6 +2220,7 @@ module cva6
       .hu_o                    (hu),
       .debug_mode_o            (debug_mode),
       .single_step_o           (single_step_csr_commit),
+      .step_b_o                (smt_step_b),
       .icache_en_o             (icache_en_csr),
       .dcache_en_o             (dcache_en_csr_nbdcache),
       .acc_cons_en_o           (acc_cons_en_csr),
@@ -3042,7 +3060,15 @@ module cva6
     longint unsigned smt_ms_mispredict[CVA6Cfg.NrHarts];
     longint unsigned smt_ms_peer_restart[CVA6Cfg.NrHarts];
     longint unsigned smt_ms_ctx_switch;
-    longint unsigned smt_ms_hol;
+    // T6b-4b: residual head-of-line = cycles where some hart's head is
+    // complete, non-privileged and not PRESENTED on any commit port —
+    // the port-availability measure. hol_presented_unacked counts heads
+    // presented but not acked (store-buffer backpressure, halt,
+    // flush-cycle parking and friends land there).
+    longint unsigned smt_ms_hol_residual;
+    longint unsigned smt_ms_hol_presented;
+    longint unsigned smt_ms_stb_head_stall;
+    longint unsigned smt_ms_xcommit;
     longint unsigned smt_ms_stall_rob, smt_ms_stall_iq;
     longint unsigned smt_ms_stall_lsq, smt_ms_stall_ren;
     longint unsigned smt_ms_sb_occ_acc[CVA6Cfg.NrHarts];
@@ -3064,7 +3090,10 @@ module cva6
       smt_ms_nonactive_commit = 0;
       smt_ms_cycles = 0;
       smt_ms_ctx_switch = 0;
-      smt_ms_hol = 0;
+      smt_ms_hol_residual = 0;
+      smt_ms_hol_presented = 0;
+      smt_ms_stb_head_stall = 0;
+      smt_ms_xcommit = 0;
       smt_ms_stall_rob = 0;
       smt_ms_stall_iq = 0;
       smt_ms_stall_lsq = 0;
@@ -3083,8 +3112,6 @@ module cva6
     end
     always @(posedge clk_i) begin
       if (rst_ni && smt_mixed_stats) begin
-        automatic int unsigned head_slot;
-        automatic bit head_busy, peer_complete;
         smt_ms_cycles++;
         if (&sb_head_valid) smt_ms_both_resident++;
         for (int h = 0; h < CVA6Cfg.NrHarts; h++) begin
@@ -3111,21 +3138,53 @@ module cva6
         // LSU translation-context switches (request hart changes).
         if (lsu_ctx_hart != smt_ms_lsu_ctx_q) smt_ms_ctx_switch++;
         smt_ms_lsu_ctx_q <= lsu_ctx_hart;
-        // Head-of-line blocking: the global commit head is live but
-        // incomplete while a different hart already holds a completed entry.
-        head_slot = int'(issue_stage_i.i_scoreboard.commit_pointer_q[0]);
-        head_busy = issue_stage_i.i_scoreboard.mem_q[head_slot].issued &&
-                    !issue_stage_i.i_scoreboard.mem_q[head_slot].sbe.valid &&
-                    !issue_stage_i.i_scoreboard.mem_q[head_slot].cancelled;
-        peer_complete = 1'b0;
-        for (int s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
-          if (issue_stage_i.i_scoreboard.mem_q[s].issued &&
-              issue_stage_i.i_scoreboard.mem_q[s].sbe.valid &&
-              !issue_stage_i.i_scoreboard.mem_q[s].cancelled &&
-              (issue_stage_i.i_scoreboard.mem_q[s].sbe.hart_id !=
-               issue_stage_i.i_scoreboard.mem_q[head_slot].sbe.hart_id))
-            peer_complete = 1'b1;
-        if (head_busy && peer_complete) smt_ms_hol++;
+        // T6b-4b hol_residual: a hart's head is complete, non-privileged
+        // (commit-eligible), yet no port PRESENTED it this cycle — the
+        // residual head-of-line the per-hart port rules leave behind.
+        // hol_presented_unacked: presented but not acked — store-buffer
+        // backpressure, halt, flush-cycle parking and friends.
+        begin
+          automatic logic res, pres_unack;
+          res = 1'b0; pres_unack = 1'b0;
+          for (int h = 0; h < CVA6Cfg.NrHarts; h++) begin
+            automatic int unsigned hs;
+            automatic logic priv, acked, presented;
+            hs = int'(issue_stage_i.i_scoreboard.head_slot[h]);
+            priv = (issue_stage_i.i_scoreboard.mem_q[hs].sbe.valid &&
+                    issue_stage_i.i_scoreboard.mem_q[hs].sbe.ex.valid) ||
+                   (issue_stage_i.i_scoreboard.mem_q[hs].sbe.fu == ariane_pkg::CSR) ||
+                   issue_stage_i.i_scoreboard.mem_q[hs].replay ||
+                   (CVA6Cfg.RVA && ariane_pkg::is_amo(
+                        issue_stage_i.i_scoreboard.mem_q[hs].sbe.op));
+            if (issue_stage_i.i_scoreboard.head_valid[h] &&
+                issue_stage_i.i_scoreboard.mem_q[hs].sbe.valid &&
+                !issue_stage_i.i_scoreboard.mem_q[hs].cancelled && !priv) begin
+              acked = 1'b0; presented = 1'b0;
+              for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
+                if (issue_stage_i.i_scoreboard.commit_sel_slot[p] ==
+                    CVA6Cfg.TRANS_ID_BITS'(hs)) presented = 1'b1;
+                if (commit_ack_commit_id[p] &&
+                    (issue_stage_i.i_scoreboard.commit_sel_slot[p] ==
+                     CVA6Cfg.TRANS_ID_BITS'(hs)))
+                  acked = 1'b1;
+              end
+              if (!presented) res = 1'b1;
+              else if (!acked) pres_unack = 1'b1;
+            end
+          end
+          if (res) smt_ms_hol_residual++;
+          if (pres_unack) smt_ms_hol_presented++;
+        end
+        // T6b-4b: a store at port 0 stalled because its tid is not the
+        // speculative-queue head, and cross-hart port-1 commits.
+        if (commit_instr_id_commit[0].valid &&
+            (commit_instr_id_commit[0].fu == ariane_pkg::STORE) &&
+            !commit_ack_commit_id[0] &&
+            ex_stage_i.lsu_i.i_store_unit.store_buffer_i.spec_head_mismatch)
+          smt_ms_stb_head_stall++;
+        if (CVA6Cfg.NrCommitPorts > 1 && commit_ack_commit_id[1] &&
+            (commit_instr_id_commit[1].hart_id != commit_instr_id_commit[0].hart_id))
+          smt_ms_xcommit++;
         // Dispatch stalls while the NON-fetching hart holds >= half of the
         // scoreboard window (the shared-structure pressure witness).
         if (CVA6Cfg.NrHarts == 2) begin
@@ -3148,8 +3207,10 @@ module cva6
                  smt_ms_both_resident, smt_ms_nonactive_commit);
         for (int h = 0; h < CVA6Cfg.NrHarts; h++)
           $display("[smt-mixed] retired hart %0d = %0d", h, smt_ms_retired[h]);
-        $display("[smt-mixed] cycles=%0d hol_cycles=%0d lsu_ctx_switches=%0d",
-                 smt_ms_cycles, smt_ms_hol, smt_ms_ctx_switch);
+        $display("[smt-mixed] cycles=%0d hol_residual=%0d hol_presented_unacked=%0d lsu_ctx_switches=%0d",
+                 smt_ms_cycles, smt_ms_hol_residual, smt_ms_hol_presented, smt_ms_ctx_switch);
+        $display("[smt-mixed] store_head_mismatch_stall_cycles=%0d cross_hart_port1_commits=%0d",
+                 smt_ms_stb_head_stall, smt_ms_xcommit);
         for (int h = 0; h < CVA6Cfg.NrHarts; h++)
           $display("[smt-mixed] hart%0d resident=%0d fetch_req=%0d fetch_parcel=%0d mispredict=%0d peer_restarts_caused=%0d sb_occ_avg=%0d.%02d sb_occ_max=%0d",
                    h, smt_ms_resident[h], smt_ms_fetch_req[h],
@@ -3343,7 +3404,7 @@ module cva6
         for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++)
           $display("[smt-dup] cyc=%0d cmt p=%0d ack=%b ackid=%b id=%0d pc=%h h=%0d fu=%0d op=%0d v=%b d=%b ex=%b",
                    issue_stage_i.i_scoreboard.smt_flow_cycle, p, commit_ack[p],
-                   commit_ack_commit_id[p], issue_stage_i.i_scoreboard.commit_pointer_q[p],
+                   commit_ack_commit_id[p], issue_stage_i.i_scoreboard.commit_sel_slot[p],
                    commit_instr_id_commit[p].pc, commit_instr_id_commit[p].hart_id,
                    commit_instr_id_commit[p].fu, commit_instr_id_commit[p].op,
                    commit_instr_id_commit[p].valid, commit_drop_id_commit[p],

@@ -545,6 +545,14 @@ module g6lc_ooo_dispatch
     for (int unsigned p = 0; p < NP; p++) rob_alloc_tid[p] = dispatch_sbe_i[p].trans_id;
   end
 
+  // T6b-4b: the committing tid per retire port — under per-hart commit heads
+  // the acked slot is the muxed port slot, not the ROB head.
+  logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rob_retire_tid;
+  always_comb begin
+    for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++)
+      rob_retire_tid[p] = commit_instr_i[p].trans_id;
+  end
+
   g6lc_rob #(
       .ROB_ENTRIES(ROB_N),
       .ROB_W      (ROB_W),
@@ -570,7 +578,9 @@ module g6lc_ooo_dispatch
       .retire_valid_o(),
       .retire_entry_o(),
       .retire_id_o   (),
-      .retire_ack_i  (commit_ack_i)
+      .retire_ack_i  (commit_ack_i),
+      // T6b-4b: frees are keyed by the committing tid, not head position.
+      .retire_tid_i  (rob_retire_tid)
   );
 
   // ---- PRF first (needed for live AGU) — issue selects feed PRF read ----

@@ -135,12 +135,26 @@ DEFAULT_PROFILE_SPECS: list[dict] = [
         "modules": [
             "issue_read_operands",
             "scoreboard",
+            "commit_stage",
             "load_unit",
             "store_unit",
             "store_buffer",
         ],
         "param_map": "verif/sv-timing-tests/param-maps/cv64a6_imafdc_xlen64.json",
         "notes": "Issue/scoreboard + LSU units — best-measure FO4 on mid/back-end core",
+    },
+    {
+        "id": "sparse_smt_mixed_commit",
+        "flist": "verif/sv-timing-tests/flists/sparse_smt_mixed_commit.f",
+        "modules": [
+            "scoreboard",
+            "commit_stage",
+            "store_buffer",
+            "g6lc_rob",
+        ],
+        "param_map": "verif/sv-timing-tests/param-maps/g6lc64_smt2_mixed_xlen64.json",
+        "soft_missing": True,
+        "notes": "T6b-4b mixed-residency commit cone (NrHarts=2, SmtDrainedHandoff=0)",
     },
     {
         "id": "sparse_ooo_issue",

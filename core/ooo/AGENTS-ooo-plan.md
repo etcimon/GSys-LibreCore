@@ -686,6 +686,166 @@ rob/iq attribution zero). `peer_restarts_caused=0` confirms the partial
 -kill peer-restart leg stays cold under this scheduler. The ping-pong and
 TLB witnesses stay clean (`h0_pp=0`, `h0_tlb=0`, `h0_tmr=144` correct).
 
+### T6b-4b — per-hart commit heads over the shared ring (2026-09-24)
+
+**Design (all new logic under `MixedSmt = NrHarts>1 && !SmtDrainedHandoff`;
+drained/single-hart constant-fold to the legacy commit mux and stay
+bit-identical — the drained 3,013,247 and anchor 3,214,702 probes are
+cycle-exact).**
+
+- `head_slot[h]` = oldest live entry of hart h (rotate/find-first over
+  `issued` from the anchor, the `sb_head_scan` shape exported as a slot);
+  `commit_pointer_q[0]` doubles as the **reclaim pointer** — each cycle it
+  jumps in one step to the oldest remaining live slot (holes skipped).
+  Window accounting `free = NR − ((issue_ptr − reclaim) mod NR)` with
+  `issued_cnt==0` disambiguation replaces popcount, so a committed non-head
+  hole inside `[reclaim, issue_ptr)` cannot alias as allocatable space.
+- **Port 0** = ring-oldest *flush-capable-privileged* head when one exists
+  (ex.valid, CSR fu, replay, drop-with-ex, AMO), else the reclaim entry —
+  all exception/eret/CSR/store/fence machinery stays port-0-only.
+- **Port 1** = (a) the legacy same-hart `port0+1` slot only when **both**
+  halves can actually retire — `p1_leg_ok` requires the +1 slot live,
+  same-hart, *and* both it and the port-0 entry complete/cancelled (an
+  incomplete port-0 head makes the +1 a dead presentation that parks the
+  peer's complete head — the rework that doubled cross-hart commits);
+  else (b) the other hart's live head, restricted to complete simple
+  `ALU/LOAD/CTRL_FLOW/MULT`, `!ex.valid`, `!replay`, `!halt`,
+  `!flush_dcache`, per-port-hart step clear, `!flush_i` (full-flush cycles
+  park the port-1 cross commit so the peer-restart frontier never samples
+  a pre-retire head — the v1/v2 duplicate-retire bug), and no port-0
+  privileged ack that cycle. Single-resident streams never set the
+  cross-hart leg, so `SBC_LEGACY_EQUIV` holds by construction.
+  FPU/FPU_VEC never cross-hart on port 1 (fflags is a single bank channel).
+- **Anchors:** `commit_ptr_i` (dispatch/IQ/LSQ age), `store_buffer.
+  commit_trans_id_i`, and the IQ system-CSR gate take `reclaim_ptr_o`;
+  `commit_tran_id_o`/`csr_commit_tid_i` stay the port-0 slot;
+  `rvfi_commit_pointer_o[p]` and the smt-flow trace id = the muxed port
+  slot.
+- **Consumers fixed:** `g6lc_rob` frees by transaction id (positional
+  `head_q+r` freed the wrong entry under out-of-order commit); the CSR
+  bank/regfile ack path gains a per-port hart vector (`commit_ack_g[h][p] =
+  ack[p] && hart[p]==h`) so a hart-B port-1 ack no longer increments
+  hart-A `instret`; store commits require `tid == speculative-queue head`
+  (one comparator in `store_buffer`, stat `store_head_mismatch_stall_
+  cycles`); scoreboard frees the *muxed* slot on the raw ack.
+- **Assertions (translate_off, MIXED):** port presents a per-hart head or
+  the legacy +1; per-hart commit order monotone; reclaim ≤ live <
+  issue_ptr; no privileged on port 1; `commit_ack[1] && cross-hart |->
+  !port0_flush_capable`; `issue_full` ⇔ window_free < i+1; no dispatch
+  overwrite of a live slot.
+
+- **HOL metrics (sim-only, `cva6.sv`).** `hol_residual` = cycles where
+  some hart's head is complete, non-privileged and **not presented on any
+  commit port** (`commit_sel_slot[p] != hs` for all p) — the port-
+  availability measure. `hol_presented_unacked` = presented-but-unacked
+  heads (store-buffer backpressure, halt, flush-cycle parking land here).
+  Both print on the `[smt-mixed]` line under `translate_off`.
+
+**Leaf oracles (all remote, sources.json verified == repo per file):**
+`t6b4b-sbcommit-v9` **7/7** scenarios + `G6LC_MUT_SB_POPCOUNT_FREE` caught
+by `SBC_NO_OVERWRITE` (interleaved alloc, cross-hart hole, reclaim jump,
+full-ring no-overwrite, CSR/exception/replay port-0 routing,
+`SBC_LEGACY_EQUIV` cycle-exact, plus scenario 6: the both-complete
+port-1 rule — B0 head commits while A0/A1 incomplete, then the legacy
+A0,A1 pair retires on one cycle); `t6b4b-storebuf-v11` 38/38
+`STB_HEAD_STALL`; `t6b4b-rob-v2` tid-keyed free + positional-free
+mutation caught; `t6b4b-rob-sby-v3` formal **PASS** (11 `$check` cells,
+4 FLAVOR-assert); `t6b4b-csrbank-v5` 14/14 `CSRBANK_ACK_PORT`;
+`t6b4b-dispatch-v4` 28/28 n2. Runner hardening: all three leaf runners
+(`run_sbcommit_leaf.py`, `run_rob_leaf.py`, `run_rtl_audit_review.py`)
+use the deterministic deepest-path `pick()` — a reused run dir's stale
+top-level copies previously shadowed fresh sources via `rglob` order
+(and `output/source` mkdir is now `exist_ok`-safe). `g6lc_rob`'s head
+re-anchor is a fixed-trip `for` over `ROB_ENTRIES` (synthesizable), same
+report-only semantics as the retired `while`.
+
+**The duplicate-retire fix.** The first mixed model (`mixed-v1`, same for
+v2 — the remote mirror had not been re-synced) failed the probe with
+`RES1=0x2` and a wrong hart-1 checksum: a cross-hart port-1 commit landed
+on the same cycle as a full flush, the peer-restart frontier sampled the
+scoreboard head before the retire was visible, parked the already-committed
+PC `0x8000020a`, and refetched it on resume (double execution → checksum
+corruption). Fix: `commit_stage.flush_i` input; the cross-hart port-1
+eligibility gains `&& !flush_i`; new translate_off assertion
+`SBC_P1_FLUSH` (no cross-hart port-1 ack on a flush cycle). Mixed probe v3
+then passed bit-exact.
+
+**T6b-4b measurement (`smt_mixed_probe`, `+smt_mixed_stats`, models
+`work-ver-t6b4b-*`; mixed column is the post-`p1_leg_ok` v4 probe —
+hart-1 checksum `0x2d9e464b9adce718` exact, drained/anchor cycle-exact).**
+
+| Metric | solo | drained | mixed | anchor |
+|---|---|---|---|---|
+| total cycles | 380,600 | 3,013,247 | **3,102,032** | 3,214,702 |
+| hart-1 kernel window (cyc) | 25,204 | 57,161 | 51,691 | 65,313 |
+| hart-0 retired / active / IPC | — | 817,740 / 1,267,685 / 0.645 | 774,775 / 1,639,882 / 0.472 | 875,657 / 1,615,340 / 0.542 |
+| hart-1 retired / act / IPC | 18,259 / 25,208 / 0.724 | 18,264 / 28,955 / 0.631 | 18,410 / 25,768 / 0.714 | 18,067 / 32,623 / 0.554 |
+| total retired / agg IPC | 192,615 / 0.506 | 1,714,424 / 0.569 | 1,892,225 / **0.610** | 1,578,539 / 0.491 |
+| both_resident_cycles | 0 | 0 | 410,053 (13.2%) | 0 |
+| nonactive_commits | 4 | 0 | 192,011 | 0 |
+| hol_residual (head not presented) | 0 | 232 | **26,215** (0.8%) | 938 |
+| hol_presented_unacked | 0 | — | 1,341 | — |
+| cross_hart_port1_commits | 0 | 0 | **24,086** | 0 |
+| store_head_mismatch_stall | 0 | 0 | 0 | 0 |
+| lsu_ctx_switches | 47,694 | 34,786 | 252,084 | 47,138 |
+| stalls peer ≥half sb (rob/iq/lsq/rename) | 0 | 0 | 0/0/40,872/40,974 | 0 |
+| peer_restarts_caused | 0,0 | 0,0 | 0,0 | 0,0 |
+
+vs T6b-4b pre-rule (v3): the `p1_leg_ok` both-complete preference doubled
+cross-hart port-1 commits **12,096 → 24,086** and cut total cycles
+3,104,000 → 3,102,032 (−0.06%); aggregate IPC holds 0.610, hart-1 window
+51,691 identical. The reworked `hol_residual` (complete simple head not
+presented on any port) reads 26,215 — versus 453,979 under the old
+unacked-head definition — and `hol_presented_unacked` adds only 1,341, so
+residual HOL is now almost entirely *head-not-yet-complete* upstream work,
+not commit-port availability; it stays the T6b-4 performance target.
+`store_head_mismatch_stall_cycles=0` — the head-comparator costs nothing
+on this trace.
+
+**FO4 — the mixed-commit screen is `sparse_smt_mixed_commit`
+(`t6b4b-fo4-mixed-v1`, param map `g6lc64_smt2_mixed_xlen64.json`,
+NrHarts=2/SmtDrainedHandoff=0/OoOEn=1).** The mixed cone is live in this
+screen: the scoreboard's three worst adjusted paths are the reclaim scan
+(`live_first`/`reclaim_n`, line 647, **19.00**, raw 83), the privileged-head
+select (`priv`/`hdist`, line 319, 16.5) and the window accounting (`wdist`,
+line 183, 15.9); the analyzed IR lists `MixedSmt`, `head_slot`,
+`commit_sel_slot` among the module's elaborated names. `commit_stage`'s worst
+path stays the legacy AMO `wdata` mux (line 209, **16.00**, raw 155) — the
+cross-hart gate is not the module's critical cone. Per-module adjusted FO4 vs
+the 32-FO4 budget @1250 MHz/20 ps: scoreboard **19.00**, commit_stage
+**16.00**, store_buffer **17.46** (raw 202), g6lc_rob **22.00** (raw 84) —
+profile primary 22.0, closes=True. Geometry caveat: the screen runs the
+`g6lc64_smt2` ring (`NR_SB_ENTRIES=8`); the rotate/find-first head scan and
+the reclaim scan grow by ~log2 mux levels per ring doubling, so a 32-entry
+mixed configuration must be re-screened before it is called
+timing-qualified. **The `sparse_issue_lsu` screen folds
+`MixedSmt` to 0** (`cv64a6_imafdc_sv39` param map → single-hart) — its
+scoreboard/commit_stage numbers measure the legacy mux only, not
+T6b-4b logic; rerun on the final RTL: primary 39.5 / worst 66.0 /
+closes=False @1012.7 MHz, 241 paths, unchanged — the pre-existing
+store_unit↔store_buffer bridge still dominates, out of scope.
+`sparse_ooo_issue` rerun (g6lc_rob changed): primary 30.0, closes=True.
+Two front-end-strictness fixes landed for the screens: `!|live_rot` →
+`live_rot == '0` (sv-parser and yosys-slang both reject the stacked
+unary) and the `MixedSmt` localparam moved above its first use (slang
+declaration-order rule) — semantics-identical.
+
+**Firmware/regressions (post-rework models `work-ver-t6b4b-{mixed-v4,
+drained-v3,anchor-v3,ooo-int-v3,fp-v3}`):** probes `t6b4b-probe-mixed-v4`
+3,102,032 cyc / `t6b4b-probe-drained-v3` **3,013,247 exact** /
+`t6b4b-probe-anchor-v3` **3,214,702 exact** / `t6b4b-solo-mixed-v4`
+380,600 — hart-1 checksum `0x2d9e464b9adce718` everywhere, solo↔mixed
+hart-1 stream identical for 64,998 records (49,310 strict-value, 0
+mismatches; `PASS-WITH-MODE-BOUNDARY` at the documented `probe_solo`
+edge). OpenSBI dual-hart: `t6b4b-firmware-mixed-v3` **10,606,940** (=
+T6b-3 exact), `t6b4b-firmware-drained-v4` **10,696,498 EXACT**,
+`t6b4b-firmware-anchor-v3` **12,765,628 EXACT** — all strictDualPassed.
+OpenSBI-mixed stats: cross_hart_port1 4,944, hol_residual 1,340 /
+presented_unacked 536, store_head_mismatch 0. Int suite 11/11
+cycle-identical to v2b; FP 14 pass + 10/10 negatives detected;
+`verify --lint --synth --remote --allow-skips` lint 8/54 baselines,
+synth 32/5 clean (`t6b4b/verify-remote-t6b4b-v2.txt`).
+
 **Slices.** T6b-1 config bit + drain gate seam, hart-tagged LSQ/store-buffer/IQ ordering,
 `sb_head_pc`, leaf oracles (drain gate still on: every existing result must reproduce). T6b-2
 recovery and frontend per-hart state (flush restart, inactive-hart redirects, per-hart filter),

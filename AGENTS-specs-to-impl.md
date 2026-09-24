@@ -45,6 +45,26 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## T6b-4b: per-hart commit heads over the shared scoreboard ring (2026-09-24)
+
+`core/scoreboard.sv` (`MixedSmt = NrHarts > 1 && !SmtDrainedHandoff`, else bit-identical): each
+hart's oldest live slot (`head_slot[h]`, the rotate/find-first of T6b-2a) is a commit candidate;
+`commit_pointer_q[0]` becomes the **reclaim pointer** (jumps to the oldest slot still live) and the
+free count is the ring-window distance, so a committed non-head hole is never allocatable
+(`G6LC_MUT_SB_POPCOUNT_FREE` restores the popcount). Port 0 presents the ring-oldest *committable*
+privileged head (`#priv-csrs` ops, xret, fences/`#sfence-vma`, WFI, exceptions, replay/drop, AMO —
+the only side-effect port), else the reclaim entry; port 1 presents the legacy same-hart `+1` pair
+only when both halves are complete, else the peer hart's complete head. `core/commit_stage.sv`:
+cross-hart port-1 commit restricted to complete `ALU/LOAD/CTRL_FLOW/MULT`, its own hart's
+`dcsr.step` (`step_hart_i` from the bank), no full-flush cycle (`flush_i`), no privileged port-0 ack.
+Non-positional consumers: `core/ooo/g6lc_rob.sv` frees by tid (`retire_tid_i`;
+`G6LC_MUT_ROB_POSITIONAL_FREE`), `core/store_buffer.sv` commits a store only as the speculative
+head (`oldest_live_tid_i` is the age anchor, `commit_trans_id_i` the head match),
+`core/smt/g6lc_smt_csr_bank.sv` routes each port's ack by `commit_hart_i` (`#minstret` per hart),
+RVFI/trace ids are the muxed slots (`core/issue_stage.sv`, `core/cva6.sv`, `ex_stage`/`lsu`/
+`store_unit` plumb the reclaim pointer). Timing: `sparse_smt_mixed_commit` screen (8-entry ring)
+scoreboard 19.0 / commit 16.0 / store_buffer 17.46 / rob 22.0 FO4, closes; re-screen larger rings.
+
 ## T6b-3 exit: a hart switch never degrades a commit-level flush (2026-09-23)
 
 `core/controller.sv`: the fine-grain switch override (flush fetch and unissued only, keep the

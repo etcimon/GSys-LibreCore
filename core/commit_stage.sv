@@ -29,12 +29,21 @@ module commit_stage
     input logic halt_i,
     // request to flush dcache, also flush the pipeline - CACHE
     input logic flush_dcache_i,
+    // T6b-4b: full pipeline flush (flush_ctrl_id) — a cross-hart port-1
+    // commit must not land on a full-flush cycle: the peer restart frontier
+    // samples the scoreboard head before the commit lands, so a peer entry
+    // retiring here would be refetched and committed a second time.
+    input logic flush_i,
     // TO_BE_COMPLETED - EX_STAGE
     output exception_t exception_o,
     // Mark the F state as dirty - CSR_REGFILE
     output logic dirty_fp_state_o,
     // TO_BE_COMPLETED - CSR_REGFILE
     input logic single_step_i,
+    // T6b-4b: per-hart dcsr.step bits from the SMT CSR bank — a cross-hart
+    // port-1 commit checks the committing hart's own step bit, not the
+    // port-0/active context's. Unused unless mixed residency is configured.
+    input logic [CVA6Cfg.NrHarts-1:0] step_hart_i,
     // The instruction we want to commit - ISSUE_STAGE
     input scoreboard_entry_t [CVA6Cfg.NrCommitPorts-1:0] commit_instr_i,
     // The instruction is cancelled - ISSUE_STAGE
@@ -120,6 +129,10 @@ module commit_stage
   logic [CVA6Cfg.XLEN-1:0] casq_hi_data_q;
   logic [4:0] casq_hi_rd_q;
   logic casq_dual_now;
+  // T6b-4b: mixed SMT residency — the scoreboard may present a cross-hart
+  // head on port 1. Drained/single-hart constant-folds to the legacy gate.
+  localparam bit MixedSmt = (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;
+  logic p1_cross, port0_privileged;
   // I4am: leftover dual_we/ack must not retarget waddr[1] = rd|1 on a
   // normal retire (s1=x9 vs s0=x8 is rd[0]). Only AMOCAS.Q owns that path.
   assign casq_dual_now = CVA6Cfg.RVA && CVA6Cfg.RVZacas &&
@@ -401,6 +414,29 @@ module commit_stage
         wdata_o[1]  = commit_instr_i[1].result;
       end
 
+      // T6b-4b: under mixed residency the scoreboard may present a cross-hart
+      // head on port 1 (the ports' hart_ids differ). A presented port-0 entry
+      // that can raise a commit-level flush, exception, replay or trigger
+      // break ("flush-capable-privileged") blocks the cross-hart commit —
+      // full-flush semantics and the peer-restart frontier depend on no
+      // same-cycle peer commit. A plain STORE at port 0 is NOT in this class:
+      // stores don't flush and port 1 never carries a store.
+      p1_cross = MixedSmt && (commit_instr_i[1].hart_id != commit_instr_i[0].hart_id);
+      port0_privileged = (commit_instr_i[0].fu inside {CSR}) ||
+                         commit_instr_i[0].ex.valid ||
+                         commit_replay_i[0] ||
+                         (CVA6Cfg.RVA && instr_0_is_amo) ||
+                         break_from_trigger_i;
+      // The exclusion must be ack-qualified, not presentation-qualified: a
+      // privileged head that cannot yet commit (e.g. a system-CSR op still
+      // waiting on the IQ global-oldest gate) flushes nothing this cycle, and
+      // holding port 1 behind it deadlocks the ring — the peer's older slots
+      // would pin the reclaim anchor below the privileged head's slot, which
+      // is exactly what that head waits on. Only a privileged port-0 ack can
+      // raise a commit-level flush, so that is the only cycle the cross-hart
+      // commit must yield.
+      port0_privileged = port0_privileged && commit_ack_o[0];
+
       // -----------------
       // Commit Port 2
       // -----------------
@@ -410,13 +446,15 @@ module commit_stage
       // Soft-ladder iter-012 note: dual-commit serialize (dual-GPR and full) was
       // PEEL_FDT-negative on work-ver-smt2-fw64{b,c} — same mepc=0x12eb2 /
       // mtval=0x12b2a. Not a dual-commit residual; see ITERATION.md.
-      if (commit_ack_o[0] && commit_instr_i[1].valid
+      if (!p1_cross && commit_ack_o[0] && commit_instr_i[1].valid
                                 && !halt_i
                                 && !commit_replay_i[0] && !commit_replay_i[1]
                                 && !(commit_instr_i[0].fu inside {CSR})
                                 && !flush_dcache_i
                                 && !(CVA6Cfg.RVA && instr_0_is_amo)
-                                && !single_step_i) begin
+                                && !single_step_i
+                                && (!MixedSmt ||
+                                    (commit_instr_i[1].trans_id != commit_instr_i[0].trans_id))) begin
         // only if the first instruction didn't throw an exception and this instruction won't throw an exception
         // and the functional unit is of type ALU, LOAD, CTRL_FLOW, MULT, FPU or FPU_VEC
         if (!commit_instr_i[1].ex.valid && (commit_instr_i[1].fu inside {ALU, LOAD, CTRL_FLOW, MULT, FPU, FPU_VEC})) begin
@@ -448,6 +486,31 @@ module commit_stage
               end
             end
           end
+        end
+      end else if (p1_cross && commit_instr_i[1].valid
+                                && !halt_i
+                                && !commit_replay_i[1]
+                                && !commit_instr_i[1].ex.valid
+                                && (commit_instr_i[1].fu inside {ALU, LOAD, CTRL_FLOW, MULT})
+                                && !flush_dcache_i
+                                && !step_hart_i[commit_instr_i[1].hart_id]
+                                && !port0_privileged
+                                && !flush_i
+                                && (commit_instr_i[1].trans_id != commit_instr_i[0].trans_id)) begin
+        // T6b-4b cross-hart head: simple, complete, non-speculative-restart
+        // class only. Port 0 remains the only side-effect port and FPU /
+        // FPU_VEC are never committed cross-hart (fflags is a port-0 bank
+        // channel).
+        if (CVA6Cfg.RVZCMP && commit_instr_i[1].is_macro_instr && commit_instr_i[1].is_last_macro_instr)
+          commit_macro_ack[1] = 1'b1;
+        else commit_macro_ack[1] = 1'b0;
+
+        commit_ack_o[1] = 1'b1;
+
+        if (!commit_drop_i[1]) begin
+          if (CVA6Cfg.FpPresent && ariane_pkg::is_rd_fpr(commit_instr_i[1].op))
+            we_fpr_o[1] = 1'b1;
+          else we_gpr_o[1] = 1'b1;
         end
       end
     end

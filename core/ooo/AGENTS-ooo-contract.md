@@ -30,8 +30,14 @@ protected default and the SMT2 OpenSBI anchor runs with `OoOEn=0`.
 
 ## 2. Age
 
-- Key: `trans_id` circular distance from the scoreboard commit pointer,
-  `(a - commit_ptr) < (b - commit_ptr)` ⇒ `a` older than `b`.
+- Key: `trans_id` circular distance from the scoreboard **reclaim pointer** (`reclaim_ptr_o`, the
+  oldest live slot), `(a - reclaim) < (b - reclaim)` ⇒ `a` older than `b`. Under legacy commit
+  order (single hart, drained handoff) the reclaim pointer *is* the port-0 commit pointer, so the
+  key is unchanged there; under mixed residency (T6b-4b) the two diverge — the committing port-0
+  slot may be a younger privileged head — and only the reclaim pointer keeps every live distance
+  inside one contiguous window `[reclaim, issue_ptr)`. Consumers: dispatch/IQ/LSQ `commit_ptr_i`,
+  `store_buffer.oldest_live_tid_i`. The committing tid (`commit_tran_id_o`, CSR table lookup,
+  store-buffer head match) is a different signal and is never used as an age anchor.
 - Soundness condition: every compared entry is **scoreboard-live**. Committed store-queue entries
   are never age-compared; they are older than any live instruction by construction.
 - T1 (2026-09-21): one function, `g6lc_ooo_pkg::ooo_age_older/ooo_age_dist`, used at all six
@@ -57,6 +63,7 @@ protected default and the SMT2 OpenSBI anchor runs with `OoOEn=0`.
 | Fetch redirect (T3) | every accepted I$ request carries a 2-bit token (`icache_dreq_t.token`, echoed on `icache_drsp_t.token` by `g6lc_icache`); the frontend wants exactly one outstanding token (`want_valid_q/want_token_q`), forgets it on `kill_s1|kill_s2`, treats a request accepted in a kill cycle as unwanted, and takes a response only on token match | proven by `core/fetch_B/formal/g6lc_fetch_token.sby` against an independent I$ ledger (depth 10, 4 asserts; removed take gate → counterexample); frozen stage-32 layout pair passes; the VA-equality kill and `G6LC_NO_KILL_PERSIST` are retired |
 | Memory-order violation | `g6lc_lsq` scan: a store address arriving after a younger load resolved overlapping bytes reports the oldest such load (`mem_violation_o`); the scoreboard marks the slot `cancelled + replay`; commit drops it, asserts `flush_commit`, and the frontend refetches `pc_commit` without increment (`mem_replay_pc`) | leaf-qualified (LSQ 12–17, formal) and exercised end-to-end on `g6lc64_ooo_int` since T2 (stage 35: `drop=1 replay=1` then clean retirement, Spike-identical) |
 | Hart handoff | drained: no issued work crosses | T6 replaces drain with per-hart cancellation identity |
+| Commit under mixed residency (T6b-4b) | one shared ring, **per-hart commit heads**: `head_slot[h]` is hart h's oldest live slot (rotate/find-first from the reclaim pointer); the reclaim pointer jumps each cycle to the oldest slot still live, so committed non-head holes are never allocatable (window accounting `free = NR − (issue_ptr − reclaim)`, popcount retired under `MixedSmt`). **Port 0** is the only side-effect port: it presents the ring-oldest *committable flush-capable-privileged* head (`sbe.ex.valid`, CSR-class fu — CSR/fence/sfence/hfence/WFI/xRET/ecall/ebreak —, replay/drop, AMO) when one exists, else the reclaim entry. **Port 1** presents the legacy same-hart `+1` slot only when both halves are complete (the pair can retire together); otherwise the other hart's head, which commits only if it is a complete `ALU/LOAD/CTRL_FLOW/MULT`, `!ex.valid`, `!replay`, its own hart's `dcsr.step` clear, no `halt`/`flush_dcache`, **not a full-flush cycle** (`flush_i`) and not a cycle in which port 0 acks a privileged entry. No FPU/FPU_VEC cross-hart (fflags is a port-0 bank channel); at most one commit per hart per cycle except the legacy pair | consumers made non-positional: `g6lc_rob` frees by tid; the store buffer commits a store only when it is the speculative-queue head (`spec_head_mismatch` stalls `commit_ready_o`); the CSR bank routes each port's ack by that port's hart (`commit_hart_i`) so `instret` and every banked ack land in the committing hart; RVFI/trace ids are the muxed port slots. Peer-restart frontier hazard found by the mixed probe (a cross-hart port-1 retire on a full-flush cycle was refetched and executed twice) is what the `flush_i` gate and `SBC_P1_FLUSH` pin |
 
 A cancelled instruction's late result must never complete, wake or supply data for the slot's next
 owner. FPU and divider hold this; the dispatch leaf (scenario 18) still accepts an id-only late
@@ -67,6 +74,7 @@ result, so the remaining producers (pending stores, CSR/AMO commit path, CVXIF/a
 | May issue out of program order | Stays singleton / ordered | Reason |
 |---|---|---|
 | ALU, branch, multiply, FP (single hart) | fence/system CSR-class ops (SFENCE/HFENCE/FENCE/WFI/xRET): only at the commit head | their side effects are global; `ex_stage` snapshots fence operands at issue |
+| — (T6b-4b) | a privileged head becomes port-0-eligible only once it is **committable** (`sbe.valid`, cancelled or replay-marked) | an un-issuable system op (still waiting on the IQ global-oldest gate) must not take port 0: it would park the port behind the reclaim entry whose commit is exactly what it waits on — observed as a hart-0 `mret` / hart-1 store-head deadlock during T6b-4b bring-up |
 | CSR read/write/set/clear (T2) | — | two-entry per-tid `csr_buffer`; value read/written at in-order commit; write operand from the renamed file |
 | Loads past **resolved** older stores (T2) | Loads wait on older **unresolved** stores unless `may_bypass` | the store buffer forwards byte-exactly from resolved stores; bypassing an unresolved one relies on the T1 violation scan + replay |
 | Stores relative to each other (T2) | Stores drain to memory in program order | LSQ store entry = spec-queue slot reservation held to commit; `check`: `LsqStoreEntries <= DEPTH_SPEC` (`gen_err_ooo_st_credits`) |
@@ -81,6 +89,11 @@ after; a screen never closes timing. T4 removed the IQ payload compaction (23.97
 T4b replaced the per-entry rank popcount with a cascaded oldest-first grant, bringing the select
 cone from 27.0 back to **16.0** (IQ module max 16.0, from 23.97 before T4). `g6lc_ooo_dispatch` at
 30.0 is the slice's worst cone and the next timing owner; `g6lc_lsq` CAM 26.0, `g6lc_rob` 22.0.
+T6b-4b added `sparse_smt_mixed_commit` (`g6lc64_smt2_mixed_xlen64.json`: NrHarts=2,
+SmtDrainedHandoff=0, OoOEn=1, 8-entry ring) because `sparse_issue_lsu` binds `cva6_cfg_empty` and
+folds `MixedSmt` to 0 — its scoreboard/commit numbers measure the legacy mux only. Mixed screen:
+scoreboard **19.0** (reclaim scan), commit_stage 16.0 (legacy AMO wdata mux), store_buffer 17.46,
+g6lc_rob 22.0; closes at the 32 budget. Re-screen before any mixed configuration with a larger ring.
 
 ## 6. Configuration guards and the evidence that removes each
 
@@ -102,8 +115,32 @@ cone from 27.0 back to **16.0** (IQ module max 16.0, from 23.97 before T4). `g6l
 | T3 | **met 2026-09-21**: token kill with the ledger proof and mutation witness; frozen s32 layout pair 869/868 pass; stages 32/33/34 pass Spike-compared (869/899/869) where they aborted before; `load_unit.sv` misalignment assertions replaced by precise-delivery properties (`misaligned_entry_excepts/no_data/tval`), leaf scenario 13 with kill/ex mutations detected; `G6LC_NO_KILL_PERSIST` retired; anchor exact; verify 6/6 locally incl. strict slang (lint 263/58, synth 32/5). Found pre-existing: `g6lc_fetch_hold` fails at frame 4 and `g6lc_fetch_iq` bmc at frame 3 on HEAD too — open formal regressions, owner T4 pre-work |
 | T4 | **met 2026-09-21** (T4 + T4b): stationary IQ with age matrix and cascaded oldest-first grant (rank popcount kept sim-only as `ooo_iq_grant_is_rank`); IQ 64/64, dispatch 28/28 ×2, ten frozen ELFs cycle-identical in both passes, anchor exact, lint/synth unchanged; FO4 §5: IQ module max 23.97 → 16.0 (payload 14.97, select 16.0). Store-age scan and FP `rs3` remain inside the select predicate — costed at 16.0, not removed. Fetch proofs repaired on the property side: hold 7 asserts PASS, IQ non-interference 9 asserts PASS. Open: IQ cover task timeout; `g6lc_ooo_dispatch` 30.0 cone |
 | T5 | **partial 2026-09-21**: on the qualification build (`G6LC_OOO_FP_QUALIFY`, single hart) 13 FP positives pass Spike-identically and all 10 negatives report their stage; the LSQ alias mutation is caught by stage 4; the FPU owner-retention mutation is **inert at core level** on every stage tried (1, 9, 10) — with 32 scoreboard entries and drop-at-commit-head every stale return lands on a dead or not-yet-reallocated slot (detected only by the S2 leaf fixture). **The production guard stays** (`ifndef` seam only; `verify --target g6lc64_ooo` still refuses). The suite also exposed the FTQ replay defect (§3). Still owed: the owner-mutation bar, the s11 residual, the guard decision |
-| T6 | **T6a gate PASSED 2026-09-23** (plan): after the outranked-mispredict and device-load fixes above, the protected dual-hart profile passes strictDual on `g6lc64_smt2_ooo_int` in 10,696,498 cycles (in order 12,765,628), every switch drained, two-hart rename/dispatch cells pass, anchor exact. The earlier "lottery divergence" was a misreading (the boot hart's bss/relocation loops sit in fw_base.S; boot hart 0 in every OoO run). **Guard lifted 2026-09-23** (user decision): `g6lc64_smt2_ooo_int` is a production package (define-free build passes the same profile identically, 10,696,498 cycles); the single-hart FP guard stays. T6b (both harts concurrently; drained handoff retired only after peer-isolation negatives) — contract written in the plan, implementation not started |
+| T6 | **T6a gate PASSED 2026-09-23** (plan): after the outranked-mispredict and device-load fixes above, the protected dual-hart profile passes strictDual on `g6lc64_smt2_ooo_int` in 10,696,498 cycles (in order 12,765,628), every switch drained, two-hart rename/dispatch cells pass, anchor exact. The earlier "lottery divergence" was a misreading (the boot hart's bss/relocation loops sit in fw_base.S; boot hart 0 in every OoO run). **Guard lifted 2026-09-23** (user decision): `g6lc64_smt2_ooo_int` is a production package (define-free build passes the same profile identically, 10,696,498 cycles); the single-hart FP guard stays. **T6b-1…T6b-3 landed 2026-09-23/24** (hart-owned memory ordering, per-hart recovery, per-access translation/privilege/PMP context, isolation negatives 7/7, first `SmtDrainedHandoff=0` dual-hart OpenSBI pass; see plan). **T6b-4b met 2026-09-24**: per-hart commit heads over the shared ring (§3 row) — sbcommit leaf 7/7 + `G6LC_MUT_SB_POPCOUNT_FREE` caught by `SBC_NO_OVERWRITE`; store-buffer head gate 38/38 (`STB_HEAD_STALL`); ROB tid-keyed free leaf + `G6LC_MUT_ROB_POSITIONAL_FREE` caught, `g6lc_ooo_rob.sby` PASS with 4 elaborated asserts; CSR bank `CSRBANK_ACK_PORT` 14/14; dispatch 28/28; mixed probe hart-1 checksum exact with `cross_hart_port1_commits` 24,086 and `hol_residual` 26,215 (0.8%); drained/anchor probes cycle-exact (3,013,247 / 3,214,702); OpenSBI dual-hart mixed 10,606,940 (= T6b-3), drained **10,696,498 exact**, anchor **12,765,628 exact**; 11 integer ELFs cycle-identical, FP 14 + 10 negatives; lint 8/54, synth 32/5; mixed FO4 screen closes (§5). Found on the way: a cross-hart port-1 retire on a full-flush cycle was refetched by the peer-restart frontier and executed twice (fixed by the `flush_i` gate, pinned by `SBC_P1_FLUSH`); an un-issuable privileged head taking port 0 deadlocked against the reclaim entry (committable qualification, §4). Mixed residency remains qualification-gated (`G6LC_OOO_SMT_MIXED_QUALIFY`); T6b-4 performance (hart-selective kill, per-hart fetch queues, PRF/LSQ floors) is open |
 
 Standing gates for every tranche: `verify --lint --synth --remote`, leaf audit cells with
 negatives and mutations, protected SMT2 anchor unchanged, traceability records updated,
 licensing tier check on every code edit.
+
+## 8. OoO coherence continuation (2026-09-24; implementation gates open)
+
+The authorized continuation preserves the in-order implementation and all existing FP/mixed-SMT
+qualification guards. Its invariant is conservation of owned memory obligations from admission
+through response, invalidation, architectural validation and retirement. Queue acceptance is not
+invalidation completion; virtual AGU addresses are not physical snoop addresses; instruction
+cancellation does not remove a cache's possible sharership.
+
+The dependency chain is measurement validity → shared transport/refill correctness → conservative
+sharer signatures and credit-bound sizing → physical-load validation → matched multicore integration.
+Each stage retains its own positive, negative and restored-defect controls. A later passing stage
+cannot waive an earlier failure. New coherence behavior remains default-off until its complete
+configuration envelope passes. No physical area or STA claim follows from logical storage counts.
+
+The first proposed filter stores monotone per-index core-presence signatures. Empty-cache reset,
+complete acquisition coverage, concurrent updates and no unqualified clear are mandatory premises.
+Its abstract finite-state check is not an RTL proof. L2 sizing must prove the current concurrent-fill
+lifetime against hub credits; the historical serialized-controller occupancy proof is inapplicable.
+
+The OoO validation boundary must use accepted physical addresses and retain instruction identity
+through retirement/cancellation and late responses. It must cover remote modifications and relevant
+sibling-hart committed stores without relying on the active fetch hart. Existing LSQ virtual-address
+hazard checks remain separate. New validation cannot be enabled merely by adding a hub selector.

@@ -46,6 +46,11 @@ module store_buffer
     // are inert when OoOEn is 0.
     input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id_i,
     input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] commit_trans_id_i,
+    // T6b-4b: the scoreboard reclaim pointer — the oldest live slot. This is
+    // the program-age anchor for the speculative queue's circular ordering;
+    // commit_trans_id_i stays the *committing* tid (port-0 slot) for the
+    // head-match gate below. Aliases commit_trans_id_i under legacy order.
+    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] oldest_live_tid_i,
     // T6b: hart of the querying load. Under OoO multi-hart a load forwards
     // only from its OWN hart's speculative stores; a peer hart's store is not
     // visible until commit. Constant-0 otherwise (single hart / in-order).
@@ -156,7 +161,10 @@ module store_buffer
   // ahead of first use: Verilator tolerates a later declaration, slang does not.
   function automatic logic ooo_older(input logic [CVA6Cfg.TRANS_ID_BITS-1:0] a,
                                      input logic [CVA6Cfg.TRANS_ID_BITS-1:0] b);
-    return g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(a), 32'(b), 32'(commit_trans_id_i));
+    // T6b-4b: age distances are anchored at the reclaim pointer (oldest live
+    // slot), not the port-0 commit slot — under per-hart commit heads they
+    // can diverge.
+    return g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(a), 32'(b), 32'(oldest_live_tid_i));
   endfunction
 
   // Visibility of a *speculative* store to the querying load. Commit-queue
@@ -166,6 +174,20 @@ module store_buffer
   function automatic logic spec_visible(input logic [CVA6Cfg.TRANS_ID_BITS-1:0] sid);
     return !CVA6Cfg.OoOEn || ooo_older(sid, load_trans_id_i);
   endfunction
+
+  // T6b-4b: under mixed-resident OoO commit, a store may only commit when it
+  // is the speculative-queue head — the queue is program-age ordered, so an
+  // out-of-ring-order peer-hart commit of a younger store must not evict the
+  // uncommitted head to memory. The mismatch stalls the store at the commit
+  // port; tid-keyed eviction is T6b-4b' if the stall stat is material.
+  localparam bit MixCommit = CVA6Cfg.OoOEn &&
+                            (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;
+  logic spec_head_valid, spec_head_mismatch;
+  assign spec_head_valid = (speculative_status_cnt_q != '0) &&
+                           speculative_queue_q[speculative_read_pointer_q].valid;
+  assign spec_head_mismatch = MixCommit && spec_head_valid &&
+                              (speculative_queue_q[speculative_read_pointer_q].trans_id !=
+                               commit_trans_id_i);
 
   assign store_buffer_empty_o = (speculative_status_cnt_q == 0) & no_st_pending_o;
   // ----------------------------------------
@@ -428,7 +450,8 @@ module store_buffer
     automatic logic [$clog2(DEPTH_COMMIT):0] commit_status_cnt;
     commit_status_cnt      = commit_status_cnt_q;
 
-    commit_ready_o         = (commit_status_cnt_q < $bits(commit_status_cnt_q)'(DEPTH_COMMIT));
+    commit_ready_o         = (commit_status_cnt_q < $bits(commit_status_cnt_q)'(DEPTH_COMMIT)) &&
+                             !spec_head_mismatch;
     // no store is pending if we don't have any element in the commit queue e.g.: it is empty
     no_st_pending_o        = (commit_status_cnt_q == 0);
     // default assignments

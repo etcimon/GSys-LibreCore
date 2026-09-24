@@ -34,7 +34,11 @@ module g6lc_rob #(
     output logic [NR_RETIRE-1:0]                   retire_valid_o,
     output entry_t [NR_RETIRE-1:0]                 retire_entry_o,
     output logic [NR_RETIRE-1:0][ROB_W-1:0]        retire_id_o,
-    input  logic [NR_RETIRE-1:0]                   retire_ack_i
+    input  logic [NR_RETIRE-1:0]                   retire_ack_i,
+    // T6b-4b: the committing scoreboard tid per retire port. Under per-hart
+    // commit heads the committed slot need not be the ring head, so frees
+    // are keyed by tid, not by head position.
+    input  logic [NR_RETIRE-1:0][TID_W-1:0]        retire_tid_i
 );
 
   typedef struct packed {
@@ -99,12 +103,36 @@ module g6lc_rob #(
       retire_valid_o[r] = rob_q[hid].valid && rob_q[hid].complete;
       retire_entry_o[r] = rob_q[hid].e;
       retire_id_o[r]    = hid;
+    end
+`ifdef G6LC_MUT_ROB_POSITIONAL_FREE
+    // MUTANT: positional head+r free. Under per-hart commit heads the acked
+    // tid is not at head+r — the wrong slot is freed and count_q drifts.
+    for (int unsigned r = 0; r < NR_RETIRE; r++) begin
+      hid = head_q + ROB_W'(r);
       if (retire_ack_i[r] && rob_q[hid].valid && rob_q[hid].complete) begin
         rob_d[hid].valid = 1'b0;
         head_d  = head_d + 1'b1;
         count_d = count_d - 1'b1;
       end
     end
+`else
+    // T6b-4b: free by transaction id — under per-hart commit heads commit
+    // order across harts need not match dispatch order; a positional head+r
+    // free would evict the wrong slot and leak the acked one.
+    for (int unsigned r = 0; r < NR_RETIRE; r++) begin
+      if (retire_ack_i[r]) begin
+        for (int unsigned i = 0; i < ROB_ENTRIES; i++) begin
+          if (rob_d[i].valid && (rob_d[i].tid == retire_tid_i[r])) begin
+            rob_d[i].valid = 1'b0;
+            count_d        = count_d - 1'b1;
+          end
+        end
+      end
+    end
+    // Re-anchor the report-only head on the oldest remaining entry.
+    for (int unsigned i = 0; i < ROB_ENTRIES; i++)
+      if ((head_d != tail_d) && !rob_d[head_d].valid) head_d = head_d + 1'b1;
+`endif
     if (flush_i) begin
       rob_d   = '0;
       head_d  = '0;
@@ -126,5 +154,21 @@ module g6lc_rob #(
       count_q <= count_d;
     end
   end
+
+//pragma translate_off
+  // Every retire ack must find its tid in the ROB — a miss means the free
+  // bookkeeping silently dropped a slot (or the ack carries no allocation).
+  for (genvar r = 0; r < NR_RETIRE; r++) begin : gen_retire_hit_chk
+    logic rob_retire_hit;
+    always_comb begin
+      rob_retire_hit = 1'b0;
+      for (int unsigned i = 0; i < ROB_ENTRIES; i++)
+        if (rob_q[i].valid && (rob_q[i].tid == retire_tid_i[r])) rob_retire_hit = 1'b1;
+    end
+    assert property (@(posedge clk_i) disable iff (!rst_ni || flush_i)
+      retire_ack_i[r] |-> rob_retire_hit)
+    else $fatal(1, "ROB_RETIRE_TID: retire ack found no matching ROB entry");
+  end
+//pragma translate_on
 
 endmodule

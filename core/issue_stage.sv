@@ -195,6 +195,10 @@ module issue_stage
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rvfi_issue_pointer_o,
     // Information dedicated to RVFI - RVFI
     output logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rvfi_commit_pointer_o,
+    // T6b-4b: scoreboard reclaim pointer (oldest live slot) — the age anchor
+    // for dispatch/IQ/LSQ and the store buffer. Aliases the port-0 commit
+    // slot under legacy commit order.
+    output logic [CVA6Cfg.TRANS_ID_BITS-1:0]                    reclaim_ptr_o,
     // Information dedicated to RVFI - RVFI
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs1_o,
     // Information dedicated to RVFI - RVFI
@@ -301,6 +305,7 @@ module issue_stage
       .x_rd_i,
       .rvfi_issue_pointer_o,
       .rvfi_commit_pointer_o,
+      .reclaim_ptr_o,
       .g1mf_v_o,
       .g1mf_rd_o,
       .g1mf_line_o,
@@ -354,7 +359,9 @@ module issue_stage
         .commit_wdata_i   (wdata_i),
         .commit_ack_i     (commit_ack_i),
         .commit_instr_i   (commit_instr_o),
-        .commit_ptr_i     (rvfi_commit_pointer_o[0]),
+        // T6b-4b: the age anchor is the reclaim pointer, not the port-0
+        // commit slot — under per-hart heads they can diverge.
+        .commit_ptr_i     (reclaim_ptr_o),
         .mispredict_i     (resolved_branch_i.valid && resolved_branch_i.is_mispredict),
         .mispredict_id_i  (resolved_branch_i.trans_id),
         .freelist_empty_o (),

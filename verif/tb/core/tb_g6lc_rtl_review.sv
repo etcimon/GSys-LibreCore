@@ -115,6 +115,7 @@ module tb_g6lc_review_fp_lifetime;
     .issue_instr_o(issued),.orig_instr_o(),.issue_instr_valid_o(iv),.issue_ack_i(ia),.fwd_o(fwd),
     .resolved_branch_i(branch),.trans_id_i(wid),.wbdata_i(wd),.ex_i(wx),.wt_valid_i(wv),
     .x_we_i(1'b0),.x_rd_i('0),.rvfi_issue_pointer_o(ip),.rvfi_commit_pointer_o(cp),
+    .reclaim_ptr_o(),
     .g1mf_v_o(),.g1mf_rd_o(),.g1mf_line_o(),.g1mf_a3_o());
   controller #(.CVA6Cfg(C),.bp_resolve_t(bp_t)) ctrl(
     .clk_i(clk),.rst_ni(rst_n),.v_i(1'b0),.set_pc_commit_o(),.flush_if_o(flush_if),
@@ -2675,6 +2676,9 @@ module tb_g6lc_review_store_recovery;
   function automatic config_pkg::cva6_cfg_t configuration();
     config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
     c.XLEN=64;c.PLEN=56;c.NrHarts=NH;c.SuperscalarEn=1;c.OoOEn=OOO;
+    // cva6_cfg_empty defaults SmtDrainedHandoff=1 — the OoO 2-hart geometry
+    // must opt out for the mixed-resident store-head gate to elaborate.
+    c.SmtDrainedHandoff=!(NH>1 && OOO);
     c.NR_SB_ENTRIES=8;c.TRANS_ID_BITS=3;c.DCACHE_INDEX_WIDTH=12;c.DCACHE_TAG_WIDTH=44;
     c.DCacheType=config_pkg::WT;return c;
   endfunction
@@ -2705,6 +2709,7 @@ module tb_g6lc_review_store_recovery;
     .stall_st_pending_i(1'b0),.no_st_pending_o(no_pending),.store_buffer_empty_o(empty),
     .page_offset_i(load_address[11:0]),.load_paddr_i(load_address),.load_paddr_valid_i(load_v),
     .load_trans_id_i(load_tid),.commit_trans_id_i(commit_tid),
+    .oldest_live_tid_i(commit_tid),
     .load_hart_i(load_hart),.st_hart_i(st_hart),
     .dcache_wbuffer_empty_i(1'b1),.page_offset_matches_o(),.st_fwd_valid_o(fwd),
     .st_fwd_data_o(fwd_data),.st_fwd_be_o(fwd_be),.commit_i(commit),
@@ -2770,6 +2775,38 @@ module tb_g6lc_review_store_recovery;
       if(fwd!==!negative||fwd_data!==64'hEEEE)
         $fatal(1,"STORE_RECOVERY_HART_OWN_FWD fwd=%b data=%h",fwd,fwd_data);
       drive();load_v=0;load_hart=0;
+    end else if(scenario==8)begin
+      // T6b-4b: under mixed-resident commit a store retires only when it is
+      // the speculative-queue head. tid1 (hart0, already enqueued) is the
+      // head; a commit presented with tid2 (hart1) must stall, and the
+      // committed order to memory stays tid1 then tid2.
+      if(NH!=2||!OOO)$fatal(1,"STORE_RECOVERY_HART_SETUP");
+      valid=1;tid=2;st_hart=1;address=56'h1020;data=64'hBBBB;
+      drive();valid=0;st_hart=0;drive();
+      commit_tid=2;#4;
+      // commit_i is the caller's pulse — it fires only when commit_ready_o
+      // permits; the stall lives in that ready, so present-and-hold here.
+      if(commit_ready!==negative)$fatal(1,"STB_HEAD_STALL non-head commit not stalled");
+      drive();
+      if(req.data_req)$fatal(1,"STB_HEAD_STALL non-head store reached memory");
+      commit_tid=1;#4;
+      if(commit_ready!==!negative)$fatal(1,"STB_HEAD_STALL head commit blocked");
+      // Grant held asserted (always-ready sink): a post-request pulse lets
+      // the queue-valid clear retire the entry a half-eval before the read
+      // pointer observes the evict and strands it on the freed slot.
+      rsp.data_gnt=1;
+      commit=1;drive();commit=0;#4;
+      if(!req.data_req||{req.address_tag,req.address_index}!=56'h1010||
+         req.data_wdata!=(negative?64'hBBBB:64'hAAAA))
+        $fatal(1,"STB_HEAD_STALL head order");
+      commit_tid=2;#4;
+      if(commit_ready!==!negative)$fatal(1,"STB_HEAD_STALL next head blocked");
+      drive();
+      commit=1;drive();commit=0;#4;
+      if(!req.data_req||{req.address_tag,req.address_index}!=56'h1020||
+         req.data_wdata!=(negative?64'hAAAA:64'hBBBB))
+        $fatal(1,"STB_HEAD_STALL tail order");
+      rsp.data_gnt=0;
     end else $fatal(1,"STORE_RECOVERY_SCENARIO");
     $display("RTL_REVIEW_PASS store_recovery scenario=%0d",scenario);$finish;
   end
@@ -2800,7 +2837,8 @@ module tb_g6lc_review_wfi;
   always #5 clk=~clk;
   commit_stage #(.CVA6Cfg(C),.exception_t(exception_t),.scoreboard_entry_t(sbe_t)) dut(
     .clk_i(clk),.rst_ni(rst_n),.halt_i(halt),.flush_dcache_i(1'b0),.exception_o(),
-    .single_step_i(1'b0),.commit_instr_i(entry),.commit_drop_i(drop),.commit_replay_i('0),.commit_ack_o(ack),
+    .single_step_i(1'b0),.step_hart_i('0),
+    .commit_instr_i(entry),.commit_drop_i(drop),.commit_replay_i('0),.commit_ack_o(ack),
     .commit_macro_ack_o(),.waddr_o(),.wdata_o(),.we_gpr_o(),.whart_o(),.we_fpr_o(),
     .amo_resp_i('0),.pc_o(),.csr_op_o(),.csr_wdata_o(),.csr_rdata_i('0),
     .csr_write_fflags_o(),.csr_exception_i(csr_ex),.commit_lsu_o(),.commit_lsu_ready_i(1'b1),
@@ -2940,6 +2978,7 @@ module tb_g6lc_review_commit;
     .resolved_branch_i(resolved),.trans_id_i(wb_tid),.wbdata_i(wb_data),
     .ex_i(wb_ex),.wt_valid_i(wt_valid),.x_we_i(1'b0),.x_rd_i('0),
     .rvfi_issue_pointer_o(rvfi_issue),.rvfi_commit_pointer_o(rvfi_commit),
+    .reclaim_ptr_o(),
     .g1mf_v_o(g1mf_v),.g1mf_rd_o(g1mf_rd),.g1mf_line_o(g1mf_line),
     .g1mf_a3_o(g1mf_a3));
 
@@ -3405,6 +3444,7 @@ module tb_g6lc_review_sbhead;
     .resolved_branch_i(resolved),.trans_id_i(wb_tid),.wbdata_i(wb_data),
     .ex_i(wb_ex),.wt_valid_i(wt_valid),.x_we_i(1'b0),.x_rd_i('0),
     .rvfi_issue_pointer_o(rvfi_issue),.rvfi_commit_pointer_o(rvfi_commit),
+    .reclaim_ptr_o(),
     .sb_head_pc_o(head_pc),.sb_head_valid_o(head_v),
     .g1mf_v_o(g1mf_v),.g1mf_rd_o(g1mf_rd),.g1mf_line_o(g1mf_line),
     .g1mf_a3_o(g1mf_a3));
@@ -3534,6 +3574,9 @@ module tb_g6lc_review_csrbank;
   logic[1:0] hart_halt;
   sbe_t commit_i='0;
   logic[1:0] commit_ack='0;
+  // T6b-4b: committing hart per port (banked ack routing). The tasks drive
+  // both ports at commit_i.hart_id; scenario 4 splits them.
+  logic[1:0][0:0] commit_hart='0;
   exception_t ex_i='0;
   fu_op csr_op=ADD;
   logic[11:0] csr_addr='0;
@@ -3554,6 +3597,7 @@ module tb_g6lc_review_csrbank;
   logic[3:0][53:0] pmpaddr,fet_pmpaddr;
   irq_ctrl_t irq_ctrl;
   irq_ctrl_t[1:0] irq_ctrl_b;
+  logic[63:0] instret0,instret1;
   riscv::priv_lvl_t[1:0] priv_lvl_b;
   logic[1:0] v_b;
   logic mbe_o,v_commit_o;
@@ -3574,6 +3618,7 @@ module tb_g6lc_review_csrbank;
     .switch_i(1'b0),.time_irq_i('0),.rtc_time_i('0),
     .flush_o(),.halt_csr_o(halt_csr),.hart_halt_o(hart_halt),
     .commit_instr_i(commit_i),.commit_ack_i(commit_ack),
+    .commit_hart_i(commit_hart),.step_b_o(),
     .boot_addr_i('0),.hart_id_base_i('0),.ex_i(ex_i),
     .csr_op_i(csr_op),.csr_addr_i(csr_addr),.csr_wdata_i(csr_wdata),.csr_rdata_o(csr_rdata),
     .dirty_fp_state_i(1'b0),.csr_write_fflags_i(1'b0),.dirty_v_state_i(1'b0),
@@ -3631,6 +3676,7 @@ module tb_g6lc_review_csrbank;
   task automatic csr_write(input int hart,input logic[11:0] addr,input logic[63:0] wdata);
     @(negedge clk);
     commit_i='0;commit_i.valid=1;commit_i.hart_id=1'(hart);
+    commit_hart={2{1'(hart)}};
     csr_op=CSR_WRITE;csr_addr=addr;csr_wdata=wdata;commit_ack=2'b11;
     @(negedge clk);
     csr_op=ADD;commit_ack='0;commit_i='0;
@@ -3639,6 +3685,7 @@ module tb_g6lc_review_csrbank;
   task automatic wfi_commit(input int hart);
     @(negedge clk);
     commit_i='0;commit_i.valid=1;commit_i.hart_id=1'(hart);
+    commit_hart={2{1'(hart)}};
     csr_op=WFI;commit_ack=2'b11;
     @(negedge clk);
     csr_op=ADD;commit_ack='0;commit_i='0;
@@ -3716,6 +3763,7 @@ module tb_g6lc_review_csrbank;
       active_hart=0;lsu_hart=0;lsu_chk_hart=0;
       @(negedge clk);
       commit_i='0;commit_i.valid=1;commit_i.hart_id=1'd1;
+      commit_hart={2{1'd1}};
       csr_op=CSR_WRITE;csr_addr=12'hB03;csr_wdata=64'h5;commit_ack=2'b11;
       #1;
       chk1 ("CSRBANK_PERF_HART",perf_we,1'b1);
@@ -3736,6 +3784,29 @@ module tb_g6lc_review_csrbank;
       chk64("CSRBANK_JVT_B1",{6'b0,jvt_b[1].base},JVT_B>>6);
       // Scalars still follow the active hart.
       chk1 ("CSRBANK_TVM_ACT",tvm_act,tvm_b[0]);
+    end else if(scenario==4 && !DRAINED)begin
+      // T6b-4b CSRBANK_ACK_PORT: banked commit acks route per port by
+      // commit_hart_i — a port-1 ack for hart 1 must bump only bank 1's
+      // instret while port 0 presents hart 0, and vice versa.
+      commit_i='0;commit_i.valid=1;csr_addr=12'hB02;commit_ack='0;
+      csr_op=CSR_READ;  // csr_rdata is gated by csr_read — ADD returns 0
+      commit_i.hart_id=1'd0;#1;instret0=csr_rdata;
+      commit_i.hart_id=1'd1;#1;instret1=csr_rdata;
+      // Port-1-only ack for hart 1 (cross-hart commit): bank1 +1, bank0 +0.
+      csr_op=ADD;
+      commit_i.hart_id=1'd0;commit_hart={1'd1,1'd0};commit_ack=2'b10;
+      @(negedge clk);commit_ack='0;
+      csr_op=CSR_READ;
+      commit_i.hart_id=1'd0;#1;chk64("CSRBANK_ACK_PORT",csr_rdata,instret0);
+      commit_i.hart_id=1'd1;#1;chk64("CSRBANK_ACK_PORT",csr_rdata,instret1+64'd1);
+      // Complement: a port-0-only ack for hart 0 bumps only bank 0.
+      csr_op=ADD;
+      commit_hart={2{1'd0}};commit_ack=2'b01;
+      @(negedge clk);commit_ack='0;
+      csr_op=CSR_READ;
+      commit_i.hart_id=1'd1;#1;chk64("CSRBANK_ACK_PORT",csr_rdata,instret1+64'd1);
+      commit_i.hart_id=1'd0;#1;chk64("CSRBANK_ACK_PORT",csr_rdata,instret0+64'd1);
+      csr_op=ADD;
     end else $fatal(1,"CSRBANK_SCENARIO");
     $display("RTL_REVIEW_PASS csrbank scenario=%0d drained=%0d",scenario,DRAINED);
     $finish;

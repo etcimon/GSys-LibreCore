@@ -117,7 +117,8 @@ module g6lc_ooo_backend
       .retire_valid_o(),
       .retire_entry_o(),
       .retire_id_o   (),
-      .retire_ack_i  ('0)
+      .retire_ack_i  ('0),
+      .retire_tid_i  ('0)
   );
 
   // Free old mapping when we would retire (stub: free on alloc of same rd for now)

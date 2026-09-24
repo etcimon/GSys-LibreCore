@@ -85,6 +85,9 @@ module load_store_unit
     output logic commit_ready_o,
     // Commit transaction ID - TO_BE_COMPLETED
     input logic [CVA6Cfg.TRANS_ID_BITS-1:0] commit_tran_id_i,
+    // T6b-4b: reclaim pointer (oldest live slot) — the store buffer's age
+    // anchor. commit_tran_id_i stays the committing (port-0) tid.
+    input logic [CVA6Cfg.TRANS_ID_BITS-1:0] oldest_live_tid_i,
     // Result from branch unit - EX_STAGE
     input bp_resolve_t resolved_branch_i,
     // Enable virtual memory translation - TO_BE_COMPLETED
@@ -643,6 +646,7 @@ module load_store_unit
       .load_trans_id_i      (load_trans_id),
       .load_hart_i          (load_hart),
       .commit_tran_id_i,
+      .oldest_live_tid_i,
       .dcache_wbuffer_empty_i,
       .page_offset_matches_o(page_offset_matches),
       .st_fwd_valid_o       (st_fwd_valid),

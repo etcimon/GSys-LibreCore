@@ -104,8 +104,16 @@ next actions are superseded by the tranche exits.
   S-mode/Sv39, value-exact vs solo stream) passes on mixed/drained/anchor; 7/7 isolation mutations
   caught; a same-cycle switch no longer degrades an xret/trap full flush (duplicate-`mret` fix).
   `G6LC_OOO_SMT_MIXED_QUALIFY` stays until T6b-4 decides the production policy. T6b-4a measured:
-  aggregate IPC mixed 0.610 vs drained 0.569, HOL-blocked commit 12.6% — T6b-4 targets: partitioned
-  commit heads, hart-selective kill / per-hart fetch queues, PRF/LSQ floors, xret park-by-hold.
+  aggregate IPC mixed 0.610 vs drained 0.569, HOL-blocked commit 12.6%. **T6b-4b landed
+  2026-09-24:** per-hart commit heads over the shared ring (reclaim pointer + window accounting,
+  port 0 = committable privileged head else reclaim entry, port 1 = complete same-hart pair else
+  the peer's complete simple head, never on a full-flush cycle); ROB frees by tid, store commits
+  only as the speculative head, CSR bank acks by port hart; sbcommit/rob/storebuf/csrbank leaves +
+  two mutations; mixed probe checksum exact (`cross_hart_port1_commits` 24,086, `hol_residual`
+  0.8%), drained/anchor cycle-exact, OpenSBI drained 10,696,498 / anchor 12,765,628 exact; mixed
+  FO4 screen `sparse_smt_mixed_commit` closes (scoreboard 19.0 at an 8-entry ring — re-screen
+  larger rings). Remaining T6b-4: hart-selective kill / per-hart fetch queues, PRF/LSQ floors,
+  xret park-by-hold; then the production-policy decision for `SmtDrainedHandoff=0`.
 - [ ] T6b mixed residency per the plan file (after T6a).
 
 ## Active stability-first review — authoritative next change sets

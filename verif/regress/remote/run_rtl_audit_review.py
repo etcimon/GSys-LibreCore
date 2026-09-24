@@ -111,7 +111,7 @@ def main():
     # Restores the missing commit-time PRF mirror, so scenario 19 must fail again.
     lateresult_fault=os.environ.get('REVIEW_RTL_LATERESULT_FAULT')=='1'
     before=os.environ.get('REVIEW_RTL_BEFORE')=='1' or wb_fault or bool(drop_fault) or lateresult_fault
-    source=out/'source';source.mkdir()
+    source=out/'source';source.mkdir(exist_ok=True)
     names=['config_pkg.sv','g6lc64_smt2_config_pkg.sv','riscv_pkg.sv','ariane_pkg.sv','g6lc_iq.sv','g6lc_bp_tage_table.sv','g6lc_bp_tage.sv','g6lc_bp_ghist.sv','g6lc_bp_ckpt.sv','g6lc_bp_ittage.sv','g6lc_l2_mshr.sv','g6lc_coherence_pkg.sv','g6lc_l3_inclusive_inv.sv','g6lc_cluster.sv','g6lc_core_types.svh','rvfi_types.svh','tb_g6lc_rtl_review.sv']
     # scoreboard.sv (and its smt_legacy/fetch_A helper packages) are only
     # needed by the commit kind; every other kind leaves that bench module
@@ -147,7 +147,14 @@ def main():
     dispatch_mode=os.environ.get('REVIEW_RTL_DISPATCH')=='1' or os.environ.get('REVIEW_RTL_LSQ')=='1' or os.environ.get('REVIEW_RTL_RENAME')=='1'
     if dispatch_mode:
         names+=['g6lc_rename.sv','g6lc_rob.sv','g6lc_lsq.sv','g6lc_prf.sv','g6lc_memdep.sv','g6lc_ooo_dispatch.sv']
-    for name in names:shutil.copy2(data/name,source/name)
+    def pick(name):
+        matches = list(data.rglob(name))
+        if not matches:
+            raise FileNotFoundError(name)
+        # Reused run dirs can carry stale top-level copies beside the pushed
+        # payload subdirectory; prefer the nested path deterministically.
+        return max(matches, key=lambda p: len(p.parts))
+    for name in names:shutil.copy2(pick(name),source/name)
     # Fault control for the checkpoint-retirement repair: with retirement
     # disabled the pool behaves as it did before the fix, so the new scenario
     # has to fail. Anything else means the scenario is not the discriminator.
@@ -276,8 +283,10 @@ def main():
         if not before:cases+=[(1,None),(2,None)]
         configurations.append(('incl',f'n{nc}',[f'-GNC={nc}'],cases))
     if os.environ.get('REVIEW_RTL_STORE_RECOVERY')=='1':
+        # T6b-4b: scenario 8 (nh2-ooo1 only) — a store commits only as the
+        # speculative-queue head (STB_HEAD_STALL); order stays head-first.
         configurations=[('store_recovery',f'nh{h}-ooo{o}',['-DG6LC_FETCH_B',f'-GNH={h}',f'-GOOO={o}'],
-                         [(n,None) for n in range(8 if (h,o)==(2,1) else 6 if o else 4)])
+                         [(n,None) for n in range(9 if (h,o)==(2,1) else 6 if o else 4)])
                         for h,o in ((1,0),(1,1),(2,1))]
     elif os.environ.get('REVIEW_RTL_WFI')=='1':
         configurations=[('wfi',f'ooo{o}-a{a}',['-DG6LC_FETCH_B',f'-GOOO={o}',f'-GRVA_EN={a}'],
@@ -337,8 +346,10 @@ def main():
         # halt, mixed parks only the owning hart.
         # T6b-3a adds scenario 3: the PMU sideband and csr_rdata bank by the
         # committing hart, and the *_b arrays expose each bank's own context.
+        # T6b-4b adds scenario 4 (mixed only): banked acks route per port by
+        # commit_hart_i — a cross-hart port-1 ack bumps only its own instret.
         configurations=[('csrbank','drained',['-GDRAINED=1'],[(0,None),(1,None),(3,None)]),
-                        ('csrbank','mixed',['-GDRAINED=0'],[(0,None),(2,None),(3,None)])]
+                        ('csrbank','mixed',['-GDRAINED=0'],[(0,None),(2,None),(3,None),(4,None)])]
     elif os.environ.get('REVIEW_RTL_PERF')=='1':
         # T6b-3a: per-hart PMU event banking — commit-derived events land in
         # the committing hart's bank, mcountinhibit is per bank, and the HPM
@@ -429,7 +440,7 @@ def main():
     results=[]
     for kind,geometry,parameters,cases in configurations:
         if os.environ.get('REVIEW_RTL_KIND') and kind != os.environ['REVIEW_RTL_KIND']:continue
-        work=out/(kind+'-'+geometry);work.mkdir();model=work/'model'
+        work=out/(kind+'-'+geometry);work.mkdir(exist_ok=True);model=work/'model'
         top='tb_g6lc_review_'+kind
         trace=['--trace','--trace-structs'] if os.environ.get('REVIEW_RTL_TRACE')=='1' else []
         # -O0 discriminates a genuine RTL defect from a simulator optimisation
@@ -443,6 +454,7 @@ def main():
         asserts=[] if os.environ.get('REVIEW_RTL_NOASSERT')=='1' else ['--assert']
         strict=[]
         if os.environ.get('REVIEW_RTL_MEMDEP')=='1':strict+=['-Werror-UNOPTFLAT']
+        if os.environ.get('REVIEW_RTL_UNOPTFLAT')=='1':strict+=['-Werror-UNOPTFLAT']
         if os.environ.get('REVIEW_RTL_LATCH')=='1':strict+=['-Werror-LATCH']
         command=['verilator','--cc','--main','--exe','--timing',*asserts,'--threads','1','-Wno-fatal',*strict,'-I'+str(source),*trace,'--top-module',top,*parameters,'--Mdir',str(model),'-o','review-test',*rtl]
         if os.environ.get('REVIEW_RTL_ILLEGAL'):
@@ -482,9 +494,12 @@ def main():
             # hart), so the single-hart negatives are not comparable there; it
             # carries its own per-hart discriminators instead.
             if kind=='store_recovery':
-                codes=('FLUSH','CANCEL','COMMITTED','REPLAY','YOUNGER_FWD','PROGRAM_ORDER',
-                       'HART_PEER_FWD','HART_OWN_FWD')
-                trials += [(n,True,'STORE_RECOVERY_'+codes[n]) for n,_ in cases]
+                codes=('STORE_RECOVERY_FLUSH','STORE_RECOVERY_CANCEL',
+                       'STORE_RECOVERY_COMMITTED','STORE_RECOVERY_REPLAY',
+                       'STORE_RECOVERY_YOUNGER_FWD','STORE_RECOVERY_PROGRAM_ORDER',
+                       'STORE_RECOVERY_HART_PEER_FWD','STORE_RECOVERY_HART_OWN_FWD',
+                       'STB_HEAD_STALL')
+                trials += [(n,True,codes[n]) for n,_ in cases]
             elif kind=='wfi':
                 trials += [(n,True,'WFI_RETIRE_RECOVERY') for n in range(7)]
             elif kind=='rename' and os.environ.get('REVIEW_RTL_RENAME_FP_SMT')=='1':
@@ -531,6 +546,8 @@ def main():
                          (1,True,'CSRBANK_WFI_HALT') if geometry=='drained'
                          else (2,True,'CSRBANK_WFI_HALT'),
                          (3,True,'CSRBANK_PERF_HART')]
+                if geometry=='mixed':
+                    trials+=[(4,True,'CSRBANK_ACK_PORT')]
             elif kind=='perf':
                 trials+=([(0,True,'PERF_BANK1_RETIRE'),(1,True,'PERF_INHIBIT_B1'),
                           (2,True,'PERF_CSR_HART')] if geometry=='mixed'

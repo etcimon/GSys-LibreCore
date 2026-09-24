@@ -54,6 +54,10 @@ module g6lc_smt_csr_bank
     output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] hart_halt_o,
     input  scoreboard_entry_t commit_instr_i,
     input  logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack_i,
+    // T6b-4b: committing hart per commit port. Under mixed residency a
+    // port-1 ack may belong to a different hart than the port-0 entry, so
+    // banked ack routing can no longer key off commit_instr_i alone.
+    input  logic [CVA6Cfg.NrCommitPorts-1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] commit_hart_i,
     input  logic [CVA6Cfg.VLEN-1:0] boot_addr_i,
     input  logic [CVA6Cfg.XLEN-1:0] hart_id_base_i,
     input  exception_t ex_i,
@@ -146,6 +150,9 @@ module g6lc_smt_csr_bank
     output logic hu_o,
     output logic debug_mode_o,
     output logic single_step_o,
+    // T6b-4b: per-hart dcsr.step vector — commit_stage gates a cross-hart
+    // port-1 commit on the committing hart's own step bit.
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] step_b_o,
     output logic icache_en_o,
     output logic dcache_en_o,
     output logic acc_cons_en_o,
@@ -382,7 +389,12 @@ module g6lc_smt_csr_bank
 
     for (genvar h = 0; h < NH; h++) begin : gen_gate
       assign commit_sel[h] = (commit_instr_i.hart_id == HID_W'(h));
-      assign commit_ack_g[h] = commit_ack_i & {CVA6Cfg.NrCommitPorts{commit_sel[h]}};
+      // T6b-4b: route each port's ack by that port's own committing hart —
+      // under per-hart commit heads a port-1 ack can belong to the peer
+      // hart while commit_instr_i (port 0) names the other bank.
+      for (genvar p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin : gen_ack_port
+        assign commit_ack_g[h][p] = commit_ack_i[p] && (commit_hart_i[p] == HID_W'(h));
+      end
       assign ex_g[h] = commit_sel[h] ? ex_i : '0;
       assign csr_op_g[h] = commit_sel[h] ? csr_op_i : fu_op'(ADD);  // non-CSR idle
       assign dirty_fp_g[h] = dirty_fp_state_i & commit_sel[h];
@@ -424,6 +436,9 @@ module g6lc_smt_csr_bank
     logic set_dbg_b[NH];
     logic tvm_b[NH], tw_b[NH], vtw_b[NH], tsr_b[NH], hu_b[NH];
     logic dbg_mode_b[NH], step_b[NH];
+    for (genvar h = 0; h < NH; h++) begin : gen_step_pack
+      assign step_b_o[h] = step_b[h];
+    end
     logic icache_b[NH], dcache_b[NH], acc_cons_b[NH];
     logic [CVA6Cfg.XLEN-1:0] ai_aicfg_b[NH];
     logic [1:0]              ai_ais_b[NH];
