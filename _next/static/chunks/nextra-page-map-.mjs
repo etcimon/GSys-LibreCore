@@ -143,7 +143,7 @@ export const pageMap = [{
     route: "/core/out-of-order",
     frontMatter: {
       "title": "Out-of-Order Execution",
-      "description": "Production config-gated OoO backend (rename, IQ, ROB, LSQ) and slice-OoO path for GSys LibreCore."
+      "description": "Config-gated OoO backend (rename, IQ, ROB, LSQ), slice-OoO path, and OoO coherence validation for GSys LibreCore."
     }
   }, {
     name: "server-profiles",
