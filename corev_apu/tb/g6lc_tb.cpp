@@ -151,6 +151,10 @@ static const char *verilog_plusargs[] = {
     // Mixed-residency statistics probe (core/cva6.sv): prints residency and
     // per-hart commit counters at $finish. Same allowlist rule as above.
     "smt_mixed_stats",
+    // Duplicate-commit diagnostics probe (core/cva6.sv): per-cycle dump of the
+    // commit/eret/flush/redirect chain over a fixed window. Same allowlist
+    // rule as above.
+    "smt_dup_trace",
     nullptr};
 
 extern dtm_t* dtm;

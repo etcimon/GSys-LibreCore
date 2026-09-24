@@ -504,11 +504,20 @@ module frontend
   logic [3:0] arch_src;
 
   // I8 encoder (post-pre-ladder): trap/eret/commit/debug outrank SMT restore.
+  // T6b-3 exit: trap/eret redirects are hart-owned like PC_COMMIT — a peer
+  // hart's exception or mret must not reseed the fetch stream of the hart
+  // currently being fetched (its banked redirect restarts it at handoff);
+  // the peer restart then steers this stream to its own frontier.
   assign arch_src = g6lc_fetch_pkg::arch_src_sel(
       SmtEn, smt_restore_i, CVA6Cfg.DebugEn && set_debug_pc_i,
       g6lc_fetch_pkg::commit_for_hart(SmtEn, set_pc_commit_i,
           8'(commit_hart_i), 8'(smt_hart_i)),
-      peer_restart_valid_i, ex_valid_i, eret_i, is_mispredict);
+      peer_restart_valid_i,
+      g6lc_fetch_pkg::commit_for_hart(SmtEn, ex_valid_i,
+          8'(commit_hart_i), 8'(smt_hart_i)),
+      g6lc_fetch_pkg::commit_for_hart(SmtEn, eret_i,
+          8'(commit_hart_i), 8'(smt_hart_i)),
+      is_mispredict);
 
   always_comb begin : arch_redirect_select
     arch_valid  = 1'b1;

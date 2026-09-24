@@ -63,6 +63,32 @@ The restored commit-mirror defect is detected at the consumer-value assertion ra
 synthesis wrapper; simulation controls and leaf synthesis pass. These do not close the outstanding
 dispatch TID-reuse sequence or establish full-core all-FU/context ownership.
 
+## T6b-3 exit: concurrent checked work, isolation negatives, first measurement (2026-09-23)
+
+`smt_mixed_probe` (`verif/tests/custom/multicore/`, runner `run_smt_mixed_probe.py`): hart 1 runs
+four integer kernels in S-mode under its own Sv39 root and folds a 64-bit checksum; hart 0 runs a
+mispredict storm, a store-to-load replay storm, a timer-interrupt handler and a shared-page
+ping-pong (a speculative peer store forwarded across harts would return the peer's id). Passes on
+the mixed model (3,101,269 cycles), the drained model (3,013,247) and the in-order anchor package
+(3,214,702) with the same checksum `0x2d9e464b9adce718`; hart 1's mixed commit stream equals the
+solo run's for 64,998 records (0 mismatches) — value-exact and cycle-insensitive as the contract
+requires. The probe found one more defect: the fine-grain switch override in `controller.sv`
+degraded a same-cycle `mret` full flush to fetch/unissued-only, so a parked duplicate copy of the
+`mret` (the frontend classifies xret as a jump-to-self and re-requests it) committed a second time
+and cleared `mstatus.mpp` twice — fixed and caught by leaf `tb_g6lc_ctrl` (`CTRL_SWITCH_ERET`) and
+assertion `t6b3_switch_keeps_commit_flush`. **Seven isolation mutations, 7/7 caught:**
+`STB_NO_HART` (ping-pong mismatches 205), `BANK_ACTIVE_LSU_CTX` (hart 1 faults `mcause=15`),
+`TLB_NO_HART_TAG` (512 TLB mismatches, checksum corrupt), `CTRL_SWITCH_DEGRADES` (assertion at
+259,215), `LSQ_NO_HART` (leaf `tb_g6lc_lsq` `LSQ_XHART_STALL`), `DECODE_ACTIVE_IRQ` (leaf
+`tb_g6lc_idstage`: peer lane takes M_TIMER), `NO_PEER_RESTART` (restart leaf `RESTART_PEER_MISP`).
+Reachability boundary: the LSQ and decode-irq mutations are caught at leaf level only — at core
+level the LSQ leak can only stall (`stl_data` is unconnected) and the irq collision never occurred
+in 144 interrupts; `peer_restarts_caused=0` in every run. First measurement (T6b-4a): aggregate
+IPC mixed 0.610 vs drained 0.569 (+7.2%), hart-1 kernel window 51,699 vs 57,161 cycles (solo
+25,204), 652k both-resident cycles (21%), **390,763 head-of-line-blocked commit cycles (12.6%)** —
+the T6b-4 target. Mixed OpenSBI profile 10,606,940 (the un-degraded flushes cost 4,114 cycles);
+drained 10,696,498 and anchor 12,765,628 exact; lint 8/54, synth 32/5.
+
 ## Mixed-resident ownership completion and partial-flush peer restart (2026-09-23, T6b-3)
 
 **First `SmtDrainedHandoff=0` pass of the protected dual-hart OpenSBI/HSM profile** on

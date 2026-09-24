@@ -100,9 +100,12 @@ next actions are superseded by the tranche exits.
   committing hart, commit-hart CSR access; partial-flush peer restart at the surviving frontier
   incl. the per-hart oldest queued entry) — **first `SmtDrainedHandoff=0` pass of the dual-hart
   profile: 10,602,826 cycles, strictDual, 105k non-active commits, zero assertions** (experimental
-  provenance; `G6LC_OOO_SMT_MIXED_QUALIFY` stays). Open: T6b-3 exit still needs the isolation
-  negatives run at core level (peer store/TLB/PMP/interrupt) and a Spike-compared dual-hart trace;
-  T6b-4 performance (hart-selective kill / per-hart fetch queues, partitioned heads, PRF floors).
+  provenance). **T6b-3 exit met:** `smt_mixed_probe` (both harts doing checked work, hart 1 in
+  S-mode/Sv39, value-exact vs solo stream) passes on mixed/drained/anchor; 7/7 isolation mutations
+  caught; a same-cycle switch no longer degrades an xret/trap full flush (duplicate-`mret` fix).
+  `G6LC_OOO_SMT_MIXED_QUALIFY` stays until T6b-4 decides the production policy. T6b-4a measured:
+  aggregate IPC mixed 0.610 vs drained 0.569, HOL-blocked commit 12.6% — T6b-4 targets: partitioned
+  commit heads, hart-selective kill / per-hart fetch queues, PRF/LSQ floors, xret park-by-hold.
 - [ ] T6b mixed residency per the plan file (after T6a).
 
 ## Active stability-first review — authoritative next change sets

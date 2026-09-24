@@ -96,6 +96,32 @@ module controller
   // Added fence_i_active state to track fence.i progress
   logic fence_i_active_d, fence_i_active_q;
 
+  // T6b-3 exit: a fine-grain switch must never degrade a commit-level flush.
+  // commit_flush enumerates every flush_id_o source in flush_ctrl below the
+  // defaults (mispredict / cf-unissued legs raise only flush_unissued_instr_o,
+  // so they are deliberately absent). Under mixed residency an eret/exception
+  // coincident with a switch still needs the scoreboard+EX kill: already-issued
+  // copies of the flushing instruction survive an unissued-only flush and
+  // re-commit against a bank context the first commit already mutated (the
+  // parked-xret duplicate-mret failure). Under drained handoff or a single
+  // hart MixedSmt folds to 0 and the override below is bit-identical.
+  localparam bit MixedSmt = CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff;
+`ifdef G6LC_MUT_CTRL_SWITCH_DEGRADES
+  // Review-only mutation: the switch override degrades commit-level flushes
+  // again — a resident peer's already-issued copies survive and re-commit.
+  localparam bit SwitchGuardMut = 1'b1;
+`else
+  localparam bit SwitchGuardMut = 1'b0;
+`endif
+  logic commit_flush;
+  assign commit_flush = ex_valid_i | eret_i
+      | (CVA6Cfg.DebugEn & set_debug_pc_i)
+      | flush_csr_i | flush_acc_i
+      | ((CVA6Cfg.RVA | CVA6Cfg.OoOEn) & flush_commit_i)
+      | fence_i | fence_i_i
+      | (CVA6Cfg.RVS & sfence_vma_i)
+      | (CVA6Cfg.RVH & (hfence_vvma_i | hfence_gvma_i));
+
   // ------------
   // Flush CTRL
   // ------------
@@ -284,7 +310,10 @@ module controller
     // (that clears the scoreboard) or flush_ex so in-flight ops of the outgoing
     // hart can drain. CSR/RF bank by instruction hart_id. Do NOT flush BP —
     // RAS/GHR are per-hart and must survive. PC from cva6_smt_pc_bank.
-    if (CVA6Cfg.NrHarts > 1 && smt_switch_i) begin
+    // The override is skipped when a commit-level flush coincides with the
+    // switch under mixed residency — its full-flush outputs above then stand.
+    if (CVA6Cfg.NrHarts > 1 && smt_switch_i
+        && !(MixedSmt && commit_flush && !SwitchGuardMut)) begin
       set_pc_commit_o        = 1'b0;
       flush_if_o             = 1'b1;
       flush_unissued_instr_o = 1'b1;

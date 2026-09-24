@@ -512,6 +512,180 @@ construction — the fileset is 12 files / modules {g6lc_lsq, g6lc_memdep,
 g6lc_ooo_dispatch, g6lc_prf, g6lc_rename, g6lc_rob, g6lc_iq}; no fetch_B source
 is analyzed.
 
+**T6b-3 exit — directed probe, the duplicate-`mret` defect, and the
+switch-guard fix.**
+
+*Probe (repo asset).* `verif/tests/custom/multicore/smt_mixed_probe.{S,_c.c}`,
+build recipe `smt_mixed_probe_build.sh`, remote runner
+`verif/regress/remote/run_smt_mixed_probe.py`. Hart 1 (checksum hart) runs in
+S-mode on its own Sv39 root (data VA `0x4000_0000` → its private page) four
+deterministic kernels — K1 store→load chain, K2 pointer chase, K3 ILP
+multiply chains, K4 branchy accumulate — folding into a 64-bit checksum
+compared against `EXPECT_CSUM=3287142068561700632`; it then loops
+kernels + `misp_burst` + 512 `squash_burst` (speculative shared-word stores
+through the `spec_pad8` RAS-mispredict pad) until `probe_done`. Hart 0 (storm
+hart, M-mode bare) runs the LFSR mispredict storm, the store→load
+pointer-chase replay storm, the shared-page ping-pong witness (4096-iter
+pure reads; a nonzero read can only be a peer-speculative forward), the
+CLINT timer interrupt witness, and its own S-mode TLB hart-tag excursion.
+`+solo` parks hart 0 so hart 1's commit stream is the cycle-insensitive
+reference; all flavours share one `.text` (the split is a `.data` branch on
+`probe_solo`). Checksum provenance: recorded by the `+solo` run on the mixed
+model (`t6b4-solo-mixed-v1`) and independently reproduced by the protected
+in-order anchor model (`t6b4-probe-anchor-v1`) — reference-checked, not
+self-referential.
+
+*The duplicate-`mret` defect.* `instr_scan.sv:77-92` classifies `mret` (and
+`sret`) via `is_xret` as `rvi_jump` with `rvi_imm=0` — a predicted
+jump-to-self. The frontend therefore parks and re-requests the `mret`
+parcel: every `mret` leaves 3–8 issued scoreboard copies that are normally
+killed by the eret's commit-level flush before they can retire. On the
+mixed-residency probe the first `mret` commit (hart 0, cycle 901081)
+coincided with `smt_switch`: the controller raised the full flush, but the
+U6.1 switch override (`controller.sv`) degraded it to `flush_if` +
+unissued-only — the already-issued sibling copies were outside that kill
+set. A second `mret` committed three cycles later with `mstatus.mpp`
+already cleared to U → U-mode refetch → instruction access fault
+(`mcause=12`). Mixed-only: drained serializes residency (no switch races a
+commit) and single-hart never switches.
+
+*Fix.* `controller.sv` computes `commit_flush` = every source that raises
+`flush_id_o`/`flush_ex_o` above the switch block (ex_valid, eret, csr,
+acc, fences, sfence/hfence, commit/replay flush, debug) and gates the
+override with `!(MixedSmt && commit_flush)`, `MixedSmt = NrHarts>1 &&
+!SmtDrainedHandoff` — drained and single-hart constant-fold to the previous
+logic (bit-identical; the drained and anchor probe reruns are cycle-equal
+to pre-fix). Mutation `G6LC_MUT_CTRL_SWITCH_DEGRADES` restores the old
+override. Assertions (translate_off, `gen_t6b3_switch_flush_guard`):
+mixed `smt_switch && commit_flush |-> flush_ctrl_id`
+(`t6b3_switch_keeps_commit_flush`); drained `smt_switch |-> !commit_flush`
+(`t6b3_drained_switch_no_commit_flush` — a latent-legacy detector only; if
+it ever fires on the anchor/drained path the behaviour is pre-existing and
+unchanged, report the cycle). Controller leaf `tb_g6lc_ctrl` /
+`run_ctrl_leaf.py`: `eret_i && smt_switch_i` → mixed asserts
+`flush_if && flush_id && flush_ex`; drained asserts `flush_id=0`
+(unchanged); inverted negative `CTRL_SWITCH_ERET`; synth 15 cells / 0
+latches / 0 SCCs.
+
+*Two companion changes the un-degraded flush exposed.* (1) `frontend.sv`
+`arch_src_sel` now takes `ex_valid_i`/`eret_i` through `commit_for_hart`
+exactly as `set_pc_commit_i` already was: a trap or xret committed by the
+hart that is *not* being fetched banks its redirect (T6b-2a) and must not
+reseed the fetched hart's stream. This is not gated by `SmtDrainedHandoff`
+(it applies to every `NrHarts>1` model); the protected anchor is exact, i.e.
+the legacy fine-grain drain never commits a peer trap/xret while fetching
+the other hart — the latent-legacy detector above also stayed silent. (2)
+The peer-restart fetch-side candidate is `smt_npc_restore` when the flush
+coincides with a switch (the incoming hart's frontier is its banked PC, the
+frontend frontier still belongs to the outgoing hart).
+
+*T6b-4 follow-up (noted, not implemented):* the `is_xret` jump-to-self
+classification is config-independent — every `mret`/`sret` stockpiles 3–8
+issued copies until its own flush arrives. Parking by *holding* the fetch
+request (wait for the redirect) rather than re-requesting the same parcel
+removes the pile-up; the switch-guard fix makes the residual correct, the
+hold-request change is a robustness/performance item.
+
+**T6b-3 exit matrix (all on post-fix models, v4 stimulus).** The v4 probe
+extends `spec_pad8`'s speculative pad from one to two dependent divides —
+the STB forwarding window now covers the observed offer-to-query gap.
+
+| Lane | Result |
+|---|---|
+| mixed probe (`t6b4-probe-mixed-v4`) | **pass**, 3,101,269 cycles, RES0=RES1=pass, checksum exact (`0x2d9e464b9adce718`), `h0_pp=0`, `h0_tlb=0`, `h0_tmr=144` |
+| solo reference (`t6b4-solo-mixed-v4`) | pass, 380,600 cycles; hart-1 commit stream == mixed stream for the first 64,998 records (49,310 strict-value records, 0 mismatches; divergence at the documented `probe_solo` mode boundary) |
+| drained probe (`t6b4-probe-drained-v4`) | pass, 3,013,247 cycles |
+| anchor probe (`t6b4-probe-anchor-v4`) | pass, 3,214,702 cycles; same checksum independently |
+| `mut-stb-no-hart` | **fail** @3,102,950 — `RES0=0x5` (`RES_FAIL_PP`), `h0_pp=205` cross-hart speculative forwards observed |
+| `mut-bank-active-lsu-ctx` | **fail** @130,457 — `RES0=0x3` (`RES_FAIL_TRAP`), `trap_mcause=15` (store page fault): hart-1's S-mode store resolved in hart 0's translation context |
+| `mut-tlb-no-hart-tag` | **fail** @3,102,606 — `RES0=0x6` (`RES_FAIL_TLB`, `h0_tlb=512` aliased words) + `RES1=0x2` checksum corrupt |
+| `mut-ctrl-switch-degrades` | **fail** @259,215 — `t6b3_switch_keeps_commit_flush` assertion fires ("switch degraded a commit-level flush under mixed residency") |
+| `mut-lsq-no-hart` | **fail at leaf** — `tb_g6lc_lsq`/`run_lsq_leaf.py`: mutant hart-1 load stalls on hart 0's unresolved store (`LSQ_XHART_STALL stall=1`); inverted negative `LSQ_XHART_STALL stall=0`; positive `LSQ_HART_PASS`; synth 2,691 cells / 0 latches / 0 SCCs |
+| `mut-decode-active-irq` | **fail at leaf** — `tb_g6lc_idstage`/`run_idstage_leaf.py`: mutant injects `ex.valid=1 cause=0x8000_0000_0000_0007` (M_TIMER) into a hart-1 entry (`DECODE_ACTIVE_IRQ`); inverted negative and `IDSTAGE_IRQ_PASS` both green |
+| `mut-no-peer-restart` | **fail at leaf** — restart bank leaf `+mut_no_peer`: `RESTART_PEER_MISP hart1 bank got=7100 want=8c2e` |
+
+*Why three negatives are leaf-level.* The probe stimulus was driven hard
+enough to prove reachability bounds, and the remaining inertness is
+structural, not a coverage gap to hide:
+`LSQ_NO_HART` — `stl_data_o` is unconnected in `g6lc_ooo_dispatch.sv`
+(`.stl_data_o()`), so cross-hart LSQ leakage can only manifest as
+stalls/replays, never a data mismatch; clean and mutant runs show
+identical replay counts (113). The leaf drives the exact seam.
+`DECODE_ACTIVE_IRQ` — wrong-hart injection needs a peer instruction at a
+decode lane while the active hart's context (`irq_ctrl_b[active_hart]`,
+`irq_i[active_hart]`) has pending+enabled irq; 144 timer fires produced no
+collision — the active hart's own entries dominate the decode ports and
+vector within ~10 cycles, and its trap's commit-level flush kills the
+peer's unissued lanes. The leaf presents both contexts directly.
+`NO_PEER_RESTART` — needs a partial kill while the inactive peer holds
+restart candidates; `peer_restarts_caused=0` on every run of the campaign
+(3.1M-cycle probe, 10.6M-cycle OpenSBI, drained and anchor). The
+`+mut_no_peer` plusarg lane of `tb_g6lc_restart` drops the same restart
+leg and fails `RESTART_PEER_MISP` as designed.
+
+*Regressions (post-fix models, all rebuilt 0-warning).* Mixed OpenSBI
+profile on `work-ver-t6b4-mixed-v3` (`+smt_flow_trace +smt_mixed_stats`,
+14M cap): `outcome=pass`, `strictDualPassed=true`,
+`*** SUCCESS *** (tohost = 0) after 10606940 cycles` — vs 10,602,826
+pre-fix (+4,114 cycles, the now-unmasked full flushes at the coincidence
+cycles); retiredByHart {0:356074, 1:8936331}, `both_resident_cycles=60092`,
+`peer_restarts_caused=0` on this profile too. Drained dual on
+`work-ver-t6b4-drained-v2`: `*** SUCCESS *** ... after 10696498 cycles` —
+exact, bit-identical (the `MixedSmt` gate constant-folds off the drained
+path). Anchor on `work-ver-t6b4-anchor-v2`:
+`*** SUCCESS *** (tohost = 0) after 12765628 cycles` — exact,
+`protectedAnchor=true`. Frozen integer probes on `work-ver-t6b4-ooo-int-v1`:
+11/11 pass cycle-identical (s11=11256, s4=842, s20=921, s32=869, s33=899,
+s34=869, s35=918, s36=918, s37=852, ilp=1117, memdep=1021). FP suite on
+`work-ver-t6b4-fp-v1`: 13 positives pass, 10/10 negatives detected.
+`verify --lint --synth --remote`: lint 8/54 warnings at baseline, synth
+32/5 clean — gate passed (the two strict-slang elaboration steps skip
+environmentally: no standalone slang on the builder). On clean models
+neither translate_off assertion fired anywhere in the campaign — the
+mixed `t6b3_switch_keeps_commit_flush` saw zero
+`smt_switch && commit_flush` coincidences outside the original defect,
+and the drained `t6b3_drained_switch_no_commit_flush` stayed silent on
+every drained and anchor run (no latent-legacy finding). On the
+`G6LC_MUT_CTRL_SWITCH_DEGRADES` mutant the mixed assertion fired at
+259,215 — the intended catch.
+
+**T6b-4a measurement (`smt_mixed_probe` v4, `+smt_mixed_stats`).** v4's
+double-divide speculative pad produces real residency overlap — 652k
+both-resident cycles (21.0%) vs v2's 1.85% — so this table is the first
+that exercises the mixed mode under contention.
+
+| Metric | solo (mixed pkg, h0 parked) | drained | mixed | anchor (in-order) |
+|---|---|---|---|---|
+| total cycles | 380,600 | 3,013,247 | **3,101,269** | 3,214,702 |
+| hart-1 kernel window (cyc) | 25,204 | 57,161 | 51,699 | 65,313 |
+| hart-0 retired / active / IPC | — | 817,740 / 1,267,685 / 0.645 | 766,592 / 1,640,113 / 0.467 | 875,657 / 1,615,340 / 0.542 |
+| hart-1 retired (1st pass) / act / IPC | 18,259 / 25,208 / 0.724 | 18,264 / 28,955 / 0.631 | 18,406 / 25,771 / 0.714 | 18,067 / 32,623 / 0.554 |
+| total retired (h0+h1) / agg IPC | 192,590 / 0.506 | 1,714,424 / 0.569 | 1,892,225 / **0.610** | 1,578,539 / 0.491 |
+| both_resident_cycles | 0 | 0 | 652,488 (21.0%) | 0 |
+| nonactive_commits | 4 | 0 | 193,044 | 0 |
+| HOL-blocking cycles | 0 | 0 | 390,763 (12.6%) | 0 |
+| lsu_ctx_switches | 47,694 | 34,786 | 252,048 | 47,138 |
+| sb_occ avg/max (h0, h1) | 0.00, 6.31 / 8, 8 | 2.05, 3.32 / 8, 8 | 2.20, 4.12 / 8, 8 | 0.64, 0.63 / 4, 6 |
+| iq_occ avg/max (h0, h1) | 0.00, 3.06 / 4, 6 | 1.17, 1.55 / 7, 7 | 1.17, 1.93 / 7, 7 | — |
+| lsq_occ avg/max (h0, h1) | 0.00, 1.97 / 3, 5 | 0.24, 1.09 / 8, 5 | 0.21, 1.35 / 8, 5 | — |
+| rob_occ avg/max | 6.31 / 8 | 5.37 / 8 | 6.32 / 8 | — |
+| prf_used avg/max | 66.50 / 71 | 66.01 / 71 | 66.55 / 71 | — |
+| mispredicts (h0, h1) | 2, 5,457 | 28,750, 24,296 | 28,756, 31,094 | 28,730, 20,243 |
+| peer_restarts_caused | 0, 0 | 0, 0 | 0, 0 | 0, 0 |
+| stalls while peer ≥half sb (rob/iq/lsq/rename) | 0/0/0/0 | 0/0/0/0 | 0/0/77,570/77,689 | 0/0/0/0 |
+
+Mixed vs drained: **+7.2% aggregate throughput** (0.610 vs 0.569
+instr/cycle) and hart-1's kernel window 9.6% faster (51,699 vs 57,161
+cycles — mixed lets hart 1 commit while hart 0 stays resident; drained
+serializes it). The costs are now measurable: 193k non-active commits,
+252k LSU context switches, **390,763 HOL cycles (12.6% of run)** where the
+commit head waits while a peer's oldest entry is complete — the single
+biggest T6b-4 performance target — and 77.5k+77.7k issue stalls taken
+while the peer holds ≥half the scoreboard (lsq/rename attribution;
+rob/iq attribution zero). `peer_restarts_caused=0` confirms the partial
+-kill peer-restart leg stays cold under this scheduler. The ping-pong and
+TLB witnesses stay clean (`h0_pp=0`, `h0_tlb=0`, `h0_tmr=144` correct).
+
 **Slices.** T6b-1 config bit + drain gate seam, hart-tagged LSQ/store-buffer/IQ ordering,
 `sb_head_pc`, leaf oracles (drain gate still on: every existing result must reproduce). T6b-2
 recovery and frontend per-hart state (flush restart, inactive-hart redirects, per-hart filter),

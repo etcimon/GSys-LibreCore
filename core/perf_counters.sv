@@ -163,10 +163,11 @@ module perf_counters
   logic [CVA6Cfg.NrCommitPorts-1:0] return_event;
   logic [CVA6Cfg.NrCommitPorts-1:0] int_event;
   logic [CVA6Cfg.NrCommitPorts-1:0] fp_event;
+  logic [CVA6Cfg.NrCommitPorts-1:0] retire_event;
   // Per-bank ORs of the per-port commit events: bank h sees only the commit
   // ports whose committed instruction carries hart h.
   logic [NH-1:0] load_event_h, store_event_h, branch_event_h, call_event_h;
-  logic [NH-1:0] return_event_h, int_event_h, fp_event_h;
+  logic [NH-1:0] return_event_h, int_event_h, fp_event_h, retire_event_h;
 
   //Multiplexer
   always_comb begin : Mux
@@ -179,6 +180,7 @@ module perf_counters
     return_event = '{default: 0};
     int_event = '{default: 0};
     fp_event = '{default: 0};
+    retire_event = '{default: 0};
     load_event_h = '0;
     store_event_h = '0;
     branch_event_h = '0;
@@ -186,6 +188,7 @@ module perf_counters
     return_event_h = '0;
     int_event_h = '0;
     fp_event_h = '0;
+    retire_event_h = '0;
 
     for (int unsigned j = 0; j < CVA6Cfg.NrCommitPorts; j++) begin
       load_event[j] = commit_ack_i[j] & (commit_instr_i[j].fu == LOAD);
@@ -195,6 +198,11 @@ module perf_counters
       return_event[j] = commit_ack_i[j] & (commit_instr_i[j].op == JALR && commit_instr_i[j].rd == 'd0);
       int_event[j] = commit_ack_i[j] & (commit_instr_i[j].fu == ALU || commit_instr_i[j].fu == MULT);
       fp_event[j] = commit_ack_i[j] & (commit_instr_i[j].fu == FPU || commit_instr_i[j].fu == FPU_VEC);
+      // T6b-4a: retired-instructions-per-hart event for the mixed-residency
+      // measurement probe. commit_ack with no exception is the retirement
+      // witness; same-hart cancellation means a peer's storms never enter
+      // this hart's count.
+      retire_event[j] = commit_ack_i[j] & !commit_instr_i[j].ex.valid;
       // Bucket the port's events into the committing instruction's hart bank.
       for (int unsigned h = 0; h < NH; h++) begin
         if (commit_instr_i[j].hart_id == $bits(commit_instr_i[j].hart_id)'(h)) begin
@@ -205,6 +213,7 @@ module perf_counters
           return_event_h[h] |= return_event[j];
           int_event_h[h]    |= int_event[j];
           fp_event_h[h]     |= fp_event[j];
+          retire_event_h[h] |= retire_event[j];
         end
       end
     end
@@ -262,6 +271,12 @@ module perf_counters
       event_group[h][3'd1][5'd5] = ooo_lsq_stall_i && act;  // LSQ / memdep / STL stall
       event_group[h][3'd1][5'd6] = ooo_stl_forward_i && act;  // store-to-load forward hits
       event_group[h][3'd1][5'd7] = ooo_rename_stall_i && act; // freelist / rename stall alone
+      // T6b-4a: retired instructions, banked by the committing hart — the
+      // architectural per-hart readout for the mixed-residency probe.
+      event_group[h][3'd1][5'd8] = retire_event_h[h];
+      // T6b-4a: cycles this hart held the active (fetch) context — the
+      // architectural residency readout companion to the retired counter.
+      event_group[h][3'd1][5'd9] = act;
       // Group 2: server memory hierarchy (mhpmevent[7:5]==2). Stable indices.
       event_group[h][3'd2][5'd0] = l3_miss_i && act;   // L3 miss
       event_group[h][3'd2][5'd1] = l3_hit_i && act;    // L3 hit

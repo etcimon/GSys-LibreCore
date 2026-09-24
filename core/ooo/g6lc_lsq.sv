@@ -128,6 +128,13 @@ module g6lc_lsq #(
   // the word boundary; a misaligned access traps in the LSU, so bytes landing
   // beyond lane XLEN/8 are moot here.
   localparam int unsigned LANES = (CVA6Cfg.XLEN + 7) / 8;
+`ifdef G6LC_MUT_LSQ_NO_HART
+  // Review-only mutation: the LSQ ignores hart tags — loads order against,
+  // forward from and replay on the peer hart's stores.
+  localparam bit LSQ_HART_OWN = 1'b0;
+`else
+  localparam bit LSQ_HART_OWN = 1'b1;
+`endif
   function automatic logic [LANES-1:0] lane_be(
       input logic [CVA6Cfg.PLEN-1:0] a,
       input logic [1:0]              size
@@ -266,7 +273,7 @@ module g6lc_lsq #(
       older_unresolved = 1'b0;
       if (ld_q[i].valid && ld_d[i].done) begin
         for (int unsigned j = 0; j < ST_ENTRIES; j++)
-          if (st_d[j].valid && !st_d[j].addr_v && st_d[j].hart == ld_q[i].hart &&
+          if (st_d[j].valid && !st_d[j].addr_v && (!LSQ_HART_OWN || st_d[j].hart == ld_q[i].hart) &&
               g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(st_d[j].id), 32'(ld_q[i].id), 32'(commit_ptr_i)))
             older_unresolved = 1'b1;
         if (!older_unresolved) ld_d[i].valid = 1'b0;
@@ -313,6 +320,9 @@ module g6lc_lsq #(
         lsq_busy_o = 1'b1;
         st_live_mask_o[st_q[i].id] = 1'b1;
         st_hart_mask_o[st_q[i].hart][st_q[i].id] = 1'b1;
+        if (!LSQ_HART_OWN)
+          for (int unsigned h = 0; h < CVA6Cfg.NrHarts; h++)
+            st_hart_mask_o[h][st_q[i].id] = 1'b1;
         if (!st_q[i].addr_v) st_unresolved_mask_o[st_q[i].id] = 1'b1;
       end
     for (int unsigned i = 0; i < LD_ENTRIES; i++)
@@ -359,7 +369,7 @@ module g6lc_lsq #(
       for (int unsigned i = 0; i < ST_ENTRIES; i++) begin
         sdist = CVA6Cfg.TRANS_ID_BITS'(g6lc_ooo_pkg::ooo_age_dist(
                     CVA6Cfg.TRANS_ID_BITS, 32'(st_q[i].id), 32'(commit_ptr_i)));
-        if (st_q[i].valid && st_q[i].hart == ld_query_hart_i && sdist < ld_dist) begin
+        if (st_q[i].valid && (!LSQ_HART_OWN || st_q[i].hart == ld_query_hart_i) && sdist < ld_dist) begin
           if (!st_q[i].addr_v) begin
             // Unresolved OLDER store may yet alias: stall regardless of any
             // resolved match (the unresolved one could be the true producer).
@@ -433,7 +443,7 @@ module g6lc_lsq #(
               ld_size_now   = addr_size_i[v];
             end
           lbe_v = lane_be(ld_addr_now, ld_size_now);
-          if (ld_q[j].valid && ld_addr_v_now && ld_q[j].hart == st_hart_now &&
+          if (ld_q[j].valid && ld_addr_v_now && (!LSQ_HART_OWN || ld_q[j].hart == st_hart_now) &&
               g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(addr_id_i[u]), 32'(ld_q[j].id), 32'(commit_ptr_i)) &&
               same_word(ld_addr_now, addr_i[u]) && ((sbe_v & lbe_v) != '0))
             viol_cand[j] = 1'b1;

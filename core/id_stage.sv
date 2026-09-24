@@ -479,8 +479,16 @@ module id_stage #(
         .INTERRUPTS(INTERRUPTS)
     ) decoder_i (
         .debug_req_i,
+`ifdef G6LC_MUT_DECODE_ACTIVE_IRQ
+        // Review-only mutation: every decode lane takes the active hart's
+        // interrupt context — a resident peer vectors on interrupts that are
+        // not its own (or misses its own).
+        .irq_ctrl_i                (irq_ctrl_i),
+        .irq_i                     (irq_i),
+`else
         .irq_ctrl_i                (SMT_MIXED_DECODE ? irq_ctrl_b_i[fetch_entry_i[i].hart_id] : irq_ctrl_i),
         .irq_i                     (SMT_MIXED_DECODE ? irq_b_i[fetch_entry_i[i].hart_id] : irq_i),
+`endif
         .pc_i                      (fetch_entry_i[i].address),
         .is_compressed_i           (is_compressed_deco[i]),
         .is_macro_instr_i          (is_macro_instr[i]),

@@ -1150,9 +1150,13 @@ module cva6
           pr_decode_valid, pr_decode_hart, pr_decode_pc,
           pr_queue_valid, pr_queue_hart, pr_queue_pc,
           // The fetch state is a frontier only for the hart the frontend is
-          // actually fetching; an inactive peer keeps its banked PC.
+          // actually fetching; an inactive peer keeps its banked PC. During
+          // the switch beat itself smt_active_hart already names the
+          // incoming hart while npc/inflight still hold the outgoing hart's
+          // dying stream — the incoming hart's frontier is its banked
+          // restore PC, not the stream being killed.
           '{valid: peer_restart_hart == smt_active_hart,
-            pc: 64'(smt_fetch_frontier)},
+            pc: 64'(smt_switch ? smt_npc_restore : smt_fetch_frontier)},
           1'b0, '0, '0);
     end
     // sb_head is a frontier only on a full flush: on a partial flush the
@@ -1161,9 +1165,16 @@ module cva6
     assign peer_restart_pc = flush_ctrl_id && sb_head_valid[peer_restart_hart]
                              ? sb_head_pc[peer_restart_hart]
                              : CVA6Cfg.VLEN'(pr_selected.pc);
+`ifdef G6LC_MUT_NO_PEER_RESTART
+    // Review-only mutation: no peer restart on a partial flush — the peer's
+    // killed pre-dispatch instructions are never refetched.
+    assign peer_restart_valid = flush_ctrl_id &&
+        (sb_head_valid[peer_restart_hart] || pr_selected.valid);
+`else
     assign peer_restart_valid = (flush_ctrl_id &&
         (sb_head_valid[peer_restart_hart] || pr_selected.valid)) ||
         (partial_kill && pr_selected.valid);
+`endif
     assign peer_restart_active = peer_restart_valid &&
         (peer_restart_hart == smt_active_hart);
   end else begin : gen_no_peer_restart
@@ -3015,25 +3026,119 @@ module cva6
   // residency actually happened. Counts cycles with every hart holding a
   // live scoreboard entry (sb_head_valid), commits whose owning hart is not
   // the active fetch hart, and per-hart retirements.
+  // T6b-4a measurement counters (same plusarg): per-hart residency, fetch
+  // share, mispredict/peer-restart attribution, scoreboard occupancy,
+  // head-of-line blocking, LSU-context switches and stall-vs-peer-occupancy
+  // attribution. OoO-structure occupancy (IQ/ROB/LSQ/PRF) is measured in
+  // gen_ms_ooo below — it exists only when OoOEn.
   if (CVA6Cfg.NrHarts > 1) begin : gen_smt_mixed_stats
     bit smt_mixed_stats;
     longint unsigned smt_ms_both_resident, smt_ms_nonactive_commit;
     longint unsigned smt_ms_retired[CVA6Cfg.NrHarts];
+    longint unsigned smt_ms_cycles;
+    longint unsigned smt_ms_resident[CVA6Cfg.NrHarts];
+    longint unsigned smt_ms_fetch_req[CVA6Cfg.NrHarts];
+    longint unsigned smt_ms_fetch_parcel[CVA6Cfg.NrHarts];
+    longint unsigned smt_ms_mispredict[CVA6Cfg.NrHarts];
+    longint unsigned smt_ms_peer_restart[CVA6Cfg.NrHarts];
+    longint unsigned smt_ms_ctx_switch;
+    longint unsigned smt_ms_hol;
+    longint unsigned smt_ms_stall_rob, smt_ms_stall_iq;
+    longint unsigned smt_ms_stall_lsq, smt_ms_stall_ren;
+    longint unsigned smt_ms_sb_occ_acc[CVA6Cfg.NrHarts];
+    int unsigned smt_ms_sb_occ_max[CVA6Cfg.NrHarts];
+    int unsigned sb_occ[CVA6Cfg.NrHarts];
+    logic [HART_ID_BITS-1:0] smt_ms_lsu_ctx_q;
+    always_comb begin
+      for (int h = 0; h < CVA6Cfg.NrHarts; h++) begin
+        sb_occ[h] = 0;
+        for (int s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
+          if (issue_stage_i.i_scoreboard.mem_q[s].issued &&
+              issue_stage_i.i_scoreboard.mem_q[s].sbe.hart_id == HART_ID_BITS'(h))
+            sb_occ[h]++;
+      end
+    end
     initial begin
       smt_mixed_stats = $test$plusargs("smt_mixed_stats");
       smt_ms_both_resident = 0;
       smt_ms_nonactive_commit = 0;
-      for (int h = 0; h < CVA6Cfg.NrHarts; h++) smt_ms_retired[h] = 0;
+      smt_ms_cycles = 0;
+      smt_ms_ctx_switch = 0;
+      smt_ms_hol = 0;
+      smt_ms_stall_rob = 0;
+      smt_ms_stall_iq = 0;
+      smt_ms_stall_lsq = 0;
+      smt_ms_stall_ren = 0;
+      smt_ms_lsu_ctx_q = '0;
+      for (int h = 0; h < CVA6Cfg.NrHarts; h++) begin
+        smt_ms_retired[h] = 0;
+        smt_ms_resident[h] = 0;
+        smt_ms_fetch_req[h] = 0;
+        smt_ms_fetch_parcel[h] = 0;
+        smt_ms_mispredict[h] = 0;
+        smt_ms_peer_restart[h] = 0;
+        smt_ms_sb_occ_acc[h] = 0;
+        smt_ms_sb_occ_max[h] = 0;
+      end
     end
     always @(posedge clk_i) begin
       if (rst_ni && smt_mixed_stats) begin
+        automatic int unsigned head_slot;
+        automatic bit head_busy, peer_complete;
+        smt_ms_cycles++;
         if (&sb_head_valid) smt_ms_both_resident++;
+        for (int h = 0; h < CVA6Cfg.NrHarts; h++) begin
+          if (sb_head_valid[h]) smt_ms_resident[h]++;
+          smt_ms_sb_occ_acc[h] += sb_occ[h];
+          if (sb_occ[h] > smt_ms_sb_occ_max[h]) smt_ms_sb_occ_max[h] = sb_occ[h];
+        end
         for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
           if (commit_ack[p]) begin
             if (commit_instr_id_commit[p].hart_id != smt_active_hart)
               smt_ms_nonactive_commit++;
             if (smt_retire_valid[p]) smt_ms_retired[smt_retire_hart[p]]++;
           end
+        end
+        // Fetch share: I$ requests issued and parcels delivered to decode,
+        // attributed to the hart the frontend is fetching.
+        if (icache_dreq_if_cache.req) smt_ms_fetch_req[smt_active_hart]++;
+        if (smt_fetch_fire) smt_ms_fetch_parcel[smt_active_hart]++;
+        // Branch mispredicts and the partial-kill peer restarts they cause.
+        if (resolved_branch.valid && resolved_branch.is_mispredict)
+          smt_ms_mispredict[resolved_branch.hart_id]++;
+        if (peer_restart_valid && !flush_ctrl_id)
+          smt_ms_peer_restart[resolved_branch.hart_id]++;
+        // LSU translation-context switches (request hart changes).
+        if (lsu_ctx_hart != smt_ms_lsu_ctx_q) smt_ms_ctx_switch++;
+        smt_ms_lsu_ctx_q <= lsu_ctx_hart;
+        // Head-of-line blocking: the global commit head is live but
+        // incomplete while a different hart already holds a completed entry.
+        head_slot = int'(issue_stage_i.i_scoreboard.commit_pointer_q[0]);
+        head_busy = issue_stage_i.i_scoreboard.mem_q[head_slot].issued &&
+                    !issue_stage_i.i_scoreboard.mem_q[head_slot].sbe.valid &&
+                    !issue_stage_i.i_scoreboard.mem_q[head_slot].cancelled;
+        peer_complete = 1'b0;
+        for (int s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
+          if (issue_stage_i.i_scoreboard.mem_q[s].issued &&
+              issue_stage_i.i_scoreboard.mem_q[s].sbe.valid &&
+              !issue_stage_i.i_scoreboard.mem_q[s].cancelled &&
+              (issue_stage_i.i_scoreboard.mem_q[s].sbe.hart_id !=
+               issue_stage_i.i_scoreboard.mem_q[head_slot].sbe.hart_id))
+            peer_complete = 1'b1;
+        if (head_busy && peer_complete) smt_ms_hol++;
+        // Dispatch stalls while the NON-fetching hart holds >= half of the
+        // scoreboard window (the shared-structure pressure witness).
+        if (CVA6Cfg.NrHarts == 2) begin
+          automatic int unsigned peer_h;
+          peer_h = CVA6Cfg.NrHarts - 1 - int'(smt_active_hart);
+          if (ooo_rob_full && sb_occ[peer_h] * 2 >= CVA6Cfg.NR_SB_ENTRIES)
+            smt_ms_stall_rob++;
+          if (ooo_iq_full && sb_occ[peer_h] * 2 >= CVA6Cfg.NR_SB_ENTRIES)
+            smt_ms_stall_iq++;
+          if (ooo_lsq_stall && sb_occ[peer_h] * 2 >= CVA6Cfg.NR_SB_ENTRIES)
+            smt_ms_stall_lsq++;
+          if (ooo_rename_stall && sb_occ[peer_h] * 2 >= CVA6Cfg.NR_SB_ENTRIES)
+            smt_ms_stall_ren++;
         end
       end
     end
@@ -3043,6 +3148,106 @@ module cva6
                  smt_ms_both_resident, smt_ms_nonactive_commit);
         for (int h = 0; h < CVA6Cfg.NrHarts; h++)
           $display("[smt-mixed] retired hart %0d = %0d", h, smt_ms_retired[h]);
+        $display("[smt-mixed] cycles=%0d hol_cycles=%0d lsu_ctx_switches=%0d",
+                 smt_ms_cycles, smt_ms_hol, smt_ms_ctx_switch);
+        for (int h = 0; h < CVA6Cfg.NrHarts; h++)
+          $display("[smt-mixed] hart%0d resident=%0d fetch_req=%0d fetch_parcel=%0d mispredict=%0d peer_restarts_caused=%0d sb_occ_avg=%0d.%02d sb_occ_max=%0d",
+                   h, smt_ms_resident[h], smt_ms_fetch_req[h],
+                   smt_ms_fetch_parcel[h], smt_ms_mispredict[h],
+                   smt_ms_peer_restart[h],
+                   smt_ms_cycles ? smt_ms_sb_occ_acc[h] / smt_ms_cycles : 0,
+                   smt_ms_cycles ? (100 * smt_ms_sb_occ_acc[h] / smt_ms_cycles) % 100 : 0,
+                   smt_ms_sb_occ_max[h]);
+        $display("[smt-mixed] stalls_peer_half_sb: rob=%0d iq=%0d lsq=%0d rename=%0d",
+                 smt_ms_stall_rob, smt_ms_stall_iq, smt_ms_stall_lsq,
+                 smt_ms_stall_ren);
+      end
+    end
+  end
+
+  // T6b-4a: OoO-structure occupancy (IQ/LSQ per hart, ROB/PRF shared — those
+  // structures are hart-blind, so per-hart attribution is not meaningful;
+  // reported as totals). Separate generate so the hierarchical paths only
+  // elaborate when the OoO backend exists.
+  if (CVA6Cfg.NrHarts > 1 && CVA6Cfg.OoOEn) begin : gen_ms_ooo_stats
+    bit smt_ms_ooo_en;
+    longint unsigned smt_ms_o_cycles;
+    longint unsigned smt_ms_iq_occ_acc[CVA6Cfg.NrHarts];
+    int unsigned smt_ms_iq_occ_max[CVA6Cfg.NrHarts];
+    longint unsigned smt_ms_lsq_occ_acc[CVA6Cfg.NrHarts];
+    int unsigned smt_ms_lsq_occ_max[CVA6Cfg.NrHarts];
+    longint unsigned smt_ms_rob_occ_acc;
+    int unsigned smt_ms_rob_occ_max;
+    longint unsigned smt_ms_prf_used_acc;
+    int unsigned smt_ms_prf_used_max;
+    initial begin
+      smt_ms_ooo_en = $test$plusargs("smt_mixed_stats");
+      smt_ms_o_cycles = 0;
+      smt_ms_rob_occ_acc = 0;
+      smt_ms_rob_occ_max = 0;
+      smt_ms_prf_used_acc = 0;
+      smt_ms_prf_used_max = 0;
+      for (int h = 0; h < CVA6Cfg.NrHarts; h++) begin
+        smt_ms_iq_occ_acc[h] = 0;
+        smt_ms_iq_occ_max[h] = 0;
+        smt_ms_lsq_occ_acc[h] = 0;
+        smt_ms_lsq_occ_max[h] = 0;
+      end
+    end
+    always @(posedge clk_i) begin
+      if (rst_ni && smt_ms_ooo_en) begin
+        automatic int unsigned iq_occ[CVA6Cfg.NrHarts];
+        automatic int unsigned lsq_occ[CVA6Cfg.NrHarts];
+        automatic int unsigned prf_used;
+        smt_ms_o_cycles++;
+        for (int h = 0; h < CVA6Cfg.NrHarts; h++) begin
+          iq_occ[h] = 0;
+          lsq_occ[h] = 0;
+        end
+        for (int e = 0; e < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.DEPTH; e++)
+          if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].valid)
+            iq_occ[int'(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.hart_id)]++;
+        for (int e = 0; e < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.LD_ENTRIES; e++)
+          if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[e].valid)
+            lsq_occ[int'(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[e].hart)]++;
+        for (int e = 0; e < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ST_ENTRIES; e++)
+          if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.st_q[e].valid)
+            lsq_occ[int'(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.st_q[e].hart)]++;
+        prf_used = 0;
+        for (int e = 0; e < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rename.PRF_ENTRIES; e++)
+          if (!issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rename.free_q[e])
+            prf_used++;
+        for (int h = 0; h < CVA6Cfg.NrHarts; h++) begin
+          smt_ms_iq_occ_acc[h] += iq_occ[h];
+          smt_ms_lsq_occ_acc[h] += lsq_occ[h];
+          if (iq_occ[h] > smt_ms_iq_occ_max[h]) smt_ms_iq_occ_max[h] = iq_occ[h];
+          if (lsq_occ[h] > smt_ms_lsq_occ_max[h]) smt_ms_lsq_occ_max[h] = lsq_occ[h];
+        end
+        smt_ms_rob_occ_acc += int'(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rob.count_q);
+        if (int'(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rob.count_q) > smt_ms_rob_occ_max)
+          smt_ms_rob_occ_max = int'(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rob.count_q);
+        smt_ms_prf_used_acc += prf_used;
+        if (prf_used > smt_ms_prf_used_max) smt_ms_prf_used_max = prf_used;
+      end
+    end
+    final begin
+      if (smt_ms_ooo_en) begin
+        for (int h = 0; h < CVA6Cfg.NrHarts; h++)
+          $display("[smt-mixed] hart%0d iq_occ_avg=%0d.%02d iq_occ_max=%0d lsq_occ_avg=%0d.%02d lsq_occ_max=%0d",
+                   h,
+                   smt_ms_o_cycles ? smt_ms_iq_occ_acc[h] / smt_ms_o_cycles : 0,
+                   smt_ms_o_cycles ? (100 * smt_ms_iq_occ_acc[h] / smt_ms_o_cycles) % 100 : 0,
+                   smt_ms_iq_occ_max[h],
+                   smt_ms_o_cycles ? smt_ms_lsq_occ_acc[h] / smt_ms_o_cycles : 0,
+                   smt_ms_o_cycles ? (100 * smt_ms_lsq_occ_acc[h] / smt_ms_o_cycles) % 100 : 0,
+                   smt_ms_lsq_occ_max[h]);
+        $display("[smt-mixed] rob_occ_avg=%0d.%02d rob_occ_max=%0d prf_used_avg=%0d.%02d prf_used_max=%0d",
+                 smt_ms_o_cycles ? smt_ms_rob_occ_acc / smt_ms_o_cycles : 0,
+                 smt_ms_o_cycles ? (100 * smt_ms_rob_occ_acc / smt_ms_o_cycles) % 100 : 0,
+                 smt_ms_rob_occ_max,
+                 smt_ms_o_cycles ? smt_ms_prf_used_acc / smt_ms_o_cycles : 0,
+                 smt_ms_o_cycles ? (100 * smt_ms_prf_used_acc / smt_ms_o_cycles) % 100 : 0,
+                 smt_ms_prf_used_max);
       end
     end
   end
@@ -3066,6 +3271,23 @@ module cva6
     else $error("t6b3: partial flush without a mispredict owner — peer restart hart undefined");
   end
 `endif
+
+  // T6b-3 exit: a switch must never degrade a commit-level flush. Mixed
+  // residency keeps the full flush (controller.sv SwitchGuardMut off); the
+  // drained witness asserts the coincidence never happens there — if it fires,
+  // the legacy fine-grain drain is not airtight (report, do not fix here).
+  if (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin : gen_t6b3_switch_flush_guard
+    t6b3_switch_keeps_commit_flush : assert property (
+        @(posedge clk_i) disable iff (!rst_ni)
+        smt_switch && controller_i.commit_flush |-> flush_ctrl_id)
+    else $error("t6b3: switch degraded a commit-level flush under mixed residency");
+  end
+  if (CVA6Cfg.NrHarts > 1 && CVA6Cfg.SmtDrainedHandoff) begin : gen_t6b3_drained_switch_witness
+    t6b3_drained_switch_no_commit_flush : assert property (
+        @(posedge clk_i) disable iff (!rst_ni)
+        smt_switch |-> !controller_i.commit_flush)
+    else $error("t6b3: switch coincident with commit-level flush under drained handoff");
+  end
 
   // Read-only load round-trip observer on the core's load port. Requests are
   // paired to responses by data_id/data_rid, which the load unit allocates from
@@ -3095,6 +3317,131 @@ module cva6
       if (dcache_req_ports_cache_ex[1].data_rvalid)
         $display("[smt-rtt] resp cycle=%0d tag=%0d active=%0d", smt_rtt_cycle,
                  dcache_req_ports_cache_ex[1].data_rid, smt_active_hart);
+    end
+  end
+
+  // T6b-3 exit diagnostics (+smt_dup_trace): duplicate-commit investigation.
+  // Per-cycle dump over a fixed window measured in scoreboard trace cycles
+  // (issue_stage_i.i_scoreboard.smt_flow_cycle) so every record lines up with
+  // the [smt-flow] alloc/retire lines. Covers the whole commit -> bank-eret
+  // -> controller-flush -> redirect / peer-restart -> fetch-frontier chain
+  // plus every scoreboard slot carrying the suspect PC.
+  if (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin : gen_smt_dup_trace
+    bit smt_dup_trace;
+    int unsigned dup_lo, dup_hi;
+    localparam logic [CVA6Cfg.VLEN-1:0] DupPc = CVA6Cfg.VLEN'(64'h0000000080000118);
+    initial begin
+      smt_dup_trace = $test$plusargs("smt_dup_trace");
+      dup_lo = 901060;
+      dup_hi = 901170;
+    end
+    always @(posedge clk_i) begin
+      if (rst_ni && smt_dup_trace &&
+          issue_stage_i.i_scoreboard.smt_flow_cycle >= dup_lo &&
+          issue_stage_i.i_scoreboard.smt_flow_cycle <= dup_hi) begin
+        // commit ports + the op the CSR bank was presented
+        for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++)
+          $display("[smt-dup] cyc=%0d cmt p=%0d ack=%b ackid=%b id=%0d pc=%h h=%0d fu=%0d op=%0d v=%b d=%b ex=%b",
+                   issue_stage_i.i_scoreboard.smt_flow_cycle, p, commit_ack[p],
+                   commit_ack_commit_id[p], issue_stage_i.i_scoreboard.commit_pointer_q[p],
+                   commit_instr_id_commit[p].pc, commit_instr_id_commit[p].hart_id,
+                   commit_instr_id_commit[p].fu, commit_instr_id_commit[p].op,
+                   commit_instr_id_commit[p].valid, commit_drop_id_commit[p],
+                   commit_instr_id_commit[p].ex.valid);
+        $display("[smt-dup] cyc=%0d bank h0id=%0d sel=%b%b op_in=%0d opg0=%0d opg1=%0d mret=%b%b we=%b%b rd=%b%b eretb=%b%b eret=%b priv=%0d%0d mpp=%0d%0d epc=%h",
+                 issue_stage_i.i_scoreboard.smt_flow_cycle,
+                 commit_instr_id_commit[0].hart_id,
+                 csr_regfile_i.gen_banked.commit_sel[0],
+                 csr_regfile_i.gen_banked.commit_sel[1],
+                 8'(csr_op_commit_csr), 8'(csr_regfile_i.gen_banked.csr_op_g[0]),
+                 8'(csr_regfile_i.gen_banked.csr_op_g[1]),
+                 csr_regfile_i.gen_banked.gen_csr[0].i_csr.mret,
+                 csr_regfile_i.gen_banked.gen_csr[1].i_csr.mret,
+                 csr_regfile_i.gen_banked.gen_csr[0].i_csr.csr_we,
+                 csr_regfile_i.gen_banked.gen_csr[1].i_csr.csr_we,
+                 csr_regfile_i.gen_banked.gen_csr[0].i_csr.csr_read,
+                 csr_regfile_i.gen_banked.gen_csr[1].i_csr.csr_read,
+                 csr_regfile_i.gen_banked.eret_b[0],
+                 csr_regfile_i.gen_banked.eret_b[1], eret,
+                 csr_regfile_i.gen_banked.priv_b[0],
+                 csr_regfile_i.gen_banked.priv_b[1],
+                 csr_regfile_i.gen_banked.gen_csr[0].i_csr.mstatus_q.mpp,
+                 csr_regfile_i.gen_banked.gen_csr[1].i_csr.mstatus_q.mpp,
+                 epc_commit_pcgen);
+        // controller flush outputs and the inputs that drive them
+        $display("[smt-dup] cyc=%0d ctl fif=%b fid=%b uniss=%b fex=%b fbp=%b spc=%b sw=%b halt=%b hfe=%b replay=%b csrfl=%b exv=%b exc=%h eret_i=%b act=%0d out=%0d rest_v=%b rest=%h nrest=%h pc_cmt=%h wh=%b%b",
+                 issue_stage_i.i_scoreboard.smt_flow_cycle,
+                 flush_ctrl_if, flush_ctrl_id, flush_unissued_instr_ctrl_id,
+                 flush_ctrl_ex, flush_ctrl_bp, set_pc_ctrl_pcgen, smt_switch,
+                 halt_ctrl, halt_frontend, mem_replay_pc_ctrl_pcgen,
+                 flush_csr_ctrl, ex_commit.valid, ex_commit.cause[15:0], eret,
+                 smt_active_hart, smt_outgoing_hart, smt_pc_restore,
+                 smt_npc_restore, smt_npc_live, pc_commit,
+                 whart_commit_id[0], whart_commit_id[CVA6Cfg.NrCommitPorts-1]);
+        // resolved branch raw / as filtered for the controller and frontend
+        $display("[smt-dup] cyc=%0d rb v=%b misp=%b cmisp=%b h=%0d pc=%h tgt=%h | fe_rfa=%b fe_outr=%b fe_ismisp=%b",
+                 issue_stage_i.i_scoreboard.smt_flow_cycle,
+                 resolved_branch.valid, resolved_branch.is_mispredict,
+                 resolved_branch_ctrl.is_mispredict, resolved_branch.hart_id,
+                 resolved_branch.pc, resolved_branch.target_address,
+                 i_frontend.resolution_for_active, i_frontend.misp_outranked,
+                 i_frontend.is_mispredict);
+        // banked redirects and the peer-restart candidates that fed them
+        $display("[smt-dup] cyc=%0d red v=%b h=%0d pc=%h | v2=%b h2=%0d pc2=%h | pk=%b fh=%0d prv=%b pra=%b prh=%0d prpc=%h selv=%b selpc=%h fet=%h qold=%b qpc0=%h qpc1=%h pcnt=%0d/%0d",
+                 issue_stage_i.i_scoreboard.smt_flow_cycle,
+                 smt_arch_redirect_valid, smt_arch_redirect_hart,
+                 smt_arch_redirect_pc, smt_arch_redirect2_valid,
+                 smt_arch_redirect2_hart, smt_arch_redirect2_pc,
+                 gen_peer_restart.partial_kill, gen_peer_restart.fault_hart,
+                 peer_restart_valid, peer_restart_active, peer_restart_hart,
+                 peer_restart_pc, gen_peer_restart.pr_selected.valid,
+                 gen_peer_restart.pr_selected.pc, smt_fetch_frontier,
+                 smt_queue_oldest_valid, smt_queue_oldest_pc[0],
+                 smt_queue_oldest_pc[CVA6Cfg.NrHarts-1],
+                 i_frontend.i_instr_queue.gen_pend_frontier.pend_cnt_q[0],
+                 i_frontend.i_instr_queue.gen_pend_frontier.pend_cnt_q[CVA6Cfg.NrHarts-1]);
+        for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+          $display("[smt-dup] cyc=%0d cand p=%0d dv=%b dh=%0d dpc=%h | dec_v=%b dec_h=%0d dec_pc=%h | fe_v=%b fe_h=%0d fe_pc=%h fe_rdy=%b",
+                   issue_stage_i.i_scoreboard.smt_flow_cycle, p,
+                   gen_peer_restart.pr_decode_valid[p],
+                   gen_peer_restart.pr_decode_hart[p],
+                   gen_peer_restart.pr_decode_pc[p],
+                   issue_entry_valid_id_issue[p], issue_entry_id_issue[p].hart_id,
+                   issue_entry_id_issue[p].pc, fetch_valid_if_id[p],
+                   fetch_entry_if_id[p].hart_id, fetch_entry_if_id[p].address,
+                   fetch_ready_id_if[p]);
+        // frontend redirect bookkeeping, NPC selection and the I$ interface
+        $display("[smt-dup] cyc=%0d fe pend=%b ppc=%h rinfl=%b rlost=%b rhit=%b rhold=%b racc=%b rtrap=%b infl=%b ia=%h npc=%h archv=%b src=%0d apc=%h faddr=%h seq=%h ifrdy=%b req=%b rva=%h rrdy=%b resp=%b rspva=%h take=%b ks2=%b icv=%b icva=%h sham=%0d",
+                 issue_stage_i.i_scoreboard.smt_flow_cycle,
+                 i_frontend.redirect_pend_q, i_frontend.redirect_pc_q,
+                 i_frontend.redirect_inflight_q, i_frontend.redirect_lost_q,
+                 i_frontend.redirect_hit, i_frontend.redirect_hold,
+                 i_frontend.redirect_accept, i_frontend.redirect_trap_q,
+                 i_frontend.inflight_q, i_frontend.inflight_addr_q,
+                 i_frontend.npc_q, i_frontend.arch_valid, i_frontend.arch_src,
+                 i_frontend.arch_pc, i_frontend.fetch_address,
+                 i_frontend.seq_base, i_frontend.if_ready,
+                 icache_dreq_if_cache.req, icache_dreq_if_cache.vaddr,
+                 icache_dreq_cache_if.ready, icache_dreq_cache_if.valid,
+                 icache_dreq_cache_if.vaddr, i_frontend.icache_take,
+                 i_frontend.kill_s2, i_frontend.icache_valid_q,
+                 i_frontend.icache_vaddr_q,
+                 i_frontend.i_instr_queue.shamt);
+        // every scoreboard slot holding a copy of the suspect instruction
+        for (int s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
+          if (issue_stage_i.i_scoreboard.mem_q[s].sbe.pc == DupPc)
+            $display("[smt-dup] cyc=%0d sb s=%0d gen=%0d iss=%b can=%b v=%b h=%0d fu=%0d op=%0d ex=%b rep=%b",
+                     issue_stage_i.i_scoreboard.smt_flow_cycle, s,
+                     issue_stage_i.i_scoreboard.smt_flow_generation[s],
+                     issue_stage_i.i_scoreboard.mem_q[s].issued,
+                     issue_stage_i.i_scoreboard.mem_q[s].cancelled,
+                     issue_stage_i.i_scoreboard.mem_q[s].sbe.valid,
+                     issue_stage_i.i_scoreboard.mem_q[s].sbe.hart_id,
+                     issue_stage_i.i_scoreboard.mem_q[s].sbe.fu,
+                     issue_stage_i.i_scoreboard.mem_q[s].sbe.op,
+                     issue_stage_i.i_scoreboard.mem_q[s].sbe.ex.valid,
+                     issue_stage_i.i_scoreboard.mem_q[s].replay);
+      end
     end
   end
 `endif

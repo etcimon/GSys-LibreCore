@@ -598,7 +598,17 @@ module g6lc_smt_csr_bank
     // I-side (ITLB, fetch PMP, fetch-side PTW context) on active_hart_i.
     // Under SmtDrainedHandoff lsu_hart_i is tied to the active hart upstream,
     // so every output is bit-identical to the drained implementation.
+`ifdef G6LC_MUT_BANK_ACTIVE_LSU_CTX
+    // Review-only mutation: the LSU-side context follows the ACTIVE hart —
+    // a resident peer's data accesses translate/check in the wrong bank.
+    localparam bit LSU_CTX_MUT = 1'b1;
+`else
+    localparam bit LSU_CTX_MUT = 1'b0;
+`endif
     always_comb begin
+      automatic logic [$bits(lsu_hart_i)-1:0] lsu_ctx, lsu_chk_ctx;
+      lsu_ctx     = LSU_CTX_MUT ? active_hart_i : lsu_hart_i;
+      lsu_chk_ctx = LSU_CTX_MUT ? active_hart_i : lsu_chk_hart_i;
       // CSR-write side-effect flush belongs to the committing hart
       flush_o                  = flush_b[commit_instr_i.hart_id];
       // WFI: under drained handoff the whole backend is empty at a switch, so
@@ -617,7 +627,7 @@ module g6lc_smt_csr_bank
       eret_o                   = eret_b[commit_instr_i.hart_id];
       trap_vector_base_o       = tvec_b[commit_instr_i.hart_id];
       priv_lvl_o               = priv_b[active_hart_i];
-      mbe_o                    = mbe_b[lsu_hart_i];
+      mbe_o                    = mbe_b[lsu_ctx];
       v_o                      = v_b[active_hart_i];
       v_commit_o               = v_b[commit_instr_i.hart_id];
       fs_o                     = fs_b[active_hart_i];
@@ -630,20 +640,20 @@ module g6lc_smt_csr_bank
       mbe_commit_o             = mbe_b[commit_instr_i.hart_id];
       en_translation_o         = en_tr_b[active_hart_i];
       en_g_translation_o       = en_gtr_b[active_hart_i];
-      en_ld_st_translation_o   = en_ld_tr_b[lsu_hart_i];
-      en_ld_st_g_translation_o = en_ld_gtr_b[lsu_hart_i];
-      ld_st_priv_lvl_o         = ld_st_priv_b[lsu_hart_i];
-      ld_st_v_o                = ld_st_v_b[lsu_hart_i];
-      sum_o                    = sum_b[lsu_hart_i];
-      vs_sum_o                 = vs_sum_b[lsu_hart_i];
-      mxr_o                    = mxr_b[lsu_hart_i];
-      vmxr_o                   = vmxr_b[lsu_hart_i];
-      satp_ppn_o               = satp_b[lsu_hart_i];
-      asid_o                   = asid_b[lsu_hart_i];
-      vsatp_ppn_o              = vsatp_b[lsu_hart_i];
-      vs_asid_o                = vs_asid_b[lsu_hart_i];
-      hgatp_ppn_o              = hgatp_b[lsu_hart_i];
-      vmid_o                   = vmid_b[lsu_hart_i];
+      en_ld_st_translation_o   = en_ld_tr_b[lsu_ctx];
+      en_ld_st_g_translation_o = en_ld_gtr_b[lsu_ctx];
+      ld_st_priv_lvl_o         = ld_st_priv_b[lsu_ctx];
+      ld_st_v_o                = ld_st_v_b[lsu_ctx];
+      sum_o                    = sum_b[lsu_ctx];
+      vs_sum_o                 = vs_sum_b[lsu_ctx];
+      mxr_o                    = mxr_b[lsu_ctx];
+      vmxr_o                   = vmxr_b[lsu_ctx];
+      satp_ppn_o               = satp_b[lsu_ctx];
+      asid_o                   = asid_b[lsu_ctx];
+      vsatp_ppn_o              = vsatp_b[lsu_ctx];
+      vs_asid_o                = vs_asid_b[lsu_ctx];
+      hgatp_ppn_o              = hgatp_b[lsu_ctx];
+      vmid_o                   = vmid_b[lsu_ctx];
       fet_satp_ppn_o           = satp_b[active_hart_i];
       fet_asid_o               = asid_b[active_hart_i];
       fet_vsatp_ppn_o          = vsatp_b[active_hart_i];
@@ -684,8 +694,8 @@ module g6lc_smt_csr_bank
       perf_addr_o              = perf_addr_b[commit_instr_i.hart_id];
       perf_data_o              = perf_data_b[commit_instr_i.hart_id];
       perf_we_o                = perf_we_b[commit_instr_i.hart_id];
-      pmpcfg_o                 = pmpcfg_b[lsu_chk_hart_i];
-      pmpaddr_o                = pmpaddr_b[lsu_chk_hart_i];
+      pmpcfg_o                 = pmpcfg_b[lsu_chk_ctx];
+      pmpaddr_o                = pmpaddr_b[lsu_chk_ctx];
       fet_pmpcfg_o             = pmpcfg_b[active_hart_i];
       fet_pmpaddr_o            = pmpaddr_b[active_hart_i];
       mcountinhibit_o          = mcountinh_b[active_hart_i];

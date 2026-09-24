@@ -664,13 +664,27 @@ module cva6_ptw
     end
   end
 
-  // Big Endian Capability Additions 
+  // Big Endian Capability Additions
   // req_port_i.data_rdata is the data coming into the Page Table Walker from Data Memory. If mbe=1 meaning the processor is in Big Endian data mode, then we need to reverse the byte order to correctly view this data.
   // Otherwise, this page table walker would not be able to understand a page table stored in Big Endian byte order.
   logic [CVA6Cfg.XLEN-1:0] endian_data;
   logic [CVA6Cfg.XLEN-1:0] byteSwapped_data;
   assign byteSwapped_data = {<<8{req_port_i.data_rdata}};
   assign endian_data = mbe_i ? byteSwapped_data : req_port_i.data_rdata;
+
+  //pragma translate_off
+  // T6b-4 debug: dump the walk context whenever a PTE lookup propagates an
+  // error — identifies wrong-base/wrong-index/stale-response corruption.
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && state_q != PROPAGATE_ERROR && state_d == PROPAGATE_ERROR) begin
+      $display("[ptw-err] t=%0t vaddr=%h lvl=%0d pptr=%h pte=%h (v=%b r=%b w=%b x=%b a=%b d=%b g=%b u=%b) instr=%b hart=%0d req_hart=%0d satp_ppn=%h state=%0d rdata=%h",
+               $time, vaddr_q, ptw_lvl_q[0], ptw_pptr_q, data_rdata_q,
+               pte.v, pte.r, pte.w, pte.x, pte.a, pte.d, pte.g, pte.u,
+               is_instr_ptw_q, tlb_update_hart_q, req_hart_i, satp_ppn_i,
+               state_q, endian_data);
+    end
+  end
+  //pragma translate_on
 
   // sequential process
   always_ff @(posedge clk_i or negedge rst_ni) begin

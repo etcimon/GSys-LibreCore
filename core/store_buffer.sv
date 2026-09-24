@@ -109,7 +109,13 @@ module store_buffer
   // T6b: speculative forwarding is same-hart only when two OoO harts can be
   // resident. The committed queue is NOT filtered — a committed store is
   // architectural and visible to every hart.
+`ifdef G6LC_MUT_STB_NO_HART
+  // Review-only mutation: speculative forwarding ignores the hart tag — a
+  // peer hart's in-flight store can feed this hart's loads.
+  localparam bit HART_OWN = 1'b0;
+`else
   localparam bit HART_OWN = CVA6Cfg.OoOEn && CVA6Cfg.NrHarts > 1;
+`endif
 
   // the store queue has two parts:
   // 1. Speculative queue

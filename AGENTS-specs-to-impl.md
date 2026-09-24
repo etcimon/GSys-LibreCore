@@ -45,6 +45,20 @@ its killed translation/miss states already own cancellation duties. An independe
 not use DUT kill_owed state as its cancellation oracle. Preserve fetch_B and all configuration
 legality guards. See the active S0-S4 plan for the implementation/verification change sets.
 
+## T6b-3 exit: a hart switch never degrades a commit-level flush (2026-09-23)
+
+`core/controller.sv`: the fine-grain switch override (flush fetch and unissued only, keep the
+backend draining) is skipped under mixed residency when a commit-level flush source (`#priv-csrs`
+xret, exception, CSR side effect, fence/sfence, replay, debug) fires in the same cycle, so the
+full scoreboard/EX kill stands; the frontend takes a peer hart's trap/xret redirect through
+`commit_for_hart` like the commit PC (`core/fetch_B/frontend.sv`), and the peer restart's
+fetch-side candidate is the incoming hart's banked PC on a switch cycle (`core/cva6.sv`). Drained
+and single-hart configurations constant-fold; anchor exact. Isolation seams (`G6LC_MUT_*`, review
+only, define-gated) mark the store-buffer, LSQ, CSR-bank LSU context, TLB tag, decode interrupt,
+peer-restart and switch-guard ownership points. Known robustness item for T6b-4: the frontend parks
+on an xret by re-requesting it (`instr_scan` classifies xret as a jump-to-self), leaving 3-8 issued
+copies resident until the eret flush.
+
 ## Mixed-resident ownership completion and partial-flush peer restart (2026-09-23, T6b-3)
 
 Every remaining active-hart-keyed CSR view is classified by its sampling point (`#priv-csrs`,
