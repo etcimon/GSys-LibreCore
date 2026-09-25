@@ -30,6 +30,35 @@ previously untested failures. Atomic response exclusion has directed coverage; a
 write/refill-publication counterexample remains unresolved at the composition boundary.
 OoO coherence remains qualification-gated; architectural coverage is not promoted.
 
+## SMT2 secondary reset observation — locally verified, integration open
+
+Clock-gated reset initialization has a discriminating simulator regression and full-model
+revalidation with an independent explicit-reset control. The secondary core boots and executes
+its program after initial reset edges are modeled correctly. The cross-core shared-line workload
+still fails a readiness handshake, so this result does not advance architectural memory-ordering,
+OpenSBI, compliance or silicon-production qualification. Missing-core verdicts remain incomplete;
+no timeout or unvalidated cycle encoding is treated as success.
+
+## MMIO freshness and software-interrupt read lanes — directed qualification
+
+Non-cacheable write acknowledgements now retire without entering or waiting on the cache-repair
+forwarding queue. Directed tests cover accepted-transaction attributes, full-queue progress,
+disabled fixups and preserved cacheable behavior, with restored-defect controls. Software-interrupt
+register reads have positive/negative lane and backpressure coverage for both CPU XLENs on the
+64-bit peripheral bus. Together the repairs allow the frozen four-hart boot/release positive and
+negative programs to reach their intended opposite verdicts. Cacheable cross-core publication,
+stock firmware/compliance and physical sign-off remain open.
+
+## Cross-core cacheable publication — directed pass, envelope-scoped
+
+A writer's retained WT copy is now a recorded sharer and is invalidated by a peer's write; the
+directed cross-core shared-line program passes in the isolated two-core `g6lc64_ooo_int2` route
+with both cores retired, and the observer does not alter retirement. Leaf coverage: writer-only
+sharer targeting, reader control, drop/keep/in-flight/same-cycle/refill/coincidence cases with
+three discriminating mutations. Not covered: the remaining frozen multicore programs (still red),
+in-order WT DI/anchor re-runs after the lifetime change, general RVWMO litmus coverage, stock
+firmware/compliance, physical sign-off.
+
 ## Precise misalignment and instruction recovery — qualification open
 
 The original load-offset assertions are currently restored. The earlier alignment-qualified

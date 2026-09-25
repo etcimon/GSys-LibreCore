@@ -23,18 +23,23 @@ def main():
     source.mkdir()
     names = ['verilator_config.vlt', 'config_pkg.sv', 'g6lc64_smt2_config_pkg.sv', 'riscv_pkg.sv', 'ariane_pkg.sv',
              'wt_cache_pkg.sv', 'cf_math_pkg.sv', 'lzc.sv', 'rr_arb_tree.sv', 'cva6_fifo_v3.sv',
-             'wt_dcache_wbuffer.sv', 'g6lc_core_types.svh', 'tb_g6lc_rtl_review.sv']
+             'wt_dcache_wbuffer.sv', 'g6lc_core_types.svh', 'rvfi_types.svh', 'tb_g6lc_rtl_review.sv']
     paths = {n: source / ('vendor/' + n if n in ('cf_math_pkg.sv', 'lzc.sv', 'rr_arb_tree.sv') else n)
              for n in names}
     for name in names:
         paths[name].parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(data / name, paths[name])
     control = os.environ.get('WT_TAG_COMPILER_CONTROL')
+    name = 'counter-split.vlt'
+    names.insert(1, name)
+    paths[name] = source / name
     if control:
-        name = 'counter-split.vlt'
-        names.insert(1, name)
-        paths[name] = source / name
         shutil.copy2(control, paths[name])
+    else:
+        # -Werror-UNOPTFLAT cannot be waived; split the packed lzc node arrays
+        # structurally, as the other WT runners do for their leaf builds.
+        paths[name].write_text('`verilator_config\nsplit_var -module "lzc" -var "index_nodes"\n'
+                               'split_var -module "lzc" -var "sel_nodes"\n')
     before = os.environ.get('WT_TAG_BEFORE') == '1'
     fault = os.environ.get('WT_TAG_FAULT') == '1'
     if before and fault:

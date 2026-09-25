@@ -171,6 +171,77 @@ Promotion of `g6lc64_ooo_int2` followed the rights holder's acceptance of this r
 reduction or performance claim follows. Application acknowledgement on non-WT consumers, matched
 firmware/compliance runs and physical gates remain deferred obligations.
 
+## SMT2 secondary reset and boot observation (2026-09-25)
+
+`verif/regress/remote/run_mc_int2_review.py` now carries a reset discriminator using the real
+reset generator, functional clock gate and SMT PC bank (`REVIEW_MC_RESET_LEAF=1`). Six matched
+records in `ooocoh-boot-reset-leaf-r1` cover initial-edge off/on, an explicit reset transition,
+negative expected-address checking, two hart banks and gated/ungated clocks. The original
+zero-initialized simulator recipe fails before release; `--x-initial-edge` supplies the missing
+initial reset event. This is simulator fidelity coverage, not a new ISA implementation.
+
+`REVIEW_MC_RESET_PROBE=1` recompiled the frozen generated C++ with the validated private runtime;
+optional observer-on/off traces agree, and a real reset transition removes the secondary PC-zero
+fault stream. `REVIEW_MC_INITIAL_REVIEW=1` rebuilds source with the fixed Makefile and no diagnostic
+driver: its release-probe retirement hashes match the explicit-reset control. The same full-model
+shared-line ELF still fails READY timeout after both cores boot. No full multicore, OpenSBI or
+compliance closure follows. The old 127 classifications are incomplete, and ten classifier controls
+now reject missing/duplicate/cap/failure banners and unvalidated soak encoding. See plan T7g.
+
+`verif/tests/custom/multicore/mc_smt2_boot_release.S` is a retained failing completion probe:
+all four software harts participate through CLINT MSIP writes/reads instead of cacheable flags.
+`REVIEW_MC_BOOT_RELEASE=1` pins the rebuilt model and assembles positive/negative variants;
+`ooocoh-boot-release-r2` times out on both, despite both cores retiring. Secondary release-clear
+stores versus primary loads need boundary tracing; neither record is matched or PASS.
+
+## Uncached WT freshness and MSIP byte lanes (2026-09-25)
+
+- `run_wt_fixup_review.py`, `WT_FIXUP_NC=1`: 24 expected outcomes at queue depths 0/2/4,
+  including non-cacheable addresses, cache-enable changes after acceptance, and full-queue ACK
+  progress. The NC attribute is checked at its accepted-TX lifetime, not reconstructed at ACK.
+  `WT_FIXUP_NC_FAULT=1` restores both exclusions' absence: 12 matched records detect retention
+  and drain failures while cacheable/disabled-queue controls stay unchanged. Original cacheable
+  fixup freshness regression: 16 matched outcomes. Artifacts `ooocoh-fixup-nc-after-r2`,
+  `ooocoh-fixup-nc-mutation-r2`, `ooocoh-fixup-regression-r1`.
+- `run_mc_int2_review.py`, `REVIEW_CLINT_LANE=1`: actual CLINT plus AXI interface, four MSIP
+  slots on a 64-bit bus, RV32 and RV64 configuration controls, set/clear independence and R
+  backpressure/ID checking. Original and `CLINT_LANE_FAULT=1` runs fail on the odd-slot lane;
+  corrected positive/negative controls match (`ooocoh-clint-lane-{before,after,mutation}-r1`).
+- Frozen `mc_smt2_boot_release.S` positive/negative ELFs now reach their intended opposite
+  verdicts at cycle 775, with all-core retirement and no instruction-access faults, after both
+  fixes (`ooocoh-nc-clint-int2-r1`). Earlier timeout records remain historical failures. This
+  closes that directed boot/release check, not the still-failing cacheable READY handshake or
+  stock OpenSBI/Linux/compliance qualification.
+- Current-tree archive checks retain int2 lint/synth 24/7 and defaults 8/54, 32/5 warning
+  baselines, with zero errors. Separate CLINT signal-driven synthesis and combinational-cycle
+  checks pass (`ooocoh-clint-lane-synth-r2`; first wrapper's enum initialization error retained).
+- The single-simulation-thread observer run has exact observer-off/on retirement equality for
+  both probes (`ooocoh-visibility-single-r1`); it localized the stale READY to a locally served
+  retained copy with no invalidation delivered. Closed below.
+
+## Writer acquisition and retained-copy invalidation (2026-09-25)
+
+- Hub scenario 26 `writer_acquisition` (`tb_g6lc_coherence_hub.sv`, OOO/NC=3): a write-only
+  sharer is targeted by a second writer's invalidation; the writer itself and an unrelated core are
+  not; reader acquisition control on a second index. Positive/negative 4/4 with scenario 12
+  (`ooocoh-hub-signature-r2`); `REVIEW_HUB_B_FAULT=writer` restores AR-only acquisition and fails
+  only scenario 26 (`ooocoh-hub-writer-fault-r1`). Hub lifetime 46/46, regression 16/16,
+  publication 21/22 ±, synth, composed 4/4, credits 2/2 re-run green; standalone scenario 23
+  remains the recorded open counterexample (`COH_BROADCAST` build, outside this change).
+- `run_wt_fixup_review.py WT_FIXUP_INV=1`: 32 expected outcomes at depths 0/2/4 — drop after ACK
+  and revive by a later same-word ACK, other-index retention, allocation-cycle precedence, in-flight
+  suppression with TX progress, same-cycle suppression, refill-repair control, push/retire
+  coincidence with a setup assertion (`ooocoh-wt-inv-r4`). `WT_FIXUP_INV_FAULT=drop|retain|count`
+  each fail exactly their own assertion (18/18 each). Copy 16/16, NC 24/24 + fault 12/12, tag formal
+  6/6 and sim 10/10 unchanged.
+- Isolated int2 route (`ooocoh-mc-initial-r1`, overlay wbuffer/wt_dcache/hub/clint):
+  `mc_shared_line_cross_core` SUCCESS at 1098 cycles with both cores retired; boot_release /
+  boot_negative unchanged at 775. Observer run `ooocoh-mc-visibility-r2`: equal retirement hashes
+  observer-off/on; invalidation to core 0 at 943 and its refill AR at 950 for `0x80090100`.
+  Archive gates int2 24/7, defaults 8/54 and 32/5, zero errors (`ooocoh-gate-{int2,default}-r1`).
+- Not covered: the other frozen multicore programs (still red, unchanged), in-order WT DI/anchor
+  re-runs after the fixup-lifetime change, stock firmware/compliance, physical sign-off.
+
 ## Current qualification boundary for misalignment and recovery
 
 The results in the historical subsection below belong to its captured binaries, not the current

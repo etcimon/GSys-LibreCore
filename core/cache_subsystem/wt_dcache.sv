@@ -90,6 +90,7 @@ module wt_dcache
   logic     [CVA6Cfg.DCACHE_USER_LINE_WIDTH-1:0]                                  wr_cl_user;
   logic     [   CVA6Cfg.DCACHE_LINE_WIDTH/8-1:0]                                  wr_cl_data_be;
   logic     [      CVA6Cfg.DCACHE_SET_ASSOC-1:0]                                  wr_vld_bits;
+  logic                                                                           wr_cl_inv;
   logic     [      CVA6Cfg.DCACHE_SET_ASSOC-1:0]                                  wr_req;
   logic                                                                           wr_ack;
   logic     [           DCACHE_CL_IDX_WIDTH-1:0]                                  wr_idx;
@@ -287,6 +288,10 @@ module wt_dcache
   // set read port to low priority
   assign rd_prio[NumPorts-1] = 1'b0;
 
+  // A cacheline write with way enables but no valid bits is an invalidation
+  // (external/self/CAS invalidation or flush); a refill installs vld_bits.
+  assign wr_cl_inv = (|wr_cl_we) & ~(|wr_vld_bits);
+
   wt_dcache_wbuffer #(
       .CVA6Cfg(CVA6Cfg),
       .DCACHE_CL_IDX_WIDTH(DCACHE_CL_IDX_WIDTH),
@@ -330,6 +335,7 @@ module wt_dcache
       // incoming invalidations/cache refills
       .wr_cl_vld_i    (wr_cl_vld),
       .wr_cl_idx_i    (wr_cl_idx),
+      .wr_cl_inv_i    (wr_cl_inv),
       // single word write interface
       .wr_req_o       (wr_req),
       .wr_ack_i       (wr_ack),

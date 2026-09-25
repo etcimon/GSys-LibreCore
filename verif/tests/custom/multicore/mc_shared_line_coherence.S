@@ -33,6 +33,19 @@
 # Trap: 32+((mcause<<1)|1).
 #
 # Needs NrCores=2. Not OpenSBI, not a cookie test.
+#
+# PEER_HART selects the publishing hart (default 1). With SMT2 cores the hart
+# ids are core*NrHarts+thread, so PEER_HART=2 puts the publisher on the second
+# physical core; hart 1 would share hart 0's L1 and never exercise the hub.
+# Every other hart parks. g6lc_cluster clock-gates the secondary cores of a
+# multi-core SMT configuration until they receive an IPI (or 200000 cycles
+# pass), so when the publisher lives on another core hart 0 releases it by
+# writing its CLINT msip word before waiting; MIE is clear at reset, so the
+# pending software interrupt never traps.
+#ifndef PEER_HART
+#define PEER_HART 1
+#endif
+  .equ CLINT_MSIP, 0x02000000
 
   .equ LINE,     0x80090000
   .equ READY,    0x80090100
@@ -53,7 +66,9 @@ _start:
   csrr t0, mhartid
   la   t1, trap_vec
   csrw mtvec, t1
-  bnez t0, hart1
+  li   t1, PEER_HART
+  beq  t0, t1, hart1
+  bnez t0, hart1_park
 
   # ---- hart 0 ----
   li   s1, LINE
@@ -70,6 +85,10 @@ _start:
   li   t1, 1
   sd   t1, 0(s3)                # GO: hart 1 publishes SEED
   fence rw, rw
+#if PEER_HART > 1
+  li   t0, CLINT_MSIP
+  sw   t1, (4 * PEER_HART)(t0)  # release the publisher's core from boot hold
+#endif
 
   li   t2, SPIN_TO
 1:

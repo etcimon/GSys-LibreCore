@@ -518,6 +518,31 @@ state cannot silently cover the interval before that owner acquired the object.
 Do not infer a frontend defect from the downstream instruction-access-fault pin.
 Evidence and exact run identities live in the out-of-order architecture record.
 
+### 10.7 Reset state is an observed event contract, not an assumed initial value
+
+The two-core SMT2 boot review first attributed PC-zero instruction faults to
+preload or restart logic. Per-core traces instead showed the primary executing
+its program and issuing the release IPI. A probe at the reset boundary found the
+held secondary's boot flag and both PC banks still zero, before any secondary
+clock or redirect. The zero-initialized two-state simulator had not delivered the
+initial reset assertion to that gated state.
+
+The distinguishing intervention kept generated RTL and the ELF fixed, used the
+validated private runtime, and supplied an actual reset transition. The secondary
+then booted; observer-on/off retirement hashes matched. A smaller test using the
+real reset generator, clock gate and PC bank reproduced the omission and checked
+Verilator's `--x-initial-edge` correction against explicit-reset and negative
+controls. A source rebuild with that option reproduced the corrected boot trace
+without the diagnostic reset sequence.
+
+Retain the conditional pattern: before repairing a post-release control-flow
+symptom, establish whether initialization reached every owner under the actual
+clock/reset schedule. Do not infer that a zero PC should be replaced by a boot
+address; zero can be a legitimate later redirect. The shared-line firmware still
+fails after reset is corrected, so boot initialization and memory visibility are
+separate obligations. Evidence: `core/ooo/AGENTS-ooo-plan.md` T7g. This is a local
+instrument-contract repair, not evidence of general SMT or OpenSBI completion.
+
 ## 11. Evaluating capability improvement by segment
 
 Evaluate the procedure's externally checkable outputs, not a claimed inner

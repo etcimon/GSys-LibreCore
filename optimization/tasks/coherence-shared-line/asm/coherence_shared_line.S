@@ -11,9 +11,14 @@
 #
 # mark_cycles is hart 0's mcycle from the first line load through the load
 # that returns COOKIE. A faster coherence module lowers that count. A stale
-# line fails the test instead of reporting a timeout as a throughput win.
+# copy fails the test instead of reporting a timeout as a throughput win.
 # Control words sit on their own 64-byte lines so a spin load cannot refill
 # the shared line by accident.
+
+#ifndef PEER_HART
+#define PEER_HART 1
+#endif
+  .equ CLINT_MSIP, 0x02000000
 
   .equ LINE,  0x80090000
   .equ READY, 0x80090100
@@ -34,7 +39,7 @@ mark_cycles:
 _start:
   csrr t0, mhartid
   beqz t0, hart0
-  li   t1, 1
+  li   t1, PEER_HART
   beq  t0, t1, hart1
 park:
   wfi
@@ -47,6 +52,10 @@ hart0:
   li   s3, GO
   li   t1, 1
   sd   t1, 0(s3)
+#if PEER_HART > 1
+  li   t2, CLINT_MSIP
+  sw   t1, (4 * PEER_HART)(t2)  # release the peer core from the cluster boot hold
+#endif
   li   t2, SPIN
 wait_ready:
   ld   t3, 0(s1)

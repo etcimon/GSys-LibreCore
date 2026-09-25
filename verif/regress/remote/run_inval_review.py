@@ -319,7 +319,11 @@ def hub_review(out, data, runtime_info, runtime):
             # Restored defect: a younger same-(core, id) AR is granted while the
             # older read slot is still live, so the L2 may answer it first.
             'r-order': ("assign ar_req[c] = core_req_i[c].ar_valid && !ar_same_id_live[c];",
-                        "assign ar_req[c] = core_req_i[c].ar_valid;")
+                        "assign ar_req[c] = core_req_i[c].ar_valid;"),
+            # Restored defect: the signature filter acquires presence only on
+            # AR fire, so a writer is never recorded as a sharer.
+            'writer': (".alloc_valid_i(ar_fire | aw_fire),",
+                       ".alloc_valid_i(ar_fire),")
         }[b_fault]
         assert text.count(old) == 1, 'B mutation site changed'
         path.write_text(text.replace(old, new))
@@ -409,7 +413,8 @@ def hub_review(out, data, runtime_info, runtime):
         if ack_before:
             trials = [(14, False, 'HUB_B_BEFORE_INVAL')]
         if signature:
-            trials = [(12, False, None), (12, True, 'HUB_SIGNATURE_TARGET')]
+            trials = [(12, False, None), (12, True, 'HUB_SIGNATURE_TARGET'),
+                      (26, False, None), (26, True, 'HUB_WRITER_ACQUISITION')]
         if stability:
             trials = [(s, False, 'HUB_B_STABILITY' if stability_before else None) for s in (19, 20)]
             if not stability_before:
@@ -423,6 +428,7 @@ def hub_review(out, data, runtime_info, runtime):
         if b_fault:
             trials = ([(24, False, 'HUB_B_ID_ORDER')] if b_fault == 'order' else
                       [(25, False, 'HUB_R_ID_ORDER')] if b_fault == 'r-order' else
+                      [(26, False, 'HUB_WRITER_ACQUISITION'), (12, False, None)] if b_fault == 'writer' else
                       [(s, False, 'HUB_B_STABILITY') for s in (19, 20)])
         elif publication and not before:
             trials += [(int(s), True, codes[int(s)]) for s in selected.split(',') if int(s) in (21, 22, 24, 25)]

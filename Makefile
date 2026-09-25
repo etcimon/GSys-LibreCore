@@ -405,6 +405,7 @@ riscv-benchmarks          := $(shell xargs printf '\n%s' < $(riscv-benchmarks-li
 # Search here for include files (e.g.: non-standalone components)
 incdir := $(CVA6_REPO_DIR)/vendor/pulp-platform/common_cells/include/ $(CVA6_REPO_DIR)/vendor/pulp-platform/axi/include/ \
           $(CVA6_REPO_DIR)/corev_apu/include/ \
+          $(CVA6_REPO_DIR)/corev_apu/src/ $(CVA6_REPO_DIR)/corev_apu/tb/ \
           $(CVA6_REPO_DIR)/corev_apu/ai_island/include/ \
           $(CVA6_REPO_DIR)/corev_apu/register_interface/include/ $(CVA6_REPO_DIR)/corev_apu/tb/common/ \
           $(CVA6_REPO_DIR)/vendor/pulp-platform/axi/include/ \
@@ -789,7 +790,7 @@ verilate_command := $(verilator) --no-timing verilator_config.vlt $(verilator_as
                     $(verilator_Wno_SIDEEFFECT)                                                                  \
                     --converge-limit 100000                                                                      \
                     --x-assign 0                                                                                 \
-                    --x-initial 0                                                                                \
+                    --x-initial 0 --x-initial-edge                                                               \
                     $(if ($(PRELOAD)!=""), -DPRELOAD=1,)                                                         \
                     $(if $(PROFILE),--stats --stats-vars --profile-cfuncs,)                                      \
                     $(if $(DEBUG), --trace-structs,)                                                             \

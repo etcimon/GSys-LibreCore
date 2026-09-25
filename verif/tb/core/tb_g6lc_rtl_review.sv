@@ -3428,7 +3428,7 @@ module tb_g6lc_review_wt_tag;
     .miss_rtrn_vld_i(return_valid), .miss_rtrn_id_i(return_id),
     .rd_tag_o(rd_tag), .rd_idx_o(rd_index), .rd_off_o(rd_offset), .rd_req_o(rd_req),
     .rd_tag_only_o(tag_only), .rd_ack_i(rd_ack), .rd_data_i('0),
-    .rd_vld_bits_i(2'b01), .rd_hit_oh_i(rd_hit), .wr_cl_vld_i(1'b0), .wr_cl_idx_i('0),
+    .rd_vld_bits_i(2'b01), .rd_hit_oh_i(rd_hit), .wr_cl_vld_i(1'b0), .wr_cl_idx_i('0), .wr_cl_inv_i(1'b0),
     .wr_req_o(wr_req), .wr_ack_i(1'b1), .wr_idx_o(), .wr_off_o(),
     .wr_data_o(wr_data), .wr_data_be_o(wr_be), .wr_user_o(),
     .inv_req_o(), .inv_ack_i(1'b1), .inv_idx_o(), .inv_way_oh_o(), .inv_vld_bits_o(),

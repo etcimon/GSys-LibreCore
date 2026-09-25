@@ -108,6 +108,7 @@ module wt_dcache_wbuffer
     // cacheline writes
     input logic wr_cl_vld_i,
     input logic [DCACHE_CL_IDX_WIDTH-1:0] wr_cl_idx_i,
+    input logic wr_cl_inv_i,  // cacheline write is an invalidation; no valid bits installed
     // cache word write interface
     output logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] wr_req_o,
     input logic wr_ack_i,
@@ -190,6 +191,8 @@ module wt_dcache_wbuffer
 
   typedef struct packed {
     logic                                         vld;
+    logic                                         nc;
+    logic                                         inv;
     logic [(CVA6Cfg.XLEN/8)-1:0]                  be;
     logic [$clog2(CVA6Cfg.WtDcacheWbufDepth)-1:0] ptr;
   } tx_stat_t;
@@ -223,6 +226,8 @@ module wt_dcache_wbuffer
   logic [DCACHE_CL_IDX_WIDTH-1:0] wr_cl_idx_q, wr_cl_idx_d;
 
   logic ack_wr_active;
+  logic rtrn_inv;
+  logic [CVA6Cfg.WtDcacheWbufDepth-1:0][DCACHE_CL_IDX_WIDTH-1:0] wtag_comp;
 
   logic [CVA6Cfg.PLEN-1:0] debug_paddr[CVA6Cfg.WtDcacheWbufDepth-1:0];
 
@@ -353,6 +358,7 @@ module wt_dcache_wbuffer
       logic [$clog2(CVA6Cfg.WtDcacheFixupDepth):0]   fixup_cnt;
       logic                                          fixup_bypass_valid_q, fixup_bypass_valid_d;
       logic                                          fixup_coalesced, fixup_active_coalesced;
+      logic                                          fixup_alloc, fixup_pop, fixup_dead, fixup_active_dead;
 
       function automatic fixup_entry_t merge_fixup(
           input fixup_entry_t prior,
@@ -380,6 +386,13 @@ module wt_dcache_wbuffer
       // Full when the FIFO is at capacity and there is no bypass slot available.
       assign fixup_full  = (fixup_cnt == FixupDepthCnt) && fixup_bypass_valid_q;
       assign fixup_empty = (fixup_cnt == '0) && !fixup_bypass_valid_q;
+
+      assign fixup_dead        = (fixup_cnt != '0) && (fixup_q[fixup_head].be == '0);
+      assign fixup_active_dead = fixup_bypass_valid_q ? (fixup_bypass_q.be == '0) : fixup_dead;
+      assign fixup_alloc       = fixup_push && !fixup_coalesced && (fixup_cnt < FixupDepthCnt);
+      assign fixup_pop         = !fixup_bypass_valid_q && !fixup_active_coalesced &&
+                                 ((fixup_state_q == FIXUP_RETIRE && fixup_wr_ack) ||
+                                  (fixup_state_q == FIXUP_PEND && fixup_dead));
       always_comb begin
         fixup_match = fixup_bypass_valid_q &&
             fixup_bypass_q.paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] == wbuffer_q[rtrn_ptr].wtag;
@@ -418,6 +431,7 @@ module wt_dcache_wbuffer
       assign fixup_rd_idx      = paddr_cl_idx;
       assign fixup_rd_off      = paddr_offset;
       assign fixup_rd_req      = (fixup_state_q == FIXUP_PEND) && !refill_hit_q &&
+                                 !fixup_active_dead &&
                                  !(|tocheck) && !check_en_q && !check_en_q1;
 
       // Capture tag-check result.  rd_hit_oh_i/rd_vld_bits_i are valid one
@@ -527,17 +541,31 @@ module wt_dcache_wbuffer
           end
         end
 
+        if (wr_cl_inv_i) begin
+          for (int unsigned k = 0; k < FixupDepth; k++) begin
+            if (fixup_q[k].paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] == wr_cl_idx_i)
+              fixup_d[k].be = '0;
+          end
+          if (fixup_bypass_valid_q &&
+              fixup_bypass_q.paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] == wr_cl_idx_i)
+            fixup_bypass_d.be = '0;
+        end
+
         // State machine for the active (head or bypass) entry.
         case (fixup_state_q)
           FIXUP_PEND: begin
+            if (fixup_active_dead && fixup_bypass_valid_q && !fixup_active_coalesced) begin
+              fixup_bypass_valid_d = 1'b0;
+            end
             if (fixup_rd_req && rd_ack_i) begin
               fixup_state_d = FIXUP_CHECK;
             end
           end
 
           FIXUP_CHECK: begin
-            // fixup_hit_oh_q is valid when fixup_check_en_q1 is high.
-            if (fixup_check_en_q1) begin
+            if (fixup_active_dead) begin
+              fixup_state_d = FIXUP_PEND;
+            end else if (fixup_check_en_q1) begin
               if (|fixup_hit_oh_q) begin
                 fixup_state_d = FIXUP_RETIRE;
               end else begin
@@ -551,7 +579,11 @@ module wt_dcache_wbuffer
           end
 
           FIXUP_RETIRE: begin
-            if (fixup_bypass_valid_q) begin
+            if (fixup_active_dead) begin
+              // Invalidated before retire: drop the entry without touching the
+              // write/inv ports or PMU pulses.
+              fixup_state_d = FIXUP_PEND;
+            end else if (fixup_bypass_valid_q) begin
               // Full-queue fallback: a tag hit must become an explicit
               // invalidation of the hit way.
               fixup_inv_req  = 1'b1;
@@ -593,18 +625,11 @@ module wt_dcache_wbuffer
           refill_hit_q          <= refill_hit_d;
 
           // Head/tail and count management.  A push into the FIFO increments
-          // both tail and count.
-          if (fixup_push && !fixup_coalesced && (fixup_cnt < FixupDepthCnt)) begin
-            fixup_tail <= fixup_tail + 1'b1;
-            fixup_cnt  <= fixup_cnt + 1'b1;
-          end
-
-          // On normal hit retire, pop the head and decrement count.
-          // Tag-miss keeps the head so forwarding survives until refill.
-          if (fixup_state_q == FIXUP_RETIRE && !fixup_bypass_valid_q && fixup_wr_ack && !fixup_active_coalesced) begin
-            fixup_head <= fixup_head + 1'b1;
-            fixup_cnt  <= fixup_cnt - 1'b1;
-          end
+          // the tail; a retire-ack or a dead head pops it.  The count takes the
+          // net delta so a same-cycle push and pop cannot clobber each other.
+          if (fixup_alloc) fixup_tail <= fixup_tail + 1'b1;
+          if (fixup_pop)  fixup_head <= fixup_head + 1'b1;
+          fixup_cnt <= fixup_cnt + ($bits(fixup_cnt))'(fixup_alloc) - ($bits(fixup_cnt))'(fixup_pop);
         end
       end
 
@@ -805,7 +830,7 @@ module wt_dcache_wbuffer
     // fixup candidate, do not free the TX or pop the return FIFO until a slot
     // frees.  This keeps correctness from depending on queue capacity.
     fixup_hold = (CVA6Cfg.WtDcacheFixupDepth > 0) &&
-                 tx_stat_q[rtrn_id].vld &&
+                 !tx_stat_q[rtrn_id].nc && !rtrn_inv && tx_stat_q[rtrn_id].vld &&
                  !rtrn_empty &&
                  !wbuffer_q[rtrn_ptr].checked &&
                  !(check_en_q1 && (check_ptr_q1 == rtrn_ptr)) &&
@@ -837,7 +862,7 @@ module wt_dcache_wbuffer
     if (!rtrn_empty && !fixup_hold) begin
       if (tx_stat_q[rtrn_id].vld) begin
         tx_stat_d[rtrn_id].vld = 1'b0;
-        if (!check_wr && wbuffer_q[rtrn_ptr].checked && (|ack_be) &&
+        if (!rtrn_inv && !check_wr && wbuffer_q[rtrn_ptr].checked && (|ack_be) &&
             (|wbuffer_q[rtrn_ptr].hit_oh)) begin
           ack_wr_active = 1'b1;
           wr_data_be_o  = ack_be;
@@ -846,7 +871,7 @@ module wt_dcache_wbuffer
           wr_data_o     = wbuffer_q[rtrn_ptr].data;
           wr_user_o     = wbuffer_q[rtrn_ptr].user;
           wr_req_o      = wbuffer_q[rtrn_ptr].hit_oh;
-        end else if (!check_wr && check_en_q1 && (check_ptr_q1 == rtrn_ptr) &&
+        end else if (!rtrn_inv && !check_wr && check_en_q1 && (check_ptr_q1 == rtrn_ptr) &&
                      (|ack_be) && (|rd_hit_oh_q)) begin
           ack_wr_active = 1'b1;
           wr_data_be_o  = ack_be;
@@ -883,11 +908,18 @@ module wt_dcache_wbuffer
       wr_req_o      = rd_hit_oh_q;
     end
 
+    for (int unsigned t = 0; t < CVA6Cfg.DCACHE_MAX_TX; t++) begin
+      if (tx_stat_q[t].vld && wr_cl_inv_i && (wtag_comp[tx_stat_q[t].ptr] == wr_cl_idx_i))
+        tx_stat_d[t].inv = 1'b1;
+    end
+
     // allocate a new entry
     if (dirty_rd_en) begin
       tx_stat_d[tx_id].vld = 1'b1;
       tx_stat_d[tx_id].ptr = dirty_ptr;
       tx_stat_d[tx_id].be  = tx_be;
+      tx_stat_d[tx_id].nc  = miss_nc_o;
+      tx_stat_d[tx_id].inv = 1'b0;
     end
   end
 
@@ -953,8 +985,6 @@ module wt_dcache_wbuffer
   // readout of status bits, index calculation
   ///////////////////////////////////////////////////////
 
-  logic [CVA6Cfg.WtDcacheWbufDepth-1:0][DCACHE_CL_IDX_WIDTH-1:0] wtag_comp;
-
   assign wr_cl_vld_d = wr_cl_vld_i;
   assign wr_cl_idx_d = wr_cl_idx_i;
 
@@ -986,6 +1016,9 @@ module wt_dcache_wbuffer
     // these word have to be looked up in the cache
     assign tocheck[k] = (~wbuffer_q[k].checked) & valid[k];
   end
+
+  assign rtrn_inv = tx_stat_q[rtrn_id].inv ||
+                    (wr_cl_inv_i && (wtag_comp[rtrn_ptr] == wr_cl_idx_i));
 
   assign wr_ptr = (|wbuffer_hit_oh) ? hit_ptr : next_ptr;
   assign rdy    = (|wbuffer_hit_oh) | (~full);
@@ -1110,7 +1143,8 @@ module wt_dcache_wbuffer
       // cases ACK frees the wbuffer entry and L1 does not yet hold the
       // word (check_wr is VoidKeep-only; ACK writeback needs |hit_oh).
       // Checked hits write L1 in p_tx_stat and must not enter the queue.
-      fixup_evict = (CVA6Cfg.WtDcacheFixupDepth > 0) && tx_stat_q[rtrn_id].vld && (|ack_be) &&
+      fixup_evict = (CVA6Cfg.WtDcacheFixupDepth > 0) &&
+                    !tx_stat_q[rtrn_id].nc && !rtrn_inv && tx_stat_q[rtrn_id].vld && (|ack_be) &&
                     (fixup_match ||
                      (!(wbuffer_q[rtrn_ptr].checked && (|wbuffer_q[rtrn_ptr].hit_oh)) &&
                       !(check_en_q1 && (check_ptr_q1 == rtrn_ptr)) &&

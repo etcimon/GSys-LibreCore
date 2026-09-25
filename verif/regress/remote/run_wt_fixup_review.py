@@ -12,6 +12,234 @@ import shutil
 import subprocess
 
 
+def nc_review(source, out, names):
+    bench = (source / 'tb_g6lc_rtl_review.sv').read_text()
+    prefix = 'module tb_g6lc_review_wt_tag;' + bench.split('module tb_g6lc_review_wt_tag;', 1)[1].split('  task automatic cycle(', 1)[0]
+    prefix = prefix.replace('module tb_g6lc_review_wt_tag;', 'module wt_fixup_nc(input logic clk, output logic checked=0);')
+    prefix = prefix.replace('logic clk=0, rst_n=0, empty;', 'logic rst_n, empty, cache_enable;')
+    prefix = prefix.replace('.cache_en_i(1\'b1)', '.cache_en_i(cache_enable)')
+    driver = '''
+logic [7:0] step=0;
+logic visible;
+localparam int CHECK_STEP=(@SCENARIO@==3) ? 9*(FIXUP+2)+2 : 18;
+always_comb begin
+  rst_n=step!=0;
+  cache_enable=(@SCENARIO@==1) ? step>=7 : (@SCENARIO@==2) ? step<7 : 1'b1;
+  request='0;
+  request.address_tag=(@SCENARIO@==0) ? 44'h2000 : TAG_A;
+  request.address_index=12'h128;
+  request.data_req=step==1;
+  request.data_be='1;
+  request.data_wdata=64'h123456789abcdef0;
+  rd_ack=0;
+  miss_ack=step==6;
+  return_valid=step==7;
+  if(@SCENARIO@==3)begin
+    request.address_tag=(int'(step)/9 < FIXUP+1) ? TAG_A+44'(int'(step)/9) : 44'h2000;
+    request.data_req=(int'(step)/9 < FIXUP+2) && (step%9==1);
+    miss_ack=(int'(step)/9 < FIXUP+2) && (step%9==6);
+    return_valid=(int'(step)/9 < FIXUP+2) && (step%9==7);
+  end
+  visible=0;
+  for(int k=0;k<=FIXUP;k++)
+    if(fixups[k].wtag=={request.address_tag,9'h25}) visible |= |fixups[k].valid;
+end
+always @(posedge clk) begin
+  if(step<90) step<=step+1'b1;
+  if(miss_req && miss_ack) return_id<=miss_id;
+  if(rst_n)begin
+    if(request.data_req) nc_store_accepted: assert(response.data_gnt);
+    if(miss_ack) nc_tx_accepted: assert(miss_req);
+    if(step==CHECK_STEP)begin
+      nc_drain: assert(empty);
+      nc_ack_freshness: assert((visible ^ @NEG@)==((@SCENARIO@==2) && FIXUP>0));
+      checked<=1;
+    end
+  end
+end
+endmodule
+'''
+    before = os.environ.get('WT_FIXUP_NC_BEFORE') == '1'
+    fault = os.environ.get('WT_FIXUP_NC_FAULT') == '1'
+    original_hash = hashlib.sha256((source / 'wt_dcache_wbuffer.sv').read_bytes()).hexdigest()
+    if fault:
+        path = source / 'wt_dcache_wbuffer.sv'
+        text = path.read_text()
+        old = '!tx_stat_q[rtrn_id].nc && '
+        assert text.count(old) == 2
+        path.write_text(text.replace(old, ''))
+    (out / 'nc-sources.json').write_text(json.dumps({'originalRtl': original_hash,
+        'effectiveRtl': hashlib.sha256((source / 'wt_dcache_wbuffer.sv').read_bytes()).hexdigest(),
+        'fault': fault, 'driver': hashlib.sha256(driver.encode()).hexdigest()}, indent=2))
+    results = []
+    for depth in (0, 2, 4):
+        for scenario in range(4):
+            for negative in ([False] if before or fault else [False, True]):
+                label = f'nc-d{depth}-s{scenario}-n{int(negative)}'
+                text = prefix.replace('parameter int FIXUP=2;', f'parameter int FIXUP={depth};') + driver
+                text = text.replace('@SCENARIO@', str(scenario)).replace('@NEG@', "1'b1" if negative else "1'b0")
+                harness = source / (label + '.sv')
+                harness.write_text(text)
+                rtl = [str(source / n) for n in names if n.endswith('.sv') and not n.startswith('tb_')]
+                script = out / (label + '.ys')
+                script.write_text('read_slang --std 1800-2017 -DG6LC_FETCH_B -DVERILATOR --top wt_fixup_nc '
+                    + ' '.join(rtl + [str(harness)]) + '\nprep -top wt_fixup_nc\nflatten\nasync2sync\nchformal -lower\nmemory_map\nopt\ncheck -assert\n'
+                    + f'sim -clock clk -n 85 -assert -q -vcd {out}/{label}.vcd\n')
+                with (out / (label + '.log')).open('w') as log:
+                    rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
+                        stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
+                output = (out / (label + '.log')).read_text()
+                expected_failure = negative or ((before or fault) and depth>0 and scenario!=2)
+                marker = 'nc_drain' if (before or fault) and depth>0 and scenario==3 else 'nc_ack_freshness'
+                matched = (rc!=0 and marker in output and 'failed' in output) if expected_failure else rc==0
+                if matched and not expected_failure:
+                    wave = (out / (label + '.vcd')).read_text()
+                    token = re.search(r'\$var\s+\w+\s+1\s+(\S+)\s+checked\s+\$end', wave)
+                    assert token and re.search(r'^(?:b1\s+' + re.escape(token[1]) + r'|1' + re.escape(token[1]) + r')$', wave, re.M)
+                results.append({'depth': depth, 'scenario': scenario, 'negative': negative,
+                                'expectedFailure': expected_failure, 'rc': rc, 'matched': matched})
+                (out / 'results.json').write_text(json.dumps(results, indent=2))
+                assert matched, label
+    return 0
+
+
+def inv_review(source, out, names):
+    bench = (source / 'tb_g6lc_rtl_review.sv').read_text()
+    prefix = 'module tb_g6lc_review_wt_tag;' + bench.split('module tb_g6lc_review_wt_tag;', 1)[1].split('  task automatic cycle(', 1)[0]
+    prefix = prefix.replace('module tb_g6lc_review_wt_tag;', 'module wt_fixup_inv(input logic clk, output logic checked=0);')
+    prefix = prefix.replace('logic clk=0, rst_n=0, empty;', '''logic rst_n, empty;
+  logic [7:0] step=0;
+  logic clwr, inv, wr_grant;
+  logic [7:0] clidx, write_index, read_index=0;
+  logic [3:0] write_offset;
+  logic visible, revived, visible_b, progress_seen=0, repair_seen=0, a_retired=0;''')
+    prefix = prefix.replace(".wr_cl_vld_i(1'b0), .wr_cl_idx_i('0)", '.wr_cl_vld_i(clwr), .wr_cl_idx_i(clidx)')
+    prefix = prefix.replace(".wr_cl_inv_i(1'b0)", '.wr_cl_inv_i(inv)')
+    prefix = prefix.replace('.wr_idx_o(), .wr_off_o()', '.wr_idx_o(write_index), .wr_off_o(write_offset)')
+    prefix = prefix.replace(".wr_ack_i(1'b1)", '.wr_ack_i(wr_grant)')
+    prefix = prefix.replace("  assign rd_hit = previous_read && rd_tag == previous_tag ? 2'b01 : 2'b00;",
+                            "  assign rd_hit = previous_read && read_index == 8'h12 && step >= @RESIDENT@ ? 2'b01 : 2'b00;")
+    driver = '''
+localparam int S=@SCENARIO@;
+localparam logic [63:0] OLD=64'h1122334455667788;
+localparam logic [63:0] NEW=64'h8877665544332211;
+localparam logic [52:0] WORD_A={TAG_A,9'h25};
+localparam logic [52:0] WORD_B={TAG_A,9'h27};
+always_comb begin
+  rst_n=step!=0;
+  request='0;
+  request.address_tag=TAG_A;
+  request.data_be='1;
+  request.data_wdata=OLD;
+  request.data_req=step==1 || (S==0 && step==20) || (S==3 && step==14) || (S==6 && step==13);
+  if (S==0 && step==20) request.data_wdata=NEW;
+  request.address_index=(S==6 && step==13) ? 12'h138 : 12'h128;
+  rd_ack=1;
+  miss_ack=step==6 || (S==0 && step==25) || (S==3 && step==17) || (S==6 && step==18);
+  return_valid=step==7 || (S==0 && step==26) || (S==3 && step==18) || (S==6 && step==19);
+  clwr=(S==0 && step==14) || (S==1 && step==14) || (S==2 && step==6) ||
+       (S==3 && step==7) || (S==4 && step==8) || (S==5 && step==14);
+  inv=clwr && S!=5;
+  clidx=(S==1) ? 8'h13 : 8'h12;
+  wr_grant=(S==6) ? step>=20 : 1'b1;
+  visible=0; revived=0; visible_b=0;
+  for(int k=0;k<=FIXUP;k++) begin
+    if(fixups[k].wtag==WORD_A) begin
+      visible |= |fixups[k].valid;
+      if(fixups[k].valid=='1 && fixups[k].data==NEW) revived=1;
+    end
+    if(fixups[k].wtag==WORD_B && |fixups[k].valid) visible_b=1;
+  end
+end
+always @(posedge clk) begin
+  if(step<90) step<=step+1'b1;
+  previous_read <= rst_n && rd_req && rd_ack;
+  read_index <= rd_index;
+  if(miss_req && miss_ack) return_id<=miss_id;
+  if(S==3 && step>=14 && miss_req) progress_seen<=1;
+  if(S==5 && (|wr_req) && write_index==8'h12 && wr_data==OLD) repair_seen<=1;
+  if(S==6 && (|wr_req) && write_index==8'h12 && wr_data==OLD && wr_grant) a_retired<=1;
+  if(rst_n)begin
+    if(request.data_req) accepted_write: assert(response.data_gnt);
+    if(miss_ack) accepted_tx: assert(miss_req);
+    if(FIXUP==0 && step==30) fixup_drained: assert(empty);
+    if(FIXUP>0 && (S==0||S==1) && step==12) inv_setup: assert((visible ^ @NEG@)==1'b1);
+    if(FIXUP>0 && S==0 && step==16) inv_drop: assert((visible ^ @NEG@)==1'b0);
+    if(FIXUP>0 && S==0 && step==30) inv_revive: assert((revived ^ @NEG@)==1'b1);
+    if(FIXUP>0 && S==1 && step==16) inv_keep_other: assert((visible ^ @NEG@)==1'b1);
+    if(FIXUP>0 && S==2 && step==12) inv_alloc_wins: assert((visible ^ @NEG@)==1'b1);
+    if(FIXUP>0 && S==3 && step==12) inv_inflight: assert((visible ^ @NEG@)==1'b0);
+    if(FIXUP>0 && S==3 && step==18) inv_inflight_progress: assert((progress_seen ^ @NEG@)==1'b1);
+    if(FIXUP>0 && S==4 && step==12) inv_same_cycle: assert((visible ^ @NEG@)==1'b0);
+    if(FIXUP>0 && S==5 && step==30) refill_repair: assert(((repair_seen && !visible) ^ @NEG@)==1'b1);
+    if(FIXUP>0 && S==6 && step==20) count_setup: assert(|wr_req);
+    if(FIXUP>0 && S==6 && step==24) count_keep: assert(((a_retired && visible_b) ^ @NEG@)==1'b1);
+    if(step==40) checked<=1;
+  end
+end
+endmodule
+'''
+    fault = os.environ.get('WT_FIXUP_INV_FAULT', '')
+    original_hash = hashlib.sha256((source / 'wt_dcache_wbuffer.sv').read_bytes()).hexdigest()
+    if fault:
+        path = source / 'wt_dcache_wbuffer.sv'
+        text = path.read_text()
+        if fault == 'drop':
+            old, new, count = 'if (wr_cl_inv_i) begin', "if (1'b0) begin", 1
+        elif fault == 'retain':
+            old, new, count = '!rtrn_inv && ', '', 4
+        elif fault == 'count':
+            old = "fixup_cnt <= fixup_cnt + ($bits(fixup_cnt))'(fixup_alloc) - ($bits(fixup_cnt))'(fixup_pop);"
+            new = "fixup_cnt <= fixup_pop ? fixup_cnt - 1'b1 : fixup_alloc ? fixup_cnt + 1'b1 : fixup_cnt;"
+            count = 1
+        else:
+            raise ValueError('unknown inv fault')
+        assert text.count(old) == count, 'inv mutation site changed'
+        path.write_text(text.replace(old, new))
+    (out / 'inv-sources.json').write_text(json.dumps({'originalRtl': original_hash,
+        'effectiveRtl': hashlib.sha256((source / 'wt_dcache_wbuffer.sv').read_bytes()).hexdigest(),
+        'fault': fault, 'driver': hashlib.sha256(driver.encode()).hexdigest()}, indent=2))
+    markers = {0: ('inv_setup', 'inv_drop', 'inv_revive'), 1: ('inv_setup', 'inv_keep_other'),
+               2: ('inv_alloc_wins',), 3: ('inv_inflight', 'inv_inflight_progress'),
+               4: ('inv_same_cycle',), 5: ('refill_repair',), 6: ('count_setup', 'count_keep')}
+    fault_expect = {'drop': {0: 'inv_drop'},
+                    'retain': {3: 'inv_inflight', 4: 'inv_same_cycle'},
+                    'count': {6: 'count_keep'}}
+    results = []
+    for depth in (0, 2, 4):
+        for scenario in range(4 if depth == 0 else 7):
+            for negative in ([False] if fault or depth == 0 else [False, True]):
+                label = f'inv-d{depth}-s{scenario}-n{int(negative)}'
+                text = prefix.replace('parameter int FIXUP=2;', f'parameter int FIXUP={depth};') + driver
+                resident = {5: 14, 6: 9}.get(scenario, 90)
+                text = text.replace('@SCENARIO@', str(scenario)).replace('@RESIDENT@', str(resident))
+                text = text.replace('@NEG@', "1'b1" if negative else "1'b0")
+                harness = source / (label + '.sv')
+                harness.write_text(text)
+                rtl = [str(source / n) for n in names if n.endswith('.sv') and not n.startswith('tb_')]
+                script = out / (label + '.ys')
+                script.write_text('read_slang --std 1800-2017 -DG6LC_FETCH_B -DVERILATOR --top wt_fixup_inv '
+                    + ' '.join(rtl + [str(harness)]) + '\nprep -top wt_fixup_inv\nflatten\nasync2sync\nchformal -lower\nmemory_map\nopt\ncheck -assert\n'
+                    + f'sim -clock clk -n 85 -assert -q -vcd {out}/{label}.vcd\n')
+                with (out / (label + '.log')).open('w') as log:
+                    rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
+                        stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
+                output = (out / (label + '.log')).read_text()
+                expected_marker = fault_expect.get(fault, {}).get(scenario) if depth > 0 else None
+                expected_failure = negative or bool(expected_marker)
+                matched = (rc != 0 and any(m in output for m in markers[scenario]) and 'failed' in output) \
+                    if expected_failure else rc == 0
+                if matched and not expected_failure:
+                    wave = (out / (label + '.vcd')).read_text()
+                    token = re.search(r'\$var\s+\w+\s+1\s+(\S+)\s+checked\s+\$end', wave)
+                    assert token and re.search(r'^(?:b1\s+' + re.escape(token[1]) + r'|1' + re.escape(token[1]) + r')$', wave, re.M)
+                results.append({'depth': depth, 'scenario': scenario, 'negative': negative, 'fault': fault,
+                                'expectedFailure': expected_failure, 'rc': rc, 'matched': matched})
+                (out / 'results.json').write_text(json.dumps(results, indent=2))
+                assert matched, label
+    return 0
+
+
 def main():
     data, out = Path(os.environ['TH_DATA_DIR']), Path(os.environ['TH_OUT_DIR'])
     source = out / 'source'
@@ -47,6 +275,10 @@ def main():
         rtl_path.write_text(rtl.replace(old, new))
     (out / 'sources.json').write_text(json.dumps({n: hashlib.sha256((source / n).read_bytes()).hexdigest()
                                                  for n in names}, indent=2))
+    if os.environ.get('WT_FIXUP_NC') == '1':
+        return nc_review(source, out, names)
+    if os.environ.get('WT_FIXUP_INV') == '1':
+        return inv_review(source, out, names)
     bench = (source / 'tb_g6lc_rtl_review.sv').read_text()
     prefix = 'module tb_g6lc_review_wt_tag;' + bench.split('module tb_g6lc_review_wt_tag;', 1)[1].split('  task automatic cycle(', 1)[0]
     prefix = prefix.replace('module tb_g6lc_review_wt_tag;', 'module wt_fixup_copy(input logic clk, output logic checked=0);')

@@ -53,8 +53,22 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (`tb_g6lc_coherence_credits`: fills capped at the four hub credits; `g6lc64_ooo_int2`
   `L2MshrDepth` 2→4 removes 51 MSHR-full stall cycles in the eight-read burst), signature SRAM
   `ImplKey` + `g6lc_ooo_snoop_filter.tech-spec.md` DFT/MBIST plan. See plan T7f.
-- [ ] Deferred for unrestricted release: matched multicore firmware/anchor/compliance runs
-  (shared-mirror simulation route), foundry macro selection and MBIST controller insertion,
+- [x] Secondary reset observation diagnosed with frozen-model and leaf controls: initial reset
+  edges were omitted for a clock-held core. `--x-initial-edge` repairs the Verilator recipe without
+  changing RTL; observer-off/on traces and the explicit-reset reference agree (plan T7g).
+- [~] Matched multicore execution now has an isolated route, without shared-mirror synchronization.
+  `mc_shared_line_cross_core` passes (1098 cycles, both cores retired) after writer acquisition in
+  the OoO signature and invalidation-bounded WT fixup copies (plan T7i). Still red and not yet
+  investigated: frozen `release_probe`, `mc_shared_line_sibling_hart`, `mc_boot_sanity`,
+  `mc_hart1_alive` (tohost 127, only core 0 retires). In-order WT DI/anchor suites have not been
+  re-run through the isolated route after the fixup-lifetime change; the 12-thread observer
+  non-interference failure remains recorded.
+- [x] Four-hart CLINT boot/release probe: stale NC post-ACK forwarding repaired using accepted-TX
+  attributes; odd MSIP read lanes repaired on the 64-bit AXI bus. Frozen positive/negative ELFs
+  reach their intended opposite verdicts at cycle 775 (`ooocoh-nc-clint-int2-r1`); independent
+  leaf negatives and restored-defect controls detect both bugs. Scope and limits: plan T7h.
+- [ ] Deferred for unrestricted release: firmware/anchor/compliance qualification, directed PMU
+  event-count checks and hub/RVFI connectivity, foundry macro selection and MBIST controller insertion,
   STA/power/area sign-off. HPDCACHE/non-WT application acknowledgement is outside the `COH_OOO`
   legality envelope.
 - [ ] Credit-consistent L2 sizing with current concurrent-fill occupancy/lifetime proof.

@@ -479,6 +479,44 @@ byte merges and slot selection on the ACK/forwarding cone; no physical STA/power
 qualification. Preserve upstream notices. Broader cache/coherence qualification is
 not implied by the directed same-word checks.
 
+## Uncached WT acknowledgement and CLINT MSIP lanes (2026-09-25)
+
+`core/cache_subsystem/wt_dcache_wbuffer.sv` records the accepted transaction's non-cacheable
+attribute in `tx_stat_t.nc`. Its post-ACK fixup allocation and full-queue hold both exclude NC
+transactions, so acknowledged device writes cannot remain as stale forwarding copies. Existing
+cacheable coalescing/retirement behavior and the zero-depth configuration remain in place. This
+adds one metadata bit per TX and small ACK-control predicates, not a load-hit pipeline stage.
+
+`corev_apu/clint/clint.sv` places MSIP read data in the 32-bit lane selected by the address on
+its 64-bit AXI bus. This corrects odd-hart MSIP reads for either CPU XLEN; the register stride,
+hart topology, interrupt outputs, timer registers and DTS/ISA interfaces are unchanged.
+
+Port-driven failures, restored-defect controls and frozen-ELF four-hart completion support these
+specific repairs. The cacheable shared-line handshake still fails; no broad RVWMO, firmware,
+physical timing or production qualification is inferred. The implementation/evidence sequence
+is recorded in `core/ooo/AGENTS-ooo-plan.md` T7h.
+
+## Writer acquisition and invalidation-bounded WT repair copies (2026-09-25)
+
+`corev_apu/coherence/g6lc_coherence_hub.sv` (`COH_OOO` branch) acquires signature presence on
+`ar_fire | aw_fire`, so a core whose first contact with a line is a write is a recorded sharer and
+a later peer write invalidates its retained copy. The single SRAM port is free at `aw_fire` by
+construction (lookup pending, AR grants blocked); a sim-only conflict check records that premise.
+Presence remains monotone per index; conservative over-invalidation is unchanged in kind.
+
+`core/cache_subsystem/wt_dcache_wbuffer.sv` treats post-ACK fixup entries as cached copies: an
+invalidating cacheline write (`wr_cl_inv_i`, derived in `wt_dcache.sv` from way enables without
+valid bits) clears matching entries at its index; a write transaction hit by an invalidation while
+in flight records a sticky `inv` and its acknowledgement retains no copy and writes no L1 word.
+The fixup FIFO count now takes the net alloc/pop delta, closing a same-cycle push/retire count
+corruption. Refill repair (`wr_cl_inv_i=0`) and the zero-depth configuration are unchanged.
+
+Evidence: hub scenario 26 ± and `writer` mutation, WT `WT_FIXUP_INV` 32 outcomes with three
+discriminating mutations, unchanged hub/WT suites, `mc_shared_line_cross_core` passing in the
+isolated int2 route, unchanged lint/synth baselines. Not inferred: in-order DI/anchor re-runs,
+stock firmware/compliance, RVWMO beyond the directed cases, physical sign-off. Sequence and
+limits: `core/ooo/AGENTS-ooo-plan.md` T7i.
+
 ## AMO result availability at issue (2026-09-19)
 
 The A-extension result must reach a dependent instruction only when its architectural

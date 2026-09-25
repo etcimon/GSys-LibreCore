@@ -723,8 +723,9 @@ module g6lc_coherence_hub
           .LINE_BYTES(LINE_BYTES), .ADDR_WIDTH(AXI_ADDR_WIDTH)
       ) i_signature (
           .clk_i, .rst_ni,
-          .alloc_valid_i(ar_fire), .alloc_addr_i(core_req_i[ar_winner].ar.addr),
-          .alloc_core_i(ar_winner), .alloc_ready_o(sig_alloc_ready),
+          .alloc_valid_i(ar_fire | aw_fire),
+          .alloc_addr_i(aw_fire ? core_req_i[aw_winner].aw.addr : core_req_i[ar_winner].ar.addr),
+          .alloc_core_i(aw_fire ? aw_winner : ar_winner), .alloc_ready_o(sig_alloc_ready),
           .lookup_valid_i(sig_start), .lookup_addr_i(core_req_i[aw_winner].aw.addr),
           .lookup_ready_o(), .result_valid_o(sig_result_valid),
           .present_o(sig_present), .ready_o(sig_initialized)
@@ -751,6 +752,11 @@ module g6lc_coherence_hub
           end
         end
       end
+      //pragma translate_off
+      always_ff @(posedge clk_i) begin
+        if (rst_ni && ar_fire && aw_fire) $fatal(1, "HUB_SIGNATURE_ALLOC_CONFLICT");
+      end
+      //pragma translate_on
     end else begin : gen_legacy_coherence
       assign sig_initialized = 1'b1;
       assign sig_alloc_ready = 1'b1;

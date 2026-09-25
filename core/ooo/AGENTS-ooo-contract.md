@@ -137,6 +137,9 @@ configuration envelope passes. No physical area or STA claim follows from logica
 
 The first proposed filter stores monotone per-index core-presence signatures. Empty-cache reset,
 complete acquisition coverage, concurrent updates and no unqualified clear are mandatory premises.
+Complete acquisition includes writers: any retained copy that can serve a load (write buffer,
+post-ACK repair entry) makes its core a sharer, so presence is acquired on AW as well as AR, and
+the L1 must drop or refuse such copies when the line is invalidated (plan T7i).
 Its abstract finite-state check is not an RTL proof. L2 sizing must prove the current concurrent-fill
 lifetime against hub credits; the historical serialized-controller occupancy proof is inapplicable.
 

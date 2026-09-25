@@ -750,6 +750,128 @@ module tb_g6lc_coherence_hub;
     return_read(2, slot, 4'd4, 64'h104);
   endtask
 
+  //  OOO-aware write driver: under the signature filter the hub holds the AW
+  //  while it runs the presence lookup, so the bench waits for the memory-side
+  //  AW instead of assuming a one-cycle admit (drive_write cannot see that).
+  task automatic ooo_write(input int core, input addr_t addr, input id_t id,
+                           output id_t slot, input logic [3:0] cache = 4'b0010);
+    core_req[core].aw = aw(addr, id, cache);
+    core_req[core].aw_valid = 1;
+    for (int n = 0; n < 8 && !memory_req.aw_valid; n++) tick();
+    if (!memory_req.aw_valid) $fatal(1, "HUB_WRITER_SETUP core=%0d", core);
+    memory_rsp.aw_ready = 1;
+    #2;
+    if (!core_rsp[core].aw_ready) $fatal(1, "HUB_WRITER_SETUP core=%0d", core);
+    slot = memory_req.aw.id;
+    tick();
+    core_req[core].aw_valid = 0;
+    memory_rsp.aw_ready = 0;
+    core_req[core].w = '{data: 64'h5a, strb: '1, last: 1, user: 0};
+    core_req[core].w_valid = 1;
+    memory_rsp.w_ready = 1;
+    tick();
+    core_req[core].w_valid = 0;
+    memory_rsp.w_ready = 0;
+  endtask
+
+  //  Writer acquisition: a core's first contact with a line can be an AW, and
+  //  the signature filter must record that writer as a sharer so a second
+  //  writer's invalidation reaches it. Registering presence only on AR leaves
+  //  the first writer invisible -- the mc_shared_line hang.
+  task automatic writer_acquisition;
+    id_t slot;
+    if (!OOO || NC != 3) $fatal(1, "HUB_WRITER_GEOMETRY");
+    reset();
+    //  Hold deliveries so a raised invalidation stays asserted for sampling
+    //  (like signature_hub); it is released before each B drain.
+    invalidation_ready = '0;
+
+    //  (a) core 0 writes 0x4000. It is the only sharer, so the write must not
+    //  raise any invalidation while its B drains.
+    ooo_write(0, 64'h4000, 4'd5, slot);
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id: slot, resp: 0, user: 0};
+    begin
+      bit seen;
+      seen = 0;
+      for (int n = 0; n < 20 && !seen; n++) begin
+        #2;
+        for (int c = 0; c < NC; c++)
+          if (invalidations[c].valid) $fatal(1, "HUB_WRITER_SPURIOUS_INVAL");
+        if (core_rsp[0].b_valid) seen = 1;
+        tick();
+      end
+      if (!seen) $fatal(1, "HUB_WRITER_DRAIN core=0");
+    end
+    memory_rsp.b_valid = 0;
+
+    //  (b) core 1 writes the same line. Core 0 acquired presence at AW fire,
+    //  so the invalidation must target core 0 and no one else.
+    ooo_write(1, 64'h4000, 4'd6, slot);
+    begin
+      bit hit;
+      hit = 0;
+      for (int n = 0; n < 8; n++) begin
+        #2;
+        if (invalidations[1].valid || invalidations[2].valid)
+          $fatal(1, "HUB_WRITER_ACQUISITION");
+        if (invalidations[0].valid &&
+            invalidations[0].line_addr != coh_line_tag(64'h4000, 64))
+          $fatal(1, "HUB_WRITER_ACQUISITION");
+        if (invalidations[0].valid ^ negative) hit = 1;
+        tick();
+      end
+      if (!hit) $fatal(1, "HUB_WRITER_ACQUISITION");
+    end
+    invalidation_ready = '1;
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id: slot, resp: 0, user: 0};
+    begin
+      bit seen;
+      seen = 0;
+      for (int n = 0; n < 24 && !seen; n++) begin
+        #2;
+        if (core_rsp[1].b_valid) seen = 1;
+        tick();
+      end
+      if (!seen) $fatal(1, "HUB_WRITER_DRAIN core=1");
+    end
+    memory_rsp.b_valid = 0;
+
+    //  (c) control: core 2 shares 0x4040 via AR, core 1 writes that line, the
+    //  invalidation must target core 2 only.
+    accept_read(2, 64'h4040, 4'd7, slot);
+    return_read(2, slot, 4'd7, 64'h201);
+    invalidation_ready = '0;
+    ooo_write(1, 64'h4040, 4'd8, slot);
+    begin
+      bit hit;
+      hit = 0;
+      for (int n = 0; n < 8; n++) begin
+        #2;
+        if (invalidations[0].valid) $fatal(1, "HUB_WRITER_ACQUISITION control");
+        if (invalidations[2].valid &&
+            invalidations[2].line_addr == coh_line_tag(64'h4040, 64)) hit = 1;
+        tick();
+      end
+      if (!hit) $fatal(1, "HUB_WRITER_ACQUISITION control");
+    end
+    invalidation_ready = '1;
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id: slot, resp: 0, user: 0};
+    begin
+      bit seen;
+      seen = 0;
+      for (int n = 0; n < 24 && !seen; n++) begin
+        #2;
+        if (core_rsp[1].b_valid) seen = 1;
+        tick();
+      end
+      if (!seen) $fatal(1, "HUB_WRITER_DRAIN core=1");
+    end
+    memory_rsp.b_valid = 0;
+  endtask
+
   //  ------------------------------------------------------------------
   //  ACK-after-invalidation scenarios (14-18).
   //
@@ -1316,6 +1438,7 @@ module tb_g6lc_coherence_hub;
       23: refill_during_write();
       24: same_id_b_order();
       25: same_id_r_order();
+      26: writer_acquisition();
       default: $fatal(1, "HUB_SCENARIO");
     endcase
     $display("HUB_PASS scenario=%0d", scenario);

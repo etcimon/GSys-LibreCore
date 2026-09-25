@@ -141,10 +141,7 @@ module clint #(
         if (en && !we) begin
             case (register_address) inside
                 [MSIP_BASE:MSIP_BASE+4*NR_CORES]: begin
-                    if (CVA6Cfg.IS_XLEN32)
-                        rdata[31:0] =  msip_q[$unsigned(address[AddrSelWidth-1+2:2])];
-                    else
-                        rdata = msip_q[$unsigned(address[AddrSelWidth-1+2:2])];
+                    rdata[32*address[2]] = msip_q[$unsigned(address[AddrSelWidth-1+2:2])];
                 end
 
                 [MTIMECMP_BASE:MTIMECMP_BASE+8*NR_CORES]: begin

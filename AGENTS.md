@@ -290,6 +290,25 @@ was deliberately left unchanged. Use a validated corrected runtime identity
 for model revalidation; generated C++ rebuilds need VPATH in the environment,
 not a command-line override that suppresses Make's runtime include search.
 
+**Clock-gated reset observation (2026-09-25):** the two-core SMT2 model built with
+`--x-initial 0` but without `--x-initial-edge` left the held secondary's reset-loaded
+frontend flag and PC banks at zero. Un-gated core state received reset clocks, hiding
+the omission. `Makefile` now enables initial X-to-0/X-to-1 edge triggers; do not replace
+this simulation correction with a PC-zero fallback, a bootrom patch, or disabled core
+liveness checks. `run_mc_int2_review.py` exposes `REVIEW_MC_RESET_LEAF=1` (real reset
+generator, functional clock gate and PC banks; flag-off and explicit-reset controls),
+`REVIEW_MC_RESET_PROBE=1` (frozen generated-model instrumentation), and
+`REVIEW_MC_INITIAL_REVIEW=1` (isolated source rebuild). Runtime dependencies must use
+the validated private runtime above. Artifacts `ooocoh-boot-reset-r1`,
+`ooocoh-boot-reset-leaf-r1`, and `ooocoh-boot-initial-edge-r1` establish reset/boot
+behavior, not full firmware or cache-coherence qualification. The cross-core shared-line
+program that still failed after both cores booted was closed by writer acquisition in the
+OoO signature and invalidation-bounded WT repair copies (`core/ooo/AGENTS-ooo-plan.md`
+T7h/T7i, `ooocoh-mc-initial-r1`). The C++ `tohost` banner reports
+an exit code, not the raw firmware store; a missing core/exit 127 is incomplete, never
+an accepted boot PASS. Read the per-core traces: the early `[boot]` print covers only
+the first 64 cycles, and `[commit-dbg]` printing stops at time 200000 by construction.
+
 **Verilator packed-counter scheduling control (2026-09-19):** the strict isolated
 PMP/WT tests encountered UNOPTFLAT on the vendored lzc packed index_nodes/sel_nodes
 arrays. A private control file containing `split_var -module "lzc" -var "*index_nodes"`

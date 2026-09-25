@@ -35,7 +35,12 @@ storage is 4,096 bits. Keep the two numbers separate in area records
 
 ## DFT / MBIST plan
 
-- MBIST: the macro is idle whenever the hub holds no AW lookup and no AR acquisition, which is
+- Acquisition sources: AR fire (reader) and AW fire (writer; a retained write-buffer or post-ACK
+  repair copy can serve loads, so the writer is a sharer). The two never share a cycle: the AW
+  lookup only starts with no held AR and blocks AR grants until the write fires, which also keeps
+  `alloc_ready_o` high at the writer's acquisition. Any wrapper that re-times the port must keep
+  that exclusivity or add a second write path.
+- MBIST: the macro is idle whenever the hub holds no AW lookup and no AR/AW acquisition, which is
   the reset state and any quiescent point; BIST may own the port through the wrapper while
   `ready_o` is held low, since the hub gates AW/AR admission on `ready_o` (`sig_initialized`).
   A BIST pass that clears the array must be followed by the cold sweep or an equivalent clear,

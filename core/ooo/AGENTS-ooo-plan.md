@@ -1080,11 +1080,203 @@ bound L2 fills, so the credit-consistent depth equals the hub slot count; `g6lc6
 BIST ownership while `ready_o` is low) and the scan/observability notes. The technology pass stays
 unarmed (`optimizationPass=false`).
 
-Still deferred and outside what this tree can execute: matched multicore firmware/anchor/
-compliance runs (require the shared-mirror simulation route), foundry macro selection, MBIST
-controller insertion, STA/power/area sign-off, and any cycle/area gain claim. L1 application
-acknowledgement on non-WT consumers is outside the `COH_OOO` envelope (`DCacheType == WT` is a
-legality condition).
+Still deferred: matched multicore firmware/anchor/compliance runs, foundry macro selection,
+MBIST controller insertion, STA/power/area sign-off, and any cycle/area gain claim. The earlier
+claim that multicore execution required shared-mirror synchronization is superseded by the
+isolated execution route in T7g. L1 application acknowledgement on non-WT consumers is outside
+the `COH_OOO` envelope (`DCacheType == WT` is a legality condition). T7f's perf test compiles
+zero-tied new event inputs; it is not directed event-count verification or hub/RVFI connectivity
+closure. The eight-read capacity experiment is not a general occupancy/lifetime proof, and the
+SRAM binding plan is not MBIST insertion.
+
+### T7g — secondary reset/boot observation repair (2026-09-25)
+
+**Method and scope.** Read the coding philosophy, both SMT reasoning/procedure guides, the
+firmware heuristics and runtime-learning guide in full. Followed the legacy reset/restore
+references without re-enabling `fetch_A/smt_legacy` (retired, not a current interchangeable
+oracle). Contract: delayed clock release must preserve reset initialization and the first boot
+address. Candidate owners were reset observation, boot-address wiring and redirect arbitration;
+the first boundary probe distinguished them before any production RTL edit.
+
+**Evidence correction.** r1–r3's early primary-only boot print did not establish a bootrom hang.
+The per-core RVFI files show primary program execution and the CLINT hart-2 MSIP store, while
+core 1 faults at PC zero. The time-200000 end of `[commit-dbg]` comes from its print condition,
+not a change in clock-release behavior. These runs also used the installed runtime hash
+`8c408609...`, not the private corrected header `dfbc2c4a...`; dependent interpretations needed
+revalidation. No earlier leaf/formal/synthesis result is invalidated solely by that discovery.
+
+**Discriminator.** `ooocoh-boot-reset-r1` rebuilds identical generated model C++ against the
+validated runtime and changes only a copied driver's reset stimulus/optional observer. Without
+an assertion edge, the gated core's `npc_rst_load_q` and both PC banks remain zero during reset.
+With an actual reset transition they are initialized before release. On the identical release
+probe ELF, the secondary changes from 0 retirements / 3605 instruction-access faults to 8700
+retirements / 0 such faults at the 20k-cycle bound. Primary retirement hashes remain identical;
+observer-on/off hashes match for both cores. This deliberately endless probe is a reset/liveness
+witness, not a completed firmware PASS.
+
+**Repair and local test.** `Makefile` adds `--x-initial-edge` alongside `--x-initial 0`.
+`REVIEW_MC_RESET_LEAF=1` in `run_mc_int2_review.py` checks real `rstgen`, `tc_clk_gating` and
+`g6lc_smt_pc_bank` with gated/ungated clocks, both hart banks and two boot addresses. Its six
+records include the failing original flag setting, explicit-reset controls, positive initial-edge
+handling and a negative expected-address control (`ooocoh-boot-reset-leaf-r1`). No production
+RTL, bootrom or reset net was changed; hardware timing, DFT and DTS/ISA behavior are unchanged.
+The builder uses a per-model tool wrapper and retains the selected runtime include path in VPATH.
+
+**Full-model check and residual.** `ooocoh-boot-initial-edge-r1` rebuilds the frozen source with
+the fixed Makefile and validated runtime, without the diagnostic driver or reset prelude. The
+release-probe retirement hashes exactly match the explicit-reset control. The identical
+`mc_shared_line_cross_core` ELF now runs on both cores with no instruction-access faults, but
+reports exit code 2 at cycle 80512 (raw tohost 5 / READY timeout). The publisher trace records
+SEED and READY stores; that is not proof of their global visibility. Memory publication/load
+observation must be traced next; changing polling bounds or calling this boot failure is not a
+repair. Sibling-only/single-core completion controls still report 127 under the all-core verdict
+because the other physical core remains intentionally held. They remain incomplete, not PASS.
+The runner's ten classifier controls reject missing/duplicate banners, cap exits, incomplete-core
+runs, failing exit codes and unvalidated cycle encoding. No new optimization-series entry is
+justified by this work.
+
+**Completion probe remains red.** `mc_smt2_boot_release.S` isolates reset/release from cacheable
+handshake words by using CLINT MSIP acknowledgements from all four software harts. In
+`ooocoh-boot-release-r2`, both positive and negative programs time out at 1000013 cycles; both
+physical cores retire and traces show all four hart IDs. The secondary records a clear of its
+release MSIP while primary loads continue to report it set. This is a retained post-boot
+publication/observation reproducer, not a passing boot-completion test. The r1 attempt stopped
+at compilation because the draft runner repeated `a` in its ISA string; the integer-only
+`rv64imac_zicsr` / `lp64` invocation now selects the configured RISC-V compiler explicitly.
+A transient host GNU-Make preflight failure occurred before r2 reached the remote and produced
+no RTL result. Neither failure was recategorized as a pass.
+
+### T7h — post-boot MMIO freshness and CLINT lanes (2026-09-25)
+
+**Boundary evidence.** `ooocoh-visibility-r1` observes accepted core/hub/L2 AXI traffic,
+CLINT register updates and WT load returns in an isolated copied source. For the CLINT probe,
+observer-off/on retirement hashes match. At time 695 the secondary's write clears MSIP[2];
+at 736 the peripheral, L2 and hub all return zero to the primary, but the WT load return is
+one at 737. The defect is downstream of the hub response, not a lost CLINT store. The same
+observer's shared-line runs have unequal retirement hashes; that comparison is inconclusive
+and retained, not silently treated as observer-independent evidence.
+
+**Uncached fixup lifetime.** A post-ACK cache-repair entry must not retain an uncached write as
+a forwarding source. The old queue kept it waiting for a tag hit that cannot occur, overwriting
+new device reads with stale acknowledged bytes. `wt_dcache_wbuffer.sv` now captures `miss_nc_o`
+in each accepted transaction and excludes that transaction from fixup allocation and full-queue
+ACK holds. The attribute belongs to the accepted TX, not the current cache-enable signal.
+Cacheable repair behavior and the zero-depth branch are preserved.
+
+`run_wt_fixup_review.py` with `WT_FIXUP_NC=1` reproduces the defect before repair. Its expanded
+24-record positive/negative matrix at depths 0/2/4 covers MMIO, disabled-cache writes, cache-enable
+changes between acceptance and ACK, and an uncached ACK behind a full fixup queue
+(`ooocoh-fixup-nc-after-r2`). Removing both exclusions detects stale retention and the ACK hold
+(`ooocoh-fixup-nc-mutation-r2`, 12 matched records). The existing 16-record cacheable freshness
+suite passes unchanged (`ooocoh-fixup-regression-r1`). These are port-driven lowered-RTL runs,
+not unbounded proofs.
+
+**CLINT lane contract.** With stale forwarding removed, the unchanged completion program sees
+MSIP[2] clear but reads zero from MSIP[1]. CLINT had returned every 32-bit MSIP at bit zero of
+its 64-bit AXI bus; an odd MSIP address selects the upper data lane. The read decoder now places
+the bit according to address bit 2, independent of the CPU's XLEN. A real-CLINT/AXI-interface
+bench detects the original error for both RV32 and RV64 on a 64-bit bus, checks all four slots,
+set/clear independence, returned IDs and stalled R stability, and detects the restored low-lane
+fault (`ooocoh-clint-lane-{before,after,mutation}-r1`). Timer-register behavior is not changed.
+
+**Composed completion.** `ooocoh-nc-clint-int2-r1` uses the frozen, unchanged ELF hashes from
+`ooocoh-boot-release-r2`. The four-hart boot/release program completes at cycle 775 with the
+positive verdict; its negative control reports the intended failure at 775. Both physical cores
+retire, with zero instruction-access faults. NC-only integration had already exposed the second
+lane defect; that failed intermediate remains `ooocoh-fixup-nc-int2-r1`. No polling bound was
+extended and no liveness check was waived. The cacheable shared-line test still reports READY
+timeout and remains a separate open coherence obligation. This is not stock OpenSBI/Linux or
+compliance completion.
+
+**Rechecks and next boundary.** Isolated current-tree archive gates pass: int2 lint 24 / synth 7
+warnings, default lint 8/54 / synth 32/5, all zero errors (`ooocoh-nc-clint-gate-{int2,default}-r1`).
+CLINT's signal-driven synthesis and `scc -expect 0` pass in `ooocoh-clint-lane-synth-r2`; r1 was
+a wrapper configuration-literal type error, corrected without weakening RTL or assertions.
+
+`ooocoh-visibility-single-r1` rebuilds the observer with one simulation thread; both CLINT and
+shared-line observer-off/on retirement hashes now match. It reconfirms the CLINT completion.
+In the shared-line capture, the primary repeatedly receives the old READY value without issuing
+an AR for that word. The peer's READY AW/W/B complete at times 942/944/945 without a matching
+invalidation to the primary. The OoO signature's acquisition input is currently `ar_fire` only,
+whereas the legacy filter accepts `aw_fire | ar_fire`. Post-ACK cacheable fixup data can therefore
+become a retained copy without the writer being recorded through that path. This was the next
+ownership/lifetime hypothesis; T7i confirms and repairs it (writer acquisition and retained-copy
+invalidation qualified together, without disabling the filter or removing the queue). The earlier
+12-thread observer mismatch remains recorded.
+
+**Impact.** One NC bit per existing write-transaction record; capture and exclusion use existing
+handshakes/reset and add no cache-hit datapath stage or new clock/reset/scan control. CLINT changes
+only combinational read-lane routing. Existing `WtDcacheFixupDepth` controls the affected queue;
+no new ISA/config/DTS capability, memory-map or hart-count change. Existing license notices are
+preserved. Physical timing/power/area and broader parameter qualification remain open.
+
+### T7i — writer acquisition and retained-copy lifetime (2026-09-25)
+
+**Mechanism (confirmed, not hypothesised).** `ooocoh-visibility-single-r1` shared-1: the primary's
+own `sd zero, READY` (line never resident) is acknowledged as a checked-miss and enters the WT
+post-ACK fixup queue, whose tag-miss path retains the word "until a refill". Every poll hits
+`wbuffer_all`, `wbuffer_fwd_hit_o` suppresses the refill, so the copy has no lifetime bound. The
+peer's `READY=1` AW/W/B (942/944/945) targets no one: the OoO signature acquired presence only on
+`ar_fire`, so a core whose first contact with a line is a write was never a recorded sharer. Even
+a delivered invalidation would not have helped — the wbuffer only cleared `checked` and paused the
+fixup tag check; no path dropped a retained copy. A third, latent defect surfaced while reading
+the queue: a same-cycle push-allocate and retire-pop each assigned `fixup_cnt` (+1, then −1, last
+assignment wins), hiding the newest entry and later overwriting a live slot.
+
+**Repairs.**
+- Hub (`g6lc_coherence_hub.sv`, `gen_ooo_coherence`): the signature acquires on `ar_fire | aw_fire`
+  with the AW address/core when a write fires. Port exclusivity holds by construction —
+  `sig_start` needs `!ar_hold_q`, `coh_block_ar` blocks AR grants from the lookup cycle through
+  `aw_fire`, and `sig_start` is 0 while the lookup is pending, so `alloc_ready` is 1 at `aw_fire`;
+  a sim-only `HUB_SIGNATURE_ALLOC_CONFLICT` check pins the premise.
+- WT (`wt_dcache_wbuffer.sv`, `wt_dcache.sv`): new `wr_cl_inv_i` = way enables without valid bits
+  (external/self/CAS invalidation or flush; refills and NC returns are not). (1) An invalidation
+  clears the bytes of every fixup entry at its index (dead entries export no forwarding, a dead head
+  is popped without a tag check, dead bypass/RETIRE/CHECK entries fall back to PEND, a later same-word
+  ACK revives only the new bytes). (2) Each write transaction records a sticky `inv` when an
+  invalidation hits its index while in flight; such an ACK creates no fixup entry, holds no return
+  FIFO, and writes no L1 word (`rtrn_inv`, current-cycle inclusive) — its data is not provably newer
+  than the invalidating write, memory is. A TX allocated in the invalidation cycle keeps its copy
+  (its write is ordered after the peer's). (3) `fixup_cnt` takes the net alloc − pop delta.
+  Refill hazards are unchanged: a refill (`wr_cl_inv_i=0`) still re-checks and repairs; the
+  index-based drop matches the miss unit's index-based fill-kill.
+
+**Evidence** (all `C:\Users\etcim\AppData\Local\Temp\cva6-artifacts\<tag>`):
+- Hub scenario 26 `writer_acquisition` (OOO, NC=3): writer-only sharer, second writer's
+  invalidation targets the first writer only, reader-acquisition control; positive/negative
+  (`ooocoh-hub-signature-r2` 4/4 with scenario 12); `writer` mutation restores AR-only acquisition
+  and fails 26 while 12 stays green (`ooocoh-hub-writer-fault-r1`). Lifetime 46/46, regression
+  16/16, publication 21/22 ±, hub synth (no latch/loop), composed hub+L2 4/4, credits 2/2
+  (`ooocoh-hub-lifetime-r1`, `-regression-r1`, `-pub21-22-r2`, `-synth-r3`, `ooocoh-composed-r3`,
+  `ooocoh-credits-r3`). Standalone scenario 23 remains the documented open counterexample
+  (`ooocoh-hub-publication-r1`); it elaborates `COH_BROADCAST`, so this change is not in its cone.
+- WT leaf `run_wt_fixup_review.py WT_FIXUP_INV=1`: drop-after-ACK + revive, other-index keep,
+  allocation-cycle wins, in-flight suppression + TX progress, same-cycle suppression, refill repair
+  control, and the push/retire coincidence (setup-asserted, non-vacuous); 32/32 with negatives at
+  depths 0/2/4 (`ooocoh-wt-inv-r4`). Mutations: `drop` fails only `inv_drop`, `retain` only
+  `inv_inflight`/`inv_same_cycle`, `count` only `count_keep` (18/18 each, `ooocoh-wt-inv-*-r1`).
+  Unchanged suites: copy 16/16, NC 24/24 + fault 12/12, tag formal 6/6 and sim 10/10 (the sim arm
+  now writes its `lzc` split control from the tree).
+- Isolated int2 route with overlay wbuffer/wt_dcache/hub/clint (`ooocoh-mc-initial-r1`):
+  `mc_shared_line_cross_core` **SUCCESS at 1098 cycles**, both cores retired; `boot_release` 775
+  SUCCESS / `boot_negative` 775 FAILED(1) unchanged. Observer run (`ooocoh-mc-visibility-r2`):
+  retirement hashes equal observer-off/on for both probes; shared-1 shows `inv addr=…8009010` at
+  943 to core 0 and core 0's `core ar … 80090100` at 950 — the copy is dropped and the load refills.
+  Pre-existing red controls unchanged: `release_probe` (0x7fffffff), `mc_shared_line_sibling_hart`,
+  `mc_boot_sanity`, `mc_hart1_alive` (tohost 127, only core 0 retires) — not investigated here.
+- Archive gates: int2 lint 24 / synth 7, defaults 8/54 and 32/5, zero errors, identical warning
+  texts (`ooocoh-gate-int2-r1`, `ooocoh-gate-default-r1`). Structural FO4 unchanged
+  (`ooocoh-fo4-r4`, same single 33.5 inval-bus path as r3).
+
+**Impact and limits.** Two sticky bits per write transaction, per-entry index comparators and a
+net-delta counter; one hub alloc mux. No new clock/reset/latch/scan control; no ISA/config/DTS
+change. In-order WT configurations see the same rules: their only invalidations are flush (entered
+with an empty write buffer and idle MSHR) and AMO/CAS self-invalidation (sequentialised), so
+`rtrn_inv` never fires there and dropped fixup copies are re-read from memory that already holds
+them — values are unchanged, but the in-order DI/anchor suites have not been re-run through the
+isolated route and remain an obligation. Writer acquisition is conservative (more invalidations,
+index aliasing unchanged). The signature still has no clear; the fixup queue's tag-miss retention
+is now bounded by invalidation, not by time.
 
 ## Deferred
 

@@ -170,7 +170,7 @@ done
 # targets. Wrap the binary to strip it (same shim as rebuild-baseline.sh).
 export VERILATOR_ROOT="${VERILATOR_ROOT:-$VLT_HOME/share/verilator}"
 [[ -e "$VERILATOR_ROOT/verilator_bin" ]] || ln -sfn "$VLT_HOME/bin/verilator_bin" "$VERILATOR_ROOT/verilator_bin"
-VLT_WRAP=/tmp/soft-ladder-vlt-wrap
+VLT_WRAP="$VERLIB_DIR/tool-wrap"
 mkdir -p "$VLT_WRAP"
 cat >"$VLT_WRAP/verilator" <<EOF
 #!/usr/bin/env bash
@@ -318,7 +318,7 @@ make -C "$ROOT/corev_apu/bootrom" \
 # the generated Variane_testharness.mk's VPATH (.. and VM_USER_DIR) does not
 # point to the C++ sources. Seed VPATH with the repo root so the compile step
 # finds corev_apu/tb/dpi/*.cc and corev_apu/tb/*.cpp wherever the Mdir lives.
-export VPATH="$CVA6_REPO_DIR"
+export VPATH="$VERILATOR_ROOT/include:$CVA6_REPO_DIR"
 
 BUILD_LOG="${SOFT_LADDER_BUILD_LOG:-$VERLIB_DIR/build.log}"
 rm -f "$BUILD_LOG"

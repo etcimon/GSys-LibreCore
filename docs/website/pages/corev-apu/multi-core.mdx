@@ -72,6 +72,13 @@ Hub invariants held by `g6lc_coherence_hub.sv`:
   masks preserve same-ID B ordering; a younger same-(core, id) AR is withheld
   while the older read slot is live, so re-tagged reads keep same-ID R order.
 - ATOP/lock classified as invalidating writers; full-width response-ID bounds.
+- Signature presence is acquired on **AR and AW**: a core whose first contact
+  with a line is a write still holds a forwarding copy (write buffer, post-ACK
+  repair entry), so it is a sharer. On the WT side those repair copies are
+  dropped by an invalidation of their index, and a write acknowledged after an
+  invalidation hit it in flight retains no copy — the directed cross-core
+  shared-line program passes in the isolated two-core route with both cores
+  retired (plan T7i).
 - The hub's four transaction credits bound L2 fills; `g6lc64_ooo_int2` sizes
   `L2MshrDepth=4` to match (measured: depth 2 left 51 MSHR-full stall cycles in
   an eight-read burst, depth 4 none).
@@ -88,8 +95,10 @@ and "COH_OOO load replay" (event 6), and the signature SRAM carries
 `corev_apu/coherence/g6lc_ooo_snoop_filter.tech-spec.md`.
 
 Deferred (tracked, not closed): matched multicore firmware/anchor/compliance
-runs, foundry macro selection and MBIST insertion, STA/power/area sign-off —
-see `AGENTS-todo.md`. HPDCACHE/non-WT application acknowledgement is outside
+runs (the isolated route so far runs directed programs: cross-core shared line
+and four-hart CLINT boot/release pass; the remaining frozen programs are still
+red), in-order WT re-runs after the repair-copy lifetime change, foundry macro
+selection and MBIST insertion, STA/power/area sign-off — see `AGENTS-todo.md`. HPDCACHE/non-WT application acknowledgement is outside
 the `COH_OOO` legality envelope.
 
 ## Config and inference
