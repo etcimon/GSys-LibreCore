@@ -517,6 +517,65 @@ isolated int2 route, unchanged lint/synth baselines. Not inferred: in-order DI/a
 stock firmware/compliance, RVWMO beyond the directed cases, physical sign-off. Sequence and
 limits: `core/ooo/AGENTS-ooo-plan.md` T7i.
 
+## WT write-buffer L1 consistency and OoO atomic issue order (2026-09-25)
+
+Four defects found by the first two-core OpenSBI runs, with leaf reproducers and mutation
+controls (plan T7l/T7m/T7n):
+
+- `core/cache_subsystem/wt_dcache_wbuffer.sv` — a checked-hit store ACK wrote its word into L1
+  "best-effort"; when the array port was owned by a cacheline write (refill or coherence
+  invalidation of any index) the word was silently dropped and the still-valid line went stale.
+  The ACK now holds its TX slot and return-FIFO entry until the word write is granted
+  (`ack_wr_sel`/`ack_wr_lost`); the read-collision case still resolves by invalidating the line
+  inside the array. Write-through invariant restored: L1 never holds an older copy of a word
+  memory already has.
+- same file — the SL-W fixup queue's state machine tag-checked and "retired" the stale array
+  slot at `fixup_head` after the queue drained (no non-empty guard; the count then wrapped),
+  rewriting an old word over newer L1 data. `fixup_active_valid` gates the tag read, the pop and
+  the CHECK/RETIRE states.
+- `core/ooo/g6lc_iq.sv` — an atomic (`fu==STORE`, `is_amo(op)`) now issues only at the commit
+  head. Out-of-order store issue let a younger AMO occupy the store unit's one-entry AMO buffer
+  ahead of an older store; `st_ready` then refused the older store and the AMO could never reach
+  commit (OpenSBI `coldboot_lottery` on core 1). The AMO already waits for the drained store
+  buffer at commit, so the head rule costs no additional wait.
+- `core/csr_buffer.sv` (OoO branch) — the two-entry table's credit now excludes the entry the
+  CSR presented this cycle is taking (`>= 1 + csr_valid_i`). Issue acks a CSR one cycle before
+  its `csr_valid_i` reaches the table, so back-to-back CSRs were both acked against one free
+  entry and the second allocation was silently dropped; its commit then found no address and
+  raised ILLEGAL_INSTR (`_trap_handler` `csrr t0, mstatus` behind `csrrw mscratch; csrr mepc`).
+  A sim-only `$error` now fires if a presented CSR finds no entry. The in-order depth-1 branch is
+  unchanged (it already counted `csr_valid_i`).
+
+Timing: the ACK hold adds one AND term on the return-FIFO pop; the fixup guard is a two-input
+OR on existing state; the IQ rule is one comparator per entry already present for the CSR
+class. The CSR credit includes the registered incoming-valid bit; it adds no table entries,
+clock/reset or ports, and leaves the in-order branch unchanged. No ISA/DTS/config change.
+Prior completed archive baselines are recorded in the tests map; the final CSR-fix OoO
+synthesis runs were interrupted (child rc=143), so their completion remains required.
+
+## Multi-core verdict precision and two-core firmware profile (2026-09-25)
+
+`corev_apu/tb/ariane_testharness.sv` (testbench only) distinguishes a secondary core that is
+still boot-held by `g6lc_cluster` (exit 125, `HELD`) from one that was released and never
+retired (127) or stopped (126), and prints the program's own exit code; the cluster's release
+signal is probed hierarchically under the cluster's exact `BOOT_HOLD` condition, so
+single-core targets are untouched. No synthesized RTL, ISA or memory-map change.
+The non-tandem path now aggregates per-core tracer completion for the shared tohost address;
+a legitimate elected publisher on a secondary core can terminate the test, and simultaneous
+failure takes priority over success. Existing held/silent/hung checks remain downstream of the
+selection. Tandem keeps primary-core completion. This supersedes the earlier observer-only
+secondary-termination policy; it does not make arbitrary secondary parking a completion event.
+
+`corev_apu/bootrom/ariane-ooo-int2.dts` describes `g6lc64_ooo_int2` for firmware: four harts
+over two cores, integer ISA (no f/d), 4-hart CLINT/PLIC contexts, shared L2 node, zawrs not
+advertised (same SMT closeout as ariane-smt2). Mapped in `dts_to_dtb.py` (plat_hc 4) and the
+binding validator's default list; tier R in `.licensing-tiers`. `smt2_sbi_dual.S` gains an
+N-hart strict payload (`G6LC_STRICT_HARTS`) beside the unchanged strict-dual block, and
+`run_opensbi_source_review.py` is shape-parameterized while keeping the two-hart anchor path
+byte-for-byte in behavior. The pinned four-hart profile now completes strictly after the CSR
+credit and testbench termination repairs (plan T7n–T7q). This qualifies the specified integer
+OoO/WT/L2/drained-SMT source profile, not arbitrary SMT configurations, Linux or ISA compliance.
+
 ## AMO result availability at issue (2026-09-19)
 
 The A-extension result must reach a dependent instruction only when its architectural

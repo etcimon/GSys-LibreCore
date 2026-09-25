@@ -75,6 +75,7 @@ T   corev_apu/tb/g6lc_tb_trace.h
 R   corev_apu/bootrom/ariane-linux.dts
 R   corev_apu/bootrom/ariane-smt2.dts
 R   corev_apu/bootrom/ariane-server-math-v.dts
+R   corev_apu/bootrom/ariane-ooo-int2.dts
 
 # Substantially-modified upstream RTL relicensed under Apache-2.0 s.4 (Case B).
 # Upstream copyright + SHL notices are RETAINED VERBATIM in these files; only the

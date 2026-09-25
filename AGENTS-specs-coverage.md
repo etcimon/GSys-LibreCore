@@ -59,6 +59,23 @@ three discriminating mutations. Not covered: the remaining frozen multicore prog
 in-order WT DI/anchor re-runs after the lifetime change, general RVWMO litmus coverage, stock
 firmware/compliance, physical sign-off.
 
+## CSR admission lifetime — directed verification and scoped four-hart firmware completion
+
+OoO CSR admission now reserves capacity for the request already in the issue-to-allocation
+pipeline. Directed tests exercise exhaustion, TID-keyed retirement, concurrent commit and
+allocation, cancellation, flush precedence, and refusal of unmatched-commit credit. Positive
+and negative oracles match; restoring the old credit rule fails the pipelined admission case.
+The in-order identity case is preserved. This closes a reproduced lost-CSR-address mechanism,
+not full CSR/privileged-ISA compliance. The resumed OoO synthesis gates complete successfully.
+
+The pinned two-core/four-hart integer-OoO, drained-SMT, WT/L2 source-profiled OpenSBI workload
+now reaches all supervisor contexts, all completion marks, and before-cap success. A testbench
+repair propagates a secondary core's shared-tohost completion while preserving error and
+progress checks; both physical-core retirement prefixes are unchanged. Matched two-hart
+in-order and OoO profiles also pass their strict payloads. These are qualification-only profile
+results, not replacement of the protected anchor, Linux boot, broad compliance, unbounded
+liveness or physical sign-off. The prior interrupted and timeout results remain historical evidence.
+
 ## Precise misalignment and instruction recovery — qualification open
 
 The original load-offset assertions are currently restored. The earlier alignment-qualified

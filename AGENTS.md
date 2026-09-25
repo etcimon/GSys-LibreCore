@@ -332,6 +332,13 @@ compiler dependencies; `run_restart_review.py` with `REVIEW_IQ_RING=1` is the
 scoped SMT2 circular-IQ integration recipe. Results and remaining proof limits
 are in `architecture/core-fetch/README.md`.
 
+**Qualification wrapper checks (2026-09-25):** on Windows, run the shell-backed proxy unit
+suite through WSL: `python3 -m unittest discover -s verif/regress/remote -p test_testharness_proxy.py`
+from `/mnt/e/cva6`. Native Windows temporary paths are not valid arguments for those Bash
+fixtures; the WSL run passes all 75 tests. For long `testharness_proxy.py shell` jobs, pass an
+explicit positive `--timeout` (e.g. 5400): current `cmd_shell` maps zero to the 60-second default
+despite the help text. Do not mistake the wrapper's interrupted synthesis for an RTL verdict.
+
 The IQ order proof has explicit binary SAT routes in `run_fetch_formal.py`:
 select `REVIEW_FORMAL_TASK=g6lc_fetch_iq_order` with a 600-second budget;
 `REVIEW_FORMAL_MODES=prove` + `REVIEW_FORMAL_SAT_PROVE=1` runs base/induction

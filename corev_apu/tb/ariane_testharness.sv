@@ -83,6 +83,7 @@ module ariane_testharness #(
   logic [31:0] jtag_exit, dmi_exit;
   logic [31:0] rvfi_exit;
   logic [31:0] tracer_exit;
+  logic [NR_CORES-1:0][31:0] core_tracer_exit;
   logic [31:0] tandem_exit;
 
   logic        jtag_TCK;
@@ -1294,8 +1295,21 @@ module ariane_testharness #(
     .rst_ni(rst_ni),
     .rvfi_i(rvfi_instr),
     .rvfi_csr_i(rvfi_csr),
-    .end_of_test_o(tracer_exit)
+    .end_of_test_o(core_tracer_exit[0])
   );
+
+`ifdef SPIKE_TANDEM
+  assign tracer_exit = core_tracer_exit[0];
+`else
+  always_comb begin : mc_exit_select
+    tracer_exit = '0;
+    for (int unsigned c = 0; c < NR_CORES; c++) begin
+      if (core_tracer_exit[c][0] &&
+          (!tracer_exit[0] || ((|core_tracer_exit[c][31:1]) && !(|tracer_exit[31:1]))))
+        tracer_exit = core_tracer_exit[c];
+    end
+  end
+`endif
 
   //  Secondary-core trace visibility.
   //
@@ -1333,10 +1347,26 @@ module ariane_testharness #(
   //  It is safe for every configuration here: the bootrom sends ALL harts to
   //  DRAM_BASE with no parking, so even a single-hart test executes the mhartid
   //  check on each core before branching. With NR_CORES == 1 the check is empty.
+  //  On multi-core SMT targets the cluster additionally clock-holds secondary
+  //  cores until an IPI or a bounded counter releases them; a never-retired
+  //  secondary there is an expected hold (exit 125), not a hang.
   logic [NR_CORES-1:0] core_retired;
   logic [NR_CORES-1:0] mc_retire_pulse;
   logic [NR_CORES-1:0] mc_hang_frozen;
   assign mc_hang_frozen[0] = 1'b0;
+  logic [NR_CORES-1:0] mc_held;
+  assign mc_held[0] = 1'b0;
+  if ((NR_CORES > 1) && (CVA6Cfg.NrHarts > 1)) begin : gen_hold_probe
+    for (genvar c = 1; c < NR_CORES; c++) begin : gen_core_hold
+      assign mc_held[c] = !i_cluster.gen_core[c].gen_boot_icg.rel;
+    end
+  end else begin : gen_no_hold_probe
+    for (genvar c = 1; c < NR_CORES; c++) begin : gen_core_free
+      assign mc_held[c] = 1'b0;
+    end
+  end
+  logic mc_all_silent_held;
+  assign mc_all_silent_held = ((~core_retired & ~mc_held) == '0);
 
   //  Injected-error control for the verdict itself. A verdict that has never been
   //  observed to fail is indistinguishable from one that cannot fail -- the exact
@@ -1402,7 +1432,7 @@ module ariane_testharness #(
         .rst_ni(rst_ni),
         .rvfi_i(sec_rvfi_instr),
         .rvfi_csr_i(sec_rvfi_csr),
-        .end_of_test_o(  /* observer only: must not terminate the simulation */)
+        .end_of_test_o(core_tracer_exit[c]  /* observer only: must not terminate the simulation */)
     );
 
     logic sec_any_retire;
@@ -1512,11 +1542,16 @@ module ariane_testharness #(
   //  complaining about elsewhere.
   //pragma translate_off
   final begin
-    if (!(&core_retired))
-      $display("*** [mc_verdict] FAIL: core(s) retired no instruction, retired_mask=%b (exit code 127)",
-               core_retired);
-    else
+    if (!(&core_retired)) begin
+      if (mc_all_silent_held)
+        $display("*** [mc_verdict] HELD: core(s) still clock-held at end of test, held_mask=%b retired_mask=%b (exit code 125)",
+                 mc_held, core_retired);
+      else
+        $display("*** [mc_verdict] FAIL: core(s) retired no instruction, retired_mask=%b held_mask=%b (exit code 127)",
+                 core_retired, mc_held);
+    end else
       $display("*** [mc_verdict] all %0d core(s) retired instructions", NR_CORES);
+    $display("*** [mc_verdict] program exit code %0d", tracer_exit[31:1]);
     for (int unsigned c = 0; c < NR_CORES; c++)
       $display("*** [mc_gap] core %0d max retirement gap %0d cycles (limit %0d, wfi=%0b)",
                c, mc_gap_max[c], MC_GAP_LIMIT, mc_last_wfi[c]);
@@ -1568,8 +1603,11 @@ module ariane_testharness #(
     //  exit code with a distinctive 127 so a silent secondary core cannot report
     //  SUCCESS. exit_o>>1 is the exit code the C++ side reports.
     //  Exit 126 for a core that ran and then STOPPED, distinct from 127 (a core
-    //  that never ran at all) so the log says which failure occurred.
-    assign rvfi_exit = (tracer_exit[0] && !(&core_retired)) ? {31'd127, 1'b1}
+    //  that never ran at all) so the log says which failure occurred. When every
+    //  still-silent core is held by the cluster's boot clock gate (expected on
+    //  multi-core SMT targets) the code is 125 instead of 127.
+    assign rvfi_exit = (tracer_exit[0] && !(&core_retired))
+                       ? (mc_all_silent_held ? {31'd125, 1'b1} : {31'd127, 1'b1})
                      : (tracer_exit[0] && mc_any_hung)      ? {31'd126, 1'b1}
                                                             : tracer_exit;
 `endif

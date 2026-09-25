@@ -573,7 +573,7 @@ module tb_g6lc_review_iq;
   parameter int NP=2, DEPTH=8;
   function automatic config_pkg::cva6_cfg_t configuration();
     config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
-    c.NrIssuePorts=NP; c.NrWbPorts=2; c.NR_SB_ENTRIES=16; c.TRANS_ID_BITS=4;
+    c.NrIssuePorts=NP; c.NrWbPorts=2; c.NR_SB_ENTRIES=16; c.TRANS_ID_BITS=4; c.RVA=1;
     return c;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
@@ -730,6 +730,17 @@ module tb_g6lc_review_iq;
         ia='1;tick();ia='0;#2;
         offer_op(5,CSR,SFENCE_VMA,0);expect_issue(0,"IQ_CSR_HEAD");
         commit_ptr=4'd5;#2;expect_issue(1,"IQ_CSR_HEAD");
+      end
+      // An atomic issues only at the commit head (the store unit's one-entry
+      // AMO buffer blocks every older store otherwise); a plain store is not
+      // held back by that rule.
+      10:begin
+        commit_ptr=4'd0;
+        offer_op(3,STORE,AMO_SWAPD,0);expect_issue(0,"IQ_AMO_HEAD");
+        commit_ptr=4'd3;#2;expect_issue(1,"IQ_AMO_HEAD");
+        ia='1;tick();ia='0;#2;
+        commit_ptr=4'd0;
+        offer_op(5,STORE,SD,0);expect_issue(1,"IQ_AMO_HEAD");
       end
       default:$fatal(1,"IQ_SCENARIO");
     endcase
@@ -1332,6 +1343,57 @@ module tb_g6lc_review_csrbuf;
         if(ready!==negative)$fatal(1,"CSRBUF_INORDER ready=%b",ready);
         retire(3'd1,12'h300,"CSRBUF_INORDER");#1;
         if(!ready)$fatal(1,"CSRBUF_INORDER ready after commit");
+      end
+      // Issue acks one cycle before csr_valid reaches the table. The credit
+      // read while an accepted CSR is still allocating (valid high this cycle)
+      // must already exclude that entry: A allocating with the table empty
+      // leaves one credit; B allocating with A in the table leaves none. Both
+      // entries must then commit their own address.
+      5:begin
+        logic ready_b, ready_c;
+        #1;if(!ready)$fatal(1,"CSRBUF_PIPE idle ready=%b",ready);
+        data.trans_id=3'd1;data.operand_b=64'h300;valid=1;#1;ready_b=ready;
+        drive();
+        data.trans_id=3'd2;data.operand_b=64'h301;valid=1;#1;ready_c=ready;
+        drive();valid=0;
+        if(ready_b!==1'b1)$fatal(1,"CSRBUF_PIPE first allocation must leave one credit ready=%b",ready_b);
+        if(ready_c!==negative)$fatal(1,"CSRBUF_PIPE second allocation must exhaust the credit ready=%b",ready_c);
+        retire(3'd1,12'h300,"CSRBUF_PIPE");retire(3'd2,12'h301,"CSRBUF_PIPE");
+      end
+      6:begin
+        issue(3'd1,12'h300);
+        data.trans_id=3'd2;data.operand_b=64'h301;valid=1;commit=1;commit_tid=3'd1;#1;
+        if(ready!==!negative || addr!==12'h300)$fatal(1,"CSRBUF_COMMIT_ALLOC ready=%b addr=%h",ready,addr);
+        drive();valid=0;commit=0;
+        issue(3'd3,12'h305);#1;
+        if(ready)$fatal(1,"CSRBUF_COMMIT_ALLOC excess credit");
+        retire(3'd2,12'h301,"CSRBUF_COMMIT_ALLOC");retire(3'd3,12'h305,"CSRBUF_COMMIT_ALLOC");
+      end
+      7:begin
+        issue(3'd1,12'h300);
+        data.trans_id=3'd2;data.operand_b=64'h301;valid=1;cancel=8'h02;#1;
+        if(ready!==negative)$fatal(1,"CSRBUF_CANCEL_ALLOC speculative credit ready=%b",ready);
+        drive();valid=0;cancel='0;commit_tid=3'd1;#1;
+        if(!ready || addr!==12'h000)$fatal(1,"CSRBUF_CANCEL_ALLOC stale owner addr=%h",addr);
+        retire(3'd2,12'h301,"CSRBUF_CANCEL_ALLOC");
+      end
+      8:begin
+        issue(3'd1,12'h300);issue(3'd2,12'h301);
+        data.trans_id=3'd3;data.operand_b=64'h305;valid=1;flush=1;
+        drive();valid=0;flush=0;#1;
+        if(ready!==!negative)$fatal(1,"CSRBUF_FLUSH_ALLOC ready=%b",ready);
+        for(int t=1;t<=3;t++)begin
+          commit_tid=3'(t);#1;
+          if(addr!==12'h000)$fatal(1,"CSRBUF_FLUSH_ALLOC stale owner tid=%0d addr=%h",t,addr);
+        end
+        issue(3'd3,12'h305);retire(3'd3,12'h305,"CSRBUF_FLUSH_ALLOC");
+      end
+      9:begin
+        issue(3'd1,12'h300);issue(3'd2,12'h301);
+        commit=1;commit_tid=3'd7;#1;
+        if(ready!==negative)$fatal(1,"CSRBUF_MATCHED_CREDIT ready=%b",ready);
+        commit=0;
+        retire(3'd1,12'h300,"CSRBUF_MATCHED_CREDIT");retire(3'd2,12'h301,"CSRBUF_MATCHED_CREDIT");
       end
       default:$fatal(1,"CSRBUF_SCENARIO");
     endcase

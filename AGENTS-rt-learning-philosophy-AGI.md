@@ -543,6 +543,45 @@ fails after reset is corrected, so boot initialization and memory visibility are
 separate obligations. Evidence: `core/ooo/AGENTS-ooo-plan.md` T7g. This is a local
 instrument-contract repair, not evidence of general SMT or OpenSBI completion.
 
+### 10.8 A credit promise includes accepted work not yet stored at the consumer
+
+The four-hart OpenSBI CSR failure appeared as an illegal read of a supported machine CSR.
+Instruction bytes and the CSR immediate were correct at issue; the first observed loss was
+one cycle later, when an already accepted CSR found both address-table entries occupied.
+The table's ready signal had counted registered free entries but not the request currently
+arriving from the issue pipeline. Retirement then selected no address, producing address zero
+and a decode exception. A commit-only assertion could not detect the missing record because
+the exception itself suppressed commit.
+
+The conditional contract is capacity conservation across the whole acceptance-to-storage
+interval. For this one-cycle, single-CSR admission seam, `free + matched_commit >= arriving + 1`
+reserves the arrival before advertising the next credit. A deeper or multi-accept pipeline needs
+its own reservation count; copying the single valid-bit formula would not establish correctness.
+A source-extracted timing trace, the failing old-credit mutation, and the 20-outcome CSR boundary
+suite support this mechanism. The in-order branch already counted the arrival and is unchanged.
+Evidence and qualification limits: `core/ooo/AGENTS-ooo-plan.md` T7n/T7o.
+
+Retain the distinction between an observed illegal instruction and a lost resource owner.
+A standalone instruction-sequence test that lacks delayed retirement and consecutive admissions
+does not refute the credit hypothesis. Place the checker at allocation as well as commit, and
+preserve the firmware as the integration gate rather than replacing the legal CSR sequence.
+
+### 10.9 Completion ownership must survive producer election
+
+The next four-hart run contained all supervisor completion marks and a success store from an
+elected boot hart on the secondary physical core. Its RVFI tracer reported completion, but the
+outer harness ran to the cycle cap: only the primary tracer's completion was connected. The
+strict runner's timeout remained correct under its existing contract; relaxing the classifier
+would have hidden a broken notification path.
+
+The reusable question is whether every legitimate producer can deliver the same completion
+contract, not whether a familiar producer usually wins election. A source-extracted negative
+case and a secondary-publisher full-model probe distinguish missing notification from missing
+work. Aggregate only valid completion words, preserve failures, and retain independent progress
+checks. This applies to shared completion endpoints, not to independent per-worker stop events.
+The testbench repair does not change firmware or the synthesized core. The old timeout remains
+recorded; a new before-cap strict result is a separate qualification obligation (plan T7p).
+
 ## 11. Evaluating capability improvement by segment
 
 Evaluate the procedure's externally checkable outputs, not a claimed inner

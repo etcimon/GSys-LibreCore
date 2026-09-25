@@ -242,6 +242,88 @@ stores versus primary loads need boundary tracing; neither record is matched or 
 - Not covered: the other frozen multicore programs (still red, unchanged), in-order WT DI/anchor
   re-runs after the fixup-lifetime change, stock firmware/compliance, physical sign-off.
 
+## Held-secondary verdict and current-tree OpenSBI (2026-09-25)
+
+- `ariane_testharness.sv`: a test that ends while every silent secondary is still boot-held
+  exits 125 with `[mc_verdict] HELD held_mask/retired_mask`; a released silent core keeps 127,
+  a stopped core 126; `program exit code` is always printed. `run_mc_int2_review.py` verdict
+  self-test 14 cases (HELD+scope '01' pass, HELD+scope '11' held-secondary, HELD+exit 5 fail,
+  127 incomplete). `ooocoh-mc-initial-r2`: all 8 int2 expectations matched, including the
+  `+mc_verdict_fault` control (`incomplete`, 127) and the probe (`timeout`, both cores retired).
+- `REVIEW_MC_BUILD_ONLY=1` current-tree models (956 SV files identical to HEAD, C++/bootrom
+  hashes compared): strict-dual OpenSBI passes on `g6lc64_smt2` (12,764,538 cycles) and
+  `g6lc64_smt2_ooo_int` (10,704,402 cycles) with the frozen `opensbi-source-dual-v3-20260919`
+  firmware (`ooocoh-smt2-osbi-r1`, `ooocoh-smt2ooo-osbi-r1`; experimental label, not the
+  proxy-attested anchor). Prior green: 12,765,628 / 10,696,498.
+- `run_opensbi_source_review.py` shape generalization: `SourceProfileVerdictTests` covers the
+  4-hart/2-core oracle (every mark, every hart's progress, cluster verdict line, scope-less
+  anchor form unchanged); `ariane-ooo-int2.dts` passes `dts_to_dtb.py` (plat_hc 4) and the
+  Linux-binding validator (FAIL=0). The first two-core firmware run is a separate record.
+
+## WT ACK-write hold, fixup phantom guard, AMO commit-head issue (2026-09-25)
+
+- Root-cause instruments (kept): `run_mem_watch_probe.py` (filters `+smt_mem_watch` output of a
+  long run to a small log), `[smt-flow]` lines now carry `scope=%m`, and the visibility mode's
+  `+mc_vis_from/+mc_vis_until/+mc_vis_stuck=N` (per-channel, wbuffer, array-port, miss-unit,
+  store-unit, store-buffer and commit-head stuck reports, once per stall). Discriminators:
+  `ooocoh-int2-memwatch-r1` (`wt_word ... ack=0 denied=0` at the lost ACK write, later
+  `wt_lookup hit=01 raw=…0002`), `ooocoh-int2-stuck-r3` (commit head `sd` never valid behind a
+  full AMO buffer).
+- WT leaf suites on the final wbuffer: `WT_FIXUP_INV` 38/38 incl. new scenario 7 (`ack_hold`,
+  `ack_landed`) at depths 0/2/4 with negatives; mutations `besteffort` (pop regardless of grant)
+  fails only scenario 7, `drop`/`retain`/`count` unchanged (`ooocoh-wt-inv-final-*`). Copy suite
+  20/20 incl. `no_phantom_retire` in every scenario and new scenario 4 (VOID ACK coalescing into
+  the head in its granted retire cycle); mutations `phantom` (guard forced true) and `retire`
+  (coalesce guards removed, 4 sites) fail exactly their scenario; `capacity`/`bytes`/`export`
+  still fail (`ooocoh-wt-copy-final-*`). NC suite 24/24; tag suite 6/6
+  (`ooocoh-wt-tag-ackhold-r1`).
+- IQ review scenario 10 `IQ_AMO_HEAD` in all four geometries with negative arms, 114/114
+  (`ooocoh-iq-amohead-r3`); gate-removed mutation fails scenario 10 first
+  (`ooocoh-iq-amohead-mut-r1`).
+- csrbuf review scenario 5 `CSRBUF_PIPE` (issue→allocate latency: the credit read while a CSR
+  allocates already excludes it) passes with its negative arm; reverted-credit mutation fails
+  scenario 5 after scenarios 0–3 pass (`ooocoh-csrbuf-pipe-*`). The expanded current-source
+  suite passes 20/20 expected outcomes (`ooocoh-csrbuf-boundary-r1`): scenarios 6–9 cover
+  commit/allocation credit and address retention, cancellation concurrent with allocation,
+  flush precedence over a full-table arrival, and rejection of unmatched commit credit.
+  The in-order identity case remains included. `mc_csr_prologue.S` passes its 4000-iteration
+  positive replay, but the original runner rejected the held-secondary negative result
+  (`ooocoh-csr-prologue-r1`); this is not a qualified positive/negative pair and does not establish
+  that trap context is necessary. The discriminating condition is pipelined credit reuse.
+- CSR-fix archive results recovered after interruption: both OoO targets pass lint with 24
+  warnings; their synthesis child processes end with rc=143, so neither is a synthesis pass
+  (`ooocoh-csrbuf-gate-{int2,active}-r1`). Defaults complete at lint 8/54 and synth 32/5.
+  The four-hart firmware run stops at 3,534,013 cycles with `outcome=incomplete` and
+  `strictDualPassed=false` (`ooocoh-int2-osbi-r7`), before the previously failing sequence.
+  Resumed archive r3 runs complete: int2 lint/synth 24/7 and active-core 24/1, zero errors.
+  The full proxy/strict-verdict unit suite passes 75/75 under WSL; native Windows Bash-fixture
+  path failures are retained as host-invocation failures, not RTL results.
+- Shared-tohost completion: `REVIEW_MC_EXIT_LEAF` extracts the testbench selector and verdict
+  equations; the original wiring fails secondary completion, and the repaired wiring passes
+  60/60 outcomes at 1/2/4 cores (`ooocoh-exit-before-r1`, `ooocoh-exit-after-r1`).
+  The full-model secondary-publisher variant of `mc_smt2_boot_release.S` times out before the
+  repair and terminates positive/negative at 814 cycles afterwards. The primary-publisher pair
+  remains 775 cycles (`ooocoh-exit-{secondary-before,secondary-after,primary-after}-r1`).
+  Before/after secondary ELFs have different file hashes but identical disassembly; the firmware
+  qualification uses the same frozen OpenSBI ELF, not a recompiled workload.
+- Matched source-profiled SMT2 firmware passes on the repaired core RTL:
+  `ooocoh-smt2ooo-osbi-csr-r1` at 10,701,925 cycles and `ooocoh-smt2-osbi-csr-r1` at 12,761,165.
+  Both strict verdicts pass; both models remain experimental, qualification-only, not protected
+  anchor replacements. The four-hart r8 trace has all payload marks but times out because its
+  secondary completion was disconnected; that timeout is preserved. `ooocoh-int2-osbi-r9`
+  strictly passes at 17,777,964 harness cycles with the same frozen firmware after testbench
+  routing repair. All four supervisor marks and tohost success are present; retirements are
+  472,120 / 652,285 / 14,942,663 / 412,622. Both current physical-core RVFI traces match r8's
+  corresponding prefixes exactly (128,663,792 and 1,772,143,971 bytes). The strengthened
+  exit oracle r2 passes 60/60 with scenario-specific failure markers. Scope: plan T7q.
+- Visibility-model probes for this class (kept in `run_mc_int2_review.py`): `+mc_vis_stuck=N`
+  stuck-handshake/commit-head reports, CSR exception and csr_buffer allocation/commit views,
+  issue-port view within `+mc_vis_from/+mc_vis_until`. The review mode's directed cases still
+  compare observer-off/on retirement; the firmware probe runs served localization only and are
+  not qualification evidence.
+- Archive gates after the wbuffer repairs: int2 24/7, defaults 8/54 and 32/5, zero errors
+  (`ooocoh-ackhold-gate-*`); after the IQ rule: recorded in plan T7m.
+
 ## Current qualification boundary for misalignment and recovery
 
 The results in the historical subsection below belong to its captured binaries, not the current

@@ -112,7 +112,7 @@ def inv_review(source, out, names):
   logic clwr, inv, wr_grant;
   logic [7:0] clidx, write_index, read_index=0;
   logic [3:0] write_offset;
-  logic visible, revived, visible_b, progress_seen=0, repair_seen=0, a_retired=0;''')
+  logic visible, revived, visible_b, progress_seen=0, repair_seen=0, a_retired=0, a_landed=0;''')
     prefix = prefix.replace(".wr_cl_vld_i(1'b0), .wr_cl_idx_i('0)", '.wr_cl_vld_i(clwr), .wr_cl_idx_i(clidx)')
     prefix = prefix.replace(".wr_cl_inv_i(1'b0)", '.wr_cl_inv_i(inv)')
     prefix = prefix.replace('.wr_idx_o(), .wr_off_o()', '.wr_idx_o(write_index), .wr_off_o(write_offset)')
@@ -141,7 +141,9 @@ always_comb begin
        (S==3 && step==7) || (S==4 && step==8) || (S==5 && step==14);
   inv=clwr && S!=5;
   clidx=(S==1) ? 8'h13 : 8'h12;
-  wr_grant=(S==6) ? step>=20 : 1'b1;
+  // S7: the array port is busy (cacheline write) for the whole ACK window;
+  // the checked-hit word must still land in L1 once the port frees.
+  wr_grant=(S==6) ? step>=20 : (S==7) ? !(step>=7 && step<=12) : 1'b1;
   visible=0; revived=0; visible_b=0;
   for(int k=0;k<=FIXUP;k++) begin
     if(fixups[k].wtag==WORD_A) begin
@@ -159,6 +161,7 @@ always @(posedge clk) begin
   if(S==3 && step>=14 && miss_req) progress_seen<=1;
   if(S==5 && (|wr_req) && write_index==8'h12 && wr_data==OLD) repair_seen<=1;
   if(S==6 && (|wr_req) && write_index==8'h12 && wr_data==OLD && wr_grant) a_retired<=1;
+  if(S==7 && (|wr_req) && write_index==8'h12 && wr_data==OLD && wr_grant) a_landed<=1;
   if(rst_n)begin
     if(request.data_req) accepted_write: assert(response.data_gnt);
     if(miss_ack) accepted_tx: assert(miss_req);
@@ -174,6 +177,8 @@ always @(posedge clk) begin
     if(FIXUP>0 && S==5 && step==30) refill_repair: assert(((repair_seen && !visible) ^ @NEG@)==1'b1);
     if(FIXUP>0 && S==6 && step==20) count_setup: assert(|wr_req);
     if(FIXUP>0 && S==6 && step==24) count_keep: assert(((a_retired && visible_b) ^ @NEG@)==1'b1);
+    if(S==7 && step==10) ack_hold: assert(((!empty) ^ @NEG@)==1'b1);
+    if(S==7 && step==20) ack_landed: assert(((a_landed && empty) ^ @NEG@)==1'b1);
     if(step==40) checked<=1;
   end
 end
@@ -192,6 +197,9 @@ endmodule
             old = "fixup_cnt <= fixup_cnt + ($bits(fixup_cnt))'(fixup_alloc) - ($bits(fixup_cnt))'(fixup_pop);"
             new = "fixup_cnt <= fixup_pop ? fixup_cnt - 1'b1 : fixup_alloc ? fixup_cnt + 1'b1 : fixup_cnt;"
             count = 1
+        elif fault == 'besteffort':
+            # Restore the dropped ACK-time word write (pop regardless of the port grant).
+            old, new, count = 'if (ack_wr_lost) begin', "if (1'b0) begin", 1
         else:
             raise ValueError('unknown inv fault')
         assert text.count(old) == count, 'inv mutation site changed'
@@ -201,17 +209,21 @@ endmodule
         'fault': fault, 'driver': hashlib.sha256(driver.encode()).hexdigest()}, indent=2))
     markers = {0: ('inv_setup', 'inv_drop', 'inv_revive'), 1: ('inv_setup', 'inv_keep_other'),
                2: ('inv_alloc_wins',), 3: ('inv_inflight', 'inv_inflight_progress'),
-               4: ('inv_same_cycle',), 5: ('refill_repair',), 6: ('count_setup', 'count_keep')}
+               4: ('inv_same_cycle',), 5: ('refill_repair',), 6: ('count_setup', 'count_keep'),
+               7: ('ack_hold', 'ack_landed')}
     fault_expect = {'drop': {0: 'inv_drop'},
                     'retain': {3: 'inv_inflight', 4: 'inv_same_cycle'},
-                    'count': {6: 'count_keep'}}
+                    'count': {6: 'count_keep'},
+                    'besteffort': {7: 'ack_hold'}}
     results = []
     for depth in (0, 2, 4):
-        for scenario in range(4 if depth == 0 else 7):
-            for negative in ([False] if fault or depth == 0 else [False, True]):
+        # Scenario 7 (ACK-time word write loses the array port) does not involve
+        # the fixup queue, so it runs at every depth including 0.
+        for scenario in ([0, 1, 2, 3, 7] if depth == 0 else range(8)):
+            for negative in ([False] if fault or (depth == 0 and scenario != 7) else [False, True]):
                 label = f'inv-d{depth}-s{scenario}-n{int(negative)}'
                 text = prefix.replace('parameter int FIXUP=2;', f'parameter int FIXUP={depth};') + driver
-                resident = {5: 14, 6: 9}.get(scenario, 90)
+                resident = {5: 14, 6: 9, 7: 3}.get(scenario, 90)
                 text = text.replace('@SCENARIO@', str(scenario)).replace('@RESIDENT@', str(resident))
                 text = text.replace('@NEG@', "1'b1" if negative else "1'b0")
                 harness = source / (label + '.sv')
@@ -225,7 +237,7 @@ endmodule
                     rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
                         stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
                 output = (out / (label + '.log')).read_text()
-                expected_marker = fault_expect.get(fault, {}).get(scenario) if depth > 0 else None
+                expected_marker = fault_expect.get(fault, {}).get(scenario) if (depth > 0 or scenario == 7) else None
                 expected_failure = negative or bool(expected_marker)
                 matched = (rc != 0 and any(m in output for m in markers[scenario]) and 'failed' in output) \
                     if expected_failure else rc == 0
@@ -259,18 +271,21 @@ def main():
             old, new = 'merged.be = prior.be | be;', 'merged.be = be;'
         elif fault == 'retire':
             old, new = ' && !fixup_active_coalesced', ''
+        elif fault == 'phantom':
+            # Let the state machine treat a drained queue slot as a live entry again.
+            old, new = "assign fixup_active_valid = fixup_bypass_valid_q || (fixup_cnt != '0);", "assign fixup_active_valid = 1'b1;"
         elif fault == 'export':
-            start = rtl.index('        if (fixup_push) begin', rtl.index('p_fixup_wbuffer'))
+            start = rtl.index('        if (fixup_export_push) begin', rtl.index('p_fixup_wbuffer'))
             end = rtl.index('\n      end\n    end\n  endgenerate', start)
             old = rtl[start:end]
-            new = '''        if (fixup_push) begin
+            new = '''        if (fixup_export_push) begin
           fixup_wbuffer_o[0].wtag = wbuffer_q[rtrn_ptr].wtag;
           fixup_wbuffer_o[0].data = fixup_data_push;
           fixup_wbuffer_o[0].valid = fixup_be_push;
         end'''
         else:
             raise ValueError('unknown fixup fault')
-        if rtl.count(old) != (3 if fault == 'retire' else 1):
+        if rtl.count(old) != (4 if fault == 'retire' else 1):
             raise RuntimeError('fixup mutation site changed')
         rtl_path.write_text(rtl.replace(old, new))
     (out / 'sources.json').write_text(json.dumps({n: hashlib.sha256((source / n).read_bytes()).hexdigest()
@@ -290,7 +305,7 @@ def main():
   logic refill;
   logic [7:0] refill_index;
   logic [63:0] cache_word=0, golden_word=0, visible_word;
-  logic saw_old=0, saw_other, race_seen=0, race_done=0, race_check=0, wr_grant;
+  logic saw_old=0, saw_other, race_seen=0, race_done=0, race_check=0, wr_grant, phantom_seen=0;
   logic [7:0] mask_seen;
   localparam logic [63:0] OLD=64'h1122334455667788;
   localparam logic [63:0] NEW=64'h8877665544332211;
@@ -310,17 +325,23 @@ def main():
     request.address_tag=TAG_A;
     request.data_be='1;
     request.data_wdata=OLD;
-    request.data_req=step == 1 || step == 10 || step == 19 || step == 32;
+    // RACE2 keeps a single retained copy so the OLD word is the queue head.
+    request.data_req=(step == 1 && !@RACE2@) || step == 10 || (step == 19 && !@RACE2@) || step == 32;
     request.address_index=step == 1 ? 12'h138 : step == 19 ? 12'h148 : 12'h128;
     if (step == 32) begin
       request.data_wdata=NEW;
       request.data_be=@BE@;
     end
-    rd_ack=1;
-    miss_ack=step == 6 || step == 15 || step == 24 || step == 39;
-    return_valid=step == 7 || step == 16 || step == 25 || (@RACE@ ?
-        ((|wr_req) && write_index == 8'h12 && !race_seen) : step == 40);
-    wr_grant=!@RACE@ || !(|wr_req) || write_index != 8'h12 || race_seen;
+    // RACE2: the NEW store's tag check is withheld (rd_ack low) while its ACK
+    // returns as a VOID ACK in the very cycle the retained OLD head, already in
+    // RETIRE and waiting for the port, is granted. The ACK must coalesce into
+    // the head and the head must retire once more with the merged word.
+    rd_ack=!(@RACE2@ && step >= 32 && step <= 44);
+    miss_ack=(step == 6 && !@RACE2@) || step == 15 || (step == 24 && !@RACE2@) || (@RACE2@ ? step == 37 : step == 39);
+    return_valid=(step == 7 && !@RACE2@) || step == 16 || (step == 25 && !@RACE2@) || (@RACE@ ?
+        ((|wr_req) && write_index == 8'h12 && !race_seen) : @RACE2@ ? step == 38 : step == 40);
+    wr_grant=@RACE2@ ? !(step >= 25 && step <= 38) :
+             (!@RACE@ || !(|wr_req) || write_index != 8'h12 || race_seen);
     refill=step == @RESIDENT@ || step == 55 || step == 56;
     refill_index=step == 55 ? 8'h13 : step == 56 ? 8'h14 : 8'h12;
     visible_word=cache_word;
@@ -360,7 +381,7 @@ def main():
         for (int f=0; f<=FIXUP; f++)
           if (fixups[f].wtag == WORD && fixups[f].valid == 8'hff && fixups[f].data == OLD) saw_old <= 1;
       end
-      if (step == 41 && !@RACE@) other_copy_survives: assert(saw_other);
+      if (step == 41 && !@RACE@ && !@RACE2@) other_copy_survives: assert(saw_other);
       if (@RACE@ && (|wr_req) && write_index == 8'h12) begin
         race_seen <= 1;
         if (race_seen) race_done <= 1;
@@ -370,6 +391,11 @@ def main():
       if (|wr_req && wr_grant && write_index == 8'h12 && write_offset == 8)
         for (int b=0; b<8; b++)
           if (wr_be[b]) cache_word[b*8+:8] <= wr_data[b*8+:8];
+      // Every retained copy has retired by step 75 (refills at 54-56, three
+      // entries, race-delayed ACK). A word write after that is a phantom retire
+      // of a drained queue slot.
+      if (step >= 76 && (|wr_req)) phantom_seen <= 1;
+      if (step == 82) no_phantom_retire: assert(!phantom_seen);
       if ((step == 55 && !@RACE@) || step == 80) begin
         if (@RACE@) race_reached: assert(race_done);
         setup_old: assert(saw_old || FIXUP == 0);
@@ -385,27 +411,28 @@ endmodule
     export_before = os.environ.get('WT_FIXUP_EXPORT_BEFORE') == '1'
     results = []
     for depth in (2, 4):
-        for scenario, resident, mask in ((0, 54, "8'hff"), (1, 54, "8'h03"), (2, 30, "8'hff"), (3, 54, "8'hff")):
-            if fault and (depth != 2 or scenario != {'capacity': 0, 'bytes': 1, 'retire': 3, 'export': 0}[fault]):
+        for scenario, resident, mask in ((0, 54, "8'hff"), (1, 54, "8'h03"), (2, 30, "8'hff"), (3, 54, "8'hff"), (4, 20, "8'hff")):
+            if fault and (depth != 2 or scenario != {'capacity': 0, 'bytes': 1, 'retire': 4, 'export': 0, 'phantom': 3}[fault]):
                 continue
             for negative in ([False] if before or export_before or fault else [False, True]):
                 label = f'd{depth}-s{scenario}-n{int(negative)}'
                 harness = source / (label + '.sv')
                 text = prefix.replace('parameter int FIXUP=2;', f'parameter int FIXUP={depth};') + driver
-                text = text.replace('@RESIDENT@', str(resident)).replace('@BE@', mask).replace('@RACE@', "1'b1" if scenario == 3 else "1'b0").replace('@NEG@', "64'd1" if negative else "64'd0")
+                text = text.replace('@RESIDENT@', str(resident)).replace('@BE@', mask).replace('@RACE@', "1'b1" if scenario == 3 else "1'b0")
+                text = text.replace('@RACE2@', "1'b1" if scenario == 4 else "1'b0").replace('@NEG@', "64'd1" if negative else "64'd0")
                 harness.write_text(text)
                 script = out / (label + '.ys')
                 rtl = [str(source / n) for n in names if n.endswith('.sv') and not n.startswith('tb_')]
                 script.write_text('read_slang --std 1800-2017 -DG6LC_FETCH_B -DVERILATOR --top wt_fixup_copy '
                                   + ' '.join(rtl + [str(harness)])
                                   + '\nprep -top wt_fixup_copy\nflatten\nasync2sync\nchformal -lower\nmemory_map\nopt\ncheck -assert\n'
-                                  + f'sim -clock clk -n 85 -assert -q -vcd {out}/{label}.vcd -summary {out}/{label}-summary.json\n')
+                                  + f'sim -clock clk -n 85 {"" if os.environ.get("WT_FIXUP_NOASSERT") else "-assert"} -q -vcd {out}/{label}.vcd -summary {out}/{label}-summary.json\n')
                 with (out / (label + '.log')).open('w') as log:
                     rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
                                         stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
                 log_text = (out / (label + '.log')).read_text()
                 expected_failure = bool(fault) or negative or before or (export_before and scenario < 3)
-                markers = ('other_copy_survives',) if export_before else ('latest_word', 'coalesce_retire', 'other_copy_survives')
+                markers = ('other_copy_survives',) if export_before else ('latest_word', 'coalesce_retire', 'other_copy_survives', 'no_phantom_retire')
                 matched = (rc != 0 and any(m in log_text for m in markers) and 'failed' in log_text) if expected_failure else rc == 0
                 if matched and not expected_failure:
                     wave = (out / (label + '.vcd')).read_text()
@@ -415,7 +442,7 @@ endmodule
                 results.append({'depth': depth, 'scenario': scenario, 'negative': negative,
                                 'rc': rc, 'matched': matched})
                 (out / 'results.json').write_text(json.dumps(results, indent=2))
-                if not matched:
+                if not matched and not os.environ.get('WT_FIXUP_NOASSERT'):
                     raise RuntimeError(f'fixup outcome mismatch: {label}')
     print('WT_FIXUP_COPY ' + json.dumps(results))
 

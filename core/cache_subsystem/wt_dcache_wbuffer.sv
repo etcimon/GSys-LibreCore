@@ -217,7 +217,7 @@ module wt_dcache_wbuffer
   logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] rd_hit_oh_d, rd_hit_oh_q;
   logic check_en_d, check_en_q, check_en_q1;
   logic full, dirty_rd_en, rdy;
-  logic rtrn_empty, evict;
+  logic rtrn_empty, evict, evict_base;
   logic [CVA6Cfg.WtDcacheWbufDepth-1:0] ni_pending_d, ni_pending_q;
   logic wbuffer_wren;
   logic free_tx_slots;
@@ -226,6 +226,7 @@ module wt_dcache_wbuffer
   logic [DCACHE_CL_IDX_WIDTH-1:0] wr_cl_idx_q, wr_cl_idx_d;
 
   logic ack_wr_active;
+  logic ack_wr_sel, ack_wr_lost;
   logic rtrn_inv;
   logic [CVA6Cfg.WtDcacheWbufDepth-1:0][DCACHE_CL_IDX_WIDTH-1:0] wtag_comp;
 
@@ -263,6 +264,7 @@ module wt_dcache_wbuffer
   // When CVA6Cfg.WtDcacheFixupDepth is 0 the block is empty and all fixup
   // signals are tied off: the legacy VoidKeepEn path is preserved bit-identical.
   logic                       fixup_push, fixup_full, fixup_evict, fixup_match;
+  logic                       fixup_export_push;
   logic [CVA6Cfg.PLEN-1:0]    fixup_paddr_push;
   logic [(CVA6Cfg.XLEN/8)-1:0] fixup_be_push;
   logic [CVA6Cfg.XLEN-1:0]    fixup_data_push;
@@ -359,6 +361,7 @@ module wt_dcache_wbuffer
       logic                                          fixup_bypass_valid_q, fixup_bypass_valid_d;
       logic                                          fixup_coalesced, fixup_active_coalesced;
       logic                                          fixup_alloc, fixup_pop, fixup_dead, fixup_active_dead;
+      logic                                          fixup_active_valid;
 
       function automatic fixup_entry_t merge_fixup(
           input fixup_entry_t prior,
@@ -390,7 +393,12 @@ module wt_dcache_wbuffer
       assign fixup_dead        = (fixup_cnt != '0) && (fixup_q[fixup_head].be == '0);
       assign fixup_active_dead = fixup_bypass_valid_q ? (fixup_bypass_q.be == '0) : fixup_dead;
       assign fixup_alloc       = fixup_push && !fixup_coalesced && (fixup_cnt < FixupDepthCnt);
-      assign fixup_pop         = !fixup_bypass_valid_q && !fixup_active_coalesced &&
+      // The active entry exists only while the bypass slot or the FIFO holds
+      // one. Without this guard the state machine tag-checked and "retired" the
+      // stale array slot at fixup_head after the queue drained, writing an old
+      // copy over newer L1 data and wrapping the count below zero.
+      assign fixup_active_valid = fixup_bypass_valid_q || (fixup_cnt != '0);
+      assign fixup_pop         = !fixup_bypass_valid_q && (fixup_cnt != '0) && !fixup_active_coalesced &&
                                  ((fixup_state_q == FIXUP_RETIRE && fixup_wr_ack) ||
                                   (fixup_state_q == FIXUP_PEND && fixup_dead));
       always_comb begin
@@ -430,7 +438,7 @@ module wt_dcache_wbuffer
       assign fixup_rd_tag      = paddr_tag;
       assign fixup_rd_idx      = paddr_cl_idx;
       assign fixup_rd_off      = paddr_offset;
-      assign fixup_rd_req      = (fixup_state_q == FIXUP_PEND) && !refill_hit_q &&
+      assign fixup_rd_req      = (fixup_state_q == FIXUP_PEND) && fixup_active_valid && !refill_hit_q &&
                                  !fixup_active_dead &&
                                  !(|tocheck) && !check_en_q && !check_en_q1;
 
@@ -563,7 +571,7 @@ module wt_dcache_wbuffer
           end
 
           FIXUP_CHECK: begin
-            if (fixup_active_dead) begin
+            if (fixup_active_dead || !fixup_active_valid) begin
               fixup_state_d = FIXUP_PEND;
             end else if (fixup_check_en_q1) begin
               if (|fixup_hit_oh_q) begin
@@ -579,9 +587,9 @@ module wt_dcache_wbuffer
           end
 
           FIXUP_RETIRE: begin
-            if (fixup_active_dead) begin
-              // Invalidated before retire: drop the entry without touching the
-              // write/inv ports or PMU pulses.
+            if (fixup_active_dead || !fixup_active_valid) begin
+              // Invalidated (or gone) before retire: drop the entry without
+              // touching the write/inv ports or PMU pulses.
               fixup_state_d = FIXUP_PEND;
             end else if (fixup_bypass_valid_q) begin
               // Full-queue fallback: a tag hit must become an explicit
@@ -677,7 +685,10 @@ module wt_dcache_wbuffer
         end
         // Same-cycle VOID ACK: wbuffer_d already cleared the entry, so the
         // registered FIFO/bypass is a cycle late. Present the push as newest.
-        if (fixup_push) begin
+        // The export is keyed on the grant-independent candidate (see p_buffer)
+        // so this forwarding cone never contains wr_ack_i; on a held ACK it
+        // merely repeats a word the wbuffer entry still forwards itself.
+        if (fixup_export_push) begin
           for (int i = FixupForwardDepth-1; i >= 0; i--)
             if ((|fixup_wbuffer_o[i].valid) && fixup_wbuffer_o[i].wtag == wbuffer_q[rtrn_ptr].wtag)
               slot = i;
@@ -824,7 +835,9 @@ module wt_dcache_wbuffer
     logic fixup_hold;
     tx_stat_d = tx_stat_q;
     evict     = 1'b0;
+    evict_base    = 1'b0;
     ack_wr_active = 1'b0;
+    ack_wr_sel    = 1'b0;
 
     // SL-W hold: if the post-ACK fixup queue is full and this ACK'd word is a
     // fixup candidate, do not free the TX or pop the return FIFO until a slot
@@ -854,16 +867,23 @@ module wt_dcache_wbuffer
     // Always free TX when a store ACK is present. Holding tx_stat[].vld until
     // tag-check / wr_ack completes deadlocks load misses (tx_rdwr_collision).
     //
-    // When the line is already tag-checked and present, write clean BE into L1
-    // best-effort (do not wait on wr_ack — that stalls the return FIFO under
-    // load pressure). Always pop the rtrn FIFO; `if (evict)` clears txblock/valid.
-    // Memory already holds the written bytes (write-through).
-    // VOID-kept ecall objects wr_req on the later tag-check (check_wr), not here.
+    // When the line is already tag-checked and present, write clean BE into L1.
+    // The word write is complete only when the array port grants it: in a
+    // cycle owned by a cacheline write (refill or coherence invalidation of any
+    // index) wt_dcache_mem neither acks nor denies, and a fixup/VoidKeep write
+    // may take the port with priority. A word that memory already holds but L1
+    // silently dropped leaves a valid stale line, so the return FIFO and the TX
+    // slot are held for that cycle and the write retried (ack_wr_lost below);
+    // the read-collision case still invalidates the line inside the array.
+    // Unchecked or missing words pop immediately (memory holds them; the fixup
+    // queue retains a copy). VOID-kept ecall objects wr_req on the later
+    // tag-check (check_wr), not here.
     if (!rtrn_empty && !fixup_hold) begin
       if (tx_stat_q[rtrn_id].vld) begin
         tx_stat_d[rtrn_id].vld = 1'b0;
         if (!rtrn_inv && !check_wr && wbuffer_q[rtrn_ptr].checked && (|ack_be) &&
             (|wbuffer_q[rtrn_ptr].hit_oh)) begin
+          ack_wr_sel    = 1'b1;
           ack_wr_active = 1'b1;
           wr_data_be_o  = ack_be;
           wr_idx_o      = wr_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
@@ -873,6 +893,7 @@ module wt_dcache_wbuffer
           wr_req_o      = wbuffer_q[rtrn_ptr].hit_oh;
         end else if (!rtrn_inv && !check_wr && check_en_q1 && (check_ptr_q1 == rtrn_ptr) &&
                      (|ack_be) && (|rd_hit_oh_q)) begin
+          ack_wr_sel    = 1'b1;
           ack_wr_active = 1'b1;
           wr_data_be_o  = ack_be;
           wr_idx_o      = wr_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH];
@@ -882,8 +903,14 @@ module wt_dcache_wbuffer
           wr_req_o      = rd_hit_oh_q;
         end
       end
-      // Always pop: a stuck return ID deadlocks the store-ACK path.
-      evict = 1'b1;
+      // Pop unless the ACK-time L1 write below loses the port this cycle: a
+      // stuck return ID would deadlock the store-ACK path, but the loss is
+      // bounded (one cacheline-write or fixup/VoidKeep cycle at a time).
+      // evict_base is the grant-independent view used by the fixup-queue push
+      // decision (see p_buffer), so that decision does not sit in the
+      // wr_ack -> pop -> forwarding-export -> lookup -> wr_ack cone.
+      evict      = 1'b1;
+      evict_base = 1'b1;
     end
 
     // SL-W fixup queue retire (middle priority).
@@ -906,6 +933,15 @@ module wt_dcache_wbuffer
       wr_data_o     = wbuffer_q[check_ptr_q1].data;
       wr_user_o     = wbuffer_q[check_ptr_q1].user;
       wr_req_o      = rd_hit_oh_q;
+    end
+
+    // A selected ACK-time word write that did not own a granted port this cycle
+    // keeps its TX slot and return-FIFO entry; the same word is offered again
+    // next cycle (the entry stays checked, so the direct path is taken).
+    ack_wr_lost = ack_wr_sel && !(ack_wr_active && wr_ack_i);
+    if (ack_wr_lost) begin
+      tx_stat_d[rtrn_id].vld = tx_stat_q[rtrn_id].vld;
+      evict = 1'b0;
     end
 
     for (int unsigned t = 0; t < CVA6Cfg.DCACHE_MAX_TX; t++) begin
@@ -1104,6 +1140,7 @@ module wt_dcache_wbuffer
     req_port_o.data_gnt = 1'b0;
     wbuffer_wren        = 1'b0;
     fixup_push          = 1'b0;
+    fixup_export_push   = 1'b0;
     fixup_evict         = 1'b0;
     fixup_paddr_push    = '0;
     fixup_be_push       = '0;
@@ -1135,7 +1172,13 @@ module wt_dcache_wbuffer
 
     // once TX write response came back, we can clear the TX block. if it was not dirty, we
     // can completely evict it - otherwise we have to leave it there for retransmission
-    if (evict) begin
+    //
+    // The candidate decision and the forwarding export use evict_base (no
+    // wr_ack_i in their cone: wr_ack -> pop -> export -> lookup -> wr_ack was
+    // a combinational cycle); the queue itself is only pushed when the ACK
+    // really pops (evict), so a held ACK cannot coalesce into a retiring head
+    // every cycle and starve it.
+    if (evict_base) begin
       // Decide whether this ACK'd word is a candidate for the SL-W fixup queue.
       // It must be unchecked, not already tag-checked this cycle, and not held
       // by the legacy VoidKeep window.
@@ -1152,7 +1195,8 @@ module wt_dcache_wbuffer
                         (wr_paddr[31:12] == VoidKeepTag)))) &&
                     (!fixup_full || fixup_match);
       if (fixup_evict) begin
-        fixup_push       = 1'b1;
+        fixup_export_push = 1'b1;
+        fixup_push        = evict;
         // Reconstruct PA as {wtag, byte-zeros}. wr_paddr is `{3'b0, wtag<<3}`,
         // which drops the high tag bits; fixup_wtag() then misses the load.
         fixup_paddr_push = {wbuffer_q[rtrn_ptr].wtag,
@@ -1161,6 +1205,8 @@ module wt_dcache_wbuffer
         fixup_data_push  = wbuffer_q[rtrn_ptr].data;
         fixup_user_push  = wbuffer_q[rtrn_ptr].user;
       end
+    end
+    if (evict) begin
       for (int k = 0; k < (CVA6Cfg.XLEN / 8); k++) begin
         if (tx_stat_q[rtrn_id].be[k]) begin
           wbuffer_d[rtrn_ptr].txblock[k] = 1'b0;

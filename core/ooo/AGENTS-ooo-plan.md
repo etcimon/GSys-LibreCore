@@ -1278,6 +1278,364 @@ isolated route and remain an obligation. Writer acquisition is conservative (mor
 index aliasing unchanged). The signature still has no clear; the fixup queue's tag-miss retention
 is now bounded by invalidation, not by time.
 
+### T7j — precise held-secondary verdict; SMT2/OpenSBI re-qualified on the current tree (2026-09-25)
+
+**Verdict precision.** The testharness multi-core verdict assumed every core runs the bootrom
+at reset; on multi-core SMT targets `g6lc_cluster` clock-holds secondary cores until an IPI or
+200000 cycles, so single-core-scope programs (`mc_boot_sanity`, `mc_hart1_alive`,
+`mc_shared_line_sibling_hart` — hart 1 is core 0's sibling) were forced to exit 127 and their
+own verdicts were hidden. `ariane_testharness.sv` now probes the cluster's release signal for
+each secondary (`gen_hold_probe`, only elaborated under the cluster's own `BOOT_HOLD` condition):
+a test ending while every silent core is still held exits **125** with a `[mc_verdict] HELD`
+line; a released-but-silent core keeps 127 and 126 stays for a core that stopped; the program's
+own exit code is always printed. `run_mc_int2_review.py` classifies `held-secondary` and passes
+a subset-scope program only when its program exit is 0, its expected cores retired and none of
+them is held (self-test 14 cases). `+mc_verdict_fault` on the cross-core program still yields
+127/`incomplete` (`cross_core_fault_control`), so 125 cannot be produced by injected silence.
+`release_probe` is declared a probe with no completion path: expected `timeout`, both cores
+retired, zero hart-2 faults.
+
+`ooocoh-mc-initial-r2` (int2 rebuilt with the testbench change, all 8 expectations matched):
+cross-core shared line pass 1098; sibling-hart/boot-sanity/hart1-alive pass via HELD with
+program exit 0 at 741/339/393; fault control `incomplete` 127; boot_release pass 775,
+boot_negative fail(1) 775; probe timeout with both cores retired. `ooocoh-mc-visibility-r3`:
+observer-off/on retirement hashes equal, causal chain unchanged.
+
+**SMT2/OpenSBI on the current tree (isolated, experimental label).** `run_mc_int2_review.py
+REVIEW_MC_BUILD_ONLY=1` builds any target from the seed + overlay at `--threads 1` with the
+pinned `split-counter.vlt` control, records original/review source hashes (956 SV files
+identical to HEAD) and the C++/bootrom hashes against the local tree (`local_hashes.py`), and
+writes the manifest `run_opensbi_source_review.py` accepts for an experimental model. The
+frozen `opensbi-source-dual-v3-20260919` strict-dual profile then ran on both current-tree
+models:
+
+| Model | Result | Cycles | retired h0 / h1 | Prior green |
+|---|---|---:|---:|---|
+| `g6lc64_smt2` (`ooocoh-smt2-osbi-r1`) | pass, strictDual | 12,764,538 | 333,591 / 8,932,410 | 12,765,628; 333,635 / 8,932,406 |
+| `g6lc64_smt2_ooo_int` (`ooocoh-smt2ooo-osbi-r1`) | pass, strictDual | 10,704,402 | 8,792,688 / 465,559 | 10,696,498; 8,792,612 / 465,543 |
+
+Both are `experimentalModel: true, protectedAnchor: false` — the anchor claim stays with the
+proxy-attested mirror build. Cycle/retirement deltas are ≤0.07 %; the anchor's hart-0 trace
+first differs from the prior anchor at line 1,504,570 as a hart interleaving shift of the same
+instruction block, not a different instruction stream. This re-covers the in-order WT
+(`g6lc64_smt2`) path after the T7i fixup-lifetime change with a full OpenSBI boot, though the
+DI mini suite itself has not been re-run.
+
+**Two-core OpenSBI profile (prepared).** `corev_apu/bootrom/ariane-ooo-int2.dts` (4 `cpu@`,
+cpu-map core0/core1 × thread0/1, 4-hart CLINT/PLIC, L2 node, integer ISA, zawrs unadvertised;
+`dts_to_dtb.py` plat_hc 4, binding validator FAIL=0), an N-hart strict payload block
+(`G6LC_STRICT_HARTS`), and a shape-parameterized `run_opensbi_source_review.py` (harts/cores/
+DTS/config/ISA, per-core progress scopes, all-cores verdict, wall up to 4 h for cores>1; unit
+tests added). The first `g6lc64_ooo_int2` firmware run is recorded in T7k.
+
+### T7k — first two-core OpenSBI run: platform enumerates, coldboot lands on core 1 and corrupts (open)
+
+`ooocoh-int2-osbi-r2` (current-tree `g6lc64_ooo_int2` model `ooocoh-int2-build-r1`, fresh
+firmware profile: `ariane-ooo-int2.dts`, `-DG6LC_STRICT_HARTS=4`, `rv64imac_zicsr_zifencei`,
+OpenSBI 455de672 with the recorded platform patches): **timeout at the 24 M-cycle cap**, no
+tohost, `retiredByHart` 0:464,113 1:643,876 2:12,197,822 3:405,231, both cores retired.
+
+What the traces establish (the per-core `trace_rvfi_hart_*.dasm` interleave both SMT harts, so
+only memory-anchored facts are used): hart 0 won the fw_base relocation lottery (its `amoadd`
+on `_relocate_lottery` returned 0) and zeroed BSS; `fw_platform_init`'s parse of the four-cpu
+FDT took longer than the 200000-cycle boot hold, so core 1 woke by timeout, its harts joined
+`_wait_for_boot_hart`, and **hart 2 won `coldboot_lottery`** (core 1's `amoswap` returned 0,
+core 0's returned 1). Hart 2 ran `init_coldboot` through `wake_coldboot_harts` (store of 1 to
+`coldboot_done`), so harts 0, 1 and 3 entered the warm `sbi_hsm_init` hart-wait loop
+(`0x8000f20e`, all three parked there at the end). Hart 2 then continued the cold path and took
+`LD_ADDR_MISALIGNED @ fdt_find_match+0x22` (`c.ld a2,16(s1)` with a corrupted `s1`), after which
+`_trap_handler` re-traps forever: `csrr t0,mstatus` at +0x08 succeeds, the same encoding at
++0x42 (after a `c.sdsp` through a garbage `sp`) raises ILLEGAL_INSTR — 653,461 times. `ipi_dev`
+was never set (cold IPI init not reached), so no HSM start could follow and the payload never
+executed on any hart.
+
+Reading: the two-core platform contract holds (4 harts enumerated, both cores boot, coherence of
+the shared boot flags works — the warm harts observed `coldboot_done`), and the first defect is a
+register/CSR-state corruption on core 1 while its sibling spins in hart-wait — a pattern the
+single-core SMT2-over-OoO target survives, so the difference is core 1 itself (hart-id base 2,
+boot-hold release, hub-side traffic). Secondary observation: the boot hold's timeout fallback is
+shorter than a four-cpu FDT walk, so the hold no longer keeps coldboot on core 0; the IPI path is
+the robust release, the constant is not. Next step (in flight): a hart-tagged `[smt-flow]`
+retire/wb/alloc stream (`scope=%m` added to the sim-only display lines in `scoreboard.sv`) to
+find where `s1` acquired its value and why the second CSR read is illegal. No RTL, firmware or
+DTS change is made on this evidence alone.
+
+### T7l — root cause: a store ACK's L1 word write is dropped when the array port is busy (repaired)
+
+**Localization.** The hart-tagged stream (`ooocoh-int2-osbi-flow-r1`, `[smt-flow]` with
+`scope=%m`) showed the corrupted `s1` was *loaded from the stack*: `c.ldsp s1,24(sp)` at
+`fdt_node_offset_by_compatible+0x8a` returned 0x2 although the prologue's `sd s1,24(sp)` had
+written 0x80022af0 to 0x80047e58 ~650 instructions earlier, and the neighbouring word
+0x80047e50 read back its pre-store value too — the whole L1 line was stale. The mem-watch
+probe (`run_mem_watch_probe.py`, `+smt_mem_watch=80047e58`, `ooocoh-int2-memwatch-r1`) then
+gave the memory-side sequence on core 1: store `0x2` (line not resident, checked-miss ACK),
+refill brings the line in with `raw=0x2`; store `0x80022af0` (line resident, loads forward from
+the wbuffer meanwhile); **ACK at cycle 1567417: `wt_word idx=e5 off=8 ways=01 ack=0 denied=0`,
+`wt_ack ... checked=1 hit=01 ack_active=1 wr_req=01 wr_ack=0 fix_push=0`** — the word write was
+requested, the array granted nothing (a cacheline write — refill or coherence invalidation of
+any index — owned the port that cycle), no invalidation and no fixup entry followed, and the
+return FIFO popped; the next load hit L1 with `raw=0x2`. The CSR anomaly in the trap handler is
+downstream: the handler ran with a stack pointer restored from the same stale frame.
+
+**Mechanism.** `wt_dcache_wbuffer.sv` `p_tx_stat` wrote a checked-hit ACK word into L1
+"best-effort" — `wr_req_o` raised, TX freed and return FIFO popped whether or not `wr_ack_i`
+was granted (a deliberate departure from upstream, which waits for the grant, made to avoid a
+`tx_rdwr_collision` stall). `wt_dcache_mem.sv` `p_bank_req` grants nothing in a
+`wr_cl_vld_i & |wr_cl_we_i` cycle (the read-collision case, `wr_denied`, still invalidates the
+line and is safe). A lost write leaves a *valid* stale line: the write-through invariant "L1
+never holds an older copy of a written word" is broken. Single-core WT sees this only when a
+refill lands in the ACK cycle; the two-core cluster adds one array-port cycle per delivered
+coherence invalidation, which is why the promoted target exposed it first.
+
+**Repair** (`wt_dcache_wbuffer.sv`): `ack_wr_sel`/`ack_wr_lost` — a selected ACK-time word
+write that did not own a granted port this cycle (port busy, or taken by a fixup/VoidKeep write)
+keeps its TX slot and return-FIFO entry and is offered again next cycle; the entry stays
+checked so the direct path is taken. The hold is bounded by consecutive cacheline-write or
+fixup cycles; unchecked/missing words still pop immediately (memory holds them; the fixup
+queue retains a copy), and `rtrn_inv` during a held cycle drops the word correctly.
+
+**Evidence.** `WT_FIXUP_INV` scenario 7 (`ack_hold`, `ack_landed`: checked-hit ACK while the
+port is withheld for six cycles; the word must remain in the wbuffer and land once the port
+frees) passes at depths 0/2/4 with negatives (`ooocoh-wt-ackhold-r1`, 38/38); the `besteffort`
+mutation (drop restored) fails exactly scenario 7 at every depth and nothing else
+(`ooocoh-wt-ackhold-mut-r1`, 21/21 matched).
+
+**Second defect found by the repaired bench: phantom fixup retires.** With the ACK held instead
+of coalesced, copy-suite scenario 3 (`latest_word`) failed: after the fixup queue had drained,
+its state machine kept tag-checking and "retiring" the stale array slot at `fixup_head`
+(`fixup_rd_req` had no non-empty guard; `fixup_pop` then wrapped `fixup_cnt` below zero), so an
+old retained word was rewritten into L1 every few cycles whenever its line was resident — over
+the newer word the direct ACK path had just written. The waveform of the *previous* passing run
+shows the same endless 0x13/0x12 retire cycle; it passed only because the head had coalesced
+the newer word. This is pre-existing (the SL-W queue's introduction), independent of
+coherence, and a second stale-L1 mechanism: any later store to a word the queue once held is
+overwritten by the phantom unless it happens to coalesce. Repair: `fixup_active_valid`
+(bypass valid or count non-zero) gates `fixup_rd_req` and `fixup_pop`, and CHECK/RETIRE fall
+back to PEND when the entry is gone. Evidence: copy suite 20/20 with a new `no_phantom_retire`
+assertion in every scenario and a new scenario 4 (VOID ACK coalescing into the head in the very
+cycle its retire is granted — the race the `retire` control needs now that a checked-hit ACK
+can no longer coalesce mid-retire); mutations `phantom` (guard forced true) and `retire`
+(coalesce guards removed) fail exactly their scenario; `capacity`/`bytes`/`export` controls
+still fail as before. Inv suite 38/38 with `drop`/`retain`/`count`/`besteffort` each failing
+only their scenario; NC suite 24/24 (`ooocoh-wt-{inv,nc,copy}-final-*`).
+
+**Integration.** `ooocoh-int2-osbi-r4` (ACK hold only, phantom still present): the stale stack
+line no longer occurs and hart 0 becomes the coldboot hart (15.8 M retirements, console lock
+traffic), but core 0's hart 1 later traps in the same `_trap_handler+0x42` loop with a garbage
+`sp` (the phantom mechanism writing an old stack word is the candidate) and both core-1 harts
+stop inside the `coldboot_lottery` `amoswap` (an AMO that never returns — exit 126). The final
+models (`ooocoh-int2-build-r4`, `ooocoh-smt2-build-r4`, `ooocoh-smt2ooo-build-r4`) carry both
+repairs; `ooocoh-int2-osbi-r5` on the int2 one reproduces r4 exactly (identical retirement
+counts), so the remaining hang is independent of the fixup queue — recorded in T7m.
+
+### T7m — third defect: an atomic issued out of order deadlocks the store unit (repaired)
+
+**Localization.** The stuck-handshake instrument added to the visibility model (`+mc_vis_stuck=N`
+reports any AXI/invalidation channel, wbuffer hold, denied word write, miss-unit drain or
+commit head held for N cycles, once) showed no memory-side stall at all on core 1
+(`ooocoh-int2-stuck-r1/r2`); the core-level report (`ooocoh-int2-stuck-r3`, t=1,642,519) is
+exact: commit head 0 = `sd a5,-32(s0)` @`atomic_xchg+0x10`, `valid=0` (never executed), head 1 =
+the younger `ld a5,-32(s0)` already `valid=1`; the store unit's one-entry AMO buffer is full
+(`amo_buffer_ready=0`) with the still-younger `amoswap.d.aqrl` (`amo_addr=0x80042000`,
+`coldboot_lottery`), `amo_valid_commit=0`, `no_st_pending=1`, write buffer empty. The issue
+queue issues stores out of program order (T6 design: the LSQ hold-to-commit reservation replaced
+the program-order store rule), so the AMO — whose operands were ready first — entered the store
+unit ahead of the older store; `st_ready = store_buffer_ready & amo_buffer_ready` then refuses
+the older store, which can never execute, so the AMO never reaches commit and the buffer never
+drains. Both core-1 harts stop in `atomic_xchg`; the same shape can hit any target with the OoO
+issue queue, the single-core boots merely never met the timing.
+
+**Repair** (`core/ooo/g6lc_iq.sv`): an AMO (`fu==STORE && is_amo(op)`) issues only at the
+commit head, the rule fence-class system ops already follow. At commit the AMO waits for the
+drained store buffer anyway, so the head rule adds no wait it would not already pay; plain
+stores keep out-of-order issue. Evidence: IQ review scenario 10 `IQ_AMO_HEAD` (AMO withheld
+until `commit_ptr` reaches it, plain store unaffected) with its `+oracle_negative` arm in all
+four IQ geometries, 114/114 (`ooocoh-iq-amohead-r3`); the gate-removed mutation fails scenario 10
+first (`ooocoh-iq-amohead-mut-r1`).
+
+**Structural check caught by the single-core gate.** The active-target synthesis
+(`g6lc64_smt2_ooo_int`, `check -assert`) reported 18 combinational loops after the ACK hold:
+`wr_ack_i → evict → fixup_push → same-cycle forwarding export → wt_dcache_mem hit → ctrl →
+rd_req → rd_ack → wr_ack_o`. The int2 cluster gate had passed the same check, so the loop was
+only visible on the `cva6` top. Cut: the fixup candidate decision and the forwarding export are
+keyed on `evict_base` (grant-independent), the queue push itself on `evict` — a held ACK then
+neither pushes nor starves a retiring head (the first attempt, pushing on `evict_base`, livelocked
+copy scenario 3: every retry re-coalesced into the head and suppressed its pop). Gates after the
+cut: active lint 24 / synth 1 with `0 problems`, int2 24/7 with `0 problems`
+(`ooocoh-loopfix-gate-*`); WT leaf suites unchanged (`ooocoh-wt-*-loopfix-r2`, copy 20/20, inv
+38/38, nc 24/24, mutations `besteffort`/`export`/`retire`/`phantom` each caught).
+
+**Firmware after the AMO rule** (`ooocoh-int2-osbi-r6`, IQ rule + pre-cut wbuffer, behaviour
+identical to the cut): the coldboot lottery completes, both cores run (hart 2 17.6 M, hart 0
+3.1 M retirements) and the payload issues `sbi_hart_start`. The remaining stop is a single
+mechanism: the `ecall` enters `_trap_handler` with sane `sp`/`tp`/`mscratch`, `csrr mstatus`
+(+0x8), `csrrw mscratch` (+0x38) and `csrr mepc` (+0x3c) succeed, and `csrr t0, mstatus` at
+`+0x42` raises ILLEGAL_INSTR (tval `0x300022f3`, priv M). Each re-entry lowers `sp` by 0x148, so
+the handler frames walk down through the scratch areas into BSS (`0x800420e8` receives the
+handler PC), which is what later made hart 0's `generic_extensions_init` load misaligned — the
+garbage-`sp` traces of r2/r4/r5 were this walk, not their cause.
+
+### T7n — fourth defect: the OoO CSR-buffer credit ignored the allocation in flight (repaired)
+
+**Discrimination.** CSR-side probes (`csr_regfile` exception flags, `csr_buffer` allocation /
+commit / table view, issue-port view; `ooocoh-int2-csrprobe-r2/r3`) at the failing commit
+(t=17,738,401, core 1): the CSR regfile receives **address 0x000** (`read_access_exception`,
+priv M, not a decode illegal); the buffer has no entry for the committing tid, and
+`csr_commit_i` is not asserted for an excepting op, so the existing "commit without entry"
+`$error` could not fire. The issue-side trace shows three CSR acks in consecutive cycles
+(`csrrw mscratch` tid 7, `csrr mepc` tid 0, `csrr mstatus` tid 2) with `csr_ready=1` for all
+three, then `CSRALLOC tid=2 ... ready=0 tab={tid7 valid, tid0 valid}` — the third allocation
+finds both entries taken and is dropped. Cause: `csr_ready_o = free(tab_q) + commit_release
+>= 1` is read by the issue decision one cycle before the acked op's `csr_valid_i` reaches the
+table, so the op acked in cycle N is still allocating (`csr_valid_i` high, not yet in `tab_q`)
+when cycle N+1's decision reads the credit; with one free entry both are acked. A bare M-mode
+replay of the prologue (`mc_csr_prologue.S`, 4000 iterations, `ooocoh-csr-prologue-r1`) does not
+reproduce the failure. That does not establish that trap context is necessary: the causal
+condition is consecutive pipelined admissions exhausting the table while retirement is delayed.
+Earlier single-core boot passes do not qualify this credit boundary.
+
+**Repair** (`core/csr_buffer.sv`): `csr_ready_o = free + commit_release >= 1 + csr_valid_i`
+(the in-order depth-1 branch already counted `csr_valid_i`; the OoO branch did not), plus a
+sim-only `$error` when a presented CSR finds no entry. Evidence: csrbuf review scenario 5
+`CSRBUF_PIPE` (A allocating with the table empty leaves one credit; B allocating with A resident
+leaves none; both then commit their own address) with its negative arm, and the reverted-credit
+mutation failing scenario 5 (`ooocoh-csrbuf-pipe-r1`: 12/12 expected outcomes;
+`ooocoh-csrbuf-pipe-mut-r1`: scenarios 0–3 pass, scenario 5 fails `CSRBUF_PIPE`).
+
+**Review and boundary validation.** The required inequality is `free + matched_commit >=
+arriving + 1`: reserve the arriving request before promising capacity to next cycle's request.
+Cancellation credit is conservatively delayed until registered; flush clears both stored entries
+and the current arrival. No table expansion, new state, ISA/DTS change or firmware workaround
+is required. The ready cone gains the registered CSR-valid input; full timing closure remains
+unmeasured. The existing commit-only assertion cannot detect this loss when the resulting CSR
+exception suppresses commit, so the allocation-loss assertion is retained.
+
+`ooocoh-csrbuf-boundary-r1` passes 20/20 expected outcomes with the unchanged repaired RTL
+(SHA256 `94fa4776c977717afa7dcc7b369e2d0d229a29fb169ce9044d198856caa90a7f`).
+Added scenarios 6–9 cover same-cycle commit/allocation, cancellation/allocation,
+flush/full-table arrival, and unmatched commit credit, each with a negative oracle.
+The in-order identity test passes unchanged.
+
+**Interrupted qualification, not success.** Retrieved `ooocoh-csrbuf-gate-{int2,active}-r1`
+artifacts contain that same CSR source hash. Lint passes at 24 warnings each; synthesis child
+rc=143 makes both synthesis verdicts false despite zero reported errors. Defaults complete at
+lint 8/54 and synth 32/5. `ooocoh-int2-osbi-r7` on `ooocoh-int2-build-r7` stops at 3,534,013
+cycles, before the former failing sequence; the strict runner records `outcome=incomplete`,
+`strictDualPassed=false`, and unknown termination. Its tohost-zero banner is not firmware
+completion evidence. Full four-hart completion and finished OoO synthesis remain open.
+
+### T7o — source-contract review and resumed four-hart qualification
+
+The coding philosophy (623 lines), SMT2 development logics (688), firmware heuristics (867),
+reasoning-pattern workflow (693), and runtime-learning guide (586) were read in full before
+further qualification. The legacy comparison is evidence about failed approaches, not a reason
+to re-enable A: `core/fetch_A/smt_legacy/frontend.sv` contains CSR-slot exceptions and instruction
+fabrication; active `core/Flist.fetch_B` selects B, and `SMT-LEGACY.md`'s 2026-09-18 boundary
+forbids retired paths in the active source list. Current PC banking is retirement/redirect owned
+under B, unlike A's switch-time snapshot/fallback. The historical guide's A/B blame table is
+therefore a hypothesis-ranking aid, not a current routing proof or permission to compile A.
+
+The source obligation behind the CSR failure is independent of firmware: each accepted request
+must retain its identity and reserved capacity until completion or cancellation. OpenSBI's
+`TRAP_SAVE_AND_SETUP_SP_T0` and `TRAP_SAVE_MEPC_MSTATUS` witness closely spaced CSR operations
+around a delayed stack access. The captured instruction and immediate remain correct through
+issue; allocation loss at the CSR table, not realignment or privilege decoding, is the observed
+first broken promise. The repaired credit and its restored-defect control check that promise
+before the firmware gate. A passing bare prologue does not eliminate the missing pipelined-credit
+cofactor. No PC, register-value filter, trap suppression or firmware workaround is introduced.
+
+Capacity preflight: 12 CPUs (affinity 0–11), about 114 GiB available RAM and 112 GiB disk free.
+Independent archive gates ran alongside the pinned single-thread four-hart model; matched SMT2
+models compiled with eight workers, serially relative to one another. Full-model simulations stay
+serialized under the overlap guard; compilation parallelism is not simulator threading. The new
+SMT2 models are `ooocoh-smt2-build-r6` and `ooocoh-smt2ooo-build-r7`, both rc=0 and qualification-only.
+
+Gate retry r2 exposed a wrapper contract mismatch: `shell --timeout 0` still selects the 60-second
+default, despite the help text. Those attempts remain recorded. With explicit `--timeout 5400`,
+`ooocoh-csrbuf-gate-int2-r3` completes lint 24 / synth 7 and
+`ooocoh-csrbuf-gate-active-r3` completes lint 24 / synth 1, zero errors. These reuse the immutable
+captured source archives; the active-core archive retains its documented qualification overrides.
+The 75-test proxy/strict-verdict suite passes under WSL; native Windows invocation fails when its
+Bash fixtures receive Windows temporary paths, so that invocation is not oracle evidence.
+Four-hart DTS validation remains FAIL=0, WARN/GAP=1 for the deprecated CLINT compatible string.
+The unchanged repaired model's strict firmware run is `ooocoh-int2-osbi-r8`; its final verdict
+and the matched SMT2 firmware results must be recorded before closing qualification.
+
+### T7p — completed secondary-core payload was not routed to testbench termination
+
+`ooocoh-int2-osbi-r8` on the repaired CSR model reports four harts and reaches the natural
+OpenSBI console/domain/HSM path. Both physical-core traces contain all four S-mode `strict_seen`
+stores, and hart 2 writes success (`1`) to the shared tohost address. Its tracer reports completion
+at 17,777,952 cycles, but the outer harness continues to the 24,000,000-cycle cap; the strict
+runner correctly retains `outcome=timeout`. The repeated `_trap_handler+0x42` illegal is absent.
+Final `mcause`/`mtval` values retain feature-probe history; they are not evidence of a new illegal
+at the `mepc` that OpenSBI has since set for supervisor entry.
+
+The owning interface is tracer→testbench completion, not the core. Core 0 alone drives
+`tracer_exit`; secondary RVFI tracers were intentionally observer-only when that logic was
+introduced. That policy is insufficient for a shared tohost written by an arbitrary elected
+boot hart. Source-extracted leaf `ooocoh-exit-before-r1` passes core-0 completion and fails
+core-1 completion (`MC_EXIT_ROUTE got=0`). The testbench now collects per-core completion words
+and selects a valid done word, with failure preferred over simultaneous success. The existing
+held/silent/hung verdict gates still qualify the selected completion. Spike tandem retains its
+original primary-core path. Historical observer-only comments describe the prior policy;
+this section records the new non-tandem shared-tohost contract.
+
+`ooocoh-exit-after-r1` passes 60/60 expected outcomes at 1/2/4 physical cores, including both
+failure-priority directions, ignored code bits without done, no completion, and held/silent/hung
+controls. `mc_smt2_boot_release.S` gains an `EXIT_ON_SECONDARY` test variant, leaving its default
+behavior unchanged. `ooocoh-int2-build-r8` builds with 24 warnings / zero errors; comparing its
+956 source entries against build-r7 changes only `corev_apu/tb/ariane_testharness.sv`. Model hash:
+`5e01f24ecf523cbe39ae165bda5992caaa0977069b5e9affaf7b22ff28ec8fe5`.
+This is simulation termination routing, with no synthesized-core state, clock, DFT, PMU, ISA,
+DTS or firmware change. The old timeout is preserved; qualification requires a fresh strict run
+that terminates before the cap, not a relaxed classifier or a retroactive pass label.
+
+The full-model secondary-publisher pair times out at 10,013 cycles before the fix
+(`ooocoh-exit-secondary-before-r1`); after the fix, success and intentional failure both terminate
+at 814 cycles (`ooocoh-exit-secondary-after-r1`). The primary pair stays at 775 cycles
+(`ooocoh-exit-primary-after-r1`). The separately linked secondary ELFs have different file hashes
+but identical disassembly; they are source-equivalent controls, not a same-ELF claim. Firmware r9
+uses the same frozen ELF as r8 and will compare trace prefixes through termination.
+
+Matched repaired-core firmware: `ooocoh-smt2ooo-osbi-csr-r1` strictly passes at 10,701,925 cycles
+(retirements 8,792,864 / 465,559); `ooocoh-smt2-osbi-csr-r1` strictly passes at 12,761,165
+(333,591 / 8,932,382). These are the rebuilt single-core models recorded in T7o, before the
+multicore testbench routing change; the single-core completion identity is separately covered
+by the exit leaf. Both retain experimental/qualification-only provenance, not protected-anchor
+replacement status.
+
+### T7q — strict four-hart source-profiled OpenSBI qualification complete
+
+`ooocoh-int2-osbi-r9` on `ooocoh-int2-build-r8` passes the unchanged strict runner:
+`outcome=pass`, `strictDualPassed=true` (the field retains its historical name for N harts),
+rc=0, tracer termination, before the 24M cap at **17,777,964 harness cycles**. The RVFI tracer
+counter reports 17,777,952; these are distinct counters, not different trials. Global hart
+retirements are **472,120 / 652,285 / 14,942,663 / 412,622** for harts 0–3. Boot hart 2 reaches
+S-mode, starts every peer via HSM, observes every `strict_seen` flag, and writes success tohost.
+The runner requires all four supervisor marks, the success store, per-hart progress, both
+physical-core traces, normal process status and before-cap termination; none was relaxed.
+
+Firmware SHA256 remains `9b832700dc109bc5d5f8d92b2eb990b26343c535181cfccd666d9200746da014`;
+model SHA256 is `5e01f24ecf523cbe39ae165bda5992caaa0977069b5e9affaf7b22ff28ec8fe5`.
+The 956-entry model source comparison changes only the testbench versus build-r7. Both physical
+core RVFI traces match their r8 prefixes byte-for-byte through final completion: 128,663,792
+bytes for core 0 and 1,772,143,971 bytes for core 1. The difference is termination, not an altered
+retirement stream. The local run artifact includes `retirement-prefix-review.json`; the raw
+remote/local traces and strict `results.json` remain the evidence of record. The strengthened
+exit-leaf oracle (`ooocoh-exit-after-r2`) matches 60/60 outcomes with scenario-specific failure
+markers.
+
+This closes the requested firmware milestone for `g6lc64_ooo_int2`: 2 cores × 2 harts, integer
+OoO, drained SMT handoff, WT + L2 + COH_OOO, fetch B, seed 1, one simulation thread, the validated
+private Verilator runtime and pinned split-counter control. It is natural source-profiled
+OpenSBI v1.5 with the documented platform/toolchain adaptations and frozen strict payload,
+not unrestricted stock-platform/compliance or Linux qualification. The model stays
+`experimentalModel=true`, `modelQualificationOnly=true`, `protectedAnchor=false`. No guards,
+assertions, firmware paths or production policies were weakened. Matched two-hart results and
+completed archive gates are recorded in T7o/T7p; foundry/MBIST/STA/power/area and broader ISA,
+RVWMO, mixed-residency and parameter-envelope obligations remain deferred.
+
 ## Deferred
 
 Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,

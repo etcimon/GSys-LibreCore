@@ -87,7 +87,14 @@ module csr_buffer
     end
   end else begin : gen_ooo
     // Ready is a table credit: at least one free entry, counting a slot the
-    // same-cycle commit is releasing.
+    // same-cycle commit is releasing and *excluding* the slot the CSR
+    // presented this cycle is taking. Issue acks a CSR one cycle before its
+    // csr_valid_i reaches this table, so the op acked last cycle is still
+    // allocating while the next issue decision reads this credit; without the
+    // csr_valid_i term two back-to-back CSRs could both be acked against one
+    // free entry and the second allocation was silently dropped (its commit
+    // then found no address and raised ILLEGAL_INSTR — OpenSBI
+    // `_trap_handler` `csrr t0, mstatus` behind `csrrw mscratch; csrr mepc`).
     logic commit_release;
     always_comb begin
       automatic int unsigned free_count;
@@ -98,7 +105,7 @@ module csr_buffer
         if (csr_commit_i && tab_q[i].valid && (tab_q[i].tid == csr_commit_tid_i))
           commit_release = 1'b1;
       end
-      csr_ready_o = (free_count + int'(commit_release)) >= 1;
+      csr_ready_o = (free_count + int'(commit_release)) >= (1 + int'(csr_valid_i));
     end
 
     // The commit stage reads the address of the CSR it is retiring, identified
@@ -122,6 +129,7 @@ module csr_buffer
     end
     //pragma translate_on
 
+    logic alloc_dropped;
     always_comb begin : write_ooo
       automatic logic allocated;
       tab_d = tab_q;
@@ -145,7 +153,16 @@ module csr_buffer
       if (flush_i) begin
         for (int unsigned i = 0; i < DEPTH; i++) tab_d[i].valid = 1'b0;
       end
+      // A presented CSR that finds no entry would commit with address 0; the
+      // credit above must make this unreachable.
+      alloc_dropped = csr_valid_i && !allocated && !flush_i;
     end
+
+    //pragma translate_off
+    always_ff @(posedge clk_i) begin
+      if (rst_ni && alloc_dropped) $error("csr_buffer: CSR presented with no free table entry");
+    end
+    //pragma translate_on
   end
 
   // sequential process

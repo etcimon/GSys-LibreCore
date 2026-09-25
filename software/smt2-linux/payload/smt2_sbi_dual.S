@@ -15,7 +15,83 @@
   .globl _start
   .align 2
 _start:
-#ifdef G6LC_STRICT_DUAL
+#if defined(G6LC_STRICT_HARTS)
+  /* N-hart strict payload (multi-core SMT packages). The boot hart marks its
+   * own strict_seen slot, starts every other hart through HSM with its own id
+   * as the opaque argument, then waits until all N slots read 1. Any trap, an
+   * out-of-range hart id, a hart_start failure, a secondary that receives its
+   * own id as the starter, or a bounded-wait expiry writes tohost=3. */
+  mv    s0, a0
+  li    t0, G6LC_STRICT_HARTS
+  bgeu  s0, t0, strict_fail
+  la    sp, __stack_top
+  slli  t0, s0, 11
+  sub   sp, sp, t0
+  la    t0, strict_fail
+  csrw  stvec, t0
+  la    t0, strict_seen
+  slli  t1, s0, 3
+  add   t0, t0, t1
+  li    t1, 1
+  sd    t1, 0(t0)
+  li    s1, 0
+strict_start_loop:
+  beq   s1, s0, strict_start_next
+  mv    a0, s1
+  la    a1, strict_secondary
+  mv    a2, s0
+  call  sbi_hart_start
+  bnez  a0, strict_fail
+strict_start_next:
+  addi  s1, s1, 1
+  li    t0, G6LC_STRICT_HARTS
+  bltu  s1, t0, strict_start_loop
+  li    t2, 1000000
+strict_wait_all:
+  fence r, rw
+  la    t1, strict_seen
+  li    s1, 0
+strict_check_loop:
+  ld    t0, 0(t1)
+  li    t3, 1
+  bne   t0, t3, strict_not_yet
+  addi  t1, t1, 8
+  addi  s1, s1, 1
+  li    t0, G6LC_STRICT_HARTS
+  bltu  s1, t0, strict_check_loop
+  li    a0, 1
+  j     strict_exit
+strict_not_yet:
+  addi  t2, t2, -1
+  bnez  t2, strict_wait_all
+  j     strict_fail
+strict_secondary:
+  li    t0, G6LC_STRICT_HARTS
+  bgeu  a0, t0, strict_fail
+  beq   a0, a1, strict_fail
+  la    sp, __stack_top
+  slli  t0, a0, 11
+  sub   sp, sp, t0
+  la    t0, strict_fail
+  csrw  stvec, t0
+  la    t0, strict_seen
+  slli  t1, a0, 3
+  add   t0, t0, t1
+  li    t1, 1
+  sd    t1, 0(t0)
+  fence w, w
+strict_park:
+  wfi
+  j     strict_park
+  .align 2
+strict_fail:
+  li    a0, 3
+strict_exit:
+  la    t0, tohost
+  sd    a0, 0(t0)
+  fence rw, rw
+  j     strict_park
+#elif defined(G6LC_STRICT_DUAL)
   mv    s0, a0
   li    t0, 2
   bgeu  s0, t0, strict_fail
@@ -210,7 +286,19 @@ sbi_srst:
   .align 3
 peer_flag:
   .dword 0
-#ifdef G6LC_STRICT_DUAL
+#if defined(G6LC_STRICT_HARTS)
+  .globl strict_seen
+strict_seen:
+  .rept G6LC_STRICT_HARTS
+  .dword 0
+  .endr
+  .section .tohost,"aw",@progbits
+  .align 6
+  .globl tohost
+tohost: .dword 0
+  .globl fromhost
+fromhost: .dword 0
+#elif defined(G6LC_STRICT_DUAL)
   .globl strict_seen
 strict_seen:
   .dword 0, 0

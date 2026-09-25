@@ -8,6 +8,34 @@ Cross-cutting: `../../agents/guides/AGENTS-soc-readiness.md`. Program: U6.1 in
 work (`ai-tensor` / PyTorch / virt-ai-pcie / HARD). Map:
 [`smt2-ai-tensor-linux.md`](smt2-ai-tensor-linux.md) · queue: `AGENTS-todo.md` **SL-T** / **AI-S3**.
 
+## Current source-profiled OpenSBI qualification (2026-09-25)
+
+The four-hart `g6lc64_ooo_int2` profile now completes the strict supervisor/HSM payload on the
+remote Verilator harness. This supersedes the older firmware-open status below for this specific
+envelope: 2 cores × 2 harts, integer OoO, drained handoff, WT, L2, COH_OOO and fetch B.
+
+| Profile | Run | Harness cycles | Strict verdict |
+|---|---|---:|---|
+| `g6lc64_ooo_int2` (four harts) | `ooocoh-int2-osbi-r9` | 17,777,964 | pass |
+| `g6lc64_smt2_ooo_int` (two harts) | `ooocoh-smt2ooo-osbi-csr-r1` | 10,701,925 | pass |
+| `g6lc64_smt2` (two harts) | `ooocoh-smt2-osbi-csr-r1` | 12,761,165 | pass |
+
+The CSR-table credit must reserve the request already accepted into the issue pipeline; otherwise
+an arriving request can lose its address while the next request is incorrectly admitted. After
+that repair, firmware completed on boot hart 2 but the testbench ignored secondary completion.
+The non-tandem testbench now aggregates shared-tohost completion, preferring failure over
+simultaneous success and retaining held/silent/hung-core checks. The source-extracted exit
+suite passes 60/60 outcomes; secondary/primary publisher controls terminate at 814/775 cycles.
+The four-hart run's two physical-core RVFI traces match the pre-routing-fix prefixes exactly
+through completion. No firmware path, privilege check or completion oracle was weakened.
+
+All runs retain seed 1, one simulation thread, the validated private runtime and pinned compiler
+control. They remain experimental/qualification-only source profiles, not protected-anchor
+replacements. The successful payload is neither Linux nor broad ISA/RVWMO/mixed-residency or
+physical sign-off. Exact hashes, four-hart retirement counts, prior failures, mutation controls
+and scope: [`../../core/ooo/AGENTS-ooo-plan.md`](../../core/ooo/AGENTS-ooo-plan.md) T7n–T7q.
+Artifacts are under `/opt/testharness/runs/<tag>/output/` and the approved local artifact root.
+
 ## Guarded OoO continuation (2026-09-19)
 
 The user has reopened SMT2+OoO development. A run-local **integer-only OoO** model

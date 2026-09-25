@@ -58,11 +58,27 @@ prerequisite for this work under the existing dual license. No licensing policy 
   changing RTL; observer-off/on traces and the explicit-reset reference agree (plan T7g).
 - [~] Matched multicore execution now has an isolated route, without shared-mirror synchronization.
   `mc_shared_line_cross_core` passes (1098 cycles, both cores retired) after writer acquisition in
-  the OoO signature and invalidation-bounded WT fixup copies (plan T7i). Still red and not yet
-  investigated: frozen `release_probe`, `mc_shared_line_sibling_hart`, `mc_boot_sanity`,
-  `mc_hart1_alive` (tohost 127, only core 0 retires). In-order WT DI/anchor suites have not been
-  re-run through the isolated route after the fixup-lifetime change; the 12-thread observer
-  non-interference failure remains recorded.
+  the OoO signature and invalidation-bounded WT fixup copies (plan T7i). The single-core-scope
+  programs (`mc_shared_line_sibling_hart`, `mc_boot_sanity`, `mc_hart1_alive`) pass under the
+  precise held-secondary verdict (exit 125, program exit 0); `release_probe` is a probe with an
+  expected timeout; the `+mc_verdict_fault` control still fails (plan T7j). The DI mini suite
+  has not been re-run through the isolated route; the 12-thread observer non-interference
+  failure remains recorded.
+- [x] SMT2/OpenSBI strict-dual re-qualified on current-tree isolated models of `g6lc64_smt2`
+  (in-order WT anchor shape) and `g6lc64_smt2_ooo_int` — both pass with ≤0.07 % cycle deltas
+  against the prior green runs; experimental label, not the proxy-attested anchor (plan T7j).
+- [x] Two-core/four-hart source-profiled OpenSBI: `ooocoh-int2-osbi-r9` strictly passes at
+  17,777,964 cycles on `ooocoh-int2-build-r8`; all four supervisor marks, success tohost,
+  per-hart progress and before-cap tracer termination are present (T7k–T7q). Repairs cover
+  ACK-time L1 write retention, drained fixup slots, AMO issue progress, and pipelined CSR credit.
+  The final blocker was testbench-only: secondary-core completion was disconnected despite
+  boot hart 2 completing the payload. Per-core completion selection now preserves failure
+  priority and held/silent/hung checks; the exit leaf passes 60/60 and the full-model
+  secondary/primary positive-negative pairs terminate at 814/775 cycles. The same frozen
+  firmware's two physical-core retirement traces match the pre-routing-fix prefixes exactly.
+  Completed OoO gates: int2 24/7, active 24/1; defaults 8/54 and 32/5, zero errors.
+  This is the pinned WT+L2, drained-SMT, integer-OoO profile, still experimental/qualification-only;
+  no protected-anchor replacement, general compliance, Linux or physical sign-off is implied.
 - [x] Four-hart CLINT boot/release probe: stale NC post-ACK forwarding repaired using accepted-TX
   attributes; odd MSIP read lanes repaired on the 64-bit AXI bus. Frozen positive/negative ELFs
   reach their intended opposite verdicts at cycle 775 (`ooocoh-nc-clint-int2-r1`); independent

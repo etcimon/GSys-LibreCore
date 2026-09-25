@@ -23,11 +23,19 @@ _start:
 secondary:
   sw zero, 8(s0)
   fence rw, rw
+#ifdef EXIT_ON_SECONDARY
+  li t2, 100000
+  j wait
+#else
   j park
+#endif
 primary:
   li t1, 1
   sw t1, 8(s0)
   fence rw, rw
+#ifdef EXIT_ON_SECONDARY
+  j park
+#endif
   li t2, 100000
 wait:
   lw t3, 8(s0)

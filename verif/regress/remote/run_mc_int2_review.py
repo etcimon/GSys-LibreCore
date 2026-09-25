@@ -12,6 +12,10 @@ library is built beside it. Env:
   REVIEW_MC_HEAD     git HEAD of the pushed subset (recorded only)
   REVIEW_MC_REBUILD  '1' forces a rebuild of an existing library
   REVIEW_MC_TIME_OUT DUT cycle bound (default 4000000)
+  REVIEW_MC_BUILD_ONLY '1' builds REVIEW_MC_BUILD_TARGET and writes
+      build-manifest.json only; the C++/bootrom compare input is produced by
+      local_hashes.py in this directory (push its stdout as
+      data/local-hashes.json).
 Programs: mc_shared_line_coherence with the publisher on the second core
 (PEER_HART=2) and on the sibling hart (PEER_HART=1), and the optimization
 kernels linked with soak_entry.S, whose tohost encodes pass/fail and
@@ -56,20 +60,39 @@ def decode_soak(value):
     return 'undecodable', value
 
 
-def verdict(text, bound, kind, rc=0):
+def verdict(text, bound, kind, rc=0, expect_mask=None):
     banners = re.findall(r'\*\*\* (SUCCESS|FAILED) \*\*\* \(tohost = (\d+)(?:, seed \d+)?\) after (\d+) cycles', text)
+    held = re.search(r'\[mc_verdict\] HELD: .*held_mask=([01x]+) retired_mask=([01x]+)', text)
+    silent = re.search(r'\[mc_verdict\] FAIL: core\(s\) retired no instruction, retired_mask=([01x]+)'
+                       r'(?: held_mask=([01x]+))?', text)
+    program = re.search(r'\[mc_verdict\] program exit code (\d+)', text)
     record = {'tohost': int(banners[0][1]) if len(banners) == 1 else None,
               'cycles': int(banners[0][2]) if len(banners) == 1 else None,
               'assertions': len(re.findall(r'%Error|Assertion failed|%Fatal', text)),
               'allCoresRetired': '[mc_verdict] all 2 core(s) retired instructions' in text,
+              'heldMask': held.group(1) if held else (silent.group(2) if silent else None),
+              'retiredMask': held.group(2) if held else (silent.group(1) if silent else None),
+              'programExit': int(program.group(1)) if program else None,
               'outcome': 'fail'}
     if record['assertions'] or len(banners) != 1:
         return record
     if record['cycles'] >= bound:
         record['outcome'] = 'timeout'
-    elif not record['allCoresRetired'] or '[mc_verdict] FAIL:' in text:
-        # Core 0 finished (its tracer raised exit) while the held secondary had
-        # not retired: the harness reports 127. Anything else is a real failure.
+        return record
+    if record['programExit']:
+        return record
+    if held:
+        if expect_mask and int(expect_mask, 2) != (1 << len(expect_mask)) - 1:
+            want = int(expect_mask, 2)
+            if ((want & ~int(record['retiredMask'], 2)) == 0
+                    and (want & int(record['heldMask'], 2)) == 0):
+                record['outcome'] = 'pass'
+                return record
+        record['outcome'] = 'held-secondary'
+        return record
+    if not record['allCoresRetired'] or '[mc_verdict] FAIL:' in text:
+        # Core 0 finished (its tracer raised exit) while a released secondary had
+        # not retired (127), or a core ran and then stopped (126).
         record['outcome'] = 'incomplete'
     elif kind == 'soak':
         record['outcome'] = 'unvalidated-soak-encoding'
@@ -80,6 +103,13 @@ def verdict(text, bound, kind, rc=0):
 
 def verdict_self_test():
     good = 'test.elf *** SUCCESS *** (tohost = 0) after 300 cycles\n*** [mc_verdict] all 2 core(s) retired instructions\n'
+    held = ('test.elf *** FAILED *** (tohost = 125) after 300 cycles\n'
+            '*** [mc_verdict] HELD: core(s) still clock-held at end of test, '
+            'held_mask=10 retired_mask=01 (exit code 125)\n'
+            '*** [mc_verdict] program exit code 0\n')
+    silent = ('test.elf *** FAILED *** (tohost = 127) after 300 cycles\n'
+              '*** [mc_verdict] FAIL: core(s) retired no instruction, retired_mask=01 '
+              'held_mask=00 (exit code 127)\n*** [mc_verdict] program exit code 0\n')
     cases = [(good, 0, 'htif', 'pass'), (good, 1, 'htif', 'fail'),
              (good.replace('300 cycles', '1000 cycles'), 0, 'htif', 'timeout'),
              (good.replace('SUCCESS', 'FAILED').replace('tohost = 0', 'tohost = 1'), 1, 'htif', 'fail'),
@@ -87,9 +117,16 @@ def verdict_self_test():
              (good.split('\n')[0], 0, 'htif', 'incomplete'),
              (good + '%Error: invalid\n', 0, 'htif', 'fail'),
              (good + '*** [mc_verdict] FAIL: stopped\n', 0, 'htif', 'incomplete'),
-             (good, 0, 'soak', 'unvalidated-soak-encoding')]
-    for text, rc, kind, expected in cases:
-        assert verdict(text, 1000, kind, rc)['outcome'] == expected
+             (good, 0, 'soak', 'unvalidated-soak-encoding'),
+             (held, 125, 'htif', 'pass', '01'),
+             (held, 125, 'htif', 'held-secondary', '11'),
+             (held.replace('program exit code 0', 'program exit code 5'), 125, 'htif', 'fail', '01'),
+             (silent, 127, 'htif', 'incomplete')]
+    for case in cases:
+        text, rc, kind, expected = case[:4]
+        expect_mask = case[4] if len(case) > 4 else None
+        got = verdict(text, 1000, kind, rc, expect_mask)['outcome']
+        assert got == expected, (case, got)
     print(f'MC_VERDICT_PASS cases={len(cases)}')
 
 
@@ -213,6 +250,92 @@ def inspect_boot_model():
     return 0
 
 
+def exit_leaf_review():
+    out, data = Path(os.environ['TH_OUT_DIR']), Path(os.environ['TH_DATA_DIR'])
+    source = (data / 'ariane_testharness.sv').read_text()
+    selection = re.search(r'  always_comb begin : mc_exit_select\n.*?\n  end', source, re.S)
+    if selection:
+        assert '.end_of_test_o(core_tracer_exit[0])' in source
+        assert '.end_of_test_o(core_tracer_exit[c]' in source
+        selection = selection[0]
+    else:
+        assert '.end_of_test_o(tracer_exit)' in source
+        selection = 'assign tracer_exit = core_tracer_exit[0];'
+    verdict_logic = re.search(r'    assign rvfi_exit = .*?;', source, re.S)[0]
+    bench = '''module tb_g6lc_mc_exit;
+parameter int NR_CORES=2;
+logic [NR_CORES-1:0][31:0] core_tracer_exit;
+logic [31:0] tracer_exit, rvfi_exit;
+logic [NR_CORES-1:0] core_retired;
+logic mc_all_silent_held, mc_any_hung;
+int scenario;
+bit negative;
+@SELECTION@
+@VERDICT@
+initial begin
+  scenario=0; void'($value$plusargs("scenario=%d",scenario));
+  negative=$test$plusargs("oracle_negative");
+  core_tracer_exit='0;core_retired='1;mc_all_silent_held=0;mc_any_hung=0;
+  case(scenario)
+    0: core_tracer_exit[0]=32'd1;
+    1: core_tracer_exit[NR_CORES-1]=32'd1;
+    2: core_tracer_exit[NR_CORES-1]=32'd11;
+    3: begin core_tracer_exit[0]=32'd1;core_tracer_exit[NR_CORES-1]=32'd11;end
+    4: begin core_tracer_exit[NR_CORES-1]=32'd1;core_retired[0]=0;end
+    5: begin core_tracer_exit[NR_CORES-1]=32'd1;mc_any_hung=1;end
+    6: begin core_tracer_exit[NR_CORES-1]=32'd1;core_retired[0]=0;mc_all_silent_held=1;end
+    7: core_tracer_exit[NR_CORES-1]=32'd10;
+    8: begin core_retired='0;mc_any_hung=1;end
+    9: begin core_tracer_exit[0]=32'd11;core_tracer_exit[NR_CORES-1]=32'd1;end
+    default: $fatal(1,"MC_EXIT_SCENARIO");
+  endcase
+  #1;
+  case(scenario)
+    0,1: if(rvfi_exit !== (32'd1 ^ 32'(negative))) $fatal(1,"MC_EXIT_ROUTE got=%h",rvfi_exit);
+    2,3: if(rvfi_exit !== (32'd11 ^ 32'(negative))) $fatal(1,"MC_EXIT_FAILURE got=%h",rvfi_exit);
+    4: if(rvfi_exit !== (32'd255 ^ 32'(negative))) $fatal(1,"MC_EXIT_SILENT got=%h",rvfi_exit);
+    5: if(rvfi_exit !== (32'd253 ^ 32'(negative))) $fatal(1,"MC_EXIT_HUNG got=%h",rvfi_exit);
+    6: if(rvfi_exit !== (32'd251 ^ 32'(negative))) $fatal(1,"MC_EXIT_HELD got=%h",rvfi_exit);
+    7,8: if(rvfi_exit !== 32'(negative)) $fatal(1,"MC_EXIT_IDLE got=%h",rvfi_exit);
+    9: if(rvfi_exit !== ((NR_CORES==1 ? 32'd1 : 32'd11) ^ 32'(negative))) $fatal(1,"MC_EXIT_PRIORITY got=%h",rvfi_exit);
+  endcase
+  $display("MC_EXIT_PASS scenario=%0d cores=%0d",scenario,NR_CORES);$finish;
+end
+endmodule
+'''.replace('@SELECTION@', selection).replace('@VERDICT@', verdict_logic)
+    path = out / 'tb_g6lc_mc_exit.sv'
+    path.write_text(bench)
+    runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
+    assert sha(runtime / 'include/verilated_funcs.h') == 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+    env = dict(os.environ, VERILATOR_ROOT=str(runtime), VPATH=str(runtime / 'include'))
+    records = []
+    (out / 'sources.json').write_text(json.dumps({'testharness': sha(data / 'ariane_testharness.sv'),
+        'bench': sha(path), 'runner': sha(__file__)}, indent=2))
+    for cores in (2, 1, 4):
+        model = out / f'model-{cores}'
+        cmd = ['verilator', '--binary', '--timing', '--assert', '-j', '4', '-Wno-fatal',
+               '-Werror-LATCH', '-Werror-UNOPTFLAT', '--top-module', 'tb_g6lc_mc_exit',
+               f'-GNR_CORES={cores}', '--Mdir', str(model), str(path)]
+        with (out / f'build-{cores}.log').open('w') as log:
+            assert subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode == 0
+        for scenario in range(10):
+            for negative in (False, True):
+                cmd = [str(model / 'Vtb_g6lc_mc_exit'), f'+scenario={scenario}'] + (['+oracle_negative'] if negative else [])
+                result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+                text = result.stdout + result.stderr
+                (out / f'n{cores}-s{scenario}-neg{int(negative)}.log').write_text(text)
+                marker = ('MC_EXIT_ROUTE', 'MC_EXIT_ROUTE', 'MC_EXIT_FAILURE', 'MC_EXIT_FAILURE',
+                          'MC_EXIT_SILENT', 'MC_EXIT_HUNG', 'MC_EXIT_HELD', 'MC_EXIT_IDLE',
+                          'MC_EXIT_IDLE', 'MC_EXIT_PRIORITY')[scenario]
+                matched = (result.returncode != 0 and marker in text and 'MC_EXIT_PASS' not in text) if negative else (result.returncode == 0 and 'MC_EXIT_PASS' in text)
+                records.append({'cores': cores, 'scenario': scenario, 'negative': negative,
+                                'expectedError': marker if negative else None,
+                                'rc': result.returncode, 'matched': matched})
+                (out / 'results.json').write_text(json.dumps(records, indent=2))
+                assert matched, (cores, scenario, negative)
+    return 0
+
+
 def boot_reset_leaf():
     out, data = Path(os.environ['TH_OUT_DIR']), Path(os.environ['TH_DATA_DIR'])
     runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
@@ -316,14 +439,32 @@ def visibility_review():
     out = Path(os.environ['TH_OUT_DIR'])
     parent_path = Path(os.environ['REVIEW_MC_MANIFEST'])
     parent = json.loads(parent_path.read_text())
-    seed = Path(parent['sourceRoot'])
+    # The parent is either an initial-review manifest (sourceRoot + plain digests)
+    # or a build-only manifest (repo beside the model, original/review digests).
+    seed = Path(parent['sourceRoot']) if 'sourceRoot' in parent else Path(parent['model']).parent.parent / 'repo'
     for name, digest in parent['sources'].items():
-        assert sha(seed / name) == digest, name
+        assert sha(seed / name) == (digest if isinstance(digest, str) else digest['reviewSha256']), name
     runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
-    assert sha(runtime / 'include/verilated_funcs.h') == parent['runtimeHeader']
+    runtime_header = parent.get('runtimeHeader') or parent['recipe']['runtimeHeader']
+    assert sha(runtime / 'include/verilated_funcs.h') == runtime_header
+    target = parent.get('target', 'g6lc64_ooo_int2')
     repo, model = out.parent / 'repo', out.parent / 'model'
     shutil.copytree(seed, repo, symlinks=True)
     changes = {}
+    # Observation window and stuck-handshake detector. Defaults keep the
+    # directed cases byte-identical (first 6000 time units, no detector); a
+    # firmware run sets +mc_vis_from/+mc_vis_until and +mc_vis_stuck=<cycles>
+    # so a channel whose valid is held without ready for that long is reported
+    # once, with its payload, instead of logging every beat.
+    window = '''logic vis_enabled; longint unsigned vis_from=0, vis_until=6000, vis_stuck=0;
+initial begin
+  vis_enabled=$test$plusargs("mc_visibility");
+  void'($value$plusargs("mc_vis_from=%d", vis_from));
+  void'($value$plusargs("mc_vis_until=%d", vis_until));
+  void'($value$plusargs("mc_vis_stuck=%d", vis_stuck));
+end
+'''
+    gate = 'rst_ni && vis_enabled && $time>=vis_from && $time<vis_until'
 
     def append_probe(name, body):
         path = repo / name
@@ -346,28 +487,77 @@ def visibility_review():
                           f'$display("VIS t=%0t %m {label} {ch} {fields}", $time, {values});')
         return '\n'.join(result)
 
-    cluster = '''logic vis_enabled;
-initial vis_enabled=$test$plusargs("mc_visibility");
-for(genvar v=0;v<NC;v++) begin : gen_visibility
-  always @(posedge clk_i) if(rst_ni && vis_enabled && $time<6000) begin
+    def stuck_probe(req, resp, label):
+        # One report per channel per stall episode: valid held without ready for
+        # vis_stuck cycles. Requests carry the address so the stalled transaction
+        # is identifiable; responses carry the id.
+        result = []
+        for ch in ('aw', 'w', 'ar', 'b', 'r'):
+            producer, consumer = (resp, req) if ch in ('b', 'r') else (req, resp)
+            payload = {'aw': 'id=%h addr=%h atop=%h", $time, {p}.aw.id, {p}.aw.addr, {p}.aw.atop',
+                       'w': 'last=%b", $time, {p}.w.last',
+                       'ar': 'id=%h addr=%h", $time, {p}.ar.id, {p}.ar.addr',
+                       'b': 'id=%h", $time, {p}.b.id',
+                       'r': 'id=%h last=%b", $time, {p}.r.id, {p}.r.last'}[ch].replace('{p}', producer)
+            result.append(f'''    if({producer}.{ch}_valid && !{consumer}.{ch}_ready) begin
+      if(stuck_{ch}==vis_stuck) $display("VIS t=%0t %m STUCK {label} {ch} {payload});
+      stuck_{ch}++;
+    end else stuck_{ch}=0;''')
+        return '\n'.join(result)
+
+    cluster = window + '''for(genvar v=0;v<NC;v++) begin : gen_visibility
+  longint unsigned stuck_aw=0, stuck_w=0, stuck_ar=0, stuck_b=0, stuck_r=0, stuck_inv=0;
+  always @(posedge clk_i) if(''' + gate + ''') begin
 ''' + axi_probe('core_req[v]', 'core_resp[v]', 'core') + '''
     if(inv_to_core[v].valid && inv_core_ready[v])
       $display("VIS t=%0t %m inv addr=%h", $time, inv_to_core[v].line_addr);
   end
+  always @(posedge clk_i) if(rst_ni && vis_enabled && vis_stuck!=0) begin
+''' + stuck_probe('core_req[v]', 'core_resp[v]', 'core') + '''
+    if(inv_to_core[v].valid && !inv_core_ready[v]) begin
+      if(stuck_inv==vis_stuck) $display("VIS t=%0t %m STUCK core inv addr=%h", $time, inv_to_core[v].line_addr);
+      stuck_inv++;
+    end else stuck_inv=0;
+  end
 end
-always @(posedge clk_i) if(rst_ni && vis_enabled && $time<6000) begin
-''' + axi_probe('hub_mem_req', 'hub_mem_resp', 'hub') + '\n' + axi_probe('l2_mst_req', 'l2_mst_resp', 'l2') + '\nend\n'
+longint unsigned hub_stuck_aw=0, hub_stuck_w=0, hub_stuck_ar=0, hub_stuck_b=0, hub_stuck_r=0;
+always @(posedge clk_i) if(''' + gate + ''') begin
+''' + axi_probe('hub_mem_req', 'hub_mem_resp', 'hub') + '\n' + axi_probe('l2_mst_req', 'l2_mst_resp', 'l2') + '''
+end
+always @(posedge clk_i) if(rst_ni && vis_enabled && vis_stuck!=0) begin
+''' + stuck_probe('hub_mem_req', 'hub_mem_resp', 'hub').replace('stuck_', 'hub_stuck_') + '\nend\n'
     append_probe('corev_apu/src/g6lc_cluster.sv', cluster)
-    append_probe('corev_apu/clint/clint.sv', '''logic vis_enabled;
-initial vis_enabled=$test$plusargs("mc_visibility");
-always @(posedge clk_i) if(rst_ni && vis_enabled && $time<6000) begin
+    append_probe('corev_apu/clint/clint.sv', window + '''always @(posedge clk_i) if(''' + gate + ''') begin
   if(en) $display("VIS t=%0t %m clint we=%b addr=%h wdata=%h be=%h rdata=%h msip=%h next=%h",
     $time,we,address,wdata,be,rdata,msip_q,msip_n);
 end
 ''')
-    append_probe('core/cva6.sv', '''logic vis_enabled;
-initial vis_enabled=$test$plusargs("mc_visibility");
-always @(posedge clk_i) if(rst_ni && vis_enabled && $time<6000) begin
+    append_probe('core/cva6.sv', window + '''longint unsigned stuck_retire=0;
+always @(posedge clk_i) if(rst_ni && vis_enabled && vis_stuck!=0) begin
+  if($time>=vis_from && $time<vis_until)
+    $display("VIS t=%0t %m COMMIT ack=%b pc0=%h fu0=%0d op0=%0d tid0=%0d v0=%b pc1=%h fu1=%0d tid1=%0d v1=%b csr_commit=%b csr_ex=%b flush_ex=%b flush_unissued=%b",
+      $time, commit_ack, commit_instr_id_commit[0].pc, commit_instr_id_commit[0].fu, commit_instr_id_commit[0].op, commit_instr_id_commit[0].trans_id, commit_instr_id_commit[0].valid,
+      commit_instr_id_commit[1].pc, commit_instr_id_commit[1].fu, commit_instr_id_commit[1].trans_id, commit_instr_id_commit[1].valid,
+      csr_commit_commit_ex, csr_exception_csr_commit.valid, flush_ctrl_ex, flush_unissued_instr_ctrl_id);
+  if(ex_commit.valid && ex_commit.cause == 64'd2)
+    $display("VIS t=%0t %m ILLEGAL pc=%h tval=%h from_decode=%b decode_cause=%0d from_csr=%b fu=%0d op=%0d hart=%0d priv=%0d",
+      $time, commit_instr_id_commit[0].pc, ex_commit.tval, commit_instr_id_commit[0].ex.valid, commit_instr_id_commit[0].ex.cause,
+      csr_exception_csr_commit.valid, commit_instr_id_commit[0].fu, commit_instr_id_commit[0].op, commit_instr_id_commit[0].hart_id, priv_lvl);
+  if(!(|commit_ack)) begin
+    if(stuck_retire==vis_stuck) begin
+      $display("VIS t=%0t %m STUCK retire head0 valid=%b pc=%h fu=%0d op=%0d hart=%0d ex=%b drop=%b | amo_valid_commit=%b amo_req=%b amo_op=%0d amo_addr=%h amo_ack=%b | no_st_pending_ex=%b wbuffer_empty=%b no_st_pending_commit=%b smt_sb_empty=%b flush_ctrl_id=%b halt_ctrl=%b halt_csr=%b lsu_commit_ready=%b",
+        $time, commit_instr_id_commit[0].valid, commit_instr_id_commit[0].pc, commit_instr_id_commit[0].fu, commit_instr_id_commit[0].op,
+        commit_instr_id_commit[0].hart_id, commit_instr_id_commit[0].ex.valid, commit_drop_id_commit[0],
+        amo_valid_commit, amo_req.req, amo_req.amo_op, amo_req.operand_a, amo_resp.ack,
+        no_st_pending_ex, dcache_commit_wbuffer_empty, no_st_pending_commit, smt_sb_empty, flush_ctrl_id, halt_ctrl, halt_csr_ctrl, lsu_commit_ready_ex_commit);
+      $display("VIS t=%0t %m STUCK retire head1 valid=%b pc=%h fu=%0d op=%0d hart=%0d ex=%b",
+        $time, commit_instr_id_commit[1].valid, commit_instr_id_commit[1].pc, commit_instr_id_commit[1].fu, commit_instr_id_commit[1].op,
+        commit_instr_id_commit[1].hart_id, commit_instr_id_commit[1].ex.valid);
+    end
+    stuck_retire++;
+  end else stuck_retire=0;
+end
+always @(posedge clk_i) if(''' + gate + ''') begin
   for(int p=0;p<3;p++) begin
     if(dcache_req_ports_ex_cache[p].data_req && dcache_req_ports_cache_ex[p].data_gnt)
       $display("VIS t=%0t %m dgrant port=%0d request=%p",$time,p,dcache_req_ports_ex_cache[p]);
@@ -377,9 +567,93 @@ always @(posedge clk_i) if(rst_ni && vis_enabled && $time<6000) begin
   end
 end
 ''')
-    append_probe('core/cache_subsystem/wt_dcache_wbuffer.sv', '''logic vis_enabled;
-initial vis_enabled=$test$plusargs("mc_visibility");
-always @(posedge clk_i) if(rst_ni && vis_enabled && $time<6000) begin
+    append_probe('core/csr_regfile.sv', window + '''always @(posedge clk_i) if(rst_ni && vis_enabled && vis_stuck!=0) begin
+  if(csr_exception_o.valid && (csr_op_i inside {CSR_READ, CSR_WRITE, CSR_SET, CSR_CLEAR}))
+    $display("VIS t=%0t %m CSREXC op=%0d addr=%h cause=%0d priv=%0d read_exc=%b update_exc=%b priv_viol=%b debug=%b",
+      $time, csr_op_i, csr_addr_i, csr_exception_o.cause, priv_lvl_o, read_access_exception, update_access_exception, privilege_violation, debug_mode_q);
+end
+''')
+    append_probe('core/ex_stage.sv', window + '''always @(posedge clk_i) if((''' + gate + ''') || (rst_ni && vis_enabled && vis_stuck!=0 && (|csr_valid_i) && (one_cycle_select != csr_valid_i))) begin
+  if(|csr_valid_i)
+    $display("VIS t=%0t %m CSRISSUE csr_valid=%b alu_valid=%b branch_valid=%b one_cycle=%b p0_tid=%0d p0_op=%0d p0_b=%h p1_tid=%0d p1_op=%0d p1_b=%h picked_tid=%0d picked_b=%h",
+      $time, csr_valid_i, alu_valid_i, branch_valid_i, one_cycle_select, fu_data_i[0].trans_id, fu_data_i[0].operation, fu_data_i[0].operand_b[11:0],
+      fu_data_i[1].trans_id, fu_data_i[1].operation, fu_data_i[1].operand_b[11:0], one_cycle_data.trans_id, one_cycle_data.operand_b[11:0]);
+end
+''')
+    append_probe('core/issue_read_operands.sv', window + '''always @(posedge clk_i) if(''' + gate + ''') begin
+  for(int p=0;p<CVA6Cfg.NrIssuePorts;p++)
+    if(issue_instr_valid_i[p])
+      $display("VIS t=%0t %m ISSUE port=%0d ack=%b pc=%h fu=%0d op=%0d tid=%0d use_imm=%b result=%h fu_busy=%b csr_ready=%b flush=%b",
+        $time, p, issue_ack_o[p], issue_instr_i[p].pc, issue_instr_i[p].fu, issue_instr_i[p].op, issue_instr_i[p].trans_id,
+        issue_instr_i[p].use_imm, issue_instr_i[p].result[11:0], fu_busy[p], csr_ready_i, flush_i);
+end
+''')
+    append_probe('core/csr_buffer.sv', window + '''logic vis_matched;
+always_comb begin
+  vis_matched = 1'b0;
+  for (int unsigned i = 0; i < DEPTH; i++)
+    if (tab_q[i].valid && (tab_q[i].tid == csr_commit_tid_i)) vis_matched = 1'b1;
+end
+always @(posedge clk_i) if(rst_ni && vis_enabled && (vis_stuck!=0 || ($time>=vis_from && $time<vis_until))) begin
+  automatic logic matched;
+  matched = vis_matched;
+  if(csr_valid_i && $time>=vis_from && $time<vis_until)
+    $display("VIS t=%0t %m CSRALLOC tid=%0d addr=%h op=%0d ready=%b tab=%p", $time, fu_data_i.trans_id, fu_data_i.operand_b[11:0], fu_data_i.operation, csr_ready_o, tab_q);
+  if(csr_commit_i && (csr_addr_o == 12'h300 || csr_addr_o == 12'h341 || csr_addr_o == 12'h340 || !matched || ($time>=vis_from && $time<vis_until)))
+    $display("VIS t=%0t %m CSRCOMMIT tid=%0d addr=%h matched=%b tab=%p valid_in=%b alloc_addr=%h alloc_tid=%0d",
+      $time, csr_commit_tid_i, csr_addr_o, matched, tab_q, csr_valid_i, fu_data_i.operand_b[11:0], fu_data_i.trans_id);
+end
+''')
+    append_probe('core/store_unit.sv', window + '''longint unsigned stuck_amo=0;
+always @(posedge clk_i) if(rst_ni && vis_enabled && vis_stuck!=0) begin
+  if(amo_buffer_valid || !amo_buffer_ready) begin
+    if(stuck_amo==vis_stuck) $display("VIS t=%0t %m STUCK storeunit st_valid=%b amo_op=%0d amo_buffer_valid=%b amo_buffer_ready=%b store_buffer_ready=%b no_st_pending=%b amo_valid_commit=%b commit=%b",
+      $time, st_valid, amo_op_q, amo_buffer_valid, amo_buffer_ready, store_buffer_ready, no_st_pending_o, amo_valid_commit_i, commit_i);
+    stuck_amo++;
+  end else stuck_amo=0;
+end
+''')
+    append_probe('core/store_buffer.sv', window + '''longint unsigned stuck_sb=0;
+always @(posedge clk_i) if(rst_ni && vis_enabled && vis_stuck!=0) begin
+  if((speculative_status_cnt_q != 0 || commit_status_cnt_q != 0)) begin
+    if(stuck_sb==vis_stuck) $display("VIS t=%0t %m STUCK storebuffer spec_cnt=%0d commit_cnt=%0d spec_head_mismatch=%b commit_i=%b stall_st_pending=%b spec_head=%p",
+      $time, speculative_status_cnt_q, commit_status_cnt_q, spec_head_mismatch, commit_i, stall_st_pending_i, speculative_queue_q[speculative_read_pointer_q]);
+    stuck_sb++;
+  end else stuck_sb=0;
+end
+''')
+    append_probe('core/cache_subsystem/wt_dcache_missunit.sv', window + '''longint unsigned stuck_drain=0;
+always @(posedge clk_i) if(rst_ni && vis_enabled && vis_stuck!=0) begin
+  if(state_q inside {DRAIN, AMO, AMO_WAIT}) begin
+    if(stuck_drain==vis_stuck) $display("VIS t=%0t %m STUCK missunit state=%0d wbuffer_empty=%b mshr_vld=%b amo_req=%b amo_op=%0d amo_addr=%h",
+      $time, state_q, wbuffer_empty_i, mshr_vld_q, amo_req_i.req, amo_req_i.amo_op, amo_req_i.operand_a);
+    stuck_drain++;
+  end else stuck_drain=0;
+end
+''')
+    append_probe('core/cache_subsystem/wt_dcache_mem.sv', window + '''longint unsigned stuck_deny=0;
+always @(posedge clk_i) if(rst_ni && vis_enabled && vis_stuck!=0) begin
+  if((|wr_req_i) && !wr_ack_o) begin
+    if(stuck_deny==vis_stuck) $display("VIS t=%0t %m STUCK wordwrite idx=%h off=%h ways=%h denied=%b clwr=%b rd_req=%b rd_ack=%h rd_idx0=%h rd_off0=%h rd_idx1=%h rd_off1=%h tagonly=%b sel=%0d",
+      $time, wr_idx_i, wr_off_i, wr_req_i, wr_denied, wr_cl_vld_i, rd_req_i, rd_ack_o, rd_idx_i[0], rd_off_i[0], rd_idx_i[1], rd_off_i[1], rd_tag_only_i, vld_sel_d);
+    stuck_deny++;
+  end else stuck_deny=0;
+end
+''')
+    append_probe('core/cache_subsystem/wt_dcache_wbuffer.sv', window + '''longint unsigned stuck_hold=0, stuck_full=0;
+always @(posedge clk_i) if(rst_ni && vis_enabled && vis_stuck!=0) begin
+  if(ack_wr_lost) begin
+    if(stuck_hold==vis_stuck) $display("VIS t=%0t %m STUCK ackhold ptr=%0d wtag=%h checked=%b hit=%h wr_req=%h wr_ack=%b fixup_wr_req=%b check_wr=%b rd_req=%b rd_ack=%b tocheck=%h",
+      $time, rtrn_ptr, wbuffer_q[rtrn_ptr].wtag, wbuffer_q[rtrn_ptr].checked, wbuffer_q[rtrn_ptr].hit_oh, wr_req_o, wr_ack_i, fixup_wr_req, check_wr, rd_req_o, rd_ack_i, tocheck);
+    stuck_hold++;
+  end else stuck_hold=0;
+  if(!empty_o && !evict) begin
+    if(stuck_full==vis_stuck) $display("VIS t=%0t %m STUCK wbuffer rtrn_empty=%b miss_req=%b miss_ack=%b tx=%p dirty=%h tocheck=%h buffers=%p",
+      $time, rtrn_empty, miss_req_o, miss_ack_i, tx_stat_q, dirty, tocheck, wbuffer_q);
+    stuck_full++;
+  end else stuck_full=0;
+end
+always @(posedge clk_i) if(''' + gate + ''') begin
   if(miss_req_o && miss_ack_i)
     $display("VIS t=%0t %m wb_send addr=%h data=%h id=%h nc=%b",$time,miss_paddr_o,miss_wdata_o,miss_id_o,miss_nc_o);
   if(miss_rtrn_vld_i || (req_port_i.data_req && req_port_o.data_gnt) || wr_ack_i) begin
@@ -392,9 +666,9 @@ end
     text = driver.read_text()
     old = '    "mc_verdict_fault",'
     assert text.count(old) == 1
-    driver.write_text(text.replace(old, '    "mc_visibility",\n' + old))
+    driver.write_text(text.replace(old, '    "mc_visibility", "mc_vis_from", "mc_vis_until", "mc_vis_stuck",\n' + old))
     cmd = (f'export VERILATOR_ROOT={runtime} SOFT_LADDER_VERLIB={model} '
-           'SOFT_LADDER_BUILD_TARGET=g6lc64_ooo_int2 SOFT_LADDER_VERILATOR_THREADS=1 '
+           f'SOFT_LADDER_BUILD_TARGET={target} SOFT_LADDER_VERILATOR_THREADS=1 '
            'SOFT_LADDER_BUILD_JOBS=8; bash verif/regress/soft-ladder-build-harness.sh B')
     rc = bash(cmd, out / 'build.log', repo, 3600)
     assert rc == 0, 'visibility build'
@@ -403,8 +677,10 @@ end
     exe = model / 'Variane_testharness'
     manifest = {'parent': str(parent_path), 'model': str(exe), 'modelSha256': sha(exe),
                 'sourceRoot': str(repo), 'observers': changes, 'driverSha256': sha(driver),
-                'runtimeHeader': parent['runtimeHeader'], 'build': cmd}
+                'runtimeHeader': runtime_header, 'target': target, 'build': cmd}
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2))
+    if os.environ.get('REVIEW_MC_VISIBILITY_BUILD_ONLY') == '1':
+        return 0
     cases = [('clint', Path('/opt/testharness/runs/ooocoh-boot-release-r2/output/negative0/boot.elf'), 20000),
              ('shared', Path('/opt/testharness/runs/ooocoh-mc-int2-r3/output/elf/mc_shared_line_cross_core.elf'), 100000)]
     records = []
@@ -582,6 +858,46 @@ def boot_release_review():
     return 0
 
 
+def directed_review():
+    """One directed program on a frozen model (build-only or initial-review
+    manifest): positive and oracle-negative arms, hart-0-only expectation
+    (secondaries held), no RTL change."""
+    out, data = Path(os.environ['TH_OUT_DIR']), Path(os.environ['TH_DATA_DIR'])
+    manifest = json.loads(Path(os.environ['REVIEW_MC_MANIFEST']).read_text())
+    exe = Path(manifest['model'])
+    repo = Path(manifest['sourceRoot']) if 'sourceRoot' in manifest else exe.parent.parent / 'repo'
+    assert sha(exe) == manifest['modelSha256']
+    src = os.environ['REVIEW_MC_DIRECTED_SRC']
+    bound = int(os.environ.get('REVIEW_MC_DIRECTED_BOUND', '1000000'))
+    expect_mask = os.environ.get('REVIEW_MC_DIRECTED_MASK', '01')
+    records = []
+    for negative in (False, True):
+        trial = out / f'negative{int(negative)}'
+        trial.mkdir()
+        elf = trial / 'directed.elf'
+        command = GCC + (['-DORACLE_NEGATIVE'] if negative else []) + (
+            ['-DEXIT_ON_SECONDARY'] if os.environ.get('REVIEW_MC_EXIT_SECONDARY') == '1' else []) + [str(data / src), '-o', str(elf)]
+        rc = bash(' '.join(command), trial / 'gcc.log', repo, 120)
+        assert rc == 0, 'gcc'
+        cmd = [str(exe), '--seed=1', '+debug_disable', '+quiet_axi', f'+time_out={bound}',
+               '+tohost_addr=0x80001000', str(elf)]
+        with (trial / 'run.log').open('w') as log:
+            rc = subprocess.run(cmd, cwd=trial, stdout=log, stderr=subprocess.STDOUT, timeout=1800).returncode
+        text = (trial / 'run.log').read_text()
+        result = verdict(text, bound, 'htif', rc, expect_mask)
+        # Oracle-negative: the program reports exit code 1 (tohost 3). With the
+        # secondaries clock-held the harness exit is the held-secondary code
+        # (125) and the program's own code is carried in the verdict line.
+        matched = ((result['programExit'] == 1 or (result['tohost'] == 1 and rc == 1))
+                   and result['outcome'] != 'pass') if negative else result['outcome'] == 'pass'
+        records.append({'negative': negative, 'rc': rc, 'matched': matched, 'elfSha256': sha(elf), **result})
+        (out / 'results.json').write_text(json.dumps(records, indent=2))
+    (out / 'manifest.json').write_text(json.dumps({'modelSha256': sha(exe), 'source': src,
+        'sourceSha256': sha(data / src), 'parent': str(exe), 'bound': bound, 'expectMask': expect_mask}, indent=2))
+    assert all(r['matched'] for r in records), [r['outcome'] for r in records]
+    return 0
+
+
 def boot_initial_review():
     out, data = Path(os.environ['TH_OUT_DIR']), Path(os.environ['TH_DATA_DIR'])
     seed = Path(os.environ['REVIEW_MC_SOURCE_DIR'])
@@ -615,17 +931,32 @@ def boot_initial_review():
                 'makefileSha256': sha(repo / 'Makefile'), 'rtlModified': overlay}
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2))
     records = []
-    cases = [(name, frozen / 'elf' / f'{name}.elf') for name in
+    cross_core = frozen / 'elf' / 'mc_shared_line_cross_core.elf'
+    cases = [(name, frozen / 'elf' / f'{name}.elf', []) for name in
              ('release_probe', 'mc_shared_line_cross_core', 'mc_shared_line_sibling_hart', 'mc_boot_sanity', 'mc_hart1_alive')]
+    cases.append(('cross_core_fault_control', cross_core, ['+mc_verdict_fault']))
     if candidate:
         base = Path('/opt/testharness/runs/ooocoh-boot-release-r2/output')
-        cases += [('boot_release', base / 'negative0/boot.elf'), ('boot_negative', base / 'negative1/boot.elf')]
-    for name, elf in cases:
+        cases += [('boot_release', base / 'negative0/boot.elf', []),
+                  ('boot_negative', base / 'negative1/boot.elf', [])]
+    # Expected verdict per case. The single-core-scope programs leave core 1
+    # clock-held, which the testbench reports as a HELD verdict (exit 125) --
+    # a pass when the expected core retired and the program's own exit was 0.
+    expected = {'release_probe': {'kind': 'probe', 'outcome': 'timeout',
+                                  'allCoresRetired': True, 'hart2Faults': 0},
+                'mc_shared_line_cross_core': {'outcome': 'pass', 'mask': '11'},
+                'mc_shared_line_sibling_hart': {'outcome': 'pass', 'mask': '01'},
+                'mc_boot_sanity': {'outcome': 'pass', 'mask': '01'},
+                'mc_hart1_alive': {'outcome': 'pass', 'mask': '01'},
+                'cross_core_fault_control': {'outcome': 'incomplete', 'tohost': 127},
+                'boot_release': {'outcome': 'pass', 'mask': '11'},
+                'boot_negative': {'outcome': 'fail', 'programExit': 1, 'allCoresRetired': True}}
+    for name, elf, extra in cases:
         trial = out / name
         trial.mkdir()
         bound = 20000 if name in ('release_probe', 'boot_release', 'boot_negative') else 4000000
         cmd = [str(exe), '--seed=1', '+debug_disable', '+quiet_axi',
-               f'+time_out={bound}', '+tohost_addr=0x80001000', str(elf)]
+               f'+time_out={bound}', '+tohost_addr=0x80001000', *extra, str(elf)]
         with (trial / 'run.log').open('w') as log:
             rc = subprocess.run(cmd, cwd=trial, stdout=log, stderr=subprocess.STDOUT, timeout=600).returncode
         text = (trial / 'run.log').read_text()
@@ -635,11 +966,24 @@ def boot_initial_review():
             traces[path.name] = {'sha256': sha(path), 'instructions': sum(line.startswith('core ') for line in lines),
                                  'faults': sum('INSTR_ACCESS_FAULT' in line for line in lines), 'first': lines[:20]}
         banners = re.findall(r'\*\*\* (SUCCESS|FAILED) \*\*\* \(tohost = (\d+)\) after (\d+) cycles', text)
-        records.append({'name': name, 'elfSha256': sha(elf), 'rc': rc, 'banners': banners,
-                        'allCoresRetired': '[mc_verdict] all 2 core(s) retired instructions' in text,
-                        'traces': traces})
+        want = expected[name]
+        result = verdict(text, bound, 'htif', rc, want.get('mask'))
+        matched = result['outcome'] == want['outcome']
+        if 'programExit' in want:
+            matched = matched and result['programExit'] == want['programExit']
+        if 'tohost' in want:
+            matched = matched and result['tohost'] == want['tohost']
+        if want.get('allCoresRetired'):
+            matched = matched and result['allCoresRetired']
+        if 'hart2Faults' in want:
+            matched = matched and traces.get('trace_rvfi_hart_02.dasm', {}).get('faults', -1) == want['hart2Faults']
+        record = {'name': name, 'elfSha256': sha(elf), 'rc': rc, 'banners': banners,
+                  'traces': traces, 'expected': want, 'matched': matched}
+        record.update(result)
+        records.append(record)
         (out / 'results.json').write_text(json.dumps(records, indent=2))
-    assert records[0]['allCoresRetired'] and records[0]['traces']['trace_rvfi_hart_02.dasm']['faults'] == 0
+    assert all(r['matched'] for r in records), \
+        [(r['name'], r['outcome'], r['expected']) for r in records]
     return 0
 
 
@@ -742,15 +1086,98 @@ def boot_reset_review():
     return 0
 
 
+def build_only_review():
+    out, data = Path(os.environ['TH_OUT_DIR']), Path(os.environ['TH_DATA_DIR'])
+    seed = Path(os.environ['REVIEW_MC_SOURCE_DIR'])
+    target = os.environ['REVIEW_MC_BUILD_TARGET']
+    threads = int(os.environ.get('REVIEW_MC_VERILATOR_THREADS', '1'))
+    runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
+    expected = 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+    assert sha(runtime / 'include/verilated_funcs.h') == expected
+    repo, model = out.parent / 'repo', out.parent / 'model'
+    shutil.copytree(seed, repo, symlinks=True)
+    for relative in ('Makefile', 'verif/regress/soft-ladder-build-harness.sh'):
+        shutil.copy2(data / Path(relative).name, repo / relative)
+    overlay = [p for p in os.environ.get('REVIEW_MC_OVERLAY', '').split(',') if p]
+    for relative in overlay:
+        shutil.copy2(data / Path(relative).name, repo / relative)
+    fields = dict((name, int(value)) for name, value in re.findall(
+        r"^\s*(NrCores|NrHarts)\s*:\s*unsigned'\(\s*(\d+)\s*\)",
+        (repo / 'core/include' / f'{target}_config_pkg.sv').read_text(), re.M))
+    for name in ('NrCores', 'NrHarts'):
+        if name not in fields:
+            raise RuntimeError(f'{target} config package has no {name} field')
+    cores, harts_per_core = fields['NrCores'], fields['NrHarts']
+    sources = {}
+    for base in ('core', 'corev_apu'):
+        for path in sorted((repo / base).rglob('*')):
+            if path.is_file() and path.suffix in ('.sv', '.svh'):
+                rel = str(path.relative_to(repo))
+                origin = seed / rel
+                sources[rel] = {'originalSha256': sha(origin) if origin.is_file() else '0' * 64,
+                                'reviewSha256': sha(path)}
+    # The SV set is already proven identical to the seed; this records the
+    # C++/bootrom side, comparing local-tree hashes (pushed as data) against
+    # the effective build inputs.
+    comparison = {'files': {}, 'mismatches': []}
+    local_hashes = data / 'local-hashes.json'
+    if local_hashes.is_file():
+        for rel, local in sorted(json.loads(local_hashes.read_text()).items()):
+            entry = {'localSha256': local,
+                     'seedSha256': sha(seed / rel) if (seed / rel).is_file() else None,
+                     'reviewSha256': sha(repo / rel) if (repo / rel).is_file() else None}
+            comparison['files'][rel] = entry
+            if entry['reviewSha256'] != local:
+                comparison['mismatches'].append(rel)
+    control = Path('/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt')
+    vlt_args = (f'{control} +incdir+{repo}/corev_apu/tb +incdir+{repo}/corev_apu/src'
+                if control.is_file() else '')
+    command = (f'export VERILATOR_ROOT={runtime} SOFT_LADDER_VERLIB={model} '
+               f'SOFT_LADDER_BUILD_TARGET={target} SOFT_LADDER_VERILATOR_THREADS={threads} '
+               'SOFT_LADDER_BUILD_JOBS=8 SOFT_LADDER_BUILD_CLEAN=1 SOFT_LADDER_ISOLATED=1 '
+               f"SOFT_LADDER_BUILD_VLT_ARGS='{vlt_args}'; "
+               'bash verif/regress/soft-ladder-build-harness.sh B')
+    rc = bash(command, out / 'build.log', repo, 3600)
+    assert rc == 0, f'build-only model build failed for {target}'
+    for rel, entry in sources.items():
+        assert sha(repo / rel) == entry['reviewSha256'], rel
+    dependencies = '\n'.join(p.read_text(errors='replace') for p in model.glob('*.d'))
+    assert str(runtime / 'include/verilated_funcs.h') in dependencies
+    assert '/toolchains/verilator-v5.008/share/verilator/include/verilated_funcs.h' not in dependencies
+    exe = model / 'Variane_testharness'
+    verfiles = (model / 'Variane_testharness__verFiles.dat').read_text()
+    assert re.search(r'--threads\s+1(?:\s|["\'])', verfiles), 'verFiles lacks --threads 1'
+    assert '/core/fetch_B/frontend.sv' in verfiles, 'verFiles lacks fetch_B frontend'
+    assert not re.search(r'/(?:fetch_A|smt_legacy)/|Flist\.smt_legacy', verfiles)
+    manifest = {'target': target, 'harts': cores * harts_per_core, 'cores': cores,
+                'hartsPerCore': harts_per_core, 'qualificationOnly': True, 'rc': rc,
+                'modelSha256': sha(exe), 'model': str(exe), 'sources': sources,
+                'recipe': {'build': command, 'runtimeHeader': expected, 'threads': threads},
+                'seed': str(seed), 'overlay': overlay,
+                'compilerControl': {'path': str(control), 'sha256': sha(control)}
+                                   if control.is_file() else None,
+                'sourceComparison': comparison}
+    (out / 'build-manifest.json').write_text(json.dumps(manifest, indent=2))
+    print(json.dumps({'target': target, 'modelSha256': manifest['modelSha256'],
+                      'sources': len(sources), 'mismatches': comparison['mismatches']}))
+    return 0
+
+
 if __name__ == '__main__':
+    if os.environ.get('REVIEW_MC_BUILD_ONLY') == '1':
+        raise SystemExit(build_only_review())
     if os.environ.get('REVIEW_CLINT_LANE') == '1':
         raise SystemExit(clint_lane_review())
     if os.environ.get('REVIEW_MC_VISIBILITY') == '1':
         raise SystemExit(visibility_review())
     if os.environ.get('REVIEW_MC_BOOT_RELEASE') == '1':
         raise SystemExit(boot_release_review())
+    if os.environ.get('REVIEW_MC_DIRECTED') == '1':
+        raise SystemExit(directed_review())
     if os.environ.get('REVIEW_MC_INITIAL_REVIEW') == '1':
         raise SystemExit(boot_initial_review())
+    if os.environ.get('REVIEW_MC_EXIT_LEAF') == '1':
+        raise SystemExit(exit_leaf_review())
     if os.environ.get('REVIEW_MC_RESET_LEAF') == '1':
         raise SystemExit(boot_reset_leaf())
     if os.environ.get('REVIEW_MC_RESET_PROBE') == '1':

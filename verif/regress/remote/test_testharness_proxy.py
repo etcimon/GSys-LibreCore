@@ -152,6 +152,34 @@ class SourceProfileVerdictTests(unittest.TestCase):
             with self.subTest(rc=rc, output=output, events=events, counts=counts):
                 self.assertFalse(source_passed(rc, output, events, counts, 0x80201000, 0x80201080))
 
+    def test_four_harts_over_two_cores_need_every_mark_and_both_cores(self):
+        from run_opensbi_source_review import hart_progress, source_passed
+        scope = 'TOP.ariane_testharness.i_cluster.gen_core[%d].i_ariane.gen_std.i_cva6.issue_stage_i.i_scoreboard'
+        progress_lines = ''.join(f'[smt-progress] scope={scope % c} hart={h} retired={10 * (2 * c + h + 1)} last_pc=0\n'
+                                 for c in (0, 1) for h in (0, 1))
+        log = ('[rvfi_tracer] INFO: Simulation terminated after 800 cycles\n' + progress_lines +
+               '*** [mc_verdict] all 2 core(s) retired instructions\n')
+        progress = hart_progress(log, 4, 2)
+        self.assertEqual(progress, {0: 10, 1: 20, 2: 30, 3: 40})
+        # A scope without gen_core[] collapses onto core 0 and can never satisfy harts 2/3.
+        flat = ''.join(f'[smt-progress] scope=TOP.sb{c} hart={h} retired=1\n' for c in (0, 1) for h in (0, 1))
+        self.assertEqual(hart_progress(flat, 4, 2), {0: 1, 1: 1})
+        # The anchor form (no scope) still reads as harts 0 and 1.
+        self.assertEqual(hart_progress('[smt-progress] hart=0 retired=2\n[smt-progress] hart=1 retired=3\n', 2, 1), {0: 2, 1: 3})
+        marks = lambda n: '\n'.join(f'1 0x80200000 (0x00303023) mem {a:#x} 0x1'
+                                    for a in [0x80201000] + [0x80201080 + 8 * h for h in range(n)])
+        self.assertTrue(source_passed(0, log, marks(4), progress, 0x80201000, 0x80201080, 4, 2))
+        failures = [(log, marks(3), progress),
+                    (log, marks(4), {0: 10, 1: 20, 2: 30}),
+                    (log.replace('*** [mc_verdict] all 2 core(s) retired instructions\n', ''), marks(4), progress),
+                    (log + '*** [mc_verdict] FAIL: core(s) retired no instruction, retired_mask=01 (exit code 127)\n',
+                     marks(4), {0: 10, 1: 20})]
+        for output, events, counts in failures:
+            with self.subTest(output=output[-60:], events=events[-40:], counts=counts):
+                self.assertFalse(source_passed(0, output, events, counts, 0x80201000, 0x80201080, 4, 2))
+        # A two-hart profile ignores an unrelated fifth mark and never needs the cluster verdict.
+        self.assertTrue(source_passed(0, log.splitlines()[0], marks(3), {0: 1, 1: 1}, 0x80201000, 0x80201080))
+
 
 class BalanceMetricsTests(unittest.TestCase):
     def fixture(self):

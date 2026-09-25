@@ -213,6 +213,7 @@ module g6lc_iq
       automatic logic is_ld;
       automatic logic older_unresolved_st;
       automatic logic is_csr;
+      automatic logic is_amo;
       // rs3 participates only when the entry actually has an FP third source;
       // otherwise rs3_rdy is set at dispatch and the term is inert.
       ready[e] = q_chain[e].valid && q_chain[e].rs1_rdy && q_chain[e].rs2_rdy &&
@@ -244,12 +245,21 @@ module g6lc_iq
       // side effects are global). Plain CSR accesses are covered by the
       // dual-entry csr_buffer's credit in issue_read_operands instead.
       is_csr = (q_chain[e].sbe.fu == CSR);
+      // An atomic also issues only at the commit head. The store unit holds
+      // an issued AMO in a one-entry buffer and is not ready for any other
+      // store until that AMO commits; an AMO issued ahead of an older store
+      // therefore blocks the store it must wait for (OpenSBI coldboot_lottery
+      // amoswap.d behind `sd a5,-32(s0)` on g6lc64_ooo_int2). At commit the
+      // AMO waits for the drained store buffer anyway, so the head rule costs
+      // nothing it would not already pay.
+      is_amo = CVA6Cfg.RVA && (q_chain[e].sbe.fu == STORE) && ariane_pkg::is_amo(q_chain[e].sbe.op);
       ready[e] = ready[e] &&
           !(is_ld && (mem_stall_i ||
                       (older_unresolved_st && !q_chain[e].may_bypass))) &&
           !(is_csr &&
             !(q_chain[e].sbe.op inside {CSR_READ, CSR_WRITE, CSR_SET, CSR_CLEAR}) &&
-            (q_chain[e].sbe.trans_id != commit_ptr_i));
+            (q_chain[e].sbe.trans_id != commit_ptr_i)) &&
+          !(is_amo && (q_chain[e].sbe.trans_id != commit_ptr_i));
     end
     // The age matrix is a strict total order over the live entries
     // (ooo_iq_age_acyclic/ooo_iq_age_total below), so the cascade's

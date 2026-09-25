@@ -269,7 +269,7 @@ def main():
     rtl=[str(source/name) for name in names if name!='g6lc_cluster.sv' and not name.endswith('.svh')]+[str(source/'incl.sv')]
     configurations=[]
     for np,d in ([(2,8)] if before else [(1,8),(2,8),(4,8),(2,16)]):
-        cases=[(0,None),(1,'IQ_VALID'),(2,'IQ_ISSUE'),(3,'IQ_CREDIT')] if before else [(n,None) for n in range(10)]
+        cases=[(0,None),(1,'IQ_VALID'),(2,'IQ_ISSUE'),(3,'IQ_CREDIT')] if before else [(n,None) for n in range(11)]
         configurations.append(('iq',f'n{np}-d{d}',[f'-GNP={np}',f'-GDEPTH={d}'],cases))
     for d,nw in ([(4,2)] if before else [(2,1),(4,2),(8,3)]):
         cases=[(0,None),(1,'MSHR_ADMISSION'),(2,'MSHR_ADMISSION'),(3,'MSHR_RETENTION'),(4,None)] if before else [(n,None) for n in range(5)]
@@ -325,7 +325,7 @@ def main():
     elif os.environ.get('REVIEW_RTL_CSRBUF')=='1':
         # Per-tid CSR address table: out-of-order issue, commit-order lookup,
         # ready as table credit, cancel/flush drop; depth-1 identity in order.
-        configurations=[('csrbuf','ooo',['-GOOO=1'],[(n,None) for n in range(4)]),
+        configurations=[('csrbuf','ooo',['-GOOO=1'],[(n,None) for n in range(10) if n!=4]),
                         ('csrbuf','inorder',['-GOOO=0'],[(4,None)])]
     elif os.environ.get('REVIEW_RTL_TAGE')=='1':
         # Predictor-context ownership: per-slot tagged provider, update-fold
@@ -542,7 +542,8 @@ def main():
             elif kind=='ghist':trials+=[(0,True,'GHIST_FOLD_TRAIN')]
             elif kind=='ckpt':trials+=[(0,True,'CKPT_MULTI'),(1,True,'CKPT_DOUBLE_ADV'),(3,True,'CKPT_DESYNC_RV'),(5,True,'CKPT_DROPPED_OWNER'),(6,True,'CKPT_EMPTY_RESTORE_HEAD')]
             elif kind=='csrbuf':
-                trials+=[(n,True,('CSRBUF_ADDR','CSRBUF_READY','CSRBUF_CANCEL','CSRBUF_FLUSH','CSRBUF_INORDER')[n]) for n,_ in cases]
+                trials+=[(n,True,('CSRBUF_ADDR','CSRBUF_READY','CSRBUF_CANCEL','CSRBUF_FLUSH','CSRBUF_INORDER','CSRBUF_PIPE',
+                                 'CSRBUF_COMMIT_ALLOC','CSRBUF_CANCEL_ALLOC','CSRBUF_FLUSH_ALLOC','CSRBUF_MATCHED_CREDIT')[n]) for n,_ in cases]
             elif kind=='sbhead':
                 trials+=[(0,True,'SBHEAD_ORDER'),(1,True,'SBHEAD_WRAP'),(2,True,'SBHEAD_HOLE')]
             elif kind=='csrbank':
@@ -570,7 +571,7 @@ def main():
                              (2,True,'MMUCTX_MIR_H1_FAULT'),(3,True,'MMUCTX_EN_H0_CLEAN')]
             else:
                 trials.append((0,True,{'iq':'IQ_ISSUE','mshr':'MSHR_ADMISSION','decay':'TAGE_DECAY','incl':'L3_PAYLOAD','commit':'COMMIT4_TID'}[kind]))
-                if kind=='iq':trials+=[(5,True,'IQ_UNRESOLVED_GATE'),(6,True,'IQ_BYPASS'),(7,True,'IQ_RESOLVED_PASS'),(8,True,'IQ_STORE_OOO'),(9,True,'IQ_CSR_HEAD')]
+                if kind=='iq':trials+=[(5,True,'IQ_UNRESOLVED_GATE'),(6,True,'IQ_BYPASS'),(7,True,'IQ_RESOLVED_PASS'),(8,True,'IQ_STORE_OOO'),(9,True,'IQ_CSR_HEAD'),(10,True,'IQ_AMO_HEAD')]
                 if kind=='incl':trials+=[(1,True,'L3_EVICT_NO_BACKPRESSURE'),(2,True,'L3_EVICT_LOST_B')]
         for scenario,negative,error in trials:
             cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])+(['+vcd'] if os.environ.get('REVIEW_RTL_TRACE')=='1' else [])

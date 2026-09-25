@@ -30,18 +30,29 @@ def run(command, log, cwd=None, env=None, timeout=300):
     return result.returncode
 
 
-def source_passed(rc, log, trace, progress, tohost, seen):
+def profile_shape():
+    """Hart/core geometry of the strict profile under review (default: the
+    protected two-hart, single-core g6lc64_smt2 shape)."""
+    harts = int(os.environ.get('SOURCE_REVIEW_HARTS', '2'))
+    cores = int(os.environ.get('SOURCE_REVIEW_CORES', '1'))
+    if harts < 2 or cores < 1 or harts % cores:
+        raise ValueError('strict profile needs >= 2 harts evenly spread over >= 1 core')
+    return harts, cores
+
+
+def source_passed(rc, log, trace, progress, tohost, seen, harts=2, cores=1):
     pattern = re.compile(r'^1 .*\bmem (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)')
     lines = trace.splitlines() if isinstance(trace, str) else trace
-    required = {tohost, seen, seen + 8}
+    required = {tohost} | {seen + 8 * h for h in range(harts)}
     observed = set()
     for line in lines:
         match = pattern.match(line)
         if match and int(match[2], 16) == 1 and int(match[1], 16) in required:
             observed.add(int(match[1], 16))
+    all_cores = cores == 1 or f'[mc_verdict] all {cores} core(s) retired instructions' in log
     return (rc == 0 and '[rvfi_tracer] INFO: Simulation terminated' in log
-            and progress.get(0, 0) > 0 and progress.get(1, 0) > 0
-            and len(required) == 3 and required <= observed)
+            and all(progress.get(h, 0) > 0 for h in range(harts))
+            and len(required) == harts + 1 and required <= observed and all_cores)
 
 
 def validate_model_manifest(manifest, observed_hash, experimental):
@@ -62,8 +73,8 @@ def validate_model_manifest(manifest, observed_hash, experimental):
     if experimental != (reviewed or sibling):
         raise ValueError('experimental mode and model provenance disagree')
     if reviewed:
-        if not qualification or manifest.get('harts') != 2 or manifest.get('rc') != 0:
-            raise ValueError('experimental model must be a successful two-hart qualification build')
+        if not qualification or manifest.get('harts') != profile_shape()[0] or manifest.get('rc') != 0:
+            raise ValueError('experimental model must be a successful qualification build with the profile hart count')
         for entry in sources.values():
             if not isinstance(entry, dict) or any(
                 not isinstance(entry.get(key), str) or not re.fullmatch(r'[0-9a-f]{64}', entry[key])
@@ -99,8 +110,10 @@ def source_outcome(rc, text, passed, cap):
 EXPECTED_COMPILER_CONTROL_SHA256 = 'be176b279ada076a3459d8bd6509e0946ccf0994d5c35a092bede308bba8c8ff'
 EXPECTED_COMPILER_CONTROL_NAME = 'split-counter.vlt'
 # Sibling targets of the protected g6lc64_smt2 profile that may run the same
-# firmware as EXPERIMENTAL models only (SOURCE_REVIEW_EXPERIMENTAL=1).
-EXPERIMENTAL_TARGETS = frozenset({'g6lc64_smt2_ooo_int'})
+# firmware as EXPERIMENTAL models only (SOURCE_REVIEW_EXPERIMENTAL=1). The
+# two-core integer package runs its own four-hart profile (SOURCE_REVIEW_HARTS=4,
+# SOURCE_REVIEW_CORES=2, ariane-ooo-int2.dts), never the anchor firmware.
+EXPERIMENTAL_TARGETS = frozenset({'g6lc64_smt2_ooo_int', 'g6lc64_ooo_int2'})
 
 
 def compiler_control_failures(control, verfiles, exists, digest, waive):
@@ -256,6 +269,8 @@ def main():
         record = json.loads(profile.read_text())
         if sha(Path(record['firmware'])) != record['firmwareSha256'] or sha(Path(record['payload'])) != record['payloadSha256']:
             raise RuntimeError('frozen source-profile artifact changed')
+        if (record.get('harts', 2), record.get('cores', 1)) != profile_shape():
+            raise RuntimeError('frozen source profile was built for a different hart/core shape')
         record.update(parentProfile=str(profile), model=str(model), modelSha256=sha(model), runnerSha256=sha(Path(__file__)))
         record.update(provenance)
         record['buildRecipe'] = manifest.get('recipe')
@@ -263,11 +278,26 @@ def main():
             record['compilerControl'] = {'path': control, 'sha256': sha(control_path)}
         (out / 'profile.json').write_text(json.dumps(record, indent=2))
         return execute(model, record, out)
-    if experimental:
+    harts, cores = profile_shape()
+    dts_name = os.environ.get('SOURCE_REVIEW_DTS', 'ariane-smt2.dts')
+    config_name = os.environ.get('SOURCE_REVIEW_CONFIG_PKG', 'g6lc64_smt2_config_pkg.sv')
+    platform_isa = os.environ.get('SOURCE_REVIEW_ISA', 'rv64imafdc_zicsr_zifencei')
+    anchor_shape = (harts, cores, dts_name, config_name) == (2, 1, 'ariane-smt2.dts', 'g6lc64_smt2_config_pkg.sv')
+    # The anchor firmware is built once and frozen; an experimental model must
+    # reuse that frozen profile rather than rebuild it. A non-anchor shape has
+    # no frozen profile of its own, so its first firmware build is admitted
+    # only for an experimental target and is itself labelled experimental.
+    if experimental and anchor_shape:
         raise RuntimeError('experimental models must reuse a frozen source profile')
+    if not anchor_shape and not experimental_target:
+        raise RuntimeError('a non-anchor profile shape requires an experimental target')
     source = out / 'opensbi'
     source.mkdir()
     archive = data / 'opensbi-v1.5-source-455de672.tar'
+    if not archive.is_file() and os.environ.get('SOURCE_REVIEW_ARCHIVE'):
+        # The pinned upstream tarball is large; a run may point at an existing
+        # remote copy. The pax commit check below still decides its identity.
+        archive = Path(os.environ['SOURCE_REVIEW_ARCHIVE'])
     with tarfile.open(archive) as tar:
         tar.getmembers()
         if tar.pax_headers.get('comment') != '455de672dd7c2aa1992df54dfb08dc11abbc1b1a':
@@ -290,15 +320,16 @@ def main():
     configs = out / 'profile/core/include'
     configs.mkdir(parents=True)
     shutil.copy2(data / 'dts_to_dtb.py', helpers / 'dts_to_dtb.py')
-    shutil.copy2(data / 'g6lc64_smt2_config_pkg.sv', configs / 'g6lc64_smt2_config_pkg.sv')
-    dtb = out / 'ariane-smt2.dtb'
-    if run([sys.executable, str(helpers / 'dts_to_dtb.py'),
-            '-i', str(data / 'ariane-smt2.dts'), '-o', str(dtb)], out / 'dtb.log'):
+    shutil.copy2(data / config_name, configs / config_name)
+    dtb = out / (Path(dts_name).stem + '.dtb')
+    if run([sys.executable, str(helpers / 'dts_to_dtb.py'), '-i', str(data / dts_name),
+            '--config-pkg', str(configs / config_name), '-o', str(dtb)], out / 'dtb.log'):
         raise RuntimeError('DTB validation failed')
     payload = out / 'payload.elf'
     binary = out / 'payload.bin'
+    strict_define = '-DG6LC_STRICT_DUAL' if harts == 2 else f'-DG6LC_STRICT_HARTS={harts}'
     compilation = ['riscv-none-elf-gcc', '-march=rv64imac_zicsr', '-mabi=lp64', '-mcmodel=medany',
-                   '-nostdlib', '-nostartfiles', '-static', '-Wl,--no-relax', '-DG6LC_STRICT_DUAL',
+                   '-nostdlib', '-nostartfiles', '-static', '-Wl,--no-relax', strict_define,
                    '-T', str(data / 'link.ld'), '-o', str(payload), str(data / 'smt2_sbi_dual.S')]
     if run(compilation, out / 'payload-build.log') or run(
             ['riscv-none-elf-objcopy', '-O', 'binary', str(payload), str(binary)], out / 'objcopy.log'):
@@ -308,7 +339,7 @@ def main():
     command = ['make', '-C', str(source), f'O={build}', 'PLATFORM=generic',
                'FW_TEXT_START=0x80000000', 'FW_PAYLOAD_OFFSET=0x200000',
                f'FW_PAYLOAD_PATH={binary}', f'FW_FDT_PATH={dtb}', 'CROSS_COMPILE=riscv-none-elf-',
-               'OPENSBI_ALLOW_NO_PIE=y', 'PLATFORM_RISCV_ISA=rv64imafdc_zicsr_zifencei', '-j8']
+               'OPENSBI_ALLOW_NO_PIE=y', f'PLATFORM_RISCV_ISA={platform_isa}', '-j8']
     (out / 'commands.json').write_text(json.dumps({'payload': compilation, 'firmware': command}, indent=2))
     if run(command, out / 'firmware-build.log'):
         raise RuntimeError('source OpenSBI build failed')
@@ -316,7 +347,9 @@ def main():
     record = {'upstreamCommit': '455de672dd7c2aa1992df54dfb08dc11abbc1b1a',
               'runnerSha256': sha(Path(__file__)),
               'archiveSha256': sha(archive), 'protectedSourceHashes': original_hashes,
-              'platformPatchHashes': patch_hashes, 'dtsSha256': sha(data / 'ariane-smt2.dts'),
+              'platformPatchHashes': patch_hashes, 'dts': dts_name, 'dtsSha256': sha(data / dts_name),
+              'configPkg': config_name, 'configPkgSha256': sha(data / config_name),
+              'harts': harts, 'cores': cores, 'platformIsa': platform_isa, 'strictDefine': strict_define,
               'dtbSha256': sha(dtb), 'payloadSourceSha256': sha(data / 'smt2_sbi_dual.S'),
               'linkerSha256': sha(data / 'link.ld'), 'payloadSha256': sha(payload),
               'firmwareSha256': sha(elf), 'modelSha256': sha(model),
@@ -349,8 +382,25 @@ def compare_reference(reference, current, extend=False):
     return result
 
 
+def hart_progress(text, harts, cores):
+    """Global-hart retirement counts from the per-scoreboard `[smt-progress]` lines.
+
+    Each physical core's scoreboard reports its local hart indices; a multi-core
+    cluster scope carries `gen_core[<c>]`, so the global id is c*NrHarts + h.
+    A repeated (scope, hart) pair keeps the larger count (a re-armed report never
+    hides a retired hart)."""
+    per_core = harts // cores
+    progress = {}
+    for scope, h, n in re.findall(r'\[smt-progress\](?: scope=(\S+))? hart=(\d+) retired=(\d+)', text):
+        core = re.search(r'gen_core\[(\d+)\]', scope)
+        hart = (int(core[1]) if core else 0) * per_core + int(h)
+        progress[hart] = max(progress.get(hart, 0), int(n))
+    return progress
+
+
 def trial_verdict(rc, text, traces, symbols, cap, reference=None, extend=False):
-    progress = {int(h): int(n) for h, n in re.findall(r'\[smt-progress\].*hart=(\d+) retired=(\d+)', text)}
+    harts, cores = profile_shape()
+    progress = hart_progress(text, harts, cores)
     addresses = re.findall(r'^([0-9a-fA-F]+)\s+\w\s+tohost$', symbols, re.M)
     seen = re.findall(r'^([0-9a-fA-F]+)\s+\w\s+strict_seen$', symbols, re.M)
 
@@ -359,8 +409,8 @@ def trial_verdict(rc, text, traces, symbols, cap, reference=None, extend=False):
             with trace.open(errors='replace') as source:
                 yield from source
 
-    passed = len(addresses) == len(seen) == len(traces) == 1 and source_passed(
-        rc, text, lines(), progress, int(addresses[0], 16), int(seen[0], 16))
+    passed = len(addresses) == len(seen) == 1 and len(traces) == cores and source_passed(
+        rc, text, lines(), progress, int(addresses[0], 16), int(seen[0], 16), harts, cores)
     outcome = source_outcome(rc, text, passed, cap)
     result = {'rc': rc, 'outcome': outcome, 'timedOut': outcome == 'timeout',
               'strictDualPassed': outcome == 'pass', 'retiredByHart': progress,
@@ -370,9 +420,9 @@ def trial_verdict(rc, text, traces, symbols, cap, reference=None, extend=False):
               'elapsedVerdicts': re.findall(r'\*\*\* (?:SUCCESS|FAILED).*', text)}
     if reference:
         try:
-            if len(traces) != 1:
-                raise ValueError('expected one physical-core trace')
-            comparison = compare_reference(Path(reference), traces[0], extend)
+            if len(traces) != cores:
+                raise ValueError(f'expected {cores} physical-core trace(s)')
+            comparison = compare_reference(Path(reference), sorted(traces)[0], extend)
         except (OSError, ValueError) as error:
             comparison = {'path': str(reference), 'status': 'error', 'error': str(error),
                           'independentArchitecturalOracle': False}
@@ -415,8 +465,11 @@ def execute(model, record, out):
             raise ValueError('invalid diagnostic physical address')
         args.insert(-1, f'+smt_mem_watch={watch:x}')
     wall = int(os.environ.get('SOURCE_REVIEW_WALL_SECONDS', '900'))
-    if not 1 <= wall <= 3600:
-        raise ValueError('wall budget must be between 1 and 3600 seconds')
+    # A multi-core model simulates proportionally slower; its wall budget may
+    # stretch to four hours, the single-core anchor keeps its one-hour ceiling.
+    wall_limit = 14400 if profile_shape()[1] > 1 else 3600
+    if not 1 <= wall <= wall_limit:
+        raise ValueError(f'wall budget must be between 1 and {wall_limit} seconds')
     if cap <= 0:
         raise ValueError('cycle budget must be positive')
     record.update(cycleBudget=cap, wallBudgetSeconds=wall, command=args,

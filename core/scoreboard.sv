@@ -890,7 +890,7 @@ module scoreboard #(
       smt_flow_idle = (|commit_ack_i || flush_i) ? 0 : smt_flow_idle + 1;
       for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++)
         if (commit_ack_i[p])
-          $display("[smt-flow] retire cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h rd=%0d result=%h valid=%b drop=%b ex=%b replay=%b",
+          $display("[smt-flow] retire cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h rd=%0d result=%h valid=%b drop=%b ex=%b replay=%b scope=%m",
                    smt_flow_cycle, p, commit_sel_slot[p], smt_flow_generation[commit_sel_slot[p]],
                    commit_instr_o[p].hart_id, commit_instr_o[p].pc, commit_instr_o[p].rd[4:0],
                    commit_instr_o[p].result, commit_instr_o[p].valid,
@@ -898,14 +898,14 @@ module scoreboard #(
                    mem_q[commit_sel_slot[p]].replay);
       for (int p = 0; p < CVA6Cfg.NrWbPorts; p++)
         if (wt_valid_i[p])
-          $display("[smt-flow] wb cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h issued=%b cancelled=%b data=%h ex=%b",
+          $display("[smt-flow] wb cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h issued=%b cancelled=%b data=%h ex=%b scope=%m",
                    smt_flow_cycle, p, trans_id_i[p], smt_flow_generation[trans_id_i[p]],
                    mem_q[trans_id_i[p]].sbe.hart_id, mem_q[trans_id_i[p]].sbe.pc,
                    mem_q[trans_id_i[p]].issued, mem_q[trans_id_i[p]].cancelled, wbdata_i[p], ex_i[p].valid);
       for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
         if (decoded_instr_valid_i[p] && decoded_instr_ack_o[p] && !flush_unissued_instr_i) begin
           smt_flow_generation[issue_pointer[p]]++;
-          $display("[smt-flow] alloc cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h insn=%h fu=%0d op=%0d rd=%0d rs1=%0d rs2=%0d",
+          $display("[smt-flow] alloc cycle=%0d port=%0d id=%0d gen=%0d hart=%0d pc=%h insn=%h fu=%0d op=%0d rd=%0d rs1=%0d rs2=%0d scope=%m",
                    smt_flow_cycle, p, issue_pointer[p], smt_flow_generation[issue_pointer[p]],
                    decoded_instr_i[p].hart_id, decoded_instr_i[p].pc, orig_instr_i[p],
                    decoded_instr_i[p].fu, decoded_instr_i[p].op, decoded_instr_i[p].rd,
