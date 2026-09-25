@@ -61,7 +61,7 @@ module g6lc_ooo_snoop_filter #(
 
   tc_sram #(
       .NumWords(NR_ENTRIES), .DataWidth(STORAGE_WIDTH), .ByteWidth(8),
-      .NumPorts(1), .Latency(1), .SimInit("none")
+      .NumPorts(1), .Latency(1), .SimInit("none"), .ImplKey("g6lc_coh_signature")
   ) i_presence (
       .clk_i, .rst_ni, .req_i(request), .we_i(write_enable),
       .addr_i(address), .wdata_i(write_data), .be_i(byte_enable), .rdata_o(read_data)

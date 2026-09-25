@@ -248,7 +248,11 @@ package cva6_config_pkg;
       L2ByteSize: unsigned'(262144),
       L2SetAssoc: unsigned'(8),
       L2LineWidth: unsigned'(512),
-      L2MshrDepth: unsigned'(2),
+      // Credit-consistent with the coherence hub's four shared transaction
+      // slots: tb_g6lc_coherence_credits measured 51 MSHR-full stall cycles
+      // and a 92-cycle drain for an eight-read burst at depth 2 against zero
+      // stalls and 77 cycles at depth 4, with fills capped at the hub credits.
+      L2MshrDepth: unsigned'(4),
       L2DataBanks: unsigned'(4),
       L2RoundRobinEn: bit'(0),
       // U6.1 SMT2

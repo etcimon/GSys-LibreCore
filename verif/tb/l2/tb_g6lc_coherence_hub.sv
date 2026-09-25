@@ -1561,3 +1561,163 @@ module tb_g6lc_coherence_l2;
     $finish;
   end
 endmodule
+
+module tb_g6lc_coherence_credits;
+  import g6lc_coherence_pkg::*;
+  import g6lc_l2_tb_pkg::*;
+  parameter int MSHR_DEPTH=2;
+  parameter int READS_PER_CORE=4;
+  parameter int MEM_LATENCY=8;
+  localparam int CORES=2;
+  localparam int DRAM_DEPTH=8;
+  localparam addr_t BASE=64'h8000_0000;
+  logic clk=0,rst_n=0;
+  req_t [CORES-1:0] requests;
+  resp_t [CORES-1:0] responses;
+  req_t hub_req,dram_req;
+  resp_t hub_rsp,dram_rsp;
+  coh_inval_t [CORES-1:0] invalidations;
+  logic [CORES-1:0] inv_ready='1;
+  int cycle=0,reads_done=0;
+  int max_fills=0,max_ar_live=0,mshr_stall_cycles=0;
+  int first_ar_cycle=-1,last_r_cycle=-1;
+  int r_seen[CORES][16];
+  bit negative;
+  typedef struct {id_t id; addr_t addr; logic [7:0] len; int issue;} dram_entry_t;
+  dram_entry_t dram_q[DRAM_DEPTH];
+  int dram_head=0,dram_count=0;
+  logic [7:0] dram_beat=0;
+
+  g6lc_coherence_hub #(.NR_CORES(2),.MAX_OUTSTANDING(4),.INVAL_DEPTH(2),
+      .LINE_BYTES(16),.SNOOP_FILTER_EN(1),.SNOOP_FILTER_ENTRIES(128),
+      .POLICY(config_pkg::COH_OOO),.axi_req_t(req_t),.axi_resp_t(resp_t)) hub (
+      .clk_i(clk),.rst_ni(rst_n),.core_req_i(requests),.core_resp_o(responses),
+      .mem_req_o(hub_req),.mem_resp_i(hub_rsp),.inv_core_o(invalidations),
+      .inv_core_ready_i(inv_ready),.lr_valid_i(1'b0),.lr_addr_i('0),.lr_core_i('0),
+      .coh_inv_fire_o(),.coh_sf_hit_o(),.coh_sf_overapprox_o(),.coh_arb_starve_o(),
+      .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o());
+  g6lc_l2_top #(.Enable(1'b1),.BYTE_SIZE(4096),.SET_ASSOC(4),
+      .LINE_WIDTH(512),.MSHR_DEPTH(MSHR_DEPTH),.DATA_BANKS(2),.FAIR_WRITES(1),
+      .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
+      .axi_req_t(req_t),.axi_resp_t(resp_t)) l2 (
+      .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
+      .mst_req_o(dram_req),.mst_resp_i(dram_rsp),
+      .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
+      .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
+      .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o());
+
+  function automatic data_t model_data(input addr_t a);
+    return {a[31:0],~a[31:0]} ^ 64'h5a5a_a5a5_1234_9876;
+  endfunction
+  function automatic addr_t read_addr(input int c,input int k);
+    return BASE+64'((c*READS_PER_CORE+k)*64);
+  endfunction
+
+  always_comb begin
+    dram_rsp='0;
+    dram_rsp.ar_ready=dram_count<DRAM_DEPTH;
+    dram_rsp.aw_ready=1'b1;
+    dram_rsp.r_valid=dram_count>0 && cycle-dram_q[dram_head].issue>=MEM_LATENCY;
+    dram_rsp.r='{id:dram_q[dram_head].id,
+      data:model_data(dram_q[dram_head].addr+64'(dram_beat)*8),
+      resp:0,last:dram_beat==dram_q[dram_head].len,user:0};
+  end
+  always_ff @(posedge clk or negedge rst_n) begin
+    if(!rst_n)begin
+      dram_head<=0;dram_count<=0;dram_beat<=0;
+    end else begin
+      int push,pop;
+      push=dram_req.ar_valid && dram_rsp.ar_ready;
+      pop=dram_rsp.r_valid && dram_req.r_ready && dram_rsp.r.last;
+      if(dram_req.aw_valid && dram_rsp.aw_ready)$fatal(1,"COH_CREDIT_AW");
+      if(push)begin
+        int tail;
+        tail=(dram_head+dram_count)%DRAM_DEPTH;
+        dram_q[tail]<='{id:dram_req.ar.id,addr:dram_req.ar.addr,
+          len:dram_req.ar.len,issue:cycle};
+      end
+      if(pop)begin dram_head<=(dram_head+1)%DRAM_DEPTH;dram_beat<=0;end
+      else if(dram_rsp.r_valid && dram_req.r_ready)dram_beat<=dram_beat+1'b1;
+      dram_count<=dram_count+push-pop;
+    end
+  end
+
+  always @(posedge clk) begin
+    if(rst_n)begin
+      int l2_fills,ar_live;
+      cycle++;
+      l2_fills=$countones(l2.gen_l2.fill_act_q);
+      ar_live=0;
+      for(int s=0;s<4;s++)ar_live+=hub.gen_cluster.ar_ot_q[s].valid;
+      if(l2_fills>max_fills)max_fills=l2_fills;
+      if(ar_live>max_ar_live)max_ar_live=ar_live;
+      if(hub_req.ar_valid && !hub_rsp.ar_ready && l2.gen_l2.mshr_full)mshr_stall_cycles++;
+      if(ar_live>4)$fatal(1,"COH_CREDIT_AR_BOUND live=%0d",ar_live);
+      if(l2_fills>4)$fatal(1,"COH_CREDIT_FILL_BOUND fills=%0d",l2_fills);
+      if(cycle>4000)$fatal(1,"COH_CREDIT_WATCHDOG reads=%0d",reads_done);
+      for(int c=0;c<CORES;c++)begin
+        if(requests[c].ar_valid && responses[c].ar_ready && first_ar_cycle<0)
+          first_ar_cycle=cycle;
+        if(responses[c].r_valid && requests[c].r_ready)begin
+          int id,beat;
+          addr_t expected;
+          id=int'(responses[c].r.id);
+          if(id>=READS_PER_CORE)$fatal(1,"COH_CREDIT_ID core=%0d id=%0d",c,id);
+          beat=r_seen[c][id];
+          expected=read_addr(c,id)+64'(beat)*8;
+          if(responses[c].r.data!=(model_data(expected)^64'(negative)))
+            $fatal(1,"COH_CREDIT_DATA core=%0d id=%0d beat=%0d",c,id,beat);
+          if(responses[c].r.resp!=0)$fatal(1,"COH_CREDIT_RESP core=%0d id=%0d",c,id);
+          if(responses[c].r.last!=(beat==1))$fatal(1,"COH_CREDIT_LAST core=%0d id=%0d",c,id);
+          r_seen[c][id]++;
+          if(responses[c].r.last)begin reads_done++;last_r_cycle=cycle;end
+        end
+      end
+    end
+  end
+
+  task automatic tick;#2;clk=1;#2;clk=0;#2;endtask
+  initial begin
+    int issued[CORES];
+    bit taken[CORES];
+    bit done_issuing;
+    negative=$test$plusargs("oracle_negative");
+    requests='0;
+    for(int c=0;c<CORES;c++)begin
+      requests[c].r_ready=1'b1;requests[c].b_ready=1'b1;issued[c]=0;taken[c]=0;
+    end
+    for(int c=0;c<CORES;c++)for(int i=0;i<16;i++)r_seen[c][i]=0;
+    repeat(3)tick();rst_n=1;repeat(132)tick();
+    done_issuing=0;
+    for(int n=0;n<2000 && !done_issuing;n++)begin
+      for(int c=0;c<CORES;c++)begin
+        if(!requests[c].ar_valid&&issued[c]<READS_PER_CORE)begin
+          requests[c].ar='0;
+          requests[c].ar.id=id_t'(issued[c]);
+          requests[c].ar.addr=read_addr(c,issued[c]);
+          requests[c].ar.len=1;requests[c].ar.size=3;
+          requests[c].ar.burst=1;requests[c].ar.cache=4'hf;
+          requests[c].ar_valid=1'b1;
+        end
+        taken[c]=0;
+      end
+      #1;
+      for(int c=0;c<CORES;c++)
+        taken[c]=requests[c].ar_valid&&responses[c].ar_ready;
+      tick();
+      done_issuing=1;
+      for(int c=0;c<CORES;c++)begin
+        if(taken[c])begin requests[c].ar_valid=1'b0;issued[c]++;end
+        if(issued[c]<READS_PER_CORE||requests[c].ar_valid)done_issuing=0;
+      end
+    end
+    if(!done_issuing)$fatal(1,"COH_CREDIT_AR_TIMEOUT");
+    for(int n=0;n<4000 && reads_done!=2*READS_PER_CORE;n++)tick();
+    if(reads_done!=2*READS_PER_CORE)
+      $fatal(1,"COH_CREDIT_WATCHDOG reads_done=%0d",reads_done);
+    $display("COH_CREDIT_PASS mshr=%0d reads=%0d max_fills=%0d max_ar_live=%0d mshr_stall_cycles=%0d drain=%0d",
+      MSHR_DEPTH,2*READS_PER_CORE,max_fills,max_ar_live,mshr_stall_cycles,
+      last_r_cycle-first_ar_cycle);
+    $finish;
+  end
+endmodule

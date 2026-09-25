@@ -77,6 +77,9 @@ module perf_counters
     input logic ooo_rob_full_i,
     input logic ooo_lsq_stall_i,
     input logic ooo_stl_forward_i,
+    // COH_OOO probes (tie 0 when unused)
+    input logic ooo_phys_replay_i,   // load marked for replay by a modification event
+    input logic coh_inval_apply_i,   // L1 coherence invalidation applied (WT return path)
     // Group 2: SoC memory hierarchy (tie 0 when unused)
     input logic l2_miss_i,
     input logic l3_hit_i,
@@ -283,6 +286,8 @@ module perf_counters
       event_group[h][3'd2][5'd2] = pf_issue_i && act;  // server PF issue
       event_group[h][3'd2][5'd3] = pf_train_i && act;  // server PF train
       event_group[h][3'd2][5'd4] = l2_miss_i && act;   // L2 miss (cluster)
+      event_group[h][3'd2][5'd5] = coh_inval_apply_i && act;  // L1 coherence invalidation applied
+      event_group[h][3'd2][5'd6] = ooo_phys_replay_i && act;  // COH_OOO load replay after modification
 
       // Group 3: FSE / deep speculation recovery (mhpmevent[7:5]==3)
       event_group[h][3'd3][5'd0] = resolved_branch_i.valid && resolved_branch_i.is_mispredict && brh;

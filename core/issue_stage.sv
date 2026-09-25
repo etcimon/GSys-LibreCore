@@ -198,6 +198,8 @@ module issue_stage
     output logic ooo_rob_full_o,
     output logic ooo_lsq_stall_o,
     output logic ooo_stl_forward_o,
+    // COH_OOO: a not-yet-retired load was marked for replay by a modification event
+    output logic ooo_phys_replay_o,
     // Information dedicated to RVFI - RVFI
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] rvfi_issue_pointer_o,
     // Information dedicated to RVFI - RVFI
@@ -261,6 +263,7 @@ module issue_stage
   assign sb_live_o = sb_live;
   logic mem_violation;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_pending, phys_replay;
+  assign ooo_phys_replay_o = |phys_replay;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] mem_violation_id;
 
   // ---------------------------------------------------------

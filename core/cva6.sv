@@ -870,6 +870,7 @@ module cva6
   logic [63:0] inval_apply_addr;
   // U5 OoO PMU probes (0 when OoOEn=0)
   logic ooo_rename_stall, ooo_iq_full, ooo_rob_full, ooo_lsq_stall, ooo_stl_forward;
+  logic ooo_phys_replay;
 
   // ----------------
   // DCache <-> *
@@ -1866,6 +1867,7 @@ module cva6
       .ooo_rob_full_o       (ooo_rob_full),
       .ooo_lsq_stall_o      (ooo_lsq_stall),
       .ooo_stl_forward_o    (ooo_stl_forward),
+      .ooo_phys_replay_o    (ooo_phys_replay),
       //RVFI
       .rvfi_issue_pointer_o (rvfi_issue_pointer),
       .rvfi_commit_pointer_o(rvfi_commit_pointer),
@@ -2340,6 +2342,8 @@ module cva6
         .ooo_rob_full_i     (ooo_rob_full),
         .ooo_lsq_stall_i    (ooo_lsq_stall),
         .ooo_stl_forward_i  (ooo_stl_forward),
+        .ooo_phys_replay_i  (ooo_phys_replay),
+        .coh_inval_apply_i  (inval_apply_valid),
         .l2_miss_i          (l2_miss_i),
         .l3_hit_i           (l3_hit_i),
         .l3_miss_i          (l3_miss_i),

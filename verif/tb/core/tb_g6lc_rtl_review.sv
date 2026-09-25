@@ -4088,6 +4088,7 @@ module tb_g6lc_review_perf;
     .stall_issue_i(1'b0),
     .ooo_rename_stall_i(1'b0),.ooo_rob_full_i(1'b0),.ooo_iq_full_i(1'b0),
     .ooo_lsq_stall_i(1'b0),.ooo_stl_forward_i(1'b0),.spec_cancel_i(1'b0),
+    .ooo_phys_replay_i(1'b0),.coh_inval_apply_i(1'b0),
     .ai_pmu_op_i(1'b0),.ai_pmu_mma_i(1'b0),.ai_pmu_post_i(1'b0),
     .ai_pmu_t0_i(1'b0),.ai_pmu_busy_i(1'b0),
     .l3_miss_i(1'b0),.l3_hit_i(1'b0),.pf_issue_i(1'b0),.pf_train_i(1'b0),

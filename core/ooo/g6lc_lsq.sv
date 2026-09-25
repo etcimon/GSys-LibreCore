@@ -458,6 +458,7 @@ module g6lc_lsq #(
     best_pc = '0;
     best_dist = 32'hFFFF_FFFF;
     this_dist = '0;
+    st_hart_now = '0;
     for (int unsigned u = 0; u < NR_UPDATE; u++) begin
       if (!PHYS_VALIDATE && addr_valid_i[u] && addr_is_st_i[u]) begin
         sbe_v = lane_be(addr_i[u], addr_size_i[u]);

@@ -48,10 +48,15 @@ prerequisite for this work under the existing dual license. No licensing policy 
   pointer advance and a hoisted `tail_m1`; the residual 1.5 FO4 is two independent counter
   increments summed in statement order (screening artifact; sv-timing path-class follow-up).
   Not STA; see `core/ooo/AGENTS-ooo-plan.md` T7e.
-- [ ] Deferred for unrestricted release (not implied by promotion): full-core L1 application
-  acknowledgement on HPDCACHE/non-WT consumers, local-CAS notification coverage, matched
-  multicore firmware/anchor/compliance runs, PMU/RVFI wiring of the hub event pins, DFT/MBIST
-  binding of the signature SRAM, credit-bound MSHR sizing, and STA/power/area sign-off.
+- [x] Local AMO/CAS apply-event coverage (`tb_g6lc_wt_amo_apply`, 8/8 + mutation 8/8), PMU group-2
+  events 5/6 (invalidation applied, COH_OOO load replay; perf leaf 8/8), credit-bound sizing
+  (`tb_g6lc_coherence_credits`: fills capped at the four hub credits; `g6lc64_ooo_int2`
+  `L2MshrDepth` 2→4 removes 51 MSHR-full stall cycles in the eight-read burst), signature SRAM
+  `ImplKey` + `g6lc_ooo_snoop_filter.tech-spec.md` DFT/MBIST plan. See plan T7f.
+- [ ] Deferred for unrestricted release: matched multicore firmware/anchor/compliance runs
+  (shared-mirror simulation route), foundry macro selection and MBIST controller insertion,
+  STA/power/area sign-off. HPDCACHE/non-WT application acknowledgement is outside the `COH_OOO`
+  legality envelope.
 - [ ] Credit-consistent L2 sizing with current concurrent-fill occupancy/lifetime proof.
 - [~] Accepted-physical-address validation is implemented as a guarded candidate through LSU/EX/
   issue/LSQ/scoreboard. The legacy virtual STQ key is not reused. The new tag-stage event saves

@@ -157,6 +157,15 @@ substitute for those gates.
   `HUB_R_ID_ORDER` (`ooocoh-r-order-after-r1`, `ooocoh-r-order-mutation-r1`).
 - Inval-bus pointer/tail rewrites re-verified by the default leaf plan (10/10,
   `ooocoh-inval-hoist-r1`), the hub lifetime/regression sets and the promoted gate.
+- `tb_g6lc_wt_amo_apply` (`REVIEW_WT_AMO_APPLY=1`, real adapter under `g6lc64_ooo_int2`):
+  AMO_SWAP / AMO_CAS1 / AMO_LR return `DCACHE_INV_REQ` and raise the full-PA apply event;
+  external-invalidation-coincident CAS orders external then self with `inval_ready_o` low while
+  retained; negative `WT_AMO_APPLY`; mutation exempting AMO_CAS1 → `WT_AMO_INV_MISSING`
+  (`ooocoh-amo-apply-r6`, `ooocoh-amo-apply-mutation-r1`).
+- `tb_g6lc_coherence_credits` (`REVIEW_HUB_L2_CREDITS=1`, `REVIEW_CREDITS_MSHR`): hard bounds
+  `ar_live <= 4`, `fills <= 4`; metrics for depth 2 and 4 (`ooocoh-credits-mshr{2,4}-*`).
+- PMU group 2 events 5/6 compile through the perf leaf (`REVIEW_RTL_PERF=1`, 8/8) and the archive
+  gates; the events have no directed counter test yet.
 
 Promotion of `g6lc64_ooo_int2` followed the rights holder's acceptance of this review; no capacity
 reduction or performance claim follows. Application acknowledgement on non-WT consumers, matched

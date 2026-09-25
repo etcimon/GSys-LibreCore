@@ -1048,11 +1048,43 @@ behaviour-preserving and re-verified: leaf 10/10 (`ooocoh-inval-hoist-r1`), life
 regression 16, composed 4/4, promoted gate lint 24 / synth 7 warnings, 0 errors
 (`ooocoh-inval-hoist-int2-r1`).
 
-Still deferred: L1 application acknowledgement on non-WT consumers (outside the `COH_OOO`
-envelope, which requires WT), local-CAS notification coverage into the physical-load checker,
-matched multicore firmware/anchor/compliance runs, PMU/RVFI wiring of the hub event pins
-(currently unconnected in `g6lc_cluster`), DFT/MBIST binding of the signature SRAM,
-credit-bound MSHR sizing, timing/power/area sign-off, and any cycle/area gain claim.
+### T7f — remaining deferred items worked (2026-09-24)
+
+**Local AMO/CAS notification coverage.** `verif/tb/uncore/tb_g6lc_wt_amo_apply.sv` drives the
+real `wt_axi_adapter` under the `g6lc64_ooo_int2` configuration: AMO_SWAP, Zacas AMO_CAS1 and
+AMO_LR each return a `DCACHE_INV_REQ` for the AMO index and raise `inval_apply_valid_o` with the
+full AMO PA (the `mem_mod_valid[0]` source of the physical-load checker); with an external
+invalidation coincident with the AMO grant the external event is applied first, `inval_ready_o`
+stays low while the self-invalidation is retained, and the AMO event follows. Negative oracle
+(`WT_AMO_APPLY`) and a mutation that exempts AMO_CAS1 from `invalidate` (`WT_AMO_INV_MISSING`)
+both detect (`ooocoh-amo-apply-r6`, `ooocoh-amo-apply-mutation-r1`, `REVIEW_WT_AMO_APPLY=1`).
+
+**PMU.** Group 2 gains event 5 (L1 coherence invalidation applied, WT return path) and event 6
+(COH_OOO load marked for replay by a modification event), wired `issue_stage.ooo_phys_replay_o`
+/ `inval_apply_valid` → `perf_counters`. Indices are stable once published. Perf leaf 8/8
+(`ooocoh-pmu-perf-leaf-r1`); int2 gate lint 24 / synth 7; default 8/54 and 32/5; the active
+target showed 5 pre-existing `LATCH` lint warnings from an unassigned local in the LSQ alias
+block under `PHYS_VALIDATE=0`, fixed by a default assignment (gate re-run recorded below).
+
+**Credit-bound MSHR sizing.** `tb_g6lc_coherence_credits` (hub 4 credits + real L2, eight
+distinct-line reads from two cores, DRAM latency 8) with the hard bounds `ar_live <= 4` and
+`fills <= 4` never violated: depth 2 → `max_fills=2 max_ar_live=3 mshr_stall_cycles=51
+drain=92`; depth 4 → `max_fills=4 max_ar_live=4 mshr_stall_cycles=0 drain=77`. The hub's credits
+bound L2 fills, so the credit-consistent depth equals the hub slot count; `g6lc64_ooo_int2` moves
+`L2MshrDepth` 2 → 4. The 16-MSHR figure of the refused `g6lc64_ooo_server` remains a recommendation
+(4 per hub credit set), not a change.
+
+**DFT/MBIST plan.** The signature SRAM now carries `ImplKey("g6lc_coh_signature")`;
+`corev_apu/coherence/g6lc_ooo_snoop_filter.tech-spec.md` records geometry, binding rules
+(port/latency equivalence, no reliance on SRAM reset, cold sweep as the initialization contract,
+BIST ownership while `ready_o` is low) and the scan/observability notes. The technology pass stays
+unarmed (`optimizationPass=false`).
+
+Still deferred and outside what this tree can execute: matched multicore firmware/anchor/
+compliance runs (require the shared-mirror simulation route), foundry macro selection, MBIST
+controller insertion, STA/power/area sign-off, and any cycle/area gain claim. L1 application
+acknowledgement on non-WT consumers is outside the `COH_OOO` envelope (`DCacheType == WT` is a
+legality condition).
 
 ## Deferred
 

@@ -576,6 +576,69 @@ req_t hub_req;resp_t hub_rsp;
     return 0
 
 
+def credits_review(out, data, runtime_info, runtime):
+    source = out / 'source'
+    source.mkdir()
+    names = ['config_pkg.sv','axi_pkg.sv','tc_sram.sv','g6lc_l2_pkg.sv',
+             'g6lc_l2_tag.sv','g6lc_l2_data.sv','g6lc_l2_mshr.sv','g6lc_l2_top.sv',
+             'g6lc_coherence_pkg.sv','g6lc_inval_bus.sv','g6lc_snoop_filter.sv',
+             'g6lc_ooo_snoop_filter.sv','g6lc_lr_sc_tracker.sv','g6lc_coherence_hub.sv',
+             'tb_g6lc_l2.sv','tb_g6lc_coherence_hub.sv']
+    for name in names:
+        shutil.copy2(data / name, source / name)
+    hashes = {name: digest(source/name) for name in names}
+    types = re.findall(r'package g6lc_l2_tb_pkg;.*?endpackage', (source/'tb_g6lc_l2.sv').read_text(), re.S)
+    assert len(types) == 1
+    (source/'types.sv').write_text(types[0]+'\n')
+    (out/'sources.json').write_text(json.dumps({'effective':hashes,
+        'scope':'hub COH_OOO plus actual L2; queued DRAM; credit-bound measurement'},indent=2))
+    (out/'runtime.json').write_text(json.dumps(runtime_info,indent=2))
+    env = dict(os.environ, VERILATOR_ROOT=str(runtime), VPATH=str(runtime/'include'))
+    mshr = int(os.environ.get('REVIEW_CREDITS_MSHR','2'))
+    files = [str(source/n) for n in names[:-2]]+[str(source/'types.sv'),str(source/names[-1])]
+    model = out/'model'
+    control = out/'credits.vlt'
+    control.write_text('`verilator_config\n' + '\n'.join(
+        f'split_var -module "{module}" -var "{port}"' for module, ports in (
+            ('g6lc_coherence_hub',('mem_req_o','mem_resp_i','core_req_i','core_resp_o')),
+            ('g6lc_l2_top',('slv_req_i','slv_resp_o','mst_req_o','mst_resp_i')))
+        for port in ports) + '\nisolate_assignments -module "g6lc_coherence_hub" -var "mem_req_o"\n'
+        'isolate_assignments -module "g6lc_l2_top" -var "slv_resp_o"\n')
+    (out/'compiler-control.json').write_text(json.dumps({'sha256':digest(control)}))
+    command = ['verilator','--cc','--main','--exe','--timing','--assert','--threads','1','--flatten',
+               '-Wno-fatal','-Werror-LATCH','-Werror-USERERROR',
+               str(control),'--top-module','tb_g6lc_coherence_credits',f'-GMSHR_DEPTH={mshr}',
+               '--Mdir',str(model),'-o','credits-test',*files]
+    commands = [('verilate',command),('build',['make','-C',str(model),'-f','Vtb_g6lc_coherence_credits.mk','-j4'])]
+    for label, cmd in commands:
+        (out/f'{label}-command.json').write_text(json.dumps(cmd,indent=2))
+        with (out/f'{label}.log').open('w') as log:
+            rc = subprocess.run(cmd,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=300).returncode
+        assert rc == 0,label
+    deps = '\n'.join(p.read_text(errors='replace') for p in model.glob('*.d'))
+    assert str(runtime/'include/verilated_funcs.h') in deps
+    assert str(Path(runtime_info['originalRoot'])/'include/verilated_funcs.h') not in deps
+    exe = model/'credits-test'
+    records = []
+    for negative in [False,True]:
+        cmd = [str(exe)]+(['+oracle_negative'] if negative else [])
+        result = subprocess.run(cmd,cwd=model,capture_output=True,text=True,timeout=60)
+        text = result.stdout+result.stderr
+        label = f'negative-{int(negative)}'
+        (out/f'{label}.log').write_text(text)
+        error = 'COH_CREDIT_DATA' if negative else None
+        matched = (result.returncode!=0 and error in text and 'COH_CREDIT_PASS' not in text) if error else (
+            result.returncode==0 and text.count('COH_CREDIT_PASS')==1 and '%Error' not in text)
+        metrics = re.findall(r'COH_CREDIT_PASS ([^\n]+)',text)
+        records.append({'mshr':mshr,'negative':negative,'expectedError':error,
+            'rc':result.returncode,'matched':matched,'metrics':metrics,
+            'modelSha256':digest(exe)})
+        (out/'results.json').write_text(json.dumps(records,indent=2))
+        assert matched,label
+    assert all(digest(source/name)==value for name,value in hashes.items())
+    return 0
+
+
 def main():
     out = Path(os.environ['TH_OUT_DIR'])
     data = Path(os.environ['TH_DATA_DIR'])
@@ -592,6 +655,8 @@ def main():
     assert [(r['tag'], r['rc']) for r in json.loads(canaries.read_text())] == [('original', 1), ('fixed', 0)]
     if os.environ.get('REVIEW_HUB_L2_COMPOSED') == '1':
         return composed_review(out, data, runtime_info, runtime)
+    if os.environ.get('REVIEW_HUB_L2_CREDITS') == '1':
+        return credits_review(out, data, runtime_info, runtime)
     if os.environ.get('REVIEW_HUB_BASELINE') == '1' or os.environ.get('REVIEW_HUB_RESERVATIONS') == '1' or \
             os.environ.get('REVIEW_HUB_ACK_BEFORE') == '1':
         if os.environ.get('REVIEW_HUB_BASELINE') == '1' and os.environ.get('REVIEW_HUB_RESERVATIONS') == '1':

@@ -160,9 +160,94 @@ endmodule
     return 0
 
 
+def run_amo_apply():
+    data, out = Path(os.environ['TH_DATA_DIR']), Path(os.environ['TH_OUT_DIR'])
+    source = out / 'source'
+    source.mkdir()
+    names = ['config_pkg.sv', 'g6lc64_ooo_int2_config_pkg.sv', 'riscv_pkg.sv',
+             'ariane_pkg.sv', 'build_config_pkg.sv', 'wt_cache_pkg.sv', 'axi_pkg.sv',
+             'ariane_axi_pkg.sv', 'cf_math_pkg.sv', 'lzc.sv', 'rr_arb_tree.sv',
+             'cva6_fifo_v3.sv', 'axi_shim.sv', 'wt_axi_adapter.sv',
+             'tb_g6lc_wt_amo_apply.sv']
+    for name in names:
+        (source / name).write_bytes((data / name).read_bytes())
+    types_source = (data / 'wt_cache_subsystem.sv').read_text()
+    types = types_source.split('  // dcache interface', 1)[1].split('  logic icache_adapter_data_req', 1)[0]
+    (source / 'wt-types.svh').write_text(types_source.split('module wt_cache_subsystem', 1)[0] + types)
+    mutation = os.environ.get('REVIEW_WT_AMO_APPLY_MUTATION') == '1'
+    original = {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in names}
+    if mutation:
+        path = source / 'wt_axi_adapter.sv'
+        text = path.read_text()
+        old = '              invalidate = arb_gnt;'
+        assert text.count(old) == 1
+        path.write_text(text.replace(
+            old, '              invalidate = arb_gnt && (dcache_data.amo_op != AMO_CAS1);'))
+    hashes = {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in names}
+    hashes['wt-types.svh'] = hashlib.sha256((source / 'wt-types.svh').read_bytes()).hexdigest()
+    (out / 'sources.json').write_text(json.dumps(
+        {'original': original, 'effective': hashes, 'mutation': mutation,
+         'scope': 'real wt_axi_adapter under g6lc64_ooo_int2 (COH_OOO, RVA, Zacas); '
+                  'AMO apply-event and retained self-invalidation coverage'}, indent=2))
+    runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
+    assert hashlib.sha256((runtime / 'include/verilated_funcs.h').read_bytes()).hexdigest() == \
+        'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+    env = dict(os.environ, VERILATOR_ROOT=str(runtime), VPATH=str(runtime / 'include'))
+    control = out / 'wt-amo.vlt'
+    control.write_text(
+        Path('/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt').read_text() +
+        '\nsplit_var -module "wt_axi_adapter" -var "dcache_data_i"\n'
+        'split_var -module "wt_axi_adapter" -var "dcache_rtrn_o"\n'
+        'split_var -module "wt_axi_adapter" -var "icache_data_i"\n'
+        'split_var -module "wt_axi_adapter" -var "icache_rtrn_o"\n'
+        'split_var -module "wt_axi_adapter" -var "axi_req_o"\n'
+        'split_var -module "wt_axi_adapter" -var "axi_resp_i"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "arb_gnt"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "axi_wr_req"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "axi_wr_gnt"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "axi_rd_req"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "axi_rd_gnt"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "axi_rd_rdy"\n')
+    (out / 'compiler-control.json').write_text(json.dumps({'sha256': hashlib.sha256(control.read_bytes()).hexdigest()}))
+    model = out / 'model'
+    command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1',
+               '-Wno-fatal', '-Werror-LATCH', '-Werror-UNOPTFLAT',
+               str(control),
+               '-I' + str(source), '--top-module', 'tb_g6lc_wt_amo_apply',
+               '--Mdir', str(model), '-o', 'wt-amo',
+               *[str(source / name) for name in names]]
+    for label, command in [('verilate', command), ('build', ['make', '-C', str(model),
+                           '-f', 'Vtb_g6lc_wt_amo_apply.mk', '-j4'])]:
+        with (out / f'{label}.log').open('w') as log:
+            rc = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=300).returncode
+        assert rc == 0, (label, str(out / f'{label}.log'))
+    deps = '\n'.join(path.read_text() for path in model.glob('*.d'))
+    assert str(runtime / 'include/verilated_funcs.h') in deps
+    results = []
+    for scenario in range(4):
+        for negative in [False, True]:
+            command = [str(model / 'wt-amo'), f'+scenario={scenario}'] + \
+                (['+oracle_negative'] if negative else [])
+            run = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            text = run.stdout + run.stderr
+            (out / f'scenario-{scenario}-negative-{int(negative)}.log').write_text(text)
+            error = 'WT_AMO_INV_MISSING' if mutation and scenario in (1, 3) else \
+                'WT_AMO_APPLY' if negative else None
+            matched = (run.returncode != 0 and error in text and 'WT_AMO_PASS' not in text) if error else \
+                (run.returncode == 0 and text.count('WT_AMO_PASS') == 1 and '%Error' not in text)
+            results.append({'scenario': scenario, 'negative': negative, 'mutation': mutation,
+                            'expectedError': error, 'rc': run.returncode, 'matched': matched})
+            (out / 'results.json').write_text(json.dumps(results, indent=2))
+            assert matched, results[-1]
+    return 0
+
+
 def main():
     if os.environ.get('REVIEW_WT_SELF_ADDR') == '1':
         return run_self_address()
+    if os.environ.get('REVIEW_WT_AMO_APPLY') == '1' or \
+            os.environ.get('REVIEW_WT_AMO_APPLY_MUTATION') == '1':
+        return run_amo_apply()
     if os.environ.get('REVIEW_WT_FILL') == '1' or \
             os.environ.get('REVIEW_WT_FILL_BEFORE') == '1':
         return run_fill()
