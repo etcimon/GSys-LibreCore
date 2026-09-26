@@ -1458,6 +1458,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // gate.
       g6lc64_ooo_server: ["corev_apu/Flist.cluster"],
       g6lc64_ooo_int2: ["corev_apu/Flist.cluster"],
+      g6lc64_ooo_int2_l3: ["corev_apu/Flist.cluster"],
+      g6lc64_smt2_l3: ["corev_apu/Flist.cluster"],
     },
     waiverFile: "verilator_config.vlt",
     top: "cva6",
@@ -1466,6 +1468,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       g6lc64_server_math_v: "g6lc_ara_lint_top",
       g6lc64_ooo_server: "g6lc_cluster_lint_top",
       g6lc64_ooo_int2: "g6lc_cluster_lint_top",
+      g6lc64_ooo_int2_l3: "g6lc_cluster_lint_top",
+      g6lc64_smt2_l3: "g6lc_cluster_lint_top",
     },
     // Default gate: full-feature 64-bit + minimal 32-bit. Production-heavy
     // packages (g6lc64_ooo / ooo_server, server_math, smt2, spec_deep) are
@@ -1642,6 +1646,11 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // Two-core COH_OOO cluster lint (g6lc_cluster_lint_top), measured on the
       // promotion archive gate ooocoh-promoted-int2-r5: WIDTH* only.
       g6lc64_ooo_int2: 24,
+      // L3 variants: cluster top, same file set as int2 plus g6lc_l3_top inside
+      // the cluster (non-inclusive 1 MiB). Baselines measured on the Phase 2
+      // archive gates ooocoh-p2-gate-int2l3-r1 / ooocoh-p2-gate-smt2l3-r1.
+      g6lc64_ooo_int2_l3: 25,
+      g6lc64_smt2_l3: 5,
     },
     failOnMissingBaseline: false,
   },
@@ -2024,6 +2033,30 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
         verilator: {
           target: "g6lc64_ooo_int2",
+          warningBudget: 650,
+        },
+      },
+      {
+        id: "diag-ooo-int2-l3-lint",
+        description: "Verilator lint of the two-core OoO non-inclusive L3 g6lc64_ooo_int2_l3 package.",
+        compartment: "ooo",
+        kind: "verilator-lint",
+        tools: ["verilator"],
+        optional: true,
+        verilator: {
+          target: "g6lc64_ooo_int2_l3",
+          warningBudget: 650,
+        },
+      },
+      {
+        id: "diag-smt2-l3-lint",
+        description: "Verilator lint of the single-core SMT2 non-inclusive L3 g6lc64_smt2_l3 package.",
+        compartment: "ooo",
+        kind: "verilator-lint",
+        tools: ["verilator"],
+        optional: true,
+        verilator: {
+          target: "g6lc64_smt2_l3",
           warningBudget: 650,
         },
       },

@@ -484,26 +484,36 @@ def composed_review(out, data, runtime_info, runtime):
     source.mkdir()
     names = ['config_pkg.sv','axi_pkg.sv','tc_sram.sv','g6lc_l2_pkg.sv',
              'g6lc_l2_tag.sv','g6lc_l2_data.sv','g6lc_l2_mshr.sv','g6lc_l2_top.sv',
+             'g6lc_l3_pkg.sv','g6lc_l3_top.sv','axi_cut.sv','spill_register.sv',
              'g6lc_coherence_pkg.sv','g6lc_inval_bus.sv','g6lc_snoop_filter.sv',
              'g6lc_ooo_snoop_filter.sv','g6lc_lr_sc_tracker.sv','g6lc_coherence_hub.sv',
              'tb_g6lc_l2.sv','tb_g6lc_coherence_hub.sv']
     for name in names:
         shutil.copy2(data / name, source / name)
+    # axi_cut includes "axi/assign.svh"/"axi/typedef.svh" (header text, not
+    # compile units) — mirror the hum runner's source/axi/ layout.
+    (source / 'axi').mkdir(exist_ok=True)
+    for header in ('assign.svh', 'typedef.svh'):
+        shutil.copy2(data / header, source / 'axi' / header)
     original = {name:digest(source/name) for name in names}
-    fault = os.environ.get('REVIEW_COMPOSED_FAULT')
+    chosen=os.environ.get('REVIEW_COMPOSED_PROFILE','small')
+    # 'stack-fault' is a profile: the bench parameter SELF_INVAL_FAULT
+    # disconnects only the L3's write self-invalidation (no RTL splice).
+    fault = 'stack' if chosen=='stack-fault' else os.environ.get('REVIEW_COMPOSED_FAULT')
     if fault:
-        assert fault == 'self-inval'
-        path = source/'g6lc_l2_top.sv'
-        text = path.read_text()
-        old = '  assign tag_match_inval = l2_back_inval_valid_i | self_inval_req;'
-        assert text.count(old)==1
-        path.write_text(text.replace(old,'  assign tag_match_inval = l2_back_inval_valid_i;'))
+        assert fault in ('self-inval','stack')
+        if fault == 'self-inval':
+            path = source/'g6lc_l2_top.sv'
+            text = path.read_text()
+            old = '  assign tag_match_inval = l2_back_inval_valid_i | self_inval_req;'
+            assert text.count(old)==1
+            path.write_text(text.replace(old,'  assign tag_match_inval = l2_back_inval_valid_i;'))
     hashes = {name:digest(source/name) for name in names}
     types = re.findall(r'package g6lc_l2_tb_pkg;.*?endpackage', (source/'tb_g6lc_l2.sv').read_text(), re.S)
     assert len(types)==1
     (source/'types.sv').write_text(types[0]+'\n')
     (out/'sources.json').write_text(json.dumps({'original':original,'effective':hashes,
-        'scope':'hub COH_OOO plus actual L2; modeled WT invalidation consumer; not CPU/ISA simulation'},indent=2))
+        'scope':'hub COH_OOO plus actual L2 (and optional L3 stack); modeled WT invalidation consumer; not CPU/ISA simulation'},indent=2))
     (out/'runtime.json').write_text(json.dumps(runtime_info,indent=2))
     env=dict(os.environ,VERILATOR_ROOT=str(runtime),VPATH=str(runtime/'include'))
     profiles = {
@@ -512,9 +522,18 @@ def composed_review(out, data, runtime_info, runtime):
         'stalled': ['-GWRITE_DELAY=4','-GW_STALL=16','-GB_DELAY=16','-GINV_HOLD=64','-GR_HOLD=100','-GB_HOLD=96'],
         'target': ['-GBYTE_SIZE=262144','-GSET_ASSOC=8','-GMSHR_DEPTH=4','-GDATA_BANKS=4'],
         'no-l2': ['-GUSE_L2=0'],
+        # Composed hub+L2+L3 stack: small geometry mirrors tb_g6lc_l2_hum's
+        # CHAIN_L3; target exercises the g6lc64_ooo_int2_l3 1 MiB/16/MSHR 4
+        # geometry point; stack-fault drops the L3 write self-invalidation.
+        'stack-small': ['-GUSE_L3=1'],
+        'stack-target': ['-GUSE_L3=1','-GBYTE_SIZE=262144','-GSET_ASSOC=8','-GMSHR_DEPTH=4',
+                         '-GDATA_BANKS=4','-GL3_BYTES=1048576','-GL3_SET_ASSOC=16',
+                         '-GL3_MSHR_DEPTH=4','-GL3_DATA_BANKS=4'],
+        'stack-fault': ['-GUSE_L3=1','-GSELF_INVAL_FAULT=1'],
     }
-    chosen=os.environ.get('REVIEW_COMPOSED_PROFILE','small')
     assert chosen in profiles and not (fault and chosen=='no-l2')
+    assert not (fault=='self-inval' and chosen.startswith('stack'))
+    assert fault!='stack' or chosen=='stack-fault'
     files=[str(source/n) for n in names[:-2]]+[str(source/'types.sv'),str(source/names[-1])]
     model=out/'model'
     if os.environ.get('REVIEW_COMPOSED_SCC')=='1':
@@ -529,15 +548,19 @@ def composed_review(out, data, runtime_info, runtime):
                 end = stop
         instances='  g6lc_coherence_hub #(' + after_hub[:end]
         wrapper=out/'composed_graph.sv'
+        scc_l3 = os.environ.get('REVIEW_COMPOSED_SCC_L3') == '1'
         wrapper.write_text('''module composed_graph import g6lc_coherence_pkg::*; import g6lc_l2_tb_pkg::*;
 (input logic clk,rst_n,input req_t[1:0] requests,input resp_t dram_rsp,
  input logic[1:0] inv_ready,output resp_t[1:0] responses,output req_t dram_req,
  output coh_inval_t[1:0] invalidations);
 localparam bit USE_L2=1;
+localparam bit USE_L3=%d;
+localparam bit SELF_INVAL_FAULT=0;
 localparam int BYTE_SIZE=4096,SET_ASSOC=4,MSHR_DEPTH=4,DATA_BANKS=2;
+localparam int L3_BYTES=2048,L3_SET_ASSOC=2,L3_MSHR_DEPTH=2,L3_DATA_BANKS=2;
 req_t hub_req;resp_t hub_rsp;
-''' + instances + '\nendmodule\n')
-        script='read_slang --top composed_graph ' + ' '.join(files[:-1]) + f' {wrapper}; hierarchy -check -top composed_graph; flatten; proc; opt; check -assert; scc -expect 0'
+''' % scc_l3 + instances + '\nendmodule\n')
+        script='read_slang -I' + str(source) + ' --top composed_graph ' + ' '.join(files[:-1]) + f' {wrapper}; hierarchy -check -top composed_graph; flatten; proc; opt; check -assert; scc -expect 0'
         (out/'scc.ys').write_text(script)
         with (out/'scc.log').open('w') as log:
             rc=subprocess.run(['yosys','-p',script],stdout=log,stderr=subprocess.STDOUT,timeout=180).returncode
@@ -548,7 +571,9 @@ req_t hub_req;resp_t hub_rsp;
     control.write_text('`verilator_config\n' + '\n'.join(
         f'split_var -module "{module}" -var "{port}"' for module, ports in (
             ('g6lc_coherence_hub',('mem_req_o','mem_resp_i','core_req_i','core_resp_o')),
-            ('g6lc_l2_top',('slv_req_i','slv_resp_o','mst_req_o','mst_resp_i')))
+            ('g6lc_l2_top',('slv_req_i','slv_resp_o','mst_req_o','mst_resp_i')),
+            ('g6lc_l3_top',('slv_req_i','slv_resp_o','mst_req_o','mst_resp_i')),
+            ('axi_cut',('slv_req_i','slv_resp_o','mst_req_o','mst_resp_i')))
         for port in ports) + '\nisolate_assignments -module "g6lc_coherence_hub" -var "mem_req_o"\n'
         'isolate_assignments -module "g6lc_l2_top" -var "slv_resp_o"\n')
     (out/'compiler-control.json').write_text(json.dumps({'sha256':digest(control)}))
@@ -556,7 +581,7 @@ req_t hub_req;resp_t hub_rsp;
     # loop: REVIEW_COMPOSED_SCC=1 proves the flattened graph has none.
     command=['verilator','--cc','--main','--exe','--timing','--assert','--threads','1','--flatten',
              '-Wno-fatal','-Werror-LATCH','-Werror-USERERROR',
-             str(control),'--top-module','tb_g6lc_coherence_l2',*profiles[chosen],
+             str(control),'-I'+str(source),'--top-module','tb_g6lc_coherence_l2',*profiles[chosen],
              '--Mdir',str(model),'-o','composed-test',*files]
     commands=[('verilate',command),('build',['make','-C',str(model),'-f','Vtb_g6lc_coherence_l2.mk','-j4'])]
     for label, cmd in commands:
@@ -577,7 +602,11 @@ req_t hub_req;resp_t hub_rsp;
     # the 'mod-only' profile is the modifiable-only identity control and runs
     # the classic scenarios only.
     for scenario in ([0,3] if fault else ([0] if chosen=='no-l2' else
-                     [0,1] if chosen=='mod-only' else [0,1,2,3])):
+                     [0,1] if chosen=='mod-only' else
+                     # stack-target's L3 (1 MiB/16w) retains the evicted L2
+                     # line across the probe sweep; the small stack's L3
+                     # aliases the same set and cannot.
+                     [0,1,2,3,4] if chosen=='stack-target' else [0,1,2,3])):
         for negative in ([False] if fault or chosen=='no-l2' else [False,True]):
             cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])
             if os.environ.get('REVIEW_COMPOSED_DIAGNOSE')=='1':cmd.append('+diagnose')
@@ -588,7 +617,7 @@ req_t hub_req;resp_t hub_rsp;
             if fault or (chosen=='no-l2' and scenario==0):
                 error='COH_L2_STALE_VALUE'
             elif negative:
-                error={2:'COH_L2_DATA',3:'COH_L2_STALE_VALUE'}.get(scenario,'COH_L2_FINAL_VALUE')
+                error={2:'COH_L2_DATA',3:'COH_L2_STALE_VALUE',4:'COH_L3_PROBE'}.get(scenario,'COH_L2_FINAL_VALUE')
             else:
                 error=None
             matched=(result.returncode!=0 and error in text and 'COH_L2_PASS' not in text) if error else (
@@ -608,11 +637,15 @@ def credits_review(out, data, runtime_info, runtime):
     source.mkdir()
     names = ['config_pkg.sv','axi_pkg.sv','tc_sram.sv','g6lc_l2_pkg.sv',
              'g6lc_l2_tag.sv','g6lc_l2_data.sv','g6lc_l2_mshr.sv','g6lc_l2_top.sv',
+             'g6lc_l3_pkg.sv','g6lc_l3_top.sv','axi_cut.sv','spill_register.sv',
              'g6lc_coherence_pkg.sv','g6lc_inval_bus.sv','g6lc_snoop_filter.sv',
              'g6lc_ooo_snoop_filter.sv','g6lc_lr_sc_tracker.sv','g6lc_coherence_hub.sv',
              'tb_g6lc_l2.sv','tb_g6lc_coherence_hub.sv']
     for name in names:
         shutil.copy2(data / name, source / name)
+    (source / 'axi').mkdir(exist_ok=True)
+    for header in ('assign.svh', 'typedef.svh'):
+        shutil.copy2(data / header, source / 'axi' / header)
     hashes = {name: digest(source/name) for name in names}
     types = re.findall(r'package g6lc_l2_tb_pkg;.*?endpackage', (source/'tb_g6lc_l2.sv').read_text(), re.S)
     assert len(types) == 1
@@ -628,13 +661,20 @@ def credits_review(out, data, runtime_info, runtime):
     control.write_text('`verilator_config\n' + '\n'.join(
         f'split_var -module "{module}" -var "{port}"' for module, ports in (
             ('g6lc_coherence_hub',('mem_req_o','mem_resp_i','core_req_i','core_resp_o')),
-            ('g6lc_l2_top',('slv_req_i','slv_resp_o','mst_req_o','mst_resp_i')))
+            ('g6lc_l2_top',('slv_req_i','slv_resp_o','mst_req_o','mst_resp_i')),
+            ('g6lc_l3_top',('slv_req_i','slv_resp_o','mst_req_o','mst_resp_i')),
+            ('axi_cut',('slv_req_i','slv_resp_o','mst_req_o','mst_resp_i')))
         for port in ports) + '\nisolate_assignments -module "g6lc_coherence_hub" -var "mem_req_o"\n'
         'isolate_assignments -module "g6lc_l2_top" -var "slv_resp_o"\n')
     (out/'compiler-control.json').write_text(json.dumps({'sha256':digest(control)}))
+    # REVIEW_CREDITS_L3_MSHR stacks the L3 between L2 and DRAM at the given MSHR
+    # depth; the 4-vs-16 sweep must yield identical drain/service cycles.
+    l3_mshr = int(os.environ.get('REVIEW_CREDITS_L3_MSHR','0'))
+    l3_args = ['-GUSE_L3=1',f'-GL3_MSHR_DEPTH={l3_mshr}'] if l3_mshr else []
     command = ['verilator','--cc','--main','--exe','--timing','--assert','--threads','1','--flatten',
                '-Wno-fatal','-Werror-LATCH','-Werror-USERERROR',
-               str(control),'--top-module','tb_g6lc_coherence_credits',f'-GMSHR_DEPTH={mshr}',
+               str(control),'-I'+str(source),'--top-module','tb_g6lc_coherence_credits',f'-GMSHR_DEPTH={mshr}',
+               *l3_args,
                '--Mdir',str(model),'-o','credits-test',*files]
     commands = [('verilate',command),('build',['make','-C',str(model),'-f','Vtb_g6lc_coherence_credits.mk','-j4'])]
     for label, cmd in commands:

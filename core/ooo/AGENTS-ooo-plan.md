@@ -1636,6 +1636,129 @@ assertions, firmware paths or production policies were weakened. Matched two-har
 completed archive gates are recorded in T7o/T7p; foundry/MBIST/STA/power/area and broader ISA,
 RVWMO, mixed-residency and parameter-envelope obligations remain deferred.
 
+## T8 — L3 under COH_OOO: allocation, non-inclusive L3, SRAM tags, geometry, SMT2 boot
+
+Approved scope (2026-09-26): new `g6lc64_ooo_int2_l3` and `g6lc64_smt2_l3` packages with a
+cfg-selected non-inclusive L3; the WT boundary emits allocate attributes (also enabled in
+`g6lc64_ooo_int2`, re-qualified); the L2/L3 tag arrays move behind `tc_sram`; geometry and
+performance are measured under a pipelined DRAM-latency model; strict SMT2 boot is re-run on
+every changed or new target while `g6lc64_smt2` and `g6lc64_smt2_ooo_int` stay byte-identical.
+Linux boot, STA/power and PDK binding are out of scope. Working plan of record:
+`~/.devin/plans/plan-9f0fd4941a162312.md` (mirrored here as the phases land).
+
+### T8a — the enabled L2 was a bypass for every WT target (measured)
+
+`core/axi_shim.sv` tags every AR/AW `CACHE_MODIFIABLE`; `g6lc_l2_pkg::l2_is_cacheable` requires
+an allocate bit, so every WT-core request took the `S_BYPASS_*` path. Only HPDCACHE targets
+(stream8, server_math, ooo_server, ai) ever allocated. Observer-only `[mc_cache]` counters in
+the testbench (final block; l2 hit/bypass read hierarchically under `gen_mc_cache_l2`, l3 from
+the cluster outputs) measured it on the frozen four-hart boot: `ooocoh-p0-osbi-d0-r1` (model
+`532d0bb5…`) reproduces r9 exactly — 17,777,964 cycles, same `retiredByHart`, both RVFI traces
+byte-identical — with **948,230 L2 requests and 0 hits**. Directed boot/release 775 unchanged.
+
+### T8b — WtAxiAllocEn and the int2 re-qualification (commit f73e4db18)
+
+`wt_axi_adapter` routes the shim output through `p_axi_alloc_attr`: cacheable requests get
+`BUFFERABLE|MODIFIABLE|RD_ALLOC|WR_ALLOC`, nc/lock/ATOP keep `MODIFIABLE` (AMO/LR/SC arrive
+with nc=1 from the miss unit), a 4-bit sideband mux with no new state; `WtAxiAllocEn=0` is
+bit-identical. `config_pkg` gains `WtAxiAllocEn`, `L3InclusiveEn`, `L2TagSramEn`,
+`L2WriteUpdateEn` (all 0 by default; consumers of the last three land in T8c–T8e) and
+`check_cfg` asserts for L3 MSHR/banks/assoc power-of-two, inclusion needing `L3En` and
+`L3ByteSize >= L2ByteSize`, and the three enables needing `L2En` (allocation also needs WT).
+`check_cfg` evaluates the built configuration, so auto-inferred sizes are not refused.
+
+Evidence: attribute leaf `ooocoh-p1-wt-attr-r1` 36/36 (9 scenarios × ALLOC 0/1 × ±), the
+nc-ignoring mutation fails `WT_ATTR_NC`; AMO apply 8/8 with its mutation; composed hub+L2
+scenarios 2 (sub-line service: one 64 B fill, three hits, per-beat data) and 3 (post-B
+re-read refetches with the new value) in small/target geometry ± negatives, `mod-only`
+identity control, self-invalidation fault fails scenario 3, 0 SCCs; `check_cfg` refusals
+`ooocoh-p1-cfgrefusal-r3` 10/10; gates int2 lint 24 / synth 7, active 24 / 1, defaults 8/54
+and 32/5, `check -assert` 0 problems; FO4 screen unchanged (adapter 18.5). Identity controls
+on rebuilt models: `g6lc64_smt2` 12,761,165 cycles with the reference trace matched
+18,531,957/18,531,957 lines; `g6lc64_smt2_ooo_int` 10,701,925 with 18,516,857/18,516,857.
+
+`g6lc64_ooo_int2` with allocation: four-hart strict **pass** at **18,675,595** cycles
+(`ooocoh-p1-osbi-d0-r1`, model `a8523a16…`), `retiredByHart` 482,404 / 15,160,465 / 428,669 /
+428,627 (boot hart moved to 1 — interleaving, not identity), L2 hit 48,649 / miss 64,015 /
+bypass 847,353. At zero DRAM latency this is **+5.0 %**: a miss fetches an 8-beat line where
+the bypass fetched 2 beats. Directed boot/release 887 (was 775), shared-line 1284 (was 1098),
+both with `l2_hit > 0`; observer-off/on equal.
+
+### T8b′ — the "delay 40" instrument was defective; replaced
+
+The first latency runs drove `axi_delayer_intf` `FIXED_DELAY_OUTPUT`. `stream_delay` is a
+single-slot, per-handshake delay (every R beat is held and the next beat is only accepted
+after the previous leaves) and its counter is 4 bits wide, so 40 became 8: the runs modelled
+"8 cycles per beat, serialized", which penalizes 64 B fills 4× more than 16 B bypasses.
+`ooocoh-p0-osbi-d40-r1`, `ooocoh-p1-osbi-d40-r1` and the 1387-cycle directed run are
+retained and **not** valid latency comparisons.
+
+Replacement (testbench only): `corev_apu/tb/g6lc_tb_dram_latency.sv` between the delayer and
+the DRAM backend — every accepted AR earns a deadline `Latency` cycles out and only the first
+R beat of its burst is held (valid/ready gated together), later beats stream; B is held
+`Latency` after the last W beat; first-beat id order is checked (`DRAM_LAT_ORDER`);
+`Latency==0` is pure wires. Leaf `ooocoh-p1b-dramlat-r7` 20/20 at 0/7/40 (exact first-beat
+offsets, consecutive beats, backpressure, order fatal). Identity at 0 on the full model:
+887/1284 cycles and counters exact.
+
+Corrected latency-40 measurements (`DramLatency=40`, 24M cap; the no-alloc arm is a
+measurement control built from a `WtAxiAllocEn=0` package copy, model `b565c0ea…`):
+
+| Configuration | L0 cycles | L40 result |
+|---|---:|---|
+| int2, no allocation | 17,777,964 pass | timeout at 24M; ≈2.90M instructions retired; 522,957 bypasses each paid the latency |
+| int2, allocation | 18,675,595 pass | timeout at 24M; ≈9.94M retired (**3.4× the progress**); L2 hit 54,461 / miss 52,907 |
+| directed boot/release | 887 | alloc **1098** vs no-alloc **2071** |
+
+Neither arm finishes the boot inside 24M cycles at latency 40 (extrapolated ≈40M for the
+allocating L2, ≈135M without); the cap is a qualification bound, not a measurement bound, so
+completed L40 boots are a T8e measurement item with an explicitly larger cap.
+
+### T8c — non-inclusive L3 packages: `g6lc64_ooo_int2_l3`, `g6lc64_smt2_l3`
+
+Cluster: the inclusion policy is `INCL = INCLUSIVE_L3 || CVA6Cfg.L3InclusiveEn` (the
+testbench and lint top now pass `INCLUSIVE_L3=0`, so packages own the policy;
+`g6lc64_ooo_server` keeps its inclusive behaviour through `L3InclusiveEn=1`). The L2 tag
+back-invalidation is qualified by the L3 victim **accept** edge (`l3_evict_v && l3_evict_rdy`)
+instead of the held offer, and `l3_evict_rdy` ANDs the inclusive-inv accept with the L2's
+`l2_back_inval_ready` — a prerequisite for the multi-cycle tag invalidate of T8d. No default
+package changes behaviour (int2 gate stays 24/7; defaults 8/54 and 32/5).
+
+Packages: `g6lc64_ooo_int2_l3` = int2 + `L3En`, 1 MiB / 16-way / 64 B / MSHR 4 / 4 banks,
+`L3InclusiveEn=0`, `L2TagSramEn=1` (consumed by T8d); `g6lc64_smt2_l3` = smt2 + the same L3
+block + `WtAxiAllocEn=1` (single core, no hub). DTS `ariane-ooo-int2-l3.dts` and
+`ariane-smt2-l3.dts` add `l3-cache` (level 3, 1 MiB, 1024 sets) chained from the L2 node;
+registered in `dts_to_dtb.py`, the validator list, tiers/REUSE, the branding test and the
+build platform (cluster lint top; measured lint baselines **int2_l3 25**, **smt2_l3 5**;
+synth 11 and 39 warnings, 0 errors, `check -assert` 0 problems — `ooocoh-p2-gate-*-r1`).
+
+Evidence: composed hub→L2→`axi_cut`→L3 stack (`USE_L3`) scenarios 0–3 ± negatives in small
+and 1 MiB/16-way geometry, `l3_miss == dram_ar` per scenario; new scenario 4 evicts a line
+from a small L2 and re-reads it — `dram_ar=9, l3_hit=1, l3_miss=9`, the L3 installs and
+serves (negative `COH_L3_PROBE`); L3-side self-invalidation fault fails scenario 3
+`COH_L2_STALE_VALUE`; 0 SCCs through the stack; credits with the L3 stage: `max_l3_fills=4,
+max_ar_live=4`, MSHR 4 and 16 identical service (drain 106) — 16 only burns entries;
+CHAIN_L3 HUM 40/40 control; refusals 12/12 with both packages as legal baselines.
+
+Firmware profiles `ooocoh-p2-fw-int2-l3-r1` (fw `a4effb5c…`) and `ooocoh-p2-fw-smt2-l3-r1`
+(fw `3c8bf623…`) built from the new DTS/packages. Strict boots at DRAM latency 0:
+
+| Target | Run | Cycles | Retired by hart | L2 hit / miss / bypass | L3 hit / miss |
+|---|---|---:|---|---|---|
+| `g6lc64_ooo_int2_l3` (model `d3d5db80…`) | `ooocoh-p2-osbi-int2l3-L0-r1` **pass** | 19,341,802 (+3.6 % vs int2-alloc) | 667,710 / 15,303,296 / 439,579 / 439,616 | 25,365 / 50,086 / 861,272 | **0** / 50,080 |
+| `g6lc64_smt2_l3` (model `b1024a23…`) | `ooocoh-p2-osbi-smt2l3-L0-r2` **pass** (20M cap; the 14M default cap timed out) | 14,300,834 (+12 % vs smt2) | 512,289 / 9,491,835 | 26,752 / 27,545 / 555,896 | 0 / 27,545 |
+| `g6lc64_ooo_int2_l3` at latency 40 | `ooocoh-p2-osbi-int2l3-L40-r1` timeout at 24M | ≈9.82M retired (int2-alloc: ≈9.94M) | | 13,633 / 50,535 / 376,288 | 0 / 50,521 |
+
+Directed int2_l3: boot/release 1022 (alloc-L2 887), shared-line 1454 (1284), `l3_miss` 3/15.
+
+**Finding:** in every system run `l3_hit = 0` and `l3_miss ≈ l2_miss`. The mechanism is
+proven at the leaf (scenario 4), so this is workload, not defect: the boot footprint fits the
+256 KiB L2, and every write-through self-invalidates the line in L2 *and* L3, so an L2 miss
+is either first-touch or post-write — neither can hit a non-inclusive L3. The serialized L3
+FSM therefore only adds per-miss latency here (+3.6 % / +12 % at L0, no L40 gain). An L3
+benefit needs either a footprint above the L2 (T8e stride/scan kernels) or written lines that
+stay resident (`L2WriteUpdateEn`, T8e); both are measurement items, not assumptions.
+
 ## Deferred
 
 Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,

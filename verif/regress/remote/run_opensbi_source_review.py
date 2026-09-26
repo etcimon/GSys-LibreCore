@@ -123,7 +123,8 @@ EXPECTED_COMPILER_CONTROL_NAME = 'split-counter.vlt'
 # firmware as EXPERIMENTAL models only (SOURCE_REVIEW_EXPERIMENTAL=1). The
 # two-core integer package runs its own four-hart profile (SOURCE_REVIEW_HARTS=4,
 # SOURCE_REVIEW_CORES=2, ariane-ooo-int2.dts), never the anchor firmware.
-EXPERIMENTAL_TARGETS = frozenset({'g6lc64_smt2_ooo_int', 'g6lc64_ooo_int2'})
+EXPERIMENTAL_TARGETS = frozenset({'g6lc64_smt2_ooo_int', 'g6lc64_ooo_int2',
+                                  'g6lc64_ooo_int2_l3', 'g6lc64_smt2_l3'})
 
 
 def compiler_control_failures(control, verfiles, exists, digest, waive):

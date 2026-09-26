@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 `timescale 1ns/1ps
-// Leaf for g6lc_tb_dram_latency_intf: pipelined per-burst DRAM latency.
+// Leaf for g6lc_tb_dram_latency: pipelined per-burst DRAM latency.
 // The upstream driver talks to the slv port; a permissive always-ready
 // backend sits on mst and returns bursts 1 beat/cycle in AR order (except
 // scenario 5, which reverses two pending bursts to prove the in-DUT order
@@ -17,7 +17,7 @@ module tb_g6lc_tb_dram_latency;
   AXI_BUS #(.AXI_ADDR_WIDTH(64), .AXI_DATA_WIDTH(64), .AXI_ID_WIDTH(4),
             .AXI_USER_WIDTH(1)) dn();
 
-  g6lc_tb_dram_latency_intf #(
+  g6lc_tb_dram_latency #(
     .AXI_ID_WIDTH(4), .AXI_ADDR_WIDTH(64), .AXI_DATA_WIDTH(64),
     .AXI_USER_WIDTH(1), .Latency(LATENCY), .Depth(DEPTH)
   ) dut (.clk_i(clk), .rst_ni(rst_n), .slv(up), .mst(dn));

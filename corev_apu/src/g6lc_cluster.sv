@@ -71,6 +71,9 @@ module g6lc_cluster
 );
 
   localparam int unsigned NC = (NR_CORES < 1) ? 1 : NR_CORES;
+  // Effective inclusion policy: TB override parameter OR package bit. The
+  // testbench keeps INCLUSIVE_L3=0 so production packages own the policy.
+  localparam bit INCL = INCLUSIVE_L3 || CVA6Cfg.L3InclusiveEn;
   localparam int unsigned LINE_B =
       (CVA6Cfg.DCACHE_LINE_WIDTH != 0) ? CVA6Cfg.DCACHE_LINE_WIDTH / 8
                                        : COH_DEFAULT_LINE_BYTES;
@@ -122,11 +125,19 @@ module g6lc_cluster
   assign evict_v = CVA6Cfg.L3En ? l3_evict_v : l2_evict_v;
   assign evict_a = CVA6Cfg.L3En ? l3_evict_a : l2_evict_a;
 
-  // L3→L2 tag back-inval (inclusive hierarchy). Active when InclusiveEn and L3.
+  // L3→L2 tag back-inval (inclusive hierarchy). Active when the effective
+  // inclusion policy and L3 are both on. The invalidate is qualified by the
+  // victim ACCEPT edge, not the held offer: the L3 keeps l3_evict_v asserted
+  // while it waits for l3_evict_rdy, so sampling the offer alone would fire
+  // the L2 tag invalidate once per wait cycle instead of once per victim.
+  // l3_evict_rdy ANDs the inclusive-inv accept with the L2's back-inval slot
+  // so the victim commit lands on both consumers atomically.
   logic l2_back_inval_v;
   logic [AXI_ADDR_WIDTH-1:0] l2_back_inval_a;
   logic l2_back_inval_ready;
-  assign l2_back_inval_v = INCLUSIVE_L3 && CVA6Cfg.L3En && l3_evict_v;
+  logic l3_evict_rdy;
+  assign l3_evict_rdy = incl_evict_ready && (INCL ? l2_back_inval_ready : 1'b1);
+  assign l2_back_inval_v = INCL && CVA6Cfg.L3En && l3_evict_v && l3_evict_rdy;
   assign l2_back_inval_a = l3_evict_a;
 
   logic [NC-1:0] inv_incl_ready;
@@ -407,7 +418,7 @@ module g6lc_cluster
         .l3_bypass_o      (l3_bypass_w),
         .l3_evict_valid_o (l3_evict_v),
         .l3_evict_addr_o  (l3_evict_a),
-        .l3_evict_ready_i (incl_evict_ready)
+        .l3_evict_ready_i (l3_evict_rdy)
     );
   end else begin : gen_no_l3
     assign l3_mst_req  = l2_mst_req;
@@ -444,7 +455,7 @@ module g6lc_cluster
   // Inclusive back-inval (parameter; default off)
   logic incl_inv_busy;
   g6lc_l3_inclusive_inv #(
-      .InclusiveEn   (INCLUSIVE_L3),
+      .InclusiveEn   (INCL),
       .NR_CORES      (NC),
       .LINE_BYTES    (LINE_B),
       .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH)
@@ -463,14 +474,15 @@ module g6lc_cluster
   // NOTE: incl_evict_ready is now honoured end-to-end on the selected producer
   // (i_l3 under L3En, i_l2 otherwise): both engines hold their victim offer in
   // S_TAG until the inclusive-inv leaf accepts it, so a victim arriving while
-  // a previous back-invalidation drains is no longer dropped.
+  // a previous back-invalidation drains is no longer dropped. Under INCL the
+  // L3 victim accept additionally waits on the L2 back-inval slot and the L2
+  // invalidate fires only on that accept edge.
   // Remaining gap (documented in architecture/multi-core/README.md): under
   // L3En the shared L2's OWN evictions are not an inv source at all — evict_v
   // selects only l3_evict_v — so an L2 victim displacing an L1-held line does
   // not broadcast an invalidation.
-  logic _unused_bypass, _unused_l2_bi_rdy, _unused_incl_busy;
+  logic _unused_bypass, _unused_incl_busy;
   assign _unused_bypass = l3_bypass_w;
-  assign _unused_l2_bi_rdy = l2_back_inval_ready;
   assign _unused_incl_busy = incl_inv_busy;
 
 endmodule

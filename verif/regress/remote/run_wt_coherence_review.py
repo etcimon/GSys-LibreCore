@@ -348,12 +348,15 @@ def run_cfg_refusal():
     data, out = Path(os.environ['TH_DATA_DIR']), Path(os.environ['TH_OUT_DIR'])
     source = out / 'source'
     source.mkdir()
-    names = ['config_pkg.sv', 'g6lc64_ooo_int2_config_pkg.sv', 'build_config_pkg.sv']
+    pkgs = ['g6lc64_ooo_int2_config_pkg.sv', 'g6lc64_ooo_int2_l3_config_pkg.sv',
+            'g6lc64_smt2_l3_config_pkg.sv']
+    names = ['config_pkg.sv', 'build_config_pkg.sv'] + pkgs
     for name in names:
         (source / name).write_bytes((data / name).read_bytes())
     hashes = {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in names}
     (out / 'sources.json').write_text(json.dumps({'effective': hashes,
-        'scope': 'check_cfg legality refusals on the g6lc64_ooo_int2 user literal'}, indent=2))
+        'scope': 'check_cfg legality refusals on the g6lc64_ooo_int2 user literal'
+                 ' plus legal baselines on the int2_l3/smt2_l3 packages'}, indent=2))
     runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
     assert hashlib.sha256((runtime / 'include/verilated_funcs.h').read_bytes()).hexdigest() == \
         'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
@@ -376,10 +379,16 @@ def run_cfg_refusal():
          " u.L2TagSramEn = 1'b1;", 1056),
         ('l2wu-no-l2', "u.WtAxiAllocEn = 1'b0; u.L2En = 1'b0; u.CohPolicy = config_pkg::COH_FILTERED;"
          " u.L2WriteUpdateEn = 1'b1;", 1057),
+        # Legal baselines: the Phase-2 non-inclusive L3 packages must pass
+        # check_cfg untouched (inclusion is off, so L3>L2 is not required).
+        ('legal-baseline-int2-l3', '', None, 'g6lc64_ooo_int2_l3_config_pkg.sv'),
+        ('legal-baseline-smt2-l3', '', None, 'g6lc64_smt2_l3_config_pkg.sv'),
     ]
     harness = source / 'cfg_refusal_harness.sv'
     results = []
-    for name, mutation, line in cases:
+    for case in cases:
+        name, mutation, line = case[:3]
+        pkg = case[3] if len(case) > 3 else 'g6lc64_ooo_int2_config_pkg.sv'
         harness.write_text(
             'module cfg_refusal_harness;\n'
             '  function automatic config_pkg::cva6_user_cfg_t mutate();\n'
@@ -397,7 +406,8 @@ def run_cfg_refusal():
         command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1',
                    '-Wno-fatal', '-I' + str(source), '--top-module', 'cfg_refusal_harness',
                    '--Mdir', str(model), '-o', 'sim',
-                   *[str(source / n) for n in names], str(harness)]
+                   str(source / 'config_pkg.sv'), str(source / pkg),
+                   str(source / 'build_config_pkg.sv'), str(harness)]
         for label, cmd in [('verilate', command),
                            ('build', ['make', '-C', str(model), '-f', 'Vcfg_refusal_harness.mk', '-j4'])]:
             with (out / f'{label}-{name}.log').open('w') as log:
@@ -411,8 +421,8 @@ def run_cfg_refusal():
         refused = run.returncode != 0 and 'CFG_NO_ASSERT' not in text
         matched = refused and expected in text if expected else \
             (run.returncode == 0 and 'CFG_NO_ASSERT' in text)
-        results.append({'case': name, 'expectedLine': line, 'rc': run.returncode,
-                        'matched': matched})
+        results.append({'case': name, 'package': pkg, 'expectedLine': line,
+                        'rc': run.returncode, 'matched': matched})
         (out / 'results.json').write_text(json.dumps(results, indent=2))
         assert matched, results[-1]
     return 0

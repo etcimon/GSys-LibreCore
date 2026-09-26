@@ -45,7 +45,9 @@ $defaultDts = @(
   "corev_apu/fpga/src/bootrom/cv64a6_agilex.dts.in",
   "corev_apu/bootrom/ariane-linux.dts",
   "corev_apu/bootrom/ariane-smt2.dts",
-  "corev_apu/bootrom/ariane-ooo-int2.dts"
+  "corev_apu/bootrom/ariane-ooo-int2.dts",
+  "corev_apu/bootrom/ariane-ooo-int2-l3.dts",
+  "corev_apu/bootrom/ariane-smt2-l3.dts"
 )
 if (-not $Dts) { $Dts = $defaultDts }
 

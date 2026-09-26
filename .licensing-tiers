@@ -78,6 +78,8 @@ R   corev_apu/bootrom/ariane-linux.dts
 R   corev_apu/bootrom/ariane-smt2.dts
 R   corev_apu/bootrom/ariane-server-math-v.dts
 R   corev_apu/bootrom/ariane-ooo-int2.dts
+R   corev_apu/bootrom/ariane-ooo-int2-l3.dts
+R   corev_apu/bootrom/ariane-smt2-l3.dts
 
 # Substantially-modified upstream RTL relicensed under Apache-2.0 s.4 (Case B).
 # Upstream copyright + SHL notices are RETAINED VERBATIM in these files; only the
@@ -93,6 +95,8 @@ R   corev_apu/src/ariane.sv
 R   core/include/g6lc64_smt2_config_pkg.sv
 R   core/include/g6lc64_smt2_ooo_int_config_pkg.sv
 R   core/include/g6lc64_ooo_int2_config_pkg.sv
+R   core/include/g6lc64_ooo_int2_l3_config_pkg.sv
+R   core/include/g6lc64_smt2_l3_config_pkg.sv
 R   core/include/g6lc64_ooo_config_pkg.sv
 R   core/include/g6lc64_ooo_int_config_pkg.sv
 R   core/include/g6lc64_ooo_server_config_pkg.sv

@@ -83,7 +83,8 @@ module g6lc_cluster_lint_top
       .NR_CORES       (NR_CORES),
       .L2_ENABLE      (1'b1),
       .IDENTITY_FAST  (1'b0),
-      .INCLUSIVE_L3   (1'b1),
+      // policy comes from CVA6Cfg.L3InclusiveEn
+      .INCLUSIVE_L3   (1'b0),
       .AXI_ADDR_WIDTH (CVA6Cfg.AxiAddrWidth),
       .AXI_DATA_WIDTH (CVA6Cfg.AxiDataWidth),
       .AXI_ID_WIDTH   (CVA6Cfg.AxiIdWidth),

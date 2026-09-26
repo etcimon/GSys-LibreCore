@@ -1453,6 +1453,12 @@ module tb_g6lc_coherence_l2;
   parameter logic [3:0] CACHE_ATTR=4'hf;
   parameter int BYTE_SIZE=4096, SET_ASSOC=4, MSHR_DEPTH=4, DATA_BANKS=2;
   parameter int WRITE_DELAY=16, W_STALL=0, B_DELAY=0, INV_HOLD=0, R_HOLD=0, B_HOLD=0;
+  // USE_L3 stacks axi_cut + g6lc_l3_top between the L2 master and the DRAM
+  // model (non-inclusive: l3_evict_ready_i tied 1). SELF_INVAL_FAULT overrides
+  // the aw address the L3's write self-invalidation sees — one line up — and
+  // restores it on the master side so only the invalidation is disconnected.
+  parameter bit USE_L3=1'b0, SELF_INVAL_FAULT=1'b0;
+  parameter int L3_BYTES=2048, L3_SET_ASSOC=2, L3_MSHR_DEPTH=2, L3_DATA_BANKS=2;
   localparam addr_t ADDRESS=64'h80004000;
   localparam int L2_LINE_BYTES=512/8;
   logic clk=0,rst_n=0;
@@ -1495,15 +1501,57 @@ module tb_g6lc_coherence_l2;
       .inv_core_ready_i(inv_ready),.lr_valid_i(1'b0),.lr_addr_i('0),.lr_core_i('0),
       .coh_inv_fire_o(),.coh_sf_hit_o(),.coh_sf_overapprox_o(),.coh_arb_starve_o(),
       .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o());
+  // dram_req/dram_rsp stay the DRAM edge; l2m_* is the L2 master side.
+  req_t l2m_req;
+  resp_t l2m_rsp;
+  logic l3_hit_p=0, l3_miss_p=0;
+  int l3_hits=0, l3_misses=0;
+  always_ff @(posedge clk) begin
+    if (l3_hit_p) l3_hits<=l3_hits+1;
+    if (l3_miss_p) l3_misses<=l3_misses+1;
+  end
   g6lc_l2_top #(.Enable(USE_L2),.BYTE_SIZE(BYTE_SIZE),.SET_ASSOC(SET_ASSOC),
       .LINE_WIDTH(512),.MSHR_DEPTH(MSHR_DEPTH),.DATA_BANKS(DATA_BANKS),.FAIR_WRITES(1),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)) l2 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
-      .mst_req_o(dram_req),.mst_resp_i(dram_rsp),
+      .mst_req_o(l2m_req),.mst_resp_i(l2m_rsp),
       .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o());
+  if (USE_L3) begin : gen_l3_stack
+    req_t cut_req,l3_slv_req,l3_mst_req;
+    resp_t cut_rsp;
+    axi_cut #(
+      .Bypass(1'b0),.aw_chan_t(aw_chan_t),.w_chan_t(w_chan_t),.b_chan_t(b_chan_t),
+      .ar_chan_t(ar_chan_t),.r_chan_t(r_chan_t),.req_t(req_t),.resp_t(resp_t)
+    ) i_l3_cut (
+      .clk_i(clk),.rst_ni(rst_n),.slv_req_i(l2m_req),.slv_resp_o(l2m_rsp),
+      .mst_req_o(cut_req),.mst_resp_i(cut_rsp)
+    );
+    always_comb begin
+      l3_slv_req=cut_req;
+      if(SELF_INVAL_FAULT)l3_slv_req.aw.addr=cut_req.aw.addr^64'h40;
+    end
+    g6lc_l3_top #(
+      .Enable(1'b1),.BYTE_SIZE(L3_BYTES),.SET_ASSOC(L3_SET_ASSOC),
+      .LINE_WIDTH(512),.MSHR_DEPTH(L3_MSHR_DEPTH),.DATA_BANKS(L3_DATA_BANKS),
+      .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
+      .axi_req_t(req_t),.axi_resp_t(resp_t)
+    ) i_l3 (
+      .clk_i(clk),.rst_ni(rst_n),.slv_req_i(l3_slv_req),.slv_resp_o(cut_rsp),
+      .mst_req_o(l3_mst_req),.mst_resp_i(dram_rsp),
+      .l3_hit_o(l3_hit_p),.l3_miss_o(l3_miss_p),.l3_bypass_o(),
+      .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
+    );
+    always_comb begin
+      dram_req=l3_mst_req;
+      if(SELF_INVAL_FAULT)dram_req.aw.addr=l3_mst_req.aw.addr^64'h40;
+    end
+  end else begin : gen_no_l3
+    assign dram_req=l2m_req;
+    assign l2m_rsp=dram_rsp;
+  end
 
   always_comb begin
     requests='0;
@@ -1697,8 +1745,30 @@ module tb_g6lc_coherence_l2;
       send_read(4,ADDRESS,8'd1);
       while(read_count!=4)tick();
       if(dram_ar_count!=1)$fatal(1,"COH_L2_MISS_ON_HIT");
-      $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d dram_ar=%0d",
-        scenario,USE_L2,BYTE_SIZE,dram_ar_count);
+      $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d dram_ar=%0d l3_hit=%0d l3_miss=%0d",
+        scenario,USE_L2,BYTE_SIZE,dram_ar_count,l3_hits,l3_misses);
+      $finish;
+    end
+    if(scenario==4)begin
+      // L3-hit probe (only meaningful when the L3 retains more same-set lines
+      // than the L2 can hold, i.e. stack-target geometry): fill ADDRESS, then
+      // stream SET_ASSOC distinct lines aliasing its L2 set so the L2 evicts
+      // it, then re-read. A retaining L3 answers the re-read — no extra DRAM
+      // AR and l3_hit>0; a non-installing L3 refetches from DRAM instead.
+      int want_ar;
+      send_read(1);
+      while(read_count!=1)tick();
+      for(int k=1;k<=SET_ASSOC;k++)begin
+        send_read(id_t'(k+1),ADDRESS+64'(k)*(BYTE_SIZE/SET_ASSOC),8'd1);
+        while(read_count!=k+1)tick();
+      end
+      send_read(id_t'(SET_ASSOC+2));
+      while(read_count!=SET_ASSOC+2)tick();
+      want_ar=SET_ASSOC+1+(negative?1:0);
+      if(dram_ar_count!=want_ar)$fatal(1,"COH_L3_PROBE");
+      if(!negative && l3_hits==0)$fatal(1,"COH_L3_NO_HIT");
+      $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d dram_ar=%0d l3_hit=%0d l3_miss=%0d",
+        scenario,USE_L2,BYTE_SIZE,dram_ar_count,l3_hits,l3_misses);
       $finish;
     end
     send_read(1);
@@ -1752,8 +1822,8 @@ module tb_g6lc_coherence_l2;
          dram_ar_addr[1]!=(ADDRESS & ~addr_t'(L2_LINE_BYTES-1)))
         $fatal(1,"COH_L2_FILL_GEOMETRY");
     end
-    $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d aw=%0d inv=%0d apply=%0d mem_b=%0d late_ar=%0d core_b=%0d blocked=%0d dram_ar=%0d",
-      scenario,USE_L2,BYTE_SIZE,aw_cycle,first_inv_cycle,last_apply_cycle,mem_b_cycle,late_ar_cycle,core_b_cycle,ar_blocked,dram_ar_count);
+    $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d aw=%0d inv=%0d apply=%0d mem_b=%0d late_ar=%0d core_b=%0d blocked=%0d dram_ar=%0d l3_hit=%0d l3_miss=%0d",
+      scenario,USE_L2,BYTE_SIZE,aw_cycle,first_inv_cycle,last_apply_cycle,mem_b_cycle,late_ar_cycle,core_b_cycle,ar_blocked,dram_ar_count,l3_hits,l3_misses);
     $finish;
   end
 endmodule
@@ -1764,6 +1834,10 @@ module tb_g6lc_coherence_credits;
   parameter int MSHR_DEPTH=2;
   parameter int READS_PER_CORE=4;
   parameter int MEM_LATENCY=8;
+  // USE_L3 stacks axi_cut + g6lc_l3_top between the L2 master and the DRAM
+  // model (non-inclusive: l3_evict_ready_i tied 1).
+  parameter bit USE_L3=1'b0;
+  parameter int L3_BYTES=2048, L3_SET_ASSOC=2, L3_MSHR_DEPTH=4, L3_DATA_BANKS=2;
   localparam int CORES=2;
   localparam int DRAM_DEPTH=8;
   localparam addr_t BASE=64'h8000_0000;
@@ -1775,7 +1849,7 @@ module tb_g6lc_coherence_credits;
   coh_inval_t [CORES-1:0] invalidations;
   logic [CORES-1:0] inv_ready='1;
   int cycle=0,reads_done=0;
-  int max_fills=0,max_ar_live=0,mshr_stall_cycles=0;
+  int max_fills=0,max_l3_fills=0,max_ar_live=0,mshr_stall_cycles=0;
   int first_ar_cycle=-1,last_r_cycle=-1;
   int r_seen[CORES][16];
   bit negative;
@@ -1792,15 +1866,43 @@ module tb_g6lc_coherence_credits;
       .inv_core_ready_i(inv_ready),.lr_valid_i(1'b0),.lr_addr_i('0),.lr_core_i('0),
       .coh_inv_fire_o(),.coh_sf_hit_o(),.coh_sf_overapprox_o(),.coh_arb_starve_o(),
       .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o());
+  // dram_req/dram_rsp stay the DRAM edge; l2m_* is the L2 master side.
+  req_t l2m_req;
+  resp_t l2m_rsp;
   g6lc_l2_top #(.Enable(1'b1),.BYTE_SIZE(4096),.SET_ASSOC(4),
       .LINE_WIDTH(512),.MSHR_DEPTH(MSHR_DEPTH),.DATA_BANKS(2),.FAIR_WRITES(1),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)) l2 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
-      .mst_req_o(dram_req),.mst_resp_i(dram_rsp),
+      .mst_req_o(l2m_req),.mst_resp_i(l2m_rsp),
       .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o());
+  if (USE_L3) begin : gen_l3_stack
+    req_t cut_req;
+    resp_t cut_rsp;
+    axi_cut #(
+      .Bypass(1'b0),.aw_chan_t(aw_chan_t),.w_chan_t(w_chan_t),.b_chan_t(b_chan_t),
+      .ar_chan_t(ar_chan_t),.r_chan_t(r_chan_t),.req_t(req_t),.resp_t(resp_t)
+    ) i_l3_cut (
+      .clk_i(clk),.rst_ni(rst_n),.slv_req_i(l2m_req),.slv_resp_o(l2m_rsp),
+      .mst_req_o(cut_req),.mst_resp_i(cut_rsp)
+    );
+    g6lc_l3_top #(
+      .Enable(1'b1),.BYTE_SIZE(L3_BYTES),.SET_ASSOC(L3_SET_ASSOC),
+      .LINE_WIDTH(512),.MSHR_DEPTH(L3_MSHR_DEPTH),.DATA_BANKS(L3_DATA_BANKS),
+      .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
+      .axi_req_t(req_t),.axi_resp_t(resp_t)
+    ) i_l3 (
+      .clk_i(clk),.rst_ni(rst_n),.slv_req_i(cut_req),.slv_resp_o(cut_rsp),
+      .mst_req_o(dram_req),.mst_resp_i(dram_rsp),
+      .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),
+      .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
+    );
+  end else begin : gen_no_l3
+    assign dram_req=l2m_req;
+    assign l2m_rsp=dram_rsp;
+  end
 
   function automatic data_t model_data(input addr_t a);
     return {a[31:0],~a[31:0]} ^ 64'h5a5a_a5a5_1234_9876;
@@ -1840,16 +1942,20 @@ module tb_g6lc_coherence_credits;
 
   always @(posedge clk) begin
     if(rst_n)begin
-      int l2_fills,ar_live;
+      int l2_fills,ar_live,l3_fills;
       cycle++;
       l2_fills=$countones(l2.gen_l2.fill_act_q);
+      l3_fills=USE_L3 ? $countones(gen_l3_stack.i_l3.i_l3_as_l2.gen_l2.fill_act_q) : 0;
       ar_live=0;
       for(int s=0;s<4;s++)ar_live+=hub.gen_cluster.ar_ot_q[s].valid;
       if(l2_fills>max_fills)max_fills=l2_fills;
+      if(l3_fills>max_l3_fills)max_l3_fills=l3_fills;
       if(ar_live>max_ar_live)max_ar_live=ar_live;
       if(hub_req.ar_valid && !hub_rsp.ar_ready && l2.gen_l2.mshr_full)mshr_stall_cycles++;
       if(ar_live>4)$fatal(1,"COH_CREDIT_AR_BOUND live=%0d",ar_live);
       if(l2_fills>4)$fatal(1,"COH_CREDIT_FILL_BOUND fills=%0d",l2_fills);
+      if(USE_L3 && l3_fills>4)$fatal(1,"COH_CREDIT_L3_BOUND fills=%0d",l3_fills);
+      if(USE_L3 && dram_count>4)$fatal(1,"COH_CREDIT_DRAM_BOUND fills=%0d",dram_count);
       if(cycle>4000)$fatal(1,"COH_CREDIT_WATCHDOG reads=%0d",reads_done);
       for(int c=0;c<CORES;c++)begin
         if(requests[c].ar_valid && responses[c].ar_ready && first_ar_cycle<0)
@@ -1911,8 +2017,8 @@ module tb_g6lc_coherence_credits;
     for(int n=0;n<4000 && reads_done!=2*READS_PER_CORE;n++)tick();
     if(reads_done!=2*READS_PER_CORE)
       $fatal(1,"COH_CREDIT_WATCHDOG reads_done=%0d",reads_done);
-    $display("COH_CREDIT_PASS mshr=%0d reads=%0d max_fills=%0d max_ar_live=%0d mshr_stall_cycles=%0d drain=%0d",
-      MSHR_DEPTH,2*READS_PER_CORE,max_fills,max_ar_live,mshr_stall_cycles,
+    $display("COH_CREDIT_PASS mshr=%0d l3=%0d l3_mshr=%0d reads=%0d max_fills=%0d max_l3_fills=%0d max_ar_live=%0d mshr_stall_cycles=%0d drain=%0d",
+      MSHR_DEPTH,USE_L3,L3_MSHR_DEPTH,2*READS_PER_CORE,max_fills,max_l3_fills,max_ar_live,mshr_stall_cycles,
       last_r_cycle-first_ar_cycle);
     $finish;
   end

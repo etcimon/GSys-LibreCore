@@ -748,7 +748,7 @@ module ariane_testharness #(
   // Memory-latency instrument (see module header): the delayer's stream_delay
   // is single-slot per-handshake and its counter truncates at 4 bits, so it
   // could not model access latency. DramLatency==0 is a pure-wire bypass.
-  g6lc_tb_dram_latency_intf #(
+  g6lc_tb_dram_latency #(
     .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
     .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
@@ -1111,8 +1111,9 @@ module ariane_testharness #(
     .L2_ENABLE      ( CVA6Cfg.L2En        ),
     .IDENTITY_FAST  ( 1'b1                ),
     // Inclusive L1 (+ L2 when L3En) back-inval on LLC victim — stream plane
-    // × multicore coherence for U6.2 / L3 hierarchy.
-    .INCLUSIVE_L3   ( CVA6Cfg.L3En        ),
+    // × multicore coherence for U6.2 / L3 hierarchy. The TB override is off;
+    // policy comes from CVA6Cfg.L3InclusiveEn.
+    .INCLUSIVE_L3   ( 1'b0                ),
 `ifdef G6LC_APU
     .PerCoreBoot     ( 1'b1 ),
     .SrcGuard        ( 1'b1 ),

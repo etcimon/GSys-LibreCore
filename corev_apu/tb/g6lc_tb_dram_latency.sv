@@ -21,7 +21,7 @@
 // Latency == 0 is the identity case: all five channels are pure wires.
 //
 // Testbench-only instrument; not a synthesizable design.
-module g6lc_tb_dram_latency_intf #(
+module g6lc_tb_dram_latency #(
     parameter int unsigned AXI_ID_WIDTH   = 4,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
