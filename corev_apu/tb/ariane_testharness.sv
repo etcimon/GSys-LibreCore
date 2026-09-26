@@ -33,7 +33,8 @@ module ariane_testharness #(
   parameter bit          InclSimDTM        = 1'b1,
   parameter int unsigned NUM_WORDS         = 2**25,         // memory size
   parameter bit          StallRandomOutput = 1'b0,
-  parameter bit          StallRandomInput  = 1'b0
+  parameter bit          StallRandomInput  = 1'b0,
+  parameter int unsigned DramLatency       = 0
 ) (
   input  logic                           clk_i,
   input  logic                           rtc_i,
@@ -737,6 +738,30 @@ module ariane_testharness #(
     .mst    ( dram_delayed )
   );
 
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) dram_lat();
+
+  // Memory-latency instrument (see module header): the delayer's stream_delay
+  // is single-slot per-handshake and its counter truncates at 4 bits, so it
+  // could not model access latency. DramLatency==0 is a pure-wire bypass.
+  g6lc_tb_dram_latency_intf #(
+    .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               ),
+    .Latency        ( DramLatency                  ),
+    .Depth          ( 32                           )
+  ) i_dram_latency (
+    .clk_i  ( clk_i        ),
+    .rst_ni ( ndmreset_n   ),
+    .slv    ( dram_delayed ),
+    .mst    ( dram_lat     )
+  );
+
   // SoC DRAM slave. Class/channels/shift come from AiIslandCfg (same as the
   // island APB). Class 1 is +define+G6LC_AI_DRAM_CLASS1+G6LC_HAVE_LITEDRAM.
   g6lc_ai_dram_backend #(
@@ -755,7 +780,7 @@ module ariane_testharness #(
     .rst_ni     ( ndmreset_n   ),
     .rst_sram_ni( rst_ni       ),
     .testmode_i ( test_en      ),
-    .slave      ( dram_delayed ),
+    .slave      ( dram_lat     ),
     .init_done_o( dram_init_done ),
     .ch_r_beats_o ( dram_ch_r_beats ),
     .ch_w_beats_o ( dram_ch_w_beats )
@@ -1069,6 +1094,9 @@ module ariane_testharness #(
     end
   end
 
+  // Observer taps for the [mc_cache] counters (sim-only use, see below).
+  logic mc_l2_miss, mc_l3_hit, mc_l3_miss;
+
   // Always use the cluster wrapper: N=1 is identity (no hub), N>1 is coherent.
   // L2 is owned by the cluster when L2En (avoids double-instantiation).
 `ifndef G6LC_APU
@@ -1114,9 +1142,9 @@ module ariane_testharness #(
     .mem_req_o      ( axi_ariane_req      ),
     .mem_resp_i     ( axi_ariane_resp     ),
     .rvfi_probes_o  ( rvfi_probes         ),
-    .l2_miss_o      (                     ),
-    .l3_hit_o       (                     ),
-    .l3_miss_o      (                     ),
+    .l2_miss_o      ( mc_l2_miss          ),
+    .l3_hit_o       ( mc_l3_hit           ),
+    .l3_miss_o      ( mc_l3_miss          ),
     .pf_issue_o     (                     ),
     .pf_train_o     (                     ),
     .ai_sb_enq_valid_o( ai_sb_enq         ),
@@ -1535,6 +1563,39 @@ module ariane_testharness #(
         mc_any_hung = 1'b1;
   end
 
+  //  Observer-only cache counters. l2_hit_o/l2_miss_o/l2_bypass_o are
+  //  single-cycle pulses inside g6lc_l2_top; l3_hit_o/l3_miss_o are cluster
+  //  outputs. The l2 hit/bypass taps are hierarchical because the cluster does
+  //  not forward them; gen_l2 exists iff L2_ENABLE || CVA6Cfg.L2En and the TB
+  //  passes L2_ENABLE=CVA6Cfg.L2En, so the guard mirrors that condition.
+  //pragma translate_off
+  longint unsigned mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass,
+                   mc_cnt_l3_hit, mc_cnt_l3_miss;
+  logic mc_l2_hit_obs, mc_l2_bypass_obs;
+  if (CVA6Cfg.L2En) begin : gen_mc_cache_l2
+    assign mc_l2_hit_obs    = i_cluster.gen_l2.i_l2.l2_hit_o;
+    assign mc_l2_bypass_obs = i_cluster.gen_l2.i_l2.l2_bypass_o;
+  end else begin : gen_mc_cache_nol2
+    assign mc_l2_hit_obs    = 1'b0;
+    assign mc_l2_bypass_obs = 1'b0;
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      mc_cnt_l2_hit    <= mc_cnt_l2_hit    + mc_l2_hit_obs;
+      mc_cnt_l2_miss   <= mc_cnt_l2_miss   + mc_l2_miss;
+      mc_cnt_l2_bypass <= mc_cnt_l2_bypass + mc_l2_bypass_obs;
+      mc_cnt_l3_hit    <= mc_cnt_l3_hit    + mc_l3_hit;
+      mc_cnt_l3_miss   <= mc_cnt_l3_miss   + mc_l3_miss;
+    end else begin
+      mc_cnt_l2_hit    <= '0;
+      mc_cnt_l2_miss   <= '0;
+      mc_cnt_l2_bypass <= '0;
+      mc_cnt_l3_hit    <= '0;
+      mc_cnt_l3_miss   <= '0;
+    end
+  end
+  //pragma translate_on
+
   //  Report in a `final` block, not from the clocked process. The C++ side leaves
   //  its loop as soon as `exit_o[0]` is set, so a $display issued in that same
   //  cycle never reaches the log -- measured: the run exited 127 with no reason
@@ -1557,6 +1618,8 @@ module ariane_testharness #(
                c, mc_gap_max[c], MC_GAP_LIMIT, mc_last_wfi[c]);
     if (mc_any_hung)
       $display("*** [mc_verdict] FAIL: a core ran and then stopped retiring (exit code 126)");
+    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d dram_latency=%0d",
+             mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass, mc_cnt_l3_hit, mc_cnt_l3_miss, DramLatency);
   end
   //pragma translate_on
 

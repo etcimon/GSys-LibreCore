@@ -562,6 +562,13 @@ package config_pkg;
     bit          ServerPrefetchEn;    // multi-stream + next-line at L3 boundary
     int unsigned ServerPfStreams;     // concurrent stream trackers
     int unsigned ServerPfDistance;    // next-line look-ahead (lines)
+    // U6.3 memory-side feature plane (phased; 0 keeps today's behaviour)
+    bit          WtAxiAllocEn;        // WT adapter emits BUFFERABLE|MODIFIABLE|RD_ALLOC|WR_ALLOC
+                                      // for cacheable requests (nc/lock/ATOP stay MODIFIABLE);
+                                      // default 0 = today's modifiable-only stream
+    bit          L3InclusiveEn;       // L3 victim back-invalidates L1s and the L2 tag (Phase 2)
+    bit          L2TagSramEn;         // L2/L3 tag array behind tc_sram launched read (Phase 3)
+    bit          L2WriteUpdateEn;     // L2 merges a WT write into a resident line (Phase 4)
     // Xg6lcai AI matrix plane (off in every package but g6lc64_ai)
     ai_cfg_t     AiCfg;
   } cva6_user_cfg_t;
@@ -716,6 +723,10 @@ package config_pkg;
     int unsigned L3LineWidth;
     int unsigned L3MshrDepth;
     int unsigned L3DataBanks;
+    bit          WtAxiAllocEn;
+    bit          L3InclusiveEn;
+    bit          L2TagSramEn;
+    bit          L2WriteUpdateEn;
     bit          ServerPrefetchEn;
     int unsigned ServerPfStreams;
     int unsigned ServerPfDistance;
@@ -1034,6 +1045,16 @@ package config_pkg;
     assert (!(Cfg.L3En && Cfg.L2LineWidth != 0 && Cfg.L3LineWidth != 0 &&
               Cfg.L3LineWidth != Cfg.L2LineWidth));
     assert (!(Cfg.ServerPrefetchEn && !Cfg.L2En && !Cfg.L3En));
+    // WT boundary allocation attributes only mean something with the WT L1 and a memory-side L2.
+    assert (!(Cfg.WtAxiAllocEn && (Cfg.DCacheType != WT || !Cfg.L2En)));
+    // L3 geometry legality mirrors L2: zero (auto-infer) or a power of two.
+    assert (Cfg.L3MshrDepth == 0 || (2 ** $clog2(Cfg.L3MshrDepth) == Cfg.L3MshrDepth));
+    assert (Cfg.L3DataBanks == 0 || (2 ** $clog2(Cfg.L3DataBanks) == Cfg.L3DataBanks));
+    assert (Cfg.L3SetAssoc == 0 || (2 ** $clog2(Cfg.L3SetAssoc) == Cfg.L3SetAssoc));
+    // Inclusion needs an L3 at least as large as the L2 it back-invalidates.
+    assert (!(Cfg.L3InclusiveEn && (!Cfg.L3En || Cfg.L3ByteSize < Cfg.L2ByteSize)));
+    assert (!(Cfg.L2TagSramEn && !Cfg.L2En));
+    assert (!(Cfg.L2WriteUpdateEn && !Cfg.L2En));
 
     // --- Xg6lcai AI matrix plane (architecture/ai-matrix/isa-encoding.md) ---
     // Seam exclusivity. CVXIF and the accelerator port are already mutually

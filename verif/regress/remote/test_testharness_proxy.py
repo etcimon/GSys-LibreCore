@@ -1073,5 +1073,26 @@ sys.exit(0 if peer.exists() else 3)
                 json.loads((out / 'results.json').read_text()), 'alpha')
 
 
+class McCacheCounterParseTests(unittest.TestCase):
+    LINE = ('*** [mc_cache] l2_hit=3 l2_miss=11 l2_bypass=7 l3_hit=2 l3_miss=5'
+            ' dram_latency=40')
+    WANT = {'l2_hit': 3, 'l2_miss': 11, 'l2_bypass': 7, 'l3_hit': 2,
+            'l3_miss': 5, 'dram_latency': 40}
+
+    def check(self, parser):
+        self.assertEqual(parser(self.LINE + '\n'), self.WANT)
+        self.assertEqual(parser('banner\n' + self.LINE + '\ntrailer\n'), self.WANT)
+        self.assertIsNone(parser('*** [mc_verdict] program exit code 0\n'))
+        self.assertIsNone(parser('*** [mc_cache] l2_hit=x l2_miss=1\n'))
+
+    def test_mc_runner_parser(self):
+        from run_mc_int2_review import parse_cache_counters
+        self.check(parse_cache_counters)
+
+    def test_opensbi_runner_parser(self):
+        from run_opensbi_source_review import parse_cache_counters
+        self.check(parse_cache_counters)
+
+
 if __name__ == '__main__':
     unittest.main()

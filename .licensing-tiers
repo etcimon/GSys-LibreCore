@@ -70,6 +70,8 @@ R   corev_apu/src/g6lc_cluster.sv
 
 # Testharness soak-exit helper (MIT). g6lc_tb.cpp stays Apache (fork of ariane_tb).
 T   corev_apu/tb/g6lc_tb_trace.h
+# Testbench DRAM access-latency instrument (MIT); simulation-only.
+T   corev_apu/tb/g6lc_tb_dram_latency.sv
 
 # LibreCore-original reference device trees (hardware description; NOT tier T).
 R   corev_apu/bootrom/ariane-linux.dts

@@ -15,6 +15,16 @@ import sys
 import tarfile
 
 
+def parse_cache_counters(text):
+    match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
+                      r' l3_hit=(\d+) l3_miss=(\d+) dram_latency=(\d+)', text)
+    if not match:
+        return None
+    return {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
+            'l2_bypass': int(match.group(3)), 'l3_hit': int(match.group(4)),
+            'l3_miss': int(match.group(5)), 'dram_latency': int(match.group(6))}
+
+
 def sha(path):
     digest = hashlib.sha256()
     with path.open('rb') as source:
@@ -416,7 +426,10 @@ def trial_verdict(rc, text, traces, symbols, cap, reference=None, extend=False):
               'strictDualPassed': outcome == 'pass', 'retiredByHart': progress,
               'tracerTerminated': '[rvfi_tracer] INFO: Simulation terminated' in text,
               'terminationPath': termination_path(rc, text, cap),
-              'pins': [line for line in text.splitlines() if line.startswith(('[hangpc]', '[smt-progress]'))],
+              'cacheCounters': parse_cache_counters(text),
+              'pins': [line for line in text.splitlines()
+                       if line.startswith(('[hangpc]', '[smt-progress]'))
+                       or '[mc_cache]' in line],
               'elapsedVerdicts': re.findall(r'\*\*\* (?:SUCCESS|FAILED).*', text)}
     if reference:
         try:

@@ -456,6 +456,11 @@ package build_config_pkg;
       cfg.L3MshrDepth = CVA6Cfg.L3MshrDepth;
       cfg.L3DataBanks = CVA6Cfg.L3DataBanks;
     end
+    // U6.3 memory-side feature plane: plain pass-through (defaults stay 0).
+    cfg.WtAxiAllocEn = CVA6Cfg.WtAxiAllocEn;
+    cfg.L3InclusiveEn = CVA6Cfg.L3InclusiveEn;
+    cfg.L2TagSramEn = CVA6Cfg.L2TagSramEn;
+    cfg.L2WriteUpdateEn = CVA6Cfg.L2WriteUpdateEn;
     // Multi-core snoop-filter / prefetch defaults when left zero
     if (cfg.NrCores > 1 && CVA6Cfg.SnoopFilterEn && CVA6Cfg.SnoopFilterEntries == 0)
       cfg.SnoopFilterEntries = cfg.NrCores * 64;

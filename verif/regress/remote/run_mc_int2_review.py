@@ -60,6 +60,16 @@ def decode_soak(value):
     return 'undecodable', value
 
 
+def parse_cache_counters(text):
+    match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
+                      r' l3_hit=(\d+) l3_miss=(\d+) dram_latency=(\d+)', text)
+    if not match:
+        return None
+    return {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
+            'l2_bypass': int(match.group(3)), 'l3_hit': int(match.group(4)),
+            'l3_miss': int(match.group(5)), 'dram_latency': int(match.group(6))}
+
+
 def verdict(text, bound, kind, rc=0, expect_mask=None):
     banners = re.findall(r'\*\*\* (SUCCESS|FAILED) \*\*\* \(tohost = (\d+)(?:, seed \d+)?\) after (\d+) cycles', text)
     held = re.search(r'\[mc_verdict\] HELD: .*held_mask=([01x]+) retired_mask=([01x]+)', text)
@@ -73,6 +83,7 @@ def verdict(text, bound, kind, rc=0, expect_mask=None):
               'heldMask': held.group(1) if held else (silent.group(2) if silent else None),
               'retiredMask': held.group(2) if held else (silent.group(1) if silent else None),
               'programExit': int(program.group(1)) if program else None,
+              'cacheCounters': parse_cache_counters(text),
               'outcome': 'fail'}
     if record['assertions'] or len(banners) != 1:
         return record
@@ -876,7 +887,8 @@ def directed_review():
         trial.mkdir()
         elf = trial / 'directed.elf'
         command = GCC + (['-DORACLE_NEGATIVE'] if negative else []) + (
-            ['-DEXIT_ON_SECONDARY'] if os.environ.get('REVIEW_MC_EXIT_SECONDARY') == '1' else []) + [str(data / src), '-o', str(elf)]
+            ['-DEXIT_ON_SECONDARY'] if os.environ.get('REVIEW_MC_EXIT_SECONDARY') == '1' else []) + (
+            os.environ.get('REVIEW_MC_DIRECTED_DEFS', '').split()) + [str(data / src), '-o', str(elf)]
         rc = bash(' '.join(command), trial / 'gcc.log', repo, 120)
         assert rc == 0, 'gcc'
         cmd = [str(exe), '--seed=1', '+debug_disable', '+quiet_axi', f'+time_out={bound}',
@@ -1132,6 +1144,10 @@ def build_only_review():
     control = Path('/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt')
     vlt_args = (f'{control} +incdir+{repo}/corev_apu/tb +incdir+{repo}/corev_apu/src'
                 if control.is_file() else '')
+    extra_vlt_args = os.environ.get('REVIEW_MC_EXTRA_VLT_ARGS', '').strip()
+    if extra_vlt_args:
+        vlt_args = (vlt_args + ' ' + extra_vlt_args).strip()
+    dram_latency = re.search(r'-GDramLatency=(\d+)', vlt_args)
     command = (f'export VERILATOR_ROOT={runtime} SOFT_LADDER_VERLIB={model} '
                f'SOFT_LADDER_BUILD_TARGET={target} SOFT_LADDER_VERILATOR_THREADS={threads} '
                'SOFT_LADDER_BUILD_JOBS=8 SOFT_LADDER_BUILD_CLEAN=1 SOFT_LADDER_ISOLATED=1 '
@@ -1156,6 +1172,8 @@ def build_only_review():
                 'seed': str(seed), 'overlay': overlay,
                 'compilerControl': {'path': str(control), 'sha256': sha(control)}
                                    if control.is_file() else None,
+                'extraVltArgs': extra_vlt_args,
+                'dramLatency': int(dram_latency.group(1)) if dram_latency else 0,
                 'sourceComparison': comparison}
     (out / 'build-manifest.json').write_text(json.dumps(manifest, indent=2))
     print(json.dumps({'target': target, 'modelSha256': manifest['modelSha256'],

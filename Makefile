@@ -280,6 +280,7 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/instr_tracing/ITI/include/iti_pkg.sv                               \
         corev_apu/instr_tracing/rv_tracer-main/include/te_pkg.sv                     \
         corev_apu/instr_tracing/rv_encapsulator-main/src/include/encap_pkg.sv        \
+        corev_apu/tb/g6lc_tb_dram_latency.sv                                       \
         corev_apu/tb/ariane_testharness.sv                                           \
         corev_apu/tb/ariane_peripherals.sv                                           \
         corev_apu/tb/rvfi_tracer.sv                                                  \

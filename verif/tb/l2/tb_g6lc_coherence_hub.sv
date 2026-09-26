@@ -1454,6 +1454,7 @@ module tb_g6lc_coherence_l2;
   parameter int BYTE_SIZE=4096, SET_ASSOC=4, MSHR_DEPTH=4, DATA_BANKS=2;
   parameter int WRITE_DELAY=16, W_STALL=0, B_DELAY=0, INV_HOLD=0, R_HOLD=0, B_HOLD=0;
   localparam addr_t ADDRESS=64'h80004000;
+  localparam int L2_LINE_BYTES=512/8;
   logic clk=0,rst_n=0;
   req_t [1:0] requests;
   logic rd_req_valid=0,rd_ready=0,wr_req_valid=0,wr_data_valid=0,wr_resp_ready=0;
@@ -1478,6 +1479,13 @@ module tb_g6lc_coherence_l2;
   data_t cache_value=0,fill_value=0;
   bit negative;
   int scenario;
+  // Scenario 2/3 bookkeeping: DRAM fill-AR count/geometry and the reader's
+  // in-flight request (for per-beat expected data).
+  int dram_ar_count=0;
+  addr_t dram_ar_addr[8];
+  int dram_ar_len[8];
+  addr_t core_rd_addr=0;
+  logic [7:0] core_rd_len=0;
 
   g6lc_coherence_hub #(.NR_CORES(2),.MAX_OUTSTANDING(4),.INVAL_DEPTH(2),
       .LINE_BYTES(16),.SNOOP_FILTER_EN(1),.SNOOP_FILTER_ENTRIES(128),
@@ -1536,6 +1544,11 @@ module tb_g6lc_coherence_l2;
       if(dram_req.ar_valid && dram_rsp.ar_ready) begin
         rd_live<=1;rd_id<=dram_req.ar.id;rd_addr<=dram_req.ar.addr;
         rd_len<=dram_req.ar.len;rd_beat<=0;rd_delay<=3;rd_snapshot<=memory_value;
+        if(dram_ar_count<8)begin
+          dram_ar_addr[dram_ar_count]<=dram_req.ar.addr;
+          dram_ar_len[dram_ar_count]<=dram_req.ar.len;
+        end
+        dram_ar_count<=dram_ar_count+1;
       end
       if(dram_rsp.r_valid && dram_req.r_ready) begin
         if(dram_rsp.r.last)rd_live<=0;else rd_beat<=rd_beat+1'b1;
@@ -1599,13 +1612,41 @@ module tb_g6lc_coherence_l2;
       end
       if(invalidations[0].valid)$fatal(1,"COH_L2_WRITER_TARGET");
       if(responses[1].r_valid && rd_ready)begin
-        if(responses[1].r.id!=id_t'(read_count+1) || responses[1].r.resp!=0 ||
-           responses[1].r.last!=(read_beat==1))$fatal(1,"COH_L2_RESPONSE_OWNER");
-        if(read_beat==0)fill_value=responses[1].r.data;
-        else if(responses[1].r.data!=other_word(ADDRESS+8))$fatal(1,"COH_L2_RESPONSE_OFFSET");
-        if(responses[1].r.last)begin
-          cache_value=fill_value;cache_valid=!fill_killed;fill_live=0;read_count++;read_beat=0;
-        end else read_beat++;
+        if(responses[1].r.id!=id_t'(read_count+1) || responses[1].r.resp!=0)
+          $fatal(1,"COH_L2_RESPONSE_OWNER");
+        if(scenario>=2)begin
+          begin
+            addr_t beat_addr;
+            data_t exp;
+            beat_addr=core_rd_addr+64'(read_beat)*8;
+            exp=(beat_addr==ADDRESS)?memory_value:other_word(beat_addr);
+            // Negative arm: scenario 2 flips one expected beat (third read's
+            // first beat); scenario 3 expects the pre-write value instead.
+            if(negative && scenario==2 && read_count==3 && read_beat==0)
+              exp=exp^64'hffff_ffff_ffff_ffff;
+            if(negative && scenario==3 && beat_addr==ADDRESS)
+              exp=64'h11;
+            if(responses[1].r.last!=(read_beat==core_rd_len))
+              $fatal(1,"COH_L2_RESPONSE_OWNER");
+            if(responses[1].r.data!=exp)begin
+              if(scenario==3)
+                $fatal(1,"COH_L2_STALE_VALUE a=%h d=%h e=%h",
+                  beat_addr,responses[1].r.data,exp);
+              else
+                $fatal(1,"COH_L2_DATA a=%h d=%h e=%h",
+                  beat_addr,responses[1].r.data,exp);
+            end
+            if(responses[1].r.last)begin read_count++;read_beat=0;fill_live=0;end
+            else read_beat++;
+          end
+        end else begin
+          if(responses[1].r.last!=(read_beat==1))$fatal(1,"COH_L2_RESPONSE_OWNER");
+          if(read_beat==0)fill_value=responses[1].r.data;
+          else if(responses[1].r.data!=other_word(ADDRESS+8))$fatal(1,"COH_L2_RESPONSE_OFFSET");
+          if(responses[1].r.last)begin
+            cache_value=fill_value;cache_valid=!fill_killed;fill_live=0;read_count++;read_beat=0;
+          end else read_beat++;
+        end
       end
       if(responses[0].b_valid && wr_resp_ready)begin
         if(core_b_cycle>=0 || responses[0].b.id!=4'h6 || responses[0].b.resp!=0)
@@ -1624,8 +1665,11 @@ module tb_g6lc_coherence_l2;
     else $fatal(1,"COH_L2_R_STABILITY");
 
   task automatic tick;#2;clk=1;#2;clk=0;#2;endtask
-  task automatic send_read(input id_t id);
-    rd_req=read_request(id);rd_req_valid=1;fill_start=1;
+  task automatic send_read(input id_t id, input addr_t addr=ADDRESS,
+                           input logic [7:0] len=1);
+    rd_req=read_request(id);rd_req.addr=addr;rd_req.len=len;
+    core_rd_addr=addr;core_rd_len=len;
+    rd_req_valid=1;fill_start=1;
     for(int n=0;n<2000;n++)begin
       #1;
       if(responses[1].ar_ready)begin tick();rd_req_valid=0;fill_start=0;return;end
@@ -1638,9 +1682,28 @@ module tb_g6lc_coherence_l2;
     if(!$value$plusargs("scenario=%d",scenario))scenario=0;
     repeat(3)tick();rst_n=1;repeat(132)tick();
     wr_resp_ready=1;rd_ready=1;
+    if(scenario==2)begin
+      // Sub-line service: the first read misses and the line-wide DRAM fill
+      // covers the remaining offset reads as hits (no further DRAM AR).
+      send_read(1,ADDRESS+16,8'd1);
+      while(read_count!=1)tick();
+      if(dram_ar_count!=1 || dram_ar_len[0]!=L2_LINE_BYTES/8-1 ||
+         dram_ar_addr[0]!=(ADDRESS & ~addr_t'(L2_LINE_BYTES-1)))
+        $fatal(1,"COH_L2_FILL_GEOMETRY");
+      send_read(2,ADDRESS+32,8'd1);
+      while(read_count!=2)tick();
+      send_read(3,ADDRESS+48,8'd1);
+      while(read_count!=3)tick();
+      send_read(4,ADDRESS,8'd1);
+      while(read_count!=4)tick();
+      if(dram_ar_count!=1)$fatal(1,"COH_L2_MISS_ON_HIT");
+      $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d dram_ar=%0d",
+        scenario,USE_L2,BYTE_SIZE,dram_ar_count);
+      $finish;
+    end
     send_read(1);
     while(read_count!=1)tick();
-    if(!cache_valid || cache_value!=64'h11)$fatal(1,"COH_L2_WARMUP");
+    if(scenario<2 && (!cache_valid || cache_value!=64'h11))$fatal(1,"COH_L2_WARMUP");
     wr_req='0;
     wr_req.addr=ADDRESS;wr_req.id=6;wr_req.size=3;
     wr_req.burst=1;wr_req.cache=CACHE_ATTR;wr_req_valid=1;
@@ -1669,7 +1732,7 @@ module tb_g6lc_coherence_l2;
     fill_start=0;wr_data_valid=0;rd_ready=1;wr_resp_ready=1;inv_ready[1]=1;
     if(core_b_cycle<0 || inv_count!=1 || apply_count!=1 || memory_value!=64'h22)
       $fatal(1,"COH_L2_COMPLETION");
-    if(cache_valid && cache_value!=64'h22)$fatal(1,"COH_L2_STALE_VALUE");
+    if(scenario<2 && cache_valid && cache_value!=64'h22)$fatal(1,"COH_L2_STALE_VALUE");
     if(USE_L2 && scenario==0 && (ar_blocked==0 || late_ar_cycle<mem_b_cycle))
       $fatal(1,"COH_L2_ADMISSION_CONTRACT");
     send_read(id_t'(read_count+1));
@@ -1678,9 +1741,19 @@ module tb_g6lc_coherence_l2;
       wanted=scenario==0 ? 3 : 2;
       while(read_count!=wanted)tick();
     end
-    if(!cache_valid || cache_value!=(64'h22 ^ 64'(negative)))$fatal(1,"COH_L2_FINAL_VALUE");
-    $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d aw=%0d inv=%0d apply=%0d mem_b=%0d late_ar=%0d core_b=%0d blocked=%0d",
-      scenario,USE_L2,BYTE_SIZE,aw_cycle,first_inv_cycle,last_apply_cycle,mem_b_cycle,late_ar_cycle,core_b_cycle,ar_blocked);
+    if(scenario<2)begin
+      if(!cache_valid || cache_value!=(64'h22 ^ 64'(negative)))$fatal(1,"COH_L2_FINAL_VALUE");
+    end else begin
+      // Post-B re-read: the write self-invalidated the resident line, so the
+      // re-read must miss and fetch a fresh line (second DRAM AR) carrying
+      // the applied value — the per-beat checker verified the data already.
+      if(dram_ar_count!=2)$fatal(1,"COH_L2_NO_REFILL");
+      if(dram_ar_len[1]!=L2_LINE_BYTES/8-1 ||
+         dram_ar_addr[1]!=(ADDRESS & ~addr_t'(L2_LINE_BYTES-1)))
+        $fatal(1,"COH_L2_FILL_GEOMETRY");
+    end
+    $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d aw=%0d inv=%0d apply=%0d mem_b=%0d late_ar=%0d core_b=%0d blocked=%0d dram_ar=%0d",
+      scenario,USE_L2,BYTE_SIZE,aw_cycle,first_inv_cycle,last_apply_cycle,mem_b_cycle,late_ar_cycle,core_b_cycle,ar_blocked,dram_ar_count);
     $finish;
   end
 endmodule

@@ -304,6 +304,12 @@ package cva6_config_pkg;
       ServerPrefetchEn: bit'(0),
       ServerPfStreams: unsigned'(0),
       ServerPfDistance: unsigned'(0),
+      // Phase 1: the WT shim was modifiable-only, so the L2 never allocated
+      // (Phase 0 measured l2_hit=0 across 948,230 bypasses on the 4-hart boot).
+      WtAxiAllocEn: bit'(1),
+      L3InclusiveEn: bit'(0),
+      L2TagSramEn: bit'(0),
+      L2WriteUpdateEn: bit'(0),
       SharedTlbDepth: int'(64),
 
       NrLoadPipeRegs: int'(CVA6ConfigNrLoadPipeRegs),

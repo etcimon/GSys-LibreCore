@@ -510,7 +510,7 @@ def composed_review(out, data, runtime_info, runtime):
         'small': [],
         'mod-only': ['-GCACHE_ATTR=2'],
         'stalled': ['-GWRITE_DELAY=4','-GW_STALL=16','-GB_DELAY=16','-GINV_HOLD=64','-GR_HOLD=100','-GB_HOLD=96'],
-        'target': ['-GBYTE_SIZE=262144','-GSET_ASSOC=8','-GMSHR_DEPTH=2','-GDATA_BANKS=4'],
+        'target': ['-GBYTE_SIZE=262144','-GSET_ASSOC=8','-GMSHR_DEPTH=4','-GDATA_BANKS=4'],
         'no-l2': ['-GUSE_L2=0'],
     }
     chosen=os.environ.get('REVIEW_COMPOSED_PROFILE','small')
@@ -519,7 +519,15 @@ def composed_review(out, data, runtime_info, runtime):
     model=out/'model'
     if os.environ.get('REVIEW_COMPOSED_SCC')=='1':
         bench=(source/'tb_g6lc_coherence_hub.sv').read_text().split('module tb_g6lc_coherence_l2;',1)[1]
-        instances='  g6lc_coherence_hub #(' + bench.split('  g6lc_coherence_hub #(',1)[1].split('  function automatic data_t other_word',1)[0]
+        # The structural wrapper needs only the two RTL instances; stop the
+        # splice at the first bench stimulus/driver block after them.
+        after_hub = bench.split('  g6lc_coherence_hub #(', 1)[1]
+        end = len(after_hub)
+        for marker in ('\n  always_comb', '\n  function automatic data_t other_word'):
+            stop = after_hub.find(marker)
+            if stop != -1 and stop < end:
+                end = stop
+        instances='  g6lc_coherence_hub #(' + after_hub[:end]
         wrapper=out/'composed_graph.sv'
         wrapper.write_text('''module composed_graph import g6lc_coherence_pkg::*; import g6lc_l2_tb_pkg::*;
 (input logic clk,rst_n,input req_t[1:0] requests,input resp_t dram_rsp,
@@ -561,7 +569,15 @@ req_t hub_req;resp_t hub_rsp;
     assert str(Path(runtime_info['originalRoot'])/'include/verilated_funcs.h') not in deps
     exe=model/'composed-test'
     records=[]
-    for scenario in ([0] if fault else [0,1]):
+    # Scenario 3 is the self-invalidation discriminator: run it under the
+    # 'self-inval' fault (disconnecting the write self-invalidation) so the
+    # post-B re-read must expose the stale resident line. Scenarios 2/3 assert
+    # line-fill geometry (a miss fetches one full line, later offsets hit),
+    # which only exists when the request stream carries allocate attributes —
+    # the 'mod-only' profile is the modifiable-only identity control and runs
+    # the classic scenarios only.
+    for scenario in ([0,3] if fault else ([0] if chosen=='no-l2' else
+                     [0,1] if chosen=='mod-only' else [0,1,2,3])):
         for negative in ([False] if fault or chosen=='no-l2' else [False,True]):
             cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])
             if os.environ.get('REVIEW_COMPOSED_DIAGNOSE')=='1':cmd.append('+diagnose')
@@ -569,7 +585,12 @@ req_t hub_req;resp_t hub_rsp;
             text=result.stdout+result.stderr
             label=f'scenario-{scenario}-negative-{int(negative)}'
             (out/f'{label}.log').write_text(text)
-            error='COH_L2_STALE_VALUE' if fault or (chosen=='no-l2' and scenario==0) else 'COH_L2_FINAL_VALUE' if negative else None
+            if fault or (chosen=='no-l2' and scenario==0):
+                error='COH_L2_STALE_VALUE'
+            elif negative:
+                error={2:'COH_L2_DATA',3:'COH_L2_STALE_VALUE'}.get(scenario,'COH_L2_FINAL_VALUE')
+            else:
+                error=None
             matched=(result.returncode!=0 and error in text and 'COH_L2_PASS' not in text) if error else (
                 result.returncode==0 and text.count('COH_L2_PASS')==1 and '%Error' not in text)
             metrics=re.findall(r'COH_L2_PASS ([^\n]+)',text)

@@ -265,6 +265,10 @@ package cva6_config_pkg;
       ServerPrefetchEn: bit'(1),
       ServerPfStreams: unsigned'(0),  // auto → max(4, 2×NrCores)
       ServerPfDistance: unsigned'(2),
+      WtAxiAllocEn: bit'(0),
+      L3InclusiveEn: bit'(1),
+      L2TagSramEn: bit'(0),
+      L2WriteUpdateEn: bit'(0),
       SharedTlbDepth: int'(128),
 
       NrLoadPipeRegs: int'(CVA6ConfigNrLoadPipeRegs),

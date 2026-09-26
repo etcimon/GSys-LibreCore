@@ -791,6 +791,31 @@ module wt_axi_adapter
   // axi protocol shim
   ///////////////////////////////////////////////////////
 
+  // Phase 1 (WtAxiAllocEn): the shim sees the plain request stream; the module
+  // output below swaps in the full allocate attribute for cacheable requests.
+  // BUFFERABLE|MODIFIABLE|RD_ALLOC|WR_ALLOC = 4'b1111.
+  localparam logic [3:0] WT_ALLOC_CACHE = axi_pkg::CACHE_BUFFERABLE |
+      axi_pkg::CACHE_MODIFIABLE | axi_pkg::CACHE_RD_ALLOC | axi_pkg::CACHE_WR_ALLOC;
+  axi_req_t axi_req_shim;
+  logic axi_rd_alloc, axi_wr_alloc;
+  // Taken from the same request word that feeds rd_addr/wr_addr (p_axi_req):
+  // the shim drives AR/AW combinationally and holds them until grant, so the
+  // attribute is stable across the handshake. AMO/LR/SC requests arrive with
+  // nc=1 (miss unit: mem_data_o.nc), so lock/ATOP keep the modifiable-only
+  // stream without a special case.
+  assign axi_rd_alloc = CVA6Cfg.WtAxiAllocEn &&
+                        !(arb_idx ? dcache_data.nc : icache_data.nc);
+  assign axi_wr_alloc = CVA6Cfg.WtAxiAllocEn && !dcache_data.nc;
+
+  // Timing: a 4-bit sideband mux off an already-registered request word — no
+  // new state, clock, reset or DFT change; with WtAxiAllocEn=0 the output is
+  // bit-identical to the shim's own assignment.
+  always_comb begin : p_axi_alloc_attr
+    axi_req_o = axi_req_shim;
+    axi_req_o.ar.cache = axi_rd_alloc ? WT_ALLOC_CACHE : axi_pkg::CACHE_MODIFIABLE;
+    axi_req_o.aw.cache = axi_wr_alloc ? WT_ALLOC_CACHE : axi_pkg::CACHE_MODIFIABLE;
+  end
+
   axi_shim #(
       .CVA6Cfg    (CVA6Cfg),
       .AxiNumWords(AxiNumWords),
@@ -828,7 +853,7 @@ module wt_axi_adapter
       .wr_valid_o (axi_wr_valid),
       .wr_id_o    (axi_wr_id_out),
       .wr_exokay_o(axi_wr_exokay),
-      .axi_req_o  (axi_req_o),
+      .axi_req_o  (axi_req_shim),
       .axi_resp_i (axi_resp_i)
   );
 

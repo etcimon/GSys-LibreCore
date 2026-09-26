@@ -122,7 +122,11 @@ _start:
   li   t1, COOKIE
   bne  t0, t1, fail_stale
 
+#ifdef ORACLE_NEGATIVE
+  li   a0, 3
+#else
   li   a0, 1
+#endif
   la   t0, tohost
   sw   a0, 0(t0)
 5: j 5b

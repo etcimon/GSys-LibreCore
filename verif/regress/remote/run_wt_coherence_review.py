@@ -242,9 +242,251 @@ def run_amo_apply():
     return 0
 
 
+def run_wt_attr():
+    data, out = Path(os.environ['TH_DATA_DIR']), Path(os.environ['TH_OUT_DIR'])
+    source = out / 'source'
+    source.mkdir()
+    names = ['config_pkg.sv', 'g6lc64_ooo_int2_config_pkg.sv', 'riscv_pkg.sv',
+             'ariane_pkg.sv', 'build_config_pkg.sv', 'wt_cache_pkg.sv', 'axi_pkg.sv',
+             'ariane_axi_pkg.sv', 'cf_math_pkg.sv', 'lzc.sv', 'rr_arb_tree.sv',
+             'cva6_fifo_v3.sv', 'axi_shim.sv', 'wt_axi_adapter.sv',
+             'tb_g6lc_wt_axi_attr.sv']
+    for name in names:
+        (source / name).write_bytes((data / name).read_bytes())
+    types_source = (data / 'wt_cache_subsystem.sv').read_text()
+    types = types_source.split('  // dcache interface', 1)[1].split('  logic icache_adapter_data_req', 1)[0]
+    (source / 'wt-types.svh').write_text(types_source.split('module wt_cache_subsystem', 1)[0] + types)
+    mutation = os.environ.get('REVIEW_WT_ATTR_MUTATION') == '1'
+    original = {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in names}
+    if mutation:
+        # Drop the nc qualifier on the read-side allocate decision: nc fills and
+        # nc loads then get the allocate attribute (scenarios 1 and 3 must fail).
+        path = source / 'wt_axi_adapter.sv'
+        text = path.read_text()
+        old = '!(arb_idx ? dcache_data.nc : icache_data.nc);'
+        assert text.count(old) == 1
+        path.write_text(text.replace(old, '1\'b1;'))
+    hashes = {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in names}
+    hashes['wt-types.svh'] = hashlib.sha256((source / 'wt-types.svh').read_bytes()).hexdigest()
+    (out / 'sources.json').write_text(json.dumps(
+        {'original': original, 'effective': hashes, 'mutation': mutation,
+         'scope': 'real wt_axi_adapter under g6lc64_ooo_int2 (COH_OOO, RVA, Zacas); '
+                  'AxCACHE emission per request class at ALLOC=0/1'}, indent=2))
+    runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
+    assert hashlib.sha256((runtime / 'include/verilated_funcs.h').read_bytes()).hexdigest() == \
+        'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+    env = dict(os.environ, VERILATOR_ROOT=str(runtime), VPATH=str(runtime / 'include'))
+    control = out / 'wt-attr.vlt'
+    # axi_req_o is now driven by the p_axi_alloc_attr comb block; split_var on
+    # the port still applies (it splits the struct net, not its driver).
+    control.write_text(
+        Path('/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt').read_text() +
+        '\nsplit_var -module "wt_axi_adapter" -var "dcache_data_i"\n'
+        'split_var -module "wt_axi_adapter" -var "dcache_rtrn_o"\n'
+        'split_var -module "wt_axi_adapter" -var "icache_data_i"\n'
+        'split_var -module "wt_axi_adapter" -var "icache_rtrn_o"\n'
+        'split_var -module "wt_axi_adapter" -var "axi_req_o"\n'
+        'split_var -module "wt_axi_adapter" -var "axi_resp_i"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "arb_gnt"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "axi_wr_req"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "axi_wr_gnt"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "axi_rd_req"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "axi_rd_gnt"\n'
+        'isolate_assignments -module "wt_axi_adapter" -var "axi_rd_rdy"\n')
+    (out / 'compiler-control.json').write_text(json.dumps({'sha256': hashlib.sha256(control.read_bytes()).hexdigest()}))
+    results = []
+    allocs = [1] if mutation else [0, 1]
+    scenarios = [1, 3] if mutation else list(range(9))
+    for alloc in allocs:
+        model = out / f'model-alloc{alloc}'
+        command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1',
+                   '-Wno-fatal', '-Werror-LATCH', '-Werror-UNOPTFLAT',
+                   str(control),
+                   '-I' + str(source), '--top-module', 'tb_g6lc_wt_axi_attr',
+                   f'-GALLOC={alloc}',
+                   '--Mdir', str(model), '-o', 'wt-attr',
+                   *[str(source / name) for name in names]]
+        for label, command in [('verilate', command), ('build', ['make', '-C', str(model),
+                               '-f', 'Vtb_g6lc_wt_axi_attr.mk', '-j4'])]:
+            with (out / f'{label}-alloc{alloc}.log').open('w') as log:
+                rc = subprocess.run(command, env=env, stdout=log, stderr=subprocess.STDOUT, timeout=300).returncode
+            assert rc == 0, (label, alloc)
+        deps = '\n'.join(path.read_text() for path in model.glob('*.d'))
+        assert str(runtime / 'include/verilated_funcs.h') in deps
+        for scenario in scenarios:
+            for negative in ([False] if mutation else [False, True]):
+                command = [str(model / 'wt-attr'), f'+scenario={scenario}'] + \
+                    (['+oracle_negative'] if negative else [])
+                run = subprocess.run(command, capture_output=True, text=True, timeout=60)
+                text = run.stdout + run.stderr
+                (out / f'alloc{alloc}-scenario-{scenario}-negative-{int(negative)}.log').write_text(text)
+                tag = ['WT_ATTR_IFILL', 'WT_ATTR_NC', 'WT_ATTR_DFILL', 'WT_ATTR_NC',
+                       'WT_ATTR_STORE', 'WT_ATTR_SNC', 'WT_ATTR_AMO', 'WT_ATTR_LR',
+                       'WT_ATTR_SC'][scenario]
+                # nc=1 stimulus on the mutation models the miss-unit AMO mark,
+                # so a dropped nc qualifier shows as the allocate attribute on
+                # the affected channel's expected-2 check (tag WT_ATTR_NC).
+                error = 'WT_ATTR_NC' if mutation else (tag if negative else None)
+                matched = (run.returncode != 0 and error in text and 'WT_ATTR_PASS' not in text) if error else \
+                    (run.returncode == 0 and text.count('WT_ATTR_PASS') == 1 and '%Error' not in text)
+                results.append({'alloc': alloc, 'scenario': scenario, 'negative': negative,
+                                'mutation': mutation, 'expectedError': error,
+                                'rc': run.returncode, 'matched': matched})
+                (out / 'results.json').write_text(json.dumps(results, indent=2))
+                assert matched, results[-1]
+    return 0
+
+
+def run_cfg_refusal():
+    # check_cfg is a simulation-time legality gate (cva6.sv calls it from an
+    # initial on the *built* cfg), so a refusal is the sim exiting on the
+    # assert rather than a lint error. Per case a tiny harness builds the int2
+    # user literal with one mutation and calls check_cfg at t=0; 'CFG_NO_ASSERT'
+    # must be absent and the reported config_pkg.sv line must be the guard's
+    # own. The legal-baseline case keeps the gate honest: a silent harness
+    # would make every refusal vacuous.
+    data, out = Path(os.environ['TH_DATA_DIR']), Path(os.environ['TH_OUT_DIR'])
+    source = out / 'source'
+    source.mkdir()
+    names = ['config_pkg.sv', 'g6lc64_ooo_int2_config_pkg.sv', 'build_config_pkg.sv']
+    for name in names:
+        (source / name).write_bytes((data / name).read_bytes())
+    hashes = {name: hashlib.sha256((source / name).read_bytes()).hexdigest() for name in names}
+    (out / 'sources.json').write_text(json.dumps({'effective': hashes,
+        'scope': 'check_cfg legality refusals on the g6lc64_ooo_int2 user literal'}, indent=2))
+    runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
+    assert hashlib.sha256((runtime / 'include/verilated_funcs.h').read_bytes()).hexdigest() == \
+        'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+    env = dict(os.environ, VERILATOR_ROOT=str(runtime), VPATH=str(runtime / 'include'))
+    cases = [
+        # name, mutation on cva6_user_cfg_t u, expected config_pkg.sv line (None = legal)
+        ('legal-baseline', '', None),
+        # COH_OOO itself demands DCacheType==WT and L2En (config_pkg.sv:908),
+        # so the DCacheType/L2En mutations also move the policy to COH_FILTERED
+        # to keep the first reported failure on the intended guard.
+        ('wt-alloc-hpdcache', "u.WtAxiAllocEn = 1'b1; u.DCacheType = config_pkg::HPDCACHE_WT;"
+         " u.CohPolicy = config_pkg::COH_FILTERED;", 1049),
+        ('wt-alloc-no-l2', "u.L2En = 1'b0; u.CohPolicy = config_pkg::COH_FILTERED;", 1049),
+        ('l3-mshr', "u.L3MshrDepth = unsigned'(3);", 1051),
+        ('l3-banks', "u.L3DataBanks = unsigned'(6);", 1052),
+        ('l3-assoc', "u.L3SetAssoc = unsigned'(12);", 1053),
+        ('l3incl-no-l3', "u.L3InclusiveEn = 1'b1;", 1055),
+        ('l3incl-small', "u.L3InclusiveEn = 1'b1; u.L3En = 1'b1; u.L3ByteSize = unsigned'(131072);", 1055),
+        ('l2sram-no-l2', "u.WtAxiAllocEn = 1'b0; u.L2En = 1'b0; u.CohPolicy = config_pkg::COH_FILTERED;"
+         " u.L2TagSramEn = 1'b1;", 1056),
+        ('l2wu-no-l2', "u.WtAxiAllocEn = 1'b0; u.L2En = 1'b0; u.CohPolicy = config_pkg::COH_FILTERED;"
+         " u.L2WriteUpdateEn = 1'b1;", 1057),
+    ]
+    harness = source / 'cfg_refusal_harness.sv'
+    results = []
+    for name, mutation, line in cases:
+        harness.write_text(
+            'module cfg_refusal_harness;\n'
+            '  function automatic config_pkg::cva6_user_cfg_t mutate();\n'
+            '    config_pkg::cva6_user_cfg_t u = cva6_config_pkg::cva6_cfg;\n'
+            f'    {mutation}\n'
+            '    return u;\n'
+            '  endfunction\n'
+            '  initial begin\n'
+            '    config_pkg::check_cfg(build_config_pkg::build_config(mutate()));\n'
+            '    $display("CFG_NO_ASSERT");\n'
+            '    $finish;\n'
+            '  end\n'
+            'endmodule\n')
+        model = out / f'model-{name}'
+        command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1',
+                   '-Wno-fatal', '-I' + str(source), '--top-module', 'cfg_refusal_harness',
+                   '--Mdir', str(model), '-o', 'sim',
+                   *[str(source / n) for n in names], str(harness)]
+        for label, cmd in [('verilate', command),
+                           ('build', ['make', '-C', str(model), '-f', 'Vcfg_refusal_harness.mk', '-j4'])]:
+            with (out / f'{label}-{name}.log').open('w') as log:
+                rc = subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT,
+                                    timeout=300).returncode
+            assert rc == 0, (label, name)
+        run = subprocess.run([str(model / 'sim')], capture_output=True, text=True, timeout=30)
+        text = run.stdout + run.stderr
+        (out / f'case-{name}.log').write_text(text)
+        expected = f'config_pkg.sv:{line}' if line else None
+        refused = run.returncode != 0 and 'CFG_NO_ASSERT' not in text
+        matched = refused and expected in text if expected else \
+            (run.returncode == 0 and 'CFG_NO_ASSERT' in text)
+        results.append({'case': name, 'expectedLine': line, 'rc': run.returncode,
+                        'matched': matched})
+        (out / 'results.json').write_text(json.dumps(results, indent=2))
+        assert matched, results[-1]
+    return 0
+
+
+def run_dram_lat():
+    # g6lc_tb_dram_latency leaf: scripted AXI master + always-ready backend.
+    # Each (latency, scenario) pair runs the positive arm and an
+    # oracle_negative arm whose expected tag proves the check is armed.
+    data = Path(os.environ['TH_DATA_DIR'])
+    out = Path(os.environ['TH_OUT_DIR'])
+    names = ['axi_pkg.sv', 'axi_intf.sv', 'g6lc_tb_dram_latency.sv',
+             'tb_g6lc_tb_dram_latency.sv']
+    for name in names:
+        source = data / name
+        assert source.is_file(), source
+        (out / name).write_text(source.read_text())
+    env = os.environ.copy()
+    env['PATH'] = '/opt/testharness/toolchains/verilator-v5.008/bin:' + env['PATH']
+    # scenario -> expected fatal tag for its oracle_negative arm
+    # (scenario 5's positive arm itself expects the DUT's order fatal).
+    pos_error = {0: None, 1: None, 2: None, 3: None, 4: None,
+                 5: 'DRAM_LAT_ORDER'}
+    neg_error = {0: 'DRAM_LAT_ID', 1: 'DRAM_LAT_RD', 2: 'DRAM_LAT_DBL',
+                 3: 'DRAM_LAT_B', 4: 'DRAM_LAT_BP', 5: 'DRAM_LAT_MISS'}
+    matrix = {0: [0], 7: [1, 2, 3, 4, 5], 40: [1, 2, 3, 4]}
+    results = []
+    for lat in sorted(matrix):
+        mdir = out / ('build-L%d' % lat)
+        mdir.mkdir(parents=True, exist_ok=True)
+        args = ['verilator', '--cc', '--main', '--exe', '--build', '--timing',
+                '--assert', '--threads', '1', '-j', '4',
+                '-Wno-fatal', '-Werror-LATCH', '-Werror-UNOPTFLAT',
+                '-GLATENCY=%d' % lat, '-GDEPTH=32',
+                '--top-module', 'tb_g6lc_tb_dram_latency',
+                '--Mdir', str(mdir), '-o', 'simv'] + \
+            [str(out / n) for n in names]
+        subprocess.run(args, cwd=out, check=True, env=env)
+        for scenario in matrix[lat]:
+            for negative in (False, True):
+                plus = ['+scenario=%d' % scenario]
+                if negative:
+                    plus.append('+oracle_negative')
+                run = subprocess.run([str(mdir / 'simv'), *plus], cwd=out,
+                                     capture_output=True, text=True, env=env,
+                                     timeout=600)
+                text = run.stdout + run.stderr
+                error = neg_error[scenario] if negative else pos_error[scenario]
+                matched = ((run.returncode != 0 and error in text and
+                            'DRAM_LAT_PASS' not in text)
+                           if error else
+                           (run.returncode == 0 and
+                            text.count('DRAM_LAT_PASS') == 1 and
+                            '%Error' not in text))
+                results.append({'latency': lat, 'scenario': scenario,
+                                'negative': negative,
+                                'returncode': run.returncode,
+                                'expectedError': error, 'matched': matched})
+        (out / 'results.json').write_text(json.dumps(results, indent=2))
+        assert all(r['matched'] for r in results), \
+            [r for r in results if not r['matched']]
+    return 0
+
+
 def main():
+    if os.environ.get('REVIEW_DRAM_LAT') == '1':
+        return run_dram_lat()
+    if os.environ.get('REVIEW_CFG_REFUSAL') == '1':
+        return run_cfg_refusal()
     if os.environ.get('REVIEW_WT_SELF_ADDR') == '1':
         return run_self_address()
+    if os.environ.get('REVIEW_WT_ATTR') == '1' or \
+            os.environ.get('REVIEW_WT_ATTR_MUTATION') == '1':
+        return run_wt_attr()
     if os.environ.get('REVIEW_WT_AMO_APPLY') == '1' or \
             os.environ.get('REVIEW_WT_AMO_APPLY_MUTATION') == '1':
         return run_amo_apply()
