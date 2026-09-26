@@ -26,6 +26,7 @@ module tb_g6lc_l2_hum;
   parameter bit CHAIN_L3=1'b0;
   parameter bit RR_EN=1'b0;
   parameter bit FAIR_WRITES=1'b0;
+  parameter bit TAG_SRAM=1'b0;
   parameter int unsigned BYTE_SIZE   = 4096;
   parameter int unsigned SET_ASSOC   = 4;
   parameter int unsigned LINE_WIDTH  = 512;
@@ -75,6 +76,7 @@ module tb_g6lc_l2_hum;
       .DATA_BANKS  (DATA_BANKS),
       .RR_EN       (RR_EN),
       .FAIR_WRITES (FAIR_WRITES),
+      .TAG_SRAM    (TAG_SRAM),
       .AXI_ADDR_WIDTH (AW),
       .AXI_DATA_WIDTH (DW),
       .AXI_ID_WIDTH   (IDW),
@@ -113,7 +115,8 @@ module tb_g6lc_l2_hum;
     );
     g6lc_l3_top #(
       .Enable(1'b1),.BYTE_SIZE(2048),.SET_ASSOC(2),.LINE_WIDTH(LINE_WIDTH),
-      .MSHR_DEPTH(2),.DATA_BANKS(2),.AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),
+      .MSHR_DEPTH(2),.DATA_BANKS(2),.TAG_SRAM(TAG_SRAM),
+      .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),
       .AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),.axi_req_t(req_t),.axi_resp_t(resp_t)
     ) i_l3 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(cut_req),.slv_resp_o(cut_resp),
@@ -280,6 +283,65 @@ module tb_g6lc_l2_hum;
   always_ff @(posedge clk) if (rst_n) begin
     if (dut.gen_l2.mshr_alloc && dut.gen_l2.mshr_merged) merges <= merges + 1;
     if (dut.gen_l2.tag_write && !dut.gen_l2.bank_conflict) fills <= fills + 1;
+  end
+
+  // TAG_SRAM engagement + contract probes. All events are observed on the
+  // i_tag ports and the parent FSM — visible on both tag paths (identical
+  // functional contract); the SRAM-only assertions are parameter-gated at
+  // the scenario sites.
+  int unsigned fwd_launch_cycles = 0, comb_fwd_cycles = 0, steal_cycles = 0;
+  int unsigned invw_corner_cycles = 0;
+  int unsigned intr_retag_seen = 0;
+  // Mirrors g6lc_l2_top's state_e encoding (hierarchical enum-literal reads
+  // are not portable across simulators).
+  localparam logic [3:0] L2_S_TAG = 4'd1, L2_S_SERVE = 4'd4;
+  logic [3:0] state_prev = '0;
+  bit retag_stalled = 1'b0;
+  bit check_evict_addr = 1'b0;
+  addr_t way_line [SET_ASSOC];
+  always_ff @(posedge clk) if (rst_n) begin
+    // (a) launch-cycle forward: install to the set whose row is being read.
+    if (dut.gen_l2.i_tag.write_i && dut.gen_l2.i_tag.write_valid_i &&
+        dut.gen_l2.i_tag.launch_i && !dut.gen_l2.i_tag.inval_match_i &&
+        dut.gen_l2.i_tag.write_index_i == dut.gen_l2.i_tag.launch_index_i)
+      fwd_launch_cycles <= fwd_launch_cycles + 1;
+    // (b) use-cycle coincidence: an install lands on the set under compare.
+    // The SRAM path (like the flop array) must not let that in-flight write
+    // reach the current compare — the decision uses pre-write state and the
+    // next relaunched row sees the install.
+    if (dut.gen_l2.i_tag.write_i && dut.gen_l2.i_tag.write_valid_i &&
+        dut.gen_l2.i_tag.lookup_i && dut.gen_l2.i_tag.row_valid_o &&
+        dut.gen_l2.i_tag.write_index_i == dut.gen_l2.i_tag.index_i)
+      comb_fwd_cycles <= comb_fwd_cycles + 1;
+    // (c) inval-match port steal: a held lookup must lose exactly the
+    // stolen cycle, no more.
+    if (dut.gen_l2.state_q == L2_S_TAG &&
+        !dut.gen_l2.i_tag.row_valid_o)
+      steal_cycles <= steal_cycles + 1;
+    // (d) S_SERVE interrupt return must re-enter S_TAG with a valid row.
+    state_prev <= dut.gen_l2.state_q;
+    if (dut.gen_l2.state_q == L2_S_TAG &&
+        state_prev == L2_S_SERVE) begin
+      intr_retag_seen <= intr_retag_seen + 1;
+      if (!dut.gen_l2.i_tag.row_valid_o) retag_stalled <= 1'b1;
+    end
+    // (e) victim probe after a forwarded install: way-level shadow of which
+    // line each way holds; on an eviction the announced address must be the
+    // line the victim way currently holds.
+    if (dut.gen_l2.tag_write)
+      way_line[dut.gen_l2.tag_wway] <=
+          {dut.gen_l2.fill_addr_q[dut.gen_l2.inst_idx][AW-1:6], 6'b0};
+    if (check_evict_addr && evict_v && evict_ready &&
+        evict_addr != way_line[dut.gen_l2.tag_probe_way])
+      $fatal(1, "HUM_TAG_PROBE_STALE evict=%h way=%0d resident=%h",
+             evict_addr, dut.gen_l2.tag_probe_way,
+             way_line[dut.gen_l2.tag_probe_way]);
+    // (g) install coinciding with a same-set inval-match read: the deferred
+    // compare must decide on the valid bits as of the read cycle.
+    if (dut.gen_l2.tag_write && dut.gen_l2.tag_wvalid &&
+        dut.gen_l2.tag_match_inval &&
+        dut.gen_l2.tag_windex == dut.gen_l2.tag_match_index)
+      invw_corner_cycles <= invw_corner_cycles + 1;
   end
 
   always @(posedge clk) if(rst_n)begin
@@ -806,16 +868,20 @@ module tb_g6lc_l2_hum;
         while(write_completed!=1) @(negedge clk);
       end
       // Stale merge: a read arriving AFTER a back-invalidation must not merge
-      // into the killed F_READY fill entry — it must refetch the line. The
-      // first fill is held unserved (slv r_ready low) so the entry sits in
-      // F_READY when the invalidation kills it; the second read must then
-      // launch a new master AR and receive the NEW (salted) fill data, while
-      // the pre-kill requester still drains the OLD fill.
+      // into the killed fill entry — it must refetch the line. The first
+      // fill is held mid-flight (memory_hold gates the DRAM R channel) so
+      // the entry is still F_FILLING when the invalidation kills it — the
+      // only window where a post-inval requester can observe the killed
+      // entry resident (an F_READY entry is the serve head and occupies the
+      // FSM before any later request can be accepted). The second read must
+      // then launch a new master AR and receive the NEW (salted) fill data,
+      // while the pre-kill requester still drains the OLD fill.
       34: begin
-        slv_req.r_ready = 1'b0;
+        memory_hold = 1'b1;
+        l2_ar_mark = l2_ar_count;
         push(4'd1, 64'h34000, 0);
-        while(!(mst_resp.r_valid && mst_resp.r.last)) @(negedge clk);
-        repeat(4) @(negedge clk);            // collect + install -> F_READY
+        while (l2_ar_count == l2_ar_mark) @(negedge clk);  // fill AR out, R held
+        repeat(4) @(negedge clk);            // entry sits F_FILLING
         back_inval_addr = 64'h34000;
         back_inval_valid = 1'b1;
         @(negedge clk);
@@ -838,9 +904,207 @@ module tb_g6lc_l2_hum;
           if (ar_addr != 64'h34000)
             $fatal(1, "HUM_STALE_MERGE wrong addr=%h", ar_addr);
         end
-        slv_req.r_ready = 1'b1;
+        memory_hold = 1'b0;                  // killed fill drains + discards
         wait_done();
         if (merges != 0) $fatal(1, "HUM_STALE_MERGE merges=%0d", merges);
+      end
+      // ---- TAG_SRAM launched-read protocol (35-40) -------------------------
+      // Functional contract is identical on both tag paths; the generate-
+      // guarded counters prove the SRAM-only mechanisms actually engaged.
+      // Set-0 addresses stride 0x400 (index field [9:6]).
+      // (a) Install into the launched set on the launch cycle: sweep the
+      // offset between a set-0 miss's install edge and a following set-0
+      // request so some iteration lands the install on the row read.
+      35: begin
+        for (int w = 0; w < int'(SET_ASSOC); w++)
+          push(id_t'(1 + w), 64'h60000 + addr_t'(w) * 64'h400, 0);
+        wait_done();
+        for (int unsigned off = 0; off < 28; off++) begin
+          push(4'd1, 64'h60000 + addr_t'(4 + off) * 64'h400, 0);
+          repeat (off) @(negedge clk);
+          push(4'd2, 64'h60000 + addr_t'(4 + 28 + off) * 64'h400, 0);
+          wait_done(8000);
+        end
+        if (TAG_SRAM && fwd_launch_cycles == 0)
+          $fatal(1, "HUM_TAG_FWD_LAUNCH_DEAD");
+      end
+      // (b) Install landing while a same-set lookup sits in S_TAG: the
+      // combinational forward must make it visible. The held request is
+      // stalled on the evict offer while an earlier fill installs.
+      36: begin
+        for (int w = 0; w < int'(SET_ASSOC) - 1; w++)
+          push(id_t'(1 + w), 64'h70000 + addr_t'(w) * 64'h400, 0);
+        wait_done();
+        check_evict_addr = 1'b1;
+        for (int unsigned k = 0; k < 12; k++) begin
+          // Miss A: commits to the last invalid way; its fill installs later.
+          // Miss B: every way valid or pending -> valid victim -> evict offer
+          // -> held while evict_ready is low; A's install lands mid-hold.
+          push(4'd1, 64'h70000 + addr_t'(3 + 2 * k) * 64'h400, 0);
+          @(negedge clk);
+          evict_ready = 1'b0;
+          push(4'd2, 64'h70000 + addr_t'(4 + 2 * k) * 64'h400, 0);
+          while (!(dut.gen_l2.state_q == L2_S_TAG)) @(negedge clk);
+          // Hold across A's install edge — that is the use-cycle forward
+          // condition (bounded so a missed coincidence cannot hang).
+          for (int unsigned g = 0; g < 60 && !dut.gen_l2.tag_write; g++)
+            @(negedge clk);
+          repeat (2) @(negedge clk);
+          evict_ready = 1'b1;
+          wait_done(8000);
+        end
+        check_evict_addr = 1'b0;
+        if (TAG_SRAM && comb_fwd_cycles == 0)
+          $fatal(1, "HUM_TAG_FWD_COMB_DEAD");
+      end
+      // (c) A back-invalidation while a lookup holds in S_TAG steals the read
+      // port for exactly one cycle; the request must then decide correctly.
+      37: begin
+        automatic int unsigned mark;
+        push(4'd9, 64'h70040, 0);                // resident line in set 1
+        for (int w = 0; w < int'(SET_ASSOC); w++)
+          push(id_t'(1 + w), 64'h80000 + addr_t'(w) * 64'h400, 0);
+        wait_done();
+        evict_ready = 1'b0;
+        push(4'd1, 64'h80000 + 64'h1000, 0);     // set-0 miss, valid victim -> held
+        while (!(dut.gen_l2.state_q == L2_S_TAG && evict_v)) @(negedge clk);
+        repeat (3) @(negedge clk);
+        mark = steal_cycles;
+        back_inval_addr = 64'h70040; back_inval_valid = 1'b1;
+        @(negedge clk);
+        back_inval_valid = 1'b0;
+        repeat (4) @(negedge clk);
+        evict_ready = 1'b1;
+        wait_done();
+        if (TAG_SRAM && steal_cycles != mark + 1)
+          $fatal(1, "HUM_TAG_STEAL got=%0d want=1", steal_cycles - mark);
+        l2_ar_mark = l2_ar_count;
+        push(4'd2, 64'h70040, 0); wait_done();   // invalidated -> refetch
+        if (l2_ar_count != l2_ar_mark + 1)
+          $fatal(1, "HUM_TAG_INVAL_LOST ar=%0d", l2_ar_count);
+      end
+      // (d) S_TAG re-entry after the S_SERVE deadlock-break interrupt: the
+      // row must already be valid on the first re-entry cycle.
+      38: begin
+        memory_hold = 1'b1;
+        for (int e = 0; e < int'(MSHR_DEPTH); e++)
+          push(id_t'(1 + e), 64'h90000 + addr_t'(e) * 64'h40, 0);  // 4 sets fill the MSHR
+        while (l2_ar_count != MSHR_DEPTH) @(negedge clk);
+        repeat (4) @(negedge clk);               // let all four allocate
+        push(4'd5, 64'hA0000, 0);                // 5th miss: stalls in S_TAG
+        while (!(dut.gen_l2.state_q == L2_S_TAG)) @(negedge clk);
+        repeat (4) @(negedge clk);               // held: no MSHR, no serve_pend
+        memory_hold = 1'b0;                      // fills drain -> interrupt path
+        wait_done(12000);
+        if (intr_retag_seen == 0) $fatal(1, "HUM_TAG_RETAG_NEVER_ENGAGED");
+        if (TAG_SRAM && retag_stalled)
+          $fatal(1, "HUM_TAG_RETAG_STALL");
+      end
+      // (e) Victim probe after a forwarded install: every eviction's
+      // announced address must be the victim way's resident line, even when
+      // the row was read the same cycle the current occupant was installed.
+      39: begin
+        check_evict_addr = 1'b1;
+        for (int w = 0; w < int'(SET_ASSOC); w++)
+          push(id_t'(1 + w), 64'hA0000 + addr_t'(w) * 64'h400, 0);
+        wait_done();
+        for (int unsigned k = 0; k < 24; k++) begin
+          push(id_t'(1 + (k % 2)), 64'hA0000 + addr_t'(4 + k) * 64'h400, 0);
+          repeat (k % 6) @(negedge clk);
+        end
+        wait_done(16000);
+        check_evict_addr = 1'b0;
+        if (TAG_SRAM && fwd_launch_cycles + comb_fwd_cycles == 0)
+          $fatal(1, "HUM_TAG_PROBE_NEVER_FWD");
+      end
+      // (f) Two chained same-set match-invalidation reads: both deferred
+      // clears must land and the untouched line must keep hitting.
+      40: begin
+        push(4'd1, 64'hB0000, 0);
+        push(4'd1, 64'hB0400, 0);
+        push(4'd1, 64'hB0800, 0);
+        wait_done();
+        back_inval_addr = 64'hB0000; back_inval_valid = 1'b1;
+        @(negedge clk);
+        back_inval_addr = 64'hB0400;             // second steal, chained
+        @(negedge clk);
+        back_inval_valid = 1'b0;
+        l2_ar_mark = l2_ar_count;
+        push(4'd2, 64'hB0000, 0); wait_done();
+        push(4'd2, 64'hB0400, 0); wait_done();
+        if (l2_ar_count != l2_ar_mark + 2)
+          $fatal(1, "HUM_TAG_INVAL_LOST2 ar=%0d", l2_ar_count);
+        push(4'd3, 64'hB0800, 0); wait_done();   // untouched: hit, no AR
+        if (l2_ar_count != l2_ar_mark + 2)
+          $fatal(1, "HUM_TAG_INVAL_OVER ar=%0d", l2_ar_count);
+      end
+      // (g) Deferred inval-match must compare the set's VALID state as of the
+      // match-read cycle, not at the deferred compare. Corner: a fill installs
+      // tag T2 into a way whose stale row entry still holds the match tag T —
+      // a live-valid compare at the deferred cycle would drop the fresh line
+      // (the flop array samples valid before the write and keeps it).
+      // Setup: fill one set, write to the way-0 line (self-inval clears the
+      // valid bit; the SRAM row keeps the stale tag), then hold a second
+      // write's W channel so wr_self_inval spans the install edge of a new
+      // miss into that freed way. A surviving line means no refetch on the
+      // re-read; a spuriously cleared one costs one DRAM AR.
+      41: begin
+        slv_req.b_ready = 1'b1;                // both writes need their B drain
+        for (int w = 0; w < int'(SET_ASSOC); w++)
+          push(id_t'(1 + w), 64'hC0000 + addr_t'(w) * 64'h400, 0);
+        wait_done();
+        send_write(4'd9, 64'hC0000, 6'h00);    // clears way 0, stale tag stays
+        repeat (4) @(negedge clk);
+        memory_hold = 1'b1;
+        l2_ar_mark = l2_ar_count;
+        push(4'd5, 64'hC0000 + addr_t'(SET_ASSOC) * 64'h400, 0);  // miss -> way 0
+        begin
+          int unsigned g = 0;
+          while (l2_ar_count == l2_ar_mark && g < 2000) begin
+            @(negedge clk); g++;
+          end
+          if (l2_ar_count == l2_ar_mark) begin
+            $display("S41DBG state=%0d ar_v=%0b ar_r=%0b act=%b fstate=%b serve_pend=%0b wip=%0b alloc=%0b",
+                     dut.gen_l2.state_q, slv_req.ar_valid, slv_resp.ar_ready,
+                     dut.gen_l2.fill_act_q, dut.gen_l2.fill_state_q[0],
+                     dut.gen_l2.serve_pend, dut.gen_l2.wr_inval_pend_q,
+                     dut.gen_l2.mshr_alloc);
+            $fatal(1, "HUM_S41_NO_FILL_AR");
+          end
+        end
+        // Second write to the cleared line: hold W so the self-inval window
+        // (S_BYPASS_AW..S_BYPASS_W) definitely covers the fill's install edge.
+        @(negedge clk);
+        b_expected = 1; expected_bid = 4'd9;
+        slv_req.aw='{id:4'd9,addr:64'hC0000,len:0,size:3,
+                     burst:axi_pkg::BURST_INCR,atop:6'h00,cache:4'hf,default:'0};
+        slv_req.aw_valid=1;
+        begin
+          int unsigned g = 0;
+          do begin @(posedge clk); g++; end while(!slv_resp.aw_ready && g < 2000);
+          if (!slv_resp.aw_ready) $fatal(1, "HUM_S41_AW_STUCK state=%0d", dut.gen_l2.state_q);
+        end
+        @(negedge clk); slv_req.aw_valid=0;
+        repeat (6) @(negedge clk);               // stalled in S_BYPASS_W
+        memory_hold = 1'b0;                      // fill drains, install lands mid-window
+        repeat (40) @(negedge clk);              // install + deferred compare settle
+        slv_req.w='{data:64'h1234,strb:'1,last:1'b1,user:'0};
+        slv_req.w_valid=1;
+        begin
+          int unsigned g = 0;
+          do begin @(posedge clk); g++; end while(!slv_resp.w_ready && g < 2000);
+          if (!slv_resp.w_ready) $fatal(1, "HUM_S41_W_STUCK state=%0d", dut.gen_l2.state_q);
+        end
+        @(negedge clk); slv_req.w_valid=0;
+        memory_hold = 1'b0;
+        wait_done();
+        if (TAG_SRAM && invw_corner_cycles == 0)
+          $fatal(1, "HUM_TAG_INVW_DEAD");
+        l2_ar_mark = l2_ar_count;
+        push(4'd6, 64'hC0000 + addr_t'(SET_ASSOC) * 64'h400, 0);
+        wait_done();                             // re-read: must hit, no refetch
+        if (l2_ar_count != l2_ar_mark)
+          $fatal(1, "HUM_TAG_STALE_CLEAR ar=%0d", l2_ar_count);
       end
       default: $fatal(1, "HUM_SCENARIO");
     endcase

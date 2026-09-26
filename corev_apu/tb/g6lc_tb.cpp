@@ -155,6 +155,10 @@ static const char *verilog_plusargs[] = {
     // commit/eret/flush/redirect chain over a fixed window. Same allowlist
     // rule as above.
     "smt_dup_trace",
+    // L2/L3 tag/FSM event observer (corev_apu/tb/ariane_testharness.sv): writes
+    // l2_trace.log for flop-vs-SRAM tag-path equivalence review. Same allowlist
+    // rule as above: unlisted, HTIF rejects it and the observer never arms.
+    "l2_trace", "l2_trace_file",
     nullptr};
 
 extern dtm_t* dtm;

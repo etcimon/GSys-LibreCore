@@ -478,6 +478,10 @@ def execute(model, record, out):
         if not 0 <= watch < 1 << 56:
             raise ValueError('invalid diagnostic physical address')
         args.insert(-1, f'+smt_mem_watch={watch:x}')
+    for extra in os.environ.get('SOURCE_REVIEW_EXTRA_PLUSARGS', '').split():
+        if not extra.startswith('+'):
+            raise ValueError('extra plusarg must start with +')
+        args.insert(-1, extra)
     wall = int(os.environ.get('SOURCE_REVIEW_WALL_SECONDS', '900'))
     # A multi-core model simulates proportionally slower; its wall budget may
     # stretch to four hours, the single-core anchor keeps its one-hour ceiling.

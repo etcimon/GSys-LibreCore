@@ -1459,6 +1459,7 @@ module tb_g6lc_coherence_l2;
   // restores it on the master side so only the invalidation is disconnected.
   parameter bit USE_L3=1'b0, SELF_INVAL_FAULT=1'b0;
   parameter int L3_BYTES=2048, L3_SET_ASSOC=2, L3_MSHR_DEPTH=2, L3_DATA_BANKS=2;
+  parameter bit TAG_SRAM=1'b0;
   localparam addr_t ADDRESS=64'h80004000;
   localparam int L2_LINE_BYTES=512/8;
   logic clk=0,rst_n=0;
@@ -1512,6 +1513,7 @@ module tb_g6lc_coherence_l2;
   end
   g6lc_l2_top #(.Enable(USE_L2),.BYTE_SIZE(BYTE_SIZE),.SET_ASSOC(SET_ASSOC),
       .LINE_WIDTH(512),.MSHR_DEPTH(MSHR_DEPTH),.DATA_BANKS(DATA_BANKS),.FAIR_WRITES(1),
+      .TAG_SRAM(TAG_SRAM),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)) l2 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
@@ -1536,6 +1538,7 @@ module tb_g6lc_coherence_l2;
     g6lc_l3_top #(
       .Enable(1'b1),.BYTE_SIZE(L3_BYTES),.SET_ASSOC(L3_SET_ASSOC),
       .LINE_WIDTH(512),.MSHR_DEPTH(L3_MSHR_DEPTH),.DATA_BANKS(L3_DATA_BANKS),
+      .TAG_SRAM(TAG_SRAM),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)
     ) i_l3 (
@@ -1838,6 +1841,7 @@ module tb_g6lc_coherence_credits;
   // model (non-inclusive: l3_evict_ready_i tied 1).
   parameter bit USE_L3=1'b0;
   parameter int L3_BYTES=2048, L3_SET_ASSOC=2, L3_MSHR_DEPTH=4, L3_DATA_BANKS=2;
+  parameter bit TAG_SRAM=1'b0;
   localparam int CORES=2;
   localparam int DRAM_DEPTH=8;
   localparam addr_t BASE=64'h8000_0000;
@@ -1871,6 +1875,7 @@ module tb_g6lc_coherence_credits;
   resp_t l2m_rsp;
   g6lc_l2_top #(.Enable(1'b1),.BYTE_SIZE(4096),.SET_ASSOC(4),
       .LINE_WIDTH(512),.MSHR_DEPTH(MSHR_DEPTH),.DATA_BANKS(2),.FAIR_WRITES(1),
+      .TAG_SRAM(TAG_SRAM),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)) l2 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
@@ -1891,6 +1896,7 @@ module tb_g6lc_coherence_credits;
     g6lc_l3_top #(
       .Enable(1'b1),.BYTE_SIZE(L3_BYTES),.SET_ASSOC(L3_SET_ASSOC),
       .LINE_WIDTH(512),.MSHR_DEPTH(L3_MSHR_DEPTH),.DATA_BANKS(L3_DATA_BANKS),
+      .TAG_SRAM(TAG_SRAM),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)
     ) i_l3 (

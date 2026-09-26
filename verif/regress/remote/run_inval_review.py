@@ -531,6 +531,10 @@ def composed_review(out, data, runtime_info, runtime):
                          '-GL3_MSHR_DEPTH=4','-GL3_DATA_BANKS=4'],
         'stack-fault': ['-GUSE_L3=1','-GSELF_INVAL_FAULT=1'],
     }
+    # REVIEW_COMPOSED_TAG_SRAM=1 routes every profile through the tc_sram tag
+    # path — the flop path stays the default (identity control).
+    if os.environ.get('REVIEW_COMPOSED_TAG_SRAM') == '1':
+        profiles = {name: args + ['-GTAG_SRAM=1'] for name, args in profiles.items()}
     assert chosen in profiles and not (fault and chosen=='no-l2')
     assert not (fault=='self-inval' and chosen.startswith('stack'))
     assert fault!='stack' or chosen=='stack-fault'
@@ -556,10 +560,11 @@ def composed_review(out, data, runtime_info, runtime):
 localparam bit USE_L2=1;
 localparam bit USE_L3=%d;
 localparam bit SELF_INVAL_FAULT=0;
+localparam bit TAG_SRAM=%d;
 localparam int BYTE_SIZE=4096,SET_ASSOC=4,MSHR_DEPTH=4,DATA_BANKS=2;
 localparam int L3_BYTES=2048,L3_SET_ASSOC=2,L3_MSHR_DEPTH=2,L3_DATA_BANKS=2;
 req_t hub_req;resp_t hub_rsp;
-''' % scc_l3 + instances + '\nendmodule\n')
+''' % (scc_l3, int(os.environ.get('REVIEW_COMPOSED_TAG_SRAM') == '1')) + instances + '\nendmodule\n')
         script='read_slang -I' + str(source) + ' --top composed_graph ' + ' '.join(files[:-1]) + f' {wrapper}; hierarchy -check -top composed_graph; flatten; proc; opt; check -assert; scc -expect 0'
         (out/'scc.ys').write_text(script)
         with (out/'scc.log').open('w') as log:
@@ -671,6 +676,8 @@ def credits_review(out, data, runtime_info, runtime):
     # depth; the 4-vs-16 sweep must yield identical drain/service cycles.
     l3_mshr = int(os.environ.get('REVIEW_CREDITS_L3_MSHR','0'))
     l3_args = ['-GUSE_L3=1',f'-GL3_MSHR_DEPTH={l3_mshr}'] if l3_mshr else []
+    if os.environ.get('REVIEW_CREDITS_TAG_SRAM') == '1':
+        l3_args += ['-GTAG_SRAM=1']
     command = ['verilator','--cc','--main','--exe','--timing','--assert','--threads','1','--flatten',
                '-Wno-fatal','-Werror-LATCH','-Werror-USERERROR',
                str(control),'-I'+str(source),'--top-module','tb_g6lc_coherence_credits',f'-GMSHR_DEPTH={mshr}',

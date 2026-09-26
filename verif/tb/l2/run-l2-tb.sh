@@ -21,6 +21,10 @@
 #   L2TB_EQ_LADDER=1        512B mapped + 4KiB/16KiB bbox + 4KiB collect
 #   L2TB_EQ_PROD=1          also 256 KiB/8-way bbox (opt-in)
 #   L2TB_EQ_TIMEOUT=seconds per-proof budget (map 120, collect 300, bbox 60)
+#   L2TB_EQ_TAGS=1          flop-vs-SRAM cycle-exactness: dual sim builds
+#     (TAG_SRAM=0/1), byte-identical per-cycle EQSIG streams = PASS;
+#     back-inval stimulus suppressed (+eq_run). L2TB_EQ_NEGATIVE=1 must
+#     produce a divergence (mutation control).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 LIVE_ROOT="$ROOT"
@@ -90,6 +94,61 @@ if [[ "${L2TB_MODE:-sim}" == config ]]; then
   exit 0
 fi
 if [[ "${L2TB_MODE:-sim}" == equiv ]]; then
+  if [[ "${L2TB_EQ_TAGS:-0}" == 1 ]]; then
+    # Flop-vs-SRAM cycle-exactness check, run as a deterministic dual
+    # simulation rather than an equiv_make miter: the two tag stores are
+    # unpaired state with different reset/init behaviour (the flop array
+    # resets to '0; the tc_sram row contents are don't-care), so the
+    # equivalence induction frame admits unreachable states where a valid
+    # way's stored tags diverge — the proof cannot close (observed: 503
+    # unproven $equiv cells at -seq 2; a miter+sat instance at -seq 16
+    # builds ~62M vars / ~170M clauses and does not converge). The claim is
+    # therefore discharged by dual run: the same bench is built at
+    # TAG_SRAM=0 (gold) and TAG_SRAM=1 (gate), both emit a per-cycle EQSIG
+    # line folding every DUT output, and the streams are compared
+    # byte-for-byte. +eq_run suppresses the two back-inval injections
+    # because the SRAM path's deferred inval-match commit is a permitted
+    # timing difference (directed-tested in tb_g6lc_l2_hum). With
+    # L2TB_EQ_NEGATIVE=1 the gate build flips its signature hit tap and the
+    # diff MUST differ — the mutation control.
+    byte_size="${L2TB_BYTE_SIZE:-512}"
+    eq_neg="${L2TB_EQ_NEGATIVE:-0}"
+    eq_sim_args=(+eq_run +bypass-backpressure +atop-drain +amo-arith "$@")
+    for variant in gold gate; do
+      if [[ "$variant" == gold ]]; then eq_ts=0; eq_n=0; else eq_ts=1; eq_n="$eq_neg"; fi
+      "$VERILATOR" --binary --timing --assert -Wall -Wno-TIMESCALEMOD -Wno-UNUSED \
+        "${warning_args[@]}" -Wno-BLKSEQ -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-VARHIDDEN \
+        -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM \
+        "$ROOT/verif/tb/l2/tb_g6lc_l2.vlt" "${sources[@]}" \
+        --top-module tb_g6lc_l2 \
+        -GBYTE_SIZE="$byte_size" -GSET_ASSOC="${L2TB_SET_ASSOC:-4}" \
+        -GMEM_LATENCY="${L2TB_MEM_LATENCY:-6}" -GSTALL_EVERY="${L2TB_STALL_EVERY:-0}" \
+        -GRR_EN="${L2TB_RR_EN:-0}" -GSEED="${L2TB_SEED:-$((0x600df00d))}" \
+        -GTAG_SRAM="$eq_ts" -GEQ_NEGATIVE="$eq_n" \
+        -Mdir "$OUT/$variant" -o tb_g6lc_l2 2>&1 | tee "$OUT/build-$variant.log"
+      "$OUT/$variant/tb_g6lc_l2" "${eq_sim_args[@]}" 2>&1 | tee "$OUT/sim-$variant.log" || true
+      grep -qFx '[L2TB] RESULT pass' "$OUT/sim-$variant.log" || { echo "[l2-tb] TAG-EQUIV sim FAIL variant=$variant — $OUT/sim-$variant.log"; exit 1; }
+      grep -cE '^EQSIG [0-9]+ ' "$OUT/sim-$variant.log" > "$OUT/eqsig-$variant.count" || true
+      grep -E '^EQSIG [0-9]+ ' "$OUT/sim-$variant.log" > "$OUT/eqsig-$variant.txt"
+      [[ -s "$OUT/eqsig-$variant.txt" ]] || { echo "[l2-tb] TAG-EQUIV no signatures variant=$variant"; exit 1; }
+    done
+    sha256sum --check --status "$OUT/sources.sha256"
+    if [[ "$eq_neg" == 1 ]]; then
+      if cmp -s "$OUT/eqsig-gold.txt" "$OUT/eqsig-gate.txt"; then
+        echo "[l2-tb] TAG-EQUIV NEGATIVE did not diverge — mutation control broken" >&2
+        exit 1
+      fi
+      echo "[l2-tb] TAG-EQUIV NEGATIVE PASS (expected divergence observed) bytes=$byte_size"
+      exit 0
+    fi
+    if ! cmp -s "$OUT/eqsig-gold.txt" "$OUT/eqsig-gate.txt"; then
+      diff -u "$OUT/eqsig-gold.txt" "$OUT/eqsig-gate.txt" | head -30 >&2
+      echo "[l2-tb] TAG-EQUIV FAIL bytes=$byte_size ways=${L2TB_SET_ASSOC:-4} — $OUT" >&2
+      exit 1
+    fi
+    echo "[l2-tb] TAG-EQUIV PASS bytes=$byte_size ways=${L2TB_SET_ASSOC:-4} cycles=$(cat "$OUT/eqsig-gold.count") — $OUT"
+    exit 0
+  fi
   if [[ "${L2TB_EQ_LADDER:-0}" == 1 ]]; then
     ladder_fail=0
     while IFS=: read -r spec_size spec_ways spec_mem spec_timeout; do
@@ -143,7 +202,18 @@ old = "      mst_req_o.r_ready = 1'b1;\n      if (mst_resp_i.r_valid && mst_resp
 new = "      if (state_q != S_BYPASS_R) mst_req_o.r_ready = 1'b1;\n      if (mst_resp_i.r_valid && mst_req_o.r_ready && mst_resp_i.r.last) begin"
 if text.count(old) != 1 or "RR_EN" in text:
     raise SystemExit("legacy reference is not the expected pre-RR engine")
-pathlib.Path(sys.argv[2]).write_text(text.replace(old, new))
+text = text.replace(old, new)
+# Fixture repair, not a waiver: g6lc_l2_mshr grew alloc_meta_i/merge_block_i
+# after the reference engine was cut; tie them off so the gold netlist
+# elaborates with no undriven ports. The equivalence criterion itself
+# (equiv_status -assert) is unchanged.
+old2 = "      .alloc_is_write_i  (1'b0),"
+new2 = ("      .alloc_meta_i       ('0),\n"
+        "      .merge_block_i     ('0),\n"
+        "      .alloc_is_write_i  (1'b0),")
+if text.count(old2) != 1:
+    raise SystemExit("legacy mshr tie-off anchor missing")
+pathlib.Path(sys.argv[2]).write_text(text.replace(old2, new2))
 PY
   sha256sum "$OUT/legacy.original.sv" "$OUT/legacy.corrected.sv" >> "$OUT/sources.sha256"
   gold_sources=()
@@ -195,9 +265,13 @@ EOF
   exit 0
 fi
 if [[ "${L2TB_MODE:-sim}" == synth ]]; then
-  "${YOSYS:-yosys}" -Q -T -p "read_slang ${sources[*]} -DL2TB_STATIC -DL2TB_SYNTH --ignore-initial --ignore-assertions --top g6lc_l2_fixture -GRR_EN=${L2TB_RR_EN:-0} -GBYTE_SIZE=${L2TB_BYTE_SIZE:-4096} -GSET_ASSOC=${L2TB_SET_ASSOC:-4}; hierarchy -top g6lc_l2_fixture; flatten; proc; opt; memory_collect; check -assert; stat; select -assert-count $((2 + ${L2TB_RR_EN:-0})) t:\$mem_v2; synth -top g6lc_l2_fixture -noabc; check -assert; stat; select -assert-none t:\$dlatch t:\$_DLATCH_*" \
+  # Under TAG_SRAM the tag words live in the tc_sram instance, so the fixture
+  # has one extra memory on that path (data array + optional RR pointer +
+  # tag row store).
+  tag_sram="${L2TB_TAG_SRAM:-0}"
+  "${YOSYS:-yosys}" -Q -T -p "read_slang ${sources[*]} -DL2TB_STATIC -DL2TB_SYNTH --ignore-initial --ignore-assertions --top g6lc_l2_fixture -GRR_EN=${L2TB_RR_EN:-0} -GBYTE_SIZE=${L2TB_BYTE_SIZE:-4096} -GSET_ASSOC=${L2TB_SET_ASSOC:-4} -GTAG_SRAM=${tag_sram}; hierarchy -top g6lc_l2_fixture; flatten; proc; opt; memory_collect; check -assert; stat; select -assert-count $((2 + ${L2TB_RR_EN:-0} + tag_sram)) t:\$mem_v2; synth -top g6lc_l2_fixture -noabc; check -assert; stat; select -assert-none t:\$dlatch t:\$_DLATCH_*" \
     2>&1 | tee "$OUT/synth.log"
-  echo "[l2-tb] SYNTH PASS rr=${L2TB_RR_EN:-0} mem=$((2 + ${L2TB_RR_EN:-0})) — $OUT/synth.log"
+  echo "[l2-tb] SYNTH PASS rr=${L2TB_RR_EN:-0} tagsram=${tag_sram} mem=$((2 + ${L2TB_RR_EN:-0} + tag_sram)) — $OUT/synth.log"
   exit 0
 fi
 if [[ "${L2TB_MODE:-sim}" == units ]]; then

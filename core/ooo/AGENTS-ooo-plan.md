@@ -1759,6 +1759,59 @@ FSM therefore only adds per-miss latency here (+3.6 % / +12 % at L0, no L40 gain
 benefit needs either a footprint above the L2 (T8e stride/scan kernels) or written lines that
 stay resident (`L2WriteUpdateEn`, T8e); both are measurement items, not assumptions.
 
+### T8d — L2/L3 tags behind `tc_sram` (`L2TagSramEn`), flop path retained
+
+`g6lc_l2_tag` gains `TAG_SRAM`: under 0 the flop array is unchanged verbatim (`row_valid_o=1`);
+under 1 the valid bits stay in async-reset flops and the tags live in one 1R1W `tc_sram`
+(`NUM_SETS` words × `SET_ASSOC×TAG_WIDTH`, `ByteWidth=TAG_WIDTH` so the byte enable is the way
+select, `ImplKey "g6lc_l2_tag"`). The parent launches the row read whenever its next state is
+`S_TAG` (`tag_launch = state_d==S_TAG`, index `idx_of(addr_d)`), which covers the S_IDLE accept
+edge, every held S_TAG cycle and the S_SERVE→S_TAG interrupt return, so the compare still
+completes on the first S_TAG cycle; the S_TAG body is gated by `row_valid_o`. An inval-match
+read has port priority and commits its clear one cycle later against the row and the set's
+valid bits **snapshotted in the read cycle**; a same-index install in the launch cycle is
+forwarded into the compared row. `l2_back_inval_ready_o` stays constant 1 and has no
+combinational dependence on the valid (the cluster ANDs it into the L3 victim accept).
+`g6lc_l3_top`/`g6lc_cluster` pass `CVA6Cfg.L2TagSramEn`. Spec: `g6lc_l2_tag.tech-spec.md`.
+
+**Defect found and fixed before landing (T8d′).** The first SRAM build compared the deferred
+inval-match against the *live* valid bits: a fill installing tag T2 into a way whose stale tag
+T equalled the matching write's line (same cycle) was spuriously invalidated. The four-hart boot
+diverged by −259 cycles (the lost line cost one hart ~40 cycles and handed SMT slots to its
+sibling, so the sibling read `time` 8 ticks earlier — a "faster" symptom of a lost line). An
+observer `+l2_trace` (per-event L2/L3 log; plusarg allow-listed in `g6lc_tb.cpp`/`ariane_tb.cpp`)
+pinned it: `L2 cyc=5078240 install idx=07c way=1 tag=…10001` with `inv idx=07c tag=…10009` in the
+same cycle, then `hit` (flop) vs `miss` (SRAM) on `…80009f10` at `cyc=5078258`; no stale hit
+anywhere, 0 port steals. Fix: `inv_valid_q <= valid_q[inval_match_index_i]` in the read cycle.
+HUM scenario 41 reproduces it (buggy fails `HUM_TAG_STALE_CLEAR`), the tag miter corner catches
+the buggy RTL (`L2TAG_MITER_CORNER`). After the fix the four-hart run is **byte-identical** to the
+flop path: 19,341,802 cycles, same `retiredByHart` and counters, identical 8,362,654-event L2/L3
+trace and RVFI traces (`ooocoh-p3b-osbi-int2l3-ts1-trace-r3` vs `…-ts0-trace-r1`).
+
+Evidence (fixed RTL): leaf sim/units/synth both paths; HUM 78/78 both paths with identical
+metrics; CHAIN_L3 40/40; composed stack small/target and fault 2/2 on the SRAM path; credits
+L3 MSHR 4/16; SCC 0; size review 32/32 identical functional records, `macroCells` 2→3 (the tag
+store). **Flop-vs-SRAM equivalence is a deterministic dual-simulation** (`L2TB_EQ_TAGS`): both
+builds emit a per-cycle signature of every DUT output; cycle-exact match at 512 B, 1, 2, 4, 8 KiB
+(17,221–49,555 cycles), inverted-hit negative diverges. A Yosys miter does not close because the
+two tag stores are unpaired state with different init (flop array resets, SRAM contents are
+don't-care) — 503 unproven cells at `-seq 2`, a `-seq 16` SAT instance of ~62M variables; formal
+closure needs an init/valid assumption and stays open. Gates: int2 24/7 (flop path, unchanged),
+int2_l3 lint **24** / synth **13**, smt2_l3 **4** / **41**, `check -assert` 0; the lint
+`WIDTHCONCAT` widths 802,816 and 204,800 (tag reset) disappear on the SRAM path, leaving only the
+16,384-bit valid array. FO4 identical both paths (`g6lc_l2_top` 20.5, `g6lc_l2_tag` 9.0, closes
+at the 32-FO4 budget). Area (analytic): flop bits removed 200,704 (L2) / 786,432 (L3) per
+instance, valid flops kept 4,096 / 16,384, macro 512×392 / 1024×768 b; `g6lc_l2_tag` generic
+cells 8,901→6,800 at the reduced synth geometry. Full models: int2 887/1284 exact (identity),
+int2_l3 1022/1454 exact, smt2_l3 strict pass **14,300,834 exact**.
+
+**Red lane recorded, not waived.** The legacy `L2TB_MODE=equiv` ladder (current engine vs the
+pinned pre-RR reference) fails with 531 unproven cells at the 512 B/4-way fixture — the
+reference predates the self-invalidation retention (`wr_inval_pend_q`) and kill-on-invalidation
+repairs, so `tag_match_inval`/`wr_self_inval`/MSHR `alloc_id_i`/`merge_block_i` differ by
+construction. A whitelist that turned it green was reverted before landing; the lane stays red
+until the reference is re-cut from the post-retention flop engine (todo).
+
 ## Deferred
 
 Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,

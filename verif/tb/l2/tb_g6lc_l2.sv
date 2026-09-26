@@ -91,6 +91,8 @@ module tb_g6lc_l2;
   parameter int unsigned MEM_LATENCY = 6;       // cycles before first R/W beat
   parameter int unsigned STALL_EVERY = 0;       // drop 1 in N beats (0 = never)
   parameter int unsigned SEED        = 32'h600d_f00d;
+  parameter int unsigned TAG_SRAM    = 0;       // tag array behind tc_sram
+  parameter int unsigned EQ_NEGATIVE = 0;       // eq-mode mutation: flips the signature hit tap
 
   localparam int unsigned LINE_BYTES = LINE_WIDTH / 8;                    // 64
   localparam int unsigned NUM_SETS   = BYTE_SIZE / (SET_ASSOC * LINE_BYTES);
@@ -124,6 +126,7 @@ module tb_g6lc_l2;
       .MSHR_DEPTH  (MSHR_DEPTH),
       .DATA_BANKS  (DATA_BANKS),
       .RR_EN       (bit'(RR_EN)),
+      .TAG_SRAM    (bit'(TAG_SRAM)),
       .AXI_ADDR_WIDTH (AW),
       .AXI_DATA_WIDTH (DW),
       .AXI_ID_WIDTH   (IDW),
@@ -149,6 +152,27 @@ module tb_g6lc_l2;
       .l2_back_inval_addr_i  (back_inval_addr),
       .l2_back_inval_ready_o (back_inval_ready)
   );
+
+  // ---- eq signature -----------------------------------------------------
+  // +eq_run prints one EQSIG line per cycle folding every DUT output (both
+  // AXI structs and the sideband flags). Builds that differ only in
+  // TAG_SRAM must emit byte-identical streams — that is the cycle-exact
+  // flop-vs-SRAM equivalence evidence (run-l2-tb.sh L2TB_EQ_TAGS). In this
+  // mode the back-inval injections below are skipped: the SRAM path's
+  // deferred inval-match commit is a permitted timing difference, covered
+  // by the HUM directed scenarios instead.
+  bit eq_run;
+  int unsigned eq_cyc = 0;
+  initial eq_run = $test$plusargs("eq_run");
+  always @(posedge clk) begin
+    if (eq_run) begin
+      $display("EQSIG %0d %h", eq_cyc,
+               {slv_resp, mst_req, l2_hit ^ bit'(EQ_NEGATIVE != 0), l2_miss,
+                l2_bypass, l2_mshr_full, l2_bank_conf, evict_v, evict_addr,
+                back_inval_ready});
+      eq_cyc <= eq_cyc + 1;
+    end
+  end
 
   // ---- golden data model --------------------------------------------------
   // Unwritten locations return a deterministic address hash; write-through
@@ -1108,26 +1132,28 @@ module tb_g6lc_l2;
     end
     phase_end("protected_hot", rd_acc, 0);
 
-    phase_begin();
-    axi_read(line_addr(1, 900), CACHEABLE);
-    axi_read(line_addr(1, 900) + 8, CACHEABLE, 2, 0, 30);
-    @(negedge clk);
-    back_inval_addr = line_addr(1, 900); back_inval_valid = 1;
-    @(posedge clk);
-    if (!back_inval_ready) $fatal(1, "invalidation not accepted");
-    @(negedge clk); back_inval_valid = 0;
-    axi_read(line_addr(1, 900), CACHEABLE);
-    axi_write(line_addr(1, 900) + 8, 64'hcafe_abcd_7654_3210, CACHEABLE, 8'h55, 30);
-    axi_read(line_addr(1, 900) + 8, CACHEABLE);
-    phase_end("invalidate_masked", 4, 1);
-    if (cnt_miss - ph_miss != 3 || cnt_hit - ph_hit != 1) $fatal(1, "invalidation check");
+    if (!eq_run) begin
+      phase_begin();
+      axi_read(line_addr(1, 900), CACHEABLE);
+      axi_read(line_addr(1, 900) + 8, CACHEABLE, 2, 0, 30);
+      @(negedge clk);
+      back_inval_addr = line_addr(1, 900); back_inval_valid = 1;
+      @(posedge clk);
+      if (!back_inval_ready) $fatal(1, "invalidation not accepted");
+      @(negedge clk); back_inval_valid = 0;
+      axi_read(line_addr(1, 900), CACHEABLE);
+      axi_write(line_addr(1, 900) + 8, 64'hcafe_abcd_7654_3210, CACHEABLE, 8'h55, 30);
+      axi_read(line_addr(1, 900) + 8, CACHEABLE);
+      phase_end("invalidate_masked", 4, 1);
+      if (cnt_miss - ph_miss != 3 || cnt_hit - ph_hit != 1) $fatal(1, "invalidation check");
 
-    phase_begin();
-    axi_read(line_addr(1, 900), CACHEABLE, 1, 1);
-    axi_read(line_addr(1, 900), NONCACHE);
-    axi_read(line_addr(1, 900), CACHEABLE);
-    phase_end("exclusive_nc", 3, 0);
-    if (cnt_hit - ph_hit != 1 || cnt_bypass - ph_bypass != 2) $fatal(1, "bypass check");
+      phase_begin();
+      axi_read(line_addr(1, 900), CACHEABLE, 1, 1);
+      axi_read(line_addr(1, 900), NONCACHE);
+      axi_read(line_addr(1, 900), CACHEABLE);
+      phase_end("exclusive_nc", 3, 0);
+      if (cnt_hit - ph_hit != 1 || cnt_bypass - ph_bypass != 2) $fatal(1, "bypass check");
+    end
 
     if ($test$plusargs("bypass-backpressure")) begin
       phase_begin();
@@ -1182,17 +1208,19 @@ module tb_g6lc_l2;
     repeat (4) @(negedge clk);
     rst_n = 1;
     repeat (4) @(negedge clk);
-    phase_begin();
-    for (int w = 0; w < SET_ASSOC; w++) axi_read(line_addr(NUM_SETS - 1, 1100 + w), CACHEABLE);
-    @(negedge clk);
-    back_inval_addr = line_addr(NUM_SETS - 1, 1101); back_inval_valid = 1;
-    @(posedge clk);
-    if (!back_inval_ready) $fatal(1, "hole invalidation not accepted");
-    @(negedge clk); back_inval_valid = 0;
-    axi_read(line_addr(NUM_SETS - 1, 1200), CACHEABLE);
-    axi_read(line_addr(NUM_SETS - 1, 1201), CACHEABLE);
-    phase_end("replacement_hole", SET_ASSOC + 2, 0);
-    if (cnt_evict - ph_evict != 1 || cnt_hit != ph_hit) $fatal(1, "hole refill/eviction coverage");
+    if (!eq_run) begin
+      phase_begin();
+      for (int w = 0; w < SET_ASSOC; w++) axi_read(line_addr(NUM_SETS - 1, 1100 + w), CACHEABLE);
+      @(negedge clk);
+      back_inval_addr = line_addr(NUM_SETS - 1, 1101); back_inval_valid = 1;
+      @(posedge clk);
+      if (!back_inval_ready) $fatal(1, "hole invalidation not accepted");
+      @(negedge clk); back_inval_valid = 0;
+      axi_read(line_addr(NUM_SETS - 1, 1200), CACHEABLE);
+      axi_read(line_addr(NUM_SETS - 1, 1201), CACHEABLE);
+      phase_end("replacement_hole", SET_ASSOC + 2, 0);
+      if (cnt_evict - ph_evict != 1 || cnt_hit != ph_hit) $fatal(1, "hole refill/eviction coverage");
+    end
 
     if (policy_lookups != cnt_hit + cnt_miss || policy_installs != fills - fill_errors ||
         policy_evictions != cnt_evict || policy_lookups == 0 || policy_installs == 0 ||
@@ -1268,7 +1296,11 @@ module g6lc_l2_fixture
   parameter bit FAIR_WRITES = 1'b0,
   parameter int unsigned MSHR_DEPTH = 4,
   parameter int unsigned DATA_BANKS = 2,
-  parameter bit CHAIN_L3 = 1'b0
+  parameter bit CHAIN_L3 = 1'b0,
+  parameter bit TAG_SRAM = 1'b0,
+  // The flop-vs-SRAM miter excludes back-invalidation: its two-cycle commit
+  // (vs one on the flop path) is a permitted timing difference.
+  parameter bit NO_INVAL = 1'b0
 )(
   input logic clk_i, rst_ni,
   input req_t slv_req_i,
@@ -1288,7 +1320,11 @@ module g6lc_l2_fixture
   if(CHAIN_L3)begin : gen_l3_chain
     g6lc_l3_top #(
       .Enable(1'b1),.BYTE_SIZE(2048),.SET_ASSOC(2),.LINE_WIDTH(512),
-      .MSHR_DEPTH(2),.DATA_BANKS(2),.AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),
+      .MSHR_DEPTH(2),.DATA_BANKS(2),
+`ifndef L2TB_LEGACY
+      .TAG_SRAM(TAG_SRAM),
+`endif
+      .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),
       .AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),.axi_req_t(req_t),.axi_resp_t(resp_t)
     ) i_l3 (
       .clk_i,.rst_ni,.slv_req_i(cache_req),.slv_resp_o(cache_resp),
@@ -1305,6 +1341,7 @@ module g6lc_l2_fixture
 `ifndef L2TB_LEGACY
     .RR_EN(bit'(RR_EN)),
     .FAIR_WRITES(FAIR_WRITES),
+    .TAG_SRAM(TAG_SRAM),
 `endif
     .axi_req_t(req_t), .axi_resp_t(resp_t)
   ) i_l2 (
@@ -1315,7 +1352,13 @@ module g6lc_l2_fixture
 `ifndef L2TB_LEGACY
     .l2_evict_ready_i(1'b1),
 `endif
-    .l2_back_inval_valid_i(inval_i), .l2_back_inval_addr_i(inval_addr_i),
+    .l2_back_inval_valid_i(
+`ifndef L2TB_LEGACY
+      NO_INVAL ? 1'b0 : inval_i
+`else
+      inval_i
+`endif
+    ), .l2_back_inval_addr_i(inval_addr_i),
     .l2_back_inval_ready_o(inval_ready_o)
   );
 endmodule

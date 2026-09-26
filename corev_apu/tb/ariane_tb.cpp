@@ -70,6 +70,9 @@ static const char *verilog_plusargs[] = {
     "jtag_rbb_enable", "time_out", "debug_disable", "tohost_addr", "elf_file",
     // testharness_proxy always passes +quiet_axi +max-cycles= (HTIF rejects unknown).
     "quiet_axi", "max-cycles",
+    // L2/L3 tag/FSM event observer (corev_apu/tb/ariane_testharness.sv): writes
+    // l2_trace.log. Must be allowlisted or HTIF rejects it and the run dies.
+    "l2_trace", "l2_trace_file",
     nullptr};
 
 extern dtm_t* dtm;

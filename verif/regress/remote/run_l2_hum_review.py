@@ -17,7 +17,8 @@ NAMES = ['axi_pkg.sv', 'tc_sram.sv', 'g6lc_l2_pkg.sv', 'g6lc_l2_tag.sv',
          # compiled with -DL2TB_STATIC: contributes g6lc_l2_tb_pkg only
          'tb_g6lc_l2.sv', 'g6lc_l3_pkg.sv', 'g6lc_l3_top.sv',
          'spill_register_flushable.sv', 'spill_register.sv', 'axi_cut.sv',
-         'assign.svh', 'typedef.svh', 'tb_g6lc_l2_hum.sv']
+         'assign.svh', 'typedef.svh', 'tb_g6lc_l2_hum.sv',
+         'tb_g6lc_l2_tag_miter.sv']
 HEADERS = ('assign.svh', 'typedef.svh')
 
 # scenario -> expected-failure token for the injected-error control
@@ -29,7 +30,12 @@ CONTRACT = {0: 'HUM_DATA', 1: 'HUM_DATA', 2: 'HUM_DATA', 3: 'HUM_DATA',
             21: 'HUM_DATA', 22: 'HUM_DATA', 23: 'HUM_DATA', 24: 'HUM_DATA',
             25: 'HUM_DATA', 26: 'HUM_DATA', 27: 'HUM_DATA', 28: 'HUM_DATA',
             29: 'HUM_DATA', 30: 'HUM_DATA', 31: 'HUM_DATA', 32: 'HUM_DATA',
-            33: 'HUM_DATA', 34: 'HUM_DATA'}
+            33: 'HUM_DATA', 34: 'HUM_DATA', 35: 'HUM_DATA', 36: 'HUM_DATA',
+            37: 'HUM_DATA', 38: 'HUM_DATA', 39: 'HUM_DATA', 40: 'HUM_DATA',
+            41: 'HUM_DATA'}
+# Scenarios exercising the TAG_SRAM launched-read protocol; functional on the
+# flop path too (the SRAM-only engagement checks are parameter-gated).
+TAG_SRAM_SCEN = range(35, 42)
 
 
 def digest(path):
@@ -49,6 +55,8 @@ def main():
     chain = os.environ.get('REVIEW_L2_HUM_CHAIN') == '1'
     inval_before = os.environ.get('REVIEW_L2_HUM_INVAL_BEFORE') == '1'
     rr_sched = os.environ.get('REVIEW_L2_HUM_RR') == '1'
+    tagsram = os.environ.get('REVIEW_L2_HUM_TAG_SRAM') == '1'
+    miter = os.environ.get('REVIEW_L2_HUM_MITER') == '1'
     (out / 'mode.json').write_text(json.dumps(
         {k: v for k, v in os.environ.items() if k.startswith('REVIEW_L2_HUM')}, indent=2))
     # Restores the original single-port schedule, where a colliding install took
@@ -134,10 +142,10 @@ def main():
 
     if os.environ.get('REVIEW_L2_HUM_SCC') == '1':
         assert not (baseline or fault or order_before or atop_before), 'invalid SCC mode'
-        script = ('read_slang ' + ' '.join(str(source / n) for n in rtl_names[:-1]) +
+        script = ('read_slang ' + ' '.join(str(source / n) for n in rtl_names[:-2]) +
                   ' -I' + str(source) + ' -DL2TB_STATIC -DL2TB_SYNTH --ignore-initial --ignore-assertions'
-                  ' --top g6lc_l2_fixture -GCHAIN_L3=1 -GBYTE_SIZE=4096 -GSET_ASSOC=4'
-                  ' -GMSHR_DEPTH=4 -GDATA_BANKS=2 -GRR_EN=0;'
+                  f' --top g6lc_l2_fixture -GCHAIN_L3=1 -GBYTE_SIZE=4096 -GSET_ASSOC=4'
+                  f' -GMSHR_DEPTH=4 -GDATA_BANKS=2 -GRR_EN=0 -GTAG_SRAM={int(tagsram)};'
                   ' hierarchy -check -top g6lc_l2_fixture; flatten; proc; opt;'
                   ' check -assert; scc -expect 0')
         command = ['yosys', '-Q', '-T', '-p', script]
@@ -149,16 +157,18 @@ def main():
         return 0
     model = out / 'model'
     rtl = ['-I' + str(source)] + [str(source / n) for n in rtl_names]
+    top = 'tb_g6lc_l2_tag_miter' if miter else 'tb_g6lc_l2_hum'
     build = [
         ('verilate', ['verilator', '--cc', '--main', '--exe', '--timing', '--assert',
                       '--threads', '1', '-Wno-fatal', '-Wno-TIMESCALEMOD',
                       '-Werror-LATCH', '-Werror-UNOPTFLAT',
                       '-DL2TB_STATIC', *(['-GCHAIN_L3=1'] if chain else []),
                       *(['-GRR_EN=1'] if rr_sched else []),
+                      *(['-GTAG_SRAM=1'] if tagsram else []),
                       *(['-GFAIR_WRITES=1'] if os.environ.get('REVIEW_L2_FAIR_WRITES') == '1' else []),
-                      '--top-module', 'tb_g6lc_l2_hum', '--Mdir', str(model),
+                      '--top-module', top, '--Mdir', str(model),
                       '-o', 'hum-test', *rtl]),
-        ('build', ['make', '-C', str(model), '-f', 'Vtb_g6lc_l2_hum.mk', '-j4',
+        ('build', ['make', '-C', str(model), '-f', f'V{top}.mk', '-j4',
                    'VERILATOR_ROOT=' + str(runtime)]),
     ]
     for label, cmd in build:
@@ -171,10 +181,11 @@ def main():
 
     if os.environ.get('REVIEW_L2_HUM_SYNTH') == '1':
         for rr in (0, 1):
-            script = ('read_slang ' + ' '.join(str(source / n) for n in rtl_names[:-1]) +
+            script = ('read_slang ' + ' '.join(str(source / n) for n in rtl_names[:-2]) +
                       ' -I' + str(source) + ' -DL2TB_STATIC -DL2TB_SYNTH --ignore-initial --ignore-assertions'
                       ' --top g6lc_l2_fixture -GBYTE_SIZE=512 -GSET_ASSOC=2'
                       f' -GMSHR_DEPTH=2 -GDATA_BANKS=2 -GRR_EN={rr}'
+                      f' -GTAG_SRAM={int(tagsram)}'
                       f' -GFAIR_WRITES={int(os.environ.get("REVIEW_L2_FAIR_WRITES") == "1")};'
                       ' hierarchy -check -top g6lc_l2_fixture; proc; opt; check -assert;'
                       ' synth -top g6lc_l2_fixture -noabc; check -assert;'
@@ -184,6 +195,28 @@ def main():
                                     stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
             assert rc == 0, f'L2 synthesis rr={rr}'
     exe = model / 'hum-test'
+    if miter:
+        # Bounded flop-vs-SRAM miter: positive must pass; the +miter_negative
+        # control inverts the trial's hit_o and must fail — the SRAM-path
+        # equivalent of the hit_o-inversion mutation.
+        results = []
+        for negative, expected in ((False, None), (True, 'L2TAG_MITER')):
+            cmd = [str(exe)] + (['+miter_negative'] if negative else [])
+            p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+            text = p.stdout + p.stderr
+            (out / f'miter-negative-{int(negative)}.log').write_text(text)
+            if expected:
+                matched = p.returncode != 0 and expected in text \
+                    and 'L2TAG_MITER_PASS' not in text
+            else:
+                matched = p.returncode == 0 and text.count('L2TAG_MITER_PASS') == 1 \
+                    and '%Error' not in text
+            results.append({'negative': negative, 'expectedError': expected,
+                            'rc': p.returncode, 'matched': matched,
+                            'executableSha256': digest(exe)})
+            (out / 'results.json').write_text(json.dumps(results, indent=2))
+            assert matched, ('miter', negative)
+        return 0
     results, metrics = [], {}
     # On the pre-change build the merge path does not exist, so the engagement
     # contract must visibly fail; only the measurements are comparable.
@@ -206,6 +239,9 @@ def main():
                     else [(s,None) for s in [8,*range(12,30),31]])
     if rr_sched: plan=[(30,'HUM_RR_READ_LOST' if rr_fault else None)]
     if inval_before: plan=[(28,None),(29,'HUM_SELF_INVAL_LOST')]
+    # TAG_SRAM mode keeps the full plan: every contract scenario must pass on
+    # both tag paths; scenarios 35-40 additionally gate SRAM engagement
+    # counters on the parameter.
     if os.environ.get('REVIEW_L2_INSTALL_INVAL') == '1':
         plan = [(32, 'HUM_INSTALL_INVAL_STALE' if
                  os.environ.get('REVIEW_L2_INSTALL_INVAL_BEFORE') == '1' else None)]

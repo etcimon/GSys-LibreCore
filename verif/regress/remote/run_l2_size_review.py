@@ -344,7 +344,7 @@ def main():
     (out / 'runtime.json').write_text(json.dumps(runtime_info, indent=2))
     rtl = [str(source / name) for name in names[:-1]]
     records = []
-    phase_names = {'warm','warm_hits','capacity','thrash','hot_scan','wr_rd','nc','lfsr','reset_fill','all_ways_hit','protected_hot','invalidate_masked','exclusive_nc','bypass_backpressure','post_atop_fill','short_last_fill_guard','replacement_hole'}
+    phase_names = {'warm','warm_hits','capacity','thrash','hot_scan','wr_rd','nc','lfsr','reset_fill','all_ways_hit','protected_hot','invalidate_masked','exclusive_nc','bypass_backpressure','post_atop_fill','short_last_fill_guard','replacement_hole','fill_error_no_install'}
     references = {}
     production = os.environ.get('REVIEW_L2_SIZE_PRODUCTION') == '1'
     geometry = (262144, 8, 4) if production else (4096, 4, 2)
@@ -355,7 +355,7 @@ def main():
             work = out / f'lat{latency}-stall{stalls}-depth{depth}'
             work.mkdir()
             model = work / 'model'
-            command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1', '-Wno-fatal', '-Wno-TIMESCALEMOD', str(source / 'tb_g6lc_l2.vlt'), '--top-module', 'tb_g6lc_l2', f'-GBYTE_SIZE={geometry[0]}', f'-GSET_ASSOC={geometry[1]}', f'-GDATA_BANKS={geometry[2]}', '-GRR_EN=0', f'-GMSHR_DEPTH={depth}', f'-GMEM_LATENCY={latency}', f'-GSTALL_EVERY={stalls}', '--Mdir', str(model), '-o', 'l2-test', *rtl]
+            command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1', '-Wno-fatal', '-Wno-TIMESCALEMOD', str(source / 'tb_g6lc_l2.vlt'), '--top-module', 'tb_g6lc_l2', f'-GBYTE_SIZE={geometry[0]}', f'-GSET_ASSOC={geometry[1]}', f'-GDATA_BANKS={geometry[2]}', '-GRR_EN=0', f'-GMSHR_DEPTH={depth}', f'-GMEM_LATENCY={latency}', f'-GSTALL_EVERY={stalls}', f'-GTAG_SRAM={os.environ.get("REVIEW_L2_TAG_SRAM", "0")}', '--Mdir', str(model), '-o', 'l2-test', *rtl]
             commands = [('verilate',command), ('build',['make','-C',str(model),'-f','Vtb_g6lc_l2.mk','-j4','VERILATOR_ROOT='+str(runtime)])]
             for label, cmd in commands:
                 (work / (label+'-command.json')).write_text(json.dumps(cmd, indent=2))
@@ -411,7 +411,7 @@ def main():
             label = f'synth-b{bytes_}-w{ways}-depth{depth}'
             work = out / label
             work.mkdir()
-            script = 'read_slang ' + ' '.join(rtl) + f' -DL2TB_STATIC -DL2TB_SYNTH --keep-hierarchy --unroll-limit=16384 --top g6lc_l2_fixture -GBYTE_SIZE={bytes_} -GSET_ASSOC={ways} -GMSHR_DEPTH={depth} -GDATA_BANKS={geometry[2]}\n'
+            script = 'read_slang ' + ' '.join(rtl) + f' -DL2TB_STATIC -DL2TB_SYNTH --keep-hierarchy --unroll-limit=16384 --top g6lc_l2_fixture -GBYTE_SIZE={bytes_} -GSET_ASSOC={ways} -GMSHR_DEPTH={depth} -GDATA_BANKS={geometry[2]} -GTAG_SRAM={os.environ.get("REVIEW_L2_TAG_SRAM", "0")}\n'
             if macro_data: script += 'blackbox tc_sram*\n'
             if production: script += 'blackbox g6lc_l2_tag*\n'
             script += 'synth -top g6lc_l2_fixture -flatten\ncheck -assert\nselect -assert-none t:$dlatch t:$_DLATCH_*\ntee -o stats.json stat -json\n'
@@ -422,7 +422,8 @@ def main():
             stats = json.loads((work/'stats.json').read_text())['modules']['\\g6lc_l2_fixture']
             cell_types = stats['num_cells_by_type']
             macro_cells = sum(n for t,n in cell_types.items() if 'tc_sram' in t)
-            assert macro_cells == (geometry[2] if macro_data else 0), 'memory treatment mismatch'
+            tag_sram = int(os.environ.get('REVIEW_L2_TAG_SRAM', '0'))
+            assert macro_cells == ((geometry[2] + tag_sram) if macro_data else 0), 'memory treatment mismatch'
             tag_cells = sum(n for t,n in cell_types.items() if 'g6lc_l2_tag' in t)
             assert tag_cells == int(production), 'tag treatment mismatch'
             areas.append({'bytes':bytes_,'ways':ways,'banks':geometry[2],'depth':depth,'dataMacro':macro_data,'tagMacro':production,'tagMacroCells':tag_cells,'dataCapacityBits':bytes_*8,'cells':stats['num_cells'],'sequentialCells':sum(n for t,n in cell_types.items() if 'DFF' in t.upper()),'macroCells':macro_cells,'cellTypes':cell_types,'physicalArea':None})

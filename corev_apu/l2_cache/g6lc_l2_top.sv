@@ -30,6 +30,13 @@ module g6lc_l2_top
     // last-installed way. Default-off: RR_EN=0 folds to the legacy netlist.
     parameter bit          RR_EN       = 1'b0,
     parameter bit          FAIR_WRITES = 1'b0,
+    // Tag storage: 0 = flop array with a single-cycle combinational compare
+    // (legacy netlist, bit-identical); 1 = tags behind a 1R1W tc_sram with a
+    // launched read (see g6lc_l2_tag.tech-spec.md). The FSM launches the row
+    // on every transition into (or hold of) S_TAG, so the compare still
+    // completes on the first S_TAG cycle; only an inval-match port steal or
+    // a missed launch holds S_TAG one extra cycle.
+    parameter bit          TAG_SRAM    = 1'b0,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -120,7 +127,9 @@ module g6lc_l2_top
   // --------------------
   // Tag / data / MSHR
   // --------------------
-  logic tag_lookup, tag_hit;
+  logic tag_lookup, tag_hit, tag_row_valid;
+  logic tag_launch;
+  logic [IDX_BITS-1:0] tag_launch_index;
   logic [WAY_W-1:0] tag_way;
   logic [SET_ASSOC-1:0] tag_way_valid;
   logic tag_write, tag_inval, tag_match_inval;
@@ -129,7 +138,11 @@ module g6lc_l2_top
   logic [TAG_BITS-1:0] tag_wtag, tag_ltag, tag_probe_tag, tag_match_tag;
   logic tag_wvalid, tag_probe_valid;
 
-  // L3→L2 back-inval always single-cycle (no MSHR interaction).
+  // L3→L2 back-inval: the tag match completes in at most two cycles under
+  // TAG_SRAM (one read + one deferred clear, pipelined — a steady stream
+  // still retires one match per cycle), so the port stays always-ready. It
+  // must never depend combinationally on l2_back_inval_valid_i: the cluster
+  // ANDs it into the L3 victim-accept edge.
   // Also used for write-through self-inval: WT bypass must drop a cached
   // line that covers the write address, else a later read hits stale L2 data
   // (store@+0 then store@+16 on same 64 B line → second load returned 0).
@@ -156,16 +169,20 @@ module g6lc_l2_top
       .NUM_SETS  (NUM_SETS),
       .SET_ASSOC (SET_ASSOC),
       .TAG_WIDTH (TAG_BITS),
-      .IDX_WIDTH (IDX_BITS)
+      .IDX_WIDTH (IDX_BITS),
+      .TAG_SRAM  (TAG_SRAM)
   ) i_tag (
       .clk_i,
       .rst_ni,
+      .launch_i     (tag_launch),
+      .launch_index_i(tag_launch_index),
       .lookup_i     (tag_lookup),
       .index_i      (tag_iindex),
       .tag_i        (tag_ltag),
       .hit_o        (tag_hit),
       .way_o        (tag_way),
       .way_valid_o  (tag_way_valid),
+      .row_valid_o  (tag_row_valid),
       .probe_way_i  (tag_probe_way),
       .probe_tag_o  (tag_probe_tag),
       .probe_valid_o(tag_probe_valid),
@@ -703,6 +720,12 @@ module g6lc_l2_top
         tag_lookup = 1'b1;
         tag_iindex = idx_of(addr_q);
         tag_ltag   = tag_of(addr_q);
+        // TAG_SRAM: the launched row gates the decision. While it is low (an
+        // inval-match read stole the port, or the first row after re-entry
+        // has not landed) the request holds in S_TAG and re-launches; no hit/
+        // miss pulse, evict offer or MSHR alloc may commit on a stale row.
+        // Under TAG_SRAM=0 tag_row_valid is constant and this folds away.
+        if (tag_row_valid) begin
         if((tag_hit && (|mshr_id_match)) || (!tag_hit && merge_order_block))begin
           if(serve_pend)begin
             serve_idx_d=fifo_q[fifo_rd_q];
@@ -780,6 +803,7 @@ module g6lc_l2_top
             end
             // else stall in S_TAG until MSHR free / evict accept / way frees
           end
+        end
         end
       end
 
@@ -1108,6 +1132,14 @@ module g6lc_l2_top
       slv_resp_o.r       = mst_resp_i.r;
       mst_req_o.r_ready  = slv_req_i.r_ready;
     end
+
+    // Launched tag-row read (TAG_SRAM): evaluated after every state_d/addr_d
+    // assignment so it covers the S_IDLE accept edge, each held S_TAG cycle
+    // (relaunch after an inval-match port steal) and the S_SERVE interrupt
+    // return — the row is therefore presented on the first S_TAG cycle with
+    // no added wait state. Under TAG_SRAM=0 the tag module ignores this.
+    tag_launch       = (state_d == S_TAG);
+    tag_launch_index = idx_of(addr_d);
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin

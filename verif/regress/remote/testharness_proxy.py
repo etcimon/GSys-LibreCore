@@ -1843,13 +1843,13 @@ def l2_units_passed(text: str, rc: int) -> bool:
     )
 
 
-def l2_synth_passed(text: str, rc: int, rr_en: int) -> bool:
-    if rr_en not in (0, 1):
+def l2_synth_passed(text: str, rc: int, rr_en: int, tag_sram: int = 0) -> bool:
+    if rr_en not in (0, 1) or tag_sram not in (0, 1):
         return False
-    mem = 2 + rr_en
+    mem = 2 + rr_en + tag_sram
     # Yosys logs mention $dlatch in the select command; the runner already
     # asserted no latches and the expected $mem_v2 count before printing PASS.
-    return rc == 0 and f"[l2-tb] SYNTH PASS rr={rr_en} mem={mem}" in text
+    return rc == 0 and f"[l2-tb] SYNTH PASS rr={rr_en} tagsram={tag_sram} mem={mem}" in text
 
 
 def cmd_l2_leaf(rem: Remote, args) -> int:
@@ -1877,7 +1877,9 @@ def cmd_l2_leaf(rem: Remote, args) -> int:
         "VERILATOR": verilator, "L2TB_OUT": f"{rundir}/output", "L2TB_RR_EN": str(args.rr_en),
         "L2TB_SET_ASSOC": str(args.ways), "L2TB_MEM_LATENCY": str(args.mem_latency),
         "L2TB_STALL_EVERY": str(args.stall_every), "L2TB_MODE": mode,
-        "L2TB_BYTE_SIZE": "4096", "L2TB_SEED": str(0x600df00d), "L2TB_EXTRA": "",
+        "L2TB_BYTE_SIZE": "4096", "L2TB_SEED": str(0x600df00d),
+        "L2TB_EXTRA": "-GTAG_SRAM=1" if getattr(args, "tag_sram", False) else "",
+        "L2TB_TAG_SRAM": "1" if getattr(args, "tag_sram", False) else "0",
     }
     if mode == "synth":
         env["YOSYS"] = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"
@@ -1898,7 +1900,8 @@ def cmd_l2_leaf(rem: Remote, args) -> int:
         passed = l2_units_passed(text, rc)
         kind = "rtl-leaf-units"
     elif mode == "synth":
-        passed = l2_synth_passed(text + "\n" + (dest / "driver.log").read_text(errors="replace"), rc, args.rr_en)
+        passed = l2_synth_passed(text + "\n" + (dest / "driver.log").read_text(errors="replace"), rc, args.rr_en,
+                                 int(getattr(args, "tag_sram", False)))
         kind = "rtl-leaf-synth"
     else:
         passed = l2_leaf_passed(text, rc, args.ways, args.rr_en)
@@ -1915,10 +1918,14 @@ def cmd_l2_leaf(rem: Remote, args) -> int:
 
 def l2_equiv_passed(text: str, rc: int, negative: bool) -> bool:
     if negative:
+        # The dual-run signature negative (TAG-EQUIV NEGATIVE PASS) exits 0 by
+        # design; the equiv_make negative must still fail the proof.
+        if "TAG-EQUIV NEGATIVE PASS" in text:
+            return True
         return rc != 0 and ("unproven" in text.lower() or "ERROR" in text or "Assert" in text)
     return (
         rc == 0
-        and "[l2-tb] EQUIVALENCE PASS" in text
+        and ("[l2-tb] EQUIVALENCE PASS" in text or "[l2-tb] TAG-EQUIV PASS" in text)
         and "LADDER FAIL" not in text
         and "timeout: failed" not in text.lower()
         and "ERROR: " not in text
@@ -1958,6 +1965,7 @@ def cmd_l2_equiv(rem: Remote, args) -> int:
         "L2TB_EQ_LADDER": "1" if args.ladder else "0",
         "L2TB_EQ_BASE_FILE": f"{source_dir}/equiv-ref/legacy.original.sv",
         "L2TB_EQ_TIMEOUT": str(args.timeout or (120 if mem == "map" or args.byte_size <= 512 else 300)),
+        "L2TB_EQ_TAGS": "1" if getattr(args, "eq_tags", False) else "0",
         "YOSYS": f"{formal_bin}/yosys",
     }
     command = " ".join(shlex.quote(f"{key}={value}") for key, value in env.items() if value != "")
@@ -1969,7 +1977,9 @@ def cmd_l2_equiv(rem: Remote, args) -> int:
     ).returncode
     rem.pull(f"{rundir}/driver.log", dest)
     rem.pull(f"{rundir}/output/", dest / "output")
-    logs = list((dest / "output").glob("run-*/equiv.log")) + [dest / "driver.log"]
+    logs = (list((dest / "output").glob("run-*/equiv.log"))
+            + list((dest / "output").glob("run-*/equiv-tags.log"))
+            + [dest / "driver.log"])
     text = ""
     for path in logs:
         if path.is_file():
@@ -2344,6 +2354,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mem-latency", type=int, default=6)
     sp.add_argument("--stall-every", type=int, default=0)
     sp.add_argument("--mode", choices=["sim", "units", "synth"], default="sim")
+    sp.add_argument("--tag-sram", action="store_true",
+                    help="build the L2 fixture with TAG_SRAM=1 (tc_sram tag path)")
     sp.set_defaults(fn=cmd_l2_leaf)
 
     sp = sub.add_parser("l2-equiv", help="RR-off equivalence of a copied L2 snapshot (no shared sync)")
@@ -2353,6 +2365,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mem", choices=["map", "collect", "bbox", "auto"], default="auto")
     sp.add_argument("--negative", action="store_true")
     sp.add_argument("--ladder", action="store_true")
+    sp.add_argument("--eq-tags", action="store_true",
+                    help="flop-vs-SRAM tag miter (gold TAG_SRAM=0, gate TAG_SRAM=1, "
+                         "back-inval tied off) instead of the legacy reference")
     sp.set_defaults(fn=cmd_l2_equiv)
 
     sp = sub.add_parser("shell", help="interactive ssh into the remote root, or run one command")

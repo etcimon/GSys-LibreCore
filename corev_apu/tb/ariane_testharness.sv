@@ -1597,6 +1597,154 @@ module ariane_testharness #(
   end
   //pragma translate_on
 
+  //  +l2_trace: per-event trace of the L2 (and L3, iff enabled) tag/FSM
+  //  interface for cross-model divergence hunting — pure observer, one
+  //  $fwrite per event per instance into l2_trace.log (override the path
+  //  with +l2_trace_file=<path>). Format "L<2|3> cyc=<n> <ev> ..." with a
+  //  free-running cycle counter, so the traces of a flop-tag and an
+  //  SRAM-tag build are expected identical up to the first behavioural
+  //  divergence. Hierarchical enum-literal reads are not portable, so
+  //  L2T_S_* mirror g6lc_l2_top's state_e encoding (S_TAG=1, S_SERVE=4).
+  //pragma translate_off
+  int l2t_fd = 0;
+  longint unsigned l2t_cyc;
+  localparam logic [3:0] L2T_S_TAG = 4'd1, L2T_S_SERVE = 4'd4;
+  initial begin
+    if ($test$plusargs("l2_trace")) begin
+      string l2t_path;
+      if (!$value$plusargs("l2_trace_file=%s", l2t_path))
+        l2t_path = "l2_trace.log";
+      l2t_fd = $fopen(l2t_path, "w");
+      if (l2t_fd == 0) $fatal(1, "L2_TRACE_OPEN path=%s", l2t_path);
+    end
+  end
+  final begin
+    if (l2t_fd != 0) $fclose(l2t_fd);
+  end
+  always_ff @(posedge clk_i) begin
+    if (!rst_ni) l2t_cyc <= '0;
+    else         l2t_cyc <= l2t_cyc + 1'b1;
+  end
+  if (CVA6Cfg.L2En) begin : gen_l2t_l2
+    always_ff @(posedge clk_i) begin
+      if (l2t_fd != 0 && rst_ni) begin
+        if (i_cluster.gen_l2.i_l2.slv_req_i.ar_valid &&
+            i_cluster.gen_l2.i_l2.slv_resp_o.ar_ready)
+          $fwrite(l2t_fd, "L2 cyc=%0d ar addr=%h id=%h cache=%h lock=%b\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.slv_req_i.ar.addr, i_cluster.gen_l2.i_l2.slv_req_i.ar.id,
+                  i_cluster.gen_l2.i_l2.slv_req_i.ar.cache, i_cluster.gen_l2.i_l2.slv_req_i.ar.lock);
+        if (i_cluster.gen_l2.i_l2.slv_req_i.aw_valid &&
+            i_cluster.gen_l2.i_l2.slv_resp_o.aw_ready)
+          $fwrite(l2t_fd, "L2 cyc=%0d aw addr=%h id=%h atop=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw.addr, i_cluster.gen_l2.i_l2.slv_req_i.aw.id,
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw.atop);
+        if (i_cluster.gen_l2.i_l2.l2_hit_o)
+          $fwrite(l2t_fd, "L2 cyc=%0d hit addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.addr_q, i_cluster.gen_l2.i_l2.gen_l2.id_q);
+        if (i_cluster.gen_l2.i_l2.l2_miss_o)
+          $fwrite(l2t_fd, "L2 cyc=%0d miss addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.addr_q, i_cluster.gen_l2.i_l2.gen_l2.id_q);
+        if (i_cluster.gen_l2.i_l2.l2_bypass_o)
+          $fwrite(l2t_fd, "L2 cyc=%0d bypass addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw_valid ?
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw.addr : i_cluster.gen_l2.i_l2.slv_req_i.ar.addr,
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw_valid ?
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw.id : i_cluster.gen_l2.i_l2.slv_req_i.ar.id);
+        if (i_cluster.gen_l2.i_l2.gen_l2.tag_write && i_cluster.gen_l2.i_l2.gen_l2.tag_wvalid)
+          $fwrite(l2t_fd, "L2 cyc=%0d install idx=%h way=%h tag=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.tag_windex, i_cluster.gen_l2.i_l2.gen_l2.tag_wway,
+                  i_cluster.gen_l2.i_l2.gen_l2.tag_wtag);
+        if (i_cluster.gen_l2.i_l2.gen_l2.tag_write && !i_cluster.gen_l2.i_l2.gen_l2.tag_wvalid)
+          $fwrite(l2t_fd, "L2 cyc=%0d wclr idx=%h way=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.tag_windex, i_cluster.gen_l2.i_l2.gen_l2.tag_wway);
+        if (i_cluster.gen_l2.i_l2.gen_l2.tag_match_inval)
+          $fwrite(l2t_fd, "L2 cyc=%0d inv idx=%h tag=%h addr=%h src=%s\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.tag_match_index, i_cluster.gen_l2.i_l2.gen_l2.tag_match_tag,
+                  i_cluster.gen_l2.i_l2.l2_back_inval_valid_i ?
+                  i_cluster.gen_l2.i_l2.l2_back_inval_addr_i : i_cluster.gen_l2.i_l2.gen_l2.self_inval_addr,
+                  i_cluster.gen_l2.i_l2.l2_back_inval_valid_i ? "l3" : "self");
+        if (i_cluster.gen_l2.i_l2.gen_l2.state_q == L2T_S_TAG &&
+            !i_cluster.gen_l2.i_l2.gen_l2.tag_row_valid)
+          $fwrite(l2t_fd, "L2 cyc=%0d steal addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.addr_q, i_cluster.gen_l2.i_l2.gen_l2.id_q);
+        if (i_cluster.gen_l2.i_l2.gen_l2.state_q == L2T_S_SERVE &&
+            i_cluster.gen_l2.i_l2.gen_l2.serve_beat_q == '0 &&
+            i_cluster.gen_l2.i_l2.slv_resp_o.r_valid && i_cluster.gen_l2.i_l2.slv_req_i.r_ready)
+          $fwrite(l2t_fd, "L2 cyc=%0d serve addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.serve_addr_q, i_cluster.gen_l2.i_l2.gen_l2.serve_id_q);
+        if (i_cluster.gen_l2.i_l2.l2_evict_valid_o && i_cluster.gen_l2.i_l2.l2_evict_ready_i)
+          $fwrite(l2t_fd, "L2 cyc=%0d evict addr=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.l2_evict_addr_o);
+      end
+    end
+  end
+  if (CVA6Cfg.L3En) begin : gen_l2t_l3
+    always_ff @(posedge clk_i) begin
+      if (l2t_fd != 0 && rst_ni) begin
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar_valid &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_resp_o.ar_ready)
+          $fwrite(l2t_fd, "L3 cyc=%0d ar addr=%h id=%h cache=%h lock=%b\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar.addr,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar.id,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar.cache,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar.lock);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw_valid &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_resp_o.aw_ready)
+          $fwrite(l2t_fd, "L3 cyc=%0d aw addr=%h id=%h atop=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw.addr,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw.id,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw.atop);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_hit_o)
+          $fwrite(l2t_fd, "L3 cyc=%0d hit addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.addr_q, i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.id_q);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_miss_o)
+          $fwrite(l2t_fd, "L3 cyc=%0d miss addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.addr_q, i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.id_q);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_bypass_o)
+          $fwrite(l2t_fd, "L3 cyc=%0d bypass addr=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw_valid ?
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw.addr :
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar.addr);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_write &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_wvalid)
+          $fwrite(l2t_fd, "L3 cyc=%0d install idx=%h way=%h tag=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_windex,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_wway,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_wtag);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_write &&
+            !i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_wvalid)
+          $fwrite(l2t_fd, "L3 cyc=%0d wclr idx=%h way=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_windex,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_wway);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_match_inval)
+          $fwrite(l2t_fd, "L3 cyc=%0d inv idx=%h tag=%h addr=%h src=%s\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_match_index,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_match_tag,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_back_inval_valid_i ?
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_back_inval_addr_i :
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.self_inval_addr,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_back_inval_valid_i ? "l3" : "self");
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.state_q == L2T_S_TAG &&
+            !i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_row_valid)
+          $fwrite(l2t_fd, "L3 cyc=%0d steal addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.addr_q,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.id_q);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.state_q == L2T_S_SERVE &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.serve_beat_q == '0 &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_resp_o.r_valid &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.r_ready)
+          $fwrite(l2t_fd, "L3 cyc=%0d serve addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.serve_addr_q,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.serve_id_q);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_evict_valid_o &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_evict_ready_i)
+          $fwrite(l2t_fd, "L3 cyc=%0d evict addr=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_evict_addr_o);
+      end
+    end
+  end
+  //pragma translate_on
+
   //  Report in a `final` block, not from the clocked process. The C++ side leaves
   //  its loop as soon as `exit_o[0]` is set, so a $display issued in that same
   //  cycle never reaches the log -- measured: the run exited 127 with no reason
