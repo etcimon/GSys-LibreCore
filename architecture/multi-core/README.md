@@ -18,7 +18,9 @@ does not re-open G1\* — `../multi-threading/soft-ladder/CONTRACT.md` §8.
 |------|--------|
 | Shared L2 (U6.0) | `corev_apu/l2_cache/` |
 | L3 + stream PF | `corev_apu/l3_cache/` + `g6lc_server_prefetcher` (ooo_server / server_math PF) |
-| Inclusive L3→L2/L1 | **Live** — L2 `l2_back_inval_*` + L1 `g6lc_l3_inclusive_inv`; TB `INCLUSIVE_L3=L3En` |
+| Inclusive L3→L2/L1 | **Live, package policy** — `CVA6Cfg.L3InclusiveEn` (TB override `INCLUSIVE_L3` passes 0); L2 `l2_back_inval_*` qualified by the L3 victim accept edge + L1 `g6lc_l3_inclusive_inv`. `g6lc64_ooo_server` inclusive; `g6lc64_ooo_int2_l3` / `g6lc64_smt2_l3` non-inclusive (WT L1 + hub invalidations need no inclusion) |
+| Allocating L2/L3 for WT cores | **`WtAxiAllocEn`** — the WT shim was modifiable-only, so WT targets' L2 never allocated (measured 0 hits / 948k requests); on in `g6lc64_ooo_int2` and both L3 packages, off (bit-identical) in `g6lc64_smt2`/`g6lc64_smt2_ooo_int` |
+| Tag storage | **`L2TagSramEn`** — tags behind a 1R1W `tc_sram` with a launched row read (`g6lc_l2_tag.tech-spec.md`); flop path retained; both L3 packages use it |
 | `NrCores` 1…8 | **Live** in `config_pkg` / packages (default 1) |
 | Snoop filter / inv bus / hub | **Live** under `corev_apu/coherence/` |
 | SoC N-core wrapper | **`corev_apu/src/g6lc_cluster.sv`** (N×ariane + hub + L2/L3/PF) |

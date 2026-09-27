@@ -73,6 +73,36 @@ verification cost.
 - **CBO** end-to-end when Zicbo* enabled
 - Prefer **64 B lines** with `Zic64b` for software alignment
 
+## WT cores, allocation and the optional L3 (2026-09-26)
+
+Three facts a contributor needs before touching this layer:
+
+- **The WT L1 never asked the L2 to allocate.** `core/axi_shim.sv` tags every request
+  `CACHE_MODIFIABLE` only, and `g6lc_l2_top` allocates only when an allocate bit is set, so
+  `g6lc64_smt2`, `g6lc64_smt2_ooo_int` and `g6lc64_ooo_int2` ran a serializing bypass (measured:
+  948,230 L2 requests, 0 hits on the four-hart OpenSBI boot). `WtAxiAllocEn` fixes the attribute
+  at the WT adapter; it is on in `g6lc64_ooo_int2` (re-qualified) and the L3 packages, and off —
+  bit-identical — in the two SMT2 targets.
+- **Inclusion is a package policy** (`L3InclusiveEn`). The WT L1 plus hub-owned invalidations do
+  not need an inclusive L3, so `g6lc64_ooo_int2_l3` and `g6lc64_smt2_l3` run a **non-inclusive**
+  1 MiB / 16-way L3 (MSHR 4, the hub's credit count); `g6lc64_ooo_server` keeps the inclusive
+  back-invalidation. Both L3 packages pass their strict SMT2 OpenSBI boots at zero DRAM latency,
+  but the L3 recorded **no hits** there: the boot footprint fits the 256 KiB L2 and every
+  write-through purges the written line from both levels. The install/hit mechanism is proven in
+  the composed stack bench; the benefit case is a footprint / write-policy measurement, not a
+  claim.
+- **Tags can live in SRAM** (`L2TagSramEn`, `g6lc_l2_tag.tech-spec.md`): valid bits stay in
+  flops, the tag row is read one cycle ahead (launched on every transition into `S_TAG`), an
+  inval-match read has port priority and clears one cycle later against the valids snapshotted
+  in its read cycle. The flop path is retained and the two are cycle-identical on the full
+  four-hart run and in a deterministic dual-simulation lane (`L2TB_EQ_TAGS`); a Yosys miter does
+  not close on the unpaired tag-store init and is an open item.
+
+For DRAM-latency experiments use the testbench's `DramLatency` parameter
+(`corev_apu/tb/g6lc_tb_dram_latency.sv`, first beat of each burst delayed). The vendor
+`axi_delayer` fixed delay serializes every beat and truncates to 4 bits — it cannot model memory
+latency and its results were withdrawn.
+
 ## DTS / software
 
 Describe next-level caches in device tree when software or firmware must know
@@ -88,8 +118,10 @@ geometry. Notes: `architecture/l2-l3-cache/dts-l3-prefetch.md`. Keep
 | Multi-core stream | `mc-stream-tests` (when catalogued) |
 
 ```bash
-g6lc-build verify --target g6lc64_ooo_int2    # WT + L2 + COH_OOO cluster
-g6lc-build verify --target g6lc64_ooo_server  # refused in production (multi-hart FP leg)
+g6lc-build verify --target g6lc64_ooo_int2     # WT + allocating L2 + COH_OOO cluster
+g6lc-build verify --target g6lc64_ooo_int2_l3  # + non-inclusive L3, SRAM tags (qualification-only)
+g6lc-build verify --target g6lc64_smt2_l3      # single core, SMT2, L2 + L3 (qualification-only)
+g6lc-build verify --target g6lc64_ooo_server   # refused in production (multi-hart FP leg)
 g6lc-build test --suite ooo-l3-tests
 ```
 

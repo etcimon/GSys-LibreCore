@@ -28,7 +28,11 @@ integer OoO, multiple WT cores, equal L1 line widths, with L2. **Promotion (2026
 holder decision after the composed hub+L2 review):** `core/include/g6lc64_ooo_int2_config_pkg.sv`
 selects `COH_OOO` for two integer OoO WT cores with L2 and no L3; `check_cfg` and `g6lc_cluster` no
 longer require `G6LC_OOO_COH_QUALIFY`. The legality assert and `gen_bad_ooo_coherence` remain, and
-the default targets and their packages are unchanged.
+the default targets and their packages are unchanged. **2026-09-26 (plan T8):** the WT boundary
+gains allocate attributes (`WtAxiAllocEn`, on in `g6lc64_ooo_int2` — its L2 had measured 0 hits
+before), and the qualification-only packages `g6lc64_ooo_int2_l3` / `g6lc64_smt2_l3` add a
+non-inclusive L3 (`L3InclusiveEn=0`) with SRAM-backed tags (`L2TagSramEn`); the COH_OOO legality
+envelope is unchanged (L3 is permitted below the hub, the hub never sees it).
 
 `g6lc_l2_top.sv` suppresses installation on a same-cycle matching invalidation, with memory-port
 requests separated from conflict-dependent completion. `FAIR_WRITES` bounds competing read/serve
@@ -756,7 +760,11 @@ limits: `architecture/core-fetch/README.md`, circular IQ section.
 | Server math / AVX-like (U10) | partial (C-light + `_v`) | `cv64a6_server_math{,_v}`; HPDCACHE+HWPF+L2 auto; `server-math-tests`; `_v` enables RVV for Ara | `RVB`, `RVZiCbo*`, `HwPrefetchEn`, `RVH`, `RVV` |
 | Ara / RVV attach (U10ᵇ) | **partial / live lintable** | Same as Vector V row: `ariane` gen_acc + `cva6_ara_attach` + `cva6_axi_2to1_mux`; `CVA6_ARA_ATTACH=1` Verilator green; `vendor/ara/` + shims; suite `ara-vector-path`. Spec sub-file `agents/spec/riscv-spec-I-9-vector.html` | `RVV`, `EnableAccelerator` |
 | KVM/H stress + H-edge | directed green (Spike+RTL 3/3) | `verif/tests/custom/kvm_h/*`, suites `kvm-h-spike` / `kvm-h-tests` | `RVH`, `SstcEn` |
-| L3 DT / inclusive | **implemented (gated)** | L3/L2 victim→L1 (`cva6_l3_inclusive_inv`); L3→L2 tag match-inval (`l2_back_inval_*` / `inval_match_*`); TB `INCLUSIVE_L3=L3En` | `L3En`, cluster `INCLUSIVE_L3` |
+| L3 DT / inclusive | **implemented (gated)** | L3/L2 victim→L1 (`g6lc_l3_inclusive_inv`); L3→L2 tag match-inval (`l2_back_inval_*` / `inval_match_*`) qualified by the L3 victim accept edge; policy from the package (2026-09-26), TB override passes 0 | `L3En`, `L3InclusiveEn` (cluster `INCLUSIVE_L3` bench override) |
+| WT boundary allocation | **implemented (gated, 2026-09-26)** | `wt_axi_adapter` `p_axi_alloc_attr`: cacheable requests get `BUFFERABLE\|MODIFIABLE\|RD_ALLOC\|WR_ALLOC` after the shim, nc/lock/ATOP stay `MODIFIABLE`; off = bit-identical stream (identity proven on `g6lc64_smt2`/`g6lc64_smt2_ooo_int`) | `WtAxiAllocEn` (needs WT + `L2En`); on in `g6lc64_ooo_int2`, `g6lc64_ooo_int2_l3`, `g6lc64_smt2_l3` |
+| Non-inclusive L3 packages | **implemented (qualification-only)** | `g6lc64_ooo_int2_l3` (COH_OOO + 1 MiB/16-way L3, MSHR 4), `g6lc64_smt2_l3` (single core); DTS `ariane-ooo-int2-l3.dts`, `ariane-smt2-l3.dts`; strict SMT2 boots pass at DRAM latency 0; `l3_hit=0` on the boot workload (plan T8c) | `L3En`, `L3ByteSize`… + `check_cfg` L3 pow2/inclusion asserts |
+| L2/L3 tag SRAM | **implemented (gated, 2026-09-26)** | `g6lc_l2_tag` `TAG_SRAM`: valid flops + 1R1W `tc_sram` row store (`ImplKey g6lc_l2_tag`), launched read (`state_d==S_TAG`), `row_valid` gates S_TAG, inval-match port priority + deferred clear on snapshotted valids; flop path verbatim under 0; `g6lc_l2_tag.tech-spec.md` | `L2TagSramEn` (on in both L3 packages) |
+| DRAM-latency instrument (TB) | testbench | `corev_apu/tb/g6lc_tb_dram_latency.sv` first-beat gate (`DramLatency`); the vendor `stream_delay` fixed delay is per-beat serialized with a 4-bit counter and must not be used for latency claims | `DramLatency` (Verilator `-G`) |
 | Stream plane × multicore (U6/p6) | **implemented (gated)** | `cva6_server_prefetcher` + `NrCores` packages; suite `mc-stream-tests` | `ServerPrefetchEn`, `NrCores`, `L2En`/`L3En` |
 | PMU group 2 L2/L3/PF | implemented | `perf_counters` g2; cluster→ariane→cva6 ports | `L2En`/`L3En`/`ServerPrefetchEn` |
 | PMU group 2 events 5/6 (L1 invalidation applied, COH_OOO load replay) | implemented | `perf_counters` g2 idx 5/6 ← `cva6.inval_apply_valid`, `issue_stage.ooo_phys_replay_o` | WT / `COH_OOO` (0 otherwise) |

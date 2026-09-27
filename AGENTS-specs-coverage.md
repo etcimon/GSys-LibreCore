@@ -59,6 +59,21 @@ three discriminating mutations. Not covered: the remaining frozen multicore prog
 in-order WT DI/anchor re-runs after the lifetime change, general RVWMO litmus coverage, stock
 firmware/compliance, physical sign-off.
 
+## L3 under COH_OOO — allocation measured, mechanism proven, benefit unproven (2026-09-26)
+
+The WT boundary now emits allocate attributes behind `WtAxiAllocEn`; before it, every WT
+target's L2 was a bypass (0 hits measured on the four-hart boot). Two qualification-only
+packages add a non-inclusive 1 MiB L3 with SRAM-backed tags and pass their strict SMT2
+OpenSBI boots at zero DRAM latency; the unchanged SMT2 targets re-ran bit-identical. The L3
+install/hit mechanism is proven at the composed leaf, the tag-SRAM path is cycle-identical to
+the flop path on the full four-hart run after a stale-clear defect was found and fixed, and
+FO4 is unchanged. Measured, not claimed (T8e): an L3 benefit exists only for a footprint above
+the L2 with memory latency present (−6.1 % on a 512 KiB scan at latency 40; no hits on the boot
+workload), and write-through purges cost the boot ~90k of its ~100k L2 misses. Not covered:
+write-update policy (T8f in progress), formal flop-vs-SRAM equivalence (dual simulation only),
+the legacy pinned-reference equivalence lane (red), physical macro binding, MBIST insertion and
+STA/power/area.
+
 ## CSR admission lifetime — directed verification and scoped four-hart firmware completion
 
 OoO CSR admission now reserves capacity for the request already in the issue-to-allocation

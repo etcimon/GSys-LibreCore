@@ -213,6 +213,16 @@ the cluster. The `COH_OOO` legality assert, `gen_bad_ooo_coherence`, default-tar
 all production defaults are unchanged. Promotion is a configuration-availability decision: the
 deferred obligations below remain open and are not implied to be satisfied.
 
+**Envelope amendment (2026-09-26, plan T8):** the promoted package now allocates in its L2
+(`WtAxiAllocEn=1`; before it the WT shim's modifiable-only attribute made the L2 a bypass, measured
+as 0 hits on the four-hart boot) and was re-qualified with allocation (strict pass). The
+qualification-only variants `g6lc64_ooo_int2_l3` / `g6lc64_smt2_l3` add a **non-inclusive** L3
+below the L2 (`L3InclusiveEn=0`, `L2TagSramEn=1`). The hub never observes the L3: the coherence
+envelope (signature acquisition on AR/AW, WT retained-copy invalidation, physical-address load
+validation) is unchanged, and the composed stack bench extends the stalled-write/self-invalidation
+scenarios through hub→L2→L3. The L3 packages are not promoted; no L3 performance benefit is
+claimed (`l3_hit = 0` on the boot workload).
+
 **Production promotion review (2026-09-24):** do not promote from B-delay leaf tests alone.
 The retained WT atomic invalidation now keeps its full PA, not merely an index widened to an
 address; only its cache-index output is sliced. Hub B offers retain their selected slot under

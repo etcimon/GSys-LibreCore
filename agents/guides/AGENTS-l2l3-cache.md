@@ -56,6 +56,20 @@ exist: the AXI route inserts an AXI-to-AXI L2 cache between the core's master
 SoC level in `corev_apu/`; the OpenPiton route reuses `core/cache_subsystem/wt_l15_adapter.sv`, which
 already hands cache lines to an external L1.5/L2.
 
+### WT boundary allocation, inclusion policy and SRAM tags (2026-09-26)
+
+Until `WtAxiAllocEn`, every WT target's L2 was a **bypass**: `core/axi_shim.sv` tags all
+requests `CACHE_MODIFIABLE` and `l2_is_cacheable` needs an allocate bit (HPDCACHE targets were
+unaffected — `hpdcache_mem_to_axi` sets the allocate bits). When adding a memory-side level for a
+WT core, check the attribute first; the `[mc_cache]` testbench counters make a bypass visible
+(`l2_hit=0`). Inclusion is a package policy (`L3InclusiveEn`; the WT L1 plus hub-owned
+invalidations do not need it, so the L3 packages are non-inclusive). `L2TagSramEn` moves the tag
+row store behind `tc_sram` with a read launched one cycle ahead (`g6lc_l2_tag.tech-spec.md`);
+when changing the tag protocol, run the dual-simulation `L2TB_EQ_TAGS` lane and HUM scenario 41
+(the deferred-clear/live-valid corner). For latency experiments use `DramLatency`
+(`g6lc_tb_dram_latency`), never the delayer's `FIXED_DELAY_*` (per-beat serialized, 4-bit).
+Evidence and limits: `core/ooo/AGENTS-ooo-plan.md` T8.
+
 ### Current memory-side experiment
 
 `g6lc_l2_top.RR_EN` is driven by default-off `L2RoundRobinEn` through both

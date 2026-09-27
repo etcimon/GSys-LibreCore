@@ -316,6 +316,26 @@ stores versus primary loads need boundary tracing; neither record is matched or 
   472,120 / 652,285 / 14,942,663 / 412,622. Both current physical-core RVFI traces match r8's
   corresponding prefixes exactly (128,663,792 and 1,772,143,971 bytes). The strengthened
   exit oracle r2 passes 60/60 with scenario-specific failure markers. Scope: plan T7q.
+- L3 under COH_OOO (plan T8a–T8d, 2026-09-26). Observer counters: `[mc_cache]` in the testbench
+  `final` block (`l2_hit/miss/bypass`, `l3_hit/miss`, `dram_latency`), parsed by both remote
+  runners; identity of the instrumented model against r9 is exact (`ooocoh-p0-osbi-d0-r1`,
+  byte-identical traces, `l2_hit=0` over 948,230 requests). WT attribute leaf
+  `tb_g6lc_wt_axi_attr` 36/36 with the nc-ignoring mutation caught (`ooocoh-p1-wt-attr-*`);
+  composed hub+L2 scenarios 2/3 (sub-line service, post-write refetch) small/target ± negatives,
+  self-invalidation fault control, 0 SCCs; `check_cfg` refusals 12/12 incl. both L3 packages as
+  legal baselines; `g6lc64_smt2`/`g6lc64_smt2_ooo_int` strict re-runs match their frozen traces
+  line-for-line (18,531,957 / 18,516,857). DRAM-latency instrument leaf `tb_g6lc_tb_dram_latency`
+  20/20 at 0/7/40 (the vendor `stream_delay` serializes beats and truncates 40→8 — its runs are
+  retained as invalid). Stack bench (`USE_L3`): scenarios 0–4 ± negatives, scenario 4 proves an
+  L3 install + hit after an L2 eviction, L3-side fault fails scenario 3; credits with the L3 stage
+  MSHR 4 = 16 service. Tag SRAM: HUM 78/78 both paths with identical metrics (scenario 41 = the
+  stale-clear corner, buggy RTL fails `HUM_TAG_STALE_CLEAR`), tag miter with `L2TAG_MITER_CORNER`,
+  deterministic dual-simulation flop-vs-SRAM equality at 512 B–8 KiB (`L2TB_EQ_TAGS`; a Yosys miter
+  does not close on unpaired init — open), leaf sim/units/synth both paths, size review 32/32
+  identical records. Full models: int2 (alloc) four-hart strict pass 18,675,595; int2_l3 pass
+  19,341,802 (identical flop vs SRAM after the fix, `+l2_trace` 8.36M events equal); smt2_l3 pass
+  14,300,834 exact both paths. Legacy pinned-reference `L2TB_MODE=equiv` is **red** (531 unproven,
+  predates the retention repair) and is not whitelisted.
 - Visibility-model probes for this class (kept in `run_mc_int2_review.py`): `+mc_vis_stuck=N`
   stuck-handshake/commit-head reports, CSR exception and csr_buffer allocation/commit views,
   issue-port view within `+mc_vis_from/+mc_vis_until`. The review mode's directed cases still

@@ -83,10 +83,31 @@ prerequisite for this work under the existing dual license. No licensing policy 
   attributes; odd MSIP read lanes repaired on the 64-bit AXI bus. Frozen positive/negative ELFs
   reach their intended opposite verdicts at cycle 775 (`ooocoh-nc-clint-int2-r1`); independent
   leaf negatives and restored-defect controls detect both bugs. Scope and limits: plan T7h.
+- [~] L3 under COH_OOO (plan T8, 2026-09-26). Landed: `WtAxiAllocEn` (WT L2 was a measured
+  bypass: 0 hits / 948k requests; now on in int2 and re-qualified, 18,675,595 cycles at DRAM
+  latency 0, 3.4× the bypass's progress at latency 40), `L3InclusiveEn` package policy with the
+  L2 back-inval on the L3 victim accept edge, packages `g6lc64_ooo_int2_l3` / `g6lc64_smt2_l3`
+  (non-inclusive 1 MiB L3, MSHR 4; strict boots pass 19,341,802 / 14,300,834), `L2TagSramEn`
+  SRAM tags (stale-clear defect found by `+l2_trace` and fixed; four-hart run identical to the
+  flop path), `g6lc_tb_dram_latency` instrument (the vendor `stream_delay` fixed delay is
+  per-beat serialized and 4-bit — never cite it). Measured (T8e): the L3 pays off only above the
+  L2 footprint with memory latency present (512 KiB scan at latency 40: −6.1 %, 4,609 L3 hits;
+  latency 0 or footprints inside the L2 / beyond the L3 gain nothing); write-through purges
+  6,060 resident lines per 8,192 stores and ~90k of the four-hart boot's ~100k L2 misses follow
+  a purge (latency-40 boots to completion under a 60M measurement cap: 46,909,150 / 48,403,596,
+  `l3_hit = 0`); PMU group-2 counters agree with the TB totals; the L2×L3 geometry sweep
+  elaborates at every point. Open in T8: `L2WriteUpdateEn` (T8f, go on the purge number),
+  final identity/strict runs on the resulting tree. No L3 benefit is claimed for the boot.
+- [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
+  pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
+  unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.
+- [ ] Formal flop-vs-SRAM tag equivalence: the Yosys miter does not close on the unpaired
+  tag-store init (503 unproven at `-seq 2`); needs an init/valid-gating assumption. Today's
+  evidence is deterministic dual simulation at 512 B–8 KiB plus the identical full-system run.
 - [ ] Deferred for unrestricted release: firmware/anchor/compliance qualification, directed PMU
-  event-count checks and hub/RVFI connectivity, foundry macro selection and MBIST controller insertion,
-  STA/power/area sign-off. HPDCACHE/non-WT application acknowledgement is outside the `COH_OOO`
-  legality envelope.
+  event-count checks and hub/RVFI connectivity, foundry macro selection and MBIST controller insertion
+  (now also the `g6lc_l2_tag` row store), STA/power/area sign-off. HPDCACHE/non-WT application
+  acknowledgement is outside the `COH_OOO` legality envelope.
 - [ ] Credit-consistent L2 sizing with current concurrent-fill occupancy/lifetime proof.
 - [~] Accepted-physical-address validation is implemented as a guarded candidate through LSU/EX/
   issue/LSQ/scoreboard. The legacy virtual STQ key is not reused. The new tag-stage event saves

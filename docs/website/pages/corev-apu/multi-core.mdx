@@ -81,7 +81,13 @@ Hub invariants held by `g6lc_coherence_hub.sv`:
   retired (plan T7i).
 - The hub's four transaction credits bound L2 fills; `g6lc64_ooo_int2` sizes
   `L2MshrDepth=4` to match (measured: depth 2 left 51 MSHR-full stall cycles in
-  an eight-read burst, depth 4 none).
+  an eight-read burst, depth 4 none). The L3 packages size `L3MshrDepth=4` on
+  the same evidence (depth 16 gives identical service through the stack).
+- The hub never sees the L3. `g6lc64_ooo_int2_l3` places a **non-inclusive**
+  L3 below the L2 (`L3InclusiveEn=0`); the composed stack bench carries the
+  stalled-write / self-invalidation scenarios through hub → L2 → L3, and the
+  four-hart strict boot passes on it. The WT boundary now emits allocate
+  attributes (`WtAxiAllocEn`) — before it the L2 in this envelope was a bypass.
 
 The composed hub + real `g6lc_l2_top` bench (`tb_g6lc_coherence_l2` in
 `verif/tb/l2/tb_g6lc_coherence_hub.sv`) shows the L2 refusing a reader's AR

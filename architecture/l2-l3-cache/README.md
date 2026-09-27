@@ -945,10 +945,49 @@ entries and data ports do not establish hit-under-miss, merged-response service,
 or multiple outstanding misses at this boundary. PMU group 2 is **wired**
 (cluster → core); do not sum duplicate shared-cache views across cores.
 Inclusive paths are **present/config-gated**, with concurrency qualification open:
-- L3 (or L2) victim → **L1** via `g6lc_l3_inclusive_inv` (`INCLUSIVE_L3`; TB sets it when `L3En`)
+- L3 (or L2) victim → **L1** via `g6lc_l3_inclusive_inv` (policy `CVA6Cfg.L3InclusiveEn`; the cluster's `INCLUSIVE_L3` parameter is a bench override and the testbench passes 0)
 - L3 victim → **L2 tag match-inval** via `l2_back_inval_*` / `inval_match_*` on `g6lc_l2_tag`
 DT: `dts-l3-prefetch.md`. Stream×multicore suite: `mc-stream-tests` (`g6lc64_ooo_server`).
 Open: Ara live vector on sim flist (IP vendored + `Flist.ara` ready).
+
+### L3 under COH_OOO, WT allocation and SRAM tags (2026-09-26)
+
+Record of decision and evidence: `core/ooo/AGENTS-ooo-plan.md` T8a–T8d.
+
+- **WT targets never allocated in the L2.** `core/axi_shim.sv` emits `CACHE_MODIFIABLE` only and
+  `l2_is_cacheable` requires an allocate bit, so `g6lc64_smt2`, `g6lc64_smt2_ooo_int` and
+  `g6lc64_ooo_int2` ran a serializing bypass: 948,230 requests, 0 hits on the four-hart boot
+  (measured with the new observer `[mc_cache]` counters). `WtAxiAllocEn` (default 0) makes
+  `wt_axi_adapter` emit `BUFFERABLE|MODIFIABLE|RD_ALLOC|WR_ALLOC` for cacheable requests; nc/lock/
+  ATOP stay modifiable-only. On in `g6lc64_ooo_int2` and the two L3 packages; the two SMT2
+  targets that keep 0 re-ran bit-identical to their frozen traces.
+- **Inclusion is a package policy.** `L3InclusiveEn` replaces the testbench `INCLUSIVE_L3=L3En`
+  hardwire (`g6lc64_ooo_server` keeps 1); the L2 tag back-invalidate is qualified by the L3
+  victim accept edge and the accept waits on the L2's back-inval ready.
+- **Packages** `g6lc64_ooo_int2_l3` and `g6lc64_smt2_l3`: non-inclusive 1 MiB / 16-way / 64 B L3,
+  MSHR 4 (same service as 16 against the hub's four credits), `L2TagSramEn=1`; DTS
+  `ariane-ooo-int2-l3.dts`, `ariane-smt2-l3.dts`. Strict SMT2 boots pass at DRAM latency 0
+  (19,341,802 and 14,300,834 cycles). In every system run so far `l3_hit = 0`: the boot fits the
+  L2 and write-through self-invalidation purges written lines from both levels, so the L3 adds
+  per-miss latency (+3.6 % / +12 %) — the mechanism is proven at the leaf (stack scenario 4), the
+  benefit case is a footprint/write-policy measurement (T8e).
+- **Tags behind `tc_sram`** (`L2TagSramEn`, `g6lc_l2_tag.tech-spec.md`): valid bits in flops, a
+  1R1W row store launched one cycle ahead (`state_d == S_TAG`), inval-match read with port
+  priority and a deferred clear against snapshotted valids. A live-valid compare in the first
+  build dropped a freshly installed line (found with `+l2_trace`, HUM scenario 41); after the fix
+  the four-hart boot is byte-identical to the flop path. Flop-vs-SRAM equivalence is a
+  deterministic dual simulation (`L2TB_EQ_TAGS`, cycle-exact at 512 B–8 KiB); a Yosys miter does
+  not close on the unpaired tag-store init and stays open. FO4 identical; the 802,816/204,800-bit
+  tag-reset widths leave the lint on the SRAM path.
+- **DRAM-latency instrument.** `axi_delayer`'s `stream_delay` serializes each beat and truncates
+  its delay to 4 bits (40 → 8) — unusable for latency experiments. `corev_apu/tb/
+  g6lc_tb_dram_latency.sv` (`DramLatency` parameter) delays only the first beat of each burst.
+  At 40 cycles the allocating L2 retires 3.4× the instructions of the bypass in the same 24M
+  cycles; neither finishes the boot inside that cap.
+- **Red lane, not waived.** The legacy `L2TB_MODE=equiv` ladder (pinned pre-RR reference) fails
+  with 531 unproven cells because the reference predates the self-invalidation retention and
+  kill-on-invalidation repairs; a whitelist was rejected. Re-cut the reference from the current
+  flop engine before citing that lane again.
 
 ## Default-off replacement experiment (2026-09-14)
 
