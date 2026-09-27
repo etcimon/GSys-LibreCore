@@ -4,20 +4,23 @@
 // Xg6lcai T2 descriptor memory fetch (P3).
 //
 // Reads a 64-byte descriptor from system memory over AXI (read-only master)
-// into a flat desc_bits_t. One outstanding transaction; 8 beats of 64-bit
-// data (INCR). Completes with ok or bus error. Timing: multi-cycle FSM;
-// does not lengthen any core pipeline path.
+// into a flat desc_bits_t. One outstanding transaction. Beats stay 8 bytes
+// (8 beats on a 64-bit bus, and still 8 beats on a wider bus) so a pointer
+// that is only 8-byte aligned stays a legal size. Completes with ok or bus
+// error. Timing: multi-cycle FSM; does not lengthen any core pipeline path.
 //
-// When DramChannels>1 the default stripe is 64 B (= DescBytes). Software must
-// 64 B-align descriptor pointers so this fetch does not straddle a channel
-// (same contract as L2 line fills). The engine does not split the AR.
+// When DramChannels>1 the default stripe is 64 B (= DescBytes). A pointer that
+// is not 64 B-aligned would straddle a channel. The engine does not split the
+// AR: it completes with err and issues no read. N=1 accepts every pointer.
 
 module g6lc_ai_desc_fetch
   import g6lc_ai_desc_pkg::*;
 #(
-    parameter int unsigned AddrWidth = 64,
-    parameter int unsigned DataWidth = 64,
-    parameter int unsigned IdWidth   = 4,
+    parameter int unsigned AddrWidth  = 64,
+    parameter int unsigned DataWidth  = 64,
+    parameter int unsigned IdWidth    = 4,
+    parameter int unsigned NrChannels = 1,
+    parameter int unsigned ChanShift  = 6,
     parameter type         axi_req_t  = logic,
     parameter type         axi_resp_t = logic
 ) (
@@ -30,13 +33,19 @@ module g6lc_ai_desc_fetch
     output logic        done_o,
     output logic        err_o,
     output desc_bits_t  desc_o,
+    // 1 when this master owns the shared DMA response. Held 0 while a GEMM
+    // or completion store is using that response, so their beats are ignored.
+    input  logic        grant_i,
     // AXI master (read channel only; write tied idle)
     output axi_req_t    axi_req_o,
     input  axi_resp_t   axi_resp_i
 );
 
-  localparam int unsigned StrbWidth = DataWidth / 8;
-  localparam int unsigned Beats     = DescBytes / (DataWidth / 8);  // 8 for 64-bit
+  localparam int unsigned BusBytes  = DataWidth / 8;
+  // 8-byte beats on a wide bus. At DataWidth=64, BeatBytes is the whole bus.
+  localparam int unsigned BeatBytes = (BusBytes > 8) ? 8 : BusBytes;
+  localparam int unsigned Beats     = DescBytes / BeatBytes;
+  localparam int unsigned BeatBits  = BeatBytes * 8;
   localparam int unsigned BeatW     = (Beats <= 1) ? 1 : $clog2(Beats);
 
   typedef enum logic [1:0] {
@@ -60,6 +69,8 @@ module g6lc_ai_desc_fetch
 
   // Default AXI idle / AR template (ariane_axi::req_t layout)
   always_comb begin
+    int unsigned lane;
+    lane               = 0;
     axi_req_o          = '0;
     axi_req_o.b_ready  = 1'b1;
     // Read-only master, but the request struct still carries a write channel;
@@ -67,7 +78,7 @@ module g6lc_ai_desc_fetch
     axi_req_o.ar.id    = '0;
     axi_req_o.ar.addr  = addr_q;
     axi_req_o.ar.len   = axi_pkg::len_t'(Beats - 1);
-    axi_req_o.ar.size  = axi_pkg::size_t'($clog2(DataWidth / 8));
+    axi_req_o.ar.size  = axi_pkg::size_t'($clog2(BeatBytes));
     axi_req_o.ar.burst = axi_pkg::BURST_INCR;
     axi_req_o.ar.lock  = 1'b0;
     axi_req_o.ar.cache = axi_pkg::CACHE_MODIFIABLE;
@@ -87,20 +98,38 @@ module g6lc_ai_desc_fetch
     unique case (state_q)
       ST_IDLE: begin
         if (start_i) begin
-          beat_d  = '0;
-          err_d   = 1'b0;
-          desc_d  = '0;
-          state_d = ST_AR;
+          beat_d = '0;
+          desc_d = '0;
+          // One 64-byte INCR. N=1 always fits. N>1 refuses a stripe cross
+          // instead of letting the demux pin the whole burst to one channel.
+          if (!g6lc_ai_island_cfg_pkg::dram_burst_fits_stripe(
+                  NrChannels, ChanShift, 64'(addr_i), DescBytes)) begin
+            err_d   = 1'b1;
+            state_d = ST_DONE;
+          end else begin
+            err_d   = 1'b0;
+            state_d = ST_AR;
+          end
         end
       end
       ST_AR: begin
-        axi_req_o.ar_valid = 1'b1;
-        if (axi_resp_i.ar_ready) state_d = ST_R;
+        // Drive AR only in a granted cycle. Otherwise ar_valid stays high
+        // across a grant that arrives late and the slave accepts two ARs.
+        if (grant_i) begin
+          axi_req_o.ar_valid = 1'b1;
+          if (axi_resp_i.ar_ready) state_d = ST_R;
+        end
       end
       ST_R: begin
-        axi_req_o.r_ready = 1'b1;
-        if (axi_resp_i.r_valid) begin
-          desc_d[beat_q*DataWidth +: DataWidth] = axi_resp_i.r.data;
+        if (grant_i) begin
+          axi_req_o.r_ready = 1'b1;
+          if (axi_resp_i.r_valid) begin
+          // Lane 0 on a bus that is already the beat width. A wider bus
+          // carries the same 8 bytes at (addr + beat*BeatBytes) % BusBytes.
+          lane = (BusBytes == BeatBytes) ? 0
+               : (unsigned'(addr_q) + unsigned'(beat_q) * BeatBytes) & (BusBytes - 1);
+          desc_d[beat_q*BeatBits +: BeatBits] =
+              BeatBits'(axi_resp_i.r.data >> (8 * lane));
           if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
             err_d = 1'b1;
           // Two exit conditions, not one: r.last is the slave's word, the beat
@@ -110,6 +139,7 @@ module g6lc_ai_desc_fetch
             state_d = ST_DONE;
           end else begin
             beat_d = beat_q + BeatW'(1);
+          end
           end
         end
       end

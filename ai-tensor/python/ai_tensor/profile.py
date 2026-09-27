@@ -16,10 +16,10 @@ class Profile:
     board_id: Optional[str] = None
     uio_primary: Optional[str] = None
     noc_width: int = 64
-    acc_tile_m: int = 256
-    acc_tile_n: int = 256
-    acc_tile_k: int = 256
-    macs_per_cycle: int = 256
+    acc_tile_m: int = 1024
+    acc_tile_n: int = 512
+    acc_tile_k: int = 512
+    macs_per_cycle: int = 512
     contract_version: int = 2
     dtype_mask: int = 1
     mmio_base: Optional[int] = None

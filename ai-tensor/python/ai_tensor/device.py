@@ -16,8 +16,8 @@ CONTRACT_VERSION = 2
 OP_GEMM = 1
 ST_OK = 0
 
-# island_p3 defaults (Phase A pin)
-DEFAULT_ACC_TILE = (256, 256, 256)
+# island_p3 box. MAC issue stays 512; this constant is the accumulator bound.
+DEFAULT_ACC_TILE = (1024, 512, 512)
 DEFAULT_MACS = 256
 DEFAULT_NOC_WIDTH = 64
 
@@ -60,10 +60,10 @@ def pack_gemm_desc(
 class Caps:
     """Software view of CAP / profile geometry."""
 
-    acc_tile_m: int = 256
-    acc_tile_n: int = 256
-    acc_tile_k: int = 256
-    macs_per_cycle: int = 256
+    acc_tile_m: int = 1024
+    acc_tile_n: int = 512
+    acc_tile_k: int = 512
+    macs_per_cycle: int = 512
     noc_width: int = 64
     clusters: int = 1
     compute_ref: bool = True
@@ -99,6 +99,43 @@ class Pmu:
             "cycles": self.cycles,
             "gbps_x1000": self.gbps_x1000,
         }
+
+
+def va_panels(macs: int) -> List[Tuple[int, int, int]]:
+    """Named VA panels at this MAC issue width. Empty unless macs is a multiple of 4."""
+    if macs < 4 or macs % 4:
+        return []
+    half = macs // 2
+    quarter = macs // 4
+    return [(macs, macs, macs), (macs, half, macs), (macs * 2, quarter, macs)]
+
+
+def _div_ceil(n: int, d: int) -> int:
+    return (n + d - 1) // d
+
+
+def choose_va_blocking(
+    m: int, n: int, k: int, cap_m: int, cap_n: int, cap_k: int, macs: int
+) -> Tuple[int, int, int]:
+    """Panel inside the cap with the fewest tiles, then the most exact panels, then wider N.
+
+    A cap the panels do not fit returns the cap itself.
+    """
+    best = None
+    for pm, pn, pk in va_panels(macs):
+        if pm > cap_m or pn > cap_n or pk > cap_k or min(pm, pn, pk) <= 0:
+            continue
+        tm, tn, tk = _div_ceil(m, pm), _div_ceil(n, pn), _div_ceil(k, pk)
+        tiles = tm * tn * tk
+        exact_m = tm if m % pm == 0 else tm - 1
+        exact_n = tn if n % pn == 0 else tn - 1
+        named = exact_m * exact_n * tk
+        score = (tiles, -named, -pn)
+        if best is None or score < best[0]:
+            best = (score, (pm, pn, pk))
+    if best is None:
+        return cap_m, cap_n, cap_k
+    return best[1]
 
 
 def tile_gemm(
@@ -240,10 +277,10 @@ class Device:
             self.board_id = self._virt.board_id
             d = self._virt.as_caps_dict()
             self._caps = Caps(
-                acc_tile_m=int(d.get("acc_tile_m", 256)),
-                acc_tile_n=int(d.get("acc_tile_n", 256)),
-                acc_tile_k=int(d.get("acc_tile_k", 256)),
-                macs_per_cycle=int(d.get("macs_per_cycle", 256)),
+                acc_tile_m=int(d.get("acc_tile_m", 1024)),
+                acc_tile_n=int(d.get("acc_tile_n", 512)),
+                acc_tile_k=int(d.get("acc_tile_k", 512)),
+                macs_per_cycle=int(d.get("macs_per_cycle", 512)),
                 noc_width=int(d.get("noc_width", 64)),
                 clusters=int(d.get("clusters", 1)),
                 compute_ref=True,
@@ -391,10 +428,10 @@ class Device:
             return
         d = self._dev.caps()
         self._caps = Caps(
-            acc_tile_m=int(d.get("acc_tile_m", 256)),
-            acc_tile_n=int(d.get("acc_tile_n", 256)),
-            acc_tile_k=int(d.get("acc_tile_k", 256)),
-            macs_per_cycle=int(d.get("macs_per_cycle", 256)),
+            acc_tile_m=int(d.get("acc_tile_m", 1024)),
+            acc_tile_n=int(d.get("acc_tile_n", 512)),
+            acc_tile_k=int(d.get("acc_tile_k", 512)),
+            macs_per_cycle=int(d.get("macs_per_cycle", 512)),
             noc_width=int(d.get("noc_width", 64)),
             clusters=int(d.get("clusters", 1)),
             compute_ref=bool(d.get("compute_ref", True)),
@@ -452,6 +489,7 @@ class Device:
         ticket: int = 1,
         *,
         auto_tile: bool = True,
+        va_panels: bool = False,
     ) -> Tuple[List[int], int, int, Dict[str, Any]]:
         """
         INT8 GEMM → i32 C.
@@ -478,7 +516,15 @@ class Device:
         if self._uio is not None:
             meta["uio"] = self._uio.as_caps_dict()
 
-        if caps.fits(m, n, k) or not auto_tile:
+        if va_panels and auto_tile:
+            bm, bn, bk = choose_va_blocking(
+                m, n, k,
+                caps.acc_tile_m, caps.acc_tile_n, caps.acc_tile_k,
+                caps.macs_per_cycle,
+            )
+        else:
+            bm, bn, bk = caps.acc_tile_m, caps.acc_tile_n, caps.acc_tile_k
+        if (m <= bm and n <= bn and k <= bk) or not auto_tile:
             c, tix, status = self._gemm_one(m, n, k, a8, b8, ticket)
             meta["pmu"] = self.pmu().as_dict()
             meta["backend"] = self.backend
@@ -490,9 +536,7 @@ class Device:
         c = [0] * (m * n)
         tix = ticket
         status = ST_OK
-        tiles = tile_gemm(
-            m, n, k, caps.acc_tile_m, caps.acc_tile_n, caps.acc_tile_k
-        )
+        tiles = tile_gemm(m, n, k, bm, bn, bk)
         meta["tiles"] = len(tiles)
         last_ticket = ticket
         for i0, j0, t0, tm, tn, tk in tiles:
@@ -542,9 +586,10 @@ def gemm_s8(
     ticket: int = 1,
     device: Optional[Device] = None,
     auto_tile: bool = True,
+    va_panels: bool = False,
 ) -> Tuple[List[int], int, int, Dict[str, Any]]:
     dev = device or Device("sim")
-    return dev.gemm_s8(m, n, k, a, b, ticket, auto_tile=auto_tile)
+    return dev.gemm_s8(m, n, k, a, b, ticket, auto_tile=auto_tile, va_panels=va_panels)
 
 
 def _slice_a(a: List[int], m: int, k: int, i0: int, t0: int, tm: int, tk: int) -> List[int]:

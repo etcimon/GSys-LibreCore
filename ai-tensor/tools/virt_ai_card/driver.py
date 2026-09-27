@@ -69,7 +69,7 @@ DEFAULT_SOFT_PATH = "virt://virt-ai-pcie/island0"
 DEFAULT_EVENTFD_PATH = "virt://virt-ai-pcie/island0_irq"
 
 
-def _log2_tile_pack(m: int = 256, n: int = 256, k: int = 256) -> int:
+def _log2_tile_pack(m: int = 1024, n: int = 512, k: int = 512) -> int:
     """CAP_ACC_TILE: log2(M)|log2(N)<<4|log2(K)<<8."""
     lm = (m.bit_length() - 1) & 0xF
     ln = (n.bit_length() - 1) & 0xF
@@ -219,13 +219,13 @@ class VirtualUioDevice:
         words = [0] * 11
         words[CAP_VERSION] = int(cap.get("version", 1))
         words[CAP_CLUSTERS] = int(cap.get("clusters", 1))
-        words[CAP_MACS] = int(cap.get("macs_per_cycle", cap.get("macs", 256)))
+        words[CAP_MACS] = int(cap.get("macs_per_cycle", cap.get("macs", 512)))
         words[CAP_CLOCK_KHZ] = int(cap.get("clock_khz", 1_000_000))
         words[CAP_SRAM] = int(cap.get("sram_bytes", 8 * 1024 * 1024))
         words[CAP_ACC_TILE] = _log2_tile_pack(
-            int(cap.get("acc_tile_m", 256)),
-            int(cap.get("acc_tile_n", 256)),
-            int(cap.get("acc_tile_k", 256)),
+            int(cap.get("acc_tile_m", 1024)),
+            int(cap.get("acc_tile_n", 512)),
+            int(cap.get("acc_tile_k", 512)),
         )
         words[CAP_DRAM] = int(cap.get("dram_gbps", 400))
         queues = int(cap.get("queues", 1)) & 0xFFFF
@@ -558,6 +558,9 @@ class VirtualUioDevice:
             "macs_per_cycle": self.read32(CAP_BASE + CAP_MACS * 4),
             "clock_khz": self.read32(CAP_BASE + CAP_CLOCK_KHZ * 4),
             "sram_bytes": self.read32(CAP_BASE + CAP_SRAM * 4),
+            "acc_tile_m": 1 << (self.read32(CAP_BASE + CAP_ACC_TILE * 4) & 0xF),
+            "acc_tile_n": 1 << ((self.read32(CAP_BASE + CAP_ACC_TILE * 4) >> 4) & 0xF),
+            "acc_tile_k": 1 << ((self.read32(CAP_BASE + CAP_ACC_TILE * 4) >> 8) & 0xF),
             "dram_gbps": self.read32(CAP_BASE + CAP_DRAM * 4),
             "queues": q & 0xFFFF,
             "queue_depth": (q >> 16) & 0xFFFF,

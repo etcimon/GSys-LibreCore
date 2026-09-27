@@ -88,6 +88,21 @@ impl NumFmt {
         self as u32
     }
 
+    /// Status a descriptor of this format receives.
+    ///
+    /// `0` is `ST_OK`. `8` is `ST_BAD_FMT`. The mask bit is necessary.
+    /// Float codes also need `fp_datapath`: the synthesizable integer strip
+    /// passes `false` and refuses them. Structured 2:4 is refused either way.
+    pub fn status_for_mask(self, mask: u32, fp_datapath: bool) -> u16 {
+        let float = self.is_float();
+        if self == NumFmt::Sp24 || (mask & (1u32 << self.grant_bit())) == 0 || (float && !fp_datapath)
+        {
+            8
+        } else {
+            0
+        }
+    }
+
     /// Stable wire name, for traces, artifacts and reports.
     pub fn as_str(self) -> &'static str {
         match self {
@@ -326,6 +341,27 @@ mod tests {
         for v in 0..8u32 {
             let f = NumFmt::from_abi(v).expect("0..8 are all defined");
             assert_eq!(f.grant_bit(), v, "{} must grant at bit {v}", f.as_str());
+        }
+    }
+
+    /// Live mask, fast mask without a float datapath, and fast mask with one.
+    /// Matches ai-tensor `FormatTrace::from_request`.
+    #[test]
+    fn live_and_fast_masks_agree_on_the_eight_codes() {
+        const LIVE: u32 = 0x0003;
+        const FAST: u32 = 0x00fb;
+        for v in 0..8u32 {
+            let f = NumFmt::from_abi(v).unwrap();
+            let live = f.status_for_mask(LIVE, false);
+            let bare = f.status_for_mask(FAST, false);
+            let model = f.status_for_mask(FAST, true);
+            if f == NumFmt::Sp24 {
+                assert_eq!((live, bare, model), (8, 8, 8));
+            } else if v <= 1 {
+                assert_eq!((live, bare, model), (0, 0, 0), "{}", f.as_str());
+            } else {
+                assert_eq!((live, bare, model), (8, 8, 0), "{}", f.as_str());
+            }
         }
     }
 

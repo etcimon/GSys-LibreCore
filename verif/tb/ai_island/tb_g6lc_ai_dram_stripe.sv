@@ -26,8 +26,15 @@ module tb_g6lc_ai_dram_stripe;
       $error("SimChans2 DramChannels");
       errors++;
     end
-    if (AiIslandSimChans2.DramGBps != unsigned'(8)) begin
-      $error("SimChans2 nameplate must stay NoC 8 GB/s");
+    if (AiIslandLatencyDefault.DramGBps != unsigned'(16) ||
+        AiIslandLatencyDefault.ClockKhz != unsigned'(2_000_000)) begin
+      $error("live class-0 nameplate must be 64-bit x 2 GHz = 16 GB/s");
+      errors++;
+    end
+    if (AiIslandSimChans2.DramGBps != AiIslandLatencyDefault.DramGBps ||
+        AiIslandSimChans2.DramGBps !=
+        dram_nameplate_gbps(64, 2_000_000, 2, AI_DRAM_SIM_AXI)) begin
+      $error("SimChans2 nameplate must stay the live NoC peak, not N times it");
       errors++;
     end
     if (!island_cfg_legal(AiIslandSimChans4) || AiIslandSimChans4.DramChannels != unsigned'(4)) begin
@@ -117,15 +124,15 @@ module tb_g6lc_ai_dram_stripe;
         $error("DDR4 must refuse 400 GB/s"); errors++;
       end
       c = AiIslandDdr4Bringup;
-      c.DramGBps = unsigned'(8);
+      c.DramGBps = AiIslandLatencyDefault.DramGBps;
       if (island_cfg_legal(c)) begin
-        $error("DDR4 must refuse NoC 8 GB/s"); errors++;
+        $error("DDR4 must refuse the class-0 NoC nameplate"); errors++;
       end
       c = AiIslandDdr4Bringup;
       c.DramClass = unsigned'(AI_DRAM_LPDDR5);
-      c.DramGBps  = unsigned'(8);
+      c.DramGBps  = AiIslandLatencyDefault.DramGBps;
       if (island_cfg_legal(c)) begin
-        $error("LPDDR5 must not reuse NoC 8 GB/s"); errors++;
+        $error("LPDDR5 must not reuse the class-0 NoC nameplate"); errors++;
       end
       c = AiIslandDdr4Bringup;
       c.DramChannels = unsigned'(3);

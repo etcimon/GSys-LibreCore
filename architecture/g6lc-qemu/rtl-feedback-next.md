@@ -59,9 +59,9 @@ in the number.** F10 would allow a *second* effective-TOPS figure, not a rewrite
 | 8 | **F7** make §8 match RTL `CAP_OFF_*` (or the reverse) | Silent wrong discovery. |
 | 9 | **Pin `ai_host_transport`** only after BAR/virtio/MSI exist in a package or DTB | Until then EDK2 GPEX ≠ card endpoint. |
 
-Live geometry: **256 MAC/cycle × 1 GHz = 0.512 TOPS**. Throughput SKU plan: 8 clusters ×
-4096 MAC/cycle @ 1.5 GHz ≈ **98.3 TOPS**. The 192× gap is MAC width × clock, not an emulator
-measurement.
+Live geometry: **512 MAC/cycle × 2 GHz nameplate = 2.048 TOPS**, DRAM nameplate **16 GB/s** (64-bit port, 8 bytes/cycle). Throughput SKU plan: 8 clusters ×
+4096 MAC/cycle @ 1.5 GHz ≈ **98.3 TOPS**. The 48× gap is MAC count × clock, not an emulator
+measurement. VA-turbo does not multiply the MAC rate.
 
 Host CLI (not a closed F-row): `cva6-build g6q --ai` / `test --ai-qemu` ingest `g6lc64_ai` and
 the AI_BRIDGE stand-in. `--ai-clusters N` with N>1 only exports F8 env; I2 is not live.

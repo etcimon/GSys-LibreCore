@@ -52,9 +52,10 @@ Runtime chooses mode from **Caps + profile**, not from framework type.
 **Ordering:** when both DMA and PLIC/IRQ are enabled, preferred order is **DMA word visible →
 fence → claim DONE / clear IRQ**. Island directed tests may keep `wr_cpl_en=0` for pure claim.
 
-**Queues:** CAP island_p3 advertises Queues=1; MMIO region window is only q0 (`0x0120`) before
-desc latch (`0x0140`). SoftIsland returns `ST_BAD_QID` for foreign qids. Hostless **sim** keeps
-4 soft regions for isolation soak.
+**Queues:** the sim pin advertises Queues=1. RTL queue 0 stays at `0x0120`. Later queues
+start at `0x01A0` (stride `0x20`) so they do not cover the descriptor latch at `0x0140` or the
+PMU at `0x0180`. SoftIsland returns `ST_BAD_QID` for a qid the CAP does not advertise. Hostless
+**sim** keeps 4 soft regions for isolation soak.
 
 **IRQ wait** (`irq.rs`):
 

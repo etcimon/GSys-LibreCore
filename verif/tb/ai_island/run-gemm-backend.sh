@@ -25,13 +25,16 @@ fi
 if [[ "${AI_GEMM_BACKEND_MEASURE_K:-0}" == "1" ]]; then
   PLUSARGS+=(+measure_k)
 fi
+if [[ "${AI_GEMM_PANEL_REUSE:-0}" == "1" ]]; then
+  PLUSARGS+=(+panel_reuse)
+fi
 # Provisioning overrides for the measurement sweeps only. 0 keeps the shipped
 # value, so an unset build is byte-identical to the directed configuration.
 PE_LANES="${PE_LANES:-0}"
 MAX_DIM="${MAX_DIM:-0}"
-case "$PE_LANES" in 0|8|16|32|64|128|256) ;; *) echo "FAIL invalid PE_LANES" >&2; exit 2;; esac
-if [[ ! "$MAX_DIM" =~ ^(0|[1-9][0-9]*)$ ]] || (( MAX_DIM != 0 && (MAX_DIM < 16 || MAX_DIM > 256) )); then
-  echo "FAIL MAX_DIM must be 0 or 16..256" >&2
+case "$PE_LANES" in 0|8|16|32|64|128|256|512|1024) ;; *) echo "FAIL invalid PE_LANES" >&2; exit 2;; esac
+if [[ ! "$MAX_DIM" =~ ^(0|[1-9][0-9]*)$ ]] || (( MAX_DIM != 0 && (MAX_DIM < 16 || MAX_DIM > 1024) )); then
+  echo "FAIL MAX_DIM must be 0 or 16..1024" >&2
   exit 2
 fi
 build_nch() {
@@ -45,6 +48,10 @@ build_nch() {
     -GNCH="$nch" \
     -GPE_LANES="$PE_LANES" \
     -GMAX_DIM="$MAX_DIM" \
+    -GMAX_M="${MAX_M:-0}" \
+    -GMAX_N="${MAX_N:-0}" \
+    -GMAX_K="${MAX_K:-0}" \
+    -GREUSE_EN="${REUSE_EN:-0}" \
   -I"$AXI/include" \
   -I"$CCELLS/include" \
   -I"$ROOT/core/include" \
@@ -85,8 +92,17 @@ build_nch() {
 DEFAULT_NCHS=(1 2 4 8)
 # shellcheck source=nch-from-env.inc.sh
 . "$(dirname "$0")/nch-from-env.inc.sh"
+DPF_LIST=(0 1)
+if [[ "${AI_GEMM_PANEL_REUSE:-0}" == "1" ]]; then
+  DPF_LIST=(0)
+fi
 for nch in "${NCH_LIST[@]}"; do
-  build_nch "$nch" 0 "${OUT}-n${nch}"
-  build_nch "$nch" 1 "${OUT}-n${nch}-dpf1"
+  for dpf in "${DPF_LIST[@]}"; do
+    build_nch "$nch" "$dpf" "${OUT}-n${nch}-dpf${dpf}"
+  done
 done
-echo "PASS tb_g6lc_ai_gemm_backend nch=${NCH_LIST[*]} dpf=0,1"
+if [[ "${AI_GEMM_PANEL_REUSE:-0}" == "1" ]]; then
+  echo "PASS tb_g6lc_ai_gemm_backend panel_reuse nch=${NCH_LIST[*]} dpf=0"
+else
+  echo "PASS tb_g6lc_ai_gemm_backend nch=${NCH_LIST[*]} dpf=0,1"
+fi

@@ -11,8 +11,8 @@
 //! Bus micro-arch (trail store, multi-out AR) stays in RTL; software only streams descs.
 
 use crate::{wait_with_policy, Device, Region, RtError, SubmitMode, WaitPolicy};
-use ai_tensor_abi::{Completion, Desc64, ST_OK};
-use ai_tensor_ir::{tile_gemm, GemmTile};
+use ai_tensor_abi::{Completion, Desc64, FLAG_REUSE_A, FLAG_REUSE_B, ST_OK};
+use ai_tensor_ir::{tile_gemm, va_blocking_tile, GemmTile};
 
 /// One planned descriptor job in a stream (after device buffers exist).
 #[derive(Debug, Clone)]
@@ -111,6 +111,20 @@ pub fn plan_gemm_s8_stream<D: Device>(
     queue: &mut Queue,
     irq: bool,
 ) -> Result<GemmStreamPlan, RtError> {
+    plan_gemm_s8_stream_in(dev, m, n, k, a, b, queue, irq, false)
+}
+
+fn plan_gemm_s8_stream_in<D: Device>(
+    dev: &mut D,
+    m: u32,
+    n: u32,
+    k: u32,
+    a: &[i8],
+    b: &[i8],
+    queue: &mut Queue,
+    irq: bool,
+    va_panels: bool,
+) -> Result<GemmStreamPlan, RtError> {
     let need_a = (m as usize)
         .checked_mul(k as usize)
         .ok_or(RtError::BufferOob)?;
@@ -126,7 +140,15 @@ pub fn plan_gemm_s8_stream<D: Device>(
     }
 
     let tile_geo = dev.caps().max_tile();
-    let tiles = tile_gemm(m, n, k, tile_geo);
+    // The device cap is the largest legal descriptor. Named VA panels are a
+    // tighter cut used only when the caller asks: while VaTurboEn is 0 the
+    // extra descriptors would not skip a fetch.
+    let block = if va_panels {
+        va_blocking_tile(m, n, k, tile_geo, dev.caps().macs_per_cycle)
+    } else {
+        tile_geo
+    };
+    let tiles = tile_gemm(m, n, k, block);
     if tiles.is_empty() {
         return Err(RtError::Msg("empty tile plan".into()));
     }
@@ -137,8 +159,8 @@ pub fn plan_gemm_s8_stream<D: Device>(
     let pa = dev.alloc(need_a)?;
     let pb = dev.alloc(need_b)?;
     // Scratch C for largest tile (AccTile) and one done word reused each job.
-    let max_c = (tile_geo.m as usize)
-        .saturating_mul(tile_geo.n as usize)
+    let max_c = (block.m as usize)
+        .saturating_mul(block.n as usize)
         .saturating_mul(4)
         .max(4);
     let pc = dev.alloc(max_c)?;
@@ -160,9 +182,20 @@ pub fn plan_gemm_s8_stream<D: Device>(
     dev.write_mem(pd, &[0u8; 8])?;
 
     let mut jobs = Vec::with_capacity(tiles.len());
-    for t in &tiles {
+    for (idx, t) in tiles.iter().enumerate() {
         let ticket = queue.next_ticket();
-        let desc = desc_for_tile(t, k, n, pa, pb, pc, pd, irq);
+        let mut desc = desc_for_tile(t, k, n, pa, pb, pc, pd, irq);
+        // One resident slot. The request matches the tile just before this
+        // one, which is the panel the island would still be holding.
+        if idx > 0 {
+            let prev = &tiles[idx - 1];
+            if prev.j0 == t.j0 && prev.tn == t.tn && prev.t0 == t.t0 && prev.tk == t.tk {
+                desc.flags |= FLAG_REUSE_B;
+            }
+            if prev.i0 == t.i0 && prev.tm == t.tm && prev.t0 == t.t0 && prev.tk == t.tk {
+                desc.flags |= FLAG_REUSE_A;
+            }
+        }
         jobs.push(StreamJob {
             tile: *t,
             ticket,
@@ -298,7 +331,7 @@ pub fn run_gemm_s8_stream_ex<D: Device>(
 ) -> Result<(Vec<i32>, Completion, u32), RtError> {
     let irq = matches!(policy, WaitPolicy::IrqThenPoll);
     let mut q = Queue::q0(ticket);
-    let mut plan = plan_gemm_s8_stream(dev, m, n, k, a, b, &mut q, irq)?;
+    let mut plan = plan_gemm_s8_stream_in(dev, m, n, k, a, b, &mut q, irq, false)?;
     if irq {
         for j in &mut plan.jobs {
             j.desc = j.desc.clone().with_irq(true);
@@ -361,5 +394,97 @@ mod tests {
         assert_eq!(d.ldb(), 8);
         assert_eq!(d.ptr_a, 0x1000 + 2 * 8 + 1);
         assert_eq!(d.ptr_b, 0x2000 + 4 * 8 + 1);
+    }
+
+    #[test]
+    fn a_second_m_tile_requests_resident_b_and_keeps_c() {
+        let mut dev = SimDevice::new();
+        let mut q = Queue::q0(1);
+        let a = vec![1i8; 1025];
+        let b = vec![1i8; 1];
+        let plan = plan_gemm_s8_stream(&mut dev, 1025, 1, 1, &a, &b, &mut q, false).unwrap();
+        assert_eq!(plan.jobs.len(), 2);
+        assert_eq!(plan.jobs[0].desc.flags & (FLAG_REUSE_A | FLAG_REUSE_B), 0);
+        assert_eq!(plan.jobs[1].tile.i0, 1024);
+        assert_ne!(plan.jobs[1].desc.flags & FLAG_REUSE_B, 0);
+        assert_eq!(plan.jobs[1].desc.flags & FLAG_REUSE_A, 0);
+        let (c, comp, ntiles) = run_gemm_stream_plan(&mut dev, &plan).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(ntiles, 2);
+        assert!(c.iter().all(|&x| x == 1), "reuse request changed C");
+    }
+
+    #[test]
+    fn a_second_n_tile_requests_resident_a() {
+        let mut dev = SimDevice::new();
+        let mut q = Queue::q0(1);
+        let a = vec![1i8; 1];
+        let b = vec![1i8; 513];
+        let plan = plan_gemm_s8_stream(&mut dev, 1, 513, 1, &a, &b, &mut q, false).unwrap();
+        assert_eq!(plan.jobs.len(), 2);
+        assert_eq!(plan.jobs[1].tile.j0, 512);
+        assert_ne!(plan.jobs[1].desc.flags & FLAG_REUSE_A, 0);
+        assert_eq!(plan.jobs[1].desc.flags & FLAG_REUSE_B, 0);
+        let (c, comp, _) = run_gemm_stream_plan(&mut dev, &plan).unwrap();
+        assert!(comp.is_ok());
+        assert!(c.iter().all(|&x| x == 1));
+    }
+
+    #[test]
+    fn va_panel_schedule_splits_1024x256_into_half_panels() {
+        let mut dev = SimDevice::new();
+        let mut q = Queue::q0(1);
+        let a = vec![1i8; 1024];
+        let b = vec![1i8; 256];
+        let plan =
+            plan_gemm_s8_stream_in(&mut dev, 1024, 256, 1, &a, &b, &mut q, false, true).unwrap();
+        assert_eq!(plan.jobs.len(), 2);
+        assert!(plan.jobs.iter().all(|j| j.tile.tm == 512 && j.tile.tn == 256));
+        assert_ne!(plan.jobs[1].desc.flags & FLAG_REUSE_B, 0);
+        let (c, comp, _) = run_gemm_stream_plan(&mut dev, &plan).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(c.len(), 1024 * 256);
+        assert!(c.iter().all(|&x| x == 1));
+    }
+
+    #[test]
+    fn a_k_split_does_not_request_reuse() {
+        let mut dev = SimDevice::new();
+        let mut q = Queue::q0(1);
+        let a = vec![1i8; 513];
+        let b = vec![1i8; 513];
+        let plan = plan_gemm_s8_stream(&mut dev, 1, 1, 513, &a, &b, &mut q, false).unwrap();
+        assert_eq!(plan.jobs.len(), 2);
+        assert_eq!(plan.jobs[0].tile.tk, 512);
+        assert_eq!(plan.jobs[1].tile.t0, 512);
+        assert_eq!(plan.jobs[1].tile.tk, 1);
+        assert_eq!(plan.jobs[1].desc.flags & (FLAG_REUSE_A | FLAG_REUSE_B), 0);
+        let (c, comp, ntiles) = run_gemm_stream_plan(&mut dev, &plan).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(ntiles, 2);
+        assert_eq!(c, vec![513]);
+    }
+
+    #[test]
+    fn an_equal_k_split_moves_the_pointer_and_keeps_flags_clear() {
+        let mut dev = SimDevice::new();
+        let mut q = Queue::q0(1);
+        let a = vec![1i8; 1024];
+        let b = vec![1i8; 1024];
+        let plan = plan_gemm_s8_stream(&mut dev, 1, 1, 1024, &a, &b, &mut q, false).unwrap();
+        assert_eq!(plan.jobs.len(), 2);
+        assert_eq!(plan.jobs[0].tile.tk, 512);
+        assert_eq!(plan.jobs[1].tile.t0, 512);
+        assert_eq!(plan.jobs[1].tile.tk, 512);
+        assert_eq!(plan.jobs[0].desc.lda(), 1024);
+        assert_eq!(plan.jobs[1].desc.lda(), 1024);
+        assert_eq!(plan.jobs[1].desc.ldb(), 1024);
+        assert_eq!(plan.jobs[1].desc.ptr_a, plan.jobs[0].desc.ptr_a + 512);
+        assert_eq!(plan.jobs[1].desc.ptr_b, plan.jobs[0].desc.ptr_b + 512);
+        assert_eq!(plan.jobs[1].desc.flags & (FLAG_REUSE_A | FLAG_REUSE_B), 0);
+        let (c, comp, ntiles) = run_gemm_stream_plan(&mut dev, &plan).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(ntiles, 2);
+        assert_eq!(c, vec![1024]);
     }
 }

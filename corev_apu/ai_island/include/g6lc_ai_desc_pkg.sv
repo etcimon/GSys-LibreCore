@@ -56,7 +56,17 @@ package g6lc_ai_desc_pkg;
   localparam int unsigned FLAG_EW_SHIFT      = 12;
   localparam int unsigned FLAG_EW_WIDTH      = 2;
   localparam int unsigned FLAG_SP24_SHIFT    = 14;
+  // VA-turbo residency requests. Honored only when VaTurboEn is set.
+  // A clear bit, or VaTurboEn=0, is the exact path: the operand is fetched.
+  // A set bit asks the sequencer to skip that fetch when the previous
+  // panel's key matches. It does not change the MAC issue count.
+  // Bit 15 is B (weights). Bit 23 is A (activations).
+  localparam int unsigned FLAG_REUSE_B_SHIFT = 15;
+  localparam int unsigned FLAG_REUSE_A_SHIFT = 23;
   localparam int unsigned FLAG_IRQ_SHIFT     = 2;
+  // Fused requant is not an executable post-op. The engine refuses the
+  // descriptor instead of running the plain GEMM and returning ST_OK.
+  localparam int unsigned FLAG_REQUANT_SHIFT = 3;
   localparam int unsigned FLAG_PRIO_SHIFT    = 16;
   localparam int unsigned FLAG_PRIO_WIDTH    = 4;
   // Numeric format selector, carved from flags[22:20] (previously reserved).

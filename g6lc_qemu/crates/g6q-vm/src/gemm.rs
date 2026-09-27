@@ -200,6 +200,10 @@ fn resolve_numfmt(model: &AiIslandModel, flags: u32) -> Result<NumFmt, AiJobReje
     if fmt == NumFmt::Sp24 || (granted >> fmt.grant_bit()) & 1 == 0 {
         return Err(AiJobReject::UngrantedDtype);
     }
+    // The mask can name a float the integer strip does not multiply.
+    if fmt.is_float() && !model.config.fp_datapath {
+        return Err(AiJobReject::UngrantedDtype);
+    }
     Ok(fmt)
 }
 
@@ -953,6 +957,9 @@ mod tests {
     fn model_granting(mask: u32) -> AiIslandModel {
         let mut m = model(256);
         m.config.dtype_mask = Some(mask);
+        // This helper is the functional model: a granted float is executed.
+        // The synthesizable strip leaves `fp_datapath` false.
+        m.config.fp_datapath = true;
         m.desc_layout.flags_layout = Some(flags_layout());
         m
     }
@@ -1248,6 +1255,22 @@ mod tests {
         let (why, st) = plan(&mem, &ev, &m).expect_err("must be refused");
         assert_eq!(why, AiJobReject::UngrantedDtype);
         assert_eq!(st, 8, "ST_BAD_FMT, so a guest can pick a fallback");
+        assert_eq!(
+            NumFmt::Fp32.status_for_mask(1, false),
+            st,
+            "the emulator status and the grant helper stay the same code"
+        );
+    }
+
+    /// A fast mask without a float datapath does not multiply FP32.
+    #[test]
+    fn a_float_grant_without_a_datapath_is_refused() {
+        let (mem, ev) = fixture_fmt(NumFmt::Fp32);
+        let mut m = model_granting(0xfb);
+        m.config.fp_datapath = false;
+        let (why, st) = plan(&mem, &ev, &m).expect_err("mask bit is not a datapath");
+        assert_eq!(why, AiJobReject::UngrantedDtype);
+        assert_eq!(st, NumFmt::Fp32.status_for_mask(0xfb, false));
     }
 
     /// With the field unpublished the request cannot be characterised, so the only honest

@@ -1,7 +1,9 @@
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 # Pin for live I1/I3-lite island geometry. SoftIsland MMIO is package-local (M5);
-# linux-uio is board path (feature linux-mmio / UIO). AccTile/Macs=256; NocWidth=64.
+# linux-uio is board path (feature linux-mmio / UIO).
+# Panel box 1024×512×512, MAC issue 512. VA panels: 512×512, 512×256, 1024×128.
+# NocWidth=64.
 id = "island-p3-desc-v2"
 abi_rev = "2.0.0"
 contract_version = 2
@@ -13,10 +15,10 @@ backend = "linux-uio"                 # Device.from_profile falls back to sim if
 mmio_map = "island_p3_v1"
 mmio_base = "0x40000000"
 noc_width = 64
-acc_tile_m = 256
-acc_tile_n = 256
-acc_tile_k = 256
-macs_per_cycle = 256
+acc_tile_m = 1024
+acc_tile_n = 512
+acc_tile_k = 512
+macs_per_cycle = 512
 plic_source = 8
 wait_policy = "poll"          # poll | irq | dma — board may prefer irq with PLIC-8
 submit_mode = "latch"         # latch | fetch — fetch uses desc_ptr + doorbell bit31
@@ -29,7 +31,7 @@ features = [
   "wr_cpl_en",
   "plic_src8",
   "pmu_v1",
-  "acc_tile_256",
+  "acc_tile_512",
 ]
 notes = "Bus micro-arch (trail C-store, multi-out AR) is RTL-only; software uses CAP/PMU."
 # Board map: monorepo architecture/ai-matrix/board-uio-eventfd.md + ariane-ai.dts

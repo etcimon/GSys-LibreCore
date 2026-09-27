@@ -58,7 +58,8 @@ def _test_local_driver() -> None:
     c = dev.gemm_s8(GOLDEN_A, GOLDEN_B, ticket=7, irq=True, wait=True)
     assert c == GOLDEN_C, f"local gemm mismatch: {c}"
     snap = dev.cap_snapshot()
-    assert snap["clusters"] == 1 and snap["macs_per_cycle"] == 256
+    assert snap["clusters"] == 1 and snap["macs_per_cycle"] == 512
+    assert snap["acc_tile_m"] == 1024 and snap["acc_tile_n"] == 512 and snap["acc_tile_k"] == 512
     seeded = VirtualUioDevice(cap={"clusters": 2, "macs_per_cycle": 256, "sram_bytes": 2097152})
     seeded_snap = seeded.cap_snapshot()
     assert seeded_snap["clusters"] == 2 and seeded_snap["sram_bytes"] == 2097152

@@ -1,7 +1,8 @@
 # DRAM channel scaling — SoC-wide bandwidth and stability
 
-**Status:** plan of record (I3) · **Live:** class 0, **N = 1**, 64-bit fabric · **Not live:**
-class-1 LiteDRAM, N>1, 400 GB/s  
+**Status:** plan of record (I3) · **Live:** class 0 N=1, 64-bit fabric, 16 GB/s nameplate (8 bytes/cycle) ·
+**Measured, still fabric-bound:** class-1 LiteDRAM N=1/2/4/8 · **Not live:** 400 GB/s,
+and the second ingress is behind `G6LC_AI_DRAM_ISLAND_PORT` (default off)
 **Parents:** [`ddr4-controller.md`](ddr4-controller.md) ·
 [`../ai-matrix/scaling-100tops.md`](../ai-matrix/scaling-100tops.md) §4 ·
 [`../multi-core/README.md`](../multi-core/README.md) ·
@@ -137,7 +138,7 @@ once the **fabric** is wide enough to observe it. It does **not** close 100 TOPS
 
 | Target | GEMM demand (streaming, `T=512`) | Max DDR4 (8ch) | Fits? |
 |---|---|---|---|
-| Live fixture 0.512 TOPS | ≪ 8 GB/s | n/a (class 0 NoC) | I3-lite fabric-bound |
+| Live fixture 2.048 TOPS nameplate | 8 bytes/cycle; nameplate 16 GB/s | n/a (class 0 NoC) | I3-lite still 8 bytes/cycle |
 | Latency SKU 12–25 TOPS | 24–48 GB/s | 38–152 GB/s | 2–4ch once fabric ≥ nameplate |
 | Throughput SKU **98 TOPS** | **195 GB/s** | **152 GB/s** | **No** — class 2 LPDDR5 (~400 GB/s) or a faster/wider DRAM |
 
@@ -165,10 +166,12 @@ and 2 channels. That width is an **island** number; the core cluster port may st
 
 ---
 
-## 4. Two-port DRAM front-end (plan, not live)
+## 4. Two-port DRAM front-end
 
-Today one xbar master port (`DRAM`) feeds the stripe. That is correct for I3-lite and for
-DDR4 bringup at 19–38 GB/s. It is **not** how 400 GB/s and Linux coexist:
+Today, unless `G6LC_AI_DRAM_ISLAND_PORT` is set, one xbar master port (`DRAM`) feeds the
+stripe and the island DMA is xbar slave port 2 at 64 bits. That is the identity path
+(`gen_sim_axi` for class 0 N=1). It is correct for I3-lite and for DDR4 bringup at
+19–38 GB/s nameplate, and it is **not** how 400 GB/s and Linux coexist:
 
 - A 400 GB/s island path through a 64-bit (or even 512-bit) **shared** xbar either starves
   fetch/LSU or is physically too wide for the core cluster.
@@ -194,8 +197,114 @@ Rules for that step:
 5. Do not rename this to I2. I2 replicates **compute clusters** behind the NoC cut line
    (`scaling-100tops.md` §7). The memory system is frozen.
 
-Until that dual-port exists, cores already use the channels through the shared xbar slave.
-That is the I3 bringup path.
+`g6lc_ai_dram_join` is that join: cluster port wins a simultaneous address handshake,
+island IDs are prefixed, an island address outside the DRAM window is `SLVERR`, and
+island `AxLOCK`/`ATOP` are forced 0. `ISLAND_DATA_WIDTH` greater than the channel width
+is an `axi_dw_converter` in front of the join; the PHYs stay at the channel width.
+`MAX_AR_OUT` caps the island ingress only. The testharness instantiates it only under
+`G6LC_AI_DRAM_ISLAND_PORT`. Unset, `slave[2]` is still the 64-bit xbar path and
+`gen_sim_axi` is unchanged. The directed test `tb_g6lc_ai_dram_join` covers the 64-bit
+stripe, priority, `SLVERR`, lock strip, the outstanding cap, and a 128-bit beat that
+lands as two channel beats and reads back through the downsizer as the same word.
+That 128-bit port sits on N=2. Two 16-byte beats from `DRAM+0x30` narrow to one
+`len=3 size=3` burst at `0x80000030`, which still crosses the 64-byte stripe, and
+the backend reports that burst. A single legal beat cannot cross it.
+A 512-bit beat, the `NocWidth` of `AiIslandLatencySkuTarget`, lands as eight channel
+beats and reads back the same way. A cluster read on that join still completes.
+With one island write held at B, a second island AW waits and a cluster AW on the
+other stripe channel is accepted. On the 512-bit port two 8-byte reads fill
+`MaxAROut` of 2, the third waits, and a cluster read still proceeds. An untaken
+island B sits at the head of the single response pipe until the island takes it.
+Under `G6LC_AI_DRAM_ISLAND_PORT` the testharness island DMA is that 512-bit port.
+`tb_g6lc_ai_island_wide` runs the live 256-MAC island at that width through the join:
+an 8×8×8 INT8 GEMM stores C=8, and the completion word is the 8-byte ticket/status
+with the next 8 bytes left unchanged. `tb_g6lc_ai_gemm_wide` runs a 2×4×16 INT8 GEMM at 128 and 512 bits through the join:
+each C pair is still one 8-byte channel beat, on the lane the address selects, and
+the bytes next to the result stay put. The same test then runs 2×3×8. Odd `n`
+stores one 4-byte word per element (six channel beats), each word is 8, and
+the bytes on either side of the 24-byte result stay put. Descriptor fetch and the completion word
+use the same 8-byte beat, so a wide bus does not zero the rest of the line.
+With more than one channel, a descriptor pointer that is not 64-byte aligned
+is refused before the read: the fetch completes with an error and issues no AR.
+On the two-channel island that refusal is completion ticket 10, status
+`ST_ERR`, and the address channel stays idle. An aligned pointer is still
+fetched. A latched prefetch whose completion pointer is only 4-byte aligned
+is ticket 12, status `ST_BAD_PTR`, and issues no write. A GEMM with even `n`
+whose C pointer is only 4-byte aligned is ticket 13, status `ST_BAD_PTR`, and
+issues no load and no store. Operand byte length, element alignment, C alignment, and the 8-byte
+completion alignment live in `g6lc_ai_island_cfg_pkg` and are used by the
+descriptor engine, the GEMM sequencer, and the completion store. A
+misaligned completion pointer or an even-`n` C pointer is `ST_BAD_PTR`
+before any matrix traffic. An FP16 `A` pointer at an odd address is refused
+by the sequencer with no beat. A descriptor fetch is checked against the same committed window before the
+read: the pointer must be 8-byte aligned and the 64 bytes must be readable.
+An odd pointer or a pointer outside the window is `ST_BAD_PTR` and issues
+no AR. Permission is split: a read-only window refuses a result store, a
+write-only window refuses the descriptor fetch, and an unprogrammed queue
+refuses both. A read-only window still fetches a descriptor. Queue 0's region is `0x0120`.
+Queue 1 is `0x01A0`, not `0x0140`: that address is the descriptor latch, so a
+write there does not change queue 1's permission. A job is checked against
+its own queue. A scale pointer is an 8-byte read probe, and a null scale
+pointer skips the probe. The scale table is not fetched. A completion
+pointer is its own 8-byte write: the matrices can fit while that pointer
+does not. With completion DMA off (`CTL` bit 1 clear) that pointer is still
+checked, and a legal pointer completes without a write. Turning the bit on
+stores the 8-byte word. `flags[2]` holds the completion IRQ until the claim
+pops the head. A layout job does not run the GEMM. The sequencer refuses
+`m` of 0, `n` of 0, `k` of 0, `m` above the 256-element tile, and a
+leading dimension shorter than `k` with `ST_ERR` and no matrix traffic
+when the window itself would allow the bytes. Three layout jobs can
+finish before any claim: the head stays the oldest ticket, and the IRQ
+follows that head. The completion beat is `{16'h0, status, ticket}` at
+the pointer, size 8 bytes, full strobe on the low lane. A latched doorbell
+that arrives while a job is running, or while the 16-deep completion FIFO
+is full, is held and submitted when a slot is free. A second 1×1×64 GEMM
+doorbelled during the first still completes, in order. The seventeenth
+layout job waits for a claim and then sits at the tail. A newer doorbell
+replaces the held ticket. A fetch doorbell clears it: an odd descriptor
+pointer is `ST_BAD_PTR` with no descriptor read, and the held ticket does
+not run. A sideband kick with a zero pointer takes the next free slot
+ahead of a held doorbell: the running job, then the sideband ticket, then
+the held ticket, three GEMMs. A sideband descriptor fetch that arrives
+while a job is still running waits until the engine is idle, then reads.
+The running 1×1×64 GEMM completes `ST_OK` first. The zero descriptor
+fetched after it is `ST_BAD_VER`. That pair adds one write and three reads:
+the GEMM's two operand reads and its result write, plus one descriptor
+read. `flags[3]` requests fused requant. The engine returns `ST_BAD_OP`
+before numeric-format checks and before any matrix traffic. Operand loads are checked as the full bus beat the sequencer will issue,
+not only the useful elements. A one-byte row on the 64-bit bus occupies
+8 bytes: a 4-byte window refuses it, and an 8-byte window accepts it.
+On the 512-bit port that row occupies 64 bytes. A 63-byte window, or a
+window that starts at the element and leaves the beat base outside, is
+`ST_BAD_PTR` and issues no AR. A window that covers the beat accepts the
+job: the read is issued at the beat base with a 64-byte size, the two
+operand reads narrow to sixteen channel beats, and the 4-byte result lands
+in the low half of the channel word (`64'h0101_0101_0000_0001`). The core
+sideband uses the same fetch check as the doorbell. An odd pointer, a
+write-only window, and an unprogrammed queue are `ST_BAD_PTR` with no AR.
+A read-only window still fetches. A zero pointer submits the latched
+descriptor and runs the GEMM.
+The descriptor engine checks the whole A, B,
+and C byte span against the queue window before any load or store. A 2×4
+result in a 16-byte window is `ST_BAD_PTR` and issues no traffic. A 1×1×1
+result in that window still completes. Odd `n` may start 4 bytes into a channel word:
+a 1×1×8 job at that address stores 8 in the upper half and leaves the lower
+half unchanged, on both the 128-bit and 512-bit ports. One channel still accepts
+a misaligned descriptor pointer. The completion store refuses a pointer
+that is not 8-byte aligned and issues no write. An aligned word at the top of
+a 512-bit beat occupies only those 8 bytes.
+The default SoC path, with the define unset, is still 64-bit slave[2]. Measured
+bandwidth is still the 8 GB/s ceiling. I2 and class 2 are not started.
+`DramClass=2` elaborates no PHY: `g6lc_ai_dram_backend` reports
+`DramClass=2 (LPDDR5) has no PHY` and stops. Class 0 N=1 is still `gen_sim_axi`.
+The define-on `g6lc64_ai` testharness elaborates and links with Verilator 5.036
+(`/tmp/g6lc-th-island-port/Variane_testharness`, 2026-09-26). In that model the
+island DMA data is 512 bits and the channel after the downsizer is 64 bits.
+Stock Verilator 5.020 faults before elaboration with the define set or unset.
+The linked model has not been booted. The define stays off on the default path.
+The island PMU (`0x18C`) bills a C handshake at 8 bytes and an A/B read at
+the port width. At 64 bits those widths match, so the live milli-GB/s value
+is unchanged. The nameplate half of CAP `0x18` stays 8.
 
 ---
 

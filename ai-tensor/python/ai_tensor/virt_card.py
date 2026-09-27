@@ -38,10 +38,10 @@ def _env(name: str, default: Optional[str] = None) -> Optional[str]:
 
 @dataclass
 class VirtCardCaps:
-    acc_tile_m: int = 256
-    acc_tile_n: int = 256
-    acc_tile_k: int = 256
-    macs_per_cycle: int = 256
+    acc_tile_m: int = 1024
+    acc_tile_n: int = 512
+    acc_tile_k: int = 512
+    macs_per_cycle: int = 512
     noc_width: int = 64
     clusters: int = 1
     board_id: str = "virt-ai-pcie"
@@ -74,10 +74,10 @@ class VirtCardSession:
         self._last_ticket = 0
         self.caps = caps or VirtCardCaps(
             board_id=self.board_id,
-            acc_tile_m=int(_env("AI_TENSOR_ACC_TILE_M", "256") or "256"),
-            acc_tile_n=int(_env("AI_TENSOR_ACC_TILE_N", "256") or "256"),
-            acc_tile_k=int(_env("AI_TENSOR_ACC_TILE_K", "256") or "256"),
-            macs_per_cycle=int(_env("AI_TENSOR_MACS", "256") or "256"),
+            acc_tile_m=int(_env("AI_TENSOR_ACC_TILE_M", "1024") or "1024"),
+            acc_tile_n=int(_env("AI_TENSOR_ACC_TILE_N", "512") or "512"),
+            acc_tile_k=int(_env("AI_TENSOR_ACC_TILE_K", "512") or "512"),
+            macs_per_cycle=int(_env("AI_TENSOR_MACS", "512") or "512"),
             noc_width=int(_env("AI_TENSOR_NOC_WIDTH", "64") or "64"),
             uio=_env("AI_TENSOR_UIO", f"virt://{self.board_id}/island0")
             or f"virt://{self.board_id}/island0",

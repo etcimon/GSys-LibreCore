@@ -30,7 +30,16 @@ module g6lc_ai_addr_check #(
     input  logic [AddrWidth-1:0]  check_len_i,   // bytes; 0 means 1-byte probe
     input  logic                  check_need_r_i,
     input  logic                  check_need_w_i,
-    output logic                  check_ok_o
+    output logic                  check_ok_o,
+    // Second probe so a descriptor fetch can be checked while the engine
+    // holds the primary request. Same committed window.
+    input  logic                  probe_req_i,
+    input  logic [QidWidth-1:0]   probe_qid_i,
+    input  logic [AddrWidth-1:0]  probe_addr_i,
+    input  logic [AddrWidth-1:0]  probe_len_i,
+    input  logic                  probe_need_r_i,
+    input  logic                  probe_need_w_i,
+    output logic                  probe_ok_o
 );
 
   typedef logic [AddrWidth-1:0] addr_t;
@@ -56,35 +65,36 @@ module g6lc_ai_addr_check #(
     end
   end
 
+  function automatic bit range_ok(
+      input logic v,
+      input logic [1:0] perm,
+      input addr_t base, limit, addr, len,
+      input logic need_r, need_w);
+    addr_t span, last;
+    logic in_range, perm_ok;
+    // Zero length means a one-byte probe, so an empty range cannot pass.
+    span = (len == '0) ? addr_t'(1) : len;
+    last = addr + span - addr_t'(1);
+    // `last >= addr` rejects a span that wraps the address space.
+    in_range = v && (limit > base) && (addr >= base)
+        && (last >= addr) && (last < limit);
+    perm_ok = (!need_r || perm[0]) && (!need_w || perm[1]);
+    return in_range && perm_ok;
+  endfunction
+
   always_comb begin
-    addr_t base, limit, addr, last, span;
-    logic [1:0] perm;
-    logic       v, in_range, perm_ok;
-
-    base = '0; limit = '0; addr = '0; last = '0; span = '0;
-    perm = '0; v = 1'b0; in_range = 1'b0; perm_ok = 1'b0;
     check_ok_o = 1'b0;
-
-    if (check_req_i && (int'(check_qid_i) < NumQueues)) begin
-      base  = base_q[check_qid_i];
-      limit = limit_q[check_qid_i];
-      perm  = perm_q[check_qid_i];
-      v     = valid_q[check_qid_i];
-      addr  = check_addr_i;
-      // Zero length means a one-byte probe, so a null-length request can never
-      // pass by describing an empty range.
-      span  = (check_len_i == '0) ? addr_t'(1) : check_len_i;
-      last  = addr + span - addr_t'(1);
-      // `last >= addr` is the wrap guard: without it a span that overflows the
-      // address space would produce a `last` below `base` and read as in-range.
-      in_range = v
-          && (limit > base)
-          && (addr >= base)
-          && (last >= addr)
-          && (last < limit);
-      perm_ok = (!check_need_r_i || perm[0]) && (!check_need_w_i || perm[1]);
-      check_ok_o = in_range && perm_ok;
-    end
+    probe_ok_o = 1'b0;
+    if (check_req_i && (int'(check_qid_i) < NumQueues))
+      check_ok_o = range_ok(
+          valid_q[check_qid_i], perm_q[check_qid_i],
+          base_q[check_qid_i], limit_q[check_qid_i],
+          check_addr_i, check_len_i, check_need_r_i, check_need_w_i);
+    if (probe_req_i && (int'(probe_qid_i) < NumQueues))
+      probe_ok_o = range_ok(
+          valid_q[probe_qid_i], perm_q[probe_qid_i],
+          base_q[probe_qid_i], limit_q[probe_qid_i],
+          probe_addr_i, probe_len_i, probe_need_r_i, probe_need_w_i);
   end
 
 endmodule

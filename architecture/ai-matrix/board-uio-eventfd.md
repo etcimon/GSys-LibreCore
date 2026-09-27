@@ -20,7 +20,7 @@ bare userspace harness) maps the island, waits on IRQ, and claims DONE. It does
 | PLIC source ID | **8** | `irq_sources[7] = ai_irq` → PLIC ID 8 |
 | Level IRQ | assert while `!cpl_empty && head.irq` | `g6lc_ai_island_top` / CPL FIFO |
 | Claim | write `1` to DONE `@0x10C` | pop FIFO head; re-arms if next head.irq |
-| CAP geometry | AccTile/Macs 256, queues **2**, depth 64, `DramClass=0`, 8 GB/s NoC, `MaxAROut=2`, CAP `0x48` init_done | `g6lc_ai_island_cfg` / CAP window |
+| CAP geometry | Panel box **1024×512×512**, MAC issue **512** (`AI_LIVE_MACS`), VA panels 512×512 / 512×256 / 1024×128, queues **2**, depth 64, `DramClass=0`, nameplate 16 GB/s on an 8-byte/cycle port, `MaxAROut=2`, CAP `0x48` init_done | `g6lc_ai_island_cfg` / CAP window |
 
 Directed SoC smoke: `ai_irq_plic_smoke` (claim DONE **before** PLIC complete).
 

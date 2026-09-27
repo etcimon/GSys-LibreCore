@@ -1,7 +1,8 @@
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 # ai-tensor profile: hostless sim (default CI)
-# Phase A: CAP/PMU/tile fields match live island_p3 (AccTile/Macs=256, Noc=64).
+# Phase A: CAP/PMU/tile fields match live island_p3
+# (panel box 1024×512×512, MAC issue 512, Noc=64).
 id = "sim-v2"
 abi_rev = "2.0.0"
 contract_version = 2
@@ -11,10 +12,10 @@ isa_doc_rev = "monorepo:architecture/ai-matrix/isa-encoding.md"
 island_rev = "none"
 backend = "sim"
 noc_width = 64
-acc_tile_m = 256
-acc_tile_n = 256
-acc_tile_k = 256
-macs_per_cycle = 256
+acc_tile_m = 1024
+acc_tile_n = 512
+acc_tile_k = 512
+macs_per_cycle = 512
 wait_policy = "poll"
 submit_mode = "latch"
 features = [
@@ -23,6 +24,6 @@ features = [
   "ai3_regions",
   "op_gemm",
   "pmu_v1",
-  "acc_tile_256",
+  "acc_tile_512",
   "compute_ref",
 ]

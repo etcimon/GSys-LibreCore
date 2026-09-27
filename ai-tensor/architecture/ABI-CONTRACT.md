@@ -90,7 +90,8 @@ Documented in island README / `g6lc_ai_island_top`; package stores offsets in **
 | `0x0100` | CTL: enable, **`wr_cpl_en`** |
 | `0x0104..0x0114` | status / doorbell / done / ticket / dstatus |
 | `0x0118/0x011C` | `desc_ptr` lo/hi (DMA fetch when doorbell[31]) |
-| `0x0120+` | region program window |
+| `0x0120` | queue 0 region window (0x20 bytes; perm write commits) |
+| `0x01A0+(q-1)*0x20` | queue `q≥1` region. Not `0x0120+q*0x20` — that address is the descriptor latch |
 | `0x0140..0x017F` | descriptor latch (16×32b) |
 | `0x0180..0x018C` | **PMU** R beats / W beats / cycles / sustained milli-GB/s (sticky last GEMM) |
 

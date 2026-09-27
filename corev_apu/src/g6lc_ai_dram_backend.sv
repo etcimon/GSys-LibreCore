@@ -32,7 +32,9 @@ module g6lc_ai_dram_backend
     parameter int unsigned NUM_WORDS      = 2 ** 25,
     parameter int unsigned NrChannels     = 1,
     parameter int unsigned ChanShift      = AI_DRAM_CHAN_SHIFT_DEFAULT,
-    parameter int unsigned MaxAROut       = AI_MAX_AR_OUT_DRAM
+    parameter int unsigned MaxAROut       = AI_MAX_AR_OUT_DRAM,
+    // Class 2 rate socket. Default off: DramClass 2 still $error.
+    parameter bit          Class2Model    = 1'b0
 ) (
     input  logic clk_i,
     input  logic rst_ni,
@@ -255,8 +257,39 @@ module g6lc_ai_dram_backend
           .rdata_o ( rdata       )
       );
     end
+  end else if (DramClass == AI_DRAM_LPDDR5 && !Class2Model) begin : gen_no_lpddr5
+    // Class 2 stays a refused elaboration. A licensed LPDDR5 PHY is a later
+    // plan; this branch must not borrow the class-1 LiteDRAM wrapper.
+    assign init_done_o  = 1'b0;
+    assign ch_r_beats_o = '0;
+    assign ch_w_beats_o = '0;
+    initial $error("g6lc_ai_dram_backend: DramClass=2 (LPDDR5) has no PHY");
+  end else if (DramClass == AI_DRAM_LPDDR5) begin : gen_class2_model
+    // Rate socket. Not a PHY and not gen_sim_axi. The log of the directed
+    // test says "model". Beats are accepted and counted; data is not stored.
+    logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_w_q;
+    assign init_done_o  = rst_ni;
+    assign ch_r_beats_o = '0;
+    assign ch_w_beats_o = ch_w_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) ch_w_q <= '0;
+      else if (slave.w_valid && slave.w_ready) ch_w_q[0] <= ch_w_q[0] + 32'd1;
+    end
+    assign slave.aw_ready = rst_ni;
+    assign slave.w_ready  = rst_ni;
+    assign slave.ar_ready = rst_ni;
+    assign slave.b_valid  = 1'b0;
+    assign slave.b_id     = '0;
+    assign slave.b_resp   = axi_pkg::RESP_OKAY;
+    assign slave.b_user   = '0;
+    assign slave.r_valid  = 1'b0;
+    assign slave.r_id     = '0;
+    assign slave.r_data   = '0;
+    assign slave.r_resp   = axi_pkg::RESP_OKAY;
+    assign slave.r_last   = 1'b0;
+    assign slave.r_user   = '0;
   end else begin : gen_need_litedram
-    // Class 1/2: N independent LiteDRAM controllers (one gen.py --sim core
+    // Class 1: N independent LiteDRAM controllers (one gen.py --sim core
     // each). Testharness CLASS1/CHANS_* elaborate this; default is class 0.
     g6lc_ai_dram_channels #(
         .NrChannels     ( NrChannels     ),

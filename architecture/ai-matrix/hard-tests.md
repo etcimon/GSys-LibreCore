@@ -138,14 +138,14 @@ Scripts:
 | Track | Status | HARD/test coverage |
 |---|---|---|
 | **I0** sizing / SKU | **Done** (`scaling-100tops.md`) | docs only |
-| **I1** one cluster AccTile/PeLanes 256 | **Partial live** | gemm_s8_* + CAP; PE/`tc_sram` cluster still lite |
+| **I1** one cluster, panel box 1024×512×512, PeLanes 512 | **Partial live** | gemm_s8_* + CAP; 512-lane identity 822/902 cy; PE/`tc_sram` cluster still lite |
 | **I3-lite** bus/PMU/C-store/multi-out AR | **Live** | bw_pmu, gemm scale, mmio |
 | **CPL FIFO** multi-claim | **Live** | `ai_cpl_fifo_multi_claim` |
 | **I3** measured memory bandwidth to model | **I3-lite live**; class-1 `--sim` 256-beat stream **7858 milli-GB/s (98% of 8 GB/s)** — 80% gate **closed**; wrap **1445 cy** (eight AR + eight AW live / 9th backpressure); GEMM class-1 N=1/2/4/8 **336/681/821/1162 cy** (MaxAROut=8); S4 parks hart 1: `ai-dt` **2620 cy**, `ai-d1` **4246**, `ai-d2` **4520**, `ai-d4` **4553**, `ai-d8` **4582**; first-pass CLASS1 {1,2,4,8} 5363/5758/5762/5821; dual-core stripe **830/900/582 cy** on `ai-d2`/`ai-d8`/`ai-sc{2,4,8}`; all-N occupancy **1328/889 cy** on `ai-d8`/`ai-sc8`; exclusive **PASS `ai-dt` 552** / **`ai-d1` 781** / **`ai-d2` 945** / **`ai-d4` 941** / **`ai-d8` 941 cy** / **`ai-sc2` 620** / **`ai-sc4` 620 cy**; dual-core snoop **16667/17137/17137/17163/17187/16686/16686 cy** (`ai-dt`/`ai-d1`/`ai-d2`/`ai-d4`/`ai-d8`/`ai-sc2`/`ai-sc4`); isolated lrsc **130 cy**; wrap-stack **104 cy** | Do not quote 98% as 19 GB/s nameplate; 400 is class 2 |
 | **I2** NoC + N clusters + QoS | **Not started** | no multi-cluster directed suite yet |
 | **I4** PD / UPF / thermal | **Open** | — |
 
-**Next for clustering/scaling:** keep AccTile/`T`/CAP frozen; measure I3 bandwidth; then I2
+**Next for clustering/scaling:** keep PeLanes and blocking `T` at 512 (sequencer box 1024×512×512); measure I3 bandwidth; then I2
 cluster replication without breaking narrow/ci HARD bit-identity on the single-cluster path
 (see `scaling-100tops.md` §5.1 staging rule).
 
@@ -153,7 +153,7 @@ cluster replication without breaking narrow/ci HARD bit-identity on the single-c
 
 These run in seconds on any host and do not need Verilator, a RISC-V toolchain, or a
 Variane build. They exist because the I2 acceptance shape — `M = N = K = 4096`, §12 —
-**cannot be submitted as one descriptor** (F12): it is 16³ tiled descriptors, so the host
+**cannot be submitted as one descriptor** (F12): it is 4×8×8 tiled descriptors on the 1024×512×512 box, so the host
 tiler and the in-guest submission path are on the I2 critical path, not beside it. Getting
 them wrong is cheap to discover here and expensive to discover on a 200 M-cycle soak.
 
@@ -176,4 +176,4 @@ Before claiming “AI HARD green”:
 1. Name the **suite** (`narrow` / `smoke` / `ci` / …), not “the tests”.  
 2. Record **target + library + pass/fail counts + cycles** for golden smokes.  
 3. Soft virt-ai-pcie alone is **not** SV proof — use `virt-impl --impl hard` or `rtl-hard`.  
-4. Do not grow AccTile with TOPS target; cluster count is I2 only.
+4. Do not grow PeLanes with the TOPS target. The sequencer box is 1024×512×512. Cluster count is I2 only.

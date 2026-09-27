@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 //! Runtime: regions, submit, wait — **sim** backend (mandatory CI).
 
+pub mod format_trace;
 pub mod numfmt;
 mod sim;
 mod mmio;
@@ -79,6 +80,9 @@ pub struct Caps {
     /// CAP queue count (island_p3 = 1; MMIO region window only for q0 today).
     pub queues: u32,
     pub queue_depth: u32,
+    /// Float codes multiply only when this is set. A mask bit is not a datapath.
+    /// The software reference sets it. The live sim pin does not.
+    pub fp_datapath: bool,
 }
 
 impl Default for Caps {
@@ -102,12 +106,14 @@ impl Caps {
             clusters: c.clusters,
             queues: u32::from(c.queues.max(1)),
             queue_depth: u32::from(c.queue_depth.max(1)),
+            fp_datapath: false,
         }
     }
 
     pub fn software_reference_v2() -> Self {
         let mut caps = Self::default();
         caps.dtype_mask = numfmt::SOFTWARE_DTYPE_MASK;
+        caps.fp_datapath = true;
         caps
     }
 
@@ -445,6 +451,7 @@ mod auto_tile_tests {
             cap_regs.dtype_mask = mask;
             let mut mmio = MmioDevice::new();
             *mmio.soft_island_mut() = SoftIsland::with_cap(cap_regs, 64);
+            mmio.soft_island_mut().set_fp_datapath(true);
             mmio.probe_caps();
             check_native_descriptor_modes(&mut mmio, mask);
         }

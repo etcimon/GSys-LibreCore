@@ -584,7 +584,50 @@ both. Measured on one engine, identical work, C checked element by element:
 | FP32 read beats | 128 | 64 | 64 | **0** |
 
 With both operands resident the engine issues **no operand reads at all** -- only
-the C writes remain, so it becomes pure compute plus output traffic. Note the
+the C writes remain, so it becomes pure compute plus output traffic. The live
+sequencer accepts a **1024×512×512** box on a 512-wide MAC issue. The VA
+panels are **512×512×k**, **512×256×k**, and **1024×128×k**, with `k ≤ 512`.
+One issue covers 512 elements of K. A full 512×512 output is 262144 MAC
+issues, and each half panel is 131072. At `k = 512` the square operands are
+262144 INT8 bytes each; the 1024-row A panel is 524288 bytes and its 128-row
+B panel is 65536 bytes; the 256-column B panel is 131072 bytes. Flags bit 15
+(`reuse_b`) and bit 23 (`reuse_a`) request that skip, and only when
+`VaTurboEn` is set. The live package leaves `VaTurboEn` clear, so those bits
+are ignored and every panel is fetched. The 1.36× figure in the table is the 8×8×16 harness. The panel byte
+counts are the schedule of the 512-wide issue. The default host stream
+still cuts at the device box, so a shape that fits stays one descriptor.
+`va_panels` selects the named panel with the fewest descriptors, then
+the most exact panels, then the wider N. A second M tile of that cut
+sets `flags[15]` (`reuse_b`); a second N tile sets `flags[23]`
+(`reuse_a`). The live island ignores both while `VaTurboEn` is 0, and
+the result C is the same either way. A directed backend run with
+`ReuseAEn`/`ReuseBEn` set (not `AiIslandLatencyDefault`) checks the
+keys at these widths: N is in the B key and M is in the A key, a
+second M tile can hit B, a second N tile can hit A, and holding
+invalidate produces no hit. Epoch is in that key on the same backend:
+epoch 1 misses a resident 0, the same epoch hits and reads fewer beats,
+and returning to 0 misses again. The island still ties the epoch pins
+to 0, so a descriptor cannot change them. A C that starts on a
+resident operand does not skip, drops the key, and the next disjoint
+job misses; the job after that hits. That C pair is still the all-ones
+dot. `run-desc-reuse.sh` is a directed island with `VaTurboEn` set
+(8 MAC/cycle, AccTile 1024×512×16, not `AiIslandLatencyDefault`):
+latched flag bit 23 skips A at m=1024, flag bit 15 skips B at n=512,
+both bits together issue no operand read, and n=128 does not hit a
+resident 512. K is in that key: a resident k=16 B still yields 16, and
+the same flag with k=8 reads B again. A moved B pointer, an A
+pointer moved by 32 bytes, and a changed lda or ldb read that operand
+again, and the next job with the new key skips it. The moved A is
+ones against B byte 0x21, so the dot is 264. A SLVERR on one B beat
+returns `ST_ERR` and drops the key; the next reuse request reads B
+and yields 264, and the job after that skips B. A SLVERR on the C
+store does the same after a hit that did not read B. Odd `n = 3`
+stores single 32-bit words: `C[0][2]` is 1, and a taller M with that
+N skips B while the tail stays 1. Format is in the key: the same bytes as INT4 yield
+20 and skip on the next INT4 job, and switching back to INT8 reads
+again and yields 8712. The host stream leaves both flags clear on a K
+split: 1×1×513 is two tiles, and 1×1×1024 is two tiles of k=512 whose
+pointers move by 512 while lda and ldb stay 1024. Note the
 comparison that matters: **1.359x on a single engine equals the 1.358x that
 resident B alone needed four contended engines to reach**, and it gets there
 without contention.

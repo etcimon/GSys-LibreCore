@@ -523,6 +523,14 @@ mod tests {
         assert!(cfg.queues > 0);
         assert!(cfg.queue_depth > 0);
         assert!(cfg.clusters > 0);
+        assert_eq!(cfg.macs_per_cycle, 512, "AI_LIVE_MACS");
+        assert_eq!(cfg.acc_tile_m, 1024, "AI_PANEL_M");
+        assert_eq!(cfg.acc_tile_n, 512, "AI_PANEL_N");
+        assert_eq!(cfg.acc_tile_k, 512, "AI_PANEL_K");
+        assert_eq!(cfg.sram_bytes, 4 * 1024 * 1024);
+        assert_eq!(cfg.clock_khz, 2_000_000, "live clock nameplate");
+        assert_eq!(cfg.dram_gbps, 16, "64-bit x 2 GHz nameplate");
+        assert_eq!(cfg.noc_width, 64);
         assert!(cfg.cap_offsets.contains_key("version"));
         // The SKU literals refer to named constants (`AI_DRAM_CHAN_SHIFT_DEFAULT`,
         // `AI_MAX_AR_OUT_LIVE`, `AI_DRAM_SIM_AXI`), so this also pins that the reader

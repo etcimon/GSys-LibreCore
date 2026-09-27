@@ -90,8 +90,8 @@ fn wait_poll<D: Device>(dev: &mut D, ticket: u32) -> Result<Completion, RtError>
 
 /// Multi-queue AI-3 region isolation + wait-policy soak (hostless).
 ///
-/// Island_p3 CAP advertises **Queues=1** and the MMIO map places desc latch at
-/// `0x0140`, so only q0 has a region window at `0x0120` (matches RTL). SoftIsland
+/// The sim pin advertises **Queues=1**. RTL keeps two queues: q0 at `0x0120`
+/// and q1 at `0x01A0`, because the descriptor latch owns `0x0140`. SoftIsland
 /// rejects qid≥Queues with `ST_BAD_QID`. Sim keeps 4 software regions for a
 /// fuller isolation check when Caps allow.
 ///

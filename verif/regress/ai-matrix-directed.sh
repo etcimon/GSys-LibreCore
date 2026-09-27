@@ -69,6 +69,20 @@ need=(
   verif/tb/ai_island/run-litedram-wrap.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_bw.sv
   verif/tb/ai_island/run-dram-bw.sh
+  verif/tb/ai_island/tb_g6lc_ai_dram_join.sv
+  verif/tb/ai_island/run-dram-join.sh
+  verif/tb/ai_island/tb_g6lc_ai_dram_class2.sv
+  verif/tb/ai_island/run-dram-class2.sh
+  verif/tb/ai_island/tb_g6lc_ai_gemm_wide.sv
+  verif/tb/ai_island/run-gemm-wide.sh
+  verif/tb/ai_island/tb_g6lc_ai_island_wide.sv
+  verif/tb/ai_island/run-island-wide.sh
+  verif/tb/ai_island/tb_g6lc_ai_desc_stripe.sv
+  verif/tb/ai_island/run-desc-stripe.sh
+  verif/tb/ai_island/tb_g6lc_ai_desc_island.sv
+  verif/tb/ai_island/run-desc-island.sh
+  verif/tb/ai_island/tb_g6lc_ai_store_align.sv
+  verif/tb/ai_island/run-store-align.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_backend_stripe.sv
   verif/tb/ai_island/run-dram-backend-stripe.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_channels.sv
@@ -77,6 +91,9 @@ need=(
   verif/tb/ai_island/run-gemm-stripe.sh
   verif/tb/ai_island/tb_g6lc_ai_gemm_backend.sv
   verif/tb/ai_island/run-gemm-backend.sh
+  verif/tb/ai_island/run-gemm-panel-reuse.sh
+  verif/tb/ai_island/tb_g6lc_ai_desc_reuse.sv
+  verif/tb/ai_island/run-desc-reuse.sh
   verif/tb/ai_island/run-gemm-backend-class1.sh
   verif/tb/ai_island/tb_g6lc_ai_gemm_channels.sv
   verif/tb/ai_island/run-gemm-channels.sh
@@ -363,6 +380,41 @@ if command -v verilator >/dev/null 2>&1; then
   else
     bad "tb_g6lc_ai_litedram_wrap"
   fi
+  if bash verif/tb/ai_island/run-dram-join.sh; then
+    ok "tb_g6lc_ai_dram_join (second ingress, define unset on the SoC path)"
+  else
+    bad "tb_g6lc_ai_dram_join"
+  fi
+  if bash verif/tb/ai_island/run-dram-class2.sh; then
+    ok "tb_g6lc_ai_dram_class2 (LPDDR5 refuses elaboration)"
+  else
+    bad "tb_g6lc_ai_dram_class2"
+  fi
+  if bash verif/tb/ai_island/run-gemm-wide.sh; then
+    ok "tb_g6lc_ai_gemm_wide (128/512 GEMM through the join)"
+  else
+    bad "tb_g6lc_ai_gemm_wide"
+  fi
+  if bash verif/tb/ai_island/run-island-wide.sh; then
+    ok "tb_g6lc_ai_island_wide (256-MAC island, 512-bit DMA)"
+  else
+    bad "tb_g6lc_ai_island_wide"
+  fi
+  if bash verif/tb/ai_island/run-desc-stripe.sh; then
+    ok "tb_g6lc_ai_desc_stripe (64 B descriptor refuses a stripe cross)"
+  else
+    bad "tb_g6lc_ai_desc_stripe"
+  fi
+  if bash verif/tb/ai_island/run-desc-island.sh; then
+    ok "tb_g6lc_ai_desc_island (N=2 completion for a stripe-crossing descriptor)"
+  else
+    bad "tb_g6lc_ai_desc_island"
+  fi
+  if bash verif/tb/ai_island/run-store-align.sh; then
+    ok "tb_g6lc_ai_store_align (completion word alignment)"
+  else
+    bad "tb_g6lc_ai_store_align"
+  fi
   if bash verif/tb/ai_island/run-dram-bw.sh; then
     ok "tb_g6lc_ai_dram_bw (class-1 --sim stream measure; 80% still Variane)"
   else
@@ -387,6 +439,16 @@ if command -v verilator >/dev/null 2>&1; then
     ok "tb_g6lc_ai_gemm_backend (N=1/2/4/8 golden C + CAP + wide occupancy)"
   else
     bad "tb_g6lc_ai_gemm_backend"
+  fi
+  if bash verif/tb/ai_island/run-gemm-panel-reuse.sh; then
+    ok "tb_g6lc_ai_gemm_backend panel keys (reuse, epoch, and C overlap; not the live package)"
+  else
+    bad "tb_g6lc_ai_gemm_backend panel keys"
+  fi
+  if bash verif/tb/ai_island/run-desc-reuse.sh; then
+    ok "tb_g6lc_ai_desc_reuse (flags, pointers, stride, format, SLVERR, odd n; VaTurboEn on that instance only)"
+  else
+    bad "tb_g6lc_ai_desc_reuse"
   fi
   if bash verif/tb/ai_island/run-gemm-backend-class1.sh; then
     ok "tb_g6lc_ai_gemm_backend class1 (testharness CLASS1/CHANS N=1/2/4 native wrap)"

@@ -7,10 +7,34 @@
 dual-licensed); **AI-0 closed on the open path**, so nothing here is licensing-blocked.
 
 > **Where we are vs this plan (2026-09).** I0 + staged SKU (**AI-S1**) closed. Single-cluster
-> AccTile 256 + CPL FIFO + HARD narrow/ci/peak green. I3-lite live (class 0, N=1, 8 GB/s NoC).
-> **Next executable work:** class-1 DRAM + **shared-channel stability** (§4.2–4.3, cores and
-> `NrCores` on the same slave) against §4, then I2 multi-cluster — without breaking
-> single-cluster HARD bit-identity. Do not treat `DramChannels` as island-private.
+> The MAC issue is **512** and stays frozen until the port moves more than 8 bytes/cycle. The sequencer box is 1024×512×512. I3-lite is still that 64-bit port.
+> Class-1 N=1/2/4/8 and the shared-channel stability rows are measured and still
+> fabric-bound (`dram-channel-scaling.md` §3.1, §5). The second DRAM ingress is
+> `g6lc_ai_dram_join` (`G6LC_AI_DRAM_ISLAND_PORT`, default off): the define-on island
+> DMA is 512 bits, narrowed onto the same 64-bit channel, with no second memory map
+> and no wider core crossbar. That define-on `g6lc64_ai` model elaborates and
+> links under Verilator 5.036 and has not been booted; stock 5.020 faults before
+> elaboration. The live port is still 8 bytes/cycle. Its published nameplate is
+> 16 GB/s because `ClockKhz` is 2_000_000; the directed ~7.86 GB/s stream was
+> that wire accounted at 1 GHz and has not been re-timed. I2 and class 2
+> stay after a channel that can carry more than 8 bytes/cycle. Do not treat `DramChannels`
+> as island-private. A non-default `AiIslandThroughputSku` (8 × 4096 MAC/cycle,
+> 1.5 GHz, format mask `16'h00fb`) elaborates beside the live package and prints
+> parameter sketches only: the same function on the live struct is 2.048 TOPS
+> (512 MAC/cycle × 2 GHz), and on this struct 98.3 INT8 TOPS, 196.6 INT4 TOPS, 98.3 FP8 TFLOPS,
+> 49.2 FP16/BF16 TFLOPS, 24.6 FP32 TFLOPS. `sketch_milli_tops_scaled` can project
+> a MAC multiplier or a VA level without elaborating another bank per lane.
+> A VA level does not change the dense peak. The elaborated cell is
+> `AI_THROUGHPUT_LANES` (8) multipliers wide and walks K in strips; 4096 is
+> not a physical MAC array. A 1-lane elaboration of the same 2×2×2 INT8 tile
+> writes the same C. That integer strip is the synthesizable cell. Float
+> products come from `g6lc_ai_fp_dot` only when `FP_REAL_MODEL` is set; that
+> reference uses `real` and is not a synthesis netlist. With the parameter
+> clear, a float descriptor is `ST_BAD_FMT` even if the mask bit is set. An
+> FP32 2×2×2 with the reference enabled matches the binary32 dots. Class 2 remains a refused PHY unless
+> `Class2Model` selects the rate socket. `VaTurboEn` stays 0 and does not
+> multiply the 512-MAC rate. These sketches
+> are not a measured 2.048 TOPS, and 16 GB/s is not a new PHY measurement.
 
 > **Why this document exists.** `README.md` sizes a *seam*. It does not size a *machine*. A review of
 > a 100-TOPS target showed that the interesting decisions at that scale are not seam decisions at all,
@@ -124,8 +148,18 @@ together; anything else produces a machine that cannot reach its own peak.**
 > **F13 (writeback):** `2/T` is **input-only**. The live sequencer is a resident GEMM (load all A,
 > load all B, MAC, store C). With `s32` accumulators the C writeback is `4·m·n`, which at
 > `m=n=k=T` is **twice** the input traffic — total traffic 3× this table, intensity **42 rather
-> than 128 MAC/byte at T=256**. Size I3 from `max(compulsory, tiled) + 4mn`. The table above
-> remains the streaming-reduction bound; do not quote it as the live engine's DRAM demand.
+> than 128 MAC/byte at T=256**, and **85 rather than 256 MAC/byte at the live T=512**.
+> The live balance is 512 MAC/cycle ÷ 8 bytes/cycle = **64 MAC/byte**, so the square
+> tile is compute-leaning on the nameplate. Input-only demand at 512 MAC/cycle and 2 GHz
+> is about 4 GB/s; with the writeback factor it is about 12 GB/s. The 16 GB/s nameplate
+> can carry that sketch. The measured stream is still the 1 GHz accounting. Size I3 from
+> `max(compulsory, tiled) + 4mn`. The table above remains the streaming-reduction bound
+> for the 100 TOPS point; do not quote it as the live engine's DRAM demand. Do not raise
+> `AI_LIVE_MACS` again on this port. MAC issue stays 512. The sequencer box
+> is 1024×512×512. The VA panels are 512×512×k, 512×256×k, and 1024×128×k,
+> each with `k ≤ 512`. A full 512×512 output is 262144 MAC issues. Each
+> half panel is 131072 issues. `k = 512` fills the lanes. VA residency can
+> skip the matching operand bytes and does not add issues. `VaTurboEn` stays 0.
 
 ### 4.1 `T` is a property of the accumulator SRAM, not of the PE array
 
@@ -185,7 +219,7 @@ DDR4 maxes at **8 × 19 = 152 GB/s**. That covers the latency SKU's GEMM row at 
 (24–48 GB/s) once the fabric can carry it. It does **not** cover the 100-TOPS 195 GB/s row,
 and it does not cover the 391 GB/s `T = 256` row. The throughput SKU still buys class 2.
 
-Live interconnect is 64-bit @ 1 GHz = **8 GB/s**. Observed BW cannot exceed
+Live interconnect is a 64-bit port: **8 bytes/cycle**. `ClockKhz = 2_000_000` publishes a **16 GB/s** nameplate. Observed BW cannot exceed
 `min(nameplate, AxiDataWidth×f, NoC peak)`. The §12 `BW_measured` floor is 80% of **that
 minimum**, not 80% of a nameplate the xbar cannot carry, and not 80% of 400 on class 1.
 Directed class-1 `--sim` stream (`tb_g6lc_ai_dram_bw`) with the native bursting wrap
@@ -225,8 +259,12 @@ them. S1 (class-0 N>1 SRAM + GEMM burst cap) is the slave-side work that makes t
 true for N>1 without a `core/` edit: a 255-beat GEMM INCR would have been parked on
 one PHY and disagreed with L2's 64 B fills. N=1 still uses `MaxBurstBeats=255`.
 S4-line (two 64 B INCR fills in flight) is the same slave seeing the L2-MSHR case.
-Island DMA on that slave is proven N=1 identity (`tb_g6lc_ai_gemm_backend`
-**175 cy**, AR id=2 only, occupancy ch1 silent, CAP `0x50`/`0x70` match) and
+Island DMA on that slave is proven N=1 identity (`tb_g6lc_ai_gemm_backend`).
+The small golden (C sum 16) on the live 512-lane sequencer is **822 cy** (integer
+dot) and **902 cy** (float pipe). Earlier geometries of that same golden were
+175 cy and then 880/935 cy; those figures are not the 512-lane machine, and the
+256³ ~83.7k cy result has not been re-timed. Occupancy ch1 stays silent on N=1,
+and CAP `0x50`/`0x70` match. Also proven is
 N>1 with a second **wide** job (`lda=64`, one A row per stripe — the L2-line
 analogue) so **all NCH** read occupancy is live: class-0 N=2/4/8 **356/405/503 cy**,
 class-1 LiteDRAM N=1/2/4/8 **336/681/821/1162 cy** (MaxAROut=8), A=1,B=1 **golden C=16**, CAP match.
@@ -393,8 +431,8 @@ Guest placement (F1): `AI_CAP_BASE = 0x4000_0000`, `AI_DESC_BASE = 0x4000_0140`;
 island-relative `CAP_BASE=0`, `DESC_BASE=0x140`. PMU: `PMU_OFF_{R_BEATS,W_BEATS,CYCLES,GBPS_X1000}`
 at `0x180–0x18C`.
 
-**Live fixture vs this plan:** I1-lite is 256 MAC/cycle × 1 GHz = **0.512 TOPS** (§2).
-I3-lite nameplate `DramGBps = 8` is the **64-bit NoC peak** at 1 GHz, not the 400 GB/s DRAM
+**Live fixture vs this plan:** I1-lite is 512 MAC/cycle × 2 GHz nameplate = **2.048 TOPS** (§2).
+I3-lite nameplate `DramGBps = 16` is the **64-bit NoC peak** at that clock (8 bytes/cycle), not the 400 GB/s DRAM
 SKU. After each GEMM the PMU writes measured milli-GB/s into `CAP_OFF_DRAM_GBPS[31:16]`
 and `CAP_OFF_DRAM_MEAS_X1000`. The 256³ HARD point (~83.7k cy) is the arithmetic fixture;
 achieved BW is whatever `ai_bw_pmu_smoke` reads back, not a Python `2/T` restatement.
@@ -466,7 +504,7 @@ is widened, so I3 moves ahead of the multi-cluster step.
 |---|---|---|---|
 | **I0** | This document: TOPS definition, bandwidth model, plane split, staged SKU decision | docs only | — (done) |
 | **I1** | **One** island cluster: PE array, banked staging + accumulator SRAM via `tc_sram`, local sequencer, capability window. **Freezes `T`, accumulator geometry, DRAM class and the NoC cut line for both SKUs.** | GEMM bit-exact vs the §3.5 rounding rule; synth smoke + FO4; area/power recorded; capability window correct on a one-cluster part | P3 (T2 spine) |
-| **I3** | Memory system: DRAM controller class, **shared** multi-channel slave (cores + L2/L3 + island), prefetch/staging, measured bandwidth into the capability register | **I3-lite done:** `DramClass=0`, NoC 8 GB/s, PMU→CAP, `MaxAROut=2`, **N=1**. **DRAM I3 open:** class-1 LiteDRAM opt-in; nameplate **`N × 19` GB/s**; N=1/2 defines; measure ≥80% of `min(nameplate, fabric)`; N>1 stability in `../uncore/dram-channel-scaling.md`. 400 is `DramClass=2` only. I2 must not change this memory | I1 |
+| **I3** | Memory system: DRAM controller class, **shared** multi-channel slave (cores + L2/L3 + island), prefetch/staging, measured bandwidth into the capability register | **I3-lite done:** `DramClass=0`, 8 bytes/cycle, nameplate 16 GB/s, PMU→CAP, `MaxAROut=2`, **N=1**. **DRAM I3 open:** class-1 LiteDRAM opt-in; nameplate **`N × 19` GB/s**; N=1/2 defines; measure ≥80% of `min(nameplate, fabric)`; N>1 stability in `../uncore/dram-channel-scaling.md`. 400 is `DramClass=2` only. I2 must not change this memory. `AI_LIVE_MACS` stays 512 until bytes/cycle rise | I1 |
 | **—** | **Latency SKU tapes out here** (1–2 clusters, ~12–25 TOPS) | §12 metrics, latency column | I3, I4 |
 | **I2** | NoC + N clusters + per-cluster clock/power gating + QoS arbitration | ≥60% of peak on `M=N=K=4096`; QoS soak with two tenants; **no change to `T`, the memory system or the software stack** | I3 |
 | **I4** | Physical: floorplan islands, UPF power domains, thermal sensor + capping loop, STA | full-chip STA closes; power cap demonstrated | I1 (latency SKU), re-run after I2 |

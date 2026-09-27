@@ -100,7 +100,7 @@ pub struct Gemm {
 }
 
 impl Gemm {
-    /// Lower to a single Desc64. Fails if dims exceed `tile` (default island_p3 256).
+    /// Lower to a single Desc64. Fails if dims exceed `tile` (default island_p3 512).
     pub fn lower(&self) -> Result<Desc64, IrError> {
         self.lower_with_tile(AccTile::ISLAND_P3_DEFAULT)
     }
@@ -164,6 +164,94 @@ pub struct GemmTile {
     pub tm: u32,
     pub tn: u32,
     pub tk: u32,
+}
+
+/// The three output shapes whose reuse keys stay distinct at this MAC issue
+/// width: `macs×macs`, `macs×macs/2`, and `(2·macs)×macs/4`, each with K
+/// `≤ macs`. A width that is not a multiple of 4 has no such set.
+pub fn va_panels(macs: u32) -> Vec<AccTile> {
+    if macs < 4 || macs % 4 != 0 {
+        return Vec::new();
+    }
+    let half = macs / 2;
+    let quarter = macs / 4;
+    vec![
+        AccTile {
+            m: macs,
+            n: macs,
+            k: macs,
+        },
+        AccTile {
+            m: macs,
+            n: half,
+            k: macs,
+        },
+        AccTile {
+            m: macs.saturating_mul(2),
+            n: quarter,
+            k: macs,
+        },
+    ]
+}
+
+fn div_ceil_u64(n: u32, d: u32) -> Option<u64> {
+    if d == 0 {
+        return None;
+    }
+    Some(u64::from(n).div_ceil(u64::from(d)))
+}
+
+/// Blocking tile for a VA-panel schedule.
+///
+/// Among the named panels that fit inside `cap`, pick the one with the fewest
+/// descriptors, then the most descriptors whose M×N is exactly that panel,
+/// then the wider N (so a later M tile can reuse B). A cap the panels do not
+/// fit returns `cap` unchanged, so a smaller device is not asked for a panel
+/// it will refuse.
+pub fn va_blocking_tile(m: u32, n: u32, k: u32, cap: AccTile, macs: u32) -> AccTile {
+    let mut best: Option<(u64, u64, u32, AccTile)> = None;
+    for panel in va_panels(macs) {
+        if panel.m == 0
+            || panel.n == 0
+            || panel.k == 0
+            || panel.m > cap.m
+            || panel.n > cap.n
+            || panel.k > cap.k
+        {
+            continue;
+        }
+        let (Some(tm), Some(tn), Some(tk)) = (
+            div_ceil_u64(m, panel.m),
+            div_ceil_u64(n, panel.n),
+            div_ceil_u64(k, panel.k),
+        ) else {
+            continue;
+        };
+        let Some(tiles) = tm.checked_mul(tn).and_then(|x| x.checked_mul(tk)) else {
+            continue;
+        };
+        let exact_m = if panel.m != 0 && m % panel.m == 0 {
+            tm
+        } else {
+            tm.saturating_sub(1)
+        };
+        let exact_n = if panel.n != 0 && n % panel.n == 0 {
+            tn
+        } else {
+            tn.saturating_sub(1)
+        };
+        let named = exact_m.saturating_mul(exact_n).saturating_mul(tk);
+        let replace = match best {
+            None => true,
+            Some((bt, bn, bw, _)) => {
+                tiles < bt || (tiles == bt && (named > bn || (named == bn && panel.n > bw)))
+            }
+        };
+        if replace {
+            best = Some((tiles, named, panel.n, panel));
+        }
+    }
+    best.map(|(_, _, _, panel)| panel).unwrap_or(cap)
 }
 
 /// Iterate AccTile-sized blocks over a large GEMM (row-major A/B/C).
@@ -364,7 +452,7 @@ mod tests {
     #[test]
     fn reject_oversize_tile() {
         let g = Gemm {
-            m: 257,
+            m: 1025,
             n: 1,
             k: 1,
             dtype: DType::S8,
@@ -379,10 +467,43 @@ mod tests {
 
     #[test]
     fn tile_large_512() {
-        let tiles = tile_gemm(512, 512, 512, AccTile::ISLAND_P3_DEFAULT);
-        // 2x2x2 = 8 tiles of 256
-        assert_eq!(tiles.len(), 8);
-        assert_eq!(tiles[0].tm, 256);
-        assert_eq!(tiles.last().unwrap().i0, 256);
+        let tiles = tile_gemm(1024, 1024, 1024, AccTile::ISLAND_P3_DEFAULT);
+        // M fits in one 1024-row panel. N and K each take two 512-steps: 4 tiles.
+        assert_eq!(tiles.len(), 4);
+        assert_eq!(tiles[0].tm, 1024);
+        assert_eq!(tiles[0].tn, 512);
+        assert_eq!(tiles.last().unwrap().t0, 512);
+    }
+
+    #[test]
+    fn va_blocking_picks_a_named_panel_inside_the_box() {
+        let cap = AccTile::ISLAND_P3_DEFAULT;
+        let macs = 512;
+        let quarter = va_blocking_tile(1024, 128, 512, cap, macs);
+        assert_eq!((quarter.m, quarter.n, quarter.k), (1024, 128, 512));
+        assert_eq!(tile_gemm(1024, 128, 512, quarter).len(), 1);
+
+        let half = va_blocking_tile(512, 256, 16, cap, macs);
+        assert_eq!((half.m, half.n), (512, 256));
+        assert_eq!(tile_gemm(512, 256, 16, half).len(), 1);
+
+        // Same descriptor count as the square panel, and every tile is named.
+        // Wider N wins, so the second M tile can reuse B.
+        let wide = va_blocking_tile(1024, 256, 512, cap, macs);
+        assert_eq!((wide.m, wide.n), (512, 256));
+        let tiles = tile_gemm(1024, 256, 512, wide);
+        assert_eq!(tiles.len(), 2);
+        assert!(tiles.iter().all(|g| g.tm == 512 && g.tn == 256));
+
+        // 129 columns: the 128-wide panel is the only cut with a named tile.
+        let edge = va_blocking_tile(1024, 129, 512, cap, macs);
+        assert_eq!((edge.m, edge.n), (1024, 128));
+
+        let small = va_blocking_tile(100, 100, 8, cap, macs);
+        assert_eq!((small.m, small.n), (512, 512));
+        assert_eq!(tile_gemm(100, 100, 8, small).len(), 1);
+
+        let tiny = AccTile { m: 2, n: 2, k: 2 };
+        assert_eq!(va_blocking_tile(4, 4, 4, tiny, macs), tiny);
     }
 }

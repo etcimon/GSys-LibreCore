@@ -47,7 +47,7 @@ Related:
 | Feature | How the test hits it | RTL / contract locus |
 |---|---|---|
 | INT8 GEMM → i32 C | `gemm_s8` / torch `int8` matmul | OP_GEMM, Desc64, `ai_gemm_s8_smoke` |
-| AccTile 256 geometry | `Device.caps()` + optional host tile stream | CAP AccTile / I1 freeze |
+| Panel box 1024×512×512, MAC issue 512 | `Device.caps()` + optional host tile stream | CAP AccTile / I1 freeze (`AI_LIVE_MACS`) |
 | Multi-ticket sequential | tickets 20–22 / FIFO claim order | CPL FIFO + DONE @0x10C |
 | Soft UIO path | `AI_TENSOR_UIO=virt://virt-ai-pcie/island0` | board-uio-eventfd soft-sticky |
 | Virtual PCIe / SSH stand-in | `--virt-mode tcp` CardAgent | pcie-endpoint virtio-SSH |
@@ -239,7 +239,7 @@ Package never path-depends monorepo crates (KD0). Spawn only via soak scripts.
 
 **Pass criteria for frameworks path:** all run Device cases green; when torch is
 present, every `TestAiIsland*` case matches torch int32 matmul of int8 inputs
-and reports `board_id=virt-ai-pcie` with AccTile/Macs 256.
+and reports `board_id=virt-ai-pcie` with AccTile/Macs 512.
 
 **Pass criteria for HARD phase:** `ai_island_mmio_smoke` + `ai_gemm_s8_smoke` SUCCESS
 under `AI_TENSOR_CORE=g6lc64_ai` / `work-ver-ai` (same as historical lab gate).

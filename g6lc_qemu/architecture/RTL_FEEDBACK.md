@@ -148,10 +148,11 @@ of the asks above load-bearing rather than tidiness:
   quantities (`BW_measured`, `TOPS_sustained@AI`). The emulator's D2 layer produces *modelled* ones.
   A modelled number that is never diffed against the measurement is not feedback; it is decoration.
 
-The live geometry makes the size of the gap concrete. `AiIslandLatencyDefault` is one cluster at 256
-MAC/cycle and 1 GHz, i.e. **0.512 TOPS** by the §2 definition; the §5.1 throughput SKU is 8 clusters ×
-4096 MAC/cycle at 1.5 GHz, i.e. **98.3 TOPS** — a **192×** gap, of which 128× is MAC width and 1.5× is
-clock. The published `256³` directed result of **83,705 cycles** against an ideal of 65,536
+The live geometry makes the size of the gap concrete. `AiIslandLatencyDefault` is one cluster at 512
+MAC/cycle and a 2 GHz nameplate, i.e. **2.048 TOPS** by the §2 definition, with a class-0 DRAM
+nameplate of **16 GB/s** (the 64-bit port is still 8 bytes/cycle). The sequencer box is 1024×512×512. MAC issue stays 512. The VA panels are 512×512, 512×256, and 1024×128. The §5.1 throughput SKU is 8 clusters ×
+4096 MAC/cycle at 1.5 GHz, i.e. **98.3 TOPS** — a **48×** gap, of which 64× is MAC count and 1.5/2.0 is
+clock. The published `256³` directed result of **83,705 cycles** is the previous 256-MAC array, against an ideal of 65,536
 (`16,777,216` MAC ÷ 256 MAC/cycle) is **78% MAC utilisation**, so roughly 18,000 cycles are
 sequencing and memory rather than arithmetic. Those overhead cycles do **not** shrink when the array
 widens: at the 8192 MAC/cycle latency-SKU target the same GEMM needs only 2,048 MAC cycles, so on
@@ -165,21 +166,21 @@ plan's own worked numbers so the model tracks the design rather than a retyped t
 SKU comes out at 98.3 TOPS with a machine balance of ~123 MAC/byte (§4 says ~125), the `T = 512` row
 is compute-bound, the `T = 128` row is bandwidth-bound (§4 asks 781 GB/s for it), and the arithmetic
 intensity of a `T`-blocked GEMM is `T / 2` regardless of shape. Against the live configuration the
-same module reports the MAC bound and **refuses** the bandwidth bound when no measured value is
-supplied, because F11 leaves `DramGBps` at zero. If a measured `measured_dram_gbps_x1000` is supplied,
+same module closes the bandwidth bound on the 16 GB/s nameplate (8 bytes/cycle). A fixture that
+clears `dram_gbps` still leaves that bound unresolved. If a measured `measured_dram_gbps_x1000` is supplied,
 the roofline closes and the cap window publishes it in the upper 16 bits of `CAP_OFF_DRAM_GBPS` —
 but F14 notes that the 16-bit half saturates at 65.535 GB/s (in 1/1000 units), so the 400 GB/s target
 cannot be reported precisely through that field.
 
 | Quantity | Live config | Throughput SKU (§5.1) |
 |---|---|---|
-| MAC/cycle | 256 | 32 768 |
-| Peak, §2 definition | 0.512 TOPS | 98.3 TOPS |
-| Blocking `T` | 256 | 512 |
-| Input-only intensity (§4's number) | 128 MAC/byte | 256 MAC/byte |
-| Intensity incl. `s32` writeback (F13) | **42 MAC/byte** at `256³` | — |
-| Machine balance | **unresolved** (F11) | ~123 MAC/byte |
-| Max submittable shape (F12) | 256 per dimension | 512 per dimension |
+| MAC/cycle | 512 | 32 768 |
+| Peak, §2 definition | 2.048 TOPS | 98.3 TOPS |
+| Blocking `T` | 512 (`min` of the 1024×512 box) | 512 |
+| Input-only intensity (§4's number) | 256 MAC/byte | 256 MAC/byte |
+| Intensity incl. `s32` writeback (F13) | **85 MAC/byte** at `512³` | — |
+| Machine balance | **64 MAC/byte** (16 GB/s nameplate, 8 bytes/cycle) | ~123 MAC/byte |
+| Max submittable shape (F12) | M≤1024, N≤512, K≤512 | 512 per dimension |
 | `256³` MAC bound | 65 536 cycles | — |
 | `256³` measured (design side) | 83 705 cycles → **78%** | — |
 
@@ -193,7 +194,7 @@ statement about the *design*, not only about the emulator:
 | | §4's model | `g6lc_ai_gemm_seq.sv` as built |
 |---|---|---|
 | Dataflow | `T × T` output block, streaming the reduction | load **all** of A, then **all** of B, MAC, store C |
-| Valid shape range | any `m, n, k` | `m, n, k ≤ MaxDim` only (F12) |
+| Valid shape range | any `m, n, k` | live box `m ≤ 1024`, `n ≤ 512`, `k ≤ 512` (F12) |
 | Input bytes | `macs · 2 / T` | `m·k + k·n`, each operand read once |
 | Writeback | not counted | `4 · m · n`, i.e. 2× the inputs at `m = n = k = T` (F13) |
 
@@ -245,7 +246,7 @@ clusters**. The emulator must not grow a second MAC/byte model in Python (`AI_BR
 | Stream plane `g6lc64_stream8` | Orthogonal envelope until FDT trusted; do not merge with smt2 DI. |
 | RVV / Ara | Core-attached memcpy/math. Do **not** widen `AiTileM/N/K=8` with island TOPS. |
 
-The live 0.512 TOPS fixture versus the ~98.3 TOPS plan is a **192×** MAC×clock gap. Growing
+The live 2.048 TOPS nameplate versus the ~98.3 TOPS plan is a **48×** gap. Growing
 `MacsPerCycle` without I3 (F11) is the §11 failure mode the emulator already predicts (~10%
 utilisation if the 256³ memory path is unchanged).
 

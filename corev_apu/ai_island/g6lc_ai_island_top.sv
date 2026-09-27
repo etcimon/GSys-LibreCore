@@ -14,8 +14,10 @@
 //   0x0114          done status (RO) — CPL FIFO head
 //   Completion FIFO depth = min(QueueDepth, 16) (see g6lc_ai_cpl_fifo / completion-fifo.md)
 //   0x0118/0x011C   desc_ptr lo/hi (fetch source when doorbell[31]=1)
-//   REG_OFF_QUEUE   0x0120+q*0x20  region: +0 base_lo, +4 base_hi, +8 limit_lo,
+//   REG_OFF_QUEUE   0x0120       q0 region: +0 base_lo, +4 base_hi, +8 limit_lo,
 //                            +c limit_hi, +10 perm (write commits region)
+//   REG_OFF_QUEUE_TAIL 0x01A0+(q-1)*0x20  q>=1. 0x0140 is the descriptor latch,
+//                            so q1 is not 0x0120+0x20.
 //   DESC_BASE       0x0140..0x017F  descriptor latch (16x32-bit)
 //   PMU_OFF_R_BEATS / W_BEATS / CYCLES / GBPS_X1000  (RO, sticky last GEMM)
 //   CAP_OFF_MAX_AR_OUT 0x40  GEMM multi-outstanding AR (I3)
@@ -108,6 +110,12 @@ module g6lc_ai_island_top
 
   // Forward declared: PMU hold lives with other regs below; default 0 until first GEMM
   logic [31:0] pmu_gbps_x1000_q;
+  // A/B reads are full-width beats. C stores are 8-byte beats (a 4-byte
+  // odd-n tail is billed as 8, which is the whole beat when the port is
+  // 64 bits). Billing every handshake at AxiDataWidth would publish a C
+  // store as 64 bytes on the 512-bit port.
+  localparam int unsigned PmuBusBytes = AxiDataWidth / 8;
+  localparam int unsigned PmuCBytes   = (PmuBusBytes > 8) ? 8 : PmuBusBytes;
 
   // Single source for the granted-format bitmap: the capability window
   // publishes it and the descriptor engine enforces it. Binding both from one
@@ -166,6 +174,7 @@ module g6lc_ai_island_top
   logic [QidWidth-1:0] db_qid_q;
   logic [31:0]       db_ticket_q;
   logic              submit_pulse_q;
+  logic              db_pending_q; // latched doorbell waiting for a free engine slot
   // Completion FIFO (replaces single done sticky overwrite)
   logic              cpl_push, cpl_pop;
   logic [31:0]       cpl_push_ticket;
@@ -220,6 +229,11 @@ module g6lc_ai_island_top
   logic                  check_req, check_need_r, check_need_w, check_ok;
   logic [QidWidth-1:0]   check_qid;
   logic [AddrWidth-1:0]  check_addr, check_len;
+  logic                  probe_req, probe_ok;
+  logic [QidWidth-1:0]   probe_qid;
+  logic [AddrWidth-1:0]  probe_addr, probe_len;
+  logic                  sb_fetch_try, desc_fetch_ok;
+  logic                  fetch_refuse_q, fetch_refuse_sb_q;
 
   desc_bits_t desc_bits;
   always_comb begin
@@ -239,7 +253,14 @@ module g6lc_ai_island_top
       .check_len_i   (check_len),
       .check_need_r_i(check_need_r),
       .check_need_w_i(check_need_w),
-      .check_ok_o    (check_ok)
+      .check_ok_o    (check_ok),
+      .probe_req_i   (probe_req),
+      .probe_qid_i   (probe_qid),
+      .probe_addr_i  (probe_addr),
+      .probe_len_i   (probe_len),
+      .probe_need_r_i(1'b1),
+      .probe_need_w_i(1'b0),
+      .probe_ok_o    (probe_ok)
   );
 
   // Stretch core sideband pulse: zero ptr ⇒ submit latched desc; non-zero
@@ -248,25 +269,50 @@ module g6lc_ai_island_top
   logic [7:0]  sb_qid_hold_q;
   logic [31:0] sb_ticket_hold_q;
   logic        sb_fetch_pending_q;  // sideband wait for DMA
+  logic [63:0] sb_ptr_hold_q;
   logic        fetch_src_sb_q;      // 1=sideband kick, 0=doorbell[31]
   logic [63:0] fetch_addr_q;
+
+  // Descriptor fetch is 64 bytes of 8-byte beats. Probe the committed window
+  // for that range. Sideband wins the probe when both kicks land together.
+  assign sb_fetch_try = EnableDmaFetch && sb_enq_valid_i && (sb_desc_ptr_i != '0)
+      && fetch_ready;
+  // The queue id rides in the doorbell write. The registered copy is the
+  // previous doorbell, so a probe during that write has to use wdata.
+  wire db_wr = req_i && we_i && (addr_i[15:0] == 16'h0108);
+  assign probe_req  = 1'b1;
+  assign probe_qid  = sb_fetch_try ? QidWidth'(sb_qid_i)
+                      : (db_wr ? QidWidth'(wdata_i[7:0]) : db_qid_q);
+  assign probe_addr = sb_fetch_try ? sb_desc_ptr_i : desc_ptr_q;
+  assign probe_len  = AddrWidth'(g6lc_ai_desc_pkg::DescBytes);
+  assign desc_fetch_ok = probe_ok && (probe_addr[2:0] == 3'b0);
 
   // Sideband same-cycle submit only when not DMA-fetching a ptr
   logic sb_imm_submit;
   assign sb_imm_submit = sb_enq_valid_i &&
       (!EnableDmaFetch || (sb_desc_ptr_i == '0));
 
-  // Mux MMIO doorbell vs core sideband kick (sideband preferred)
+  // Mux MMIO doorbell vs core sideband kick (sideband preferred).
+  // A latched doorbell is one cycle wide. If the engine is busy, or the
+  // completion FIFO is full, that pulse is held until a slot is free.
+  // Disabled+idle still presents the pulse so the engine can return
+  // ST_DISABLED.
   logic                  submit_valid_mux;
   logic [QidWidth-1:0]   submit_qid_mux;
   logic [31:0]           submit_ticket_mux;
+  wire db_let_through = !cpl_full && !(sb_enq_sticky_q || sb_imm_submit)
+      && (submit_ready || (!enable_q && !busy));
   always_comb begin
     if (sb_enq_sticky_q || sb_imm_submit) begin
       submit_valid_mux  = 1'b1;
       submit_qid_mux    = QidWidth'(sb_imm_submit ? sb_qid_i : sb_qid_hold_q);
       submit_ticket_mux = sb_imm_submit ? sb_ticket_i : sb_ticket_hold_q;
+    end else if ((submit_pulse_q || db_pending_q) && db_let_through) begin
+      submit_valid_mux  = 1'b1;
+      submit_qid_mux    = db_qid_q;
+      submit_ticket_mux = db_ticket_q;
     end else begin
-      submit_valid_mux  = submit_pulse_q;
+      submit_valid_mux  = 1'b0;
       submit_qid_mux    = db_qid_q;
       submit_ticket_mux = db_ticket_q;
     end
@@ -278,6 +324,7 @@ module g6lc_ai_island_top
       sb_qid_hold_q      <= '0;
       sb_ticket_hold_q   <= '0;
       sb_fetch_pending_q <= 1'b0;
+      sb_ptr_hold_q      <= '0;
     end else begin
       if (submit_ready && (sb_enq_sticky_q || sb_imm_submit)) begin
         sb_enq_sticky_q <= 1'b0;
@@ -285,11 +332,17 @@ module g6lc_ai_island_top
         sb_enq_sticky_q  <= 1'b1;
         sb_qid_hold_q    <= sb_qid_i;
         sb_ticket_hold_q <= sb_ticket_i;
-      end else if (EnableDmaFetch && sb_enq_valid_i && (sb_desc_ptr_i != '0)) begin
+      end else if (EnableDmaFetch && sb_enq_valid_i && (sb_desc_ptr_i != '0)
+                   && desc_fetch_ok) begin
         // Hold identity for post-fetch submit
         sb_qid_hold_q      <= sb_qid_i;
         sb_ticket_hold_q   <= sb_ticket_i;
+        sb_ptr_hold_q      <= sb_desc_ptr_i;
         sb_fetch_pending_q <= 1'b1;
+      end else if (EnableDmaFetch && sb_enq_valid_i && (sb_desc_ptr_i != '0)) begin
+        sb_qid_hold_q      <= sb_qid_i;
+        sb_ticket_hold_q   <= sb_ticket_i;
+        sb_fetch_pending_q <= 1'b0;
       end
       // After sideband DMA success, sticky submit is armed in the write FF block
       if (EnableDmaFetch && fetch_done && fetch_src_sb_q && !fetch_err) begin
@@ -314,7 +367,7 @@ module g6lc_ai_island_top
 
   // I1-lite GEMM handshake / params (engine → unit)
   logic        gemm_start, gemm_ready, gemm_done, gemm_err;
-  logic [31:0] gemm_m, gemm_n, gemm_k;
+  logic [31:0] gemm_m, gemm_n, gemm_k, gemm_flags;
   logic [15:0] gemm_lda, gemm_ldb;
   logic [2:0]  gemm_numfmt;
   logic [AddrWidth-1:0] gemm_ptr_a, gemm_ptr_b, gemm_ptr_c;
@@ -330,12 +383,15 @@ module g6lc_ai_island_top
   if (EnableDmaFetch) begin : gen_dma_fetch
     axi_req_t  dma_mux_req;
     axi_resp_t dma_resp_int;
+    logic      fetch_grant_q;
     g6lc_ai_desc_fetch #(
-        .AddrWidth (AddrWidth),
-        .DataWidth (AxiDataWidth),
-        .IdWidth   (AxiIdWidth),
-        .axi_req_t (axi_req_t),
-        .axi_resp_t(axi_resp_t)
+        .AddrWidth  (AddrWidth),
+        .DataWidth  (AxiDataWidth),
+        .IdWidth    (AxiIdWidth),
+        .NrChannels (IslandCfg.DramChannels),
+        .ChanShift  (IslandCfg.DramChanShift),
+        .axi_req_t  (axi_req_t),
+        .axi_resp_t (axi_resp_t)
     ) i_fetch (
         .clk_i,
         .rst_ni,
@@ -345,6 +401,7 @@ module g6lc_ai_island_top
         .done_o  (fetch_done),
         .err_o   (fetch_err),
         .desc_o  (fetch_desc),
+        .grant_i (fetch_grant_q),
         .axi_req_o  (fetch_axi_req),
         .axi_resp_i (dma_resp_int)
     );
@@ -366,17 +423,18 @@ module g6lc_ai_island_top
         .axi_req_o  (store_axi_req),
         .axi_resp_i (dma_resp_int)
     );
-    // Geometry from IslandCfg (single source with capability window).
-    // I1-lite assumes square AccTileM=N=K; PeLanes = MacsPerCycle.
+    // Geometry from IslandCfg. M, N and K are separate so the VA panels
+    // 512×512, 512×256 and 1024×128 share one MAC issue width.
     // pragma translate_off
     initial begin
-      assert (IslandCfg.AccTileM == IslandCfg.AccTileN
-              && IslandCfg.AccTileN == IslandCfg.AccTileK)
-      else $error("g6lc_ai_island: AccTileM/N/K must be equal (I1-lite square tile)");
-      assert (IslandCfg.MacsPerCycle >= 1 && IslandCfg.AccTileM >= 1)
-      else $error("g6lc_ai_island: MacsPerCycle and AccTileM must be >= 1");
+      assert (IslandCfg.MacsPerCycle >= 1 && IslandCfg.AccTileM >= 1 &&
+              IslandCfg.AccTileN >= 1 && IslandCfg.AccTileK >= 1)
+      else $error("g6lc_ai_island: MacsPerCycle and AccTile must be >= 1");
       assert (IslandCfg.MacsPerCycle <= IslandCfg.AccTileK)
       else $error("g6lc_ai_island: MacsPerCycle must be <= AccTileK");
+      // One engine. N copies elaborate as g6lc_ai_cluster_set.
+      assert (IslandCfg.Clusters == 1 && IslandCfg.ClustersEnabled == 1)
+      else $error("g6lc_ai_island: Clusters>1 belongs on g6lc_ai_cluster_set");
     end
     // pragma translate_on
     g6lc_ai_gemm_seq #(
@@ -384,8 +442,12 @@ module g6lc_ai_island_top
         .DataWidth (AxiDataWidth),
         .IdWidth   (AxiIdWidth),
         .MaxDim    (IslandCfg.AccTileM),
+        .MaxM      (IslandCfg.AccTileM),
+        .MaxN      (IslandCfg.AccTileN),
+        .MaxK      (IslandCfg.AccTileK),
         .PeLanes   (IslandCfg.MacsPerCycle),
         .MaxAROut  (IslandCfg.MaxAROut),
+        // VaTurboEn enables reuse. It does not widen PeLanes.
         .ReuseBEn  (AiCfg.VaTurboEn),
         .ReuseAEn  (AiCfg.VaTurboEn),
         .MaxElementBytes(AiCfg.IslandFpEn ? 4 : 1),
@@ -414,13 +476,16 @@ module g6lc_ai_island_top
         .pmu_r_beats_o(gemm_pmu_r),
         .pmu_w_beats_o(gemm_pmu_w),
         .pmu_cycles_o (gemm_pmu_cy),
-        .reuse_b_i(1'b0),
+        // VaTurboEn=0 folds both requests to 0 and keeps invalidate set,
+        // which is the exact fetch. A set flag is a residency request for
+        // the 512×k operand, not an extra MAC.
+        .reuse_b_i(AiCfg.VaTurboEn && gemm_flags[FLAG_REUSE_B_SHIFT]),
         .reuse_b_epoch_i(32'd0),
-        .reuse_b_invalidate_i(1'b1),
+        .reuse_b_invalidate_i(!AiCfg.VaTurboEn),
         .pmu_reuse_b_hit_o(),
-        .reuse_a_i(1'b0),
+        .reuse_a_i(AiCfg.VaTurboEn && gemm_flags[FLAG_REUSE_A_SHIFT]),
         .reuse_a_epoch_i(32'd0),
-        .reuse_a_invalidate_i(1'b1),
+        .reuse_a_invalidate_i(!AiCfg.VaTurboEn),
         .pmu_reuse_a_hit_o(),
         .axi_req_o  (gemm_axi_req),
         .axi_resp_i (dma_resp_int)
@@ -437,6 +502,13 @@ module g6lc_ai_island_top
     assign dma_mux_req = store_active ? store_axi_req
                        : gemm_active  ? gemm_axi_req
                        : (!fetch_ready ? fetch_axi_req : '0);
+    // The fetch shares this response. Sample ownership in a flop so the
+    // grant does not comb-loop through fetch_ready, and so a GEMM beat
+    // cannot retire a descriptor read.
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) fetch_grant_q <= 1'b0;
+      else fetch_grant_q <= !fetch_ready && !store_active && !gemm_active;
+    end
     // I3: DDR4 page-command delay on island DMA only (Cas==0 = live bypass).
     if (IslandCfg.DramCas == 0) begin : gen_dram_t_bypass
       assign axi_dma_req_o = dma_mux_req;
@@ -640,7 +712,8 @@ module g6lc_ai_island_top
       .AddrWidth       (AddrWidth),
       .WriteCompletion (EnableDmaFetch),
       .ExecuteGemm     (EnableDmaFetch),
-      .DtypeMask       (DtypeMaskLp)
+      .DtypeMask       (DtypeMaskLp),
+      .BeatBytes       (AxiDataWidth / 8)
   ) i_engine (
       .clk_i, .rst_ni,
       .testmode_i      (testmode_i),
@@ -690,6 +763,7 @@ module g6lc_ai_island_top
       .gemm_ptr_a_o    (gemm_ptr_a),
       .gemm_ptr_b_o    (gemm_ptr_b),
       .gemm_ptr_c_o    (gemm_ptr_c),
+      .gemm_flags_o    (gemm_flags),
       .gemm_ready_i    (gemm_ready),
       .gemm_done_i     (gemm_done),
       .gemm_err_i      (gemm_err)
@@ -697,19 +771,18 @@ module g6lc_ai_island_top
 
   // ------------------------------------------------------------------ writes + prog pulse
   always_comb begin
+    logic [11:0] qd;
     int unsigned q;
-    logic [15:0] off;
-    q   = 0;
-    off = '0;
+    q = 0;
+    qd = ai_queue_decode(addr_i[15:0], NumQueues);
     prog_we    = 1'b0;
     prog_qid   = '0;
     prog_base  = '0;
     prog_limit = '0;
     prog_perm  = '0;
-    if (req_i && we_i && addr_i[15:0] >= 16'h0120 && addr_i[15:0] < 16'h0140) begin
-      q   = (unsigned'(addr_i[15:0]) - 32'h0120) >> 5;
-      off = (addr_i[15:0] - 16'h0120) & 16'h1f;
-      if (q < NumQueues && off[4:2] == 3'd4) begin
+    if (req_i && we_i && qd[11]) begin
+      q = qd[10:3];
+      if (q < NumQueues && qd[2:0] == 3'd4) begin
         // Commit region on perm write; base/limit already stored
         // Perm is the commit trigger so a half-programmed region can never go
         // live: base/lo/hi land in local regs first and only this write arms them.
@@ -722,6 +795,15 @@ module g6lc_ai_island_top
     end
   end
 
+  // The fetch, the GEMM, and the completion store share one AXI response.
+  // Descriptor checks leave the GEMM unit idle and then start it, so a kick
+  // during a job waits until the engine itself is idle and no new job is
+  // accepted on this cycle.
+  wire dma_quiet = !busy_engine && gemm_ready && wr_ready
+                   && !gemm_start && !wr_start
+                   && !(sb_enq_sticky_q || sb_imm_submit)
+                   && !((submit_pulse_q || db_pending_q) && db_let_through);
+
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       enable_q            <= 1'b0;
@@ -729,11 +811,14 @@ module g6lc_ai_island_top
       db_qid_q            <= '0;
       db_ticket_q         <= '0;
       submit_pulse_q      <= 1'b0;
+      db_pending_q        <= 1'b0;
       desc_ptr_q          <= '0;
       fetch_start_q       <= 1'b0;
       fetch_err_complete_q <= 1'b0;
       fetch_src_sb_q      <= 1'b0;
       fetch_addr_q        <= '0;
+      fetch_refuse_q      <= 1'b0;
+      fetch_refuse_sb_q   <= 1'b0;
       pmu_r_hold_q        <= '0;
       pmu_w_hold_q        <= '0;
       pmu_cy_hold_q       <= '0;
@@ -747,26 +832,44 @@ module g6lc_ai_island_top
     end else begin
       submit_pulse_q       <= 1'b0;
       fetch_start_q        <= 1'b0;
+      if (submit_pulse_q && !db_let_through)
+        db_pending_q <= 1'b1;
+      else if (db_pending_q && db_let_through)
+        db_pending_q <= 1'b0;
       fetch_err_complete_q <= 1'b0;
 
-      // I3: latch GEMM PMU at job done (milli-GB/s = bytes*ClockKhz/cycles/1000)
+      // I3: latch GEMM PMU at job done.
+      // milli-GB/s = bytes * ClockKhz / cycles / 1000. Read bytes follow
+      // the port width. Write bytes stay 8, so a wider port does not bill
+      // a C handshake at AxiDataWidth. At 64 bits PmuCBytes == PmuBusBytes
+      // and this is the previous (r+w)*width product.
       if (EnableDmaFetch && gemm_done) begin
         pmu_r_hold_q  <= gemm_pmu_r;
         pmu_w_hold_q  <= gemm_pmu_w;
         pmu_cy_hold_q <= gemm_pmu_cy;
         if (gemm_pmu_cy != 0) begin
           pmu_gbps_x1000_q <=
-              ((gemm_pmu_r + gemm_pmu_w) * 32'(AxiDataWidth / 8) *
+              ((gemm_pmu_r * 32'(PmuBusBytes) + gemm_pmu_w * 32'(PmuCBytes)) *
                32'(IslandCfg.ClockKhz)) / gemm_pmu_cy / 32'd1000;
         end else
           pmu_gbps_x1000_q <= '0;
       end
 
-      // Sideband kick with non-zero ptr ⇒ start DMA (identity held in sticky FF)
-      if (EnableDmaFetch && sb_enq_valid_i && (sb_desc_ptr_i != '0) && fetch_ready) begin
-        fetch_addr_q   <= sb_desc_ptr_i;
+      // Sideband kick with non-zero ptr ⇒ descriptor read, once the shared
+      // response is free. A kick during a job is held in sb_fetch_pending_q.
+      fetch_refuse_q    <= 1'b0;
+      fetch_refuse_sb_q <= 1'b0;
+      if (EnableDmaFetch && fetch_ready && dma_quiet &&
+          ((sb_enq_valid_i && (sb_desc_ptr_i != '0) && desc_fetch_ok) ||
+           (sb_fetch_pending_q && !sb_enq_valid_i))) begin
+        fetch_addr_q   <= (sb_enq_valid_i && (sb_desc_ptr_i != '0)) ? sb_desc_ptr_i
+                                                                    : sb_ptr_hold_q;
         fetch_src_sb_q <= 1'b1;
         fetch_start_q  <= 1'b1;
+      end else if (EnableDmaFetch && sb_enq_valid_i && (sb_desc_ptr_i != '0)
+                   && fetch_ready && !desc_fetch_ok) begin
+        fetch_refuse_q    <= 1'b1;
+        fetch_refuse_sb_q <= 1'b1;
       end
 
       // DMA fetch completion: load latch + submit, or bus-error complete
@@ -789,10 +892,18 @@ module g6lc_ai_island_top
           db_qid_q    <= QidWidth'(wdata_i[7:0]);
           db_ticket_q <= {9'h0, wdata_i[30:8]};
           // [31]=fetch_from_mem (DMA); else immediate submit of latched desc
-          if (EnableDmaFetch && wdata_i[31] && (desc_ptr_q != '0) && fetch_ready) begin
-            fetch_addr_q   <= desc_ptr_q;
-            fetch_src_sb_q <= 1'b0;
-            fetch_start_q  <= 1'b1;
+          if (EnableDmaFetch && wdata_i[31] && (desc_ptr_q != '0) && fetch_ready
+              && !sb_fetch_try) begin
+            if (desc_fetch_ok) begin
+              fetch_addr_q   <= desc_ptr_q;
+              fetch_src_sb_q <= 1'b0;
+              fetch_start_q  <= 1'b1;
+              db_pending_q   <= 1'b0;
+            end else begin
+              fetch_refuse_q    <= 1'b1;
+              fetch_refuse_sb_q <= 1'b0;
+              db_pending_q      <= 1'b0;
+            end
           end else if (!(EnableDmaFetch && wdata_i[31] && (desc_ptr_q != '0))) begin
             submit_pulse_q <= 1'b1;
           end
@@ -802,13 +913,13 @@ module g6lc_ai_island_top
           desc_ptr_q[63:32] <= wdata_i;
         end else if (addr_i[15:0] >= 16'h0140 && addr_i[15:0] < 16'h0180) begin
           desc_words_q[addr_i[5:2]] <= wdata_i;
-        end else if (addr_i[15:0] >= 16'h0120 && addr_i[15:0] < 16'h0140) begin
+        end else begin
+          automatic logic [11:0] qd;
           automatic int unsigned q;
-          automatic logic [15:0] off;
-          q   = (unsigned'(addr_i[15:0]) - 32'h0120) >> 5;
-          off = (addr_i[15:0] - 16'h0120) & 16'h1f;
-          if (q < NumQueues) begin
-            unique case (off[4:2])
+          qd = ai_queue_decode(addr_i[15:0], NumQueues);
+          q  = qd[10:3];
+          if (qd[11] && q < NumQueues) begin
+            unique case (qd[2:0])
               3'd0: base_q[q][31:0]   <= wdata_i;
               3'd1: base_q[q][63:32]  <= wdata_i;
               3'd2: limit_q[q][31:0]  <= wdata_i;
@@ -840,6 +951,11 @@ module g6lc_ai_island_top
       cpl_push_ticket = fetch_src_sb_q ? sb_ticket_hold_q : db_ticket_q;
       cpl_push_status = ST_ERR;
       cpl_push_irq    = 1'b0;
+    end else if (fetch_refuse_q) begin
+      cpl_push        = 1'b1;
+      cpl_push_ticket = fetch_refuse_sb_q ? sb_ticket_hold_q : db_ticket_q;
+      cpl_push_status = ST_BAD_PTR;
+      cpl_push_irq    = 1'b0;
     end
     // DONE claim: pop head (PLIC discipline)
     if (req_i && we_i && (addr_i[15:0] == 16'h010C) && wdata_i[0]) begin
@@ -854,10 +970,10 @@ module g6lc_ai_island_top
   logic        cap_pending_q;
 
   always_comb begin
+    logic [11:0] qd;
     int unsigned q;
-    logic [15:0] off;
-    q   = 0;
-    off = '0;
+    q  = 0;
+    qd = '0;
     rdata_n  = '0;
     rvalid_n = 1'b0;
     if (req_i && !cap_sel) begin
@@ -882,11 +998,11 @@ module g6lc_ai_island_top
         default: begin
           if (addr_i[15:0] >= 16'h0140 && addr_i[15:0] < 16'h0180)
             rdata_n = desc_words_q[addr_i[5:2]];
-          else if (addr_i[15:0] >= 16'h0120 && addr_i[15:0] < 16'h0140) begin
-            q   = (unsigned'(addr_i[15:0]) - 32'h0120) >> 5;
-            off = (addr_i[15:0] - 16'h0120) & 16'h1f;
-            if (q < NumQueues) begin
-              unique case (off[4:2])
+          else begin
+            qd = ai_queue_decode(addr_i[15:0], NumQueues);
+            q  = qd[10:3];
+            if (qd[11] && q < NumQueues) begin
+              unique case (qd[2:0])
                 3'd0: rdata_n = base_q[q][31:0];
                 3'd1: rdata_n = base_q[q][63:32];
                 3'd2: rdata_n = limit_q[q][31:0];

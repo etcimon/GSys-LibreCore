@@ -6,7 +6,7 @@ Structured PyTorch validation of ai-tensor against **ai_island** features
 via the virtual PCIe AI board (``virt-ai-pcie`` / ``virt-card`` backend).
 
 Maps framework GEMM to the same host path that will eventually hit:
-  CAP/CTL @ 0x4000_0000 · PLIC-8 claim order · AccTile 256 · INT8→i32 C ·
+  CAP/CTL @ 0x4000_0000 · PLIC-8 claim order · panel 1024×512×512 · INT8→i32 C ·
   multi-ticket DONE FIFO · soft UIO ``virt://…`` · optional TCP CardAgent
   (BAR4 / virtio-SSH stand-in).
 
@@ -133,11 +133,11 @@ class TestAiIslandGemmThroughVirtPcie(unittest.TestCase):
             self.assertEqual(dev.board_id, self.board)
             self.assertIn("virt-card", dev.backend)
             caps = dev.caps()
-            # island_p3 / I1 freeze
-            self.assertEqual(caps.acc_tile_m, 256)
-            self.assertEqual(caps.acc_tile_n, 256)
-            self.assertEqual(caps.acc_tile_k, 256)
-            self.assertEqual(caps.macs_per_cycle, 256)
+            # island_p3 panel box; MAC issue stays AI_LIVE_MACS
+            self.assertEqual(caps.acc_tile_m, 1024)
+            self.assertEqual(caps.acc_tile_n, 512)
+            self.assertEqual(caps.acc_tile_k, 512)
+            self.assertEqual(caps.macs_per_cycle, 512)
             self.assertEqual(caps.noc_width, 64)
 
     def test_gemm_s8_2x2_golden(self) -> None:

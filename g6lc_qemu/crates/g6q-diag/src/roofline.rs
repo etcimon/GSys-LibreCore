@@ -364,15 +364,21 @@ mod tests {
     use super::*;
 
     /// The live island configuration, as published today.
+    ///
+    /// Clock, MAC width, and DRAM nameplate match `AiIslandLatencyDefault`:
+    /// 512 MAC/cycle, 2 GHz, 16 GB/s on a 64-bit port (8 bytes/cycle).
+    /// The accumulator box is 1024×512×512, so blocking `T` stays
+    /// `min(M, N) = 512`. The nameplate is not a re-measurement of the
+    /// 1 GHz stream, and a VA level is not part of this rate.
     fn live() -> AiIslandConfig {
         AiIslandConfig {
             clusters: 1,
-            macs_per_cycle: 256,
-            clock_khz: 1_000_000,
-            acc_tile_m: 256,
-            acc_tile_n: 256,
-            acc_tile_k: 256,
-            dram_gbps: 0, // "not measured (I3)"
+            macs_per_cycle: 512,
+            clock_khz: 2_000_000,
+            acc_tile_m: 1024,
+            acc_tile_n: 512,
+            acc_tile_k: 512,
+            dram_gbps: 16,
             ..Default::default()
         }
     }
@@ -432,13 +438,13 @@ mod tests {
     /// a shape larger than `T`, which is the re-read trap §4.1 names.
     #[test]
     fn the_read_model_takes_the_larger_of_the_floor_and_the_reread() {
-        let cfg = live(); // T = 256
+        let cfg = live(); // T = 512
 
-        // Small shape: the compulsory floor dominates. `2 / T` would say 2,048 bytes.
+        // Small shape: the compulsory floor dominates. `2 / T` would say 1,024 bytes.
         let small = gemm(&cfg, 64, 64, 64).unwrap();
         assert_eq!(small.compulsory_read_bytes, 64 * 64 + 64 * 64);
-        assert_eq!(small.tiled_read_bytes, 262_144 * 2 / 256);
-        assert_eq!(small.tiled_read_bytes, 2_048);
+        assert_eq!(small.tiled_read_bytes, 262_144 * 2 / 512);
+        assert_eq!(small.tiled_read_bytes, 1_024);
         assert_eq!(
             small.dram_read_bytes, 8_192,
             "a resident schedule still reads both operands once"
@@ -446,14 +452,14 @@ mod tests {
 
         // At exactly m = n = k = T the two models coincide, which is why a test that only
         // looked at the maximal shape could not tell them apart.
-        let square = gemm(&cfg, 256, 256, 256).unwrap();
-        assert_eq!(square.compulsory_read_bytes, 131_072);
-        assert_eq!(square.tiled_read_bytes, 131_072);
-        assert_eq!(square.dram_read_bytes, 131_072);
+        let square = gemm(&cfg, 512, 512, 512).unwrap();
+        assert_eq!(square.compulsory_read_bytes, 524_288);
+        assert_eq!(square.tiled_read_bytes, 524_288);
+        assert_eq!(square.dram_read_bytes, 524_288);
 
-        // Large shape: the re-read model dominates by an order of magnitude.
+        // Large shape: re-read dominates by S/T. At T=512 a 4096 cube is 8×.
         let large = gemm(&cfg, 4096, 4096, 4096).unwrap();
-        assert!(large.tiled_read_bytes > large.compulsory_read_bytes * 15);
+        assert_eq!(large.tiled_read_bytes, large.compulsory_read_bytes * 8);
         assert_eq!(large.dram_read_bytes, large.tiled_read_bytes);
     }
 
@@ -465,40 +471,43 @@ mod tests {
     /// achievable throughput by 3x on this shape.
     #[test]
     fn the_accumulator_writeback_dominates_at_the_engines_own_shapes() {
-        let r = gemm(&live(), 256, 256, 256).unwrap();
-        assert_eq!(r.dram_read_bytes, 131_072);
-        assert_eq!(r.dram_write_bytes, 4 * 256 * 256);
-        assert_eq!(r.dram_write_bytes, 262_144);
+        let r = gemm(&live(), 512, 512, 512).unwrap();
+        assert_eq!(r.dram_read_bytes, 524_288);
+        assert_eq!(r.dram_write_bytes, 4 * 512 * 512);
+        assert_eq!(r.dram_write_bytes, 1_048_576);
         assert_eq!(
             r.dram_write_bytes,
             r.dram_read_bytes * 2,
             "s32 writeback is twice the int8 input traffic at m=n=k=T"
         );
-        assert_eq!(r.dram_bytes, 393_216);
+        assert_eq!(r.dram_bytes, 1_572_864);
 
         // Total intensity is therefore a third of the input-only figure §4 quotes.
-        assert_eq!(r.tiled_input_intensity_mac_per_byte, 128);
-        assert_eq!(r.intensity_mac_per_byte, 42);
+        assert_eq!(r.tiled_input_intensity_mac_per_byte, 256);
+        assert_eq!(r.intensity_mac_per_byte, 85);
     }
 
     /// The descriptor contract bounds every dimension by its accumulator tile, and the
     /// acceptance shape in the plan is far outside it.
     ///
-    /// The live GEMM unit states `m, n, k in [1, MaxDim]` and rejects anything larger, so
-    /// the plan's `M = N = K = 4096` gate cannot be submitted as one descriptor at all --
-    /// it needs host-side blocking into 16^3 pieces. The bound carries that fact rather
-    /// than quietly describing a machine that would refuse the work.
+    /// The live GEMM unit accepts `m ≤ 1024`, `n ≤ 512`, `k ≤ 512` and rejects
+    /// anything larger, so the plan's `M = N = K = 4096` gate cannot be submitted
+    /// as one descriptor. Host blocking of that cube is 4×8×8 panels. The bound
+    /// carries that fact rather than describing a machine that would accept the cube.
     #[test]
     fn a_shape_past_the_blocking_limit_is_reported_as_not_fitting() {
-        let cfg = live(); // acc_tile_* = 256
+        let cfg = live(); // box 1024×512×512
 
-        assert!(gemm(&cfg, 256, 256, 256).unwrap().shape_fits_blocking);
+        assert!(gemm(&cfg, 512, 512, 512).unwrap().shape_fits_blocking);
+        assert!(gemm(&cfg, 512, 256, 512).unwrap().shape_fits_blocking);
+        assert!(gemm(&cfg, 1024, 128, 512).unwrap().shape_fits_blocking);
         assert!(gemm(&cfg, 1, 1, 1).unwrap().shape_fits_blocking);
 
-        // One dimension over the limit is enough.
-        assert!(!gemm(&cfg, 257, 256, 256).unwrap().shape_fits_blocking);
-        assert!(!gemm(&cfg, 256, 257, 256).unwrap().shape_fits_blocking);
-        assert!(!gemm(&cfg, 256, 256, 257).unwrap().shape_fits_blocking);
+        // 513 fits M. It does not fit N or K. 1025 does not fit M.
+        assert!(gemm(&cfg, 513, 512, 512).unwrap().shape_fits_blocking);
+        assert!(!gemm(&cfg, 1025, 512, 512).unwrap().shape_fits_blocking);
+        assert!(!gemm(&cfg, 512, 513, 512).unwrap().shape_fits_blocking);
+        assert!(!gemm(&cfg, 512, 512, 513).unwrap().shape_fits_blocking);
 
         // The plan's own acceptance gate does not fit the live contract.
         assert!(!gemm(&cfg, 4096, 4096, 4096).unwrap().shape_fits_blocking);
@@ -540,10 +549,13 @@ mod tests {
         );
     }
 
-    /// An unmeasured DRAM class has no roofline. This is the live part's actual state.
+    /// A zero DRAM nameplate has no roofline. The live package publishes 16 GB/s;
+    /// this fixture clears that field so a missing number stays unresolved.
     #[test]
     fn an_unmeasured_dram_class_leaves_the_bandwidth_bound_unresolved() {
-        let r = gemm(&live(), 256, 256, 256).unwrap();
+        let mut cfg = live();
+        cfg.dram_gbps = 0;
+        let r = gemm(&cfg, 256, 256, 256).unwrap();
         assert_eq!(r.dram_bound_cycles, None, "must not invent a bandwidth");
         assert_eq!(r.balance_mac_per_byte, None);
         assert_eq!(r.bound, Bound::Unresolved);
@@ -599,13 +611,19 @@ mod tests {
     }
 
     /// The known measured point: `corev_apu/ai_island/README.md` reports the 256-cubed
-    /// directed GEMM at 83,705 cycles on the live single-cluster configuration.
+    /// directed GEMM at 83,705 cycles on the previous 256-MAC configuration.
     ///
     /// The MAC bound is 65,536 cycles, so about 78% of the time is arithmetic and the rest is
     /// sequencing and memory. That residue is what decides whether widening the array helps.
+    /// The live array is now 512 MAC/cycle; this cycle count was not re-timed.
     #[test]
     fn the_measured_256_cubed_point_shows_the_sequencing_residue() {
-        let r = gemm(&live(), 256, 256, 256).unwrap();
+        let mut then = live();
+        then.macs_per_cycle = 256;
+        then.acc_tile_m = 256;
+        then.acc_tile_n = 256;
+        then.acc_tile_k = 256;
+        let r = gemm(&then, 256, 256, 256).unwrap();
         assert_eq!(r.macs, 16_777_216);
         assert_eq!(r.mac_bound_cycles, 65_536);
 
@@ -616,7 +634,7 @@ mod tests {
         // Widening the array without touching the memory path does not remove the residue.
         // At the latency-SKU target of 8192 MAC/cycle the same shape needs 2,048 MAC cycles,
         // so if the ~18,000 non-MAC cycles stay, utilisation collapses -- the §11 failure mode.
-        let mut wide = live();
+        let mut wide = then.clone();
         wide.macs_per_cycle = 8192;
         let rw = gemm(&wide, 256, 256, 256).unwrap();
         assert_eq!(rw.mac_bound_cycles, 2_048);
@@ -630,18 +648,23 @@ mod tests {
         );
     }
 
-    /// The live part is two orders of magnitude below the target, and the model says so.
+    /// The live part is 48× below the throughput sketch, and the model says so.
     #[test]
     fn the_live_configuration_is_far_below_the_hundred_tops_definition() {
         let cfg = live();
-        let r = gemm(&cfg, 256, 256, 256).unwrap();
-        // 1 cluster x 256 MAC/cycle x 1 GHz x 2 ops = 512 GOPS.
-        assert_eq!(r.peak_ops_per_sec(&cfg).unwrap(), 512_000_000_000);
+        let r = gemm(&cfg, 512, 512, 512).unwrap();
+        // 1 cluster x 512 MAC/cycle x 2 GHz x 2 ops = 2048 GOPS.
+        assert_eq!(r.peak_ops_per_sec(&cfg).unwrap(), 2_048_000_000_000);
+        // 16 GB/s at 2 GHz is 8 bytes/cycle. The 512³ shape is still
+        // compute-bound: MAC cycles 262144, DRAM cycles 196608.
+        assert_eq!(r.dram_bound_cycles, Some(196_608));
+        assert_eq!(r.bound, Bound::Compute);
+        assert_eq!(r.balance_mac_per_byte, Some(64));
 
         let target = throughput_sku();
-        let rt = gemm(&target, 256, 256, 256).unwrap();
+        let rt = gemm(&target, 512, 512, 512).unwrap();
         let ratio = rt.peak_ops_per_sec(&target).unwrap() / r.peak_ops_per_sec(&cfg).unwrap();
-        assert_eq!(ratio, 192, "128x MAC width and 1.5x clock");
+        assert_eq!(ratio, 48, "64x MAC count and 1.5/2.0 clock");
     }
 
     /// Unresolved geometry yields no bound at all, rather than a guessed one.

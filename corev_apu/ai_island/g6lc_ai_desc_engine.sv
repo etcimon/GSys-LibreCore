@@ -27,7 +27,9 @@ module g6lc_ai_desc_engine
     // the SAME value the capability window publishes at CAP_OFF_DTYPE_MASK,
     // otherwise software discovers a format the engine then refuses. The island
     // top passes one constant to both; do not default this to all-ones.
-    parameter logic [15:0] DtypeMask       = 16'h0001
+    parameter logic [15:0] DtypeMask       = 16'h0001,
+    // A/B loads are one full beat of this many bytes. Live SoC is 8.
+    parameter int unsigned BeatBytes       = 8
 ) (
     input  logic                  clk_i,
     input  logic                  rst_ni,
@@ -89,6 +91,7 @@ module g6lc_ai_desc_engine
     output logic [AddrWidth-1:0]  gemm_ptr_a_o,
     output logic [AddrWidth-1:0]  gemm_ptr_b_o,
     output logic [AddrWidth-1:0]  gemm_ptr_c_o,
+    output logic [31:0]           gemm_flags_o,
     input  logic                  gemm_ready_i,
     input  logic                  gemm_done_i,
     input  logic                  gemm_err_i
@@ -151,6 +154,7 @@ module g6lc_ai_desc_engine
   assign gemm_ptr_a_o = AddrWidth'(desc_q.ptr_a);
   assign gemm_ptr_b_o = AddrWidth'(desc_q.ptr_b);
   assign gemm_ptr_c_o = AddrWidth'(desc_q.ptr_c);
+  assign gemm_flags_o = desc_q.flags;
 
   // After checks (and optional GEMM): completion DMA or done pulse
   function automatic logic want_wr_cpl(input desc_t d, input logic wr_en);
@@ -174,10 +178,10 @@ module g6lc_ai_desc_engine
     check_req_o    = 1'b0;
     check_qid_o    = qid_q;
     check_addr_o   = '0;
-    // 8 is the PROBE width, not the transfer size: this stage only proves the
-    // pointer itself lands in the queue's region. Full-extent checking of the
-    // m*n*k footprint is the GEMM sequencer's job, not the engine's.
-    check_len_o    = AddrWidth'(8);  // pointer-sized accesses
+    // Pointer-sized probes (completion, scale). A/B/C override this with the
+    // byte length of the tensor so a matrix cannot start in-window and
+    // finish past the limit.
+    check_len_o    = AddrWidth'(8);
     check_need_r_o = 1'b0;
     check_need_w_o = 1'b0;
 
@@ -213,6 +217,11 @@ module g6lc_ai_desc_engine
         end else if (int'(qid_q) >= NumQueues) begin
           status_d = ST_BAD_QID;
           state_d  = ST_COMPLETE;
+        end else if (desc_q.flags[FLAG_REQUANT_SHIFT]) begin
+          // A set requant flag would otherwise run the integer GEMM and
+          // report success. The products would not be the requested post-op.
+          status_d = ST_BAD_OP;
+          state_d  = ST_COMPLETE;
         end else if (!desc_numfmt_granted(desc_q, DtypeMask)) begin
           // Fail closed on an ungranted numeric format. Checked here, in PARSE,
           // alongside version/op/qid rather than in the GEMM sequencer, because
@@ -230,9 +239,16 @@ module g6lc_ai_desc_engine
 
       ST_CHK_A: begin
         check_req_o    = 1'b1;
-        check_addr_o   = desc_q.ptr_a;
+        check_addr_o   = g6lc_ai_island_cfg_pkg::ai_beat_lo(desc_q.ptr_a, BeatBytes);
+        check_len_o    = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(
+                            desc_q.ptr_a,
+                            g6lc_ai_island_cfg_pkg::ai_operand_span(
+                                desc_q.m, 32'(desc_q.ld_ab[15:0]), desc_q.k,
+                                desc_compute_numfmt(desc_q)),
+                            BeatBytes));
         check_need_r_o = 1'b1;
-        if (!check_ok_i) begin
+        if (!g6lc_ai_island_cfg_pkg::ai_elem_aligned(
+                desc_q.ptr_a, desc_compute_numfmt(desc_q)) || !check_ok_i) begin
           status_d = ST_BAD_PTR;
           state_d  = ST_COMPLETE;
         end else state_d = ST_CHK_B;
@@ -240,9 +256,16 @@ module g6lc_ai_desc_engine
 
       ST_CHK_B: begin
         check_req_o    = 1'b1;
-        check_addr_o   = desc_q.ptr_b;
+        check_addr_o   = g6lc_ai_island_cfg_pkg::ai_beat_lo(desc_q.ptr_b, BeatBytes);
+        check_len_o    = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(
+                            desc_q.ptr_b,
+                            g6lc_ai_island_cfg_pkg::ai_operand_span(
+                                desc_q.n, 32'(desc_q.ld_ab[31:16]), desc_q.k,
+                                desc_compute_numfmt(desc_q)),
+                            BeatBytes));
         check_need_r_o = 1'b1;
-        if (!check_ok_i) begin
+        if (!g6lc_ai_island_cfg_pkg::ai_elem_aligned(
+                desc_q.ptr_b, desc_compute_numfmt(desc_q)) || !check_ok_i) begin
           status_d = ST_BAD_PTR;
           state_d  = ST_COMPLETE;
         end else state_d = ST_CHK_C;
@@ -251,8 +274,11 @@ module g6lc_ai_desc_engine
       ST_CHK_C: begin
         check_req_o    = 1'b1;
         check_addr_o   = desc_q.ptr_c;
+        check_len_o    = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_result_span(
+                            desc_q.m, desc_q.n));
         check_need_w_o = 1'b1;
-        if (!check_ok_i) begin
+        if (!g6lc_ai_island_cfg_pkg::ai_c_aligned(desc_q.ptr_c, desc_q.n[0])
+            || !check_ok_i) begin
           status_d = ST_BAD_PTR;
           state_d  = ST_COMPLETE;
         end else state_d = ST_CHK_SCALE;
@@ -280,7 +306,8 @@ module g6lc_ai_desc_engine
           check_req_o    = 1'b1;
           check_addr_o   = desc_q.ptr_done;
           check_need_w_o = 1'b1;
-          if (!check_ok_i) begin
+          if (!g6lc_ai_island_cfg_pkg::ai_completion_aligned(desc_q.ptr_done)
+              || !check_ok_i) begin
             status_d = ST_BAD_PTR;
             state_d  = ST_COMPLETE;
           end else begin

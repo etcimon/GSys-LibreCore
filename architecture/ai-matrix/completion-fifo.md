@@ -23,6 +23,7 @@ losing intermediate completions if SW did not claim between jobs.
 | `0x10C` sticky | `!empty` |
 | `0x110/0x114` | FIFO **head** (oldest unclaimed) |
 | `irq_o` | sticky && head.irq |
+| Doorbell | one-cycle pulse. If the engine is busy or the FIFO is full, the latched doorbell is held and submitted when a slot is free. A newer doorbell replaces that held ticket. A fetch doorbell clears the hold. A sideband kick waiting for the same free slot runs before the held doorbell, and the held doorbell still runs after it. |
 
 ## Host software
 

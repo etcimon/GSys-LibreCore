@@ -52,11 +52,13 @@ of frequency.
 
 **There are two SKUs, and until this section existed only one of them had an operating point.**
 That gap was not academic: `g6lc_ai_island_cfg_pkg::AiIslandLatencyDefault` sets
-`ClockKhz = 1_000_000` (1 GHz), which agrees with **neither** the router target below (1.25 GHz)
+`ClockKhz = 2_000_000` (2 GHz nameplate), which agrees with **neither** the router target below (1.25 GHz)
 **nor** the throughput figure `architecture/ai-matrix/scaling-100tops.md` §7 derives its 98.3 TOPS
 from (1.5 GHz). Every island TOPS number is a product of MAC width **and** clock, so an unanchored
 clock makes the headline unfalsifiable — which is exactly the failure `scaling-100tops.md` §2
-exists to prevent.
+exists to prevent. This 2 GHz figure is the live fixture's published nameplate. It has no STA
+closure. The 64-bit port still moves 8 bytes/cycle; `DramGBps = 16` is `noc_peak_gbps` of that
+port at this clock, not a re-measurement of the 1 GHz stream.
 
 The AI card is a **PCIe add-in card**, not a fanless gateway. Nothing in §1.1 transfers to it:
 the power budget differs by ~25×, the thermal solution is active, and the memory class is
@@ -64,10 +66,11 @@ DDR4/LPDDR5 rather than a 16-bit DDR3 gateway bus.
 
 | Item | Latency SKU | Throughput SKU | Confidence |
 |---|---|---|---|
-| Island clock | **1.0 GHz** (live fixture, `AiIslandLatencyDefault`) | **1.5 GHz** (`scaling-100tops.md` §7) | decided / inferred |
+| Island clock | **2.0 GHz** nameplate (live fixture, `AiIslandLatencyDefault`) | **1.5 GHz** (`scaling-100tops.md` §7) | decided / inferred |
 | Core clock | tracks §1.1 (1.25 GHz) — the cores are the same IP | 1.25 GHz | inferred |
-| Clusters × MAC/cycle | 1 × 256 live; 1–2 × 4096–8192 target | 8 × 4096 | decided |
-| Peak dense INT8 | **0.512 TOPS** live; ~12–25 TOPS target | **98.3 TOPS** | derived |
+| Clusters × MAC/cycle | 1 × 512 live (`AI_LIVE_MACS`); 1–2 × 4096–8192 target | 8 × 4096 | decided |
+| Peak dense INT8 | **2.048 TOPS** live nameplate; ~12–25 TOPS target | **98.3 TOPS** | derived |
+| Class-0 DRAM nameplate | **16 GB/s** (64-bit × 2 GHz, 8 bytes/cycle) | LPDDR5 400 GB/s nameplate | derived |
 | DRAM class | DDR4-2400×64, `N × 19` GB/s (`DramChannels` ∈ {1,2,4,8}) | LPDDR5 ~400 GB/s (`DramClass=2`, not live) | decided |
 | Card power | — | 60–80 W typical, 100–150 W peak (AI-S4) | inferred, **unmeasured** |
 | Thermal | — | active; 75 W slot budget is insufficient, needs 8-pin aux | inferred |

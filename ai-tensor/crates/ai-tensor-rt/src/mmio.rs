@@ -19,6 +19,31 @@ const MEM_BASE: u64 = 0x1000;
 const MEM_CAP: usize = 16 * 1024 * 1024;
 const NUM_QUEUES: usize = 4;
 
+/// Queue 0 is `0x0120`. Later queues start at `0x01A0` so they do not cover
+/// the descriptor latch at `0x0140` or the PMU at `0x0180`.
+fn queue_slot(off: u16) -> Option<(usize, usize)> {
+    let (origin, q_base) = if (mmio::REG0..mmio::DESC).contains(&off) {
+        (mmio::REG0, 0usize)
+    } else if off >= mmio::REG_QUEUE_TAIL {
+        let n_tail = (NUM_QUEUES as u16).saturating_sub(1);
+        let end = mmio::REG_QUEUE_TAIL.saturating_add(n_tail.saturating_mul(0x20));
+        if off >= end {
+            return None;
+        }
+        (mmio::REG_QUEUE_TAIL, 1usize)
+    } else {
+        return None;
+    };
+    let rel = off.wrapping_sub(origin);
+    let q = q_base + (rel / 0x20) as usize;
+    let slot = ((rel % 0x20) / 4) as usize;
+    if q >= NUM_QUEUES {
+        None
+    } else {
+        Some((q, slot))
+    }
+}
+
 /// 32-bit island register bus (offsets are absolute within the 4 KiB window).
 pub trait MmioBus {
     fn read32(&mut self, off: u16) -> u32;
@@ -78,6 +103,10 @@ pub struct SoftIsland {
     /// Software completion history (CAP.queue_depth). Models g6lc_ai_cpl_fifo:
     /// oldest-first head; per-entry IRQ for head-driven irq after claim/pop.
     comp_history: VecDeque<(Completion, bool)>,
+    traces: Vec<crate::format_trace::FormatTrace>,
+    trace_desc: Option<Desc64>,
+    /// Float products. Off unless this island is the software reference.
+    fp_datapath: bool,
 }
 
 impl Default for SoftIsland {
@@ -116,7 +145,18 @@ impl SoftIsland {
             next_off: 0,
             last_comp: None,
             comp_history: VecDeque::new(),
+            traces: Vec::new(),
+            trace_desc: None,
+            fp_datapath: false,
         }
+    }
+
+    pub fn set_fp_datapath(&mut self, on: bool) {
+        self.fp_datapath = on;
+    }
+
+    pub fn format_traces(&self) -> &[crate::format_trace::FormatTrace] {
+        &self.traces
     }
 
     pub fn caps_from_cap(&self) -> Caps {
@@ -210,13 +250,28 @@ impl SoftIsland {
                 return;
             }
         };
+        self.trace_desc = Some(Desc64 {
+            version: d.version,
+            op: d.op,
+            flags: d.flags,
+            m: d.m,
+            n: d.n,
+            k: d.k,
+            ld_ab: d.ld_ab,
+            ptr_a: d.ptr_a,
+            ptr_b: d.ptr_b,
+            ptr_c: d.ptr_c,
+            ptr_scale: d.ptr_scale,
+            ptr_done: d.ptr_done,
+        });
 
         if !self.enable {
             self.complete(ticket, ST_DISABLED, false);
             return;
         }
-        // Island map: region windows 0x0120+q*0x20 collide with desc @0x0140 for q≥1
-        // when Queues=1 (live CAP). Reject foreign qids early.
+        // Sim pin is Queues=1. The RTL keeps two queues: q0 at 0x0120 and q1 at
+        // 0x01A0, because 0x0140 is the descriptor latch. Reject a qid the CAP
+        // does not advertise.
         let nq = self.cap.queues.max(1) as u8;
         if qid >= nq {
             self.complete(ticket, ST_BAD_QID, false);
@@ -235,7 +290,7 @@ impl SoftIsland {
             return;
         }
 
-        if crate::numfmt::check_desc_format(&d, self.cap.dtype_mask).is_err() {
+        if crate::numfmt::check_desc_engine(&d, self.cap.dtype_mask, self.fp_datapath).is_err() {
             self.complete(ticket, ai_tensor_abi::ST_BAD_FMT, false);
             return;
         }
@@ -297,6 +352,10 @@ impl SoftIsland {
     }
 
     fn complete(&mut self, ticket: u32, status: u16, irq: bool) {
+        if let Some(d) = self.trace_desc.take() {
+            self.traces
+                .push(crate::format_trace::FormatTrace::from_desc(&d, status));
+        }
         // FIFO push (oldest-first head); matches g6lc_ai_cpl_fifo
         let c = Completion { ticket, status };
         self.push_history(c, irq);
@@ -374,22 +433,20 @@ impl MmioBus for SoftIsland {
             0x0188 => self.pmu.cycles,
             0x018C => self.pmu.gbps_x1000,
             o if (0x0140..0x0180).contains(&o) => self.desc_words[((o - 0x0140) / 4) as usize],
-            o if (0x0120..0x0140).contains(&o) => {
-                let q = ((o - 0x0120) / 0x20) as usize;
-                let slot = ((o - 0x0120) % 0x20) / 4;
-                if q >= NUM_QUEUES {
-                    return 0;
-                }
-                match slot {
-                    0 => self.base[q] as u32,
-                    1 => (self.base[q] >> 32) as u32,
-                    2 => self.limit[q] as u32,
-                    3 => (self.limit[q] >> 32) as u32,
-                    4 => u32::from(self.perm[q]),
-                    _ => 0,
+            o => {
+                if let Some((q, slot)) = queue_slot(o) {
+                    match slot {
+                        0 => self.base[q] as u32,
+                        1 => (self.base[q] >> 32) as u32,
+                        2 => self.limit[q] as u32,
+                        3 => (self.limit[q] >> 32) as u32,
+                        4 => u32::from(self.perm[q]),
+                        _ => 0,
+                    }
+                } else {
+                    0
                 }
             }
-            _ => 0,
         }
     }
 
@@ -415,33 +472,29 @@ impl MmioBus for SoftIsland {
             o if (0x0140..0x0180).contains(&o) => {
                 self.desc_words[((o - 0x0140) / 4) as usize] = val;
             }
-            o if (0x0120..0x0140).contains(&o) => {
-                let q = ((o - 0x0120) / 0x20) as usize;
-                let slot = ((o - 0x0120) % 0x20) / 4;
-                if q >= NUM_QUEUES {
-                    return;
-                }
-                match slot {
-                    0 => {
-                        self.base[q] = (self.base[q] & !0xffff_ffff) | u64::from(val);
+            o => {
+                if let Some((q, slot)) = queue_slot(o) {
+                    match slot {
+                        0 => {
+                            self.base[q] = (self.base[q] & !0xffff_ffff) | u64::from(val);
+                        }
+                        1 => {
+                            self.base[q] = (self.base[q] & 0xffff_ffff) | (u64::from(val) << 32);
+                        }
+                        2 => {
+                            self.limit[q] = (self.limit[q] & !0xffff_ffff) | u64::from(val);
+                        }
+                        3 => {
+                            self.limit[q] = (self.limit[q] & 0xffff_ffff) | (u64::from(val) << 32);
+                        }
+                        4 => {
+                            self.perm[q] = (val & 3) as u8;
+                            self.region_live[q] = true; // commit on perm write
+                        }
+                        _ => {}
                     }
-                    1 => {
-                        self.base[q] = (self.base[q] & 0xffff_ffff) | (u64::from(val) << 32);
-                    }
-                    2 => {
-                        self.limit[q] = (self.limit[q] & !0xffff_ffff) | u64::from(val);
-                    }
-                    3 => {
-                        self.limit[q] = (self.limit[q] & 0xffff_ffff) | (u64::from(val) << 32);
-                    }
-                    4 => {
-                        self.perm[q] = (val & 3) as u8;
-                        self.region_live[q] = true; // commit on perm write
-                    }
-                    _ => {}
                 }
             }
-            _ => {}
         }
     }
 }
@@ -471,8 +524,10 @@ impl MmioDevice {
     pub fn software_reference_v2() -> Self {
         let mut cap = CapRegs::island_p3_sim_default();
         cap.dtype_mask = crate::numfmt::SOFTWARE_DTYPE_MASK;
-        let island = SoftIsland::with_cap(cap, 64);
-        let cached_caps = island.caps_from_cap();
+        let mut island = SoftIsland::with_cap(cap, 64);
+        island.set_fp_datapath(true);
+        let mut cached_caps = island.caps_from_cap();
+        cached_caps.fp_datapath = true;
         Self { island, cached_caps }
     }
 
@@ -484,6 +539,7 @@ impl MmioDevice {
         // wr_cpl from CTL after enable is separate; default true until CTL written
         c.wr_cpl_en = self.island.wr_cpl_en;
         c.compute_ref = true;
+        c.fp_datapath = self.island.fp_datapath;
         self.cached_caps = c;
         c
     }
@@ -523,12 +579,12 @@ impl Device for MmioDevice {
         if qid as usize >= NUM_QUEUES {
             return Err(RtError::BadPtr("qid"));
         }
-        // Live map: only q0 fits before desc latch @0x0140 (Queues=1).
+        // q0 is 0x0120. q>=1 starts at 0x01A0 so it does not cover the latch.
         let nq = self.cached_caps.queues.max(1);
         if u32::from(qid) >= nq {
             return Err(RtError::BadPtr("qid exceeds CAP.queues / MMIO map"));
         }
-        let base_off = mmio::REG0 + u16::from(qid) * 0x20;
+        let base_off = mmio::queue_region(u16::from(qid));
         self.island
             .write32(base_off, region.base as u32);
         self.island
@@ -876,7 +932,9 @@ impl MmioBus for MappedWindow {
 /// Seed a MappedWindow CAP region with island_p3 defaults (file-backed bring-up).
 pub fn seed_cap_island_p3(bus: &mut dyn MmioBus) {
     let c = CapRegs::island_p3_sim_default();
-    let acc = 8u32 | (8 << 4) | (8 << 8);
+    let acc = c.acc_tile.m.trailing_zeros()
+        | (c.acc_tile.n.trailing_zeros() << 4)
+        | (c.acc_tile.k.trailing_zeros() << 8);
     bus.write32(0x00, u32::from(c.version));
     bus.write32(0x04, c.clusters);
     bus.write32(0x08, c.macs_per_cycle);
@@ -897,11 +955,28 @@ mod tests {
     use crate::run_gemm_s8;
 
     #[test]
+    fn q1_region_does_not_alias_desc_latch() {
+        let mut isl = SoftIsland::new();
+        isl.write32(mmio::DESC, 0xA5A5_A5A5);
+        isl.write32(mmio::queue_region(1) + 0x10, 3);
+        assert_eq!(isl.read32(mmio::DESC), 0xA5A5_A5A5);
+        assert_eq!(isl.read32(mmio::queue_region(1) + 0x10), 3);
+        // The old stride 0x0120+0x20 is a descriptor word, not queue 1.
+        isl.write32(0x0150, 0x1111_1111);
+        assert_eq!(isl.read32(0x0150), 0x1111_1111);
+        assert_eq!(isl.read32(mmio::queue_region(1) + 0x10), 3);
+        assert_eq!(mmio::queue_region(0), 0x0120);
+        assert_eq!(mmio::queue_region(1), 0x01A0);
+    }
+
+    #[test]
     fn cap_probe_acc_tile_256() {
         let mut dev = MmioDevice::new();
         let c = dev.probe_caps();
         assert_eq!(c.acc_tile, AccTile::ISLAND_P3_DEFAULT);
-        assert_eq!(c.macs_per_cycle, 256);
+        assert_eq!(c.macs_per_cycle, 512);
+        assert_eq!(c.acc_tile.m, 1024);
+        assert_eq!(c.acc_tile.n, 512);
         assert_eq!(c.noc_width, 64);
     }
 
@@ -1011,7 +1086,8 @@ mod tests {
         let cap = probe_cap_regs(&mut w);
         assert_eq!(w.read32(mmio::CAP_LAYOUT), mmio::CAP_LAYOUT_B_KMAJOR);
         assert_eq!(SoftIsland::new().read32(mmio::CAP_LAYOUT), mmio::CAP_LAYOUT_B_KMAJOR);
-        assert_eq!(cap.macs_per_cycle, 256);
-        assert_eq!(cap.acc_tile.m, 256);
+        assert_eq!(cap.macs_per_cycle, 512);
+        assert_eq!(cap.acc_tile.m, 1024);
+        assert_eq!(cap.acc_tile.n, 512);
     }
 }

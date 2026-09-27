@@ -23,16 +23,18 @@
 //      A with j as the row index. One beat spreads across PeLanes banks at one
 //      address each, so the tile is 1R1W like A's.
 //   3) MAC: PeLanes parallel products/cycle via g6lc_ai_pe_dot
-//   4) Store C: dual-i32 pack on ≥64-bit bus; multi-beat INCR AW (up to
-//      MaxBurstBeats pair-beats) along a C row; dual-bank combo read so
-//      each W is one cycle when PeLanes>=2 (j and j+1 different banks).
+//   4) Store C: one 8-byte pair (or one 4-byte tail) per W beat, placed at
+//      addr % BytesPerBeat. On a 64-bit bus that lane is 0. A wider bus keeps
+//      aw.size at 8 (or 4) bytes so the pair does not fill the beat.
+//      Multi-beat INCR AW (up to MaxBurstBeats pair-beats) along a C row;
+//      dual-bank combo read so each W is one cycle when PeLanes>=2.
 //      I3: trail-store completed rows during MAC (stc_i < mac_i) so C AW/W
 //      rides free AXI cycles; drain tail after last MAC row.
 //
 // C multi-banked (j % PeLanes). Beat packing parameterized by DataWidth.
 // Bursts stay within a single A row (k), B row (k), or C row (n); never cross.
 //
-// Bounds: m,n,k ∈ [1, MaxDim]. Timing: multi-cycle; multi-outstanding AR
+// Bounds: m,n,k ∈ [1, MaxM/MaxN/MaxK], or MaxDim when those are 0.
 // (MaxAROut) hides inter-burst memory latency on A/B loads; one AW.
 
 module g6lc_ai_gemm_seq #(
@@ -40,6 +42,11 @@ module g6lc_ai_gemm_seq #(
     parameter int unsigned DataWidth = 64,
     parameter int unsigned IdWidth   = 4,
     parameter int unsigned MaxDim    = 8,
+    // 0 keeps the square MaxDim bound. The live island sets these apart
+    // so 1024×128 and 512×256 fit without a 1024-cube.
+    parameter int unsigned MaxM      = 0,
+    parameter int unsigned MaxN      = 0,
+    parameter int unsigned MaxK      = 0,
     parameter int unsigned PeLanes   = 4,  // parallel MACs / cycle (power of 2 preferred)
     parameter bit          DotPipeFloat = 1'b0, // 0: combinational g6lc_ai_pe_dot_float; 1: pipelined dot product with valid handshake
     parameter int unsigned MaxAROut  = 2,  // I3: multi-outstanding AR; live = 2
@@ -87,14 +94,24 @@ module g6lc_ai_gemm_seq #(
     input  axi_resp_t   axi_resp_i
 );
 
-  // Words per bank: MaxDim rows × ceil(MaxDim/PeLanes) cols along t (A/B) or j (C)
-  localparam int unsigned KPerBank     = (MaxDim + PeLanes - 1) / PeLanes;
-  localparam int unsigned BankWords    = MaxDim * KPerBank;
+  localparam int unsigned LimM = (MaxM != 0) ? MaxM : MaxDim;
+  localparam int unsigned LimN = (MaxN != 0) ? MaxN : MaxDim;
+  localparam int unsigned LimK = (MaxK != 0) ? MaxK : MaxDim;
+  localparam int unsigned LimHi = (LimM > LimN) ?
+      ((LimM > LimK) ? LimM : LimK) : ((LimN > LimK) ? LimN : LimK);
+  // C: j runs to LimN. A rows are LimM, B rows are LimN, K is LimK.
+  localparam int unsigned KPerBank     = (LimN + PeLanes - 1) / PeLanes;
+  localparam int unsigned BankWords    = LimM * KPerBank;
   localparam int unsigned BankAddrW    = (BankWords > 1) ? $clog2(BankWords) : 1;
-  localparam int unsigned OperandKPerBank = (MaxElementBytes * MaxDim + PeLanes - 1) / PeLanes;
-  localparam int unsigned OperandBankWords = MaxDim * OperandKPerBank;
+  localparam int unsigned OperandKPerBank = (MaxElementBytes * LimK + PeLanes - 1) / PeLanes;
+  localparam int unsigned OperandWordsA = LimM * OperandKPerBank;
+  localparam int unsigned OperandWordsB = LimN * OperandKPerBank;
+  localparam int unsigned OperandBankWords = (OperandWordsA > OperandWordsB) ?
+      OperandWordsA : OperandWordsB;
   localparam int unsigned OperandBankAddrW = (OperandBankWords > 1) ? $clog2(OperandBankWords) : 1;
   localparam int unsigned LaneW        = (PeLanes > 1) ? $clog2(PeLanes) : 1;
+  // VA-turbo reuse keys must hold every accepted m, n and k.
+  localparam int unsigned DimW = $clog2(LimHi + 1);
   // AXI beat geometry (I3: wider DataWidth raises BytesPerBeat without RTL rewrite)
   localparam int unsigned BytesPerBeat  = DataWidth / 8;
   localparam int unsigned BeatAlignW    = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
@@ -128,6 +145,11 @@ module g6lc_ai_gemm_seq #(
       else $error("g6lc_ai_gemm_seq: NrChannels=%0d not in {1,2,4,8}", NrChannels);
     assert (ChanShift >= 3 && ChanShift <= 16)
       else $error("g6lc_ai_gemm_seq: ChanShift=%0d out of range", ChanShift);
+    // The held-beat absorber was removed with the B oct-drain. A beat wider
+    // than PeLanes would drop the bytes this cycle does not take.
+    assert (PeLanes >= (DataWidth / 8))
+      else $error("g6lc_ai_gemm_seq: PeLanes=%0d < %0d bytes/beat",
+                  PeLanes, DataWidth / 8);
   end
   // pragma translate_on
 
@@ -258,7 +280,7 @@ module g6lc_ai_gemm_seq #(
 
   for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_a_banks
     g6lc_ai_tile_sram #(
-        .NumWords (OperandBankWords),
+        .NumWords (OperandWordsA),
         .DataWidth(8),
         .NumPorts (2),
         .ImplKey  ("g6lc_ai_tile_a")
@@ -278,7 +300,7 @@ module g6lc_ai_gemm_seq #(
 
   for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_b_banks
     g6lc_ai_tile_sram #(
-        .NumWords (OperandBankWords),
+        .NumWords (OperandWordsB),
         .DataWidth(8),
         .NumPorts (2),  // AI-X9: 1R1W, same as A (was 8 for the oct drain)
         .ImplKey  ("g6lc_ai_tile_b")
@@ -451,13 +473,7 @@ module g6lc_ai_gemm_seq #(
   // byte width. This is a local copy so g6lc_ai_gemm_seq stays unit-testable
   // without pulling config_pkg into every backend runner.
   function automatic logic [31:0] ai_fmt_bytes();
-    case (numfmt_q)
-      3'd1:              return 32'd1; // INT4 (packed, but a byte holds two)
-      3'd3, 3'd4:        return 32'd1; // FP8 E4M3 / E5M2
-      3'd5, 3'd6:        return 32'd2; // FP16 / BF16
-      3'd7:              return 32'd4; // FP32
-      default:           return 32'd1; // INT8 and reserved
-    endcase
+    return g6lc_ai_island_cfg_pkg::ai_elem_bytes(numfmt_q);
   endfunction
 
   // F1: number of elements issued per MAC cycle.
@@ -512,7 +528,7 @@ module g6lc_ai_gemm_seq #(
   if (ReuseBEn) begin : gen_reuse_b
     logic valid_q, cacheable_q, invalidated_q;
     logic [AddrWidth-1:0] ptr_q;
-    logic [8:0] n_saved_q, k_saved_q;
+    logic [DimW-1:0] n_saved_q, k_saved_q;
     logic [15:0] ldb_saved_q;
     logic [2:0] fmt_q;
     logic [31:0] epoch_q, job_epoch_q;
@@ -520,12 +536,12 @@ module g6lc_ai_gemm_seq #(
     logic [AddrWidth:0] b_end, c_end;
     logic geometry_ok, disjoint, response_error;
 
-    assign b_span = 32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes;
-    assign c_span = (32'(m_q[8:0]) * 32'(n_q[8:0])) << 2;
+    assign b_span = 32'(n_q - 32'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes;
+    assign c_span = (32'(m_q) * 32'(n_q)) << 2;
     assign b_end = {1'b0, pb_q} + (AddrWidth+1)'(b_span);
     assign c_end = {1'b0, pc_q} + (AddrWidth+1)'(c_span);
-    assign geometry_ok = m_q > 0 && m_q <= 256 && n_q > 0 && n_q <= 256 &&
-                         k_q > 0 && k_q <= 256 && ldb_q >= k_q[15:0] &&
+    assign geometry_ok = m_q > 0 && m_q <= LimM && n_q > 0 && n_q <= LimN &&
+                         k_q > 0 && k_q <= LimK && ldb_q >= k_q[15:0] &&
                          numfmt_q inside {3'd0, 3'd1, 3'd3, 3'd4, 3'd5, 3'd6, 3'd7};
     assign disjoint = !b_end[AddrWidth] && !c_end[AddrWidth] &&
                       ({1'b0, pc_q} >= b_end || {1'b0, pb_q} >= c_end);
@@ -555,7 +571,7 @@ module g6lc_ai_gemm_seq #(
         if (state_q == ST_IDLE && start_i) begin
           job_epoch_q <= reuse_b_epoch_i;
           reuse_b_skip_q <= reuse_b_i && valid_q && ptr_q == ptr_b_i &&
-                            {23'd0, n_saved_q} == n_i && {23'd0, k_saved_q} == k_i &&
+                            32'(n_saved_q) == n_i && 32'(k_saved_q) == k_i &&
                             ldb_saved_q == ldb_i && fmt_q == numfmt_i && epoch_q == reuse_b_epoch_i;
           valid_q <= 1'b0;
           cacheable_q <= 1'b0;
@@ -572,8 +588,8 @@ module g6lc_ai_gemm_seq #(
         if (state_q == ST_DONE) begin
           valid_q <= cacheable_q && !invalidated_q && !err_q;
           ptr_q <= pb_q;
-          n_saved_q <= n_q[8:0];
-          k_saved_q <= k_q[8:0];
+          n_saved_q <= n_q[DimW-1:0];
+          k_saved_q <= k_q[DimW-1:0];
           ldb_saved_q <= ldb_q;
           fmt_q <= numfmt_q;
           epoch_q <= job_epoch_q;
@@ -601,7 +617,7 @@ module g6lc_ai_gemm_seq #(
   if (ReuseAEn) begin : gen_reuse_a
     logic valid_q, cacheable_q, invalidated_q;
     logic [AddrWidth-1:0] ptr_q;
-    logic [8:0] m_saved_q, k_saved_q;
+    logic [DimW-1:0] m_saved_q, k_saved_q;
     logic [15:0] lda_saved_q;
     logic [2:0] fmt_q;
     logic [31:0] epoch_q, job_epoch_q;
@@ -609,12 +625,12 @@ module g6lc_ai_gemm_seq #(
     logic [AddrWidth:0] a_end, c_end;
     logic geometry_ok, disjoint, response_error;
 
-    assign a_span = 32'(m_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, lda_q}) + k_bytes;
-    assign c_span = (32'(m_q[8:0]) * 32'(n_q[8:0])) << 2;
+    assign a_span = 32'(m_q - 32'd1) * fmt_row_bytes({16'd0, lda_q}) + k_bytes;
+    assign c_span = (32'(m_q) * 32'(n_q)) << 2;
     assign a_end = {1'b0, pa_q} + (AddrWidth+1)'(a_span);
     assign c_end = {1'b0, pc_q} + (AddrWidth+1)'(c_span);
-    assign geometry_ok = m_q > 0 && m_q <= 256 && n_q > 0 && n_q <= 256 &&
-                         k_q > 0 && k_q <= 256 && lda_q >= k_q[15:0] &&
+    assign geometry_ok = m_q > 0 && m_q <= LimM && n_q > 0 && n_q <= LimN &&
+                         k_q > 0 && k_q <= LimK && lda_q >= k_q[15:0] &&
                          numfmt_q inside {3'd0, 3'd1, 3'd3, 3'd4, 3'd5, 3'd6, 3'd7};
     assign disjoint = !a_end[AddrWidth] && !c_end[AddrWidth] &&
                       ({1'b0, pc_q} >= a_end || {1'b0, pa_q} >= c_end);
@@ -644,7 +660,7 @@ module g6lc_ai_gemm_seq #(
         if (state_q == ST_IDLE && start_i) begin
           job_epoch_q <= reuse_a_epoch_i;
           reuse_a_skip_q <= reuse_a_i && valid_q && ptr_q == ptr_a_i &&
-                            {23'd0, m_saved_q} == m_i && {23'd0, k_saved_q} == k_i &&
+                            32'(m_saved_q) == m_i && 32'(k_saved_q) == k_i &&
                             lda_saved_q == lda_i && fmt_q == numfmt_i && epoch_q == reuse_a_epoch_i;
           valid_q <= 1'b0;
           cacheable_q <= 1'b0;
@@ -660,8 +676,8 @@ module g6lc_ai_gemm_seq #(
         if (state_q == ST_DONE) begin
           valid_q <= cacheable_q && !invalidated_q && !err_q;
           ptr_q <= pa_q;
-          m_saved_q <= m_q[8:0];
-          k_saved_q <= k_q[8:0];
+          m_saved_q <= m_q[DimW-1:0];
+          k_saved_q <= k_q[DimW-1:0];
           lda_saved_q <= lda_q;
           fmt_q <= numfmt_q;
           epoch_q <= job_epoch_q;
@@ -710,8 +726,7 @@ module g6lc_ai_gemm_seq #(
   );
     // INT4 packs two elements per byte; ceil so an odd count keeps its last
     // element. FP8/INT8 are one byte. FP16/BF16 are two bytes. FP32 is four.
-    return (numfmt_q == 3'd1) ? ((elems + 32'd1) >> 1)
-                              : (elems * ai_fmt_bytes());
+    return g6lc_ai_island_cfg_pkg::ai_row_bytes(numfmt_q, elems);
   endfunction
 
   function automatic logic [31:0] fmt_ld_to_stride(
@@ -806,6 +821,46 @@ module g6lc_ai_gemm_seq #(
         NrChannels, ChanShift, BytesPerBeat, 64'(addr));
     if (nbeats > maxb) return 32'(maxb);
     return nbeats;
+  endfunction
+
+  // C beats are 8 bytes (aw.size=3), not the A/B beat. At DataWidth=64 the
+  // two widths match, so the stripe cap is the same number as cap_nbeats.
+  function automatic logic [31:0] cap_c_nbeats(
+      input logic [AddrWidth-1:0] addr,
+      input logic [31:0] nbeats
+  );
+    automatic int unsigned maxb;
+    maxb = g6lc_ai_island_cfg_pkg::dram_beats_in_stripe(
+        NrChannels, ChanShift, 8, 64'(addr));
+    if (nbeats > maxb) return 32'(maxb);
+    return nbeats;
+  endfunction
+
+  typedef struct packed {
+    logic [DataWidth-1:0]   data;
+    logic [DataWidth/8-1:0] strb;
+  } wbeat_t;
+
+  // Put `nbytes` (4 or 8) of `payload` on the byte lane `addr` selects.
+  // DataWidth=64 and an 8-byte-aligned pair lands in [63:0] with strobe 8'hFF.
+  function automatic wbeat_t wbeat_at(
+      input logic [63:0] payload,
+      input int unsigned nbytes,
+      input logic [31:0] addr
+  );
+    automatic wbeat_t b;
+    automatic int unsigned lane, i, at;
+    b.data = '0;
+    b.strb = '0;
+    lane = unsigned'(addr) & (BytesPerBeat - 1);
+    for (i = 0; i < 8; i++) begin
+      at = lane + i;
+      if (i < nbytes && at < BytesPerBeat) begin
+        b.data[8*at +: 8] = payload[8*i +: 8];
+        b.strb[at]        = 1'b1;
+      end
+    end
+    return b;
   endfunction
 
   // Elements covered by `nb` beats starting at byte lane `lane0`, cap `rem`
@@ -984,10 +1039,15 @@ module g6lc_ai_gemm_seq #(
 
       ST_CHK: begin
         // AI-X9: B is k-major, so ldb must hold a row of k elements (was n).
+        // A/B must be aligned to the element. Even n stores 8-byte C pairs;
+        // odd n stores 4-byte C words.
         if (m_q == 0 || n_q == 0 || k_q == 0
-            || m_q > MaxDim || n_q > MaxDim || k_q > MaxDim
+            || m_q > LimM || n_q > LimN || k_q > LimK
             || ai_fmt_bytes() > MaxElementBytes
-            || lda_q < k_q[15:0] || ldb_q < k_q[15:0]) begin
+            || lda_q < k_q[15:0] || ldb_q < k_q[15:0]
+            || !g6lc_ai_island_cfg_pkg::ai_elem_aligned(pa_q, numfmt_q)
+            || !g6lc_ai_island_cfg_pkg::ai_elem_aligned(pb_q, numfmt_q)
+            || !g6lc_ai_island_cfg_pkg::ai_c_aligned(pc_q, n_q[0])) begin
           err_d   = 1'b1;
           state_d = ST_DONE;
         end else begin
@@ -1473,7 +1533,7 @@ module g6lc_ai_gemm_seq #(
                 pairs_rem = (n_q - stc_j_q) >> 1;
                 nbeats    = pairs_rem;
                 if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
-                nbeats    = cap_nbeats_to_stripe(c_store_addr, nbeats);
+                nbeats    = cap_c_nbeats(c_store_addr, nbeats);
                 if (nbeats == 0) nbeats = 1;
                 axi_req_o.aw.addr  = c_store_addr;
                 axi_req_o.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
@@ -1495,8 +1555,13 @@ module g6lc_ai_gemm_seq #(
                 c_r1_req  = 1'b1;
                 c_r1_bank = c_bank(j_eff + 32'd1);
                 c_r1_addr = c_bank_addr(stc_i_q, j_eff + 32'd1);
-                axi_req_o.w.data  = DataWidth'({c_r1_data, c_r0_data});
-                axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
+                begin
+                  automatic wbeat_t wb;
+                  wb = wbeat_at({c_r1_data, c_r0_data}, 8,
+                                32'(c_store_addr) + (beats_done << 3));
+                  axi_req_o.w.data = wb.data;
+                  axi_req_o.w.strb = wb.strb;
+                end
                 axi_req_o.w.last  = (stc_w_left_q == 9'd1);
                 axi_req_o.w_valid = 1'b1;
                 if (axi_resp_i.w_ready) begin
@@ -1534,12 +1599,11 @@ module g6lc_ai_gemm_seq #(
               c_r0_addr = c_bank_addr(stc_i_q, stc_j_q);
               axi_req_o.aw.addr = c_store_addr;
               axi_req_o.aw.size = axi_pkg::size_t'(2);
-              if (DataWidth >= 64 && c_store_addr[2]) begin
-                axi_req_o.w.data = DataWidth'({c_r0_data, 32'h0});
-                axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hF0};
-              end else begin
-                axi_req_o.w.data = DataWidth'(c_r0_data);
-                axi_req_o.w.strb = {{(DataWidth/8-4){1'b0}}, 4'hF};
+              begin
+                automatic wbeat_t wb;
+                wb = wbeat_at(64'(c_r0_data), 4, 32'(c_store_addr));
+                axi_req_o.w.data = wb.data;
+                axi_req_o.w.strb = wb.strb;
               end
               stc_n_d = 16'd1;
               if (!aw_sent_q) begin
@@ -1613,7 +1677,7 @@ module g6lc_ai_gemm_seq #(
               pairs_rem = (n_q - stc_j_q) >> 1;
               nbeats    = pairs_rem;
               if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
-              nbeats    = cap_nbeats_to_stripe(c_store_addr, nbeats);
+              nbeats    = cap_c_nbeats(c_store_addr, nbeats);
               if (nbeats == 0) nbeats = 1;
               axi_req_o.aw.addr  = c_store_addr;
               axi_req_o.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
@@ -1636,8 +1700,13 @@ module g6lc_ai_gemm_seq #(
                 c_r1_req  = 1'b1;
                 c_r1_bank = c_bank(j_eff + 32'd1);
                 c_r1_addr = c_bank_addr(stc_i_q, j_eff + 32'd1);
-                axi_req_o.w.data  = DataWidth'({c_r1_data, c_r0_data});
-                axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
+                begin
+                  automatic wbeat_t wb;
+                  wb = wbeat_at({c_r1_data, c_r0_data}, 8,
+                                32'(c_store_addr) + (beats_done << 3));
+                  axi_req_o.w.data = wb.data;
+                  axi_req_o.w.strb = wb.strb;
+                end
                 axi_req_o.w.last  = (stc_w_left_q == 9'd1);
                 axi_req_o.w_valid = 1'b1;
                 if (axi_resp_i.w_ready) begin
@@ -1655,8 +1724,13 @@ module g6lc_ai_gemm_seq #(
                 c_r0_req  = 1'b1;
                 c_r0_bank = c_bank(j_eff + 32'd1);
                 c_r0_addr = c_bank_addr(stc_i_q, j_eff + 32'd1);
-                axi_req_o.w.data  = DataWidth'({c_r0_data, c_lo_q});
-                axi_req_o.w.strb  = {{(DataWidth/8-8){1'b0}}, 8'hFF};
+                begin
+                  automatic wbeat_t wb;
+                  wb = wbeat_at({c_r0_data, c_lo_q}, 8,
+                                32'(c_store_addr) + (beats_done << 3));
+                  axi_req_o.w.data = wb.data;
+                  axi_req_o.w.strb = wb.strb;
+                end
                 axi_req_o.w.last  = (stc_w_left_q == 9'd1);
                 axi_req_o.w_valid = 1'b1;
                 if (axi_resp_i.w_ready) begin
@@ -1698,12 +1772,11 @@ module g6lc_ai_gemm_seq #(
             c_r0_addr = c_bank_addr(stc_i_q, stc_j_q);
             axi_req_o.aw.addr = c_store_addr;
             axi_req_o.aw.size = axi_pkg::size_t'(2);
-            if (DataWidth >= 64 && c_store_addr[2]) begin
-              axi_req_o.w.data = DataWidth'({c_r0_data, 32'h0});
-              axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hF0};
-            end else begin
-              axi_req_o.w.data = DataWidth'(c_r0_data);
-              axi_req_o.w.strb = {{(DataWidth/8-4){1'b0}}, 4'hF};
+            begin
+              automatic wbeat_t wb;
+              wb = wbeat_at(64'(c_r0_data), 4, 32'(c_store_addr));
+              axi_req_o.w.data = wb.data;
+              axi_req_o.w.strb = wb.strb;
             end
             stc_n_d = 16'd1;
             if (!aw_sent_q) begin

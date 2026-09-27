@@ -105,7 +105,7 @@ Do not multiply profiles per framework — only per **platform capability**.
 
 | Profile file | Backend | Pin intent |
 |---|---|---|
-| `profiles/sim-v0.toml` | sim | AccTile/Macs=256, NocWidth=64, `pmu_v1`, `compute_ref` |
+| `profiles/sim-v0.toml` | sim | Panel box 1024×512×512, Macs=512, NocWidth=64, `pmu_v1`, `compute_ref` |
 | `profiles/island-p3-v1.toml` | linux-uio (M5) | Same geometry; MMIO base `0x4000_0000`; PLIC 8 |
 
 The profile **filenames are retained for caller path stability**, but their contents now

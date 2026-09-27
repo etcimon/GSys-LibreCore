@@ -384,13 +384,16 @@ in-core `ai.enq` path and the host-side PCIe doorbell path.
 | `14` | `sp24` |
 | `19:16` | priority class (§7.1); `0` is the default class |
 | `22:20` | `numfmt`, encoded as §3.1a. Ungranted ⇒ `ST_BAD_FMT`, never demoted |
-| `31:23`, `15` | reserved, write zero |
+| `15` | `reuse_b`: keep the B panel when `VaTurboEn=1`. Ignored when it is clear, and the MAC count does not change |
+| `23` | `reuse_a`: keep the A panel when `VaTurboEn=1`. Same rule as `reuse_b` |
+| `31:24` | reserved, write zero |
 
-**Shape bound (F12).** Each of `m`, `n`, `k` must be in `[1, MaxDim]`, where `MaxDim` is the
-corresponding capability-window tile (`CAP_OFF_BLOCK_MNK` / `AccTileM/N/K`). The live
-sequencer (`g6lc_ai_gemm_seq` `ST_CHK`) **rejects** a descriptor that exceeds the tile
-(`ST_ERR`). **Software owns blocking** beyond that limit: the §12 `M=N=K=4096` gate is
-16³ tiles on the live MaxDim=256 part, not one doorbell. Hardware does not stream a
+**Shape bound (F12).** `m` must be in `[1, AccTileM]`, `n` in `[1, AccTileN]`, and `k` in
+`[1, AccTileK]` (`CAP_OFF_BLOCK_MNK`). The live box is 1024×512×512. The sequencer
+(`g6lc_ai_gemm_seq` `ST_CHK`) **rejects** a descriptor outside that box (`ST_ERR`).
+Named VA panels inside the box are 512×512, 512×256, and 1024×128. A shape such as
+1024×256 still fits and is a legal descriptor. **Software owns blocking** beyond the
+box: the §12 `M=N=K=4096` gate is 4×8×8 descriptors. Hardware does not stream a
 larger reduction; if that is desired later, `ST_CHK` is the wrong check.
 
 C is packed with `ldc = n` (the descriptor has no `ldc` field). Host tiling of a

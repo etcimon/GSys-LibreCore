@@ -9,6 +9,9 @@ module g6lc_ai_island_apb
   import g6lc_ai_island_cfg_pkg::*;
 #(
     parameter ai_island_cfg_t IslandCfg = AiIslandLatencyDefault,
+    // Default off. A directed test can pass a config with VaTurboEn set.
+    // The live island does not.
+    parameter config_pkg::ai_cfg_t AiCfg = config_pkg::AiCfgOff,
     parameter bit             EnableDmaFetch = 1'b1,
     parameter int unsigned    AxiDataWidth = 64,
     parameter int unsigned    AxiIdWidth   = 4,
@@ -56,6 +59,7 @@ module g6lc_ai_island_apb
   state_e state_q, state_d;
 
   g6lc_ai_island_top #(
+      .AiCfg         (AiCfg),
       .IslandCfg     (IslandCfg),
       .EnableDmaFetch(EnableDmaFetch),
       .AxiDataWidth  (AxiDataWidth),

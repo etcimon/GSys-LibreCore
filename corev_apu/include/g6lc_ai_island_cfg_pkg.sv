@@ -9,7 +9,7 @@
 // config_pkg::ai_cfg_t.
 //
 // Status: P3 + I1-lite live (island on flist when MatrixEn).
-// gemm_seq MaxDim/PeLanes bind from AccTileM / MacsPerCycle (AiIslandLatencyDefault).
+// gemm_seq PeLanes binds from MacsPerCycle. MaxM/N/K bind from AccTileM/N/K.
 
 package g6lc_ai_island_cfg_pkg;
 
@@ -20,6 +20,8 @@ package g6lc_ai_island_cfg_pkg;
   localparam int unsigned AI_DRAM_SIM_AXI = 0;  // testharness AXI SRAM; I3-lite
   localparam int unsigned AI_DRAM_DDR4    = 1;  // LiteDRAM at xbar; I3
   localparam int unsigned AI_DRAM_LPDDR5  = 2;  // SKU target only
+  // Class-2 nameplate. A rate socket may advertise it. It is not a measured PHY.
+  localparam int unsigned AI_DRAM_LPDDR5_GBPS = 400;
   // DDR4-2400 ×64 peak = 2400e6 × 8 B/s = 19.2 GB/s → integer nameplate 19.
   // Board DIMM class only — not a measurement, not the 400 GB/s LPDDR5 SKU.
   localparam int unsigned AI_DRAM_DDR4_2400_X64_GBPS = 19;
@@ -34,6 +36,20 @@ package g6lc_ai_island_cfg_pkg;
   localparam int unsigned AI_DRAM_DDR4_TRCD_CY = 14;
   localparam int unsigned AI_DRAM_DDR4_TRP_CY  = 14;
 
+  // Elaborated INT8 MAC/cycle of the live island. gemm_seq PeLanes takes
+  // this value. The accumulator box is AI_PANEL_* below, so the next MAC
+  // width is still this localparam and does not by itself resize M or N.
+  // VaTurboEn does not multiply it: that flag only enables operand reuse,
+  // which adds no lanes.
+  localparam int unsigned AI_LIVE_MACS = 512;
+  // Bounding box of the live panels. MAC issue width stays AI_LIVE_MACS.
+  // VA residency keys are (m,k) for A and (n,k) for B, so these three
+  // output shapes do not alias each other:
+  //   512×512, 512×256, 1024×128. K of each panel is still <= 512.
+  localparam int unsigned AI_PANEL_M = 1024;
+  localparam int unsigned AI_PANEL_N = 512;
+  localparam int unsigned AI_PANEL_K = 512;
+
   // NoC peak GB/s = (width_bytes) × (clock GHz). Live 64-bit @ 1 GHz → 8.
   function automatic int unsigned noc_peak_gbps(
       input int unsigned noc_bits, input int unsigned clock_khz
@@ -44,6 +60,43 @@ package g6lc_ai_island_cfg_pkg;
   // DDR4-2400×64 nameplate scales linearly with independent channels.
   function automatic int unsigned ddr4_nameplate_gbps(input int unsigned nch);
     return nch * AI_DRAM_DDR4_2400_X64_GBPS;
+  endfunction
+
+  // Published DRAM nameplate in GB/s. Not a measured PHY rate.
+  // Class 0 is the NoC peak (width_bytes × clock_GHz). Extra class-0 stripes
+  // do not multiply it. Class 1 is N × 19. Class 2 is the 400 GB/s constant.
+  function automatic int unsigned dram_nameplate_gbps(
+      input int unsigned noc_bits,
+      input int unsigned clock_khz,
+      input int unsigned nch,
+      input int unsigned dram_class
+  );
+    if (dram_class == AI_DRAM_SIM_AXI)
+      return noc_peak_gbps(noc_bits, clock_khz);
+    if (dram_class == AI_DRAM_DDR4)
+      return ddr4_nameplate_gbps(nch);
+    if (dram_class == AI_DRAM_LPDDR5)
+      return AI_DRAM_LPDDR5_GBPS;
+    return 0;
+  endfunction
+
+  // Project a class-0 nameplate by integer width and clock multipliers.
+  // Class 1 and class 2 ignore those multipliers, so 19 stays N×19 and 400
+  // stays 400. A zero multiplier is not a nameplate.
+  function automatic int unsigned bumped_dram_gbps(
+      input int unsigned noc_bits,
+      input int unsigned clock_khz,
+      input int unsigned nch,
+      input int unsigned dram_class,
+      input int unsigned width_mul,
+      input int unsigned clock_mul
+  );
+    if (width_mul == 0 || clock_mul == 0)
+      return 0;
+    if (dram_class != AI_DRAM_SIM_AXI)
+      return dram_nameplate_gbps(noc_bits, clock_khz, nch, dram_class);
+    return dram_nameplate_gbps(
+        noc_bits * width_mul, clock_khz * clock_mul, nch, dram_class);
   endfunction
 
   function automatic bit dram_channels_ok(input int unsigned nch);
@@ -87,6 +140,98 @@ package g6lc_ai_island_cfg_pkg;
     return maxb;
   endfunction
 
+  // Element width in bytes. INT4 is packed two-per-byte, so a row uses
+  // ai_row_bytes. Must stay in step with g6lc_ai_gemm_seq's loader.
+  function automatic logic [31:0] ai_elem_bytes(input logic [2:0] fmt);
+    if (fmt inside {3'd5, 3'd6}) return 32'd2;
+    else if (fmt == 3'd7) return 32'd4;
+    else return 32'd1;
+  endfunction
+
+  function automatic logic [31:0] ai_row_bytes(input logic [2:0] fmt,
+                                               input logic [31:0] elems);
+    if (fmt == 3'd1) return (elems + 32'd1) >> 1;
+    else return elems * ai_elem_bytes(fmt);
+  endfunction
+
+  // Bytes touched by `rows` rows. The last row is `tail_elems` long; earlier
+  // rows use `stride_elems`. A product that does not fit saturates so the
+  // region check fails closed.
+  function automatic logic [63:0] ai_operand_span(
+      input logic [31:0] rows, stride_elems, tail_elems,
+      input logic [2:0] fmt);
+    logic [63:0] stride_b, tail_b, n, prod;
+    if (rows == 0) return 64'd1;
+    stride_b = 64'(ai_row_bytes(fmt, stride_elems));
+    tail_b   = 64'(ai_row_bytes(fmt, tail_elems));
+    n        = 64'(rows) - 64'd1;
+    if (stride_b != 0 && n > ({64{1'b1}} / stride_b))
+      return {64{1'b1}};
+    prod = n * stride_b;
+    if (tail_b > ({64{1'b1}} - prod))
+      return {64{1'b1}};
+    prod = prod + tail_b;
+    if (prod == 0) return 64'd1;
+    return prod;
+  endfunction
+
+  // C is packed i32, ldc = n.
+  function automatic logic [63:0] ai_result_span(
+      input logic [31:0] rows, cols);
+    logic [63:0] bytes;
+    if (rows == 0 || cols == 0) return 64'd1;
+    if (64'(rows) > ({64{1'b1}} / 64'(cols)))
+      return {64{1'b1}};
+    bytes = 64'(rows) * 64'(cols);
+    if (bytes > ({64{1'b1}} >> 2))
+      return {64{1'b1}};
+    return bytes << 2;
+  endfunction
+
+  function automatic bit ai_elem_aligned(input logic [63:0] addr,
+                                         input logic [2:0] fmt);
+    if (fmt inside {3'd5, 3'd6}) return addr[0] == 1'b0;
+    else if (fmt == 3'd7) return addr[1:0] == 2'b0;
+    else return 1'b1;
+  endfunction
+
+  // Even n stores 8-byte pairs. Odd n stores 4-byte words.
+  function automatic bit ai_c_aligned(input logic [63:0] addr,
+                                      input logic n_odd);
+    if (n_odd) return addr[1:0] == 2'b0;
+    else return addr[2:0] == 3'b0;
+  endfunction
+
+  function automatic bit ai_completion_aligned(input logic [63:0] addr);
+    return addr[2:0] == 3'b0;
+  endfunction
+
+  // A/B loads use one full-bus beat. The region check has to cover that beat,
+  // including bytes before a misaligned pointer and after the last element.
+  function automatic logic [63:0] ai_beat_lo(input logic [63:0] addr,
+                                             input int unsigned beat);
+    if (beat <= 1) return addr;
+    if ((beat & (beat - 1)) != 0) return 64'd0;
+    return addr & ~(64'(beat) - 64'd1);
+  endfunction
+
+  function automatic logic [63:0] ai_bus_len(
+      input logic [63:0] addr,
+      input logic [63:0] nbytes,
+      input int unsigned beat);
+    logic [63:0] lo, last, mask, hi;
+    if (nbytes == 0 || nbytes == {64{1'b1}}) return {64{1'b1}};
+    if (beat <= 1) return nbytes;
+    if ((beat & (beat - 1)) != 0) return {64{1'b1}};
+    if ((nbytes - 64'd1) > ({64{1'b1}} - addr)) return {64{1'b1}};
+    lo   = ai_beat_lo(addr, beat);
+    last = addr + nbytes - 64'd1;
+    mask = 64'(beat) - 64'd1;
+    if ((last | mask) == {64{1'b1}}) return {64{1'b1}};
+    hi = (last | mask) + 64'd1;
+    return hi - lo;
+  endfunction
+
   // Frozen at I1 for both latency and throughput SKUs (scaling-100tops.md §5.1).
   typedef struct packed {
     int unsigned Clusters;       // replication unit (1 for latency SKU)
@@ -112,22 +257,24 @@ package g6lc_ai_island_cfg_pkg;
     int unsigned ClustersEnabled; // F8: enabled count; == Clusters until I2 gating
   } ai_island_cfg_t;
 
-  // I1 live RTL: AccTile*=256 / PeLanes=256 (1 MAC cycle per C at full tile).
-  // Multi-bank C (j%PeLanes) → each bank MaxDim*1 words (256xi32 @256/256).
-  // gemm_seq binds MaxDim/PeLanes from AccTileM / MacsPerCycle.
+  // I1 live RTL: PeLanes = AI_LIVE_MACS. The accumulator box is
+  // AI_PANEL_M × AI_PANEL_N × AI_PANEL_K, which holds the VA panels
+  // 512×512, 512×256 and 1024×128. Multi-bank C is j%PeLanes.
+  // gemm_seq binds MaxM/N/K and PeLanes from those fields.
   // I3-lite: multi-beat AR/AW + B oct-drain + trail C-store + multi-out AR + PMU→CAP; NoC 64.
+  // ClockKhz 2_000_000 is the published nameplate. The port is still 8 bytes/cycle.
   localparam ai_island_cfg_t AiIslandLatencyDefault = '{
       Clusters:     unsigned'(1),
-      MacsPerCycle: unsigned'(256),           // PeLanes = AccTileK (full-width MAC)
-      ClockKhz:     unsigned'(1_000_000),
-      SramBytes:    unsigned'(2 * 1024 * 1024), // A/B + multi-bank C (MaxDim=256)
-      AccTileM:     unsigned'(256),           // SKU AccTile* live freeze
-      AccTileN:     unsigned'(256),
-      AccTileK:     unsigned'(256),
+      MacsPerCycle: unsigned'(AI_LIVE_MACS),  // PeLanes = AccTileK
+      ClockKhz:     unsigned'(2_000_000),     // nameplate; noc peak = 16 GB/s
+      SramBytes:    unsigned'(4 * 1024 * 1024),
+      AccTileM:     unsigned'(AI_PANEL_M),
+      AccTileN:     unsigned'(AI_PANEL_N),
+      AccTileK:     unsigned'(AI_PANEL_K),
       NocWidth:     unsigned'(64),
       DramChannels: unsigned'(1),
       DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
-      DramGBps:     unsigned'(8),             // I3-lite: 64-bit NoC @ 1 GHz peak GB/s
+      DramGBps:     unsigned'(16),            // dram_nameplate_gbps(64, 2 GHz, class 0)
       DramClass:    unsigned'(AI_DRAM_SIM_AXI),
       Queues:       unsigned'(2),
       QueueDepth:   unsigned'(64),
@@ -145,12 +292,12 @@ package g6lc_ai_island_cfg_pkg;
   // in the testharness with +define+G6LC_AI_DRAM_TIMING (default off).
   localparam ai_island_cfg_t AiIslandDdr4TimingSim = '{
       Clusters:     unsigned'(1),
-      MacsPerCycle: unsigned'(256),
+      MacsPerCycle: unsigned'(AI_LIVE_MACS),
       ClockKhz:     unsigned'(1_000_000),
-      SramBytes:    unsigned'(2 * 1024 * 1024),
-      AccTileM:     unsigned'(256),
-      AccTileN:     unsigned'(256),
-      AccTileK:     unsigned'(256),
+      SramBytes:    unsigned'(4 * 1024 * 1024),
+      AccTileM:     unsigned'(AI_PANEL_M),
+      AccTileN:     unsigned'(AI_PANEL_N),
+      AccTileK:     unsigned'(AI_PANEL_K),
       NocWidth:     unsigned'(64),
       DramChannels: unsigned'(1),
       DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
@@ -172,12 +319,12 @@ package g6lc_ai_island_cfg_pkg;
   // Nameplate is DDR4-2400 x64 peak, not the 8 GB/s NoC number and not 400.
   localparam ai_island_cfg_t AiIslandDdr4Bringup = '{
       Clusters:     unsigned'(1),
-      MacsPerCycle: unsigned'(256),
+      MacsPerCycle: unsigned'(AI_LIVE_MACS),
       ClockKhz:     unsigned'(1_000_000),
-      SramBytes:    unsigned'(2 * 1024 * 1024),
-      AccTileM:     unsigned'(256),
-      AccTileN:     unsigned'(256),
-      AccTileK:     unsigned'(256),
+      SramBytes:    unsigned'(4 * 1024 * 1024),
+      AccTileM:     unsigned'(AI_PANEL_M),
+      AccTileN:     unsigned'(AI_PANEL_N),
+      AccTileK:     unsigned'(AI_PANEL_K),
       NocWidth:     unsigned'(64),            // live xbar still 64-bit
       DramChannels: unsigned'(1),
       DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
@@ -198,12 +345,12 @@ package g6lc_ai_island_cfg_pkg;
   // Same AccTile/NoC as 1-channel bringup; bandwidth scales with DramChannels.
   localparam ai_island_cfg_t AiIslandDdr4x2Bringup = '{
       Clusters:     unsigned'(1),
-      MacsPerCycle: unsigned'(256),
+      MacsPerCycle: unsigned'(AI_LIVE_MACS),
       ClockKhz:     unsigned'(1_000_000),
-      SramBytes:    unsigned'(2 * 1024 * 1024),
-      AccTileM:     unsigned'(256),
-      AccTileN:     unsigned'(256),
-      AccTileK:     unsigned'(256),
+      SramBytes:    unsigned'(4 * 1024 * 1024),
+      AccTileM:     unsigned'(AI_PANEL_M),
+      AccTileN:     unsigned'(AI_PANEL_N),
+      AccTileK:     unsigned'(AI_PANEL_K),
       NocWidth:     unsigned'(64),
       DramChannels: unsigned'(2),
       DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
@@ -226,13 +373,50 @@ package g6lc_ai_island_cfg_pkg;
   localparam ai_island_cfg_t AiIslandDdr4x8Bringup =
       island_cfg_with_channels(AiIslandDdr4Bringup, unsigned'(8));
 
-  // Latency-SKU target: AccTile* = 256 frozen; full Macs/NoC/DRAM still open.
+  // Non-default throughput cluster. Not the live package.
+  // 8 × 4096 MAC/cycle at 1.5 GHz is the 98.3 TOPS sketch. AccTileK matches
+  // MacsPerCycle so the island_top bound holds. DramClass 2 names the rate
+  // socket. The live default stays class 0, one AI_LIVE_MACS cluster, a
+  // 64-bit port, and a 2 GHz nameplate (16 GB/s, still 8 bytes/cycle).
+  localparam ai_island_cfg_t AiIslandThroughputSku = '{
+      Clusters:     unsigned'(8),
+      MacsPerCycle: unsigned'(4096),
+      ClockKhz:     unsigned'(1_500_000),
+      SramBytes:    unsigned'(2 * 1024 * 1024),
+      AccTileM:     unsigned'(4096),
+      AccTileN:     unsigned'(4096),
+      AccTileK:     unsigned'(4096),
+      NocWidth:     unsigned'(512),
+      DramChannels: unsigned'(1),
+      DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
+      DramGBps:     unsigned'(AI_DRAM_LPDDR5_GBPS),
+      DramClass:    unsigned'(AI_DRAM_LPDDR5),
+      Queues:       unsigned'(2),
+      QueueDepth:   unsigned'(64),
+      QosClasses:   unsigned'(2),
+      WorkQuantumK: unsigned'(64),
+      MaxAROut:     unsigned'(AI_MAX_AR_OUT_DRAM),
+      DramCas:      unsigned'(0),
+      DramTrcd:     unsigned'(0),
+      DramTrp:      unsigned'(0),
+      ClustersEnabled: unsigned'(8)
+  };
+
+  // Fast-cluster format grant: every ISA code except structured 2:4.
+  // The live PE mask stays INT8|INT4. This mask is for g6lc_ai_cluster_set.
+  localparam logic [15:0] AiIslandFastDtypeMask = 16'h00fb;
+  // Elaborated multiplier count of g6lc_ai_cluster_tile. The 4096 sketch
+  // above is not this many physical MACs; K is walked in strips of LANES.
+  localparam int unsigned AI_THROUGHPUT_LANES = 8;
+
+  // Latency-SKU target. AccTile stays 256 so 8192 MAC/cycle stays illegal.
+  // It does not follow AI_LIVE_MACS.
   localparam ai_island_cfg_t AiIslandLatencySkuTarget = '{
       Clusters:     unsigned'(1),
       MacsPerCycle: unsigned'(8192),
       ClockKhz:     unsigned'(1_000_000),
       SramBytes:    unsigned'(2 * 1024 * 1024),
-      AccTileM:     unsigned'(256),           // AccTile* freeze (matches live)
+      AccTileM:     unsigned'(256),
       AccTileN:     unsigned'(256),
       AccTileK:     unsigned'(256),
       NocWidth:     unsigned'(512),
@@ -266,6 +450,9 @@ package g6lc_ai_island_cfg_pkg;
   localparam logic [15:0] REG_OFF_DOORBELL  = 16'h0108;
   localparam logic [15:0] REG_OFF_CPL       = 16'h010C;
   localparam logic [15:0] REG_OFF_QUEUE     = 16'h0120;
+  // q0 only. A stride of 0x20 from here is the descriptor latch, and 0x0180
+  // is the PMU, so later queues start at REG_OFF_QUEUE_TAIL.
+  localparam logic [15:0] REG_OFF_QUEUE_TAIL = 16'h01A0;
 
   // I3 PMU (sticky last GEMM). Units: beats, cycles, milli-GB/s.
   localparam logic [15:0] PMU_OFF_R_BEATS     = 16'h0180;
@@ -277,6 +464,32 @@ package g6lc_ai_island_cfg_pkg;
   localparam logic [15:0] PMU_OFF_POLICY_WORD  = 16'h0194;
   localparam logic [15:0] PMU_OFF_POLICY_TOPO  = 16'h0198;
   localparam logic [15:0] PMU_OFF_POLICY_EVENT = 16'h019C;
+
+  // {hit, q[7:0], word[2:0]}. `word` is the 32-bit slot in the 0x20 window.
+  // Queue 0 is 0x0120. Queues after that are 0x01A0 + (q-1)*0x20.
+  function automatic logic [11:0] ai_queue_decode(
+      input logic [15:0] addr,
+      input int unsigned nqueues
+  );
+    logic [11:0] dec;
+    int unsigned q;
+    int unsigned idx;
+    logic [2:0] word;
+    dec  = '0;
+    q    = 0;
+    idx  = 0;
+    word = addr[4:2];
+    if (nqueues != 0 && addr >= REG_OFF_QUEUE && addr < REG_OFF_QUEUE + 16'h20) begin
+      dec = {1'b1, 8'd0, word};
+    end else if (nqueues > 1 && 32'(addr) >= 32'(REG_OFF_QUEUE_TAIL)
+        && 32'(addr) < 32'(REG_OFF_QUEUE_TAIL) + 32'(nqueues - 1) * 32'd32) begin
+      idx = (32'(addr) - 32'(REG_OFF_QUEUE_TAIL)) >> 5;
+      q   = idx + 1;
+      if (q < nqueues && q < 256)
+        dec = {1'b1, 8'(q), word};
+    end
+    return dec;
+  endfunction
 
   // Live SKU: both queues on cluster 0. I2 grows this with ClustersEnabled.
   localparam int unsigned QueueClusterMap [0:1] = '{0, 0};
@@ -423,17 +636,11 @@ package g6lc_ai_island_cfg_pkg;
     int unsigned noc;
     ok  = 1'b1;
     noc = noc_peak_gbps(c.NocWidth, c.ClockKhz);
-    if (c.Clusters == 0 || c.ClustersEnabled > c.Clusters) ok = 1'b0;
-    // Replication is not implemented: g6lc_ai_island_top instantiates exactly
-    // one g6lc_ai_gemm_seq, while these two fields are published to software
-    // through CAP_OFF_CLUSTERS and CAP_OFF_CLUSTER_EN.  Accepting Clusters > 1
-    // would elaborate a single engine while advertising several, which is a
-    // false capability rather than a configuration choice, so it fails closed
-    // here.  This is a marker for the work, not a decision against it: measured
-    // evidence makes replication the cheaper way to buy throughput (4.00x area
-    // for 4x, versus 6.30x for lane ganging to 4.20x).  Raise this bound in the
-    // same change that adds per-cluster GEMM/descriptor/queue fan-out.
-    if (c.Clusters > 1 || c.ClustersEnabled > 1) ok = 1'b0;
+    if (c.Clusters == 0 || c.Clusters > 8 || c.ClustersEnabled > c.Clusters) ok = 1'b0;
+    // g6lc_ai_island_top is one engine and rejects Clusters != 1.
+    // g6lc_ai_cluster_set is the N-copy elaboration. MacsPerCycle must fit
+    // the K tile so a 8192-MAC struct with AccTileK 256 stays illegal.
+    if (c.MacsPerCycle == 0 || c.MacsPerCycle > c.AccTileK) ok = 1'b0;
     if (c.MaxAROut < 1 || c.MaxAROut > AI_MAX_AR_OUT_DRAM) ok = 1'b0;
     if ((c.DramCas == 0) != (c.DramTrcd == 0) || (c.DramCas == 0) != (c.DramTrp == 0))
       ok = 1'b0;
@@ -443,17 +650,119 @@ package g6lc_ai_island_cfg_pkg;
       ok = 1'b0;  // DRAM-class command delay needs outstanding ARs
     if (c.DramClass > AI_DRAM_LPDDR5) ok = 1'b0;
     if (c.DramClass == AI_DRAM_SIM_AXI) begin
-      if (c.DramGBps != noc) ok = 1'b0;
+      if (c.DramGBps != dram_nameplate_gbps(
+              c.NocWidth, c.ClockKhz, c.DramChannels, c.DramClass))
+        ok = 1'b0;
     end
     if (!dram_channels_ok(c.DramChannels)) ok = 1'b0;
     if (c.DramChanShift < 3 || c.DramChanShift > 16) ok = 1'b0;
     if (c.DramClass == AI_DRAM_DDR4) begin
-      // Nameplate is N × DDR4-2400×64; never the I3-lite NoC number or 400.
-      if (c.DramGBps != ddr4_nameplate_gbps(c.DramChannels)) ok = 1'b0;
+      // Nameplate is N × DDR4-2400×64; never the class-0 NoC number or 400.
+      if (c.DramGBps != dram_nameplate_gbps(
+              c.NocWidth, c.ClockKhz, c.DramChannels, c.DramClass))
+        ok = 1'b0;
     end
     if (c.DramClass == AI_DRAM_LPDDR5 && c.DramGBps == noc)
-      ok = 1'b0;  // SKU must not reuse the I3-lite NoC number
+      ok = 1'b0;  // SKU must not reuse the class-0 NoC number
+    if (c.DramClass == AI_DRAM_LPDDR5 && c.DramGBps != dram_nameplate_gbps(
+            c.NocWidth, c.ClockKhz, c.DramChannels, c.DramClass))
+      ok = 1'b0;
     return ok;
+  endfunction
+
+  // Parameter sketch in milli-TOPS (98.304 TOPS → 98304). Not a measurement.
+  // INT8 is 2 × clusters × macs × clock. Other formats scale by element bytes.
+  function automatic int unsigned sketch_milli_tops(
+      input ai_island_cfg_t c, input int unsigned fmt
+  );
+    int unsigned base;
+    base = (2 * c.Clusters * c.MacsPerCycle * (c.ClockKhz / 1000)) / 1000;
+    case (fmt)
+      0: return base;           // INT8
+      1: return base * 2;       // INT4, two per byte
+      3, 4: return base;       // FP8, one byte
+      5, 6: return base / 2;   // FP16, BF16
+      7: return base / 4;       // FP32
+      default: return 0;       // SP24 and anything reserved
+    endcase
+  endfunction
+
+  // Same sketch, times mac_mul/mac_div. mac_mul is a projection of issue
+  // groups. It does not elaborate gemm_seq: PeLanes stays MacsPerCycle.
+  // va_level is the VA-turbo error-budget index (0..15). It does not scale
+  // the dense peak. Lane groups inside one engine do not add MAC/cycle, and
+  // level 0 is the exact path. A level above 15 is not a peak.
+  function automatic int unsigned sketch_milli_tops_scaled(
+      input ai_island_cfg_t c,
+      input int unsigned fmt,
+      input int unsigned mac_mul,
+      input int unsigned mac_div,
+      input int unsigned va_level
+  );
+    int unsigned milli;
+    if (mac_mul == 0 || mac_div == 0 || va_level > 15)
+      return 0;
+    milli = sketch_milli_tops(c, fmt);
+    if (milli != 0 && mac_mul > ({32{1'b1}} / milli))
+      return 0;
+    return (milli * mac_mul) / mac_div;
+  endfunction
+
+  // Issues of AI_LIVE_MACS products along K for one output. A K that fits
+  // the tile is one issue: extra lanes stay idle, so a short K does not
+  // finish in fewer issues. k==AI_LIVE_MACS is the full-lane panel.
+  // k above the tile does not fit one descriptor.
+  // The three output shapes VA residency can keep distinct.
+  function automatic bit va_panel_ok(input int unsigned m, input int unsigned n);
+    if (m == AI_LIVE_MACS && n == AI_LIVE_MACS)
+      return 1'b1;
+    if (m == AI_LIVE_MACS && n == (AI_LIVE_MACS / 2))
+      return 1'b1;
+    if (m == (AI_LIVE_MACS * 2) && n == (AI_LIVE_MACS / 4))
+      return 1'b1;
+    return 1'b0;
+  endfunction
+
+  function automatic int unsigned panel_k_issues(input int unsigned k);
+    if (k == 0 || k > AI_PANEL_K)
+      return 0;
+    return (k + AI_LIVE_MACS - 1) / AI_LIVE_MACS;
+  endfunction
+
+  // MAC issues for an m×n×k panel inside the live box. VA residency does
+  // not change this count. 512×256 and 1024×128 are half the outputs of
+  // 512×512, and any k that fits is still one issue per output.
+  function automatic int unsigned panel_mac_issues(
+      input int unsigned m,
+      input int unsigned n,
+      input int unsigned k
+  );
+    int unsigned issues;
+    int unsigned outs;
+    if (m == 0 || n == 0 || m > AI_PANEL_M || n > AI_PANEL_N)
+      return 0;
+    issues = panel_k_issues(k);
+    if (issues == 0)
+      return 0;
+    if (m > ({32{1'b1}} / n))
+      return 0;
+    outs = m * n;
+    if (outs > ({32{1'b1}} / issues))
+      return 0;
+    return outs * issues;
+  endfunction
+
+  // INT8 bytes of one operand (rows × k). A VA hit skips this many bytes
+  // and does not change panel_mac_issues. rows or k above the tile is 0.
+  function automatic int unsigned panel_operand_bytes(
+      input int unsigned rows,
+      input int unsigned k
+  );
+    if (rows == 0 || k == 0 || rows > AI_PANEL_M || k > AI_PANEL_K)
+      return 0;
+    if (rows > ({32{1'b1}} / k))
+      return 0;
+    return rows * k;
   endfunction
 
   // Testharness axi_riscv_atomics_wrap write MLP. Live MaxAROut keeps 1
@@ -475,8 +784,9 @@ package g6lc_ai_island_cfg_pkg;
     return c;
   endfunction
 
-  // Class-0 SRAM, two 64 B stripes. Nameplate stays the NoC 8 GB/s.
-  // Testharness +define+G6LC_AI_DRAM_SIM_CHANS_2. Not LiteDRAM, not I2.
+  // Class-0 SRAM, two 64 B stripes. Nameplate stays the live NoC peak
+  // (channels do not multiply class 0). Testharness
+  // +define+G6LC_AI_DRAM_SIM_CHANS_2. Not LiteDRAM, not I2.
   localparam ai_island_cfg_t AiIslandSimChans2 =
       island_cfg_with_channels(AiIslandLatencyDefault, unsigned'(2));
   // Class-0 SRAM, four/eight 64 B stripes. Testharness SIM_CHANS_4 / _8.

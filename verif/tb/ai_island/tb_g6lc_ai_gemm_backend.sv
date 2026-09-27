@@ -34,13 +34,22 @@ module tb_g6lc_ai_gemm_backend
     // MAX_DIM raises the sequencer's MaxDim so the +measure_k sweep can push k
     // past 16. It grows the tile SRAM (BankWords = MaxDim*ceil(MaxDim/PeLanes)),
     // so it is opt-in and 0 keeps the directed value.
-    parameter int unsigned MAX_DIM      = 0
+    parameter int unsigned MAX_DIM      = 0,
+    // Separate M/N/K and reuse are opt-in. 0 keeps the square MaxDim path
+    // and leaves the reuse generate unelaborated, so the directed run is
+    // unchanged. +panel_reuse drives the keys; it is not the live package.
+    parameter int unsigned MAX_M        = 0,
+    parameter int unsigned MAX_N        = 0,
+    parameter int unsigned MAX_K        = 0,
+    parameter bit          REUSE_EN     = 1'b0
 );
   localparam int unsigned ID_W    = 4;
   localparam int unsigned MST_ID  = ID_W + 1;
   localparam int unsigned ADDR_W  = 64;
   localparam int unsigned DATA_W  = 64;
-  localparam int unsigned NWORDS  = 1024;
+  // The directed image is 8 KiB. The panel-key build needs room for an
+  // m=1024 operand and an n=512 row without overlapping C.
+  localparam int unsigned NWORDS  = (MAX_M == 0) ? 1024 : 8192;
   localparam int unsigned TO_HS   = 8000;
   localparam int unsigned TO_RSP  = 20000;
   // +measure geometry.  m and n must exceed the AR depth under test because A/B
@@ -100,6 +109,11 @@ module tb_g6lc_ai_gemm_backend
   logic [DATA_W-1:0] c0, c1;
   logic [DATA_W-1:0] c0_eqv, c1_eqv;
   logic [3:0]        ar_max_val;
+  logic              reuse_b_req, reuse_a_req, reuse_b_inv, reuse_a_inv;
+  logic              reuse_b_hit, reuse_a_hit;
+  logic [31:0]       reuse_epoch;
+  logic [31:0]       panel_epoch;
+  logic [63:0]       panel_pc;
   // Measurement plumbing (sim-only, +measure).  `cycles` is the TB's shared
   // TIMEOUT BUDGET -- every helper task compares it against TO_HS/TO_RSP
   // absolutely -- so it can never be the measurement.  `free_cy` is a
@@ -184,9 +198,14 @@ module tb_g6lc_ai_gemm_backend
       .DataWidth  ( DATA_W ),
       .IdWidth    ( ID_W ),
       .MaxDim     ( GEMM_MAXDIM ),
+      .MaxM       ( MAX_M ),
+      .MaxN       ( MAX_N ),
+      .MaxK       ( MAX_K ),
       .PeLanes    ( GEMM_LANES ),
       .DotPipeFloat( DOT_PIPE_FLOAT ),
       .MaxAROut   ( GEMM_MAX_AR ),
+      .ReuseBEn   ( REUSE_EN ),
+      .ReuseAEn   ( REUSE_EN ),
       .NrChannels ( NCH ),
       .ChanShift  ( AI_DRAM_CHAN_SHIFT_DEFAULT ),
       .axi_req_t  ( gbus_req_t ),
@@ -212,10 +231,12 @@ module tb_g6lc_ai_gemm_backend
       .pmu_r_beats_o( pmu_r ),
       .pmu_w_beats_o( pmu_w ),
       .pmu_cycles_o ( pmu_cy ),
-      .reuse_b_i(1'b0), .reuse_b_epoch_i(32'd0), .reuse_b_invalidate_i(1'b1),
-      .pmu_reuse_b_hit_o(),
-      .reuse_a_i(1'b0), .reuse_a_epoch_i(32'd0), .reuse_a_invalidate_i(1'b1),
-      .pmu_reuse_a_hit_o(),
+      .reuse_b_i(reuse_b_req), .reuse_b_epoch_i(reuse_epoch),
+      .reuse_b_invalidate_i(reuse_b_inv),
+      .pmu_reuse_b_hit_o(reuse_b_hit),
+      .reuse_a_i(reuse_a_req), .reuse_a_epoch_i(reuse_epoch),
+      .reuse_a_invalidate_i(reuse_a_inv),
+      .pmu_reuse_a_hit_o(reuse_a_hit),
       .axi_req_o    ( gemm_req ),
       .axi_resp_i   ( gemm_resp )
   );
@@ -721,11 +742,196 @@ module tb_g6lc_ai_gemm_backend
     cycles = saved_cycles;
   endtask
 
+  // Opt-in (+panel_reuse). Reuse blocks exist only when REUSE_EN is set.
+  // k=1 all-ones, so every C element is 1. Shapes use the panel dimensions
+  // (m=1024, n=512) so the key registers are wide enough for those indices.
+  task automatic panel_job(
+      input int unsigned m,
+      input int unsigned n,
+      input logic        rb,
+      input logic        ra,
+      input logic        inv,
+      input logic        exp_b,
+      input logic        exp_a,
+      input logic [63:0] c0_addr,
+      input logic [63:0] c1_addr,
+      input string       tag,
+      output int unsigned r_beats
+  );
+    logic [63:0] got;
+    int unsigned guard;
+    cycles = 0;
+    gemm_m = m;
+    gemm_n = n;
+    gemm_k = 32'd1;
+    gemm_lda = 16'd1;
+    gemm_ldb = 16'd1;
+    gemm_numfmt = 3'd0;
+    gemm_pa = 64'h8000_0000;
+    gemm_pb = 64'h8000_0800;
+    gemm_pc = panel_pc;
+    reuse_b_req = rb;
+    reuse_a_req = ra;
+    reuse_b_inv = inv;
+    reuse_a_inv = inv;
+    reuse_epoch = panel_epoch;
+    wr8(c0_addr, 64'hDEAD_BEEF_DEAD_BEEF);
+    if (c1_addr != c0_addr)
+      wr8(c1_addr, 64'hDEAD_BEEF_DEAD_BEEF);
+    guard = 0;
+    while (!ready && guard < 1000) begin
+      tick;
+      guard++;
+    end
+    if (!ready) begin
+      $error("panel %s not ready", tag);
+      errors++;
+      r_beats = 0;
+      return;
+    end
+    start = 1'b1;
+    tick;
+    start = 1'b0;
+    guard = cycles;
+    while (!done && cycles < guard + 100000) tick;
+    if (!done || err) begin
+      $error("panel %s done=%0d err=%0d cy=%0d", tag, done, err, cycles);
+      errors++;
+      r_beats = 0;
+      return;
+    end
+    r_beats = pmu_r;
+    if (reuse_b_hit !== exp_b || reuse_a_hit !== exp_a) begin
+      $error("panel %s hit b=%0d a=%0d exp %0d/%0d r=%0d",
+             tag, reuse_b_hit, reuse_a_hit, exp_b, exp_a, pmu_r);
+      errors++;
+    end
+    // rd8 compares against the absolute timeout budget. The job may have
+    // used that budget already; the read itself is a handful of cycles.
+    cycles = 0;
+    rd8(c0_addr, got);
+    if (got !== 64'h0000_0001_0000_0001) begin
+      $error("panel %s C0 %h", tag, got);
+      errors++;
+    end
+    if (c1_addr != c0_addr) begin
+      rd8(c1_addr, got);
+      if (got !== 64'h0000_0001_0000_0001) begin
+        $error("panel %s C1 %h", tag, got);
+        errors++;
+      end
+    end
+  endtask
+
+  task automatic panel_key_check;
+    int unsigned i, r_cold, r_hit;
+    logic [63:0] pa, pb, pc;
+    if (!REUSE_EN || MAX_M < 1024 || MAX_N < 512 || MAX_K < 1) begin
+      $error("panel_reuse needs REUSE_EN and MAX_M>=1024 MAX_N>=512");
+      errors++;
+      return;
+    end
+    pa = 64'h8000_0000;
+    pb = 64'h8000_0800;
+    pc = 64'h8000_1000;
+    panel_epoch = 32'd0;
+    panel_pc = 64'h8000_1000;
+    cycles = 0;
+    while (!ready && cycles < 1000) tick;
+    for (i = 0; i < 128; i++)
+      wr8(pa + (64'(i) * 64'd8), ONES8);
+    for (i = 0; i < 64; i++)
+      wr8(pb + (64'(i) * 64'd8), ONES8);
+    // Invalidate held: a reuse request does not hit and does not install a key.
+    // m=4, n=2 with invalidate held. Full reads; this is the cold beat count.
+    panel_job(4, 2, 1'b1, 1'b0, 1'b1, 1'b0, 1'b0, pc, pc + 64'd16, "inv", r_cold);
+    // Prime B at n=2, m=8. The m=4 key was not installed while invalidate was held.
+    panel_job(8, 2, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0, pc, pc + 64'd48, "prime-b", r_hit);
+    // Same B, different m. B hits, and the read count drops against the cold m=4.
+    panel_job(4, 2, 1'b1, 1'b0, 1'b0, 1'b1, 1'b0, pc, pc + 64'd16, "hit-b", r_hit);
+    if (r_hit == 0 || r_hit >= r_cold) begin
+      $error("panel hit-b reads %0d not below cold %0d", r_hit, r_cold);
+      errors++;
+    end
+    // n is in the B key. 2 then 4 must miss.
+    panel_job(4, 4, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0, pc, pc + 64'd48, "miss-n", r_hit);
+    // n is not in the A key. Same m, wider n, A hits.
+    panel_job(4, 8, 1'b0, 1'b1, 1'b0, 1'b0, 1'b1, pc, pc + 64'd96, "hit-a", r_hit);
+    // m=1024 walks the tall panel index. A from m=4 must not hit.
+    panel_job(1024, 2, 1'b0, 1'b1, 1'b0, 1'b0, 1'b0,
+              pc, pc + 64'd8176, "tall", r_hit);
+    // Same m=1024, different n. A hits.
+    panel_job(1024, 4, 1'b0, 1'b1, 1'b0, 1'b0, 1'b1, pc, pc + 64'd32, "hit-a-tall", r_hit);
+    // n=512 walks the wide panel index.
+    panel_job(2, 512, 1'b0, 1'b0, 1'b0, 1'b0, 1'b0, pc, pc + 64'd2040, "wide", r_hit);
+    // Same n=512, different m. B hits.
+    panel_job(8, 512, 1'b1, 1'b0, 1'b0, 1'b1, 1'b0, pc, pc + 64'd2040, "hit-b-wide", r_hit);
+    // n=128 is a different B key from n=512.
+    panel_job(2, 128, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0, pc, pc + 64'd504, "miss-128", r_hit);
+    // Epoch 1 does not match the resident 0. The same epoch then hits,
+    // and dropping back to 0 misses A. The island pin stays 0.
+    panel_epoch = 32'd1;
+    panel_job(2, 128, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0, pc, pc + 64'd504, "miss-epoch-b", r_cold);
+    panel_job(2, 128, 1'b1, 1'b0, 1'b0, 1'b1, 1'b0, pc, pc + 64'd504, "hit-epoch-b", r_hit);
+    if (r_hit == 0 || r_hit >= r_cold) begin
+      $error("panel hit-epoch-b reads %0d not below miss %0d", r_hit, r_cold);
+      errors++;
+    end
+    panel_epoch = 32'd0;
+    panel_pc = 64'h8000_1000;
+    panel_job(2, 128, 1'b0, 1'b1, 1'b0, 1'b0, 1'b0, pc, pc + 64'd504, "miss-epoch-a", r_cold);
+    panel_job(2, 128, 1'b0, 1'b1, 1'b0, 1'b0, 1'b1, pc, pc + 64'd504, "hit-epoch-a", r_hit);
+    if (r_hit == 0 || r_hit >= r_cold) begin
+      $error("panel hit-epoch-a reads %0d not below miss %0d", r_hit, r_cold);
+      errors++;
+    end
+    panel_epoch = 32'd0;
+    panel_pc = 64'h8000_1000;
+    reuse_epoch = 32'd0;
+    // C starts on B. The key matches, the skip must not fire, and the
+    // key must not stay valid. The checked pair is past the B bytes.
+    panel_pc = pb;
+    panel_job(2, 128, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0, pb + 64'd512, pb + 64'd512,
+              "overlap-b", r_hit);
+    for (i = 0; i < 16; i++)
+      wr8(pb + (64'(i) * 64'd8), ONES8);
+    panel_pc = pc;
+    panel_job(2, 128, 1'b1, 1'b0, 1'b0, 1'b0, 1'b0, pc, pc + 64'd504, "miss-ov-b", r_cold);
+    panel_job(2, 128, 1'b1, 1'b0, 1'b0, 1'b1, 1'b0, pc, pc + 64'd504, "hit-ov-b", r_hit);
+    if (r_hit == 0 || r_hit >= r_cold) begin
+      $error("panel hit-ov-b reads %0d not below miss %0d", r_hit, r_cold);
+      errors++;
+    end
+    // C starts on A. Same rule for the A key. The checked pair is past
+    // the two A bytes.
+    panel_pc = pa;
+    panel_job(2, 128, 1'b0, 1'b1, 1'b0, 1'b0, 1'b0, pa + 64'd8, pa + 64'd8,
+              "overlap-a", r_hit);
+    for (i = 0; i < 128; i++)
+      wr8(pa + (64'(i) * 64'd8), ONES8);
+    panel_pc = pc;
+    panel_job(2, 128, 1'b0, 1'b1, 1'b0, 1'b0, 1'b0, pc, pc + 64'd504, "miss-ov-a", r_cold);
+    panel_job(2, 128, 1'b0, 1'b1, 1'b0, 1'b0, 1'b1, pc, pc + 64'd504, "hit-ov-a", r_hit);
+    if (r_hit == 0 || r_hit >= r_cold) begin
+      $error("panel hit-ov-a reads %0d not below miss %0d", r_hit, r_cold);
+      errors++;
+    end
+    panel_pc = pc;
+    $display("PANEL keys m=%0d n=%0d reuse=%0d epoch=1 ov=1", MAX_M, MAX_N, REUSE_EN);
+  endtask
+
   initial begin
     errors = 0;
     cycles = 0;
     meas_runs = 0;
     start = 0;
+    reuse_b_req = 1'b0;
+    reuse_a_req = 1'b0;
+    reuse_b_inv = 1'b1;
+    reuse_a_inv = 1'b1;
+    reuse_epoch = 32'd0;
+    panel_epoch = 32'd0;
+    panel_pc = 64'h8000_1000;
     gemm_m = 32'd2; gemm_n = 32'd2; gemm_k = 32'd16;
     gemm_lda = 16'd16; gemm_ldb = 16'd16; gemm_numfmt = 3'd0;
     gemm_pa = 64'h8000_0038;
@@ -880,6 +1086,10 @@ module tb_g6lc_ai_gemm_backend
       measure_sweep;
     if ($test$plusargs("measure_k"))
       measure_k_sweep;
+    // Separate elaboration (REUSE_EN, MAX_M/N/K). The live package keeps
+    // VaTurboEn clear, so this does not run in the default backend script.
+    if ($test$plusargs("panel_reuse"))
+      panel_key_check;
 
     if (errors == 0)
       $display("PASS g6lc_ai_gemm_backend class=%0d nch=%0d ar=%0d cycles=%0d r=%0d/%0d goldenC=16 cap%s",

@@ -329,6 +329,9 @@ pub struct AiIslandConfig {
     /// from there because the `ai_island_cfg_t` package does not carry it. If even the cap window
     /// does not publish it, this stays `None` and the word is reported through `cap_unsourced`.
     pub dtype_mask: Option<u32>,
+    /// Float products are implemented. A set mask bit is not this.
+    /// Older JSON omits the field, which is false: the integer strip.
+    pub fp_datapath: bool,
     /// Capability window offsets by name, from `CAP_OFF_*` localparams.
     pub cap_offsets: std::collections::BTreeMap<String, u64>,
     /// Island PMU register offsets by name, from `PMU_OFF_*` localparams.
@@ -402,6 +405,7 @@ impl AiIslandConfig {
                 "dtype_mask",
                 self.dtype_mask.map_or(Json::Null, |v| Json::Int(v as i64)),
             ),
+            ("fp_datapath", Json::Bool(self.fp_datapath)),
             (
                 "block_mnk",
                 self.block_mnk.map_or(Json::Null, |c| c.to_json()),

@@ -34,6 +34,20 @@ pub fn check_desc_format(d: &Desc64, mask: u16) -> Result<(), RtError> {
     check_format(desc_compute_numfmt(d)?, mask)
 }
 
+/// Execution check. Float codes need `fp_datapath` in addition to the mask bit.
+pub fn check_desc_engine(d: &Desc64, mask: u16, fp_datapath: bool) -> Result<(), RtError> {
+    let fmt = desc_compute_numfmt(d)?;
+    check_format(fmt, mask)?;
+    let float = matches!(
+        fmt,
+        NumFmt::Fp8E4m3 | NumFmt::Fp8E5m2 | NumFmt::Fp16 | NumFmt::Bf16 | NumFmt::Fp32
+    );
+    if float && !fp_datapath {
+        return Err(RtError::BadFmt);
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 pub struct Layout {
     pub(crate) m: usize,

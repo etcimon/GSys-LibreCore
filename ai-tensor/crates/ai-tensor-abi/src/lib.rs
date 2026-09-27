@@ -34,6 +34,10 @@ pub const ST_WATCHDOG: u16 = 7;
 
 /// `flags[2]` — request completion IRQ when sticky IRQ is wired.
 pub const FLAG_IRQ: u32 = 1 << 2;
+/// `flags[15]` — request a resident B panel. Ignored while `VaTurboEn` is 0.
+pub const FLAG_REUSE_B: u32 = 1 << 15;
+/// `flags[23]` — request a resident A panel. Ignored while `VaTurboEn` is 0.
+pub const FLAG_REUSE_A: u32 = 1 << 23;
 
 /// Numeric-format selector inside `Desc64::flags`, at `flags[22:20]`.
 ///
@@ -187,8 +191,21 @@ pub mod mmio {
     pub const DSTATUS: u16 = 0x0114;
     pub const DESC_PTR_LO: u16 = 0x0118;
     pub const DESC_PTR_HI: u16 = 0x011C;
+    /// Queue 0 region. Later queues are not `REG0 + q*0x20`: that stride lands
+    /// on the descriptor latch. They start at [`REG_QUEUE_TAIL`].
     pub const REG0: u16 = 0x0120;
     pub const DESC: u16 = 0x0140;
+    /// First byte of queue 1. Following queues use a stride of 0x20.
+    pub const REG_QUEUE_TAIL: u16 = 0x01A0;
+
+    /// Island-relative base of queue `qid`'s region window.
+    pub fn queue_region(qid: u16) -> u16 {
+        if qid == 0 {
+            REG0
+        } else {
+            REG_QUEUE_TAIL + (qid - 1) * 0x20
+        }
+    }
 
     // I3 PMU sticky last GEMM
     pub const PMU_R_BEATS: u16 = 0x0180;
@@ -222,9 +239,9 @@ impl AccTile {
     }
 
     pub const ISLAND_P3_DEFAULT: Self = Self {
-        m: 256,
-        n: 256,
-        k: 256,
+        m: 1024,
+        n: 512,
+        k: 512,
     };
 
     pub fn fits(&self, m: u32, n: u32, k: u32) -> bool {
@@ -288,13 +305,13 @@ impl CapRegs {
             .collect()
     }
 
-    /// Synthetic CAP matching live AiIslandLatencyDefault shape (AccTile/Macs=256).
+    /// Synthetic CAP matching the live panel box (1024×512×512, MAC issue 512).
     pub fn island_p3_sim_default() -> Self {
-        let acc_w = 8u32 | (8 << 4) | (8 << 8);
+        let acc_w = 10u32 | (9 << 4) | (9 << 8);
         Self {
             version: 1,
             clusters: 1,
-            macs_per_cycle: 256,
+            macs_per_cycle: 512,
             clock_khz: 1000,
             sram_bytes: 8 * 1024 * 1024,
             acc_tile: AccTile::from_cap_word(acc_w),
@@ -557,15 +574,20 @@ mod tests {
     }
 
     #[test]
-    fn cap_acc_tile_256() {
-        let w = 8u32 | (8 << 4) | (8 << 8);
+    fn cap_acc_tile_live() {
+        let w = 10u32 | (9 << 4) | (9 << 8);
         let t = AccTile::from_cap_word(w);
         assert_eq!(t, AccTile::ISLAND_P3_DEFAULT);
-        assert!(t.fits(256, 256, 256));
-        assert!(!t.fits(257, 1, 1));
+        assert!(t.fits(512, 512, 512));
+        assert!(t.fits(512, 256, 512));
+        assert!(t.fits(1024, 128, 512));
+        assert!(!t.fits(1025, 128, 1));
+        assert!(!t.fits(1024, 513, 1));
+        assert!(!t.fits(1, 1, 513));
         let caps = CapRegs::island_p3_sim_default();
-        assert_eq!(caps.macs_per_cycle, 256);
-        assert_eq!(caps.acc_tile.m, 256);
+        assert_eq!(caps.macs_per_cycle, 512);
+        assert_eq!(caps.acc_tile.m, 1024);
+        assert_eq!(caps.acc_tile.n, 512);
         assert_eq!(mmio::PMU_R_BEATS, 0x180);
         assert_eq!(mmio::CAP_MACS_PER_CYCLE, 0x08);
     }

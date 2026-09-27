@@ -20,6 +20,7 @@ pub struct SimDevice {
     mem: Vec<u8>,
     next_off: usize,
     completions: HashMap<u32, Completion>,
+    traces: Vec<crate::format_trace::FormatTrace>,
     last_ticket: u32,
     last_status: u16,
     irq_sticky: bool,
@@ -33,6 +34,10 @@ impl Default for SimDevice {
 }
 
 impl SimDevice {
+    pub fn format_traces(&self) -> &[crate::format_trace::FormatTrace] {
+        &self.traces
+    }
+
     pub fn new() -> Self {
         Self::with_caps(Caps::default())
     }
@@ -52,6 +57,7 @@ impl SimDevice {
             mem: vec![0u8; MEM_CAP],
             next_off: 0,
             completions: HashMap::new(),
+            traces: Vec::new(),
             last_ticket: 0,
             last_status: 0,
             irq_sticky: false,
@@ -117,7 +123,7 @@ impl SimDevice {
                 status: ST_BAD_QID,
             };
         };
-        if crate::numfmt::check_desc_format(d, self.caps.dtype_mask).is_err() {
+        if crate::numfmt::check_desc_engine(d, self.caps.dtype_mask, self.caps.fp_datapath).is_err() {
             return Completion { ticket, status: ai_tensor_abi::ST_BAD_FMT };
         }
         let layout = match crate::numfmt::Layout::from_desc(d) {
@@ -236,6 +242,7 @@ impl Device for SimDevice {
 
     fn submit(&mut self, qid: u8, ticket: u32, desc: &Desc64) -> Result<(), RtError> {
         let c = self.run_job(qid, ticket, desc);
+        self.traces.push(crate::format_trace::FormatTrace::from_desc(desc, c.status));
         self.last_ticket = ticket;
         self.last_status = c.status;
         self.completions.insert(ticket, c);
@@ -283,6 +290,29 @@ mod tests {
         // row0: 1*5+2*7=19, 1*6+2*8=22
         // row1: 3*5+4*7=43, 3*6+4*8=50
         assert_eq!(c, vec![19, 22, 43, 50]);
+        let tr = dev.format_traces();
+        assert_eq!(tr.len(), 1);
+        assert_eq!(tr[0].numfmt, 0);
+        assert_eq!(tr[0].m, 2);
+        assert_eq!(tr[0].status, ST_OK);
+    }
+
+    #[test]
+    fn fast_mask_without_a_float_datapath_refuses_fp32() {
+        use ai_tensor_abi::{NumFmt, ST_BAD_FMT};
+        let mut caps = Caps::default();
+        caps.dtype_mask = crate::format_trace::FAST_DTYPE_MASK;
+        assert!(!caps.fp_datapath);
+        let mut dev = SimDevice::with_caps(caps);
+        dev.enable(true);
+        let mut d = Desc64::gemm(1, 1, 1);
+        d.flags = NumFmt::Fp32.into_flags(d.flags);
+        dev.submit(0, 1, &d).unwrap();
+        assert_eq!(dev.poll(1).unwrap().unwrap().status, ST_BAD_FMT);
+        let traced = dev.format_traces();
+        assert_eq!(traced.len(), 1);
+        assert_eq!(traced[0].status, ST_BAD_FMT);
+        assert_eq!(traced[0].numfmt, NumFmt::Fp32.abi() as u8);
     }
 
     #[test]
@@ -299,7 +329,7 @@ mod tests {
     fn reject_oversize_dims() {
         let mut dev = SimDevice::new();
         dev.enable(true);
-        let big = Desc64::gemm(257, 1, 1).with_ptrs(0x1000, 0x1000, 0x1000, 0);
+        let big = Desc64::gemm(1025, 1, 1).with_ptrs(0x1000, 0x1000, 0x1000, 0);
         let reg = Region {
             base: 0x1000,
             limit: 0x1000 + (1 << 20),

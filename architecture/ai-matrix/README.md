@@ -38,8 +38,9 @@ remote --ai build                                                # proxy flavour
 
 **Scaling plan of record: [`scaling-100tops.md`](scaling-100tops.md)** — what changes when the target
 is the 100-TOPS class rather than 1–5 TOPS. It supplies the bandwidth-first sizing model, the
-core-attached/island plane split (§1.1 below), the SKU question that is still open, and the island
-track I0–I4 (§8). Read it before sizing anything.
+core-attached/island plane split (§1.1 below), the closed SKU decision (latency first,
+throughput by cluster replication), and the island track I0–I4 (§8). Read it before
+sizing anything.
 
 > **Scaffold contract.** Nothing in this file is compiled. No path here is referenced by
 > `core/Flist.cva6`, any `verif/` flist, or any `pd/` script. This document *reserves* seams and
@@ -72,10 +73,10 @@ Honest status of **implemented silicon/software**, not the scaffold-only state o
 | **CPL FIFO** multi-claim | `g6lc_ai_cpl_fifo` | **Live** | `ai_cpl_fifo_multi_claim` HARD |
 | **PLIC-8 IRQ** | island top + SoC | **Live** | `ai_irq_plic_smoke` |
 | **Desc DMA fetch/store** | island engine | **Live** | `ai_desc_fetch_*` / enq/fetch smokes |
-| **I1-lite INT8 GEMM** AccTile/PeLanes **256** | island compute | **Live (lite)** | **HARD** gemm_s8 1067 cy; 256³ ~83.7k cy peak |
+| **I1-lite INT8 GEMM** AccTile/PeLanes **512** (`AI_LIVE_MACS`) | island compute | **Live (lite)** | small golden on the 512-lane sequencer 822/902 cy; 256³ ~83.7k cy is the previous array |
 | **PMU / CAP geometry** | CAP + PMU windows | **Live** | cap/bw_pmu smokes |
 | **I3-lite bus** (trail C-store, multi-out AR, …) | island fabric | **Live** | scale gemm + PMU |
-| **NoC width 64b** | island | **Floor (live)** | wider NoC deferred |
+| **NoC width 64b** | island | **Floor (live)** | define-on island DMA is 512 bits; channel stays 64 |
 | **I2 multi-cluster / NoC/QoS** | island package | **Not started** | F8 present/enabled + bitmap published; still measure I3 BW first |
 | **I3 full memory bandwidth model** | DRAM/channels | **I3-lite live; DRAM I3 opt-in** | class 0, 8 GB/s, N=1, Cas=0 default; SoC `master[DRAM]` shared with cores/L2; opt-in class-1 N=1/2/4/8 and class-0 `SIM_CHANS_{2,4,8}`; GEMM class-1 N=8 **1162 cy** wide all-NCH occupancy; 400 is class 2 |
 | **PCIe EP + virtio (P5)** | uncore | **Virtual only** | `virt-ai-pcie` TCP + EDK2 GPEX RC witness; transport **unpinned** |
@@ -85,11 +86,30 @@ Honest status of **implemented silicon/software**, not the scaffold-only state o
 | **Kernel UIO/eventfd** | Linux driver | **Open** | contract in board-uio-eventfd |
 | **I4 PD / UPF / thermal** | backend | **Open** | — |
 
-**Next program step (scaling):** freeze AccTile/`T`/CAP; **measure I3 bandwidth** against
-`scaling-100tops.md` §4 (F13 writeback, not input-only `2/T`) on the **shared** DRAM slave
-(cores already use it; do not make `DramChannels` island-private); then **I2 cluster
-replication** without regressing narrow/ci HARD on the single-cluster path. Do not wait on
-KVM, full OoO, or a pinned PCIe BAR. Design asks: [`../../g6lc_qemu/architecture/RTL_FEEDBACK.md`](../../g6lc_qemu/architecture/RTL_FEEDBACK.md)
+**Next program step (scaling):** the class-1 80% of `min(nameplate, 8 GB/s fabric)` floor
+is already closed. The live array is already 512 MAC/cycle; do not raise `AI_LIVE_MACS` or add channels on that port. The second DRAM ingress,
+`g6lc_ai_dram_join`, sits above the stripe. With `G6LC_AI_DRAM_ISLAND_PORT` the island
+DMA is 512 bits and the join narrows it onto the 64-bit channel. The island
+at that width completes an 8×8×8 INT8 GEMM onto the 64-bit channel
+(`tb_g6lc_ai_island_wide`). The same define elaborates and links `g6lc64_ai`
+under Verilator 5.036; stock 5.020 faults before elaboration, and the linked
+model has not been booted. Unset, slave port 2
+stays the 64-bit crossbar. That define does not raise the measured 8 GB/s ceiling:
+C stores, descriptor fetches, and the completion word are still 8-byte beats.
+The island PMU bills those C handshakes at 8 bytes, so `0x18C` does not
+treat a C store as a 512-bit beat. Operand reads use the full port beat, so
+a one-byte row on that 512-bit port occupies 64 bytes. The core sideband
+applies the same descriptor-fetch check as the doorbell. A non-default
+throughput struct, `AiIslandThroughputSku`, is the elaboration of I2 (8
+clusters), a 4096-MAC cluster, and the float format codes except structured
+2:4. Its peaks are parameter sketches (98.3 INT8 TOPS, 24.6 FP32 TFLOPS, and
+the width-scaled rows beside them). The live package is a 2.048 TOPS nameplate
+(512 MAC/cycle × 2 GHz), INT8|INT4, and class 0 at 16 GB/s on the 64-bit port.
+VA-turbo does not multiply that MAC rate. The sequencer box is 1024×512×512.
+The VA panels are 512×512, 512×256, and 1024×128. MAC issue stays 512.
+Class 2 still has no PHY; `Class2Model` is an off-by-default rate
+socket. V/A-Turbo is not this step.
+Design asks: [`../../g6lc_qemu/architecture/RTL_FEEDBACK.md`](../../g6lc_qemu/architecture/RTL_FEEDBACK.md)
 §2.1 / §3.3. Snapshot: [`../current-stage.md`](../current-stage.md).
 Detail: [`hard-tests.md`](hard-tests.md) §5 · [`scaling-100tops.md`](scaling-100tops.md) §11.
 
@@ -209,6 +229,10 @@ and option D, and is the single largest hidden cost in the phasing below. Tracke
 | Writeback port count | `core/include/build_config_pkg.sv:38` | 5th port shared by both seams |
 | PMU | `core/perf_counters.sv` group 4 (`MHPMGrpAI`) | see §5.1 |
 | RVFI | `core/cva6_rvfi.sv`, `rvfi_types.svh` | `aicfg`/`aistatus` probes + UVMT assigns |
+| Island top / GEMM / capability window | `corev_apu/ai_island/g6lc_ai_island_top.sv`, `g6lc_ai_gemm_seq.sv`, `g6lc_ai_cap_window.sv` | T2 DMA, 256-MAC tile, CAP at `0x4000_0000` |
+| SoC DRAM slave | `corev_apu/src/g6lc_ai_dram_backend.sv`, `g6lc_ai_dram_channels.sv` | one slave today; class 0 N=1 is `axi2mem`, N>1 and class 1 stripe |
+| Second ingress | `corev_apu/src/g6lc_ai_dram_join.sv` | cluster + island above the stripe. Default off (`G6LC_AI_DRAM_ISLAND_PORT`) |
+| Testharness DMA port | `corev_apu/tb/ariane_testharness.sv` slave[2] | island DMA. Define peels a 512-bit port onto the join and that `g6lc64_ai` model links under Verilator 5.036; unset, it stays on the 64-bit xbar |
 
 ## 4. Config knobs (proposed — `cva6_cfg_t` + `check_cfg`)
 
@@ -391,8 +415,8 @@ and one software stack.
 | # | Deliverable | Depends on |
 |---|---|---|
 | **I0** | TOPS definition, bandwidth model, plane split, staged SKU decision | — (done: `scaling-100tops.md`) |
-| **I1** | **one** island cluster: PE array, `tc_sram` banks, sequencer, capability window. Freezes `T`, accumulator geometry, DRAM class and the NoC cut line **for both SKUs**. **Landed (partial):** AccTile*=256 / PeLanes=256 + I3-lite bus + PMU + CPL FIFO; HARD narrow/ci/peak green; full PE/`tc_sram` density still open | P3 |
-| **I3** | memory system sized to the §4 model; **measured** bandwidth (**next critical gate**) | I1 |
+| **I1** | **one** island cluster: PE array, `tc_sram` banks, sequencer, capability window. Freezes `T`, accumulator geometry, DRAM class and the NoC cut line **for both SKUs**. **Landed (partial):** `T` and `AI_LIVE_MACS` are 512, frozen until bytes/cycle rise; I3-lite bus + PMU + CPL FIFO; full PE/`tc_sram` density still open | P3 |
+| **I3** | memory system. **Measured:** class 0 and class-1 N=1..8, fabric-bound at 8 bytes/cycle (80% floor closed on the 1 GHz accounting). Nameplate is 16 GB/s. **In RTL, define off:** second ingress at 512-bit island / 64-bit channel. **Remaining:** class 2. Not more MACs | I1 |
 | — | **latency SKU tapes out** (1–2 clusters, ~12–25 TOPS) | I3, I4 |
 | **I2** | NoC + N clusters + per-cluster gating + QoS arbitration (**after I3 measure**) | I3 |
 | **I4** | floorplan, UPF domains, thermal cap loop, STA | I1, re-run after I2 |
