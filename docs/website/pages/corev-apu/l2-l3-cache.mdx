@@ -98,6 +98,19 @@ Three facts a contributor needs before touching this layer:
   four-hart run and in a deterministic dual-simulation lane (`L2TB_EQ_TAGS`); a Yosys miter does
   not close on the unpaired tag-store init and is an open item.
 
+## Write-through update (`L2WriteUpdateEn`, 2026-09-27)
+
+A write-through on a resident L2/L3 line used to purge the line (~6,060 purges per 8,192
+stores on the write/read kernel; ~90k of the four-hart boot's ~100k L2 misses followed a
+purge). With `L2WriteUpdateEn` (default 0; on in `g6lc64_ooo_int2`, `g6lc64_ooo_int2_l3`,
+`g6lc64_smt2_l3`; off and bit-identical in `g6lc64_smt2`/`g6lc64_smt2_ooo_int`) an **eligible**
+write — cacheable, no ATOP, no lock, burst inside the line — merges its bytes into the
+resident line through the data port while the write-through still reaches memory. Same-line
+in-flight fills are still killed, and merged bytes become visible only after memory's B
+response. Measured: boot `l2_miss` ~103k→~1.5k, `l2_selfinv` ~91.6k→~190, `l2_wupd`
+~770–833k; strict boots pass on all enabled packages and the latency-40 boot improves
+11.5–13.2 %. Observability: `l2_wupd`/`l3_wupd` fields in the testbench `[mc_cache]` line.
+
 For DRAM-latency experiments use the testbench's `DramLatency` parameter
 (`corev_apu/tb/g6lc_tb_dram_latency.sv`, first beat of each burst delayed). The vendor
 `axi_delayer` fixed delay serializes every beat and truncates to 4 bits — it cannot model memory

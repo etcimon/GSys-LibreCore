@@ -1078,17 +1078,26 @@ class McCacheCounterParseTests(unittest.TestCase):
             ' dram_latency=40')
     WANT = {'l2_hit': 3, 'l2_miss': 11, 'l2_bypass': 7, 'l3_hit': 2,
             'l3_miss': 5, 'l2_selfinv': None, 'l3_selfinv': None,
+            'l2_wupd': None, 'l3_wupd': None,
             'dram_latency': 40}
     LINE8 = ('*** [mc_cache] l2_hit=3 l2_miss=11 l2_bypass=7 l3_hit=2 l3_miss=5'
              ' l2_selfinv=9 l3_selfinv=4 dram_latency=40')
     WANT8 = {'l2_hit': 3, 'l2_miss': 11, 'l2_bypass': 7, 'l3_hit': 2,
-             'l3_miss': 5, 'l2_selfinv': 9, 'l3_selfinv': 4, 'dram_latency': 40}
+             'l3_miss': 5, 'l2_selfinv': 9, 'l3_selfinv': 4,
+             'l2_wupd': None, 'l3_wupd': None, 'dram_latency': 40}
+    LINE10 = ('*** [mc_cache] l2_hit=3 l2_miss=11 l2_bypass=7 l3_hit=2 l3_miss=5'
+              ' l2_selfinv=9 l3_selfinv=4 l2_wupd=6 l3_wupd=1 dram_latency=40')
+    WANT10 = {'l2_hit': 3, 'l2_miss': 11, 'l2_bypass': 7, 'l3_hit': 2,
+              'l3_miss': 5, 'l2_selfinv': 9, 'l3_selfinv': 4,
+              'l2_wupd': 6, 'l3_wupd': 1, 'dram_latency': 40}
 
     def check(self, parser):
-        # Six-field (legacy) and eight-field (selfinv) lines both parse.
+        # Six-field (legacy), eight-field (selfinv) and ten-field
+        # (write-update) lines all parse.
         self.assertEqual(parser(self.LINE + '\n'), self.WANT)
         self.assertEqual(parser('banner\n' + self.LINE + '\ntrailer\n'), self.WANT)
         self.assertEqual(parser(self.LINE8 + '\n'), self.WANT8)
+        self.assertEqual(parser(self.LINE10 + '\n'), self.WANT10)
         self.assertIsNone(parser('*** [mc_verdict] program exit code 0\n'))
         self.assertIsNone(parser('*** [mc_cache] l2_hit=x l2_miss=1\n'))
 
@@ -1099,6 +1108,119 @@ class McCacheCounterParseTests(unittest.TestCase):
     def test_opensbi_runner_parser(self):
         from run_opensbi_source_review import parse_cache_counters
         self.check(parse_cache_counters)
+
+
+class CommandTimeoutTests(unittest.TestCase):
+    def test_zero_means_no_timeout(self):
+        # --timeout 0 must honour the help text, not fall back to the
+        # safety-net default (this used to silently apply 60 s).
+        self.assertEqual(proxy.command_timeout(0, 60), 0)
+        self.assertEqual(proxy.command_timeout(0.0, proxy.DEFAULT_SHELL_TIMEOUT), 0.0)
+
+    def test_unset_uses_the_command_default(self):
+        self.assertEqual(proxy.command_timeout(None, 60), 60)
+        self.assertEqual(proxy.command_timeout(None, 900), 900)
+
+    def test_explicit_values_pass_through(self):
+        self.assertEqual(proxy.command_timeout(5400, 60), 5400)
+        self.assertEqual(proxy.command_timeout(0.5, 60), 0.5)
+
+    def test_cli_default_leaves_timeout_unset(self):
+        args = proxy.build_parser().parse_args(['doctor'])
+        self.assertIsNone(args.timeout)
+        args = proxy.build_parser().parse_args(['--timeout', '0', 'doctor'])
+        self.assertEqual(args.timeout, 0.0)
+
+
+class LaneSchedulerTests(unittest.TestCase):
+    def lanes(self):
+        return [
+            {'tag': 'a', 'command': ['true'], 'threads': 4, 'after': []},
+            {'tag': 'b', 'command': ['true'], 'threads': 4, 'after': []},
+            {'tag': 'c', 'command': ['true'], 'threads': 4, 'after': []},
+            {'tag': 'd', 'command': ['true'], 'threads': 2, 'after': ['a']},
+        ]
+
+    def test_budget_respected_and_dependency_ordering(self):
+        sched = __import__('run_queue').LaneScheduler(self.lanes(), budget=8)
+        first = sched.tick()
+        # Budget 8 admits a+b (4+4); c (4) would overflow; d waits on a.
+        self.assertEqual([l['tag'] for l in first], ['a', 'b'])
+        self.assertEqual(sched.tick(), [])
+        sched.finish('a', 0)
+        # a done frees 4 and unblocks d; c wins file order first (needs 4 of 4).
+        started = {l['tag'] for l in sched.tick()}
+        self.assertEqual(started, {'c'})
+        sched.finish('c', 0)
+        self.assertEqual([l['tag'] for l in sched.tick()], ['d'])
+        sched.finish('d', 0); sched.finish('b', 0)
+        self.assertTrue(sched.done())
+
+    def test_failure_isolates_dependents_not_peers(self):
+        sched = __import__('run_queue').LaneScheduler(self.lanes(), budget=8)
+        started = {l['tag'] for l in sched.tick()}
+        self.assertEqual(started, {'a', 'b'})
+        sched.finish('a', 1)   # fails
+        sched.finish('b', 0)
+        ticked = sched.tick()
+        # c still starts (peer), d is skipped (dep failed)
+        self.assertIn('c', [l['tag'] for l in ticked])
+        self.assertEqual(sched.lanes['d']['status'], 'skipped')
+        sched.finish('c', 0)
+        self.assertTrue(sched.done())
+
+    def test_duplicate_unknown_and_cyclic_deps_rejected(self):
+        rq = __import__('run_queue')
+        for lanes in (
+            [{'tag': 'x', 'command': ['t'], 'threads': 1, 'after': []},
+             {'tag': 'x', 'command': ['t'], 'threads': 1, 'after': []}],
+            [{'tag': 'x', 'command': ['t'], 'threads': 1, 'after': ['nope']}],
+            [{'tag': 'x', 'command': ['t'], 'threads': 1, 'after': ['y']},
+             {'tag': 'y', 'command': ['t'], 'threads': 1, 'after': ['x']}],
+        ):
+            with self.assertRaises(ValueError):
+                rq.LaneScheduler(lanes, budget=4)
+
+    def test_lane_file_json_and_yaml(self):
+        rq = __import__('run_queue')
+        js = rq.parse_lane_file('[{"tag":"t1","threads":2,'
+                              '"command":["echo","hi"]}]')
+        self.assertEqual(js[0]['command'], ['echo', 'hi'])
+        ym = rq.parse_lane_file('- tag: t2\n  threads: 3\n  after: [t1]\n'
+                              '  command: bash run.sh x\n')
+        self.assertEqual(ym[0]['tag'], 't2')
+        self.assertEqual(ym[0]['threads'], 3)
+        self.assertEqual(ym[0]['after'], ['t1'])
+        self.assertEqual(ym[0]['command'], ['bash', 'run.sh', 'x'])
+
+    def test_run_queue_runs_all_and_isolates_failure(self):
+        import threading
+        rq = __import__('run_queue')
+        active = [0]
+        peak = [0]
+        lock = threading.Lock()
+
+        import time as _time
+        def runner(lane):
+            with lock:
+                active[0] += lane['threads']
+                peak[0] = max(peak[0], active[0])
+            _time.sleep(0.01)
+            with lock:
+                active[0] -= lane['threads']
+            return 0 if lane['tag'] != 'fail' else 7
+
+        lanes = [{'tag': 'fail', 'command': ['x'], 'threads': 4, 'after': []},
+                 {'tag': 'peer', 'command': ['x'], 'threads': 4, 'after': []},
+                 {'tag': 'dep', 'command': ['x'], 'threads': 1,
+                  'after': ['fail']},
+                 {'tag': 'okdep', 'command': ['x'], 'threads': 2,
+                  'after': ['peer']}]
+        summary = rq.run_queue(lanes, 8, runner, log=lambda m: None)
+        statuses = {l['tag']: l['status'] for l in summary['lanes']}
+        self.assertEqual(statuses, {'fail': 'failed', 'peer': 'passed',
+                                    'dep': 'skipped', 'okdep': 'passed'})
+        self.assertLessEqual(peak[0], 8)
 
 
 if __name__ == '__main__':

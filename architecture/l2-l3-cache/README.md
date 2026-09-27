@@ -989,6 +989,39 @@ Record of decision and evidence: `core/ooo/AGENTS-ooo-plan.md` T8a–T8d.
   kill-on-invalidation repairs; a whitelist was rejected. Re-cut the reference from the current
   flop engine before citing that lane again.
 
+### Write-through update (`L2WriteUpdateEn`) and Phase-5 qualification (2026-09-27)
+
+Record of decision and evidence: `core/ooo/AGENTS-ooo-plan.md` T8f/T8g.
+
+- **Resident-line writes merge in place.** `L2WriteUpdateEn` (default 0; `WRITE_UPDATE` on
+  `g6lc_l2_top`, passed through `g6lc_l3_top`) splits the write's self-invalidation into a
+  tag clear (`tag_match_inval`) and a fill kill (`kill_match`); on a confirmed resident-line
+  hit by an eligible write (cacheable, no ATOP, no lock, burst inside the line) the tag clear
+  is suppressed and each forwarded W beat merges bytes through data port A. The fill kill
+  still fires, so a racing fill can never stale-merge. Merged bytes are visible only after
+  memory's B — the FSM leaves the bypass states via S_BYPASS_B — so the composed bench's
+  `late_ar >= mem_b` admission contract holds under WU=1. A write to a non-resident line,
+  or an ineligible write, takes the invalidate-and-bypass path verbatim. On in
+  `g6lc64_ooo_int2`, `g6lc64_ooo_int2_l3`, `g6lc64_smt2_l3`; off — and bit-identical — on
+  `g6lc64_smt2` / `g6lc64_smt2_ooo_int` (frozen traces re-verified: 12,761,165 /
+  10,701,925 cycles, exact).
+- **Boot numbers (strict pass).** Four-hart int2 at latency 0: 17,993,674 cycles (was
+  18,675,595), `l2_miss` 103,380→1,532, `l2_selfinv` 91,594→189, `l2_wupd` 817,606.
+  int2_l3: 18,244,344 (was 19,341,802), flop-tag `L2TagSramEn=0` build byte-identical to
+  the SRAM-tag run. smt2_l3: 13,814,448 (was 14,300,834). Latency-40 measurement boots:
+  int2 41,508,827 (−11.5 %), int2_l3 42,004,100 (−13.2 %) with the boot workload's first
+  `l3_hit` — written lines now stay resident in the L3 instead of being purged.
+- **Directed.** `mc_l2_write_read` (128 KiB × 4 iterations): `l2_selfinv` 6,060→0,
+  `l2_wupd` 6,135, read-backs hit the L2 (~6,040 hits vs ~15), latency-40 cycles
+  821,733→526,714 on int2 / 926,763→559,492 on int2_l3. The 512 KiB scan is
+  cycle-identical (its stores never find a resident line). Every negative arm fires.
+- **Gates.** HUM 78/78 identical metric hash under WU=0; `L2TB_EQ_TAGS` byte-exact at
+  WU=1 (512 B 17,187; 4 KiB 32,102) and WU=0 (17,221); merge/tag fault controls fail as
+  designed; int2/int2_l3/smt2_l3 lint-synth zero errors, default counts unchanged; FO4
+  `g6lc_l2_top` worst 28.5 at both WU values — the merge lives only in the bypass states.
+- **Open.** Posted-write merges and CBO-on-WT are M1; `--threads>1` Verilator models
+  diverge late (~97.7 % identical) and are measurement-only, not qualification.
+
 ## Default-off replacement experiment (2026-09-14)
 
 `L2RoundRobinEn` flows through both config structs, `build_config`, and

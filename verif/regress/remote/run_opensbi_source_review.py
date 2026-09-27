@@ -17,10 +17,12 @@ import tarfile
 
 def parse_cache_counters(text):
     # l2_selfinv/l3_selfinv are optional: pre-Phase-4 models print the
-    # six-field line, new models add the two self-invalidation counts.
+    # six-field line, Phase-4 models add the two self-invalidation counts,
+    # and Phase-5 models add the l2_wupd/l3_wupd write-update counts.
     match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
                       r' l3_hit=(\d+) l3_miss=(\d+)'
-                      r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))? dram_latency=(\d+)', text)
+                      r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))?'
+                      r'(?: l2_wupd=(\d+) l3_wupd=(\d+))? dram_latency=(\d+)', text)
     if not match:
         return None
     return {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
@@ -28,7 +30,9 @@ def parse_cache_counters(text):
             'l3_miss': int(match.group(5)),
             'l2_selfinv': int(match.group(6)) if match.group(6) else None,
             'l3_selfinv': int(match.group(7)) if match.group(7) else None,
-            'dram_latency': int(match.group(8))}
+            'l2_wupd': int(match.group(8)) if match.group(8) else None,
+            'l3_wupd': int(match.group(9)) if match.group(9) else None,
+            'dram_latency': int(match.group(10))}
 
 
 def sha(path):
@@ -272,8 +276,26 @@ def main():
         if str(control_path) not in verfiles:
             raise RuntimeError('compiler control absent from generated model inputs')
         shutil.copy2(control_path, out / control_path.name)
-    if not re.search(r'--threads\s+1(?:\s|["\'])', verfiles) or '/core/fetch_B/frontend.sv' not in verfiles:
+    # Verilator --threads N models need an explicit opt-in: qualification stays
+    # on --threads 1; SOURCE_REVIEW_ALLOW_THREADS=N admits a model verilated
+    # with exactly N threads (N <= host nproc) for throughput experiments only.
+    # The admitted degree is recorded in provenance/results as modelThreads.
+    allow_threads = int(os.environ.get('SOURCE_REVIEW_ALLOW_THREADS', '1'))
+    if allow_threads < 1:
+        raise RuntimeError('SOURCE_REVIEW_ALLOW_THREADS must be >= 1')
+    model_threads = 1
+    threads_match = re.search(r'--threads\s+(\d+)(?:\s|["\'])', verfiles)
+    if threads_match:
+        model_threads = int(threads_match.group(1))
+    if model_threads != 1 and model_threads != allow_threads:
+        raise RuntimeError('source-profile requires single-thread fetch_B '
+                           f'(model is --threads {model_threads}; set '
+                           'SOURCE_REVIEW_ALLOW_THREADS to admit it)')
+    if model_threads > (os.cpu_count() or 1):
+        raise RuntimeError(f'model --threads {model_threads} exceeds host nproc')
+    if '/core/fetch_B/frontend.sv' not in verfiles:
         raise RuntimeError('source-profile requires single-thread fetch_B')
+    provenance['modelThreads'] = model_threads
     if re.search(r'/(?:fetch_A|smt_legacy)/|Flist\.smt_legacy', verfiles):
         raise RuntimeError('excluded source input')
     dependencies = '\n'.join(p.read_text(errors='replace') for p in model.parent.glob('*.d'))
@@ -465,7 +487,13 @@ def execute(model, record, out):
         raise RuntimeError('strict payload must have one tohost')
     if os.environ.get('SOURCE_REVIEW_BUILD_ONLY') == '1':
         return 0
-    if subprocess.run(['pgrep', '-af', '[/]Variane_testharness( |$)'], capture_output=True).returncode != 1:
+    # Serial-era mutual exclusion: refuse to start while a model binary is
+    # already running on this host. Cycle-exact results do not depend on
+    # co-tenants, so SOURCE_REVIEW_ALLOW_CONCURRENT=1 admits overlap when a
+    # throughput budget (e.g. remote nproc) is enforced by the launcher.
+    if (os.environ.get('SOURCE_REVIEW_ALLOW_CONCURRENT') != '1'
+            and subprocess.run(['pgrep', '-af', '[/]Variane_testharness( |$)'],
+                               capture_output=True).returncode != 1):
         raise RuntimeError('another harness is active')
     resource.setrlimit(resource.RLIMIT_STACK, (resource.RLIM_INFINITY, resource.RLIM_INFINITY))
     trial = out / 'trial'

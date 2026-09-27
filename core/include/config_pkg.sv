@@ -568,7 +568,7 @@ package config_pkg;
                                       // default 0 = today's modifiable-only stream
     bit          L3InclusiveEn;       // L3 victim back-invalidates L1s and the L2 tag (Phase 2)
     bit          L2TagSramEn;         // L2/L3 tag array behind tc_sram launched read (Phase 3)
-    bit          L2WriteUpdateEn;     // L2 merges a WT write into a resident line (Phase 4)
+    bit          L2WriteUpdateEn;     // L2 merges a WT write into a resident line (T8f)
     // Xg6lcai AI matrix plane (off in every package but g6lc64_ai)
     ai_cfg_t     AiCfg;
   } cva6_user_cfg_t;

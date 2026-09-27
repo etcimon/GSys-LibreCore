@@ -353,6 +353,7 @@ module g6lc_cluster
         .RR_EN          (CVA6Cfg.L2RoundRobinEn),
         .FAIR_WRITES    (CVA6Cfg.OoOEn),
         .TAG_SRAM       (CVA6Cfg.L2TagSramEn),
+        .WRITE_UPDATE   (CVA6Cfg.L2WriteUpdateEn),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),
@@ -371,8 +372,9 @@ module g6lc_cluster
         .l2_bypass_o        (),
         .l2_mshr_full_o     (),
         .l2_bank_conflict_o (),
-        // TB reads the pulse hierarchically; no cluster port.
+        // TB reads the pulses hierarchically; no cluster ports.
         .l2_selfinv_hit_o   (),
+        .l2_wupdate_o       (),
         .l2_evict_valid_o   (l2_evict_v),
         .l2_evict_addr_o    (l2_evict_a),
         // Under L3En the L2's evict output is not the inclusive broadcast
@@ -404,6 +406,7 @@ module g6lc_cluster
         .MSHR_DEPTH     (CVA6Cfg.L3MshrDepth != 0 ? CVA6Cfg.L3MshrDepth : 32'd16),
         .DATA_BANKS     (CVA6Cfg.L3DataBanks != 0 ? CVA6Cfg.L3DataBanks : 32'd8),
         .TAG_SRAM       (CVA6Cfg.L2TagSramEn),
+        .WRITE_UPDATE   (CVA6Cfg.L2WriteUpdateEn),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),
@@ -420,8 +423,9 @@ module g6lc_cluster
         .l3_hit_o         (l3_hit_w),
         .l3_miss_o        (l3_miss_w),
         .l3_bypass_o      (l3_bypass_w),
-        // TB reads the pulse hierarchically; no cluster port.
+        // TB reads the pulses hierarchically; no cluster ports.
         .l3_selfinv_hit_o (),
+        .l3_wupdate_o       (),
         .l3_evict_valid_o (l3_evict_v),
         .l3_evict_addr_o  (l3_evict_a),
         .l3_evict_ready_i (l3_evict_rdy)

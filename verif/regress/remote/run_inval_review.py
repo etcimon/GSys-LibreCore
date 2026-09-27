@@ -535,6 +535,10 @@ def composed_review(out, data, runtime_info, runtime):
     # path — the flop path stays the default (identity control).
     if os.environ.get('REVIEW_COMPOSED_TAG_SRAM') == '1':
         profiles = {name: args + ['-GTAG_SRAM=1'] for name, args in profiles.items()}
+    # REVIEW_COMPOSED_WU=1 enables the resident-line write merge on both
+    # cache levels; the bench's WU-conditional expectations do the rest.
+    if os.environ.get('REVIEW_COMPOSED_WU') == '1':
+        profiles = {name: args + ['-GWRITE_UPDATE=1'] for name, args in profiles.items()}
     assert chosen in profiles and not (fault and chosen=='no-l2')
     assert not (fault=='self-inval' and chosen.startswith('stack'))
     assert fault!='stack' or chosen=='stack-fault'
@@ -561,10 +565,12 @@ localparam bit USE_L2=1;
 localparam bit USE_L3=%d;
 localparam bit SELF_INVAL_FAULT=0;
 localparam bit TAG_SRAM=%d;
+localparam bit WRITE_UPDATE=%d;
 localparam int BYTE_SIZE=4096,SET_ASSOC=4,MSHR_DEPTH=4,DATA_BANKS=2;
 localparam int L3_BYTES=2048,L3_SET_ASSOC=2,L3_MSHR_DEPTH=2,L3_DATA_BANKS=2;
 req_t hub_req;resp_t hub_rsp;
-''' % (scc_l3, int(os.environ.get('REVIEW_COMPOSED_TAG_SRAM') == '1')) + instances + '\nendmodule\n')
+''' % (scc_l3, int(os.environ.get('REVIEW_COMPOSED_TAG_SRAM') == '1'),
+       int(os.environ.get('REVIEW_COMPOSED_WU') == '1')) + instances + '\nendmodule\n')
         script='read_slang -I' + str(source) + ' --top composed_graph ' + ' '.join(files[:-1]) + f' {wrapper}; hierarchy -check -top composed_graph; flatten; proc; opt; check -assert; scc -expect 0'
         (out/'scc.ys').write_text(script)
         with (out/'scc.log').open('w') as log:

@@ -21,6 +21,10 @@
 
 module tb_g6lc_l2_tag_miter;
 
+  // WRITE_UPDATE exercises the same-edge install-vs-match guard added for
+  // merged-line self-invalidation; the default keeps the Phase-4 netlist.
+  parameter bit WRITE_UPDATE = 1'b0;
+
   localparam int unsigned NUM_SETS  = 16;
   localparam int unsigned SET_ASSOC = 4;
   localparam int unsigned TAG_WIDTH = 8;
@@ -55,7 +59,7 @@ module tb_g6lc_l2_tag_miter;
 
   g6lc_l2_tag #(
       .NUM_SETS(NUM_SETS), .SET_ASSOC(SET_ASSOC), .TAG_WIDTH(TAG_WIDTH),
-      .IDX_WIDTH(IDX_WIDTH), .TAG_SRAM(1'b0)
+      .IDX_WIDTH(IDX_WIDTH), .TAG_SRAM(1'b0), .WRITE_UPDATE(WRITE_UPDATE)
   ) i_gold (
       .clk_i(clk), .rst_ni(rst_n),
       .launch_i(launch), .launch_index_i(launch_index),
@@ -71,7 +75,7 @@ module tb_g6lc_l2_tag_miter;
 
   g6lc_l2_tag #(
       .NUM_SETS(NUM_SETS), .SET_ASSOC(SET_ASSOC), .TAG_WIDTH(TAG_WIDTH),
-      .IDX_WIDTH(IDX_WIDTH), .TAG_SRAM(1'b1)
+      .IDX_WIDTH(IDX_WIDTH), .TAG_SRAM(1'b1), .WRITE_UPDATE(WRITE_UPDATE)
   ) i_trial (
       .clk_i(clk), .rst_ni(rst_n),
       .launch_i(launch), .launch_index_i(launch_index),

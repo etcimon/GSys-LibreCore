@@ -62,10 +62,12 @@ def decode_soak(value):
 
 def parse_cache_counters(text):
     # l2_selfinv/l3_selfinv are optional: pre-Phase-4 models print the
-    # six-field line, new models add the two self-invalidation counts.
+    # six-field line, Phase-4 models add the two self-invalidation counts,
+    # and Phase-5 models add the l2_wupd/l3_wupd write-update counts.
     match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
                       r' l3_hit=(\d+) l3_miss=(\d+)'
-                      r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))? dram_latency=(\d+)', text)
+                      r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))?'
+                      r'(?: l2_wupd=(\d+) l3_wupd=(\d+))? dram_latency=(\d+)', text)
     if not match:
         return None
     return {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
@@ -73,7 +75,9 @@ def parse_cache_counters(text):
             'l3_miss': int(match.group(5)),
             'l2_selfinv': int(match.group(6)) if match.group(6) else None,
             'l3_selfinv': int(match.group(7)) if match.group(7) else None,
-            'dram_latency': int(match.group(8))}
+            'l2_wupd': int(match.group(8)) if match.group(8) else None,
+            'l3_wupd': int(match.group(9)) if match.group(9) else None,
+            'dram_latency': int(match.group(10))}
 
 
 def verdict(text, bound, kind, rc=0, expect_mask=None):
@@ -1207,9 +1211,10 @@ def build_only_review():
     if extra_vlt_args:
         vlt_args = (vlt_args + ' ' + extra_vlt_args).strip()
     dram_latency = re.search(r'-GDramLatency=(\d+)', vlt_args)
+    jobs = os.environ.get('REVIEW_MC_BUILD_JOBS', '8')
     command = (f'export VERILATOR_ROOT={runtime} SOFT_LADDER_VERLIB={model} '
                f'SOFT_LADDER_BUILD_TARGET={target} SOFT_LADDER_VERILATOR_THREADS={threads} '
-               'SOFT_LADDER_BUILD_JOBS=8 SOFT_LADDER_BUILD_CLEAN=1 SOFT_LADDER_ISOLATED=1 '
+               f'SOFT_LADDER_BUILD_JOBS={jobs} SOFT_LADDER_BUILD_CLEAN=1 SOFT_LADDER_ISOLATED=1 '
                f"SOFT_LADDER_BUILD_VLT_ARGS='{vlt_args}'; "
                'bash verif/regress/soft-ladder-build-harness.sh B')
     rc = bash(command, out / 'build.log', repo, 3600)
@@ -1221,7 +1226,8 @@ def build_only_review():
     assert '/toolchains/verilator-v5.008/share/verilator/include/verilated_funcs.h' not in dependencies
     exe = model / 'Variane_testharness'
     verfiles = (model / 'Variane_testharness__verFiles.dat').read_text()
-    assert re.search(r'--threads\s+1(?:\s|["\'])', verfiles), 'verFiles lacks --threads 1'
+    assert re.search(rf'--threads\s+{threads}(?:\s|["\'])', verfiles), \
+        f'verFiles lacks --threads {threads}'
     assert '/core/fetch_B/frontend.sv' in verfiles, 'verFiles lacks fetch_B frontend'
     assert not re.search(r'/(?:fetch_A|smt_legacy)/|Flist\.smt_legacy', verfiles)
     manifest = {'target': target, 'harts': cores * harts_per_core, 'cores': cores,

@@ -92,6 +92,7 @@ module tb_g6lc_l2;
   parameter int unsigned STALL_EVERY = 0;       // drop 1 in N beats (0 = never)
   parameter int unsigned SEED        = 32'h600d_f00d;
   parameter int unsigned TAG_SRAM    = 0;       // tag array behind tc_sram
+  parameter int unsigned WRITE_UPDATE = 0;      // resident-line write merge (T8f)
   parameter int unsigned EQ_NEGATIVE = 0;       // eq-mode mutation: flips the signature hit tap
 
   localparam int unsigned LINE_BYTES = LINE_WIDTH / 8;                    // 64
@@ -112,7 +113,8 @@ module tb_g6lc_l2;
   logic [1:0] memory_resp_code = axi_pkg::RESP_OKAY;
   assign driven_resp = manual_mode ? manual_resp : mst_resp;
 
-  logic l2_hit, l2_miss, l2_bypass, l2_mshr_full, l2_bank_conf;
+  logic l2_hit, l2_miss, l2_bypass, l2_mshr_full, l2_bank_conf, l2_wupd;
+  logic l2_selfinv_hit;
   logic evict_v;
   addr_t evict_addr;
   logic back_inval_ready, back_inval_valid = 1'b0;
@@ -127,6 +129,7 @@ module tb_g6lc_l2;
       .DATA_BANKS  (DATA_BANKS),
       .RR_EN       (bit'(RR_EN)),
       .TAG_SRAM    (bit'(TAG_SRAM)),
+      .WRITE_UPDATE (bit'(WRITE_UPDATE)),
       .AXI_ADDR_WIDTH (AW),
       .AXI_DATA_WIDTH (DW),
       .AXI_ID_WIDTH   (IDW),
@@ -145,7 +148,8 @@ module tb_g6lc_l2;
       .l2_bypass_o        (l2_bypass),
       .l2_mshr_full_o     (l2_mshr_full),
       .l2_bank_conflict_o (l2_bank_conf),
-      .l2_selfinv_hit_o   (),
+      .l2_selfinv_hit_o   (l2_selfinv_hit),
+      .l2_wupdate_o       (l2_wupd),
       .l2_evict_valid_o   (evict_v),
       .l2_evict_addr_o    (evict_addr),
       .l2_evict_ready_i   (1'b1),
@@ -170,7 +174,13 @@ module tb_g6lc_l2;
       $display("EQSIG %0d %h", eq_cyc,
                {slv_resp, mst_req, l2_hit ^ bit'(EQ_NEGATIVE != 0), l2_miss,
                 l2_bypass, l2_mshr_full, l2_bank_conf, evict_v, evict_addr,
-                back_inval_ready});
+                back_inval_ready, l2_wupd,
+                dut.gen_l2.data_a_req, dut.gen_l2.data_a_we,
+                dut.gen_l2.data_a_be, dut.gen_l2.data_a_wdata});
+      // l2_selfinv_hit is wired but excluded from the signature: the SRAM
+      // path's deferred inval-match commit pulses it one cycle later than
+      // the flop path — the same permitted timing difference that keeps
+      // back-inval stimulus out of +eq_run.
       eq_cyc <= eq_cyc + 1;
     end
   end
@@ -561,11 +571,15 @@ module tb_g6lc_l2;
       if (dut.gen_l2.mshr_complete &&
           dut.gen_l2.fill_ferr_q[dut.gen_l2.serve_idx_q] != axi_pkg::RESP_OKAY)
         fill_errors++;
-      if (slv_req.aw_valid && slv_resp.aw_ready) begin
+      // A write self-invalidation commits when the write's (or its deferred
+      // pending) match wins the inval-match port. Under WRITE_UPDATE a
+      // resident hit suppresses that stream — the policy line correctly
+      // stays valid and the merged bytes are checked by the golden path.
+      if (dut.gen_l2.self_inval_req && !back_inval_valid) begin
         for (int w = 0; w < SET_ASSOC; w++)
-          if (policy_lines[int'((slv_req.aw.addr >> OFF_BITS) % NUM_SETS)][w] ==
-              (slv_req.aw.addr & ~addr_t'(LINE_BYTES - 1)))
-            policy_valid[int'((slv_req.aw.addr >> OFF_BITS) % NUM_SETS)][w] = 0;
+          if (policy_lines[int'((dut.gen_l2.self_inval_addr >> OFF_BITS) % NUM_SETS)][w] ==
+              (dut.gen_l2.self_inval_addr & ~addr_t'(LINE_BYTES - 1)))
+            policy_valid[int'((dut.gen_l2.self_inval_addr >> OFF_BITS) % NUM_SETS)][w] = 0;
       end
       if (back_inval_valid && back_inval_ready) begin
         for (int w = 0; w < SET_ASSOC; w++)
@@ -1146,7 +1160,11 @@ module tb_g6lc_l2;
       axi_write(line_addr(1, 900) + 8, 64'hcafe_abcd_7654_3210, CACHEABLE, 8'h55, 30);
       axi_read(line_addr(1, 900) + 8, CACHEABLE);
       phase_end("invalidate_masked", 4, 1);
-      if (cnt_miss - ph_miss != 3 || cnt_hit - ph_hit != 1) $fatal(1, "invalidation check");
+      // WRITE_UPDATE merges the store into the refilled line, so the last
+      // read hits instead of refilling: 2 misses/2 hits instead of 3/1.
+      if (cnt_miss - ph_miss != (WRITE_UPDATE != 0 ? 2 : 3) ||
+          cnt_hit - ph_hit != (WRITE_UPDATE != 0 ? 2 : 1))
+        $fatal(1, "invalidation check");
 
       phase_begin();
       axi_read(line_addr(1, 900), CACHEABLE, 1, 1);
@@ -1299,6 +1317,7 @@ module g6lc_l2_fixture
   parameter int unsigned DATA_BANKS = 2,
   parameter bit CHAIN_L3 = 1'b0,
   parameter bit TAG_SRAM = 1'b0,
+  parameter bit WRITE_UPDATE = 1'b0,
   // The flop-vs-SRAM miter excludes back-invalidation: its two-cycle commit
   // (vs one on the flop path) is a permitted timing difference.
   parameter bit NO_INVAL = 1'b0
@@ -1324,6 +1343,7 @@ module g6lc_l2_fixture
       .MSHR_DEPTH(2),.DATA_BANKS(2),
 `ifndef L2TB_LEGACY
       .TAG_SRAM(TAG_SRAM),
+      .WRITE_UPDATE(WRITE_UPDATE),
 `endif
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),
       .AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),.axi_req_t(req_t),.axi_resp_t(resp_t)
@@ -1332,6 +1352,7 @@ module g6lc_l2_fixture
       .mst_req_o,.mst_resp_i,.l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),
 `ifndef L2TB_LEGACY
       .l3_selfinv_hit_o(),
+      .l3_wupdate_o(),
 `endif
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
     );
@@ -1346,6 +1367,7 @@ module g6lc_l2_fixture
     .RR_EN(bit'(RR_EN)),
     .FAIR_WRITES(FAIR_WRITES),
     .TAG_SRAM(TAG_SRAM),
+    .WRITE_UPDATE(WRITE_UPDATE),
 `endif
     .axi_req_t(req_t), .axi_resp_t(resp_t)
   ) i_l2 (
@@ -1354,6 +1376,7 @@ module g6lc_l2_fixture
     .l2_mshr_full_o(full_o), .l2_bank_conflict_o(conflict_o),
 `ifndef L2TB_LEGACY
     .l2_selfinv_hit_o(),
+    .l2_wupdate_o(),
 `endif
     .l2_evict_valid_o(evict_o), .l2_evict_addr_o(evict_addr_o),
 `ifndef L2TB_LEGACY

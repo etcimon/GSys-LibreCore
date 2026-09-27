@@ -1855,7 +1855,76 @@ miss 101,421, selfinv 89,793. Both strict-pass. The boot never profits from the 
 inside the L2), and ~90 k of its ~100 k L2 misses follow a write-through purge — the case for
 `L2WriteUpdateEn` (T8f) is this number, not an assumption.
 
-## Deferred
+### T8f — `L2WriteUpdateEn`: merge a write-through into a resident line (2026-09-27)
+
+Write-through on a resident line used to purge the line; under `L2WriteUpdateEn` the write
+merges in place and the line stays valid while memory still receives the data. `g6lc_l2_top`
+gains `parameter bit WRITE_UPDATE` (pass-through on `g6lc_l3_top`, driven from
+`CVA6Cfg.L2WriteUpdateEn` in `g6lc_cluster`, default 0). The mechanism: a write's old
+self-invalidation did two things — clear the tag and kill same-line in-flight fills; those are
+now split (`tag_match_inval` vs `kill_match`). At AW acceptance the tag row for `addr_d` is
+launched (`tag_launch` extended into the S_IDLE→S_BYPASS_AW edge) and, for an *eligible* write
+(cacheable, no ATOP, no lock, burst stays inside the line), a non-counting tag lookup decides
+`wu_hit_q`/`wu_way_q` once; the invalidation stream is suppressed only on that confirmed hit —
+a stale row, miss, or ineligible write keeps today's invalidate-and-kill path verbatim.
+`kill_match` still fires on update hits so a racing fill is killed and cannot stale-merge.
+The merge itself runs in S_BYPASS_W: each forwarded W handshake writes data port A
+(`data_a_be` = `w.strb` shifted by the beat offset); port A always lands on a bank conflict —
+the fill installer is the side that retries. The FSM only reaches S_IDLE after B, so no reader
+can be served merged bytes before memory's acknowledge; the composed bench's
+`late_ar >= mem_b` contract keeps holding under WU=1. Observability: `l2_wupdate_o` /
+`l3_wupdate_o` pulses, counted hierarchically as `l2_wupd`/`l3_wupd` in `[mc_cache]`. On in
+`g6lc64_ooo_int2`, `g6lc64_ooo_int2_l3`, `g6lc64_smt2_l3`; `g6lc64_smt2` and
+`g6lc64_smt2_ooo_int` keep 0 (their frozen traces still match bit-exact, T8g).
+
+Evidence: HUM `tb_g6lc_l2_hum` keeps the identical 78/78 metric hash under WU=0 on both tag
+paths; WU=1 adds directed cases (a)–(i) — partial-strobe merge with memory read-back,
+multi-beat in-line write, non-resident write (no allocation, later read gets memory's new
+data), ATOP/locked/non-cacheable writes still invalidate-or-bypass, write racing a same-line
+fill kills it (read after B returns new data), the composed scenario-0 admission contract
+under WU=1, and stack scenario 4 with a store before the re-read (L3 retains the line and
+serves the new data on the L2-capacity miss). Fault controls: disconnecting the data merge
+fails case (a) with the stale value; a separate tag fault fails its own case. The Phase-4
+`inv_clr` snapshot fold is guarded by `L2TAG_MITER_CORNER2` — the mutation fails without it.
+Flop-vs-SRAM dual simulation (`L2TB_EQ_TAGS`) stays byte-exact: WU=1 512 B 17,187/17,187 and
+4 KiB 32,102/32,102; WU=0 512 B 17,221/17,221 baseline-identical; the mutation control
+diverges. Gates: int2 24/7, int2_l3 24/13, smt2_l3 4/41, defaults 8/54 + 32/5, all zero
+errors with `check -assert` clean; SCC through the stack. FO4 `g6lc_l2_top` worst path
+**28.5 at both WU=0 and WU=1 (~1403 MHz)** — the merge is a byte-enable shifter and a
+port-A write mux in the bypass states only, nothing enters the S_TAG hit compare.
+
+### T8g — Phase 5 qualification on the write-update tree (2026-09-27)
+
+All runs single-threaded except the marked experiment; strict = four/two-hart profile with
+tracer termination; model hashes in each run's `build-manifest.json`.
+
+| Lane | Run tag | Cycles | vs reference | Notes |
+|---|---|---:|---:|---|
+| int2 L0 four-hart strict | `ooocoh-p5-osbi-int2-L0-r1` | **17,993,674** | 18,675,595 (−3.7 %) | `l2_miss` 103,380→1,532, `l2_selfinv` 91,594→189, `l2_wupd`=817,606 |
+| int2_l3 L0 four-hart strict (ts1) | `ooocoh-p5-osbi-int2l3-L0-r1` | **18,244,344** | 19,341,802 (−5.7 %) | `l2_wupd`=`l3_wupd`=832,758 (L3 output is the forwarded L2 pulse in this stack) |
+| int2_l3 L0 ts0 (flop-tag identity) | `ooocoh-p5-osbi-int2l3ts0-L0-r1` | **18,244,344** | identical | all four trace files **byte-identical** to ts1 (rvfi 31,928,475 + 1,730,930 lines) |
+| smt2_l3 two-hart strict | `ooocoh-p5-osbi-smt2l3-L0-r1` | **13,814,448** | 14,300,834 (−3.4 %) | `l2_wupd`=`l3_wupd`=530,843 |
+| smt2 strict + frozen trace | `ooocoh-p5-osbi-smt2-L0-r1` | **12,761,165** | exact | 18,531,957 matched lines; WU counters 0 (package keeps 0) |
+| smt2_ooo_int strict + frozen trace | `ooocoh-p5-osbi-smt2ooo-L0-r1` | **10,701,925** | exact | 18,516,857 matched lines; WU counters 0 |
+| int2 L40 measurement (60M cap) | `ooocoh-p5-osbi-int2-L40-60M-r1` | **41,508,827** | 46,909,150 (−11.5 %) | `l2_hit` 209,318, `l2_wupd`=765,630 |
+| int2_l3 L40 measurement (60M cap) | `ooocoh-p5-osbi-int2l3-L40-60M-r1` | **42,004,100** | 48,403,596 (−13.2 %) | **`l3_hit`=1** — the boot workload's first L3 hit; `l2_wupd`=770,656 |
+
+Directed kernels on the rebuilt WU=1 models: `mc_l2_write_read` at L40 — int2
+821,733→**526,714**, int2_l3 926,763→**559,492** (−36 % / −40 %), `l2_selfinv` 6,060→**0**,
+`l2_wupd`=6,135, `l2_hit` ≈6,040 (was ~15); the 512 KiB scan is cycle-identical to the
+pre-WU run (424,380 / 1,063,540 — no resident-line writes, so the path is silent);
+shared-line coherence keeps passing with the two former purges now counted as `wupd`=2;
+every negative arm still fires.
+
+**Thread-degree experiment (throughput, not qualification).** The same int2 strict profile
+on a `--threads 4` model (`ooocoh-p5-osbi-int2-L0-t4-r1`, admitted via
+`SOURCE_REVIEW_ALLOW_THREADS=4`) is **not byte-identical**: all traces match until
+`trace_rvfi_hart_00.dasm` line 31,194,870 (~97.7 %), where the t4 run retires one
+instruction earlier at a timing-sensitive boundary and finishes at 17,991,980 vs
+17,993,674 cycles; counters differ by ≤112 events. Wall 1,266.1 s vs 2,459.8 s (1.94×),
+build 98.3 s (ccache) vs 361.9 s. Conclusion: `--threads>1` models are measurement-only;
+qualification stays on `--threads 1` (the runner enforces it; the opt-in env records
+`modelThreads` in provenance).
 
 Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,
 FP widths beyond `FLen <= XLEN`, four-wide retirement, adaptive scheduling policy, early-termination

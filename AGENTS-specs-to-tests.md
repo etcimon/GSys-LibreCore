@@ -336,6 +336,24 @@ stores versus primary loads need boundary tracing; neither record is matched or 
   19,341,802 (identical flop vs SRAM after the fix, `+l2_trace` 8.36M events equal); smt2_l3 pass
   14,300,834 exact both paths. Legacy pinned-reference `L2TB_MODE=equiv` is **red** (531 unproven,
   predates the retention repair) and is not whitelisted.
+- L3 measurements and the write-update landing (plan T8e–T8g, 2026-09-27). Observer counters now
+  include `l2_selfinv`/`l3_selfinv` (inval-match pulses that clear a live way) and
+  `l2_wupd`/`l3_wupd` (resident-line write merges). Directed kernels (`verif/tests/custom/
+  multicore/`, all with firing negative arms): `mc_l3_stride_scan` at 128 KiB/512 KiB/2 MiB
+  measures where a non-inclusive L3 pays (only 512 KiB at DRAM latency 40: −6.1 %, ~4.6k L3
+  hits); `mc_l2_write_read` was the write-update discriminator (6,060 purges / 8,192 stores)
+  and under `L2WriteUpdateEn` reads back merged lines (selfinv 0, wupd 6,135, −36 % cycles at
+  latency 40); `mc_pmu_l3` cross-checks PMU group-2 selectors against the TB totals. The L2×L3
+  geometry sweep (`run_cache_sweep_review.py`, 3×3 size points) elaborates everywhere with hits
+  scaling monotonically. WU=1 leaf cases cover partial-strobe merge + memory read-back,
+  multi-beat in-line writes, non-resident writes, ATOP/locked/nc exclusions, fill-race kill,
+  and the composed `late_ar >= mem_b` contract; merge/tag fault controls fail as designed and
+  `L2TAG_MITER_CORNER2` guards the `inv_clr` snapshot fold. Phase-5 qualification on the WU=1
+  tree: int2 17,993,674, int2_l3 18,244,344 (ts0 flop-tag byte-identical), smt2_l3 13,814,448,
+  smt2/smt2_ooo_int frozen-trace exact (12,761,165 / 10,701,925), latency-40 boots
+  41,508,827 / 42,004,100 with the first boot-workload `l3_hit`. A `--threads 4` model build
+  diverges from threads=1 at ~97.7 % of the trace — measurement-only, qualification stays
+  single-thread (`SOURCE_REVIEW_ALLOW_THREADS` opt-in, recorded in provenance).
 - Visibility-model probes for this class (kept in `run_mc_int2_review.py`): `+mc_vis_stuck=N`
   stuck-handshake/commit-head reports, CSR exception and csr_buffer allocation/commit views,
   issue-port view within `+mc_vis_from/+mc_vis_until`. The review mode's directed cases still

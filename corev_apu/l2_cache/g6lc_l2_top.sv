@@ -37,6 +37,13 @@ module g6lc_l2_top
     // completes on the first S_TAG cycle; only an inval-match port steal or
     // a missed launch holds S_TAG one extra cycle.
     parameter bit          TAG_SRAM    = 1'b0,
+    // Write-update: a write-through AW that hits a resident line merges its W
+    // beats into the line instead of self-invalidating the tag (measured
+    // mc_l2_write_read: ~6,060 purges of resident lines per 8,192 stores and
+    // ~90k of ~100k boot L2 misses followed a purge — T8e). Under 0 the
+    // decision registers, merge port write and suppression logic fold away
+    // and the netlist is identical to the invalidate path.
+    parameter bit          WRITE_UPDATE = 1'b0,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -63,6 +70,10 @@ module g6lc_l2_top
     // back-inval) actually cleared a live line this cycle. The cluster
     // leaves it unconnected; the TB counts it hierarchically as l2_selfinv.
     output logic      l2_selfinv_hit_o,
+    // Observability pulse (WRITE_UPDATE): a forwarded write merged into a
+    // resident line instead of purging it — one pulse per such write. The
+    // cluster leaves it unconnected; the TB counts it as l2_wupd.
+    output logic      l2_wupdate_o,
     // Victim replace (valid way overwritten on miss) — inclusive LLC back-inval.
     // evict is a valid/ready offer: it re-asserts every cycle the FSM holds in
     // S_TAG, and the victim commit waits for l2_evict_ready_i, so a victim can
@@ -88,6 +99,7 @@ module g6lc_l2_top
     assign l2_mshr_full_o = 1'b0;
     assign l2_bank_conflict_o = 1'b0;
     assign l2_selfinv_hit_o = 1'b0;
+    assign l2_wupdate_o = 1'b0;
     assign l2_evict_valid_o = 1'b0;
     assign l2_evict_addr_o  = '0;
     assign l2_back_inval_ready_o = 1'b1;
@@ -161,8 +173,15 @@ module g6lc_l2_top
   logic wr_inval_pend_q, wr_inval_pend_d;
   logic [AXI_ADDR_WIDTH-1:0] wr_inval_addr_q, wr_inval_addr_d;
   logic [AXI_ADDR_WIDTH-1:0] self_inval_addr;
-  logic self_inval_req;
-  assign self_inval_req  = wr_self_inval | wr_inval_pend_q;
+  logic self_inval_req, kill_match;
+  // Declared beside its consumer: the write-update tag-clear mask for
+  // wr_self_inval (driven by the decision block near S_BYPASS_* handling).
+  logic wu_tag_inval;
+  // WRITE_UPDATE: a resident-hit write suppresses the tag clear but never
+  // the fill kill — an in-flight fill for the same line must die either
+  // way, or it would install pre-write data over the merged line.
+  assign self_inval_req  = (wr_self_inval && wu_tag_inval) | wr_inval_pend_q;
+  assign kill_match      = l2_back_inval_valid_i | wr_self_inval | wr_inval_pend_q;
   assign self_inval_addr = wr_inval_pend_q ? wr_inval_addr_q : wr_self_inval_addr;
   assign tag_match_inval = l2_back_inval_valid_i | self_inval_req;
   assign tag_match_index = idx_of(l2_back_inval_valid_i ? l2_back_inval_addr_i
@@ -175,7 +194,8 @@ module g6lc_l2_top
       .SET_ASSOC (SET_ASSOC),
       .TAG_WIDTH (TAG_BITS),
       .IDX_WIDTH (IDX_BITS),
-      .TAG_SRAM  (TAG_SRAM)
+      .TAG_SRAM  (TAG_SRAM),
+      .WRITE_UPDATE (WRITE_UPDATE)
   ) i_tag (
       .clk_i,
       .rst_ni,
@@ -353,6 +373,7 @@ module g6lc_l2_top
   logic [3:0]                cache_q, cache_d;
   logic [5:0]                atop_q, atop_d;  // AXI ATOP (AMOs / AMOCAS)
   logic                      lock_q, lock_d;
+  logic                      burst_incr_q, burst_incr_d;
   logic                      is_write_q, is_write_d;
   logic                      cacheable_q, cacheable_d;
   logic [WAY_W-1:0]          way_q, way_d;
@@ -502,6 +523,19 @@ module g6lc_l2_top
   assign beat_base = addr_q[OFF_BITS-1:BEAT_ADDR_LSB];
   assign beat_idx  = beat_base + BEAT_IDX_W'(beat_q);
 
+  // Write-update decision state: valid for the duration of one bypassed
+  // write, cleared on return to S_IDLE. wu_hit_q/wu_way_q name the resident
+  // line the W beats merge into; wu_beat_q counts forwarded beats so each
+  // lands at its burst offset inside the line.
+  logic wu_decided_q, wu_decided_d;
+  logic wu_hit_q, wu_hit_d;
+  logic [WAY_W-1:0] wu_way_q, wu_way_d;
+  logic [BEAT_IDX_W-1:0] wu_beat_q, wu_beat_d;
+  logic wu_fill_same_line, wu_eligible, wu_candidate, wu_hit_now;
+  logic wu_merge_wr, wu_install_stall, data_a_req_hit;
+  logic [23:0] wu_span;
+  logic [LINE_WIDTH/8-1:0] wu_be;
+
   logic [SET_ASSOC-1:0] pend_way;
   logic found_inv, way_ok;
   logic [WAY_W-1:0] victim_way;
@@ -539,13 +573,86 @@ module g6lc_l2_top
        line_align(fill_addr_q[inst_idx]) == line_align(wr_inval_addr_q)) ||
       ((state_q == S_BYPASS_AW || state_q == S_BYPASS_W) &&
        line_align(fill_addr_q[inst_idx]) == line_align(addr_q));
-  assign data_a_req = (state_q == S_TAG) && tag_hit && !(|mshr_id_match);
-  assign data_a_we = 1'b0;
+  // ---------------- WRITE_UPDATE: resident-line write merge ----------------
+  // Ordering: a write is globally ordered by its B response — the hub drops
+  // the writer's L1 copy at B, so anything a reader can be served before B
+  // may be pre-write, and everything after must carry the write's bytes.
+  // Merging the forwarded beats into the resident line satisfies the same
+  // bound as purging it: the FSM only leaves through S_BYPASS_B after B
+  // lands, so no reader can be served the merged line before memory has
+  // acknowledged the write (the composed bench's late_ar >= mem_b contract
+  // still holds with WRITE_UPDATE on).
+  // Eligibility (all on registered AW fields): cacheable, non-atomic,
+  // unlocked, and the whole burst confined to the addressed line — a
+  // single beat of any size (WSTRB already names its lanes) or a
+  // full-width multi-beat INCR run that ends inside the line. Atomics and
+  // locked writes carry a memory-side result and must drop the cached
+  // copy; non-cacheable writes and bursts that would wrap inside the line
+  // keep the invalidate-and-kill path. An in-flight fill for the same line
+  // makes the write ineligible (defensive — a fill implies an earlier
+  // miss, so a hit cannot co-exist with one; kill_match drops it anyway).
+  assign wu_span = 24'(addr_q[OFF_BITS-1:0]) +
+                   ((24'(len_q) + 24'd1) << size_q);
+  assign wu_eligible = WRITE_UPDATE && is_write_q && cacheable_q &&
+                       (atop_q == '0) && !lock_q && !wu_fill_same_line &&
+                       (len_q == 8'd0 ||
+                        (burst_incr_q &&
+                         size_q == 3'($clog2(AXI_DATA_WIDTH / 8)))) &&
+                       (wu_span <= 24'(LINE_BYTES));
+  // Still-deciding candidate: an eligible write whose launched row survived
+  // the S_IDLE accept edge (an inval-match steal yields !tag_row_valid and
+  // the write conservatively invalidates). Its tag clear defers one cycle
+  // while the compare resolves; a miss then invalidates exactly as before,
+  // a hit suppresses it entirely.
+  assign wu_candidate = wu_eligible && !wu_decided_q && tag_row_valid;
+  assign wu_hit_now   = wu_decided_q ? wu_hit_q : (wu_candidate && tag_hit);
+  assign wu_tag_inval = !wu_hit_now && !wu_candidate;
+  // A same-line fill cannot co-exist with a resident tag (see above) — the
+  // predicate is defensive, kill_match removes the fill regardless.
+  always_comb begin
+    wu_fill_same_line = 1'b0;
+    for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
+      if (fill_act_q[e] && (fill_state_q[e] != F_READY) &&
+          (line_align(fill_addr_q[e]) == line_align(addr_q)))
+        wu_fill_same_line = 1'b1;
+    end
+  end
+  // Forwarded-beat merge into the resident line via data port A — the
+  // demand port, which wins same-bank conflicts in g6lc_l2_data while the
+  // fill installer retries on bank_conflict, so a merge always lands. The
+  // W stream itself never stalls: slv w_ready stays the transparent
+  // mst w_ready. Each beat's byte lanes are shifted to
+  // (burst-start word + beat count) inside the line.
+  assign wu_merge_wr = wu_hit_q && (state_q == S_BYPASS_W) &&
+                       slv_req_i.w_valid && mst_resp_i.w_ready;
+  assign wu_be = (LINE_WIDTH/8)'(slv_req_i.w.strb)
+                 << (((BEAT_IDX_W+1)'(beat_base) + (BEAT_IDX_W+1)'(wu_beat_q))
+                     * STRB_W);
+  // A fill for a DIFFERENT line must not claim the merge's way while beats
+  // are in flight: its install writes tag+line wholesale, so the bytes
+  // merged so far die while later merge beats would still write the old
+  // tag's line. Stall such an install until the write drains into
+  // S_BYPASS_B — a post-merge install is a full-line write and wins
+  // cleanly. Same-line fills never reach here (kill_match discards them).
+  assign wu_install_stall = wu_hit_now && inst_vld &&
+                            (state_q == S_BYPASS_AW || state_q == S_BYPASS_W) &&
+                            (idx_of(fill_addr_q[inst_idx]) == idx_of(addr_q)) &&
+                            (fill_way_q[inst_idx] ==
+                             (wu_decided_q ? wu_way_q : tag_way));
+  // One pulse per write handled as a merge (its last forwarded beat).
+  assign l2_wupdate_o = wu_merge_wr && slv_req_i.w.last;
+
+  assign data_a_req_hit = (state_q == S_TAG) && tag_hit && !(|mshr_id_match);
+  assign data_a_req = data_a_req_hit | wu_merge_wr;
+  assign data_a_we  = wu_merge_wr;
   assign data_a_idx = idx_of(addr_q);
-  assign data_a_way = data_a_req ? tag_way : way_q;
-  assign data_a_wdata = '0;
-  assign data_a_be = '1;
-  assign data_b_req = inst_vld && !install_discard;
+  assign data_a_way = wu_merge_wr ? wu_way_q
+                                  : (data_a_req_hit ? tag_way : way_q);
+  // wdata stays '0 under WRITE_UPDATE=0 so the port-A write input folds
+  // away and the netlist is unchanged.
+  assign data_a_wdata = WRITE_UPDATE ? {BEATS{slv_req_i.w.data}} : '0;
+  assign data_a_be = wu_merge_wr ? wu_be : '1;
+  assign data_b_req = inst_vld && !install_discard && !wu_install_stall;
   assign data_b_we = data_b_req;
   assign data_b_idx = data_b_req ? idx_of(fill_addr_q[inst_idx]) : idx_of(addr_q);
   assign data_b_way = data_b_req ? fill_way_q[inst_idx] : way_q;
@@ -631,6 +738,7 @@ module g6lc_l2_top
     cache_d     = cache_q;
     atop_d      = atop_q;
     lock_d      = lock_q;
+    burst_incr_d = burst_incr_q;
     is_write_d  = is_write_q;
     cacheable_d = cacheable_q;
     way_d       = way_q;
@@ -646,6 +754,10 @@ module g6lc_l2_top
     wr_self_inval_addr = addr_q;
     wr_inval_pend_d    = wr_inval_pend_q;
     wr_inval_addr_d    = wr_inval_addr_q;
+    wu_decided_d       = wu_decided_q;
+    wu_hit_d           = wu_hit_q;
+    wu_way_d           = wu_way_q;
+    wu_beat_d          = wu_beat_q;
 
     unique case (state_q)
       // ---------------- IDLE: accept AR (reads), serve a ready fill, or AW --
@@ -678,6 +790,7 @@ module g6lc_l2_top
           // was already captured). Locked AR always bypasses — a cache hit
           // would return OKAY and never arm the DRAM monitor.
           lock_d      = slv_req_i.ar.lock;
+          burst_incr_d = (slv_req_i.ar.burst == axi_pkg::BURST_INCR);
           is_write_d  = 1'b0;
           cacheable_d = l2_is_cacheable(slv_req_i.ar.cache);
           beat_d      = '0;
@@ -711,6 +824,9 @@ module g6lc_l2_top
           // and the HPDCACHE UC FSM hangs waiting for the atomic R beat.
           atop_d      = slv_req_i.aw.atop;
           lock_d      = slv_req_i.aw.lock;
+          // WRITE_UPDATE merges multi-beat writes at linear INCR offsets —
+          // WRAP/FIXED bursts keep the invalidate path.
+          burst_incr_d = (slv_req_i.aw.burst == axi_pkg::BURST_INCR);
           is_write_d  = 1'b1;
           cacheable_d = l2_is_cacheable(slv_req_i.aw.cache);
           beat_d      = '0;
@@ -943,9 +1059,25 @@ module g6lc_l2_top
         mst_req_o.aw.cache = cache_q;
         mst_req_o.aw.atop  = atop_q;
         mst_req_o.aw.lock  = lock_q;
-        // Drop any L2 copy of this line (WT does not update data array)
+        // Drop any L2 copy of this line — except under WRITE_UPDATE, where a
+        // confirmed resident hit keeps the line and merges the W beats.
         wr_self_inval      = 1'b1;
         wr_self_inval_addr = addr_q;
+        // Write-update decision, first bypass cycle only: the row for this
+        // set was launched at the S_IDLE accept edge (see tag_launch below),
+        // so the compare resolves here. An eligible write that finds its
+        // line resident becomes wu_hit_q — the tag clear is suppressed and
+        // the W beats merge in place. Anything else keeps the
+        // invalidate-and-kill path. This is a silent probe of the tag: no
+        // l2_hit_o/l2_miss_o pulse is emitted for it.
+        if (WRITE_UPDATE && !wu_decided_q) begin
+          wu_decided_d = 1'b1;
+          if (wu_eligible) begin
+            tag_lookup = 1'b1;
+            wu_hit_d   = tag_row_valid && tag_hit;
+            wu_way_d   = tag_way;
+          end
+        end
         // ATOP/AMO may already be fetching old data — never block R.
         if(wr_r_pending_q && mst_resp_i.r_valid && mst_resp_i.r.id==id_q && !is_fill_beat)begin
           slv_resp_o.r_valid = 1'b1;
@@ -965,6 +1097,9 @@ module g6lc_l2_top
         // Keep self-inval asserted through W so multi-beat writes still snoop
         wr_self_inval      = 1'b1;
         wr_self_inval_addr = addr_q;
+        // A write-update hit merges each forwarded beat into the resident
+        // line (the W channel is still forwarded unchanged to memory).
+        if (wu_merge_wr) wu_beat_d = wu_beat_q + 1'b1;
         // Forward ATOP load/compare R beats while W is in flight
         if(wr_r_pending_q && mst_resp_i.r_valid && mst_resp_i.r.id==id_q && !is_fill_beat)begin
           slv_resp_o.r_valid = 1'b1;
@@ -1000,6 +1135,12 @@ module g6lc_l2_top
        !is_fill_beat && slv_req_i.r_ready && mst_resp_i.r.last)
       wr_r_pending_d=1'b0;
     if(state_q==S_BYPASS_B && wr_b_done_d && !wr_r_pending_d)state_d=S_IDLE;
+    // Write-update state lives only inside one bypassed write.
+    if (state_d == S_IDLE) begin
+      wu_decided_d = 1'b0;
+      wu_hit_d     = 1'b0;
+      wu_beat_d    = '0;
+    end
 
     // ---- Fill collector: drain FILL_ID beats into per-entry line buffers ----
     // All fills issue under FILL_ID, so AXI same-ID ordering guarantees their
@@ -1057,14 +1198,17 @@ module g6lc_l2_top
       if (install_discard) begin
         fill_state_d[inst_idx] = F_READY;
       end else begin
-        tag_write  = !bank_conflict;
+        // wu_install_stall holds off an install that would claim the merge's
+        // way mid-write — see the WRITE_UPDATE block. The data-bank request
+        // is gated the same way, so no port attempt is made while stalled.
+        tag_write  = !bank_conflict && !wu_install_stall;
         tag_windex = idx_of(fill_addr_q[inst_idx]);
         tag_wway   = fill_way_q[inst_idx];
         tag_wtag   = tag_of(fill_addr_q[inst_idx]);
         tag_wvalid = 1'b1;
 
 
-        if (!bank_conflict) begin
+        if (!bank_conflict && !wu_install_stall) begin
           fill_state_d[inst_idx] = F_READY;
           // RR pointer tracks the last-installed way (advances past it).
           rr_adv = RR_EN;
@@ -1078,15 +1222,19 @@ module g6lc_l2_top
     // entries are killed too because a merge attaching after the inval is
     // ordered after it and must not be served the stale pre-inval line.
     // Defer a self-invalidation the external snoop displaced, and retire it on
-    // the first cycle the match port is free.
-    if (self_inval_req && l2_back_inval_valid_i) begin
+    // the first cycle the match port is free. The arm taps the raw write
+    // stream rather than the WU-suppressed self_inval_req: a write-update
+    // hit colliding with a back-inval still retires a match for its line —
+    // conservatively clearing the merged line so the fill-kill can never be
+    // starved for the whole AW/W window.
+    if ((wr_self_inval | wr_inval_pend_q) && l2_back_inval_valid_i) begin
       wr_inval_pend_d = 1'b1;
       wr_inval_addr_d = self_inval_addr;
     end else if (wr_inval_pend_q) begin
       wr_inval_pend_d = 1'b0;
     end
 
-    if (tag_match_inval) begin
+    if (kill_match) begin
       for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
         if (fill_act_q[e] &&
             (line_align(fill_addr_q[e]) ==
@@ -1143,8 +1291,13 @@ module g6lc_l2_top
     // assignment so it covers the S_IDLE accept edge, each held S_TAG cycle
     // (relaunch after an inval-match port steal) and the S_SERVE interrupt
     // return — the row is therefore presented on the first S_TAG cycle with
-    // no added wait state. Under TAG_SRAM=0 the tag module ignores this.
-    tag_launch       = (state_d == S_TAG);
+    // no added wait state. WRITE_UPDATE also launches on the write-accept
+    // edge so the write-update decision in the first S_BYPASS_AW cycle sees
+    // the row; an inval-match steal reports !row_valid and the write
+    // conservatively invalidates. Under TAG_SRAM=0 the tag module ignores
+    // this.
+    tag_launch       = (state_d == S_TAG) ||
+                       (WRITE_UPDATE && state_q == S_IDLE && state_d == S_BYPASS_AW);
     tag_launch_index = idx_of(addr_d);
   end
 
@@ -1158,6 +1311,7 @@ module g6lc_l2_top
       cache_q     <= '0;
       atop_q      <= '0;
       lock_q      <= 1'b0;
+      burst_incr_q <= 1'b0;
       is_write_q  <= 1'b0;
       cacheable_q <= 1'b0;
       way_q       <= '0;
@@ -1168,6 +1322,10 @@ module g6lc_l2_top
       wr_b_done_q    <= 1'b0;
       wr_inval_pend_q <= 1'b0;
       wr_inval_addr_q <= '0;
+      wu_decided_q    <= 1'b0;
+      wu_hit_q        <= 1'b0;
+      wu_way_q        <= '0;
+      wu_beat_q       <= '0;
       serve_turn_q <= 1'b0;
       serve_idx_q <= '0;
       serve_addr_q <= '0;
@@ -1204,6 +1362,7 @@ module g6lc_l2_top
       cache_q     <= cache_d;
       atop_q      <= atop_d;
       lock_q      <= lock_d;
+      burst_incr_q <= burst_incr_d;
       is_write_q  <= is_write_d;
       cacheable_q <= cacheable_d;
       way_q       <= way_d;
@@ -1214,6 +1373,10 @@ module g6lc_l2_top
       wr_b_done_q    <= wr_b_done_d;
       wr_inval_pend_q <= wr_inval_pend_d;
       wr_inval_addr_q <= wr_inval_addr_d;
+      wu_decided_q    <= wu_decided_d;
+      wu_hit_q        <= wu_hit_d;
+      wu_way_q        <= wu_way_d;
+      wu_beat_q       <= wu_beat_d;
       serve_turn_q <= serve_turn_d;
       serve_idx_q <= serve_idx_d;
       serve_addr_q <= serve_addr_d;

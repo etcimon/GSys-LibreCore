@@ -25,6 +25,8 @@
 #     (TAG_SRAM=0/1), byte-identical per-cycle EQSIG streams = PASS;
 #     back-inval stimulus suppressed (+eq_run). L2TB_EQ_NEGATIVE=1 must
 #     produce a divergence (mutation control).
+#   L2TB_WRITE_UPDATE=1     enable the resident-line write merge (T8f);
+#     0 must fold to the invalidate-only netlist.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 LIVE_ROOT="$ROOT"
@@ -125,6 +127,7 @@ if [[ "${L2TB_MODE:-sim}" == equiv ]]; then
         -GMEM_LATENCY="${L2TB_MEM_LATENCY:-6}" -GSTALL_EVERY="${L2TB_STALL_EVERY:-0}" \
         -GRR_EN="${L2TB_RR_EN:-0}" -GSEED="${L2TB_SEED:-$((0x600df00d))}" \
         -GTAG_SRAM="$eq_ts" -GEQ_NEGATIVE="$eq_n" \
+        -GWRITE_UPDATE="${L2TB_WRITE_UPDATE:-0}" \
         -Mdir "$OUT/$variant" -o tb_g6lc_l2 2>&1 | tee "$OUT/build-$variant.log"
       "$OUT/$variant/tb_g6lc_l2" "${eq_sim_args[@]}" 2>&1 | tee "$OUT/sim-$variant.log" || true
       grep -qFx '[L2TB] RESULT pass' "$OUT/sim-$variant.log" || { echo "[l2-tb] TAG-EQUIV sim FAIL variant=$variant — $OUT/sim-$variant.log"; exit 1; }
@@ -269,9 +272,9 @@ if [[ "${L2TB_MODE:-sim}" == synth ]]; then
   # has one extra memory on that path (data array + optional RR pointer +
   # tag row store).
   tag_sram="${L2TB_TAG_SRAM:-0}"
-  "${YOSYS:-yosys}" -Q -T -p "read_slang ${sources[*]} -DL2TB_STATIC -DL2TB_SYNTH --ignore-initial --ignore-assertions --top g6lc_l2_fixture -GRR_EN=${L2TB_RR_EN:-0} -GBYTE_SIZE=${L2TB_BYTE_SIZE:-4096} -GSET_ASSOC=${L2TB_SET_ASSOC:-4} -GTAG_SRAM=${tag_sram}; hierarchy -top g6lc_l2_fixture; flatten; proc; opt; memory_collect; check -assert; stat; select -assert-count $((2 + ${L2TB_RR_EN:-0} + tag_sram)) t:\$mem_v2; synth -top g6lc_l2_fixture -noabc; check -assert; stat; select -assert-none t:\$dlatch t:\$_DLATCH_*" \
+  "${YOSYS:-yosys}" -Q -T -p "read_slang ${sources[*]} -DL2TB_STATIC -DL2TB_SYNTH --ignore-initial --ignore-assertions --top g6lc_l2_fixture -GRR_EN=${L2TB_RR_EN:-0} -GBYTE_SIZE=${L2TB_BYTE_SIZE:-4096} -GSET_ASSOC=${L2TB_SET_ASSOC:-4} -GTAG_SRAM=${tag_sram} -GWRITE_UPDATE=${L2TB_WRITE_UPDATE:-0}; hierarchy -top g6lc_l2_fixture; flatten; proc; opt; memory_collect; check -assert; stat; select -assert-count $((2 + ${L2TB_RR_EN:-0} + tag_sram)) t:\$mem_v2; synth -top g6lc_l2_fixture -noabc; check -assert; stat; select -assert-none t:\$dlatch t:\$_DLATCH_*" \
     2>&1 | tee "$OUT/synth.log"
-  echo "[l2-tb] SYNTH PASS rr=${L2TB_RR_EN:-0} tagsram=${tag_sram} mem=$((2 + ${L2TB_RR_EN:-0} + tag_sram)) — $OUT/synth.log"
+  echo "[l2-tb] SYNTH PASS rr=${L2TB_RR_EN:-0} tagsram=${tag_sram} wu=${L2TB_WRITE_UPDATE:-0} mem=$((2 + ${L2TB_RR_EN:-0} + tag_sram)) — $OUT/synth.log"
   exit 0
 fi
 if [[ "${L2TB_MODE:-sim}" == units ]]; then
@@ -306,6 +309,7 @@ fi
   -GSTALL_EVERY="${L2TB_STALL_EVERY:-0}" \
   -GRR_EN="${L2TB_RR_EN:-0}" \
   -GSEED="${L2TB_SEED:-$((0x600df00d))}" \
+  -GWRITE_UPDATE="${L2TB_WRITE_UPDATE:-0}" \
   ${L2TB_EXTRA:-} \
   -Mdir "$OUT" -o tb_g6lc_l2 2>&1 | tee "$OUT/build.log"
 

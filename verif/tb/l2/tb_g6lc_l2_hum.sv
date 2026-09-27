@@ -27,6 +27,10 @@ module tb_g6lc_l2_hum;
   parameter bit RR_EN=1'b0;
   parameter bit FAIR_WRITES=1'b0;
   parameter bit TAG_SRAM=1'b0;
+  // WRITE_UPDATE=1: an eligible write-through to a resident line merges into
+  // it instead of purging. Scenarios 42-48 are the directed WU contract;
+  // earlier scenarios must behave identically in either mode.
+  parameter bit WRITE_UPDATE=1'b0;
   parameter int unsigned BYTE_SIZE   = 4096;
   parameter int unsigned SET_ASSOC   = 4;
   parameter int unsigned LINE_WIDTH  = 512;
@@ -50,6 +54,7 @@ module tb_g6lc_l2_hum;
   resp_t cache_resp;
 
   logic l2_hit, l2_miss, l2_bypass, l2_mshr_full, l2_bank_conf, evict_v;
+  logic l2_wupd;
   addr_t evict_addr;
   logic evict_ready = 1'b1;
   logic back_inval_ready;
@@ -77,6 +82,7 @@ module tb_g6lc_l2_hum;
       .RR_EN       (RR_EN),
       .FAIR_WRITES (FAIR_WRITES),
       .TAG_SRAM    (TAG_SRAM),
+      .WRITE_UPDATE(WRITE_UPDATE),
       .AXI_ADDR_WIDTH (AW),
       .AXI_DATA_WIDTH (DW),
       .AXI_ID_WIDTH   (IDW),
@@ -96,6 +102,7 @@ module tb_g6lc_l2_hum;
       .l2_mshr_full_o     (l2_mshr_full),
       .l2_bank_conflict_o (l2_bank_conf),
       .l2_selfinv_hit_o   (),
+      .l2_wupdate_o       (l2_wupd),
       .l2_evict_valid_o   (evict_v),
       .l2_evict_addr_o    (evict_addr),
       .l2_evict_ready_i   (evict_ready),
@@ -117,12 +124,14 @@ module tb_g6lc_l2_hum;
     g6lc_l3_top #(
       .Enable(1'b1),.BYTE_SIZE(2048),.SET_ASSOC(2),.LINE_WIDTH(LINE_WIDTH),
       .MSHR_DEPTH(2),.DATA_BANKS(2),.TAG_SRAM(TAG_SRAM),
+      .WRITE_UPDATE(WRITE_UPDATE),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),
       .AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),.axi_req_t(req_t),.axi_resp_t(resp_t)
     ) i_l3 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(cut_req),.slv_resp_o(cut_resp),
       .mst_req_o(mst_req),.mst_resp_i(mst_resp),
       .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),.l3_selfinv_hit_o(),
+      .l3_wupdate_o(),
       .l3_evict_valid_o(l3_evict_valid),
       .l3_evict_addr_o(l3_evict_addr),
       // The directed stimulus owns the port when it is driving.
@@ -168,12 +177,39 @@ module tb_g6lc_l2_hum;
     reference_word = {a[31:0], ~a[31:0]} ^ 64'h5a5a_a5a5_1234_9876;
   endfunction
 
+  // Write patch layer: the write-through contract. Every W beat the memory
+  // model accepts is recorded byte-granularly, and the R stream serves the
+  // patched value — exactly the bytes a WRITE_UPDATE merge must also have
+  // recorded. A dropped merge shows up as stale read-back on a resident hit;
+  // a dropped write-through shows up after an invalidate+refetch.
+  data_t patch_val[addr_t];
+  strb_t patch_msk[addr_t];
+  function automatic void patch_apply(input addr_t a, input data_t d,
+                                      input strb_t m);
+    addr_t w = a >> 3;
+    if (!patch_val.exists(w)) begin
+      patch_val[w] = '0;
+      patch_msk[w] = '0;
+    end
+    for (int b = 0; b < DW/8; b++)
+      if (m[b]) patch_val[w][8*b +: 8] = d[8*b +: 8];
+    patch_msk[w] |= m;
+  endfunction
+  function automatic data_t patched_word(input addr_t a);
+    addr_t w = a >> 3;
+    data_t v = reference_word(a);
+    if (patch_val.exists(w))
+      for (int b = 0; b < DW/8; b++)
+        if (patch_msk[w][b]) v[8*b +: 8] = patch_val[w][8*b +: 8];
+    return v;
+  endfunction
+
   // Beat i of a burst starting at `a`: the DUT indexes within the line and
   // wraps at the line boundary, so the reference must wrap identically.
   function automatic data_t reference_beat(input addr_t a, input int unsigned i);
     addr_t base  = a & ~addr_t'(LINE_BYTES - 1);
     int unsigned first = int'((a >> 3) % BEATS);
-    reference_beat = reference_word(base + addr_t'(((first + i) % BEATS) * 8));
+    reference_beat = patched_word(base + addr_t'(((first + i) % BEATS) * 8));
   endfunction
 
   // ---- memory model: serves any AR after MEM_LATENCY cycles ---------------
@@ -200,6 +236,7 @@ module tb_g6lc_l2_hum;
   logic wr_active=1'b0,wr_data_done=1'b0,wr_b_pending=1'b0,wr_r_pending=1'b0,wr_r_issued=1'b0;
   logic r_is_atop=1'b0;
   aw_chan_t wr_header;
+  int unsigned wr_beat=0;
   int unsigned mem_atomic_r=0;
   always @(posedge clk or negedge rst_n) begin
     if(!rst_n) begin
@@ -212,7 +249,7 @@ module tb_g6lc_l2_hum;
       rd_head=0;rd_tail=0;rd_count=0;
       mem_ar_count=0;mem_outstanding=0;mem_peak=0;
       wr_active=0;wr_data_done=0;wr_b_pending=0;wr_r_pending=0;wr_r_issued=0;
-      r_is_atop=0;wr_header='0;mem_atomic_r=0;
+      r_is_atop=0;wr_header='0;wr_beat=0;mem_atomic_r=0;
       for(int i=0;i<RD_DEPTH;i++)jobs[i]='0;
     end else begin
       automatic bit take_ar = mst_req.ar_valid && mst_resp.ar_ready;
@@ -236,7 +273,7 @@ module tb_g6lc_l2_hum;
         r_is_atop=1'b0;
         if(wr_r_pending && !wr_r_issued && !atomic_r_hold)begin
           mst_resp.r_valid<=1'b1;
-          mst_resp.r<='{id:wr_header.id,data:reference_word(wr_header.addr),
+          mst_resp.r<='{id:wr_header.id,data:patched_word(wr_header.addr),
                         resp:axi_pkg::RESP_OKAY,last:1'b1,user:'0};
           r_is_atop=1'b1;wr_r_issued=1'b1;
         end else
@@ -244,7 +281,7 @@ module tb_g6lc_l2_hum;
           mst_resp.r_valid <= 1'b1;
           mst_resp.r.id <= jobs[rd_head].id;
           mst_resp.r.resp <= axi_pkg::RESP_OKAY;
-          mst_resp.r.data <= reference_word(jobs[rd_head].addr + addr_t'(jobs[rd_head].beat*8)) ^
+          mst_resp.r.data <= patched_word(jobs[rd_head].addr + addr_t'(jobs[rd_head].beat*8)) ^
                              jobs[rd_head].salt;
           mst_resp.r.last <= (jobs[rd_head].beat==int'(jobs[rd_head].len));
           if(jobs[rd_head].beat==int'(jobs[rd_head].len))begin
@@ -261,13 +298,21 @@ module tb_g6lc_l2_hum;
         if(mem_outstanding>mem_peak)mem_peak=mem_outstanding;
       end
       if(take_aw)begin
-        if(wr_active || mst_req.aw.len!=0)$fatal(1,"HUM_WRITE_SHAPE");
-        wr_active=1'b1;wr_data_done=1'b0;wr_header=mst_req.aw;
+        // Multi-beat INCR writes (len>0) are legal traffic: WU eligibility
+        // requires size==full-word when len>0, which the DUT forwards.
+        if(wr_active)$fatal(1,"HUM_WRITE_SHAPE");
+        wr_active=1'b1;wr_data_done=1'b0;wr_header=mst_req.aw;wr_beat=0;
       end
       if(take_w)begin
-        if(!wr_active || wr_data_done || !mst_req.w.last)$fatal(1,"HUM_WRITE_DATA");
-        wr_data_done=1'b1;wr_b_pending=1'b1;
-        wr_r_pending=wr_header.atop[5];wr_r_issued=1'b0;
+        if(!wr_active || wr_data_done)$fatal(1,"HUM_WRITE_DATA");
+        if(mst_req.w.last !== (wr_beat == int'(wr_header.len)))
+          $fatal(1,"HUM_WRITE_LAST beat=%0d len=%0d",wr_beat,wr_header.len);
+        patch_apply(wr_header.addr + addr_t'(wr_beat)*(DW/8),
+                    mst_req.w.data, mst_req.w.strb);
+        if(mst_req.w.last)begin
+          wr_data_done=1'b1;wr_b_pending=1'b1;wr_beat=0;
+          wr_r_pending=wr_header.atop[5];wr_r_issued=1'b0;
+        end else wr_beat++;
       end
       if(wr_data_done && !wr_b_pending && !wr_r_pending)begin
         wr_active=1'b0;wr_data_done=1'b0;
@@ -343,6 +388,16 @@ module tb_g6lc_l2_hum;
         dut.gen_l2.tag_match_inval &&
         dut.gen_l2.tag_windex == dut.gen_l2.tag_match_index)
       invw_corner_cycles <= invw_corner_cycles + 1;
+  end
+
+  // WRITE_UPDATE observability: one pulse per merged write (the port output),
+  // plus the install-stall engagement for the merge-vs-evict window.
+  int unsigned wupd_count = 0, wupd_mark = 0;
+  int unsigned wu_stall_cycles = 0;
+  always_ff @(posedge clk) if (rst_n) begin
+    if (l2_wupd) wupd_count <= wupd_count + 1;
+    if (WRITE_UPDATE && dut.gen_l2.wu_install_stall)
+      wu_stall_cycles <= wu_stall_cycles + 1;
   end
 
   always @(posedge clk) if(rst_n)begin
@@ -481,11 +536,17 @@ module tb_g6lc_l2_hum;
     return requested;
   endfunction
 
-  task automatic send_write(input id_t id,input addr_t a,input logic[5:0] atop);
+  // Generalized write: len+1 beats of `data0` stepped per beat, `strb` on
+  // every beat, full AXI attribute control for the WU ineligibility cases.
+  task automatic send_write_b(input id_t id,input addr_t a,input logic[5:0] atop,
+                              input logic [3:0] cache,input bit lock,
+                              input int unsigned len,input data_t data0,
+                              input strb_t strb);
     stim_t er;
     @(negedge clk);
     b_expected=1;expected_bid=id;
-    slv_req.aw='{id:id,addr:a,len:0,size:3,burst:axi_pkg::BURST_INCR,atop:atop,cache:4'hf,default:'0};
+    slv_req.aw='{id:id,addr:a,len:8'(len),size:3'd3,burst:axi_pkg::BURST_INCR,
+                 atop:atop,cache:cache,lock:lock,default:'0};
     slv_req.aw_valid=1;
     do @(posedge clk);while(!slv_resp.aw_ready);
     if(atop[5])begin
@@ -495,10 +556,18 @@ module tb_g6lc_l2_hum;
     end
     @(negedge clk);
     slv_req.aw_valid=0;
-    slv_req.w='{data:64'h1234,strb:'1,last:1'b1,user:'0};
-    slv_req.w_valid=1;
-    do @(posedge clk);while(!slv_resp.w_ready);
-    @(negedge clk);slv_req.w_valid=0;
+    for(int unsigned bt=0;bt<=len;bt++)begin
+      slv_req.w='{data:data0 ^ (64'(bt)*64'h0101_0101_0101_0101),strb:strb,
+                  last:(bt==len),user:'0};
+      slv_req.w_valid=1;
+      do @(posedge clk);while(!slv_resp.w_ready);
+      @(negedge clk);
+      slv_req.w_valid=0;
+    end
+  endtask
+
+  task automatic send_write(input id_t id,input addr_t a,input logic[5:0] atop);
+    send_write_b(id,a,atop,4'hf,1'b0,0,64'h1234,'1);
   endtask
 
   initial begin
@@ -1099,13 +1168,165 @@ module tb_g6lc_l2_hum;
         @(negedge clk); slv_req.w_valid=0;
         memory_hold = 1'b0;
         wait_done();
-        if (TAG_SRAM && invw_corner_cycles == 0)
+        // Under WRITE_UPDATE the second write merges into the still-resident
+        // line — no inval-match stream runs, so the deferred-compare corner
+        // does not engage; the WU coverage is the install stall on the
+        // merge's way while the fill drains.
+        if (TAG_SRAM && !WRITE_UPDATE && invw_corner_cycles == 0)
           $fatal(1, "HUM_TAG_INVW_DEAD");
+        if (WRITE_UPDATE && wu_stall_cycles == 0)
+          $fatal(1, "HUM_WU_STALL_DEAD");
         l2_ar_mark = l2_ar_count;
         push(4'd6, 64'hC0000 + addr_t'(SET_ASSOC) * 64'h400, 0);
         wait_done();                             // re-read: must hit, no refetch
         if (l2_ar_count != l2_ar_mark)
           $fatal(1, "HUM_TAG_STALE_CLEAR ar=%0d", l2_ar_count);
+      end
+      // ---- WRITE_UPDATE directed contract (42-48) -------------------------
+      // (a) Resident line, single-beat partial-strobe write: merges in place
+      // under WU (hit, no DRAM AR); the same bytes must be in memory — an
+      // invalidate+refetch returns them too.
+      42: begin
+        push(4'd1, 64'h50000, 0);
+        wait_done();
+        slv_req.b_ready = 1'b1;
+        l2_ar_mark = l2_ar_count;
+        wupd_mark = wupd_count;
+        send_write_b(4'd9, 64'h50008, 6'h00, 4'hf, 1'b0, 0,
+                     64'hdead_beef_cafe_f00d, 8'h0f);
+        while (write_completed != 1) @(negedge clk);
+        push(4'd2, 64'h50008, 0);            // resident read-back
+        wait_done();
+        if (WRITE_UPDATE) begin
+          if (l2_ar_count != l2_ar_mark)
+            $fatal(1, "HUM_WU_REFETCH ar=%0d", l2_ar_count);
+          if (wupd_count != wupd_mark + 1)
+            $fatal(1, "HUM_WU_NO_MERGE wupd=%0d", wupd_count);
+        end else if (l2_ar_count != l2_ar_mark + 1)
+          $fatal(1, "HUM_WU_REFETCH ar=%0d", l2_ar_count);
+        // Memory-side check: drop the merged line, refetch — memory must
+        // carry the same patched bytes the hit returned.
+        back_inval_addr = 64'h50000; back_inval_valid = 1'b1;
+        @(negedge clk);
+        back_inval_valid = 1'b0;
+        push(4'd3, 64'h50008, 0);
+        wait_done();
+        if (l2_ar_count != l2_ar_mark + (WRITE_UPDATE ? 2'(1) : 2'(2)))
+          $fatal(1, "HUM_WU_MEM_BYTES ar=%0d", l2_ar_count);
+      end
+      // (b) Multi-beat full-width write inside one line: both beats merge.
+      43: begin
+        push(4'd1, 64'h51000, 0);
+        wait_done();
+        slv_req.b_ready = 1'b1;
+        l2_ar_mark = l2_ar_count;
+        wupd_mark = wupd_count;
+        send_write_b(4'd9, 64'h51008, 6'h00, 4'hf, 1'b0, 1,
+                     64'h1111_2222_3333_4444, '1);
+        while (write_completed != 1) @(negedge clk);
+        push(4'd2, 64'h51008, 0);
+        push(4'd3, 64'h51010, 0);
+        wait_done();
+        if (WRITE_UPDATE) begin
+          if (l2_ar_count != l2_ar_mark)
+            $fatal(1, "HUM_WU_REFETCH ar=%0d", l2_ar_count);
+          if (wupd_count != wupd_mark + 1)
+            $fatal(1, "HUM_WU_NO_MERGE wupd=%0d", wupd_count);
+        end else if (l2_ar_count != l2_ar_mark + 1)
+          $fatal(1, "HUM_WU_REFETCH ar=%0d", l2_ar_count);
+      end
+      // (c) Write to a non-resident line: never allocates; the later read
+      // fetches memory's post-write bytes. Mode-independent contract.
+      44: begin
+        slv_req.b_ready = 1'b1;
+        l2_ar_mark = l2_ar_count;
+        wupd_mark = wupd_count;
+        send_write_b(4'd9, 64'h52008, 6'h00, 4'hf, 1'b0, 0,
+                     64'h5eed_5eed_5eed_5eed, '1);
+        while (write_completed != 1) @(negedge clk);
+        push(4'd2, 64'h52008, 0);
+        wait_done();
+        if (wupd_count != wupd_mark)
+          $fatal(1, "HUM_WU_PHANTOM_MERGE wupd=%0d", wupd_count);
+        if (l2_ar_count != l2_ar_mark + 1)
+          $fatal(1, "HUM_WU_NONRESIDENT ar=%0d", l2_ar_count);
+      end
+      // (d) ATOP write to a resident line: memory-side result carries an R
+      // beat; the line must be invalidated, not merged.
+      45: begin
+        push(4'd1, 64'h53000, 0);
+        wait_done();
+        slv_req.b_ready = 1'b1;
+        l2_ar_mark = l2_ar_count;
+        wupd_mark = wupd_count;
+        send_write_b(4'd9, 64'h53008, axi_pkg::ATOP_ATOMICSWAP, 4'hf, 1'b0,
+                     0, 64'h0bad_0bad_0bad_0bad, '1);
+        while (write_completed != 1) @(negedge clk);
+        push(4'd2, 64'h53008, 0);
+        wait_done();
+        if (wupd_count != wupd_mark)
+          $fatal(1, "HUM_WU_ATOP_MERGE wupd=%0d", wupd_count);
+        if (l2_ar_count != l2_ar_mark + 1)
+          $fatal(1, "HUM_WU_ATOP_KEPT ar=%0d", l2_ar_count);
+      end
+      // (e) Locked write to a resident line: same ineligible path.
+      46: begin
+        push(4'd1, 64'h54000, 0);
+        wait_done();
+        slv_req.b_ready = 1'b1;
+        l2_ar_mark = l2_ar_count;
+        wupd_mark = wupd_count;
+        send_write_b(4'd9, 64'h54008, 6'h00, 4'hf, 1'b1, 0,
+                     64'hc001_c001_c001_c001, '1);
+        while (write_completed != 1) @(negedge clk);
+        push(4'd2, 64'h54008, 0);
+        wait_done();
+        if (wupd_count != wupd_mark)
+          $fatal(1, "HUM_WU_LOCK_MERGE wupd=%0d", wupd_count);
+        if (l2_ar_count != l2_ar_mark + 1)
+          $fatal(1, "HUM_WU_LOCK_KEPT ar=%0d", l2_ar_count);
+      end
+      // (f) Non-cacheable write to a resident line: bypasses the tags but
+      // must still drop the stale cached copy.
+      47: begin
+        push(4'd1, 64'h55000, 0);
+        wait_done();
+        slv_req.b_ready = 1'b1;
+        l2_ar_mark = l2_ar_count;
+        wupd_mark = wupd_count;
+        send_write_b(4'd9, 64'h55008, 6'h00, 4'h0, 1'b0, 0,
+                     64'h0f0f_0f0f_0f0f_0f0f, '1);
+        while (write_completed != 1) @(negedge clk);
+        push(4'd2, 64'h55008, 0);
+        wait_done();
+        if (wupd_count != wupd_mark)
+          $fatal(1, "HUM_WU_NC_MERGE wupd=%0d", wupd_count);
+        if (l2_ar_count != l2_ar_mark + 1)
+          $fatal(1, "HUM_WU_NC_KEPT ar=%0d", l2_ar_count);
+      end
+      // (g) Write while a same-line fill is in flight: kill_match fires
+      // whether or not the tag clear is suppressed — the killed fill drains
+      // and discards, and a read issued after B refetches the new bytes.
+      48: begin
+        memory_hold = 1'b1;
+        l2_ar_mark = l2_ar_count;
+        push(4'd1, 64'h56000, 0);
+        while (l2_ar_count == l2_ar_mark) @(negedge clk);  // fill AR out, R held
+        repeat (4) @(negedge clk);                          // entry F_FILLING
+        slv_req.b_ready = 1'b1;
+        send_write_b(4'd9, 64'h56008, 6'h00, 4'hf, 1'b0, 0,
+                     64'hf111_f111_f111_f111, '1);
+        while (write_completed != 1) @(negedge clk);
+        memory_hold = 1'b0;
+        wait_done();
+        wupd_mark = wupd_count;
+        l2_ar_mark = l2_ar_count;
+        push(4'd2, 64'h56008, 0);
+        wait_done();
+        if (wupd_count != wupd_mark)
+          $fatal(1, "HUM_WU_FILL_MERGE wupd=%0d", wupd_count);
+        if (l2_ar_count != l2_ar_mark + 1)
+          $fatal(1, "HUM_WU_FILL_KILL ar=%0d", l2_ar_count);
       end
       default: $fatal(1, "HUM_SCENARIO");
     endcase

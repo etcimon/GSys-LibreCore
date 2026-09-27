@@ -32,10 +32,18 @@ CONTRACT = {0: 'HUM_DATA', 1: 'HUM_DATA', 2: 'HUM_DATA', 3: 'HUM_DATA',
             29: 'HUM_DATA', 30: 'HUM_DATA', 31: 'HUM_DATA', 32: 'HUM_DATA',
             33: 'HUM_DATA', 34: 'HUM_DATA', 35: 'HUM_DATA', 36: 'HUM_DATA',
             37: 'HUM_DATA', 38: 'HUM_DATA', 39: 'HUM_DATA', 40: 'HUM_DATA',
-            41: 'HUM_DATA'}
+            41: 'HUM_DATA',
+            # 42-48 are the WRITE_UPDATE directed contract: 42/43 encode the
+            # merged-hit metric (they fail by design on a WU=0 build), the
+            # ineligible paths 44-48 are mode-independent.
+            42: 'HUM_DATA', 43: 'HUM_DATA', 44: 'HUM_DATA', 45: 'HUM_DATA',
+            46: 'HUM_DATA', 47: 'HUM_DATA', 48: 'HUM_DATA'}
 # Scenarios exercising the TAG_SRAM launched-read protocol; functional on the
 # flop path too (the SRAM-only engagement checks are parameter-gated).
 TAG_SRAM_SCEN = range(35, 42)
+# WU-only scenarios: kept out of the WU=0 plan so its metric hash stays
+# byte-identical to the pre-WU run.
+WU_ONLY_SCEN = range(42, 49)
 
 
 def digest(path):
@@ -57,6 +65,9 @@ def main():
     rr_sched = os.environ.get('REVIEW_L2_HUM_RR') == '1'
     tagsram = os.environ.get('REVIEW_L2_HUM_TAG_SRAM') == '1'
     miter = os.environ.get('REVIEW_L2_HUM_MITER') == '1'
+    # WRITE_UPDATE mode; implied by the WU fault controls (they only manifest
+    # on a merge-capable build).
+    wu = os.environ.get('REVIEW_L2_HUM_WU') == '1'
     (out / 'mode.json').write_text(json.dumps(
         {k: v for k, v in os.environ.items() if k.startswith('REVIEW_L2_HUM')}, indent=2))
     # Restores the original single-port schedule, where a colliding install took
@@ -93,7 +104,20 @@ def main():
         'merge': (34,
             "      .merge_block_i     (fill_kill_q),",
             "      .merge_block_i     ('0),", 'HUM_STALE_MERGE'),
+        # WU fault controls on the merge hit: tag kept but data merge
+        # disconnected -> resident read-back returns the pre-write value; and
+        # tag invalidation forced on -> the merged line is dropped and the
+        # re-read refetches (data still right, AR count wrong).
+        'wu_merge': (42,
+            "  assign data_a_req = data_a_req_hit | wu_merge_wr;",
+            "  assign data_a_req = data_a_req_hit;", 'HUM_DATA'),
+        'wu_tag': (42,
+            "  assign wu_tag_inval = !wu_hit_now && !wu_candidate;",
+            "  assign wu_tag_inval = 1'b1;", 'HUM_WU_REFETCH'),
     }
+    WU_FAULTS = ('wu_merge', 'wu_tag')
+    if fault in WU_FAULTS:
+        wu = True
     assert not fault or (fault in faults and not baseline), 'invalid fault-control mode'
     assert not order_before or (not baseline and not fault), 'invalid order-before mode'
     assert not atop_before or (not baseline and not fault and not order_before), 'invalid atop-before mode'
@@ -165,6 +189,7 @@ def main():
                       '-DL2TB_STATIC', *(['-GCHAIN_L3=1'] if chain else []),
                       *(['-GRR_EN=1'] if rr_sched else []),
                       *(['-GTAG_SRAM=1'] if tagsram else []),
+                      *(['-GWRITE_UPDATE=1'] if wu else []),
                       *(['-GFAIR_WRITES=1'] if os.environ.get('REVIEW_L2_FAIR_WRITES') == '1' else []),
                       '--top-module', top, '--Mdir', str(model),
                       '-o', 'hum-test', *rtl]),
@@ -186,6 +211,7 @@ def main():
                       ' --top g6lc_l2_fixture -GBYTE_SIZE=512 -GSET_ASSOC=2'
                       f' -GMSHR_DEPTH=2 -GDATA_BANKS=2 -GRR_EN={rr}'
                       f' -GTAG_SRAM={int(tagsram)}'
+                      f' -GWRITE_UPDATE={int(wu)}'
                       f' -GFAIR_WRITES={int(os.environ.get("REVIEW_L2_FAIR_WRITES") == "1")};'
                       ' hierarchy -check -top g6lc_l2_fixture; proc; opt; check -assert;'
                       ' synth -top g6lc_l2_fixture -noabc; check -assert;'
@@ -227,7 +253,8 @@ def main():
     if os.environ.get('REVIEW_L2_FAIR_WRITES') != '1':
         CHAIN_ONLY.add(33)
     plan = ([(0, 'HUM_NOT_ENGAGED'), (5, None), (6, None)] if baseline
-            else [(s, None) for s in sorted(CONTRACT) if s not in CHAIN_ONLY])
+            else [(s, None) for s in sorted(CONTRACT) if s not in CHAIN_ONLY
+                  and (wu or s not in WU_ONLY_SCEN)])
     if fault: plan = [(faults[fault][0], faults[fault][3])]
     if order_before:
         plan = [(12, 'HUM_DATA'), (13, 'HUM_DATA'), (14, 'HUM_DATA'),

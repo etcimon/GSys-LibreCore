@@ -68,6 +68,17 @@ REMOTE_ROOT = os.environ.get("TH_REMOTE_ROOT", "/opt/testharness")
 DEFAULT_TARGET = os.environ.get("TH_TARGET", "g6lc64_smt2")
 DEFAULT_SHELL_TIMEOUT = float(os.environ.get("TH_SHELL_TIMEOUT", "60"))
 
+
+def command_timeout(requested: float | None, default: float) -> float:
+    """Resolve the CLI ``--timeout`` value against a command's safety net.
+
+    ``None`` means the flag was not given: apply the command's default. An
+    explicit value is honoured verbatim, including ``0`` (no timeout, as the
+    ``--timeout`` help text promises). Callers must not use ``or`` on this —
+    ``0`` is a value, not "unset".
+    """
+    return default if requested is None else float(requested)
+
 # Allow overriding the ssh/rsync binaries (e.g. Windows rsync not on PATH,
 # or a WSL/cygwin ssh). The default is the unqualified command found by ssh.
 SSH_BIN = shlex.split(os.environ.get("TH_SSH_BIN", "ssh"))
@@ -1843,13 +1854,14 @@ def l2_units_passed(text: str, rc: int) -> bool:
     )
 
 
-def l2_synth_passed(text: str, rc: int, rr_en: int, tag_sram: int = 0) -> bool:
-    if rr_en not in (0, 1) or tag_sram not in (0, 1):
+def l2_synth_passed(text: str, rc: int, rr_en: int, tag_sram: int = 0,
+                    write_update: int = 0) -> bool:
+    if rr_en not in (0, 1) or tag_sram not in (0, 1) or write_update not in (0, 1):
         return False
     mem = 2 + rr_en + tag_sram
     # Yosys logs mention $dlatch in the select command; the runner already
     # asserted no latches and the expected $mem_v2 count before printing PASS.
-    return rc == 0 and f"[l2-tb] SYNTH PASS rr={rr_en} tagsram={tag_sram} mem={mem}" in text
+    return rc == 0 and f"[l2-tb] SYNTH PASS rr={rr_en} tagsram={tag_sram} wu={write_update} mem={mem}" in text
 
 
 def cmd_l2_leaf(rem: Remote, args) -> int:
@@ -1880,6 +1892,7 @@ def cmd_l2_leaf(rem: Remote, args) -> int:
         "L2TB_BYTE_SIZE": "4096", "L2TB_SEED": str(0x600df00d),
         "L2TB_EXTRA": "-GTAG_SRAM=1" if getattr(args, "tag_sram", False) else "",
         "L2TB_TAG_SRAM": "1" if getattr(args, "tag_sram", False) else "0",
+        "L2TB_WRITE_UPDATE": "1" if getattr(args, "write_update", False) else "0",
     }
     if mode == "synth":
         env["YOSYS"] = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"
@@ -1889,7 +1902,7 @@ def cmd_l2_leaf(rem: Remote, args) -> int:
     rc = rem.run(
         f"{env_prefix()} cd {shlex.quote(source_dir)} && env {command} bash verif/tb/l2/run-l2-tb.sh "
         f"{plus}> {shlex.quote(rundir + '/driver.log')} 2>&1",
-        check=False, timeout=args.timeout or 900, heartbeat=True,
+        check=False, timeout=command_timeout(args.timeout, 900), heartbeat=True,
     ).returncode
     rem.pull(f"{rundir}/driver.log", dest)
     rem.pull(f"{rundir}/output/", dest / "output")
@@ -1901,7 +1914,8 @@ def cmd_l2_leaf(rem: Remote, args) -> int:
         kind = "rtl-leaf-units"
     elif mode == "synth":
         passed = l2_synth_passed(text + "\n" + (dest / "driver.log").read_text(errors="replace"), rc, args.rr_en,
-                                 int(getattr(args, "tag_sram", False)))
+                                 int(getattr(args, "tag_sram", False)),
+                                 int(getattr(args, "write_update", False)))
         kind = "rtl-leaf-synth"
     else:
         passed = l2_leaf_passed(text, rc, args.ways, args.rr_en)
@@ -1964,8 +1978,9 @@ def cmd_l2_equiv(rem: Remote, args) -> int:
         "L2TB_EQ_MEM": mem, "L2TB_EQ_NEGATIVE": "1" if args.negative else "0",
         "L2TB_EQ_LADDER": "1" if args.ladder else "0",
         "L2TB_EQ_BASE_FILE": f"{source_dir}/equiv-ref/legacy.original.sv",
-        "L2TB_EQ_TIMEOUT": str(args.timeout or (120 if mem == "map" or args.byte_size <= 512 else 300)),
+        "L2TB_EQ_TIMEOUT": str(int(command_timeout(args.timeout, 120 if mem == "map" or args.byte_size <= 512 else 300))),
         "L2TB_EQ_TAGS": "1" if getattr(args, "eq_tags", False) else "0",
+        "L2TB_WRITE_UPDATE": "1" if getattr(args, "write_update", False) else "0",
         "YOSYS": f"{formal_bin}/yosys",
     }
     command = " ".join(shlex.quote(f"{key}={value}") for key, value in env.items() if value != "")
@@ -1973,7 +1988,7 @@ def cmd_l2_equiv(rem: Remote, args) -> int:
     rc = rem.run(
         f"{env_prefix()} cd {shlex.quote(source_dir)} && env {command} bash verif/tb/l2/run-l2-tb.sh "
         f"> {shlex.quote(rundir + '/driver.log')} 2>&1",
-        check=False, timeout=args.timeout or 1800, heartbeat=True,
+        check=False, timeout=command_timeout(args.timeout, 1800), heartbeat=True,
     ).returncode
     rem.pull(f"{rundir}/driver.log", dest)
     rem.pull(f"{rundir}/output/", dest / "output")
@@ -2012,7 +2027,7 @@ def cmd_shell(rem: Remote, args) -> int:
         # both start heavy Variane/soft-ladder workloads.
         if re.search(r"Variane_testharness|soft-ladder", args.command):
             _no_overlap_guard(rem, f"shell ({args.command[:60]}...)")
-        timeout = args.timeout if args.timeout > 0 else DEFAULT_SHELL_TIMEOUT
+        timeout = command_timeout(args.timeout, DEFAULT_SHELL_TIMEOUT)
         return rem.run(f"cd {REMOTE_ROOT} && {args.command}",
                        check=False, timeout=timeout,
                        heartbeat=not args.no_hang, tty=args.tty).returncode
@@ -2220,8 +2235,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run the CVA6/LibreCore Verilator testharness on a remote host.",
     )
     p.add_argument("--host", default=HOST, help=f"ssh host alias (default {HOST})")
-    p.add_argument("--timeout", type=float, default=0,
-                   help="remote command timeout in seconds, 0 = no timeout (default: 0)")
+    p.add_argument("--timeout", type=float, default=None, metavar="SECONDS",
+                   help="remote command timeout in seconds; 0 = no timeout "
+                        "(unset: command defaults, e.g. 60 s for `shell`)")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="verbose progress and command echo")
     p.add_argument("-d", "--debug", action="store_true",
@@ -2356,6 +2372,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--mode", choices=["sim", "units", "synth"], default="sim")
     sp.add_argument("--tag-sram", action="store_true",
                     help="build the L2 fixture with TAG_SRAM=1 (tc_sram tag path)")
+    sp.add_argument("--write-update", action="store_true",
+                    help="enable the resident-line write merge (T8f)")
     sp.set_defaults(fn=cmd_l2_leaf)
 
     sp = sub.add_parser("l2-equiv", help="RR-off equivalence of a copied L2 snapshot (no shared sync)")
@@ -2368,6 +2386,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--eq-tags", action="store_true",
                     help="flop-vs-SRAM tag miter (gold TAG_SRAM=0, gate TAG_SRAM=1, "
                          "back-inval tied off) instead of the legacy reference")
+    sp.add_argument("--write-update", action="store_true",
+                    help="enable the resident-line write merge (T8f) on both sides")
     sp.set_defaults(fn=cmd_l2_equiv)
 
     sp = sub.add_parser("shell", help="interactive ssh into the remote root, or run one command")
@@ -2398,7 +2418,7 @@ def main(argv: list[str] | None = None) -> int:
     _DEBUG = args.debug
     verbose = args.verbose or args.debug
     rem = Remote(args.host, verbose=verbose, debug_mode=args.debug)
-    rem.timeout = args.timeout
+    rem.timeout = args.timeout if args.timeout is not None else 0.0
     try:
         t0 = time.time()
         rc = args.fn(rem, args)

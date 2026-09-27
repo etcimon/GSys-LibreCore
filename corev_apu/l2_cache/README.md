@@ -10,6 +10,44 @@ Memory-side AXI-to-AXI L2 under `corev_apu/l2_cache/`. Does **not** edit `core/c
 - **Exclusive AR bypass**: `AR.lock` is captured and forwarded on the memory-side AR. A locked read never takes the tag-hit path (that would return OKAY and leave `g6lc_axi_lrsc` unarmed). `AW.lock` / ATOP were already preserved for AMOCAS/STEX.
 - **Write-through + read-allocate**: matches CVA6 WT L1; writes push through to memory.
 - **Parallel tag compare**: single-cycle SET_ASSOC hit path.
+
+## Write-update policy (`WRITE_UPDATE` / `CVA6Cfg.L2WriteUpdateEn`)
+
+Default off; when enabled, a write-through to a **resident** line merges the W
+beats into that line instead of invalidating the tag. Motivation (T8e,
+measured on `mc_l2_write_read` and the four-hart OpenSBI boot): ~6,060 of
+8,192 stores purged a resident L2 line and ~90k of ~100k boot L2 misses
+followed a purge.
+
+**Ordering argument.** A write is globally ordered by its B response: the
+coherence hub drops the writer's L1 copy at B, so a reader served *before* B
+may legally observe pre-write data, while any reader served *after* B must see
+the new bytes. Merging keeps the same bound as purging — the FSM stays in the
+write bypass sequence until B lands (`S_BYPASS_AW → S_BYPASS_W → S_BYPASS_B`),
+so no read can be served the merged line before memory acknowledged the write;
+the composed bench's `late_ar_cycle >= mem_b_cycle` admission contract holds
+under both settings.
+
+**Eligibility** (evaluated once, at AW acceptance, on registered fields —
+`wu_eligible`): cacheable write, `atop == '0`, not locked, the whole burst
+inside the addressed line (`len==0` of any size, or a full-width multi-beat
+INCR run ending inside the line), and no in-flight fill for the same line.
+Anything else — atomics, locked accesses, non-cacheable writes,
+same-line-fill races, tag-miss writes — keeps the invalidate-and-kill path,
+including the fill-kill (`kill_match` fires on every write either way) and the
+deferred self-invalidation retry.
+
+**Collision rules.** A back-invalidation colliding with a merge arms the
+deferred match port and conservatively clears the merged line. An install
+that would claim the merge's way mid-write is stalled (`wu_install_stall`)
+until the write drains into `S_BYPASS_B`; a tag `write_i` landing on the
+match-read edge exempts that way from the deferred inval-match compare (the
+tag replacement itself retires the invalidation). `l2_wupdate_o` pulses once
+per merged write (last forwarded beat).
+
+**Timing impact:** the merge adds a byte-enable shifter plus a data-port-A
+write mux in the bypass states only — no path into the `S_TAG` hit compare;
+the eligibility compare is on registered request fields.
 - **Pairs with** `corev_apu/coherence/` split AR‖AW hub under multi-core.
 
 ## Config (`cva6_cfg_t`)

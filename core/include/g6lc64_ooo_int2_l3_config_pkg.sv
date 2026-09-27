@@ -307,7 +307,10 @@ package cva6_config_pkg;
       WtAxiAllocEn: bit'(1),
       L3InclusiveEn: bit'(0),
       L2TagSramEn: bit'(1),
-      L2WriteUpdateEn: bit'(0),
+      // T8e measured 6,060 purges of resident lines per 8,192 stores
+      // (mc_l2_write_read) and ~90k of ~100k four-hart boot L2 misses
+      // following a write purge — merge writes in place instead.
+      L2WriteUpdateEn: bit'(1),
       SharedTlbDepth: int'(64),
 
       NrLoadPipeRegs: int'(CVA6ConfigNrLoadPipeRegs),

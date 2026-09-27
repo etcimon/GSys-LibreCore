@@ -96,8 +96,20 @@ prerequisite for this work under the existing dual license. No licensing policy 
   6,060 resident lines per 8,192 stores and ~90k of the four-hart boot's ~100k L2 misses follow
   a purge (latency-40 boots to completion under a 60M measurement cap: 46,909,150 / 48,403,596,
   `l3_hit = 0`); PMU group-2 counters agree with the TB totals; the L2×L3 geometry sweep
-  elaborates at every point. Open in T8: `L2WriteUpdateEn` (T8f, go on the purge number),
-  final identity/strict runs on the resulting tree. No L3 benefit is claimed for the boot.
+  elaborates at every point. **Landed (T8f/T8g, 2026-09-27): `L2WriteUpdateEn`** — an eligible
+  write-through merges into a resident line instead of purging it (cacheable, no ATOP/lock,
+  in-line burst; racing same-line fills are still killed; merged bytes visible only after
+  memory's B). On in `g6lc64_ooo_int2`, `g6lc64_ooo_int2_l3`, `g6lc64_smt2_l3`; off elsewhere
+  (smt2/smt2_ooo_int frozen traces still exact: 12,761,165 / 10,701,925). Strict boots:
+  int2 17,993,674, int2_l3 18,244,344 (flop-tag ts0 byte-identical), smt2_l3 13,814,448.
+  Boot counters: `l2_miss` ~103k→~1.5k, `l2_selfinv` ~91.6k→~190, `l2_wupd` ~770–833k;
+  latency-40 boots 41,508,827 / 42,004,100 (−11.5 % / −13.2 %) and the int2_l3 boot logged
+  its first `l3_hit`. Flop-vs-SRAM dual sim stays byte-exact (17,187/32,102/17,221 records);
+  FO4 `g6lc_l2_top` 28.5 at both WU values. Verilator `--threads 4` diverges late
+  (~97.7 % identical, not byte-exact) → measurement-only; qualification stays threads=1.
+  Open under the eWT plan: M1 — CBO on WT targets hangs the store buffer (`store_buffer.sv:468-487`
+  waits on a `data_rvalid` the WT wbuffer never asserts, `wt_dcache_wbuffer.sv:1121`); M3 —
+  the int2 packages' real issue window is `NrScoreboardEntries=8`.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

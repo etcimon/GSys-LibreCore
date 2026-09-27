@@ -1460,6 +1460,9 @@ module tb_g6lc_coherence_l2;
   parameter bit USE_L3=1'b0, SELF_INVAL_FAULT=1'b0;
   parameter int L3_BYTES=2048, L3_SET_ASSOC=2, L3_MSHR_DEPTH=2, L3_DATA_BANKS=2;
   parameter bit TAG_SRAM=1'b0;
+  // WRITE_UPDATE=1 merges eligible write-throughs into resident lines at both
+  // cache levels; the scenario checks below become the merge-aware forms.
+  parameter bit WRITE_UPDATE=1'b0;
   // Scenario-5 sweep workload: (a) STREAM_BYTES of lines twice, (b) re-read a
   // WS_BYTES working set after POLLUTE_BYTES of pollution. Read-only, one
   // 16B hub request per 64B cache line.
@@ -1512,22 +1515,26 @@ module tb_g6lc_coherence_l2;
   req_t l2m_req;
   resp_t l2m_rsp;
   logic l3_hit_p=0, l3_miss_p=0, l2_hit_p=0, l2_miss_p=0;
+  logic l2_wupd_p=0, l3_wupd_p=0;
   int l3_hits=0, l3_misses=0, l2_hits=0, l2_misses=0;
+  int l2_wupd=0, l3_wupd=0;
   always_ff @(posedge clk) begin
     if (l3_hit_p) l3_hits<=l3_hits+1;
     if (l3_miss_p) l3_misses<=l3_misses+1;
     if (l2_hit_p) l2_hits<=l2_hits+1;
     if (l2_miss_p) l2_misses<=l2_misses+1;
+    if (l2_wupd_p) l2_wupd<=l2_wupd+1;
+    if (l3_wupd_p) l3_wupd<=l3_wupd+1;
   end
   g6lc_l2_top #(.Enable(USE_L2),.BYTE_SIZE(BYTE_SIZE),.SET_ASSOC(SET_ASSOC),
       .LINE_WIDTH(512),.MSHR_DEPTH(MSHR_DEPTH),.DATA_BANKS(DATA_BANKS),.FAIR_WRITES(1),
-      .TAG_SRAM(TAG_SRAM),
+      .TAG_SRAM(TAG_SRAM),.WRITE_UPDATE(WRITE_UPDATE),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)) l2 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
       .mst_req_o(l2m_req),.mst_resp_i(l2m_rsp),
       .l2_hit_o(l2_hit_p),.l2_miss_o(l2_miss_p),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
-      .l2_selfinv_hit_o(),
+      .l2_selfinv_hit_o(),.l2_wupdate_o(l2_wupd_p),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o());
   if (USE_L3) begin : gen_l3_stack
@@ -1547,13 +1554,14 @@ module tb_g6lc_coherence_l2;
     g6lc_l3_top #(
       .Enable(1'b1),.BYTE_SIZE(L3_BYTES),.SET_ASSOC(L3_SET_ASSOC),
       .LINE_WIDTH(512),.MSHR_DEPTH(L3_MSHR_DEPTH),.DATA_BANKS(L3_DATA_BANKS),
-      .TAG_SRAM(TAG_SRAM),
+      .TAG_SRAM(TAG_SRAM),.WRITE_UPDATE(WRITE_UPDATE),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)
     ) i_l3 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(l3_slv_req),.slv_resp_o(cut_rsp),
       .mst_req_o(l3_mst_req),.mst_resp_i(dram_rsp),
       .l3_hit_o(l3_hit_p),.l3_miss_o(l3_miss_p),.l3_bypass_o(),.l3_selfinv_hit_o(),
+      .l3_wupdate_o(l3_wupd_p),
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
     );
     always_comb begin
@@ -1796,11 +1804,39 @@ module tb_g6lc_coherence_l2;
         send_read(id_t'(k+1),ADDRESS+64'(k)*(BYTE_SIZE/SET_ASSOC),8'd1);
         while(read_count!=k+1)tick();
       end
+      // Phase-5 WU probe: store into the evicted line before the re-read.
+      // Under WRITE_UPDATE the L3 merges the write into its resident copy and
+      // the re-read hits the L3 carrying the new bytes; without it the write
+      // purges the L3 copy and the re-read costs one more DRAM fill.
+      wr_req='0;
+      wr_req.addr=ADDRESS;wr_req.id=6;wr_req.size=3;
+      wr_req.burst=1;wr_req.cache=CACHE_ATTR;wr_req_valid=1;
+      while(aw_cycle<0)tick();
+      wr_req_valid=0;
+      // Same W-drive idiom as the scenario 0-3 loop: the handshake must be
+      // sampled before the posedge — a post-edge poll can miss the consumed
+      // beat and deadlock on w_ready.
+      for(int n=0;n<2000 && core_b_cycle<0;n++)begin
+        bit w_taken;
+        wr_data_valid=cycle-aw_cycle>=WRITE_DELAY && mem_b_cycle<0;
+        wr_data='{data:64'h22,strb:'1,last:1,user:0};
+        #1;
+        w_taken=wr_data_valid && responses[0].w_ready;
+        tick();
+        if(w_taken)wr_data_valid=0;
+      end
+      wr_data_valid=0;
+      if(core_b_cycle<0)$fatal(1,"COH_L2_W_TIMEOUT");
       send_read(id_t'(SET_ASSOC+2));
       while(read_count!=SET_ASSOC+2)tick();
-      want_ar=SET_ASSOC+1+(negative?1:0);
+      want_ar=SET_ASSOC+1+(WRITE_UPDATE?0:1)+(negative?1:0);
       if(dram_ar_count!=want_ar)$fatal(1,"COH_L3_PROBE");
-      if(!negative && l3_hits==0)$fatal(1,"COH_L3_NO_HIT");
+      if(!negative && WRITE_UPDATE)begin
+        if(l3_hits==0)$fatal(1,"COH_L3_NO_HIT");
+        if(l3_wupd==0)$fatal(1,"COH_L2_WU_NO_MERGE");
+      end else if(!negative && !WRITE_UPDATE)begin
+        if(l3_hits!=0)$fatal(1,"COH_L3_STALE_HIT");
+      end
       $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d dram_ar=%0d l3_hit=%0d l3_miss=%0d",
         scenario,USE_L2,BYTE_SIZE,dram_ar_count,l3_hits,l3_misses);
       $finish;
@@ -1840,7 +1876,15 @@ module tb_g6lc_coherence_l2;
     if(scenario<2 && (!cache_valid || cache_value!=64'h11))$fatal(1,"COH_L2_WARMUP");
     wr_req='0;
     wr_req.addr=ADDRESS;wr_req.id=6;wr_req.size=3;
-    wr_req.burst=1;wr_req.cache=CACHE_ATTR;wr_req_valid=1;
+    wr_req.burst=1;
+    // Under WRITE_UPDATE an eligible store merges in place and never takes the
+    // L3 self-invalidation, so the SELF_INVAL_FAULT profile would stop
+    // discriminating. The fault write is therefore modifiable but
+    // non-allocating: the hub still broadcasts the L1 invalidation (cache[1])
+    // while the L2/L3 find it write-update-ineligible (no allocate bit) and
+    // keep the invalidation path that the fault severs.
+    wr_req.cache=(SELF_INVAL_FAULT && WRITE_UPDATE) ? 4'b0010 : CACHE_ATTR;
+    wr_req_valid=1;
     inv_ready[1]=(INV_HOLD==0);wr_resp_ready=(B_HOLD==0);
     while(aw_cycle<0)tick();
     wr_req_valid=0;
@@ -1878,12 +1922,14 @@ module tb_g6lc_coherence_l2;
     if(scenario<2)begin
       if(!cache_valid || cache_value!=(64'h22 ^ 64'(negative)))$fatal(1,"COH_L2_FINAL_VALUE");
     end else begin
-      // Post-B re-read: the write self-invalidated the resident line, so the
-      // re-read must miss and fetch a fresh line (second DRAM AR) carrying
-      // the applied value — the per-beat checker verified the data already.
-      if(dram_ar_count!=2)$fatal(1,"COH_L2_NO_REFILL");
-      if(dram_ar_len[1]!=L2_LINE_BYTES/8-1 ||
-         dram_ar_addr[1]!=(ADDRESS & ~addr_t'(L2_LINE_BYTES-1)))
+      // Post-B re-read: without write-update the write self-invalidated the
+      // resident line, so the re-read must miss and fetch a fresh line
+      // (second DRAM AR); with it the re-read hits the merged line — the
+      // per-beat checker verified the new data either way.
+      if(dram_ar_count!=(WRITE_UPDATE ? 1 : 2))$fatal(1,"COH_L2_NO_REFILL");
+      if(!WRITE_UPDATE &&
+         (dram_ar_len[1]!=L2_LINE_BYTES/8-1 ||
+          dram_ar_addr[1]!=(ADDRESS & ~addr_t'(L2_LINE_BYTES-1))))
         $fatal(1,"COH_L2_FILL_GEOMETRY");
     end
     $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d aw=%0d inv=%0d apply=%0d mem_b=%0d late_ar=%0d core_b=%0d blocked=%0d dram_ar=%0d l3_hit=%0d l3_miss=%0d",
@@ -1942,7 +1988,7 @@ module tb_g6lc_coherence_credits;
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
       .mst_req_o(l2m_req),.mst_resp_i(l2m_rsp),
       .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
-      .l2_selfinv_hit_o(),
+      .l2_selfinv_hit_o(),.l2_wupdate_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o());
   if (USE_L3) begin : gen_l3_stack
@@ -1965,6 +2011,7 @@ module tb_g6lc_coherence_credits;
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(cut_req),.slv_resp_o(cut_rsp),
       .mst_req_o(dram_req),.mst_resp_i(dram_rsp),
       .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),.l3_selfinv_hit_o(),
+      .l3_wupdate_o(),
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
     );
   end else begin : gen_no_l3

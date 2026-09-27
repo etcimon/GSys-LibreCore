@@ -14,7 +14,14 @@ module g6lc_l2_tag #(
     parameter int unsigned SET_ASSOC  = 8,
     parameter int unsigned TAG_WIDTH  = 48,
     parameter int unsigned IDX_WIDTH  = 9,
-    parameter bit          TAG_SRAM   = 1'b0
+    parameter bit          TAG_SRAM   = 1'b0,
+    // WRITE_UPDATE=1 keeps a merged write's line valid, so its tag can still
+    // match a later write's self-invalidation in the same cycle a fill
+    // installs into that way: the install already replaces the tag (which
+    // itself satisfies the invalidation of the old line), so the match must
+    // not additionally clear the fresh line's valid bit. Under 0 the guard
+    // folds away — a write self-invalidation always finds the way invalid.
+    parameter bit          WRITE_UPDATE = 1'b0
 ) (
     input  logic                          clk_i,
     input  logic                          rst_ni,
@@ -117,7 +124,10 @@ module g6lc_l2_tag #(
       if (inval_match_i) begin
         for (int unsigned w = 0; w < SET_ASSOC; w++) begin
           if (tags_q[inval_match_index_i][w].valid &&
-              tags_q[inval_match_index_i][w].tag == inval_match_tag_i) begin
+              tags_q[inval_match_index_i][w].tag == inval_match_tag_i &&
+              !(WRITE_UPDATE && write_i && write_valid_i &&
+                write_index_i == inval_match_index_i &&
+                write_way_i == WAY_W'(w))) begin
             tags_d[inval_match_index_i][w].valid = 1'b0;
             inval_match_hit_o = 1'b1;
           end
@@ -309,8 +319,16 @@ module g6lc_l2_tag #(
         // Snapshot epoch = the read cycle, with the in-flight deferred clear
         // folded in (it lands at this edge's valid_d, so a back-to-back
         // inval-match observes post-clear bits like the flop array).
+        // WRITE_UPDATE fold-in: a way whose tag a same-edge install is
+        // rewriting cannot hold the matched tag at the deferred compare —
+        // the replacement itself retires the invalidation. Without the
+        // exclusion the snapshot of the still-valid merged line would match
+        // its old tag and the deferred clear would kill the new line.
         inv_valid_q <= valid_q[inval_match_index_i] &
-                       ~((inval_match_index_i == inv_index_q) ? inv_clr : '0);
+                       ~((inval_match_index_i == inv_index_q) ? inv_clr : '0) &
+                       ~((WRITE_UPDATE && write_i && write_valid_i &&
+                          write_index_i == inval_match_index_i)
+                         ? (SET_ASSOC'(1'b1) << write_way_i) : '0);
         row_index_q <= rd_index;
         fwd_valid_q <= rd_req && write_i && write_valid_i &&
                        (write_index_i == rd_index);
