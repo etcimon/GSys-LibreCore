@@ -371,6 +371,8 @@ module g6lc_cluster
         .l2_bypass_o        (),
         .l2_mshr_full_o     (),
         .l2_bank_conflict_o (),
+        // TB reads the pulse hierarchically; no cluster port.
+        .l2_selfinv_hit_o   (),
         .l2_evict_valid_o   (l2_evict_v),
         .l2_evict_addr_o    (l2_evict_a),
         // Under L3En the L2's evict output is not the inclusive broadcast
@@ -418,6 +420,8 @@ module g6lc_cluster
         .l3_hit_o         (l3_hit_w),
         .l3_miss_o        (l3_miss_w),
         .l3_bypass_o      (l3_bypass_w),
+        // TB reads the pulse hierarchically; no cluster port.
+        .l3_selfinv_hit_o (),
         .l3_evict_valid_o (l3_evict_v),
         .l3_evict_addr_o  (l3_evict_a),
         .l3_evict_ready_i (l3_evict_rdy)

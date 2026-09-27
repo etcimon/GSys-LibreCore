@@ -31,6 +31,9 @@ module g6lc_l3_top
     output logic      l3_hit_o,
     output logic      l3_miss_o,
     output logic      l3_bypass_o,
+    // Observability pulse: an inval-match actually cleared a live L3 line
+    // this cycle (write self-inval propagation). TB counts it as l3_selfinv.
+    output logic      l3_selfinv_hit_o,
     // Victim replace — inclusive back-inval toward L1/L2. Valid/ready offer:
     // the victim commit inside holds until l3_evict_ready_i accepts the
     // notification. Tie high when no inclusive engine is connected.
@@ -66,6 +69,7 @@ module g6lc_l3_top
       .l2_hit_o           (l3_hit_o),
       .l2_miss_o          (l3_miss_o),
       .l2_bypass_o        (l3_bypass_o),
+      .l2_selfinv_hit_o   (l3_selfinv_hit_o),
       .l2_mshr_full_o     (full),
       .l2_bank_conflict_o (bank_cfl),
       .l2_evict_valid_o   (l3_evict_valid_o),

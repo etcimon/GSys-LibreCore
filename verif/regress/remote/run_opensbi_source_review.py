@@ -16,13 +16,19 @@ import tarfile
 
 
 def parse_cache_counters(text):
+    # l2_selfinv/l3_selfinv are optional: pre-Phase-4 models print the
+    # six-field line, new models add the two self-invalidation counts.
     match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
-                      r' l3_hit=(\d+) l3_miss=(\d+) dram_latency=(\d+)', text)
+                      r' l3_hit=(\d+) l3_miss=(\d+)'
+                      r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))? dram_latency=(\d+)', text)
     if not match:
         return None
     return {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
             'l2_bypass': int(match.group(3)), 'l3_hit': int(match.group(4)),
-            'l3_miss': int(match.group(5)), 'dram_latency': int(match.group(6))}
+            'l3_miss': int(match.group(5)),
+            'l2_selfinv': int(match.group(6)) if match.group(6) else None,
+            'l3_selfinv': int(match.group(7)) if match.group(7) else None,
+            'dram_latency': int(match.group(8))}
 
 
 def sha(path):

@@ -48,6 +48,7 @@ module tb_g6lc_l2_tag_miter;
   logic                    rv_g, rv_s;
   logic [TAG_WIDTH-1:0]    pt_g, pt_s;
   logic                    pv_g, pv_s;
+  logic                    imh_g, imh_s, imh_g_d = 1'b0;
 
   bit negative;
   assign hit_s = hit_s_raw ^ negative;
@@ -65,7 +66,7 @@ module tb_g6lc_l2_tag_miter;
       .write_tag_i(write_tag), .write_valid_i(write_valid),
       .inval_i(1'b0), .inval_index_i('0), .inval_way_i('0),
       .inval_match_i(inval), .inval_match_index_i(inval_index),
-      .inval_match_tag_i(inval_tag)
+      .inval_match_tag_i(inval_tag), .inval_match_hit_o(imh_g)
   );
 
   g6lc_l2_tag #(
@@ -81,7 +82,7 @@ module tb_g6lc_l2_tag_miter;
       .write_tag_i(write_tag), .write_valid_i(write_valid),
       .inval_i(1'b0), .inval_index_i('0), .inval_way_i('0),
       .inval_match_i(inval), .inval_match_index_i(inval_index),
-      .inval_match_tag_i(inval_tag)
+      .inval_match_tag_i(inval_tag), .inval_match_hit_o(imh_s)
   );
 
   // Drive just after posedge, check at the following negedge: stimulus lives
@@ -129,6 +130,13 @@ module tb_g6lc_l2_tag_miter;
       probe_way = WAY_W'($urandom_range(0, SET_ASSOC - 1));
       @(negedge clk);
       if (rv_g !== 1'b1) $fatal(1, "L2TAG_MITER_CONST flop row_valid_o");
+      // Deferred-pulse parity: the SRAM path reports a match-clear exactly
+      // one cycle after the flop path reports the same clear — every cycle,
+      // including inside the suppress window (the pulse is the deferred
+      // compare's own verdict, not a live-valid observation).
+      if (imh_s !== imh_g_d)
+        $fatal(1, "L2TAG_MITER_SELFINV i=%0d gold_d=%0b sram=%0b", i, imh_g_d, imh_s);
+      imh_g_d = imh_g;
       if (!suppress) begin
         if (rv_s === 1'b1) begin
           if (!prev_vld) $fatal(1, "L2TAG_MITER_ROW_UNSOLICITED");
@@ -181,6 +189,37 @@ module tb_g6lc_l2_tag_miter;
     if (hit_s !== 1'b1 || way_s !== way_g || wv_s !== wv_g)
       $fatal(1, "L2TAG_MITER_CORNER sram hit=%0b way=%0d wv=%b gold h=1 way=%0d wv=%b",
              hit_s, way_s, wv_s, way_g, wv_g);
+    checks++;
+
+    // Directed corner 2: back-to-back inval-match on the same set/tag, with
+    // an install racing the SECOND read. inv1's deferred clear is still in
+    // flight when inv2 snapshots the valid row — the snapshot must fold the
+    // pending clear in (the flop array already committed it), else inv2's
+    // compare matches the stale row and kills the fresh C2 install.
+    launch = 0; lookup = 0; write = 0; inval = 0;
+    @(posedge clk); #1;
+    write = 1'b1; write_index = IDX_WIDTH'(9); write_way = WAY_W'(1);
+    write_tag = 8'hC1;                                          // install C1
+    @(posedge clk); #1;
+    write = 1'b0;
+    inval = 1'b1; inval_index = IDX_WIDTH'(9); inval_tag = 8'hC1; // inv1: kills w1
+    @(posedge clk); #1;
+    write = 1'b1; write_index = IDX_WIDTH'(9); write_way = WAY_W'(1);
+    write_tag = 8'hC2;                                          // install C2 ...
+    inval = 1'b1; inval_index = IDX_WIDTH'(9); inval_tag = 8'hC1; // ... under inv2
+    @(posedge clk); #1;
+    write = 1'b0; inval = 1'b0;
+    repeat (4) @(posedge clk);                                  // both deferrals retire
+    #1;
+    launch = 1'b1; launch_index = IDX_WIDTH'(9);
+    @(posedge clk); #1;
+    launch = 1'b0;
+    lookup = 1'b1; index = IDX_WIDTH'(9); tag = 8'hC2;
+    @(negedge clk);
+    if (hit_g !== 1'b1) $fatal(1, "L2TAG_MITER_CORNER2_GOLD");
+    if (hit_s !== 1'b1 || wv_s !== wv_g)
+      $fatal(1, "L2TAG_MITER_CORNER2 sram hit=%0b wv=%b gold h=1 wv=%b",
+             hit_s, wv_s, wv_g);
     checks++;
 
     if (checks < 500) $fatal(1, "L2TAG_MITER_THIN checks=%0d", checks);

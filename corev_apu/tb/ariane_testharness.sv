@@ -1571,14 +1571,24 @@ module ariane_testharness #(
   //  passes L2_ENABLE=CVA6Cfg.L2En, so the guard mirrors that condition.
   //pragma translate_off
   longint unsigned mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass,
-                   mc_cnt_l3_hit, mc_cnt_l3_miss;
-  logic mc_l2_hit_obs, mc_l2_bypass_obs;
+                   mc_cnt_l3_hit, mc_cnt_l3_miss,
+                   mc_cnt_l2_selfinv, mc_cnt_l3_selfinv;
+  logic mc_l2_hit_obs, mc_l2_bypass_obs, mc_l2_selfinv_obs, mc_l3_selfinv_obs;
   if (CVA6Cfg.L2En) begin : gen_mc_cache_l2
     assign mc_l2_hit_obs    = i_cluster.gen_l2.i_l2.l2_hit_o;
     assign mc_l2_bypass_obs = i_cluster.gen_l2.i_l2.l2_bypass_o;
+    // l2_selfinv_hit_o: inval-match (WT write self-inval or L3 back-inval)
+    // actually cleared a live line — "lines purged by writes".
+    assign mc_l2_selfinv_obs = i_cluster.gen_l2.i_l2.l2_selfinv_hit_o;
   end else begin : gen_mc_cache_nol2
     assign mc_l2_hit_obs    = 1'b0;
     assign mc_l2_bypass_obs = 1'b0;
+    assign mc_l2_selfinv_obs = 1'b0;
+  end
+  if (CVA6Cfg.L3En) begin : gen_mc_cache_l3
+    assign mc_l3_selfinv_obs = i_cluster.gen_l3.i_l3.l3_selfinv_hit_o;
+  end else begin : gen_mc_cache_nol3
+    assign mc_l3_selfinv_obs = 1'b0;
   end
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
@@ -1587,12 +1597,16 @@ module ariane_testharness #(
       mc_cnt_l2_bypass <= mc_cnt_l2_bypass + mc_l2_bypass_obs;
       mc_cnt_l3_hit    <= mc_cnt_l3_hit    + mc_l3_hit;
       mc_cnt_l3_miss   <= mc_cnt_l3_miss   + mc_l3_miss;
+      mc_cnt_l2_selfinv <= mc_cnt_l2_selfinv + mc_l2_selfinv_obs;
+      mc_cnt_l3_selfinv <= mc_cnt_l3_selfinv + mc_l3_selfinv_obs;
     end else begin
       mc_cnt_l2_hit    <= '0;
       mc_cnt_l2_miss   <= '0;
       mc_cnt_l2_bypass <= '0;
       mc_cnt_l3_hit    <= '0;
       mc_cnt_l3_miss   <= '0;
+      mc_cnt_l2_selfinv <= '0;
+      mc_cnt_l3_selfinv <= '0;
     end
   end
   //pragma translate_on
@@ -1767,8 +1781,9 @@ module ariane_testharness #(
                c, mc_gap_max[c], MC_GAP_LIMIT, mc_last_wfi[c]);
     if (mc_any_hung)
       $display("*** [mc_verdict] FAIL: a core ran and then stopped retiring (exit code 126)");
-    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d dram_latency=%0d",
-             mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass, mc_cnt_l3_hit, mc_cnt_l3_miss, DramLatency);
+    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d dram_latency=%0d",
+             mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass, mc_cnt_l3_hit, mc_cnt_l3_miss,
+             mc_cnt_l2_selfinv, mc_cnt_l3_selfinv, DramLatency);
   end
   //pragma translate_on
 

@@ -59,6 +59,10 @@ module g6lc_l2_top
     output logic      l2_bypass_o,
     output logic      l2_mshr_full_o,
     output logic      l2_bank_conflict_o,
+    // Observability pulse: an inval-match (WT write self-inval or L3
+    // back-inval) actually cleared a live line this cycle. The cluster
+    // leaves it unconnected; the TB counts it hierarchically as l2_selfinv.
+    output logic      l2_selfinv_hit_o,
     // Victim replace (valid way overwritten on miss) — inclusive LLC back-inval.
     // evict is a valid/ready offer: it re-asserts every cycle the FSM holds in
     // S_TAG, and the victim commit waits for l2_evict_ready_i, so a victim can
@@ -83,6 +87,7 @@ module g6lc_l2_top
     assign l2_bypass_o = 1'b1;
     assign l2_mshr_full_o = 1'b0;
     assign l2_bank_conflict_o = 1'b0;
+    assign l2_selfinv_hit_o = 1'b0;
     assign l2_evict_valid_o = 1'b0;
     assign l2_evict_addr_o  = '0;
     assign l2_back_inval_ready_o = 1'b1;
@@ -196,7 +201,8 @@ module g6lc_l2_top
       .inval_way_i  (tag_iway),
       .inval_match_i      (tag_match_inval),
       .inval_match_index_i(tag_match_index),
-      .inval_match_tag_i  (tag_match_tag)
+      .inval_match_tag_i  (tag_match_tag),
+      .inval_match_hit_o  (l2_selfinv_hit_o)
   );
 
   logic data_a_req, data_a_we, data_b_req, data_b_we, bank_conflict;

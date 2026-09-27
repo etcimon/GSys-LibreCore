@@ -1460,8 +1460,14 @@ module tb_g6lc_coherence_l2;
   parameter bit USE_L3=1'b0, SELF_INVAL_FAULT=1'b0;
   parameter int L3_BYTES=2048, L3_SET_ASSOC=2, L3_MSHR_DEPTH=2, L3_DATA_BANKS=2;
   parameter bit TAG_SRAM=1'b0;
+  // Scenario-5 sweep workload: (a) STREAM_BYTES of lines twice, (b) re-read a
+  // WS_BYTES working set after POLLUTE_BYTES of pollution. Read-only, one
+  // 16B hub request per 64B cache line.
+  parameter int STREAM_BYTES=1048576, WS_BYTES=65536, POLLUTE_BYTES=524288;
   localparam addr_t ADDRESS=64'h80004000;
   localparam int L2_LINE_BYTES=512/8;
+  localparam addr_t STREAM_BASE=64'h80100000, WS_BASE=64'h80200000,
+                    POLLUTE_BASE=64'h80400000;
   logic clk=0,rst_n=0;
   req_t [1:0] requests;
   logic rd_req_valid=0,rd_ready=0,wr_req_valid=0,wr_data_valid=0,wr_resp_ready=0;
@@ -1505,11 +1511,13 @@ module tb_g6lc_coherence_l2;
   // dram_req/dram_rsp stay the DRAM edge; l2m_* is the L2 master side.
   req_t l2m_req;
   resp_t l2m_rsp;
-  logic l3_hit_p=0, l3_miss_p=0;
-  int l3_hits=0, l3_misses=0;
+  logic l3_hit_p=0, l3_miss_p=0, l2_hit_p=0, l2_miss_p=0;
+  int l3_hits=0, l3_misses=0, l2_hits=0, l2_misses=0;
   always_ff @(posedge clk) begin
     if (l3_hit_p) l3_hits<=l3_hits+1;
     if (l3_miss_p) l3_misses<=l3_misses+1;
+    if (l2_hit_p) l2_hits<=l2_hits+1;
+    if (l2_miss_p) l2_misses<=l2_misses+1;
   end
   g6lc_l2_top #(.Enable(USE_L2),.BYTE_SIZE(BYTE_SIZE),.SET_ASSOC(SET_ASSOC),
       .LINE_WIDTH(512),.MSHR_DEPTH(MSHR_DEPTH),.DATA_BANKS(DATA_BANKS),.FAIR_WRITES(1),
@@ -1518,7 +1526,8 @@ module tb_g6lc_coherence_l2;
       .axi_req_t(req_t),.axi_resp_t(resp_t)) l2 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
       .mst_req_o(l2m_req),.mst_resp_i(l2m_rsp),
-      .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
+      .l2_hit_o(l2_hit_p),.l2_miss_o(l2_miss_p),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
+      .l2_selfinv_hit_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o());
   if (USE_L3) begin : gen_l3_stack
@@ -1544,7 +1553,7 @@ module tb_g6lc_coherence_l2;
     ) i_l3 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(l3_slv_req),.slv_resp_o(cut_rsp),
       .mst_req_o(l3_mst_req),.mst_resp_i(dram_rsp),
-      .l3_hit_o(l3_hit_p),.l3_miss_o(l3_miss_p),.l3_bypass_o(),
+      .l3_hit_o(l3_hit_p),.l3_miss_o(l3_miss_p),.l3_bypass_o(),.l3_selfinv_hit_o(),
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
     );
     always_comb begin
@@ -1616,10 +1625,20 @@ module tb_g6lc_coherence_l2;
       if(dram_rsp.b_valid && dram_req.b_ready)begin wr_live<=0;wr_done<=0;end
     end
   end
+  int sc5_mark_reads=0, sc5_mark_cycle=0;
   always @(posedge clk) begin
     if(rst_n)begin
       cycle++;
-      if(cycle>4000)begin
+      // Scenario 5 streams tens of thousands of reads, so the fixed 4000-cycle
+      // bound cannot apply; it gets a progress watchdog instead (a read must
+      // complete at least every 20000 cycles).
+      if(scenario==5)begin
+        if(read_count!=sc5_mark_reads)begin
+          sc5_mark_reads=read_count;sc5_mark_cycle=cycle;
+        end else if(cycle-sc5_mark_cycle>20000)begin
+          $fatal(1,"COH_L2_WATCHDOG sweep reads=%0d",read_count);
+        end
+      end else if(cycle>4000)begin
         $display("COMPOSED_STALL aw=%0d inv=%0d apply=%0d mem_b=%0d core_b=%0d reads=%0d wr_live=%b wr_done=%b b_delay=%0d",
           aw_cycle,first_inv_cycle,last_apply_cycle,mem_b_cycle,core_b_cycle,read_count,wr_live,wr_done,b_delay);
         $display("COMPOSED_STALL core: aw_v=%b aw_r=%b w_v=%b w_r=%b b_v=%b b_r=%b inv_v=%b inv_r=%b",
@@ -1728,6 +1747,18 @@ module tb_g6lc_coherence_l2;
     end
     $fatal(1,"COH_L2_AR_TIMEOUT");
   endtask
+  // Scenario 5: issue `lines` sequential reads, one per 64-byte line starting
+  // at `base`, waiting for each response before the next request. The
+  // response checker (scenario>=2 path) validates every beat, so the stream
+  // is self-checking; the response-id contract requires id==read_count+1.
+  task automatic sweep_stream(input addr_t base, input int lines);
+    int target;
+    for(int k=0;k<lines;k++)begin
+      target=read_count+1;
+      send_read(id_t'(target),base+addr_t'(k)*L2_LINE_BYTES,8'd1);
+      while(read_count!=target)tick();
+    end
+  endtask
   initial begin
     negative=$test$plusargs("oracle_negative");
     if(!$value$plusargs("scenario=%d",scenario))scenario=0;
@@ -1772,6 +1803,36 @@ module tb_g6lc_coherence_l2;
       if(!negative && l3_hits==0)$fatal(1,"COH_L3_NO_HIT");
       $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d dram_ar=%0d l3_hit=%0d l3_miss=%0d",
         scenario,USE_L2,BYTE_SIZE,dram_ar_count,l3_hits,l3_misses);
+      $finish;
+    end
+    if(scenario==5)begin
+      // Geometry-sweep workload (D.1): five phases, counters snapshotted at
+      // each boundary so the runner can attribute hits per phase:
+      //   A1 cold stream (STREAM_BYTES), A2 repeat stream,
+      //   B1 working-set install (WS_BYTES), B2 pollution (POLLUTE_BYTES),
+      //   B3 working-set re-read.
+      int l2h_p[5],l2m_p[5],l3h_p[5],l3m_p[5],dar_p[5],cyc_p[5];
+      rd_ready=1;
+      sweep_stream(STREAM_BASE,STREAM_BYTES/L2_LINE_BYTES);
+      l2h_p[0]=l2_hits;l2m_p[0]=l2_misses;l3h_p[0]=l3_hits;l3m_p[0]=l3_misses;
+      dar_p[0]=dram_ar_count;cyc_p[0]=cycle;
+      sweep_stream(STREAM_BASE,STREAM_BYTES/L2_LINE_BYTES);
+      l2h_p[1]=l2_hits;l2m_p[1]=l2_misses;l3h_p[1]=l3_hits;l3m_p[1]=l3_misses;
+      dar_p[1]=dram_ar_count;cyc_p[1]=cycle;
+      sweep_stream(WS_BASE,WS_BYTES/L2_LINE_BYTES);
+      l2h_p[2]=l2_hits;l2m_p[2]=l2_misses;l3h_p[2]=l3_hits;l3m_p[2]=l3_misses;
+      dar_p[2]=dram_ar_count;cyc_p[2]=cycle;
+      sweep_stream(POLLUTE_BASE,POLLUTE_BYTES/L2_LINE_BYTES);
+      l2h_p[3]=l2_hits;l2m_p[3]=l2_misses;l3h_p[3]=l3_hits;l3m_p[3]=l3_misses;
+      dar_p[3]=dram_ar_count;cyc_p[3]=cycle;
+      sweep_stream(WS_BASE,WS_BYTES/L2_LINE_BYTES);
+      l2h_p[4]=l2_hits;l2m_p[4]=l2_misses;l3h_p[4]=l3_hits;l3m_p[4]=l3_misses;
+      dar_p[4]=dram_ar_count;cyc_p[4]=cycle;
+      $display("COH_L2_SWEEP scenario=5 l2bytes=%0d l3bytes=%0d cycles=%0d",BYTE_SIZE,L3_BYTES,cycle);
+      for(int p=0;p<5;p++)
+        $display("COH_L2_SWEEP phase=%0d l2_hit=%0d l2_miss=%0d l3_hit=%0d l3_miss=%0d dram_ar=%0d cycles=%0d",
+          p,l2h_p[p],l2m_p[p],l3h_p[p],l3m_p[p],dar_p[p],cyc_p[p]);
+      $display("COH_L2_PASS scenario=%0d",scenario);
       $finish;
     end
     send_read(1);
@@ -1881,6 +1942,7 @@ module tb_g6lc_coherence_credits;
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
       .mst_req_o(l2m_req),.mst_resp_i(l2m_rsp),
       .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
+      .l2_selfinv_hit_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o());
   if (USE_L3) begin : gen_l3_stack
@@ -1902,7 +1964,7 @@ module tb_g6lc_coherence_credits;
     ) i_l3 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(cut_req),.slv_resp_o(cut_rsp),
       .mst_req_o(dram_req),.mst_resp_i(dram_rsp),
-      .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),
+      .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),.l3_selfinv_hit_o(),
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
     );
   end else begin : gen_no_l3

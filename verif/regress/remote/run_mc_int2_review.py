@@ -61,13 +61,19 @@ def decode_soak(value):
 
 
 def parse_cache_counters(text):
+    # l2_selfinv/l3_selfinv are optional: pre-Phase-4 models print the
+    # six-field line, new models add the two self-invalidation counts.
     match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
-                      r' l3_hit=(\d+) l3_miss=(\d+) dram_latency=(\d+)', text)
+                      r' l3_hit=(\d+) l3_miss=(\d+)'
+                      r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))? dram_latency=(\d+)', text)
     if not match:
         return None
     return {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
             'l2_bypass': int(match.group(3)), 'l3_hit': int(match.group(4)),
-            'l3_miss': int(match.group(5)), 'dram_latency': int(match.group(6))}
+            'l3_miss': int(match.group(5)),
+            'l2_selfinv': int(match.group(6)) if match.group(6) else None,
+            'l3_selfinv': int(match.group(7)) if match.group(7) else None,
+            'dram_latency': int(match.group(8))}
 
 
 def verdict(text, bound, kind, rc=0, expect_mask=None):
@@ -902,7 +908,60 @@ def directed_review():
         # (125) and the program's own code is carried in the verdict line.
         matched = ((result['programExit'] == 1 or (result['tohost'] == 1 and rc == 1))
                    and result['outcome'] != 'pass') if negative else result['outcome'] == 'pass'
-        records.append({'negative': negative, 'rc': rc, 'matched': matched, 'elfSha256': sha(elf), **result})
+        # PMU kernel publishes its in-window deltas as stores to pmu_out{0,1,2}
+        # = tohost+0x10/+0x18/+0x20 (linker places .tohost at 0x80001000, the
+        # same address the +tohost_addr plusarg polls). Nothing services HTIF
+        # syscalls under +debug_disable, so the values are recovered from the
+        # `mem <addr> <data>` store records in the RVFI dasm trace; the last
+        # store to each slot wins.
+        pmu = None
+        pmu_line = re.search(r'PMU l3miss=([0-9a-f]+) l3hit=([0-9a-f]+) l2miss=([0-9a-f]+)', text)
+        if pmu_line:
+            pmu = {'l3Miss': int(pmu_line.group(1), 16), 'l3Hit': int(pmu_line.group(2), 16),
+                   'l2Miss': int(pmu_line.group(3), 16)}
+        else:
+            dasm = trial / 'trace_rvfi_hart_00.dasm'
+            if dasm.is_file():
+                stores = re.findall(r'mem 0x00000000800010(10|18|20) 0x([0-9a-fA-F]+)',
+                                    dasm.read_text(errors='replace'))
+                vals = {slot: val for slot, val in stores}
+                if len(vals) == 3:
+                    pmu = {'l3Miss': int(vals['10'], 16), 'l3Hit': int(vals['18'], 16),
+                           'l2Miss': int(vals['20'], 16)}
+        if os.environ.get('REVIEW_MC_DIRECTED_PMU') == '1':
+            # Cross-check in-window PMU deltas against the TB [mc_cache]
+            # totals. The TB counts from reset and cluster-wide while the PMU
+            # window is hart-0-only and starts after reset: the sibling harts'
+            # initial fetches can hit a line hart 0 installed in the L3, so the
+            # TB l3_hit can exceed the PMU delta by a small setup slack
+            # (observed 1). The windowed delta therefore must satisfy
+            # 0 < pmu <= tb on every counter; a delta of exactly the TB total
+            # is still accepted, and the slack is recorded for the report.
+            counters = result.get('cacheCounters') or {}
+            if negative:
+                # The arm's claim "pmu_l3Hit == 0" must be false; a zeroed
+                # group-2 counter would make the control vacuous.
+                pmu_ok = pmu is not None and pmu['l3Hit'] != 0
+            else:
+                # 0 < pmu <= tb with a bounded setup slack: a wrong selector
+                # lands orders of magnitude off (e.g. hits counting misses ~8k),
+                # so a slack ceiling keeps the cross-check discriminating.
+                slack_max = 64
+                def in_window(pmu_v, tb_v):
+                    return (tb_v is not None and 0 < pmu_v <= tb_v
+                            and tb_v - pmu_v <= slack_max)
+                pmu_ok = (pmu is not None
+                          and in_window(pmu['l3Hit'], counters.get('l3_hit'))
+                          and in_window(pmu['l3Miss'], counters.get('l3_miss'))
+                          and in_window(pmu['l2Miss'], counters.get('l2_miss')))
+                if pmu is not None:
+                    pmu['tbSlack'] = {
+                        'l3Hit': (counters.get('l3_hit') or 0) - pmu['l3Hit'],
+                        'l3Miss': (counters.get('l3_miss') or 0) - pmu['l3Miss'],
+                        'l2Miss': (counters.get('l2_miss') or 0) - pmu['l2Miss']}
+            matched = matched and pmu_ok
+        records.append({'negative': negative, 'rc': rc, 'matched': matched, 'elfSha256': sha(elf),
+                        'pmu': pmu, **result})
         (out / 'results.json').write_text(json.dumps(records, indent=2))
     (out / 'manifest.json').write_text(json.dumps({'modelSha256': sha(exe), 'source': src,
         'sourceSha256': sha(data / src), 'parent': str(exe), 'bound': bound, 'expectMask': expect_mask}, indent=2))

@@ -50,7 +50,11 @@ module g6lc_l2_tag #(
     // in the set whose tag matches.
     input  logic                          inval_match_i,
     input  logic [IDX_WIDTH-1:0]          inval_match_index_i,
-    input  logic [TAG_WIDTH-1:0]          inval_match_tag_i
+    input  logic [TAG_WIDTH-1:0]          inval_match_tag_i,
+    // Observability: pulses in the cycle an inval-match actually clears at
+    // least one live way (counted as [mc_cache] l2_selfinv by the TB). A
+    // match that finds only already-invalid ways does not pulse.
+    output logic                          inval_match_hit_o
 );
 
   localparam int unsigned WAY_W = (SET_ASSOC <= 1) ? 1 : $clog2(SET_ASSOC);
@@ -101,6 +105,7 @@ module g6lc_l2_tag #(
 
     always_comb begin
       tags_d = tags_q;
+      inval_match_hit_o = 1'b0;
       if (write_i) begin
         tags_d[write_index_i][write_way_i].valid = write_valid_i;
         tags_d[write_index_i][write_way_i].tag   = write_tag_i;
@@ -114,6 +119,7 @@ module g6lc_l2_tag #(
           if (tags_q[inval_match_index_i][w].valid &&
               tags_q[inval_match_index_i][w].tag == inval_match_tag_i) begin
             tags_d[inval_match_index_i][w].valid = 1'b0;
+            inval_match_hit_o = 1'b1;
           end
         end
       end
@@ -159,6 +165,12 @@ module g6lc_l2_tag #(
     // in an invalid way clear a line installed in the same cycle as the
     // read — the flop path never sees that match (old valid was 0).
     logic [SET_ASSOC-1:0]    inv_valid_q;
+    // Ways the deferred compare currently in flight is clearing (inv_clr).
+    // The flop array commits a match clear at the request edge, so a second
+    // inval-match one cycle later already sees the dying bit as 0; the SRAM
+    // path's snapshot must fold the in-flight clear in or a stale-tag match
+    // would spuriously re-kill a way revalidated after the first match.
+    logic [SET_ASSOC-1:0]    inv_clr;
     // Same-index write forward: a fill that installs into the set whose row
     // was just read is substituted next cycle so the compare and the victim
     // probe see post-write tags like the flop array. No use-cycle forward:
@@ -257,10 +269,14 @@ module g6lc_l2_tag #(
     // and outranks the clear below.
     always_comb begin
       valid_d = valid_q;
+      inval_match_hit_o = 1'b0;
+      inv_clr = '0;
       if (inv_pend_q) begin
         for (int unsigned w = 0; w < SET_ASSOC; w++) begin
           if (inv_valid_q[w] && (row_raw[w] == inv_tag_q)) begin
             valid_d[inv_index_q][w] = 1'b0;
+            inv_clr[w] = 1'b1;
+            inval_match_hit_o = 1'b1;
           end
         end
       end
@@ -290,7 +306,11 @@ module g6lc_l2_tag #(
         inv_pend_q  <= inv_rd;
         inv_index_q <= inval_match_index_i;
         inv_tag_q   <= inval_match_tag_i;
-        inv_valid_q <= valid_q[inval_match_index_i];
+        // Snapshot epoch = the read cycle, with the in-flight deferred clear
+        // folded in (it lands at this edge's valid_d, so a back-to-back
+        // inval-match observes post-clear bits like the flop array).
+        inv_valid_q <= valid_q[inval_match_index_i] &
+                       ~((inval_match_index_i == inv_index_q) ? inv_clr : '0);
         row_index_q <= rd_index;
         fwd_valid_q <= rd_req && write_i && write_valid_i &&
                        (write_index_i == rd_index);

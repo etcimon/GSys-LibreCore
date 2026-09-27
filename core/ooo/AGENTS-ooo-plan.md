@@ -1812,6 +1812,49 @@ repairs, so `tag_match_inval`/`wr_self_inval`/MSHR `alloc_id_i`/`merge_block_i` 
 construction. A whitelist that turned it green was reverted before landing; the lane stays red
 until the reference is re-cut from the post-retention flop engine (todo).
 
+### T8e — measurements: where an L3 helps, and what write-through invalidation costs
+
+Observability: `inval_match_hit_o` on `g6lc_l2_tag` (one pulse per inval-match that clears a live
+way) surfaces as `l2_selfinv`/`l3_selfinv` in `[mc_cache]`; the SRAM path's valid snapshot now
+also folds in the deferred clear in flight for the same set, so back-to-back matches see the
+dying bit as 0 like the flop array. HUM 78/78 both paths with an identical metric hash, int2
+gate 24/7 unchanged. Three directed kernels (hart 0 runs, others park; negative arms fire):
+
+| Kernel / footprint | Target | L0 cycles | L40 cycles | L2 hit / miss | L3 hit / miss | selfinv |
+|---|---|---:|---:|---|---|---|
+| stride scan 128 KiB (fits L2) | int2 | 65,844 | 225,594 | 2,010 / 2,049 | — | 0 |
+|  | int2_l3 | 92,462 | 252,239 | 2,008 / 2,049 | 0 / 2,049 | 0 |
+| **stride scan 512 KiB** (L2 < footprint < L3) | int2 | 308,691 | 1,132,648 | 3,599 / 12,802 | — | 0 |
+|  | **int2_l3** | 424,380 | **1,063,540 (−6.1 %)** | 3,597 / 12,802 | **4,609 / 8,193** | 0 |
+| stride scan 2 MiB (> L3) | int2 | 1,340,887 | 5,077,098 | 3,599 / 61,953 | — | 0 |
+|  | int2_l3 | 1,994,139 | 5,209,131 | 3,600 / 61,952 | 12,288 / 49,664 | 0 |
+| write/read 128 KiB × 4 | int2 | 195,760 | 821,733 | 11 / 8,072 | — | 6,060 |
+|  | int2_l3 | 292,646 | 926,763 | 19 / 8,072 | — / — | 6,060 (L3 6,060) |
+
+Reading: the L3 pays off only when the footprint exceeds the L2 **and** memory latency exists
+(−6.1 % at latency 40 on the 512 KiB scan; at latency 0 its extra lookup stage costs cycles); a
+footprint inside the L2 or beyond the L3 gains nothing. The write/read kernel is the write-policy
+discriminator: 6,060 resident lines purged by their own stores, ~0 L2 hits on read-back, every
+read-back paying DRAM latency (4.2× cycles at latency 40). PMU group-2 cross-check
+(`mc_pmu_l3.S`, selectors 0x40/0x41/0x44 confirmed in `perf_counters.sv`): counter deltas over
+the scan window are 4,609 / 8,191 / 12,799 against TB totals 4,610 / 8,194 / 12,804 — bounded
+by the pre-window setup traffic, negative arm fires.
+
+Geometry sweep (`run_cache_sweep_review.py`, composed stack, SRAM tags, fixed five-phase
+workload): L2 {128 K, 256 K, 512 K} × L3 {512 K, 1 M, 2 M} all elaborate (lint 23–24 warnings,
+0 errors); larger L3 monotonically raises L3 hits and lowers cycles (256 K/512 K 1,226,372 →
+256 K/1 M 1,113,220 → 256 K/2 M 1,099,908), L2 hits scale with L2 capacity (1,792 / 3,584 /
+7,168). Analytic bit budgets per point recorded in the run (`results-sweep.json`); e.g. L3 1 MiB =
+786,432 tag + 8,388,608 data bits + 16,384 valid flops, L3 2 MiB = 1,540,096 + 16,777,216 +
+32,768.
+
+Four-hart boots at DRAM latency 40 to completion (**measurement cap 60M**, not a qualification
+bound): int2 (allocating L2) **46,909,150** cycles, L2 hit 110,135 / miss 103,380 / bypass
+785,360 / **selfinv 91,594**; int2_l3 **48,403,596**, L2 hit 31,987 / miss 101,435, L3 hit **0** /
+miss 101,421, selfinv 89,793. Both strict-pass. The boot never profits from the L3 (footprint
+inside the L2), and ~90 k of its ~100 k L2 misses follow a write-through purge — the case for
+`L2WriteUpdateEn` (T8f) is this number, not an assumption.
+
 ## Deferred
 
 Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,

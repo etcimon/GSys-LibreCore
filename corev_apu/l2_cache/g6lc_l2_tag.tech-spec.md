@@ -57,6 +57,16 @@ Flop bits removed per instance: `NUM_SETS*SET_ASSOC*TAG_WIDTH` — 200,704 (L2) 
   ordering. A wrapper must not reorder a read past a same-cycle write
   differently than "old data", matching the flop array's same-cycle match
   semantics.
+- The snapshot also folds in the ways the *preceding* deferred compare is
+  clearing this cycle (`inv_clr`, same set only): the flop array commits a
+  match clear at the request edge, so a back-to-back inval-match already
+  sees the dying bit as 0; without the fold the second compare would
+  re-match a way revalidated between the two requests and kill its fresh
+  install (`L2TAG_MITER_CORNER2`).
+- `inval_match_hit_o` pulses once per deferred compare that actually clears
+  a live way (one pulse regardless of how many ways match — a tag occupies
+  at most one way per set in practice); the flop path pulses in the request
+  cycle, the SRAM path one cycle later.
 
 ## Launched-read protocol
 

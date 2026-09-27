@@ -1077,11 +1077,18 @@ class McCacheCounterParseTests(unittest.TestCase):
     LINE = ('*** [mc_cache] l2_hit=3 l2_miss=11 l2_bypass=7 l3_hit=2 l3_miss=5'
             ' dram_latency=40')
     WANT = {'l2_hit': 3, 'l2_miss': 11, 'l2_bypass': 7, 'l3_hit': 2,
-            'l3_miss': 5, 'dram_latency': 40}
+            'l3_miss': 5, 'l2_selfinv': None, 'l3_selfinv': None,
+            'dram_latency': 40}
+    LINE8 = ('*** [mc_cache] l2_hit=3 l2_miss=11 l2_bypass=7 l3_hit=2 l3_miss=5'
+             ' l2_selfinv=9 l3_selfinv=4 dram_latency=40')
+    WANT8 = {'l2_hit': 3, 'l2_miss': 11, 'l2_bypass': 7, 'l3_hit': 2,
+             'l3_miss': 5, 'l2_selfinv': 9, 'l3_selfinv': 4, 'dram_latency': 40}
 
     def check(self, parser):
+        # Six-field (legacy) and eight-field (selfinv) lines both parse.
         self.assertEqual(parser(self.LINE + '\n'), self.WANT)
         self.assertEqual(parser('banner\n' + self.LINE + '\ntrailer\n'), self.WANT)
+        self.assertEqual(parser(self.LINE8 + '\n'), self.WANT8)
         self.assertIsNone(parser('*** [mc_verdict] program exit code 0\n'))
         self.assertIsNone(parser('*** [mc_cache] l2_hit=x l2_miss=1\n'))
 

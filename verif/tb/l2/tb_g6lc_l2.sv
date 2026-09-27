@@ -145,6 +145,7 @@ module tb_g6lc_l2;
       .l2_bypass_o        (l2_bypass),
       .l2_mshr_full_o     (l2_mshr_full),
       .l2_bank_conflict_o (l2_bank_conf),
+      .l2_selfinv_hit_o   (),
       .l2_evict_valid_o   (evict_v),
       .l2_evict_addr_o    (evict_addr),
       .l2_evict_ready_i   (1'b1),
@@ -1329,6 +1330,9 @@ module g6lc_l2_fixture
     ) i_l3 (
       .clk_i,.rst_ni,.slv_req_i(cache_req),.slv_resp_o(cache_resp),
       .mst_req_o,.mst_resp_i,.l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),
+`ifndef L2TB_LEGACY
+      .l3_selfinv_hit_o(),
+`endif
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
     );
   end else begin : gen_l2_only
@@ -1348,6 +1352,9 @@ module g6lc_l2_fixture
     .clk_i, .rst_ni, .slv_req_i, .slv_resp_o, .mst_req_o(cache_req), .mst_resp_i(cache_resp),
     .l2_hit_o(actual_hit), .l2_miss_o(miss_o), .l2_bypass_o(bypass_o),
     .l2_mshr_full_o(full_o), .l2_bank_conflict_o(conflict_o),
+`ifndef L2TB_LEGACY
+    .l2_selfinv_hit_o(),
+`endif
     .l2_evict_valid_o(evict_o), .l2_evict_addr_o(evict_addr_o),
 `ifndef L2TB_LEGACY
     .l2_evict_ready_i(1'b1),

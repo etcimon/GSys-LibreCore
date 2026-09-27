@@ -273,6 +273,7 @@ module g6lc_l2_top_lint_top
       .l2_bypass_o          (l2_bypass),
       .l2_mshr_full_o       (l2_mshr_full),
       .l2_bank_conflict_o   (l2_bank_conflict),
+      .l2_selfinv_hit_o     (),
       .l2_evict_valid_o     (l2_evict_valid),
       .l2_evict_addr_o      (l2_evict_addr),
       .l2_evict_ready_i     (l2_evict_ready),
@@ -319,6 +320,7 @@ module g6lc_l3_top_lint_top
       .l3_hit_o        (l3_hit),
       .l3_miss_o       (l3_miss),
       .l3_bypass_o     (l3_bypass),
+      .l3_selfinv_hit_o(),
       .l3_evict_valid_o(l3_evict_valid),
       .l3_evict_addr_o (l3_evict_addr),
       .l3_evict_ready_i(l3_evict_ready)
