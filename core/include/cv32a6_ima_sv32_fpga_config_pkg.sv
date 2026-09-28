@@ -204,6 +204,7 @@ package cva6_config_pkg;
       SnoopFilterEntries: unsigned'(0),
       CohInvalDepth: unsigned'(0),
       CohAxiStarveLimit: unsigned'(0),
+      CohMaxOutstanding: unsigned'(0),
       WayPredEn: bit'(0),
       WayPredEntries: unsigned'(0),
       ReplPolicy: config_pkg::REPL_PLRU,
@@ -243,6 +244,7 @@ package cva6_config_pkg;
       L3InclusiveEn: bit'(0),
       L2TagSramEn: bit'(0),
       L2WriteUpdateEn: bit'(0),
+      L2CmoEn: bit'(0),
       SharedTlbDepth: int'(64),
 
       NrLoadPipeRegs: int'(CVA6ConfigNrLoadPipeRegs),

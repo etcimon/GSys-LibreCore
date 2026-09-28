@@ -343,7 +343,19 @@ stores versus primary loads need boundary tracing; neither record is matched or 
   measures where a non-inclusive L3 pays (only 512 KiB at DRAM latency 40: −6.1 %, ~4.6k L3
   hits); `mc_l2_write_read` was the write-update discriminator (6,060 purges / 8,192 stores)
   and under `L2WriteUpdateEn` reads back merged lines (selfinv 0, wupd 6,135, −36 % cycles at
-  latency 40); `mc_pmu_l3` cross-checks PMU group-2 selectors against the TB totals. The L2×L3
+  latency 40); `mc_pmu_l3` cross-checks PMU group-2 selectors against the TB totals. `mc_cbo_ewt`
+  (M1a) is the end-to-end CBO discriminator: a `+mem_poke` harness write behind the
+  caches, `cbo.inval`, then reads on the issuer and a peer hart — both must see the
+  poked DRAM word; `cbo.clean`/`cbo.flush` must complete without disturbing it and
+  `cbo.zero` still zeroes; the negative arm demands the wrong value and fails as
+  designed (positive+negative green on int2, int2_l3, smt2, smt2_l3, smt2_ooo_int,
+  stream8, server_math). The CMO engine leaf (`tb_g6lc_cmo_engine`) covers arbiter
+  fairness, per-core ready backpressure, L2/L3 back-inval handshake with an inclusive
+  victim collision, write-idle waiting, and dropped-core/dropped-level/early-done
+  negatives; the WT leaf proves the CBO never reaches the wbuffer (mutation forwards
+  it → stray byte write observed) with exactly one `rvalid`, and the HPDCACHE leaf
+  proves the response hold. The composed bench's CMO scenario shows the resident line
+  invalidated at every level with the next read missing at L2 and L3. The L2×L3
   geometry sweep (`run_cache_sweep_review.py`, 3×3 size points) elaborates everywhere with hits
   scaling monotonically. WU=1 leaf cases cover partial-strobe merge + memory read-back,
   multi-beat in-line writes, non-resident writes, ATOP/locked/nc exclusions, fill-race kill,

@@ -136,17 +136,39 @@ module g6lc_cluster
   logic [AXI_ADDR_WIDTH-1:0] l2_back_inval_a;
   logic l2_back_inval_ready;
   logic l3_evict_rdy;
+  // T9a: CMO engine wiring (valid only under CVA6Cfg.L2CmoEn)
+  logic       [NC-1:0] cmo_req_v, cmo_req_rdy, cmo_done;
+  logic [1:0]          cmo_req_op  [NC];
+  logic [CVA6Cfg.PLEN-1:0]     cmo_req_paddr [NC];
+  logic [AXI_ADDR_WIDTH-1:0]   cmo_req_addr  [NC];
+  coh_inval_t [NC-1:0] inv_cmo;
+  logic       [NC-1:0] inv_cmo_ready;
+  logic                cmo_bcast_v, cmo_bcast_rdy, cmo_bcast_done;
+  logic [AXI_ADDR_WIDTH-1:0] cmo_bcast_a;
+  logic                cmo_l2_v, cmo_l2_rdy;
+  logic [AXI_ADDR_WIDTH-1:0] cmo_l2_a;
+  logic                cmo_l3_v, cmo_l3_rdy;
+  logic [AXI_ADDR_WIDTH-1:0] cmo_l3_a;
+  logic                l2_idle_w, l3_idle_w;
+  // The L3 victim accept is the only competing user of the L2 back-inval
+  // port; it wins the slot and the CMO simply keeps l2_inval_valid raised.
+  logic vict_l2_take;
+  assign vict_l2_take = INCL && CVA6Cfg.L3En && l3_evict_v && l3_evict_rdy;
   assign l3_evict_rdy = incl_evict_ready && (INCL ? l2_back_inval_ready : 1'b1);
-  assign l2_back_inval_v = INCL && CVA6Cfg.L3En && l3_evict_v && l3_evict_rdy;
-  assign l2_back_inval_a = l3_evict_a;
+  assign l2_back_inval_v = vict_l2_take ? 1'b1 : cmo_l2_v;
+  assign l2_back_inval_a = vict_l2_take ? l3_evict_a : cmo_l2_a;
+  assign cmo_l2_rdy = !vict_l2_take && l2_back_inval_ready;
 
   logic [NC-1:0] inv_incl_ready;
-  // Merge hub + inclusive inv (hub wins if both valid same cycle)
+  // Merge hub + inclusive victim + CMO broadcast inv (priority order)
   always_comb begin
     for (int unsigned c = 0; c < NC; c++) begin
       inv_incl_ready[c] = inv_core_ready[c] && !inv_hub[c].valid;
+      inv_cmo_ready[c]  = inv_core_ready[c] && !inv_hub[c].valid &&
+                          !inv_incl[c].valid;
       if (inv_hub[c].valid) inv_to_core[c] = inv_hub[c];
-      else inv_to_core[c] = inv_incl[c];
+      else if (inv_incl[c].valid) inv_to_core[c] = inv_incl[c];
+      else inv_to_core[c] = inv_cmo[c];
     end
   end
 
@@ -222,6 +244,12 @@ module g6lc_cluster
         .l1_inval_addr_i  (l1_inv_addr[c]),
         .l1_inval_valid_i (l1_inv_valid[c]),
         .l1_inval_ready_o (l1_inv_ready[c]),
+        // T9a CMO sideband → g6lc_cmo_engine (idle ties when L2CmoEn=0)
+        .cmo_valid_o      (cmo_req_v[c]),
+        .cmo_op_o         (cmo_req_op[c]),
+        .cmo_addr_o       (cmo_req_paddr[c]),
+        .cmo_ready_i      (cmo_req_rdy[c]),
+        .cmo_done_i       (cmo_done[c]),
         // Fan hierarchy probes to every core's PMU group 2
         .l2_miss_i        (l2_miss_w),
         .l3_hit_i         (l3_hit_w),
@@ -249,6 +277,9 @@ module g6lc_cluster
         .l1_inval_valid_o(l1_inv_valid[c]),
         .l1_inval_ready_i(l1_inv_ready[c])
     );
+
+    // PLEN (core side) → AXI_ADDR_WIDTH (hierarchy side)
+    assign cmo_req_addr[c] = AXI_ADDR_WIDTH'(cmo_req_paddr[c]);
   end
 
   assign rvfi_probes_o = core_rvfi[0];
@@ -299,6 +330,9 @@ module g6lc_cluster
   end else begin : gen_hub
     g6lc_coherence_hub #(
         .NR_CORES             (NC),
+        // T9a: package-configured outstanding-transaction credit limit
+        // (0 → default 4; legality range enforced by check_cfg)
+        .MAX_OUTSTANDING      (CVA6Cfg.CohMaxOutstanding != 0 ? CVA6Cfg.CohMaxOutstanding : 4),
         .SNOOP_FILTER_EN      (CVA6Cfg.SnoopFilterEn),
         .SNOOP_FILTER_ENTRIES (CVA6Cfg.SnoopFilterEntries != 0 ? CVA6Cfg.SnoopFilterEntries
                                                                : COH_DEFAULT_SF_ENTRIES),
@@ -384,7 +418,8 @@ module g6lc_cluster
         .l2_evict_ready_i   (CVA6Cfg.L3En ? 1'b1 : incl_evict_ready),
         .l2_back_inval_valid_i (l2_back_inval_v),
         .l2_back_inval_addr_i  (l2_back_inval_a),
-        .l2_back_inval_ready_o (l2_back_inval_ready)
+        .l2_back_inval_ready_o (l2_back_inval_ready),
+        .l2_write_idle_o       (l2_idle_w)
     );
   end else begin : gen_no_l2
     assign l2_mst_req   = hub_mem_req;
@@ -393,6 +428,7 @@ module g6lc_cluster
     assign l2_evict_v   = 1'b0;
     assign l2_evict_a   = '0;
     assign l2_back_inval_ready = 1'b1;
+    assign l2_idle_w    = 1'b1;
   end
 
   if (CVA6Cfg.L3En) begin : gen_l3
@@ -428,7 +464,12 @@ module g6lc_cluster
         .l3_wupdate_o       (),
         .l3_evict_valid_o (l3_evict_v),
         .l3_evict_addr_o  (l3_evict_a),
-        .l3_evict_ready_i (l3_evict_rdy)
+        .l3_evict_ready_i (l3_evict_rdy),
+        // T9a CMO: L3 match-inval + write-idle for clean/flush ordering
+        .l3_write_idle_o       (l3_idle_w),
+        .l3_back_inval_valid_i (cmo_l3_v),
+        .l3_back_inval_addr_i  (cmo_l3_a),
+        .l3_back_inval_ready_o (cmo_l3_rdy)
     );
   end else begin : gen_no_l3
     assign l3_mst_req  = l2_mst_req;
@@ -438,6 +479,8 @@ module g6lc_cluster
     assign l3_bypass_w = 1'b1;
     assign l3_evict_v  = 1'b0;
     assign l3_evict_a  = '0;
+    assign l3_idle_w   = 1'b1;
+    assign cmo_l3_rdy  = 1'b1;
   end
 
   g6lc_server_prefetcher #(
@@ -477,8 +520,79 @@ module g6lc_cluster
       .inv_ready_i  (inv_incl_ready),
       .inv_o        (inv_incl),
       .inv_busy_o   (incl_inv_busy),
-      .evict_ready_o(incl_evict_ready)
+      .evict_ready_o(incl_evict_ready),
+      .drain_done_o ()
   );
+
+  // --------------------
+  // T9a eWT CMO engine + L1 broadcaster
+  // --------------------
+  // One CMO in flight, round-robin over the cores' cmo sidebands. The
+  // broadcaster is a second inclusive-inv instance so the CMO broadcast
+  // inherits the same all-cores-ack drain contract; it merges into
+  // inv_to_core at lowest priority (hub > inclusive victim > cmo).
+  if (CVA6Cfg.L2CmoEn) begin : gen_cmo
+    g6lc_l3_inclusive_inv #(
+        .InclusiveEn   (1'b1),
+        .NR_CORES      (NC),
+        .LINE_BYTES    (LINE_B),
+        .AXI_ADDR_WIDTH(AXI_ADDR_WIDTH)
+    ) i_cmo_bcast (
+        .clk_i,
+        .rst_ni,
+        .evict_valid_i(cmo_bcast_v),
+        .evict_addr_i (cmo_bcast_a),
+        .inv_ready_i  (inv_cmo_ready),
+        .inv_o        (inv_cmo),
+        .inv_busy_o   (),
+        .evict_ready_o(cmo_bcast_rdy),
+        .drain_done_o (cmo_bcast_done)
+    );
+
+    g6lc_cmo_engine #(
+        .NR_CORES       (NC),
+        .L2_EN          (CVA6Cfg.L2En),
+        .L3_EN          (CVA6Cfg.L3En),
+        .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH)
+    ) i_cmo_engine (
+        .clk_i,
+        .rst_ni,
+        .cmo_valid_i      (cmo_req_v),
+        .cmo_op_i         (cmo_req_op),
+        .cmo_addr_i       (cmo_req_addr),
+        .cmo_ready_o      (cmo_req_rdy),
+        .cmo_done_o       (cmo_done),
+        .l1_bcast_valid_o (cmo_bcast_v),
+        .l1_bcast_addr_o  (cmo_bcast_a),
+        .l1_bcast_ready_i (cmo_bcast_rdy),
+        .l1_bcast_done_i  (cmo_bcast_done),
+        .l2_inval_valid_o (cmo_l2_v),
+        .l2_inval_addr_o  (cmo_l2_a),
+        .l2_inval_ready_i (cmo_l2_rdy),
+        .l3_inval_valid_o (cmo_l3_v),
+        .l3_inval_addr_o  (cmo_l3_a),
+        .l3_inval_ready_i (cmo_l3_rdy),
+        .l2_write_idle_i  (l2_idle_w),
+        .l3_write_idle_i  (l3_idle_w)
+    );
+  end else begin : gen_no_cmo
+    // The cores complete CBOs locally (L2CmoEn=0) — sideband stays idle.
+    for (genvar c = 0; c < NC; c++) begin : gen_cmo_idle
+      assign inv_cmo[c]    = '0;
+      assign cmo_req_rdy[c] = 1'b0;
+      assign cmo_done[c]    = 1'b0;
+    end
+    assign cmo_l2_v        = 1'b0;
+    assign cmo_l2_a        = '0;
+    assign cmo_l3_v        = 1'b0;
+    assign cmo_l3_a        = '0;
+    assign cmo_bcast_v     = 1'b0;
+    assign cmo_bcast_a     = '0;
+    assign cmo_bcast_rdy   = 1'b0;
+    assign cmo_bcast_done  = 1'b0;
+    logic unused_cmo_w;
+    assign unused_cmo_w = |cmo_req_v;
+  end
 
   // Silence unused
   // NOTE: incl_evict_ready is now honoured end-to-end on the selected producer

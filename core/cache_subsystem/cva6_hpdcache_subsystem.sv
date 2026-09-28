@@ -126,7 +126,13 @@ module cva6_hpdcache_subsystem
     // U6.2 external L1 invalidation (coherence hub → D$). Tie valid=0 if unused.
     input  logic [63:0] inval_addr_i,
     input  logic        inval_valid_i,
-    output logic        inval_ready_o
+    output logic        inval_ready_o,
+    // T9a eWT CMO sideband (store adapter; response hold lives there)
+    output logic                    cmo_valid_o,
+    output logic [1:0]              cmo_op_o,
+    output logic [CVA6Cfg.PLEN-1:0] cmo_addr_o,
+    input  logic                    cmo_ready_i,
+    input  logic                    cmo_done_i
     //  }}}
 );
   //  }}}
@@ -369,7 +375,13 @@ module cva6_hpdcache_subsystem
 
       .dcache_mem_resp_write_ready_o(dcache_write_resp_ready),
       .dcache_mem_resp_write_valid_i(dcache_write_resp_valid),
-      .dcache_mem_resp_write_i(dcache_write_resp)
+      .dcache_mem_resp_write_i(dcache_write_resp),
+
+      .cmo_valid_o(cmo_valid_o),
+      .cmo_op_o   (cmo_op_o),
+      .cmo_addr_o (cmo_addr_o),
+      .cmo_ready_i(cmo_ready_i),
+      .cmo_done_i (cmo_done_i)
   );
 
   if (CVA6Cfg.NOCType == config_pkg::NOC_TYPE_L15_BIG_ENDIAN || CVA6Cfg.NOCType == config_pkg::NOC_TYPE_L15_LITTLE_ENDIAN) begin

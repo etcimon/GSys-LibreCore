@@ -147,13 +147,11 @@ module store_unit
   // it doesn't matter what we are writing back as stores don't return anything
   assign result_o = lsu_ctrl_i.data;
 
-  enum logic [2:0] {
+  enum logic [1:0] {
     IDLE,
     VALID_STORE,
     WAIT_TRANSLATION,
-    WAIT_STORE_READY,
-    CBOZ_WAIT,   // U7ᶜ: wait for store-buffer space (no st_valid)
-    CBOZ_ISSUE   // U7ᶜ: issue one expand beat (entered only when ready)
+    WAIT_STORE_READY
   }
       state_d, state_q;
 
@@ -177,24 +175,23 @@ module store_unit
   // T6b: hart of the in-flight store, registered alongside its tid.
   logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] st_hart_n, st_hart_q;
 
-  // U7ᶜ cbo.zero full cache-block expand (Zicboz / memcpy-class zeroing)
-  // Beats = line_bytes / native store width. Address aligned to block base.
+  // U7ᶜ cbo.zero full cache-block marker (Zicboz): the store buffer gets ONE
+  // speculative entry carrying the line-aligned base address and cbo_op =
+  // CBO_ZERO; the commit-queue drain in store_buffer expands it into
+  // line_bytes/stride ordinary full-width stores after the instruction
+  // commits. One instruction -> one entry -> one commit keeps the store
+  // buffer's commit accounting intact and keeps trans_id_q owned by this
+  // instruction for the whole operation (the earlier multi-beat expansion
+  // outlived pop_st_o, let lsu_ctrl_i drift to the next store, and both
+  // orphaned queue entries and reported completion under a stolen tid).
   localparam int unsigned CBOZ_LINE_B =
       (CVA6Cfg.DCACHE_LINE_WIDTH >= 64) ? (CVA6Cfg.DCACHE_LINE_WIDTH / 8) : 64;
-  localparam int unsigned CBOZ_STRIDE = CVA6Cfg.XLEN / 8;
-  localparam int unsigned CBOZ_BEATS  =
-      (CBOZ_LINE_B / CBOZ_STRIDE) > 0 ? (CBOZ_LINE_B / CBOZ_STRIDE) : 1;
-  localparam int unsigned CBOZ_BEAT_W = (CBOZ_BEATS <= 1) ? 1 : $clog2(CBOZ_BEATS + 1);
 
-  logic [CBOZ_BEAT_W-1:0] cboz_beat_q, cboz_beat_d;
-  logic [CVA6Cfg.PLEN-1:0] cboz_base_q, cboz_base_d;
   logic [CVA6Cfg.PLEN-1:0] paddr_to_sb;
-  // Physical address presented to the store buffer (line-aligned + beat offset)
-  assign paddr_to_sb = (state_q == CBOZ_ISSUE || state_q == CBOZ_WAIT)
-                           ? (cboz_base_q + CVA6Cfg.PLEN'(cboz_beat_q * CBOZ_STRIDE))
-                           : (CVA6Cfg.RVZiCboz && cbo_op_q == ariane_pkg::CBO_ZERO)
-                                 ? (paddr_i & ~(CVA6Cfg.PLEN'(CBOZ_LINE_B) - CVA6Cfg.PLEN'(1)))
-                                 : paddr_i;
+  // Physical address presented to the store buffer (line-aligned for cbo.zero)
+  assign paddr_to_sb = (CVA6Cfg.RVZiCboz && cbo_op_q == ariane_pkg::CBO_ZERO)
+                           ? (paddr_i & ~(CVA6Cfg.PLEN'(CBOZ_LINE_B) - CVA6Cfg.PLEN'(1)))
+                           : paddr_i;
 
   // output assignments
   assign vaddr_o         = lsu_ctrl_i.vaddr;  // virtual address
@@ -213,8 +210,6 @@ module store_unit
     trans_id_n             = lsu_ctrl_i.trans_id;
     st_hart_n              = lsu_ctrl_i.hart;
     state_d                = state_q;
-    cboz_beat_d            = cboz_beat_q;
-    cboz_base_d            = cboz_base_q;
 
     case (state_q)
       // we got a valid store
@@ -238,76 +233,31 @@ module store_unit
       end
 
       VALID_STORE: begin
-        // U7ᶜ: full-line cbo.zero — first beat (entered with st_ready from IDLE).
-        // Further beats use CBOZ_WAIT → CBOZ_ISSUE (no ready↔valid combo loop).
-        if (CVA6Cfg.RVZiCboz && cbo_op_q == ariane_pkg::CBO_ZERO) begin
-          st_valid_without_flush = 1'b1;
-          cboz_base_d = paddr_i & ~(CVA6Cfg.PLEN'(CBOZ_LINE_B) - CVA6Cfg.PLEN'(1));
-          if (!flush_i) st_valid = 1'b1;
-          if (CBOZ_BEATS <= 1 || flush_i) begin
-            valid_o     = 1'b1;
-            state_d     = IDLE;
-            cboz_beat_d = '0;
-          end else begin
-            cboz_beat_d = CBOZ_BEAT_W'(1);
-            state_d     = CBOZ_WAIT;  // wait for space before next beat
-          end
-        end else begin
-          valid_o = 1'b1;
-          // post this store to the store buffer if we are not flushing
-          if (!flush_i) st_valid = 1'b1;
-
-          st_valid_without_flush = 1'b1;
-
-          // we have another request and its not an AMO (the AMO buffer only has depth 1)
-          if ((valid_i && CVA6Cfg.RVA && !instr_is_amo) || (valid_i && !CVA6Cfg.RVA)) begin
-
-            translation_req_o = 1'b1;
-            state_d = VALID_STORE;
-            pop_st_o = 1'b1;
-
-            if (CVA6Cfg.MmuPresent && !dtlb_hit_i) begin
-              state_d  = WAIT_TRANSLATION;
-              pop_st_o = 1'b0;
-            end
-
-            if (!st_ready) begin
-              state_d  = WAIT_STORE_READY;
-              pop_st_o = 1'b0;
-            end
-            // if we do not have another request go back to idle
-          end else begin
-            state_d = IDLE;
-          end
-        end
-      end
-
-      // Wait for store-buffer space before next cbo.zero beat (st_valid=0)
-      CBOZ_WAIT: begin
-        if (flush_i) begin
-          state_d     = IDLE;
-          cboz_beat_d = '0;
-        end else if (st_ready) begin
-          state_d = CBOZ_ISSUE;
-        end else begin
-          state_d = CBOZ_WAIT;
-        end
-      end
-
-      // Issue one expand beat; only entered when st_ready was true last cycle
-      CBOZ_ISSUE: begin
-        st_valid_without_flush = 1'b1;
+        valid_o = 1'b1;
+        // post this store to the store buffer if we are not flushing
         if (!flush_i) st_valid = 1'b1;
-        if (flush_i) begin
-          state_d     = IDLE;
-          cboz_beat_d = '0;
-        end else if (cboz_beat_q >= CBOZ_BEAT_W'(CBOZ_BEATS - 1)) begin
-          valid_o     = 1'b1;
-          state_d     = IDLE;
-          cboz_beat_d = '0;
+
+        st_valid_without_flush = 1'b1;
+
+        // we have another request and its not an AMO (the AMO buffer only has depth 1)
+        if ((valid_i && CVA6Cfg.RVA && !instr_is_amo) || (valid_i && !CVA6Cfg.RVA)) begin
+
+          translation_req_o = 1'b1;
+          state_d = VALID_STORE;
+          pop_st_o = 1'b1;
+
+          if (CVA6Cfg.MmuPresent && !dtlb_hit_i) begin
+            state_d  = WAIT_TRANSLATION;
+            pop_st_o = 1'b0;
+          end
+
+          if (!st_ready) begin
+            state_d  = WAIT_STORE_READY;
+            pop_st_o = 1'b0;
+          end
+          // if we do not have another request go back to idle
         end else begin
-          cboz_beat_d = cboz_beat_q + 1'b1;
-          state_d     = CBOZ_WAIT;
+          state_d = IDLE;
         end
       end
 
@@ -349,7 +299,6 @@ module store_unit
 
     if (flush_i) begin
       state_d     = IDLE;
-      cboz_beat_d = '0;
     end
   end
 
@@ -382,9 +331,8 @@ module store_unit
     // don't shift the data if we are going to perform an AMO as we still need to operate on this data
     st_data_n = ((CVA6Cfg.RVA && instr_is_amo) ? endian_data[CVA6Cfg.XLEN-1:0] :
                  data_align(lsu_ctrl_i.vaddr[2:0], {{64 - CVA6Cfg.XLEN{1'b0}}, endian_data}));
-    // Zicboz: force zero data + full BE (U7ᶜ multi-beat covers the whole line)
-    if (CVA6Cfg.RVZiCboz && (lsu_ctrl_i.operation == ariane_pkg::CBO_ZERO ||
-                             state_q == CBOZ_ISSUE || state_q == CBOZ_WAIT)) begin
+    // Zicboz: force zero data + full BE (drain-time expansion covers the line)
+    if (CVA6Cfg.RVZiCboz && lsu_ctrl_i.operation == ariane_pkg::CBO_ZERO) begin
       st_data_n = '0;
       st_be_n   = '1;
     end
@@ -416,19 +364,12 @@ module store_unit
         ariane_pkg::CBO_INVAL: cbo_op_d = CVA6Cfg.RVZiCbom ? ariane_pkg::CBO_INVAL : ariane_pkg::CBO_NONE;
         ariane_pkg::CBO_CLEAN: cbo_op_d = CVA6Cfg.RVZiCbom ? ariane_pkg::CBO_CLEAN : ariane_pkg::CBO_NONE;
         ariane_pkg::CBO_FLUSH: cbo_op_d = CVA6Cfg.RVZiCbom ? ariane_pkg::CBO_FLUSH : ariane_pkg::CBO_NONE;
-        // Zicboz: mark as CBO_ZERO; store path multi-beats the line
+        // Zicboz: mark as CBO_ZERO; commit drain expands to the full line
         ariane_pkg::CBO_ZERO:  cbo_op_d = CVA6Cfg.RVZiCboz ? ariane_pkg::CBO_ZERO : ariane_pkg::CBO_NONE;
         default:               cbo_op_d = ariane_pkg::CBO_NONE;
       endcase
     end else begin
       cbo_op_d = ariane_pkg::CBO_NONE;
-    end
-    // Intermediate expand beats: ordinary XLEN zero stores
-    if (state_q == CBOZ_ISSUE || state_q == CBOZ_WAIT) begin
-      cbo_op_d       = ariane_pkg::CBO_NONE;
-      st_data_size_n = CVA6Cfg.IS_XLEN64 ? 2'b11 : 2'b10;
-      st_data_n      = '0;
-      st_be_n        = '1;
     end
   end
 
@@ -500,8 +441,7 @@ module store_unit
       .trans_id_i           (trans_id_q),
       .rvfi_mem_paddr_o     (rvfi_mem_paddr_o),
       .data_i               (st_data_q),
-      .cbo_op_i             ((state_q == CBOZ_ISSUE || state_q == CBOZ_WAIT)
-                                 ? ariane_pkg::CBO_NONE : cbo_op_q),
+      .cbo_op_i             (cbo_op_q),
       .be_i                 (st_be_q),
       .data_size_i          (st_data_size_q),
       .req_port_i           (req_port_i),
@@ -553,8 +493,6 @@ module store_unit
       st_hart_q      <= '0;
       amo_op_q       <= AMO_NONE;
       cbo_op_q       <= ariane_pkg::CBO_NONE;
-      cboz_beat_q    <= '0;
-      cboz_base_q    <= '0;
       amo_tid_q      <= '0;
     end else begin
       state_q        <= state_d;
@@ -572,8 +510,6 @@ module store_unit
       st_data_size_q <= st_data_size_n;
       amo_op_q       <= amo_op_d;
       cbo_op_q       <= cbo_op_d;
-      cboz_beat_q    <= cboz_beat_d;
-      cboz_base_q    <= cboz_base_d;
       // Remember TID of AMO living in the depth-1 buffer (for cancel kill).
       if (CVA6Cfg.RVA && amo_buffer_valid) begin
         amo_tid_q <= trans_id_q;

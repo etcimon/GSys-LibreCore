@@ -7,6 +7,8 @@
   .section .text.init
   .globl _start
 _start:
+  csrr t0, mhartid
+  bnez t0, park
   # Stack in DRAM
   li   sp, 0x80008000
 
@@ -57,6 +59,11 @@ fail:
   la   t0, tohost
   sw   a0, 0(t0)
 3: j    3b
+
+park:
+1:
+  wfi
+  j    1b
 
   .section .tohost,"aw",@progbits
   .align 6

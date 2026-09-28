@@ -119,6 +119,7 @@ module tb_g6lc_l2;
   addr_t evict_addr;
   logic back_inval_ready, back_inval_valid = 1'b0;
   addr_t back_inval_addr = '0;
+  logic l2_write_idle;
 
   g6lc_l2_top #(
       .Enable      (1'b1),
@@ -155,7 +156,8 @@ module tb_g6lc_l2;
       .l2_evict_ready_i   (1'b1),
       .l2_back_inval_valid_i (back_inval_valid),
       .l2_back_inval_addr_i  (back_inval_addr),
-      .l2_back_inval_ready_o (back_inval_ready)
+      .l2_back_inval_ready_o (back_inval_ready),
+      .l2_write_idle_o       (l2_write_idle)
   );
 
   // ---- eq signature -----------------------------------------------------
@@ -1354,7 +1356,9 @@ module g6lc_l2_fixture
       .l3_selfinv_hit_o(),
       .l3_wupdate_o(),
 `endif
-      .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
+      .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
+      .l3_write_idle_o(), .l3_back_inval_valid_i(1'b0),
+      .l3_back_inval_addr_i('0), .l3_back_inval_ready_o()
     );
   end else begin : gen_l2_only
     assign mst_req_o=cache_req;
@@ -1389,7 +1393,8 @@ module g6lc_l2_fixture
       inval_i
 `endif
     ), .l2_back_inval_addr_i(inval_addr_i),
-    .l2_back_inval_ready_o(inval_ready_o)
+    .l2_back_inval_ready_o(inval_ready_o),
+    .l2_write_idle_o()
   );
 endmodule
 `endif

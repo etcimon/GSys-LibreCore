@@ -1929,3 +1929,95 @@ qualification stays on `--threads 1` (the runner enforces it; the opt-in env rec
 Linux/compliance/liveness, STA/DFT/power sign-off, CASQ, PMU residuals, coherence/hierarchy/snoop,
 FP widths beyond `FLen <= XLEN`, four-wide retirement, adaptive scheduling policy, early-termination
 root cause (re-examined only if it recurs with the non-destructive proxy).
+
+### T9a — M1a: CBO end-to-end, eWT config flips, legality and hub credits (2026-09-27)
+
+**Defect.** On WT targets a `cbo.inval/clean/flush` decoded as `STORE` with `rs2=x0` and a
+one-byte enable (`decoder.sv:533-535`): the WT write buffer treated it as an ordinary store
+and the store buffer waited on a `data_rvalid` the WT cache never asserts
+(`store_buffer.sv:468-487` / `wt_dcache_wbuffer.sv`) — one zero byte was written to the
+target address and the hart hung. HPDCACHE targets mapped CBOs to CMO ops and responded,
+but the CMO never reached L2/L3, so `cbo.inval` could not evict a peer copy below L1.
+
+**Design — CMO sideband.** `cva6`/`ariane` expose `cmo_valid_o`, `cmo_op_o` (0 inval,
+1 clean, 2 flush), `cmo_addr_o`, `cmo_ready_i`, `cmo_done_i`; new cfg `L2CmoEn` (default 0,
+`check_cfg` requires `L2En`). With `L2CmoEn=0` (e.g. `g6lc64_ooo_int`, `L2En=0`) the core
+completes the CBO locally: `inval` goes through the L1 `inval_addr` mux, `clean`/`flush`
+wait for write-buffer drain. In the WT subsystem a store-port request with
+`cbo_op != CBO_NONE` is not forwarded to the write buffer: it is granted, its address
+captured, the CMO issued once the buffer is empty, and exactly one `data_rvalid` is
+answered on `cmo_done_i` (the store-buffer `wait_rvalid` path retires the CBO). HPDCACHE
+keeps its own CMO handling (L1 invalidate/flush + response) but the adapter emits the
+sideband and holds that CMO response until `cmo_done_i`. The new
+`corev_apu/coherence/g6lc_cmo_engine.sv` round-robins the NC cores, one CMO in flight:
+`inval` broadcasts L1 invalidations to every core through a second
+`g6lc_l3_inclusive_inv #(InclusiveEn=1)` merged into `inv_to_core` at lowest priority
+(hub > inclusive victim > cmo), match-invalidates the L2 through `l2_back_inval_*`
+(arbitrated against the inclusive-victim source — victim wins, cmo holds) and the L3
+through new `l3_back_inval_*`; `clean`/`flush` complete once `l2_write_idle_o` and
+`l3_write_idle_o` report no unacknowledged write. `cbo.zero` keeps one speculative
+store-buffer entry and one commit-queue entry and drains multiple `CBO_ZERO`-tagged write
+beats, each with its own grant/`rvalid`, retiring only after the final beat.
+
+**Legality.** `check_cfg` now rejects `NrCores > 1` with `DCacheType` in
+`{WB, HPDCACHE_WB, HPDCACHE_WT_WB}` — the WB-L1 multi-core hole; no shipped package
+changes legality. New cfg `CohMaxOutstanding` (default 4) drives the hub
+`MAX_OUTSTANDING`; legal range 2–14 (4-bit id space, `FILL_ID='1`, one spare), and OoO
+signature-filter packages must carry at least two transaction credits.
+
+**Package flips.** `WtAxiAllocEn=1`, `L2WriteUpdateEn=1`, `L2CmoEn=1` in `g6lc64_smt2`
+and `g6lc64_smt2_ooo_int` — anchors re-baselined by decision (new frozen traces below);
+`L2CmoEn=1` in int2/int2_l3/smt2_l3; `L2WriteUpdateEn=1` + `L2CmoEn=1` in `stream8`,
+`server_math`, `server_math_v`, `ai`, `ooo_server`.
+
+**Credits measurement.** `tb_g6lc_coherence_credits` (hub + real L2/L3), all lanes
+positive+negative matched (`ooocoh-m1a-credits-*-r3`): the eight-read burst reaches
+`max_ar_live`=8 under OT8 vs a capped 4 under OT4 (drain 141 both — the burst is
+latency-bound at L0, but the extra service is used); the mixed read+write bursts pay
+`wr_stall_cycles`=12 at OT4 (drain 183) vs 0 at OT8 (drain 165) — four-hart shape
+identical; the L3 stack drains 194→186 with `max_fills`/`max_l3_fills` 4→8.
+`CohMaxOutstanding=8` therefore chosen for `g6lc64_ooo_int2`/`g6lc64_ooo_int2_l3` with
+`L2MshrDepth=8` (`L3MshrDepth=8` on int2_l3); signature-filter proofs re-run at OT8.
+
+**Evidence.** Leaf oracles: `tb_g6lc_cmo_engine` (arbiter fairness, broadcast with
+per-core-ready backpressure, L2/L3 back-inval handshake including collision with the
+inclusive-victim source, clean waits for write-idle; negatives: dropped core, dropped
+level, early done), the WT subsystem leaf (the CBO never reaches the wbuffer — the
+forwarding mutation lets the byte write be observed — and exactly one `rvalid`), and the
+HPDCACHE adapter response-hold leaf. Composed `tb_g6lc_coherence_hub` CMO scenario: a
+resident line is invalidated at every level and the next read misses at L2 and L3
+(counters); the negative arm fails. Directed `mc_cbo_ewt.S` (harness `+mem_poke` writes
+DRAM behind the caches at a fixed cycle): positive pass and negative-arm matched failure
+on int2, int2_l3, smt2, smt2_l3, smt2_ooo_int, stream8 and server_math (r6 lanes,
+~120k cycles each, `PEER_HART=1` on the two-hart packages).
+
+**Regression: the parked ATOP R.** The same-line ordering fix that closed
+`HUB_STALE_REFILL_PUBLICATION` (invalidation held while a same-line fill is outstanding)
+deadlocked against a pre-existing behaviour: an ATOP R was *withheld* from the shared
+memory R channel until `slot_applied()`, while the invalidation it waited on could not be
+delivered until the same-line fill's R landed — a beat queued *behind* the withheld ATOP
+R on that channel. Seen as `mini_amocas_w` failures (stream8, server_math, and a WT int2
+reproduction ending in a held core) and int2/int2_l3 strict-boot hangs. The fix parks the
+beat exactly like the B path already does: the hub consumes the ATOP R into the owning
+AW slot (`r_held` + captured payload), keeps `r_ready` asserted so the fill's R passes,
+and replays the parked beat — with priority over a fresh R to the same core — once
+`slot_applied()`; the slot frees only after the replayed R handshakes and B is done.
+Leaf oracle: hub scenario 27 `atop_parked_r` builds the shape (target-core same-line
+fill outstanding, early ATOP R) — pass at OT4 and OT16 (`k=0`), negative arm
+`HUB_ATOP_R_WITHHELD` matched, lifetime lane `ooocoh-m1a-hub-lifetime-park-r1` 50/50
+matched. Directed confirmation on the rebuilt p8 models: `mini_amocas_w/d/q` and
+`mini_stream_plane` pass on stream8/server_math; all seven `mc_cbo_ewt` lanes matched
+both arms; the int2/int2_l3 strict boots below now complete (they hung pre-fix).
+
+**Strict boots (threads=1, p8 fixed-hub models, `SOURCE_REVIEW_ALLOW_CONCURRENT`).**
+smt2 and smt2_ooo_int now carry the eWT flips, so their previous frozen traces
+(12,761,165 / 10,701,925 on the alloc/WU-off packages) are retired; the runs below are
+the new anchor references from now on.
+
+| Lane | Run tag | Cycles | Notes |
+|---|---|---:|---|
+| int2 L0 four-hart strict | `osbi-int2-r6` | 17,928,441 | vs 17,993,674 M0 (−0.4 %, OT=8 + CMO on); `l2_wupd`=820,345, `l2_miss`=1,522 — hung pre-fix |
+| int2_l3 L0 four-hart strict | `osbi-int2l3-r6` | 18,244,150 | vs 18,244,344 M0 (−194); `l2_wupd`=`l3_wupd`=832,773 — hung pre-fix |
+| smt2_l3 L0 two-hart strict | `osbi-smt2l3-r6` | 13,814,448 | byte-stable vs T8g (WU already on); `l2_wupd`=`l3_wupd`=530,843 |
+| smt2 L0 two-hart strict — NEW anchor | `osbi-smt2-r6` | 12,867,172 | `l2_wupd`=502,702, `l2_selfinv`=164; rvfi hart_00 sha256 `0611f9fa160593b0` (18,538,109 lines) |
+| smt2_ooo_int L0 strict — NEW anchor | `osbi-smt2ooo-r6` | 10,809,010 | `l2_wupd`=497,296; rvfi hart_00 sha256 `560b14fd1e909350` (18,560,141 lines) |

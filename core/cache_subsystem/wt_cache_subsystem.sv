@@ -81,7 +81,14 @@ module wt_cache_subsystem
     input logic inval_valid_i,
     output logic inval_ready_o,
     output logic inval_apply_valid_o,
-    output logic [63:0] inval_apply_addr_o
+    output logic [63:0] inval_apply_addr_o,
+    // CMO sideband (T9a eWT) — pass-through of the wt_dcache tracker;
+    // cmo_op_o encodes 0=inval, 1=clean, 2=flush
+    output logic                    cmo_valid_o,
+    output logic [1:0]              cmo_op_o,
+    output logic [CVA6Cfg.PLEN-1:0] cmo_addr_o,
+    input  logic                    cmo_ready_i,
+    input  logic                    cmo_done_i
     // TODO: interrupt interface
 );
 
@@ -173,6 +180,11 @@ module wt_cache_subsystem
       .miss_o          (dcache_miss_o),
       .wbuffer_empty_o (wbuffer_empty_o),
       .wbuffer_not_ni_o(wbuffer_not_ni_o),
+      .cmo_valid_o     (cmo_valid_o),
+      .cmo_op_o        (cmo_op_o),
+      .cmo_addr_o      (cmo_addr_o),
+      .cmo_ready_i     (cmo_ready_i),
+      .cmo_done_i      (cmo_done_i),
       .amo_req_i       (dcache_amo_req_i),
       .amo_resp_o      (dcache_amo_resp_o),
       .mbe_i           (mbe_i),

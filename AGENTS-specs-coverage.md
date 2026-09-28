@@ -74,9 +74,13 @@ of purging it: the boot's `l2_miss` fell ~103k→~1.5k and `l2_selfinv` ~91.6k�
 exact. At DRAM latency 40 the four-hart boots measure 41,508,827 (int2) and 42,004,100
 (int2_l3, −13.2 %, first boot-workload `l3_hit`). Directed evidence: resident-line merge +
 memory read-back, exclusion cases (ATOP/lock/nc/non-resident/fill-race), and a 512 KiB scan
-showing −6.1 % at latency 40. Not covered: posted-write merges and CBO on WT (M1), formal
-flop-vs-SRAM equivalence (dual simulation only), the legacy pinned-reference equivalence
-lane (red), physical macro binding, MBIST insertion and STA/power/area. Verilator
+showing −6.1 % at latency 40. CBO is now end-to-end (M1a/T9a): the `cmo_*` sideband plus `g6lc_cmo_engine`
+invalidate every L1 copy and match-invalidate L2/L3 on `cbo.inval`, and
+`clean`/`flush` complete on the L2/L3 write-idle trackers; `cbo.zero` works as a
+commit-queue drain burst on every eWT package. Not covered: posted-write merges
+(M1b), formal flop-vs-SRAM equivalence (dual simulation only), the legacy
+pinned-reference equivalence lane (red), physical macro binding, MBIST insertion
+and STA/power/area. Verilator
 `--threads>1` models diverge from the threads=1 record and are measurement-only.
 
 ## CSR admission lifetime — directed verification and scoped four-hart firmware completion

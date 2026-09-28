@@ -1407,6 +1407,105 @@ module tb_g6lc_coherence_hub;
       return_read(n % 2, slots[n], id_t'(n), 64'(n));
   endtask
 
+  //  Scenario 27: an ATOP R arriving while its invalidation is still
+  //  undelivered is PARKED, not withheld. Withholding it (the pre-fix
+  //  behaviour, r_ready=0) deadlocks the exact shape reproduced here: the
+  //  target core's same-line fill is still in flight, so the delivery that
+  //  slot_applied() waits on cannot happen until the fill's R lands — and on
+  //  the shared R channel that beat is queued BEHIND the withheld ATOP R.
+  //  The B channel never had this flaw (it is consumed and replayed via
+  //  b_held); the fix gives the ATOP R the same treatment via r_held.
+  task automatic atop_parked_r;
+    id_t atop_slot, fill_slot;
+    int k;
+    bit seen_leak, got_b;
+    reset();
+    if (NC != 2) $fatal(1, "HUB_ATOP_PARK_GEOMETRY");
+    // core1's same-line fill is admitted first and stays outstanding: it is
+    // the fill inv_fill_hold makes the write's invalidation wait on.
+    accept_read(1, 64'h4000, 4'h9, fill_slot);
+    // core0's ATOP write to the same line (expect_r): its invalidation
+    // targets core1 and cannot be presented while that fill is in flight.
+    core_req[0].aw = aw(64'h4000, 4'he);
+    core_req[0].aw.atop = 6'b100000;
+    core_req[0].aw_valid = 1;
+    memory_rsp.aw_ready = 1;
+    #2;
+    if (!core_rsp[0].aw_ready) $fatal(1, "HUB_ATOP_PARK_SETUP");
+    atop_slot = memory_req.aw.id;
+    tick();
+    core_req[0].aw_valid = 0;
+    memory_rsp.aw_ready = 0;
+    core_req[0].w = '{data: 64'h991, strb: '1, last: 1, user: 0};
+    core_req[0].w_valid = 1;
+    memory_rsp.w_ready = 1;
+    #2;
+    if (!core_rsp[0].w_ready) $fatal(1, "HUB_ATOP_PARK_W");
+    tick();
+    core_req[0].w_valid = 0;
+    memory_rsp.w_ready = 0;
+    repeat (2) begin
+      #2;
+      if (invalidations[1].valid)
+        $fatal(1, "HUB_ATOP_PARK_HOLD invalidation presented during same-line fill");
+      tick();
+    end
+    // B is consumed and parked the usual way (never withheld at the port).
+    memory_rsp.b_valid = 1;
+    memory_rsp.b = '{id: atop_slot, resp: 0, user: 0};
+    seen_leak = 0;
+    got_b = 0;
+    #2;
+    if (!memory_req.b_ready) $fatal(1, "HUB_ATOP_PARK_B_NOT_CONSUMED");
+    if (core_rsp[0].b_valid) seen_leak = 1;
+    tick();
+    memory_rsp.b_valid = 0;
+    // The ATOP R arrives ahead of the fill's R (different ids — the L2 may
+    // legally emit it first). The invalidation is still undelivered, so the
+    // beat cannot be forwarded yet — but it MUST be consumed: withholding it
+    // is the deadlock, because the fill's R sits behind it on this channel.
+    memory_rsp.r_valid = 1;
+    memory_rsp.r = '{id: atop_slot, data: 64'hc0ffee, resp: 0, last: 1, user: 0};
+    #2;
+    if (negative) begin
+      if (memory_req.r_ready)
+        $fatal(1, "HUB_ATOP_R_WITHHELD park landed — the withheld-beat defect is absent");
+      $display("HUB_ACK_TIMING scenario=27 negative: withheld beat observed");
+      return;
+    end
+    if (!memory_req.r_ready)
+      $fatal(1, "HUB_ATOP_R_WITHHELD atop R withheld while unapplied — channel deadlock");
+    if (core_rsp[0].r_valid) seen_leak = 1;
+    tick();
+    memory_rsp.r_valid = 0;
+    // The fill's R lands: core1's ar slot frees, the hold clears, the
+    // invalidation is delivered, and the parked ATOP R is replayed.
+    return_read(1, fill_slot, 4'h9, 64'h77);
+    k = -1;
+    for (int n = 0; n < 40; n++) begin
+      #2;
+      if (invalidations[1].valid && invalidation_ready[1] && k < 0) k = n;
+      if (core_rsp[0].b_valid) begin
+        if (core_rsp[0].b.id !== 4'he) $fatal(1, "HUB_ATOP_PARK_B_ID");
+        if (k < 0 || n <= k + 1 + INV_LAT) seen_leak = 1;
+        got_b = 1;
+      end
+      if (core_rsp[0].r_valid) begin
+        if (core_rsp[0].r.id !== 4'he || core_rsp[0].r.data !== 64'hc0ffee)
+          $fatal(1, "HUB_ATOP_PARK_REPLAY id=%h data=%h",
+                 core_rsp[0].r.id, core_rsp[0].r.data);
+        if (k < 0 || n <= k + 1 + INV_LAT) seen_leak = 1;
+        break;
+      end
+      tick();
+      if (n == 39) $fatal(1, "HUB_ATOP_PARK_LATE parked ATOP R never replayed");
+    end
+    if (k < 0) $fatal(1, "HUB_ATOP_PARK_SETUP invalidation never delivered");
+    if (!got_b) $fatal(1, "HUB_ATOP_PARK_B_LATE parked B never replayed");
+    if (seen_leak) $fatal(1, "HUB_ATOP_R_BEFORE_INVAL");
+    $display("HUB_ACK_TIMING scenario=27 k=%0d", k);
+  endtask
+
   initial begin
     scenario = 0;
     negative = $test$plusargs("oracle_negative");
@@ -1439,6 +1538,7 @@ module tb_g6lc_coherence_hub;
       24: same_id_b_order();
       25: same_id_r_order();
       26: writer_acquisition();
+      27: atop_parked_r();
       default: $fatal(1, "HUB_SCENARIO");
     endcase
     $display("HUB_PASS scenario=%0d", scenario);
@@ -1487,6 +1587,20 @@ module tb_g6lc_coherence_l2;
   addr_t rd_addr;
   logic [7:0] rd_len,rd_beat;
   data_t memory_value,rd_snapshot;
+  // Scenario 7 (HPDCACHE store shapes) needs a real byte-granular DRAM:
+  // `dram_words` records writes to every non-ADDRESS word the model has seen
+  // (ADDRESS itself stays in `memory_value` because its reset value 64'h11 is
+  // distinct from other_word()), and every W beat merges by strobe instead of
+  // requiring a full-strobe single beat at ADDRESS.
+  data_t dram_words[addr_t];
+  data_t rd_snap[8];
+  addr_t wr_base;
+  int wr_beat;
+  logic [7:0] wr_wlen;
+  // Per-write-shape stimulus payload (beat data/strobes for send_write).
+  data_t wr_beats[8];
+  logic [7:0] wr_strbs[8];
+  int core_b_count=0;
   int rd_delay,b_delay;
   int cycle=0,aw_cycle=-1,mem_b_cycle=-1,late_ar_cycle=-1,core_b_cycle=-1;
   int read_count=0,read_beat=0,inv_count=0,apply_count=0,ar_blocked=0;
@@ -1514,6 +1628,63 @@ module tb_g6lc_coherence_l2;
   // dram_req/dram_rsp stay the DRAM edge; l2m_* is the L2 master side.
   req_t l2m_req;
   resp_t l2m_rsp;
+  // T9a CMO composed path: the g6lc_cmo_engine + a dedicated broadcaster
+  // (g6lc_l3_inclusive_inv #(.InclusiveEn(1)), the same instance the cluster
+  // uses) drive the L2/L3 match-inval ports. There is no victim producer in
+  // this bench, so the cluster's victim-wins arbitration is not modelled.
+  logic cmo_l2_v, cmo_l2_rdy, cmo_l2_idle;
+  addr_t cmo_l2_a;
+  logic cmo_l3_v, cmo_l3_rdy, cmo_l3_idle;
+  addr_t cmo_l3_a;
+  logic [1:0]   tb_cmo_req_v=0, tb_cmo_ready, tb_cmo_done;
+  logic [1:0]   tb_cmo_req_op[2];
+  addr_t        tb_cmo_req_addr[2];
+  // Under verilator --timing, timing-process writes into unpacked array
+  // ports do not propagate (same limitation as tb_g6lc_cmo_engine and
+  // tb_g6lc_wt_cmo): stage the request payload through clocked registers.
+  logic [1:0]   tb_cmo_req_op_r[2];
+  addr_t        tb_cmo_req_addr_r[2];
+  always_ff @(posedge clk) begin
+    for (int c = 0; c < 2; c++) begin
+      tb_cmo_req_op_r[c]   <= tb_cmo_req_op[c];
+      tb_cmo_req_addr_r[c] <= tb_cmo_req_addr[c];
+    end
+  end
+  coh_inval_t [1:0] cmo_inv;
+  logic cmo_bcast_v, cmo_bcast_rdy, cmo_bcast_done;
+  addr_t cmo_bcast_a;
+  int cmo_inv_count[2] = '{0,0};
+  int cmo_done_count = 0;
+  // Negative arm: +oracle_negative disconnects the L2 match-inval wire so the
+  // broadcast completes but the resident L2 line survives — the re-read below
+  // then hits, and the expected-miss check fails by construction.
+  logic cmo_l2_v_w = 1'b0;
+  assign cmo_l2_v = negative ? 1'b0 : cmo_l2_v_w;
+  g6lc_l3_inclusive_inv #(.InclusiveEn(1'b1),.NR_CORES(2),.LINE_BYTES(16),
+      .AXI_ADDR_WIDTH(AW)) i_cmo_bcast (
+      .clk_i(clk),.rst_ni(rst_n),
+      .evict_valid_i(cmo_bcast_v),.evict_addr_i(cmo_bcast_a),
+      .inv_ready_i(inv_ready),.inv_o(cmo_inv),.inv_busy_o(),
+      .evict_ready_o(cmo_bcast_rdy),.drain_done_o(cmo_bcast_done));
+  g6lc_cmo_engine #(.NR_CORES(2),.L2_EN(USE_L2),.L3_EN(USE_L3),
+      .AXI_ADDR_WIDTH(AW)) i_cmo_engine (
+      .clk_i(clk),.rst_ni(rst_n),
+      .cmo_valid_i(tb_cmo_req_v),.cmo_op_i(tb_cmo_req_op_r),
+      .cmo_addr_i(tb_cmo_req_addr_r),.cmo_ready_o(tb_cmo_ready),
+      .cmo_done_o(tb_cmo_done),
+      .l1_bcast_valid_o(cmo_bcast_v),.l1_bcast_addr_o(cmo_bcast_a),
+      .l1_bcast_ready_i(cmo_bcast_rdy),.l1_bcast_done_i(cmo_bcast_done),
+      .l2_inval_valid_o(cmo_l2_v_w),.l2_inval_addr_o(cmo_l2_a),
+      .l2_inval_ready_i(cmo_l2_rdy),
+      .l3_inval_valid_o(cmo_l3_v),.l3_inval_addr_o(cmo_l3_a),
+      .l3_inval_ready_i(cmo_l3_rdy),
+      .l2_write_idle_i(cmo_l2_idle),.l3_write_idle_i(cmo_l3_idle));
+  always_ff @(posedge clk) begin
+    for (int c = 0; c < 2; c++)
+      if (cmo_inv[c].valid && inv_ready[c]) cmo_inv_count[c] <= cmo_inv_count[c]+1;
+    for (int c = 0; c < 2; c++)
+      if (tb_cmo_done[c]) cmo_done_count <= cmo_done_count+1;
+  end
   logic l3_hit_p=0, l3_miss_p=0, l2_hit_p=0, l2_miss_p=0;
   logic l2_wupd_p=0, l3_wupd_p=0;
   int l3_hits=0, l3_misses=0, l2_hits=0, l2_misses=0;
@@ -1536,7 +1707,8 @@ module tb_g6lc_coherence_l2;
       .l2_hit_o(l2_hit_p),.l2_miss_o(l2_miss_p),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
       .l2_selfinv_hit_o(),.l2_wupdate_o(l2_wupd_p),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
-      .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o());
+      .l2_back_inval_valid_i(cmo_l2_v),.l2_back_inval_addr_i(cmo_l2_a),
+      .l2_back_inval_ready_o(cmo_l2_rdy),.l2_write_idle_o(cmo_l2_idle));
   if (USE_L3) begin : gen_l3_stack
     req_t cut_req,l3_slv_req,l3_mst_req;
     resp_t cut_rsp;
@@ -1562,7 +1734,10 @@ module tb_g6lc_coherence_l2;
       .mst_req_o(l3_mst_req),.mst_resp_i(dram_rsp),
       .l3_hit_o(l3_hit_p),.l3_miss_o(l3_miss_p),.l3_bypass_o(),.l3_selfinv_hit_o(),
       .l3_wupdate_o(l3_wupd_p),
-      .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
+      .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
+      .l3_write_idle_o(cmo_l3_idle),
+      .l3_back_inval_valid_i(cmo_l3_v),.l3_back_inval_addr_i(cmo_l3_a),
+      .l3_back_inval_ready_o(cmo_l3_rdy)
     );
     always_comb begin
       dram_req=l3_mst_req;
@@ -1571,6 +1746,8 @@ module tb_g6lc_coherence_l2;
   end else begin : gen_no_l3
     assign dram_req=l2m_req;
     assign l2m_rsp=dram_rsp;
+    assign cmo_l3_idle = 1'b1;
+    assign cmo_l3_rdy  = 1'b1;
   end
 
   always_comb begin
@@ -1583,6 +1760,15 @@ module tb_g6lc_coherence_l2;
   end
   function automatic data_t other_word(input addr_t addr);
     return 64'h4400 | (addr & 64'h3f);
+  endfunction
+  // DRAM word read: the ADDRESS word lives in `memory_value`; words the model
+  // has seen written live in `dram_words`; untouched words keep the
+  // deterministic `other_word` contents (unchanged behaviour for every
+  // pre-shape scenario).
+  function automatic data_t mem_word(input addr_t addr);
+    if(addr==ADDRESS)return memory_value;
+    if(dram_words.exists(addr))return dram_words[addr];
+    return other_word(addr);
   endfunction
   function automatic ar_chan_t read_request(input id_t id);
     ar_chan_t r;
@@ -1597,14 +1783,16 @@ module tb_g6lc_coherence_l2;
     dram_rsp.b_valid=wr_live && wr_done && b_delay==0;
     dram_rsp.b='{id:wr_id,resp:0,user:0};
     dram_rsp.r_valid=rd_live && rd_delay==0;
-    dram_rsp.r='{id:rd_id,
-      data:(rd_addr+64'(rd_beat)*8==ADDRESS ? rd_snapshot : other_word(rd_addr+64'(rd_beat)*8)),
+    // Burst snapshot taken at AR accept: a read must not observe a write that
+    // lands after its address phase (the late_ar >= mem_b contract).
+    dram_rsp.r='{id:rd_id,data:rd_snap[3'(rd_beat)],
       resp:0,last:rd_beat==rd_len,user:0};
   end
   always_ff @(posedge clk or negedge rst_n) begin
     if(!rst_n) begin
       rd_live<=0;wr_live<=0;wr_done<=0;rd_id<=0;wr_id<=0;
       rd_addr<=0;rd_len<=0;rd_beat<=0;rd_delay<=0;b_delay<=0;
+      wr_base<='0;wr_beat<=0;wr_wlen<='0;
       memory_value<=64'h11;rd_snapshot<=0;
     end else begin
       if(rd_delay>0)rd_delay<=rd_delay-1;
@@ -1612,6 +1800,7 @@ module tb_g6lc_coherence_l2;
       if(dram_req.ar_valid && dram_rsp.ar_ready) begin
         rd_live<=1;rd_id<=dram_req.ar.id;rd_addr<=dram_req.ar.addr;
         rd_len<=dram_req.ar.len;rd_beat<=0;rd_delay<=3;rd_snapshot<=memory_value;
+        for(int i=0;i<8;i++)rd_snap[i]<=mem_word(dram_req.ar.addr+64'(i)*8);
         if(dram_ar_count<8)begin
           dram_ar_addr[dram_ar_count]<=dram_req.ar.addr;
           dram_ar_len[dram_ar_count]<=dram_req.ar.len;
@@ -1622,13 +1811,31 @@ module tb_g6lc_coherence_l2;
         if(dram_rsp.r.last)rd_live<=0;else rd_beat<=rd_beat+1'b1;
       end
       if(dram_req.aw_valid && dram_rsp.aw_ready) begin
-        if(dram_req.aw.addr!=ADDRESS || dram_req.aw.len!=0 || dram_req.aw.atop!=0)
-          $fatal(1,"COH_L2_MEMORY_AW");
+        // One-line window at ADDRESS: 64-bit INCR beats, no atomics, whole
+        // burst confined to the line.
+        if(dram_req.aw.atop!=0 || dram_req.aw.burst!=2'b01 ||
+           dram_req.aw.size!=3 ||
+           (dram_req.aw.addr & ~addr_t'(L2_LINE_BYTES-1))!=(ADDRESS & ~addr_t'(L2_LINE_BYTES-1)) ||
+           dram_req.aw.addr[2:0]!=0 ||
+           int'(dram_req.aw.addr[5:3])+int'(dram_req.aw.len)+1>L2_LINE_BYTES/8)
+          $fatal(1,"COH_L2_MEMORY_AW a=%h len=%0d",dram_req.aw.addr,dram_req.aw.len);
         wr_live<=1;wr_done<=0;wr_id<=dram_req.aw.id;
+        wr_base<=dram_req.aw.addr;wr_beat<=0;wr_wlen<=dram_req.aw.len;
       end
       if(dram_req.w_valid && dram_rsp.w_ready) begin
-        if(!dram_req.w.last || dram_req.w.strb!='1)$fatal(1,"COH_L2_MEMORY_W");
-        memory_value<=dram_req.w.data;wr_done<=1;b_delay<=B_DELAY;
+        begin : w_apply
+          addr_t wa;
+          data_t merged;
+          wa=wr_base+addr_t'(wr_beat)*8;
+          merged=mem_word(wa);
+          for(int b=0;b<8;b++)
+            if(dram_req.w.strb[b])merged[b*8+:8]=dram_req.w.data[b*8+:8];
+          if(wa==ADDRESS)memory_value<=merged;else dram_words[wa]<=merged;
+        end
+        if(dram_req.w.last)begin
+          if(wr_beat!=wr_wlen)$fatal(1,"COH_L2_MEMORY_W b=%0d len=%0d",wr_beat,wr_wlen);
+          wr_done<=1;b_delay<=B_DELAY;
+        end else wr_beat<=wr_beat+1;
       end
       if(dram_rsp.b_valid && dram_req.b_ready)begin wr_live<=0;wr_done<=0;end
     end
@@ -1676,7 +1883,12 @@ module tb_g6lc_coherence_l2;
       end
       if(wr_req_valid && responses[0].aw_ready)aw_cycle=cycle;
       if(dram_rsp.b_valid && dram_req.b_ready)mem_b_cycle=cycle;
-      if(hub_req.ar_valid && !hub_rsp.ar_ready && aw_cycle>=0)ar_blocked++;
+      // A racing same-line AR is held either upstream at the hub admission
+      // (responses[1].ar_ready low while a same-line write is live) or, when
+      // forwarded, downstream at the L2 (hub_rsp.ar_ready low). Count both so
+      // the admission contract covers either enforcement point.
+      if(((hub_req.ar_valid && !hub_rsp.ar_ready) ||
+          (rd_req_valid && !responses[1].ar_ready)) && aw_cycle>=0)ar_blocked++;
       if(rd_req_valid && responses[1].ar_ready && read_count==1)late_ar_cycle=cycle;
       if(fill_start)begin fill_live=1;fill_killed=0;cache_valid=0;end
       if(apply_pending)begin
@@ -1697,7 +1909,7 @@ module tb_g6lc_coherence_l2;
             addr_t beat_addr;
             data_t exp;
             beat_addr=core_rd_addr+64'(read_beat)*8;
-            exp=(beat_addr==ADDRESS)?memory_value:other_word(beat_addr);
+            exp=mem_word(beat_addr);
             // Negative arm: scenario 2 flips one expected beat (third read's
             // first beat); scenario 3 expects the pre-write value instead.
             if(negative && scenario==2 && read_count==3 && read_beat==0)
@@ -1727,10 +1939,18 @@ module tb_g6lc_coherence_l2;
         end
       end
       if(responses[0].b_valid && wr_resp_ready)begin
-        if(core_b_cycle>=0 || responses[0].b.id!=4'h6 || responses[0].b.resp!=0)
+        if(responses[0].b.id!=4'h6 || responses[0].b.resp!=0)
           $fatal(1,"COH_L2_B_OWNER");
-        if(apply_count!=1)$fatal(1,"COH_L2_B_BEFORE_APPLY");
-        if(cache_valid && cache_value!=64'h22)$fatal(1,"COH_L2_STALE_VALUE");
+        core_b_count++;
+        if(scenario!=7)begin
+          if(core_b_cycle>=0)$fatal(1,"COH_L2_B_OWNER");
+          if(apply_count!=1)$fatal(1,"COH_L2_B_BEFORE_APPLY");
+          if(cache_valid && cache_value!=64'h22)$fatal(1,"COH_L2_STALE_VALUE");
+        end else begin
+          // Shapes run: every write still owes its L1 broadcast before the B
+          // is delivered (B never races ahead of the invalidation apply).
+          if(apply_count<core_b_count)$fatal(1,"COH_L2_B_BEFORE_APPLY");
+        end
         core_b_cycle=cycle;
       end
     end
@@ -1754,6 +1974,42 @@ module tb_g6lc_coherence_l2;
       tick();fill_start=0;
     end
     $fatal(1,"COH_L2_AR_TIMEOUT");
+  endtask
+  // Scenario 7 (HPDCACHE store shapes): one AXI write of `beats` 64-bit INCR
+  // beats whose per-beat data/strobes come from wr_beats/wr_strbs; waits for
+  // the core-side B (core_b_count) so shapes serialize.
+  task automatic send_write(input addr_t addr,input int beats,
+                            input logic [3:0] cache);
+    int b_want;
+    b_want=core_b_count+1;
+    wr_req='0;wr_req.addr=addr;wr_req.id=6;wr_req.len=8'(beats-1);
+    wr_req.size=3;wr_req.burst=2'b01;wr_req.cache=cache;wr_req_valid=1;
+    for(int n=0;n<2000;n++)begin
+      #1;
+      if(wr_req_valid && responses[0].aw_ready)begin tick();wr_req_valid=0;break;end
+      tick();
+    end
+    if(wr_req_valid)$fatal(1,"COH_L2_AW_TIMEOUT");
+    // The DRAM model gates w_ready on `cycle-aw_cycle >= WRITE_DELAY+W_STALL`
+    // and `cycle` advances by a blocking increment inside the posedge monitor,
+    // so the gate's rising edge only exists inside the posedge evaluation —
+    // a W beat presented earlier never observes ready. Wait the gate out
+    // before driving the burst (same cycle-gate idiom as the scenario-0
+    // write loop at `cycle-aw_cycle >= WRITE_DELAY`).
+    for(int n=0;n<2000 && cycle-aw_cycle<WRITE_DELAY+W_STALL;n++)tick();
+    if(cycle-aw_cycle<WRITE_DELAY+W_STALL)$fatal(1,"COH_L2_W_READY_TIMEOUT");
+    for(int k=0;k<beats;k++)begin
+      wr_data='{data:wr_beats[k],strb:wr_strbs[k],last:k==beats-1,user:0};
+      wr_data_valid=1;
+      for(int n=0;n<2000;n++)begin
+        #1;
+        if(wr_data_valid && responses[0].w_ready)begin tick();wr_data_valid=0;break;end
+        tick();
+      end
+      if(wr_data_valid)$fatal(1,"COH_L2_W_TIMEOUT");
+    end
+    for(int n=0;n<2000 && core_b_count<b_want;n++)tick();
+    if(core_b_count<b_want)$fatal(1,"COH_L2_B_TIMEOUT");
   endtask
   // Scenario 5: issue `lines` sequential reads, one per 64-byte line starting
   // at `base`, waiting for each response before the next request. The
@@ -1871,6 +2127,109 @@ module tb_g6lc_coherence_l2;
       $display("COH_L2_PASS scenario=%0d",scenario);
       $finish;
     end
+    if(scenario==6)begin
+      // T9a composed CMO: warm ADDRESS into L2 (and the stacked L3), then a
+      // core-0 cbo.inval through the engine must (a) broadcast an L1 inval to
+      // BOTH cores, (b) tag-match-inval the line at L2 and L3, (c) pulse done
+      // exactly once. The re-read then misses at every level and DRAM fills
+      // again. +oracle_negative severs the L2 match-inval wire: the re-read
+      // hits and COH_L2_CMO_PROP must fire.
+      send_read(1);
+      while(read_count!=1)tick();
+      if(dram_ar_count!=1)$fatal(1,"COH_L2_CMO_WARMUP");
+      tb_cmo_req_op[0]=2'd0;tb_cmo_req_addr[0]=ADDRESS;
+      // one tick so the staged request payload reaches the engine before valid
+      tick();
+      tb_cmo_req_v[0]=1'b1;
+      // The request is consumed at the accepting edge (valid && ready); a
+      // held valid is a second request, so drop it right after that edge.
+      begin
+        bit accepted=0;
+        for(int n=0;n<2000 && !accepted;n++)begin
+          accepted=tb_cmo_ready[0];
+          tick();
+        end
+        tb_cmo_req_v[0]=1'b0;
+        if(!accepted)$fatal(1,"COH_L2_CMO_NO_ACCEPT");
+      end
+      for(int n=0;n<2000 && cmo_done_count==0;n++)tick();
+      if(cmo_done_count!=1)$fatal(1,"COH_L2_CMO_NO_DONE");
+      if(cmo_inv_count[0]!=1 || cmo_inv_count[1]!=1)
+        $fatal(1,"COH_L2_CMO_BCAST c0=%0d c1=%0d",cmo_inv_count[0],cmo_inv_count[1]);
+      send_read(2);
+      while(read_count!=2)tick();
+      if(dram_ar_count!=2)$fatal(1,"COH_L2_CMO_PROP dram_ar=%0d",dram_ar_count);
+      if(l2_misses<2 || (USE_L3 && l3_misses<2))
+        $fatal(1,"COH_L2_CMO_MISSCOUNT l2=%0d l3=%0d",l2_misses,l3_misses);
+      $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d dram_ar=%0d l2_miss=%0d l3_miss=%0d cmo_done=%0d",
+        scenario,USE_L2,BYTE_SIZE,dram_ar_count,l2_misses,l3_misses,cmo_done_count);
+      $finish;
+    end
+    if(scenario==7)begin
+      // T9a/M1a HPDCACHE store shapes under eWT: the write-through stream an
+      // HPDCACHE L1 emits (single word, wbuf-coalesced full-line burst,
+      // partial-strobe multi-beat, modifiable-only NC) against a resident
+      // line, exercising the WRITE_UPDATE merge path end to end. A cbo.inval
+      // through the engine then forces a DRAM refill that proves the merged
+      // bytes reached memory. Under +oracle_negative the L2 match-inval wire
+      // is severed, so the post-CMO read hits the resident line instead of
+      // refilling and COH_L2_SHAPE_AR must fire.
+      // (a) warm ADDRESS resident at every level.
+      send_read(1);
+      while(read_count!=1)tick();
+      if(dram_ar_count!=1)$fatal(1,"COH_L2_CMO_WARMUP");
+      // (b) single word, partial strobe, write-allocate attribute.
+      wr_beats[0]=64'hAAAA_BBBB_CCCC_DDDD;wr_strbs[0]=8'h0F;
+      send_write(ADDRESS,1,4'hf);
+      send_read(2);while(read_count!=2)tick();
+      // (c) wbuf-coalesced full-line burst: 8 full-strobe beats, line base.
+      for(int k=0;k<8;k++)begin
+        wr_beats[k]=64'h1000_0000_0000_0000|(64'(k+1)<<48)|64'h5a5a;
+        wr_strbs[k]='1;
+      end
+      send_write(ADDRESS & ~addr_t'(L2_LINE_BYTES-1),8,4'hf);
+      send_read(3);while(read_count!=3)tick();
+      // (d) two-beat partial-strobe run, bufferable cleared (alloc-only).
+      wr_beats[0]=64'hDEAD_BEEF_0000_1111;wr_strbs[0]=8'h81;
+      wr_beats[1]=64'h2222_3333_4444_5555;wr_strbs[1]=8'h3C;
+      send_write(ADDRESS,2,4'h6);
+      send_read(4);while(read_count!=4)tick();
+      // (e) cbo.inval through the engine: the resident copy drops at every
+      //     level, so the next read refills from DRAM — the refill data
+      //     verifies the DRAM model saw every merged byte lane above.
+      tb_cmo_req_op[0]=2'd0;tb_cmo_req_addr[0]=ADDRESS;tick();
+      tb_cmo_req_v[0]=1'b1;
+      begin
+        bit accepted=0;
+        for(int n=0;n<2000 && !accepted;n++)begin
+          accepted=tb_cmo_ready[0];tick();
+        end
+        tb_cmo_req_v[0]=1'b0;
+        if(!accepted)$fatal(1,"COH_L2_CMO_NO_ACCEPT");
+      end
+      for(int n=0;n<2000 && cmo_done_count==0;n++)tick();
+      if(cmo_done_count!=1)$fatal(1,"COH_L2_CMO_NO_DONE");
+      send_read(5);while(read_count!=5)tick();
+      // (f) modifiable-only (HPDCACHE NC) write: write-update-ineligible —
+      //     the resident line is invalidated and memory takes the bytes.
+      wr_beats[0]=64'h7777_8888_9999_AAAA;wr_strbs[0]='1;
+      send_write(ADDRESS,1,4'h2);
+      send_read(6);while(read_count!=6)tick();
+      // The severed match-inval under +oracle_negative leaves the line
+      // resident, so step (e)'s re-read hits instead of refilling and the
+      // DRAM-AR count below fails — the arm needs no extra stimulus.
+      if(WRITE_UPDATE)begin
+        if(l2_wupd!=3)$fatal(1,"COH_L2_WU_SHAPES wupd=%0d",l2_wupd);
+        if(dram_ar_count!=3)$fatal(1,"COH_L2_SHAPE_AR dram_ar=%0d",dram_ar_count);
+      end else begin
+        if(l2_wupd!=0)$fatal(1,"COH_L2_WU_SHAPES wupd=%0d",l2_wupd);
+        if(dram_ar_count!=6)$fatal(1,"COH_L2_SHAPE_AR dram_ar=%0d",dram_ar_count);
+      end
+      if(apply_count!=4)$fatal(1,"COH_L2_SHAPE_INV apply=%0d",apply_count);
+      $display("COH_L2_PASS scenario=%0d l2=%0d bytes=%0d dram_ar=%0d l2_hit=%0d l2_miss=%0d l3_miss=%0d l2_wupd=%0d cmo_done=%0d",
+        scenario,USE_L2,BYTE_SIZE,dram_ar_count,l2_hits,l2_misses,l3_misses,l2_wupd,cmo_done_count);
+      $finish;
+    end
     send_read(1);
     while(read_count!=1)tick();
     if(scenario<2 && (!cache_valid || cache_value!=64'h11))$fatal(1,"COH_L2_WARMUP");
@@ -1942,14 +2301,23 @@ module tb_g6lc_coherence_credits;
   import g6lc_coherence_pkg::*;
   import g6lc_l2_tb_pkg::*;
   parameter int MSHR_DEPTH=2;
+  // Hub shared AR/AW slot count — drives CVA6Cfg.CohMaxOutstanding sweeps
+  // (legal range 2..14; the bench counters bound at MAX_OT accordingly).
+  parameter int MAX_OT=4;
   parameter int READS_PER_CORE=4;
+  // WRITES_PER_CORE>0 interleaves that many write-through AW/W bursts per core
+  // port with the read burst (ids READS_PER_CORE+k) — the "mixed" burst that
+  // pressures the shared AR/AW credit pool from both channels.
+  parameter int WRITES_PER_CORE=0;
   parameter int MEM_LATENCY=8;
   // USE_L3 stacks axi_cut + g6lc_l3_top between the L2 master and the DRAM
   // model (non-inclusive: l3_evict_ready_i tied 1).
   parameter bit USE_L3=1'b0;
   parameter int L3_BYTES=2048, L3_SET_ASSOC=2, L3_MSHR_DEPTH=4, L3_DATA_BANKS=2;
   parameter bit TAG_SRAM=1'b0;
-  localparam int CORES=2;
+  // CORES parameterises the issuer count so a "four-hart-style" burst can drive
+  // four agents without changing the checkers.
+  parameter int CORES=2;
   localparam int DRAM_DEPTH=8;
   localparam addr_t BASE=64'h8000_0000;
   logic clk=0,rst_n=0;
@@ -1959,9 +2327,10 @@ module tb_g6lc_coherence_credits;
   resp_t hub_rsp,dram_rsp;
   coh_inval_t [CORES-1:0] invalidations;
   logic [CORES-1:0] inv_ready='1;
-  int cycle=0,reads_done=0;
-  int max_fills=0,max_l3_fills=0,max_ar_live=0,mshr_stall_cycles=0;
-  int first_ar_cycle=-1,last_r_cycle=-1;
+  int cycle=0,reads_done=0,writes_done=0;
+  int max_fills=0,max_l3_fills=0,max_ar_live=0,max_aw_live=0;
+  int mshr_stall_cycles=0,wr_stall_cycles=0;
+  int first_ar_cycle=-1,last_r_cycle=-1,last_b_cycle=-1;
   int r_seen[CORES][16];
   bit negative;
   typedef struct {id_t id; addr_t addr; logic [7:0] len; int issue;} dram_entry_t;
@@ -1969,7 +2338,7 @@ module tb_g6lc_coherence_credits;
   int dram_head=0,dram_count=0;
   logic [7:0] dram_beat=0;
 
-  g6lc_coherence_hub #(.NR_CORES(2),.MAX_OUTSTANDING(4),.INVAL_DEPTH(2),
+  g6lc_coherence_hub #(.NR_CORES(CORES),.MAX_OUTSTANDING(MAX_OT),.INVAL_DEPTH(2),
       .LINE_BYTES(16),.SNOOP_FILTER_EN(1),.SNOOP_FILTER_ENTRIES(128),
       .POLICY(config_pkg::COH_OOO),.axi_req_t(req_t),.axi_resp_t(resp_t)) hub (
       .clk_i(clk),.rst_ni(rst_n),.core_req_i(requests),.core_resp_o(responses),
@@ -1990,7 +2359,8 @@ module tb_g6lc_coherence_credits;
       .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
       .l2_selfinv_hit_o(),.l2_wupdate_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
-      .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o());
+      .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o(),
+      .l2_write_idle_o());
   if (USE_L3) begin : gen_l3_stack
     req_t cut_req;
     resp_t cut_rsp;
@@ -2012,7 +2382,10 @@ module tb_g6lc_coherence_credits;
       .mst_req_o(dram_req),.mst_resp_i(dram_rsp),
       .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),.l3_selfinv_hit_o(),
       .l3_wupdate_o(),
-      .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1)
+      .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
+      .l3_write_idle_o(),
+      .l3_back_inval_valid_i(1'b0),.l3_back_inval_addr_i('0),
+      .l3_back_inval_ready_o()
     );
   end else begin : gen_no_l3
     assign dram_req=l2m_req;
@@ -2025,11 +2398,23 @@ module tb_g6lc_coherence_credits;
   function automatic addr_t read_addr(input int c,input int k);
     return BASE+64'((c*READS_PER_CORE+k)*64);
   endfunction
+  function automatic addr_t write_addr(input int c,input int k);
+    return BASE+64'h0040_0000+64'((c*WRITES_PER_CORE+k)*64);
+  endfunction
+
+  // DRAM write side: one write burst open at a time (the model is a serial
+  // device); AW is held off while a W burst or its B is pending.
+  logic wr_open_q, b_pend_q;
+  id_t wr_id_q, b_id_q;
+  logic [7:0] wr_len_q, wbeat_q;
 
   always_comb begin
     dram_rsp='0;
     dram_rsp.ar_ready=dram_count<DRAM_DEPTH;
-    dram_rsp.aw_ready=1'b1;
+    dram_rsp.aw_ready=!wr_open_q && !b_pend_q;
+    dram_rsp.w_ready=wr_open_q;
+    dram_rsp.b_valid=b_pend_q;
+    dram_rsp.b='{id:b_id_q,resp:0,user:0};
     dram_rsp.r_valid=dram_count>0 && cycle-dram_q[dram_head].issue>=MEM_LATENCY;
     dram_rsp.r='{id:dram_q[dram_head].id,
       data:model_data(dram_q[dram_head].addr+64'(dram_beat)*8),
@@ -2038,11 +2423,24 @@ module tb_g6lc_coherence_credits;
   always_ff @(posedge clk or negedge rst_n) begin
     if(!rst_n)begin
       dram_head<=0;dram_count<=0;dram_beat<=0;
+      wr_open_q<=0;b_pend_q<=0;wr_id_q<='0;wr_len_q<='0;wbeat_q<=0;
     end else begin
       int push,pop;
       push=dram_req.ar_valid && dram_rsp.ar_ready;
       pop=dram_rsp.r_valid && dram_req.r_ready && dram_rsp.r.last;
-      if(dram_req.aw_valid && dram_rsp.aw_ready)$fatal(1,"COH_CREDIT_AW");
+      if(dram_req.aw_valid && dram_rsp.aw_ready && WRITES_PER_CORE==0)
+        $fatal(1,"COH_CREDIT_AW");
+      if(dram_req.aw_valid && dram_rsp.aw_ready)begin
+        wr_open_q<=1;wr_id_q<=dram_req.aw.id;wr_len_q<=dram_req.aw.len;
+        wbeat_q<=0;
+      end
+      if(dram_req.w_valid && dram_rsp.w_ready)begin
+        if(dram_req.w.last != (wbeat_q==wr_len_q))
+          $fatal(1,"COH_CREDIT_WLAST beat=%0d len=%0d",wbeat_q,wr_len_q);
+        wbeat_q<=wbeat_q+1'b1;
+        if(dram_req.w.last)begin wr_open_q<=0;b_pend_q<=1;b_id_q<=wr_id_q;end
+      end
+      if(dram_rsp.b_valid && dram_req.b_ready)b_pend_q<=0;
       if(push)begin
         int tail;
         tail=(dram_head+dram_count)%DRAM_DEPTH;
@@ -2055,23 +2453,42 @@ module tb_g6lc_coherence_credits;
     end
   end
 
+  // The L3 fill-occupancy probe lives behind a generate: Verilator resolves
+  // the dotted name even under the dead arm of a ternary, so a plain
+  // USE_L3 ? hier : 0 breaks USE_L3=0 builds.
+  int l3_fill_probe;
+  if (USE_L3) begin : gen_l3_probe
+    always_comb l3_fill_probe = $countones(gen_l3_stack.i_l3.i_l3_as_l2.gen_l2.fill_act_q);
+  end else begin : gen_l3_probe
+    always_comb l3_fill_probe = 0;
+  end
+
+  localparam int WATCHDOG = 2000 + 100*CORES*(READS_PER_CORE+WRITES_PER_CORE);
+
   always @(posedge clk) begin
     if(rst_n)begin
-      int l2_fills,ar_live,l3_fills;
+      int l2_fills,ar_live,aw_live,l3_fills;
       cycle++;
       l2_fills=$countones(l2.gen_l2.fill_act_q);
-      l3_fills=USE_L3 ? $countones(gen_l3_stack.i_l3.i_l3_as_l2.gen_l2.fill_act_q) : 0;
+      l3_fills=l3_fill_probe;
       ar_live=0;
-      for(int s=0;s<4;s++)ar_live+=hub.gen_cluster.ar_ot_q[s].valid;
+      aw_live=0;
+      for(int s=0;s<MAX_OT;s++)begin
+        ar_live+=hub.gen_cluster.ar_ot_q[s].valid;
+        aw_live+=hub.gen_cluster.aw_ot_q[s].valid;
+      end
       if(l2_fills>max_fills)max_fills=l2_fills;
       if(l3_fills>max_l3_fills)max_l3_fills=l3_fills;
       if(ar_live>max_ar_live)max_ar_live=ar_live;
+      if(aw_live>max_aw_live)max_aw_live=aw_live;
       if(hub_req.ar_valid && !hub_rsp.ar_ready && l2.gen_l2.mshr_full)mshr_stall_cycles++;
-      if(ar_live>4)$fatal(1,"COH_CREDIT_AR_BOUND live=%0d",ar_live);
-      if(l2_fills>4)$fatal(1,"COH_CREDIT_FILL_BOUND fills=%0d",l2_fills);
-      if(USE_L3 && l3_fills>4)$fatal(1,"COH_CREDIT_L3_BOUND fills=%0d",l3_fills);
-      if(USE_L3 && dram_count>4)$fatal(1,"COH_CREDIT_DRAM_BOUND fills=%0d",dram_count);
-      if(cycle>4000)$fatal(1,"COH_CREDIT_WATCHDOG reads=%0d",reads_done);
+      if(hub_req.aw_valid && !hub_rsp.aw_ready)wr_stall_cycles++;
+      if(ar_live>MAX_OT)$fatal(1,"COH_CREDIT_AR_BOUND live=%0d",ar_live);
+      if(aw_live>MAX_OT)$fatal(1,"COH_CREDIT_AW_BOUND live=%0d",aw_live);
+      if(l2_fills>MSHR_DEPTH)$fatal(1,"COH_CREDIT_FILL_BOUND fills=%0d",l2_fills);
+      if(USE_L3 && l3_fills>L3_MSHR_DEPTH)$fatal(1,"COH_CREDIT_L3_BOUND fills=%0d",l3_fills);
+      if(USE_L3 && dram_count>DRAM_DEPTH)$fatal(1,"COH_CREDIT_DRAM_BOUND fills=%0d",dram_count);
+      if(cycle>WATCHDOG)$fatal(1,"COH_CREDIT_WATCHDOG reads=%0d writes=%0d",reads_done,writes_done);
       for(int c=0;c<CORES;c++)begin
         if(requests[c].ar_valid && responses[c].ar_ready && first_ar_cycle<0)
           first_ar_cycle=cycle;
@@ -2089,6 +2506,13 @@ module tb_g6lc_coherence_credits;
           r_seen[c][id]++;
           if(responses[c].r.last)begin reads_done++;last_r_cycle=cycle;end
         end
+        if(responses[c].b_valid && requests[c].b_ready)begin
+          if(int'(responses[c].b.id)<READS_PER_CORE ||
+             int'(responses[c].b.id)>=READS_PER_CORE+WRITES_PER_CORE)
+            $fatal(1,"COH_CREDIT_B_ID core=%0d id=%0d",c,responses[c].b.id);
+          if(responses[c].b.resp!=0)$fatal(1,"COH_CREDIT_RESP core=%0d",c);
+          writes_done++;last_b_cycle=cycle;
+        end
       end
     end
   end
@@ -2096,17 +2520,26 @@ module tb_g6lc_coherence_credits;
   task automatic tick;#2;clk=1;#2;clk=0;#2;endtask
   initial begin
     int issued[CORES];
-    bit taken[CORES];
+    int issued_w[CORES];
+    // w_left: W beats still owed for the write whose AW was last accepted on
+    // this port (one W burst at a time per core — the AW slot itself stays
+    // live until B, which is what pressures the shared credit pool).
+    int w_left[CORES];
+    int w_idx[CORES];
+    bit taken[CORES], taken_w[CORES];
     bit done_issuing;
     negative=$test$plusargs("oracle_negative");
+    if(READS_PER_CORE+WRITES_PER_CORE>16)
+      $fatal(1,"COH_CREDIT_CFG ids overflow IDW (%0d+%0d)",READS_PER_CORE,WRITES_PER_CORE);
     requests='0;
     for(int c=0;c<CORES;c++)begin
-      requests[c].r_ready=1'b1;requests[c].b_ready=1'b1;issued[c]=0;taken[c]=0;
+      requests[c].r_ready=1'b1;requests[c].b_ready=1'b1;
+      issued[c]=0;issued_w[c]=0;w_left[c]=0;w_idx[c]=0;taken[c]=0;taken_w[c]=0;
     end
     for(int c=0;c<CORES;c++)for(int i=0;i<16;i++)r_seen[c][i]=0;
     repeat(3)tick();rst_n=1;repeat(132)tick();
     done_issuing=0;
-    for(int n=0;n<2000 && !done_issuing;n++)begin
+    for(int n=0;n<WATCHDOG && !done_issuing;n++)begin
       for(int c=0;c<CORES;c++)begin
         if(!requests[c].ar_valid&&issued[c]<READS_PER_CORE)begin
           requests[c].ar='0;
@@ -2116,25 +2549,53 @@ module tb_g6lc_coherence_credits;
           requests[c].ar.burst=1;requests[c].ar.cache=4'hf;
           requests[c].ar_valid=1'b1;
         end
-        taken[c]=0;
+        if(!requests[c].aw_valid&&issued_w[c]<WRITES_PER_CORE&&w_left[c]==0)begin
+          requests[c].aw='0;
+          requests[c].aw.id=id_t'(READS_PER_CORE+issued_w[c]);
+          requests[c].aw.addr=write_addr(c,issued_w[c]);
+          requests[c].aw.len=1;requests[c].aw.size=3;
+          requests[c].aw.burst=1;requests[c].aw.cache=4'hf;
+          requests[c].aw_valid=1'b1;
+        end
+        if(w_left[c]>0)begin
+          requests[c].w.data=model_data(write_addr(c,w_idx[c])+64'(2-w_left[c])*8);
+          requests[c].w.strb='1;
+          requests[c].w.last=w_left[c]==1;
+          requests[c].w_valid=1'b1;
+        end
+        taken[c]=0;taken_w[c]=0;
       end
       #1;
-      for(int c=0;c<CORES;c++)
+      for(int c=0;c<CORES;c++)begin
         taken[c]=requests[c].ar_valid&&responses[c].ar_ready;
+        taken_w[c]=requests[c].aw_valid&&responses[c].aw_ready;
+        if(w_left[c]>0&&requests[c].w_valid&&responses[c].w_ready)w_left[c]--;
+      end
       tick();
       done_issuing=1;
       for(int c=0;c<CORES;c++)begin
         if(taken[c])begin requests[c].ar_valid=1'b0;issued[c]++;end
-        if(issued[c]<READS_PER_CORE||requests[c].ar_valid)done_issuing=0;
+        if(taken_w[c])begin
+          requests[c].aw_valid=1'b0;
+          w_idx[c]=issued_w[c];w_left[c]=2;issued_w[c]++;
+        end
+        if(w_left[c]==0)requests[c].w_valid=1'b0;
+        if(issued[c]<READS_PER_CORE||issued_w[c]<WRITES_PER_CORE||
+           requests[c].ar_valid||requests[c].aw_valid||w_left[c]>0)
+          done_issuing=0;
       end
     end
     if(!done_issuing)$fatal(1,"COH_CREDIT_AR_TIMEOUT");
-    for(int n=0;n<4000 && reads_done!=2*READS_PER_CORE;n++)tick();
-    if(reads_done!=2*READS_PER_CORE)
-      $fatal(1,"COH_CREDIT_WATCHDOG reads_done=%0d",reads_done);
-    $display("COH_CREDIT_PASS mshr=%0d l3=%0d l3_mshr=%0d reads=%0d max_fills=%0d max_l3_fills=%0d max_ar_live=%0d mshr_stall_cycles=%0d drain=%0d",
-      MSHR_DEPTH,USE_L3,L3_MSHR_DEPTH,2*READS_PER_CORE,max_fills,max_l3_fills,max_ar_live,mshr_stall_cycles,
-      last_r_cycle-first_ar_cycle);
+    for(int n=0;n<WATCHDOG &&
+          (reads_done!=CORES*READS_PER_CORE||writes_done!=CORES*WRITES_PER_CORE);
+        n++)tick();
+    if(reads_done!=CORES*READS_PER_CORE||writes_done!=CORES*WRITES_PER_CORE)
+      $fatal(1,"COH_CREDIT_WATCHDOG reads_done=%0d writes_done=%0d",
+        reads_done,writes_done);
+    $display("COH_CREDIT_PASS mshr=%0d l3=%0d l3_mshr=%0d cores=%0d reads=%0d writes=%0d max_fills=%0d max_l3_fills=%0d max_ar_live=%0d max_aw_live=%0d mshr_stall_cycles=%0d wr_stall_cycles=%0d drain=%0d ot=%0d",
+      MSHR_DEPTH,USE_L3,L3_MSHR_DEPTH,CORES,CORES*READS_PER_CORE,CORES*WRITES_PER_CORE,
+      max_fills,max_l3_fills,max_ar_live,max_aw_live,mshr_stall_cycles,wr_stall_cycles,
+      last_r_cycle-first_ar_cycle,MAX_OT);
     $finish;
   end
 endmodule

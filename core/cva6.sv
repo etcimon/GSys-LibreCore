@@ -424,6 +424,16 @@ module cva6
     input  logic [63:0] l1_inval_addr_i,
     input  logic        l1_inval_valid_i,
     output logic        l1_inval_ready_o,
+    // T9a eWT CMO sideband: Zicbom cache-block ops leave the core on this
+    // channel when L2CmoEn propagates them into the hierarchy. cmo_op_o
+    // encodes 0=inval, 1=clean, 2=flush; cmo_addr_o is the physical address.
+    // When L2CmoEn=0 the core completes the CBO locally (L1 inval / buffer
+    // drain) and these ports stay idle — tie ready/done to 0.
+    output logic                    cmo_valid_o,
+    output logic [1:0]              cmo_op_o,
+    output logic [CVA6Cfg.PLEN-1:0] cmo_addr_o,
+    input  logic                    cmo_ready_i,
+    input  logic                    cmo_done_i,
     // PMU group 2: SoC L2/L3/PF probes (tie 0 for single-core / no hierarchy)
     input  logic        l2_miss_i,
     input  logic        l3_hit_i,
@@ -901,9 +911,15 @@ module cva6
   // Accelerator-side inv (Ara/CVXIF) OR external multi-core coherence inv
   logic [63:0] acc_inval_addr;
   logic        acc_inval_valid;
-  // External inv has priority when accelerator is idle
-  assign inval_addr  = acc_inval_valid ? acc_inval_addr : l1_inval_addr_i;
-  assign inval_valid = acc_inval_valid | l1_inval_valid_i;
+  // T9a: third inval source — the local CMO completion path. Only reachable
+  // when L2CmoEn=0; lowest priority after acc_inval and l1_inval_*.
+  logic [63:0] cmo_lcl_addr;
+  logic        cmo_lcl_valid;
+  // External inv has priority when accelerator is idle; the local CMO inval
+  // is last (it only exists when no hierarchy is present).
+  assign inval_addr  = acc_inval_valid ? acc_inval_addr :
+                       l1_inval_valid_i ? l1_inval_addr_i : cmo_lcl_addr;
+  assign inval_valid = acc_inval_valid | l1_inval_valid_i | cmo_lcl_valid;
   assign l1_inval_ready_o = inval_ready & ~acc_inval_valid;
   if (CVA6Cfg.DCacheType != config_pkg::WT) begin : gen_no_wt_apply
     assign inval_apply_valid = 1'b0;
@@ -927,6 +943,78 @@ module cva6
   end else begin : gen_no_local_modification
     assign mem_mod_valid[1] = 1'b0;
     assign mem_mod_addr[1] = '0;
+  end
+
+  // --------------
+  // CMO sideband routing (T9a eWT)
+  // --------------
+  // The active cache subsystem drives cmo_req_*; with L2CmoEn the request
+  // travels on the external cmo_* ports to the cluster's g6lc_cmo_engine.
+  // Without it the core completes the CBO locally: inval → its own L1 through
+  // the inval mux above, clean/flush → already ordered by the subsystem's
+  // write-buffer drain, so a one-cycle done pulse finishes them.
+  logic                    cmo_req_valid;
+  logic [1:0]              cmo_req_op;
+  logic [CVA6Cfg.PLEN-1:0] cmo_req_addr;
+  logic                    cmo_req_ready;
+  logic                    cmo_req_done;
+
+  if (CVA6Cfg.L2CmoEn && CVA6Cfg.L2En) begin : gen_cmo_ext
+    assign cmo_valid_o   = cmo_req_valid;
+    assign cmo_op_o      = cmo_req_op;
+    assign cmo_addr_o    = cmo_req_addr;
+    assign cmo_req_ready = cmo_ready_i;
+    assign cmo_req_done  = cmo_done_i;
+    assign cmo_lcl_valid = 1'b0;
+    assign cmo_lcl_addr  = '0;
+  end else begin : gen_cmo_local
+    typedef enum logic [1:0] {CL_IDLE, CL_INVAL, CL_DONE} cl_fsm_e;
+    cl_fsm_e cl_fsm_q, cl_fsm_d;
+    logic [CVA6Cfg.PLEN-1:0] cl_addr_q, cl_addr_d;
+
+    assign cmo_valid_o = 1'b0;
+    assign cmo_op_o    = '0;
+    assign cmo_addr_o  = '0;
+    // The subsystem only raises cmo_req_valid once its write buffer has
+    // drained, so acceptance is unconditional here.
+    assign cmo_req_ready = 1'b1;
+    // Acceptance posts the INV_REQ onto the dcache return channel the same
+    // cycle (wt_axi_adapter), so ready-accept is the apply; done pulses the
+    // next cycle. Priority mirrors the inval mux above.
+    wire cl_inval_fire = cmo_lcl_valid && inval_ready &&
+                         !acc_inval_valid && !l1_inval_valid_i;
+    assign cmo_lcl_valid = (cl_fsm_q == CL_INVAL);
+    assign cmo_lcl_addr  = 64'(cl_addr_q);
+
+    always_comb begin
+      cl_fsm_d  = cl_fsm_q;
+      cl_addr_d = cl_addr_q;
+      unique case (cl_fsm_q)
+        CL_IDLE: if (cmo_req_valid) begin
+          cl_addr_d = cmo_req_addr;
+          // op 0 = inval → local L1 invalidate; clean/flush → drain already
+          // done by the subsystem tracker, complete immediately.
+          cl_fsm_d  = (cmo_req_op == 2'd0) ? CL_INVAL : CL_DONE;
+        end
+        CL_INVAL: if (cl_inval_fire) cl_fsm_d = CL_DONE;
+        CL_DONE:  cl_fsm_d = CL_IDLE;
+        default:  cl_fsm_d = CL_IDLE;
+      endcase
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : p_cmo_lcl
+      if (!rst_ni) begin
+        cl_fsm_q     <= CL_IDLE;
+        cl_addr_q    <= '0;
+        cmo_req_done <= 1'b0;
+      end else begin
+        cl_fsm_q     <= cl_fsm_d;
+        cl_addr_q    <= cl_addr_d;
+        cmo_req_done <= (cl_fsm_q == CL_DONE);
+      end
+    end
+    logic unused_lcl_cmo;
+    assign unused_lcl_cmo = cmo_ready_i | cmo_done_i;
   end
 
   // --------------
@@ -2537,7 +2625,13 @@ module cva6
         .inval_addr_i      (inval_addr),
         .inval_valid_i     (inval_valid),
         .inval_ready_o     (inval_ready),
-        .inval_apply_valid_o(inval_apply_valid), .inval_apply_addr_o(inval_apply_addr)
+        .inval_apply_valid_o(inval_apply_valid), .inval_apply_addr_o(inval_apply_addr),
+        // T9a eWT CMO sideband
+        .cmo_valid_o       (cmo_req_valid),
+        .cmo_op_o          (cmo_req_op),
+        .cmo_addr_o        (cmo_req_addr),
+        .cmo_ready_i       (cmo_req_ready),
+        .cmo_done_i        (cmo_req_done)
     );
   end else if (
         CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT ||
@@ -2606,7 +2700,13 @@ module cva6
         // U6.2 external L1 inv from coherence hub
         .inval_addr_i (inval_addr),
         .inval_valid_i(inval_valid),
-        .inval_ready_o(inval_ready)
+        .inval_ready_o(inval_ready),
+        // T9a eWT CMO sideband (response hold lives in the adapter)
+        .cmo_valid_o  (cmo_req_valid),
+        .cmo_op_o     (cmo_req_op),
+        .cmo_addr_o   (cmo_req_addr),
+        .cmo_ready_i  (cmo_req_ready),
+        .cmo_done_i   (cmo_req_done)
     );
     assign miss_vld_bits = '0;
     assign dcache_pm_void_ack    = 1'b0;
@@ -2666,6 +2766,9 @@ module cva6
     );
     assign dcache_commit_wbuffer_not_ni = 1'b1;
     assign inval_ready                  = 1'b1;
+    assign cmo_req_valid                = 1'b0;
+    assign cmo_req_op                   = '0;
+    assign cmo_req_addr                 = '0;
     assign miss_vld_bits                = '0;
     assign dcache_pm_void_ack           = 1'b0;
     assign dcache_pm_fixup_write        = 1'b0;

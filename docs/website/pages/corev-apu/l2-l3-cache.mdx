@@ -81,8 +81,8 @@ Three facts a contributor needs before touching this layer:
   `CACHE_MODIFIABLE` only, and `g6lc_l2_top` allocates only when an allocate bit is set, so
   `g6lc64_smt2`, `g6lc64_smt2_ooo_int` and `g6lc64_ooo_int2` ran a serializing bypass (measured:
   948,230 L2 requests, 0 hits on the four-hart OpenSBI boot). `WtAxiAllocEn` fixes the attribute
-  at the WT adapter; it is on in `g6lc64_ooo_int2` (re-qualified) and the L3 packages, and off —
-  bit-identical — in the two SMT2 targets.
+  at the WT adapter; it is on in every eWT package (the two SMT2 targets re-qualified with
+  re-baselined anchors at M1a).
 - **Inclusion is a package policy** (`L3InclusiveEn`). The WT L1 plus hub-owned invalidations do
   not need an inclusive L3, so `g6lc64_ooo_int2_l3` and `g6lc64_smt2_l3` run a **non-inclusive**
   1 MiB / 16-way L3 (MSHR 4, the hub's credit count); `g6lc64_ooo_server` keeps the inclusive
@@ -102,14 +102,35 @@ Three facts a contributor needs before touching this layer:
 
 A write-through on a resident L2/L3 line used to purge the line (~6,060 purges per 8,192
 stores on the write/read kernel; ~90k of the four-hart boot's ~100k L2 misses followed a
-purge). With `L2WriteUpdateEn` (default 0; on in `g6lc64_ooo_int2`, `g6lc64_ooo_int2_l3`,
-`g6lc64_smt2_l3`; off and bit-identical in `g6lc64_smt2`/`g6lc64_smt2_ooo_int`) an **eligible**
+purge). With `L2WriteUpdateEn` (default 0; on in every eWT package after the M1a
+anchor re-baseline) an **eligible**
 write — cacheable, no ATOP, no lock, burst inside the line — merges its bytes into the
 resident line through the data port while the write-through still reaches memory. Same-line
 in-flight fills are still killed, and merged bytes become visible only after memory's B
 response. Measured: boot `l2_miss` ~103k→~1.5k, `l2_selfinv` ~91.6k→~190, `l2_wupd`
 ~770–833k; strict boots pass on all enabled packages and the latency-40 boot improves
 11.5–13.2 %. Observability: `l2_wupd`/`l3_wupd` fields in the testbench `[mc_cache]` line.
+
+## CBO / CMO end-to-end (`L2CmoEn`, M1a 2026-09-27)
+
+Zicbom block operations reach every level of the hierarchy. The core emits
+`cmo_valid`/`cmo_op`/`cmo_addr` and waits for `cmo_done`: on WT targets the CBO's
+store-port request is intercepted before the write buffer (the old decode hung the
+store buffer and corrupted one byte), issued once the buffer is empty, and the store
+buffer's `data_rvalid` is pulsed when the cluster answers. The cluster's
+`g6lc_cmo_engine` round-robins the cores, broadcasts the L1 invalidation to **every**
+core, match-invalidates the L2 (`l2_back_inval_*`, arbitrated behind the inclusive
+victim source) and the L3 (`l3_back_inval_*`); `cbo.clean`/`cbo.flush` complete once
+`l2_write_idle_o`/`l3_write_idle_o` report no unacknowledged write. On HPDCACHE
+targets the adapter's own CMO response is held until `cmo_done_i`, so the same
+contract reaches the shared levels. `cbo.zero` works everywhere as a commit-queue
+zero-write burst. Directed evidence: `mc_cbo_ewt` (a `+mem_poke` write behind the
+caches becomes visible to issuer and peer alike) on int2, int2_l3, smt2, smt2_l3,
+smt2_ooo_int, stream8 and server_math, with firing negative arms.
+
+Also new: `CohMaxOutstanding` (hub shared AR/AW slot count, default 4, legal 2–14 —
+8 on the int2 packages with MSHR 8, measured to remove all read-burst stalls on
+`tb_g6lc_coherence_credits`).
 
 For DRAM-latency experiments use the testbench's `DramLatency` parameter
 (`corev_apu/tb/g6lc_tb_dram_latency.sv`, first beat of each burst delayed). The vendor

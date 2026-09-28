@@ -20,15 +20,16 @@ does not allocate on a store miss; the L2/L3 engine applies the same policy.
 
 | Configuration | L1 | Allocate | Write-update | Posted writes | CBO | Coherence |
 |---|---|---|---|---|---|---|
-| `g6lc64_ooo_int2`, `g6lc64_ooo_int2_l3` | WT | on | on | M1 | M1 | `COH_OOO` (signature) |
-| `g6lc64_smt2_l3` | WT | on | on | M1 | M1 | single core |
-| `g6lc64_smt2`, `g6lc64_smt2_ooo_int` (anchors) | WT | M1 (re-baselined) | M1 | M1 | M1 | single core |
-| `g6lc64_stream8`, `server_math`, `server_math_v`, `ai` | HPDCACHE_WT | on (HPDCACHE) | M1 | M1 | M1 | `COH_FILTERED` |
-| `g6lc64_ooo_int` | WT, no L2 | — | — | — | M1 (L1 only) | single core |
+| `g6lc64_ooo_int2`, `g6lc64_ooo_int2_l3` | WT | on | on | M1b | on | `COH_OOO` (signature) |
+| `g6lc64_smt2_l3` | WT | on | on | M1b | on | single core |
+| `g6lc64_smt2`, `g6lc64_smt2_ooo_int` (anchors) | WT | on (anchors re-baselined) | on | M1b | on | single core |
+| `g6lc64_stream8`, `server_math`, `server_math_v`, `ai`, `ooo_server` | HPDCACHE_WT | on (HPDCACHE) | on | M1b | on | `COH_FILTERED` |
+| `g6lc64_ooo_int` | WT, no L2 | — | — | — | on (L1-local, `L2En=0`) | single core |
 
-"M1" = planned in the eWT milestone of `C:\Users\etcim\.devin\plans\plan-9f0fd4941a162312.md`
-(recorded in `core/ooo/AGENTS-ooo-plan.md` once landed); everything marked "on" has
-strict OpenSBI evidence on the named package (T8a–T8f).
+"M1a" (CBO end-to-end + write-update + allocation) is landed (T9a); "M1b" = posted
+writes, still planned in the eWT milestone of
+`C:\Users\etcim\.devin\plans\plan-9f0fd4941a162312.md`. Everything marked "on" has
+strict OpenSBI evidence on the named package (T8a–T8f, T9a).
 
 Measured on the four-hart OpenSBI boot of `g6lc64_ooo_int2` (DRAM latency 0,
 `ooocoh-p5-osbi-int2-L0-r1`): allocation alone turned a 0-hit bypass into 110k L2
@@ -131,14 +132,19 @@ streaming store, and a writer that keeps running while other cores hit the L2.
   immediately once posted writes drained). Non-coherent DMA **writes** require
   `cbo.inval` over the written range (or a coherent ingress) — the invalidation reaches
   every L1, the L2 and the L3.
-- Until M1 lands, `cbo.inval/clean/flush` on a WT target is **broken**: the decoder
-  turns a CBO into a `STORE` with `rs2 = x0` and a one-byte enable (`decoder.sv:533-535`,
-  `ariane_pkg::extract_transfer_size` returns size 0), the WT write buffer treats it as
-  an ordinary store (no `cbo` handling in `wt_dcache*.sv`) and the store buffer then
-  waits for a `data_rvalid` the WT cache never asserts (`store_buffer.sv:468-487`,
-  `wt_dcache_wbuffer.sv:1121`). Firmware that issues CBOs on `g6lc64_ooo_int2*` today
-  corrupts one byte and hangs. HPDCACHE targets map CBOs to CMO operations and are not
-  affected by the byte write; their CMO does not yet reach L2/L3.
+- Since M1a, `cbo.inval/clean/flush` on a WT target travels the CMO sideband: the
+  store-port request is intercepted in `wt_dcache`/`wt_cache_subsystem` (it never
+  reaches the write buffer), the op is issued to `g6lc_cmo_engine` once the write
+  buffer is empty, and the store buffer's `data_rvalid` is answered on `cmo_done_i`.
+  The engine broadcasts the L1 invalidation to every core and match-invalidates L2/L3
+  (`l2_back_inval_*`, `l3_back_inval_*`); `clean`/`flush` complete on
+  `l2_write_idle_o`/`l3_write_idle_o`. On HPDCACHE targets the adapter's own CMO
+  response is held until `cmo_done_i`, so the same contract reaches L2/L3. With
+  `L2CmoEn=0` (e.g. `g6lc64_ooo_int`) the core completes the CBO locally: `inval`
+  goes through the L1 `inval_addr` mux, `clean`/`flush` wait for write-buffer drain.
+  Directed evidence: `mc_cbo_ewt` (hart-to-hart visibility behind a `+mem_poke`
+  DRAM write) on int2, int2_l3, smt2, smt2_l3, smt2_ooo_int, stream8, server_math;
+  negative arms corrupt the expected value and fail as designed.
 
 ## Ordering rules the RTL enforces (posted writes, M1)
 

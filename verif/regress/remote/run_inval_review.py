@@ -318,12 +318,17 @@ def hub_review(out, data, runtime_info, runtime):
             'order': ("b_predecessors_q[s] <= b_predecessors_d[s];", "b_predecessors_q[s] <= '0;"),
             # Restored defect: a younger same-(core, id) AR is granted while the
             # older read slot is still live, so the L2 may answer it first.
-            'r-order': ("assign ar_req[c] = core_req_i[c].ar_valid && !ar_same_id_live[c];",
-                        "assign ar_req[c] = core_req_i[c].ar_valid;"),
+            'r-order': ("assign ar_req[c] = core_req_i[c].ar_valid && !ar_same_id_live[c] &&",
+                        "assign ar_req[c] = core_req_i[c].ar_valid &&"),
             # Restored defect: the signature filter acquires presence only on
             # AR fire, so a writer is never recorded as a sharer.
             'writer': (".alloc_valid_i(ar_fire | aw_fire),",
-                       ".alloc_valid_i(ar_fire),")
+                       ".alloc_valid_i(ar_fire),"),
+            # Restored defect: a same-line AR is forwarded while the write is
+            # still in flight, so the refill can publish pre-write data after
+            # the invalidation was already consumed (stale refill).
+            'refill': ("assign ar_req[c] = core_req_i[c].ar_valid && !ar_same_id_live[c] &&\n                         !ar_wr_line_live[c];",
+                       "assign ar_req[c] = core_req_i[c].ar_valid && !ar_same_id_live[c];")
         }[b_fault]
         assert text.count(old) == 1, 'B mutation site changed'
         path.write_text(text.replace(old, new))
@@ -355,7 +360,10 @@ def hub_review(out, data, runtime_info, runtime):
     publication = os.environ.get('REVIEW_HUB_PUBLICATION') == '1'
     stability = os.environ.get('REVIEW_HUB_B_STABILITY') == '1'
     stability_before = os.environ.get('REVIEW_HUB_B_STABILITY_BEFORE') == '1'
-    for outstanding in ([1] if bad_signature else [4] if (signature or ack_before or stability or publication) else [4, 1, 16] if lifetime else [4, 1] if repaired else [4]):
+    # REVIEW_HUB_OT sweeps the shared credit count (default 4); used to
+    # re-prove the signature/b-order arms at the configured CohMaxOutstanding.
+    ot_env = int(os.environ.get('REVIEW_HUB_OT', '4'))
+    for outstanding in ([1] if bad_signature else [ot_env] if (signature or ack_before or stability or publication or b_fault) else [4, 1, 16] if lifetime else [4, 1] if repaired else [4]):
         work = out / f'model-{outstanding}'
         work.mkdir()
         command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1', '-Wno-fatal', '-Werror-LATCH', '-Werror-UNOPTFLAT', '-Werror-USERERROR', '--top-module', 'tb_g6lc_coherence_hub', f'-GOT={outstanding}', *(['-GOOO=1', '-GNC=3'] if signature else []), *(['-GACK_AFTER_INVAL=0'] if ack_before else []), '--Mdir', str(work), '-o', 'hub-test', *files]
@@ -409,7 +417,8 @@ def hub_review(out, data, runtime_info, runtime):
                                (19, False, None), (19, True, 'HUB_B_STABILITY'),
                                (20, False, None), (20, True, 'HUB_B_STABILITY'),
                                (24, False, None), (24, True, 'HUB_B_ID_ORDER'),
-                               (25, False, None), (25, True, 'HUB_R_ID_ORDER')]
+                               (25, False, None), (25, True, 'HUB_R_ID_ORDER'),
+                               (27, False, None), (27, True, 'HUB_ATOP_R_WITHHELD')]
         if ack_before:
             trials = [(14, False, 'HUB_B_BEFORE_INVAL')]
         if signature:
@@ -429,6 +438,7 @@ def hub_review(out, data, runtime_info, runtime):
             trials = ([(24, False, 'HUB_B_ID_ORDER')] if b_fault == 'order' else
                       [(25, False, 'HUB_R_ID_ORDER')] if b_fault == 'r-order' else
                       [(26, False, 'HUB_WRITER_ACQUISITION'), (12, False, None)] if b_fault == 'writer' else
+                      [(23, False, 'HUB_STALE_REFILL_PUBLICATION')] if b_fault == 'refill' else
                       [(s, False, 'HUB_B_STABILITY') for s in (19, 20)])
         elif publication and not before:
             trials += [(int(s), True, codes[int(s)]) for s in selected.split(',') if int(s) in (21, 22, 24, 25)]
@@ -487,6 +497,7 @@ def composed_review(out, data, runtime_info, runtime):
              'g6lc_l3_pkg.sv','g6lc_l3_top.sv','axi_cut.sv','spill_register.sv',
              'g6lc_coherence_pkg.sv','g6lc_inval_bus.sv','g6lc_snoop_filter.sv',
              'g6lc_ooo_snoop_filter.sv','g6lc_lr_sc_tracker.sv','g6lc_coherence_hub.sv',
+             'g6lc_cmo_engine.sv','g6lc_l3_inclusive_inv.sv',
              'tb_g6lc_l2.sv','tb_g6lc_coherence_hub.sv']
     for name in names:
         shutil.copy2(data / name, source / name)
@@ -546,15 +557,19 @@ def composed_review(out, data, runtime_info, runtime):
     model=out/'model'
     if os.environ.get('REVIEW_COMPOSED_SCC')=='1':
         bench=(source/'tb_g6lc_coherence_hub.sv').read_text().split('module tb_g6lc_coherence_l2;',1)[1]
-        # The structural wrapper needs only the two RTL instances; stop the
-        # splice at the first bench stimulus/driver block after them.
-        after_hub = bench.split('  g6lc_coherence_hub #(', 1)[1]
-        end = len(after_hub)
+        # The structural wrapper needs only the hub and the L2(+L3) instances.
+        # The T9a CMO engine/broadcaster sit textually between them and refer
+        # to bench-only stimulus state, so splice the hub instance and the
+        # cache segment separately and tie the match-inval inputs off below.
+        hub_seg = '  g6lc_coherence_hub #(' + \
+            bench.split('  g6lc_coherence_hub #(', 1)[1].split(');', 1)[0] + ');\n'
+        after_l2 = bench.split('  g6lc_l2_top #(', 1)[1]
+        end = len(after_l2)
         for marker in ('\n  always_comb', '\n  function automatic data_t other_word'):
-            stop = after_hub.find(marker)
+            stop = after_l2.find(marker)
             if stop != -1 and stop < end:
                 end = stop
-        instances='  g6lc_coherence_hub #(' + after_hub[:end]
+        instances = hub_seg + '  g6lc_l2_top #(' + after_l2[:end]
         wrapper=out/'composed_graph.sv'
         scc_l3 = os.environ.get('REVIEW_COMPOSED_SCC_L3') == '1'
         wrapper.write_text('''module composed_graph import g6lc_coherence_pkg::*; import g6lc_l2_tb_pkg::*;
@@ -569,6 +584,13 @@ localparam bit WRITE_UPDATE=%d;
 localparam int BYTE_SIZE=4096,SET_ASSOC=4,MSHR_DEPTH=4,DATA_BANKS=2;
 localparam int L3_BYTES=2048,L3_SET_ASSOC=2,L3_MSHR_DEPTH=2,L3_DATA_BANKS=2;
 req_t hub_req;resp_t hub_rsp;
+req_t l2m_req;resp_t l2m_rsp;
+logic l3_hit_p,l3_miss_p,l2_hit_p,l2_miss_p,l2_wupd_p,l3_wupd_p;
+logic cmo_l2_rdy,cmo_l2_idle,cmo_l3_rdy,cmo_l3_idle;
+addr_t cmo_l2_a,cmo_l3_a;
+logic cmo_l2_v,cmo_l3_v;
+assign cmo_l2_v = 1'b0;
+assign cmo_l3_v = 1'b0;
 ''' % (scc_l3, int(os.environ.get('REVIEW_COMPOSED_TAG_SRAM') == '1'),
        int(os.environ.get('REVIEW_COMPOSED_WU') == '1')) + instances + '\nendmodule\n')
         script='read_slang -I' + str(source) + ' --top composed_graph ' + ' '.join(files[:-1]) + f' {wrapper}; hierarchy -check -top composed_graph; flatten; proc; opt; check -assert; scc -expect 0'
@@ -616,8 +638,12 @@ req_t hub_req;resp_t hub_rsp;
                      [0,1] if chosen=='mod-only' else
                      # stack-target's L3 (1 MiB/16w) retains the evicted L2
                      # line across the probe sweep; the small stack's L3
-                     # aliases the same set and cannot.
-                     [0,1,2,3,4] if chosen=='stack-target' else [0,1,2,3])):
+                     # aliases the same set and cannot. Scenario 6 is the T9a
+                     # composed CMO (cbo.inval through the engine into the
+                     # resident line at L2 and the stacked L3); scenario 7 is
+                     # the M1a HPDCACHE store-shape stream (partial strobes,
+                     # full-line burst, NC attribute) qualifying write-update.
+                     [0,1,2,3,4,6,7] if chosen=='stack-target' else [0,1,2,3,6,7])):
         for negative in ([False] if fault or chosen=='no-l2' else [False,True]):
             cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])
             if os.environ.get('REVIEW_COMPOSED_DIAGNOSE')=='1':cmd.append('+diagnose')
@@ -628,7 +654,14 @@ req_t hub_req;resp_t hub_rsp;
             if fault or (chosen=='no-l2' and scenario==0):
                 error='COH_L2_STALE_VALUE'
             elif negative:
-                error={2:'COH_L2_DATA',3:'COH_L2_STALE_VALUE',4:'COH_L3_PROBE'}.get(scenario,'COH_L2_FINAL_VALUE')
+                error={2:'COH_L2_DATA',3:'COH_L2_STALE_VALUE',4:'COH_L3_PROBE',
+                       # +oracle_negative severs the L2 match-inval wire: the
+                       # engine completes but the resident line survives, so
+                       # the re-read hits and PROP must fire.
+                       6:'COH_L2_CMO_PROP',
+                       # Same severed wire in scenario 7: the post-CMO re-read
+                       # hits the resident line, so the DRAM-AR count is short.
+                       7:'COH_L2_SHAPE_AR'}.get(scenario,'COH_L2_FINAL_VALUE')
             else:
                 error=None
             matched=(result.returncode!=0 and error in text and 'COH_L2_PASS' not in text) if error else (
@@ -666,6 +699,17 @@ def credits_review(out, data, runtime_info, runtime):
     (out/'runtime.json').write_text(json.dumps(runtime_info,indent=2))
     env = dict(os.environ, VERILATOR_ROOT=str(runtime), VPATH=str(runtime/'include'))
     mshr = int(os.environ.get('REVIEW_CREDITS_MSHR','2'))
+    # Credit-geometry sweep knobs (M1a): MAX_OT drives the hub shared AR/AW
+    # slot count (CohMaxOutstanding), READS/CORES shape the burst, WRITES adds
+    # the mixed AW/W phase.
+    credit_gargs = [f'-GMSHR_DEPTH={mshr}']
+    for env_name, gparam in (('REVIEW_CREDITS_OT', 'MAX_OT'),
+                             ('REVIEW_CREDITS_READS', 'READS_PER_CORE'),
+                             ('REVIEW_CREDITS_WRITES', 'WRITES_PER_CORE'),
+                             ('REVIEW_CREDITS_CORES', 'CORES')):
+        value = os.environ.get(env_name)
+        if value is not None:
+            credit_gargs.append(f'-G{gparam}={int(value)}')
     files = [str(source/n) for n in names[:-2]]+[str(source/'types.sv'),str(source/names[-1])]
     model = out/'model'
     control = out/'credits.vlt'
@@ -686,7 +730,7 @@ def credits_review(out, data, runtime_info, runtime):
         l3_args += ['-GTAG_SRAM=1']
     command = ['verilator','--cc','--main','--exe','--timing','--assert','--threads','1','--flatten',
                '-Wno-fatal','-Werror-LATCH','-Werror-USERERROR',
-               str(control),'-I'+str(source),'--top-module','tb_g6lc_coherence_credits',f'-GMSHR_DEPTH={mshr}',
+               str(control),'-I'+str(source),'--top-module','tb_g6lc_coherence_credits',*credit_gargs,
                *l3_args,
                '--Mdir',str(model),'-o','credits-test',*files]
     commands = [('verilate',command),('build',['make','-C',str(model),'-f','Vtb_g6lc_coherence_credits.mk','-j4'])]
@@ -710,7 +754,11 @@ def credits_review(out, data, runtime_info, runtime):
         matched = (result.returncode!=0 and error in text and 'COH_CREDIT_PASS' not in text) if error else (
             result.returncode==0 and text.count('COH_CREDIT_PASS')==1 and '%Error' not in text)
         metrics = re.findall(r'COH_CREDIT_PASS ([^\n]+)',text)
-        records.append({'mshr':mshr,'negative':negative,'expectedError':error,
+        records.append({'mshr':mshr,'maxOt':int(os.environ.get('REVIEW_CREDITS_OT','4')),
+            'cores':int(os.environ.get('REVIEW_CREDITS_CORES','2')),
+            'readsPerCore':int(os.environ.get('REVIEW_CREDITS_READS','4')),
+            'writesPerCore':int(os.environ.get('REVIEW_CREDITS_WRITES','0')),
+            'negative':negative,'expectedError':error,
             'rc':result.returncode,'matched':matched,'metrics':metrics,
             'modelSha256':digest(exe)})
         (out/'results.json').write_text(json.dumps(records,indent=2))
@@ -737,8 +785,14 @@ def main():
         return composed_review(out, data, runtime_info, runtime)
     if os.environ.get('REVIEW_HUB_L2_CREDITS') == '1':
         return credits_review(out, data, runtime_info, runtime)
-    if os.environ.get('REVIEW_HUB_BASELINE') == '1' or os.environ.get('REVIEW_HUB_RESERVATIONS') == '1' or \
-            os.environ.get('REVIEW_HUB_ACK_BEFORE') == '1':
+    hub_modes = ('REVIEW_HUB_BASELINE', 'REVIEW_HUB_RESERVATIONS',
+                 'REVIEW_HUB_ACK_BEFORE', 'REVIEW_HUB_SIGNATURE',
+                 'REVIEW_HUB_PUBLICATION', 'REVIEW_HUB_B_STABILITY',
+                 'REVIEW_HUB_LIFETIME', 'REVIEW_HUB_LIFETIME_BEFORE',
+                 'REVIEW_HUB_PUBLICATION_BEFORE',
+                 'REVIEW_HUB_SIGNATURE_BAD_CREDITS', 'REVIEW_HUB_SYNTH')
+    if any(os.environ.get(k) == '1' for k in hub_modes) or \
+            os.environ.get('REVIEW_HUB_B_FAULT'):
         if os.environ.get('REVIEW_HUB_BASELINE') == '1' and os.environ.get('REVIEW_HUB_RESERVATIONS') == '1':
             raise ValueError('select baseline or reservation repair, not both')
         return hub_review(out, data, runtime_info, runtime)

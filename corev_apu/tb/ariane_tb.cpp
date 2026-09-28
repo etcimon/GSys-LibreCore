@@ -73,7 +73,15 @@ static const char *verilog_plusargs[] = {
     // L2/L3 tag/FSM event observer (corev_apu/tb/ariane_testharness.sv): writes
     // l2_trace.log. Must be allowlisted or HTIF rejects it and the run dies.
     "l2_trace", "l2_trace_file",
+    // +mem_poke=<hexaddr>:<hexval64>:<cycle> — backdoor DRAM write at a cycle,
+    // consumed here in C++ (writes the same MEM the cookie-exit poll reads);
+    // mc_cbo_ewt.S uses it to inject a non-coherent mutation behind the caches.
+    "mem_poke",
     nullptr};
+
+// +mem_poke entries, applied inside the sim loop once main_time reaches cycle.
+struct MemPoke { uint64_t addr, val, cycle; bool applied; };
+static std::vector<MemPoke> mem_pokes;
 
 extern dtm_t* dtm;
 extern remote_bitbang_t * jtag;
@@ -410,6 +418,17 @@ done_processing:
 
   const char *vcd_file = NULL;
   Verilated::commandArgs(argc, argv);
+
+  for (int i = 1; i < argc; i++) {
+    if (strncmp(argv[i], "+mem_poke=", 10) == 0) {
+      uint64_t pa = 0, pv = 0, pc = 0;
+      if (sscanf(argv[i] + 10, "%llx:%llx:%llu", (unsigned long long *)&pa,
+                 (unsigned long long *)&pv, (unsigned long long *)&pc) == 3)
+        mem_pokes.push_back({pa, pv, pc, false});
+      else
+        std::cerr << "[mem_poke] malformed plusarg: " << argv[i] << "\n";
+    }
+  }
 
   jtag = new remote_bitbang_t(rbb_port);
   dtm = new preload_aware_dtm_t(htif_argc, htif_argv);
@@ -779,6 +798,24 @@ done_processing:
       top->rtc_i ^= 1;
     }
     main_time++;
+#ifdef MEM
+    // +mem_poke: backdoor 64-bit write straight into the DRAM array behind
+    // every cache level — the non-coherent mutation a cbo.inval must expose.
+    if (!mem_pokes.empty()) {
+      for (auto &p : mem_pokes) {
+        if (!p.applied && main_time >= p.cycle &&
+            p.addr >= dram_base && p.addr + 8 <= dram_base + mem_size) {
+          auto *bytes = reinterpret_cast<uint8_t *>(MEM);
+          const uint64_t off = p.addr - dram_base;
+          for (int i = 0; i < 8; i++)
+            bytes[off + i] = (uint8_t)(p.val >> (8 * i));
+          p.applied = true;
+          std::cerr << "[mem_poke] t=" << std::dec << main_time << " addr=0x"
+                    << std::hex << p.addr << " val=0x" << p.val << std::dec << "\n";
+        }
+      }
+    }
+#endif
     // I4q: first time frontend NPC is 0 after leaving boot (smt2 hart0 illegal).
 #if !defined(G6LC_TB_NO_HIER)
     if (std::getenv("CVA6_TRAP_DUMP") != nullptr) {

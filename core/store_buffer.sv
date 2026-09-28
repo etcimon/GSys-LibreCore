@@ -110,6 +110,28 @@ module store_buffer
             (CVA6Cfg.MaxOutstandingStores > 8) ? 8 : CVA6Cfg.MaxOutstandingStores)
       : int'(ariane_pkg::DEPTH_COMMIT);
 
+  // U7c cbo.zero commit-drain expansion (Zicboz): the store unit posts ONE
+  // speculative entry carrying cbo_op=CBO_ZERO, the line-aligned base
+  // address, zero data and a full byte enable. On commit the drain below
+  // issues CBOZ_BEATS consecutive full-width stores at base + beat*stride —
+  // each beat is tagged CBO_ZERO so the WT write buffer forwards it as an
+  // ordinary store and returns the one-shot rvalid this protocol needs
+  // (HPDCACHE answers every store via need_rsp). One instruction -> one
+  // speculative entry -> one commit entry -> one commit; only the memory
+  // drain is multi-beat, so queue accounting and the scoreboard's single
+  // completion stay 1:1 and no entry can be orphaned.
+  localparam int unsigned CBOZ_LINE_B =
+      (CVA6Cfg.DCACHE_LINE_WIDTH >= 64) ? (CVA6Cfg.DCACHE_LINE_WIDTH / 8) : 64;
+  localparam int unsigned CBOZ_STRIDE = CVA6Cfg.XLEN / 8;
+  localparam int unsigned CBOZ_BEATS =
+      (CBOZ_LINE_B / CBOZ_STRIDE) > 0 ? (CBOZ_LINE_B / CBOZ_STRIDE) : 1;
+  localparam int unsigned CBOZ_BEAT_W = (CBOZ_BEATS <= 1) ? 1 : $clog2(CBOZ_BEATS);
+  // Line-offset width: also the granularity of the [11:0] hazard match below
+  // (a cbo.zero line can never cross a 4 KiB page for any sane line size).
+  localparam int unsigned CBOZ_OFF_W = $clog2(CBOZ_LINE_B);
+
+  logic [CBOZ_BEAT_W-1:0] cboz_beat_q, cboz_beat_n;
+
   localparam int unsigned HID_W = $clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2);
   // T6b: speculative forwarding is same-hart only when two OoO harts can be
   // resident. The committed queue is NOT filtered — a committed store is
@@ -434,7 +456,11 @@ module store_buffer
   // we do not require an acknowledgement for writes, thus we do not need to identify uniquely the responses
   assign req_port_o.data_id = '0;
   // those signals can directly be output to the memory
-  assign req_port_o.address_index = commit_queue_q[commit_read_pointer_q].address[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0];
+  // (cboz_beat_q is 0 for any non-CBO_ZERO head — it is only ever advanced
+  // while a CBO_ZERO entry sits at the commit head and cleared on retire)
+  assign req_port_o.address_index =
+      commit_queue_q[commit_read_pointer_q].address[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0] +
+      CVA6Cfg.DCACHE_INDEX_WIDTH'(cboz_beat_q * CBOZ_STRIDE);
   // if we got a new request we already saved the tag from the previous cycle
   assign req_port_o.address_tag   = commit_queue_q[commit_read_pointer_q].address[CVA6Cfg.DCACHE_TAG_WIDTH     +
                                                                                     CVA6Cfg.DCACHE_INDEX_WIDTH-1 :
@@ -457,6 +483,7 @@ module store_buffer
     // default assignments
     commit_read_pointer_n  = commit_read_pointer_q;
     commit_write_pointer_n = commit_write_pointer_q;
+    cboz_beat_n            = cboz_beat_q;
 
     commit_queue_n         = commit_queue_q;
 
@@ -475,6 +502,7 @@ module store_buffer
           // advance the read_pointer
           commit_read_pointer_n = commit_read_pointer_q + 1'b1;
           commit_status_cnt--;
+          cboz_beat_n = '0;
         end else if (commit_queue_q[commit_read_pointer_q].cbo_op != ariane_pkg::CBO_NONE) begin
           // CBO and have gotten data grant -> proceed to wait for rvalid
           commit_queue_n[commit_read_pointer_q].wait_rvalid = 1'b1;
@@ -486,12 +514,22 @@ module store_buffer
     begin
       // wait for rvalid, but no need to raise another request / wait for grant
       if (req_port_i.data_rvalid) begin
-        // CMO did commit
-        // we can evict the entry from the commit buffer
-        commit_queue_n[commit_read_pointer_q].valid = 1'b0;
-        // advance the read_pointer
-        commit_read_pointer_n = commit_read_pointer_q + 1'b1;
-        commit_status_cnt--;
+        // CMO did commit — for a CBO_ZERO entry this is one beat of the
+        // drain expansion: clear wait_rvalid and advance to the next beat,
+        // or retire the (single) architectural entry after the last beat.
+        if (CVA6Cfg.RVZiCboz &&
+            commit_queue_q[commit_read_pointer_q].cbo_op == ariane_pkg::CBO_ZERO &&
+            cboz_beat_q != CBOZ_BEAT_W'(CBOZ_BEATS - 1)) begin
+          commit_queue_n[commit_read_pointer_q].wait_rvalid = 1'b0;
+          cboz_beat_n = cboz_beat_q + 1'b1;
+        end else begin
+          // we can evict the entry from the commit buffer
+          commit_queue_n[commit_read_pointer_q].valid = 1'b0;
+          // advance the read_pointer
+          commit_read_pointer_n = commit_read_pointer_q + 1'b1;
+          commit_status_cnt--;
+          cboz_beat_n = '0;
+        end
       end
     end
 
@@ -550,6 +588,17 @@ module store_buffer
     return a == b;
   endfunction
 
+  // U7c: a cbo.zero entry's coverage is its whole cache line (the stored
+  // address is the line-aligned base). Match by line tag so loads anywhere
+  // in the line stall on the pending entry and forward zeros.
+  function automatic logic cboz_covers(input cbo_t cop,
+                                       input logic [CVA6Cfg.PLEN-1:0] entry_pa,
+                                       input logic [CVA6Cfg.PLEN-1:0] byte_pa);
+    return CVA6Cfg.RVZiCboz && (cop == ariane_pkg::CBO_ZERO) &&
+           (entry_pa[CVA6Cfg.PLEN-1:CBOZ_OFF_W] ==
+            byte_pa[CVA6Cfg.PLEN-1:CBOZ_OFF_W]);
+  endfunction
+
   always_comb begin : address_checker
     // R3a: **stall** on [11:0] always (classic Ariane — never miss stack RAW).
     // load_paddr is vaddr (see load_unit); full-PA-only stall missed stack RAW
@@ -559,7 +608,11 @@ module store_buffer
 
     for (int unsigned i = 0; i < DEPTH_COMMIT; i++) begin
       if (commit_queue_q[i].valid &&
-          (commit_queue_q[i].address[11:0] == page_offset_i)) begin
+          ((commit_queue_q[i].address[11:0] == page_offset_i) ||
+           (CVA6Cfg.RVZiCboz &&
+            commit_queue_q[i].cbo_op == ariane_pkg::CBO_ZERO &&
+            ((commit_queue_q[i].address[11:0] >> CBOZ_OFF_W) ==
+             (page_offset_i >> CBOZ_OFF_W))))) begin
         page_offset_matches_now = 1'b1;
         break;
       end
@@ -570,13 +623,19 @@ module store_buffer
       // can never progress -- that store cannot commit until the load retires.
       if (speculative_queue_q[i].valid &&
           spec_visible(speculative_queue_q[i].trans_id) &&
-          (speculative_queue_q[i].address[11:0] == page_offset_i)) begin
+          ((speculative_queue_q[i].address[11:0] == page_offset_i) ||
+           (CVA6Cfg.RVZiCboz &&
+            speculative_queue_q[i].cbo_op == ariane_pkg::CBO_ZERO &&
+            ((speculative_queue_q[i].address[11:0] >> CBOZ_OFF_W) ==
+             (page_offset_i >> CBOZ_OFF_W))))) begin
         page_offset_matches_now = 1'b1;
         break;
       end
     end
     if (valid_without_flush_i && spec_visible(trans_id_i) &&
-        (paddr_i[11:0] == page_offset_i)) begin
+        ((paddr_i[11:0] == page_offset_i) ||
+         (CVA6Cfg.RVZiCboz && cbo_op_i == ariane_pkg::CBO_ZERO &&
+          ((paddr_i[11:0] >> CBOZ_OFF_W) == (page_offset_i >> CBOZ_OFF_W))))) begin
       page_offset_matches_now = 1'b1;
     end
 
@@ -606,11 +665,29 @@ module store_buffer
       for (int unsigned k = 0; k < DEPTH_COMMIT; k++) begin
         cidx = commit_read_pointer_q + $clog2(DEPTH_COMMIT)'(k);
         if (commit_queue_q[cidx].valid &&
-            pa_eq(commit_queue_q[cidx].address, load_paddr_i)) begin
-          for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
-            if (commit_queue_q[cidx].be[b]) begin
-              data_m[8*b+:8] = commit_queue_q[cidx].data[8*b+:8];
-              be_m[b]        = 1'b1;
+            (pa_eq(commit_queue_q[cidx].address, load_paddr_i) ||
+             cboz_covers(commit_queue_q[cidx].cbo_op,
+                         commit_queue_q[cidx].address, load_paddr_i))) begin
+          if (CVA6Cfg.RVZiCboz &&
+              commit_queue_q[cidx].cbo_op == ariane_pkg::CBO_ZERO) begin
+            // the entry zeroes its whole line: forward '0 for every load
+            // byte inside that line (per-byte check covers straddling loads);
+            // data_m must be cleared — an older store may already have
+            // written nonzero bytes to this lane.
+            for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+              if (cboz_covers(commit_queue_q[cidx].cbo_op,
+                              commit_queue_q[cidx].address,
+                              load_paddr_i + CVA6Cfg.PLEN'(b))) begin
+                data_m[8*b+:8] = '0;
+                be_m[b]        = 1'b1;
+              end
+            end
+          end else begin
+            for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+              if (commit_queue_q[cidx].be[b]) begin
+                data_m[8*b+:8] = commit_queue_q[cidx].data[8*b+:8];
+                be_m[b]        = 1'b1;
+              end
             end
           end
         end
@@ -620,22 +697,46 @@ module store_buffer
         if (speculative_queue_q[sidx].valid &&
             spec_visible(speculative_queue_q[sidx].trans_id) &&
             (!HART_OWN || speculative_queue_q[sidx].hart == load_hart_i) &&
-            pa_eq(speculative_queue_q[sidx].address, load_paddr_i)) begin
-          for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
-            if (speculative_queue_q[sidx].be[b]) begin
-              data_m[8*b+:8] = speculative_queue_q[sidx].data[8*b+:8];
-              be_m[b]        = 1'b1;
+            (pa_eq(speculative_queue_q[sidx].address, load_paddr_i) ||
+             cboz_covers(speculative_queue_q[sidx].cbo_op,
+                         speculative_queue_q[sidx].address, load_paddr_i))) begin
+          if (CVA6Cfg.RVZiCboz &&
+              speculative_queue_q[sidx].cbo_op == ariane_pkg::CBO_ZERO) begin
+            for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+              if (cboz_covers(speculative_queue_q[sidx].cbo_op,
+                              speculative_queue_q[sidx].address,
+                              load_paddr_i + CVA6Cfg.PLEN'(b))) begin
+                data_m[8*b+:8] = '0;
+                be_m[b]        = 1'b1;
+              end
+            end
+          end else begin
+            for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+              if (speculative_queue_q[sidx].be[b]) begin
+                data_m[8*b+:8] = speculative_queue_q[sidx].data[8*b+:8];
+                be_m[b]        = 1'b1;
+              end
             end
           end
         end
       end
       if (valid_without_flush_i && spec_visible(trans_id_i) &&
           (!HART_OWN || st_hart_i == load_hart_i) &&
-          pa_eq(paddr_i, load_paddr_i)) begin
-        for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
-          if (be_i[b]) begin
-            data_m[8*b+:8] = data_i[8*b+:8];
-            be_m[b]        = 1'b1;
+          (pa_eq(paddr_i, load_paddr_i) ||
+           cboz_covers(cbo_op_i, paddr_i, load_paddr_i))) begin
+        if (CVA6Cfg.RVZiCboz && cbo_op_i == ariane_pkg::CBO_ZERO) begin
+          for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+            if (cboz_covers(cbo_op_i, paddr_i, load_paddr_i + CVA6Cfg.PLEN'(b))) begin
+              data_m[8*b+:8] = '0;
+              be_m[b]        = 1'b1;
+            end
+          end
+        end else begin
+          for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+            if (be_i[b]) begin
+              data_m[8*b+:8] = data_i[8*b+:8];
+              be_m[b]        = 1'b1;
+            end
           end
         end
       end
@@ -757,11 +858,13 @@ module store_buffer
       commit_read_pointer_q  <= '0;
       commit_write_pointer_q <= '0;
       commit_status_cnt_q    <= '0;
+      cboz_beat_q            <= '0;
     end else begin
       commit_queue_q         <= commit_queue_n;
       commit_read_pointer_q  <= commit_read_pointer_n;
       commit_write_pointer_q <= commit_write_pointer_n;
       commit_status_cnt_q    <= commit_status_cnt_n;
+      cboz_beat_q            <= cboz_beat_n;
     end
   end
 
@@ -872,6 +975,26 @@ module store_buffer
                   i, speculative_queue_q[i].trans_id);
     end
   end
+
+  // U7c cbo.zero drain invariants: the beat counter may only be nonzero
+  // while the commit head is a CBO_ZERO entry, and a cbo.zero's commit
+  // entry must present the line-aligned base (the drain adds beat*stride).
+  cboz_beat_only_zero_head :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   (cboz_beat_q != '0) |->
+                   (commit_queue_q[commit_read_pointer_q].valid &&
+                    commit_queue_q[commit_read_pointer_q].cbo_op == ariane_pkg::CBO_ZERO))
+  else $error("[Commit Queue] cbo.zero beat counter advanced without a CBO_ZERO head");
+
+  cboz_entry_line_aligned :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   (CVA6Cfg.RVZiCboz && commit_i &&
+                    speculative_queue_q[speculative_read_pointer_q].valid &&
+                    speculative_queue_q[speculative_read_pointer_q].cbo_op ==
+                    ariane_pkg::CBO_ZERO) |->
+                   (speculative_queue_q[speculative_read_pointer_q].address[CBOZ_OFF_W-1:0] ==
+                    '0))
+  else $error("[Commit Queue] cbo.zero commit entry is not line-aligned");
   //pragma translate_on
 endmodule
 

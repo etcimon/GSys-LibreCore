@@ -934,7 +934,11 @@ never takes the tag-hit path — otherwise `g6lc_axi_lrsc` never arms and
 `sc.d` returns 1. `AW.lock` / ATOP were already preserved.
 
 ## Invariants
-RVWMO; PMA (MMIO uncached via NC bypass); CBO end-to-end; 64 B lines with `Zic64b`
+RVWMO; PMA (MMIO uncached via NC bypass); **CBO end-to-end (landed M1a/T9a)** — a
+`cbo.*` rides the `cmo_*` sideband out of the core, `g6lc_cmo_engine` broadcasts the
+L1 invalidation to every core and match-invalidates L2/L3 (`l2_back_inval_*`,
+`l3_back_inval_*`), and `clean`/`flush` complete only when `l2_write_idle_o` /
+`l3_write_idle_o` report no unacknowledged write; 64 B lines with `Zic64b`
 (equals default `DramChanShift=6`). Demand miss wins AR over prefetch **and** must
 keep winning over island GEMM when both share the DRAM slave.
 

@@ -86,7 +86,12 @@ module g6lc_l2_top
     // ready (single-cycle tag match). Tie valid low when unused.
     input  logic                          l2_back_inval_valid_i,
     input  logic [AXI_ADDR_WIDTH-1:0]     l2_back_inval_addr_i,
-    output logic                          l2_back_inval_ready_o
+    output logic                          l2_back_inval_ready_o,
+    // T9a eWT CMO ordering: high when no write has been accepted and not yet
+    // B-acknowledged (the bypass write states). The CMO engine gates
+    // clean/flush completion on this; M1b (posted writes) redefines it as
+    // tracker-empty.
+    output logic                          l2_write_idle_o
 );
 
   // Identity when disabled (should not be instantiated; safety net)
@@ -103,6 +108,7 @@ module g6lc_l2_top
     assign l2_evict_valid_o = 1'b0;
     assign l2_evict_addr_o  = '0;
     assign l2_back_inval_ready_o = 1'b1;
+    assign l2_write_idle_o = 1'b1;
   end else begin : gen_l2
 
   localparam int unsigned LINE_BYTES  = LINE_WIDTH / 8;
@@ -395,6 +401,12 @@ module g6lc_l2_top
   // fill collector drains their beats unconditionally.
   logic mst_r_ot_q, mst_r_ot_d;
   logic wr_r_pending_q,wr_r_pending_d,wr_b_done_q,wr_b_done_d;
+  // T9a eWT write-idle (CMO clean/flush ordering): no write accepted and not
+  // yet B-acknowledged. A write traverses S_BYPASS_AW→W→B with is_write_q
+  // latched at AW accept; S_IDLE is only reached after B, so idle here also
+  // implies memory has observed the write.
+  assign l2_write_idle_o = !(is_write_q &&
+      (state_q == S_BYPASS_AW || state_q == S_BYPASS_W || state_q == S_BYPASS_B));
   // Serve alternation: set when a fill-serve burst just completed so a
   // pending AR gets the next S_IDLE slot before another serve starts.
   logic serve_turn_q, serve_turn_d;

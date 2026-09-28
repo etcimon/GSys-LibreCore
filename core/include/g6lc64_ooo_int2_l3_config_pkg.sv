@@ -250,7 +250,10 @@ package cva6_config_pkg;
       // slots: tb_g6lc_coherence_credits measured 51 MSHR-full stall cycles
       // and a 92-cycle drain for an eight-read burst at depth 2 against zero
       // stalls and 77 cycles at depth 4, with fills capped at the hub credits.
-      L2MshrDepth: unsigned'(4),
+      // T9a: raised to 8 alongside CohMaxOutstanding — at 4 hub credits the
+      // L2 was capped first (max_fills=4 at any MSHR depth); at 8 credits and
+      // depth 8 the bench fills all 8 slots.
+      L2MshrDepth: unsigned'(8),
       L2DataBanks: unsigned'(4),
       L2RoundRobinEn: bit'(0),
       // U6.1 SMT2
@@ -264,6 +267,10 @@ package cva6_config_pkg;
       SnoopFilterEntries: unsigned'(128),
       CohInvalDepth: unsigned'(2),
       CohAxiStarveLimit: unsigned'(0),
+      // T9a: 8 shared hub AR/AW credits (legal 2..14). Credits bench: at 4
+      // the hub bound the eight-read burst; at 8 with L2/L3 MSHR depth 8 all
+      // 8 slots run and the L3-stack drain drops 106->98 / 194->186 cycles.
+      CohMaxOutstanding: unsigned'(8),
       WayPredEn: bit'(0),
       WayPredEntries: unsigned'(0),
       ReplPolicy: config_pkg::REPL_PLRU,
@@ -297,7 +304,9 @@ package cva6_config_pkg;
       L3ByteSize: unsigned'(1048576),
       L3SetAssoc: unsigned'(16),
       L3LineWidth: unsigned'(512),
-      L3MshrDepth: unsigned'(4),
+      // T9a: raised to 8 with CohMaxOutstanding — the stack drains the burst
+      // 4-8% faster at 8x8 (106->98 / 194->186 cycles in the credits bench).
+      L3MshrDepth: unsigned'(8),
       L3DataBanks: unsigned'(4),
       ServerPrefetchEn: bit'(0),
       ServerPfStreams: unsigned'(0),
@@ -311,6 +320,7 @@ package cva6_config_pkg;
       // (mc_l2_write_read) and ~90k of ~100k four-hart boot L2 misses
       // following a write purge — merge writes in place instead.
       L2WriteUpdateEn: bit'(1),
+      L2CmoEn: bit'(1),
       SharedTlbDepth: int'(64),
 
       NrLoadPipeRegs: int'(CVA6ConfigNrLoadPipeRegs),

@@ -89,7 +89,8 @@ def verdict(text, bound, kind, rc=0, expect_mask=None):
     record = {'tohost': int(banners[0][1]) if len(banners) == 1 else None,
               'cycles': int(banners[0][2]) if len(banners) == 1 else None,
               'assertions': len(re.findall(r'%Error|Assertion failed|%Fatal', text)),
-              'allCoresRetired': '[mc_verdict] all 2 core(s) retired instructions' in text,
+              'allCoresRetired': re.search(
+                  r'\[mc_verdict\] all \d+ core\(s\) retired instructions', text) is not None,
               'heldMask': held.group(1) if held else (silent.group(2) if silent else None),
               'retiredMask': held.group(2) if held else (silent.group(1) if silent else None),
               'programExit': int(program.group(1)) if program else None,
@@ -892,7 +893,11 @@ def directed_review():
     bound = int(os.environ.get('REVIEW_MC_DIRECTED_BOUND', '1000000'))
     expect_mask = os.environ.get('REVIEW_MC_DIRECTED_MASK', '01')
     records = []
-    for negative in (False, True):
+    # REVIEW_MC_DIRECTED_NO_NEG=1 runs the positive arm only — for checked-work
+    # minis that carry no ORACLE_NEGATIVE variant (the negatives live in the
+    # leaf benches); the pass/fail assert below still applies to what runs.
+    arms = (False,) if os.environ.get('REVIEW_MC_DIRECTED_NO_NEG') == '1' else (False, True)
+    for negative in arms:
         trial = out / f'negative{int(negative)}'
         trial.mkdir()
         elf = trial / 'directed.elf'
@@ -901,8 +906,11 @@ def directed_review():
             os.environ.get('REVIEW_MC_DIRECTED_DEFS', '').split()) + [str(data / src), '-o', str(elf)]
         rc = bash(' '.join(command), trial / 'gcc.log', repo, 120)
         assert rc == 0, 'gcc'
+        # REVIEW_MC_DIRECTED_ARGS carries extra model plusargs (e.g.
+        # +mem_poke=<addr>:<val>:<cycle> for mc_cbo_ewt). Extra args come
+        # before the ELF so HTIF does not eat them as positional input.
         cmd = [str(exe), '--seed=1', '+debug_disable', '+quiet_axi', f'+time_out={bound}',
-               '+tohost_addr=0x80001000', str(elf)]
+               '+tohost_addr=0x80001000'] + os.environ.get('REVIEW_MC_DIRECTED_ARGS', '').split() + [str(elf)]
         with (trial / 'run.log').open('w') as log:
             rc = subprocess.run(cmd, cwd=trial, stdout=log, stderr=subprocess.STDOUT, timeout=1800).returncode
         text = (trial / 'run.log').read_text()
@@ -1211,10 +1219,20 @@ def build_only_review():
     if extra_vlt_args:
         vlt_args = (vlt_args + ' ' + extra_vlt_args).strip()
     dram_latency = re.search(r'-GDramLatency=(\d+)', vlt_args)
-    jobs = os.environ.get('REVIEW_MC_BUILD_JOBS', '8')
+    # Build throughput defaults (M1a): jobs follows the remote CPU count (the
+    # harness resolves the literal '$(nproc)'), ccache fronts the C++ compile
+    # into /opt/testharness/ccache, and mold links when present — the harness
+    # degrades each one gracefully when missing, and REVIEW_MC_BUILD_* still
+    # override.
+    jobs = os.environ.get('REVIEW_MC_BUILD_JOBS', '$(nproc)')
+    objcache = os.environ.get('REVIEW_MC_BUILD_OBJCACHE', 'ccache')
+    ccdir = os.environ.get('REVIEW_MC_BUILD_CCACHE_DIR', '/opt/testharness/ccache')
+    linker = os.environ.get('REVIEW_MC_BUILD_LINKER', 'mold')
     command = (f'export VERILATOR_ROOT={runtime} SOFT_LADDER_VERLIB={model} '
                f'SOFT_LADDER_BUILD_TARGET={target} SOFT_LADDER_VERILATOR_THREADS={threads} '
                f'SOFT_LADDER_BUILD_JOBS={jobs} SOFT_LADDER_BUILD_CLEAN=1 SOFT_LADDER_ISOLATED=1 '
+               f'SOFT_LADDER_BUILD_OBJCACHE={objcache} SOFT_LADDER_BUILD_CCACHE_DIR={ccdir} '
+               f'SOFT_LADDER_BUILD_LINKER={linker} '
                f"SOFT_LADDER_BUILD_VLT_ARGS='{vlt_args}'; "
                'bash verif/regress/soft-ladder-build-harness.sh B')
     rc = bash(command, out / 'build.log', repo, 3600)

@@ -111,7 +111,14 @@ module cva6_hpdcache_wrapper
 
     output logic                 dcache_mem_resp_write_ready_o,
     input  logic                 dcache_mem_resp_write_valid_i,
-    input  hpdcache_mem_resp_w_t dcache_mem_resp_write_i
+    input  hpdcache_mem_resp_w_t dcache_mem_resp_write_i,
+
+    // T9a eWT CMO sideband from the store adapter (see cva6_hpdcache_if_adapter)
+    output logic                        cmo_valid_o,
+    output logic [1:0]                  cmo_op_o,
+    output logic [CVA6Cfg.PLEN-1:0]     cmo_addr_o,
+    input  logic                        cmo_ready_i,
+    input  logic                        cmo_done_i
 );
 
   localparam int HPDCACHE_NREQUESTERS = NumPorts + 1;
@@ -177,7 +184,13 @@ module cva6_hpdcache_wrapper
           .hpdcache_req_pma_o  (dcache_req_pma[r]),
 
           .hpdcache_rsp_valid_i(dcache_rsp_valid[r]),
-          .hpdcache_rsp_i      (dcache_rsp[r])
+          .hpdcache_rsp_i      (dcache_rsp[r]),
+
+          .cmo_valid_o(),
+          .cmo_op_o   (),
+          .cmo_addr_o (),
+          .cmo_ready_i(1'b0),
+          .cmo_done_i (1'b0)
       );
     end
 
@@ -215,7 +228,14 @@ module cva6_hpdcache_wrapper
         .hpdcache_req_pma_o  (dcache_req_pma[NumPorts-1]),
 
         .hpdcache_rsp_valid_i(dcache_rsp_valid[NumPorts-1]),
-        .hpdcache_rsp_i      (dcache_rsp[NumPorts-1])
+        .hpdcache_rsp_i      (dcache_rsp[NumPorts-1]),
+
+        // T9a eWT CMO sideband (store port)
+        .cmo_valid_o(cmo_valid_o),
+        .cmo_op_o   (cmo_op_o),
+        .cmo_addr_o (cmo_addr_o),
+        .cmo_ready_i(cmo_ready_i),
+        .cmo_done_i (cmo_done_i)
     );
   endgenerate
 

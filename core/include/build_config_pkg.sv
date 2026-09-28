@@ -344,6 +344,10 @@ package build_config_pkg;
                             ? unsigned'(4) : CVA6Cfg.CohInvalDepth;
     cfg.CohAxiStarveLimit = (CVA6Cfg.CohAxiStarveLimit == 0 && cfg.NrCores > 1)
                             ? unsigned'(16) : CVA6Cfg.CohAxiStarveLimit;
+    // Hub shared AR/AW slots; 0 selects the default of 4 (FILL_ID + one spare
+    // must remain free in the hub's 4-bit ID space — check_cfg bounds 2..14).
+    cfg.CohMaxOutstanding = (CVA6Cfg.CohMaxOutstanding == 0)
+                          ? unsigned'(4) : CVA6Cfg.CohMaxOutstanding;
     cfg.WayPredEn = CVA6Cfg.WayPredEn;
     cfg.WayPredEntries = CVA6Cfg.WayPredEntries;
     cfg.ReplPolicy = CVA6Cfg.ReplPolicy;
@@ -461,6 +465,7 @@ package build_config_pkg;
     cfg.L3InclusiveEn = CVA6Cfg.L3InclusiveEn;
     cfg.L2TagSramEn = CVA6Cfg.L2TagSramEn;
     cfg.L2WriteUpdateEn = CVA6Cfg.L2WriteUpdateEn;
+    cfg.L2CmoEn = CVA6Cfg.L2CmoEn;
     // Multi-core snoop-filter / prefetch defaults when left zero
     if (cfg.NrCores > 1 && CVA6Cfg.SnoopFilterEn && CVA6Cfg.SnoopFilterEntries == 0)
       cfg.SnoopFilterEntries = cfg.NrCores * 64;

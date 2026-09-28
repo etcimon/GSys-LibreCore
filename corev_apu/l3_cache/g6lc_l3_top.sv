@@ -45,7 +45,14 @@ module g6lc_l3_top
     // notification. Tie high when no inclusive engine is connected.
     output logic                       l3_evict_valid_o,
     output logic [AXI_ADDR_WIDTH-1:0]  l3_evict_addr_o,
-    input  logic                       l3_evict_ready_i
+    input  logic                       l3_evict_ready_i,
+    // T9a eWT CMO ordering (see g6lc_l2_top l2_write_idle_o)
+    output logic                       l3_write_idle_o,
+    // T9a CMO match-inval into the L3 tag (cluster CMO engine). Always ready
+    // (single-cycle tag match on the inner engine's back-inval port).
+    input  logic                       l3_back_inval_valid_i,
+    input  logic [AXI_ADDR_WIDTH-1:0]  l3_back_inval_addr_i,
+    output logic                       l3_back_inval_ready_o
 );
 
   logic full, bank_cfl;
@@ -83,10 +90,12 @@ module g6lc_l3_top
       .l2_evict_valid_o   (l3_evict_valid_o),
       .l2_evict_addr_o    (l3_evict_addr_o),
       .l2_evict_ready_i   (l3_evict_ready_i),
-      // L3 has no upper-level inclusive slave; back-inval is L2's job
-      .l2_back_inval_valid_i (1'b0),
-      .l2_back_inval_addr_i  ('0),
-      .l2_back_inval_ready_o (/* unused */)
+      // T9a: CMO match-inval drives the inner engine's back-inval port; the
+      // inclusive L3 victim has no up-level back-inval of its own here.
+      .l2_back_inval_valid_i (l3_back_inval_valid_i),
+      .l2_back_inval_addr_i  (l3_back_inval_addr_i),
+      .l2_back_inval_ready_o (l3_back_inval_ready_o),
+      .l2_write_idle_o       (l3_write_idle_o)
   );
 
 endmodule

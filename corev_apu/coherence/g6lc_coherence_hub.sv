@@ -136,9 +136,19 @@ module g6lc_coherence_hub
     // AXI still owes the core same-id R order, so a core's AR is not eligible
     // while an older AR slot of the same (core, original id) is live.
     logic [NC-1:0] ar_same_id_live;
+    // Same-line RAW closure (HUB_STALE_REFILL_PUBLICATION): a fill whose AR is
+    // forwarded to memory while a same-line write is still pending at the port
+    // or live in an AW slot can return pre-write data. The write's
+    // invalidation was already delivered (or will be consumed before the fill
+    // lands), so nothing kills the stale copy afterwards. An AR is therefore
+    // ineligible until no AW input request and no live AW slot carries the
+    // same line -- the slot only frees after B is forwarded, i.e. after the
+    // write's data is in memory and its invalidation was applied everywhere.
+    logic [NC-1:0] ar_wr_line_live;
     for (genvar c = 0; c < NC; c++) begin : gen_req
       assign aw_req[c] = core_req_i[c].aw_valid;
-      assign ar_req[c] = core_req_i[c].ar_valid && !ar_same_id_live[c];
+      assign ar_req[c] = core_req_i[c].ar_valid && !ar_same_id_live[c] &&
+                         !ar_wr_line_live[c];
     end
 
     function automatic logic [CID_W-1:0] pick_rr(
@@ -230,6 +240,24 @@ module g6lc_coherence_hub
       logic                                b_held;
       logic [1:0]                          b_resp;
       logic [AXI_USER_WIDTH-1:0]           b_user;
+      // r_held: the mem-side ATOP R beat was consumed but is withheld from
+      // the core until the invalidation has been applied (b_held analogue).
+      // Parking is mandatory, not optional: withholding the beat at the port
+      // (r_ready=0) stalls the single shared R channel, and the same-line
+      // fill whose completion inv_fill_hold waits on may be queued behind it
+      // -- ATOP R waits on delivery, delivery waits on the fill, the fill's
+      // R waits on the ATOP R. Deadlock (observed: amocas second-op hang,
+      // OpenSBI boot-lottery amoswap stall).
+      logic                                r_held;
+      logic                                r_last;
+      logic [AXI_DATA_WIDTH-1:0]           r_data;
+      logic [1:0]                          r_resp;
+      logic [AXI_USER_WIDTH-1:0]           r_user;
+      // Line tag of the request, registered at admission. AR slots use it to
+      // hold an invalidation delivery until the fill lands; AW slots use it
+      // to keep same-line ARs ineligible until the write has fully completed
+      // (stale-refill publication closure).
+      logic [55:0]                         line_addr;
     } ot_entry_t;
 
     // ACK-after-invalidation bookkeeping (AW slots only). Kept in a separate
@@ -268,15 +296,55 @@ module g6lc_coherence_hub
     assign ar_ot_full = &slot_used;
     assign aw_ot_full = &slot_used;
 
+    // Per-core invalidation delivery hold: while core c still has a same-line
+    // fill outstanding -- an AR that beat the write to the memory port and may
+    // legally return pre-write data -- the head of c's invalidation queue is
+    // neither presented nor popped, so the invalidation lands after the fill
+    // and kills the stale copy. A held AR already at the memory port
+    // (ar_hold) counts as an outstanding fill for the same reason.
+    logic [NC-1:0]   inv_fill_hold;
+    coh_inval_t [NC-1:0] inv_bus_o;
+    logic [NC-1:0]   inv_bus_ready;
+
     always_comb begin
       ar_same_id_live = '0;
+      ar_wr_line_live = '0;
+      inv_fill_hold   = '0;
       for (int unsigned c = 0; c < NC; c++) begin
+        automatic logic [55:0] ar_line;
+        ar_line = coh_line_tag(core_req_i[c].ar.addr, LINE_BYTES);
+        for (int unsigned c2 = 0; c2 < NC; c2++) begin
+          if (core_req_i[c2].aw_valid &&
+              coh_line_tag(core_req_i[c2].aw.addr, LINE_BYTES) == ar_line)
+            ar_wr_line_live[c] = 1'b1;
+        end
         for (int unsigned s = 0; s < OT_MAX; s++) begin
           if (ar_ot_q[s].valid && ar_ot_q[s].core == CID_W'(c) &&
               ar_ot_q[s].orig_id == core_req_i[c].ar.id)
             ar_same_id_live[c] = 1'b1;
+          if (aw_ot_q[s].valid && aw_ot_q[s].line_addr == ar_line)
+            ar_wr_line_live[c] = 1'b1;
+          if (ar_ot_q[s].valid && ar_ot_q[s].core == CID_W'(c) &&
+              inv_bus_o[c].valid &&
+              ar_ot_q[s].line_addr == inv_bus_o[c].line_addr)
+            inv_fill_hold[c] = 1'b1;
         end
+        if (ar_hold_q && ar_hold_owner_q == CID_W'(c) &&
+            inv_bus_o[c].valid && ar_line == inv_bus_o[c].line_addr)
+          inv_fill_hold[c] = 1'b1;
       end
+    end
+
+    // The hold suppresses both pop and presentation: a suppressed head is not
+    // visible to the core at all, so no ready edge can be mistaken for a
+    // delivery while the fill it must outlive is still in flight.
+    for (genvar c = 0; c < NC; c++) begin : gen_inv_hold
+      assign inv_core_o[c]       = '{valid:   inv_bus_o[c].valid && !inv_fill_hold[c],
+                                     all_ways: inv_bus_o[c].all_ways,
+                                     dcache:   inv_bus_o[c].dcache,
+                                     icache:   inv_bus_o[c].icache,
+                                     line_addr: inv_bus_o[c].line_addr};
+      assign inv_bus_ready[c]    = inv_core_ready_i[c] && !inv_fill_hold[c];
     end
 
     always_comb begin
@@ -371,6 +439,24 @@ module g6lc_coherence_hub
       end
     end
 
+    // Lowest-index parked-R slot per core that may be replayed this cycle.
+    // Unlike held-B there is no predecessors list: ATOP R beats carry the AW
+    // slot id and AXI imposes no cross-id ordering on R.
+    logic [NC-1:0]   r_held_found;
+    logic [OT_W-1:0] r_held_slot [NC];
+
+    always_comb begin
+      r_held_found = '0;
+      for (int unsigned c = 0; c < NC; c++) r_held_slot[c] = '0;
+      for (int unsigned s = 0; s < OT_MAX; s++) begin
+        if (aw_ot_q[s].valid && aw_ot_q[s].r_held &&
+            slot_applied(inv_ot_q[s]) && !r_held_found[aw_ot_q[s].core]) begin
+          r_held_found[aw_ot_q[s].core] = 1'b1;
+          r_held_slot[aw_ot_q[s].core]  = OT_W'(s);
+        end
+      end
+    end
+
     // Combinational grant eligibility
     logic aw_grant, ar_grant;
     logic aw_fire, ar_fire, w_fire, b_fire, r_fire;
@@ -453,7 +539,10 @@ module g6lc_coherence_hub
         aw_ot_d[aw_free_slot].b_done   = 1'b0;
         aw_ot_d[aw_free_slot].core     = aw_winner;
         aw_ot_d[aw_free_slot].orig_id  = core_req_i[aw_winner].aw.id;
+        aw_ot_d[aw_free_slot].line_addr =
+            coh_line_tag(core_req_i[aw_winner].aw.addr, LINE_BYTES);
         aw_ot_d[aw_free_slot].b_held     = 1'b0;
+        aw_ot_d[aw_free_slot].r_held     = 1'b0;
         w_owner_d = aw_winner;
         w_slot_d  = aw_free_slot;
         w_busy_d  = 1'b1;
@@ -476,6 +565,8 @@ module g6lc_coherence_hub
         ar_ot_d[ar_free_slot].valid   = 1'b1;
         ar_ot_d[ar_free_slot].core    = ar_winner;
         ar_ot_d[ar_free_slot].orig_id = core_req_i[ar_winner].ar.id;
+        ar_ot_d[ar_free_slot].line_addr =
+            coh_line_tag(core_req_i[ar_winner].ar.addr, LINE_BYTES);
       end
 
       // ---- W data follows w_owner ----
@@ -559,6 +650,37 @@ module g6lc_coherence_hub
         end
       end
 
+      // ---- Held-R presentation ----
+      // Same replay contract as held-B: the ATOP R beat consumed while its
+      // invalidation was still in flight is offered on the first cycle the
+      // slot reports applied(); the payload is replayed verbatim with the
+      // original core id restored. Placed after the B demux so a same-cycle
+      // B handshake's b_done update is visible when the slot is freed.
+      // A replayed beat takes the port over a fresh R to the same core —
+      // otherwise a second hart's fill stream could starve it indefinitely
+      // while the ATOP's hart waits for completion.
+      for (int unsigned c = 0; c < NC; c++) begin
+        if (r_held_found[c]) begin
+          core_resp_o[c].r_valid = 1'b1;
+          core_resp_o[c].r.data  = aw_ot_q[r_held_slot[c]].r_data;
+          core_resp_o[c].r.resp  = aw_ot_q[r_held_slot[c]].r_resp;
+          core_resp_o[c].r.last  = aw_ot_q[r_held_slot[c]].r_last;
+          core_resp_o[c].r.user  = aw_ot_q[r_held_slot[c]].r_user;
+          core_resp_o[c].r.id    = aw_ot_q[r_held_slot[c]].orig_id;
+          if (core_req_i[c].r_ready) begin
+            aw_ot_d[r_held_slot[c]].r_held = 1'b0;
+            if (aw_ot_q[r_held_slot[c]].r_last) begin
+              r_fire = 1'b1;
+              aw_ot_d[r_held_slot[c]].expect_r = 1'b0;
+              if (aw_ot_d[r_held_slot[c]].b_done) begin
+                aw_ot_d[r_held_slot[c]].valid = 1'b0;
+                if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
+              end
+            end
+          end
+        end
+      end
+
       // ---- R response demux by OT slot id; restore original core id ----
       // Normal reads: slot in ar_ot. AXI ATOP load/swap/compare returns old
       // data on R with the *AW* id — demux via aw_ot and free the slot here
@@ -568,21 +690,25 @@ module g6lc_coherence_hub
         rs      = OT_W'(mem_resp_i.r.id);
         if (r_id_ok && ar_ot_q[rs].valid) begin
           rc = ar_ot_q[rs].core;
-          core_resp_o[rc].r_valid = 1'b1;
-          core_resp_o[rc].r       = mem_resp_i.r;
-          core_resp_o[rc].r.id    = ar_ot_q[rs].orig_id;
-          mem_req_o.r_ready = core_req_i[rc].r_ready;
-          if (core_req_i[rc].r_ready) begin
-            r_fire = 1'b1;
-            if (mem_resp_i.r.last) begin
-              ar_ot_d[rs].valid = 1'b0;
-              if (ar_ot_cnt_d != '0) ar_ot_cnt_d = ar_ot_cnt_d - 1'b1;
+          if (!r_held_found[rc]) begin
+            core_resp_o[rc].r_valid = 1'b1;
+            core_resp_o[rc].r       = mem_resp_i.r;
+            core_resp_o[rc].r.id    = ar_ot_q[rs].orig_id;
+            mem_req_o.r_ready = core_req_i[rc].r_ready;
+            if (core_req_i[rc].r_ready) begin
+              r_fire = 1'b1;
+              if (mem_resp_i.r.last) begin
+                ar_ot_d[rs].valid = 1'b0;
+                if (ar_ot_cnt_d != '0) ar_ot_cnt_d = ar_ot_cnt_d - 1'b1;
+              end
             end
           end
+          // else a parked ATOP R is being replayed to this core this cycle;
+          // the incoming beat is withheld (bounded by the core's r_ready).
         end else if (r_id_ok && aw_ot_q[rs].valid && aw_ot_q[rs].expect_r) begin
           // Atomic R (ATOP load/swap/compare) — same core/id as parent AW
           rc = aw_ot_q[rs].core;
-          if (slot_applied(inv_ot_q[rs])) begin
+          if (slot_applied(inv_ot_q[rs]) && !r_held_found[rc]) begin
             core_resp_o[rc].r_valid = 1'b1;
             core_resp_o[rc].r       = mem_resp_i.r;
             core_resp_o[rc].r.id    = aw_ot_q[rs].orig_id;
@@ -595,7 +721,22 @@ module g6lc_coherence_hub
                 if (aw_ot_cnt_d != '0) aw_ot_cnt_d = aw_ot_cnt_d - 1'b1;
               end
             end
+          end else if (!aw_ot_q[rs].r_held) begin
+            // Park the beat like B: consume it now, replay once the
+            // invalidation has been applied. Withholding it (r_ready=0)
+            // stalls the shared R channel and deadlocks against
+            // inv_fill_hold — the fill the delivery waits on can be queued
+            // behind this very beat.
+            mem_req_o.r_ready   = 1'b1;
+            aw_ot_d[rs].r_held  = 1'b1;
+            aw_ot_d[rs].r_data  = mem_resp_i.r.data;
+            aw_ot_d[rs].r_resp  = mem_resp_i.r.resp;
+            aw_ot_d[rs].r_user  = mem_resp_i.r.user;
+            aw_ot_d[rs].r_last  = mem_resp_i.r.last;
           end
+          // else r_held already set while still unapplied: withhold — only
+          // reachable for a multi-beat ATOP R, which the downstream
+          // axi_riscv_amos never emits (single-beat read result).
         end else begin
           mem_req_o.r_ready = 1'b1;
         end
@@ -1000,8 +1141,8 @@ module g6lc_coherence_hub
         .inv_req_i       (inv_req),
         .inv_target_i    (inv_target),
         .inv_ready_o     (inv_ready),
-        .inv_core_o      (inv_core_o),
-        .inv_core_ready_i(inv_core_ready_i),
+        .inv_core_o      (inv_bus_o),
+        .inv_core_ready_i(inv_bus_ready),
         .inv_stall_o     (),
         .inv_coalesce_o  (),
         .inv_enq_seq_o   (inv_enq_seq),

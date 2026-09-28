@@ -58,7 +58,17 @@ module cva6_hpdcache_if_adapter
 
     //  Response port from the L1 Dcache
     input logic          hpdcache_rsp_valid_i,
-    input hpdcache_rsp_t hpdcache_rsp_i
+    input hpdcache_rsp_t hpdcache_rsp_i,
+
+    // T9a eWT CMO sideband (store port only; tie ready/done 0, leave valid
+    // open on load adapters). A line CMO (cbo_op inval/clean/flush) still
+    // goes into HPDCACHE — it invalidates/flushes the L1 line — but its
+    // response is HELD until the cluster engine reports done.
+    output logic                        cmo_valid_o,
+    output logic [1:0]                  cmo_op_o,
+    output logic [CVA6Cfg.PLEN-1:0]     cmo_addr_o,
+    input  logic                        cmo_ready_i,
+    input  logic                        cmo_done_i
 );
   //  }}}
 
@@ -149,6 +159,12 @@ module cva6_hpdcache_if_adapter
       assign cva6_req_o.data_rdata = hpdcache_rsp_i.rdata;
       assign cva6_req_o.data_rid = hpdcache_rsp_i.tid;
       assign cva6_req_o.data_gnt = hpdcache_req_ready_i;
+      // CMO sideband is a store-port facility
+      assign cmo_valid_o = 1'b0;
+      assign cmo_op_o    = '0;
+      assign cmo_addr_o  = '0;
+      logic unused_cmo_ld;
+      assign unused_cmo_ld = cmo_ready_i | cmo_done_i;
 
       //  Assertions
       //  {{{
@@ -182,6 +198,15 @@ module cva6_hpdcache_if_adapter
 
       logic forward_store, forward_amo, forward_flush, forward_casd;
       hpdcache_pkg::hpdcache_req_op_t store_op;
+
+      // T9a eWT CMO response hold — state (logic is below the CAS.D FSM)
+      logic                    cmo_pend_q, cmo_pend_d;
+      logic                    cmo_sb_gnt_q, cmo_sb_gnt_d;
+      logic                    cmo_served_q, cmo_served_d;
+      logic                    cmo_rsp_seen_q, cmo_rsp_seen_d;
+      logic                    cmo_done_seen_q, cmo_done_seen_d;
+      logic [CVA6Cfg.PLEN-1:0] cmo_addr_q, cmo_addr_d;
+      logic [1:0]              cmo_op_q, cmo_op_d;
 
       // AMOCAS.D: 64b expected + 64b swap cannot fit in one req wdata.
       // Local RMW in the adapter (same spirit as wt_dcache_missunit AMO_CAS_*).
@@ -225,7 +250,10 @@ module cva6_hpdcache_if_adapter
 
         case (flush_fsm_q)
           FLUSH_IDLE: begin
-            if (cva6_dcache_flush_i) begin
+            // T9a: hold off a pipeline flush while a CMO response is being
+            // held — the flush's tid='0 response would otherwise be
+            // swallowed at the rvalid seam and the flush would never ack.
+            if (cva6_dcache_flush_i && !cmo_pend_q) begin
               forward_flush = 1'b1;
               if (hpdcache_req_ready_i) begin
                 flush_fsm_d = FLUSH_PEND;
@@ -256,9 +284,9 @@ module cva6_hpdcache_if_adapter
             ariane_pkg::CBO_INVAL: store_op = hpdcache_pkg::HPDCACHE_REQ_CMO_INVAL_NLINE;
             ariane_pkg::CBO_CLEAN: store_op = hpdcache_pkg::HPDCACHE_REQ_CMO_FLUSH_NLINE;
             ariane_pkg::CBO_FLUSH: store_op = hpdcache_pkg::HPDCACHE_REQ_CMO_FLUSH_INVAL_NLINE;
-            // Zicboz: U7ᶜ store_unit multi-beats full D$ line as zero STOREs
-            // (line-aligned). First beat may still tag CBO_ZERO; subsequent
-            // beats use CBO_NONE. Plain STORE updates memory for memcpy/memset.
+            // Zicboz: the store buffer drains a committed cbo.zero as
+            // full-line zero STORE beats (line-aligned, each tagged
+            // CBO_ZERO). Plain STORE updates memory for memcpy/memset.
             ariane_pkg::CBO_ZERO:  store_op = hpdcache_pkg::HPDCACHE_REQ_STORE;
             default: ;  // store - above
           endcase
@@ -353,10 +381,15 @@ module cva6_hpdcache_if_adapter
               size: hpdcache_pkg::hpdcache_req_size_t'(cva6_req_i.data_size),
               sid: hpdcache_req_sid_i,
               tid: '0,
+              // CMO requests need a response; so does every cbo.zero drain
+              // beat (CBO_ZERO is forwarded as a plain STORE but the store
+              // buffer's CBO protocol waits for one data_rvalid per beat,
+              // and HPDCACHE only responds when need_rsp is set).
               need_rsp:
-              store_op
-              !=
-              hpdcache_pkg::HPDCACHE_REQ_STORE,  // CMO requests need a response
+              (store_op
+               !=
+               hpdcache_pkg::HPDCACHE_REQ_STORE)
+              || (cva6_req_i.cbo_op == ariane_pkg::CBO_ZERO),
               phys_indexed: 1'b1,
               addr_tag: cva6_req_i.address_tag,
               pma: '{
@@ -547,16 +580,103 @@ module cva6_hpdcache_if_adapter
         endcase
       end
 
+      // T9a eWT CMO response hold
+      //  {{{
+      // A line CMO (inval/clean/flush on the store port) is sent to HPDCACHE
+      // AND — under L2CmoEn — issued on the cmo_* sideband to the cluster
+      // engine. The CMO's hpdcache response (tid='0) is then swallowed at the
+      // response-forwarding seam below and the store port's data_rvalid is
+      // released only once cmo_done_i has ALSO arrived, so a retiring CBO is
+      // ordered behind the whole hierarchy, not just the L1 op.
+      // !cmo_pend_q && !cmo_served_q makes the issue single-shot: a core
+      // that keeps data_req raised after the grant (the sideband contract
+      // says drop on grant, but a held request must never re-arm the hold
+      // registers) can neither re-issue the CMO nor wipe rsp_seen/done_seen
+      // — cmo_served_q latches the issue until data_req actually drops, so
+      // even after release the held request cannot fire a second CMO, and
+      // the repeated hpdcache grants it would cause are masked below.
+      wire store_is_cmo = forward_store &&
+                          (cva6_req_i.cbo_op == ariane_pkg::CBO_INVAL ||
+                           cva6_req_i.cbo_op == ariane_pkg::CBO_CLEAN ||
+                           cva6_req_i.cbo_op == ariane_pkg::CBO_FLUSH);
+      wire cmo_issue = CVA6Cfg.L2CmoEn && store_is_cmo && hpdcache_req_ready_i &&
+                       !cmo_pend_q && !cmo_served_q;
+      wire cmo_rsp_now = cmo_pend_q && hpdcache_rsp_valid_i && (hpdcache_rsp_i.tid == '0);
+      wire cmo_rel = cmo_pend_q && (cmo_rsp_seen_q || cmo_rsp_now) &&
+                     (cmo_done_seen_q || cmo_done_i);
+
+      assign cmo_valid_o = cmo_pend_q && !cmo_sb_gnt_q;
+      assign cmo_op_o    = cmo_op_q;
+      assign cmo_addr_o  = cmo_addr_q;
+
+      always_comb begin : cmo_hold_comb
+        cmo_pend_d      = cmo_pend_q;
+        cmo_sb_gnt_d    = cmo_sb_gnt_q;
+        cmo_served_d    = cmo_served_q;
+        cmo_rsp_seen_d  = cmo_rsp_seen_q;
+        cmo_done_seen_d = cmo_done_seen_q;
+        cmo_addr_d      = cmo_addr_q;
+        cmo_op_d        = cmo_op_q;
+        if (cmo_issue) begin
+          cmo_pend_d      = 1'b1;
+          cmo_sb_gnt_d    = 1'b0;
+          cmo_served_d    = 1'b1;
+          cmo_rsp_seen_d  = 1'b0;
+          cmo_done_seen_d = 1'b0;
+          cmo_addr_d = CVA6Cfg.PLEN'({cva6_req_i.address_tag, cva6_req_i.address_index});
+          cmo_op_d   = (cva6_req_i.cbo_op == ariane_pkg::CBO_INVAL) ? 2'd0 :
+                       (cva6_req_i.cbo_op == ariane_pkg::CBO_CLEAN) ? 2'd1 : 2'd2;
+        end
+        if (!cva6_req_i.data_req) cmo_served_d = 1'b0;
+        if (cmo_pend_q) begin
+          if (cmo_valid_o && cmo_ready_i) cmo_sb_gnt_d = 1'b1;
+          if (cmo_rsp_now) cmo_rsp_seen_d = 1'b1;
+          if (cmo_done_i)  cmo_done_seen_d = 1'b1;
+          if (cmo_rel)     cmo_pend_d = 1'b0;
+        end
+      end
+
+      always_ff @(posedge clk_i or negedge rst_ni) begin : cmo_hold_ff
+        if (!rst_ni) begin
+          cmo_pend_q      <= 1'b0;
+          cmo_sb_gnt_q    <= 1'b0;
+          cmo_served_q    <= 1'b0;
+          cmo_rsp_seen_q  <= 1'b0;
+          cmo_done_seen_q <= 1'b0;
+          cmo_addr_q      <= '0;
+          cmo_op_q        <= '0;
+        end else begin
+          cmo_pend_q      <= cmo_pend_d;
+          cmo_sb_gnt_q    <= cmo_sb_gnt_d;
+          cmo_served_q    <= cmo_served_d;
+          cmo_rsp_seen_q  <= cmo_rsp_seen_d;
+          cmo_done_seen_q <= cmo_done_seen_d;
+          cmo_addr_q      <= cmo_addr_d;
+          cmo_op_q        <= cmo_op_d;
+        end
+      end
+      //  }}}
+
       assign forward_store = cva6_req_i.data_req & ~casd_busy;
       // Word CAS / other AMOs go through HPDCACHE AMO path; dword CAS is local
       assign forward_amo = cva6_amo_req_i.req & ~is_casd_req & ~casd_busy;
 
+      // A held CMO store is forwarded to HPDCACHE exactly once (at
+      // cmo_issue); further grants of the still-raised request are masked
+      // so HPDCACHE does not repeat the CMO and produce stray tid='0
+      // responses that would leak through the rvalid seam after release.
       assign hpdcache_req_valid_o =
-          (forward_amo & ~amo_pending_q) | forward_store | forward_flush | forward_casd;
+          (forward_amo & ~amo_pending_q) |
+          (forward_store & ~(store_is_cmo & cmo_served_q)) |
+          forward_flush | forward_casd;
 
+      // Payload mux must use the same masked store term as req_valid: while
+      // a served CMO request is held, a concurrent flush/AMO carries its
+      // own payload rather than re-sending the stale store request.
       assign hpdcache_req = forward_casd  ? hpdcache_req_casd :
                             forward_amo   ? hpdcache_req_amo :
-                            forward_store ? hpdcache_req_store : hpdcache_req_flush;
+                            (forward_store & ~(store_is_cmo & cmo_served_q))
+                                          ? hpdcache_req_store : hpdcache_req_flush;
 
       assign hpdcache_req_abort_o = 1'b0;  // unused on physically indexed requests
       assign hpdcache_req_tag_o = '0;  // unused on physically indexed requests
@@ -576,7 +696,11 @@ module cva6_hpdcache_if_adapter
         assign amo_resp_word = hpdcache_rsp_i.rdata[0];
       end
 
-      assign cva6_req_o.data_rvalid = hpdcache_rsp_valid_i && (hpdcache_rsp_i.tid != '1);
+      // T9a seam: while a CMO is held, its tid='0 response is swallowed and
+      // rvalid is released only when the hpdcache rsp AND cmo_done_i are in.
+      assign cva6_req_o.data_rvalid =
+          (hpdcache_rsp_valid_i && (hpdcache_rsp_i.tid != '1) && !cmo_rsp_now) ||
+          cmo_rel;
       assign cva6_req_o.data_rdata = hpdcache_rsp_i.rdata;
       assign cva6_req_o.data_rid = hpdcache_rsp_i.tid;
       assign cva6_req_o.data_gnt = hpdcache_req_ready_i & ~casd_busy;

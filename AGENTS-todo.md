@@ -107,9 +107,23 @@ prerequisite for this work under the existing dual license. No licensing policy 
   its first `l3_hit`. Flop-vs-SRAM dual sim stays byte-exact (17,187/32,102/17,221 records);
   FO4 `g6lc_l2_top` 28.5 at both WU values. Verilator `--threads 4` diverges late
   (~97.7 % identical, not byte-exact) → measurement-only; qualification stays threads=1.
-  Open under the eWT plan: M1 — CBO on WT targets hangs the store buffer (`store_buffer.sv:468-487`
-  waits on a `data_rvalid` the WT wbuffer never asserts, `wt_dcache_wbuffer.sv:1121`); M3 —
-  the int2 packages' real issue window is `NrScoreboardEntries=8`.
+  **Landed (T9a, 2026-09-27): M1a CBO end-to-end** — the WT CBO hang (the decoder turns a
+  `cbo.*` into a one-byte STORE whose `data_rvalid` the WT wbuffer never asserts,
+  `store_buffer.sv:468-487` / `wt_dcache_wbuffer.sv:1121`) is fixed by a CMO sideband:
+  `cva6`/`ariane` emit `cmo_valid/op/addr`, the WT subsystem intercepts the CBO store-port
+  request (never reaches the wbuffer), waits for write-buffer drain, and answers one
+  `data_rvalid` on `cmo_done_i`; the HPDCACHE adapter holds its CMO response the same way.
+  The new `g6lc_cmo_engine` round-robins cores, broadcasts the L1 invalidation, and
+  match-invalidates L2/L3 through `l2_back_inval_*`/new `l3_back_inval_*`; `cbo.clean`/
+  `cbo.flush` complete on `l2/l3_write_idle_o`; `cbo.zero` drains as a commit-queue
+  burst. New config: `L2CmoEn`, `CohMaxOutstanding` (4 default, 2–14 legal, 8 on
+  int2/int2_l3 with MSHR 8 — measured stall removal). `WtAxiAllocEn`/`L2WriteUpdateEn`/
+  `L2CmoEn` now on in `g6lc64_smt2`, `g6lc64_smt2_ooo_int`, `stream8`, `server_math`,
+  `server_math_v`, `ai`, `ooo_server`; smt2/smt2ooo anchors re-baselined by decision
+  (12,867,172 / 10,809,010; smt2_l3 byte-stable at 13,814,448). Hub same-line AR/write
+  ordering plus invalidation-after-fill hold closed `HUB_STALE_REFILL_PUBLICATION`.
+  Open under the eWT plan: M1b posted writes; M3 — the int2 packages' real issue
+  window is `NrScoreboardEntries=8`.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

@@ -39,6 +39,7 @@ ${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_ooo_snoop_filter.sv
 ${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_lr_sc_tracker.sv
 ${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_l1_inv_adapter.sv
 ${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_coherence_hub.sv
+${CVA6_REPO_DIR}/corev_apu/coherence/g6lc_cmo_engine.sv
 ${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_tag.sv
 ${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_data.sv

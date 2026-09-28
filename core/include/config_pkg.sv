@@ -518,6 +518,9 @@ package config_pkg;
     int unsigned SnoopFilterEntries;  // SF entries (0 or power-of-two)
     int unsigned CohInvalDepth;       // per-core inv FIFO depth
     int unsigned CohAxiStarveLimit;   // multi-master AXI anti-starve cycles
+    int unsigned CohMaxOutstanding;   // shared AR/AW slots in the hub
+                                      // (0→4; legal 2..14 — 4-bit ID space
+                                      // minus FILL_ID and one spare)
     // U3 energy-first L1
     bit          WayPredEn;           // MRU way prediction (I$ data-array CE)
     int unsigned WayPredEntries;      // way-predictor table entries (0 or pot)
@@ -569,6 +572,8 @@ package config_pkg;
     bit          L3InclusiveEn;       // L3 victim back-invalidates L1s and the L2 tag (Phase 2)
     bit          L2TagSramEn;         // L2/L3 tag array behind tc_sram launched read (Phase 3)
     bit          L2WriteUpdateEn;     // L2 merges a WT write into a resident line (T8f)
+    bit          L2CmoEn;             // CMO sideband to cluster engine (T9a);
+                                      // 0 = the core completes CBOs locally
     // Xg6lcai AI matrix plane (off in every package but g6lc64_ai)
     ai_cfg_t     AiCfg;
   } cva6_user_cfg_t;
@@ -692,6 +697,7 @@ package config_pkg;
     int unsigned SnoopFilterEntries;
     int unsigned CohInvalDepth;
     int unsigned CohAxiStarveLimit;
+    int unsigned CohMaxOutstanding;
     bit WayPredEn;
     int unsigned WayPredEntries;
     repl_policy_t ReplPolicy;
@@ -727,6 +733,7 @@ package config_pkg;
     bit          L3InclusiveEn;
     bit          L2TagSramEn;
     bit          L2WriteUpdateEn;
+    bit          L2CmoEn;
     bit          ServerPrefetchEn;
     int unsigned ServerPfStreams;
     int unsigned ServerPfDistance;
@@ -913,6 +920,15 @@ package config_pkg;
             (2 ** $clog2(Cfg.SnoopFilterEntries) == Cfg.SnoopFilterEntries));
     assert (Cfg.CohInvalDepth == 0 ||
             (2 ** $clog2(Cfg.CohInvalDepth) == Cfg.CohInvalDepth));
+    // 0 selects the built-in default (4); an explicit value must leave room in
+    // the 4-bit hub ID space for FILL_ID ('1) plus one spare → 2..14.
+    assert (Cfg.CohMaxOutstanding == 0 ||
+            (Cfg.CohMaxOutstanding >= 2 && Cfg.CohMaxOutstanding <= 14));
+    // A write-back L1 behind a shared invalidation-only L2/L3 is unsound: the
+    // hub/L2 track line presence, not dirty data, so a WB victim could carry
+    // the only copy. Multi-core packages must keep WT/HPDCACHE_WT L1s.
+    assert (!(Cfg.NrCores > 1 &&
+              Cfg.DCacheType inside {WB, HPDCACHE_WB, HPDCACHE_WT_WB}));
     // SL-W write-buffer fixup queue must not exceed the write buffer and must
     // be a power of two (or zero) when enabled.
     assert (Cfg.WtDcacheFixupDepth <= Cfg.WtDcacheWbufDepth);
@@ -1055,6 +1071,7 @@ package config_pkg;
     assert (!(Cfg.L3InclusiveEn && (!Cfg.L3En || Cfg.L3ByteSize < Cfg.L2ByteSize)));
     assert (!(Cfg.L2TagSramEn && !Cfg.L2En));
     assert (!(Cfg.L2WriteUpdateEn && !Cfg.L2En));
+    assert (!(Cfg.L2CmoEn && !Cfg.L2En));
 
     // --- Xg6lcai AI matrix plane (architecture/ai-matrix/isa-encoding.md) ---
     // Seam exclusivity. CVXIF and the accelerator port are already mutually

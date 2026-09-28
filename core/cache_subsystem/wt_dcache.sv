@@ -38,6 +38,15 @@ module wt_dcache
     output logic miss_o,  // we missed on a ld/st
     output logic wbuffer_empty_o,
     output logic wbuffer_not_ni_o,
+    // CMO sideband (T9a eWT): Zicbom store-port commands are issued on this
+    // dedicated channel once the write buffer has drained — they never enter
+    // the write buffer as data writes. cmo_op_o encodes 0=inval, 1=clean,
+    // 2=flush. cmo_done_i pulses once when the hierarchy completed the op.
+    output logic                    cmo_valid_o,
+    output logic [1:0]              cmo_op_o,
+    output logic [CVA6Cfg.PLEN-1:0] cmo_addr_o,
+    input  logic                    cmo_ready_i,
+    input  logic                    cmo_done_i,
 
     // AMO interface
     input  amo_req_t  amo_req_i,
@@ -292,6 +301,109 @@ module wt_dcache
   // (external/self/CAS invalidation or flush); a refill installs vld_bits.
   assign wr_cl_inv = (|wr_cl_we) & ~(|wr_vld_bits);
 
+  ///////////////////////////////////////////////////////
+  // CBO sideband interception (T9a eWT)
+  ///////////////////////////////////////////////////////
+  // A Zicbom store-port request (cbo_op in {INVAL, CLEAN, FLUSH}) is a
+  // cache-block operation, not a data write: the tracker below grants it,
+  // captures the physical address, drains the write buffer (uniform for all
+  // three ops — this keeps a CBO ordered behind the hart's own in-flight
+  // stores), and issues the command once on the cmo_* sideband. The store
+  // buffer's commit-queue entry then retires on a single data_rvalid pulse.
+  // cbo.zero stays an ordinary store: the store buffer drains its single
+  // commit entry as CBOZ_BEATS line-width stores, each tagged CBO_ZERO, and
+  // each beat gets one rvalid pulse so the entry retires after the last
+  // beat.
+  // Timing impact: a cbo_op compare on the store port's grant mux plus a
+  // 4-state FSM on registered fields; no path into tag lookup or the read
+  // ports.
+  dcache_req_i_t wbuf_port_req;
+  dcache_req_o_t wbuf_port_rsp;
+
+  if (CVA6Cfg.RVZiCbom || CVA6Cfg.RVZiCboz) begin : gen_cmo
+    typedef enum logic [1:0] {
+      CMO_S_IDLE,
+      CMO_S_DRAIN,
+      CMO_S_ISSUE,
+      CMO_S_WAIT
+    } cmo_fsm_e;
+
+    cmo_fsm_e cmo_fsm_q, cmo_fsm_d;
+    logic [CVA6Cfg.PLEN-1:0] cmo_addr_q, cmo_addr_d;
+    logic [1:0] cmo_op_q, cmo_op_d;
+    logic cmo_rvalid_q;
+    logic zero_rvalid_q;
+
+    wire cmo_req = CVA6Cfg.RVZiCbom && req_ports_i[NumPorts-1].data_req &&
+                   (req_ports_i[NumPorts-1].cbo_op == ariane_pkg::CBO_INVAL ||
+                    req_ports_i[NumPorts-1].cbo_op == ariane_pkg::CBO_CLEAN ||
+                    req_ports_i[NumPorts-1].cbo_op == ariane_pkg::CBO_FLUSH);
+    wire zero_req = CVA6Cfg.RVZiCboz && req_ports_i[NumPorts-1].data_req &&
+                    req_ports_i[NumPorts-1].cbo_op == ariane_pkg::CBO_ZERO;
+    // A CMO request is granted as soon as the tracker is free; the buffer
+    // drain below restores ordering relative to the hart's earlier stores.
+    wire cmo_gnt = cmo_req && (cmo_fsm_q == CMO_S_IDLE);
+
+    always_comb begin
+      wbuf_port_req = req_ports_i[NumPorts-1];
+      wbuf_port_req.data_req = req_ports_i[NumPorts-1].data_req && !cmo_req;
+      wbuf_port_req.data_we = req_ports_i[NumPorts-1].data_we && !cmo_req;
+      req_ports_o[NumPorts-1] = wbuf_port_rsp;
+      req_ports_o[NumPorts-1].data_gnt = cmo_req ? cmo_gnt : wbuf_port_rsp.data_gnt;
+      req_ports_o[NumPorts-1].data_rvalid = wbuf_port_rsp.data_rvalid |
+                                            cmo_rvalid_q | zero_rvalid_q;
+    end
+
+    always_comb begin
+      cmo_fsm_d   = cmo_fsm_q;
+      cmo_addr_d  = cmo_addr_q;
+      cmo_op_d    = cmo_op_q;
+      cmo_valid_o = 1'b0;
+      cmo_op_o    = cmo_op_q;
+      cmo_addr_o  = cmo_addr_q;
+      unique case (cmo_fsm_q)
+        CMO_S_IDLE: if (cmo_gnt) begin
+          cmo_addr_d = CVA6Cfg.PLEN'({req_ports_i[NumPorts-1].address_tag,
+                                     req_ports_i[NumPorts-1].address_index});
+          cmo_op_d = (req_ports_i[NumPorts-1].cbo_op == ariane_pkg::CBO_INVAL) ? 2'd0 :
+                     (req_ports_i[NumPorts-1].cbo_op == ariane_pkg::CBO_CLEAN) ? 2'd1 : 2'd2;
+          cmo_fsm_d  = CMO_S_DRAIN;
+        end
+        CMO_S_DRAIN: if (wbuffer_empty_o) cmo_fsm_d = CMO_S_ISSUE;
+        CMO_S_ISSUE: begin
+          cmo_valid_o = 1'b1;
+          if (cmo_ready_i) cmo_fsm_d = CMO_S_WAIT;
+        end
+        CMO_S_WAIT: if (cmo_done_i) cmo_fsm_d = CMO_S_IDLE;
+        default: cmo_fsm_d = CMO_S_IDLE;
+      endcase
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : p_cmo
+      if (!rst_ni) begin
+        cmo_fsm_q     <= CMO_S_IDLE;
+        cmo_addr_q    <= '0;
+        cmo_op_q      <= '0;
+        cmo_rvalid_q  <= 1'b0;
+        zero_rvalid_q <= 1'b0;
+      end else begin
+        cmo_fsm_q     <= cmo_fsm_d;
+        cmo_addr_q    <= cmo_addr_d;
+        cmo_op_q      <= cmo_op_d;
+        cmo_rvalid_q  <= (cmo_fsm_q == CMO_S_WAIT) && cmo_done_i;
+        zero_rvalid_q <= zero_req && wbuf_port_rsp.data_gnt;
+      end
+    end
+  end else begin : gen_no_cmo
+    logic unused_cmo;
+    assign wbuf_port_req           = req_ports_i[NumPorts-1];
+    assign req_ports_o[NumPorts-1] = wbuf_port_rsp;
+    assign cmo_valid_o             = 1'b0;
+    assign cmo_op_o                = '0;
+    assign cmo_addr_o              = '0;
+    assign unused_cmo              = cmo_ready_i | cmo_done_i;
+  end
+
   wt_dcache_wbuffer #(
       .CVA6Cfg(CVA6Cfg),
       .DCACHE_CL_IDX_WIDTH(DCACHE_CL_IDX_WIDTH),
@@ -306,9 +418,10 @@ module wt_dcache
       // TODO: fix this
       .cache_en_i     (cache_en),
       // .cache_en_i      ( '0                  ),
-      // request ports from core (store unit)
-      .req_port_i     (req_ports_i[NumPorts-1]),
-      .req_port_o     (req_ports_o[NumPorts-1]),
+      // request ports from core (store unit) — the CBO tracker above
+      // interposes on this port; cache-block ops never reach the buffer
+      .req_port_i     (wbuf_port_req),
+      .req_port_o     (wbuf_port_rsp),
       // miss unit interface
       .miss_req_o     (miss_req[NumPorts-1]),
       .miss_ack_i     (miss_ack[NumPorts-1]),

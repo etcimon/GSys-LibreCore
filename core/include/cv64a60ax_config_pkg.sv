@@ -176,6 +176,7 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       SnoopFilterEntries: unsigned'(0),
       CohInvalDepth: unsigned'(0),
       CohAxiStarveLimit: unsigned'(0),
+      CohMaxOutstanding: unsigned'(0),
       WayPredEn: bit'(0),
       WayPredEntries: unsigned'(0),
       ReplPolicy: config_pkg::REPL_PLRU,
@@ -215,6 +216,7 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       L3InclusiveEn: bit'(0),
       L2TagSramEn: bit'(0),
       L2WriteUpdateEn: bit'(0),
+      L2CmoEn: bit'(0),
       SharedTlbDepth: int'(64),
 
    NrLoadPipeRegs: int'(0),

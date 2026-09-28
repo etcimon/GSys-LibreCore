@@ -108,7 +108,8 @@ module tb_g6lc_l2_hum;
       .l2_evict_ready_i   (evict_ready),
       .l2_back_inval_valid_i (inval_valid),
       .l2_back_inval_addr_i  (inval_addr),
-      .l2_back_inval_ready_o (back_inval_ready)
+      .l2_back_inval_ready_o (back_inval_ready),
+      .l2_write_idle_o       ()
   );
 
   if(CHAIN_L3)begin : gen_l3_chain
@@ -135,7 +136,10 @@ module tb_g6lc_l2_hum;
       .l3_evict_valid_o(l3_evict_valid),
       .l3_evict_addr_o(l3_evict_addr),
       // The directed stimulus owns the port when it is driving.
-      .l3_evict_ready_i(back_inval_ready && !back_inval_valid)
+      .l3_evict_ready_i(back_inval_ready && !back_inval_valid),
+      .l3_write_idle_o(),
+      .l3_back_inval_valid_i(1'b0), .l3_back_inval_addr_i('0),
+      .l3_back_inval_ready_o()
     );
     always_ff @(posedge clk) if(rst_n && l3_evict_valid && back_inval_ready &&
                                 !back_inval_valid)

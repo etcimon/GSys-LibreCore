@@ -3,6 +3,8 @@
   .section .text.init
   .globl _start
 _start:
+  csrr t0, mhartid
+  bnez t0, park
   li   sp, 0x80008000
   la   t0, trap_soft
   csrw mtvec, t0
@@ -29,6 +31,11 @@ trap_soft:
   la   t0, tohost
   sw   a0, 0(t0)
 2: j 2b
+park:
+1:
+  wfi
+  j    1b
+
   .section .tohost,"aw",@progbits
   .align 6
   .globl tohost

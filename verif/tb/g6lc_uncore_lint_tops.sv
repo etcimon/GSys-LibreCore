@@ -280,7 +280,8 @@ module g6lc_l2_top_lint_top
       .l2_evict_ready_i     (l2_evict_ready),
       .l2_back_inval_valid_i(l2_back_inval_valid),
       .l2_back_inval_addr_i (l2_back_inval_addr),
-      .l2_back_inval_ready_o(l2_back_inval_ready)
+      .l2_back_inval_ready_o(l2_back_inval_ready),
+      .l2_write_idle_o      ()
   );
 endmodule
 
@@ -304,7 +305,10 @@ module g6lc_l3_top_lint_top
     output logic        l3_bypass,
     output logic        l3_evict_valid,
     output logic [63:0] l3_evict_addr,
-    input  logic        l3_evict_ready
+    input  logic        l3_evict_ready,
+    input  logic        l3_back_inval_valid,
+    input  logic [63:0] l3_back_inval_addr,
+    output logic        l3_back_inval_ready
 );
   g6lc_l3_top #(
       .Enable    (1'b1),
@@ -325,7 +329,11 @@ module g6lc_l3_top_lint_top
       .l3_wupdate_o    (),
       .l3_evict_valid_o(l3_evict_valid),
       .l3_evict_addr_o (l3_evict_addr),
-      .l3_evict_ready_i(l3_evict_ready)
+      .l3_evict_ready_i(l3_evict_ready),
+      .l3_write_idle_o (),
+      .l3_back_inval_valid_i(l3_back_inval_valid),
+      .l3_back_inval_addr_i (l3_back_inval_addr),
+      .l3_back_inval_ready_o(l3_back_inval_ready)
   );
 endmodule
 
