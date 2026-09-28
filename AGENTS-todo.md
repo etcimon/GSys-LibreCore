@@ -12,6 +12,31 @@ is the queue, not the design.
 | Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
+## AI execution-contract continuation (2026-09-28)
+
+The approved operator-first AI program begins with host and RTL contract correctness.
+Rights-holder exemption for tier-R changes was explicitly authorized in this session;
+no licensing policy was changed. Existing AI schedule edits and independent cache/SMT
+work remain intact. Design: `architecture/ai-matrix/log-2026-09.md`, `va-turbo.md`,
+`ai-tensor/architecture/RUNTIME.md`, and `ABI-CONTRACT.md`.
+
+- [x] Test-first host fixes: UIO queue-region mapping, positive ticket-qualified completion,
+  monotonic timeout/pending ownership, IRQ flag/rearm, and 23-bit doorbell ticket validation.
+- [x] Explicit Rust completion observation/claim avoids DMA/IRQ double-pop. C/Python/Rust
+  queue and ticket constants checked; full pytest discovery added to `ait.py test`.
+  Host gate: 101 Rust workspace tests, 289 pytest passes with 5 explicit skips,
+  NumPy/PyTorch smokes, ABI and package independence. Not guest/RTL/physical evidence.
+- [x] No-DMA spine qid repair: request generation split from response-driven state logic,
+  qid width preserved through validation, fetch signal declarations ordered before use.
+  `ai-spine-qid-before-20260928-r6` reproduces four invalid-qid failures; after-run r2 passes
+  the 446-cycle spine and negative oracle. `run_ai_spine_review.py` records source/runtime
+  hashes and generic synthesis: 1,412 cells, no latches/SCCs. Scope and setup failures are
+  retained in `architecture/ai-matrix/log-2026-09.md`; not DMA/GEMM/physical qualification.
+- [ ] Complete admission/completion capacity, capability truth and PMU arithmetic repairs.
+- [ ] Characterize the current island, then registered SRAM/retirement/format implementation,
+  real QEMU guest device and persistent RTL bridge, framework operators and both inference
+  families, quality-budgeted VA-Turbo and bandwidth-before-cluster scaling. Live gates stay off.
+
 ## Integrated OoO coherence continuation (2026-09-24)
 
 Contract: `core/ooo/AGENTS-ooo-contract.md` §8. Rights-holder authorization for this work was
@@ -169,6 +194,25 @@ prerequisite for this work under the existing dual license. No licensing policy 
   smt2_ooo_int 28/0 + 2/0 and defaults at baseline; FO4 `sparse_smt_mixed_commit`
   worst 31.0 ≤ 32. Carries a translate_off `pmp_entry` NAPOT-assert stabilization
   (delta-cycle read of a per-hart muxed `lzc` output). See `core/ooo/AGENTS-ooo-plan.md` T9d.
+- [x] **Landed (T9e, 2026-09-28): M1d reserved downstream write id `WR_ID`** —
+  every postable write forwards on `WR_ID = '1 - 1` (14; `FILL_ID`=15 stays the
+  bypass trail), so AXI same-id ordering applies same-line posted writes in the
+  L2's merge order — R2 among posted writes removed entirely (cross-core share
+  too), no hub change, no integration assumption. The write tracker records
+  slave id + downstream id; memory B matches dsid oldest-first, the slave B
+  carries the slave id; R2 compares downstream ids (posted-vs-blocking still
+  holds). `l2_line_hold` on the strict boots: 372,982/13,647,144/730,556/14,385,949
+  → **1/164/2/82**; cycles int2 L0 17,870,562 (−0.18 %), int2 L40 40,024,648
+  (−1.7 %), int2_l3 L0 18,389,755 (−2.7 % — the M1b L3 regression reversed),
+  int2_l3 L40 40,405,333 (−3.7 %); smt2 anchor byte-identical (12,406,273, same
+  rvfi sha `e0858842b829e5e2`), smt2_ooo_int mixed anchor byte-identical
+  (10,556,456, new sha `6fd35592317c2139`). `hub_ar_hold` measured 0–285 — not
+  a bottleneck; `hub_aw_sc_collide` ~390–440 k is now the largest remaining
+  same-core stall (hub slot level). Evidence: HUM matrix POSTED=0 hash = M1a,
+  sc60/sc61 + `pw_wrid` control; formal P1 on downstream ids PASS (+mut_p1
+  intended FAIL); composed+credits byte-matched M1b; gates 6/6; FO4 28.5.
+  **M1 is closed** — the M1a–M1d ordering work is landed and measured end to
+  end. See `core/ooo/AGENTS-ooo-plan.md` T9e.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

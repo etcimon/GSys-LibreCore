@@ -98,7 +98,8 @@ module g6lc_coherence_hub_lint_top
       .coh_split_conflict_o(coh_split_conflict),
       .coh_sc_noresv_o     (coh_sc_noresv),
       .coh_lr_kill_o       (coh_lr_kill),
-      .hub_aw_sc_collide_o ()
+      .hub_aw_sc_collide_o (),
+      .hub_ar_wr_hold_o    ()
   );
 endmodule
 

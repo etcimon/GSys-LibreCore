@@ -66,7 +66,8 @@ def parse_cache_counters(text):
     # Phase-5 models add the l2_wupd/l3_wupd write-update counts, and T9b
     # (posted writes) adds l2_wtrk_full/l2_line_hold/l2_posted/l2_rdtrk,
     # and T9c/M1c adds the hold split
-    # l2_hold_r1/l2_hold_r1_wu/l2_hold_r2/hub_aw_sc_collide.
+    # l2_hold_r1/l2_hold_r1_wu/l2_hold_r2/hub_aw_sc_collide; T9e/M1d adds
+    # hub_ar_hold (hub-side read-behind-write hold cycles).
     match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
                       r' l3_hit=(\d+) l3_miss=(\d+)'
                       r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))?'
@@ -75,6 +76,7 @@ def parse_cache_counters(text):
                       r' l2_posted=(\d+) l2_rdtrk=(\d+))?'
                       r'(?: l2_hold_r1=(\d+) l2_hold_r1_wu=(\d+)'
                       r' l2_hold_r2=(\d+) hub_aw_sc_collide=(\d+))?'
+                      r'(?: hub_ar_hold=(\d+))?'
                       r' dram_latency=(\d+)', text)
     if not match:
         return None
@@ -93,7 +95,8 @@ def parse_cache_counters(text):
             'l2_hold_r1_wu': int(match.group(15)) if match.group(15) else None,
             'l2_hold_r2': int(match.group(16)) if match.group(16) else None,
             'hub_aw_sc_collide': int(match.group(17)) if match.group(17) else None,
-            'dram_latency': int(match.group(18))}
+            'hub_ar_hold': int(match.group(18)) if match.group(18) else None,
+            'dram_latency': int(match.group(19))}
 
 
 def verdict(text, bound, kind, rc=0, expect_mask=None):

@@ -27,7 +27,10 @@ does not allocate on a store miss; the L2/L3 engine applies the same policy.
 | `g6lc64_ooo_int` | WT, no L2 | — | — | — | on (L1-local, `L2En=0`) | single core |
 
 "M1a" (CBO end-to-end + write-update + allocation) is landed (T9a); "M1b" (posted
-writes + bypass-read tracking, `L2PostedWriteEn`) is landed (T9b). Everything
+writes + bypass-read tracking, `L2PostedWriteEn`) is landed (T9b); "M1c" measured
+the hold split (~100 % R2, ≥55 % same-core, T9c); "M1d" puts every postable write
+on the reserved downstream write id `WR_ID` so AXI same-id ordering removes the
+R2 hold among posted writes entirely (T9e). Everything
 marked "on" has strict OpenSBI evidence on the named package (T8a–T8f, T9a, T9b).
 
 Measured on the four-hart OpenSBI boot of `g6lc64_ooo_int2` (DRAM latency 0,
@@ -149,12 +152,19 @@ streaming store, and a writer that keeps running while other cores hit the L2.
 
 1. A cacheable read miss to a line with a tracked (not yet B-acknowledged) write holds
    until that B — AXI does not order an AR against an earlier AW to the same address.
-2. Two tracked writes to the same line must carry the same AXI id (AXI orders B per id);
-   a second write to a tracked line under a different id holds until the first B.
+2. Every postable write is forwarded downstream on one reserved write id
+   (`WR_ID = '1 - 1`); AXI same-id ordering then applies same-line posted writes in
+   the L2's acceptance (merge) order with no hold. A write to a tracked line holds
+   only when the two *downstream* ids differ — a posted write meeting a blocking
+   (ATOP/lock) entry, or vice versa. Ids 14/15 are reserved: a postable slave write
+   arriving on `WR_ID` is an integration violation (sim assert; the L3 instance
+   below an L2 accepts it by design), id 15 stays the `FILL_ID` bypass trail.
 3. A write to a line with an in-flight fill waits for the fill and then takes the
    write-update path (the fill-kill rule for self-invalidations is unchanged).
-4. B responses are routed to the oldest tracker entry of their id; a blocking write
-   (ATOP, lock) also occupies a tracker entry so the routing is uniform.
+4. B responses are routed to the oldest tracker entry of their *downstream* id and
+   returned to the slave on the entry's recorded slave id; a blocking write (ATOP,
+   lock) keeps its original id downstream and also occupies a tracker entry so the
+   routing is uniform.
 5. Non-cacheable reads are tracked the same way; a cacheable hit response with the same
    id as an in-flight bypass read waits (per-id ordering on the slave side).
 6. The hub credit count (`CohMaxOutstanding`) bounds fills plus posted writes; the

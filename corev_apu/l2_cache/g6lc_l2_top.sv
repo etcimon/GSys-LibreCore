@@ -55,6 +55,14 @@ module g6lc_l2_top
     parameter bit          POSTED_WRITES = 1'b0,
     parameter int unsigned WTRK_DEPTH    = 4,
     parameter int unsigned RDTRK_DEPTH   = 4,
+    // T9d/M1d: set when the upstream agent may itself re-tag its posted
+    // writes onto the reserved WR_ID — the inner engine of an L3 stack,
+    // whose L2 forwards posted writes downstream on WR_ID. At the outer
+    // (hub-facing) L2 a postable slave write arriving on WR_ID is an
+    // integration violation and fails the simulation assert below; ATOP /
+    // lock writes on WR_ID stay legal (they keep their original id on the
+    // blocking path). Has no netlist effect — assertion gating only.
+    parameter bit          SLV_WRID_OK   = 1'b0,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -381,6 +389,14 @@ module g6lc_l2_top
   localparam int unsigned WTRK_W = (WTRK_DEPTH <= 1) ? 1 : $clog2(WTRK_DEPTH);
   // All fill ARs issue under the reserved FILL_ID (see the fill engine).
   localparam logic [AXI_ID_WIDTH-1:0] FILL_ID = '1;
+  // T9d/M1d: every *postable* write is forwarded downstream on the reserved
+  // write id WR_ID ('1 - 1). AXI same-id ordering then guarantees memory
+  // applies posted writes in the L2's acceptance order — the merge order —
+  // for every pair of same-line writes, same-core or cross-core, with no
+  // integration assumption. ATOP/lock/FILL_ID-alias writes keep their
+  // original id on the blocking path. The write tracker records the slave
+  // id (for the B return) and the downstream id separately.
+  localparam logic [AXI_ID_WIDTH-1:0] WR_ID = AXI_ID_WIDTH'('1) - 1;
   localparam int unsigned BFID_SETTLE = 16;
 
   logic                        wtrk_push, wtrk_full, wtrk_empty;
@@ -398,6 +414,7 @@ module g6lc_l2_top
   logic                        rdtrk_head_match;
   logic [3:0]                  rdtrk_probe_match;
   logic                        aw_postable;
+  logic [AXI_ID_WIDTH-1:0]     aw_dsid;
   logic                        wtrk_aw_ok;
   logic                        wr_posted_q, wr_posted_d;
   logic [WTRK_W-1:0]           wr_trk_idx_q, wr_trk_idx_d;
@@ -501,10 +518,12 @@ module g6lc_l2_top
   assign l2_hold_r1_o = POSTED_WRITES &&
       (state_q == S_TAG && tag_row_valid && !tag_hit && wtrk_line0_match);
   assign l2_hold_r1_wu_o = l2_hold_r1_o && wtrk_line0_wu;
-  // R2: AW held because a same-line tracker entry carries a different id.
+  // R2 (T9d): AW held because a same-line tracker entry carries a different
+  // *downstream* id — posted-vs-posted shares WR_ID and never holds; only
+  // posted-vs-blocking or blocking-vs-blocking mismatches still serialize.
   assign l2_hold_r2_o = POSTED_WRITES &&
       (state_q == S_IDLE && slv_req_i.aw_valid && !wtrk_full &&
-       wtrk_line1_match && (slv_req_i.aw.id != wtrk_line1_id));
+       wtrk_line1_match && (aw_dsid != wtrk_line1_id));
   assign l2_wtrk_line_hold_o = l2_hold_r1_o | l2_hold_r2_o |
       // ATOP-load guard: AW accepted only when admitted.
       (POSTED_WRITES && state_q == S_IDLE && slv_req_i.aw_valid &&
@@ -608,15 +627,21 @@ module g6lc_l2_top
   // but still hold a (blocking) tracker entry for uniform B routing.
   assign aw_postable = (slv_req_i.aw.atop == '0) && !slv_req_i.aw.lock &&
                        (slv_req_i.aw.id != FILL_ID);
-  // R2 AW admission: free slot, and a same-line entry implies the same id
-  // (per-id B order then alone routes same-line write completions). An
-  // ATOP-load (atop[5]) may not enter while a tracked bypass read carries
-  // its id: the ATOP R forward and the read-tracked beats share the slave
-  // R channel and could not be told apart.
+  // The downstream id the offered AW will be forwarded on: WR_ID for a
+  // posted write, the original id for a blocking one.
+  assign aw_dsid = aw_postable ? WR_ID : slv_req_i.aw.id;
+  // R2 AW admission: free slot, and a same-line entry implies the same
+  // *downstream* id — per-id B order then alone routes same-line write
+  // completions, so two posted writes (both WR_ID) never serialize here;
+  // only a posted write meeting a blocking entry (or two blocking entries
+  // on different ids) still waits. An ATOP-load (atop[5]) may not enter
+  // while a tracked bypass read carries its id: the ATOP R forward and the
+  // read-tracked beats share the slave R channel and could not be told
+  // apart.
   assign wtrk_aw_ok = !POSTED_WRITES ||
                       (!wtrk_full &&
                        (!wtrk_line1_match ||
-                        (slv_req_i.aw.id == wtrk_line1_id)) &&
+                        (aw_dsid == wtrk_line1_id)) &&
                        !(slv_req_i.aw.atop[5] && rdtrk_probe_match[3]));
   // Slave-R arbiter. An in-progress tracked burst owns the channel until
   // last; a new burst picks round-robin (r_turn_q: 1 favors memory-side
@@ -655,6 +680,7 @@ module g6lc_l2_top
         .rst_ni,
         .push_i            (wtrk_push),
         .push_id_i         (slv_req_i.aw.id),
+        .push_dsid_i       (aw_dsid),
         .push_line_i       (line_align(slv_req_i.aw.addr)),
         .push_blocking_i   (!aw_postable),
         .push_need_r_i     (slv_req_i.aw.atop[5]),
@@ -708,6 +734,22 @@ module g6lc_l2_top
         .probe_match_o (rdtrk_probe_match),
         .empty_o       (rdtrk_empty)
     );
+
+    if (!SLV_WRID_OK) begin : gen_wrid_chk
+      // T9d/M1d: WR_ID is reserved for this engine's own re-tagging. A
+      // postable slave write arriving already on WR_ID means upstream
+      // violated the reservation (hub slot ids stay in 0..13; ATOP/lock
+      // writes on WR_ID keep their original id on the blocking path and
+      // are legal). In an L3 stack the inner engine sets SLV_WRID_OK — its
+      // L2's posted writes arrive on WR_ID by design.
+      //pragma translate_off
+      always_ff @(posedge clk_i) begin
+        if (rst_ni && slv_req_i.aw_valid && aw_postable &&
+            (slv_req_i.aw.id == WR_ID))
+          $error("%m: postable slave write arrived on reserved WR_ID");
+      end
+      //pragma translate_on
+    end
   end else begin : gen_no_trk
     assign wtrk_full         = 1'b0;
     assign wtrk_empty        = 1'b1;
@@ -1351,7 +1393,11 @@ module g6lc_l2_top
         // injects R beats that would alias into an in-flight fill collector.
         mst_req_o.aw_valid = !(id_q == FILL_ID && (fill_out || fill_ar_hold_q));
         mst_req_o.aw.addr  = addr_q;
-        mst_req_o.aw.id    = id_q;
+        // T9d/M1d: a posted write goes downstream on the reserved WR_ID —
+        // every posted write shares one id, so memory applies them in
+        // acceptance (merge) order and same-line posted writes never need
+        // the R2 hold. Blocking writes keep their original id.
+        mst_req_o.aw.id    = (POSTED_WRITES && wr_posted_q) ? WR_ID : id_q;
         mst_req_o.aw.len   = len_q;
         mst_req_o.aw.size  = size_q;
         mst_req_o.aw.burst = axi_pkg::BURST_INCR;

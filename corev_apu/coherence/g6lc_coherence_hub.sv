@@ -72,7 +72,12 @@ module g6lc_coherence_hub
     // id hold the L2 will charge counts as same-core serialization here
     // (the L2 only sees the hub's slot ids). The TB counts it as
     // hub_aw_sc_collide; leave unconnected elsewhere.
-    output logic                       hub_aw_sc_collide_o
+    output logic                       hub_aw_sc_collide_o,
+    // T9e/M1d hold-cycle level: any core offers an AR that is ineligible
+    // because a same-line AW is pending at a port or live in an AW slot —
+    // the hub-side read-behind-write hold (ar_wr_line_live). The TB counts
+    // it as hub_ar_hold; leave unconnected elsewhere.
+    output logic                       hub_ar_wr_hold_o
 );
 
   localparam bit OOO_SF = (POLICY == COH_OOO) && SNOOP_FILTER_EN;
@@ -118,6 +123,7 @@ module g6lc_coherence_hub
     assign coh_sc_noresv_o      = 1'b0;
     assign coh_lr_kill_o        = 1'b0;
     assign hub_aw_sc_collide_o  = 1'b0;
+    assign hub_ar_wr_hold_o     = 1'b0;
   end else begin : gen_cluster
 
     // ================================================================
@@ -357,6 +363,16 @@ module g6lc_coherence_hub
           end
         end
       end
+    end
+
+    // T9e/M1d: an offered AR held ineligible by the same-line AW rule —
+    // the hub-side read-behind-write cost. Level counts hold cycles;
+    // nc=1 folds to the gen_identity tie-off.
+    always_comb begin
+      hub_ar_wr_hold_o = 1'b0;
+      for (int unsigned c = 0; c < NC; c++)
+        if (core_req_i[c].ar_valid && ar_wr_line_live[c])
+          hub_ar_wr_hold_o = 1'b1;
     end
 
     // The hold suppresses both pop and presentation: a suppressed head is not

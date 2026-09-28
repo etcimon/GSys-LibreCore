@@ -5,16 +5,23 @@
 //
 // g6lc_l2_wtrk — write tracker. Every accepted write (posted and blocking
 // alike) allocates one entry in slave-AW accept order, so memory B responses
-// route uniformly: a B for id X is absorbed by the oldest live entry with
-// id X that has not yet received its B (per-id B ordering is an AXI
-// guarantee). Entries whose B has arrived are presented on the slave B
-// channel oldest-first and popped on the slave handshake.
+// route uniformly: a B for downstream id X is absorbed by the oldest live
+// entry with downstream id X that has not yet received its B (per-id B
+// ordering is an AXI guarantee). Entries whose B has arrived are presented
+// on the slave B channel oldest-first — carrying the recorded *slave* id —
+// and popped on the slave handshake. Each entry therefore carries two ids:
+// the slave-side id (`push_id_i`, returned on slave B and probed by the
+// ATOP-load guard) and the downstream id (`push_dsid_i`, the id the write
+// was forwarded on — the parent's reserved WR_ID for a posted write, the
+// original id for a blocking one).
 //
 //   Ordering enforced by the parent FSM, not here:
 //     R1  a cacheable read miss to a line with any live entry holds.
 //     R2  AW acceptance requires a free slot and — when an entry for the
-//         same line exists — the same id, so per-id B order alone routes
-//         same-line write completions.
+//         same line exists — the same *downstream* id, so same-id B order
+//         alone routes same-line write completions. Posted writes all share
+//         WR_ID, so posted-vs-posted never holds; only a posted write
+//         meeting a blocking entry (or vice versa) still waits.
 //
 // g6lc_l2_rdtrk — bypass-read tracker. A forwarded non-FILL_ID bypass AR
 // leaves an {id} entry; memory R beats are routed to the oldest entry with
@@ -38,9 +45,13 @@ module g6lc_l2_wtrk #(
 ) (
     input  logic     clk_i,
     input  logic     rst_ni,
-    // Allocation on slave AW accept.
+    // Allocation on slave AW accept. push_id_i is the slave id (returned on
+    // the slave B channel); push_dsid_i is the downstream id the write is
+    // forwarded on (reserved WR_ID for posted writes, original id for
+    // blocking ones) — memory B routing and the R2 admission compare use it.
     input  logic                        push_i,
     input  logic [ID_WIDTH-1:0]         push_id_i,
+    input  logic [ID_WIDTH-1:0]         push_dsid_i,
     input  logic [ADDR_WIDTH-1:0]       push_line_i,
     input  logic                        push_blocking_i,
     // Entry's write carries an ATOP R response (atop[5]); the read tracker
@@ -54,7 +65,8 @@ module g6lc_l2_wtrk #(
     input  logic [$clog2(DEPTH)-1:0]    mark_idx_i,
     output logic                        full_o,
     output logic [$clog2(DEPTH)-1:0]    alloc_idx_o,
-    // Memory B channel: absorb a B into the oldest matching unserved entry.
+    // Memory B channel: absorb a B into the oldest matching unserved entry
+    // (matched on the downstream id).
     input  logic                        m_b_valid_i,
     input  logic [ID_WIDTH-1:0]         m_b_id_i,
     input  logic [1:0]                  m_b_resp_i,
@@ -71,8 +83,8 @@ module g6lc_l2_wtrk #(
     output logic [$clog2(DEPTH)-1:0]    pop_idx_o,
     // Line hazard probes (registered request fields compared in the
     // parent): probe 0 is the R1 in-flight-request line, probe 1 the R2
-    // AW-admission line (whose matching entry id is also reported for the
-    // same-id admission rule).
+    // AW-admission line (whose matching entry's downstream id is also
+    // reported for the same-downstream-id admission rule).
     input  logic [ADDR_WIDTH-1:0]       line0_i,
     output logic                        line0_match_o,
     // Any line0-matching entry was marked write-update-hit (vs write-around).
@@ -90,6 +102,7 @@ module g6lc_l2_wtrk #(
 
   logic [DEPTH-1:0]        valid_q, valid_d;
   logic [ID_WIDTH-1:0]     ent_id_q    [DEPTH];
+  logic [ID_WIDTH-1:0]     ent_dsid_q  [DEPTH];
   logic [ADDR_WIDTH-1:0]   ent_line_q  [DEPTH];
   logic [DEPTH-1:0]        ent_block_q, ent_block_d;
   logic [DEPTH-1:0]        ent_needs_q, ent_needs_d;
@@ -133,13 +146,14 @@ module g6lc_l2_wtrk #(
   endfunction
 
   // --------------------
-  // Memory B: oldest entry with matching id that still waits for its B.
+  // Memory B: oldest entry with matching downstream id that still waits
+  // for its B.
   // --------------------
   logic [DEPTH-1:0] m_match, m_sel;
   logic [IDX_W-1:0] m_sel_idx;
   always_comb begin
     for (int unsigned e = 0; e < DEPTH; e++)
-      m_match[e] = valid_q[e] && !b_pend_q[e] && (ent_id_q[e] == m_b_id_i);
+      m_match[e] = valid_q[e] && !b_pend_q[e] && (ent_dsid_q[e] == m_b_id_i);
     m_sel = oldest(m_match, older_q);
     m_sel_idx = '0;
     for (int unsigned e = 0; e < DEPTH; e++)
@@ -194,7 +208,7 @@ module g6lc_l2_wtrk #(
   assign line0_match_o     = |l0_match;
   assign line0_wu_o        = |(l0_match & ent_wu_q);
   assign line1_match_o     = |l1_match;
-  assign line1_match_id_o  = ent_id_q[l1_match_idx];
+  assign line1_match_id_o  = ent_dsid_q[l1_match_idx];
   assign need_r_id_match_o = |(valid_q & ent_needs_q &
                                match_by_id(ent_id_q, need_r_id_i));
 
@@ -250,6 +264,7 @@ module g6lc_l2_wtrk #(
       b_pend_q    <= '0;
       for (int unsigned e = 0; e < DEPTH; e++) begin
         ent_id_q[e]   <= '0;
+        ent_dsid_q[e] <= '0;
         ent_line_q[e] <= '0;
         b_resp_q[e]   <= '0;
         b_user_q[e]   <= '0;
@@ -263,6 +278,7 @@ module g6lc_l2_wtrk #(
       b_pend_q    <= b_pend_d;
       if (push_i) begin
         ent_id_q[free_idx]   <= push_id_i;
+        ent_dsid_q[free_idx] <= push_dsid_i;
         ent_line_q[free_idx] <= push_line_i;
       end
       if (m_b_valid_i && m_b_match_o) begin

@@ -2315,3 +2315,113 @@ FO4 `sparse_smt_mixed_commit` at ring 8 (`m2-fo4-mixed-commit`, param map
 reg→reg, slack 1.0, ~1290 MHz vs 1250 MHz budget) — within the ≤32 bound;
 cones: scoreboard 30.5, commit_stage 30.0, store_buffer 31.0, `g6lc_rob`
 8.0, `g6lc_smt_csr_bank` 6.0.
+
+### T9e — M1d: reserved downstream write id `WR_ID` (2026-09-28)
+
+**Decision rationale.** T9c measured `l2_line_hold` ≈ 100 % R2 (different-id
+same-line AW), with the same-core share ≥55 % at L40. Of the three options
+the measurement supported, the chosen fix is neither a hub-id scheme nor an
+unproven downstream-order assumption: the L2/L3 engine puts **every postable
+write it forwards on one reserved downstream write id**,
+`WR_ID = AXI_ID_WIDTH'('1) - 1` (14; `FILL_ID` = 15 keeps the bypass trail).
+AXI same-id ordering then guarantees memory applies the L2's posted writes in
+the L2's acceptance — merge — order for every same-line pair, same-core or
+cross-core, with no integration assumption and no hub change. R2 disappears
+for posted-vs-posted entirely (the ~45 % cross-core share too, not just the
+measured ≥55 %).
+
+**Change.** `g6lc_l2_wtrk` entries split the recorded id: `ent_id_q` (slave
+id, for the slave-visible B) and `ent_dsid_q` (downstream id, for memory-B
+matching and the R2 line probe). `g6lc_l2_top`: postable writes
+(`atop=='0 && !lock && id != FILL_ID`) forward with `mst_req_o.aw.id = WR_ID`;
+ATOP/lock/FILL_ID-alias writes keep their original id on the blocking path.
+Memory B matches `ent_dsid_q` oldest-first (pure FIFO on `WR_ID`); the slave B
+carries `ent_id_q`. R2 compares downstream ids: a same-line AW holds only when
+the two downstream ids differ — posted-vs-posted never holds,
+posted-vs-blocking and blocking-vs-posted still do. R1 and R3–R6 are
+unchanged (AR vs AW is unordered in AXI regardless of id, so the read-miss
+hold stays). Legality: ids 14/15 are reserved, `CohMaxOutstanding <= 14`
+stands; a postable slave write arriving already on `WR_ID` is an integration
+violation (sim assert, parameter `SLV_WRID_OK` — 0 at the hub-facing L2, 1 on
+the inner L3 engine which receives L2-retagged `WR_ID` writes by design and
+re-tags them to its own identical `WR_ID`). `check_cfg` comments updated.
+New `[mc_cache]` field `hub_ar_hold` (`hub_ar_wr_hold_o`: a core AR offered
+but ineligible because `ar_wr_line_live` — the next candidate bottleneck,
+measured on the same boots); tied 0 in the single-core path. Parsers treat it
+as an optional trailing field; older lines still parse.
+
+**Formal** (`verif/tb/l2/formal/`, yices): P1 is now "no two valid entries
+share a line with different *downstream* ids"; `push_dsid_i` added and the R2
+admission assumption compares downstream ids.
+`g6lc_l2_wtrk_{prove,live,cover}` PASS, `mut_p1` intended-FAIL;
+`g6lc_l2_top_prove` PASS, `mut_p3` intended-FAIL.
+
+**HUM** (`ooocoh-m1d-hum-*`, 12 lanes): full WU{0,1}×TAG_SRAM{0,1}×POSTED{0,1}
+matrix — POSTED=0 contract hash **byte-identical to M1b (= M1a)** on all four
+combinations; POSTED=1 94/94 (wu0) and 110/110 (wu1) records matched. sc51 is
+reworked: two posted writes to one line from different slave ids under
+`+mem_reorder_ids` now pass with **no R2 hold** (memory sees a single id — the
+reorder knob has nothing to reorder). New sc60 probes that contract (final
+memory = second write, `l2_hold_r2` = 0) and sc61 holds a posted write behind
+a same-line ATOP (different downstream ids). Fault controls:
+`pw_r1`→`HUM_R1_FILL_LAUNCHED`, `pw_r2` retargeted to sc61→`HUM_ATOP_AW_ACCEPTED`,
+`pw_r5`→`HUM_DATA`, `pw_wrid` (posted writes forwarded on original ids while
+the tracker records `WR_ID`) → the fail-fast B-routing assertion
+"no live write-tracker entry" fires before the `HUM_WID_DRAIN` watchdog.
+
+**Composed + credits.** All six composed lanes (`ooocoh-m1d-composed-*-wu1-r1`:
+small, mod-only, stack-small, stack-fault, SCC, SCC+L3) matched with
+`late_ar >= mem_b`; SCC 0 through hub+L2 and hub+L2+L3, `check -assert` clean.
+Six credit lanes (`ooocoh-m1d-credits-*-r1`) byte-matched the M1b metrics —
+reads-only `max_fills`/`max_ar_live` 4@OT4 / 8@OT8, mixed `wr_stall` 22→0 at
+OT8, `max_aw_live` 1, L3 stack `max_fills`=5/`aw`=2/drain 270 — `WR_ID` does
+not change hub slot usage (`fills + wtrk + rdtrk ≤ credits` stands).
+
+**Gates + timing.** FO4 `g6lc_l2_top` (`m1d-fo4-l2top`): worst **28.5 FO4**
+(reg0/CP→reg1/D, ~1403 MHz vs 1250 budget) — identical to the M1b screen.
+Lint/synth `check -assert` (all `passed`, 0 errors):
+`ooocoh-m1d-gate-ooo_int2-r1` 24/0 + 7/0,
+`ooocoh-m1d-gate-ooo_int2_l3-r1` 24/0 + 13/0,
+`ooocoh-m1d-gate-smt2-r1` 4/0 + 31/0,
+`ooocoh-m1d-gate-smt2_l3-r1` 4/0 + 41/0,
+`ooocoh-m1d-gate-smt2_ooo_int-r1` 28/0 + 2/0,
+`ooocoh-m1d-gate-defaults-r1` 8/0 + 54/0 lint, 32/0 + 5/0 synth — at the M1b
+baselines (int2 synth drops to 7 because the lint tops now tie the hold-split
+taps).
+
+**Directed** (int2/int2_l3, L0/L40 — `run_mc_int2_review.py`, pos+neg):
+`mc_l2_write_read` L40 518,507 (int2) / 543,093 (int2_l3) — identical to M1b;
+`mc_l3_stride_scan` 512K, `mc_store_load_new_line`, `mc_cbo_ewt` (±),
+`mc_smt2_boot_release`, `mc_shared_line_coherence` (PEER_HART=2, negatives
+fire) — all records matched.
+
+**Strict boots** (threads=1, `ALLOW_CONCURRENT`; counters + cycles vs M1c):
+
+| Lane | Tag | Cycles (M1c) | `l2_hold_r1` | `l2_hold_r1_wu` | `l2_hold_r2` | `hub_aw_sc_collide` | `hub_ar_hold` | `l2_posted` |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| int2 L0 | `ooocoh-m1d-osbi-int2-L0-r1` | **17,870,562** (17,903,402, −0.18 %) | 1 | 0 | **0** | 418,054 | 0 | 842,872 |
+| int2 L40 60M | `ooocoh-m1d-osbi-int2-L40-r1` | **40,024,648** (40,712,259, −1.69 %) | 164 | 0 | **0** | 388,923 | 285 | 779,312 |
+| int2_l3 L0 | `ooocoh-m1d-osbi-int2l3-L0-r1` | **18,389,755** (18,905,079, −2.73 %) | 2 | 0 | **0** | 440,181 | 1 | 860,049 |
+| int2_l3 L40 60M | `ooocoh-m1d-osbi-int2l3-L40-r1` | **40,405,333** (41,946,955, −3.68 %) | 82 | 0 | **0** | 392,774 | 243 | 791,031 |
+| smt2_l3 L0 | `ooocoh-m1d-osbi-smt2l3-L0-r1` | 13,691,686 (unchanged) | 4 | 0 | 0 | 0 | 0 | 552,843 |
+| smt2 L0 (anchor) | `ooocoh-m1d-osbi-smt2-L0-r1` | **12,406,273 — byte-identical anchor** | 0 | 0 | 0 | 0 | 0 | 519,730 |
+| smt2_ooo_int mixed L0 (anchor) | `ooocoh-m1d-osbi-smt2ooo-L0-r1` | **10,556,456 — byte-identical mixed anchor** | 0 | 0 | 0 | 0 | 0 | 510,325 |
+
+`l2_line_hold` collapses from 372,982 / 13,647,144 / 730,556 / 14,385,949 to
+1 / 164 / 2 / 82 — the whole R2 bill is gone; the residual is a handful of
+genuine R1 events (all write-around, `l2_hold_r1_wu` = 0 everywhere).
+`hub_aw_sc_collide` still counts the hub slot-level same-core same-line AW
+offers (~390–440 k) — that upstream hold is the remaining same-core cost and
+is now the largest single stall source, though far cheaper than the old L2 R2
+round trips. `hub_ar_hold` measures the AR-behind-write hold at 0–285 cycles
+per boot — negligible; the anticipated next bottleneck is not one.
+
+**Final anchors (replace M1b's).** smt2 L0: 12,406,273 cycles, rvfi hart_00
+sha256 `e0858842b829e5e244d1297df1f95fc916c745079444455c48946a8ca9199810`,
+18,522,309 lines — **identical hash and count
+to the M1b anchor** (single-core posted-write order is unchanged). smt2_ooo_int
+mixed L0: 10,556,456 cycles, rvfi hart_00 sha256 `6fd35592317c21393d6465e0d795766f14a05db977542ae7adb18bd54fc7c5a9`,
+18,544,481 lines (mixed residency per T9d; `+smt_mixed_stats`:
+`both_resident_cycles`=60,914, `cross_hart_port1_commits`=4,851,
+`hol_residual`=1,488, retired h0=8,810,200 / h1=462,035 — byte-identical to
+the M2 measurement).

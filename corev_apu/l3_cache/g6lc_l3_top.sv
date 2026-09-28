@@ -80,6 +80,10 @@ module g6lc_l3_top
       .POSTED_WRITES  (POSTED_WRITES),
       .WTRK_DEPTH     (WTRK_DEPTH),
       .RDTRK_DEPTH    (RDTRK_DEPTH),
+      // This engine sits below an L2 that re-tags its posted writes onto
+      // the reserved WR_ID — id-14 arrivals are the designed flow here, so
+      // the slave-side WR_ID integration assert stays off (T9d/M1d).
+      .SLV_WRID_OK    (1'b1),
       .BYTE_SIZE      (BYTE_SIZE),
       .SET_ASSOC      (SET_ASSOC),
       .LINE_WIDTH     (LINE_WIDTH),

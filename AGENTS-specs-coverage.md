@@ -15,6 +15,14 @@ headline view: it deliberately carries **no file references and no line numbers*
 
 ---
 
+## AI host execution contract — software coverage only
+
+Additional host protocol regressions cover queue-region separation, ticket-qualified completion,
+claim ownership, timeout retention and doorbell ticket bounds. The no-DMA RTL spine now has
+source-bound before/after queue-ID negatives, valid-queue controls and a failing-oracle check;
+generic synthesis reports no latches or combinational SCCs. This changes no RISC-V chapter status,
+floating-format grant, DMA coherence qualification or physical-readiness status.
+
 ## OoO coherence continuation — qualification open
 
 Atomic response transport and same-cycle cache refill/invalidation have additional directed

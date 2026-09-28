@@ -45,7 +45,9 @@ CONTRACT = {0: 'HUM_DATA', 1: 'HUM_DATA', 2: 'HUM_DATA', 3: 'HUM_DATA',
             # (hold pulses / memory-content checks) so no data arm is wired.
             49: 'HUM_DATA', 50: 'HUM_DATA', 51: None, 52: None, 53: None,
             54: None, 55: 'HUM_DATA', 56: 'HUM_DATA', 57: None, 58: 'HUM_DATA',
-            59: None}
+            # 60/61 are the T9e/M1d WR_ID ordering contract: no R2 cycles
+            # among posted writes, R2 retained against blocking entries.
+            59: None, 60: None, 61: None}
 # Scenarios exercising the TAG_SRAM launched-read protocol; functional on the
 # flop path too (the SRAM-only engagement checks are parameter-gated).
 TAG_SRAM_SCEN = range(35, 42)
@@ -54,12 +56,12 @@ TAG_SRAM_SCEN = range(35, 42)
 WU_ONLY_SCEN = range(42, 49)
 # POSTED-only scenarios: kept out of the POSTED=0 plan so its metric hash
 # stays byte-identical to the M1a run.
-POSTED_ONLY_SCEN = range(49, 60)
+POSTED_ONLY_SCEN = range(49, 62)
 # Scenario 50 additionally requires WRITE_UPDATE: it is the (a2) resident-line
 # merge-hit probe and fatals HUM_POSTED_WU_REQUIRED on a WU=0 build by design.
 WU_POSTED_SCEN = {50}
 # Scenarios that need the memory model to reorder B/R across different ids.
-MEM_REORDER_SCEN = {51, 54}
+MEM_REORDER_SCEN = {51, 54, 60, 61}
 
 
 def digest(path):
@@ -134,23 +136,33 @@ def main():
             "  assign wu_tag_inval = 1'b1;", 'HUM_WU_REFETCH'),
         # T9b fault controls: drop each ordering-rule hold. R1 -> the miss
         # launches its fill while the write is still tracked (HUM_R1_FILL_
-        # LAUNCHED). R2 -> the different-id same-line AW is accepted
-        # (HUM_R2_AW_ACCEPTED; +mem_reorder_ids also makes memory end with
-        # the older value). R5 -> the same-id hit response jumps the
-        # tracked read's queue position (per-id R order -> HUM_DATA).
+        # LAUNCHED). R2 -> the different-downstream-id same-line AW is
+        # accepted (T9e/M1d: posted writes share WR_ID, so the live R2 case
+        # is the store-atomic behind a posted write — the leaked accept
+        # trips HUM_ATOP_AW_ACCEPTED (and under +mem_reorder_ids would also
+        # corrupt the merge order).
+        # R5 -> the same-id hit response jumps the tracked read's queue
+        # position (per-id R order -> HUM_DATA). WR_ID -> posted writes
+        # forwarded on their original ids while the tracker still records
+        # WR_ID: the first memory B arrives on an id the tracker cannot
+        # match and the fail-fast B-routing assertion fires ("no live
+        # write-tracker entry") before the drain watchdog can trip.
         'pw_r1': (49,
             "            if (mshr_ready && !wtrk_line0_match &&",
             "            if (mshr_ready &&", 'HUM_R1_FILL_LAUNCHED'),
-        'pw_r2': (51,
+        'pw_r2': (61,
             "        end else if (slv_req_i.aw_valid && wtrk_aw_ok) begin",
             "        end else if (slv_req_i.aw_valid && !wtrk_full) begin",
-            'HUM_R2_AW_ACCEPTED'),
+            'HUM_ATOP_AW_ACCEPTED'),
         'pw_r5': (56,
             "        if (r_fsm_start_ok && !rdtrk_probe_match[0]) state_d = S_HIT_RESP;",
             "        if (r_fsm_start_ok) state_d = S_HIT_RESP;", 'HUM_DATA'),
+        'pw_wrid': (60,
+            "        mst_req_o.aw.id    = (POSTED_WRITES && wr_posted_q) ? WR_ID : id_q;",
+            "        mst_req_o.aw.id    = id_q;", 'no live write-tracker entry'),
     }
     WU_FAULTS = ('wu_merge', 'wu_tag')
-    POSTED_FAULTS = ('pw_r1', 'pw_r2', 'pw_r5')
+    POSTED_FAULTS = ('pw_r1', 'pw_r2', 'pw_r5', 'pw_wrid')
     if fault in WU_FAULTS:
         wu = True
     if fault in POSTED_FAULTS:
@@ -194,8 +206,10 @@ def main():
         shutil.copy2(source / name, source / 'axi' / name)
     rtl_names = [n for n in NAMES if n not in HEADERS]
 
-    runtime_info = json.loads(Path(
-        '/opt/testharness/runs/review-cacheability-pair-20260916/output/runtime.json').read_text())
+    runtime_info = json.loads(Path(os.environ.get(
+        'REVIEW_RUNTIME_JSON',
+        '/opt/testharness/runs/review-cacheability-pair-20260916/output/runtime.json'
+    )).read_text())
     runtime = Path(runtime_info['privateRoot'])
     assert digest(runtime / 'include/verilated_funcs.h') == \
         'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'

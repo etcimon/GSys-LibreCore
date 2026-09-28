@@ -370,8 +370,9 @@ module g6lc_cluster
         .coh_split_conflict_o(),
         .coh_sc_noresv_o  (),
         .coh_lr_kill_o    (),
-        // TB reads the level hierarchically; no cluster port.
-        .hub_aw_sc_collide_o ()
+        // TB reads the levels hierarchically; no cluster ports.
+        .hub_aw_sc_collide_o (),
+        .hub_ar_wr_hold_o     ()
     );
   end
 

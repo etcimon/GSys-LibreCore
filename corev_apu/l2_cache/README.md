@@ -55,15 +55,20 @@ the eligibility compare is on registered request fields.
 Default off; when enabled the write bypass posts the write instead of
 blocking on memory's B. Every accepted write carries an entry in the
 write tracker (`g6lc_l2_wtrk.sv`, `L2WriteTrackDepth` entries: valid,
-id, line address, blocking flag, in AW-issue order). A write is
-*postable* iff `atop=='0 && !lock && id != FILL_ID`; postable writes
-return to `S_IDLE` after the last forwarded W beat, so hits and misses
-are served while the write is in flight. ATOP, locked and FILL_ID-alias
-writes stay on the blocking `S_BYPASS_B` path but still hold an entry,
-so B routing is uniform: a memory B is absorbed by the oldest tracker
-entry of its id (AXI orders B per id) and the slave B is presented when
-that entry pops. `l2_write_idle_o` = tracker empty and no write state,
-which is what `cbo.clean`/`cbo.flush` wait on.
+slave id, downstream id, line address, blocking flag, in AW-issue
+order). A write is *postable* iff `atop=='0 && !lock && id != FILL_ID`;
+postable writes are forwarded on one reserved downstream write id
+(`WR_ID = '1 - 1`, T9e) and return to `S_IDLE` after the last forwarded
+W beat, so hits and misses are served while the write is in flight.
+ATOP, locked and FILL_ID-alias writes stay on the blocking
+`S_BYPASS_B` path with their original id but still hold an entry, so B
+routing is uniform: a memory B is absorbed by the oldest tracker entry
+of its *downstream* id (AXI orders B per id) and the slave B is
+presented, with the recorded slave id, when that entry pops. Since all
+posted writes share `WR_ID`, memory applies them in the L2's acceptance
+order — including same-line pairs — with no L2-side serialization and
+no integration assumption. `l2_write_idle_o` = tracker empty and no
+write state, which is what `cbo.clean`/`cbo.flush` wait on.
 
 NC/lock bypass reads are posted the same way: the AR forwards and the
 FSM returns to `S_IDLE` with an entry in the read tracker
@@ -72,23 +77,32 @@ slave through an R arbiter that keeps a burst atomic until `last`.
 
 **Ordering rules** (the eWT doc's 1-6, enforced by two small CAMs): a
 cacheable read *miss* to a tracked-write line holds until that B (R1);
-a different-id write to a tracked line holds (R2); a same-line fill
-still kills the write's update eligibility (R3); B is routed per id to
-the oldest entry (R4); a slave-side hit or fill serve whose id has a
-live read-tracker entry holds (R5); the hub `CohMaxOutstanding` credit
-bound covers fills + write tracker + read tracker (R6).
+a write to a tracked line holds only when the two *downstream* ids
+differ — posted-vs-posted never holds, posted-vs-blocking and
+blocking-vs-posted still hold (R2, T9e); a same-line fill still kills
+the write's update eligibility (R3); B is routed per downstream id to
+the oldest entry and returned with the slave id (R4); a slave-side hit
+or fill serve whose id has a live read-tracker entry holds (R5); the
+hub `CohMaxOutstanding` credit bound covers fills + write tracker +
+read tracker (R6).
 
 **Observability:** `l2_wtrk_full_o` (AW held, tracker full),
-`l2_wtrk_line_hold_o` (R1/R2 holds), `l2_posted_o`, `l2_rdtrk_o` feed
-the `[mc_cache]` counters `l2_wtrk_full`, `l2_line_hold`, `l2_posted`,
-`l2_rdtrk`; `l2_posted_hold_o`/`l3_posted_hold_o` feed PMU group-2
-events 7/8 (posted-write hold cycles).
+`l2_wtrk_line_hold_o` (any R1/R2 hold), `l2_hold_r1_o` (read miss
+behind a tracked write), `l2_hold_r1_wu_o` (R1 behind a write-update
+hit — expected ~0), `l2_hold_r2_o` (different-downstream-id same-line
+AW), `l2_posted_o`, `l2_rdtrk_o` feed the `[mc_cache]` counters
+`l2_wtrk_full`, `l2_line_hold`, `l2_hold_r1`, `l2_hold_r1_wu`,
+`l2_hold_r2`, `l2_posted`, `l2_rdtrk`; the hub adds
+`hub_aw_sc_collide` (same-core same-line AW slot collide) and
+`hub_ar_hold` (AR offered but held behind a same-line live AW);
+`l2_posted_hold_o`/`l3_posted_hold_o` feed PMU group-2 events 7/8
+(posted-write hold cycles).
 
 **Timing impact:** the CAMs are DEPTH-entry compares on registered
 request fields (line-address CAM over the write tracker, id CAM over
 both); the R arbiter adds one mux level on the slave R data path;
 nothing enters the `S_TAG` hit-compare path. Structural FO4 on
-`g6lc_l2_top` stays 28.5 (T9b screen).
+`g6lc_l2_top` stays 28.5 (T9b/T9e screens).
 
 ## Config (`cva6_cfg_t`)
 | Knob | Meaning |

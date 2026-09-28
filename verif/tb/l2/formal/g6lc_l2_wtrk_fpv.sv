@@ -3,9 +3,9 @@
 //
 // Bounded formal harness for g6lc_l2_wtrk (T9b posted-write tracker).
 //
-//   P1  no two live entries share a line with different ids (under the
-//       parent's R2 admission contract; FORMAL_MUT_P1 drops the contract
-//       as the negative control).
+//   P1  no two live entries share a line with different *downstream* ids
+//       (under the parent's R2 admission contract on dsid; FORMAL_MUT_P1
+//       drops the contract as the negative control).
 //   P2  B conservation — every memory B is absorbed by exactly one entry,
 //       b_pend rises only on an absorb and falls only on the slave-B pop;
 //       bounded liveness: no entry outlives the fairness bound, with a
@@ -24,6 +24,7 @@ module g6lc_l2_wtrk_fpv #(
     input logic               rst_ni,
     input logic               push_i,
     input logic [IDW-1:0]     push_id_i,
+    input logic [IDW-1:0]     push_dsid_i,
     input logic [AW_-1:0]     push_line_i,
     input logic               push_blocking_i,
     input logic               push_need_r_i,
@@ -51,6 +52,7 @@ module g6lc_l2_wtrk_fpv #(
       .rst_ni,
       .push_i            (push_i),
       .push_id_i         (push_id_i),
+      .push_dsid_i       (push_dsid_i),
       .push_line_i       (push_line_i),
       .push_blocking_i   (push_blocking_i),
       .push_need_r_i     (push_need_r_i),
@@ -92,18 +94,20 @@ module g6lc_l2_wtrk_fpv #(
   always @(posedge clk_i) assume (f_past_valid || !rst_ni);
 
   // R2 admission: a push whose line matches a live entry carries that
-  // entry's id (the parent's AW gate holds different-id same-line writes).
+  // entry's downstream id (the parent's AW gate holds same-line writes
+  // only when the two *downstream* ids differ — posted writes all share
+  // WR_ID, so posted-vs-posted never holds).
   // FORMAL_MUT_P1 drops this assumption — the solver must then produce a
   // P1 counterexample, proving the property is load-bearing.
   logic           line_seen;
-  logic [IDW-1:0] line_seen_id;
+  logic [IDW-1:0] line_seen_dsid;
   always_comb begin
-    line_seen    = 1'b0;
-    line_seen_id = '0;
+    line_seen      = 1'b0;
+    line_seen_dsid = '0;
     for (int unsigned e = 0; e < DEPTH; e++)
       if (dut.valid_q[e] && dut.ent_line_q[e] == push_line_i) begin
-        line_seen    = 1'b1;
-        line_seen_id = dut.ent_id_q[e];
+        line_seen      = 1'b1;
+        line_seen_dsid = dut.ent_dsid_q[e];
       end
   end
 
@@ -112,7 +116,7 @@ module g6lc_l2_wtrk_fpv #(
       // AW admission never pushes into a full tracker.
       assume (!push_i || !full_o);
 `ifndef FORMAL_MUT_P1
-      assume (!push_i || !line_seen || push_id_i == line_seen_id);
+      assume (!push_i || !line_seen || push_dsid_i == line_seen_dsid);
 `endif
     end
   end
@@ -140,7 +144,7 @@ module g6lc_l2_wtrk_fpv #(
   end
 
   // --------------------
-  // P1 — same-line entries always carry the same id
+  // P1 — same-line entries always carry the same downstream id
   // --------------------
   always @(posedge clk_i) begin
     if (rst_ni) begin
@@ -148,7 +152,7 @@ module g6lc_l2_wtrk_fpv #(
         for (int unsigned j = i + 1; j < DEPTH; j++)
           assert (!(dut.valid_q[i] && dut.valid_q[j] &&
                     dut.ent_line_q[i] == dut.ent_line_q[j] &&
-                    dut.ent_id_q[i]  != dut.ent_id_q[j]));
+                    dut.ent_dsid_q[i] != dut.ent_dsid_q[j]));
     end
   end
 

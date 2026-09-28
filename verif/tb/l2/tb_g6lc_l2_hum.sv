@@ -59,7 +59,8 @@ module tb_g6lc_l2_hum;
 
   logic l2_hit, l2_miss, l2_bypass, l2_mshr_full, l2_bank_conf, evict_v;
   logic l2_wupd;
-  logic l2_wtrk_full_p, l2_line_hold_p, l2_posted_p, l2_rdtrk_p;
+  logic l2_wtrk_full_p, l2_line_hold_p, l2_hold_r2_p,
+        l2_posted_p, l2_rdtrk_p;
   logic l2_idle_w, l2_phold_w;
   addr_t evict_addr;
   logic evict_ready = 1'b1;
@@ -116,7 +117,7 @@ module tb_g6lc_l2_hum;
       .l2_wtrk_line_hold_o(l2_line_hold_p),
       .l2_hold_r1_o       (),
       .l2_hold_r1_wu_o    (),
-      .l2_hold_r2_o       (),
+      .l2_hold_r2_o       (l2_hold_r2_p),
       .l2_posted_o        (l2_posted_p),
       .l2_rdtrk_o         (l2_rdtrk_p),
       .l2_posted_hold_o   (l2_phold_w),
@@ -547,11 +548,12 @@ module tb_g6lc_l2_hum;
   end
 
   // T9b posted-write observability: engagement counters on the DUT pulses.
-  int unsigned pw_wtrk_full = 0, pw_line_hold = 0, pw_posted = 0,
-               pw_rdtrk = 0, pw_hold = 0;
+  int unsigned pw_wtrk_full = 0, pw_line_hold = 0, pw_r2_hold = 0,
+               pw_posted = 0, pw_rdtrk = 0, pw_hold = 0;
   always_ff @(posedge clk) if (rst_n) begin
     if (l2_wtrk_full_p) pw_wtrk_full <= pw_wtrk_full + 1;
     if (l2_line_hold_p) pw_line_hold <= pw_line_hold + 1;
+    if (l2_hold_r2_p)   pw_r2_hold   <= pw_r2_hold + 1;
     if (l2_posted_p)    pw_posted    <= pw_posted + 1;
     if (l2_rdtrk_p)     pw_rdtrk     <= pw_rdtrk + 1;
     if (l2_phold_w)     pw_hold      <= pw_hold + 1;
@@ -1562,9 +1564,10 @@ module tb_g6lc_l2_hum;
         memory_b_hold = 1'b0;
         while (write_completed != 1) @(negedge clk);
       end
-      // (b) Different-id write to a tracked line: the AW holds until B
-      // (R2). +mem_reorder_ids lets a leaked write genuinely reorder at
-      // memory — the older value then wins and the content check catches it.
+      // (b) Different-slave-id posted write to a tracked line (T9e/M1d):
+      // both posts forward on the reserved WR_ID, so R2 compares equal
+      // downstream ids and the second AW is admitted with no hold — the
+      // +mem_reorder_ids knob has nothing to reorder on a single id.
       51: begin
         if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
         slv_req.b_ready = 1'b1;
@@ -1577,17 +1580,6 @@ module tb_g6lc_l2_hum;
                        burst: axi_pkg::BURST_INCR, atop: 6'h00, cache: 4'hf,
                        lock: 1'b0, default: '0};
         slv_req.aw_valid = 1'b1;
-        begin automatic bit aw_acc = 1'b0;
-          repeat (10) begin
-            @(posedge clk);
-            // aw_ready is a one-cycle pulse — a leaked accept drops before a
-            // single post-window sample would see it.
-            if (slv_resp.aw_ready) aw_acc = 1'b1;
-          end
-          if (aw_acc) $fatal(1, "HUM_R2_AW_ACCEPTED");
-        end
-        if (pw_line_hold == 0) $fatal(1, "HUM_R2_NO_HOLD");
-        memory_b_hold = 1'b0;
         do @(posedge clk); while (!slv_resp.aw_ready);
         @(negedge clk);
         slv_req.aw_valid = 1'b0;
@@ -1597,7 +1589,9 @@ module tb_g6lc_l2_hum;
         do @(posedge clk); while (!slv_resp.w_ready);
         @(negedge clk);
         slv_req.w_valid = 1'b0;
+        memory_b_hold = 1'b0;
         while (write_completed != 2) @(negedge clk);
+        if (pw_r2_hold != 0) $fatal(1, "HUM_R2_HELD cycles=%0d", pw_r2_hold);
         if (patched_word(64'h24200) != 64'h2222_2222_2222_2222)
           $fatal(1, "HUM_R2_MEMORY_ORDER %h", patched_word(64'h24200));
       end
@@ -1761,6 +1755,83 @@ module tb_g6lc_l2_hum;
         while (write_completed != 1) @(negedge clk);
         repeat (3) @(posedge clk);
         if (!l2_idle_w) $fatal(1, "HUM_IDLE_AFTER_DRAIN");
+      end
+      // T9e/M1d ordering oracle: three posted writes to one line from
+      // three different slave ids all forward on WR_ID — no l2_hold_r2
+      // cycle, and under +mem_reorder_ids the single downstream id keeps
+      // B (and byte-apply) order strict FIFO, so memory must end with the
+      // third write. The pw_wrid mutation (posted writes forwarded on
+      // their original ids while the tracker still records WR_ID) leaves
+      // every memory B unroutable — the bounded drain below fires
+      // HUM_WID_DRAIN instead of hanging.
+      60: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        memory_b_hold = 1'b1;
+        send_write_b(4'd1, 64'h25600, 6'h00, 4'hf, 1'b0, 0,
+                     64'haaaa_0000_0000_0001, '1);
+        send_write_b(4'd2, 64'h25600, 6'h00, 4'hf, 1'b0, 0,
+                     64'haaaa_0000_0000_0002, '1);
+        send_write_b(4'd3, 64'h25600, 6'h00, 4'hf, 1'b0, 0,
+                     64'haaaa_0000_0000_0003, '1);
+        memory_b_hold = 1'b0;
+        begin automatic int g = 0;
+          while (write_completed != 3 && g < 2000) begin
+            @(posedge clk); g++;
+          end
+          if (g >= 2000) $fatal(1, "HUM_WID_DRAIN completed=%0d",
+                              write_completed);
+        end
+        if (pw_r2_hold != 0) $fatal(1, "HUM_WID_R2_CYCLES %0d", pw_r2_hold);
+        if (patched_word(64'h25600) != 64'haaaa_0000_0000_0003)
+          $fatal(1, "HUM_WID_MEMORY_ORDER %h", patched_word(64'h25600));
+      end
+      // T9e/M1d mixed-id hold: a posted write tracked on WR_ID then a
+      // blocking store-atomic (atop[5]=0, no R) to the same line — the
+      // atomic keeps its original id downstream, so the pair has
+      // different downstream ids and the R2 hold still applies. Under
+      // +mem_reorder_ids the pw_r2 mutation (admit different downstream
+      // ids) lets the atomic's bytes land under the posted write's —
+      // HUM_ATOP_MEMORY_ORDER catches it.
+      61: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        memory_b_hold = 1'b1;
+        send_write_b(4'd1, 64'h25700, 6'h00, 4'hf, 1'b0, 0,
+                     64'hbbbb_0000_0000_0001, '1);
+        bexp[4'd5]++;
+        @(negedge clk);
+        slv_req.aw = '{id: 4'd5, addr: 64'h25700, len: 0, size: 3'd3,
+                       burst: axi_pkg::BURST_INCR, atop: 6'h10, cache: 4'hf,
+                       lock: 1'b0, default: '0};
+        slv_req.aw_valid = 1'b1;
+        begin automatic bit aw_acc = 1'b0;
+          repeat (10) begin
+            @(posedge clk);
+            if (slv_resp.aw_ready) aw_acc = 1'b1;
+          end
+          if (aw_acc) $fatal(1, "HUM_ATOP_AW_ACCEPTED");
+        end
+        if (pw_r2_hold == 0) $fatal(1, "HUM_ATOP_NO_HOLD");
+        memory_b_hold = 1'b0;
+        do @(posedge clk); while (!slv_resp.aw_ready);
+        @(negedge clk);
+        slv_req.aw_valid = 1'b0;
+        slv_req.w = '{data: 64'hbbbb_0000_0000_0002, strb: '1, last: 1'b1,
+                      user: '0};
+        slv_req.w_valid = 1'b1;
+        do @(posedge clk); while (!slv_resp.w_ready);
+        @(negedge clk);
+        slv_req.w_valid = 1'b0;
+        begin automatic int g = 0;
+          while (write_completed != 2 && g < 2000) begin
+            @(posedge clk); g++;
+          end
+          if (g >= 2000) $fatal(1, "HUM_ATOP_DRAIN completed=%0d",
+                              write_completed);
+        end
+        if (patched_word(64'h25700) != 64'hbbbb_0000_0000_0002)
+          $fatal(1, "HUM_ATOP_MEMORY_ORDER %h", patched_word(64'h25700));
       end
       default: $fatal(1, "HUM_SCENARIO");
     endcase
