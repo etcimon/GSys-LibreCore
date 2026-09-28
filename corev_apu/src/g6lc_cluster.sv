@@ -369,7 +369,9 @@ module g6lc_cluster
         .coh_arb_starve_o (),
         .coh_split_conflict_o(),
         .coh_sc_noresv_o  (),
-        .coh_lr_kill_o    ()
+        .coh_lr_kill_o    (),
+        // TB reads the level hierarchically; no cluster port.
+        .hub_aw_sc_collide_o ()
     );
   end
 
@@ -418,6 +420,9 @@ module g6lc_cluster
         .l2_wupdate_o       (),
         .l2_wtrk_full_o     (),
         .l2_wtrk_line_hold_o(),
+        .l2_hold_r1_o       (),
+        .l2_hold_r1_wu_o    (),
+        .l2_hold_r2_o       (),
         .l2_posted_o        (),
         .l2_rdtrk_o         (),
         .l2_posted_hold_o   (l2_pwhold_w),
@@ -480,6 +485,9 @@ module g6lc_cluster
         .l3_wupdate_o       (),
         .l3_wtrk_full_o     (),
         .l3_wtrk_line_hold_o(),
+        .l3_hold_r1_o       (),
+        .l3_hold_r1_wu_o    (),
+        .l3_hold_r2_o       (),
         .l3_posted_o        (),
         .l3_rdtrk_o         (),
         .l3_posted_hold_o   (l3_pwhold_w),

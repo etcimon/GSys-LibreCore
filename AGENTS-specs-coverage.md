@@ -135,11 +135,12 @@ physical or guarded-feature status advances from qualification-tooling changes a
 
 ## Hart-owned memory ordering for mixed residency (2026-09-23, T6b-1)
 
-**Foundations landed, mixed residency still refused.** Loads now order against, forward from and
-replay for their own hart's stores only, at leaf level with positives and negatives, and every
-existing single-hart and drained-handoff result reproduces. Mixed residency (`SmtDrainedHandoff=0`)
-remains illegal outside the qualification define until T6b-2/3 deliver per-hart recovery, frontend
-state and the concurrent-work firmware gate.
+**Promoted on the single-core package (2026-09-28, T9d/M2).** Loads order against, forward
+from and replay for their own hart's stores only; mixed residency is production on
+`g6lc64_smt2_ooo_int` (`SmtDrainedHandoff=0`, define-free legality
+`SmtDrainedHandoff || NrCores == 1`). Multi-core mixed residency stays
+qualification-gated; `int2`/`int2_l3` keep the drained handoff. Evidence re-baselined
+on the eWT tree in `core/ooo/AGENTS-ooo-plan.md` T9d.
 
 ## OoO with two harts under the drained handoff (2026-09-22)
 

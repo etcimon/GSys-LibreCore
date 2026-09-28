@@ -84,6 +84,14 @@ def main():
   input logic [1:0] ld_query_size_i,
   input logic [5:0] ld_query_id_i,
   input logic [0:0] ld_query_hart_i,
+  input logic [1:0] phys_valid_i,
+  input logic [1:0][55:0] phys_addr_i,
+  input logic [1:0][5:0] phys_id_i,
+  input logic [1:0][0:0] phys_hart_i,
+  input logic [1:0][1:0] phys_size_i,
+  input logic [1:0] commit_ld_i,
+  input logic [1:0] mod_valid_i,
+  input logic [1:0][55:0] mod_addr_i,
   output logic stl_forward_o, stl_stall_o, mem_violation_o, store_pending_o
 );
   function automatic config_pkg::cva6_cfg_t cfg();
@@ -97,7 +105,8 @@ def main():
     .ld_full_o(), .st_full_o(), .ld_free_o(), .st_free_o(),
     .st_live_mask_o(), .st_unresolved_mask_o(), .st_hart_mask_o(),
     .stl_data_o(), .lsq_busy_o(),
-    .mem_violation_id_o(), .mem_violation_pc_o(), .*
+    .mem_violation_id_o(), .mem_violation_pc_o(),
+    .phys_pending_o(), .phys_replay_o(), .*
   );
 endmodule
 ''')

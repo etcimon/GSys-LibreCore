@@ -48,6 +48,10 @@ module g6lc_l3_top
     // T9b observability at L3 (see g6lc_l2_top l2_*_o outputs).
     output logic      l3_wtrk_full_o,
     output logic      l3_wtrk_line_hold_o,
+    // T9c/M1c hold-cycle split (see g6lc_l2_top l2_hold_*_o).
+    output logic      l3_hold_r1_o,
+    output logic      l3_hold_r1_wu_o,
+    output logic      l3_hold_r2_o,
     output logic      l3_posted_o,
     output logic      l3_rdtrk_o,
     output logic      l3_posted_hold_o,
@@ -101,6 +105,9 @@ module g6lc_l3_top
       .l2_wupdate_o       (l3_wupdate_o),
       .l2_wtrk_full_o     (l3_wtrk_full_o),
       .l2_wtrk_line_hold_o(l3_wtrk_line_hold_o),
+      .l2_hold_r1_o       (l3_hold_r1_o),
+      .l2_hold_r1_wu_o    (l3_hold_r1_wu_o),
+      .l2_hold_r2_o       (l3_hold_r2_o),
       .l2_posted_o        (l3_posted_o),
       .l2_rdtrk_o         (l3_rdtrk_o),
       .l2_posted_hold_o   (l3_posted_hold_o),

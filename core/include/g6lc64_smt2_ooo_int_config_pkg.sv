@@ -280,7 +280,11 @@ package cva6_config_pkg;
       SliceBiqDepth: unsigned'(0),
       SliceMaxRunahead: unsigned'(0),
       OoOEn: bit'(1),
-      SmtDrainedHandoff: bit'(1),
+      // T9d/M2: mixed residency promoted on this single-core shape — the
+      // T6b-1…4b evidence (probe matrix, isolation mutations, drained-overlay
+      // exactness) is re-baselined on the eWT tree in this milestone.
+      // int2/int2_l3 keep the drained handoff (multi-core stays gated).
+      SmtDrainedHandoff: bit'(0),
       DeepSpecEn: bit'(0),
       RobEntries: unsigned'(0),
       PrfEntries: unsigned'(0),

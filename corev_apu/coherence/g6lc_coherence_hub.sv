@@ -66,7 +66,13 @@ module g6lc_coherence_hub
     output logic                       coh_split_conflict_o, // W-data vs AW owner mismatch
     // SC-shaped store with no reservation recorded here (see g6lc_lr_sc_tracker).
     output logic                       coh_sc_noresv_o,
-    output logic                       coh_lr_kill_o
+    output logic                       coh_lr_kill_o,
+    // T9c/M1c hold-cycle level: any core offers an AW while a live AW slot
+    // of the SAME core already holds that line — the R2 same-line/different-
+    // id hold the L2 will charge counts as same-core serialization here
+    // (the L2 only sees the hub's slot ids). The TB counts it as
+    // hub_aw_sc_collide; leave unconnected elsewhere.
+    output logic                       hub_aw_sc_collide_o
 );
 
   localparam bit OOO_SF = (POLICY == COH_OOO) && SNOOP_FILTER_EN;
@@ -111,6 +117,7 @@ module g6lc_coherence_hub
     assign coh_split_conflict_o = 1'b0;
     assign coh_sc_noresv_o      = 1'b0;
     assign coh_lr_kill_o        = 1'b0;
+    assign hub_aw_sc_collide_o  = 1'b0;
   end else begin : gen_cluster
 
     // ================================================================
@@ -332,6 +339,23 @@ module g6lc_coherence_hub
         if (ar_hold_q && ar_hold_owner_q == CID_W'(c) &&
             inv_bus_o[c].valid && ar_line == inv_bus_o[c].line_addr)
           inv_fill_hold[c] = 1'b1;
+      end
+    end
+
+    // M1c: an offered AW colliding on line with a live AW slot of the same
+    // core — the R2 serialization the L2 will charge is same-core. Level
+    // counts hold cycles; nc=1 folds to the gen_identity tie-off.
+    always_comb begin
+      hub_aw_sc_collide_o = 1'b0;
+      for (int unsigned c = 0; c < NC; c++) begin
+        if (core_req_i[c].aw_valid) begin
+          for (int unsigned s = 0; s < OT_MAX; s++) begin
+            if (aw_ot_q[s].valid && aw_ot_q[s].core == CID_W'(c) &&
+                aw_ot_q[s].line_addr ==
+                    coh_line_tag(core_req_i[c].aw.addr, LINE_BYTES))
+              hub_aw_sc_collide_o = 1'b1;
+          end
+        end
       end
     end
 

@@ -92,6 +92,15 @@ module g6lc_l2_top
     // group-2 "posted-write hold" event at each level.
     output logic      l2_wtrk_full_o,
     output logic      l2_wtrk_line_hold_o,
+    // T9c/M1c hold-cycle split of l2_wtrk_line_hold_o: l2_hold_r1_o counts a
+    // cacheable read-miss hold behind a live tracker entry (R1),
+    // l2_hold_r2_o a different-id same-line AW hold (R2). The ATOP-load
+    // guard stays in the aggregate only. l2_hold_r1_wu_o is the R1 subset
+    // whose blocking entry was marked write-update-hit rather than
+    // write-around (see g6lc_l2_wtrk mark_i/line0_wu_o).
+    output logic      l2_hold_r1_o,
+    output logic      l2_hold_r1_wu_o,
+    output logic      l2_hold_r2_o,
     output logic      l2_posted_o,
     output logic      l2_rdtrk_o,
     output logic      l2_posted_hold_o,
@@ -128,6 +137,9 @@ module g6lc_l2_top
     assign l2_wupdate_o = 1'b0;
     assign l2_wtrk_full_o = 1'b0;
     assign l2_wtrk_line_hold_o = 1'b0;
+    assign l2_hold_r1_o = 1'b0;
+    assign l2_hold_r1_wu_o = 1'b0;
+    assign l2_hold_r2_o = 1'b0;
     assign l2_posted_o = 1'b0;
     assign l2_rdtrk_o = 1'b0;
     assign l2_posted_hold_o = 1'b0;
@@ -379,6 +391,7 @@ module g6lc_l2_top
   logic [1:0]                  wtrk_sb_resp;
   logic [AXI_USER_WIDTH-1:0]   wtrk_sb_user;
   logic                        wtrk_line0_match, wtrk_line1_match;
+  logic                        wtrk_line0_wu, wtrk_mark;
   logic [AXI_ID_WIDTH-1:0]     wtrk_line1_id;
   logic                        wtrk_need_r_match;
   logic                        rdtrk_push, rdtrk_pop, rdtrk_full, rdtrk_empty;
@@ -479,15 +492,23 @@ module g6lc_l2_top
 
   // M1b observability: hold-cycle levels for the PMU group-2 posted-write
   // event and completion pulses for the [mc_cache] counters.
+  // M1c split: R1 (read miss behind a tracked write), its write-update-hit
+  // subset, and R2 (different-id same-line AW). The ATOP-load guard has no
+  // split field and stays in the aggregate only.
   assign l2_wtrk_full_o = POSTED_WRITES && (state_q == S_IDLE) &&
                           slv_req_i.aw_valid && wtrk_full;
-  assign l2_wtrk_line_hold_o = POSTED_WRITES &&
-      // R1: a cacheable read miss holds while its line has a tracker entry.
-      ((state_q == S_TAG && tag_row_valid && !tag_hit && wtrk_line0_match) ||
-       // R2 (+ATOP-load guard): AW accepted only when admitted.
-       (state_q == S_IDLE && slv_req_i.aw_valid && !wtrk_full &&
-        ((wtrk_line1_match && (slv_req_i.aw.id != wtrk_line1_id)) ||
-         (slv_req_i.aw.atop[5] && rdtrk_probe_match[3]))));
+  // R1: a cacheable read miss holds while its line has a tracker entry.
+  assign l2_hold_r1_o = POSTED_WRITES &&
+      (state_q == S_TAG && tag_row_valid && !tag_hit && wtrk_line0_match);
+  assign l2_hold_r1_wu_o = l2_hold_r1_o && wtrk_line0_wu;
+  // R2: AW held because a same-line tracker entry carries a different id.
+  assign l2_hold_r2_o = POSTED_WRITES &&
+      (state_q == S_IDLE && slv_req_i.aw_valid && !wtrk_full &&
+       wtrk_line1_match && (slv_req_i.aw.id != wtrk_line1_id));
+  assign l2_wtrk_line_hold_o = l2_hold_r1_o | l2_hold_r2_o |
+      // ATOP-load guard: AW accepted only when admitted.
+      (POSTED_WRITES && state_q == S_IDLE && slv_req_i.aw_valid &&
+       !wtrk_full && slv_req_i.aw.atop[5] && rdtrk_probe_match[3]);
   assign l2_posted_hold_o = l2_wtrk_full_o | l2_wtrk_line_hold_o;
   assign l2_posted_o = POSTED_WRITES && wtrk_pop && !wtrk_sb_blocking;
   assign l2_rdtrk_o  = POSTED_WRITES && rdtrk_pop;
@@ -637,6 +658,8 @@ module g6lc_l2_top
         .push_line_i       (line_align(slv_req_i.aw.addr)),
         .push_blocking_i   (!aw_postable),
         .push_need_r_i     (slv_req_i.aw.atop[5]),
+        .mark_i            (wtrk_mark),
+        .mark_idx_i        (wr_trk_idx_q),
         .full_o            (wtrk_full),
         .alloc_idx_o       (wtrk_alloc_idx),
         .m_b_valid_i       (mst_resp_i.b_valid),
@@ -654,6 +677,7 @@ module g6lc_l2_top
         .pop_idx_o         (wtrk_pop_idx),
         .line0_i           (line_align(addr_q)),
         .line0_match_o     (wtrk_line0_match),
+        .line0_wu_o        (wtrk_line0_wu),
         .line1_i           (line_align(slv_req_i.aw.addr)),
         .line1_match_o     (wtrk_line1_match),
         .line1_match_id_o  (wtrk_line1_id),
@@ -697,6 +721,7 @@ module g6lc_l2_top
     assign wtrk_sb_user      = '0;
     assign wtrk_pop          = 1'b0;
     assign wtrk_line0_match  = 1'b0;
+    assign wtrk_line0_wu     = 1'b0;
     assign wtrk_line1_match  = 1'b0;
     assign wtrk_line1_id     = '0;
     assign wtrk_need_r_match = 1'b0;
@@ -826,6 +851,11 @@ module g6lc_l2_top
   assign wu_candidate = wu_eligible && !wu_decided_q && tag_row_valid;
   assign wu_hit_now   = wu_decided_q ? wu_hit_q : (wu_candidate && tag_hit);
   assign wu_tag_inval = !wu_hit_now && !wu_candidate;
+  // M1c: mark the tracked entry write-update-hit on its decide cycle so an
+  // R1 hold against it is attributed write-update vs write-around. One
+  // pulse — wu_candidate is live only until wu_decided_q latches.
+  assign wtrk_mark = POSTED_WRITES && (state_q == S_BYPASS_AW) &&
+                     wu_candidate && tag_hit;
   // A same-line fill cannot co-exist with a resident tag (see above) — the
   // predicate is defensive, kill_match removes the fill regardless.
   always_comb begin

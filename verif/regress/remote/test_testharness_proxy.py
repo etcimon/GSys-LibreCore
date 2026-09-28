@@ -1081,6 +1081,8 @@ class McCacheCounterParseTests(unittest.TestCase):
             'l2_wupd': None, 'l3_wupd': None,
             'l2_wtrk_full': None, 'l2_line_hold': None,
             'l2_posted': None, 'l2_rdtrk': None,
+            'l2_hold_r1': None, 'l2_hold_r1_wu': None,
+            'l2_hold_r2': None, 'hub_aw_sc_collide': None,
             'dram_latency': 40}
     LINE8 = ('*** [mc_cache] l2_hit=3 l2_miss=11 l2_bypass=7 l3_hit=2 l3_miss=5'
              ' l2_selfinv=9 l3_selfinv=4 dram_latency=40')
@@ -1088,14 +1090,20 @@ class McCacheCounterParseTests(unittest.TestCase):
              'l3_miss': 5, 'l2_selfinv': 9, 'l3_selfinv': 4,
              'l2_wupd': None, 'l3_wupd': None,
              'l2_wtrk_full': None, 'l2_line_hold': None,
-             'l2_posted': None, 'l2_rdtrk': None, 'dram_latency': 40}
+             'l2_posted': None, 'l2_rdtrk': None,
+             'l2_hold_r1': None, 'l2_hold_r1_wu': None,
+             'l2_hold_r2': None, 'hub_aw_sc_collide': None,
+             'dram_latency': 40}
     LINE10 = ('*** [mc_cache] l2_hit=3 l2_miss=11 l2_bypass=7 l3_hit=2 l3_miss=5'
               ' l2_selfinv=9 l3_selfinv=4 l2_wupd=6 l3_wupd=1 dram_latency=40')
     WANT10 = {'l2_hit': 3, 'l2_miss': 11, 'l2_bypass': 7, 'l3_hit': 2,
               'l3_miss': 5, 'l2_selfinv': 9, 'l3_selfinv': 4,
               'l2_wupd': 6, 'l3_wupd': 1,
               'l2_wtrk_full': None, 'l2_line_hold': None,
-              'l2_posted': None, 'l2_rdtrk': None, 'dram_latency': 40}
+              'l2_posted': None, 'l2_rdtrk': None,
+              'l2_hold_r1': None, 'l2_hold_r1_wu': None,
+              'l2_hold_r2': None, 'hub_aw_sc_collide': None,
+              'dram_latency': 40}
     LINE14 = ('*** [mc_cache] l2_hit=3 l2_miss=11 l2_bypass=7 l3_hit=2 l3_miss=5'
               ' l2_selfinv=9 l3_selfinv=4 l2_wupd=6 l3_wupd=1'
               ' l2_wtrk_full=2 l2_line_hold=7 l2_posted=10 l2_rdtrk=4'
@@ -1104,16 +1112,34 @@ class McCacheCounterParseTests(unittest.TestCase):
               'l3_miss': 5, 'l2_selfinv': 9, 'l3_selfinv': 4,
               'l2_wupd': 6, 'l3_wupd': 1,
               'l2_wtrk_full': 2, 'l2_line_hold': 7,
-              'l2_posted': 10, 'l2_rdtrk': 4, 'dram_latency': 40}
+              'l2_posted': 10, 'l2_rdtrk': 4,
+              'l2_hold_r1': None, 'l2_hold_r1_wu': None,
+              'l2_hold_r2': None, 'hub_aw_sc_collide': None,
+              'dram_latency': 40}
+    LINE18 = ('*** [mc_cache] l2_hit=3 l2_miss=11 l2_bypass=7 l3_hit=2 l3_miss=5'
+              ' l2_selfinv=9 l3_selfinv=4 l2_wupd=6 l3_wupd=1'
+              ' l2_wtrk_full=2 l2_line_hold=7 l2_posted=10 l2_rdtrk=4'
+              ' l2_hold_r1=5 l2_hold_r1_wu=1 l2_hold_r2=2 hub_aw_sc_collide=1'
+              ' dram_latency=40')
+    WANT18 = {'l2_hit': 3, 'l2_miss': 11, 'l2_bypass': 7, 'l3_hit': 2,
+              'l3_miss': 5, 'l2_selfinv': 9, 'l3_selfinv': 4,
+              'l2_wupd': 6, 'l3_wupd': 1,
+              'l2_wtrk_full': 2, 'l2_line_hold': 7,
+              'l2_posted': 10, 'l2_rdtrk': 4,
+              'l2_hold_r1': 5, 'l2_hold_r1_wu': 1,
+              'l2_hold_r2': 2, 'hub_aw_sc_collide': 1,
+              'dram_latency': 40}
 
     def check(self, parser):
         # Six-field (legacy), eight-field (selfinv), ten-field
-        # (write-update) and fourteen-field (posted-write) lines all parse.
+        # (write-update), fourteen-field (posted-write) and eighteen-field
+        # (M1c hold split) lines all parse.
         self.assertEqual(parser(self.LINE + '\n'), self.WANT)
         self.assertEqual(parser('banner\n' + self.LINE + '\ntrailer\n'), self.WANT)
         self.assertEqual(parser(self.LINE8 + '\n'), self.WANT8)
         self.assertEqual(parser(self.LINE10 + '\n'), self.WANT10)
         self.assertEqual(parser(self.LINE14 + '\n'), self.WANT14)
+        self.assertEqual(parser(self.LINE18 + '\n'), self.WANT18)
         self.assertIsNone(parser('*** [mc_verdict] program exit code 0\n'))
         self.assertIsNone(parser('*** [mc_cache] l2_hit=x l2_miss=1\n'))
 

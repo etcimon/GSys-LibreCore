@@ -97,7 +97,8 @@ module g6lc_coherence_hub_lint_top
       .coh_arb_starve_o    (coh_arb_starve),
       .coh_split_conflict_o(coh_split_conflict),
       .coh_sc_noresv_o     (coh_sc_noresv),
-      .coh_lr_kill_o       (coh_lr_kill)
+      .coh_lr_kill_o       (coh_lr_kill),
+      .hub_aw_sc_collide_o ()
   );
 endmodule
 
@@ -277,6 +278,9 @@ module g6lc_l2_top_lint_top
       .l2_wupdate_o         (),
       .l2_wtrk_full_o       (),
       .l2_wtrk_line_hold_o  (),
+      .l2_hold_r1_o         (),
+      .l2_hold_r1_wu_o      (),
+      .l2_hold_r2_o         (),
       .l2_posted_o          (),
       .l2_rdtrk_o           (),
       .l2_posted_hold_o     (),
@@ -334,6 +338,9 @@ module g6lc_l3_top_lint_top
       .l3_wupdate_o    (),
       .l3_wtrk_full_o  (),
       .l3_wtrk_line_hold_o(),
+      .l3_hold_r1_o    (),
+      .l3_hold_r1_wu_o (),
+      .l3_hold_r2_o    (),
       .l3_posted_o     (),
       .l3_rdtrk_o      (),
       .l3_posted_hold_o(),

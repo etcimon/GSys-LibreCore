@@ -8,6 +8,17 @@ Cross-cutting: `../../agents/guides/AGENTS-soc-readiness.md`. Program: U6.1 in
 work (`ai-tensor` / PyTorch / virt-ai-pcie / HARD). Map:
 [`smt2-ai-tensor-linux.md`](smt2-ai-tensor-linux.md) · queue: `AGENTS-todo.md` **SL-T** / **AI-S3**.
 
+## Mixed-residency promotion (2026-09-28, T9d/M2)
+
+Mixed residency is **promoted to production on `g6lc64_smt2_ooo_int`**: the
+single-core package now builds define-free with `SmtDrainedHandoff=0`. The
+drained handoff remains the configured behaviour on `int2`/`int2_l3`
+(`SmtDrainedHandoff=1`), and multi-core mixed residency stays
+qualification-gated behind `G6LC_OOO_SMT_MIXED_QUALIFY`; FP+mixed remains
+refused. Evidence (probe matrix, isolation mutations, strict-boot anchor
+exactness, gates, FO4) is re-baselined on the eWT tree in
+`../../core/ooo/AGENTS-ooo-plan.md` T9d.
+
 ## Current source-profiled OpenSBI qualification (2026-09-25)
 
 The four-hart `g6lc64_ooo_int2` profile now completes the strict supervisor/HSM payload on the

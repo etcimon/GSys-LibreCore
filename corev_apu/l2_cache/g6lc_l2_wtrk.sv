@@ -46,6 +46,12 @@ module g6lc_l2_wtrk #(
     // Entry's write carries an ATOP R response (atop[5]); the read tracker
     // must not take a same-id entry while such a write is live.
     input  logic                        push_need_r_i,
+    // Write-update attribution (T9c/M1c): the parent pulses this once the
+    // write-update decision of the entry at mark_idx_i resolves as a hit, so
+    // an R1 hold against a live entry can be split write-around vs
+    // write-update-hit (line0_wu_o).
+    input  logic                        mark_i,
+    input  logic [$clog2(DEPTH)-1:0]    mark_idx_i,
     output logic                        full_o,
     output logic [$clog2(DEPTH)-1:0]    alloc_idx_o,
     // Memory B channel: absorb a B into the oldest matching unserved entry.
@@ -69,6 +75,8 @@ module g6lc_l2_wtrk #(
     // same-id admission rule).
     input  logic [ADDR_WIDTH-1:0]       line0_i,
     output logic                        line0_match_o,
+    // Any line0-matching entry was marked write-update-hit (vs write-around).
+    output logic                        line0_wu_o,
     input  logic [ADDR_WIDTH-1:0]       line1_i,
     output logic                        line1_match_o,
     output logic [ID_WIDTH-1:0]         line1_match_id_o,
@@ -85,6 +93,7 @@ module g6lc_l2_wtrk #(
   logic [ADDR_WIDTH-1:0]   ent_line_q  [DEPTH];
   logic [DEPTH-1:0]        ent_block_q, ent_block_d;
   logic [DEPTH-1:0]        ent_needs_q, ent_needs_d;
+  logic [DEPTH-1:0]        ent_wu_q,    ent_wu_d;
   logic [DEPTH-1:0]        b_pend_q,    b_pend_d;
   logic [1:0]              b_resp_q    [DEPTH];
   logic [AXI_USER_WIDTH-1:0] b_user_q  [DEPTH];
@@ -183,6 +192,7 @@ module g6lc_l2_wtrk #(
   endfunction
 
   assign line0_match_o     = |l0_match;
+  assign line0_wu_o        = |(l0_match & ent_wu_q);
   assign line1_match_o     = |l1_match;
   assign line1_match_id_o  = ent_id_q[l1_match_idx];
   assign need_r_id_match_o = |(valid_q & ent_needs_q &
@@ -195,6 +205,7 @@ module g6lc_l2_wtrk #(
     valid_d     = valid_q;
     ent_block_d = ent_block_q;
     ent_needs_d = ent_needs_q;
+    ent_wu_d    = ent_wu_q;
     b_pend_d    = b_pend_q;
     for (int unsigned e = 0; e < DEPTH; e++) begin
       older_d[e] = older_q[e];
@@ -205,10 +216,15 @@ module g6lc_l2_wtrk #(
       b_pend_d[m_sel_idx] = 1'b1;
     end
 
+    if (mark_i) begin
+      ent_wu_d[mark_idx_i] = 1'b1;
+    end
+
     if (push_i) begin
       valid_d[free_idx]     = 1'b1;
       ent_block_d[free_idx] = push_blocking_i;
       ent_needs_d[free_idx] = push_need_r_i;
+      ent_wu_d[free_idx]    = 1'b0;
       for (int unsigned e = 0; e < DEPTH; e++) begin
         older_d[e][free_idx] = valid_q[e];   // every live entry is older
         older_d[free_idx][e] = 1'b0;          // new entry is newest
@@ -230,6 +246,7 @@ module g6lc_l2_wtrk #(
       valid_q     <= '0;
       ent_block_q <= '0;
       ent_needs_q <= '0;
+      ent_wu_q    <= '0;
       b_pend_q    <= '0;
       for (int unsigned e = 0; e < DEPTH; e++) begin
         ent_id_q[e]   <= '0;
@@ -242,6 +259,7 @@ module g6lc_l2_wtrk #(
       valid_q     <= valid_d;
       ent_block_q <= ent_block_d;
       ent_needs_q <= ent_needs_d;
+      ent_wu_q    <= ent_wu_d;
       b_pend_q    <= b_pend_d;
       if (push_i) begin
         ent_id_q[free_idx]   <= push_id_i;

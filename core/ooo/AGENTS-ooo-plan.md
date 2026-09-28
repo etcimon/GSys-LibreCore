@@ -2146,3 +2146,172 @@ into the MSHR instead of holding) removes the hold at the cost of a per-MSHR 64 
 mask buffer; if R2 dominates, either the hub keeps a per-core same-line write on one
 id or R2 is relaxed behind a documented downstream same-address write-order guarantee.
 Neither is assumed; both are measured first (M1c).
+
+### T9c — M1c: posted-write hold split — measurement only (2026-09-28)
+
+**Instrumentation (no policy change).** `g6lc_l2_top`: `l2_hold_r1_o` = the R1
+level (`S_TAG` cacheable read miss whose line has a live write-tracker entry),
+`l2_hold_r1_wu_o` = the R1 subset whose tracked entry was a write-update hit
+(resident line), `l2_hold_r2_o` = the R2 level (`S_IDLE`, AW offered, tracker
+not full, same-line entry with a different id); `l2_wtrk_line_hold_o` remains
+the aggregate (R1 | R2 | ATOP-load guard, which has no split field).
+`g6lc_coherence_hub`: `hub_aw_sc_collide_o` = a level asserted while a core
+offers an AW whose line a live AW slot of the **same core** already holds —
+the hub-side view of the same-core R2 share (the L2 cannot see slot→core).
+`[mc_cache]` gains `l2_hold_r1 l2_hold_r1_wu l2_hold_r2 hub_aw_sc_collide`
+appended at the end of the line; both parsers
+(`run_mc_int2_review.py`, `run_opensbi_source_review.py`) accept them as an
+optional trailing group so older lines still parse (`None` fields).
+New isolator `verif/tests/custom/multicore/mc_store_load_new_line.S`:
+hart 0 stores then loads 4,096 fresh lines (fence between — without it the
+store buffer forwards the load and no L2 read is ever issued); tohost
+1/3/5, peers park. All counter fields are levels summed by the TB into
+cycle counts.
+
+**Directed lanes** (all records pos+neg matched; single-hart → no cross-id
+traffic, so every hold counter is 0 — the boots below are the authoritative
+source): `mc_l2_write_read` int2 135,526 / L40 518,507, int2_l3 160,122 /
+543,093; `mc_l3_stride_scan` 512 KiB int2_l3 424,374 / 1,046,973;
+`mc_store_load_new_line` int2 147,827 / 467,295, int2_l3 205,169 / 545,090 —
+4,096 posted writes + 4,095 load misses each, `l2_hold_r1` = **0** on all
+four: the core's own store→dependent-load ordering waits for the posted
+write's B before the load's miss reaches the L2, so the single-hart isolator
+cannot create the overlap the R1 arm guards.
+
+**Strict-boot split** (threads=1, four-hart source-profile OpenSBI; models
+`ooocoh-m1c-*-build-*-r2`, modelSha256 int2-L0 `7d26a562…`, int2-L40
+`a6cea01e…`, int2l3-L0 `5f6ebd46…`, int2l3-L40 `9de35340…`):
+
+| Config | Lat | Tag | Cycles | `l2_line_hold` | `l2_hold_r1` | `l2_hold_r1_wu` | `l2_hold_r2` | `hub_aw_sc_collide` |
+|---|---:|---|---:|---:|---:|---:|---:|---:|
+| int2 | 0 | `ooocoh-m1c-osbi-int2-L0-r2` | 17,903,402 | 372,982 | 1 | 0 | 372,981 | 429,790 |
+| int2 | 40 | `ooocoh-m1c-osbi-int2-L40-60M-r2` | 40,712,259 | 13,647,144 | 127 | 0 | 13,647,017 | 7,599,674 |
+| int2_l3 | 0 | `ooocoh-m1c-osbi-int2l3-L0-r2` | 18,519,467 † | 730,556 | 4 | 0 | 730,552 | 624,532 |
+| int2_l3 | 40 | `ooocoh-m1c-osbi-int2l3-L40-60M-r1` | 41,946,955 | 14,385,949 | 155 | 0 | 14,385,794 | 7,993,992 |
+
+† deviation: this rerun was launched against the **int2** profile
+(`ooocoh-int2-osbi-r2`) rather than the int2-l3 one
+(`ooocoh-p2-fw-int2-l3-r1`) — still a strict four-hart OpenSBI boot on the
+int2_l3 model, so the counters are valid measurement data, but its cycle
+count is not comparable with the M1b int2_l3-L0 boot (18,905,079). The L40
+int2_l3 lane used the correct l3 profile and reproduces the M1b cycle count
+exactly, as does int2 at both latencies — counters are observation-only.
+
+**Readings.**
+- **R2 is ~100 % of the hold bill** at every point: R1 totals 1–155 cycles
+  (≤ 0.001 % of holds); every R1 event is a **write-around**
+  (`l2_hold_r1_wu` = 0 everywhere), i.e. the "store to a resident line then
+  read-miss it" shape never occurs — consistent with the isolator: the
+  core-side store→load ordering already serializes that shape before the
+  L2 can hold it, so R1 exists only for cross-agent races the boot almost
+  never hits.
+- **R2 same-core share**: `hub_aw_sc_collide`/`l2_hold_r2` = 55.6 %–55.7 %
+  on the L40 boots (the regime where holds cost ~34 % of the boot),
+  85.5 % int2_l3-L0, and >100 % int2-L0 (the hub-visible collision window
+  is wider than the cycles the L2 charges — an AW can be counted while
+  still in transit or while a *blocking* entry holds the line — so the
+  same-core figure is best read as a ≥55 % floor at L40, not an exact
+  ratio). The mechanism: each hub AW slot is a fresh outstanding id, so a
+  core's *own* consecutive writes to one line serialize at the L2 for a
+  full B round-trip each (~80 cycles at L40).
+- `l2_wtrk_full` = 0 on every boot — tracker depth 4 never bound; the
+  stalls are ordering, not capacity.
+
+**Recommendation (measurement only — decision is the lead's).**
+- Option 1 (`L2WriteAllocEn` + per-MSHR pending-write merge) targets R1 —
+  measured at ≤0.001 % of holds. **Not justified by the data**; the 64 B +
+  mask buffer buys nothing on these workloads.
+- Option 2 (keep a core's same-line writes on one hub id) removes the
+  measured dominant share — ≥55 % of R2 cycles at L40 — with a contained
+  hub change (id allocation keyed by (core, line) instead of per-slot).
+  **Recommended first lever.** Extending the reuse to a shared id for
+  same-line writes from *different* cores would cover most of the
+  remainder but complicates B attribution back to the right core's slot —
+  worth evaluating only if the same-core fix leaves a meaningful residual.
+- Option 3 (relax R2 behind a downstream same-address-order guarantee)
+  would remove all R2 but requires proving the memory path preserves
+  write-write order to one address across different AXI ids — not a
+  property AXI generally provides. **Do not adopt** without that proof;
+  a silent write-order inversion is the failure mode.
+
+**Infra deviations.** `ooocoh-m1c-osbi-int2-L40-60M-r1` (pre-fix
+`ooocoh-m1c-int2-build-L40-r1`, `napot_canonical_chk` absent) died on the
+`pmp_entry.sv` NAPOT translate_off assert at cycle 40,542,906 — the same
+delta-cycle hazard recorded in T9d; rerun on the fixed build is the r2 row
+above. `osbi-int2-L0-r1` hit a `profile changed during execution`
+identityError while the profile was being rebuilt; r2 is clean. The r1
+int2l3-L40 build likewise predates the assert fix but the assert never
+tripped there — observation-only counters, result stands.
+
+### T9d — M2: mixed-residency promotion on `g6lc64_smt2_ooo_int` (2026-09-28)
+
+**Change.** `core/include/g6lc64_smt2_ooo_int_config_pkg.sv`:
+`SmtDrainedHandoff: bit'(0)` (comment cites the T6b evidence and this
+milestone). `core/include/config_pkg.sv` replaces the
+`ifndef G6LC_OOO_SMT_MIXED_QUALIFY`-gated "mixed residency is
+qualification-only" block with the define-free
+`assert (Cfg.SmtDrainedHandoff || Cfg.NrCores == 1)`; the define now gates
+only multi-core (`NrCores > 1`) mixed residency. `cva6.sv` and
+`core/ooo/g6lc_ooo_dispatch.sv` comments that called mixed residency
+qualification-only are aligned. `int2` / `int2_l3` stay drained
+(`SmtDrainedHandoff=1`). What stays gated: multi-core mixed residency and
+FP+mixed (the `OoOEn && FpPresent` legs are unchanged).
+
+**Assertion-side fix carried.** `core/pmp/src/pmp_entry.sv` — the NAPOT
+`assert (size > 2)` legality check sampled `trail_ones`, whose driving `lzc`
+instance evaluates a delta cycle after the per-hart PMP bank mux moves
+`conf_addr_i`/`conf_addr_mode_i`; under mixed residency (and, in fact, on
+in-order four-hart boots — see T9c) the check could see a stale non-canonical
+value and `$stop`. The check now recomputes the trailing-one count locally
+inside the `// synthesis translate_off` block (named block, automatic
+variables); the functional NAPOT match path is untouched, zero netlist
+impact. First seen on the M2 mixed probe at cycle 609; same signature killed
+the pre-fix M1c int2/int2_l3 L0 boots at ~17.9 M / ~18.9 M cycles in the PTW
+PMP instance.
+
+**Probe matrix** (`run_smt_mixed_probe.py`, threads=1, post-fix r2 models;
+`smt_mixed_probe*.elf` sha256 `5bc9059e…e148e9cb` / `a0e8c8fd…` /
+`10666c82…`):
+
+| Lane | Tag | Result | Cycles | Notes |
+|---|---|---|---:|---|
+| mixed | `ooocoh-m2-probe-mixed-r2` | SUCCESS | 3,103,699 | RES0=RES1=0x1; `h0_pp`=0, `h0_tlb`=0, `h0_tmr`=144; `both_resident_cycles`=410,929, `cross_hart_port1_commits`=21,977, `hol_residual`=25,993; retired h0=891,486 / h1=1,000,739 (matches the T6b-4b pass counts exactly) |
+| solo | `ooocoh-m2-probe-solo-r2` | SUCCESS | 388,025 | RES1=0x1; `both_resident`=0 (control) |
+| drained overlay | `ooocoh-m2-probe-drained-r2` | SUCCESS | 3,018,235 | RES0=RES1=0x1; `h0_pp`=0, `h0_tlb`=0; `both_resident`=0 (draining witnessed) |
+| anchor `g6lc64_smt2` | `ooocoh-m2-probe-anchor-r2` | SUCCESS | 3,221,052 | RES0=RES1=0x1; `h0_pp`=0, `h0_tlb`=0 |
+
+**Isolation mutations / negatives.**
+
+| Lane | Tag | Expected | Observed |
+|---|---|---|---|
+| `mut-stb-no-hart` | `ooocoh-m2-probe-mut-stb-no-hart-r2` | fail | **fail** @3,105,561 — `RES0=0x5` (`RES_FAIL_PP`), `h0_pp`=213 cross-hart speculative forwards witnessed (the shared-page ping-pong witness fires; T6b-3 saw 205 on the pre-eWT tree) |
+| `mut-ctrl-switch-degrades` | `ooocoh-m2-probe-mut-ctrl-switch-degrades-r2` | fail | **fail** @193,987 — `t6b3_switch_keeps_commit_flush` assertion ("switch degraded a commit-level flush under mixed residency") |
+| `mut-lsq-no-hart` | `ooocoh-m2-lsq-leaf-r4` | leaf fail | re-run (not hash-gated — `g6lc_lsq.sv` changed in `781a25215`/`5a19fb1bb`): `LSQ_HART_PASS`, inverted negative `LSQ_XHART_STALL stall=0` and mutant `stall=1` both fire; synth 2,691 cells / 0 latches / 0 SCC |
+| `mut-decode-active-irq` (idstage leaf) | hash-gated | — | file set unchanged since `81111b653` (T6b-3 exit): `core/id_stage.sv`, decoder family (`fedf3f2b7`/`8a2df2987`/`5b694633a`/`2ef1c1b1f`, all pre-T6b-3), `tb_g6lc_idstage.sv`, `run_idstage_leaf.py`; only `config_pkg.sv` metadata moved (87dd183d6) |
+| `mut-no-peer-restart` (restart leaf) | hash-gated | — | file set unchanged since `e3ec6e00a`/`5a826bfe4` (T6b-3/T6b-2a): `core/fetch_B/g6lc_fetch_pkg.sv` `5f623771…`, `core/smt/g6lc_smt_pc_bank.sv` `ae2c9f0c…`, `tb_g6lc_restart.sv` `94643d78…`, `run_restart_bank.py` `43d3e503…` |
+
+**Strict boots** (threads=1, source-profile OpenSBI, post-fix r2 models):
+
+| Lane | Tag | Result | Cycles |
+|---|---|---|---:|
+| mixed | `ooocoh-m2-osbi-smt2ooo-mixed-r2` | strictDual pass | **10,556,456** (vs drained 10,702,679, −1.4 %; vs T6b-4b mixed 10,606,940, −0.5 %) |
+| drained overlay | `ooocoh-m2-osbi-smt2ooo-drained-r2` | strictDual pass | **10,702,679 — exact match to the final anchor**; rvfi hart_00 sha256 `7e228d3acf5993735838…`, 18,557,085 lines (identical hash and line count) |
+
+`+smt_mixed_stats` on the mixed boot (lane `ooocoh-m2-osbi-smt2ooo-mixed-r3`,
+identical 10,556,456-cycle run): `both_resident_cycles`=60,914,
+`cross_hart_port1_commits`=4,851, `hol_residual`=1,488, retired
+h0=8,810,200 / h1=462,035 — the harts are resident together ~0.6 % of the
+boot, matching T6b-4b's observation that the mixed speedup comes from a
+small shared window, not permanent dual residency.
+
+**Gates + timing.** `g6lc64_smt2_ooo_int`: `ooocoh-m2-gate-smt2_ooo_int-r1`
+lint **28/0**, synth **2/0** (`check -assert` clean; the +4 lint / +1 synth
+warnings vs M1b are the `smt_mixed_stats` display-block width notes and the
+M1c counter-port notices — all `%Warning` class). Defaults
+(`ooocoh-m2-gate-defaults-r1`): lint 8/0 + 54/0, synth 32/0 + 5/0 — at the
+M1b baselines.
+FO4 `sparse_smt_mixed_commit` at ring 8 (`m2-fo4-mixed-commit`, param map
+`g6lc64_smt2_mixed_xlen64.json`): worst **31.0 FO4** (`store_buffer`
+reg→reg, slack 1.0, ~1290 MHz vs 1250 MHz budget) — within the ≤32 bound;
+cones: scoreboard 30.5, commit_stage 30.0, store_buffer 31.0, `g6lc_rob`
+8.0, `g6lc_smt_csr_bank` 6.0.

@@ -19,13 +19,17 @@ def parse_cache_counters(text):
     # l2_selfinv/l3_selfinv are optional: pre-Phase-4 models print the
     # six-field line, Phase-4 models add the two self-invalidation counts,
     # Phase-5 models add the l2_wupd/l3_wupd write-update counts, and T9b
-    # (posted writes) adds l2_wtrk_full/l2_line_hold/l2_posted/l2_rdtrk.
+    # (posted writes) adds l2_wtrk_full/l2_line_hold/l2_posted/l2_rdtrk,
+    # and T9c/M1c adds the hold split
+    # l2_hold_r1/l2_hold_r1_wu/l2_hold_r2/hub_aw_sc_collide.
     match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
                       r' l3_hit=(\d+) l3_miss=(\d+)'
                       r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))?'
                       r'(?: l2_wupd=(\d+) l3_wupd=(\d+))?'
                       r'(?: l2_wtrk_full=(\d+) l2_line_hold=(\d+)'
                       r' l2_posted=(\d+) l2_rdtrk=(\d+))?'
+                      r'(?: l2_hold_r1=(\d+) l2_hold_r1_wu=(\d+)'
+                      r' l2_hold_r2=(\d+) hub_aw_sc_collide=(\d+))?'
                       r' dram_latency=(\d+)', text)
     if not match:
         return None
@@ -40,7 +44,11 @@ def parse_cache_counters(text):
             'l2_line_hold': int(match.group(11)) if match.group(11) else None,
             'l2_posted': int(match.group(12)) if match.group(12) else None,
             'l2_rdtrk': int(match.group(13)) if match.group(13) else None,
-            'dram_latency': int(match.group(14))}
+            'l2_hold_r1': int(match.group(14)) if match.group(14) else None,
+            'l2_hold_r1_wu': int(match.group(15)) if match.group(15) else None,
+            'l2_hold_r2': int(match.group(16)) if match.group(16) else None,
+            'hub_aw_sc_collide': int(match.group(17)) if match.group(17) else None,
+            'dram_latency': int(match.group(18))}
 
 
 def sha(path):

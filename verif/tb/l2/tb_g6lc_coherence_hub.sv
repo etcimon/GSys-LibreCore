@@ -64,7 +64,8 @@ module tb_g6lc_coherence_hub;
     //  been observed to fire in any test -- the RTL drives it, which is not the
     //  same thing as a bench having seen it assert. Scenario 9 observes it.
     .coh_arb_starve_o(arb_starve),
-    .coh_split_conflict_o(), .coh_sc_noresv_o(), .coh_lr_kill_o()
+    .coh_split_conflict_o(), .coh_sc_noresv_o(), .coh_lr_kill_o(),
+    .hub_aw_sc_collide_o()
   );
 
   function automatic ar_chan_t ar(input addr_t address, input id_t id);
@@ -1627,7 +1628,7 @@ module tb_g6lc_coherence_l2;
       .mem_req_o(hub_req),.mem_resp_i(hub_rsp),.inv_core_o(invalidations),
       .inv_core_ready_i(inv_ready),.lr_valid_i(1'b0),.lr_addr_i('0),.lr_core_i('0),
       .coh_inv_fire_o(),.coh_sf_hit_o(),.coh_sf_overapprox_o(),.coh_arb_starve_o(),
-      .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o());
+      .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o(),.hub_aw_sc_collide_o());
   // dram_req/dram_rsp stay the DRAM edge; l2m_* is the L2 master side.
   req_t l2m_req;
   resp_t l2m_rsp;
@@ -1710,7 +1711,9 @@ module tb_g6lc_coherence_l2;
       .mst_req_o(l2m_req),.mst_resp_i(l2m_rsp),
       .l2_hit_o(l2_hit_p),.l2_miss_o(l2_miss_p),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
       .l2_selfinv_hit_o(),.l2_wupdate_o(l2_wupd_p),
-      .l2_wtrk_full_o(),.l2_wtrk_line_hold_o(),.l2_posted_o(),.l2_rdtrk_o(),
+      .l2_wtrk_full_o(),.l2_wtrk_line_hold_o(),
+      .l2_hold_r1_o(),.l2_hold_r1_wu_o(),.l2_hold_r2_o(),
+      .l2_posted_o(),.l2_rdtrk_o(),
       .l2_posted_hold_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(cmo_l2_v),.l2_back_inval_addr_i(cmo_l2_a),
@@ -1741,7 +1744,9 @@ module tb_g6lc_coherence_l2;
       .mst_req_o(l3_mst_req),.mst_resp_i(dram_rsp),
       .l3_hit_o(l3_hit_p),.l3_miss_o(l3_miss_p),.l3_bypass_o(),.l3_selfinv_hit_o(),
       .l3_wupdate_o(l3_wupd_p),
-      .l3_wtrk_full_o(),.l3_wtrk_line_hold_o(),.l3_posted_o(),.l3_rdtrk_o(),
+      .l3_wtrk_full_o(),.l3_wtrk_line_hold_o(),
+      .l3_hold_r1_o(),.l3_hold_r1_wu_o(),.l3_hold_r2_o(),
+      .l3_posted_o(),.l3_rdtrk_o(),
       .l3_posted_hold_o(),
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
       .l3_write_idle_o(cmo_l3_idle),
@@ -2358,7 +2363,7 @@ module tb_g6lc_coherence_credits;
       .mem_req_o(hub_req),.mem_resp_i(hub_rsp),.inv_core_o(invalidations),
       .inv_core_ready_i(inv_ready),.lr_valid_i(1'b0),.lr_addr_i('0),.lr_core_i('0),
       .coh_inv_fire_o(),.coh_sf_hit_o(),.coh_sf_overapprox_o(),.coh_arb_starve_o(),
-      .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o());
+      .coh_split_conflict_o(),.coh_sc_noresv_o(),.coh_lr_kill_o(),.hub_aw_sc_collide_o());
   // dram_req/dram_rsp stay the DRAM edge; l2m_* is the L2 master side.
   req_t l2m_req;
   resp_t l2m_rsp;
@@ -2372,7 +2377,9 @@ module tb_g6lc_coherence_credits;
       .mst_req_o(l2m_req),.mst_resp_i(l2m_rsp),
       .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
       .l2_selfinv_hit_o(),.l2_wupdate_o(),
-      .l2_wtrk_full_o(),.l2_wtrk_line_hold_o(),.l2_posted_o(),.l2_rdtrk_o(),
+      .l2_wtrk_full_o(),.l2_wtrk_line_hold_o(),
+      .l2_hold_r1_o(),.l2_hold_r1_wu_o(),.l2_hold_r2_o(),
+      .l2_posted_o(),.l2_rdtrk_o(),
       .l2_posted_hold_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o(),
@@ -2399,7 +2406,9 @@ module tb_g6lc_coherence_credits;
       .mst_req_o(dram_req),.mst_resp_i(dram_rsp),
       .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),.l3_selfinv_hit_o(),
       .l3_wupdate_o(),
-      .l3_wtrk_full_o(),.l3_wtrk_line_hold_o(),.l3_posted_o(),.l3_rdtrk_o(),
+      .l3_wtrk_full_o(),.l3_wtrk_line_hold_o(),
+      .l3_hold_r1_o(),.l3_hold_r1_wu_o(),.l3_hold_r2_o(),
+      .l3_posted_o(),.l3_rdtrk_o(),
       .l3_posted_hold_o(),
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
       .l3_write_idle_o(),

@@ -159,6 +159,9 @@ module tb_g6lc_l2;
       .l2_wupdate_o       (l2_wupd),
       .l2_wtrk_full_o     (),
       .l2_wtrk_line_hold_o(),
+      .l2_hold_r1_o       (),
+      .l2_hold_r1_wu_o    (),
+      .l2_hold_r2_o       (),
       .l2_posted_o        (),
       .l2_rdtrk_o         (),
       .l2_posted_hold_o   (),
@@ -1422,7 +1425,8 @@ module g6lc_l2_fixture
 `ifndef L2TB_LEGACY
       .l3_selfinv_hit_o(),
       .l3_wupdate_o(),
-      .l3_wtrk_full_o(), .l3_wtrk_line_hold_o(), .l3_posted_o(),
+      .l3_wtrk_full_o(), .l3_wtrk_line_hold_o(),
+      .l3_hold_r1_o(), .l3_hold_r1_wu_o(), .l3_hold_r2_o(), .l3_posted_o(),
       .l3_rdtrk_o(), .l3_posted_hold_o(),
 `endif
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
@@ -1453,7 +1457,8 @@ module g6lc_l2_fixture
 `ifndef L2TB_LEGACY
     .l2_selfinv_hit_o(),
     .l2_wupdate_o(),
-    .l2_wtrk_full_o(), .l2_wtrk_line_hold_o(), .l2_posted_o(),
+    .l2_wtrk_full_o(), .l2_wtrk_line_hold_o(),
+    .l2_hold_r1_o(), .l2_hold_r1_wu_o(), .l2_hold_r2_o(), .l2_posted_o(),
     .l2_rdtrk_o(), .l2_posted_hold_o(),
 `endif
     .l2_evict_valid_o(evict_o), .l2_evict_addr_o(evict_addr_o),

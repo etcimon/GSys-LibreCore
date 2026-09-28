@@ -1034,12 +1034,16 @@ package config_pkg;
     // strictDual on g6lc64_smt2_ooo_int and the in-order anchor is exact.
     // FP multi-hart is refused pending hart-tagged lazy-FS (T6b).
     assert (!(Cfg.OoOEn && Cfg.NrHarts > 1 && Cfg.FpPresent));
-    // Mixed residency is T6b and stays qualification-gated: clearing the drain
-    // gate is legal only on an OoO multi-hart configuration, and until the T6b
-    // exit only behind the G6LC_OOO_SMT_MIXED_QUALIFY define.
+    // Mixed residency is T6b: clearing the drain gate is legal only on an
+    // OoO multi-hart configuration, and since the T9d/M2 promotion it is a
+    // production feature on single-core packages (NrCores == 1) — mixed
+    // harts on one core were qualified by the T6b evidence chain.
     assert (Cfg.SmtDrainedHandoff || (Cfg.OoOEn && Cfg.NrHarts > 1));
 `ifndef G6LC_OOO_SMT_MIXED_QUALIFY
-    assert (Cfg.SmtDrainedHandoff);
+    // Multi-core mixed residency stays qualification-gated: on a package
+    // with more than one core the drain gate may drop only behind the
+    // G6LC_OOO_SMT_MIXED_QUALIFY define.
+    assert (Cfg.SmtDrainedHandoff || Cfg.NrCores == 1);
 `endif
 `ifndef G6LC_OOO_FP_QUALIFY
     // Single-hart FP stays illegal in production. G6LC_OOO_FP_QUALIFY exists

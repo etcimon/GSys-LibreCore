@@ -141,8 +141,9 @@ module g6lc_ooo_dispatch
   // selector switches only when the scoreboard and store queues are empty, so
   // the hart-blind IQ/ROB/LSQ never hold work from two harts at once (asserted
   // at the switch as ooo_switch_drained in cva6.sv). Qualified 2026-09-23
-  // (T6a) on the protected dual-hart OpenSBI/HSM profile; mixed residency is
-  // T6b and stays excluded by the drain gate itself.
+  // (T6a) on the protected dual-hart OpenSBI/HSM profile; mixed residency
+  // (drain gate off) is promoted to production on single-core packages by
+  // T9d/M2 and stays qualification-gated on multi-core packages.
   if (CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_fp_mh
     // Hart-tagged LSQ and lazy-FS per-hart tracking are the T6 work item; an
     // FP register class on a multi-hart OoO configuration stays illegal even

@@ -145,6 +145,30 @@ prerequisite for this work under the existing dual license. No licensing policy 
   R1/R2 holds absorbing the write-drain latency.
   Open under the eWT plan: M1 qualification matrix; M3 — the int2 packages' real issue
   window is `NrScoreboardEntries=8`.
+- [x] **Measured (T9c, 2026-09-28): M1c posted-write hold split** — `l2_line_hold` is
+  ~100 % R2 (different-id same-line AW) on all four strict boots: R1 totals 1–155
+  cycles, all write-around (`l2_hold_r1_wu`=0 everywhere; even the 4,096-line
+  `mc_store_load_new_line` isolator shows 0 — the core's own store→load ordering
+  serializes the pattern upstream). Hub-side `hub_aw_sc_collide` puts the same-core
+  R2 share at ≥55 % at L40 (55.6 %/55.7 %; int2-L0 shows >100 % because the hub
+  offer window is wider than the L2 charge). Data supports option 2 (same-core
+  same-line on one hub id), rejects option 1 (write-alloc merge fixes a 0.001 %
+  phenomenon), and warns option 3 needs a downstream same-address-order proof.
+  New `[mc_cache]` fields `l2_hold_r1`/`l2_hold_r1_wu`/`l2_hold_r2`/
+  `hub_aw_sc_collide`; older lines still parse. See `core/ooo/AGENTS-ooo-plan.md` T9c.
+- [x] **Landed (T9d, 2026-09-28): M2 mixed-residency promotion on `g6lc64_smt2_ooo_int`** —
+  `SmtDrainedHandoff=0` define-free on the single-core package; `check_cfg` legality is
+  `SmtDrainedHandoff || NrCores == 1` with `G6LC_OOO_SMT_MIXED_QUALIFY` retained only for
+  multi-core mixed residency (int2/int2_l3 stay drained). Evidence re-baselined on the
+  eWT tree: probe matrix mixed/solo/drained-overlay/anchor all SUCCESS with
+  `h0_pp`=`h0_tlb`=0; mutations `mut-stb-no-hart` (ping-pong witness 213) and
+  `mut-ctrl-switch-degrades` fail as designed; the LSQ leaf re-ran green
+  (`g6lc_lsq.sv` changed post-T6b-3) while the idstage/restart negatives are
+  hash-gated; strict boots — mixed 10,556,456 cycles, drained overlay exactly the
+  10,702,679-cycle final anchor (rvfi hart_00 sha `7e228d3acf599373`); gates
+  smt2_ooo_int 28/0 + 2/0 and defaults at baseline; FO4 `sparse_smt_mixed_commit`
+  worst 31.0 ≤ 32. Carries a translate_off `pmp_entry` NAPOT-assert stabilization
+  (delta-cycle read of a per-hart muxed `lzc` output). See `core/ooo/AGENTS-ooo-plan.md` T9d.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

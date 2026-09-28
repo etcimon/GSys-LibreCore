@@ -386,7 +386,12 @@ fills+wtrk+rdtrk <= `CohMaxOutstanding` at OT4/OT8 (mixed-burst `wr_stall`
 conservation, P3 posted never enters `S_BYPASS_B`, bounded liveness; intended
 mutations `mut_p1`/`mut_p3` fail (yices). Directed `mc_l2_write_read` at L40:
 int2 518,507 / int2_l3 543,093 cycles (vs 526,714 / 559,492 M1a); strict boots
-on every enabled package.
+on every enabled package. T9c adds the hold-split observability
+(`l2_hold_r1`/`l2_hold_r1_wu`/`l2_hold_r2`/`hub_aw_sc_collide` on `[mc_cache]`,
+optional trailing fields so older lines parse) and the R1 isolator
+`mc_store_load_new_line` (4,096 store→load fresh-line pairs on hart 0; all
+four config×latency records matched, `l2_hold_r1`=0 — same-core ordering
+serializes the shape upstream of the L2); the boot split itself is plan T9c.
 - Visibility-model probes for this class (kept in `run_mc_int2_review.py`): `+mc_vis_stuck=N`
   stuck-handshake/commit-head reports, CSR exception and csr_buffer allocation/commit views,
   issue-port view within `+mc_vis_from/+mc_vis_until`. The review mode's directed cases still
@@ -467,6 +472,27 @@ peer-restart frontier — the `flush_i` gate and `SBC_P1_FLUSH` pin it. Leaf run
 deepest payload path deterministically (stale top-level copies in reused remote run dirs had
 shadowed fresh sources twice) and every shipped leaf's `sources.json` was hash-checked against the
 repo.
+
+## T9d / M2: mixed residency promoted on `g6lc64_smt2_ooo_int` (2026-09-28)
+
+All T6b evidence re-baselined on the eWT tree (`L2PostedWriteEn` era, post-`pmp_entry`
+translate_off stabilization). Probe matrix (`ooocoh-m2-probe-*-r2`, threads=1): mixed
+SUCCESS 3,103,699 (RES0=RES1=0x1, `h0_pp`=`h0_tlb`=0; `both_resident_cycles`=410,929,
+`cross_hart_port1_commits`=21,977, `hol_residual`=25,993), solo 388,025, drained
+overlay 3,018,235 and anchor `g6lc64_smt2` 3,221,052 all pass with zero witnesses.
+Isolation negatives: `mut-stb-no-hart` fails `RES0=0x5` with `h0_pp`=213 (ping-pong
+witness fires), `mut-ctrl-switch-degrades` fails on `t6b3_switch_keeps_commit_flush`
+@193,987; `mut-lsq-no-hart` re-ran at the leaf (`g6lc_lsq.sv` changed post-T6b-3 —
+`ooocoh-m2-lsq-leaf-r4`: `LSQ_HART_PASS`, `LSQ_XHART_STALL` inverted + mutant, synth
+2,691 cells / 0 latches / 0 SCC); idstage/restart leaf negatives hash-gated (RTL,
+bench and runner unchanged since T6b-3). Strict boots: mixed 10,556,456 strictDual
+(`+smt_mixed_stats`: `both_resident_cycles`=60,914, `cross_hart_port1_commits`=4,851,
+`hol_residual`=1,488); drained overlay exactly the final anchor — 10,702,679 cycles,
+rvfi hart_00 sha256 `7e228d3acf599373`, 18,557,085 lines. Gates: smt2_ooo_int
+28/0 + 2/0, defaults 8/54 + 32/5 at baseline; FO4 `sparse_smt_mixed_commit` ring 8
+worst 31.0 ≤ 32 (scoreboard 30.5 / commit_stage 30.0 / store_buffer 31.0 / rob 8.0).
+Legality now `SmtDrainedHandoff || NrCores == 1` define-free; multi-core mixed and
+FP+mixed stay gated.
 
 ## T6b-3 exit: concurrent checked work, isolation negatives, first measurement (2026-09-23)
 

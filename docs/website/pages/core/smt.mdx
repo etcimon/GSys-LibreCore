@@ -32,7 +32,9 @@ Scaffold + bring-up: `architecture/multi-threading/`
 On OoO profiles (`OoOEn && NrHarts=2`), residency switches by **drained
 handoff**: the thread selector changes only when the scoreboard and store
 queues are empty, so the hart-blind OoO backend never interleaves two harts'
-work. Mixed residency (`SmtDrainedHandoff=0`) stays qualification-gated behind
+work. Mixed residency (`SmtDrainedHandoff=0`) is promoted to production on the
+single-core `g6lc64_smt2_ooo_int` package (T9d/M2, evidence re-baselined on the
+eWT tree); on multi-core packages it stays qualification-gated behind
 `G6LC_OOO_SMT_MIXED_QUALIFY`.
 
 Modules under `core/smt/` include thread select, hart state, banked RF, PC
@@ -50,7 +52,7 @@ bank, and CSR bank helpers.
 
 ```
 core/include/g6lc64_smt2_config_pkg.sv         # NrHarts=2, SMT_HYBRID, in-order
-core/include/g6lc64_smt2_ooo_int_config_pkg.sv # NrHarts=2 over OoO, drained handoff (production)
+core/include/g6lc64_smt2_ooo_int_config_pkg.sv # NrHarts=2 over OoO, mixed residency (production)
 core/include/g6lc64_ooo_int2_config_pkg.sv     # two-core WT + L2 COH_OOO variant (integration target)
 ```
 

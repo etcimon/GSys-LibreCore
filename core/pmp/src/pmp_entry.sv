@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Moritz Schneider, ETH Zurich
+// Modified by: Etienne Cimon
 // Date: 2.10.2019
 // Description: single PMP entry
 
@@ -76,11 +77,23 @@ module pmp_entry #(
         // synthesis translate_off
         // size extract checks
         assert (size >= 2);
-        if (conf_addr_mode_i == riscv::NAPOT) begin
-          assert (size > 2);
-          if (size < CVA6Cfg.PLEN - 2) assert (conf_addr_i[size-3] == 0);
+        if (conf_addr_mode_i == riscv::NAPOT) begin : napot_canonical_chk
+          // G6LC: recompute the trailing-ones count locally. `size`/`trail_ones`
+          // are driven by the separate i_lzc instance and lag one delta when
+          // conf_addr_i transitions — the per-hart conf bank muxes switch
+          // conf_addr_i and conf_addr_mode_i in the same delta — which made the
+          // immediate asserts below evaluate a stale count against a fresh
+          // address and fire on legal encodings (Verilator eval-order hazard).
+          automatic int unsigned chk_trail = 0;
+          automatic bit          chk_zero_seen = 1'b0;
           for (int i = 0; i < CVA6Cfg.PLEN - 2; i++) begin
-            if (size > 3 && i <= size - 4) begin
+            if (!chk_zero_seen && conf_addr_i[i]) chk_trail++;
+            else chk_zero_seen = 1'b1;
+          end
+          assert (chk_trail + 3 > 2);
+          if (chk_trail + 3 < CVA6Cfg.PLEN - 2) assert (conf_addr_i[chk_trail] == 0);
+          for (int i = 0; i < CVA6Cfg.PLEN - 2; i++) begin
+            if (chk_trail > 0 && i <= chk_trail - 1) begin
               assert (conf_addr_i[i] == 1);  // check that all the rest are ones
             end
           end
