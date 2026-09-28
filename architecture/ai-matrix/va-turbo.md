@@ -11,11 +11,67 @@ LibreCore AI island. It is the only policy feature that may change arithmetic,
 so it is isolated behind its own gate, its own verification mode and its own
 promotion evidence.
 
-**Status: default-off config gate, host bank generator, corrected bounded SV
-selection and an exact resident-B consumer are implemented. Recipe 16 is wired
-to real GEMM execution in the verification harness; production runtime requests
-remain tied off pending an ownership/epoch ABI. No approximate arithmetic,
-model-quality gain, physical-area gain or silicon throughput is claimed.**
+**Status: exact operand reuse is on the directed test config
+`AiCfgVaTurboTest` only. The live `g6lc64` `ai_cfg` keeps `VaTurboEn` at 0.
+No approximate arithmetic, model-quality gain, physical-area gain, or silicon
+throughput is claimed. A VA level does not scale the dense peak.**
+
+The September 2026 record of the host paths is [`log-2026-09.md`](log-2026-09.md).
+
+## Completion path
+
+This track is parallel to the 100 TOPS order in
+[`scaling-100tops.md`](scaling-100tops.md). It does not move the 48× gap, and
+it does not start I2 or class 2.
+
+| Step | State | What completion means |
+|---|---|---|
+| 1. Test config | Done | `AiCfgVaTurboTest` sets `VaTurboEn` with the policy chain and `IslandFpEn`. Directed `run-desc-reuse` elaborates it at 8 MAC/cycle and tile 1024×512×16. |
+| 2. Exact reuse | Done on that island | Flags bit 15 and bit 23 skip a matching B or A. M-split reuses B, N-split reuses A, K-split does not. A repeated panel can hit. Keys include pointer, shape, leading dimension, format, and epoch. Overlap, a GEMM error, or a C-store error drops residency. A completion-beat error does not. The host simulator, the soft island, QEMU, and the virtual card do the same when reuse is enabled, and leave it off by default, so a flag alone does not change a product. A hit multiplies the resident bytes. |
+| 3. Host schedule | Done for the test geometry | `plan_gemm_s8_va_turbo_test` refuses the live 512-MAC tile and then enables exact reuse on the directed device. A 16×8×8 run skips B on the second panel and C stays all 8s. An 8×8×16 K-split reads both operands and C stays all 16s. An 8×16×8 N-split skips A and C stays all 8s. The default stream stays on the 1024×512×512 box, does not ask for reuse, and does not enable it. `run_gemm_s8_auto` on the directed tile uses the named-panel schedule when an adjacent tile can skip, and stays on that ordinary stream for a K-split or any other capability record. Python `Device.gemm_s8` does the same: a device that publishes its own capability record wins over a host caps override. Python `run_va_turbo_test_s8` follows the same three shapes and the same refusal. `torch_ops.gemm_s8` enables that same exact reuse only when the device caps are the directed tile and two adjacent tiles can skip A or B. A one-row N-split hits A. An M-split such as 16×8×8 hits B. A K-split such as 1×256×256 has no adjacent hit, so reuse stays off. The Rust schedule and `run_va_turbo_test_s8` do the same: reuse is enabled only when a planned tile carries a skip flag, and the 8×8×16 K-split leaves the switch clear, reads both operands, and keeps C all 16s. The soft island does the same when its CAP record is the directed tile. Its default 512-MAC CAP refuses the schedule. The local virtual card and the TCP card agent do the same when the card CAP is that directed tile, and a default 512-MAC card refuses the schedule. A TCP hello that reports 512 MAC/cycle stays on the exact GEMM even if the host asked for the directed tile. The qemu-uio guest driver does the same when the capability window is that directed tile. A window that is not that tile stays on one exact GEMM, including when the host caps were overridden. The native soft island does the same when it is constructed as that directed tile. Its default 512-MAC CAP refuses the schedule, including when the host caps name the directed tile. The native simulator does the same: constructing it with that directed tile runs the schedule, and its default 512-MAC configuration refuses it even if the host caps are overwritten afterward. The QEMU guest model does the same when its capability record is that directed tile, and a 512-MAC model refuses the schedule. Ringing that schedule through the island doorbell does the same: reuse is enabled only when a tile can skip, and the product is read back from guest memory. A live 512-MAC device stays off, and the applied level stays 0. A named recipe on that call is refused while the known witnesses are not all passed, so the default product stays the exact integer GEMM. The result names the shape choice and reports the carried port: the live 64-bit fabric is 8 bytes/cycle and is not promoted. `fed` is this device's own MAC count against that width and the 8-byte control beats. One cluster of 512 is fed. Eight clusters of 4096 on the same 64-bit fabric are not. A native-format call reports the same fields and does not enable reuse. `reuse_blocked` is `live-caps` on the live package, `shape` when the shape is not a decode or its transpose, and `native-call` for one native GEMM. `promotion_missing` stays the known witness list. A one-row decode nominates resident B, and an N-split of that row hits A: `shape_reuse_b` stays true and `hit_a` records the skip. The live call hits neither operand. NumPy and TensorFlow use the same INT8 call. `run_high_level_s8` calls `Device.gemm_s8`, so PyTorch, NumPy, and TensorFlow share that one auto decision. On the directed tile a 16×8×8 started at ticket 5 finishes at ticket 6 with B skipped and C all 8s. An 8×8×16 K-split stays the caller's ticket, one ordinary tile, reuse off, and `reuse_blocked` is `shape`. |
+| 4. Completion status | Done | The DMA word keeps the GEMM status. The FIFO and the status register follow the write response. Host `DmaThenClaim` returns the FIFO. |
+| 5. Ownership and epoch | Epoch register and host lease done | `REG_OFF_REUSE_EPOCH` (`0x0F00`) reaches `gemm_seq` only when `VaTurboEn` is set. A new epoch misses, the same epoch hits, and returning to 0 misses. `ReuseLease::invalidate` is how the caller advances that register after a writer touches A or B. Hardware does not snoop the writer. Live packages still drive epoch 0 because `VaTurboEn` is clear. |
+| 6. Error budget | Ladder checked, request stored, not applied | `va_turbo_budget_ppm` matches the policy-package ladder. `va_turbo_compose_ppm` is `(eps * kappa_q8 + 255) >> 8` and fails closed when kappa is below 1 or the bound exceeds 100%. FP16 at kappa 1 fits level 5 and does not fit level 1. A level above 0 also needs a measured ppm: the documented INT8 tile error of 18,527 ppm does not fit level 8 (12,800) and does fit level 9 (25,600). `va_turbo_applied_level` still returns 0. The test schedule refuses level 8 for the documented 18,527 ppm INT8 figure and accepts level 9 only as a budget; the product stays the exact 8s. A level-9 plan for that 8×8×8 job has the same tile and descriptor fields as level 0. The request is stored at `0x0F04` and the completion PMU at `0x0F08` reports applied level 0. |
+| 7. Live promotion | Locked off | `g6lc64` `ai_cfg.VaTurboEn` is 0. `AiCfgVaTurboTest.VaTurboEn` is 1. Ingest fails if those two bits swap. Copying the bit onto the live package still waits for an error-bound check that may change a product, which does not exist yet. It is not the next 100 TOPS item. |
+
+Optimization adjustments stay on step 1's geometry. They do not widen
+`AI_LIVE_MACS` and they do not change the live nameplate.
+
+### Optimization selection
+
+The host choice follows the shape. Selecting it does not enable reuse on a
+device and does not change a product.
+
+1. **Resident B.** `m <= 1`, `n >= 2`, `k >= 2` is decode. The choice is
+   recipe 16 with `reuse_b`. `large_decode` means B is at least 99% of the
+   reads. 1×256×256 is 996 per mille. The 91.5× row below is a model
+   ceiling, not the value this choice returns.
+2. **Resident A.** `n <= 1`, `m >= 2`, `k >= 2` is tall. The choice is the
+   same recipe with `reuse_a`. 256×1×256 is the large case for A.
+   `reuse_a` and `reuse_b` are never both set. A merely wide or tall
+   prefill, and an 8×8 square, select nothing.
+3. **Withheld VA-Turbo.** Fifteen non-exact ids stay unselected.
+   `admit_withheld` lists an id only when the five permission predicates
+   hold and the recipe's analytic bound fits the level. At level 9 with
+   the documented 18,527 ppm measurement, recipe 4 can be listed and
+   recipe 27 cannot. Listing an id does not arm the evidence window.
+   `apply` stays false until a measured error bound exists. Live
+   `VaTurboEn` stays off.
+4. **Left out of this choice.** Prefetch depth stays advice. The subcode
+   cache stays off. Lane groups, converters, and approximate consumers
+   are not selected here. A K-split still does not reuse; this record is
+   a whole-shape choice and does not override a tile whose K origin changed.
+5. **MAC rate.** The live sketch is 1 × 512 MAC/cycle × 2 GHz:
+   1.024 × 10¹² MAC/s, 2.048 INT8 TOPS, 4.096 INT4 TOPS, 2.048 FP8
+   TFLOPS, 1.024 FP16/BF16 TFLOPS, and 0.512 FP32 TFLOPS. The throughput
+   sketch is 8 × 4096 × 1.5 GHz and is 48× the live rate in every format
+   the sketch can express, 98.3 INT8 TOPS at the top. A decode choice and
+   a VA level do not multiply it. The carried width is the narrower of
+   the island DMA and the fabric, so a 512-bit island DMA on the 64-bit
+   fabric is still 8 bytes/cycle and the live MAC count stays frozen.
+   Descriptor, C, and completion beats stay 8 bytes on that fabric.
+   A carried port wider than 8 bytes/cycle is the gate that may raise
+   the MAC count; class 2 and I2 stay behind that gate.
 
 The name is descriptive of the intent — trading numeric precision for parallel
 throughput the way an analog multiplier trades precision for density — but the
@@ -50,8 +106,25 @@ V/A-Turbo can change results. That single property justifies the separation:
 The chain is therefore `VaTurboEn -> PolicySubcodeEn -> PolicyBenefitEn ->
 PolicyCodecEn -> matrix plane + T2 queue`. The gate exists to keep an
 arithmetic-changing feature unreachable, not to switch it on.
+`AiCfgVaTurboTest` is the directed-test config that does set the bit, for
+exact operand reuse only. `g6lc64_ai_config_pkg`'s `ai_cfg` stays off.
+There is no error-budget level on that test config, so it does not scale
+the dense peak. Host `plan_gemm_s8_va_turbo_test` is the schedule for
+that island's geometry, 8 MAC/cycle and tile 1024×512×16. It refuses
+the live 512-MAC tile. A 16×8×8 all-ones product is two 8×8 panels,
+the second requests resident B, and every result is 8. On
+`AiCfgVaTurboTest` that second panel issues no B read, and the first
+and last C pairs are 8. An 8×8×16
+product splits in K, requests no reuse, and every result is 16. On
+`AiCfgVaTurboTest` each of those panels has leading dimension 16 and
+K offset 0 then 8. The second panel reads B, and each panel's first
+and last C pairs are 8. Repeating the second panel then skips B. An 8×16×8 product is
+two panels along N. The host result is 8, and the second panel
+requests resident A. On `AiCfgVaTurboTest` that panel issues no A
+read, and its first and last C pairs are 8.
+The default stream stays on the live box.
 
-### 2.2 Runtime parameter — planned, not implemented
+### 2.2 Runtime parameter — ladder checked, not applied
 
 One `va_turbo_level` field, an **error budget** rather than an opaque
 aggressiveness dial, so the runtime knob has the same units as the promotion
@@ -80,8 +153,22 @@ budgets are plausible, at the same 4 bits.
 ladder, rounded up, so it compares directly against the authorised level.
 
 `0` must be bit-exact, not approximately exact: that is what makes the feature
-safely shippable-but-disabled. Plumbing (aicfg field or MMIO, PMU readback of
-the level actually applied) is unimplemented.
+safely shippable-but-disabled. `va_turbo_budget_ppm` and
+`va_turbo_error_bound_q4` are that ladder. `va_turbo_applied_level` returns
+0 for every code, so the MAC path is unchanged.
+
+`REG_OFF_VA_TURBO_LEVEL` (`0x0F04`) stores the request in bits `[3:0]`.
+Bits `[11:8]` are the applied level and read as 0. `PMU_OFF_VA_TURBO_LEVEL`
+(`0x0F08`) copies that word when a GEMM completes, so a later write does not
+rewrite the job that already finished. `gemm_seq` does not read either
+register. On `AiCfgVaTurboTest`, a request of 9 (a write of `32'h109`, which
+also sets bit 8) reads back `32'h9`, the PMU word stays 0 until the next
+job, and a 2×2×1 all-ones product is still 1. The live package is unchanged.
+The virtual card stores that request in side state at the same offset
+inside the 4 KiB window. A write of
+`0x0F04` clears the card's evidence-window bit, including a rewrite of the
+same nibble. The card's PMU copy stays with the job that finished, and a
+2×2 product stays `[[19, 22], [43, 50]]`.
 
 ### 2.3 Sub-code word — repurposed, not widened
 
@@ -89,7 +176,28 @@ The SV research request uses `{bank[1:0], subcode[2:0]}` for a 32-recipe namespa
 The bank is separate context: three bits alone cannot identify 32 independent
 recipes. The frozen policy group remains unchanged. The existing topology
 subcode evaluator has not been replaced or repurposed; it remains a comparator
-for later experiments. No descriptor, MMIO or ISA ABI was changed in this pass.
+for later experiments. The descriptor and the ISA were not widened.
+
+`REG_OFF_VA_TURBO_RECIPE` (`0x0F0C`) stores `{bank, subcode}` in bits `[4:0]`.
+Bits `[12:8]` are the applied id and read as 0. `PMU_OFF_VA_TURBO_RECIPE`
+(`0x0F10`) copies that word when a GEMM completes. `gemm_seq` does not read
+either register and does not call `va_turbo_select`. On `AiCfgVaTurboTest`,
+a write of `32'h110` (id 16, with bit 8 set) reads back `32'h10`. The PMU
+word stays 0 until the next job, and a 2×2×1 all-ones product is still 1.
+
+`REG_OFF_VA_TURBO_WINDOW` (`0x0F14`) is the caller's claim that this
+level, recipe, and epoch still match the evidence. A write to any of
+those three registers clears the bit. `PMU_OFF_VA_TURBO_WINDOW`
+(`0x0F18`) copies it when a GEMM completes. The claim does not change
+the product: with the bit set, the same 2×2×1 all-ones job is still 1.
+Tensor identity, numeric format, and the approval profile are not in
+the register map. The host `EvidenceWindow` records them and clears
+its claim when any of them changes. A level the budget rejects cannot
+arm that claim: level 8 with the documented 18,527 ppm figure stays
+unarmed, and level 9 may be armed while the product stays exact. A
+recipe whose own analytic bound does not fit the level stays unarmed
+too: recipe 27 at 250,000 ppm does not fit level 9, and exact recipe 16
+still may.
 
 `va_turbo_select` decodes a request into a bounded execution plan, not an
 arithmetic result. The previous host-generated three-entry precision bank is a
@@ -255,6 +363,24 @@ All four, or it stays off:
 4. accuracy validated beyond the tile proxy — the current metric is Frobenius
    error on one small model and one prompt, which is not a model-quality result.
 
+The host `PromotionGates.ready` is that conjunction. The documented
+18,527 ppm figure satisfies none of the four. A ready report does not
+write `g6lc64` `VaTurboEn`; that bit stays `bit'(0)`. A randomly
+initialised Hugging Face BERT layer can match the exact GEMM path and
+still leaves `beyond_tile_proxy` clear: one untrained layer is not
+held-out model quality. Reusing that layer's query weight matches the
+first product and misses a mutated weight. `va_turbo_en_allowed` is
+true only when that exact reuse holds and all four gates are ready.
+With reuse shown, the witnesses are concurrency `failed` (lane groups
+do not add MAC/s), and held-out evidence, a gain threshold, and
+beyond-tile accuracy `absent`. A passed witness with no source is
+dropped. Marking lane groups as passed concurrency stays `failed`.
+Marking the random BERT layer as beyond-tile accuracy stays `absent`.
+Checking the four boxes without those witnesses does not allow the
+bit. A witness set that is all `passed`, each with its own source,
+allows the host decision and still does not write `VaTurboEn`. The
+live bit stays `bit'(0)`.
+
 ## 8. Implemented SV recipe calculations
 
 `corev_apu/ai_island/include/g6lc_ai_policy_pkg.sv` now provides
@@ -313,7 +439,16 @@ metadata and resource predicates pass. `apply` additionally requires all of:
 
 When permission is absent, the action fields remain zero and `target_numfmt`
 remains the native input format, even when `eligible=1`. There is no production
-call site or nonzero production consumer mask yet.
+call site or nonzero production consumer mask yet. The host `permission`
+report takes each config-chain bit separately, so a live package, the
+directed test config, or a chain with one gate clear can all be evaluated.
+`permitted` is the conjunction of the five predicates, for any recipe id
+in `0..31`. `apply` stays false, so recipe 16 with the directed chain,
+level 9, both mask bits, and a window is permitted and still not applied.
+The report is not the class-eligibility body inside `va_turbo_select`.
+The host `decode` names all 32 ids. Every action field on that record
+stays clear, including `apply`, reuse, convert, and approximate products.
+An id above 31 is unsupported and still has no actions.
 
 Conversion predicates compare the caller's upward-rounded geometric ladder index
 `error_bound_q4` against `level`. The maximum budget is 1,000,000 ppm; an error
@@ -606,8 +741,22 @@ keys at these widths: N is in the B key and M is in the A key, a
 second M tile can hit B, a second N tile can hit A, and holding
 invalidate produces no hit. Epoch is in that key on the same backend:
 epoch 1 misses a resident 0, the same epoch hits and reads fewer beats,
-and returning to 0 misses again. The island still ties the epoch pins
-to 0, so a descriptor cannot change them. A C that starts on a
+and returning to 0 misses again. `REG_OFF_REUSE_EPOCH` (`0x0F00`)
+forwards that value only when `VaTurboEn` is set. Live packages still
+drive epoch 0. The block is inside the 4 KiB SoC window. A guest store
+at `0x2200` does not reach the island. The soft-island register bus
+reads and writes `0x0F00`.
+A write clears the evidence-window bit, including a rewrite of the same
+epoch, and that rewrite keeps the resident key. QEMU uses the ingested
+name `reuse_epoch`. A store through that parsed map clears the window
+the same way, and the completion PMU copies the cleared bit. A guest
+doorbell on the 4 KiB window stores the level, the recipe, and the
+epoch. The level store leaves a resident 1×1 product at 2. A recipe
+store of `32'h110` reads back `16`, clears the window again, including
+a rewrite of the same id, and the next doorbell still returns 2.
+Arming the window and ringing again still returns 2, and the completion
+copy at `0x0F18` is 1. The epoch store clears the live window and leaves
+that copy at 1 until the miss, which returns 9 and copies 0. A C that starts on a
 resident operand does not skip, drops the key, and the next disjoint
 job misses; the job after that hits. That C pair is still the all-ones
 dot. `run-desc-reuse.sh` is a directed island with `VaTurboEn` set
@@ -621,7 +770,27 @@ again, and the next job with the new key skips it. The moved A is
 ones against B byte 0x21, so the dot is 264. A SLVERR on one B beat
 returns `ST_ERR` and drops the key; the next reuse request reads B
 and yields 264, and the job after that skips B. A SLVERR on the C
-store does the same after a hit that did not read B. Odd `n = 3`
+store does the same after a hit that did not read B. A SLVERR on the
+A read of a job that was eligible to skip B cancels that skip, returns
+`ST_ERR`, and the next reuse request reads B again. The job after
+that reload skips B and the product stays 264. When both operands
+are already resident, a SLVERR on the C store reads neither operand,
+returns `ST_ERR`, and the next job with both flags reads both again;
+the job after that skips both and stays at 264. A B-read SLVERR
+after A has already been skipped does not read A, returns `ST_ERR`,
+and drops A; the next request reads A again, and the job after that
+reload skips A and stays at 264. A SLVERR on the completion word,
+after GEMM has already skipped A and written C, returns `ST_ERR` and
+leaves A resident: the next request still skips A and stays at 264.
+The stored completion word is still status 0 with ticket 42; the
+sticky descriptor status is `ST_ERR`. Host `DmaThenClaim` returns the FIFO status even when the stored
+word still says 0 or was discarded. The word is observed, and it is
+not the result. The sim, the MMIO model, and the virtual card post
+that same pair: the word keeps the GEMM status, and a failed
+completion beat changes only the FIFO. A GEMM failure is the other
+way around: the C-store error on ticket 36 stores status 1 in that
+word, and the sticky status is `ST_ERR` as well.
+Odd `n = 3`
 stores single 32-bit words: `C[0][2]` is 1, and a taller M with that
 N skips B while the tail stays 1. Format is in the key: the same bytes as INT4 yield
 20 and skip on the next INT4 job, and switching back to INT8 reads
@@ -886,6 +1055,11 @@ At each shape's own optimal lane count, FP32:
 | prefill 256x256x256 | 65,536 | 65,536 | 53% | 50% | 1.36x | 2.14x |
 | **decode 1x16x16** | 16 | 136 | **85%** | **94%** | **5.04x** | 6.75x |
 | **decode 1x256x256** | 256 | 32,896 | **99%** | **100%** | **91.5x** | 141x |
+
+The host `select_workload` chooses exact resident B for this decode shape
+and exact resident A for the transposed shape. `large_decode` is this
+1×256 row. The 91.5× figure stays a model ceiling. The choice does not
+apply a recipe.
 
 At m=1 the weight matrix B is essentially **all** of the traffic, re-read for every
 token, so the measured 1.279x came from a square tile -- the *least* favourable
@@ -1644,7 +1818,42 @@ percentage next to it.
 ## 11. Not implemented
 
 Independent lane groups, compact exact floating reductions, operand converters,
-production residency/accuracy proof producers, descriptor/MMIO runtime plumbing,
-applied-plan PMU readback and automatic evidence-window wiring remain open.
+and production residency/accuracy proof producers remain open. A level request
+may be stored at `0x0F04`. The applied level in that word and at `0x0F08`
+stays 0. A recipe id may be stored at `0x0F0C`. The applied id in that word
+and at `0x0F10` stays 0. `gemm_seq` does not call `va_turbo_select`.
+A window claim at `0x0F14` clears when the epoch, level, or recipe is
+written. It does not apply a recipe.
 Approximate arithmetic consumers and production multi-cluster support remain
-disabled. The resident-B experiment is not model inference or silicon MAC/s.
+disabled. The host decode keeps every action field clear and does not
+select lane groups, floating reductions, converters, proof producers,
+approximate consumers, or multi-cluster by default. Each is a setting
+and defaults off. Lane groups do not add MAC/s. Approximate consumers
+apply only when every promotion gate is present, and that report still
+does not write `VaTurboEn`. A port setting promotes only when its
+fabric carries more than 8 bytes/cycle. The live setting is 512 onto
+64 and is not promoted, so the live MAC count stays 512. A 256-bit
+fabric on that island DMA carries 32 bytes/cycle and may use the
+configured MAC count in the sketch. On a promoted 256-bit fabric,
+4 clusters of 2048 MAC/cycle at 2 GHz sketch to 32.768 INT8 TOPS,
+65.536 INT4 TOPS, and 8.192 FP32 TFLOPS. The same features on the
+live 64-bit fabric stay 2.048 INT8 TOPS. Descriptor, C, and completion
+beats stay 8 bytes either way. That 4×2048 array on 32 bytes/cycle
+is 256 MAC/byte, four times the live 64 MAC/byte, so the sketch is
+still port-bound: it needs 128 bytes/cycle to keep the live intensity.
+The 8×4096 sketch needs 512 bytes/cycle, a 4096-bit fabric, to hold
+64 MAC/byte on the data port. Descriptor, C, and completion stay 8
+bytes, so that same array is 4096 MAC/byte on the control path and is
+not fed. Those beats are a setting that defaults to 8 bytes. The same
+array is fed only when that setting is also 512 bytes/cycle. At the
+sketch clock of 1.5 GHz the class-0 nameplate truncates to 1 GHz, so
+both of those 512-byte paths publish 512 GB/s, not 768. That demand
+is 512 GB/s. Class 0 covers it. Class 2 stays 400 and does not.
+A claimed rate has to equal the class formula: 16 matches live class
+0, and 400 does not. Class 2 may claim 400 only when that is not also
+the class-0 nameplate. Covering 512 GB/s with DDR4-2400×64 takes 27
+channels of 19 GB/s; 26 do not. The live class stays 0 and the live
+channel count stays 1. Lane groups, reductions, converters,
+and proof producers do not change the rate. The 100 TOPS gap remains
+that live 8-byte port. A VA level does not scale it. The resident-B
+experiment is not model inference or silicon MAC/s.

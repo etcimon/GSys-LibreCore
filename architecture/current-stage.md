@@ -48,6 +48,7 @@ OoO pass must not invent AI BAR sizes.
  100 TOPS island ───┤─ I3 DRAM: LiteDRAM at shared xbar DRAM slave, DramClass=1
                     │    (cores + L2 + NrCores use the same channels; before I2)
                     ├─ F12 host tiling vs the 1024×512×512 box; F13 writeback in sizing
+                    ├─ VA-Turbo exact reuse on `AiCfgVaTurboTest` only (live `VaTurboEn` stays 0; not a TOPS step)
                     └─ I2 cluster replica only after DRAM I3 (F6+F8 published)
 
                     ┌─ Keep RC (g6lc-virt GPEX + EDK2) and EP (virt_ai_card) separate
@@ -86,6 +87,12 @@ Published this pass / prior: F1–F15; **S1–S7 directed closed**. Native wrap 
 Live geometry (`RTL_FEEDBACK.md` §3.1): 512 MAC/cycle × 2 GHz nameplate = **2.048 TOPS**, DRAM nameplate **16 GB/s** on the same 64-bit port. Throughput SKU
 plan is 8 clusters × 4096 MAC/cycle @ 1.5 GHz ≈ **98.3 TOPS**. The 48× gap is MAC count × clock,
 not a QEMU measurement. VA-turbo does not multiply the 512-MAC rate.
+Exact reuse is a parallel track on `AiCfgVaTurboTest` (`va-turbo.md`,
+Completion path): the live `ai_cfg` stays off, the host test schedule is
+the 8-MAC 1024×512×16 tile, and a requested level at `0x0F04` is stored
+with applied level 0. Live promotion still waits on a measured error bound
+before any `va_turbo_level` changes a product. The host paths that share
+that schedule are recorded in `ai-matrix/log-2026-09.md`.
 
 ---
 

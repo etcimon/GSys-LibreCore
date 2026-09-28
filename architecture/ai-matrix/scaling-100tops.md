@@ -14,7 +14,7 @@ dual-licensed); **AI-0 closed on the open path**, so nothing here is licensing-b
 > DMA is 512 bits, narrowed onto the same 64-bit channel, with no second memory map
 > and no wider core crossbar. That define-on `g6lc64_ai` model elaborates and
 > links under Verilator 5.036 and has not been booted; stock 5.020 faults before
-> elaboration. The live port is still 8 bytes/cycle. Its published nameplate is
+> elaboration. The live port is still 8 bytes/cycle. A 512-bit island DMA joined onto that 64-bit fabric carries 8 bytes/cycle as well: the carried width is the narrower of the two. The live MAC count stays frozen until the carried port is wider than 8. Descriptor, C, and completion beats stay 8 bytes on the fabric. Its published nameplate is
 > 16 GB/s because `ClockKhz` is 2_000_000; the directed ~7.86 GB/s stream was
 > that wire accounted at 1 GHz and has not been re-timed. I2 and class 2
 > stay after a channel that can carry more than 8 bytes/cycle. Do not treat `DramChannels`
@@ -33,7 +33,9 @@ dual-licensed); **AI-0 closed on the open path**, so nothing here is licensing-b
 > clear, a float descriptor is `ST_BAD_FMT` even if the mask bit is set. An
 > FP32 2×2×2 with the reference enabled matches the binary32 dots. Class 2 remains a refused PHY unless
 > `Class2Model` selects the rate socket. `VaTurboEn` stays 0 and does not
-> multiply the 512-MAC rate. These sketches
+> multiply the 512-MAC rate. Exact reuse completes on `AiCfgVaTurboTest`
+> only (`va-turbo.md`, Completion path; record in `log-2026-09.md`) and does not change the I2 or
+> class-2 gate. These sketches
 > are not a measured 2.048 TOPS, and 16 GB/s is not a new PHY measurement.
 
 > **Why this document exists.** `README.md` sizes a *seam*. It does not size a *machine*. A review of

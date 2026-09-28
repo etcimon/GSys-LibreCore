@@ -25,6 +25,29 @@ losing intermediate completions if SW did not claim between jobs.
 | `irq_o` | sticky && head.irq |
 | Doorbell | one-cycle pulse. If the engine is busy or the FIFO is full, the latched doorbell is held and submitted when a slot is free. A newer doorbell replaces that held ticket. A fetch doorbell clears the hold. A sideband kick waiting for the same free slot runs before the held doorbell, and the held doorbell still runs after it. |
 
+## Completion word and FIFO status
+
+The DMA completion word is `{reserved[15:0], status[15:0], ticket[31:0]}`,
+written from the GEMM result before the write response comes back.
+
+| What failed | Stored word | FIFO / sticky `0x114` |
+|---|---|---|
+| GEMM, including a C-store SLVERR | that GEMM status | the same status |
+| The completion beat itself | GEMM status (0 when the GEMM succeeded) | `ST_ERR` |
+
+A discarded completion beat can also leave the previous bytes in place. Host
+`DmaThenClaim` reads the word and returns the FIFO status. It does not treat
+the word's status as the result. A completion-beat failure does not drop a
+resident operand. A GEMM or C-store failure does. The QEMU island
+model posts the same pair: the guest store keeps the GEMM status, and
+the status register shows `ST_ERR` when that beat fails. The guest
+store is that GEMM word; it is not rewritten after the beat fails. A
+doorbell through the published window still multiplies, stores that
+word, and shows `ST_ERR` in the status register. An oversize tile is
+the other case: no C is written, and the stored word is status 1. The
+virtual card does the same on a 2×2 product: C is 19, 22, 43, 50, the
+stored word is status 0, and the FIFO status is `ST_ERR`.
+
 ## Host software
 
 | Mechanism | Role |

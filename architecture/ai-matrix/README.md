@@ -11,6 +11,8 @@ cores and a matrix island sharing one address space. Read `../README.md` (scaffo
 |---|---|
 | [`isa-encoding.md`](isa-encoding.md) | Frozen ISA / CSR / Desc64 contract |
 | [`scaling-100tops.md`](scaling-100tops.md) | I0–I4 sizing; §4.2–4.3 shared `DramChannels` (cores + island); **next: I3 measure → I2 clusters** |
+| [`va-turbo.md`](va-turbo.md) | Exact reuse on `AiCfgVaTurboTest` only. Live `VaTurboEn` stays 0. Not a TOPS step. Completion path: ownership/epoch, then an error bound before any level above 0 |
+| [`log-2026-09.md`](log-2026-09.md) | September 2026 state: live 512-MAC geometry, carried port and DRAM claim, and the directed exact-reuse schedule. Live `VaTurboEn` stays 0 |
 | [`hard-tests.md`](hard-tests.md) | **HARD suites + directed ELF catalog + green results** |
 | [`frameworks-virt-pcie.md`](frameworks-virt-pcie.md) | soft virt-ai-pcie + `tensor virt-impl` soft→HARD→timing |
 | [`completion-fifo.md`](completion-fifo.md) | CPL FIFO RTL + multi-claim |
@@ -108,7 +110,8 @@ the width-scaled rows beside them). The live package is a 2.048 TOPS nameplate
 VA-turbo does not multiply that MAC rate. The sequencer box is 1024×512×512.
 The VA panels are 512×512, 512×256, and 1024×128. MAC issue stays 512.
 Class 2 still has no PHY; `Class2Model` is an off-by-default rate
-socket. V/A-Turbo is not this step.
+socket. V/A-Turbo is not this step. The directed schedule is recorded in
+[`log-2026-09.md`](log-2026-09.md).
 Design asks: [`../../g6lc_qemu/architecture/RTL_FEEDBACK.md`](../../g6lc_qemu/architecture/RTL_FEEDBACK.md)
 §2.1 / §3.3. Snapshot: [`../current-stage.md`](../current-stage.md).
 Detail: [`hard-tests.md`](hard-tests.md) §5 · [`scaling-100tops.md`](scaling-100tops.md) §11.
