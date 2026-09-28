@@ -1563,6 +1563,9 @@ module tb_g6lc_coherence_l2;
   // WRITE_UPDATE=1 merges eligible write-throughs into resident lines at both
   // cache levels; the scenario checks below become the merge-aware forms.
   parameter bit WRITE_UPDATE=1'b0;
+  // T9b posted writes + bypass-read tracking at L2 (and L3 in the stack).
+  parameter bit POSTED_WRITES=1'b0;
+  parameter int unsigned WTRK_DEPTH=4, RDTRK_DEPTH=4;
   // Scenario-5 sweep workload: (a) STREAM_BYTES of lines twice, (b) re-read a
   // WS_BYTES working set after POLLUTE_BYTES of pollution. Read-only, one
   // 16B hub request per 64B cache line.
@@ -1700,12 +1703,15 @@ module tb_g6lc_coherence_l2;
   g6lc_l2_top #(.Enable(USE_L2),.BYTE_SIZE(BYTE_SIZE),.SET_ASSOC(SET_ASSOC),
       .LINE_WIDTH(512),.MSHR_DEPTH(MSHR_DEPTH),.DATA_BANKS(DATA_BANKS),.FAIR_WRITES(1),
       .TAG_SRAM(TAG_SRAM),.WRITE_UPDATE(WRITE_UPDATE),
+      .POSTED_WRITES(POSTED_WRITES),.WTRK_DEPTH(WTRK_DEPTH),.RDTRK_DEPTH(RDTRK_DEPTH),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)) l2 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
       .mst_req_o(l2m_req),.mst_resp_i(l2m_rsp),
       .l2_hit_o(l2_hit_p),.l2_miss_o(l2_miss_p),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
       .l2_selfinv_hit_o(),.l2_wupdate_o(l2_wupd_p),
+      .l2_wtrk_full_o(),.l2_wtrk_line_hold_o(),.l2_posted_o(),.l2_rdtrk_o(),
+      .l2_posted_hold_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(cmo_l2_v),.l2_back_inval_addr_i(cmo_l2_a),
       .l2_back_inval_ready_o(cmo_l2_rdy),.l2_write_idle_o(cmo_l2_idle));
@@ -1727,6 +1733,7 @@ module tb_g6lc_coherence_l2;
       .Enable(1'b1),.BYTE_SIZE(L3_BYTES),.SET_ASSOC(L3_SET_ASSOC),
       .LINE_WIDTH(512),.MSHR_DEPTH(L3_MSHR_DEPTH),.DATA_BANKS(L3_DATA_BANKS),
       .TAG_SRAM(TAG_SRAM),.WRITE_UPDATE(WRITE_UPDATE),
+      .POSTED_WRITES(POSTED_WRITES),.WTRK_DEPTH(WTRK_DEPTH),.RDTRK_DEPTH(RDTRK_DEPTH),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)
     ) i_l3 (
@@ -1734,6 +1741,8 @@ module tb_g6lc_coherence_l2;
       .mst_req_o(l3_mst_req),.mst_resp_i(dram_rsp),
       .l3_hit_o(l3_hit_p),.l3_miss_o(l3_miss_p),.l3_bypass_o(),.l3_selfinv_hit_o(),
       .l3_wupdate_o(l3_wupd_p),
+      .l3_wtrk_full_o(),.l3_wtrk_line_hold_o(),.l3_posted_o(),.l3_rdtrk_o(),
+      .l3_posted_hold_o(),
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
       .l3_write_idle_o(cmo_l3_idle),
       .l3_back_inval_valid_i(cmo_l3_v),.l3_back_inval_addr_i(cmo_l3_a),
@@ -2315,6 +2324,10 @@ module tb_g6lc_coherence_credits;
   parameter bit USE_L3=1'b0;
   parameter int L3_BYTES=2048, L3_SET_ASSOC=2, L3_MSHR_DEPTH=4, L3_DATA_BANKS=2;
   parameter bit TAG_SRAM=1'b0;
+  // T9b posted writes + bypass-read tracking at L2 (and L3 in the stack);
+  // the credit bound must hold fills + write tracker + read tracker ≤ MAX_OT.
+  parameter bit POSTED_WRITES=1'b0;
+  parameter int unsigned WTRK_DEPTH=4, RDTRK_DEPTH=4;
   // CORES parameterises the issuer count so a "four-hart-style" burst can drive
   // four agents without changing the checkers.
   parameter int CORES=2;
@@ -2352,12 +2365,15 @@ module tb_g6lc_coherence_credits;
   g6lc_l2_top #(.Enable(1'b1),.BYTE_SIZE(4096),.SET_ASSOC(4),
       .LINE_WIDTH(512),.MSHR_DEPTH(MSHR_DEPTH),.DATA_BANKS(2),.FAIR_WRITES(1),
       .TAG_SRAM(TAG_SRAM),
+      .POSTED_WRITES(POSTED_WRITES),.WTRK_DEPTH(WTRK_DEPTH),.RDTRK_DEPTH(RDTRK_DEPTH),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)) l2 (
       .clk_i(clk),.rst_ni(rst_n),.slv_req_i(hub_req),.slv_resp_o(hub_rsp),
       .mst_req_o(l2m_req),.mst_resp_i(l2m_rsp),
       .l2_hit_o(),.l2_miss_o(),.l2_bypass_o(),.l2_mshr_full_o(),.l2_bank_conflict_o(),
       .l2_selfinv_hit_o(),.l2_wupdate_o(),
+      .l2_wtrk_full_o(),.l2_wtrk_line_hold_o(),.l2_posted_o(),.l2_rdtrk_o(),
+      .l2_posted_hold_o(),
       .l2_evict_valid_o(),.l2_evict_addr_o(),.l2_evict_ready_i(1'b1),
       .l2_back_inval_valid_i(1'b0),.l2_back_inval_addr_i('0),.l2_back_inval_ready_o(),
       .l2_write_idle_o());
@@ -2375,6 +2391,7 @@ module tb_g6lc_coherence_credits;
       .Enable(1'b1),.BYTE_SIZE(L3_BYTES),.SET_ASSOC(L3_SET_ASSOC),
       .LINE_WIDTH(512),.MSHR_DEPTH(L3_MSHR_DEPTH),.DATA_BANKS(L3_DATA_BANKS),
       .TAG_SRAM(TAG_SRAM),
+      .POSTED_WRITES(POSTED_WRITES),.WTRK_DEPTH(WTRK_DEPTH),.RDTRK_DEPTH(RDTRK_DEPTH),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),.AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),
       .axi_req_t(req_t),.axi_resp_t(resp_t)
     ) i_l3 (
@@ -2382,6 +2399,8 @@ module tb_g6lc_coherence_credits;
       .mst_req_o(dram_req),.mst_resp_i(dram_rsp),
       .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),.l3_selfinv_hit_o(),
       .l3_wupdate_o(),
+      .l3_wtrk_full_o(),.l3_wtrk_line_hold_o(),.l3_posted_o(),.l3_rdtrk_o(),
+      .l3_posted_hold_o(),
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
       .l3_write_idle_o(),
       .l3_back_inval_valid_i(1'b0),.l3_back_inval_addr_i('0),

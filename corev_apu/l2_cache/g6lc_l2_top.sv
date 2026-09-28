@@ -44,6 +44,17 @@ module g6lc_l2_top
     // decision registers, merge port write and suppression logic fold away
     // and the netlist is identical to the invalidate path.
     parameter bit          WRITE_UPDATE = 1'b0,
+    // Posted writes + bypass-read tracking (T9b; ordering rules 1-6 in
+    // architecture/l2-l3-cache/ewt-caching.md). Every accepted write holds a
+    // write-tracker entry (WTRK_DEPTH); a postable write (atop=='0, no lock,
+    // id != FILL_ID) returns to S_IDLE after its last W beat and the tracker
+    // forwards its memory B to the slave when it arrives. NC/lock bypass
+    // reads likewise park a read-tracker entry (RDTRK_DEPTH) instead of
+    // holding the FSM in S_BYPASS_R. Under 0 the trackers and the R/B
+    // routing fold away and the netlist is the blocking AW/W/B path.
+    parameter bit          POSTED_WRITES = 1'b0,
+    parameter int unsigned WTRK_DEPTH    = 4,
+    parameter int unsigned RDTRK_DEPTH   = 4,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -74,6 +85,16 @@ module g6lc_l2_top
     // resident line instead of purging it — one pulse per such write. The
     // cluster leaves it unconnected; the TB counts it as l2_wupd.
     output logic      l2_wupdate_o,
+    // Observability pulses (POSTED_WRITES): an AW held for a full write
+    // tracker, an R1/R2 line-match hold cycle, a posted write completing its
+    // B on the slave channel, and a tracked bypass read draining its last
+    // beat. l2_posted_hold_o is the hold-cycle union fanned into the PMU
+    // group-2 "posted-write hold" event at each level.
+    output logic      l2_wtrk_full_o,
+    output logic      l2_wtrk_line_hold_o,
+    output logic      l2_posted_o,
+    output logic      l2_rdtrk_o,
+    output logic      l2_posted_hold_o,
     // Victim replace (valid way overwritten on miss) — inclusive LLC back-inval.
     // evict is a valid/ready offer: it re-asserts every cycle the FSM holds in
     // S_TAG, and the victim commit waits for l2_evict_ready_i, so a victim can
@@ -88,9 +109,9 @@ module g6lc_l2_top
     input  logic [AXI_ADDR_WIDTH-1:0]     l2_back_inval_addr_i,
     output logic                          l2_back_inval_ready_o,
     // T9a eWT CMO ordering: high when no write has been accepted and not yet
-    // B-acknowledged (the bypass write states). The CMO engine gates
-    // clean/flush completion on this; M1b (posted writes) redefines it as
-    // tracker-empty.
+    // B-acknowledged — under POSTED_WRITES that means the write tracker is
+    // empty and the FSM is not in a bypass write state. The CMO engine gates
+    // clean/flush completion on this.
     output logic                          l2_write_idle_o
 );
 
@@ -105,6 +126,11 @@ module g6lc_l2_top
     assign l2_bank_conflict_o = 1'b0;
     assign l2_selfinv_hit_o = 1'b0;
     assign l2_wupdate_o = 1'b0;
+    assign l2_wtrk_full_o = 1'b0;
+    assign l2_wtrk_line_hold_o = 1'b0;
+    assign l2_posted_o = 1'b0;
+    assign l2_rdtrk_o = 1'b0;
+    assign l2_posted_hold_o = 1'b0;
     assign l2_evict_valid_o = 1'b0;
     assign l2_evict_addr_o  = '0;
     assign l2_back_inval_ready_o = 1'b1;
@@ -332,6 +358,43 @@ module g6lc_l2_top
   assign l2_mshr_full_o = mshr_full;
 
   // --------------------
+  // M1b trackers (POSTED_WRITES): write tracker for uniform B routing and
+  // the posted-write path, read tracker + R arbiter for bypass reads. All
+  // hazard probes compare registered request fields (AW accept / addr_q);
+  // the CAMs are WTRK_DEPTH/RDTRK_DEPTH-entry (≤8) and the R arbiter adds
+  // one mux level on the slave R data path — nothing here enters the S_TAG
+  // hit compare. Under POSTED_WRITES=0 every probe is tied off and the
+  // netlist folds to the blocking-path shape.
+  // --------------------
+  localparam int unsigned WTRK_W = (WTRK_DEPTH <= 1) ? 1 : $clog2(WTRK_DEPTH);
+  // All fill ARs issue under the reserved FILL_ID (see the fill engine).
+  localparam logic [AXI_ID_WIDTH-1:0] FILL_ID = '1;
+  localparam int unsigned BFID_SETTLE = 16;
+
+  logic                        wtrk_push, wtrk_full, wtrk_empty;
+  logic [WTRK_W-1:0]           wtrk_alloc_idx, wtrk_pop_idx;
+  logic                        wtrk_m_match, wtrk_sb_valid, wtrk_pop;
+  logic                        wtrk_sb_blocking;
+  logic [AXI_ID_WIDTH-1:0]     wtrk_sb_id;
+  logic [1:0]                  wtrk_sb_resp;
+  logic [AXI_USER_WIDTH-1:0]   wtrk_sb_user;
+  logic                        wtrk_line0_match, wtrk_line1_match;
+  logic [AXI_ID_WIDTH-1:0]     wtrk_line1_id;
+  logic                        wtrk_need_r_match;
+  logic                        rdtrk_push, rdtrk_pop, rdtrk_full, rdtrk_empty;
+  logic                        rdtrk_head_match;
+  logic [3:0]                  rdtrk_probe_match;
+  logic                        aw_postable;
+  logic                        wtrk_aw_ok;
+  logic                        wr_posted_q, wr_posted_d;
+  logic [WTRK_W-1:0]           wr_trk_idx_q, wr_trk_idx_d;
+  logic                        r_rdtrk_active_q, r_rdtrk_active_d;
+  logic                        r_turn_q, r_turn_d;
+  logic                        rdtrk_wants, rdtrk_grant;
+  logic                        fsm_in_r, fsm_wants_r, r_fsm_start_ok;
+
+
+  // --------------------
   // Controller FSM (request pipeline) + decoupled fill engine
   //
   // The request pipeline accepts ARs, runs tag lookup, serves hits and parks
@@ -384,6 +447,9 @@ module g6lc_l2_top
   logic                      cacheable_q, cacheable_d;
   logic [WAY_W-1:0]          way_q, way_d;
   logic [LINE_WIDTH-1:0]     line_q, line_d;
+  // S_HIT_WAIT may park for many cycles under the R5 hold — the port-A read
+  // result is only fresh on the entry cycle, so line_q may latch it once.
+  logic                      hit_fresh_q, hit_fresh_d;
   // First AXI beat index within the L2 line for the captured AR address.
   // Without this, a hit on a 64 B line always returned beats from offset 0,
   // so I$ fills at +16/+32/... re-read the first 16 B of the line.
@@ -402,11 +468,29 @@ module g6lc_l2_top
   logic mst_r_ot_q, mst_r_ot_d;
   logic wr_r_pending_q,wr_r_pending_d,wr_b_done_q,wr_b_done_d;
   // T9a eWT write-idle (CMO clean/flush ordering): no write accepted and not
-  // yet B-acknowledged. A write traverses S_BYPASS_AW→W→B with is_write_q
-  // latched at AW accept; S_IDLE is only reached after B, so idle here also
-  // implies memory has observed the write.
+  // yet B-acknowledged. A blocking write traverses S_BYPASS_AW→W→B with
+  // is_write_q latched at AW accept; under POSTED_WRITES a posted write's
+  // liveness is its tracker entry, so idle additionally requires the tracker
+  // to have drained — idle here also implies memory has observed the write.
+  // wtrk_empty is tied high when POSTED_WRITES=0 (folds to the T9a shape).
   assign l2_write_idle_o = !(is_write_q &&
-      (state_q == S_BYPASS_AW || state_q == S_BYPASS_W || state_q == S_BYPASS_B));
+      (state_q == S_BYPASS_AW || state_q == S_BYPASS_W || state_q == S_BYPASS_B)) &&
+      wtrk_empty;
+
+  // M1b observability: hold-cycle levels for the PMU group-2 posted-write
+  // event and completion pulses for the [mc_cache] counters.
+  assign l2_wtrk_full_o = POSTED_WRITES && (state_q == S_IDLE) &&
+                          slv_req_i.aw_valid && wtrk_full;
+  assign l2_wtrk_line_hold_o = POSTED_WRITES &&
+      // R1: a cacheable read miss holds while its line has a tracker entry.
+      ((state_q == S_TAG && tag_row_valid && !tag_hit && wtrk_line0_match) ||
+       // R2 (+ATOP-load guard): AW accepted only when admitted.
+       (state_q == S_IDLE && slv_req_i.aw_valid && !wtrk_full &&
+        ((wtrk_line1_match && (slv_req_i.aw.id != wtrk_line1_id)) ||
+         (slv_req_i.aw.atop[5] && rdtrk_probe_match[3]))));
+  assign l2_posted_hold_o = l2_wtrk_full_o | l2_wtrk_line_hold_o;
+  assign l2_posted_o = POSTED_WRITES && wtrk_pop && !wtrk_sb_blocking;
+  assign l2_rdtrk_o  = POSTED_WRITES && rdtrk_pop;
   // Serve alternation: set when a fill-serve burst just completed so a
   // pending AR gets the next S_IDLE slot before another serve starts.
   logic serve_turn_q, serve_turn_d;
@@ -439,9 +523,8 @@ module g6lc_l2_top
   // exclusive: a bypass/AMO whose id equals FILL_ID never issues while a fill
   // is outstanding, and a fill never issues while a FILL_ID bypass trail is
   // live (bfid_*), so r.id==FILL_ID beats are unambiguously fill beats.
+  // (FILL_ID / BFID_SETTLE are declared beside the tracker block above.)
   // --------------------
-  localparam logic [AXI_ID_WIDTH-1:0] FILL_ID = '1;
-  localparam int unsigned BFID_SETTLE = 16;
 
   typedef enum logic [1:0] {
     F_QUEUED,   // allocated, waiting for AR issue
@@ -499,6 +582,130 @@ module g6lc_l2_top
                           && !((state_q==S_BYPASS_AW || state_q==S_BYPASS_W || state_q==S_BYPASS_B) && id_q==FILL_ID);
   assign serve_pend     = (fifo_cnt_q != '0) &&
                           (fill_state_q[fifo_q[fifo_rd_q]] == F_READY);
+  // Postable iff non-atomic, unlocked and outside the reserved fill id —
+  // ATOP/lock/FILL_ID-alias writes keep the blocking S_BYPASS_AW→W→B path
+  // but still hold a (blocking) tracker entry for uniform B routing.
+  assign aw_postable = (slv_req_i.aw.atop == '0) && !slv_req_i.aw.lock &&
+                       (slv_req_i.aw.id != FILL_ID);
+  // R2 AW admission: free slot, and a same-line entry implies the same id
+  // (per-id B order then alone routes same-line write completions). An
+  // ATOP-load (atop[5]) may not enter while a tracked bypass read carries
+  // its id: the ATOP R forward and the read-tracked beats share the slave
+  // R channel and could not be told apart.
+  assign wtrk_aw_ok = !POSTED_WRITES ||
+                      (!wtrk_full &&
+                       (!wtrk_line1_match ||
+                        (slv_req_i.aw.id == wtrk_line1_id)) &&
+                       !(slv_req_i.aw.atop[5] && rdtrk_probe_match[3]));
+  // Slave-R arbiter. An in-progress tracked burst owns the channel until
+  // last; a new burst picks round-robin (r_turn_q: 1 favors memory-side
+  // beats, 0 favors FSM-internal bursts). FSM bursts only claim the channel
+  // through r_fsm_start_ok-gated transitions, so a tracked burst can never
+  // be interleaved.
+  assign rdtrk_wants = POSTED_WRITES && mst_resp_i.r_valid &&
+                       rdtrk_head_match && !is_fill_beat;
+  assign fsm_in_r    = (state_q == S_HIT_RESP) || (state_q == S_SERVE) ||
+                       (state_q == S_BYPASS_R &&
+                        mst_resp_i.r_valid && (mst_resp_i.r.id == id_q) &&
+                        !rdtrk_head_match) ||
+                       (((state_q == S_BYPASS_AW) || (state_q == S_BYPASS_W) ||
+                         (state_q == S_BYPASS_B)) &&
+                        wr_r_pending_q && mst_resp_i.r_valid &&
+                        (mst_resp_i.r.id == id_q) && !is_fill_beat) ||
+                       (state_q == S_IDLE && mst_resp_i.r_valid &&
+                        !mst_r_ot_q && !is_fill_beat && !rdtrk_head_match);
+  assign fsm_wants_r = (state_q == S_HIT_WAIT) || (state_q == S_SERVE_POP) ||
+                       (serve_pend && ((state_q == S_IDLE) ||
+                                       (state_q == S_TAG) ||
+                                       (state_q == S_BYPASS_AR)));
+  assign rdtrk_grant = r_rdtrk_active_q ? rdtrk_wants
+                       : (rdtrk_wants && !fsm_in_r &&
+                          (r_turn_q || !fsm_wants_r));
+  assign r_fsm_start_ok = !r_rdtrk_active_q && !(rdtrk_wants && r_turn_q);
+
+  if (POSTED_WRITES) begin : gen_trk
+    g6lc_l2_wtrk #(
+        .DEPTH          (WTRK_DEPTH),
+        .ID_WIDTH       (AXI_ID_WIDTH),
+        .ADDR_WIDTH     (AXI_ADDR_WIDTH),
+        .AXI_USER_WIDTH (AXI_USER_WIDTH)
+    ) i_wtrk (
+        .clk_i,
+        .rst_ni,
+        .push_i            (wtrk_push),
+        .push_id_i         (slv_req_i.aw.id),
+        .push_line_i       (line_align(slv_req_i.aw.addr)),
+        .push_blocking_i   (!aw_postable),
+        .push_need_r_i     (slv_req_i.aw.atop[5]),
+        .full_o            (wtrk_full),
+        .alloc_idx_o       (wtrk_alloc_idx),
+        .m_b_valid_i       (mst_resp_i.b_valid),
+        .m_b_id_i          (mst_resp_i.b.id),
+        .m_b_resp_i        (mst_resp_i.b.resp),
+        .m_b_user_i        (mst_resp_i.b.user),
+        .m_b_match_o       (wtrk_m_match),
+        .s_b_valid_o       (wtrk_sb_valid),
+        .s_b_id_o          (wtrk_sb_id),
+        .s_b_resp_o        (wtrk_sb_resp),
+        .s_b_user_o        (wtrk_sb_user),
+        .s_b_blocking_o    (wtrk_sb_blocking),
+        .s_b_ready_i       (slv_req_i.b_ready),
+        .pop_o             (wtrk_pop),
+        .pop_idx_o         (wtrk_pop_idx),
+        .line0_i           (line_align(addr_q)),
+        .line0_match_o     (wtrk_line0_match),
+        .line1_i           (line_align(slv_req_i.aw.addr)),
+        .line1_match_o     (wtrk_line1_match),
+        .line1_match_id_o  (wtrk_line1_id),
+        .need_r_id_i       (id_q),
+        .need_r_id_match_o (wtrk_need_r_match),
+        .empty_o           (wtrk_empty)
+    );
+
+    // Probe map: [0] captured request id (hit responses), [1] fill-serve id
+    // (mshr_complete_id), [2] waiter id (serve pop), [3] slave AW id (the
+    // ATOP-load admission guard). R5: a same-id response holds until the
+    // tracked read's entry pops.
+    g6lc_l2_rdtrk #(
+        .DEPTH    (RDTRK_DEPTH),
+        .ID_WIDTH (AXI_ID_WIDTH),
+        .NPROBE   (4)
+    ) i_rdtrk (
+        .clk_i,
+        .rst_ni,
+        .push_i        (rdtrk_push),
+        .push_id_i     (id_q),
+        .full_o        (rdtrk_full),
+        .r_id_i        (mst_resp_i.r.id),
+        .head_match_o  (rdtrk_head_match),
+        .pop_i         (rdtrk_pop),
+        .probe_id_i    ({slv_req_i.aw.id, mshr_waiter_id,
+                         mshr_complete_id, id_q}),
+        .probe_match_o (rdtrk_probe_match),
+        .empty_o       (rdtrk_empty)
+    );
+  end else begin : gen_no_trk
+    assign wtrk_full         = 1'b0;
+    assign wtrk_empty        = 1'b1;
+    assign wtrk_alloc_idx    = '0;
+    assign wtrk_pop_idx      = '0;
+    assign wtrk_m_match      = 1'b0;
+    assign wtrk_sb_valid     = 1'b0;
+    assign wtrk_sb_blocking  = 1'b0;
+    assign wtrk_sb_id        = '0;
+    assign wtrk_sb_resp      = '0;
+    assign wtrk_sb_user      = '0;
+    assign wtrk_pop          = 1'b0;
+    assign wtrk_line0_match  = 1'b0;
+    assign wtrk_line1_match  = 1'b0;
+    assign wtrk_line1_id     = '0;
+    assign wtrk_need_r_match = 1'b0;
+    assign rdtrk_full        = 1'b0;
+    assign rdtrk_empty       = 1'b1;
+    assign rdtrk_head_match  = 1'b0;
+    assign rdtrk_probe_match = '0;
+  end
+
   logic merge_order_block, after_match;
   logic fill_ar_hold_q, fill_ar_hold_d;
   logic fill_ar_offer, bypass_ar_offer;
@@ -742,6 +949,13 @@ module g6lc_l2_top
     mst_r_ot_d  = mst_r_ot_q;
     wr_r_pending_d = wr_r_pending_q;
     wr_b_done_d    = wr_b_done_q;
+    wtrk_push      = 1'b0;
+    rdtrk_push     = 1'b0;
+    rdtrk_pop      = 1'b0;
+    wr_posted_d    = wr_posted_q;
+    wr_trk_idx_d   = wr_trk_idx_q;
+    r_rdtrk_active_d = r_rdtrk_active_q;
+    r_turn_d       = r_turn_q;
     state_d     = state_q;
     addr_d      = addr_q;
     id_d        = id_q;
@@ -755,6 +969,7 @@ module g6lc_l2_top
     cacheable_d = cacheable_q;
     way_d       = way_q;
     line_d      = line_q;
+    hit_fresh_d = hit_fresh_q;
     beat_d      = beat_q;
 
     l2_hit_o    = 1'b0;
@@ -778,8 +993,10 @@ module g6lc_l2_top
         // but never fill beats: those are consumed by the fill collector
         // below (r.id==FILL_ID while a fill is collecting), and forwarding
         // them here would both corrupt the response stream and starve the
-        // collecting entry.
-        if (mst_resp_i.r_valid && !is_fill_beat) begin
+        // collecting entry. Tracked bypass-read beats are also excluded —
+        // the M1b R arbiter forwards them (with pop bookkeeping) so the
+        // FSM keeps taking new work while they drain.
+        if (mst_resp_i.r_valid && !is_fill_beat && !rdtrk_head_match) begin
           slv_resp_o.r_valid = 1'b1;
           slv_resp_o.r       = mst_resp_i.r;
           mst_req_o.r_ready  = slv_req_i.r_ready;
@@ -813,10 +1030,14 @@ module g6lc_l2_top
             l2_bypass_o = 1'b1;
             state_d = S_BYPASS_AR;
           end
-        end else if (serve_pend && !prefer_write) begin
+        end else if (serve_pend && !prefer_write && r_fsm_start_ok &&
+                     !rdtrk_probe_match[1]) begin
           // Oldest ready fill entry gets the response channel next. Its
           // primary's id/offset come from the entry itself (complete_idx is
-          // already pointed at the fifo head below).
+          // already pointed at the fifo head below). The R5 hold: a serve
+          // whose id has a live bypass-read tracker entry waits for that
+          // entry to pop (per-id response order), and the arbiter may hold
+          // the entry one more cycle for a tracked burst.
           serve_idx_d  = fifo_q[fifo_rd_q];
           serve_addr_d = fill_addr_q[fifo_q[fifo_rd_q]];
           serve_id_d   = mshr_complete_id;
@@ -824,7 +1045,7 @@ module g6lc_l2_top
           serve_beat_d = '0;
           serve_intr_d = 1'b0;
           state_d      = S_SERVE;
-        end else if (slv_req_i.aw_valid) begin
+        end else if (slv_req_i.aw_valid && wtrk_aw_ok) begin
           // Writes: write-through bypass (always push to memory); optional allocate
           slv_resp_o.aw_ready = 1'b1;
           addr_d      = slv_req_i.aw.addr;
@@ -845,6 +1066,11 @@ module g6lc_l2_top
           l2_bypass_o = 1'b1;
           wr_r_pending_d = slv_req_i.aw.atop[5];
           wr_b_done_d    = 1'b0;
+          // M1b: every accepted write allocates a tracker entry (AW-issue
+          // order); postable writes then skip S_BYPASS_B after their last W.
+          wtrk_push    = 1'b1;
+          wr_trk_idx_d = wtrk_alloc_idx;
+          wr_posted_d  = aw_postable;
           state_d     = S_BYPASS_AW;
         end
       end
@@ -861,7 +1087,7 @@ module g6lc_l2_top
         // Under TAG_SRAM=0 tag_row_valid is constant and this folds away.
         if (tag_row_valid) begin
         if((tag_hit && (|mshr_id_match)) || (!tag_hit && merge_order_block))begin
-          if(serve_pend)begin
+          if(serve_pend && r_fsm_start_ok && !rdtrk_probe_match[1])begin
             serve_idx_d=fifo_q[fifo_rd_q];
             serve_addr_d=fill_addr_q[fifo_q[fifo_rd_q]];
             serve_id_d=mshr_complete_id;
@@ -874,6 +1100,7 @@ module g6lc_l2_top
           l2_hit_o = 1'b1;
           way_d    = tag_way;
           // Kick data read
+          hit_fresh_d = 1'b1;
           state_d    = S_HIT_WAIT;
         end else begin
           l2_miss_o = 1'b1;
@@ -899,8 +1126,13 @@ module g6lc_l2_top
               };
             end
             // A same-line merge needs no victim way and no evict — only a
-            // fresh alloc is gated on way_ok and the evict handshake.
-            if (mshr_ready &&
+            // fresh alloc is gated on way_ok and the evict handshake. R1
+            // (M1b): a miss whose line carries a write-tracker entry must
+            // not commit either — a posted write's B has not landed, so a
+            // fill AR now could return pre-write memory (AXI does not order
+            // an AR against an earlier AW to the same address). Hits are
+            // served (merged data); the hold retries when the entry pops.
+            if (mshr_ready && !wtrk_line0_match &&
                 (mshr_lookup_hit ||
                  (way_ok && (!tag_way_valid[way_d] || l2_evict_ready_i)))) begin
               mshr_alloc = 1'b1;
@@ -921,7 +1153,8 @@ module g6lc_l2_top
                 fill_ferr_d[mshr_alloc_idx]  = axi_pkg::RESP_OKAY;
               end
               state_d = S_IDLE;
-            end else if (serve_pend) begin
+            end else if (serve_pend && r_fsm_start_ok &&
+                         !rdtrk_probe_match[1]) begin
               // Deadlock break: this request cannot commit (MSHR full, or no
               // evictable way), and MSHR entries only free through the serve
               // path — which needs this FSM. Interrupt: drain the oldest
@@ -943,8 +1176,13 @@ module g6lc_l2_top
 
       // ---------------- HIT: wait 1-cycle SRAM ----------------
       S_HIT_WAIT: begin
-        state_d = S_HIT_RESP;
-        line_d  = data_a_rdata;
+        // R5 + arbiter: enter the response channel only when it is free for
+        // a new burst and no tracked bypass read carries this id.
+        if (r_fsm_start_ok && !rdtrk_probe_match[0]) state_d = S_HIT_RESP;
+        // Latch the port-A result on the entry cycle only — a multi-cycle
+        // R5 hold would otherwise re-sample a port that has moved on.
+        if (hit_fresh_q) line_d = data_a_rdata;
+        hit_fresh_d = 1'b0;
       end
 
       S_HIT_RESP: begin
@@ -1007,14 +1245,19 @@ module g6lc_l2_top
       end
 
       // Pop the next merged waiter and re-serve it from the filled line.
+      // R5: hold the pop while the waiter's id is carried by a live tracked
+      // bypass read, and while the R channel is arbitrated to memory-side
+      // beats — the waiter's burst must not interleave or precede them.
       S_SERVE_POP: begin
-        mshr_waiter_pop = 1'b1;
-        serve_id_d      = mshr_waiter_id;
-        // Same line as the primary: keep the line bits, swap in the offset.
-        serve_addr_d    = {serve_addr_q[AXI_ADDR_WIDTH-1:OFF_BITS], waiter_off};
-        serve_len_d     = waiter_len;
-        serve_beat_d    = '0;
-        state_d         = S_SERVE;
+        if (r_fsm_start_ok && !rdtrk_probe_match[2]) begin
+          mshr_waiter_pop = 1'b1;
+          serve_id_d      = mshr_waiter_id;
+          // Same line as the primary: keep the line bits, swap in the offset.
+          serve_addr_d    = {serve_addr_q[AXI_ADDR_WIDTH-1:OFF_BITS], waiter_off};
+          serve_len_d     = waiter_len;
+          serve_beat_d    = '0;
+          state_d         = S_SERVE;
+        end
       end
 
       // ---------------- Non-cacheable / write bypass ----------------
@@ -1035,9 +1278,20 @@ module g6lc_l2_top
         mst_req_o.ar.prot  = 3'b000;
         if (mst_req_o.ar_valid && mst_resp_i.ar_ready) begin
           if (id_q == FILL_ID) bfid_rpend_d = 1'b1;
-          state_d = S_BYPASS_R;
+          if (POSTED_WRITES && (id_q != FILL_ID) && !rdtrk_full &&
+              !wtrk_need_r_match) begin
+            // Tracked bypass read: the read tracker + R arbiter return the
+            // beats while the FSM takes the next request. FILL_ID reads,
+            // a full tracker, and reads sharing an ATOP-load write's id
+            // keep the blocking S_BYPASS_R trail.
+            rdtrk_push = 1'b1;
+            state_d = S_IDLE;
+          end else begin
+            state_d = S_BYPASS_R;
+          end
         end
-        else if((|mshr_id_match) && serve_pend)begin
+        else if((|mshr_id_match) && serve_pend && r_fsm_start_ok &&
+                !rdtrk_probe_match[1])begin
           serve_idx_d=fifo_q[fifo_rd_q];
           serve_addr_d=fill_addr_q[fifo_q[fifo_rd_q]];
           serve_id_d=mshr_complete_id;
@@ -1051,7 +1305,10 @@ module g6lc_l2_top
       S_BYPASS_R: begin
         // Forward only this transaction's beats: fill beats (id==FILL_ID) can
         // interleave on the R channel and belong to the collector below.
-        if (mst_resp_i.r_valid && mst_resp_i.r.id == id_q) begin
+        // A same-id beat claimed by the read tracker belongs to the older
+        // tracked burst (per-id order) — the arbiter forwards it and pops
+        // its entry; this read's own beats arrive after that pop.
+        if (mst_resp_i.r_valid && mst_resp_i.r.id == id_q && !rdtrk_head_match) begin
           slv_resp_o.r_valid = 1'b1;
           slv_resp_o.r       = mst_resp_i.r;
           mst_req_o.r_ready  = slv_req_i.r_ready;
@@ -1119,13 +1376,20 @@ module g6lc_l2_top
           mst_req_o.r_ready  = slv_req_i.r_ready;
         end
         if (slv_req_i.w_valid && mst_resp_i.w_ready && slv_req_i.w.last)
-          state_d = S_BYPASS_B;
+          // A posted write is done here: its tracker entry routes the later
+          // B through the uniform slave B channel (ordering rule 4).
+          state_d = (POSTED_WRITES && wr_posted_q) ? S_IDLE : S_BYPASS_B;
       end
 
       S_BYPASS_B: begin
-        slv_resp_o.b_valid=mst_resp_i.b_valid && (mst_resp_i.b.id==id_q) && !wr_b_done_q;
-        slv_resp_o.b=mst_resp_i.b;
-        mst_req_o.b_ready=slv_req_i.b_ready && (mst_resp_i.b.id==id_q) && !wr_b_done_q;
+        // Under POSTED_WRITES the write tracker owns both B channels
+        // (uniform routing); this state then only waits for "my" entry to
+        // drain and forwards any ATOP R as before.
+        if (!POSTED_WRITES) begin
+          slv_resp_o.b_valid=mst_resp_i.b_valid && (mst_resp_i.b.id==id_q) && !wr_b_done_q;
+          slv_resp_o.b=mst_resp_i.b;
+          mst_req_o.b_ready=slv_req_i.b_ready && (mst_resp_i.b.id==id_q) && !wr_b_done_q;
+        end
         // AXI ATOP (AMOCAS/AMOLOAD/…) returns old data on R with the AW id.
         // Must forward and accept R here — if we leave it unabsorbed,
         // axi_riscv_amos stays in SEND_R with mst_r_ready=0 and would orphan
@@ -1135,7 +1399,7 @@ module g6lc_l2_top
           slv_resp_o.r       = mst_resp_i.r;
           mst_req_o.r_ready  = slv_req_i.r_ready;
         end
-        if(mst_resp_i.b_valid && mst_resp_i.b.id==id_q && slv_req_i.b_ready && !wr_b_done_q)
+        if(!POSTED_WRITES && mst_resp_i.b_valid && mst_resp_i.b.id==id_q && slv_req_i.b_ready && !wr_b_done_q)
           wr_b_done_d=1'b1;
       end
 
@@ -1276,12 +1540,16 @@ module g6lc_l2_top
     // blocked: axi2mem stays in READ with r_valid && !r_ready until r_last is
     // taken. Fill ARs are tracked by issued/collect counters instead.
     mst_r_ot_d = mst_r_ot_q;
-    if (mst_req_o.ar_valid && mst_resp_i.ar_ready && mst_req_o.ar.id != FILL_ID) begin
+    // A tracked bypass read does not need the blocking drain flag — the
+    // read tracker owns its R return and pops on the last beat.
+    if (mst_req_o.ar_valid && mst_resp_i.ar_ready && mst_req_o.ar.id != FILL_ID &&
+        !rdtrk_push) begin
       mst_r_ot_d = 1'b1;
     end
     if (mst_r_ot_q) begin
       // Keep accepting R until last beat even if FSM left S_BYPASS_R.
-      if (state_q != S_BYPASS_R) mst_req_o.r_ready = 1'b1;
+      // Never eat a tracked burst's beats: the arbiter forwards those.
+      if (state_q != S_BYPASS_R && !rdtrk_head_match) mst_req_o.r_ready = 1'b1;
       if (mst_resp_i.r_valid && mst_req_o.r_ready && mst_resp_i.r.last &&
           mst_resp_i.r.id == id_q) begin
         mst_r_ot_d = 1'b0;
@@ -1292,11 +1560,59 @@ module g6lc_l2_top
     // (1) HPDCACHE gets the atomic old-data beat and (2) amos leaves SEND_R
     // (which holds mst_r_ready=0 and would orphan the next miss-fill at
     // axi2mem). If the slave is not ready, keep the beat pending — do not
-    // silently drop ATOP R. Fill beats are never forwarded here.
-    if (state_q == S_IDLE && mst_resp_i.r_valid && !mst_r_ot_q && !is_fill_beat) begin
+    // silently drop ATOP R. Fill beats are never forwarded here, and
+    // tracked bypass beats take the arbiter path.
+    if (state_q == S_IDLE && mst_resp_i.r_valid && !mst_r_ot_q && !is_fill_beat &&
+        !rdtrk_head_match) begin
       slv_resp_o.r_valid = 1'b1;
       slv_resp_o.r       = mst_resp_i.r;
       mst_req_o.r_ready  = slv_req_i.r_ready;
+    end
+
+    // ---- M1b posted-write B routing + bypass-read R arbiter ----
+    // Everything in this block folds away under POSTED_WRITES=0: the tracker
+    // tie-offs leave the B/R channels exactly on the M1a paths.
+    if (POSTED_WRITES) begin
+      // Uniform slave B channel (ordering rule 4): the tracker presents the
+      // oldest entry whose B has arrived; pop on slave acceptance. The
+      // memory B channel absorbs into the matching unserved entry — B order
+      // per id is an AXI guarantee, so oldest-match is exact.
+      slv_resp_o.b_valid = wtrk_sb_valid;
+      slv_resp_o.b.id    = wtrk_sb_id;
+      slv_resp_o.b.resp  = wtrk_sb_resp;
+      slv_resp_o.b.user  = wtrk_sb_user;
+      mst_req_o.b_ready  = mst_resp_i.b_valid && wtrk_m_match;
+      // A blocking write's wait ends when its own tracker entry drains.
+      if (wtrk_pop && (wtrk_pop_idx == wr_trk_idx_q) && !wr_posted_q) begin
+        wr_b_done_d = 1'b1;
+        if (!atop_q[5]) bfid_rpend_d = 1'b0;
+      end
+      // Bypass-read arbiter: an in-progress tracked burst owns the slave R
+      // channel through last; new bursts alternate with FSM-internal bursts
+      // on r_turn_q (rule 5/6). FSM channel entry is gated by
+      // r_fsm_start_ok, so a tracked burst is never interleaved.
+      if (rdtrk_grant) begin
+        slv_resp_o.r_valid = 1'b1;
+        slv_resp_o.r       = mst_resp_i.r;
+        mst_req_o.r_ready  = slv_req_i.r_ready;
+        if (slv_req_i.r_ready) begin
+          r_rdtrk_active_d = !mst_resp_i.r.last;
+          if (mst_resp_i.r.last) begin
+            rdtrk_pop = 1'b1;
+            r_turn_d  = 1'b0;   // next new-burst grant favors the FSM
+          end
+        end
+      end
+      // Internal-burst completions hand the next grant to memory-side beats.
+      if ((state_q == S_HIT_RESP) && slv_req_i.r_ready && (beat_q == len_q))
+        r_turn_d = 1'b1;
+      if ((state_q == S_SERVE) && slv_req_i.r_ready &&
+          (serve_beat_q == serve_len_q))
+        r_turn_d = 1'b1;
+      // A completed blocking-path read burst counts as a memory-side burst.
+      if ((state_q == S_BYPASS_R) && mst_resp_i.r_valid &&
+          mst_req_o.r_ready && mst_resp_i.r.last)
+        r_turn_d = 1'b0;
     end
 
     // Launched tag-row read (TAG_SRAM): evaluated after every state_d/addr_d
@@ -1328,10 +1644,15 @@ module g6lc_l2_top
       cacheable_q <= 1'b0;
       way_q       <= '0;
       line_q      <= '0;
+      hit_fresh_q <= 1'b0;
       beat_q      <= '0;
       mst_r_ot_q  <= 1'b0;
       wr_r_pending_q <= 1'b0;
       wr_b_done_q    <= 1'b0;
+      wr_posted_q    <= 1'b0;
+      wr_trk_idx_q   <= '0;
+      r_rdtrk_active_q <= 1'b0;
+      r_turn_q       <= 1'b0;
       wr_inval_pend_q <= 1'b0;
       wr_inval_addr_q <= '0;
       wu_decided_q    <= 1'b0;
@@ -1379,10 +1700,15 @@ module g6lc_l2_top
       cacheable_q <= cacheable_d;
       way_q       <= way_d;
       line_q      <= line_d;
+      hit_fresh_q <= hit_fresh_d;
       beat_q      <= beat_d;
       mst_r_ot_q  <= mst_r_ot_d;
       wr_r_pending_q <= wr_r_pending_d;
       wr_b_done_q    <= wr_b_done_d;
+      wr_posted_q    <= wr_posted_d;
+      wr_trk_idx_q   <= wr_trk_idx_d;
+      r_rdtrk_active_q <= r_rdtrk_active_d;
+      r_turn_q       <= r_turn_d;
       wr_inval_pend_q <= wr_inval_pend_d;
       wr_inval_addr_q <= wr_inval_addr_d;
       wu_decided_q    <= wu_decided_d;

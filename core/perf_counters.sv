@@ -86,6 +86,9 @@ module perf_counters
     input logic l3_miss_i,
     input logic pf_issue_i,
     input logic pf_train_i,
+    // T9b posted-write hold cycles (L2 index 7, L3 index 8)
+    input logic l2_pwhold_i,
+    input logic l3_pwhold_i,
     // Group 3: FSE speculation recovery (tie 0 when unused)
     input logic spec_cancel_i,
     // Group 4: Xg6lcai AI matrix (tie 0 when AiCfg.MatrixEn=0 / no copro)
@@ -288,6 +291,10 @@ module perf_counters
       event_group[h][3'd2][5'd4] = l2_miss_i && act;   // L2 miss (cluster)
       event_group[h][3'd2][5'd5] = coh_inval_apply_i && act;  // L1 coherence invalidation applied
       event_group[h][3'd2][5'd6] = ooo_phys_replay_i && act;  // COH_OOO load replay after modification
+      // T9b: cycles an L2/L3 write- or line-hold stalls a requester behind
+      // an unacknowledged posted write (tracker full, R1/R2, ATOP guard).
+      event_group[h][3'd2][5'd7] = l2_pwhold_i && act;  // L2 posted-write hold
+      event_group[h][3'd2][5'd8] = l3_pwhold_i && act;  // L3 posted-write hold
 
       // Group 3: FSE / deep speculation recovery (mhpmevent[7:5]==3)
       event_group[h][3'd3][5'd0] = resolved_branch_i.valid && resolved_branch_i.is_mispredict && brh;

@@ -132,6 +132,29 @@ Also new: `CohMaxOutstanding` (hub shared AR/AW slot count, default 4, legal 2�
 8 on the int2 packages with MSHR 8, measured to remove all read-burst stalls on
 `tb_g6lc_coherence_credits`).
 
+## Posted writes (`L2PostedWriteEn`, M1b 2026-09-28)
+
+The L2 write bypass no longer blocks on memory's B. Every accepted write takes an
+entry in `g6lc_l2_wtrk` (`L2WriteTrackDepth`, default 4 — id, line address,
+blocking flag, in AW-issue order); a *postable* write (`atop=='0 && !lock &&
+id != FILL_ID`) returns the FSM to `S_IDLE` after the last forwarded W beat, so
+hits and misses are served while the write drains. The slave B still comes from
+memory — it is routed to the oldest tracker entry of its id, so software-visible
+ordering is unchanged. ATOP, locked and FILL-ID-alias writes keep the blocking
+path with a tracker entry, so B routing is uniform. NC/lock bypass reads post the
+same way through a read tracker (`L2ReadTrackDepth`) and an R arbiter that keeps
+each slave-side burst atomic. Ordering: a cacheable read miss to a tracked line
+holds until the write's B (R1); a different-id write to a tracked line holds
+(R2); the same-line fill kill is unchanged (R3); B routes per-id to the oldest
+entry (R4); a same-id hit or fill serve holds behind a tracked read (R5); the hub
+credit bound covers fills + both trackers (R6). `l2_write_idle_o` now means
+tracker-empty — that is what `cbo.clean`/`cbo.flush` wait on. Observability:
+`[mc_cache]` gains `l2_wtrk_full`, `l2_line_hold`, `l2_posted`, `l2_rdtrk`, and
+PMU group-2 events 7/8 count posted-write hold cycles at L2/L3. Timing: the
+hazard CAMs are small compares on registered request fields, the R arbiter adds
+one mux level on the slave R path, and nothing enters the `S_TAG` hit compare —
+structural FO4 on `g6lc_l2_top` stays 28.5. On in every L2 package.
+
 For DRAM-latency experiments use the testbench's `DramLatency` parameter
 (`corev_apu/tb/g6lc_tb_dram_latency.sv`, first beat of each burst delayed). The vendor
 `axi_delayer` fixed delay serializes every beat and truncates to 4 bits — it cannot model memory

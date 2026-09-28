@@ -1,0 +1,38 @@
+# Bounded proofs for g6lc_l2_wtrk (T9b write tracker):
+#   prove   — P1 (same-line => same id) + P2 safety (B conservation,
+#             b_pend only from an absorb / cleared only by a pop) +
+#             bounded liveness (entry age <= MAXAGE under fairness).
+#   cover   — liveness witness: a posted entry completes its lifecycle.
+#   mut_p1  — negative control: the R2 admission assumption dropped via
+#             FORMAL_MUT_P1 must FAIL (P1 is load-bearing).
+# Expect: prove PASS, cover PASS, mut_p1 FAIL.
+
+[tasks]
+prove
+live
+cover
+mut_p1
+
+[options]
+depth 20
+live: depth 60
+cover: depth 40
+prove: mode prove
+live: mode prove
+cover: mode cover
+mut_p1: mode bmc
+
+[engines]
+smtbmc yices
+
+[script]
+prove: read_slang g6lc_l2_wtrk.sv g6lc_l2_wtrk_fpv.sv
+live: read_slang -D FORMAL_LIVENESS g6lc_l2_wtrk.sv g6lc_l2_wtrk_fpv.sv
+cover: read_slang g6lc_l2_wtrk.sv g6lc_l2_wtrk_fpv.sv
+mut_p1: read_slang -D FORMAL_MUT_P1 g6lc_l2_wtrk.sv g6lc_l2_wtrk_fpv.sv
+prep -top g6lc_l2_wtrk_fpv
+flatten
+
+[files]
+g6lc_l2_wtrk_fpv.sv
+../../../../corev_apu/l2_cache/g6lc_l2_wtrk.sv

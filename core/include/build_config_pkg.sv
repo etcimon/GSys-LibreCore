@@ -466,6 +466,13 @@ package build_config_pkg;
     cfg.L2TagSramEn = CVA6Cfg.L2TagSramEn;
     cfg.L2WriteUpdateEn = CVA6Cfg.L2WriteUpdateEn;
     cfg.L2CmoEn = CVA6Cfg.L2CmoEn;
+    // T9b posted writes: 0 means "auto" (4-entry trackers), matching the
+    // other geometry fields' convention.
+    cfg.L2PostedWriteEn = CVA6Cfg.L2PostedWriteEn;
+    cfg.L2WriteTrackDepth =
+        (CVA6Cfg.L2WriteTrackDepth != 0) ? CVA6Cfg.L2WriteTrackDepth : 4;
+    cfg.L2ReadTrackDepth =
+        (CVA6Cfg.L2ReadTrackDepth != 0) ? CVA6Cfg.L2ReadTrackDepth : 4;
     // Multi-core snoop-filter / prefetch defaults when left zero
     if (cfg.NrCores > 1 && CVA6Cfg.SnoopFilterEn && CVA6Cfg.SnoopFilterEntries == 0)
       cfg.SnoopFilterEntries = cfg.NrCores * 64;

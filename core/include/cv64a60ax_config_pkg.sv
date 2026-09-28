@@ -217,6 +217,9 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       L2TagSramEn: bit'(0),
       L2WriteUpdateEn: bit'(0),
       L2CmoEn: bit'(0),
+      L2PostedWriteEn: bit'(0),
+      L2WriteTrackDepth: unsigned'(4),
+      L2ReadTrackDepth: unsigned'(4),
       SharedTlbDepth: int'(64),
 
    NrLoadPipeRegs: int'(0),

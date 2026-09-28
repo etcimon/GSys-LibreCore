@@ -27,6 +27,7 @@
 #     produce a divergence (mutation control).
 #   L2TB_WRITE_UPDATE=1     enable the resident-line write merge (T8f);
 #     0 must fold to the invalidate-only netlist.
+#   L2TB_POSTED_WRITES=1    enable posted writes + bypass-read tracking (T9b).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 LIVE_ROOT="$ROOT"
@@ -57,6 +58,7 @@ sources=(
   "$ROOT/corev_apu/l2_cache/g6lc_l2_tag.sv"
   "$ROOT/corev_apu/l2_cache/g6lc_l2_data.sv"
   "$ROOT/corev_apu/l2_cache/g6lc_l2_mshr.sv"
+  "$ROOT/corev_apu/l2_cache/g6lc_l2_wtrk.sv"
   "$ROOT/corev_apu/l2_cache/g6lc_l2_top.sv"
   "$ROOT/verif/tb/l2/tb_g6lc_l2.sv"
 )
@@ -310,6 +312,7 @@ fi
   -GRR_EN="${L2TB_RR_EN:-0}" \
   -GSEED="${L2TB_SEED:-$((0x600df00d))}" \
   -GWRITE_UPDATE="${L2TB_WRITE_UPDATE:-0}" \
+  -GPOSTED_WRITES="${L2TB_POSTED_WRITES:-0}" \
   ${L2TB_EXTRA:-} \
   -Mdir "$OUT" -o tb_g6lc_l2 2>&1 | tee "$OUT/build.log"
 

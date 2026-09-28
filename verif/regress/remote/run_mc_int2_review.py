@@ -63,11 +63,15 @@ def decode_soak(value):
 def parse_cache_counters(text):
     # l2_selfinv/l3_selfinv are optional: pre-Phase-4 models print the
     # six-field line, Phase-4 models add the two self-invalidation counts,
-    # and Phase-5 models add the l2_wupd/l3_wupd write-update counts.
+    # Phase-5 models add the l2_wupd/l3_wupd write-update counts, and T9b
+    # (posted writes) adds l2_wtrk_full/l2_line_hold/l2_posted/l2_rdtrk.
     match = re.search(r'\*\*\* \[mc_cache\] l2_hit=(\d+) l2_miss=(\d+) l2_bypass=(\d+)'
                       r' l3_hit=(\d+) l3_miss=(\d+)'
                       r'(?: l2_selfinv=(\d+) l3_selfinv=(\d+))?'
-                      r'(?: l2_wupd=(\d+) l3_wupd=(\d+))? dram_latency=(\d+)', text)
+                      r'(?: l2_wupd=(\d+) l3_wupd=(\d+))?'
+                      r'(?: l2_wtrk_full=(\d+) l2_line_hold=(\d+)'
+                      r' l2_posted=(\d+) l2_rdtrk=(\d+))?'
+                      r' dram_latency=(\d+)', text)
     if not match:
         return None
     return {'l2_hit': int(match.group(1)), 'l2_miss': int(match.group(2)),
@@ -77,7 +81,11 @@ def parse_cache_counters(text):
             'l3_selfinv': int(match.group(7)) if match.group(7) else None,
             'l2_wupd': int(match.group(8)) if match.group(8) else None,
             'l3_wupd': int(match.group(9)) if match.group(9) else None,
-            'dram_latency': int(match.group(10))}
+            'l2_wtrk_full': int(match.group(10)) if match.group(10) else None,
+            'l2_line_hold': int(match.group(11)) if match.group(11) else None,
+            'l2_posted': int(match.group(12)) if match.group(12) else None,
+            'l2_rdtrk': int(match.group(13)) if match.group(13) else None,
+            'dram_latency': int(match.group(14))}
 
 
 def verdict(text, bound, kind, rc=0, expect_mask=None):

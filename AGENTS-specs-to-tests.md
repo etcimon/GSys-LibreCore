@@ -366,6 +366,27 @@ stores versus primary loads need boundary tracing; neither record is matched or 
   41,508,827 / 42,004,100 with the first boot-workload `l3_hit`. A `--threads 4` model build
   diverges from threads=1 at ~97.7 % of the trace — measurement-only, qualification stays
   single-thread (`SOURCE_REVIEW_ALLOW_THREADS` opt-in, recorded in provenance).
+- T9b posted writes (`L2PostedWriteEn`): HUM scenarios 49-59 are the posted directed
+contract — (a) same-line read miss holds until B (mutation `pw_r1` drops the R1 hold
+→ `HUM_R1_FILL_LAUNCHED`), (a2) resident-line hit serves merged bytes immediately
+(WU-required), (b) different-id same-line AW holds under `+mem_reorder_ids`
+(mutation `pw_r2` → `HUM_R2_AW_ACCEPTED`, memory ends with the older value),
+(c) same-id consecutive writes proceed with B order preserved, (d) full tracker
+backpressures AW, (e) interleaved four-requester B routing, (f) NC-read burst
+atomicity vs hit/serve, (g) same-id hit-vs-tracked-read hold (mutation `pw_r5` →
+`HUM_DATA` per-id R reorder), (h) ATOP/lock keep the blocking path, (i) write
+racing a same-line fill kills update eligibility while still posting, (j)
+`l2_write_idle` tracks the drain. Matrix WU{0,1}xTAG_SRAM{0,1}xPOSTED{0,1}:
+POSTED=0 metrics byte-identical to M1a (hashes `e0c8313b`/`c485eca3`); POSTED=1
+hashes `a5ba46bc` (wu0) / `de33d621` (wu1), 92/92 and 108/108 records matched.
+Composed hub+L2/L3 scenarios incl. CMO sc6 and HPDCACHE-shape sc7 pass under
+POSTED=1 with `late_ar >= mem_b` and SCC 0; credits bench proves
+fills+wtrk+rdtrk <= `CohMaxOutstanding` at OT4/OT8 (mixed-burst `wr_stall`
+22->0 at OT8). Formal: `verif/tb/l2/formal/` — P1 same-line single-id, P2 B
+conservation, P3 posted never enters `S_BYPASS_B`, bounded liveness; intended
+mutations `mut_p1`/`mut_p3` fail (yices). Directed `mc_l2_write_read` at L40:
+int2 518,507 / int2_l3 543,093 cycles (vs 526,714 / 559,492 M1a); strict boots
+on every enabled package.
 - Visibility-model probes for this class (kept in `run_mc_int2_review.py`): `+mc_vis_stuck=N`
   stuck-handshake/commit-head reports, CSR exception and csr_buffer allocation/commit views,
   issue-port view within `+mc_vis_from/+mc_vis_until`. The review mode's directed cases still

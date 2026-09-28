@@ -77,11 +77,18 @@ memory read-back, exclusion cases (ATOP/lock/nc/non-resident/fill-race), and a 5
 showing −6.1 % at latency 40. CBO is now end-to-end (M1a/T9a): the `cmo_*` sideband plus `g6lc_cmo_engine`
 invalidate every L1 copy and match-invalidate L2/L3 on `cbo.inval`, and
 `clean`/`flush` complete on the L2/L3 write-idle trackers; `cbo.zero` works as a
-commit-queue drain burst on every eWT package. Not covered: posted-write merges
-(M1b), formal flop-vs-SRAM equivalence (dual simulation only), the legacy
+commit-queue drain burst on every eWT package. Not covered: line drain / early completion
+(the B is still memory's B), formal flop-vs-SRAM equivalence (dual simulation only), the legacy
 pinned-reference equivalence lane (red), physical macro binding, MBIST insertion
 and STA/power/area. Verilator
 `--threads>1` models diverge from the threads=1 record and are measurement-only.
+
+`L2PostedWriteEn` (T9b) posts writes and NC/lock bypass reads through two
+trackers (write: per-id B routing + R1/R2/R3/R4 ordering; read: atomic R
+arbiter + R5) so hits and misses are served while writes drain; measured:
+mixed-burst `wr_stall_cycles` 22->0 at OT8 on the credits bench, L40
+write/read kernel 518,507 (int2) / 543,093 (int2_l3) cycles, and the
+bypass-write stall is gone from the boot profiles (T9b boot table).
 
 ## CSR admission lifetime — directed verification and scoped four-hart firmware completion
 

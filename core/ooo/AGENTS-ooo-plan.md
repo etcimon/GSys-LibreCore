@@ -2021,3 +2021,128 @@ the new anchor references from now on.
 | smt2_l3 L0 two-hart strict | `osbi-smt2l3-r6` | 13,814,448 | byte-stable vs T8g (WU already on); `l2_wupd`=`l3_wupd`=530,843 |
 | smt2 L0 two-hart strict — NEW anchor | `osbi-smt2-r6` | 12,867,172 | `l2_wupd`=502,702, `l2_selfinv`=164; rvfi hart_00 sha256 `0611f9fa160593b0` (18,538,109 lines) |
 | smt2_ooo_int L0 strict — NEW anchor | `osbi-smt2ooo-r6` | 10,809,010 | `l2_wupd`=497,296; rvfi hart_00 sha256 `560b14fd1e909350` (18,560,141 lines) |
+
+### T9b — M1b: posted writes and bypass-read tracking in the L2/L3 engine (2026-09-28)
+
+**Design.** New cfg `L2PostedWriteEn` (default 0; `check_cfg`: `L2PostedWriteEn → L2En`),
+`L2WriteTrackDepth` (default 4, pow2 2..8) and `L2ReadTrackDepth` (default 4); `g6lc_l2_top`
+parameters `POSTED_WRITES`/`WTRK_DEPTH`/`RDTRK_DEPTH` pass through `g6lc_l3_top` and the
+cluster. `corev_apu/l2_cache/g6lc_l2_wtrk.sv` (tier R) holds `{valid, id, line_addr,
+blocking}` in AW-issue order; **every** accepted write takes an entry so B routing is
+uniform. A postable write (`atop=='0 && !lock && id != FILL_ID`) returns to `S_IDLE`
+after the last forwarded W beat — memory's B is routed to the oldest tracker entry of
+its id and popped on the slave's `b_ready`; ATOP/lock/FILL_ID-alias writes keep the
+blocking `S_BYPASS_B` path on their entry. NC/lock bypass reads post through a read
+tracker and an atomic slave-R arbiter (an in-progress burst holds the channel to `last`;
+round-robin among ready sources). Ordering rules per `ewt-caching.md`: R1 read miss to a
+tracked line holds until the entry's B; R2 a different-id same-line AW is held; R3 a
+write into an in-flight fill still invalidates and kills; R4 uniform per-id oldest-entry
+B routing; R5 a same-id hit response or fill serve waits for the tracked read to pop;
+R6 `CohMaxOutstanding` bounds fills + write-tracker + read-tracker entries.
+`l2_write_idle_o`/`l3_write_idle_o` now mean "tracker empty and no write state" — the
+CMO `clean`/`flush` wait consumes it. Under `L2PostedWriteEn=0` the netlist folds to the
+M1a datapath (identity verified by metric hash below).
+
+**HUM identity + directed.** POSTED=0 metric hash is byte-identical to the M1a hash on
+**every** WU × TAG_SRAM combination (`ooocoh-m1b-hum-p0-*-r1`): WU0 = `e0c8313b…ecdc0`,
+WU1 = `c485eca3…a1b9c` — each identical for flop and `tc_sram` tags. POSTED=1 runs all
+matched: WU0 92/92 records both tag paths (hash `a5ba46bc…a41a4b`), WU1 108/108 both tag
+paths (hash `de33d621…3c561`). Scenarios 49–59 are the posted directed contract —
+(a) same-line read miss holds until B; (a2/sc50, WU+posted only) resident-line hit
+serves merged bytes; (b) different-id same-line AW holds under `+mem_reorder_ids`;
+(c) same-id back-to-back writes proceed, B order preserved; (d) full tracker
+backpressures AW (`l2_wtrk_full` counted, no loss); (e) per-id B routing with
+interleaved ids; (f) NC reads interleaved with hits/fills — slave-R bursts stay atomic;
+(g) same-id hit holds behind a tracked read; (h) ATOP/lock writes take the blocking path;
+(i) postable write racing a same-line fill kills it; (j) `l2_write_idle` waits for the
+tracker to drain (the CMO clean wait). Mutation arms all fired on defective builds:
+`pw_r1` drops the R1 hold → `HUM_R1_FILL_LAUNCHED` (sc49); `pw_r2` drops the R2
+admission → `HUM_R2_AW_ACCEPTED` (sc51, memory ends with the older value);
+`pw_r5` drops the R5 hold → `HUM_DATA` per-id order violation (sc56)
+(`ooocoh-m1b-hum-fault-pw-{r1,r2,r5}-r1`).
+
+**Bounded formal** (`verif/tb/l2/formal/`, SymbiYosys/yices — z3 was dropped after it
+OOM-crashed WSL; yices proves the same models in seconds). Free-init-state
+counterexamples are excluded by an `f_past_valid` reset-entry pattern.
+
+| Task | Result | Property |
+|---|---|---|
+| `g6lc_l2_wtrk prove` (d20) | PASS | P1 no two valid entries share a line with different ids; P2 B conservation safety |
+| `g6lc_l2_wtrk live` (d60) | PASS | P2 liveness: every posted entry gets its B within the age bound |
+| `g6lc_l2_wtrk cover` | PASS | posted-entry lifecycle reachable |
+| `g6lc_l2_wtrk mut_p1` | intended FAIL (step 4) | R2 admission assumption is load-bearing |
+| `g6lc_l2_top prove` (d48) | PASS | P3 FSM never in `S_BYPASS_B` for a posted write |
+| `g6lc_l2_top mut_p3` | intended FAIL (step 5) | posted-guard drop detected |
+
+**Composed + credits.** `tb_g6lc_coherence_hub` POSTED=1 (L2 and L2+L3 stacks):
+`ooocoh-m1b-composed-{small,modonly,stacksmall,stackfault}-wu1-r1` — 12+4+12+2 records
+matched including CMO sc6/sc7; parked-ATOP-R sc27 is a hub-leaf scenario (no L2 instance, no POSTED knob) and was re-run on this tree at OT4/OT16 — `ooocoh-m1b-hub-lifetime-r1` 50/50 matched, `HUB_ATOP_R_WITHHELD` arm fires; the `late_ar >= mem_b` contract
+holds (posted B is still memory's B); SCC 0 through hub+L2 and hub+L2+L3
+(`ooocoh-m1b-composed-scc{,-l3}-wu1-r1`). Credits (`ooocoh-m1b-credits-*-r{1,2}`):
+`fills + wtrk + rdtrk ≤ credits` held on every lane — eight-read burst `max_ar_live`
+4@OT4 / 8@OT8 (drain 141); mixed bursts `wr_stall_cycles` 22→0 at OT8 (drain
+154→147), `max_aw_live` 1→2 when the L3 stack is present (drain 270, `max_fills` 5,
+`max_l3_fills` 4); every negative arm failed with `COH_CREDIT_DATA`. OT8 stays
+`CohMaxOutstanding=8` on int2/int2_l3 — the trackers at depth 4+4 are covered.
+
+**Gates + timing.** `L2PostedWriteEn=1` in every L2 package (all `g6lc64_*` L2
+configurations; cv32/cv64 upstream packages keep the field at default 0 — they are not
+eWT targets). Lint/synth `check -assert` all green, 0 errors (see table below); SCC
+through the composed stack clean (above). FO4 `g6lc_l2_top`: worst path
+`reg0/CP → reg1/D` **28.5 FO4** — identical to the pre-M1b screen (the 4-entry CAMs sit
+on registered request fields; the R arbiter adds one mux level on the slave R data
+path; nothing enters the S_TAG hit compare), ~1403 MHz vs the 1250 MHz budget. Hub
+unchanged — its 32.0 FO4 screen stands.
+
+| Target | Gate tag | lint w/e | synth w/e |
+|---|---|---|---|
+| g6lc64_ooo_int2 | `ooocoh-m1b-gate-ooo_int2-r1` | 24/0 | 11/0 |
+| g6lc64_ooo_int2_l3 | `ooocoh-m1b-gate-ooo_int2_l3-r1` | 24/0 | 17/0 |
+| g6lc64_smt2 | `ooocoh-m1b-gate-smt2-r1` | 4/0 | 31/0 |
+| g6lc64_smt2_l3 | `ooocoh-m1b-gate-smt2_l3-r1` | 4/0 | 41/0 |
+| g6lc64_smt2_ooo_int | `ooocoh-m1b-gate-smt2_ooo_int-r1` | 24/0 | 1/0 |
+| g6lc64_stream8 | `ooocoh-m1b-gate-stream8-r1` | 7/0 | 36/0 |
+| g6lc64_server_math | `ooocoh-m1b-gate-server_math-r1` | 7/0 | 36/0 |
+| g6lc64_server_math_v | `ooocoh-m1b-gate-server_math_v-r1` | 3/0 | 36/0 |
+| g6lc64_ai | `ooocoh-m1b-gate-ai-r1` | 7/0 | 36/0 |
+| g6lc64_ooo_server | `ooocoh-m1b-gate-ooo_server-r2` | 7/0 | pending — r1 synth hit the 5400 s stage cap mid-opt (infrastructure timeout, not an error) |
+| defaults (cv64) | `ooocoh-m1b-gate-defaults-r1` | 8/0 + 54/0 | 32/0 + 5/0 |
+
+**Directed** (`run_queue` m1b-queue-r1, POSTED=1 models, every arm matched): the L40
+write/read kernel drops below its M0 numbers as predicted — `mc_l2_write_read`
+int2 L0/L40 = 135,526 / **518,507** (M0: 135,528 / 526,714); int2_l3 = 160,122 / **543,093** (M0: 160,120 / 559,492); `scan512k` int2_l3 424,374 / 1,046,973 (vs Phase-4 424,380 / 1,063,540); `mc_cbo_ewt` pos+neg matched on all four
+int2/int2_l3 L0/L40 lanes plus stream8/server_math; boot/release and shared-line
+matched on all four lanes; the posted counters (`l2_posted`, `l2_rdtrk`) appear in
+`[mc_cache]` lines; all negative arms fired. HPDCACHE directed suites:
+`mini_amocas_w/d/q` and `mini_stream_plane` pass on stream8 and server_math.
+
+**Strict boots (threads=1, concurrent, ≤11 remote threads).** int2/int2_l3 four-hart and smt2_l3 two-hart runs all strict; the two anchor lanes re-freeze below.
+
+| Lane | Run tag | Cycles | Notes |
+|---|---|---:|---|
+| int2 L0 strict | `osbi-int2-r1` | 17,903,402 | vs M1a 17,928,441 (−0.1 %); `l2_posted`=841,717, `l2_line_hold`=372,982 |
+| int2 L40 60M | `osbi-int2-L40-60M-r1` | 40,712,259 | vs M1a 41,508,827 (−1.9 %); `l2_posted`=778,465, `l2_line_hold`=13.6 M |
+| int2_l3 L0 strict | `osbi-int2l3-r1` | 18,905,079 | vs M1a 18,244,150 (+3.6 % — L3-latency line holds); `l2_posted`=855,600, `l2_line_hold`=744,907 |
+| int2_l3 L40 60M | `osbi-int2l3-L40-60M-r1` | 41,946,955 | vs M1a 42,004,100 (−0.1 %); `l2_posted`=793,008, `l2_line_hold`=14.4 M |
+| smt2_l3 L0 | `osbi-smt2l3-r1` | 13,691,686 | vs M1a 13,814,448 (−0.9 %); `l2_posted`=552,843 |
+| smt2 L0 — FINAL anchor | `osbi-smt2-r1` | 12,406,273 (−3.6 % vs M1a) | rvfi hart_00 sha256 `e0858842b829e5e2` (18,522,309 lines) |
+| smt2_ooo_int L0 — FINAL anchor | `osbi-smt2ooo-r1` | 10,702,679 | rvfi hart_00 sha256 `7e228d3acf599373` (18,557,085 lines) |
+
+The smt2/smt2_ooo_int runs above are the **final re-frozen anchors for the eWT tree**
+(PostedWriteEn now on; all earlier anchors retired).
+
+**Reading (lead).** Posting converted the FSM's blocking wait into R1/R2 holds without
+removing the wait for the boot's dominant pattern: at latency 40 the four-hart boots spend
+13.6 M (int2) and 14.4 M (int2_l3) of ~41 M cycles in `l2_line_hold`, i.e. a same-line
+access follows a write before that write's B roughly a third of the time, and on int2_l3
+at latency 0 the longer B path through the L3 makes the holds cost more than posting
+saves (+3.6 %). The gain therefore lands on the non-same-line traffic only (−1.9 % int2
+L40, −3.6 % smt2). Two follow-ups, to be decided on data: (1) split the hold counter into
+R1 (read miss behind a tracked write — the store→load-to-a-new-line pattern) and R2
+(different-id same-line write — every hub slot is a new id, so two consecutive writes
+from one core to one line collide); (2) if R1 dominates, `L2WriteAllocEn` (write miss
+allocates a fill and merges the pending bytes at install, so the following read merges
+into the MSHR instead of holding) removes the hold at the cost of a per-MSHR 64 B +
+mask buffer; if R2 dominates, either the hub keeps a per-core same-line write on one
+id or R2 is relaxed behind a documented downstream same-address write-order guarantee.
+Neither is assumed; both are measured first (M1c).

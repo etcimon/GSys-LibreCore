@@ -1,0 +1,38 @@
+# Bounded proofs for g6lc_l2_top (T9b posted writes):
+#   prove   — P3: the FSM is never in S_BYPASS_B with a posted write live.
+#   mut_p3  — negative control: gen_support.py regenerates
+#             mut/g6lc_l2_top.sv with the posted S_BYPASS_B guard dropped;
+#             the proof must FAIL.
+# Expect: prove PASS, mut_p3 FAIL.
+
+[tasks]
+prove
+mut_p3
+
+[options]
+depth 48
+prove: mode prove
+mut_p3: mode bmc
+
+[engines]
+smtbmc yices
+
+[script]
+prove: exec -- python3 gen_support.py
+prove: read_slang g6lc_l2_pkg.sv axi_pkg.sv tc_sram.sv g6lc_l2_tag.sv g6lc_l2_data.sv g6lc_l2_mshr.sv g6lc_l2_wtrk.sv g6lc_l2_top.sv types.sv g6lc_l2_top_fpv.sv
+mut_p3: exec -- python3 gen_support.py
+mut_p3: read_slang g6lc_l2_pkg.sv axi_pkg.sv tc_sram.sv g6lc_l2_tag.sv g6lc_l2_data.sv g6lc_l2_mshr.sv g6lc_l2_wtrk.sv mut/g6lc_l2_top.sv types.sv g6lc_l2_top_fpv.sv
+prep -top g6lc_l2_top_fpv
+flatten
+
+[files]
+gen_support.py
+g6lc_l2_top_fpv.sv
+../../../../corev_apu/l2_cache/g6lc_l2_pkg.sv
+../../../../corev_apu/l2_cache/g6lc_l2_tag.sv
+../../../../corev_apu/l2_cache/g6lc_l2_data.sv
+../../../../corev_apu/l2_cache/g6lc_l2_mshr.sv
+../../../../corev_apu/l2_cache/g6lc_l2_wtrk.sv
+../../../../corev_apu/l2_cache/g6lc_l2_top.sv
+../../../../vendor/pulp-platform/axi/src/axi_pkg.sv
+../../../../vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv

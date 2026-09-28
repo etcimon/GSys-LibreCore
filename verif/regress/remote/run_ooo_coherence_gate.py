@@ -133,7 +133,8 @@ def execute():
         with log_path.open("w") as log:
             try:
                 process = subprocess.run(["bash", str(runner)], cwd=snapshot,
-                                         stdout=log, stderr=subprocess.STDOUT, timeout=5400)
+                                         stdout=log, stderr=subprocess.STDOUT,
+                                         timeout=int(os.environ.get('REVIEW_GATE_STAGE_TIMEOUT', '5400')))
                 rc = process.returncode
             except subprocess.TimeoutExpired:
                 rc = 124

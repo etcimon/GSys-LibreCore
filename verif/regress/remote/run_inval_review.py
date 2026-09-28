@@ -493,7 +493,8 @@ def composed_review(out, data, runtime_info, runtime):
     source = out / 'source'
     source.mkdir()
     names = ['config_pkg.sv','axi_pkg.sv','tc_sram.sv','g6lc_l2_pkg.sv',
-             'g6lc_l2_tag.sv','g6lc_l2_data.sv','g6lc_l2_mshr.sv','g6lc_l2_top.sv',
+             'g6lc_l2_tag.sv','g6lc_l2_data.sv','g6lc_l2_mshr.sv','g6lc_l2_wtrk.sv',
+             'g6lc_l2_top.sv',
              'g6lc_l3_pkg.sv','g6lc_l3_top.sv','axi_cut.sv','spill_register.sv',
              'g6lc_coherence_pkg.sv','g6lc_inval_bus.sv','g6lc_snoop_filter.sv',
              'g6lc_ooo_snoop_filter.sv','g6lc_lr_sc_tracker.sv','g6lc_coherence_hub.sv',
@@ -550,6 +551,10 @@ def composed_review(out, data, runtime_info, runtime):
     # cache levels; the bench's WU-conditional expectations do the rest.
     if os.environ.get('REVIEW_COMPOSED_WU') == '1':
         profiles = {name: args + ['-GWRITE_UPDATE=1'] for name, args in profiles.items()}
+    # REVIEW_COMPOSED_POSTED=1 enables posted writes + bypass-read tracking
+    # on the L2 (and the L3 in stack profiles) — T9b.
+    if os.environ.get('REVIEW_COMPOSED_POSTED') == '1':
+        profiles = {name: args + ['-GPOSTED_WRITES=1'] for name, args in profiles.items()}
     assert chosen in profiles and not (fault and chosen=='no-l2')
     assert not (fault=='self-inval' and chosen.startswith('stack'))
     assert fault!='stack' or chosen=='stack-fault'
@@ -581,6 +586,8 @@ localparam bit USE_L3=%d;
 localparam bit SELF_INVAL_FAULT=0;
 localparam bit TAG_SRAM=%d;
 localparam bit WRITE_UPDATE=%d;
+localparam bit POSTED_WRITES=%d;
+localparam int unsigned WTRK_DEPTH=4,RDTRK_DEPTH=4;
 localparam int BYTE_SIZE=4096,SET_ASSOC=4,MSHR_DEPTH=4,DATA_BANKS=2;
 localparam int L3_BYTES=2048,L3_SET_ASSOC=2,L3_MSHR_DEPTH=2,L3_DATA_BANKS=2;
 req_t hub_req;resp_t hub_rsp;
@@ -592,7 +599,9 @@ logic cmo_l2_v,cmo_l3_v;
 assign cmo_l2_v = 1'b0;
 assign cmo_l3_v = 1'b0;
 ''' % (scc_l3, int(os.environ.get('REVIEW_COMPOSED_TAG_SRAM') == '1'),
-       int(os.environ.get('REVIEW_COMPOSED_WU') == '1')) + instances + '\nendmodule\n')
+       int(os.environ.get('REVIEW_COMPOSED_WU') == '1'),
+       int(os.environ.get('REVIEW_COMPOSED_POSTED') == '1'))
+       + instances + '\nendmodule\n')
         script='read_slang -I' + str(source) + ' --top composed_graph ' + ' '.join(files[:-1]) + f' {wrapper}; hierarchy -check -top composed_graph; flatten; proc; opt; check -assert; scc -expect 0'
         (out/'scc.ys').write_text(script)
         with (out/'scc.log').open('w') as log:
@@ -680,7 +689,8 @@ def credits_review(out, data, runtime_info, runtime):
     source = out / 'source'
     source.mkdir()
     names = ['config_pkg.sv','axi_pkg.sv','tc_sram.sv','g6lc_l2_pkg.sv',
-             'g6lc_l2_tag.sv','g6lc_l2_data.sv','g6lc_l2_mshr.sv','g6lc_l2_top.sv',
+             'g6lc_l2_tag.sv','g6lc_l2_data.sv','g6lc_l2_mshr.sv','g6lc_l2_wtrk.sv',
+             'g6lc_l2_top.sv',
              'g6lc_l3_pkg.sv','g6lc_l3_top.sv','axi_cut.sv','spill_register.sv',
              'g6lc_coherence_pkg.sv','g6lc_inval_bus.sv','g6lc_snoop_filter.sv',
              'g6lc_ooo_snoop_filter.sv','g6lc_lr_sc_tracker.sv','g6lc_coherence_hub.sv',
@@ -728,6 +738,8 @@ def credits_review(out, data, runtime_info, runtime):
     l3_args = ['-GUSE_L3=1',f'-GL3_MSHR_DEPTH={l3_mshr}'] if l3_mshr else []
     if os.environ.get('REVIEW_CREDITS_TAG_SRAM') == '1':
         l3_args += ['-GTAG_SRAM=1']
+    if os.environ.get('REVIEW_CREDITS_POSTED') == '1':
+        l3_args += ['-GPOSTED_WRITES=1']
     command = ['verilator','--cc','--main','--exe','--timing','--assert','--threads','1','--flatten',
                '-Wno-fatal','-Werror-LATCH','-Werror-USERERROR',
                str(control),'-I'+str(source),'--top-module','tb_g6lc_coherence_credits',*credit_gargs,

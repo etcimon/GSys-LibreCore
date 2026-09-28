@@ -244,6 +244,9 @@ package cva6_config_pkg;
       L2TagSramEn: bit'(0),
       L2WriteUpdateEn: bit'(0),
       L2CmoEn: bit'(0),
+      L2PostedWriteEn: bit'(0),
+      L2WriteTrackDepth: unsigned'(4),
+      L2ReadTrackDepth: unsigned'(4),
       SharedTlbDepth: int'(64),
 
       NrLoadPipeRegs: int'(CVA6ConfigNrLoadPipeRegs),

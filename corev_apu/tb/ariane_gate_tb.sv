@@ -138,7 +138,9 @@ module ariane_gate_tb;
         .l3_hit_i             ( 1'b0                ),
         .l3_miss_i            ( 1'b0                ),
         .pf_issue_i           ( 1'b0                ),
-        .pf_train_i           ( 1'b0                )
+        .pf_train_i           ( 1'b0                ),
+        .l2_pwhold_i          ( 1'b0                ),
+        .l3_pwhold_i          ( 1'b0                )
     );
 
     `AXI_ASSIGN_FROM_REQ(slave[0], axi_ariane_req)

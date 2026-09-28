@@ -122,7 +122,28 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `server_math_v`, `ai`, `ooo_server`; smt2/smt2ooo anchors re-baselined by decision
   (12,867,172 / 10,809,010; smt2_l3 byte-stable at 13,814,448). Hub same-line AR/write
   ordering plus invalidation-after-fill hold closed `HUB_STALE_REFILL_PUBLICATION`.
-  Open under the eWT plan: M1b posted writes; M3 — the int2 packages' real issue
+  **Landed (T9b, 2026-09-28): M1b posted writes + bypass-read tracking** —
+  `L2PostedWriteEn` posts every eligible write (`atop==0`, unlocked, id !=
+  `FILL_ID`) into `g6lc_l2_wtrk` and returns the slave FSM to idle after the
+  last W beat; memory's B is routed to the oldest tracker entry of its id
+  (ATOP/lock writes keep the blocking `S_BYPASS_B` path on their entry).
+  NC/lock bypass reads post through a read tracker behind an atomic slave-R
+  arbiter. Ordering rules R1–R6 are proven by directed + mutation lanes:
+  HUM scenarios 49–59 all matched (`pw_r1`→`HUM_R1_FILL_LAUNCHED`,
+  `pw_r2`→`HUM_R2_AW_ACCEPTED`, `pw_r5`→`HUM_DATA`); POSTED=0 metric hash is
+  byte-identical to M1a on every WU×TAG_SRAM combination; composed hub+L2/L3
+  lanes 30/30 with the `late_ar >= mem_b` contract and 0 SCCs; credits prove
+  `fills + wtrk + rdtrk ≤ credits` (mixed-burst `wr_stall` 22→0 at OT8);
+  bounded formal P1/P2/P3 all green with the intended mutation failures.
+  `l2_write_idle_o` now means tracker-empty — the CMO clean/flush wait.
+  On in every `g6lc64_*` L2 package (cv32/cv64 upstream packages keep the
+  default 0). FO4 `g6lc_l2_top` stays 28.5. Strict boots (final anchors):
+  smt2 12,406,273 / smt2_ooo_int 10,702,679 (rvfi hart_00 sha256
+  `e0858842b829e5e2` / `7e228d3acf599373`); int2 17,903,402, int2_l3
+  18,905,079, smt2_l3 13,691,686; latency-40 60M boots 40,712,259 /
+  41,946,955. `l2_posted` ~0.5–0.86M per boot; `l2_line_hold` shows the
+  R1/R2 holds absorbing the write-drain latency.
+  Open under the eWT plan: M1 qualification matrix; M3 — the int2 packages' real issue
   window is `NrScoreboardEntries=8`.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531

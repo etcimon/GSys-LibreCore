@@ -145,7 +145,9 @@ module cva6_tb_wrapper import uvmt_cva6_pkg::*; #(
     .l3_hit_i             ( 1'b0                         ),
     .l3_miss_i            ( 1'b0                         ),
     .pf_issue_i           ( 1'b0                         ),
-    .pf_train_i           ( 1'b0                         )
+    .pf_train_i           ( 1'b0                         ),
+    .l2_pwhold_i          ( 1'b0                         ),
+    .l3_pwhold_i          ( 1'b0                         )
   );
 
   //----------------------------------------------------------------------------

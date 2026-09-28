@@ -20,16 +20,15 @@ does not allocate on a store miss; the L2/L3 engine applies the same policy.
 
 | Configuration | L1 | Allocate | Write-update | Posted writes | CBO | Coherence |
 |---|---|---|---|---|---|---|
-| `g6lc64_ooo_int2`, `g6lc64_ooo_int2_l3` | WT | on | on | M1b | on | `COH_OOO` (signature) |
-| `g6lc64_smt2_l3` | WT | on | on | M1b | on | single core |
-| `g6lc64_smt2`, `g6lc64_smt2_ooo_int` (anchors) | WT | on (anchors re-baselined) | on | M1b | on | single core |
-| `g6lc64_stream8`, `server_math`, `server_math_v`, `ai`, `ooo_server` | HPDCACHE_WT | on (HPDCACHE) | on | M1b | on | `COH_FILTERED` |
+| `g6lc64_ooo_int2`, `g6lc64_ooo_int2_l3` | WT | on | on | on | on | `COH_OOO` (signature) |
+| `g6lc64_smt2_l3` | WT | on | on | on | on | single core |
+| `g6lc64_smt2`, `g6lc64_smt2_ooo_int` (anchors) | WT | on (anchors re-baselined) | on | on | on | single core |
+| `g6lc64_stream8`, `server_math`, `server_math_v`, `ai`, `ooo_server` | HPDCACHE_WT | on (HPDCACHE) | on | on | on | `COH_FILTERED` |
 | `g6lc64_ooo_int` | WT, no L2 | — | — | — | on (L1-local, `L2En=0`) | single core |
 
-"M1a" (CBO end-to-end + write-update + allocation) is landed (T9a); "M1b" = posted
-writes, still planned in the eWT milestone of
-`C:\Users\etcim\.devin\plans\plan-9f0fd4941a162312.md`. Everything marked "on" has
-strict OpenSBI evidence on the named package (T8a–T8f, T9a).
+"M1a" (CBO end-to-end + write-update + allocation) is landed (T9a); "M1b" (posted
+writes + bypass-read tracking, `L2PostedWriteEn`) is landed (T9b). Everything
+marked "on" has strict OpenSBI evidence on the named package (T8a–T8f, T9a, T9b).
 
 Measured on the four-hart OpenSBI boot of `g6lc64_ooo_int2` (DRAM latency 0,
 `ooocoh-p5-osbi-int2-L0-r1`): allocation alone turned a 0-hit bypass into 110k L2

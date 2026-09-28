@@ -13,7 +13,8 @@ import hashlib, json, os, re, shutil, subprocess, sys
 from pathlib import Path
 
 NAMES = ['axi_pkg.sv', 'tc_sram.sv', 'g6lc_l2_pkg.sv', 'g6lc_l2_tag.sv',
-         'g6lc_l2_data.sv', 'g6lc_l2_mshr.sv', 'g6lc_l2_top.sv',
+         'g6lc_l2_data.sv', 'g6lc_l2_mshr.sv', 'g6lc_l2_wtrk.sv',
+         'g6lc_l2_top.sv',
          # compiled with -DL2TB_STATIC: contributes g6lc_l2_tb_pkg only
          'tb_g6lc_l2.sv', 'g6lc_l3_pkg.sv', 'g6lc_l3_top.sv',
          'spill_register_flushable.sv', 'spill_register.sv', 'axi_cut.sv',
@@ -37,13 +38,28 @@ CONTRACT = {0: 'HUM_DATA', 1: 'HUM_DATA', 2: 'HUM_DATA', 3: 'HUM_DATA',
             # merged-hit metric (they fail by design on a WU=0 build), the
             # ineligible paths 44-48 are mode-independent.
             42: 'HUM_DATA', 43: 'HUM_DATA', 44: 'HUM_DATA', 45: 'HUM_DATA',
-            46: 'HUM_DATA', 47: 'HUM_DATA', 48: 'HUM_DATA'}
+            46: 'HUM_DATA', 47: 'HUM_DATA', 48: 'HUM_DATA',
+            # 49-59 are the POSTED_WRITES directed contract (T9b). Read
+            # scenarios get the oracle_negative data-inversion arm; the
+            # write-ordering scenarios carry their own structural oracles
+            # (hold pulses / memory-content checks) so no data arm is wired.
+            49: 'HUM_DATA', 50: 'HUM_DATA', 51: None, 52: None, 53: None,
+            54: None, 55: 'HUM_DATA', 56: 'HUM_DATA', 57: None, 58: 'HUM_DATA',
+            59: None}
 # Scenarios exercising the TAG_SRAM launched-read protocol; functional on the
 # flop path too (the SRAM-only engagement checks are parameter-gated).
 TAG_SRAM_SCEN = range(35, 42)
 # WU-only scenarios: kept out of the WU=0 plan so its metric hash stays
 # byte-identical to the pre-WU run.
 WU_ONLY_SCEN = range(42, 49)
+# POSTED-only scenarios: kept out of the POSTED=0 plan so its metric hash
+# stays byte-identical to the M1a run.
+POSTED_ONLY_SCEN = range(49, 60)
+# Scenario 50 additionally requires WRITE_UPDATE: it is the (a2) resident-line
+# merge-hit probe and fatals HUM_POSTED_WU_REQUIRED on a WU=0 build by design.
+WU_POSTED_SCEN = {50}
+# Scenarios that need the memory model to reorder B/R across different ids.
+MEM_REORDER_SCEN = {51, 54}
 
 
 def digest(path):
@@ -68,6 +84,8 @@ def main():
     # WRITE_UPDATE mode; implied by the WU fault controls (they only manifest
     # on a merge-capable build).
     wu = os.environ.get('REVIEW_L2_HUM_WU') == '1'
+    # POSTED_WRITES mode; implied by the posted-write fault controls.
+    posted = os.environ.get('REVIEW_L2_HUM_POSTED') == '1'
     (out / 'mode.json').write_text(json.dumps(
         {k: v for k, v in os.environ.items() if k.startswith('REVIEW_L2_HUM')}, indent=2))
     # Restores the original single-port schedule, where a colliding install took
@@ -114,10 +132,29 @@ def main():
         'wu_tag': (42,
             "  assign wu_tag_inval = !wu_hit_now && !wu_candidate;",
             "  assign wu_tag_inval = 1'b1;", 'HUM_WU_REFETCH'),
+        # T9b fault controls: drop each ordering-rule hold. R1 -> the miss
+        # launches its fill while the write is still tracked (HUM_R1_FILL_
+        # LAUNCHED). R2 -> the different-id same-line AW is accepted
+        # (HUM_R2_AW_ACCEPTED; +mem_reorder_ids also makes memory end with
+        # the older value). R5 -> the same-id hit response jumps the
+        # tracked read's queue position (per-id R order -> HUM_DATA).
+        'pw_r1': (49,
+            "            if (mshr_ready && !wtrk_line0_match &&",
+            "            if (mshr_ready &&", 'HUM_R1_FILL_LAUNCHED'),
+        'pw_r2': (51,
+            "        end else if (slv_req_i.aw_valid && wtrk_aw_ok) begin",
+            "        end else if (slv_req_i.aw_valid && !wtrk_full) begin",
+            'HUM_R2_AW_ACCEPTED'),
+        'pw_r5': (56,
+            "        if (r_fsm_start_ok && !rdtrk_probe_match[0]) state_d = S_HIT_RESP;",
+            "        if (r_fsm_start_ok) state_d = S_HIT_RESP;", 'HUM_DATA'),
     }
     WU_FAULTS = ('wu_merge', 'wu_tag')
+    POSTED_FAULTS = ('pw_r1', 'pw_r2', 'pw_r5')
     if fault in WU_FAULTS:
         wu = True
+    if fault in POSTED_FAULTS:
+        posted = True
     assert not fault or (fault in faults and not baseline), 'invalid fault-control mode'
     assert not order_before or (not baseline and not fault), 'invalid order-before mode'
     assert not atop_before or (not baseline and not fault and not order_before), 'invalid atop-before mode'
@@ -190,6 +227,7 @@ def main():
                       *(['-GRR_EN=1'] if rr_sched else []),
                       *(['-GTAG_SRAM=1'] if tagsram else []),
                       *(['-GWRITE_UPDATE=1'] if wu else []),
+                      *(['-GPOSTED_WRITES=1'] if posted else []),
                       *(['-GFAIR_WRITES=1'] if os.environ.get('REVIEW_L2_FAIR_WRITES') == '1' else []),
                       '--top-module', top, '--Mdir', str(model),
                       '-o', 'hum-test', *rtl]),
@@ -254,7 +292,9 @@ def main():
         CHAIN_ONLY.add(33)
     plan = ([(0, 'HUM_NOT_ENGAGED'), (5, None), (6, None)] if baseline
             else [(s, None) for s in sorted(CONTRACT) if s not in CHAIN_ONLY
-                  and (wu or s not in WU_ONLY_SCEN)])
+                  and (wu or s not in WU_ONLY_SCEN)
+                  and (posted or s not in POSTED_ONLY_SCEN)
+                  and (wu or s not in WU_POSTED_SCEN)])
     if fault: plan = [(faults[fault][0], faults[fault][3])]
     if order_before:
         plan = [(12, 'HUM_DATA'), (13, 'HUM_DATA'), (14, 'HUM_DATA'),
@@ -282,6 +322,7 @@ def main():
             trials.append((True, CONTRACT[scenario]))
         for negative, expected in trials:
             cmd = [str(exe), f'+scenario={scenario}'] + (['+oracle_negative'] if negative else [])
+            if scenario in MEM_REORDER_SCEN: cmd += ['+mem_reorder_ids']
             if os.environ.get('REVIEW_L2_HUM_RR_DIAGNOSE')=='1': cmd += ['+rr_diagnose']
             p = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
             text = p.stdout + p.stderr

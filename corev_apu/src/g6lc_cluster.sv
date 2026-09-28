@@ -105,6 +105,8 @@ module g6lc_cluster
   logic l2_miss_w, l2_evict_v;
   logic [AXI_ADDR_WIDTH-1:0] l2_evict_a;
   logic l3_hit_w, l3_miss_w, l3_bypass_w, l3_evict_v;
+  // T9b posted-write hold-cycle probes → PMU group 2, indices 7 (L2) / 8 (L3).
+  logic l2_pwhold_w, l3_pwhold_w;
   logic [AXI_ADDR_WIDTH-1:0] l3_evict_a;
   logic pf_issue_w, pf_train_w;
   logic evict_v, incl_evict_ready;
@@ -256,6 +258,8 @@ module g6lc_cluster
         .l3_miss_i        (l3_miss_w),
         .pf_issue_i       (pf_issue_w),
         .pf_train_i       (pf_train_w),
+        .l2_pwhold_i      (l2_pwhold_w),
+        .l3_pwhold_i      (l3_pwhold_w),
         .ai_sb_enq_valid_o(core_sb_enq[c]),
         .ai_sb_qid_o      (core_sb_qid[c]),
         .ai_sb_ticket_o   (core_sb_ticket[c]),
@@ -388,6 +392,9 @@ module g6lc_cluster
         .FAIR_WRITES    (CVA6Cfg.OoOEn),
         .TAG_SRAM       (CVA6Cfg.L2TagSramEn),
         .WRITE_UPDATE   (CVA6Cfg.L2WriteUpdateEn),
+        .POSTED_WRITES  (CVA6Cfg.L2PostedWriteEn),
+        .WTRK_DEPTH     (CVA6Cfg.L2WriteTrackDepth != 0 ? CVA6Cfg.L2WriteTrackDepth : 32'd4),
+        .RDTRK_DEPTH    (CVA6Cfg.L2ReadTrackDepth != 0 ? CVA6Cfg.L2ReadTrackDepth : 32'd4),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),
@@ -409,6 +416,11 @@ module g6lc_cluster
         // TB reads the pulses hierarchically; no cluster ports.
         .l2_selfinv_hit_o   (),
         .l2_wupdate_o       (),
+        .l2_wtrk_full_o     (),
+        .l2_wtrk_line_hold_o(),
+        .l2_posted_o        (),
+        .l2_rdtrk_o         (),
+        .l2_posted_hold_o   (l2_pwhold_w),
         .l2_evict_valid_o   (l2_evict_v),
         .l2_evict_addr_o    (l2_evict_a),
         // Under L3En the L2's evict output is not the inclusive broadcast
@@ -429,6 +441,7 @@ module g6lc_cluster
     assign l2_evict_a   = '0;
     assign l2_back_inval_ready = 1'b1;
     assign l2_idle_w    = 1'b1;
+    assign l2_pwhold_w  = 1'b0;
   end
 
   if (CVA6Cfg.L3En) begin : gen_l3
@@ -443,6 +456,9 @@ module g6lc_cluster
         .DATA_BANKS     (CVA6Cfg.L3DataBanks != 0 ? CVA6Cfg.L3DataBanks : 32'd8),
         .TAG_SRAM       (CVA6Cfg.L2TagSramEn),
         .WRITE_UPDATE   (CVA6Cfg.L2WriteUpdateEn),
+        .POSTED_WRITES  (CVA6Cfg.L2PostedWriteEn),
+        .WTRK_DEPTH     (CVA6Cfg.L2WriteTrackDepth != 0 ? CVA6Cfg.L2WriteTrackDepth : 32'd4),
+        .RDTRK_DEPTH    (CVA6Cfg.L2ReadTrackDepth != 0 ? CVA6Cfg.L2ReadTrackDepth : 32'd4),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),
@@ -462,6 +478,11 @@ module g6lc_cluster
         // TB reads the pulses hierarchically; no cluster ports.
         .l3_selfinv_hit_o (),
         .l3_wupdate_o       (),
+        .l3_wtrk_full_o     (),
+        .l3_wtrk_line_hold_o(),
+        .l3_posted_o        (),
+        .l3_rdtrk_o         (),
+        .l3_posted_hold_o   (l3_pwhold_w),
         .l3_evict_valid_o (l3_evict_v),
         .l3_evict_addr_o  (l3_evict_a),
         .l3_evict_ready_i (l3_evict_rdy),
@@ -480,6 +501,7 @@ module g6lc_cluster
     assign l3_evict_v  = 1'b0;
     assign l3_evict_a  = '0;
     assign l3_idle_w   = 1'b1;
+    assign l3_pwhold_w = 1'b0;
     assign cmo_l3_rdy  = 1'b1;
   end
 

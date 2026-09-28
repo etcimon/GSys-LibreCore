@@ -321,6 +321,11 @@ package cva6_config_pkg;
       // following a write purge — merge writes in place instead.
       L2WriteUpdateEn: bit'(1),
       L2CmoEn: bit'(1),
+      // T9b: posted writes + bypass-read tracking — HUM 49-59, composed
+      // lanes, credits OT8 and bounded formal all green.
+      L2PostedWriteEn: bit'(1),
+      L2WriteTrackDepth: unsigned'(4),
+      L2ReadTrackDepth: unsigned'(4),
       SharedTlbDepth: int'(64),
 
       NrLoadPipeRegs: int'(CVA6ConfigNrLoadPipeRegs),

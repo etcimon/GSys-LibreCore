@@ -31,6 +31,10 @@ module tb_g6lc_l2_hum;
   // it instead of purging. Scenarios 42-48 are the directed WU contract;
   // earlier scenarios must behave identically in either mode.
   parameter bit WRITE_UPDATE=1'b0;
+  // T9b: posted writes + bypass-read tracking. Scenarios 49+ are the posted
+  // contract; earlier records must keep the M1a metric hash when off.
+  parameter bit POSTED_WRITES=1'b0;
+  parameter int unsigned WTRK_DEPTH=4, RDTRK_DEPTH=4;
   parameter int unsigned BYTE_SIZE   = 4096;
   parameter int unsigned SET_ASSOC   = 4;
   parameter int unsigned LINE_WIDTH  = 512;
@@ -55,6 +59,8 @@ module tb_g6lc_l2_hum;
 
   logic l2_hit, l2_miss, l2_bypass, l2_mshr_full, l2_bank_conf, evict_v;
   logic l2_wupd;
+  logic l2_wtrk_full_p, l2_line_hold_p, l2_posted_p, l2_rdtrk_p;
+  logic l2_idle_w, l2_phold_w;
   addr_t evict_addr;
   logic evict_ready = 1'b1;
   logic back_inval_ready;
@@ -83,6 +89,9 @@ module tb_g6lc_l2_hum;
       .FAIR_WRITES (FAIR_WRITES),
       .TAG_SRAM    (TAG_SRAM),
       .WRITE_UPDATE(WRITE_UPDATE),
+      .POSTED_WRITES(POSTED_WRITES),
+      .WTRK_DEPTH  (WTRK_DEPTH),
+      .RDTRK_DEPTH (RDTRK_DEPTH),
       .AXI_ADDR_WIDTH (AW),
       .AXI_DATA_WIDTH (DW),
       .AXI_ID_WIDTH   (IDW),
@@ -103,13 +112,18 @@ module tb_g6lc_l2_hum;
       .l2_bank_conflict_o (l2_bank_conf),
       .l2_selfinv_hit_o   (),
       .l2_wupdate_o       (l2_wupd),
+      .l2_wtrk_full_o     (l2_wtrk_full_p),
+      .l2_wtrk_line_hold_o(l2_line_hold_p),
+      .l2_posted_o        (l2_posted_p),
+      .l2_rdtrk_o         (l2_rdtrk_p),
+      .l2_posted_hold_o   (l2_phold_w),
       .l2_evict_valid_o   (evict_v),
       .l2_evict_addr_o    (evict_addr),
       .l2_evict_ready_i   (evict_ready),
       .l2_back_inval_valid_i (inval_valid),
       .l2_back_inval_addr_i  (inval_addr),
       .l2_back_inval_ready_o (back_inval_ready),
-      .l2_write_idle_o       ()
+      .l2_write_idle_o       (l2_idle_w)
   );
 
   if(CHAIN_L3)begin : gen_l3_chain
@@ -126,6 +140,8 @@ module tb_g6lc_l2_hum;
       .Enable(1'b1),.BYTE_SIZE(2048),.SET_ASSOC(2),.LINE_WIDTH(LINE_WIDTH),
       .MSHR_DEPTH(2),.DATA_BANKS(2),.TAG_SRAM(TAG_SRAM),
       .WRITE_UPDATE(WRITE_UPDATE),
+      .POSTED_WRITES(POSTED_WRITES),
+      .WTRK_DEPTH(WTRK_DEPTH),.RDTRK_DEPTH(RDTRK_DEPTH),
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),
       .AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),.axi_req_t(req_t),.axi_resp_t(resp_t)
     ) i_l3 (
@@ -133,6 +149,8 @@ module tb_g6lc_l2_hum;
       .mst_req_o(mst_req),.mst_resp_i(mst_resp),
       .l3_hit_o(),.l3_miss_o(),.l3_bypass_o(),.l3_selfinv_hit_o(),
       .l3_wupdate_o(),
+      .l3_wtrk_full_o(),.l3_wtrk_line_hold_o(),.l3_posted_o(),
+      .l3_rdtrk_o(),.l3_posted_hold_o(),
       .l3_evict_valid_o(l3_evict_valid),
       .l3_evict_addr_o(l3_evict_addr),
       // The directed stimulus owns the port when it is driving.
@@ -225,6 +243,9 @@ module tb_g6lc_l2_hum;
     int unsigned beat;
     int unsigned delay_cycles;
     data_t salt;
+    // Reorder-mode completion mark: a non-head job may finish before the
+    // head; slots free contiguously from rd_head.
+    logic done;
   } read_job_t;
   read_job_t jobs[RD_DEPTH];
   int unsigned rd_head=0,rd_tail=0,rd_count=0;
@@ -237,11 +258,27 @@ module tb_g6lc_l2_hum;
   data_t data_salt='0;
   int unsigned install_conflicts=0;
   logic atomic_r_hold=1'b0,memory_b_hold=1'b0;
-  logic wr_active=1'b0,wr_data_done=1'b0,wr_b_pending=1'b0,wr_r_pending=1'b0,wr_r_issued=1'b0;
   logic r_is_atop=1'b0;
-  aw_chan_t wr_header;
-  int unsigned wr_beat=0;
   int unsigned mem_atomic_r=0;
+  // +mem_reorder_ids: B and R completions may reorder across different ids
+  // (AXI preserves order per id only). Write bytes then apply when the
+  // job's B issues — a same-line different-id write that sneaks past the
+  // L2's R2 hold can therefore land its bytes under the older write's.
+  bit mem_reorder=1'b0;
+  // Write job queue (AW-issue order). Posted writes let several memory-side
+  // writes be outstanding at once; W beats land on the oldest job still
+  // collecting (AXI W follows AW order), Bs issue per the ordering rules.
+  localparam int WD_DEPTH=8;
+  typedef struct {
+    aw_chan_t header;
+    int unsigned beat;
+    bit w_done, b_done, r_pend, r_issued;
+    int unsigned wnum;
+    addr_t waddr[16]; data_t wdata[16]; strb_t wstrb[16];
+  } wjob_t;
+  wjob_t wjobs[WD_DEPTH];
+  int unsigned wq_head=0, wq_tail=0, wq_count=0;
+  int unsigned atop_slot=0;
   always @(posedge clk or negedge rst_n) begin
     if(!rst_n) begin
       mst_resp.ar_ready <= 1'b0;
@@ -252,51 +289,134 @@ module tb_g6lc_l2_hum;
       mst_resp.r <= '0;
       rd_head=0;rd_tail=0;rd_count=0;
       mem_ar_count=0;mem_outstanding=0;mem_peak=0;
-      wr_active=0;wr_data_done=0;wr_b_pending=0;wr_r_pending=0;wr_r_issued=0;
-      r_is_atop=0;wr_header='0;wr_beat=0;mem_atomic_r=0;
+      r_is_atop=0;mem_atomic_r=0;
+      wq_head=0;wq_tail=0;wq_count=0;atop_slot=0;
       for(int i=0;i<RD_DEPTH;i++)jobs[i]='0;
+      for(int i=0;i<WD_DEPTH;i++)begin
+        wjobs[i].beat=0;wjobs[i].w_done=0;wjobs[i].b_done=0;
+        wjobs[i].r_pend=0;wjobs[i].r_issued=0;wjobs[i].wnum=0;
+      end
     end else begin
       automatic bit take_ar = mst_req.ar_valid && mst_resp.ar_ready;
       automatic bit take_aw=mst_req.aw_valid && mst_resp.aw_ready;
       automatic bit take_w=mst_req.w_valid && mst_resp.w_ready;
+      automatic int pick=-1, apick=-1, rpick=-1, wpick=-1;
+      automatic bit id_unique;
       if(mst_resp.r_valid && mst_req.r_ready && mst_resp.r.last)begin
-        if(r_is_atop)begin wr_r_pending=1'b0;wr_r_issued=1'b0;mem_atomic_r++;end
+        if(r_is_atop)begin
+          wjobs[atop_slot].r_pend=1'b0;wjobs[atop_slot].r_issued=1'b0;
+          mem_atomic_r++;
+        end
         else mem_outstanding--;
       end
-      if(mst_resp.b_valid && mst_req.b_ready)begin
-        mst_resp.b_valid<=1'b0;wr_b_pending=1'b0;
-      end
-      if(wr_b_pending && !memory_b_hold && !mst_resp.b_valid)begin
-        mst_resp.b_valid<=1'b1;
-        mst_resp.b<='{id:wr_header.id,resp:axi_pkg::RESP_OKAY,user:'0};
+      if(mst_resp.b_valid && mst_req.b_ready)
+        mst_resp.b_valid<=1'b0;
+      // Issue the next B: oldest ready job normally; under mem_reorder the
+      // newest ready job whose id is unique among ready jobs (per-id order
+      // stays intact — only different ids may pass each other).
+      if(!memory_b_hold && !mst_resp.b_valid)begin
+        if(!mem_reorder)begin
+          for(int k=0;k<wq_count;k++)begin
+            automatic int i=(wq_head+k)%WD_DEPTH;
+            if(wjobs[i].w_done && !wjobs[i].b_done && pick<0)pick=i;
+          end
+        end else begin
+          for(int k=wq_count-1;k>=0;k--)begin
+            automatic int i=(wq_head+k)%WD_DEPTH;
+            id_unique=1'b1;
+            if(wjobs[i].w_done && !wjobs[i].b_done)begin
+              for(int m=0;m<k;m++)begin
+                automatic int j2=(wq_head+m)%WD_DEPTH;
+                if(wjobs[j2].w_done && !wjobs[j2].b_done &&
+                   wjobs[j2].header.id==wjobs[i].header.id)id_unique=1'b0;
+              end
+              if(id_unique && pick<0)pick=i;
+            end
+          end
+        end
+        if(pick>=0)begin
+          if(mem_reorder)
+            for(int k=0;k<wjobs[pick].wnum;k++)
+              patch_apply(wjobs[pick].waddr[k],wjobs[pick].wdata[k],
+                          wjobs[pick].wstrb[k]);
+          mst_resp.b_valid<=1'b1;
+          mst_resp.b<='{id:wjobs[pick].header.id,resp:axi_pkg::RESP_OKAY,user:'0};
+          wjobs[pick].b_done=1'b1;
+        end
       end
       for(int i=0;i<RD_DEPTH;i++)
         if(jobs[i].delay_cycles!=0)jobs[i].delay_cycles--;
       if(!mst_resp.r_valid || mst_req.r_ready) begin
         mst_resp.r_valid <= 1'b0;
         r_is_atop=1'b0;
-        if(wr_r_pending && !wr_r_issued && !atomic_r_hold)begin
-          mst_resp.r_valid<=1'b1;
-          mst_resp.r<='{id:wr_header.id,data:patched_word(wr_header.addr),
-                        resp:axi_pkg::RESP_OKAY,last:1'b1,user:'0};
-          r_is_atop=1'b1;wr_r_issued=1'b1;
-        end else
-        if(rd_count!=0 && jobs[rd_head].delay_cycles==0 && !memory_hold && !(wr_r_pending && jobs[rd_head].id==wr_header.id))begin
-          mst_resp.r_valid <= 1'b1;
-          mst_resp.r.id <= jobs[rd_head].id;
-          mst_resp.r.resp <= axi_pkg::RESP_OKAY;
-          mst_resp.r.data <= patched_word(jobs[rd_head].addr + addr_t'(jobs[rd_head].beat*8)) ^
-                             jobs[rd_head].salt;
-          mst_resp.r.last <= (jobs[rd_head].beat==int'(jobs[rd_head].len));
-          if(jobs[rd_head].beat==int'(jobs[rd_head].len))begin
-            rd_head=(rd_head+1)%RD_DEPTH;rd_count--;
-          end else jobs[rd_head].beat++;
+        for(int k=0;k<wq_count;k++)begin
+          automatic int i=(wq_head+k)%WD_DEPTH;
+          if(wjobs[i].r_pend && !wjobs[i].r_issued && apick<0)apick=i;
         end
+        if(apick>=0 && !atomic_r_hold)begin
+          mst_resp.r_valid<=1'b1;
+          mst_resp.r<='{id:wjobs[apick].header.id,
+                        data:patched_word(wjobs[apick].header.addr),
+                        resp:axi_pkg::RESP_OKAY,last:1'b1,user:'0};
+          r_is_atop=1'b1;wjobs[apick].r_issued=1'b1;atop_slot=apick;
+        end else begin
+          if(rd_count!=0 && !memory_hold)begin
+            if(!mem_reorder)begin
+              if(jobs[rd_head].delay_cycles==0)rpick=rd_head;
+            end else begin
+              for(int k=rd_count-1;k>=0;k--)begin
+                automatic int i=(rd_head+k)%RD_DEPTH;
+                id_unique=1'b1;
+                if(jobs[i].delay_cycles==0)begin
+                  for(int m=0;m<k;m++)begin
+                    automatic int j2=(rd_head+m)%RD_DEPTH;
+                    if(jobs[j2].delay_cycles==0 &&
+                       jobs[j2].id==jobs[i].id)id_unique=1'b0;
+                  end
+                  if(id_unique && rpick<0)rpick=i;
+                end
+              end
+            end
+          end
+          // An ATOP-R job sharing the read's id keeps that id's read beats
+          // behind it (same-id channel order).
+          if(rpick>=0)begin
+            for(int k=0;k<wq_count;k++)begin
+              automatic int i=(wq_head+k)%WD_DEPTH;
+              if(wjobs[i].r_pend && wjobs[i].header.id==jobs[rpick].id)rpick=-1;
+            end
+          end
+          if(rpick>=0)begin
+            mst_resp.r_valid <= 1'b1;
+            mst_resp.r.id <= jobs[rpick].id;
+            mst_resp.r.resp <= axi_pkg::RESP_OKAY;
+            mst_resp.r.data <= patched_word(jobs[rpick].addr + addr_t'(jobs[rpick].beat*8)) ^
+                               jobs[rpick].salt;
+            mst_resp.r.last <= (jobs[rpick].beat==int'(jobs[rpick].len));
+            if(jobs[rpick].beat==int'(jobs[rpick].len))begin
+              if(mem_reorder)jobs[rpick].done=1'b1;
+              else begin rd_head=(rd_head+1)%RD_DEPTH;rd_count--;end
+            end else jobs[rpick].beat++;
+          end
+        end
+      end
+      // Reorder-mode read jobs free their slot once every job ahead of them
+      // has completed — the ring stays FIFO for accounting.
+      if(mem_reorder)
+        while(rd_count!=0 && jobs[rd_head].done)begin
+          jobs[rd_head]='0;
+          rd_head=(rd_head+1)%RD_DEPTH;rd_count--;
+        end
+      // Completed write jobs retire in order.
+      while(wq_count!=0 && wjobs[wq_head].w_done && wjobs[wq_head].b_done &&
+            !wjobs[wq_head].r_pend)begin
+        wjobs[wq_head].b_done=1'b0;wjobs[wq_head].w_done=1'b0;
+        wq_head=(wq_head+1)%WD_DEPTH;wq_count--;
       end
       if(take_ar)begin
         if(rd_count>=RD_DEPTH)$fatal(1,"HUM_MEMORY_OVERFLOW");
         jobs[rd_tail]='{addr:mst_req.ar.addr,id:mst_req.ar.id,len:mst_req.ar.len,
-                        beat:0,delay_cycles:MEM_LATENCY,salt:data_salt};
+                        beat:0,delay_cycles:MEM_LATENCY,salt:data_salt,done:1'b0};
         rd_tail=(rd_tail+1)%RD_DEPTH;rd_count++;
         mem_ar_count++;mem_outstanding++;
         if(mem_outstanding>mem_peak)mem_peak=mem_outstanding;
@@ -304,25 +424,44 @@ module tb_g6lc_l2_hum;
       if(take_aw)begin
         // Multi-beat INCR writes (len>0) are legal traffic: WU eligibility
         // requires size==full-word when len>0, which the DUT forwards.
-        if(wr_active)$fatal(1,"HUM_WRITE_SHAPE");
-        wr_active=1'b1;wr_data_done=1'b0;wr_header=mst_req.aw;wr_beat=0;
+        if(wq_count>=WD_DEPTH)$fatal(1,"HUM_WRITE_OVERFLOW");
+        wjobs[wq_tail]='{header:mst_req.aw,beat:0,w_done:1'b0,b_done:1'b0,
+                        r_pend:1'b0,r_issued:1'b0,wnum:0,
+                        waddr:'{default:'0},wdata:'{default:'0},wstrb:'{default:'0}};
+        wq_tail=(wq_tail+1)%WD_DEPTH;wq_count++;
       end
       if(take_w)begin
-        if(!wr_active || wr_data_done)$fatal(1,"HUM_WRITE_DATA");
-        if(mst_req.w.last !== (wr_beat == int'(wr_header.len)))
-          $fatal(1,"HUM_WRITE_LAST beat=%0d len=%0d",wr_beat,wr_header.len);
-        patch_apply(wr_header.addr + addr_t'(wr_beat)*(DW/8),
-                    mst_req.w.data, mst_req.w.strb);
+        for(int k=0;k<wq_count;k++)begin
+          automatic int i=(wq_head+k)%WD_DEPTH;
+          if(!wjobs[i].w_done && wpick<0)wpick=i;
+        end
+        if(wpick<0)$fatal(1,"HUM_WRITE_DATA");
+        if(mst_req.w.last !== (wjobs[wpick].beat == int'(wjobs[wpick].header.len)))
+          $fatal(1,"HUM_WRITE_LAST beat=%0d len=%0d",wjobs[wpick].beat,
+                 wjobs[wpick].header.len);
+        if(!mem_reorder)begin
+          patch_apply(wjobs[wpick].header.addr + addr_t'(wjobs[wpick].beat)*(DW/8),
+                      mst_req.w.data, mst_req.w.strb);
+        end else if(wjobs[wpick].wnum<16)begin
+          wjobs[wpick].waddr[wjobs[wpick].wnum]=
+              wjobs[wpick].header.addr + addr_t'(wjobs[wpick].beat)*(DW/8);
+          wjobs[wpick].wdata[wjobs[wpick].wnum]=mst_req.w.data;
+          wjobs[wpick].wstrb[wjobs[wpick].wnum]=mst_req.w.strb;
+          wjobs[wpick].wnum++;
+        end
         if(mst_req.w.last)begin
-          wr_data_done=1'b1;wr_b_pending=1'b1;wr_beat=0;
-          wr_r_pending=wr_header.atop[5];wr_r_issued=1'b0;
-        end else wr_beat++;
+          wjobs[wpick].w_done=1'b1;
+          wjobs[wpick].r_pend=wjobs[wpick].header.atop[5];
+          wjobs[wpick].r_issued=1'b0;
+        end else wjobs[wpick].beat++;
       end
-      if(wr_data_done && !wr_b_pending && !wr_r_pending)begin
-        wr_active=1'b0;wr_data_done=1'b0;
+      mst_resp.aw_ready<=wq_count<WD_DEPTH;
+      begin
+        automatic bit w_open=1'b0;
+        for(int k=0;k<wq_count;k++)
+          if(!wjobs[(wq_head+k)%WD_DEPTH].w_done)w_open=1'b1;
+        mst_resp.w_ready<=w_open;
       end
-      mst_resp.aw_ready<=!wr_active;
-      mst_resp.w_ready<=wr_active && !wr_data_done;
       mst_resp.ar_ready <= (rd_count < RD_DEPTH) && !memory_ar_hold;
     end
   end
@@ -404,6 +543,45 @@ module tb_g6lc_l2_hum;
       wu_stall_cycles <= wu_stall_cycles + 1;
   end
 
+  // T9b posted-write observability: engagement counters on the DUT pulses.
+  int unsigned pw_wtrk_full = 0, pw_line_hold = 0, pw_posted = 0,
+               pw_rdtrk = 0, pw_hold = 0;
+  always_ff @(posedge clk) if (rst_n) begin
+    if (l2_wtrk_full_p) pw_wtrk_full <= pw_wtrk_full + 1;
+    if (l2_line_hold_p) pw_line_hold <= pw_line_hold + 1;
+    if (l2_posted_p)    pw_posted    <= pw_posted + 1;
+    if (l2_rdtrk_p)     pw_rdtrk     <= pw_rdtrk + 1;
+    if (l2_phold_w)     pw_hold      <= pw_hold + 1;
+  end
+  // Read-tracker occupancy (push-edge): an entry whose memory R is held
+  // downstream is already live — pops alone cannot prove engagement.
+  int unsigned pw_rdtrk_push = 0;
+  always_ff @(posedge clk) if (rst_n && POSTED_WRITES &&
+      dut.gen_l2.rdtrk_push)
+    pw_rdtrk_push <= pw_rdtrk_push + 1;
+
+  // R5 engagement: a hit response captive in S_TAG whose id carries a live
+  // read-tracker entry (probe[0] = id_q). Only fires under POSTED_WRITES;
+  // the probes are tied off otherwise.
+  int unsigned pw_r5_hold = 0;
+  localparam logic [3:0] L2T_S_TAG = 4'd1;
+  always_ff @(posedge clk) if (rst_n && POSTED_WRITES &&
+      dut.gen_l2.state_q == L2T_S_TAG && dut.gen_l2.tag_hit &&
+      dut.gen_l2.rdtrk_probe_match[0])
+    pw_r5_hold <= pw_r5_hold + 1;
+
+  // Slave-R burst atomicity: once a burst's first beat is on the channel no
+  // other burst may cut in before last (the R arbiter owns it to the end).
+  bit   r_burst_open = 1'b0;
+  id_t  r_burst_id;
+  always @(posedge clk) if (rst_n && slv_resp.r_valid && slv_req.r_ready) begin
+    if (r_burst_open && slv_resp.r.id != r_burst_id)
+      $fatal(1, "HUM_R_INTERLEAVE id=%0d in_burst=%0d",
+             slv_resp.r.id, r_burst_id);
+    r_burst_id = slv_resp.r.id;
+    r_burst_open = !slv_resp.r.last;
+  end
+
   always @(posedge clk) if(rst_n)begin
     if(dut.gen_l2.bank_conflict)install_conflicts++;
     if(dut.gen_l2.collect_cnt_q>dut.gen_l2.issued_cnt_q ||
@@ -448,13 +626,15 @@ module tb_g6lc_l2_hum;
   int unsigned start_cyc = 0, end_cyc = 0, cyc = 0;
   int          scenario;
 
-  bit b_expected=0;
-  id_t expected_bid;
+  // Per-id expected-B queues: posted writes let several Bs be outstanding
+  // across ids, and +mem_reorder_ids lets them return out of order — each
+  // id's count is consumed independently (per-id B order is an AXI rule).
+  int unsigned bexp[16];
   int unsigned write_completed=0;
   always @(posedge clk)if(rst_n && slv_resp.b_valid && slv_req.b_ready)begin
-    if(!b_expected || slv_resp.b.id!==expected_bid || slv_resp.b.resp!==axi_pkg::RESP_OKAY)
-      $fatal(1,"HUM_B_RESPONSE");
-    b_expected=0;write_completed++;
+    if(bexp[slv_resp.b.id]==0 || slv_resp.b.resp!==axi_pkg::RESP_OKAY)
+      $fatal(1,"HUM_B_RESPONSE id=%0d",slv_resp.b.id);
+    bexp[slv_resp.b.id]--;write_completed++;
   end
   assert property(@(posedge clk)disable iff(!rst_n)
     slv_resp.b_valid && !slv_req.b_ready |=> slv_resp.b_valid && $stable(slv_resp.b))
@@ -548,7 +728,7 @@ module tb_g6lc_l2_hum;
                               input strb_t strb);
     stim_t er;
     @(negedge clk);
-    b_expected=1;expected_bid=id;
+    bexp[id]++;
     slv_req.aw='{id:id,addr:a,len:8'(len),size:3'd3,burst:axi_pkg::BURST_INCR,
                  atop:atop,cache:cache,lock:lock,default:'0};
     slv_req.aw_valid=1;
@@ -576,8 +756,9 @@ module tb_g6lc_l2_hum;
 
   initial begin
     scenario = 0;
-    for(int i=0;i<16;i++)begin exp_head[i]=0;exp_tail[i]=0;beats_seen[i]=0;end
+    for(int i=0;i<16;i++)begin exp_head[i]=0;exp_tail[i]=0;beats_seen[i]=0;bexp[i]=0;end
     negative = $test$plusargs("oracle_negative");
+    mem_reorder = $test$plusargs("mem_reorder_ids");
     void'($value$plusargs("scenario=%d", scenario));
     repeat (4) @(posedge clk);
     rst_n = 1'b1;
@@ -921,8 +1102,7 @@ module tb_g6lc_l2_hum;
         for(int n=0;n<32;n++) push(id_t'(1+(n%2)),64'h50000,0);
         @(negedge clk);
         read_mark=issued;
-        b_expected=1;
-        expected_bid=4'd8;
+        bexp[4'd8]++;
         slv_req.aw='{id:4'd8,addr:64'h51000,len:0,size:3,
                      burst:axi_pkg::BURST_INCR,cache:4'hf,default:'0};
         slv_req.aw_valid=1'b1;
@@ -1149,7 +1329,7 @@ module tb_g6lc_l2_hum;
         // Second write to the cleared line: hold W so the self-inval window
         // (S_BYPASS_AW..S_BYPASS_W) definitely covers the fill's install edge.
         @(negedge clk);
-        b_expected = 1; expected_bid = 4'd9;
+        bexp[4'd9]++;
         slv_req.aw='{id:4'd9,addr:64'hC0000,len:0,size:3,
                      burst:axi_pkg::BURST_INCR,atop:6'h00,cache:4'hf,default:'0};
         slv_req.aw_valid=1;
@@ -1332,9 +1512,259 @@ module tb_g6lc_l2_hum;
         if (l2_ar_count != l2_ar_mark + 1)
           $fatal(1, "HUM_WU_FILL_KILL ar=%0d", l2_ar_count);
       end
+      // ---- POSTED_WRITES directed contract (49-59) -------------------------
+      // (a) Read miss to a tracked-write line holds until the write's B
+      // (R1); the fill then carries the write's bytes — the miss path of
+      // read-after-write.
+      49: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        memory_b_hold = 1'b1;
+        send_write(4'd1, 64'h24000, 6'h00);          // posted; B held
+        l2_ar_mark = l2_ar_count;
+        push(4'd2, 64'h24000, 0);                    // same-line read miss
+        begin automatic int g = 0;
+          while (pw_line_hold == 0 && l2_ar_count == l2_ar_mark && g < 200) begin
+            @(posedge clk); g++;
+          end
+          if (l2_ar_count != l2_ar_mark)
+            $fatal(1, "HUM_R1_FILL_LAUNCHED ar=%0d", l2_ar_count);
+          if (pw_line_hold == 0) $fatal(1, "HUM_R1_NO_HOLD");
+          // The hold pulse alone does not prove the commit gate held — it
+          // also fires on a miss that leaked through a dropped R1. Confirm
+          // no miss AR leaves while the write's B is still held.
+          for (g = 0; g < 40 && l2_ar_count == l2_ar_mark; g++)
+            @(posedge clk);
+          if (l2_ar_count != l2_ar_mark)
+            $fatal(1, "HUM_R1_FILL_LAUNCHED ar=%0d", l2_ar_count);
+        end
+        if (l2_idle_w) $fatal(1, "HUM_IDLE_EARLY");
+        memory_b_hold = 1'b0;
+        wait_done();                                 // fill = post-write bytes
+        if (!l2_idle_w) $fatal(1, "HUM_IDLE_LATE");
+        if (pw_posted != 1) $fatal(1, "HUM_POSTED_COUNT %0d", pw_posted);
+      end
+      // (a2) Resident-line read hit during a tracked write serves the
+      // merged bytes immediately — R1 holds only misses (WU merge path).
+      50: begin
+        if (!POSTED_WRITES || !WRITE_UPDATE)
+          $fatal(1, "HUM_POSTED_WU_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        push(4'd1, 64'h24100, 0);
+        wait_done();                                 // line resident
+        memory_b_hold = 1'b1;
+        send_write(4'd2, 64'h24108, 6'h00);          // merge + posted
+        push(4'd3, 64'h24108, 0);                    // hit — no hold
+        wait_done();                                 // merged bytes verified
+        memory_b_hold = 1'b0;
+        while (write_completed != 1) @(negedge clk);
+      end
+      // (b) Different-id write to a tracked line: the AW holds until B
+      // (R2). +mem_reorder_ids lets a leaked write genuinely reorder at
+      // memory — the older value then wins and the content check catches it.
+      51: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        memory_b_hold = 1'b1;
+        send_write_b(4'd1, 64'h24200, 6'h00, 4'hf, 1'b0, 0,
+                     64'h1111_1111_1111_1111, '1);
+        bexp[4'd2]++;
+        @(negedge clk);
+        slv_req.aw = '{id: 4'd2, addr: 64'h24200, len: 0, size: 3'd3,
+                       burst: axi_pkg::BURST_INCR, atop: 6'h00, cache: 4'hf,
+                       lock: 1'b0, default: '0};
+        slv_req.aw_valid = 1'b1;
+        begin automatic bit aw_acc = 1'b0;
+          repeat (10) begin
+            @(posedge clk);
+            // aw_ready is a one-cycle pulse — a leaked accept drops before a
+            // single post-window sample would see it.
+            if (slv_resp.aw_ready) aw_acc = 1'b1;
+          end
+          if (aw_acc) $fatal(1, "HUM_R2_AW_ACCEPTED");
+        end
+        if (pw_line_hold == 0) $fatal(1, "HUM_R2_NO_HOLD");
+        memory_b_hold = 1'b0;
+        do @(posedge clk); while (!slv_resp.aw_ready);
+        @(negedge clk);
+        slv_req.aw_valid = 1'b0;
+        slv_req.w = '{data: 64'h2222_2222_2222_2222, strb: '1, last: 1'b1,
+                      user: '0};
+        slv_req.w_valid = 1'b1;
+        do @(posedge clk); while (!slv_resp.w_ready);
+        @(negedge clk);
+        slv_req.w_valid = 1'b0;
+        while (write_completed != 2) @(negedge clk);
+        if (patched_word(64'h24200) != 64'h2222_2222_2222_2222)
+          $fatal(1, "HUM_R2_MEMORY_ORDER %h", patched_word(64'h24200));
+      end
+      // (c) Same-id consecutive writes to one line: admitted without the
+      // R2 hold (same id), per-id B order preserved.
+      52: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        memory_b_hold = 1'b1;
+        send_write_b(4'd3, 64'h24300, 6'h00, 4'hf, 1'b0, 0,
+                     64'h3333_3333_3333_3333, '1);
+        bexp[4'd3]++;
+        @(negedge clk);
+        slv_req.aw = '{id: 4'd3, addr: 64'h24300, len: 0, size: 3'd3,
+                       burst: axi_pkg::BURST_INCR, atop: 6'h00, cache: 4'hf,
+                       lock: 1'b0, default: '0};
+        slv_req.aw_valid = 1'b1;
+        begin automatic int g = 0;
+          do begin @(posedge clk); g++; end while (!slv_resp.aw_ready && g < 200);
+          if (g >= 200) $fatal(1, "HUM_SAMEID_HELD");
+        end
+        @(negedge clk);
+        slv_req.aw_valid = 1'b0;
+        slv_req.w = '{data: 64'h4444_4444_4444_4444, strb: '1, last: 1'b1,
+                      user: '0};
+        slv_req.w_valid = 1'b1;
+        do @(posedge clk); while (!slv_resp.w_ready);
+        @(negedge clk);
+        slv_req.w_valid = 1'b0;
+        memory_b_hold = 1'b0;
+        while (write_completed != 2) @(negedge clk);
+        if (patched_word(64'h24300) != 64'h4444_4444_4444_4444)
+          $fatal(1, "HUM_SAMEID_ORDER %h", patched_word(64'h24300));
+      end
+      // (d) Full write tracker: the next AW backpressures (wtrk_full
+      // pulse), nothing is lost.
+      53: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        memory_b_hold = 1'b1;
+        for (int k = 0; k < WTRK_DEPTH; k++)
+          send_write_b(id_t'(k + 1), 64'h24400 + addr_t'(k) * 64'h100, 6'h00,
+                       4'hf, 1'b0, 0, 64'h5555 + data_t'(k), '1);
+        bexp[4'd9]++;
+        @(negedge clk);
+        slv_req.aw = '{id: 4'd9, addr: 64'h24800, len: 0, size: 3'd3,
+                       burst: axi_pkg::BURST_INCR, atop: 6'h00, cache: 4'hf,
+                       lock: 1'b0, default: '0};
+        slv_req.aw_valid = 1'b1;
+        repeat (10) @(posedge clk);
+        if (slv_resp.aw_ready) $fatal(1, "HUM_WTRK_FULL_ACCEPTED");
+        if (pw_wtrk_full == 0) $fatal(1, "HUM_WTRK_FULL_NO_PULSE");
+        memory_b_hold = 1'b0;
+        do @(posedge clk); while (!slv_resp.aw_ready);
+        @(negedge clk);
+        slv_req.aw_valid = 1'b0;
+        slv_req.w = '{data: 64'h9999, strb: '1, last: 1'b1, user: '0};
+        slv_req.w_valid = 1'b1;
+        do @(posedge clk); while (!slv_resp.w_ready);
+        @(negedge clk);
+        slv_req.w_valid = 1'b0;
+        while (write_completed != WTRK_DEPTH + 1) @(negedge clk);
+      end
+      // (e) Posted Bs from four requesters route back to their own ids —
+      // +mem_reorder_ids lets them arrive in any cross-id order; the per-id
+      // B accounting catches a misroute.
+      54: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        memory_b_hold = 1'b1;
+        for (int k = 0; k < 4; k++)
+          send_write_b(id_t'(10 + k), 64'h24A00 + addr_t'(k) * 64'h100, 6'h00,
+                       4'hf, 1'b0, 0, 64'haa00 + data_t'(k), '1);
+        memory_b_hold = 1'b0;
+        while (write_completed != 4) @(negedge clk);
+        if (pw_posted != 4) $fatal(1, "HUM_POSTED_COUNT %0d", pw_posted);
+      end
+      // (f) Tracked NC reads interleaved with a hit response and a fill
+      // serve — every slave R burst stays atomic (HUM_R_INTERLEAVE fires
+      // on any cut-in).
+      55: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        push(4'd1, 64'h24B00, 0);
+        wait_done();                                 // line resident
+        push(4'd2, 64'h24B40, 2, 4'b0000);           // NC read, 3 beats
+        push(4'd1, 64'h24B00, 0);                    // hit response
+        push(4'd3, 64'h24BC0, 1, 4'b0000);           // NC read, 2 beats
+        push(4'd4, 64'h24C00, 0);                    // miss -> fill serve
+        wait_done();
+        if (pw_rdtrk < 2) $fatal(1, "HUM_RDTRK_NO_TRACK %0d", pw_rdtrk);
+      end
+      // (g) Same-id ordering (R5): a hit response whose id has a live
+      // tracked read holds until that read's burst completes — the
+      // collector's per-id queue detects any out-of-order R.
+      56: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        push(4'd5, 64'h24D00, 0);
+        wait_done();                                 // line resident
+        memory_hold = 1'b1;
+        push(4'd5, 64'h24D40, 3, 4'b0000);           // tracked NC read id5
+        begin automatic int g = 0;
+          while (pw_rdtrk_push == 0 && g < 200) begin @(posedge clk); g++; end
+          if (pw_rdtrk_push == 0) $fatal(1, "HUM_RDTRK_NO_ENTRY");
+        end
+        push(4'd5, 64'h24D00, 0);                    // same-id hit — R5 hold
+        begin automatic int g = 0;
+          while (pw_r5_hold == 0 && g < 200) begin @(posedge clk); g++; end
+          if (pw_r5_hold == 0) $fatal(1, "HUM_R5_NO_HOLD");
+        end
+        memory_hold = 1'b0;
+        wait_done();
+      end
+      // (h) ATOP and lock writes take the blocking path (tracker entry
+      // blocking=1, no posted pulse) and still receive their B/R.
+      57: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        send_write_b(4'd7, 64'h24E00, axi_pkg::ATOP_ATOMICSWAP, 4'hf, 1'b0,
+                     0, 64'h7777, '1);
+        send_write_b(4'd7, 64'h24E40, 6'h00, 4'hf, 1'b1, 0, 64'h8888, '1);
+        begin automatic int g = 0;
+          while ((write_completed != 2 || mem_atomic_r != 1) && g < 2000) begin
+            @(posedge clk); g++;
+          end
+          if (g >= 2000) $fatal(1, "HUM_BLOCKING_TIMEOUT");
+        end
+        if (pw_posted != 0) $fatal(1, "HUM_BLOCKING_POSTED %0d", pw_posted);
+      end
+      // (i) Posted write racing an in-flight same-line fill: kill_match
+      // semantics unchanged — write posts and reaches memory, the killed
+      // fill drains, later reads return post-write data.
+      58: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        memory_hold = 1'b1;
+        l2_ar_mark = l2_ar_count;
+        push(4'd1, 64'h24F00, 0);
+        while (l2_ar_count == l2_ar_mark) @(negedge clk);  // fill AR out
+        repeat (4) @(negedge clk);
+        send_write(4'd2, 64'h24F08, 6'h00);          // posts while fill held
+        while (write_completed != 1) @(negedge clk);
+        memory_hold = 1'b0;
+        wait_done();
+        l2_ar_mark = l2_ar_count;
+        push(4'd3, 64'h24F08, 0);                    // refetch post-write data
+        wait_done();
+        if (pw_posted != 1) $fatal(1, "HUM_POSTED_COUNT %0d", pw_posted);
+      end
+      // (j) l2_write_idle_o: deasserts while a posted write is tracked,
+      // reasserts only after the tracker drains — the CMO engine's
+      // clean/flush ordering input.
+      59: begin
+        if (!POSTED_WRITES) $fatal(1, "HUM_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        if (!l2_idle_w) $fatal(1, "HUM_IDLE_BASELINE");
+        memory_b_hold = 1'b1;
+        send_write(4'd3, 64'h25000, 6'h00);
+        repeat (3) @(posedge clk);
+        if (l2_idle_w) $fatal(1, "HUM_IDLE_WHILE_TRACKED");
+        memory_b_hold = 1'b0;
+        while (write_completed != 1) @(negedge clk);
+        repeat (3) @(posedge clk);
+        if (!l2_idle_w) $fatal(1, "HUM_IDLE_AFTER_DRAIN");
+      end
       default: $fatal(1, "HUM_SCENARIO");
     endcase
 
+    // Write-only scenarios complete no slave R beats; close the window on
+    // the scenario's own cycle counter instead of the last read beat.
+    if (end_cyc <= start_cyc) end_cyc = cyc;
     $display("HUM_METRICS scenario=%0d cycles=%0d dram_ar=%0d fills=%0d merges=%0d responses=%0d",
              scenario, end_cyc - start_cyc, mem_ar_count, fills, merges, completed);
     $display("RTL_REVIEW_PASS hum scenario=%0d", scenario);

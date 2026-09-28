@@ -13,6 +13,11 @@ module g6lc_l3_top
     // Write-update: forwarded cacheable writes merge into resident lines
     // instead of purging them (see g6lc_l2_top WRITE_UPDATE / l2 README).
     parameter bit          WRITE_UPDATE = 1'b0,
+    // T9b posted writes / bypass-read tracking at the L3 level (see
+    // g6lc_l2_top POSTED_WRITES); pass-through of the cluster config.
+    parameter bit          POSTED_WRITES = 1'b0,
+    parameter int unsigned WTRK_DEPTH    = 4,
+    parameter int unsigned RDTRK_DEPTH   = 4,
     parameter int unsigned BYTE_SIZE   = L3_DEFAULT_BYTE_SIZE,
     parameter int unsigned SET_ASSOC   = L3_DEFAULT_SET_ASSOC,
     parameter int unsigned LINE_WIDTH  = L3_DEFAULT_LINE_WIDTH,
@@ -40,6 +45,12 @@ module g6lc_l3_top
     // Observability pulse (WRITE_UPDATE): a forwarded write merged into a
     // resident L3 line. TB counts it as l3_wupd.
     output logic      l3_wupdate_o,
+    // T9b observability at L3 (see g6lc_l2_top l2_*_o outputs).
+    output logic      l3_wtrk_full_o,
+    output logic      l3_wtrk_line_hold_o,
+    output logic      l3_posted_o,
+    output logic      l3_rdtrk_o,
+    output logic      l3_posted_hold_o,
     // Victim replace — inclusive back-inval toward L1/L2. Valid/ready offer:
     // the victim commit inside holds until l3_evict_ready_i accepts the
     // notification. Tie high when no inclusive engine is connected.
@@ -62,6 +73,9 @@ module g6lc_l3_top
       .FAIR_WRITES    (FAIR_WRITES),
       .TAG_SRAM       (TAG_SRAM),
       .WRITE_UPDATE   (WRITE_UPDATE),
+      .POSTED_WRITES  (POSTED_WRITES),
+      .WTRK_DEPTH     (WTRK_DEPTH),
+      .RDTRK_DEPTH    (RDTRK_DEPTH),
       .BYTE_SIZE      (BYTE_SIZE),
       .SET_ASSOC      (SET_ASSOC),
       .LINE_WIDTH     (LINE_WIDTH),
@@ -85,6 +99,11 @@ module g6lc_l3_top
       .l2_bypass_o        (l3_bypass_o),
       .l2_selfinv_hit_o   (l3_selfinv_hit_o),
       .l2_wupdate_o       (l3_wupdate_o),
+      .l2_wtrk_full_o     (l3_wtrk_full_o),
+      .l2_wtrk_line_hold_o(l3_wtrk_line_hold_o),
+      .l2_posted_o        (l3_posted_o),
+      .l2_rdtrk_o         (l3_rdtrk_o),
+      .l2_posted_hold_o   (l3_posted_hold_o),
       .l2_mshr_full_o     (full),
       .l2_bank_conflict_o (bank_cfl),
       .l2_evict_valid_o   (l3_evict_valid_o),

@@ -93,6 +93,9 @@ module tb_g6lc_l2;
   parameter int unsigned SEED        = 32'h600d_f00d;
   parameter int unsigned TAG_SRAM    = 0;       // tag array behind tc_sram
   parameter int unsigned WRITE_UPDATE = 0;      // resident-line write merge (T8f)
+  parameter int unsigned POSTED_WRITES = 0;     // posted writes + read tracking (T9b)
+  parameter int unsigned WTRK_DEPTH   = 4;
+  parameter int unsigned RDTRK_DEPTH  = 4;
   parameter int unsigned EQ_NEGATIVE = 0;       // eq-mode mutation: flips the signature hit tap
 
   localparam int unsigned LINE_BYTES = LINE_WIDTH / 8;                    // 64
@@ -131,6 +134,9 @@ module tb_g6lc_l2;
       .RR_EN       (bit'(RR_EN)),
       .TAG_SRAM    (bit'(TAG_SRAM)),
       .WRITE_UPDATE (bit'(WRITE_UPDATE)),
+      .POSTED_WRITES (bit'(POSTED_WRITES)),
+      .WTRK_DEPTH   (WTRK_DEPTH),
+      .RDTRK_DEPTH  (RDTRK_DEPTH),
       .AXI_ADDR_WIDTH (AW),
       .AXI_DATA_WIDTH (DW),
       .AXI_ID_WIDTH   (IDW),
@@ -151,6 +157,11 @@ module tb_g6lc_l2;
       .l2_bank_conflict_o (l2_bank_conf),
       .l2_selfinv_hit_o   (l2_selfinv_hit),
       .l2_wupdate_o       (l2_wupd),
+      .l2_wtrk_full_o     (),
+      .l2_wtrk_line_hold_o(),
+      .l2_posted_o        (),
+      .l2_rdtrk_o         (),
+      .l2_posted_hold_o   (),
       .l2_evict_valid_o   (evict_v),
       .l2_evict_addr_o    (evict_addr),
       .l2_evict_ready_i   (1'b1),
@@ -882,24 +893,54 @@ module tb_g6lc_l2;
   endtask
 
   task automatic manual_b(input id_t id);
+    int unsigned guard;
     manual_resp.b_valid = 1;
     manual_resp.b = '{id: id, resp: axi_pkg::RESP_OKAY, user: '1};
     slv_req.b_ready = 0;
-    repeat (3) begin
+    if (POSTED_WRITES) begin
+      // Uniform tracker routing (T9b): the memory B is absorbed into the
+      // matching entry as it arrives and re-presented on the slave B
+      // channel from stored state the next cycle. The hold contract is
+      // then the same: valid + stable metadata until the slave accepts.
       @(posedge clk);
-      if (!slv_resp.b_valid || slv_resp.b !== manual_resp.b || mst_req.b_ready)
-        $fatal(1, "ATOP B hold/metadata");
       @(negedge clk);
+      manual_resp.b_valid = 0;
+      guard = 0;
+      while (!slv_resp.b_valid) begin
+        @(posedge clk);
+        guard = guard + 1;
+        if (guard >= 1000) $fatal(1, "ATOP B never presented");
+        @(negedge clk);
+      end
+      repeat (3) begin
+        @(posedge clk);
+        if (!slv_resp.b_valid || slv_resp.b !== manual_resp.b)
+          $fatal(1, "ATOP B hold/metadata");
+        @(negedge clk);
+      end
+      slv_req.b_ready = 1;
+      @(posedge clk);
+      if (!slv_resp.b_valid) $fatal(1, "ATOP B handshake");
+      @(negedge clk);
+      slv_req.b_ready = 0;
+    end else begin
+      repeat (3) begin
+        @(posedge clk);
+        if (!slv_resp.b_valid || slv_resp.b !== manual_resp.b || mst_req.b_ready)
+          $fatal(1, "ATOP B hold/metadata");
+        @(negedge clk);
+      end
+      slv_req.b_ready = 1;
+      @(posedge clk);
+      if (!mst_req.b_ready || !slv_resp.b_valid) $fatal(1, "ATOP B handshake");
+      @(negedge clk);
+      manual_resp.b_valid = 0;
+      slv_req.b_ready = 0;
     end
-    slv_req.b_ready = 1;
-    @(posedge clk);
-    if (!mst_req.b_ready || !slv_resp.b_valid) $fatal(1, "ATOP B handshake");
-    @(negedge clk);
-    manual_resp.b_valid = 0;
-    slv_req.b_ready = 0;
   endtask
 
   task automatic manual_r(input id_t id, input data_t data);
+    logic saw_b = 1'b0;
     manual_resp.r_valid = 1;
     manual_resp.r = '{id: id, data: data, resp: axi_pkg::RESP_OKAY, last: 1'b1, user: '1};
     slv_req.r_ready = 0;
@@ -907,12 +948,21 @@ module tb_g6lc_l2;
       @(posedge clk);
       if (!slv_resp.r_valid || slv_resp.r !== manual_resp.r || mst_req.r_ready || dut.gen_l2.mst_r_ot_q)
         $fatal(1, "ATOP R hold/metadata/AR-credit");
-      if (manual_resp.b_valid && (!slv_resp.b_valid || !mst_req.b_ready))
-        $fatal(1, "concurrent ATOP B handshake");
+      // Under POSTED the tracker absorbs the B on arrival (mst b_ready is
+      // the absorb handshake); on the blocking path it must also reach the
+      // slave in the same window — either way, no B starvation behind R.
+      if (manual_resp.b_valid) begin
+        saw_b = 1'b1;
+        if (POSTED_WRITES ? !mst_req.b_ready
+                          : (!slv_resp.b_valid || !mst_req.b_ready))
+          $fatal(1, "concurrent ATOP B handshake");
+      end
       @(negedge clk);
       if (manual_resp.b_valid) begin
         manual_resp.b_valid = 0;
-        slv_req.b_ready = 0;
+        // Under POSTED the absorbed B re-presents from the tracker a cycle
+        // later — keep b_ready up so the pop can land (drained below).
+        if (!POSTED_WRITES) slv_req.b_ready = 0;
       end
     end
     slv_req.r_ready = 1;
@@ -922,6 +972,16 @@ module tb_g6lc_l2;
     @(negedge clk);
     manual_resp.r_valid = 0;
     slv_req.r_ready = 0;
+    if (POSTED_WRITES && saw_b) begin
+      int unsigned bwait = 0;
+      while (b_left != 0) begin
+        @(posedge clk);
+        bwait = bwait + 1;
+        if (bwait >= 1000) $fatal(1, "ATOP B never retired");
+        @(negedge clk);
+      end
+      slv_req.b_ready = 0;
+    end
   endtask
 
   task automatic atop_forward(input int unsigned mode);
@@ -1320,6 +1380,10 @@ module g6lc_l2_fixture
   parameter bit CHAIN_L3 = 1'b0,
   parameter bit TAG_SRAM = 1'b0,
   parameter bit WRITE_UPDATE = 1'b0,
+  // T9b posted writes + bypass-read tracking.
+  parameter bit POSTED_WRITES = 1'b0,
+  parameter int unsigned WTRK_DEPTH = 4,
+  parameter int unsigned RDTRK_DEPTH = 4,
   // The flop-vs-SRAM miter excludes back-invalidation: its two-cycle commit
   // (vs one on the flop path) is a permitted timing difference.
   parameter bit NO_INVAL = 1'b0
@@ -1346,6 +1410,9 @@ module g6lc_l2_fixture
 `ifndef L2TB_LEGACY
       .TAG_SRAM(TAG_SRAM),
       .WRITE_UPDATE(WRITE_UPDATE),
+      .POSTED_WRITES(POSTED_WRITES),
+      .WTRK_DEPTH(WTRK_DEPTH),
+      .RDTRK_DEPTH(RDTRK_DEPTH),
 `endif
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),
       .AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),.axi_req_t(req_t),.axi_resp_t(resp_t)
@@ -1355,6 +1422,8 @@ module g6lc_l2_fixture
 `ifndef L2TB_LEGACY
       .l3_selfinv_hit_o(),
       .l3_wupdate_o(),
+      .l3_wtrk_full_o(), .l3_wtrk_line_hold_o(), .l3_posted_o(),
+      .l3_rdtrk_o(), .l3_posted_hold_o(),
 `endif
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
       .l3_write_idle_o(), .l3_back_inval_valid_i(1'b0),
@@ -1372,6 +1441,9 @@ module g6lc_l2_fixture
     .FAIR_WRITES(FAIR_WRITES),
     .TAG_SRAM(TAG_SRAM),
     .WRITE_UPDATE(WRITE_UPDATE),
+    .POSTED_WRITES(POSTED_WRITES),
+    .WTRK_DEPTH(WTRK_DEPTH),
+    .RDTRK_DEPTH(RDTRK_DEPTH),
 `endif
     .axi_req_t(req_t), .axi_resp_t(resp_t)
   ) i_l2 (
@@ -1381,6 +1453,8 @@ module g6lc_l2_fixture
 `ifndef L2TB_LEGACY
     .l2_selfinv_hit_o(),
     .l2_wupdate_o(),
+    .l2_wtrk_full_o(), .l2_wtrk_line_hold_o(), .l2_posted_o(),
+    .l2_rdtrk_o(), .l2_posted_hold_o(),
 `endif
     .l2_evict_valid_o(evict_o), .l2_evict_addr_o(evict_addr_o),
 `ifndef L2TB_LEGACY

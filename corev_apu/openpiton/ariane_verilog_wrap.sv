@@ -385,7 +385,9 @@ module ariane_verilog_wrap
     .l3_hit_i         ( 1'b0  ),
     .l3_miss_i        ( 1'b0  ),
     .pf_issue_i       ( 1'b0  ),
-    .pf_train_i       ( 1'b0  )
+    .pf_train_i       ( 1'b0  ),
+    .l2_pwhold_i      ( 1'b0  ),
+    .l3_pwhold_i      ( 1'b0  )
   );
 
 endmodule // ariane_verilog_wrap

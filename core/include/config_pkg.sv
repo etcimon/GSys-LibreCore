@@ -574,6 +574,11 @@ package config_pkg;
     bit          L2WriteUpdateEn;     // L2 merges a WT write into a resident line (T8f)
     bit          L2CmoEn;             // CMO sideband to cluster engine (T9a);
                                       // 0 = the core completes CBOs locally
+    bit          L2PostedWriteEn;     // posted writes + bypass-read tracking at
+                                      // L2/L3 (T9b); 0 folds to the blocking
+                                      // AW/W/B path
+    int unsigned L2WriteTrackDepth;   // write tracker entries (pow2 2..8, 0→4)
+    int unsigned L2ReadTrackDepth;    // bypass-read tracker entries (2..8, 0→4)
     // Xg6lcai AI matrix plane (off in every package but g6lc64_ai)
     ai_cfg_t     AiCfg;
   } cva6_user_cfg_t;
@@ -734,6 +739,9 @@ package config_pkg;
     bit          L2TagSramEn;
     bit          L2WriteUpdateEn;
     bit          L2CmoEn;
+    bit          L2PostedWriteEn;
+    int unsigned L2WriteTrackDepth;
+    int unsigned L2ReadTrackDepth;
     bit          ServerPrefetchEn;
     int unsigned ServerPfStreams;
     int unsigned ServerPfDistance;
@@ -1072,6 +1080,13 @@ package config_pkg;
     assert (!(Cfg.L2TagSramEn && !Cfg.L2En));
     assert (!(Cfg.L2WriteUpdateEn && !Cfg.L2En));
     assert (!(Cfg.L2CmoEn && !Cfg.L2En));
+    // T9b posted writes need the L2 engine; tracker depths are small powers
+    // of two (the compare cones stay 4-entry by default, ~1 FO4 each).
+    assert (!(Cfg.L2PostedWriteEn && !Cfg.L2En));
+    assert (Cfg.L2WriteTrackDepth == 0 ||
+            (Cfg.L2WriteTrackDepth inside {2, 4, 8}));
+    assert (Cfg.L2ReadTrackDepth == 0 ||
+            (Cfg.L2ReadTrackDepth inside {2, 4, 8}));
 
     // --- Xg6lcai AI matrix plane (architecture/ai-matrix/isa-encoding.md) ---
     // Seam exclusivity. CVXIF and the accelerator port are already mutually
