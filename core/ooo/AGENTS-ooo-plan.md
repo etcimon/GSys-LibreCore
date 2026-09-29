@@ -2425,3 +2425,174 @@ mixed L0: 10,556,456 cycles, rvfi hart_00 sha256 `6fd35592317c21393d6465e0d79576
 `both_resident_cycles`=60,914, `cross_hart_port1_commits`=4,851,
 `hol_residual`=1,488, retired h0=8,810,200 / h1=462,035 — byte-identical to
 the M2 measurement).
+
+### T9f — M3: frontend/window uplift measured on `g6lc64_ooo_int2_l3`/`g6lc64_smt2_ooo_int` — **measured, not adopted** (2026-09-28/29)
+
+**Scope.** Both production OoO targets ran `NrScoreboardEntries = 8` (inherited
+from `g6lc64_smt2`); the scoreboard ring is the real in-flight window
+(`TRANS_ID_BITS = clog2(NR_SB_ENTRIES)`). The M3 uplift (ring 32, TAGE_LITE,
+DeepSpec/memdep, LSQ 16/8, FTQ 8/FDIP/loop buffer) was built, gated, measured —
+and **every candidate knob regresses the strict four-hart boot**, so both
+qualification packages stay at the M1d geometry (ring 8, BHT, `BPCkptDepth=0`).
+What remains landed: the frontend switch-safety fix the work exposed, its
+formal/leaf evidence, the bp-leaf hart-isolation evidence, and the
+`+misp_stats` recovery probe.
+
+**Landed: frontend switch safety.** A directed counterexample surfaced first:
+`ooocoh-m3-wr-int2l3-L0-r3` double-committed the window at
+`0x80000040`/`0x80000044` on an SMT hart switch. Root cause was not a missing
+flush (`controller.sv` asserts `flush_if_o` on every `smt_switch_i`, and the
+frontend's `smt_restore_flush` terms already cover FTQ/loop-buffer/FDIP
+state): in `frontend.sv` the `SRC_RESTORE` case reseeded the FTQ at `arch_pc`
+with `arch_step = 1'b0`, so `npc_q` stayed on the restore PC and the next
+sequential `if_ready` re-pushed the same window. Fix: `arch_step = FtqEn`
+(`core/fetch_B/frontend.sv`, ~line 566). Evidence on the fixed RTL: bounded
+formal `core/fetch_B/formal/g6lc_fetch_restore.sby` (bmc, yices, depth 16,
+NrHarts=2/FtqDepth=8/LoopBufEn=1) **PASS**; directed leaf
+`verif/tb/core/tb_g6lc_fetch_restore.sv` **PASS** (restore window demanded
+exactly once; `G6LC_MUT_FETCH_RESTORE_NOFLUSH` fails `FETCH_RESTORE_STALE` as
+designed); bp leaf `tb_g6lc_rtl_review.sv` NR_HARTS=2 hart-isolation holds and
+`mut-shareghr` is detected. `g6lc64_smt2` identity: byte-exact boot
+(12,406,273 cycles, rvfi sha `e0858842b829e5e2` — the `arch_step` term is
+inert at `FtqDepth=0`).
+
+**Measured result — NOT adopted.** Uplifted `g6lc64_ooo_int2_l3` strict boot
+22,376,701 (+21.7 % vs the 18,389,755 anchor) and `g6lc64_smt2_ooo_int` mixed
+boot 13,603,015 (+28.9 %); `mc_branchy` +36.7 %.
+
+**Recovery mechanism (from source — quoted).** A resolved mispredict does
+**not** flash-free younger state; it *marks and drains*:
+
+- `core/scoreboard.sv` (`bmiss` loop): every same-hart entry younger than the
+  branch is marked `mem_n[i].cancelled = 1'b1` but keeps `sbe.valid` — the
+  slot stays occupied.
+- `issue_pointer` only advances by the allocation count
+  (`issue_pointer_n = issue_pointer[num_issue]`); it is **not** rolled back —
+  new correct-path allocations land *after* the dead entries in the ring.
+- `commit_drop_o[i] = mem_q[commit_sel_slot[i]].cancelled` — cancelled entries
+  retire through the in-order commit head as drops at commit width (2/cycle).
+- `core/ooo/g6lc_rob.sv`: `cancelled_mask_i` marks younger ROB entries
+  *complete* so in-order retire can drain them; freed by tid on the normal
+  retire path — the ROB head does not jump.
+- `core/ooo/g6lc_rename.sv`: rename map + free list **are** restored in one
+  cycle to the branch's checkpoint (`map_d[ckpt_hart_q[level]]`,
+  `free_d |= squashed`) — checkpoint restore is already fast; occupancy drain
+  is the slow part.
+- IQ/LSQ/LSU (`g6lc_iq.sv`, `g6lc_lsq.sv`, `load_store_unit.sv`) drop
+  cancelled entries combinationally via `cancelled_mask_i` — they do not
+  wait for the drain.
+
+**`+misp_stats` probe** (translate_off, `core/scoreboard.sv`): per mispredict —
+cycles from `resolved_branch_i.is_mispredict` to the first post-resolution
+correct-path commit (allocation-epoch tagged, per-hart filtered) and the
+in-flight issued-uncommitted count at resolution; mean/max/histogram plus
+per-hart `bptrain`/`miss` at `final`.
+
+**Ablation — each knob isolated** (package overlays of
+`g6lc64_ooo_int2_l3`, the package itself never edited; L0, `PMU_G1`,
+`+misp_stats`):
+
+| Lane | Knobs over M1d | `mc_branchy` | `mc_l2_write_read` | `ooo_ilp_chain` | `ooo_mem_dep` | Boot L0 (anchor 18,389,755) |
+|---|---|---:|---:|---:|---:|---:|
+| M1d | — | 3,603,094 | 160,187 | 1,587 | 1,897 | **18,389,755** pass (exact anchor) |
+| A0 | **ring 32 only** (ckpt 0) | 3,603,094 | 159,666 | 1,493 | 1,812 | **24,000,000 cap — timeout** |
+| A | ring 32 + ckpt 32 | 3,603,094 | 159,615 | 1,493 | 1,821 | **24,000,000 cap — timeout** |
+| B | TAGE_LITE + ITTAGE/loop/statcor + ckpt 32 | 3,604,260 | 160,198 | 1,584 | 1,895 | **24,000,000 cap — timeout** |
+| C | FTQ 8 + FDIP 2 + loop buffer 8 | **4,919,262 (+36.5 %)** | **176,637 (+10.3 %)** | 1,583 | **2,026 (+6.8 %)** | 19,192,298 (+4.4 %) pass |
+| D | DeepSpec + memdep + LSQ 16/8 + stores 8 + ckpt 32 | 3,603,094 | 159,615 | 1,493 | 1,819 | **24,000,000 cap — timeout** |
+| E | ring 16 + ckpt 32 | 3,603,094 | 159,615 | 1,493 | 1,819 | **24,000,000 cap — timeout** |
+
+Mispredict counts (PMU; `mc_branchy`): M1d/A/A0/D/E 98,111 · B 97,924 · C
+98,111 — all flat. `iqStall` = 0 everywhere. Model SHAs: m1d `a513ce30`,
+A0 `737a1682`, A `b8f541f9`, B `39ce12ad`, C `b70f827f`, D `a3a278f9`,
+E `9f8fd530`. All lanes `ooocoh-m3abl-*-r3`.
+
+**Reading — four independent costs, not one.**
+
+1. **`NrScoreboardEntries > 8` alone breaks the boot.** The clean ring-32
+   lane (A0, `BPCkptDepth=0` — proven legal: every `check_cfg` ckpt assert is
+   `ckpt != 0 → …`) timed out at the 24 M cap, as did ring-16 (E) and
+   ring-32+ckpt (A): all three show only ~7 k branch mispredicts (vs M1d's
+   131 k) but doubled recovery means (A 17.4 / E 17.5 / A0 17.2 cycles vs M1d
+   8.3) with a new tail at 88–124 cycles — deep drains are real when the ring
+   holds > 8. A/E additionally log ~18.3 M retirements on the dominant hart
+   vs M1d's 15.46 M — ~2.8 M *extra* commit events, i.e. squashed/replayed
+   work draining through commit. **Mechanism hypothesis (unrooted — M3b must
+   confirm):** the drained handoff serializes every hart switch on the ring
+   being empty; a 2–4× window multiplies per-switch drain work on a
+   switch-heavy boot, and/or flush-adjacent replays scale with occupancy.
+   Kernels never see it because they run one active hart.
+2. **TAGE_LITE thrashes on the boot stream:** lane B logged 622,336 branch
+   resolves marked mispredict vs M1d's 130,923 (+375 %) — the 3×64-entry
+   tables alias destructively. On `mc_branchy` it was neutral because LFSR
+   data-dependent branches are uncorrelatable for any predictor. Per-hart
+   banking is correct (`bptrain_h1`/`miss_h1` track the second hart), so this
+   is a table-size/correlation limit, not a training-path bug.
+3. **DeepSpec/memdep is boot-poisonous at ring 8:** lane D made the least
+   progress of any timeout lane (~7.1 M retirements at the cap) —
+   speculation replays dominate, not branch recovery.
+4. **FTQ/FDIP/loop buffer is the only bounded-but-real frontend tax:** C is
+   +4.4 % on the boot and +36.5 % on `mc_branchy` with a flat mispredict
+   count and identical 7.0-cycle recovery mean — the cost lands on
+   *correct-path* control transfers (~+2 cycles × ~720 k resolves ≈ the
+   +1.32 M delta), i.e. the FTQ redirect walk / FDIP bandwidth, hidden under
+   L40 memory latency (the M3-full wr-L40 lane was −0.1 %).
+
+**Recovery scaling verdict (M3b justification).** At ring 8 every lane shows
+mean ~7–8.5 cycles resolved→first-commit, dominated by the 4-cycle
+front-end-refill bucket — drain-at-commit-head is real in the source but
+hidden under refill while infl ≤ 8. At ring ≥ 16 the boot probes show
+infl_max 16–17, mean doubling to ~17–19, and a drain tail at 88–124 cycles —
+recovery *does* scale with in-flight depth once the window fills. The M3b
+fast-squash sketch stands for deep-window work, but the measured blocker is
+upstream of it.
+
+**Decision (applied):** no lane satisfies "≤ M1d boot **and** ≤ M1d
+`mc_branchy`" — nothing is adopted; `g6lc64_ooo_int2_l3` and
+`g6lc64_smt2_ooo_int` stay at the M1d geometry. `g6lc64_smt2` identity
+byte-exact (above).
+
+**M3b candidate — fast squash (design sketch, NOT implemented).** Goal:
+one-cycle invalidation of same-hart younger entries instead of
+drain-at-commit-head.
+
+- **Scoreboard**: reuse the existing bmiss younger-than+same-hart mask to
+  drive `sbe.valid=0` directly (instead of sticky `cancelled` + drain),
+  restore `num_free`, and roll `issue_pointer` back to branch+1 (the branch
+  itself retires normally).
+- **Tid-reuse hazard**: a freed slot can be reallocated while a killed load's
+  WB is still in flight — either tag slots with a generation/epoch bit
+  checked on WB/complete returns, or keep the LSU `cancelled_mask_i` kill
+  authoritative and suppress WB to freed tids.
+- **Commit head / ROB**: jump the head past the cancelled run (the head
+  selection already scans `commit_sel_slot`); ROB frees masked entries
+  instantly rather than via per-entry retire acks; no `commit_drop` is
+  produced for entries that never reach the head (no double-free, since the
+  rename checkpoint already returned their registers).
+- **Rename**: unchanged — checkpoint restore already returns map + free list
+  in one cycle.
+- **IQ/LSQ/LSU**: unchanged — `cancelled_mask_i` drops them combinationally.
+- **Mixed residency (T6b)**: the ring is shared and `issue_pointer` is
+  global — peer-hart entries younger than the branch must survive, so the
+  pointer cannot roll back past them. Fast squash applies to drained
+  (`SmtDrainedHandoff=1`: ring holds only the resolving hart at switch time)
+  and single-hart packages; `smt2_ooo_int` (mixed) keeps the drain path
+  unless the ring becomes a per-hart free list.
+- **FO4 estimate**: the younger-than mask exists combinationally today; the
+  delta is a `valid`-clear fan-out (~1 FO4), a `num_free` popcount (~2–3 FO4
+  at 32), pointer/head muxes (~1 FO4) → ≈ +2–4 on the issue/commit cones.
+  `sparse_smt_mixed_commit` was 31.0 at ring 32 — must re-screen; drained
+  targets have headroom.
+
+**M3b pre-work (recorded, not scheduled):** root-cause the ring>8 boot
+pathology before any window uplift — A0 (pure ring 32, ckpt 0) shows it is
+*not* a checkpoint-depth effect; per-switch drain or flush-adjacent replay is
+the suspect. TAGE needs bigger tables or a different boot profile before it
+can earn its area. DeepSpec needs a replay-rate counter to tune.
+
+**Legality note**: `RobEntries = max(NrScoreboardEntries, NrIssuePorts·16)` →
+floor 32 on int2_l3; `BPCkptDepth` is only constrained when non-zero
+(`OoOEn && ckpt != 0 → ckpt ≥ RobEntries`), so `ckpt=0` is legal at any ring —
+used by lane A0 to separate ring depth from checkpoint depth.
+
+**Artifacts**: `ooocoh-m3abl-*-r3` (ablation), `ooocoh-m3-*` (uplift runs).

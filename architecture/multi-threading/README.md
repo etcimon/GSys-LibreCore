@@ -19,6 +19,24 @@ refused. Evidence (probe matrix, isolation mutations, strict-boot anchor
 exactness, gates, FO4) is re-baselined on the eWT tree in
 `../../core/ooo/AGENTS-ooo-plan.md` T9d.
 
+2026-09-28 (T9f/M3, measured — **not adopted**): the M3 window uplift (ring 32,
+TAGE_LITE + indirect + ckpt 32, `DeepSpecEn`+`MemDepPredEn`, FTQ 8 / FDIP /
+loop buffer 8) was evaluated on `g6lc64_ooo_int2_l3` and `g6lc64_smt2_ooo_int`
+and **rejected on performance** — strict boots regressed (+21.7 % on
+int2_l3, +28.9 % on the smt2_ooo_int mixed boot) and `mc_branchy` +36.7 %.
+Both packages stay at the M1d ring-8 geometry. What remains landed is the
+frontend switch-safety fix it exposed: `smt_restore_i` must reseed the FTQ
+*and* step the cursor (`arch_step=FtqEn`; a restore that only reseeds
+re-fetched the same window and double-committed — real bug, fixed and
+proven by `core/fetch_B/formal/g6lc_fetch_restore.sby` +
+`tb_g6lc_fetch_restore`). The knob ablation (every uplifted knob regresses the boot independently —
+ring > 8 alone times out, TAGE_LITE multiplies mispredicts ~4.75×,
+DeepSpec/memdep replays dominate, FTQ/FDIP taxes every control transfer),
+the measured recovery mechanism (cancelled entries drain through the
+in-order commit head — `+misp_stats` shows ~8-cycle recovery at ring 8,
+doubling to ~17–19 once the window fills), and the M3b fast-squash
+candidate are in plan T9f.
+
 ## Current source-profiled OpenSBI qualification (2026-09-25)
 
 The four-hart `g6lc64_ooo_int2` profile now completes the strict supervisor/HSM payload on the

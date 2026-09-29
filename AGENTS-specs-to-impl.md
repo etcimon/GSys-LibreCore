@@ -231,6 +231,25 @@ the eWT tree (probe matrix, isolation mutations, drained-overlay exactness, stri
 gates, FO4) is in `core/ooo/AGENTS-ooo-plan.md` T9d. FP+mixed stays refused by the
 `OoOEn && FpPresent` legs.
 
+## SMT restore must step the FTQ cursor (2026-09-28, T9f/M3 finding)
+
+Instruction-stream liveness + hart-switch isolation (`#instr_fetch`): in
+`core/fetch_B/frontend.sv` the `SRC_RESTORE` architecture-source arm reseeds
+the FTQ at `smt_npc_restore_i` with `arch_reseed=1`; it must also set
+`arch_step = FtqEn` so `npc_d` advances to `next_block(arch_pc)` when the FTQ
+is enabled. With `arch_step=0` the reseeded window was pushed a second time
+by the next sequential `if_ready`, and the window's instructions committed
+twice on the hart switch (observed as `mc_l2_write_read` failing with
+duplicated commits at the restore boundary). `smt_restore_i` is also folded
+into the hart-blind flush wires (`smt_restore_flush` covering FTQ, loop
+buffer, FDIP bookkeeping) so no pre-switch state survives a restore;
+`controller.sv` asserts `flush_if_o` on every switch, so the terms are belt
+over an already-flushed suspenders — the leaf and the `NOFLUSH` mutant pin the
+contract anyway. `FtqDepth=0` packages elaborate none of this and are
+byte-identical (smt2 strict-boot rvfi sha unchanged). Bounded proof:
+`core/fetch_B/formal/g6lc_fetch_restore.sby` (bmc 16, NrHarts=2/FtqDepth=8/
+LoopBufEn=1); directed leaf `verif/tb/core/tb_g6lc_fetch_restore.sv`.
+
 ## Control-flow hold armed only by a pushed target (2026-09-23, SB=16 finding)
 
 Instruction-stream liveness (`#instr_fetch`): in `core/fetch_B/frontend.sv` (FTQ path only) the

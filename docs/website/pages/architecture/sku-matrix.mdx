@@ -24,7 +24,7 @@ aid**, not a formal datasheet.
 | `g6lc64_smt2` | 1–2 | Off | **2** | 1 | Often on | Off | Off | Dual-thread bring-up |
 | `g6lc64_ooo` | **2** | **On** | 1 | 1 | Optional | Off | Off | Dual-issue OoO lite — **refused in production** (see note) |
 | `g6lc64_ooo_int` | **2** | **On** | 1 | 1 | Optional | Off | Off | Integer-only OoO; bring-up / verification baseline |
-| `g6lc64_smt2_ooo_int` | **2** | **On** | **2** | 1 | L2 | Sstc | Off | **Production** SMT2 over OoO (drained handoff) |
+| `g6lc64_smt2_ooo_int` | **2** | **On** | **2** | 1 | L2 | Sstc | Off | **Production** SMT2 over OoO (mixed residency; M1d ring-8 window — T9f/M3 uplift not adopted) |
 | `g6lc64_ooo_int2` | **2** | **On** | **2** | **2** | **L2** | Sstc | Off | Two-core WT + `COH_OOO` integration target |
 | `g6lc64_ooo_server` | **4** | **On** | ≤2 | **2+** | **L2/L3 auto** | Check pkg | Off | Fat server OoO + multicore — **refused in production** (see note) |
 | `g6lc64_server_math` | **2** | Off | 1 | **2** | **L2 auto** | **On** | Off | KVM/math host C-light |

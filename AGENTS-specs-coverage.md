@@ -23,6 +23,21 @@ source-bound before/after queue-ID negatives, valid-queue controls and a failing
 generic synthesis reports no latches or combinational SCCs. This changes no RISC-V chapter status,
 floating-format grant, DMA coherence qualification or physical-readiness status.
 
+The custom island also has reduced-geometry DMA diagnostics for qid status, PMU overflow,
+retained failed-fetch completions and pending descriptor identity. Channel-level backpressure
+checks expose and repair offered-AR identity changes and C data read before retirement;
+both floating-pipeline settings pass the directed signed/tail arithmetic and stability checks.
+Fractional-clock nameplates have cross-language helper coverage. Aggregate-AXI strict lint,
+full admission/error-drain, FIFO parameter qualification, complete DMA synthesis/formal,
+SoC integration and physical closure remain open. These additions promote no ISA chapter.
+Completion FIFO geometry/full-replacement now has directed and inductive leaf safety coverage.
+The compatible iterative rate path has arithmetic/alias and no-combinational-divider structural
+checks. The registered-SRAM command FIFO additionally has an optional island/APB integration
+with capability, receipts/credits, configuration locking and a ready/valid seam; defaults remain
+off. Queued full-pressure and real-GEMM directed cases pass, as do Python ownership tests.
+Core-instruction propagation, Rust/QEMU queued execution and full-SoC/physical readiness remain
+open; no RISC-V chapter or complete memory-ordering obligation is promoted.
+
 ## OoO coherence continuation — qualification open
 
 Atomic response transport and same-cycle cache refill/invalidation have additional directed
@@ -149,6 +164,36 @@ from and replay for their own hart's stores only; mixed residency is production 
 `SmtDrainedHandoff || NrCores == 1`). Multi-core mixed residency stays
 qualification-gated; `int2`/`int2_l3` keep the drained handoff. Evidence re-baselined
 on the eWT tree in `core/ooo/AGENTS-ooo-plan.md` T9d.
+
+## Frontend switch safety — the landed part of the M3 window work (2026-09-28, T9f/M3)
+
+**`smt_restore_i` no longer leaves stale hart-blind frontend state.** The
+restore path now provably reseeds the FTQ to the restore PC *and* steps the
+NPC cursor (`arch_step=FtqEn`) — a restore that only reseeded re-pushed the
+same fetch window and double-committed it on the switch (found by
+`mc_l2_write_read` on the uplifted `int2_l3`, not by any bench). Coverage:
+`g6lc_fetch_restore` formal (bmc 16, NrHarts=2/FtqDepth=8/LoopBufEn=1) +
+`tb_g6lc_fetch_restore` directed leaf with the `G6LC_MUT_FETCH_RESTORE_NOFLUSH`
+mutant detected.
+
+**The ring-32 window itself was measured and NOT adopted.** The M3 uplift on
+`g6lc64_ooo_int2_l3`/`g6lc64_smt2_ooo_int` (NrScoreboardEntries 32, TAGE_LITE
+(ghist 24, 3×64/8b), BPCkptDepth 32, DeepSpecEn+MemDepPredEn, LSQ 16/8,
+FTQ 8/FDIP/loop buffer — resolved ROB 32/PRF 103/IQ 32) was functionally
+green (gates int2_l3 26/0+15/0, smt2_ooo_int 30/0+3/0, defaults at baseline;
+FO4 `sparse_smt_mixed_commit` 31.0 ≤ 32 at ring 32; `g6lc64_smt2`
+byte-identical, rvfi sha `e0858842b829e5e2`) but regressed every
+mispredict-bound lane: strict boots 22,376,701 / 13,603,015 (+21.7 % /
++28.9 %), `mc_branchy` +36.7 % with a flat mispredict count. The per-knob
+ablation (`ooocoh-m3abl-*-r3`) found four independent costs, not one:
+ring > 8 alone (clean `A0` overlay) times out the boot at the 24 M cap;
+TAGE_LITE multiplies boot mispredicts 4.75× (3×64-entry aliasing);
+DeepSpec/memdep+LSQ times out replay-dominated; and FTQ/FDIP/loop buffer
+taxes every control transfer (+36.5 % branchy, +4.4 % boot) — the
+cancelled-entry drain exists in the source but hides under refill at ring 8
+(probe mean ~8.3 cycles). Both packages stay at the M1d ring-8 geometry;
+the ablation table, `+misp_stats` recovery numbers and the M3b fast-squash
+candidate are in plan T9f.
 
 ## OoO with two harts under the drained handoff (2026-09-22)
 

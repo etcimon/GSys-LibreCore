@@ -168,8 +168,9 @@ prerequisite for this work under the existing dual license. No licensing policy 
   18,905,079, smt2_l3 13,691,686; latency-40 60M boots 40,712,259 /
   41,946,955. `l2_posted` ~0.5–0.86M per boot; `l2_line_hold` shows the
   R1/R2 holds absorbing the write-drain latency.
-  Open under the eWT plan: M1 qualification matrix; M3 — the int2 packages' real issue
-  window is `NrScoreboardEntries=8`.
+  Open under the eWT plan: M1 qualification matrix. (M3 — the int2 packages'
+  real issue window — was measured at T9f below and **not adopted**: packages
+  stay at ring 8; the M3b fast-squash candidate is the next step.)
 - [x] **Measured (T9c, 2026-09-28): M1c posted-write hold split** — `l2_line_hold` is
   ~100 % R2 (different-id same-line AW) on all four strict boots: R1 totals 1–155
   cycles, all write-around (`l2_hold_r1_wu`=0 everywhere; even the 4,096-line
@@ -213,6 +214,41 @@ prerequisite for this work under the existing dual license. No licensing policy 
   intended FAIL); composed+credits byte-matched M1b; gates 6/6; FO4 28.5.
   **M1 is closed** — the M1a–M1d ordering work is landed and measured end to
   end. See `core/ooo/AGENTS-ooo-plan.md` T9e.
+- [x] **Measured, NOT adopted (T9f, 2026-09-28): M3 frontend/window uplift —
+  packages stay at ring 8; M3b fast-squash is the candidate** — the uplift
+  (ring 32, TAGE_LITE + indirect + ckpt 32, DeepSpecEn+MemDepPred, LSQ 16/8,
+  MaxOutstandingStores 8, FTQ 8/FDIP/loop buffer 8) was functionally green
+  but regressed every mispredict-bound lane: int2_l3 boot 22,376,701 vs
+  18,389,755 (+21.7 %), smt2_ooo_int mixed 13,603,015 vs 10,556,456
+  (+28.9 %), `mc_branchy` +36.7 %. Both qualification packages are reverted
+  to the M1d geometry in the working tree. **What stays landed:** the
+  frontend switch-safety fix it exposed — `SRC_RESTORE` reseeded the FTQ
+  with `arch_step=0`, so the restore window re-pushed and double-committed
+  (`ooocoh-m3-wr-int2l3-L0-r3`); `arch_step=FtqEn` fixes it (`g6lc_fetch_restore`
+  formal bmc-16 PASS + `tb_g6lc_fetch_restore` leaf PASS, `NOFLUSH` mutant
+  detected), plus the bp-leaf hart-isolation + `mut-shareghr` evidence and
+  the `+misp_stats` recovery probe. **Mechanism (from source):** a mispredict
+  flash-marks younger same-hart scoreboard entries `cancelled`, but they
+  keep their slots and drain in order through the commit head as drops at
+  commit width (`commit_drop_o`); the issue pointer is NOT rolled back and
+  the ROB head does not jump. **Ablation verdict (lane × {branchy, wr, ilp,
+  memdep, boot}):** ring 32 alone — the clean `A0` overlay (ckpt 0) — is
+  kernel-neutral but times the boot out at the 24 M cap (≥+30 %, ~7 k
+  mispredicts but doubled recovery means ~17 vs 8.3 and replay-class extra
+  commit work); ring 16 and ring 32+ckpt fail identically; TAGE_LITE fails
+  via 4.75× the boot
+  mispredict count (3×64-entry table aliasing); DeepSpec/memdep+LSQ times
+  out with the least progress (replay-dominated); FTQ/FDIP/loop buffer is
+  +4.4 % boot and +36.5 % branchy — a per-control-transfer frontend tax.
+  `+misp_stats` recovery means: ~7–8.5 cycles at ring 8 (4-cycle refill
+  dominates, drain hidden), ~17–19 at ring ≥ 16 with an 88–124-cycle drain
+  tail — recovery *does* scale with in-flight depth once the window fills,
+  but it is not the measured boot cost. **No knob qualifies; both packages
+  stay at M1d geometry.** The ablation table, recovery numbers, the ring>8
+  pathology note and the M3b fast-squash design sketch are in
+  `core/ooo/AGENTS-ooo-plan.md` T9f. smt2 identity: byte-exact boot
+  (12,406,273, rvfi sha `e0858842b829e5e2`) since `arch_step=FtqEn` is inert
+  at `FtqDepth=0`.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

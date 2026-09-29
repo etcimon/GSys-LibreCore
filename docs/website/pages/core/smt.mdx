@@ -35,7 +35,17 @@ queues are empty, so the hart-blind OoO backend never interleaves two harts'
 work. Mixed residency (`SmtDrainedHandoff=0`) is promoted to production on the
 single-core `g6lc64_smt2_ooo_int` package (T9d/M2, evidence re-baselined on the
 eWT tree); on multi-core packages it stays qualification-gated behind
-`G6LC_OOO_SMT_MIXED_QUALIFY`.
+`G6LC_OOO_SMT_MIXED_QUALIFY`. The T9f/M3 window uplift (ring 32, TAGE_LITE,
+BPCkptDepth 32, DeepSpec+MemDepPred, FTQ 8 / FDIP / loop buffer) was measured
+on `smt2_ooo_int` and `ooo_int2_l3` and **not adopted** — strict boots and
+branch-bound IPC regressed, and the per-knob ablation found every uplifted
+knob regresses the boot independently (ring > 8 alone times out; TAGE_LITE
+multiplies boot mispredicts ~4.75×; DeepSpec/memdep replays dominate;
+FTQ/FDIP taxes every control transfer); both packages stay at ring 8 pending
+the M3b re-evaluation in plan T9f. Landed from that work is the switch-safety fix:
+`smt_restore_i` reseeds the FTQ *and* steps the cursor (`arch_step=FtqEn`)
+and clears the loop buffer on every switch (formal `g6lc_fetch_restore` +
+the `tb_g6lc_fetch_restore` leaf; the `NOFLUSH` mutant is detected).
 
 Modules under `core/smt/` include thread select, hart state, banked RF, PC
 bank, and CSR bank helpers.

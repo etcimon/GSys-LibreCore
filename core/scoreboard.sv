@@ -1084,4 +1084,123 @@ module scoreboard #(
     end
   end
   //pragma translate_on
+
+//pragma translate_off
+  // M3b recovery-cost probe (+misp_stats). For each mispredict resolution
+  // (`bmiss`) records: cycles until the first commit of an entry allocated
+  // *after* the resolution (a correct-path commit — an allocation epoch tag
+  // per slot discriminates pre-resolution survivors), and the number of
+  // in-flight (issued, uncommitted) entries at resolution. A same-hart filter
+  // keeps a peer hart's commits from closing the window under SMT. Stats are
+  // emitted on the `[ooo-misp]` line at `final` as
+  // `n/mean/max/superseded` + `infl_mean/infl_max` + a 4-cycle histogram,
+  // plus per-hart resolve/mispredict counts (`bp_train`) for TAGE banking
+  // checks. Entirely report-only: no functional signal is read into logic.
+  bit    misp_en;
+  int unsigned misp_epoch_q = 0;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0][31:0] slot_epoch_q = '0;
+  logic         misp_pend_q = 1'b0;
+  int unsigned  misp_hart_q = 0;
+  longint unsigned misp_start_q = 0;
+  int unsigned  misp_inflight_q = 0;
+  longint unsigned misp_cycle_q = 0;
+  int unsigned  misp_events = 0, misp_resolved = 0, misp_superseded = 0;
+  longint unsigned misp_sum_cyc = 0, misp_sum_inf = 0;
+  int unsigned  misp_max_cyc = 0, misp_max_inf = 0;
+  int unsigned  misp_hist[32] = '{default:0};
+  int unsigned  misp_bptrain[2] = '{default:0};
+  int unsigned  misp_misses[2]  = '{default:0};
+  initial misp_en = $test$plusargs("misp_stats");
+  always @(posedge clk_i) begin : misp_stats_ff
+    int unsigned infl;
+    int unsigned bucket;
+    bit found;
+    if (!rst_ni) begin
+      misp_pend_q  = 1'b0;
+      misp_cycle_q = '0;
+      misp_epoch_q = '0;
+    end else if (misp_en) begin
+      misp_cycle_q = misp_cycle_q + 1;
+      // Allocation epoch shadow (mirrors the scoreboard alloc term).
+      for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+        if (decoded_instr_valid_i[i] && decoded_instr_ack_o[i] &&
+`ifdef G6LC_FETCH_B
+            !flush_unissued_instr_i
+`else
+            g6lc_sb_keep::alloc(
+                CVA6Cfg, flush_unissued_instr_i,
+                decoded_instr_i[i].fu, decoded_instr_i[i].rd[4:0])
+`endif
+           )
+          slot_epoch_q[issue_pointer[i]] = 32'(misp_epoch_q);
+      end
+      // bp training traffic per hart (predictor update = every resolve).
+      if (resolved_branch_i.valid) begin
+        misp_bptrain[int'(resolved_branch_i.hart_id)] =
+          misp_bptrain[int'(resolved_branch_i.hart_id)] + 1;
+        if (resolved_branch_i.is_mispredict)
+          misp_misses[int'(resolved_branch_i.hart_id)] =
+            misp_misses[int'(resolved_branch_i.hart_id)] + 1;
+      end
+      if (bmiss) begin
+        misp_events++;
+        if (misp_pend_q) misp_superseded++;
+        misp_pend_q    = 1'b1;
+        misp_start_q   = misp_cycle_q;
+        misp_hart_q    = int'(resolved_branch_i.hart_id);
+        misp_epoch_q   = misp_epoch_q + 1;
+        infl = 0;
+        for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
+          if (mem_q[s].issued) infl++;
+        misp_inflight_q = infl;
+        misp_sum_inf    = misp_sum_inf + infl;
+        if (infl > misp_max_inf) misp_max_inf = infl;
+      end else if (misp_pend_q) begin
+        // First same-hart commit of a post-resolution entry = recovered.
+        found = 1'b0;
+        for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
+          if (!found && commit_ack_i[p] &&
+              int'(mem_q[commit_sel_slot[p]].sbe.hart_id) == misp_hart_q &&
+              slot_epoch_q[commit_sel_slot[p]] == misp_epoch_q &&
+              !mem_q[commit_sel_slot[p]].cancelled) begin
+            found = 1'b1;
+            misp_pend_q = 1'b0;
+            misp_resolved++;
+            misp_sum_cyc = misp_sum_cyc + (misp_cycle_q - misp_start_q);
+            if ((misp_cycle_q - misp_start_q) > 64'(misp_max_cyc))
+              misp_max_cyc = int'(misp_cycle_q - misp_start_q);
+            bucket = int'((misp_cycle_q - misp_start_q) / 4);
+            if (bucket > 31) bucket = 31;
+            misp_hist[bucket]++;
+          end
+        end
+      end
+    end
+  end
+  final begin
+    if (misp_en) begin
+      $write("[ooo-misp] n=%0d resolved=%0d superseded=%0d", misp_events,
+             misp_resolved, misp_superseded);
+      if (misp_resolved > 0)
+        $write(" mean=%0d.%02d max=%0d",
+               int'(misp_sum_cyc / 64'(misp_resolved)),
+               int'((misp_sum_cyc * 100 / 64'(misp_resolved)) % 100),
+               misp_max_cyc);
+      else
+        $write(" mean=na max=na");
+      if (misp_events > 0)
+        $write(" infl_mean=%0d.%02d infl_max=%0d",
+               int'(misp_sum_inf / 64'(misp_events)),
+               int'((misp_sum_inf * 100 / 64'(misp_events)) % 100),
+               misp_max_inf);
+      else
+        $write(" infl_mean=na infl_max=na");
+      $write(" bptrain_h0=%0d bptrain_h1=%0d miss_h0=%0d miss_h1=%0d hist:",
+             misp_bptrain[0], misp_bptrain[1], misp_misses[0], misp_misses[1]);
+      for (int b = 0; b < 32; b++)
+        if (misp_hist[b] > 0) $write(" %0d:%0d", b * 4, misp_hist[b]);
+      $write("\n");
+    end
+  end
+//pragma translate_on
 endmodule

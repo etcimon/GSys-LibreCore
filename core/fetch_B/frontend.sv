@@ -240,6 +240,22 @@ module frontend
   logic kill_s1, kill_s2, spec_req;
   logic inflight_q;
   logic [CVA6Cfg.VLEN-1:0] inflight_addr_q;
+  // A hart switch drops every hart-blind queue/prefetcher: entries pushed for
+  // the old stream must never serve the restored hart (the loop buffer keys
+  // on vaddr and the harts run different address spaces). The same term also
+  // kills the in-flight I$ request and drains every piece of mid-stream state
+  // (taken-not-presented block, leftover carry, pending-prediction filter,
+  // speculative marker): a response accepted after the switch is stamped with
+  // the incoming hart, so the outgoing hart's fetch block must never reach the
+  // queue. Folds to 0 at NrHarts==1 (SmtEn is a localparam).
+  logic smt_restore_flush;
+`ifdef G6LC_MUT_FETCH_RESTORE_NOFLUSH
+  // MUTANT: pre-M3 behaviour — a hart switch leaves hart-blind FTQ/FDIP/loop
+  // buffer state and the in-flight request live for the restored hart.
+  assign smt_restore_flush = 1'b0;
+`else
+  assign smt_restore_flush = SmtEn & smt_restore_i;
+`endif
   logic [63:0] snap_nb;
   // address will always be 16 bit aligned, make this explicit here
   // shamt is in HALFWORDS, not bytes (bit 0 is dropped). Without RVC every
@@ -549,7 +565,12 @@ module frontend
       end
       g6lc_fetch_pkg::SRC_RESTORE: begin
         arch_pc   = smt_npc_restore_i;
-        arch_step = 1'b0;
+        // With an FTQ the reseeded entry owns the restore window, so the NPC
+        // enqueue cursor must step past it like any other reseed; keeping
+        // npc_q at arch_pc re-pushes the same window on the first sequential
+        // if_ready and double-commits it. Folds to 0 without an FTQ, where
+        // npc_d must stay on arch_pc to issue the request.
+        arch_step = FtqEn;
       end
       g6lc_fetch_pkg::SRC_MISP: begin
         arch_pc = resolved_branch_i.target_address;
@@ -619,7 +640,7 @@ module frontend
       bp_pend_q     <= 1'b1;
       bp_tgt_q      <= resolved_branch_i.target_address;
       bp_misp_ttl_q <= 3'd7;
-    end else if (flush_i) begin
+    end else if (flush_i | smt_restore_flush) begin
       bp_pend_q     <= 1'b0;
       bp_misp_ttl_q <= '0;
     end else if (bp_fire) begin
@@ -791,7 +812,7 @@ module frontend
         .clk_i,
         .rst_ni,
         // sequential addresses queued behind a taken CF must not be drained
-        .flush_i      (flush_i | is_mispredict | bp_fire | replay_q),
+        .flush_i      (flush_i | is_mispredict | bp_fire | replay_q | smt_restore_flush),
         .push_i       (ftq_push),
         .push_vaddr_i (ftq_push_vaddr),
         .push_taken_i (bp_fire),
@@ -817,7 +838,7 @@ module frontend
       ) i_fdip (
           .clk_i,
           .rst_ni,
-          .flush_i        (flush_i | is_mispredict | bp_fire | replay_q),
+          .flush_i        (flush_i | is_mispredict | bp_fire | replay_q | smt_restore_flush),
           .enable_i       (1'b1),
           .peek_valid_i   (ftq_peek_valid),
           .peek_vaddr_i   (ftq_peek_vaddr),
@@ -840,7 +861,7 @@ module frontend
       ) i_lbuf (
           .clk_i,
           .rst_ni,
-          .flush_i       (flush_i | is_mispredict | flush_bp_i),
+          .flush_i       (flush_i | is_mispredict | flush_bp_i | smt_restore_flush),
           .enable_i      (1'b1),
           .cf_valid_i    (bp_fire),
           .cf_taken_i    (bp_fire),
@@ -874,7 +895,10 @@ module frontend
       (FtqEn && pf_req) ? pf_vaddr : fetch_address;
 
   // Redirect drops in-flight I$ (A keep/kill capability, no opcode spares).
-  assign kill_s1 = g6lc_fetch_pkg::kill_s1(is_mispredict, flush_i, replay_q);
+  // A hart switch kills the in-flight request too (I10: its address is banked
+  // for re-fetch, so a late response must be dropped by token, not served).
+  assign kill_s1 = g6lc_fetch_pkg::kill_s1(is_mispredict, flush_i, replay_q)
+      | smt_restore_flush;
   assign kill_s2 = g6lc_fetch_pkg::kill_s2(kill_s1, bp_fire);
   assign icache_dreq_o.kill_s1 = kill_s1;
   assign icache_dreq_o.kill_s2 = kill_s2;
@@ -888,7 +912,7 @@ module frontend
   assign leftover_branch_bp_fire = bp_fire & serving_unaligned
       & (cf_type[0] == ariane_pkg::Branch);
   assign leftover_kill = is_mispredict | flush_i | (replay & ~leftover_slot0_push)
-      | leftover_branch_bp_fire;
+      | leftover_branch_bp_fire | smt_restore_flush;
 
   // Response ownership by request token. Every accepted I$ request carries a
   // 2-bit token; the frontend wants exactly one outstanding token and takes a
@@ -955,7 +979,8 @@ module frontend
   // assert on branch, deassert when resolved; prefetches are always speculative
   logic speculative_q, speculative_d;
   assign speculative_d = (speculative_q && !resolution_for_active
-                          || |is_branch || |is_return || |is_jalr) && !flush_i;
+                          || |is_branch || |is_return || |is_jalr) && !flush_i
+                          && !smt_restore_flush;
   // FDIP is speculative by construction; a demand fetch is speculative only
   // while an unresolved CF is outstanding. Do not reuse this as a leftover
   // gate: spec_req is high on ordinary sequential fetch (NEGATIVE I3 keep).
@@ -1028,7 +1053,7 @@ module frontend
       // A line already registered here would still be presented next cycle and
       // re-enter the instruction queue, so drop it on any redirect. kill_s2 only
       // cancels the in-flight request.
-      if (flush_i || is_mispredict || bp_fire) begin
+      if (flush_i || is_mispredict || bp_fire || smt_restore_flush) begin
         icache_valid_q    <= 1'b0;
         icache_ex_valid_q <= ariane_pkg::FE_NONE;
         // I3/I7: re-base the prefix filter on the redirect target.
@@ -1287,7 +1312,10 @@ module frontend
   ) i_instr_queue (
       .clk_i              (clk_i),
       .rst_ni             (rst_ni),
-      .flush_i            (flush_i),
+      // Parcels die on a hart switch: gen_smt_restart_frontier banks the
+      // outgoing hart's oldest undelivered PC and the restored stream
+      // refetches from it, so leaving queued parcels would deliver them twice.
+      .flush_i            (flush_i | smt_restore_flush),
       .hart_i             (smt_hart_i),
       .instr_i            (instr),                 // from re-aligner
       .addr_i             (addr),                  // from re-aligner

@@ -912,6 +912,15 @@ def directed_review():
     bound = int(os.environ.get('REVIEW_MC_DIRECTED_BOUND', '1000000'))
     expect_mask = os.environ.get('REVIEW_MC_DIRECTED_MASK', '01')
     records = []
+    # REVIEW_MC_DIRECTED_EXTRA_SRCS (space-separated basenames already pushed
+    # as data) links runtime support into the test — e.g. 'crt.S syscalls.c'
+    # for the crt/exit-style OoO kernels. crt tests place tohost past the
+    # 4 KiB-aligned .tohost section, so REVIEW_MC_DIRECTED_TOHOST_ADDR=auto
+    # resolves the symbol from the linked binary instead of the fixed
+    # 0x80001000 used by the bare-metal kernels.
+    extra_srcs = [str(data / name) for name in
+                  os.environ.get('REVIEW_MC_DIRECTED_EXTRA_SRCS', '').split()]
+    tohost_mode = os.environ.get('REVIEW_MC_DIRECTED_TOHOST_ADDR', '0x80001000')
     # REVIEW_MC_DIRECTED_NO_NEG=1 runs the positive arm only — for checked-work
     # minis that carry no ORACLE_NEGATIVE variant (the negatives live in the
     # leaf benches); the pass/fail assert below still applies to what runs.
@@ -922,14 +931,22 @@ def directed_review():
         elf = trial / 'directed.elf'
         command = GCC + (['-DORACLE_NEGATIVE'] if negative else []) + (
             ['-DEXIT_ON_SECONDARY'] if os.environ.get('REVIEW_MC_EXIT_SECONDARY') == '1' else []) + (
-            os.environ.get('REVIEW_MC_DIRECTED_DEFS', '').split()) + [str(data / src), '-o', str(elf)]
+            os.environ.get('REVIEW_MC_DIRECTED_DEFS', '').split()) + [
+                str(data / src)] + extra_srcs + ['-o', str(elf)]
         rc = bash(' '.join(command), trial / 'gcc.log', repo, 120)
         assert rc == 0, 'gcc'
+        tohost_addr = tohost_mode
+        if tohost_addr == 'auto':
+            symbols = subprocess.run(['bash', '-c', '. /opt/testharness/env.sh; riscv-none-elf-nm ' + str(elf)],
+                                     capture_output=True, text=True, timeout=60).stdout
+            tohost = re.search(r'^([0-9a-f]+) . tohost$', symbols, re.M)
+            assert tohost, 'tohost symbol missing'
+            tohost_addr = '0x' + tohost.group(1)
         # REVIEW_MC_DIRECTED_ARGS carries extra model plusargs (e.g.
         # +mem_poke=<addr>:<val>:<cycle> for mc_cbo_ewt). Extra args come
         # before the ELF so HTIF does not eat them as positional input.
         cmd = [str(exe), '--seed=1', '+debug_disable', '+quiet_axi', f'+time_out={bound}',
-               '+tohost_addr=0x80001000'] + os.environ.get('REVIEW_MC_DIRECTED_ARGS', '').split() + [str(elf)]
+               f'+tohost_addr={tohost_addr}'] + os.environ.get('REVIEW_MC_DIRECTED_ARGS', '').split() + [str(elf)]
         with (trial / 'run.log').open('w') as log:
             rc = subprocess.run(cmd, cwd=trial, stdout=log, stderr=subprocess.STDOUT, timeout=1800).returncode
         text = (trial / 'run.log').read_text()
@@ -946,19 +963,28 @@ def directed_review():
         # `mem <addr> <data>` store records in the RVFI dasm trace; the last
         # store to each slot wins.
         pmu = None
+        # REVIEW_MC_PMU_KEYS names the three publish slots (comma-separated);
+        # the default preserves the group-2 L3/L2 cross-check names, and M3's
+        # group-1 runs pass 'mispredict,robBackpressure,iqStall'.
+        pmu_keys = (os.environ.get('REVIEW_MC_PMU_KEYS')
+                    or 'l3Miss,l3Hit,l2Miss').split(',')
+        assert len(pmu_keys) == 3, 'REVIEW_MC_PMU_KEYS must name three slots'
         pmu_line = re.search(r'PMU l3miss=([0-9a-f]+) l3hit=([0-9a-f]+) l2miss=([0-9a-f]+)', text)
         if pmu_line:
-            pmu = {'l3Miss': int(pmu_line.group(1), 16), 'l3Hit': int(pmu_line.group(2), 16),
-                   'l2Miss': int(pmu_line.group(3), 16)}
+            pmu = {pmu_keys[0]: int(pmu_line.group(1), 16), pmu_keys[1]: int(pmu_line.group(2), 16),
+                   pmu_keys[2]: int(pmu_line.group(3), 16)}
         else:
             dasm = trial / 'trace_rvfi_hart_00.dasm'
             if dasm.is_file():
-                stores = re.findall(r'mem 0x00000000800010(10|18|20) 0x([0-9a-fA-F]+)',
+                # slot addresses are tohost+0x10/+0x18/+0x20 (see mc_pmu_l3.S)
+                slot_pat = '|'.join(f'{int(tohost_addr, 16) + off:08x}'
+                                    for off in (0x10, 0x18, 0x20))
+                stores = re.findall(r'mem 0x0*(' + slot_pat + r') 0x([0-9a-fA-F]+)',
                                     dasm.read_text(errors='replace'))
-                vals = {slot: val for slot, val in stores}
+                vals = {slot[-2:]: val for slot, val in stores}
                 if len(vals) == 3:
-                    pmu = {'l3Miss': int(vals['10'], 16), 'l3Hit': int(vals['18'], 16),
-                           'l2Miss': int(vals['20'], 16)}
+                    pmu = {pmu_keys[0]: int(vals['10'], 16), pmu_keys[1]: int(vals['18'], 16),
+                           pmu_keys[2]: int(vals['20'], 16)}
         if os.environ.get('REVIEW_MC_DIRECTED_PMU') == '1':
             # Cross-check in-window PMU deltas against the TB [mc_cache]
             # totals. The TB counts from reset and cluster-wide while the PMU

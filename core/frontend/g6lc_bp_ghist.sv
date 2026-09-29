@@ -51,8 +51,20 @@ module g6lc_bp_ghist
   logic [NH-1:0][GHIST_LEN-1:0] ghist_d, ghist_q;
   logic [GHIST_LEN-1:0] ghist_live, ghist_train;
 
-  assign ghist_live   = ghist_q[hart_i];
-  assign ghist_train  = ghist_q[train_hart_i];
+  // Bank selectors: fetch view vs train/restore view.
+  logic [HID_W-1:0] live_sel, train_sel;
+`ifdef G6LC_MUT_BP_SHARE_GHR
+  // MUTANT: a single shared bank — every hart-qualified access lands on
+  // slot 0, so hart A's resolves rewrite hart B's prediction context.
+  assign live_sel  = '0;
+  assign train_sel = '0;
+`else
+  assign live_sel  = hart_i;
+  assign train_sel = train_hart_i;
+`endif
+
+  assign ghist_live   = ghist_q[live_sel];
+  assign ghist_train  = ghist_q[train_sel];
   assign ghist_o      = ghist_live;
   assign train_ghist_o = ghist_train;
 
@@ -60,14 +72,14 @@ module g6lc_bp_ghist
     ghist_d = ghist_q;
     if (restore_valid_i) begin
       // FSE S5: restore the resolving branch's bank, not necessarily fetch
-      ghist_d[train_hart_i] = restore_ghist_i;
+      ghist_d[train_sel] = restore_ghist_i;
     end else if (update_valid_i) begin
-      if (GHIST_LEN == 1) ghist_d[train_hart_i] = update_taken_i;
-      else ghist_d[train_hart_i] = {ghist_train[GHIST_LEN-2:0], update_taken_i};
+      if (GHIST_LEN == 1) ghist_d[train_sel] = update_taken_i;
+      else ghist_d[train_sel] = {ghist_train[GHIST_LEN-2:0], update_taken_i};
     end
     // Flush only the train bank on mispredict empty-ckpt path; fetch bank for flush_bp
     if (flush_i) begin
-      ghist_d[train_hart_i] = '0;
+      ghist_d[train_sel] = '0;
     end
   end
 

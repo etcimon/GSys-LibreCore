@@ -2748,9 +2748,9 @@ module tb_g6lc_review_ghist;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
   logic clk=0,rst_n=0,flush=0,hart=0,train_hart=0,uv=0,ut=0,rv=0;
-  logic [7:0] rgh='0,ghist,train_ghist;
+  logic [7:0] rgh='0,ghist,train_ghist,exp0,exp1;
   logic [1:0][7:0] folded,folded_tr;
-  bit negative;
+  bit negative;int scenario;
   g6lc_bp_ghist #(.CVA6Cfg(C),.GHIST_LEN(8),.NR_FOLDS(2),.FOLD_W(8)) dut(
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.hart_i(hart),.train_hart_i(train_hart),
     .update_valid_i(uv),.update_taken_i(ut),.restore_valid_i(rv),.restore_ghist_i(rgh),
@@ -2759,19 +2759,42 @@ module tb_g6lc_review_ghist;
   task automatic tick;clk=1;#2;clk=0;#2;endtask
   initial begin
     negative=$test$plusargs("oracle_negative");
+    if(!$value$plusargs("scenario=%d",scenario))scenario=0;
     #2;tick();rst_n=1;
-    // bank0: shift in one taken (ghist=1); bank1: two takens (ghist=3)
-    hart=0;train_hart=0;ut=1;uv=1;tick();uv=0;
-    train_hart=1;uv=1;tick();tick();uv=0;tick();
-    #2;
-    // fold0 is the raw bank (GHIST_LEN==FOLD_W); fold1 rotates by one bit.
-    if(ghist!==8'h01 || train_ghist!==8'h03)$fatal(1,"GHIST_BANK g=%0h t=%0h",ghist,train_ghist);
-    if(folded[0]!==8'h01 || folded[1]!==8'h02)$fatal(1,"GHIST_FOLD_FETCH");
-    if(negative) begin
-      if(folded_tr[0]!==8'h01)$fatal(1,"GHIST_FOLD_TRAIN");
-    end else begin
-      if(folded_tr[0]!==8'h03 || folded_tr[1]!==8'h06)$fatal(1,"GHIST_FOLD_TRAIN %0h %0h",folded_tr[0],folded_tr[1]);
-    end
+    if(scenario==0)begin
+      // bank0: shift in one taken (ghist=1); bank1: two takens (ghist=3)
+      hart=0;train_hart=0;ut=1;uv=1;tick();uv=0;
+      train_hart=1;uv=1;tick();tick();uv=0;tick();
+      #2;
+      // fold0 is the raw bank (GHIST_LEN==FOLD_W); fold1 rotates by one bit.
+      if(ghist!==8'h01 || train_ghist!==8'h03)$fatal(1,"GHIST_BANK g=%0h t=%0h",ghist,train_ghist);
+      if(folded[0]!==8'h01 || folded[1]!==8'h02)$fatal(1,"GHIST_FOLD_FETCH");
+      if(negative) begin
+        if(folded_tr[0]!==8'h01)$fatal(1,"GHIST_FOLD_TRAIN");
+      end else begin
+        if(folded_tr[0]!==8'h03 || folded_tr[1]!==8'h06)$fatal(1,"GHIST_FOLD_TRAIN %0h %0h",folded_tr[0],folded_tr[1]);
+      end
+    end else if(scenario==1)begin
+      // M3 hart-switch cell: resolves and restores land on the train bank while
+      // the fetch view may sit on the other hart. bank0 gets T,N,T (=8'h05);
+      // bank1 gets T,T,T (=8'h07) — the last resolve fires while the fetch
+      // view is back on hart0, so a hart-blind or shared bank is caught by the
+      // live view changing under it.
+      hart=0;train_hart=0;ut=1;uv=1;tick();ut=0;tick();ut=1;tick();uv=0;
+      hart=1;train_hart=1;ut=1;uv=1;tick();tick();uv=0;
+      hart=0;uv=1;tick();uv=0;             // bank1 3->7 while fetch reads bank0
+      // A shared bank accumulates every resolve: 1,0,1,1,1,1 -> 8'h2F.
+      exp0=negative?8'h2F:8'h05;exp1=negative?8'h2F:8'h07;
+      if(ghist!==exp0)$fatal(1,"GHIST_SWITCH_BANK fetch0 g=%0h want=%0h",ghist,exp0);
+      hart=1;#2;
+      if(ghist!==exp1)$fatal(1,"GHIST_SWITCH_BANK fetch1 g=%0h want=%0h",ghist,exp1);
+      // Restore still lands only on the train bank (still hart1).
+      rgh=8'h2A;rv=1;tick();rv=0;
+      if(ghist!==8'h2A)$fatal(1,"GHIST_SWITCH_RESTORE g=%0h",ghist);
+      hart=0;#2;
+      exp0=negative?8'h2A:8'h05;
+      if(ghist!==exp0)$fatal(1,"GHIST_SWITCH_BANK fetch0post g=%0h want=%0h",ghist,exp0);
+    end else $fatal(1,"GHIST_SCENARIO");
     $display("RTL_REVIEW_PASS ghistfold");$finish;
   end
 endmodule

@@ -24,7 +24,8 @@ module tb_g6lc_review_incl;
   logic clk=0,rst_n=0,evict=0,evict_rdy;
   logic [63:0] evict_addr=64'h4000;
   logic [NC-1:0] inv_core_ready='0,inv_incl_ready;
-  coh_inval_t [NC-1:0] inv_hub='0,inv_incl,inv_to_core;
+  coh_inval_t [NC-1:0] inv_hub='0,inv_incl,inv_to_core,inv_cmo='0;
+  logic [NC-1:0] inv_cmo_ready;
   int delivered[NC];
   int got_a[NC],got_b[NC];
   int scenario;
@@ -255,16 +256,28 @@ def main():
     hashes={name:digest(source/name) for name in names}
     (out/'sources.json').write_text(json.dumps(hashes,indent=2))
     cluster=(source/'g6lc_cluster.sv').read_text()
-    begin=cluster.index('  // Merge hub + inclusive inv')
+    begin=cluster.index('  // Merge hub + inclusive victim + CMO broadcast inv')
     start=cluster.index('  always_comb begin',begin)
     end=cluster.index('  // --------------------',start)
     mux=cluster[start:end]
     ready=re.findall(r'\.evict_addr_i\s*\(evict_a\),\s*\.inv_ready_i\s*\((\w+)\)',cluster)
     assert len(ready)==1 and ready[0] in {'inv_core_ready','inv_incl_ready'}
     (source/'incl.sv').write_text(L3_BENCH.replace('@MUX@',mux).replace('@READY@',ready[0]))
-    runtime_info=json.loads(Path('/opt/testharness/runs/review-private-runtime-rebuild-20260915/output/runtime.json').read_text())
-    runtime=Path(runtime_info['privateRoot'])
-    assert digest(runtime/'include/verilated_funcs.h')=='dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+    if os.environ.get('REVIEW_RTL_STOCK_RUNTIME')=='1':
+        # The patched private runtime fixes the CONSTHI wide-constant zero-fill
+        # bug, which only matters for the big composed models. The leaf cells
+        # never generate those constants, so when the private runtime image is
+        # absent a stock Verilator root is sufficient — recorded as stock in
+        # runtime.json.
+        probe=subprocess.run(['verilator','-V'],capture_output=True,text=True,check=True)
+        root=[l.split('=')[-1].strip() for l in probe.stdout.splitlines()
+              if l.strip().startswith('VERILATOR_ROOT')][0]
+        runtime_info={'privateRoot':root,'originalRoot':root,'stockRuntime':True}
+        runtime=Path(root)
+    else:
+        runtime_info=json.loads(Path('/opt/testharness/runs/review-private-runtime-rebuild-20260915/output/runtime.json').read_text())
+        runtime=Path(runtime_info['privateRoot'])
+        assert digest(runtime/'include/verilated_funcs.h')=='dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
     (out/'runtime.json').write_text(json.dumps(runtime_info,indent=2))
     rtl=[str(source/name) for name in names if name!='g6lc_cluster.sv' and not name.endswith('.svh')]+[str(source/'incl.sv')]
     configurations=[]
@@ -330,8 +343,16 @@ def main():
     elif os.environ.get('REVIEW_RTL_TAGE')=='1':
         # Predictor-context ownership: per-slot tagged provider, update-fold
         # ownership, unaligned base/ITTAGE addressing, banked-GHR train folds.
-        configurations=[('tage','s2-c1',[],[(n,None) for n in range(4)]),
-                        ('ghist','h2',[],[(0,None)])]
+        # M3: ghist scenario 1 is the hart-switch cell — a resolve/restore on
+        # one hart must not move the peer's bank while the fetch view sits on
+        # it. REVIEW_RTL_MUT=shareghr collapses the banks to a shared register
+        # and must be caught by both cells.
+        if os.environ.get('REVIEW_RTL_MUT')=='shareghr':
+            configurations=[('ghist','mut-shareghr',['-DG6LC_MUT_BP_SHARE_GHR'],
+                             [(0,'GHIST_BANK'),(1,'GHIST_SWITCH_BANK')])]
+        else:
+            configurations=[('tage','s2-c1',[],[(n,None) for n in range(4)]),
+                            ('ghist','h2',[],[(0,None),(1,None)])]
     elif os.environ.get('REVIEW_RTL_CKPT')=='1':
         # Prediction-time checkpoint FIFO: conservation, full push+pop single
         # head advance, restore drains younger wrong-path entries, overflow
@@ -488,7 +509,8 @@ def main():
             assert p.returncode==0,str(work/(label+'.log'))
         dependencies='\n'.join(p.read_text(errors='replace') for p in model.glob('*.d'))
         assert str(runtime/'include/verilated_funcs.h') in dependencies
-        assert str(Path(runtime_info['originalRoot'])/'include/verilated_funcs.h') not in dependencies
+        if Path(runtime_info['originalRoot']) != runtime:
+            assert str(Path(runtime_info['originalRoot'])/'include/verilated_funcs.h') not in dependencies
         exe=model/'review-test'
         trials=[(scenario,False,error) for scenario,error in cases]
         if not before and not rename_fault and not credit_fault and not flush_fault and not leak_fault and not fp_zero_fault and not fp_commit_fault:
@@ -539,7 +561,11 @@ def main():
                          if os.environ.get('REVIEW_RTL_WB_OWNER')=='1' else
                          [(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER'),(6,True,'DISPATCH_STORE_WB_RETIRE'),(7,True,'DISPATCH_LOAD_UNBLOCKED'),(8,True,'DISPATCH_WRAP_ORDER'),(9,True,'DISPATCH_TAG_REUSE'),(10,True,'DISPATCH_LSQ_CREDIT'),(20,True,'DISPATCH_RECOVERY_ISSUE'),(21,True,'DISPATCH_RECOVERY_WAKE'),(22,True,'DISPATCH_RECOVERY_ISSUE'),(23,True,'DISPATCH_RECOVERY_ISSUE'),(28,True,'DISPATCH_LATE_WAKE_EARLY'),(29,True,'DISPATCH_LATE_WAKE_EARLY')])
             elif kind=='tage':trials+=[(0,True,'TAGE_SLOT_BROADCAST'),(1,True,'TAGE_UPDATE_FOLD'),(2,True,'TAGE_BASE_ALIAS'),(3,True,'ITTAGE_SLOT_ALIAS')]
-            elif kind=='ghist':trials+=[(0,True,'GHIST_FOLD_TRAIN')]
+            elif kind=='ghist':
+                # The mutation geometry runs only its expected-failure
+                # positive trials; oracle_negative gets no extra arm there.
+                if geometry!='mut-shareghr':
+                    trials+=[(0,True,'GHIST_FOLD_TRAIN'),(1,True,'GHIST_SWITCH_BANK')]
             elif kind=='ckpt':trials+=[(0,True,'CKPT_MULTI'),(1,True,'CKPT_DOUBLE_ADV'),(3,True,'CKPT_DESYNC_RV'),(5,True,'CKPT_DROPPED_OWNER'),(6,True,'CKPT_EMPTY_RESTORE_HEAD')]
             elif kind=='csrbuf':
                 trials+=[(n,True,('CSRBUF_ADDR','CSRBUF_READY','CSRBUF_CANCEL','CSRBUF_FLUSH','CSRBUF_INORDER','CSRBUF_PIPE',

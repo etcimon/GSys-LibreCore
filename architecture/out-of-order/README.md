@@ -224,7 +224,26 @@ blockers below supersede any implied claim of verified end-to-end precision.
 |---------|------|
 | `g6lc64_ooo_server_config_pkg.sv` | **Configured server**: 4-issue, 4c×2h, L2/L3 auto, `DeepSpecEn`, `MemDepPredEn` |
 | `g6lc64_ooo_config_pkg.sv` | **Configured dual-issue lite**: 2-issue OoO + DeepSpec (bring-up / area-lean) |
+| `g6lc64_ooo_int2_l3_config_pkg.sv` | **Configured int2 L3**: 2c×2h drained, ring 8 (M1d geometry; the T9f/M3 ring-32/TAGE/FTQ window was measured and **not adopted** — ablation in T9f) |
+| `g6lc64_smt2_ooo_int_config_pkg.sv` | **Configured SMT2 int**: 1c×2h mixed residency, same ring-8 geometry (M3 window likewise not adopted) |
 | Default `cv64a6_imafdc_sv39` etc. | `OoOEn=0` identity (still production in-order) |
+
+The M3 uplift (ring 32, TAGE_LITE, FTQ/FDIP/loop buffer, DeepSpec/LSQ growth)
+was qualified functionally but regressed strict-boot and branch-bound IPC
+(+21.7 % / +28.9 % / +36.7 %) and is **not** configured: the per-knob
+ablation found every uplifted knob regresses the strict four-hart boot
+independently (ring > 8 alone times out at the 24 M cap; TAGE_LITE
+multiplies boot mispredicts ~4.75×; DeepSpec/memdep replays dominate;
+FTQ/FDIP taxes every control transfer), so both packages stay at ring 8
+pending the M3b re-evaluation documented in
+`../../core/ooo/AGENTS-ooo-plan.md` T9f. What remains landed from M3 is the
+frontend switch-safety fix: `smt_restore_i` reseeds the FTQ to the restore PC
+**and steps the cursor** (`arch_step=FtqEn`, else the window double-fetches)
+and clears the loop buffer; proven by
+`core/fetch_B/formal/g6lc_fetch_restore.sby` (bmc 16) and the
+`tb_g6lc_fetch_restore` directed leaf (`NOFLUSH` mutant detected). If
+FTQ/FDIP/loop buffer are ever enabled on a two-hart package, that evidence is
+the gate.
 
 ROB/IQ/LSQ/PRF depths 0 → scaled from issue width in `build_config_pkg`.
 

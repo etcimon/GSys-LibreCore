@@ -375,6 +375,26 @@ def main() -> int:
         progress = {int(h): int(n) for h, n in re.findall(r'\[smt-progress\].*hart=(\d+) retired=(\d+)', text)}
         record['retiredByHart'] = progress
         passed = passed and all(progress.get(h, 0) > 0 for h in range(required_harts))
+    # FP_REVIEW_PMU_KEYS names the tohost+0x10/+0x18/+0x20 publish slots
+    # (comma-separated, e.g. 'mispredict,robBackpressure,iqStall' for the M3
+    # group-1 kernels). The slots are recovered from the RVFI dasm mem-store
+    # records like the mc directed lanes; nothing is recorded when the test
+    # does not publish.
+    if os.environ.get('FP_REVIEW_PMU_KEYS'):
+        pmu_keys = os.environ['FP_REVIEW_PMU_KEYS'].split(',')
+        if len(pmu_keys) != 3:
+            raise ValueError('FP_REVIEW_PMU_KEYS must name three slots')
+        rtl_traces = list(out.glob('trace_rvfi_hart_*.dasm'))
+        stores = {}
+        for dasm in rtl_traces:
+            for addr, value in re.findall(
+                    r'mem (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)', dasm.read_text(errors='replace')):
+                if int(addr, 16) in (tohost + 0x10, tohost + 0x18, tohost + 0x20):
+                    stores[int(addr, 16)] = int(value, 16)
+        if len(stores) == 3:
+            record['pmu'] = {pmu_keys[0]: stores[tohost + 0x10],
+                             pmu_keys[1]: stores[tohost + 0x18],
+                             pmu_keys[2]: stores[tohost + 0x20]}
     record['reviewPassed'] = passed
     (out / 'results.json').write_text(json.dumps(record, indent=2))
     print(json.dumps(record, indent=2))

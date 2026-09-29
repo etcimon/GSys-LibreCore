@@ -403,6 +403,22 @@ tracker cannot match — detected by the fail-fast B-routing assertion
 ("no live write-tracker entry") before the `HUM_WID_DRAIN` watchdog. Formal P1
 moves to downstream ids; `hub_ar_hold` joins `[mc_cache]` (AR behind a
 same-line live AW).
+T9f (M3, frontend/window uplift): the SMT-restore switch-safety property lives
+in two places — bounded formal `core/fetch_B/formal/g6lc_fetch_restore.sby`
+(bmc yices depth 16, live `frontend` at NrHarts=2/FtqDepth=8/LoopBufEn=1,
+PASS on the fixed RTL; `g6lc_fetch_restore.xml` 11 asserts, 0 failures) and the
+directed leaf `verif/tb/core/tb_g6lc_fetch_restore.sv`, which additionally
+checks the restore window is demanded exactly once (the M3 `SRC_RESTORE`
+`arch_step` counterexample — a restore that reseeded the FTQ without stepping
+the NPC cursor re-pushed the window and double-committed it). Mutant
+`G6LC_MUT_FETCH_RESTORE_NOFLUSH` fails `FETCH_RESTORE_STALE count=2` as
+designed. Directed IPC/PMU evidence (int2_l3, `PMU_G1`, pre/post ring-8→32):
+`mc_l2_write_read`, `mc_l3_stride_scan` 512K, `mc_branchy`, `ooo_ilp_chain`,
+`ooo_mem_dep` at L0 and L40 — all pos/neg arms matched
+(`ooocoh-m3-{wr,scan512k,branchy,ooo-*}-int2l3-*-r6` and `*-pre-*` baselines).
+The uplift was measured but **not adopted** (boots +21.7 % / +28.9 %,
+`mc_branchy` +36.7 %): the knob ablation and `+misp_stats` recovery numbers
+live under `ooocoh-m3abl-*` and are recorded in plan T9f.
 - Visibility-model probes for this class (kept in `run_mc_int2_review.py`): `+mc_vis_stuck=N`
   stuck-handshake/commit-head reports, CSR exception and csr_buffer allocation/commit views,
   issue-port view within `+mc_vis_from/+mc_vis_until`. The review mode's directed cases still
