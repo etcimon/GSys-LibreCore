@@ -250,6 +250,21 @@ byte-identical (smt2 strict-boot rvfi sha unchanged). Bounded proof:
 `core/fetch_B/formal/g6lc_fetch_restore.sby` (bmc 16, NrHarts=2/FtqDepth=8/
 LoopBufEn=1); directed leaf `verif/tb/core/tb_g6lc_fetch_restore.sv`.
 
+## FP legal on the OoO path for single-hart and drained handoff (2026-09-29, T9g/M4)
+
+F/D execution + register file state (`#zf`, `#ext:d`): `core/fpu_wrap.sv` carries a per-slot
+owner table (`owner_live_q`/`owner_cancelled_q`) so an FP result may write back only while its
+`trans_id` still owns a live, uncancelled slot — proven at the writeback seam by
+`core/ooo/formal/g6lc_ooo_fp_owner.sby` (bmc depth 24 ≥ the S2 reuse window; the
+`G6LC_MUT_FP_NO_OWNER_LIVE` mutation fails at step 2). `check_cfg` now reads
+`assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.NrHarts > 1 && !Cfg.SmtDrainedHandoff))` under
+`G6LC_OOO_FP_QUALIFY` (single-hart FP on `g6lc64_ooo` and drained multi-hart FP on
+`g6lc64_ooo_int2_l3` are production legs; the same term — without the `ifndef` — lives in
+`g6lc_ooo_dispatch.sv` as `gen_err_ooo_fp_mh`), and `!FpPresent` is dropped from the `COH_OOO`
+legality term. FP under mixed residency stays refused (hart-tagged lazy-FS audit);
+`g6lc64_ooo_server` stays an opt-in/unqualified target (`COH_FILTERED` coherence).
+Evidence: `core/ooo/AGENTS-ooo-plan.md` T9g.
+
 ## Control-flow hold armed only by a pushed target (2026-09-23, SB=16 finding)
 
 Instruction-stream liveness (`#instr_fetch`): in `core/fetch_B/frontend.sv` (FTQ path only) the

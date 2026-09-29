@@ -2596,3 +2596,96 @@ floor 32 on int2_l3; `BPCkptDepth` is only constrained when non-zero
 used by lane A0 to separate ring depth from checkpoint depth.
 
 **Artifacts**: `ooocoh-m3abl-*-r3` (ablation), `ooocoh-m3-*` (uplift runs).
+
+### T9g — M4: FP on the OoO path — single-hart and drained-handoff legal (2026-09-29)
+
+**Scope.** Enable and qualify RVF/RVD on `g6lc64_ooo_int2_l3` (2c×2h, WT,
+`COH_OOO`, non-inclusive L3, drained handoff) and lift the FP legality guards
+for `NrHarts == 1 || SmtDrainedHandoff`. Mixed-residency FP stays refused.
+
+**What changed.**
+
+- `core/fpu_wrap.sv` — per-slot owner table (`owner_live_q`,
+  `owner_cancelled_q`): an FP request is accepted only onto a free/uncancelled
+  slot; a result may drive `fpu_valid_o`/writeback only while its `trans_id`
+  still owns the slot; flush and cancellation clear ownership. The
+  `G6LC_MUT_FP_NO_OWNER_LIVE` mutation drops the owner-live compare.
+- `core/include/config_pkg.sv` — `check_cfg`: the
+  `ifndef G6LC_OOO_FP_QUALIFY` leg now reads
+  `!(OoOEn && FpPresent && NrHarts > 1 && !SmtDrainedHandoff)` (was
+  `!(OoOEn && FpPresent)`); `!FpPresent` is dropped from the `COH_OOO`
+  legality term.
+- `core/ooo/g6lc_ooo_dispatch.sv` — `gen_err_ooo_fp_mh` narrowed to the same
+  `&& !SmtDrainedHandoff` term (mixed + FP stays a hard elaboration error).
+- `core/include/g6lc64_ooo_int2_l3_config_pkg.sv` — `CVA6ConfigRVF=1`,
+  `CVA6ConfigRVD=1`, FPU/XF fields aligned with the `g6lc64_smt2` package.
+- `corev_apu/bootrom/ariane-ooo-int2-l3.dts` — `riscv,isa` →
+  `rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas` (f/d added to the existing
+  zacas/zicbo* set; `smt,fp-register-banking=<0>` kept — the drained handoff
+  switches the whole FS context).
+- `verif/tb/g6lc_cluster_lint_top.sv` — the pre-M4 workaround
+  `if (c.FpPresent) c.OoOEn = 0` narrowed to the still-refused
+  mixed/non-drained shape (it had been making the FP-enabled `COH_OOO` target
+  illegal at the gate).
+- `verif/regress/remote/run_ooo_fp_review.py` — multi-hart model support:
+  per-hart rvfi trace handling (`FP_REVIEW_ACTIVE_TRACE`), the `mc_verdict`
+  held-secondary fold (`FP_REVIEW_HELD_OK` — program exit from the
+  `[mc_verdict] program exit code` line, not tohost 125), and the
+  `FP_REVIEW_PARK_FILTER` mixed 16/32-bit park-loop detector.
+
+**Legality result.** `g6lc64_ooo` is legal single-hart FP;
+`g6lc64_ooo_int2_l3` is RV64GC+B under the drained handoff; `g6lc64_ooo_server`
+is no longer refused by the generic multi-hart FP leg (it is drained) but
+stays an opt-in/unqualified target — its `COH_FILTERED` coherence has no M4
+qualification evidence. FP under mixed residency (`!SmtDrainedHandoff`)
+remains refused by both the `check_cfg` leg and `gen_err_ooo_fp_mh`.
+
+**Evidence.**
+
+- *Owner proof*: `core/ooo/formal/g6lc_ooo_fp_owner.sby` — `bmc` PASS
+  (depth 24 ≥ S2 reuse window), `cover` PASS (normal completion, cancellation
+  suppression, reallocation, held-input cancellation, flush), `mut_owner`
+  expected-FAIL at step 2.
+- *S2 leaf witness*: `tb_g6lc_review_fp_lifetime` rerun
+  (`ooocoh-m4-s2-fplife-r4`) — all scenarios matched (normal/delayed reuse/
+  cancel-reuse/flush/same-cycle replacement); mutation rerun
+  `ooocoh-m4-s2-fplife-mut-r5` detected (`FP_OWNER_CANCELLED_RESPONSE`,
+  rc=SIGABRT, `retention-mutation-detected`).
+- *FP suite on the int2_l3 FP model* (model sha `20d3d08f…`,
+  `ooocoh-m4-fp-*-r2`): 13 positives + 13 negatives all
+  `retirementsMatch: true`, `qualified: true`; program exits exact
+  (positives 0, negatives 1–11).
+- *Four-hart directed* `mc_fp_smt` (`ooocoh-m4-fpsmt-r1`): positive pass
+  (tohost 0, 3,774 cycles, all harts retired); negative detected
+  (tohost 1, 961 cycles).
+- *SB=16 stage-9*: `ooo_fp_cancel_tid_reuse` on the `g6lc64_ooo` SB=16
+  overlay (`ooocoh-m4-sb16-s9-r1`, model `0ab95827…`) — the historical T5
+  hang does not reproduce: pass in 5,279 cycles, Spike retirements exact,
+  `qualified: true`. (Link to T9f: ring ≥ 16 *strict boots* time out under
+  the drained handoff — a different pathology than this stage-9 hang, which
+  was a fetch-park defect already fixed in T5.)
+- *FPU synth delta* (`ooocoh-m4-fpusynth-r5`, leaf stat, generic cells):
+  owner-live tracking costs **+454 cells / +454 wire bits** (66,558 vs
+  66,104); both variants `check -assert` + `scc -expect 0` clean.
+- *Gate* (`ooocoh-m4-gate-int2l3-r2`): lint 23 warnings / 0 errors, synth
+  43 warnings / 0 errors, `check -assert` clean — FP-enabled `COH_OOO`
+  elaborates define-free.
+- *Firmware*: `ariane-ooo-int2-l3.dts` → DTB OK (4 cpu nodes =
+  NrCores·NrHarts; validator FAIL=0, the pre-existing dual-CLINT-binding
+  GAP unchanged); OpenSBI profile `ooocoh-m4-fw-int2l3-r2` built with
+  `rv64imafdc_zicsr_zifencei`.
+- *Strict boot*: `ooocoh-m4-osbi-int2l3-L0-r1` — **PASS, 18,419,779
+  cycles** (tohost 0, strictDual, tracer-terminated; +30,024 / +0.16 % vs
+  the 18,389,755 M1d anchor — inside the allowed FPU decode/CSR movement).
+  Model `20d3d08f`, profile `ooocoh-m4-fw-int2l3-r2`, dtb `ecbcffb7`,
+  payload `3bcb66ab`, firmware `20cf5b51`.
+- *int2 identity*: `ooocoh-m4-osbi-int2-L0-r3` — **PASS, 17,870,562
+  cycles, byte-identical to the M1d int2 anchor** on the restored frozen
+  profile (remote dir re-primed from the pinned local artifact,
+  payload/firmware sha re-verified before the run). The shared M4 core
+  files are inert at `FpPresent=0` — the boot, not a file-set hash, is
+  the evidence.
+
+**Remaining.** Mixed-residency FP (hart-tagged lazy-FS audit);
+`g6lc64_ooo_server` qualification; the T5 s11 residual note is superseded by
+the r2 Spike-exact suite run.

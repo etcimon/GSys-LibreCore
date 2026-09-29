@@ -51,6 +51,32 @@ def run_outcome(returncode: int, text: str, cycle_cap: int) -> str:
     return 'timeout' if int(verdicts[0][2]) >= cycle_cap else 'pass'
 
 
+def park_loop_pcs(disassembly: str) -> set:
+    # crt.S parks every hart with mhartid >= 1 on `csrr a0, mhartid; li a1, 1;
+    # bgeu a0, a1, <self>` — the bgeu branches to ITSELF (imm == 0), so the
+    # parked sibling retires one conditional self-branch forever. On an SMT
+    # package those rows interleave with the active hart's retirements in the
+    # shared core RVFI trace, and a single-active-hart Spike comparison must
+    # drop exactly them. Match only a B-type branch whose immediate is zero
+    # (a self-branch), preceded within two instructions by the mhartid read —
+    # an unconditional `j .` halt is a different signature and stays visible.
+    words = {int(a, 16): (int(i, 16), len(i) // 4 * 2)
+             for a, i in re.findall(r'^\s*([0-9a-fA-F]+):\s+([0-9a-fA-F]+)\s',
+                                    disassembly, re.M)}
+    pcs = set()
+    for pc, (insn, size) in words.items():
+        if size != 4 or (insn & 0x707f) != 0x7063:  # 32-bit bgeu only
+            continue
+        imm = (((insn >> 31) & 1) << 12) | (((insn >> 7) & 1) << 11) | \
+              (((insn >> 25) & 0x3f) << 5) | (((insn >> 8) & 0xf) << 1)
+        if imm != 0:
+            continue
+        ctx = [words.get(pc - d, (0, 0))[0] for d in (4, 6, 8)]
+        if 0xf1402573 in ctx:  # csrr a0, mhartid
+            pcs.add(pc)
+    return pcs
+
+
 def retirement_roi(text: str, start: int, stop: int) -> list:
     rows = []
     active = False
@@ -90,11 +116,14 @@ def build_fp_review(out: Path, data: Path) -> int:
     source = out / 'source'
     source.mkdir()
     flist = (REPO / 'core/Flist.cva6').read_text()
+    # T9g/M4: the production guard only refuses mixed-residency multi-hart FP,
+    # so the single-hart review build needs no rewrite — these substitutions are
+    # identity checks that pin the narrowed guard sites.
     substitutions = {
-        'config_pkg.sv': ('    assert (!(Cfg.OoOEn && Cfg.FpPresent));',
-                          '    assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.NrHarts > 1));'),
-        'g6lc_ooo_dispatch.sv': ('  if (CVA6Cfg.FpPresent) begin : gen_err_ooo_fp',
-                               '  if (CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_fp'),
+        'config_pkg.sv': ('    assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.NrHarts > 1 && !Cfg.SmtDrainedHandoff));',
+                          '    assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.NrHarts > 1 && !Cfg.SmtDrainedHandoff));'),
+        'g6lc_ooo_dispatch.sv': ('CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin : gen_err_ooo_fp_mh',
+                               'CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin : gen_err_ooo_fp_mh'),
     }
     paths = {'config_pkg.sv': 'core/include/config_pkg.sv',
              'g6lc_ooo_dispatch.sv': 'core/ooo/g6lc_ooo_dispatch.sv',
@@ -326,6 +355,17 @@ def main() -> int:
     # absence of any verdict, or a SUCCESS at the cap, as a hang. Without this
     # distinction a genuine wrong-result failure is misreported as a stall.
     outcome = run_outcome(r.returncode, text, cycles)
+    # A multi-core SMT model clock-holds the secondary cores for the whole
+    # run; the harness then folds core 0's program exit into the held-secondary
+    # code 125 (ariane_testharness `mc_verdict`). With FP_REVIEW_HELD_OK the
+    # `[mc_verdict] program exit code` line carries the program's own verdict
+    # and is authoritative; 125 itself never is.
+    held = re.search(r'\[mc_verdict\] HELD: .*held_mask=(\S+) retired_mask=(\S+)', text)
+    prog = re.search(r'\[mc_verdict\] program exit code (\d+)', text)
+    if os.environ.get('FP_REVIEW_HELD_OK') == '1' and held and prog:
+        record['heldSecondaryExit'] = {'heldMask': held.group(1), 'retiredMask': held.group(2),
+                                       'programExit': int(prog.group(1))}
+        outcome = 'pass' if int(prog.group(1)) == 0 else 'fail'
     timed_out = outcome == 'timeout'
     passed = outcome == 'pass'
     record.update(runCommand=run_cmd, rc=r.returncode, verdicts=verdicts, outcome=outcome,
@@ -347,15 +387,42 @@ def main() -> int:
                                'traceSha256': sha(trace)}
         rtl_exits = [int(value, 16 if value.startswith('0x') else 10) for value in
                      re.findall(r'\*\*\* (?:SUCCESS|FAILED) \*\*\* \(tohost = (0x[0-9a-fA-F]+|[0-9]+)\)', text)]
-        matched = len(exits) == 1 and reference.returncode == 0 and exits == rtl_exits and outcome in ('pass', 'fail')
+        # On a held-secondary model the final tohost write is the harness
+        # mc_verdict fold (125), not the program exit; the program's own code
+        # is the [mc_verdict] program exit code line. On a single-hart model
+        # the verdict carries tohost = (code << 1) | 1, decoded as v >> 1.
+        if os.environ.get('FP_REVIEW_HELD_OK') == '1' and prog:
+            rtl_codes = [int(prog.group(1))]
+        else:
+            rtl_codes = [v >> 1 for v in rtl_exits]
+        matched = len(exits) == 1 and reference.returncode == 0 and exits == rtl_codes and outcome in ('pass', 'fail')
         boundaries = {name: int(address, 16) for address, name in
                       re.findall(r'^([0-9a-fA-F]+)\s+\w\s+(main|exit)$', nm.stdout, re.M)}
         try:
             rtl_traces = list(out.glob('trace_rvfi_hart_*.dasm'))
+            # M4: multi-hart models emit one trace per physical core; cores
+            # still clock-held (never released, never retired) leave an empty
+            # trace. Single-active-hart mode keeps only traces that recorded
+            # a retirement, so a parked peer does not fail the reference check —
+            # an unexpectedly active core still trips the count.
+            if os.environ.get('FP_REVIEW_ACTIVE_TRACE') == '1':
+                rtl_traces = [p for p in rtl_traces if any(
+                    line.startswith('core ') for line in
+                    p.read_text(errors='replace').splitlines())]
             if len(rtl_traces) != 1:
                 raise ValueError('single-hart reference requires exactly one RTL trace')
             rtl_rows = retirement_roi(rtl_traces[0].read_text(), boundaries['main'], boundaries['exit'])
             ref_rows = retirement_roi(trace.read_text(), boundaries['main'], boundaries['exit'])
+            # On an SMT package the held sibling spins in crt.S's mhartid
+            # park loop while hart 0 runs the test; its rows share the core
+            # trace. FP_REVIEW_PARK_FILTER drops exactly those rows so the
+            # remaining stream is the active hart's, Spike-comparable.
+            if os.environ.get('FP_REVIEW_PARK_FILTER') == '1':
+                pcs = park_loop_pcs(disassembly.stdout)
+                before = len(rtl_rows)
+                rtl_rows = [row for row in rtl_rows if row[1] not in pcs]
+                record['reference']['parkFilter'] = {
+                    'pcs': sorted(hex(p) for p in pcs), 'dropped': before - len(rtl_rows)}
             same = rtl_rows == ref_rows
             record['reference'].update(retirementsMatch=same, rtlRetirements=len(rtl_rows),
                                        referenceRetirements=len(ref_rows),

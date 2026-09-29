@@ -224,7 +224,7 @@ blockers below supersede any implied claim of verified end-to-end precision.
 |---------|------|
 | `g6lc64_ooo_server_config_pkg.sv` | **Configured server**: 4-issue, 4c×2h, L2/L3 auto, `DeepSpecEn`, `MemDepPredEn` |
 | `g6lc64_ooo_config_pkg.sv` | **Configured dual-issue lite**: 2-issue OoO + DeepSpec (bring-up / area-lean) |
-| `g6lc64_ooo_int2_l3_config_pkg.sv` | **Configured int2 L3**: 2c×2h drained, ring 8 (M1d geometry; the T9f/M3 ring-32/TAGE/FTQ window was measured and **not adopted** — ablation in T9f) |
+| `g6lc64_ooo_int2_l3_config_pkg.sv` | **Configured int2 L3**: 2c×2h drained, ring 8 (M1d geometry; the T9f/M3 ring-32/TAGE/FTQ window was measured and **not adopted** — ablation in T9f), **RV64GC+B** — RVF/RVD enabled under the drained handoff (T9g/M4: owner-lifetime proof + four-hart `mc_fp_smt` + Spike-exact FP suite; mixed residency + FP stays refused) |
 | `g6lc64_smt2_ooo_int_config_pkg.sv` | **Configured SMT2 int**: 1c×2h mixed residency, same ring-8 geometry (M3 window likewise not adopted) |
 | Default `cv64a6_imafdc_sv39` etc. | `OoOEn=0` identity (still production in-order) |
 
@@ -256,6 +256,9 @@ ROB/IQ/LSQ/PRF depths 0 → scaled from issue width in `build_config_pkg`.
 | ILP / rename | `verif/tests/custom/ooo/ooo_ilp_chain.S` |
 | Memdep / STL | `verif/tests/custom/ooo/ooo_mem_dep.S` |
 | L2/L3 stream | `verif/tests/custom/l3/l3_stride_stream.S` |
+| FP OoO suite | `verif/tests/custom/ooo/ooo_fp_{ooo,rename}.S` (13 positives + negatives, Spike-ordered) |
+| FP SMT residency | `verif/tests/custom/multicore/mc_fp_smt.S` (four-hart FP context + drained switches) |
+| FP owner proof | `core/ooo/formal/g6lc_ooo_fp_owner.sby` (bmc/cover/`mut_owner`) |
 
 `build-platform` suite id: **`ooo-l3-tests` (optional / lengthy)** — not in
 default `verify.targets` or `defaultSuites` (runtime cost, not maturity).

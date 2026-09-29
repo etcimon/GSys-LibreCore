@@ -144,22 +144,15 @@ module g6lc_ooo_dispatch
   // (T6a) on the protected dual-hart OpenSBI/HSM profile; mixed residency
   // (drain gate off) is promoted to production on single-core packages by
   // T9d/M2 and stays qualification-gated on multi-core packages.
-  if (CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_fp_mh
-    // Hart-tagged LSQ and lazy-FS per-hart tracking are the T6 work item; an
-    // FP register class on a multi-hart OoO configuration stays illegal even
-    // for the single-hart qualification build below.
-    $error("OoO FP with more than one hart is unqualified: hart-tagged LSQ and lazy-FS are T6.");
-  end
 `ifndef G6LC_OOO_FP_QUALIFY
-  if (CVA6Cfg.FpPresent) begin : gen_err_ooo_fp
-    // The FP class is implemented and tested at module level, and the
-    // FP-enabled full core elaborates and synthesises clean. What is missing is
-    // behavioural evidence: no FP program has been simulated on this path, and
-    // there is no independent-reference comparison.
-    // G6LC_OOO_FP_QUALIFY exists only for the T5 qualification build that
-    // produces that evidence; it is removed by the T5 commit once the suite
-    // passes, so production builds keep this elaboration guard.
-    $error("OoO FP register class is implemented but unqualified: full release qualification is pending.");
+  if (CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin : gen_err_ooo_fp_mh
+    // FP under mixed residency stays refused: the hart-tagged lazy-FS audit is
+    // the remaining work. Drained multi-hart FP and single-hart FP are the
+    // production legs (T9g/M4: Spike FP suite on the int2_l3 FP model, the
+    // fpu_wrap owner-lifetime proof g6lc_ooo_fp_owner, and the four-hart
+    // FP-residency kernel). G6LC_OOO_FP_QUALIFY re-opens the mixed leg for a
+    // qualification build only.
+    $error("OoO FP under mixed residency is unqualified: hart-tagged lazy-FS is open (T9g).");
   end
 `endif
 

@@ -15,7 +15,9 @@ single-core package now builds define-free with `SmtDrainedHandoff=0`. The
 drained handoff remains the configured behaviour on `int2`/`int2_l3`
 (`SmtDrainedHandoff=1`), and multi-core mixed residency stays
 qualification-gated behind `G6LC_OOO_SMT_MIXED_QUALIFY`; FP+mixed remains
-refused. Evidence (probe matrix, isolation mutations, strict-boot anchor
+refused, while FP under the **drained** handoff is legal since T9g/M4
+(`g6lc64_ooo_int2_l3` is RV64GC+B — owner-lifetime proof + four-hart
+`mc_fp_smt` + Spike-exact FP suite). Evidence (probe matrix, isolation mutations, strict-boot anchor
 exactness, gates, FO4) is re-baselined on the eWT tree in
 `../../core/ooo/AGENTS-ooo-plan.md` T9d.
 

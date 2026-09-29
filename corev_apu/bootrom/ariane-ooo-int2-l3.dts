@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 // Copyright (c) 2026 Etienne Cimon
 //
-// Two-core SMT2 integer OoO DTS for g6lc64_ooo_int2_l3_config_pkg
+// Two-core SMT2 OoO DTS for g6lc64_ooo_int2_l3_config_pkg
 // (NrCores=2, NrHarts=2, CohPolicy=COH_OOO, L2En=1, L3En=1 non-inclusive
-// 1 MiB, RVF/RVD=0).
+// 1 MiB, RVF/RVD=1 (T9g/M4 FP on the drained-handoff OoO path)).
 //
 // Shape is taken only from the sparse Linux tree (fetch-linux-dts.ps1):
 //   «dts»/Documentation/devicetree/bindings/riscv/cpus.yaml  (hart = execution context)
@@ -17,8 +17,7 @@
 // cpu-map core0{thread0,thread1} core1{thread0,thread1}. mhartid = core*NrHarts + thread
 // (g6lc_cluster hart_id_base), matching CSR bank, CLINT and PLIC slot indices.
 //
-// ISA: the integer package. No f/d (FpPresent=0), otherwise the ariane-smt2.dts
-// set; zawrs stays unadvertised for the same SMT closeout reason (no wait-for-peer wake).
+// ISA: FpPresent=1 (T9g/M4) -> rv64imafdc + the ariane-smt2.dts extension set; zawrs stays unadvertised for the same SMT closeout reason (no wait-for-peer wake).
 //
 // Validate: .\build-platform\scripts\validate-cva6-dts.ps1 and
 //   python software/smt2-linux/scripts/dts_to_dtb.py -i corev_apu/bootrom/ariane-ooo-int2.dts -o <dtb>
@@ -50,11 +49,11 @@
       reg = <0>;
       status = "okay";
       clock-frequency = <50000000>;
-      // Integer OoO package: rv64imac + Zacas + Zicbo* + bitmanip; no F/D, no RVV.
-      riscv,isa = "rv64imac_zba_zbb_zbs_zicbom_zicboz_zacas";
+      // FP OoO package (T9g/M4): rv64imafdc + Zacas + Zicbo* + bitmanip; no RVV.
+      riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
       riscv,isa-base = "rv64i";
-      // Tokens only from extensions.yaml; set matches g6lc64_ooo_int2_config_pkg
-      riscv,isa-extensions = "i", "m", "a", "c", "b",
+      // Tokens only from extensions.yaml; set matches g6lc64_ooo_int2_l3_config_pkg
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "b",
         "zicntr", "zicsr", "zifencei", "zihpm",
         "zba", "zbb", "zbs",
         "zcb", "zicond",
@@ -86,9 +85,9 @@
       reg = <1>;
       status = "okay";
       clock-frequency = <50000000>;
-      riscv,isa = "rv64imac_zba_zbb_zbs_zicbom_zicboz_zacas";
+      riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
       riscv,isa-base = "rv64i";
-      riscv,isa-extensions = "i", "m", "a", "c", "b",
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "b",
         "zicntr", "zicsr", "zifencei", "zihpm",
         "zba", "zbb", "zbs",
         "zcb", "zicond",
@@ -119,9 +118,9 @@
       reg = <2>;
       status = "okay";
       clock-frequency = <50000000>;
-      riscv,isa = "rv64imac_zba_zbb_zbs_zicbom_zicboz_zacas";
+      riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
       riscv,isa-base = "rv64i";
-      riscv,isa-extensions = "i", "m", "a", "c", "b",
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "b",
         "zicntr", "zicsr", "zifencei", "zihpm",
         "zba", "zbb", "zbs",
         "zcb", "zicond",
@@ -152,9 +151,9 @@
       reg = <3>;
       status = "okay";
       clock-frequency = <50000000>;
-      riscv,isa = "rv64imac_zba_zbb_zbs_zicbom_zicboz_zacas";
+      riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
       riscv,isa-base = "rv64i";
-      riscv,isa-extensions = "i", "m", "a", "c", "b",
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "b",
         "zicntr", "zicsr", "zifencei", "zihpm",
         "zba", "zbb", "zbs",
         "zcb", "zicond",
@@ -224,7 +223,7 @@
       smt,boot-crutches = <0x3>;          /* SMT_COLD_EXCL | SMT_FIRST_ACT_EXCL */
       smt,dual-commit = <0>;              /* two harts cannot commit CSRs same cycle */
       smt,banked-bht = <0>;               /* BHT/BTB shared across harts */
-      smt,fp-register-banking = <0>;      /* no F/D on this package */
+      smt,fp-register-banking = <0>;      /* F/D context banked per hart only inside OoO rename; architectural FS is switched whole (drained handoff) */
       smt,idle-clock-gate = <0>;          /* secondary cores are boot-held, not idle-gated */
       smt,zawrs = <0>;                    /* no wait-for-peer wake */
       smt,default-sku = "experimental";   /* two-core SMT2 OoO not yet a production default SKU */

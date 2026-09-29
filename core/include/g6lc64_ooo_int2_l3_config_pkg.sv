@@ -9,11 +9,13 @@
 // Two-core integer OoO WT coherence envelope (COH_OOO) with L3 — Etienne Cimon 2026
 //
 // g6lc64_ooo_int2_l3: g6lc64_ooo_int2 plus a non-inclusive 1 MiB shared L3
-// (16-way, 64 B lines, 4 banks). MSHR depth 4 stays credit-consistent with
-// the coherence hub's four shared transaction slots. L2TagSramEn is set so
-// the tag-SRAM increment consumes it; L3InclusiveEn stays 0 (Phase 2 brings
-// the L3 up non-inclusive; g6lc64_ooo_server carries the inclusive policy).
-// Default production packages keep NrCores=1 (identity path).
+// (16-way, 64 B lines, 4 banks) and — since T9g/M4 — the FP register class
+// (RVF/RVD) on the drained-handoff OoO path. MSHR depth 4 stays
+// credit-consistent with the coherence hub's four shared transaction slots.
+// L2TagSramEn is set so the tag-SRAM increment consumes it; L3InclusiveEn
+// stays 0 (Phase 2 brings the L3 up non-inclusive; g6lc64_ooo_server carries
+// the inclusive policy). Default production packages keep NrCores=1
+// (identity path).
 
 // ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
 // The original work of the copyright holders named above remains licensed
@@ -28,8 +30,13 @@ package cva6_config_pkg;
 
   localparam CVA6ConfigXlen = 64;
 
-  localparam CVA6ConfigRVF = 0;
-  localparam CVA6ConfigRVD = 0;
+  // FP on the OoO path (T9g/M4): RVF/RVD on. The drained handoff empties the
+  // scoreboard at every switch, `g6lc_rename` keeps per-hart FP maps/pools and
+  // `dirty_fp_state` is attributed per committing hart — qualified by the
+  // Spike FP suite, `mc_fp_smt` and the `g6lc_ooo_fp_owner` proof. COH_OOO no
+  // longer excludes FpPresent (FP loads replay like any load).
+  localparam CVA6ConfigRVF = 1;
+  localparam CVA6ConfigRVD = 1;
   localparam CVA6ConfigF16En = 0;
   localparam CVA6ConfigF16AltEn = 0;
   localparam CVA6ConfigF8En = 0;

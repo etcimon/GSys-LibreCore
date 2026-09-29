@@ -752,6 +752,28 @@ pulsed into a busy divider is not covered. Strict
 `-Werror-UNOPTFLAT` builds remain blocked by existing scoreboard and vendored FPnew loops; that
 structural gate is open, not waived. No full-core reachability or FP+OoO guard promotion follows.
 
+## FP on the OoO path — owner proof and four-hart residency (2026-09-29, T9g/M4)
+
+The owner-retention protection that was inert at core level is now proven at the writeback
+seam: `core/ooo/formal/g6lc_ooo_fp_owner.sby` binds `fpu_wrap` + a dispatch-side stimulus —
+bmc depth 24 (≥ the S2 reuse window) PASS, cover witnesses PASS, and the
+`G6LC_MUT_FP_NO_OWNER_LIVE` mutation (owner-live compare dropped) fails at step 2
+(`mut_owner`). The simulation witness is the S2 leaf `tb_g6lc_review_fp_lifetime` rerun on
+the M4 tree: all positive/negative scenarios match, and `FP_LIFETIME_MUTATE_CANCEL=1` is
+detected (`FP_OWNER_CANCELLED_RESPONSE`). The four-hart directed test
+`verif/tests/custom/multicore/mc_fp_smt.S` runs on the FP-enabled `g6lc64_ooo_int2_l3` model:
+each hart fills f0–f31 with a hart-unique pattern and a unique `fcsr`, forces drained
+sibling handoffs with an in-flight `fdiv.d`/`fsqrt.d`, issues FP loads on a line the peer
+core is writing (COH_OOO replay), then re-verifies registers/fcsr/`mstatus.FS` per hart;
+the negative arm mutates the expected pattern and is detected. The Spike-ordered FP suite
+(`ooo_fp_rename` incl. recovery/status arms, `ooo_fp_ooo` stages 1–11 positives and
+negatives) runs retirement-exact on the same model in single-active-hart mode
+(`FP_REVIEW_ACTIVE_TRACE`/`FP_REVIEW_HELD_OK`/`FP_REVIEW_PARK_FILTER` — the parked sibling's
+compressed/32-bit mixed park loop is filtered from the comparison and the `mc_verdict`
+held-secondary fold code 125 is decoded via the `program exit code` line). On the
+`g6lc64_ooo` SB=16 overlay the historical stage-9 hang does **not** reproduce:
+`ooo_fp_cancel_tid_reuse` completes in 5,279 cycles Spike-exact.
+
 ## Historical misaligned-load tests (2026-09-20)
 
 `ooo_mem_min.S` stages32/33 are registered as `ooo_load_misaligned_trap` and

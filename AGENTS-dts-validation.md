@@ -62,6 +62,7 @@ CVA6 DTS under validation:
 | `corev_apu/bootrom/ariane-smt2.dts` | Dual-hart SMT Linux topology |
 | `corev_apu/bootrom/ariane-stream8.dts` | Dual-core stream8 residual package topology |
 | `corev_apu/bootrom/ariane-ooo-int2.dts` | Two-core × two-hart integer OoO (`g6lc64_ooo_int2`): 4 `cpu@`, cpu-map core0/core1 × thread0/1, 4-hart CLINT/PLIC, shared L2 node, no f/d, zawrs unadvertised; `dts_to_dtb.py` maps it to `g6lc64_ooo_int2_config_pkg.sv` (plat_hc 4). Isolated OpenSBI strict-payload qualification only, not a Linux SKU. |
+| `corev_apu/bootrom/ariane-ooo-int2-l3.dts` | Two-core × two-hart OoO + non-inclusive L3 (`g6lc64_ooo_int2_l3`): same topology as `ariane-ooo-int2.dts` plus the L3 `cache-level=<3>` node and L2→L3 `next-level-cache`; **f/d advertised** since T9g/M4 (`riscv,isa = rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas`, extensions include `f`/`d`), `smt,fp-register-banking=<0>` kept (drained handoff switches the whole FS context); `dts_to_dtb.py` maps it to `g6lc64_ooo_int2_l3_config_pkg.sv` (plat_hc 4). Validator: FAIL=0, WARN/GAP=1 (pre-existing dual CLINT binding). Isolated OpenSBI strict-payload qualification only. |
 | `gpu@40001000` (`virtio,mmio`) | LibreCore APU guest window; `status = "disabled"` until a `G6LC_APU` testharness build instantiates `g6lc_apu_xbar`. PLIC source 9. Control `0x40002000` is firmware-only and omitted. Default testharness topology is unchanged. |
 | `g6lc-apu-domain.dtsi` | OpenSBI domain overlay for firmware hart 1; **not included** in default DTBs. Do not apply to `ariane-smt2.dts`. |
 

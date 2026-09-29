@@ -603,9 +603,15 @@ module fpu_wrap
     // Downstream write port is dedicated to FPU and always ready
     assign fpu_out_ready = 1'b1;
 
-    // Downstream valid from unit
+    // Downstream valid from unit. OoO: a return may complete only while its
+    // transaction id still owns the slot and is uncancelled — the stale-return
+    // gate the S2 leaf exercises (see core/ooo/formal/g6lc_ooo_fp_owner.sby).
     assign fpu_valid_o = fpu_out_valid && (!CVA6Cfg.OoOEn ||
-        (!flush_i && owner_live_q[result_tag] && !owner_cancelled_q[result_tag] &&
+        (!flush_i &&
+`ifndef G6LC_MUT_FP_NO_OWNER_LIVE
+         owner_live_q[result_tag] &&
+`endif
+         !owner_cancelled_q[result_tag] &&
          !cancelled_mask_i[result_tag]));
 
   end

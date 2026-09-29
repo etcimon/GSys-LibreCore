@@ -249,10 +249,11 @@ def main():
         assert text.count(old)==1,'FP fault site changed'
         path.write_text(text.replace(old,new))
     if fp_dispatch:
-        path=source/'g6lc_ooo_dispatch.sv';text=path.read_text()
-        old='  if (CVA6Cfg.FpPresent) begin : gen_err_ooo_fp'
-        assert text.count(old)==1,'FP qualification guard site changed'
-        path.write_text(text.replace(old,'  if (CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1) begin : gen_err_ooo_fp'))
+        # T9g/M4: the guard now fires only for mixed-residency multi-hart FP, so
+        # the single-hart FP cell builds without a rewrite; pin the new site.
+        text=(source/'g6lc_ooo_dispatch.sv').read_text()
+        guard='CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff'
+        assert text.count(guard)==1,'FP qualification guard site changed'
     hashes={name:digest(source/name) for name in names}
     (out/'sources.json').write_text(json.dumps(hashes,indent=2))
     cluster=(source/'g6lc_cluster.sv').read_text()
@@ -434,6 +435,12 @@ def main():
             configurations=[('dispatch','fp',['-GFPEN=1'],
                              [(n,'DISPATCH_FP_COMMIT_FLUSH' if fp_commit_fault or (fp_zero_fault and n==27) else None)
                               for n in (24,25,27)])]
+            # T9g: the newly legal drained-handoff multi-hart FP shape gets the
+            # same FP dispatch cells at -GHARTS=2 -GDRAIN=1.
+            if os.environ.get('REVIEW_RTL_FP_DRAINED')=='1':
+                configurations.append(('dispatch','fp-drained',
+                                       ['-GHARTS=2','-GFPEN=1','-GDRAIN=1'],
+                                       [(n,None) for n in (24,25,27)]))
         if hart_dispatch:
             configurations=[('dispatch','nh2',['-GHARTS=2'],[(26,None)])]
         # T6a positive counterpart to the illegal cells: integer -GHARTS=2 must
@@ -455,11 +462,12 @@ def main():
             # expected message.
             illegal_kind=os.environ['REVIEW_RTL_ILLEGAL']
             assert illegal_kind in ('smt','fp')
-            # 'smt' is the FP multi-hart guard (gen_err_ooo_fp_mh: integer
-            # -GHARTS=2 is legal since T6a); 'fp' is the single-hart FP guard
-            # (gen_err_ooo_fp).
+            # T9g: single-hart FP and drained-handoff multi-hart FP are legal —
+            # the only remaining refusal is FP under *mixed* residency
+            # (gen_err_ooo_fp_mh). The fixture leaves SmtDrainedHandoff=0, so
+            # -GHARTS=2 -GFPEN=1 hits it; both names pin the same refusal.
             configurations=[('dispatch','illegal-'+illegal_kind,
-                             ['-GHARTS=2','-GFPEN=1'] if illegal_kind=='smt' else ['-GFPEN=1'],[])]
+                             ['-GHARTS=2','-GFPEN=1'],[])]
     results=[]
     for kind,geometry,parameters,cases in configurations:
         if os.environ.get('REVIEW_RTL_KIND') and kind != os.environ['REVIEW_RTL_KIND']:continue
@@ -489,11 +497,9 @@ def main():
                 p=subprocess.run(strict_cmd,stdout=log,stderr=subprocess.STDOUT,timeout=180)
             text=(work/'verilate.log').read_text(errors='replace')
             # Matched on the guard's own text, so a reworded refusal fails here
-            # rather than silently passing on a different guard. The refusals
-            # are "FP with more than one hart is unqualified" and "FP class
-            # implemented but unqualified".
-            expected=('more than one hart is unqualified' if illegal_kind=='smt'
-                      else 'implemented but unqualified')
+            # rather than silently passing on a different guard. T9g: both
+            # names pin the mixed-residency refusal in gen_err_ooo_fp_mh.
+            expected='under mixed residency is unqualified'
             refused=p.returncode!=0 and expected in text
             results.append({'kind':kind,'geometry':geometry,'scenario':None,
                             'illegalKind':illegal_kind,

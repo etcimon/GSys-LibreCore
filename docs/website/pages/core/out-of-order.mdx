@@ -66,22 +66,24 @@ on; zeros when off. RVFI/commit observe tags via the scoreboard entry.
 | `g6lc64_ooo_int_config_pkg.sv` | Integer-only single-hart OoO — the bring-up/verification baseline: elaborates, lints and synthesizes clean |
 | `g6lc64_smt2_ooo_int_config_pkg.sv` | **Production** SMT2 over OoO: `NrHarts=2`, integer-only, **mixed residency** (T9d), Sstc; M1d ring-8 window (the T9f/M3 ring-32/TAGE/FTQ uplift was measured and not adopted) |
 | `g6lc64_ooo_int2_config_pkg.sv` | Two-core WT + L2 `COH_OOO` integration target — OoO coherence envelope, not a production profile |
-| `g6lc64_ooo_int2_l3_config_pkg.sv` | Two-core WT + L2/L3 `COH_OOO`, drained handoff; M1d ring-8 window (T9f/M3 uplift not adopted) |
-| `g6lc64_ooo_config_pkg.sv` | Dual-issue OoO lite (area-lean bring-up) — **refused in production** (single-hart FP leg) |
-| `g6lc64_ooo_server_config_pkg.sv` | Server: wide issue, multi-core×hart, L2/L3 auto, deep spec, memdep — **refused in production** (multi-hart FP leg) |
+| `g6lc64_ooo_int2_l3_config_pkg.sv` | Two-core WT + L2/L3 `COH_OOO`, drained handoff; M1d ring-8 window (T9f/M3 uplift not adopted); **RV64GC+B** — RVF/RVD on (T9g/M4) |
+| `g6lc64_ooo_config_pkg.sv` | Dual-issue OoO lite (area-lean bring-up) — legal single-hart FP since T9g/M4 |
+| `g6lc64_ooo_server_config_pkg.sv` | Server: wide issue, multi-core×hart, L2/L3 auto, deep spec, memdep — opt-in/unqualified (drained-FP legal; `COH_FILTERED` coherence leg unqualified) |
 | Default `cv64a6_imafdc_sv39` (etc.) | `OoOEn=0` identity |
 
 `check_cfg` legality for OoO (`core/include/config_pkg.sv`):
 
 ```
 assert (!(Cfg.OoOEn && !Cfg.SpeculativeSb));
-assert (!(Cfg.OoOEn && Cfg.NrHarts > 1 && Cfg.FpPresent));   // multi-hart FP: always refused
+assert (!(Cfg.OoOEn && Cfg.NrHarts > 1 && Cfg.FpPresent && !Cfg.SmtDrainedHandoff));
+                                                     // FP + mixed residency: refused
 assert (Cfg.SmtDrainedHandoff || (Cfg.OoOEn && Cfg.NrHarts > 1));
 `ifndef G6LC_OOO_SMT_MIXED_QUALIFY
-assert (Cfg.SmtDrainedHandoff);                            // mixed residency: qualification-gated
+assert (Cfg.SmtDrainedHandoff);                      // multi-core mixed residency: qualification-gated
 `endif
 `ifndef G6LC_OOO_FP_QUALIFY
-assert (!(Cfg.OoOEn && Cfg.FpPresent));                    // single-hart FP: refused in production
+assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.NrHarts > 1 && !Cfg.SmtDrainedHandoff));
+                                                     // single-hart and drained FP lifted (T9g/M4)
 `endif
 ```
 
@@ -89,9 +91,12 @@ assert (!(Cfg.OoOEn && Cfg.FpPresent));                    // single-hart FP: re
 under the **drained handoff** — the thread selector switches only when the
 scoreboard and store queues are empty (asserted at the switch in `cva6.sv` as
 `ooo_switch_drained`), so the hart-blind IQ/ROB/LSQ never hold two harts' work
-at once. The FP refusal remains an **aliasing** gap, not a conservative one: the
-OoO block has no FP register class, so FP results are neither renamed nor tracked
-in the busy table; multi-hart FP is refused outright pending hart-tagged lazy-FS.
+at once. Since T9g/M4 the FP register class exists on the OoO path (per-hart
+`g6lc_rename` FP maps/pools/checkpoints, per-committing-hart `dirty_fp_state`,
+op-agnostic LSQ) and the `fpu_wrap` owner table is proven — so FP is legal
+single-hart (`g6lc64_ooo`) and under the drained handoff (`g6lc64_ooo_int2_l3`,
+RV64GC+B). FP under **mixed** residency stays refused pending the hart-tagged
+lazy-FS audit.
 `g6lc64_ooo_int` clears every FP format and keeps `NrHarts=1`, which is what makes
 it legal — treat it as a bring-up and verification baseline, not a qualified
 product.

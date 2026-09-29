@@ -22,11 +22,11 @@ aid**, not a formal datasheet.
 | `cv64a6_imafdch_sv39` | 1–2 | Off | 1 | 1 | Off | H path | Off | Hypervisor-oriented without full server math |
 | `cv64a6_spec_deep` | ↑ | Off* | 1 | 1 | * | * | Off | Deep speculation knobs (`DeepSpecEn`) |
 | `g6lc64_smt2` | 1–2 | Off | **2** | 1 | Often on | Off | Off | Dual-thread bring-up |
-| `g6lc64_ooo` | **2** | **On** | 1 | 1 | Optional | Off | Off | Dual-issue OoO lite — **refused in production** (see note) |
+| `g6lc64_ooo` | **2** | **On** | 1 | 1 | Optional | Off | Off | Dual-issue OoO lite — legal single-hart FP (T9g/M4) |
 | `g6lc64_ooo_int` | **2** | **On** | 1 | 1 | Optional | Off | Off | Integer-only OoO; bring-up / verification baseline |
 | `g6lc64_smt2_ooo_int` | **2** | **On** | **2** | 1 | L2 | Sstc | Off | **Production** SMT2 over OoO (mixed residency; M1d ring-8 window — T9f/M3 uplift not adopted) |
 | `g6lc64_ooo_int2` | **2** | **On** | **2** | **2** | **L2** | Sstc | Off | Two-core WT + `COH_OOO` integration target |
-| `g6lc64_ooo_server` | **4** | **On** | ≤2 | **2+** | **L2/L3 auto** | Check pkg | Off | Fat server OoO + multicore — **refused in production** (see note) |
+| `g6lc64_ooo_server` | **4** | **On** | ≤2 | **2+** | **L2/L3 auto** | Check pkg | Off | Fat server OoO + multicore — opt-in/unqualified (drained-FP legal, `COH_FILTERED` unqualified; see note) |
 | `g6lc64_server_math` | **2** | Off | 1 | **2** | **L2 auto** | **On** | Off | KVM/math host C-light |
 | `g6lc64_server_math_v` | **2** | Off | 1 | **2** | **L2 auto** | **On** | **On** | Same + Ara/RVV |
 | `g6lc64_stream8` | 1 | Off | 1 | **2** | **L2** | **On** | Off | Stream8-class in-order fabric bring-up |
@@ -42,18 +42,24 @@ the busy table, so the combination *aliases* rather than under-performs:
 
 ```
 assert (!(Cfg.OoOEn && !Cfg.SpeculativeSb));
-assert (!(Cfg.OoOEn && Cfg.NrHarts > 1 && Cfg.FpPresent));   // multi-hart FP: always refused
+assert (!(Cfg.OoOEn && Cfg.NrHarts > 1 && Cfg.FpPresent && !Cfg.SmtDrainedHandoff));
+                                                            // FP + mixed residency: refused
 `ifndef G6LC_OOO_FP_QUALIFY
-assert (!(Cfg.OoOEn && Cfg.FpPresent));                    // single-hart FP: refused in production
+assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.NrHarts > 1 && !Cfg.SmtDrainedHandoff));
+                                                            // single-hart and drained FP lifted (T9g/M4)
 `endif
 ```
 
 Integer multi-hart OoO is **legal** under the drained handoff
 (`SmtDrainedHandoff`): the thread selector switches only when the scoreboard and
 store queues are empty, so the hart-blind backend never interleaves two harts'
-work. Clearing the drain gate for mixed residency stays qualification-gated
-behind `G6LC_OOO_SMT_MIXED_QUALIFY`. `g6lc64_ooo` sets `RVF=RVD=1` and
-`g6lc64_ooo_server` sets `NrHarts=2` with FP, so both are refused in production.
+work. Since T9g/M4 the same drained handoff legalizes multi-hart FP — only one
+hart is resident in IQ/ROB/LSQ at a time and the FP rename maps, pools and
+`dirty_fp_state` are per hart (owner-lifetime proof + four-hart directed test +
+Spike-exact FP suite). FP under **mixed** residency stays refused behind
+`G6LC_OOO_FP_QUALIFY` (the hart-tagged lazy-FS audit is the remaining work), and
+`g6lc64_ooo_server` stays an opt-in/unqualified target. `g6lc64_ooo` sets
+`RVF=RVD=1` and is legal single-hart FP; `g6lc64_ooo_int2_l3` is RV64GC+B.
 `g6lc64_ooo_int` clears every FP format and keeps `NrHarts=1`; it is a
 **verification and bring-up baseline, not a qualified product** — no
 independent-reference comparison and no boot evidence. `g6lc64_smt2_ooo_int`

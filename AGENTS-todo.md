@@ -249,6 +249,31 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `core/ooo/AGENTS-ooo-plan.md` T9f. smt2 identity: byte-exact boot
   (12,406,273, rvfi sha `e0858842b829e5e2`) since `arch_step=FtqEn` is inert
   at `FtqDepth=0`.
+- [x] **Landed (T9g, 2026-09-29): M4 FP on the OoO path — single-hart and
+  drained-handoff legal** — `fpu_wrap` carries a per-slot owner table
+  (accept only onto a free/uncancelled slot; writeback only while the
+  returning `trans_id` still owns it; flush/cancel clears), proven at the
+  writeback seam by `core/ooo/formal/g6lc_ooo_fp_owner.sby` (bmc depth 24
+  PASS, cover PASS, `mut_owner` expected-FAIL). Guards narrowed:
+  `check_cfg`'s `G6LC_OOO_FP_QUALIFY` leg and `gen_err_ooo_fp_mh` now read
+  `OoOEn && FpPresent && NrHarts>1 && !SmtDrainedHandoff`; `!FpPresent` is
+  dropped from `COH_OOO` legality; `g6lc_cluster_lint_top`'s pre-M4
+  FP->OoOEn workaround is narrowed to the still-refused mixed shape.
+  `g6lc64_ooo_int2_l3` sets RVF/RVD (RV64GC+B; DTS `rv64imafdc_...`,
+  OpenSBI profile `rv64imafdc_zicsr_zifencei`); `g6lc64_ooo` is legal
+  single-hart FP; `g6lc64_ooo_server` stays opt-in/unqualified
+  (`COH_FILTERED`); mixed+FP stays refused. Evidence: S2 FP-lifetime leaf
+  rerun green incl. mutation detection; Spike-ordered FP suite
+  retirement-exact on the four-hart FP model (13 positives + 13 negatives,
+  `qualified: true`); `mc_fp_smt` four-hart residency test pos+neg;
+  SB=16 stage-9 historical hang does not reproduce (5,279 cycles, exact);
+  int2_l3 lint 23w/0e + synth 43w/0e `check -assert`; FPU owner delta
+  +454 cells/+454 bits; strict int2_l3 boot **18,419,779** cycles
+  (+30,024 vs the 18,389,755 M1d anchor, +0.16% — inside the allowed FPU
+  decode/CSR movement; strictDual pass, tohost 0); int2 identity boot
+  `ooocoh-m4-osbi-int2-L0-r3` **17,870,562 cycles = the M1d int2
+  anchor exactly** (FpPresent=0 folds the owner table away). Details in
+  `core/ooo/AGENTS-ooo-plan.md` T9g.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

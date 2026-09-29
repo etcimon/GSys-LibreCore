@@ -921,7 +921,7 @@ package config_pkg;
     assert (Cfg.NrCores * Cfg.NrHarts <= CVA6_MAX_SW_HARTS);
     assert (Cfg.CohPolicy inside {COH_WRITE_INVAL, COH_BROADCAST, COH_FILTERED, COH_OOO});
     assert (Cfg.CohPolicy != COH_OOO ||
-            (Cfg.OoOEn && !Cfg.FpPresent && Cfg.L2En && Cfg.NrCores > 1 && Cfg.DCacheType == WT &&
+            (Cfg.OoOEn && Cfg.L2En && Cfg.NrCores > 1 && Cfg.DCacheType == WT &&
              Cfg.ICACHE_LINE_WIDTH == Cfg.DCACHE_LINE_WIDTH));
     assert (!(Cfg.NrCores > 1 && Cfg.SnoopFilterEn && Cfg.SnoopFilterEntries == 0));
     assert (Cfg.SnoopFilterEntries == 0 ||
@@ -929,7 +929,9 @@ package config_pkg;
     assert (Cfg.CohInvalDepth == 0 ||
             (2 ** $clog2(Cfg.CohInvalDepth) == Cfg.CohInvalDepth));
     // 0 selects the built-in default (4); an explicit value must leave room in
-    // the 4-bit hub ID space for FILL_ID ('1) plus one spare → 2..14.
+    // the 4-bit hub ID space for the reserved ids: FILL_ID ('1 = 15) and the
+    // posted-write WR_ID ('1 - 1 = 14) the L2/L3 engine re-tags posted writes
+    // onto (T9d) → outstanding slots live in ids 0..13 → 2..14.
     assert (Cfg.CohMaxOutstanding == 0 ||
             (Cfg.CohMaxOutstanding >= 2 && Cfg.CohMaxOutstanding <= 14));
     // A write-back L1 behind a shared invalidation-only L2/L3 is unsound: the
@@ -1020,20 +1022,25 @@ package config_pkg;
     //    per-hart flush, tested at NR_HARTS=2). What remains is that the IQ,
     //    ROB and LSQ contain no hart signal at all, so memory ordering and
     //    store-to-load forwarding still alias across harts.
-    //  * FpPresent: the split FP register class EXISTS and is tested at module
-    //    level, and the FP-enabled full core elaborates and synthesises clean.
-    //    What is missing is behavioural evidence — no FP simulation, no
-    //    independent-reference comparison.
-    // g6lc64_ooo_server sets OoOEn=1 with NrHarts=2 and RVF/RVD=1, so it trips
-    // both deliberately. See architecture/out-of-order/README.md.
+    //  * FpPresent: the split FP register class EXISTS, is Spike-qualified at
+    //    module and core level (T5/T9g evidence), and the FU owner tables in
+    //    fpu_wrap/mult carry the cancel/reuse proof (g6lc_ooo_fp_owner).
+    // g6lc64_ooo_server sets OoOEn=1 with NrHarts=2 and RVF/RVD=1 — it is
+    // drained, so it no longer trips this leg; it stays an opt-in target with
+    // no qualification evidence (its coherence is COH_FILTERED, unqualified
+    // for OoO FP). See architecture/out-of-order/README.md.
     // Integer multi-hart OoO is legal under the drained handoff: the thread
     // selector switches only when the scoreboard and store queues are empty
     // (asserted at the switch in cva6.sv as ooo_switch_drained), so the
     // hart-blind IQ/ROB/LSQ never hold two harts' work at once. Qualified
     // 2026-09-23 (T6a): the protected dual-hart OpenSBI/HSM profile completes
     // strictDual on g6lc64_smt2_ooo_int and the in-order anchor is exact.
-    // FP multi-hart is refused pending hart-tagged lazy-FS (T6b).
-    assert (!(Cfg.OoOEn && Cfg.NrHarts > 1 && Cfg.FpPresent));
+    // FP multi-hart is legal under the same drained handoff (T9g/M4): at a
+    // switch the scoreboard is empty and `g6lc_rename` keeps per-hart FP
+    // maps/pools, `dirty_fp_state` is attributed per committing hart in
+    // `g6lc_smt_csr_bank`, and `g6lc_lsq` is op-agnostic. FP with *mixed*
+    // residency stays refused by the `G6LC_OOO_FP_QUALIFY` leg below: the
+    // hart-tagged lazy-FS audit is the remaining work.
     // Mixed residency is T6b: clearing the drain gate is legal only on an
     // OoO multi-hart configuration, and since the T9d/M2 promotion it is a
     // production feature on single-core packages (NrCores == 1) — mixed
@@ -1046,11 +1053,12 @@ package config_pkg;
     assert (Cfg.SmtDrainedHandoff || Cfg.NrCores == 1);
 `endif
 `ifndef G6LC_OOO_FP_QUALIFY
-    // Single-hart FP stays illegal in production. G6LC_OOO_FP_QUALIFY exists
-    // only for the T5 qualification build that produces the behavioural
-    // evidence; it is removed by the T5 commit once the suite passes.
-    // Multi-hart FP remains illegal regardless via the NrHarts leg above.
-    assert (!(Cfg.OoOEn && Cfg.FpPresent));
+    // T9g/M4 lifted the FP guard for `NrHarts == 1 || SmtDrainedHandoff` —
+    // single-hart FP and drained multi-hart FP are production legs on the
+    // Spike suite + owner-lifetime proof + four-hart FP-residency evidence.
+    // FP under MIXED residency stays behind G6LC_OOO_FP_QUALIFY: a
+    // qualification build only, pending the hart-tagged lazy-FS audit.
+    assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.NrHarts > 1 && !Cfg.SmtDrainedHandoff));
 `endif
     // The OoO FP writeback narrows the XLEN-wide writeback bus to FLen
     // (g6lc_ooo_dispatch: fprf_wdata = wb_data_i[FLen-1:0]), so an FP result

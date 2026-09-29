@@ -198,7 +198,8 @@ candidate are in plan T9f.
 ## OoO with two harts under the drained handoff (2026-09-22)
 
 **Integration gate passed and the refusal lifted (2026-09-23): `g6lc64_smt2_ooo_int` is a production
-configuration.** The single-hart FP guard is kept by decision.
+configuration.** The single-hart FP guard was lifted by the M4 evidence (see T9g below);
+FP under mixed residency stays refused.
 The two-hart leaf cells pass, every observed hart switch is drained, and — after fixing two defects
 that only out-of-order issue can expose (a same-cycle replay/mispredict that armed the fetch target
 filter, and a device load waiting on younger speculative stores) — the protected dual-hart firmware
@@ -207,13 +208,15 @@ in-order configuration is untouched in behaviour: its anchor is exact on the reb
 
 ## FP OoO behaviour and the fetch-target-queue replay defect (2026-09-21)
 
-**FP out-of-order behaviour has Spike-compared directed evidence on a qualification-only build; the
-production guard stays.** The suite found a real frontend defect on every FTQ-enabled configuration
-(a queue replay did not flush the FTQ, and a prefetch response could be consumed as supply —
-skipping a window or livelocking); both causes are fixed with the protected configuration untouched
-and exact, and the directed reproducer now passes on every affected configuration.
-The FPU ownership mutation is caught at leaf level but is structurally unreachable at core level
-in this geometry; the bar for lifting the single-hart FP guard is not yet decided.
+**FP out-of-order behaviour has Spike-compared directed evidence; the single-hart and
+drained-handoff guards are lifted (2026-09-29, T9g/M4).** The suite found a real frontend defect
+on every FTQ-enabled configuration (a queue replay did not flush the FTQ, and a prefetch response
+could be consumed as supply — skipping a window or livelocking); both causes are fixed with the
+protected configuration untouched and exact, and the directed reproducer now passes on every
+affected configuration. The FPU ownership mutation that was structurally unreachable at core level
+is now proven at the `fpu_wrap` writeback seam (`g6lc_ooo_fp_owner.sby`, bmc-24 PASS /
+`mut_owner` expected-FAIL), and the FP suite is retirement-exact on the FP-enabled
+`g6lc64_ooo_int2_l3` model; FP under mixed residency stays refused (hart-tagged lazy-FS audit).
 
 ## OoO issue queue structure and fetch proof repair (2026-09-21)
 
@@ -252,13 +255,16 @@ timing remain open.
 
 ## OoO FP result ownership (2026-09-21)
 
-**Directed repair; qualification remains partial.** A cancelled floating-point or serial-divide
-operation could return its result after its transaction ID was reused. The FPU wrapper and the
-multiply/divide unit now retain ownership until the raw result drains, suppress cancelled results,
-and clear ownership on a full flush because both units discard in-flight work then. Boundary
-fixtures show the defect before repair, detection of restored defects, and preserved replacement,
-flush-then-replacement and older-survivor completion. Strict combinational-loop structural checks,
-full-core reachability and FP/MULT+OoO promotion remain open.
+**Directed repair; qualified at the writeback seam since T9g/M4.** A cancelled floating-point or
+serial-divide operation could return its result after its transaction ID was reused. The FPU
+wrapper and the multiply/divide unit now retain ownership until the raw result drains, suppress
+cancelled results, and clear ownership on a full flush because both units discard in-flight work
+then. Boundary fixtures show the defect before repair, detection of restored defects, and
+preserved replacement, flush-then-replacement and older-survivor completion; the
+`g6lc_ooo_fp_owner` bounded proof (bmc-24) closes the writeback-ownership property and its
+`mut_owner` negative fails as designed. Strict combinational-loop structural checks remain open;
+FP+OoO promotion is done for single-hart and drained-handoff shapes (mixed residency stays
+refused).
 
 ## OoO load cancellation lifetime (2026-09-20)
 

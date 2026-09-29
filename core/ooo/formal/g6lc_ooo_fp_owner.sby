@@ -1,0 +1,42 @@
+# FP writeback ownership at the fpu_wrap output seam (bounded) against the
+# LIVE fpu_wrap + an anyseq fpnew_top stub.
+#
+#   bmc       — P1..P4 safety over the ring-8 transaction space; depth 24
+#               (>= the S2 leaf's ~13-cycle reuse window)
+#   cover     — witnesses: normal completion, cancelled-return suppression,
+#               realloc after consume, held-input cancellation, flush live
+#   mut_owner — negative control: G6LC_MUT_FP_NO_OWNER_LIVE drops the
+#               owner-live compare from the output gate; must FAIL.
+#
+# Expect: bmc PASS, cover PASS, mut_owner FAIL.
+# Run: sby -f core/ooo/formal/g6lc_ooo_fp_owner.sby
+
+[tasks]
+bmc
+cover
+mut_owner
+
+[options]
+depth 24
+bmc: mode bmc
+cover: mode cover
+mut_owner: mode bmc
+
+[engines]
+smtbmc yices
+
+[script]
+bmc: read_slang --std 1800-2017 --allow-use-before-declare --top g6lc_ooo_fp_owner_props -DFORMAL g6lc64_ooo_int2_l3_config_pkg.sv config_pkg.sv riscv_pkg.sv ariane_pkg.sv fpnew_pkg.sv fpnew_top_anyseq.sv fpu_wrap.sv g6lc_ooo_fp_owner_props.sv
+cover: read_slang --std 1800-2017 --allow-use-before-declare --top g6lc_ooo_fp_owner_props -DFORMAL g6lc64_ooo_int2_l3_config_pkg.sv config_pkg.sv riscv_pkg.sv ariane_pkg.sv fpnew_pkg.sv fpnew_top_anyseq.sv fpu_wrap.sv g6lc_ooo_fp_owner_props.sv
+mut_owner: read_slang --std 1800-2017 --allow-use-before-declare --top g6lc_ooo_fp_owner_props -DFORMAL -DG6LC_MUT_FP_NO_OWNER_LIVE g6lc64_ooo_int2_l3_config_pkg.sv config_pkg.sv riscv_pkg.sv ariane_pkg.sv fpnew_pkg.sv fpnew_top_anyseq.sv fpu_wrap.sv g6lc_ooo_fp_owner_props.sv
+prep -top g6lc_ooo_fp_owner_props
+
+[files]
+../../include/g6lc64_ooo_int2_l3_config_pkg.sv
+../../include/config_pkg.sv
+../../include/riscv_pkg.sv
+../../include/ariane_pkg.sv
+../../cvfpu/src/fpnew_pkg.sv
+fpnew_top_anyseq.sv
+../../fpu_wrap.sv
+g6lc_ooo_fp_owner_props.sv

@@ -30,7 +30,11 @@ import subprocess
 import tarfile
 from pathlib import Path
 
-GCC = ['$RISCV/bin/riscv-none-elf-gcc', '-march=rv64imac_zicsr', '-mabi=lp64', '-nostdlib',
+# REVIEW_MC_MARCH/REVIEW_MC_MABI override the ISA/ABI for directed tests that
+# need extensions beyond the integer baseline (mc_fp_smt.S needs rv64...d).
+GCC = ['$RISCV/bin/riscv-none-elf-gcc',
+       '-march=' + os.environ.get('REVIEW_MC_MARCH', 'rv64imac_zicsr'),
+       '-mabi=' + os.environ.get('REVIEW_MC_MABI', 'lp64'), '-nostdlib',
        '-nostartfiles', '-T', 'verif/tests/custom/common/link_verilator.ld',
        '-I', 'verif/tests/custom/common']
 

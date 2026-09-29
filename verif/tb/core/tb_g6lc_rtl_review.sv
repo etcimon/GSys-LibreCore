@@ -1958,10 +1958,14 @@ module tb_g6lc_review_dispatch;
   // build, not merely warn in simulation.
   parameter int unsigned HARTS=1;
   parameter bit FPEN=1'b0;
+  // T9g: DRAIN=1 selects the drained-handoff leg under which multi-hart FP is
+  // legal; the default keeps the fixture mixed-resident so the remaining
+  // refusal stays exercisable.
+  parameter bit DRAIN=1'b0;
   function automatic config_pkg::cva6_cfg_t configuration();
     config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
     c.XLEN=64;c.VLEN=64;c.PLEN=56;c.NrHarts=HARTS;c.NrCores=1;c.NrIssuePorts=2;c.NrCommitPorts=2;c.NrWbPorts=2;
-    c.FpPresent=FPEN;c.FLen=FPEN?64:1;c.RVA=1;
+    c.FpPresent=FPEN;c.FLen=FPEN?64:1;c.RVA=1;c.SmtDrainedHandoff=DRAIN;
     c.NR_SB_ENTRIES=16;c.TRANS_ID_BITS=4;c.PrfEntries=HARTS>1?80:40;c.RobEntries=8;c.IqEntries=8;
     // Checkpoints are owned per hart, so a two-hart geometry keeps the same
     // two outstanding branches per hart that the single-hart scenarios assume.
