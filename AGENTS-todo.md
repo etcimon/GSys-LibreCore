@@ -307,6 +307,19 @@ prerequisite for this work under the existing dual license. No licensing policy 
   boots PASS (`ooocoh-m6-osbi-{s8l3,sml3}-r1`, 11,691,278 / 11,691,235
   cycles, `strictDualPassed`, profiles built from the smt2_l3 mechanism
   in one attempt). Details in `core/ooo/AGENTS-ooo-plan.md` T9i.
+- [x] **Not promoted (T9j, 2026-09-29): M7 4-issue overlay** -- a wider
+  issue width needs a wider window, and M3 showed every ring > 8 times
+  out the four-hart strict boot under the drained handoff while recovery
+  is mark-and-drain. No i4 overlay built; no RTL changed. Reopen after
+  M3b lands the fast squash + the ring-depth/drained-handoff timeout
+  root cause. Details in `core/ooo/AGENTS-ooo-plan.md` T9j.
+- [x] **Milestone summary (commits):** M0 `e07ccd452` (eWT baseline:
+  L2WriteUpdateEn + Phase-5 qualification); M1 `2102366df` + `87dd183d6`
+  + `79dc613ab` (M1a CBO/hub ordering, M1b posted writes + bypass reads,
+  M1d reserved write id); M2 `35f649598` (mixed-residency SMT2
+  promotion); M3 `a1b685020` (switch-restore fix, uplift not adopted);
+  M4 `e791afdaf` (FP on OoO); M5 `c08d8a690` (L2 prefetcher, default
+  off); M6 `67e2b7586` (in-order L3 packages); M7 not promoted (T9j).
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.
@@ -8501,7 +8514,7 @@ Oracle: `SOFT_LADDER_SKIP_BUILD=1`; pin md5 **`bc7ed11dab17454fd147e4927ba07fef`
   Distribution is also lopsided: `W1 × LSU` (68) and `W6 × amo` (16) hold 84 of the 106 classified minis.
   Lower-confidence classifications are flagged per-entry in the YAML (`mini_hpd_*` W1-vs-W3 ~70%; the 68 `W1 × LSU`
   homes ~75%, resolved via the blame router's data signature since R4's Home is explicitly ambiguous).
-- Migration items from the heuristics §5 table: **M1–M6 are now landed.** M7 ("capability work resumes on proven ground") is the state this reaches, not a task. Open follow-ups it exposes, in ladder order:
+- Migration items from the heuristics §5 table: **M1–M6 are landed; M7 evaluated and not promoted** (4-issue overlay blocked on M3b — ring>8 boot timeout under the drained handoff + mark-and-drain recovery; T9j). Open follow-ups it exposes, in ladder order:
   1. `ariane-ai.dts` vs `g6lc64_ai_config_pkg.sv` hart-count mismatch (above) — an owner decision, and the first real defect the new L1 checks caught.
   2. `core/scoreboard.sv` still consults the A-path `g6lc_sb_keep` list; waived-with-note in `diag-isa-red-lines`. Owed artifact is a squash-window contract at the EX→commit boundary.
   3. ~~The `.sby` files are unrun on this host~~ **Discharged.** All three fetch proofs **PASS by k-induction**, and `verify --formal` is **7/7** including the four `core/ooo` tasks. What it took, and what is now landed in the build platform:

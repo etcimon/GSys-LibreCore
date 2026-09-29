@@ -2826,3 +2826,21 @@ Build-platform targets registered in `build-platform/src/config/defaults.ts`
 **Status.** Qualification-only in-order L3 packages; `L2PrefetchEn` stays
 0 per the M5 decision. Open: L3 benefit measurement on these packages,
 physical closure.
+
+### T9j — M7: 4-issue overlay — not promoted, blocked on M3b (2026-09-29)
+
+**Decision.** The M7 4-issue overlay is **not promoted**: a wider issue
+width needs a wider window to pay off, and the M3 ablation showed every
+ring > 8 times out the four-hart strict boot under the drained handoff
+while mispredict recovery is mark-and-drain (younger entries retire
+through the commit head at commit width, `issue_pointer` never rolls
+back). No i4 overlay was built; no RTL changed.
+
+**Reopen preconditions** (both, in order): (1) M3b — root-cause the
+ring>8 boot timeout under the drained handoff (the ~2.8 M extra commit
+events on the dominant hart, seen at ring 16/32 even with checkpoints
+disabled) and land the fast-squash design sketched in T9f (age/cancel-
+mask `sbe.valid` clear + `issue_pointer` rollback + commit-head jump,
+hart-scoped); (2) re-run the T9f ablation shape on the fixed recovery
+path — a 4-issue candidate is only worth building if a wider window
+is first proven boot-neutral at L0.

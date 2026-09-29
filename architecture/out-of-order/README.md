@@ -228,6 +228,11 @@ blockers below supersede any implied claim of verified end-to-end precision.
 | `g6lc64_smt2_ooo_int_config_pkg.sv` | **Configured SMT2 int**: 1c×2h mixed residency, same ring-8 geometry (M3 window likewise not adopted) |
 | Default `cv64a6_imafdc_sv39` etc. | `OoOEn=0` identity (still production in-order) |
 
+The 4-issue overlay (M7) was evaluated and **not promoted**: it needs a wider
+window, and every ring > 8 times out the four-hart strict boot under the
+drained handoff while mispredict recovery is mark-and-drain. It reopens only
+after M3b (fast squash + ring-depth/drained-handoff root cause) — plan T9j.
+
 The M3 uplift (ring 32, TAGE_LITE, FTQ/FDIP/loop buffer, DeepSpec/LSQ growth)
 was qualified functionally but regressed strict-boot and branch-bound IPC
 (+21.7 % / +28.9 % / +36.7 %) and is **not** configured: the per-knob

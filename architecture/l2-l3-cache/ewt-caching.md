@@ -16,7 +16,7 @@ reach for write-back, applied at every level and to every configuration:
 The L1 write-through cache already updates a resident line on a store hit and
 does not allocate on a store miss; the L2/L3 engine applies the same policy.
 
-## Status (2026-09-27)
+## Status (2026-09-29)
 
 | Configuration | L1 | Allocate | Write-update | Posted writes | CBO | Coherence |
 |---|---|---|---|---|---|---|
@@ -24,6 +24,7 @@ does not allocate on a store miss; the L2/L3 engine applies the same policy.
 | `g6lc64_smt2_l3` | WT | on | on | on | on | single core |
 | `g6lc64_smt2`, `g6lc64_smt2_ooo_int` (anchors) | WT | on (anchors re-baselined) | on | on | on | single core |
 | `g6lc64_stream8`, `server_math`, `server_math_v`, `ai`, `ooo_server` | HPDCACHE_WT | on (HPDCACHE) | on | on | on | `COH_FILTERED` |
+| `g6lc64_stream8_l3`, `g6lc64_server_math_l3` (M6, T9i) | HPDCACHE_WT | on (HPDCACHE; `WtAxiAllocEn` is WT-adapter-only and stays 0) | on | on | on | `COH_FILTERED`, non-inclusive L3 |
 | `g6lc64_ooo_int` | WT, no L2 | — | — | — | on (L1-local, `L2En=0`) | single core |
 
 "M1a" (CBO end-to-end + write-update + allocation) is landed (T9a); "M1b" (posted
