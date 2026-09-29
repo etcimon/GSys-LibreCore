@@ -165,6 +165,35 @@ pub mod mmio {
     // CAP window (RO) — see g6lc_ai_cap_window
     pub const CAP_BASE: u16 = 0x0000;
     pub const CAP_VERSION: u16 = 0x0000;
+    pub const CAP_COMMAND_QUEUE: u16 = 0x0090;
+    /// Accumulate-mode grant (RO): bit 0 set means `flags.accmode == 01` is executable and
+    /// seeds each output's ordered reduction from the value already in C.
+    pub const CAP_ACCMODE: u16 = 0x0094;
+    pub const CAP_ACCMODE_ACCUMULATE: u32 = 1;
+    /// Operand bank capacity in bytes (RO). The K box is a byte capacity per panel
+    /// (`n * pitch_bytes(k) <= BANK_B`, `m * pitch_bytes(k) <= BANK_A`, pitch = next
+    /// power of two of `ceil(row_bytes / macs_per_cycle)` lane words); 0 keeps the
+    /// legacy `k <= AccTileK` box.
+    pub const CAP_BANK_A_BYTES: u16 = 0x0098;
+    pub const CAP_BANK_B_BYTES: u16 = 0x009C;
+    pub const FLAG_ACCMODE_SHIFT: u32 = 10;
+    pub const ACCMODE_ACCUMULATE: u32 = 1;
+    pub const COMMAND_QUEUE_VERSION: u32 = 1;
+    pub const COMMAND_QUEUE_FLAGS: u32 = 7;
+    pub const CMD_MODE: u16 = 0x0f20;
+    pub const CMD_PTR_LO: u16 = 0x0f24;
+    pub const CMD_PTR_HI: u16 = 0x0f28;
+    pub const CMD_TICKET: u16 = 0x0f2c;
+    pub const CMD_QID: u16 = 0x0f30;
+    pub const CMD_SUBMIT: u16 = 0x0f34;
+    pub const CMD_CREDITS: u16 = 0x0f38;
+    pub const CMD_RECEIPT_TICKET: u16 = 0x0f3c;
+    pub const CMD_RECEIPT_CODE: u16 = 0x0f40;
+    pub const CMD_ACCEPTED_COUNT: u16 = 0x0f44;
+    pub const CMD_REJECTED_COUNT: u16 = 0x0f48;
+    pub const CMD_ACCEPTED: u32 = 0;
+    pub const CMD_FULL: u32 = 1;
+    pub const CMD_DISABLED: u32 = 2;
     pub const CAP_CLUSTERS: u16 = 0x0004;
     pub const CAP_MACS_PER_CYCLE: u16 = 0x0008;
     pub const CAP_CLOCK_KHZ: u16 = 0x000C;
@@ -197,6 +226,47 @@ pub mod mmio {
     pub const DESC: u16 = 0x0140;
     /// First byte of queue 1. Following queues use a stride of 0x20.
     pub const REG_QUEUE_TAIL: u16 = 0x01A0;
+    /// Reuse epoch. Applied only when `VaTurboEn` is set. Live packages
+    /// keep that bit clear, so this register does not change their jobs.
+    pub const REG_REUSE_EPOCH: u16 = 0x0F00;
+    /// Requested VA-Turbo level in bits [3:0]. Bits [11:8] are the applied
+    /// level and stay 0. The MAC path does not read this register.
+    pub const REG_VA_TURBO_LEVEL: u16 = 0x0F04;
+    /// Copy of [`va_turbo_level_word`], latched when a GEMM completes.
+    pub const PMU_VA_TURBO_LEVEL: u16 = 0x0F08;
+    pub const VA_TURBO_LEVEL_APPLIED_SHIFT: u32 = 8;
+
+    /// Low 4 bits of `requested`. The applied nibble is 0.
+    pub fn va_turbo_level_word(requested: u32) -> u32 {
+        requested & 0xF
+    }
+
+    /// Applied level from a level word. This is 0.
+    pub fn va_turbo_level_applied(word: u32) -> u32 {
+        (word >> VA_TURBO_LEVEL_APPLIED_SHIFT) & 0xF
+    }
+
+    /// Requested recipe id `{bank, subcode}` in bits [4:0]. Bits [12:8] are
+    /// the applied id and stay 0. The MAC path does not read this register.
+    pub const REG_VA_TURBO_RECIPE: u16 = 0x0F0C;
+    /// Copy of [`va_turbo_recipe_word`], latched when a GEMM completes.
+    pub const PMU_VA_TURBO_RECIPE: u16 = 0x0F10;
+    pub const VA_TURBO_RECIPE_APPLIED_SHIFT: u32 = 8;
+
+    /// Low 5 bits of `requested`. The applied id is 0.
+    pub fn va_turbo_recipe_word(requested: u32) -> u32 {
+        requested & 0x1F
+    }
+
+    /// Applied recipe id from a recipe word. This is 0.
+    pub fn va_turbo_recipe_applied(word: u32) -> u32 {
+        (word >> VA_TURBO_RECIPE_APPLIED_SHIFT) & 0x1F
+    }
+
+    /// Evidence-window claim. Epoch, level, and recipe writes clear it.
+    pub const REG_VA_TURBO_WINDOW: u16 = 0x0F14;
+    /// Copy of that bit, latched when a GEMM completes.
+    pub const PMU_VA_TURBO_WINDOW: u16 = 0x0F18;
 
     /// Island-relative base of queue `qid`'s region window.
     pub fn queue_region(qid: u16) -> u16 {
@@ -216,6 +286,7 @@ pub mod mmio {
     pub const CTL_ENABLE: u32 = 1 << 0;
     pub const CTL_WR_CPL_EN: u32 = 1 << 1;
     pub const DOORBELL_FETCH: u32 = 1 << 31;
+    pub const DOORBELL_TICKET_MAX: u32 = 0x007f_ffff;
 }
 
 /// AccTile geometry from CAP_ACC_TILE (log2 fields x4 bits).
@@ -244,10 +315,21 @@ impl AccTile {
         k: 512,
     };
 
+    /// Directed `AiCfgVaTurboTest` island. Eight MAC/cycle, K tile 16.
+    /// Not the live 512-MAC package. `VA_TURBO_TEST_MACS` is the issue width.
+    pub const VA_TURBO_TEST: Self = Self {
+        m: 1024,
+        n: 512,
+        k: 16,
+    };
+
     pub fn fits(&self, m: u32, n: u32, k: u32) -> bool {
         m <= self.m && n <= self.n && k <= self.k
     }
 }
+
+/// MAC issue width of [`AccTile::VA_TURBO_TEST`].
+pub const VA_TURBO_TEST_MACS: u32 = 8;
 
 /// CAP RO window fields used by software Caps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -500,6 +582,23 @@ impl Completion {
     }
 }
 
+/// The DMA word is written from the GEMM result, before the write response.
+/// `bus_err` is a failed completion beat. A GEMM error is `gemm_status`
+/// itself: both the word and the FIFO carry it. A completion-beat failure
+/// leaves the word at that GEMM status and reports `ST_ERR` on the FIFO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompletionPost {
+    pub word: u64,
+    pub fifo_status: u16,
+}
+
+pub fn completion_post(ticket: u32, gemm_status: u16, bus_err: bool) -> CompletionPost {
+    CompletionPost {
+        word: Completion::make(ticket, gemm_status),
+        fifo_status: if bus_err { ST_ERR } else { gemm_status },
+    }
+}
+
 fn put_u16(b: &mut [u8], off: usize, v: u16) {
     b[off..off + 2].copy_from_slice(&v.to_le_bytes());
 }
@@ -547,6 +646,18 @@ mod tests {
         assert_eq!(c.ticket, 9);
         let w2 = Completion::make(1, ST_BAD_PTR);
         assert_eq!(Completion::from_u64(w2).status, ST_BAD_PTR);
+    }
+
+    #[test]
+    fn completion_word_keeps_the_gemm_and_the_fifo_follows_the_bus() {
+        let gemm = completion_post(36, ST_ERR, false);
+        assert_eq!(Completion::from_u64(gemm.word).ticket, 36);
+        assert_eq!(Completion::from_u64(gemm.word).status, ST_ERR);
+        assert_eq!(gemm.fifo_status, ST_ERR);
+        let bus = completion_post(42, ST_OK, true);
+        assert_eq!(Completion::from_u64(bus.word).ticket, 42);
+        assert_eq!(Completion::from_u64(bus.word).status, ST_OK);
+        assert_eq!(bus.fifo_status, ST_ERR);
     }
 
     /// Golden: version=1 op=1 flags=0 m=n=k=8 ld_ab=0x00080008

@@ -158,6 +158,12 @@ module tb_g6lc_ai_dram_stripe;
       end
     end
 
+    if (noc_peak_gbps(64, 500_000) != 4 || noc_peak_gbps(64, 1_250_000) != 10 ||
+        noc_peak_gbps(64, 1_500_000) != 12 || noc_peak_gbps(64, 2_000_000) != 16 ||
+        dram_nameplate_gbps(64, 1_500_000, 8, AI_DRAM_SIM_AXI) != 12 ||
+        noc_peak_gbps(32'hffff_ffff, 32'hffff_ffff) != 32'hffff_ffff)
+      $fatal(1, "NAMEPLATE_FRACTIONAL_OR_OVERFLOW");
+    if ($test$plusargs("oracle_negative")) $fatal(1, "FAIL oracle negative control");
     if (errors == 0) $display("PASS g6lc_ai_dram_stripe");
     else begin
       $display("FAIL g6lc_ai_dram_stripe errors=%0d", errors);

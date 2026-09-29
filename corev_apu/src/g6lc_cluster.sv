@@ -62,10 +62,14 @@ module g6lc_cluster
     output logic pf_train_o,
     // Xg6lcai island sideband from core 0 (tie open/0 when no island)
     output logic        ai_sb_enq_valid_o,
+    input  logic        ai_sb_enq_ready_i,
     output logic [7:0]  ai_sb_qid_o,
     output logic [31:0] ai_sb_ticket_o,
     output logic [CVA6Cfg.XLEN-1:0] ai_sb_desc_ptr_o,
+    input  logic        ai_isl_attached_i,
     input  logic        ai_isl_has_completion_i,
+    input  logic        ai_isl_retired_valid_i,
+    input  logic [31:0] ai_isl_retired_ticket_i,
     input  logic [31:0] ai_isl_last_ticket_i,
     input  logic [15:0] ai_isl_last_status_i
 );
@@ -265,11 +269,17 @@ module g6lc_cluster
         .l2_pf_issue_i    (l2_pf_iss_w),
         .l2_pf_useful_i   (l2_pf_use_w),
         .ai_sb_enq_valid_o(core_sb_enq[c]),
+        // Only core 0 reaches the island; other cores keep the local stub so an
+        // unrouted kick cannot hang them. Multi-core island arbitration is open.
+        .ai_sb_enq_ready_i((c == 0) ? ai_sb_enq_ready_i : 1'b1),
         .ai_sb_qid_o      (core_sb_qid[c]),
         .ai_sb_ticket_o   (core_sb_ticket[c]),
         .ai_sb_desc_ptr_o (core_sb_desc_ptr[c]),
+        .ai_isl_attached_i((c == 0) && ai_isl_attached_i),
         // Broadcast island completion to every core for ai.poll
         .ai_isl_has_completion_i(ai_isl_has_completion_i),
+        .ai_isl_retired_valid_i(ai_isl_retired_valid_i),
+        .ai_isl_retired_ticket_i(ai_isl_retired_ticket_i),
         .ai_isl_last_ticket_i   (ai_isl_last_ticket_i),
         .ai_isl_last_status_i   (ai_isl_last_status_i)
     );
@@ -376,7 +386,9 @@ module g6lc_cluster
         .coh_lr_kill_o    (),
         // TB reads the levels hierarchically; no cluster ports.
         .hub_aw_sc_collide_o (),
-        .hub_ar_wr_hold_o     ()
+        .hub_ar_wr_hold_o     (),
+        .hub_aw_hold_slot_o   (),
+        .hub_aw_hold_other_o  ()
     );
   end
 
@@ -407,6 +419,8 @@ module g6lc_cluster
         .PF_DISTANCE    (CVA6Cfg.L2PfDistance != 0 ? CVA6Cfg.L2PfDistance : 32'd2),
         .PF_STRIDE      (CVA6Cfg.L2PfStrideEn),
         .PF_MSHR_RESERVE(CVA6Cfg.L2PfMshrReserve != 0 ? CVA6Cfg.L2PfMshrReserve : 32'd1),
+        .PF_MAX_OUT     (CVA6Cfg.L2PfMaxOutstanding != 0 ? CVA6Cfg.L2PfMaxOutstanding : 32'd1),
+        .PF_QUIET       (CVA6Cfg.L2PfQuiet != 0 ? CVA6Cfg.L2PfQuiet : 32'd8),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),
@@ -488,6 +502,8 @@ module g6lc_cluster
         .PF_DISTANCE    (CVA6Cfg.L2PfDistance != 0 ? CVA6Cfg.L2PfDistance : 32'd2),
         .PF_STRIDE      (CVA6Cfg.L2PfStrideEn),
         .PF_MSHR_RESERVE(CVA6Cfg.L2PfMshrReserve != 0 ? CVA6Cfg.L2PfMshrReserve : 32'd1),
+        .PF_MAX_OUT     (CVA6Cfg.L2PfMaxOutstanding != 0 ? CVA6Cfg.L2PfMaxOutstanding : 32'd1),
+        .PF_QUIET       (CVA6Cfg.L2PfQuiet != 0 ? CVA6Cfg.L2PfQuiet : 32'd8),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),

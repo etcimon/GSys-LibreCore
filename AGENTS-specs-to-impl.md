@@ -31,6 +31,76 @@ without latches/SCCs. Fetch-mode semantics, admission capacity, GEMM, formal/ful
 qualification and physical timing remain open; no normative RISC-V chapter is promoted.
 Details: `architecture/ai-matrix/log-2026-09.md`, `AGENTS-specs-to-tests.md`.
 
+Continuation adds full-width DMA refusal status, immutable pending descriptor bytes, retained
+refusal/fetch-error ticket records, and widened PMU arithmetic in the island top. The independent
+SV/Rust/Python nameplate helpers preserve fractional GHz. `g6lc_ai_gemm_seq.sv` now separates bank
+requests/operand formation from response-driven state, retains an offered AR slot through
+backpressure, and exposes C rows to stores only after their last SRAM write commits. The AR-ID
+change-under-stall and stale-C W-data change-under-stall both have before-run counterexamples.
+Directed after-runs pass all seven format encodings and 56 asymmetric/tail output checks with
+909 stalled channel observations for both float-pipe settings. These are reduced leaf results;
+strict aggregate-AXI lint and full qualification remain open. A DMA-enabled synthesis smoke
+found an undriven AR-depth input from a late declaration; its declaration-order repair is under
+verification. No new ISA encoding, DT mapping, production numeric grant or RISC-V chapter status.
+
+The declaration-order repair now passes reduced DMA synthesis. Completion-FIFO wrapping and
+full simultaneous replacement have directed and reset-base/inductive leaf safety evidence.
+The PMU divider is replaced by `g6lc_ai_pmu_rate` (same top source file): on-read snapshot,
+serial scale/restoring divide and variable-latency APB response for all rate aliases. No job
+completion waits for this calculation. Arithmetic and isolated structural checks pass, including
+absence of mul/div/mod cells. `g6lc_ai_cmd_fifo.sv` now has an optional island/APB integration:
+`IslandCfg.CommandDepth` defaults0, CAP advertises the versioned extension only when provisioned,
+and mode/receipt/credit registers distinguish accepted commands from refused attempts. Protected
+configuration writes fail without effects while queued mode is active; dispatch preserves full
+qid/ticket/pointer identity and waits for completion room. Raw VALID/READY sideband and queued
+GEMMs pass directed tests. `core/cvxif_g6lc_ai/g6lc_ai_exec.sv` now implements the producer
+side: `ai.enq` holds VALID until `sb_enq_ready_i` (`ST_ENQ`) and returns the ticket only on
+acceptance; `ai.poll` defers to the island whenever `isl_attached_i` is set. Both signals are
+threaded through the coprocessor, `ariane`, `g6lc_cluster` (core0 only) and the testharness;
+islandless configurations tie READY=1/attached=0 and keep the bring-up stub. The Rust SoftIsland
+and the B3 emulator model the same window from published constants. B1 parity and a full-SoC
+rebuild with the new ports remain open. The island's DMA master now ends in a registered
+boundary (`corev_apu/ai_island/g6lc_ai_axi_cut.sv`, `AxiCutEn` default on): every VALID/READY
+path is cut by a two-entry spill register per channel, and the DMA units keep bit-split copies
+of their AXI aggregates. With a simulation-stripe register slice, the reduced DMA gate is
+strict-lint clean without waivers; cycle baselines shifted by the added stages.
+`flags.accmode == 01` (accumulate: seed each C reduction from memory) is a published
+extension behind `CAP_OFF_ACCMODE` (0x94) and is implemented: `g6lc_ai_gemm_seq.sv` `ST_LC`
+loads the C tile, the first partial of each element is added onto the seed read from the C
+bank, stores run in `ST_STC`; `g6lc_ai_desc_engine.sv` refuses it without `AccumulateEn` and
+refuses `1x` always; `g6lc_ai_cap_window.sv` publishes the same parameter (`AiIslandAccmodeGrant
+= 1`). Chained K blocks equal one long job bit for bit on lane-aligned splits.
+`ai.poll` is island-authoritative with a sideband retired watermark: `g6lc_ai_island_top.sv`
+tags job origin (`job_src_sb_q`, `fetch_src_sb_q`, `fetch_refuse_sb_q`, command word bit 104)
+and publishes `sb_retired_valid_o`/`sb_retired_ticket_o`; `g6lc_ai_exec.sv` answers head
+match with exact status, at-or-below watermark complete, otherwise pending. The full
+`g6lc64_ai` SoC builds with every new port and passes 28/30 directed ELFs against a
+pre-change baseline (two pre-existing failures recorded in the log).
+`g6lc_ai_gemm_seq.sv` scales bytes/elements by `ai_elem_shift` (package) instead of
+multiplying/dividing by the runtime element size, and `beats_for_rem` divides by a constant
+shift (`ElemsPerBeatShift`): no divider on a runtime operand remains; cycle-identical on the
+156-record backend bench. `g6lc_ai_island_top.sv` gains a simulation-only `+ai_pmu_trace`
+per-job record (translate_off) used by the SoC bench; `ST_LC` cycles are billed to the LA
+phase word. Its grant-subset-of-implemented guard is FP-aware: with `AiCfg.IslandFpEn` the
+implemented set is `AiIslandPeImplMaskFp` (0x00FB: INT8/INT4/FP8x2/FP16/BF16/FP32, backed by
+the seven-format backend gates), else `AiIslandPeImplMask`. `ariane_testharness`
+`G6LC_AI_TB_BENCH_SKU` overrides the island's AiCfg (VaTurboEn, IslandFpEn) and grant
+(`AiIslandDtypeMaskBench`) for the bench model only; production packages are unchanged.
+Flat panel mapping (K-split-to-residency): `g6lc_ai_gemm_seq.sv` stores operand rows at a
+per-job power-of-two pitch (`pitch_sh_q`, from `k_bytes` in `ST_CHK`) and boxes K by byte
+capacity (`cap_ok_c`: `n*pitch <= OperandWordsB`, `m*pitch <= OperandWordsA`, `k <= 65535`)
+instead of `k <= LimK`; bank addresses are shifts; the reuse key's `k` is 16 bits.
+`g6lc_ai_cap_window.sv` publishes `CAP_OFF_BANK_A_BYTES`/`CAP_OFF_BANK_B_BYTES`
+(`ai_operand_bank_bytes`, 0 = legacy box) from `g6lc_ai_island_top.sv`. No descriptor
+layout change; `accmode 01` remains for K beyond the banks. The resident-B key is a
+`ReuseBSlots`-deep directory (island_top parameter, default 2): half-bank slots with
+round-robin (LRU) victim, `b_base_q` added to the B row address, "big" panels take the
+whole bank and evict the other slot; the 64-bit overflow-guard dividers in
+`ai_operand_span`/`ai_result_span` are replaced by a 68-bit product test (no `$div` cell
+remains in the island).
+Python pointer/lease submission is capability-gated; C/Python/Rust constants are lockstep checked.
+No mapped PPA, full-SoC or new architectural status is inferred from these component results.
+
 ## OoO coherence continuation — partial, qualification-gated (2026-09-24)
 
 RVWMO (`#memorymodel`) and atomic transport (`#ext:a`) require owned responses and coherent
@@ -828,7 +898,7 @@ limits: `architecture/core-fetch/README.md`, circular IQ section.
 | CBO/CMO end-to-end (Zicbom) | **implemented (gated, 2026-09-27)** | `cva6`/`ariane` emit `cmo_valid_o`/`cmo_op_o`/`cmo_addr_o` and wait for `cmo_done_i`; the WT subsystem intercepts the CBO store-port request (never forwarded to the write buffer), issues the op after write-buffer drain, and pulses `data_rvalid` once on `cmo_done_i` (fixes the `store_buffer.sv:468-487` hang + one-byte corrupting store); the HPDCACHE adapter keeps its own L1 CMO but holds the response until `cmo_done_i`. `corev_apu/coherence/g6lc_cmo_engine.sv` round-robins `NrCores` requests, broadcasts the L1 invalidation (second `g6lc_l3_inclusive_inv` merged lowest-priority into `inv_to_core`), match-invalidates L2 via `l2_back_inval_*` (arbitrated behind the inclusive victim source) and L3 via new `l3_back_inval_*`; `clean`/`flush` complete on `l2_write_idle_o`/`l3_write_idle_o`. `L2CmoEn=0` or `L2En=0` completes the CBO in-core (own-L1 inval mux / wbuffer drain). `cbo.zero` is a speculative store-buffer entry whose commit-queue drain emits the zero beats (plan T9a) | `L2CmoEn` (`check_cfg`: `L2CmoEn → L2En`); on in every eWT package |
 | Coherence-hub outstanding depth | **implemented (gated, 2026-09-27)** | `CVA6Cfg.CohMaxOutstanding` (default 4) maps to the hub's `MAX_OUTSTANDING` shared AR/AW slot count; `check_cfg` bounds it to 2–14 for the 4-bit mem-side ID space (`FILL_ID='1` reserved + one spare). Credits bench (`tb_g6lc_coherence_credits`, real hub+L2/L3): OT=8 with MSHR 8 removes all read-burst MSHR stalls (73→0) and cuts the mixed drain 183→165; OT=8+MSHR4 stalls 73. Set to 8 on `g6lc64_ooo_int2`/`g6lc64_ooo_int2_l3` with `L2MshrDepth=8` (and `L3MshrDepth=8` for int2_l3) | `CohMaxOutstanding`, `L2MshrDepth`, `L3MshrDepth` |
 | Posted writes + bypass-read tracking | **implemented (gated, 2026-09-28)** | `g6lc_l2_top` `POSTED_WRITES`: every accepted write takes a `g6lc_l2_wtrk` entry (`{valid,id,dsid,line,blocking}` in AW order); a postable write (`atop==0 && !lock && id!=FILL_ID`) is forwarded on the reserved downstream write id `WR_ID = '1 - 1` (14; `FILL_ID`=15 stays the bypass trail) and returns to `S_IDLE` after the last W beat; memory B is routed to the oldest entry of its *downstream* id and returned with the entry's slave id (ATOP/lock writes keep the blocking `S_BYPASS_B` path and their original id on their entry). NC/lock bypass reads post through a read tracker and an atomic slave-R arbiter. Ordering enforced: R1 read-miss-to-tracked-line holds until B; R2 (T9e) a same-line AW holds only when the two downstream ids differ — posted-vs-posted never holds (AXI same-id ordering applies them in merge order), posted-vs-blocking still holds; R3 same-line fill kill unchanged; R4 per-downstream-id oldest-entry B routing; R5 same-id hit/serve holds behind a tracked read; R6 `CohMaxOutstanding` bounds fills+wtrk+rdtrk. `l2_write_idle_o` = tracker empty (the `clean`/`flush` wait). `[mc_cache]` gains `l2_wtrk_full`/`l2_line_hold`/`l2_posted`/`l2_rdtrk`; PMU group-2 events 7/8 count posted-write hold cycles (plan T9b). T9c splits `l2_line_hold` into `l2_hold_r1` (read miss behind a tracked write), its write-update-hit subset `l2_hold_r1_wu`, `l2_hold_r2` (different-downstream-id same-line AW), and hub-side `hub_aw_sc_collide` (same-core same-line AW-slot collision); T9e adds `hub_ar_hold` (AR offered but held behind a same-line live AW) — all trailing fields optional in the parsers so older lines still parse | `L2PostedWriteEn` (`check_cfg`: `L2PostedWriteEn → L2En`), `L2WriteTrackDepth` (pow2 2..8, default 4), `L2ReadTrackDepth` (default 4); on in every L2 package |
-| L2 stream/stride prefetcher | **implemented (gated, default off — 2026-09-29)** | `g6lc_l2_pf` inside `g6lc_l2_top`: demand-miss-trained streams keyed by 4 KiB region tag, next-line + stride (two equal deltas) detect, <=1 candidate/cycle, no page crossing; PF-flagged MSHR/fill entries (no waiter, demand priority, `L2PfMshrReserve` demand slots, drop-not-hold on resident/duplicate/tracked-write, same `kill_match`/`install_discard`); `pf_installed` per-way bit feeds `l2_pf_useful_o`; `[mc_cache]` `l2_pf_issue`/`l2_pf_useful`/`l2_pf_drop` + PMU g2 sel 9/10; `L3PrefetchEn` pass-through unqualified. Measured: scan -9.9 %/-8.2 % (L0/L40), wr -13.1 %/-7.8 %, chase neutral, strict boots +0.3 % → ships off (plan T9h) | `L2PrefetchEn`, `L2PfStreams` (4), `L2PfDistance` (2), `L2PfStrideEn` (1), `L2PfMshrReserve` (1), `L3PrefetchEn` (0) |
+| L2 stream/stride prefetcher | **implemented (gated, default off — 2026-09-29)** | `g6lc_l2_pf` inside `g6lc_l2_top`: demand-miss-trained streams keyed by 4 KiB region tag, next-line + stride (two equal deltas) detect, <=1 candidate/cycle, no page crossing; PF-flagged MSHR/fill entries (no waiter, demand priority, `L2PfMshrReserve` demand slots, drop-not-hold on resident/duplicate/tracked-write, same `kill_match`/`install_discard`); `pf_installed` per-way bit feeds `l2_pf_useful_o`; `[mc_cache]` `l2_pf_issue`/`l2_pf_useful`/`l2_pf_drop` + PMU g2 sel 9/10; `L3PrefetchEn` pass-through unqualified. Measured: scan -9.9 %/-8.2 % (L0/L40), wr -13.1 %/-7.8 %, chase neutral, strict boots +0.3 % → ships off (plan T9h). T10b/N3 adds burst throttling: >=2 confirmed hits arm a stream, `L2PfMaxOutstanding` caps in-flight PF fills per stream, `L2PfQuiet` suppresses issue for N cycles after a demand miss | `L2PrefetchEn`, `L2PfStreams` (4), `L2PfDistance` (2), `L2PfStrideEn` (1), `L2PfMshrReserve` (1), `L2PfMaxOutstanding` (1), `L2PfQuiet` (8), `L3PrefetchEn` (0) |
 | WB-L1 multi-core legality | **implemented (2026-09-27)** | `check_cfg` rejects `NrCores > 1` with `DCacheType` in {WB, HPDCACHE_WB, HPDCACHE_WT_WB} — a WB L1 cannot be kept coherent by the invalidation bus, so multi-core WB-L1 was never sound; no shipping package is affected (they are WT/HPDCACHE_WT) | `NrCores`, `DCacheType` |
 | DRAM-latency instrument (TB) | testbench | `corev_apu/tb/g6lc_tb_dram_latency.sv` first-beat gate (`DramLatency`); the vendor `stream_delay` fixed delay is per-beat serialized with a 4-bit counter and must not be used for latency claims | `DramLatency` (Verilator `-G`) |
 | Stream plane × multicore (U6/p6) | **implemented (gated)** | `cva6_server_prefetcher` + `NrCores` packages; suite `mc-stream-tests` | `ServerPrefetchEn`, `NrCores`, `L2En`/`L3En` |

@@ -30,6 +30,14 @@ module g6lc_ai_mem_store #(
     input  axi_resp_t   axi_resp_i
 );
 
+  // Bit-granular copies of the AXI aggregates. The master's ready signals may depend
+  // on the slave's valids (legal), but on a whole-struct view that reads as a
+  // request<->response loop; splitting keeps Verilator's cycle check exact.
+  axi_req_t  axi_req_d /*verilator split_var*/;
+  axi_resp_t axi_resp_s /*verilator split_var*/;
+  assign axi_req_o  = axi_req_d;
+  assign axi_resp_s = axi_resp_i;
+
   localparam int unsigned BusBytes   = DataWidth / 8;
   // Completion word is 64 bits. DataWidth=64 keeps a full-strobe beat.
   localparam int unsigned StoreBytes = (BusBytes > 8) ? 8 : BusBytes;
@@ -53,44 +61,46 @@ module g6lc_ai_mem_store #(
   assign err_o   = err_q;
 
   always_comb begin
-    axi_req_o          = '0;
-    axi_req_o.b_ready  = 1'b0;
-    axi_req_o.r_ready  = 1'b1;
-    axi_req_o.ar_valid = 1'b0;
-    axi_req_o.aw_valid = 1'b0;
-    axi_req_o.w_valid  = 1'b0;
+    axi_req_d          = '0;
+    axi_req_d.b_ready  = state_q == ST_B;
+    axi_req_d.r_ready  = 1'b1;
+    axi_req_d.ar_valid = 1'b0;
+    axi_req_d.aw_valid = state_q == ST_AW;
+    axi_req_d.w_valid  = state_q == ST_W;
 
     // Non-modifiable / non-bufferable: completion word is a device write.
     // ID=1 distinguishes from desc-fetch (id=0) on the shared DMA master port.
     // ID 1 keeps the completion word distinguishable from the descriptor fetch
     // (0) and the GEMM traffic (2) on the one shared island DMA master.
-    axi_req_o.aw.id     = IdWidth'(1);
-    axi_req_o.aw.addr   = addr_q;
-    axi_req_o.aw.len    = '0;
-    axi_req_o.aw.size   = axi_pkg::size_t'($clog2(StoreBytes));
-    axi_req_o.aw.burst  = axi_pkg::BURST_INCR;
-    axi_req_o.aw.lock   = 1'b0;
-    axi_req_o.aw.cache  = '0;
-    axi_req_o.aw.prot   = '0;
-    axi_req_o.aw.qos    = '0;
-    axi_req_o.aw.region = '0;
-    axi_req_o.aw.atop   = '0;
-    axi_req_o.aw.user   = '0;
+    axi_req_d.aw.id     = IdWidth'(1);
+    axi_req_d.aw.addr   = addr_q;
+    axi_req_d.aw.len    = '0;
+    axi_req_d.aw.size   = axi_pkg::size_t'($clog2(StoreBytes));
+    axi_req_d.aw.burst  = axi_pkg::BURST_INCR;
+    axi_req_d.aw.lock   = 1'b0;
+    axi_req_d.aw.cache  = '0;
+    axi_req_d.aw.prot   = '0;
+    axi_req_d.aw.qos    = '0;
+    axi_req_d.aw.region = '0;
+    axi_req_d.aw.atop   = '0;
+    axi_req_d.aw.user   = '0;
     begin
       int unsigned lane;
       lane = 0;
       if (StoreBytes == BusBytes) begin
-        axi_req_o.w.data = data_q;
-        axi_req_o.w.strb = '1;
+        axi_req_d.w.data = data_q;
+        axi_req_d.w.strb = '1;
       end else begin
         lane = unsigned'(addr_q) & (BusBytes - 1);
-        axi_req_o.w.data = DataWidth'(data_q[63:0]) << (8 * lane);
-        axi_req_o.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hFF} << lane;
+        axi_req_d.w.data = DataWidth'(data_q[63:0]) << (8 * lane);
+        axi_req_d.w.strb = {{(DataWidth/8-8){1'b0}}, 8'hFF} << lane;
       end
     end
-    axi_req_o.w.last    = 1'b1;
-    axi_req_o.w.user    = '0;
+    axi_req_d.w.last    = 1'b1;
+    axi_req_d.w.user    = '0;
+  end
 
+  always_comb begin
     state_d = state_q;
     err_d   = err_q;
 
@@ -109,17 +119,14 @@ module g6lc_ai_mem_store #(
         end
       end
       ST_AW: begin
-        axi_req_o.aw_valid = 1'b1;
-        if (axi_resp_i.aw_ready) state_d = ST_W;
+        if (axi_resp_s.aw_ready) state_d = ST_W;
       end
       ST_W: begin
-        axi_req_o.w_valid = 1'b1;
-        if (axi_resp_i.w_ready) state_d = ST_B;
+        if (axi_resp_s.w_ready) state_d = ST_B;
       end
       ST_B: begin
-        axi_req_o.b_ready = 1'b1;
-        if (axi_resp_i.b_valid) begin
-          if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+        if (axi_resp_s.b_valid) begin
+          if (axi_resp_s.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
             err_d = 1'b1;
           state_d = ST_IDLE;
         end
@@ -144,7 +151,7 @@ module g6lc_ai_mem_store #(
     end else begin
       state_q <= state_d;
       err_q   <= err_d;
-      done_q  <= ((state_q == ST_B) && axi_resp_i.b_valid && axi_req_o.b_ready)
+      done_q  <= ((state_q == ST_B) && axi_resp_s.b_valid && axi_req_d.b_ready)
                  || (state_q == ST_FAIL);
       if (state_q == ST_IDLE && start_i) begin
         addr_q <= addr_i;

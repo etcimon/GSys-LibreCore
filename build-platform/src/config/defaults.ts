@@ -664,6 +664,41 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        // Quick per-format cycles-per-operation bench on the LOCAL host (Linux/WSL with the
+        // pinned Verilator 5.008): the reduced backend bench `measure`/`measure_k` cases through
+        // the same runner + snapshot discipline as the remote gate, reduced by
+        // verif/regress/remote/ai_bench_report.py. Sequencer behaviour, not live geometry.
+        id: "ai-ops-bench",
+        description:
+          "OPTIONAL local: 8-lane GEMM backend bench over 7 numeric formats (phase/stall counters -> cycles per op, MAC efficiency, bottleneck); tuning aid, not a timing claim.",
+        script: "verif/regress/ai-ops-bench.sh",
+        group: "benchmark",
+        target: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: ["verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
+        // The full bench matrix on the SoC model (bench SKU: island VaTurboEn + IslandFpEn +
+        // all-format grant, `G6LC_AI_TB_BENCH_SKU`, library work-ver-ai-bench):
+        // [GEMM x 7 formats x MxNxK shapes x {mmio, ai.enq} x {cold, reuse_a, reuse_b}] from
+        // ai_bench_gemm.S plus the T0/T1 instruction bench (dot4, dot4a, mma, mvta+mvacc)
+        // from ai_bench_t0.S; AI_JOB records + rdcycle reduced by ai_bench_report.py --soc.
+        // Knobs: AI_MATRIX_BENCH_{FMTS,SHAPES,PATHS,REUSE,T0,ITER}; AI_MATRIX_VERI_REBUILD=1.
+        id: "ai-ops-bench-soc",
+        description:
+          "OPTIONAL: AI ops bench matrix on the g6lc64_ai bench SKU (formats x shapes x mmio/ai.enq x cold/reuse_a/reuse_b + T0 ops) -> cycles per op at the built geometry; not a timing claim.",
+        script: "verif/regress/ai-ops-bench-soc.sh",
+        group: "benchmark",
+        target: "g6lc64_ai",
+        dvTarget: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: ["verilator", "riscv-gcc"],
+        openSource: true,
+        optional: true,
+      },
+      {
         id: "ai-policy-codec",
         description:
           "OPTIONAL remote: eight-state codec and format-aware benefit steering; validated scheduling-model percentages, not production MAC/s. Local synthesis/formal via --synth-only.",

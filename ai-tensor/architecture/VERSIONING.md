@@ -103,6 +103,20 @@ Do not multiply profiles per framework — only per **platform capability**.
 
 ## 7. Live profiles (Phase A)
 
+The optional queued-MMIO candidate adds an **extension ABI revision 2.1.0**, pinned as
+`requires:desc-v2-k-major+command-queue-v1`: unchanged Desc64 v2/completion-word v1,
+plus CAP command-queue version1 and the `ABI-CONTRACT.md` queued register surface.
+`QueuedMmioSession` explicitly negotiates that capability; it refuses zero/unknown versions.
+The existing profile files below remain on their legacy latch/fetch contract and do not
+silently select queued mode. No released board profile or Rust/QEMU queued backend is
+qualified by this extension pin. Package release numbers remain a separate release step.
+
+Accumulate mode (`flags.accmode == 01`, grant word `CAP_ACCMODE` 0x94) is **extension ABI
+revision 2.2.0**, pinned as `requires:desc-v2-k-major+accmode-v1`: no descriptor or
+completion change, a reserved encoding enabled behind a new read-only grant. The software
+reference and the live island (`AiIslandAccmodeGrant = 1`, `g6lc_ai_gemm_seq` `ST_LC` seed
+path) grant it; a part publishing 0 refuses.
+
 | Profile file | Backend | Pin intent |
 |---|---|---|
 | `profiles/sim-v0.toml` | sim | Panel box 1024×512×512, Macs=512, NocWidth=64, `pmu_v1`, `compute_ref` |

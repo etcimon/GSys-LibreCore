@@ -334,12 +334,25 @@ impl Hart {
         let Some(model) = self.ai_model.clone() else {
             return;
         };
+        self.run_pending_ai_command(mem, &model);
         let Some(ev) = mem.ai_island_mut().and_then(|a| a.take_pending_job()) else {
             return;
         };
-        let mut job = crate::gemm::execute(mem, &ev, &model);
-        if Self::apply_ai_c_writes(mem, &job.c_writes).is_err() {
+        let resident = mem.ai_island().map(|a| a.operand_reuse.clone());
+        let mut job = crate::gemm::execute_with(mem, &ev, &model, resident.as_ref());
+        let c_ok = Self::apply_ai_c_writes(mem, &job.c_writes).is_ok();
+        if !c_ok {
             job.status = crate::gemm::bad_pointer_status(&model);
+        }
+        if job.ran_gemm {
+            if let Some(ai) = mem.ai_island_mut() {
+                ai.operand_reuse.observe(job.read_a, job.read_b);
+                if c_ok {
+                    ai.operand_reuse.commit(&job);
+                } else {
+                    ai.operand_reuse.drop_both();
+                }
+            }
         }
         let write = mem
             .ai_island_mut()
@@ -348,6 +361,55 @@ impl Hart {
             if Self::write_ai_completion(mem, addr, word).is_err() {
                 if let Some(ai) = mem.ai_island_mut() {
                     ai.fail_pending_dma();
+                }
+            }
+        }
+    }
+
+    /// Drain accepted command-queue entries: resolve each descriptor pointer against
+    /// guest memory, run it, and complete it under the command's own ticket. A
+    /// pointer that cannot be read completes with the package's bad-pointer status.
+    fn run_pending_ai_command(
+        &mut self,
+        mem: &mut PhysMem,
+        model: &g6q_core::model::AiIslandModel,
+    ) {
+        while let Some((ptr, _ticket, qid)) =
+            mem.ai_island_mut().and_then(|a| a.take_pending_command())
+        {
+            let bad_qid = u32::from(qid) >= model.config.queues.max(1);
+            let ev = if bad_qid || ptr == 0 || ptr % 8 != 0 {
+                None
+            } else {
+                crate::device::AiIsland::read_descriptor_event(mem, ptr, 0, model)
+            };
+            let (ev, status) = match ev {
+                Some(ev) => {
+                    let resident = mem.ai_island().map(|a| a.operand_reuse.clone());
+                    let mut job = crate::gemm::execute_with(mem, &ev, model, resident.as_ref());
+                    if Self::apply_ai_c_writes(mem, &job.c_writes).is_err() {
+                        job.status = crate::gemm::bad_pointer_status(model);
+                    }
+                    (ev, job.status)
+                }
+                None => {
+                    let codes = mem.ai_island().map(|a| a.codes).unwrap_or_default();
+                    let status = if bad_qid {
+                        codes.bad_qid
+                    } else {
+                        codes.bad_ptr
+                    };
+                    (g6q_diag::ai_tensor::AiTensorEvent::default(), status)
+                }
+            };
+            let write = mem
+                .ai_island_mut()
+                .and_then(|a| a.complete_pending_command(ev, status));
+            if let Some((addr, word)) = write {
+                if Self::write_ai_completion(mem, addr, word).is_err() {
+                    if let Some(ai) = mem.ai_island_mut() {
+                        ai.fail_pending_dma();
+                    }
                 }
             }
         }
@@ -3783,6 +3845,149 @@ impl Hart {
         });
         self.record_order += 1;
     }
+
+    /// Ring the directed schedule through the island doorbell.
+    ///
+    /// `mem` holds A row-major `[m][k]` at `ptr_a` and B k-major `[n][k]` at
+    /// `ptr_b`. `ptr_c` is scratch; the returned product is accumulated here.
+    /// A model that is not the 8-MAC 1024×512×16 tile is refused. Reuse is
+    /// enabled only when a planned tile can skip an operand.
+    pub fn run_va_turbo_doorbell(
+        &mut self,
+        mem: &mut PhysMem,
+        island_base: u64,
+        m: u32,
+        n: u32,
+        k: u32,
+        ptr_a: u64,
+        ptr_b: u64,
+        ptr_c: u64,
+    ) -> Result<crate::gemm::VaTurboTestRun, &'static str> {
+        let model = self
+            .ai_model
+            .clone()
+            .ok_or("VaTurbo test schedule requires the 8-MAC 1024x512x16 directed tile")?;
+        let plan = crate::gemm::plan_va_turbo_tiles(&model, m, n, k)?;
+        mem.ai_island_mut()
+            .ok_or("VaTurbo test schedule requires the 8-MAC 1024x512x16 directed tile")?
+            .set_reuse_en(plan.reuse_enabled);
+        let desc_base = island_base + model.config.desc_base.unwrap_or(0x140);
+        let ctl = model
+            .config
+            .reg_offset("ctl")
+            .ok_or("directed doorbell needs the published control surface")?;
+        let bell = model
+            .config
+            .reg_offset("doorbell")
+            .ok_or("directed doorbell needs the published control surface")?;
+        let status_off = model
+            .config
+            .reg_offset("status")
+            .ok_or("directed doorbell needs the published control surface")?;
+        let field = |name: &str| {
+            model
+                .desc_layout
+                .offset(name)
+                .ok_or("directed doorbell needs the published descriptor layout")
+        };
+        let ver = field("version")?;
+        if field("op")? != ver + 2 {
+            return Err("directed doorbell needs packed version and op");
+        }
+        let version = u32::try_from(model.desc_layout.version.unwrap_or(1)).unwrap_or(1);
+        let op = u32::try_from(model.desc_layout.op("OP_GEMM").unwrap_or(1)).unwrap_or(1);
+        let flags_off = field("flags")?;
+        let m_off = field("m")?;
+        let n_off = field("n")?;
+        let k_off = field("k")?;
+        let ld_off = field("ld_ab")?;
+        let a_off = field("ptr_a")?;
+        let b_off = field("ptr_b")?;
+        let c_off = field("ptr_c")?;
+        let done_off = field("ptr_done")?;
+        let write4 = |mem: &mut PhysMem, addr: u64, val: u32| -> Result<(), &'static str> {
+            mem.write_le::<4>(addr, u64::from(val))
+                .map_err(|_| "directed tile job failed")
+        };
+        let write8 = |mem: &mut PhysMem, addr: u64, val: u64| -> Result<(), &'static str> {
+            mem.write_le::<8>(addr, val)
+                .map_err(|_| "directed tile job failed")
+        };
+        write4(mem, island_base + ctl, 0b11)?;
+        let cells = (m as usize)
+            .checked_mul(n as usize)
+            .ok_or("invalid shape")?;
+        let mut c = vec![0i32; cells];
+        let mut read_a = true;
+        let mut read_b = true;
+        let mut hit_a = false;
+        let mut hit_b = false;
+        let flag_words: Vec<u32> = plan.tiles.iter().map(|tile| tile.flags).collect();
+        for tile in &plan.tiles {
+            write4(mem, desc_base + ver, version | (op << 16))?;
+            write4(mem, desc_base + flags_off, tile.flags)?;
+            write4(mem, desc_base + m_off, tile.tm)?;
+            write4(mem, desc_base + n_off, tile.tn)?;
+            write4(mem, desc_base + k_off, tile.tk)?;
+            write4(mem, desc_base + ld_off, k | (k << 16))?;
+            write8(
+                mem,
+                desc_base + a_off,
+                ptr_a + u64::from(tile.i0) * u64::from(k) + u64::from(tile.t0),
+            )?;
+            write8(
+                mem,
+                desc_base + b_off,
+                ptr_b + u64::from(tile.j0) * u64::from(k) + u64::from(tile.t0),
+            )?;
+            write8(mem, desc_base + c_off, ptr_c)?;
+            write8(mem, desc_base + done_off, 0)?;
+            let before = mem
+                .ai_island()
+                .map(|island| island.ticket)
+                .ok_or("directed tile job failed")?;
+            write4(mem, island_base + bell, 1)?;
+            self.run_pending_ai_job(mem);
+            let (ticket, saw_a, saw_b) = {
+                let island = mem.ai_island().ok_or("directed tile job failed")?;
+                (island.ticket, island.reuse_read_a(), island.reuse_read_b())
+            };
+            if ticket == before {
+                return Err("directed tile job failed");
+            }
+            let st = mem
+                .read_le::<4>(island_base + status_off)
+                .map_err(|_| "directed tile job failed")?;
+            if (st >> 16) != 0 {
+                return Err("directed tile job failed");
+            }
+            read_a = saw_a;
+            read_b = saw_b;
+            hit_a |= !read_a;
+            hit_b |= !read_b;
+            let tn = tile.tn as usize;
+            for ii in 0..tile.tm as usize {
+                for jj in 0..tn {
+                    let addr = ptr_c + ((ii * tn + jj) * 4) as u64;
+                    let value = mem
+                        .read_le::<4>(addr)
+                        .map_err(|_| "directed tile job failed")?
+                        as u32 as i32;
+                    let dst = (tile.i0 as usize + ii) * n as usize + (tile.j0 as usize + jj);
+                    c[dst] = c[dst].wrapping_add(value);
+                }
+            }
+        }
+        Ok(crate::gemm::VaTurboTestRun {
+            c,
+            flags: flag_words,
+            read_a,
+            read_b,
+            hit_a,
+            hit_b,
+            reuse_enabled: plan.reuse_enabled,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5701,6 +5906,27 @@ mod tests {
     }
 
     #[test]
+    fn a_committed_completion_beat_error_keeps_the_guest_word() {
+        let (h, mut m) = dma_guest_fixture(0x9000_2000, 0x9000_3000, 3);
+        let model = h.ai_model.as_ref().unwrap().clone();
+        let ev =
+            crate::device::AiIsland::read_descriptor_event(&m, 0x9000_0400, 0, &model).unwrap();
+        let (ptr, word) = {
+            let ai = m.ai_island_mut().unwrap();
+            ai.wr_cpl_en = true;
+            ai.fail_next_completion_bus();
+            ai.complete_pending_job(ev, ai.codes.ok).unwrap()
+        };
+        Hart::write_ai_completion(&mut m, ptr, word).unwrap();
+        assert_eq!(m.read_le::<8>(ptr).unwrap(), word);
+        let ai = m.ai_island().unwrap();
+        assert_eq!(word & 0xffff_ffff, ai.ticket as u64);
+        assert_eq!((word >> 32) & 0xffff, u64::from(ai.codes.ok));
+        assert_eq!(ai.last_status, ai.codes.err);
+        assert_ne!(ai.completion_word(), word);
+    }
+
+    #[test]
     fn guest_poll_reports_a_completion_mapping_lost_after_fence() {
         let (mut h, mut m) = dma_guest_fixture(0x9000_2000, 0x9000_3000, 3);
         h.regs.set(10, 0x9000_0400);
@@ -5990,6 +6216,191 @@ mod tests {
     }
 
     #[test]
+    fn a_guest_completion_beat_error_keeps_the_gemm_word() {
+        use crate::device::AiIsland;
+        use crate::mem::{Device, DeviceKind, Region};
+
+        let mut h = hart();
+        let mut m = mem();
+        let ai_model = crate::device::tests::model_with_control_surface();
+        let mut ai_island = AiIsland::new();
+        ai_island.set_ai_model(&ai_model);
+        const ISLAND: u64 = 0x4000_0000;
+        m.add_device(Device::new(ISLAND, 0x1000, DeviceKind::AiIsland(ai_island)));
+        h.ai_model = Some(ai_model.clone());
+
+        let (a_ptr, b_ptr, c_ptr, done_ptr) =
+            (0x9000_0000u64, 0x9000_1000, 0x9000_2000, 0x9000_3000);
+        m.add(Region::new(0x9000_0000, 0x4000));
+        for (i, v) in [1i8, 2, 3, 4].iter().enumerate() {
+            m.write_le::<1>(a_ptr + i as u64, *v as u8 as u64).unwrap();
+        }
+        for (i, v) in [5i8, 7, 6, 8].iter().enumerate() {
+            m.write_le::<1>(b_ptr + i as u64, *v as u8 as u64).unwrap();
+        }
+        m.write_le::<8>(done_ptr, 0xdead_beef_dead_beef).unwrap();
+
+        let reg = |n: &str| ISLAND + ai_model.config.reg_offset(n).unwrap();
+        let desc = |field: &str| ISLAND + 0x140 + ai_model.desc_layout.offset(field).unwrap();
+        m.write_le::<4>(reg("ctl"), 0b11).unwrap();
+        m.write_le::<4>(desc("version"), 1 | (1 << 16)).unwrap();
+        m.write_le::<4>(desc("m"), 2).unwrap();
+        m.write_le::<4>(desc("n"), 2).unwrap();
+        m.write_le::<4>(desc("k"), 2).unwrap();
+        m.write_le::<4>(desc("ld_ab"), 2 | (2 << 16)).unwrap();
+        m.write_le::<8>(desc("ptr_a"), a_ptr).unwrap();
+        m.write_le::<8>(desc("ptr_b"), b_ptr).unwrap();
+        m.write_le::<8>(desc("ptr_c"), c_ptr).unwrap();
+        m.write_le::<8>(desc("ptr_done"), done_ptr).unwrap();
+
+        m.ai_island_mut().unwrap().fail_next_completion_bus();
+        m.write_le::<4>(reg("doorbell"), 1).unwrap();
+        m.write_le::<4>(0x8000_0000, 0x00000013).unwrap();
+        assert_eq!(h.step(&mut m, 64), None);
+
+        let c = |i: u64| m.read_le::<4>(c_ptr + i * 4).unwrap() as u32 as i32;
+        assert_eq!([c(0), c(1), c(2), c(3)], [19, 22, 43, 50]);
+        assert_eq!(m.read_le::<4>(reg("status")).unwrap(), 1 << 16);
+        let word = m.read_le::<8>(done_ptr).unwrap();
+        let cl = ai_model.desc_layout.completion.unwrap();
+        assert_eq!(
+            word >> cl.status_bit_low & 0xffff,
+            0,
+            "stored GEMM status stays 0"
+        );
+        assert_eq!(word & 0xffff_ffff, 1, "first ticket");
+    }
+
+    #[test]
+    fn a_guest_reuse_hit_keeps_the_resident_b_byte() {
+        use crate::device::AiIsland;
+        use crate::mem::{Device, DeviceKind, Region};
+
+        let mut h = hart();
+        let mut m = mem();
+        let mut ai_model = crate::device::tests::model_with_control_surface();
+        for (name, off) in [
+            ("reuse_epoch", 0x0F00u64),
+            ("va_turbo_level", 0x0F04),
+            ("va_turbo_recipe", 0x0F0C),
+            ("va_turbo_window", 0x0F14),
+        ] {
+            ai_model.config.reg_offsets.insert(name.to_string(), off);
+        }
+        ai_model
+            .config
+            .pmu_offsets
+            .insert("va_turbo_level".into(), 0x0F08);
+        ai_model
+            .config
+            .pmu_offsets
+            .insert("va_turbo_recipe".into(), 0x0F10);
+        ai_model
+            .config
+            .pmu_offsets
+            .insert("va_turbo_window".into(), 0x0F18);
+        let mut ai_island = AiIsland::new();
+        ai_island.set_ai_model(&ai_model);
+        ai_island.set_reuse_en(true);
+        const ISLAND: u64 = 0x4000_0000;
+        m.add_device(Device::new(ISLAND, 0x1000, DeviceKind::AiIsland(ai_island)));
+        h.ai_model = Some(ai_model.clone());
+
+        let (a_ptr, b_ptr, c_ptr) = (0x9000_0000u64, 0x9000_1000, 0x9000_2000);
+        m.add(Region::new(0x9000_0000, 0x4000));
+        m.write_le::<1>(a_ptr, 1).unwrap();
+        m.write_le::<1>(b_ptr, 2).unwrap();
+
+        let reg = |n: &str| ISLAND + ai_model.config.reg_offset(n).unwrap();
+        let desc = |field: &str| ISLAND + 0x140 + ai_model.desc_layout.offset(field).unwrap();
+        m.write_le::<4>(reg("ctl"), 1).unwrap();
+        m.write_le::<4>(desc("version"), 1 | (1 << 16)).unwrap();
+        m.write_le::<4>(desc("m"), 1).unwrap();
+        m.write_le::<4>(desc("n"), 1).unwrap();
+        m.write_le::<4>(desc("k"), 1).unwrap();
+        m.write_le::<4>(desc("ld_ab"), 1 | (1 << 16)).unwrap();
+        m.write_le::<8>(desc("ptr_a"), a_ptr).unwrap();
+        m.write_le::<8>(desc("ptr_b"), b_ptr).unwrap();
+        m.write_le::<8>(desc("ptr_c"), c_ptr).unwrap();
+
+        let ring = |m: &mut crate::mem::PhysMem, h: &mut Hart| {
+            m.write_le::<4>(reg("doorbell"), 1).unwrap();
+            m.write_le::<4>(0x8000_0000, 0x0000_0013).unwrap();
+            assert_eq!(h.step(m, 64), None);
+        };
+        ring(&mut m, &mut h);
+        assert_eq!(m.read_le::<4>(c_ptr).unwrap() as i32, 2);
+
+        m.write_le::<1>(b_ptr, 9).unwrap();
+        m.write_le::<4>(desc("flags"), 1 << 15).unwrap();
+        ring(&mut m, &mut h);
+        assert_eq!(m.read_le::<4>(c_ptr).unwrap() as i32, 2);
+        assert!(!m.ai_island().unwrap().reuse_read_b());
+
+        m.write_le::<4>(reg("va_turbo_window"), 1).unwrap();
+        m.write_le::<4>(reg("va_turbo_level"), 0x109).unwrap();
+        assert_eq!(m.read_le::<4>(reg("va_turbo_level")).unwrap(), 9);
+        assert_eq!(m.read_le::<4>(reg("va_turbo_window")).unwrap(), 0);
+        ring(&mut m, &mut h);
+        assert_eq!(m.read_le::<4>(c_ptr).unwrap() as i32, 2);
+        assert!(!m.ai_island().unwrap().reuse_read_b());
+        let pmu_level = ISLAND
+            + ai_model
+                .config
+                .pmu_offsets
+                .get("va_turbo_level")
+                .copied()
+                .unwrap();
+        assert_eq!(m.read_le::<4>(pmu_level).unwrap(), 9);
+        assert_eq!((m.read_le::<4>(pmu_level).unwrap() >> 8) & 0xF, 0);
+
+        m.write_le::<4>(reg("va_turbo_window"), 1).unwrap();
+        m.write_le::<4>(reg("va_turbo_recipe"), 0x110).unwrap();
+        assert_eq!(m.read_le::<4>(reg("va_turbo_recipe")).unwrap(), 0x10);
+        assert_eq!(
+            (m.read_le::<4>(reg("va_turbo_recipe")).unwrap() >> 8) & 0x1F,
+            0
+        );
+        assert_eq!(m.read_le::<4>(reg("va_turbo_window")).unwrap(), 0);
+        m.write_le::<4>(reg("va_turbo_window"), 1).unwrap();
+        m.write_le::<4>(reg("va_turbo_recipe"), 0x10).unwrap();
+        assert_eq!(m.read_le::<4>(reg("va_turbo_window")).unwrap(), 0);
+        ring(&mut m, &mut h);
+        assert_eq!(m.read_le::<4>(c_ptr).unwrap() as i32, 2);
+        assert!(!m.ai_island().unwrap().reuse_read_b());
+        let pmu_recipe = ISLAND
+            + ai_model
+                .config
+                .pmu_offsets
+                .get("va_turbo_recipe")
+                .copied()
+                .unwrap();
+        assert_eq!(m.read_le::<4>(pmu_recipe).unwrap(), 0x10);
+        assert_eq!((m.read_le::<4>(pmu_recipe).unwrap() >> 8) & 0x1F, 0);
+
+        m.write_le::<4>(reg("va_turbo_window"), 1).unwrap();
+        ring(&mut m, &mut h);
+        assert_eq!(m.read_le::<4>(c_ptr).unwrap() as i32, 2);
+        assert!(!m.ai_island().unwrap().reuse_read_b());
+        let pmu_window = ISLAND
+            + ai_model
+                .config
+                .pmu_offsets
+                .get("va_turbo_window")
+                .copied()
+                .unwrap();
+        assert_eq!(m.read_le::<4>(pmu_window).unwrap(), 1);
+
+        m.write_le::<4>(reg("reuse_epoch"), 1).unwrap();
+        assert_eq!(m.read_le::<4>(reg("va_turbo_window")).unwrap(), 0);
+        assert_eq!(m.read_le::<4>(pmu_window).unwrap(), 1);
+        ring(&mut m, &mut h);
+        assert_eq!(m.read_le::<4>(c_ptr).unwrap() as i32, 9);
+        assert!(m.ai_island().unwrap().reuse_read_b());
+        assert_eq!(m.read_le::<4>(pmu_window).unwrap(), 0);
+    }
+
+    #[test]
     fn a_shape_beyond_the_accumulator_tile_completes_with_an_error_and_writes_no_c() {
         use crate::device::AiIsland;
         use crate::mem::{Device, DeviceKind, Region};
@@ -6021,13 +6432,24 @@ mod tests {
         m.write_le::<8>(desc("ptr_a"), 0x9000_0000).unwrap();
         m.write_le::<8>(desc("ptr_b"), 0x9000_1000).unwrap();
         m.write_le::<8>(desc("ptr_c"), 0x9000_2000).unwrap();
+        m.write_le::<8>(desc("ptr_done"), 0x9000_3000).unwrap();
+        m.write_le::<8>(0x9000_3000, 0xdead_beef_dead_beef).unwrap();
         m.write_le::<4>(reg("doorbell"), 1).unwrap();
         m.write_le::<4>(0x8000_0000, 0x00000013).unwrap();
         assert_eq!(h.step(&mut m, 64), None);
 
-        // ST_ERR in the high half, and C untouched.
+        // ST_ERR in the high half, and C untouched. The completion word
+        // carries that same GEMM error.
         assert_eq!(m.read_le::<4>(reg("status")).unwrap(), 1 << 16);
         assert_eq!(m.read_le::<4>(0x9000_2000).unwrap(), 0);
+        let word = m.read_le::<8>(0x9000_3000).unwrap();
+        let cl = ai_model.desc_layout.completion.unwrap();
+        assert_eq!(
+            word >> cl.status_bit_low & 0xffff,
+            1,
+            "stored GEMM status is ST_ERR"
+        );
+        assert_eq!(word & 0xffff_ffff, 1, "first ticket");
     }
 
     #[test]
@@ -6175,5 +6597,77 @@ mod tests {
             assert_eq!(q.ctl, 0x1, "aiqctl");
             assert_eq!(q.head, 0, "aiqhead");
         }
+    }
+
+    fn directed_surface() -> g6q_core::model::AiIslandModel {
+        let mut model = crate::device::tests::model_with_control_surface();
+        model.config.macs_per_cycle = 8;
+        model.config.acc_tile_m = 1024;
+        model.config.acc_tile_n = 512;
+        model.config.acc_tile_k = 16;
+        model.config.clusters = 1;
+        model
+    }
+
+    fn doorbell_schedule(
+        model: g6q_core::model::AiIslandModel,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<crate::gemm::VaTurboTestRun, &'static str> {
+        use crate::device::AiIsland;
+        use crate::mem::DeviceKind;
+
+        let mut h = hart();
+        let mut mem = mem();
+        let mut island = AiIsland::new();
+        island.set_ai_model(&model);
+        const ISLAND: u64 = 0x4000_0000;
+        mem.add_device(crate::mem::Device::new(
+            ISLAND,
+            0x1000,
+            DeviceKind::AiIsland(island),
+        ));
+        h.ai_model = Some(model);
+        mem.add(Region::new(0x9000_0000, 0x4000));
+        let ptr_a = 0x9000_0000u64;
+        let ptr_b = 0x9000_1000;
+        let ptr_c = 0x9000_2000;
+        for i in 0..u64::from(m) * u64::from(k) {
+            mem.write_le::<1>(ptr_a + i, 1).unwrap();
+        }
+        for i in 0..u64::from(n) * u64::from(k) {
+            mem.write_le::<1>(ptr_b + i, 1).unwrap();
+        }
+        h.run_va_turbo_doorbell(&mut mem, ISLAND, m, n, k, ptr_a, ptr_b, ptr_c)
+    }
+
+    #[test]
+    fn the_doorbell_schedule_enables_reuse_only_when_a_tile_skips() {
+        let mut live = crate::device::tests::model_with_control_surface();
+        live.config.macs_per_cycle = 512;
+        live.config.acc_tile_m = 1024;
+        live.config.acc_tile_n = 512;
+        live.config.acc_tile_k = 512;
+        live.config.clusters = 1;
+        assert!(doorbell_schedule(live, 16, 8, 8).is_err());
+
+        let directed = directed_surface();
+        let m_split = doorbell_schedule(directed.clone(), 16, 8, 8).unwrap();
+        assert!(m_split.reuse_enabled);
+        assert_eq!(m_split.flags[1] & (1 << 15), 1 << 15);
+        assert_eq!(m_split.flags[1] & (1 << 23), 0);
+        assert!(m_split.read_a);
+        assert!(!m_split.read_b);
+        assert!(m_split.hit_b);
+        assert!(!m_split.hit_a);
+        assert_eq!(m_split.c, vec![8i32; 16 * 8]);
+
+        let k_split = doorbell_schedule(directed, 8, 8, 16).unwrap();
+        assert!(!k_split.reuse_enabled);
+        assert_eq!(k_split.flags[1] & ((1 << 15) | (1 << 23)), 0);
+        assert!(k_split.read_a);
+        assert!(k_split.read_b);
+        assert_eq!(k_split.c, vec![16i32; 8 * 8]);
     }
 }

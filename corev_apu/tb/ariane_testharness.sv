@@ -14,6 +14,9 @@
 //              Instantiates an AXI-Bus and memories
 
 `include "axi/assign.svh"
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+`include "axi/typedef.svh"
+`endif
 `include "rvfi_types.svh"
 `include "iti_types.svh"
 
@@ -129,6 +132,19 @@ module ariane_testharness #(
   // Driven from gen_ai_island when MatrixEn; idle otherwise.
   ariane_axi::req_t  ai_dma_req;
   ariane_axi::resp_t ai_dma_resp;
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+  // 512-bit island DMA on this define only. ai_dma_req stays the 64-bit
+  // type the unset path assigns onto xbar slave[2].
+  localparam int unsigned AI_ISLAND_DATA_W = 512;
+  typedef logic [AI_ISLAND_DATA_W-1:0]   aiw_data_t;
+  typedef logic [AI_ISLAND_DATA_W/8-1:0] aiw_strb_t;
+  typedef ariane_axi::addr_t aiw_addr_t;
+  typedef ariane_axi::id_t   aiw_id_t;
+  typedef ariane_axi::user_t aiw_user_t;
+  `AXI_TYPEDEF_ALL(aiw, aiw_addr_t, aiw_id_t, aiw_data_t, aiw_strb_t, aiw_user_t)
+  aiw_req_t  ai_dma_wide_req;
+  aiw_resp_t ai_dma_wide_resp;
+`endif
   logic              dram_init_done;
   logic [g6lc_ai_island_cfg_pkg::AI_DRAM_MAX_CHANNELS-1:0][31:0]
                      dram_ch_r_beats, dram_ch_w_beats;
@@ -155,8 +171,45 @@ module ariane_testharness #(
       g6lc_ai_island_cfg_pkg::AiIslandLatencyDefault
 `endif
       ;
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+  // Island DMA leaves the 64-bit xbar on a 512-bit port. slave[2] stays idle
+  // so the default address map is unchanged. The join is its only DRAM ingress.
+  assign slave[2].aw_valid  = 1'b0;
+  assign slave[2].aw_id     = '0;
+  assign slave[2].aw_addr   = '0;
+  assign slave[2].aw_len    = '0;
+  assign slave[2].aw_size   = '0;
+  assign slave[2].aw_burst  = axi_pkg::BURST_FIXED;
+  assign slave[2].aw_lock   = 1'b0;
+  assign slave[2].aw_cache  = '0;
+  assign slave[2].aw_prot   = '0;
+  assign slave[2].aw_qos    = '0;
+  assign slave[2].aw_region = '0;
+  assign slave[2].aw_atop   = '0;
+  assign slave[2].aw_user   = '0;
+  assign slave[2].w_valid   = 1'b0;
+  assign slave[2].w_data    = '0;
+  assign slave[2].w_strb    = '0;
+  assign slave[2].w_last    = 1'b0;
+  assign slave[2].w_user    = '0;
+  assign slave[2].b_ready   = 1'b0;
+  assign slave[2].ar_valid  = 1'b0;
+  assign slave[2].ar_id     = '0;
+  assign slave[2].ar_addr   = '0;
+  assign slave[2].ar_len    = '0;
+  assign slave[2].ar_size   = '0;
+  assign slave[2].ar_burst  = axi_pkg::BURST_FIXED;
+  assign slave[2].ar_lock   = 1'b0;
+  assign slave[2].ar_cache  = '0;
+  assign slave[2].ar_prot   = '0;
+  assign slave[2].ar_qos    = '0;
+  assign slave[2].ar_region = '0;
+  assign slave[2].ar_user   = '0;
+  assign slave[2].r_ready   = 1'b0;
+`else
   `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_req)
   `AXI_ASSIGN_TO_RESP(ai_dma_resp, slave[2])
+`endif
 
 `ifdef G6LC_APU
   localparam int unsigned APU_NB_EXTRA = 3;
@@ -472,19 +525,33 @@ module ariane_testharness #(
   // ------------------------------
   // Module-scope sideband between cluster core0 and island (always present;
   // idle when MatrixEn=0).
-  logic        ai_sb_enq;
+  logic        ai_sb_enq, ai_sb_enq_ready, ai_isl_attached;
   logic [7:0]  ai_sb_qid;
   logic [31:0] ai_sb_ticket;
   logic [CVA6Cfg.XLEN-1:0] ai_sb_desc_ptr;
   logic [31:0] ai_isl_last_ticket;
   logic [15:0] ai_isl_last_status;
   logic        ai_isl_has_completion;
+  logic        ai_isl_retired_valid;
+  logic [31:0] ai_isl_retired_ticket;
   logic        ai_irq;
   logic        apu_irq;
 `ifndef G6LC_APU
   assign apu_irq = 1'b0;
 `endif
 
+`ifdef G6LC_AI_TB_BENCH_SKU
+  // Bench SKU island config (module scope: constant functions may not live under
+  // a generate). Island-only: VaTurboEn for operand residency, IslandFpEn for
+  // 4-byte operand banks. The core-side CVA6Cfg.AiCfg is untouched.
+  function automatic config_pkg::ai_cfg_t ai_cfg_bench_sku();
+    config_pkg::ai_cfg_t c = CVA6Cfg.AiCfg;
+    c.VaTurboEn  = 1'b1;
+    c.IslandFpEn = 1'b1;
+    return c;
+  endfunction
+  localparam config_pkg::ai_cfg_t AiCfgBenchSku = ai_cfg_bench_sku();
+`endif
   if (CVA6Cfg.AiCfg.MatrixEn) begin : gen_ai_island
     logic         ai_penable, ai_pwrite, ai_psel, ai_pready, ai_pslverr;
     logic [31:0]  ai_paddr, ai_pwdata, ai_prdata;
@@ -555,13 +622,23 @@ module ariane_testharness #(
         .PSLVERR   ( ai_pslverr )
     );
 
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    assign ai_dma_req  = '0;
+    assign ai_dma_resp = '0;
+`endif
     g6lc_ai_island_apb #(
         .IslandCfg      ( AiIslandCfg ),
         .EnableDmaFetch ( 1'b1 ),
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+        .AxiDataWidth   ( AI_ISLAND_DATA_W ),
+        .axi_req_t      ( aiw_req_t ),
+        .axi_resp_t     ( aiw_resp_t ),
+`else
         .AxiDataWidth   ( AXI_DATA_WIDTH ),
-        .AxiIdWidth     ( ariane_axi_soc::IdWidth ),
         .axi_req_t      ( ariane_axi::req_t ),
         .axi_resp_t     ( ariane_axi::resp_t ),
+`endif
+        .AxiIdWidth     ( ariane_axi_soc::IdWidth ),
         // `+define+G6LC_AI_TB_OVERGRANT` advertises BF16 the PE cannot execute, so the
         // grant-subset-of-datapath guard in g6lc_ai_island_top can be shown to FIRE. Kept
         // here rather than as an `ifdef` inside the config package: two conditional
@@ -570,6 +647,15 @@ module ariane_testharness #(
         // exactly such a reader. The package states one design; the testbench overrides.
 `ifdef G6LC_AI_TB_OVERGRANT
         .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMaskOvergrant )
+`elsif G6LC_AI_TB_BENCH_SKU
+        // Bench SKU: the island alone gets VaTurboEn (exact operand residency via
+        // FLAG_REUSE_A/B) and IslandFpEn (4-byte operand banks) with every executable
+        // format granted, so `verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1`
+        // can run the [op x format x shape x residency x path] matrix on one model.
+        // The core-side ai_cfg (T0 formats, check_cfg) is untouched; this is a
+        // testbench parameter like the overgrant control, not a package value.
+        .AiCfg          ( AiCfgBenchSku ),
+        .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMaskBench )
 `else
         .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMask )
 `endif
@@ -587,24 +673,41 @@ module ariane_testharness #(
         .pslverr_o ( ai_pslverr ),
         .irq_o     ( ai_irq     ),
         .sb_enq_valid_i      ( ai_sb_enq              ),
+        .sb_enq_ready_o      ( ai_sb_enq_ready        ),
         .sb_qid_i            ( ai_sb_qid              ),
         .sb_ticket_i         ( ai_sb_ticket           ),
         .sb_desc_ptr_i       ( ai_sb_desc_ptr         ),
         .sb_last_ticket_o    ( ai_isl_last_ticket     ),
         .sb_last_status_o    ( ai_isl_last_status     ),
         .sb_has_completion_o ( ai_isl_has_completion  ),
+        .sb_retired_valid_o  ( ai_isl_retired_valid   ),
+        .sb_retired_ticket_o ( ai_isl_retired_ticket  ),
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+        .axi_dma_req_o       ( ai_dma_wide_req        ),
+        .axi_dma_resp_i      ( ai_dma_wide_resp       ),
+`else
         .axi_dma_req_o       ( ai_dma_req             ),
         .axi_dma_resp_i      ( ai_dma_resp            ),
+`endif
         .dram_init_done_i    ( dram_init_done         ),
         .ch_r_beats_i        ( dram_ch_r_beats        ),
         .ch_w_beats_i        ( dram_ch_w_beats        )
     );
+    assign ai_isl_attached = 1'b1;
   end else begin : gen_gpio_err
     assign ai_irq = 1'b0;
     assign ai_isl_last_ticket = '0;
     assign ai_isl_last_status = '0;
+    assign ai_sb_enq_ready = 1'b1;
+    assign ai_isl_attached = 1'b0;
     assign ai_dma_req = '0;
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    assign ai_dma_wide_req = '0;
+    assign ai_dma_resp = '0;
+`endif
     assign ai_isl_has_completion = 1'b0;
+    assign ai_isl_retired_valid  = 1'b0;
+    assign ai_isl_retired_ticket = '0;
     ariane_axi_soc::req_slv_t  gpio_req;
     ariane_axi_soc::resp_slv_t gpio_resp;
     `AXI_ASSIGN_TO_REQ(gpio_req, master[ariane_soc::GPIO])
@@ -764,9 +867,104 @@ module ariane_testharness #(
 
   // SoC DRAM slave. Class/channels/shift come from AiIslandCfg (same as the
   // island APB). Class 1 is +define+G6LC_AI_DRAM_CLASS1+G6LC_HAVE_LITEDRAM.
+  // G6LC_AI_DRAM_ISLAND_PORT peels the island DMA off xbar slave[2] and joins
+  // it above this slave. Unset, dram_lat is the only ingress (identity).
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) join_cl ();
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AI_ISLAND_DATA_W             ),
+    .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) join_is ();
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH                ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH                   ),
+    .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave + 1 ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH                   )
+  ) join_mst ();
+
+  `AXI_ASSIGN(join_cl, dram_lat)
+
+  localparam int unsigned AI_DMA_ID_PAD =
+      ariane_axi_soc::IdWidthSlave - ariane_axi::IdWidth;
+  assign join_is.aw_id     = { {AI_DMA_ID_PAD{1'b0}}, ai_dma_wide_req.aw.id };
+  assign join_is.aw_addr   = ai_dma_wide_req.aw.addr;
+  assign join_is.aw_len    = ai_dma_wide_req.aw.len;
+  assign join_is.aw_size   = ai_dma_wide_req.aw.size;
+  assign join_is.aw_burst  = ai_dma_wide_req.aw.burst;
+  assign join_is.aw_lock   = ai_dma_wide_req.aw.lock;
+  assign join_is.aw_cache  = ai_dma_wide_req.aw.cache;
+  assign join_is.aw_prot   = ai_dma_wide_req.aw.prot;
+  assign join_is.aw_qos    = ai_dma_wide_req.aw.qos;
+  assign join_is.aw_region = ai_dma_wide_req.aw.region;
+  assign join_is.aw_atop   = ai_dma_wide_req.aw.atop;
+  assign join_is.aw_user   = ai_dma_wide_req.aw.user;
+  assign join_is.aw_valid  = ai_dma_wide_req.aw_valid;
+  assign join_is.w_data    = ai_dma_wide_req.w.data;
+  assign join_is.w_strb    = ai_dma_wide_req.w.strb;
+  assign join_is.w_last    = ai_dma_wide_req.w.last;
+  assign join_is.w_user    = ai_dma_wide_req.w.user;
+  assign join_is.w_valid   = ai_dma_wide_req.w_valid;
+  assign join_is.b_ready   = ai_dma_wide_req.b_ready;
+  assign join_is.ar_id     = { {AI_DMA_ID_PAD{1'b0}}, ai_dma_wide_req.ar.id };
+  assign join_is.ar_addr   = ai_dma_wide_req.ar.addr;
+  assign join_is.ar_len    = ai_dma_wide_req.ar.len;
+  assign join_is.ar_size   = ai_dma_wide_req.ar.size;
+  assign join_is.ar_burst  = ai_dma_wide_req.ar.burst;
+  assign join_is.ar_lock   = ai_dma_wide_req.ar.lock;
+  assign join_is.ar_cache  = ai_dma_wide_req.ar.cache;
+  assign join_is.ar_prot   = ai_dma_wide_req.ar.prot;
+  assign join_is.ar_qos    = ai_dma_wide_req.ar.qos;
+  assign join_is.ar_region = ai_dma_wide_req.ar.region;
+  assign join_is.ar_user   = ai_dma_wide_req.ar.user;
+  assign join_is.ar_valid  = ai_dma_wide_req.ar_valid;
+  assign join_is.r_ready   = ai_dma_wide_req.r_ready;
+  assign ai_dma_wide_resp.aw_ready = join_is.aw_ready;
+  assign ai_dma_wide_resp.ar_ready = join_is.ar_ready;
+  assign ai_dma_wide_resp.w_ready  = join_is.w_ready;
+  assign ai_dma_wide_resp.b_valid  = join_is.b_valid;
+  assign ai_dma_wide_resp.b.id     = ariane_axi::id_t'(join_is.b_id);
+  assign ai_dma_wide_resp.b.resp   = join_is.b_resp;
+  assign ai_dma_wide_resp.b.user   = join_is.b_user;
+  assign ai_dma_wide_resp.r_valid  = join_is.r_valid;
+  assign ai_dma_wide_resp.r.id     = ariane_axi::id_t'(join_is.r_id);
+  assign ai_dma_wide_resp.r.data   = join_is.r_data;
+  assign ai_dma_wide_resp.r.resp   = join_is.r_resp;
+  assign ai_dma_wide_resp.r.last   = join_is.r_last;
+  assign ai_dma_wide_resp.r.user   = join_is.r_user;
+
+  g6lc_ai_dram_join #(
+      .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+      .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+      .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
+      .AXI_USER_WIDTH ( AXI_USER_WIDTH               ),
+      .ISLAND_DATA_WIDTH ( AI_ISLAND_DATA_W          ),
+      .MAX_AR_OUT     ( AiIslandCfg.MaxAROut         ),
+      .DRAM_BASE      ( ariane_soc::DRAMBase         ),
+      .DRAM_BYTES     ( ariane_soc::DRAMLength       )
+  ) i_dram_join (
+      .clk_i       ( clk_i          ),
+      .rst_ni      ( ndmreset_n     ),
+      .testmode_i  ( test_en        ),
+      .init_done_i ( dram_init_done ),
+      .cluster     ( join_cl        ),
+      .island      ( join_is        ),
+      .master      ( join_mst       )
+  );
+`endif
   g6lc_ai_dram_backend #(
     .DramClass      ( AiIslandCfg.DramClass            ),
-    .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave     ),
+    .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+                      + 1
+`endif
+                    ),
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH                ),
     .AXI_DATA_WIDTH ( AXI_DATA_WIDTH                   ),
     .AXI_USER_WIDTH ( AXI_USER_WIDTH                   ),
@@ -780,7 +978,11 @@ module ariane_testharness #(
     .rst_ni     ( ndmreset_n   ),
     .rst_sram_ni( rst_ni       ),
     .testmode_i ( test_en      ),
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    .slave      ( join_mst     ),
+`else
     .slave      ( dram_lat     ),
+`endif
     .init_done_o( dram_init_done ),
     .ch_r_beats_o ( dram_ch_r_beats ),
     .ch_w_beats_o ( dram_ch_w_beats )
@@ -1149,10 +1351,14 @@ module ariane_testharness #(
     .pf_issue_o     (                     ),
     .pf_train_o     (                     ),
     .ai_sb_enq_valid_o( ai_sb_enq         ),
+    .ai_sb_enq_ready_i( ai_sb_enq_ready   ),
     .ai_sb_qid_o      ( ai_sb_qid         ),
     .ai_sb_ticket_o   ( ai_sb_ticket      ),
     .ai_sb_desc_ptr_o ( ai_sb_desc_ptr    ),
+    .ai_isl_attached_i( ai_isl_attached   ),
     .ai_isl_has_completion_i( ai_isl_has_completion ),
+    .ai_isl_retired_valid_i ( ai_isl_retired_valid  ),
+    .ai_isl_retired_ticket_i( ai_isl_retired_ticket ),
     .ai_isl_last_ticket_i   ( ai_isl_last_ticket    ),
     .ai_isl_last_status_i   ( ai_isl_last_status    )
   );
@@ -1577,7 +1783,8 @@ module ariane_testharness #(
                    mc_cnt_l2_wtrk_full, mc_cnt_l2_line_hold,
                    mc_cnt_l2_posted, mc_cnt_l2_rdtrk,
                    mc_cnt_l2_hold_r1, mc_cnt_l2_hold_r1_wu,
-                   mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold;
+                   mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold,
+                   mc_cnt_hub_aw_hold_slot, mc_cnt_hub_aw_hold_other;
   // T9h/M5: L2 prefetcher pulses.
   int unsigned mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop;
   logic mc_l2_pf_issue_obs, mc_l2_pf_useful_obs, mc_l2_pf_drop_obs;
@@ -1586,7 +1793,8 @@ module ariane_testharness #(
         mc_l2_wtrk_full_obs, mc_l2_line_hold_obs, mc_l2_posted_obs,
         mc_l2_rdtrk_obs,
         mc_l2_hold_r1_obs, mc_l2_hold_r1_wu_obs, mc_l2_hold_r2_obs,
-        mc_hub_aw_sc_obs, mc_hub_ar_obs;
+        mc_hub_aw_sc_obs, mc_hub_ar_obs,
+        mc_hub_aw_hold_slot_obs, mc_hub_aw_hold_other_obs;
   if (CVA6Cfg.L2En) begin : gen_mc_cache_l2
     assign mc_l2_hit_obs    = i_cluster.gen_l2.i_l2.l2_hit_o;
     assign mc_l2_bypass_obs = i_cluster.gen_l2.i_l2.l2_bypass_o;
@@ -1630,9 +1838,14 @@ module ariane_testharness #(
     assign mc_hub_aw_sc_obs = i_cluster.gen_hub.i_hub.hub_aw_sc_collide_o;
     // T9e/M1d: hub-side read-behind-write hold (ar_wr_line_live).
     assign mc_hub_ar_obs   = i_cluster.gen_hub.i_hub.hub_ar_wr_hold_o;
+    // T10c/N4: actual AW holds at a core port, split by blocker.
+    assign mc_hub_aw_hold_slot_obs  = i_cluster.gen_hub.i_hub.hub_aw_hold_slot_o;
+    assign mc_hub_aw_hold_other_obs = i_cluster.gen_hub.i_hub.hub_aw_hold_other_o;
   end else begin : gen_mc_hub_nosc
     assign mc_hub_aw_sc_obs = 1'b0;
     assign mc_hub_ar_obs   = 1'b0;
+    assign mc_hub_aw_hold_slot_obs  = 1'b0;
+    assign mc_hub_aw_hold_other_obs = 1'b0;
   end
   if (CVA6Cfg.L3En) begin : gen_mc_cache_l3
     assign mc_l3_selfinv_obs = i_cluster.gen_l3.i_l3.l3_selfinv_hit_o;
@@ -1659,6 +1872,8 @@ module ariane_testharness #(
       mc_cnt_l2_hold_r2 <= mc_cnt_l2_hold_r2 + mc_l2_hold_r2_obs;
       mc_cnt_hub_aw_sc <= mc_cnt_hub_aw_sc + mc_hub_aw_sc_obs;
       mc_cnt_hub_ar_hold <= mc_cnt_hub_ar_hold + mc_hub_ar_obs;
+      mc_cnt_hub_aw_hold_slot <= mc_cnt_hub_aw_hold_slot + mc_hub_aw_hold_slot_obs;
+      mc_cnt_hub_aw_hold_other <= mc_cnt_hub_aw_hold_other + mc_hub_aw_hold_other_obs;
       mc_cnt_l2_posted <= mc_cnt_l2_posted + mc_l2_posted_obs;
       mc_cnt_l2_rdtrk <= mc_cnt_l2_rdtrk + mc_l2_rdtrk_obs;
       mc_cnt_l2_pf_issue <= mc_cnt_l2_pf_issue + mc_l2_pf_issue_obs;
@@ -1681,6 +1896,8 @@ module ariane_testharness #(
       mc_cnt_l2_hold_r2 <= '0;
       mc_cnt_hub_aw_sc <= '0;
       mc_cnt_hub_ar_hold <= '0;
+      mc_cnt_hub_aw_hold_slot <= '0;
+      mc_cnt_hub_aw_hold_other <= '0;
       mc_cnt_l2_posted <= '0;
       mc_cnt_l2_rdtrk <= '0;
       mc_cnt_l2_pf_issue <= '0;
@@ -1860,12 +2077,13 @@ module ariane_testharness #(
                c, mc_gap_max[c], MC_GAP_LIMIT, mc_last_wfi[c]);
     if (mc_any_hung)
       $display("*** [mc_verdict] FAIL: a core ran and then stopped retiring (exit code 126)");
-    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d l2_wtrk_full=%0d l2_line_hold=%0d l2_posted=%0d l2_rdtrk=%0d l2_hold_r1=%0d l2_hold_r1_wu=%0d l2_hold_r2=%0d hub_aw_sc_collide=%0d hub_ar_hold=%0d dram_latency=%0d l2_pf_issue=%0d l2_pf_useful=%0d l2_pf_drop=%0d",
+    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d l2_wtrk_full=%0d l2_line_hold=%0d l2_posted=%0d l2_rdtrk=%0d l2_hold_r1=%0d l2_hold_r1_wu=%0d l2_hold_r2=%0d hub_aw_sc_collide=%0d hub_ar_hold=%0d hub_aw_hold_slot=%0d hub_aw_hold_other=%0d dram_latency=%0d l2_pf_issue=%0d l2_pf_useful=%0d l2_pf_drop=%0d",
              mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass, mc_cnt_l3_hit, mc_cnt_l3_miss,
              mc_cnt_l2_selfinv, mc_cnt_l3_selfinv, mc_cnt_l2_wupd, mc_cnt_l3_wupd,
              mc_cnt_l2_wtrk_full, mc_cnt_l2_line_hold, mc_cnt_l2_posted,
              mc_cnt_l2_rdtrk, mc_cnt_l2_hold_r1, mc_cnt_l2_hold_r1_wu,
-             mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold, DramLatency,
+             mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold,
+             mc_cnt_hub_aw_hold_slot, mc_cnt_hub_aw_hold_other, DramLatency,
              mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop);
   end
   //pragma translate_on

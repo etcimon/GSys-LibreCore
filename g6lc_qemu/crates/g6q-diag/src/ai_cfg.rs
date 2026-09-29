@@ -43,9 +43,16 @@ pub fn parse_ai_island_cfg_pkg(text: &str) -> Result<AiIslandConfig, String> {
             "QueueDepth" => cfg.queue_depth = v as u32,
             "QosClasses" => cfg.qos_classes = v as u32,
             "WorkQuantumK" => cfg.work_quantum_k = v as u32,
+            "CommandDepth" => cfg.command_depth = v as u32,
             _ => {}
         }
     }
+    cfg.command_queue_version =
+        extract_localparam_scalar(&cleaned, "COMMAND_QUEUE_VERSION").map(|v| v as u32);
+    cfg.command_queue_flags =
+        extract_localparam_scalar(&cleaned, "COMMAND_QUEUE_FLAGS").map(|v| v as u32);
+    cfg.accmode_grant =
+        extract_localparam_scalar(&cleaned, "AiIslandAccmodeGrant").map(|v| v as u32);
 
     // Capability version.
     if let Some(v) = extract_localparam_scalar(&cleaned, "AiIslandCapVersion") {
@@ -208,8 +215,13 @@ fn strip_sv_comments(text: &str) -> String {
 }
 
 fn extract_struct_literal(text: &str, name: &str) -> Option<String> {
-    let needle = format!("localparam ai_island_cfg_t {name}");
-    let start = text.find(&needle)?;
+    extract_typed_struct_literal(text, "ai_island_cfg_t", name)
+}
+
+fn extract_typed_struct_literal(text: &str, ty: &str, name: &str) -> Option<String> {
+    // `g6lc64_ai_config_pkg` qualifies the type (`config_pkg::ai_cfg_t ai_cfg`).
+    // A needle of `localparam ai_cfg_t ai_cfg` never sees that literal.
+    let start = find_localparam_struct(text, ty, name)?;
     let after_sig = text[start..].find('=')?;
     let body_start = start + after_sig + 1;
     // Skip whitespace and the optional leading quote of the '{...}' initializer.
@@ -249,6 +261,65 @@ fn extract_struct_literal(text: &str, name: &str) -> Option<String> {
         out.push(c);
     }
     Some(out)
+}
+
+/// Index of `localparam` whose type is `ty` (optionally `scope::ty`) and whose name is `name`.
+fn find_localparam_struct(text: &str, ty: &str, name: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(rel) = text[from..].find("localparam") {
+        let at = from + rel;
+        let preceded_ok = at == 0
+            || text[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_ascii_alphanumeric() && c != '_');
+        let after_kw = &text[at + "localparam".len()..];
+        let keyword_ok = after_kw.chars().next().is_some_and(|c| c.is_whitespace());
+        if preceded_ok && keyword_ok && struct_decl_matches(after_kw, ty, name) {
+            return Some(at);
+        }
+        from = at + "localparam".len();
+    }
+    None
+}
+
+fn struct_decl_matches(after_kw: &str, ty: &str, name: &str) -> bool {
+    let s = after_kw.trim_start();
+    let s = skip_scopes(s);
+    let Some(s) = s.strip_prefix(ty) else {
+        return false;
+    };
+    if s.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return false;
+    }
+    let s = s.trim_start();
+    let Some(s) = s.strip_prefix(name) else {
+        return false;
+    };
+    !s.chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn skip_scopes(s: &str) -> &str {
+    let mut rest = s;
+    loop {
+        let Some(idx) = rest.find("::") else {
+            return rest;
+        };
+        let head = &rest[..idx];
+        if head.is_empty()
+            || head
+                .chars()
+                .any(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+        {
+            return rest;
+        }
+        rest = &rest[idx + 2..];
+    }
 }
 
 fn split_member_list(body: &str) -> Vec<(String, String)> {
@@ -432,13 +503,52 @@ fn eval_field(raw: &str) -> Result<i64, String> {
 }
 
 fn eval_field_with(raw: &str, syms: &Symbols) -> Result<i64, String> {
-    let s = raw.trim();
-    let s = s
-        .strip_prefix("unsigned'")
-        .or_else(|| s.strip_prefix("int'"))
-        .map_or(s, |inner| inner.trim().trim_start_matches('(').trim());
-    let s = s.strip_suffix(")").map_or(s, |inner| inner.trim());
+    // `unsigned'(AI_LIVE_MACS)`, `int'(…)`, and the live package's `bit'(0)`.
+    // A sized literal such as `1'b1` has no `'(` and is left for `parse_atom`.
+    let s = unwrap_sv_cast(raw.trim());
     eval_expr(s, syms)
+}
+
+/// Unwrap one `type'(expr)` cast when the parentheses cover the whole value.
+fn unwrap_sv_cast(s: &str) -> &str {
+    let Some(tick) = s.find("'(") else {
+        return s;
+    };
+    let head = &s[..tick];
+    let head_ok = !head.is_empty()
+        && head
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+        && head
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_');
+    if !head_ok {
+        return s;
+    }
+    let open = tick + 1;
+    let mut depth = 0i32;
+    let mut close = None;
+    for (i, c) in s[open..].char_indices() {
+        match c {
+            '(' | '{' | '[' => depth += 1,
+            ')' | '}' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return s;
+    };
+    if close + 1 != s.len() {
+        return s;
+    }
+    s[open + 1..close].trim()
 }
 
 fn eval_expr(s: &str, syms: &Symbols) -> Result<i64, String> {
@@ -553,6 +663,102 @@ mod tests {
             cfg.control_surface_resolved(),
             "REG_OFF_DOORBELL/REG_OFF_CPL are published; ingest regressed"
         );
+        assert_eq!(cfg.reg_offsets.get("reuse_epoch").copied(), Some(0x0F00));
+        assert_eq!(cfg.reg_offsets.get("va_turbo_level").copied(), Some(0x0F04));
+        assert_eq!(cfg.pmu_offsets.get("va_turbo_level").copied(), Some(0x0F08));
+        assert_eq!(
+            cfg.reg_offsets.get("va_turbo_recipe").copied(),
+            Some(0x0F0C)
+        );
+        assert_eq!(
+            cfg.pmu_offsets.get("va_turbo_recipe").copied(),
+            Some(0x0F10)
+        );
+        assert_eq!(
+            cfg.reg_offsets.get("va_turbo_window").copied(),
+            Some(0x0F14)
+        );
+        assert_eq!(
+            cfg.pmu_offsets.get("va_turbo_window").copied(),
+            Some(0x0F18)
+        );
+        // Optional command-queue extension v1: default off, but the constants and the
+        // register window are published so a provisioned part is fully discoverable.
+        assert_eq!(cfg.command_depth, 0, "live package keeps queued mode off");
+        assert_eq!(cfg.command_queue_version, Some(1));
+        assert_eq!(cfg.command_queue_flags, Some(7));
+        assert_eq!(cfg.cap_offsets.get("command_queue").copied(), Some(0x90));
+        assert_eq!(cfg.cap_value("command_queue"), Some(0));
+        assert_eq!(cfg.cap_offsets.get("accmode").copied(), Some(0x94));
+        assert_eq!(
+            cfg.cap_value("accmode"),
+            Some(1),
+            "live island grants accmode 01"
+        );
+        // Flat panel mapping: operand bank bytes are sourced from the tile geometry
+        // (integer strip: 1024 x 512 B and 512 x 512 B at 512 lanes).
+        assert_eq!(cfg.cap_offsets.get("bank_a_bytes").copied(), Some(0x98));
+        assert_eq!(cfg.cap_offsets.get("bank_b_bytes").copied(), Some(0x9C));
+        assert_eq!(cfg.cap_value("bank_a_bytes"), Some(1024 * 512));
+        assert_eq!(cfg.cap_value("bank_b_bytes"), Some(512 * 512));
+        for (name, off) in [
+            ("cmd_mode", 0x0F20u64),
+            ("cmd_submit", 0x0F34),
+            ("cmd_credits", 0x0F38),
+            ("cmd_receipt_ticket", 0x0F3C),
+            ("cmd_receipt_code", 0x0F40),
+        ] {
+            assert_eq!(cfg.reg_offsets.get(name).copied(), Some(off), "{name}");
+        }
+    }
+
+    fn ai_cfg_bit(text: &str, struct_name: &str, field: &str) -> i64 {
+        let cleaned = strip_sv_comments(text);
+        let body = extract_typed_struct_literal(&cleaned, "ai_cfg_t", struct_name)
+            .unwrap_or_else(|| panic!("{struct_name} not found"));
+        let raw = split_member_list(&body)
+            .into_iter()
+            .find(|(name, _)| name == field)
+            .unwrap_or_else(|| panic!("{field} missing from {struct_name}"))
+            .1;
+        eval_field(raw.trim()).unwrap_or_else(|e| panic!("{struct_name}.{field}: {e}"))
+    }
+
+    #[test]
+    fn a_qualified_ai_cfg_and_a_bit_cast_are_read() {
+        let text = r#"
+package p;
+  localparam config_pkg::ai_cfg_t ai_cfg = '{
+      VaTurboEn: bit'(0),
+      MatrixEn: bit'(1)
+  };
+  localparam ai_cfg_t AiCfgVaTurboTest = '{
+      VaTurboEn: 1'b1
+  };
+endpackage
+"#;
+        assert_eq!(ai_cfg_bit(text, "ai_cfg", "VaTurboEn"), 0);
+        assert_eq!(ai_cfg_bit(text, "ai_cfg", "MatrixEn"), 1);
+        assert_eq!(ai_cfg_bit(text, "AiCfgVaTurboTest", "VaTurboEn"), 1);
+    }
+
+    #[test]
+    fn live_ai_cfg_keeps_va_turbo_off_and_the_test_config_sets_it() {
+        let live = std::path::Path::new(r"E:/cva6/core/include/g6lc64_ai_config_pkg.sv");
+        let pkg = std::path::Path::new(r"E:/cva6/core/include/config_pkg.sv");
+        if !live.exists() || !pkg.exists() {
+            return;
+        }
+        let live_text = std::fs::read_to_string(live).unwrap();
+        let pkg_text = std::fs::read_to_string(pkg).unwrap();
+        assert_eq!(ai_cfg_bit(&live_text, "ai_cfg", "VaTurboEn"), 0);
+        assert_eq!(ai_cfg_bit(&pkg_text, "AiCfgVaTurboTest", "VaTurboEn"), 1);
+        assert_eq!(
+            ai_cfg_bit(&pkg_text, "AiCfgVaTurboTest", "PolicySubcodeEn"),
+            1
+        );
+        assert_eq!(ai_cfg_bit(&pkg_text, "AiCfgVaTurboTest", "IslandFpEn"), 1);
+        assert_eq!(ai_cfg_bit(&pkg_text, "AiCfgVaTurboTest", "MatrixEn"), 1);
     }
 
     #[test]

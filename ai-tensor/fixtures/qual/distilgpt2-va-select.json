@@ -1,0 +1,313 @@
+{
+  "backend": "software-reference-v2",
+  "budget": {
+    "ppl_rel": 0.1,
+    "top1": 0.9
+  },
+  "bytes_ratio_selected": 0.36903261868445236,
+  "caps": {
+    "acc_tile_k": 512,
+    "acc_tile_m": 1024,
+    "acc_tile_n": 512,
+    "accumulate": true,
+    "clusters": 1,
+    "compute_ref": true,
+    "dtype_mask": 251,
+    "macs_per_cycle": 512,
+    "noc_width": 64
+  },
+  "evidence": "virtual execution of the descriptor contract at live geometry; bytes are operand traffic, not timing",
+  "model": "distilgpt2",
+  "recipes": [
+    {
+      "calib": {
+        "ppl": 46.506406283046196,
+        "ppl_rel": -3.8146899895563635e-06,
+        "seconds": 47.39321303367615,
+        "top1": 1.0
+      },
+      "calib_within_budget": true,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "layers_replaced": 25,
+      "name": "fp32-accumulate",
+      "quant": "none",
+      "skip": [],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 0,
+      "weight_bytes_island": 324258816,
+      "weight_bytes_total": 324258816
+    },
+    {
+      "calib": {
+        "ppl": 213.68753426025282,
+        "ppl_rel": 3.5947802934507536,
+        "seconds": 53.32864594459534,
+        "top1": 0.4313725531101227
+      },
+      "calib_within_budget": false,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "layers_replaced": 25,
+      "name": "fp8-e5m2-g128",
+      "quant": "fp8-e5m2",
+      "skip": [],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 0,
+      "weight_bytes_island": 81064704,
+      "weight_bytes_total": 81064704
+    },
+    {
+      "calib": {
+        "ppl": 67.46219735993873,
+        "ppl_rel": 0.45059456114464114,
+        "seconds": 44.083635091781616,
+        "top1": 0.6000000238418579
+      },
+      "calib_within_budget": false,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "layers_replaced": 25,
+      "name": "fp8-e4m3-g128",
+      "quant": "fp8-e4m3",
+      "skip": [],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 0,
+      "weight_bytes_island": 81064704,
+      "weight_bytes_total": 81064704
+    },
+    {
+      "calib": {
+        "ppl": 47.32924451562279,
+        "ppl_rel": 0.017689126121130272,
+        "seconds": 20.27584433555603,
+        "top1": 0.9333333373069763
+      },
+      "calib_within_budget": true,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "layers_replaced": 24,
+      "name": "fp8-e4m3-g128-fp-lmhead",
+      "quant": "fp8-e4m3",
+      "skip": [
+        "lm_head"
+      ],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 154389504,
+      "weight_bytes_island": 42467328,
+      "weight_bytes_total": 196856832
+    },
+    {
+      "calib": {
+        "ppl": 48.56562488060094,
+        "ppl_rel": 0.044274187134994536,
+        "seconds": 17.675318956375122,
+        "top1": 0.8549019694328308
+      },
+      "calib_within_budget": false,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "layers_replaced": 25,
+      "name": "int8-g128",
+      "quant": "int8-dynamic",
+      "skip": [],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 0,
+      "weight_bytes_island": 81064704,
+      "weight_bytes_total": 81064704
+    },
+    {
+      "calib": {
+        "ppl": 46.44220681411824,
+        "ppl_rel": -0.0013842529813544724,
+        "seconds": 9.616198301315308,
+        "top1": 0.9725490212440491
+      },
+      "calib_within_budget": true,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "layers_replaced": 24,
+      "name": "int8-g128-fp-lmhead",
+      "quant": "int8-dynamic",
+      "skip": [
+        "lm_head"
+      ],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 154389504,
+      "weight_bytes_island": 42467328,
+      "weight_bytes_total": 196856832
+    },
+    {
+      "calib": {
+        "ppl": 46.62235356121906,
+        "ppl_rel": 0.0024893221730108994,
+        "seconds": 10.76016640663147,
+        "top1": 0.9686274528503418
+      },
+      "calib_within_budget": true,
+      "fallback_calls": 0,
+      "group_k": 64,
+      "layers_replaced": 24,
+      "name": "int8-g64-fp-lmhead",
+      "quant": "int8-dynamic",
+      "skip": [
+        "lm_head"
+      ],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 154389504,
+      "weight_bytes_island": 42467328,
+      "weight_bytes_total": 196856832
+    },
+    {
+      "calib": {
+        "ppl": 46.75479514990179,
+        "ppl_rel": 0.005337125175742807,
+        "seconds": 41.788554191589355,
+        "top1": 0.9647058844566345
+      },
+      "calib_within_budget": true,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "layers_replaced": 25,
+      "name": "bf16-all",
+      "quant": "bf16",
+      "skip": [],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 0,
+      "weight_bytes_island": 162129408,
+      "weight_bytes_total": 162129408
+    },
+    {
+      "calib": {
+        "ppl": 46.69428268825538,
+        "ppl_rel": 0.00403596613881696,
+        "seconds": 29.73624849319458,
+        "top1": 0.9450980424880981
+      },
+      "calib_within_budget": true,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "layers_replaced": 25,
+      "lm_head": {
+        "group_k": 128,
+        "quant": "bf16"
+      },
+      "name": "int8-g128-bf16-lmhead",
+      "quant": "int8-dynamic",
+      "skip": [
+        "lm_head"
+      ],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 0,
+      "weight_bytes_island": 119662080,
+      "weight_bytes_total": 119662080
+    },
+    {
+      "calib": {
+        "ppl": 46.46369279153209,
+        "ppl_rel": -0.0009222543629116009,
+        "seconds": 28.478351593017578,
+        "top1": 0.9725490212440491
+      },
+      "calib_within_budget": true,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "holdout": {
+        "ppl": 87.34733283039478,
+        "ppl_rel": -0.0032543518935019833,
+        "top1": 0.9744681119918823
+      },
+      "holdout_within_budget": true,
+      "layers_replaced": 25,
+      "lm_head": {
+        "group_k": 128,
+        "quant": "fp16"
+      },
+      "name": "int8-g128-fp16-lmhead",
+      "quant": "int8-dynamic",
+      "skip": [
+        "lm_head"
+      ],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 0,
+      "weight_bytes_island": 119662080,
+      "weight_bytes_total": 119662080
+    },
+    {
+      "calib": {
+        "ppl": 48.096789904642776,
+        "ppl_rel": 0.034193141856099674,
+        "seconds": 22.107256650924683,
+        "top1": 0.8627451062202454
+      },
+      "calib_within_budget": false,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "layers_replaced": 25,
+      "lm_head": {
+        "group_k": 32,
+        "quant": "int8-dynamic"
+      },
+      "name": "int8-g128-int8g32-lmhead",
+      "quant": "int8-dynamic",
+      "skip": [
+        "lm_head"
+      ],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 0,
+      "weight_bytes_island": 81064704,
+      "weight_bytes_total": 81064704
+    },
+    {
+      "calib": {
+        "ppl": 61.74847546308789,
+        "ppl_rel": 0.32773621629643857,
+        "seconds": 26.89356303215027,
+        "top1": 0.6274510025978088
+      },
+      "calib_within_budget": false,
+      "fallback_calls": 0,
+      "group_k": 128,
+      "layers_replaced": 25,
+      "lm_head": {
+        "group_k": 32,
+        "quant": "fp8-e4m3"
+      },
+      "name": "int8-g128-fp8e4m3g32-lmhead",
+      "quant": "int8-dynamic",
+      "skip": [
+        "lm_head"
+      ],
+      "weight_bytes_fp32_equiv": 324258816,
+      "weight_bytes_host_float": 0,
+      "weight_bytes_island": 81064704,
+      "weight_bytes_total": 81064704
+    }
+  ],
+  "recipes_list": [
+    "fp32-accumulate",
+    "fp8-e5m2-g128",
+    "fp8-e4m3-g128",
+    "fp8-e4m3-g128-fp-lmhead",
+    "int8-g128",
+    "int8-g128-fp-lmhead",
+    "int8-g64-fp-lmhead",
+    "bf16-all",
+    "int8-g128-bf16-lmhead",
+    "int8-g128-fp16-lmhead",
+    "int8-g128-int8g32-lmhead",
+    "int8-g128-fp8e4m3g32-lmhead"
+  ],
+  "reference": {
+    "calib_ppl": 46.50658369124545,
+    "holdout_ppl": 87.63251988742276,
+    "weight_bytes_fp32": 324258816
+  },
+  "revision": "2290a62682d06624634c1f46a6ad5be0f47f38aa",
+  "schema": "ai-tensor.va-select.v1",
+  "selected": "int8-g128-fp16-lmhead",
+  "tokens": {
+    "calib": 256,
+    "holdout": 236
+  }
+}

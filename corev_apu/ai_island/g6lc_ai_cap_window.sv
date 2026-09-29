@@ -15,7 +15,12 @@ module g6lc_ai_cap_window
   import g6lc_ai_island_cfg_pkg::*;
 #(
     parameter ai_island_cfg_t IslandCfg = AiIslandLatencyDefault,
-    parameter logic [15:0]    DtypeMask = AiIslandDtypeMask  // F3: package default
+    parameter logic [15:0]    DtypeMask = AiIslandDtypeMask,  // F3: package default
+    // CAP_OFF_ACCMODE bit 0 (published and enforced from one top-level value).
+    parameter bit             AccumulateEn = AiIslandAccmodeGrant[0],
+    // Operand bank bytes (CAP_OFF_BANK_{A,B}_BYTES); 0 = legacy k <= AccTileK box.
+    parameter logic [31:0]    BankABytes = 32'd0,
+    parameter logic [31:0]    BankBBytes = 32'd0
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
@@ -77,6 +82,12 @@ module g6lc_ai_cap_window
       // two 8-entry ranges, which a flat CAP_OFF_* case would have to spell out
       // as 16 separate arms.
       if (!occ_hit) unique case (addr_i[15:2])  // word index of CAP_OFF_*
+        CAP_OFF_COMMAND_QUEUE[15:2]:
+          rdata_n = IslandCfg.CommandDepth == 0 ? 32'd0 :
+              {16'(IslandCfg.CommandDepth), COMMAND_QUEUE_VERSION, COMMAND_QUEUE_FLAGS};
+        CAP_OFF_ACCMODE[15:2]: rdata_n = {31'h0, AccumulateEn};
+        CAP_OFF_BANK_A_BYTES[15:2]: rdata_n = BankABytes;
+        CAP_OFF_BANK_B_BYTES[15:2]: rdata_n = BankBBytes;
         CAP_OFF_VERSION[15:2]:
           rdata_n = {16'h0, AiIslandCapVersion};
         CAP_OFF_CLUSTERS[15:2]:

@@ -2,7 +2,7 @@
 # Copyright (c) 2026 Etienne Cimon
 #
 # F12 software tiling: 32x32x32 INT8 as 2x2 output tiles of 16x16x32.
-# A/B stay in the full 32-wide matrices (lda=ldb=32). C is packed ldc=n=16
+# A/B stay in the full 32-wide matrices (lda=ldb=32, B k-major). C is packed ldc=n=16
 # per tile — the sequencer has no ldc field, so the host owns scatter.
 # All-ones → each packed C element = 32.
 # Tickets 31..34; claim CPL between tiles (engine is single-outstanding).
@@ -23,6 +23,13 @@
   .section .text.init
   .globl _start
 _start:
+  # g6lc64_ai has two cores and both start here: only hart 0 drives the island;
+  # any other hart parks, otherwise every MMIO doorbell/claim is issued twice.
+  csrr t0, mhartid
+  beqz t0, 1f
+2: wfi
+  j    2b
+1:
   li   sp, 0x80008000
   la   t0, trap_vec
   csrw mtvec, t0
@@ -57,9 +64,10 @@ nj_loop:
   la   t0, mat_a
   slli t1, s1, 9
   add  t3, t0, t1
-  # ptr_b = mat_b + nj * TILE  (16)
+  # ptr_b = mat_b + nj * TILE * DIM (512): B is k-major (AI-X9), so an output
+  # column tile is TILE consecutive rows of DIM k-elements each.
   la   t0, mat_b
-  slli t1, s2, 4
+  slli t1, s2, 9
   add  t4, t0, t1
   # ptr_c = mat_c + (mi*2+nj) * TILE * TILE * 4  (1024)
   la   t0, mat_c
@@ -108,22 +116,32 @@ nj_loop:
   bnez t0, 2f
   addi t2, t2, -1
   bnez t2, 1b
-  j    fail
+  j    fail1
 2:
   lw   t0, AI_DSTATUS(s0)
   slli t0, t0, 48
   srli t0, t0, 48
   li   t1, ST_OK
-  bne  t0, t1, fail
+  bne  t0, t1, fail2
   lw   t0, AI_TICKET(s0)
   slli t1, s1, 1
   add  t1, t1, s2
   addi t1, t1, TICKET0
-  bne  t0, t1, fail
+  bne  t0, t1, fail3
 
   li   t0, 1
   sw   t0, AI_DONE(s0)
   fence
+  # One claim must empty the FIFO: a second completion for the same job
+  # (or an ignored pop) shows up here as a still-set sticky.
+  lw   t0, AI_DONE(s0)
+  andi t0, t0, 1
+  beqz t0, 3f
+  lw   t0, AI_TICKET(s0)
+  slli a0, t0, 8
+  ori  a0, a0, 13
+  j    fail_exit
+3:
 
   addi s2, s2, 1
   li   t0, 2
@@ -134,12 +152,12 @@ nj_loop:
   la   t0, mat_c
   li   t1, 1024
   li   t3, 32
-3:
+8:
   lw   t2, 0(t0)
-  bne  t2, t3, fail
+  bne  t2, t3, fail4
   addi t0, t0, 4
   addi t1, t1, -1
-  bnez t1, 3b
+  bnez t1, 8b
 
 pass:
   li   a0, 1
@@ -147,14 +165,31 @@ pass:
   sw   a0, 0(t0)
 4: j 4b
 
-fail:
+fail1:
   li   a0, 3
+  j    fail_exit
+fail2:
+  li   a0, 5
+  j    fail_exit
+fail3:
+  # Completion identity: a0 = (expected << 16) | (observed << 8) | 7 (low bytes).
+  andi t0, t0, 0xFF
+  slli a0, t0, 8
+  andi t1, t1, 0xFF
+  slli t1, t1, 16
+  or   a0, a0, t1
+  ori  a0, a0, 7
+  j    fail_exit
+fail4:
+  li   a0, 9
+  j    fail_exit
+fail_exit:
   la   t0, tohost
   sw   a0, 0(t0)
 5: j 5b
 
 trap_vec:
-  li   a0, 5
+  li   a0, 11
   la   t0, tohost
   sw   a0, 0(t0)
 6: j 6b

@@ -4,6 +4,7 @@
 
 pub mod format_trace;
 pub mod numfmt;
+mod reuse;
 mod sim;
 mod mmio;
 mod profile;
@@ -23,9 +24,11 @@ pub use cosim::{
 };
 pub use mmio::{probe_cap_regs, read_pmu, seed_cap_island_p3, MappedWindow, MmioBus, MmioDevice, SoftIsland};
 pub use stream::{
-    desc_for_tile, plan_gemm_s8_stream, run_gemm_s8_stream, run_gemm_s8_stream_ex,
-    run_gemm_s8_stream_with_policy, run_gemm_stream_plan, run_gemm_stream_plan_ex,
-    run_gemm_stream_plan_with_policy, GemmStreamPlan, Queue, StreamJob,
+    desc_for_tile, execute_va_turbo_test_s8, execute_va_turbo_test_s8_at, plan_gemm_s8_stream,
+    run_gemm_s8_stream,
+    run_gemm_s8_stream_ex, run_gemm_s8_stream_with_policy, run_gemm_stream_plan,
+    run_gemm_stream_plan_ex, run_gemm_stream_plan_with_policy, GemmStreamPlan, Queue, StreamJob,
+    VaTurboTestRun,
 };
 pub use policy::{recommend_policy, soak_multi_queue, wait_with_policy, WaitPolicy};
 pub use irq::{
@@ -83,6 +86,8 @@ pub struct Caps {
     /// Float codes multiply only when this is set. A mask bit is not a datapath.
     /// The software reference sets it. The live sim pin does not.
     pub fp_datapath: bool,
+    /// `CAP_ACCMODE` bit 0: `flags.accmode == 01` (seed from C) is executable.
+    pub accumulate: bool,
 }
 
 impl Default for Caps {
@@ -107,6 +112,7 @@ impl Caps {
             queues: u32::from(c.queues.max(1)),
             queue_depth: u32::from(c.queue_depth.max(1)),
             fp_datapath: false,
+            accumulate: false,
         }
     }
 
@@ -114,6 +120,7 @@ impl Caps {
         let mut caps = Self::default();
         caps.dtype_mask = numfmt::SOFTWARE_DTYPE_MASK;
         caps.fp_datapath = true;
+        caps.accumulate = true;
         caps
     }
 
@@ -166,6 +173,9 @@ pub trait Device: Send {
         self.submit(qid, ticket, desc)
     }
     fn poll(&mut self, ticket: u32) -> Result<Option<Completion>, RtError>;
+    fn poll_completion(&mut self, _ticket: u32, _claim: bool) -> Result<Option<Completion>, RtError> {
+        Err(RtError::Msg("backend lacks explicit completion-claim support".into()))
+    }
     /// Sticky last-job PMU (zeros until a GEMM completes).
     fn pmu(&self) -> PmuSnapshot {
         PmuSnapshot::default()
@@ -176,6 +186,47 @@ pub trait Device: Send {
     }
     /// Clear DONE sticky / IRQ source (PLIC claim discipline). Default no-op.
     fn claim_done(&mut self) -> Result<(), RtError> {
+        Ok(())
+    }
+    /// Write `REG_REUSE_EPOCH` (`0x0F00`). Operand reuse compares this value
+    /// only when [`Device::set_reuse_en`] is on. Default devices leave reuse
+    /// off, so the epoch does not change their jobs.
+    fn set_reuse_epoch(&mut self, _epoch: u32) -> Result<(), RtError> {
+        Ok(())
+    }
+    /// Exact operand reuse. Off by default: flags 15 and 23 do not change
+    /// the product. When on, a hit multiplies the resident bytes.
+    fn set_reuse_en(&mut self, _on: bool) -> Result<(), RtError> {
+        Ok(())
+    }
+    /// Whether exact reuse is enabled. A device that ignores the switch
+    /// reports false.
+    fn reuse_enabled(&self) -> bool {
+        false
+    }
+    /// Whether the last GEMM read A. A hit is false. Devices that do not
+    /// track residency report a read.
+    fn reuse_read_a(&self) -> bool {
+        true
+    }
+    /// Whether the last GEMM read B. A hit is false. Devices that do not
+    /// track residency report a read.
+    fn reuse_read_b(&self) -> bool {
+        true
+    }
+    /// Write `REG_VA_TURBO_LEVEL` (`0x0F04`). Only the low 4 bits are stored.
+    /// The applied level stays 0 and the dot does not read the register.
+    fn set_va_turbo_level(&mut self, _level: u32) -> Result<(), RtError> {
+        Ok(())
+    }
+    /// Write `REG_VA_TURBO_RECIPE` (`0x0F0C`). Only the low 5 bits are stored.
+    /// The applied id stays 0 and the dot does not read the register.
+    fn set_va_turbo_recipe(&mut self, _id: u32) -> Result<(), RtError> {
+        Ok(())
+    }
+    /// Write `REG_VA_TURBO_WINDOW` (`0x0F14`). Epoch, level, and recipe
+    /// writes clear it. The dot does not read it.
+    fn set_va_turbo_window(&mut self, _valid: bool) -> Result<(), RtError> {
         Ok(())
     }
     fn wait(&mut self, ticket: u32) -> Result<Completion, RtError> {
@@ -327,8 +378,23 @@ pub fn run_gemm_s8_auto<D: Device>(
     b: &[i8],
     ticket: u32,
 ) -> Result<(Vec<i32>, Completion, u32), RtError> {
-    // Always use stream planner: single-tile plans collapse to one job with
-    // correct strides; multi-tile reuses full A/B without host gather.
+    // The directed tile uses the named-panel schedule only when an adjacent
+    // tile can skip. A K-split and every other capability record stay on the
+    // ordinary stream, which does not enable reuse.
+    if stream::directed_tiles_can_skip(&dev.caps(), m, n, k) {
+        let run = stream::execute_va_turbo_test_s8_at(dev, m, n, k, a, b, ticket)?;
+        let ntiles = run.flags.len() as u32;
+        let last = ticket.wrapping_add(ntiles.saturating_sub(1));
+        return Ok((
+            run.c,
+            Completion {
+                ticket: last,
+                status: ST_OK,
+            },
+            ntiles,
+        ));
+    }
+    // Single-tile plans collapse to one job. Multi-tile keeps full A/B.
     run_gemm_s8_stream(dev, m, n, k, a, b, ticket)
 }
 
@@ -403,7 +469,7 @@ mod auto_tile_tests {
         rejects_before_c_write(&mut MmioDevice::software_reference_v2());
     }
 
-    fn check_native_descriptor_modes(dev: &mut dyn Device, mask: u16) {
+    fn check_native_descriptor_modes(dev: &mut dyn Device, mask: u16, accumulate: bool) {
         use ai_tensor_abi::{NumFmt, ST_BAD_FMT};
         dev.enable(true);
         dev.program_region(0, Region { base: 0x1000, limit: u64::MAX, read: true, write: true }).unwrap();
@@ -417,7 +483,10 @@ mod auto_tile_tests {
             (1 << 12, accepted),
             (NumFmt::Int4.into_flags(0), accepted),
             (1 << 8, ST_BAD_FMT),
-            (1 << 10, ST_BAD_FMT),
+            // accmode 01 executes only on an engine that grants it (CAP_ACCMODE), seeded
+            // from the poisoned C; 10 is reserved everywhere.
+            (NumFmt::Int4.into_flags(1 << 10), if accumulate { accepted } else { ST_BAD_FMT }),
+            (2 << 10, ST_BAD_FMT),
             (2 << 12, ST_BAD_FMT),
             (1 << 14, ST_BAD_FMT),
             (NumFmt::Sp24.into_flags(0), ST_BAD_FMT),
@@ -433,8 +502,10 @@ mod auto_tile_tests {
             let mut result = [0; 16];
             dev.read_mem(c, &mut result).unwrap();
             if status == ST_OK {
-                let expected: Vec<u8> = [2i32, -6, -6, 2].iter().flat_map(|v| v.to_le_bytes()).collect();
-                assert_eq!(result.as_slice(), expected.as_slice());
+                let seed = if flags & (1 << 10) != 0 { 0xa5a5a5a5u32 as i32 } else { 0 };
+                let expected: Vec<u8> = [2i32, -6, -6, 2].iter()
+                    .flat_map(|v| seed.wrapping_add(*v).to_le_bytes()).collect();
+                assert_eq!(result.as_slice(), expected.as_slice(), "flags={flags:x}");
             } else {
                 assert_eq!(result, [0xa5; 16]);
             }
@@ -446,14 +517,17 @@ mod auto_tile_tests {
         for mask in [1u16, 2, 3, 0xfb] {
             let mut caps = Caps::software_reference_v2();
             caps.dtype_mask = mask;
-            check_native_descriptor_modes(&mut SimDevice::with_caps(caps), mask);
+            check_native_descriptor_modes(&mut SimDevice::with_caps(caps), mask, true);
             let mut cap_regs = CapRegs::island_p3_sim_default();
             cap_regs.dtype_mask = mask;
             let mut mmio = MmioDevice::new();
             *mmio.soft_island_mut() = SoftIsland::with_cap(cap_regs, 64);
             mmio.soft_island_mut().set_fp_datapath(true);
             mmio.probe_caps();
-            check_native_descriptor_modes(&mut mmio, mask);
+            check_native_descriptor_modes(&mut mmio, mask, false);
+            mmio.soft_island_mut().set_accumulate(true);
+            mmio.probe_caps();
+            check_native_descriptor_modes(&mut mmio, mask, true);
         }
     }
 
@@ -494,5 +568,55 @@ mod auto_tile_tests {
         assert!(comp.is_ok());
         assert_eq!(ntiles, 8); // 2x2x2
         assert!(c.iter().all(|&x| x == 4), "{c:?}");
+    }
+
+    #[test]
+    fn auto_on_the_directed_tile_reuses_only_when_a_tile_skips() {
+        use ai_tensor_abi::VA_TURBO_TEST_MACS;
+        let a = vec![1i8; 16 * 8];
+        let b = vec![1i8; 8 * 8];
+        let mut live = SimDevice::new();
+        let (c, comp, ntiles) = run_gemm_s8_auto(&mut live, 16, 8, 8, &a, &b, 3).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(comp.ticket, 3);
+        assert_eq!(ntiles, 1);
+        assert!(!live.reuse_enabled());
+        assert_eq!(c, vec![8i32; 16 * 8]);
+
+        let mut caps = Caps::default();
+        caps.macs_per_cycle = VA_TURBO_TEST_MACS;
+        caps.acc_tile = AccTile::VA_TURBO_TEST;
+        let mut dev = SimDevice::with_caps(caps);
+        let (c, comp, ntiles) = run_gemm_s8_auto(&mut dev, 16, 8, 8, &a, &b, 5).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(comp.ticket, 6);
+        assert_eq!(ntiles, 2);
+        assert!(dev.reuse_enabled());
+        assert!(!dev.reuse_read_b());
+        assert_eq!(c, vec![8i32; 16 * 8]);
+
+        let mut dev = SimDevice::with_caps(caps);
+        let a = vec![1i8; 8 * 16];
+        let b = vec![1i8; 16 * 8];
+        let (c, comp, ntiles) = run_gemm_s8_auto(&mut dev, 8, 8, 16, &a, &b, 9).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(comp.ticket, 9);
+        assert_eq!(ntiles, 1);
+        assert!(!dev.reuse_enabled());
+        assert!(dev.reuse_read_a());
+        assert!(dev.reuse_read_b());
+        assert_eq!(c, vec![16i32; 8 * 8]);
+
+        let mut dev = SimDevice::with_caps(caps);
+        let a = vec![1i8; 8 * 8];
+        let b = vec![1i8; 8 * 16];
+        let (c, comp, ntiles) = run_gemm_s8_auto(&mut dev, 8, 16, 8, &a, &b, 4).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(comp.ticket, 5);
+        assert_eq!(ntiles, 2);
+        assert!(dev.reuse_enabled());
+        assert!(!dev.reuse_read_a());
+        assert!(dev.reuse_read_b());
+        assert_eq!(c, vec![8i32; 8 * 16]);
     }
 }

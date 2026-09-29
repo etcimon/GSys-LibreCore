@@ -62,7 +62,7 @@ static void wait_done(uint16_t &status, uint32_t &ticket) {
 }
 
 static void program_region(int q, uint64_t base, uint64_t limit, uint32_t perm) {
-  uint16_t b = (uint16_t)(0x0120 + q * 0x20);
+  uint16_t b = (uint16_t)(q == 0 ? 0x0120 : 0x01A0 + (q - 1) * 0x20);
   reg_write(b + 0x0, (uint32_t)base);
   reg_write(b + 0x4, (uint32_t)(base >> 32));
   reg_write(b + 0x8, (uint32_t)limit);
@@ -151,6 +151,7 @@ int main(int argc, char **argv) {
   // Cap version
   uint32_t r = reg_read(0x0000);
   expect("cap version", (r & 0xFFFF) == 1);
+  expect("command queue default off", reg_read(0x0090) == 0);
 
   r = reg_read(0x0004);
   expect("cap clusters non-zero", r != 0);
@@ -256,6 +257,52 @@ int main(int argc, char **argv) {
   reg_write(0x010C, 1);
   sticky = reg_read(0x010C);
   expect("CPL FIFO empty after 3 claims", (sticky & 1) == 0);
+
+  program_region(1, 0x80010000ull, 0x80014000ull, 0x3);
+  make_ok_desc(desc);
+  load_desc_words(desc);
+  reg_write(0x0108, (30u << 8) | 1u);
+  wait_done(st, ticket);
+  expect("queue one independent region", st == ST_OK && ticket == 30);
+  const unsigned invalid_qids[] = {2u, 255u};
+  for (unsigned qid : invalid_qids) {
+    load_desc_words(desc);
+    reg_write(0x0108, (31u << 8) | qid);
+    wait_done(st, ticket);
+    expect("invalid full-width doorbell qid", st == 5 && ticket == 31);
+    dut->sb_qid_i = qid;
+    dut->sb_ticket_i = 32;
+    dut->sb_desc_ptr_i = 0;
+    dut->sb_enq_valid_i = 1;
+    tick();
+    dut->sb_enq_valid_i = 0;
+    wait_done(st, ticket);
+    expect("invalid full-width sideband qid", st == 5 && ticket == 32);
+  }
+  make_ok_desc(desc);
+  load_desc_words(desc);
+  for (unsigned t = 100; t < 116; ++t) {
+    reg_write(0x0108, t << 8);
+    for (int i = 0; i < 30; ++i) tick();
+  }
+  expect("admission full head", reg_read(0x0110) == 100);
+  dut->sb_qid_i = 0;
+  dut->sb_ticket_i = 116;
+  dut->sb_desc_ptr_i = 0;
+  dut->sb_enq_valid_i = 1;
+  tick();
+  dut->sb_enq_valid_i = 0;
+  for (int i = 0; i < 30; ++i) tick();
+  desc[0] = 99;
+  load_desc_words(desc);
+  for (unsigned t = 100; t < 116; ++t) {
+    wait_done(st, ticket);
+    expect("admission old completion", ticket == t && st == ST_OK);
+  }
+  wait_done(st, ticket);
+  expect("admission held sideband payload", ticket == 116 && st == ST_OK);
+  expect("admission final empty", (reg_read(0x010C) & 1) == 0);
+  expect("oracle negative control", Verilated::commandArgsPlusMatch("oracle_negative")[0] == '\0');
 
   if (errors == 0) {
     std::printf("*** SUCCESS *** ai-island P3 spine + CPL FIFO (%llu cycles)\n",

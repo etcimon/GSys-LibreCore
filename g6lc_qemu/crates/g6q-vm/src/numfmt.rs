@@ -95,7 +95,9 @@ impl NumFmt {
     /// passes `false` and refuses them. Structured 2:4 is refused either way.
     pub fn status_for_mask(self, mask: u32, fp_datapath: bool) -> u16 {
         let float = self.is_float();
-        if self == NumFmt::Sp24 || (mask & (1u32 << self.grant_bit())) == 0 || (float && !fp_datapath)
+        if self == NumFmt::Sp24
+            || (mask & (1u32 << self.grant_bit())) == 0
+            || (float && !fp_datapath)
         {
             8
         } else {

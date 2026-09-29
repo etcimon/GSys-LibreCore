@@ -7,10 +7,40 @@ from __future__ import annotations
 import struct
 from pathlib import Path
 
+CAP_COMMAND_QUEUE = 0x0090
+# Accumulate-mode grant (RO): bit 0 = flags.accmode 01 seeds each output from C.
+CAP_ACCMODE = 0x0094
+CAP_ACCMODE_ACCUMULATE = 1
+# Operand bank capacity in bytes (RO). The K box is a byte capacity per panel:
+# n * pitch_bytes(k) <= CAP_BANK_B_BYTES and m * pitch_bytes(k) <= CAP_BANK_A_BYTES,
+# pitch_bytes(k) = next_pow2(ceil(row_bytes(k) / macs_per_cycle)) * macs_per_cycle.
+# A part publishing 0 keeps the legacy k <= acc_tile_k box.
+CAP_BANK_A_BYTES = 0x0098
+CAP_BANK_B_BYTES = 0x009C
+FLAG_ACCMODE_SHIFT = 10
+ACCMODE_ACCUMULATE = 1
+COMMAND_QUEUE_VERSION = 1
+COMMAND_QUEUE_FLAGS = 7
+CMD_MODE = 0x0F20
+CMD_PTR_LO = 0x0F24
+CMD_PTR_HI = 0x0F28
+CMD_TICKET = 0x0F2C
+CMD_QID = 0x0F30
+CMD_SUBMIT = 0x0F34
+CMD_CREDITS = 0x0F38
+CMD_RECEIPT_TICKET = 0x0F3C
+CMD_RECEIPT_CODE = 0x0F40
+CMD_ACCEPTED_COUNT = 0x0F44
+CMD_REJECTED_COUNT = 0x0F48
+CMD_ACCEPTED = 0
+CMD_FULL = 1
+CMD_DISABLED = 2
+
 DESC_BYTES = 64
 CONTRACT_VERSION = 2
 OP_GEMM = 1
 ST_OK = 0
+ST_ERR = 1
 ST_BAD_PTR = 4
 ST_BAD_QID = 5
 ST_DISABLED = 6
@@ -145,6 +175,15 @@ MMIO_DOORBELL = 0x0108
 MMIO_DONE = 0x010C
 MMIO_DESC = 0x0140
 MMIO_PMU_R = 0x0180
+MMIO_QUEUE0 = 0x0120
+MMIO_QUEUE_TAIL = 0x01A0
+DOORBELL_TICKET_MAX = 0x007FFFFF
+
+
+def queue_region(qid: int) -> int:
+    if type(qid) is not int or not 0 <= qid <= 0xFF:
+        raise ValueError("queue id must be an unsigned byte")
+    return MMIO_QUEUE0 if qid == 0 else MMIO_QUEUE_TAIL + (qid - 1) * 0x20
 
 CTL_ENABLE = 1 << 0
 CTL_WR_CPL_EN = 1 << 1
@@ -195,6 +234,13 @@ def pack_desc64(
 
 def completion_make(ticket: int, status: int = ST_OK) -> int:
     return (int(status) << 32) | (int(ticket) & 0xFFFFFFFF)
+
+
+def completion_post(ticket: int, gemm_status: int, bus_err: bool = False):
+    """DMA word keeps the GEMM status. A failed completion beat sets the FIFO to ST_ERR."""
+    word = completion_make(ticket, gemm_status)
+    fifo = ST_ERR if bus_err else int(gemm_status) & 0xFFFF
+    return word, fifo
 
 
 def verify_header_present() -> bool:

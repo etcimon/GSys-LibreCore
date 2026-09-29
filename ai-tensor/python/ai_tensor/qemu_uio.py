@@ -32,11 +32,16 @@ real path uses ``mmap`` and a blocking ``read`` on ``/dev/uioN``.
 
 from __future__ import annotations
 
+import math
 import os
 import struct
+import time
+from threading import Lock
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple
 
+from . import c_abi as abi
+from .c_abi import DOORBELL_TICKET_MAX, FLAG_IRQ, queue_region
 from .device import ST_OK, pack_gemm_desc
 
 # --- island MMIO map (byte offsets; mirrors include/ai_tensor.h) --------------
@@ -141,6 +146,11 @@ class IslandCaps:
     dram_gbps: int
     dram_gbps_measured_x1000: int
     dtype_mask: int
+    # CAP_ACCMODE bit 0: flags.accmode 01 (seed the reduction from C) is executable.
+    accumulate: bool = False
+    # CAP_BANK_{A,B}_BYTES: operand bank capacity (flat panel mapping); 0 = legacy K box.
+    bank_a_bytes: int = 0
+    bank_b_bytes: int = 0
 
     def as_dict(self) -> Dict[str, int]:
         return dict(self.__dict__)
@@ -174,7 +184,128 @@ def read_caps(win: MmioWindow) -> IslandCaps:
         dram_gbps=dram_word & 0xFFFF,
         dram_gbps_measured_x1000=(dram_word >> 16) & 0xFFFF,
         dtype_mask=win.read32(CAP_DTYPE_MASK) & 0xFFFF,
+        accumulate=bool(win.read32(abi.CAP_ACCMODE) & abi.CAP_ACCMODE_ACCUMULATE),
+        bank_a_bytes=win.read32(abi.CAP_BANK_A_BYTES),
+        bank_b_bytes=win.read32(abi.CAP_BANK_B_BYTES),
     )
+
+
+class QueuedMmioSession:
+    def __init__(self, window: MmioWindow):
+        capability = window.read32(abi.CAP_COMMAND_QUEUE)
+        self.depth = capability >> 16
+        if not self.depth or (capability >> 8) & 0xFF != abi.COMMAND_QUEUE_VERSION or capability & 7 != 7:
+            raise NotImplementedError("command queue v1 is not advertised")
+        self.window = window
+        self.queues = min(window.read32(CAP_QUEUES) & 0xFFFF, 256)
+        self._lock = Lock()
+        self._pending: Dict[int, object] = {}
+        self._uncertain: Optional[Tuple[int, int]] = None
+        self._last_ticket = -1
+        self._enabled = False
+
+    @property
+    def pending_tickets(self) -> Tuple[int, ...]:
+        with self._lock:
+            return tuple(self._pending)
+
+    @property
+    def credits(self) -> int:
+        with self._lock:
+            return self.window.read32(abi.CMD_CREDITS)
+
+    def enable(self) -> None:
+        with self._lock:
+            if self._enabled or self._pending or self.window.read32(abi.CMD_MODE):
+                raise RuntimeError("command queue already owned or not drained")
+            if not self.window.read32(MMIO_CTL) & CTL_ENABLE:
+                raise RuntimeError("enable CTL and program protection regions before queued mode")
+            self.window.write32(abi.CMD_MODE, 1)
+            if self.window.read32(abi.CMD_MODE) != 1:
+                raise RuntimeError("queued mode was not enabled")
+            self._enabled = True
+
+    def disable(self) -> None:
+        with self._lock:
+            if self._pending:
+                raise RuntimeError("pending commands retain their buffer leases")
+            if self._enabled:
+                self.window.write32(abi.CMD_MODE, 0)
+                if self.window.read32(abi.CMD_MODE) != 0:
+                    raise RuntimeError("queued mode did not drain")
+                self._enabled = False
+
+    def _resolve_locked(self) -> bool:
+        if self._uncertain is None:
+            raise RuntimeError("no unresolved submission")
+        ticket, previous = self._uncertain
+        if self.window.read32(abi.CMD_RECEIPT_TICKET) != ticket:
+            raise RuntimeError("ambiguous command receipt; buffers remain owned")
+        code = self.window.read32(abi.CMD_RECEIPT_CODE)
+        if code not in (abi.CMD_ACCEPTED, abi.CMD_FULL, abi.CMD_DISABLED):
+            raise RuntimeError("unknown command receipt; buffers remain owned")
+        self._uncertain = None
+        if code == abi.CMD_ACCEPTED:
+            return True
+        del self._pending[ticket]
+        self._last_ticket = previous
+        if code == abi.CMD_DISABLED:
+            self._enabled = False
+            raise RuntimeError("command queue is disabled")
+        return False
+
+    def resolve_submission(self) -> bool:
+        with self._lock:
+            return self._resolve_locked()
+
+    def submit(self, descriptor_pointer: int, *, ticket: int, lease: object, qid: int = 0) -> bool:
+        with self._lock:
+            if not self._enabled or self._uncertain is not None:
+                raise RuntimeError("queue disabled or a prior submission is unresolved")
+            if type(ticket) is not int or not self._last_ticket < ticket <= 0xFFFFFFFF:
+                raise ValueError("tickets must increase without wrapping within a session")
+            if type(qid) is not int or not 0 <= qid < self.queues:
+                raise ValueError("qid is not advertised")
+            if type(descriptor_pointer) is not int or not 0 < descriptor_pointer <= (1 << 64) - 64 or descriptor_pointer & 7:
+                raise ValueError("descriptor pointer must name an aligned, representable 64-byte span")
+            if lease is None:
+                raise ValueError("a buffer lease is required")
+            self.window.write32(abi.CMD_PTR_LO, descriptor_pointer & 0xFFFFFFFF)
+            self.window.write32(abi.CMD_PTR_HI, descriptor_pointer >> 32)
+            self.window.write32(abi.CMD_TICKET, ticket)
+            self.window.write32(abi.CMD_QID, qid)
+            self._pending[ticket] = lease
+            self._uncertain = (ticket, self._last_ticket)
+            self._last_ticket = ticket
+            self.window.write32(abi.CMD_SUBMIT, 1)
+            return self._resolve_locked()
+
+    def poll(self) -> Optional[Tuple[int, int]]:
+        with self._lock:
+            if not self.window.read32(MMIO_DONE) & 1:
+                return None
+            ticket = self.window.read32(MMIO_TICKET)
+            if ticket not in self._pending:
+                return None
+            status = self.window.read32(MMIO_DSTATUS) & 0xFFFF
+            self.window.write32(MMIO_DONE, 1)
+            del self._pending[ticket]
+            if self._uncertain is not None and self._uncertain[0] == ticket:
+                self._uncertain = None
+            return ticket, status
+
+    def wait(self, timeout: float = 5.0) -> Tuple[int, int]:
+        if not math.isfinite(timeout) or timeout < 0:
+            raise ValueError("timeout must be finite and nonnegative")
+        deadline = time.monotonic() + timeout
+        while True:
+            completed = self.poll()
+            if completed is not None:
+                return completed
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("queued completion timed out; buffer leases remain owned")
+            time.sleep(min(0.001, remaining))
 
 
 class QemuUioSession:
@@ -200,6 +331,7 @@ class QemuUioSession:
         self.timeout = timeout
         self.caps = read_caps(window)
         self._ticket = 0
+        self._pending_ticket: Optional[int] = None
         # Enable the island and the completion-word write. `wr_cpl_en` matters because
         # the completion word is the only in-band signal that names *which* ticket
         # finished; the sticky DONE bit alone cannot say that.
@@ -211,12 +343,12 @@ class QemuUioSession:
 
         The permission write is what commits the region, so it is written last.
         """
-        if qid >= max(self.caps.queues, 1):
-            raise ValueError(
-                f"queue {qid} does not exist; the capability window reports "
-                f"{self.caps.queues}"
-            )
-        off = MMIO_QUEUE0 + qid * QUEUE_STRIDE
+        self._check_qid(qid)
+        if self._pending_ticket is not None:
+            raise RuntimeError("a pending submission owns the DMA region")
+        if not 0 <= base < limit <= (1 << 64) - 1 or perm not in (0, 1, 2, 3):
+            raise ValueError("invalid DMA region or permissions")
+        off = queue_region(qid)
         self.window.write32(off + QUEUE_BASE_LO, base & 0xFFFFFFFF)
         self.window.write32(off + QUEUE_BASE_HI, (base >> 32) & 0xFFFFFFFF)
         self.window.write32(off + QUEUE_LIMIT_LO, limit & 0xFFFFFFFF)
@@ -231,16 +363,32 @@ class QemuUioSession:
             (word,) = struct.unpack_from("<I", desc, i)
             self.window.write32(MMIO_DESC + i, word)
 
+    def _check_qid(self, qid: int) -> None:
+        if type(qid) is not int or not 0 <= qid < min(self.caps.queues, 256):
+            raise ValueError(f"queue {qid} does not exist; CAP reports {self.caps.queues}")
+
+    def _check_submission_slot(self) -> None:
+        if self._pending_ticket is not None:
+            raise RuntimeError("a submission is pending; wait before reusing its buffers")
+        if self._ticket >= DOORBELL_TICKET_MAX:
+            raise ValueError("doorbell ticket space exhausted; drain and reopen the session")
+
     def submit(self, desc: bytes, qid: int = 0) -> int:
         """Latch a descriptor and ring the doorbell. Returns the ticket."""
         from .c_abi import CONTRACT_VERSION
+        self._check_qid(qid)
+        self._check_submission_slot()
         if len(desc) != 64 or struct.unpack_from('<H', desc)[0] != CONTRACT_VERSION:
             raise ValueError('Desc64 v2 required; v1 B layout is not reinterpreted')
         from .numfmt import check_format
         check_format((struct.unpack_from('<I', desc, 4)[0] >> 20) & 7, self.caps.dtype_mask)
+        if self.irq is not None:
+            desc = bytearray(desc)
+            struct.pack_into('<I', desc, 4, struct.unpack_from('<I', desc, 4)[0] | FLAG_IRQ)
         self._latch(desc)
         self._ticket += 1
         ticket = self._ticket
+        self._pending_ticket = ticket
         if self.irq is not None:
             self.irq.enable()
         # Doorbell: qid in the low byte, ticket above it.
@@ -255,18 +403,29 @@ class QemuUioSession:
         completed. Claiming after completing lets a level-set source re-arm immediately.
         """
         budget = self.timeout if timeout is None else timeout
-        if self.irq is not None and self.irq.wait(budget):
-            status = (self.window.read32(MMIO_STATUS) >> 16) & 0xFFFF
-            self.window.write32(MMIO_DONE, 1)
-            return status
-        # Poll the status register's busy flag.
-        deadline_spins = 1_000_000
-        for _ in range(deadline_spins):
+        if not math.isfinite(budget) or budget < 0:
+            raise ValueError("timeout must be finite and nonnegative")
+        if self._pending_ticket is None:
+            raise RuntimeError("no submission is pending")
+        deadline = time.monotonic() + budget
+        while True:
+            if self.window.read32(MMIO_DONE) & 1:
+                if self.window.read32(MMIO_TICKET) == self._pending_ticket:
+                    status = self.window.read32(MMIO_DSTATUS) & 0xFFFF
+                    self.window.write32(MMIO_DONE, 1)
+                    self._pending_ticket = None
+                    if self.irq is not None:
+                        self.irq.enable()
+                    return status
+            # Poll the status register's busy flag.
             st = self.window.read32(MMIO_STATUS)
-            if st & 1 == 0:
-                self.window.write32(MMIO_DONE, 1)
-                return (st >> 16) & 0xFFFF
-        raise TimeoutError("island did not complete the job")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"island did not complete ticket {self._pending_ticket}")
+            if self.irq is not None:
+                self.irq.wait(min(remaining, 0.01))
+            else:
+                time.sleep(min(remaining, 0.001 if st & 1 else 0.0001))
 
     def pmu(self) -> Dict[str, int]:
         """Sticky counters from the last completed job."""
@@ -286,6 +445,8 @@ class QemuUioSession:
         a: Sequence[int],
         b: Sequence[int],
         ticket: int = 1,
+        *,
+        flags: int = 0,
     ) -> Tuple[List[int], int, int]:
         """Run one INT8 GEMM whose shape already fits the accumulator tile.
 
@@ -296,31 +457,44 @@ class QemuUioSession:
             raise ValueError('invalid shape or short S8 operands')
         a_bytes = bytes(int(x) & 255 for x in a)
         b_bytes = bytes(int(b[t * n + j]) & 255 for j in range(n) for t in range(k))
-        raw, issued, status = self._gemm_native_result(a_bytes, b_bytes, m, n, k, 0, ticket=ticket)
+        raw, issued, status = self._gemm_native_result(
+            a_bytes, b_bytes, m, n, k, 0, ticket=ticket, flags=flags
+        )
         return list(struct.unpack('<' + 'i' * (m * n), raw)), issued, status
 
     def gemm_native(self, a: bytes, b: bytes, m: int, n: int, k: int, numfmt: int,
-                    lda=None, ldb=None, *, ticket: int = 1) -> bytes:
-        raw, _, status = self._gemm_native_result(a, b, m, n, k, numfmt, lda, ldb, ticket=ticket)
+                    lda=None, ldb=None, *, ticket: int = 1, c_init=None) -> bytes:
+        """``c_init`` requests accmode 01: the seed is placed in the C window before the
+        doorbell and the island continues the ordered reduction from it. Refused
+        unless the CAP window grants it."""
+        flags = 0
+        if c_init is not None:
+            if not self.caps.accumulate:
+                raise ValueError('ST_BAD_FMT: accumulate mode is not granted by this island')
+            flags = abi.ACCMODE_ACCUMULATE << abi.FLAG_ACCMODE_SHIFT
+        raw, _, status = self._gemm_native_result(a, b, m, n, k, numfmt, lda, ldb, ticket=ticket,
+                                                  flags=flags, c_init=c_init)
         if status != ST_OK:
             raise RuntimeError(f'native GEMM failed with status {status}')
         return raw
 
-    def _gemm_native_result(self, a, b, m, n, k, numfmt, lda=None, ldb=None, *, ticket=1):
+    def _gemm_native_result(self, a, b, m, n, k, numfmt, lda=None, ldb=None, *, ticket=1, flags=0,
+                            c_init=None):
+        self._check_submission_slot()
         from .numfmt import validate_buffers
         from .c_abi import numfmt_flags
         a_bytes, b_bytes, lda, ldb, na, nb, c_len = validate_buffers(
             a, b, m, n, k, numfmt, lda, ldb, self.caps.dtype_mask)
         a_bytes, b_bytes = a_bytes[:na], b_bytes[:nb]
-        if not (
-            m <= self.caps.acc_tile_m
-            and n <= self.caps.acc_tile_n
-            and k <= self.caps.acc_tile_k
-        ):
+        from .device import Caps as _Caps
+        _box = _Caps(acc_tile_m=self.caps.acc_tile_m, acc_tile_n=self.caps.acc_tile_n,
+                     acc_tile_k=self.caps.acc_tile_k, macs_per_cycle=self.caps.macs_per_cycle,
+                     bank_a_bytes=self.caps.bank_a_bytes, bank_b_bytes=self.caps.bank_b_bytes)
+        if not _box.fits(m, n, k, row_bytes=len(b_bytes) // max(1, n)):
             raise ValueError(
                 f"shape {m}x{n}x{k} exceeds the accumulator tile "
-                f"{self.caps.acc_tile_m}x{self.caps.acc_tile_n}x{self.caps.acc_tile_k}; "
-                "tile on the host"
+                f"{self.caps.acc_tile_m}x{self.caps.acc_tile_n}x{self.caps.acc_tile_k} "
+                f"or the operand banks (A/B {self.caps.bank_a_bytes}/{self.caps.bank_b_bytes} bytes); tile on the host"
             )
 
         # Lay A, B, C and the completion word out in the DMA window, 64-byte aligned so
@@ -342,7 +516,9 @@ class QemuUioSession:
             raise ValueError('DMA pointer range exceeds u64')
         self.dma.write(a_off, a_bytes)
         self.dma.write(b_off, b_bytes)
-        self.dma.write(c_off, b"\x00" * c_len)
+        if c_init is not None and len(c_init) < c_len:
+            raise ValueError(f'accumulate seed too short: need C={c_len} bytes')
+        self.dma.write(c_off, bytes(c_init[:c_len]) if c_init is not None else b"\x00" * c_len)
         self.dma.write(done_off, b"\x00" * 8)
 
         base = self.dma.base
@@ -356,7 +532,7 @@ class QemuUioSession:
             ptr_b=base + b_off,
             ptr_c=base + c_off,
             ptr_done=base + done_off,
-            flags=numfmt_flags(numfmt), lda=lda, ldb=ldb,
+            flags=numfmt_flags(numfmt, int(flags)), lda=lda, ldb=ldb,
         )
         issued = self.submit(desc)
         status = self.wait()
@@ -366,6 +542,126 @@ class QemuUioSession:
         if len(raw) != c_len:
             raise ValueError('short C32 DMA read')
         return raw, issued, ST_OK
+
+    def reports_directed_tile(self) -> bool:
+        """True when the capability window is the 8-MAC 1024×512×16 tile."""
+        from .device import VA_TURBO_TEST_MACS, VA_TURBO_TEST_TILE
+
+        c = self.caps
+        return c.macs_per_cycle == VA_TURBO_TEST_MACS and (
+            c.acc_tile_m,
+            c.acc_tile_n,
+            c.acc_tile_k,
+        ) == VA_TURBO_TEST_TILE
+
+    def _observed_reads(self) -> Tuple[bool, bool]:
+        window = self.window
+        read_a = getattr(window, "last_read_a", None)
+        read_b = getattr(window, "last_read_b", None)
+        if callable(read_a) and callable(read_b):
+            return bool(read_a()), bool(read_b())
+        return True, True
+
+    def run_va_turbo_test_s8(
+        self,
+        m: int,
+        n: int,
+        k: int,
+        a: Sequence[int],
+        b: Sequence[int],
+        ticket: int = 1,
+    ) -> Dict[str, Any]:
+        """Directed schedule for this window.
+
+        Any other capability record is refused. Exact reuse is requested
+        only when a planned tile can skip an operand. A K-split leaves the
+        flags clear. The window decides whether a flag actually skips a read.
+        """
+        from .device import (
+            Caps,
+            _adjacent_reuse,
+            _slice_a,
+            _slice_b,
+            choose_va_blocking,
+            tile_can_reuse,
+            tile_gemm,
+        )
+        from .policy import FLAG_REUSE_A, FLAG_REUSE_B
+
+        if not self.reports_directed_tile():
+            raise ValueError(
+                "VaTurbo test schedule requires the 8-MAC 1024x512x16 directed tile"
+            )
+        if min(m, n, k) <= 0 or len(a) < m * k or len(b) < k * n:
+            raise ValueError("invalid shape or short S8 operands")
+        c = self.caps
+        caps = Caps(
+            acc_tile_m=c.acc_tile_m,
+            acc_tile_n=c.acc_tile_n,
+            acc_tile_k=c.acc_tile_k,
+            macs_per_cycle=c.macs_per_cycle,
+            noc_width=c.noc_width,
+            clusters=c.clusters,
+            dtype_mask=c.dtype_mask,
+            bank_a_bytes=c.bank_a_bytes,
+            bank_b_bytes=c.bank_b_bytes,
+            compute_ref=False,
+        )
+        bm, bn, bk = choose_va_blocking(
+            m, n, k, caps.acc_tile_m, caps.acc_tile_n, caps.acc_tile_k, caps.macs_per_cycle
+        )
+        tiles = tile_gemm(m, n, k, bm, bn, bk)
+        if not tiles:
+            raise ValueError("empty tile plan")
+        can_a, can_b = tile_can_reuse(m, n, k, caps)
+        out = [0] * (m * n)
+        flag_words: List[int] = []
+        hit_a = False
+        hit_b = False
+        read_a = True
+        read_b = True
+        a_list = [int(x) for x in a]
+        b_list = [int(x) for x in b]
+        for idx, (i0, j0, t0, tm, tn, tk) in enumerate(tiles):
+            flag = 0
+            if idx:
+                reuse_a, reuse_b = _adjacent_reuse(tiles[idx - 1], (i0, j0, t0, tm, tn, tk))
+                if reuse_b:
+                    flag |= FLAG_REUSE_B
+                if reuse_a:
+                    flag |= FLAG_REUSE_A
+            partial, _, status = self.gemm_s8(
+                tm,
+                tn,
+                tk,
+                _slice_a(a_list, m, k, i0, t0, tm, tk),
+                _slice_b(b_list, k, n, t0, j0, tk, tn),
+                ticket,
+                flags=flag,
+            )
+            ticket += 1
+            if status != ST_OK:
+                raise RuntimeError(f"ai-tensor gemm failed status={status}")
+            read_a, read_b = self._observed_reads()
+            hit_a = hit_a or not read_a
+            hit_b = hit_b or not read_b
+            for ii in range(tm):
+                for jj in range(tn):
+                    dst = (i0 + ii) * n + (j0 + jj)
+                    value = (out[dst] + int(partial[ii * tn + jj])) & 0xFFFFFFFF
+                    out[dst] = value - (1 << 32) if value & (1 << 31) else value
+            flag_words.append(flag)
+        return {
+            "c": out,
+            "flags": flag_words,
+            "read_a": read_a,
+            "read_b": read_b,
+            "hit_a": hit_a,
+            "hit_b": hit_b,
+            "reuse_enabled": can_a or can_b,
+            "requested_level": 0,
+            "applied_level": 0,
+        }
 
     def as_caps_dict(self) -> Dict[str, Any]:
         d = self.caps.as_dict()

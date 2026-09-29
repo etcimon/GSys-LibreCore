@@ -38,6 +38,7 @@ verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTF
   "$AXI/src/axi_id_prepend.sv" \
   "$AXI/src/axi_mux.sv" \
   "$AXI/src/axi_demux.sv" \
+  "$AXI/src/axi_cut.sv" \
   "$AXI/src/axi_atop_filter.sv" \
   "$AXI/src/axi_err_slv.sv" \
   "$AXI/src/axi_dw_upsizer.sv" \
@@ -66,6 +67,7 @@ verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTF
   "$ROOT/corev_apu/ai_island/g6lc_ai_gemm_seq.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_dram_timing.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_cpl_fifo.sv" \
+  "$ROOT/corev_apu/ai_island/g6lc_ai_axi_cut.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_island_top.sv" \
   "$ROOT/corev_apu/ai_island/g6lc_ai_island_apb.sv" \
   "$ROOT/corev_apu/src/g6lc_ai_dram_backend.sv" \

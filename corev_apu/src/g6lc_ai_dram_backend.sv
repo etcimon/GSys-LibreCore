@@ -215,6 +215,29 @@ module g6lc_ai_dram_backend
       assign local_a = {{SelW{1'b0}}, addr[AXI_ADDR_WIDTH-1:ChanShift+SelW],
                         addr[ChanShift-1:0]};
 
+      // Register slice between the demux and the combinational axi2mem slave.
+      // The demux's whole-struct request process and axi2mem's single ready/valid
+      // process otherwise form a Verilator scheduling loop; the cut adds one
+      // cycle per channel on this simulation-only class-0 model.
+      AXI_BUS #(
+          .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ),
+          .AXI_DATA_WIDTH ( AXI_DATA_WIDTH ),
+          .AXI_ID_WIDTH   ( AXI_ID_WIDTH   ),
+          .AXI_USER_WIDTH ( AXI_USER_WIDTH )
+      ) ch_cut();
+
+      axi_cut_intf #(
+          .ADDR_WIDTH ( AXI_ADDR_WIDTH ),
+          .DATA_WIDTH ( AXI_DATA_WIDTH ),
+          .ID_WIDTH   ( AXI_ID_WIDTH   ),
+          .USER_WIDTH ( AXI_USER_WIDTH )
+      ) i_ch_cut (
+          .clk_i,
+          .rst_ni,
+          .in  ( ch[i]  ),
+          .out ( ch_cut )
+      );
+
       axi2mem #(
           .AXI_ID_WIDTH   ( AXI_ID_WIDTH   ),
           .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ),
@@ -223,7 +246,7 @@ module g6lc_ai_dram_backend
       ) i_axi2mem (
           .clk_i  ( clk_i   ),
           .rst_ni ( rst_ni  ),
-          .slave  ( ch[i]   ),
+          .slave  ( ch_cut  ),
           .req_o  ( req     ),
           .we_o   ( we      ),
           .addr_o ( addr    ),

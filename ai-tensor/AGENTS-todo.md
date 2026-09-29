@@ -4,6 +4,154 @@ Update this file every implementation pass. Architecture concepts: `architecture
 Roadmap re-scoped 2026-08-10 against live I1/I3-lite island (AccTile/PeLanes=256, PMU/CAP,
 trail C-store, multi-out AR). See architecture analysis: contract → real device → frameworks.
 
+## 2026-09-28 — Submission/completion correctness review (in progress)
+
+- [x] Reproduced eight new Python protocol cases (12 failing outcomes with qid subtests)
+  and four Rust MMIO regressions before their fixes. Existing focused Python (32) and
+  Rust runtime (74) tests passed on the starting working tree.
+- [x] UIO uses the split queue map, validates qids before MMIO, requires DONE plus the
+  expected ticket/DSTATUS, and retains pending buffer ownership through timeout. IRQ
+  submissions set FLAG_IRQ and rearm only after claiming. Ticket exhaustion is refused.
+- [x] Added explicit `Device::poll_completion(ticket, claim)` to separate observation
+  from consumption. DMA/IRQ/eventfd waiters no longer double-pop the next completion;
+  legacy MMIO poll remains consuming for compatibility. Latch/fetch refuse tickets
+  outside the 23-bit doorbell field before side effects.
+- [x] `ait.py test` discovers all pytest tests and checks ABI lockstep. New queue/ticket
+  constants are aligned in C/Python/Rust. `ait.py test --no-harness` passes: Rust workspace
+  101 tests, pytest 289 passed / 5 skipped / 11 subtests, golden/queue checks and NumPy/
+  PyTorch smokes. This does not qualify the native extension, TensorFlow, guest execution
+  or RTL. No dependencies were installed; inherited dead-code warnings remain.
+- [x] Remote no-DMA spine qid regression: four reproduced failures before preserving all
+  qid bits; after-run `ai-spine-qid-after-20260928-r2` passes in 446 cycles and detects its
+  negative oracle. Strict process-loop and declaration-order findings were repaired;
+  Yosys reports 1,412 generic cells, zero latches/SCCs. Not GEMM/physical qualification.
+- [x] Fractional-clock bandwidth arithmetic now multiplies at kHz precision before
+  rounding whole GB/s and saturates u32 overflow, matching the SV helper. New Rust/Python
+  tests reproduced the 500-MHz zero-rate bug; updated 1.5-GHz sizing expectations use the
+  correct 768 GB/s for a hypothetical 512-byte port. This is not measured hardware BW.
+  Full `ait.py test` rerun passes 102 Rust tests and 289 pytest cases / five skips.
+- [~] DMA qid/status, PMU overflow and two full-FIFO completion-loss cases repaired with
+  diagnostic before/after evidence. Pending descriptors own their bytes; refused/failing
+  fetch completions retain their ticket/status. `architecture/ai-matrix/log-2026-09.md`
+  records exact tags and the no-DMA synthesis gate. Six aggregate-AXI strict lint findings
+  remain; diagnostics are INCOMPLETE, not hardware qualification.
+- [x] User recovered disk capacity; the preserved runtime identity was revalidated from
+  a local manifest copy. Signed 2x1/2x3 and AXI backpressure regressions now execute:
+  mutable ARID and premature C reads were reproduced/fixed, with 56 exact checks and
+  909 stalled observations passing for each float-pipe setting. Not physical qualification.
+- [x] Reduced DMA synthesis is CHECK/latch/SCC clean after declaration-order repair.
+  Active fetches retain qid/ticket across later doorbells, with a reproduced failure and
+  passing after-run. FIFO depths 1/3/16 pass; depths 3/16 additionally have inductive safety,
+  negative controls and full-replacement cover. These remain leaf/reduced-geometry results.
+- [x] User-selected iterative compatible PMU candidate passes 272 arithmetic cases and
+  all rate aliases; variable-latency read leaves computational completion unchanged.
+  Structural rate check has no mul/div/mod/latch/SCC cells; mapped timing remains open.
+- [~] Optional command FIFO now has an island/APB candidate (CAP/mode/receipts/credits,
+  protected writes, immutable queued tuples, VALID/READY seam). All production CommandDepth
+  defaults remain0. Remote enabled tests cover full capacity, rejection, blocked sideband,
+  and two real asymmetric GEMMs with full-u32 tickets; reduced synthesis is latch/SCC clean.
+- [x] Python `QueuedMmioSession` adds explicit capability negotiation and pointer/lease
+  submission: known refusal releases no accepted owner, ambiguous receipts/I/O failures
+  retain leases, foreign heads are not claimed and timeout does not permit reuse.
+  Seven directed cases pass; C/Python/Rust constants match across 47 macros.
+- [x] Core `ai.enq` now holds VALID until island READY and returns the ticket on acceptance;
+  `ai.poll` trusts only the island when attached. Leaf `--enq` lane passes strict lint
+  after the accumulator read request was extracted from the FSM process (15 results).
+- [x] Rust `SoftIsland`/`MmioDevice` model the command extension (default absent); three
+  tests cover absence, receipts/lock/identity with real GEMMs and held dispatch. B3 emulator
+  ingests `CommandDepth`/version/flags/`REG_OFF_CMD_*` and implements the window; two
+  device tests plus the package parse test pass. `g6q.py check` is red only on pre-existing
+  clippy/fixture debt in the user's in-progress `gemm.rs`/`exec.rs`/`tensor_eval` changes.
+- [x] Strict aggregate-AXI lint closed on the reduced DMA gate without waivers (registered
+  DMA boundary `g6lc_ai_axi_cut`, bit-split AXI copies, sim-stripe slice, two vendor
+  `isolate_assignments` with a re-proven negative probe); all directed cases and synthesis pass.
+  Cycle baselines shifted with the added register stages (PMU fixture 2354 cycles).
+- [x] Stage-2 phase/stall counters (`PMU_OFF_PHASE_*`, `PMU_OFF_STALL_*`) and a measured
+  reduced-geometry breakdown: loads and MAC are sequential (44% load share at 8x8x16),
+  MAC is output-serial (~97% of phase ideal), AR depth shortens only loads; recorded in
+  `architecture/ai-matrix/log-2026-09.md`. Not live-512/silicon evidence.
+- [x] `ai_tensor.torch_backend`: `AiTensorLinear` (prepacked k-major weight, AccTile
+  M/N/K blocking, exact INT8 K-split, ordered-FP refusal), `AiTensorConv2d` (im2col),
+  `replace_linear` swap report with counted explicit fallback, optional
+  `torch.ops.ai_tensor.gemm`, GPT-2 `Conv1D` folding. 10 tests incl. a tiny BERT layer,
+  a conv block and a GPT-2 greedy decode loop (KV cache) matching tokens exactly; virtual
+  backends only, random weights, no model-quality claim.
+- [ ] B1 generated QEMU device parity, full-SoC `g6lc64_ai` rebuild with the new producer
+  ports and AXI cut, malformed/error-drain, backend-bench TB mux lint, full-SoC/physical closure.
+- [x] First pinned-model qualification: `tools/qualify_llm.py` on distilgpt2@2290a626 with an
+  inferred budget (ppl +10 %, top-1 90 %). W8A8 K-group-128 with float lm_head PASSES
+  (ppl -0.1 %, top-1 0.973, 24/24 blocks offloaded); per-row W8A8 fails (+56 %), and the
+  tied lm_head is the sensitive layer. Records in `fixtures/qual/`, checked by
+  `test_qual_records.py`. Virtual evidence; budget pending ratification.
+- [x] Accumulate mode (`flags.accmode == 01`, grant `CAP_ACCMODE` 0x94, ABI ext 2.2.0):
+  seeded ordered reduction in Python/Rust references, engines, constants (51 macros) and
+  `torch_backend` float K-chaining. distilgpt2 FP32 fully offloaded: top-1 1.000, ppl
+  identical to 4e-6. RTL `ST_LC`/seed path landed in `g6lc_ai_gemm_seq`, grant flipped to 1:
+  backend 112-check chained-vs-long + negative control PASS on both float pipes, island gate
+  PASS strict/synth, `qemu-uio` carries the seed (3 tests).
+- [x] Full-SoC `g6lc64_ai` rebuilt (isolated copy) with all new ports; before/after suite vs a
+  pre-change baseline. Fixed the one regression (`ai.poll` head-only -> sideband retired
+  watermark, leaf 18 results) and 12 stale ELFs (v1 descriptors, old geometry/nameplate,
+  row-major B tile). 28/30 default cases PASS; `ai_irq_plic_smoke` and the latched-doorbell
+  completion-identity anomaly (`ai_gemm_tile_2x2_smoke`) are pre-existing and open.
+- [x] SoC anomaly root-caused by waveform: g6lc64_ai has two cores and the AI ELFs had no
+  mhartid guard -> both harts drove every MMIO doorbell/claim/PLIC claim (second AW came
+  from core 1 through the hub). Test-suite defect, not RTL; hart-0 guard added to 44 ELFs.
+  Explains `ai_gemm_tile_2x2_smoke`, `ai_cpl_fifo_multi_claim` layout sensitivity and
+  `ai_irq_plic_smoke` claim=0. SoC re-run: tile_2x2 PASS (20,471 cy), multi_claim PASS,
+  irq_plic PASS (892 cy), queue_doorbell PASS -> directed SoC suite 30/30 on guarded ELFs.
+- [x] Dividers gone: `$div` 3 -> 0 (`dram_beats_in_stripe` shift; the last two were 64-bit
+  overflow-guard dividers in `ai_operand_span`/`ai_result_span` -> 68-bit product test);
+  `$mul` 48 -> 38; island gate `ai-flat-island-20260929-r3` strict lint 0, 11,686 cells.
+- [x] VA-Turbo bounded approximation measured: FP8 E4M3/E5M2 grouped and BF16/FP16 cast
+  recipes in `torch_backend`; `tools/va_select.py` ladder with calibration/held-out gating.
+  distilgpt2 selection: INT8 g128 blocks + FP16 lm_head = 0.369x FP32 bytes, ppl -0.1/-0.3 %,
+  top-1 0.973/0.9745. FP8 worse than INT8 at equal bytes here. Virtual evidence.
+- [x] Quick bench + execution-path analysis: `verif/regress/ai-ops-bench.sh` (local WSL,
+  63 s, both float pipes, 156 records) + `ai_bench_report.py`; `ai_bench_gemm.S` per-format
+  SoC bench with the island `+ai_pmu_trace` record; build-platform suites `ai-ops-bench`,
+  `ai-ops-bench-soc`. Findings: MAC at byte-lane rate (INT8/FP8 1x, FP16/BF16 1/2, FP32
+  1/4, INT4 2x), loads latency-bound at small K / bandwidth-bound at live K, odd-N stores
+  stall the MAC. Area: runtime element-size divides/multiplies -> shifts, cycle-identical.
+- [x] Bench matrix assets: `ai_bench_gemm.S` [fmt x MxNxK (auto-tiled, accmode K-split) x
+  {mmio, ai.enq/ai.poll} x {cold, reuse_a, reuse_b}], `ai_bench_t0.S` [dot4, dot4a, mma,
+  mvta+mvacc], bench SKU model (`G6LC_AI_TB_BENCH_SKU`: island VaTurboEn + IslandFpEn +
+  all-format grant), `ai-matrix-veri.sh AI_MATRIX_BENCH=1` harvester, `ai_bench_report.py
+  --soc`, `+measure_reuse` in the local backend bench (residency hits on all 7 formats).
+- [x] SoC bench matrix, first points (bench SKU, 512 lanes, cycles not timing): INT8 1x512x512
+  cold 34,136 cy (B stream 1.01 cy/beat) -> reuse_b resident **846 cy (40.3x)**; 1x256x1024
+  K-split: accumulate block +2.2 % (C seed 388 cy); ai.enq/ai.poll path == MMIO path
+  (34,128 / 846). Remaining FP32 points + T0 ops run in `ai-bench-matrix-20260929-r7`.
+- [ ] Record the completed r7 matrix (FP32 decode points, T0 cycles/op) in the log.
+- [x] K-split-to-residency: flat panel mapping in `g6lc_ai_gemm_seq` (per-job power-of-two
+  row pitch, byte-capacity K box, `CAP_OFF_BANK_{A,B}_BYTES`), `Caps.max_k`/`fits` byte box,
+  `AiTensorLinear` one-job K for flat-panel parts. `+review_flat` PASS 19 checks (both
+  pipes), measure sweep cycle-identical on 156 records; pytest 334. A 256x1024 INT8 panel is
+  one job / one resident key; `reuse_b` hits without a K-split. **SoC measured**
+  (`ai-bench-flat-20260929-r1`): 1x256x1024 INT8 cold 33,812 (one job, was 34,595 in two)
+  -> resident **778 cy, lb=0 (43.5x)**; before: no hit.
+- [x] `g6lc_qemu` sources `bank_a_bytes`/`bank_b_bytes` (B3 + generated B1 parity); two
+  reader defects fixed (function in constants block, conditional `command_queue` arm).
+- [x] Two-slot resident-B directory (`ReuseBSlots=2`): alternating N panels both hit,
+  big panel takes the bank; `+review_slots` 16 checks both pipes, 156-record identity;
+  VA island synth +54 cells / +141 bits vs one slot; strict lint 0.
+- [ ] Deferred with measured basis: row-merged AR bursts (<1 % at 1.002-1.008 cy/beat on
+  >= 64-beat rows), odd-N stores (even hidden sizes). Incremental row pointers are done
+  by the flat pitch (row address is a shift). Reopen if skinny-K or odd-N workloads appear.
+- [ ] Record the r1/r2 flat SoC points (FP32 resident, KBOX=512 control) and T0 table.
+- [ ] Diffusion pipeline: BLOCKED on `diffusers` (not installed; no implicit installs).
+- [ ] Framework: pinned pretrained LLM (decode loop, KV cache untouched) and one Diffusers
+  pipeline through `replace_linear`, with offload ratio and quality metrics; INT8 path
+  quality budget; persistent buffers instead of per-call byte packing on `qemu-uio`.
+  Production geometry and feature gates are unchanged. Remote capacity was initially
+  occupied; first dispatch additionally failed because Git Bash converted Linux arguments.
+  Use process-local
+  `MSYS_NO_PATHCONV=1` / `MSYS2_ARG_CONV_EXCL=*` on native Bun gateway calls carrying Linux
+  PATH/destination arguments. Failed runs remain distinct from simulation results.
+- [ ] Complete the approved operator-first program: measured live-512 characterization,
+  SRAM/datapath/formats, persistent QEMU/RTL bridge, framework/model gates, bounded
+  approximation and bandwidth-led scaling. No production VA-Turbo or floating grant promotion.
+
 ## M0 — Architecture scaffold
 
 - [x] `AGENTS.md` — purpose as PyTorch/TF backend for island

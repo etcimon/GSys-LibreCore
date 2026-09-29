@@ -645,6 +645,13 @@ Tools; then the PnR flow off `pd/synth`.
   run `probe install` (or `probe --json`) and follow its playbook.
 - **Windows bash**: the LibreCore regression scripts are bash; `test` needs Git-Bash
   or WSL bash on PATH. `doctor` / `probe utils` report this.
+  Native Bun gateway calls launched by Git Bash with Linux `--env PATH=...` or
+  `--dest /mnt/...` arguments need process-local `MSYS_NO_PATHCONV=1` and
+  `MSYS2_ARG_CONV_EXCL=*`. Otherwise Git Bash rewrites those arguments to Windows
+  paths before the gateway forwards them to WSL/SSH. The AI-spine review first
+  failed before Python execution for this reason; the corrected invocation leaves
+  credentials in the existing cache and uses a fresh remote tag. Do not change
+  global shell or repository configuration to work around argument conversion.
 - **Spike / R3 on Windows**: use WSL (`tools install spike`, `smt-linux-r3-cosim.sh`);
   Cygwin cannot build Spike (`addr_t`). `probe env` shows residual WSL tool roots.
 - **diag vs verify**: `diag` uses per-test Verilator surfaces and warning budgets;

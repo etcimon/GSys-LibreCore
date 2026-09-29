@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 #
-# Capability window must advertise I1 live geometry:
-#   clusters=1, macs/cycle=256 (PeLanes), AccTile M/N/K log2 = 8 (tile=256).
+# Capability window must advertise the live geometry (g6lc_ai_island_cfg_pkg):
+#   clusters=1, macs/cycle=512 (AI_LIVE_MACS), AccTile M/N/K log2 = 10/9/9
+#   (1024x512x512), class-0 nameplate = NoC peak 64 bit x 2 GHz = 16 GB/s.
 # Dual-mode I3: default Cas=0 / MaxAROut=2, or +define+G6LC_AI_DRAM_TIMING
 # (class-0 SRAM + Cas=14 / MaxAROut=8). Soft-pass if island is an error slave.
 
@@ -26,6 +27,13 @@
   .section .text.init
   .globl _start
 _start:
+  # g6lc64_ai has two cores and both start here: only hart 0 drives the island;
+  # any other hart parks, otherwise every MMIO doorbell/claim is issued twice.
+  csrr t0, mhartid
+  beqz t0, 1f
+2: wfi
+  j    2b
+1:
   li   sp, 0x80008000
   la   t0, trap_vec
   csrw mtvec, t0
@@ -45,14 +53,15 @@ _start:
   bne  t0, t1, fail
 
   lw   t0, CAP_MACS(s0)
-  li   t1, 256
+  li   t1, 512
   bne  t0, t1, fail
 
-  # packed log2(K)|log2(N)|log2(M) in low 12 bits — expect 8,8,8
+  # packed log2(K)|log2(N)|log2(M) in low 12 bits — expect M=10, N=9, K=9
   lw   t0, CAP_BLOCK_MNK(s0)
   andi t1, t0, 0xF
-  li   t2, 8
+  li   t2, 10
   bne  t1, t2, fail
+  li   t2, 9
   srli t1, t0, 4
   andi t1, t1, 0xF
   bne  t1, t2, fail
@@ -60,7 +69,8 @@ _start:
   andi t1, t1, 0xF
   bne  t1, t2, fail
 
-  # I3: class 0 nameplate 8; class 1 nameplate N×19. Shift always 6.
+  # I3: class 0 nameplate = NoC peak (16 GB/s at 2 GHz live, 8 at the 1 GHz
+  # timing build); class 1 nameplate N×19. Shift always 6.
   lw   t0, CAP_NOC_WIDTH(s0)
   li   t1, 64
   bne  t0, t1, fail
@@ -90,16 +100,18 @@ _start:
   bne  s5, t1, fail
   j    status
 cap_c0:
+  beqz s4, cap_c0_live
   li   t1, 8
   bne  s2, t1, fail
-  beqz s4, cap_c0_live
   li   t1, 0x000E0E0E
   bne  s4, t1, fail
   li   t1, 8
   bne  s5, t1, fail
   j    status
 cap_c0_live:
-  li   t1, 2
+  li   t1, 16
+  bne  s2, t1, fail
+  li   t1, 2                   # AI_MAX_AR_OUT_LIVE
   bne  s5, t1, fail
 
 status:

@@ -105,12 +105,15 @@ module tb_g6lc_ai_island_wide;
       .pslverr_o(pslverr),
       .irq_o(irq),
       .sb_enq_valid_i(1'b0),
+      .sb_enq_ready_o(),
       .sb_qid_i(8'd0),
       .sb_ticket_i(32'd0),
       .sb_desc_ptr_i(64'd0),
       .sb_last_ticket_o(),
       .sb_last_status_o(),
       .sb_has_completion_o(),
+      .sb_retired_valid_o(),
+      .sb_retired_ticket_o(),
       .axi_dma_req_o(dma_req),
       .axi_dma_resp_i(dma_rsp_g),
       .dram_init_done_i(init_done),
@@ -221,7 +224,8 @@ module tb_g6lc_ai_island_wide;
       @(posedge clk);
       guard++;
       @(negedge clk);
-    end while (!pready && guard < 30);
+    end while (!pready && guard < ((addr == PMU_OFF_GBPS_X1000 ||
+        addr == CAP_OFF_DRAM_MEAS_X1000 || addr == CAP_OFF_DRAM_GBPS) ? 256 : 30));
     if (!pready) $fatal(1, "apb read timeout %h", addr);
     data = prdata;
     psel = 0; penable = 0;

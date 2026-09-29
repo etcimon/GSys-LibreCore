@@ -48,6 +48,7 @@ for lanes in $LANES_LIST; do
       "$AXI/src/axi_id_prepend.sv" \
       "$AXI/src/axi_mux.sv" \
       "$AXI/src/axi_demux.sv" \
+      "$AXI/src/axi_cut.sv" \
       "$ROOT/core/include/config_pkg.sv" \
       "$ROOT/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv" \
       "$ROOT/common/local/util/tc_sram_wrapper.sv" \

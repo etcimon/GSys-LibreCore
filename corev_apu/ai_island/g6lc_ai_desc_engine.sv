@@ -28,6 +28,8 @@ module g6lc_ai_desc_engine
     // otherwise software discovers a format the engine then refuses. The island
     // top passes one constant to both; do not default this to all-ones.
     parameter logic [15:0] DtypeMask       = 16'h0001,
+    // CAP_OFF_ACCMODE bit 0: flags.accmode 01 is executable by the attached sequencer.
+    parameter bit          AccumulateEn    = 1'b0,
     // A/B loads are one full beat of this many bytes. Live SoC is 8.
     parameter int unsigned BeatBytes       = 8
 ) (
@@ -161,6 +163,46 @@ module g6lc_ai_desc_engine
     return WriteCompletion && wr_en && (d.ptr_done != '0);
   endfunction
 
+  always_comb begin
+    check_req_o = 1'b0;
+    check_qid_o = qid_q;
+    check_addr_o = '0;
+    check_len_o = AddrWidth'(8);
+    check_need_r_o = 1'b0;
+    check_need_w_o = 1'b0;
+    case (state_q)
+      ST_CHK_A, ST_CHK_B: begin
+        check_req_o = 1'b1;
+        check_addr_o = g6lc_ai_island_cfg_pkg::ai_beat_lo(
+            state_q == ST_CHK_A ? desc_q.ptr_a : desc_q.ptr_b, BeatBytes);
+        check_len_o = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(
+            state_q == ST_CHK_A ? desc_q.ptr_a : desc_q.ptr_b,
+            g6lc_ai_island_cfg_pkg::ai_operand_span(
+                state_q == ST_CHK_A ? desc_q.m : desc_q.n,
+                state_q == ST_CHK_A ? 32'(desc_q.ld_ab[15:0]) : 32'(desc_q.ld_ab[31:16]),
+                desc_q.k, desc_compute_numfmt(desc_q)), BeatBytes));
+        check_need_r_o = 1'b1;
+      end
+      ST_CHK_C: begin
+        check_req_o = 1'b1;
+        check_addr_o = desc_q.ptr_c;
+        check_len_o = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_result_span(desc_q.m, desc_q.n));
+        check_need_w_o = 1'b1;
+      end
+      ST_CHK_SCALE: begin
+        check_req_o = desc_q.ptr_scale != '0;
+        check_addr_o = desc_q.ptr_scale;
+        check_need_r_o = desc_q.ptr_scale != '0;
+      end
+      ST_CHK_DONE: begin
+        check_req_o = desc_q.ptr_done != '0;
+        check_addr_o = desc_q.ptr_done;
+        check_need_w_o = desc_q.ptr_done != '0;
+      end
+      default: ;
+    endcase
+  end
+
   // Default check idle
   always_comb begin
     state_d       = state_q;
@@ -175,15 +217,9 @@ module g6lc_ai_desc_engine
     gemm_start_n  = 1'b0;
     gemm_issued_d = gemm_issued_q;
 
-    check_req_o    = 1'b0;
-    check_qid_o    = qid_q;
-    check_addr_o   = '0;
     // Pointer-sized probes (completion, scale). A/B/C override this with the
     // byte length of the tensor so a matrix cannot start in-window and
     // finish past the limit.
-    check_len_o    = AddrWidth'(8);
-    check_need_r_o = 1'b0;
-    check_need_w_o = 1'b0;
 
     unique case (state_q)
       ST_IDLE: begin
@@ -222,7 +258,8 @@ module g6lc_ai_desc_engine
           // report success. The products would not be the requested post-op.
           status_d = ST_BAD_OP;
           state_d  = ST_COMPLETE;
-        end else if (!desc_numfmt_granted(desc_q, DtypeMask)) begin
+        end else if (!desc_numfmt_granted(desc_q, DtypeMask) ||
+                     (desc_accumulate(desc_q) && !AccumulateEn)) begin
           // Fail closed on an ungranted numeric format. Checked here, in PARSE,
           // alongside version/op/qid rather than in the GEMM sequencer, because
           // this is a contract check on the descriptor and not a property of the
@@ -238,15 +275,6 @@ module g6lc_ai_desc_engine
       end
 
       ST_CHK_A: begin
-        check_req_o    = 1'b1;
-        check_addr_o   = g6lc_ai_island_cfg_pkg::ai_beat_lo(desc_q.ptr_a, BeatBytes);
-        check_len_o    = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(
-                            desc_q.ptr_a,
-                            g6lc_ai_island_cfg_pkg::ai_operand_span(
-                                desc_q.m, 32'(desc_q.ld_ab[15:0]), desc_q.k,
-                                desc_compute_numfmt(desc_q)),
-                            BeatBytes));
-        check_need_r_o = 1'b1;
         if (!g6lc_ai_island_cfg_pkg::ai_elem_aligned(
                 desc_q.ptr_a, desc_compute_numfmt(desc_q)) || !check_ok_i) begin
           status_d = ST_BAD_PTR;
@@ -255,15 +283,6 @@ module g6lc_ai_desc_engine
       end
 
       ST_CHK_B: begin
-        check_req_o    = 1'b1;
-        check_addr_o   = g6lc_ai_island_cfg_pkg::ai_beat_lo(desc_q.ptr_b, BeatBytes);
-        check_len_o    = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_bus_len(
-                            desc_q.ptr_b,
-                            g6lc_ai_island_cfg_pkg::ai_operand_span(
-                                desc_q.n, 32'(desc_q.ld_ab[31:16]), desc_q.k,
-                                desc_compute_numfmt(desc_q)),
-                            BeatBytes));
-        check_need_r_o = 1'b1;
         if (!g6lc_ai_island_cfg_pkg::ai_elem_aligned(
                 desc_q.ptr_b, desc_compute_numfmt(desc_q)) || !check_ok_i) begin
           status_d = ST_BAD_PTR;
@@ -272,11 +291,6 @@ module g6lc_ai_desc_engine
       end
 
       ST_CHK_C: begin
-        check_req_o    = 1'b1;
-        check_addr_o   = desc_q.ptr_c;
-        check_len_o    = AddrWidth'(g6lc_ai_island_cfg_pkg::ai_result_span(
-                            desc_q.m, desc_q.n));
-        check_need_w_o = 1'b1;
         if (!g6lc_ai_island_cfg_pkg::ai_c_aligned(desc_q.ptr_c, desc_q.n[0])
             || !check_ok_i) begin
           status_d = ST_BAD_PTR;
@@ -290,9 +304,6 @@ module g6lc_ai_desc_engine
         if (desc_q.ptr_scale == '0) begin
           state_d = ST_CHK_DONE;
         end else begin
-          check_req_o    = 1'b1;
-          check_addr_o   = desc_q.ptr_scale;
-          check_need_r_o = 1'b1;
           if (!check_ok_i) begin
             status_d = ST_BAD_PTR;
             state_d  = ST_COMPLETE;
@@ -303,9 +314,6 @@ module g6lc_ai_desc_engine
       ST_CHK_DONE: begin
         // Null ptr_done: no completion word; else check writable before execute
         if (desc_q.ptr_done != '0) begin
-          check_req_o    = 1'b1;
-          check_addr_o   = desc_q.ptr_done;
-          check_need_w_o = 1'b1;
           if (!g6lc_ai_island_cfg_pkg::ai_completion_aligned(desc_q.ptr_done)
               || !check_ok_i) begin
             status_d = ST_BAD_PTR;

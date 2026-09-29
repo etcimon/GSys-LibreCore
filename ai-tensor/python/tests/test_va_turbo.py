@@ -390,6 +390,310 @@ def test_executability_is_profile_dependent_not_a_constant(fixture_tensors):
         assert vt.format_supported(vt.AI_FMT_INT, bad) is False
 
 
+def test_permission_reports_the_predicates_and_does_not_apply():
+    from dataclasses import replace
+
+    mask = 1 << 16
+    armed = vt.permission(
+        vt.Gates.directed(),
+        level=9,
+        recipe=16,
+        consumer_mask=mask,
+        profile_mask=mask,
+        window_valid=True,
+    )
+    assert armed.gates and armed.level_nonzero and armed.consumer and armed.profile and armed.window
+    assert armed.permitted is True
+    assert armed.apply is False
+    off = vt.permission(
+        replace(vt.Gates.directed(), va_turbo_en=False),
+        level=9,
+        recipe=16,
+        consumer_mask=mask,
+        profile_mask=mask,
+        window_valid=True,
+    )
+    assert off.gates is False and off.permitted is False and off.apply is False
+    assert vt.permission(
+        replace(vt.Gates.directed(), matrix_en=False),
+        level=9,
+        recipe=16,
+        consumer_mask=mask,
+        profile_mask=mask,
+        window_valid=True,
+    ).permitted is False
+    assert vt.permission(
+        replace(vt.Gates.directed(), queues=0),
+        level=9,
+        recipe=16,
+        consumer_mask=mask,
+        profile_mask=mask,
+        window_valid=True,
+    ).gates is False
+    paused = vt.permission(
+        replace(vt.Gates.directed(), enable=False),
+        level=9,
+        recipe=16,
+        consumer_mask=mask,
+        profile_mask=mask,
+        window_valid=True,
+    )
+    assert paused.gates is True and paused.level_nonzero is False and paused.permitted is False
+    assert vt.permission(
+        vt.Gates.directed(),
+        level=0,
+        recipe=16,
+        consumer_mask=mask,
+        profile_mask=mask,
+        window_valid=True,
+    ).level_nonzero is False
+    assert vt.permission(
+        vt.Gates.directed(),
+        level=16,
+        recipe=16,
+        consumer_mask=mask,
+        profile_mask=mask,
+        window_valid=True,
+    ).level_nonzero is False
+    top = 1 << 31
+    last = vt.permission(
+        vt.Gates.directed(),
+        level=15,
+        recipe=31,
+        consumer_mask=top,
+        profile_mask=top,
+        window_valid=True,
+    )
+    assert last.consumer and last.profile and last.permitted is True and last.apply is False
+    unknown = vt.permission(
+        vt.Gates.directed(),
+        level=9,
+        recipe=32,
+        consumer_mask=(1 << 32) - 1,
+        profile_mask=(1 << 32) - 1,
+        window_valid=True,
+    )
+    assert unknown.consumer is False and unknown.profile is False and unknown.permitted is False
+    assert vt.permission(
+        vt.Gates.directed(),
+        level=9,
+        recipe=16,
+        consumer_mask=mask,
+        profile_mask=mask,
+        window_valid=False,
+    ).permitted is False
+    assert vt.permission(
+        vt.Gates.directed(),
+        level=9,
+        recipe=16,
+        consumer_mask=mask,
+        profile_mask=0,
+        window_valid=True,
+    ).profile is False
+    assert vt.Gates(va_turbo_en=1, policy_subcode_en=True, policy_benefit_en=True,
+                    policy_codec_en=True, island_fp_en=True, matrix_en=True,
+                    queues=1, enable=True).chain() is False
+
+
+def test_format_sketch_keeps_the_live_rate_and_the_48x_gap():
+    live_macs, live_ops = vt.format_sketch(vt.LIVE_CLUSTERS, vt.LIVE_MACS, vt.LIVE_CLOCK_KHZ, 0)
+    assert live_macs == 1_024_000_000_000 and live_ops == 2_048
+    assert vt.format_sketch(vt.LIVE_CLUSTERS, vt.LIVE_MACS, vt.LIVE_CLOCK_KHZ, 1)[1] == 4_096
+    assert vt.format_sketch(vt.LIVE_CLUSTERS, vt.LIVE_MACS, vt.LIVE_CLOCK_KHZ, 5)[1] == 1_024
+    assert vt.format_sketch(vt.LIVE_CLUSTERS, vt.LIVE_MACS, vt.LIVE_CLOCK_KHZ, 7)[1] == 512
+    sku_macs, sku_ops = vt.format_sketch(vt.SKU_CLUSTERS, vt.SKU_MACS, vt.SKU_CLOCK_KHZ, 0)
+    assert sku_ops == 98_304 and sku_macs == 49_152_000_000_000
+    for fmt in (0, 1, 3, 4, 5, 6, 7):
+        assert vt.tops_gap(fmt)[2] == 48
+    assert vt.tops_gap(2) == (0, 0, 0)
+    assert vt.carried_bytes_per_cycle(512, 64) == 8
+    assert vt.carried_bytes_per_cycle(64, 512) == 8
+    assert vt.carried_bytes_per_cycle(512, 512) == 64
+    assert vt.macs_may_rise(vt.carried_bytes_per_cycle(512, 64)) is False
+    assert vt.macs_may_rise(vt.carried_bytes_per_cycle(512, 512)) is True
+    assert vt.carried_nameplate_gbps(512, 64, 2_000_000) == 16
+    assert vt.carried_nameplate_gbps(512, 512, 2_000_000) == 128
+    for clock, expected in ((500_000, 4), (1_250_000, 10), (1_500_000, 12), (2_000_000, 16)):
+        assert vt.carried_nameplate_gbps(512, 64, clock) == expected
+        fractional = vt.configured_rate(vt.PortSetting.live(), vt.TrackFeatures.live(), clock, 0)
+        fractional_balance = vt.port_balance(fractional)
+        assert fractional_balance["data_nameplate_gbps"] == expected
+        assert fractional_balance["control_nameplate_gbps"] == expected
+        assert fractional_balance["demand_gbps"] == expected
+    assert vt.carried_nameplate_gbps(0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF) == 0xFFFFFFFF
+    live_rate = vt.configured_rate(vt.PortSetting.live(), vt.TrackFeatures.live(), vt.LIVE_CLOCK_KHZ, 0)
+    assert live_rate["promoted"] is False
+    assert live_rate["clusters"] == 1 and live_rate["macs"] == 512
+    assert live_rate["milli_ops"] == 2_048 and live_rate["control_beat_bytes"] == 8
+    scaled = vt.TrackFeatures(
+        lane_groups=True,
+        float_reductions=True,
+        converters=True,
+        proof_producers=True,
+        clusters=4,
+        macs=2048,
+    )
+    wide = vt.PortSetting(512, 256)
+    promoted = vt.configured_rate(wide, scaled, vt.LIVE_CLOCK_KHZ, 0)
+    assert promoted["promoted"] is True
+    assert promoted["clusters"] == 4 and promoted["macs"] == 2048
+    assert promoted["milli_ops"] == 32_768
+    assert promoted["macs_per_s"] == 16_384_000_000_000
+    assert promoted["carried_bytes"] == 32 and promoted["control_beat_bytes"] == 8
+    assert vt.configured_rate(wide, scaled, vt.LIVE_CLOCK_KHZ, 1)["milli_ops"] == 65_536
+    assert vt.configured_rate(wide, scaled, vt.LIVE_CLOCK_KHZ, 7)["milli_ops"] == 8_192
+    assert vt.configured_rate(vt.PortSetting.live(), scaled, vt.LIVE_CLOCK_KHZ, 0)["milli_ops"] == 2_048
+    live_balance = vt.port_balance(live_rate)
+    assert live_balance["macs_per_byte"] == 64 and live_balance["bytes_to_keep_pace"] == 8
+    assert live_balance["keeps_pace"] is True and live_balance["control_keeps_pace"] is True
+    assert live_balance["fed"] is True
+    assert live_balance["data_nameplate_gbps"] == 16
+    assert live_balance["control_nameplate_gbps"] == 16
+    assert live_balance["demand_gbps"] == 16
+    assert vt.dram_covers(live_balance, 0, 1) is True
+    assert vt.dram_covers(live_balance, 3, 1) is False
+    assert vt.dram_claim_matches(0, 1, live_balance["data_nameplate_gbps"], 16) is True
+    assert vt.dram_claim_matches(0, 1, live_balance["data_nameplate_gbps"], 400) is False
+    assert vt.ddr4_channels_to_cover(16) == 1
+    wide_balance = vt.port_balance(promoted)
+    assert wide_balance["macs_per_cycle"] == 8_192 and wide_balance["macs_per_byte"] == 256
+    assert wide_balance["bytes_to_keep_pace"] == 128 and wide_balance["keeps_pace"] is False
+    sku = vt.TrackFeatures(clusters=vt.SKU_CLUSTERS, macs=vt.SKU_MACS)
+    fabric = vt.PortSetting(4096, 4096)
+    sku_balance = vt.port_balance(vt.configured_rate(fabric, sku, vt.SKU_CLOCK_KHZ, 0))
+    assert sku_balance["macs_per_cycle"] == 32_768 and sku_balance["macs_per_byte"] == 64
+    assert sku_balance["bytes_to_keep_pace"] == 512 and sku_balance["keeps_pace"] is True
+    assert sku_balance["control_macs_per_byte"] == 4_096
+    assert sku_balance["control_keeps_pace"] is False and sku_balance["fed"] is False
+    opened = vt.port_balance(vt.with_control(
+        vt.configured_rate(fabric, sku, vt.SKU_CLOCK_KHZ, 0),
+        vt.ControlSetting(512),
+    ))
+    assert opened["control_macs_per_byte"] == 64
+    assert opened["keeps_pace"] is True and opened["control_keeps_pace"] is True and opened["fed"] is True
+    assert opened["data_nameplate_gbps"] == 768
+    assert opened["control_nameplate_gbps"] == 768
+    assert opened["demand_gbps"] == 768
+    assert vt.dram_covers(opened, 0, 1) is True
+    assert vt.dram_covers(opened, 2, 1) is False
+    assert vt.dram_claim_matches(2, 1, opened["data_nameplate_gbps"], 400) is True
+    assert vt.dram_claim_matches(2, 1, 400, 400) is False
+    assert vt.ddr4_channels_to_cover(512) == 27
+    assert vt.ddr4_channels_to_cover(768) == 41
+    assert vt.dram_covers(opened, 1, 41) is True
+    assert vt.dram_covers(opened, 1, 40) is False
+    still_narrow = vt.port_balance(vt.with_control(
+        vt.configured_rate(fabric, sku, vt.SKU_CLOCK_KHZ, 0),
+        vt.ControlSetting.live(),
+    ))
+    assert still_narrow["fed"] is False
+    assert vt.dram_covers(still_narrow, 0, 1) is False
+    assert vt.ControlSetting(12).bytes() == 0
+
+
+def test_decode_names_every_bank_entry_and_applies_nothing():
+    for recipe in range(32):
+        row = vt.decode(recipe)
+        assert row.supported, recipe
+        assert row.actions_clear(), recipe
+    exact = vt.decode(16)
+    assert exact.kind == "exact" and exact.eps_ppm == 0
+    assert vt.decode(4).eps_ppm == 977 and vt.decode(4).narrows_storage
+    assert vt.decode(6).quant_levels == 127 and vt.decode(6).eps_ppm == 7892
+    assert vt.decode(18).needs_param and vt.decode(18).eps_ppm is None
+    assert vt.decode(18, 0).eps_ppm == 977
+    sentinel = vt.decode(26, 1)
+    assert sentinel.kind == "rel" and sentinel.eps_ppm is None and sentinel.actions_clear()
+    outside = vt.decode(32)
+    assert outside.supported is False and outside.actions_clear() and outside.kind == "none"
+
+
+def test_promotion_stays_off_until_all_four_gates_and_does_not_write_the_live_bit():
+    assert vt.PromotionGates().ready() is False
+    assert vt.ppm_satisfies_promotion(vt.DOC_INT8_PPM) is False
+    partial = vt.PromotionGates(True, True, True, False)
+    assert partial.ready() is False
+    assert vt.PromotionGates(True, True, True, True).ready() is True
+    assert vt.LIVE_VA_TURBO_EN is False
+    assert vt.section11_selected() is False
+    assert len(vt.SECTION11_OPEN) == 6
+    live = vt.PortSetting.live()
+    assert live.carried_bytes() == 8 and live.promoted() is False
+    assert vt.TrackFeatures.live().effective_macs(live) == 512
+    grouped = vt.TrackFeatures(lane_groups=True)
+    assert grouped.effective_macs(live) == 512
+    wide = vt.PortSetting(512, 256)
+    assert wide.promoted() is True and wide.carried_bytes() == 32
+    scaled = vt.TrackFeatures(clusters=4, macs=2048)
+    assert scaled.effective_macs(wide) == 2048
+    assert scaled.effective_macs(live) == 512
+    assert vt.PortSetting(96, 96).promoted() is False
+    approx = vt.TrackFeatures(approximate_consumers=True)
+    assert approx.approximate_apply(vt.PromotionGates()) is False
+    assert approx.approximate_apply(vt.PromotionGates(True, True, True, True)) is True
+    assert vt.LIVE_VA_TURBO_EN is False
+
+
+def test_select_workload_picks_resident_b_for_large_decode_and_applies_nothing():
+    large = vt.select_workload(1, 256, 256)
+    assert large.code == vt.POLICY_DECODE
+    assert large.exact_recipe == 16
+    assert large.reuse_b and not large.reuse_a and large.apply is False and large.large_decode
+    assert large.b_share_millis == 996
+    assert large.withheld == 15
+    small = vt.select_workload(1, 8, 16)
+    assert small.exact_recipe == 16 and small.large_decode is False and small.b_share_millis == 888
+    square = vt.select_workload(8, 8, 16)
+    assert square.code == vt.POLICY_BULK and square.exact_recipe is None and square.apply is False
+    assert square.withheld == 15
+    empty = vt.select_workload(0, 256, 256)
+    assert empty.code == vt.POLICY_MOVEMENT and empty.exact_recipe is None and empty.apply is False
+    tall = vt.select_workload(256, 1, 256)
+    assert tall.code == vt.POLICY_TALL and tall.exact_recipe == 16
+    assert tall.reuse_a and not tall.reuse_b and tall.apply is False
+    assert tall.large_decode is False and tall.large_resident and tall.a_share_millis == 996
+    wide = vt.select_workload(8, 16, 16)
+    assert wide.code == vt.POLICY_WIDE and wide.exact_recipe is None
+    assert wide.apply is False and not wide.reuse_a and not wide.reuse_b
+
+
+def test_admit_withheld_lists_only_ids_the_bound_accepts_and_applies_nothing():
+    mask = (1 << 32) - 1
+    listed = vt.admit_withheld(
+        vt.Gates.directed(),
+        level=9,
+        measured_ppm=vt.DOC_INT8_PPM,
+        kappa_q8=256,
+        consumer_mask=mask,
+        profile_mask=mask,
+        window_valid=True,
+    )
+    assert 4 in listed.ids
+    assert 16 not in listed.ids and 26 not in listed.ids and 27 not in listed.ids
+    assert listed.apply is False
+    assert all(vt.decode(recipe).kind != "exact" for recipe in listed.ids)
+    tight = vt.admit_withheld(
+        vt.Gates.directed(),
+        level=8,
+        measured_ppm=vt.DOC_INT8_PPM,
+        kappa_q8=256,
+        consumer_mask=mask,
+        profile_mask=mask,
+        window_valid=True,
+    )
+    assert tight.ids == () and tight.apply is False
+    closed = vt.admit_withheld(
+        vt.Gates.directed(),
+        level=9,
+        measured_ppm=vt.DOC_INT8_PPM,
+        kappa_q8=256,
+        consumer_mask=mask,
+        profile_mask=0,
+        window_valid=True,
+    )
+    assert closed.ids == ()
+
+
 @needs_torch
 def test_the_exact_plans_state_their_own_caveat(fixture_tensors):
     a, b = fixture_tensors

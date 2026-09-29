@@ -1642,3 +1642,30 @@ These fixes are now in the generator: `g6q-emit-qemu` emits `reg_shift` / `clock
 - CTL re-enable recovery **green**: ESP `CTL.TXT` `reenable_ok=true`. After a disabled doorbell, `CTL.enable=1` then a qid-0 ring completes `ST_OK` again. `g6q run --backend qemu --loader edk2 --os efi-shell --machine g6lc-virt --wsl --expect reenable_ok` **green**. `push --model` stamps `reenable_ok=true` and still joins ESP DESC/CPL. Transport still **unpinned**.
 - U3-Shell **virt green**: `g6q run --loader u-boot --os efi-shell --machine g6lc-virt --smp 2 --expect "UEFI Interactive Shell"`. Distro boot `virtio 0:1` `bootefi` of EDK2 `Shell.efi` (`out/loader-run/esp-shell.img`). **`UEFI Interactive Shell v2.2`**, `UEFI v2.110 (Das U-Boot, 0x20250700)`, mapping table `FS0:` / `HD0b:`. Soc SPI FIT of the same PE: `bootm` **`Transferring control to EFI`** then hangs after `Booting <NULL>` (not UCS-2; ASCII expect would have matched). Soc `bootefi hello` **`Hello, world!`** / `Running on UEFI 2.11`. Soc U-Boot fragment now serial-only stdout, empty `bootargs`, `bootefi hello` fallback, and `# CONFIG_VIDEO/PCI/USB is not set`. Next soc Shell: a file device path on NOR (virt's working path), not a 32 MiB pflash FD.
 - Missing host prerequisites to record: RISC-V cross-toolchain, `make`, `bash`, WSL (on Windows), `ninja`/BaseTools for EDK2, and network/git for source fetch.
+
+### AI island CAP bank words + reader repairs (2026-09-29)
+
+- `AiIslandConfig::cap_value` sources `bank_a_bytes` / `bank_b_bytes` (CAP 0x98/0x9C, flat
+  panel mapping) from the ingested tile geometry (`operand_bank_bytes`: rows x
+  ceil(elem_max x AccTileK / lanes) x lanes, elem_max 4 with `fp_datapath` else 1); the
+  live-package test pins offsets and integer-strip values. B3 and the generated B1 device
+  read the same words as the RTL.
+- Reader repairs: `parse_cap_window_packed` skips the conditional `command_queue` arm
+  (it aborted the whole packed set, leaving `dram_gbps` unsourced); the cfg-package
+  constants reader stops at a `function` block, so the design keeps functions out of the
+  `CAP_OFF_*`/`REG_OFF_*` block (recorded as a design-side convention, not a reader change).
+- `tensor_eval::native_fixture_all_formats_and_rejections` root cause and fix: commit
+  `9805b92cd` added `AiIslandConfig::fp_datapath` and the gemm refusal of float codes
+  without it ("a set mask bit is not an implemented product"), but nothing in ingest ever
+  sourced the field, so every float job was refused on every design (the fixture, mask
+  0xfb, executed 3 of 11 instead of 9). Ingest now reads it from the design at the seam
+  that decides it in RTL: `AiCfg.IslandFpEn` of the core package (`Package::nested`,
+  the live `g6lc64_ai` package says 0 = integer strip); when the package carries no
+  `AiCfg` (the synthetic fixture), the island's own legality rule decides -- the top
+  asserts grant ⊆ implemented with the FP-aware implemented mask only under `IslandFpEn`,
+  so a grant naming a float code (`FLOAT_GRANT_BITS` 0xF8 = codes 3..7) can only elaborate
+  with the float datapath present. Read from the design either way, never assumed.
+  Tests: ingest pins both sources (explicit 1/0 win over the mask; mask-only fallback).
+- Green: whole workspace `cargo test` (cli 87, core 41, diag 75, vm 187, ingest 26, svcfg
+  52, dts 45, emit-args 43, emit-qemu 59, flist 11). `check` still red only on the owner's
+  in-progress `too_many_arguments` (`gemm.rs:97/931`, `exec.rs:3855`); `fmt --all` applied.

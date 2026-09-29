@@ -54,6 +54,11 @@ module tb_g6lc_ai_desc_reuse;
   localparam logic [63:0] C_I8 = 64'h0000_2208_0000_2208;
   // A ones at the moved pointer, B still 0x21: 8*1*33 = 264.
   localparam logic [63:0] C_AP = 64'h0000_0108_0000_0108;
+  // Completion word is {0, status, ticket}. GEMM commits ST_OK before
+  // the completion response can fail.
+  localparam logic [63:0] CPL_OK_42 = 64'h0000_0000_0000_002A;
+  // A C-store failure is a GEMM error, so the completion word carries it.
+  localparam logic [63:0] CPL_ERR_36 = 64'h0000_0001_0000_0024;
   localparam logic [31:0] REUSE_B = 32'h1 << FLAG_REUSE_B_SHIFT;
   localparam logic [31:0] REUSE_A = 32'h1 << FLAG_REUSE_A_SHIFT;
 
@@ -66,32 +71,7 @@ module tb_g6lc_ai_desc_reuse;
   endfunction
 
   localparam ai_island_cfg_t Island = reuse_island();
-  localparam ai_cfg_t AiCfgReuse = '{
-    MatrixEn: 1'b1,
-    AccelEn: 1'b0,
-    TileLdEn: 1'b0,
-    RequantEn: 1'b0,
-    SparseEn: 1'b0,
-    UmodeEn: 1'b0,
-    PolicyCodecEn: 1'b1,
-    PolicyBenefitEn: 1'b1,
-    PolicySubcodeEn: 1'b1,
-    PolicySubcodeCacheEn: 1'b0,
-    VaTurboEn: 1'b1,
-    IslandFpEn: 1'b1,
-    Int4En: 1'b0,
-    Sparse24En: 1'b0,
-    FormatMask: 32'h0000_0001,
-    TileM: 32'd8,
-    TileN: 32'd8,
-    TileK: 32'd8,
-    TileCount: 32'd1,
-    AccBanks: 32'd1,
-    AccDepth: 32'd8,
-    Queues: 32'd1,
-    QueueDepth: 32'd4,
-    QosClasses: 32'd1
-  };
+  localparam ai_cfg_t AiCfgReuse = AiCfgVaTurboTest;
 
   logic clk = 0;
   logic rst_n = 0;
@@ -117,6 +97,8 @@ module tb_g6lc_ai_desc_reuse;
   logic        poke_we;
   logic        b_slverr;
   logic        c_slverr;
+  logic        a_slverr;
+  logic        d_slverr;
   logic [63:0] poke_addr, poke_data;
 
   typedef enum logic [1:0] { RD_IDLE, RD_DATA } rd_e;
@@ -162,6 +144,8 @@ module tb_g6lc_ai_desc_reuse;
       end else if (rd_q == RD_DATA && dma_req_g.r_ready) begin
         if (b_slverr && ar_addr_q >= PB && ar_addr_q < PC)
           b_slverr <= 1'b0;
+        if (a_slverr && ar_addr_q >= PA && ar_addr_q < PB)
+          a_slverr <= 1'b0;
         if (rd_beat == ar_len_q) rd_q <= RD_IDLE;
         else rd_beat <= rd_beat + 8'd1;
       end
@@ -184,6 +168,8 @@ module tb_g6lc_ai_desc_reuse;
       end else if (wr_q == WR_RESP && dma_req_g.b_ready) begin
         if (c_slverr && aw_addr_q >= PC && aw_addr_q < PD)
           c_slverr <= 1'b0;
+        if (d_slverr && aw_addr_q >= PD && aw_addr_q < WIN)
+          d_slverr <= 1'b0;
         wr_q <= WR_IDLE;
       end
     end
@@ -205,8 +191,13 @@ module tb_g6lc_ai_desc_reuse;
     // One B beat returns SLVERR. resp[1] drops the resident key.
     if (b_slverr && ar_addr_q >= PB && ar_addr_q < PC)
       dma_rsp.r.resp = 2'b10;
+    if (a_slverr && ar_addr_q >= PA && ar_addr_q < PB)
+      dma_rsp.r.resp = 2'b10;
     // One C-store beat returns SLVERR. The completion word is at PD.
     if (c_slverr && wr_q == WR_RESP && aw_addr_q >= PC && aw_addr_q < PD)
+      dma_rsp.b.resp = 2'b10;
+    // The completion word is at PD, after GEMM has committed the key.
+    if (d_slverr && wr_q == WR_RESP && aw_addr_q >= PD && aw_addr_q < WIN)
       dma_rsp.b.resp = 2'b10;
   end
 
@@ -223,8 +214,8 @@ module tb_g6lc_ai_desc_reuse;
       .psel_i(psel), .penable_i(penable), .pwrite_i(pwrite),
       .paddr_i(paddr), .pwdata_i(pwdata),
       .prdata_o(prdata), .pready_o(pready), .pslverr_o(pslverr), .irq_o(irq),
-      .sb_enq_valid_i(1'b0), .sb_qid_i('0), .sb_ticket_i('0), .sb_desc_ptr_i('0),
-      .sb_last_ticket_o(), .sb_last_status_o(), .sb_has_completion_o(),
+      .sb_enq_valid_i(1'b0), .sb_enq_ready_o(), .sb_qid_i('0), .sb_ticket_i('0), .sb_desc_ptr_i('0),
+      .sb_last_ticket_o(), .sb_last_status_o(), .sb_has_completion_o(), .sb_retired_valid_o(), .sb_retired_ticket_o(),
       .axi_dma_req_o(dma_req), .axi_dma_resp_i(dma_rsp_g),
       .dram_init_done_i(1'b1),
       .ch_r_beats_i('0), .ch_w_beats_i('0)
@@ -343,6 +334,11 @@ module tb_g6lc_ai_desc_reuse;
   initial begin
     logic [31:0] ticket, status;
     int unsigned a0, b0, da, db;
+    if (!AiCfgVaTurboTest.VaTurboEn || !AiCfgVaTurboTest.PolicySubcodeEn ||
+        !AiCfgVaTurboTest.PolicyBenefitEn || !AiCfgVaTurboTest.PolicyCodecEn ||
+        !AiCfgVaTurboTest.IslandFpEn || !AiCfgVaTurboTest.MatrixEn) begin
+      $fatal(1, "AiCfgVaTurboTest lost a required gate");
+    end
     errors = 0;
     psel = 0; penable = 0; pwrite = 0; paddr = '0; pwdata = '0;
     poke_we = 1'b0;
@@ -350,6 +346,8 @@ module tb_g6lc_ai_desc_reuse;
     poke_data = '0;
     b_slverr = 1'b0;
     c_slverr = 1'b0;
+    a_slverr = 1'b0;
+    d_slverr = 1'b0;
     rst_n = 0;
     repeat (8) @(posedge clk);
     rst_n = 1;
@@ -883,8 +881,522 @@ module tb_g6lc_ai_desc_reuse;
     expect_w("odd-hit-last", PC + 64'd40, C_ONE);
     retire_cpl();
 
+    // Install both keys, then fail the A read while B is skipped.
+    poke(PA + 64'd32, 64'h0101_0101_0101_0101);
+    poke(PA + 64'd48, 64'h0101_0101_0101_0101);
+    poke(PB + 64'd64, 64'h2121_2121_2121_2121);
+    poke(PB + 64'd72, 64'h2121_2121_2121_2121);
+    poke(PB + 64'd80, 64'h2121_2121_2121_2121);
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd8, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(32'h0, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2000);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd32 || status[15:0] != ST_OK || da == 0 || db == 0) begin
+      $error("asl-prime t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("asl-prime", PC, C_AP);
+    retire_cpl();
+
+    // The A beat is SLVERR while B was eligible to skip. The error
+    // cancels that skip, so B is read too, and neither key may survive.
+    a_slverr = 1'b1;
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_B, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2100);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd33 || status[15:0] != ST_ERR || da == 0 || db == 0 || a_slverr) begin
+      $error("aslverr t=%0d st=%h arA=%0d arB=%0d arm=%0d",
+             ticket, status, da, db, a_slverr);
+      errors++;
+    end
+    a_slverr = 1'b0;
+    retire_cpl();
+
+    // The failed job does not leave B resident.
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd8, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_B, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2200);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd34 || status[15:0] != ST_OK || db == 0) begin
+      $error("miss-aslverr t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("miss-aslverr", PC, C_AP);
+    expect_w("miss-aslverr-last", PC + 64'd8, C_AP);
+    retire_cpl();
+
+    // That reload leaves B resident. The next request skips it.
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd8, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_B, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2300);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd35 || status[15:0] != ST_OK || da == 0 || db != 0) begin
+      $error("hit-aslverr t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("hit-aslverr", PC, C_AP);
+    expect_w("hit-aslverr-last", PC + 64'd8, C_AP);
+    retire_cpl();
+
+    // Both operands are resident. The C store is SLVERR and neither
+    // key may survive. No operand read is allowed on this job.
+    // The completion word is written after that GEMM error.
+    c_slverr = 1'b1;
+    poke(PD, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_A | REUSE_B, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2400);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd36 || status[15:0] != ST_ERR || da != 0 || db != 0 || c_slverr) begin
+      $error("wboth t=%0d st=%h arA=%0d arB=%0d arm=%0d",
+             ticket, status, da, db, c_slverr);
+      errors++;
+    end
+    expect_w("wboth-word", PD, CPL_ERR_36);
+    c_slverr = 1'b0;
+    retire_cpl();
+
+    // Both flags are set, and both operands are read again.
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd8, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_A | REUSE_B, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2500);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd37 || status[15:0] != ST_OK || da == 0 || db == 0) begin
+      $error("miss-wboth t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("miss-wboth", PC, C_AP);
+    expect_w("miss-wboth-last", PC + 64'd8, C_AP);
+    retire_cpl();
+
+    // The reload leaves both resident.
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd8, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_A | REUSE_B, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2600);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd38 || status[15:0] != ST_OK || da != 0 || db != 0) begin
+      $error("hit-wboth t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("hit-wboth", PC, C_AP);
+    expect_w("hit-wboth-last", PC + 64'd8, C_AP);
+    retire_cpl();
+
+    // A is already skipped before B is loaded. The B beat is SLVERR.
+    // This job must not read A, and it must not leave A resident.
+    b_slverr = 1'b1;
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_A, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2700);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd39 || status[15:0] != ST_ERR || da != 0 || db == 0 || b_slverr) begin
+      $error("bslverr t=%0d st=%h arA=%0d arB=%0d arm=%0d",
+             ticket, status, da, db, b_slverr);
+      errors++;
+    end
+    b_slverr = 1'b0;
+    retire_cpl();
+
+    // The failed B read dropped A. The next request reads A again.
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd8, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_A, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2800);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd40 || status[15:0] != ST_OK || da == 0) begin
+      $error("miss-bslverr t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("miss-bslverr", PC, C_AP);
+    expect_w("miss-bslverr-last", PC + 64'd8, C_AP);
+    retire_cpl();
+
+    // That reload leaves A resident.
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd8, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_A, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2900);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd41 || status[15:0] != ST_OK || da != 0 || db == 0) begin
+      $error("hit-bslverr t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("hit-bslverr", PC, C_AP);
+    expect_w("hit-bslverr-last", PC + 64'd8, C_AP);
+    retire_cpl();
+
+    // A is resident. GEMM skips A and writes C. Only the completion
+    // word fails, so the key must still be there afterward.
+    d_slverr = 1'b1;
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd8, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PD, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_A, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2A00);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd42 || status[15:0] != ST_ERR || da != 0 || db == 0 || d_slverr) begin
+      $error("cplerr t=%0d st=%h arA=%0d arB=%0d arm=%0d",
+             ticket, status, da, db, d_slverr);
+      errors++;
+    end
+    expect_w("cplerr", PC, C_AP);
+    expect_w("cplerr-last", PC + 64'd8, C_AP);
+    // Sticky status is ST_ERR. The stored word still says ST_OK.
+    expect_w("cplerr-word", PD, CPL_OK_42);
+    d_slverr = 1'b0;
+    retire_cpl();
+
+    // The completion failure did not drop A.
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd8, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_A, 32'd2, 32'd2, 32'd8,
+                  PA + 64'd32, PB + 64'd64, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2B00);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd43 || status[15:0] != ST_OK || da != 0 || db == 0) begin
+      $error("hit-cplerr t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("hit-cplerr", PC, C_AP);
+    expect_w("hit-cplerr-last", PC + 64'd8, C_AP);
+    retire_cpl();
+
+    // Host plan_gemm_s8_va_turbo_test on 16x8x8: two 8x8 panels, lda=k=8.
+    // The second panel starts at A row 8 and requests resident B.
+    for (int wi = 0; wi < 16; wi++) poke(PA + 64'(wi) * 64'd8, 64'h0101_0101_0101_0101);
+    for (int wi = 0; wi < 8; wi++) poke(PB + 64'(wi) * 64'd8, 64'h0101_0101_0101_0101);
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd248, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(32'h0, 32'd8, 32'd8, 32'd8, PA, PB, 16'd8, 16'd8);
+    apb_write(16'h0108, 32'h0000_2C00);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd44 || status[15:0] != ST_OK || da == 0 || db == 0) begin
+      $error("sched t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("sched", PC, C_K8);
+    expect_w("sched-last", PC + 64'd248, C_K8);
+    retire_cpl();
+
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd248, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_B, 32'd8, 32'd8, 32'd8, PA + 64'd64, PB, 16'd8, 16'd8);
+    apb_write(16'h0108, 32'h0000_2D00);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd45 || status[15:0] != ST_OK || da == 0 || db != 0) begin
+      $error("sched-b t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("sched-b", PC, C_K8);
+    expect_w("sched-b-last", PC + 64'd248, C_K8);
+    retire_cpl();
+
+    // Host 8x8x16 splits at panel K=8. lda=16. The second panel's
+    // pointers move by 8, so it must read B. Repeating that panel skips.
+    for (int wi = 0; wi < 16; wi++) begin
+      poke(PA + 64'(wi) * 64'd8, 64'h0101_0101_0101_0101);
+      poke(PB + 64'(wi) * 64'd8, 64'h0101_0101_0101_0101);
+    end
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd248, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(32'h0, 32'd8, 32'd8, 32'd8, PA, PB, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2E00);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd46 || status[15:0] != ST_OK || da == 0 || db == 0) begin
+      $error("ksplit t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("ksplit", PC, C_K8);
+    expect_w("ksplit-last", PC + 64'd248, C_K8);
+    retire_cpl();
+
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd248, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(32'h0, 32'd8, 32'd8, 32'd8, PA + 64'd8, PB + 64'd8, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_2F00);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd47 || status[15:0] != ST_OK || da == 0 || db == 0) begin
+      $error("ksplit-2 t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("ksplit-2", PC, C_K8);
+    expect_w("ksplit-2-last", PC + 64'd248, C_K8);
+    retire_cpl();
+
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd248, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_B, 32'd8, 32'd8, 32'd8, PA + 64'd8, PB + 64'd8, 16'd16, 16'd16);
+    apb_write(16'h0108, 32'h0000_3000);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd48 || status[15:0] != ST_OK || da == 0 || db != 0) begin
+      $error("ksplit-hit t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("ksplit-hit", PC, C_K8);
+    expect_w("ksplit-hit-last", PC + 64'd248, C_K8);
+    retire_cpl();
+
+    // Host 8x16x8: two 8x8 panels along N. The second starts at B
+    // column 8 and requests resident A.
+    for (int wi = 0; wi < 8; wi++) poke(PA + 64'(wi) * 64'd8, 64'h0101_0101_0101_0101);
+    for (int wi = 0; wi < 16; wi++) poke(PB + 64'(wi) * 64'd8, 64'h0101_0101_0101_0101);
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd248, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(32'h0, 32'd8, 32'd8, 32'd8, PA, PB, 16'd8, 16'd8);
+    apb_write(16'h0108, 32'h0000_3100);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd49 || status[15:0] != ST_OK || da == 0 || db == 0) begin
+      $error("nsplit t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("nsplit", PC, C_K8);
+    expect_w("nsplit-last", PC + 64'd248, C_K8);
+    retire_cpl();
+
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    poke(PC + 64'd248, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_A, 32'd8, 32'd8, 32'd8, PA, PB + 64'd64, 16'd8, 16'd8);
+    apb_write(16'h0108, 32'h0000_3200);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd50 || status[15:0] != ST_OK || da != 0 || db == 0) begin
+      $error("nsplit-a t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_w("nsplit-a", PC, C_K8);
+    expect_w("nsplit-a-last", PC + 64'd248, C_K8);
+    retire_cpl();
+
+    // Epoch register. VaTurboEn forwards it. A new epoch misses,
+    // the same epoch hits, and returning to 0 misses again.
+    poke(PA, 64'h0101_0101_0101_0101);
+    poke(PB, 64'h0101_0101_0101_0101);
+    apb_write(REG_OFF_REUSE_EPOCH, 32'h0);
+    apb_read(REG_OFF_REUSE_EPOCH, status);
+    if (status != 32'h0) begin
+      $error("epoch readback %h", status);
+      errors++;
+    end
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(32'h0, 32'd2, 32'd2, 32'd1, PA, PB, 16'd1, 16'd1);
+    apb_write(16'h0108, 32'h0000_3300);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd51 || status[15:0] != ST_OK || da == 0 || db == 0) begin
+      $error("epoch-prime t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_c("epoch-prime", PC);
+    retire_cpl();
+
+    apb_write(REG_OFF_REUSE_EPOCH, 32'h1);
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_B, 32'd2, 32'd2, 32'd1, PA, PB, 16'd1, 16'd1);
+    apb_write(16'h0108, 32'h0000_3400);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd52 || status[15:0] != ST_OK || db == 0) begin
+      $error("epoch-miss t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_c("epoch-miss", PC);
+    retire_cpl();
+
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_B, 32'd2, 32'd2, 32'd1, PA, PB, 16'd1, 16'd1);
+    apb_write(16'h0108, 32'h0000_3500);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd53 || status[15:0] != ST_OK || da == 0 || db != 0) begin
+      $error("epoch-hit t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_c("epoch-hit", PC);
+    retire_cpl();
+
+    apb_write(REG_OFF_REUSE_EPOCH, 32'h0);
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(REUSE_B, 32'd2, 32'd2, 32'd1, PA, PB, 16'd1, 16'd1);
+    apb_write(16'h0108, 32'h0000_3600);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd54 || status[15:0] != ST_OK || db == 0) begin
+      $error("epoch-back t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_c("epoch-back", PC);
+    retire_cpl();
+
+    // Level register. [3:0] is the request. [11:8] is applied and stays 0.
+    // A stored request does not change the exact product. The PMU copy
+    // updates when the next GEMM completes.
+    apb_write(REG_OFF_VA_TURBO_LEVEL, 32'hFFFF_FFFF);
+    apb_read(REG_OFF_VA_TURBO_LEVEL, status);
+    if (status != 32'h0000_000F) begin
+      $error("level mask %h", status);
+      errors++;
+    end
+    apb_write(REG_OFF_VA_TURBO_LEVEL, 32'h0000_0109);
+    apb_read(REG_OFF_VA_TURBO_LEVEL, status);
+    if (status != 32'h0000_0009) begin
+      $error("level req %h", status);
+      errors++;
+    end
+    apb_read(PMU_OFF_VA_TURBO_LEVEL, status);
+    if (status != 32'h0) begin
+      $error("level pmu early %h", status);
+      errors++;
+    end
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(32'h0, 32'd2, 32'd2, 32'd1, PA, PB, 16'd1, 16'd1);
+    apb_write(16'h0108, 32'h0000_3700);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd55 || status[15:0] != ST_OK || da == 0 || db == 0) begin
+      $error("level-job t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_c("level-job", PC);
+    retire_cpl();
+    apb_read(PMU_OFF_VA_TURBO_LEVEL, status);
+    if (status != 32'h0000_0009) begin
+      $error("level pmu %h", status);
+      errors++;
+    end
+
+    // Recipe id [4:0] is {bank, subcode}. [12:8] is the applied id and
+    // stays 0. A stored id does not change the exact product.
+    apb_write(REG_OFF_VA_TURBO_RECIPE, 32'hFFFF_FFFF);
+    apb_read(REG_OFF_VA_TURBO_RECIPE, status);
+    if (status != 32'h0000_001F) begin
+      $error("recipe mask %h", status);
+      errors++;
+    end
+    apb_write(REG_OFF_VA_TURBO_RECIPE, 32'h0000_0110);
+    apb_read(REG_OFF_VA_TURBO_RECIPE, status);
+    if (status != 32'h0000_0010) begin
+      $error("recipe req %h", status);
+      errors++;
+    end
+    apb_read(PMU_OFF_VA_TURBO_RECIPE, status);
+    if (status != 32'h0) begin
+      $error("recipe pmu early %h", status);
+      errors++;
+    end
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(32'h0, 32'd2, 32'd2, 32'd1, PA, PB, 16'd1, 16'd1);
+    apb_write(16'h0108, 32'h0000_3800);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd56 || status[15:0] != ST_OK || da == 0 || db == 0) begin
+      $error("recipe-job t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_c("recipe-job", PC);
+    retire_cpl();
+    apb_read(PMU_OFF_VA_TURBO_RECIPE, status);
+    if (status != 32'h0000_0010) begin
+      $error("recipe pmu %h", status);
+      errors++;
+    end
+
+    // A window claim dies when the level, recipe, or epoch is written.
+    // The claim does not change the exact product.
+    apb_write(REG_OFF_VA_TURBO_WINDOW, 32'h1);
+    apb_read(REG_OFF_VA_TURBO_WINDOW, status);
+    if (status != 32'h1) begin
+      $error("window set %h", status);
+      errors++;
+    end
+    apb_write(REG_OFF_VA_TURBO_LEVEL, 32'h9);
+    apb_read(REG_OFF_VA_TURBO_WINDOW, status);
+    if (status != 32'h0) begin
+      $error("window survived a level write %h", status);
+      errors++;
+    end
+    apb_write(REG_OFF_VA_TURBO_WINDOW, 32'h1);
+    apb_read(PMU_OFF_VA_TURBO_WINDOW, status);
+    if (status != 32'h0) begin
+      $error("window pmu early %h", status);
+      errors++;
+    end
+    poke(PC, 64'hDEAD_BEEF_DEAD_BEEF);
+    a0 = ar_a; b0 = ar_b;
+    latch_gemm_at(32'h0, 32'd2, 32'd2, 32'd1, PA, PB, 16'd1, 16'd1);
+    apb_write(16'h0108, 32'h0000_3900);
+    wait_cpl(ticket, status);
+    da = ar_a - a0; db = ar_b - b0;
+    if (ticket != 32'd57 || status[15:0] != ST_OK || da == 0 || db == 0) begin
+      $error("window-job t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+      errors++;
+    end
+    expect_c("window-job", PC);
+    retire_cpl();
+    apb_read(PMU_OFF_VA_TURBO_WINDOW, status);
+    if (status != 32'h1) begin
+      $error("window pmu %h", status);
+      errors++;
+    end
+
     if (errors == 0) begin
-      $display("DESC reuse m=1024 n=512 k=16 ptr=ab ld=1 fmt=1 err=1 werr=1 odd=1");
+      $display("DESC reuse m=1024 n=512 k=16 ptr=ab ld=1 fmt=1 err=1 werr=1 odd=1 asl=1 wboth=1 bsl=1 cpl=1 sched=1 ksplit=1 nsplit=1 epoch=1 lvl=1 recipe=1 window=1");
       $display("PASS tb_g6lc_ai_desc_reuse");
       $finish;
     end else begin

@@ -4,7 +4,7 @@
 # I3-lite bandwidth PMU: after a 32x32 all-ones GEMM, island MMIO must report
 # non-zero R/W beats and active cycles at 0x180/184/188, and a positive
 # sustained GB/s x1000 at 0x18C. CAP DRAM (0x18) high half mirrors that
-# milli-GB/s (16-bit saturate); low half is I1-lite NoC nameplate (8 GB/s).
+# milli-GB/s (16-bit saturate); low half is the class-0 NoC nameplate (16 GB/s live).
 # 0x2C is the full 32-bit measured milli-GB/s (F14).
 
   .equ AI_BASE,     0x40000000
@@ -26,6 +26,13 @@
   .section .text.init
   .globl _start
 _start:
+  # g6lc64_ai has two cores and both start here: only hart 0 drives the island;
+  # any other hart parks, otherwise every MMIO doorbell/claim is issued twice.
+  csrr t0, mhartid
+  beqz t0, 1f
+2: wfi
+  j    2b
+1:
   li   sp, 0x80008000
   la   t0, trap_vec
   csrw mtvec, t0
@@ -120,7 +127,7 @@ _start:
   and  t0, t0, t3
   bne  t0, t2, fail
   and  t1, t1, t3
-  li   t2, 8
+  li   t2, 16                  # live class-0 nameplate: 64 bit x 2 GHz
   bne  t1, t2, fail
   # F14: 0x2C is the unsaturated 32-bit measured milli-GB/s
   lw   t1, CAP_DRAM_MEAS(s0)

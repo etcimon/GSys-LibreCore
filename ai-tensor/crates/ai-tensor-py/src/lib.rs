@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 //! Python: `import ai_tensor_native`
 
-use ai_tensor_rt::{run_gemm_s8, Device, MmioDevice, SimDevice};
+use ai_tensor_abi::{AccTile, CapRegs, VA_TURBO_TEST_MACS};
+use ai_tensor_rt::{execute_va_turbo_test_s8_at, run_gemm_s8, Device, MmioDevice, SimDevice};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -23,6 +24,42 @@ fn caps_to_dict(py: Python<'_>, caps: ai_tensor_rt::Caps) -> PyResult<Py<PyDict>
     Ok(d.into())
 }
 
+fn is_directed(caps: ai_tensor_rt::Caps) -> bool {
+    caps.macs_per_cycle == VA_TURBO_TEST_MACS && caps.acc_tile == AccTile::VA_TURBO_TEST
+}
+
+fn directed_sim() -> SimDevice {
+    let mut caps = ai_tensor_rt::Caps::default();
+    caps.macs_per_cycle = VA_TURBO_TEST_MACS;
+    caps.acc_tile = AccTile::VA_TURBO_TEST;
+    SimDevice::with_caps(caps)
+}
+
+fn va_turbo_dict<D: Device>(
+    py: Python<'_>,
+    dev: &mut D,
+    m: u32,
+    n: u32,
+    k: u32,
+    a: &[i8],
+    b: &[i8],
+    ticket: u32,
+) -> PyResult<Py<PyDict>> {
+    let got = execute_va_turbo_test_s8_at(dev, m, n, k, a, b, ticket)
+        .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let d = PyDict::new_bound(py);
+    d.set_item("c", got.c)?;
+    d.set_item("flags", got.flags)?;
+    d.set_item("read_a", got.read_a)?;
+    d.set_item("read_b", got.read_b)?;
+    d.set_item("hit_a", got.hit_a)?;
+    d.set_item("hit_b", got.hit_b)?;
+    d.set_item("reuse_enabled", got.reuse_enabled)?;
+    d.set_item("requested_level", 0)?;
+    d.set_item("applied_level", 0)?;
+    Ok(d.into())
+}
+
 fn pmu_to_dict(py: Python<'_>, p: ai_tensor_abi::PmuSnapshot) -> PyResult<Py<PyDict>> {
     let d = PyDict::new_bound(py);
     d.set_item("r_beats", p.r_beats)?;
@@ -40,11 +77,37 @@ struct Sim {
 #[pymethods]
 impl Sim {
     #[new]
-    #[pyo3(signature = (software_reference=false))]
-    fn new(software_reference: bool) -> Self {
+    #[pyo3(signature = (software_reference=false, directed=false))]
+    fn new(software_reference: bool, directed: bool) -> Self {
+        let dev = if software_reference {
+            SimDevice::with_caps(ai_tensor_rt::Caps::software_reference_v2())
+        } else if directed {
+            directed_sim()
+        } else {
+            SimDevice::new()
+        };
         Self {
-            inner: Mutex::new(if software_reference { SimDevice::with_caps(ai_tensor_rt::Caps::software_reference_v2()) } else { SimDevice::new() }),
+            inner: Mutex::new(dev),
         }
+    }
+
+    fn reports_directed_tile(&self) -> bool {
+        is_directed(self.inner.lock().unwrap().caps())
+    }
+
+    #[pyo3(signature = (m, n, k, a, b, ticket=1))]
+    fn run_va_turbo_test_s8(
+        &self,
+        py: Python<'_>,
+        m: u32,
+        n: u32,
+        k: u32,
+        a: Vec<i8>,
+        b: Vec<i8>,
+        ticket: u32,
+    ) -> PyResult<Py<PyDict>> {
+        let mut dev = self.inner.lock().unwrap();
+        va_turbo_dict(py, &mut *dev, m, n, k, &a, &b, ticket)
     }
 
     fn gemm_s8(
@@ -97,13 +160,41 @@ struct Mmio {
 #[pymethods]
 impl Mmio {
     #[new]
-    #[pyo3(signature = (software_reference=false))]
-    fn new(software_reference: bool) -> Self {
-        let mut d = if software_reference { MmioDevice::software_reference_v2() } else { MmioDevice::new() };
+    #[pyo3(signature = (software_reference=false, directed=false))]
+    fn new(software_reference: bool, directed: bool) -> Self {
+        let mut d = if software_reference {
+            MmioDevice::software_reference_v2()
+        } else if directed {
+            let mut cap = CapRegs::island_p3_sim_default();
+            cap.macs_per_cycle = VA_TURBO_TEST_MACS;
+            cap.acc_tile = AccTile::VA_TURBO_TEST;
+            MmioDevice::with_cap(cap)
+        } else {
+            MmioDevice::new()
+        };
         d.probe_caps();
         Self {
             inner: Mutex::new(d),
         }
+    }
+
+    fn reports_directed_tile(&self) -> bool {
+        is_directed(self.inner.lock().unwrap().caps())
+    }
+
+    #[pyo3(signature = (m, n, k, a, b, ticket=1))]
+    fn run_va_turbo_test_s8(
+        &self,
+        py: Python<'_>,
+        m: u32,
+        n: u32,
+        k: u32,
+        a: Vec<i8>,
+        b: Vec<i8>,
+        ticket: u32,
+    ) -> PyResult<Py<PyDict>> {
+        let mut dev = self.inner.lock().unwrap();
+        va_turbo_dict(py, &mut *dev, m, n, k, &a, &b, ticket)
     }
 
     fn probe_caps(&self, py: Python<'_>) -> PyResult<Py<PyDict>> {

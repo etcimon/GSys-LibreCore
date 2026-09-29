@@ -11,7 +11,8 @@
 `include "axi/typedef.svh"
 `include "axi/assign.svh"
 
-module tb_g6lc_ai_desc_island;
+module tb_g6lc_ai_desc_island #(parameter bit SmallGeometry = 1'b0, parameter bit QueuedTest = 1'b0,
+                                parameter bit AccumulateEn = 1'b1);
   import g6lc_ai_desc_pkg::*;
   import g6lc_ai_island_cfg_pkg::*;
 
@@ -21,6 +22,19 @@ module tb_g6lc_ai_desc_island;
   localparam int unsigned UW = 1;
   localparam logic [63:0] DRAM = 64'h8000_0000;
   localparam logic [63:0] CROSS = DRAM + 64'h8;
+
+  function automatic ai_island_cfg_t test_cfg();
+    ai_island_cfg_t cfg = AiIslandSimChans2;
+    cfg.CommandDepth = QueuedTest ? 2 : 0;
+    if (SmallGeometry) begin
+      cfg.MacsPerCycle = 8;
+      cfg.AccTileM = 16;
+      cfg.AccTileN = 16;
+      cfg.AccTileK = 64;
+    end
+    return cfg;
+  endfunction
+  localparam ai_island_cfg_t TestCfg = test_cfg();
 
   logic clk = 0;
   logic rst_n = 0;
@@ -33,17 +47,25 @@ module tb_g6lc_ai_desc_island;
   typedef logic [DW/8-1:0] strb_t;
   `AXI_TYPEDEF_ALL(gd, addr_t, id_t, data_t, strb_t, user_t)
 
-  gd_req_t  dma_req, dma_req_g;
-  gd_resp_t dma_rsp, dma_rsp_g;
-  assign dma_req_g = rst_n ? dma_req : '0;
-  assign dma_rsp_g = rst_n ? dma_rsp : '0;
+  gd_req_t  dma_req /*verilator split_var*/, dma_req_g /*verilator split_var*/;
+  gd_resp_t dma_rsp /*verilator split_var*/, dma_rsp_g /*verilator split_var*/;
+  logic hold_dma_r = 1'b0;
+  always_comb begin
+    dma_req_g = rst_n ? dma_req : '0;
+    dma_rsp_g = rst_n ? dma_rsp : '0;
+    if (hold_dma_r) begin
+      dma_req_g.r_ready = 1'b0;
+      dma_rsp_g.r_valid = 1'b0;
+    end
+  end
 
   logic psel, penable, pwrite, pready, pslverr, irq;
   logic [31:0] paddr, pwdata, prdata;
   logic init_done;
   logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r, ch_w;
-  int unsigned ar_cnt, aw_cnt;
+  int unsigned ar_cnt, aw_cnt, last_apb_read_cycles;
   logic        sb_valid = 1'b0;
+  logic        sb_ready;
   logic [7:0]  sb_qid   = '0;
   logic [31:0] sb_ticket = '0;
   logic [63:0] sb_ptr   = '0;
@@ -52,6 +74,71 @@ module tb_g6lc_ai_desc_island;
   logic [63:0] cap_aw, cap_wdata;
   logic [7:0]  cap_wstrb;
   logic [2:0]  cap_awsize;
+  localparam int unsigned RateClocks[4] = '{2_000_000, 1_500_000, 500_000, 0};
+  localparam int unsigned RateReadBytes[4] = '{8, 8, 64, 8};
+  logic rate_start = 1'b0;
+  logic [31:0] rate_reads, rate_writes, rate_cycles;
+  logic [3:0] rate_ready, rate_valid;
+  logic [3:0][31:0] rate_values;
+  for (genvar i = 0; i < 4; i++) begin : gen_rate_math
+    g6lc_ai_pmu_rate #(.ReadBytes(RateReadBytes[i]), .WriteBytes(8), .ClockKhz(RateClocks[i])) rate_dut (
+        .clk_i(clk), .rst_ni(rst_n), .start_i(rate_start),
+        .reads_i(rate_reads), .writes_i(rate_writes), .cycles_i(rate_cycles),
+        .ready_o(rate_ready[i]), .valid_o(rate_valid[i]), .rate_o(rate_values[i])
+    );
+  end
+
+  task automatic queued_memory_word(input logic [63:0] address, input logic write_word,
+                                    input logic [63:0] value, output logic [63:0] observed);
+    logic [63:0] offset, local_address;
+    int index;
+    offset = address - DRAM;
+    local_address = ((offset >> (TestCfg.DramChanShift + 1)) << TestCfg.DramChanShift) |
+                    (offset & ((64'd1 << TestCfg.DramChanShift) - 1));
+    index = int'(local_address >> 3);
+    @(negedge clk);
+    if (offset[TestCfg.DramChanShift]) begin
+      if (write_word) i_mem.gen_sim_stripe.gen_ch[1].i_sram.gen_cut[0].i_tc_sram_wrapper.i_tc_sram.sram[index] = value;
+      observed = i_mem.gen_sim_stripe.gen_ch[1].i_sram.gen_cut[0].i_tc_sram_wrapper.i_tc_sram.sram[index];
+    end else begin
+      if (write_word) i_mem.gen_sim_stripe.gen_ch[0].i_sram.gen_cut[0].i_tc_sram_wrapper.i_tc_sram.sram[index] = value;
+      observed = i_mem.gen_sim_stripe.gen_ch[0].i_sram.gen_cut[0].i_tc_sram_wrapper.i_tc_sram.sram[index];
+    end
+  endtask
+
+  task automatic check_rate(input logic [31:0] reads, writes, elapsed);
+    logic [3:0] seen;
+    logic [127:0] reference_rate;
+    logic [31:0] expected_rate;
+    @(negedge clk);
+    if (rate_ready != 4'hf) $fatal(1, "RATE_MATH not idle");
+    rate_reads = reads;
+    rate_writes = writes;
+    rate_cycles = elapsed;
+    rate_start = 1;
+    @(negedge clk);
+    rate_start = 0;
+    rate_reads = ~reads;
+    rate_writes = ~writes;
+    rate_cycles = ~elapsed;
+    seen = '0;
+    for (int guard = 0; guard < 256 && seen != 4'hf; guard++) begin
+      for (int i = 0; i < 4; i++) begin
+        if (rate_valid[i] && !seen[i]) begin
+          reference_rate = elapsed == 0 ? 128'd0 :
+              ((128'(reads) * 128'(RateReadBytes[i]) + 128'(writes) * 128'd8) *
+               128'(RateClocks[i])) / 128'(elapsed) / 128'd1000;
+          expected_rate = reference_rate > 128'hffff_ffff ? 32'hffff_ffff : 32'(reference_rate);
+          if (rate_values[i] !== expected_rate)
+            $fatal(1, "RATE_MATH i=%0d r=%0d w=%0d cy=%0d got=%0d expected=%0d", i, reads, writes, elapsed, rate_values[i], expected_rate);
+          seen[i] = 1;
+        end
+      end
+      @(negedge clk);
+    end
+    if (seen != 4'hf) $fatal(1, "RATE_MATH timeout seen=%h", seen);
+    repeat (2) @(negedge clk);
+  endtask
 
   AXI_BUS #(.AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(DW), .AXI_ID_WIDTH(IW), .AXI_USER_WIDTH(UW))
       dma ();
@@ -88,8 +175,9 @@ module tb_g6lc_ai_desc_island;
   end
 
   g6lc_ai_island_apb #(
-      .IslandCfg(AiIslandSimChans2),
+      .IslandCfg(TestCfg),
       .EnableDmaFetch(1'b1),
+      .AccumulateEn(AccumulateEn),
       .AxiDataWidth(DW),
       .AxiIdWidth(IW),
       .axi_req_t(gd_req_t),
@@ -99,9 +187,9 @@ module tb_g6lc_ai_desc_island;
       .psel_i(psel), .penable_i(penable), .pwrite_i(pwrite),
       .paddr_i(paddr), .pwdata_i(pwdata),
       .prdata_o(prdata), .pready_o(pready), .pslverr_o(pslverr), .irq_o(irq),
-      .sb_enq_valid_i(sb_valid), .sb_qid_i(sb_qid), .sb_ticket_i(sb_ticket),
+      .sb_enq_valid_i(sb_valid), .sb_enq_ready_o(sb_ready), .sb_qid_i(sb_qid), .sb_ticket_i(sb_ticket),
       .sb_desc_ptr_i(sb_ptr),
-      .sb_last_ticket_o(), .sb_last_status_o(), .sb_has_completion_o(),
+      .sb_last_ticket_o(), .sb_last_status_o(), .sb_has_completion_o(), .sb_retired_valid_o(), .sb_retired_ticket_o(),
       .axi_dma_req_o(dma_req), .axi_dma_resp_i(dma_rsp_g),
       .dram_init_done_i(init_done),
       .ch_r_beats_i(ch_r), .ch_w_beats_i(ch_w)
@@ -117,7 +205,7 @@ module tb_g6lc_ai_desc_island;
       .ch_r_beats_o(ch_r), .ch_w_beats_o(ch_w)
   );
 
-  task automatic apb_write(input logic [15:0] addr, input logic [31:0] data);
+  task automatic apb_write(input logic [15:0] addr, input logic [31:0] data, input bit expected_error = 0);
     int guard;
     @(negedge clk);
     psel = 1; penable = 0; pwrite = 1; paddr = {16'b0, addr}; pwdata = data;
@@ -131,6 +219,7 @@ module tb_g6lc_ai_desc_island;
       @(negedge clk);
     end while (!pready && guard < 30);
     if (!pready) $fatal(1, "apb write timeout %h", addr);
+    if (pslverr !== expected_error) $fatal(1, "apb write error %h got=%b expected=%b", addr, pslverr, expected_error);
     psel = 0; penable = 0; pwrite = 0;
   endtask
 
@@ -146,8 +235,10 @@ module tb_g6lc_ai_desc_island;
       @(posedge clk);
       guard++;
       @(negedge clk);
-    end while (!pready && guard < 30);
+    end while (!pready && guard < ((addr == PMU_OFF_GBPS_X1000 ||
+        addr == CAP_OFF_DRAM_MEAS_X1000 || addr == CAP_OFF_DRAM_GBPS) ? 256 : 30));
     if (!pready) $fatal(1, "apb read timeout %h", addr);
+    last_apb_read_cycles = guard;
     data = prdata;
     psel = 0; penable = 0;
   endtask
@@ -157,7 +248,7 @@ module tb_g6lc_ai_desc_island;
     int polls;
     sticky = '0;
     polls = 0;
-    while (!(sticky & 32'h1) && polls < 400) begin
+    while (!(sticky & 32'h1) && polls < 4000) begin
       apb_read(16'h010C, sticky);
       polls++;
     end
@@ -1071,6 +1162,380 @@ module tb_g6lc_ai_desc_island;
                ticket, status, aw_cnt, ar_cnt, aw0, ar0);
     end
 
+    retire_cpl();
+    if ($test$plusargs("review_qid")) begin
+      int unsigned aw0, ar0;
+      aw0 = aw_cnt;
+      ar0 = ar_cnt;
+      for (int q = 0; q < 2; q++) begin
+        automatic logic [7:0] bad_qid = q == 0 ? 8'd2 : 8'd255;
+        apb_write(16'h0118, 32'(DRAM));
+        apb_write(16'h011C, 32'h0);
+        apb_write(16'h0108, 32'h8000_6400 | 32'(bad_qid));
+        wait_cpl(ticket, status);
+        if (ticket != 100 || status[15:0] != ST_BAD_QID || ar_cnt != ar0 || aw_cnt != aw0)
+          $fatal(1, "DMA_QID doorbell q=%0d ticket=%0d status=%h ar=%0d aw=%0d",
+                 bad_qid, ticket, status, ar_cnt, aw_cnt);
+        retire_cpl();
+        sb_kick(bad_qid, 32'd101, DRAM);
+        wait_cpl(ticket, status);
+        if (ticket != 101 || status[15:0] != ST_BAD_QID || ar_cnt != ar0 || aw_cnt != aw0)
+          $fatal(1, "DMA_QID sideband q=%0d ticket=%0d status=%h ar=%0d aw=%0d",
+                 bad_qid, ticket, status, ar_cnt, aw_cnt);
+        retire_cpl();
+      end
+      $display("PASS DMA_QID checks=4");
+    end
+    if ($test$plusargs("review_refuse_capacity") || $test$plusargs("review_fetch_capacity")) begin
+      int unsigned ar0, aw0, first;
+      bit fetch_error_case;
+      fetch_error_case = $test$plusargs("review_fetch_capacity");
+      first = fetch_error_case ? 300 : 200;
+      ar0 = ar_cnt;
+      aw0 = aw_cnt;
+      latch_job_ex(OP_LAYOUT, 32'h0, 32'd1, 32'd1, 32'd1, 16'd1, 16'd1,
+                   DRAM, DRAM, DRAM, 64'd0, 64'd0);
+      for (int unsigned t = first; t < first + 16; t++) begin
+        apb_write(16'h0108, 32'(t) << 8);
+        settle_job();
+      end
+      apb_write(16'h0118, 32'(fetch_error_case ? CROSS : DRAM));
+      apb_write(16'h011C, 32'h0);
+      apb_write(16'h0108, 32'h8000_0000 | ((first + 16) << 8) | (fetch_error_case ? 32'd0 : 32'd2));
+      settle_job();
+      apb_write(16'h0140, 32'h0001_0063);
+      apb_write(16'h0108, (first + 17) << 8);
+      for (int unsigned t = first; t < first + 16; t++) begin
+        wait_cpl(ticket, status);
+        if (ticket != t || status[15:0] != ST_OK)
+          $fatal(1, "REFUSE_CAPACITY old ticket=%0d expected=%0d status=%h", ticket, t, status);
+        apb_write(16'h010C, 32'h1);
+        settle_job();
+      end
+      wait_cpl(ticket, status);
+      if (ticket != first + 16 || status[15:0] != (fetch_error_case ? ST_ERR : ST_BAD_QID))
+        $fatal(1, "REFUSE_CAPACITY error ticket=%0d status=%h", ticket, status);
+      apb_write(16'h010C, 32'h1);
+      settle_job();
+      wait_cpl(ticket, status);
+      if (ticket != first + 17 || status[15:0] != ST_BAD_VER || ar_cnt != ar0 || aw_cnt != aw0)
+        $fatal(1, "REFUSE_CAPACITY next ticket=%0d status=%h ar=%0d aw=%0d", ticket, status, ar_cnt, aw_cnt);
+      retire_cpl();
+      if (fetch_error_case) $display("PASS FETCH_CAPACITY checks=18");
+      else $display("PASS REFUSE_CAPACITY checks=18");
+    end
+    if ($test$plusargs("review_fetch_identity")) begin
+      int ar0, aw0, seen_fetch, seen_latch;
+      ar0 = ar_cnt;
+      aw0 = aw_cnt;
+      seen_fetch = 0;
+      seen_latch = 0;
+      latch_job_ex(OP_LAYOUT, 32'h0, 32'd1, 32'd1, 32'd1, 16'd1, 16'd1,
+                   DRAM, DRAM, DRAM, 64'd0, 64'd0);
+      hold_dma_r = 1'b1;
+      apb_write(16'h0118, 32'(DRAM));
+      apb_write(16'h011C, 32'h0);
+      apb_write(16'h0108, 32'h8001_9000);
+      for (int cycles = 0; cycles < 100 && ar_cnt == ar0; cycles++) @(negedge clk);
+      if (ar_cnt != ar0 + 1) $fatal(1, "FETCH_IDENTITY missing in-flight AR witness");
+      apb_write(16'h0108, 32'h0001_9100);
+      repeat (8) @(negedge clk);
+      hold_dma_r = 1'b0;
+      for (int c = 0; c < 2; c++) begin
+        wait_cpl(ticket, status);
+        if (ticket == 400 && status[15:0] == ST_BAD_VER) seen_fetch++;
+        else if (ticket == 401 && status[15:0] == ST_OK) seen_latch++;
+        else $fatal(1, "FETCH_IDENTITY unexpected ticket=%0d status=%h", ticket, status);
+        apb_write(16'h010C, 32'h1);
+      end
+      settle_job();
+      if (seen_fetch != 1 || seen_latch != 1 || ar_cnt != ar0 + 1 || aw_cnt != aw0)
+        $fatal(1, "FETCH_IDENTITY conservation fetch=%0d latch=%0d ar=%0d aw=%0d", seen_fetch, seen_latch, ar_cnt, aw_cnt);
+      apb_read(16'h010C, status);
+      if (status[0]) $fatal(1, "FETCH_IDENTITY extra completion");
+      $display("PASS FETCH_IDENTITY checks=2");
+    end
+    if ($test$plusargs("review_pmu") || $test$plusargs("review_iterative_pmu")) begin
+      logic [31:0] reads, writes, elapsed, rate, alias_rate;
+      longint unsigned expected;
+      latch_job_ex(OP_GEMM, 32'h0, 32'd16, 32'd16, 32'd64, 16'd64, 16'd64,
+                   DRAM + 64'h100, DRAM + 64'h500, DRAM + 64'h900, 64'd0, 64'd0);
+      apb_write(16'h0108, 32'h0000_6600);
+      wait_cpl(ticket, status);
+      if (ticket != 102 || status[15:0] != ST_OK) $fatal(1, "PMU_GEMM failed");
+      apb_read(PMU_OFF_R_BEATS, reads);
+      apb_read(PMU_OFF_W_BEATS, writes);
+      apb_read(PMU_OFF_CYCLES, elapsed);
+      apb_read(PMU_OFF_GBPS_X1000, rate);
+      if ($test$plusargs("review_iterative_pmu")) begin
+        if (last_apb_read_cycles <= 4) $fatal(1, "PMU_STILL_COMBINATIONAL cycles=%0d", last_apb_read_cycles);
+        $display("PASS ITERATIVE_PMU wait=%0d", last_apb_read_cycles);
+      end
+      if (reads != 256 || writes != 128 || elapsed == 0)
+        $fatal(1, "PMU_COUNTS r=%0d w=%0d cy=%0d", reads, writes, elapsed);
+      expected = ((64'(reads) + 64'(writes)) * 64'd8 * 64'(TestCfg.ClockKhz)) / elapsed / 1000;
+      if (64'(rate) != expected) $fatal(1, "PMU_RATE got=%0d expected=%0d", rate, expected);
+      apb_read(CAP_OFF_DRAM_MEAS_X1000, alias_rate);
+      if (alias_rate != rate) $fatal(1, "PMU_RATE full capability alias");
+      apb_read(CAP_OFF_DRAM_GBPS, alias_rate);
+      if (alias_rate[15:0] != 16'(TestCfg.DramGBps) ||
+          alias_rate[31:16] != (rate > 32'hffff ? 16'hffff : rate[15:0]))
+        $fatal(1, "PMU_RATE packed capability alias");
+      retire_cpl();
+      $display("PASS PMU_RATE reads=%0d writes=%0d cycles=%0d rate=%0d", reads, writes, elapsed, rate);
+    end
+    if ($test$plusargs("review_queued")) begin
+      logic [31:0] value;
+      int ar0, aw0;
+      if (!QueuedTest) $fatal(1, "QUEUED_TEST missing configuration");
+      apb_read(CAP_OFF_COMMAND_QUEUE, value);
+      if (value != {16'd2, COMMAND_QUEUE_VERSION, COMMAND_QUEUE_FLAGS})
+        $fatal(1, "QUEUED_CAP got=%h", value);
+      ar0 = ar_cnt;
+      aw0 = aw_cnt;
+      apb_write(REG_OFF_CMD_MODE, 1);
+      apb_read(REG_OFF_CMD_MODE, value);
+      if (value != 1) $fatal(1, "QUEUED_MODE enable");
+      for (int t = 500; t < 519; t++) begin
+        apb_write(REG_OFF_CMD_PTR_LO, 32'(DRAM));
+        apb_write(REG_OFF_CMD_PTR_HI, 0);
+        apb_write(REG_OFF_CMD_TICKET, 32'(t));
+        apb_write(REG_OFF_CMD_QID, 255);
+        apb_write(REG_OFF_CMD_SUBMIT, 1);
+        apb_read(REG_OFF_CMD_RECEIPT_TICKET, value);
+        if (value != 32'(t)) $fatal(1, "QUEUED_RECEIPT ticket=%0d expected=%0d", value, t);
+        apb_read(REG_OFF_CMD_RECEIPT_CODE, value);
+        if (value != (t < 518 ? CMD_ACCEPTED : CMD_FULL))
+          $fatal(1, "QUEUED_RECEIPT status=%0d ticket=%0d", value, t);
+      end
+      apb_read(REG_OFF_CMD_CREDITS, value);
+      if (value != 0) $fatal(1, "QUEUED_CREDITS full=%0d", value);
+      @(negedge clk);
+      sb_qid = 255;
+      sb_ticket = 900;
+      sb_ptr = DRAM;
+      sb_valid = 1;
+      repeat (8) begin
+        @(negedge clk);
+        if (sb_ready) $fatal(1, "QUEUED_SIDEBAND accepted while full");
+      end
+      apb_write(REG_OFF_CMD_MODE, 0, 1);
+      apb_write(REG_OFF_CTL, 0, 1);
+      apb_write(REG_OFF_QUEUE + 16'h10, 0, 1);
+      apb_write(REG_OFF_DOORBELL, 32'h0002_0000, 1);
+      apb_read(REG_OFF_QUEUE + 16'h10, value);
+      if (value != 3) $fatal(1, "QUEUED_PROTECTION changed");
+      fork
+        begin
+          int guard;
+          guard = 0;
+          do begin
+            @(posedge clk);
+            guard++;
+          end while (!sb_ready && guard < 2000);
+          if (!sb_ready) $fatal(1, "QUEUED_SIDEBAND timeout");
+          @(negedge clk);
+          sb_valid = 0;
+        end
+        begin
+          for (int t = 500; t < 518; t++) begin
+            wait_cpl(ticket, status);
+            if (ticket != 32'(t) || status[15:0] != ST_BAD_QID)
+              $fatal(1, "QUEUED_COMPLETION ticket=%0d expected=%0d status=%h", ticket, t, status);
+            apb_write(REG_OFF_CPL, 1);
+          end
+        end
+      join
+      wait_cpl(ticket, status);
+      if (ticket != 900 || status[15:0] != ST_BAD_QID) $fatal(1, "QUEUED_SIDEBAND identity");
+      apb_write(REG_OFF_CPL, 1);
+      settle_job();
+      apb_read(REG_OFF_CMD_ACCEPTED, value);
+      if (value != 18) $fatal(1, "QUEUED_ACCEPTED count=%0d", value);
+      apb_read(REG_OFF_CMD_REJECTED, value);
+      if (value != 1) $fatal(1, "QUEUED_REJECTED count=%0d", value);
+      apb_read(REG_OFF_CMD_CREDITS, value);
+      if (value != 2 || ar_cnt != ar0 || aw_cnt != aw0) $fatal(1, "QUEUED_DRAIN traffic or credits");
+      apb_write(REG_OFF_CMD_MODE, 0);
+      apb_read(REG_OFF_CMD_MODE, value);
+      if (value != 0) $fatal(1, "QUEUED_MODE disable");
+      begin
+        desc_t d;
+        desc_bits_t bits;
+        logic [63:0] observed;
+        d = '0;
+        d.version = ContractVersion;
+        d.op = OP_GEMM;
+        d.m = 2; d.n = 2; d.k = 2;
+        d.ld_ab = {16'd2, 16'd2};
+        d.ptr_a = DRAM + 64'h800;
+        d.ptr_b = DRAM + 64'h880;
+        queued_memory_word(d.ptr_a, 1, 64'h0403_0201, observed);
+        queued_memory_word(d.ptr_b, 1, 64'h0806_0705, observed);
+        for (int job = 0; job < 2; job++) begin
+          d.ptr_c = DRAM + 64'ha00 + 64'(job * 64);
+          bits = desc_to_bits(d);
+          for (int wi = 0; wi < 8; wi++)
+            queued_memory_word(DRAM + 64'h400 + 64'(job * 64 + wi * 8), 1, bits[wi*64 +: 64], observed);
+          queued_memory_word(d.ptr_c, 1, 64'ha5a5_a5a5_a5a5_a5a5, observed);
+          queued_memory_word(d.ptr_c + 8, 1, 64'ha5a5_a5a5_a5a5_a5a5, observed);
+        end
+        apb_write(REG_OFF_CMD_MODE, 1);
+        for (int job = 0; job < 2; job++) begin
+          apb_write(REG_OFF_CMD_PTR_LO, 32'(DRAM + 64'h400 + 64'(job * 64)));
+          apb_write(REG_OFF_CMD_PTR_HI, 0);
+          apb_write(REG_OFF_CMD_TICKET, 32'hf000_0001 + 32'(job));
+          apb_write(REG_OFF_CMD_QID, 0);
+          apb_write(REG_OFF_CMD_SUBMIT, 1);
+          apb_read(REG_OFF_CMD_RECEIPT_CODE, value);
+          if (value != CMD_ACCEPTED) $fatal(1, "QUEUED_GEMM admission");
+        end
+        for (int job = 0; job < 2; job++) begin
+          wait_cpl(ticket, status);
+          if (ticket != 32'hf000_0001 + 32'(job) || status[15:0] != ST_OK)
+            $fatal(1, "QUEUED_GEMM completion ticket=%h status=%h", ticket, status);
+          queued_memory_word(DRAM + 64'ha00 + 64'(job * 64), 0, 0, observed);
+          if (observed != 64'h0000_0016_0000_0013) $fatal(1, "QUEUED_GEMM C row0=%h", observed);
+          queued_memory_word(DRAM + 64'ha08 + 64'(job * 64), 0, 0, observed);
+          if (observed != 64'h0000_0032_0000_002b) $fatal(1, "QUEUED_GEMM C row1=%h", observed);
+          apb_write(REG_OFF_CPL, 1);
+        end
+        settle_job();
+        apb_write(REG_OFF_CMD_MODE, 0);
+      end
+      $display("PASS QUEUED checks=21");
+    end
+    // accmode 01 through the descriptor engine and the queued path: the second
+    // submission of the same 2x2x2 job seeds from C and doubles it in place; the
+    // reserved accmode 10 is refused with ST_BAD_FMT and leaves C untouched.
+    if ($test$plusargs("review_accumulate")) begin
+      logic [31:0] value;
+      desc_t d;
+      desc_bits_t bits;
+      logic [63:0] observed;
+      int checks;
+      checks = 0;
+      if (!QueuedTest) $fatal(1, "ACCUMULATE_TEST needs the queued configuration");
+      apb_read(CAP_OFF_ACCMODE, value);
+      if (value != 32'(AccumulateEn)) $fatal(1, "ACCUMULATE_CAP got=%h", value);
+      checks++;
+      // Operand bank capacity words (flat panel mapping): A and B banks of this
+      // configuration, in bytes, as g6lc_ai_gemm_seq sizes them.
+      apb_read(CAP_OFF_BANK_A_BYTES, value);
+      if (value != ai_operand_bank_bytes(TestCfg.AccTileM, TestCfg.AccTileK, TestCfg.MacsPerCycle, 1))
+        $fatal(1, "BANK_A_BYTES got=%0d", value);
+      apb_read(CAP_OFF_BANK_B_BYTES, value);
+      if (value != ai_operand_bank_bytes(TestCfg.AccTileN, TestCfg.AccTileK, TestCfg.MacsPerCycle, 1))
+        $fatal(1, "BANK_B_BYTES got=%0d", value);
+      checks += 2;
+      d = '0;
+      d.version = ContractVersion;
+      d.op = OP_GEMM;
+      d.m = 2; d.n = 2; d.k = 2;
+      d.ld_ab = {16'd2, 16'd2};
+      d.ptr_a = DRAM + 64'h800;
+      d.ptr_b = DRAM + 64'h880;
+      d.ptr_c = DRAM + 64'hb00;
+      queued_memory_word(d.ptr_a, 1, 64'h0403_0201, observed);
+      queued_memory_word(d.ptr_b, 1, 64'h0806_0705, observed);
+      queued_memory_word(d.ptr_c, 1, 64'ha5a5_a5a5_a5a5_a5a5, observed);
+      queued_memory_word(d.ptr_c + 8, 1, 64'ha5a5_a5a5_a5a5_a5a5, observed);
+      apb_write(REG_OFF_CMD_MODE, 1);
+      // job 0: overwrite; job 1: accumulate (01); job 2: reserved (10).
+      for (int job = 0; job < 3; job++) begin
+        d.flags = 32'(job) << FLAG_ACCMODE_SHIFT;
+        bits = desc_to_bits(d);
+        for (int wi = 0; wi < 8; wi++)
+          queued_memory_word(DRAM + 64'h600 + 64'(wi * 8), 1, bits[wi*64 +: 64], observed);
+        apb_write(REG_OFF_CMD_PTR_LO, 32'(DRAM + 64'h600));
+        apb_write(REG_OFF_CMD_PTR_HI, 0);
+        apb_write(REG_OFF_CMD_TICKET, 32'hacc0_0000 + 32'(job));
+        apb_write(REG_OFF_CMD_QID, 0);
+        apb_write(REG_OFF_CMD_SUBMIT, 1);
+        apb_read(REG_OFF_CMD_RECEIPT_CODE, value);
+        if (value != CMD_ACCEPTED) $fatal(1, "ACCUMULATE admission job=%0d", job);
+        wait_cpl(ticket, status);
+        if (ticket != 32'hacc0_0000 + 32'(job)) $fatal(1, "ACCUMULATE ticket=%h job=%0d", ticket, job);
+        if (status[15:0] != ((job == 2) ? ST_BAD_FMT : ST_OK))
+          $fatal(1, "ACCUMULATE status=%h job=%0d", status, job);
+        apb_write(REG_OFF_CPL, 1);
+        queued_memory_word(d.ptr_c, 0, 0, observed);
+        if (observed != ((job == 0) ? 64'h0000_0016_0000_0013 : 64'h0000_002c_0000_0026))
+          $fatal(1, "ACCUMULATE C row0=%h job=%0d", observed, job);
+        queued_memory_word(d.ptr_c + 8, 0, 0, observed);
+        if (observed != ((job == 0) ? 64'h0000_0032_0000_002b : 64'h0000_0064_0000_0056))
+          $fatal(1, "ACCUMULATE C row1=%h job=%0d", observed, job);
+        checks += 3;
+      end
+      settle_job();
+      apb_write(REG_OFF_CMD_MODE, 0);
+      $display("PASS ACCUMULATE_ISLAND checks=%0d", checks);
+    end
+    // Standalone replay of the SoC ELF ai_gemm_tile_2x2_smoke: four latched-doorbell
+    // 16x16x32 all-ones GEMM tiles (tickets 31..34) with a claim between them, then the
+    // whole packed C checked. The SoC run completes the second job with the first ticket
+    // in some code layouts; if this island-only replay passes, the defect is outside the
+    // island (bridge/core path), if it fails it is reproducible here with a waveform.
+    if ($test$plusargs("review_tile_seq")) begin
+      logic [31:0] value;
+      desc_t d;
+      desc_bits_t bits;
+      logic [63:0] observed, base_a, base_b, base_c;
+      int checks, tile;
+      checks = 0;
+      base_a = DRAM + 64'h0800; base_b = DRAM + 64'h0c00; base_c = DRAM + 64'h1000;
+      apb_write(16'h0100, 32'h1);
+      apb_write(16'h0120, 32'(DRAM)); apb_write(16'h0124, 32'(DRAM >> 32));
+      apb_write(16'h0128, 32'(DRAM + 64'h4000)); apb_write(16'h012C, 32'((DRAM + 64'h4000) >> 32));
+      apb_write(16'h0130, 32'h3);
+      for (int w = 0; w < 128; w++) begin
+        queued_memory_word(base_a + 64'(w * 8), 1, 64'h0101_0101_0101_0101, observed);
+        queued_memory_word(base_b + 64'(w * 8), 1, 64'h0101_0101_0101_0101, observed);
+      end
+      for (int w = 0; w < 512; w++) queued_memory_word(base_c + 64'(w * 8), 1, 64'h0, observed);
+      for (tile = 0; tile < 4; tile++) begin
+        d = '0;
+        d.version = ContractVersion;
+        d.op = OP_GEMM;
+        d.m = 16; d.n = 16; d.k = 32;
+        d.ld_ab = {16'd32, 16'd32};
+        d.ptr_a = base_a + 64'((tile / 2) * 512);
+        d.ptr_b = base_b + 64'((tile % 2) * 512);
+        d.ptr_c = base_c + 64'(tile * 1024);
+        bits = desc_to_bits(d);
+        for (int wi = 0; wi < 16; wi++) apb_write(16'h0140 + 16'(wi << 2), bits[wi*32 +: 32]);
+        apb_read(16'h0100, value);
+        apb_write(16'h0108, 32'(31 + tile) << 8);
+        wait_cpl(ticket, status);
+        if (status[15:0] != ST_OK) $fatal(1, "TILE_SEQ status=%h tile=%0d", status, tile);
+        if (ticket != 32'(31 + tile)) $fatal(1, "TILE_SEQ ticket=%0d expected=%0d tile=%0d", ticket, 31 + tile, tile);
+        checks += 2;
+        apb_write(16'h010C, 32'h1);
+        apb_read(16'h010C, value);
+        if (value & 32'h1) $fatal(1, "TILE_SEQ sticky after claim tile=%0d", tile);
+        checks++;
+      end
+      for (int w = 0; w < 512; w++) begin
+        queued_memory_word(base_c + 64'(w * 8), 0, 0, observed);
+        if (observed != 64'h0000_0020_0000_0020) $fatal(1, "TILE_SEQ C word %0d = %h", w, observed);
+      end
+      checks++;
+      $display("PASS TILE_SEQ checks=%0d", checks);
+    end
+    if ($test$plusargs("review_rate_math")) begin
+      logic [31:0] seed;
+      seed = 32'h6ac0_2026;
+      check_rate(0, 0, 0);
+      check_rate(512, 0, 1024);
+      check_rate(32'hffff_ffff, 32'hffff_ffff, 1);
+      check_rate(32'hffff_ffff, 32'hffff_ffff, 32'hffff_ffff);
+      for (int i = 0; i < 64; i++) begin
+        seed = seed * 32'd1664525 + 32'd1013904223;
+        check_rate(seed, {seed[15:0], seed[31:16]}, (i % 4 == 0) ? seed & 32'h3ff : seed ^ 32'ha5a5_5a5a);
+      end
+      $display("PASS RATE_MATH checks=272");
+    end
+    if ($test$plusargs("oracle_negative")) $fatal(1, "FAIL oracle negative control");
     $display("PASS tb_g6lc_ai_desc_island");
     $finish;
   end

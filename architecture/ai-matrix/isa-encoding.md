@@ -399,9 +399,17 @@ larger reduction; if that is desired later, `ST_CHK` is the wrong check.
 C is packed with `ldc = n` (the descriptor has no `ldc` field). Host tiling of a
 larger logical C therefore writes **packed tiles** and concatenates them; A/B may
 be strided views via `lda`/`ldb`. Directed: `ai_gemm_tile_2x2_smoke` (32³ as 2×2
-tiles of 16×16×32). K-tiling that needs `C += A·B` is not hardware — the native
-T2 subset is signed, overwrite-only. Nonzero `dtype` or `accmode`, sparse mode,
-reserved EW, and float requests with nonzero EW are refused with `ST_BAD_FMT`.
+tiles of 16×16×32). K-tiling that needs `C += A·B` uses `accmode = 01`
+(**accumulate**): every `C[i][j]` reduction is *seeded* from the i32/f32 word already
+stored at `ptr_c` instead of zero, then the ordered reduction continues, so a host K-split
+is bit-identical to one long ordered reduction. It is executable only when the CAP word
+`CAP_OFF_ACCMODE` (0x94) has bit 0 set. The live sequencer implements it (`ST_LC` loads the
+C tile, the first partial of every element is added onto that seed, stores run after the
+MAC) and publishes 1; on hardware the bit-identity with one long job holds when the K split
+is a multiple of the PE lane count, because the lane tree partitions each step. An older
+part publishes 0 and refuses `accmode = 01` with `ST_BAD_FMT`. `accmode = 1x`, nonzero
+`dtype`, sparse mode, reserved EW, and float requests with nonzero EW are refused with
+`ST_BAD_FMT`.
 Legacy `numfmt=INT` plus `ew=01` resolves to INT4 and requires the INT4 grant;
 explicit `numfmt=INT4` accepts EW zero or one. Raw format extraction and the
 64-byte descriptor layout remain unchanged. Unsupported post-op groups, including
@@ -435,7 +443,11 @@ index owned by hardware. Full is signalled by `ai.enq` returning all-ones, never
 | `ENQ_FULL` | all-ones of `XLEN` | `ai.enq` did not take the work (`aiqctl[0]=0` today) |
 
 `ai.poll` returns this **status**, not a ticket. The emulator's `0xffff_ffff` pending value is
-not the hardware contract. Island backpressure is a sticky sideband submit, not a rejected
+not the hardware contract. With an island attached the answer is island-authoritative: a
+ticket equal to the completion-FIFO head returns that entry's OK/ERR; any other ticket at or
+below the island's **sideband retired watermark** (highest sideband-origin ticket ever
+completed, claimed or not) returns complete -- its error detail is in the completion word
+-- and everything above it is pending. Allocating a ticket never implies completion. Island backpressure is a sticky sideband submit, not a rejected
 ticket; do not treat a returned ticket as proof the engine was idle.
 
 ### 7.1 Scheduling, QoS and preemption (normative)

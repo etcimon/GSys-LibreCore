@@ -1,0 +1,51 @@
+{
+  "backend": "software-reference-v2",
+  "budget": {
+    "ppl_rel": 0.1,
+    "top1": 0.9
+  },
+  "caps": {
+    "acc_tile_k": 512,
+    "acc_tile_m": 1024,
+    "acc_tile_n": 512,
+    "clusters": 1,
+    "compute_ref": true,
+    "dtype_mask": 251,
+    "macs_per_cycle": 512,
+    "noc_width": 64
+  },
+  "evidence": "virtual execution of the descriptor contract; not hardware timing or silicon",
+  "group_k": 128,
+  "layers_replaced": 24,
+  "layers_skipped": {
+    "lm_head": "skipped by caller"
+  },
+  "max_abs_logit_diff": 3.1261367797851562,
+  "model": "distilgpt2",
+  "offload_ratio": 1.0,
+  "offload_stats": {
+    "fallback_calls": 0,
+    "fallback_reasons": {},
+    "offloaded_blocks": 756,
+    "offloaded_calls": 24
+  },
+  "pass": true,
+  "ppl_island": 46.44220681411824,
+  "ppl_reference": 46.50658369124545,
+  "ppl_rel_increase": -0.0013842529813544422,
+  "quant": "int8-dynamic",
+  "revision": "2290a62682d06624634c1f46a6ad5be0f47f38aa",
+  "schema": "ai-tensor.qualify-llm.v1",
+  "seconds_island": 8.410419225692749,
+  "seconds_reference": 0.19791340827941895,
+  "skip": [
+    "lm_head"
+  ],
+  "tokens": 256,
+  "top1_agreement": 0.9725490212440491,
+  "verdict": {
+    "no_fallback": true,
+    "ppl_within_budget": true,
+    "top1_within_budget": true
+  }
+}

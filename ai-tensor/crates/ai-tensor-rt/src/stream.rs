@@ -12,7 +12,7 @@
 
 use crate::{wait_with_policy, Device, Region, RtError, SubmitMode, WaitPolicy};
 use ai_tensor_abi::{Completion, Desc64, FLAG_REUSE_A, FLAG_REUSE_B, ST_OK};
-use ai_tensor_ir::{tile_gemm, va_blocking_tile, GemmTile};
+use ai_tensor_ir::{tile_gemm, va_blocking_tile, va_turbo_applied_level, va_turbo_measurement_fits, GemmTile};
 
 /// One planned descriptor job in a stream (after device buffers exist).
 #[derive(Debug, Clone)]
@@ -20,6 +20,16 @@ pub struct StreamJob {
     pub tile: GemmTile,
     pub ticket: u32,
     pub desc: Desc64,
+}
+
+/// Exact schedule plus the level that was asked for and the level that was applied.
+#[derive(Debug, Clone)]
+pub struct VaTurboTestPlan {
+    pub plan: GemmStreamPlan,
+    pub requested_level: u32,
+    pub applied_level: u32,
+    /// True when a planned tile carries a skip. A one-tile job and a K-split leave it false.
+    pub reuse_enabled: bool,
 }
 
 /// Plan of tile jobs for a row-major INT8 GEMM.
@@ -101,6 +111,208 @@ pub fn desc_for_tile(
 }
 
 /// Setup region + full A/B + scratch, build stream plan (does not submit).
+/// Software lease for the reuse epoch register.
+///
+/// `invalidate` advances the epoch after a writer touches A or B. Hardware
+/// does not snoop that write. Bind the lease before the next test-island
+/// jobs. The live stream does not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReuseLease {
+    epoch: u32,
+}
+
+impl Default for ReuseLease {
+    fn default() -> Self {
+        Self { epoch: 0 }
+    }
+}
+
+impl ReuseLease {
+    pub fn from_epoch(epoch: u32) -> Self {
+        Self { epoch }
+    }
+
+    pub fn epoch(self) -> u32 {
+        self.epoch
+    }
+
+    pub fn invalidate(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+}
+
+/// Store `lease` in the device epoch register.
+pub fn bind_reuse_lease<D: Device>(dev: &mut D, lease: &ReuseLease) -> Result<(), RtError> {
+    dev.set_reuse_epoch(lease.epoch())
+}
+
+/// Caller-owned evidence window. A mismatch clears the claim.
+///
+/// The device also clears its bit when the epoch, level, or recipe
+/// register is written. This struct covers tensor identity, numeric
+/// format, and the approval profile, which the register map cannot see.
+/// A level the budget rejects cannot arm the claim. A recipe whose own
+/// analytic bound does not fit that level cannot arm it either. Neither
+/// one changes the product.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EvidenceWindow {
+    level: u32,
+    recipe: u32,
+    epoch: u32,
+    identity: u64,
+    format: u32,
+    profile: u64,
+    valid: bool,
+}
+
+impl EvidenceWindow {
+    /// Arm the claim. `recipe` is a 5-bit id and `format` is a 3-bit code.
+    /// Level 0 needs no measurement. A higher level needs one that fits.
+    pub fn commit(
+        &mut self,
+        level: u32,
+        recipe: u32,
+        epoch: u32,
+        identity: u64,
+        format: u32,
+        profile: u64,
+        measured_ppm: Option<u32>,
+        kappa_q8: Option<u32>,
+        approx_param: Option<u32>,
+    ) -> bool {
+        if recipe > 31
+            || format > 7
+            || !ai_tensor_ir::va_turbo_recipe_claim_fits(
+                level,
+                recipe,
+                measured_ppm,
+                kappa_q8,
+                approx_param,
+            )
+        {
+            self.valid = false;
+            return false;
+        }
+        self.level = level;
+        self.recipe = recipe;
+        self.epoch = epoch;
+        self.identity = identity;
+        self.format = format;
+        self.profile = profile;
+        self.valid = true;
+        true
+    }
+
+    pub fn valid(self) -> bool {
+        self.valid
+    }
+
+    /// True only while the recorded tuple still matches.
+    pub fn observe(
+        &mut self,
+        level: u32,
+        recipe: u32,
+        epoch: u32,
+        identity: u64,
+        format: u32,
+        profile: u64,
+    ) -> bool {
+        let same = self.valid
+            && self.level == level
+            && self.recipe == recipe
+            && self.epoch == epoch
+            && self.identity == identity
+            && self.format == format
+            && self.profile == profile;
+        if !same {
+            self.valid = false;
+        }
+        same
+    }
+}
+
+/// Write the window bit from `window`. A cleared struct stores 0.
+pub fn bind_evidence_window<D: Device>(
+    dev: &mut D,
+    window: &EvidenceWindow,
+) -> Result<(), RtError> {
+    dev.set_va_turbo_window(window.valid())
+}
+
+/// Named-panel schedule for the directed VaTurbo test island only.
+///
+/// The device must report [`AccTile::VA_TURBO_TEST`] and
+/// [`VA_TURBO_TEST_MACS`]. The live 512-MAC package is refused. The
+/// schedule enables exact reuse only when a tile asks to skip A or B.
+/// A K-split leaves reuse off. The default stream does not enable it, so
+/// a flag there does not change a product.
+pub fn plan_gemm_s8_va_turbo_test<D: Device>(
+    dev: &mut D,
+    m: u32,
+    n: u32,
+    k: u32,
+    a: &[i8],
+    b: &[i8],
+    queue: &mut Queue,
+    irq: bool,
+) -> Result<GemmStreamPlan, RtError> {
+    let caps = dev.caps();
+    if caps.macs_per_cycle != ai_tensor_abi::VA_TURBO_TEST_MACS
+        || caps.max_tile() != ai_tensor_abi::AccTile::VA_TURBO_TEST
+    {
+        return Err(RtError::Msg(
+            "VaTurbo test schedule requires the 8-MAC 1024x512x16 directed tile".into(),
+        ));
+    }
+    plan_gemm_s8_va_turbo_test_level(dev, m, n, k, a, b, queue, irq, 0, None).map(|p| p.plan)
+}
+
+/// Same schedule as [`plan_gemm_s8_va_turbo_test`]. A level above 0 is refused
+/// unless `measured_ppm` fits that level's budget. The applied level is still 0.
+pub fn plan_gemm_s8_va_turbo_test_level<D: Device>(
+    dev: &mut D,
+    m: u32,
+    n: u32,
+    k: u32,
+    a: &[i8],
+    b: &[i8],
+    queue: &mut Queue,
+    irq: bool,
+    level: u32,
+    measured_ppm: Option<u32>,
+) -> Result<VaTurboTestPlan, RtError> {
+    let caps = dev.caps();
+    if caps.macs_per_cycle != ai_tensor_abi::VA_TURBO_TEST_MACS
+        || caps.max_tile() != ai_tensor_abi::AccTile::VA_TURBO_TEST
+    {
+        return Err(RtError::Msg(
+            "VaTurbo test schedule requires the 8-MAC 1024x512x16 directed tile".into(),
+        ));
+    }
+    if level != 0 && !va_turbo_measurement_fits(level, measured_ppm) {
+        return Err(RtError::Msg(
+            "VaTurbo level above 0 needs a measured ppm inside the level budget; the MAC path still applies 0".into(),
+        ));
+    }
+    if va_turbo_applied_level(level) != 0 {
+        return Err(RtError::Msg(
+            "VaTurbo arithmetic level is not applied".into(),
+        ));
+    }
+    let plan = plan_gemm_s8_stream_in(dev, m, n, k, a, b, queue, irq, true)?;
+    let reuse = plan.jobs.iter().any(|job| {
+        job.desc.flags & (FLAG_REUSE_A | FLAG_REUSE_B) != 0
+    });
+    dev.set_reuse_en(reuse)?;
+    dev.set_va_turbo_level(level)?;
+    Ok(VaTurboTestPlan {
+        plan,
+        requested_level: level,
+        applied_level: 0,
+        reuse_enabled: reuse,
+    })
+}
+
 pub fn plan_gemm_s8_stream<D: Device>(
     dev: &mut D,
     m: u32,
@@ -340,11 +552,152 @@ pub fn run_gemm_s8_stream_ex<D: Device>(
     run_gemm_stream_plan_ex(dev, &plan, policy, mode)
 }
 
+/// Product of one directed VA-Turbo schedule.
+///
+/// `read_a` and `read_b` are the last tile. `hit_a` and `hit_b` are true
+/// when any tile skipped that operand. `reuse_enabled` is true only when a
+/// planned tile carries a skip.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaTurboTestRun {
+    pub c: Vec<i32>,
+    pub flags: Vec<u32>,
+    pub read_a: bool,
+    pub read_b: bool,
+    pub hit_a: bool,
+    pub hit_b: bool,
+    pub reuse_enabled: bool,
+}
+
+/// Run the directed schedule on `dev`.
+///
+/// The live 512-MAC package is refused. Exact reuse is enabled only when a
+/// planned tile can skip an operand. The applied level stays 0 because this
+/// path does not store one.
+pub fn execute_va_turbo_test_s8<D: Device>(
+    dev: &mut D,
+    m: u32,
+    n: u32,
+    k: u32,
+    a: &[i8],
+    b: &[i8],
+) -> Result<VaTurboTestRun, RtError> {
+    execute_va_turbo_test_s8_at(dev, m, n, k, a, b, 1)
+}
+
+/// Same as [`execute_va_turbo_test_s8`], starting the ticket sequence at `first_ticket`.
+pub fn execute_va_turbo_test_s8_at<D: Device>(
+    dev: &mut D,
+    m: u32,
+    n: u32,
+    k: u32,
+    a: &[i8],
+    b: &[i8],
+    first_ticket: u32,
+) -> Result<VaTurboTestRun, RtError> {
+    let mut q = Queue::q0(first_ticket);
+    let plan = plan_gemm_s8_va_turbo_test(dev, m, n, k, a, b, &mut q, false)?;
+    let reuse_enabled = dev.reuse_enabled();
+    let flags: Vec<u32> = plan.jobs.iter().map(|job| job.desc.flags).collect();
+    let mut c = vec![0i32; (m as usize).saturating_mul(n as usize)];
+    let mut read_a = true;
+    let mut read_b = true;
+    let mut hit_a = false;
+    let mut hit_b = false;
+    for job in &plan.jobs {
+        let tm = job.tile.tm as usize;
+        let tn = job.tile.tn as usize;
+        let c_bytes = tm * tn * 4;
+        dev.write_mem(plan.ptr_c_tile, &vec![0u8; c_bytes])?;
+        dev.write_mem(plan.ptr_done, &[0u8; 8])?;
+        dev.submit(plan.qid, job.ticket, &job.desc)?;
+        let comp = wait_with_policy(dev, job.ticket, WaitPolicy::Poll)?;
+        if comp.status != ST_OK {
+            return Err(RtError::Msg(format!(
+                "directed tile status {}",
+                comp.status
+            )));
+        }
+        let mut raw = vec![0u8; c_bytes];
+        dev.read_mem(plan.ptr_c_tile, &mut raw)?;
+        for ii in 0..tm {
+            for jj in 0..tn {
+                let v = i32::from_le_bytes(
+                    raw[(ii * tn + jj) * 4..(ii * tn + jj) * 4 + 4]
+                        .try_into()
+                        .unwrap(),
+                );
+                let dst = (job.tile.i0 as usize + ii) * n as usize + (job.tile.j0 as usize + jj);
+                c[dst] = c[dst].wrapping_add(v);
+            }
+        }
+        read_a = dev.reuse_read_a();
+        read_b = dev.reuse_read_b();
+        hit_a |= !read_a;
+        hit_b |= !read_b;
+    }
+    Ok(VaTurboTestRun {
+        c,
+        flags,
+        read_a,
+        read_b,
+        hit_a,
+        hit_b,
+        reuse_enabled,
+    })
+}
+
+/// True when `dev`'s capability record is the directed tile and two adjacent
+/// panels can skip A or B. A K-split and a one-tile shape are false. Any
+/// other capability record is false.
+pub fn directed_tiles_can_skip(caps: &crate::Caps, m: u32, n: u32, k: u32) -> bool {
+    use ai_tensor_abi::{AccTile, VA_TURBO_TEST_MACS};
+    if caps.macs_per_cycle != VA_TURBO_TEST_MACS || caps.max_tile() != AccTile::VA_TURBO_TEST {
+        return false;
+    }
+    if m == 0 || n == 0 || k == 0 {
+        return false;
+    }
+    let panel = va_blocking_tile(m, n, k, caps.acc_tile, caps.macs_per_cycle);
+    let tiles = tile_gemm(m, n, k, panel);
+    tiles.windows(2).any(|pair| {
+        let prev = &pair[0];
+        let tile = &pair[1];
+        (prev.j0 == tile.j0 && prev.tn == tile.tn && prev.t0 == tile.t0 && prev.tk == tile.tk)
+            || (prev.i0 == tile.i0 && prev.tm == tile.tm && prev.t0 == tile.t0 && prev.tk == tile.tk)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Caps, SimDevice};
-    use ai_tensor_abi::{AccTile, CapRegs};
+    use ai_tensor_abi::{AccTile, CapRegs, FLAG_REUSE_A, FLAG_REUSE_B, VA_TURBO_TEST_MACS};
+
+    #[test]
+    fn an_evidence_window_drops_when_the_tensor_identity_changes() {
+        let measured = ai_tensor_ir::VA_TURBO_DOC_INT8_PPM;
+        let mut window = EvidenceWindow::default();
+        assert!(!window.commit(8, 0x10, 1, 7, 0, 1, Some(measured), None, None));
+        assert!(!window.commit(9, 27, 1, 7, 0, 1, Some(measured), Some(256), None));
+        let mut dev = SimDevice::new();
+        bind_evidence_window(&mut dev, &window).unwrap();
+        assert!(!dev.va_turbo_window());
+        assert!(window.commit(9, 0x10, 1, 7, 0, 1, Some(measured), None, None));
+        bind_evidence_window(&mut dev, &window).unwrap();
+        assert!(dev.va_turbo_window());
+        let (c, comp) = crate::run_gemm_s8(&mut dev, 2, 2, 2, &[1, 2, 3, 4], &[5, 6, 7, 8], 1)
+            .unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(c, vec![19, 22, 43, 50]);
+        assert!(dev.va_turbo_window());
+        assert!(window.observe(9, 0x10, 1, 7, 0, 1));
+        assert!(!window.observe(9, 0x10, 1, 7, 1, 1));
+        assert!(!window.valid());
+        bind_evidence_window(&mut dev, &window).unwrap();
+        assert!(!dev.va_turbo_window());
+        assert!(window.commit(0, 0, 0, 7, 0, 4, None, None, None));
+        assert!(!window.observe(0, 0, 0, 7, 0, 5));
+    }
 
     #[test]
     fn stream_single_tile_matches_direct() {
@@ -394,6 +747,134 @@ mod tests {
         assert_eq!(d.ldb(), 8);
         assert_eq!(d.ptr_a, 0x1000 + 2 * 8 + 1);
         assert_eq!(d.ptr_b, 0x2000 + 4 * 8 + 1);
+    }
+
+    #[test]
+    fn va_turbo_test_schedule_reuses_b_and_refuses_the_live_tile() {
+        let a = vec![1i8; 16 * 8];
+        let b = vec![1i8; 8 * 8];
+        let mut live = SimDevice::new();
+        let mut q = Queue::q0(1);
+        assert!(plan_gemm_s8_va_turbo_test(&mut live, 16, 8, 8, &a, &b, &mut q, false).is_err());
+
+        let mut caps = crate::Caps::default();
+        caps.macs_per_cycle = VA_TURBO_TEST_MACS;
+        caps.acc_tile = AccTile::VA_TURBO_TEST;
+        let mut dev = SimDevice::with_caps(caps);
+        let mut q = Queue::q0(1);
+        let plan = plan_gemm_s8_va_turbo_test(&mut dev, 16, 8, 8, &a, &b, &mut q, false).unwrap();
+        assert_eq!(plan.jobs.len(), 2);
+        assert_eq!(plan.jobs[0].tile.tm, 8);
+        assert_eq!(plan.jobs[0].tile.tn, 8);
+        assert_eq!(plan.jobs[1].tile.i0, 8);
+        assert_eq!(plan.jobs[1].desc.flags & FLAG_REUSE_B, FLAG_REUSE_B);
+        assert_eq!(plan.jobs[1].desc.flags & FLAG_REUSE_A, 0);
+        assert!(dev.reuse_enabled());
+        let mut lease = ReuseLease::default();
+        bind_reuse_lease(&mut dev, &lease).unwrap();
+        assert_eq!(dev.reuse_epoch(), 0);
+        lease.invalidate();
+        bind_reuse_lease(&mut dev, &lease).unwrap();
+        assert_eq!(dev.reuse_epoch(), 1);
+        let mut wrapped = ReuseLease::from_epoch(u32::MAX);
+        wrapped.invalidate();
+        assert_eq!(wrapped.epoch(), 0);
+        let (c, comp, ntiles) = run_gemm_stream_plan(&mut dev, &plan).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(ntiles, 2);
+        assert_eq!(c, vec![8i32; 16 * 8]);
+        assert!(dev.reuse_read_a());
+        assert!(!dev.reuse_read_b());
+
+        // K does not fit one panel. The second tile must not request reuse,
+        // and the product is the full reduction.
+        let mut caps = crate::Caps::default();
+        caps.macs_per_cycle = VA_TURBO_TEST_MACS;
+        caps.acc_tile = AccTile::VA_TURBO_TEST;
+        let mut dev = SimDevice::with_caps(caps);
+        let mut q = Queue::q0(1);
+        let a = vec![1i8; 8 * 16];
+        let b = vec![1i8; 16 * 8];
+        let plan = plan_gemm_s8_va_turbo_test(&mut dev, 8, 8, 16, &a, &b, &mut q, false).unwrap();
+        assert_eq!(plan.jobs.len(), 2);
+        assert_eq!(plan.jobs[1].tile.t0, 8);
+        assert_eq!(plan.jobs[1].desc.flags & (FLAG_REUSE_A | FLAG_REUSE_B), 0);
+        assert!(!dev.reuse_enabled());
+        let (c, comp, ntiles) = run_gemm_stream_plan(&mut dev, &plan).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(ntiles, 2);
+        assert_eq!(c, vec![16i32; 8 * 8]);
+        assert!(dev.reuse_read_a());
+        assert!(dev.reuse_read_b());
+
+        // N does not fit one square panel. The second tile reuses A.
+        let mut caps = crate::Caps::default();
+        caps.macs_per_cycle = VA_TURBO_TEST_MACS;
+        caps.acc_tile = AccTile::VA_TURBO_TEST;
+        let mut dev = SimDevice::with_caps(caps);
+        let mut q = Queue::q0(1);
+        let a = vec![1i8; 8 * 8];
+        let b = vec![1i8; 8 * 16];
+        let plan = plan_gemm_s8_va_turbo_test(&mut dev, 8, 16, 8, &a, &b, &mut q, false).unwrap();
+        assert_eq!(plan.jobs.len(), 2);
+        assert_eq!(plan.jobs[1].tile.j0, 8);
+        assert_eq!(plan.jobs[1].desc.flags & FLAG_REUSE_A, FLAG_REUSE_A);
+        assert_eq!(plan.jobs[1].desc.flags & FLAG_REUSE_B, 0);
+        let (c, comp, ntiles) = run_gemm_stream_plan(&mut dev, &plan).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(ntiles, 2);
+        assert_eq!(c, vec![8i32; 8 * 16]);
+        assert!(!dev.reuse_read_a());
+        assert!(dev.reuse_read_b());
+        assert!(dev.reuse_enabled());
+
+        // Level 8 does not cover the documented 18,527 ppm INT8 figure.
+        // Level 9 does, and the product stays the exact 8s.
+        let mut caps = crate::Caps::default();
+        caps.macs_per_cycle = VA_TURBO_TEST_MACS;
+        caps.acc_tile = AccTile::VA_TURBO_TEST;
+        let mut dev = SimDevice::with_caps(caps);
+        let mut q = Queue::q0(1);
+        let a = vec![1i8; 8 * 8];
+        let b = vec![1i8; 8 * 8];
+        let measured = ai_tensor_ir::VA_TURBO_DOC_INT8_PPM;
+        assert!(plan_gemm_s8_va_turbo_test_level(
+            &mut dev, 8, 8, 8, &a, &b, &mut q, false, 8, Some(measured),
+        )
+        .is_err());
+        let mut q = Queue::q0(1);
+        let planned = plan_gemm_s8_va_turbo_test_level(
+            &mut dev, 8, 8, 8, &a, &b, &mut q, false, 9, Some(measured),
+        )
+        .unwrap();
+        assert_eq!(planned.requested_level, 9);
+        assert_eq!(planned.applied_level, 0);
+        assert!(!planned.reuse_enabled);
+        assert!(!dev.reuse_enabled());
+        assert_eq!(dev.va_turbo_level_word(), 9);
+        assert_eq!(ai_tensor_abi::mmio::va_turbo_level_applied(dev.va_turbo_level_word()), 0);
+        assert_eq!(planned.plan.jobs.len(), 1);
+        let mut caps = crate::Caps::default();
+        caps.macs_per_cycle = VA_TURBO_TEST_MACS;
+        caps.acc_tile = AccTile::VA_TURBO_TEST;
+        let mut exact_dev = SimDevice::with_caps(caps);
+        let mut exact_q = Queue::q0(1);
+        let exact = plan_gemm_s8_va_turbo_test_level(
+            &mut exact_dev, 8, 8, 8, &a, &b, &mut exact_q, false, 0, None,
+        )
+        .unwrap();
+        assert_eq!(planned.plan.jobs[0].tile, exact.plan.jobs[0].tile);
+        assert_eq!(planned.plan.jobs[0].desc.m, exact.plan.jobs[0].desc.m);
+        assert_eq!(planned.plan.jobs[0].desc.n, exact.plan.jobs[0].desc.n);
+        assert_eq!(planned.plan.jobs[0].desc.k, exact.plan.jobs[0].desc.k);
+        assert_eq!(planned.plan.jobs[0].desc.flags, exact.plan.jobs[0].desc.flags);
+        assert!(!exact.reuse_enabled);
+        let (c, comp, ntiles) = run_gemm_stream_plan(&mut dev, &planned.plan).unwrap();
+        assert!(comp.is_ok());
+        assert_eq!(ntiles, 1);
+        assert_eq!(c, vec![8i32; 8 * 8]);
+        assert_eq!(dev.pmu_va_turbo_level(), 9);
+        assert_eq!(ai_tensor_abi::mmio::va_turbo_level_applied(dev.pmu_va_turbo_level()), 0);
     }
 
     #[test]
@@ -486,5 +967,68 @@ mod tests {
         assert!(comp.is_ok());
         assert_eq!(ntiles, 2);
         assert_eq!(c, vec![1024]);
+    }
+
+    #[test]
+    fn the_soft_island_schedule_enables_reuse_only_when_a_tile_skips() {
+        use crate::MmioDevice;
+        let mut live = MmioDevice::new();
+        let a = vec![1i8; 16 * 8];
+        let b = vec![1i8; 8 * 8];
+        assert!(execute_va_turbo_test_s8(&mut live, 16, 8, 8, &a, &b).is_err());
+
+        let mut cap = ai_tensor_abi::CapRegs::island_p3_sim_default();
+        cap.macs_per_cycle = VA_TURBO_TEST_MACS;
+        cap.acc_tile = AccTile::VA_TURBO_TEST;
+        let mut dev = MmioDevice::with_cap(cap);
+        let m_split = execute_va_turbo_test_s8(&mut dev, 16, 8, 8, &a, &b).unwrap();
+        assert!(m_split.reuse_enabled);
+        assert_eq!(m_split.flags[1] & FLAG_REUSE_B, FLAG_REUSE_B);
+        assert_eq!(m_split.flags[1] & FLAG_REUSE_A, 0);
+        assert!(m_split.read_a);
+        assert!(!m_split.read_b);
+        assert!(m_split.hit_b);
+        assert!(!m_split.hit_a);
+        assert_eq!(m_split.c, vec![8i32; 16 * 8]);
+
+        let mut dev = MmioDevice::with_cap(cap);
+        let a = vec![1i8; 8 * 16];
+        let b = vec![1i8; 16 * 8];
+        let k_split = execute_va_turbo_test_s8(&mut dev, 8, 8, 16, &a, &b).unwrap();
+        assert!(!k_split.reuse_enabled);
+        assert_eq!(k_split.flags[1] & (FLAG_REUSE_A | FLAG_REUSE_B), 0);
+        assert!(k_split.read_a);
+        assert!(k_split.read_b);
+        assert!(!k_split.hit_a);
+        assert!(!k_split.hit_b);
+        assert_eq!(k_split.c, vec![16i32; 8 * 8]);
+    }
+
+    #[test]
+    fn the_sim_schedule_enables_reuse_only_when_a_tile_skips() {
+        let mut live = SimDevice::new();
+        let a = vec![1i8; 16 * 8];
+        let b = vec![1i8; 8 * 8];
+        assert!(execute_va_turbo_test_s8(&mut live, 16, 8, 8, &a, &b).is_err());
+
+        let mut caps = Caps::default();
+        caps.macs_per_cycle = VA_TURBO_TEST_MACS;
+        caps.acc_tile = AccTile::VA_TURBO_TEST;
+        let mut dev = SimDevice::with_caps(caps);
+        let m_split = execute_va_turbo_test_s8(&mut dev, 16, 8, 8, &a, &b).unwrap();
+        assert!(m_split.reuse_enabled);
+        assert_eq!(m_split.flags[1] & FLAG_REUSE_B, FLAG_REUSE_B);
+        assert!(!m_split.read_b);
+        assert!(m_split.hit_b);
+        assert_eq!(m_split.c, vec![8i32; 16 * 8]);
+
+        let mut dev = SimDevice::with_caps(caps);
+        let a = vec![1i8; 8 * 16];
+        let b = vec![1i8; 16 * 8];
+        let k_split = execute_va_turbo_test_s8(&mut dev, 8, 8, 16, &a, &b).unwrap();
+        assert!(!k_split.reuse_enabled);
+        assert!(k_split.read_a);
+        assert!(k_split.read_b);
+        assert_eq!(k_split.c, vec![16i32; 8 * 8]);
     }
 }

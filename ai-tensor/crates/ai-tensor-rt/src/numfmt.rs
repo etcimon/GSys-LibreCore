@@ -19,7 +19,9 @@ pub fn desc_compute_numfmt(d: &Desc64) -> Result<NumFmt, RtError> {
     let ew = (d.flags >> 12) & 3;
     let sparse = (d.flags >> 14) & 1;
     let fmt = NumFmt::from_flags(d.flags).ok_or(RtError::BadFmt)?;
-    if dtype != 0 || accmode != 0 || sparse != 0 || ew > 1 || fmt == NumFmt::Sp24 {
+    // accmode 01 (accumulate: the reduction is seeded from C) is a legal request whose
+    // *grant* the engine checks separately (`check_desc_engine`); 10/11 stay refused.
+    if dtype != 0 || accmode > 1 || sparse != 0 || ew > 1 || fmt == NumFmt::Sp24 {
         return Err(RtError::BadFmt);
     }
     match fmt {
@@ -34,7 +36,26 @@ pub fn check_desc_format(d: &Desc64, mask: u16) -> Result<(), RtError> {
     check_format(desc_compute_numfmt(d)?, mask)
 }
 
+/// `flags.accmode == 01`: seed each output's ordered reduction from the value already in C
+/// (i32 for integer formats, f32 for float formats) instead of zero. Reserved codes fail.
+pub fn desc_accumulate(d: &Desc64) -> Result<bool, RtError> {
+    match (d.flags >> 10) & 3 {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(RtError::BadFmt),
+    }
+}
+
 /// Execution check. Float codes need `fp_datapath` in addition to the mask bit.
+/// Accumulate mode is refused unless the engine grants it (`CAP_ACCMODE` bit 0).
+pub fn check_desc_engine_acc(d: &Desc64, mask: u16, fp_datapath: bool, accumulate_granted: bool) -> Result<(), RtError> {
+    if desc_accumulate(d)? && !accumulate_granted {
+        return Err(RtError::BadFmt);
+    }
+    check_desc_engine(d, mask, fp_datapath)
+}
+
+/// Execution check without an accumulate grant (legacy engines).
 pub fn check_desc_engine(d: &Desc64, mask: u16, fp_datapath: bool) -> Result<(), RtError> {
     let fmt = desc_compute_numfmt(d)?;
     check_format(fmt, mask)?;
@@ -139,12 +160,26 @@ fn multiply(a: f32, b: f32) -> f32 { a * b }
 fn add(a: f32, b: f32) -> f32 { a + b }
 
 pub fn gemm_native(a: &[u8], b: &[u8], layout: Layout) -> Result<Vec<u8>, RtError> {
+    gemm_native_acc(a, b, layout, None)
+}
+
+/// GEMM with an optional C seed: with `c_init`, output (i,j) starts its ordered reduction
+/// from the stored i32/f32 word instead of zero (`flags.accmode == 01`). A host K-split
+/// with the seed is therefore bit-identical to one long ordered reduction.
+pub fn gemm_native_acc(a: &[u8], b: &[u8], layout: Layout, c_init: Option<&[u8]>) -> Result<Vec<u8>, RtError> {
     layout.validate(a, b)?;
+    if c_init.is_some_and(|c| c.len() < layout.c_bytes) {
+        return Err(RtError::BufferOob);
+    }
     let mut out = vec![0u8; layout.c_bytes];
     for i in 0..layout.m {
         for j in 0..layout.n {
-            let mut integer = 0i32;
-            let mut float = 0.0f32;
+            let seed = c_init.map_or(0u32, |c| {
+                let off = (i * layout.n + j) * 4;
+                u32::from_le_bytes(c[off..off + 4].try_into().unwrap())
+            });
+            let mut integer = seed as i32;
+            let mut float = f32::from_bits(seed);
             for t in 0..layout.k {
                 let av = raw(a, i * layout.stride_a, t, layout.fmt);
                 let bv = raw(b, j * layout.stride_b, t, layout.fmt);
@@ -186,7 +221,8 @@ pub(crate) fn execute_memory(mem: &mut [u8], base: u64, d: &Desc64, compute: boo
     let b = memory_range(d.ptr_b, base, l.b_bytes, mem.len())?;
     let c = memory_range(d.ptr_c, base, l.c_bytes, mem.len())?;
     if compute {
-        let out = gemm_native(&mem[a], &mem[b], l)?;
+        let seed = if desc_accumulate(d)? { Some(mem[c.clone()].to_vec()) } else { None };
+        let out = gemm_native_acc(&mem[a], &mem[b], l, seed.as_deref())?;
         mem[c].copy_from_slice(&out);
     }
     Ok(())
@@ -204,13 +240,40 @@ mod tests {
     #[test]
     fn descriptor_accmode_fails_closed() {
         let mut d = Desc64::gemm(1, 1, 1);
-        d.flags = descriptor_flags(0, 0, 1, 0, 0);
+        d.flags = descriptor_flags(0, 0, 2, 0, 0);
         assert!(matches!(Layout::from_desc(&d), Err(RtError::BadFmt)));
+        d.flags = descriptor_flags(0, 0, 1, 0, 0);
+        assert!(Layout::from_desc(&d).is_ok(), "accumulate is a legal request");
+        assert!(matches!(check_desc_engine_acc(&d, 1, false, false), Err(RtError::BadFmt)),
+                "but it needs the engine grant");
+        assert!(check_desc_engine_acc(&d, 1, false, true).is_ok());
+    }
+
+    #[test]
+    fn accumulate_seeds_the_ordered_reduction_from_c() {
+        // 1x1x2 INT8: A=[3,4], B=[5,6] -> 39; seeded with C=100 -> 139.
+        let mut d = Desc64::gemm(1, 1, 2).with_ptrs(0, 8, 16, 0);
+        d.flags = descriptor_flags(0, 0, 1, 0, 0);
+        let mut mem = [0u8; 24];
+        mem[0..2].copy_from_slice(&[3, 4]);
+        mem[8..10].copy_from_slice(&[5, 6]);
+        mem[16..20].copy_from_slice(&100i32.to_le_bytes());
+        execute_memory(&mut mem, 0, &d, true).unwrap();
+        assert_eq!(i32::from_le_bytes(mem[16..20].try_into().unwrap()), 139);
+        // Float: a K-split with the seed equals one long ordered reduction bit for bit.
+        let fmt = NumFmt::Fp32;
+        let a: Vec<f32> = (0..6).map(|t| 1.0 + t as f32 * 0.37).collect();
+        let b: Vec<f32> = (0..6).map(|t| 0.9 - t as f32 * 0.21).collect();
+        let bytes = |v: &[f32]| v.iter().flat_map(|x| x.to_bits().to_le_bytes()).collect::<Vec<u8>>();
+        let full = gemm_native(&bytes(&a), &bytes(&b), Layout::new(1, 1, 6, fmt, 6, 6).unwrap()).unwrap();
+        let first = gemm_native(&bytes(&a[..4]), &bytes(&b[..4]), Layout::new(1, 1, 4, fmt, 4, 4).unwrap()).unwrap();
+        let second = gemm_native_acc(&bytes(&a[4..]), &bytes(&b[4..]), Layout::new(1, 1, 2, fmt, 2, 2).unwrap(), Some(&first)).unwrap();
+        assert_eq!(full, second);
     }
 
     #[test]
     fn descriptor_modes_fail_closed_before_writing_c() {
-        for flags in [descriptor_flags(0, 1, 0, 0, 0), descriptor_flags(0, 0, 1, 0, 0)] {
+        for flags in [descriptor_flags(0, 1, 0, 0, 0), descriptor_flags(0, 0, 2, 0, 0)] {
             let mut d = Desc64::gemm(1, 1, 1).with_ptrs(0, 4, 8, 0);
             d.flags = flags;
             let mut mem = [0xa5; 16];
@@ -231,7 +294,7 @@ mod tests {
                         for sparse in 0..2 {
                             let mut d = Desc64::gemm(1, 1, 1);
                             d.flags = descriptor_flags(fmt, dtype, accmode, ew, sparse);
-                            let legal = dtype == 0 && accmode == 0 && sparse == 0
+                            let legal = dtype == 0 && accmode <= 1 && sparse == 0
                                 && fmt != 2 && ew < 2 && (fmt < 3 || ew == 0);
                             let effective = if fmt == 0 && ew == 1 { 1 } else { fmt };
                             for mask in [1, 2, 3, 0xf9, 0xfb, 0xff] {

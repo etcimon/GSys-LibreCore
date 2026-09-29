@@ -19,6 +19,13 @@
   .section .text.init
   .globl _start
 _start:
+  # g6lc64_ai has two cores and both start here: only hart 0 drives the island;
+  # any other hart parks, otherwise every MMIO doorbell/claim is issued twice.
+  csrr t0, mhartid
+  beqz t0, 1f
+2: wfi
+  j    2b
+1:
   li   sp, 0x80008000
   la   t0, trap_vec
   csrw mtvec, t0
@@ -44,7 +51,7 @@ _start:
   sd   zero, 0(t0)
 
   # Good descriptor with ptr_done = &done_word
-  li   t0, (3 << 16) | 1  /* OP_LAYOUT (spine; no GEMM) */
+  li   t0, (3 << 16) | 2  /* OP_LAYOUT (spine; no GEMM) */
   sw   t0, AI_DESC+0x0(s0)
   sw   zero, AI_DESC+0x4(s0)
   li   t0, 8

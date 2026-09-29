@@ -238,9 +238,16 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/ai_island/g6lc_ai_gemm_seq.sv                                      \
         corev_apu/ai_island/g6lc_ai_dram_timing.sv                                   \
         corev_apu/ai_island/g6lc_ai_cpl_fifo.sv                                       \
+        corev_apu/ai_island/g6lc_ai_cmd_fifo.sv                                       \
+        corev_apu/ai_island/g6lc_ai_axi_cut.sv                                        \
         corev_apu/ai_island/g6lc_ai_island_top.sv                                    \
         corev_apu/ai_island/g6lc_ai_island_apb.sv                                    \
         vendor/pulp-platform/axi/src/axi_dw_converter.sv                             \
+        vendor/pulp-platform/axi/src/axi_dw_downsizer.sv                             \
+        vendor/pulp-platform/axi/src/axi_dw_upsizer.sv                               \
+        vendor/pulp-platform/common_cells/src/onehot_to_bin.sv                       \
+        vendor/pulp-platform/common_cells/src/id_queue.sv                            \
+        corev_apu/src/g6lc_ai_dram_join.sv                                           \
         $(wildcard corev_apu/bootrom/*.sv)                                           \
         $(wildcard corev_apu/clint/*.sv)                                             \
         $(wildcard corev_apu/fpga/src/axi2apb/src/*.sv)                              \

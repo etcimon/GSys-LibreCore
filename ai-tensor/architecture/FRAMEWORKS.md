@@ -59,6 +59,35 @@ sim | SoftIsland | linux-uio → ai_island
 - Pin storage, ensure AI-3 region covers buffers (or expand region API).
 - Build desc (flags.IRQ optional), submit, wait, return output tensor.
 
+### 2.1a Module-level offload (landed, virtual backends)
+
+`ai_tensor.torch_backend` is the first surface that runs a **model's own layers** through
+the device path:
+
+- `AiTensorLinear(nn.Linear, Device, quant=...)`: the `[out, in]` weight *is* the island's
+  k-major `B[n][k]`, so it is prepacked once; forwards flatten to `[M, K]`, split M/N/K
+  into AccTile blocks and call `Device.gemm_native`. Integer blocks accumulate exactly
+  across K; float formats keep the island's ordered FP32 reduction and **refuse** a K-split.
+  `quant="int8-dynamic"` = weight-only per-channel INT8 + per-row dynamic INT8 activations
+  with exact i32 accumulation (a quantization; the caller owns the quality budget).
+- `AiTensorConv2d`: groups=1 conv via `F.unfold` im2col onto the same linear path.
+- `replace_linear(model, device, quant=..., conv2d=...)`: in-place swap over Transformers /
+  Diffusers / plain modules; returns a `SwapReport` with one shared `OffloadStats`.
+- Fallback to torch is **explicit and counted** (`OffloadStats.fallback_reasons`); a
+  `allow_fallback=False` layer raises instead. A prepacked-byte corruption test proves the
+  island path executed.
+- `register_custom_op()` exposes `torch.ops.ai_tensor.gemm(a, b_kmajor)` with a fake kernel
+  when `torch.library.custom_op` exists.
+
+GPT-2-family `Conv1D` (transposed `[in, out]` weight) is folded once into the same path.
+
+Tests: `python/tests/test_torch_backend.py` (10, incl. a tiny BERT layer through swapped
+linears, a conv->conv block, and a GPT-2 greedy `generate()` decode loop with KV cache whose
+tokens match the float model exactly). Evidence boundary: `sim` / `software-reference-v2` /
+`mmio` are **virtual** executions of the descriptor contract; only `qemu-uio` against a
+real island is hardware evidence. Model-quality qualification of a full pretrained LLM
+and diffusion pipeline remains open.
+
 ### 2.2 Phase M8 — optional deeper integration
 
 | Mechanism | Benefit | Cost |
@@ -133,3 +162,17 @@ Breaking desc/status changes bump **major** `abi_rev` (see VERSIONING). Framewor
 - Replacing CUDA for arbitrary PyTorch ops in M4–M6.
 - Shipping prebuilt wheels that embed a full LibreCore bitstream.
 - Silent fallback to CPU matmul without an explicit policy flag (debugging only).
+
+## Bounded approximation recipes (VA-Turbo, measured)
+
+`AiTensorLinear(quant=...)` now offers `int8-dynamic`, `fp8-e4m3`, `fp8-e5m2` (per-(row,
+K-group) scaled codes; the island multiplies raw pairs, the host applies the two group scales
+and sums groups in f32), and `bf16` / `fp16` (cast recipes on the island's float datapath
+with the ordered FP32 accumulation, K-chained through accmode 01). `tools/va_select.py`
+runs a recipe ladder on a pinned model, keeps only recipes within the quality budget on a
+calibration text, re-measures the cheapest on a disjoint held-out text and records every
+candidate (`fixtures/qual/*-va-select.json`, checked by `test_qual_records.py`). Cost is
+the island's weight byte stream (the live geometry is B-load bound). On distilgpt2 the
+selection is INT8 K-group-128 blocks with an FP16 `lm_head`: 0.369x the FP32 bytes at
+-0.1 % / -0.3 % perplexity and 0.973 / 0.9745 top-1 on calibration / held-out. FP8 is
+measurably worse than INT8 at equal bytes on this model. Virtual evidence.

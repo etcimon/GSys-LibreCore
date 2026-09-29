@@ -106,8 +106,13 @@ class VirtCardSession:
             from virt_ai_card.driver import VirtualEventFd, VirtualUioDevice
 
             efd = VirtualEventFd(path=self.caps.eventfd)
-            self._local = VirtualUioDevice(eventfd=efd, path=self.caps.uio)
+            self._local = VirtualUioDevice(
+                eventfd=efd,
+                path=self.caps.uio,
+                cap=self._uio_cap(),
+            )
             self._local.enable(True)
+            self._adopt_cap(self._local.cap_snapshot())
             return
 
         # TCP / virtual PCIe path
@@ -118,7 +123,11 @@ class VirtCardSession:
             host, port = self._host, int(self._port)
             self._owns_agent = False
         else:
-            self._agent = CardAgent(host=self._host or "127.0.0.1", port=self._port or 0)
+            self._agent = CardAgent(
+                host=self._host or "127.0.0.1",
+                port=self._port or 0,
+                cap=self._uio_cap(),
+            )
             host, port = self._agent.start()
             self._owns_agent = True
             time.sleep(0.02)
@@ -133,6 +142,9 @@ class VirtCardSession:
             self.caps.uio = str(hello["uio"])
         if hello.get("eventfd"):
             self.caps.eventfd = str(hello["eventfd"])
+        cap = hello.get("cap")
+        if isinstance(cap, dict):
+            self._adopt_cap(cap)
 
     def close(self) -> None:
         if self._client is not None:
@@ -198,3 +210,172 @@ class VirtCardSession:
             flat.extend(int(x) for x in row)
         self._last_ticket = ticket
         return flat, ticket, 0
+
+    def _uio_cap(self) -> Dict[str, int]:
+        return {
+            "clusters": int(self.caps.clusters),
+            "macs_per_cycle": int(self.caps.macs_per_cycle),
+            "acc_tile_m": int(self.caps.acc_tile_m),
+            "acc_tile_n": int(self.caps.acc_tile_n),
+            "acc_tile_k": int(self.caps.acc_tile_k),
+        }
+
+    def _adopt_cap(self, snap: Dict[str, Any]) -> None:
+        """Geometry comes from the card snapshot, local or from the TCP hello."""
+        for key in (
+            "macs_per_cycle",
+            "acc_tile_m",
+            "acc_tile_n",
+            "acc_tile_k",
+            "clusters",
+        ):
+            if key in snap:
+                setattr(self.caps, key, int(snap[key]))
+
+    def _run_tile(
+        self,
+        a_rows: Sequence[Sequence[int]],
+        b_rows: Sequence[Sequence[int]],
+        ticket: int,
+        flag: int,
+        reuse_en: bool,
+    ) -> Tuple[List[List[int]], bool, bool, bool]:
+        if self._local is not None:
+            self._local.set_reuse_en(reuse_en)
+            partial = self._local.gemm_s8(a_rows, b_rows, ticket=ticket, flags=flag)
+            return (
+                partial,
+                self._local.last_read_a(),
+                self._local.last_read_b(),
+                self._local.reuse_enabled(),
+            )
+        if self._client is None:
+            raise RuntimeError("virt-card session not open")
+        partial = self._client.gemm_s8(
+            a_rows, b_rows, ticket=ticket, flags=flag, reuse_en=reuse_en
+        )
+        return (
+            partial,
+            bool(self._client.last_read_a),
+            bool(self._client.last_read_b),
+            bool(self._client.reuse_enabled),
+        )
+
+    def reports_directed_tile(self) -> bool:
+        """True when the card CAP, local or TCP, is the 8-MAC 1024×512×16 tile."""
+        if self._local is None and self._client is None:
+            return False
+        from ai_tensor.device import VA_TURBO_TEST_MACS, VA_TURBO_TEST_TILE
+
+        return int(self.caps.macs_per_cycle) == VA_TURBO_TEST_MACS and (
+            int(self.caps.acc_tile_m),
+            int(self.caps.acc_tile_n),
+            int(self.caps.acc_tile_k),
+        ) == VA_TURBO_TEST_TILE
+
+    def run_va_turbo_test_s8(
+        self,
+        m: int,
+        n: int,
+        k: int,
+        a: Sequence[int],
+        b: Sequence[int],
+        ticket: int = 1,
+    ) -> Dict[str, Any]:
+        """Directed schedule on the local card or the TCP agent.
+
+        The default 512-MAC CAP is refused. Exact reuse is enabled only
+        when a planned tile can skip an operand. A K-split leaves it off.
+        """
+        from ai_tensor.device import (
+            Caps,
+            _adjacent_reuse,
+            choose_va_blocking,
+            tile_can_reuse,
+            tile_gemm,
+        )
+        from ai_tensor.policy import FLAG_REUSE_A, FLAG_REUSE_B
+
+        if (self._local is None and self._client is None) or not self.reports_directed_tile():
+            raise ValueError(
+                "VaTurbo test schedule requires the 8-MAC 1024x512x16 directed tile"
+            )
+        if min(m, n, k) <= 0 or len(a) < m * k or len(b) < k * n:
+            raise ValueError("invalid shape or short S8 operands")
+        caps = Caps(
+            acc_tile_m=int(self.caps.acc_tile_m),
+            acc_tile_n=int(self.caps.acc_tile_n),
+            acc_tile_k=int(self.caps.acc_tile_k),
+            macs_per_cycle=int(self.caps.macs_per_cycle),
+            noc_width=int(self.caps.noc_width),
+            clusters=int(self.caps.clusters),
+        )
+        bm, bn, bk = choose_va_blocking(
+            m, n, k, caps.acc_tile_m, caps.acc_tile_n, caps.acc_tile_k, caps.macs_per_cycle
+        )
+        tiles = tile_gemm(m, n, k, bm, bn, bk)
+        if not tiles:
+            raise ValueError("empty tile plan")
+        can_a, can_b = tile_can_reuse(m, n, k, caps)
+        reuse_en = can_a or can_b
+        c = [0] * (m * n)
+        flags: List[int] = []
+        hit_a = False
+        hit_b = False
+        read_a = True
+        read_b = True
+        enabled = False
+        for idx, (i0, j0, t0, tm, tn, tk) in enumerate(tiles):
+            flag = 0
+            if idx:
+                reuse_a, reuse_b = _adjacent_reuse(tiles[idx - 1], (i0, j0, t0, tm, tn, tk))
+                if reuse_b:
+                    flag |= FLAG_REUSE_B
+                if reuse_a:
+                    flag |= FLAG_REUSE_A
+            a_rows = _rows_a(a, k, i0, t0, tm, tk)
+            b_rows = _rows_b(b, n, j0, t0, tn, tk)
+            partial, read_a, read_b, enabled = self._run_tile(
+                a_rows, b_rows, ticket, flag, reuse_en
+            )
+            hit_a = hit_a or not read_a
+            hit_b = hit_b or not read_b
+            for ii in range(tm):
+                for jj in range(tn):
+                    dst = (i0 + ii) * n + (j0 + jj)
+                    value = (c[dst] + int(partial[ii][jj])) & 0xFFFFFFFF
+                    c[dst] = value - (1 << 32) if value & (1 << 31) else value
+            flags.append(flag)
+            ticket += 1
+        self._last_ticket = ticket - 1
+        return {
+            "c": c,
+            "flags": flags,
+            "read_a": read_a,
+            "read_b": read_b,
+            "hit_a": hit_a,
+            "hit_b": hit_b,
+            "reuse_enabled": enabled,
+            "requested_level": 0,
+            "applied_level": 0,
+        }
+
+
+def _rows_a(
+    a: Sequence[int], k: int, i0: int, t0: int, tm: int, tk: int
+) -> List[List[int]]:
+    rows: List[List[int]] = []
+    for ii in range(tm):
+        base = (i0 + ii) * k + t0
+        rows.append([int(a[base + t]) for t in range(tk)])
+    return rows
+
+
+def _rows_b(
+    b: Sequence[int], n: int, j0: int, t0: int, tn: int, tk: int
+) -> List[List[int]]:
+    rows: List[List[int]] = []
+    for t in range(tk):
+        base = (t0 + t) * n + j0
+        rows.append([int(b[base + jj]) for jj in range(tn)])
+    return rows

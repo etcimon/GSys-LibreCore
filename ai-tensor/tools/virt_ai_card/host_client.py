@@ -42,6 +42,9 @@ class HostClient:
     def __init__(self, host: str = "127.0.0.1", port: int = 18765) -> None:
         self.link = VirtualPcieLink(host=host, port=port)
         self._sock = None
+        self.last_read_a = True
+        self.last_read_b = True
+        self.reuse_enabled = False
 
     def connect(self, timeout: float = 5.0) -> Dict[str, Any]:
         self._sock = self.link.connect(timeout=timeout)
@@ -157,12 +160,17 @@ class HostClient:
         ticket: int = 1,
         irq: bool = True,
         timeout: float = 10.0,
+        flags: int = 0,
+        reuse_en: Optional[bool] = None,
     ) -> List[List[int]]:
         msg: Dict[str, Any] = {
             "type": MSG_GEMM_S8,
             "ticket": ticket,
             "irq": irq,
+            "flags": int(flags),
         }
+        if reuse_en is not None:
+            msg["reuse_en"] = bool(reuse_en)
         if a is not None:
             msg["a"] = a
         if b is not None:
@@ -177,6 +185,9 @@ class HostClient:
         c = r.get("c")
         if c is None:
             raise RuntimeError("gemm_s8: no c in result")
+        self.last_read_a = bool(r.get("read_a", True))
+        self.last_read_b = bool(r.get("read_b", True))
+        self.reuse_enabled = bool(r.get("reuse_enabled", False))
         return c
 
 

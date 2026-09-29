@@ -212,7 +212,9 @@ pub fn parse_cap_window_packed(
 
         // The dtype_mask and block_mnk words are handled by dedicated readers: dtype_mask is a
         // flat parameter, and block_mnk needs log2 transforms. Keep this path for raw packings.
-        if cap_name == "dtype_mask" || cap_name == "block_mnk" {
+        // `command_queue` is a conditional pack (`depth == 0 ? 0 : {depth, version,
+        // flags}`) sourced by `cap_value` from the package constants, not a raw packing.
+        if cap_name == "dtype_mask" || cap_name == "block_mnk" || cap_name == "command_queue" {
             continue;
         }
 

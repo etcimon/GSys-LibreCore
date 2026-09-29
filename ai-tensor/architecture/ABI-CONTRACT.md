@@ -80,6 +80,32 @@ v2 profile pins supersede their old row-major B/version-1 descriptions.
 Upstream: `{ reserved[15:0], status[15:0], ticket[31:0] }`.  
 **API:** `Completion::from_u64`, status enum aligned with `ST_OK`, `ST_BAD_PTR`, …
 
+### 2.2a Optional command-queue extension v1
+
+The candidate queued profile consumes the design-side contract in
+`architecture/ai-matrix/completion-fifo.md`; it does not change Desc64 v2.
+CAP `0x0090` is zero when unavailable, otherwise `{depth[15:0], version[7:0], flags[7:0]}`.
+Version1 flags7 advertise presence, descriptor-pointer commands and the VALID/READY seam.
+The live hardware defaults still advertise zero until integration qualification.
+
+MODE is `0x0f20`; pointer low/high, full-u32 ticket and qid staging are `0x0f24..0x0f30`.
+SUBMIT `0x0f34` attempts admission once. CREDITS `0x0f38` is advisory. Receipt ticket/code
+at `0x0f3c/0x0f40` distinguishes accepted0, full/contention1, disabled2; accepted/rejected
+MMIO attempt counters are `0x0f44/0x0f48`. No completion is owed for a rejected attempt.
+AI-3/CTL/legacy doorbell/reuse-policy writes are locked while MODE=1; rejected writes
+raise APB slave error and cannot mutate the queued protection context. Mode changes
+require all accepted commands, active work and completion records to drain.
+
+C/Python/Rust constants are checked in lockstep. `QueuedMmioSession` is an explicit,
+single-owner pointer/lease API, not an implicit replacement for the legacy session or a
+multi-process DMA driver. The caller supplies immutable descriptor/operand storage and
+keeps the session alive until every lease is returned. This API requires monotonically
+increasing accepted tickets without wrapping. A verified full receipt permits retry of
+that unaccepted ticket; an ambiguous receipt or I/O failure retains its lease and blocks
+new submission until resolved. Timeouts and foreign FIFO heads do not release leases.
+This is protocol coverage, not guest-QEMU execution evidence; core-instruction producer
+and emulator implementation remain separate qualification gates.
+
 ### 2.3 MMIO control (profile-dependent offsets)
 
 Documented in island README / `g6lc_ai_island_top`; package stores offsets in **abi + profile**:
@@ -96,6 +122,17 @@ Documented in island README / `g6lc_ai_island_top`; package stores offsets in **
 | `0x0180..0x018C` | **PMU** R beats / W beats / cycles / sustained milli-GB/s (sticky last GEMM) |
 
 **API:** `mmio::*` constants, `CapRegs::from_words` / `decode_acc_tile`, `PmuSnapshot`.
+
+The MMIO doorbell carries only **23 ticket bits** (`[30:8]`); bit 31 selects descriptor
+fetch. This is narrower than the 32-bit completion ticket. Rust latch/fetch submission
+rejects tickets above `0x007fffff` before changing the latch or allocating a descriptor.
+The Python UIO session allocates tickets 1 through that maximum and refuses exhaustion
+rather than wrapping into a previous identity. Reopening requires the caller to have drained
+and quiesced the device; it is not a hardware reset or generation protocol.
+
+C/Python/Rust lockstep checks include the queue-0/tail offsets and doorbell ticket maximum.
+Python `queue_region(qid)` follows the split region map; queue 1 must never program DESC.
+No descriptor version or field meaning changed in these protocol repairs.
 
 ### 2.4 T0 custom-2 (optional module)
 
@@ -128,3 +165,38 @@ See [`VERSIONING.md`](VERSIONING.md):
 - `island_doc_rev` — `ai_island` README / RTL tag for MMIO.
 
 Frameworks depend on **`abi_rev`**, not on monorepo paths.
+
+## Accumulate mode (`flags.accmode == 01`) — extension, ABI 2.2.0
+
+- Request: `flags[11:10] = 01`. Semantics: each output's ordered reduction starts from the
+  i32 (integer formats) or f32 (float formats) word already stored in C, then proceeds
+  exactly as `accmode == 00`. Integer results are therefore `C + A·B` exactly; float results
+  equal one long ordered reduction over the concatenated K blocks, bit for bit.
+- Grant: CAP word `0x0094` (`CAP_ACCMODE`), bit 0. Software MUST read it; a device without
+  the bit completes `accmode == 01` with `ST_BAD_FMT` and must not demote to overwrite.
+  The live island (`AiIslandAccmodeGrant = 1`), the software reference and the
+  `software-reference-v2` device grant it. `accmode == 1x` remains reserved (`ST_BAD_FMT`).
+- Hardware note: the RTL reduces each K step through a PE lane tree, so a chained K-split
+  equals one long job bit for bit when every block boundary is a multiple of the lane
+  count (the live AccTile K = 512 = lane count, which the `torch_backend` blocking uses).
+  The software reference is sequential and exact for any split. An accumulate job loads
+  the C tile first (m*n*4 extra read bytes) and does not overlap stores with the MAC.
+- Descriptor layout, version and every other field are unchanged (reserved encoding enabled
+  behind a new RO grant word), so this is an extension, not a version bump.
+- Python: `Device.gemm_native(..., c_init=)`; Rust: `numfmt::gemm_native_acc`,
+  `check_desc_engine_acc`, `Caps.accumulate`; C: `AI_TENSOR_CAP_ACCMODE`,
+  `AI_TENSOR_ACCMODE_ACCUMULATE`. `torch_backend` chains float K blocks through it.
+
+## Operand bank capacity (`CAP_BANK_A_BYTES` 0x98, `CAP_BANK_B_BYTES` 0x9C)
+
+Read-only words giving the island's A and B operand bank capacity in bytes. A part that
+publishes both non-zero boxes a job by **panel bytes**, not by `AccTileK`:
+
+    pitch_bytes(k) = next_pow2(ceil(row_bytes(k) / macs_per_cycle)) * macs_per_cycle
+    accepted iff  m <= AccTileM, n <= AccTileN, k <= 65535,
+                  n * pitch_bytes(k) <= CAP_BANK_B_BYTES, m * pitch_bytes(k) <= CAP_BANK_A_BYTES
+
+so a 256 x 1024 INT8 weight panel is one job (the same bytes as 512 x 512) and one
+`FLAG_REUSE_B` key. A part publishing 0 keeps `k <= AccTileK`. Software: `Caps.fits`,
+`Caps.max_k`; `accmode 01` still chains K beyond the banks. Refusal is `ST_ERR` at the
+engine's geometry check, before any operand traffic.

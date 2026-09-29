@@ -59,9 +59,25 @@ class FakeDma:
 class FakeIsland:
     """A register-accurate island that actually multiplies."""
 
-    def __init__(self, dma: FakeDma, *, acc_tile: int = 256, queues: int = 2):
+    def __init__(
+        self,
+        dma: FakeDma,
+        *,
+        acc_tile: int = 256,
+        acc_tile_m: int | None = None,
+        acc_tile_n: int | None = None,
+        acc_tile_k: int | None = None,
+        macs: int = 256,
+        queues: int = 2,
+        accumulate: bool = False,
+    ):
         self.dma = dma
+        self.accumulate = accumulate
         self.acc_tile = acc_tile
+        self.acc_tile_m = acc_tile if acc_tile_m is None else acc_tile_m
+        self.acc_tile_n = acc_tile if acc_tile_n is None else acc_tile_n
+        self.acc_tile_k = acc_tile if acc_tile_k is None else acc_tile_k
+        self.macs = macs
         self.queues = queues
         self.regs = bytearray(qu.ISLAND_WINDOW_BYTES)
         self.enabled = False
@@ -73,27 +89,52 @@ class FakeIsland:
         self.ticket = 0
         self.trace: list[tuple[str, int, int]] = []
         self.regions: dict[int, tuple[int, int, int]] = {}
+        from ai_tensor.policy import OperandReuse
+
+        self._reuse = OperandReuse()
+        self._reuse.set_enabled(self._is_directed())
+        self._last_read_a = True
+        self._last_read_b = True
         self._install_caps()
+
+    def _is_directed(self) -> bool:
+        """The directed test window stands for AiCfgVaTurboTest, where VaTurboEn is 1."""
+        from ai_tensor.device import VA_TURBO_TEST_MACS, VA_TURBO_TEST_TILE
+
+        return self.macs == VA_TURBO_TEST_MACS and (
+            self.acc_tile_m,
+            self.acc_tile_n,
+            self.acc_tile_k,
+        ) == VA_TURBO_TEST_TILE
+
+    def last_read_a(self) -> bool:
+        return self._last_read_a
+
+    def last_read_b(self) -> bool:
+        return self._last_read_b
 
     # -- capability window ---------------------------------------------------
     def _install_caps(self) -> None:
-        lg = self.acc_tile.bit_length() - 1
+        def lg(n: int) -> int:
+            return (n.bit_length() - 1) & 0xF
+
         block = (
-            (lg << qu.CAP_BLOCK_M_SHIFT)
-            | (lg << qu.CAP_BLOCK_N_SHIFT)
-            | (lg << qu.CAP_BLOCK_K_SHIFT)
+            (lg(self.acc_tile_m) << qu.CAP_BLOCK_M_SHIFT)
+            | (lg(self.acc_tile_n) << qu.CAP_BLOCK_N_SHIFT)
+            | (lg(self.acc_tile_k) << qu.CAP_BLOCK_K_SHIFT)
         )
         for off, val in [
             (qu.CAP_VERSION, 1),
             (qu.CAP_DTYPE_MASK, 1),
             (qu.CAP_CLUSTERS, 1 | (1 << 16)),
-            (qu.CAP_MACS_CYCLE, 256),
+            (qu.CAP_MACS_CYCLE, self.macs),
             (qu.CAP_CLOCK_KHZ, 1_000_000),
             (qu.CAP_SRAM_BYTES, 2 << 20),
             (qu.CAP_BLOCK_MNK, block),
             (qu.CAP_DRAM_GBPS, 8),
             (qu.CAP_QUEUES, self.queues | (64 << 16)),
             (qu.CAP_NOC_WIDTH, 64),
+            (qu.abi.CAP_ACCMODE, qu.abi.CAP_ACCMODE_ACCUMULATE if self.accumulate else 0),
         ]:
             struct.pack_into("<I", self.regs, off, val)
 
@@ -106,6 +147,8 @@ class FakeIsland:
             return 1 if self.done_sticky else 0
         if offset == qu.MMIO_TICKET:
             return self.ticket
+        if offset == qu.MMIO_DSTATUS:
+            return self.last_status
         if offset == qu.MMIO_CTL:
             return (1 if self.enabled else 0) | (2 if self.wr_cpl_en else 0)
         return struct.unpack_from("<I", self.regs, offset)[0]
@@ -122,14 +165,17 @@ class FakeIsland:
                 self.irq_pending = False
             return
         if offset == qu.MMIO_DOORBELL:
-            self._run(value & 0xFF)
+            self._run(value & 0xFF, (value >> 8) & 0x7FFFFF)
             return
-        if qu.MMIO_QUEUE0 <= offset < qu.MMIO_DESC:
+        if 0x120 <= offset < 0x140 or 0x1A0 <= offset < 0x1A0 + (self.queues - 1) * 0x20:
             struct.pack_into("<I", self.regs, offset, value)
-            rel = offset - qu.MMIO_QUEUE0
-            qid, field = divmod(rel, qu.QUEUE_STRIDE)
+            if offset < 0x140:
+                qid, field, q = 0, offset - 0x120, 0x120
+            else:
+                qid, field = divmod(offset - 0x1A0, 0x20)
+                qid += 1
+                q = 0x1A0 + (qid - 1) * 0x20
             if field == qu.QUEUE_PERM:
-                q = qu.MMIO_QUEUE0 + qid * qu.QUEUE_STRIDE
                 lo = struct.unpack_from("<I", self.regs, q + qu.QUEUE_BASE_LO)[0]
                 hi = struct.unpack_from("<I", self.regs, q + qu.QUEUE_BASE_HI)[0]
                 llo = struct.unpack_from("<I", self.regs, q + qu.QUEUE_LIMIT_LO)[0]
@@ -139,35 +185,54 @@ class FakeIsland:
         struct.pack_into("<I", self.regs, offset, value)
 
     # -- the engine ----------------------------------------------------------
-    def _run(self, qid: int) -> None:
-        self.ticket += 1
+    def _run(self, qid: int, ticket: int) -> None:
+        self.ticket = ticket
         if not self.enabled:
             self.last_status = 6  # ST_DISABLED
             self.done_sticky = True
             return
         d = struct.unpack_from("<HHIIIIIQQQQQ", self.regs, qu.MMIO_DESC)
-        version, op, _flags, m, n, k, ld_ab, pa, pb, pc, _ps, pdone = d
+        version, op, flags, m, n, k, ld_ab, pa, pb, pc, _ps, pdone = d
         if version != 2:
             self.last_status = 2
         elif op != 1:
             self.last_status = 3
-        elif not (0 < m <= self.acc_tile and 0 < n <= self.acc_tile and 0 < k <= self.acc_tile):
+        elif not (
+            0 < m <= self.acc_tile_m and 0 < n <= self.acc_tile_n and 0 < k <= self.acc_tile_k
+        ):
             self.last_status = 1  # ST_ERR, matching the engine's ST_CHK
         elif not self._admitted(qid, [pa, pb, pc, pdone]):
             self.last_status = 4  # ST_BAD_PTR
         else:
             lda, ldb = ld_ab & 0xFFFF, ld_ab >> 16
             from ai_tensor.numfmt import gemm_native, layout
-            fmt = (_flags >> 20) & 7
+            from ai_tensor.policy import FLAG_REUSE_A, FLAG_REUSE_B
+
+            fmt = (flags >> 20) & 7
+            accmode = (flags >> 10) & 3
             try:
-                _, _, na, nb, _ = layout(m, n, k, fmt, lda, ldb)
+                if accmode > 1 or (accmode == 1 and not self.accumulate):
+                    raise ValueError("ST_BAD_FMT: accmode")
+                _, _, na, nb, c_len = layout(m, n, k, fmt, lda, ldb)
+                seed = self.dma.read(pc - self.dma.base, c_len) if accmode == 1 else None
                 a = self.dma.read(pa - self.dma.base, na)
                 b = self.dma.read(pb - self.dma.base, nb)
-                out = gemm_native(a, b, m, n, k, fmt, lda, ldb, self.read32(qu.CAP_DTYPE_MASK))
+                _, a = self._reuse.bind(
+                    "a", flags & FLAG_REUSE_A, (pa, m, k, lda, fmt), a, True
+                )
+                _, b = self._reuse.bind(
+                    "b", flags & FLAG_REUSE_B, (pb, n, k, ldb, fmt), b, True
+                )
+                out = gemm_native(a, b, m, n, k, fmt, lda, ldb, self.read32(qu.CAP_DTYPE_MASK),
+                                  c_init=seed)
+                self._reuse.finish(True)
                 self.dma.write(pc - self.dma.base, out)
                 self.last_status = 0
             except ValueError:
+                self._reuse.finish(False)
                 self.last_status = 8
+            self._last_read_a = self._reuse.last_read_a
+            self._last_read_b = self._reuse.last_read_b
         self.done_sticky = True
         self.irq_pending = True
         if self.wr_cpl_en and pdone:
@@ -308,6 +373,40 @@ class TestSubmissionProtocol(unittest.TestCase):
         self.assertEqual(s.pmu()["cycles"], 4242)
 
 
+class TestAccumulateMode(unittest.TestCase):
+    A = bytes([1, 2, 3, 4])
+    B = bytes([5, 7, 6, 8])  # k-major B: rows are output columns
+
+    def test_seed_is_added_when_granted(self):
+        s, isl, _ = session(accumulate=True)
+        self.assertTrue(s.caps.accumulate)
+        first = s.gemm_native(self.A, self.B, 2, 2, 2, 0)
+        self.assertEqual(struct.unpack("<4i", first), (19, 22, 43, 50))
+        second = s.gemm_native(self.A, self.B, 2, 2, 2, 0, c_init=first)
+        self.assertEqual(struct.unpack("<4i", second), (38, 44, 86, 100))
+        # The descriptor actually carried accmode 01.
+        flags = [v for kind, off, v in isl.trace if kind == "w" and off == qu.MMIO_DESC + 4]
+        self.assertEqual((flags[-1] >> 10) & 3, 1)
+
+    def test_ungranted_island_refuses_before_any_traffic(self):
+        s, isl, _ = session(accumulate=False)
+        self.assertFalse(s.caps.accumulate)
+        before = len(isl.trace)
+        with self.assertRaisesRegex(ValueError, "not granted"):
+            s.gemm_native(self.A, self.B, 2, 2, 2, 0, c_init=bytes(16))
+        self.assertEqual(len(isl.trace), before)
+
+    def test_device_facade_routes_accumulate_to_uio(self):
+        from ai_tensor.device import Device
+
+        s, _, _ = session(accumulate=True)
+        dev = Device("qemu-uio", session=s)
+        self.assertTrue(dev.caps().accumulate)
+        first = dev.gemm_native(self.A, self.B, 2, 2, 2, 0)
+        second = dev.gemm_native(self.A, self.B, 2, 2, 2, 0, c_init=first)
+        self.assertEqual(struct.unpack("<4i", second), (38, 44, 86, 100))
+
+
 class TestRefusals(unittest.TestCase):
     def test_a_shape_beyond_the_tile_is_refused_on_the_host(self):
         # The engine would return an error status; refusing before submission gives the
@@ -435,6 +534,363 @@ class TestEnvSelection(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
+
+class TestDirectedSchedule(unittest.TestCase):
+    def _directed(self):
+        return session(acc_tile_m=1024, acc_tile_n=512, acc_tile_k=16, macs=8)
+
+    def test_a_default_window_ignores_the_flag_and_refuses_the_schedule(self) -> None:
+        from ai_tensor.policy import FLAG_REUSE_B
+
+        s, isl, _ = session()
+        self.assertFalse(s.reports_directed_tile())
+        with self.assertRaises(ValueError):
+            s.run_va_turbo_test_s8(16, 8, 8, [1] * (16 * 8), [1] * (8 * 8))
+        s.gemm_s8(1, 1, 1, [1], [2])
+        c, _, status = s.gemm_s8(1, 1, 1, [1], [9], flags=FLAG_REUSE_B)
+        self.assertEqual(status, 0)
+        self.assertEqual(c, [9])
+        self.assertTrue(isl.last_read_b())
+
+    def test_the_directed_window_skips_only_when_a_tile_does(self) -> None:
+        from ai_tensor.policy import FLAG_REUSE_A, FLAG_REUSE_B
+
+        s, isl, _ = self._directed()
+        self.assertTrue(s.reports_directed_tile())
+        s.gemm_s8(1, 1, 1, [1], [2])
+        kept, _, status = s.gemm_s8(1, 1, 1, [1], [9], flags=FLAG_REUSE_B)
+        self.assertEqual(status, 0)
+        self.assertEqual(kept, [2])
+        self.assertFalse(isl.last_read_b())
+
+        m_split = s.run_va_turbo_test_s8(16, 8, 8, [1] * (16 * 8), [1] * (8 * 8))
+        self.assertEqual(m_split["flags"][1] & FLAG_REUSE_B, FLAG_REUSE_B)
+        self.assertEqual(m_split["flags"][1] & FLAG_REUSE_A, 0)
+        self.assertTrue(m_split["reuse_enabled"])
+        self.assertTrue(m_split["hit_b"])
+        self.assertFalse(m_split["hit_a"])
+        self.assertTrue(m_split["read_a"])
+        self.assertFalse(m_split["read_b"])
+        self.assertEqual(m_split["applied_level"], 0)
+        self.assertEqual(m_split["c"], [8] * (16 * 8))
+
+        k_split = s.run_va_turbo_test_s8(8, 8, 16, [1] * (8 * 16), [1] * (16 * 8))
+        self.assertEqual(k_split["flags"][1] & (FLAG_REUSE_A | FLAG_REUSE_B), 0)
+        self.assertFalse(k_split["reuse_enabled"])
+        self.assertTrue(k_split["read_a"])
+        self.assertTrue(k_split["read_b"])
+        self.assertEqual(k_split["c"], [16] * (8 * 8))
+
+    def test_high_level_uses_the_window_and_not_a_caps_override(self) -> None:
+        from ai_tensor.device import Caps, run_high_level_s8
+
+        s, _, _ = self._directed()
+        dev = Device("qemu-uio", session=s)
+        c, meta = run_high_level_s8(dev, 16, 8, 8, [1] * (16 * 8), [1] * (8 * 8))
+        self.assertTrue(meta["exact_reuse"])
+        self.assertTrue(meta["hit_b"])
+        self.assertFalse(meta["hit_a"])
+        self.assertEqual(meta["applied_level"], 0)
+        self.assertFalse(meta["port_promoted"])
+        self.assertEqual(c, [8] * (16 * 8))
+        dev.close()
+
+        plain, _, _ = session()
+        overridden = Device(
+            "qemu-uio",
+            session=plain,
+            caps=Caps(acc_tile_m=1024, acc_tile_n=512, acc_tile_k=16, macs_per_cycle=8),
+        )
+        c_live, meta_live = run_high_level_s8(
+            overridden, 16, 8, 8, [1] * (16 * 8), [1] * (8 * 8)
+        )
+        self.assertFalse(meta_live["exact_reuse"])
+        self.assertFalse(meta_live["hit_b"])
+        self.assertEqual(c_live, c)
+        overridden.close()
+
+
+class TestCompletionOwnership(unittest.TestCase):
+    def test_queue_one_region_does_not_overwrite_descriptor(self):
+        s, isl, _ = session()
+        poison = b"\xa5" * 64
+        isl.regs[qu.MMIO_DESC:qu.MMIO_DESC + 64] = poison
+        isl.trace.clear()
+        s.program_region(1, DMA_BASE, DMA_BASE + 256)
+        writes = [(off, value) for op, off, value in isl.trace if op == "w"]
+        self.assertEqual([off for off, _ in writes], [0x1A0, 0x1A4, 0x1A8, 0x1AC, 0x1B0])
+        self.assertEqual(isl.regs[qu.MMIO_DESC:qu.MMIO_DESC + 64], poison)
+
+    def test_invalid_qids_do_not_touch_registers(self):
+        for qid in (-1, 2, 255, 256):
+            with self.subTest(qid=qid):
+                s, isl, _ = session()
+                isl.trace.clear()
+                with self.assertRaises(ValueError):
+                    s.submit(qu.pack_gemm_desc(1, 1, 1), qid=qid)
+                self.assertFalse(any(op == "w" for op, _, _ in isl.trace))
+        s, isl, _ = session()
+        isl.trace.clear()
+        with self.assertRaises(ValueError):
+            s.program_region(-1, DMA_BASE, DMA_BASE + 256)
+        self.assertFalse(any(op == "w" for op, _, _ in isl.trace))
+
+    def test_idle_without_done_is_not_completion(self):
+        s, isl, _ = session()
+        s.submit(qu.pack_gemm_desc(1, 1, 1))
+        isl.done_sticky = False
+        isl.trace.clear()
+        with self.assertRaises(TimeoutError):
+            s.wait(timeout=0)
+        self.assertNotIn(("w", qu.MMIO_DONE, 1), isl.trace)
+
+    def test_wrong_ticket_is_not_claimed(self):
+        s, isl, _ = session()
+        s.submit(qu.pack_gemm_desc(1, 1, 1))
+        isl.ticket = 99
+        isl.trace.clear()
+        with self.assertRaises(TimeoutError):
+            s.wait(timeout=0)
+        self.assertTrue(isl.done_sticky)
+        self.assertNotIn(("w", qu.MMIO_DONE, 1), isl.trace)
+
+    def test_pending_submission_owns_dma_until_completion(self):
+        s, isl, dma = session()
+        s.submit(qu.pack_gemm_desc(1, 1, 1))
+        before = bytes(dma._buf)
+        isl.trace.clear()
+        with self.assertRaises(RuntimeError):
+            s.gemm_s8(1, 1, 1, [7], [9])
+        self.assertEqual(bytes(dma._buf), before)
+        self.assertFalse(any(op == "w" for op, _, _ in isl.trace))
+
+    def test_spurious_irq_does_not_prove_completion(self):
+        class Irq:
+            def enable(self):
+                pass
+
+            def wait(self, timeout=None):
+                return True
+
+        s, isl, _ = session()
+        s.irq = Irq()
+        s.submit(qu.pack_gemm_desc(1, 1, 1))
+        isl.done_sticky = False
+        isl.trace.clear()
+        with self.assertRaises(TimeoutError):
+            s.wait(timeout=0)
+        self.assertNotIn(("w", qu.MMIO_DONE, 1), isl.trace)
+
+    def test_delayed_acceptance_preserves_result_and_claim_order(self):
+        class Delayed(FakeIsland):
+            pending = None
+            reads = 0
+
+            def write32(self, offset, value):
+                if offset == qu.MMIO_DOORBELL:
+                    self.pending = value
+                    self.trace.append(("w", offset, value))
+                else:
+                    super().write32(offset, value)
+
+            def read32(self, offset):
+                if offset == qu.MMIO_DONE and self.pending is not None:
+                    self.reads += 1
+                    if self.reads == 3:
+                        super().write32(qu.MMIO_DOORBELL, self.pending)
+                        self.pending = None
+                return super().read32(offset)
+
+        dma = FakeDma()
+        isl = Delayed(dma)
+        s = qu.QemuUioSession(isl, dma)
+        c, ticket, status = s.gemm_s8(2, 2, 2, [1, 2, 3, 4], [5, 6, 7, 8])
+        self.assertEqual((c, ticket, status), ([19, 22, 43, 50], 1, 0))
+        self.assertEqual(isl.reads, 3)
+        self.assertEqual(isl.trace.count(("w", qu.MMIO_DONE, 1)), 1)
+
+    def test_irq_request_and_rearm_follow_claim(self):
+        s, isl, _ = session()
+
+        class Irq:
+            def enable(self):
+                isl.trace.append(("irq-enable", 0, 0))
+
+            def wait(self, timeout=None):
+                return True
+
+        s.irq = Irq()
+        s.gemm_s8(1, 1, 1, [2], [3])
+        flags = struct.unpack_from('<I', isl.regs, qu.MMIO_DESC + 4)[0]
+        self.assertTrue(flags & (1 << 2))
+        self.assertEqual(isl.trace.count(("w", qu.MMIO_DONE, 1)), 1)
+        claim = isl.trace.index(("w", qu.MMIO_DONE, 1))
+        self.assertIn(("irq-enable", 0, 0), isl.trace[claim + 1:])
+
+    def test_last_wire_ticket_is_preserved(self):
+        s, _, _ = session()
+        s._ticket = 0x7FFFFE
+        c, ticket, status = s.gemm_s8(1, 1, 1, [2], [3])
+        self.assertEqual((c, ticket, status), ([6], 0x7FFFFF, 0))
+
+    def test_timeout_preserves_the_pending_request(self):
+        s, isl, _ = session()
+        issued = s.submit(qu.pack_gemm_desc(1, 1, 1))
+        isl.done_sticky = False
+        with self.assertRaises(TimeoutError):
+            s.wait(timeout=0)
+        with self.assertRaises(RuntimeError):
+            s.submit(qu.pack_gemm_desc(1, 1, 1))
+        isl.ticket = issued
+        isl.done_sticky = True
+        isl.last_status = 1
+        self.assertEqual(s.wait(timeout=0), 1)
+
+    def test_ticket_exhaustion_cannot_reuse_a_wire_identity(self):
+        s, isl, _ = session()
+        s._ticket = 0x7FFFFF
+        isl.trace.clear()
+        with self.assertRaises(ValueError):
+            s.submit(qu.pack_gemm_desc(1, 1, 1))
+        self.assertFalse(any(op == "w" for op, _, _ in isl.trace))
+
+
+class FakeCommandWindow:
+    def __init__(self, depth=2):
+        self.regs = {0x90: (depth << 16) | 0x107, 0x1C: 2, 0x100: 3, 0xF20: 0}
+        self.depth = depth
+        self.commands = []
+        self.completions = []
+        self.writes = []
+        self.mismatch = False
+
+    def read32(self, offset):
+        if offset == 0xF38:
+            return self.depth - len(self.commands)
+        if offset == 0x10C:
+            return int(bool(self.completions))
+        if offset == 0x110:
+            return self.completions[0][0] if self.completions else 0
+        if offset == 0x114:
+            return self.completions[0][1] if self.completions else 0
+        return self.regs.get(offset, 0)
+
+    def write32(self, offset, value):
+        self.writes.append((offset, value))
+        if offset == 0x10C and value & 1:
+            self.completions.pop(0)
+            return
+        if offset == 0xF20 and value == 0 and (self.commands or self.completions):
+            raise RuntimeError("busy mode transition")
+        self.regs[offset] = value
+        if offset == 0xF34 and value & 1:
+            ticket = self.regs[0xF2C]
+            code = 2 if not self.regs[0xF20] else (1 if len(self.commands) >= self.depth else 0)
+            if code == 0:
+                self.commands.append((ticket, self.regs[0xF30], self.regs[0xF24] | self.regs[0xF28] << 32))
+            self.regs[0xF3C] = ticket + int(self.mismatch)
+            self.regs[0xF40] = code
+
+    def complete(self, status=0):
+        ticket, _, _ = self.commands.pop(0)
+        self.completions.append((ticket, status))
+
+
+class TestQueuedMmio(unittest.TestCase):
+    def test_requires_advertised_profile_before_writes(self):
+        window = FakeCommandWindow()
+        window.regs[0x90] = 0
+        with self.assertRaises(NotImplementedError):
+            qu.QueuedMmioSession(window)
+        self.assertEqual(window.writes, [])
+
+    def test_credits_receipts_and_completion_ownership(self):
+        window = FakeCommandWindow()
+        queue = qu.QueuedMmioSession(window)
+        queue.enable()
+        a, b, rejected = object(), object(), object()
+        self.assertTrue(queue.submit(0x1000, ticket=0xF0000001, lease=a))
+        self.assertTrue(queue.submit(0x1040, ticket=0xF0000002, lease=b))
+        self.assertFalse(queue.submit(0x1080, ticket=0xF0000003, lease=rejected))
+        self.assertEqual(queue.pending_tickets, (0xF0000001, 0xF0000002))
+        self.assertEqual(queue.credits, 0)
+        with self.assertRaises(RuntimeError):
+            queue.disable()
+        window.complete(8)
+        self.assertEqual(queue.poll(), (0xF0000001, 8))
+        window.complete()
+        self.assertEqual(queue.poll(), (0xF0000002, 0))
+        queue.disable()
+        self.assertEqual(window.regs[0xF20], 0)
+
+    def test_timeout_and_foreign_head_do_not_release(self):
+        window = FakeCommandWindow()
+        queue = qu.QueuedMmioSession(window)
+        queue.enable()
+        queue.submit(0x1000, ticket=7, lease=object())
+        window.completions.append((99, 0))
+        self.assertIsNone(queue.poll())
+        with self.assertRaises(TimeoutError):
+            queue.wait(timeout=0)
+        self.assertEqual(queue.pending_tickets, (7,))
+        self.assertEqual(window.completions, [(99, 0)])
+
+    def test_ambiguous_receipt_blocks_reuse_until_resolved(self):
+        window = FakeCommandWindow()
+        queue = qu.QueuedMmioSession(window)
+        queue.enable()
+        window.mismatch = True
+        with self.assertRaises(RuntimeError):
+            queue.submit(0x1000, ticket=7, lease=object())
+        self.assertEqual(queue.pending_tickets, (7,))
+        with self.assertRaises(RuntimeError):
+            queue.submit(0x1040, ticket=8, lease=object())
+        window.regs[0xF3C] = 7
+        self.assertTrue(queue.resolve_submission())
+        window.complete()
+        self.assertEqual(queue.poll(), (7, 0))
+        with self.assertRaises(ValueError):
+            queue.submit(0x1080, ticket=7, lease=object())
+
+    def test_full_receipt_allows_retry_without_reusing_accepted_ticket(self):
+        window = FakeCommandWindow(depth=1)
+        queue = qu.QueuedMmioSession(window)
+        queue.enable()
+        self.assertTrue(queue.submit(0x1000, ticket=1, lease=object()))
+        self.assertFalse(queue.submit(0x1040, ticket=2, lease=object()))
+        window.complete()
+        self.assertEqual(queue.poll(), (1, 0))
+        self.assertTrue(queue.submit(0x1040, ticket=2, lease=object()))
+
+    def test_exception_after_submit_keeps_the_lease(self):
+        class FaultyWindow(FakeCommandWindow):
+            def write32(self, offset, value):
+                super().write32(offset, value)
+                if offset == 0xF34:
+                    raise OSError("lost acknowledgment")
+
+        window = FaultyWindow()
+        queue = qu.QueuedMmioSession(window)
+        queue.enable()
+        with self.assertRaises(OSError):
+            queue.submit(0x1000, ticket=1, lease=object())
+        self.assertEqual(queue.pending_tickets, (1,))
+        self.assertTrue(queue.resolve_submission())
+        window.complete()
+        self.assertEqual(queue.poll(), (1, 0))
+
+    def test_invalid_commands_have_no_effect(self):
+        window = FakeCommandWindow()
+        queue = qu.QueuedMmioSession(window)
+        queue.enable()
+        before = list(window.writes)
+        for pointer, ticket, qid in ((0, 1, 0), (3, 1, 0), (1 << 64, 1, 0),
+                                     (0x1000, 1 << 32, 0), (0x1000, 1, 2)):
+            with self.subTest(pointer=pointer, ticket=ticket, qid=qid):
+                with self.assertRaises(ValueError):
+                    queue.submit(pointer, ticket=ticket, qid=qid, lease=object())
+        self.assertEqual(before, window.writes)
 
 
 if __name__ == "__main__":

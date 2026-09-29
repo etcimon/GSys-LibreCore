@@ -511,6 +511,782 @@ def error_budget_level(ppm: float) -> int:
     raise AssertionError("unreachable: level 15 saturates at 100%")  # pragma: no cover
 
 
+def compose_ppm(eps_ppm: int, kappa_q8: int):
+    """``(eps_ppm * kappa_q8 + 255) >> 8``.
+
+    ``kappa_q8`` is kappa times 256. A value below 256 is kappa below 1 and
+    fails closed. A composed bound above 100% fails closed. This does not
+    change a product.
+    """
+    if isinstance(eps_ppm, bool) or isinstance(kappa_q8, bool):
+        return None
+    if not isinstance(eps_ppm, int) or not isinstance(kappa_q8, int):
+        return None
+    if eps_ppm < 0 or kappa_q8 < 256:
+        return None
+    composed = (eps_ppm * kappa_q8 + 255) >> 8
+    if composed > LADDER_MAX_PPM:
+        return None
+    return composed
+
+
+# Documented INT8 tile error in va-turbo.md. Not re-measured here.
+DOC_INT8_PPM = 18_527
+
+
+def measurement_fits(level: int, measured_ppm: Optional[int]) -> bool:
+    """Level 0 needs no measurement. A higher level with none fails closed."""
+    if level == 0:
+        return measured_ppm is None or measured_ppm == 0
+    try:
+        budget = budget_ppm(level)
+    except ValueError:
+        return False
+    if measured_ppm is None:
+        return False
+    return measured_ppm <= budget
+
+
+def recipe_admitted(level: int, eps_ppm: int, kappa_q8: int, caller_ppm: int) -> bool:
+    """Analytic bound and caller bound both fit ``level``. The MAC path still applies 0."""
+    try:
+        budget = budget_ppm(level)
+        bound = error_budget_level(caller_ppm)
+    except ValueError:
+        return False
+    composed = compose_ppm(eps_ppm, kappa_q8)
+    if composed is None:
+        return False
+    return composed <= budget and level <= bound
+
+
+# Untightened quantisation flatness, fa + fb = 2 in Q8.
+FLAT_WORST_Q8 = 512
+
+_ROUND_EPS = (
+    None, 562_500, 265_625, 128_907, 63_477, 31_495, 15_687, 7_828, 3_911, 1_955,
+    977, 489, 245, 123, 62, 31, 16, 8, 4, 2, 1, 1, 1, 1,
+)
+_TRUNC_EPS = (
+    1_000_000, 750_000, 437_500, 234_375, 121_094, 61_524, 31_006, 15_564, 7_798,
+    3_903, 1_953, 977, 489, 245, 123, 62, 31, 16, 8, 4, 2, 1, 1, 1,
+)
+_EXACT_RECIPE_IDS = frozenset(
+    (0, 1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 22, 23, 24)
+)
+
+
+def _table_ppm(table: tuple, bits: object):
+    if isinstance(bits, bool) or not isinstance(bits, int) or bits < 0 or bits >= len(table):
+        return None
+    return table[bits]
+
+
+def quant_eps_ppm(levels: int, flat_q8: int):
+    """Full-scale quantisation ppm. A flatness above 512 fails closed."""
+    if isinstance(levels, bool) or isinstance(flat_q8, bool):
+        return None
+    if not isinstance(levels, int) or not isinstance(flat_q8, int):
+        return None
+    flat = FLAT_WORST_Q8 if flat_q8 == 0 else flat_q8
+    if flat < 0 or flat > FLAT_WORST_Q8:
+        return None
+    if levels == 127:
+        per_unit, constant_term = 3_938, 16
+    elif levels == 7:
+        per_unit, constant_term = 71_429, 5_103
+    else:
+        return None
+    total = (((per_unit * flat) + 255) >> 8) + constant_term
+    if total > LADDER_MAX_PPM:
+        return None
+    return total
+
+
+def recipe_eps_ppm(recipe: int, approx_param: Optional[int] = None, flat_q8: Optional[int] = None):
+    """Per-recipe analytic epsilon. Exact ids are 0. Recipe 26 is refused.
+
+    A recipe that needs ``approx_param`` returns ``None`` without one.
+    Absent flatness uses :data:`FLAT_WORST_Q8`.
+    """
+    if isinstance(recipe, bool) or not isinstance(recipe, int) or recipe < 0 or recipe > 31:
+        return None
+    flat = FLAT_WORST_Q8 if flat_q8 in (None, 0) else flat_q8
+    if recipe in _EXACT_RECIPE_IDS:
+        return 0
+    if recipe == 4:
+        return _table_ppm(_ROUND_EPS, 10)
+    if recipe == 5:
+        return _table_ppm(_ROUND_EPS, 7)
+    if recipe == 6:
+        return quant_eps_ppm(127, flat)
+    if recipe == 7:
+        return _table_ppm(_ROUND_EPS, 3)
+    if recipe == 18:
+        if isinstance(approx_param, bool) or not isinstance(approx_param, int):
+            return None
+        arm = approx_param & 3
+        if arm == 0:
+            return _table_ppm(_ROUND_EPS, 10)
+        if arm == 1:
+            return _table_ppm(_ROUND_EPS, 7)
+        if arm == 2:
+            return quant_eps_ppm(127, flat)
+        return _table_ppm(_ROUND_EPS, 2)
+    if recipe in (19, 20):
+        return quant_eps_ppm(127, flat)
+    if recipe in (21, 25, 30, 31):
+        if isinstance(approx_param, bool) or not isinstance(approx_param, int):
+            return None
+        return _table_ppm(_TRUNC_EPS, approx_param)
+    if recipe == 26:
+        return None
+    if recipe in (27, 28):
+        return 250_000
+    if recipe == 29:
+        return quant_eps_ppm(7, flat)
+    return None
+
+
+@dataclass(frozen=True)
+class Decode:
+    """One bank entry. The action fields stay clear.
+
+    ``supported`` means the id has an arithmetic class. ``apply``, reuse,
+    convert, and the other action fields are false for every id.
+    """
+
+    kind: str
+    eps_ppm: Optional[int]
+    needs_param: bool
+    narrows_storage: bool
+    quant_levels: Optional[int]
+    supported: bool
+    apply: bool = False
+    reuse_a: bool = False
+    reuse_b: bool = False
+    convert: bool = False
+    approx_products: bool = False
+    skip_products: bool = False
+    split_rows: bool = False
+    groups_log2: int = 0
+    rewrites_format: bool = False
+
+    def actions_clear(self) -> bool:
+        return not (
+            self.apply
+            or self.reuse_a
+            or self.reuse_b
+            or self.convert
+            or self.approx_products
+            or self.skip_products
+            or self.split_rows
+            or self.groups_log2
+            or self.rewrites_format
+        )
+
+
+def decode(recipe: int, approx_param: Optional[int] = None, flat_q8: Optional[int] = None) -> Decode:
+    """Decode one recipe id. An id above 31 is unsupported and still has no actions."""
+    idle = Decode("none", None, False, False, None, False)
+    if isinstance(recipe, bool) or not isinstance(recipe, int) or recipe < 0 or recipe > 31:
+        return idle
+    if recipe in _EXACT_RECIPE_IDS:
+        kind, needs_param, narrows, quant = "exact", False, False, None
+    elif recipe in (4, 5, 7):
+        kind, needs_param, narrows, quant = "rel", False, True, None
+    elif recipe == 6:
+        kind, needs_param, narrows, quant = "full", False, True, 127
+    elif recipe == 18:
+        quant = 127 if isinstance(approx_param, int) and not isinstance(approx_param, bool) and (approx_param & 3) == 2 else None
+        kind, needs_param, narrows = "rel", True, True
+    elif recipe == 19:
+        kind, needs_param, narrows, quant = "full", False, False, 127
+    elif recipe == 20:
+        kind, needs_param, narrows, quant = "full", False, True, 127
+    elif recipe in (21, 25, 30, 31, 26):
+        kind, needs_param, narrows, quant = "rel", True, False, None
+    elif recipe in (27, 28):
+        kind, needs_param, narrows, quant = "rel", False, False, None
+    elif recipe == 29:
+        kind, needs_param, narrows, quant = "full", False, True, 7
+    else:
+        return idle
+    return Decode(
+        kind,
+        recipe_eps_ppm(recipe, approx_param, flat_q8),
+        needs_param,
+        narrows,
+        quant,
+        True,
+    )
+
+
+@dataclass(frozen=True)
+class PromotionGates:
+    """All four have to be present, or promotion stays off.
+
+    The documented 18,527 ppm tile figure is not one of these gates.
+    """
+
+    concurrency_measured: bool = False
+    held_out_pair: bool = False
+    gain_threshold_recorded: bool = False
+    beyond_tile_proxy: bool = False
+
+    def ready(self) -> bool:
+        return (
+            self.concurrency_measured
+            and self.held_out_pair
+            and self.gain_threshold_recorded
+            and self.beyond_tile_proxy
+        )
+
+
+LIVE_VA_TURBO_EN = False
+
+
+def va_turbo_en_allowed(exact_reuse_ok: bool, gates: PromotionGates) -> bool:
+    """Bare gate flags are claims, not measurements. They never allow.
+
+    Use :func:`va_turbo_from_witnesses`. This does not write the live bit.
+    """
+    _ = (exact_reuse_ok, gates)
+    return False
+
+
+PROMOTION_GATES = (
+    "concurrency_measured",
+    "held_out_pair",
+    "gain_threshold_recorded",
+    "beyond_tile_proxy",
+)
+
+
+@dataclass(frozen=True)
+class VaTurboDecision:
+    """What still blocks the live bit. ``allowed`` does not write it."""
+
+    exact_reuse_ok: bool
+    allowed: bool
+    missing: tuple
+
+
+def va_turbo_decision(exact_reuse_ok: bool, gates: PromotionGates) -> VaTurboDecision:
+    """Name every unchecked gate. Bare flags do not allow the live bit."""
+    missing = []
+    if exact_reuse_ok is not True:
+        missing.append("exact_reuse")
+    for name in PROMOTION_GATES:
+        if not getattr(gates, name):
+            missing.append(name)
+    return VaTurboDecision(exact_reuse_ok is True, False, tuple(missing))
+
+
+@dataclass(frozen=True)
+class GateWitness:
+    """One measured requirement. ``status`` is passed, failed, or absent.
+
+    A passed witness needs a ``source``. ``lane-groups`` cannot pass
+    concurrency. ``huggingface-bert-random`` cannot pass beyond-tile
+    accuracy.
+    """
+
+    name: str
+    status: str
+    source: str = ""
+
+
+def known_promotion_witnesses() -> tuple:
+    """Witnesses the tree actually has.
+
+    Lane groups were measured and do not add MAC/s, so concurrency failed.
+    The other three gates have no measurement.
+    """
+    return (
+        GateWitness("concurrency_measured", "failed", "lane-groups"),
+        GateWitness("held_out_pair", "absent", ""),
+        GateWitness("gain_threshold_recorded", "absent", ""),
+        GateWitness("beyond_tile_proxy", "absent", ""),
+    )
+
+
+def accept_witness(proposed: GateWitness) -> GateWitness:
+    """Drop a passed witness that has no source, or that reuses a refuted run."""
+    status = proposed.status
+    if status not in ("passed", "failed", "absent"):
+        status = "absent"
+    elif status == "passed" and not proposed.source:
+        status = "absent"
+    elif (
+        proposed.name == "concurrency_measured"
+        and status == "passed"
+        and proposed.source == "lane-groups"
+    ):
+        status = "failed"
+    elif (
+        proposed.name == "beyond_tile_proxy"
+        and status == "passed"
+        and proposed.source == "huggingface-bert-random"
+    ):
+        status = "absent"
+    return GateWitness(proposed.name, status, proposed.source)
+
+
+def refuse_unapplied_recipe(recipe: Optional[str]) -> None:
+    """The high-level GEMM applies no explicit recipe until witnesses allow it.
+
+    The default call passes ``None`` and stays the exact integer or native
+    product. A named recipe, including a narrowed or approximate one, is
+    refused while the known witnesses are not all passed.
+    """
+    if recipe is None:
+        return
+    decision = va_turbo_from_witnesses(
+        GateWitness("exact_reuse", "passed", "high-level-call"),
+        known_promotion_witnesses(),
+    )
+    if not decision.allowed:
+        raise NotImplementedError(
+            f"{recipe} is not applied on the high-level GEMM. missing={list(decision.missing)}"
+        )
+
+
+def va_turbo_from_witnesses(exact: GateWitness, gates: tuple) -> VaTurboDecision:
+    """Allow only when exact reuse and every gate witness passed.
+
+    This does not write the live bit.
+    """
+    exact = accept_witness(exact)
+    exact_ok = exact.name == "exact_reuse" and exact.status == "passed"
+    by_name = {item.name: item.status for item in (accept_witness(item) for item in gates)}
+    missing = []
+    if not exact_ok:
+        missing.append("exact_reuse")
+    for name in PROMOTION_GATES:
+        status = by_name.get(name, "absent")
+        if status != "passed":
+            missing.append(f"{name}:{status}")
+    return VaTurboDecision(exact_ok, not missing, tuple(missing))
+
+
+SECTION11_OPEN = (
+    "lane_groups",
+    "float_reductions",
+    "converters",
+    "proof_producers",
+    "approximate_consumers",
+    "multi_cluster",
+)
+
+
+def ppm_satisfies_promotion(_ppm: int) -> bool:
+    """A ppm figure does not satisfy a promotion gate."""
+    return False
+
+
+def section11_selected() -> bool:
+    return False
+
+
+def _width_ok(bits: int) -> bool:
+    return (
+        isinstance(bits, int)
+        and not isinstance(bits, bool)
+        and 64 <= bits <= 4096
+        and bits & (bits - 1) == 0
+    )
+
+
+@dataclass(frozen=True)
+class PortSetting:
+    """Configurable fabric. The live setting is not promoted.
+
+    Legal widths are powers of two from 64 through 4096.
+    """
+
+    island_bits: int = 512
+    fabric_bits: int = 64
+
+    @staticmethod
+    def live() -> "PortSetting":
+        return PortSetting()
+
+    def carried_bytes(self) -> int:
+        if not _width_ok(self.island_bits) or not _width_ok(self.fabric_bits):
+            return 0
+        return min(self.island_bits, self.fabric_bits) // 8
+
+    def promoted(self) -> bool:
+        return self.carried_bytes() > 8
+
+
+@dataclass(frozen=True)
+class TrackFeatures:
+    """Section 11 settings. Defaults match the live package.
+
+    Lane groups do not add MAC/s. Approximate consumers apply only when
+    every promotion gate is present, and that still does not write the
+    live bit.
+    """
+
+    lane_groups: bool = False
+    float_reductions: bool = False
+    converters: bool = False
+    proof_producers: bool = False
+    approximate_consumers: bool = False
+    clusters: int = 1
+    macs: int = 512
+
+    @staticmethod
+    def live() -> "TrackFeatures":
+        return TrackFeatures()
+
+    def effective_macs(self, port: PortSetting) -> int:
+        if port.promoted() and isinstance(self.macs, int) and not isinstance(self.macs, bool) and self.macs > 0:
+            return self.macs
+        return 512
+
+    def effective_clusters(self, port: PortSetting) -> int:
+        if port.promoted() and isinstance(self.clusters, int) and not isinstance(self.clusters, bool) and self.clusters > 0:
+            return self.clusters
+        return 1
+
+    def approximate_apply(self, gates: PromotionGates) -> bool:
+        return bool(self.approximate_consumers) and gates.ready()
+
+
+LIVE_CLUSTERS = 1
+LIVE_MACS = 512
+LIVE_CLOCK_KHZ = 2_000_000
+SKU_CLUSTERS = 8
+SKU_MACS = 4096
+SKU_CLOCK_KHZ = 1_500_000
+
+
+def sketch_milli_tops(clusters: int, macs: int, clock_khz: int, fmt: int) -> int:
+    """Parameter sketch in milli-ops. Not a measurement.
+
+    INT8 is ``2 × clusters × macs × (clock_khz/1000) / 1000``, which is two
+    operations per MAC. INT4 is twice that, FP8 matches INT8, FP16 and BF16
+    are half, and FP32 is a quarter. Structured 2:4 and an unknown code are 0.
+    A VA level is not an argument.
+    """
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in (clusters, macs, clock_khz, fmt)):
+        return 0
+    if clusters < 0 or macs < 0 or clock_khz < 0 or fmt < 0:
+        return 0
+    base = (2 * clusters * macs * (clock_khz // 1000)) // 1000
+    if fmt in (0, 3, 4):
+        return base
+    if fmt == 1:
+        return base * 2
+    if fmt in (5, 6):
+        return base // 2
+    if fmt == 7:
+        return base // 4
+    return 0
+
+
+def format_sketch(clusters: int, macs: int, clock_khz: int, fmt: int) -> tuple:
+    """``(macs_per_s, milli_ops)``. The MAC rate does not depend on format."""
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in (clusters, macs, clock_khz)):
+        return (0, 0)
+    if clusters < 0 or macs < 0 or clock_khz < 0:
+        return (0, 0)
+    macs_per_s = clusters * macs * clock_khz * 1000
+    return (macs_per_s, sketch_milli_tops(clusters, macs, clock_khz, fmt))
+
+
+NARROW_BEAT_BYTES = 8
+
+
+@dataclass(frozen=True)
+class ControlSetting:
+    """Descriptor, C, and completion width. The live setting is 8 bytes.
+
+    A legal width is a power of two from 8 through 512.
+    """
+
+    beat_bytes: int = 8
+
+    @staticmethod
+    def live() -> "ControlSetting":
+        return ControlSetting()
+
+    def bytes(self) -> int:
+        width = self.beat_bytes
+        if isinstance(width, bool) or not isinstance(width, int):
+            return 0
+        if 8 <= width <= 512 and width & (width - 1) == 0:
+            return width
+        return 0
+
+
+def carried_bytes_per_cycle(island_bits: int, fabric_bits: int) -> int:
+    """Bytes that move. The join carries the narrower of the two widths."""
+    if any(isinstance(v, bool) or not isinstance(v, int) for v in (island_bits, fabric_bits)):
+        return 0
+    if island_bits < 0 or fabric_bits < 0:
+        return 0
+    return min(island_bits, fabric_bits) // 8
+
+
+def macs_may_rise(bytes_per_cycle: int) -> bool:
+    """True only after the carried port is wider than 8 bytes/cycle."""
+    return isinstance(bytes_per_cycle, int) and not isinstance(bytes_per_cycle, bool) and bytes_per_cycle > NARROW_BEAT_BYTES
+
+
+def carried_nameplate_gbps(island_bits: int, fabric_bits: int, clock_khz: int) -> int:
+    """Class-0 nameplate of the carried width. Round only the final GB/s result."""
+    return _bytes_nameplate_gbps(carried_bytes_per_cycle(island_bits, fabric_bits), clock_khz)
+
+
+def _bytes_nameplate_gbps(width: int, clock_khz: int) -> int:
+    if isinstance(clock_khz, bool) or not isinstance(clock_khz, int) or clock_khz < 0:
+        return 0
+    return min(0xFFFFFFFF, width * clock_khz // 1_000_000)
+
+
+def configured_rate(port: PortSetting, features: TrackFeatures, clock_khz: int, fmt: int) -> dict:
+    """Sketch for one port setting. Not a measurement.
+
+    The live setting stays 1×512. A promoted fabric may use the configured
+    cluster and MAC counts. Control beats stay 8 bytes. Lane groups,
+    reductions, converters, and proof producers do not change the rate.
+    """
+    clusters = features.effective_clusters(port)
+    macs = features.effective_macs(port)
+    macs_per_s, milli_ops = format_sketch(clusters, macs, clock_khz, fmt)
+    return {
+        "clusters": clusters,
+        "macs": macs,
+        "macs_per_s": macs_per_s,
+        "milli_ops": milli_ops,
+        "carried_bytes": port.carried_bytes(),
+        "control_beat_bytes": NARROW_BEAT_BYTES,
+        "clock_khz": clock_khz,
+        "promoted": port.promoted(),
+    }
+
+
+def with_control(rate: dict, control: ControlSetting) -> dict:
+    """Replace the control-beat width. The live rate uses 8."""
+    opened = dict(rate)
+    opened["control_beat_bytes"] = control.bytes()
+    return opened
+
+
+LIVE_MACS_PER_BYTE = 64
+
+
+def port_balance(rate: dict) -> dict:
+    """Whether the data port and the control beats feed the array.
+
+    ``keeps_pace`` is the carried data width. ``control_keeps_pace`` is
+    the descriptor, C, and completion path. ``fed`` is both. A wide data
+    fabric does not widen those beats.
+    """
+    total = rate["clusters"] * rate["macs"]
+    carried = rate["carried_bytes"]
+    control = rate["control_beat_bytes"]
+    keeps = carried > 0 and total <= carried * LIVE_MACS_PER_BYTE
+    control_keeps = control > 0 and total <= control * LIVE_MACS_PER_BYTE
+    return {
+        "macs_per_cycle": total,
+        "macs_per_byte": 0 if carried == 0 else total // carried,
+        "bytes_to_keep_pace": (total + LIVE_MACS_PER_BYTE - 1) // LIVE_MACS_PER_BYTE,
+        "keeps_pace": keeps,
+        "control_macs_per_byte": 0 if control == 0 else total // control,
+        "control_keeps_pace": control_keeps,
+        "fed": keeps and control_keeps,
+        "data_nameplate_gbps": _bytes_nameplate_gbps(carried, rate["clock_khz"]),
+        "control_nameplate_gbps": _bytes_nameplate_gbps(control, rate["clock_khz"]),
+        "demand_gbps": _bytes_nameplate_gbps(
+            (total + LIVE_MACS_PER_BYTE - 1) // LIVE_MACS_PER_BYTE, rate["clock_khz"]),
+    }
+
+
+def dram_cap_gbps(dram_class: int, channels: int, data_nameplate_gbps: int) -> int:
+    """Class 0 is the data nameplate. Class 1 is ``channels × 19``. Class 2 is 400."""
+    if isinstance(dram_class, bool) or not isinstance(dram_class, int):
+        return 0
+    if dram_class == 0:
+        return data_nameplate_gbps
+    if dram_class == 1:
+        if isinstance(channels, bool) or not isinstance(channels, int) or channels < 0:
+            return 0
+        return channels * 19
+    if dram_class == 2:
+        return 400
+    return 0
+
+
+def dram_covers(balance: dict, dram_class: int, channels: int) -> bool:
+    """True when the setting is fed and the DRAM cap meets ``demand_gbps``."""
+    cap = dram_cap_gbps(dram_class, channels, balance["data_nameplate_gbps"])
+    return balance["fed"] and balance["demand_gbps"] > 0 and cap >= balance["demand_gbps"]
+
+
+def dram_claim_matches(dram_class: int, channels: int, data_nameplate_gbps: int, claimed_gbps: int) -> bool:
+    """The claimed GB/s equals the class formula.
+
+    Class 2 is 400, and that claim is rejected when it is also the class-0
+    nameplate. A match does not change the live DRAM class.
+    """
+    if isinstance(dram_class, bool) or not isinstance(dram_class, int) or dram_class > 2:
+        return False
+    cap = dram_cap_gbps(dram_class, channels, data_nameplate_gbps)
+    if claimed_gbps != cap:
+        return False
+    return not (dram_class == 2 and claimed_gbps == data_nameplate_gbps)
+
+
+def ddr4_channels_to_cover(demand_gbps: int) -> int:
+    """DDR4-2400×64 channels needed. Each channel is 19 GB/s."""
+    if isinstance(demand_gbps, bool) or not isinstance(demand_gbps, int) or demand_gbps <= 0:
+        return 0
+    return (demand_gbps + 18) // 19
+
+
+def tops_gap(fmt: int) -> tuple:
+    """``(live_milli, sku_milli, ratio)``. The ratio is 48 where the sketch is nonzero."""
+    live = sketch_milli_tops(LIVE_CLUSTERS, LIVE_MACS, LIVE_CLOCK_KHZ, fmt)
+    sku = sketch_milli_tops(SKU_CLUSTERS, SKU_MACS, SKU_CLOCK_KHZ, fmt)
+    return (live, sku, 0 if live == 0 else sku // live)
+
+
+POLICY_BULK = 0
+POLICY_WIDE = 1
+POLICY_TALL = 2
+POLICY_DECODE = 3
+POLICY_MOVEMENT = 7
+
+
+@dataclass(frozen=True)
+class WorkloadChoice:
+    """Automatic exact choice for one shape. Approximate ids stay withheld.
+
+    A decode shape selects resident B, recipe 16. The transposed shape
+    selects resident A, the same recipe. The two are never both set.
+    ``large_decode`` is B's share of reads at least 99%. ``large_resident``
+    is the selected operand's share at that same line. ``apply`` stays
+    false, and this record does not enable reuse on a device.
+    """
+
+    code: int
+    exact_recipe: Optional[int]
+    reuse_b: bool
+    reuse_a: bool
+    apply: bool
+    large_decode: bool
+    large_resident: bool
+    b_share_millis: int
+    a_share_millis: int
+    withheld: int
+
+
+def select_workload(m: int, n: int, k: int) -> WorkloadChoice:
+    """Choose the exact optimization for a shape. ``apply`` stays false."""
+    if isinstance(m, bool) or isinstance(n, bool) or isinstance(k, bool):
+        code = POLICY_MOVEMENT
+        m = n = k = 0
+    elif not all(isinstance(v, int) and v >= 0 for v in (m, n, k)):
+        code = POLICY_MOVEMENT
+        m = n = k = 0
+    elif m == 0 or n == 0 or k == 0:
+        code = POLICY_MOVEMENT
+    elif m <= 1 and n >= 2 and k >= 2:
+        code = POLICY_DECODE
+    elif n > m:
+        code = POLICY_WIDE
+    elif m > n:
+        code = POLICY_TALL
+    else:
+        code = POLICY_BULK
+    denom = m + n
+    b_share = 0 if denom == 0 else (n * 1000) // denom
+    a_share = 0 if denom == 0 else (m * 1000) // denom
+    reuse_b = code == POLICY_DECODE
+    reuse_a = code == POLICY_TALL and n <= 1 and m >= 2 and k >= 2
+    withheld = sum(1 for recipe in range(32) if decode(recipe).kind != "exact")
+    return WorkloadChoice(
+        code,
+        16 if reuse_a or reuse_b else None,
+        reuse_b,
+        reuse_a,
+        False,
+        reuse_b and b_share >= 990,
+        (reuse_b and b_share >= 990) or (reuse_a and a_share >= 990),
+        b_share,
+        a_share,
+        withheld,
+    )
+
+
+@dataclass(frozen=True)
+class WithheldAdmission:
+    """Withheld ids that pass permission and the analytic bound.
+
+    ``apply`` stays false. Listing an id does not arm an evidence window
+    and does not change a product.
+    """
+
+    ids: tuple
+    apply: bool
+
+
+def admit_withheld(
+    gates: Gates,
+    *,
+    level: int,
+    measured_ppm: Optional[int],
+    kappa_q8: Optional[int],
+    consumer_mask: int,
+    profile_mask: int,
+    window_valid: bool,
+    approx_param: Optional[int] = None,
+) -> WithheldAdmission:
+    """Consider withheld recipes. Exact ids are not in this set."""
+    found = []
+    for recipe in range(32):
+        if decode(recipe, approx_param).kind == "exact":
+            continue
+        allowed = permission(
+            gates,
+            level=level,
+            recipe=recipe,
+            consumer_mask=consumer_mask,
+            profile_mask=profile_mask,
+            window_valid=window_valid,
+        )
+        if not allowed.permitted:
+            continue
+        if recipe_claim_fits(level, recipe, measured_ppm, kappa_q8, approx_param):
+            found.append(recipe)
+    return WithheldAdmission(tuple(found), False)
+
+
+def recipe_claim_fits(
+    level: int,
+    recipe: int,
+    measured_ppm: Optional[int],
+    kappa_q8: Optional[int] = None,
+    approx_param: Optional[int] = None,
+) -> bool:
+    """Analytic bound and measured ppm both fit ``level``. Exact ids need no kappa."""
+    if not measurement_fits(level, measured_ppm):
+        return False
+    eps = recipe_eps_ppm(recipe, approx_param, None)
+    if eps is None:
+        return False
+    if eps == 0:
+        return recipe_admitted(level, 0, 256, 0 if measured_ppm is None else measured_ppm)
+    if kappa_q8 is None or measured_ppm is None:
+        return False
+    return recipe_admitted(level, eps, kappa_q8, measured_ppm)
+
+
 # --------------------------------------------------------------------------- cycle model
 
 
@@ -1110,12 +1886,117 @@ def _execution_verdict(rec: Recipe, residency: str,
     if residency != "none":
         return True, (
             "EXECUTABLE (exact): recipe 16 operand residency changes no arithmetic. It is "
-            "wired to real GEMM execution in the verification harness (ReuseBEn / resident-A); "
-            "production g6lc_ai_island_top binds presence to VaTurboEn but ties runtime reuse "
-            "off and invalidation on until an ownership/epoch ABI exists, and reuse_b_i is "
-            "permission, not coherence."
+            "wired to real GEMM execution in the verification harness (ReuseBEn / resident-A). "
+            "Production g6lc_ai_island_top ties runtime reuse off because live VaTurboEn is 0. "
+            "The epoch register is published. The selector still does not apply a recipe, "
+            "and reuse_b_i is permission, not coherence."
         )
     return True, "EXECUTABLE (exact): recipe 0 is the native datapath the island runs today."
+
+
+def _flag(value: object) -> bool:
+    return isinstance(value, bool) and value
+
+
+@dataclass(frozen=True)
+class Gates:
+    """Config-chain inputs of the selector's permission stage.
+
+    Each bit is separate so a live package, the directed test config, or a
+    chain with one gate clear can all be evaluated. An integer where a
+    boolean is required fails closed.
+    """
+
+    va_turbo_en: object = False
+    policy_subcode_en: object = False
+    policy_benefit_en: object = False
+    policy_codec_en: object = False
+    island_fp_en: object = False
+    matrix_en: object = False
+    queues: object = 0
+    enable: object = False
+
+    @staticmethod
+    def directed() -> "Gates":
+        """``AiCfgVaTurboTest``: the chain set, one queue, runtime enable on."""
+        return Gates(True, True, True, True, True, True, 1, True)
+
+    def chain(self) -> bool:
+        """``VaTurboEn`` through ``Queues > 0``. Runtime enable is predicate 2."""
+        queues_ok = (
+            isinstance(self.queues, int)
+            and not isinstance(self.queues, bool)
+            and self.queues > 0
+        )
+        return (
+            _flag(self.va_turbo_en)
+            and _flag(self.policy_subcode_en)
+            and _flag(self.policy_benefit_en)
+            and _flag(self.policy_codec_en)
+            and _flag(self.island_fp_en)
+            and _flag(self.matrix_en)
+            and queues_ok
+        )
+
+
+@dataclass(frozen=True)
+class Permission:
+    """The five selector predicates, and the MAC result.
+
+    ``permitted`` is their conjunction for any recipe id in ``0..31``.
+    ``apply`` stays false. The selector is not connected to the MAC path,
+    and the applied level is 0. This is not class eligibility inside
+    ``va_turbo_select``.
+    """
+
+    gates: bool
+    level_nonzero: bool
+    consumer: bool
+    profile: bool
+    window: bool
+    permitted: bool
+    apply: bool
+
+
+def _mask_has_recipe(mask: object, recipe: object) -> bool:
+    if isinstance(mask, bool) or isinstance(recipe, bool):
+        return False
+    if not isinstance(mask, int) or not isinstance(recipe, int):
+        return False
+    if mask < 0 or recipe < 0 or recipe > 31:
+        return False
+    return bool(mask & (1 << recipe))
+
+
+def permission(
+    gates: Gates,
+    *,
+    level: int,
+    recipe: int,
+    consumer_mask: int,
+    profile_mask: int,
+    window_valid: bool,
+) -> Permission:
+    """Report the selector predicates for one recipe id."""
+    level_ok = (
+        _flag(gates.enable)
+        and isinstance(level, int)
+        and not isinstance(level, bool)
+        and 0 < level <= 15
+    )
+    gates_ok = gates.chain()
+    consumer = _mask_has_recipe(consumer_mask, recipe)
+    profile = _mask_has_recipe(profile_mask, recipe)
+    window = _flag(window_valid)
+    return Permission(
+        gates=gates_ok,
+        level_nonzero=level_ok,
+        consumer=consumer,
+        profile=profile,
+        window=window,
+        permitted=gates_ok and level_ok and consumer and profile and window,
+        apply=False,
+    )
 
 
 @dataclass(frozen=True)

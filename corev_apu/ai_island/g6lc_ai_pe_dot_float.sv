@@ -159,11 +159,11 @@ module g6lc_ai_pe_dot_float #(
 
     cnt = P2;
     while (cnt > 1) begin
-      for (int unsigned i = 0; i < cnt / 2; i++) begin
+      for (int unsigned i = 0; i < (cnt >> 1); i++) begin
         node[i] = node[2*i] + node[2*i+1];
       end
       // P2 is a power of two; no odd tail
-      cnt = cnt / 2;
+      cnt = cnt >> 1;
     end
     bfp_sum = node[0];
   end

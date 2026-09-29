@@ -29,6 +29,13 @@
   .section .text.init
   .globl _start
 _start:
+  # g6lc64_ai has two cores and both start here: only hart 0 drives the island;
+  # any other hart parks, otherwise every MMIO doorbell/claim is issued twice.
+  csrr t0, mhartid
+  beqz t0, 1f
+2: wfi
+  j    2b
+1:
   li   sp, 0x80008000
   la   t0, trap_vec
   csrw mtvec, t0
@@ -40,7 +47,7 @@ _start:
   slli t0, t0, 48
   srli t0, t0, 48
   li   t1, 1
-  bne  t0, t1, fail
+  bne  t0, t1, fail1
 
   li   t0, 1
   sw   t0, AI_CTL(s0)
@@ -63,7 +70,7 @@ _start:
   jal  ra, wait_done_sticky
   lw   t0, AI_TICKET(s0)
   li   t1, 20
-  bne  t0, t1, fail
+  bne  t0, t1, fail2
 
   # ---- ticket 21 (keep 20 unclaimed) ----
   jal  ra, load_ok_desc
@@ -73,7 +80,7 @@ _start:
   jal  ra, wait_job
   lw   t0, AI_TICKET(s0)
   li   t1, 20
-  bne  t0, t1, fail
+  bne  t0, t1, fail3
 
   # ---- ticket 22 ----
   jal  ra, load_ok_desc
@@ -84,15 +91,15 @@ _start:
 
   lw   t0, AI_DONE(s0)
   andi t0, t0, 1
-  beqz t0, fail
+  beqz t0, fail4
   lw   t0, AI_TICKET(s0)
   li   t1, 20
-  bne  t0, t1, fail
+  bne  t0, t1, fail5
   lw   t0, AI_DSTATUS(s0)
   slli t0, t0, 48
   srli t0, t0, 48
   li   t1, ST_OK
-  bne  t0, t1, fail
+  bne  t0, t1, fail6
 
   # claim → 21
   li   t0, 1
@@ -100,10 +107,10 @@ _start:
   fence
   lw   t0, AI_DONE(s0)
   andi t0, t0, 1
-  beqz t0, fail
+  beqz t0, fail7
   lw   t0, AI_TICKET(s0)
   li   t1, 21
-  bne  t0, t1, fail
+  bne  t0, t1, fail8
 
   # claim → 22
   li   t0, 1
@@ -111,10 +118,10 @@ _start:
   fence
   lw   t0, AI_DONE(s0)
   andi t0, t0, 1
-  beqz t0, fail
+  beqz t0, fail9
   lw   t0, AI_TICKET(s0)
   li   t1, 22
-  bne  t0, t1, fail
+  bne  t0, t1, fail10
 
   # claim → empty
   li   t0, 1
@@ -122,7 +129,7 @@ _start:
   fence
   lw   t0, AI_DONE(s0)
   andi t0, t0, 1
-  bnez t0, fail
+  bnez t0, fail11
 
 pass:
   li   a0, 1
@@ -130,8 +137,52 @@ pass:
   sw   a0, 0(t0)
 9: j 9b
 
-fail:
+fail1:
   li   a0, 3
+  j    fail_exit
+fail2:
+  li   a0, 5
+  j    fail_exit
+fail3:
+  li   a0, 7
+  j    fail_exit
+fail4:
+  li   a0, 9
+  j    fail_exit
+fail5:
+  li   a0, 11
+  j    fail_exit
+fail6:
+  li   a0, 13
+  j    fail_exit
+fail7:
+  li   a0, 15
+  j    fail_exit
+fail8:
+  li   a0, 17
+  j    fail_exit
+fail9:
+  li   a0, 19
+  j    fail_exit
+fail10:
+  li   a0, 21
+  j    fail_exit
+fail11:
+  li   a0, 23
+  j    fail_exit
+fail12:
+  li   a0, 25
+  j    fail_exit
+fail13:
+  li   a0, 27
+  j    fail_exit
+fail14:
+  li   a0, 29
+  j    fail_exit
+fail15:
+  li   a0, 31
+  j    fail_exit
+fail_exit:
   la   t0, tohost
   sw   a0, 0(t0)
 8: j 8b
@@ -143,7 +194,7 @@ trap_vec:
 7: j 7b
 
 load_ok_desc:
-  li   t0, (3 << 16) | 1
+  li   t0, (3 << 16) | 2
   sw   t0, AI_DESC+0x0(s0)
   sw   zero, AI_DESC+0x4(s0)
   li   t0, 8
@@ -178,7 +229,7 @@ wait_idle:
   beqz t0, 1f
   addi t2, t2, -1
   bnez t2, 0b
-  j    fail
+  j    fail12
 1:
   ret
 
@@ -197,11 +248,11 @@ wait_job:
   beqz t0, 2f
   addi t2, t2, -1
   bnez t2, 1b
-  j    fail
+  j    fail13
 2:
   lw   t0, AI_DONE(s0)
   andi t0, t0, 1
-  beqz t0, fail
+  beqz t0, fail14
   ret
 
 wait_done_sticky:
@@ -212,7 +263,7 @@ wait_done_sticky:
   bnez t0, 1f
   addi t2, t2, -1
   bnez t2, 0b
-  j    fail
+  j    fail15
 1:
   ret
 

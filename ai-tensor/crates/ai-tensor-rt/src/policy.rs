@@ -7,7 +7,7 @@
 //! **completion word visible → fence → claim DONE / clear IRQ**.
 
 use crate::{Device, Queue, Region, RtError};
-use ai_tensor_abi::{Completion, Desc64, ST_BAD_PTR, ST_BAD_QID, ST_OK};
+use ai_tensor_abi::{Completion, Desc64, ST_BAD_PTR, ST_BAD_QID, ST_ERR, ST_OK};
 
 /// How software waits for a submitted ticket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,11 +16,12 @@ pub enum WaitPolicy {
     Poll,
     /// Require `irq_pending` (FLAG_IRQ jobs) then poll+claim.
     IrqThenPoll,
-    /// Spin on 64-bit completion word at `ptr_done`, then optional DONE claim.
-    /// Use when `wr_cpl_en=1` and host trusts DMA store before claim.
+    /// Observe the completion word, then return the FIFO status.
+    /// The word is stored before the write response. Its status can still
+    /// be 0, or the store can be discarded, while the FIFO says `ST_ERR`.
     DmaThenClaim {
         ptr_done: u64,
-        /// After DMA word matches ticket, call `claim_done` (PLIC source clear).
+        /// After the FIFO has this ticket, call `claim_done`.
         claim: bool,
     },
     /// Claim DONE path only; ignore DMA word (island claim soak: wr_cpl_en=0).
@@ -54,34 +55,31 @@ pub fn wait_with_policy<D: Device>(
     policy: WaitPolicy,
 ) -> Result<Completion, RtError> {
     match policy {
-        WaitPolicy::Poll | WaitPolicy::ClaimOnly => wait_poll(dev, ticket),
+        WaitPolicy::Poll => wait_poll(dev, ticket, false),
+        WaitPolicy::ClaimOnly => wait_poll(dev, ticket, true),
         WaitPolicy::IrqThenPoll => {
             // Soft sticky + claim (see irq.rs); board swaps in UioIrqWait under linux-mmio.
             crate::wait_irq_then_claim(dev, ticket, 10_000)
         }
         WaitPolicy::DmaThenClaim { ptr_done, claim } => {
             for _ in 0..10_000 {
+                // The FIFO is updated after the write response. The word
+                // is not: a SLVERR can leave status 0, or leave the old bytes.
+                if let Some(fifo) = dev.poll_completion(ticket, claim)? {
+                    return Ok(fifo);
+                }
                 let mut raw = [0u8; 8];
                 dev.read_mem(ptr_done, &mut raw)?;
-                let w = u64::from_le_bytes(raw);
-                let c = Completion::from_u64(w);
-                if c.ticket == ticket {
-                    if claim {
-                        let _ = dev.claim_done();
-                    }
-                    // Also drain poll so SoftIsland sticky is cleared if still set.
-                    let _ = dev.poll(ticket);
-                    return Ok(c);
-                }
             }
             Err(RtError::Timeout)
         }
     }
 }
 
-fn wait_poll<D: Device>(dev: &mut D, ticket: u32) -> Result<Completion, RtError> {
+fn wait_poll<D: Device>(dev: &mut D, ticket: u32, claim: bool) -> Result<Completion, RtError> {
     for _ in 0..10_000 {
-        if let Some(c) = dev.poll(ticket)? {
+        let completion = if claim { dev.poll_completion(ticket, true)? } else { dev.poll(ticket)? };
+        if let Some(c) = completion {
             return Ok(c);
         }
     }
@@ -239,6 +237,104 @@ mod tests {
             WaitPolicy::DmaThenClaim { .. }
         ));
         assert_eq!(recommend_policy(false, false, 0), WaitPolicy::Poll);
+    }
+
+    /// Word says ST_OK. FIFO says ST_ERR. The wait returns the FIFO.
+    struct SplitCpl {
+        word: u64,
+        fifo: Completion,
+        claimed: bool,
+    }
+
+    impl Device for SplitCpl {
+        fn caps(&self) -> crate::Caps {
+            crate::Caps::default()
+        }
+        fn enable(&mut self, _on: bool) {}
+        fn set_wr_cpl_en(&mut self, _on: bool) {}
+        fn program_region(&mut self, _qid: u8, _region: Region) -> Result<(), RtError> {
+            Ok(())
+        }
+        fn alloc(&mut self, _len: usize) -> Result<u64, RtError> {
+            Ok(0)
+        }
+        fn write_mem(&mut self, _addr: u64, _data: &[u8]) -> Result<(), RtError> {
+            Ok(())
+        }
+        fn read_mem(&mut self, _addr: u64, out: &mut [u8]) -> Result<(), RtError> {
+            let bytes = self.word.to_le_bytes();
+            out.copy_from_slice(&bytes);
+            Ok(())
+        }
+        fn submit(&mut self, _qid: u8, _ticket: u32, _desc: &Desc64) -> Result<(), RtError> {
+            Ok(())
+        }
+        fn poll(&mut self, ticket: u32) -> Result<Option<Completion>, RtError> {
+            if self.fifo.ticket == ticket {
+                Ok(Some(self.fifo))
+            } else {
+                Ok(None)
+            }
+        }
+        fn poll_completion(&mut self, ticket: u32, claim: bool) -> Result<Option<Completion>, RtError> {
+            let completion = self.poll(ticket)?;
+            if claim && completion.is_some() {
+                self.claim_done()?;
+            }
+            Ok(completion)
+        }
+        fn claim_done(&mut self) -> Result<(), RtError> {
+            self.claimed = true;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn dma_wait_uses_fifo_status_when_the_word_says_ok() {
+        let mut dev = SplitCpl {
+            word: Completion::make(42, ST_OK),
+            fifo: Completion {
+                ticket: 42,
+                status: ST_ERR,
+            },
+            claimed: false,
+        };
+        let c = wait_with_policy(
+            &mut dev,
+            42,
+            WaitPolicy::DmaThenClaim {
+                ptr_done: 0x8000_5000,
+                claim: true,
+            },
+        )
+        .expect("fifo visible");
+        assert_eq!(c.ticket, 42);
+        assert_eq!(c.status, ST_ERR);
+        assert!(dev.claimed);
+    }
+
+    #[test]
+    fn dma_wait_uses_fifo_when_the_completion_store_is_discarded() {
+        let mut dev = SplitCpl {
+            word: 0,
+            fifo: Completion {
+                ticket: 7,
+                status: ST_ERR,
+            },
+            claimed: false,
+        };
+        let c = wait_with_policy(
+            &mut dev,
+            7,
+            WaitPolicy::DmaThenClaim {
+                ptr_done: 0x8000_5000,
+                claim: true,
+            },
+        )
+        .expect("fifo visible without a stored ticket");
+        assert_eq!(c.ticket, 7);
+        assert_eq!(c.status, ST_ERR);
+        assert!(dev.claimed);
     }
 
     #[test]

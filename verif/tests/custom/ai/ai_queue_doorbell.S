@@ -10,6 +10,13 @@
   .section .text.init
   .globl _start
 _start:
+  # g6lc64_ai has two cores and both start here: only hart 0 drives the island;
+  # any other hart parks, otherwise every MMIO doorbell/claim is issued twice.
+  csrr t0, mhartid
+  beqz t0, 1f
+2: wfi
+  j    2b
+1:
   li   sp, 0x80008000
   la   t0, trap_vec
   csrw mtvec, t0
@@ -50,18 +57,32 @@ _start:
   mv   s2, a0
 
   # poll a0,a1: f7=1 → 0x0205D55B
-  # Retired tickets must not stay pending. Status may be 1 (T0 stub OK) or
-  # 2 (island completed empty/latched desc with AI-3/version error) — both
-  # mean the ticket left the queue. Future ticket 99 stays pending (0).
+  # ai.poll is island-authoritative: 0 means still pending, so spin (bounded)
+  # until the island retires the ticket. Status is then 1 (OK) or 2 (the
+  # island completed the garbage descriptor with a version/AI-3 error); both
+  # mean the ticket left the queue. Ticket 1 is behind the unclaimed head, so
+  # it is answered through the retired watermark. Future ticket 99 stays 0.
+  li   t2, 4000
+1:
   mv   a1, s1
   .word 0x0205D55B             # ai.poll a0, a1
-  beqz a0, fail
+  bnez a0, 2f
+  addi t2, t2, -1
+  bnez t2, 1b
+  j    fail
+2:
   li   t0, 2
   bgtu a0, t0, fail
 
+  li   t2, 4000
+3:
   mv   a1, s2
   .word 0x0205D55B
-  beqz a0, fail
+  bnez a0, 4f
+  addi t2, t2, -1
+  bnez t2, 3b
+  j    fail
+4:
   li   t0, 2
   bgtu a0, t0, fail
 

@@ -776,6 +776,12 @@ pub struct AiStatusCodes {
     pub bad_ver: u16,
     /// Island present but not enabled.
     pub disabled: u16,
+    /// Completion beat failed, or a generic engine error when the package publishes it.
+    pub err: u16,
+    /// Operand or descriptor pointer outside the queue's AI-3 window.
+    pub bad_ptr: u16,
+    /// Queue id the capability window does not advertise.
+    pub bad_qid: u16,
 }
 
 impl Default for AiStatusCodes {
@@ -784,6 +790,9 @@ impl Default for AiStatusCodes {
             ok: 0,
             bad_ver: 2,
             disabled: 6,
+            err: 1,
+            bad_ptr: 4,
+            bad_qid: 5,
         }
     }
 }
@@ -800,6 +809,15 @@ impl AiStatusCodes {
         }
         if let Some(v) = layout.status("ST_DISABLED") {
             codes.disabled = v as u16;
+        }
+        if let Some(v) = layout.status("ST_ERR") {
+            codes.err = v as u16;
+        }
+        if let Some(v) = layout.status("ST_BAD_PTR") {
+            codes.bad_ptr = v as u16;
+        }
+        if let Some(v) = layout.status("ST_BAD_QID") {
+            codes.bad_qid = v as u16;
         }
         codes
     }
@@ -877,10 +895,27 @@ pub struct AiIsland {
     pub pmu_gbps_x1000: u32,
     /// `CTL[0]`: island enabled. A doorbell on a disabled island completes `ST_DISABLED`.
     pub enabled: bool,
-    /// `CTL[1]`: write the completion word to `ptr_done` after a successful job.
+    /// `CTL[1]`: write the completion word to `ptr_done`. The word keeps the
+    /// GEMM status. A failed completion beat changes only the status register.
     pub wr_cpl_en: bool,
+    /// The next completion beat fails after the GEMM word is formed.
+    completion_bus_err: bool,
     /// Status of the most recently completed job, reported in the status register.
     pub last_status: u16,
+    /// Requested VA-Turbo level, low 4 bits of `va_turbo_level`. Applied stays 0.
+    pub va_level_req: u32,
+    /// Sticky request word from the last completed job. Applied nibble is 0.
+    pub pmu_va_level: u32,
+    /// Requested recipe id, low 5 bits of `va_turbo_recipe`. Applied id stays 0.
+    pub va_recipe_req: u32,
+    /// Sticky recipe request from the last completed job. Applied id is 0.
+    pub pmu_va_recipe: u32,
+    /// Evidence-window claim. Cleared by an epoch, level, or recipe store.
+    pub window_valid: bool,
+    /// That bit from the last completed job.
+    pub pmu_window: bool,
+    /// Exact operand reuse. Off until [`AiIsland::set_reuse_en`].
+    pub operand_reuse: crate::gemm::OperandReuse,
     /// A job latched by a doorbell write and not yet executed.
     ///
     /// The island reads operands from guest memory, but it *lives* in that memory's
@@ -894,9 +929,203 @@ pub struct AiIsland {
     /// [`Self::irq_pending`], but nothing may claim it through the controller. Inventing
     /// a source number here would make an unroutable design look wired.
     pub irq_source: Option<u32>,
+    /// Optional command-queue extension v1 state. Only reachable when the ingested
+    /// package provisions `CommandDepth` and publishes the `REG_OFF_CMD_*` window.
+    pub cmd: AiCommandQueue,
+    /// A dequeued command `(desc_ptr, ticket, qid)` the executor is resolving.
+    pub pending_command: Option<(u64, u32, u8)>,
+}
+
+/// Command-queue extension v1 (`architecture/ai-matrix/completion-fifo.md`).
+///
+/// Accepted commands are descriptor pointers with their own qid and full 32-bit ticket.
+/// The B3 VM has no cycle time, so a command dispatches as soon as the executor drains it
+/// through [`AiIsland::take_pending_command`]; credits, receipts and the mode lock follow
+/// the published contract exactly.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AiCommandQueue {
+    /// `CMD_MODE[0]`: queued mode enabled; changes need a drained island.
+    pub mode: bool,
+    /// Staged descriptor pointer (`CMD_PTR_LO/HI`).
+    pub ptr: u64,
+    /// Staged full 32-bit ticket.
+    pub ticket: u32,
+    /// Staged queue id (low 8 bits).
+    pub qid: u8,
+    /// Ticket named by the last submit attempt.
+    pub receipt_ticket: u32,
+    /// Receipt of the last attempt: 0 accepted, 1 full, 2 disabled.
+    pub receipt_code: u32,
+    /// Wrapping count of accepted MMIO attempts.
+    pub accepted: u32,
+    /// Wrapping count of rejected MMIO attempts.
+    pub rejected: u32,
+    /// Accepted `(desc_ptr, ticket, qid)` commands awaiting dispatch.
+    pub commands: std::collections::VecDeque<(u64, u32, u8)>,
+    /// The most recent store was refused by the queued-mode protection lock.
+    pub last_store_refused: bool,
 }
 
 impl AiIsland {
+    fn cmd_reg(&self, name: &str) -> Option<u64> {
+        let cfg = &self.ai_model.as_ref()?.config;
+        if cfg.command_depth == 0 {
+            return None;
+        }
+        cfg.reg_offset(name)
+    }
+
+    fn cmd_depth(&self) -> u64 {
+        self.ai_model
+            .as_ref()
+            .map_or(0, |m| m.config.command_depth as u64)
+    }
+
+    fn cmd_quiescent(&self) -> bool {
+        self.cmd.commands.is_empty() && self.pending_job.is_none() && self.pending_command.is_none()
+    }
+
+    fn cmd_locked(&self, offset: u64) -> bool {
+        if !self.cmd.mode {
+            return false;
+        }
+        let r = self.regmap;
+        Some(offset) == r.ctl
+            || Some(offset) == r.doorbell
+            || self.va_level_offset() == Some(offset)
+            || self.recipe_offset() == Some(offset)
+            || self.window_offset() == Some(offset)
+            || self.reuse_epoch_offset() == Some(offset)
+            || self
+                .ai_model
+                .as_ref()
+                .and_then(|m| m.config.reg_offset("queue"))
+                .is_some_and(|q| offset >= q && offset < q + 0x20)
+            || self
+                .ai_model
+                .as_ref()
+                .and_then(|m| m.config.reg_offset("queue_tail"))
+                .is_some_and(|q| {
+                    let n = self
+                        .ai_model
+                        .as_ref()
+                        .map_or(1, |m| m.config.queues.max(1) as u64);
+                    offset >= q && offset < q + n.saturating_sub(1) * 0x20
+                })
+    }
+
+    fn cmd_load(&self, offset: u64) -> Option<u64> {
+        let hit = |name: &str| self.cmd_reg(name) == Some(offset);
+        Some(if hit("cmd_mode") {
+            u64::from(self.cmd.mode)
+        } else if hit("cmd_ptr_lo") {
+            self.cmd.ptr & 0xffff_ffff
+        } else if hit("cmd_ptr_hi") {
+            self.cmd.ptr >> 32
+        } else if hit("cmd_ticket") {
+            u64::from(self.cmd.ticket)
+        } else if hit("cmd_qid") {
+            u64::from(self.cmd.qid)
+        } else if hit("cmd_credits") {
+            self.cmd_depth()
+                .saturating_sub(self.cmd.commands.len() as u64)
+        } else if hit("cmd_receipt_ticket") {
+            u64::from(self.cmd.receipt_ticket)
+        } else if hit("cmd_receipt_code") {
+            u64::from(self.cmd.receipt_code)
+        } else if hit("cmd_accepted") {
+            u64::from(self.cmd.accepted)
+        } else if hit("cmd_rejected") {
+            u64::from(self.cmd.rejected)
+        } else {
+            return None;
+        })
+    }
+
+    /// Returns true when the store belonged to the command window.
+    fn cmd_store(&mut self, offset: u64, value: u64) -> bool {
+        let hit = |name: &str, me: &Self| me.cmd_reg(name) == Some(offset);
+        if hit("cmd_mode", self) {
+            let want = value & 1 != 0;
+            if want != self.cmd.mode && (!self.cmd_quiescent() || (want && !self.enabled)) {
+                self.cmd.last_store_refused = true;
+            } else {
+                self.cmd.mode = want;
+            }
+        } else if hit("cmd_ptr_lo", self) {
+            self.cmd.ptr = (self.cmd.ptr & !0xffff_ffff) | (value & 0xffff_ffff);
+        } else if hit("cmd_ptr_hi", self) {
+            self.cmd.ptr = (self.cmd.ptr & 0xffff_ffff) | ((value & 0xffff_ffff) << 32);
+        } else if hit("cmd_ticket", self) {
+            self.cmd.ticket = value as u32;
+        } else if hit("cmd_qid", self) {
+            self.cmd.qid = (value & 0xff) as u8;
+        } else if hit("cmd_submit", self) {
+            if value & 1 != 0 {
+                // Receipt codes are the published `CMD_ACCEPTED/FULL/DISABLED` values.
+                let code = if !self.cmd.mode || !self.enabled {
+                    2
+                } else if self.cmd.commands.len() as u64 >= self.cmd_depth() {
+                    1
+                } else {
+                    self.cmd
+                        .commands
+                        .push_back((self.cmd.ptr, self.cmd.ticket, self.cmd.qid));
+                    0
+                };
+                self.cmd.receipt_ticket = self.cmd.ticket;
+                self.cmd.receipt_code = code;
+                if code == 0 {
+                    self.cmd.accepted = self.cmd.accepted.wrapping_add(1);
+                } else {
+                    self.cmd.rejected = self.cmd.rejected.wrapping_add(1);
+                }
+            }
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Hand the oldest accepted command to the executor. Like [`Self::take_pending_job`],
+    /// the island cannot read guest memory itself, so the caller resolves the pointer.
+    pub fn take_pending_command(&mut self) -> Option<(u64, u32, u8)> {
+        if self.pending_job.is_some() || self.pending_command.is_some() {
+            return None;
+        }
+        let cmd = self.cmd.commands.pop_front()?;
+        self.pending_command = Some(cmd);
+        Some(cmd)
+    }
+
+    /// Record the outcome of a command the executor ran, keeping the command's own ticket.
+    pub fn complete_pending_command(
+        &mut self,
+        mut ev: g6q_diag::ai_tensor::AiTensorEvent,
+        status: u16,
+    ) -> Option<(u64, u64)> {
+        let (ptr, ticket, qid) = self.pending_command.take()?;
+        ev.descriptor_addr = ptr;
+        ev.cluster = self
+            .ai_model
+            .as_ref()
+            .and_then(|m| m.config.cluster_for_queue(u32::from(qid)))
+            .unwrap_or(ev.cluster);
+        let write = self.complete_pending_job(ev, status);
+        // `complete_pending_job` allocates the island's sequential ticket; a queued
+        // command owns its caller-supplied ticket instead.
+        self.ticket = ticket;
+        if let Some(last) = self.events.last_mut() {
+            last.ticket = ticket;
+        }
+        write.map(|(addr, _)| {
+            (
+                addr,
+                self.pack_completion_word(u64::from(ticket), u64::from(self.status)),
+            )
+        })
+    }
+
     /// Create a fresh AI island, disabled, with one ring and fallback geometry.
     pub fn new() -> Self {
         let codes = AiStatusCodes::default();
@@ -1027,6 +1256,9 @@ impl AiIsland {
             "w_beats" => self.pmu_w_beats,
             "cycles" => self.pmu_cycles,
             "gbps_x1000" => self.pmu_gbps_x1000,
+            "va_turbo_level" => self.pmu_va_level,
+            "va_turbo_recipe" => self.pmu_va_recipe,
+            "va_turbo_window" => u32::from(self.pmu_window),
             _ => 0,
         }
     }
@@ -1465,8 +1697,11 @@ impl AiIsland {
         status: u16,
     ) -> Option<(u64, u64)> {
         self.ticket = self.ticket.wrapping_add(1);
-        self.status = status;
-        self.last_status = status;
+        let bus_err = self.completion_bus_err;
+        self.completion_bus_err = false;
+        let reported = if bus_err { self.codes.err } else { status };
+        self.status = reported;
+        self.last_status = reported;
         let cfg = self
             .ai_model
             .as_ref()
@@ -1475,7 +1710,7 @@ impl AiIsland {
 
         ev.order = self.event_order;
         ev.ticket = self.ticket;
-        ev.status = status;
+        ev.status = reported;
         ev.done = true;
         (
             ev.pmu_r_beats,
@@ -1507,6 +1742,8 @@ impl AiIsland {
             self.irq_pending = true;
         }
 
+        // The stored word is the GEMM result. `reported` is what the status
+        // register shows after the write response.
         let word = self.pack_completion_word(self.ticket as u64, status as u64);
         let write = if self.wr_cpl_en && ev.ptr_done != 0 {
             Some((ev.ptr_done, word))
@@ -1515,7 +1752,52 @@ impl AiIsland {
         };
         self.events.push(ev);
         self.event_order += 1;
+        self.pmu_va_level = self.va_level_req & 0xF;
+        self.pmu_va_recipe = self.va_recipe_req & 0x1F;
+        self.pmu_window = self.window_valid;
         write
+    }
+
+    fn va_level_offset(&self) -> Option<u64> {
+        self.ai_model.as_ref()?.config.reg_offset("va_turbo_level")
+    }
+
+    fn recipe_offset(&self) -> Option<u64> {
+        self.ai_model.as_ref()?.config.reg_offset("va_turbo_recipe")
+    }
+
+    fn window_offset(&self) -> Option<u64> {
+        self.ai_model.as_ref()?.config.reg_offset("va_turbo_window")
+    }
+
+    fn reuse_epoch_offset(&self) -> Option<u64> {
+        self.ai_model.as_ref()?.config.reg_offset("reuse_epoch")
+    }
+
+    /// Exact operand reuse. Off by default, so flag bits 15 and 23 do not
+    /// change a product. When on, a hit multiplies the resident bytes.
+    pub fn set_reuse_en(&mut self, on: bool) {
+        self.operand_reuse.set_enabled(on);
+    }
+
+    /// Store the reuse epoch. Hits require this value to match the resident key.
+    pub fn set_reuse_epoch(&mut self, epoch: u32) {
+        self.operand_reuse.epoch = epoch;
+    }
+
+    /// Whether the last finished dot read A from guest memory.
+    pub fn reuse_read_a(&self) -> bool {
+        self.operand_reuse.last_read_a
+    }
+
+    /// Whether the last finished dot read B from guest memory.
+    pub fn reuse_read_b(&self) -> bool {
+        self.operand_reuse.last_read_b
+    }
+
+    /// The next completion beat returns an error after the GEMM word is formed.
+    pub fn fail_next_completion_bus(&mut self) {
+        self.completion_bus_err = true;
     }
 
     /// The status word a guest reads from the published status register.
@@ -1541,6 +1823,21 @@ impl MmioDevice for AiIsland {
         // PMU sticky registers are read-only and sit outside the descriptor latch.
         if let Some(v) = self.pmu_load(offset) {
             return v;
+        }
+        if let Some(v) = self.cmd_load(offset) {
+            return v;
+        }
+        if self.va_level_offset() == Some(offset) {
+            return u64::from(self.va_level_req & 0xF);
+        }
+        if self.reuse_epoch_offset() == Some(offset) {
+            return u64::from(self.operand_reuse.epoch);
+        }
+        if self.recipe_offset() == Some(offset) {
+            return u64::from(self.va_recipe_req & 0x1F);
+        }
+        if self.window_offset() == Some(offset) {
+            return u64::from(self.window_valid);
         }
         let r = self.regmap;
         // The published control surface takes precedence over the derived descriptor
@@ -1578,6 +1875,35 @@ impl MmioDevice for AiIsland {
             return;
         }
         let r = self.regmap;
+        self.cmd.last_store_refused = false;
+        if self.cmd_locked(offset) {
+            // Queued mode owns the protection context: the RTL answers PSLVERR and
+            // leaves the register untouched.
+            self.cmd.last_store_refused = true;
+            return;
+        }
+        if self.cmd_store(offset, value) {
+            return;
+        }
+        if self.va_level_offset() == Some(offset) {
+            self.va_level_req = (value as u32) & 0xF;
+            self.window_valid = false;
+            return;
+        }
+        if self.reuse_epoch_offset() == Some(offset) {
+            self.operand_reuse.epoch = value as u32;
+            self.window_valid = false;
+            return;
+        }
+        if self.recipe_offset() == Some(offset) {
+            self.va_recipe_req = (value as u32) & 0x1F;
+            self.window_valid = false;
+            return;
+        }
+        if self.window_offset() == Some(offset) {
+            self.window_valid = value & 1 != 0;
+            return;
+        }
         if Some(offset) == r.ctl {
             self.enabled = value & 1 != 0;
             self.wr_cpl_en = value & 2 != 0;
@@ -1938,6 +2264,128 @@ pub(crate) mod tests {
         assert!(a.take_pending_job().is_none(), "a bell rings once");
     }
 
+    fn model_with_command_queue(depth: u32) -> g6q_core::model::AiIslandModel {
+        let mut m = model_with_control_surface();
+        m.config.command_depth = depth;
+        m.config.command_queue_version = Some(1);
+        m.config.command_queue_flags = Some(7);
+        m.config.cap_offsets.insert("command_queue".into(), 0x90);
+        for (name, off) in [
+            ("cmd_mode", 0x0F20u64),
+            ("cmd_ptr_lo", 0x0F24),
+            ("cmd_ptr_hi", 0x0F28),
+            ("cmd_ticket", 0x0F2C),
+            ("cmd_qid", 0x0F30),
+            ("cmd_submit", 0x0F34),
+            ("cmd_credits", 0x0F38),
+            ("cmd_receipt_ticket", 0x0F3C),
+            ("cmd_receipt_code", 0x0F40),
+            ("cmd_accepted", 0x0F44),
+            ("cmd_rejected", 0x0F48),
+        ] {
+            m.config.reg_offsets.insert(name.into(), off);
+        }
+        m
+    }
+
+    #[test]
+    fn command_queue_is_absent_unless_provisioned() {
+        let mut a = AiIsland::new();
+        let mut m = model_with_command_queue(0);
+        m.config.command_depth = 0;
+        a.set_ai_model(&m);
+        assert_eq!(
+            a.load(0x90, 4),
+            0,
+            "CAP word reads zero when not provisioned"
+        );
+        a.store(0x0F20, 4, 1);
+        assert!(!a.cmd.mode, "an unprovisioned window has no registers");
+        // Same CAP offset, no version/flags published: the word is a tracked gap, not zero.
+        let mut gap = model_with_command_queue(2);
+        gap.config.command_queue_flags = None;
+        assert!(gap
+            .config
+            .cap_unsourced()
+            .iter()
+            .any(|(n, _)| n == "command_queue"));
+    }
+
+    #[test]
+    fn command_queue_receipts_credits_and_lock() {
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model_with_command_queue(2));
+        assert_eq!(a.load(0x90, 4), (2 << 16) | (1 << 8) | 7);
+        // Mode needs CTL.enable.
+        a.store(0x0F20, 4, 1);
+        assert!(!a.cmd.mode && a.cmd.last_store_refused);
+        a.store(0x100, 4, 1);
+        a.store(0x0F20, 4, 1);
+        assert!(a.cmd.mode);
+        // Protected writes are refused without effect.
+        a.store(0x100, 4, 0);
+        assert!(a.enabled && a.cmd.last_store_refused);
+        a.store(0x108, 4, 1);
+        assert!(
+            a.take_pending_job().is_none(),
+            "legacy doorbell is locked out"
+        );
+        // Two credits, then a definite full refusal carrying its own ticket.
+        let submit = |a: &mut AiIsland, ptr: u64, ticket: u64, qid: u64| {
+            a.store(0x0F24, 4, ptr & 0xffff_ffff);
+            a.store(0x0F28, 4, ptr >> 32);
+            a.store(0x0F2C, 4, ticket);
+            a.store(0x0F30, 4, qid);
+            a.store(0x0F34, 4, 1);
+            (a.load(0x0F3C, 4), a.load(0x0F40, 4))
+        };
+        assert_eq!(
+            submit(&mut a, 0x8000_0400, 0xF000_0001, 0),
+            (0xF000_0001, 0)
+        );
+        assert_eq!(
+            submit(&mut a, 0x8000_0440, 0xF000_0002, 9),
+            (0xF000_0002, 0)
+        );
+        assert_eq!(a.load(0x0F38, 4), 0);
+        assert_eq!(
+            submit(&mut a, 0x8000_0480, 0xF000_0003, 0),
+            (0xF000_0003, 1)
+        );
+        assert_eq!((a.load(0x0F44, 4), a.load(0x0F48, 4)), (2, 1));
+        // Mode exit is refused while commands are pending.
+        a.store(0x0F20, 4, 0);
+        assert!(a.cmd.mode && a.cmd.last_store_refused);
+        // Dispatch in order, each under its own ticket; the bad qid is reported as such.
+        assert_eq!(
+            a.take_pending_command(),
+            Some((0x8000_0400, 0xF000_0001, 0))
+        );
+        assert!(
+            a.take_pending_command().is_none(),
+            "one command in flight at a time"
+        );
+        a.complete_pending_command(g6q_diag::ai_tensor::AiTensorEvent::default(), a.codes.ok);
+        assert_eq!(a.ticket, 0xF000_0001);
+        assert_eq!(
+            a.take_pending_command(),
+            Some((0x8000_0440, 0xF000_0002, 9))
+        );
+        a.complete_pending_command(
+            g6q_diag::ai_tensor::AiTensorEvent::default(),
+            a.codes.bad_qid,
+        );
+        assert_eq!(
+            a.events.last().map(|e| (e.ticket, e.status)),
+            Some((0xF000_0002, a.codes.bad_qid))
+        );
+        assert_eq!(a.load(0x0F38, 4), 2);
+        a.store(0x0F20, 4, 0);
+        assert!(!a.cmd.mode);
+        // Disabled receipts are distinct from full ones.
+        assert_eq!(submit(&mut a, 0x8000_0400, 7, 0), (7, 2));
+    }
+
     #[test]
     fn a_completion_claim_drops_the_level_interrupt() {
         let mut a = AiIsland::new();
@@ -2011,6 +2459,28 @@ pub(crate) mod tests {
             .complete_pending_job(ev, 0)
             .expect("wr_cpl_en writes the completion word");
         assert_eq!(addr, 0x9000_0000);
+    }
+
+    #[test]
+    fn a_completion_beat_error_keeps_the_gemm_word_and_reports_st_err() {
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model_with_control_surface());
+        a.store(0x100, 4, 0b11);
+        let ev = g6q_diag::ai_tensor::AiTensorEvent {
+            ptr_done: 0x9000_0000,
+            ..Default::default()
+        };
+        a.fail_next_completion_bus();
+        let (addr, word) = a
+            .complete_pending_job(ev, a.codes.ok)
+            .expect("the GEMM word is still stored");
+        assert_eq!(addr, 0x9000_0000);
+        assert_eq!(
+            word,
+            a.pack_completion_word(a.ticket as u64, a.codes.ok as u64)
+        );
+        assert_eq!(a.load(0x104, 4), u64::from(a.codes.err) << 16);
+        assert_ne!(word, a.completion_word());
     }
 
     /// A completion layout with status in the lower 16 bits and ticket in the upper 48 bits,
@@ -2500,5 +2970,187 @@ pub(crate) mod tests {
         assert_eq!(r_beats, 4);
         // w_bytes = 4 * 4 * 4 = 64; w_beats = 8.
         assert_eq!(w_beats, 8);
+    }
+
+    #[test]
+    fn a_va_turbo_level_request_reads_back_and_the_applied_level_stays_zero() {
+        let mut model = model_with_control_surface();
+        model
+            .config
+            .reg_offsets
+            .insert("va_turbo_level".into(), 0x0F04);
+        model
+            .config
+            .pmu_offsets
+            .insert("va_turbo_level".into(), 0x0F08);
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model);
+        a.store(0x0F04, 4, 0xFFFF_FFFF);
+        assert_eq!(a.load(0x0F04, 4), 0xF);
+        assert_eq!(a.load(0x0F08, 4), 0);
+        a.store(0x0F04, 4, 0x109);
+        assert_eq!(a.load(0x0F04, 4), 9);
+        let ev = g6q_diag::ai_tensor::AiTensorEvent::default();
+        let _ = a.complete_pending_job(ev, 0);
+        assert_eq!(a.load(0x0F08, 4), 9);
+        assert_eq!((a.load(0x0F04, 4) >> 8) & 0xF, 0);
+        assert_eq!((a.load(0x0F08, 4) >> 8) & 0xF, 0);
+    }
+
+    #[test]
+    fn a_reuse_epoch_store_is_the_published_register() {
+        let mut model = model_with_control_surface();
+        model
+            .config
+            .reg_offsets
+            .insert("reuse_epoch".into(), 0x0F00);
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model);
+        a.store(0x0F00, 4, 0x1_0000_0011);
+        assert_eq!(a.load(0x0F00, 4), 0x11);
+        assert_eq!(a.operand_reuse.epoch, 0x11);
+    }
+
+    #[test]
+    fn an_ingested_reuse_epoch_clears_the_evidence_window() {
+        let text = r#"
+package g6lc_ai_island_cfg_pkg;
+  localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters: unsigned'(1),
+      Queues: unsigned'(1),
+      QueueDepth: unsigned'(4)
+  };
+  localparam logic [15:0] REG_OFF_REUSE_EPOCH = 16'h0F00;
+  localparam logic [15:0] REG_OFF_VA_TURBO_WINDOW = 16'h0F14;
+  localparam logic [15:0] PMU_OFF_VA_TURBO_WINDOW = 16'h0F18;
+endpackage
+"#;
+        let cfg = g6q_diag::ai_cfg::parse_ai_island_cfg_pkg(text).unwrap();
+        assert_eq!(cfg.reg_offset("reuse_epoch"), Some(0x0F00));
+        assert_eq!(cfg.reg_offset("va_turbo_window"), Some(0x0F14));
+        let mut model = model_with_control_surface();
+        model.config.reg_offsets.extend(cfg.reg_offsets);
+        model.config.pmu_offsets.extend(cfg.pmu_offsets);
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model);
+        a.store(0x0F14, 4, 1);
+        assert_eq!(a.load(0x0F14, 4), 1);
+        a.store(0x0F00, 4, 0x11);
+        assert_eq!(a.load(0x0F00, 4), 0x11);
+        assert_eq!(a.operand_reuse.epoch, 0x11);
+        assert_eq!(a.load(0x0F14, 4), 0);
+        a.store(0x0F14, 4, 1);
+        a.store(0x0F00, 4, 0x11);
+        assert_eq!(a.load(0x0F00, 4), 0x11);
+        assert_eq!(a.load(0x0F14, 4), 0);
+        let _ = a.complete_pending_job(g6q_diag::ai_tensor::AiTensorEvent::default(), 0);
+        assert_eq!(a.load(0x0F18, 4), 0);
+    }
+
+    #[test]
+    fn the_four_kib_aperture_reaches_the_va_turbo_block() {
+        use crate::mem::{Device, DeviceKind, PhysMem};
+
+        let text = r#"
+package g6lc_ai_island_cfg_pkg;
+  localparam ai_island_cfg_t AiIslandLatencyDefault = '{
+      Clusters: unsigned'(1),
+      Queues: unsigned'(1),
+      QueueDepth: unsigned'(4)
+  };
+  localparam logic [15:0] REG_OFF_REUSE_EPOCH = 16'h0F00;
+  localparam logic [15:0] REG_OFF_VA_TURBO_LEVEL = 16'h0F04;
+  localparam logic [15:0] PMU_OFF_VA_TURBO_LEVEL = 16'h0F08;
+  localparam logic [15:0] REG_OFF_VA_TURBO_WINDOW = 16'h0F14;
+endpackage
+"#;
+        let cfg = g6q_diag::ai_cfg::parse_ai_island_cfg_pkg(text).unwrap();
+        let epoch_off = cfg.reg_offset("reuse_epoch").unwrap();
+        let level_off = cfg.reg_offset("va_turbo_level").unwrap();
+        let window_off = cfg.reg_offset("va_turbo_window").unwrap();
+        let pmu_off = cfg.pmu_offsets.get("va_turbo_level").copied().unwrap();
+        let mut model = model_with_control_surface();
+        model.config.reg_offsets.extend(cfg.reg_offsets);
+        model.config.pmu_offsets.extend(cfg.pmu_offsets);
+        let mut island = AiIsland::new();
+        island.set_ai_model(&model);
+        let mut mem = PhysMem::new();
+        const BASE: u64 = 0x4000_0000;
+        mem.add_device(Device::new(BASE, 0x1000, DeviceKind::AiIsland(island)));
+        let epoch = BASE + epoch_off;
+        let level = BASE + level_off;
+        let window = BASE + window_off;
+        assert!(epoch < BASE + 0x1000);
+        assert!(level < BASE + 0x1000);
+        assert!(window < BASE + 0x1000);
+        mem.write_le::<4>(window, 1).unwrap();
+        assert_eq!(mem.read_le::<4>(window).unwrap(), 1);
+        mem.write_le::<4>(level, 0x109).unwrap();
+        assert_eq!(mem.read_le::<4>(level).unwrap(), 9);
+        assert_eq!((mem.read_le::<4>(level).unwrap() >> 8) & 0xF, 0);
+        assert_eq!(mem.read_le::<4>(window).unwrap(), 0);
+        mem.write_le::<4>(window, 1).unwrap();
+        mem.write_le::<4>(epoch, 0x11).unwrap();
+        assert_eq!(mem.read_le::<4>(epoch).unwrap(), 0x11);
+        assert_eq!(mem.read_le::<4>(window).unwrap(), 0);
+        assert_eq!(mem.ai_island().unwrap().operand_reuse.epoch, 0x11);
+        assert!(mem.write_le::<4>(BASE + 0x2200, 0x22).is_err());
+        assert_eq!(mem.ai_island().unwrap().operand_reuse.epoch, 0x11);
+        let _ = mem
+            .ai_island_mut()
+            .unwrap()
+            .complete_pending_job(g6q_diag::ai_tensor::AiTensorEvent::default(), 0);
+        let pmu = BASE + pmu_off;
+        assert_eq!(mem.read_le::<4>(pmu).unwrap(), 9);
+        assert_eq!((mem.read_le::<4>(pmu).unwrap() >> 8) & 0xF, 0);
+    }
+
+    #[test]
+    fn a_va_turbo_recipe_request_reads_back_and_the_applied_id_stays_zero() {
+        let mut model = model_with_control_surface();
+        model
+            .config
+            .reg_offsets
+            .insert("va_turbo_recipe".into(), 0x0F0C);
+        model
+            .config
+            .pmu_offsets
+            .insert("va_turbo_recipe".into(), 0x0F10);
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model);
+        a.store(0x0F0C, 4, 0x0110);
+        assert_eq!(a.load(0x0F0C, 4), 0x10);
+        assert_eq!(a.load(0x0F10, 4), 0);
+        let ev = g6q_diag::ai_tensor::AiTensorEvent::default();
+        let _ = a.complete_pending_job(ev, 0);
+        assert_eq!(a.load(0x0F10, 4), 0x10);
+        assert_eq!((a.load(0x0F0C, 4) >> 8) & 0x1F, 0);
+        assert_eq!((a.load(0x0F10, 4) >> 8) & 0x1F, 0);
+    }
+
+    #[test]
+    fn an_evidence_window_clears_when_the_recipe_is_stored() {
+        let mut model = model_with_control_surface();
+        model
+            .config
+            .reg_offsets
+            .insert("va_turbo_window".into(), 0x0F14);
+        model
+            .config
+            .reg_offsets
+            .insert("va_turbo_recipe".into(), 0x0F0C);
+        model
+            .config
+            .pmu_offsets
+            .insert("va_turbo_window".into(), 0x0F18);
+        let mut a = AiIsland::new();
+        a.set_ai_model(&model);
+        a.store(0x0F14, 4, 1);
+        assert_eq!(a.load(0x0F14, 4), 1);
+        a.store(0x0F0C, 4, 0x10);
+        assert_eq!(a.load(0x0F14, 4), 0);
+        a.store(0x0F14, 4, 1);
+        let _ = a.complete_pending_job(g6q_diag::ai_tensor::AiTensorEvent::default(), 0);
+        assert_eq!(a.load(0x0F18, 4), 1);
     }
 }

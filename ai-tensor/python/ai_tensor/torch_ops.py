@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Optional, Tuple
 
-from .device import Device
+from .device import Device, high_level_fields, run_high_level_s8
 
 try:
     import torch
@@ -26,6 +26,7 @@ def gemm_s8(
     ticket: int = 1,
     auto_tile: bool = True,
     backend: str = "sim",
+    recipe: Optional[str] = None,
 ) -> Tuple["torch.Tensor", dict]:
     """
     INT8 matmul: ``C[m,n] = A[m,k] @ B[k,n]`` with i32 accum.
@@ -44,7 +45,8 @@ def gemm_s8(
     assert k == k2
 
     dev = device or Device(backend)
-    c_list, tix, status, meta = dev.gemm_s8(
+    c_list, meta = run_high_level_s8(
+        dev,
         int(m),
         int(n),
         int(k),
@@ -52,22 +54,17 @@ def gemm_s8(
         b_i.reshape(-1).tolist(),
         ticket=ticket,
         auto_tile=auto_tile,
+        recipe=recipe,
     )
-    if status != 0:
-        raise RuntimeError(f"ai-tensor gemm failed status={status}")
-
     c = torch.tensor(c_list, dtype=torch.int32).reshape(m, n)
-    meta = {
-        **meta,
-        "ticket": tix,
-        "status": status,
-        "backend": dev.backend,
-    }
     return c, meta
 
 
 def gemm(a: 'torch.Tensor', b: 'torch.Tensor', *, device: Optional[Device] = None,
-         backend: str = 'sim', ticket: int = 1) -> Tuple['torch.Tensor', dict]:
+         backend: str = 'sim', ticket: int = 1, recipe: Optional[str] = None) -> Tuple['torch.Tensor', dict]:
+    from .va_turbo import refuse_unapplied_recipe
+
+    refuse_unapplied_recipe(recipe)
     from .c_abi import numfmt_of_dtype
     import sys
     if sys.byteorder != 'little':
@@ -87,7 +84,14 @@ def gemm(a: 'torch.Tensor', b: 'torch.Tensor', *, device: Optional[Device] = Non
     raw = dev.gemm_native(a_bytes, b_bytes, int(m), int(n), int(k), fmt, ticket=ticket)
     dtype = torch.int32 if fmt < 2 else torch.float32
     out = torch.frombuffer(bytearray(raw), dtype=dtype).clone().reshape(m, n)
-    return out, {'backend': dev.backend, 'numfmt': fmt, 'status': 0, 'ticket': ticket, 'caps': dev.caps().as_dict()}
+    return out, {
+        "backend": dev.backend,
+        "numfmt": fmt,
+        "status": 0,
+        "ticket": ticket,
+        "caps": dev.caps().as_dict(),
+        **high_level_fields(dev.caps(), int(m), int(n), int(k), False, native=True),
+    }
 
 
 def check_close_to_torch(

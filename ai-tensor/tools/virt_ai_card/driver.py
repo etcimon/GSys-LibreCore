@@ -38,6 +38,17 @@ DESC_PTR_LO = 0x118
 DESC_PTR_HI = 0x11C
 REG0 = 0x120
 DESC = 0x140
+REG_REUSE_EPOCH = 0x0F00
+# Requested level in bits [3:0]. Applied nibble stays 0. Inside the 4 KiB
+# window, kept in side state so a raw pack cannot set the applied nibble.
+REG_VA_TURBO_LEVEL = 0x0F04
+PMU_VA_TURBO_LEVEL = 0x0F08
+REG_VA_TURBO_RECIPE = 0x0F0C
+PMU_VA_TURBO_RECIPE = 0x0F10
+REG_VA_TURBO_WINDOW = 0x0F14
+PMU_VA_TURBO_WINDOW = 0x0F18
+FLAG_REUSE_B = 1 << 15
+FLAG_REUSE_A = 1 << 23
 DESC_END = 0x180
 PMU = 0x180
 DESC_BYTES = DESC_END - DESC
@@ -61,6 +72,17 @@ ST_DISABLED = 6
 ST_BAD_FMT = 8
 ST_BAD_VER = 2
 ST_BAD_OP = 3
+
+
+def completion_post(ticket: int, gemm_status: int, bus_err: bool = False):
+    """Same split as ai_tensor.c_abi.completion_post.
+
+    The DMA word keeps the GEMM status. A failed completion beat reports ST_ERR
+    on the FIFO and does not rewrite that word.
+    """
+    word = ((int(gemm_status) & 0xFFFF) << 32) | (int(ticket) & 0xFFFFFFFF)
+    fifo = ST_ERR if bus_err else int(gemm_status) & 0xFFFF
+    return word, fifo
 # isa-encoding.md §7: flags[2] raise IRQ. Matches ingested flags_layout.irq_bit.
 FLAG_IRQ = 1 << 2
 
@@ -173,6 +195,36 @@ class VirtualEventFd:
             return self._counter
 
 
+class _ReuseDisabled:
+    """Stand-in when ``ai_tensor.policy`` is not on the import path.
+
+    Flags are ignored and every operand is read from the staged matrix.
+    """
+
+    def __init__(self) -> None:
+        self.epoch = 0
+        self.last_read_a = True
+        self.last_read_b = True
+
+    def set_enabled(self, on: bool) -> None:
+        del on
+
+    def bind(self, side: str, flag: bool, key: tuple, data, disjoint: bool = True):
+        del side, flag, key, disjoint
+        return True, data
+
+    def finish(self, ok: bool) -> None:
+        del ok
+
+
+def _new_reuse():
+    try:
+        from ai_tensor.policy import OperandReuse
+    except ImportError:
+        return _ReuseDisabled()
+    return OperandReuse()
+
+
 class VirtualUioDevice:
     """
     4 KiB MMIO window + SoftIsland-like GEMM on doorbell.
@@ -202,13 +254,38 @@ class VirtualUioDevice:
         self._queues = 1
         self._busy = False
         self._last_status = 0
+        self._last_completion_word = 0
+        self._completion_bus_err = False
         self._db_qid = 0
         self._db_ticket = 0
         self._desc_words = [0] * 16
         self._pmu = (0, 0, 0, 0)  # r, w, cycles, gbps_x1000
         self._comp_fifo: List[_Completion] = []
+        self._reuse = _new_reuse()
+        self._level_req = 0
+        self._pmu_level = 0
+        self._recipe_req = 0
+        self._pmu_recipe = 0
+        self._window_valid = False
+        self._pmu_window = False
         self._seed_cap(cap)
         self._refresh_done_head()
+
+    def set_reuse_en(self, on: bool) -> None:
+        """Exact operand reuse. Off by default, so flags 15 and 23 do not change C."""
+        self._reuse.set_enabled(on)
+
+    def reuse_enabled(self) -> bool:
+        """Whether exact reuse is enabled. A plan with no skip leaves it off."""
+        return bool(self._reuse.enabled)
+
+    def last_read_a(self) -> bool:
+        """True when the last GEMM read A. A hit leaves this false."""
+        return bool(self._reuse.last_read_a)
+
+    def last_read_b(self) -> bool:
+        """True when the last GEMM read B. A hit leaves this false."""
+        return bool(self._reuse.last_read_b)
 
     # -- CAP seed (island_p3-ish; overrides are reported geometry, not timing) --
 
@@ -266,15 +343,19 @@ class VirtualUioDevice:
         irq: bool,
         c_matrix: Optional[List[List[int]]] = None,
     ) -> None:
+        bus_err = self._completion_bus_err
+        self._completion_bus_err = False
+        word, fifo = completion_post(ticket, status, bus_err)
+        self._last_completion_word = word
         self._comp_fifo.append(
-            _Completion(ticket=ticket, status=status, irq=irq, c_matrix=c_matrix)
+            _Completion(ticket=ticket, status=fifo, irq=irq, c_matrix=c_matrix)
         )
         # keep depth modest
         while len(self._comp_fifo) > 8:
             self._comp_fifo.pop(0)
         self._busy = False
-        self._last_status = status
-        self._pack32(STATUS, (status << 16) | 0)
+        self._last_status = fifo
+        self._pack32(STATUS, (fifo << 16) | 0)
         self._refresh_done_head()
 
     def claim_done(self) -> Optional[_Completion]:
@@ -300,6 +381,20 @@ class VirtualUioDevice:
 
     def read32(self, off: int) -> int:
         with self._lock:
+            if off == REG_REUSE_EPOCH:
+                return self._reuse.epoch & 0xFFFFFFFF
+            if off == REG_VA_TURBO_LEVEL:
+                return self._level_req & 0xF
+            if off == PMU_VA_TURBO_LEVEL:
+                return self._pmu_level & 0xF
+            if off == REG_VA_TURBO_RECIPE:
+                return self._recipe_req & 0x1F
+            if off == PMU_VA_TURBO_RECIPE:
+                return self._pmu_recipe & 0x1F
+            if off == REG_VA_TURBO_WINDOW:
+                return 1 if self._window_valid else 0
+            if off == PMU_VA_TURBO_WINDOW:
+                return 1 if self._pmu_window else 0
             if off < 0 or off + 4 > MMIO_SIZE or off % 4 != 0:
                 return 0
             if off == CTL:
@@ -325,6 +420,21 @@ class VirtualUioDevice:
                 return
             if off == DOORBELL:
                 self._doorbell(val)
+                return
+            if off == REG_REUSE_EPOCH:
+                self._reuse.epoch = val & 0xFFFFFFFF
+                self._window_valid = False
+                return
+            if off == REG_VA_TURBO_LEVEL:
+                self._level_req = val & 0xF
+                self._window_valid = False
+                return
+            if off == REG_VA_TURBO_RECIPE:
+                self._recipe_req = val & 0x1F
+                self._window_valid = False
+                return
+            if off == REG_VA_TURBO_WINDOW:
+                self._window_valid = (val & 1) != 0
                 return
             if off == DONE:
                 if val & 1:
@@ -387,18 +497,37 @@ class VirtualUioDevice:
             # Soft path with eventfd: ensure IRQ so claim discipline is exercised.
             if self.eventfd is not None:
                 irq = True
+            fmt = (flags >> 20) & 7
+            read_a, a_used = self._reuse.bind(
+                "a", flags & FLAG_REUSE_A, (1, m, k, k, fmt), a, True
+            )
+            read_b, b_used = self._reuse.bind(
+                "b", flags & FLAG_REUSE_B, (2, n, k, k, fmt), b, True
+            )
             try:
-                c = int8_gemm(a, b)
-                self._dram["C"] = c
-                self._pmu = (m * k + k * n, m * n, max(m * n, 1), 0)
-                self._push_completion(self._db_ticket, ST_OK, irq, c)
+                c = int8_gemm(a_used, b_used)
             except Exception:
+                self._reuse.finish(False)
                 self._push_completion(self._db_ticket, ST_ERR, False)
+                return
+            self._reuse.finish(True)
+            self._pmu_level = self._level_req & 0xF
+            self._pmu_recipe = self._recipe_req & 0x1F
+            self._pmu_window = self._window_valid
+            self._dram["C"] = c
+            read_elems = (0 if not read_a else m * k) + (0 if not read_b else k * n)
+            self._pmu = (read_elems, m * n, max(m * n, 1), 0)
+            self._push_completion(self._db_ticket, ST_OK, irq, c)
             return
         # DESC-only path without staged A/B: complete OK empty (tests without matrices)
         self._push_completion(self._db_ticket, ST_OK, bool(self.eventfd), None)
 
     # -- high-level GEMM (card agent / smoke) -------------------------------
+
+    def fail_next_completion_bus(self) -> None:
+        """The next completion beat fails after the GEMM word is stored."""
+        with self._lock:
+            self._completion_bus_err = True
 
     def stage_tensor(self, name: str, matrix: Sequence[Sequence[int]]) -> None:
         """Stage a BAR4 tensor into card DRAM so a later doorbell can consume it."""
@@ -440,6 +569,7 @@ class VirtualUioDevice:
         ticket: int = 1,
         irq: bool = True,
         desc: Optional[bytes] = None,
+        flags: int = 0,
     ) -> int:
         """Stage A/B, program DESC (packed image or minimal words), ring doorbell."""
         with self._lock:
@@ -472,6 +602,10 @@ class VirtualUioDevice:
                 self._desc_words[5] = k | (k << 16)
                 for i, w in enumerate(self._desc_words):
                     self._pack32(DESC + i * 4, w)
+            reuse_bits = int(flags) & (FLAG_REUSE_A | FLAG_REUSE_B)
+            if reuse_bits:
+                self._desc_words[1] = (self._desc_words[1] | reuse_bits) & 0xFFFFFFFF
+                self._pack32(DESC + 4, self._desc_words[1])
             if not self._enable:
                 self.enable(True)
             # doorbell: qid=0 | ticket<<8
@@ -488,13 +622,14 @@ class VirtualUioDevice:
         wait: bool = True,
         timeout: float = 2.0,
         desc: Optional[bytes] = None,
+        flags: int = 0,
     ) -> List[List[int]]:
         """
         Stage + doorbell + (optional) eventfd wait + claim DONE.
 
         Claim order: wait → claim DONE @0x10C → clear eventfd.
         """
-        self.stage_gemm_s8(a, b, ticket=ticket, irq=irq, desc=desc)
+        self.stage_gemm_s8(a, b, ticket=ticket, irq=irq, desc=desc, flags=flags)
         if wait:
             return self.wait_claim_result(ticket=ticket, timeout=timeout)
         c = self._dram.get("C")

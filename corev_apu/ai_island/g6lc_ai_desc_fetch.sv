@@ -41,6 +41,14 @@ module g6lc_ai_desc_fetch
     input  axi_resp_t   axi_resp_i
 );
 
+  // Bit-granular copies of the AXI aggregates. The master's ready signals may depend
+  // on the slave's valids (legal), but on a whole-struct view that reads as a
+  // request<->response loop; splitting keeps Verilator's cycle check exact.
+  axi_req_t  axi_req_d /*verilator split_var*/;
+  axi_resp_t axi_resp_s /*verilator split_var*/;
+  assign axi_req_o  = axi_req_d;
+  assign axi_resp_s = axi_resp_i;
+
   localparam int unsigned BusBytes  = DataWidth / 8;
   // 8-byte beats on a wide bus. At DataWidth=64, BeatBytes is the whole bus.
   localparam int unsigned BeatBytes = (BusBytes > 8) ? 8 : BusBytes;
@@ -69,26 +77,28 @@ module g6lc_ai_desc_fetch
 
   // Default AXI idle / AR template (ariane_axi::req_t layout)
   always_comb begin
-    int unsigned lane;
-    lane               = 0;
-    axi_req_o          = '0;
-    axi_req_o.b_ready  = 1'b1;
+    axi_req_d          = '0;
+    axi_req_d.b_ready  = 1'b1;
     // Read-only master, but the request struct still carries a write channel;
     // ID 0 is this unit's identity on the shared DMA port (store uses 1, GEMM 2).
-    axi_req_o.ar.id    = '0;
-    axi_req_o.ar.addr  = addr_q;
-    axi_req_o.ar.len   = axi_pkg::len_t'(Beats - 1);
-    axi_req_o.ar.size  = axi_pkg::size_t'($clog2(BeatBytes));
-    axi_req_o.ar.burst = axi_pkg::BURST_INCR;
-    axi_req_o.ar.lock  = 1'b0;
-    axi_req_o.ar.cache = axi_pkg::CACHE_MODIFIABLE;
-    axi_req_o.ar.prot  = '0;
-    axi_req_o.ar.qos   = '0;
-    axi_req_o.ar.region = '0;
-    axi_req_o.ar.user  = '0;
-    axi_req_o.ar_valid = 1'b0;
-    axi_req_o.r_ready  = 1'b0;
+    axi_req_d.ar.id    = '0;
+    axi_req_d.ar.addr  = addr_q;
+    axi_req_d.ar.len   = axi_pkg::len_t'(Beats - 1);
+    axi_req_d.ar.size  = axi_pkg::size_t'($clog2(BeatBytes));
+    axi_req_d.ar.burst = axi_pkg::BURST_INCR;
+    axi_req_d.ar.lock  = 1'b0;
+    axi_req_d.ar.cache = axi_pkg::CACHE_MODIFIABLE;
+    axi_req_d.ar.prot  = '0;
+    axi_req_d.ar.qos   = '0;
+    axi_req_d.ar.region = '0;
+    axi_req_d.ar.user  = '0;
+    axi_req_d.ar_valid = state_q == ST_AR && grant_i;
+    axi_req_d.r_ready  = state_q == ST_R && grant_i;
+  end
 
+  always_comb begin
+    int unsigned lane;
+    lane = 0;
     state_d = state_q;
     beat_d  = beat_q;
     desc_d  = desc_q;
@@ -116,26 +126,24 @@ module g6lc_ai_desc_fetch
         // Drive AR only in a granted cycle. Otherwise ar_valid stays high
         // across a grant that arrives late and the slave accepts two ARs.
         if (grant_i) begin
-          axi_req_o.ar_valid = 1'b1;
-          if (axi_resp_i.ar_ready) state_d = ST_R;
+          if (axi_resp_s.ar_ready) state_d = ST_R;
         end
       end
       ST_R: begin
         if (grant_i) begin
-          axi_req_o.r_ready = 1'b1;
-          if (axi_resp_i.r_valid) begin
+          if (axi_resp_s.r_valid) begin
           // Lane 0 on a bus that is already the beat width. A wider bus
           // carries the same 8 bytes at (addr + beat*BeatBytes) % BusBytes.
           lane = (BusBytes == BeatBytes) ? 0
                : (unsigned'(addr_q) + unsigned'(beat_q) * BeatBytes) & (BusBytes - 1);
           desc_d[beat_q*BeatBits +: BeatBits] =
-              BeatBits'(axi_resp_i.r.data >> (8 * lane));
-          if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+              BeatBits'(axi_resp_s.r.data >> (8 * lane));
+          if (axi_resp_s.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
             err_d = 1'b1;
           // Two exit conditions, not one: r.last is the slave's word, the beat
           // count is ours. A slave that under- or over-runs the burst cannot
           // leave this FSM stuck or let it write past the descriptor.
-          if (axi_resp_i.r.last || (beat_q == BeatW'(Beats - 1))) begin
+          if (axi_resp_s.r.last || (beat_q == BeatW'(Beats - 1))) begin
             state_d = ST_DONE;
           end else begin
             beat_d = beat_q + BeatW'(1);

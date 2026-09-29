@@ -16,7 +16,7 @@ module g6lc_ai_cpl_fifo #(
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
-    // Push one completion (ignored when full — caller should avoid overrun)
+    // Push one completion (full accepts only with a simultaneous valid pop)
     input  logic        push_i,
     input  logic [31:0] ticket_i,
     input  logic [15:0] status_i,
@@ -40,7 +40,21 @@ module g6lc_ai_cpl_fifo #(
 
   cpl_t mem_q[Depth];
   logic [CntW-1:0] count_q;
-  logic [$clog2(Depth)-1:0] wr_q, rd_q;
+  localparam int unsigned PtrW = Depth <= 1 ? 1 : $clog2(Depth);
+  logic [PtrW-1:0] wr_q, rd_q;
+
+  function automatic logic [PtrW-1:0] next_ptr(input logic [PtrW-1:0] ptr);
+    if (Depth == 1) return '0;
+    if ((Depth & (Depth - 1)) == 0) return ptr + PtrW'(1);
+    return ptr == PtrW'(Depth - 1) ? '0 : ptr + PtrW'(1);
+  endfunction
+
+  // pragma translate_off
+  initial begin
+    assert (Depth >= 1 && CntW >= $clog2(64'(Depth) + 64'd1))
+      else $error("g6lc_ai_cpl_fifo: invalid depth/count width");
+  end
+  // pragma translate_on
 
   assign empty_o    = (count_q == '0);
   assign full_o     = (count_q == CntW'(Depth));
@@ -60,16 +74,16 @@ module g6lc_ai_cpl_fifo #(
         mem_q[i].irq    <= 1'b0;
       end
     end else begin
-      unique case ({push_i && !full_o, pop_i && !empty_o})
+      unique case ({push_i && (!full_o || (pop_i && !empty_o)), pop_i && !empty_o})
         2'b10: begin
           mem_q[wr_q].ticket <= ticket_i;
           mem_q[wr_q].status <= status_i;
           mem_q[wr_q].irq    <= irq_i;
-          wr_q    <= wr_q + 1'b1;
+          wr_q    <= next_ptr(wr_q);
           count_q <= count_q + 1'b1;
         end
         2'b01: begin
-          rd_q    <= rd_q + 1'b1;
+          rd_q    <= next_ptr(rd_q);
           count_q <= count_q - 1'b1;
         end
         2'b11: begin
@@ -79,8 +93,8 @@ module g6lc_ai_cpl_fifo #(
           mem_q[wr_q].ticket <= ticket_i;
           mem_q[wr_q].status <= status_i;
           mem_q[wr_q].irq    <= irq_i;
-          wr_q    <= wr_q + 1'b1;
-          rd_q    <= rd_q + 1'b1;
+          wr_q    <= next_ptr(wr_q);
+          rd_q    <= next_ptr(rd_q);
           // count unchanged
         end
         default: ;

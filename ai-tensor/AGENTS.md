@@ -139,9 +139,11 @@ python tools/ait.py test
 python tools/ait.py doctor
 ```
 
-The tooling spine is live. `python tools/ait.py test` runs Rust, pure-Python,
-ABI-lockstep and optional framework checks, including the external local cosim
-helper by default. On Windows, the Rust cosim launcher requires a POSIX `sh`;
+The tooling spine is live. `python tools/ait.py test` runs Rust, the complete
+`python/tests` pytest suite (including function-style VA-Turbo regressions),
+C/Python/Rust ABI-lockstep and optional framework checks, including the external local cosim
+helper by default. Pytest is a required test dependency; missing optional frameworks
+are explicit skips, not framework qualification. On Windows, the Rust cosim launcher requires a POSIX `sh`;
 Git's `usr/bin` can be added to the **child command's** PATH. The CLI quotes
 forward-slash interpreter/harness paths so spaces and backslashes are preserved.
 
@@ -151,6 +153,12 @@ check. A verification invocation may set `PYO3_PYTHON` to an existing supported
 interpreter (the host's OSS CAD Suite Python 3.11 was used for `cargo check -p
 ai-tensor-py --offline`). Compilation is not an extension import test under 3.14.
 No interpreter or dependency is installed implicitly.
+
+For a direct pytest invocation from this package root, set the child process's
+`PYTHONPATH` to `python` (or its absolute path); several test modules intentionally
+rely on the package path supplied by `ait.py test`. A collection failure without
+that path is not an executed-test verdict. Use `python -B -m pytest -q -p
+no:cacheprovider python/tests` with that environment for a focused Python rerun.
 
 ---
 

@@ -13,8 +13,13 @@
 //! | Modelled | Not modelled |
 //! |---|---|
 //! | `C = A · B` with the design's operand types and leading dimensions | the PE array, banking, or oct-drain |
+//! | exact operand reuse when `OperandReuse` is enabled | reuse while that switch is off |
 //! | the shape bound the engine enforces, and the status it returns | cycles, bandwidth, or any latency |
 //! | refusal of arithmetic modes the capability window does not grant | the modes themselves |
+//!
+//! [`run_va_turbo_test_s8`] turns that switch on only for the 8-MAC
+//! 1024×512×16 model, and only when a planned tile can skip an operand.
+//! A 512-MAC model is refused. The schedule does not apply a VA level.
 //!
 //! Every code and bound is read from the ingested [`AiIslandModel`]: op codes, status
 //! codes, the accumulator tile that bounds each dimension, and the granted data types.
@@ -63,7 +68,114 @@ pub struct AiJobResult {
     /// execute (for example a layout transform). The entry still completes `ST_OK`, but a
     /// consumer can tell "ran" from "accepted and skipped".
     pub skipped: bool,
+    /// The dot finished. A refusal leaves this clear so residency is left alone.
+    pub ran_gemm: bool,
+    /// False when resident A supplied the operand.
+    pub read_a: bool,
+    /// False when resident B supplied the operand.
+    pub read_b: bool,
+    /// A image to keep after a successful dot. Empty means that key drops.
+    pub install_a: Option<ResidentOperand>,
+    /// B image to keep after a successful dot. Empty means that key drops.
+    pub install_b: Option<ResidentOperand>,
 }
+
+/// One captured operand. The key matches `g6lc_ai_gemm_seq`: pointer, the
+/// dimension that addresses it, K, the leading dimension, format, and epoch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentOperand {
+    ptr: u64,
+    rows: u32,
+    k: u32,
+    ld: u32,
+    fmt: u32,
+    epoch: u32,
+    bytes: Vec<u8>,
+}
+
+impl ResidentOperand {
+    fn matches(
+        &self,
+        ptr: u64,
+        rows: u32,
+        k: u32,
+        ld: u32,
+        fmt: u32,
+        epoch: u32,
+        len: u64,
+    ) -> bool {
+        self.ptr == ptr
+            && self.rows == rows
+            && self.k == k
+            && self.ld == ld
+            && self.fmt == fmt
+            && self.epoch == epoch
+            && self.bytes.len() as u64 == len
+    }
+}
+
+/// Exact operand reuse for the guest model. Off until [`OperandReuse::set_enabled`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperandReuse {
+    enabled: bool,
+    /// Epoch compared with the resident key. A different epoch misses.
+    pub epoch: u32,
+    a: Option<ResidentOperand>,
+    b: Option<ResidentOperand>,
+    /// Whether the last finished dot read A from guest memory.
+    pub last_read_a: bool,
+    /// Whether the last finished dot read B from guest memory.
+    pub last_read_b: bool,
+}
+
+impl Default for OperandReuse {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            epoch: 0,
+            a: None,
+            b: None,
+            last_read_a: true,
+            last_read_b: true,
+        }
+    }
+}
+
+impl OperandReuse {
+    /// Turn residency on. Turning it off drops both keys.
+    pub fn set_enabled(&mut self, on: bool) {
+        self.enabled = on;
+        if !on {
+            self.a = None;
+            self.b = None;
+        }
+    }
+
+    /// Drop both keys. A failed C store uses this.
+    pub fn drop_both(&mut self) {
+        self.a = None;
+        self.b = None;
+    }
+
+    /// Record whether the dot read each operand from guest memory.
+    pub fn observe(&mut self, read_a: bool, read_b: bool) {
+        self.last_read_a = read_a;
+        self.last_read_b = read_b;
+    }
+
+    /// Keep the images from a finished dot. A missing image drops that key.
+    pub fn commit(&mut self, job: &AiJobResult) {
+        if !self.enabled || !job.ran_gemm {
+            return;
+        }
+        self.a = job.install_a.clone();
+        self.b = job.install_b.clone();
+    }
+}
+
+/// `g6lc_ai_desc_pkg` flag shifts. They are descriptor bits, not status codes.
+const FLAG_REUSE_B: u32 = 1 << 15;
+const FLAG_REUSE_A: u32 = 1 << 23;
 
 /// Why a descriptor was refused, for callers that want to explain a status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +219,34 @@ fn status_of(model: &AiIslandModel, name: &str, fallback: u16) -> u16 {
 /// *encoding*, not an address, so it is read here rather than ingested as an offset.
 fn split_ld(ld_ab: u32) -> (u32, u32) {
     (ld_ab & 0xffff, ld_ab >> 16)
+}
+
+fn numfmt_key(model: &AiIslandModel, flags: u32) -> u32 {
+    model
+        .desc_layout
+        .flags_layout
+        .and_then(|fl| fl.numfmt)
+        .map(|field| field.extract(flags))
+        .unwrap_or(0)
+}
+
+fn ranges_disjoint(op: u64, op_len: u64, c: u64, c_len: u64) -> bool {
+    let Some(op_end) = (op as u128).checked_add(op_len as u128) else {
+        return false;
+    };
+    let Some(c_end) = (c as u128).checked_add(c_len as u128) else {
+        return false;
+    };
+    c_end <= op as u128 || op_end <= c as u128
+}
+
+fn snapshot_bytes(mem: &PhysMem, ptr: u64, len: u64) -> Option<Vec<u8>> {
+    let _ = usize::try_from(len).ok()?;
+    let mut out = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        out.push(mem.read_le::<1>(ptr + i).ok()? as u8);
+    }
+    Some(out)
 }
 
 pub(crate) fn bad_pointer_status(model: &AiIslandModel) -> u16 {
@@ -215,7 +355,17 @@ fn resolve_numfmt(model: &AiIslandModel, flags: u32) -> Result<NumFmt, AiJobReje
 /// The checks mirror the engine's own order — version, op, shape — so a status returned
 /// here is the status the design would return, not an emulator opinion.
 pub fn execute(mem: &PhysMem, ev: &AiTensorEvent, model: &AiIslandModel) -> AiJobResult {
-    match plan(mem, ev, model) {
+    execute_with(mem, ev, model, None)
+}
+
+/// Same as [`execute`], using `resident` when it is enabled.
+pub fn execute_with(
+    mem: &PhysMem,
+    ev: &AiTensorEvent,
+    model: &AiIslandModel,
+    resident: Option<&OperandReuse>,
+) -> AiJobResult {
+    match plan_with(mem, ev, model, resident) {
         Ok(r) => r,
         Err((reject, status)) => {
             let _ = reject;
@@ -223,6 +373,7 @@ pub fn execute(mem: &PhysMem, ev: &AiTensorEvent, model: &AiIslandModel) -> AiJo
                 status,
                 c_writes: Vec::new(),
                 skipped: false,
+                ..AiJobResult::default()
             }
         }
     }
@@ -233,6 +384,15 @@ pub fn plan(
     mem: &PhysMem,
     ev: &AiTensorEvent,
     model: &AiIslandModel,
+) -> Result<AiJobResult, (AiJobReject, u16)> {
+    plan_with(mem, ev, model, None)
+}
+
+fn plan_with(
+    mem: &PhysMem,
+    ev: &AiTensorEvent,
+    model: &AiIslandModel,
+    resident: Option<&OperandReuse>,
 ) -> Result<AiJobResult, (AiJobReject, u16)> {
     let ok = status_of(model, ST_OK, 0);
 
@@ -261,6 +421,7 @@ pub fn plan(
             status: ok,
             c_writes: Vec::new(),
             skipped: true,
+            ..AiJobResult::default()
         });
     }
 
@@ -352,7 +513,46 @@ pub fn plan(
     {
         return Err(bad(model));
     }
-    let reuse = mem.is_ram_range(ev.ptr_a, a_len)
+    let fmt_key = numfmt_key(model, ev.flags);
+    let a_disj = ranges_disjoint(ev.ptr_a, a_len, ev.ptr_c, c_len);
+    let b_disj = ranges_disjoint(ev.ptr_b, b_len, ev.ptr_c, c_len);
+    let active = resident.filter(|r| r.enabled);
+    let take = |slot: Option<&ResidentOperand>,
+                flag: u32,
+                disj: bool,
+                ptr: u64,
+                rows: u32,
+                ld: u32,
+                len: u64| {
+        active.and_then(|r| {
+            if ev.flags & flag == 0 || !disj {
+                return None;
+            }
+            slot.filter(|op| op.matches(ptr, rows, ev.k, ld, fmt_key, r.epoch, len))
+                .map(|op| op.bytes.clone())
+        })
+    };
+    let cached_a = take(
+        active.and_then(|r| r.a.as_ref()),
+        FLAG_REUSE_A,
+        a_disj,
+        ev.ptr_a,
+        ev.m,
+        lda,
+        a_len,
+    );
+    let cached_b = take(
+        active.and_then(|r| r.b.as_ref()),
+        FLAG_REUSE_B,
+        b_disj,
+        ev.ptr_b,
+        ev.n,
+        ldb,
+        b_len,
+    );
+    let prefetch = cached_a.is_none()
+        && cached_b.is_none()
+        && mem.is_ram_range(ev.ptr_a, a_len)
         && mem.is_ram_range(ev.ptr_b, b_len)
         && (m + n)
             .checked_mul(k)
@@ -371,7 +571,7 @@ pub fn plan(
         }
         Ok(values)
     };
-    let (a_values, b_values) = if reuse {
+    let (a_values, b_values) = if prefetch {
         (
             decode(ev.ptr_a, m, a_row_stride)?,
             decode(ev.ptr_b, n, b_row_stride)?,
@@ -390,7 +590,13 @@ pub fn plan(
             let mut acc_f: f32 = 0.0;
             for t in 0..k {
                 let rd = |addr: u64| mem.read_le::<1>(addr).ok().map(|v| v as u8);
-                let a = if reuse {
+                let a = if let Some(bytes) = cached_a.as_deref() {
+                    read_elem(fmt, a_row, t, |addr| {
+                        let off = usize::try_from(addr.checked_sub(ev.ptr_a)?).ok()?;
+                        bytes.get(off).copied()
+                    })
+                    .ok_or_else(|| bad(model))?
+                } else if prefetch {
                     a_values[(i * k + t) as usize]
                 } else {
                     read_elem(fmt, a_row, t, rd).ok_or_else(|| bad(model))?
@@ -399,7 +605,13 @@ pub fn plan(
                 // the element index within the row is `t` -- exactly like A. `read_elem` is
                 // index-based and needs no change for either operand or any format.
                 let b_row = ev.ptr_b + j * b_row_stride;
-                let b = if reuse {
+                let b = if let Some(bytes) = cached_b.as_deref() {
+                    read_elem(fmt, b_row, t, |addr| {
+                        let off = usize::try_from(addr.checked_sub(ev.ptr_b)?).ok()?;
+                        bytes.get(off).copied()
+                    })
+                    .ok_or_else(|| bad(model))?
+                } else if prefetch {
                     b_values[(j * k + t) as usize]
                 } else {
                     read_elem(fmt, b_row, t, rd).ok_or_else(|| bad(model))?
@@ -423,10 +635,370 @@ pub fn plan(
         }
     }
 
+    let epoch = active.map(|r| r.epoch).unwrap_or(0);
+    let install = |cached: &Option<Vec<u8>>, disj: bool, ptr: u64, rows: u32, ld: u32, len: u64| {
+        if active.is_none() {
+            return Ok(None);
+        }
+        if !disj {
+            return Ok(None);
+        }
+        let bytes = if let Some(bytes) = cached {
+            bytes.clone()
+        } else {
+            snapshot_bytes(mem, ptr, len).ok_or_else(|| bad(model))?
+        };
+        Ok(Some(ResidentOperand {
+            ptr,
+            rows,
+            k: ev.k,
+            ld,
+            fmt: fmt_key,
+            epoch,
+            bytes,
+        }))
+    };
     Ok(AiJobResult {
         status: ok,
         c_writes,
         skipped: false,
+        ran_gemm: true,
+        read_a: cached_a.is_none(),
+        read_b: cached_b.is_none(),
+        install_a: install(&cached_a, a_disj, ev.ptr_a, ev.m, lda, a_len)?,
+        install_b: install(&cached_b, b_disj, ev.ptr_b, ev.n, ldb, b_len)?,
+    })
+}
+
+/// MAC issue width of the directed VA-Turbo test model. Not the live package.
+const VA_TURBO_TEST_MACS: u32 = 8;
+
+struct Panel {
+    m: u32,
+    n: u32,
+    k: u32,
+}
+
+struct Block {
+    i0: u32,
+    j0: u32,
+    t0: u32,
+    tm: u32,
+    tn: u32,
+    tk: u32,
+}
+
+/// Outcome of [`run_va_turbo_test_s8`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaTurboTestRun {
+    /// Full i32 product, row-major.
+    pub c: Vec<i32>,
+    /// Flag word for each tile. Bit 15 skips B. Bit 23 skips A.
+    pub flags: Vec<u32>,
+    /// Whether the last tile read A from guest memory.
+    pub read_a: bool,
+    /// Whether the last tile read B from guest memory.
+    pub read_b: bool,
+    /// True when any tile skipped A.
+    pub hit_a: bool,
+    /// True when any tile skipped B.
+    pub hit_b: bool,
+    /// True when a planned tile can skip, which is when reuse is enabled.
+    pub reuse_enabled: bool,
+}
+
+/// True when `model` is the directed 8-MAC 1024×512×16 tile.
+pub fn directed_va_turbo_model(model: &AiIslandModel) -> bool {
+    let c = &model.config;
+    c.macs_per_cycle == VA_TURBO_TEST_MACS
+        && c.acc_tile_m == 1024
+        && c.acc_tile_n == 512
+        && c.acc_tile_k == 16
+}
+
+fn va_panels(macs: u32) -> Vec<Panel> {
+    if macs < 4 || macs % 4 != 0 {
+        return Vec::new();
+    }
+    let half = macs / 2;
+    let quarter = macs / 4;
+    vec![
+        Panel {
+            m: macs,
+            n: macs,
+            k: macs,
+        },
+        Panel {
+            m: macs,
+            n: half,
+            k: macs,
+        },
+        Panel {
+            m: macs.saturating_mul(2),
+            n: quarter,
+            k: macs,
+        },
+    ]
+}
+
+fn div_ceil(n: u32, d: u32) -> Option<u64> {
+    if d == 0 {
+        return None;
+    }
+    Some(u64::from(n).div_ceil(u64::from(d)))
+}
+
+/// Same choice as the host `va_blocking_tile`: fewest tiles, then the most
+/// exact panels, then the wider N.
+fn blocking_panel(m: u32, n: u32, k: u32, cap_m: u32, cap_n: u32, cap_k: u32, macs: u32) -> Panel {
+    let mut best: Option<(u64, u64, u32, Panel)> = None;
+    for panel in va_panels(macs) {
+        if panel.m == 0
+            || panel.n == 0
+            || panel.k == 0
+            || panel.m > cap_m
+            || panel.n > cap_n
+            || panel.k > cap_k
+        {
+            continue;
+        }
+        let (Some(tm), Some(tn), Some(tk)) = (
+            div_ceil(m, panel.m),
+            div_ceil(n, panel.n),
+            div_ceil(k, panel.k),
+        ) else {
+            continue;
+        };
+        let Some(tiles) = tm.checked_mul(tn).and_then(|x| x.checked_mul(tk)) else {
+            continue;
+        };
+        let exact_m = if m % panel.m == 0 {
+            tm
+        } else {
+            tm.saturating_sub(1)
+        };
+        let exact_n = if n % panel.n == 0 {
+            tn
+        } else {
+            tn.saturating_sub(1)
+        };
+        let named = exact_m.saturating_mul(exact_n).saturating_mul(tk);
+        let replace = match &best {
+            None => true,
+            Some((bt, bn, bw, _)) => {
+                tiles < *bt || (tiles == *bt && (named > *bn || (named == *bn && panel.n > *bw)))
+            }
+        };
+        if replace {
+            best = Some((tiles, named, panel.n, panel));
+        }
+    }
+    best.map(|(_, _, _, panel)| panel).unwrap_or(Panel {
+        m: cap_m,
+        n: cap_n,
+        k: cap_k,
+    })
+}
+
+fn tile_blocks(m: u32, n: u32, k: u32, panel: &Panel) -> Vec<Block> {
+    let mut out = Vec::new();
+    if m == 0 || n == 0 || k == 0 || panel.m == 0 || panel.n == 0 || panel.k == 0 {
+        return out;
+    }
+    let mut i = 0u32;
+    while i < m {
+        let tm = (m - i).min(panel.m);
+        let mut j = 0u32;
+        while j < n {
+            let tn = (n - j).min(panel.n);
+            let mut t = 0u32;
+            while t < k {
+                let tk = (k - t).min(panel.k);
+                out.push(Block {
+                    i0: i,
+                    j0: j,
+                    t0: t,
+                    tm,
+                    tn,
+                    tk,
+                });
+                t += tk;
+            }
+            j += tn;
+        }
+        i += tm;
+    }
+    out
+}
+
+/// One tile of the directed schedule, including the reuse flags it requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VaTurboTile {
+    /// Row origin in the full A matrix.
+    pub i0: u32,
+    /// Column origin in the full B matrix.
+    pub j0: u32,
+    /// K origin.
+    pub t0: u32,
+    /// Tile M.
+    pub tm: u32,
+    /// Tile N.
+    pub tn: u32,
+    /// Tile K.
+    pub tk: u32,
+    /// Bit 15 skips B. Bit 23 skips A.
+    pub flags: u32,
+}
+
+/// Tile list for the directed model. Other capability records are refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VaTurboPlan {
+    /// Tiles in schedule order.
+    pub tiles: Vec<VaTurboTile>,
+    /// True when a tile carries a skip, which is when reuse is enabled.
+    pub reuse_enabled: bool,
+}
+
+/// Plan the directed schedule without executing it.
+///
+/// The live 512-MAC record is refused. Exact reuse is enabled only when a
+/// planned tile can skip an operand.
+pub fn plan_va_turbo_tiles(
+    model: &AiIslandModel,
+    m: u32,
+    n: u32,
+    k: u32,
+) -> Result<VaTurboPlan, &'static str> {
+    if !directed_va_turbo_model(model) {
+        return Err("VaTurbo test schedule requires the 8-MAC 1024x512x16 directed tile");
+    }
+    if m == 0 || n == 0 || k == 0 {
+        return Err("invalid shape");
+    }
+    let cap = &model.config;
+    let panel = blocking_panel(
+        m,
+        n,
+        k,
+        cap.acc_tile_m,
+        cap.acc_tile_n,
+        cap.acc_tile_k,
+        cap.macs_per_cycle,
+    );
+    let blocks = tile_blocks(m, n, k, &panel);
+    if blocks.is_empty() {
+        return Err("empty tile plan");
+    }
+    let mut flags = vec![0u32; blocks.len()];
+    let mut can_skip = false;
+    for idx in 1..blocks.len() {
+        let prev = &blocks[idx - 1];
+        let tile = &blocks[idx];
+        if prev.j0 == tile.j0 && prev.tn == tile.tn && prev.t0 == tile.t0 && prev.tk == tile.tk {
+            flags[idx] |= FLAG_REUSE_B;
+            can_skip = true;
+        }
+        if prev.i0 == tile.i0 && prev.tm == tile.tm && prev.t0 == tile.t0 && prev.tk == tile.tk {
+            flags[idx] |= FLAG_REUSE_A;
+            can_skip = true;
+        }
+    }
+    let tiles = blocks
+        .into_iter()
+        .zip(flags)
+        .map(|(tile, flags)| VaTurboTile {
+            i0: tile.i0,
+            j0: tile.j0,
+            t0: tile.t0,
+            tm: tile.tm,
+            tn: tile.tn,
+            tk: tile.tk,
+            flags,
+        })
+        .collect();
+    Ok(VaTurboPlan {
+        tiles,
+        reuse_enabled: can_skip,
+    })
+}
+
+/// Directed schedule on the guest model.
+///
+/// `mem` already holds A row-major `[m][k]` at `ptr_a` and B k-major `[n][k]`
+/// at `ptr_b`. `ptr_c` is a scratch the tiles share; the returned `c` is the
+/// accumulated product. The default and the live 512-MAC records are refused.
+/// Exact reuse is enabled only when a planned tile can skip an operand.
+pub fn run_va_turbo_test_s8(
+    model: &AiIslandModel,
+    mem: &PhysMem,
+    m: u32,
+    n: u32,
+    k: u32,
+    ptr_a: u64,
+    ptr_b: u64,
+    ptr_c: u64,
+) -> Result<VaTurboTestRun, &'static str> {
+    let plan = plan_va_turbo_tiles(model, m, n, k)?;
+    let flags: Vec<u32> = plan.tiles.iter().map(|tile| tile.flags).collect();
+    let mut cache = OperandReuse::default();
+    cache.set_enabled(plan.reuse_enabled);
+    let version = u16::try_from(model.desc_layout.version.unwrap_or(1)).unwrap_or(1);
+    let op = u16::try_from(model.desc_layout.op(OP_GEMM).unwrap_or(1)).unwrap_or(1);
+    let cells = (m as usize)
+        .checked_mul(n as usize)
+        .ok_or("invalid shape")?;
+    let mut c = vec![0i32; cells];
+    let mut read_a = true;
+    let mut read_b = true;
+    let mut hit_a = false;
+    let mut hit_b = false;
+    for tile in &plan.tiles {
+        let ev = AiTensorEvent {
+            version,
+            op,
+            m: tile.tm,
+            n: tile.tn,
+            k: tile.tk,
+            ld_ab: k | (k << 16),
+            flags: tile.flags,
+            ptr_a: ptr_a + u64::from(tile.i0) * u64::from(k) + u64::from(tile.t0),
+            ptr_b: ptr_b + u64::from(tile.j0) * u64::from(k) + u64::from(tile.t0),
+            ptr_c,
+            ..Default::default()
+        };
+        let job =
+            plan_with(mem, &ev, model, Some(&cache)).map_err(|_| "directed tile job failed")?;
+        if job.status != status_of(model, ST_OK, 0) || !job.ran_gemm {
+            return Err("directed tile job failed");
+        }
+        let need = (tile.tm as usize)
+            .checked_mul(tile.tn as usize)
+            .ok_or("invalid shape")?;
+        if job.c_writes.len() != need {
+            return Err("directed tile job failed");
+        }
+        for ii in 0..tile.tm as usize {
+            for jj in 0..tile.tn as usize {
+                let value = job.c_writes[ii * tile.tn as usize + jj].1;
+                let dst = (tile.i0 as usize + ii) * n as usize + (tile.j0 as usize + jj);
+                c[dst] = c[dst].wrapping_add(value);
+            }
+        }
+        read_a = job.read_a;
+        read_b = job.read_b;
+        hit_a |= !job.read_a;
+        hit_b |= !job.read_b;
+        cache.observe(job.read_a, job.read_b);
+        cache.commit(&job);
+    }
+    Ok(VaTurboTestRun {
+        c,
+        flags,
+        read_a,
+        read_b,
+        hit_a,
+        hit_b,
+        reuse_enabled: plan.reuse_enabled,
     })
 }
 
@@ -1307,6 +1879,58 @@ mod tests {
     }
 
     #[test]
+    fn a_reuse_hit_keeps_the_resident_byte_until_the_epoch_changes() {
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(BASE, 0x1000));
+        mem.write_le::<1>(BASE + 0x100, 1).unwrap();
+        mem.write_le::<1>(BASE + 0x200, 2).unwrap();
+        let ev = AiTensorEvent {
+            version: 1,
+            op: 1,
+            m: 1,
+            n: 1,
+            k: 1,
+            ld_ab: 1 | (1 << 16),
+            ptr_a: BASE + 0x100,
+            ptr_b: BASE + 0x200,
+            ptr_c: BASE + 0x300,
+            ..Default::default()
+        };
+        let m = model(256);
+        let mut cache = OperandReuse::default();
+        let off = super::plan_with(&mem, &ev, &m, Some(&cache)).unwrap();
+        assert_eq!(off.c_writes, vec![(BASE + 0x300, 2)]);
+        assert!(off.read_b);
+        cache.set_enabled(true);
+        let primed = super::plan_with(&mem, &ev, &m, Some(&cache)).unwrap();
+        cache.observe(primed.read_a, primed.read_b);
+        cache.commit(&primed);
+        mem.write_le::<1>(BASE + 0x200, 9).unwrap();
+        let mut hit = ev;
+        hit.flags = super::FLAG_REUSE_B;
+        let stayed = super::plan_with(&mem, &hit, &m, Some(&cache)).unwrap();
+        assert_eq!(stayed.c_writes, vec![(BASE + 0x300, 2)]);
+        assert!(!stayed.read_b);
+        cache.commit(&stayed);
+        cache.epoch = 1;
+        let missed = super::plan_with(&mem, &hit, &m, Some(&cache)).unwrap();
+        assert_eq!(missed.c_writes, vec![(BASE + 0x300, 9)]);
+        assert!(missed.read_b);
+        cache.commit(&missed);
+        let mut overlap = hit;
+        overlap.ptr_c = overlap.ptr_b;
+        mem.write_le::<1>(BASE + 0x200, 4).unwrap();
+        let dropped = super::plan_with(&mem, &overlap, &m, Some(&cache)).unwrap();
+        assert_eq!(dropped.c_writes, vec![(overlap.ptr_c, 4)]);
+        assert!(dropped.read_b);
+        cache.commit(&dropped);
+        let mut again = hit;
+        again.ptr_c = BASE + 0x300;
+        let reloaded = super::plan_with(&mem, &again, &m, Some(&cache)).unwrap();
+        assert!(reloaded.read_b, "C on B drops the key");
+    }
+
+    #[test]
     fn negative_operands_use_signed_int8() {
         let mut mem = PhysMem::new();
         mem.add(Region::new(BASE, 0x1000));
@@ -1462,5 +2086,83 @@ mod tests {
             plan(&mem, &ev, &m).is_ok(),
             "an unresolved packing must not be read as a mode request"
         );
+    }
+
+    fn directed_model() -> AiIslandModel {
+        let mut model = model(16);
+        model.config.acc_tile_m = 1024;
+        model.config.acc_tile_n = 512;
+        model.config.acc_tile_k = 16;
+        model.config.macs_per_cycle = super::VA_TURBO_TEST_MACS;
+        model
+    }
+
+    fn ones(mem: &mut PhysMem, ptr: u64, len: u64) {
+        for i in 0..len {
+            mem.write_le::<1>(ptr + i, 1).unwrap();
+        }
+    }
+
+    fn schedule(
+        model: &AiIslandModel,
+        m: u32,
+        n: u32,
+        k: u32,
+    ) -> Result<VaTurboTestRun, &'static str> {
+        let mut mem = PhysMem::new();
+        mem.add(Region::new(BASE, 0x1000));
+        let ptr_a = BASE;
+        let ptr_b = BASE + 0x400;
+        let ptr_c = BASE + 0x800;
+        ones(&mut mem, ptr_a, u64::from(m) * u64::from(k));
+        ones(&mut mem, ptr_b, u64::from(n) * u64::from(k));
+        run_va_turbo_test_s8(model, &mem, m, n, k, ptr_a, ptr_b, ptr_c)
+    }
+
+    #[test]
+    fn the_qemu_schedule_enables_reuse_only_when_a_tile_skips() {
+        let mut live = model(512);
+        live.config.acc_tile_m = 1024;
+        live.config.acc_tile_n = 512;
+        live.config.acc_tile_k = 512;
+        live.config.macs_per_cycle = 512;
+        assert!(!directed_va_turbo_model(&live));
+        assert!(schedule(&live, 16, 8, 8).is_err());
+
+        let directed = directed_model();
+        assert!(directed_va_turbo_model(&directed));
+        let m_split = schedule(&directed, 16, 8, 8).unwrap();
+        assert_eq!(m_split.flags.len(), 2);
+        assert_eq!(m_split.flags[1] & super::FLAG_REUSE_B, super::FLAG_REUSE_B);
+        assert_eq!(m_split.flags[1] & super::FLAG_REUSE_A, 0);
+        assert!(m_split.read_a);
+        assert!(!m_split.read_b);
+        assert!(m_split.hit_b);
+        assert!(!m_split.hit_a);
+        assert!(m_split.reuse_enabled);
+        assert_eq!(m_split.c, vec![8i32; 16 * 8]);
+
+        let k_split = schedule(&directed, 8, 8, 16).unwrap();
+        assert_eq!(k_split.flags.len(), 2);
+        assert_eq!(
+            k_split.flags[1] & (super::FLAG_REUSE_A | super::FLAG_REUSE_B),
+            0
+        );
+        assert!(k_split.read_a);
+        assert!(k_split.read_b);
+        assert!(!k_split.hit_a);
+        assert!(!k_split.hit_b);
+        assert!(!k_split.reuse_enabled);
+        assert_eq!(k_split.c, vec![16i32; 8 * 8]);
+
+        let n_split = schedule(&directed, 8, 16, 8).unwrap();
+        assert_eq!(n_split.flags[1] & super::FLAG_REUSE_A, super::FLAG_REUSE_A);
+        assert_eq!(n_split.flags[1] & super::FLAG_REUSE_B, 0);
+        assert!(!n_split.read_a);
+        assert!(n_split.read_b);
+        assert!(n_split.hit_a);
+        assert!(!n_split.hit_b);
+        assert!(n_split.reuse_enabled);
+        assert_eq!(n_split.c, vec![8i32; 8 * 16]);
     }
 }

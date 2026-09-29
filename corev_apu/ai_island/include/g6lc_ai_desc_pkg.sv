@@ -186,8 +186,15 @@ package g6lc_ai_desc_pkg;
     return desc_numfmt(d);
   endfunction
 
+  // accmode 01 = accumulate: seed each C[i][j] reduction from the stored C word.
+  // Legal as a request; whether the engine executes it is the CAP_OFF_ACCMODE grant,
+  // checked by the descriptor engine (ungranted -> ST_BAD_FMT, never demoted).
+  function automatic logic desc_accumulate(input desc_t d);
+    return desc_accmode(d) == 2'd1;
+  endfunction
+
   function automatic logic desc_compute_mode_legal(input desc_t d);
-    return desc_dtype(d) == 2'd0 && desc_accmode(d) == 2'd0 && !desc_sp24(d) &&
+    return desc_dtype(d) == 2'd0 && desc_accmode(d) < 2'd2 && !desc_sp24(d) &&
            desc_numfmt(d) != 3'd2 && desc_ew(d) < 2'd2 &&
            (desc_numfmt(d) < 3'd3 || desc_ew(d) == 2'd0);
   endfunction

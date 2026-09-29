@@ -84,8 +84,7 @@ def cmd_test(ns: argparse.Namespace) -> None:
     # Python smoke + goldens (no torch/tf required)
     env_py = os.environ.copy()
     env_py["PYTHONPATH"] = str(ROOT / "python") + os.pathsep + env_py.get("PYTHONPATH", "")
-    run([sys.executable, '-m', 'unittest', 'discover', '-s', 'python/tests', '-p', 'test_native_reference.py'], env=env_py)
-    run([sys.executable, '-m', 'unittest', 'discover', '-s', 'python/tests', '-p', 'test_qemu_uio_backend.py'], env=env_py)
+    run([sys.executable, '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'python/tests'], env=env_py)
     log("+ python -m ai_tensor")
     r = subprocess.run([sys.executable, "-m", "ai_tensor"], cwd=str(ROOT), env=env_py)
     if r.returncode != 0:

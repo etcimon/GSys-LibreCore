@@ -35,6 +35,7 @@ build_nch() {
     "$AXI/src/axi_pkg.sv" \
     "$AXI/src/axi_intf.sv" \
     "$AXI/src/axi_demux.sv" \
+    "$AXI/src/axi_cut.sv" \
     "$ROOT/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv" \
     "$ROOT/common/local/util/tc_sram_wrapper.sv" \
     "$ROOT/corev_apu/axi_mem_if/src/axi2mem.sv" \

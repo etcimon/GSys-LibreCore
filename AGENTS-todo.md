@@ -32,7 +32,49 @@ work remain intact. Design: `architecture/ai-matrix/log-2026-09.md`, `va-turbo.m
   the 446-cycle spine and negative oracle. `run_ai_spine_review.py` records source/runtime
   hashes and generic synthesis: 1,412 cells, no latches/SCCs. Scope and setup failures are
   retained in `architecture/ai-matrix/log-2026-09.md`; not DMA/GEMM/physical qualification.
-- [ ] Complete admission/completion capacity, capability truth and PMU arithmetic repairs.
+- [~] DMA continuation: qid status and PMU overflow reproduced/fixed; sideband payloads
+  are held across full FIFO and latch mutation; refused/failing descriptor fetch completions
+  retain their own identities until space is available. Diagnostic tags and the 1075-cycle
+  no-DMA capacity gate are in `architecture/ai-matrix/log-2026-09.md` §0.1. PMU status-divider
+  timing/resource closure is still open. No-DMA synthesis: 1426 generic cells, no latches/SCCs.
+- [x] Nameplate arithmetic preserves fractional GHz in Rust/Python/SV; helper regression
+  has a failing baseline and passing after-run. Full host gate: 102 Rust tests, 289 pytest
+  passes / five explicit skips, external software-cosim and NumPy/PyTorch smokes.
+- [~] GEMM read/operand and fetch/store request formation separated from response-driven
+  logic; seven-format and signed 2x3x17 leaf goldens pass for both float-pipe settings.
+  Six aggregate-AXI strict lint findings remain. Diagnostics keep the gate INCOMPLETE.
+- [x] After user disk recovery, execute signed 2x1/2x3 tails and AR/AW/W backpressure.
+  Reproduced mutable ARID and C read before retirement; held AR slot and committed-row
+  watermark repairs pass 56 arithmetic checks / 909 stall observations for both float-pipe
+  settings. Diagnostics still retain the aggregate-AXI strict lint failure.
+- [x] Reduced DMA synthesis CHECK repair verified (declare AR-depth signal before use).
+  FIFO depth 1/3/16 wrap/full-replacement repairs pass simulation; depth one has bounded
+  safety, depths 3/16 have base+inductive order/count/pointer safety and reached cover,
+  with ticket-bit negatives. Invalid first scoreboard and timed-out direct proof are retained.
+- [x] Reproduce active fetch renamed by a later doorbell; retain fetch qid/ticket/result
+  until engine acceptance. After-run passes both identities and full directed DMA cases;
+  reduced synthesis: 9656 generic cells / 5999 register bits, zero latches/SCCs, not PPA.
+- [x] User selected iterative compatible PMU reads and an on-chip command FIFO (not a
+  host DMA ring). PMU candidate preserves all three register aliases, snapshots operands
+  on read and passes 272 exact corner/random comparisons; nonzero read waits 80 APB cycles.
+  Rate-unit synthesis has zero mul/div/mod cells, latches or SCCs. Mapped timing is open.
+- [~] The selected command FIFO storage primitive passes depth1/3/64 functional/negative
+  checks and D64 SRAM-boundary synthesis (83 coarse cells,8192 storage bits,no latches/SCCs).
+  Optional `CommandDepth` now integrates it into the island/APB: versioned CAP, mode,
+  receipts/credits, protected configuration writes and a VALID/READY sideband seam.
+  Default-off gate passes; queued tests conserve 18 buffered/error records, hold a blocked
+  sideband request and execute two full-ticket asymmetric GEMMs. Reduced enabled synth is
+  CHECK/latch/SCC clean. Python pointer/lease API plus C/Rust/Python constants are aligned.
+  Core `ai.enq` now holds VALID until READY and returns its ticket on acceptance; `ai.poll`
+  is island-authoritative when attached (`tb_g6lc_ai_enq_ready` passes; pre-existing exec
+  accumulator comb loop keeps its strict lint red). Rust SoftIsland and B3 emulator model the
+  extension from ingested constants with passing tests. B1 device parity and a full-SoC
+  `g6lc64_ai` rebuild with the new ports remain open. Strict aggregate-AXI lint is now green
+  on the reduced DMA gate (`ai-strict-split-20260928-r7`): bit-split AXI copies, a registered
+  DMA boundary (`g6lc_ai_axi_cut`), a sim-stripe register slice and two vendor `isolate_assignments`
+  with a re-proven negative probe. Complete error-drain, capability truth,
+  strict aggregate-AXI lint and full-SoC/physical gates. Retain incomplete/negative records;
+  no remote files were deleted by the agent.
 - [ ] Characterize the current island, then registered SRAM/retirement/format implementation,
   real QEMU guest device and persistent RTL bridge, framework operators and both inference
   families, quality-budgeted VA-Turbo and bandwidth-before-cluster scaling. Live gates stay off.
@@ -208,8 +250,10 @@ prerequisite for this work under the existing dual license. No licensing policy 
   int2_l3 L40 40,405,333 (−3.7 %); smt2 anchor byte-identical (12,406,273, same
   rvfi sha `e0858842b829e5e2`), smt2_ooo_int mixed anchor byte-identical
   (10,556,456, new sha `6fd35592317c2139`). `hub_ar_hold` measured 0–285 — not
-  a bottleneck; `hub_aw_sc_collide` ~390–440 k is now the largest remaining
-  same-core stall (hub slot level). Evidence: HUM matrix POSTED=0 hash = M1a,
+  a bottleneck; `hub_aw_sc_collide` ~390–440 k — re-measured in T10c/N4 as an
+  offer-level observation, never an actual AW hold (`hub_aw_hold_slot`=0 on the
+  int2_l3 L0 boot; the real residual stall is the single-W-channel AW
+  serialization counted by `hub_aw_hold_other`). Evidence: HUM matrix POSTED=0 hash = M1a,
   sc60/sc61 + `pw_wrid` control; formal P1 on downstream ids PASS (+mut_p1
   intended FAIL); composed+credits byte-matched M1b; gates 6/6; FO4 28.5.
   **M1 is closed** — the M1a–M1d ordering work is landed and measured end to
@@ -311,8 +355,18 @@ prerequisite for this work under the existing dual license. No licensing policy 
   issue width needs a wider window, and M3 showed every ring > 8 times
   out the four-hart strict boot under the drained handoff while recovery
   is mark-and-drain. No i4 overlay built; no RTL changed. Reopen after
-  M3b lands the fast squash + the ring-depth/drained-handoff timeout
-  root cause. Details in `core/ooo/AGENTS-ooo-plan.md` T9j.
+  M3b lands the fast squash; T10a root-caused the timeout as a ring ×
+  knob combination, not depth alone (see next row). Details in
+  `core/ooo/AGENTS-ooo-plan.md` T9j.
+- [x] **Root-caused (T10a, 2026-09-29): N1 ring>8 drained-handoff
+  "timeout" is not ring depth alone** — `+smt_stats` probe
+  (`[smt-drain]`): drains bounded (max 109–146), `aborts`/`commit_drop`
+  0, ~100 % `wait_sb` (issue not held during drain — a ~1 % cost), and
+  all switching ends by ~2M cycles in both geometries. 6M progress
+  identical; the full pure ring-16 boot **completes at 17,250,251 —
+  faster than the 18,419,779 ring-8 anchor**. The M3 timeouts were
+  ring × knob pairings (ckpt 32 / DeepSpec / ckpt 0), not depth; no
+  issue-hold fix needed. Details: plan T10a.
 - [x] **Milestone summary (commits):** M0 `e07ccd452` (eWT baseline:
   L2WriteUpdateEn + Phase-5 qualification); M1 `2102366df` + `87dd183d6`
   + `79dc613ab` (M1a CBO/hub ordering, M1b posted writes + bypass reads,
@@ -320,6 +374,22 @@ prerequisite for this work under the existing dual license. No licensing policy 
   promotion); M3 `a1b685020` (switch-restore fix, uplift not adopted);
   M4 `e791afdaf` (FP on OoO); M5 `c08d8a690` (L2 prefetcher, default
   off); M6 `67e2b7586` (in-order L3 packages); M7 not promoted (T9j).
+- [x] **Measured, still off (T10b, 2026-09-29): N3 L2 prefetcher burst
+  throttling** — `L2PfMaxOutstanding` (1/stream), `L2PfQuiet` (8-cycle
+  demand-miss quiet window) and confidence ≥ 2 hits added to `g6lc_l2_pf`;
+  leaf positive + 4 mutation controls green (`maxcap`/`noreserve`/
+  `noquiet`/`earlyarm`). Kernel gains retained (scan −9.1 %/−8.1 %,
+  wr −12.0 %/−7.7 % L0/L40) at ~half the issue volume, but the strict
+  L0 boot still lands +0.33 % (18,479,834 vs 18,419,779) with only 64 PF
+  issues — the cost is on the candidate path, not supply volume.
+  `L2PrefetchEn`/`L3PrefetchEn` stay 0. Details: plan T10b.
+- [x] **Retitled (T10c, 2026-09-29): N4 `hub_aw_sc_collide` is an
+  observation, not a stall** — the same-line collide is not in the hub AW
+  grant; new `hub_aw_hold_slot`/`hub_aw_hold_other` split real
+  `aw_valid && !aw_ready` cycles: slot-full 0 vs other 929,874 on the
+  int2_l3 L0 boot (~1.08 per posted write). Real residual stall: the
+  single-W-channel AW serialization + downstream `!aw_ready`. The M1d
+  "largest remaining stall" line above is corrected. Details: plan T10c.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

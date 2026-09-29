@@ -10,6 +10,7 @@
 //! integer strip and true only for the simulation reference.
 
 use ai_tensor_abi::{Desc64, NumFmt, ST_BAD_FMT, ST_OK};
+use ai_tensor_ir::{PortSetting, TrackFeatures};
 
 /// Live island grant: `AiIslandPeImplMask` INT8|INT4.
 pub const LIVE_DTYPE_MASK: u16 = 0x0003;
@@ -64,14 +65,247 @@ pub fn sketch_milli_tops_scaled(
     (milli * u64::from(mac_mul) / u64::from(mac_div)) as u32
 }
 
+/// Descriptor, C, and completion beats stay this wide on the live fabric.
+pub const NARROW_BEAT_BYTES: u32 = 8;
+
+/// Descriptor, C, and completion width. The live setting is 8 bytes.
+///
+/// A legal width is a power of two from 8 through 512. Anything else
+/// carries 0. This does not widen those beats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ControlSetting {
+    pub beat_bytes: u32,
+}
+
+impl ControlSetting {
+    pub const fn live() -> Self {
+        Self {
+            beat_bytes: NARROW_BEAT_BYTES,
+        }
+    }
+
+    pub fn bytes(self) -> u32 {
+        if (8..=512).contains(&self.beat_bytes) && self.beat_bytes.is_power_of_two() {
+            self.beat_bytes
+        } else {
+            0
+        }
+    }
+}
+
+/// Bytes/cycle that move. A wider island DMA joined onto a narrower
+/// fabric carries the fabric width. 512 onto 64 is still 8.
+pub fn carried_bytes_per_cycle(island_bits: u32, fabric_bits: u32) -> u32 {
+    island_bits.min(fabric_bits) / 8
+}
+
+/// The live MAC count may rise only after the carried port is wider
+/// than [`NARROW_BEAT_BYTES`]. This does not widen the port.
+pub fn macs_may_rise(bytes_per_cycle: u32) -> bool {
+    bytes_per_cycle > NARROW_BEAT_BYTES
+}
+
+/// Class-0 nameplate of the carried width. Round only the final GB/s result.
+pub fn carried_nameplate_gbps(island_bits: u32, fabric_bits: u32, clock_khz: u32) -> u32 {
+    bytes_nameplate_gbps(carried_bytes_per_cycle(island_bits, fabric_bits), clock_khz)
+}
+
+fn bytes_nameplate_gbps(bytes: u32, clock_khz: u32) -> u32 {
+    (u64::from(bytes) * u64::from(clock_khz) / 1_000_000).min(u64::from(u32::MAX)) as u32
+}
+
 /// Class 0 is width_bytes × clock_GHz. Channels do not multiply it.
 /// Class 1 is `nch × 19`. Class 2 is 400. Any other class is 0.
 pub fn dram_nameplate_gbps(noc_bits: u32, clock_khz: u32, nch: u32, dram_class: u32) -> u32 {
     match dram_class {
-        0 => (noc_bits / 8) * (clock_khz / 1_000_000),
+        0 => bytes_nameplate_gbps(noc_bits / 8, clock_khz),
         1 => nch.saturating_mul(19),
         2 => 400,
         _ => 0,
+    }
+}
+
+/// Live package: 1 cluster, 512 MAC/cycle, 2 GHz nameplate.
+pub const LIVE_CLUSTERS: u32 = 1;
+pub const LIVE_MACS: u32 = 512;
+pub const LIVE_CLOCK_KHZ: u32 = 2_000_000;
+/// Throughput sketch: 8 clusters, 4096 MAC/cycle, 1.5 GHz. Not elaborated here.
+pub const SKU_CLUSTERS: u32 = 8;
+pub const SKU_MACS: u32 = 4096;
+pub const SKU_CLOCK_KHZ: u32 = 1_500_000;
+
+/// MAC issue rate and the format sketch.
+///
+/// `macs_per_s` is `clusters × macs × clock`. It does not change with the
+/// numeric format. `milli_ops` is [`sketch_milli_tops`]: two operations per
+/// INT8 MAC, then scaled by element width. A VA level is not an input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FormatSketch {
+    pub macs_per_s: u64,
+    pub milli_ops: u32,
+}
+
+/// Rate card for one cluster count, MAC array, clock, and format code.
+pub fn format_sketch(clusters: u32, macs: u32, clock_khz: u32, fmt: u8) -> FormatSketch {
+    FormatSketch {
+        macs_per_s: u64::from(clusters)
+            .saturating_mul(u64::from(macs))
+            .saturating_mul(u64::from(clock_khz))
+            .saturating_mul(1000),
+        milli_ops: sketch_milli_tops(clusters, macs, clock_khz, fmt),
+    }
+}
+
+/// Live milli-ops, throughput-sketch milli-ops, and the integer ratio.
+///
+/// The ratio is 48 for every format the sketch can express. Structured 2:4
+/// and an unknown code are 0 and have ratio 0. This does not raise
+/// `AI_LIVE_MACS`.
+pub fn tops_gap(fmt: u8) -> (u32, u32, u32) {
+    let live = sketch_milli_tops(LIVE_CLUSTERS, LIVE_MACS, LIVE_CLOCK_KHZ, fmt);
+    let sku = sketch_milli_tops(SKU_CLUSTERS, SKU_MACS, SKU_CLOCK_KHZ, fmt);
+    let gap = if live == 0 { 0 } else { sku / live };
+    (live, sku, gap)
+}
+
+/// Sketch for one port setting. Not a measurement.
+///
+/// The live setting stays 1×512 at the given clock. A promoted fabric
+/// may use the configured cluster and MAC counts. Descriptor, C, and
+/// completion beats stay [`NARROW_BEAT_BYTES`]. Lane groups, reductions,
+/// converters, and proof producers do not change the rate. A VA level
+/// is not an input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfiguredRate {
+    pub clusters: u32,
+    pub macs: u32,
+    pub macs_per_s: u64,
+    pub milli_ops: u32,
+    pub carried_bytes: u32,
+    pub control_beat_bytes: u32,
+    pub clock_khz: u32,
+    pub promoted: bool,
+}
+
+pub fn configured_rate(
+    port: PortSetting,
+    features: TrackFeatures,
+    clock_khz: u32,
+    fmt: u8,
+) -> ConfiguredRate {
+    let clusters = features.effective_clusters(port);
+    let macs = features.effective_macs(port);
+    let sketch = format_sketch(clusters, macs, clock_khz, fmt);
+    ConfiguredRate {
+        clusters,
+        macs,
+        macs_per_s: sketch.macs_per_s,
+        milli_ops: sketch.milli_ops,
+        carried_bytes: port.carried_bytes(),
+        control_beat_bytes: NARROW_BEAT_BYTES,
+        clock_khz,
+        promoted: port.promoted(),
+    }
+}
+
+impl ConfiguredRate {
+    /// Replace the control-beat width. The live rate uses 8.
+    pub fn with_control(self, control: ControlSetting) -> Self {
+        Self {
+            control_beat_bytes: control.bytes(),
+            ..self
+        }
+    }
+}
+
+/// Live intensity: 512 MAC/cycle on 8 bytes/cycle.
+pub const LIVE_MACS_PER_BYTE: u32 = 64;
+
+/// Whether the data port and the control beats still feed the array.
+///
+/// `keeps_pace` is the carried data width. `control_keeps_pace` is the
+/// descriptor, C, and completion path, which stays 8 bytes. `fed` is
+/// both. A wide data fabric does not widen those beats. This does not
+/// widen the live fabric.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortBalance {
+    pub macs_per_cycle: u32,
+    pub macs_per_byte: u32,
+    pub bytes_to_keep_pace: u32,
+    pub keeps_pace: bool,
+    pub control_macs_per_byte: u32,
+    pub control_keeps_pace: bool,
+    pub fed: bool,
+    /// Class-0 nameplate in whole GB/s, calculated at kHz clock precision.
+    pub data_nameplate_gbps: u32,
+    pub control_nameplate_gbps: u32,
+    /// Whole GB/s for the assumed 64 MAC/byte balance, not a workload roofline.
+    pub demand_gbps: u32,
+}
+
+pub fn port_balance(rate: ConfiguredRate) -> PortBalance {
+    let total = rate.clusters.saturating_mul(rate.macs);
+    let bytes = rate.carried_bytes;
+    let control = rate.control_beat_bytes;
+    let keeps_pace = bytes > 0 && total <= bytes.saturating_mul(LIVE_MACS_PER_BYTE);
+    let control_keeps_pace = control > 0 && total <= control.saturating_mul(LIVE_MACS_PER_BYTE);
+    let needed = total.div_ceil(LIVE_MACS_PER_BYTE);
+    PortBalance {
+        macs_per_cycle: total,
+        macs_per_byte: if bytes == 0 { 0 } else { total / bytes },
+        bytes_to_keep_pace: needed,
+        keeps_pace,
+        control_macs_per_byte: if control == 0 { 0 } else { total / control },
+        control_keeps_pace,
+        fed: keeps_pace && control_keeps_pace,
+        data_nameplate_gbps: bytes_nameplate_gbps(bytes, rate.clock_khz),
+        control_nameplate_gbps: bytes_nameplate_gbps(control, rate.clock_khz),
+        demand_gbps: bytes_nameplate_gbps(needed, rate.clock_khz),
+    }
+}
+
+/// Class 0 is the carried data nameplate. Class 1 is `channels × 19`.
+/// Class 2 is 400 and ignores width and clock. Any other class is 0.
+pub fn dram_cap_gbps(class: u32, channels: u32, data_nameplate_gbps: u32) -> u32 {
+    match class {
+        0 => data_nameplate_gbps,
+        1 => channels.saturating_mul(19),
+        2 => 400,
+        _ => 0,
+    }
+}
+
+/// The DRAM cap covers the array only when the setting is fed and the
+/// cap is at least [`PortBalance::demand_gbps`]. This does not change
+/// the live DRAM class.
+pub fn dram_covers(balance: PortBalance, class: u32, channels: u32) -> bool {
+    let cap = dram_cap_gbps(class, channels, balance.data_nameplate_gbps);
+    balance.fed && balance.demand_gbps > 0 && cap >= balance.demand_gbps
+}
+
+/// The claimed GB/s has to equal the class formula.
+///
+/// Class 2 is 400, and that claim is rejected when it is also the class-0
+/// nameplate. A matching claim does not change the live DRAM class.
+pub fn dram_claim_matches(
+    class: u32,
+    channels: u32,
+    data_nameplate_gbps: u32,
+    claimed_gbps: u32,
+) -> bool {
+    if class > 2 {
+        return false;
+    }
+    let cap = dram_cap_gbps(class, channels, data_nameplate_gbps);
+    claimed_gbps == cap && !(class == 2 && claimed_gbps == data_nameplate_gbps)
+}
+
+/// DDR4-2400×64 channels needed to cover `demand_gbps`. Each channel is 19.
+pub fn ddr4_channels_to_cover(demand_gbps: u32) -> u32 {
+    if demand_gbps == 0 {
+        0
+    } else {
+        demand_gbps.div_ceil(19)
     }
 }
 
@@ -265,6 +499,20 @@ mod tests {
     }
 
     #[test]
+    fn nameplates_preserve_fractional_ghz() {
+        for (clock, expected) in [(500_000, 4), (1_250_000, 10), (1_500_000, 12), (2_000_000, 16)] {
+            assert_eq!(carried_nameplate_gbps(512, 64, clock), expected);
+            assert_eq!(dram_nameplate_gbps(64, clock, 8, 0), expected);
+            let rate = configured_rate(PortSetting::live(), TrackFeatures::live(), clock, 0);
+            let balance = port_balance(rate);
+            assert_eq!(balance.data_nameplate_gbps, expected);
+            assert_eq!(balance.control_nameplate_gbps, expected);
+            assert_eq!(balance.demand_gbps, expected);
+        }
+        assert_eq!(carried_nameplate_gbps(u32::MAX, u32::MAX, u32::MAX), u32::MAX);
+    }
+
+    #[test]
     fn throughput_sketch_matches_the_rtl_milli_tops() {
         // 8 × 4096 MAC/cycle at 1.5 GHz, the AiIslandThroughputSku parameters.
         let row = |fmt| sketch_milli_tops(8, 4096, 1_500_000, fmt);
@@ -286,6 +534,120 @@ mod tests {
         );
         assert_eq!(sketch_milli_tops_scaled(1, 512, 2_000_000, 0, 1, 1, 16), 0);
         assert_eq!(sketch_milli_tops_scaled(1, 512, 2_000_000, 1, 1, 1, 0), 4_096);
+        let live = format_sketch(LIVE_CLUSTERS, LIVE_MACS, LIVE_CLOCK_KHZ, 0);
+        assert_eq!(live.macs_per_s, 1_024_000_000_000);
+        assert_eq!(live.milli_ops, 2_048);
+        assert_eq!(format_sketch(LIVE_CLUSTERS, LIVE_MACS, LIVE_CLOCK_KHZ, 1).milli_ops, 4_096);
+        assert_eq!(format_sketch(LIVE_CLUSTERS, LIVE_MACS, LIVE_CLOCK_KHZ, 5).milli_ops, 1_024);
+        assert_eq!(format_sketch(LIVE_CLUSTERS, LIVE_MACS, LIVE_CLOCK_KHZ, 7).milli_ops, 512);
+        let sku = format_sketch(SKU_CLUSTERS, SKU_MACS, SKU_CLOCK_KHZ, 0);
+        assert_eq!(sku.milli_ops, 98_304);
+        assert_eq!(sku.macs_per_s, 49_152_000_000_000);
+        for fmt in [0u8, 1, 3, 4, 5, 6, 7] {
+            assert_eq!(tops_gap(fmt).2, 48, "fmt {fmt}");
+            assert_eq!(
+                sketch_milli_tops_scaled(LIVE_CLUSTERS, LIVE_MACS, LIVE_CLOCK_KHZ, fmt, 1, 1, 9),
+                sketch_milli_tops(LIVE_CLUSTERS, LIVE_MACS, LIVE_CLOCK_KHZ, fmt),
+                "fmt {fmt}"
+            );
+        }
+        assert_eq!(tops_gap(2), (0, 0, 0));
+        assert_eq!(carried_bytes_per_cycle(512, 64), 8);
+        assert_eq!(carried_bytes_per_cycle(64, 512), 8);
+        assert_eq!(carried_bytes_per_cycle(512, 512), 64);
+        assert!(!macs_may_rise(carried_bytes_per_cycle(512, 64)));
+        assert!(macs_may_rise(carried_bytes_per_cycle(512, 512)));
+        assert_eq!(carried_nameplate_gbps(512, 64, 2_000_000), 16);
+        assert_eq!(carried_nameplate_gbps(512, 512, 2_000_000), 128);
+        assert_eq!(NARROW_BEAT_BYTES, 8);
+        let live_rate = configured_rate(
+            PortSetting::live(),
+            TrackFeatures::live(),
+            LIVE_CLOCK_KHZ,
+            0,
+        );
+        assert!(!live_rate.promoted);
+        assert_eq!(live_rate.clusters, 1);
+        assert_eq!(live_rate.macs, 512);
+        assert_eq!(live_rate.milli_ops, 2_048);
+        assert_eq!(live_rate.carried_bytes, 8);
+        assert_eq!(live_rate.control_beat_bytes, 8);
+        let mut scaled = TrackFeatures::live();
+        scaled.clusters = 4;
+        scaled.macs = 2048;
+        scaled.lane_groups = true;
+        scaled.float_reductions = true;
+        scaled.converters = true;
+        scaled.proof_producers = true;
+        let wide = PortSetting {
+            island_bits: 512,
+            fabric_bits: 256,
+        };
+        let promoted = configured_rate(wide, scaled, LIVE_CLOCK_KHZ, 0);
+        assert!(promoted.promoted);
+        assert_eq!(promoted.clusters, 4);
+        assert_eq!(promoted.macs, 2048);
+        assert_eq!(promoted.milli_ops, 32_768);
+        assert_eq!(promoted.macs_per_s, 16_384_000_000_000);
+        assert_eq!(promoted.carried_bytes, 32);
+        assert_eq!(promoted.control_beat_bytes, 8);
+        assert_eq!(configured_rate(wide, scaled, LIVE_CLOCK_KHZ, 1).milli_ops, 65_536);
+        assert_eq!(configured_rate(wide, scaled, LIVE_CLOCK_KHZ, 5).milli_ops, 16_384);
+        assert_eq!(configured_rate(wide, scaled, LIVE_CLOCK_KHZ, 7).milli_ops, 8_192);
+        assert_eq!(configured_rate(PortSetting::live(), scaled, LIVE_CLOCK_KHZ, 0).milli_ops, 2_048);
+        let live_balance = port_balance(live_rate);
+        assert_eq!(live_balance.macs_per_byte, 64);
+        assert_eq!(live_balance.bytes_to_keep_pace, 8);
+        assert!(live_balance.keeps_pace && live_balance.control_keeps_pace && live_balance.fed);
+        assert_eq!(live_balance.data_nameplate_gbps, 16);
+        assert_eq!(live_balance.control_nameplate_gbps, 16);
+        assert_eq!(live_balance.demand_gbps, 16);
+        assert!(dram_covers(live_balance, 0, 1));
+        assert!(!dram_covers(live_balance, 3, 1));
+        assert!(dram_claim_matches(0, 1, live_balance.data_nameplate_gbps, 16));
+        assert!(!dram_claim_matches(0, 1, live_balance.data_nameplate_gbps, 400));
+        assert_eq!(ddr4_channels_to_cover(16), 1);
+        let wide_balance = port_balance(promoted);
+        assert_eq!(wide_balance.macs_per_cycle, 8_192);
+        assert_eq!(wide_balance.macs_per_byte, 256);
+        assert_eq!(wide_balance.bytes_to_keep_pace, 128);
+        assert!(!wide_balance.keeps_pace);
+        let mut sku = TrackFeatures::live();
+        sku.clusters = SKU_CLUSTERS;
+        sku.macs = SKU_MACS;
+        let fabric = PortSetting {
+            island_bits: 4096,
+            fabric_bits: 4096,
+        };
+        let sku_balance = port_balance(configured_rate(fabric, sku, SKU_CLOCK_KHZ, 0));
+        assert_eq!(sku_balance.macs_per_cycle, 32_768);
+        assert_eq!(sku_balance.macs_per_byte, 64);
+        assert_eq!(sku_balance.bytes_to_keep_pace, 512);
+        assert!(sku_balance.keeps_pace);
+        assert_eq!(sku_balance.control_macs_per_byte, 4_096);
+        assert!(!sku_balance.control_keeps_pace && !sku_balance.fed);
+        let opened = port_balance(
+            configured_rate(fabric, sku, SKU_CLOCK_KHZ, 0).with_control(ControlSetting { beat_bytes: 512 }),
+        );
+        assert_eq!(opened.control_macs_per_byte, 64);
+        assert!(opened.keeps_pace && opened.control_keeps_pace && opened.fed);
+        assert_eq!(opened.data_nameplate_gbps, 768);
+        assert_eq!(opened.control_nameplate_gbps, 768);
+        assert_eq!(opened.demand_gbps, 768);
+        assert!(dram_covers(opened, 0, 1));
+        assert!(!dram_covers(opened, 2, 1));
+        assert!(dram_claim_matches(2, 1, opened.data_nameplate_gbps, 400));
+        assert!(!dram_claim_matches(2, 1, 400, 400));
+        assert_eq!(ddr4_channels_to_cover(512), 27);
+        assert_eq!(ddr4_channels_to_cover(768), 41);
+        assert!(dram_covers(opened, 1, 41));
+        assert!(!dram_covers(opened, 1, 40));
+        let still_narrow = port_balance(
+            configured_rate(fabric, sku, SKU_CLOCK_KHZ, 0).with_control(ControlSetting::live()),
+        );
+        assert!(!still_narrow.fed);
+        assert!(!dram_covers(still_narrow, 0, 1));
+        assert_eq!(ControlSetting { beat_bytes: 12 }.bytes(), 0);
         assert_eq!(dram_nameplate_gbps(64, 2_000_000, 8, 0), 16);
         assert_eq!(bumped_dram_gbps(64, 2_000_000, 1, 0, 2, 1), 32);
         assert_eq!(bumped_dram_gbps(64, 1_000_000, 2, 1, 4, 4), 38);

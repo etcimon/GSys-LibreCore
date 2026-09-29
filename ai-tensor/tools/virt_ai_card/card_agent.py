@@ -146,6 +146,7 @@ class CardAgent:
             b = msg.get("b")
             ticket = int(msg.get("ticket", 1))
             irq = bool(msg.get("irq", True))
+            flags = int(msg.get("flags", 0))
             desc = None
             if a is None or b is None:
                 # optional BAR4 names
@@ -163,11 +164,16 @@ class CardAgent:
                 return
             try:
                 with self._lock:
+                    if "reuse_en" in msg:
+                        self.device.set_reuse_en(bool(msg.get("reuse_en")))
                     c = self.device.gemm_s8(
-                        a, b, ticket=ticket, irq=irq, wait=True, desc=desc
+                        a, b, ticket=ticket, irq=irq, wait=True, desc=desc, flags=flags
                     )
                     self._bar4["C"] = c
                     self.device.stage_tensor("C", c)
+                    read_a = self.device.last_read_a()
+                    read_b = self.device.last_read_b()
+                    reuse_enabled = self.device.reuse_enabled()
                 send_msg(
                     conn,
                     {
@@ -176,6 +182,9 @@ class CardAgent:
                         "ticket": ticket,
                         "c": c,
                         "status": 0,
+                        "read_a": read_a,
+                        "read_b": read_b,
+                        "reuse_enabled": reuse_enabled,
                     },
                 )
             except Exception as exc:  # noqa: BLE001

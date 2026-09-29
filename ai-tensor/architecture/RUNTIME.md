@@ -46,11 +46,59 @@ Runtime chooses mode from **Caps + profile**, not from framework type.
 |---|---|
 | `Poll` | Default spin on `poll(ticket)` |
 | `IrqThenPoll` | FLAG_IRQ jobs; wait `irq_pending` then claim |
-| `DmaThenClaim` | `wr_cpl_en=1`: spin completion word @ `ptr_done`, then `claim_done` |
+| `DmaThenClaim` | Check ticket-qualified FIFO status; observe the DMA word while waiting, then optionally consume that completion once |
 | `ClaimOnly` | Island claim soak with `wr_cpl_en=0` (no DMA word) |
 
-**Ordering:** when both DMA and PLIC/IRQ are enabled, preferred order is **DMA word visible →
-fence → claim DONE / clear IRQ**. Island directed tests may keep `wr_cpl_en=0` for pure claim.
+**Completion authority:** the FIFO status is final, after the completion-store response.
+The DMA word records the earlier GEMM status; it may still say OK, or retain old bytes,
+when that store failed. `DmaThenClaim` therefore checks the matching FIFO completion even
+when the word is absent. It does not require a successful DMA write to report its error.
+
+**Explicit observation/claim API:** `Device::poll_completion(ticket, claim)` observes the
+completion and consumes at most its matching FIFO head when `claim=true`. With `claim=false`
+it leaves DONE/IRQ unchanged. DMA, claim-only, IRQ and eventfd waiters use this operation,
+not a consuming `poll` followed by another `claim_done`. The legacy `MmioDevice::poll`
+continues to claim a matching head for compatibility; historical-ticket lookup never pops
+another ticket. Backends without the explicit API return an unsupported error rather than
+silently choosing claim semantics.
+
+**Guest UIO:** a session owns one pending submission. DONE, the expected ticket and FIFO
+DSTATUS must agree before it claims; neither idle STATUS nor an IRQ proves completion.
+Timeout uses a monotonic deadline and preserves ownership, so retrying wait is permitted but
+staging another job or reprogramming the region is refused. IRQ-backed submission sets
+FLAG_IRQ and claims DONE before re-enabling the interrupt. This is a single-owner bring-up
+API, not a multi-process driver, hardware cancellation or DMA coherence implementation.
+
+**Admission limit:** a legacy doorbell write is not an unlimited enqueue acknowledgment.
+The island has bounded pending state and completion storage. Current repairs snapshot pending
+latch descriptors and retain fetch completion identities across FIFO pressure, but do not add a
+complete sideband ready/credit protocol. Keep the single-owner UIO rule; independent producers
+must not concurrently rewrite the shared descriptor latch or assume every pulse was admitted.
+
+**Queued-profile candidate:** the optional island/APB path now uses an on-chip FIFO of
+explicit descriptor-pointer commands, with credits/receipts and a held VALID/READY sideband.
+Legacy serialized mode remains available; this is not a host-owned DMA-ring contract.
+`QueuedMmioSession` separately negotiates capability/mode, retains buffer leases and requires
+increasing accepted tickets. All descriptors remain Desc64 v2; see ABI-CONTRACT for the
+extension pin. The core producer now honours READY and defers `ai.poll` to an attached
+island; `MmioDevice::queued_submit` and the B3 emulator model the same window. `ai.poll`'s
+ordered comparison assumes one monotone ticket producer: a guest must not poll MMIO-queued
+tickets through `ai.poll`. B1 parity and full-SoC qualification are open, so every production
+`CommandDepth` remains zero.
+
+**Iterative PMU rate (RTL candidate, source-bound verification):** the derived-rate register
+keeps its meaning. A read captures the latest held GEMM counters and waits for an iterative
+shift/add/divide calculator; later GEMM activity cannot change those captured operands.
+`PMU_OFF_GBPS_X1000`, `CAP_OFF_DRAM_MEAS_X1000` and the measured half of
+`CAP_OFF_DRAM_GBPS` all use that path, preserving the packed field's saturation. APB permits
+one outstanding register transaction and waits for its response; fixed-cycle internal read
+latency must not be assumed. The directed nonzero case waits 80 APB cycles. Raw counter reads
+remain available and GEMM completion does not wait for rate calculation. Zero elapsed cycles
+return zero; the full rate saturates at u32 maximum. This is still a counter-derived value at
+the declared clock, not a measured physical frequency. A complete mapped timing result is open.
+
+**Ordering:** data visibility/acquire precedes consuming results; claim DONE / clear the
+level source before IRQ re-enable. Island directed tests may keep `wr_cpl_en=0` for pure claim.
 
 **Queues:** the sim pin advertises Queues=1. RTL queue 0 stays at `0x0120`. Later queues
 start at `0x01A0` (stride `0x20`) so they do not cover the descriptor latch at `0x0140` or the

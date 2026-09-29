@@ -76,7 +76,7 @@ pub fn claim_after_irq<D: Device>(
     // Prefer Device::poll: SoftIsland/MmioDevice pops CPL FIFO head when ticket matches.
     // Do not claim_done first — that would drop the head before status is observed.
     for _ in 0..16 {
-        if let Some(c) = dev.poll(ticket)? {
+        if let Some(c) = dev.poll_completion(ticket, true)? {
             return Ok(c);
         }
     }
@@ -92,12 +92,11 @@ pub fn wait_irq_then_claim<D: Device>(
     wait_irq_sticky(dev, max_iters)?;
     for _ in 0..max_iters {
         if dev.irq_pending() {
-            if let Some(c) = dev.poll(ticket)? {
-                let _ = dev.claim_done();
+            if let Some(c) = dev.poll_completion(ticket, true)? {
                 return Ok(c);
             }
         }
-        if let Some(c) = dev.poll(ticket)? {
+        if let Some(c) = dev.poll_completion(ticket, true)? {
             return Ok(c);
         }
     }

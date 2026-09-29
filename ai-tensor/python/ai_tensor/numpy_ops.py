@@ -29,6 +29,7 @@ def gemm_s8(
     ticket: int = 1,
     auto_tile: bool = True,
     backend: str = "sim",
+    recipe: Optional[str] = None,
 ) -> Tuple["np.ndarray", dict]:
     """
     INT8 matmul via island stack: ``C = A @ B`` with int32 accum.
@@ -43,8 +44,11 @@ def gemm_s8(
         raise ValueError(f"shape mismatch {a8.shape} @ {b8.shape}")
     m, k = int(a8.shape[0]), int(a8.shape[1])
     n = int(b8.shape[1])
+    from .device import run_high_level_s8
+
     dev = device or Device(backend)
-    c_list, tix, status, meta = dev.gemm_s8(
+    c_list, meta = run_high_level_s8(
+        dev,
         m,
         n,
         k,
@@ -52,11 +56,10 @@ def gemm_s8(
         b8.reshape(-1).tolist(),
         ticket=ticket,
         auto_tile=auto_tile,
+        recipe=recipe,
     )
-    if status != 0:
-        raise RuntimeError(f"ai-tensor gemm failed status={status}")
     c = np.asarray(c_list, dtype=np.int32).reshape(m, n)
-    meta = {**meta, "ticket": tix, "status": status, "backend": dev.backend, "framework": "numpy"}
+    meta = {**meta, "framework": "numpy"}
     return c, meta
 
 
@@ -77,8 +80,17 @@ def gemm(a: ArrayLike, b: ArrayLike, *, device: Optional[Device] = None,
     dev = device or Device(backend)
     raw = dev.gemm_native(np.ascontiguousarray(a).tobytes(), np.ascontiguousarray(b.T).tobytes(),
                           int(m), int(n), int(k), fmt, ticket=ticket)
+    from .device import high_level_fields
+
     out = np.frombuffer(raw, dtype='<i4' if fmt < 2 else '<f4').copy().reshape(m, n)
-    return out, {'backend': dev.backend, 'numfmt': fmt, 'status': 0, 'ticket': ticket, 'caps': dev.caps().as_dict()}
+    return out, {
+        "backend": dev.backend,
+        "numfmt": fmt,
+        "status": 0,
+        "ticket": ticket,
+        "caps": dev.caps().as_dict(),
+        **high_level_fields(dev.caps(), int(m), int(n), int(k), False, native=True),
+    }
 
 
 def check_close_to_numpy(

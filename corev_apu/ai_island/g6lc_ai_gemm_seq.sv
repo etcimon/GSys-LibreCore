@@ -55,7 +55,13 @@ module g6lc_ai_gemm_seq #(
     // INCR at the 64 B stripe so GEMM and core L2 fills share one map.
     parameter int unsigned NrChannels = 1,
     parameter int unsigned ChanShift  = 6,
-    parameter bit          ReuseBEn   = 1'b0,
+    parameter bit          ReuseBEn  = 1'b0,
+    // Resident-B directory depth (VA-Turbo). With 2 slots the B bank is split in
+    // halves and two panels that each fit a half stay resident together, so a
+    // layer whose N spans two panels (the decode case that alternates them every
+    // token) still hits. A panel that needs more than a half takes the whole bank
+    // ("big") and evicts the other slot. 1 = the single resident key.
+    parameter int unsigned ReuseBSlots = 2,
     parameter bit          ReuseAEn   = 1'b0,
     parameter int unsigned MaxElementBytes = 4,
     parameter type         axi_req_t  = logic,
@@ -71,6 +77,9 @@ module g6lc_ai_gemm_seq #(
     input  logic [15:0] lda_i,
     input  logic [15:0] ldb_i,
     input  logic [2:0]  numfmt_i,
+    // flags.accmode == 01: seed every C[i][j] reduction from the word already in
+    // memory (ST_LC loads the C tile first). The top grants/refuses; this only executes.
+    input  logic        accumulate_i,
     input  logic [3:0]  ar_max_i,  // 0 = use parameter MaxAROut
     input  logic [AddrWidth-1:0] ptr_a_i,
     input  logic [AddrWidth-1:0] ptr_b_i,
@@ -82,6 +91,11 @@ module g6lc_ai_gemm_seq #(
     output logic [31:0] pmu_r_beats_o,
     output logic [31:0] pmu_w_beats_o,
     output logic [31:0] pmu_cycles_o,
+    // Stage-2 characterization: per-job cycles in each phase and stalled handshakes.
+    // {STC, MAC, LB, LA} phase cycles; AR held without ready, R valid without ready
+    // (MAC-side backpressure), W held without ready. Reset at job start like the others.
+    output logic [3:0][31:0] pmu_phase_o,
+    output logic [2:0][31:0] pmu_stall_o,
     input  logic        reuse_b_i,
     input  logic [31:0] reuse_b_epoch_i,
     input  logic        reuse_b_invalidate_i,
@@ -93,6 +107,14 @@ module g6lc_ai_gemm_seq #(
     output axi_req_t    axi_req_o,
     input  axi_resp_t   axi_resp_i
 );
+
+  // Bit-granular copies of the AXI aggregates. The master's ready signals may depend
+  // on the slave's valids (legal), but on a whole-struct view that reads as a
+  // request<->response loop; splitting keeps Verilator's cycle check exact.
+  axi_req_t  axi_req_d /*verilator split_var*/;
+  axi_resp_t axi_resp_s /*verilator split_var*/;
+  assign axi_req_o  = axi_req_d;
+  assign axi_resp_s = axi_resp_i;
 
   localparam int unsigned LimM = (MaxM != 0) ? MaxM : MaxDim;
   localparam int unsigned LimN = (MaxN != 0) ? MaxN : MaxDim;
@@ -110,10 +132,23 @@ module g6lc_ai_gemm_seq #(
       OperandWordsA : OperandWordsB;
   localparam int unsigned OperandBankAddrW = (OperandBankWords > 1) ? $clog2(OperandBankWords) : 1;
   localparam int unsigned LaneW        = (PeLanes > 1) ? $clog2(PeLanes) : 1;
-  // VA-turbo reuse keys must hold every accepted m, n and k.
+  // Flat panel mapping (K-split-to-residency): operand rows are stored at a
+  // per-job pitch of 2^pitch_sh_q bank words (pitch = next power of two of
+  // ceil(k_bytes / PeLanes)), not at the fixed LimK pitch. The K box therefore
+  // becomes a BYTE capacity -- n * pitch <= OperandWordsB and m * pitch <=
+  // OperandWordsA -- so a 256 x 1024 INT8 panel occupies the same bank as a
+  // 512 x 512 one and is one job (one resident key) instead of two chained K
+  // blocks. The power-of-two pitch keeps the row address a shift (no runtime
+  // multiplier); its cost is up to 2x row slack for k_bytes that are not a
+  // power-of-two multiple of PeLanes. PeLanes must be a power of two.
+  localparam int unsigned LaneShift    = (PeLanes > 1) ? $clog2(PeLanes) : 0;
+  localparam int unsigned PitchShW     = $clog2(OperandBankAddrW + 1);
+  // VA-turbo reuse keys must hold every accepted m and n; k is 16 bits (lda/ldb width).
   localparam int unsigned DimW = $clog2(LimHi + 1);
   // AXI beat geometry (I3: wider DataWidth raises BytesPerBeat without RTL rewrite)
   localparam int unsigned BytesPerBeat  = DataWidth / 8;
+  localparam int unsigned ElemsPerBeat  = (BytesPerBeat > PeLanes) ? PeLanes : BytesPerBeat;
+  localparam int unsigned ElemsPerBeatShift = (ElemsPerBeat > 1) ? $clog2(ElemsPerBeat) : 0;
   localparam int unsigned BeatAlignW    = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
   localparam int unsigned BeatLaneW     = (BytesPerBeat > 1) ? $clog2(BytesPerBeat) : 1;
   // Max beats per AR/AW (AXI4 max 256 → len=255; keep ≤255 for 8-bit counters)
@@ -150,6 +185,8 @@ module g6lc_ai_gemm_seq #(
     assert (PeLanes >= (DataWidth / 8))
       else $error("g6lc_ai_gemm_seq: PeLanes=%0d < %0d bytes/beat",
                   PeLanes, DataWidth / 8);
+    assert ((PeLanes & (PeLanes - 1)) == 0)
+      else $error("g6lc_ai_gemm_seq: PeLanes=%0d must be a power of two (flat panel pitch is a shift)", PeLanes);
   end
   // pragma translate_on
 
@@ -160,7 +197,8 @@ module g6lc_ai_gemm_seq #(
     ST_LB    = 4'd3,
     ST_MAC   = 4'd4,
     ST_STC   = 4'd5,
-    ST_DONE  = 4'd6
+    ST_DONE  = 4'd6,
+    ST_LC    = 4'd7   // accumulate: load the existing C tile before the MAC
   } state_e;
 
   state_e state_q, state_d;
@@ -187,6 +225,22 @@ module g6lc_ai_gemm_seq #(
   logic [31:0] sum_j_q, sum_j_d;
   logic        err_q, err_d;
   logic        done_q;
+  // Accumulate mode (latched from accumulate_i at start).
+  logic        acc_mode_q;
+  // ST_LC loader: one outstanding burst, one 32-bit C word written per cycle.
+  localparam int unsigned WordsPerBeat = (DataWidth >= 32) ? DataWidth / 32 : 1;
+  localparam int unsigned LcWordW      = (WordsPerBeat > 1) ? $clog2(WordsPerBeat) : 1;
+  logic [31:0]            lc_total_q, lc_beats_q;   // words, beats
+  logic [31:0]            lc_issued_q, lc_recv_q;   // beats issued / received
+  logic [7:0]             lc_burst_left_q;
+  logic                   lc_ar_busy_q;
+  logic [DataWidth-1:0]   lc_buf_q;
+  logic                   lc_buf_v_q;
+  logic [LcWordW-1:0]     lc_word_q;
+  logic [31:0]            lc_e_q, lc_i_q, lc_j_q;
+  // next-state (driven in the main process)
+  logic                   lc_ar_fire, lc_r_fire, lc_w_fire;
+  logic [7:0]             lc_ar_beats;
   // Multi-outstanding AR count (0..MaxAROut); AW still single-outstanding
   logic [AROutW-1:0] ar_inflight_q, ar_inflight_d;
   logic        aw_sent_q, aw_sent_d;
@@ -219,6 +273,24 @@ module g6lc_ai_gemm_seq #(
   logic                 ar_slot_r_last;
   logic [ARSlotW-1:0]   ar_slot_ridx;
   logic [31:0]          ar_slot_ntake;
+  logic                 ar_hold_q;
+  logic [ARSlotW-1:0]   ar_hold_slot_q;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      ar_hold_q <= 1'b0;
+      ar_hold_slot_q <= '0;
+    end else if (state_q == ST_IDLE && start_i) begin
+      ar_hold_q <= 1'b0;
+      ar_hold_slot_q <= '0;
+    end else if (axi_req_d.ar_valid) begin
+      if (axi_resp_s.ar_ready) ar_hold_q <= 1'b0;
+      else if (!ar_hold_q) begin
+        ar_hold_q <= 1'b1;
+        ar_hold_slot_q <= SplitArId ? ARSlotW'(axi_req_d.ar.id - ArIdBase) : '0;
+      end
+    end
+  end
 
   // Multi-byte unpack count for this R cycle. AI-X9 made the two loads the same
   // shape, so lb_n_d is now the same width as la_n_d (it was [3:0], capped at 8
@@ -229,8 +301,10 @@ module g6lc_ai_gemm_seq #(
   // C dual-store: dual-bank combo read of C[j],C[j+1] → one W/cycle (PeLanes≥2).
   // Multi-beat: AW once with len=nbeats-1; stream W; advance j on B by stc_elem.
   // PeLanes==1 falls back to pair-hold (same bank for j and j+1).
-  // Trail cursor (stc_i/stc_j) is independent of MAC (i_q/j_q): store rows with
-  // stc_i < i_q while MAC advances; i_q==m means MAC finished all rows.
+  // Trail cursor (stc_i/stc_j) is independent of MAC (i_q/j_q): store only rows
+  // whose C writes have committed; i_q==m means issue, not retirement, finished.
+  localparam int unsigned RowCountW = (LimM < 2) ? 1 : $clog2(64'(LimM) + 64'd1);
+  logic [RowCountW-1:0] c_rows_done_q;
   logic        c_pair_hold_q, c_pair_hold_d;
   logic [31:0] c_lo_q;
   logic        c_lo_we_d;
@@ -475,15 +549,39 @@ module g6lc_ai_gemm_seq #(
   function automatic logic [31:0] ai_fmt_bytes();
     return g6lc_ai_island_cfg_pkg::ai_elem_bytes(numfmt_q);
   endfunction
+  // Element size as a shift (0/1/2): byte<->element scaling in the datapath is a
+  // shift, never a multiply or divide by the runtime element size.
+  function automatic logic [1:0] ai_fmt_shift();
+    return g6lc_ai_island_cfg_pkg::ai_elem_shift(numfmt_q);
+  endfunction
 
-  // F1: number of elements issued per MAC cycle.
+  // F1: number of elements issued per MAC cycle (PeLanes byte lanes / element bytes).
   assign mac_step = (numfmt_q == 3'd1) ? 32'(2 * PeLanes)
-                                       : (32'(PeLanes) / ai_fmt_bytes());
+                                       : (32'(PeLanes) >> ai_fmt_shift());
 
   // F1: bytes in one operand row (k elements). This is the bound the LOAD states
   // run to; ST_MAC still bounds against k_q in elements. For INT8 the two are
   // equal, which is why the INT8 path is bit-identical.
   assign k_bytes = fmt_row_bytes(k_q);
+
+  // Row pitch of the operand banks for this job (see the flat-panel note above).
+  function automatic logic [PitchShW-1:0] ceil_log2_rt(input logic [31:0] v);
+    logic [PitchShW-1:0] sh;
+    sh = '0;
+    for (int unsigned s = 0; s < (1 << PitchShW); s++)
+      if ((32'd1 << s) < v) sh = PitchShW'(s + 1);
+    return sh;
+  endfunction
+  logic [31:0]         row_words_c;
+  logic [PitchShW-1:0] pitch_sh_c, pitch_sh_q;
+  logic                cap_ok_c;
+  assign row_words_c = (k_bytes + 32'(PeLanes) - 32'd1) >> LaneShift;
+  assign pitch_sh_c  = ceil_log2_rt(row_words_c);
+  // Byte-capacity box: both operand panels must fit their banks at this pitch,
+  // and k must fit the 16-bit lda/ldb it is compared against.
+  assign cap_ok_c = k_q <= 32'h0000_FFFF &&
+                    (n_q << pitch_sh_c) <= 32'(OperandWordsB) &&
+                    (m_q << pitch_sh_c) <= 32'(OperandWordsA);
 
   // F0b-2: the accumulator is now fed from the PIPELINE register, so
   // `mac_acc_next` is a function of state (sum_q, acc_q) rather than of the
@@ -519,29 +617,62 @@ module g6lc_ai_gemm_seq #(
   // path vs the integer path. A future pass should either retime it around the
   // existing one-cycle pe_sum -> acc_q pipeline or pipeline fp32_add itself;
   // this is not a throughput change and does not affect the load/store FSM.
+  // Accumulate mode: the first partial of an element is added onto the C word
+  // that ST_LC placed in the tile (read on port r0 in the drain cycle) instead of
+  // starting from zero, so a K-split chained through C is one ordered reduction.
+  logic [31:0] mac_seed;
+  logic [36:0] mac_fp32_seed_add;
+  assign mac_seed          = acc_mode_q ? c_r0_data : 32'd0;
+  assign mac_fp32_seed_add = g6lc_ai_fp_pkg::fp32_add(mac_seed, sum_q);
   assign mac_fp32_add = g6lc_ai_fp_pkg::fp32_add(acc_q, sum_q);
   assign mac_acc_next = pe_float_en
-      ? (sum_first_q ? sum_q : mac_fp32_add[31:0])
-      : ((sum_first_q ? '0 : acc_q) + sum_q);
+      ? (sum_first_q ? (acc_mode_q ? mac_fp32_seed_add[31:0] : sum_q) : mac_fp32_add[31:0])
+      : ((sum_first_q ? mac_seed : acc_q) + sum_q);
 
   logic reuse_b_skip_q, reuse_b_safe;
+  // Row base of the B panel in the operand bank: 0, or the slot's half when the
+  // resident-B directory placed this job's panel in a slot (see gen_reuse_b).
+  logic [OperandBankAddrW-1:0] b_base_q;
   if (ReuseBEn) begin : gen_reuse_b
-    logic valid_q, cacheable_q, invalidated_q;
-    logic [AddrWidth-1:0] ptr_q;
-    logic [DimW-1:0] n_saved_q, k_saved_q;
-    logic [15:0] ldb_saved_q;
-    logic [2:0] fmt_q;
-    logic [31:0] epoch_q, job_epoch_q;
+    localparam int unsigned SlotsB     = (ReuseBSlots < 1) ? 1 : ReuseBSlots;
+    localparam int unsigned SlotWordsB = OperandWordsB / SlotsB;
+    localparam int unsigned SlotW      = (SlotsB > 1) ? $clog2(SlotsB) : 1;
+    logic [SlotsB-1:0] valid_q, big_q, hit_vec;
+    logic cacheable_q, invalidated_q, hit_any;
+    logic [AddrWidth-1:0] ptr_q [SlotsB];
+    logic [DimW-1:0] n_saved_q [SlotsB];
+    logic [15:0]     k_saved_q [SlotsB];
+    logic [15:0]     ldb_saved_q [SlotsB];
+    logic [2:0]      fmt_q [SlotsB];
+    logic [31:0]     epoch_q [SlotsB];
+    logic [SlotW-1:0] cur_q, victim_q, hit_idx;
+    logic [31:0] job_epoch_q;
     logic [31:0] b_span, c_span;
     logic [AddrWidth:0] b_end, c_end;
-    logic geometry_ok, disjoint, response_error;
+    logic geometry_ok, disjoint, response_error, small_c;
+
+    // The incoming job's key against every slot; the first hit wins (keys are
+    // unique per slot because a slot is invalidated before it is refilled).
+    always_comb begin
+      hit_idx = '0;
+      for (int unsigned s = 0; s < SlotsB; s++)
+        hit_vec[s] = valid_q[s] && ptr_q[s] == ptr_b_i &&
+                     32'(n_saved_q[s]) == n_i && 32'(k_saved_q[s]) == k_i &&
+                     ldb_saved_q[s] == ldb_i && fmt_q[s] == numfmt_i &&
+                     epoch_q[s] == reuse_b_epoch_i;
+      for (int s = SlotsB - 1; s >= 0; s--)
+        if (hit_vec[s]) hit_idx = SlotW'(s);
+    end
+    assign hit_any = |hit_vec;
+    // Fits one slot at this job's pitch; otherwise the panel takes the whole bank.
+    assign small_c = SlotsB > 1 && (n_q << pitch_sh_c) <= 32'(SlotWordsB);
 
     assign b_span = 32'(n_q - 32'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes;
     assign c_span = (32'(m_q) * 32'(n_q)) << 2;
     assign b_end = {1'b0, pb_q} + (AddrWidth+1)'(b_span);
     assign c_end = {1'b0, pc_q} + (AddrWidth+1)'(c_span);
     assign geometry_ok = m_q > 0 && m_q <= LimM && n_q > 0 && n_q <= LimN &&
-                         k_q > 0 && k_q <= LimK && ldb_q >= k_q[15:0] &&
+                         k_q > 0 && cap_ok_c && ldb_q >= k_q[15:0] &&
                          numfmt_q inside {3'd0, 3'd1, 3'd3, 3'd4, 3'd5, 3'd6, 3'd7};
     assign disjoint = !b_end[AddrWidth] && !c_end[AddrWidth] &&
                       ({1'b0, pc_q} >= b_end || {1'b0, pb_q} >= c_end);
@@ -550,52 +681,77 @@ module g6lc_ai_gemm_seq #(
     // The job's shape and pointers are latched at start and do not move, so this
     // is the same value `cacheable_q` carries from ST_CHK onward.
     assign reuse_b_safe = geometry_ok && disjoint && !invalidated_q;
-    assign response_error = (axi_resp_i.r_valid && axi_req_o.r_ready && axi_resp_i.r.resp[1]) ||
-                            (axi_resp_i.b_valid && axi_req_o.b_ready && axi_resp_i.b.resp[1]);
+    assign response_error = (axi_resp_s.r_valid && axi_req_d.r_ready && axi_resp_s.r.resp[1]) ||
+                            (axi_resp_s.b_valid && axi_req_d.b_ready && axi_resp_s.b.resp[1]);
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        valid_q <= 1'b0;
+        valid_q <= '0;
+        big_q <= '0;
         cacheable_q <= 1'b0;
         invalidated_q <= 1'b0;
-        ptr_q <= '0;
-        n_saved_q <= '0;
-        k_saved_q <= '0;
-        ldb_saved_q <= '0;
-        fmt_q <= '0;
-        epoch_q <= '0;
+        for (int unsigned s = 0; s < SlotsB; s++) begin
+          ptr_q[s] <= '0;
+          n_saved_q[s] <= '0;
+          k_saved_q[s] <= '0;
+          ldb_saved_q[s] <= '0;
+          fmt_q[s] <= '0;
+          epoch_q[s] <= '0;
+        end
+        cur_q <= '0;
+        victim_q <= '0;
+        b_base_q <= '0;
         job_epoch_q <= '0;
         reuse_b_skip_q <= 1'b0;
         pmu_reuse_b_hit_o <= 1'b0;
       end else begin
         if (state_q == ST_IDLE && start_i) begin
           job_epoch_q <= reuse_b_epoch_i;
-          reuse_b_skip_q <= reuse_b_i && valid_q && ptr_q == ptr_b_i &&
-                            32'(n_saved_q) == n_i && 32'(k_saved_q) == k_i &&
-                            ldb_saved_q == ldb_i && fmt_q == numfmt_i && epoch_q == reuse_b_epoch_i;
-          valid_q <= 1'b0;
+          reuse_b_skip_q <= reuse_b_i && hit_any;
+          // The job owns the slot it hit, else the round-robin victim; that slot's
+          // key is dropped now (its rows are rewritten unless the skip is taken)
+          // and re-established at ST_DONE with this job's key.
+          cur_q <= hit_any ? hit_idx : victim_q;
+          valid_q[hit_any ? hit_idx : victim_q] <= 1'b0;
           cacheable_q <= 1'b0;
           invalidated_q <= 1'b0;
           pmu_reuse_b_hit_o <= 1'b0;
         end
-        if (state_q == ST_CHK)
+        if (state_q == ST_CHK) begin
           cacheable_q <= geometry_ok && disjoint;
+          // Placement: a panel that fits a slot lives at the slot's half; a bigger
+          // one takes the whole bank and evicts every other slot. A small panel
+          // landing next to a "big" resident also evicts it (they overlap).
+          if (small_c) begin
+            b_base_q <= OperandBankAddrW'(32'(cur_q) * SlotWordsB);
+            big_q[cur_q] <= 1'b0;
+            for (int unsigned s = 0; s < SlotsB; s++)
+              if (SlotW'(s) != cur_q && big_q[s]) valid_q[s] <= 1'b0;
+          end else begin
+            b_base_q <= '0;
+            big_q[cur_q] <= 1'b1;
+            for (int unsigned s = 0; s < SlotsB; s++)
+              if (SlotW'(s) != cur_q) valid_q[s] <= 1'b0;
+          end
+        end
         // ST_LA -> ST_MAC is a B skip with A loaded; ST_CHK -> ST_MAC is a B
         // skip with A resident too.  Both must report, or the counter would
         // under-report exactly when the engine saved the most traffic.
         if ((state_q == ST_LA || state_q == ST_CHK) && state_d == ST_MAC)
           pmu_reuse_b_hit_o <= 1'b1;
         if (state_q == ST_DONE) begin
-          valid_q <= cacheable_q && !invalidated_q && !err_q;
-          ptr_q <= pb_q;
-          n_saved_q <= n_q[DimW-1:0];
-          k_saved_q <= k_q[DimW-1:0];
-          ldb_saved_q <= ldb_q;
-          fmt_q <= numfmt_q;
-          epoch_q <= job_epoch_q;
+          valid_q[cur_q] <= cacheable_q && !invalidated_q && !err_q;
+          ptr_q[cur_q] <= pb_q;
+          n_saved_q[cur_q] <= n_q[DimW-1:0];
+          k_saved_q[cur_q] <= k_q[15:0];
+          ldb_saved_q[cur_q] <= ldb_q;
+          fmt_q[cur_q] <= numfmt_q;
+          epoch_q[cur_q] <= job_epoch_q;
+          // Round robin after use: with two slots this is exactly LRU.
+          victim_q <= (32'(cur_q) + 1 >= SlotsB) ? '0 : cur_q + SlotW'(1);
         end
         if (reuse_b_invalidate_i || response_error) begin
-          valid_q <= 1'b0;
+          valid_q <= '0;
           reuse_b_skip_q <= 1'b0;
           invalidated_q <= 1'b1;
         end
@@ -605,6 +761,7 @@ module g6lc_ai_gemm_seq #(
     assign reuse_b_skip_q = 1'b0;
     assign reuse_b_safe = 1'b0;
     assign pmu_reuse_b_hit_o = 1'b0;
+    assign b_base_q = '0;
   end
 
   // Resident A, the mirror of the B path above and the same recipe 16.  B
@@ -617,7 +774,8 @@ module g6lc_ai_gemm_seq #(
   if (ReuseAEn) begin : gen_reuse_a
     logic valid_q, cacheable_q, invalidated_q;
     logic [AddrWidth-1:0] ptr_q;
-    logic [DimW-1:0] m_saved_q, k_saved_q;
+    logic [DimW-1:0] m_saved_q;
+    logic [15:0]     k_saved_q;
     logic [15:0] lda_saved_q;
     logic [2:0] fmt_q;
     logic [31:0] epoch_q, job_epoch_q;
@@ -630,7 +788,7 @@ module g6lc_ai_gemm_seq #(
     assign a_end = {1'b0, pa_q} + (AddrWidth+1)'(a_span);
     assign c_end = {1'b0, pc_q} + (AddrWidth+1)'(c_span);
     assign geometry_ok = m_q > 0 && m_q <= LimM && n_q > 0 && n_q <= LimN &&
-                         k_q > 0 && k_q <= LimK && lda_q >= k_q[15:0] &&
+                         k_q > 0 && cap_ok_c && lda_q >= k_q[15:0] &&
                          numfmt_q inside {3'd0, 3'd1, 3'd3, 3'd4, 3'd5, 3'd6, 3'd7};
     assign disjoint = !a_end[AddrWidth] && !c_end[AddrWidth] &&
                       ({1'b0, pc_q} >= a_end || {1'b0, pa_q} >= c_end);
@@ -639,8 +797,8 @@ module g6lc_ai_gemm_seq #(
     // cleared by the start handshake, so keying off it would make the skip dead
     // code while the PMU still claimed a hit.
     assign reuse_a_safe = geometry_ok && disjoint && !invalidated_q;
-    assign response_error = (axi_resp_i.r_valid && axi_req_o.r_ready && axi_resp_i.r.resp[1]) ||
-                            (axi_resp_i.b_valid && axi_req_o.b_ready && axi_resp_i.b.resp[1]);
+    assign response_error = (axi_resp_s.r_valid && axi_req_d.r_ready && axi_resp_s.r.resp[1]) ||
+                            (axi_resp_s.b_valid && axi_req_d.b_ready && axi_resp_s.b.resp[1]);
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -677,7 +835,7 @@ module g6lc_ai_gemm_seq #(
           valid_q <= cacheable_q && !invalidated_q && !err_q;
           ptr_q <= pa_q;
           m_saved_q <= m_q[DimW-1:0];
-          k_saved_q <= k_q[DimW-1:0];
+          k_saved_q <= k_q[15:0];
           lda_saved_q <= lda_q;
           fmt_q <= numfmt_q;
           epoch_q <= job_epoch_q;
@@ -705,6 +863,30 @@ module g6lc_ai_gemm_seq #(
   assign pmu_r_beats_o = pmu_r_q;
   assign pmu_w_beats_o = pmu_w_q;
   assign pmu_cycles_o  = pmu_cy_q;
+
+  logic [3:0][31:0] pmu_phase_q;
+  logic [2:0][31:0] pmu_stall_q;
+  assign pmu_phase_o = pmu_phase_q;
+  assign pmu_stall_o = pmu_stall_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      pmu_phase_q <= '0;
+      pmu_stall_q <= '0;
+    end else if (state_q == ST_IDLE && start_i) begin
+      pmu_phase_q <= '0;
+      pmu_stall_q <= '0;
+    end else begin
+      // ST_LC (accumulate seed load) is a load phase too; it is billed to the A bucket
+      // so the four published words stay {STC, MAC, LB, LA} without a fifth register.
+      if (state_q == ST_LA || state_q == ST_LC) pmu_phase_q[0] <= pmu_phase_q[0] + 32'd1;
+      if (state_q == ST_LB)  pmu_phase_q[1] <= pmu_phase_q[1] + 32'd1;
+      if (state_q == ST_MAC) pmu_phase_q[2] <= pmu_phase_q[2] + 32'd1;
+      if (state_q == ST_STC) pmu_phase_q[3] <= pmu_phase_q[3] + 32'd1;
+      if (axi_req_d.ar_valid && !axi_resp_s.ar_ready) pmu_stall_q[0] <= pmu_stall_q[0] + 32'd1;
+      if (axi_resp_s.r_valid && !axi_req_d.r_ready)   pmu_stall_q[1] <= pmu_stall_q[1] + 32'd1;
+      if (axi_req_d.w_valid && !axi_resp_s.w_ready)   pmu_stall_q[2] <= pmu_stall_q[2] + 32'd1;
+    end
+  end
 
   // ---------------------------------------------------------------------------
   // F1 format scaling. TWO cursor conventions, deliberately:
@@ -785,15 +967,14 @@ module g6lc_ai_gemm_seq #(
       input logic [31:0] rem,
       input logic [BeatLaneW-1:0] lane0
   );
-    automatic logic [31:0] first, after, more, total, epb;
+    automatic logic [31:0] first, after, more, total;
     if (rem == 0) return 8'd1;
     first = 32'(BytesPerBeat) - 32'(lane0);
     if (first > rem) first = rem;
     after = rem - first;
-    epb   = 32'(BytesPerBeat);
-    if (epb > PeLanes) epb = PeLanes;
-    if (epb == 0) epb = 1;
-    more  = (after + epb - 1) / epb;
+    // Elements absorbed per beat is min(BytesPerBeat, PeLanes), both powers of
+    // two, so the ceiling division is a constant shift (no divider cell).
+    more  = (after + 32'(ElemsPerBeat) - 32'd1) >> ElemsPerBeatShift;
     total = 32'd1 + more;
     if (total > MaxBurstBeats) total = MaxBurstBeats;
     if (total == 0) total = 1;
@@ -882,31 +1063,35 @@ module g6lc_ai_gemm_seq #(
 
   // Bank map: bank = t % PeLanes (or t for A / B along reduction);
   // local index = i * KPerBank + t / PeLanes  (A); for B: j * KPerBank + t / PeLanes
+  // PeLanes is a power of two (asserted): bank select is a mask, row index a shift,
+  // so no $div/$mod cell survives synthesis on the bank address paths.
   function automatic logic [LaneW-1:0] t_bank(input logic [31:0] t);
-    return LaneW'(t % PeLanes);
+    return LaneW'(t & 32'(PeLanes - 1));
   endfunction
 
+  // Flat panel: row i of A (row j of B) starts at i << pitch_sh_q bank words;
+  // `t` is the byte offset in the row, PeLanes bytes per word.
   function automatic logic [OperandBankAddrW-1:0] a_bank_addr(
       input logic [31:0] i, t
   );
-    return OperandBankAddrW'(int'(i) * OperandKPerBank + int'(t / PeLanes));
+    return OperandBankAddrW'((i << pitch_sh_q) + (t >> LaneShift));
   endfunction
 
   function automatic logic [OperandBankAddrW-1:0] b_bank_addr(
       input logic [31:0] t, j
   );
-    return OperandBankAddrW'(int'(j) * OperandKPerBank + int'(t / PeLanes));
+    return OperandBankAddrW'((j << pitch_sh_q) + (t >> LaneShift)) + b_base_q;
   endfunction
 
   // C bank map: bank = j % PeLanes; local = i * KPerBank + j / PeLanes
   function automatic logic [LaneW-1:0] c_bank(input logic [31:0] j);
-    return LaneW'(j % PeLanes);
+    return LaneW'(j & 32'(PeLanes - 1));
   endfunction
 
   function automatic logic [BankAddrW-1:0] c_bank_addr(
       input logic [31:0] i, j
   );
-    return BankAddrW'(int'(i) * KPerBank + int'(j / PeLanes));
+    return BankAddrW'(int'(i) * KPerBank + int'(j >> LaneShift));
   endfunction
 
   logic [AddrWidth-1:0] a_cur, b_cur, a_ar_cur, b_ar_cur, c_store_addr;
@@ -921,53 +1106,181 @@ module g6lc_ai_gemm_seq #(
   assign ar_head_lane = ar_lane_mem_q[0];
 
   always_comb begin
+    logic [31:0] byte_base, byte_idx;
+    byte_base = numfmt_q == 3'd1 ? t_q >> 1 : t_q << ai_fmt_shift();
+    byte_idx = '0;
+    for (int unsigned p = 0; p < PeLanes; p++) begin
+      a_r_req[p] = 1'b0;
+      a_r_addr[p] = '0;
+      b_r_req[p] = 1'b0;
+      b_r_addr[p] = '0;
+      byte_idx = byte_base + 32'(p);
+      if (state_q == ST_MAC && i_q < m_q &&
+          ((numfmt_q == 3'd1) ? t_q + 32'(p << 1) < k_q : byte_idx < k_bytes)) begin
+        a_r_req[p] = 1'b1;
+        a_r_addr[p] = a_bank_addr(i_q, byte_idx);
+        b_r_req[p] = 1'b1;
+        b_r_addr[p] = b_bank_addr(byte_idx, j_q);
+      end
+    end
+  end
+
+  always_comb begin
+    logic trail, pair_store;
+    logic [31:0] beats_done, column;
+    trail = state_q == ST_MAC && DualCRead && DataWidth >= 64 && dot_pending_q == '0 &&
+        !acc_mode_q && stc_i_q < 32'(c_rows_done_q);
+    pair_store = DataWidth >= 64 && !n_q[0];
+    beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
+    column = stc_j_q + (beats_done << 1);
+    c_r0_req = 1'b0;
+    c_r0_bank = '0;
+    c_r0_addr = '0;
+    c_r1_req = 1'b0;
+    c_r1_bank = '0;
+    c_r1_addr = '0;
+    if (state_q == ST_MAC && acc_mode_q && sum_v_q && sum_first_q) begin
+      // Seed read for the element whose first partial drains this cycle.
+      c_r0_req  = 1'b1;
+      c_r0_bank = c_bank(sum_j_q);
+      c_r0_addr = c_bank_addr(sum_i_q, sum_j_q);
+    end else if (trail || state_q == ST_STC) begin
+      if (!pair_store) begin
+        c_r0_req = 1'b1;
+        c_r0_bank = c_bank(stc_j_q);
+        c_r0_addr = c_bank_addr(stc_i_q, stc_j_q);
+      end else if (aw_sent_q && stc_w_left_q != 0) begin
+        c_r0_req = 1'b1;
+        if (DualCRead) begin
+          c_r0_bank = c_bank(column);
+          c_r0_addr = c_bank_addr(stc_i_q, column);
+          c_r1_req = 1'b1;
+          c_r1_bank = c_bank(column + 32'd1);
+          c_r1_addr = c_bank_addr(stc_i_q, column + 32'd1);
+        end else begin
+          c_r0_bank = c_bank(column + 32'(c_pair_hold_q));
+          c_r0_addr = c_bank_addr(stc_i_q, column + 32'(c_pair_hold_q));
+        end
+      end
+    end
+  end
+
+  always_comb begin
+    logic [31:0] t_byte_base;
+    t_byte_base = numfmt_q == 3'd1 ? t_q >> 1 : t_q << ai_fmt_shift();
+    for (int unsigned p = 0; p < PeLanes; p++) begin
+      pe_a[p] = '0;
+      pe_b[p] = '0;
+      pe_a_float[p] = '0;
+      pe_b_float[p] = '0;
+      pe_v[p] = 1'b0;
+    end
+    if (state_q == ST_MAC && i_q < m_q) begin
+      for (int unsigned p = 0; p < PeLanes; p++) begin
+        if (numfmt_q == 3'd1) begin
+          // INT4: two elements per byte. Lane p covers elements
+          // (t_q + 2p) and (t_q + 2p + 1) in the same byte.
+          automatic logic [31:0] e0, e1;
+          e0 = t_q + 32'(p << 1);
+          e1 = e0 + 32'd1;
+          if (e0 < k_q) begin
+            // Mask the invalid nibble(s) to 0; the PE sign-extends the
+            // remaining nibble and computes two products, one of which is 0.
+            pe_a[p] = {(e1 < k_q) ? a_r_data[p][7:4] : 4'b0000,
+                       (e0 < k_q) ? a_r_data[p][3:0] : 4'b0000};
+            pe_b[p] = {(e1 < k_q) ? b_r_data[p][7:4] : 4'b0000,
+                       (e0 < k_q) ? b_r_data[p][3:0] : 4'b0000};
+            pe_v[p] = 1'b1;
+          end
+        end else begin
+          // INT8/FP8/BF16/FP16/FP32: load bytes, then assemble elements
+          // into 32-bit float lanes.  `byte_idx` is the byte position
+          // along the K row; `k_bytes` comes from fmt_row_bytes().
+          automatic logic [31:0] byte_idx;
+          byte_idx = t_byte_base + 32'(p);
+          if (byte_idx < k_bytes) begin
+            pe_a[p] = $signed(a_r_data[p]);
+            pe_b[p] = $signed(b_r_data[p]);
+          end
+        end
+      end
+
+      // Assemble multi-byte floating operands (BF16/FP16/FP32) from the
+      // byte-lane read data. For INT8/FP8 this is a zero-extend; for
+      // FP16/BF16 it is two bytes little-endian; for FP32 it is four.
+      // INT4 stays in its own branch above.
+      if (numfmt_q != 3'd1) begin
+        // Bounded by the PeLanes parameter, not by the runtime mac_step:
+        // on this branch (numfmt != INT4) mac_step is PeLanes/bytes, so it
+        // can never exceed PeLanes and the extra iterations are inert.  A
+        // constant bound is what makes this loop elaborate under an open
+        // synthesis frontend -- with the runtime bound, Yosys read_slang
+        // tries to unroll it and exhausts its limit, which left the whole
+        // GEMM datapath without any gate-level area or timing evidence.
+        for (int unsigned e = 0; e < PeLanes; e++) begin
+          automatic logic [31:0] elem_t;
+          automatic logic [31:0] off;
+          elem_t = t_q + 32'(e);
+          off = 32'(e) << ai_fmt_shift();
+          if (int'(e) < int'(mac_step) && elem_t < k_q) begin
+            case (ai_fmt_bytes())
+              32'd1: begin
+                pe_a_float[e] = {24'b0, a_r_data[off]};
+                pe_b_float[e] = {24'b0, b_r_data[off]};
+              end
+              32'd2: begin
+                pe_a_float[e] = {16'b0, a_r_data[off+1], a_r_data[off]};
+                pe_b_float[e] = {16'b0, b_r_data[off+1], b_r_data[off]};
+              end
+              32'd4: begin
+                pe_a_float[e] = {a_r_data[off+3], a_r_data[off+2], a_r_data[off+1], a_r_data[off]};
+                pe_b_float[e] = {b_r_data[off+3], b_r_data[off+2], b_r_data[off+1], b_r_data[off]};
+              end
+              default: begin
+                pe_a_float[e] = 32'd0;
+                pe_b_float[e] = 32'd0;
+              end
+            endcase
+            pe_v[e] = 1'b1;
+          end
+        end
+      end
+    end
+  end
+
+  always_comb begin
     // defaults: idle banks + AXI
     for (int unsigned p = 0; p < PeLanes; p++) begin
-      a_r_req[p]  = 1'b0;
-      a_r_addr[p] = '0;
       a_w_req[p]  = 1'b0;
       a_w_addr[p] = '0;
       a_w_data[p] = '0;
-      b_r_req[p]  = 1'b0;
-      b_r_addr[p] = '0;
       b_w_req[p]  = 1'b0;
       b_w_addr[p] = '0;
       b_w_data[p] = '0;
-      pe_a[p]       = '0;
-      pe_b[p]       = '0;
-      pe_a_float[p] = '0;
-      pe_b_float[p] = '0;
-      pe_v[p]       = 1'b0;
     end
-    c_r0_req  = 1'b0;
-    c_r0_bank = '0;
-    c_r0_addr = '0;
-    c_r1_req  = 1'b0;
-    c_r1_bank = '0;
-    c_r1_addr = '0;
     c_w_req  = 1'b0;
     c_w_bank = '0;
     c_w_addr = '0;
     c_w_data = '0;
 
-    axi_req_o = '0;
-    axi_req_o.b_ready  = 1'b0;
-    axi_req_o.r_ready  = 1'b0;
-    axi_req_o.ar_valid = 1'b0;
-    axi_req_o.aw_valid = 1'b0;
-    axi_req_o.w_valid  = 1'b0;
-    axi_req_o.ar.id    = IdWidth'(2);
-    axi_req_o.ar.len   = '0;
-    axi_req_o.ar.size  = axi_pkg::size_t'($clog2(DataWidth / 8));
-    axi_req_o.ar.burst = axi_pkg::BURST_INCR;
-    axi_req_o.ar.cache = axi_pkg::CACHE_MODIFIABLE;
-    axi_req_o.aw.id    = IdWidth'(2);
-    axi_req_o.aw.len   = '0;
-    axi_req_o.aw.size  = axi_pkg::size_t'(2);  // default 4B; pair path uses 8B
-    axi_req_o.aw.burst = axi_pkg::BURST_INCR;
-    axi_req_o.aw.cache = '0;
-    axi_req_o.w.last   = 1'b1;
-    axi_req_o.w.strb   = '0;
+    axi_req_d = '0;
+    axi_req_d.b_ready  = 1'b0;
+    axi_req_d.r_ready  = 1'b0;
+    axi_req_d.ar_valid = 1'b0;
+    axi_req_d.aw_valid = 1'b0;
+    axi_req_d.w_valid  = 1'b0;
+    axi_req_d.ar.id    = IdWidth'(2);
+    axi_req_d.ar.len   = '0;
+    axi_req_d.ar.size  = axi_pkg::size_t'($clog2(DataWidth / 8));
+    axi_req_d.ar.burst = axi_pkg::BURST_INCR;
+    axi_req_d.ar.cache = axi_pkg::CACHE_MODIFIABLE;
+    axi_req_d.aw.id    = IdWidth'(2);
+    axi_req_d.aw.len   = '0;
+    axi_req_d.aw.size  = axi_pkg::size_t'(2);  // default 4B; pair path uses 8B
+    axi_req_d.aw.burst = axi_pkg::BURST_INCR;
+    axi_req_d.aw.cache = '0;
+    axi_req_d.w.last   = 1'b1;
+    axi_req_d.w.strb   = '0;
 
     state_d     = state_q;
     acc_d       = acc_q;
@@ -1021,6 +1334,10 @@ module g6lc_ai_gemm_seq #(
     stc_j_en        = 1'b0;
     stc_i_d         = stc_i_q;
     stc_j_d         = stc_j_q;
+    lc_ar_fire      = 1'b0;
+    lc_r_fire       = 1'b0;
+    lc_w_fire       = 1'b0;
+    lc_ar_beats     = 8'd0;
 
     unique case (state_q)
       ST_IDLE: begin
@@ -1042,7 +1359,7 @@ module g6lc_ai_gemm_seq #(
         // A/B must be aligned to the element. Even n stores 8-byte C pairs;
         // odd n stores 4-byte C words.
         if (m_q == 0 || n_q == 0 || k_q == 0
-            || m_q > LimM || n_q > LimN || k_q > LimK
+            || m_q > LimM || n_q > LimN || !cap_ok_c
             || ai_fmt_bytes() > MaxElementBytes
             || lda_q < k_q[15:0] || ldb_q < k_q[15:0]
             || !g6lc_ai_island_cfg_pkg::ai_elem_aligned(pa_q, numfmt_q)
@@ -1091,23 +1408,24 @@ module g6lc_ai_gemm_seq #(
                 free_s = ARSlotW'(s);
               end
               if (ar_slot_q[s].valid &&
-                  axi_resp_i.r.id == (ArIdBase + IdWidth'(s))) begin
+                  axi_resp_s.r.id == (ArIdBase + IdWidth'(s))) begin
                 r_match = 1'b1;
                 match_s = ARSlotW'(s);
               end
             end
           end
           // ---- Issue AR (may run concurrent with R) ----
-          if (ar_inflight_q < ar_max_eff && ar_i_q < m_q) begin
-            axi_req_o.ar.addr  = beat_align(a_ar_cur);
+          if (ar_hold_q) free_s = ar_hold_slot_q;
+          if ((ar_hold_q || ar_inflight_q < ar_max_eff) && ar_i_q < m_q) begin
+            axi_req_d.ar.addr  = beat_align(a_ar_cur);
             nb                 = cap_beats_to_stripe(
                 beat_align(a_ar_cur),
                 beats_for_rem(k_bytes - ar_t_q, a_ar_cur[BeatAlignW-1:0]));
-            axi_req_o.ar.len   = axi_pkg::len_t'(nb - 8'd1);
+            axi_req_d.ar.len   = axi_pkg::len_t'(nb - 8'd1);
             if (SplitArId)
-              axi_req_o.ar.id = ArIdBase + IdWidth'(free_s);
-            axi_req_o.ar_valid = 1'b1;
-            if (axi_resp_i.ar_ready) begin
+              axi_req_d.ar.id = ArIdBase + IdWidth'(free_s);
+            axi_req_d.ar_valid = 1'b1;
+            if (axi_resp_s.ar_ready) begin
               ar_push         = 1'b1;
               ar_lane_push_en = 1'b1;
               ar_lane_push    = a_ar_cur[BeatAlignW-1:0];
@@ -1125,9 +1443,9 @@ module g6lc_ai_gemm_seq #(
             end
           end
           // ---- Receive R ----
-          axi_req_o.r_ready = (ar_inflight_q != '0) &&
-                              (!SplitArId || !axi_resp_i.r_valid || r_match);
-          if (ar_inflight_q != '0 && axi_resp_i.r_valid &&
+          axi_req_d.r_ready = (ar_inflight_q != '0) &&
+                              (!SplitArId || !axi_resp_s.r_valid || r_match);
+          if (ar_inflight_q != '0 && axi_resp_s.r_valid &&
               (!SplitArId || r_match)) begin
             automatic logic [BeatLaneW-1:0] lane0;
             automatic logic [31:0] n_take, rem_k, rem_beat, recv_i, recv_t;
@@ -1147,7 +1465,7 @@ module g6lc_ai_gemm_seq #(
             la_n_d = n_take[7:0];
             ar_slot_r_en   = SplitArId;
             ar_slot_ridx   = match_s;
-            ar_slot_r_last = axi_resp_i.r.last;
+            ar_slot_r_last = axi_resp_s.r.last;
             ar_slot_ntake  = n_take;
             for (int unsigned p = 0; p < PeLanes; p++) begin
               if (32'(p) < n_take) begin
@@ -1156,10 +1474,10 @@ module g6lc_ai_gemm_seq #(
                 a_w_req [t_bank(tt)] = 1'b1;
                 a_w_addr[t_bank(tt)] = a_bank_addr(recv_i, tt);
                 a_w_data[t_bank(tt)] = byte_from_beat(
-                    axi_resp_i.r.data, BeatLaneW'(unsigned'(lane0) + p));
+                    axi_resp_s.r.data, BeatLaneW'(unsigned'(lane0) + p));
               end
             end
-            if (axi_resp_i.r.last)
+            if (axi_resp_s.r.last)
               ar_lane_pop_en = 1'b1;
             if (!SplitArId && (t_q + n_take >= k_bytes) && (i_q + 1 == m_q)) begin
               ar_t_en = 1'b1; ar_t_d = '0;
@@ -1170,7 +1488,7 @@ module g6lc_ai_gemm_seq #(
               state_d = ST_LA;
           end
           // Net inflight + burst_first (handles AR+R same cycle)
-          unique case ({ar_push, r_fire && axi_resp_i.r.last})
+          unique case ({ar_push, r_fire && axi_resp_s.r.last})
             2'b10: begin
               ar_inflight_d = ar_inflight_q + AROutW'(1);
               if (ar_inflight_q == '0) burst_first_d = 1'b1;
@@ -1185,7 +1503,7 @@ module g6lc_ai_gemm_seq #(
             end
             default: ;
           endcase
-          if (r_fire && !axi_resp_i.r.last)
+          if (r_fire && !axi_resp_s.r.last)
             burst_first_d = 1'b0;
           if (SplitArId) begin
             if ((ar_i_en ? ar_i_d : ar_i_q) >= m_q && ar_inflight_d == '0)
@@ -1194,7 +1512,7 @@ module g6lc_ai_gemm_seq #(
             ar_inflight_d = '0;
           if (state_d == ST_LB && ReuseBEn && reuse_b_skip_q && reuse_b_safe &&
               !reuse_b_invalidate_i && !err_q &&
-              !(axi_resp_i.r_valid && axi_req_o.r_ready && axi_resp_i.r.resp[1])) begin
+              !(axi_resp_s.r_valid && axi_req_d.r_ready && axi_resp_s.r.resp[1])) begin
             state_d = ST_MAC;
             acc_d = '0;
             ar_inflight_d = '0;
@@ -1237,23 +1555,24 @@ module g6lc_ai_gemm_seq #(
                 free_s = ARSlotW'(s);
               end
               if (ar_slot_q[s].valid &&
-                  axi_resp_i.r.id == (ArIdBase + IdWidth'(s))) begin
+                  axi_resp_s.r.id == (ArIdBase + IdWidth'(s))) begin
                 r_match = 1'b1;
                 match_s = ARSlotW'(s);
               end
             end
           end
           // ---- Issue AR (may run concurrent with R) ----
-          if (ar_inflight_q < ar_max_eff && ar_j_q < n_q) begin
-            axi_req_o.ar.addr  = beat_align(b_ar_cur);
+          if (ar_hold_q) free_s = ar_hold_slot_q;
+          if ((ar_hold_q || ar_inflight_q < ar_max_eff) && ar_j_q < n_q) begin
+            axi_req_d.ar.addr  = beat_align(b_ar_cur);
             nb                 = cap_beats_to_stripe(
                 beat_align(b_ar_cur),
                 beats_for_rem(k_bytes - ar_t_q, b_ar_cur[BeatAlignW-1:0]));
-            axi_req_o.ar.len   = axi_pkg::len_t'(nb - 8'd1);
+            axi_req_d.ar.len   = axi_pkg::len_t'(nb - 8'd1);
             if (SplitArId)
-              axi_req_o.ar.id = ArIdBase + IdWidth'(free_s);
-            axi_req_o.ar_valid = 1'b1;
-            if (axi_resp_i.ar_ready) begin
+              axi_req_d.ar.id = ArIdBase + IdWidth'(free_s);
+            axi_req_d.ar_valid = 1'b1;
+            if (axi_resp_s.ar_ready) begin
               ar_push         = 1'b1;
               ar_lane_push_en = 1'b1;
               ar_lane_push    = b_ar_cur[BeatAlignW-1:0];
@@ -1271,9 +1590,9 @@ module g6lc_ai_gemm_seq #(
             end
           end
           // ---- Receive R ----
-          axi_req_o.r_ready = (ar_inflight_q != '0) &&
-                              (!SplitArId || !axi_resp_i.r_valid || r_match);
-          if (ar_inflight_q != '0 && axi_resp_i.r_valid &&
+          axi_req_d.r_ready = (ar_inflight_q != '0) &&
+                              (!SplitArId || !axi_resp_s.r_valid || r_match);
+          if (ar_inflight_q != '0 && axi_resp_s.r_valid &&
               (!SplitArId || r_match)) begin
             automatic logic [BeatLaneW-1:0] lane0;
             automatic logic [31:0] n_take, rem_k, rem_beat, recv_j, recv_t;
@@ -1293,7 +1612,7 @@ module g6lc_ai_gemm_seq #(
             lb_n_d = n_take[7:0];
             ar_slot_r_en   = SplitArId;
             ar_slot_ridx   = match_s;
-            ar_slot_r_last = axi_resp_i.r.last;
+            ar_slot_r_last = axi_resp_s.r.last;
             ar_slot_ntake  = n_take;
             for (int unsigned p = 0; p < PeLanes; p++) begin
               if (32'(p) < n_take) begin
@@ -1302,10 +1621,10 @@ module g6lc_ai_gemm_seq #(
                 b_w_req [t_bank(tt)] = 1'b1;
                 b_w_addr[t_bank(tt)] = b_bank_addr(tt, recv_j);
                 b_w_data[t_bank(tt)] = byte_from_beat(
-                    axi_resp_i.r.data, BeatLaneW'(unsigned'(lane0) + p));
+                    axi_resp_s.r.data, BeatLaneW'(unsigned'(lane0) + p));
               end
             end
-            if (axi_resp_i.r.last)
+            if (axi_resp_s.r.last)
               ar_lane_pop_en = 1'b1;
             if (!SplitArId && (t_q + n_take >= k_bytes) && (j_q + 1 == n_q)) begin
               state_d = ST_MAC;
@@ -1314,7 +1633,7 @@ module g6lc_ai_gemm_seq #(
               state_d = ST_LB;
           end
           // Net inflight + burst_first (handles AR+R same cycle)
-          unique case ({ar_push, r_fire && axi_resp_i.r.last})
+          unique case ({ar_push, r_fire && axi_resp_s.r.last})
             2'b10: begin
               ar_inflight_d = ar_inflight_q + AROutW'(1);
               if (ar_inflight_q == '0) burst_first_d = 1'b1;
@@ -1329,7 +1648,7 @@ module g6lc_ai_gemm_seq #(
             end
             default: ;
           endcase
-          if (r_fire && !axi_resp_i.r.last)
+          if (r_fire && !axi_resp_s.r.last)
             burst_first_d = 1'b0;
           if (SplitArId) begin
             if ((ar_j_en ? ar_j_d : ar_j_q) >= n_q && ar_inflight_d == '0) begin
@@ -1362,19 +1681,15 @@ module g6lc_ai_gemm_seq #(
           automatic logic [31:0] pairs_rem, nbeats, beats_done, j_eff;
           automatic logic [31:0] t_next;
           automatic logic        last_step;
-          automatic logic [31:0] t_byte_base;
           mac_active = (i_q < m_q);
           t_next     = t_q + mac_step;
           last_step  = (t_next >= k_q);
-          t_byte_base= (numfmt_q == 3'd1) ? (t_q >> 1)
-                                          : (t_q * ai_fmt_bytes());
           // Trail-store only when no float dot is in flight: a pending result
           // still has to write its C bank, and that write must not race an AXI
           // read of the same bank from the store side.
-          can_trail  = DualCRead && (DataWidth >= 64) &&
+          can_trail  = DualCRead && (DataWidth >= 64) && !acc_mode_q &&
                        (dot_pending_q == '0) &&
-                       (stc_i_q < i_q ||
-                        (i_q >= m_q && stc_i_q < m_q));
+                       stc_i_q < 32'(c_rows_done_q);
 
           // ---- drain the previous issue -----------------------------------
           // The previous cycle's sum is now stable; add it to the accumulator
@@ -1395,88 +1710,6 @@ module g6lc_ai_gemm_seq #(
 
           // ---- issue the next step ----------------------------------------
           if (mac_active) begin
-            for (int unsigned p = 0; p < PeLanes; p++) begin
-              if (numfmt_q == 3'd1) begin
-                // INT4: two elements per byte. Lane p covers elements
-                // (t_q + 2p) and (t_q + 2p + 1) in the same byte.
-                automatic logic [31:0] e0, e1;
-                e0 = t_q + 32'(p << 1);
-                e1 = e0 + 32'd1;
-                if (e0 < k_q) begin
-                  automatic logic [31:0] byte_idx;
-                  byte_idx = t_byte_base + 32'(p);
-                  a_r_req [p] = 1'b1;
-                  a_r_addr[p] = a_bank_addr(i_q, byte_idx);
-                  b_r_req [p] = 1'b1;
-                  b_r_addr[p] = b_bank_addr(byte_idx, j_q);
-                  // Mask the invalid nibble(s) to 0; the PE sign-extends the
-                  // remaining nibble and computes two products, one of which is 0.
-                  pe_a[p]     = {(e1 < k_q) ? a_r_data[p][7:4] : 4'b0000,
-                                 (e0 < k_q) ? a_r_data[p][3:0] : 4'b0000};
-                  pe_b[p]     = {(e1 < k_q) ? b_r_data[p][7:4] : 4'b0000,
-                                 (e0 < k_q) ? b_r_data[p][3:0] : 4'b0000};
-                  pe_a_float[p] = 32'd0;
-                  pe_b_float[p] = 32'd0;
-                  pe_v[p]     = 1'b1;
-                end
-              end else begin
-                // INT8/FP8/BF16/FP16/FP32: load bytes, then assemble elements
-                // into 32-bit float lanes.  `byte_idx` is the byte position
-                // along the K row; `k_bytes` comes from fmt_row_bytes().
-                automatic logic [31:0] byte_idx;
-                byte_idx = t_byte_base + 32'(p);
-                if (byte_idx < k_bytes) begin
-                  a_r_req [p] = 1'b1;
-                  a_r_addr[p] = a_bank_addr(i_q, byte_idx);
-                  b_r_req [p] = 1'b1;
-                  b_r_addr[p] = b_bank_addr(byte_idx, j_q);
-                  pe_a[p]     = $signed(a_r_data[p]);
-                  pe_b[p]     = $signed(b_r_data[p]);
-                end
-              end
-            end
-
-            // Assemble multi-byte floating operands (BF16/FP16/FP32) from the
-            // byte-lane read data. For INT8/FP8 this is a zero-extend; for
-            // FP16/BF16 it is two bytes little-endian; for FP32 it is four.
-            // INT4 stays in its own branch above.
-            if (numfmt_q != 3'd1) begin
-              // Bounded by the PeLanes parameter, not by the runtime mac_step:
-              // on this branch (numfmt != INT4) mac_step is PeLanes/bytes, so it
-              // can never exceed PeLanes and the extra iterations are inert.  A
-              // constant bound is what makes this loop elaborate under an open
-              // synthesis frontend -- with the runtime bound, Yosys read_slang
-              // tries to unroll it and exhausts its limit, which left the whole
-              // GEMM datapath without any gate-level area or timing evidence.
-              for (int unsigned e = 0; e < PeLanes; e++) begin
-                automatic logic [31:0] elem_t;
-                automatic logic [31:0] off;
-                elem_t = t_q + 32'(e);
-                if (int'(e) < int'(mac_step) && elem_t < k_q) begin
-                  off = 32'(e) * ai_fmt_bytes();
-                  case (ai_fmt_bytes())
-                    32'd1: begin
-                      pe_a_float[e] = {24'b0, a_r_data[off]};
-                      pe_b_float[e] = {24'b0, b_r_data[off]};
-                    end
-                    32'd2: begin
-                      pe_a_float[e] = {16'b0, a_r_data[off+1], a_r_data[off]};
-                      pe_b_float[e] = {16'b0, b_r_data[off+1], b_r_data[off]};
-                    end
-                    32'd4: begin
-                      pe_a_float[e] = {a_r_data[off+3], a_r_data[off+2], a_r_data[off+1], a_r_data[off]};
-                      pe_b_float[e] = {b_r_data[off+3], b_r_data[off+2], b_r_data[off+1], b_r_data[off]};
-                    end
-                    default: begin
-                      pe_a_float[e] = 32'd0;
-                      pe_b_float[e] = 32'd0;
-                    end
-                  endcase
-                  pe_v[e] = 1'b1;
-                end
-              end
-            end
-
             // Tag the pipelined dot product when this is a float tile.
             dot_start      = mac_active && pe_float_en;
             dot_first_issue= (t_q == 0);
@@ -1535,11 +1768,11 @@ module g6lc_ai_gemm_seq #(
                 if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
                 nbeats    = cap_c_nbeats(c_store_addr, nbeats);
                 if (nbeats == 0) nbeats = 1;
-                axi_req_o.aw.addr  = c_store_addr;
-                axi_req_o.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
-                axi_req_o.aw.size  = axi_pkg::size_t'(3);
-                axi_req_o.aw_valid = 1'b1;
-                if (axi_resp_i.aw_ready) begin
+                axi_req_d.aw.addr  = c_store_addr;
+                axi_req_d.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
+                axi_req_d.aw.size  = axi_pkg::size_t'(3);
+                axi_req_d.aw_valid = 1'b1;
+                if (axi_resp_s.aw_ready) begin
                   aw_sent_d     = 1'b1;
                   stc_w_left_d  = nbeats[8:0];
                   stc_elem_d    = nbeats[15:0] << 1;
@@ -1549,31 +1782,25 @@ module g6lc_ai_gemm_seq #(
               end else if (stc_w_left_q != 9'd0) begin
                 beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
                 j_eff      = stc_j_q + (beats_done << 1);
-                c_r0_req  = 1'b1;
-                c_r0_bank = c_bank(j_eff);
-                c_r0_addr = c_bank_addr(stc_i_q, j_eff);
-                c_r1_req  = 1'b1;
-                c_r1_bank = c_bank(j_eff + 32'd1);
-                c_r1_addr = c_bank_addr(stc_i_q, j_eff + 32'd1);
                 begin
                   automatic wbeat_t wb;
                   wb = wbeat_at({c_r1_data, c_r0_data}, 8,
                                 32'(c_store_addr) + (beats_done << 3));
-                  axi_req_o.w.data = wb.data;
-                  axi_req_o.w.strb = wb.strb;
+                  axi_req_d.w.data = wb.data;
+                  axi_req_d.w.strb = wb.strb;
                 end
-                axi_req_o.w.last  = (stc_w_left_q == 9'd1);
-                axi_req_o.w_valid = 1'b1;
-                if (axi_resp_i.w_ready) begin
+                axi_req_d.w.last  = (stc_w_left_q == 9'd1);
+                axi_req_d.w_valid = 1'b1;
+                if (axi_resp_s.w_ready) begin
                   stc_w_left_d = stc_w_left_q - 9'd1;
                   if (stc_w_left_q == 9'd1)
                     w_sent_d = 1'b1;
                 end
               end else begin
-                axi_req_o.b_ready = 1'b1;
+                axi_req_d.b_ready = 1'b1;
                 stc_n_d = stc_elem_q;
-                if (axi_resp_i.b_valid) begin
-                  if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR,
+                if (axi_resp_s.b_valid) begin
+                  if (axi_resp_s.b.resp inside {axi_pkg::RESP_DECERR,
                                                 axi_pkg::RESP_SLVERR})
                     err_d = 1'b1;
                   aw_sent_d     = 1'b0;
@@ -1594,32 +1821,29 @@ module g6lc_ai_gemm_seq #(
               end
             end else begin
               // Single i32 (odd n tail)
-              c_r0_req  = 1'b1;
-              c_r0_bank = c_bank(stc_j_q);
-              c_r0_addr = c_bank_addr(stc_i_q, stc_j_q);
-              axi_req_o.aw.addr = c_store_addr;
-              axi_req_o.aw.size = axi_pkg::size_t'(2);
+              axi_req_d.aw.addr = c_store_addr;
+              axi_req_d.aw.size = axi_pkg::size_t'(2);
               begin
                 automatic wbeat_t wb;
                 wb = wbeat_at(64'(c_r0_data), 4, 32'(c_store_addr));
-                axi_req_o.w.data = wb.data;
-                axi_req_o.w.strb = wb.strb;
+                axi_req_d.w.data = wb.data;
+                axi_req_d.w.strb = wb.strb;
               end
               stc_n_d = 16'd1;
               if (!aw_sent_q) begin
-                axi_req_o.aw_valid = 1'b1;
-                if (axi_resp_i.aw_ready) begin
+                axi_req_d.aw_valid = 1'b1;
+                if (axi_resp_s.aw_ready) begin
                   aw_sent_d  = 1'b1;
                   stc_elem_d = 16'd1;
                 end
               end
               if (!w_sent_q) begin
-                axi_req_o.w_valid = 1'b1;
-                if (axi_resp_i.w_ready) w_sent_d = 1'b1;
+                axi_req_d.w_valid = 1'b1;
+                if (axi_resp_s.w_ready) w_sent_d = 1'b1;
               end
-              axi_req_o.b_ready = 1'b1;
-              if (aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
-                if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR,
+              axi_req_d.b_ready = 1'b1;
+              if (aw_sent_q && w_sent_q && axi_resp_s.b_valid) begin
+                if (axi_resp_s.b.resp inside {axi_pkg::RESP_DECERR,
                                               axi_pkg::RESP_SLVERR})
                   err_d = 1'b1;
                 aw_sent_d     = 1'b0;
@@ -1648,8 +1872,9 @@ module g6lc_ai_gemm_seq #(
           else if (i_q >= m_q && stc_i_q >= m_q && aw_sent_q &&
                    dot_pending_q == '0)
             state_d = ST_MAC;  // finish open AW/B
-          else if (!DualCRead && i_q >= m_q && dot_pending_q == '0) begin
-            // PeLanes==1: fall back to dedicated ST_STC
+          else if ((!DualCRead || acc_mode_q) && i_q >= m_q && dot_pending_q == '0) begin
+            // PeLanes==1 (or accumulate mode, whose seed reads own port r0 during
+            // the MAC): fall back to dedicated ST_STC
             state_d       = ST_STC;
             aw_sent_d     = 1'b0;
             w_sent_d      = 1'b0;
@@ -1658,6 +1883,47 @@ module g6lc_ai_gemm_seq #(
             stc_elem_d    = '0;
           end else
             state_d = ST_MAC;
+        end
+      end
+
+      // Accumulate: stream the existing C tile (contiguous, ldc = n) into the C
+      // banks. One outstanding burst; each received beat is drained one 32-bit
+      // word per cycle through the single C write port (R is held meanwhile).
+      ST_LC: begin
+        begin
+          automatic logic [AddrWidth-1:0] lc_addr;
+          automatic logic [31:0] beats_left;
+          automatic logic [7:0]  nb;
+          lc_addr    = beat_align(pc_q) + AddrWidth'(lc_issued_q) * AddrWidth'(BytesPerBeat);
+          beats_left = lc_beats_q - lc_issued_q;
+          nb         = (beats_left > MaxBurstBeats) ? 8'(MaxBurstBeats) : beats_left[7:0];
+          nb         = cap_beats_to_stripe(lc_addr, nb);
+          if (!lc_ar_busy_q && lc_issued_q < lc_beats_q) begin
+            axi_req_d.ar.addr  = lc_addr;
+            axi_req_d.ar.len   = axi_pkg::len_t'(nb - 8'd1);
+            axi_req_d.ar_valid = 1'b1;
+            lc_ar_beats        = nb;
+            if (axi_resp_s.ar_ready) lc_ar_fire = 1'b1;
+          end
+          axi_req_d.r_ready = lc_ar_busy_q && !lc_buf_v_q;
+          if (lc_ar_busy_q && !lc_buf_v_q && axi_resp_s.r_valid) begin
+            lc_r_fire = 1'b1;
+            if (axi_resp_s.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+              err_d = 1'b1;
+          end
+          if (lc_buf_v_q && lc_e_q < lc_total_q) begin
+            c_w_req   = 1'b1;
+            c_w_bank  = c_bank(lc_j_q);
+            c_w_addr  = c_bank_addr(lc_i_q, lc_j_q);
+            c_w_data  = lc_buf_q[32 * lc_word_q +: 32];
+            lc_w_fire = 1'b1;
+          end
+          if (err_q) begin
+            if (!lc_ar_busy_q) state_d = ST_DONE;
+          end else if (lc_e_q >= lc_total_q && !lc_buf_v_q && !lc_ar_busy_q) begin
+            state_d = ST_MAC;
+            acc_d   = '0;
+          end
         end
       end
 
@@ -1679,11 +1945,11 @@ module g6lc_ai_gemm_seq #(
               if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
               nbeats    = cap_c_nbeats(c_store_addr, nbeats);
               if (nbeats == 0) nbeats = 1;
-              axi_req_o.aw.addr  = c_store_addr;
-              axi_req_o.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
-              axi_req_o.aw.size  = axi_pkg::size_t'(3);
-              axi_req_o.aw_valid = 1'b1;
-              if (axi_resp_i.aw_ready) begin
+              axi_req_d.aw.addr  = c_store_addr;
+              axi_req_d.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
+              axi_req_d.aw.size  = axi_pkg::size_t'(3);
+              axi_req_d.aw_valid = 1'b1;
+              if (axi_resp_s.aw_ready) begin
                 aw_sent_d     = 1'b1;
                 stc_w_left_d  = nbeats[8:0];
                 stc_elem_d    = nbeats[15:0] << 1;
@@ -1694,46 +1960,34 @@ module g6lc_ai_gemm_seq #(
               beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
               j_eff      = stc_j_q + (beats_done << 1);
               if (DualCRead) begin
-                c_r0_req  = 1'b1;
-                c_r0_bank = c_bank(j_eff);
-                c_r0_addr = c_bank_addr(stc_i_q, j_eff);
-                c_r1_req  = 1'b1;
-                c_r1_bank = c_bank(j_eff + 32'd1);
-                c_r1_addr = c_bank_addr(stc_i_q, j_eff + 32'd1);
                 begin
                   automatic wbeat_t wb;
                   wb = wbeat_at({c_r1_data, c_r0_data}, 8,
                                 32'(c_store_addr) + (beats_done << 3));
-                  axi_req_o.w.data = wb.data;
-                  axi_req_o.w.strb = wb.strb;
+                  axi_req_d.w.data = wb.data;
+                  axi_req_d.w.strb = wb.strb;
                 end
-                axi_req_o.w.last  = (stc_w_left_q == 9'd1);
-                axi_req_o.w_valid = 1'b1;
-                if (axi_resp_i.w_ready) begin
+                axi_req_d.w.last  = (stc_w_left_q == 9'd1);
+                axi_req_d.w_valid = 1'b1;
+                if (axi_resp_s.w_ready) begin
                   stc_w_left_d = stc_w_left_q - 9'd1;
                   if (stc_w_left_q == 9'd1)
                     w_sent_d = 1'b1;
                 end
               end else if (!c_pair_hold_q) begin
-                c_r0_req      = 1'b1;
-                c_r0_bank     = c_bank(j_eff);
-                c_r0_addr     = c_bank_addr(stc_i_q, j_eff);
                 c_lo_we_d     = 1'b1;
                 c_pair_hold_d = 1'b1;
               end else begin
-                c_r0_req  = 1'b1;
-                c_r0_bank = c_bank(j_eff + 32'd1);
-                c_r0_addr = c_bank_addr(stc_i_q, j_eff + 32'd1);
                 begin
                   automatic wbeat_t wb;
                   wb = wbeat_at({c_r0_data, c_lo_q}, 8,
                                 32'(c_store_addr) + (beats_done << 3));
-                  axi_req_o.w.data = wb.data;
-                  axi_req_o.w.strb = wb.strb;
+                  axi_req_d.w.data = wb.data;
+                  axi_req_d.w.strb = wb.strb;
                 end
-                axi_req_o.w.last  = (stc_w_left_q == 9'd1);
-                axi_req_o.w_valid = 1'b1;
-                if (axi_resp_i.w_ready) begin
+                axi_req_d.w.last  = (stc_w_left_q == 9'd1);
+                axi_req_d.w_valid = 1'b1;
+                if (axi_resp_s.w_ready) begin
                   stc_w_left_d  = stc_w_left_q - 9'd1;
                   c_pair_hold_d = 1'b0;
                   if (stc_w_left_q == 9'd1)
@@ -1741,10 +1995,10 @@ module g6lc_ai_gemm_seq #(
                 end
               end
             end else begin
-              axi_req_o.b_ready = 1'b1;
+              axi_req_d.b_ready = 1'b1;
               stc_n_d = stc_elem_q;
-              if (axi_resp_i.b_valid) begin
-                if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+              if (axi_resp_s.b_valid) begin
+                if (axi_resp_s.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
                   err_d = 1'b1;
                 aw_sent_d     = 1'b0;
                 w_sent_d      = 1'b0;
@@ -1767,32 +2021,29 @@ module g6lc_ai_gemm_seq #(
               end
             end
           end else begin
-            c_r0_req  = 1'b1;
-            c_r0_bank = c_bank(stc_j_q);
-            c_r0_addr = c_bank_addr(stc_i_q, stc_j_q);
-            axi_req_o.aw.addr = c_store_addr;
-            axi_req_o.aw.size = axi_pkg::size_t'(2);
+            axi_req_d.aw.addr = c_store_addr;
+            axi_req_d.aw.size = axi_pkg::size_t'(2);
             begin
               automatic wbeat_t wb;
               wb = wbeat_at(64'(c_r0_data), 4, 32'(c_store_addr));
-              axi_req_o.w.data = wb.data;
-              axi_req_o.w.strb = wb.strb;
+              axi_req_d.w.data = wb.data;
+              axi_req_d.w.strb = wb.strb;
             end
             stc_n_d = 16'd1;
             if (!aw_sent_q) begin
-              axi_req_o.aw_valid = 1'b1;
-              if (axi_resp_i.aw_ready) begin
+              axi_req_d.aw_valid = 1'b1;
+              if (axi_resp_s.aw_ready) begin
                 aw_sent_d  = 1'b1;
                 stc_elem_d = 16'd1;
               end
             end
             if (!w_sent_q) begin
-              axi_req_o.w_valid = 1'b1;
-              if (axi_resp_i.w_ready) w_sent_d = 1'b1;
+              axi_req_d.w_valid = 1'b1;
+              if (axi_resp_s.w_ready) w_sent_d = 1'b1;
             end
-            axi_req_o.b_ready = 1'b1;
-            if (aw_sent_q && w_sent_q && axi_resp_i.b_valid) begin
-              if (axi_resp_i.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+            axi_req_d.b_ready = 1'b1;
+            if (aw_sent_q && w_sent_q && axi_resp_s.b_valid) begin
+              if (axi_resp_s.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
                 err_d = 1'b1;
               aw_sent_d     = 1'b0;
               w_sent_d      = 1'b0;
@@ -1820,6 +2071,10 @@ module g6lc_ai_gemm_seq #(
       ST_DONE: state_d = ST_IDLE;
       default: state_d = ST_IDLE;
     endcase
+    // Accumulate mode enters the MAC through ST_LC so the tile holds C first.
+    if (acc_mode_q && state_d == ST_MAC && state_q != ST_MAC && state_q != ST_LC)
+      state_d = ST_LC;
+
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -1828,9 +2083,11 @@ module g6lc_ai_gemm_seq #(
       m_q <= '0; n_q <= '0; k_q <= '0;
       lda_q <= '0; ldb_q <= '0;
       numfmt_q <= '0;
+      acc_mode_q <= 1'b0;
       pa_q <= '0; pb_q <= '0; pc_q <= '0;
       i_q <= '0; j_q <= '0; t_q <= '0;
       acc_q <= '0;
+      pitch_sh_q <= '0;
       err_q <= 1'b0;
       done_q <= 1'b0;
       ar_inflight_q <= '0;
@@ -1857,6 +2114,7 @@ module g6lc_ai_gemm_seq #(
       stc_elem_q <= '0;
       stc_i_q <= '0;
       stc_j_q <= '0;
+      c_rows_done_q <= '0;
       dot_pending_q <= '0;
       pmu_r_q  <= '0;
       pmu_w_q  <= '0;
@@ -1883,6 +2141,10 @@ module g6lc_ai_gemm_seq #(
         sum_j_q     <= sum_j_d;
       end
       err_q       <= err_d;
+      // The pitch is fixed for the job at ST_CHK; every bank address from ST_LA on
+      // uses the registered value (the reuse key compares k, so a resident panel
+      // always carries the pitch the new job computes).
+      if (state_q == ST_CHK) pitch_sh_q <= pitch_sh_c;
       ar_inflight_q <= ar_inflight_d;
       aw_sent_q     <= aw_sent_d;
       w_sent_q      <= w_sent_d;
@@ -1949,6 +2211,8 @@ module g6lc_ai_gemm_seq #(
                          - ((dot_valid && dot_pending_q != '0) ? 1'd1 : 1'd0)
                        : '0;
       if (c_lo_we_d)   c_lo_q <= c_r_data;
+      if (c_w_req && sum_j_q + 32'd1 == n_q)
+        c_rows_done_q <= RowCountW'(sum_i_q) + RowCountW'(1);
       done_q        <= (state_q == ST_DONE);
 
       // I3: accumulate traffic while job is running
@@ -1956,12 +2220,12 @@ module g6lc_ai_gemm_seq #(
       if (state_q != ST_IDLE && state_q != ST_DONE)
         pmu_cy_q <= pmu_cy_q + 32'd1;
       if (state_q != ST_IDLE && state_q != ST_DONE &&
-          axi_req_o.r_ready && axi_resp_i.r_valid)
+          axi_req_d.r_ready && axi_resp_s.r_valid)
         pmu_r_q <= pmu_r_q + 32'd1;
       // Count W handshakes, not B responses: a multi-beat AW produces one B for
       // many beats, so counting B would understate write traffic in the PMU.
       if (state_q != ST_IDLE && state_q != ST_DONE &&
-          axi_req_o.w_valid && axi_resp_i.w_ready)
+          axi_req_d.w_valid && axi_resp_s.w_ready)
         pmu_w_q <= pmu_w_q + 32'd1;
 
       if (state_q == ST_IDLE && start_i) begin
@@ -1971,6 +2235,7 @@ module g6lc_ai_gemm_seq #(
         lda_q <= lda_i;
         ldb_q <= ldb_i;
         numfmt_q <= numfmt_i;
+        acc_mode_q <= accumulate_i;
         pa_q  <= ptr_a_i;
         pb_q  <= ptr_b_i;
         pc_q  <= ptr_c_i;
@@ -1989,6 +2254,7 @@ module g6lc_ai_gemm_seq #(
         stc_elem_q    <= '0;
         stc_i_q  <= '0;
         stc_j_q  <= '0;
+        c_rows_done_q <= '0;
         pmu_r_q  <= '0;
         pmu_w_q  <= '0;
         pmu_cy_q <= '0;
@@ -2011,8 +2277,8 @@ module g6lc_ai_gemm_seq #(
       end
 
       // A load: advance t by la_n_d (multi-byte unpack)
-      if (!SplitArId && state_q == ST_LA && ar_inflight_q != '0 && axi_resp_i.r_valid) begin
-        if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+      if (!SplitArId && state_q == ST_LA && ar_inflight_q != '0 && axi_resp_s.r_valid) begin
+        if (axi_resp_s.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
           err_q <= 1'b1;
         if (t_q + 32'(la_n_d) >= k_bytes) begin
           t_q <= '0;
@@ -2030,8 +2296,8 @@ module g6lc_ai_gemm_seq #(
       // B load: advance t by lb_n_d, then j -- the same shape as the A load
       // above, because AI-X9 made B k-major. There is no held-beat term any
       // more; the oct-drain that needed one is gone.
-      if (!SplitArId && state_q == ST_LB && ar_inflight_q != '0 && axi_resp_i.r_valid) begin
-        if (axi_resp_i.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
+      if (!SplitArId && state_q == ST_LB && ar_inflight_q != '0 && axi_resp_s.r_valid) begin
+        if (axi_resp_s.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR})
           err_q <= 1'b1;
         if (t_q + 32'(lb_n_d) >= k_bytes) begin
           t_q <= '0;
@@ -2069,8 +2335,50 @@ module g6lc_ai_gemm_seq #(
       // Store cursor (trail during MAC or dedicated ST_STC)
       if (stc_i_en) stc_i_q <= stc_i_d;
       if (stc_j_en) stc_j_q <= stc_j_d;
-      if (SplitArId && axi_resp_i.r_valid && axi_req_o.r_ready && axi_resp_i.r.resp[1])
+      if (SplitArId && axi_resp_s.r_valid && axi_req_d.r_ready && axi_resp_s.r.resp[1])
         err_q <= 1'b1;
+    end
+  end
+
+  // ST_LC loader state. Idle outside ST_LC so entry always starts clean.
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      lc_total_q <= '0; lc_beats_q <= '0; lc_issued_q <= '0; lc_recv_q <= '0;
+      lc_burst_left_q <= '0; lc_ar_busy_q <= 1'b0; lc_buf_q <= '0; lc_buf_v_q <= 1'b0;
+      lc_word_q <= '0; lc_e_q <= '0; lc_i_q <= '0; lc_j_q <= '0;
+    end else if (state_q != ST_LC) begin
+      lc_total_q <= m_q * n_q;
+      lc_beats_q <= (32'((pc_q >> 2) & AddrWidth'(WordsPerBeat - 1)) + m_q * n_q
+                     + 32'(WordsPerBeat) - 32'd1) >> LcWordW;
+      lc_issued_q <= '0; lc_recv_q <= '0; lc_burst_left_q <= '0; lc_ar_busy_q <= 1'b0;
+      lc_buf_q <= '0; lc_buf_v_q <= 1'b0; lc_word_q <= '0;
+      lc_e_q <= '0; lc_i_q <= '0; lc_j_q <= '0;
+    end else begin
+      if (lc_ar_fire) begin
+        lc_ar_busy_q    <= 1'b1;
+        lc_burst_left_q <= lc_ar_beats;
+        lc_issued_q     <= lc_issued_q + 32'(lc_ar_beats);
+      end
+      if (lc_r_fire) begin
+        lc_buf_q   <= axi_resp_s.r.data;
+        lc_buf_v_q <= 1'b1;
+        // First beat starts at the word lane of ptr_c; later beats at lane 0.
+        lc_word_q  <= (lc_recv_q == 32'd0) ? LcWordW'((pc_q >> 2) & AddrWidth'(WordsPerBeat - 1)) : '0;
+        lc_recv_q  <= lc_recv_q + 32'd1;
+        lc_burst_left_q <= lc_burst_left_q - 8'd1;
+        if (lc_burst_left_q == 8'd1 || axi_resp_s.r.last) lc_ar_busy_q <= 1'b0;
+      end
+      if (lc_w_fire) begin
+        lc_e_q <= lc_e_q + 32'd1;
+        if (lc_j_q + 32'd1 >= n_q) begin lc_j_q <= '0; lc_i_q <= lc_i_q + 32'd1; end
+        else lc_j_q <= lc_j_q + 32'd1;
+        if (lc_word_q == LcWordW'(WordsPerBeat - 1) || lc_e_q + 32'd1 >= lc_total_q)
+          lc_buf_v_q <= 1'b0;
+        else
+          lc_word_q <= lc_word_q + LcWordW'(1);
+      end else if (lc_buf_v_q && lc_e_q >= lc_total_q) begin
+        lc_buf_v_q <= 1'b0;  // trailing pad words of the last beat
+      end
     end
   end
 

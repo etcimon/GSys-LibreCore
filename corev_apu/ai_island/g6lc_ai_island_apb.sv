@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 //
 // APB3 slave in front of g6lc_ai_island_top (simple reg port).
-// Setup phase arms the request; access phase waits for rvalid (1–2 cycles).
+// Setup arms one request; access waits for rvalid, including iterative PMU reads.
 // Optional AXI DMA master for descriptor fetch (EnableDmaFetch).
 
 module g6lc_ai_island_apb
@@ -18,7 +18,9 @@ module g6lc_ai_island_apb
     parameter type            axi_req_t    = logic,
     parameter type            axi_resp_t   = logic,
     // Forwarded to g6lc_ai_island_top; see there for why it is a parameter.
-    parameter logic [15:0]    DtypeMask    = AiIslandDtypeMask
+    parameter logic [15:0]    DtypeMask    = AiIslandDtypeMask,
+    // Forwarded accumulate grant (CAP_OFF_ACCMODE bit 0).
+    parameter bit             AccumulateEn = AiIslandAccmodeGrant[0]
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
@@ -35,12 +37,15 @@ module g6lc_ai_island_apb
     output logic        irq_o,
     // Core sideband (optional; tie 0 when unused)
     input  logic        sb_enq_valid_i,
+    output logic        sb_enq_ready_o,
     input  logic [7:0]  sb_qid_i,
     input  logic [31:0] sb_ticket_i,
     input  logic [63:0] sb_desc_ptr_i,
     output logic [31:0] sb_last_ticket_o,
     output logic [15:0] sb_last_status_o,
     output logic        sb_has_completion_o,
+    output logic        sb_retired_valid_o,
+    output logic [31:0] sb_retired_ticket_o,
     // AXI DMA (desc fetch)
     output axi_req_t    axi_dma_req_o,
     input  axi_resp_t   axi_dma_resp_i,
@@ -53,7 +58,7 @@ module g6lc_ai_island_apb
   logic        is_req, is_we;
   logic [15:0] is_addr;
   logic [31:0] is_wdata, is_rdata;
-  logic        is_rvalid;
+  logic        is_rvalid, is_rerror;
 
   typedef enum logic [1:0] { S_IDLE, S_REQ, S_WAIT } state_e;
   state_e state_q, state_d;
@@ -66,7 +71,8 @@ module g6lc_ai_island_apb
       .AxiIdWidth    (AxiIdWidth),
       .axi_req_t     (axi_req_t),
       .axi_resp_t    (axi_resp_t),
-      .DtypeMask     (DtypeMask)
+      .DtypeMask     (DtypeMask),
+      .AccumulateEn  (AccumulateEn)
   ) i_island (
       .clk_i     (clk_i),
       .rst_ni    (rst_ni),
@@ -77,14 +83,18 @@ module g6lc_ai_island_apb
       .wdata_i   (is_wdata),
       .rdata_o   (is_rdata),
       .rvalid_o  (is_rvalid),
+      .rerror_o  (is_rerror),
       .irq_o     (irq_o),
       .sb_enq_valid_i      (sb_enq_valid_i),
+      .sb_enq_ready_o      (sb_enq_ready_o),
       .sb_qid_i            (sb_qid_i),
       .sb_ticket_i         (sb_ticket_i),
       .sb_desc_ptr_i       (sb_desc_ptr_i),
       .sb_last_ticket_o    (sb_last_ticket_o),
       .sb_last_status_o    (sb_last_status_o),
       .sb_has_completion_o (sb_has_completion_o),
+      .sb_retired_valid_o  (sb_retired_valid_o),
+      .sb_retired_ticket_o (sb_retired_ticket_o),
       .axi_dma_req_o       (axi_dma_req_o),
       .axi_dma_resp_i      (axi_dma_resp_i),
       .dram_init_done_i    (dram_init_done_i),
@@ -125,6 +135,7 @@ module g6lc_ai_island_apb
         if (is_rvalid || pwrite_i) begin
           // Writes also complete after 1 cycle of processing
           pready_o = 1'b1;
+          pslverr_o = is_rerror;
           prdata_o = is_rdata;
           state_d  = S_IDLE;
         end

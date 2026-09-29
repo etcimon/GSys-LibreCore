@@ -118,7 +118,7 @@ module tb_g6lc_ai_gemm_area
       .rst_ni       ( rst_ni ),
       .testmode_i   ( testmode_i ),
       .start_i      ( start_i ),
-      .m_i, .n_i, .k_i, .lda_i, .ldb_i, .numfmt_i, .ar_max_i,
+      .m_i, .n_i, .k_i, .lda_i, .ldb_i, .numfmt_i, .accumulate_i(1'b0), .ar_max_i,
       .ptr_a_i      ( ptr_a_i ),
       .ptr_b_i      ( ptr_b_i ),
       .ptr_c_i      ( ptr_c_i ),
@@ -130,6 +130,7 @@ module tb_g6lc_ai_gemm_area
       .pmu_r_beats_o( pmu_r_beats_o ),
       .pmu_w_beats_o( pmu_w_beats_o ),
       .pmu_cycles_o ( pmu_cycles_o ),
+      .pmu_phase_o (), .pmu_stall_o (),
       .reuse_b_i, .reuse_b_epoch_i, .reuse_b_invalidate_i, .pmu_reuse_b_hit_o,
       .reuse_a_i, .reuse_a_epoch_i, .reuse_a_invalidate_i, .pmu_reuse_a_hit_o
   );

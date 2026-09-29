@@ -37,8 +37,17 @@ module g6lc_ai_exec
     input  logic [7:0]            ai_qid_i,    // aiqctl[15:8]
     // Island completion sideband for ai.poll (tie 0 when no island)
     input  logic                  isl_has_completion_i,
+    // Sideband retired watermark (highest ticket the island has completed for
+    // this producer, claimed or not). Answers polls for tickets behind the head.
+    input  logic                  isl_retired_valid_i,
+    input  logic [31:0]           isl_retired_ticket_i,
     input  logic [31:0]           isl_last_ticket_i,
     input  logic [15:0]           isl_last_status_i,
+    // 1 when the sideband reaches a real island: ai.poll then reports only island
+    // completions. 0 keeps the pre-P3 local-ticket stub for islandless bring-up.
+    input  logic                  isl_attached_i,
+    // Held-valid acceptance from the island; tie 1 for the legacy pulse contract.
+    input  logic                  sb_enq_ready_i,
     input  logic                  testmode_i,  // DFT
     output logic                  setcfg_we_o,
     output logic       [XLEN-1:0] setcfg_wdata_o,
@@ -197,7 +206,8 @@ module g6lc_ai_exec
     ST_MMA   = 3'd1,
     ST_DONE  = 3'd2,
     ST_RQ    = 3'd3,  // requant s32→s8
-    ST_RELU  = 3'd4
+    ST_RELU  = 3'd4,
+    ST_ENQ   = 3'd5   // ai.enq held until the island accepts (VALID/READY)
   } state_e;
   state_e state_q, state_d;
 
@@ -259,6 +269,21 @@ module g6lc_ai_exec
   assign dirty_o        = dirty_q;
   assign busy_o         = (state_q != ST_IDLE);
 
+  // Accumulator read request, formed only from registered state and the issue
+  // inputs. Kept out of the FSM process so the Latency-0 read data that process
+  // consumes is not also a function of its own outputs (a scheduling loop).
+  always_comb begin
+    acc_r_req = 1'b0;
+    acc_r_acc = '0;
+    if (state_q == ST_IDLE && valid_i && opcode_i == AI_MVACC && idx_rs1 < AccCount) begin
+      acc_r_req = 1'b1;
+      acc_r_acc = AccAddrW'(idx_rs1);
+    end else if ((state_q == ST_MMA || state_q == ST_RQ) && mma_acc_q < AccCount) begin
+      acc_r_req = 1'b1;
+      acc_r_acc = AccAddrW'(mma_acc_q);
+    end
+  end
+
   // Classify completing ops for PMU (latched with valid_q)
   logic pmu_mma_n, pmu_mma_q, pmu_post_n, pmu_post_q, pmu_t0_n, pmu_t0_q;
   assign pmu_op_o   = valid_q;
@@ -271,10 +296,14 @@ module g6lc_ai_exec
   logic        poll_isl_hit, poll_isl_err, poll_local_done;
   logic [1:0]  poll_status;
   assign poll_want       = registers_i[0][31:0];
-  assign poll_isl_hit    = isl_has_completion_i && (poll_want <= isl_last_ticket_i);
-  assign poll_isl_err    = poll_isl_hit && (poll_want == isl_last_ticket_i) &&
+  // Head match gives the exact status. Any other ticket at or below the
+  // retired watermark is complete (its detail is in the completion word /
+  // the MMIO claim); above it, or with no island evidence, it is pending.
+  assign poll_isl_hit    = (isl_has_completion_i && (poll_want == isl_last_ticket_i)) ||
+                           (isl_retired_valid_i && (poll_want <= isl_retired_ticket_i));
+  assign poll_isl_err    = isl_has_completion_i && (poll_want == isl_last_ticket_i) &&
                            (isl_last_status_i != 16'd0);
-  assign poll_local_done = (poll_want < ticket_q);
+  assign poll_local_done = !isl_attached_i && (poll_want < ticket_q);
   always_comb begin
     if (!ai_q_en_i) poll_status = POLL_PENDING[1:0];
     else if (poll_isl_err) poll_status = POLL_ERR[1:0];
@@ -292,8 +321,6 @@ module g6lc_ai_exec
     // defaults: hold tiles; no acc write
     for (int unsigned t = 0; t < TileCount; t++)
       for (int unsigned e = 0; e < TileElems; e++) tiles_d[t][e] = tiles_q[t][e];
-    acc_r_req  = 1'b0;
-    acc_r_acc  = '0;
     acc_w_req  = 1'b0;
     acc_w_acc  = '0;
     acc_w_data = '0;
@@ -317,8 +344,8 @@ module g6lc_ai_exec
     rq_pack_d      = rq_pack_q;
     ticket_d       = ticket_q;
     sb_enq_n       = 1'b0;
-    sb_qid_n       = ai_qid_i;
-    sb_ticket_n    = ticket_q;
+    sb_qid_n       = sb_qid_q;
+    sb_ticket_n    = sb_ticket_q;
     sb_desc_ptr_n  = sb_desc_ptr_q;
 
     result_n       = '0;
@@ -403,8 +430,6 @@ module g6lc_ai_exec
             AI_MVACC: begin
               // rd GPR, acc=rs1, elem=rs2 — Latency=0 combo read
               if (idx_rs1 < AccCount && int'(idx_rs2) < AccElems) begin
-                acc_r_req = 1'b1;
-                acc_r_acc = AccAddrW'(idx_rs1);
                 result_n  = XLEN'(acc_get(acc_r_data, int'(idx_rs2)));
               end else result_n = '0;
               we_n     = 1'b1;
@@ -482,20 +507,23 @@ module g6lc_ai_exec
             AI_ENQ: begin
               // Return ticket or all-ones if queue disabled. Sideband kick
               // carries rs1 as optional desc ptr (0 ⇒ use MMIO-latched desc).
-              // Does not block on full.
+              // The kick is held VALID until the island accepts it; the ticket
+              // is returned only on acceptance (legacy islands accept at once).
               if (ai_q_en_i) begin
-                result_n       = XLEN'(ticket_q);
                 sb_enq_n       = 1'b1;
                 sb_qid_n       = ai_qid_i;
                 sb_ticket_n    = ticket_q;
                 sb_desc_ptr_n  = registers_i[0];
-                ticket_d       = ticket_q + 32'd1;
+                mma_hart_d     = hartid_i;
+                mma_id_d       = id_i;
+                mma_rd_d       = rd_i;
+                state_d        = ST_ENQ;
               end else begin
                 result_n = XLEN'(ENQ_FULL);
+                we_n     = 1'b1;
+                valid_n  = 1'b1;
+                pmu_t0_n = 1'b1;
               end
-              we_n     = 1'b1;
-              valid_n  = 1'b1;
-              pmu_t0_n = 1'b1;
             end
             AI_POLL: begin
               // Status from poll_status wires (see above). Always complete T0.
@@ -559,8 +587,6 @@ module g6lc_ai_exec
         end
         mac_c_elem = mma_m_q * TileN + mma_n_q;
         if (mma_acc_q < AccCount && mac_c_elem < AccElems) begin
-          acc_r_req = 1'b1;
-          acc_r_acc = AccAddrW'(mma_acc_q);
           mac_old   = acc_get(acc_r_data, mac_c_elem);
           unique case (mma_accmode_q)
             2'b00: mac_new = mac_sum;
@@ -608,8 +634,6 @@ module g6lc_ai_exec
           c_elem = mma_m_q * TileN + mma_n_q;
           if (mma_acc_q < AccCount && mma_ta_q < TileCount && c_elem < AccElems &&
               c_elem < TileElems) begin
-            acc_r_req = 1'b1;
-            acc_r_acc = AccAddrW'(mma_acc_q);
             aval = acc_get(acc_r_data, c_elem);
             // Signed widen: s32×s16 → s48
             prod = signed'({{16{aval[31]}}, aval}) * signed'({{32{sc[15]}}, sc});
@@ -659,6 +683,22 @@ module g6lc_ai_exec
           mma_n_d = '0;
           if (mma_m_q + 4'd1 < mma_M_q) mma_m_d = mma_m_q + 4'd1;
           else state_d = ST_DONE;
+        end
+      end
+
+      ST_ENQ: begin
+        sb_enq_n = 1'b1;
+        if (sb_enq_ready_i) begin
+          sb_enq_n = 1'b0;
+          hartid_n = mma_hart_q;
+          id_n     = mma_id_q;
+          rd_n     = mma_rd_q;
+          result_n = XLEN'(sb_ticket_q);
+          ticket_d = sb_ticket_q + 32'd1;
+          we_n     = 1'b1;
+          valid_n  = 1'b1;
+          pmu_t0_n = 1'b1;
+          state_d  = ST_IDLE;
         end
       end
 

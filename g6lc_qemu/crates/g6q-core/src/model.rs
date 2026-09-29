@@ -313,6 +313,17 @@ pub struct AiIslandConfig {
     pub qos_classes: u32,
     /// Preemption boundary in k-steps.
     pub work_quantum_k: u32,
+    /// Depth of the optional on-chip command FIFO (`IslandCfg.CommandDepth`). Zero means
+    /// the queued extension is not provisioned and its CAP word reads zero.
+    pub command_depth: u32,
+    /// `COMMAND_QUEUE_VERSION` when the package publishes it. Without it and the flags
+    /// below, the `command_queue` CAP word stays unsourced rather than invented.
+    pub command_queue_version: Option<u32>,
+    /// `COMMAND_QUEUE_FLAGS` when the package publishes it.
+    pub command_queue_flags: Option<u32>,
+    /// `AiIslandAccmodeGrant` (CAP `accmode` word) when the package publishes it; bit 0 is
+    /// the accumulate grant. `None` leaves the CAP word unsourced rather than zero.
+    pub accmode_grant: Option<u32>,
     /// Bit layout of the packed `block_mnk` capability word, when the design publishes it.
     ///
     /// The cap window packs `log2(AccTileM)`, `log2(AccTileN)` and `log2(AccTileK)` into one
@@ -401,6 +412,22 @@ impl AiIslandConfig {
             ("queue_depth", Json::Int(self.queue_depth as i64)),
             ("qos_classes", Json::Int(self.qos_classes as i64)),
             ("work_quantum_k", Json::Int(self.work_quantum_k as i64)),
+            ("command_depth", Json::Int(self.command_depth as i64)),
+            (
+                "command_queue_version",
+                self.command_queue_version
+                    .map_or(Json::Null, |v| Json::Int(v as i64)),
+            ),
+            (
+                "command_queue_flags",
+                self.command_queue_flags
+                    .map_or(Json::Null, |v| Json::Int(v as i64)),
+            ),
+            (
+                "accmode_grant",
+                self.accmode_grant
+                    .map_or(Json::Null, |v| Json::Int(v as i64)),
+            ),
             (
                 "dtype_mask",
                 self.dtype_mask.map_or(Json::Null, |v| Json::Int(v as i64)),
@@ -502,6 +529,14 @@ impl AiIslandConfig {
         out
     }
 
+    /// Operand bank capacity in bytes for `rows` panel rows (see `bank_a_bytes`).
+    pub fn operand_bank_bytes(&self, rows: u32) -> u64 {
+        let lanes = u64::from(self.macs_per_cycle.max(1));
+        let elem_max: u64 = if self.fp_datapath { 4 } else { 1 };
+        let words = (elem_max * u64::from(self.acc_tile_k)).div_ceil(lanes);
+        u64::from(rows) * words * lanes
+    }
+
     /// Source one capability word from the configuration, by the design's own name.
     ///
     /// Returning `None` means *this configuration cannot source that word*, which callers
@@ -523,6 +558,21 @@ impl AiIslandConfig {
             "dram_channels" => Some(self.dram_channels as u64),
             "dtype_mask" => self.dtype_mask.map(|v| v as u64),
             "block_mnk" => self.pack_block_mnk(),
+            "accmode" => self.accmode_grant.map(u64::from),
+            // Flat panel mapping: operand bank capacity in bytes, the sequencer's
+            // `OperandWords{A,B} * PeLanes` = rows * ceil(elem_max * AccTileK / lanes) * lanes
+            // (`ai_operand_bank_bytes` in the package). elem_max is 4 with a float
+            // datapath, else 1 -- the same rule the island top applies.
+            "bank_a_bytes" => Some(self.operand_bank_bytes(self.acc_tile_m)),
+            "bank_b_bytes" => Some(self.operand_bank_bytes(self.acc_tile_n)),
+            // `{depth[15:0], version[7:0], flags[7:0]}`; zero when not provisioned.
+            "command_queue" => Some(if self.command_depth == 0 {
+                0
+            } else {
+                ((self.command_depth as u64 & 0xffff) << 16)
+                    | ((self.command_queue_version? as u64 & 0xff) << 8)
+                    | (self.command_queue_flags? as u64 & 0xff)
+            }),
             // Packed words have a field list in the model.
             _ => self.pack_cap_packed(name),
         }

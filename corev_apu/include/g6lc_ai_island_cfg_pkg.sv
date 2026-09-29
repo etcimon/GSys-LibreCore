@@ -50,11 +50,53 @@ package g6lc_ai_island_cfg_pkg;
   localparam int unsigned AI_PANEL_N = 512;
   localparam int unsigned AI_PANEL_K = 512;
 
+  // Bytes/cycle that move. A wider island DMA joined onto a narrower
+  // fabric carries the fabric width. 512 onto 64 is still 8, so
+  // AI_LIVE_MACS stays 512.
+  function automatic int unsigned carried_bytes_per_cycle(
+      input int unsigned island_bits, input int unsigned fabric_bits
+  );
+    int unsigned bits;
+    bits = (island_bits < fabric_bits) ? island_bits : fabric_bits;
+    return bits / 8;
+  endfunction
+
+  // The live MAC count may rise only after the carried port is wider
+  // than 8 bytes/cycle. Descriptor, C, and completion beats are a
+  // separate 8-byte path and are not this check.
+  function automatic bit macs_may_rise(input int unsigned bytes_per_cycle);
+    return bytes_per_cycle > 8;
+  endfunction
+
+  // Descriptor, C, and completion bytes/cycle. The live path is 8.
+  // A legal setting is a power of two from 8 through 512. Anything else
+  // carries nothing. This does not widen those beats.
+  function automatic int unsigned control_beat_bytes(input int unsigned bytes);
+    if (bytes >= 8 && bytes <= 512 && (bytes & (bytes - 1)) == 0) return bytes;
+    return 0;
+  endfunction
+
+  // A configured fabric wider than 64 bits promotes the port. The live
+  // fabric stays 64. Widths that are not a power of two from 64 through
+  // 4096 carry nothing.
+  function automatic bit port_width_ok(input int unsigned bits);
+    return bits >= 64 && bits <= 4096 && (bits & (bits - 1)) == 0;
+  endfunction
+
+  function automatic bit port_promoted(
+      input int unsigned island_bits, input int unsigned fabric_bits
+  );
+    if (!port_width_ok(island_bits) || !port_width_ok(fabric_bits)) return 1'b0;
+    return macs_may_rise(carried_bytes_per_cycle(island_bits, fabric_bits));
+  endfunction
+
   // NoC peak GB/s = (width_bytes) × (clock GHz). Live 64-bit @ 1 GHz → 8.
   function automatic int unsigned noc_peak_gbps(
       input int unsigned noc_bits, input int unsigned clock_khz
   );
-    return (noc_bits / 8) * (clock_khz / 1_000_000);
+    logic [63:0] gbps;
+    gbps = (64'(noc_bits / 8) * 64'(clock_khz)) / 64'd1_000_000;
+    return gbps > 64'hffff_ffff ? 32'hffff_ffff : 32'(gbps);
   endfunction
 
   // DDR4-2400×64 nameplate scales linearly with independent channels.
@@ -134,7 +176,12 @@ package g6lc_ai_island_cfg_pkg;
     stripe = unsigned'(1) << shift;
     off    = unsigned'(addr[31:0]) & (stripe - unsigned'(1));
     rem    = stripe - off;
-    maxb   = rem / beat_bytes;
+    // beat_bytes is a power of two at every call site (AXI beat, 8 B C word); a
+    // shift keeps this off the divider path when the address is a runtime value.
+    if ((beat_bytes & (beat_bytes - unsigned'(1))) == 0)
+      maxb = rem >> $clog2(beat_bytes);
+    else
+      maxb = rem / beat_bytes;
     if (maxb == 0) maxb = unsigned'(1);
     if (maxb > unsigned'(255)) maxb = unsigned'(255);
     return maxb;
@@ -148,10 +195,21 @@ package g6lc_ai_island_cfg_pkg;
     else return 32'd1;
   endfunction
 
+  // log2 of the element size: every native element is 1, 2 or 4 bytes (INT4 is
+  // handled by its callers as half a byte), so element/byte scaling is a shift.
+  // Datapaths must use this rather than multiply/divide by ai_elem_bytes(): a
+  // runtime multiply or divide by a value that is always a power of two still
+  // synthesises as a multiplier/divider.
+  function automatic logic [1:0] ai_elem_shift(input logic [2:0] fmt);
+    if (fmt inside {3'd5, 3'd6}) return 2'd1;
+    else if (fmt == 3'd7) return 2'd2;
+    else return 2'd0;
+  endfunction
+
   function automatic logic [31:0] ai_row_bytes(input logic [2:0] fmt,
                                                input logic [31:0] elems);
     if (fmt == 3'd1) return (elems + 32'd1) >> 1;
-    else return elems * ai_elem_bytes(fmt);
+    else return elems << ai_elem_shift(fmt);
   endfunction
 
   // Bytes touched by `rows` rows. The last row is `tail_elems` long; earlier
@@ -161,13 +219,20 @@ package g6lc_ai_island_cfg_pkg;
       input logic [31:0] rows, stride_elems, tail_elems,
       input logic [2:0] fmt);
     logic [63:0] stride_b, tail_b, n, prod;
+    logic [67:0] wide;
     if (rows == 0) return 64'd1;
     stride_b = 64'(ai_row_bytes(fmt, stride_elems));
     tail_b   = 64'(ai_row_bytes(fmt, tail_elems));
     n        = 64'(rows) - 64'd1;
-    if (stride_b != 0 && n > ({64{1'b1}} / stride_b))
+    // Overflow guard without a 64-bit divider: rows is 32 bits and a row is at
+    // most 2^34 bytes (32-bit element count x 4), so the product fits 66 bits;
+    // any bit above 63 means the span saturates. (The former
+    // `n > MAX / stride_b` test synthesised to a 64-bit restoring divider on a
+    // runtime operand -- the deepest cone in the island for a range check.)
+    wide = 68'(n) * 68'(stride_b);
+    if (|wide[67:64])
       return {64{1'b1}};
-    prod = n * stride_b;
+    prod = wide[63:0];
     if (tail_b > ({64{1'b1}} - prod))
       return {64{1'b1}};
     prod = prod + tail_b;
@@ -180,12 +245,22 @@ package g6lc_ai_island_cfg_pkg;
       input logic [31:0] rows, cols);
     logic [63:0] bytes;
     if (rows == 0 || cols == 0) return 64'd1;
-    if (64'(rows) > ({64{1'b1}} / 64'(cols)))
-      return {64{1'b1}};
+    // 32 x 32 bits never exceeds 64 bits: no divider-based overflow test needed;
+    // the `> MAX >> 2` check below saturates the byte count.
     bytes = 64'(rows) * 64'(cols);
     if (bytes > ({64{1'b1}} >> 2))
       return {64{1'b1}};
     return bytes << 2;
+  endfunction
+
+  // Operand bank capacity published at CAP_OFF_BANK_{A,B}_BYTES (flat panel mapping).
+  function automatic logic [31:0] ai_operand_bank_bytes(input int unsigned rows,
+                                                        input int unsigned tile_k,
+                                                        input int unsigned lanes,
+                                                        input int unsigned elem_bytes_max);
+    // rows * ceil(elem_bytes_max * tile_k / lanes) words of `lanes` bytes: the
+    // OperandWords{A,B} * PeLanes sizing of g6lc_ai_gemm_seq.
+    return 32'(rows * ((elem_bytes_max * tile_k + lanes - 1) / lanes) * lanes);
   endfunction
 
   function automatic bit ai_elem_aligned(input logic [63:0] addr,
@@ -248,6 +323,7 @@ package g6lc_ai_island_cfg_pkg;
     int unsigned DramClass;      // 0=sim AXI (I3-lite), 1=DDR4, 2=LPDDR5 SKU
     int unsigned Queues;         // T2 rings visible to the island
     int unsigned QueueDepth;
+    int unsigned CommandDepth;
     int unsigned QosClasses;
     int unsigned WorkQuantumK;   // preemption boundary in k-steps
     int unsigned MaxAROut;       // I3: GEMM multi-outstanding AR/AW (live=2; DDR4≤8)
@@ -278,6 +354,7 @@ package g6lc_ai_island_cfg_pkg;
       DramClass:    unsigned'(AI_DRAM_SIM_AXI),
       Queues:       unsigned'(2),
       QueueDepth:   unsigned'(64),
+      CommandDepth: unsigned'(0),
       QosClasses:   unsigned'(2),
       WorkQuantumK: unsigned'(64),
       MaxAROut:     unsigned'(AI_MAX_AR_OUT_LIVE),
@@ -305,6 +382,7 @@ package g6lc_ai_island_cfg_pkg;
       DramClass:    unsigned'(AI_DRAM_SIM_AXI),
       Queues:       unsigned'(2),
       QueueDepth:   unsigned'(64),
+      CommandDepth: unsigned'(0),
       QosClasses:   unsigned'(2),
       WorkQuantumK: unsigned'(64),
       MaxAROut:     unsigned'(AI_MAX_AR_OUT_DRAM),
@@ -332,6 +410,7 @@ package g6lc_ai_island_cfg_pkg;
       DramClass:    unsigned'(AI_DRAM_DDR4),
       Queues:       unsigned'(2),
       QueueDepth:   unsigned'(64),
+      CommandDepth: unsigned'(0),
       QosClasses:   unsigned'(2),
       WorkQuantumK: unsigned'(64),
       MaxAROut:     unsigned'(AI_MAX_AR_OUT_DRAM),
@@ -358,6 +437,7 @@ package g6lc_ai_island_cfg_pkg;
       DramClass:    unsigned'(AI_DRAM_DDR4),
       Queues:       unsigned'(2),
       QueueDepth:   unsigned'(64),
+      CommandDepth: unsigned'(0),
       QosClasses:   unsigned'(2),
       WorkQuantumK: unsigned'(64),
       MaxAROut:     unsigned'(AI_MAX_AR_OUT_DRAM),
@@ -393,6 +473,7 @@ package g6lc_ai_island_cfg_pkg;
       DramClass:    unsigned'(AI_DRAM_LPDDR5),
       Queues:       unsigned'(2),
       QueueDepth:   unsigned'(64),
+      CommandDepth: unsigned'(0),
       QosClasses:   unsigned'(2),
       WorkQuantumK: unsigned'(64),
       MaxAROut:     unsigned'(AI_MAX_AR_OUT_DRAM),
@@ -426,6 +507,7 @@ package g6lc_ai_island_cfg_pkg;
       DramClass:    unsigned'(AI_DRAM_LPDDR5),
       Queues:       unsigned'(2),
       QueueDepth:   unsigned'(64),
+      CommandDepth: unsigned'(0),
       QosClasses:   unsigned'(2),
       WorkQuantumK: unsigned'(64),
       MaxAROut:     unsigned'(AI_MAX_AR_OUT_DRAM),
@@ -443,6 +525,53 @@ package g6lc_ai_island_cfg_pkg;
   // Island-relative register map (F1). Capability window occupies [CAP_BASE, 0x00FF].
   localparam logic [15:0] CAP_BASE          = 16'h0000;
   localparam logic [15:0] DESC_BASE         = 16'h0140;
+  localparam logic [15:0] CAP_OFF_COMMAND_QUEUE = 16'h0090;
+  localparam logic [7:0] COMMAND_QUEUE_VERSION = 8'd1;
+  localparam logic [7:0] COMMAND_QUEUE_FLAGS = 8'h07;
+  // Accumulate-mode grant word (RO, isa-encoding.md T2 accmode). Bit 0 set means the
+  // engine executes `flags.accmode == 01`: every C[i][j] reduction is SEEDED from the
+  // i32/f32 word already in memory, so a host K-split equals one ordered reduction.
+  // g6lc_ai_gemm_seq implements it (ST_LC loads the C tile, the first partial of
+  // every element is added onto that seed; stores run in ST_STC for such jobs, so an
+  // accumulate job pays m*n*4 extra read bytes and loses the trail-store overlap).
+  // Chained K blocks equal one long job bit for bit when the split is a multiple of
+  // the PE lane count (the software reference is sequential and exact for any split).
+  // Software must still read this word: an older part publishes 0 and refuses.
+  localparam logic [15:0] CAP_OFF_ACCMODE = 16'h0094;
+  localparam logic [31:0] AiIslandAccmodeGrant = 32'd1;
+  // Operand bank capacity (RO, bytes): the K box is a BYTE capacity per operand
+  // panel (flat panel mapping in g6lc_ai_gemm_seq). A job is accepted when
+  //   n * pitch_bytes(k) <= CAP_OFF_BANK_B_BYTES and m * pitch_bytes(k) <= CAP_OFF_BANK_A_BYTES
+  // with pitch_bytes(k) = next_pow2(ceil(row_bytes(k) / MacsPerCycle)) * MacsPerCycle
+  // (the row pitch is a power of two of lane words so the bank address is a shift),
+  // besides m <= AccTileM, n <= AccTileN, k <= 65535. A part that publishes 0 keeps
+  // the legacy k <= AccTileK box. Software blocks K by these words, not by AccTileK,
+  // so a 256 x 1024 INT8 weight panel is one job and one resident key.
+  localparam logic [15:0] CAP_OFF_BANK_A_BYTES = 16'h0098;
+  localparam logic [15:0] CAP_OFF_BANK_B_BYTES = 16'h009C;
+  localparam logic [15:0] REG_OFF_CMD_MODE = 16'h0f20;
+  localparam logic [15:0] REG_OFF_CMD_PTR_LO = 16'h0f24;
+  localparam logic [15:0] REG_OFF_CMD_PTR_HI = 16'h0f28;
+  localparam logic [15:0] REG_OFF_CMD_TICKET = 16'h0f2c;
+  localparam logic [15:0] REG_OFF_CMD_QID = 16'h0f30;
+  localparam logic [15:0] REG_OFF_CMD_SUBMIT = 16'h0f34;
+  localparam logic [15:0] REG_OFF_CMD_CREDITS = 16'h0f38;
+  localparam logic [15:0] REG_OFF_CMD_RECEIPT_TICKET = 16'h0f3c;
+  localparam logic [15:0] REG_OFF_CMD_RECEIPT_CODE = 16'h0f40;
+  localparam logic [15:0] REG_OFF_CMD_ACCEPTED = 16'h0f44;
+  localparam logic [15:0] REG_OFF_CMD_REJECTED = 16'h0f48;
+  // Stage-2 characterization counters, sticky from the last GEMM (RO).
+  localparam logic [15:0] PMU_OFF_PHASE_LA = 16'h0f50;
+  localparam logic [15:0] PMU_OFF_PHASE_LB = 16'h0f54;
+  localparam logic [15:0] PMU_OFF_PHASE_MAC = 16'h0f58;
+  localparam logic [15:0] PMU_OFF_PHASE_STC = 16'h0f5c;
+  localparam logic [15:0] PMU_OFF_STALL_AR = 16'h0f60;
+  localparam logic [15:0] PMU_OFF_STALL_R = 16'h0f64;
+  localparam logic [15:0] PMU_OFF_STALL_W = 16'h0f68;
+  localparam logic [31:0] CMD_ACCEPTED = 32'd0;
+  localparam logic [31:0] CMD_FULL = 32'd1;
+  localparam logic [31:0] CMD_DISABLED = 32'd2;
+
   localparam logic [15:0] REG_OFF_CAP       = 16'h0000;
   localparam logic [15:0] REG_OFF_DESC      = 16'h0140;
   localparam logic [15:0] REG_OFF_CTL       = 16'h0100;
@@ -464,6 +593,28 @@ package g6lc_ai_island_cfg_pkg;
   localparam logic [15:0] PMU_OFF_POLICY_WORD  = 16'h0194;
   localparam logic [15:0] PMU_OFF_POLICY_TOPO  = 16'h0198;
   localparam logic [15:0] PMU_OFF_POLICY_EVENT = 16'h019C;
+  // Inside the 4 KiB SoC window (GPIOLength = 0x1000). An offset of
+  // 0x2200 never reaches this slave. Live Queues is 2, so queue decode
+  // ends at 0x01C0. These words sit above that region. The explicit
+  // address match wins over a later queue slot. The epoch reaches
+  // gemm_seq only when AiCfg.VaTurboEn is set. VaTurboEn=0 keeps the
+  // epoch pins at 0.
+  localparam logic [15:0] REG_OFF_REUSE_EPOCH = 16'h0F00;
+  // Requested VA-Turbo level in [3:0]. [11:8] is the applied level and
+  // stays 0. gemm_seq does not read this register.
+  localparam logic [15:0] REG_OFF_VA_TURBO_LEVEL = 16'h0F04;
+  // Copy of that word, latched when a GEMM completes.
+  localparam logic [15:0] PMU_OFF_VA_TURBO_LEVEL = 16'h0F08;
+  // Requested recipe id in [4:0], `{bank, subcode}`. [12:8] is the
+  // applied id and stays 0. gemm_seq does not read this register.
+  localparam logic [15:0] REG_OFF_VA_TURBO_RECIPE = 16'h0F0C;
+  // Copy of that word, latched when a GEMM completes.
+  localparam logic [15:0] PMU_OFF_VA_TURBO_RECIPE = 16'h0F10;
+  // Caller claim that the evidence window still matches. A write to the
+  // epoch, level, or recipe register clears it. gemm_seq does not read it.
+  localparam logic [15:0] REG_OFF_VA_TURBO_WINDOW = 16'h0F14;
+  // Copy of that bit, latched when a GEMM completes.
+  localparam logic [15:0] PMU_OFF_VA_TURBO_WINDOW = 16'h0F18;
 
   // {hit, q[7:0], word[2:0]}. `word` is the 32-bit slot in the 0x20 window.
   // Queue 0 is 0x0120. Queues after that are 0x01A0 + (q-1)*0x20.
@@ -629,6 +780,21 @@ package g6lc_ai_island_cfg_pkg;
   // guest-visible lie. Update this ONLY together with the PE.
   localparam logic [15:0] AiIslandPeImplMask  = 16'h0003;  // AiFmtMaskInt8Int4
 
+  // The same statement for an island built with `AiCfg.IslandFpEn` (operand banks
+  // sized for 4-byte elements): the sequencer's float dot (`g6lc_ai_pe_dot_float`,
+  // pipelined variant behind DotPipeFloat) executes FP8 E4M3/E5M2, FP16, BF16 and
+  // FP32 with the ordered FP32 accumulation -- the seven-format backend gates
+  // (`+review_signed`, `+review_accumulate`, `+measure`) are the evidence. SP24 is
+  // still refused (structured sparsity is not a datapath). Bench/FP SKUs may grant
+  // up to this mask; the INT8-only default keeps AiIslandPeImplMask.
+  localparam logic [15:0] AiIslandPeImplMaskFp = 16'h00FB;  // INT8 INT4 FP8x2 FP16 BF16 FP32
+
+  // Bench SKU grant (testbench parameter, selected under `G6LC_AI_TB_BENCH_SKU` in
+  // the testharness together with an AiCfg carrying VaTurboEn/IslandFpEn): every
+  // executable format, so one SoC model benches the whole format matrix. Not a
+  // production package value; g6lc64_ai keeps AiIslandDtypeMask.
+  localparam logic [15:0] AiIslandDtypeMaskBench = AiIslandPeImplMaskFp;
+
   // I3 legality: sim-AXI nameplate is the NoC peak; never advertise 400 GB/s
   // on class 0; enabled clusters cannot exceed present.
   function automatic bit island_cfg_legal(input ai_island_cfg_t c);
@@ -642,6 +808,9 @@ package g6lc_ai_island_cfg_pkg;
     // the K tile so a 8192-MAC struct with AccTileK 256 stays illegal.
     if (c.MacsPerCycle == 0 || c.MacsPerCycle > c.AccTileK) ok = 1'b0;
     if (c.MaxAROut < 1 || c.MaxAROut > AI_MAX_AR_OUT_DRAM) ok = 1'b0;
+    if (c.CommandDepth > 65535) ok = 1'b0;
+    if (c.CommandDepth != 0 && (c.Queues == 0 || c.Queues > 256 ||
+        64'(REG_OFF_QUEUE_TAIL) + 64'(c.Queues - 1) * 64'd32 > 64'(REG_OFF_REUSE_EPOCH))) ok = 1'b0;
     if ((c.DramCas == 0) != (c.DramTrcd == 0) || (c.DramCas == 0) != (c.DramTrp == 0))
       ok = 1'b0;
     if (c.DramCas > 255 || c.DramTrcd > 255 || c.DramTrp > 255)

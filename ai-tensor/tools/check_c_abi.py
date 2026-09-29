@@ -60,6 +60,9 @@ def main() -> int:
         ("AI_TENSOR_MMIO_DONE", py.MMIO_DONE),
         ("AI_TENSOR_MMIO_DESC", py.MMIO_DESC),
         ("AI_TENSOR_MMIO_PMU_R", py.MMIO_PMU_R),
+        ("AI_TENSOR_MMIO_QUEUE0", py.MMIO_QUEUE0),
+        ("AI_TENSOR_MMIO_QUEUE_TAIL", py.MMIO_QUEUE_TAIL),
+        ("AI_TENSOR_DOORBELL_TICKET_MAX", py.DOORBELL_TICKET_MAX),
         ("AI_TENSOR_CTL_ENABLE", py.CTL_ENABLE),
         ("AI_TENSOR_CTL_WR_CPL_EN", py.CTL_WR_CPL_EN),
     ]
@@ -71,12 +74,30 @@ def main() -> int:
     }
     for name in variants.values():
         checks.append(('AI_TENSOR_FMT_' + name, getattr(py, 'AI_FMT_' + name)))
+    command_names = ("CAP_COMMAND_QUEUE", "COMMAND_QUEUE_VERSION", "COMMAND_QUEUE_FLAGS",
+                     "CMD_MODE", "CMD_PTR_LO", "CMD_PTR_HI", "CMD_TICKET", "CMD_QID",
+                     "CMD_SUBMIT", "CMD_CREDITS", "CMD_RECEIPT_TICKET", "CMD_RECEIPT_CODE",
+                     "CMD_ACCEPTED_COUNT", "CMD_REJECTED_COUNT", "CMD_ACCEPTED", "CMD_FULL", "CMD_DISABLED",
+                     "CAP_ACCMODE", "CAP_ACCMODE_ACCUMULATE", "FLAG_ACCMODE_SHIFT", "ACCMODE_ACCUMULATE",
+                     "CAP_BANK_A_BYTES", "CAP_BANK_B_BYTES")
+    checks.extend(("AI_TENSOR_" + name, getattr(py, name)) for name in command_names)
     bad = []
     rust = (ROOT / 'crates/ai-tensor-abi/src/lib.rs').read_text(encoding='utf-8')
+    for name in command_names:
+        match = re.search(r'pub const ' + name + r': \w+ = (0x[0-9a-fA-F_]+|[0-9]+);', rust)
+        if not match or int(match[1].replace('_', ''), 0) != getattr(py, name):
+            bad.append(f'Rust/Python {name} mismatch')
     for name in ('CONTRACT_VERSION', 'FLAG_NUMFMT_SHIFT', 'FLAG_NUMFMT_WIDTH', 'ST_BAD_FMT'):
         match = re.search(r'pub const ' + name + r': \w+ = (\d+);', rust)
         if not match or int(match[1]) != getattr(py, name):
             bad.append(f'Rust/Python {name} mismatch')
+    for rust_name, py_name in (
+        ('REG0', 'MMIO_QUEUE0'), ('REG_QUEUE_TAIL', 'MMIO_QUEUE_TAIL'),
+        ('DOORBELL_TICKET_MAX', 'DOORBELL_TICKET_MAX'),
+    ):
+        match = re.search(r'pub const ' + rust_name + r': \w+ = (0x[0-9a-fA-F_]+);', rust)
+        if not match or int(match[1].replace('_', ''), 16) != getattr(py, py_name):
+            bad.append(f'Rust/Python {rust_name} mismatch')
     for variant, name in variants.items():
         match = re.search(r'^\s*' + variant + r' = (\d+),', rust, re.MULTILINE)
         if not match or int(match[1]) != getattr(py, 'AI_FMT_' + name):

@@ -38,6 +38,7 @@ verilator --binary --timing -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-UNOPTF
   "$AXI/src/axi_id_prepend.sv" \
   "$AXI/src/axi_mux.sv" \
   "$AXI/src/axi_demux.sv" \
+  "$AXI/src/axi_cut.sv" \
   "$AXI/src/axi_atop_filter.sv" \
   "$AXI/src/axi_err_slv.sv" \
   "$AXI/src/axi_dw_upsizer.sv" \

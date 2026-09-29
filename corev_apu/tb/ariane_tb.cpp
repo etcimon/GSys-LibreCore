@@ -81,6 +81,10 @@ static const char *verilog_plusargs[] = {
     // recovery-cycle mean/max/histogram at final. Same allowlist rule as
     // above: unlisted, HTIF rejects it and the probe never arms.
     "misp_stats",
+    // AI island per-job PMU record (corev_apu/ai_island/g6lc_ai_island_top.sv,
+    // translate_off): prints one AI_JOB line per completed descriptor for the
+    // verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1 harvester.
+    "ai_pmu_trace",
     nullptr};
 
 // +mem_poke entries, applied inside the sim loop once main_time reaches cycle.

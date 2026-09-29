@@ -43,6 +43,7 @@ def gemm_s8(
     ticket: int = 1,
     auto_tile: bool = True,
     backend: str = "sim",
+    recipe: Optional[str] = None,
 ) -> Tuple[Any, dict]:
     """
     INT8 matmul: ``C[m,n] = A[m,k] @ B[k,n]`` with i32 accum.
@@ -54,22 +55,14 @@ def gemm_s8(
     if k != k2:
         raise ValueError(f"shape mismatch ({m},{k}) @ ({k2},{n})")
 
-    dev = device or Device(backend)
-    c_list, tix, status, meta = dev.gemm_s8(
-        m, n, k, a8, b8, ticket=ticket, auto_tile=auto_tile
-    )
-    if status != 0:
-        raise RuntimeError(f"ai-tensor gemm failed status={status}")
+    from .device import run_high_level_s8
 
-    c = tf.constant(c_list, dtype=tf.int32)
-    c = tf.reshape(c, (m, n))
-    meta = {
-        **meta,
-        "ticket": tix,
-        "status": status,
-        "backend": dev.backend,
-        "framework": "tensorflow",
-    }
+    dev = device or Device(backend)
+    c_list, meta = run_high_level_s8(
+        dev, m, n, k, a8, b8, ticket=ticket, auto_tile=auto_tile, recipe=recipe
+    )
+    c = tf.reshape(tf.constant(c_list, dtype=tf.int32), (m, n))
+    meta = {**meta, "framework": "tensorflow"}
     return c, meta
 
 

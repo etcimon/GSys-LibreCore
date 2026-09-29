@@ -63,7 +63,12 @@ CHANS8="${AI_ISLAND_DRAM_CHANS_8:-0}"
 SIMCH2="${AI_ISLAND_DRAM_SIM_CHANS_2:-0}"
 SIMCH4="${AI_ISLAND_DRAM_SIM_CHANS_4:-0}"
 SIMCH8="${AI_ISLAND_DRAM_SIM_CHANS_8:-0}"
-if [[ "$CHANS8" == "1" ]]; then
+if [[ "${AI_MATRIX_BENCH_SKU:-0}" == "1" ]]; then
+  # Bench SKU model: island-only VaTurboEn + IslandFpEn + all-format grant
+  # (ariane_testharness G6LC_AI_TB_BENCH_SKU). Used by AI_MATRIX_BENCH=1.
+  VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai-bench}"
+  TIMING_DEFINES="defines=G6LC_AI_TB_BENCH_SKU"
+elif [[ "$CHANS8" == "1" ]]; then
   VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai-d8}"
   TIMING_DEFINES="defines=G6LC_AI_DRAM_CHANS_8"
 elif [[ "$CHANS4" == "1" ]]; then
@@ -153,6 +158,77 @@ mkdir -p "$OUT"
 HARNESS="$ROOT/$VER_LIBRARY/Variane_testharness"
 PASS=0
 FAIL=0
+
+# Bench mode (AI_MATRIX_BENCH=1): the [op x format x shape x path x residency] matrix.
+#   T2 GEMM  : verif/tests/custom/ai/ai_bench_gemm.S assembled per point with -D flags, run with
+#              +ai_pmu_trace; the island's AI_JOB records (one per tile job, both passes when a
+#              residency flag is benched) are harvested into $OUT/ai_bench.log under a BENCH header.
+#   T0/T1 ops: verif/tests/custom/ai/ai_bench_t0.S (dot4 / dot4a / mma / mvta+mvacc) reports
+#              cycles for ITER issues through tohost = (cycles << 1) | 1.
+# verif/regress/remote/ai_bench_report.py --soc reduces both to cycles per operation.
+#   AI_MATRIX_BENCH_FMTS="0 1 3 4 5 6 7"        numeric formats (needs the bench SKU model for
+#                                               anything but 0/1: AI_MATRIX_BENCH_SKU=1)
+#   AI_MATRIX_BENCH_SHAPES="1x512x512 1x256x1024 64x512x512 64x256x1024"   MxNxK
+#   AI_MATRIX_BENCH_KBOX=512   K per job (1024 on the flat-panel island: 1x256x1024 = one job)
+#   AI_MATRIX_BENCH_PATHS="0 1"                 0 MMIO doorbell (low level), 1 ai.enq/ai.poll (high level)
+#   AI_MATRIX_BENCH_REUSE="0 1 2"               0 cold, 1 FLAG_REUSE_A, 2 FLAG_REUSE_B (second pass)
+#   AI_MATRIX_BENCH_T0="0 1 2 3"                T0 ops (dot4, dot4a, mma, mvta+mvacc); "" skips
+#   AI_MATRIX_BENCH_ITER=256
+if [[ "${AI_MATRIX_BENCH:-0}" == "1" ]]; then
+  bench_log="$OUT/ai_bench.log"; : > "$bench_log"
+  bench_one() {  # name, defines..., -> PASS/FAIL, appends the records
+    local t="$1"; shift
+    local elf="$OUT/${t}.elf" src="$1"; shift
+    log "=== $t ==="
+    "$RISCV_CC" -march=rv64imafdc_zicsr -mabi=lp64d -nostdlib -nostartfiles "$@" \
+      -T "$LD" -I"$COMMON" -o "$elf" "$src"
+    local th; th=$("$CROSS_NM" "$elf" | awk '$3=="tohost"{print $1; exit}')
+    local log_file="/tmp/ai-matrix-veri_${t}.log"
+    set +e
+    "$HARNESS" +time_out="$TIME_OUT" +debug_disable +ai_pmu_trace ${th:+ +tohost_addr=0x$th} "$elf" >"$log_file" 2>&1
+    set -e
+    BENCH_LOG_FILE="$log_file"
+  }
+  for fmt in ${AI_MATRIX_BENCH_FMTS:-0 1 3 4 5 6 7}; do
+    for shape in ${AI_MATRIX_BENCH_SHAPES:-1x512x512 1x256x1024 64x512x512 64x256x1024}; do
+      IFS=x read -r bm bn bk <<< "$shape"
+      for path in ${AI_MATRIX_BENCH_PATHS:-0 1}; do
+        for reuse in ${AI_MATRIX_BENCH_REUSE:-0 1 2}; do
+          kbox="${AI_MATRIX_BENCH_KBOX:-512}"
+          t="ai_bench_gemm_f${fmt}_${shape}_p${path}_r${reuse}"
+          [[ "$kbox" == 512 ]] || t="${t}_kb${kbox}"
+          bench_one "$t" verif/tests/custom/ai/ai_bench_gemm.S \
+            -DFMT="$fmt" -DM="$bm" -DN="$bn" -DK="$bk" -DPATH="$path" -DREUSE="$reuse" -DKBOX="$kbox"
+          if grep -q '\*\*\* SUCCESS \*\*\*' "$BENCH_LOG_FILE"; then
+            log "PASS $t"; PASS=$((PASS+1))
+            { echo "BENCH op=gemm fmt=$fmt m=$bm n=$bn k=$bk path=$path reuse=$reuse kbox=$kbox elf=$t"
+              grep '^AI_JOB ' "$BENCH_LOG_FILE"; } >> "$bench_log"
+          else
+            log "FAIL $t"; FAIL=$((FAIL+1)); grep -E "tohost|FAILED|ILLEGAL" "$BENCH_LOG_FILE" | head -3 || true
+          fi
+        done
+      done
+    done
+  done
+  t0_names=(dot4.s8 dot4a.s8 mma.s8 mvta+mvacc)
+  for op in ${AI_MATRIX_BENCH_T0-0 1 2 3}; do
+    iter="${AI_MATRIX_BENCH_ITER:-256}"
+    t="ai_bench_t0_op${op}"
+    bench_one "$t" verif/tests/custom/ai/ai_bench_t0.S -DOP="$op" -DITER="$iter"
+    code=$(grep -oE 'tohost = [0-9]+' "$BENCH_LOG_FILE" | head -1 | awk '{print $3}')
+    if [[ -n "$code" && "$code" != "1" && $((code & 1)) == 1 && $((code >> 1)) -gt 20 ]]; then
+      log "PASS $t cycles=$((code >> 1)) iter=$iter"; PASS=$((PASS+1))
+      echo "BENCH_T0 op=${t0_names[$op]} iter=$iter cycles=$((code >> 1))" >> "$bench_log"
+    else
+      log "FAIL $t (tohost=${code:-none})"; FAIL=$((FAIL+1))
+    fi
+  done
+  log "bench records -> $bench_log ($(grep -c '^AI_JOB' "$bench_log") jobs, $(grep -c '^BENCH_T0' "$bench_log") T0 points)"
+  python3 "$ROOT/verif/regress/remote/ai_bench_report.py" "$OUT" --soc --json "$OUT/ai_bench.json" || true
+  log "SUMMARY pass=${PASS} fail=${FAIL} total=$((PASS+FAIL))"
+  [[ "$FAIL" -eq 0 ]]
+  exit $?
+fi
 
 for t in "${tests[@]}"; do
   src="verif/tests/custom/ai/${t}.S"

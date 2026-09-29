@@ -415,11 +415,18 @@ fn build_soc(
         // controller in this family uses; the tree does not state it directly.
         soc.contexts_per_hart = 2;
     }
-    soc.ai_island = flist.and_then(build_ai_island_model);
+    soc.ai_island = flist.and_then(|f| build_ai_island_model(f, pkg));
     soc
 }
 
-fn build_ai_island_model(flist: &g6q_flist::Expansion) -> Option<g6q_core::model::AiIslandModel> {
+/// Numeric-format grant bits that name a float code (bit index = `flags.numfmt`
+/// code: FP8 E4M3 3, FP8 E5M2 4, FP16 5, BF16 6, FP32 7).
+const FLOAT_GRANT_BITS: u32 = 0xF8;
+
+fn build_ai_island_model(
+    flist: &g6q_flist::Expansion,
+    pkg: &Package,
+) -> Option<g6q_core::model::AiIslandModel> {
     let cfg_path = flist
         .files
         .iter()
@@ -463,6 +470,19 @@ fn build_ai_island_model(flist: &g6q_flist::Expansion) -> Option<g6q_core::model
             }
         }
     }
+
+    // Float products exist only when the core package's `AiCfg.IslandFpEn` is set
+    // (that field selects the float PE and the FP-aware implemented-format guard in
+    // `g6lc_ai_island_top`). When the package does not carry an `AiCfg` struct the
+    // island's own legality rule decides: the top asserts that every granted format
+    // is implemented, so a grant mask naming a float code can only elaborate with the
+    // float datapath present. Either way this is read from the design, not assumed.
+    config.fp_datapath = match pkg.nested("AiCfg", "IslandFpEn").and_then(Value::as_bool) {
+        Some(fp) => fp,
+        None => config
+            .dtype_mask
+            .is_some_and(|mask| mask & FLOAT_GRANT_BITS != 0),
+    };
 
     Some(g6q_core::model::AiIslandModel {
         config,
@@ -893,8 +913,33 @@ mod tests {
                 .files
                 .push(fixture.join(name).to_string_lossy().into_owned());
         }
-        let model = build_ai_island_model(&flist).expect("fixture parses");
+        let no_ai_cfg = g6q_svcfg::read_package("package p; endpackage");
+        let model = build_ai_island_model(&flist, &no_ai_cfg).expect("fixture parses");
         assert_eq!(model.config.queues, 2);
+        // No `AiCfg` in the core package: the float datapath follows the island's own
+        // grant⊆implemented rule (the fixture cap window grants no float -> false); an
+        // explicit `AiCfg.IslandFpEn` wins either way.
+        assert!(
+            !model.config.fp_datapath
+                || model
+                    .config
+                    .dtype_mask
+                    .is_some_and(|m| m & FLOAT_GRANT_BITS != 0)
+        );
+        let fp_pkg = g6q_svcfg::read_package(
+            "package p; localparam config_pkg::ai_cfg_t ai_cfg = '{ MatrixEn: bit'(1), IslandFpEn: bit'(1) };              localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{ XLEN: unsigned'(64), RVC: bit'(1), AiCfg: ai_cfg }; endpackage");
+        let with_fp = build_ai_island_model(&flist, &fp_pkg).expect("fixture parses");
+        assert!(
+            with_fp.config.fp_datapath,
+            "AiCfg.IslandFpEn=1 sources the float datapath"
+        );
+        let no_fp_pkg = g6q_svcfg::read_package(
+            "package p; localparam config_pkg::ai_cfg_t ai_cfg = '{ MatrixEn: bit'(1), IslandFpEn: bit'(0) };              localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{ XLEN: unsigned'(64), RVC: bit'(1), AiCfg: ai_cfg }; endpackage");
+        let without_fp = build_ai_island_model(&flist, &no_fp_pkg).expect("fixture parses");
+        assert!(
+            !without_fp.config.fp_datapath,
+            "AiCfg.IslandFpEn=0 is the integer strip"
+        );
         assert_eq!(model.config.queue_cluster_map, Some(vec![0, 1]));
         assert_eq!(model.desc_layout.desc_bytes, 64);
         assert_eq!(model.desc_layout.offset("ptr_done"), Some(56));
@@ -928,7 +973,9 @@ mod tests {
                 .files
                 .push(fixture.join(name).to_string_lossy().into_owned());
         }
-        let model = build_ai_island_model(&flist).expect("fixture parses");
+        let model =
+            build_ai_island_model(&flist, &g6q_svcfg::read_package("package p; endpackage"))
+                .expect("fixture parses");
         let f = model
             .desc_layout
             .flags_layout

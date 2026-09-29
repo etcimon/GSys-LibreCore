@@ -536,6 +536,7 @@ module tb_g6lc_ai_gemm_concurrent
         .reuse_a_invalidate_i ( invalidate_a_v[i] ),
         .pmu_reuse_a_hit_o ( reuse_hit_a_v[i] ),
         .numfmt_i     ( numfmt_v[i] ),
+        .accumulate_i(1'b0),
         .ar_max_i     ( 4'(GEMM_MAX_AR) ),  // AR-cap consumer was removed: always max
         .ptr_a_i      ( pa_v[i] ),
         .ptr_b_i      ( pb_v[i] ),
@@ -546,6 +547,7 @@ module tb_g6lc_ai_gemm_concurrent
         .pmu_r_beats_o( pmu_r_v[i] ),
         .pmu_w_beats_o( pmu_w_v[i] ),
         .pmu_cycles_o ( pmu_cy_v[i] ),
+        .pmu_phase_o (), .pmu_stall_o (),
         .axi_req_o    ( eng_req[i] ),
         .axi_resp_i   ( checked_resp[i] )
     );

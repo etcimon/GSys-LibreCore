@@ -364,10 +364,14 @@ module tb_g6lc_apu_cva6_th_cookie;
     .pf_issue_o(),
     .pf_train_o(),
     .ai_sb_enq_valid_o(),
+    .ai_sb_enq_ready_i(1'b1),
     .ai_sb_qid_o(),
     .ai_sb_ticket_o(),
     .ai_sb_desc_ptr_o(),
     .ai_isl_has_completion_i(1'b0),
+    .ai_isl_retired_valid_i(1'b0),
+    .ai_isl_retired_ticket_i('0),
+    .ai_isl_attached_i(1'b0),
     .ai_isl_last_ticket_i('0),
     .ai_isl_last_status_i('0)
   );
