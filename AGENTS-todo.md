@@ -355,18 +355,24 @@ prerequisite for this work under the existing dual license. No licensing policy 
   issue width needs a wider window, and M3 showed every ring > 8 times
   out the four-hart strict boot under the drained handoff while recovery
   is mark-and-drain. No i4 overlay built; no RTL changed. Reopen after
-  M3b lands the fast squash; T10a root-caused the timeout as a ring ×
-  knob combination, not depth alone (see next row). Details in
-  `core/ooo/AGENTS-ooo-plan.md` T9j.
+  M3b lands the fast squash; T10a shows pure ring-16 boots
+  at-or-faster than ring 8 (not depth alone) and finds a
+  depth-dependent reproducibility anomaly as the timeout seed (see
+  next row). Details in `core/ooo/AGENTS-ooo-plan.md` T9j.
 - [x] **Root-caused (T10a, 2026-09-29): N1 ring>8 drained-handoff
-  "timeout" is not ring depth alone** — `+smt_stats` probe
-  (`[smt-drain]`): drains bounded (max 109–146), `aborts`/`commit_drop`
-  0, ~100 % `wait_sb` (issue not held during drain — a ~1 % cost), and
-  all switching ends by ~2M cycles in both geometries. 6M progress
-  identical; the full pure ring-16 boot **completes at 17,250,251 —
-  faster than the 18,419,779 ring-8 anchor**. The M3 timeouts were
-  ring × knob pairings (ckpt 32 / DeepSpec / ckpt 0), not depth; no
-  issue-hold fix needed. Details: plan T10a.
+  "timeout" — not depth alone; depth-dependent race found** —
+  `+smt_stats` probe (`[smt-drain]`): drains bounded (max 109–146),
+  `aborts`/`commit_drop` 0, ~100 % `wait_sb` (issue not held during
+  drain — a ~1 % cost), all switching done by ~2M cycles in both
+  geometries, 6M progress identical. The pure ring-16 boot **completes
+  under the 24M cap** (r1 17,250,251; r2 18,297,381 `strictDualPassed`,
+  vs the 18,419,779 ring-8 anchor) — **but runs are not reproducible**:
+  identical model+seed launches diverge in drain requests, retired
+  counts and cycles (r1+6M agree, r2 diverged; mechanism unrooted —
+  discriminator: `smt_sched_trace`/`.dasm` diff at first divergence).
+  That is the plausible seed of the M3 timeouts: a pathological
+  interleave/input path widened by depth, not drain starvation. No
+  issue-hold fix warranted. Details: plan T10a.
 - [x] **Milestone summary (commits):** M0 `e07ccd452` (eWT baseline:
   L2WriteUpdateEn + Phase-5 qualification); M1 `2102366df` + `87dd183d6`
   + `79dc613ab` (M1a CBO/hub ordering, M1b posted writes + bypass reads,

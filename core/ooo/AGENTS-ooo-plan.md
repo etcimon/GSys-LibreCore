@@ -2944,24 +2944,38 @@ one field: `NrScoreboardEntries` 8 vs 16.
   counters freeze and each core runs its dominant hart solo.
 - 6M progress is identical (r8 hart0 4,417,197 vs r16 4,443,939 retired;
   ~0.9 M instr/M-cycle on both) — no early divergence, no starvation.
-- **Full ring-16 boot completes: SUCCESS after 17,250,251 cycles —
-  faster than the ring-8 anchor 18,419,779 (−6.3 %).** A deeper window
-  absorbs more of the boot's miss latency. (The r1 record ended
-  `wall-budget` — the sim printed SUCCESS at the same moment the 3600 s
-  wall limit fired; r2 reruns with a larger wall budget for a clean
-  `strictDualPassed` artifact.)
+- **Full ring-16 boot completes — but nondeterministically.** r1:
+  SUCCESS after 17,250,251 cycles (record terminated `wall-budget`: the
+  sim printed SUCCESS as the 3600 s wall limit fired). r2: SUCCESS after
+  **18,297,381**, `strictDualPassed`, `timedOut: false`. Both under the
+  24M cap — ring 16 vs the ring-8 anchor 18,419,779 is neutral-to-faster,
+  not a timeout.
+
+**The anomaly that matters: the ring-16 runs are not reproducible.**
+Same model (`b32c1fa3`), same seed, same ELF: the 6M run and r1 agree
+(`req` 23,150/20,769, drain totals identical), but r2 diverged
+(23,672/21,133 requests, dominant-hart retired 15.46 M vs 14.70 M,
+cycles 18,297,381 vs 17,250,251). Ring-8 anchors have always been
+byte-identical. Caveat: Verilator evaluation is deterministic per
+binary+inputs, so a pure delta-cycle RTL race would *repeat* across
+launches — divergence means either an uncontrolled input reached the
+sim (uninitialized/seeded reset state, host-fed value — none found in
+`g6lc_tb.cpp`: `random_seed` is vestigial, `rtc_i` is cycle-driven, no
+`rand()` consumers) or an evaluation-order sensitivity the build maps
+differently per process. Mechanism unrooted — the discriminator is a
+trace diff at first divergence (`smt_sched_trace`/`smt_flow_trace`, or
+the per-hart `.dasm`) between an agreeing and a diverging launch: the
+first differing cycle names the input path.
 
 **Verdict.** The drained-handoff timeout hypothesis is refuted for ring
 depth alone: drains are bounded, wait only on the scoreboard (issue is
 not held while a drain pends — the measured cause, but a ~1 % cost),
-and the handoff phase is done by 2M cycles regardless. The M3 record of
-"every ring > 8 times out" was a **ring × knob combination** effect —
-every timing-out lane also moved checkpoint depth or speculation
-structure (E/A/D: ckpt 32; A0: ckpt 0 at ring 32), while the plain
-ring-16 geometry boots faster than ring 8. No issue-stage drain hold is
-implemented — the numbers do not support it (it would optimize the ~1 %
-`wait_sb` share, not a boot cost). The real recorded limit feeding
-M7/M3b is the mark-and-drain recovery cost from T9f (recovery mean
-17–19 cy at ring ≥ 16 vs 7 at ring 8) and whichever knob pairing
-actually produced the timeouts — the checkpoint-geometry interaction is
-the candidate, not ring depth.
+and the handoff phase is done by ~2M cycles regardless; pure ring-16
+boots at-or-faster than ring 8 **in two of two completions** (r1
+17,250,251 — record marked `wall-budget` as the 3600 s limit fired with
+the SUCCESS line; r2 18,297,381 `strictDualPassed`). Mechanism (c):
+the recorded limit is the mark-and-drain recovery cost from T9f plus
+the reproducibility anomaly above — a pathological interleave/input
+path that ring depth widens, consistent with the M3 lanes timing out
+sporadically-by-construction rather than deterministically. No
+issue-stage drain hold is implemented — the numbers do not support it.
