@@ -35,6 +35,10 @@ module tb_g6lc_l2_hum;
   // contract; earlier records must keep the M1a metric hash when off.
   parameter bit POSTED_WRITES=1'b0;
   parameter int unsigned WTRK_DEPTH=4, RDTRK_DEPTH=4;
+  // T9h/M5: L2 stream/stride prefetcher. Off keeps every earlier scenario
+  // cycle-identical (asserted below by hash-stable observability taps).
+  parameter bit PREFETCH=1'b0;
+  parameter int unsigned PF_STREAMS=4, PF_DISTANCE=2, PF_MSHR_RESERVE=1;
   parameter int unsigned BYTE_SIZE   = 4096;
   parameter int unsigned SET_ASSOC   = 4;
   parameter int unsigned LINE_WIDTH  = 512;
@@ -93,6 +97,10 @@ module tb_g6lc_l2_hum;
       .POSTED_WRITES(POSTED_WRITES),
       .WTRK_DEPTH  (WTRK_DEPTH),
       .RDTRK_DEPTH (RDTRK_DEPTH),
+      .PF_EN       (PREFETCH),
+      .PF_STREAMS  (PF_STREAMS),
+      .PF_DISTANCE (PF_DISTANCE),
+      .PF_MSHR_RESERVE(PF_MSHR_RESERVE),
       .AXI_ADDR_WIDTH (AW),
       .AXI_DATA_WIDTH (DW),
       .AXI_ID_WIDTH   (IDW),
@@ -121,6 +129,9 @@ module tb_g6lc_l2_hum;
       .l2_posted_o        (l2_posted_p),
       .l2_rdtrk_o         (l2_rdtrk_p),
       .l2_posted_hold_o   (l2_phold_w),
+      .l2_pf_issue_o      (l2_pf_issue_p),
+      .l2_pf_useful_o     (l2_pf_useful_p),
+      .l2_pf_drop_o       (l2_pf_drop_p),
       .l2_evict_valid_o   (evict_v),
       .l2_evict_addr_o    (evict_addr),
       .l2_evict_ready_i   (evict_ready),
@@ -155,6 +166,7 @@ module tb_g6lc_l2_hum;
       .l3_wupdate_o(),
       .l3_wtrk_full_o(),.l3_wtrk_line_hold_o(),.l3_posted_o(),
       .l3_rdtrk_o(),.l3_posted_hold_o(),
+      .l3_pf_issue_o(),.l3_pf_useful_o(),.l3_pf_drop_o(),
       .l3_evict_valid_o(l3_evict_valid),
       .l3_evict_addr_o(l3_evict_addr),
       // The directed stimulus owns the port when it is driving.
@@ -564,6 +576,15 @@ module tb_g6lc_l2_hum;
   always_ff @(posedge clk) if (rst_n && POSTED_WRITES &&
       dut.gen_l2.rdtrk_push)
     pw_rdtrk_push <= pw_rdtrk_push + 1;
+
+  // T9h/M5 prefetcher observability: engagement counters on the DUT pulses.
+  int unsigned pf_issue = 0, pf_useful = 0, pf_drop = 0;
+  logic l2_pf_issue_p, l2_pf_useful_p, l2_pf_drop_p;
+  always_ff @(posedge clk) if (rst_n) begin
+    if (l2_pf_issue_p)  pf_issue  <= pf_issue + 1;
+    if (l2_pf_useful_p) pf_useful <= pf_useful + 1;
+    if (l2_pf_drop_p)   pf_drop   <= pf_drop + 1;
+  end
 
   // R5 engagement: a hit response captive in S_TAG whose id carries a live
   // read-tracker entry (probe[0] = id_q). Only fires under POSTED_WRITES;
@@ -1832,6 +1853,83 @@ module tb_g6lc_l2_hum;
         end
         if (patched_word(64'h25700) != 64'hbbbb_0000_0000_0002)
           $fatal(1, "HUM_ATOP_MEMORY_ORDER %h", patched_word(64'h25700));
+      end
+      // ---------------- T9h/M5 prefetch directed contract (62-64) ---------
+      // (a) Useful hit after a stream: three next-line demand misses arm
+      // the stream; both PF fills issue, and a demand read of each
+      // PF-installed line is a hit (or an in-flight merge — still useful)
+      // that queues no new fill AR.
+      62: begin
+        if (!PREFETCH) $fatal(1, "HUM_PREFETCH_REQUIRED");
+        push(4'd1, 64'h26000, 0); wait_done();
+        push(4'd1, 64'h26040, 0); wait_done();
+        push(4'd1, 64'h26080, 0); wait_done();
+        begin automatic int g = 0;
+          while (pf_issue != 2 && g < 400) begin @(posedge clk); g++; end
+          if (pf_issue != 2) $fatal(1, "HUM_PF_NO_ISSUE issue=%0d", pf_issue);
+        end
+        wait_done();
+        repeat (80) @(posedge clk);            // let both fills install
+        l2_ar_mark = mem_ar_count;
+        push(4'd2, 64'h260C0, 0); wait_done();
+        push(4'd2, 64'h26100, 0); wait_done();
+        if (pf_useful != 2) $fatal(1, "HUM_PF_NO_USEFUL useful=%0d", pf_useful);
+        if (mem_ar_count != l2_ar_mark)
+          $fatal(1, "HUM_PF_USEFUL_REFETCH ar=%0d", mem_ar_count - l2_ar_mark);
+      end
+      // (b) A same-line write kills an in-flight PF fill: install_discard
+      // applies, the line never installs, a later read refetches post-write
+      // data (the killed fill may not serve the stale fetch).
+      63: begin
+        if (!PREFETCH || !POSTED_WRITES) $fatal(1, "HUM_PREFETCH_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        push(4'd1, 64'h27000, 0); wait_done();
+        push(4'd1, 64'h27040, 0); wait_done();
+        memory_hold = 1'b1;
+        push(4'd1, 64'h27080, 0);            // arms; cand 270C0 issues & holds
+        begin automatic int g = 0;
+          while (pf_issue == 0 && g < 400) begin @(posedge clk); g++; end
+          if (pf_issue == 0) $fatal(1, "HUM_PF_NO_ISSUE");
+        end
+        send_write(4'd2, 64'h270C8, 6'h00);  // kills the in-flight pf fill
+        while (write_completed != 1) @(negedge clk);
+        memory_hold = 1'b0;
+        wait_done();
+        repeat (80) @(posedge clk);          // killed fill drains + retires
+        l2_ar_mark = mem_ar_count;
+        push(4'd3, 64'h270C0, 0); wait_done(); // refetch — not a stale hit
+        repeat (80) @(posedge clk);            // retrained follow-on PF drains
+        // +1 refetch AR on the killed line; +1 fill AR from the follow-on
+        // candidate (27140) the refetch's demand-miss train re-armed.
+        if (mem_ar_count != l2_ar_mark + 2)
+          $fatal(1, "HUM_PF_KILL_INSTALL ar=%0d", mem_ar_count - l2_ar_mark);
+      end
+      // (c) R1: a posted write whose B is held keeps its wtrk entry live;
+      // a PF candidate for the tracked line drops (a read fill now could
+      // return pre-write memory), while the other candidate still issues.
+      64: begin
+        if (!PREFETCH || !POSTED_WRITES) $fatal(1, "HUM_PREFETCH_POSTED_REQUIRED");
+        slv_req.b_ready = 1'b1;
+        memory_b_hold = 1'b1;
+        send_write(4'd4, 64'h280C0, 6'h00);
+        push(4'd1, 64'h28000, 0); wait_done();
+        push(4'd1, 64'h28040, 0); wait_done();
+        push(4'd1, 64'h28080, 0); wait_done(); // armed: cands 280C0/28100
+        l2_ar_mark = mem_ar_count;
+        begin automatic int g = 0;
+          while (pf_drop == 0 && pf_issue == 0 && g < 400) begin
+            @(posedge clk); g++;
+          end
+          if (pf_drop == 0) $fatal(1, "HUM_PF_R1_ISSUE");
+        end
+        // The tracked candidate must never reach DRAM; the untracked one may.
+        wait_done();
+        repeat (80) @(posedge clk);
+        if (mem_ar_count > l2_ar_mark + 1)
+          $fatal(1, "HUM_PF_R1_FILL ar=%0d", mem_ar_count - l2_ar_mark);
+        memory_b_hold = 1'b0;
+        while (write_completed != 1) @(negedge clk);
+        push(4'd5, 64'h280C0, 0); wait_done(); // post-write data
       end
       default: $fatal(1, "HUM_SCENARIO");
     endcase

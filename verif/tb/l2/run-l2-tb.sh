@@ -59,12 +59,14 @@ sources=(
   "$ROOT/corev_apu/l2_cache/g6lc_l2_data.sv"
   "$ROOT/corev_apu/l2_cache/g6lc_l2_mshr.sv"
   "$ROOT/corev_apu/l2_cache/g6lc_l2_wtrk.sv"
+  "$ROOT/corev_apu/l2_cache/g6lc_l2_pf.sv"
   "$ROOT/corev_apu/l2_cache/g6lc_l2_top.sv"
   "$ROOT/verif/tb/l2/tb_g6lc_l2.sv"
 )
 target="${TARGET_CFG:-g6lc64_smt2}"
 [[ "$target" =~ ^[a-zA-Z0-9_]+$ ]] || exit 2
-inputs=("${sources[@]}" "$ROOT/verif/tb/l2/tb_g6lc_l2.vlt" "$ROOT/verif/tb/l2/run-l2-tb.sh")
+inputs=("${sources[@]}" "$ROOT/verif/tb/l2/tb_g6lc_l2.vlt" "$ROOT/verif/tb/l2/run-l2-tb.sh"
+  "$ROOT/verif/tb/l2/tb_g6lc_l2_pf.sv")
 if [[ "${L2TB_MODE:-sim}" == units ]]; then
   inputs+=("$ROOT/verif/tb/l2/tb_g6lc_l2_units.sv")
 fi
@@ -297,6 +299,49 @@ if [[ "${L2TB_MODE:-sim}" == units ]]; then
     grep -qFx '[L2UNIT] mshr_full=1 merge=1 merge_full=1 waiter=1 bank_conflict=1 bank_ok=1' "$OUT/sim.log" &&
     ! grep -qE 'FAIL|RESULT fail|%Error|%Fatal' "$OUT/sim.log" || { echo "[l2-tb] UNITS FAIL — $OUT/sim.log"; exit 1; }
   echo "[l2-tb] UNITS PASS — $OUT/sim.log"
+  exit 0
+fi
+if [[ "${L2TB_MODE:-sim}" == pf ]]; then
+  # T9h/M5 stream+stride prefetch leaf: Part A engine checks (train, issue,
+  # stride, page boundary) then Part B L2 admission (useful hit, reserve,
+  # resident/R1/in-flight drops, killed-fill refetch). +oracle_negative
+  # inverts the data oracle and must fail. L2TB_PF_MUT=noreserve edits the
+  # source copy to drop the MSHR reserve term — a PF then takes the last
+  # entry and the eighth demand miss must stall (L2PF_NO_FILL_AR) or a
+  # candidate slips into the reserve window (L2PF_RESERVE).
+  if [[ "${L2TB_PF_MUT:-}" == noreserve ]]; then
+    top_mut="$ROOT/corev_apu/l2_cache/g6lc_l2_top.sv"
+    grep -qF "(mshr_count < (MSHR_W + 1)'(MSHR_DEPTH - PF_MSHR_RESERVE))" "$top_mut" ||
+      { echo "[l2-tb] PF_MUT site changed" >&2; exit 2; }
+    sed -i "s|(MSHR_W + 1)'(MSHR_DEPTH - PF_MSHR_RESERVE)|(MSHR_W + 1)'(MSHR_DEPTH)|" "$top_mut"
+  else
+    sha256sum --check --status "$OUT/sources.sha256"
+  fi
+  "$VERILATOR" --binary --timing --assert -Wall -Wno-TIMESCALEMOD -Wno-UNUSED \
+    "${warning_args[@]}" -Wno-BLKSEQ -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-VARHIDDEN \
+    -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM \
+    "$ROOT/verif/tb/l2/tb_g6lc_l2.vlt" "${sources[@]}" \
+    "$ROOT/verif/tb/l2/tb_g6lc_l2_pf.sv" \
+    --top-module tb_g6lc_l2_pf -DL2TB_STATIC \
+    -Mdir "$OUT" -o tb_g6lc_l2_pf 2>&1 | tee "$OUT/build.log"
+  [[ -x "$OUT/tb_g6lc_l2_pf" ]] || { echo "[l2-tb] PF build FAIL — $OUT/build.log"; exit 1; }
+  sha256sum "$OUT/tb_g6lc_l2_pf" > "$OUT/executable.sha256"
+  "$OUT/tb_g6lc_l2_pf" 2>&1 | tee "$OUT/sim.log" || true
+  "$OUT/tb_g6lc_l2_pf" +oracle_negative 2>&1 | tee "$OUT/sim-neg.log" || true
+  if [[ "${L2TB_PF_MUT:-}" == noreserve ]]; then
+    ! grep -qFx 'RTL_REVIEW_PASS l2_pf' "$OUT/sim.log" &&
+      grep -qE 'L2PF_RESERVE|L2PF_NO_FILL_AR|L2PF_FILL_STUCK|L2PF_BAD_ID' "$OUT/sim.log" ||
+      { echo "[l2-tb] PF_MUT noreserve did not break the reserve contract — $OUT/sim.log"; exit 1; }
+    echo "[l2-tb] PF_MUT noreserve detected — $OUT/sim.log"
+    exit 0
+  fi
+  [[ $(grep -cFx 'RTL_REVIEW_PASS l2_pf' "$OUT/sim.log") == 1 ]] &&
+    ! grep -qE 'FAIL|%Error|%Fatal' "$OUT/sim.log" ||
+    { echo "[l2-tb] PF FAIL — $OUT/sim.log"; exit 1; }
+  ! grep -qFx 'RTL_REVIEW_PASS l2_pf' "$OUT/sim-neg.log" &&
+    grep -qE 'L2PF_|%Fatal' "$OUT/sim-neg.log" ||
+    { echo "[l2-tb] PF NEGATIVE did not fail — $OUT/sim-neg.log"; exit 1; }
+  echo "[l2-tb] PF PASS — $OUT/sim.log"
   exit 0
 fi
 [[ "${L2TB_MODE:-sim}" == sim ]] || exit 2

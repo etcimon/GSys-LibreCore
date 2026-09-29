@@ -32,6 +32,10 @@ the hold split (~100 % R2, ≥55 % same-core, T9c); "M1d" puts every postable wr
 on the reserved downstream write id `WR_ID` so AXI same-id ordering removes the
 R2 hold among posted writes entirely (T9e). Everything
 marked "on" has strict OpenSBI evidence on the named package (T8a–T8f, T9a, T9b).
+M5 adds a demand-miss-trained L2 stream/stride prefetcher (`L2PrefetchEn`,
+`g6lc_l2_pf`) — proven at leaf/HUM/system level but **off in every package**:
+streaming kernels gain 8–13 % while both strict boots pay ~+0.3 %, failing the
+adoption bar (T9h).
 
 Measured on the four-hart OpenSBI boot of `g6lc64_ooo_int2` (DRAM latency 0,
 `ooocoh-p5-osbi-int2-L0-r1`): allocation alone turned a 0-hit bypass into 110k L2

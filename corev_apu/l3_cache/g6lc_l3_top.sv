@@ -18,6 +18,13 @@ module g6lc_l3_top
     parameter bit          POSTED_WRITES = 1'b0,
     parameter int unsigned WTRK_DEPTH    = 4,
     parameter int unsigned RDTRK_DEPTH   = 4,
+    // T9h/M5: same stream/stride prefetcher as the L2 (pass-through of
+    // g6lc_l2_top PF_*); default off at L3 in this milestone.
+    parameter bit          PF_EN          = 1'b0,
+    parameter int unsigned PF_STREAMS     = 4,
+    parameter int unsigned PF_DISTANCE    = 2,
+    parameter bit          PF_STRIDE      = 1'b1,
+    parameter int unsigned PF_MSHR_RESERVE= 1,
     parameter int unsigned BYTE_SIZE   = L3_DEFAULT_BYTE_SIZE,
     parameter int unsigned SET_ASSOC   = L3_DEFAULT_SET_ASSOC,
     parameter int unsigned LINE_WIDTH  = L3_DEFAULT_LINE_WIDTH,
@@ -48,6 +55,10 @@ module g6lc_l3_top
     // T9b observability at L3 (see g6lc_l2_top l2_*_o outputs).
     output logic      l3_wtrk_full_o,
     output logic      l3_wtrk_line_hold_o,
+    // T9h/M5 prefetcher observability (see g6lc_l2_top l2_pf_*_o).
+    output logic      l3_pf_issue_o,
+    output logic      l3_pf_useful_o,
+    output logic      l3_pf_drop_o,
     // T9c/M1c hold-cycle split (see g6lc_l2_top l2_hold_*_o).
     output logic      l3_hold_r1_o,
     output logic      l3_hold_r1_wu_o,
@@ -80,6 +91,11 @@ module g6lc_l3_top
       .POSTED_WRITES  (POSTED_WRITES),
       .WTRK_DEPTH     (WTRK_DEPTH),
       .RDTRK_DEPTH    (RDTRK_DEPTH),
+      .PF_EN          (PF_EN),
+      .PF_STREAMS     (PF_STREAMS),
+      .PF_DISTANCE    (PF_DISTANCE),
+      .PF_STRIDE      (PF_STRIDE),
+      .PF_MSHR_RESERVE(PF_MSHR_RESERVE),
       // This engine sits below an L2 that re-tags its posted writes onto
       // the reserved WR_ID — id-14 arrivals are the designed flow here, so
       // the slave-side WR_ID integration assert stays off (T9d/M1d).
@@ -115,6 +131,9 @@ module g6lc_l3_top
       .l2_posted_o        (l3_posted_o),
       .l2_rdtrk_o         (l3_rdtrk_o),
       .l2_posted_hold_o   (l3_posted_hold_o),
+      .l2_pf_issue_o      (l3_pf_issue_o),
+      .l2_pf_useful_o     (l3_pf_useful_o),
+      .l2_pf_drop_o       (l3_pf_drop_o),
       .l2_mshr_full_o     (full),
       .l2_bank_conflict_o (bank_cfl),
       .l2_evict_valid_o   (l3_evict_valid_o),

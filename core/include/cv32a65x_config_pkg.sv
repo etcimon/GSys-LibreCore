@@ -193,6 +193,12 @@ package cva6_config_pkg;
       L2PostedWriteEn: bit'(0),
       L2WriteTrackDepth: unsigned'(4),
       L2ReadTrackDepth: unsigned'(4),
+      L2PrefetchEn: bit'(0),
+      L2PfStreams: unsigned'(0),
+      L2PfDistance: unsigned'(0),
+      L2PfStrideEn: bit'(0),
+      L2PfMshrReserve: unsigned'(0),
+      L3PrefetchEn: bit'(0),
       SharedTlbDepth: int'(64),
 
       NrLoadPipeRegs: int'(0),

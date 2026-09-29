@@ -14,7 +14,7 @@ from pathlib import Path
 
 NAMES = ['axi_pkg.sv', 'tc_sram.sv', 'g6lc_l2_pkg.sv', 'g6lc_l2_tag.sv',
          'g6lc_l2_data.sv', 'g6lc_l2_mshr.sv', 'g6lc_l2_wtrk.sv',
-         'g6lc_l2_top.sv',
+         'g6lc_l2_pf.sv', 'g6lc_l2_top.sv',
          # compiled with -DL2TB_STATIC: contributes g6lc_l2_tb_pkg only
          'tb_g6lc_l2.sv', 'g6lc_l3_pkg.sv', 'g6lc_l3_top.sv',
          'spill_register_flushable.sv', 'spill_register.sv', 'axi_cut.sv',
@@ -47,7 +47,10 @@ CONTRACT = {0: 'HUM_DATA', 1: 'HUM_DATA', 2: 'HUM_DATA', 3: 'HUM_DATA',
             54: None, 55: 'HUM_DATA', 56: 'HUM_DATA', 57: None, 58: 'HUM_DATA',
             # 60/61 are the T9e/M1d WR_ID ordering contract: no R2 cycles
             # among posted writes, R2 retained against blocking entries.
-            59: None, 60: None, 61: None}
+            59: None, 60: None, 61: None,
+            # 62-64 are the T9h/M5 prefetcher directed contract (useful hit,
+            # same-line-write kill, R1 tracked-write drop).
+            62: 'HUM_DATA', 63: 'HUM_DATA', 64: 'HUM_DATA'}
 # Scenarios exercising the TAG_SRAM launched-read protocol; functional on the
 # flop path too (the SRAM-only engagement checks are parameter-gated).
 TAG_SRAM_SCEN = range(35, 42)
@@ -57,6 +60,11 @@ WU_ONLY_SCEN = range(42, 49)
 # POSTED-only scenarios: kept out of the POSTED=0 plan so its metric hash
 # stays byte-identical to the M1a run.
 POSTED_ONLY_SCEN = range(49, 62)
+# PF-only scenarios: kept out of the PREFETCH=0 plan so its metric hash stays
+# byte-identical to the M4 run. 63/64 additionally need POSTED_WRITES (they
+# drive a posted write against an in-flight/tracked line).
+PF_ONLY_SCEN = range(62, 65)
+PF_POSTED_SCEN = {63, 64}
 # Scenario 50 additionally requires WRITE_UPDATE: it is the (a2) resident-line
 # merge-hit probe and fatals HUM_POSTED_WU_REQUIRED on a WU=0 build by design.
 WU_POSTED_SCEN = {50}
@@ -88,6 +96,8 @@ def main():
     wu = os.environ.get('REVIEW_L2_HUM_WU') == '1'
     # POSTED_WRITES mode; implied by the posted-write fault controls.
     posted = os.environ.get('REVIEW_L2_HUM_POSTED') == '1'
+    # PREFETCH mode (T9h/M5); scenarios 63/64 are posted-write dependent.
+    prefetch = os.environ.get('REVIEW_L2_HUM_PREFETCH') == '1'
     (out / 'mode.json').write_text(json.dumps(
         {k: v for k, v in os.environ.items() if k.startswith('REVIEW_L2_HUM')}, indent=2))
     # Restores the original single-port schedule, where a colliding install took
@@ -220,7 +230,8 @@ def main():
         script = ('read_slang ' + ' '.join(str(source / n) for n in rtl_names[:-2]) +
                   ' -I' + str(source) + ' -DL2TB_STATIC -DL2TB_SYNTH --ignore-initial --ignore-assertions'
                   f' --top g6lc_l2_fixture -GCHAIN_L3=1 -GBYTE_SIZE=4096 -GSET_ASSOC=4'
-                  f' -GMSHR_DEPTH=4 -GDATA_BANKS=2 -GRR_EN=0 -GTAG_SRAM={int(tagsram)};'
+                  f' -GMSHR_DEPTH=4 -GDATA_BANKS=2 -GRR_EN=0 -GTAG_SRAM={int(tagsram)}'
+                  f' -GPF_EN={int(prefetch)};'
                   ' hierarchy -check -top g6lc_l2_fixture; flatten; proc; opt;'
                   ' check -assert; scc -expect 0')
         command = ['yosys', '-Q', '-T', '-p', script]
@@ -231,7 +242,20 @@ def main():
         assert rc == 0, 'cache-stack combinational graph check'
         return 0
     model = out / 'model'
-    rtl = ['-I' + str(source)] + [str(source / n) for n in rtl_names]
+    # PREFETCH mode: the admission handshake (pf_launch_ok -> pf_launch ->
+    # tag_launch, pf_capture -> cand_take_i) rides the same word-level
+    # circularity class the leaf bench already waives in tb_g6lc_l2.vlt
+    # (pf_launch*). The sandbox flattens the source dir, so the file globs
+    # are basename-scoped here; the bit-level check stays the yosys SCC lane
+    # (REVIEW_L2_HUM_SCC=1 with PREFETCH=1 runs it at PF_EN=1).
+    if prefetch:
+        (source / 'review_pf.vlt').write_text(
+            '`verilator_config\n'
+            'lint_off -rule UNOPTFLAT -file "*g6lc_l2_top.sv" -match "*pf_launch*"\n'
+            'lint_off -rule UNOPTFLAT -file "*g6lc_l2_top.sv" -match "*pf_capture*"\n'
+            'lint_off -rule UNOPTFLAT -file "*g6lc_l2_top.sv" -match "*pf_cand_take*"\n')
+    rtl = (['-I' + str(source)] + [str(source / 'review_pf.vlt')] * int(prefetch) +
+           [str(source / n) for n in rtl_names])
     top = 'tb_g6lc_l2_tag_miter' if miter else 'tb_g6lc_l2_hum'
     build = [
         ('verilate', ['verilator', '--cc', '--main', '--exe', '--timing', '--assert',
@@ -242,6 +266,7 @@ def main():
                       *(['-GTAG_SRAM=1'] if tagsram else []),
                       *(['-GWRITE_UPDATE=1'] if wu else []),
                       *(['-GPOSTED_WRITES=1'] if posted else []),
+                      *(['-GPREFETCH=1'] if prefetch else []),
                       *(['-GFAIR_WRITES=1'] if os.environ.get('REVIEW_L2_FAIR_WRITES') == '1' else []),
                       '--top-module', top, '--Mdir', str(model),
                       '-o', 'hum-test', *rtl]),
@@ -308,7 +333,13 @@ def main():
             else [(s, None) for s in sorted(CONTRACT) if s not in CHAIN_ONLY
                   and (wu or s not in WU_ONLY_SCEN)
                   and (posted or s not in POSTED_ONLY_SCEN)
-                  and (wu or s not in WU_POSTED_SCEN)])
+                  and (wu or s not in WU_POSTED_SCEN)
+                  and (prefetch or s not in PF_ONLY_SCEN)
+                  and (posted or s not in PF_POSTED_SCEN)
+                  # 30's phase sweep synchronises on exact mem_ar marks; a
+                  # correct stream prefetcher inserts fills and the `!=`
+                  # waits overshoot — PF-incompatible by construction.
+                  and (not prefetch or s != 30)])
     if fault: plan = [(faults[fault][0], faults[fault][3])]
     if order_before:
         plan = [(12, 'HUM_DATA'), (13, 'HUM_DATA'), (14, 'HUM_DATA'),

@@ -79,9 +79,9 @@ module g6lc_cluster
                                        : COH_DEFAULT_LINE_BYTES;
 
   if (CVA6Cfg.CohPolicy == COH_OOO &&
-      (!CVA6Cfg.OoOEn || CVA6Cfg.FpPresent || !CVA6Cfg.L2En || NC <= 1 || CVA6Cfg.DCacheType != WT ||
+      (!CVA6Cfg.OoOEn || !CVA6Cfg.L2En || NC <= 1 || CVA6Cfg.DCacheType != WT ||
        CVA6Cfg.ICACHE_LINE_WIDTH != CVA6Cfg.DCACHE_LINE_WIDTH)) begin : gen_bad_ooo_coherence
-    $error("OoO coherence requires multiple integer OoO WT cores with equal L1 lines and L2");
+    $error("OoO coherence requires multiple OoO WT cores with equal L1 lines and L2");
     //pragma translate_off
 `ifndef SYNTHESIS
     initial $fatal(1, "invalid OoO coherence configuration");
@@ -107,6 +107,8 @@ module g6lc_cluster
   logic l3_hit_w, l3_miss_w, l3_bypass_w, l3_evict_v;
   // T9b posted-write hold-cycle probes → PMU group 2, indices 7 (L2) / 8 (L3).
   logic l2_pwhold_w, l3_pwhold_w;
+  // T9h/M5: L2 prefetcher pulses (PMU group-2 9/10).
+  logic l2_pf_iss_w, l2_pf_use_w;
   logic [AXI_ADDR_WIDTH-1:0] l3_evict_a;
   logic pf_issue_w, pf_train_w;
   logic evict_v, incl_evict_ready;
@@ -260,6 +262,8 @@ module g6lc_cluster
         .pf_train_i       (pf_train_w),
         .l2_pwhold_i      (l2_pwhold_w),
         .l3_pwhold_i      (l3_pwhold_w),
+        .l2_pf_issue_i    (l2_pf_iss_w),
+        .l2_pf_useful_i   (l2_pf_use_w),
         .ai_sb_enq_valid_o(core_sb_enq[c]),
         .ai_sb_qid_o      (core_sb_qid[c]),
         .ai_sb_ticket_o   (core_sb_ticket[c]),
@@ -398,6 +402,11 @@ module g6lc_cluster
         .POSTED_WRITES  (CVA6Cfg.L2PostedWriteEn),
         .WTRK_DEPTH     (CVA6Cfg.L2WriteTrackDepth != 0 ? CVA6Cfg.L2WriteTrackDepth : 32'd4),
         .RDTRK_DEPTH    (CVA6Cfg.L2ReadTrackDepth != 0 ? CVA6Cfg.L2ReadTrackDepth : 32'd4),
+        .PF_EN          (CVA6Cfg.L2PrefetchEn),
+        .PF_STREAMS     (CVA6Cfg.L2PfStreams != 0 ? CVA6Cfg.L2PfStreams : 32'd4),
+        .PF_DISTANCE    (CVA6Cfg.L2PfDistance != 0 ? CVA6Cfg.L2PfDistance : 32'd2),
+        .PF_STRIDE      (CVA6Cfg.L2PfStrideEn),
+        .PF_MSHR_RESERVE(CVA6Cfg.L2PfMshrReserve != 0 ? CVA6Cfg.L2PfMshrReserve : 32'd1),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),
@@ -427,6 +436,11 @@ module g6lc_cluster
         .l2_posted_o        (),
         .l2_rdtrk_o         (),
         .l2_posted_hold_o   (l2_pwhold_w),
+        // T9h/M5 prefetcher: drop pulse is TB-visible only (hierarchical);
+        // issue/useful feed PMU group 2.
+        .l2_pf_issue_o      (l2_pf_iss_w),
+        .l2_pf_useful_o     (l2_pf_use_w),
+        .l2_pf_drop_o       (),
         .l2_evict_valid_o   (l2_evict_v),
         .l2_evict_addr_o    (l2_evict_a),
         // Under L3En the L2's evict output is not the inclusive broadcast
@@ -448,6 +462,8 @@ module g6lc_cluster
     assign l2_back_inval_ready = 1'b1;
     assign l2_idle_w    = 1'b1;
     assign l2_pwhold_w  = 1'b0;
+    assign l2_pf_iss_w  = 1'b0;
+    assign l2_pf_use_w  = 1'b0;
   end
 
   if (CVA6Cfg.L3En) begin : gen_l3
@@ -465,6 +481,13 @@ module g6lc_cluster
         .POSTED_WRITES  (CVA6Cfg.L2PostedWriteEn),
         .WTRK_DEPTH     (CVA6Cfg.L2WriteTrackDepth != 0 ? CVA6Cfg.L2WriteTrackDepth : 32'd4),
         .RDTRK_DEPTH    (CVA6Cfg.L2ReadTrackDepth != 0 ? CVA6Cfg.L2ReadTrackDepth : 32'd4),
+        // T9h/M5: L3 instance shares the L2 prefetch fields; L3PrefetchEn
+        // stays 0 in this milestone (check_cfg refuses it without L2 PF).
+        .PF_EN          (CVA6Cfg.L3PrefetchEn),
+        .PF_STREAMS     (CVA6Cfg.L2PfStreams != 0 ? CVA6Cfg.L2PfStreams : 32'd4),
+        .PF_DISTANCE    (CVA6Cfg.L2PfDistance != 0 ? CVA6Cfg.L2PfDistance : 32'd2),
+        .PF_STRIDE      (CVA6Cfg.L2PfStrideEn),
+        .PF_MSHR_RESERVE(CVA6Cfg.L2PfMshrReserve != 0 ? CVA6Cfg.L2PfMshrReserve : 32'd1),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
         .AXI_DATA_WIDTH (AXI_DATA_WIDTH),
         .AXI_ID_WIDTH   (AXI_ID_WIDTH),
@@ -492,6 +515,10 @@ module g6lc_cluster
         .l3_posted_o        (),
         .l3_rdtrk_o         (),
         .l3_posted_hold_o   (l3_pwhold_w),
+        // TB reads the L3 pf pulses hierarchically; no cluster ports.
+        .l3_pf_issue_o      (),
+        .l3_pf_useful_o     (),
+        .l3_pf_drop_o       (),
         .l3_evict_valid_o (l3_evict_v),
         .l3_evict_addr_o  (l3_evict_a),
         .l3_evict_ready_i (l3_evict_rdy),

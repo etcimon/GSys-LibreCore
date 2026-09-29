@@ -419,6 +419,10 @@ simulates across a register slice, and server-prefetch response ownership is
 repaired. Coverage effects are confined to memory-side response handling: no ISA
 chapter status changes, and coherence, inclusive invalidation, atomics semantics,
 prefetch effectiveness, production geometry and physical closure remain open.
+The M5 L2 stream/stride prefetcher (T9h) is now leaf-covered (train/issue/stride/
+page-boundary/reserve/drop positives, oracle negative, reserve-removal mutation)
+and HUM-covered at both PF settings, but its prefetch *effectiveness* is only
+measured on three directed kernels — it ships config-gated off.
 
 Invalidation-source ownership is repaired, and on the OoO side rename checkpoints now
 retire at commit and LSQ admission uses group credits, each with a fault control that

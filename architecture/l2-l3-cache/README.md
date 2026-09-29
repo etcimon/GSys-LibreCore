@@ -29,6 +29,7 @@ Detail: [`../uncore/dram-channel-scaling.md`](../uncore/dram-channel-scaling.md)
 | L2 | `g6lc_l2_top` | `L2En`, size/assoc/MSHR/banks; default-off `L2RoundRobinEn` experiment |
 | L3 | `g6lc_l3_top` (wraps L2 engine) | `L3En` (requires `L2En`) |
 | Prefetch | `g6lc_server_prefetcher` | `ServerPrefetchEn`, streams, distance |
+| L2 prefetch | `g6lc_l2_pf` (inside `g6lc_l2_top`) | `L2PrefetchEn`, `L2PfStreams`, `L2PfDistance`, `L2PfStrideEn`, `L2PfMshrReserve` — default off (M5) |
 
 ## P2 read-response ownership increment
 
@@ -1025,6 +1026,37 @@ Record of decision and evidence: `core/ooo/AGENTS-ooo-plan.md` T8f/T8g.
   `g6lc_l2_top` worst 28.5 at both WU values — the merge lives only in the bypass states.
 - **Open.** Posted-write merges and CBO-on-WT are M1; `--threads>1` Verilator models
   diverge late (~97.7 % identical) and are measurement-only, not qualification.
+
+### L2 stream/stride prefetcher (`L2PrefetchEn`, M5 — 2026-09-29)
+
+Record of decision and evidence: `core/ooo/AGENTS-ooo-plan.md` T9h.
+
+- **Demand-miss trained, PF-flagged fills.** `g6lc_l2_pf` trains on S_TAG miss
+  commits, tracks streams by 4 KiB region tag, detects next-line and (after two
+  equal deltas) stride streams, emits <=1 candidate per cycle and never crosses a
+  page. A candidate allocates a PF-flagged MSHR/fill entry with no waiter — the
+  fill installs like a demand fill, `kill_match` kills it identically, and a
+  killed/failed PF fill takes `install_discard`. Demand allocation wins; a PF
+  allocates only while `L2PfMshrReserve` MSHR entries stay demand-reserved.
+  Resident-line, duplicate-MSHR and tracked-write candidates are dropped, not
+  held — R1 and tracker ordering are unchanged.
+- **Observability.** `l2_pf_issue_o` / `l2_pf_useful_o` (demand hit on a
+  `pf_installed` way bit) / `l2_pf_drop_o`, mirrored as `[mc_cache]`
+  `l2_pf_issue`/`l2_pf_useful`/`l2_pf_drop` and PMU group-2 selectors 9/10.
+  `L3PrefetchEn` shares the fields at the L3 instance but is off and
+  unqualified.
+- **Measured.** 512 KiB scan -9.9 % (L0) / -8.2 % (L40); write/read -13.1 % /
+  -7.8 %; pointer chase neutral; strict boot +0.3 % at both latencies
+  (pf-off control boot reproduces the 18,419,779 anchor exactly). The boot cost
+  failed the "improve or neutral" adoption bar, so **the prefetcher ships off in
+  every package** — the mechanism is proven and config-gated for later policy
+  tuning.
+- **Evidence.** PF leaf `tb_g6lc_l2_pf` (train/issue/stride/page-boundary/
+  reserve/drop cases + oracle negative + reserve-removal mutation detected);
+  HUM pf-off identity 110/110; HUM pf-on 114/114 incl. directed scenarios
+  62-64 (sc30 excluded under PF — it counts demand-only ARs); fixture SCC 0;
+  lint/synth `check -assert` green on defaults/int2/int2_l3; FO4 `g6lc_l2_top`
+  30.5 <= 32.
 
 ## Default-off replacement experiment (2026-09-14)
 

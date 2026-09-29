@@ -63,6 +63,15 @@ module g6lc_l2_top
     // lock writes on WR_ID stay legal (they keep their original id on the
     // blocking path). Has no netlist effect — assertion gating only.
     parameter bit          SLV_WRID_OK   = 1'b0,
+    // T9h/M5 stream/stride prefetcher (tier R): trained on committed demand
+    // misses, next-line + fixed-stride detection, at most one prefetched
+    // line in flight as a PF-flagged MSHR fill that never takes the last
+    // PF_MSHR_RESERVE MSHR entries and never displaces a resident line.
+    parameter bit          PF_EN          = 1'b0,
+    parameter int unsigned PF_STREAMS     = 4,
+    parameter int unsigned PF_DISTANCE    = 2,
+    parameter bit          PF_STRIDE      = 1'b1,
+    parameter int unsigned PF_MSHR_RESERVE= 1,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -93,6 +102,13 @@ module g6lc_l2_top
     // resident line instead of purging it — one pulse per such write. The
     // cluster leaves it unconnected; the TB counts it as l2_wupd.
     output logic      l2_wupdate_o,
+    // Observability pulses (T9h/M5 prefetcher): a candidate allocated an
+    // MSHR fill, a demand hit to a PF-installed line, a candidate dropped
+    // by admission (resident / in-flight / tracked write / MSHR reserve /
+    // no free way).
+    output logic      l2_pf_issue_o,
+    output logic      l2_pf_useful_o,
+    output logic      l2_pf_drop_o,
     // Observability pulses (POSTED_WRITES): an AW held for a full write
     // tracker, an R1/R2 line-match hold cycle, a posted write completing its
     // B on the slave channel, and a tracked bypass read draining its last
@@ -151,6 +167,9 @@ module g6lc_l2_top
     assign l2_posted_o = 1'b0;
     assign l2_rdtrk_o = 1'b0;
     assign l2_posted_hold_o = 1'b0;
+    assign l2_pf_issue_o = 1'b0;
+    assign l2_pf_useful_o = 1'b0;
+    assign l2_pf_drop_o = 1'b0;
     assign l2_evict_valid_o = 1'b0;
     assign l2_evict_addr_o  = '0;
     assign l2_back_inval_ready_o = 1'b1;
@@ -241,13 +260,46 @@ module g6lc_l2_top
   assign tag_match_tag   = tag_of(l2_back_inval_valid_i ? l2_back_inval_addr_i
                                                        : self_inval_addr);
 
+  // --------------------
+  // T9h/M5 prefetcher plumbing (PF_EN)
+  // --------------------
+  // g6lc_l2_pf offers ≤1 candidate line. Admission runs from S_IDLE only —
+  // demand work in S_TAG always owns the MSHR/tag ports — via a silent tag
+  // row launch + lookup on the candidate's set, the MSHR lookup CAM, the
+  // R1 write-tracker line probe, the PF_MSHR_RESERVE free-entry floor and a
+  // free-way check (a prefetch never displaces a resident line: all-valid
+  // sets are dropped, not evicted). A committed candidate becomes a
+  // pf-flagged fill entry — issued, collected, installed and kill-matched
+  // exactly like a demand fill, with no waiter. At serve time a pf head
+  // carrying no waiters retires without the slave R channel; a head that
+  // picked up a same-line waiter enters the serve path at S_SERVE_POP (its
+  // stored id/len are never used — the waiter's meta drives the burst).
+  // Every probe muxes off registered candidate state on idle cycles —
+  // nothing here lengthens the S_TAG hit compare or the fill-issue path.
+  logic                          pf_cand_vld, pf_cand_take;
+  logic [AXI_ADDR_WIDTH-1:0]     pf_cand_line;
+  logic                          pf_train;
+  logic                          pf_probe_q, pf_probe_d;
+  logic                          pf_row_q, pf_row_d;
+  logic [AXI_ADDR_WIDTH-1:0]     pf_addr_q, pf_addr_d;
+  logic                          pf_launch, pf_launch_ok, pf_capture;
+  logic                          pf_probe_fire, pf_alloc;
+  logic                          pf_way_ok;
+  logic [WAY_W-1:0]              pf_way;
+  logic [SET_ASSOC-1:0]          pf_pend_way;
+  logic [AXI_ADDR_WIDTH-1:0]     pf_launch_addr;
+  logic                          tag_wpf, tag_hit_pf;
+  logic [MSHR_DEPTH-1:0]         fill_pf_q, fill_pf_d;
+  logic                          head_pf, pf_retire;
+
   g6lc_l2_tag #(
       .NUM_SETS  (NUM_SETS),
       .SET_ASSOC (SET_ASSOC),
       .TAG_WIDTH (TAG_BITS),
       .IDX_WIDTH (IDX_BITS),
       .TAG_SRAM  (TAG_SRAM),
-      .WRITE_UPDATE (WRITE_UPDATE)
+      .WRITE_UPDATE (WRITE_UPDATE),
+      .PF_TAG    (PF_EN)
   ) i_tag (
       .clk_i,
       .rst_ni,
@@ -268,6 +320,8 @@ module g6lc_l2_top
       .write_way_i  (tag_wway),
       .write_tag_i  (tag_wtag),
       .write_valid_i(tag_wvalid),
+      .write_pf_i   (tag_wpf),
+      .hit_pf_o     (tag_hit_pf),
       .inval_i      (tag_inval),
       .inval_index_i(tag_iindex),
       .inval_way_i  (tag_iway),
@@ -331,6 +385,7 @@ module g6lc_l2_top
   logic [OFF_BITS-1:0]     waiter_off;
   logic [7:0]              waiter_len;
   logic [2:0]              waiter_size;
+  logic [MSHR_W:0]         mshr_count;
   assign {waiter_off, waiter_len, waiter_size} = mshr_waiter_meta;
   // Optional round-robin victim pointer (RR_EN). rr_adv strobes on a
   // successful install; rr_victim_way is the pointer read for the current set.
@@ -373,7 +428,7 @@ module g6lc_l2_top
       .empty_o           (mshr_empty),
       .full_o            (mshr_full),
       .merge_full_o      (),
-      .count_o           ()
+      .count_o           (mshr_count)
   );
   assign l2_mshr_full_o = mshr_full;
 
@@ -549,9 +604,15 @@ module g6lc_l2_top
   assign serve_bidx = serve_base + BEAT_IDX_W'(serve_beat_q);
 
   // The primary's id is the captured one: the AR bus has already moved on by
-  // the time S_TAG allocates. A merging waiter overrides both below.
-  assign mshr_alloc_id   = id_q;
-  assign mshr_alloc_line = line_align(addr_q);
+  // the time S_TAG allocates. A merging waiter overrides both below. A PF
+  // probe muxes the lookup/alloc line onto the candidate; its entries carry
+  // FILL_ID — they never serve a primary burst, so the id is inert.
+  assign mshr_alloc_id   = pf_alloc ? FILL_ID : id_q;
+  assign mshr_alloc_line = pf_probe_fire ? line_align(pf_addr_q)
+                                         : line_align(addr_q);
+  // Demand misses commit in S_TAG; a commit is the prefetcher's only
+  // training edge (mshr_alloc in S_IDLE is a pf commit — excluded).
+  assign pf_train        = PF_EN && mshr_alloc && (state_q == S_TAG);
 
   // --------------------
   // Fill engine: per-MSHR-entry fill state, line buffers and issue order.
@@ -606,6 +667,9 @@ module g6lc_l2_top
   logic              serve_pend;
   logic [MSHR_W-1:0] inst_idx;
   logic              inst_vld;
+  // The installed line's pf provenance — tag_wpf is only consumed alongside
+  // tag_write at install time.
+  assign tag_wpf        = PF_EN && fill_pf_q[inst_idx];
   assign collect_pos    = fifo_wrap((MSHR_W + 1)'(fifo_rd_q) + collect_cnt_q);
   assign issue_pos      = fifo_wrap((MSHR_W + 1)'(fifo_rd_q) + issued_cnt_q);
   assign collect_idx    = fifo_q[collect_pos];
@@ -620,8 +684,17 @@ module g6lc_l2_top
   assign issue_vld      = (issued_cnt_q < fifo_cnt_q) && !bfid_busy &&
                           (fill_state_q[issue_idx] == F_QUEUED)
                           && !((state_q==S_BYPASS_AW || state_q==S_BYPASS_W || state_q==S_BYPASS_B) && id_q==FILL_ID);
+  // A pf fill head with waiters still claims the serve channel (the waiters
+  // are demand readers); a waitless pf head retires without a slave burst.
+  assign head_pf        = PF_EN && (fifo_cnt_q != '0) &&
+                          fill_pf_q[fifo_q[fifo_rd_q]];
   assign serve_pend     = (fifo_cnt_q != '0) &&
-                          (fill_state_q[fifo_q[fifo_rd_q]] == F_READY);
+                          (fill_state_q[fifo_q[fifo_rd_q]] == F_READY) &&
+                          !(head_pf && !mshr_waiter_valid);
+  assign pf_retire      = (fifo_cnt_q != '0) &&
+                          (fill_state_q[fifo_q[fifo_rd_q]] == F_READY) &&
+                          head_pf && !mshr_waiter_valid &&
+                          (state_q != S_SERVE) && (state_q != S_SERVE_POP);
   // Postable iff non-atomic, unlocked and outside the reserved fill id —
   // ATOP/lock/FILL_ID-alias writes keep the blocking S_BYPASS_AW→W→B path
   // but still hold a (blocking) tracker entry for uniform B routing.
@@ -701,7 +774,8 @@ module g6lc_l2_top
         .s_b_ready_i       (slv_req_i.b_ready),
         .pop_o             (wtrk_pop),
         .pop_idx_o         (wtrk_pop_idx),
-        .line0_i           (line_align(addr_q)),
+        .line0_i           (pf_probe_fire ? line_align(pf_addr_q)
+                                          : line_align(addr_q)),
         .line0_match_o     (wtrk_line0_match),
         .line0_wu_o        (wtrk_line0_wu),
         .line1_i           (line_align(slv_req_i.aw.addr)),
@@ -849,6 +923,69 @@ module g6lc_l2_top
     end
   end
   assign tag_probe_way = victim_way;
+
+  // PF way pick: an invalid way in the candidate's set not already claimed
+  // by an in-flight fill — a prefetch never evicts, so an all-valid or all-
+  // pending set drops the candidate instead. tag_way_valid reflects
+  // index_i, which the probe fire muxes to the candidate's set.
+  always_comb begin
+    pf_pend_way = '0;
+    for (int unsigned e = 0; e < MSHR_DEPTH; e++) begin
+      if (fill_act_q[e] && (fill_state_q[e] != F_READY) &&
+          (idx_of(fill_addr_q[e]) == idx_of(pf_addr_q)))
+        pf_pend_way[fill_way_q[e]] = 1'b1;
+    end
+    pf_way    = '0;
+    pf_way_ok = 1'b0;
+    for (int w = 0; w < int'(SET_ASSOC); w++) begin
+      if (!tag_way_valid[w] && !pf_pend_way[w] && !pf_way_ok) begin
+        pf_way    = WAY_W'(w);
+        pf_way_ok = 1'b1;
+      end
+    end
+  end
+
+  if (PF_EN) begin : gen_pf
+    g6lc_l2_pf #(
+      .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
+      .LINE_BYTES     (LINE_WIDTH / 8),
+      .NR_STREAMS     (PF_STREAMS),
+      .PF_DISTANCE    (PF_DISTANCE),
+      .STRIDE_EN      (PF_STRIDE)
+    ) i_pf (
+      .clk_i,
+      .rst_ni,
+      .train_i      (pf_train),
+      .train_line_i (line_align(addr_q)),
+      .cand_valid_o (pf_cand_vld),
+      .cand_line_o  (pf_cand_line),
+      .cand_take_i  (pf_cand_take)
+    );
+    assign pf_cand_take = pf_capture;
+  end else begin : gen_no_pf
+    assign pf_cand_vld  = 1'b0;
+    assign pf_cand_line = '0;
+    assign pf_cand_take = 1'b0;
+  end
+
+  // Admission sequencing: a captured candidate gets its tag row launched
+  // while the launch port is free (demand S_TAG relaunch and the WU write
+  // probe own it otherwise); pf_row_q remembers whose row is in flight so
+  // an inval-match steal re-launches. The probe evaluates — silently, one
+  // cycle minimum after capture — on the first S_IDLE cycle that owns the
+  // registered row.
+  assign pf_launch_ok  = PF_EN &&
+                         !(state_d == S_TAG) &&
+                         !(WRITE_UPDATE && (state_q == S_IDLE) &&
+                           (state_d == S_BYPASS_AW));
+  assign pf_launch_addr = pf_probe_q ? pf_addr_q : pf_cand_line;
+  assign pf_capture    = pf_cand_vld && !pf_probe_q && pf_launch_ok;
+  // Relaunch each cycle while armed: same-index re-reads are idempotent, and
+  // keeping pf_probe_fire out of the launch term severs the combinational
+  // pf_launch -> tag row_valid -> probe -> launch loop under TAG_SRAM.
+  assign pf_launch     = pf_launch_ok && (pf_capture || pf_probe_q);
+  assign pf_probe_fire = PF_EN && pf_probe_q && (state_q == S_IDLE) &&
+                         pf_row_q && tag_row_valid;
 
   logic install_discard;
   assign install_discard = fill_kill_q[inst_idx] ||
@@ -1002,6 +1139,13 @@ module g6lc_l2_top
     fill_buf_d    = fill_buf_q;
     fill_bcnt_d   = fill_bcnt_q;
     fill_ferr_d   = fill_ferr_q;
+    fill_pf_d     = fill_pf_q;
+    pf_probe_d    = pf_probe_q;
+    // Recomputed every cycle: 1 when the last tag launch was the pf row and
+    // an inval-match did not steal it. Only read under TAG_SRAM.
+    pf_row_d      = pf_launch && !tag_match_inval;
+    pf_addr_d     = pf_addr_q;
+    pf_alloc      = 1'b0;
     fifo_d        = fifo_q;
     fifo_rd_d     = fifo_rd_q;
     fifo_wr_d     = fifo_wr_q;
@@ -1047,6 +1191,9 @@ module g6lc_l2_top
     l2_hit_o    = 1'b0;
     l2_miss_o   = 1'b0;
     l2_bypass_o = 1'b0;
+    l2_pf_issue_o  = 1'b0;
+    l2_pf_useful_o = 1'b0;
+    l2_pf_drop_o   = 1'b0;
     l2_evict_valid_o = 1'b0;
     l2_evict_addr_o  = '0;
     wr_self_inval      = 1'b0;
@@ -1116,7 +1263,9 @@ module g6lc_l2_top
           serve_len_d  = fill_len_q[fifo_q[fifo_rd_q]];
           serve_beat_d = '0;
           serve_intr_d = 1'b0;
-          state_d      = S_SERVE;
+          // A pf fill has no primary burst: waitered pf heads start at the
+          // waiter pop; the waitless case is retired inline (pf_retire).
+          state_d      = head_pf ? S_SERVE_POP : S_SERVE;
         end else if (slv_req_i.aw_valid && wtrk_aw_ok) begin
           // Writes: write-through bypass (always push to memory); optional allocate
           slv_resp_o.aw_ready = 1'b1;
@@ -1166,10 +1315,14 @@ module g6lc_l2_top
             serve_len_d=fill_len_q[fifo_q[fifo_rd_q]];
             serve_beat_d='0;
             serve_intr_d=1'b1;
-            state_d=S_SERVE;
+            state_d=head_pf ? S_SERVE_POP : S_SERVE;
           end
         end else if(tag_hit)begin
           l2_hit_o = 1'b1;
+          // T9h/M5: a demand hit on a PF-installed line — the tag self-clears
+          // the way's pf bit on this lookup, so each prefetched line counts
+          // as useful at most once.
+          l2_pf_useful_o = tag_hit_pf;
           way_d    = tag_way;
           // Kick data read
           hit_fresh_d = 1'b1;
@@ -1208,6 +1361,10 @@ module g6lc_l2_top
                 (mshr_lookup_hit ||
                  (way_ok && (!tag_way_valid[way_d] || l2_evict_ready_i)))) begin
               mshr_alloc = 1'b1;
+              // A demand merging onto an in-flight PF fill is a useful
+              // prefetch — it saves exactly the fill latency it waited for.
+              if (mshr_lookup_hit)
+                l2_pf_useful_o = fill_pf_q[mshr_lookup_idx];
               if (!mshr_lookup_hit) begin
                 // Fresh miss: park the entry, queue a background fill and
                 // return to S_IDLE — the pipeline takes the next request
@@ -1223,6 +1380,7 @@ module g6lc_l2_top
                 fill_len_d[mshr_alloc_idx]   = len_q;
                 fill_bcnt_d[mshr_alloc_idx]  = '0;
                 fill_ferr_d[mshr_alloc_idx]  = axi_pkg::RESP_OKAY;
+                fill_pf_d[mshr_alloc_idx]    = 1'b0;
               end
               state_d = S_IDLE;
             end else if (serve_pend && r_fsm_start_ok &&
@@ -1238,7 +1396,7 @@ module g6lc_l2_top
               serve_len_d  = fill_len_q[fifo_q[fifo_rd_q]];
               serve_beat_d = '0;
               serve_intr_d = 1'b1;
-              state_d      = S_SERVE;
+              state_d      = head_pf ? S_SERVE_POP : S_SERVE;
             end
             // else stall in S_TAG until MSHR free / evict accept / way frees
           end
@@ -1370,7 +1528,7 @@ module g6lc_l2_top
           serve_len_d=fill_len_q[fifo_q[fifo_rd_q]];
           serve_beat_d='0;
           serve_intr_d=1'b1;
-          state_d=S_SERVE;
+          state_d=head_pf ? S_SERVE_POP : S_SERVE;
         end
       end
 
@@ -1691,6 +1849,61 @@ module g6lc_l2_top
         r_turn_d = 1'b0;
     end
 
+    // ---- T9h/M5 prefetch admission (runs after the case so the demand
+    // FSM's final state_d is visible; the pf probes mux tag/MSHR/tracker
+    // ports only on cycles the demand path does not own them) ----
+    if (pf_capture) begin
+      pf_probe_d = 1'b1;
+      pf_addr_d  = pf_cand_line;
+    end
+    if (pf_probe_fire) begin
+      // Silent probe of the candidate's set/tag — no l2_hit_o/l2_miss_o
+      // pulse. line0/MSHR lookup inputs are already muxed to pf_addr_q.
+      tag_lookup = 1'b1;
+      tag_iindex = idx_of(pf_addr_q);
+      tag_ltag   = tag_of(pf_addr_q);
+      if (!tag_hit && !mshr_lookup_hit && !wtrk_line0_match &&
+          (mshr_count < (MSHR_W + 1)'(MSHR_DEPTH - PF_MSHR_RESERVE)) &&
+          pf_way_ok) begin
+        // Commit: pf-flagged fill, no waiter, installs like a demand fill.
+        pf_alloc                     = 1'b1;
+        mshr_alloc                   = 1'b1;
+        mshr_alloc_meta              = '0;
+        fifo_d[fifo_wr_q]            = mshr_alloc_idx;
+        fifo_wr_d                    = fifo_inc(fifo_wr_q);
+        fifo_cnt_d                   = fifo_cnt_q + 1'b1;
+        fill_act_d[mshr_alloc_idx]   = 1'b1;
+        fill_state_d[mshr_alloc_idx] = F_QUEUED;
+        fill_kill_d[mshr_alloc_idx]  = 1'b0;
+        fill_addr_d[mshr_alloc_idx]  = pf_addr_q;
+        fill_way_d[mshr_alloc_idx]   = pf_way;
+        fill_len_d[mshr_alloc_idx]   = '0;
+        fill_bcnt_d[mshr_alloc_idx]  = '0;
+        fill_ferr_d[mshr_alloc_idx]  = axi_pkg::RESP_OKAY;
+        fill_pf_d[mshr_alloc_idx]    = 1'b1;
+        l2_pf_issue_o                = 1'b1;
+      end else begin
+        l2_pf_drop_o = 1'b1;
+      end
+      pf_probe_d = 1'b0;
+    end
+
+    // A served-out pf head carrying no waiters frees itself — no slave
+    // burst, no serve regs. !mshr_alloc: a same-cycle waiter attach (an
+    // S_TAG merge landing on this entry) or a pf commit wins, and the
+    // retire retries next cycle — the head then drains via the serve path.
+    if (pf_retire && !mshr_alloc) begin
+      mshr_complete                 = 1'b1;
+      fill_act_d[fifo_q[fifo_rd_q]] = 1'b0;
+      fifo_rd_d                     = fifo_inc(fifo_rd_q);
+      // Accumulate on _d, not _q: this block runs after the collector and
+      // issue engine, whose same-cycle +1s (an AR issue or a last-beat
+      // collect landing under a pf head retire) must survive.
+      fifo_cnt_d                    = fifo_cnt_d - 1'b1;
+      issued_cnt_d                  = issued_cnt_d - 1'b1;
+      collect_cnt_d                 = collect_cnt_d - 1'b1;
+    end
+
     // Launched tag-row read (TAG_SRAM): evaluated after every state_d/addr_d
     // assignment so it covers the S_IDLE accept edge, each held S_TAG cycle
     // (relaunch after an inval-match port steal) and the S_SERVE interrupt
@@ -1699,10 +1912,12 @@ module g6lc_l2_top
     // edge so the write-update decision in the first S_BYPASS_AW cycle sees
     // the row; an inval-match steal reports !row_valid and the write
     // conservatively invalidates. Under TAG_SRAM=0 the tag module ignores
-    // this.
+    // this. T9h/M5: a prefetch candidate row launch takes the port only on
+    // cycles the demand path did not claim it (pf_launch_ok above).
     tag_launch       = (state_d == S_TAG) ||
-                       (WRITE_UPDATE && state_q == S_IDLE && state_d == S_BYPASS_AW);
-    tag_launch_index = idx_of(addr_d);
+                       (WRITE_UPDATE && state_q == S_IDLE && state_d == S_BYPASS_AW) ||
+                       pf_launch;
+    tag_launch_index = pf_launch ? idx_of(pf_launch_addr) : idx_of(addr_d);
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -1744,6 +1959,10 @@ module g6lc_l2_top
       serve_intr_q <= 1'b0;
       fill_act_q  <= '0;
       fill_kill_q <= '0;
+      fill_pf_q   <= '0;
+      pf_probe_q  <= 1'b0;
+      pf_row_q    <= 1'b0;
+      pf_addr_q   <= '0;
       fifo_rd_q   <= '0;
       fifo_wr_q   <= '0;
       fifo_cnt_q  <= '0;
@@ -1800,6 +2019,10 @@ module g6lc_l2_top
       serve_intr_q <= serve_intr_d;
       fill_act_q  <= fill_act_d;
       fill_kill_q <= fill_kill_d;
+      fill_pf_q   <= fill_pf_d;
+      pf_probe_q  <= pf_probe_d;
+      pf_row_q    <= pf_row_d;
+      pf_addr_q   <= pf_addr_d;
       fifo_rd_q   <= fifo_rd_d;
       fifo_wr_q   <= fifo_wr_d;
       fifo_cnt_q  <= fifo_cnt_d;

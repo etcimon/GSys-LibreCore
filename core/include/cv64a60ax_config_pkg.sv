@@ -220,6 +220,12 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       L2PostedWriteEn: bit'(0),
       L2WriteTrackDepth: unsigned'(4),
       L2ReadTrackDepth: unsigned'(4),
+      L2PrefetchEn: bit'(0),
+      L2PfStreams: unsigned'(0),
+      L2PfDistance: unsigned'(0),
+      L2PfStrideEn: bit'(0),
+      L2PfMshrReserve: unsigned'(0),
+      L3PrefetchEn: bit'(0),
       SharedTlbDepth: int'(64),
 
    NrLoadPipeRegs: int'(0),

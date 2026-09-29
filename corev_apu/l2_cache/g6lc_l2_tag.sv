@@ -21,7 +21,14 @@ module g6lc_l2_tag #(
     // itself satisfies the invalidation of the old line), so the match must
     // not additionally clear the fresh line's valid bit. Under 0 the guard
     // folds away — a write self-invalidation always finds the way invalid.
-    parameter bit          WRITE_UPDATE = 1'b0
+    parameter bit          WRITE_UPDATE = 1'b0,
+    // T9h/M5: a per-way "installed by prefetch" bit (flop metadata in both
+    // tag paths, like the SRAM path's valid bits). Set by write_pf_i on
+    // install, cleared by every invalidation and self-cleared on the first
+    // demand lookup hit so a prefetched line counts as useful exactly once.
+    // PF_TAG=0 leaves no storage and ties hit_pf_o low — off netlist
+    // unchanged.
+    parameter bit          PF_TAG    = 1'b0
 ) (
     input  logic                          clk_i,
     input  logic                          rst_ni,
@@ -49,6 +56,10 @@ module g6lc_l2_tag #(
     input  logic [$clog2(SET_ASSOC)-1:0]  write_way_i,
     input  logic [TAG_WIDTH-1:0]          write_tag_i,
     input  logic                          write_valid_i,
+    // T9h/M5: the installed line came from the prefetcher (PF_TAG only).
+    input  logic                          write_pf_i,
+    // pf bit of the hit way — 1 on a demand hit to a PF-installed line.
+    output logic                          hit_pf_o,
     // Invalidate way
     input  logic                          inval_i,
     input  logic [IDX_WIDTH-1:0]          inval_index_i,
@@ -88,6 +99,35 @@ module g6lc_l2_tag #(
       end
     end
     assign hit_o = |hit_way;
+
+    // T9h/M5 per-way prefetch-installed bit — flop metadata.
+    logic [NUM_SETS-1:0][SET_ASSOC-1:0] pf_q, pf_d;
+    if (PF_TAG) begin : gen_pf
+      assign hit_pf_o = |(pf_q[index_i] & hit_way);
+      always_comb begin
+        pf_d = pf_q;
+        if (write_i) pf_d[write_index_i][write_way_i] = write_pf_i;
+        if (inval_i) pf_d[inval_index_i][inval_way_i] = 1'b0;
+        if (inval_match_i) begin
+          for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+            if (tags_q[inval_match_index_i][w].valid &&
+                tags_q[inval_match_index_i][w].tag == inval_match_tag_i)
+              pf_d[inval_match_index_i][w] = 1'b0;
+          end
+        end
+        // First demand hit on a PF-installed line consumes the bit.
+        if (|hit_way) pf_d[index_i] = pf_q[index_i] & ~hit_way;
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) pf_q <= '0;
+        else         pf_q <= pf_d;
+      end
+    end else begin : gen_no_pf
+      assign hit_pf_o = 1'b0;
+      logic _unused_pf;
+      assign _unused_pf = write_pf_i & (|pf_q);
+      assign pf_q = '0;
+    end
 
     // One-hot → binary way
     always_comb begin
@@ -264,6 +304,33 @@ module g6lc_l2_tag #(
       for (int unsigned w = 0; w < SET_ASSOC; w++) begin
         way_valid_o[w] = valid_q[index_i][w];
       end
+    end
+
+    // T9h/M5 per-way prefetch-installed bit — flop metadata beside valid_q
+    // (the SRAM row stores tags only; pf is way state, not compare data).
+    logic [NUM_SETS-1:0][SET_ASSOC-1:0] pf_q, pf_d;
+    if (PF_TAG) begin : gen_pf
+      assign hit_pf_o = |(pf_q[index_i] & hit_way);
+      always_comb begin
+        pf_d = pf_q;
+        if (inv_pend_q) begin
+          for (int unsigned w = 0; w < SET_ASSOC; w++)
+            if (inv_clr[w]) pf_d[inv_index_q][w] = 1'b0;
+        end
+        if (write_i) pf_d[write_index_i][write_way_i] = write_pf_i;
+        if (inval_i) pf_d[inval_index_i][inval_way_i] = 1'b0;
+        // First demand hit on a PF-installed line consumes the bit.
+        if (|hit_way) pf_d[index_i] = pf_q[index_i] & ~hit_way;
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) pf_q <= '0;
+        else         pf_q <= pf_d;
+      end
+    end else begin : gen_no_pf
+      assign hit_pf_o = 1'b0;
+      logic _unused_pf;
+      assign _unused_pf = write_pf_i;
+      assign pf_q = '0;
     end
 
     assign probe_tag_o   = row_tag[probe_way_i];

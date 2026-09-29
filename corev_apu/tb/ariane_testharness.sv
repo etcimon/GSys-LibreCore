@@ -1573,9 +1573,20 @@ module ariane_testharness #(
   longint unsigned mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass,
                    mc_cnt_l3_hit, mc_cnt_l3_miss,
                    mc_cnt_l2_selfinv, mc_cnt_l3_selfinv,
-                   mc_cnt_l2_wupd, mc_cnt_l3_wupd;
+                   mc_cnt_l2_wupd, mc_cnt_l3_wupd,
+                   mc_cnt_l2_wtrk_full, mc_cnt_l2_line_hold,
+                   mc_cnt_l2_posted, mc_cnt_l2_rdtrk,
+                   mc_cnt_l2_hold_r1, mc_cnt_l2_hold_r1_wu,
+                   mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold;
+  // T9h/M5: L2 prefetcher pulses.
+  int unsigned mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop;
+  logic mc_l2_pf_issue_obs, mc_l2_pf_useful_obs, mc_l2_pf_drop_obs;
   logic mc_l2_hit_obs, mc_l2_bypass_obs, mc_l2_selfinv_obs, mc_l3_selfinv_obs,
-        mc_l2_wupd_obs, mc_l3_wupd_obs;
+        mc_l2_wupd_obs, mc_l3_wupd_obs,
+        mc_l2_wtrk_full_obs, mc_l2_line_hold_obs, mc_l2_posted_obs,
+        mc_l2_rdtrk_obs,
+        mc_l2_hold_r1_obs, mc_l2_hold_r1_wu_obs, mc_l2_hold_r2_obs,
+        mc_hub_aw_sc_obs, mc_hub_ar_obs;
   if (CVA6Cfg.L2En) begin : gen_mc_cache_l2
     assign mc_l2_hit_obs    = i_cluster.gen_l2.i_l2.l2_hit_o;
     assign mc_l2_bypass_obs = i_cluster.gen_l2.i_l2.l2_bypass_o;
@@ -1585,11 +1596,43 @@ module ariane_testharness #(
     // l2_wupdate_o: a forwarded write merged into a resident line
     // (WRITE_UPDATE) instead of purging it.
     assign mc_l2_wupd_obs = i_cluster.gen_l2.i_l2.l2_wupdate_o;
+    // T9b posted-write tracker observability; T9c/M1c hold-cycle split.
+    assign mc_l2_wtrk_full_obs = i_cluster.gen_l2.i_l2.l2_wtrk_full_o;
+    assign mc_l2_line_hold_obs = i_cluster.gen_l2.i_l2.l2_wtrk_line_hold_o;
+    assign mc_l2_hold_r1_obs   = i_cluster.gen_l2.i_l2.l2_hold_r1_o;
+    assign mc_l2_hold_r1_wu_obs = i_cluster.gen_l2.i_l2.l2_hold_r1_wu_o;
+    assign mc_l2_hold_r2_obs   = i_cluster.gen_l2.i_l2.l2_hold_r2_o;
+    assign mc_l2_posted_obs    = i_cluster.gen_l2.i_l2.l2_posted_o;
+    assign mc_l2_rdtrk_obs     = i_cluster.gen_l2.i_l2.l2_rdtrk_o;
+    // T9h/M5 prefetcher pulses (constant 0 when PF_EN=0).
+    assign mc_l2_pf_issue_obs  = i_cluster.gen_l2.i_l2.l2_pf_issue_o;
+    assign mc_l2_pf_useful_obs = i_cluster.gen_l2.i_l2.l2_pf_useful_o;
+    assign mc_l2_pf_drop_obs   = i_cluster.gen_l2.i_l2.l2_pf_drop_o;
   end else begin : gen_mc_cache_nol2
     assign mc_l2_hit_obs    = 1'b0;
     assign mc_l2_bypass_obs = 1'b0;
     assign mc_l2_selfinv_obs = 1'b0;
     assign mc_l2_wupd_obs = 1'b0;
+    assign mc_l2_wtrk_full_obs = 1'b0;
+    assign mc_l2_line_hold_obs = 1'b0;
+    assign mc_l2_hold_r1_obs = 1'b0;
+    assign mc_l2_hold_r1_wu_obs = 1'b0;
+    assign mc_l2_hold_r2_obs = 1'b0;
+    assign mc_l2_posted_obs = 1'b0;
+    assign mc_l2_rdtrk_obs = 1'b0;
+    assign mc_l2_pf_issue_obs = 1'b0;
+    assign mc_l2_pf_useful_obs = 1'b0;
+    assign mc_l2_pf_drop_obs = 1'b0;
+  end
+  // R2 same-core share: the L2 sees hub slot ids, so the core attribution
+  // lives at the hub (gen_hub exists iff NrCores > 1 — IDENTITY_FAST=1).
+  if (CVA6Cfg.NrCores > 1) begin : gen_mc_hub_sc
+    assign mc_hub_aw_sc_obs = i_cluster.gen_hub.i_hub.hub_aw_sc_collide_o;
+    // T9e/M1d: hub-side read-behind-write hold (ar_wr_line_live).
+    assign mc_hub_ar_obs   = i_cluster.gen_hub.i_hub.hub_ar_wr_hold_o;
+  end else begin : gen_mc_hub_nosc
+    assign mc_hub_aw_sc_obs = 1'b0;
+    assign mc_hub_ar_obs   = 1'b0;
   end
   if (CVA6Cfg.L3En) begin : gen_mc_cache_l3
     assign mc_l3_selfinv_obs = i_cluster.gen_l3.i_l3.l3_selfinv_hit_o;
@@ -1609,6 +1652,18 @@ module ariane_testharness #(
       mc_cnt_l3_selfinv <= mc_cnt_l3_selfinv + mc_l3_selfinv_obs;
       mc_cnt_l2_wupd <= mc_cnt_l2_wupd + mc_l2_wupd_obs;
       mc_cnt_l3_wupd <= mc_cnt_l3_wupd + mc_l3_wupd_obs;
+      mc_cnt_l2_wtrk_full <= mc_cnt_l2_wtrk_full + mc_l2_wtrk_full_obs;
+      mc_cnt_l2_line_hold <= mc_cnt_l2_line_hold + mc_l2_line_hold_obs;
+      mc_cnt_l2_hold_r1 <= mc_cnt_l2_hold_r1 + mc_l2_hold_r1_obs;
+      mc_cnt_l2_hold_r1_wu <= mc_cnt_l2_hold_r1_wu + mc_l2_hold_r1_wu_obs;
+      mc_cnt_l2_hold_r2 <= mc_cnt_l2_hold_r2 + mc_l2_hold_r2_obs;
+      mc_cnt_hub_aw_sc <= mc_cnt_hub_aw_sc + mc_hub_aw_sc_obs;
+      mc_cnt_hub_ar_hold <= mc_cnt_hub_ar_hold + mc_hub_ar_obs;
+      mc_cnt_l2_posted <= mc_cnt_l2_posted + mc_l2_posted_obs;
+      mc_cnt_l2_rdtrk <= mc_cnt_l2_rdtrk + mc_l2_rdtrk_obs;
+      mc_cnt_l2_pf_issue <= mc_cnt_l2_pf_issue + mc_l2_pf_issue_obs;
+      mc_cnt_l2_pf_useful <= mc_cnt_l2_pf_useful + mc_l2_pf_useful_obs;
+      mc_cnt_l2_pf_drop <= mc_cnt_l2_pf_drop + mc_l2_pf_drop_obs;
     end else begin
       mc_cnt_l2_hit    <= '0;
       mc_cnt_l2_miss   <= '0;
@@ -1619,6 +1674,18 @@ module ariane_testharness #(
       mc_cnt_l3_selfinv <= '0;
       mc_cnt_l2_wupd <= '0;
       mc_cnt_l3_wupd <= '0;
+      mc_cnt_l2_wtrk_full <= '0;
+      mc_cnt_l2_line_hold <= '0;
+      mc_cnt_l2_hold_r1 <= '0;
+      mc_cnt_l2_hold_r1_wu <= '0;
+      mc_cnt_l2_hold_r2 <= '0;
+      mc_cnt_hub_aw_sc <= '0;
+      mc_cnt_hub_ar_hold <= '0;
+      mc_cnt_l2_posted <= '0;
+      mc_cnt_l2_rdtrk <= '0;
+      mc_cnt_l2_pf_issue <= '0;
+      mc_cnt_l2_pf_useful <= '0;
+      mc_cnt_l2_pf_drop <= '0;
     end
   end
   //pragma translate_on
@@ -1793,10 +1860,13 @@ module ariane_testharness #(
                c, mc_gap_max[c], MC_GAP_LIMIT, mc_last_wfi[c]);
     if (mc_any_hung)
       $display("*** [mc_verdict] FAIL: a core ran and then stopped retiring (exit code 126)");
-    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d dram_latency=%0d",
+    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d l2_wtrk_full=%0d l2_line_hold=%0d l2_posted=%0d l2_rdtrk=%0d l2_hold_r1=%0d l2_hold_r1_wu=%0d l2_hold_r2=%0d hub_aw_sc_collide=%0d hub_ar_hold=%0d dram_latency=%0d l2_pf_issue=%0d l2_pf_useful=%0d l2_pf_drop=%0d",
              mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass, mc_cnt_l3_hit, mc_cnt_l3_miss,
              mc_cnt_l2_selfinv, mc_cnt_l3_selfinv, mc_cnt_l2_wupd, mc_cnt_l3_wupd,
-             DramLatency);
+             mc_cnt_l2_wtrk_full, mc_cnt_l2_line_hold, mc_cnt_l2_posted,
+             mc_cnt_l2_rdtrk, mc_cnt_l2_hold_r1, mc_cnt_l2_hold_r1_wu,
+             mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold, DramLatency,
+             mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop);
   end
   //pragma translate_on
 

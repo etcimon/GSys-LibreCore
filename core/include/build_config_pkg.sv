@@ -473,6 +473,16 @@ package build_config_pkg;
         (CVA6Cfg.L2WriteTrackDepth != 0) ? CVA6Cfg.L2WriteTrackDepth : 4;
     cfg.L2ReadTrackDepth =
         (CVA6Cfg.L2ReadTrackDepth != 0) ? CVA6Cfg.L2ReadTrackDepth : 4;
+    // T9h/M5: L2 prefetcher geometry defaults (engine off unless enabled).
+    cfg.L2PrefetchEn   = CVA6Cfg.L2PrefetchEn;
+    cfg.L2PfStreams    = (CVA6Cfg.L2PfStreams != 0) ? CVA6Cfg.L2PfStreams : 4;
+    cfg.L2PfDistance   = (CVA6Cfg.L2PfDistance != 0) ? CVA6Cfg.L2PfDistance : 2;
+    // bit field — 0 is a real choice (next-line only); packages enabling
+    // L2PrefetchEn set L2PfStrideEn explicitly.
+    cfg.L2PfStrideEn   = CVA6Cfg.L2PfStrideEn;
+    cfg.L2PfMshrReserve= (CVA6Cfg.L2PfMshrReserve != 0) ? CVA6Cfg.L2PfMshrReserve
+                                                      : 1;
+    cfg.L3PrefetchEn   = CVA6Cfg.L3PrefetchEn;
     // Multi-core snoop-filter / prefetch defaults when left zero
     if (cfg.NrCores > 1 && CVA6Cfg.SnoopFilterEn && CVA6Cfg.SnoopFilterEntries == 0)
       cfg.SnoopFilterEntries = cfg.NrCores * 64;

@@ -274,6 +274,24 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `ooocoh-m4-osbi-int2-L0-r3` **17,870,562 cycles = the M1d int2
   anchor exactly** (FpPresent=0 folds the owner table away). Details in
   `core/ooo/AGENTS-ooo-plan.md` T9g.
+- [x] **Landed, default off (T9h, 2026-09-29): M5 L2 stream/stride
+  prefetcher** — `g6lc_l2_pf` (tier R) trained on S_TAG demand-miss commits,
+  streams keyed by 4 KiB region tag, next-line + stride detect, <=1
+  candidate/cycle, page-boundary-safe. PFs are PF-flagged MSHR/fill entries
+  (no waiter, demand priority, `L2PfMshrReserve` demand slots reserved,
+  dropped — not held — on resident/duplicate/tracked-write lines, same
+  `kill_match`/`install_discard` as demand). `l2_pf_issue/useful/drop_o` +
+  `[mc_cache]` counters + PMU g2 sel 9/10. Evidence: PF leaf incl.
+  noreserve mutation + oracle negative; HUM pf-off identity 110/110 and
+  pf-on 114/114 (sc62-64 directed, sc30 excluded under PF); fixture SCC 0;
+  gates lint/synth `check -assert` green (defaults/int2/int2_l3); FO4
+  `g6lc_l2_top` 30.5 <= 32. Measured on int2_l3: 512 KiB scan -9.9 % L0 /
+  -8.2 % L40, write/read -13.1 % / -7.8 %, pointer chase neutral; strict
+  boots +0.28 % L0 / +0.33 % L40 (~230 PF issues shift demand arbitration —
+  the pf-off control boot reproduces the 18,419,779 anchor exactly). The
+  boot regression fails the adoption bar, so `L2PrefetchEn` stays 0 in
+  every package — a proven, config-gated candidate pending a
+  burst-throttling policy. Details in `core/ooo/AGENTS-ooo-plan.md` T9h.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

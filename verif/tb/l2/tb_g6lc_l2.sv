@@ -1387,6 +1387,11 @@ module g6lc_l2_fixture
   parameter bit POSTED_WRITES = 1'b0,
   parameter int unsigned WTRK_DEPTH = 4,
   parameter int unsigned RDTRK_DEPTH = 4,
+  // T9h/M5 stream/stride prefetcher (admission/pf_fill in the L2 engine).
+  parameter bit PF_EN = 1'b0,
+  parameter int unsigned PF_STREAMS = 4,
+  parameter int unsigned PF_DISTANCE = 2,
+  parameter int unsigned PF_MSHR_RESERVE = 1,
   // The flop-vs-SRAM miter excludes back-invalidation: its two-cycle commit
   // (vs one on the flop path) is a permitted timing difference.
   parameter bit NO_INVAL = 1'b0
@@ -1416,6 +1421,8 @@ module g6lc_l2_fixture
       .POSTED_WRITES(POSTED_WRITES),
       .WTRK_DEPTH(WTRK_DEPTH),
       .RDTRK_DEPTH(RDTRK_DEPTH),
+      .PF_EN(PF_EN),.PF_STREAMS(PF_STREAMS),.PF_DISTANCE(PF_DISTANCE),
+      .PF_MSHR_RESERVE(PF_MSHR_RESERVE),
 `endif
       .AXI_ADDR_WIDTH(AW),.AXI_DATA_WIDTH(DW),
       .AXI_ID_WIDTH(IDW),.AXI_USER_WIDTH(UW),.axi_req_t(req_t),.axi_resp_t(resp_t)
@@ -1428,6 +1435,7 @@ module g6lc_l2_fixture
       .l3_wtrk_full_o(), .l3_wtrk_line_hold_o(),
       .l3_hold_r1_o(), .l3_hold_r1_wu_o(), .l3_hold_r2_o(), .l3_posted_o(),
       .l3_rdtrk_o(), .l3_posted_hold_o(),
+      .l3_pf_issue_o(), .l3_pf_useful_o(), .l3_pf_drop_o(),
 `endif
       .l3_evict_valid_o(),.l3_evict_addr_o(),.l3_evict_ready_i(1'b1),
       .l3_write_idle_o(), .l3_back_inval_valid_i(1'b0),
@@ -1448,6 +1456,8 @@ module g6lc_l2_fixture
     .POSTED_WRITES(POSTED_WRITES),
     .WTRK_DEPTH(WTRK_DEPTH),
     .RDTRK_DEPTH(RDTRK_DEPTH),
+    .PF_EN(PF_EN),.PF_STREAMS(PF_STREAMS),.PF_DISTANCE(PF_DISTANCE),
+    .PF_MSHR_RESERVE(PF_MSHR_RESERVE),
 `endif
     .axi_req_t(req_t), .axi_resp_t(resp_t)
   ) i_l2 (
@@ -1460,6 +1470,7 @@ module g6lc_l2_fixture
     .l2_wtrk_full_o(), .l2_wtrk_line_hold_o(),
     .l2_hold_r1_o(), .l2_hold_r1_wu_o(), .l2_hold_r2_o(), .l2_posted_o(),
     .l2_rdtrk_o(), .l2_posted_hold_o(),
+    .l2_pf_issue_o(), .l2_pf_useful_o(), .l2_pf_drop_o(),
 `endif
     .l2_evict_valid_o(evict_o), .l2_evict_addr_o(evict_addr_o),
 `ifndef L2TB_LEGACY

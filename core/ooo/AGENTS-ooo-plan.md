@@ -2689,3 +2689,94 @@ remains refused by both the `check_cfg` leg and `gen_err_ooo_fp_mh`.
 **Remaining.** Mixed-residency FP (hart-tagged lazy-FS audit);
 `g6lc64_ooo_server` qualification; the T5 s11 residual note is superseded by
 the r2 Spike-exact suite run.
+
+### T9h — M5: L2 stream/stride prefetcher — landed, default off (2026-09-29)
+
+**Scope.** Tier-R demand-miss-trained L2 prefetcher
+(`corev_apu/l2_cache/g6lc_l2_pf.sv`) behind `L2PrefetchEn` (default 0),
+`L2PfStreams` (4), `L2PfDistance` (2 lines), `L2PfStrideEn` (1),
+`L2PfMshrReserve` (1). `L3PrefetchEn` shares the fields and stays off at the
+L3 instance.
+
+**Design.** Trained on demand misses at S_TAG miss commit; streams tracked by
+4 KiB region tag; next-line and stride detection (two consecutive equal
+deltas); at most one candidate per cycle; never crosses a 4 KiB page.
+Candidates allocate a PF-flagged MSHR/fill entry (no waiter, fills install
+like demand fills, killed/failed fills take `install_discard`, same
+`kill_match` as demand). Demand allocation wins and PF may allocate only
+while `L2PfMshrReserve` entries remain for demand. A candidate matching a
+resident line, an in-flight MSHR line, or a tracked write is dropped, never
+held — tracker ordering rules and R1 are unchanged. `pf_useful` counts a
+demand hit on a way marked `pf_installed`. Observability: `l2_pf_issue_o`,
+`l2_pf_useful_o`, `l2_pf_drop_o`; `[mc_cache]` counters of the same names;
+PMU group-2 selectors 9 (`l2_pf_issue`) and 10 (`l2_pf_useful`; sel 2 stays
+the server-PF counter). Timing note in `g6lc_l2_top.sv`: the PF probe is one
+extra S_IDLE-cycle candidate compare against tags/MSHR/write-tracker and
+shares the existing miss-allocation mux — no new pipeline stage.
+
+**Evidence.**
+
+- *Leaf* `verif/tb/l2/tb_g6lc_l2_pf.sv` (`L2TB_MODE=pf`): train/issue,
+  stride, 4 KiB page boundary, MSHR reserve, drop-on-resident,
+  drop-on-tracked-write all pass (`RTL_REVIEW_PASS l2_pf`, sample metrics
+  issue=8/useful=2/drop=8); `+oracle_negative` fails as designed;
+  `L2TB_PF_MUT=noreserve` removes the reserve term and is detected
+  (`L2PF_RESERVE`/`L2PF_NO_FILL_AR` — a PF takes the last MSHR and the
+  eighth demand stalls).
+- *HUM pf-off identity* (`ooocoh-m5-hum-p0-wu1-ts0-r2`): 110 records,
+  0 unmatched — `L2PrefetchEn=0` changes no existing record.
+- *HUM pf-on* (`ooocoh-m5-hum-pf1-wu1-ts1-r4`): 114 records, 0 unmatched;
+  new directed scenarios 62-64 (useful hit after a stream, same-line write
+  kills the in-flight PF, R1 respected) pass pos+neg. Scenario 30 is
+  excluded under PF only: it synchronizes on the exact `mem_ar_count`, and
+  PF ARs legitimately increment that counter — a bench limitation, kept for
+  the pf-off identity lane.
+- *SCC* (`ooocoh-m5-hum-scc-{ts0,ts1}-r2`, `ooocoh-m5-hum-scc-pf1-ts{0,1}-r3`):
+  `Found 0 SCCs in module g6lc_l2_fixture` at PF=0 and PF=1.
+- *Gates*: `ooocoh-m5-gate-defaults-r1` lint 9/55 warnings, 0 errors, synth
+  5/32 warnings, 0 errors; `ooocoh-m5-gate-int2-r3` lint 25/0, synth 7/0;
+  `ooocoh-m5-gate-int2l3-r3` lint 24/0, synth 43/0 (43 = the M4 count — the
+  PF cone adds no synth warnings).
+- *FO4* `g6lc_l2_top` (`m5-fo4-l2`): worst cone 30.5 FO4 (reg-to-out) vs the
+  32 budget — closes; `failing_paths: 0`.
+
+**Kernels** (`g6lc64_ooo_int2_l3` models `d7a54392`/`e2c0e9f1`/`2cde927d`/
+`a3c5655b`; pos arms matched, neg arms detected):
+
+| Kernel | PF off | PF on | Delta |
+|---|---:|---:|---:|
+| 512 KiB stride scan, L0 | 424,488 | 382,498 | **-9.9 %** |
+| 512 KiB stride scan, L40 | 1,047,138 (prior base) | 961,451 | **-8.2 %** |
+| `mc_l2_write_read`, L0 | 160,187 | 139,184 | **-13.1 %** |
+| `mc_l2_write_read`, L40 | 542,715 (prior base) | 500,378 | **-7.8 %** |
+| `mc_chase`, L0 | 459,241 | 459,180 | -0.01 % (neutral) |
+| `mc_chase`, L40 | 942,584 | 942,495 | neutral (3 issues) |
+
+PF counters confirm the mechanism: scan L0 issue 2,366 / useful 3,761 /
+drop 17,219; wr L0 1,183/1,183/384; chase 3/3/1.
+
+**Strict boots** (int2_l3, `ooocoh-m4-fw-int2l3-r2` profile, strictDual):
+
+| Boot | Cycles | vs anchor |
+|---|---:|---|
+| int2_l3 L0, **PF off** (`ooocoh-m5-osbi-int2l3-pf0-L0-r2`) | 18,419,779 | **byte-exact M4 anchor** — the M5 tree is inert at PF=0 |
+| int2_l3 L0, PF on (`ooocoh-m5-osbi-int2l3-pf1-L0-r1`) | 18,471,075 | +51,296 (+0.28 %) |
+| int2_l3 L40, PF on (`ooocoh-m5-osbi-int2l3-pf1-L40-r1`) | 40,540,375 | +135,042 (+0.33 %) vs 40,405,333 |
+
+Boot PF traffic is tiny (L0: 226-230 issued / 176-184 useful / ~50 dropped)
+yet the delta is real and prefetcher-caused: the pf0 control boot reproduces
+the anchor exactly, so the ~0.3 % is ~230 extra fill ARs shifting demand
+arbitration, not model drift.
+
+**Decision — not enabled.** The adoption bar was "boot and scan both improve
+or are neutral". The scan improves (-9.9 % / -8.2 %) but both boots cost
++0.3 %, so `L2PrefetchEn` stays **0 in every shipped package** and no int2
+boot was run (the int2_l3 condition failed). The feature is a proven
+config-gated candidate: reclaiming the residual needs the PF to yield
+harder under bursty demand (candidate-throttling / deeper reserve), which is
+post-M5 work.
+
+**Remaining.** `L3PrefetchEn` never qualified; drop-count vs useful ratio on
+the scan (~4.6x drops per issue) suggests distance-2 fires past the demand
+window under no latency — a tuning note, not a correctness defect (drops are
+cheap: candidate discarded at admission).

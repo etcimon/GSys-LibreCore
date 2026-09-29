@@ -579,6 +579,16 @@ package config_pkg;
                                       // AW/W/B path
     int unsigned L2WriteTrackDepth;   // write tracker entries (pow2 2..8, 0→4)
     int unsigned L2ReadTrackDepth;    // bypass-read tracker entries (2..8, 0→4)
+    // T9h/M5 L2 stream/stride prefetcher (engine inside g6lc_l2_top; 0 folds
+    // it away entirely — off-config netlist is unchanged).
+    bit          L2PrefetchEn;        // demand-miss trained stream/stride PF
+    int unsigned L2PfStreams;         // concurrent stream trackers (0→4)
+    int unsigned L2PfDistance;        // look-ahead in lines (0→2)
+    bit          L2PfStrideEn;        // unequal-delta stride detect;
+                                      // 0 = next-line only
+    int unsigned L2PfMshrReserve;     // MSHR entries kept for demand (0→1)
+    bit          L3PrefetchEn;        // same engine at the L3 level; shares
+                                      // the L2Pf* geometry fields (default 0)
     // Xg6lcai AI matrix plane (off in every package but g6lc64_ai)
     ai_cfg_t     AiCfg;
   } cva6_user_cfg_t;
@@ -742,6 +752,12 @@ package config_pkg;
     bit          L2PostedWriteEn;
     int unsigned L2WriteTrackDepth;
     int unsigned L2ReadTrackDepth;
+    bit          L2PrefetchEn;
+    int unsigned L2PfStreams;
+    int unsigned L2PfDistance;
+    bit          L2PfStrideEn;
+    int unsigned L2PfMshrReserve;
+    bit          L3PrefetchEn;
     bit          ServerPrefetchEn;
     int unsigned ServerPfStreams;
     int unsigned ServerPfDistance;
@@ -1099,6 +1115,18 @@ package config_pkg;
             (Cfg.L2WriteTrackDepth inside {2, 4, 8}));
     assert (Cfg.L2ReadTrackDepth == 0 ||
             (Cfg.L2ReadTrackDepth inside {2, 4, 8}));
+    // T9h/M5: the L2 prefetcher needs the L2 engine (the L3 instance needs
+    // L3); the reserve must leave at least one MSHR entry usable by a
+    // prefetcher at all (reserve < depth) so the reserve itself is the only
+    // demand guarantee.
+    assert (!(Cfg.L2PrefetchEn && !Cfg.L2En));
+    assert (!(Cfg.L3PrefetchEn && !Cfg.L3En));
+    assert (!(Cfg.L2PrefetchEn &&
+              (Cfg.L2PfMshrReserve == 0 ||
+               Cfg.L2PfMshrReserve >= Cfg.L2MshrDepth)));
+    assert (!(Cfg.L3PrefetchEn &&
+              (Cfg.L2PfMshrReserve == 0 ||
+               Cfg.L2PfMshrReserve >= Cfg.L3MshrDepth)));
 
     // --- Xg6lcai AI matrix plane (architecture/ai-matrix/isa-encoding.md) ---
     // Seam exclusivity. CVXIF and the accelerator port are already mutually

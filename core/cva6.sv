@@ -442,7 +442,10 @@ module cva6
     input  logic        pf_train_i,
     // T9b: posted-write hold cycles at L2 / L3 (group-2 indices 7 / 8)
     input  logic        l2_pwhold_i,
-    input  logic        l3_pwhold_i
+    input  logic        l3_pwhold_i,
+    // T9h/M5: L2 prefetcher pulses (group-2 indices 9 / 10)
+    input  logic        l2_pf_issue_i,
+    input  logic        l2_pf_useful_i
 );
 
   localparam type interrupts_t = struct packed {
@@ -2442,6 +2445,8 @@ module cva6
         .pf_train_i         (pf_train_i),
         .l2_pwhold_i        (l2_pwhold_i),
         .l3_pwhold_i        (l3_pwhold_i),
+        .l2_pf_issue_i      (l2_pf_issue_i),
+        .l2_pf_useful_i     (l2_pf_useful_i),
         .spec_cancel_i      (spec_cancel),
         .ai_pmu_op_i        (ai_pmu_op_i),
         .ai_pmu_mma_i       (ai_pmu_mma_i),

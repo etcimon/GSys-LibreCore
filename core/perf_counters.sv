@@ -89,6 +89,9 @@ module perf_counters
     // T9b posted-write hold cycles (L2 index 7, L3 index 8)
     input logic l2_pwhold_i,
     input logic l3_pwhold_i,
+    // T9h/M5: L2 stream/stride prefetcher pulses (g6lc_l2_top).
+    input logic l2_pf_issue_i,
+    input logic l2_pf_useful_i,
     // Group 3: FSE speculation recovery (tie 0 when unused)
     input logic spec_cancel_i,
     // Group 4: Xg6lcai AI matrix (tie 0 when AiCfg.MatrixEn=0 / no copro)
@@ -295,6 +298,9 @@ module perf_counters
       // an unacknowledged posted write (tracker full, R1/R2, ATOP guard).
       event_group[h][3'd2][5'd7] = l2_pwhold_i && act;  // L2 posted-write hold
       event_group[h][3'd2][5'd8] = l3_pwhold_i && act;  // L3 posted-write hold
+      // T9h/M5: L2 prefetcher issue/usefulness (g6lc_l2_top PF_EN).
+      event_group[h][3'd2][5'd9]  = l2_pf_issue_i && act;   // L2 PF fill issued
+      event_group[h][3'd2][5'd10] = l2_pf_useful_i && act;  // demand hit on PF line
 
       // Group 3: FSE / deep speculation recovery (mhpmevent[7:5]==3)
       event_group[h][3'd3][5'd0] = resolved_branch_i.valid && resolved_branch_i.is_mispredict && brh;

@@ -17,19 +17,22 @@
 // Requires TARGET_CFG=<the target whose package is on the flist> and
 // corev_apu/Flist.cluster via verify.extraFlistsByTarget.
 
-// The only target with L3En=1 is g6lc64_ooo_server, which is deliberately
-// unsound (OoOEn=1 with NrHarts=2 and FP) and refuses to elaborate. Gating the
-// uncore on it as-is would therefore never pass. This clears OoOEn only, which
-// makes the configuration legal while keeping the full cache hierarchy, SMT and
-// FP core in the elaboration. One field, chosen because the OoO backend has its
-// own leaf suites and its own refusal checks (review-ooo-illegal-*), whereas the
-// cache hierarchy had no gate coverage at all. Integer packages keep OoOEn: the
-// COH_OOO hub is only legal with the OoO backend present, and g6lc64_ooo_int2
-// exists precisely to put that hub under the gate.
+// The only L3En=1 targets that refuse elaboration are the ones whose OoO+FP
+// combination is still illegal: multi-hart FP with MIXED residency (the
+// T9g/M4 guard keeps `OoOEn && FpPresent && NrHarts > 1 && !SmtDrainedHandoff`
+// refused). Single-hart and drained-handoff FP are production legs and keep
+// OoOEn here, so g6lc64_ooo_int2_l3 elaborates the real COH_OOO hub with the
+// FP class enabled — the hierarchy coverage this top exists for. One field,
+// chosen because the OoO backend has its own leaf suites and its own refusal
+// checks (review-ooo-illegal-*), whereas the cache hierarchy had no gate
+// coverage at all. Integer packages keep OoOEn unconditionally: the COH_OOO
+// hub is only legal with the OoO backend present, and g6lc64_ooo_int2 exists
+// precisely to put that hub under the gate.
 function automatic config_pkg::cva6_cfg_t uncore_lint_cfg();
   config_pkg::cva6_cfg_t c;
   c = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg);
-  if (c.FpPresent) c.OoOEn = 1'b0;
+  if (c.FpPresent && c.OoOEn && c.NrHarts > 1 && !c.SmtDrainedHandoff)
+    c.OoOEn = 1'b0;
 `ifdef SYNTHESIS
   // Synthesis smoke only: the generic BEHAVIOURAL tc_sram model cannot be
   // elaborated by the synthesis frontend at the production cache geometry (its

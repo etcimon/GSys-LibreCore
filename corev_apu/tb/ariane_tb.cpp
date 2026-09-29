@@ -77,6 +77,10 @@ static const char *verilog_plusargs[] = {
     // consumed here in C++ (writes the same MEM the cookie-exit poll reads);
     // mc_cbo_ewt.S uses it to inject a non-coherent mutation behind the caches.
     "mem_poke",
+    // M3b mispredict-recovery statistics probe (core/scoreboard.sv): prints
+    // recovery-cycle mean/max/histogram at final. Same allowlist rule as
+    // above: unlisted, HTIF rejects it and the probe never arms.
+    "misp_stats",
     nullptr};
 
 // +mem_poke entries, applied inside the sim loop once main_time reaches cycle.

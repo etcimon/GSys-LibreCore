@@ -45,6 +45,7 @@ ${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_tag.sv
 ${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_data.sv
 ${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_mshr.sv
 ${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_wtrk.sv
+${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_pf.sv
 ${CVA6_REPO_DIR}/corev_apu/l2_cache/g6lc_l2_top.sv
 ${CVA6_REPO_DIR}/corev_apu/l3_cache/g6lc_l3_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/l3_cache/g6lc_l3_inclusive_inv.sv

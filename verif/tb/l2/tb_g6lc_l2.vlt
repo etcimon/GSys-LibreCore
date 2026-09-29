@@ -25,8 +25,23 @@ lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*ta
 lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*bank_conflict*"
 lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*mshr_merged*"
 lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*tag_way_valid*"
+// T9h/M5: the prefetch probe reuses the same tag-lookup / inval / MSHR-merge
+// combinational cone (pf_probe_fire muxes tag_lookup onto pf_addr_q); same
+// word-level circularity class as the sites above — pf_launch ->
+// tag_launch -> row_valid is explicitly severed by keeping pf_probe_fire
+// out of the launch term (g6lc_l2_top.sv admission comment).
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*pf_launch*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*tag_hit_pf*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*tag_match_index*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*tag_match_tag*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_top.sv" -match "*kill_match*"
+lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_mshr.sv" -match "*merge_can_attach*"
 lint_off -rule UNOPTFLAT -file "*/corev_apu/l2_cache/g6lc_l2_tag.sv" -match "*hit_way*"
 lint_off -rule PINCONNECTEMPTY -file "*/corev_apu/l2_cache/*.sv"
+// T9h/M5 leaf bench: unconnected observability pins are intentional (the
+// bench taps the pf pulses only), and mem.exists() is a 32-bit truth value.
+lint_off -rule PINCONNECTEMPTY -file "*/verif/tb/l2/tb_g6lc_l2_pf.sv"
+lint_off -rule WIDTHTRUNC     -file "*/verif/tb/l2/tb_g6lc_l2_pf.sv" -match "*'exists'*"
 
 `ifdef L2TB_GENUNNAMED
 lint_off -rule GENUNNAMED     -file "*/vendor/pulp-platform/*"
