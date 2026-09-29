@@ -2780,3 +2780,49 @@ post-M5 work.
 the scan (~4.6x drops per issue) suggests distance-2 fires past the demand
 window under no latency — a tuning note, not a correctness defect (drops are
 cheap: candidate discarded at admission).
+
+### T9i — M6: in-order non-inclusive L3 packages — landed (2026-09-29)
+
+**Scope.** Two in-order qualification packages carrying the M1b/M1c
+non-inclusive L3 stack on the HPDCACHE_WT in-order core:
+`g6lc64_stream8_l3` and `g6lc64_server_math_l3`
+(`core/include/g6lc64_{stream8,server_math}_l3_config_pkg.sv`). Both are
+NrCores=2 / NrHarts=1-per-core copies of their base packages with
+`L3En=1, L3InclusiveEn=0, L3ByteSize=1 MiB, L3SetAssoc=16,
+L3LineWidth=512, L3MshrDepth=4, L3DataBanks=4, L2TagSramEn=1`; eWT flags
+as the base (write-update, posted writes, CMO on). `WtAxiAllocEn=0` on
+both — the knob belongs to the classic-WT adapter and `check_cfg`
+refuses it off `DCacheType==WT`; HPDCACHE_WT emits allocate attributes
+directly. DTS: `corev_apu/bootrom/ariane-{stream8,server-math}-l3.dts`
+(L2→L3 `next-level-cache`, plat_hc 2, one hart per core;
+validator FAIL=0 with the same two pre-existing stream8 GAPs).
+Build-platform targets registered in `build-platform/src/config/defaults.ts`
+(cluster flist, `g6lc_cluster_lint_top`).
+
+**Evidence.**
+
+- Gates r1 (remote lint + synth `check -assert`): both targets 9w/0e lint,
+  46w/0e synth.
+- Composed hub+L2+L3 bench at the stack target: all scenarios matched,
+  including scenario 7 (HPDCACHE attribute stream, `l2_wupd=3`, L3
+  stacked). Credits bench at 4 with the L3 stack: matched.
+- Remote directed suites on both models (`ooocoh-m6-*-r2`, model SHAs
+  s8l3 `8a3a6abf4e3d`, sml3 `a09ea3fceee8`): `mini_amocas` W 543 / D 702 /
+  Q 978 cycles pass, `mini_stream_plane` 2026 pass, `mc_cbo_ewt` positive
+  pass (~120,490) with the negative arm detected as designed (~120,170).
+  All 10 queue lanes `passed`.
+- Strict OpenSBI two-core boots: first in-order strict-boot profiles
+  built from the `smt2_l3` mechanism (`SOURCE_REVIEW_HARTS=2`,
+  `SOURCE_REVIEW_CORES=2`, per-package DTS+config overrides via the new
+  `SOURCE_REVIEW_DTS`/`SOURCE_REVIEW_CONFIG_PKG`/`SOURCE_REVIEW_ISA` env
+  seams; both targets admitted to `EXPERIMENTAL_TARGETS`). Result —
+  **PASS on the first attempt**, the first in-order two-core strict
+  boots: `ooocoh-m6-osbi-s8l3-r1` `*** SUCCESS *** (tohost = 0)` after
+  11,691,278 cycles on model `8a3a6abf4e3d`; `ooocoh-m6-osbi-sml3-r1`
+  after 11,691,235 cycles on model `a09ea3fceee8` (both
+  `strictDualPassed`, not timed out, platform ISA
+  `rv64imafdc_zicsr_zifencei`, pinned OpenSBI `455de672`).
+
+**Status.** Qualification-only in-order L3 packages; `L2PrefetchEn` stays
+0 per the M5 decision. Open: L3 benefit measurement on these packages,
+physical closure.

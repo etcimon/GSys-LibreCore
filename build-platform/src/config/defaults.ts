@@ -1460,6 +1460,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       g6lc64_ooo_int2: ["corev_apu/Flist.cluster"],
       g6lc64_ooo_int2_l3: ["corev_apu/Flist.cluster"],
       g6lc64_smt2_l3: ["corev_apu/Flist.cluster"],
+      // In-order two-core non-inclusive L3 packages (M6): same reasoning — the
+      // L2/L3 hierarchy is only reachable through the cluster lint top.
+      g6lc64_server_math_l3: ["corev_apu/Flist.cluster"],
+      g6lc64_stream8_l3: ["corev_apu/Flist.cluster"],
     },
     waiverFile: "verilator_config.vlt",
     top: "cva6",
@@ -1470,6 +1474,8 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       g6lc64_ooo_int2: "g6lc_cluster_lint_top",
       g6lc64_ooo_int2_l3: "g6lc_cluster_lint_top",
       g6lc64_smt2_l3: "g6lc_cluster_lint_top",
+      g6lc64_server_math_l3: "g6lc_cluster_lint_top",
+      g6lc64_stream8_l3: "g6lc_cluster_lint_top",
     },
     // Default gate: full-feature 64-bit + minimal 32-bit. Production-heavy
     // packages (g6lc64_ooo / ooo_server, server_math, smt2, spec_deep) are
@@ -1591,6 +1597,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // T3: fetch-response ownership by request token against the live
       // frontend with an independent I$ ledger; stimulus enters through ports.
       "core/fetch_B/formal/g6lc_fetch_token.sby",
+      // M3: hart-blind frontend state vs SMT restore — an accepted restore
+      // must leave no pre-restore entry in the FTQ and must leave the loop
+      // buffer unarmed. Bounds the FtqDepth=8/LoopBufEn=1 two-hart uplift.
+      "core/fetch_B/formal/g6lc_fetch_restore.sby",
     ],
     formal: {
       // null = one sby process per host core, and tasks dispatched concurrently.
@@ -1651,6 +1661,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // archive gates ooocoh-p2-gate-int2l3-r1 / ooocoh-p2-gate-smt2l3-r1.
       g6lc64_ooo_int2_l3: 25,
       g6lc64_smt2_l3: 5,
+      // In-order two-core L3 packages (M6): cluster top, measured on the M6
+      // archive gates ooocoh-m6-gate-s8l3-r1 / ooocoh-m6-gate-sml3-r1.
+      g6lc64_stream8_l3: 9,
+      g6lc64_server_math_l3: 9,
     },
     failOnMissingBaseline: false,
   },

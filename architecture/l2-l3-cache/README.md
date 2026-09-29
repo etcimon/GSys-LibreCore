@@ -971,7 +971,11 @@ Record of decision and evidence: `core/ooo/AGENTS-ooo-plan.md` T8a–T8d.
   victim accept edge and the accept waits on the L2's back-inval ready.
 - **Packages** `g6lc64_ooo_int2_l3` and `g6lc64_smt2_l3`: non-inclusive 1 MiB / 16-way / 64 B L3,
   MSHR 4 (same service as 16 against the hub's four credits), `L2TagSramEn=1`; DTS
-  `ariane-ooo-int2-l3.dts`, `ariane-smt2-l3.dts`. Strict SMT2 boots pass at DRAM latency 0
+  `ariane-ooo-int2-l3.dts`, `ariane-smt2-l3.dts`. M6 adds the in-order HPDCACHE_WT
+  variants `g6lc64_stream8_l3` and `g6lc64_server_math_l3` (same L3 geometry; DTS
+  `ariane-stream8-l3.dts`, `ariane-server-math-l3.dts`; `WtAxiAllocEn` stays 0 —
+  it is the classic-WT adapter's knob and `check_cfg` refuses it on HPDCACHE_WT).
+  Strict SMT2 boots pass at DRAM latency 0
   (19,341,802 and 14,300,834 cycles). In every system run so far `l3_hit = 0`: the boot fits the
   L2 and write-through self-invalidation purges written lines from both levels, so the L3 adds
   per-miss latency (+3.6 % / +12 %) — the mechanism is proven at the leaf (stack scenario 4), the

@@ -424,6 +424,18 @@ page-boundary/reserve/drop positives, oracle negative, reserve-removal mutation)
 and HUM-covered at both PF settings, but its prefetch *effectiveness* is only
 measured on three directed kernels — it ships config-gated off.
 
+The M6 in-order non-inclusive L3 packages (`g6lc64_stream8_l3`,
+`g6lc64_server_math_l3` -- HPDCACHE_WT L1, NrCores=2, 1 MiB/16-way L3,
+`L2TagSramEn`) are covered by: remote lint/synth `check -assert` gates
+(9w/0e + 46w/0e each), the composed hub+L2+L3 stack-target bench at the
+package geometry (all scenarios matched, incl. the HPDCACHE
+attribute-stream scenario 7 with `l2_wupd=3`), the credits bench at 4
+with the L3 stacked, and the remote directed suites (`mini_amocas`
+W/D/Q, `mini_stream_plane`, `mc_cbo_ewt` pos+neg) on both models.
+The first in-order two-core strict OpenSBI boots PASS on both
+(11,691,278 / 11,691,235 cycles). Open: L3 benefit measurement and the
+same physical-closure items as the OoO L3 packages.
+
 Invalidation-source ownership is repaired, and on the OoO side rename checkpoints now
 retire at commit and LSQ admission uses group credits, each with a fault control that
 reproduces the original defect. These are leaf/fixture results: OoO remains

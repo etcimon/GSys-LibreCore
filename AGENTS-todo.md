@@ -292,6 +292,21 @@ prerequisite for this work under the existing dual license. No licensing policy 
   boot regression fails the adoption bar, so `L2PrefetchEn` stays 0 in
   every package — a proven, config-gated candidate pending a
   burst-throttling policy. Details in `core/ooo/AGENTS-ooo-plan.md` T9h.
+- [x] **M6 (T9i, 2026-09-29): in-order non-inclusive L3 packages** --
+  `g6lc64_stream8_l3` / `g6lc64_server_math_l3` (HPDCACHE_WT, NrCores=2,
+  L3En non-inclusive 1 MiB/16-way/64 B/MSHR 4/4 banks, `L2TagSramEn=1`,
+  `WtAxiAllocEn=0` -- the knob is the classic-WT adapter's and `check_cfg`
+  refuses it off `DCacheType==WT`). DTS `ariane-stream8-l3.dts` /
+  `ariane-server-math-l3.dts` (L2->L3 `next-level-cache`, plat_hc 2,
+  validator FAIL=0 / same pre-existing stream8 GAPs). Gates r1 green:
+  lint 9w/0e + synth 46w/0e `check -assert` on both. Composed hub+L2+L3
+  stack-target bench all matched incl. scenario 7 (HPDCACHE attribute
+  stream, l2_wupd=3, L3 stacked); credits at 4 with the L3 stack matched.
+  Directed suites on both models: mini_amocas W/D/Q + stream plane pass,
+  mc_cbo_ewt pos+neg matched. First in-order two-core strict OpenSBI
+  boots PASS (`ooocoh-m6-osbi-{s8l3,sml3}-r1`, 11,691,278 / 11,691,235
+  cycles, `strictDualPassed`, profiles built from the smt2_l3 mechanism
+  in one attempt). Details in `core/ooo/AGENTS-ooo-plan.md` T9i.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

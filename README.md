@@ -267,7 +267,10 @@ L2 and `COH_OOO`), `g6lc64_ooo_int2_l3` and `g6lc64_smt2_l3` (the same two shape
 plus a non-inclusive 1 MiB L3 with SRAM-backed tags; qualification-only),
 `g6lc64_server_math` (in-order H+Sstc math/KVM host with HPDCACHE
 and L2), `g6lc64_server_math_v` (the same plus RVV through the Ara attach),
-`g6lc64_stream8` (stream8 class), `g6lc64_ai` (Xg6lcai AI island), and
+`g6lc64_stream8` (stream8 class), `g6lc64_stream8_l3` and
+`g6lc64_server_math_l3` (the two in-order packages plus the same
+non-inclusive 1 MiB L3; M6),
+`g6lc64_ai` (Xg6lcai AI island), and
 `g6lc64_ooo` / `g6lc64_ooo_server` — FP-on-OoO packages: `g6lc64_ooo` is legal
 single-hart FP since T9g/M4, `g6lc64_ooo_server` remains opt-in/unqualified.
 

@@ -77,6 +77,8 @@ DTS_CONFIG_PKG: dict[str, str] = {
     "ariane-ooo-int2.dts": "g6lc64_ooo_int2_config_pkg.sv",
     "ariane-ooo-int2-l3.dts": "g6lc64_ooo_int2_l3_config_pkg.sv",
     "ariane-smt2-l3.dts": "g6lc64_smt2_l3_config_pkg.sv",
+    "ariane-stream8-l3.dts": "g6lc64_stream8_l3_config_pkg.sv",
+    "ariane-server-math-l3.dts": "g6lc64_server_math_l3_config_pkg.sv",
 }
 
 _CPU_NODE = re.compile(r"(?P<label>cpu@(?P<addr>[0-9a-fA-F]+))\s*\{")
