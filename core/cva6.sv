@@ -1754,6 +1754,122 @@ module cva6
       .switch_on_starve_o  (smt_switch_on_starve)
   );
 
+  //pragma translate_off
+`ifdef G6LC_FETCH_B
+  // N1/T10a drained-handoff observer (+smt_stats). Reads the selector's
+  // drain FSM hierarchically (sim-only) and attributes every
+  // drain_pending && !drain_ready cycle to a cause bucket. Prints on
+  // [smt-drain] every 1M cycles and at final.
+  if (CVA6Cfg.NrHarts > 1 && CVA6Cfg.SmtDrainedHandoff) begin : gen_smt_stats
+    localparam int unsigned SSNH = CVA6Cfg.NrHarts;
+    bit smt_stats_en;
+    longint unsigned ss_cycle, ss_switch, ss_drain_req, ss_drain_abort;
+    longint unsigned ss_drain_cyc, ss_drain_max;
+    longint unsigned ss_hist[8];   // <8,8-15,16-31,32-63,64-127,128-255,256-511,>=512
+    longint unsigned ss_w_sb, ss_w_st, ss_w_flushid;
+    longint unsigned ss_w_peer, ss_w_hold, ss_w_trap, ss_w_flush;
+    longint unsigned ss_retired[SSNH];
+    longint unsigned ss_drop;
+    longint unsigned ss_set_cycle;
+    bit ss_prev_dp;
+    initial begin
+      smt_stats_en = $test$plusargs("smt_stats");
+      ss_cycle = 0; ss_switch = 0; ss_drain_req = 0; ss_drain_abort = 0;
+      ss_drain_cyc = 0; ss_drain_max = 0; ss_set_cycle = 0; ss_prev_dp = 0;
+      ss_w_sb = 0; ss_w_st = 0; ss_w_flushid = 0;
+      ss_w_peer = 0; ss_w_hold = 0; ss_w_trap = 0; ss_w_flush = 0;
+      ss_drop = 0;
+      for (int i = 0; i < 8; i++) ss_hist[i] = 0;
+      for (int h = 0; h < SSNH; h++) ss_retired[h] = 0;
+    end
+    logic ss_dp, ss_drdy;
+    assign ss_dp   = i_smt_thread_select.gen_smt.drain_pending_q;
+    assign ss_drdy = smt_sb_empty && no_st_pending_commit && !flush_ctrl_id;
+    always @(posedge clk_i) begin
+      if (!rst_ni) begin
+        ss_prev_dp <= 1'b0;
+      end else if (smt_stats_en) begin
+        automatic longint unsigned dur;
+        ss_cycle = ss_cycle + 1;
+        if (ss_dp && !ss_prev_dp) begin
+          ss_drain_req = ss_drain_req + 1;
+          ss_set_cycle = ss_cycle;
+        end
+        if (ss_dp && !smt_switch) begin
+          ss_drain_cyc = ss_drain_cyc + 1;
+          if (!ss_drdy) begin
+            if (!smt_sb_empty)                ss_w_sb      = ss_w_sb + 1;
+            else if (!no_st_pending_commit)   ss_w_st      = ss_w_st + 1;
+            else                              ss_w_flushid = ss_w_flushid + 1;
+          end else if (!smt_hart_ready_sel[i_smt_thread_select.gen_smt.drain_peer_q]) begin
+            ss_w_peer = ss_w_peer + 1;
+          end else if (smt_switch_hold) begin
+            ss_w_hold = ss_w_hold + 1;
+          end else if (smt_trap_hold) begin
+            ss_w_trap = ss_w_trap + 1;
+          end else if (i_smt_thread_select.gen_smt.do_switch) begin
+            // Grant cycle: drain_pending_q still reads 1 while switch_q has
+            // not yet risen — the drain completes next cycle, not a stall.
+          end else begin
+            ss_w_flush = ss_w_flush + 1;
+          end
+        end
+        if (ss_prev_dp && !ss_dp) begin
+          if (smt_switch) begin
+            dur = ss_cycle - ss_set_cycle;
+            ss_switch = ss_switch + 1;
+            if (dur > ss_drain_max) ss_drain_max = dur;
+            if (dur < 8)         ss_hist[0] = ss_hist[0] + 1;
+            else if (dur < 16)   ss_hist[1] = ss_hist[1] + 1;
+            else if (dur < 32)   ss_hist[2] = ss_hist[2] + 1;
+            else if (dur < 64)   ss_hist[3] = ss_hist[3] + 1;
+            else if (dur < 128)  ss_hist[4] = ss_hist[4] + 1;
+            else if (dur < 256)  ss_hist[5] = ss_hist[5] + 1;
+            else if (dur < 512)  ss_hist[6] = ss_hist[6] + 1;
+            else                 ss_hist[7] = ss_hist[7] + 1;
+          end else begin
+            ss_drain_abort = ss_drain_abort + 1;
+          end
+        end
+        for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
+          if (commit_ack[p] && commit_drop_id_commit[p])
+            ss_drop = ss_drop + 1;
+          if (smt_retire_valid[p] && smt_retire_hart[p] < SSNH)
+            ss_retired[smt_retire_hart[p]] = ss_retired[smt_retire_hart[p]] + 1;
+        end
+        if (ss_cycle % 1000000 == 0) begin
+          $display("[smt-drain] cyc=%0d req=%0d switches=%0d aborts=%0d drain_cyc=%0d max=%0d wait_sb=%0d wait_st=%0d wait_flushid=%0d wait_peer=%0d wait_hold=%0d wait_trap=%0d wait_flush=%0d hist={%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d} ret={%0d,%0d,%0d,%0d} drop=%0d",
+                   ss_cycle, ss_drain_req, ss_switch, ss_drain_abort,
+                   ss_drain_cyc, ss_drain_max,
+                   ss_w_sb, ss_w_st, ss_w_flushid, ss_w_peer, ss_w_hold,
+                   ss_w_trap, ss_w_flush,
+                   ss_hist[0], ss_hist[1], ss_hist[2], ss_hist[3],
+                   ss_hist[4], ss_hist[5], ss_hist[6], ss_hist[7],
+                   ss_retired[0], SSNH > 1 ? ss_retired[1] : 0,
+                   SSNH > 2 ? ss_retired[2] : 0, SSNH > 3 ? ss_retired[3] : 0,
+                   ss_drop);
+        end
+        ss_prev_dp <= ss_dp;
+      end
+    end
+    final begin
+      if (smt_stats_en) begin
+        $display("[smt-drain] FINAL cyc=%0d req=%0d switches=%0d aborts=%0d drain_cyc=%0d max=%0d wait_sb=%0d wait_st=%0d wait_flushid=%0d wait_peer=%0d wait_hold=%0d wait_trap=%0d wait_flush=%0d hist={%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d} ret={%0d,%0d,%0d,%0d} drop=%0d",
+                 ss_cycle, ss_drain_req, ss_switch, ss_drain_abort,
+                 ss_drain_cyc, ss_drain_max,
+                 ss_w_sb, ss_w_st, ss_w_flushid, ss_w_peer, ss_w_hold,
+                 ss_w_trap, ss_w_flush,
+                 ss_hist[0], ss_hist[1], ss_hist[2], ss_hist[3],
+                 ss_hist[4], ss_hist[5], ss_hist[6], ss_hist[7],
+                 ss_retired[0], SSNH > 1 ? ss_retired[1] : 0,
+                 SSNH > 2 ? ss_retired[2] : 0, SSNH > 3 ? ss_retired[3] : 0,
+                 ss_drop);
+      end
+    end
+  end
+`endif
+  //pragma translate_on
+
   // U5 full OoO lives in issue_stage (cva6_ooo_dispatch) when OoOEn=1.
 
   logic [CVA6Cfg.NrWbPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_ex_id;

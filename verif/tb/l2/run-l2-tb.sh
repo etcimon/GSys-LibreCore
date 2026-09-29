@@ -309,14 +309,47 @@ if [[ "${L2TB_MODE:-sim}" == pf ]]; then
   # source copy to drop the MSHR reserve term — a PF then takes the last
   # entry and the eighth demand miss must stall (L2PF_NO_FILL_AR) or a
   # candidate slips into the reserve window (L2PF_RESERVE).
-  if [[ "${L2TB_PF_MUT:-}" == noreserve ]]; then
-    top_mut="$ROOT/corev_apu/l2_cache/g6lc_l2_top.sv"
-    grep -qF "(mshr_count < (MSHR_W + 1)'(MSHR_DEPTH - PF_MSHR_RESERVE))" "$top_mut" ||
-      { echo "[l2-tb] PF_MUT site changed" >&2; exit 2; }
-    sed -i "s|(MSHR_W + 1)'(MSHR_DEPTH - PF_MSHR_RESERVE)|(MSHR_W + 1)'(MSHR_DEPTH)|" "$top_mut"
-  else
-    sha256sum --check --status "$OUT/sources.sha256"
-  fi
+  case "${L2TB_PF_MUT:-}" in
+    noreserve)
+      top_mut="$ROOT/corev_apu/l2_cache/g6lc_l2_top.sv"
+      grep -qF "(mshr_count < (MSHR_W + 1)'(MSHR_DEPTH - PF_MSHR_RESERVE))" "$top_mut" ||
+        { echo "[l2-tb] PF_MUT site changed" >&2; exit 2; }
+      sed -i "s|(MSHR_W + 1)'(MSHR_DEPTH - PF_MSHR_RESERVE)|(MSHR_W + 1)'(MSHR_DEPTH)|" "$top_mut"
+      ;;
+    earlyarm)
+      # N3: drop the two-confirmation confidence rule — arms on the first
+      # confirmed delta; the A1/A4 L2PF_EARLY_CAND checks must fire.
+      pf_mut="$ROOT/corev_apu/l2_cache/g6lc_l2_pf.sv"
+      grep -qF "st_q[train_hit_idx].conf >= 2'd1" "$pf_mut" ||
+        { echo "[l2-tb] PF_MUT site changed" >&2; exit 2; }
+      sed -i "s|st_q\[train_hit_idx\].conf >= 2'd1|train_hit|" "$pf_mut"
+      ;;
+    noquiet)
+      # N3: remove the quiet window entirely (refill + withhold) — the A1
+      # L2PF_QUIET_BREAK check must fire.
+      pf_mut="$ROOT/corev_apu/l2_cache/g6lc_l2_pf.sv"
+      grep -qF "(quiet_d == '0)" "$pf_mut" && grep -qF "(quiet_q == '0)" "$pf_mut" ||
+        { echo "[l2-tb] PF_MUT site changed" >&2; exit 2; }
+      sed -i "s|&& (quiet_d == '0)||; s|&& (quiet_q == '0)||" "$pf_mut"
+      ;;
+    maxcap)
+      # N3: arm the full PF_DISTANCE burst again — the per-arm candidate
+      # cap is gone; an A1/A4 L2PF_EXTRA_CAND check must fire.
+      pf_mut="$ROOT/corev_apu/l2_cache/g6lc_l2_pf.sv"
+      grep -qF "PW'(PEND_CAP)" "$pf_mut" ||
+        { echo "[l2-tb] PF_MUT site changed" >&2; exit 2; }
+      sed -i "s|PW'(PEND_CAP)|PW'(PF_DISTANCE)|" "$pf_mut"
+      ;;
+    "")
+      # The remote harness writes the manifest into the fresh run dir;
+      # a local run has none, so the freshness check is conditional.
+      if [[ -f "$OUT/sources.sha256" ]]; then
+        sha256sum --check --status "$OUT/sources.sha256"
+      fi
+      ;;
+    *)
+      echo "[l2-tb] unknown L2TB_PF_MUT=${L2TB_PF_MUT}" >&2; exit 2 ;;
+  esac
   "$VERILATOR" --binary --timing --assert -Wall -Wno-TIMESCALEMOD -Wno-UNUSED \
     "${warning_args[@]}" -Wno-BLKSEQ -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-VARHIDDEN \
     -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM \
@@ -328,11 +361,11 @@ if [[ "${L2TB_MODE:-sim}" == pf ]]; then
   sha256sum "$OUT/tb_g6lc_l2_pf" > "$OUT/executable.sha256"
   "$OUT/tb_g6lc_l2_pf" 2>&1 | tee "$OUT/sim.log" || true
   "$OUT/tb_g6lc_l2_pf" +oracle_negative 2>&1 | tee "$OUT/sim-neg.log" || true
-  if [[ "${L2TB_PF_MUT:-}" == noreserve ]]; then
+  if [[ -n "${L2TB_PF_MUT:-}" ]]; then
     ! grep -qFx 'RTL_REVIEW_PASS l2_pf' "$OUT/sim.log" &&
-      grep -qE 'L2PF_RESERVE|L2PF_NO_FILL_AR|L2PF_FILL_STUCK|L2PF_BAD_ID' "$OUT/sim.log" ||
-      { echo "[l2-tb] PF_MUT noreserve did not break the reserve contract — $OUT/sim.log"; exit 1; }
-    echo "[l2-tb] PF_MUT noreserve detected — $OUT/sim.log"
+      grep -qE 'L2PF_|%Fatal' "$OUT/sim.log" ||
+      { echo "[l2-tb] PF_MUT ${L2TB_PF_MUT} did not break the contract — $OUT/sim.log"; exit 1; }
+    echo "[l2-tb] PF_MUT ${L2TB_PF_MUT} detected — $OUT/sim.log"
     exit 0
   fi
   [[ $(grep -cFx 'RTL_REVIEW_PASS l2_pf' "$OUT/sim.log") == 1 ]] &&

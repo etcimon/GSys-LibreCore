@@ -39,7 +39,7 @@ module tb_g6lc_l2_pf;
 
   g6lc_l2_pf #(
       .AXI_ADDR_WIDTH(AW), .LINE_BYTES(64), .NR_STREAMS(4),
-      .PF_DISTANCE(2), .STRIDE_EN(1'b1)
+      .PF_DISTANCE(2), .STRIDE_EN(1'b1), .MAX_OUT(1), .QUIET(8)
   ) eng (
       .clk_i(clk), .rst_ni(rst_n),
       .train_i      (eng_train),
@@ -118,7 +118,7 @@ module tb_g6lc_l2_pf;
       .MSHR_DEPTH(8), .DATA_BANKS(2),
       .POSTED_WRITES(1'b1), .WTRK_DEPTH(4), .RDTRK_DEPTH(4),
       .PF_EN(1'b1), .PF_STREAMS(4), .PF_DISTANCE(2), .PF_STRIDE(1'b1),
-      .PF_MSHR_RESERVE(1),
+      .PF_MSHR_RESERVE(1), .PF_MAX_OUT(1), .PF_QUIET(8),
       .AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(DW),
       .AXI_ID_WIDTH(IDW), .AXI_USER_WIDTH(UW),
       .axi_req_t(req_t), .axi_resp_t(resp_t)
@@ -234,7 +234,7 @@ module tb_g6lc_l2_pf;
   // ---- slave-side read driver + data scoreboard ---------------------------
   typedef struct { id_t id; addr_t addr; } stim_t;
   stim_t pending[$];
-  stim_t expected[16][32];
+  stim_t expected[16][64];
   int unsigned exp_head[16], exp_tail[16], beats_seen[16];
   int unsigned requested = 0, completed = 0, slv_b_seen = 0;
   bit negative;
@@ -264,7 +264,7 @@ module tb_g6lc_l2_pf;
         slv_req.ar.burst = 2'b01;
         slv_req.ar.cache = 4'hf;
         do @(posedge clk); while (!slv_resp.ar_ready);
-        if (exp_tail[s.id] >= 32) $fatal(1, "L2PF_EXPECTED_CAP");
+        if (exp_tail[s.id] >= 64) $fatal(1, "L2PF_EXPECTED_CAP");
         expected[s.id][exp_tail[s.id]] = s;
         exp_tail[s.id]++;
         void'(pending.pop_front());
@@ -367,76 +367,122 @@ module tb_g6lc_l2_pf;
     @(posedge clk);
 
     // ---------------- Part A: stream engine -------------------------------
-    // A1: next-line stream — first miss allocates, second trains the delta,
-    // third arms it; candidates emit one at a time and hold until taken.
+    // A1: next-line stream — N3 semantics: two confirmed deltas required
+    // (conf >= 2) before the first arm, MAX_OUT=1 candidate per arm, and
+    // the offer is withheld for QUIET cycles after each demand miss.
     eng_miss(64'h60000);
     if (eng_cand_v) $fatal(1, "L2PF_EARLY_CAND");
     eng_miss(64'h60040);
-    if (eng_cand_v) $fatal(1, "L2PF_TRAIN_ISSUE");
-    eng_miss(64'h60080);
-    eng_expect(64'h600C0);
-    eng_expect(64'h60100);
-    if (eng_cand_v) $fatal(1, "L2PF_EXTRA_CAND");
+    eng_miss(64'h60080);    // confirm #1 — must NOT arm yet
+    repeat (12) @(posedge clk);  // quiet expires; still no candidate
+    if (eng_cand_v) $fatal(1, "L2PF_EARLY_CAND cand=%h", eng_cand_line);
+    eng_miss(64'h600C0);    // confirm #2 -> arm one candidate
+    repeat (4) @(posedge clk);
+    if (eng_cand_v) $fatal(1, "L2PF_QUIET_BREAK cand=%h", eng_cand_line);
+    eng_expect(64'h60100);  // offered once the quiet window passes
+    repeat (8) @(posedge clk);
+    if (eng_cand_v) $fatal(1, "L2PF_EXTRA_CAND cand=%h", eng_cand_line);
 
-    // A2: stride != 1 — misses 2 lines apart arm stride +2.
+    // A2: stride != 1 — misses 2 lines apart arm stride +2 (cap still 1).
     eng_miss(64'h68000);
     eng_miss(64'h68080);
-    eng_miss(64'h68100);
-    eng_expect(64'h68180);
+    eng_miss(64'h68100);    // confirm #1
+    eng_miss(64'h68180);    // confirm #2 -> arm
     eng_expect(64'h68200);
+    repeat (8) @(posedge clk);
+    if (eng_cand_v) $fatal(1, "L2PF_EXTRA_CAND cand=%h", eng_cand_line);
 
-    // A3: 4 KiB page boundary — armed at the page tail; both candidates
-    // land in the next page and are dropped inside the engine.
+    // A3: 4 KiB page boundary — armed at the page tail; the candidate
+    // lands in the next page and is dropped inside the engine.
     eng_miss(64'h62F00);
+    eng_miss(64'h62F40);
     eng_miss(64'h62F80);
-    eng_miss(64'h62FC0);
-    repeat (16) @(posedge clk);
+    eng_miss(64'h62FC0);    // confirm #2 -> arm; cand 0x63000 crosses page
+    repeat (24) @(posedge clk);
     if (eng_cand_v) $fatal(1, "L2PF_PAGE_CROSS cand=%h", eng_cand_line);
 
-    // A4: retrain — a delta change drops the not-yet-offered pending burst;
-    // an already-offered candidate stays offered (the engine never retracts
-    // one), and the new stride must re-confirm before issuing again.
+    // A4: retrain — a delta change resets confidence and the pending
+    // burst; the new stride must re-confirm twice before issuing again.
     eng_miss(64'h6A000);
     eng_miss(64'h6A040);
-    eng_miss(64'h6A080);    // armed (+1): 6A0C0 offered
-    eng_expect(64'h6A0C0);  // take — 6A100 is emitted next
+    eng_miss(64'h6A080);
+    eng_miss(64'h6A0C0);    // confirm #2 -> arm
     eng_expect(64'h6A100);
-    eng_miss(64'h6A180);    // delta +4: retrain, pending burst cleared
-    repeat (8) @(posedge clk);
+    eng_miss(64'h6A140);    // delta +2 lines: retrain, conf reset
+    repeat (12) @(posedge clk);
     if (eng_cand_v) $fatal(1, "L2PF_STALE_CAND cand=%h", eng_cand_line);
-    eng_miss(64'h6A280);    // +4 lines confirmed -> arm
-    eng_expect(64'h6A380);  // last + stride(4 lines) = 0x6A280 + 0x100
-    eng_expect(64'h6A480);
+    eng_miss(64'h6A1C0);    // +2 confirmed once — still no arm
+    repeat (12) @(posedge clk);
+    if (eng_cand_v) $fatal(1, "L2PF_EARLY_CAND cand=%h", eng_cand_line);
+    eng_miss(64'h6A240);    // confirm #2 -> arm; cand = 0x6A240 + 0x80
+    eng_expect(64'h6A2C0);
+    repeat (8) @(posedge clk);
+    if (eng_cand_v) $fatal(1, "L2PF_EXTRA_CAND cand=%h", eng_cand_line);
+
+    // A5: quiet withhold mid-offer — an offered-but-untaken candidate is
+    // withdrawn while a new demand miss reloads the quiet window, then
+    // re-presented after it expires.
+    eng_miss(64'h6E000);
+    eng_miss(64'h6E040);
+    eng_miss(64'h6E080);
+    eng_miss(64'h6E0C0);    // confirm #2 -> arm 6E100
+    repeat (16) @(posedge clk);  // quiet expires: offer presents
+    if (!eng_cand_v || eng_cand_line != 64'h6E100)
+      $fatal(1, "L2PF_NO_CAND want=6e100 got_v=%b got=%h", eng_cand_v, eng_cand_line);
+    eng_miss(64'h6E100);    // confirm #3: quiet reloads, offer withheld
+    repeat (4) @(posedge clk);
+    if (eng_cand_v) $fatal(1, "L2PF_QUIET_WITHHELD cand=%h", eng_cand_line);
+    eng_expect(64'h6E100);  // same offer re-presents after quiet
+    eng_expect(64'h6E140);  // confirm #3 re-armed one more candidate
 
     // ---------------- Part B: L2 admission --------------------------------
-    // B1: train at the L2 — demand misses at +0/+40/+80 arm the stream; two
-    // PF fills issue, install, and the demand reads then hit them with a
-    // useful pulse and no new fill AR.
+    // B1: train at the L2 — N3 semantics: two confirmed deltas arm ONE
+    // candidate per confirmation (MAX_OUT=1); each PF fill installs and a
+    // later demand read reports useful with no new fill AR. A demand hit
+    // on a prefetched line does not retrain (hit: no miss commit), so the
+    // second arm is built on a re-trained +2 stride.
     push(4'd1, 64'h70000); wait_done();
     push(4'd1, 64'h70040); wait_done();
-    push(4'd1, 64'h70080); wait_done();
+    push(4'd1, 64'h70080); wait_done();   // confirm #1
+    push(4'd1, 64'h700C0); wait_done();   // confirm #2 -> arm 70100
+    wait_issue(1);
+    wait_mshr_empty();
+    m = mem_ar_count;
+    push(4'd2, 64'h70100); wait_done();   // demand hits the PF line
+    if (pf_useful != 1) $fatal(1, "L2PF_NO_USEFUL useful=%0d", pf_useful);
+    if (mem_ar_count != m) $fatal(1, "L2PF_USEFUL_REFETCH ar=%0d", mem_ar_count - m);
+    push(4'd1, 64'h70140); wait_done();   // +2 lines -> retrain stride +2
+    push(4'd1, 64'h701C0); wait_done();   // +2 confirm #1
+    push(4'd1, 64'h70240); wait_done();   // +2 confirm #2 -> arm 702C0
     wait_issue(2);
     wait_mshr_empty();
     m = mem_ar_count;
-    push(4'd2, 64'h700C0); wait_done();
-    push(4'd2, 64'h70100); wait_done();
+    push(4'd2, 64'h702C0); wait_done();   // demand hits the PF line
     if (pf_useful != 2) $fatal(1, "L2PF_NO_USEFUL useful=%0d", pf_useful);
     if (mem_ar_count != m) $fatal(1, "L2PF_USEFUL_REFETCH ar=%0d", mem_ar_count - m);
 
     // B2: MSHR reserve — pin the DRAM R channel and hold seven demand fills
-    // in flight (depth 8, reserve 1): both armed candidates must drop, the
-    // last slot stays demand-owned. Removing the reserve lets a pf take it —
-    // pf_issue grows (L2PF_RESERVE) and the eighth demand then stalls behind
-    // a full MSHR (L2PF_NO_FILL_AR).
+    // in flight (depth 8, reserve 1). Streams p78/p7A are pre-trained to
+    // confirm #1 in the free-run phase so their confirms land as misses 6
+    // and 7: both armed candidates must drop, the last slot stays
+    // demand-owned. Removing the reserve lets a pf take it — pf_issue
+    // grows (L2PF_RESERVE) and the eighth demand then stalls behind a
+    // full MSHR (L2PF_NO_FILL_AR).
+    push(4'd1, 64'h78000); wait_done();   // p78: new
+    push(4'd1, 64'h78040); wait_done();   // p78: seen
+    push(4'd1, 64'h78080); wait_done();   // p78: confirm #1
+    push(4'd1, 64'h7A000); wait_done();   // p7A: new
+    push(4'd1, 64'h7A040); wait_done();   // p7A: seen
+    push(4'd1, 64'h7A080); wait_done();   // p7A: confirm #1
     memory_hold = 1'b1;
     m = mem_ar_count;
-    push(4'd1, 64'h78000);   // p78: new stream        (count 1)
-    push(4'd1, 64'h79000);   // p79: new               (count 2)
-    push(4'd1, 64'h7A000);   // p7A: new               (count 3)
-    push(4'd1, 64'h7B000);   // p7B: new               (count 4)
-    push(4'd1, 64'h78040);   // p78: delta seen        (count 5)
-    push(4'd1, 64'h7A040);   // p7A: delta seen        (count 6)
-    push(4'd1, 64'h78080);   // p78: armed             (count 7)
+    push(4'd1, 64'h79000);   // p79: new               (in-flight 1)
+    push(4'd1, 64'h7B000);   // p7B: new               (2)
+    push(4'd1, 64'h79040);   // p79: seen              (3)
+    push(4'd1, 64'h7B040);   // p7B: seen              (4)
+    push(4'd1, 64'h79080);   // p79: confirm #1        (5)
+    push(4'd1, 64'h780C0);   // p78: confirm #2 -> arm 78100  (6)
+    push(4'd1, 64'h7A0C0);   // p7A: confirm #2 -> arm 7A100  (7)
     wait_ar(m + 7);
     begin
       automatic int unsigned issue_mark = pf_issue;
@@ -459,65 +505,90 @@ module tb_g6lc_l2_pf;
     wait_done();
 
     // B3: resident drop — install two same-page lines by demand, then arm a
-    // stream whose candidates are those resident lines; both probes drop.
+    // stream whose single candidate is a resident line; the probe drops.
     push(4'd1, 64'h71AC0); wait_done();
     push(4'd1, 64'h71B00); wait_done();   // resident (stream: page 0x71)
-    push(4'd1, 64'h71A00); wait_done();   // retrain
-    push(4'd1, 64'h71A40); wait_done();
-    push(4'd1, 64'h71A80); wait_done();   // armed (+1): cands 71AC0/71B00
-    wait_drop(4);                          // B2's two + two resident drops
+    push(4'd1, 64'h719C0); wait_done();   // new stream
+    push(4'd1, 64'h71A00); wait_done();   // seen
+    push(4'd1, 64'h71A40); wait_done();   // confirm #1
+    push(4'd1, 64'h71A80); wait_done();   // confirm #2 -> arm cand 71AC0
+    wait_drop(3);                          // B2's two + one resident drop
     if (pf_issue != 2) $fatal(1, "L2PF_RESIDENT_ISSUE issue=%0d", pf_issue);
 
     // B4: R1 tracked write — a posted write whose B is held keeps its wtrk
-    // entry live; the candidate covering that line must drop, not hold.
+    // entry live; the candidate covering that line must drop, not hold. A
+    // second stream's candidate is untouched and still issues.
     memory_b_hold = 1'b1;
-    send_write(4'd6, 64'h720C0, 64'hdead_beef_cafe_f00d);
-    push(4'd1, 64'h72000); wait_done();
-    push(4'd1, 64'h72040); wait_done();
-    push(4'd1, 64'h72080); wait_done();   // armed: cands 720C0/72100
-    wait_drop(5);            // + the tracked-write drop
-    wait_issue(3);           // the +72100 candidate still issues
+    send_write(4'd6, 64'h72300, 64'hdead_beef_cafe_f00d);
+    push(4'd1, 64'h72100); wait_done();   // p72: new
+    push(4'd1, 64'h72180); wait_done();   // p72: seen (stride +2 lines)
+    push(4'd1, 64'h72200); wait_done();   // p72: confirm #1
+    push(4'd1, 64'h72280); wait_done();   // p72: confirm #2 -> arm 72300
+    push(4'd1, 64'h75400); wait_done();   // p75: new
+    push(4'd1, 64'h75440); wait_done();   // p75: seen
+    push(4'd1, 64'h75480); wait_done();   // p75: confirm #1
+    push(4'd1, 64'h754C0); wait_done();   // p75: confirm #2 -> arm 75500
+    wait_drop(4);            // + the tracked-write drop
+    wait_issue(3);           // the p75 candidate still issues
     memory_b_hold = 1'b0;
     while (w_completed != 1) @(negedge clk);
     wait_done();
-    push(4'd7, 64'h720C0); wait_done();  // post-write data (oracle checks)
+    push(4'd7, 64'h72300); wait_done();  // post-write data (oracle checks)
+    repeat (60) @(posedge clk);          // let the retrained follow-on arm drain
 
     // B5: in-flight drop — a demand fill already sitting in the MSHR for
-    // the candidate's line drops it; no duplicate fill AR is queued.
-    mem_latency = 14;
-    m = mem_ar_count;
-    push(4'd1, 64'h730C0);  // demand fill of the future candidate's line
-    wait_ar(m + 1);
-    push(4'd1, 64'h73000);  // same-page stream: retrain
-    push(4'd1, 64'h73040);
-    push(4'd1, 64'h73080);  // armed (+1): cand 730C0 probes the in-flight fill
-    wait_drop(6);
-    wait_issue(4);          // cand 73100 still issues
-    mem_latency = 6;
-    wait_done();
+    // the candidate's line drops it; no duplicate fill AR is queued. The
+    // second stream's candidate still issues. mem_latency 64 keeps the
+    // fill in flight across the whole training burst + quiet window.
+    begin
+      automatic int unsigned dm = pf_drop, im = pf_issue;
+      // Second stream first: its candidate issues while the MSHR still has
+      // room (the serialized DRAM model would otherwise pin mcnt at the
+      // reserve gate and the probe would drop).
+      push(4'd1, 64'h76000);  // p76: new
+      push(4'd1, 64'h76040);  // p76: seen
+      push(4'd1, 64'h76080);  // p76: confirm #1
+      push(4'd1, 64'h760C0);  // p76: confirm #2 -> arm 76100
+      wait_issue(im + 1);   // cand 76100 still issues
+      mem_latency = 64;
+      m = mem_ar_count;
+      push(4'd1, 64'h73500);  // demand fill of the future candidate's line
+      wait_ar(m + 1);
+      push(4'd1, 64'h73300);  // p73: new
+      push(4'd1, 64'h73380);  // p73: seen (stride +2 lines)
+      push(4'd1, 64'h73400);  // p73: confirm #1
+      push(4'd1, 64'h73480);  // p73: confirm #2 -> arm 73500
+      wait_drop(dm + 1);    // + the in-flight-fill drop
+      mem_latency = 6;
+      wait_done();
+    end
 
     // B6: same-line write kills an in-flight PF fill — install_discard
     // applies, a later read refetches post-write data. The write must land
-    // AFTER the 740C0 candidate's fill is queued (issue #6): earlier, the
-    // candidate just hits the tracked write and drops under R1.
-    push(4'd1, 64'h74000); wait_done();
-    memory_hold = 1'b1;
-    push(4'd1, 64'h74040);  // held fill
-    push(4'd1, 64'h74080);  // arm — cand 740C0 issues, fill held too
-    wait_issue(6);
-    send_write(4'd3, 64'h740C8, 64'hc001_c0de_5eed_5eed);
-    while (w_completed != 2) @(negedge clk);
-    memory_hold = 1'b0;
-    wait_done();
-    wait_mshr_empty();
-    m = mem_ar_count;
-    push(4'd4, 64'h740C0); wait_done();  // killed fill installed nothing
-    wait_mshr_empty();
-    repeat (40) @(posedge clk);          // let the retrained follow-on PF drain
-    // +1 refetch AR on the killed line; +1 fill AR from the follow-on
-    // candidate (74140) the refetch's train pulse re-armed.
-    if (mem_ar_count != m + 2)
-      $fatal(1, "L2PF_KILL_INSTALL ar=%0d", mem_ar_count - m);
+    // AFTER the 74140 candidate's fill is queued: earlier, the candidate
+    // just hits the tracked write and drops under R1.
+    begin
+      automatic int unsigned im2 = pf_issue;
+      push(4'd1, 64'h74040); wait_done();   // p74: new
+      memory_hold = 1'b1;
+      push(4'd1, 64'h74080);  // p74: seen
+      push(4'd1, 64'h740C0);  // p74: confirm #1
+      push(4'd1, 64'h74100);  // p74: confirm #2 -> arm 74140, fill held too
+      wait_issue(im2 + 1);
+      send_write(4'd3, 64'h74148, 64'hc001_c0de_5eed_5eed);
+      while (w_completed != 2) @(negedge clk);
+      memory_hold = 1'b0;
+      wait_done();
+      wait_mshr_empty();
+      m = mem_ar_count;
+      push(4'd4, 64'h74140); wait_done();  // killed fill installed nothing
+      wait_mshr_empty();
+      repeat (60) @(posedge clk);          // let the retrained follow-on PF drain
+      // +1 refetch AR on the killed line; +1 fill AR from the follow-on
+      // candidate (74180) the refetch's train pulse re-armed.
+      if (mem_ar_count != m + 2)
+        $fatal(1, "L2PF_KILL_INSTALL ar=%0d", mem_ar_count - m);
+    end
 
     $display("L2PF_METRICS issue=%0d useful=%0d drop=%0d", pf_issue, pf_useful, pf_drop);
     $display("RTL_REVIEW_PASS l2_pf");

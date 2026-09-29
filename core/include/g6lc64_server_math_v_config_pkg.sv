@@ -299,6 +299,8 @@ package cva6_config_pkg;
       L2PfDistance: unsigned'(0),
       L2PfStrideEn: bit'(0),
       L2PfMshrReserve: unsigned'(0),
+      L2PfMaxOutstanding: unsigned'(0),
+      L2PfQuiet: unsigned'(0),
       L3PrefetchEn: bit'(0),
       SharedTlbDepth: int'(64),
 

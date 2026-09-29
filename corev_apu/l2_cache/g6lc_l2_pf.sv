@@ -30,6 +30,12 @@ module g6lc_l2_pf #(
     parameter int unsigned NR_STREAMS   = 4,
     parameter int unsigned PF_DISTANCE  = 2,
     parameter bit          STRIDE_EN    = 1'b1,
+    // T10b/N3 burst throttling: a confirmation arms at most MAX_OUT
+    // candidates per stream (capped by PF_DISTANCE), no candidate is
+    // offered within QUIET cycles of a demand miss commit, and a stream
+    // must log two confirmed deltas before it may arm at all.
+    parameter int unsigned MAX_OUT      = 1,
+    parameter int unsigned QUIET        = 8,
     parameter int unsigned LINE_BYTES   = 64,
     parameter int unsigned AXI_ADDR_WIDTH = 64
 ) (
@@ -52,6 +58,10 @@ module g6lc_l2_pf #(
   localparam int unsigned SW         = (NR_STREAMS <= 1) ? 1 : $clog2(NR_STREAMS);
   localparam int unsigned PW         = (PF_DISTANCE <= 1) ? 1 : $clog2(PF_DISTANCE + 1);
   localparam int unsigned DLT_W      = PAGE_LBITS + 1;         // signed delta
+  // Burst cap: a confirmation can never arm more than the look-ahead or
+  // the per-stream outstanding limit, whichever is smaller.
+  localparam int unsigned PEND_CAP   = (MAX_OUT < PF_DISTANCE) ? MAX_OUT : PF_DISTANCE;
+  localparam int unsigned QW         = (QUIET <= 1) ? 1 : $clog2(QUIET + 1);
 
   typedef struct packed {
     logic                      valid;
@@ -59,12 +69,16 @@ module g6lc_l2_pf #(
     logic [LINE_BITS-1:0]      last;      // last trained line index
     logic signed [DLT_W-1:0]   stride;    // previous within-page delta
     logic                      seen;      // a first delta has been recorded
+    logic [1:0]                conf;      // confirmed-delta count (saturates 3)
     logic [PW-1:0]             pend;      // armed candidates not yet emitted
     logic [PW-1:0]             ahead;     // next pend offset (1..PF_DISTANCE)
   } stream_t;
 
   stream_t [NR_STREAMS-1:0] st_q, st_d;
   logic [SW-1:0]             rr_q, rr_d;
+  // Demand-miss quiet window: train_i reloads the countdown, and while it
+  // is non-zero no candidate is offered (pend keeps its arming).
+  logic [QW-1:0]             quiet_q, quiet_d;
   // Emit cursor: which stream is currently holding a pending candidate.
   // cand_valid_o is registered with the line so the output is a stable
   // offer, not a combinational walk of the table.
@@ -124,11 +138,15 @@ module g6lc_l2_pf #(
     cnd_vld_d  = cnd_vld_q;
     cnd_line_d = cnd_line_q;
 
+    // ---- quiet window after a demand miss commit ----
+    quiet_d = (quiet_q != '0) ? quiet_q - 1'b1 : '0;
+    if (train_i) quiet_d = QW'(QUIET);
+
     // ---- retire the offered candidate ----
     if (cnd_vld_q && cand_take_i) cnd_vld_d = 1'b0;
 
     // ---- refill the offer register: round-robin over armed streams ----
-    if (!cnd_vld_d) begin
+    if (!cnd_vld_d && (quiet_d == '0)) begin
       for (int unsigned k = 0; k < NR_STREAMS; k++) begin
         em_s = (rr_q + k) % NR_STREAMS;
         // A stream being retrained this cycle keeps its new epoch: do not
@@ -161,14 +179,22 @@ module g6lc_l2_pf #(
           tr_str = STRIDE_EN ? tr_d : DLT_W'(1);
           if (st_q[train_hit_idx].seen &&
               (tr_d == st_q[train_hit_idx].stride)) begin
-            // Two consecutive equal deltas → confirmed: arm DISTANCE ahead.
+            // Equal deltas → confirmed hit. N3: a stream arms only on its
+            // SECOND confirmed hit (conf ≥ 2 counting this one) and then at
+            // most PEND_CAP candidates — the burst cap that keeps PF fills
+            // from crowding demand.
             st_d[train_hit_idx].stride = tr_str;
-            st_d[train_hit_idx].pend   = PW'(PF_DISTANCE);
-            st_d[train_hit_idx].ahead  = PW'(1);
+            st_d[train_hit_idx].conf   = (st_q[train_hit_idx].conf == 2'd3)
+                ? st_q[train_hit_idx].conf : st_q[train_hit_idx].conf + 2'd1;
+            if (st_q[train_hit_idx].conf >= 2'd1) begin
+              st_d[train_hit_idx].pend  = PW'(PEND_CAP);
+              st_d[train_hit_idx].ahead = PW'(1);
+            end
           end else begin
-            // First/changed delta: (re)train, no prefetch yet.
+            // First/changed delta: (re)train, drop the confidence history.
             st_d[train_hit_idx].stride = tr_str;
             st_d[train_hit_idx].seen   = 1'b1;
+            st_d[train_hit_idx].conf   = '0;
             st_d[train_hit_idx].pend   = '0;
           end
         end
@@ -187,6 +213,7 @@ module g6lc_l2_pf #(
         st_d[em_v].last   = train_line;
         st_d[em_v].stride = '0;
         st_d[em_v].seen   = 1'b0;
+        st_d[em_v].conf   = '0;
         st_d[em_v].pend   = '0;
         st_d[em_v].ahead  = '0;
         rr_d = SW'((em_v + 1) % NR_STREAMS);
@@ -194,18 +221,23 @@ module g6lc_l2_pf #(
     end
   end
 
-  assign cand_valid_o = cnd_vld_q;
+  // The quiet window withholds the offer without dropping it: an armed
+  // candidate presents again once QUIET cycles have passed with no demand
+  // miss commit.
+  assign cand_valid_o = cnd_vld_q && (quiet_q == '0);
   assign cand_line_o  = {cnd_line_q, {OFF_BITS{1'b0}}};
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       st_q      <= '{default: '0};
       rr_q      <= '0;
+      quiet_q   <= '0;
       cnd_vld_q <= 1'b0;
       cnd_line_q <= '0;
     end else begin
       st_q      <= st_d;
       rr_q      <= rr_d;
+      quiet_q   <= quiet_d;
       cnd_vld_q <= cnd_vld_d;
       cnd_line_q <= cnd_line_d;
     end

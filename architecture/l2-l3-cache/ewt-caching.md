@@ -36,7 +36,15 @@ marked "on" has strict OpenSBI evidence on the named package (T8a–T8f, T9a, T9
 M5 adds a demand-miss-trained L2 stream/stride prefetcher (`L2PrefetchEn`,
 `g6lc_l2_pf`) — proven at leaf/HUM/system level but **off in every package**:
 streaming kernels gain 8–13 % while both strict boots pay ~+0.3 %, failing the
-adoption bar (T9h).
+adoption bar (T9h). T10b/N3 adds burst throttling (`L2PfMaxOutstanding`,
+`L2PfQuiet`, two-hit confidence) — adoption re-measured in T10b.
+
+N4/T10c counter truth: `[mc_cache] hub_aw_sc_collide` is an **offer-level
+observation**, not a stall — the same-line check is not in the hub AW grant, so
+`hub_aw_hold_slot` measured 0 on the int2_l3 L0 boot while colliding offers
+numbered 125,396 in 6 M cycles. The measured residual stall is the hub's AW
+serialization (`hub_aw_hold_other`: one write-data channel at a time plus
+downstream `!aw_ready`), 246,739 hold cycles in the same window.
 
 Measured on the four-hart OpenSBI boot of `g6lc64_ooo_int2` (DRAM latency 0,
 `ooocoh-p5-osbi-int2-L0-r1`): allocation alone turned a 0-hit bypass into 110k L2

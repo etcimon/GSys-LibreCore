@@ -191,6 +191,39 @@ package config_pkg;
   /// Default for every package that does not implement the AI plane.
   localparam ai_cfg_t AiCfgOff = ai_cfg_t'(0);
 
+  /// Directed reuse test. Not `g6lc64_ai_config_pkg`'s `ai_cfg`.
+  ///
+  /// `VaTurboEn` here only enables exact operand reuse. It does not scale
+  /// the dense peak and it is not an error-budget level. A core package
+  /// that copies this also needs RVF and RVD, because `check_cfg` requires
+  /// them before `IslandFpEn`.
+  localparam ai_cfg_t AiCfgVaTurboTest = '{
+    MatrixEn: 1'b1,
+    AccelEn: 1'b0,
+    TileLdEn: 1'b0,
+    RequantEn: 1'b0,
+    SparseEn: 1'b0,
+    UmodeEn: 1'b0,
+    PolicyCodecEn: 1'b1,
+    PolicyBenefitEn: 1'b1,
+    PolicySubcodeEn: 1'b1,
+    PolicySubcodeCacheEn: 1'b0,
+    VaTurboEn: 1'b1,
+    IslandFpEn: 1'b1,
+    Int4En: 1'b0,
+    Sparse24En: 1'b0,
+    FormatMask: 32'h0000_0001,
+    TileM: 32'd8,
+    TileN: 32'd8,
+    TileK: 32'd8,
+    TileCount: 32'd1,
+    AccBanks: 32'd1,
+    AccDepth: 32'd8,
+    Queues: 32'd1,
+    QueueDepth: 32'd4,
+    QosClasses: 32'd1
+  };
+
   /// -------------------------------------------------------------------------
   /// Numeric-format bit positions (`ai_cfg_t.FormatMask`, `aicfg.numfmt`,
   /// descriptor `flags.numfmt`, island `CAP_OFF_DTYPE_MASK`).
@@ -587,6 +620,12 @@ package config_pkg;
     bit          L2PfStrideEn;        // unequal-delta stride detect;
                                       // 0 = next-line only
     int unsigned L2PfMshrReserve;     // MSHR entries kept for demand (0→1)
+    // T10b/N3 burst throttling (defaults kick in at 0 like the other
+    // geometry fields): per-stream candidate cap and demand-miss quiet
+    // window. Streams also need two confirmed deltas before they arm.
+    int unsigned L2PfMaxOutstanding;  // armed candidates per stream (0→1)
+    int unsigned L2PfQuiet;           // no PF offer within N cycles of a
+                                      // demand miss commit (0→8)
     bit          L3PrefetchEn;        // same engine at the L3 level; shares
                                       // the L2Pf* geometry fields (default 0)
     // Xg6lcai AI matrix plane (off in every package but g6lc64_ai)
@@ -757,6 +796,8 @@ package config_pkg;
     int unsigned L2PfDistance;
     bit          L2PfStrideEn;
     int unsigned L2PfMshrReserve;
+    int unsigned L2PfMaxOutstanding;
+    int unsigned L2PfQuiet;
     bit          L3PrefetchEn;
     bit          ServerPrefetchEn;
     int unsigned ServerPfStreams;
@@ -1127,6 +1168,10 @@ package config_pkg;
     assert (!(Cfg.L3PrefetchEn &&
               (Cfg.L2PfMshrReserve == 0 ||
                Cfg.L2PfMshrReserve >= Cfg.L3MshrDepth)));
+    // T10b/N3: a live prefetcher must be allowed at least one armed
+    // candidate per stream (build_config defaults the field to 1).
+    assert (!(Cfg.L2PrefetchEn && Cfg.L2PfMaxOutstanding == 0));
+    assert (!(Cfg.L3PrefetchEn && Cfg.L2PfMaxOutstanding == 0));
 
     // --- Xg6lcai AI matrix plane (architecture/ai-matrix/isa-encoding.md) ---
     // Seam exclusivity. CVXIF and the accelerator port are already mutually

@@ -2844,3 +2844,124 @@ mask `sbe.valid` clear + `issue_pointer` rollback + commit-head jump,
 hart-scoped); (2) re-run the T9f ablation shape on the fixed recovery
 path — a 4-issue candidate is only worth building if a wider window
 is first proven boot-neutral at L0.
+
+### T10b — N3: L2 prefetcher burst throttling — measured, still off (2026-09-29)
+
+**Change.** `g6lc_l2_pf` gains `L2PfMaxOutstanding` (default 1 PF fill in
+flight per stream), `L2PfQuiet` (default 8-cycle no-issue window after a
+demand miss) and a confidence gate (PF issue requires >= 2 confirmed
+hits on the stream). `L2PfMshrReserve` unchanged. Build defaults:
+`L2PfMaxOutstanding=1`/`L2PfQuiet=8` when the field is 0; `check_cfg`
+rejects `L2PrefetchEn`/`L3PrefetchEn` with `L2PfMaxOutstanding=0`. The
+L3 instance in `g6lc_cluster` shares the same fields (params threaded
+through `g6lc_l3_top`).
+
+**Leaf.** Positive `L2PF_METRICS issue=7 useful=2 drop=5` + `RTL_REVIEW_PASS`;
+`+oracle_negative` fails. Mutation controls all detected: `maxcap`
+(`L2PF_EXTRA_CAND`), `noreserve` (`L2PF_RESERVE`), `noquiet`
+(`L2PF_QUIET_BREAK`), `earlyarm` (`L2PF_EARLY_CAND` — the mutation
+sustitutes `train_hit` for the confidence compare; a literal
+`conf >= 2'd0` was constant-folded by Verilator).
+
+**Measurements on `g6lc64_ooo_int2_l3`, PF on, tuned knobs.**
+
+- 512K scan: L0 385,988 / L40 962,623 cycles (vs pf0 424,488/1,047,138 —
+  -9.1 % / -8.1 %, i.e. the gain holds).
+- write/read: L0 140,942 / L40 500,949 (vs 160,187/~542,715).
+- PF efficiency: scan L0 `issue=2,878 useful=5,398 drop=9,116`; L40
+  `issue=3,837 useful=7,197 drop=8,157` — roughly half the M5 issue
+  volume at the same gain (quiet+cap cut the speculative supply).
+- **Strict L0 boot `ooocoh-n3-int2l3-pf1-osbi-L0-r1`: SUCCESS after
+  18,479,834 cycles — +60,055 (+0.33 %) vs the 18,419,779 anchor** with
+  only `l2_pf_issue=64 useful=56 drop=4` for the whole boot. The +0.3 %
+  cost is therefore not prefetch-supply interference; it rides on the
+  candidate path itself (arbiter mux / candidate presence on the MSHR
+  offer), and throttling cannot remove it.
+
+**Decision.** Adoption rule was boot <= anchor AND scan keeps >= half
+its gain. Boot fails (+0.33 %). `L2PrefetchEn` stays 0 in every package;
+`L3PrefetchEn` stays 0. The knobs ship as tuned defaults; a future
+candidate-path repair (remove the candidate from the demand arbitration
+timing) could re-open adoption — scan/write gains are proven.
+
+### T10c — N4: `hub_aw_sc_collide` is an observation, not a stall (2026-09-29)
+
+**Question.** `hub_aw_sc_collide` counts AW offers colliding with a live
+same-core same-line AW slot. T9e recorded "~390-440 k, largest remaining
+same-core stall". Verify whether the hub ever *holds* an AW for it.
+
+**Code read.** `aw_grant` in `g6lc_coherence_hub` requires
+`!aw_ot_full && aw_have_free && !w_busy_q && !(aw_may_invalidate && inv_pend_valid_q)`
+(+ OOOSF signature gating). The same-line collide is not a term — a
+collide alone can never produce a hold.
+
+**New counters** (`hub_aw_hold_slot_o`/`hub_aw_hold_other_o`, folded
+into `[mc_cache]` as `hub_aw_hold_slot`/`hub_aw_hold_other`): cycles a
+core-port AW is `valid && !ready`, split into slot-table-exhausted vs
+everything else.
+
+**Measurement** (int2_l3 L0 boot `ooocoh-n3-int2l3-pf1-osbi-L0-r1`, and
+the N1 6M runs): `hub_aw_sc_collide=444,641`, **`hub_aw_hold_slot=0`**,
+`hub_aw_hold_other=929,874` (~1.08 per posted write), `hub_ar_hold=2`,
+`l2_wtrk_full=0`. Not one AW was ever held for slot reasons.
+
+**Verdict.** `hub_aw_sc_collide` is an offer-level observation (an upper
+bound on would-be R2 serialization), not a stall. The largest measured
+residual stall at the hub is the AW serialization counted by
+`hub_aw_hold_other` — one write-data channel at a time plus downstream
+`!aw_ready`, ~1 hold cycle per posted write. Docs retitled
+(`AGENTS-todo.md` M1d line corrected; ewt-caching/l2 README status
+notes added).
+
+### T10a — N1: ring>8 drained-handoff timeout — refuted for pure depth (2026-09-29)
+
+**Probe.** `+smt_stats` observer in `core/cva6.sv` (translate_off,
+`NrHarts > 1 && SmtDrainedHandoff`): per-core drain requests/switches/
+aborts, drain-cycle totals, max, not-ready cause split
+(`wait_sb`/`wait_st`/`wait_flushid`/`wait_peer`/`wait_hold`/`wait_trap`/
+`wait_flush`), duration histogram, per-hart retired, `commit_drop`;
+prints every 1M cycles and at `final` on `[smt-drain]`; plusarg
+allowlisted in `corev_apu/tb/g6lc_tb.cpp`.
+
+**Runs** (int2_l3 L0 four-hart, threads=1): 6M-cap progress boots
+`ooocoh-n1-int2l3-{r8,r16}-6M-L0-r4` and the ring-16 full boot
+`ooocoh-n1-int2l3-r16-24M-L0-{r1,r2}`. Models `250fa966` (ring 8) /
+`b32c1fa3` (ring 16) — build manifests verified to differ in exactly
+one field: `NrScoreboardEntries` 8 vs 16.
+
+**Numbers.**
+
+- Drains are healthy: `switches == req`, `aborts = 0`, `commit_drop = 0`
+  in both geometries; max drain 109–146 cycles (r16 max is *lower* than
+  r8). Wait split: ~100 % `wait_sb` (scoreboard not yet empty — issue is
+  not held while a drain pends); `wait_flushid`/`wait_peer`/`wait_hold`/
+  `wait_trap`/`wait_flush` all exactly 0.
+- Per-drain cost grows modestly: mean drain 16.3 vs 13.7 cyc (core 0)
+  and 15.9 vs 11.4 (core 1); total drain overhead +50 k/+81 k cycles per
+  core — ≈1 % of elapsed.
+- **All handoff switching ends by ~2M cycles in BOTH geometries** — the
+  drained handoff is an early-boot (hart-sync) phenomenon; after ~2M the
+  counters freeze and each core runs its dominant hart solo.
+- 6M progress is identical (r8 hart0 4,417,197 vs r16 4,443,939 retired;
+  ~0.9 M instr/M-cycle on both) — no early divergence, no starvation.
+- **Full ring-16 boot completes: SUCCESS after 17,250,251 cycles —
+  faster than the ring-8 anchor 18,419,779 (−6.3 %).** A deeper window
+  absorbs more of the boot's miss latency. (The r1 record ended
+  `wall-budget` — the sim printed SUCCESS at the same moment the 3600 s
+  wall limit fired; r2 reruns with a larger wall budget for a clean
+  `strictDualPassed` artifact.)
+
+**Verdict.** The drained-handoff timeout hypothesis is refuted for ring
+depth alone: drains are bounded, wait only on the scoreboard (issue is
+not held while a drain pends — the measured cause, but a ~1 % cost),
+and the handoff phase is done by 2M cycles regardless. The M3 record of
+"every ring > 8 times out" was a **ring × knob combination** effect —
+every timing-out lane also moved checkpoint depth or speculation
+structure (E/A/D: ckpt 32; A0: ckpt 0 at ring 32), while the plain
+ring-16 geometry boots faster than ring 8. No issue-stage drain hold is
+implemented — the numbers do not support it (it would optimize the ~1 %
+`wait_sb` share, not a boot cost). The real recorded limit feeding
+M7/M3b is the mark-and-drain recovery cost from T9f (recovery mean
+17–19 cy at ring ≥ 16 vs 7 at ring 8) and whichever knob pairing
+actually produced the timeouts — the checkpoint-geometry interaction is
+the candidate, not ring depth.

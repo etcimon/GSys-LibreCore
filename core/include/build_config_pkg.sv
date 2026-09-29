@@ -482,6 +482,11 @@ package build_config_pkg;
     cfg.L2PfStrideEn   = CVA6Cfg.L2PfStrideEn;
     cfg.L2PfMshrReserve= (CVA6Cfg.L2PfMshrReserve != 0) ? CVA6Cfg.L2PfMshrReserve
                                                       : 1;
+    // T10b/N3: burst-throttling defaults — one armed candidate per stream
+    // and an 8-cycle quiet window after every demand miss commit.
+    cfg.L2PfMaxOutstanding = (CVA6Cfg.L2PfMaxOutstanding != 0)
+                             ? CVA6Cfg.L2PfMaxOutstanding : 1;
+    cfg.L2PfQuiet    = (CVA6Cfg.L2PfQuiet != 0) ? CVA6Cfg.L2PfQuiet : 8;
     cfg.L3PrefetchEn   = CVA6Cfg.L3PrefetchEn;
     // Multi-core snoop-filter / prefetch defaults when left zero
     if (cfg.NrCores > 1 && CVA6Cfg.SnoopFilterEn && CVA6Cfg.SnoopFilterEntries == 0)

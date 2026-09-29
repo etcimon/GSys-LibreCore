@@ -72,6 +72,10 @@ module g6lc_l2_top
     parameter int unsigned PF_DISTANCE    = 2,
     parameter bit          PF_STRIDE      = 1'b1,
     parameter int unsigned PF_MSHR_RESERVE= 1,
+    // T10b/N3: armed-candidate cap per stream and the demand-miss quiet
+    // window (burst throttling).
+    parameter int unsigned PF_MAX_OUT     = 1,
+    parameter int unsigned PF_QUIET       = 8,
     parameter int unsigned AXI_ADDR_WIDTH = 64,
     parameter int unsigned AXI_DATA_WIDTH = 64,
     parameter int unsigned AXI_ID_WIDTH   = 4,
@@ -951,7 +955,9 @@ module g6lc_l2_top
       .LINE_BYTES     (LINE_WIDTH / 8),
       .NR_STREAMS     (PF_STREAMS),
       .PF_DISTANCE    (PF_DISTANCE),
-      .STRIDE_EN      (PF_STRIDE)
+      .STRIDE_EN      (PF_STRIDE),
+      .MAX_OUT        (PF_MAX_OUT),
+      .QUIET          (PF_QUIET)
     ) i_pf (
       .clk_i,
       .rst_ni,

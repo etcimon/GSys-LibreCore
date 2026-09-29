@@ -25,6 +25,10 @@ module g6lc_l3_top
     parameter int unsigned PF_DISTANCE    = 2,
     parameter bit          PF_STRIDE      = 1'b1,
     parameter int unsigned PF_MSHR_RESERVE= 1,
+    // T10b/N3: burst-throttling pass-through (see g6lc_l2_top PF_MAX_OUT /
+    // PF_QUIET); the shared L2Pf* fields feed both instances.
+    parameter int unsigned PF_MAX_OUT     = 1,
+    parameter int unsigned PF_QUIET       = 8,
     parameter int unsigned BYTE_SIZE   = L3_DEFAULT_BYTE_SIZE,
     parameter int unsigned SET_ASSOC   = L3_DEFAULT_SET_ASSOC,
     parameter int unsigned LINE_WIDTH  = L3_DEFAULT_LINE_WIDTH,
@@ -96,6 +100,8 @@ module g6lc_l3_top
       .PF_DISTANCE    (PF_DISTANCE),
       .PF_STRIDE      (PF_STRIDE),
       .PF_MSHR_RESERVE(PF_MSHR_RESERVE),
+      .PF_MAX_OUT     (PF_MAX_OUT),
+      .PF_QUIET       (PF_QUIET),
       // This engine sits below an L2 that re-tags its posted writes onto
       // the reserved WR_ID — id-14 arrivals are the designed flow here, so
       // the slave-side WR_ID integration assert stays off (T9d/M1d).

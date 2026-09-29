@@ -77,7 +77,15 @@ module g6lc_coherence_hub
     // because a same-line AW is pending at a port or live in an AW slot —
     // the hub-side read-behind-write hold (ar_wr_line_live). The TB counts
     // it as hub_ar_hold; leave unconnected elsewhere.
-    output logic                       hub_ar_wr_hold_o
+    output logic                       hub_ar_wr_hold_o,
+    // T10c/N4 hold-cycle levels: an AW actually held at a core port
+    // (aw_valid && !aw_ready), split by blocker. _slot: the shared AR/AW
+    // slot table or the AW free-slot pick is exhausted (slot_used/AR
+    // pre-emption); _other: W-data in flight, inv-retention admission,
+    // signature gating, mem-side !aw_ready, or an RR loss. The same-line
+    // collide above never gates aw_grant — it is observation only.
+    output logic                       hub_aw_hold_slot_o,
+    output logic                       hub_aw_hold_other_o
 );
 
   localparam bit OOO_SF = (POLICY == COH_OOO) && SNOOP_FILTER_EN;
@@ -124,6 +132,8 @@ module g6lc_coherence_hub
     assign coh_lr_kill_o        = 1'b0;
     assign hub_aw_sc_collide_o  = 1'b0;
     assign hub_ar_wr_hold_o     = 1'b0;
+    assign hub_aw_hold_slot_o   = 1'b0;
+    assign hub_aw_hold_other_o  = 1'b0;
   end else begin : gen_cluster
 
     // ================================================================
@@ -361,6 +371,21 @@ module g6lc_coherence_hub
                     coh_line_tag(core_req_i[c].aw.addr, LINE_BYTES))
               hub_aw_sc_collide_o = 1'b1;
           end
+        end
+      end
+    end
+
+    // T10c/N4: an AW actually held at a core port (aw_valid && !aw_ready),
+    // split by blocker — slot table exhausted vs everything else. The
+    // same-line collide above is *not* in aw_grant, so a collide alone
+    // never produces a hold.
+    always_comb begin
+      hub_aw_hold_slot_o  = 1'b0;
+      hub_aw_hold_other_o = 1'b0;
+      for (int unsigned c = 0; c < NC; c++) begin
+        if (core_req_i[c].aw_valid && !core_resp_o[c].aw_ready) begin
+          if (aw_ot_full || !aw_have_free) hub_aw_hold_slot_o  = 1'b1;
+          else                             hub_aw_hold_other_o = 1'b1;
         end
       end
     end

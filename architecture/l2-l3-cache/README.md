@@ -29,7 +29,7 @@ Detail: [`../uncore/dram-channel-scaling.md`](../uncore/dram-channel-scaling.md)
 | L2 | `g6lc_l2_top` | `L2En`, size/assoc/MSHR/banks; default-off `L2RoundRobinEn` experiment |
 | L3 | `g6lc_l3_top` (wraps L2 engine) | `L3En` (requires `L2En`) |
 | Prefetch | `g6lc_server_prefetcher` | `ServerPrefetchEn`, streams, distance |
-| L2 prefetch | `g6lc_l2_pf` (inside `g6lc_l2_top`) | `L2PrefetchEn`, `L2PfStreams`, `L2PfDistance`, `L2PfStrideEn`, `L2PfMshrReserve` — default off (M5) |
+| L2 prefetch | `g6lc_l2_pf` (inside `g6lc_l2_top`) | `L2PrefetchEn`, `L2PfStreams`, `L2PfDistance`, `L2PfStrideEn`, `L2PfMshrReserve`, `L2PfMaxOutstanding`, `L2PfQuiet` — default off (M5); throttling knobs from T10b/N3 |
 
 ## P2 read-response ownership increment
 
@@ -954,6 +954,11 @@ Inclusive paths are **present/config-gated**, with concurrency qualification ope
 - L3 victim → **L2 tag match-inval** via `l2_back_inval_*` / `inval_match_*` on `g6lc_l2_tag`
 DT: `dts-l3-prefetch.md`. Stream×multicore suite: `mc-stream-tests` (`g6lc64_ooo_server`).
 Open: Ara live vector on sim flist (IP vendored + `Flist.ara` ready).
+Hub counters (T10c/N4): `hub_aw_sc_collide` counts *offered* AWs colliding with a
+live same-core same-line slot — an observation only, the collide is not in the AW
+grant and `hub_aw_hold_slot` measured 0 on the int2_l3 L0 boot; the residual
+stall is AW serialization (`hub_aw_hold_other`: single W channel + downstream
+`!aw_ready`, ~1 hold cycle per posted write).
 
 ### L3 under COH_OOO, WT allocation and SRAM tags (2026-09-26)
 
