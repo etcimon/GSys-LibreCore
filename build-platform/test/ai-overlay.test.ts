@@ -4,10 +4,11 @@
 // AI overlay pins: every configured <pkg>_ai package/DTS equals a fresh generation.
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import { DEFAULT_CONFIG } from "../src/config/defaults.ts";
-import { checkPin, pinPackageText, pinDtsText, AI_OVERLAY_MARKER } from "../src/tooling/aiOverlay.ts";
+import { checkPin, computePin, pinPackageText, pinDtsText, AI_OVERLAY_MARKER } from "../src/tooling/aiOverlay.ts";
 
 const repoRoot = join(import.meta.dir, "..", "..");
 
@@ -29,6 +30,23 @@ describe("ai-overlay", () => {
     const strip = (t: string) =>
       t.split("\n").filter((l) => !/^\s*(CvxifEn|CoproType|AiCfg):/.test(l) && !l.startsWith("//") && l.trim() !== "").join("\n");
     expect(strip(out)).toBe(strip(base));
+  });
+
+  test("a CRLF checkout (Windows autocrlf) generates byte-identical pins", async () => {
+    // The Windows CI runner reads the base package and DTS with CRLF endings;
+    // the marker sha and the generated text must not depend on that.
+    const target = "g6lc64_ooo_int2_l3";
+    const tmp = mkdtempSync(join(tmpdir(), "ai-overlay-crlf-"));
+    mkdirSync(join(tmp, "core/include"), { recursive: true });
+    mkdirSync(join(tmp, "corev_apu/bootrom"), { recursive: true });
+    for (const rel of [`core/include/${target}_config_pkg.sv`, "corev_apu/bootrom/ariane-ooo-int2-l3.dts"]) {
+      const lf = readFileSync(join(repoRoot, rel), "utf8").split("\r\n").join("\n");
+      writeFileSync(join(tmp, rel), lf.split("\n").join("\r\n"));
+    }
+    const fromLf = await computePin(repoRoot, { target });
+    const fromCrlf = await computePin(tmp, { target });
+    expect(fromCrlf.packageText).toBe(fromLf.packageText);
+    expect(fromCrlf.dtsText).toBe(fromLf.dtsText);
   });
 
   test("the DTS appends xg6lcai to every cpu and includes the island dtsi", () => {
