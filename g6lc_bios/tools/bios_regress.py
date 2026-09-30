@@ -301,9 +301,18 @@ def case_http_standalone_frames(spec: Path) -> None:
                     response = response[5:]
                 if b'"menus":[' not in response:
                     raise RuntimeError("standalone HTTP/TLS frame lost menu response")
-        hello = b"\x03\x03" + bytes(32) + b"\0\0\x02\0\x3c\x01\0"
-        handshake = b"\x01" + len(hello).to_bytes(3, "big") + hello
-        record = b"\x16\x03\x03" + len(handshake).to_bytes(2, "big") + handshake
+        # P6 suite contract (g6b-tls server.rs pick_suite): the server answers an
+        # ECDHE-GCM offer and refuses CBC/RSA key transport outright.
+        def client_hello(suites: bytes) -> bytes:
+            hello = (
+                b"\x03\x03" + bytes(32) + b"\0"
+                + len(suites).to_bytes(2, "big") + suites + b"\x01\0"
+            )
+            handshake = b"\x01" + len(hello).to_bytes(3, "big") + hello
+            return b"\x16\x03\x03" + len(handshake).to_bytes(2, "big") + handshake
+
+        ecdhe_rsa_gcm = b"\xc0\x2f"  # TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+        record = client_hello(ecdhe_rsa_gcm)
         with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
             sock.sendall(record[:6])
             time.sleep(0.02)
@@ -315,6 +324,17 @@ def case_http_standalone_frames(spec: Path) -> None:
             or response[5:6] != b"\x02"
         ):
             raise RuntimeError("standalone ClientHello lost ServerHello record")
+        # ServerHello body: version(2) random(32) session_id_len(1) suite(2)
+        server_hello_len = int.from_bytes(response[6:9], "big")
+        body = response[9:9 + server_hello_len]
+        if body[:2] != b"\x03\x03" or body[35:37] != ecdhe_rsa_gcm:
+            raise RuntimeError(f"ServerHello did not select ECDHE-GCM: {body[:37].hex()}")
+        legacy = client_hello(b"\x00\x3c")  # TLS_RSA_WITH_AES_128_CBC_SHA256 only
+        with socket.create_connection(("127.0.0.1", port), timeout=3) as sock:
+            sock.sendall(legacy)
+            response = _socket_response(sock)
+        if response:
+            raise RuntimeError(f"CBC/RSA-only ClientHello must be refused, got {response[:8].hex()}")
 
 
 def case_dual_band_repl(spec: Path) -> None:
