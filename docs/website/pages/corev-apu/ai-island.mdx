@@ -107,6 +107,17 @@ builds, oracle controls behave, and `ai_dot4_s8_smoke`, `ai_mma_s8_golden`, `ai_
 `ai_island_mmio_smoke` pass on the two-hart dual-issue model. Queued: the dual-issue mini rerun, the two-hart
 boot-load bench (`ai_bench_smt2.S`, per-hart queues), the strict OpenSBI boot (`ariane-smt2-ai.dts`).
 
+## Island on any configuration (2026-10-01)
+
+| Item | State | Evidence |
+|---|---|---|
+| Enable on any package | `+define+G6LC_AI_OVERLAY[_INT]` (build_config splices `config_pkg::AiCfgIsland`); pinned `<pkg>_ai` packages + DTS from `ai-overlay pin` (`g6lc64_ooo_int2_l3_ai`, `g6lc64_stream8_l3_ai`, `g6lc64_smt2_ooo_int_ai`); `+define+G6LC_AI_ISLAND_CFG=<literal>` for the geometry | `verify --lint --ai-overlay` adds no error on six targets; SoC-top Verilator lint clean on the three pins; drift test in `bun test` |
+| Coherent outputs | `AiCfg.DmaInvalEn` (CAP `0xA0` bit 0): each completed island write is invalidated through the CMO engine's writer port after its B, per 64 B line, and a job's completion is held until its invalidations returned; `cbo.inval` remains the software fallback | leaf `tb_g6lc_ai_inval_queue` + mutation PASS; SoC `ai_coh_stale`/`_sw` in the suite, **not yet run**; cost unmeasured |
+| Every core enqueues | `g6lc_ai_enq_arb` (round-robin) in the cluster; the island allocates the ticket stream (`SbTicketAlloc`) | leaf + mutation PASS; SoC `ai_mc_enq` **not yet run** |
+| OoO cores | CVXIF issues only at the commit head (`g6lc_iq`), so the coprocessor's issue-time side effects are never speculative | leaf `tb_g6lc_iq_cvxif_head` + mutation PASS; AI subset on `g6lc64_ooo_int2_l3_ai` **not yet run** |
+| FP island on integer cores | `IslandFpEn` no longer requires RVF/RVD (T0 float grants still do) | `g6lc64_smt2_ooo_int_ai` elaborates with the FP island |
+| Two-hart boot-load bench | `HARTS=1` control: 4 decode jobs, 135,931 wall cycles (33,872 each) on `g6lc64_smt2_ai`; `HARTS=2` failed on an ELF defect (queue-1 region), fixed, rerun owed | `ai-chain10` |
+
 ## Open items (as of 2026-10-01, end of pass)
 
 - V1 SoC measurement (queued with the `AI_START` trace; island and memory path proven on leaves).
