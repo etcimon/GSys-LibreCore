@@ -146,14 +146,19 @@ sources:
       - core/commit_stage.sv
       - core/axi_shim.sv
 
-      # Frontend (i.e., fetch, decode, dispatch)
+      # Frontend (i.e., fetch, decode, dispatch). Predictors stay under
+      # core/frontend; the instruction supply is core/fetch_B (Flist.fetch_B),
+      # the retired fetch-A frontend.sv/instr_queue.sv/instr_scan.sv are gone.
       - core/frontend/btb.sv
       - core/frontend/bht.sv
       - core/frontend/bht2lvl.sv
       - core/frontend/ras.sv
-      - core/frontend/instr_scan.sv
-      - core/frontend/instr_queue.sv
-      - core/frontend/frontend.sv
+      - core/fetch_B/g6lc_fetch_pkg.sv
+      - core/fetch_B/instr_realign.sv
+      - core/fetch_B/instr_scan.sv
+      - core/fetch_B/instr_queue.sv
+      - core/fetch_B/frontend.sv
+      - core/fetch_B/g6lc_fetch_dbg.sv
       # Cache subsystem(s)
       - core/cache_subsystem/wt_dcache_ctrl.sv
       - core/cache_subsystem/wt_dcache_mem.sv

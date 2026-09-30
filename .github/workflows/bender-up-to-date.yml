@@ -8,9 +8,40 @@ name: bender-up-to-date
 
 on: [ push, pull_request, workflow_dispatch ]
 
+permissions:
+  contents: read
+
 jobs:
   bender-up-to-date:
     runs-on: ubuntu-latest
     steps:
+      # GSys LibreCore: the pulp composite action (bender-up-to-date@v2.4.4)
+      # hard-codes `actions/checkout` with `submodules: recursive`, which walks
+      # every nested pointer in this monorepo -- including g6lc_bios/pglite's
+      # `../postgres-pglite.git`, a relative URL that only resolves under the
+      # upstream electric-sql org. Bender.yml (`--no-deps`) only needs the
+      # hpdcache tree, so check out exactly that and run the same check inline.
+      - uses: actions/checkout@v4
+
+      - name: Submodules referenced by Bender.yml
+        run: git submodule update --init --recursive --depth 1 core/cache_subsystem/hpdcache
+
+      - name: Install bender
+        uses: pulp-platform/pulp-actions/bender-install@v2
+
+      # Same gate as pulp-actions/bender-up-to-date/bender-up-to-date.sh:
+      # Bender >= 0.29 exits non-zero when a listed source file is missing; the
+      # loop below is the explicit check for older Bender versions.
       - name: Check Bender up-to-date
-        uses: pulp-platform/pulp-actions/bender-up-to-date@v2.4.4
+        run: |
+          set -euo pipefail
+          bender --version
+          bender script --no-deps flist > flist.txt
+          missing=0
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in +*) continue ;; esac
+            if [ ! -f "$f" ]; then echo "bender-up-to-date: $f not found."; missing=1; fi
+          done < flist.txt
+          echo "bender-up-to-date: $(grep -vc '^+' flist.txt) source(s) listed in Bender.yml"
+          exit "$missing"
