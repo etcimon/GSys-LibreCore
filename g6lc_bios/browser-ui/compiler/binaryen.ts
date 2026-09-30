@@ -36,7 +36,14 @@ export const MIN_WASM_OPT_VERSION = 123;
 export const WASM_OPT_RELEASE = process.env.SVELTE_D_WASM_OPT_RELEASE || "wasm-opt-svelte-d";
 /** Branch holding `wasm-opt-<variant>.tar.gz` when the release is absent. */
 export const WASM_OPT_BRANCH = process.env.SVELTE_D_WASM_OPT_BRANCH || "wasm-opt-binaries";
-export const WASM_OPT_REPO = process.env.SVELTE_D_WASM_OPT_REPO || "etcimon/binaryen";
+/**
+ * The fork's *source* is etcimon/binaryen (branch svelte-d), but the binaries
+ * are built and published by the svelte-d repository's `wasm-opt` workflow
+ * (release `wasm-opt-svelte-d` + branch `wasm-opt-binaries` on etcimon/svelte-d).
+ * etcimon/binaryen carries neither, so pointing here at the source repo made
+ * every download URL 404 and left CI without the tool (`g6b-kernel` asyncify tests).
+ */
+export const WASM_OPT_REPO = process.env.SVELTE_D_WASM_OPT_REPO || "etcimon/svelte-d";
 
 export type WasmOptInfo = {
   /** Absolute path, or "" when nothing usable was found. */

@@ -24,8 +24,11 @@ Auto-installs requirements as needed:
 
 Both toolchains land under browser-ui/toolchains/ and are resolved from there
 in preference to anything ambient, because the cell's provenance hash covers
-the tool binaries. wasm-opt is downloaded from the etcimon/binaryen svelte-d
-fork's CI and, failing that, cmake-built from the svelte-d/binaryen submodule.
+the tool binaries. wasm-opt (source: etcimon/binaryen, branch svelte-d) is
+downloaded from the svelte-d repository's `wasm-opt-svelte-d` release, which is
+where its CI publishes the binaries, and, failing that, cmake-built from the
+svelte-d/binaryen submodule. `check` provisions it too, because the g6b-kernel
+asyncify tests shell out to it.
 
 Fall-through to E:\\cva6\\build-platform: when build-platform is present and
 the host lacks a required tool, this script delegates the install to:

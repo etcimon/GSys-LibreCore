@@ -271,6 +271,19 @@ def cmd_check(args: argparse.Namespace) -> int:
             failed.append("journal-disk-tests")
         ui = package_root() / "browser-ui"
         bun = shutil.which("bun")
+        # The g6b-kernel asyncify tests shell out to the forked wasm-opt
+        # (g6b-wasm find_fork_wasm_opt: browser-ui/toolchains/binaryen-svelte-d
+        # is one of its roots). Provision it here so the cargo gate below is
+        # self-sufficient on a fresh host instead of depending on a prebuilt
+        # ~/.svelte-d toolchain; the installer is idempotent and adopts an
+        # existing fork first.
+        log("--- wasm-opt (forked) ---")
+        if bun:
+            log("+ bun scripts/install-wasm-opt.ts")
+            if subprocess.run([bun, "scripts/install-wasm-opt.ts"], cwd=str(ui)).returncode != 0:
+                failed.append("wasm-opt")
+        else:
+            err("bun not on PATH (wasm-opt install); g6b-kernel asyncify tests will fail")
         log("--- browser-ui ---")
         if rust_only:
             log("skipped (--rust-only); the tracked browser-ui/out artifacts feed the cargo gates")
