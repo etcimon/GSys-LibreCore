@@ -1936,6 +1936,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         ],
       },
       {
+        // WP4 SMT2+AI: the two-hart AI package and its DTS (strict boot + boot-load bench).
+        id: "diag-smt2-ai-paths",
+        description: "SMT2+AI config package, DTS, dual-issue mini and two-hart bench on disk.",
+        compartment: "smt2",
+        kind: "path-check",
+        paths: [
+          "core/include/g6lc64_smt2_ai_config_pkg.sv",
+          "corev_apu/bootrom/ariane-smt2-ai.dts",
+          "verif/tests/custom/ai/mini_ai_dual_issue.S",
+          "verif/tests/custom/ai/ai_bench_smt2.S",
+        ],
+      },
+      {
         // Residual scaffold P0: scripts + docs present (not a sim gate).
         id: "diag-soft-ladder-paths",
         description:
