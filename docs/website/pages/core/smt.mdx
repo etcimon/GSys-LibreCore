@@ -35,17 +35,32 @@ queues are empty, so the hart-blind OoO backend never interleaves two harts'
 work. Mixed residency (`SmtDrainedHandoff=0`) is promoted to production on the
 single-core `g6lc64_smt2_ooo_int` package (T9d/M2, evidence re-baselined on the
 eWT tree); on multi-core packages it stays qualification-gated behind
-`G6LC_OOO_SMT_MIXED_QUALIFY`. The T9f/M3 window uplift (ring 32, TAGE_LITE,
-BPCkptDepth 32, DeepSpec+MemDepPred, FTQ 8 / FDIP / loop buffer) was measured
-on `smt2_ooo_int` and `ooo_int2_l3` and **not adopted** — strict boots and
-branch-bound IPC regressed, and the per-knob ablation found every uplifted
-knob regresses the boot independently (ring > 8 alone times out; TAGE_LITE
-multiplies boot mispredicts ~4.75×; DeepSpec/memdep replays dominate;
-FTQ/FDIP taxes every control transfer); both packages stay at ring 8 pending
-the M3b re-evaluation in plan T9f. Landed from that work is the switch-safety fix:
-`smt_restore_i` reseeds the FTQ *and* steps the cursor (`arch_step=FtqEn`)
-and clears the loop buffer on every switch (formal `g6lc_fetch_restore` +
-the `tb_g6lc_fetch_restore` leaf; the `NOFLUSH` mutant is detected).
+`G6LC_OOO_SMT_MIXED_QUALIFY`. FP on the OoO path is legal single-hart and under
+the drained handoff (M4 — `g6lc64_ooo_int2_l3` is RV64GC+B); FP under mixed
+residency stays refused pending the hart-tagged lazy-FS audit.
+
+**Window geometry.** Both OoO SMT2 packages run a **16-entry scoreboard ring**
+(`NrScoreboardEntries=16`, adopted T10d: the int2_l3 four-hart boot 18,297,381
+cycles vs 18,419,779 at ring 8, the mixed `smt2_ooo_int` boot 10,459,588 vs
+10,556,456, branch-bound IPC unchanged, mixed-commit FO4 31.0). The full T9f/M3
+uplift bundle (ring 32, TAGE_LITE, BPCkptDepth 32, DeepSpec+MemDepPred, FTQ 8 /
+FDIP / loop buffer) was measured and **not adopted**: every knob regressed the
+strict boot on its own (TAGE_LITE at 3×64 entries multiplies boot mispredicts
+~4.75×, DeepSpec/memdep replays dominate, FTQ/FDIP taxes every control
+transfer), and mispredict recovery is mark-and-drain through the commit head, so
+a deeper window pays more per mispredict — the M3b fast-squash candidate is
+sketched in plan T9f. Ring 32 additionally exposed a **drained-handoff hole**: a
+drain can pend for millions of cycles while the resident hart holds scoreboard
+entries; the bounded-drain fix (`SmtDrainForceCycles`, N1c) is in qualification.
+Landed from the M3 work is the switch-safety fix: `smt_restore_i` reseeds the
+FTQ *and* steps the cursor (`arch_step=FtqEn`) and clears the loop buffer on
+every switch (formal `g6lc_fetch_restore` + the `tb_g6lc_fetch_restore` leaf;
+the `NOFLUSH` mutant is detected).
+
+**Qualification anchors (strict OpenSBI, single-threaded Verilator, byte-exact
+per-hart traces):** `g6lc64_smt2` 12,406,273 cycles, `g6lc64_smt2_ooo_int`
+(mixed, ring 16) 10,459,588, `g6lc64_smt2_l3` 13,691,686. A run killed by the
+wall clock now reports `TERMINATED` (exit 124) instead of a truncated SUCCESS.
 
 Modules under `core/smt/` include thread select, hart state, banked RF, PC
 bank, and CSR bank helpers.
@@ -61,9 +76,11 @@ bank, and CSR bank helpers.
 ## Enable
 
 ```
-core/include/g6lc64_smt2_config_pkg.sv         # NrHarts=2, SMT_HYBRID, in-order
-core/include/g6lc64_smt2_ooo_int_config_pkg.sv # NrHarts=2 over OoO, mixed residency (production)
-core/include/g6lc64_ooo_int2_config_pkg.sv     # two-core WT + L2 COH_OOO variant (integration target)
+core/include/g6lc64_smt2_config_pkg.sv         # NrHarts=2, SMT_HYBRID, in-order (anchor)
+core/include/g6lc64_smt2_l3_config_pkg.sv      # + non-inclusive L3
+core/include/g6lc64_smt2_ooo_int_config_pkg.sv # NrHarts=2 over OoO, mixed residency, ring 16 (production)
+core/include/g6lc64_ooo_int2_config_pkg.sv     # two-core WT + L2 COH_OOO (integer anchor, drained)
+core/include/g6lc64_ooo_int2_l3_config_pkg.sv  # + L3, RV64GC+B, ring 16 (drained)
 ```
 
 ```bash

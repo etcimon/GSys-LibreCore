@@ -26,11 +26,18 @@ core L1(s)
 
 | Level | Module | Config (concept) |
 |---|---|---|
-| L2 | `g6lc_l2_top` | `L2En`, size / assoc / MSHR / banks |
-| L3 | `g6lc_l3_top` | `L3En` (requires `L2En`) |
-| Prefetch | `g6lc_server_prefetcher` | `ServerPrefetchEn`, streams, distance |
+| L2 | `g6lc_l2_top` | `L2En`, size / assoc / MSHR / banks; eWT knobs `WtAxiAllocEn`, `L2WriteUpdateEn`, `L2PostedWriteEn`, `L2CmoEn`, `L2TagSramEn` |
+| L3 | `g6lc_l3_top` | `L3En` (requires `L2En`), `L3InclusiveEn` |
+| L2 prefetch | `g6lc_l2_pf` (inside `g6lc_l2_top`) | `L2PrefetchEn` + `L2Pf*` geometry/throttling — **default off in every package** (see below) |
+| Prefetch (LLC edge) | `g6lc_server_prefetcher` | `ServerPrefetchEn`, streams, distance |
 
 Default on many packages: **`L2En=0`** (off). Server / OoO packages may auto-enable.
+
+The whole hierarchy is **write-through at every level** — "enhanced write-through"
+(eWT): hub-owned invalidation coherence, read-allocate, write-update, posted writes
+and propagated CBO. Why not write-back, and what each piece buys, is recorded in
+`architecture/l2-l3-cache/ewt-caching.md`; the per-milestone evidence is
+`core/ooo/AGENTS-ooo-plan.md` T8a–T10e.
 
 ## Product features (L2 done)
 
@@ -85,12 +92,13 @@ Three facts a contributor needs before touching this layer:
   re-baselined anchors at M1a).
 - **Inclusion is a package policy** (`L3InclusiveEn`). The WT L1 plus hub-owned invalidations do
   not need an inclusive L3, so `g6lc64_ooo_int2_l3` and `g6lc64_smt2_l3` run a **non-inclusive**
-  1 MiB / 16-way L3 (MSHR 4, the hub's credit count); `g6lc64_ooo_server` keeps the inclusive
-  back-invalidation. Both L3 packages pass their strict SMT2 OpenSBI boots at zero DRAM latency,
-  but the L3 recorded **no hits** there: the boot footprint fits the 256 KiB L2 and every
-  write-through purges the written line from both levels. The install/hit mechanism is proven in
-  the composed stack bench; the benefit case is a footprint / write-policy measurement, not a
-  claim.
+  1 MiB / 16-way L3 (SRAM tags; MSHR 8 on int2_l3 with `CohMaxOutstanding=8`), and since M6 the
+  in-order two-core HPDCACHE packages `g6lc64_stream8_l3` and `g6lc64_server_math_l3` carry the
+  same L3 (their strict two-core OpenSBI boots complete in 11,691,278 / 11,691,235 cycles);
+  `g6lc64_ooo_server` keeps the inclusive back-invalidation. Before write-update the L3 recorded
+  no hits on the boot (every write-through purged the written line); with `L2WriteUpdateEn` the
+  latency-40 boot records its first L3 hits, and the measured benefit is a footprint one — about
+  −6 % on a 512 KiB scan at DRAM latency 40, nothing when the footprint fits the L2.
 - **Tags can live in SRAM** (`L2TagSramEn`, `g6lc_l2_tag.tech-spec.md`): valid bits stay in
   flops, the tag row is read one cycle ahead (launched on every transition into `S_TAG`), an
   inval-match read has port priority and clears one cycle later against the valids snapshotted
@@ -157,11 +165,34 @@ credit bound covers fills + both trackers (R6). `l2_write_idle_o` now means
 tracker-empty — that is what `cbo.clean`/`cbo.flush` wait on. Observability:
 `[mc_cache]` gains `l2_wtrk_full`, `l2_line_hold`, `l2_posted`, `l2_rdtrk` plus
 the hold split `l2_hold_r1`/`l2_hold_r1_wu`/`l2_hold_r2` and the hub counters
-`hub_aw_sc_collide`/`hub_ar_hold`, and PMU group-2 events 7/8 count posted-write
-hold cycles at L2/L3. Timing: the hazard CAMs are small compares on registered
-request fields, the R arbiter adds one mux level on the slave R path, and nothing
-enters the `S_TAG` hit compare — structural FO4 on `g6lc_l2_top` stays 28.5.
-On in every L2 package.
+`hub_aw_sc_collide`/`hub_ar_hold`/`hub_aw_hold_slot`/`hub_aw_hold_other`, and PMU
+group-2 events 7/8 count posted-write hold cycles at L2/L3. Timing: the hazard CAMs
+are small compares on registered request fields, the R arbiter adds one mux level on
+the slave R path, and nothing enters the `S_TAG` hit compare — structural FO4 on
+`g6lc_l2_top` stays 28.5. On in every L2 package.
+
+Measured on the four-hart boots after WR_ID: `l2_hold_r2 = 0`, int2 latency-40
+40,024,648 cycles (−1.7 % vs posted-before-WR_ID), int2_l3 latency-40 40,405,333
+(−3.7 %). The hub-side read-behind-write hold (`hub_ar_hold`) is 0–285 cycles per
+boot, `hub_aw_sc_collide` counts *offers* only (the collide is not in the AW grant,
+`hub_aw_hold_slot = 0`), and the residual write stall is plain AW serialization —
+about one hold cycle per posted write on the single W channel.
+
+## L2 stream/stride prefetcher (`L2PrefetchEn`, M5/N3 — proven, off)
+
+`g6lc_l2_pf` trains on demand-miss commits per 4 KiB region (next-line, and stride
+after two equal deltas), issues at most one PF-flagged MSHR fill per cycle with
+`L2PfMshrReserve` entries kept for demand, drops candidates on resident lines,
+in-flight fills, tracked writes and page boundaries, is killed by the same same-line
+write as a demand fill, and marks installed ways so a demand hit counts as
+`l2_pf_useful` once. Burst throttling (`L2PfMaxOutstanding`, `L2PfQuiet`, two-hit
+confidence) halves the issues for the same gain. Measured on `g6lc64_ooo_int2_l3`:
+512 KiB scan −9 % / −8 % (latency 0 / 40), write/read −12 % / −8 %, pointer chase
+neutral — but the four-hart boot pays +0.3 % at both latencies while an enabled-but-
+silent prefetcher boots byte-identical to the anchor, so the cost is the live offers,
+not the datapath. It fails the "boot ≤ anchor" adoption bar and **ships off in every
+package** (`L3PrefetchEn` likewise). Leaf `tb_g6lc_l2_pf` with four mutations, HUM
+scenarios 62–64, PMU group-2 events 9/10.
 
 For DRAM-latency experiments use the testbench's `DramLatency` parameter
 (`corev_apu/tb/g6lc_tb_dram_latency.sv`, first beat of each burst delayed). The vendor
@@ -183,12 +214,20 @@ geometry. Notes: `architecture/l2-l3-cache/dts-l3-prefetch.md`. Keep
 | Multi-core stream | `mc-stream-tests` (when catalogued) |
 
 ```bash
-g6lc-build verify --target g6lc64_ooo_int2     # WT + allocating L2 + COH_OOO cluster
-g6lc-build verify --target g6lc64_ooo_int2_l3  # + non-inclusive L3, SRAM tags (qualification-only)
-g6lc-build verify --target g6lc64_smt2_l3      # single core, SMT2, L2 + L3 (qualification-only)
-g6lc-build verify --target g6lc64_ooo_server   # refused in production (multi-hart FP leg)
+g6lc-build verify --target g6lc64_ooo_int2        # WT + allocating L2 + COH_OOO cluster (integer anchor)
+g6lc-build verify --target g6lc64_ooo_int2_l3     # + non-inclusive L3, SRAM tags, RV64GC+B, ring 16
+g6lc-build verify --target g6lc64_smt2_l3         # single core, SMT2, L2 + L3
+g6lc-build verify --target g6lc64_stream8_l3      # in-order two-core HPDCACHE + L3 (M6)
+g6lc-build verify --target g6lc64_server_math_l3  # in-order two-core HPDCACHE + L3 (M6)
+g6lc-build verify --target g6lc64_ooo_server      # opt-in / unqualified (COH_FILTERED leg)
 g6lc-build test --suite ooo-l3-tests
 ```
+
+Leaf and bench evidence lives under `verif/tb/l2/` (`tb_g6lc_l2_hum` hit-under-miss and
+posted-write contract, `tb_g6lc_coherence_hub` composed hub+L2+L3 with CMO scenarios,
+`tb_g6lc_l2_pf`, and the SymbiYosys tasks in `verif/tb/l2/formal/` for the write
+tracker: no two entries share a line with different downstream ids, B conservation,
+posted writes never enter the blocking B state).
 
 ## PMU
 

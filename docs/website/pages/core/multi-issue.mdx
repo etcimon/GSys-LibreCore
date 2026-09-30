@@ -47,9 +47,9 @@ Examples (confirm names in `core/include/`):
 |---|---|---|
 | Default `cv64a6_imafdc_sv39` | 1 (or 2 if superscalar) | Identity-lean path |
 | `g6lc64_ooo_int` | 2 | Integer-only OoO bring-up baseline |
-| `g6lc64_smt2_ooo_int` | 2 | Production SMT2 over OoO (drained handoff) |
-| `g6lc64_ooo` | 2 | Dual-issue OoO lite — **refused in production** (FP leg) |
-| `g6lc64_ooo_server` | 4 | Server OoO width — **refused in production** (multi-hart FP leg) |
+| `g6lc64_smt2_ooo_int` | 2 | Production SMT2 over OoO (mixed residency, ring 16) |
+| `g6lc64_ooo` | 2 | Dual-issue OoO lite — legal single-hart FP since M4 |
+| `g6lc64_ooo_server` | 4 | Server OoO width — opt-in / unqualified; the 4-issue overlay on int2_l3 (M7) is not promoted until the fast-squash recovery lands |
 | Server math packages | 2+ | Dual-issue + L2/H/Sstc stack |
 
 ## Timing and power

@@ -85,9 +85,10 @@ Package names evolve; treat these as **illustrative** and confirm against
 g6lc-build config   # inspect soc.coreConfig
 
 # Full OoO — legal targets today:
-#   g6lc64_ooo_int (baseline)  |  g6lc64_smt2_ooo_int (production SMT2)
-#   g6lc64_ooo_int2 (two-core COH_OOO integration)
-# g6lc64_ooo / g6lc64_ooo_server are refused in production (FP legs).
+#   g6lc64_ooo_int (baseline)  |  g6lc64_smt2_ooo_int (production SMT2, mixed residency, ring 16)
+#   g6lc64_ooo_int2 (two-core COH_OOO integer anchor)  |  g6lc64_ooo_int2_l3 (+ L3, RV64GC+B, ring 16)
+#   g6lc64_ooo (single-hart FP, legal since M4)
+# g6lc64_ooo_server is opt-in / unqualified (COH_FILTERED leg without evidence).
 g6lc-build verify --target g6lc64_ooo_int
 g6lc-build test --suite ooo-l3-tests   # optional, lengthy
 

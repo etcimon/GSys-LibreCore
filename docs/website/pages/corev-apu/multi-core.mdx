@@ -53,13 +53,15 @@ N × ariane (core tile)
 | `COH_OOO` | `g6lc_ooo_snoop_filter.sv` — SRAM-backed monotone sharer signatures (one-port `tc_sram`, cold sweep of `NR_ENTRIES` cycles) | OoO coherent fabric |
 
 `COH_OOO` is the envelope for out-of-order cores: `check_cfg` admits it only when
-`OoOEn && !FpPresent && L2En && NrCores > 1 && DCacheType == WT` and the I$/D$
-line widths match. On this fabric every load is revalidated against its accepted
-physical address until it retires — a modification event holds load retirement
-for one cycle and matching loads replay through the existing precise cancel
-path; PMA non-idempotent loads never replay. This is verified with directed
-LSQ/scoreboard tests, mutations and a bounded formal ledger; matched multicore
-firmware execution is still a deferred obligation, not an established result.
+`OoOEn && L2En && NrCores > 1 && DCacheType == WT` and the I$/D$ line widths
+match (the `!FpPresent` term left with M4 — FP loads replay like any load, and
+`g6lc64_ooo_int2_l3` runs RV64GC+B on it). On this fabric every load is
+revalidated against its accepted physical address until it retires — a
+modification event holds load retirement for one cycle and matching loads replay
+through the existing precise cancel path; PMA non-idempotent loads never replay.
+Verified with directed LSQ/scoreboard tests, mutations, a bounded formal ledger
+and the strict four-hart OpenSBI boots of `g6lc64_ooo_int2` (17,870,562 cycles)
+and `g6lc64_ooo_int2_l3` (18,297,381 at ring 16).
 
 Hub invariants held by `g6lc_coherence_hub.sv`:
 
@@ -79,20 +81,32 @@ Hub invariants held by `g6lc_coherence_hub.sv`:
   invalidation hit it in flight retains no copy — the directed cross-core
   shared-line program passes in the isolated two-core route with both cores
   retired (plan T7i).
-- The hub's four transaction credits bound L2 fills; `g6lc64_ooo_int2` sizes
-  `L2MshrDepth=4` to match (measured: depth 2 left 51 MSHR-full stall cycles in
-  an eight-read burst, depth 4 none). The L3 packages size `L3MshrDepth=4` on
-  the same evidence (depth 16 gives identical service through the stack).
+- The hub's transaction credits (`CohMaxOutstanding`, default 4, legal 2–14;
+  8 on the int2 packages with `L2MshrDepth`/`L3MshrDepth` 8) bound L2 fills plus
+  the posted-write and bypass-read trackers; the credits bench shows the eight-read
+  burst using all 8 slots and the mixed-burst write stall dropping to 0 at 8.
+- **Same-line ordering (M1a):** an AR to a line with a pending or live same-line
+  write is ineligible until that write's B (closes the stale-refill counterexample
+  that the standalone hub scenario 23 documented), and an invalidation to a core
+  with a same-line fill in flight is held until the fill lands. The ATOP R that this
+  hold could deadlock against is **parked** in its AW slot and replayed once the
+  invalidation is applied — the same treatment the B channel already had (hub
+  scenario 27, lifetime lane 50/50).
+- **CBO reaches every level (M1a):** `g6lc_cmo_engine` in the cluster broadcasts
+  the L1 invalidation to all cores, match-invalidates L2 and L3, and completes
+  `clean`/`flush` on the write-idle trackers; see [L2 / L3 Cache](./l2-l3-cache).
 - The hub never sees the L3. `g6lc64_ooo_int2_l3` places a **non-inclusive**
   L3 below the L2 (`L3InclusiveEn=0`); the composed stack bench carries the
-  stalled-write / self-invalidation scenarios through hub → L2 → L3, and the
-  four-hart strict boot passes on it. The WT boundary now emits allocate
+  stalled-write / self-invalidation / CMO scenarios through hub → L2 → L3, and
+  the four-hart strict boot passes on it. The WT boundary emits allocate
   attributes (`WtAxiAllocEn`) — before it the L2 in this envelope was a bypass.
+- Write-back L1 types are refused on multi-core packages (`check_cfg`): the
+  hub/L2 track presence, not dirty data, so a WB victim could carry the only copy.
 
 The composed hub + real `g6lc_l2_top` bench (`tb_g6lc_coherence_l2` in
 `verif/tb/l2/tb_g6lc_coherence_hub.sv`) shows the L2 refusing a reader's AR
-during a stalled write and admitting it after memory B, which excludes the
-standalone-slave stale-refill counterexample in this composition.
+during a stalled write and admitting it after memory B; with posted writes the
+same contract (`late_ar ≥ mem_b`) holds because the slave B is still memory's B.
 
 Local AMO/CAS operations raise the same apply event as external invalidations
 (`tb_g6lc_wt_amo_apply`), PMU group 2 exposes "invalidation applied" (event 5)
@@ -100,12 +114,14 @@ and "COH_OOO load replay" (event 6), and the signature SRAM carries
 `ImplKey("g6lc_coh_signature")` with its macro/MBIST plan in
 `corev_apu/coherence/g6lc_ooo_snoop_filter.tech-spec.md`.
 
-Deferred (tracked, not closed): matched multicore firmware/anchor/compliance
-runs (the isolated route so far runs directed programs: cross-core shared line
-and four-hart CLINT boot/release pass; the remaining frozen programs are still
-red), in-order WT re-runs after the repair-copy lifetime change, foundry macro
-selection and MBIST insertion, STA/power/area sign-off — see `AGENTS-todo.md`. HPDCACHE/non-WT application acknowledgement is outside
-the `COH_OOO` legality envelope.
+Qualified today (source-profiled strict OpenSBI, single-threaded Verilator,
+per-hart traces): `g6lc64_ooo_int2` four harts, `g6lc64_ooo_int2_l3` four harts
+(RV64GC+B, ring 16), `g6lc64_smt2_l3`, and the in-order two-core HPDCACHE
+packages `g6lc64_stream8_l3` / `g6lc64_server_math_l3` (M6). Deferred (tracked,
+not closed): Linux boot and `riscv-arch-test` compliance on these packages,
+RVWMO litmus coverage across harts, foundry macro selection and MBIST insertion,
+STA/power/area sign-off — see `AGENTS-todo.md`. HPDCACHE packages use
+`COH_FILTERED`; `COH_OOO` stays a WT-L1 envelope.
 
 ## Config and inference
 
@@ -143,8 +159,10 @@ Validate with `AGENTS-dts-validation.md` / `build-platform/scripts/validate-cva6
 | `dual-hart-ci` | Dual-hart CI path where catalogued |
 
 ```bash
-g6lc-build verify --target g6lc64_ooo_int2    # two-core COH_OOO coherence cluster
-g6lc-build verify --target g6lc64_ooo_server  # refused in production (multi-hart FP leg)
+g6lc-build verify --target g6lc64_ooo_int2         # two-core COH_OOO coherence cluster
+g6lc-build verify --target g6lc64_ooo_int2_l3      # + L3, FP, ring 16
+g6lc-build verify --target g6lc64_stream8_l3       # in-order two-core HPDCACHE + L3
+g6lc-build verify --target g6lc64_ooo_server       # opt-in / unqualified (COH_FILTERED leg)
 g6lc-build test --suite mc-stream-tests
 ```
 

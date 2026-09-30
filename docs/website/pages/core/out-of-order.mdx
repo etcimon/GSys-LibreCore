@@ -124,10 +124,16 @@ builders (see `build_config_pkg` / package sources).
 | Risk | Mitigation (product view) |
 |---|---|
 | Multi-issue WAW/WAR | Single-cycle multi-port rename |
-| Mispredict blast radius | Checkpoint + scoreboard **cancel mask** squash |
+| Mispredict blast radius | Checkpoint restore of the rename map + scoreboard **cancel mask**; the cancelled entries themselves are **marked and drained through the commit head** (measured T9f: ~8 recovery cycles at ring 8, ~17–19 at ring ≥ 16) — a one-cycle fast squash (M3b) is the sketched next step and the precondition for wider windows / 4-issue |
 | Dependent ALU bubbles | Same-cycle producer→consumer IQ wakeup |
 | PRF read latency | Write-through PRF + WB bypass |
 | Memory order | Store-set + LSQ CAM; STL with live AGU |
+
+Measured state of the window (T9f–T10d): the 16-entry ring is adopted on
+`g6lc64_ooo_int2_l3` and `g6lc64_smt2_ooo_int`; ring 32, the 3×64-entry
+TAGE_LITE, DeepSpec/memdep and the FTQ/FDIP/loop-buffer frontend each regressed
+the strict boot on their own and stay off. The prefetcher (`g6lc_l2_pf`) and the
+window bundle ship config-gated with their evidence rather than enabled.
 
 ## Observability
 
@@ -142,16 +148,19 @@ events. Prefer counters + RVFI when debugging mispredict or memory-order bugs.
 | Regress | `verif/regress/ooo-l3-tests.*` → suite **`ooo-l3-tests`** (optional) |
 | ILP / rename | `verif/tests/custom/ooo/ooo_ilp_chain.S` |
 | Memdep / STL | `verif/tests/custom/ooo/ooo_mem_dep.S` |
+| Branch-bound IPC | `verif/tests/custom/multicore/mc_branchy.S` (LFSR branches; the window ablation's yardstick) |
+| FP on OoO | `ooo_fp_{ooo,rename}.S` (Spike-ordered), `mc_fp_smt.S` (four-hart FP residency), `core/ooo/formal/g6lc_ooo_fp_owner.sby` |
+| Frontend switch safety | `core/fetch_B/formal/g6lc_fetch_restore.sby`, `verif/tb/core/tb_g6lc_fetch_restore.sv` |
+| Probes | `+misp_stats` (recovery cycles per mispredict), `+smt_stats` (drain requests / durations) — sim-only |
 
 ```bash
 # The OoO targets that elaborate end to end:
 g6lc-build verify --lint --synth --target g6lc64_ooo_int
 g6lc-build verify --lint --synth --target g6lc64_smt2_ooo_int
 g6lc-build verify --lint --synth --target g6lc64_ooo_int2
-# These two are refused in production by the FP legs of check_cfg;
-# the refusal is the intended behaviour.
-g6lc-build verify --target g6lc64_ooo
-g6lc-build verify --target g6lc64_ooo_server
+g6lc-build verify --lint --synth --target g6lc64_ooo_int2_l3   # RV64GC+B, ring 16
+g6lc-build verify --lint --synth --target g6lc64_ooo            # single-hart FP, legal since M4
+g6lc-build verify --target g6lc64_ooo_server                    # opt-in / unqualified
 g6lc-build test --suite ooo-l3-tests
 ```
 
