@@ -123,7 +123,7 @@ module tb_g6lc_ai_gemm_wide;
   ) i_gemm0 (
       .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
       .start_i(start0), .m_i(m0), .n_i(n0), .k_i(k0),
-      .lda_i(lda0), .ldb_i(ldb0), .numfmt_i(nf0), .accumulate_i(1'b0), .ar_max_i(4'd0),
+      .lda_i(lda0), .ldb_i(ldb0), .ldc_i(16'd0), .numfmt_i(nf0), .accumulate_i(1'b0), .ar_max_i(4'd0),
       .ptr_a_i(pa0), .ptr_b_i(pb0), .ptr_c_i(pc0),
       .ready_o(ready0), .done_o(done0), .err_o(err0),
       .pmu_r_beats_o(pmu_r0), .pmu_w_beats_o(), .pmu_cycles_o(),
@@ -158,7 +158,7 @@ module tb_g6lc_ai_gemm_wide;
   ) i_gemm1 (
       .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
       .start_i(start1), .m_i(m1), .n_i(n1), .k_i(k1),
-      .lda_i(lda1), .ldb_i(ldb1), .numfmt_i(nf1), .accumulate_i(1'b0), .ar_max_i(4'd0),
+      .lda_i(lda1), .ldb_i(ldb1), .ldc_i(16'd0), .numfmt_i(nf1), .accumulate_i(1'b0), .ar_max_i(4'd0),
       .ptr_a_i(pa1), .ptr_b_i(pb1), .ptr_c_i(pc1),
       .ready_o(ready1), .done_o(done1), .err_o(err1),
       .pmu_r_beats_o(pmu_r1), .pmu_w_beats_o(), .pmu_cycles_o(),
@@ -193,7 +193,7 @@ module tb_g6lc_ai_gemm_wide;
   ) i_gemm2 (
       .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
       .start_i(start2), .m_i(32'd1), .n_i(32'd16), .k_i(32'd512),
-      .lda_i(16'd512), .ldb_i(16'd512), .numfmt_i(3'd0), .accumulate_i(1'b0), .ar_max_i(4'd0),
+      .lda_i(16'd512), .ldb_i(16'd512), .ldc_i(16'd0), .numfmt_i(3'd0), .accumulate_i(1'b0), .ar_max_i(4'd0),
       .ptr_a_i(DRAM + 64'h4000), .ptr_b_i(DRAM + 64'h4400), .ptr_c_i(DRAM + 64'h6800),
       .ready_o(ready2), .done_o(done2), .err_o(err2),
       .pmu_r_beats_o(pmu_r2), .pmu_w_beats_o(), .pmu_cycles_o(),

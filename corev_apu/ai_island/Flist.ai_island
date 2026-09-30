@@ -24,6 +24,7 @@ ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_desc_fetch.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_dram_timing.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_fp_mac.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_gemm_seq.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_cluster_dispatch.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_island_apb.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_mem_store.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot.sv

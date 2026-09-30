@@ -526,7 +526,7 @@ module tb_g6lc_ai_gemm_concurrent
         .n_i          ( n_v[i] ),
         .k_i          ( k_v[i] ),
         .lda_i        ( lda_v[i] ),
-        .ldb_i        ( ldb_v[i] ),
+        .ldb_i        ( ldb_v[i] ), .ldc_i(16'd0),
         .reuse_b_i    ( reuse_v[i] ),
         .reuse_b_epoch_i ( epoch_v[i] ),
         .reuse_b_invalidate_i ( invalidate_v[i] ),

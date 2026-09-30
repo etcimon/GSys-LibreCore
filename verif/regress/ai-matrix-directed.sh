@@ -73,6 +73,8 @@ need=(
   verif/tb/ai_island/run-dram-join.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_join_wide.sv
   verif/tb/ai_island/run-dram-join-wide.sh
+  verif/tb/ai_island/tb_g6lc_ai_cluster_dispatch.sv
+  verif/tb/ai_island/run-cluster-dispatch.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_class2.sv
   verif/tb/ai_island/run-dram-class2.sh
   verif/tb/ai_island/tb_g6lc_ai_gemm_wide.sv
@@ -394,6 +396,13 @@ if command -v verilator >/dev/null 2>&1; then
     ok "tb_g6lc_ai_dram_join_wide (V1 wide channel: join + 512-bit class-0 slave)"
   else
     bad "tb_g6lc_ai_dram_join_wide"
+  fi
+  # V3/V4: N engines behind one job interface and one AXI master, N-split of the C
+  # panel (per-slice ldc); 2- and 4-cluster C equals the single engine's, faster.
+  if bash verif/tb/ai_island/run-cluster-dispatch.sh; then
+    ok "tb_g6lc_ai_cluster_dispatch (V3/V4 N-split dispatch, golden = single engine)"
+  else
+    bad "tb_g6lc_ai_cluster_dispatch"
   fi
   if bash verif/tb/ai_island/run-dram-class2.sh; then
     ok "tb_g6lc_ai_dram_class2 (LPDDR5 refuses elaboration)"

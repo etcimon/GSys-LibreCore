@@ -299,7 +299,7 @@ module tb_g6lc_ai_gemm_backend
       .n_i          ( gemm_n ),
       .k_i          ( gemm_k ),
       .lda_i        ( gemm_lda ),
-      .ldb_i        ( gemm_ldb ),
+      .ldb_i        ( gemm_ldb ), .ldc_i(16'd0),
       .numfmt_i     ( gemm_numfmt ),
       .accumulate_i(accumulate),
       .ar_max_i     ( ar_max_val ),

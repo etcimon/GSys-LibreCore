@@ -84,6 +84,10 @@ module g6lc_ai_gemm_seq #(
     input  logic [31:0] k_i,
     input  logic [15:0] lda_i,
     input  logic [15:0] ldb_i,
+    // C row pitch in elements (0 = n, the single-engine contract). A cluster
+    // dispatch hands each engine a column slice of one C panel, so the slice's
+    // rows are `ldc` apart while its width is the slice's n.
+    input  logic [15:0] ldc_i,
     input  logic [2:0]  numfmt_i,
     // flags.accmode == 01: seed every C[i][j] reduction from the word already in
     // memory (ST_LC loads the C tile first). The top grants/refuses; this only executes.
@@ -226,6 +230,9 @@ module g6lc_ai_gemm_seq #(
   // i,j element indices; t is reduction base (multiple of PeLanes during MAC
   // for INT8, multiple of 2*PeLanes for INT4)
   logic [31:0] i_q, j_q, t_q;
+  logic [15:0] ldc_q;
+  logic [31:0] ldc_eff;
+  assign ldc_eff = (ldc_q == 16'd0) ? n_q : 32'(ldc_q);
   logic [31:0] acc_q [OutCols];
   logic [31:0] acc_d [OutCols];
   // F0b-2: one-cycle pipeline between the PE's pure reduction and the
@@ -792,7 +799,7 @@ module g6lc_ai_gemm_seq #(
     assign small_c = SlotsB > 1 && g6lc_ai_island_cfg_pkg::ai_slot_small(n_grp_c, pitch_sh_c, SlotWordsB);
 
     assign b_span = 32'(n_q - 32'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes;
-    assign c_span = (32'(m_q) * 32'(n_q)) << 2;
+    assign c_span = ((32'(m_q) - 32'd1) * ldc_eff + 32'(n_q)) << 2;
     assign b_end = {1'b0, pb_q} + (AddrWidth+1)'(b_span);
     assign c_end = {1'b0, pc_q} + (AddrWidth+1)'(c_span);
     assign geometry_ok = m_q > 0 && m_q <= LimM && n_q > 0 && n_q <= LimN &&
@@ -908,7 +915,7 @@ module g6lc_ai_gemm_seq #(
     logic geometry_ok, disjoint, response_error;
 
     assign a_span = 32'(m_q - 32'd1) * fmt_row_bytes({16'd0, lda_q}) + k_bytes;
-    assign c_span = (32'(m_q) * 32'(n_q)) << 2;
+    assign c_span = ((32'(m_q) - 32'd1) * ldc_eff + 32'(n_q)) << 2;
     assign a_end = {1'b0, pa_q} + (AddrWidth+1)'(a_span);
     assign c_end = {1'b0, pc_q} + (AddrWidth+1)'(c_span);
     assign geometry_ok = m_q > 0 && m_q <= LimM && n_q > 0 && n_q <= LimN &&
@@ -1256,7 +1263,7 @@ module g6lc_ai_gemm_seq #(
   assign a_ar_cur     = a_addr(pa_q, ar_i_q, ar_t_q, lda_q);
   assign b_ar_cur     = b_addr(pb_q, ar_t_q, ar_j_q, ldb_q);
   // Store address uses trail cursor (not MAC i/j)
-  assign c_store_addr = c_addr(pc_q, stc_i_q, stc_j_q, n_q);
+  assign c_store_addr = c_addr(pc_q, stc_i_q, stc_j_q, ldc_eff);
   assign ar_head_lane = ar_lane_mem_q[0];
 
   always_comb begin
@@ -2296,7 +2303,7 @@ module g6lc_ai_gemm_seq #(
     if (!rst_ni) begin
       state_q   <= ST_IDLE;
       m_q <= '0; n_q <= '0; k_q <= '0;
-      lda_q <= '0; ldb_q <= '0;
+      lda_q <= '0; ldb_q <= '0; ldc_q <= '0;
       numfmt_q <= '0;
       acc_mode_q <= 1'b0;
       pa_q <= '0; pb_q <= '0; pc_q <= '0;
@@ -2374,9 +2381,11 @@ module g6lc_ai_gemm_seq #(
       if (state_q == ST_CHK) begin
         wide_c_q <= WideCStore && !n_q[0] &&
                     ((n_q & 32'(StoreWordsMax - 1)) == 32'd0) &&
+                    ((ldc_eff & 32'(StoreWordsMax - 1)) == 32'd0) &&
                     ((pc_q & AddrWidth'(BytesPerBeat - 1)) == '0);
         wsh_q    <= (WideCStore && !n_q[0] &&
                      ((n_q & 32'(StoreWordsMax - 1)) == 32'd0) &&
+                     ((ldc_eff & 32'(StoreWordsMax - 1)) == 32'd0) &&
                      ((pc_q & AddrWidth'(BytesPerBeat - 1)) == '0)) ? StoreShW'(StoreShMax) : StoreShW'(1);
       end
       ar_inflight_q <= ar_inflight_d;
@@ -2476,6 +2485,7 @@ module g6lc_ai_gemm_seq #(
         k_q   <= k_i;
         lda_q <= lda_i;
         ldb_q <= ldb_i;
+        ldc_q <= ldc_i;
         numfmt_q <= numfmt_i;
         acc_mode_q <= accumulate_i;
         pa_q  <= ptr_a_i;

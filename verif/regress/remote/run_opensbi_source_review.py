@@ -154,7 +154,11 @@ EXPECTED_COMPILER_CONTROL_NAME = 'split-counter.vlt'
 # SOURCE_REVIEW_CORES=2, ariane-ooo-int2.dts), never the anchor firmware.
 EXPERIMENTAL_TARGETS = frozenset({'g6lc64_smt2_ooo_int', 'g6lc64_ooo_int2',
                                   'g6lc64_ooo_int2_l3', 'g6lc64_smt2_l3',
-                                  'g6lc64_server_math_l3', 'g6lc64_stream8_l3'})
+                                  'g6lc64_server_math_l3', 'g6lc64_stream8_l3',
+                                  # WP4 SMT2+AI: two harts, dual issue, the FP AI island
+                                  # (SOURCE_REVIEW_DTS=ariane-smt2-ai.dts,
+                                  # SOURCE_REVIEW_CONFIG_PKG=g6lc64_smt2_ai_config_pkg.sv).
+                                  'g6lc64_smt2_ai'})
 
 
 def compiler_control_failures(control, verfiles, exists, digest, waive):

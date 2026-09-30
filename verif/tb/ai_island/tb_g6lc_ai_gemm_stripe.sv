@@ -156,7 +156,7 @@ module tb_g6lc_ai_gemm_stripe
       .n_i          ( 32'd2 ),
       .k_i          ( 32'd16 ),
       .lda_i        ( 16'd16 ),
-      .ldb_i        ( 16'd16 ),
+      .ldb_i        ( 16'd16 ), .ldc_i(16'd0),
       .numfmt_i     ( 3'd0 ),
       .accumulate_i(1'b0),
       .ar_max_i     ( 4'd2 ),
