@@ -93,7 +93,6 @@ jobs:
       - name: Platform CLI (Linux)
         if: runner.os != 'Windows'
         run: |
-          chmod +x build.sh
           ./build.sh config
           ./build.sh status
           ./build.sh test --list
@@ -252,7 +251,6 @@ jobs:
       # through the package CLI, then the smoke assertions on the package.
       - name: Host smoke (build-platform test sv-timing-smoke)
         run: |
-          chmod +x build.sh
           ./build.sh test sv-timing-smoke
 
       # Known-red package hygiene at the time of writing (rustfmt drift, KD0
@@ -306,7 +304,6 @@ jobs:
       # the tracked browser-ui/out artifacts feed the cargo gates instead.
       - name: g6b check --rust-only
         run: |
-          chmod +x build.sh
           ./build.sh g6b check --rust-only
 
   # ---------------------------------------------------------------------------
@@ -344,7 +341,6 @@ jobs:
 
       - name: g6q doctor
         run: |
-          chmod +x build.sh
           ./build.sh g6q doctor
 
       - name: g6q check
@@ -388,7 +384,6 @@ jobs:
 
       - name: tensor doctor
         run: |
-          chmod +x build.sh
           ./build.sh tensor doctor
 
       # cargo tests + golden-check + queue-soak via monorepo-soak/run-ai-tensor.sh
@@ -428,7 +423,6 @@ jobs:
 
       - name: Provision open-source toolchain
         run: |
-          chmod +x build.sh
           ./build.sh setup --install --allow-system-install
 
       - name: Run open-source smoke suites
