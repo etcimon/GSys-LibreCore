@@ -1669,3 +1669,28 @@ These fixes are now in the generator: `g6q-emit-qemu` emits `reg_shift` / `clock
 - Green: whole workspace `cargo test` (cli 87, core 41, diag 75, vm 187, ingest 26, svcfg
   52, dts 45, emit-args 43, emit-qemu 59, flist 11). `check` still red only on the owner's
   in-progress `too_many_arguments` (`gemm.rs:97/931`, `exec.rs:3855`); `fmt --all` applied.
+
+### B1 parity on the real repo: island flist, symbol namespacing, ai-matrix node (2026-09-29)
+
+- Real-repo ingestion had no island: the core/SoC flists do not list the island packages.
+  The island now publishes `corev_apu/ai_island/Flist.ai_island` and `g6q-cli` resolve adds
+  it (`layout::AI_FLIST`) when present, so `gen --repo-root E:/cva6 --target g6lc64_ai`
+  carries `soc.ai_island` (dtype 3, `fp_datapath` 0 from `AiCfg.IslandFpEn`, accmode 1,
+  bank words 0x80000 / 0x40000) and emits `g6lc-g6lc64_ai` with the AI-island device.
+- Two AI machines could not coexist in one QEMU tree: the emitted `helper_g6lc_ai_*`,
+  `trans_ai_*`, `g6lc_ai_island*` symbols were target-blind and the fixture `ai` machine
+  collided with `g6lc64_ai` at compile/link. `g6q-emit-qemu` now namespaces the decode
+  instruction names, `trans_` routines, helpers and the island C API by the machine id
+  (`trans_g6lc_<id>_ai_enq`, `helper_g6lc_<id>_ai_poll`, `g6lc_<id>_ai_island_create`, ...);
+  tests pin the names and the absence of the old ones.
+- The board DTS names the island node `ai-matrix` (`compatible = "g6lc,ai-matrix"`, the UIO
+  `of_id` contract) while the fixtures use `ai-island`; the machine emitter's device create,
+  `payload_flags.py` and the unimplemented-access filter accept both.
+- `g6q_remote.py` false green: with the passphrase-protected key and no agent, the
+  `conhost wsl ssh/rsync` calls hung or failed and the tool still logged "synced" / "built"
+  on a Sep-14 binary. Runs now go through a WSL-native invocation with an agent unlocked via
+  `SSH_ASKPASS` from the proxy's passphrase file. Open: make the tool check every ssh/rsync
+  exit code and refuse to report a step it did not observe succeeding.
+- Live: `g6lc-g6lc64_ai` builds with both AI machines present and boots OpenSBI v1.5.1
+  (`Platform Name: GSys LibreCore g6lc64_ai`, `rv64imafdcbh`); the AI-island smoke on the
+  real model is the run in progress (`b1-parity-20260929-r6`).

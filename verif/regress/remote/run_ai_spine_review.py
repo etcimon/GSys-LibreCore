@@ -130,7 +130,7 @@ module g6lc_ai_dma_review (
     output ai_review_types::bus_req_t dma_req,
     input ai_review_types::bus_resp_t dma_resp
 );
-  g6lc_ai_island_top #(.IslandCfg(ai_review_types::Cfg), .EnableDmaFetch(1),
+  g6lc_ai_island_top #(.IslandCfg(AI_REVIEW_ISLAND_CFG), .EnableDmaFetch(1),
       .AxiDataWidth(64), .AxiIdWidth(4),AI_REVIEW_VA_PARAMS
       .axi_req_t(ai_review_types::bus_req_t), .axi_resp_t(ai_review_types::bus_resp_t)) dut (
       .clk_i(clk), .rst_ni(rst_n), .testmode_i(testmode),
@@ -146,8 +146,16 @@ endmodule
    # REVIEW_AI_VA=1 synthesises the VA-Turbo (reuse) island; REVIEW_AI_SLOTS sets the
    # resident-B directory depth so its area can be compared (1 = single key).
    .replace("AI_REVIEW_VA_PARAMS",
-            (" .AiCfg(config_pkg::AiCfgVaTurboTest)," if os.environ.get("REVIEW_AI_VA") == "1" else "")
-            + (" .ReuseBSlots(%s)," % os.environ["REVIEW_AI_SLOTS"] if os.environ.get("REVIEW_AI_SLOTS") else "")))
+            (" .AiCfg(config_pkg::AiCfgVaTurboTest)," if os.environ.get("REVIEW_AI_VA") == "1" else
+             (" .AiCfg(config_pkg::%s)," % os.environ["REVIEW_AI_AICFG"] if os.environ.get("REVIEW_AI_AICFG") else ""))
+            + (" .ReuseBSlots(%s)," % os.environ["REVIEW_AI_SLOTS"] if os.environ.get("REVIEW_AI_SLOTS") else ""))
+   # REVIEW_AI_ISLAND_CFG names a g6lc_ai_island_cfg_pkg constant for the geometry; the
+   # default is the reduced review fixture. AiIslandLatencyDefault + AiCfgIslandFpTest is
+   # the live 512-lane FP island (area anchor; synthesis only -- the directed cases assume
+   # the reduced geometry).
+   .replace("AI_REVIEW_ISLAND_CFG",
+            ("g6lc_ai_island_cfg_pkg::" + os.environ["REVIEW_AI_ISLAND_CFG"]) if os.environ.get("REVIEW_AI_ISLAND_CFG")
+            else "ai_review_types::Cfg"))
     inputs = " ".join(str(source / name) for name in sources if name.endswith(".sv") and not name.startswith("tb_"))
     script = out / "dma-synth.ys"
     script.write_text("read_slang -I" + str(source) + " --top g6lc_ai_dma_review " + inputs + " " + str(wrapper)
@@ -407,6 +415,8 @@ def main():
         # Residency axis of the bench (+measure_reuse / +panel_reuse need the reuse blocks).
         if os.environ.get("REVIEW_AI_REUSE") == "1":
             mode.append("-GREUSE_EN=1")
+        if os.environ.get("REVIEW_AI_OUT_COLS"):
+            mode.append("-GOUT_COLS=" + os.environ["REVIEW_AI_OUT_COLS"])
     if stripe:
         top = "tb_g6lc_ai_dram_stripe"
         mode = ["--main", "--timing"]

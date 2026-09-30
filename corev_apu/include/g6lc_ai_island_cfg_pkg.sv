@@ -187,6 +187,69 @@ package g6lc_ai_island_cfg_pkg;
     return maxb;
   endfunction
 
+  // ---------------------------------------------------------------------------
+  // Flat-panel operand mapping (g6lc_ai_gemm_seq): the pure arithmetic the
+  // sequencer's address paths are built from, stated once so the bounded proof
+  // in corev_apu/ai_island/formal/g6lc_ai_gemm_flat_props.sv is about the design
+  // and not about a copy. All shifts, no runtime multiplier or divider.
+  // ---------------------------------------------------------------------------
+
+  // Row pitch (in bank words, as a shift) for a row of `k_bytes` bytes over
+  // 2^lane_shift-byte bank words: the next power of two of ceil(k_bytes / lanes).
+  // k_bytes == 0 or one word -> shift 0.
+  function automatic int unsigned ai_flat_pitch_shift(input logic [31:0] k_bytes,
+                                                      input int unsigned lane_shift);
+    logic [31:0] row_words;
+    int unsigned sh;
+    row_words = (k_bytes + (32'd1 << lane_shift) - 32'd1) >> lane_shift;
+    sh = 0;
+    for (int unsigned s = 0; s < 31; s++)
+      if ((32'd1 << s) < row_words) sh = s + 1;
+    return sh;
+  endfunction
+
+  // `rows` rows at that pitch fit a bank of `words` words (64-bit compare: no wrap).
+  function automatic bit ai_flat_fits(input logic [31:0] rows, input int unsigned pitch_sh,
+                                      input int unsigned words);
+    return (64'(rows) << pitch_sh) <= 64'(words);
+  endfunction
+
+  // Bank word of byte `t` in operand row `row` at that pitch.
+  function automatic logic [63:0] ai_flat_row_word(input logic [31:0] row, input int unsigned pitch_sh,
+                                                   input logic [31:0] t, input int unsigned lane_shift);
+    return (64'(row) << pitch_sh) + 64'(t >> lane_shift);
+  endfunction
+
+  // AXI beats to move `rem` bytes of a row-contiguous operand starting at byte
+  // lane `lane0` of a `bytes_per_beat`-byte beat, when every beat after the first
+  // carries 2^elems_shift bytes; capped at `max_beats`, never 0.
+  function automatic int unsigned ai_beats_for_rem(input logic [31:0] rem, input logic [31:0] lane0,
+                                                   input int unsigned bytes_per_beat,
+                                                   input int unsigned elems_shift,
+                                                   input int unsigned max_beats);
+    logic [31:0] first, after, more, total;
+    if (rem == 0) return 1;
+    first = 32'(bytes_per_beat) - lane0;
+    if (first > rem) first = rem;
+    after = rem - first;
+    more  = (after + (32'd1 << elems_shift) - 32'd1) >> elems_shift;
+    total = 32'd1 + more;
+    if (total > 32'(max_beats)) total = 32'(max_beats);
+    if (total == 0) total = 1;
+    return unsigned'(total);
+  endfunction
+
+  // Resident-B directory placement: a panel of `n` rows at `pitch_sh` fits one of
+  // the equal slots of `slot_words` words; the slot's row base.
+  function automatic bit ai_slot_small(input logic [31:0] n, input int unsigned pitch_sh,
+                                       input int unsigned slot_words);
+    return (64'(n) << pitch_sh) <= 64'(slot_words);
+  endfunction
+
+  function automatic logic [63:0] ai_slot_base(input int unsigned slot, input int unsigned slot_words);
+    return 64'(slot) * 64'(slot_words);
+  endfunction
+
   // Element width in bytes. INT4 is packed two-per-byte, so a row uses
   // ai_row_bytes. Must stay in step with g6lc_ai_gemm_seq's loader.
   function automatic logic [31:0] ai_elem_bytes(input logic [2:0] fmt);
@@ -343,7 +406,9 @@ package g6lc_ai_island_cfg_pkg;
       Clusters:     unsigned'(1),
       MacsPerCycle: unsigned'(AI_LIVE_MACS),  // PeLanes = AccTileK
       ClockKhz:     unsigned'(2_000_000),     // nameplate; noc peak = 16 GB/s
-      SramBytes:    unsigned'(4 * 1024 * 1024),
+      // FP island (elem_max 4): A 1024 x 2 KiB + B 512 x 2 KiB operand banks +
+      // C 1024 x 512 x 4 B = 2 + 1 + 2 MiB. The integer strip was 4 MiB nominal.
+      SramBytes:    unsigned'(5 * 1024 * 1024),
       AccTileM:     unsigned'(AI_PANEL_M),
       AccTileN:     unsigned'(AI_PANEL_N),
       AccTileK:     unsigned'(AI_PANEL_K),
@@ -466,6 +531,120 @@ package g6lc_ai_island_cfg_pkg;
       AccTileM:     unsigned'(4096),
       AccTileN:     unsigned'(4096),
       AccTileK:     unsigned'(4096),
+      NocWidth:     unsigned'(512),
+      DramChannels: unsigned'(1),
+      DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
+      DramGBps:     unsigned'(AI_DRAM_LPDDR5_GBPS),
+      DramClass:    unsigned'(AI_DRAM_LPDDR5),
+      Queues:       unsigned'(2),
+      QueueDepth:   unsigned'(64),
+      CommandDepth: unsigned'(0),
+      QosClasses:   unsigned'(2),
+      WorkQuantumK: unsigned'(64),
+      MaxAROut:     unsigned'(AI_MAX_AR_OUT_DRAM),
+      DramCas:      unsigned'(0),
+      DramTrcd:     unsigned'(0),
+      DramTrp:      unsigned'(0),
+      ClustersEnabled: unsigned'(8)
+  };
+
+  // ---------------------------------------------------------------------------
+  // Scaling ladder (architecture/ai-matrix/scaling-100tops.md s7/s11, balanced
+  // order: memory before MACs). Each step changes one axis of the tuple
+  // {bytes/cycle, columns/cycle, clusters, clock}; the previous step's results
+  // must stay bit-identical. Peaks are the s2 INT8-dense definition; every
+  // figure derived from these literals is a nameplate, not a measurement.
+  //   V1 wide port    : 512-bit channel + island port (64 B/cycle), 1 x 512 MAC
+  //                     -> 2.048 TOPS @ 2 GHz, balance 8 MAC/byte
+  //   V2 column array : 8 output columns x 512 lanes = 4096 MAC/cycle
+  //                     -> 16.4 TOPS @ 2 GHz on the same 64 B/cycle port
+  //   V3 quad         : 4 clusters x 4096 @ 1.5 GHz, class-2 memory nameplate
+  //                     -> 49.2 TOPS
+  //   V4 octo         : 8 clusters x 4096 @ 1.5 GHz -> 98.3 TOPS (the s7 reference)
+  // ---------------------------------------------------------------------------
+  localparam ai_island_cfg_t AiIslandV1WidePort = '{
+      Clusters:     unsigned'(1),
+      MacsPerCycle: unsigned'(AI_LIVE_MACS),
+      ClockKhz:     unsigned'(2_000_000),
+      SramBytes:    unsigned'(5 * 1024 * 1024),
+      AccTileM:     unsigned'(AI_PANEL_M),
+      AccTileN:     unsigned'(AI_PANEL_N),
+      AccTileK:     unsigned'(AI_PANEL_K),
+      NocWidth:     unsigned'(512),           // 64 B/cycle: the G6LC_AI_DRAM_WIDE_CH model
+      DramChannels: unsigned'(1),
+      DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
+      DramGBps:     unsigned'(128),           // dram_nameplate_gbps(512, 2 GHz, class 0)
+      DramClass:    unsigned'(AI_DRAM_SIM_AXI),
+      Queues:       unsigned'(2),
+      QueueDepth:   unsigned'(64),
+      CommandDepth: unsigned'(0),
+      QosClasses:   unsigned'(2),
+      WorkQuantumK: unsigned'(64),
+      MaxAROut:     unsigned'(AI_MAX_AR_OUT_LIVE),
+      DramCas:      unsigned'(0),
+      DramTrcd:     unsigned'(0),
+      DramTrp:      unsigned'(0),
+      ClustersEnabled: unsigned'(1)
+  };
+
+  localparam ai_island_cfg_t AiIslandV2ColumnArray = '{
+      Clusters:     unsigned'(1),
+      MacsPerCycle: unsigned'(8 * AI_LIVE_MACS),  // OutCols 8
+      ClockKhz:     unsigned'(2_000_000),
+      SramBytes:    unsigned'(5 * 1024 * 1024),
+      AccTileM:     unsigned'(AI_PANEL_M),
+      AccTileN:     unsigned'(AI_PANEL_N),
+      AccTileK:     unsigned'(AI_PANEL_K),
+      NocWidth:     unsigned'(512),
+      DramChannels: unsigned'(1),
+      DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
+      DramGBps:     unsigned'(128),
+      DramClass:    unsigned'(AI_DRAM_SIM_AXI),
+      Queues:       unsigned'(2),
+      QueueDepth:   unsigned'(64),
+      CommandDepth: unsigned'(0),
+      QosClasses:   unsigned'(2),
+      WorkQuantumK: unsigned'(64),
+      MaxAROut:     unsigned'(AI_MAX_AR_OUT_LIVE),
+      DramCas:      unsigned'(0),
+      DramTrcd:     unsigned'(0),
+      DramTrp:      unsigned'(0),
+      ClustersEnabled: unsigned'(1)
+  };
+
+  localparam ai_island_cfg_t AiIslandV3Quad = '{
+      Clusters:     unsigned'(4),
+      MacsPerCycle: unsigned'(8 * AI_LIVE_MACS),
+      ClockKhz:     unsigned'(1_500_000),
+      SramBytes:    unsigned'(5 * 1024 * 1024),  // per cluster
+      AccTileM:     unsigned'(AI_PANEL_M),
+      AccTileN:     unsigned'(AI_PANEL_N),
+      AccTileK:     unsigned'(AI_PANEL_K),
+      NocWidth:     unsigned'(512),
+      DramChannels: unsigned'(1),
+      DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
+      DramGBps:     unsigned'(AI_DRAM_LPDDR5_GBPS),
+      DramClass:    unsigned'(AI_DRAM_LPDDR5),
+      Queues:       unsigned'(2),
+      QueueDepth:   unsigned'(64),
+      CommandDepth: unsigned'(0),
+      QosClasses:   unsigned'(2),
+      WorkQuantumK: unsigned'(64),
+      MaxAROut:     unsigned'(AI_MAX_AR_OUT_DRAM),
+      DramCas:      unsigned'(0),
+      DramTrcd:     unsigned'(0),
+      DramTrp:      unsigned'(0),
+      ClustersEnabled: unsigned'(4)
+  };
+
+  localparam ai_island_cfg_t AiIslandV4Octo = '{
+      Clusters:     unsigned'(8),
+      MacsPerCycle: unsigned'(8 * AI_LIVE_MACS),
+      ClockKhz:     unsigned'(1_500_000),
+      SramBytes:    unsigned'(5 * 1024 * 1024),
+      AccTileM:     unsigned'(AI_PANEL_M),
+      AccTileN:     unsigned'(AI_PANEL_N),
+      AccTileK:     unsigned'(AI_PANEL_K),
       NocWidth:     unsigned'(512),
       DramChannels: unsigned'(1),
       DramChanShift: unsigned'(AI_DRAM_CHAN_SHIFT_DEFAULT),
@@ -742,16 +921,21 @@ package g6lc_ai_island_cfg_pkg;
   //
   // Literal, not `config_pkg::AiFmtMaskInt8Int4`: the ai_island unit-TB runners
   // (verif/tb/ai_island/run-gemm-*.sh) compile THIS package before core's
-  // config_pkg, so a cross-package reference here breaks them. The value must
-  // equal AiFmtMaskInt8Int4; g6lc_ai_island_top's grant ⊆ implemented assertion
-  // and config_pkg's own check_cfg mask↔Int4En rule are what keep it honest.
-  localparam logic [15:0] AiIslandDtypeMask   = 16'h0003;  // AiFmtMaskInt8Int4
+  // config_pkg, so a cross-package reference here breaks them. Since 2026-09-30
+  // the live island is the FP SKU (g6lc64_ai_config_pkg AiCfg.IslandFpEn = 1):
+  // the grant is every ISA format except structured 2:4 -- INT8, INT4, FP8 E4M3,
+  // FP8 E5M2, FP16, BF16, FP32 -- and equals AiIslandPeImplMaskFp below.
+  // g6lc_ai_island_top's grant ⊆ implemented assertion (FP-aware when IslandFpEn)
+  // is what keeps it honest; an integer-strip build must lower this to 0x0003.
+  localparam logic [15:0] AiIslandDtypeMask   = 16'h00FB;  // AiIslandPeImplMaskFp
 
-  // Illegal grant used ONLY as a negative control: INT8 + BF16, where the PE
-  // implements INT8 alone, so the grant ⊆ implemented guard in
-  // g6lc_ai_island_top must fire. A guard that has never fired is
-  // indistinguishable from a dead one, and a silent build proves only that
-  // nothing complained.
+  // Illegal grant used ONLY as a negative control: INT8 + structured 2:4 (bit 2),
+  // which no PE mask implements -- integer strip or FP island -- so the grant ⊆
+  // implemented guard in g6lc_ai_island_top must fire on every build. (It was
+  // INT8 + BF16 while the live island was the integer strip; BF16 is legal on
+  // the FP island, so that value would have become a control that cannot fail.)
+  // A guard that has never fired is indistinguishable from a dead one, and a
+  // silent build proves only that nothing complained.
   //
   // It is a named constant here rather than an `ifdef` around
   // AiIslandDtypeMask itself: two conditional declarations of one localparam
@@ -759,7 +943,7 @@ package g6lc_ai_island_cfg_pkg;
   // evaluating macros, and the emulator's capability-window ingest is exactly
   // such a reader (it reported "unresolved" instead of 0x0001). The testbench
   // selects it by parameter, so the package keeps stating one design.
-  localparam logic [15:0] AiIslandDtypeMaskOvergrant = 16'h0041;
+  localparam logic [15:0] AiIslandDtypeMaskOvergrant = 16'h0005;
 
   // What the PE array can actually COMPUTE, as opposed to what the capability
   // window is willing to advertise.
@@ -797,16 +981,37 @@ package g6lc_ai_island_cfg_pkg;
 
   // I3 legality: sim-AXI nameplate is the NoC peak; never advertise 400 GB/s
   // on class 0; enabled clusters cannot exceed present.
+  // Output columns the sequencer computes per cycle: the PE array is OutCols dot
+  // units of AccTileK lanes sharing one A word (g6lc_ai_gemm_seq OutCols), so
+  // MacsPerCycle = OutCols x AccTileK. 1 is the single-dot engine; the V2..V4
+  // ladder SKUs use 8. Not a struct field: every literal and every reader (the
+  // emulator ingests the struct by field name) would otherwise have to change.
+  function automatic int unsigned island_cfg_out_cols(input ai_island_cfg_t c);
+    if (c.AccTileK == 0) return 0;
+    // Fewer MACs than K lanes: one dot walking K in PeLanes steps (the reduced
+    // review fixtures and the pre-V2 islands). More: OutCols dots of AccTileK lanes.
+    if (c.MacsPerCycle <= c.AccTileK) return 1;
+    return c.MacsPerCycle / c.AccTileK;
+  endfunction
+
+  // K lanes of one dot for the same rule.
+  function automatic int unsigned island_cfg_pe_lanes(input ai_island_cfg_t c);
+    return (c.MacsPerCycle <= c.AccTileK) ? c.MacsPerCycle : c.AccTileK;
+  endfunction
+
   function automatic bit island_cfg_legal(input ai_island_cfg_t c);
     bit ok;
-    int unsigned noc;
+    int unsigned noc, cols;
     ok  = 1'b1;
     noc = noc_peak_gbps(c.NocWidth, c.ClockKhz);
+    cols = island_cfg_out_cols(c);
     if (c.Clusters == 0 || c.Clusters > 8 || c.ClustersEnabled > c.Clusters) ok = 1'b0;
-    // g6lc_ai_island_top is one engine and rejects Clusters != 1.
-    // g6lc_ai_cluster_set is the N-copy elaboration. MacsPerCycle must fit
-    // the K tile so a 8192-MAC struct with AccTileK 256 stays illegal.
-    if (c.MacsPerCycle == 0 || c.MacsPerCycle > c.AccTileK) ok = 1'b0;
+    // MacsPerCycle is OutCols x AccTileK: a whole number of column dots (power of
+    // two, at most 16) over the K-lane array. 8192 MACs on AccTileK 256 (32 cols)
+    // stays illegal; 512 on 512 is the single dot; 4096 on 512 is 8 columns.
+    if (c.MacsPerCycle == 0 || c.AccTileK == 0) ok = 1'b0;
+    if (c.MacsPerCycle > c.AccTileK &&
+        ((c.MacsPerCycle % c.AccTileK) != 0 || cols > 16 || (cols & (cols - 1)) != 0)) ok = 1'b0;
     if (c.MaxAROut < 1 || c.MaxAROut > AI_MAX_AR_OUT_DRAM) ok = 1'b0;
     if (c.CommandDepth > 65535) ok = 1'b0;
     if (c.CommandDepth != 0 && (c.Queues == 0 || c.Queues > 256 ||

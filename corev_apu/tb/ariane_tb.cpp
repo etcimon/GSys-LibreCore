@@ -496,6 +496,18 @@ done_processing:
   // through wrap after init, cluster held via preload_hold.
 #elif defined(G6LC_AI_DRAM_SIM_CHANS_2) || defined(G6LC_AI_DRAM_SIM_CHANS_4) || defined(G6LC_AI_DRAM_SIM_CHANS_8)
   // Class-0 N>1: gen_sim_stripe.gen_ch[i].i_sram, not gen_sim_axi.
+#elif defined(G6LC_AI_DRAM_WIDE_CH)
+  // V1 wide channel (G6LC_AI_DRAM_WIDE_CH): the class-0 slave is 512 bits wide and
+  // common/local/util/sram.sv splits every word into eight 64-bit cuts
+  // (gen_cut[k] holds bytes 8k..8k+7 of each 64-byte word). A byte at DRAM offset
+  // `o` therefore lives in cut (o % 64) / 8, word o / 64, byte o % 8. The class-0
+  // N=1 path below (`MEM` = cut 0) would put the whole image into cut 0 -- which is
+  // exactly what the first V1 SoC model did: the core fetched garbage and never
+  // reached tohost while the join and the memory were correct
+  // (tb_g6lc_ai_dram_join_wide). Scatter per byte instead.
+#define G6LC_WCUT(k) \
+  top->rootp \
+      ->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_sram__DOT__gen_cut__BRA__##k##__KET____DOT__i_tc_sram_wrapper__DOT__i_tc_sram__DOT__sram.m_storage
 #elif defined(G6LC_TB_NO_HIER)
   // g6lc64_ai: DRAM is i_dram_backend.gen_sim_axi.i_sram (class 0 N=1), not
   // testharness i_sram. A 16-byte dummy overflowed on ELF preload (segfault).
@@ -588,6 +600,61 @@ done_processing:
       clock_tick();
     std::cerr << "[g6lc-ai] CLASS1 preload done words=" << nword
               << " t=" << main_time << " cluster released\n";
+  }
+  if (max_cycles == (uint64_t)-1)
+    max_cycles = 2000000ULL;
+  std::cerr << "[g6lc-ai] sim loop max_cycles=" << max_cycles
+            << " (no dtm/jtag poll)" << std::endl;
+#elif defined(G6LC_AI_DRAM_WIDE_CH)
+  {
+    std::cerr << "[g6lc-ai] wide-channel preload: 512-bit words, eight 64-bit cuts" << std::endl;
+    auto poke = [&](uint64_t ba, uint8_t b) {
+      const uint64_t off = ba - dram_base;
+      const size_t word = (size_t)(off >> 6);
+      const int cut = (int)((off >> 3) & 7ULL);
+      const int sh = (int)(off & 7ULL) * 8;
+      uint64_t v;
+      switch (cut) {
+      case 0: v = G6LC_WCUT(0)[word]; break;
+      case 1: v = G6LC_WCUT(1)[word]; break;
+      case 2: v = G6LC_WCUT(2)[word]; break;
+      case 3: v = G6LC_WCUT(3)[word]; break;
+      case 4: v = G6LC_WCUT(4)[word]; break;
+      case 5: v = G6LC_WCUT(5)[word]; break;
+      case 6: v = G6LC_WCUT(6)[word]; break;
+      default: v = G6LC_WCUT(7)[word]; break;
+      }
+      v = (v & ~(0xFFULL << sh)) | ((uint64_t)b << sh);
+      switch (cut) {
+      case 0: G6LC_WCUT(0)[word] = v; break;
+      case 1: G6LC_WCUT(1)[word] = v; break;
+      case 2: G6LC_WCUT(2)[word] = v; break;
+      case 3: G6LC_WCUT(3)[word] = v; break;
+      case 4: G6LC_WCUT(4)[word] = v; break;
+      case 5: G6LC_WCUT(5)[word] = v; break;
+      case 6: G6LC_WCUT(6)[word] = v; break;
+      default: G6LC_WCUT(7)[word] = v; break;
+      }
+    };
+    size_t nbytes = 0;
+    while (get_section(&addr, &len)) {
+      if (len <= 0)
+        continue;
+      const uint64_t a = (uint64_t)addr;
+      const uint64_t e = a + (uint64_t)len;
+      if (a < dram_base + 0x10000000ULL && e > dram_base) {
+        std::vector<uint8_t> tmp((size_t)len);
+        read_section_void(addr, tmp.data(), (uint64_t)len);
+        const uint64_t start = (a > dram_base) ? a : dram_base;
+        const uint64_t end =
+            (e < dram_base + 0x10000000ULL) ? e : dram_base + 0x10000000ULL;
+        for (uint64_t ba = start; ba < end; ba++) {
+          poke(ba, tmp[(size_t)(ba - a)]);
+          nbytes++;
+        }
+      }
+    }
+    std::cerr << "[g6lc-ai] wide-channel preload bytes=" << nbytes << std::endl;
   }
   if (max_cycles == (uint64_t)-1)
     max_cycles = 2000000ULL;

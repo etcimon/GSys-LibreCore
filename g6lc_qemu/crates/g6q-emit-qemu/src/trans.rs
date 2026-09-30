@@ -56,9 +56,9 @@ pub fn emit_decode(model: &TargetModel, version: &str, digest: &str) -> Option<E
 \n\
 @r    ....... ..... ..... ... ..... ....... &r %rs2 %rs1 %rd\n\
 \n\
-ai_enq    {enq} ..... ..... {funct3} ..... {op} @r\n\
-ai_poll   {poll} ..... ..... {funct3} ..... {op} @r\n\
-ai_qfence {qfence} ..... ..... {funct3} ..... {op} @r\n",
+g6lc_{id}_ai_enq    {enq} ..... ..... {funct3} ..... {op} @r\n\
+g6lc_{id}_ai_poll   {poll} ..... ..... {funct3} ..... {op} @r\n\
+g6lc_{id}_ai_qfence {qfence} ..... ..... {funct3} ..... {op} @r\n",
         id = safe_id,
         funct3 = funct3,
         op = op_bits,
@@ -96,28 +96,28 @@ pub fn emit_trans(model: &TargetModel, version: &str, digest: &str) -> Option<Em
  * until the generated AI-island device is available.\n\
  */\n\
 \n\
-static bool trans_ai_enq(DisasContext *ctx, arg_r *a)\n\
+static bool trans_g6lc_{id}_ai_enq(DisasContext *ctx, arg_r *a)\n\
 {{\n\
     TCGv desc    = get_gpr(ctx, a->rs1, EXT_NONE);\n\
     TCGv ticket  = dest_gpr(ctx, a->rd);\n\
-    gen_helper_g6lc_ai_enq(ticket, tcg_env, desc);\n\
+    gen_helper_g6lc_{id}_ai_enq(ticket, tcg_env, desc);\n\
     gen_set_gpr(ctx, a->rd, ticket);\n\
     return true;\n\
 }}\n\
 \n\
-static bool trans_ai_qfence(DisasContext *ctx, arg_r *a)\n\
+static bool trans_g6lc_{id}_ai_qfence(DisasContext *ctx, arg_r *a)\n\
 {{\n\
     (void)ctx;\n\
     (void)a;\n\
-    gen_helper_g6lc_ai_qfence(tcg_env);\n\
+    gen_helper_g6lc_{id}_ai_qfence(tcg_env);\n\
     return true;\n\
 }}\n\
 \n\
-static bool trans_ai_poll(DisasContext *ctx, arg_r *a)\n\
+static bool trans_g6lc_{id}_ai_poll(DisasContext *ctx, arg_r *a)\n\
 {{\n\
     TCGv ticket = get_gpr(ctx, a->rs1, EXT_NONE);\n\
     TCGv status = dest_gpr(ctx, a->rd);\n\
-    gen_helper_g6lc_ai_poll(status, tcg_env, ticket);\n\
+    gen_helper_g6lc_{id}_ai_poll(status, tcg_env, ticket);\n\
     gen_set_gpr(ctx, a->rd, status);\n\
     return true;\n\
 }}\n",
@@ -143,9 +143,9 @@ pub fn emit_helpers_h(model: &TargetModel, version: &str, digest: &str) -> Optio
  * QEMU's helper-proto, helper-gen and helper-info expansions each redefine\n\
  * DEF_HELPER and re-include this fragment.\n\
  */\n\
-DEF_HELPER_2(g6lc_ai_enq, tl, env, tl)\n\
-DEF_HELPER_1(g6lc_ai_qfence, void, env)\n\
-DEF_HELPER_2(g6lc_ai_poll, tl, env, tl)\n\
+DEF_HELPER_2(g6lc_{id}_ai_enq, tl, env, tl)\n\
+DEF_HELPER_1(g6lc_{id}_ai_qfence, void, env)\n\
+DEF_HELPER_2(g6lc_{id}_ai_poll, tl, env, tl)\n\
 ",
         id = safe_id,
     );
@@ -174,19 +174,19 @@ pub fn emit_helpers_c(model: &TargetModel, version: &str, digest: &str) -> Optio
 #include "exec/helper-proto.h"
 #include "hw/riscv/g6lc-{id}-ai-island.h"
 
-target_ulong helper_g6lc_ai_enq(CPURISCVState *env, target_ulong desc_ptr)
+target_ulong helper_g6lc_{id}_ai_enq(CPURISCVState *env, target_ulong desc_ptr)
 {{
-    return g6lc_ai_island_enq(g6lc_ai_island, env, desc_ptr);
+    return g6lc_{id}_ai_island_enq(g6lc_{id}_ai_island, env, desc_ptr);
 }}
 
-void helper_g6lc_ai_qfence(CPURISCVState *env)
+void helper_g6lc_{id}_ai_qfence(CPURISCVState *env)
 {{
-    g6lc_ai_island_qfence(g6lc_ai_island, env);
+    g6lc_{id}_ai_island_qfence(g6lc_{id}_ai_island, env);
 }}
 
-target_ulong helper_g6lc_ai_poll(CPURISCVState *env, target_ulong ticket)
+target_ulong helper_g6lc_{id}_ai_poll(CPURISCVState *env, target_ulong ticket)
 {{
-    return g6lc_ai_island_poll(g6lc_ai_island, env, ticket);
+    return g6lc_{id}_ai_island_poll(g6lc_{id}_ai_island, env, ticket);
 }}
 "###,
         id = safe_id,
@@ -281,10 +281,18 @@ mod tests {
     fn emits_trans_for_each_queue_instruction() {
         let m = ai_model();
         let f = emit_trans(&m, "0.1.0", "sha256:abc").unwrap();
-        assert!(f.contents.contains("trans_ai_enq"));
-        assert!(f.contents.contains("trans_ai_qfence"));
-        assert!(f.contents.contains("trans_ai_poll"));
-        assert!(f.contents.contains("gen_helper_g6lc_ai_enq"));
+        // Every symbol carries the target id: two AI machines must coexist in one
+        // QEMU tree (the fixture `ai` machine and the real `g6lc64_ai` collided on
+        // `helper_g6lc_ai_poll` / `trans_ai_enq` / the `g6lc_ai_island` global).
+        let id = crate::machine::machine_name(&m.target_id);
+        assert!(f.contents.contains(&format!("trans_g6lc_{id}_ai_enq")));
+        assert!(f.contents.contains(&format!("trans_g6lc_{id}_ai_qfence")));
+        assert!(f.contents.contains(&format!("trans_g6lc_{id}_ai_poll")));
+        assert!(f.contents.contains(&format!("gen_helper_g6lc_{id}_ai_enq")));
+        assert!(
+            !f.contents.contains("trans_ai_enq(")
+                && !f.contents.contains("gen_helper_g6lc_ai_enq(")
+        );
     }
 
     #[test]
@@ -292,8 +300,15 @@ mod tests {
         let m = ai_model();
         let h = emit_helpers_h(&m, "0.1.0", "sha256:abc").unwrap();
         let c = emit_helpers_c(&m, "0.1.0", "sha256:abc").unwrap();
-        assert!(h.contents.contains("DEF_HELPER_2(g6lc_ai_enq"));
-        assert!(c.contents.contains("helper_g6lc_ai_enq"));
+        let id = crate::machine::machine_name(&m.target_id);
+        assert!(h
+            .contents
+            .contains(&format!("DEF_HELPER_2(g6lc_{id}_ai_enq")));
+        assert!(c.contents.contains(&format!("helper_g6lc_{id}_ai_enq")));
+        assert!(c
+            .contents
+            .contains(&format!("g6lc_{id}_ai_island_enq(g6lc_{id}_ai_island,")));
+        assert!(!h.contents.contains("DEF_HELPER_2(g6lc_ai_enq"));
     }
 
     #[test]

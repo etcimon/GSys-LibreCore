@@ -136,6 +136,19 @@ module ariane_testharness #(
   // 512-bit island DMA on this define only. ai_dma_req stays the 64-bit
   // type the unset path assigns onto xbar slave[2].
   localparam int unsigned AI_ISLAND_DATA_W = 512;
+`endif
+  // V1 "wide port" ladder step (scaling-100tops.md s4.2 dual-port front-end):
+  // with G6LC_AI_DRAM_WIDE_CH the class-0 DRAM channel itself is 512 bits (64 B
+  // per beat, one channel), the island port joins it at full width and the
+  // 64-bit cluster port is upsized in g6lc_ai_dram_join. This is the class-2
+  // (LPDDR5-class) bytes-per-cycle stand-in for the simulation model; the
+  // default channel stays 64 bits. Requires G6LC_AI_DRAM_ISLAND_PORT.
+`ifdef G6LC_AI_DRAM_WIDE_CH
+  localparam int unsigned AI_DRAM_CH_W = 512;
+`else
+  localparam int unsigned AI_DRAM_CH_W = AXI_DATA_WIDTH;
+`endif
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
   typedef logic [AI_ISLAND_DATA_W-1:0]   aiw_data_t;
   typedef logic [AI_ISLAND_DATA_W/8-1:0] aiw_strb_t;
   typedef ariane_axi::addr_t aiw_addr_t;
@@ -646,6 +659,7 @@ module ariane_testharness #(
         // the package without evaluating macros, and the emulator's capability ingest is
         // exactly such a reader. The package states one design; the testbench overrides.
 `ifdef G6LC_AI_TB_OVERGRANT
+        .AiCfg          ( CVA6Cfg.AiCfg ),
         .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMaskOvergrant )
 `elsif G6LC_AI_TB_BENCH_SKU
         // Bench SKU: the island alone gets VaTurboEn (exact operand residency via
@@ -657,6 +671,11 @@ module ariane_testharness #(
         .AiCfg          ( AiCfgBenchSku ),
         .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMaskBench )
 `else
+        // The island's plane follows the core package (IslandFpEn selects the
+        // 4-byte operand banks and the float dot; VaTurboEn the residency keys).
+        // Until 2026-09-30 this port was left at its AiCfgOff default, so a
+        // package that enabled IslandFpEn still built the integer strip here.
+        .AiCfg          ( CVA6Cfg.AiCfg ),
         .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMask )
 `endif
     ) i_ai_island (
@@ -884,7 +903,7 @@ module ariane_testharness #(
   ) join_is ();
   AXI_BUS #(
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH                ),
-    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH                   ),
+    .AXI_DATA_WIDTH ( AI_DRAM_CH_W                     ),
     .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave + 1 ),
     .AXI_USER_WIDTH ( AXI_USER_WIDTH                   )
   ) join_mst ();
@@ -941,7 +960,8 @@ module ariane_testharness #(
 
   g6lc_ai_dram_join #(
       .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
-      .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+      .AXI_DATA_WIDTH ( AI_DRAM_CH_W                 ),
+      .CLUSTER_DATA_WIDTH ( AXI_DATA_WIDTH           ),
       .AXI_ID_WIDTH   ( ariane_axi_soc::IdWidthSlave ),
       .AXI_USER_WIDTH ( AXI_USER_WIDTH               ),
       .ISLAND_DATA_WIDTH ( AI_ISLAND_DATA_W          ),
@@ -966,10 +986,11 @@ module ariane_testharness #(
 `endif
                     ),
     .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH                ),
-    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH                   ),
+    .AXI_DATA_WIDTH ( AI_DRAM_CH_W                     ),
     .AXI_USER_WIDTH ( AXI_USER_WIDTH                   ),
     .AXI_USER_EN    ( AXI_USER_EN                      ),
-    .NUM_WORDS      ( NUM_WORDS                        ),
+    // Same byte capacity at any channel width.
+    .NUM_WORDS      ( NUM_WORDS * AXI_DATA_WIDTH / AI_DRAM_CH_W ),
     .NrChannels     ( AiIslandCfg.DramChannels         ),
     .ChanShift      ( AiIslandCfg.DramChanShift        ),
     .MaxAROut       ( AiIslandCfg.MaxAROut             )

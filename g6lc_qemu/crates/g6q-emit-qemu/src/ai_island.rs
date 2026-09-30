@@ -159,19 +159,20 @@ typedef struct G6lcAIIsland {{
     unsigned int tail[G6LC_AI_ISLAND_QUEUES];
 }} G6lcAIIsland;
 
-extern G6lcAIIsland *g6lc_ai_island;
+extern G6lcAIIsland *g6lc_{id}_ai_island;
 
-G6lcAIIsland *g6lc_ai_island_create(hwaddr base, hwaddr size,
+G6lcAIIsland *g6lc_{id}_ai_island_create(hwaddr base, hwaddr size,
                                     bool cap_decoded, uint64_t cap_base,
                                     bool desc_decoded, uint64_t desc_base);
-uint64_t g6lc_ai_island_enq(G6lcAIIsland *island, CPURISCVState *env,
+uint64_t g6lc_{id}_ai_island_enq(G6lcAIIsland *island, CPURISCVState *env,
                             uint64_t desc_ptr);
-void g6lc_ai_island_qfence(G6lcAIIsland *island, CPURISCVState *env);
-uint64_t g6lc_ai_island_poll(G6lcAIIsland *island, CPURISCVState *env,
+void g6lc_{id}_ai_island_qfence(G6lcAIIsland *island, CPURISCVState *env);
+uint64_t g6lc_{id}_ai_island_poll(G6lcAIIsland *island, CPURISCVState *env,
                              uint64_t ticket);
 
 #endif /* G6LC_{upper}_AI_ISLAND_H */
 "###,
+        id = safe_id,
         upper = safe_id.to_uppercase(),
     ));
 
@@ -275,7 +276,7 @@ pub fn emit_island_c(model: &TargetModel, version: &str, digest: &str) -> Option
 #include "exec/memory.h"
 #include "g6lc-{id}-ai-island.h"
 
-G6lcAIIsland *g6lc_ai_island = NULL;
+G6lcAIIsland *g6lc_{id}_ai_island = NULL;
 
 {cap_table}static uint64_t g6lc_{id}_ai_island_read(void *opaque, hwaddr offset,
                                          unsigned int size)
@@ -309,7 +310,7 @@ static const MemoryRegionOps g6lc_{id}_ai_island_ops = {{
     .valid.max_access_size = 8,
 }};
 
-G6lcAIIsland *g6lc_ai_island_create(hwaddr base, hwaddr size,
+G6lcAIIsland *g6lc_{id}_ai_island_create(hwaddr base, hwaddr size,
                                     bool cap_decoded, uint64_t cap_base,
                                     bool desc_decoded, uint64_t desc_base)
 {{
@@ -331,11 +332,11 @@ G6lcAIIsland *g6lc_ai_island_create(hwaddr base, hwaddr size,
     memory_region_init_io(&s->mmio, NULL, &g6lc_{id}_ai_island_ops, s,
                           "g6lc-{id}-ai-island-mmio", size);
     memory_region_add_subregion(get_system_memory(), base, &s->mmio);
-    g6lc_ai_island = s;
+    g6lc_{id}_ai_island = s;
     return s;
 }}
 
-uint64_t g6lc_ai_island_enq(G6lcAIIsland *island, CPURISCVState *env,
+uint64_t g6lc_{id}_ai_island_enq(G6lcAIIsland *island, CPURISCVState *env,
                             uint64_t desc_ptr)
 {{
     unsigned int q, slot;
@@ -380,7 +381,7 @@ static void g6lc_ai_island_complete_entry(G6lcAIQueueEntry *e,
     }}
 }}
 
-void g6lc_ai_island_qfence(G6lcAIIsland *island, CPURISCVState *env)
+void g6lc_{id}_ai_island_qfence(G6lcAIIsland *island, CPURISCVState *env)
 {{
     unsigned int q, slot;
 
@@ -397,7 +398,7 @@ void g6lc_ai_island_qfence(G6lcAIIsland *island, CPURISCVState *env)
     }}
 }}
 
-uint64_t g6lc_ai_island_poll(G6lcAIIsland *island, CPURISCVState *env,
+uint64_t g6lc_{id}_ai_island_poll(G6lcAIIsland *island, CPURISCVState *env,
                              uint64_t ticket)
 {{
     unsigned int q, slot;

@@ -637,7 +637,7 @@ mod tests {
         assert_eq!(cfg.acc_tile_m, 1024, "AI_PANEL_M");
         assert_eq!(cfg.acc_tile_n, 512, "AI_PANEL_N");
         assert_eq!(cfg.acc_tile_k, 512, "AI_PANEL_K");
-        assert_eq!(cfg.sram_bytes, 4 * 1024 * 1024);
+        assert_eq!(cfg.sram_bytes, 5 * 1024 * 1024, "FP island: A 2 + B 1 + C 2 MiB");
         assert_eq!(cfg.clock_khz, 2_000_000, "live clock nameplate");
         assert_eq!(cfg.dram_gbps, 16, "64-bit x 2 GHz nameplate");
         assert_eq!(cfg.noc_width, 64);

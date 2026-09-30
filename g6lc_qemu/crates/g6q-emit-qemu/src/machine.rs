@@ -371,8 +371,14 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
                 Some(b) => ("true", b),
                 None => ("false", 0),
             };
-            body.push_str("        if (strstr(g6lc_peripherals[i].model, \"ai-island\")) {\n");
-            body.push_str("            g6lc_ai_island_create(g6lc_peripherals[i].base,\n");
+            // The island node is `ai-island` in the fixtures and `g6lc,ai-matrix` on the
+            // real board DTS (the UIO of_id contract); both name the same device.
+            body.push_str("        if (strstr(g6lc_peripherals[i].model, \"ai-island\") ||\n");
+            body.push_str("            strstr(g6lc_peripherals[i].model, \"ai-matrix\")) {\n");
+            body.push_str(&format!(
+                "            g6lc_{}_ai_island_create(g6lc_peripherals[i].base,\n",
+                name
+            ));
             body.push_str("                                  g6lc_peripherals[i].len,\n");
             body.push_str(&format!(
                 "                                  {cap_decoded}, {cap_base}ULL,\n\

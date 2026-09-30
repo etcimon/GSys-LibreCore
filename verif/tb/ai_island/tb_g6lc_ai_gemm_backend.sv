@@ -30,6 +30,8 @@ module tb_g6lc_ai_gemm_backend
     // raises the outstanding-AR bound, which is the only direction that can add
     // throughput: policy prefetch_depth could merely lower it.
     parameter int unsigned PE_LANES     = 0,
+    // V2 column array: output columns per cycle (g6lc_ai_gemm_seq OutCols); 1 = single dot.
+    parameter int unsigned OUT_COLS     = 1,
     parameter int unsigned AR_PROVISION = 0,
     // MAX_DIM raises the sequencer's MaxDim so the +measure_k sweep can push k
     // past 16. It grows the tile SRAM (BankWords = MaxDim*ceil(MaxDim/PeLanes)),
@@ -60,13 +62,14 @@ module tb_g6lc_ai_gemm_backend
   // tall (m>n), wide (n>m) and the largest square MaxDim allows.
   localparam int unsigned MeasK      = 16;
   localparam int unsigned MeasPasses = 2;
-  localparam int unsigned MeasShapes = 5;
+  localparam int unsigned MeasShapes = 6;
   localparam int unsigned MeasMN [MeasShapes][2] = '{
       '{8,  8},   // bulk / square
       '{1,  16},  // decode-like: single output row
       '{16, 1},   // tall
       '{2,  16},  // wide
-      '{16, 16}   // largest square at MaxDim=16
+      '{16, 16},  // largest square at MaxDim=16
+      '{1,  32}   // decode row long enough for the intra-row trail store (TrailMinCols)
   };
   localparam logic [DATA_W-1:0] ONES8  = 64'h0101_0101_0101_0101;
   localparam logic [DATA_W-1:0] C16    = 64'h0000_0010_0000_0010;
@@ -278,6 +281,7 @@ module tb_g6lc_ai_gemm_backend
       .MaxN       ( MAX_N ),
       .MaxK       ( MAX_K ),
       .PeLanes    ( GEMM_LANES ),
+      .OutCols    ( OUT_COLS ),
       .DotPipeFloat( DOT_PIPE_FLOAT ),
       .MaxAROut   ( GEMM_MAX_AR ),
       .ReuseBEn   ( REUSE_EN ),
@@ -1140,6 +1144,10 @@ module tb_g6lc_ai_gemm_backend
     for (shape = 0; shape < MeasShapes; shape++) begin
       gemm_m = 32'(MeasMN[shape][0]);
       gemm_n = 32'(MeasMN[shape][1]);
+      // A 32-row B operand (up to 2 KiB at FP32) needs its own room: B at 0x1000,
+      // C (128 B) at 0x1C00, all inside the 8 KiB model and disjoint from A.
+      gemm_pb = gemm_n > 16 ? 64'h8000_1000 : 64'h8000_0800;
+      gemm_pc = gemm_n > 16 ? 64'h8000_1C00 : 64'h8000_0C00;
       for (pass = 0; pass < MeasPasses; pass++) begin
         meas_runs = 0;
         $display("MEASURE_BEGIN schema=g6lc.policy-measure.v1 tb=tb_g6lc_ai_gemm_backend cycle_source=free_running_rtl_counter class=%0d nch=%0d dpf=%0d ar_max=%0d pass=%0d lanes=%0d",

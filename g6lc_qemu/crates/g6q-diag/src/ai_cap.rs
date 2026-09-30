@@ -513,15 +513,17 @@ endmodule
         assert_eq!(layout.n_low, 4);
         assert_eq!(layout.k_low, 8);
         assert_eq!(layout.m_width, 4);
-        // F1 raised the live grant from dense INT8 (0x0001) to INT8 + INT4 (0x0003),
-        // together with the PE nibble unpack, the 2*PeLanes reduction, and the byte-counting
-        // loaders. This assertion is the drift detector for that: it must only ever move in
-        // lockstep with `AiIslandPeImplMask`, because the emulator gates its own arithmetic on
-        // the ingested mask and would otherwise compute a format the RTL refuses.
+        // The live grant moved 0x0001 (INT8) -> 0x0003 (F1: INT4) -> 0x00FB (2026-09-30:
+        // the FP island, g6lc64_ai AiCfg.IslandFpEn = 1 -- FP8 E4M3/E5M2, FP16, BF16, FP32
+        // on the ordered-FP32 dot; SP24 stays refused). This assertion is the drift
+        // detector: it must only ever move in lockstep with the PE implemented mask
+        // (`AiIslandPeImplMaskFp` for the FP island), because the emulator gates its own
+        // arithmetic on the ingested mask and would otherwise compute a format the RTL
+        // refuses.
         assert_eq!(
             cfg.dtype_mask,
-            Some(0x0003),
-            "the live part grants dense INT8 + INT4"
+            Some(0x00FB),
+            "the live part grants every dense format except structured 2:4"
         );
     }
 

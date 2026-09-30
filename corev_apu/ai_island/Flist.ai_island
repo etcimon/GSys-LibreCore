@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+// Copyright (c) 2026 Etienne Cimon
+//
+// GSys LibreCore AI island (Xg6lcai, SoC T2) — the design's own compile list.
+// Packages first, then RTL. Consumers: the sv-timing full_corev_apu flist,
+// build-platform lint targets, and g6lc_qemu's ingest (which reads the island
+// config/descriptor packages named here to generate the emulated device).
+// core-side g6lc_ai_exec / g6lc_ai_instr_pkg stay on core/Flist.cva6.
+
++incdir+${CVA6_REPO_DIR}/corev_apu/ai_island/include
+
+${CVA6_REPO_DIR}/corev_apu/include/g6lc_ai_island_cfg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/include/g6lc_ai_desc_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/include/g6lc_ai_fp_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/include/g6lc_ai_policy_pkg.sv
+
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_addr_check.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_axi_cut.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_cap_window.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_cmd_fifo.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_cpl_fifo.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_desc_engine.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_desc_fetch.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_dram_timing.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_fp_mac.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_gemm_seq.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_island_apb.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_mem_store.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot_float.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_pe_dot_float_pipe.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_policy_codec.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_policy_steer.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_policy_subcode.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_tile_sram.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_island_top.sv

@@ -96,7 +96,7 @@ else
   VER_LIBRARY="${AI_MATRIX_VER_LIBRARY:-work-ver-ai}"
   TIMING_DEFINES=""
 fi
-DEFAULT_TESTS="ai_csr_aistatus_xs ai_setcfg_readback ai_illegal_when_off ai_dot4_s8_smoke ai_mma_s8_golden ai_requant_rhe_golden ai_pmu_group4_smoke ai_queue_doorbell ai_aiperm_umode ai_island_mmio_smoke ai_cpl_fifo_multi_claim ai_enq_sideband_smoke ai_dual_enq_poll ai_irq_plic_smoke ai_desc_fetch_smoke ai_enq_fetch_smoke ai_ptr_done_smoke ai_gemm_s8_smoke ai_gemm_s8_lda_smoke ai_gemm_dim_err_smoke ai_gemm_s8_4x4_smoke ai_gemm_s8_8x8_smoke ai_gemm_s8_16x16_smoke ai_gemm_s8_32x32_smoke ai_gemm_s8_64x64_smoke ai_gemm_s8_128x128_smoke ai_gemm_s8_256x256_smoke ai_bw_pmu_smoke ai_cap_bringup_smoke ai_gemm_tile_2x2_smoke"
+DEFAULT_TESTS="ai_must_pass ai_must_fail mini_ai_dual_issue ai_csr_aistatus_xs ai_setcfg_readback ai_illegal_when_off ai_dot4_s8_smoke ai_mma_s8_golden ai_requant_rhe_golden ai_pmu_group4_smoke ai_queue_doorbell ai_aiperm_umode ai_island_mmio_smoke ai_cpl_fifo_multi_claim ai_enq_sideband_smoke ai_dual_enq_poll ai_irq_plic_smoke ai_desc_fetch_smoke ai_enq_fetch_smoke ai_ptr_done_smoke ai_gemm_s8_smoke ai_gemm_s8_lda_smoke ai_gemm_dim_err_smoke ai_gemm_s8_4x4_smoke ai_gemm_s8_8x8_smoke ai_gemm_s8_16x16_smoke ai_gemm_s8_32x32_smoke ai_gemm_s8_64x64_smoke ai_gemm_s8_128x128_smoke ai_gemm_s8_256x256_smoke ai_bw_pmu_smoke ai_cap_bringup_smoke ai_gemm_tile_2x2_smoke"
 # shellcheck disable=SC2206
 tests=( ${AI_MATRIX_VERI_TESTS:-$DEFAULT_TESTS} )
 # 256x256 GEMM ~0.3M cy; MaxBurst=64 + I3 PMU; headroom for suite.
@@ -223,6 +223,25 @@ if [[ "${AI_MATRIX_BENCH:-0}" == "1" ]]; then
       log "FAIL $t (tohost=${code:-none})"; FAIL=$((FAIL+1))
     fi
   done
+  # Two-hart boot-load bench (AI_MATRIX_BENCH_SMT2="1 2": HARTS values; needs a NrHarts>=2
+  # or NrCores>=2 model, e.g. g6lc64_smt2_ai). Reports the wall span in cycles through the
+  # T0 tohost convention; per-job island cycles are in the AI_JOB records.
+  for harts in ${AI_MATRIX_BENCH_SMT2- }; do
+    [[ -n "$harts" ]] || continue
+    for fmt in ${AI_MATRIX_BENCH_SMT2_FMTS:-0}; do
+      jobs="${AI_MATRIX_BENCH_SMT2_JOBS:-8}"
+      t="ai_bench_smt2_h${harts}_f${fmt}_j${jobs}"
+      bench_one "$t" verif/tests/custom/ai/ai_bench_smt2.S -DHARTS="$harts" -DFMT="$fmt" -DJOBS="$jobs"
+      code=$(grep -oE 'tohost = [0-9]+' "$BENCH_LOG_FILE" | head -1 | awk '{print $3}')
+      if [[ -n "$code" && "$code" != "1" && $((code & 1)) == 1 && $((code >> 1)) -gt 20 ]]; then
+        log "PASS $t wall_cycles=$((code >> 1)) harts=$harts jobs_per_hart=$jobs"; PASS=$((PASS+1))
+        { echo "BENCH_SMT2 harts=$harts fmt=$fmt jobs=$jobs wall_cycles=$((code >> 1)) elf=$t"
+          grep '^AI_JOB ' "$BENCH_LOG_FILE"; } >> "$bench_log"
+      else
+        log "FAIL $t (tohost=${code:-none})"; FAIL=$((FAIL+1)); grep -E "tohost|FAILED|ILLEGAL" "$BENCH_LOG_FILE" | head -3 || true
+      fi
+    done
+  done
   log "bench records -> $bench_log ($(grep -c '^AI_JOB' "$bench_log") jobs, $(grep -c '^BENCH_T0' "$bench_log") T0 points)"
   python3 "$ROOT/verif/regress/remote/ai_bench_report.py" "$OUT" --soc --json "$OUT/ai_bench.json" || true
   log "SUMMARY pass=${PASS} fail=${FAIL} total=$((PASS+FAIL))"
@@ -253,21 +272,35 @@ for t in "${tests[@]}"; do
     "$elf" >"$log_file" 2>&1
   set -e
   tail -8 "$log_file"
-  # Mini AI tests: tohost=1 pass, tohost=2 fail (bit0 still 1 → SUCCESS tracer)
+  # Mini AI tests: tohost=1 pass, tohost=2 fail (bit0 still 1 -> SUCCESS tracer)
+  verdict=FAIL
   if grep -q '\*\*\* SUCCESS \*\*\*' "$log_file"; then
     if grep -qE 'tohost = 2\b|tohost = 0x0*2\b' "$log_file"; then
       log "FAIL $t (tohost fail code 2)"
-      FAIL=$((FAIL+1))
     else
+      verdict=PASS
       log "PASS $t"
-      PASS=$((PASS+1))
     fi
   else
     log "FAIL $t"
-    FAIL=$((FAIL+1))
     grep -E "ILLEGAL|exception|FAILED|DIDNOTCONVERGE|tohost" "$log_file" | head -12 || true
   fi
+  # Oracle controls (H3): the negative control must read FAIL and the positive one PASS,
+  # or the classifier is biased and no verdict of this run is evidence.
+  case "$t" in
+    ai_must_fail)
+      if [[ "$verdict" == FAIL ]]; then log "CONTROL ok: $t classified FAIL"; PASS=$((PASS+1))
+      else log "ORACLE INVALID: negative control $t classified PASS"; ORACLE_INVALID=1; FAIL=$((FAIL+1)); fi ;;
+    ai_must_pass)
+      if [[ "$verdict" == PASS ]]; then log "CONTROL ok: $t classified PASS"; PASS=$((PASS+1))
+      else log "ORACLE INVALID: positive control $t classified FAIL"; ORACLE_INVALID=1; FAIL=$((FAIL+1)); fi ;;
+    *)
+      if [[ "$verdict" == PASS ]]; then PASS=$((PASS+1)); else FAIL=$((FAIL+1)); fi ;;
+  esac
 done
+if [[ "${ORACLE_INVALID:-0}" == 1 ]]; then
+  log "ORACLE INVALID: a control was misclassified; the PASS/FAIL counts of this run are not evidence"
+fi
 
 log "SUMMARY pass=${PASS} fail=${FAIL} total=${#tests[@]}"
 [[ "$FAIL" -eq 0 ]]

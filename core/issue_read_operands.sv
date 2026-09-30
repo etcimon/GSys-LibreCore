@@ -330,6 +330,22 @@ module issue_read_operands
   assign alu2_valid_o = alu2_valid_q;
   assign cvxif_valid_o = CVA6Cfg.CvxifEn ? cvxif_valid_q : '0;
   assign cvxif_off_instr_o = CVA6Cfg.CvxifEn ? cvxif_off_instr_q : '0;
+
+  // pragma translate_off
+  // Port-0 steering contract (config_pkg check_cfg relies on it): a CVXIF-class
+  // instruction is never issued from a port other than 0, whatever the issue width.
+  // Its illegal-instruction trap therefore always reaches the coprocessor handshake.
+  if (CVA6Cfg.CvxifEn && CVA6Cfg.NrIssuePorts > 1) begin : gen_cvxif_port0_contract
+    always_ff @(posedge clk_i) if (rst_ni) begin
+      for (int unsigned p = 1; p < CVA6Cfg.NrIssuePorts; p++) begin
+        assert (!cvxif_valid_o[p])
+          else $error("issue_read_operands: CVXIF instruction issued from port %0d (port-0 steering broken)", p);
+        assert (!(issue_instr_valid_i[p] && issue_ack_o[p] && issue_instr_i[p].fu == CVXIF))
+          else $error("issue_read_operands: CVXIF instruction acknowledged on port %0d", p);
+      end
+    end
+  end
+  // pragma translate_on
   assign stall_issue_o = stall_raw[0];
   assign tinst_o = CVA6Cfg.RVH ? tinst_q : '0;
 

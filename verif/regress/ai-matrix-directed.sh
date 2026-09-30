@@ -71,6 +71,8 @@ need=(
   verif/tb/ai_island/run-dram-bw.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_join.sv
   verif/tb/ai_island/run-dram-join.sh
+  verif/tb/ai_island/tb_g6lc_ai_dram_join_wide.sv
+  verif/tb/ai_island/run-dram-join-wide.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_class2.sv
   verif/tb/ai_island/run-dram-class2.sh
   verif/tb/ai_island/tb_g6lc_ai_gemm_wide.sv
@@ -384,6 +386,14 @@ if command -v verilator >/dev/null 2>&1; then
     ok "tb_g6lc_ai_dram_join (second ingress, define unset on the SoC path)"
   else
     bad "tb_g6lc_ai_dram_join"
+  fi
+  # V1 wide channel: 512-bit channel + island port, 64-bit cluster port upsized
+  # (cluster and island round-trips, fetch-shaped lane read, island narrow write
+  # landing at its lane without clobbering the word).
+  if bash verif/tb/ai_island/run-dram-join-wide.sh; then
+    ok "tb_g6lc_ai_dram_join_wide (V1 wide channel: join + 512-bit class-0 slave)"
+  else
+    bad "tb_g6lc_ai_dram_join_wide"
   fi
   if bash verif/tb/ai_island/run-dram-class2.sh; then
     ok "tb_g6lc_ai_dram_class2 (LPDDR5 refuses elaboration)"

@@ -6,28 +6,27 @@
 // You may obtain a copy of the License at https://solderpad.org/licenses/
 //
 // Original Author: Jean-Roch COULON - Thales
-// AI matrix card package (Etienne Cimon 2026)
-// Derived from g6lc64_stream8: NrCores=2, H+Sstc, Zacas W/D/Q, DeepSpec STQ,
-// HPDCACHE_WT + L2, C-light in-order -- plus the Xg6lcai AI matrix plane on the
-// CVXIF seam (option B). See architecture/ai-matrix/README.md s2 for why the
-// CVXIF seam is chosen over the accelerator port for P1-P2, and
-// architecture/ai-matrix/isa-encoding.md for the interface these knobs size.
+// U6.1 experimental SMT2 profile — Etienne Cimon 2026
 //
-// This package is the OPEN interface to the AI plane. It stays tier R so that a
-// party without the tier-P implementation can still elaborate, discover and
-// verify the seam; only the implementation behind it is withheld. Do not move
-// this file to tier P. See AGENTS-licensing.md and .licensing-tiers.
+// Select as active cva6_config_pkg for dual-thread coarse-grain SMT bring-up.
+// Default production packages keep NrHarts=1 (identity path).
 
 // ---- Licensing provenance (see LICENSE, LICENSE.CERN-OHL-S, NOTICE) --------
 // The original work of the copyright holders named above remains licensed
 // under the license stated above, and that grant is unaffected.
-// Modifications (c) 2026 Etienne Cimon: AI package derived from the Thales
-// config package template via g6lc64_server_math and g6lc64_stream8.
+// Modifications (c) 2026 Etienne Cimon: dual-hart coarse-grain SMT profile derived from the Thales config package template.
+//
+// g6lc64_smt2_ai (2026-09-30, WP4 of the AI scaling plan): g6lc64_smt2 (two hardware
+// threads, dual-issue, drained handoff, RV64GC+H) plus the Xg6lcai matrix plane of
+// g6lc64_ai on the CVXIF seam -- the package in which the island is driven by two
+// software harts (per-hart AI CSR banks, two T2 queues) and the host stays
+// dual-issue thanks to the CVXIF port-0 steering contract (config_pkg check_cfg).
+// Stage A of the SMT2+AI track: in-order; the mixed-residency (OoO) stage follows
+// the OoO CVXIF late-result audit.
 // Etienne Cimon offers this file AS A WHOLE under the dual licence below.
 // Expressed as a non-SPDX tag because SPDX has no operator for "whole is X,
 // portions remain Y"; the machine-readable form is in REUSE.toml.
 // Outbound-License: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
-
 
 package cva6_config_pkg;
 
@@ -40,16 +39,20 @@ package cva6_config_pkg;
   localparam CVA6ConfigF8En = 0;
   localparam CVA6ConfigFVecEn = 0;
 
-  // Seam B: the AI coprocessor attaches through CVXIF. Mutually exclusive with
-  // the accelerator port (core/cva6.sv gen_err_xif_and_acc), hence VExtEn = 0.
-  localparam CVA6ConfigCvxifEn = 1;
+  // 0, not inherited-1: CVXIF offload is wired for issue port 0 only, while the
+  // decoder withholds ex.valid for an illegal instruction so the coprocessor may
+  // claim the encoding first. On this 2-wide core an illegal instruction issued on
+  // port 1 therefore never traps and never retires. check_cfg now rejects the
+  // combination outright; this target has no coprocessor to offload to, so the
+  // knob goes to baseline rather than the assert being relaxed.
+  localparam CVA6ConfigCvxifEn = 1;  // AI matrix plane on the CVXIF seam (seam B)
   localparam CVA6ConfigCExtEn = 1;
   localparam CVA6ConfigZcbExtEn = 1;
   localparam CVA6ConfigZcmpExtEn = 0;
   localparam CVA6ConfigAExtEn = 1;
-  localparam CVA6ConfigHExtEn = 1;  // U9: hypervisor for KVM/Bao
+  localparam CVA6ConfigHExtEn = 0;
   localparam CVA6ConfigBExtEn = 1;
-  localparam CVA6ConfigVExtEn = 0;  // must stay 0: RVV would claim the accelerator port
+  localparam CVA6ConfigVExtEn = 0;
   localparam CVA6ConfigRVZiCond = 1;
 
   localparam CVA6ConfigAxiIdWidth = 4;
@@ -71,27 +74,31 @@ package cva6_config_pkg;
   localparam CVA6ConfigDcacheFlushOnFenceI = 1'b0;
   localparam CVA6ConfigDcacheInvalidateOnFlush = 1'b0;
 
-  // HPDCACHE MSHR/wbuf need memId ≥4 with 8 load-buf + wbuf-8
+  // G1n: hang-7 raised NrLoadBufEntries to 8; 1-bit D$ rid truncated
+  // ldbuf_windex (load_unit data_id → wt_dcache_ctrl id_q). P4 c.lw of
+  // the 0x70 line then retired another slot's rdata (a5=0x010dfeec).
+  // Match server_math / stream8 (clog2(8)=3). WT miss still uses RdTxId.
   localparam CVA6ConfigDcacheIdWidth = 3;
-  localparam CVA6ConfigMemTidWidth = 4;
+  localparam CVA6ConfigMemTidWidth = 2;
 
   localparam CVA6ConfigWtDcacheWbufDepth = 8;
-  localparam CVA6ConfigWtDcacheFixupDepth = 0;
-  localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b1;
+  // SL-W gate-6: post-ACK fixup queue enabled with a small depth to exercise
+  // the full-queue hold path under SMT2 OpenSBI without over-committing area.
+  localparam CVA6ConfigWtDcacheFixupDepth = 2;
+  localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b0;
 
-  localparam CVA6ConfigNrScoreboardEntries = 16;
+  localparam CVA6ConfigNrScoreboardEntries = 8;
 
   localparam CVA6ConfigNrLoadPipeRegs = 1;
   localparam CVA6ConfigNrStorePipeRegs = 0;
-  // Hang-7 bisect: NrLoadBufEntries=1 still hung (MEMCHR_LO / hart_cnt=0x80).
-  // Multi-outstanding ldbuf ID mismatch ruled out as sole cause.
+  // Hang-7 bisect (server_math): ldbuf=1 still hung; 8 matches multi-outstanding
+  // FDT walks. smt2 was left at 2 during dual-issue bring-up — raise with RAS.
   localparam CVA6ConfigNrLoadBufEntries = 8;
 
-  // Hang-7 note: RASDepth=2 is tiny vs FDT call depth; raising to 16 regressed
-  // to earlier load-misalign @ fdt_getprop (mtval=0x8001e8fb). Keep 2 until
-  // RAS/ckpt restore is validated; hang-7 residual is c.jr fallthrough after
-  // path_offset error ret (see monorepo-soak/L2-OPENSBI-HANG-PROGRESS.md).
-  localparam CVA6ConfigRASDepth = 2;
+  // Hang-7: RASDepth=2 is tiny vs OpenSBI FDT call depth. Depth 16 previously
+  // unmasked load-misalign under server_math TAGE+ckpt; smt2 has BPCkptDepth=0
+  // and RAS-miss is now NoCF (frontend) so EX always corrects empty RAS. Use 16.
+  localparam CVA6ConfigRASDepth = 16;
   localparam CVA6ConfigBTBEntries = 32;
   localparam CVA6ConfigBHTEntries = 128;
 
@@ -101,32 +108,12 @@ package cva6_config_pkg;
 
   localparam CVA6ConfigPerfCounterEn = 1;
 
-  // HPDCACHE for CMO + HW prefetch (U7/U10); not deprecated std WT
-  localparam config_pkg::cache_type_t CVA6ConfigDcacheType = config_pkg::HPDCACHE_WT;
+  localparam config_pkg::cache_type_t CVA6ConfigDcacheType = config_pkg::WT;
 
   localparam CVA6ConfigMmuPresent = 1;
 
   localparam CVA6ConfigRvfiTrace = 1;
 
-  // Xg6lcai AI matrix plane. Sizing rationale:
-  //  - 8x8x8 s8 tile: one MMA is 512 MACs, which pipelines in ~3 stages at the
-  //    2.5 GHz structural FO4 screen without lengthening the ex_stage cone.
-  //  - TileCount 8 / AccDepth 4: enough for a double-buffered 2x2 register-block
-  //    GEMM kernel without spilling; grows only after a real kernel is profiled.
-  //  - AccBanks 1 == NrHarts here; build_config raises it if NrHarts grows, so an
-  //    AI-heavy hart can never starve the control hart on an SMT part.
-  //  - TileLdEn 0 is forced by the seam, not by choice: CVXIF has no memory port
-  //    (core/cvxif_fu.sv), so ai.ldt/ai.stt are compiler-synthesised until the
-  //    accelerator seam lands. Discoverable, not an encoding difference.
-  //  - Queues 2: one ring per privilege consumer (kernel + a user context) is the
-  //    minimum that exercises the T2 path; depth 64 descriptors = 4 KiB, one page.
-  //  - QosClasses 2: the minimum that can actually demonstrate the s7.1 scheduling
-  //    contract (a high class must preempt a low one at a work-quantum boundary).
-  //    1 would make the QoS soak vacuous.
-  //  - Int4En / Sparse24En 0: the grant path and the discovery bits exist, but this
-  //    package does not claim to implement them. ai.setcfg downgrades a 4-bit or
-  //    sparse request to 8-bit dense, so software stays portable either way
-  //    (isa-encoding.md s3.1). Turn on only with a bit-exact reference to match.
   localparam config_pkg::ai_cfg_t ai_cfg = '{
       MatrixEn: bit'(1),
       AccelEn: bit'(0),  // seam B (CVXIF); flip with VExtEn=0 when seam D lands
@@ -163,7 +150,7 @@ package cva6_config_pkg;
       TileN: unsigned'(8),
       TileK: unsigned'(8),
       TileCount: unsigned'(8),
-      AccBanks: unsigned'(1),
+      AccBanks: unsigned'(2),  // >= NrHarts: one accumulator bank per hardware thread
       AccDepth: unsigned'(4),
       Queues: unsigned'(2),
       QueueDepth: unsigned'(64),
@@ -173,17 +160,13 @@ package cva6_config_pkg;
   localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       XLEN: unsigned'(CVA6ConfigXlen),
       VLEN: unsigned'(64),
-      FpgaEn: bit'(0),  // for Xilinx and Altera
-      FpgaAlteraEn: bit'(0),  // for Altera (only)
+      FpgaEn: bit'(0),
+      FpgaAlteraEn: bit'(0),
       TechnoCut: bit'(0),
-      // Hang-6 temporary: single-issue until dual residual is fixed.
-      // Dual (ports=2) fails fdt_path_offset("/cpus") BADOFFSET; single
-      // clears hang-6 (later _start_hang BADPATH is a different issue).
-      // Hang-4 stored-PC + realign 2'b01 kept for dual re-enable.
-      SuperscalarEn: bit'(0),
-      NrIssuePorts: unsigned'(1),
+      SuperscalarEn: bit'(1),
+      NrIssuePorts: unsigned'(2),
       ALUBypass: bit'(0),
-      NrCommitPorts: unsigned'(1),
+      NrCommitPorts: unsigned'(2),
       AxiAddrWidth: unsigned'(CVA6ConfigAxiAddrWidth),
       AxiDataWidth: unsigned'(CVA6ConfigAxiDataWidth),
       AxiIdWidth: unsigned'(CVA6ConfigAxiIdWidth),
@@ -196,7 +179,7 @@ package cva6_config_pkg;
       XF16ALT: bit'(CVA6ConfigF16AltEn),
       XF8: bit'(CVA6ConfigF8En),
       RVA: bit'(CVA6ConfigAExtEn),
-      RVZacas: bit'(1),  // Zacas AMOCAS.W/D/Q for stream8 multicore CAS
+      RVZacas: bit'(1),  // Zacas AMOCAS.W/D — Linux-boot DTS advertises zacas
       RVB: bit'(CVA6ConfigBExtEn),
       ZKN: bit'(1),
       RVV: bit'(CVA6ConfigVExtEn),
@@ -225,18 +208,18 @@ package cva6_config_pkg;
       ExceptionAddress: 64'h808,
       RASDepth: unsigned'(CVA6ConfigRASDepth),
       BTBEntries: unsigned'(CVA6ConfigBTBEntries),
-      BPType: config_pkg::TAGE_LITE,
+      BPType: config_pkg::BHT,
       BHTEntries: unsigned'(CVA6ConfigBHTEntries),
       BHTHist: unsigned'(3),
-      BPGhistLen: unsigned'(24),
-      BPTageTables: unsigned'(3),
-      BPTageTableEntries: unsigned'(64),
-      BPTageTagBits: unsigned'(8),
-      BPLoopEn: bit'(1),
-      BPIndirectEn: bit'(1),
-      BPIndirectEntries: unsigned'(32),
-      BPStatCorEn: bit'(1),
-      BPCkptDepth: unsigned'(16),
+      BPGhistLen: unsigned'(0),
+      BPTageTables: unsigned'(0),
+      BPTageTableEntries: unsigned'(0),
+      BPTageTagBits: unsigned'(0),
+      BPLoopEn: bit'(0),
+      BPIndirectEn: bit'(0),
+      BPIndirectEntries: unsigned'(0),
+      BPStatCorEn: bit'(0),
+      BPCkptDepth: unsigned'(0),
       DmBaseAddress: 64'h0,
       TvalEn: bit'(CVA6ConfigTvalEn),
       DirectVecOnly: bit'(0),
@@ -249,13 +232,31 @@ package cva6_config_pkg;
       NrNonIdempotentRules: unsigned'(2),
       NonIdempotentAddrBase: 1024'({64'b0, 64'b0}),
       NonIdempotentLength: 1024'({64'b0, 64'b0}),
-      NrExecuteRegionRules: unsigned'(3),
-      ExecuteRegionAddrBase: 1024'({64'h8000_0000, 64'h1_0000, 64'h0}),
-      ExecuteRegionLength: 1024'({64'h40000000, 64'h10000, 64'h1000}),
-      NrCachedRegionRules: unsigned'(1),
-      CachedRegionAddrBase: 1024'({64'h8000_0000}),
-      CachedRegionLength: 1024'({64'h40000000}),
-      MaxOutstandingStores: unsigned'(8),
+      // I4l: RV64 sign-extended DRAM alias (0xffff_ffff_8000_0000) so
+      // fdt_next_tag after fdt_offset_ptr is not an IAF at …8001_29f4.
+      // I4w: execute is *text*, not all of DRAM. 32 MiB still covered
+      // .rodata/FDT @0x8001e000 — I4ae nat s0=0x8001f801 is that window.
+      // I4ag: identity/sign-ext execute is .text only (ends 0x1d918);
+      // separate 4 KiB windows for fw_payload @0x80200000. I4v then
+      // refuses JALR into FDT/rodata. Cached stays 1 GiB.
+      // Page-0 is not text: a resolved ret@hsm to 0x81c was fetchable
+      // and decoded as garbage (nat HSM). Bootrom stays @0x10000.
+      // I11: resolve is still unfiltered; I19 only suppresses predict.
+      NrExecuteRegionRules: unsigned'(5),
+      ExecuteRegionAddrBase: 1024'({
+        64'hffff_ffff_8020_0000, 64'h8020_0000,
+        64'hffff_ffff_8000_0000, 64'h8000_0000,
+        64'h1_0000
+      }),
+      ExecuteRegionLength: 1024'({
+        64'h1000, 64'h1000,
+        64'h1e000, 64'h1e000,
+        64'h1_0000
+      }),
+      NrCachedRegionRules: unsigned'(2),
+      CachedRegionAddrBase: 1024'({64'hffff_ffff_8000_0000, 64'h8000_0000}),
+      CachedRegionLength: 1024'({64'h4000_0000, 64'h4000_0000}),
+      MaxOutstandingStores: unsigned'(7),
       DebugEn: bit'(1),
       SDTRIG: bit'(0),
       Mcontrol6: bit'(0),
@@ -288,34 +289,31 @@ package cva6_config_pkg;
       ZihintpauseEn: bit'(1),
       SvpbmtEn: bit'(1),
       ZawrsEn: bit'(1),
-      // L2 size 0 → build_config infers max(256 KiB, NrCores×128 KiB) for N=2 → 256 KiB
-      // Hang-7: L2En=0 bisect deadlocked on stack store in path_offset (not clean).
       L2En: bit'(1),
-      L2ByteSize: unsigned'(0),
-      L2SetAssoc: unsigned'(0),
-      L2LineWidth: unsigned'(0),  // 512b (64 B) after infer — Zic64b-class line
-      L2MshrDepth: unsigned'(0),
-      L2DataBanks: unsigned'(0),
+      L2ByteSize: unsigned'(262144),
+      L2SetAssoc: unsigned'(8),
+      L2LineWidth: unsigned'(512),
+      L2MshrDepth: unsigned'(2),
+      L2DataBanks: unsigned'(4),
       L2RoundRobinEn: bit'(0),
-      NrHarts: unsigned'(1),
+      // U6.1 SMT2
+      NrHarts: unsigned'(2),
       SmtPolicy: config_pkg::SMT_HYBRID,
-      SmtFetchQuantum: unsigned'(4),
-      SmtStarveLimit: unsigned'(16),
-      NrCores: unsigned'(2),
+      SmtFetchQuantum: unsigned'(128),  // dual-ready RR; OpenSBI-scale (miss thrash fix)
+      SmtStarveLimit: unsigned'(64),
+      NrCores: unsigned'(1),
       CohPolicy: config_pkg::COH_FILTERED,
-      SnoopFilterEn: bit'(1),
-      SnoopFilterEntries: unsigned'(0),  // auto 64×NrCores
-      CohInvalDepth: unsigned'(4),
-      CohAxiStarveLimit: unsigned'(16),
+      SnoopFilterEn: bit'(0),
+      SnoopFilterEntries: unsigned'(0),
+      CohInvalDepth: unsigned'(0),
+      CohAxiStarveLimit: unsigned'(0),
       CohMaxOutstanding: unsigned'(0),
-      WayPredEn: bit'(1),
-      WayPredEntries: unsigned'(128),
-      ReplPolicy: config_pkg::REPL_RRIP,
-      HwPrefetchEn: bit'(1),
-      HwPrefetchStreams: unsigned'(4),
+      WayPredEn: bit'(0),
+      WayPredEntries: unsigned'(0),
+      ReplPolicy: config_pkg::REPL_PLRU,
+      HwPrefetchEn: bit'(0),
+      HwPrefetchStreams: unsigned'(0),
       DcacheMshrDepth: unsigned'(0),
-      // Hang-5 bisect: U2 frontend off (FTQ/FDIP/LoopBuf). Dual-issue +
-      // stored-PC still hits fw_fdt_bin; isolate U2 vs base dual-issue.
       FtqDepth: unsigned'(0),
       FdipEn: bit'(0),
       FdipDistance: unsigned'(0),
@@ -326,14 +324,10 @@ package cva6_config_pkg;
       SliceAiqDepth: unsigned'(0),
       SliceBiqDepth: unsigned'(0),
       SliceMaxRunahead: unsigned'(0),
-      // U10 is C-light (in-order multi-issue); full OoO is ooo_server package
       OoOEn: bit'(0),
       SmtDrainedHandoff: bit'(1),
       SmtDrainForceCycles: unsigned'(256),
-      // Same STQ deepen as imafdc FORCE_IMAFDC smoke: DEPTH_COMMIT=4 with
-      // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
-      // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
-      DeepSpecEn: bit'(1),
+      DeepSpecEn: bit'(0),
       RobEntries: unsigned'(0),
       PrfEntries: unsigned'(0),
       IqEntries: unsigned'(0),
@@ -341,20 +335,16 @@ package cva6_config_pkg;
       LsqStoreEntries: unsigned'(0),
       MemDepPredEn: bit'(0),
       OoORetireWidth: unsigned'(0),
-      // Stream plane × multicore (U6/p6): L2 miss-edge multi-stream PF on.
-      // L3 stays optional (ooo_server enables L3 + inclusive L1/L2 back-inval).
       L3En: bit'(0),
       L3ByteSize: unsigned'(0),
       L3SetAssoc: unsigned'(0),
       L3LineWidth: unsigned'(0),
       L3MshrDepth: unsigned'(0),
       L3DataBanks: unsigned'(0),
-      // Disabled until PF R-absorb path is soak-proven on MC+L2+ROM boot;
-      // re-enable after mc-mini-veri green on server_math.
       ServerPrefetchEn: bit'(0),
-      ServerPfStreams: unsigned'(0),  // auto → max(4, 2×NrCores)
-      ServerPfDistance: unsigned'(2),
-      WtAxiAllocEn: bit'(0),
+      ServerPfStreams: unsigned'(0),
+      ServerPfDistance: unsigned'(0),
+      WtAxiAllocEn: bit'(1),
       L3InclusiveEn: bit'(0),
       L2TagSramEn: bit'(0),
       L2WriteUpdateEn: bit'(1),

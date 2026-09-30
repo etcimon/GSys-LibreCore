@@ -28,6 +28,11 @@ module g6lc_ai_dram_join #(
     parameter int unsigned AXI_ID_WIDTH      = 4,
     parameter int unsigned AXI_USER_WIDTH    = 1,
     parameter int unsigned ISLAND_DATA_WIDTH = 64,
+    // Width of the cluster (xbar) ingress. Equal to the channel by default; a
+    // channel wider than the xbar (the V1 "wide port" ladder step: 512-bit channel
+    // and island, 64-bit cluster) puts an axi_dw_converter upsizer on this port so
+    // the cores keep their 64-bit fabric while the island streams 64 B/cycle.
+    parameter int unsigned CLUSTER_DATA_WIDTH = AXI_DATA_WIDTH,
     parameter int unsigned MAX_AR_OUT        = 2,
     parameter logic [63:0] DRAM_BASE         = 64'h8000_0000,
     parameter logic [63:0] DRAM_BYTES        = 64'h4000_0000,
@@ -55,8 +60,37 @@ module g6lc_ai_dram_join #(
                   ISLAND_DATA_WIDTH, AXI_DATA_WIDTH);
     assert ((ISLAND_DATA_WIDTH % AXI_DATA_WIDTH) == 0)
       else $error("g6lc_ai_dram_join: island width must be a multiple of the channel");
+    assert (CLUSTER_DATA_WIDTH <= AXI_DATA_WIDTH && (AXI_DATA_WIDTH % CLUSTER_DATA_WIDTH) == 0)
+      else $error("g6lc_ai_dram_join: cluster width %0d must divide the channel width %0d",
+                  CLUSTER_DATA_WIDTH, AXI_DATA_WIDTH);
   end
   // pragma translate_on
+
+  // Cluster ingress at the channel width (upsized when the channel is wider).
+  AXI_BUS #(
+      .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ),
+      .AXI_DATA_WIDTH ( AXI_DATA_WIDTH ),
+      .AXI_ID_WIDTH   ( AXI_ID_WIDTH   ),
+      .AXI_USER_WIDTH ( AXI_USER_WIDTH )
+  ) cluster_n ();
+
+  if (CLUSTER_DATA_WIDTH == AXI_DATA_WIDTH) begin : gen_cluster_same
+    `AXI_ASSIGN(cluster_n, cluster)
+  end else begin : gen_cluster_up
+    axi_dw_converter_intf #(
+        .AXI_ID_WIDTH            ( AXI_ID_WIDTH       ),
+        .AXI_ADDR_WIDTH          ( AXI_ADDR_WIDTH     ),
+        .AXI_SLV_PORT_DATA_WIDTH ( CLUSTER_DATA_WIDTH ),
+        .AXI_MST_PORT_DATA_WIDTH ( AXI_DATA_WIDTH     ),
+        .AXI_USER_WIDTH          ( AXI_USER_WIDTH     ),
+        .AXI_MAX_READS           ( 8                  )
+    ) i_up (
+        .clk_i,
+        .rst_ni,
+        .slv ( cluster   ),
+        .mst ( cluster_n )
+    );
+  end
 
   AXI_BUS #(
       .AXI_ADDR_WIDTH ( AXI_ADDR_WIDTH ),
@@ -98,55 +132,55 @@ module g6lc_ai_dram_join #(
   ) mux_mst ();
 
   // Cluster request, held until init_done. Payload is not rewritten.
-  assign mux_cl.aw_id     = cluster.aw_id;
-  assign mux_cl.aw_addr   = cluster.aw_addr;
-  assign mux_cl.aw_len    = cluster.aw_len;
-  assign mux_cl.aw_size   = cluster.aw_size;
-  assign mux_cl.aw_burst  = cluster.aw_burst;
-  assign mux_cl.aw_lock   = cluster.aw_lock;
-  assign mux_cl.aw_cache  = cluster.aw_cache;
-  assign mux_cl.aw_prot   = cluster.aw_prot;
-  assign mux_cl.aw_qos    = cluster.aw_qos;
-  assign mux_cl.aw_region = cluster.aw_region;
-  assign mux_cl.aw_atop   = cluster.aw_atop;
-  assign mux_cl.aw_user   = cluster.aw_user;
-  assign mux_cl.aw_valid  = init_done_i && cluster.aw_valid;
-  assign cluster.aw_ready = init_done_i && mux_cl.aw_ready;
+  assign mux_cl.aw_id     = cluster_n.aw_id;
+  assign mux_cl.aw_addr   = cluster_n.aw_addr;
+  assign mux_cl.aw_len    = cluster_n.aw_len;
+  assign mux_cl.aw_size   = cluster_n.aw_size;
+  assign mux_cl.aw_burst  = cluster_n.aw_burst;
+  assign mux_cl.aw_lock   = cluster_n.aw_lock;
+  assign mux_cl.aw_cache  = cluster_n.aw_cache;
+  assign mux_cl.aw_prot   = cluster_n.aw_prot;
+  assign mux_cl.aw_qos    = cluster_n.aw_qos;
+  assign mux_cl.aw_region = cluster_n.aw_region;
+  assign mux_cl.aw_atop   = cluster_n.aw_atop;
+  assign mux_cl.aw_user   = cluster_n.aw_user;
+  assign mux_cl.aw_valid  = init_done_i && cluster_n.aw_valid;
+  assign cluster_n.aw_ready = init_done_i && mux_cl.aw_ready;
 
-  assign mux_cl.w_data  = cluster.w_data;
-  assign mux_cl.w_strb  = cluster.w_strb;
-  assign mux_cl.w_last  = cluster.w_last;
-  assign mux_cl.w_user  = cluster.w_user;
-  assign mux_cl.w_valid = init_done_i && cluster.w_valid;
-  assign cluster.w_ready = init_done_i && mux_cl.w_ready;
+  assign mux_cl.w_data  = cluster_n.w_data;
+  assign mux_cl.w_strb  = cluster_n.w_strb;
+  assign mux_cl.w_last  = cluster_n.w_last;
+  assign mux_cl.w_user  = cluster_n.w_user;
+  assign mux_cl.w_valid = init_done_i && cluster_n.w_valid;
+  assign cluster_n.w_ready = init_done_i && mux_cl.w_ready;
 
-  assign cluster.b_id    = mux_cl.b_id;
-  assign cluster.b_resp  = mux_cl.b_resp;
-  assign cluster.b_user  = mux_cl.b_user;
-  assign cluster.b_valid = mux_cl.b_valid;
-  assign mux_cl.b_ready  = cluster.b_ready;
+  assign cluster_n.b_id    = mux_cl.b_id;
+  assign cluster_n.b_resp  = mux_cl.b_resp;
+  assign cluster_n.b_user  = mux_cl.b_user;
+  assign cluster_n.b_valid = mux_cl.b_valid;
+  assign mux_cl.b_ready  = cluster_n.b_ready;
 
-  assign mux_cl.ar_id     = cluster.ar_id;
-  assign mux_cl.ar_addr   = cluster.ar_addr;
-  assign mux_cl.ar_len    = cluster.ar_len;
-  assign mux_cl.ar_size   = cluster.ar_size;
-  assign mux_cl.ar_burst  = cluster.ar_burst;
-  assign mux_cl.ar_lock   = cluster.ar_lock;
-  assign mux_cl.ar_cache  = cluster.ar_cache;
-  assign mux_cl.ar_prot   = cluster.ar_prot;
-  assign mux_cl.ar_qos    = cluster.ar_qos;
-  assign mux_cl.ar_region = cluster.ar_region;
-  assign mux_cl.ar_user   = cluster.ar_user;
-  assign mux_cl.ar_valid  = init_done_i && cluster.ar_valid;
-  assign cluster.ar_ready = init_done_i && mux_cl.ar_ready;
+  assign mux_cl.ar_id     = cluster_n.ar_id;
+  assign mux_cl.ar_addr   = cluster_n.ar_addr;
+  assign mux_cl.ar_len    = cluster_n.ar_len;
+  assign mux_cl.ar_size   = cluster_n.ar_size;
+  assign mux_cl.ar_burst  = cluster_n.ar_burst;
+  assign mux_cl.ar_lock   = cluster_n.ar_lock;
+  assign mux_cl.ar_cache  = cluster_n.ar_cache;
+  assign mux_cl.ar_prot   = cluster_n.ar_prot;
+  assign mux_cl.ar_qos    = cluster_n.ar_qos;
+  assign mux_cl.ar_region = cluster_n.ar_region;
+  assign mux_cl.ar_user   = cluster_n.ar_user;
+  assign mux_cl.ar_valid  = init_done_i && cluster_n.ar_valid;
+  assign cluster_n.ar_ready = init_done_i && mux_cl.ar_ready;
 
-  assign cluster.r_id    = mux_cl.r_id;
-  assign cluster.r_data  = mux_cl.r_data;
-  assign cluster.r_resp  = mux_cl.r_resp;
-  assign cluster.r_last  = mux_cl.r_last;
-  assign cluster.r_user  = mux_cl.r_user;
-  assign cluster.r_valid = mux_cl.r_valid;
-  assign mux_cl.r_ready  = cluster.r_ready;
+  assign cluster_n.r_id    = mux_cl.r_id;
+  assign cluster_n.r_data  = mux_cl.r_data;
+  assign cluster_n.r_resp  = mux_cl.r_resp;
+  assign cluster_n.r_last  = mux_cl.r_last;
+  assign cluster_n.r_user  = mux_cl.r_user;
+  assign cluster_n.r_valid = mux_cl.r_valid;
+  assign mux_cl.r_ready  = cluster_n.r_ready;
 
   // ---- island filter: window, lock strip, outstanding cap, cluster priority ----
   logic [4:0] ar_out_q, aw_out_q;
@@ -172,8 +206,8 @@ module g6lc_ai_dram_join #(
 
   wire ar_room = (ar_out_q < 5'(AW_Q));
   wire aw_room = (aw_out_q < 5'(AW_Q)) && (aw_n_q < 5'(AW_Q));
-  wire cl_ar   = cluster.ar_valid;
-  wire cl_aw   = cluster.aw_valid;
+  wire cl_ar   = cluster_n.ar_valid;
+  wire cl_aw   = cluster_n.aw_valid;
   wire ar_in   = addr_in_dram(island_n.ar_addr, island_n.ar_len, island_n.ar_size);
   wire aw_in   = addr_in_dram(island_n.aw_addr, island_n.aw_len, island_n.aw_size);
   wire aw_head_local = aw_kind_q[aw_rd_q];

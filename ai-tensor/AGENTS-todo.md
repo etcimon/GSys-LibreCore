@@ -138,8 +138,22 @@ trail C-store, multi-out AR). See architecture analysis: contract → real devic
 - [ ] Deferred with measured basis: row-merged AR bursts (<1 % at 1.002-1.008 cy/beat on
   >= 64-beat rows), odd-N stores (even hidden sizes). Incremental row pointers are done
   by the flat pitch (row address is a shift). Reopen if skinny-K or odd-N workloads appear.
-- [ ] Record the r1/r2 flat SoC points (FP32 resident, KBOX=512 control) and T0 table.
-- [ ] Diffusion pipeline: BLOCKED on `diffusers` (not installed; no implicit installs).
+- [x] Flat SoC points recorded: FP32 1x256x1024 resident 2,700 cy (49.8x); KBOX=512 control
+  no hit; T0 table (dot4 4.07, mma 7.07 cy/op loop-inclusive).
+- [x] Slots SoC proof point: INT8 1x768x512 (512 + 256 panels) resident **1,304 cy, both
+  panels hit (39.3x)**.
+- [x] Intra-row trail store (`TrailMinPairs`/`TrailMinCols`): m=1 store tail hidden behind
+  the MAC; 1x32x16 bench 94 -> 76 cy; 156 records identical; all directed cases bit-exact.
+  SoC re-measure in `ai-bench-trail-20260929-r1`.
+- [x] Diffusers unblocked: `diffusers==0.39.0` (optional pin), `tools/qualify_diffusion.py`,
+  tiny-pipeline ladder records (INT8 60.4 dB > FP8 48.7 dB, BF16 71.3, INT8+conv2d 41.6);
+  `segmind/tiny-sd` pretrained: INT8 g128 FAIL (MAD 0.0205), **INT8 g64 PASS 35.0 dB**,
+  BF16 PASS 48.5 dB -> diffusion recipe of record INT8 K-group 64.
+- [x] SoC with intra-row trailing: INT8 1x512x512 resident 846 -> **590 cy (57.4x)**.
+- [x] B1 parity: `g6lc-g6lc64_ai` boots OpenSBI, queue smoke PASS on the real-repo model
+  (emitter symbol namespacing, ai-matrix node, field-wise payload, hart-0 park).
+- [ ] Record the 768 / FP32 trail points when `ai-bench-trail-20260929-r1` lands; make
+  `g6q_remote.py` check ssh/rsync exit codes (false green).
 - [ ] Framework: pinned pretrained LLM (decode loop, KV cache untouched) and one Diffusers
   pipeline through `replace_linear`, with offload ratio and quality metrics; INT8 path
   quality budget; persistent buffers instead of per-call byte packing on `qemu-uio`.

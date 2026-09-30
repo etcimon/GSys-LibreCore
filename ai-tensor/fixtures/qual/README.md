@@ -45,3 +45,29 @@ stream; FP16 there costs half of FP32 and is exact enough, while INT8/FP8 there 
 top-1 budget at any tested group size. FP8 (both encodings) is worse than INT8 at equal
 bytes on this model. Virtual evidence at live geometry; bytes are contract operand traffic,
 not a timing measurement.
+
+## Diffusion pipelines (`tools/qualify_diffusion.py`, schema `ai-tensor.qualify-diffusion.v1`)
+
+The denoiser's `nn.Linear` layers (and with `--conv2d` its ungrouped `nn.Conv2d` through
+im2col) are swapped for the island module; the same prompt is rendered at the same seed in
+FP32 and through the island, and the images are compared (PSNR in dB, mean absolute pixel
+difference, images in [0, 1]) against an explicit budget (default PSNR >= 30 dB, MAD <= 0.02,
+zero fallbacks). Scheduler, VAE and text encoder stay in float unless named in `--components`.
+
+| record | pipeline | recipe | layers | PSNR | MAD | verdict |
+|---|---|---|---|---|---|---|
+| `tiny-sd-pipe-int8-dynamic.json` | `hf-internal-testing/tiny-stable-diffusion-pipe@3ee6c9f2` (random-weight UNet, plumbing/quality-ordering fixture) | W8A8 K-group 128 | 74 Linear | 60.4 dB | 7e-4 | **PASS** |
+| `tiny-sd-pipe-fp8-e4m3.json` | same | FP8 E4M3 K-group 128 | 74 | 48.7 dB | 2.8e-3 | **PASS** (worse than INT8 at equal bytes, as on the LLM) |
+| `tiny-sd-pipe-bf16.json` | same | BF16 cast, K chained through `accmode=01` | 74 | 71.3 dB | 2e-4 | **PASS** |
+| `tiny-sd-pipe-int8-dynamic-conv2d.json` | same, `--conv2d` | W8A8 K-group 128, Linear + im2col Conv2d | 121 | 41.6 dB | 6.3e-3 | **PASS** |
+| `segmind-tiny-sd-int8-dynamic-g128.json` | `segmind/tiny-sd@cad0bd74` (pretrained 512x512 distilled SD, 3 steps) | W8A8 K-group 128 | 101 Linear | 30.7 dB | 0.0205 | FAIL (MAD budget 0.02; retained) |
+| `segmind-tiny-sd-int8-dynamic-g64.json` | same | W8A8 K-group 64 | 101 | 35.0 dB | 0.0124 | **PASS** |
+| `segmind-tiny-sd-bf16.json` | same | BF16 cast, K chained through `accmode=01` | 101 | 48.5 dB | 0.0026 | **PASS** |
+
+The tiny test pipeline has random weights: its records prove the offload path and the
+recipe ordering, not perceptual quality. The pretrained `segmind/tiny-sd` records are the
+quality data: the UNet is more K-group-sensitive than GPT-2 (g128 misses the MAD budget by
+2.5 %, g64 clears it with 4 dB to spare), so the diffusion recipe of record is **INT8 K-group
+64** (or BF16 where bytes allow). Island passes run on the software reference (549 s vs 33 s
+for FP32 torch on this host) -- a virtual-execution cost, not a device projection. Budgets are inferred (PSNR 30 dB is the usual "visually identical"
+threshold for 8-bit images) and await ratification.

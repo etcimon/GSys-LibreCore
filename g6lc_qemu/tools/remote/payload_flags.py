@@ -49,7 +49,8 @@ def compile_flags(
     layout = ai.get("desc_layout") or {}
     fields = layout.get("fields") or {}
 
-    ai_base = _peripheral_base(model, ["ai-island"])
+    # DTS node ids: `ai-island` (fixtures) or `ai-matrix` (the board DTS / UIO of_id).
+    ai_base = _peripheral_base(model, ["ai-island", "ai-matrix"])
     if ai_base is None:
         raise ValueError("the model has no ai-island peripheral base")
     desc_base = cfg.get("desc_base")
@@ -101,7 +102,13 @@ def compile_flags(
             break
 
     # The smoke payload uses the four scalar shape fields and the done pointer.
+    # `version` and `op` too: the payload stores them as the two halfwords the layout
+    # names, not as a hard-coded `version<<16 | op` pack -- the v2 layout keeps
+    # version at [15:0] and op at [31:16], the reverse of the older fixture, and
+    # a swapped pack fails the engine's version check (ST_BAD_VER) silently.
     needed = {
+        "version": "AI_OFF_VERSION",
+        "op": "AI_OFF_OP",
         "m": "AI_OFF_M",
         "n": "AI_OFF_N",
         "k": "AI_OFF_K",

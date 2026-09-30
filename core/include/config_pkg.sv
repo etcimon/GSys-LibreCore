@@ -224,6 +224,37 @@ package config_pkg;
     QosClasses: 32'd1
   };
 
+  /// The live FP island's core-side view for island-only benches and synthesis
+  /// (g6lc64_ai_config_pkg's `ai_cfg` with the T0-plane fields at their test
+  /// minimum): IslandFpEn without VaTurboEn and without the policy blocks, so a
+  /// gate can measure the FP datapath alone. Not a core package.
+  localparam ai_cfg_t AiCfgIslandFpTest = '{
+    MatrixEn: 1'b1,
+    AccelEn: 1'b0,
+    TileLdEn: 1'b0,
+    RequantEn: 1'b0,
+    SparseEn: 1'b0,
+    UmodeEn: 1'b0,
+    PolicyCodecEn: 1'b0,
+    PolicyBenefitEn: 1'b0,
+    PolicySubcodeEn: 1'b0,
+    PolicySubcodeCacheEn: 1'b0,
+    VaTurboEn: 1'b0,
+    IslandFpEn: 1'b1,
+    Int4En: 1'b0,
+    Sparse24En: 1'b0,
+    FormatMask: 32'h0000_0001,
+    TileM: 32'd8,
+    TileN: 32'd8,
+    TileK: 32'd8,
+    TileCount: 32'd1,
+    AccBanks: 32'd1,
+    AccDepth: 32'd8,
+    Queues: 32'd1,
+    QueueDepth: 32'd4,
+    QosClasses: 32'd1
+  };
+
   /// -------------------------------------------------------------------------
   /// Numeric-format bit positions (`ai_cfg_t.FormatMask`, `aicfg.numfmt`,
   /// descriptor `flags.numfmt`, island `CAP_OFF_DTYPE_MASK`).
@@ -944,10 +975,15 @@ package config_pkg;
     // choosing a parameter combination -- fail elaboration instead of building a
     // core that silently drops illegal-instruction exceptions. Lift this once the
     // offload path covers all NrIssuePorts.
-    assert (!(Cfg.CvxifEn && Cfg.NrIssuePorts > 1))
-    else
-      $fatal(1,
-             "[cfg] CvxifEn with NrIssuePorts>1 is unsound: CVXIF offload is port-0 only, so an illegal instruction on another port never traps");
+    // CvxifEn with NrIssuePorts>1 (2026-09-30, WP4 of the AI scaling plan): sound
+    // because issue_read_operands steers CSR/CVXIF to port 0 -- `fus_busy[p].cvxif`
+    // is forced for every p >= 1, so a CVXIF-class instruction on a later port waits
+    // until it is the oldest and is then offered to the coprocessor on port 0, where
+    // a rejected (illegal) encoding traps precisely. The contract is asserted at the
+    // issue stage (`cvxif_valid_o[p>0] == 0`, always) and exercised by
+    // verif/tests/custom/ai/mini_ai_dual_issue.S. The former elaboration ban
+    // ("offload is port-0 only, so an illegal instruction on another port never
+    // traps") predates the steering and is retired with it.
     assert (Cfg.INSTR_PER_FETCH >= 1);
     // Support for disabling MIP.MSIP and MIE.MSIE in Hypervisor and Supervisor mode is not supported
     // Software Interrupt can be disabled when there is only M machine mode in CVA6.

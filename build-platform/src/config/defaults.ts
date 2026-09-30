@@ -680,6 +680,22 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
+        // Scaling ladder (architecture/ai-matrix/scaling-100tops.md, V1..V4): SKU literal
+        // legality + nameplates, the flat-panel/stripe/slot bounded proof, the V2 column
+        // array on the backend bench at OutCols 1/2/4 (OutCols=1 cycle-identical), and the
+        // derived ladder table. Local, minutes; SoC and synthesis points are remote gates.
+        id: "ai-scale-ladder",
+        description:
+          "OPTIONAL local: AI island scaling ladder -- SKU literals, bounded formal, V2 column array at OutCols 1/2/4 on the 8-lane bench, derived V1..V4 table (derived, not measured).",
+        script: "verif/regress/ai-scale-ladder.sh",
+        group: "benchmark",
+        target: "g6lc64_ai",
+        dvSimulators: "veri-testharness",
+        tools: ["verilator"],
+        openSource: true,
+        optional: true,
+      },
+      {
         // The full bench matrix on the SoC model (bench SKU: island VaTurboEn + IslandFpEn +
         // all-format grant, `G6LC_AI_TB_BENCH_SKU`, library work-ver-ai-bench):
         // [GEMM x 7 formats x MxNxK shapes x {mmio, ai.enq} x {cold, reuse_a, reuse_b}] from
@@ -1605,6 +1621,11 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // candidates. These are the L2 rung of the feedback-latency ladder: a
       // violation is a counterexample in seconds instead of a firmware pin ten
       // million cycles downstream.
+      // AI island GEMM sequencer: flat-panel pitch/capacity, row disjointness, burst
+      // length, DRAM stripe cap and resident-B slot placement over the pure functions
+      // of g6lc_ai_island_cfg_pkg the sequencer's address paths call. Swept over the
+      // 8-lane bench and the 512-lane live geometries (WP2 of the AI scaling plan).
+      "corev_apu/ai_island/formal/g6lc_ai_gemm_flat.sby",
       "core/fetch_B/formal/g6lc_fetch_align.sby",
       "core/fetch_B/formal/g6lc_fetch_order.sby",
       "core/fetch_B/formal/g6lc_fetch_redirect.sby",
@@ -2012,6 +2033,16 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         ],
       },
       // --- core: fetch bounded formal present (L2 rung) --------------------
+      {
+        id: "diag-ai-formal-paths",
+        description: "AI island bounded-formal property packages on disk (flat panel, stripe cap, slots).",
+        compartment: "core",
+        kind: "path-check",
+        paths: [
+          "corev_apu/ai_island/formal/g6lc_ai_gemm_flat.sby",
+          "corev_apu/ai_island/formal/g6lc_ai_gemm_flat_props.sv",
+        ],
+      },
       {
         id: "diag-fetch-formal-paths",
         description: "Fetch bounded-formal property packages on disk (I3/I5, I2/I7, I8).",

@@ -1,0 +1,58 @@
+{
+  "backend": "software-reference-v2",
+  "budget": {
+    "mad": 0.02,
+    "psnr_db": 30.0
+  },
+  "caps": {
+    "acc_tile_k": 512,
+    "acc_tile_m": 1024,
+    "acc_tile_n": 512,
+    "accumulate": true,
+    "bank_a_bytes": 0,
+    "bank_b_bytes": 0,
+    "clusters": 1,
+    "compute_ref": true,
+    "dtype_mask": 251,
+    "macs_per_cycle": 512,
+    "noc_width": 64
+  },
+  "components": [
+    "unet"
+  ],
+  "conv2d": false,
+  "evidence": "virtual execution of the descriptor contract; not hardware timing or silicon",
+  "group_k": 128,
+  "image_shape": [
+    64,
+    64,
+    3
+  ],
+  "layers_replaced": 74,
+  "layers_skipped": [],
+  "max_abs_diff": 0.00488048791885376,
+  "mean_abs_diff": 0.0007249849319729643,
+  "model": "hf-internal-testing/tiny-stable-diffusion-pipe",
+  "offload_ratio": 1.0,
+  "offload_stats": {
+    "fallback_calls": 0,
+    "offloaded_blocks": 240,
+    "offloaded_calls": 222
+  },
+  "pass": true,
+  "prompt": "a small red boat on a calm lake at sunrise, oil painting",
+  "psnr_db": 60.41246204608511,
+  "quant": "int8-dynamic",
+  "revision": "3ee6c9f225f088ad5d35b624b6514b091e6a4849",
+  "schema": "ai-tensor.qualify-diffusion.v1",
+  "seconds_island": 1.1219720840454102,
+  "seconds_reference": 0.2637147903442383,
+  "seed": 0,
+  "skip": [],
+  "steps": 3,
+  "verdict": {
+    "mad_within_budget": true,
+    "no_fallback": true,
+    "psnr_within_budget": true
+  }
+}

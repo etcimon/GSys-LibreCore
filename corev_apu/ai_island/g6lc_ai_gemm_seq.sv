@@ -47,7 +47,15 @@ module g6lc_ai_gemm_seq #(
     parameter int unsigned MaxM      = 0,
     parameter int unsigned MaxN      = 0,
     parameter int unsigned MaxK      = 0,
-    parameter int unsigned PeLanes   = 4,  // parallel MACs / cycle (power of 2 preferred)
+    parameter int unsigned PeLanes   = 4,  // K lanes per dot (power of two)
+    // V2 column array: OutCols dot units share one A word and each reads its own
+    // B row, so OutCols consecutive output columns complete per K step and the
+    // MAC rate is OutCols x PeLanes. B is banked by column group (j % OutCols),
+    // each group OperandWordsB/OutCols words, so the byte capacity is unchanged.
+    // 1 is the single-dot engine (bit- and cycle-identical to the pre-V2 RTL).
+    // Accumulate-mode jobs run one column at a time (their seed read owns the
+    // single C read port); columns past n are masked.
+    parameter int unsigned OutCols   = 1,
     parameter bit          DotPipeFloat = 1'b0, // 0: combinational g6lc_ai_pe_dot_float; 1: pipelined dot product with valid handshake
     parameter int unsigned MaxAROut  = 2,  // I3: multi-outstanding AR; live = 2
     // Shared DRAM stripe (g6lc_ai_island_cfg_pkg). N=1 leaves MaxBurstBeats
@@ -132,6 +140,10 @@ module g6lc_ai_gemm_seq #(
       OperandWordsA : OperandWordsB;
   localparam int unsigned OperandBankAddrW = (OperandBankWords > 1) ? $clog2(OperandBankWords) : 1;
   localparam int unsigned LaneW        = (PeLanes > 1) ? $clog2(PeLanes) : 1;
+  localparam int unsigned ColShift     = (OutCols > 1) ? $clog2(OutCols) : 0;
+  localparam int unsigned ColW         = (OutCols > 1) ? $clog2(OutCols) : 1;
+  // B bank words per column group (the flat pitch applies per group).
+  localparam int unsigned OperandWordsBGrp = OperandWordsB >> ColShift;
   // Flat panel mapping (K-split-to-residency): operand rows are stored at a
   // per-job pitch of 2^pitch_sh_q bank words (pitch = next power of two of
   // ceil(k_bytes / PeLanes)), not at the fixed LimK pitch. The K box therefore
@@ -187,6 +199,8 @@ module g6lc_ai_gemm_seq #(
                   PeLanes, DataWidth / 8);
     assert ((PeLanes & (PeLanes - 1)) == 0)
       else $error("g6lc_ai_gemm_seq: PeLanes=%0d must be a power of two (flat panel pitch is a shift)", PeLanes);
+    assert (OutCols >= 1 && (OutCols & (OutCols - 1)) == 0 && OutCols <= PeLanes && OutCols <= LimN)
+      else $error("g6lc_ai_gemm_seq: OutCols=%0d must be a power of two, <= PeLanes and <= LimN", OutCols);
   end
   // pragma translate_on
 
@@ -212,12 +226,16 @@ module g6lc_ai_gemm_seq #(
   // i,j element indices; t is reduction base (multiple of PeLanes during MAC
   // for INT8, multiple of 2*PeLanes for INT4)
   logic [31:0] i_q, j_q, t_q;
-  logic [31:0] acc_q, acc_d;
+  logic [31:0] acc_q [OutCols];
+  logic [31:0] acc_d [OutCols];
   // F0b-2: one-cycle pipeline between the PE's pure reduction and the
   // accumulator. The pipeline carries not just the sum, but the i/j address
   // and first/last flags, because the C write and accumulator reset now happen
   // one cycle after the operands were issued.
-  logic [31:0] sum_q, sum_d;
+  logic [31:0] sum_q [OutCols];
+  logic [31:0] sum_d [OutCols];
+  logic        sum_cv_q [OutCols];  // column g of the drained group is a real column
+  logic        sum_cv_d [OutCols];
   logic        sum_v_q, sum_v_d;
   logic        sum_first_q, sum_first_d;
   logic        sum_last_q, sum_last_d;
@@ -305,6 +323,14 @@ module g6lc_ai_gemm_seq #(
   // whose C writes have committed; i_q==m means issue, not retirement, finished.
   localparam int unsigned RowCountW = (LimM < 2) ? 1 : $clog2(64'(LimM) + 64'd1);
   logic [RowCountW-1:0] c_rows_done_q;
+  // Intra-row trailing (single-row / decode jobs): the C row being computed is
+  // stored pair by pair behind the MAC. `c_cols_row_q` is the row of the last C
+  // write and `c_cols_done_q` the number of its columns written so far (the MAC
+  // writes columns in order), so a burst may cover pairs strictly below that
+  // count. Only the even-n pair path trails inside a row; odd n keeps the
+  // row-complete rule (AI-X8 kept its single/pair transition out of the MAC).
+  logic [RowCountW-1:0] c_cols_row_q;
+  logic [31:0]          c_cols_done_q;
   logic        c_pair_hold_q, c_pair_hold_d;
   logic [31:0] c_lo_q;
   logic        c_lo_we_d;
@@ -324,12 +350,12 @@ module g6lc_ai_gemm_seq #(
   logic [OperandBankAddrW-1:0] a_w_addr [PeLanes];
   logic [7:0]           a_w_data [PeLanes];
 
-  logic                 b_r_req  [PeLanes];
-  logic [OperandBankAddrW-1:0] b_r_addr [PeLanes];
-  logic [7:0]           b_r_data [PeLanes];
-  logic                 b_w_req  [PeLanes];
-  logic [OperandBankAddrW-1:0] b_w_addr [PeLanes];
-  logic [7:0]           b_w_data [PeLanes];
+  logic                 b_r_req  [OutCols][PeLanes];
+  logic [OperandBankAddrW-1:0] b_r_addr [OutCols][PeLanes];
+  logic [7:0]           b_r_data [OutCols][PeLanes];
+  logic                 b_w_req  [OutCols][PeLanes];
+  logic [OperandBankAddrW-1:0] b_w_addr [OutCols][PeLanes];
+  logic [7:0]           b_w_data [OutCols][PeLanes];
   // AI-X9: the I3 same-bank multi-write ports (w2..w8) are gone. They existed
   // only because a row-major B burst ran along j and therefore landed a whole
   // beat in ONE bank. k-major B spreads a beat across PeLanes banks at one
@@ -338,10 +364,33 @@ module g6lc_ai_gemm_seq #(
   // C multi-bank (bank = j % PeLanes). Dual concurrent reads for pair-store:
   // j and j+1 always hit different banks when PeLanes >= 2 (live: 128).
   logic                 c_r0_req, c_r1_req, c_w_req;
+  // Extra C write ports for output columns 1..OutCols-1 (column 0 uses c_w_*).
+  // Consecutive columns land in distinct banks (OutCols <= PeLanes), so every
+  // bank sees at most one writer per cycle.
+  logic                 c_wx_req  [OutCols];
+  logic [LaneW-1:0]     c_wx_bank [OutCols];
+  logic [BankAddrW-1:0] c_wx_addr [OutCols];
+  logic [31:0]          c_wx_data [OutCols];
   logic [LaneW-1:0]     c_r0_bank, c_r1_bank, c_w_bank;
   logic [BankAddrW-1:0] c_r0_addr, c_r1_addr, c_w_addr;
   logic [31:0]          c_r0_data, c_r1_data, c_w_data;
   logic [31:0]          c_r_data_b [PeLanes];
+  logic                 c_wp_req  [PeLanes];
+  logic [BankAddrW-1:0] c_wp_addr [PeLanes];
+  logic [31:0]          c_wp_data [PeLanes];
+  always_comb begin
+    for (int unsigned p = 0; p < PeLanes; p++) begin
+      c_wp_req[p]  = c_w_req && (c_w_bank == LaneW'(p));
+      c_wp_addr[p] = c_w_addr;
+      c_wp_data[p] = c_w_data;
+      for (int unsigned g = 1; g < OutCols; g++)
+        if (c_wx_req[g] && c_wx_bank[g] == LaneW'(p)) begin
+          c_wp_req[p]  = 1'b1;
+          c_wp_addr[p] = c_wx_addr[g];
+          c_wp_data[p] = c_wx_data[g];
+        end
+    end
+  end
   // Alias for single-element paths (single store / MAC write uses r0)
   logic                 c_r_req;
   logic [LaneW-1:0]     c_r_bank;
@@ -372,16 +421,17 @@ module g6lc_ai_gemm_seq #(
     );
   end
 
+  for (genvar g = 0; g < int'(OutCols); g++) begin : gen_b_grp
   for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_b_banks
     g6lc_ai_tile_sram #(
-        .NumWords (OperandWordsB),
+        .NumWords (OperandWordsBGrp),
         .DataWidth(8),
         .NumPorts (2),  // AI-X9: 1R1W, same as A (was 8 for the oct drain)
         .ImplKey  ("g6lc_ai_tile_b")
     ) i_tile_b (
         .clk_i, .rst_ni, .testmode_i,
-        .r_req_i (b_r_req[p]), .r_addr_i(b_r_addr[p]), .r_data_o(b_r_data[p]),
-        .w_req_i (b_w_req[p]), .w_addr_i(b_w_addr[p]), .w_data_i(b_w_data[p]),
+        .r_req_i (b_r_req[g][p]), .r_addr_i(b_r_addr[g][p]), .r_data_o(b_r_data[g][p]),
+        .w_req_i (b_w_req[g][p]), .w_addr_i(b_w_addr[g][p]), .w_data_i(b_w_data[g][p]),
         .w2_req_i(1'b0), .w2_addr_i('0), .w2_data_i('0),
         .w3_req_i(1'b0), .w3_addr_i('0), .w3_data_i('0),
         .w4_req_i(1'b0), .w4_addr_i('0), .w4_data_i('0),
@@ -390,6 +440,7 @@ module g6lc_ai_gemm_seq #(
         .w7_req_i(1'b0), .w7_addr_i('0), .w7_data_i('0),
         .w8_req_i(1'b0), .w8_addr_i('0), .w8_data_i('0)
     );
+  end
   end
 
   for (genvar p = 0; p < int'(PeLanes); p++) begin : gen_c_banks
@@ -405,9 +456,9 @@ module g6lc_ai_gemm_seq #(
                   (c_r1_req && (c_r1_bank == LaneW'(p)))),
         .r_addr_i((c_r1_req && (c_r1_bank == LaneW'(p))) ? c_r1_addr : c_r0_addr),
         .r_data_o(c_r_data_b[p]),
-        .w_req_i (c_w_req && (c_w_bank == LaneW'(p))),
-        .w_addr_i(c_w_addr),
-        .w_data_i(c_w_data),
+        .w_req_i (c_wp_req[p]),
+        .w_addr_i(c_wp_addr[p]),
+        .w_data_i(c_wp_data[p]),
         .w2_req_i(1'b0), .w2_addr_i('0), .w2_data_i('0),
         .w3_req_i(1'b0), .w3_addr_i('0), .w3_data_i('0),
         .w4_req_i(1'b0), .w4_addr_i('0), .w4_data_i('0),
@@ -432,32 +483,48 @@ module g6lc_ai_gemm_seq #(
 
   // PE: multi-lane MAC (driven only in ST_MAC)
   logic signed [7:0] pe_a [PeLanes];
-  logic signed [7:0] pe_b [PeLanes];
+  logic signed [7:0] pe_b [OutCols][PeLanes];
   logic        [31:0] pe_a_float [PeLanes];
-  logic        [31:0] pe_b_float [PeLanes];
+  logic        [31:0] pe_b_float [OutCols][PeLanes];
   logic              pe_v [PeLanes];
-  logic       [31:0] pe_sum;
-  logic       [31:0] pe_sum_int;
-  logic       [31:0] pe_sum_float;
+  logic       [31:0] pe_sum [OutCols];
+  logic       [31:0] pe_sum_int [OutCols];
+  logic       [31:0] pe_sum_float [OutCols];
+  // Column g of the current group is a real output column (masked past n; a
+  // single column in accumulate mode).
+  logic              col_v [OutCols];
+  logic [31:0]       cols_eff;
+  assign cols_eff = acc_mode_q ? 32'd1 : 32'(OutCols);
+  // B column group feeding dot g: col_grp(j_q + g). With the OutCols stride this
+  // is g itself; accumulate mode advances one column at a time, so dot 0 must
+  // follow the column's own group.
+  logic [ColW-1:0]   grp_of [OutCols];
+  always_comb for (int unsigned g = 0; g < OutCols; g++) grp_of[g] = col_grp(j_q + 32'(g));
+  // Registers only (j_q, n_q, acc_mode_q): its own process so no read-data path
+  // feeds back into the bank-request process through it.
+  always_comb for (int unsigned g = 0; g < OutCols; g++)
+    col_v[g] = (32'(g) < cols_eff) && (j_q + 32'(g) < n_q);
 
-  // Integer/INT4 path
-  g6lc_ai_pe_dot #(.Lanes(PeLanes)) i_pe_int (
-      .a_i     (pe_a),
-      .b_i     (pe_b),
-      .valid_i (pe_v),
-      .numfmt_i(numfmt_q),
-      .sum_o   (pe_sum_int)
-  );
+  for (genvar g = 0; g < int'(OutCols); g++) begin : gen_pe_cols
+    // Integer/INT4 path
+    g6lc_ai_pe_dot #(.Lanes(PeLanes)) i_pe_int (
+        .a_i     (pe_a),
+        .b_i     (pe_b[g]),
+        .valid_i (pe_v),
+        .numfmt_i(numfmt_q),
+        .sum_o   (pe_sum_int[g])
+    );
 
-  // Floating path (FP8/FP16/BF16/FP32) — combinational baseline
-  g6lc_ai_pe_dot_float #(.Lanes(PeLanes)) i_pe_float (
-      .a_i     (pe_a_float),
-      .b_i     (pe_b_float),
-      .valid_i (pe_v),
-      .numfmt_i(numfmt_q),
-      .sum_o   (pe_sum_float),
-      .flags_o ()
-  );
+    // Floating path (FP8/FP16/BF16/FP32) — combinational baseline
+    g6lc_ai_pe_dot_float #(.Lanes(PeLanes)) i_pe_float (
+        .a_i     (pe_a_float),
+        .b_i     (pe_b_float[g]),
+        .valid_i (pe_v),
+        .numfmt_i(numfmt_q),
+        .sum_o   (pe_sum_float[g]),
+        .flags_o ()
+    );
+  end
 
   // Pipelined floating dot-product handshake
   // dot_start is asserted with each MAC issue; dot_sum/dot_first/... are valid
@@ -468,7 +535,8 @@ module g6lc_ai_gemm_seq #(
 
   logic dot_start;
   logic dot_valid;
-  logic [31:0] dot_sum;
+  logic [31:0] dot_sum [OutCols];
+  logic        dot_cv_out [OutCols];
   logic dot_first_out, dot_last_out;
   logic [31:0] dot_i_out, dot_j_out;
   logic dot_first_issue, dot_last_issue;
@@ -479,21 +547,29 @@ module g6lc_ai_gemm_seq #(
 
   generate
     if (DotPipeFloat) begin : gen_dot_pipe
-      g6lc_ai_pe_dot_float_pipe #(.Lanes(PeLanes)) i_pe_float_pipe (
-          .clk_i    (clk_i),
-          .rst_ni   (rst_ni),
-          .start_i  (dot_start),
-          .a_i      (pe_a_float),
-          .b_i      (pe_b_float),
-          .valid_i  (pe_v),
-          .numfmt_i (numfmt_q),
-          .sum_o    (dot_sum),
-          .flags_o  (),
-          .valid_o  (dot_valid)
-      );
+      logic dot_valid_col [OutCols];
+      for (genvar g = 0; g < int'(OutCols); g++) begin : gen_dot_pipe_cols
+        g6lc_ai_pe_dot_float_pipe #(.Lanes(PeLanes)) i_pe_float_pipe (
+            .clk_i    (clk_i),
+            .rst_ni   (rst_ni),
+            .start_i  (dot_start),
+            .a_i      (pe_a_float),
+            .b_i      (pe_b_float[g]),
+            .valid_i  (pe_v),
+            .numfmt_i (numfmt_q),
+            .sum_o    (dot_sum[g]),
+            .flags_o  (),
+            .valid_o  (dot_valid_col[g])
+        );
+      end
+      // All column pipes share start and latency; column 0 is the handshake.
+      assign dot_valid = dot_valid_col[0];
 
       logic [DOT_LATENCY-1:0] dot_first_pipe, dot_last_pipe;
       logic [DOT_LATENCY-1:0][31:0] dot_i_pipe, dot_j_pipe;
+      logic [DOT_LATENCY-1:0][OutCols-1:0] dot_cv_pipe;
+      logic [OutCols-1:0] col_v_vec;
+      always_comb for (int unsigned g = 0; g < OutCols; g++) col_v_vec[g] = col_v[g];
 
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (!rst_ni) begin
@@ -501,6 +577,7 @@ module g6lc_ai_gemm_seq #(
           dot_last_pipe  <= '0;
           dot_i_pipe     <= '0;
           dot_j_pipe     <= '0;
+          dot_cv_pipe    <= '0;
         end else begin
           dot_first_pipe <= {dot_first_pipe[DOT_LATENCY-2:0],
                              dot_start ? dot_first_issue : 1'b0};
@@ -510,6 +587,8 @@ module g6lc_ai_gemm_seq #(
                              dot_start ? dot_i_issue : 32'd0};
           dot_j_pipe     <= {dot_j_pipe[DOT_LATENCY-2:0],
                              dot_start ? dot_j_issue : 32'd0};
+          dot_cv_pipe    <= {dot_cv_pipe[DOT_LATENCY-2:0],
+                             dot_start ? col_v_vec : {OutCols{1'b0}}};
         end
       end
 
@@ -517,9 +596,10 @@ module g6lc_ai_gemm_seq #(
       assign dot_last_out  = dot_last_pipe[DOT_LATENCY-1];
       assign dot_i_out     = dot_i_pipe[DOT_LATENCY-1];
       assign dot_j_out     = dot_j_pipe[DOT_LATENCY-1];
+      always_comb for (int unsigned g = 0; g < OutCols; g++) dot_cv_out[g] = dot_cv_pipe[DOT_LATENCY-1][g];
     end else begin : gen_dot_float_comb
       assign dot_valid     = 1'b0;
-      assign dot_sum       = '0;
+      always_comb for (int unsigned g = 0; g < OutCols; g++) begin dot_sum[g] = '0; dot_cv_out[g] = 1'b0; end
       assign dot_first_out = 1'b0;
       assign dot_last_out  = 1'b0;
       assign dot_i_out     = '0;
@@ -539,7 +619,8 @@ module g6lc_ai_gemm_seq #(
   // Static per job (numfmt_q is latched at start), so this is a configuration
   // select rather than a per-cycle mux in the MAC's critical path.
   assign pe_float_en = (numfmt_q inside {3'd3, 3'd4, 3'd5, 3'd6, 3'd7});
-  assign pe_sum = pe_float_en ? pe_sum_float : pe_sum_int;
+  always_comb for (int unsigned g = 0; g < OutCols; g++)
+    pe_sum[g] = pe_float_en ? pe_sum_float[g] : pe_sum_int[g];
 
   // ---------------------------------------------------------------------------
   // F1-F5 format scaling: bytes per element for the live numerical formats.
@@ -565,23 +646,19 @@ module g6lc_ai_gemm_seq #(
   assign k_bytes = fmt_row_bytes(k_q);
 
   // Row pitch of the operand banks for this job (see the flat-panel note above).
-  function automatic logic [PitchShW-1:0] ceil_log2_rt(input logic [31:0] v);
-    logic [PitchShW-1:0] sh;
-    sh = '0;
-    for (int unsigned s = 0; s < (1 << PitchShW); s++)
-      if ((32'd1 << s) < v) sh = PitchShW'(s + 1);
-    return sh;
-  endfunction
-  logic [31:0]         row_words_c;
+  // The arithmetic is g6lc_ai_island_cfg_pkg's flat-panel functions, proven bounded
+  // in corev_apu/ai_island/formal/g6lc_ai_gemm_flat_props.sv.
   logic [PitchShW-1:0] pitch_sh_c, pitch_sh_q;
   logic                cap_ok_c;
-  assign row_words_c = (k_bytes + 32'(PeLanes) - 32'd1) >> LaneShift;
-  assign pitch_sh_c  = ceil_log2_rt(row_words_c);
+  assign pitch_sh_c  = PitchShW'(g6lc_ai_island_cfg_pkg::ai_flat_pitch_shift(k_bytes, LaneShift));
   // Byte-capacity box: both operand panels must fit their banks at this pitch,
   // and k must fit the 16-bit lda/ldb it is compared against.
+  // B rows are spread over OutCols groups of OperandWordsBGrp words each.
+  logic [31:0] n_grp_c;
+  assign n_grp_c = (n_q + 32'(OutCols) - 32'd1) >> ColShift;
   assign cap_ok_c = k_q <= 32'h0000_FFFF &&
-                    (n_q << pitch_sh_c) <= 32'(OperandWordsB) &&
-                    (m_q << pitch_sh_c) <= 32'(OperandWordsA);
+                    g6lc_ai_island_cfg_pkg::ai_flat_fits(n_grp_c, pitch_sh_c, OperandWordsBGrp) &&
+                    g6lc_ai_island_cfg_pkg::ai_flat_fits(m_q, pitch_sh_c, OperandWordsA);
 
   // F0b-2: the accumulator is now fed from the PIPELINE register, so
   // `mac_acc_next` is a function of state (sum_q, acc_q) rather than of the
@@ -609,8 +686,8 @@ module g6lc_ai_gemm_seq #(
   // ST_MAC. Landing that needs its own verification pass: the C-write port is
   // shared with the trail-store path in ST_MAC, so moving the MAC write one
   // cycle later changes that arbitration.
-  logic [31:0] mac_acc_next;
-  logic [36:0] mac_fp32_add;
+  logic [31:0] mac_acc_next [OutCols];
+  logic [36:0] mac_fp32_add [OutCols];
   // Float tiles accumulate with RNE FP32 addition; integer tiles with i32 add.
   // Timing note: fp32_add is a combinational decode/align/add/normalise block.
   // Together with the multi-byte gather mux it lengthens the MAC combinational
@@ -622,12 +699,18 @@ module g6lc_ai_gemm_seq #(
   // starting from zero, so a K-split chained through C is one ordered reduction.
   logic [31:0] mac_seed;
   logic [36:0] mac_fp32_seed_add;
+  // The seed (accumulate mode) belongs to column 0: accumulate jobs run one
+  // column at a time, so no other column ever needs it.
   assign mac_seed          = acc_mode_q ? c_r0_data : 32'd0;
-  assign mac_fp32_seed_add = g6lc_ai_fp_pkg::fp32_add(mac_seed, sum_q);
-  assign mac_fp32_add = g6lc_ai_fp_pkg::fp32_add(acc_q, sum_q);
-  assign mac_acc_next = pe_float_en
-      ? (sum_first_q ? (acc_mode_q ? mac_fp32_seed_add[31:0] : sum_q) : mac_fp32_add[31:0])
-      : ((sum_first_q ? mac_seed : acc_q) + sum_q);
+  assign mac_fp32_seed_add = g6lc_ai_fp_pkg::fp32_add(mac_seed, sum_q[0]);
+  always_comb begin
+    for (int unsigned g = 0; g < OutCols; g++) begin
+      mac_fp32_add[g] = g6lc_ai_fp_pkg::fp32_add(acc_q[g], sum_q[g]);
+      mac_acc_next[g] = pe_float_en
+          ? (sum_first_q ? ((acc_mode_q && g == 0) ? mac_fp32_seed_add[31:0] : sum_q[g]) : mac_fp32_add[g][31:0])
+          : ((sum_first_q ? ((g == 0) ? mac_seed : 32'd0) : acc_q[g]) + sum_q[g]);
+    end
+  end
 
   logic reuse_b_skip_q, reuse_b_safe;
   // Row base of the B panel in the operand bank: 0, or the slot's half when the
@@ -635,7 +718,8 @@ module g6lc_ai_gemm_seq #(
   logic [OperandBankAddrW-1:0] b_base_q;
   if (ReuseBEn) begin : gen_reuse_b
     localparam int unsigned SlotsB     = (ReuseBSlots < 1) ? 1 : ReuseBSlots;
-    localparam int unsigned SlotWordsB = OperandWordsB / SlotsB;
+    // Slot words are group-local (each column group holds 1/OutCols of a panel).
+    localparam int unsigned SlotWordsB = OperandWordsBGrp / SlotsB;
     localparam int unsigned SlotW      = (SlotsB > 1) ? $clog2(SlotsB) : 1;
     logic [SlotsB-1:0] valid_q, big_q, hit_vec;
     logic cacheable_q, invalidated_q, hit_any;
@@ -665,7 +749,7 @@ module g6lc_ai_gemm_seq #(
     end
     assign hit_any = |hit_vec;
     // Fits one slot at this job's pitch; otherwise the panel takes the whole bank.
-    assign small_c = SlotsB > 1 && (n_q << pitch_sh_c) <= 32'(SlotWordsB);
+    assign small_c = SlotsB > 1 && g6lc_ai_island_cfg_pkg::ai_slot_small(n_grp_c, pitch_sh_c, SlotWordsB);
 
     assign b_span = 32'(n_q - 32'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes;
     assign c_span = (32'(m_q) * 32'(n_q)) << 2;
@@ -723,7 +807,7 @@ module g6lc_ai_gemm_seq #(
           // one takes the whole bank and evicts every other slot. A small panel
           // landing next to a "big" resident also evicts it (they overlap).
           if (small_c) begin
-            b_base_q <= OperandBankAddrW'(32'(cur_q) * SlotWordsB);
+            b_base_q <= OperandBankAddrW'(g6lc_ai_island_cfg_pkg::ai_slot_base(cur_q, SlotWordsB));
             big_q[cur_q] <= 1'b0;
             for (int unsigned s = 0; s < SlotsB; s++)
               if (SlotW'(s) != cur_q && big_q[s]) valid_q[s] <= 1'b0;
@@ -967,18 +1051,10 @@ module g6lc_ai_gemm_seq #(
       input logic [31:0] rem,
       input logic [BeatLaneW-1:0] lane0
   );
-    automatic logic [31:0] first, after, more, total;
-    if (rem == 0) return 8'd1;
-    first = 32'(BytesPerBeat) - 32'(lane0);
-    if (first > rem) first = rem;
-    after = rem - first;
     // Elements absorbed per beat is min(BytesPerBeat, PeLanes), both powers of
     // two, so the ceiling division is a constant shift (no divider cell).
-    more  = (after + 32'(ElemsPerBeat) - 32'd1) >> ElemsPerBeatShift;
-    total = 32'd1 + more;
-    if (total > MaxBurstBeats) total = MaxBurstBeats;
-    if (total == 0) total = 1;
-    return total[7:0];
+    return 8'(g6lc_ai_island_cfg_pkg::ai_beats_for_rem(rem, 32'(lane0), BytesPerBeat,
+                                                       ElemsPerBeatShift, MaxBurstBeats));
   endfunction
 
   // N=1: identity (return nb). N>1: do not cross DramChanShift stripe.
@@ -1074,13 +1150,17 @@ module g6lc_ai_gemm_seq #(
   function automatic logic [OperandBankAddrW-1:0] a_bank_addr(
       input logic [31:0] i, t
   );
-    return OperandBankAddrW'((i << pitch_sh_q) + (t >> LaneShift));
+    return OperandBankAddrW'(g6lc_ai_island_cfg_pkg::ai_flat_row_word(i, pitch_sh_q, t, LaneShift));
   endfunction
 
+  // Column group of B row j and its row index inside the group.
+  function automatic logic [ColW-1:0] col_grp(input logic [31:0] j);
+    return ColW'(j & 32'(OutCols - 1));
+  endfunction
   function automatic logic [OperandBankAddrW-1:0] b_bank_addr(
       input logic [31:0] t, j
   );
-    return OperandBankAddrW'((j << pitch_sh_q) + (t >> LaneShift)) + b_base_q;
+    return OperandBankAddrW'(g6lc_ai_island_cfg_pkg::ai_flat_row_word(j >> ColShift, pitch_sh_q, t, LaneShift)) + b_base_q;
   endfunction
 
   // C bank map: bank = j % PeLanes; local = i * KPerBank + j / PeLanes
@@ -1095,6 +1175,19 @@ module g6lc_ai_gemm_seq #(
   endfunction
 
   logic [AddrWidth-1:0] a_cur, b_cur, a_ar_cur, b_ar_cur, c_store_addr;
+  // The trail store may run: the cursor row is complete, or (even n) it is the
+  // row under computation and at least one whole pair beyond the cursor is written.
+  // A burst inside the row waits for TrailMinPairs written pairs, and rows shorter
+  // than TrailMinCols are stored only once complete: on a 16-column row the split
+  // into two AWs cost 2-5 cycles on the 8-lane bench, while a 512-column decode row
+  // hides its whole ~n/2-beat store tail behind the MAC (778 -> ~530 cycles).
+  localparam int unsigned TrailMinPairs = 4;
+  localparam int unsigned TrailMinCols  = 32;
+  logic trail_ready;
+  assign trail_ready = stc_i_q < 32'(c_rows_done_q) ||
+                       (!n_q[0] && n_q >= 32'(TrailMinCols) &&
+                        32'(c_cols_row_q) == stc_i_q &&
+                        c_cols_done_q >= stc_j_q + 32'(2 * TrailMinPairs));
   // Receive cursors (tile write / MAC)
   assign a_cur        = a_addr(pa_q, i_q, t_q, lda_q);
   assign b_cur        = b_addr(pb_q, t_q, j_q, ldb_q);
@@ -1112,15 +1205,23 @@ module g6lc_ai_gemm_seq #(
     for (int unsigned p = 0; p < PeLanes; p++) begin
       a_r_req[p] = 1'b0;
       a_r_addr[p] = '0;
-      b_r_req[p] = 1'b0;
-      b_r_addr[p] = '0;
+      for (int unsigned g = 0; g < OutCols; g++) begin
+        b_r_req[g][p] = 1'b0;
+        b_r_addr[g][p] = '0;
+      end
       byte_idx = byte_base + 32'(p);
       if (state_q == ST_MAC && i_q < m_q &&
           ((numfmt_q == 3'd1) ? t_q + 32'(p << 1) < k_q : byte_idx < k_bytes)) begin
         a_r_req[p] = 1'b1;
         a_r_addr[p] = a_bank_addr(i_q, byte_idx);
-        b_r_req[p] = 1'b1;
-        b_r_addr[p] = b_bank_addr(byte_idx, j_q);
+        // Static destination index (a dynamic first index on the write side is a
+        // read-modify-write of the array to a synthesis frontend -> logic loop).
+        for (int unsigned g = 0; g < OutCols; g++)
+          for (int unsigned gg = 0; gg < OutCols; gg++)
+            if (col_v[g] && grp_of[g] == ColW'(gg)) begin
+              b_r_req[gg][p] = 1'b1;
+              b_r_addr[gg][p] = b_bank_addr(byte_idx, j_q + 32'(g));
+            end
       end
     end
   end
@@ -1128,9 +1229,9 @@ module g6lc_ai_gemm_seq #(
   always_comb begin
     logic trail, pair_store;
     logic [31:0] beats_done, column;
-    trail = state_q == ST_MAC && DualCRead && DataWidth >= 64 && dot_pending_q == '0 &&
-        !acc_mode_q && stc_i_q < 32'(c_rows_done_q);
     pair_store = DataWidth >= 64 && !n_q[0];
+    trail = state_q == ST_MAC && DualCRead && DataWidth >= 64 && dot_pending_q == '0 &&
+        !acc_mode_q && trail_ready;
     beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
     column = stc_j_q + (beats_done << 1);
     c_r0_req = 1'b0;
@@ -1170,10 +1271,12 @@ module g6lc_ai_gemm_seq #(
     t_byte_base = numfmt_q == 3'd1 ? t_q >> 1 : t_q << ai_fmt_shift();
     for (int unsigned p = 0; p < PeLanes; p++) begin
       pe_a[p] = '0;
-      pe_b[p] = '0;
       pe_a_float[p] = '0;
-      pe_b_float[p] = '0;
       pe_v[p] = 1'b0;
+      for (int unsigned g = 0; g < OutCols; g++) begin
+        pe_b[g][p] = '0;
+        pe_b_float[g][p] = '0;
+      end
     end
     if (state_q == ST_MAC && i_q < m_q) begin
       for (int unsigned p = 0; p < PeLanes; p++) begin
@@ -1188,8 +1291,9 @@ module g6lc_ai_gemm_seq #(
             // remaining nibble and computes two products, one of which is 0.
             pe_a[p] = {(e1 < k_q) ? a_r_data[p][7:4] : 4'b0000,
                        (e0 < k_q) ? a_r_data[p][3:0] : 4'b0000};
-            pe_b[p] = {(e1 < k_q) ? b_r_data[p][7:4] : 4'b0000,
-                       (e0 < k_q) ? b_r_data[p][3:0] : 4'b0000};
+            for (int unsigned g = 0; g < OutCols; g++)
+              pe_b[g][p] = {(e1 < k_q) ? b_r_data[grp_of[g]][p][7:4] : 4'b0000,
+                            (e0 < k_q) ? b_r_data[grp_of[g]][p][3:0] : 4'b0000};
             pe_v[p] = 1'b1;
           end
         end else begin
@@ -1200,7 +1304,8 @@ module g6lc_ai_gemm_seq #(
           byte_idx = t_byte_base + 32'(p);
           if (byte_idx < k_bytes) begin
             pe_a[p] = $signed(a_r_data[p]);
-            pe_b[p] = $signed(b_r_data[p]);
+            for (int unsigned g = 0; g < OutCols; g++)
+              pe_b[g][p] = $signed(b_r_data[grp_of[g]][p]);
           end
         end
       end
@@ -1226,19 +1331,23 @@ module g6lc_ai_gemm_seq #(
             case (ai_fmt_bytes())
               32'd1: begin
                 pe_a_float[e] = {24'b0, a_r_data[off]};
-                pe_b_float[e] = {24'b0, b_r_data[off]};
+                for (int unsigned g = 0; g < OutCols; g++)
+                  pe_b_float[g][e] = {24'b0, b_r_data[grp_of[g]][off]};
               end
               32'd2: begin
                 pe_a_float[e] = {16'b0, a_r_data[off+1], a_r_data[off]};
-                pe_b_float[e] = {16'b0, b_r_data[off+1], b_r_data[off]};
+                for (int unsigned g = 0; g < OutCols; g++)
+                  pe_b_float[g][e] = {16'b0, b_r_data[grp_of[g]][off+1], b_r_data[grp_of[g]][off]};
               end
               32'd4: begin
                 pe_a_float[e] = {a_r_data[off+3], a_r_data[off+2], a_r_data[off+1], a_r_data[off]};
-                pe_b_float[e] = {b_r_data[off+3], b_r_data[off+2], b_r_data[off+1], b_r_data[off]};
+                for (int unsigned g = 0; g < OutCols; g++)
+                  pe_b_float[g][e] = {b_r_data[grp_of[g]][off+3], b_r_data[grp_of[g]][off+2],
+                                      b_r_data[grp_of[g]][off+1], b_r_data[grp_of[g]][off]};
               end
               default: begin
                 pe_a_float[e] = 32'd0;
-                pe_b_float[e] = 32'd0;
+                for (int unsigned g = 0; g < OutCols; g++) pe_b_float[g][e] = 32'd0;
               end
             endcase
             pe_v[e] = 1'b1;
@@ -1254,14 +1363,22 @@ module g6lc_ai_gemm_seq #(
       a_w_req[p]  = 1'b0;
       a_w_addr[p] = '0;
       a_w_data[p] = '0;
-      b_w_req[p]  = 1'b0;
-      b_w_addr[p] = '0;
-      b_w_data[p] = '0;
+      for (int unsigned g = 0; g < OutCols; g++) begin
+        b_w_req[g][p]  = 1'b0;
+        b_w_addr[g][p] = '0;
+        b_w_data[g][p] = '0;
+      end
     end
     c_w_req  = 1'b0;
     c_w_bank = '0;
     c_w_addr = '0;
     c_w_data = '0;
+    for (int unsigned g = 0; g < OutCols; g++) begin
+      c_wx_req[g]  = 1'b0;
+      c_wx_bank[g] = '0;
+      c_wx_addr[g] = '0;
+      c_wx_data[g] = '0;
+    end
 
     axi_req_d = '0;
     axi_req_d.b_ready  = 1'b0;
@@ -1283,9 +1400,12 @@ module g6lc_ai_gemm_seq #(
     axi_req_d.w.strb   = '0;
 
     state_d     = state_q;
-    acc_d       = acc_q;
+    for (int unsigned g = 0; g < OutCols; g++) begin
+      acc_d[g]    = acc_q[g];
+      sum_d[g]    = '0;
+      sum_cv_d[g] = 1'b0;
+    end
     // F0b-2: pipeline defaults (and empty-pipe on state entry).
-    sum_d       = '0;
     sum_v_d     = 1'b0;
     sum_first_d = 1'b0;
     sum_last_d  = 1'b0;
@@ -1380,7 +1500,7 @@ module g6lc_ai_gemm_seq #(
           if (ReuseAEn && reuse_a_skip_q && reuse_a_safe && !reuse_a_invalidate_i) begin
             if (ReuseBEn && reuse_b_skip_q && reuse_b_safe && !reuse_b_invalidate_i) begin
               state_d = ST_MAC;
-              acc_d   = '0;
+              for (int unsigned g = 0; g < OutCols; g++) acc_d[g] = '0;
             end else
               state_d = ST_LB;
           end
@@ -1514,7 +1634,7 @@ module g6lc_ai_gemm_seq #(
               !reuse_b_invalidate_i && !err_q &&
               !(axi_resp_s.r_valid && axi_req_d.r_ready && axi_resp_s.r.resp[1])) begin
             state_d = ST_MAC;
-            acc_d = '0;
+            for (int unsigned g = 0; g < OutCols; g++) acc_d[g] = '0;
             ar_inflight_d = '0;
             ar_i_en = 1'b1; ar_i_d = '0;
             ar_j_en = 1'b1; ar_j_d = '0;
@@ -1618,17 +1738,20 @@ module g6lc_ai_gemm_seq #(
               if (32'(p) < n_take) begin
                 automatic logic [31:0] tt;
                 tt = recv_t + 32'(p);
-                b_w_req [t_bank(tt)] = 1'b1;
-                b_w_addr[t_bank(tt)] = b_bank_addr(tt, recv_j);
-                b_w_data[t_bank(tt)] = byte_from_beat(
-                    axi_resp_s.r.data, BeatLaneW'(unsigned'(lane0) + p));
+                for (int unsigned gg = 0; gg < OutCols; gg++)
+                  if (col_grp(recv_j) == ColW'(gg)) begin
+                    b_w_req [gg][t_bank(tt)] = 1'b1;
+                    b_w_addr[gg][t_bank(tt)] = b_bank_addr(tt, recv_j);
+                    b_w_data[gg][t_bank(tt)] = byte_from_beat(
+                        axi_resp_s.r.data, BeatLaneW'(unsigned'(lane0) + p));
+                  end
               end
             end
             if (axi_resp_s.r.last)
               ar_lane_pop_en = 1'b1;
             if (!SplitArId && (t_q + n_take >= k_bytes) && (j_q + 1 == n_q)) begin
               state_d = ST_MAC;
-              acc_d   = '0;
+              for (int unsigned g = 0; g < OutCols; g++) acc_d[g] = '0;
             end else
               state_d = ST_LB;
           end
@@ -1653,7 +1776,7 @@ module g6lc_ai_gemm_seq #(
           if (SplitArId) begin
             if ((ar_j_en ? ar_j_d : ar_j_q) >= n_q && ar_inflight_d == '0) begin
               state_d = ST_MAC;
-              acc_d   = '0;
+              for (int unsigned g = 0; g < OutCols; g++) acc_d[g] = '0;
             end
           end else if (state_d == ST_MAC)
             ar_inflight_d = '0;
@@ -1688,8 +1811,7 @@ module g6lc_ai_gemm_seq #(
           // still has to write its C bank, and that write must not race an AXI
           // read of the same bank from the store side.
           can_trail  = DualCRead && (DataWidth >= 64) && !acc_mode_q &&
-                       (dot_pending_q == '0) &&
-                       stc_i_q < 32'(c_rows_done_q);
+                       (dot_pending_q == '0) && trail_ready;
 
           // ---- drain the previous issue -----------------------------------
           // The previous cycle's sum is now stable; add it to the accumulator
@@ -1699,12 +1821,23 @@ module g6lc_ai_gemm_seq #(
           // in-flight sum drains even when the issue cursor has already
           // reached i_q == m and no new operands are being fed.
           if (sum_v_q) begin
-            acc_d = mac_acc_next;
-            if (sum_last_q) begin
-              c_w_req  = 1'b1;
-              c_w_bank = c_bank(sum_j_q);
-              c_w_addr = c_bank_addr(sum_i_q, sum_j_q);
-              c_w_data = mac_acc_next;
+            for (int unsigned g = 0; g < OutCols; g++) begin
+              if (sum_cv_q[g]) begin
+                acc_d[g] = mac_acc_next[g];
+                if (sum_last_q) begin
+                  if (g == 0) begin
+                    c_w_req  = 1'b1;
+                    c_w_bank = c_bank(sum_j_q);
+                    c_w_addr = c_bank_addr(sum_i_q, sum_j_q);
+                    c_w_data = mac_acc_next[0];
+                  end else begin
+                    c_wx_req[g]  = 1'b1;
+                    c_wx_bank[g] = c_bank(sum_j_q + 32'(g));
+                    c_wx_addr[g] = c_bank_addr(sum_i_q, sum_j_q + 32'(g));
+                    c_wx_data[g] = mac_acc_next[g];
+                  end
+                end
+              end
             end
           end
 
@@ -1722,14 +1855,17 @@ module g6lc_ai_gemm_seq #(
             if (DotPipeFloat && pe_float_en) begin
               // Dot output is captured directly in the main always_ff below;
               // these always_comb values are not used for the pipelined path.
-              sum_d      = '0;
+              for (int unsigned g = 0; g < OutCols; g++) sum_d[g] = '0;
               sum_v_d    = 1'b0;
               sum_first_d= 1'b0;
               sum_last_d = 1'b0;
               sum_i_d    = '0;
               sum_j_d    = '0;
             end else begin
-              sum_d      = pe_sum;
+              for (int unsigned g = 0; g < OutCols; g++) begin
+                sum_d[g]    = pe_sum[g];
+                sum_cv_d[g] = col_v[g];
+              end
               sum_v_d    = 1'b1;
               sum_first_d= (t_q == 0);
               sum_last_d = last_step;
@@ -1765,6 +1901,10 @@ module g6lc_ai_gemm_seq #(
               if (!aw_sent_q) begin
                 pairs_rem = (n_q - stc_j_q) >> 1;
                 nbeats    = pairs_rem;
+                // Inside the row still being computed only the pairs whose C words
+                // are already written may be burst; the AW length is fixed at issue.
+                if (!(stc_i_q < 32'(c_rows_done_q)) && nbeats > ((c_cols_done_q - stc_j_q) >> 1))
+                  nbeats = (c_cols_done_q - stc_j_q) >> 1;
                 if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
                 nbeats    = cap_c_nbeats(c_store_addr, nbeats);
                 if (nbeats == 0) nbeats = 1;
@@ -1922,7 +2062,7 @@ module g6lc_ai_gemm_seq #(
             if (!lc_ar_busy_q) state_d = ST_DONE;
           end else if (lc_e_q >= lc_total_q && !lc_buf_v_q && !lc_ar_busy_q) begin
             state_d = ST_MAC;
-            acc_d   = '0;
+            for (int unsigned g = 0; g < OutCols; g++) acc_d[g] = '0;
           end
         end
       end
@@ -2086,7 +2226,7 @@ module g6lc_ai_gemm_seq #(
       acc_mode_q <= 1'b0;
       pa_q <= '0; pb_q <= '0; pc_q <= '0;
       i_q <= '0; j_q <= '0; t_q <= '0;
-      acc_q <= '0;
+      for (int unsigned g = 0; g < OutCols; g++) begin acc_q[g] <= '0; sum_q[g] <= '0; sum_cv_q[g] <= 1'b0; end
       pitch_sh_q <= '0;
       err_q <= 1'b0;
       done_q <= 1'b0;
@@ -2098,7 +2238,6 @@ module g6lc_ai_gemm_seq #(
       ar_t_q <= '0;
       ar_j_q <= '0;
       // F0b-2: the reduction pipeline is empty at reset.
-      sum_q      <= '0;
       sum_v_q    <= 1'b0;
       sum_first_q<= 1'b0;
       sum_last_q <= 1'b0;
@@ -2115,25 +2254,33 @@ module g6lc_ai_gemm_seq #(
       stc_i_q <= '0;
       stc_j_q <= '0;
       c_rows_done_q <= '0;
+      c_cols_row_q <= '0;
+      c_cols_done_q <= '0;
       dot_pending_q <= '0;
       pmu_r_q  <= '0;
       pmu_w_q  <= '0;
       pmu_cy_q <= '0;
     end else begin
       state_q       <= state_d;
-      acc_q         <= acc_d;
+      for (int unsigned g = 0; g < OutCols; g++) acc_q[g] <= acc_d[g];
       // F0b-2: advance the pipeline stage. For the pipelined floating path the
       // dot product valid/data are sampled directly from the pipe output; the
       // integer path continues to use the combinational `sum_*_d` values.
       if (DotPipeFloat && pe_float_en) begin
-        sum_q       <= dot_valid ? dot_sum : '0;
+        for (int unsigned g = 0; g < OutCols; g++) begin
+          sum_q[g]    <= dot_valid ? dot_sum[g] : '0;
+          sum_cv_q[g] <= dot_valid ? dot_cv_out[g] : 1'b0;
+        end
         sum_v_q     <= dot_valid;
         sum_first_q <= dot_valid ? dot_first_out : 1'b0;
         sum_last_q  <= dot_valid ? dot_last_out  : 1'b0;
         sum_i_q     <= dot_valid ? dot_i_out     : '0;
         sum_j_q     <= dot_valid ? dot_j_out     : '0;
       end else begin
-        sum_q       <= sum_d;
+        for (int unsigned g = 0; g < OutCols; g++) begin
+          sum_q[g]    <= sum_d[g];
+          sum_cv_q[g] <= sum_cv_d[g];
+        end
         sum_v_q     <= sum_v_d;
         sum_first_q <= sum_first_d;
         sum_last_q  <= sum_last_d;
@@ -2211,8 +2358,16 @@ module g6lc_ai_gemm_seq #(
                          - ((dot_valid && dot_pending_q != '0) ? 1'd1 : 1'd0)
                        : '0;
       if (c_lo_we_d)   c_lo_q <= c_r_data;
-      if (c_w_req && sum_j_q + 32'd1 == n_q)
+      // Column 0 of a group always writes when the group completes, and the
+      // group's valid columns are consecutive from sum_j_q, so the written count
+      // is min(sum_j_q + cols_eff, n) -- except in ST_LC, whose C writes are the
+      // seed load and not MAC progress.
+      if (state_q == ST_MAC && c_w_req && sum_j_q + cols_eff >= n_q)
         c_rows_done_q <= RowCountW'(sum_i_q) + RowCountW'(1);
+      if (state_q == ST_MAC && c_w_req) begin
+        c_cols_row_q  <= RowCountW'(sum_i_q);
+        c_cols_done_q <= (sum_j_q + cols_eff > n_q) ? n_q : sum_j_q + cols_eff;
+      end
       done_q        <= (state_q == ST_DONE);
 
       // I3: accumulate traffic while job is running
@@ -2255,6 +2410,8 @@ module g6lc_ai_gemm_seq #(
         stc_i_q  <= '0;
         stc_j_q  <= '0;
         c_rows_done_q <= '0;
+        c_cols_row_q <= '0;
+        c_cols_done_q <= '0;
         pmu_r_q  <= '0;
         pmu_w_q  <= '0;
         pmu_cy_q <= '0;
@@ -2323,11 +2480,11 @@ module g6lc_ai_gemm_seq #(
       if (state_q == ST_MAC && i_q < m_q) begin
         if (t_q + mac_step >= k_q) begin
           t_q   <= '0;
-          if (j_q + 1 == n_q) begin
+          if (j_q + cols_eff >= n_q) begin
             j_q <= '0;
             i_q <= i_q + 1;  // becomes m when last row completes
           end else
-            j_q <= j_q + 1;
+            j_q <= j_q + cols_eff;
         end else
           t_q <= t_q + mac_step;
       end
@@ -2381,5 +2538,50 @@ module g6lc_ai_gemm_seq #(
       end
     end
   end
+
+  // ---------------------------------------------------------------------------
+  // Layer contracts (L3 of the feedback-latency ladder): fire on the cycle of the
+  // violation in every simulation -- backend bench, island gates, SoC suite --
+  // instead of surfacing as a wrong C word or a stray AXI beat downstream. Each
+  // rule is the run-time face of a property proven over the pure functions in
+  // corev_apu/ai_island/formal/g6lc_ai_gemm_flat_props.sv. Simulation only.
+  // ---------------------------------------------------------------------------
+  // pragma translate_off
+  always_ff @(posedge clk_i) if (rst_ni) begin
+    // C1  Operand bank writes/reads stay inside the panel banks.
+    for (int unsigned p = 0; p < PeLanes; p++) begin
+      if (a_w_req[p]) assert (32'(a_w_addr[p]) < OperandWordsA)
+        else $error("g6lc_ai_gemm_seq C1: A bank write %0d beyond OperandWordsA %0d", a_w_addr[p], OperandWordsA);
+      for (int unsigned g = 0; g < OutCols; g++)
+        if (b_w_req[g][p]) assert (32'(b_w_addr[g][p]) < OperandWordsBGrp)
+          else $error("g6lc_ai_gemm_seq C1: B bank write %0d beyond OperandWordsBGrp %0d", b_w_addr[g][p], OperandWordsBGrp);
+      if (a_r_req[p] && state_q == ST_MAC) assert (32'(a_r_addr[p]) < OperandWordsA)
+        else $error("g6lc_ai_gemm_seq C1: A bank read %0d beyond OperandWordsA", a_r_addr[p]);
+      for (int unsigned g = 0; g < OutCols; g++)
+        if (b_r_req[g][p] && state_q == ST_MAC) assert (32'(b_r_addr[g][p]) < OperandWordsBGrp)
+          else $error("g6lc_ai_gemm_seq C1: B bank read %0d beyond OperandWordsBGrp", b_r_addr[g][p]);
+    end
+    // C2  C bank writes stay inside the result bank.
+    if (c_w_req) assert (32'(c_w_addr) < BankWords)
+      else $error("g6lc_ai_gemm_seq C2: C bank write %0d beyond BankWords %0d", c_w_addr, BankWords);
+    // C3  No AXI burst crosses a DRAM channel stripe (N>1 only; N=1 is one channel).
+    if (NrChannels > 1 && axi_req_d.ar_valid)
+      assert (g6lc_ai_island_cfg_pkg::dram_burst_fits_stripe(NrChannels, ChanShift, 64'(axi_req_d.ar.addr),
+                                                   (32'(axi_req_d.ar.len) + 32'd1) << axi_req_d.ar.size))
+        else $error("g6lc_ai_gemm_seq C3: AR burst at %h len %0d crosses the %0d B stripe",
+                    axi_req_d.ar.addr, axi_req_d.ar.len, 1 << ChanShift);
+    if (NrChannels > 1 && axi_req_d.aw_valid)
+      assert (g6lc_ai_island_cfg_pkg::dram_burst_fits_stripe(NrChannels, ChanShift, 64'(axi_req_d.aw.addr),
+                                                   (32'(axi_req_d.aw.len) + 32'd1) << axi_req_d.aw.size))
+        else $error("g6lc_ai_gemm_seq C3: AW burst at %h len %0d crosses the %0d B stripe",
+                    axi_req_d.aw.addr, axi_req_d.aw.len, 1 << ChanShift);
+    // C4  The trail store never reads a C pair the MAC has not written yet (intra-row
+    //     trailing is bounded by the written-column count).
+    if (state_q == ST_MAC && c_r0_req && !acc_mode_q && !(stc_i_q < 32'(c_rows_done_q)))
+      assert (32'(c_cols_row_q) == stc_i_q && 32'(c_r0_addr) <= c_bank_addr(stc_i_q, c_cols_done_q - 32'd1))
+        else $error("g6lc_ai_gemm_seq C4: trail store reads C row %0d word %0d beyond %0d written columns",
+                    stc_i_q, c_r0_addr, c_cols_done_q);
+  end
+  // pragma translate_on
 
 endmodule

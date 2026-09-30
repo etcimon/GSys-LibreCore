@@ -21,6 +21,8 @@ OUT="${AI_BENCH_OUT:-/tmp/ai-ops-bench}"
 CASES="${AI_BENCH_CASES:-measure,measure_k,measure_reuse}"
 # measure_reuse needs the reuse blocks elaborated; harmless for the other cases.
 export REVIEW_AI_REUSE="${AI_BENCH_REUSE_EN:-1}"
+# V2 column array: AI_BENCH_OUT_COLS=2/4 elaborates the sequencer with that many output columns.
+export REVIEW_AI_OUT_COLS="${AI_BENCH_OUT_COLS:-}"
 DPFS="${AI_BENCH_DPF:-0 1}"
 VLT_ROOT="${AI_BENCH_VERILATOR_ROOT:-$HOME/tools/verilator-v5.008}"
 [[ -x "$VLT_ROOT/bin/verilator" ]] || { echo "[ai-ops-bench] Verilator 5.008 not found at $VLT_ROOT (set AI_BENCH_VERILATOR_ROOT)"; exit 2; }

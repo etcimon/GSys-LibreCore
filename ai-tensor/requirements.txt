@@ -1,3 +1,8 @@
 # Optional host tooling only (package logic is Rust + stdlib Python).
 # torch is optional for python/examples/torch_island_smoke.py
 # torch>=2.0
+# Framework qualification tools (tools/qualify_llm.py, tools/va_select.py,
+# tools/qualify_diffusion.py) additionally need the pinned framework packages below.
+# Nothing here is installed implicitly; the tests skip when a package is absent.
+# transformers>=4.40      # pinned LLM checkpoints (distilgpt2 records)
+# diffusers==0.39.0       # pinned Diffusers pipelines (fixtures/qual/*diffusion* records)

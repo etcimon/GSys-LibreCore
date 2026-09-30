@@ -1,0 +1,33 @@
+# AI island GEMM sequencer: flat-panel mapping, stripe cap, slot placement (bounded).
+# Combinational contracts over g6lc_ai_island_cfg_pkg's pure functions, swept over
+# the two geometries in use (8-lane bench, 512-lane live island) and the two
+# channel counts that matter for the stripe cap.
+#
+# Run: sby -f corev_apu/ai_island/formal/g6lc_ai_gemm_flat.sby          (all tasks)
+#      sby -f corev_apu/ai_island/formal/g6lc_ai_gemm_flat.sby live     (one task)
+# Wired into build-platform verify.formalTasks (cva6-build verify --formal).
+#
+# -DFORMAL is mandatory: the properties live under `ifdef FORMAL`.
+
+[tasks]
+bench
+live
+live4ch
+
+[options]
+mode prove
+depth 2
+
+[engines]
+abc pdr
+smtbmc z3
+
+[script]
+bench:   read_slang --std 1800-2017 --keep-hierarchy --top g6lc_ai_gemm_flat_props -DFORMAL -G LS=3 -G WORDS=2048 -G SLOTS=2 -G BPB=8 -G EPBS=3 -G NCH=2 -G CSH=6 g6lc_ai_island_cfg_pkg.sv g6lc_ai_gemm_flat_props.sv
+live:    read_slang --std 1800-2017 --keep-hierarchy --top g6lc_ai_gemm_flat_props -DFORMAL -G LS=9 -G WORDS=2048 -G SLOTS=2 -G BPB=8 -G EPBS=3 -G NCH=1 -G CSH=6 g6lc_ai_island_cfg_pkg.sv g6lc_ai_gemm_flat_props.sv
+live4ch: read_slang --std 1800-2017 --keep-hierarchy --top g6lc_ai_gemm_flat_props -DFORMAL -G LS=9 -G WORDS=2048 -G SLOTS=2 -G BPB=64 -G EPBS=6 -G NCH=4 -G CSH=6 g6lc_ai_island_cfg_pkg.sv g6lc_ai_gemm_flat_props.sv
+prep -top g6lc_ai_gemm_flat_props
+
+[files]
+../../include/g6lc_ai_island_cfg_pkg.sv
+g6lc_ai_gemm_flat_props.sv

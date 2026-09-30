@@ -181,13 +181,72 @@ def report_soc(rows, args):
     return 0
 
 
+# Scaling ladder (architecture/ai-matrix/scaling-100tops.md; g6lc_ai_island_cfg_pkg
+# AiIslandV1WidePort..V4Octo). Nameplates from the literals; tb_g6lc_ai_scale_ladder pins
+# them at elaboration. Every cycle figure below is DERIVED from measured per-beat and
+# per-issue costs at a smaller geometry, never a measurement of the SKU.
+LADDER = [
+    # name, clusters, MAC/cycle/cluster, bytes/cycle (port), GHz, memory class
+    ("live", 1, 512, 8, 2.0, "class 0 sim, 64-bit"),
+    ("V1 wide port", 1, 512, 64, 2.0, "class 0 sim, 512-bit channel"),
+    ("V2 column array", 1, 4096, 64, 2.0, "class 0 sim, 512-bit channel"),
+    ("V3 quad", 4, 4096, 64, 1.5, "class 2 nameplate 400 GB/s"),
+    ("V4 octo", 8, 4096, 64, 1.5, "class 2 nameplate 400 GB/s"),
+]
+# Canonical archetype shapes (m, n, k, element bytes): A1 decode, A2 prefill, A3 conv im2col.
+LADDER_SHAPES = [
+    ("A1 decode 1x4096x4096 INT8", 1, 4096, 4096, 1),
+    ("A1 decode 1x4096x4096 BF16", 1, 4096, 4096, 2),
+    ("A2 prefill 512x4096x4096 INT8", 512, 4096, 4096, 1),
+    ("A3 conv 4096x256x1152 INT8", 4096, 256, 1152, 1),
+]
+
+
+def report_sku(cy_per_beat, store_bytes_per_cycle):
+    """Derived ladder: cold cycles = A+B operand beats x measured cycles/beat + MAC issue cycles
+    (outputs x K steps / columns) + the C store tail (4 bytes per output at the store rate),
+    with load and MAC overlapping only through the trail store (i.e. summed, an upper bound).
+    Clusters split N. Resident (VA) drops the B beats. Reported per SKU as TOPS nameplate,
+    balance and cycles; tok/s at batch 1 is the A1 row and is never converted to TOPS."""
+    print(f"ladder (derived from cycles/beat={cy_per_beat:.3f} measured on the SoC bench SKU; store {store_bytes_per_cycle} B/cycle)")
+    print(f"{'SKU':18} {'TOPS':>7} {'MAC/B':>6} | " + " | ".join(f"{n[:22]:>22}" for n, *_ in LADDER_SHAPES))
+    for name, clusters, macs, bpc, ghz, mem in LADDER:
+        tops = 2 * clusters * macs * ghz / 1000.0
+        cols = [f"{tops:7.2f}", f"{clusters * macs // bpc:6d}"]
+        cells = []
+        for _, m, n, k, eb in LADDER_SHAPES:
+            lanes = 512 if macs >= 512 else macs
+            out_cols = max(1, macs // lanes)
+            n_cl = -(-n // clusters)
+            a_bytes, b_bytes = m * k * eb, n_cl * k * eb
+            beats = (a_bytes + b_bytes) / bpc
+            ksteps = -(-(k * eb) // lanes)
+            mac = m * (-(-n_cl // out_cols)) * ksteps
+            store = m * n_cl * 4 / min(bpc, store_bytes_per_cycle)
+            cold = beats * cy_per_beat + mac + store
+            resident = (a_bytes / bpc) * cy_per_beat + mac + store
+            us = cold / (ghz * 1000.0)
+            cells.append(f"{int(cold):>10d}/{int(resident):>8d} {us:6.1f}us")
+        print(f"{name:18} {cols[0]} {cols[1]} | " + " | ".join(f"{c:>22}" for c in cells))
+    print("cells: cold/resident cycles, cold wall time at the SKU clock; A1 rows are the batch-1 regime "
+          "(bytes-bound: only bytes/cycle moves them); derived, not measured; class-2 memory is a nameplate.")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("root")
+    ap.add_argument("root", nargs="?", default=None)
     ap.add_argument("--json")
     ap.add_argument("--soc", action="store_true", help="read AI_JOB records from ai_bench.log (SoC bench)")
     ap.add_argument("--lanes", type=int, default=512, help="PE lanes of the SoC model (live 512)")
+    ap.add_argument("--sku", action="store_true", help="derived scaling-ladder table (no records needed)")
+    ap.add_argument("--cy-per-beat", type=float, default=1.005, help="measured B-stream cycles/beat (SoC bench SKU: 1.002-1.008)")
+    ap.add_argument("--store-bpc", type=int, default=8, help="C store bytes/cycle (8-byte pairs today)")
     args = ap.parse_args()
+    if args.sku:
+        return report_sku(args.cy_per_beat, args.store_bpc)
+    if not args.root:
+        ap.error("root is required unless --sku")
     raw = parse_soc(args.root, args.lanes) if args.soc else parse(args.root)
     extra = ("acc", "path", "reuse", "pass", "job", "shape", "hit_b", "hit_a")
     rows = [dict(derive(d), **{k: d[k] for k in extra if k in d}) for d in raw]

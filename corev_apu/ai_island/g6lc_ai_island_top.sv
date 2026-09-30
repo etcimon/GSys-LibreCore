@@ -46,7 +46,13 @@ module g6lc_ai_island_top
     // Granted numeric formats, one bit per config_pkg::AI_FMT_* index. A parameter
     // rather than a package read so a testbench can drive an illegal grant to prove
     // the guard below fires; the design default is the package's own value.
-    parameter logic [15:0]    DtypeMask    = AiIslandDtypeMask,
+    // Format grant. The package policy (AiIslandDtypeMask, the FP island's seven
+    // formats) applies when the island has the float plane; an integer-strip
+    // elaboration (AiCfg.IslandFpEn = 0) grants the integer subset of that policy,
+    // so one package value serves both planes and the grant-subset-of-implemented
+    // guard below holds by construction for either.
+    parameter logic [15:0]    DtypeMask    = AiCfg.IslandFpEn ? AiIslandDtypeMask
+                                                              : (AiIslandDtypeMask & AiIslandPeImplMask),
     // Register slice on the DMA master (g6lc_ai_axi_cut). Cuts every VALID/READY
     // path at the island boundary; costs one cycle per channel direction.
     parameter bit             AxiCutEn     = 1'b1,
@@ -194,11 +200,14 @@ module g6lc_ai_island_top
       .DtypeMask(DtypeMaskLp),
       .AccumulateEn(AccumulateEn),
       // Flat panel mapping: the K box is a byte capacity per operand bank
-      // (g6lc_ai_gemm_seq OperandWords{A,B} * PeLanes; PeLanes = MacsPerCycle).
+      // (g6lc_ai_gemm_seq OperandWords{A,B} * PeLanes; PeLanes = AccTileK lanes,
+      // the column groups of a V2 array share the same total B bytes).
       .BankABytes(ai_operand_bank_bytes(IslandCfg.AccTileM, IslandCfg.AccTileK,
-                                        IslandCfg.MacsPerCycle, AiCfg.IslandFpEn ? 4 : 1)),
+                                        (IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? IslandCfg.MacsPerCycle : IslandCfg.AccTileK,
+                                        AiCfg.IslandFpEn ? 4 : 1)),
       .BankBBytes(ai_operand_bank_bytes(IslandCfg.AccTileN, IslandCfg.AccTileK,
-                                        IslandCfg.MacsPerCycle, AiCfg.IslandFpEn ? 4 : 1))
+                                        (IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? IslandCfg.MacsPerCycle : IslandCfg.AccTileK,
+                                        AiCfg.IslandFpEn ? 4 : 1))
   ) i_cap (
       .clk_i, .rst_ni,
       .req_i   (cap_sel),
@@ -546,8 +555,9 @@ module g6lc_ai_island_top
       assert (IslandCfg.MacsPerCycle >= 1 && IslandCfg.AccTileM >= 1 &&
               IslandCfg.AccTileN >= 1 && IslandCfg.AccTileK >= 1)
       else $error("g6lc_ai_island: MacsPerCycle and AccTile must be >= 1");
-      assert (IslandCfg.MacsPerCycle <= IslandCfg.AccTileK)
-      else $error("g6lc_ai_island: MacsPerCycle must be <= AccTileK");
+      assert (island_cfg_out_cols(IslandCfg) >= 1 &&
+              IslandCfg.MacsPerCycle == island_cfg_out_cols(IslandCfg) * island_cfg_pe_lanes(IslandCfg))
+      else $error("g6lc_ai_island: MacsPerCycle must be OutCols x PeLanes (PeLanes <= AccTileK)");
       // One engine. N copies elaborate as g6lc_ai_cluster_set.
       assert (IslandCfg.Clusters == 1 && IslandCfg.ClustersEnabled == 1)
       else $error("g6lc_ai_island: Clusters>1 belongs on g6lc_ai_cluster_set");
@@ -561,7 +571,11 @@ module g6lc_ai_island_top
         .MaxM      (IslandCfg.AccTileM),
         .MaxN      (IslandCfg.AccTileN),
         .MaxK      (IslandCfg.AccTileK),
-        .PeLanes   (IslandCfg.MacsPerCycle),
+        // K lanes per dot and output columns per cycle from MacsPerCycle vs AccTileK
+        // (island_cfg_pe_lanes / island_cfg_out_cols). Plain arithmetic here, not the package function:
+        // the simulator does not fold a struct-argument function in a parameter port.
+        .PeLanes   ((IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? IslandCfg.MacsPerCycle : IslandCfg.AccTileK),
+        .OutCols   ((IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? 1 : IslandCfg.MacsPerCycle / IslandCfg.AccTileK),
         .MaxAROut  (IslandCfg.MaxAROut),
         // VaTurboEn enables reuse. It does not widen PeLanes.
         .ReuseBEn  (AiCfg.VaTurboEn),

@@ -33,8 +33,9 @@
 #   clean     remove remote build/run directories
 #
 # Convenience:
-#   python tools/g6q_remote.py remote-build --package E:\cva6
-#     = install-qemu locally, sync, configure, build, pull, test --smoke
+#   python tools/g6q.py install-qemu --package E:\cva6 --target g6lc64_ai   (emit into qemu/)
+#   python tools/g6q_remote.py remote-build --machine g6lc-g6lc64_ai --test --test-ai --controls
+#     = sync (sentinel-verified), configure, build (artifact-verified), pull, test
 #
 # This is a *build* proxy; it does not synthesize or simulate RTL/uncore.
 # Those remain the responsibility of the host monorepo's testharness.
@@ -122,6 +123,17 @@ if _WINDOWS and shutil.which("wsl") is not None:
 
 QEMU_TARGET = "riscv64-softmmu"
 QEMU_BINARY = "qemu-system-riscv64"
+
+# Files whose bytes must agree on both sides after `sync`. The generated machines are
+# wired through exactly these, so a sync that did not carry a freshly installed machine
+# cannot pass the check. Exit codes are transport (a `conhost wsl ...` wrapper returns
+# conhost's status, not the child's); the artifact is the verdict.
+SYNC_SENTINELS = (
+    "hw/riscv/meson.build",
+    "target/riscv/meson.build",
+    "configs/targets/riscv64-softmmu.mak",
+    "target/riscv/translate.c",
+)
 
 # Directories inside DEFAULT_ROOT
 REPO_DIR = "repo/qemu"
@@ -639,8 +651,41 @@ def cmd_sync(args: argparse.Namespace) -> int:
         _rsync_to_remote(host, sock, qemu_src, remote_qemu, SYNC_EXCLUDES, timeout=_step_timeout(args, 1800))
         if getattr(args, "gl", False):
             _repair_vhost_user_symlinks(host, sock, remote_qemu, _step_timeout(args, 60))
-    log(f"synced qemu/ to {host}:{remote_qemu}")
+        mismatch = _sync_mismatch(host, sock, qemu_src, remote_qemu, _step_timeout(args, 60))
+    if mismatch:
+        err("sync did not land: " + "; ".join(mismatch))
+        return 1
+    log(f"synced qemu/ to {host}:{remote_qemu} (sentinels verified: {len(SYNC_SENTINELS)})")
     return 0
+
+
+def _sync_mismatch(host: str, sock: Path | None, local_root: Path, remote_root: str, timeout: float | None) -> list[str]:
+    """Positive evidence that the sync landed: sha256 of the sentinel files must agree.
+
+    An empty or unparsable remote answer is a mismatch, never a pass (H3: absence is not
+    success).
+    """
+    import hashlib
+
+    want: dict[str, str] = {}
+    for rel in SYNC_SENTINELS:
+        path = local_root / rel
+        if path.is_file():
+            want[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+    if not want:
+        return ["no local sentinel file exists"]
+    cmd = "cd " + shlex.quote(remote_root) + " && sha256sum " + " ".join(shlex.quote(r) for r in want)
+    res = _remote(host, sock, [cmd], check=False, capture=True, timeout=timeout)
+    got: dict[str, str] = {}
+    for line in (res.stdout or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            got[parts[1].lstrip("*")] = parts[0]
+    problems = []
+    for rel, digest in want.items():
+        if got.get(rel) != digest:
+            problems.append(f"{rel}: remote {got.get(rel, 'absent')[:12]} != local {digest[:12]}")
+    return problems
 
 
 def _configure_args(args: argparse.Namespace, remote_qemu: str) -> str:
@@ -720,11 +765,35 @@ def cmd_build(args: argparse.Namespace) -> int:
         log(f"build: {cmd}")
         if args.dry_run:
             return 0
+        stamp = _remote(host, sock, ["date", "+%s"], check=False, capture=True, timeout=_step_timeout(args, 30))
+        started = int((stamp.stdout or "0").strip() or "0")
         res = _remote(host, sock, [cmd], check=False, timeout=_step_timeout(args, 7200))
-    if res.returncode != 0:
-        err("remote build failed")
-        return res.returncode
-    log(f"built in {host}:{remote_build}")
+        if res.returncode != 0:
+            err("remote build failed")
+            return res.returncode
+        # Artifact check: the linked binary exists, was touched at or after the build
+        # started (ninja may legitimately be a no-op on an already-built tree, so only
+        # require it when the sync carried changes), and knows the requested machine.
+        binary = f"{remote_build}/{QEMU_BINARY}"
+        probe = _remote(host, sock, [f"stat -c %Y {shlex.quote(binary)} && {shlex.quote(binary)} -M help"],
+                        check=False, capture=True, timeout=_step_timeout(args, 60))
+        lines = (probe.stdout or "").splitlines()
+        if probe.returncode != 0 or not lines:
+            err(f"build produced no verifiable binary at {host}:{binary}")
+            return 1
+        try:
+            mtime = int(lines[0].strip())
+        except ValueError:
+            err(f"cannot read the binary's mtime ({lines[0]!r})")
+            return 1
+        machine = getattr(args, "machine", None)
+        if machine and not any(l.split() and l.split()[0] == machine for l in lines[1:]):
+            err(f"built binary does not list machine {machine!r} (-M help)")
+            return 1
+        if started and mtime < started - 5 and getattr(args, "expect_relink", False):
+            err(f"binary mtime {mtime} predates the build start {started}: nothing was relinked")
+            return 1
+    log(f"built in {host}:{remote_build} (binary mtime {mtime}{', machine ' + machine if machine else ''})")
     return 0
 
 
@@ -1035,9 +1104,34 @@ def cmd_test(args: argparse.Namespace) -> int:
                     pass
             # The unimplemented-device log is a fallback when the plugin's
             # atexit summary is not flushed (QEMU is killed after the sleep).
-            if "g6lc,ai-island:" in line and ("unimplemented device read" in line or "unimplemented device write" in line):
+            if ("g6lc,ai-island:" in line or "g6lc,ai-matrix:" in line) and ("unimplemented device read" in line or "unimplemented device write" in line):
                 ai_count += 1
         smoke_name = payload_stem.replace('_', '-')
+        if getattr(args, "controls", False):
+            # Negative control: same payload, forced to print AI_NG before any island
+            # traffic. The oracle must say FAILED here or every PASS above is
+            # meaningless (H3 / RT-H1).
+            neg_elf = f"{runs}/{payload_stem}_neg.elf"
+            neg_log = f"{runs}/{payload_stem.replace('_', '-')}-neg.log"
+            with _control_socket(host) as sock2:
+                if use_local_cc:
+                    local_neg = out_dir() / f"{payload_stem}_neg.elf"
+                    if _compile_payload_local(payload_stem, payload_extra + ["-DAI_FORCE_FAIL=1"], local_neg, local_lds) != 0:
+                        err("negative-control payload compile failed")
+                        return 1
+                    _rsync_to_remote(host, sock2, local_neg, neg_elf, timeout=_step_timeout(args, 120))
+                else:
+                    _remote(host, sock2, [compile_cmd.replace(f"-o {payload_elf}", f"-DAI_FORCE_FAIL=1 -o {neg_elf}")],
+                            timeout=_step_timeout(args, 120))
+                _remote(host, sock2, [run_cmd.replace(payload_elf, neg_elf).replace(log_file, neg_log)],
+                        timeout=_step_timeout(args, 60))
+                neg = _remote(host, sock2, ["cat", neg_log], check=False, capture=True, timeout=_step_timeout(args, 30))
+            neg_text = neg.stdout or ""
+            if "AI_OK" in neg_text or "AI_NG" not in neg_text:
+                err(f"{smoke_name} NEGATIVE CONTROL did not fail as required (AI_NG present={('AI_NG' in neg_text)}, "
+                    f"AI_OK present={('AI_OK' in neg_text)}); the oracle cannot say FAIL -- no PASS is valid")
+                return 1
+            log(f"{smoke_name} negative control FAILED as required (oracle can say FAIL)")
         if ai_ok and (getattr(args, "queue", False) or ai_count > 0):
             if getattr(args, "queue", False):
                 log(f"{smoke_name} PASSED")
@@ -1101,6 +1195,7 @@ def cmd_remote_build(args: argparse.Namespace) -> int:
             host=args.host,
             root=args.root,
             smoke=args.test,
+            controls=getattr(args, "controls", False),
             plugin=args.test_plugin,
             ai_island=args.test_ai,
             machine=args.machine,
@@ -1205,6 +1300,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ai-n", default=1, type=int, help="GEMM n dimension for the smoke")
     p.add_argument("--ai-k", default=1, type=int, help="GEMM k dimension for the smoke")
     p.add_argument("--uart-base", default="0x10000000", help="UART MMIO base")
+    p.add_argument("--controls", action="store_true",
+                   help="also run the negative control (payload forced to AI_NG must be classified FAILED)")
     p.add_argument("--local-riscv", action="store_true", help="compile the RISC-V payload locally with the contained toolchain")
     p.add_argument("--tag", default=None, help="test tag")
     p.add_argument("--timeout", type=int, default=None, help="smoke timeout in seconds")
@@ -1227,6 +1324,8 @@ def main(argv: list[str] | None = None) -> int:
     _add_common(p)
     _add_build_opts(p)
     p.add_argument("--no-pull", action="store_true", help="skip pulling the binary back")
+    p.add_argument("--expect-relink", action="store_true",
+                   help="fail the build step if the binary was not relinked after the build started")
     p.add_argument("--test", action="store_true", help="run OpenSBI smoke after build")
     p.add_argument("--test-plugin", action="store_true", help="also run plugin smoke")
     p.add_argument("--test-ai", action="store_true", help="also run AI-island smoke")

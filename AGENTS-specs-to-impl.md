@@ -99,6 +99,33 @@ whole bank and evict the other slot; the 64-bit overflow-guard dividers in
 `ai_operand_span`/`ai_result_span` are replaced by a 68-bit product test (no `$div` cell
 remains in the island).
 Python pointer/lease submission is capability-gated; C/Python/Rust constants are lockstep checked.
+**2026-09-30 (AI scaling plan WP0-WP4, Stage A).** Oracle controls: `verif/tests/custom/ai/
+ai_must_pass.S` / `ai_must_fail.S` ride in the default `ai-matrix-veri.sh` list and a
+misclassified control voids the run (`ORACLE INVALID`); `g6lc_qemu/tools/g6q_remote.py` judges
+`sync`/`build` by the artifact (sentinel sha256, binary `-M help`, mtime) and `test --controls`
+runs a forced-`AI_NG` payload that must read FAILED. **FP island live:** `g6lc64_ai_config_pkg`
+`IslandFpEn: 1`; `AiIslandDtypeMask 0x00FB`, overgrant control `0x0005`, `SramBytes` 5 MiB;
+`ariane_testharness` passes `CVA6Cfg.AiCfg` to the island in every branch (it never did in the
+default branch -- the package's float plane was unreachable); `g6lc_ai_island_top`/`_apb`
+`DtypeMask` default follows `AiCfg.IslandFpEn`; `config_pkg::AiCfgIslandFpTest`. **Formal:**
+`g6lc_ai_island_cfg_pkg` states the flat-panel arithmetic as pure functions
+(`ai_flat_pitch_shift`, `ai_flat_fits`, `ai_flat_row_word`, `ai_beats_for_rem`, `ai_slot_small`,
+`ai_slot_base`) that `g6lc_ai_gemm_seq` calls; `corev_apu/ai_island/formal/g6lc_ai_gemm_flat.sby`
+proves F1-F7 over three geometries; C1-C4 `translate_off` contracts in the sequencer.
+**Scaling ladder:** `AiIslandV1WidePort`/`V2ColumnArray`/`V3Quad`/`V4Octo` with
+`island_cfg_out_cols`/`island_cfg_pe_lanes` (MacsPerCycle vs AccTileK, no new field);
+`g6lc_ai_gemm_seq` `OutCols` (B column groups `j % OutCols`, per-column PE/dot pipe/sum/acc,
+extra C write ports `c_wx_*` into distinct banks, masked columns past `n`, single-column
+accumulate mode, `OutCols = 1` cycle-identical); `g6lc_ai_island_top` derives PeLanes/OutCols
+from the cfg; `g6lc_ai_dram_join` `CLUSTER_DATA_WIDTH` upsizer and `G6LC_AI_DRAM_WIDE_CH`
+(512-bit class-0 channel) for V1; `tb_g6lc_ai_scale_ladder`, `verif/regress/ai-scale-ladder.sh`,
+`ai_bench_report.py --sku` (derived table). Open: wide C store (INT8 is store-bound at 8 B/cycle
+once columns > 2), V3/V4 cluster dispatch. **SMT2+AI:** `check_cfg` retires the
+`CvxifEn && NrIssuePorts > 1` ban in favour of the port-0 steering contract asserted in
+`issue_read_operands` (`gen_cvxif_port0_contract`) and exercised by `mini_ai_dual_issue.S`;
+`core/include/g6lc64_smt2_ai_config_pkg.sv` (two harts, dual issue, AI island, `AccBanks 2`)
+lints and elaborates; the duplicate `L2PfMaxOutstanding`/`L2PfQuiet` keys that made
+`g6lc64_smt2` fail elaboration are removed.
 No mapped PPA, full-SoC or new architectural status is inferred from these component results.
 
 ## OoO coherence continuation — partial, qualification-gated (2026-09-24)

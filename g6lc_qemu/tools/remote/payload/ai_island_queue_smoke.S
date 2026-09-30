@@ -69,14 +69,27 @@
 .section .text
 .global _start
 _start:
+    /* Multi-hart machines start every hart here; the smoke is a single-hart
+     * program (one descriptor, one doorbell, one UART line), so park hart != 0.
+     * Otherwise two harts interleave the UART bytes ("AAII__OOKK") and ring
+     * the doorbell twice -- the same defect class the SoC ELFs fixed. */
+    .option push
+    .option arch, +zicsr   /* the payload -march has no zicsr; only this read needs it */
+    csrr t0, mhartid
+    .option pop
+    bnez t0, 9f
     la sp, _stack_top
 
     /* Build the descriptor in guest memory.  a0 (x10) is the descriptor pointer
      * so the queue instruction reads the same register it set up. */
     li a0, AI_DESC_ADDR
 
-    li t1, ((AI_VERSION << 16) | (AI_OP_GEMM & 0xffff))
-    sw t1, 0(a0)
+    /* Field-wise per the ingested layout (AI_OFF_VERSION / AI_OFF_OP are both
+     * 16-bit): never a hard-coded pack -- v2 has version low and op high. */
+    li t1, AI_VERSION
+    sh t1, AI_OFF_VERSION(a0)
+    li t1, AI_OP_GEMM
+    sh t1, AI_OFF_OP(a0)
 
 #ifndef AI_M
 #define AI_M 1
@@ -112,19 +125,23 @@ _start:
     .word (5 << 15) | (6 << 7) | AI_POLL_MATCH
 
     /* 1. The entry must not still be pending. */
+    li a7, 1   /* failing check number, printed after AI_NG */
     li t3, 0xffffffff
     beq x6, t3, fail
 
     /* 2. The island must have overwritten the sentinel at ptr_done. */
+    li a7, 2   /* failing check number, printed after AI_NG */
     ld t5, 0(t2)
     beq t5, t4, fail
 
     /* 3. The word returned by ai.poll must equal the word written to ptr_done, i.e. the
      *    register path and the memory path must agree on the completion-word packing. */
+    li a7, 3   /* failing check number, printed after AI_NG */
     bne t5, x6, fail
 
     /* 4. The completion word contains the ticket the queue returned in x5. */
     li t2, AI_COMPLETION_TICKET_MASK
+    li a7, 4   /* failing check number, printed after AI_NG */
     and t3, x6, t2
     bne t3, x5, fail
 
@@ -132,6 +149,7 @@ _start:
     li t2, AI_ST_OK
     srli t3, x6, AI_COMPLETION_STATUS_SHIFT
     li t4, AI_COMPLETION_STATUS_MASK
+    li a7, 5   /* failing check number, printed after AI_NG */
     and t3, t3, t4
     bne t3, t2, fail
 
@@ -166,9 +184,15 @@ fail:
     sw a0, 0(t6)
     li a0, 'G'
     sw a0, 0(t6)
+    addi a0, a7, '0'   /* which check failed: AI_NG1..AI_NG5 */
+    sw a0, 0(t6)
     li a0, '\n'
     sw a0, 0(t6)
 
 2:
     wfi
     j 2b
+
+9:
+    wfi
+    j 9b

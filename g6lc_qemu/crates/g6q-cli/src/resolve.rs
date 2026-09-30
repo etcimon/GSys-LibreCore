@@ -27,6 +27,9 @@ mod layout {
     pub const DTS_DIR: &str = "corev_apu/bootrom";
     pub const CORE_FLIST: &[&str] = &["core/Flist.g6lc", "core/Flist.cva6"];
     pub const SOC_FLIST: &[&str] = &["Flist.ariane"];
+    /// The AI island's own compile list (packages the ingest reads for the emulated
+    /// device); absent on trees without the island.
+    pub const AI_FLIST: &[&str] = &["corev_apu/ai_island/Flist.ai_island"];
     pub const ROOT_VAR: &str = "CVA6_REPO_DIR";
 }
 
@@ -362,6 +365,9 @@ pub fn resolve(args: &Args) -> Result<Resolved, String> {
                 flists.push(p);
             }
             if let Some(p) = first_existing(r, layout::SOC_FLIST) {
+                flists.push(p);
+            }
+            if let Some(p) = first_existing(r, layout::AI_FLIST) {
                 flists.push(p);
             }
         }

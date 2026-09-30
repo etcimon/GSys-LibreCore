@@ -77,3 +77,29 @@ def test_distilgpt2_selection_is_int8_blocks_with_fp16_lm_head():
     # FP8 alone is measurably worse than INT8 at the same byte cost on this model.
     assert names["fp8-e4m3-g128"]["calib"]["ppl_rel"] > names["int8-g128"]["calib"]["ppl_rel"]
     assert not names["fp8-e5m2-g128"]["calib_within_budget"]
+
+
+DIFFUSION = sorted(p for p in QUAL_DIR.glob("*.json") if json.loads(p.read_text())["schema"] == "ai-tensor.qualify-diffusion.v1")
+
+
+@pytest.mark.parametrize("path", DIFFUSION, ids=lambda p: p.stem)
+def test_diffusion_record_is_consistent(path):
+    """Pinned pipeline, verdict derived from the recorded PSNR / mean-abs-diff / fallback
+    numbers, evidence class stated; the recipe ladder on the tiny pipeline keeps the
+    expected ordering (INT8 g128 beats FP8 E4M3 at equal bytes, BF16 beats both)."""
+    d = json.loads(path.read_text())
+    assert len(d["revision"]) == 40 and "virtual" in d["evidence"]
+    v = d["verdict"]
+    assert v["psnr_within_budget"] == (d["psnr_db"] >= d["budget"]["psnr_db"])
+    assert v["mad_within_budget"] == (d["mean_abs_diff"] <= d["budget"]["mad"])
+    assert v["no_fallback"] == (d["offload_stats"]["fallback_calls"] == 0)
+    assert d["pass"] == all(v.values())
+    assert d["offload_ratio"] == 1.0 and d["layers_replaced"] > 0
+
+
+def test_tiny_pipeline_recipe_ladder_orders_by_precision():
+    by = {json.loads(p.read_text())["quant"]: json.loads(p.read_text()) for p in DIFFUSION
+          if "tiny-stable-diffusion-pipe" in json.loads(p.read_text())["model"] and not json.loads(p.read_text())["conv2d"]}
+    if not {"int8-dynamic", "fp8-e4m3", "bf16"} <= set(by):
+        pytest.skip("tiny pipeline ladder not recorded")
+    assert by["bf16"]["psnr_db"] > by["int8-dynamic"]["psnr_db"] > by["fp8-e4m3"]["psnr_db"] > 30.0

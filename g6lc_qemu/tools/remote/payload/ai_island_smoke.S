@@ -21,6 +21,15 @@
 .section .text
 .global _start
 _start:
+    /* Multi-hart machines start every hart here; the smoke is a single-hart
+     * program (one descriptor, one doorbell, one UART line), so park hart != 0.
+     * Otherwise two harts interleave the UART bytes ("AAII__OOKK") and ring
+     * the doorbell twice -- the same defect class the SoC ELFs fixed. */
+    .option push
+    .option arch, +zicsr   /* the payload -march has no zicsr; only this read needs it */
+    csrr t0, mhartid
+    .option pop
+    bnez t0, 9f
     la sp, _stack_top
 
     li t0, AI_DESC_BASE
@@ -49,8 +58,12 @@ _start:
     sd t2, AI_OFF_PTR_DONE(t0)
 
     /* Ring the doorbell: version=AI_VERSION, op=AI_OP_GEMM. */
-    li t1, ((AI_VERSION << 16) | (AI_OP_GEMM & 0xffff))
-    sw t1, 0(t0)
+    /* Field-wise per the ingested layout (AI_OFF_VERSION / AI_OFF_OP are both
+     * 16-bit): never a hard-coded pack -- v2 has version low and op high. */
+    li t1, AI_VERSION
+    sh t1, AI_OFF_VERSION(t0)
+    li t1, AI_OP_GEMM
+    sh t1, AI_OFF_OP(t0)
 
     /* In B2 the plugin observes a store to ptr_done and marks the descriptor
      * done.  In B3 the device writes the packed completion word.  Either way a
@@ -78,3 +91,7 @@ _start:
 1:
     wfi
     j 1b
+
+9:
+    wfi
+    j 9b

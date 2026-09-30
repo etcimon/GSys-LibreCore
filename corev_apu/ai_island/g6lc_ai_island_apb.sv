@@ -18,7 +18,8 @@ module g6lc_ai_island_apb
     parameter type            axi_req_t    = logic,
     parameter type            axi_resp_t   = logic,
     // Forwarded to g6lc_ai_island_top; see there for why it is a parameter.
-    parameter logic [15:0]    DtypeMask    = AiIslandDtypeMask,
+    parameter logic [15:0]    DtypeMask    = AiCfg.IslandFpEn ? AiIslandDtypeMask
+                                                              : (AiIslandDtypeMask & AiIslandPeImplMask),
     // Forwarded accumulate grant (CAP_OFF_ACCMODE bit 0).
     parameter bit             AccumulateEn = AiIslandAccmodeGrant[0]
 ) (
