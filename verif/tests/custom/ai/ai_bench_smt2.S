@@ -44,6 +44,7 @@
   .equ EB, 1
 #endif
   .equ ROW_BYTES, K * EB
+  .equ AI_REGQ1,  0x1A0             # queue-1 region (REG_OFF_QUEUE_TAIL)
   .equ MAT_A,     0x80800000
   .equ MAT_B,     0x81000000
   .equ MAT_C,     0x81800000        # + hart * 0x100000
@@ -75,6 +76,18 @@ _start:
   sw   zero, AI_REG0+0xC(s0)
   li   t0, 0x3
   sw   t0, AI_REG0+0x10(s0)
+#if HARTS > 1
+  # hart 1 kicks on qid 1: its region lives at REG_OFF_QUEUE_TAIL (0x1A0 + (qid-1)*0x20);
+  # an unprogrammed queue region refuses the descriptor (ST_BAD_PTR -> poll ERR, code 0x13).
+  li   t0, 0x80000000
+  sw   t0, AI_REGQ1+0x0(s0)
+  sw   zero, AI_REGQ1+0x4(s0)
+  li   t0, 0x84000000
+  sw   t0, AI_REGQ1+0x8(s0)
+  sw   zero, AI_REGQ1+0xC(s0)
+  li   t0, 0x3
+  sw   t0, AI_REGQ1+0x10(s0)
+#endif
   fence
   li   t0, 1
   sd   t0, 0(s2)
