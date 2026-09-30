@@ -56,7 +56,7 @@ level of the stack legible to an AI agent.
 > | **OoO coherence (`COH_OOO`)** | integration | Promoted 2026-09-24 for the `g6lc64_ooo_int2` envelope (2 WT cores × 2 harts, L2, no L3): SRAM sharer-signature filter, hub response ownership/ordering repairs, accepted-physical-address load validation through retirement; the composed hub + real-L2 bench excludes the stale-refill counterexample; same-id R ordering guard, local AMO/CAS apply-event coverage, PMU group-2 events, credit-consistent L2 MSHR depth and the signature-SRAM DFT plan followed. Post-boot repairs (2026-09-25): writers acquire signature presence, WT repair copies are invalidation-bounded, NC ACKs stay out of the repair queue, CLINT MSIP read lanes fixed — the directed cross-core shared-line and four-hart boot/release programs pass in the isolated two-core route. Deferred: matched multicore firmware/compliance runs, in-order WT re-runs, foundry macro/MBIST insertion, STA/power/area — [`AGENTS-todo.md`](AGENTS-todo.md) | [`core/ooo/AGENTS-ooo-contract.md`](core/ooo/AGENTS-ooo-contract.md) · [`multi-core/`](architecture/multi-core/) |
 > | **Multi-core cluster / L2 / L3** | boot | `NrCores` 1…8, `g6lc_cluster`, coherence hub, scaled CLINT/PLIC, L1 inv adapters; L2 done (concurrent fills, hit-under-miss merging, killed-fill retention, OoO-gated write fairness); L3 + server stream prefetcher config-gated. 2026-09-26: WT cores now allocate in the L2 (`WtAxiAllocEn` — the shim was modifiable-only, measured 0 hits before), inclusion is a package policy (`L3InclusiveEn`), tags can live behind `tc_sram` (`L2TagSramEn`), and the non-inclusive-L3 packages `g6lc64_ooo_int2_l3` / `g6lc64_smt2_l3` pass their strict SMT2 OpenSBI boots. 2026-09-27: `L2WriteUpdateEn` merges an eligible write-through into a resident L2/L3 line instead of purging it — boot L2 misses ~103k→~1.5k, strict boots 17,993,674 / 18,244,344 / 13,814,448 cycles, latency-40 boots −11.5 % / −13.2 % with the first boot-workload `l3_hit`; disabled packages stay bit-identical. M1a adds end-to-end CBO: a `cmo_*` core sideband + `g6lc_cmo_engine` broadcast/match-invalidate L1/L2/L3 for `cbo.inval` (the old WT decode hung the store buffer), `clean`/`flush` gate on the L2/L3 write-idle trackers, `cbo.zero` drains as a commit-queue burst; allocation/write-update/CMO are now on for every eWT package (smt2/smt2_ooo_int anchors re-baselined) and `CohMaxOutstanding` is measured at 8 on the int2 packages. 2026-09-28: `L2PostedWriteEn` posts writes and bypass reads through L2/L3 trackers — hits and misses are served while writes drain (B still comes from memory, routed per-id), `wr_stall` on the mixed credits burst is 0 at OT8, and the L40 write/read kernel drops to 518,507/543,093 cycles. M1d then puts every postable write on one reserved downstream write id `WR_ID`, so AXI same-id ordering preserves the merge order and the different-id same-line AW hold (the measured ~100 % of posted-write holds) disappears for posted-vs-posted pairs. 2026-09-29: M5 adds a demand-miss-trained L2 stream/stride prefetcher (`L2PrefetchEn`) — scan/write-read kernels gain 8–13 %, pointer chase is neutral, but both strict boots pay ~+0.3 %, so it ships **off** pending a burst-throttling policy | [`multi-core/`](architecture/multi-core/) · [`l2-l3-cache/`](architecture/l2-l3-cache/) |
 > | **Stream8** | leaf | `g6lc64_stream8`, `mc-spo-veri` 9/9, AMOCAS W/D/Q, H-edge 3/3; optional suite (not default CI) | [`stream8-class.md`](architecture/stream8-class.md) |
-> | **AI island (`Xg6lcai`)** | leaf | P1–P3 / I1 partial — CVXIF + `ai_island` T2 @ `0x4000_0000`, AccTile 256, CPL FIFO, HARD narrow/ci/peak green; **ai-tensor** soft virt-ai-pcie + `tensor virt-impl` soft→HARD; **next I3 BW measure → I2 clustering** | [`ai-matrix/`](architecture/ai-matrix/) · [`hard-tests.md`](architecture/ai-matrix/hard-tests.md) |
+> | **AI island (`Xg6lcai`)** | integration | **FP island shipped on `g6lc64_ai`** (2026-09-30: seven formats INT8/INT4/FP8×2/FP16/BF16/FP32, 512 MAC/cycle, flat-panel byte-capacity banks, two-slot VA-Turbo residency, accumulate mode, wide C store); measured on the SoC model: decode `1×512×512` INT8 cold 34,136 cycles / resident 590 (57×), B stream at 1.00 cycles/beat; scaling ladder V1 wide port (leaf 60.4 B/cycle, SoC point owed) → V2 column array (RTL, OutCols 1/2/4 verified) → V3/V4 `g6lc_ai_cluster_dispatch` (RTL + island-top elaboration, leaf-verified; nameplates 49/98 TOPS are **derived**); bounded formal on the flat-panel arithmetic; oracle-controlled SoC suite; `g6lc64_smt2_ai` two-hart AI package runs the AI subset; **ai-tensor** PyTorch/Diffusers backend with qualified INT8/BF16 recipes and a calibrated cost model | [`ai-matrix/`](architecture/ai-matrix/) · [`scaling-100tops.md`](architecture/ai-matrix/scaling-100tops.md) · [`log-2026-09.md`](architecture/ai-matrix/log-2026-09.md) |
 >
 > Defaults keep **netlist identity** for small targets: `OoOEn=0`, `SliceOoOEn=0`,
 > `NrHarts=1`, `L2En=0` / `L3En=0`, `DeepSpecEn=0`, `AiMatrixEn=0`. Profiles opt in via
@@ -293,12 +293,14 @@ codewords. Hysteresis and feature-signature silence limit reevaluation; current
 and successor decodes provide tile/dataflow/prefetch choices and discardable
 address/bank hints. Skipping still requires an independent exact-zero proof.
 
-| Layer | Current status | Evidence boundary |
+| Layer | Current status (2026-10-01) | Evidence boundary |
 |---|---|---|
-| T2 GEMM | INT8 and packed INT4; descriptor v2, k-major B; island grant and PE masks `0x0003` | Existing Variane directed integration; no floating GEMM grant |
-| Policy codec and benefit steering | Isolated, verified RTL; fixed format-aware reduction/output budgets | Control decisions and scheduling-model comparisons, not integrated array throughput |
-| Floating arithmetic | Exact FP8 E4M3/E5M2, FP16, BF16 and FP32 widening plus separate FP32 RNE multiply/add | Scalar RTL only; default result latency 8 cycles, initiation interval 10 cycles |
-| Native software evaluation | ai-tensor and model-derived B3 execution agree on descriptor and C32 bytes | Live-mask run: 16 execute / 68 reject; explicit software fixture: 82 / 2; not guest boot or RTL timing |
+| T2 GEMM (`g6lc64_ai`) | **FP island shipped**: INT8, INT4, FP8 E4M3/E5M2, FP16, BF16, FP32 (grant `0x00FB`, SP24 refused); 512 lanes; flat-panel byte-capacity banks (A 2 / B 1 / C 2 MiB); two-slot resident-B directory; accumulate mode; intra-row trail + wide C store | Verilator SoC model of the built geometry (cycles, not timing): `1×512×512` INT8 cold 34,136 / resident 590; `1×768×512` two panels both resident (39×); 8-lane bench 226 records seven formats, both float pipes |
+| Scaling ladder | V1 wide port plumbing (join upsizer, 512-bit channel; leaf: 60.4 B/cycle island stream); V2 `OutCols` column array (RTL, 1/2/4 verified, island gate strict lint 0); V3/V4 `g6lc_ai_cluster_dispatch` (RTL, island top elaborates Clusters 1/2/4, 2- and 4-cluster C bit-identical to the single engine) | V1 SoC point not yet measured; V2 measured on the bench only; V3/V4 leaf only — 16.4 / 49.2 / 98.3 TOPS are **nameplates**, decode stays bytes-bound |
+| Verification | oracle controls (`ai_must_pass`/`ai_must_fail`, `ORACLE INVALID`), bounded formal on the flat-panel/stripe/slot arithmetic (mutation fails), C1–C4 run-time contracts, directed leaves per lever, `+ai_pmu_trace` records | a pass is positive evidence only with the controls in the run; remote runs serialized one harness at a time |
+| SMT2 + AI | `g6lc64_smt2_ai` (two harts, dual issue, per-hart AI banks) builds; `ai_dot4`/`mma`/queue/MMIO smokes pass; DTS ready; strict boot admitted | boot not run (~24 h at the FP-island model's ~140 cycles/s); two-hart bench and dual-issue mini in flight |
+| Host software (`ai-tensor`) | PyTorch `AiTensorLinear`/`Conv2d` + Diffusers; qualified recipes (LLM INT8 g128 + FP16 head; UNet INT8 g64 or BF16); `cost_model` calibrated on the measured points; QEMU B1 contract emulator boots OpenSBI and passes the queue smoke | virtual evidence (PSNR/perplexity, bytes), never RTL timing |
+| Policy codec / benefit steering | Isolated, verified RTL; off in production | control decisions, not throughput |
 
 The balanced LLM/diffusion-shaped **scheduling fixtures** report modeled time
 reductions of **38.24% at SRAM128** and **3.55% at SRAM512** against their matched
@@ -306,20 +308,22 @@ baseline. Per-format/state usage, negative results and the slightly better
 retrospective fixed-code comparison are retained. These figures are neither
 measured MAC/s nor a benchmark of a real LLM or diffusion model.
 
-`PolicyCodecEn`, `PolicyBenefitEn` and `IslandFpEn` remain off in production.
-The next steps are descriptor/tile metadata and per-context ownership, one guarded
-GEMM policy consumer at a time, PMU visibility, and end-to-end memory/arithmetic
-regressions. Floating loaders, accumulators and stores must be integrated before
-expanding grants. I3 memory characterization still precedes I2 clustering;
-PDK timing, DFT/ATPG and full-SoC compliance remain separate gates.
+`IslandFpEn` is **on** for `g6lc64_ai` since 2026-09-30 (the core-side T0 tile stays INT8);
+`PolicyCodecEn`/`PolicyBenefitEn` and `VaTurboEn` remain off in production. Open on the
+ladder: the V1 SoC measurement, full-geometry synthesis of a cluster SKU, cross-job B
+prefetch (designed), the strict `g6lc64_smt2_ai` boot. Every ladder figure is derived
+from measured per-beat/per-issue costs until a SoC point exists at that geometry; PDK
+timing, DFT/ATPG and full-SoC compliance remain separate gates.
 
-Start with the [architecture and measured scopes](architecture/ai-matrix/README.md#10-frozen-workload-policy-codec-compartment)
-(the complete policy/native sections are §10–§12), the
-[island status and integration path](corev_apu/ai_island/README.md),
-[ai-tensor](ai-tensor/README.md), and [B3 evaluation](g6lc_qemu/README.md#native-tensor-evaluation-and-optimization).
-Optional checks are `test ai-policy-codec`, `test ai-desc-formats`,
-`test ai-fp-mac` and `test ai-native-eval` through
-`bun build-platform/src/cli/index.ts`; Verilator work uses the remote proxy.
+Start with the [scaling note](architecture/ai-matrix/scaling-100tops.md) (the 100-TOPS
+definition, the plane split and the batch-1 trap), the running
+[log](architecture/ai-matrix/log-2026-09.md) (every measured/derived/void result with its
+instrument), the [island status](corev_apu/ai_island/README.md),
+[ai-tensor](ai-tensor/README.md), the [B3 evaluation](g6lc_qemu/README.md#native-tensor-evaluation-and-optimization),
+and the docs-site page [AI Island](https://etcimon.github.io/GSys-LibreCore/corev-apu/ai-island).
+Local checks in minutes: `test ai-ops-bench` (8-lane bench, seven formats), `test ai-scale-ladder`,
+`verify --formal` (flat-panel proof), `verif/regress/ai-matrix-directed.sh`; SoC runs use the
+remote proxy with the oracle controls in the suite.
 
 ---
 

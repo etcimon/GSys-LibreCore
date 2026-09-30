@@ -33,7 +33,7 @@ aid**, not a formal datasheet.
 | `g6lc64_stream8_l3` | 1 | Off | 1 | **2** | **L2 + non-inclusive 1 MiB L3** | **On** | Off | Same + L3 (M6) |
 | `g6lc64_server_math_l3` | **2** | Off | 1 | **2** | **L2 + non-inclusive 1 MiB L3** | **On** | Off | Same + L3 (M6) |
 | `g6lc64_ai` | 1 | Off | 1 | **2** | **L2** | **On** | Off | AI island (`Xg6lcai`) profile — **FP island** since 2026-09-30 (`IslandFpEn=1`, seven formats, 512 MAC/cycle, flat-panel banks); see [AI Island](../corev-apu/ai-island) |
-| `g6lc64_smt2_ai` | **2** | Off | **2** | 1 | L2 | Off | Off | SMT2 + AI island: two software harts driving the island on per-hart queues; SoC builds and runs the AI subset (2026-10-01), strict boot queued |
+| `g6lc64_smt2_ai` | **2** | Off | **2** | 1 | L2 | Off | Off | SMT2 + AI island: two software harts driving the island on per-hart queues; SoC builds, oracle controls behave, `ai_dot4`/`mma`/queue/MMIO smokes pass (2026-10-01); DTS `ariane-smt2-ai.dts` ready, strict boot admitted but not run |
 | `cv64a6_imafdcv_sv39` | 1–2 | Off | 1 | 1 | Off | Off | **On** | Legacy vector-oriented |
 
 \*Deep-spec package details: open the package; not every deep-spec knob implies OoO.

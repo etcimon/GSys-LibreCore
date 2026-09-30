@@ -1,6 +1,6 @@
 ---
 title: AI Island (Xg6lcai)
-description: The LibreCore AI matrix plane — T0 core ops, the T2 GEMM island in corev_apu, numeric formats, VA-Turbo residency, the scaling ladder, ai-tensor and the QEMU contract emulator. State as of 2026-10-01.
+description: The LibreCore AI matrix plane — T0 core ops, the T2 GEMM island in corev_apu, numeric formats, VA-Turbo residency, the scaling ladder (wide port, column array, cluster dispatch), ai-tensor and the QEMU contract emulator. State as of 2026-10-01 (end of pass).
 ---
 
 # AI Island (`Xg6lcai`)
@@ -41,6 +41,7 @@ A QEMU or software-reference result is never RTL or silicon evidence.
 | Operand banks | flat-panel mapping, byte-capacity box: A 2 MiB, B 1 MiB, C 2 MiB | measured: `1×256×1024` INT8 is one job, one resident key |
 | Sequencer box | `M ≤ 1024`, `N ≤ 512`, K by bank bytes (`CAP_OFF_BANK_A/B_BYTES`) | published in the capability window |
 | VA-Turbo residency | two-slot resident-B directory, resident-A key (`VaTurboEn`, off in production) | measured on the bench SKU: `1×768×512` two panels both hit, **39×**; intra-row trail store 846 → 590 |
+| C store | 8-byte pairs on the 64-bit port; **wide C store** (`DataWidth/32` columns per beat) when rows are beat-aligned | 64-bit path cycle-identical (226/226); 128/512-bit paths verified on `tb_g6lc_ai_gemm_wide` (one 64 B beat for 16 columns) |
 | Accumulate mode | `CAP_OFF_ACCMODE` bit 0, K-split chains through C | measured (+2.2 % seed cost per block) |
 | Area (island, reduced review fixture) | 11,896 generic cells, 8,234 FF, `$div` 0, no SCC | yosys generic, not timing |
 
@@ -62,10 +63,9 @@ prints the derived table, suite `ai-scale-ladder` runs the local evidence in min
 | Step | Axis | Nameplate | RTL state |
 |---|---|---|---|
 | live | 1 × 512 MAC, 8 B/cycle | 2.05 TOPS, balance 64 | shipped |
-| **V1 wide port** | 512-bit island port + class-0 channel (64 B/cycle), 64-bit cluster upsized in `g6lc_ai_dram_join` | 2.05 TOPS, balance 8 | plumbing landed; join + slave stream at **1.00 cycles/beat** (leaf); SoC point **not yet measured** — the remaining serializer is inside the island's 512-bit elaboration |
-| **V2 column array** | `OutCols = 8` dot units share one A word, B banked by column group, wide C store | 16.4 TOPS @ 2 GHz | RTL landed: OutCols=1 cycle-identical, OutCols 2/4 pass every directed case; island gate strict lint 0; FP32 16×16×16 MAC phase 2064 → 528 at 4 columns |
-| V3 quad | 4 clusters × 4096, class-2 memory nameplate | 49.2 TOPS @ 1.5 GHz | literal only — `g6lc_ai_cluster_dispatch` not started |
-| V4 octo | 8 clusters × 4096 | 98.3 TOPS @ 1.5 GHz | literal only |
+| **V1 wide port** | 512-bit island port + class-0 channel (64 B/cycle), 64-bit cluster upsized in `g6lc_ai_dram_join` | 2.05 TOPS, balance 8 | plumbing landed; leaf: join + slave at **1.00 cycles/beat**, the island's own B stream at **60.4 B/cycle** on the V1 shape (7.5× the narrow path); SoC point **not yet measured** (harness preload defect for 8-cut SRAM words fixed, `AI_START` trace added, run queued) |
+| **V2 column array** | `OutCols = 8` dot units share one A word, B banked by column group, **wide C store** | 16.4 TOPS @ 2 GHz | RTL landed: OutCols=1 cycle-identical, OutCols 2/4 pass every directed case; island gate strict lint 0; FP32 16×16×16 MAC phase 2064 → 528 at 4 columns; wide store lands 16 columns per 64 B beat |
+| **V3 quad / V4 octo** | `g6lc_ai_cluster_dispatch`: N engines split one job along N (per-slice `ptr_b`/`ptr_c`, `ldc = n`), `axi_mux` with cluster-prefixed IDs, one master; the island top elaborates it for `Clusters > 1` | 49.2 / 98.3 TOPS @ 1.5 GHz | RTL landed, leaf-verified: 2- and 4-cluster C bit-identical to the single engine (`m2 n32 k16` 241 → 191 cycles); island top elaborates Clusters 1/2/4 at reduced geometry; **not** synthesized at full geometry, no SoC point |
 
 The batch-1 trap (scaling note §5) still holds: decode needs bytes, not TOPS; the ladder's
 100-TOPS end is the prefill / batched / conv regime.
@@ -107,12 +107,13 @@ builds, oracle controls behave, and `ai_dot4_s8_smoke`, `ai_mma_s8_golden`, `ai_
 `ai_island_mmio_smoke` pass on the two-hart dual-issue model. Queued: the dual-issue mini rerun, the two-hart
 boot-load bench (`ai_bench_smt2.S`, per-hart queues), the strict OpenSBI boot (`ariane-smt2-ai.dts`).
 
-## Open items (as of 2026-10-01)
+## Open items (as of 2026-10-01, end of pass)
 
-- V1 SoC measurement (island-side 512-bit throughput leaf first).
-- V3/V4 cluster dispatch; cross-job B prefetch into the free residency slot.
-- Serialized rerun of the FP-island directed suite and seven-format cold points on the shipped SKU.
-- 512-lane FP island synthesis anchor (queued).
+- V1 SoC measurement (queued with the `AI_START` trace; island and memory path proven on leaves).
+- Full-geometry synthesis of a cluster SKU and its SoC gate; derived-table refresh.
+- Cross-job B prefetch (WP5): designed — needs a second B-load context to overlap the next job's panel load with the current MAC.
+- Strict OpenSBI boot on `g6lc64_smt2_ai` (admitted in the runner; ~24 h at the FP-island model's speed).
+- Serialized rerun of the FP-island directed suite and seven-format cold points (queued); 512-lane FP synthesis anchor (queued).
 
 Playbooks: the AI section of `AGENTS-todo.md`, `architecture/ai-matrix/README.md`,
 `ai-tensor/AGENTS.md`, `g6lc_qemu/AGENTS.md`.
