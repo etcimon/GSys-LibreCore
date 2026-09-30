@@ -186,7 +186,7 @@
       g6lc,queue-depth = <64>;
       g6lc,noc-width = <64>;
       g6lc,dram-class = <0>;
-      g6lc,dram-gbps = <8>;
+      g6lc,dram-gbps = <16>;
       /* Live N=1 class 0. CLASS1 / CHANS_{2,4,8} still one memory@; hardware
        * stripe on the shared DRAM slave (cores + island). CAP 0x38 packs
        * count+shift; 0x34 class; 0x48 init_done. Do not add per-channel memory@. */

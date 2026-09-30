@@ -122,7 +122,7 @@ module tb_g6lc_ai_cap_occupancy
       $error("0x90 must stay unused, got=%h", r); errors++;
     end
 
-    // Live DTS ariane-ai.dts: class 0, 8 GB/s, 1 channel, shift 6.
+    // Live DTS ariane-ai.dts: class 0, 16 GB/s (2 GHz nameplate), 1 channel, shift 6.
     cap_read(CAP_OFF_DRAM_CLASS, r);
     if (r !== 32'(AI_DRAM_SIM_AXI)) begin
       $error("DTS class exp=0 got=%0d", r); errors++;
@@ -133,9 +133,11 @@ module tb_g6lc_ai_cap_occupancy
       $error("DTS channels/shift exp=1/6 got count=%0d shift=%0d",
              r[15:0], r[23:16]); errors++;
     end
+    // The DTS node must state the package's nameplate (16 GB/s since the 2 GHz
+    // promotion, 9805b92cd); the literal is the single source, the DTS follows.
     cap_read(CAP_OFF_DRAM_GBPS, r);
-    if (r[15:0] !== 16'd8) begin
-      $error("DTS gbps exp=8 got=%0d", r[15:0]); errors++;
+    if (r[15:0] !== 16'(AiIslandLatencyDefault.DramGBps)) begin
+      $error("DTS gbps exp=%0d got=%0d", AiIslandLatencyDefault.DramGBps, r[15:0]); errors++;
     end
 
     // CLASS1 N=2 bringup CAP (one memory@; firmware reads 0x38, not N DT banks).

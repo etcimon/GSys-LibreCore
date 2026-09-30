@@ -217,13 +217,13 @@ grep -q "SplitArId" corev_apu/ai_island/g6lc_ai_gemm_seq.sv \
   && ok "GEMM N>1 split outstanding AR IDs" || bad "SplitArId"
 grep -q "phy2_addr" verif/tb/ai_island/tb_g6lc_ai_dram_channels.sv \
   && ok "class-1 two IDs per PHY (N=2/4)" || bad "phy2_addr"
-grep -q 'build_nch 1' verif/tb/ai_island/run-dram-channels.sh \
+grep -q 'DEFAULT_NCHS=(1 ' verif/tb/ai_island/run-dram-channels.sh \
   && ok "class-1 PHY N=1 identity" || bad "dram_channels n1"
 grep -q "g6lc_ai_cap_window" verif/tb/ai_island/tb_g6lc_ai_gemm_channels.sv \
   && ok "class-1 GEMM CAP occupancy window" || bad "gemm_channels cap_window"
 grep -q "GATE_MILLI" verif/tb/ai_island/tb_g6lc_ai_dram_bw.sv \
   && ok "class-1 --sim stream BW TB" || bad "dram_bw GATE_MILLI"
-grep -q 'build_nch 1' verif/tb/ai_island/run-gemm-channels.sh \
+grep -q 'DEFAULT_NCHS=(1 ' verif/tb/ai_island/run-gemm-channels.sh \
   && ok "class-1 GEMM N=1 LiteDRAM identity" || bad "gemm_channels n1"
 # The N sweep is a DEFAULT_NCHS loop (nch-from-env.inc.sh), not unrolled
 # `build_nch <n>` calls, so assert the list that actually drives it.

@@ -15,6 +15,8 @@ module g6lc_ai_island_apb
     parameter bit             EnableDmaFetch = 1'b1,
     parameter int unsigned    AxiDataWidth = 64,
     parameter bit             SbTicketAlloc = 1'b0,
+    // Resident-B directory depth (g6lc_ai_island_top ReuseBSlots).
+    parameter int unsigned    ReuseBSlots = 2,
     parameter int unsigned    AxiIdWidth   = 4,
     parameter type            axi_req_t    = logic,
     parameter type            axi_resp_t   = logic,
@@ -76,6 +78,7 @@ module g6lc_ai_island_apb
       .EnableDmaFetch(EnableDmaFetch),
       .AxiDataWidth  (AxiDataWidth),
       .SbTicketAlloc (SbTicketAlloc),
+      .ReuseBSlots   (ReuseBSlots),
       .AxiIdWidth    (AxiIdWidth),
       .axi_req_t     (axi_req_t),
       .axi_resp_t    (axi_resp_t),

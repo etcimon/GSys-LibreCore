@@ -128,6 +128,24 @@ lints and elaborates; the duplicate `L2PfMaxOutstanding`/`L2PfQuiet` keys that m
 `g6lc64_smt2` fail elaboration are removed.
 No mapped PPA, full-SoC or new architectural status is inferred from these component results.
 
+**Island on any configuration (2026-10-01, `172b3971a` / `4c92ccd3a` / `8cb3d5d08`).**
+`config_pkg::AiCfgIsland`/`AiCfgIslandInt` + `ai_cfg_overlay()`; `build_config_pkg`
+`+define+G6LC_AI_OVERLAY[_INT]` splices the plane and the CVXIF coprocessor into any package
+(`NrWbPorts` follows); `ariane_testharness` `+define+G6LC_AI_ISLAND_CFG=<literal>`; build-platform
+`verify --lint --ai-overlay`, `ai-overlay pin|check|list` (generated `<pkg>_ai_config_pkg.sv` +
+`ariane-<pkg>-ai.dts` from `g6lc-ai-matrix.dtsi`, drift-tested; pins `g6lc64_ooo_int2_l3_ai`,
+`g6lc64_stream8_l3_ai`, `g6lc64_smt2_ooo_int_ai`). **Coherent outputs:** `ai_cfg_t.DmaInvalEn`
+(check_cfg: matrix plane + T2 queue) -> `g6lc_ai_inval_queue` on the island's muxed master (inval
+after B, per-line coalescing, AW hold, `idle`), `g6lc_ai_island_top` holds `gemm_done`/`wr_done`
+behind `idle`, `g6lc_cmo_engine` `NR_WRITERS`, `g6lc_cluster` generates the engine under
+`L2CmoEn || DmaInvalEn` and wires the writer port, `CAP_OFF_COH` (0xA0) bit 0. **Multi-core
+enqueue:** `g6lc_ai_enq_arb` in `g6lc_cluster`; island `SbTicketAlloc` + `sb_enq_ticket_o`
+(SoC harness 1), `g6lc_ai_exec` returns the island's ticket when attached. **OoO:** `g6lc_iq`
+issues a CVXIF op only at the commit head (`is_cvxif`, `G6LC_MUT_CVXIF_NOHEAD`). **FP coupling:**
+`IslandFpEn` no longer requires RVF/RVD. Makefile/`Flist.ai_island` list `g6lc_ai_inval_queue`,
+`g6lc_ai_enq_arb`, `g6lc_ai_cluster_dispatch`. SoC runs of the new discriminators are queued, not
+measured; the DMA-invalidation cost is not measured.
+
 ## OoO coherence continuation — partial, qualification-gated (2026-09-24)
 
 RVWMO (`#memorymodel`) and atomic transport (`#ext:a`) require owned responses and coherent

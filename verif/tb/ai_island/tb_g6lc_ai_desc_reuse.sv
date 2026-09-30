@@ -24,6 +24,8 @@
 `include "axi/assign.svh"
 
 module tb_g6lc_ai_desc_reuse;
+  // Resident-B directory depth under test (the shipped island keeps 2 panels).
+  parameter int unsigned REUSE_SLOTS = 2;
   import g6lc_ai_desc_pkg::*;
   import g6lc_ai_island_cfg_pkg::*;
   import config_pkg::*;
@@ -204,6 +206,7 @@ module tb_g6lc_ai_desc_reuse;
   g6lc_ai_island_apb #(
       .AiCfg(AiCfgReuse),
       .IslandCfg(Island),
+      .ReuseBSlots(REUSE_SLOTS),
       .EnableDmaFetch(1'b1),
       .AxiDataWidth(DW),
       .AxiIdWidth(IW),
@@ -1275,8 +1278,15 @@ module tb_g6lc_ai_desc_reuse;
     apb_write(16'h0108, 32'h0000_3600);
     wait_cpl(ticket, status);
     da = ar_a - a0; db = ar_b - b0;
-    if (ticket != 32'd54 || status[15:0] != ST_OK || db == 0) begin
-      $error("epoch-back t=%0d st=%h arA=%0d arB=%0d", ticket, status, da, db);
+    // Epoch semantics are monotonic: the caller advances the epoch after a writer
+    // touched B and never legitimately returns to an older one. With ONE slot the
+    // epoch-1 fill displaced the epoch-0 panel, so going back misses; with two or
+    // more slots the epoch-0 panel is still resident and going back HITS -- the
+    // directory keys on (ptr, epoch), and that resident copy is exactly the data
+    // epoch 0 named. Both are the correct behaviour of their geometry.
+    if (ticket != 32'd54 || status[15:0] != ST_OK ||
+        ((REUSE_SLOTS > 1) ? (db != 0) : (db == 0))) begin
+      $error("epoch-back t=%0d st=%h arA=%0d arB=%0d slots=%0d", ticket, status, da, db, REUSE_SLOTS);
       errors++;
     end
     expect_c("epoch-back", PC);
