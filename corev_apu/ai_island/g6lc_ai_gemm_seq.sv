@@ -341,6 +341,18 @@ module g6lc_ai_gemm_seq #(
   logic        stc_i_en, stc_j_en;          // advance store cursor this cycle
   logic [31:0] stc_i_d, stc_j_d;
   localparam bit DualCRead = (PeLanes >= 2);
+  // Wide C store (V1/V2): on a bus wider than 64 bits a C beat can carry
+  // DataWidth/32 consecutive columns (read from as many distinct banks) instead of
+  // one 8-byte pair. Taken per job when the row pitch keeps every row base beat-
+  // aligned (n % StoreWordsMax == 0 and ptr_c aligned); otherwise the pair path.
+  // Words per beat are a shift (wsh: 1 = pair, StoreShMax = wide), so the 64-bit
+  // path is arithmetically the pre-change one.
+  localparam int unsigned StoreWordsMax = (DataWidth >= 64) ? DataWidth / 32 : 2;
+  localparam int unsigned StoreShMax    = $clog2(StoreWordsMax);
+  localparam int unsigned StoreShW      = (StoreShMax > 1) ? $clog2(StoreShMax + 1) : 1;
+  localparam bit          WideCStore    = DualCRead && (StoreWordsMax > 2) && (PeLanes >= StoreWordsMax);
+  logic [StoreShW-1:0] wsh_q;      // words-per-beat shift for this job's C store
+  logic                wide_c_q;   // this job's rows are beat-aligned: use the wide store
 
   // ---- Banked A/B tile ports ----
   logic                 a_r_req  [PeLanes];
@@ -375,6 +387,11 @@ module g6lc_ai_gemm_seq #(
   logic [BankAddrW-1:0] c_r0_addr, c_r1_addr, c_w_addr;
   logic [31:0]          c_r0_data, c_r1_data, c_w_data;
   logic [31:0]          c_r_data_b [PeLanes];
+  // Wide-store read ports for columns 2..StoreWordsMax-1 (0 and 1 are c_r0/c_r1).
+  logic                 c_rx_req  [StoreWordsMax];
+  logic [LaneW-1:0]     c_rx_bank [StoreWordsMax];
+  logic [BankAddrW-1:0] c_rx_addr [StoreWordsMax];
+  logic [31:0]          c_rx_data [StoreWordsMax];
   logic                 c_wp_req  [PeLanes];
   logic [BankAddrW-1:0] c_wp_addr [PeLanes];
   logic [31:0]          c_wp_data [PeLanes];
@@ -451,10 +468,10 @@ module g6lc_ai_gemm_seq #(
         .ImplKey  ("g6lc_ai_tile_c")
     ) i_tile_c (
         .clk_i, .rst_ni, .testmode_i,
-        // Dual-read: r0 and r1 select different banks (pair j, j+1)
-        .r_req_i ((c_r0_req && (c_r0_bank == LaneW'(p))) ||
-                  (c_r1_req && (c_r1_bank == LaneW'(p)))),
-        .r_addr_i((c_r1_req && (c_r1_bank == LaneW'(p))) ? c_r1_addr : c_r0_addr),
+        // Multi-read: r0/r1 (pair j, j+1) and the wide-store ports select
+        // different banks (consecutive columns, StoreWordsMax <= PeLanes).
+        .r_req_i (c_rp_req[p]),
+        .r_addr_i(c_rp_addr[p]),
         .r_data_o(c_r_data_b[p]),
         .w_req_i (c_wp_req[p]),
         .w_addr_i(c_wp_addr[p]),
@@ -469,7 +486,22 @@ module g6lc_ai_gemm_seq #(
     );
   end
 
-  // Latency=0 dual read mux
+  // Per-bank read request: r0, r1 or one of the wide ports (at most one per bank).
+  logic                 c_rp_req  [PeLanes];
+  logic [BankAddrW-1:0] c_rp_addr [PeLanes];
+  always_comb begin
+    for (int unsigned p = 0; p < PeLanes; p++) begin
+      c_rp_req[p]  = (c_r0_req && (c_r0_bank == LaneW'(p))) || (c_r1_req && (c_r1_bank == LaneW'(p)));
+      c_rp_addr[p] = (c_r1_req && (c_r1_bank == LaneW'(p))) ? c_r1_addr : c_r0_addr;
+      for (int unsigned w = 2; w < StoreWordsMax; w++)
+        if (c_rx_req[w] && c_rx_bank[w] == LaneW'(p)) begin
+          c_rp_req[p]  = 1'b1;
+          c_rp_addr[p] = c_rx_addr[w];
+        end
+    end
+  end
+
+  // Latency=0 read muxes
   always_comb begin
     c_r0_data = c_r_data_b[0];
     c_r1_data = c_r_data_b[0];
@@ -479,7 +511,15 @@ module g6lc_ai_gemm_seq #(
       if (c_r1_bank == LaneW'(p))
         c_r1_data = c_r_data_b[p];
     end
+    for (int unsigned w = 0; w < StoreWordsMax; w++) begin
+      c_rx_data[w] = c_r_data_b[0];
+      for (int unsigned p = 1; p < PeLanes; p++)
+        if (c_rx_bank[w] == LaneW'(p)) c_rx_data[w] = c_r_data_b[p];
+    end
+    c_rx_data[0] = c_r0_data;
+    if (StoreWordsMax > 1) c_rx_data[1] = c_r1_data;
   end
+
 
   // PE: multi-lane MAC (driven only in ST_MAC)
   logic signed [7:0] pe_a [PeLanes];
@@ -1120,6 +1160,27 @@ module g6lc_ai_gemm_seq #(
     return b;
   endfunction
 
+  // One C beat: the `nwords` (a power of two, 2 or StoreWordsMax) consecutive
+  // 32-bit words placed at the byte lane the address selects (0 when aligned).
+  function automatic wbeat_t wbeat_words(
+      input logic [31:0] addr,
+      input int unsigned nwords
+  );
+    automatic wbeat_t bt;
+    automatic int unsigned lane, w, at;
+    bt.data = '0;
+    bt.strb = '0;
+    lane = unsigned'(addr) & (BytesPerBeat - 1);
+    for (w = 0; w < StoreWordsMax; w++) begin
+      at = lane + 4 * w;
+      if (w < nwords && at + 3 < BytesPerBeat) begin
+        bt.data[8*at +: 32] = c_rx_data[w];
+        bt.strb[at +: 4]    = 4'hF;
+      end
+    end
+    return bt;
+  endfunction
+
   // Elements covered by `nb` beats starting at byte lane `lane0`, cap `rem`
   function automatic logic [31:0] elems_for_burst(
       input logic [31:0] rem,
@@ -1232,14 +1293,19 @@ module g6lc_ai_gemm_seq #(
     pair_store = DataWidth >= 64 && !n_q[0];
     trail = state_q == ST_MAC && DualCRead && DataWidth >= 64 && dot_pending_q == '0 &&
         !acc_mode_q && trail_ready;
-    beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
-    column = stc_j_q + (beats_done << 1);
+    beats_done = 32'(stc_elem_q >> wsh_q) - 32'(stc_w_left_q);
+    column = stc_j_q + (beats_done << wsh_q);
     c_r0_req = 1'b0;
     c_r0_bank = '0;
     c_r0_addr = '0;
     c_r1_req = 1'b0;
     c_r1_bank = '0;
     c_r1_addr = '0;
+    for (int unsigned w = 0; w < StoreWordsMax; w++) begin
+      c_rx_req[w]  = 1'b0;
+      c_rx_bank[w] = '0;
+      c_rx_addr[w] = '0;
+    end
     if (state_q == ST_MAC && acc_mode_q && sum_v_q && sum_first_q) begin
       // Seed read for the element whose first partial drains this cycle.
       c_r0_req  = 1'b1;
@@ -1258,6 +1324,13 @@ module g6lc_ai_gemm_seq #(
           c_r1_req = 1'b1;
           c_r1_bank = c_bank(column + 32'd1);
           c_r1_addr = c_bank_addr(stc_i_q, column + 32'd1);
+          // Wide beat: columns 2..W-1 of the beat as well.
+          if (wide_c_q)
+            for (int unsigned w = 2; w < StoreWordsMax; w++) begin
+              c_rx_req[w]  = 1'b1;
+              c_rx_bank[w] = c_bank(column + 32'(w));
+              c_rx_addr[w] = c_bank_addr(stc_i_q, column + 32'(w));
+            end
         end else begin
           c_r0_bank = c_bank(column + 32'(c_pair_hold_q));
           c_r0_addr = c_bank_addr(stc_i_q, column + 32'(c_pair_hold_q));
@@ -1899,33 +1972,34 @@ module g6lc_ai_gemm_seq #(
             can_pair = !n_q[0];
             if (can_pair) begin
               if (!aw_sent_q) begin
-                pairs_rem = (n_q - stc_j_q) >> 1;
+                pairs_rem = (n_q - stc_j_q) >> wsh_q;
                 nbeats    = pairs_rem;
-                // Inside the row still being computed only the pairs whose C words
+                // Inside the row still being computed only the beats whose C words
                 // are already written may be burst; the AW length is fixed at issue.
-                if (!(stc_i_q < 32'(c_rows_done_q)) && nbeats > ((c_cols_done_q - stc_j_q) >> 1))
-                  nbeats = (c_cols_done_q - stc_j_q) >> 1;
+                if (!(stc_i_q < 32'(c_rows_done_q)) && nbeats > ((c_cols_done_q - stc_j_q) >> wsh_q))
+                  nbeats = (c_cols_done_q - stc_j_q) >> wsh_q;
                 if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
-                nbeats    = cap_c_nbeats(c_store_addr, nbeats);
+                nbeats    = wide_c_q ? cap_nbeats_to_stripe(c_store_addr, nbeats)
+                                     : cap_c_nbeats(c_store_addr, nbeats);
                 if (nbeats == 0) nbeats = 1;
                 axi_req_d.aw.addr  = c_store_addr;
                 axi_req_d.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
-                axi_req_d.aw.size  = axi_pkg::size_t'(3);
+                axi_req_d.aw.size  = axi_pkg::size_t'(32'd2 + 32'(wsh_q));
                 axi_req_d.aw_valid = 1'b1;
                 if (axi_resp_s.aw_ready) begin
                   aw_sent_d     = 1'b1;
                   stc_w_left_d  = nbeats[8:0];
-                  stc_elem_d    = nbeats[15:0] << 1;
+                  stc_elem_d    = nbeats[15:0] << wsh_q;
                   w_sent_d      = 1'b0;
                   c_pair_hold_d = 1'b0;
                 end
               end else if (stc_w_left_q != 9'd0) begin
-                beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
-                j_eff      = stc_j_q + (beats_done << 1);
+                beats_done = 32'(stc_elem_q >> wsh_q) - 32'(stc_w_left_q);
+                j_eff      = stc_j_q + (beats_done << wsh_q);
                 begin
                   automatic wbeat_t wb;
-                  wb = wbeat_at({c_r1_data, c_r0_data}, 8,
-                                32'(c_store_addr) + (beats_done << 3));
+                  wb = wbeat_words(32'(c_store_addr) + (beats_done << (32'd2 + 32'(wsh_q))),
+                                   wide_c_q ? StoreWordsMax : 2);
                   axi_req_d.w.data = wb.data;
                   axi_req_d.w.strb = wb.strb;
                 end
@@ -2080,30 +2154,31 @@ module g6lc_ai_gemm_seq #(
 
           if (can_pair) begin
             if (!aw_sent_q) begin
-              pairs_rem = (n_q - stc_j_q) >> 1;
+              pairs_rem = (n_q - stc_j_q) >> wsh_q;
               nbeats    = pairs_rem;
               if (nbeats > MaxBurstBeats) nbeats = MaxBurstBeats;
-              nbeats    = cap_c_nbeats(c_store_addr, nbeats);
+              nbeats    = wide_c_q ? cap_nbeats_to_stripe(c_store_addr, nbeats)
+                                   : cap_c_nbeats(c_store_addr, nbeats);
               if (nbeats == 0) nbeats = 1;
               axi_req_d.aw.addr  = c_store_addr;
               axi_req_d.aw.len   = axi_pkg::len_t'(nbeats - 32'd1);
-              axi_req_d.aw.size  = axi_pkg::size_t'(3);
+              axi_req_d.aw.size  = axi_pkg::size_t'(32'd2 + 32'(wsh_q));
               axi_req_d.aw_valid = 1'b1;
               if (axi_resp_s.aw_ready) begin
                 aw_sent_d     = 1'b1;
                 stc_w_left_d  = nbeats[8:0];
-                stc_elem_d    = nbeats[15:0] << 1;
+                stc_elem_d    = nbeats[15:0] << wsh_q;
                 w_sent_d      = 1'b0;
                 c_pair_hold_d = 1'b0;
               end
             end else if (stc_w_left_q != 9'd0) begin
-              beats_done = 32'(stc_elem_q >> 1) - 32'(stc_w_left_q);
-              j_eff      = stc_j_q + (beats_done << 1);
+              beats_done = 32'(stc_elem_q >> wsh_q) - 32'(stc_w_left_q);
+              j_eff      = stc_j_q + (beats_done << wsh_q);
               if (DualCRead) begin
                 begin
                   automatic wbeat_t wb;
-                  wb = wbeat_at({c_r1_data, c_r0_data}, 8,
-                                32'(c_store_addr) + (beats_done << 3));
+                  wb = wbeat_words(32'(c_store_addr) + (beats_done << (32'd2 + 32'(wsh_q))),
+                                   wide_c_q ? StoreWordsMax : 2);
                   axi_req_d.w.data = wb.data;
                   axi_req_d.w.strb = wb.strb;
                 end
@@ -2239,6 +2314,8 @@ module g6lc_ai_gemm_seq #(
       ar_j_q <= '0;
       // F0b-2: the reduction pipeline is empty at reset.
       sum_v_q    <= 1'b0;
+      wide_c_q   <= 1'b0;
+      wsh_q      <= StoreShW'(1);
       sum_first_q<= 1'b0;
       sum_last_q <= 1'b0;
       sum_i_q    <= '0;
@@ -2292,6 +2369,16 @@ module g6lc_ai_gemm_seq #(
       // uses the registered value (the reuse key compares k, so a resident panel
       // always carries the pitch the new job computes).
       if (state_q == ST_CHK) pitch_sh_q <= pitch_sh_c;
+      // Wide C store when every row base is beat-aligned: n a multiple of the
+      // words per beat (ldc = n) and ptr_c aligned to the beat. Pairs otherwise.
+      if (state_q == ST_CHK) begin
+        wide_c_q <= WideCStore && !n_q[0] &&
+                    ((n_q & 32'(StoreWordsMax - 1)) == 32'd0) &&
+                    ((pc_q & AddrWidth'(BytesPerBeat - 1)) == '0);
+        wsh_q    <= (WideCStore && !n_q[0] &&
+                     ((n_q & 32'(StoreWordsMax - 1)) == 32'd0) &&
+                     ((pc_q & AddrWidth'(BytesPerBeat - 1)) == '0)) ? StoreShW'(StoreShMax) : StoreShW'(1);
+      end
       ar_inflight_q <= ar_inflight_d;
       aw_sent_q     <= aw_sent_d;
       w_sent_q      <= w_sent_d;

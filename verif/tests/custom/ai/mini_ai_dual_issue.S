@@ -12,7 +12,9 @@
 #      mepc = its own address, and the handler resumes after it.
 #
 # On a single-issue package both facts hold trivially (the mini is then a
-# positive control for the AI op and the trap path). Hart 0 only.
+# positive control for the AI op and the trap path). Hart 0 only. Failure words
+# carry the exit bit ((code << 1) | 1) so a failing mini stops the harness at once
+# instead of running to the cycle cap (the even code 2 of the older minis does that).
   .section .text.init
   .globl _start
 _start:
@@ -66,14 +68,14 @@ pass:
   sw   a0, 0(t0)
 1: j 1b
 
-fail_exec:                      # AI op result or partner wrong: code 2
-  li   a0, 2
+fail_exec:                      # AI op result or partner wrong: exit code 1 (tohost 3)
+  li   a0, 3
   la   t0, tohost
   sw   a0, 0(t0)
 2: j 2b
 
-fail_notrap:                    # illegal encoding did not trap: code 2 as well (mini convention)
-  li   a0, 2
+fail_notrap:                    # illegal encoding did not trap: exit code 2 (tohost 5)
+  li   a0, 5
   la   t0, tohost
   sw   a0, 0(t0)
 3: j 3b

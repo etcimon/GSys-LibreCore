@@ -419,6 +419,50 @@ module tb_g6lc_ai_gemm_wide;
     if (!done1) $fatal(1, "512-bit gemm timeout");
     if (err1) $fatal(1, "512-bit gemm err");
     check_c(1, wsnap);
+    // Wide C store evidence: the 128-bit 2x4x16 job (n = 4 words = one 16 B beat,
+    // PC beat-aligned) must have taken the wide path; the 512-bit n=4 job must not
+    // (4 is not a multiple of its 16 words per beat) -- both C results were checked.
+    if (!i_gemm0.wide_c_q) $fatal(1, "128-bit n=4 job did not take the wide C store");
+    if (i_gemm1.wide_c_q)  $fatal(1, "512-bit n=4 job took the wide C store (n %% 16 != 0)");
+
+    // 512-bit wide store: m=1 n=16 k=16, all ones -> 16 words of 16 in ONE 64 B beat
+    // (one channel-side burst of eight 8 B beats through the downsizer). Sentinels on
+    // both sides of the 64 B row must survive.
+    begin
+      int r;
+      logic [63:0] got;
+      int unsigned w_before;
+      for (r = 0; r < 16; r++) begin
+        wr64(1, PB + (64'(r) * 64'd16), ONES);
+        wr64(1, PB + (64'(r) * 64'd16) + 64'd8, ONES);
+      end
+      for (r = 0; r < 8; r++) wr64(1, PC + 64'h200 + (64'(r) * 64'd8), 64'h0);
+      wr64(1, PC + 64'h200 - 64'd8, SENT);
+      wr64(1, PC + 64'h200 + 64'd64, SENT);
+      m1 = 32'd1; n1 = 32'd16; k1 = 32'd16; lda1 = 16'd16; ldb1 = 16'd16; nf1 = 3'd0;
+      pc1 = PC + 64'h200;
+      guard = 0;
+      do begin @(posedge clk); guard++; end while (!ready1 && guard < 100);
+      w_before = ch_w1[0];
+      @(negedge clk); start1 = 1;
+      @(negedge clk); start1 = 0;
+      guard = 0;
+      do begin @(posedge clk); guard++; end while (!done1 && guard < 20000);
+      if (!done1) $fatal(1, "512-bit wide-store gemm timeout");
+      if (err1) $fatal(1, "512-bit wide-store gemm err");
+      if (!i_gemm1.wide_c_q) $fatal(1, "512-bit n=16 job did not take the wide C store");
+      for (r = 0; r < 8; r++) begin
+        rd64(1, PC + 64'h200 + (64'(r) * 64'd8), got);
+        if (got !== C16) $fatal(1, "wide-store C word pair %0d exp %h got %h", r, C16, got);
+      end
+      rd64(1, PC + 64'h200 - 64'd8, got);
+      if (got !== SENT) $fatal(1, "wide-store sentinel before smashed %h", got);
+      rd64(1, PC + 64'h200 + 64'd64, got);
+      if (got !== SENT) $fatal(1, "wide-store sentinel after smashed %h", got);
+      if (ch_w1[0] != w_before + 8)
+        $fatal(1, "wide-store C channel beats %0d (before %0d): expected one 64 B beat = 8 channel beats", ch_w1[0], w_before);
+      pc1 = PC;
+    end
 
     arm_odd(0);
     preload_odd(0);
