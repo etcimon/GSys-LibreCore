@@ -341,6 +341,21 @@ script adopts it and the step is a no-op.
 - **spike**: Linux native or Windows via WSL (`build-platform/scripts/install-spike.sh`);
   Cygwin unsupported. Installs Linux ELF under `workspace/tooling/spike`; adopts
   `~/tools/spike` when present. Run on Windows with `wsl …/tooling/spike/bin/spike`.
+- **verilator**: Linux native or Windows via WSL (`build-platform/scripts/install-verilator.sh`)
+  → `workspace/tooling/verilator-<pin>` (pin: `toolchain.versions.verilator`, v5.008). **The
+  installed tool is always the pinned tag PLUS every `verif/regress/verilator-*.patch`**: the
+  script applies each patch with `git apply --check` (a patch that does not apply is a hard
+  error, unlike the upstream `verif/regress/install-verilator.sh` whose `git apply || true`
+  silently builds a stock tool), skips Verilator's own `make test`, and after `make install`
+  verifies that every added header line is present under `share/verilator/include` and that
+  `--version` reports `(mod)`. A prefix is adopted (`VERILATOR_ADOPT_FROM`, or an OSS CAD
+  drop-in under `workspace/tooling/oss-cad-suite`) only if it passes the same check. The
+  check itself is `src/tooling/verilatorPatch.ts` and is shared by `tools install verilator`
+  ("already installed (patched …)" vs. rebuild), `diag status` / `verify --tools`
+  (`verilator-patch` row), the `diag run` lint preflight (warns — the fixes are runtime headers
+  that `--lint-only` never compiles) and the sim preflight (**required** — regress compiles
+  the runtime). CI's `rtl-lint` lane is the same `./build.sh tools install verilator` behind an
+  `actions/cache` of the prefix.
 - **`setup --install`** ends with a post-setup tools probe snapshot; failures point at
   `probe install`.
 

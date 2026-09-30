@@ -25,6 +25,7 @@ import type { PlatformContext } from "../context.ts";
 import { run, type CommandResult } from "../platform/exec.ts";
 import { recommendedJobs } from "../platform/os.ts";
 import { hasWsl, windowsPathToWsl, wslCommand } from "../platform/wsl.ts";
+import { formatVerilatorPatchStatus, verilatorPatchStatus } from "./verilatorPatch.ts";
 
 /** Absolute locations of every binary the gate can drive. */
 export interface EdaPaths {
@@ -149,10 +150,31 @@ export function edaPaths(ctx: PlatformContext): EdaPaths {
   };
 }
 
-/** Report which gate tools are actually installed. */
-export function edaPresence(paths: EdaPaths): EdaToolStatus[] {
+/**
+ * Report which gate tools are actually installed. With `repoRoot`, the Verilator
+ * row is followed by `verilator-patch`: whether the suite's Verilator carries the
+ * repo's custom fixes (verif/regress/verilator-*.patch). The fixes live in the
+ * C++ runtime headers, which `--lint-only` never compiles, so the row is
+ * informational for the lint/elab gate; the simulation preflight
+ * (simPreflight.ts) and `tools install verilator` require it.
+ */
+export function edaPresence(paths: EdaPaths, repoRoot?: string): EdaToolStatus[] {
+  const verilatorPresent = existsSync(paths.verilator);
+  const patchRows: EdaToolStatus[] = [];
+  if (repoRoot !== undefined) {
+    const st = verilatorPatchStatus(paths.root, repoRoot);
+    if (st.patches.length > 0) {
+      patchRows.push({
+        id: "verilator-patch",
+        path: `${join(paths.verilatorRoot, "include")} — ${formatVerilatorPatchStatus(st)}`,
+        present: verilatorPresent && st.patched,
+        required: false,
+      });
+    }
+  }
   return [
-    { id: "verilator", path: paths.verilator, present: existsSync(paths.verilator), required: true },
+    { id: "verilator", path: paths.verilator, present: verilatorPresent, required: true },
+    ...patchRows,
     { id: "slang", path: paths.slang, present: existsSync(paths.slang), required: false },
     { id: "yosys", path: paths.yosys, present: existsSync(paths.yosys), required: false },
     { id: "yosys-slang", path: paths.slangPlugin, present: existsSync(paths.slangPlugin), required: false },

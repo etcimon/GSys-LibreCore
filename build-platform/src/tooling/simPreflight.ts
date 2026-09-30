@@ -15,6 +15,8 @@ import {
   type ResolvedBash,
 } from "../platform/shell.ts";
 import { hasManagedTool } from "../tests/runner.ts";
+import { isVerilatorInstalled } from "./recipes.ts";
+import { formatVerilatorPatchStatus, verilatorPatchStatus } from "./verilatorPatch.ts";
 
 export interface SimPreflightItem {
   id: string;
@@ -99,8 +101,23 @@ export function assessSimPreflight(ctx: PlatformContext): SimPreflightReport {
     detail: verilator ? "managed or PATH" : "missing",
     hint: verilator
       ? undefined
-      : "tools install sim  |  OSS CAD suite under workspace/tooling",
+      : "tools install sim  |  tools install verilator",
   });
+
+  // The regress flow compiles against VERILATOR_INSTALL_DIR (the managed
+  // prefix); it must be the built, patched tool, not a stock drop-in.
+  if (isVerilatorInstalled(ctx.tools.verilatorBin)) {
+    const st = verilatorPatchStatus(ctx.tools.verilator, ctx.repoRoot);
+    if (st.patches.length > 0) {
+      items.push({
+        id: "verilator-patch",
+        ok: st.patched,
+        required: true,
+        detail: formatVerilatorPatchStatus(st),
+        hint: st.patched ? undefined : "tools install verilator  # rebuilds the pinned tag with verif/regress/verilator-*.patch",
+      });
+    }
+  }
 
   // make is needed for verilate path — under Windows prefer WSL (GNU make).
   const engine = ctx.host.os === "windows" ? resolveRegressEngine() : "bash";

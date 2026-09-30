@@ -112,7 +112,7 @@ export const diagCommand: Command = {
 
     if (sub === "status") {
       const paths = edaPaths(ctx);
-      const presence = edaPresence(paths);
+      const presence = edaPresence(paths, ctx.repoRoot);
       let probeReport = null;
       try {
         probeReport = await gatherProbeReport(ctx);

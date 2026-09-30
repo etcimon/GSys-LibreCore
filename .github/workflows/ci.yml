@@ -148,30 +148,54 @@ jobs:
           bun-version: latest
 
       # The managed prefix the build platform expects (workspace/tooling/verilator-v5.008).
-      - name: Cache pinned Verilator
+      # restore/save are split so a ten-minute build is kept even when a later
+      # step of this job fails (actions/cache's post step only saves on success).
+      # The key covers the recipe and every custom patch, so editing a fix
+      # rebuilds the tool.
+      - name: Restore pinned Verilator
         id: cache-verilator
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: build-platform/workspace/tooling/verilator-v5.008
-          key: verilator-v5.008-${{ runner.os }}-${{ hashFiles('verif/regress/install-verilator.sh', 'verif/regress/verilator-v5.patch') }}
+          key: verilator-v5.008-${{ runner.os }}-${{ hashFiles('build-platform/scripts/install-verilator.sh', 'build-platform/src/tooling/recipes.ts', 'verif/regress/verilator-*.patch') }}
 
-      # Same source, tag and patch as verif/regress/install-verilator.sh, minus
-      # its `make test` (the full Verilator regression is not our gate).
-      - name: Build pinned Verilator (cache miss)
+      # One recipe, shared with every host: `tools install verilator` runs
+      # build-platform/scripts/install-verilator.sh, which clones the pinned tag,
+      # applies every verif/regress/verilator-*.patch strictly (a patch that does
+      # not apply is a hard error, never a silent stock build), skips Verilator's
+      # own `make test`, and verifies the installed headers carry each patched
+      # line. On a cache hit the same command re-verifies the restored prefix and
+      # reports "already installed (patched ...)".
+      - name: Build prerequisites (cache miss)
         if: steps.cache-verilator.outputs.cache-hit != 'true'
         run: |
-          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends autoconf bison flex help2man libfl-dev libfl2 zlib1g-dev
+
+      - name: tools install verilator (pinned + patched)
+        env:
+          VERILATOR_SKIP_DEPS: "1"
+        run: ./build.sh tools install verilator
+
+      - name: Save pinned Verilator
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build-platform/workspace/tooling/verilator-v5.008
+          key: ${{ steps.cache-verilator.outputs.cache-primary-key }}
+
+      # Independent proof that the tool the gate will run carries the fixes:
+      # `--version` reports "(mod)" for a tree built with local modifications,
+      # and the VlUnpacked::data() cast from verilator-v5.patch must be in the
+      # installed runtime header.
+      - name: Verify custom fixes in the installed Verilator
+        run: |
+          set -euo pipefail
           prefix="$PWD/build-platform/workspace/tooling/verilator-v5.008"
-          build="$RUNNER_TEMP/verilator-build"
-          git clone --branch v5.008 --depth 1 https://github.com/verilator/verilator.git "$build"
-          cd "$build"
-          git apply "$GITHUB_WORKSPACE/verif/regress/verilator-v5.patch" || true
-          autoconf
-          ./configure --prefix="$prefix"
-          make -j"$(nproc)"
-          make install
+          "$prefix/bin/verilator_bin" --version
+          "$prefix/bin/verilator_bin" --version | grep -q '(mod)'
+          grep -q 'WData\* data() { return (WData\*)&m_storage\[0\]; }' "$prefix/share/verilator/include/verilated_types.h"
+          echo "verilator-v5.patch present in installed headers"
 
       - name: Point the gate at the managed Verilator
         run: |
@@ -179,7 +203,6 @@ jobs:
           // CI overlay: lint/elab tools come from the managed pinned Verilator prefix.
           export default { verify: { suite: { root: "verilator-v5.008", version: "v5.008" } } };
           EOF
-          ./build.sh tools install verilator
           ./build.sh diag status
 
       # core = ISA red lines + firmware-accommodation scan + cv64a6_imafdc_sv39 /

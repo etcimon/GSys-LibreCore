@@ -21,6 +21,7 @@ import {
 } from "./eda.ts";
 import { hasManagedTool } from "../tests/runner.ts";
 import type { ProbeReport } from "./probe.ts";
+import { formatVerilatorPatchStatus, verilatorPatchStatus } from "./verilatorPatch.ts";
 
 export const DIAG_COMPARTMENTS: DiagnosticCompartment[] = [
   "host",
@@ -443,6 +444,20 @@ async function runVerilatorDiag(
           optional: false,
         };
       }
+    }
+  }
+
+  // Say so when the suite's Verilator is a stock drop-in (OSS CAD, distro
+  // package) rather than the built, patched tool. The custom fixes are in the
+  // runtime headers, which --lint-only never compiles, so lint still runs —
+  // but the regress flow must use the managed patched prefix (sim preflight).
+  if (existsSync(paths.verilator)) {
+    const st = verilatorPatchStatus(paths.root, ctx.repoRoot);
+    if (st.patches.length > 0 && !st.patched) {
+      ctx.logger.warn(
+        `${test.id}: verilator at ${paths.root} is ${formatVerilatorPatchStatus(st)} ` +
+          "(lint-only is unaffected; simulation needs `tools install verilator`).",
+      );
     }
   }
 

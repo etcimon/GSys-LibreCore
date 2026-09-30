@@ -234,11 +234,15 @@ Design rules the workflow follows:
 
 - **Checkout is `submodules: false`.** Each lane inits the exact submodules it needs; a recursive
   checkout drags in every nested pointer and dies on the first unpublished one.
-- **The gate's Verilator is the pinned v5.008.** Ubuntu's `verilator` 5.020 lints the core packages
-  but segfaults on the cluster lint top (`g6lc_ooo_int2*`, `*_l3`), so CI builds the pinned tag
-  (same source/patch as `verif/regress/install-verilator.sh`, minus its `make test`) and points the
-  gate at it through the gitignored overlay `build-platform/.config.local.ts`
-  (`verify.suite.root: "verilator-v5.008"`). `tools install verilator` then reports "already installed".
+- **The gate's Verilator is the pinned v5.008 with the repo's custom fixes.** Ubuntu's `verilator`
+  5.020 lints the core packages but segfaults on the cluster lint top (`g6lc_ooo_int2*`, `*_l3`),
+  and any stock tool lacks `verif/regress/verilator-*.patch`. CI therefore runs
+  `./build.sh tools install verilator` — the platform recipe
+  (`build-platform/scripts/install-verilator.sh`) that clones the pinned tag, applies every patch
+  strictly, skips Verilator's own `make test` and verifies the installed headers carry each
+  patched line — behind an `actions/cache` of the prefix, then re-checks `(mod)` + the patched
+  header, and points the gate at it through the gitignored overlay `build-platform/.config.local.ts`
+  (`verify.suite.root: "verilator-v5.008"`). See `build-platform/AGENTS.md` §4.6.2 (verilator).
 - **Rust lanes cache with `Swatinem/rust-cache` + `git restore-mtime`.** The workspaces have no
   crates.io dependencies (KD0), so the cache is only useful if unchanged workspace crates keep their
   fingerprints — which needs source mtimes restored from git history.

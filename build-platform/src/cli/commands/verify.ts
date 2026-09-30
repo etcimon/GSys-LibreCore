@@ -174,7 +174,7 @@ export const verifyCommand: Command = {
       }
     }
     const paths = edaPaths(ctx);
-    let presence = edaPresence(paths);
+    let presence = edaPresence(paths, ctx.repoRoot);
 
     if (args.flags.tools) {
       logger.heading(`OSS CAD Suite (pinned ${config.verify.suite.version})`);
@@ -190,7 +190,7 @@ export const verifyCommand: Command = {
     if (!ctx.dryRun && !qualification) {
       const want: ManagedTool[] = ["verilator", "riscv-gcc"];
       await offerInstallMissingTools(ctx, want, args.flags as Record<string, string | boolean>);
-      presence = edaPresence(paths);
+      presence = edaPresence(paths, ctx.repoRoot);
     }
 
     const missingRequired = presence.filter((t) => t.required && !t.present);

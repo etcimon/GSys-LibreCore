@@ -3,13 +3,15 @@
 //
 // recipes.ts — Install recipes for the managed open-source-sim toolchain.
 //
-// Where the CVA6 repo already ships a proven installer (Verilator, Spike), the
-// recipe REUSES it (verif/regress/install-*.sh) with the environment pointed at
-// workspace/tooling, rather than re-implementing configure/make. RISC-V GCC is
-// fetched as a prebuilt tarball. Icarus is delegated to the package manager.
+// Verilator, Spike and the formal stack are built by the platform's own scripts
+// under build-platform/scripts/ (install-*.sh) with the environment pointed at
+// workspace/tooling; Verilator's script applies the repo's custom patches
+// strictly and verifies them, which the upstream verif/regress installer does
+// not. RISC-V GCC is fetched as a prebuilt tarball. Icarus is delegated to the
+// package manager.
 // Everything is confined to the managed workspace + respects dry-run.
 
-import { existsSync, mkdirSync, readdirSync, rmSync, cpSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readdirSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { basename, join } from "node:path";
 
@@ -17,6 +19,7 @@ import { childEnv, type PlatformContext } from "../context.ts";
 import { hasBinary, run, which } from "../platform/exec.ts";
 import { resolveBashBinary, runBashScript } from "../platform/shell.ts";
 import { recommendedJobs } from "../platform/os.ts";
+import { formatVerilatorPatchStatus, verilatorPatchStatus } from "./verilatorPatch.ts";
 
 export interface RecipeOptions {
   dryRun?: boolean;
@@ -60,123 +63,90 @@ export function findOssCadVerilatorRoot(toolingRoot: string): string | null {
 }
 
 /**
- * Point the managed Verilator prefix at an existing OSS CAD Suite install so
- * VERILATOR_INSTALL_DIR/bin/verilator resolves without a full source rebuild.
- * Uses directory junctions/symlinks when possible; falls back to a shallow copy
- * of bin/ + share/verilator/.
- */
-function adoptVerilatorFromOssCad(
-  toolsVerilator: string,
-  ossRoot: string,
-  logger: PlatformContext["logger"],
-): boolean {
-  const destBin = join(toolsVerilator, "bin");
-  const destShare = join(toolsVerilator, "share");
-  const srcBin = join(ossRoot, "bin");
-  const srcShareVl = join(ossRoot, "share", "verilator");
-
-  try {
-    mkdirSync(toolsVerilator, { recursive: true });
-    // Prefer junctions/symlinks (cheap, stay in sync with oss-cad updates).
-    const linkDir = (target: string, linkPath: string): void => {
-      if (existsSync(linkPath)) return;
-      try {
-        // Windows: 'junction' for dirs; Node maps type 'junction' → mklink /J.
-        symlinkSync(target, linkPath, process.platform === "win32" ? "junction" : "dir");
-      } catch {
-        mkdirSync(linkPath, { recursive: true });
-        cpSync(target, linkPath, { recursive: true, force: true });
-      }
-    };
-
-    // Link the whole bin/ (includes verilator + verilator_bin*) and share/verilator.
-    linkDir(srcBin, destBin);
-    if (existsSync(srcShareVl)) {
-      mkdirSync(destShare, { recursive: true });
-      linkDir(srcShareVl, join(destShare, "verilator"));
-    }
-
-    const ok = isVerilatorInstalled(destBin);
-    if (ok) {
-      logger.info(`Verilator: adopted OSS CAD Suite at ${ossRoot} → ${toolsVerilator}`);
-    }
-    return ok;
-  } catch (err) {
-    logger.warn(`Verilator: failed to adopt OSS CAD Suite (${err})`);
-    return false;
-  }
-}
-
-/**
- * Verilator: install into workspace/tooling/verilator-<pin>.
+ * Verilator: install the PATCHED pinned tag into workspace/tooling/verilator-<pin>.
  *
- * Order:
- *  1. Already present at the managed prefix.
- *  2. Adopt workspace/tooling/oss-cad-suite when it already has Verilator
- *     (common on Windows after a prior OSS CAD drop-in).
- *  3. **Windows**: build under WSL into the managed prefix (Git-Bash alone
- *     rarely has autoconf/flex/bison for a source build).
- *  4. **Linux/macOS** (or Windows with a usable bash and no WSL): run
- *     verif/regress/install-verilator.sh via resolveBashBinary() (Git-Bash
- *     preferred — not hasBinary("bash"), which misses off-PATH Git installs).
+ * One recipe for every host, `build-platform/scripts/install-verilator.sh`
+ * (mirrors install-spike.sh / install-formal.sh):
+ *  - clones the pinned tag, applies every `verif/regress/verilator-*.patch`
+ *    strictly (the upstream `verif/regress/install-verilator.sh` does
+ *    `git apply || true`, which can silently build a stock tool), skips
+ *    Verilator's own `make test`, and verifies the installed headers carry
+ *    every patched line before reporting success;
+ *  - adopts an existing prefix (OSS CAD Suite drop-in, a prior WSL build)
+ *    ONLY when that prefix passes the same verification — an unpatched suite
+ *    is never linked into the managed prefix;
+ *  - **Windows** runs it under WSL (Git-Bash rarely has autoconf/flex/bison),
+ *    installing Linux binaries into the managed prefix, like Spike/formal.
+ *
+ * A prefix that is present but unpatched is reported as a failure, not
+ * "already installed": the platform always runs the built, patched version.
  */
 export async function installVerilator(
   ctx: PlatformContext,
   options: RecipeOptions = {},
 ): Promise<RecipeResult> {
-  const { logger, repoRoot, tools, host, paths } = ctx;
+  const { logger, repoRoot, tools, host, paths, config } = ctx;
+
+  const patchSummary = (): string =>
+    formatVerilatorPatchStatus(verilatorPatchStatus(tools.verilator, repoRoot));
 
   if (!options.force && isVerilatorInstalled(tools.verilatorBin)) {
-    return already("verilator", "already installed");
-  }
-
-  // Fast path: re-use OSS CAD Suite Verilator already under workspace/tooling.
-  if (!options.force) {
-    const oss = findOssCadVerilatorRoot(paths.tooling);
-    if (oss) {
-      if (options.dryRun) {
-        logger.info(`[dry-run] adopt verilator from ${oss} → ${tools.verilator}`);
-        return already("verilator", "dry-run adopt oss-cad-suite");
-      }
-      if (adoptVerilatorFromOssCad(tools.verilator, oss, logger)) {
-        return {
-          id: "verilator",
-          ok: true,
-          skipped: false,
-          reason: `adopted from ${oss}`,
-        };
-      }
+    const st = verilatorPatchStatus(tools.verilator, repoRoot);
+    if (st.patched || st.patches.length === 0) {
+      return already("verilator", `already installed (${formatVerilatorPatchStatus(st)})`);
     }
+    logger.warn(`Verilator at ${tools.verilator} is ${formatVerilatorPatchStatus(st)}; rebuilding.`);
+    for (const m of st.missing) logger.warn(`  missing: ${m}`);
+    options = { ...options, force: true };
   }
 
-  const scriptRel = "verif/regress/install-verilator.sh";
+  const scriptRel = "build-platform/scripts/install-verilator.sh";
   const scriptAbs = join(repoRoot, scriptRel);
   if (!existsSync(scriptAbs)) {
     return { id: "verilator", ok: false, skipped: false, reason: `${scriptRel} missing` };
   }
 
+  // Candidate to adopt (the script verifies it is patched before copying).
+  const ossRoot = findOssCadVerilatorRoot(paths.tooling);
+  const adoptFrom = process.env.VERILATOR_ADOPT_FROM ?? ossRoot ?? "";
+  const tag = config.toolchain.versions.verilator;
+
   if (options.dryRun) {
-    if (host.os === "windows") {
-      logger.info(`[dry-run] wsl -e bash ${scriptRel} (→ ${tools.verilator})`);
-    } else {
-      logger.info(`[dry-run] bash ${scriptRel} (→ ${tools.verilator})`);
-    }
+    const how = host.os === "windows" ? "wsl -e bash" : "bash";
+    logger.info(`[dry-run] ${how} ${scriptRel} tag=${tag} patches=verif/regress/verilator-*.patch (→ ${tools.verilator})`);
+    if (adoptFrom) logger.info(`[dry-run]   adopt candidate (only if patched): ${adoptFrom}`);
     return already("verilator", "dry-run");
   }
 
-  // --- Windows: prefer WSL source build (parity with Spike) ---------------
-  if (host.os === "windows" && hasBinary("wsl")) {
-    const installWsl = await windowsPathToWsl(tools.verilator);
-    const buildWsl = await windowsPathToWsl(join(paths.cache, "verilator-build"));
-    const scriptWsl = await windowsPathToWsl(scriptAbs);
-    const jobs = String(recommendedJobs());
+  const jobs = String(recommendedJobs());
+  const forceFlag = options.force ? "1" : "0";
 
-    logger.info(`Verilator: building/installing under WSL → ${tools.verilator}`);
+  // --- Windows: build under WSL into the managed prefix ---------------------
+  if (host.os === "windows") {
+    if (!hasBinary("wsl")) {
+      return {
+        id: "verilator",
+        ok: false,
+        skipped: true,
+        reason:
+          "windows: WSL required to build the patched Verilator (Git-Bash lacks autoconf/flex/bison); " +
+          "enable WSL and re-run tools install verilator",
+      };
+    }
+    const installWsl = await windowsPathToWsl(tools.verilator);
+    const repoWsl = await windowsPathToWsl(repoRoot);
+    const scriptWsl = await windowsPathToWsl(scriptAbs);
+    const adoptWsl = adoptFrom ? await windowsPathToWsl(adoptFrom) : "";
+
+    logger.info(`Verilator ${tag}: building patched tool under WSL → ${tools.verilator}`);
     const shellCmd = [
       "set -euo pipefail",
+      `export CVA6_REPO_DIR=${JSON.stringify(repoWsl)}`,
       `export VERILATOR_INSTALL_DIR=${JSON.stringify(installWsl)}`,
-      `export VERILATOR_BUILD_DIR=${JSON.stringify(buildWsl)}`,
+      `export VERILATOR_TAG=${JSON.stringify(tag)}`,
       `export NUM_JOBS=${JSON.stringify(jobs)}`,
+      `export VERILATOR_FORCE=${JSON.stringify(forceFlag)}`,
+      adoptWsl ? `export VERILATOR_ADOPT_FROM=${JSON.stringify(adoptWsl)}` : "true",
       // Build deps often live in apt or mamba envs under WSL.
       'if [ -x "$HOME/tools/mamba/envs/build/bin/autoconf" ]; then',
       '  export PATH="$HOME/tools/mamba/envs/build/bin:$PATH"',
@@ -190,33 +160,14 @@ export async function installVerilator(
       allowFailure: true,
       stdio: "both",
     });
-
-    const ok = res.ok && isVerilatorInstalled(tools.verilatorBin);
-    if (ok) {
-      return { id: "verilator", ok: true, skipped: false, reason: `${tools.verilator} (via WSL)` };
-    }
-
-    // If WSL build failed but OSS CAD is present, still try adopt as salvage.
-    const oss = findOssCadVerilatorRoot(paths.tooling);
-    if (oss && adoptVerilatorFromOssCad(tools.verilator, oss, logger)) {
-      logger.warn(
-        `Verilator WSL build failed (exit ${res.code}); adopted OSS CAD Suite instead.`,
-      );
-      return {
-        id: "verilator",
-        ok: true,
-        skipped: false,
-        reason: `adopted from ${oss} after WSL build failure`,
-      };
-    }
-
+    const ok = res.ok && isVerilatorInstalled(tools.verilatorBin) && verilatorPatchStatus(tools.verilator, repoRoot).patched;
     return {
       id: "verilator",
-      ok: false,
+      ok,
       skipped: false,
-      reason:
-        `WSL verilator install failed (exit ${res.code}); need autoconf/flex/bison/g++/make in WSL, ` +
-        `or drop OSS CAD Suite under build-platform/workspace/tooling/oss-cad-suite`,
+      reason: ok
+        ? `${tools.verilator} (via WSL; ${patchSummary()})`
+        : `WSL verilator install failed (exit ${res.code}); need autoconf/flex/bison/g++/make in WSL — ${patchSummary()}`,
     };
   }
 
@@ -229,22 +180,18 @@ export async function installVerilator(
       id: "verilator",
       ok: false,
       skipped: false,
-      reason:
-        "bash required (install Git for Windows, or enable WSL and re-run tools install verilator)",
+      reason: "bash required (install Git for Windows, or enable WSL and re-run tools install verilator)",
     };
   }
 
-  if (host.os === "windows") {
-    logger.warn(
-      `Verilator: building via ${bash.flavor} at ${bash.bin}. ` +
-        "Source builds usually need MSYS/autoconf tools; prefer WSL or OSS CAD Suite.",
-    );
-  }
-
   const env = childEnv(ctx, {
+    CVA6_REPO_DIR: repoRoot,
     VERILATOR_INSTALL_DIR: tools.verilator,
-    VERILATOR_BUILD_DIR: join(paths.cache, "verilator-build"),
-    NUM_JOBS: String(recommendedJobs()),
+    VERILATOR_TAG: tag,
+    VERILATOR_BUILD_DIR: join(paths.cache, `verilator-build-${tag}`),
+    NUM_JOBS: jobs,
+    VERILATOR_FORCE: forceFlag,
+    ...(adoptFrom ? { VERILATOR_ADOPT_FROM: adoptFrom } : {}),
   });
   const res = await runBashScript(scriptRel, [], {
     cwd: repoRoot,
@@ -252,12 +199,14 @@ export async function installVerilator(
     logger,
     allowFailure: true,
   });
-  const ok = res.ok && isVerilatorInstalled(tools.verilatorBin);
+  const ok = res.ok && isVerilatorInstalled(tools.verilatorBin) && verilatorPatchStatus(tools.verilator, repoRoot).patched;
   return {
     id: "verilator",
     ok,
     skipped: false,
-    reason: ok ? undefined : `verilator install failed (exit ${res.code}; bash=${bash.bin})`,
+    reason: ok
+      ? `${tools.verilator} (${patchSummary()})`
+      : `verilator install failed (exit ${res.code}; bash=${bash.bin}) — ${patchSummary()}`,
   };
 }
 
