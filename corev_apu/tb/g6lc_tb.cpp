@@ -184,7 +184,12 @@ static std::vector<MemPoke> mem_pokes;
 extern dtm_t* dtm;
 extern remote_bitbang_t * jtag;
 
+// A wall-clock kill must not print SUCCESS: record it so the verdict line
+// reads TERMINATED (exit 124, the `timeout` convention) instead of a pass.
+static volatile sig_atomic_t sigterm_seen = 0;
+
 void handle_sigterm(int sig) {
+  sigterm_seen = 1;
   dtm->stop();
 }
 
@@ -1896,6 +1901,9 @@ done_processing:
     int exitcode = ((unsigned int) top->exit_o) >> 1;
     fprintf(stderr, "%s *** FAILED *** (tohost = %d) after %ld cycles\n", htif_argv[1], exitcode, main_time);
     ret = exitcode;
+  } else if (sigterm_seen) {
+    fprintf(stderr, "%s *** TERMINATED (SIGTERM) *** after %ld cycles\n", htif_argv[1], main_time);
+    ret = 124;
   } else {
     fprintf(stderr, "%s *** SUCCESS *** (tohost = 0) after %ld cycles\n", htif_argv[1], main_time);
   }

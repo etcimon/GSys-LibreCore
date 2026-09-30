@@ -37,7 +37,12 @@ M5 adds a demand-miss-trained L2 stream/stride prefetcher (`L2PrefetchEn`,
 `g6lc_l2_pf`) — proven at leaf/HUM/system level but **off in every package**:
 streaming kernels gain 8–13 % while both strict boots pay ~+0.3 %, failing the
 adoption bar (T9h). T10b/N3 adds burst throttling (`L2PfMaxOutstanding`,
-`L2PfQuiet`, two-hit confidence) — adoption re-measured in T10b.
+`L2PfQuiet`, two-hit confidence) — adoption re-measured in T10b (still
++0.33 %, stays off). T10e/N3b isolates the residual: an enabled-but-silent
+prefetcher (`L2PfQuiet` never lapses) boots **byte-identical** to the
+anchor, so the demand path carries zero idle cost — the +0.3 % attaches
+only to live PF offers/issues; adoption is a policy/arb problem, not an
+idle-cost repair.
 
 N4/T10c counter truth: `[mc_cache] hub_aw_sc_collide` is an **offer-level
 observation**, not a stall — the same-line check is not in the hub AW grant, so

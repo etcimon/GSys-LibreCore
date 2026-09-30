@@ -90,7 +90,10 @@ package cva6_config_pkg;
   localparam CVA6ConfigWtDcacheFixupDepth = 2;
   localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b0;
 
-  localparam CVA6ConfigNrScoreboardEntries = 8;
+  // T10d/N1b: ring 16 adopted — deterministic (r2/r3/r4 byte-identical),
+  // boot 18,297,381 <= ring-8 anchor 18,419,779, branchy = M1d. BPCkptDepth
+  // derives to NR_SB_ENTRIES (=16) in build_config_pkg.
+  localparam CVA6ConfigNrScoreboardEntries = 16;
 
   localparam CVA6ConfigNrLoadPipeRegs = 1;
   localparam CVA6ConfigNrStorePipeRegs = 0;

@@ -224,23 +224,29 @@ blockers below supersede any implied claim of verified end-to-end precision.
 |---------|------|
 | `g6lc64_ooo_server_config_pkg.sv` | **Configured server**: 4-issue, 4c×2h, L2/L3 auto, `DeepSpecEn`, `MemDepPredEn` |
 | `g6lc64_ooo_config_pkg.sv` | **Configured dual-issue lite**: 2-issue OoO + DeepSpec (bring-up / area-lean) |
-| `g6lc64_ooo_int2_l3_config_pkg.sv` | **Configured int2 L3**: 2c×2h drained, ring 8 (M1d geometry; the T9f/M3 ring-32/TAGE/FTQ window was measured and **not adopted** — ablation in T9f), **RV64GC+B** — RVF/RVD enabled under the drained handoff (T9g/M4: owner-lifetime proof + four-hart `mc_fp_smt` + Spike-exact FP suite; mixed residency + FP stays refused) |
-| `g6lc64_smt2_ooo_int_config_pkg.sv` | **Configured SMT2 int**: 1c×2h mixed residency, same ring-8 geometry (M3 window likewise not adopted) |
+| `g6lc64_ooo_int2_l3_config_pkg.sv` | **Configured int2 L3**: 2c×2h drained, ring 16 (`NrScoreboardEntries=16`, `BPCkptDepth` derives 16 — adopted in T10d/N1b: deterministic, strict boot 18,297,381 ≤ the ring-8 18,419,779 anchor, `mc_branchy` = M1d; the T9f/M3 ring-32/TAGE/FTQ window stays **not adopted** — ablation in T9f), **RV64GC+B** — RVF/RVD enabled under the drained handoff (T9g/M4: owner-lifetime proof + four-hart `mc_fp_smt` + Spike-exact FP suite; mixed residency + FP stays refused) |
+| `g6lc64_smt2_ooo_int_config_pkg.sv` | **Configured SMT2 int**: 1c×2h mixed residency, same ring-16 geometry (T10d: mixed boot PASS 10,459,588 cycles vs ring-8 10,556,456; mixed-commit FO4 re-screen closes at 31.0; M3 window likewise not adopted) |
 | Default `cv64a6_imafdc_sv39` etc. | `OoOEn=0` identity (still production in-order) |
 
 The 4-issue overlay (M7) was evaluated and **not promoted**: it needs a wider
-window, and every ring > 8 times out the four-hart strict boot under the
-drained handoff while mispredict recovery is mark-and-drain. It reopens only
-after M3b (fast squash + ring-depth/drained-handoff root cause) — plan T9j.
+window, and mispredict recovery is still mark-and-drain. The ring>8 boot
+"timeout" was partially resolved in N1b/T10d — the r1/r2 divergence was a
+harness wall-kill printing fake SUCCESS, and pure ring-16 boots are now
+deterministic and adopted; but ring 32 genuinely timed out at the 24 M cap
+with a drain pending ~6 M cycles on `wait_sb` (no force/timeout path when
+the resident hart never empties the scoreboard). M7 reopens only after M3b
+(fast squash + that stuck-drain fix) — plan T9j/T10d.
 
 The M3 uplift (ring 32, TAGE_LITE, FTQ/FDIP/loop buffer, DeepSpec/LSQ growth)
 was qualified functionally but regressed strict-boot and branch-bound IPC
 (+21.7 % / +28.9 % / +36.7 %) and is **not** configured: the per-knob
 ablation found every uplifted knob regresses the strict four-hart boot
-independently (ring > 8 alone times out at the 24 M cap; TAGE_LITE
-multiplies boot mispredicts ~4.75×; DeepSpec/memdep replays dominate;
-FTQ/FDIP taxes every control transfer), so both packages stay at ring 8
-pending the M3b re-evaluation documented in
+independently (TAGE_LITE multiplies boot mispredicts ~4.75×;
+DeepSpec/memdep replays dominate; FTQ/FDIP taxes every control transfer;
+the M3-era "ring > 8 alone times out" observation did not survive N1b —
+pure ring-16 boots complete deterministically at the 24 M cap),
+so the packages run ring 16 — the M3 window bundle stays off pending the
+M3b re-evaluation documented in
 `../../core/ooo/AGENTS-ooo-plan.md` T9f. What remains landed from M3 is the
 frontend switch-safety fix: `smt_restore_i` reseeds the FTQ to the restore PC
 **and steps the cursor** (`arch_step=FtqEn`, else the window double-fetches)

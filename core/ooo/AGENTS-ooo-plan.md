@@ -2836,14 +2836,16 @@ while mispredict recovery is mark-and-drain (younger entries retire
 through the commit head at commit width, `issue_pointer` never rolls
 back). No i4 overlay was built; no RTL changed.
 
-**Reopen preconditions** (both, in order): (1) M3b — root-cause the
-ring>8 boot timeout under the drained handoff (the ~2.8 M extra commit
-events on the dominant hart, seen at ring 16/32 even with checkpoints
-disabled) and land the fast-squash design sketched in T9f (age/cancel-
-mask `sbe.valid` clear + `issue_pointer` rollback + commit-head jump,
-hart-scoped); (2) re-run the T9f ablation shape on the fixed recovery
-path — a 4-issue candidate is only worth building if a wider window
-is first proven boot-neutral at L0.
+**Reopen preconditions** (both, in order): (1) M3b — fix the
+stuck-drain hole found in T10d/N1b (a pending drain waits on
+`wait_sb` unboundedly when the resident hart never empties the
+scoreboard — the ring-32 24M boot timed out on exactly this, ~6.06 M
+cycles; ring 16 merely never hit it on the measured lanes) and land the
+fast-squash design sketched in T9f (age/cancel-mask `sbe.valid` clear +
+`issue_pointer` rollback + commit-head jump, hart-scoped); (2) re-run
+the T9f ablation shape on the fixed recovery path — a 4-issue candidate
+is only worth building if a wider window is first proven boot-neutral
+at L0.
 
 ### T10b — N3: L2 prefetcher burst throttling — measured, still off (2026-09-29)
 
@@ -2965,7 +2967,9 @@ sim (uninitialized/seeded reset state, host-fed value — none found in
 differently per process. Mechanism unrooted — the discriminator is a
 trace diff at first divergence (`smt_sched_trace`/`smt_flow_trace`, or
 the per-hart `.dasm`) between an agreeing and a diverging launch: the
-first differing cycle names the input path.
+first differing cycle names the input path. **Resolved in T10d/N1b:
+r1 was a 3600 s wall kill whose SIGTERM path printed a fake SUCCESS —
+no RTL nondeterminism exists; r2/r3/r4 are byte-identical.**
 
 **Verdict.** The drained-handoff timeout hypothesis is refuted for ring
 depth alone: drains are bounded, wait only on the scoreboard (issue is
@@ -2979,3 +2983,108 @@ the reproducibility anomaly above — a pathological interleave/input
 path that ring depth widens, consistent with the M3 lanes timing out
 sporadically-by-construction rather than deterministically. No
 issue-stage drain hold is implemented — the numbers do not support it.
+
+### T10e — N3b: prefetcher idle demand-path cost is zero; the +0.3 % rides on live issues only (2026-09-29)
+
+**Question.** T10b: the strict boot pays +0.33 % with only 64 PF fills,
+so either the demand path itself carries a structural cost when
+`L2PrefetchEn=1` (tag-port steal for the candidate lookup, MSHR-alloc
+arbitration cycle, S_TAG miss-commit change), or the cost attaches to
+the live offers/issues themselves.
+
+**Discrimination build** `ooocoh-n3b-int2l3-pfq-build-L0-r2`:
+`L2PrefetchEn=1` with `L2PfQuiet=1048575` — a ~1 M-cycle quiet window
+that never lapses, so the prefetcher trains, performs the resident/MSHR
+candidate lookups on every demand miss, but can never issue.
+(`L2PfMaxOutstanding=0` was not usable as the never-issue seam —
+`build_config_pkg` defaults 0 to 1; the `check_cfg` reject lives inside
+`translate_off`, so the quiet overlay is a sim-only probe config, not a
+shippable combination.)
+
+**Result.** `ooocoh-n3b-int2l3-pfq-osbi-L0-r1`: SUCCESS after
+**18,419,779 cycles — byte-identical to the PF-off anchor**,
+`l2_pf_issue=0 l2_pf_useful=0 l2_pf_drop=0`. With PF enabled but never
+issuing the boot pays nothing: the stream table, per-miss candidate
+lookups and S_TAG miss-commit path are all live in this model and cost
+zero cycles. There is no idle structural cost to repair.
+
+**Verdict.** The +0.33 % is attached to the live offer/issue path —
+the ~64 issued fills and the arbitration cycles in which a candidate
+offers (drops included), not to the engine running idle. No RTL change
+warranted; `L2PrefetchEn`/`L3PrefetchEn` stay 0. Adoption remains
+blocked on making live PF issues demand-neutral, which is a policy/arb
+problem, not an idle-cost problem.
+
+### T10d — N1b: ring-16 "divergence" was a harness wall-kill artifact; ring 16 adopted (2026-09-29)
+
+**Static audit** (ring-16 int2_l3 model `b32c1fa3` and the r16c smt2
+model): no `--x-initial`/`--x-assign` overrides — Verilator pins X-initial
+state to 0 and there are no `VL_RAND_RESET` sites; `threads=1`; no
+`$urandom`/`rand()`/`random_seed` consumer exists in `g6lc_tb.cpp`
+(`--seed` is accepted and unread); `+verilator+seed+`/`+verilator+
+rand+reset+` have no compiled-in machinery to perturb — the requested
+seed probes cannot discriminate and were skipped on that evidence.
+`misp_stats` is fully `translate_off` (no RTL fan-in).
+
+**Root cause.** The r1-vs-r2 "divergence" was a harness artifact, not
+RTL: r1 hit the 3600 s wall budget; the pre-fix `g6lc_tb.cpp` SIGTERM
+handler ran `dtm->stop()` then fell through to the success printer,
+emitting `*** SUCCESS *** after 17,250,251 cycles` with truncated
+`[smt-drain]` counters — hence the "different" drain/retire numbers.
+Harness fix: `sigterm_seen` flag → a wall kill now prints
+`*** TERMINATED (SIGTERM) ***` and exits 124, so a truncated run can
+never again masquerade as a pass.
+
+**Determinism proof.** r2/r3/r4 (identical model+seed+ELF launches) all
+complete byte-identical at **18,297,381** cycles, `strictDualPassed`,
+identical `[smt-drain]` totals (core0 req 23,672 / core1 21,133). No
+reset gap, no read-before-write; the RTL reset/read audit items
+(scoreboard `mem_q`, cancel/age masks, rename checkpoints, LSQ age
+vectors) are moot given three identical full-boot traces.
+
+**Adoption evidence (ring 16 = `NrScoreboardEntries 16`, `BPCkptDepth`
+deriving 16 via `build_config_pkg`).**
+
+- int2_l3 strict boot L0 (24M cap): **18,297,381 ≤ anchor 18,419,779**
+  (−0.66 %), three identical completions.
+- `mc_branchy` L0: **3,603,094 = M1d exactly**, neg arm detected;
+  `ooo_ilp_chain` 1,493 / `ooo_mem_dep` 1,812 (M1d: 1,587 / 1,897).
+- `sparse_smt_mixed_commit` FO4 at ring 16: **worst 31.0 ≤ 32**, slack
+  1.0, ~1,290 MHz vs the 1,250 target — closes.
+- `smt2_ooo_int` mixed boot `ooocoh-n1b-smt2ooo-r16-osbi-L0-r5`: **PASS
+  10,459,588 cycles**, `strictDualPassed` (vs ring-8 10,556,456,
+  −0.92 %); `sb_occ_max=16`, `both_resident_cycles=97,358`,
+  `cross_hart_port1_commits=11,879`, `hol_residual=2,734`.
+- Lint+synth `check -assert` gates on a HEAD+adoption export
+  (`ooocoh-n1b-gate-{int2l3,smt2int}-r16`): int2_l3 lint 29w/0e, synth
+  43w/0e; smt2_ooo_int lint 29w/0e, synth 2w/0e — all `check -assert`
+  clean.
+
+**Adopted.** `CVA6ConfigNrScoreboardEntries = 16` on
+`g6lc64_ooo_int2_l3` and `g6lc64_smt2_ooo_int` (one localparam each;
+`TRANS_ID_BITS`→4 and `BPCkptDepth`→16 derive in `build_config_pkg`).
+`g6lc64_ooo_int2` (ring-8 anchor 17,870,562) and the drained smt2
+package (anchor 12,406,273) are untouched — anchors still valid.
+
+**Ring 32** (overlay: SB=32 with ROB 32 / PRF 72 / IQ 24 / LSQ 16+8 /
+FTQ 8 / DeepSpec / memdep / MaxOutstandingStores 8): `mc_branchy`
+3,603,094 = M1d, ilp 1,493 / memdep 1,821 pass — but the 24M four-hart
+boot `ooocoh-n1b-int2l3-r32-24M-L0-r3` **timed out at the cap**
+(`outcome=timeout`, `timedOut`). The `[smt-drain]` FINAL lines show the
+mechanism — an instance of the N1 hypothesis-(b) livelock: on core 0 a
+drain request was still pending at the cap (`req=23,488` vs
+`switches=23,487`, `aborts=0`), having accumulated **6,059,894 wait
+cycles, ~100 % `wait_sb`** — the resident hart's scoreboard never
+reached empty for ~6 M cycles while both of core 0's harts retired
+almost nothing after ~18 M (`ret={663,545, 489,197}`; core 1's dominant
+hart completed the boot-side work at 18,269,699). The drain protocol
+has no timeout/force path and issue is not held while a drain pends, so
+a resident hart that parks (wfi/idle) or stalls holding scoreboard
+entries starves the pending drain indefinitely — consistent with the
+M3-era "ring > 8 times out" observations now that the harness artifact
+is eliminated. **Ring 32 fails the ≤-anchor bar and is not adopted**;
+the stuck-drain mechanism is the recorded residual (an r16 model can in
+principle expose the same protocol hole — drain waiting on a
+non-emptying scoreboard has no bound at any depth — but ring 16 is
+proven deterministic and faster on every gate we ran: three identical
+boots + the mixed boot + kernels + FO4).

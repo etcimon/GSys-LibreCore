@@ -355,10 +355,12 @@ prerequisite for this work under the existing dual license. No licensing policy 
   issue width needs a wider window, and M3 showed every ring > 8 times
   out the four-hart strict boot under the drained handoff while recovery
   is mark-and-drain. No i4 overlay built; no RTL changed. Reopen after
-  M3b lands the fast squash; T10a shows pure ring-16 boots
-  at-or-faster than ring 8 (not depth alone) and finds a
-  depth-dependent reproducibility anomaly as the timeout seed (see
-  next row). Details in `core/ooo/AGENTS-ooo-plan.md` T9j.
+  M3b lands the fast squash plus the T10d stuck-drain fix (a
+  pending drain waits on `wait_sb` unboundedly — the ring-32 24M
+  boot timed out on it); T10a/T10d show pure ring-16 boots
+  deterministic and at-or-faster than ring 8 — the r1/r2
+  divergence was a harness wall-kill artifact, not depth. Details in
+  `core/ooo/AGENTS-ooo-plan.md` T9j, T10d.
 - [x] **Root-caused (T10a, 2026-09-29): N1 ring>8 drained-handoff
   "timeout" — not depth alone; depth-dependent race found** —
   `+smt_stats` probe (`[smt-drain]`): drains bounded (max 109–146),
@@ -366,13 +368,11 @@ prerequisite for this work under the existing dual license. No licensing policy 
   drain — a ~1 % cost), all switching done by ~2M cycles in both
   geometries, 6M progress identical. The pure ring-16 boot **completes
   under the 24M cap** (r1 17,250,251; r2 18,297,381 `strictDualPassed`,
-  vs the 18,419,779 ring-8 anchor) — **but runs are not reproducible**:
-  identical model+seed launches diverge in drain requests, retired
-  counts and cycles (r1+6M agree, r2 diverged; mechanism unrooted —
-  discriminator: `smt_sched_trace`/`.dasm` diff at first divergence).
-  That is the plausible seed of the M3 timeouts: a pathological
-  interleave/input path widened by depth, not drain starvation. No
-  issue-hold fix warranted. Details: plan T10a.
+  vs the 18,419,779 ring-8 anchor). The r1/r2 divergence was a
+  harness artifact, resolved in N1b/T10d: r1 hit the 3600 s wall
+  budget and the pre-fix `g6lc_tb.cpp` SIGTERM handler printed a fake
+  SUCCESS; r2/r3/r4 are byte-identical (18,297,381). No issue-hold
+  fix warranted. Details: plan T10a, T10d.
 - [x] **Milestone summary (commits):** M0 `e07ccd452` (eWT baseline:
   L2WriteUpdateEn + Phase-5 qualification); M1 `2102366df` + `87dd183d6`
   + `79dc613ab` (M1a CBO/hub ordering, M1b posted writes + bypass reads,
@@ -396,6 +396,38 @@ prerequisite for this work under the existing dual license. No licensing policy 
   int2_l3 L0 boot (~1.08 per posted write). Real residual stall: the
   single-W-channel AW serialization + downstream `!aw_ready`. The M1d
   "largest remaining stall" line above is corrected. Details: plan T10c.
+- [x] **Resolved + adopted (T10d, 2026-09-29): N1b ring-16 run-to-run
+  "divergence" was a harness wall-kill artifact, not RTL** — the
+  r1 24M boot hit the 3600 s wall budget and the pre-fix
+  `g6lc_tb.cpp` SIGTERM path (`dtm->stop()` then fallthrough) printed
+  a fake SUCCESS at the kill cycle; r2/r3/r4 identical launches all
+  complete byte-identical at 18,297,381 `strictDualPassed`. Harness
+  fixed: SIGTERM now prints TERMINATED + exit 124. Build audit:
+  `--x-initial 0`/`--x-assign 0`, threads=1, no VL_RAND_RESET sites,
+  no `$urandom`/`rand()` consumers, `--seed`/`+verilator+*` vestigial
+  — seed probes cannot perturb state, so they were skipped as
+  non-discriminating. **Ring 16 adopted** on `g6lc64_ooo_int2_l3` and
+  `g6lc64_smt2_ooo_int` (`NrScoreboardEntries=16`; BPCkptDepth
+  derives 16): int2_l3 boot 18,297,381 ≤ anchor 18,419,779;
+  branchy 3,603,094 = M1d; ilp 1,493 / memdep 1,812 (M1d: 1,587/1,897);
+  mixed-commit FO4 re-screen at ring 16 closes at 31.0 (slack 1.0,
+  ~1290 MHz vs 1250); smt2_ooo_int mixed boot PASS 10,459,588 (vs r8
+  10,556,456), `sb_occ_max=16`. Ring 32: branchy identical, kernels
+  pass, but the 24M boot **timed out at the cap**: a drain pended
+  ~6.06M cycles on core 0 (~100% `wait_sb`, harts retired frozen)
+  — the N1 hypothesis-(b) livelock: a pending drain waits on a
+  resident hart that never empties the scoreboard (no force/timeout
+  path). Ring 32 fails the ≤-anchor bar, not adopted; the
+  stuck-drain hole is the recorded residual for ring 16 too.
+  Details: plan T10d.
+- [x] **Zero idle cost; stays off (T10e, 2026-09-29): N3b prefetcher
+  structural-cost probe** — `PF_EN=1` + `L2PfQuiet=1048575`
+  (never-issue; `L2PfMaxOutstanding=0` is unusable — build_config
+  defaults 0→1) boots byte-identical to the 18,419,779 anchor with
+  `l2_pf_issue=0`: the live stream-table/candidate-lookup demand path
+  is free. The +0.33 % attaches only to live offers/issues (~64 fills
+  + arbitration), a policy/arb problem, not an idle cost. No RTL
+  change; `L2PrefetchEn`/`L3PrefetchEn` stay 0. Details: plan T10e.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

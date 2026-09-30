@@ -64,9 +64,9 @@ on; zeros when off. RVFI/commit observe tags via the scoreboard entry.
 | Package | Role |
 |---|---|
 | `g6lc64_ooo_int_config_pkg.sv` | Integer-only single-hart OoO — the bring-up/verification baseline: elaborates, lints and synthesizes clean |
-| `g6lc64_smt2_ooo_int_config_pkg.sv` | **Production** SMT2 over OoO: `NrHarts=2`, integer-only, **mixed residency** (T9d), Sstc; M1d ring-8 window (the T9f/M3 ring-32/TAGE/FTQ uplift was measured and not adopted) |
+| `g6lc64_smt2_ooo_int_config_pkg.sv` | **Production** SMT2 over OoO: `NrHarts=2`, integer-only, **mixed residency** (T9d), Sstc; ring-16 window adopted in T10d (`NrScoreboardEntries=16` — deterministic, mixed boot faster; the T9f/M3 ring-32/TAGE/FTQ uplift bundle stays off) |
 | `g6lc64_ooo_int2_config_pkg.sv` | Two-core WT + L2 `COH_OOO` integration target — OoO coherence envelope, not a production profile |
-| `g6lc64_ooo_int2_l3_config_pkg.sv` | Two-core WT + L2/L3 `COH_OOO`, drained handoff; M1d ring-8 window (T9f/M3 uplift not adopted); **RV64GC+B** — RVF/RVD on (T9g/M4) |
+| `g6lc64_ooo_int2_l3_config_pkg.sv` | Two-core WT + L2/L3 `COH_OOO`, drained handoff; ring-16 window adopted in T10d (T9f/M3 uplift bundle not adopted); **RV64GC+B** — RVF/RVD on (T9g/M4) |
 | `g6lc64_ooo_config_pkg.sv` | Dual-issue OoO lite (area-lean bring-up) — legal single-hart FP since T9g/M4 |
 | `g6lc64_ooo_server_config_pkg.sv` | Server: wide issue, multi-core×hart, L2/L3 auto, deep spec, memdep — opt-in/unqualified (drained-FP legal; `COH_FILTERED` coherence leg unqualified) |
 | Default `cv64a6_imafdc_sv39` (etc.) | `OoOEn=0` identity |

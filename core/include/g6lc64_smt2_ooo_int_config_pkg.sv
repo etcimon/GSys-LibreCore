@@ -85,7 +85,10 @@ package cva6_config_pkg;
   localparam CVA6ConfigWtDcacheFixupDepth = 2;
   localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b0;
 
-  localparam CVA6ConfigNrScoreboardEntries = 8;
+  // T10d/N1b: ring 16 adopted — mixed boot PASS 10,459,588 cycles (vs r8
+  // 10,556,456), mixed FO4 screen closes at 31.0. BPCkptDepth derives to
+  // NR_SB_ENTRIES (=16) in build_config_pkg.
+  localparam CVA6ConfigNrScoreboardEntries = 16;
 
   localparam CVA6ConfigNrLoadPipeRegs = 1;
   localparam CVA6ConfigNrStorePipeRegs = 0;
