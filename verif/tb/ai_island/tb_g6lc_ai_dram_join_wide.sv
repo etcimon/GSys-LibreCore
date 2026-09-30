@@ -167,6 +167,32 @@ module tb_g6lc_ai_dram_join_wide;
     cl_rd64(DRAM + 64'h128, d64, "Q3 cluster read of the narrow write");
     if (d64 !== 64'hCAFE_F00D_DEAD_BEEF) $fatal(1, "Q3 FAIL: cluster reads %h after the island narrow write", d64);
 
+    // Q5 throughput: a 16-beat 64 B island INCR read (the B-row shape at K=1024):
+    // cycles per beat on the wide path. Correctness above; this is the number the SoC
+    // could not give. Expect 1.00 cycles/beat (64 B/cycle).
+    begin
+      int t0, t1, beats, guard;
+      @(negedge clk);
+      is.ar_id = 4'h6; is.ar_addr = DRAM + 64'h400; is.ar_len = 15; is.ar_size = 3'd6; is.ar_burst = 1;
+      is.ar_lock = 0; is.ar_cache = 0; is.ar_prot = 0; is.ar_qos = 0; is.ar_region = 0;
+      is.ar_user = 0; is.ar_valid = 1; is.r_ready = 1;
+      guard = 0; do begin @(posedge clk); guard++; end while (!is.ar_ready && guard < 60);
+      if (!is.ar_ready) $fatal(1, "Q5: 16-beat island AR never accepted");
+      t0 = $time; beats = 0;
+      @(negedge clk); is.ar_valid = 0;
+      guard = 0;
+      while (beats < 16 && guard < 400) begin
+        @(posedge clk); guard++;
+        if (is.r_valid && is.r_ready) begin beats++; if (is.r_last && beats != 16) $fatal(1, "Q5: early r_last at beat %0d", beats); end
+      end
+      t1 = $time;
+      if (beats != 16) $fatal(1, "Q5 FAIL: got %0d of 16 beats", beats);
+      $display("Q5 island 16 x 64 B read burst: %0d cycles from AR accept to last beat (%0.2f cycles/beat incl. latency)",
+               (t1 - t0) / 10, real'(t1 - t0) / 10.0 / 16.0);
+      if ((t1 - t0) / 10 > 24) $fatal(1, "Q5 FAIL: wide path slower than 1.5 cycles/beat");
+      @(negedge clk); is.r_ready = 0;
+    end
+
     $display("PASS tb_g6lc_ai_dram_join_wide");
     $finish;
   end

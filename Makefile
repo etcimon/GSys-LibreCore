@@ -787,6 +787,7 @@ verilate_command := $(verilator) --no-timing verilator_config.vlt $(verilator_as
                     +incdir+corev_apu/axi_node                                                                   \
                     $(if $(verilator_threads), --threads $(verilator_threads))                                   \
                     --unroll-count 256                                                                           \
+                    --unroll-stmts 131072                                                                        \
                     -Wall                                                                                        \
                     -Werror-PINMISSING                                                                           \
                     -Werror-IMPLICIT                                                                             \
