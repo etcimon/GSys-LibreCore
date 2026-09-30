@@ -33,6 +33,17 @@ module g6lc_thread_select
     // stable so PC-bank save/restore cannot corrupt a bootrom→DRAM jump.
     input  logic hold_i,
     input  logic drain_ready_i,
+    // N1c bounded drain (drained handoff only; inert when
+    // CVA6Cfg.SmtDrainForceCycles == 0).
+    input  logic commit_i,          // any commit-stage ack this cycle
+    input  logic drain_killable_i,  // resident in-flight state is cancellable
+    input  logic head_wfi_i,        // resident commit head is a WFI
+    input  logic head_plain_i,      // resident commit head is a plain op
+    input  logic [CVA6Cfg.VLEN-1:0] head_pc_i,   // oldest uncommitted PC
+    output logic drain_force_o,     // pulse: flush the resident hart now
+    output logic drain_force_wfi_o, // drain_force_o && head was WFI
+    output logic drain_forced_o,    // a force is outstanding until switch_o
+    output logic [CVA6Cfg.VLEN-1:0] drain_force_pc_o,
     output logic quiesce_o,
     // I4ba: ID has a hart-tagged unissued instruction.
     // I4bc: IQ head valid while ID is empty.
@@ -76,9 +87,15 @@ module g6lc_thread_select
     assign switch_on_miss_o    = 1'b0;
     assign switch_on_quantum_o = 1'b0;
     assign switch_on_starve_o  = 1'b0;
+    assign drain_force_o       = 1'b0;
+    assign drain_force_wfi_o   = 1'b0;
+    assign drain_forced_o      = 1'b0;
+    assign drain_force_pc_o    = '0;
     logic _unused_boot;
     assign _unused_boot = fetch_fire_i | issue_fire_i | flush_i | hold_i |
-                          id_uniss_i | iq_valid_i | t0_imm_i | trap_hold_i;
+                          id_uniss_i | iq_valid_i | t0_imm_i | trap_hold_i |
+                          commit_i | drain_killable_i | head_wfi_i |
+                          head_plain_i | (|head_pc_i) | drain_ready_i;
   end else begin : gen_smt
 
     logic [HID_W-1:0] active_q, active_d;
@@ -117,8 +134,37 @@ module g6lc_thread_select
     logic [HID_W-1:0] drain_peer_q, drain_peer_d;
     logic [3:0] drain_reason_q, drain_reason_d;
     assign quiesce_o = drain_pending_q | switch_q;
+
+    // N1c bounded drain (T10f). A pending drain that makes no commit
+    // progress for SmtDrainForceCycles cycles is forced: the top level
+    // flushes the resident hart's uncommitted state like a commit flush,
+    // the hart's bank entry is rewound to the oldest uncommitted PC
+    // (head_pc_i, latched into drain_force_pc_q so the killed head —
+    // a WFI included — re-executes on the next activation), and
+    // drain_ready_i then rises so the handoff completes. A WFI at the
+    // resident head forces immediately (the hart wants to sleep and the
+    // peer must run). The counter only counts cycles with no resident
+    // commit; any commit means drain progress and resets it. The force is
+    // issued only while drain_killable_i guarantees no uncancellable side
+    // effect (mid-atomic AMO/LR-SC, LSU commit handshake, pending store)
+    // is in flight, and never while drain_ready_i.
+    localparam int unsigned DF_MAX = CVA6Cfg.SmtDrainForceCycles;
+    localparam int unsigned DF_W   = (DF_MAX <= 1) ? 1 : $clog2(DF_MAX + 1);
+    localparam bit DRAIN_FORCE_EN  =
+        CVA6Cfg.SmtDrainedHandoff && (DF_MAX != 0);
+    logic [DF_W-1:0]   drain_force_cnt_q, drain_force_cnt_d;
+    logic              drain_forced_q, drain_forced_d;
+    logic [CVA6Cfg.VLEN-1:0] drain_force_pc_q;
+    // The force pulse is registered: drain_force_o feeds the controller's
+    // flush legs, and flush_id closes a path into drain_ready_i. Sampling
+    // the decision keeps drain_ready_i out of the force cone — there is no
+    // same-cycle path from the flush back into drain_force_d.
+    logic              drain_force, drain_force_q, drain_force_wfi_q;
 `else
     assign quiesce_o = 1'b0;
+    logic _unused_drain;
+    assign _unused_drain = commit_i | drain_killable_i | head_wfi_i |
+                           head_plain_i | (|head_pc_i) | drain_ready_i;
 `endif
 
     always_comb begin
@@ -313,6 +359,41 @@ module g6lc_thread_select
         reason_starve = 1'b0;
         reason_yield = 1'b0;
       end
+
+      // N1c bounded drain force. WFI is an immediate request; otherwise the
+      // no-commit counter must reach DF_MAX. One force per drain: while
+      // drain_forced_q is armed no further request is issued — a re-fired
+      // force would keep flush_ctrl_id high and drain_ready_i could never
+      // rise (the formal boundedness proof catches that livelock otherwise).
+`ifdef G6LC_MUT_DRAIN_NOFORCE
+      // Review/formal mutation: the bounded-drain force is dropped so the
+      // drain regresses to the unbounded pre-N1c behaviour. The review leaf
+      // times out waiting for drain_force_o and the SymbiYosys boundedness
+      // property must fail.
+      drain_force = 1'b0;
+`else
+      drain_force = DRAIN_FORCE_EN && drain_pending_q && !drain_ready_i &&
+          !commit_i && drain_killable_i && !drain_forced_q &&
+          (head_wfi_i ||
+           ((drain_force_cnt_q == DF_W'(DF_MAX)) && head_plain_i));
+`endif
+      drain_force_cnt_d = drain_force_cnt_q;
+      if (!drain_pending_q || drain_ready_i || commit_i || drain_force)
+        drain_force_cnt_d = '0;
+      else if (drain_force_cnt_q != DF_W'(DF_MAX))
+        drain_force_cnt_d = drain_force_cnt_q + 1'b1;
+      // Forced state must survive the do_switch cycle into the switch_q pulse
+      // (the outgoing bank reads npc_alt at switch_i) and die with the switch
+      // or with the drain itself. drain_force_q is the registered pulse; the
+      // npc_alt window is anchored on the decision so a flush that resolves
+      // the drain in one cycle cannot outrun it. If the drain resolves
+      // naturally in the pulse cycle itself (drain_ready_i rises or a commit
+      // lands while the force is in flight), the head-PC snapshot is stale —
+      // drop the forced state so the bank takes the normal retire/NPC path
+      // instead of rewinding to a PC that has since committed or drained.
+      drain_forced_d = (drain_forced_q || drain_force) && drain_pending_q &&
+                       !switch_q &&
+                       !(drain_force_q && (drain_ready_i || commit_i));
 `endif
       // Hold wins over policy: no switch. Also *freeze* quantum/starve aging —
       // otherwise the parked primary's starve hits ST_MAX during peer bootrom
@@ -373,6 +454,11 @@ module g6lc_thread_select
         drain_pending_q <= 1'b0;
         drain_peer_q <= '0;
         drain_reason_q <= '0;
+        drain_force_cnt_q <= '0;
+        drain_forced_q <= 1'b0;
+        drain_force_pc_q <= '0;
+        drain_force_q <= 1'b0;
+        drain_force_wfi_q <= 1'b0;
 `endif
         active_q         <= '0;
         pause_req_q      <= '0;
@@ -393,6 +479,11 @@ module g6lc_thread_select
         drain_pending_q <= drain_pending_d;
         drain_peer_q <= drain_peer_d;
         drain_reason_q <= drain_reason_d;
+        drain_force_cnt_q <= drain_force_cnt_d;
+        drain_forced_q <= drain_forced_d;
+        drain_force_q <= drain_force;
+        drain_force_wfi_q <= drain_force && head_wfi_i;
+        if (drain_force) drain_force_pc_q <= head_pc_i;
 `endif
         active_q         <= active_d;
         // Clear only on an activation TRANSITION: the hint is raised while the
@@ -421,6 +512,17 @@ module g6lc_thread_select
     assign switch_on_miss_o    = reason_miss_q;
     assign switch_on_quantum_o = reason_quantum_q;
     assign switch_on_starve_o  = reason_starve_q;
+`ifdef G6LC_FETCH_B
+    assign drain_force_o       = drain_force_q;
+    assign drain_force_wfi_o   = drain_force_wfi_q;
+    assign drain_forced_o      = drain_forced_q;
+    assign drain_force_pc_o    = drain_force_pc_q;
+`else
+    assign drain_force_o       = 1'b0;
+    assign drain_force_wfi_o   = 1'b0;
+    assign drain_forced_o      = 1'b0;
+    assign drain_force_pc_o    = '0;
+`endif
 
     // issue_fire reserved for future issue-quantum policy
     logic _unused_issue;

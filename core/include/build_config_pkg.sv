@@ -366,6 +366,7 @@ package build_config_pkg;
     cfg.SliceMaxRunahead = CVA6Cfg.SliceMaxRunahead;
     cfg.OoOEn = CVA6Cfg.OoOEn;
     cfg.SmtDrainedHandoff = CVA6Cfg.SmtDrainedHandoff;
+    cfg.SmtDrainForceCycles = CVA6Cfg.SmtDrainForceCycles;
     // U5 geometry defaults when enabled and left zero.
     // Scale ROB/IQ/LSQ with issue width so 4-issue is not starved by 2-issue depths.
     if (CVA6Cfg.OoOEn) begin

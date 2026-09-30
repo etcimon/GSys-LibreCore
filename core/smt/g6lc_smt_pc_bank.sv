@@ -80,7 +80,8 @@ module g6lc_smt_pc_bank
         // executes boot-hart code with a reset SP (I4q hold sp1=0x20 / I4t
         // ecall_unregister mcause=4). I4p still applies: never bank 0.
         // I10: snapshot only on switch into the outgoing bank. Never bank 0.
-        // npc_alt is A-only t0 rewind (tied off under G6LC_FETCH_B).
+        // npc_alt is the N1c forced-drain restart PC under FETCH_B and the
+        // A-only t0 rewind elsewhere.
 `ifdef G6LC_FETCH_B
         for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++)
           if (retire_valid_i[p]) npc_bank_q[retire_hart_i[p]] <= retire_pc_i[p];
@@ -90,6 +91,12 @@ module g6lc_smt_pc_bank
         // different hart than the primary redirect by construction.
         if (redirect2_valid_i)
           npc_bank_q[redirect2_hart_i] <= redirect2_pc_i;
+        // N1c: a forced drain rewinds the outgoing hart's bank to the
+        // latched commit-head PC so its killed head (WFI included)
+        // re-executes on the next activation. Written last so it wins over
+        // a same-cycle retire/redirect into the same bank entry.
+        if (switch_i && npc_alt_valid_i && |npc_alt_i)
+          npc_bank_q[prev_hart_q] <= npc_alt_i;
 `else
         if (switch_i) begin
           if (npc_alt_valid_i && |npc_alt_i)

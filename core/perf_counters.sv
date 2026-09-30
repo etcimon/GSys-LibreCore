@@ -94,6 +94,8 @@ module perf_counters
     input logic l2_pf_useful_i,
     // Group 3: FSE speculation recovery (tie 0 when unused)
     input logic spec_cancel_i,
+    input logic smt_drain_force_i,     // N1c bounded-drain force pulse
+    input logic smt_drain_force_wfi_i, // force pulse whose resident head was WFI
     // Group 4: Xg6lcai AI matrix (tie 0 when AiCfg.MatrixEn=0 / no copro)
     input logic ai_pmu_op_i,      // any AI result_valid pulse
     input logic ai_pmu_mma_i,     // MMA complete pulse
@@ -309,6 +311,9 @@ module perf_counters
       event_group[h][3'd3][5'd3] = stall_issue_i && act;   // issue/RAW bubble
       event_group[h][3'd3][5'd4] = load_event_h[h];        // load pressure
       event_group[h][3'd3][5'd5] = store_event_h[h];       // store pressure
+      // N1c bounded drain (g6lc_thread_select, drained handoff)
+      event_group[h][3'd3][5'd6] = smt_drain_force_i && act;     // drain-force pulse
+      event_group[h][3'd3][5'd7] = smt_drain_force_wfi_i && act; // force on WFI head
 
       // Group 4: Xg6lcai AI (mhpmevent[7:5]==MHPMGrpAI). See ariane_pkg.
       if (CVA6Cfg.AiCfg.MatrixEn) begin

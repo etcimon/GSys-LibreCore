@@ -771,8 +771,19 @@ state correct. Island compute stays in `corev_apu/ai_island/**` and host stacks 
 Per-hart precise traps and isolation; RVWMO per and across harts; no starvation (enforced by `SmtStarveLimit` under hybrid).
 AI sideband and RF banks remain **per-hart**; island queues remain **SoC-isolated**, not RF-banked.
 
+### Bounded drained handoff (N1c)
+The drained handoff is **bounded by construction**. While a drain pends without a resident-hart
+commit, `g6lc_thread_select` counts blocked cycles; at `SmtDrainForceCycles` (default 256, 0 =
+never force, power-of-two enforced by `check_cfg`) — or immediately when the commit head is a WFI —
+and only while the head is safe to cancel (`no_st_pending_commit`, no AMO/CSR writeback in flight),
+the controller flushes the resident hart's uncommitted state exactly like a mispredict flush
+(`flush_unissued + flush`, hart-scoped under mixed residency), the SMT PC bank restores the hart's
+restart PC (commit-head PC, or the WFI's own PC so WFI re-executes), `drain_ready` asserts and the
+switch proceeds. Pulses `smt_drain_force`/`smt_drain_force_wfi` report under `[smt-drain]` and PMU
+group 3. The `+smt_sched_trace` force record exposes `pc`/`next`/`empty`/`force`/`wfi` per event.
+
 ## Status vs scaffold
-**Fine-grain dual-PC + CSR/RF/RAS/GHR banks + drain-on-switch + AI CSR sideband.** Production default remains `NrHarts=1`.  
+**Fine-grain dual-PC + CSR/RF/RAS/GHR banks + bounded drain-on-switch + AI CSR sideband.** Production default remains `NrHarts=1`.  
 **SMT2 product closeout is open:** cookie green is a gate, not completeness; the remaining items are listed in `smt2-product-closeout.md`.  
 **Linux path:** boot-path + rootfs preflight in-repo; full rootfs needs external images.  
 **AI path:** soft pytorch green on virt-ai-pcie; multi-thread host workers gated on soft-ladder topology trust.

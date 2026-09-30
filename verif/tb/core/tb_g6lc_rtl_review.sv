@@ -3599,11 +3599,14 @@ module tb_g6lc_review_smt_drain;
   bit negative;
   g6lc_thread_select #(.CVA6Cfg(C)) dut (
     .clk_i(clk), .rst_ni(rst_n), .fetch_fire_i(fetch), .issue_fire_i(1'b0), .flush_i(flush),
-    .hold_i(1'b0), .drain_ready_i(idle), .quiesce_o(quiesce), .id_uniss_i(1'b0),
+    .hold_i(1'b0), .drain_ready_i(idle), .commit_i(1'b0), .drain_killable_i(1'b1),
+    .head_wfi_i(1'b0), .head_plain_i(1'b1), .head_pc_i('0),
+    .drain_force_o(), .drain_force_wfi_o(), .drain_forced_o(), .drain_force_pc_o(),
+    .quiesce_o(quiesce), .id_uniss_i(1'b0),
     .iq_valid_i(1'b0), .t0_imm_i(1'b0), .trap_hold_i(trap_hold), .hart_ready_i(ready),
     .hart_dmiss_i('0), .hart_imiss_i('0), .hart_block_i('0), .active_hart_o(active),
     .switch_o(switched), .t0_extra_o(), .switch_on_miss_o(), .switch_on_quantum_o(),
-    .switch_on_starve_o()
+    .switch_on_starve_o(), .pause_hint_i('0)
   );
   task automatic tick;
     #2; clk=1; #2; clk=0; #2;
@@ -3636,6 +3639,107 @@ module tb_g6lc_review_smt_drain;
     if ((int'(active) ^ int'(negative)) != (NH>1 ? 1 : 0))
       $fatal(1,"SMT_DRAIN_ORACLE");
     $display("RTL_REVIEW_PASS smt_drain harts=%0d scenario=%0d",NH,scenario);
+    $finish;
+  end
+endmodule
+
+// N1c bounded drain (T10f). A drain that makes no commit progress for
+// SmtDrainForceCycles cycles is forced (scenario 0), a WFI head forces
+// immediately (scenario 1), and a non-killable head defers the force until
+// the head becomes killable (scenario 2). The no-force mutation
+// (+define+G6LC_MUT_DRAIN_NOFORCE) must hit SMT_DFORCE_TIMEOUT instead of
+// draining — that is the mutation control, not an oracle negative.
+module tb_g6lc_review_smt_drainforce;
+  parameter int NH=2, FORCE=8;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.VLEN=64; c.XLEN=64;
+    c.NrHarts=NH;
+    c.SmtPolicy=config_pkg::SMT_RR;
+    c.SmtFetchQuantum=1; c.SmtStarveLimit=0;
+    c.SmtDrainedHandoff=1'b1;
+    c.SmtDrainForceCycles=FORCE;
+    return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  logic clk=0, rst_n=0, fetch=0, idle=0, quiesce, switched, flush=0;
+  logic [NH-1:0] ready='1;
+  logic [$clog2(NH>1?NH:2)-1:0] active;
+  logic commit=0, killable=1, wfi=0, plain=1;
+  logic [63:0] headpc;
+  logic dforce, force_wfi, forced;
+  logic [63:0] forcepc;
+  int scenario=0;
+  bit negative;
+  g6lc_thread_select #(.CVA6Cfg(C)) dut (
+    .clk_i(clk), .rst_ni(rst_n), .fetch_fire_i(fetch), .issue_fire_i(1'b0), .flush_i(flush),
+    .hold_i(1'b0), .drain_ready_i(idle), .commit_i(commit), .drain_killable_i(killable),
+    .head_wfi_i(wfi), .head_plain_i(plain), .head_pc_i(headpc),
+    .drain_force_o(dforce), .drain_force_wfi_o(force_wfi),
+    .drain_forced_o(forced), .drain_force_pc_o(forcepc),
+    .quiesce_o(quiesce), .id_uniss_i(1'b0),
+    .iq_valid_i(1'b0), .t0_imm_i(1'b0), .trap_hold_i(1'b0), .hart_ready_i(ready),
+    .hart_dmiss_i('0), .hart_imiss_i('0), .hart_block_i('0), .active_hart_o(active),
+    .switch_o(switched), .t0_extra_o(), .switch_on_miss_o(), .switch_on_quantum_o(),
+    .switch_on_starve_o(), .pause_hint_i('0)
+  );
+  task automatic tick;
+    #2; clk=1; #2; clk=0; #2;
+  endtask
+  task automatic arm_drain;
+    fetch=1; tick(); fetch=0; tick();
+    if (!quiesce) $fatal(1,"SMT_DFORCE_ARM quiesce=%b",quiesce);
+  endtask
+  task automatic wait_force(input int lim,input int seen_bound);
+    int n=0;
+    while (!dforce && n < lim) begin tick(); n++; end
+    if (!dforce) $fatal(1,"SMT_DFORCE_TIMEOUT scenario=%0d",scenario);
+    if (n > seen_bound) $fatal(1,"SMT_DFORCE_LATE n=%0d bound=%0d",n,seen_bound);
+  endtask
+  task automatic finish_switch;
+    idle=1; tick();
+    if (!switched) begin tick(); if (!switched) $fatal(1,"SMT_DFORCE_NOSWITCH"); end
+    if (active != 1) $fatal(1,"SMT_DFORCE_ACTIVE active=%0d",active);
+    idle=0; tick();
+  endtask
+  initial begin
+    void'($value$plusargs("scenario=%d",scenario));
+    negative=$test$plusargs("oracle_negative");
+    headpc=64'h8000_0040;
+    tick(); rst_n=1; tick();
+    if (scenario==1) begin
+      // WFI head: immediate force, no counter wait.
+      arm_drain();
+      wfi=1;
+      wait_force(6,4);
+      if (!force_wfi) $fatal(1,"SMT_DFORCE_WFI_FLAG");
+      tick(); wfi=0;
+      if (forcepc != headpc) $fatal(1,"SMT_DFORCE_PC got=%h",forcepc);
+      finish_switch();
+    end else if (scenario==2) begin
+      // Not killable: no force no matter how long the counter runs; the
+      // force lands promptly once the head becomes killable.
+      killable=0;
+      arm_drain();
+      repeat (2*FORCE+4) begin tick();
+        if (dforce) $fatal(1,"SMT_DFORCE_UNSAFE");
+      end
+      killable=1;
+      wait_force(FORCE+4,FORCE+2);
+      if (force_wfi) $fatal(1,"SMT_DFORCE_WFI_FLAG");
+      if (forcepc != headpc) $fatal(1,"SMT_DFORCE_PC got=%h",forcepc);
+      finish_switch();
+    end else begin
+      // Resident hart never commits: the no-commit counter bounds the drain.
+      arm_drain();
+      wait_force(2*FORCE+8,FORCE+4);
+      if (force_wfi) $fatal(1,"SMT_DFORCE_WFI_FLAG");
+      if (forcepc != headpc) $fatal(1,"SMT_DFORCE_PC got=%h",forcepc);
+      if (!forced) $fatal(1,"SMT_DFORCE_STICKY");
+      finish_switch();
+    end
+    if ((int'(active) ^ int'(negative)) != 1) $fatal(1,"SMT_DFORCE_ORACLE");
+    $display("RTL_REVIEW_PASS smt_drainforce harts=%0d scenario=%0d",NH,scenario);
     $finish;
   end
 endmodule
@@ -4177,6 +4281,7 @@ module tb_g6lc_review_perf;
     .stall_issue_i(1'b0),
     .ooo_rename_stall_i(1'b0),.ooo_rob_full_i(1'b0),.ooo_iq_full_i(1'b0),
     .ooo_lsq_stall_i(1'b0),.ooo_stl_forward_i(1'b0),.spec_cancel_i(1'b0),
+    .smt_drain_force_i(1'b0),.smt_drain_force_wfi_i(1'b0),
     .ooo_phys_replay_i(1'b0),.coh_inval_apply_i(1'b0),
     .ai_pmu_op_i(1'b0),.ai_pmu_mma_i(1'b0),.ai_pmu_post_i(1'b0),
     .ai_pmu_t0_i(1'b0),.ai_pmu_busy_i(1'b0),

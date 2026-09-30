@@ -848,6 +848,24 @@ not all production widths, FPGA/RVH or full SMT2 qualification. Current priority
 `AGENTS-todo.md`, with F0–F5 qualification requirements retained. Evidence and
 limits: `architecture/core-fetch/README.md`, circular IQ section.
 
+### Bounded drained handoff — `SmtDrainForceCycles` (2026-09-30, N1c)
+
+`core/include/config_pkg.sv` adds `SmtDrainForceCycles` (default 256, 0 = never
+force, power-of-two-or-zero enforced by `check_cfg`; meaningful only with
+`SmtDrainedHandoff`). `core/smt/g6lc_thread_select.sv` counts cycles of
+`drain_pending && !drain_ready` without a resident-hart commit (the counter
+resets on any commit). At the limit — or immediately when the resident commit
+head is a WFI — and only while the head is safe to cancel (`no_st_pending_commit`
+and no uncancellable AMO/CSR writeback in flight), `drain_force_o` requests a
+forced drain: `core/cva6.sv` drives a hart-scoped `flush_unissued + flush`
+through `core/controller.sv`, and `core/smt/g6lc_smt_pc_bank.sv` restores the
+outgoing hart's restart PC (oldest uncommitted = commit-head PC, or the WFI's
+own PC so WFI re-executes). `drain_ready` then completes the switch. Pulses
+`smt_drain_force` / `smt_drain_force_wfi` report under `[smt-drain]` and PMU
+group 3; `+smt_sched_trace` exposes `pc`/`next`/`empty`/`force`/`wfi` per event.
+No new clock/reset; single `always_ff` counter; WFI `hart_block` semantics
+unchanged. Evidence: `core/ooo/AGENTS-ooo-plan.md` T10f.
+
 ## How to use
 
 1. Identify the spec chapter/`X.y` (via `agents/spec/INDEX.md`) your change touches.

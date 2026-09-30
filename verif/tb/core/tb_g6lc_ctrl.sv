@@ -53,7 +53,7 @@ module tb_g6lc_ctrl;
     .sfence_vma_i(sfence_vma), .hfence_vvma_i(hfence_vvma),
     .hfence_gvma_i(hfence_gvma), .flush_commit_i(flush_commit),
     .replay_i(1'b0), .mem_replay_pc_o(), .flush_acc_i(flush_acc),
-    .smt_switch_i(sw)
+    .smt_switch_i(sw), .drain_force_i(1'b0)
   );
 
   controller #(.CVA6Cfg(cfg(1)), .bp_resolve_t(bp_resolve_t)) drained (
@@ -70,7 +70,7 @@ module tb_g6lc_ctrl;
     .sfence_vma_i(sfence_vma), .hfence_vvma_i(hfence_vvma),
     .hfence_gvma_i(hfence_gvma), .flush_commit_i(flush_commit),
     .replay_i(1'b0), .mem_replay_pc_o(), .flush_acc_i(flush_acc),
-    .smt_switch_i(sw)
+    .smt_switch_i(sw), .drain_force_i(1'b0)
   );
 
   // flush_ctrl is purely combinational; a short settle is enough.

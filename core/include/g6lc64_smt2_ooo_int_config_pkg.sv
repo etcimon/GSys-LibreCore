@@ -288,6 +288,7 @@ package cva6_config_pkg;
       // exactness) is re-baselined on the eWT tree in this milestone.
       // int2/int2_l3 keep the drained handoff (multi-core stays gated).
       SmtDrainedHandoff: bit'(0),
+      SmtDrainForceCycles: unsigned'(0),
       DeepSpecEn: bit'(0),
       RobEntries: unsigned'(0),
       PrfEntries: unsigned'(0),

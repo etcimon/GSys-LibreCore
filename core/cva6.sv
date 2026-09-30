@@ -817,6 +817,13 @@ module cva6
                             ? lsu_chk_hart : smt_active_hart;
   logic                    smt_switch;
   logic                    smt_quiesce, smt_sb_empty;
+  // N1c bounded drain force (drained handoff)
+  logic                    smt_drain_force;
+  logic                    smt_drain_force_wfi;
+  logic                    smt_drain_forced;
+  logic [CVA6Cfg.VLEN-1:0] smt_drain_force_pc;
+  logic                    smt_drain_safe;
+  logic                    smt_head_wfi, smt_head_plain;
   logic                    smt_t0_extra;
   logic                    smt_t0_rewind;
   logic [CVA6Cfg.VLEN-1:0] smt_t0_alt;
@@ -1368,9 +1375,10 @@ module cva6
       .active_hart_i   (smt_active_hart),
       .switch_i        (smt_switch),
 `ifdef G6LC_FETCH_B
-      // I10: snapshot npc_live only. t0 immediate rewind is A-only (LEDGER I4bl).
-      .npc_alt_valid_i (1'b0),
-      .npc_alt_i       ('0),
+      // I10: snapshot npc_live only — EXCEPT the N1c forced-drain rewind,
+      // which hands the outgoing hart its latched commit-head PC at switch.
+      .npc_alt_valid_i (smt_drain_forced),
+      .npc_alt_i       (smt_drain_force_pc),
 `else
       .npc_alt_valid_i (smt_t0_rewind),
       .npc_alt_i       (smt_t0_alt),
@@ -1721,6 +1729,37 @@ module cva6
 
 
 
+  // N1c bounded drain (T10f): resident-hart commit-head classification for
+  // the force gate. The head may be killed only while it carries no
+  // uncancellable side effect — never an AMO/LR-SC (mid-atomic), never a
+  // CSR/privilege op (MRET/SRET/DRET/WFI-class side effects live in the CSR
+  // FU), never a memory-order, TLB or cache-block op, and never an exception
+  // already bound to commit. WFI is the sole special case and forces
+  // immediately: the hart wants to sleep, the peer must run, and re-executing
+  // the WFI on the next activation reproduces the sleep.
+  assign smt_head_wfi = commit_instr_id_commit[0].valid &&
+                        commit_instr_id_commit[0].op == ariane_pkg::WFI;
+  assign smt_head_plain = commit_instr_id_commit[0].valid &&
+      !commit_instr_id_commit[0].ex.valid &&
+      !ariane_pkg::is_amo(commit_instr_id_commit[0].op) &&
+      (commit_instr_id_commit[0].fu != ariane_pkg::CSR) &&
+      (commit_instr_id_commit[0].op != ariane_pkg::WFI) &&
+      !(commit_instr_id_commit[0].op inside {
+          ariane_pkg::FENCE, ariane_pkg::FENCE_I,
+          ariane_pkg::SFENCE_VMA, ariane_pkg::HFENCE_VVMA,
+          ariane_pkg::HFENCE_GVMA,
+          ariane_pkg::CBO_CLEAN, ariane_pkg::CBO_FLUSH,
+          ariane_pkg::CBO_INVAL, ariane_pkg::CBO_ZERO});
+  // Killing the resident hart is additionally unsafe while a store is
+  // pending at commit / in the write buffer (no_st_pending_commit), while an
+  // AMO/SC is committed into the LSU and awaiting acceptance (the "cannot
+  // cancel in flight" handshake), while a debug redirect owns the resident
+  // bank write, or while the hart has no live head PC to restart from.
+  assign smt_drain_safe = no_st_pending_commit &&
+      sb_head_valid[smt_active_hart] &&
+      !(lsu_commit_commit_ex && !lsu_commit_ready_ex_commit) &&
+      !(CVA6Cfg.DebugEn && set_debug_pc);
+
   g6lc_thread_select #(
       .CVA6Cfg(CVA6Cfg)
   ) i_smt_thread_select (
@@ -1736,6 +1775,15 @@ module cva6
       // the two resident streams disjoint.
       .drain_ready_i       (CVA6Cfg.SmtDrainedHandoff ?
                             (smt_sb_empty && no_st_pending_commit && !flush_ctrl_id) : 1'b1),
+      .commit_i            (|commit_macro_ack),
+      .drain_killable_i    (smt_drain_safe),
+      .head_wfi_i          (smt_head_wfi),
+      .head_plain_i        (smt_head_plain),
+      .head_pc_i           (sb_head_pc[smt_active_hart]),
+      .drain_force_o       (smt_drain_force),
+      .drain_force_wfi_o   (smt_drain_force_wfi),
+      .drain_forced_o      (smt_drain_forced),
+      .drain_force_pc_o    (smt_drain_force_pc),
       .quiesce_o           (smt_quiesce),
       .id_uniss_i          (issue_entry_valid_id_issue[0]),
       .iq_valid_i          (fetch_valid_if_id[0]),
@@ -1768,6 +1816,7 @@ module cva6
     longint unsigned ss_hist[8];   // <8,8-15,16-31,32-63,64-127,128-255,256-511,>=512
     longint unsigned ss_w_sb, ss_w_st, ss_w_flushid;
     longint unsigned ss_w_peer, ss_w_hold, ss_w_trap, ss_w_flush;
+    longint unsigned ss_force, ss_force_wfi;
     longint unsigned ss_retired[SSNH];
     longint unsigned ss_drop;
     longint unsigned ss_set_cycle;
@@ -1778,6 +1827,7 @@ module cva6
       ss_drain_cyc = 0; ss_drain_max = 0; ss_set_cycle = 0; ss_prev_dp = 0;
       ss_w_sb = 0; ss_w_st = 0; ss_w_flushid = 0;
       ss_w_peer = 0; ss_w_hold = 0; ss_w_trap = 0; ss_w_flush = 0;
+      ss_force = 0; ss_force_wfi = 0;
       ss_drop = 0;
       for (int i = 0; i < 8; i++) ss_hist[i] = 0;
       for (int h = 0; h < SSNH; h++) ss_retired[h] = 0;
@@ -1837,12 +1887,14 @@ module cva6
           if (smt_retire_valid[p] && smt_retire_hart[p] < SSNH)
             ss_retired[smt_retire_hart[p]] = ss_retired[smt_retire_hart[p]] + 1;
         end
+        if (smt_drain_force) ss_force = ss_force + 1;
+        if (smt_drain_force_wfi) ss_force_wfi = ss_force_wfi + 1;
         if (ss_cycle % 1000000 == 0) begin
-          $display("[smt-drain] cyc=%0d req=%0d switches=%0d aborts=%0d drain_cyc=%0d max=%0d wait_sb=%0d wait_st=%0d wait_flushid=%0d wait_peer=%0d wait_hold=%0d wait_trap=%0d wait_flush=%0d hist={%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d} ret={%0d,%0d,%0d,%0d} drop=%0d",
+          $display("[smt-drain] cyc=%0d req=%0d switches=%0d aborts=%0d drain_cyc=%0d max=%0d wait_sb=%0d wait_st=%0d wait_flushid=%0d wait_peer=%0d wait_hold=%0d wait_trap=%0d wait_flush=%0d force=%0d force_wfi=%0d hist={%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d} ret={%0d,%0d,%0d,%0d} drop=%0d",
                    ss_cycle, ss_drain_req, ss_switch, ss_drain_abort,
                    ss_drain_cyc, ss_drain_max,
                    ss_w_sb, ss_w_st, ss_w_flushid, ss_w_peer, ss_w_hold,
-                   ss_w_trap, ss_w_flush,
+                   ss_w_trap, ss_w_flush, ss_force, ss_force_wfi,
                    ss_hist[0], ss_hist[1], ss_hist[2], ss_hist[3],
                    ss_hist[4], ss_hist[5], ss_hist[6], ss_hist[7],
                    ss_retired[0], SSNH > 1 ? ss_retired[1] : 0,
@@ -1854,11 +1906,11 @@ module cva6
     end
     final begin
       if (smt_stats_en) begin
-        $display("[smt-drain] FINAL cyc=%0d req=%0d switches=%0d aborts=%0d drain_cyc=%0d max=%0d wait_sb=%0d wait_st=%0d wait_flushid=%0d wait_peer=%0d wait_hold=%0d wait_trap=%0d wait_flush=%0d hist={%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d} ret={%0d,%0d,%0d,%0d} drop=%0d",
+        $display("[smt-drain] FINAL cyc=%0d req=%0d switches=%0d aborts=%0d drain_cyc=%0d max=%0d wait_sb=%0d wait_st=%0d wait_flushid=%0d wait_peer=%0d wait_hold=%0d wait_trap=%0d wait_flush=%0d force=%0d force_wfi=%0d hist={%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d} ret={%0d,%0d,%0d,%0d} drop=%0d",
                  ss_cycle, ss_drain_req, ss_switch, ss_drain_abort,
                  ss_drain_cyc, ss_drain_max,
                  ss_w_sb, ss_w_st, ss_w_flushid, ss_w_peer, ss_w_hold,
-                 ss_w_trap, ss_w_flush,
+                 ss_w_trap, ss_w_flush, ss_force, ss_force_wfi,
                  ss_hist[0], ss_hist[1], ss_hist[2], ss_hist[3],
                  ss_hist[4], ss_hist[5], ss_hist[6], ss_hist[7],
                  ss_retired[0], SSNH > 1 ? ss_retired[1] : 0,
@@ -2564,6 +2616,8 @@ module cva6
         .l2_pf_issue_i      (l2_pf_issue_i),
         .l2_pf_useful_i     (l2_pf_useful_i),
         .spec_cancel_i      (spec_cancel),
+        .smt_drain_force_i  (smt_drain_force),
+        .smt_drain_force_wfi_i (smt_drain_force_wfi),
         .ai_pmu_op_i        (ai_pmu_op_i),
         .ai_pmu_mma_i       (ai_pmu_mma_i),
         .ai_pmu_post_i      (ai_pmu_post_i),
@@ -2634,6 +2688,7 @@ module cva6
       .halt_frontend_o       (halt_frontend),
       .halt_o                (halt_ctrl),
       .smt_switch_i          (smt_switch),
+      .drain_force_i         (smt_drain_force),
       // control ports
       .eret_i                (eret),
       .ex_valid_i            (ex_commit.valid),

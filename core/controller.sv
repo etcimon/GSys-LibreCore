@@ -87,7 +87,11 @@ module controller
     // Flush request from accelerator - ACC_DISPATCHER
     input logic flush_acc_i,
     // U6.1 coarse-grain SMT switch: full pipeline flush, PC comes from PC bank
-    input logic smt_switch_i
+    input logic smt_switch_i,
+    // N1c bounded drain force - SMT selector (drained handoff): the resident
+    // hart's uncommitted state is killed so the pending handoff can complete;
+    // the outgoing hart's restart PC is banked via npc_alt, not set_pc.
+    input logic drain_force_i
 );
 
   // active fence - high if we are currently flushing the dcache
@@ -116,7 +120,7 @@ module controller
   logic commit_flush;
   assign commit_flush = ex_valid_i | eret_i
       | (CVA6Cfg.DebugEn & set_debug_pc_i)
-      | flush_csr_i | flush_acc_i
+      | flush_csr_i | flush_acc_i | drain_force_i
       | ((CVA6Cfg.RVA | CVA6Cfg.OoOEn) & flush_commit_i)
       | fence_i | fence_i_i
       | (CVA6Cfg.RVS & sfence_vma_i)
@@ -320,6 +324,24 @@ module controller
       flush_id_o             = 1'b0;
       flush_ex_o             = 1'b0;
       flush_bp_o             = 1'b0;
+    end
+
+    // ---------------------------------
+    // N1c bounded drain force
+    // ---------------------------------
+    // Kill the resident hart's uncommitted state exactly like a commit-level
+    // flush but WITHOUT set_pc_commit_o: the outgoing hart's restart PC is
+    // banked by g6lc_smt_pc_bank through npc_alt at the switch. Under the
+    // drained handoff every in-flight entry belongs to the resident hart, so
+    // the global kill is hart-scoped. The selector asserts this only when no
+    // uncancellable side effect is in flight, so it cannot race a commit
+    // redirect. Ordered last so the kill can never be degraded by the switch
+    // override; drained handoff only, constant-0 otherwise.
+    if (drain_force_i) begin
+      flush_if_o             = 1'b1;
+      flush_unissued_instr_o = 1'b1;
+      flush_id_o             = 1'b1;
+      flush_ex_o             = 1'b1;
     end
   end
 

@@ -1018,6 +1018,18 @@ startup/FDT/HSM logic and uses `G6LC_STRICT_DUAL` in the existing S-mode payload
 Strict completion requires real HSM peer startup, checked per-hart seen flags and
 an explicit successful payload store, not banner text or the old soft cookie.
 
+### Bounded drain — force timeout, WFI immediate, no-force-while-ready (2026-09-30, N1c)
+
+`core/smt/formal/` binds SymbiYosys on `g6lc_thread_select` with a small drain-interface
+model (`g6lc_thread_select_props.sv`, `g6lc_thread_select.sby`): `prove` shows a pending
+drain completes a switch within `SmtDrainForceCycles + K` (K = flush latency bound) and
+`drain_force_o` never fires while `drain_ready`; `cover` reaches a WFI-forced drain;
+mutation `g6lc_thread_select_mut_noforce` (force path removed) times the bounded-switch
+property out as designed. `tb_g6lc_rtl_review.sv` leaf scenario: a resident hart that
+never commits is force-drained and the peer switch completes. Boot-level identity:
+`+smt_stats` reports `smt_drain_force`/`smt_drain_force_wfi` per core and expects zero
+on the ring-16 profiles. Evidence/tags: `core/ooo/AGENTS-ooo-plan.md` T10f.
+
 ## Architectural resume and source-profile residual (2026-09-19)
 
 `tb_g6lc_restart.sv` / `run_restart_bank.py` now test retirement-owned PC banking:

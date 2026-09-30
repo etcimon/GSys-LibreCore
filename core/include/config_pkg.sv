@@ -578,6 +578,12 @@ package config_pkg;
     // T6b: when 1 the SMT thread selector switches only on a drained backend
     // (scoreboard and store queues empty); 0 permits mixed residency.
     bit          SmtDrainedHandoff;
+    // N1c: bound on a drained-handoff drain that makes no commit progress.
+    // 0 = never force; otherwise 0-or-power-of-two cycles of
+    // drain_pending && !drain_ready without a resident-hart commit before the
+    // selector forces a hart-scoped flush of the resident hart. Meaningful
+    // only with SmtDrainedHandoff.
+    int unsigned SmtDrainForceCycles;
     // FSE: deep speculation depth plane (architecture/speculative-execution/)
     // 0 = legacy STQ depth 4 + package-stated buffers; 1 = auto floors + deeper STQ
     bit          DeepSpecEn;
@@ -770,6 +776,7 @@ package config_pkg;
     int unsigned SliceMaxRunahead;
     bit          OoOEn;
     bit          SmtDrainedHandoff;
+    int unsigned SmtDrainForceCycles;
     int unsigned RobEntries;
     int unsigned PrfEntries;
     int unsigned IqEntries;
@@ -1103,6 +1110,11 @@ package config_pkg;
     // production feature on single-core packages (NrCores == 1) — mixed
     // harts on one core were qualified by the T6b evidence chain.
     assert (Cfg.SmtDrainedHandoff || (Cfg.OoOEn && Cfg.NrHarts > 1));
+    // N1c bounded drain: 0 disables the force entirely; the live value is a
+    // power of two, and it is meaningful only on a drained-handoff package.
+    assert (Cfg.SmtDrainForceCycles == 0 ||
+            (2 ** $clog2(Cfg.SmtDrainForceCycles) == Cfg.SmtDrainForceCycles));
+    assert (Cfg.SmtDrainForceCycles == 0 || Cfg.SmtDrainedHandoff);
 `ifndef G6LC_OOO_SMT_MIXED_QUALIFY
     // Multi-core mixed residency stays qualification-gated: on a package
     // with more than one core the drain gate may drop only behind the

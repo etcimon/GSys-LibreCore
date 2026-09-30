@@ -428,6 +428,22 @@ prerequisite for this work under the existing dual license. No licensing policy 
   is free. The +0.33 % attaches only to live offers/issues (~64 fills
   + arbitration), a policy/arb problem, not an idle cost. No RTL
   change; `L2PrefetchEn`/`L3PrefetchEn` stay 0. Details: plan T10e.
+- [~] **Bounded drained handoff (T10f, N1c): the drain pending ~6 M
+  cycles in T10d's ring-32 boot is now bounded by construction** —
+  new cfg `SmtDrainForceCycles` (256, 0 = never, pow2 checked);
+  `g6lc_thread_select` counts `drain_pending && !drain_ready` without
+  a resident commit and, only when the commit head is safely
+  cancellable (`no_st_pending_commit`, no AMO/CSR writeback in
+  flight), forces a hart-scoped mispredict flush + PC-bank restore to
+  the oldest uncommitted PC (WFI head forces immediately and
+  re-executes its own WFI). Pulses `smt_drain_force` /
+  `smt_drain_force_wfi` in `[smt-drain]` + PMU group 3. Formal:
+  bounded-switch + no-force-while-ready proven, noforce mutation
+  times out; leaf scenario green. Gates all pass (int2l3 29w/43w,
+  smt2int 29w/2w, smt2 10w/31w, defaults 9+55w/5+32w, 0 errors);
+  FO4 `sparse_smt_mixed_commit` r32 = 31.0 (≤32) and
+  `g6lc_thread_select` alone = 23.0. Boot/kernel/decision evidence in
+  flight — see plan T10f.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

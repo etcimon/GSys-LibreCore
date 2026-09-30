@@ -1,0 +1,39 @@
+# Bounded proofs for g6lc_thread_select N1c bounded drain (T10f):
+#   prove        — P1 (force never requested while drain_ready_i) + P2 (a
+#                  pending drain switches within SmtDrainForceCycles + K) +
+#                  forced/WFI bookkeeping + the natural-resolution race drop,
+#                  under the worst-case model: the resident hart never
+#                  commits, the head is always killable and plain-or-WFI, and
+#                  the flush completes within K cycles.
+#   cover        — witnesses: timer force, WFI force, completed switch.
+#   mut_noforce  — negative control: G6LC_MUT_DRAIN_NOFORCE drops the force
+#                  and the bounded property must FAIL.
+# Expect: prove PASS, cover PASS, mut_noforce FAIL.
+
+[tasks]
+prove
+cover
+mut_noforce
+
+[options]
+depth 24
+cover: depth 40
+mut_noforce: depth 24
+prove: mode prove
+cover: mode cover
+mut_noforce: mode bmc
+
+[engines]
+smtbmc yices
+
+[script]
+prove: read_slang --std 1800-2017 --top g6lc_thread_select_props -DFORMAL -DG6LC_FETCH_B config_pkg.sv g6lc_thread_select.sv g6lc_thread_select_props.sv
+cover: read_slang --std 1800-2017 --top g6lc_thread_select_props -DFORMAL -DFORMAL_COVER -DG6LC_FETCH_B config_pkg.sv g6lc_thread_select.sv g6lc_thread_select_props.sv
+mut_noforce: read_slang --std 1800-2017 --top g6lc_thread_select_props -DFORMAL -DG6LC_FETCH_B -DG6LC_MUT_DRAIN_NOFORCE config_pkg.sv g6lc_thread_select.sv g6lc_thread_select_props.sv
+prep -top g6lc_thread_select_props
+flatten
+
+[files]
+../../include/config_pkg.sv
+../g6lc_thread_select.sv
+g6lc_thread_select_props.sv
