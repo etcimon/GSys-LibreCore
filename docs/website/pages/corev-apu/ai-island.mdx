@@ -1,0 +1,118 @@
+---
+title: AI Island (Xg6lcai)
+description: The LibreCore AI matrix plane — T0 core ops, the T2 GEMM island in corev_apu, numeric formats, VA-Turbo residency, the scaling ladder, ai-tensor and the QEMU contract emulator. State as of 2026-10-01.
+---
+
+# AI Island (`Xg6lcai`)
+
+The AI plane has **two halves on two sides of the core boundary** (the *plane split* of
+`architecture/ai-matrix/scaling-100tops.md` §3):
+
+| Plane | Where | What | Reached by |
+|---|---|---|---|
+| **T0 / T1 core-attached** | `core/cvxif_g6lc_ai/` on the CVXIF seam (seam B) | fixed 8×8×8 INT8 tile unit (`ai.dot4`, `ai.mma`, tile moves, requant), AI CSRs, per-hart accumulator banks | custom-2 instructions, precise traps |
+| **T2 island** | `corev_apu/ai_island/` — a device on the fabric | the GEMM sequencer (`g6lc_ai_gemm_seq`), banked `tc_sram` operand/result tiles, descriptor engine, queues, completion FIFO, capability window | descriptor rings, doorbell / `ai.enq`, `ai.poll`, PLIC IRQ |
+
+Normative text lives in the monorepo scaffold, not here:
+`architecture/ai-matrix/isa-encoding.md` (opcodes, CSR, descriptor), `numeric-formats-datapath.md`,
+`va-turbo.md`, `scaling-100tops.md`, `corev_apu/ai_island/README.md` (live MMIO map) and the
+running log `architecture/ai-matrix/log-2026-09.md`. This page is the map and the current state.
+
+## Evidence classes (read before any number)
+
+Every figure in the AI record carries one of four labels, and they are never mixed:
+
+| Label | Source | Example |
+|---|---|---|
+| **measured** | Verilator SoC model of the built geometry (cycles, not timing) or the 8-lane backend bench | `1×512×512` INT8 cold **34,136** cycles, resident **590** |
+| **derived** | a model calibrated from measured per-beat / per-issue costs | the V1..V4 ladder table (`ai_bench_report.py --sku`) |
+| **projected** | a nameplate from a config literal | 98.3 TOPS for `AiIslandV4Octo` |
+| **virtual** | the QEMU contract emulator or the software reference backend | B1 boot + queue smoke, diffusion PSNR |
+
+A QEMU or software-reference result is never RTL or silicon evidence.
+
+## The live island (`g6lc64_ai`, 2026-09-30)
+
+| Property | Value | Status |
+|---|---|---|
+| MAC issue | 512 lanes × 1 output column per cycle | measured (2.048 TOPS nameplate at 2 GHz) |
+| Port | 64-bit AXI, 8 B/cycle → machine balance **64 MAC/byte** | measured: B stream at 1.002–1.008 cycles/beat |
+| Formats | INT8, INT4, FP8 E4M3/E5M2, FP16, BF16, FP32 (grant `0x00FB`; SP24 refused) | **FP island is the shipped package** since 2026-09-30 (`IslandFpEn=1`) |
+| Operand banks | flat-panel mapping, byte-capacity box: A 2 MiB, B 1 MiB, C 2 MiB | measured: `1×256×1024` INT8 is one job, one resident key |
+| Sequencer box | `M ≤ 1024`, `N ≤ 512`, K by bank bytes (`CAP_OFF_BANK_A/B_BYTES`) | published in the capability window |
+| VA-Turbo residency | two-slot resident-B directory, resident-A key (`VaTurboEn`, off in production) | measured on the bench SKU: `1×768×512` two panels both hit, **39×**; intra-row trail store 846 → 590 |
+| Accumulate mode | `CAP_OFF_ACCMODE` bit 0, K-split chains through C | measured (+2.2 % seed cost per block) |
+| Area (island, reduced review fixture) | 11,896 generic cells, 8,234 FF, `$div` 0, no SCC | yosys generic, not timing |
+
+### Bottleneck ledger (measured)
+
+- **A1 decode (m = 1)** is bytes-bound by construction: cold `1×512×512` INT8 runs at 7.7 MAC/cycle
+  (1.5 % of peak) because the weight panel streams once at 8 B/cycle. Only bytes/cycle (port
+  width, channels) and bytes (formats, residency) move it. Resident decode reaches 87 % MAC efficiency.
+- **A2 prefill (m ≫ 1)** is MAC-bound at the single output column per cycle → the column array (V2).
+- The C store was the next floor once columns > 2 at short K → the wide C store (landed).
+- T0 ops (`dot4` 4.07 cycles/op loop-inclusive) are control plane, not a throughput lever.
+
+## Scaling ladder toward 100 TOPS (balanced: memory before MACs)
+
+Four SKU literals in `g6lc_ai_island_cfg_pkg` (`AiIslandV1WidePort`, `V2ColumnArray`, `V3Quad`,
+`V4Octo`); `tb_g6lc_ai_scale_ladder` pins legality and nameplates, `ai_bench_report.py --sku`
+prints the derived table, suite `ai-scale-ladder` runs the local evidence in minutes.
+
+| Step | Axis | Nameplate | RTL state |
+|---|---|---|---|
+| live | 1 × 512 MAC, 8 B/cycle | 2.05 TOPS, balance 64 | shipped |
+| **V1 wide port** | 512-bit island port + class-0 channel (64 B/cycle), 64-bit cluster upsized in `g6lc_ai_dram_join` | 2.05 TOPS, balance 8 | plumbing landed; join + slave stream at **1.00 cycles/beat** (leaf); SoC point **not yet measured** — the remaining serializer is inside the island's 512-bit elaboration |
+| **V2 column array** | `OutCols = 8` dot units share one A word, B banked by column group, wide C store | 16.4 TOPS @ 2 GHz | RTL landed: OutCols=1 cycle-identical, OutCols 2/4 pass every directed case; island gate strict lint 0; FP32 16×16×16 MAC phase 2064 → 528 at 4 columns |
+| V3 quad | 4 clusters × 4096, class-2 memory nameplate | 49.2 TOPS @ 1.5 GHz | literal only — `g6lc_ai_cluster_dispatch` not started |
+| V4 octo | 8 clusters × 4096 | 98.3 TOPS @ 1.5 GHz | literal only |
+
+The batch-1 trap (scaling note §5) still holds: decode needs bytes, not TOPS; the ladder's
+100-TOPS end is the prefill / batched / conv regime.
+
+## Verification ladder for the island
+
+Left to right is where a violation is caught first:
+
+1. **Package arithmetic + legality** — `island_cfg_legal`, `check_cfg` (grant ⊆ implemented, FP plane needs RVF/RVD).
+2. **Bounded formal** — `corev_apu/ai_island/formal/g6lc_ai_gemm_flat.sby`: flat-panel pitch/capacity, row disjointness, burst length, DRAM stripe cap, resident-slot placement over the pure functions the sequencer calls (three geometries; a pitch mutation fails). Wired into `verify --formal`.
+3. **Run-time contracts** — C1–C4 in `g6lc_ai_gemm_seq` (bank bounds, no stripe-crossing bursts, trail store reads only written pairs).
+4. **Directed minis + the 8-lane backend bench** — `verif/regress/ai-ops-bench.sh` (63 s locally, 226 records, seven formats, both float pipes; cycle-identity is the regression gate for every refactor).
+5. **SoC directed suite + bench matrix** — `ai-matrix-veri.sh` with **oracle controls** (`ai_must_pass` / `ai_must_fail`; a misclassified control voids the run), `ai_bench_gemm.S` per format/shape/path/residency, `+ai_pmu_trace` `AI_JOB` records.
+6. **QEMU contract emulator** (`g6lc_qemu`, B1) — descriptor/queue/capability contract, boots OpenSBI; never an RTL number.
+
+## Host software: `ai-tensor`
+
+`ai-tensor/` is the project-independent host backend (PyTorch first, TensorFlow second): one 64-byte
+descriptor ABI for MMIO doorbell, `ai.enq`, and the frameworks; a mandatory software-reference/sim
+backend; hardware backends feature-gated; a pinned cross-connect to the island ABI.
+
+- `AiTensorLinear` / `AiTensorConv2d` lower to island jobs and take the largest K the banks admit
+  (`Caps.bank_*_bytes`); K beyond the banks chains through accumulate mode.
+- Qualification tools with retained records under `fixtures/qual/`: `qualify_llm.py` (distilgpt2:
+  INT8 g128 + FP16 head selected at 0.369× FP32 bytes) and `qualify_diffusion.py` (tiny-sd ladder;
+  pretrained `segmind/tiny-sd`: INT8 g64 35.0 dB PASS, g128 30.7 dB FAIL retained, BF16 48.5 dB). Virtual evidence.
+- `ai_tensor.cost_model`: a derived island cost model calibrated on the measured SoC points
+  (`1×512×512` cold/resident, FP32 `1×256×1024`), bytes- vs MAC-bound classification, offload-vs-host
+  decision, and the archetype recipe table (A1/A2 decode-prefill, A3 conv, A4 K-chain) filtered by the
+  capability grant.
+
+## SMT2 + AI
+
+`g6lc64_smt2_ai` (two software harts, dual issue, AI island, per-hart accumulator banks) exists because
+the AI plane is meant to be driven by several software threads with per-hart AI CSR banks and SoC-isolated
+queues. `check_cfg` retired the `CvxifEn && NrIssuePorts > 1` ban in favour of the issue-stage port-0
+steering contract (asserted in `issue_read_operands`, exercised by `mini_ai_dual_issue.S`). State: the SoC
+builds, oracle controls behave, and `ai_dot4_s8_smoke`, `ai_mma_s8_golden`, `ai_queue_doorbell`,
+`ai_island_mmio_smoke` pass on the two-hart dual-issue model. Queued: the dual-issue mini rerun, the two-hart
+boot-load bench (`ai_bench_smt2.S`, per-hart queues), the strict OpenSBI boot (`ariane-smt2-ai.dts`).
+
+## Open items (as of 2026-10-01)
+
+- V1 SoC measurement (island-side 512-bit throughput leaf first).
+- V3/V4 cluster dispatch; cross-job B prefetch into the free residency slot.
+- Serialized rerun of the FP-island directed suite and seven-format cold points on the shipped SKU.
+- 512-lane FP island synthesis anchor (queued).
+
+Playbooks: the AI section of `AGENTS-todo.md`, `architecture/ai-matrix/README.md`,
+`ai-tensor/AGENTS.md`, `g6lc_qemu/AGENTS.md`.
