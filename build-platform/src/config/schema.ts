@@ -91,6 +91,29 @@ export interface SocConfig {
   riscvConfigYaml?: string;
   /** Optional hwconfig option string forwarded to cva6.py --hwconfig_opts. */
   hwconfigOpts?: string;
+  /**
+   * AI overlay pins: the `<pkg>_ai` packages + DTS that `ai-overlay pin`
+   * generated from a base package (config_pkg::AiCfgIsland spliced in). `ai-overlay
+   * check` and `bun test` regenerate each entry and fail on drift. Iteration on any
+   * other target uses `verify --ai-overlay` (+define+G6LC_AI_OVERLAY) instead.
+   */
+  aiOverlayPins: AiOverlayPin[];
+  /**
+   * Island geometry literal (g6lc_ai_island_cfg_pkg) passed to SoC builds as
+   * `+define+G6LC_AI_ISLAND_CFG=<literal>`; undefined keeps the testharness's
+   * DRAM-class define chain (AiIslandLatencyDefault by default).
+   */
+  aiIslandCfg?: string;
+}
+
+/** One generated AI package pin (see tooling/aiOverlay.ts). */
+export interface AiOverlayPin {
+  /** Base package name (g6lc64_*). */
+  target: string;
+  /** Integer strip (`AiCfgIslandInt`) instead of the FP island. */
+  int?: boolean;
+  /** Island geometry literal recorded in the DTS node. */
+  islandCfg?: string;
 }
 
 // ---------------------------------------------------------------------------

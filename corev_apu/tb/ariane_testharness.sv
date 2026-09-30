@@ -163,8 +163,13 @@ module ariane_testharness #(
                      dram_ch_r_beats, dram_ch_w_beats;
   // One island cfg for APB *and* the DRAM slave. Channel/class/shift must
   // not drift between gen_ai_island and i_dram_backend.
+  // Island geometry: `+define+G6LC_AI_ISLAND_CFG=<g6lc_ai_island_cfg_pkg literal>`
+  // names it directly (AiIslandV2ColumnArray, AiIslandReview..., a cluster SKU);
+  // otherwise the DRAM-class define chain below keeps its historical selection.
   localparam g6lc_ai_island_cfg_pkg::ai_island_cfg_t AiIslandCfg =
-`ifdef G6LC_AI_DRAM_CHANS_8
+`ifdef G6LC_AI_ISLAND_CFG
+      g6lc_ai_island_cfg_pkg::`G6LC_AI_ISLAND_CFG
+`elsif G6LC_AI_DRAM_CHANS_8
       g6lc_ai_island_cfg_pkg::AiIslandDdr4x8Bringup
 `elsif G6LC_AI_DRAM_CHANS_4
       g6lc_ai_island_cfg_pkg::AiIslandDdr4x4Bringup

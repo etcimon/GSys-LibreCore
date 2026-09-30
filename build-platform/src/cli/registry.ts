@@ -28,6 +28,7 @@ import { verifyCommand } from "./commands/verify.ts";
 import { remoteCommand } from "./commands/remote.ts";
 import { g6qCommand } from "./commands/g6q.ts";
 import { g6bCommand } from "./commands/g6b.ts";
+import { aiOverlayCommand } from "./commands/aiOverlay.ts";
 
 export const COMMANDS: Command[] = [
   statusCommand,
@@ -50,6 +51,7 @@ export const COMMANDS: Command[] = [
   remoteCommand,
   g6qCommand,
   g6bCommand,
+  aiOverlayCommand,
 ];
 
 export function findCommand(name: string): Command | undefined {

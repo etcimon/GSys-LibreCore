@@ -108,7 +108,7 @@ export const verifyCommand: Command = {
   name: "verify",
   summary: "Run the per-change gate: lint, formal, simulation, synthesis.",
   usage:
-    "bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth] [--target <cfg>] [--qualification <profile>] [--ai] [--from-timing DIR] [--use-emit] [--remote] [--allow-skips] [--yes] [--json] [--dry-run]",
+    "bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth] [--target <cfg>] [--qualification <profile>] [--ai] [--ai-overlay [--ai-overlay-int]] [--from-timing DIR] [--use-emit] [--remote] [--allow-skips] [--yes] [--json] [--dry-run]",
   details:
     "Runs the AGENTS.md §0.2 verification gate with the open EDA suite pinned in\n" +
     ".config.ts (verify.suite). Stages:\n" +
@@ -280,6 +280,15 @@ export const verifyCommand: Command = {
 
     const stages = requestedStages(args.flags as Record<string, unknown>, config.verify.stages);
     const targetFlag = typeof args.flags.target === "string" ? args.flags.target : null;
+    // AI overlay (L0 of the "island on any configuration" ladder): lint +
+    // strict-elaborate every selected target with +define+G6LC_AI_OVERLAY
+    // (build_config splices config_pkg::AiCfgIsland and the CVXIF coprocessor
+    // into the package; --ai-overlay-int forces the integer strip). A refusal
+    // must come from a named check_cfg assert, never from a missing module.
+    const overlayDefines: string[] = args.flags["ai-overlay"]
+      ? ["G6LC_AI_OVERLAY", ...(args.flags["ai-overlay-int"] ? ["G6LC_AI_OVERLAY_INT"] : [])]
+      : [];
+    if (overlayDefines.length > 0) logger.info(`AI overlay defines: ${overlayDefines.join(" ")}`);
     const targets = qualification
       ? [...new Set(qualification.map((entry) => entry.target))]
       : targetFlag
@@ -314,8 +323,8 @@ export const verifyCommand: Command = {
           }
         } else {
           for (const target of targets) {
-            outcomes.push(await lintTarget(ctx, paths, target));
-            outcomes.push(await elaborateTarget(ctx, paths, target));
+            outcomes.push(await lintTarget(ctx, paths, target, overlayDefines));
+            outcomes.push(await elaborateTarget(ctx, paths, target, overlayDefines));
           }
         }
       } else if (stage === "synth") {

@@ -1,0 +1,47 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Etienne Cimon
+//
+// Xg6lcai matrix plane, as an include for any board DTS (AI overlay pins): the
+// island operand/completion carve-out and the `g6lc,ai-matrix` UIO node. The
+// geometry properties below are the live g6lc64_ai island; a generated
+// ariane-<pkg>-ai.dts overrides them through the `ai_matrix` label from the
+// g6lc_ai_island_cfg_pkg literal it was pinned with (must track the CAP words).
+// dtc merges nodes by path, so `/` and `soc` here fold into the base DTS.
+
+/ {
+  reserved-memory {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    ranges;
+
+    ai_dma: ai-operands@8f000000 {
+      compatible = "shared-dma-pool";
+      reg = <0x0 0x8f000000 0x0 0x01000000>;
+      no-map;
+    };
+  };
+
+  soc {
+    ai_matrix: ai-matrix@40000000 {
+      compatible = "g6lc,ai-matrix", "generic-uio";
+      reg = <0x0 0x40000000 0x0 0x1000>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <8>;
+      memory-region = <&ai_dma>;
+      g6lc,acc-tile-m = <1024>;
+      g6lc,acc-tile-n = <512>;
+      g6lc,acc-tile-k = <512>;
+      g6lc,macs-per-cycle = <512>;
+      g6lc,queues = <2>;
+      g6lc,queue-depth = <64>;
+      g6lc,noc-width = <64>;
+      g6lc,dram-class = <0>;
+      g6lc,dram-gbps = <16>;
+      g6lc,dram-channels = <1>;
+      g6lc,dram-chan-shift = <6>;
+      g6lc,max-ar-out = <2>;
+      g6lc,clusters = <1>;
+      status = "okay";
+    };
+  };
+};

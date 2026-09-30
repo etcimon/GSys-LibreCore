@@ -256,6 +256,79 @@ package config_pkg;
   };
 
   /// -------------------------------------------------------------------------
+  /// Canonical island planes for ANY core package (AI overlay, 2026-10-01).
+  /// -------------------------------------------------------------------------
+  /// `AiCfgIsland` is the shipped g6lc64_ai plane (g6lc64_ai_config_pkg::ai_cfg)
+  /// stated once here so a package -- or the build-time overlay in
+  /// build_config_pkg -- can adopt it without re-typing it: FP island, INT8 T0
+  /// tile, two T2 rings, two QoS classes. `AiCfgIslandInt` is the same plane with
+  /// the integer strip (IslandFpEn 0) for cores that cannot carry the float plane.
+  /// Sizing fields left at 0 are normalised by build_config (AccBanks follows
+  /// NrHarts). These are the ONLY two values the overlay ever splices in; every
+  /// other AiCfg is a package's own statement.
+  localparam ai_cfg_t AiCfgIsland = '{
+    MatrixEn: 1'b1,
+    AccelEn: 1'b0,
+    TileLdEn: 1'b0,
+    RequantEn: 1'b1,
+    SparseEn: 1'b1,
+    UmodeEn: 1'b1,
+    PolicyCodecEn: 1'b0,
+    PolicyBenefitEn: 1'b0,
+    PolicySubcodeEn: 1'b0,
+    PolicySubcodeCacheEn: 1'b0,
+    VaTurboEn: 1'b0,
+    IslandFpEn: 1'b1,
+    Int4En: 1'b0,
+    Sparse24En: 1'b0,
+    FormatMask: 32'h0000_0001,   // AiFmtMaskInt8: the T0 tile grant
+    TileM: 32'd8,
+    TileN: 32'd8,
+    TileK: 32'd8,
+    TileCount: 32'd8,
+    AccBanks: 32'd0,             // normalised to NrHarts by build_config
+    AccDepth: 32'd4,
+    Queues: 32'd2,
+    QueueDepth: 32'd64,
+    QosClasses: 32'd2
+  };
+
+  localparam ai_cfg_t AiCfgIslandInt = '{
+    MatrixEn: 1'b1,
+    AccelEn: 1'b0,
+    TileLdEn: 1'b0,
+    RequantEn: 1'b1,
+    SparseEn: 1'b1,
+    UmodeEn: 1'b1,
+    PolicyCodecEn: 1'b0,
+    PolicyBenefitEn: 1'b0,
+    PolicySubcodeEn: 1'b0,
+    PolicySubcodeCacheEn: 1'b0,
+    VaTurboEn: 1'b0,
+    IslandFpEn: 1'b0,
+    Int4En: 1'b0,
+    Sparse24En: 1'b0,
+    FormatMask: 32'h0000_0001,
+    TileM: 32'd8,
+    TileN: 32'd8,
+    TileK: 32'd8,
+    TileCount: 32'd8,
+    AccBanks: 32'd0,
+    AccDepth: 32'd4,
+    Queues: 32'd2,
+    QueueDepth: 32'd64,
+    QosClasses: 32'd2
+  };
+
+  /// The plane the overlay gives a core: the FP island when the core can host it
+  /// (check_cfg's IslandFpEn legality today asks for RVF and RVD), otherwise the
+  /// integer strip. `force_int` (the G6LC_AI_OVERLAY_INT define) selects the strip
+  /// regardless. Pure: no side effect, no macro inside a package.
+  function automatic ai_cfg_t ai_cfg_overlay(input bit rvf, input bit rvd, input bit force_int);
+    return (rvf && rvd && !force_int) ? AiCfgIsland : AiCfgIslandInt;
+  endfunction
+
+  /// -------------------------------------------------------------------------
   /// Numeric-format bit positions (`ai_cfg_t.FormatMask`, `aicfg.numfmt`,
   /// descriptor `flags.numfmt`, island `CAP_OFF_DTYPE_MASK`).
   /// -------------------------------------------------------------------------

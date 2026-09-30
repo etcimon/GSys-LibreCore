@@ -591,6 +591,8 @@ export async function lintTarget(
   ctx: PlatformContext,
   paths: EdaPaths,
   target: string,
+  /** Extra Verilog defines (`NAME` or `NAME=VALUE`), e.g. the AI overlay. */
+  extraDefines: string[] = [],
 ): Promise<StageOutcome> {
   const started = performance.now();
   const { verify } = ctx.config;
@@ -615,6 +617,7 @@ export async function lintTarget(
     "--lint-only",
     ...verify.lintArgs,
     ...(araLive ? ["+define+CVA6_ARA_ATTACH"] : []),
+    ...extraDefines.map((d) => (d.startsWith("+define+") ? d : `+define+${d}`)),
     "--top-module",
     top,
     posixPath(join(ctx.repoRoot, verify.waiverFile)),
@@ -631,8 +634,10 @@ export async function lintTarget(
     logger: ctx.logger,
   });
 
+  // An overlay build changes the elaborated design, so the per-target warning
+  // baseline does not apply to it: judge on errors only and report the count.
   const baseline = verify.warningBaseline[target];
-  const limit = baseline ?? (verify.failOnMissingBaseline ? 0 : null);
+  const limit = extraDefines.length > 0 ? null : baseline ?? (verify.failOnMissingBaseline ? 0 : null);
   return summarise("lint", target, result, limit, started);
 }
 
@@ -645,6 +650,8 @@ export async function elaborateTarget(
   ctx: PlatformContext,
   paths: EdaPaths,
   target: string,
+  /** Extra defines (`NAME` or `NAME=VALUE`), passed to slang as -D. */
+  extraDefines: string[] = [],
 ): Promise<StageOutcome> {
   const started = performance.now();
 
@@ -679,6 +686,7 @@ export async function elaborateTarget(
     top,
     "--single-unit",
     "-Wrange-width-oob",
+    ...extraDefines.map((d) => `-D${d.replace(/^\+define\+/, "")}`),
   ];
 
   const result = await run(paths.slang, args, {
