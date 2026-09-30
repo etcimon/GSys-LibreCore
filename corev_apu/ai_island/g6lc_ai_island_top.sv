@@ -26,6 +26,8 @@
 //   CAP_OFF_DRAM_CH_R/W 0x50/0x70  SoC occupancy (8×32), not GEMM PMU
 // Guest-absolute: AI_CAP_BASE=0x4000_0000, AI_DESC_BASE=0x4000_0140.
 
+`include "axi/typedef.svh"
+
 module g6lc_ai_island_top
   import g6lc_ai_island_cfg_pkg::*;
   import g6lc_ai_desc_pkg::*;
@@ -558,72 +560,153 @@ module g6lc_ai_island_top
       assert (island_cfg_out_cols(IslandCfg) >= 1 &&
               IslandCfg.MacsPerCycle == island_cfg_out_cols(IslandCfg) * island_cfg_pe_lanes(IslandCfg))
       else $error("g6lc_ai_island: MacsPerCycle must be OutCols x PeLanes (PeLanes <= AccTileK)");
-      // One engine. N copies elaborate as g6lc_ai_cluster_set.
-      assert (IslandCfg.Clusters == 1 && IslandCfg.ClustersEnabled == 1)
-      else $error("g6lc_ai_island: Clusters>1 belongs on g6lc_ai_cluster_set");
+      // Clusters > 1 elaborates g6lc_ai_cluster_dispatch (N engines, one master);
+      // every cluster present is enabled (a partial enable mask is a policy, not
+      // a datapath, and is not modelled here).
+      assert (IslandCfg.Clusters >= 1 && (IslandCfg.Clusters & (IslandCfg.Clusters - 1)) == 0 &&
+              IslandCfg.ClustersEnabled == IslandCfg.Clusters)
+      else $error("g6lc_ai_island: Clusters must be a power of two with every cluster enabled");
+      assert (IslandCfg.Clusters == 1 || AxiIdWidth > $clog2(IslandCfg.Clusters))
+      else $error("g6lc_ai_island: AxiIdWidth too narrow to prefix %0d clusters", IslandCfg.Clusters);
     end
     // pragma translate_on
+    if (IslandCfg.Clusters == 1) begin : gen_one_engine
     g6lc_ai_gemm_seq #(
-        .AddrWidth (AddrWidth),
-        .DataWidth (AxiDataWidth),
-        .IdWidth   (AxiIdWidth),
-        .MaxDim    (IslandCfg.AccTileM),
-        .MaxM      (IslandCfg.AccTileM),
-        .MaxN      (IslandCfg.AccTileN),
-        .MaxK      (IslandCfg.AccTileK),
-        // K lanes per dot and output columns per cycle from MacsPerCycle vs AccTileK
-        // (island_cfg_pe_lanes / island_cfg_out_cols). Plain arithmetic here, not the package function:
-        // the simulator does not fold a struct-argument function in a parameter port.
-        .PeLanes   ((IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? IslandCfg.MacsPerCycle : IslandCfg.AccTileK),
-        .OutCols   ((IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? 1 : IslandCfg.MacsPerCycle / IslandCfg.AccTileK),
-        .MaxAROut  (IslandCfg.MaxAROut),
-        // VaTurboEn enables reuse. It does not widen PeLanes.
-        .ReuseBEn  (AiCfg.VaTurboEn),
-        .ReuseBSlots(ReuseBSlots),
-        .ReuseAEn  (AiCfg.VaTurboEn),
-        .MaxElementBytes(AiCfg.IslandFpEn ? 4 : 1),
-        .NrChannels(IslandCfg.DramChannels),
-        .ChanShift (IslandCfg.DramChanShift),
-        .axi_req_t (axi_req_t),
-        .axi_resp_t(axi_resp_t)
-    ) i_gemm (
-        .clk_i,
-        .rst_ni,
-        .testmode_i(testmode_i),
-        .start_i  (gemm_start),
-        .m_i      (gemm_m),
-        .n_i      (gemm_n),
-        .k_i      (gemm_k),
-        .lda_i    (gemm_lda),
-        .ldb_i    (gemm_ldb), .ldc_i(16'd0),
-        .numfmt_i (gemm_numfmt),
-        .accumulate_i(AccumulateEn && (gemm_flags[FLAG_ACCMODE_SHIFT +: FLAG_ACCMODE_WIDTH] == 2'd1)),
-        .ar_max_i (gemm_ar_max),
-        .ptr_a_i  (gemm_ptr_a),
-        .ptr_b_i  (gemm_ptr_b),
-        .ptr_c_i  (gemm_ptr_c),
-        .ready_o  (gemm_ready),
-        .done_o   (gemm_done),
-        .err_o    (gemm_err),
-        .pmu_r_beats_o(gemm_pmu_r),
-        .pmu_w_beats_o(gemm_pmu_w),
-        .pmu_cycles_o (gemm_pmu_cy),
-        .pmu_phase_o  (gemm_pmu_phase),
-        .pmu_stall_o  (gemm_pmu_stall),
-        // VaTurboEn=0 folds both requests to 0 and keeps invalidate set,
-        // which is the exact fetch. A set flag is a residency request for
-        // the 512×k operand, not an extra MAC.
-        .reuse_b_i(AiCfg.VaTurboEn && gemm_flags[FLAG_REUSE_B_SHIFT]),
-        .reuse_b_epoch_i(AiCfg.VaTurboEn ? reuse_epoch_q : 32'd0),
-        .reuse_b_invalidate_i(!AiCfg.VaTurboEn),
-        .pmu_reuse_b_hit_o(),
-        .reuse_a_i(AiCfg.VaTurboEn && gemm_flags[FLAG_REUSE_A_SHIFT]),
-        .reuse_a_epoch_i(AiCfg.VaTurboEn ? reuse_epoch_q : 32'd0),
-        .reuse_a_invalidate_i(!AiCfg.VaTurboEn),
-        .pmu_reuse_a_hit_o(),
-        .axi_req_o  (gemm_axi_req),
-        .axi_resp_i (dma_resp_int)
-    );
+          .AddrWidth (AddrWidth),
+          .DataWidth (AxiDataWidth),
+          .IdWidth   (AxiIdWidth),
+          .MaxDim    (IslandCfg.AccTileM),
+          .MaxM      (IslandCfg.AccTileM),
+          .MaxN      (IslandCfg.AccTileN),
+          .MaxK      (IslandCfg.AccTileK),
+          // K lanes per dot and output columns per cycle from MacsPerCycle vs AccTileK
+          // (island_cfg_pe_lanes / island_cfg_out_cols). Plain arithmetic here, not the package function:
+          // the simulator does not fold a struct-argument function in a parameter port.
+          .PeLanes   ((IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? IslandCfg.MacsPerCycle : IslandCfg.AccTileK),
+          .OutCols   ((IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? 1 : IslandCfg.MacsPerCycle / IslandCfg.AccTileK),
+          .MaxAROut  (IslandCfg.MaxAROut),
+          // VaTurboEn enables reuse. It does not widen PeLanes.
+          .ReuseBEn  (AiCfg.VaTurboEn),
+          .ReuseBSlots(ReuseBSlots),
+          .ReuseAEn  (AiCfg.VaTurboEn),
+          .MaxElementBytes(AiCfg.IslandFpEn ? 4 : 1),
+          .NrChannels(IslandCfg.DramChannels),
+          .ChanShift (IslandCfg.DramChanShift),
+          .axi_req_t (axi_req_t),
+          .axi_resp_t(axi_resp_t)
+      ) i_gemm (
+          .clk_i,
+          .rst_ni,
+          .testmode_i(testmode_i),
+          .start_i  (gemm_start),
+          .m_i      (gemm_m),
+          .n_i      (gemm_n),
+          .k_i      (gemm_k),
+          .lda_i    (gemm_lda),
+          .ldb_i    (gemm_ldb), .ldc_i(16'd0),
+          .numfmt_i (gemm_numfmt),
+          .accumulate_i(AccumulateEn && (gemm_flags[FLAG_ACCMODE_SHIFT +: FLAG_ACCMODE_WIDTH] == 2'd1)),
+          .ar_max_i (gemm_ar_max),
+          .ptr_a_i  (gemm_ptr_a),
+          .ptr_b_i  (gemm_ptr_b),
+          .ptr_c_i  (gemm_ptr_c),
+          .ready_o  (gemm_ready),
+          .done_o   (gemm_done),
+          .err_o    (gemm_err),
+          .pmu_r_beats_o(gemm_pmu_r),
+          .pmu_w_beats_o(gemm_pmu_w),
+          .pmu_cycles_o (gemm_pmu_cy),
+          .pmu_phase_o  (gemm_pmu_phase),
+          .pmu_stall_o  (gemm_pmu_stall),
+          // VaTurboEn=0 folds both requests to 0 and keeps invalidate set,
+          // which is the exact fetch. A set flag is a residency request for
+          // the 512×k operand, not an extra MAC.
+          .reuse_b_i(AiCfg.VaTurboEn && gemm_flags[FLAG_REUSE_B_SHIFT]),
+          .reuse_b_epoch_i(AiCfg.VaTurboEn ? reuse_epoch_q : 32'd0),
+          .reuse_b_invalidate_i(!AiCfg.VaTurboEn),
+          .pmu_reuse_b_hit_o(),
+          .reuse_a_i(AiCfg.VaTurboEn && gemm_flags[FLAG_REUSE_A_SHIFT]),
+          .reuse_a_epoch_i(AiCfg.VaTurboEn ? reuse_epoch_q : 32'd0),
+          .reuse_a_invalidate_i(!AiCfg.VaTurboEn),
+          .pmu_reuse_a_hit_o(),
+          .axi_req_o  (gemm_axi_req),
+          .axi_resp_i (dma_resp_int)
+      );
+  end else begin : gen_clusters
+      // Engine-side AXI types: the dispatch's axi_mux prefixes clog2(Clusters) ID
+      // bits, so each engine runs on AxiIdWidth - clog2(Clusters).
+      localparam int unsigned EngIdW = AxiIdWidth - $clog2(IslandCfg.Clusters);
+      typedef logic [AddrWidth-1:0]      eng_addr_t;
+      typedef logic [EngIdW-1:0]         eng_id_t;
+      typedef logic [AxiDataWidth-1:0]   eng_data_t;
+      typedef logic [AxiDataWidth/8-1:0] eng_strb_t;
+      typedef logic [0:0]                eng_user_t;
+      `AXI_TYPEDEF_ALL(eng, eng_addr_t, eng_id_t, eng_data_t, eng_strb_t, eng_user_t)
+      g6lc_ai_cluster_dispatch #(
+          .AddrWidth (AddrWidth),
+          .DataWidth (AxiDataWidth),
+          .IdWidth   (AxiIdWidth),
+          .Clusters  (IslandCfg.Clusters),
+          .MaxDim    (IslandCfg.AccTileM),
+          .MaxM      (IslandCfg.AccTileM),
+          .MaxN      (IslandCfg.AccTileN),
+          .MaxK      (IslandCfg.AccTileK),
+          // K lanes per dot and output columns per cycle from MacsPerCycle vs AccTileK
+          // (island_cfg_pe_lanes / island_cfg_out_cols). Plain arithmetic here, not the package function:
+          // the simulator does not fold a struct-argument function in a parameter port.
+          .PeLanes   ((IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? IslandCfg.MacsPerCycle : IslandCfg.AccTileK),
+          .OutCols   ((IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? 1 : IslandCfg.MacsPerCycle / IslandCfg.AccTileK),
+          .MaxAROut  (IslandCfg.MaxAROut),
+          // VaTurboEn enables reuse. It does not widen PeLanes.
+          .ReuseBEn  (AiCfg.VaTurboEn),
+          .ReuseBSlots(ReuseBSlots),
+          .ReuseAEn  (AiCfg.VaTurboEn),
+          .MaxElementBytes(AiCfg.IslandFpEn ? 4 : 1),
+          .NrChannels(IslandCfg.DramChannels),
+          .ChanShift (IslandCfg.DramChanShift),
+          .axi_req_t (axi_req_t),
+          .axi_resp_t(axi_resp_t),
+          .eng_req_t (eng_req_t),
+          .eng_resp_t(eng_resp_t)
+        ) i_gemm (
+          .clk_i,
+          .rst_ni,
+          .testmode_i(testmode_i),
+          .start_i  (gemm_start),
+          .m_i      (gemm_m),
+          .n_i      (gemm_n),
+          .k_i      (gemm_k),
+          .lda_i    (gemm_lda),
+          .ldb_i    (gemm_ldb),
+          .numfmt_i (gemm_numfmt),
+          .accumulate_i(AccumulateEn && (gemm_flags[FLAG_ACCMODE_SHIFT +: FLAG_ACCMODE_WIDTH] == 2'd1)),
+          .ar_max_i (gemm_ar_max),
+          .ptr_a_i  (gemm_ptr_a),
+          .ptr_b_i  (gemm_ptr_b),
+          .ptr_c_i  (gemm_ptr_c),
+          .ready_o  (gemm_ready),
+          .done_o   (gemm_done),
+          .err_o    (gemm_err),
+          .pmu_r_beats_o(gemm_pmu_r),
+          .pmu_w_beats_o(gemm_pmu_w),
+          .pmu_cycles_o (gemm_pmu_cy),
+          .pmu_phase_o  (gemm_pmu_phase),
+          .pmu_stall_o  (gemm_pmu_stall),
+          // VaTurboEn=0 folds both requests to 0 and keeps invalidate set,
+          // which is the exact fetch. A set flag is a residency request for
+          // the 512×k operand, not an extra MAC.
+          .reuse_b_i(AiCfg.VaTurboEn && gemm_flags[FLAG_REUSE_B_SHIFT]),
+          .reuse_b_epoch_i(AiCfg.VaTurboEn ? reuse_epoch_q : 32'd0),
+          .reuse_b_invalidate_i(!AiCfg.VaTurboEn),
+          .pmu_reuse_b_hit_o(),
+          .reuse_a_i(AiCfg.VaTurboEn && gemm_flags[FLAG_REUSE_A_SHIFT]),
+          .reuse_a_epoch_i(AiCfg.VaTurboEn ? reuse_epoch_q : 32'd0),
+          .reuse_a_invalidate_i(!AiCfg.VaTurboEn),
+          .pmu_reuse_a_hit_o(),
+          .axi_req_o  (gemm_axi_req),
+          .axi_resp_i (dma_resp_int)
+      );
+  end
 
     // Priority: completion store > GEMM > desc fetch. When all idle, drive a
     // clean zero req (no b_ready) so the DMA master cannot siphon B beats from

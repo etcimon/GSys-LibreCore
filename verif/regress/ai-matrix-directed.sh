@@ -75,6 +75,8 @@ need=(
   verif/tb/ai_island/run-dram-join-wide.sh
   verif/tb/ai_island/tb_g6lc_ai_cluster_dispatch.sv
   verif/tb/ai_island/run-cluster-dispatch.sh
+  verif/tb/ai_island/lint_g6lc_ai_island_clusters.sv
+  verif/tb/ai_island/run-island-clusters-lint.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_class2.sv
   verif/tb/ai_island/run-dram-class2.sh
   verif/tb/ai_island/tb_g6lc_ai_gemm_wide.sv
@@ -403,6 +405,12 @@ if command -v verilator >/dev/null 2>&1; then
     ok "tb_g6lc_ai_cluster_dispatch (V3/V4 N-split dispatch, golden = single engine)"
   else
     bad "tb_g6lc_ai_cluster_dispatch"
+  fi
+  # The island top elaborates Clusters = 1 / 2 / 4 (dispatch inside the island).
+  if bash verif/tb/ai_island/run-island-clusters-lint.sh; then
+    ok "g6lc_ai_island_top Clusters 1/2/4 elaborate (reduced geometry)"
+  else
+    bad "run-island-clusters-lint"
   fi
   if bash verif/tb/ai_island/run-dram-class2.sh; then
     ok "tb_g6lc_ai_dram_class2 (LPDDR5 refuses elaboration)"
