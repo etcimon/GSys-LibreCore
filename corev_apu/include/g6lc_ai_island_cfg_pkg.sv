@@ -728,6 +728,11 @@ package g6lc_ai_island_cfg_pkg;
   // so a 256 x 1024 INT8 weight panel is one job and one resident key.
   localparam logic [15:0] CAP_OFF_BANK_A_BYTES = 16'h0098;
   localparam logic [15:0] CAP_OFF_BANK_B_BYTES = 16'h009C;
+  // Output coherence contract (0xA0): bit 0 = every completed island write is
+  // invalidated through the L1/L2/L3 hierarchy before the job's completion is
+  // published (AiCfg.DmaInvalEn, g6lc_ai_inval_queue -> CMO engine writer port);
+  // 0 = the host must cbo.inval the output range (non-coherent DMA model).
+  localparam logic [15:0] CAP_OFF_COH = 16'h00A0;
   localparam logic [15:0] REG_OFF_CMD_MODE = 16'h0f20;
   localparam logic [15:0] REG_OFF_CMD_PTR_LO = 16'h0f24;
   localparam logic [15:0] REG_OFF_CMD_PTR_HI = 16'h0f28;

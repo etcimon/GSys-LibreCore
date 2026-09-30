@@ -77,6 +77,10 @@ need=(
   verif/tb/ai_island/run-cluster-dispatch.sh
   verif/tb/ai_island/lint_g6lc_ai_island_clusters.sv
   verif/tb/ai_island/run-island-clusters-lint.sh
+  verif/tb/ai_island/tb_g6lc_ai_inval_queue.sv
+  verif/tb/ai_island/run-inval-queue.sh
+  verif/tb/ai_island/tb_g6lc_ai_enq_arb.sv
+  verif/tb/ai_island/run-enq-arb.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_class2.sv
   verif/tb/ai_island/run-dram-class2.sh
   verif/tb/ai_island/tb_g6lc_ai_gemm_wide.sv
@@ -411,6 +415,21 @@ if command -v verilator >/dev/null 2>&1; then
     ok "g6lc_ai_island_top Clusters 1/2/4 elaborate (reduced geometry)"
   else
     bad "run-island-clusters-lint"
+  fi
+  # DMA-write invalidation queue (AiCfg.DmaInvalEn): inval only after B, per-line
+  # coalescing, no drop under hold, idle = everything landed + invalidated;
+  # oracle negative and the inval-at-AW mutation must both fail.
+  if bash verif/tb/ai_island/run-inval-queue.sh; then
+    ok "tb_g6lc_ai_inval_queue (+ oracle negative, inval-at-AW mutation)"
+  else
+    bad "run-inval-queue"
+  fi
+  # Multi-core ai.enq sideband arbiter: one grant per cycle, every kick accepted
+  # once with its own fields, round-robin fairness (fixed-priority mutation fails).
+  if bash verif/tb/ai_island/run-enq-arb.sh; then
+    ok "tb_g6lc_ai_enq_arb (+ oracle negative, fixed-priority mutation)"
+  else
+    bad "run-enq-arb"
   fi
   if bash verif/tb/ai_island/run-dram-class2.sh; then
     ok "tb_g6lc_ai_dram_class2 (LPDDR5 refuses elaboration)"

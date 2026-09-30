@@ -19,7 +19,7 @@ SOURCES = (
     "g6lc_ai_addr_check.sv", "g6lc_ai_cap_window.sv", "g6lc_ai_desc_engine.sv",
     "g6lc_ai_cpl_fifo.sv", "g6lc_ai_policy_codec.sv", "g6lc_ai_policy_subcode.sv",
     "g6lc_ai_policy_steer.sv", "spill_register_flushable.sv", "spill_register.sv",
-    "g6lc_ai_axi_cut.sv", "g6lc_ai_island_top.sv", "sim_main.cpp",
+    "g6lc_ai_axi_cut.sv", "g6lc_ai_inval_queue.sv", "g6lc_ai_island_top.sv", "sim_main.cpp",
 )
 HEADER_SHA = "dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166"
 
@@ -139,6 +139,7 @@ module g6lc_ai_dma_review (
       .sb_enq_ready_o(sb_ready), .sb_enq_valid_i(sb_valid), .sb_qid_i(sb_qid), .sb_ticket_i(sb_ticket), .sb_desc_ptr_i(sb_ptr),
       .sb_last_ticket_o(sb_last_ticket), .sb_last_status_o(sb_last_status), .sb_has_completion_o(sb_done),
       .axi_dma_req_o(dma_req), .axi_dma_resp_i(dma_resp), .dram_init_done_i(dram_init_done),
+      .dma_inval_valid_o(), .dma_inval_addr_o(), .dma_inval_ready_i(1'b0), .dma_inval_done_i(1'b0),
       .ch_r_beats_i('0), .ch_w_beats_i('0)
   );
 endmodule
@@ -541,7 +542,7 @@ def main():
     if fifo or cmd_fifo:
         marker = ("PASS CMD_FIFO depth=" if cmd_fifo else "PASS CPL_FIFO depth=") + str(depth)
     if enq:
-        marker = "PASS ENQ_READY results=18 held=12"
+        marker = "PASS ENQ_READY results=21 held=12"
     cases = []
     for case in ["", *arguments]:
         suffix = "-" + case if case else ""

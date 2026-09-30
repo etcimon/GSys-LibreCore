@@ -240,6 +240,9 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         corev_apu/ai_island/g6lc_ai_cpl_fifo.sv                                       \
         corev_apu/ai_island/g6lc_ai_cmd_fifo.sv                                       \
         corev_apu/ai_island/g6lc_ai_axi_cut.sv                                        \
+        corev_apu/ai_island/g6lc_ai_inval_queue.sv                                    \
+        corev_apu/ai_island/g6lc_ai_enq_arb.sv                                       \
+        corev_apu/ai_island/g6lc_ai_cluster_dispatch.sv                               \
         corev_apu/ai_island/g6lc_ai_island_top.sv                                    \
         corev_apu/ai_island/g6lc_ai_island_apb.sv                                    \
         vendor/pulp-platform/axi/src/axi_dw_converter.sv                             \

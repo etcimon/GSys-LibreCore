@@ -50,6 +50,7 @@ module g6lc_ai_coprocessor
     // Sideband kick to island (ai.enq)
     output logic            sb_enq_valid_o,
     input  logic            sb_enq_ready_i,
+    input  logic [31:0]     sb_enq_ticket_i,
     output logic [7:0]      sb_qid_o,
     output logic [31:0]     sb_ticket_o,
     output logic [XLEN-1:0] sb_desc_ptr_o,
@@ -183,6 +184,7 @@ module g6lc_ai_coprocessor
       .isl_last_status_i   (isl_last_status_i),
       .isl_attached_i      (isl_attached_i),
       .sb_enq_ready_i      (sb_enq_ready_i),
+      .sb_enq_ticket_i     (sb_enq_ticket_i),
       .testmode_i    (testmode_i),
       .setcfg_we_o   (ai_setcfg_we_o),
       .setcfg_wdata_o(ai_setcfg_wdata_o),

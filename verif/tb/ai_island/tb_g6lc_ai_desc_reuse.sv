@@ -215,7 +215,7 @@ module tb_g6lc_ai_desc_reuse;
       .paddr_i(paddr), .pwdata_i(pwdata),
       .prdata_o(prdata), .pready_o(pready), .pslverr_o(pslverr), .irq_o(irq),
       .sb_enq_valid_i(1'b0), .sb_enq_ready_o(), .sb_qid_i('0), .sb_ticket_i('0), .sb_desc_ptr_i('0),
-      .sb_last_ticket_o(), .sb_last_status_o(), .sb_has_completion_o(), .sb_retired_valid_o(), .sb_retired_ticket_o(),
+      .sb_last_ticket_o(), .sb_last_status_o(), .sb_has_completion_o(), .sb_retired_valid_o(), .sb_retired_ticket_o(), .dma_inval_valid_o(), .dma_inval_addr_o(), .dma_inval_ready_i(1'b0), .dma_inval_done_i(1'b0),
       .axi_dma_req_o(dma_req), .axi_dma_resp_i(dma_rsp_g),
       .dram_init_done_i(1'b1),
       .ch_r_beats_i('0), .ch_w_beats_i('0)

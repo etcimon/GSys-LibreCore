@@ -194,11 +194,6 @@ module tb_g6lc_ai_dram_bw;
     t1 = cycles;
 
     if (beats != TOTAL) begin
-      $display("stall r0v=%0d r0bi=%0d r0inf=%0d r1v=%0d r1bi=%0d r1inf=%0d mc=%0d dc=%0d ev=%0d el=%0d nwb=%0d nrv=%0d nrr=%0d ncv=%0d ncr=%0d qn=%0d/%0d",
-               i_dut.r0v, i_dut.r0bi, i_dut.r0inf, i_dut.r1v, i_dut.r1bi, i_dut.r1inf,
-               i_dut.mc, i_dut.dc, i_dut.ev, i_dut.el, i_dut.nwb,
-               i_dut.n_r_valid, i_dut.n_r_ready, i_dut.n_cmd_valid, i_dut.n_cmd_ready,
-               i_dut.w0qn, i_dut.w1qn);
       $error("beat count exp=%0d got=%0d inflight=%0d burst_done=%0d",
              TOTAL, beats, inflight, burst_done);
       errors++;

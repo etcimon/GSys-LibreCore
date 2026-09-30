@@ -28,6 +28,10 @@
 
 module g6lc_cmo_engine #(
     parameter int unsigned NR_CORES = 1,
+    // Request ports: the NR_CORES core sidebands plus optional non-core writers
+    // (the AI island's DMA-write invalidation queue, AiCfg.DmaInvalEn). Writer
+    // ports index from NR_CORES upward and are inval-only by contract.
+    parameter int unsigned NR_WRITERS = NR_CORES,
     // Tie off levels that do not exist: the corresponding inval step is
     // skipped and the write-idle input is ignored (tie it high).
     parameter bit          L2_EN  = 1'b1,
@@ -38,11 +42,11 @@ module g6lc_cmo_engine #(
     input  logic rst_ni,
     // Per-core request sideband (core's cmo_* outputs). ready = accept into
     // the engine; done = the whole hierarchy completed the op.
-    input  logic [NR_CORES-1:0]       cmo_valid_i,
-    input  logic [1:0]                cmo_op_i   [NR_CORES],
-    input  logic [AXI_ADDR_WIDTH-1:0] cmo_addr_i [NR_CORES],
-    output logic [NR_CORES-1:0]       cmo_ready_o,
-    output logic [NR_CORES-1:0]       cmo_done_o,
+    input  logic [NR_WRITERS-1:0]     cmo_valid_i,
+    input  logic [1:0]                cmo_op_i   [NR_WRITERS],
+    input  logic [AXI_ADDR_WIDTH-1:0] cmo_addr_i [NR_WRITERS],
+    output logic [NR_WRITERS-1:0]     cmo_ready_o,
+    output logic [NR_WRITERS-1:0]     cmo_done_o,
     // L1 broadcast (into the cluster's broadcaster instance): valid is held
     // until l1_bcast_ready_i captures the line; l1_bcast_done_i pulses when
     // every core's invalidation was accepted.
@@ -75,8 +79,8 @@ module g6lc_cmo_engine #(
   } state_e;
 
   state_e                       state_q, state_d;
-  logic [$clog2(NR_CORES > 1 ? NR_CORES : 2)-1:0] sel_q, sel_d;
-  logic [$clog2(NR_CORES > 1 ? NR_CORES : 2)-1:0] rr_ptr_q, rr_ptr_d;
+  logic [$clog2(NR_WRITERS > 1 ? NR_WRITERS : 2)-1:0] sel_q, sel_d;
+  logic [$clog2(NR_WRITERS > 1 ? NR_WRITERS : 2)-1:0] rr_ptr_q, rr_ptr_d;
   logic [1:0]                   op_q, op_d;
   logic [AXI_ADDR_WIDTH-1:0]    addr_q, addr_d;
   logic                         l1_sent_q, l1_sent_d;
@@ -91,17 +95,17 @@ module g6lc_cmo_engine #(
   logic                         l3_done_q, l3_done_d;
 
   // Round-robin request pick: first valid at or after rr_ptr_q, wrapping.
-  logic [NR_CORES-1:0] req_v;
+  logic [NR_WRITERS-1:0] req_v;
   assign req_v = cmo_valid_i;
   function automatic logic [$bits(sel_q)-1:0] rr_pick(
-      input logic [NR_CORES-1:0] v,
+      input logic [NR_WRITERS-1:0] v,
       input int unsigned ptr
   );
-    for (int unsigned i = 0; i < NR_CORES; i++) begin
-      automatic int unsigned c = (ptr + i) % NR_CORES;
+    for (int unsigned i = 0; i < NR_WRITERS; i++) begin
+      automatic int unsigned c = (ptr + i) % NR_WRITERS;
       if (v[c]) return $bits(sel_q)'(c);
     end
-    return $bits(sel_q)'(ptr % NR_CORES);
+    return $bits(sel_q)'(ptr % NR_WRITERS);
   endfunction
 
   wire logic [$bits(sel_q)-1:0] sel_c = rr_pick(req_v, int'(rr_ptr_q));
@@ -139,7 +143,7 @@ module g6lc_cmo_engine #(
           l2_done_d = !L2_EN;
           l3_done_d = !L3_EN;
           // rotate past the granted core for next time
-          rr_ptr_d = (int'(sel_c) == NR_CORES-1) ? '0
+          rr_ptr_d = (int'(sel_c) == NR_WRITERS-1) ? '0
                      : $bits(rr_ptr_q)'(int'(sel_c) + 1);
           state_d = S_ISSUE;
         end

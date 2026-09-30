@@ -116,6 +116,7 @@ module ariane import ariane_pkg::*; #(
   // Xg6lcai island sideband: ai.enq kick + ai.poll completion (tie 0 / open if no island)
   output logic                         ai_sb_enq_valid_o,
   input  logic                         ai_sb_enq_ready_i,
+  input  logic [31:0]                  ai_sb_enq_ticket_i,
   output logic [7:0]                   ai_sb_qid_o,
   output logic [31:0]                  ai_sb_ticket_o,
   output logic [CVA6Cfg.XLEN-1:0]      ai_sb_desc_ptr_o,
@@ -294,6 +295,7 @@ module ariane import ariane_pkg::*; #(
           .ai_setcfg_wdata_o    ( ai_setcfg_wdata                ),
           .sb_enq_valid_o       ( ai_sb_enq                      ),
           .sb_enq_ready_i       ( ai_sb_enq_ready_i              ),
+          .sb_enq_ticket_i      ( ai_sb_enq_ticket_i             ),
           .sb_qid_o             ( ai_sb_qid                      ),
           .sb_ticket_o          ( ai_sb_ticket                   ),
           .sb_desc_ptr_o        ( ai_sb_desc_ptr                 ),

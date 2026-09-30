@@ -471,6 +471,32 @@ the top silent model-accuracy bug).
   requirements**, not tuning (`isa-encoding.md` §7.1).
 - Island telemetry belongs in the MMIO capability/counter window, not `core/perf_counters.sv` — the
   core PMU cannot observe an uncore device.
+- **Island outputs are not coherent by position.** The island joins the fabric *below* the cluster
+  (xbar `slave[2]` / the DRAM join), so its writes — C tiles, completion words, descriptor status —
+  reach DRAM without passing the coherence hub, the L2/L3 or any WT L1. A line a core already
+  holds is stale after the island wrote it. Two contracts exist, published at `CAP_OFF_COH` (0xA0)
+  bit 0:
+  - `AiCfg.DmaInvalEn = 1` (the canonical `AiCfgIsland` plane, `g6lc64_ai`): every completed
+    island write is turned into an `inval` on the eWT CMO engine's writer port
+    (`g6lc_ai_inval_queue` → `g6lc_cmo_engine` `NR_WRITERS`), i.e. the same L1-broadcast + L2/L3
+    tag-clear path `cbo.inval` takes. The invalidation is issued only after the write's B (the
+    data is in DRAM — an inval before landing would let a core re-fetch and re-cache the old
+    line), one per touched 64 B line with same-line coalescing, and a job's `gemm_done` /
+    `wr_done` are held until every line it wrote has been invalidated everywhere. So: **completion
+    visible ⇒ no stale copy of that job's outputs anywhere in the hierarchy**, with no software
+    maintenance. `ai_coh_stale` is the directed proof (read the line, run the job, re-read).
+  - `AiCfg.DmaInvalEn = 0`: the Linux non-coherent-DMA model — software `cbo.inval`s the output
+    range after completion (`ai_coh_stale_sw` is that arm; the ai-tensor UIO path must do it when
+    the CAP bit is clear).
+  Inputs are the other direction and already ordered: core writes are write-through at every
+  level and `fence` waits for their B, which the L2 returns only from memory, so a descriptor or
+  operand written before the doorbell is in DRAM when the island fetches it.
+- **One ticket stream per island.** `ai.enq` tickets are allocated by the island
+  (`SbTicketAlloc`, returned on `sb_enq_ticket_o` in the acceptance cycle) and every core's kick
+  reaches it through the cluster's round-robin sideband arbiter (`g6lc_ai_enq_arb`). A per-core
+  counter would make `ai.poll`'s retired watermark meaningless with two producers; a lone core
+  counting its own accepted kicks proposes exactly the value the island allocates, which is why
+  the single-core evidence is unchanged.
 
 ## 10. Frozen workload-policy codec compartment
 

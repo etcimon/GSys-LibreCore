@@ -150,6 +150,7 @@ package cva6_config_pkg;
       //    This is the plane split of scaling-100tops.md s3: the core-attached T0 tile
       //    below stays INT8 (FormatMask), the island formats are the island's grant.
       IslandFpEn: bit'(1),
+      DmaInvalEn: bit'(1),
       Int4En: bit'(0),
       Sparse24En: bit'(0),
       //  - FormatMask: dense INT8 only for the CORE-ATTACHED tile plane (ai.setcfg

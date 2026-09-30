@@ -16,6 +16,8 @@ ${CVA6_REPO_DIR}/corev_apu/ai_island/include/g6lc_ai_policy_pkg.sv
 
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_addr_check.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_axi_cut.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_inval_queue.sv
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_enq_arb.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_cap_window.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_cmd_fifo.sv
 ${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_cpl_fifo.sv

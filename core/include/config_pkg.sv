@@ -159,6 +159,14 @@ package config_pkg;
     // reached by enabling steering alone. See architecture/ai-matrix/va-turbo.md.
     bit          VaTurboEn;
     bit          IslandFpEn;
+    // Coherence of island DMA writes (2026-10-01): the island joins the fabric
+    // below the cluster, so its writes (C tiles, completion words) bypass L1/L2/L3.
+    // 1 = every completed island write is invalidated through the eWT CMO engine's
+    // writer port (g6lc_ai_inval_queue -> g6lc_cmo_engine NR_WRITERS) before the
+    // job's completion is published; 0 = software must `cbo.inval` the output
+    // range (the Linux non-coherent DMA model). Consumed by g6lc_cluster and the
+    // island top, published at CAP_OFF_COH bit 0.
+    bit          DmaInvalEn;
     // Datatype options. These are GRANT gates, not encodings: aicfg carries the
     // request, and ai.setcfg downgrades to the nearest supported value rather
     // than trapping (isa-encoding.md s3.1), so software is portable across
@@ -210,6 +218,7 @@ package config_pkg;
     PolicySubcodeCacheEn: 1'b0,
     VaTurboEn: 1'b1,
     IslandFpEn: 1'b1,
+    DmaInvalEn: 1'b0,
     Int4En: 1'b0,
     Sparse24En: 1'b0,
     FormatMask: 32'h0000_0001,
@@ -241,6 +250,7 @@ package config_pkg;
     PolicySubcodeCacheEn: 1'b0,
     VaTurboEn: 1'b0,
     IslandFpEn: 1'b1,
+    DmaInvalEn: 1'b0,
     Int4En: 1'b0,
     Sparse24En: 1'b0,
     FormatMask: 32'h0000_0001,
@@ -279,6 +289,7 @@ package config_pkg;
     PolicySubcodeCacheEn: 1'b0,
     VaTurboEn: 1'b0,
     IslandFpEn: 1'b1,
+    DmaInvalEn: 1'b1,
     Int4En: 1'b0,
     Sparse24En: 1'b0,
     FormatMask: 32'h0000_0001,   // AiFmtMaskInt8: the T0 tile grant
@@ -306,6 +317,7 @@ package config_pkg;
     PolicySubcodeCacheEn: 1'b0,
     VaTurboEn: 1'b0,
     IslandFpEn: 1'b0,
+    DmaInvalEn: 1'b1,
     Int4En: 1'b0,
     Sparse24En: 1'b0,
     FormatMask: 32'h0000_0001,
@@ -1329,6 +1341,10 @@ package config_pkg;
               !Cfg.RVF || !Cfg.RVD)))
       else $error("AiCfg.IslandFpEn requires the matrix plane, a T2 queue, RVF and RVD");
     assert (!((Cfg.AiCfg.Int4En || Cfg.AiCfg.Sparse24En) && !Cfg.AiCfg.MatrixEn));
+    // DMA-write invalidation needs the island (queues) and the cluster's CMO
+    // engine, which g6lc_cluster generates under L2CmoEn OR this bit.
+    assert (!(Cfg.AiCfg.DmaInvalEn && (!Cfg.AiCfg.MatrixEn || Cfg.AiCfg.Queues == 0)))
+      else $error("AiCfg.DmaInvalEn requires the matrix plane with a T2 queue");
     // Numeric formats. The mask and the two legacy grant bits describe the same
     // thing, so they must not disagree: software may read either, and a part
     // that answered "INT4" through one and "no INT4" through the other would be

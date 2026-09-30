@@ -20,7 +20,10 @@ module g6lc_ai_cap_window
     parameter bit             AccumulateEn = AiIslandAccmodeGrant[0],
     // Operand bank bytes (CAP_OFF_BANK_{A,B}_BYTES); 0 = legacy k <= AccTileK box.
     parameter logic [31:0]    BankABytes = 32'd0,
-    parameter logic [31:0]    BankBBytes = 32'd0
+    parameter logic [31:0]    BankBBytes = 32'd0,
+    // CAP_OFF_COH bit 0: island DMA writes are invalidated through the cache
+    // hierarchy before completion (AiCfg.DmaInvalEn); 0 = software cbo.inval.
+    parameter bit             DmaInvalEn = 1'b0
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
@@ -88,6 +91,7 @@ module g6lc_ai_cap_window
         CAP_OFF_ACCMODE[15:2]: rdata_n = {31'h0, AccumulateEn};
         CAP_OFF_BANK_A_BYTES[15:2]: rdata_n = BankABytes;
         CAP_OFF_BANK_B_BYTES[15:2]: rdata_n = BankBBytes;
+        CAP_OFF_COH[15:2]:          rdata_n = {31'h0, DmaInvalEn};
         CAP_OFF_VERSION[15:2]:
           rdata_n = {16'h0, AiIslandCapVersion};
         CAP_OFF_CLUSTERS[15:2]:

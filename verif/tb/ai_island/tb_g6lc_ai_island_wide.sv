@@ -113,7 +113,7 @@ module tb_g6lc_ai_island_wide;
       .sb_last_status_o(),
       .sb_has_completion_o(),
       .sb_retired_valid_o(),
-      .sb_retired_ticket_o(),
+      .sb_retired_ticket_o(), .dma_inval_valid_o(), .dma_inval_addr_o(), .dma_inval_ready_i(1'b0), .dma_inval_done_i(1'b0),
       .axi_dma_req_o(dma_req),
       .axi_dma_resp_i(dma_rsp_g),
       .dram_init_done_i(init_done),

@@ -545,12 +545,15 @@ module ariane_testharness #(
   // idle when MatrixEn=0).
   logic        ai_sb_enq, ai_sb_enq_ready, ai_isl_attached;
   logic [7:0]  ai_sb_qid;
-  logic [31:0] ai_sb_ticket;
+  logic [31:0] ai_sb_ticket, ai_sb_enq_ticket;
   logic [CVA6Cfg.XLEN-1:0] ai_sb_desc_ptr;
   logic [31:0] ai_isl_last_ticket;
   logic [15:0] ai_isl_last_status;
   logic        ai_isl_has_completion;
   logic        ai_isl_retired_valid;
+  // island DMA-write invalidations -> cluster CMO engine writer port
+  logic        ai_dma_inval_valid, ai_dma_inval_ready, ai_dma_inval_done;
+  logic [63:0] ai_dma_inval_addr;
   logic [31:0] ai_isl_retired_ticket;
   logic        ai_irq;
   logic        apu_irq;
@@ -647,6 +650,9 @@ module ariane_testharness #(
     g6lc_ai_island_apb #(
         .IslandCfg      ( AiIslandCfg ),
         .EnableDmaFetch ( 1'b1 ),
+        // The cluster arbitrates every core's ai.enq onto this one sideband, so
+        // the island owns the ticket stream (a lone core proposes the same values).
+        .SbTicketAlloc  ( 1'b1 ),
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
         .AxiDataWidth   ( AI_ISLAND_DATA_W ),
         .axi_req_t      ( aiw_req_t ),
@@ -706,6 +712,11 @@ module ariane_testharness #(
         .sb_has_completion_o ( ai_isl_has_completion  ),
         .sb_retired_valid_o  ( ai_isl_retired_valid   ),
         .sb_retired_ticket_o ( ai_isl_retired_ticket  ),
+        .sb_enq_ticket_o     ( ai_sb_enq_ticket       ),
+        .dma_inval_valid_o   ( ai_dma_inval_valid     ),
+        .dma_inval_addr_o    ( ai_dma_inval_addr      ),
+        .dma_inval_ready_i   ( ai_dma_inval_ready     ),
+        .dma_inval_done_i    ( ai_dma_inval_done      ),
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
         .axi_dma_req_o       ( ai_dma_wide_req        ),
         .axi_dma_resp_i      ( ai_dma_wide_resp       ),
@@ -732,6 +743,9 @@ module ariane_testharness #(
     assign ai_isl_has_completion = 1'b0;
     assign ai_isl_retired_valid  = 1'b0;
     assign ai_isl_retired_ticket = '0;
+    assign ai_dma_inval_valid    = 1'b0;
+    assign ai_dma_inval_addr     = '0;
+    assign ai_sb_enq_ticket      = '0;
     ariane_axi_soc::req_slv_t  gpio_req;
     ariane_axi_soc::resp_slv_t gpio_resp;
     `AXI_ASSIGN_TO_REQ(gpio_req, master[ariane_soc::GPIO])
@@ -1377,6 +1391,7 @@ module ariane_testharness #(
     .pf_issue_o     (                     ),
     .pf_train_o     (                     ),
     .ai_sb_enq_valid_o( ai_sb_enq         ),
+    .ai_sb_enq_ticket_i( ai_sb_enq_ticket ),
     .ai_sb_enq_ready_i( ai_sb_enq_ready   ),
     .ai_sb_qid_o      ( ai_sb_qid         ),
     .ai_sb_ticket_o   ( ai_sb_ticket      ),
@@ -1384,6 +1399,10 @@ module ariane_testharness #(
     .ai_isl_attached_i( ai_isl_attached   ),
     .ai_isl_has_completion_i( ai_isl_has_completion ),
     .ai_isl_retired_valid_i ( ai_isl_retired_valid  ),
+    .ai_dma_inval_valid_i   ( ai_dma_inval_valid    ),
+    .ai_dma_inval_addr_i    ( ai_dma_inval_addr     ),
+    .ai_dma_inval_ready_o   ( ai_dma_inval_ready    ),
+    .ai_dma_inval_done_o    ( ai_dma_inval_done     ),
     .ai_isl_retired_ticket_i( ai_isl_retired_ticket ),
     .ai_isl_last_ticket_i   ( ai_isl_last_ticket    ),
     .ai_isl_last_status_i   ( ai_isl_last_status    )

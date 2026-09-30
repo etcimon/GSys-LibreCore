@@ -63,6 +63,7 @@ module g6lc_cluster
     // Xg6lcai island sideband from core 0 (tie open/0 when no island)
     output logic        ai_sb_enq_valid_o,
     input  logic        ai_sb_enq_ready_i,
+    input  logic [31:0] ai_sb_enq_ticket_i,
     output logic [7:0]  ai_sb_qid_o,
     output logic [31:0] ai_sb_ticket_o,
     output logic [CVA6Cfg.XLEN-1:0] ai_sb_desc_ptr_o,
@@ -71,7 +72,14 @@ module g6lc_cluster
     input  logic        ai_isl_retired_valid_i,
     input  logic [31:0] ai_isl_retired_ticket_i,
     input  logic [31:0] ai_isl_last_ticket_i,
-    input  logic [15:0] ai_isl_last_status_i
+    input  logic [15:0] ai_isl_last_status_i,
+    // AI island DMA-write invalidation (AiCfg.DmaInvalEn): the island's
+    // g6lc_ai_inval_queue asks for one line inval per completed write; it goes
+    // through the CMO engine's writer port (L1 broadcast + L2/L3 tag inval).
+    input  logic                      ai_dma_inval_valid_i,
+    input  logic [AXI_ADDR_WIDTH-1:0] ai_dma_inval_addr_i,
+    output logic                      ai_dma_inval_ready_o,
+    output logic                      ai_dma_inval_done_o
 );
 
   localparam int unsigned NC = (NR_CORES < 1) ? 1 : NR_CORES;
@@ -269,13 +277,15 @@ module g6lc_cluster
         .l2_pf_issue_i    (l2_pf_iss_w),
         .l2_pf_useful_i   (l2_pf_use_w),
         .ai_sb_enq_valid_o(core_sb_enq[c]),
-        // Only core 0 reaches the island; other cores keep the local stub so an
-        // unrouted kick cannot hang them. Multi-core island arbitration is open.
-        .ai_sb_enq_ready_i((c == 0) ? ai_sb_enq_ready_i : 1'b1),
+        // Every core reaches the island through the round-robin sideband
+        // arbiter below (one kick accepted per cycle; a core holds its kick
+        // until granted). The island allocates the ticket and broadcasts it.
+        .ai_sb_enq_ready_i(core_sb_gnt[c] && ai_sb_enq_ready_i),
+        .ai_sb_enq_ticket_i(ai_sb_enq_ticket_i),
         .ai_sb_qid_o      (core_sb_qid[c]),
         .ai_sb_ticket_o   (core_sb_ticket[c]),
         .ai_sb_desc_ptr_o (core_sb_desc_ptr[c]),
-        .ai_isl_attached_i((c == 0) && ai_isl_attached_i),
+        .ai_isl_attached_i(ai_isl_attached_i),
         // Broadcast island completion to every core for ai.poll
         .ai_isl_has_completion_i(ai_isl_has_completion_i),
         .ai_isl_retired_valid_i(ai_isl_retired_valid_i),
@@ -302,11 +312,25 @@ module g6lc_cluster
 
   assign rvfi_probes_o = core_rvfi[0];
 
-  // Single island: accept enq from core 0 (first hart wins multi-core for now)
-  assign ai_sb_enq_valid_o = core_sb_enq[0];
-  assign ai_sb_qid_o       = core_sb_qid[0];
-  assign ai_sb_ticket_o    = core_sb_ticket[0];
-  assign ai_sb_desc_ptr_o  = core_sb_desc_ptr[0];
+  // Sideband enqueue arbiter (g6lc_ai_enq_arb): round-robin over the cores'
+  // held kicks, one kick offered per cycle, ready back to the winner only.
+  logic [NC-1:0] core_sb_gnt;
+  g6lc_ai_enq_arb #(
+      .NC(NC), .QidW(8), .AddrW(CVA6Cfg.XLEN)
+  ) i_ai_enq_arb (
+      .clk_i,
+      .rst_ni,
+      .valid_i  (core_sb_enq),
+      .qid_i    (core_sb_qid),
+      .ticket_i (core_sb_ticket),
+      .ptr_i    (core_sb_desc_ptr),
+      .gnt_o    (core_sb_gnt),
+      .valid_o  (ai_sb_enq_valid_o),
+      .qid_o    (ai_sb_qid_o),
+      .ticket_o (ai_sb_ticket_o),
+      .ptr_o    (ai_sb_desc_ptr_o),
+      .ready_i  (ai_sb_enq_ready_i)
+  );
 
   // Per-core guard in front of the hub. SrcGuard=0 is a wire.
   localparam int unsigned HART_STRIDE =
@@ -605,7 +629,30 @@ module g6lc_cluster
   // broadcaster is a second inclusive-inv instance so the CMO broadcast
   // inherits the same all-cores-ack drain contract; it merges into
   // inv_to_core at lowest priority (hub > inclusive victim > cmo).
-  if (CVA6Cfg.L2CmoEn) begin : gen_cmo
+  // The engine exists for the cores' CBOs (L2CmoEn) or for the island's DMA
+  // invalidations (AiCfg.DmaInvalEn); both share it.
+  localparam bit CMO_EN = CVA6Cfg.L2CmoEn || CVA6Cfg.AiCfg.DmaInvalEn;
+  localparam int unsigned CMO_NW = NC + (CVA6Cfg.AiCfg.DmaInvalEn ? 1 : 0);
+  logic [CMO_NW-1:0]         cmo_w_v, cmo_w_rdy, cmo_w_done;
+  logic [1:0]                cmo_w_op   [CMO_NW];
+  logic [AXI_ADDR_WIDTH-1:0] cmo_w_addr [CMO_NW];
+  always_comb begin
+    for (int unsigned c = 0; c < NC; c++) begin
+      cmo_w_v[c]    = cmo_req_v[c];
+      cmo_w_op[c]   = cmo_req_op[c];
+      cmo_w_addr[c] = cmo_req_addr[c];
+      cmo_req_rdy[c] = cmo_w_rdy[c];
+      cmo_done[c]    = cmo_w_done[c];
+    end
+    if (CVA6Cfg.AiCfg.DmaInvalEn) begin
+      cmo_w_v[CMO_NW-1]    = ai_dma_inval_valid_i;
+      cmo_w_op[CMO_NW-1]   = 2'd0;                 // inval only
+      cmo_w_addr[CMO_NW-1] = ai_dma_inval_addr_i;
+    end
+  end
+  assign ai_dma_inval_ready_o = CVA6Cfg.AiCfg.DmaInvalEn ? cmo_w_rdy[CMO_NW-1]  : 1'b0;
+  assign ai_dma_inval_done_o  = CVA6Cfg.AiCfg.DmaInvalEn ? cmo_w_done[CMO_NW-1] : 1'b0;
+  if (CMO_EN) begin : gen_cmo
     g6lc_l3_inclusive_inv #(
         .InclusiveEn   (1'b1),
         .NR_CORES      (NC),
@@ -625,17 +672,18 @@ module g6lc_cluster
 
     g6lc_cmo_engine #(
         .NR_CORES       (NC),
+        .NR_WRITERS     (CMO_NW),
         .L2_EN          (CVA6Cfg.L2En),
         .L3_EN          (CVA6Cfg.L3En),
         .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH)
     ) i_cmo_engine (
         .clk_i,
         .rst_ni,
-        .cmo_valid_i      (cmo_req_v),
-        .cmo_op_i         (cmo_req_op),
-        .cmo_addr_i       (cmo_req_addr),
-        .cmo_ready_o      (cmo_req_rdy),
-        .cmo_done_o       (cmo_done),
+        .cmo_valid_i      (cmo_w_v),
+        .cmo_op_i         (cmo_w_op),
+        .cmo_addr_i       (cmo_w_addr),
+        .cmo_ready_o      (cmo_w_rdy),
+        .cmo_done_o       (cmo_w_done),
         .l1_bcast_valid_o (cmo_bcast_v),
         .l1_bcast_addr_o  (cmo_bcast_a),
         .l1_bcast_ready_i (cmo_bcast_rdy),
@@ -653,9 +701,9 @@ module g6lc_cluster
     // The cores complete CBOs locally (L2CmoEn=0) — sideband stays idle.
     for (genvar c = 0; c < NC; c++) begin : gen_cmo_idle
       assign inv_cmo[c]    = '0;
-      assign cmo_req_rdy[c] = 1'b0;
-      assign cmo_done[c]    = 1'b0;
     end
+    assign cmo_w_rdy  = '0;
+    assign cmo_w_done = '0;
     assign cmo_l2_v        = 1'b0;
     assign cmo_l2_a        = '0;
     assign cmo_l3_v        = 1'b0;

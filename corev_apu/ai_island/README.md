@@ -97,6 +97,21 @@ SoC: MMIO doorbell + AI-3; sideband enq/poll; **PLIC-8 IRQ**; **DMA desc fetch +
 Sideband protocol: after any desc/region MMIO write, load a **different** island
 reg before `ai.enq` (same-addr load-back can STLF; kick is a core wire).
 
+## Coherence and multi-core producers (2026-10-01)
+
+- `g6lc_ai_inval_queue` (`AiCfg.DmaInvalEn`, `CAP_OFF_COH` bit 0): every completed island write
+  becomes an `inval` on the cluster CMO engine's writer port, issued after the write's B, one per
+  64 B line touched, coalesced per line; the island holds `gemm_done`/`wr_done` until the job's
+  invalidations returned (`idle`). Leaf `run-inval-queue.sh` (order oracle, inval-at-AW mutation);
+  SoC `ai_coh_stale` / `ai_coh_stale_sw`. Without the bit the host must `cbo.inval` its outputs.
+- `g6lc_ai_enq_arb`: the cluster arbitrates every core's `ai.enq` sideband onto the island
+  (round-robin, one kick per cycle); the island allocates the ticket (`SbTicketAlloc`) and returns
+  it on `sb_enq_ticket_o`, so one monotonic stream serves every producer. Leaf `run-enq-arb.sh`
+  (fixed-priority mutation); SoC `ai_mc_enq` (core 1 gets ticket 0, core 0 then gets ticket 1).
+- Any package: `+define+G6LC_AI_OVERLAY` (build_config splices `config_pkg::AiCfgIsland`), or a
+  generated pin `<pkg>_ai` (`bun run build-platform/src/cli/index.ts ai-overlay pin --target`).
+  Island geometry: `+define+G6LC_AI_ISLAND_CFG=<g6lc_ai_island_cfg_pkg literal>`.
+
 ## Ordering
 
 1. **P3 spine** — descriptor engine + per-queue address check (**done**).

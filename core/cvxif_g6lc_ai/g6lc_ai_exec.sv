@@ -48,6 +48,8 @@ module g6lc_ai_exec
     input  logic                  isl_attached_i,
     // Held-valid acceptance from the island; tie 1 for the legacy pulse contract.
     input  logic                  sb_enq_ready_i,
+    // Ticket the island allocated for the accepted kick (valid with ready).
+    input  logic [31:0]           sb_enq_ticket_i,
     input  logic                  testmode_i,  // DFT
     output logic                  setcfg_we_o,
     output logic       [XLEN-1:0] setcfg_wdata_o,
@@ -693,8 +695,10 @@ module g6lc_ai_exec
           hartid_n = mma_hart_q;
           id_n     = mma_id_q;
           rd_n     = mma_rd_q;
-          result_n = XLEN'(sb_ticket_q);
-          ticket_d = sb_ticket_q + 32'd1;
+          // Attached island: its stream is the ticket; the local counter follows
+          // it so a later detach/poll_local keeps counting from the same point.
+          result_n = XLEN'(isl_attached_i ? sb_enq_ticket_i : sb_ticket_q);
+          ticket_d = (isl_attached_i ? sb_enq_ticket_i : sb_ticket_q) + 32'd1;
           we_n     = 1'b1;
           valid_n  = 1'b1;
           pmu_t0_n = 1'b1;

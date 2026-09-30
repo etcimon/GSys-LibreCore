@@ -40,6 +40,8 @@ module g6lc_ai_island_top
     parameter ai_island_cfg_t IslandCfg = AiIslandLatencyDefault,
     parameter int unsigned    AddrWidth = 64,
     // When 1: instantiate AXI desc-fetch (SoC). Standalone spine keeps 0.
+    // Island allocates the sideband ticket (multi-producer SoC); 0 = proposed ticket.
+    parameter bit             SbTicketAlloc = 1'b0,
     parameter bit             EnableDmaFetch = 1'b0,
     parameter int unsigned    AxiDataWidth = 64,
     parameter int unsigned    AxiIdWidth   = 4,
@@ -82,7 +84,13 @@ module g6lc_ai_island_top
     input  logic        sb_enq_valid_i,
     output logic        sb_enq_ready_o,
     input  logic [7:0]  sb_qid_i,
+    // Producer's proposed ticket (legacy, single producer). The island allocates
+    // the ticket it will actually use from one monotonic stream and returns it on
+    // sb_enq_ticket_o in the acceptance cycle; with one producer counting its own
+    // accepted kicks the two agree, with several cores behind the cluster's
+    // arbiter only the island's stream keeps ai.poll's watermark meaningful.
     input  logic [31:0] sb_ticket_i,
+    output logic [31:0] sb_enq_ticket_o,
     input  logic [63:0] sb_desc_ptr_i,
     // Completion feedback for ai.poll (in-order tickets)
     output logic [31:0] sb_last_ticket_o,
@@ -97,6 +105,13 @@ module g6lc_ai_island_top
     // AXI master for desc fetch (tie req idle / resp ready when EnableDmaFetch=0)
     output axi_req_t    axi_dma_req_o,
     input  axi_resp_t   axi_dma_resp_i,
+    // DMA-write invalidation (AiCfg.DmaInvalEn): one line inval per completed
+    // island write toward the cluster's CMO engine writer port; job completion
+    // is published only after every inval of the job returned (idle).
+    output logic                 dma_inval_valid_o,
+    output logic [AddrWidth-1:0] dma_inval_addr_o,
+    input  logic                 dma_inval_ready_i,
+    input  logic                 dma_inval_done_i,
     // I3: DRAM backend init/calib. Tie 1 when the TB has no DRAM slave.
     // No port defaults: Verilator 5.008 (remote testharness) rejects them.
     input  logic        dram_init_done_i,
@@ -209,7 +224,8 @@ module g6lc_ai_island_top
                                         AiCfg.IslandFpEn ? 4 : 1)),
       .BankBBytes(ai_operand_bank_bytes(IslandCfg.AccTileN, IslandCfg.AccTileK,
                                         (IslandCfg.MacsPerCycle <= IslandCfg.AccTileK) ? IslandCfg.MacsPerCycle : IslandCfg.AccTileK,
-                                        AiCfg.IslandFpEn ? 4 : 1))
+                                        AiCfg.IslandFpEn ? 4 : 1)),
+      .DmaInvalEn(AiCfg.DmaInvalEn)
   ) i_cap (
       .clk_i, .rst_ni,
       .req_i   (cap_sel),
@@ -365,6 +381,31 @@ module g6lc_ai_island_top
   assign probe_len  = AddrWidth'(g6lc_ai_desc_pkg::DescBytes);
   assign desc_fetch_ok = probe_ok && (probe_addr[2:0] == 3'b0);
 
+  // Island-allocated sideband ticket: one stream for every producer.
+  logic [31:0] sb_ticket_alloc_q;
+  // SbTicketAlloc=0 keeps the producer's proposed ticket (single-producer
+  // leaves and the legacy contract); the SoC cluster sets 1 so every core's
+  // kicks draw from this one stream.
+  wire  [31:0] sb_ticket_eff = SbTicketAlloc ? sb_ticket_alloc_q : sb_ticket_i;
+  assign sb_enq_ticket_o = sb_ticket_eff;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) sb_ticket_alloc_q <= '0;
+    else if (sb_enq_valid_i && sb_enq_ready_o) sb_ticket_alloc_q <= sb_ticket_alloc_q + 32'd1;
+  end
+  // pragma translate_off
+  // A lone producer counting its own accepted kicks proposes exactly the ticket
+  // the island allocates; a mismatch means a second producer (or a reset skew)
+  // and is reported once so the legacy assumption is visible, never silent.
+  logic sb_ticket_mismatch_seen_q;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) sb_ticket_mismatch_seen_q <= 1'b0;
+    else if (sb_enq_valid_i && sb_enq_ready_o && (sb_ticket_i != sb_ticket_eff) && !sb_ticket_mismatch_seen_q) begin
+      sb_ticket_mismatch_seen_q <= 1'b1;
+      $display("[g6lc_ai_island] sideband ticket proposed %0d, allocated %0d (multi-producer stream)", sb_ticket_i, sb_ticket_eff);
+    end
+  end
+  // pragma translate_on
+
   // Sideband same-cycle submit only when not DMA-fetching a ptr
   logic sb_imm_submit;
   assign sb_imm_submit = legacy_sb_valid &&
@@ -396,7 +437,7 @@ module g6lc_ai_island_top
       submit_valid_mux  = 1'b1;
       submit_src_sb_mux = 1'b1;
       submit_qid_mux    = QidWidth'(sb_imm_submit ? sb_qid_i : sb_qid_hold_q);
-      submit_ticket_mux = sb_imm_submit ? sb_ticket_i : sb_ticket_hold_q;
+      submit_ticket_mux = sb_imm_submit ? sb_ticket_eff : sb_ticket_hold_q;
       submit_desc_mux = sb_imm_submit ? desc_bits : sb_desc_hold_q;
     end else if ((submit_pulse_q || db_pending_q) && db_let_through) begin
       submit_valid_mux  = 1'b1;
@@ -425,18 +466,18 @@ module g6lc_ai_island_top
       end else if (sb_imm_submit && !sb_let_through) begin
         sb_enq_sticky_q  <= 1'b1;
         sb_qid_hold_q    <= sb_qid_i;
-        sb_ticket_hold_q <= sb_ticket_i;
+        sb_ticket_hold_q <= sb_ticket_eff;
         sb_desc_hold_q   <= desc_bits;
       end else if (EnableDmaFetch && legacy_sb_valid && (sb_desc_ptr_i != '0)
                    && desc_fetch_ok) begin
         // Hold identity for post-fetch submit
         sb_qid_hold_q      <= sb_qid_i;
-        sb_ticket_hold_q   <= sb_ticket_i;
+        sb_ticket_hold_q   <= sb_ticket_eff;
         sb_ptr_hold_q      <= sb_desc_ptr_i;
         sb_fetch_pending_q <= 1'b1;
       end else if (EnableDmaFetch && legacy_sb_valid && (sb_desc_ptr_i != '0)) begin
         sb_qid_hold_q      <= sb_qid_i;
-        sb_ticket_hold_q   <= sb_ticket_i;
+        sb_ticket_hold_q   <= sb_ticket_eff;
         sb_fetch_pending_q <= 1'b0;
       end
       // Once sideband DMA owns the identity, release its pending fetch slot.
@@ -476,6 +517,24 @@ module g6lc_ai_island_top
   logic [3:0]  gemm_ar_max;
 
   logic        wr_start, wr_ready, wr_done, wr_err;
+  // DMA-write invalidation barrier (see gen_dma_inval): the engine sees a job's
+  // gemm_done / wr_done only once every line the job wrote is invalid everywhere.
+  logic        dma_inval_idle;
+  logic [31:0] pmu_dma_invals, pmu_dma_hold;
+  logic        gemm_done_pend_q, wr_done_pend_q;
+  logic        gemm_done_eng, wr_done_eng;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      gemm_done_pend_q <= 1'b0;
+      wr_done_pend_q   <= 1'b0;
+    end else begin
+      gemm_done_pend_q <= (gemm_done_pend_q || gemm_done) && !gemm_done_eng;
+      wr_done_pend_q   <= (wr_done_pend_q || wr_done) && !wr_done_eng;
+    end
+  end
+  // Pass-through when nothing is owed (the AiCfg.DmaInvalEn=0 build is exact).
+  assign gemm_done_eng = (gemm_done || gemm_done_pend_q) && dma_inval_idle;
+  assign wr_done_eng   = (wr_done   || wr_done_pend_q)   && dma_inval_idle;
   logic [AddrWidth-1:0] wr_addr;
   logic [63:0] wr_data;
   // Split so the request mux is checked bit-by-bit rather than as one aggregate
@@ -734,10 +793,55 @@ module g6lc_ai_island_top
         .slv_req_i(cut_req), .slv_resp_o(cut_resp),
         .mst_req_o(axi_dma_req_o), .mst_resp_i(axi_dma_resp_i)
     );
+    // DMA-write invalidation queue (AiCfg.DmaInvalEn). Sits on the muxed master
+    // in front of the cut/timing stage: it sees every AW/B of the island's single
+    // write stream, holds AW (valid and ready both masked) while it is full, and
+    // reports idle when every write landed and was invalidated. The engine's
+    // gemm_done / wr_done are held behind that idle so a completion (DONE sticky,
+    // IRQ, ptr_done word) is never visible before the job's lines are invalid
+    // in every L1/L2/L3.
+    axi_req_t  held_req  /*verilator split_var*/;
+    axi_resp_t held_resp /*verilator split_var*/;
+    logic      dma_aw_hold;
+    if (AiCfg.DmaInvalEn) begin : gen_dma_inval
+      g6lc_ai_inval_queue #(
+          .AddrWidth(AddrWidth), .LineBytes(64), .Depth(8)
+      ) i_inval_queue (
+          .clk_i, .rst_ni,
+          .aw_fire_i    (held_req.aw_valid && held_resp.aw_ready),
+          .aw_addr_i    (held_req.aw.addr),
+          .aw_len_i     (held_req.aw.len),
+          .aw_size_i    (held_req.aw.size),
+          .b_fire_i     (held_resp.b_valid && held_req.b_ready),
+          .aw_hold_o    (dma_aw_hold),
+          .inval_valid_o(dma_inval_valid_o),
+          .inval_addr_o (dma_inval_addr_o),
+          .inval_ready_i(dma_inval_ready_i),
+          .inval_done_i (dma_inval_done_i),
+          .idle_o       (dma_inval_idle),
+          .pmu_invals_o (pmu_dma_invals),
+          .pmu_hold_o   (pmu_dma_hold)
+      );
+    end else begin : gen_no_dma_inval
+      assign dma_aw_hold       = 1'b0;
+      assign dma_inval_idle    = 1'b1;
+      assign dma_inval_valid_o = 1'b0;
+      assign dma_inval_addr_o  = '0;
+      assign pmu_dma_invals    = '0;
+      assign pmu_dma_hold      = '0;
+      logic _unused_inval;
+      assign _unused_inval = dma_inval_ready_i | dma_inval_done_i;
+    end
+    always_comb begin
+      held_req          = dma_mux_req;
+      held_req.aw_valid = dma_mux_req.aw_valid && !dma_aw_hold;
+      dma_resp_int          = held_resp;
+      dma_resp_int.aw_ready = held_resp.aw_ready && !dma_aw_hold;
+    end
     // I3: DDR4 page-command delay on island DMA only (Cas==0 = live bypass).
     if (IslandCfg.DramCas == 0) begin : gen_dram_t_bypass
-      assign cut_req      = dma_mux_req;
-      assign dma_resp_int = cut_resp;
+      assign cut_req   = held_req;
+      assign held_resp = cut_resp;
     end else begin : gen_dram_t_page
       g6lc_ai_dram_timing #(
           .CasCycles  (IslandCfg.DramCas),
@@ -749,8 +853,8 @@ module g6lc_ai_island_top
       ) i_dram_timing (
           .clk_i,
           .rst_ni,
-          .slv_req_i  (dma_mux_req),
-          .slv_resp_o (dma_resp_int),
+          .slv_req_i  (held_req),
+          .slv_resp_o (held_resp),
           .mst_req_o  (cut_req),
           .mst_resp_i (cut_resp)
       );
@@ -770,6 +874,11 @@ module g6lc_ai_island_top
     assign store_axi_req = '0;
     assign gemm_axi_req  = '0;
     assign axi_dma_req_o = '0;
+    assign dma_inval_valid_o = 1'b0;
+    assign dma_inval_addr_o  = '0;
+    assign dma_inval_idle    = 1'b1;
+    assign pmu_dma_invals    = '0;
+    assign pmu_dma_hold      = '0;
     assign wr_ready = 1'b1;
     // One-cycle delayed ack so engine sees wr_issued_q && wr_done_i
     // (same-cycle wr_done=wr_start leaves ST_WR_DONE wedged).
@@ -981,7 +1090,7 @@ module g6lc_ai_island_top
       .wr_addr_o       (wr_addr),
       .wr_data_o       (wr_data),
       .wr_ready_i      (wr_ready),
-      .wr_done_i       (wr_done),
+      .wr_done_i       (wr_done_eng),
       .wr_err_i        (wr_err),
       .gemm_start_o    (gemm_start),
       .gemm_m_o        (gemm_m),
@@ -995,7 +1104,7 @@ module g6lc_ai_island_top
       .gemm_ptr_c_o    (gemm_ptr_c),
       .gemm_flags_o    (gemm_flags),
       .gemm_ready_i    (gemm_ready),
-      .gemm_done_i     (gemm_done),
+      .gemm_done_i     (gemm_done_eng),
       .gemm_err_i      (gemm_err)
   );
 
@@ -1057,7 +1166,7 @@ module g6lc_ai_island_top
   assign cmd_push_valid = cmd_mode_q && enable_q && (cmd_choose_sb || cmd_mmio_attempt);
   // Bit 104 tags the origin (1 = core sideband) so its completion can move the
   // sideband retired watermark.
-  assign cmd_push_data = cmd_choose_sb ? {23'd0, 1'b1, sb_qid_i, sb_ticket_i, sb_desc_ptr_i} :
+  assign cmd_push_data = cmd_choose_sb ? {23'd0, 1'b1, sb_qid_i, sb_ticket_eff, sb_desc_ptr_i} :
                                           {23'd0, 1'b0, cmd_qid_q, cmd_ticket_q, cmd_ptr_q};
   assign cmd_mmio_accept = cmd_mmio_attempt && cmd_push_valid && !cmd_choose_sb && cmd_push_ready;
   assign sb_enq_ready_o = !cmd_mode_q ||
@@ -1217,14 +1326,14 @@ module g6lc_ai_island_top
                                                                     : sb_ptr_hold_q;
         fetch_src_sb_q <= 1'b1;
         fetch_start_q  <= 1'b1;
-        fetch_ticket_q <= (legacy_sb_valid && sb_desc_ptr_i != '0) ? sb_ticket_i : sb_ticket_hold_q;
+        fetch_ticket_q <= (legacy_sb_valid && sb_desc_ptr_i != '0) ? sb_ticket_eff : sb_ticket_hold_q;
         fetch_qid_q <= QidWidth'((legacy_sb_valid && sb_desc_ptr_i != '0) ? sb_qid_i : sb_qid_hold_q);
       end else if (EnableDmaFetch && legacy_sb_valid && (sb_desc_ptr_i != '0)
                    && fetch_ready && !desc_fetch_ok) begin
         fetch_refuse_q    <= 1'b1;
         fetch_refuse_sb_q <= 1'b1;
         fetch_refuse_status_q <= (32'(sb_qid_i) >= NumQueues) ? ST_BAD_QID : ST_BAD_PTR;
-        fetch_refuse_ticket_q <= sb_ticket_i;
+        fetch_refuse_ticket_q <= sb_ticket_eff;
       end
 
       // DMA fetch completion: load latch + submit, or bus-error complete
