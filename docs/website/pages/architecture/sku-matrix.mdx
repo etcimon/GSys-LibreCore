@@ -34,6 +34,9 @@ aid**, not a formal datasheet.
 | `g6lc64_server_math_l3` | **2** | Off | 1 | **2** | **L2 + non-inclusive 1 MiB L3** | **On** | Off | Same + L3 (M6) |
 | `g6lc64_ai` | 1 | Off | 1 | **2** | **L2** | **On** | Off | AI island (`Xg6lcai`) profile — **FP island** since 2026-09-30 (`IslandFpEn=1`, seven formats, 512 MAC/cycle, flat-panel banks); see [AI Island](../corev-apu/ai-island) |
 | `g6lc64_smt2_ai` | **2** | Off | **2** | 1 | L2 | Off | Off | SMT2 + AI island: two software harts driving the island on per-hart queues; SoC builds, oracle controls behave, `ai_dot4`/`mma`/queue/MMIO smokes pass (2026-10-01); DTS `ariane-smt2-ai.dts` ready, strict boot admitted but not run |
+| `g6lc64_ooo_int2_l3_ai` | **2** | **On** | **2** | **2** | **L2 + L3** | **On** | Off | **Generated pin** (`ai-overlay pin`): the all-on target with the FP island; SoC-top lint clean; AI subset not yet run |
+| `g6lc64_stream8_l3_ai` | 1 | Off | 1 | **2** | **L2 + L3** | **On** | Off | Generated pin: in-order two-core + L3 with the FP island; SoC-top lint clean |
+| `g6lc64_smt2_ooo_int_ai` | 1 | **On** | **2** | 1 | L2 | Off | Off | Generated pin: mixed residency, integer core, FP island (`IslandFpEn` no longer needs RVF/RVD); elaborates |
 | `cv64a6_imafdcv_sv39` | 1–2 | Off | 1 | 1 | Off | Off | **On** | Legacy vector-oriented |
 
 \*Deep-spec package details: open the package; not every deep-spec knob implies OoO.

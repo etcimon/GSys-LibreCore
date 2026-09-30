@@ -124,7 +124,8 @@ boot-load bench (`ai_bench_smt2.S`, per-hart queues), the strict OpenSBI boot (`
 - Full-geometry synthesis of a cluster SKU and its SoC gate; derived-table refresh.
 - Cross-job B prefetch (WP5): designed — needs a second B-load context to overlap the next job's panel load with the current MAC.
 - Strict OpenSBI boot on `g6lc64_smt2_ai` (admitted in the runner; ~24 h at the FP-island model's speed).
-- Serialized rerun of the FP-island directed suite and seven-format cold points (queued); 512-lane FP synthesis anchor (queued).
+- Serialized rerun of the FP-island directed suite and seven-format cold points (the 2026-10-01 run is void: pre-fix tree snapshot); 512-lane FP synthesis anchor (runner error, rerun owed).
+- SoC runs of `ai_coh_stale` / `ai_coh_stale_sw`, `ai_mc_enq` and the AI subset on `g6lc64_ooo_int2_l3_ai`; DMA-invalidation cost (budget < 2 % cold, < 5 % resident); two-hart bench `HARTS=2` rerun; the sideband `ai.enq` hang seen once on `g6lc64_smt2_ai`.
 
 Playbooks: the AI section of `AGENTS-todo.md`, `architecture/ai-matrix/README.md`,
 `ai-tensor/AGENTS.md`, `g6lc_qemu/AGENTS.md`.
