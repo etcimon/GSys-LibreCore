@@ -428,22 +428,31 @@ prerequisite for this work under the existing dual license. No licensing policy 
   is free. The +0.33 % attaches only to live offers/issues (~64 fills
   + arbitration), a policy/arb problem, not an idle cost. No RTL
   change; `L2PrefetchEn`/`L3PrefetchEn` stay 0. Details: plan T10e.
-- [~] **Bounded drained handoff (T10f, N1c): the drain pending ~6 M
-  cycles in T10d's ring-32 boot is now bounded by construction** —
-  new cfg `SmtDrainForceCycles` (256, 0 = never, pow2 checked);
-  `g6lc_thread_select` counts `drain_pending && !drain_ready` without
-  a resident commit and, only when the commit head is safely
-  cancellable (`no_st_pending_commit`, no AMO/CSR writeback in
-  flight), forces a hart-scoped mispredict flush + PC-bank restore to
-  the oldest uncommitted PC (WFI head forces immediately and
-  re-executes its own WFI). Pulses `smt_drain_force` /
-  `smt_drain_force_wfi` in `[smt-drain]` + PMU group 3. Formal:
-  bounded-switch + no-force-while-ready proven, noforce mutation
-  times out; leaf scenario green. Gates all pass (int2l3 29w/43w,
-  smt2int 29w/2w, smt2 10w/31w, defaults 9+55w/5+32w, 0 errors);
-  FO4 `sparse_smt_mixed_commit` r32 = 31.0 (≤32) and
-  `g6lc_thread_select` alone = 23.0. Boot/kernel/decision evidence in
-  flight — see plan T10f.
+- [~] **Bounded drained handoff (T10f, N1c): force machinery landed
+  but the ring-32 boot showed it never arms — the bound is conditional,
+  not yet construction-grade** — `SmtDrainForceCycles` (256, 0 = never,
+  pow2 checked), the no-commit counter + WFI-immediate force, the
+  hart-scoped flush + PC-bank restore, `[smt-drain]` `force`/`force_wfi`
+  + PMU group-3 events, the formal bounded-switch property + noforce
+  mutation, and the never-commits leaf are all green; gates all pass
+  (int2l3 29w/43w, smt2int 29w/2w, smt2 10w/31w, defaults 9+55w/5+32w,
+  0 errors); FO4 `sparse_smt_mixed_commit` r32 = 31.0 (≤32) and
+  `g6lc_thread_select` alone = 23.0. All inert paths byte-identical
+  (int2_l3 r16 18,297,381 / smt2_ooo_int mixed r16 10,459,588 / smt2
+  12,406,259, force=0 everywhere). **But** the r32 int2_l3 24M boot
+  timed out with a drain pending 6,068,793 cycles (~100 % `wait_sb`)
+  and `force=0`: the fire gate needs `head_wfi_i || head_plain_i`,
+  which requires `commit_instr_i[0].valid` — a commit head
+  masked-invalid under COH_OOO (`phys_pending`, `phys_mod` LOAD,
+  `cancelled`) or orphaned non-active-hart entries blocking
+  `sb_head_valid[active]` in `smt_drain_safe` hold the force off
+  forever, and `commit_i` resetting the counter lets a polling
+  resident starve it. The formal proof only covers its caller-side
+  envelope (commit_i=0 / killable=1 / head_plain=1). **Ring 32 not
+  adopted** (boot timed out; branchy 3,603,094 met the bound exactly
+  but cannot rescue it; mixed r32 boot not run). Ring 16 stays.
+  Next: fire on `cnt==MAX && killable` without head class, absolute
+  counter, `[smt-drain]` gate-field diagnostics — plan T10f.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.

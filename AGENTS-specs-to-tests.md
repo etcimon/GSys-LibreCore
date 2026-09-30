@@ -1028,7 +1028,13 @@ mutation `g6lc_thread_select_mut_noforce` (force path removed) times the bounded
 property out as designed. `tb_g6lc_rtl_review.sv` leaf scenario: a resident hart that
 never commits is force-drained and the peer switch completes. Boot-level identity:
 `+smt_stats` reports `smt_drain_force`/`smt_drain_force_wfi` per core and expects zero
-on the ring-16 profiles. Evidence/tags: `core/ooo/AGENTS-ooo-plan.md` T10f.
+on the ring-16 profiles (ring-16 `int2_l3`, `smt2_ooo_int` mixed, and the `smt2` anchor
+boots are byte-identical with `force=0`). Full-core caveat: the ring-32 24 M boot timed
+out with a ~6.07 M-cycle pending drain and `force=0` — the proof envelope
+(`commit_i=0` / `killable` / classifiable head) does not cover a masked-invalid or
+orphaned commit head, so the integration-level bound is still open; the discriminating
+gate-field instrumentation + gate relaxation are recorded in the plan.
+Evidence/tags: `core/ooo/AGENTS-ooo-plan.md` T10f.
 
 ## Architectural resume and source-profile residual (2026-09-19)
 

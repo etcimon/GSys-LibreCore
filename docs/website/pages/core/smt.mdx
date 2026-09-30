@@ -51,7 +51,13 @@ transfer), and mispredict recovery is mark-and-drain through the commit head, so
 a deeper window pays more per mispredict — the M3b fast-squash candidate is
 sketched in plan T9f. Ring 32 additionally exposed a **drained-handoff hole**: a
 drain can pend for millions of cycles while the resident hart holds scoreboard
-entries; the bounded-drain fix (`SmtDrainForceCycles`, N1c) is in qualification.
+entries. The bounded-drain machinery (`SmtDrainForceCycles`, N1c: no-commit
+counter, WFI-immediate force, hart-scoped flush + PC rewind, PMU events, leaf and
+bounded proof) is landed and inert on every qualified package (force count 0,
+anchors byte-identical), but on the ring-32 boot the force **never armed**: the
+stalled head was uncommittable, so the head-class/killable gates masked it. The
+bound is therefore conditional, not construction-grade; the head-level root cause
+is the open item (plan T10f) and ring 32 stays off.
 Landed from the M3 work is the switch-safety fix: `smt_restore_i` reseeds the
 FTQ *and* steps the cursor (`arch_step=FtqEn`) and clears the loop buffer on
 every switch (formal `g6lc_fetch_restore` + the `tb_g6lc_fetch_restore` leaf;

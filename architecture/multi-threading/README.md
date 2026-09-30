@@ -771,16 +771,26 @@ state correct. Island compute stays in `corev_apu/ai_island/**` and host stacks 
 Per-hart precise traps and isolation; RVWMO per and across harts; no starvation (enforced by `SmtStarveLimit` under hybrid).
 AI sideband and RF banks remain **per-hart**; island queues remain **SoC-isolated**, not RF-banked.
 
-### Bounded drained handoff (N1c)
-The drained handoff is **bounded by construction**. While a drain pends without a resident-hart
-commit, `g6lc_thread_select` counts blocked cycles; at `SmtDrainForceCycles` (default 256, 0 =
-never force, power-of-two enforced by `check_cfg`) — or immediately when the commit head is a WFI —
-and only while the head is safe to cancel (`no_st_pending_commit`, no AMO/CSR writeback in flight),
-the controller flushes the resident hart's uncommitted state exactly like a mispredict flush
-(`flush_unissued + flush`, hart-scoped under mixed residency), the SMT PC bank restores the hart's
-restart PC (commit-head PC, or the WFI's own PC so WFI re-executes), `drain_ready` asserts and the
-switch proceeds. Pulses `smt_drain_force`/`smt_drain_force_wfi` report under `[smt-drain]` and PMU
-group 3. The `+smt_sched_trace` force record exposes `pc`/`next`/`empty`/`force`/`wfi` per event.
+### Bounded drained handoff (N1c — bound armed conditionally; integration gap open)
+The drained handoff carries a drain-force mechanism intended to make it bounded: while a drain
+pends without a resident-hart commit, `g6lc_thread_select` counts blocked cycles; at
+`SmtDrainForceCycles` (default 256, 0 = never force, power-of-two enforced by `check_cfg`) — or
+immediately when the commit head is a WFI — and only while the head is safe to cancel
+(`no_st_pending_commit`, no AMO/CSR writeback in flight), the controller flushes the resident
+hart's uncommitted state exactly like a mispredict flush (`flush_unissued + flush`, hart-scoped
+under mixed residency), the SMT PC bank restores the hart's restart PC (commit-head PC, or the
+WFI's own PC so WFI re-executes), `drain_ready` asserts and the switch proceeds. Pulses
+`smt_drain_force`/`smt_drain_force_wfi` report under `[smt-drain]` and PMU group 3; the
+`+smt_sched_trace` force record exposes `pc`/`next`/`empty`/`force`/`wfi` per event.
+**Integration status (T10f):** the formal/leaf bound is proven only inside its caller-side
+envelope (`commit_i=0`, `killable`, classifiable head); the ring-32 four-hart boot reproduced a
+~6 M-cycle pending drain with `force=0` — the fire gate requires a classifiable commit head
+(`commit_instr_i[0].valid`, plain or WFI) and a killable head (`sb_head_valid[active]`), both of
+which can hold the force off indefinitely while the scoreboard stays non-empty, and `commit_i`
+trickle resets the counter. The bound is therefore **not yet construction-grade in full-core
+integration**; ring 32 stays rejected and ring 16 remains the production geometry. The recorded
+fix sketch (head-class-free timeout leg + absolute counter + gate-field diagnostics) is in
+`../../core/ooo/AGENTS-ooo-plan.md` T10f.
 
 ## Status vs scaffold
 **Fine-grain dual-PC + CSR/RF/RAS/GHR banks + bounded drain-on-switch + AI CSR sideband.** Production default remains `NrHarts=1`.  

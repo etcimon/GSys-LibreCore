@@ -3088,3 +3088,100 @@ principle expose the same protocol hole — drain waiting on a
 non-emptying scoreboard has no bound at any depth — but ring 16 is
 proven deterministic and faster on every gate we ran: three identical
 boots + the mixed boot + kernels + FO4).
+
+### T10f — N1c: bounded-drain force landed; ring-32 boot shows it never arms; ring 32 rejected (2026-09-30)
+
+
+
+`SmtDrainForceCycles` (256, 0=never, pow2-or-0 in `check_cfg`) with the
+force FSM, hart-scoped controller flush, PC-bank restore, `[smt-drain]`
+`force`/`force_wfi` counters, PMU group-3 events, the SymbiYosys
+bounded-switch property + noforce mutation, and the never-commits review
+leaf — all committed and green (89158748). Gates all pass (int2_l3
+29w/43w, smt2_ooo_int 29w/2w, smt2 10w/31w, defaults 9+55w/5+32w, zero
+errors); FO4 `sparse_smt_mixed_commit` at ring 32 = 31.0 ≤ 32 and
+`g6lc_thread_select` alone = 23.0.
+
+
+
+**Inert paths are byte-identical (the adoption-preserving evidence).**
+Ring-16 `int2_l3` strict boot PASS at 18,297,381 (`strictDualPassed`,
+force=0 both cores; RVFI hart00 `3a865954…` / hart02 `d7c2f025…`
+byte-identical to N1b). `smt2_ooo_int` mixed ring-16 boot PASS at
+10,459,588, force-inert, RVFI `9eada327…` byte-identical. `g6lc64_smt2`
+in-order anchor boot PASS at 12,406,259, force=0, RVFI `e0858842…`
+byte-identical — the shared `g6lc_thread_select` change does not perturb
+any adopted profile.
+
+
+
+**Ring 32 — the bound did not fire.**
+`ooocoh-n1c-int2l3-r32-24M-L0-r3` (model `39cb6d28`): `timedOut`,
+`outcome=timeout` (the `SUCCESS after 24000000 cycles` line is the
+firmware cap print, not strict dual completion). `[smt-drain]` FINAL:
+core 0 `req=23,610 / switches=23,610`, `force=0`; core 1 `req=20,771 /
+switches=20,770` — one drain pending from ~17.73 M, `drain_cyc=6,068,793`
+(~100 % `wait_sb`, `wait_st=356`), `force=0`, `force_wfi=0`, core-1 harts
+frozen at `ret={430,924, 429,949}` from ~20 M on.
+
+
+
+**Why the force never armed (mechanism, from code + counters).** The
+counter saturates at `DF_MAX` and core 1 retired nothing for the last
+~4 M cycles, so the no-commit threshold was armed the whole time; what
+held it off was the head/killable conjunction, not the count. Two
+structural masks are verified reachable and both produce exactly this
+signature (which one applied needs an instrumented run): (a) the fire leg
+`head_wfi_i || (cnt==MAX && head_plain_i)` — both head terms require
+`commit_instr_i[0].valid`, and under `COH_OOO` the commit head's valid is
+masked by `phys_pending_i[slot]` (an LSQ load whose address never
+resolved), `phys_mod_i && fu==LOAD`, or a `cancelled` entry; a wedged
+uncommittable head keeps `wait_sb` high (the entry is still `issued`)
+while both head terms read 0 forever. The frozen hart's RVFI tail ends
+mid-`sbi_hsm` park sequence at 0x8000e9f6 (an `add`, i.e. the head after
+it never committed), consistent with this. (b) `smt_drain_safe` requires
+`sb_head_valid[smt_active_hart]` — if the scoreboard's remaining issued
+entries belong to the *other* hart (orphans), `killable`=0 forever.
+Secondary weakness regardless: `commit_i` resets the counter, so a
+resident hart polling in a commit loop can hold the bound off
+indefinitely — the counter is conditional, not absolute. The formal
+envelope ties `commit_i=0`, `drain_killable_i=1`, `head_plain_i=1`; the
+bounded-switch property is therefore proven only inside that caller-side
+contract, and the failing boot sits outside it. **N1c's "bounded by
+construction" claim does not hold in production integration; fix sketched
+below (next dispatch), not landed.** Ring 32 stays rejected.
+
+
+
+**Ring-32 kernel numbers** (positive runs, directed lanes):
+`mc_branchy` 3,603,094 — exactly the M1d bound (negative arm 3,603,102
+detected); `ooo_ilp_chain` 3,285 and `ooo_mem_dep` 3,505 pass but roughly
+double ring-16 (1,493 / 1,812). Hypothesis for T10f/M3b: at ring 32 every
+branch mispredict pays mark-and-drain recovery over a 32-deep window plus
+32-slot rename-checkpoint pressure; these kernels are branch-dominated
+and recovery-bound, so the deeper window doubles the penalty. That is a
+mechanism hypothesis, not measured proof — but it is exactly the cost the
+M3b fast-squash work would target, so M3b should include a ring-16-vs-32
+recovery-cycle delta on these kernels before any re-evaluation.
+
+
+
+**Decision (brief rule applied).** Ring 32 on `int2_l3` requires boot
+≤ 18,297,381 AND branchy ≤ 3,603,094: branchy is equal but the boot
+timed out — **ring 32 not adopted**. The ring-32 `smt2_ooo_int` mixed
+boot was conditional on that adoption and was not run. Ring 16 remains
+the production geometry on both packages.
+
+
+
+**Next step (sketch, not implemented).** Fire the timeout leg on
+`cnt==DF_MAX && drain_killable_i` without a head-class requirement
+(head_valid or not), restart the hart from `sb_head_pc[active]` when a
+live head exists else the banked NPC (the `|npc_alt_i` guard already
+tolerates a zero head PC); make the timeout absolute (drop the commit
+reset) or add a second absolute counter so a committing poll loop cannot
+starve the bound; and expose `killable/head_valid/head_wfi/head_plain/
+cnt` in `[smt-drain]` so the next stall print discriminates mask (a)
+from (b) directly. Then re-run the ring-32 24M boot — it must complete
+with `smt_drain_force>0`, and all ring-16/anchor boots must stay
+byte-identical with force=0.

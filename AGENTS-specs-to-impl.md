@@ -891,7 +891,12 @@ own PC so WFI re-executes). `drain_ready` then completes the switch. Pulses
 `smt_drain_force` / `smt_drain_force_wfi` report under `[smt-drain]` and PMU
 group 3; `+smt_sched_trace` exposes `pc`/`next`/`empty`/`force`/`wfi` per event.
 No new clock/reset; single `always_ff` counter; WFI `hart_block` semantics
-unchanged. Evidence: `core/ooo/AGENTS-ooo-plan.md` T10f.
+unchanged. **Integration status:** the ring-32 four-hart boot reproduced a ~6 M-cycle
+pending drain with `force=0` — the fire gate's head-class requirement
+(`commit_instr_i[0].valid`, plain or WFI) plus the `sb_head_valid[active]` conjunct in
+`drain_killable_i` can hold the force off while the scoreboard stays non-empty, so the
+bound is conditional rather than construction-grade in production integration; the
+recorded fix sketch is in the plan. Evidence: `core/ooo/AGENTS-ooo-plan.md` T10f.
 
 ## How to use
 

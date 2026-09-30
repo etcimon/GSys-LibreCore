@@ -233,9 +233,11 @@ window, and mispredict recovery is still mark-and-drain. The ring>8 boot
 "timeout" was partially resolved in N1b/T10d — the r1/r2 divergence was a
 harness wall-kill printing fake SUCCESS, and pure ring-16 boots are now
 deterministic and adopted; but ring 32 genuinely timed out at the 24 M cap
-with a drain pending ~6 M cycles on `wait_sb` (no force/timeout path when
-the resident hart never empties the scoreboard). M7 reopens only after M3b
-(fast squash + that stuck-drain fix) — plan T9j/T10d.
+with a drain pending ~6 M cycles on `wait_sb`, and the N1c drain-force
+machinery did **not** fire (`force=0`) because its head-classification
+gate never armed — the bound is conditional, not construction-grade
+(T10f). M7 reopens only after M3b (fast squash + that stuck-drain fix) —
+plan T9j/T10d/T10f.
 
 The M3 uplift (ring 32, TAGE_LITE, FTQ/FDIP/loop buffer, DeepSpec/LSQ growth)
 was qualified functionally but regressed strict-boot and branch-bound IPC
