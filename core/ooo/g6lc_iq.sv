@@ -214,6 +214,7 @@ module g6lc_iq
       automatic logic older_unresolved_st;
       automatic logic is_csr;
       automatic logic is_amo;
+      automatic logic is_cvxif;
       // rs3 participates only when the entry actually has an FP third source;
       // otherwise rs3_rdy is set at dispatch and the term is inert.
       ready[e] = q_chain[e].valid && q_chain[e].rs1_rdy && q_chain[e].rs2_rdy &&
@@ -253,7 +254,24 @@ module g6lc_iq
       // AMO waits for the drained store buffer anyway, so the head rule costs
       // nothing it would not already pay.
       is_amo = CVA6Cfg.RVA && (q_chain[e].sbe.fu == STORE) && ariane_pkg::is_amo(q_chain[e].sbe.op);
+      // A CVXIF (Xg6lcai coprocessor) op issues only at the commit head. The
+      // coprocessor executes at issue and the CVXIF driver signals commit in the
+      // issue cycle ("goes to execute = not speculative"), which is only true
+      // when nothing older can still fault or redirect and the op itself cannot
+      // be cancelled: exactly the head, whose cancelled predecessors have all
+      // drained. Its side effects (accumulator tiles, ai.enq kicks, AI CSR
+      // dirtying) therefore never happen on a wrong path, and its result can
+      // never arrive for a cancelled entry. The oldest ready entry takes port
+      // 0, which also keeps the port-0 steering contract of
+      // issue_read_operands. T0 ops are control plane; the serialisation is
+      // the price of not needing a kill-capable coprocessor.
+`ifdef G6LC_MUT_CVXIF_NOHEAD
+      is_cvxif = 1'b0;   // review mutation: the rule is dropped
+`else
+      is_cvxif = CVA6Cfg.CvxifEn && (q_chain[e].sbe.fu == CVXIF);
+`endif
       ready[e] = ready[e] &&
+          !(is_cvxif && (q_chain[e].sbe.trans_id != commit_ptr_i)) &&
           !(is_ld && (mem_stall_i ||
                       (older_unresolved_st && !q_chain[e].may_bypass))) &&
           !(is_csr &&

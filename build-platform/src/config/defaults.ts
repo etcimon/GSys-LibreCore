@@ -39,11 +39,12 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     // g6lc64_ai / g6lc64_smt2_ai packages are hand-stated and are not pins.
     //   ooo_int2_l3   : the all-on target (2 cores x 2 harts, OoO, L2 + L3, RV64GC+B)
     //   stream8_l3    : in-order two-core HPDCACHE + L3
-    //   smt2_ooo_int  : mixed residency, integer core -> integer strip until WP-E
+    //   smt2_ooo_int  : mixed residency, integer core, FP island (the island's
+    //                   float plane no longer requires RVF/RVD -- WP-E)
     aiOverlayPins: [
       { target: "g6lc64_ooo_int2_l3" },
       { target: "g6lc64_stream8_l3" },
-      { target: "g6lc64_smt2_ooo_int", int: true },
+      { target: "g6lc64_smt2_ooo_int" },
     ],
   },
 

@@ -79,6 +79,7 @@ result, so the remaining producers (pending stores, CSR/AMO commit path, CVXIF/a
 | Loads past **resolved** older stores (T2) | Loads wait on older **unresolved** stores unless `may_bypass` | the store buffer forwards byte-exactly from resolved stores; bypassing an unresolved one relies on the T1 violation scan + replay |
 | Stores relative to each other (T2) | Stores drain to memory in program order | LSQ store entry = spec-queue slot reservation held to commit; `check`: `LsqStoreEntries <= DEPTH_SPEC` (`gen_err_ooo_st_credits`) |
 | — | AMO buffer depth 1, CVXIF port 0 only; one store translation pipe | unchanged |
+| CVXIF (Xg6lcai coprocessor) is never speculative (WP-C, 2026-10-01) | A CVXIF op issues only at the commit head (`g6lc_iq`, same class as fence/system CSR and AMO); the CVXIF driver's issue-cycle commit is therefore exact under OoO, the coprocessor's side effects (accumulator tiles, `ai.enq`, AI CSR dirtying) never happen on a wrong path, and no CVXIF result can arrive for a cancelled entry — the "CVXIF/accelerator" late-result producer above is closed by construction, not by an owner tag | `verif/tb/core/tb_g6lc_iq_cvxif_head.sv` (+ `G6LC_MUT_CVXIF_NOHEAD`); `issue_read_operands` port-0 assertion |
 
 ## 5. Timing cones of record (FO4 screen, not STA)
 

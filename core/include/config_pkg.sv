@@ -332,12 +332,15 @@ package config_pkg;
     QosClasses: 32'd2
   };
 
-  /// The plane the overlay gives a core: the FP island when the core can host it
-  /// (check_cfg's IslandFpEn legality today asks for RVF and RVD), otherwise the
-  /// integer strip. `force_int` (the G6LC_AI_OVERLAY_INT define) selects the strip
-  /// regardless. Pure: no side effect, no macro inside a package.
+  /// The plane the overlay gives a core: the FP island unless `force_int` (the
+  /// G6LC_AI_OVERLAY_INT define) asks for the integer strip. The island's float
+  /// plane does not depend on the core's RVF/RVD (see check_cfg); the arguments
+  /// stay so a future policy can bind on them without changing every caller.
+  /// Pure: no side effect, no macro inside a package.
   function automatic ai_cfg_t ai_cfg_overlay(input bit rvf, input bit rvd, input bit force_int);
-    return (rvf && rvd && !force_int) ? AiCfgIsland : AiCfgIslandInt;
+    logic _unused;
+    _unused = rvf | rvd;
+    return force_int ? AiCfgIslandInt : AiCfgIsland;
   endfunction
 
   /// -------------------------------------------------------------------------
@@ -1337,9 +1340,12 @@ package config_pkg;
       else $error("AiCfg.VaTurboEn requires policy subcode evaluation");
     assert (!(Cfg.AiCfg.VaTurboEn && !Cfg.AiCfg.IslandFpEn))
       else $error("AiCfg.VaTurboEn requires the island floating-point plane");
-    assert (!(Cfg.AiCfg.IslandFpEn && (!Cfg.AiCfg.MatrixEn || Cfg.AiCfg.Queues == 0 ||
-              !Cfg.RVF || !Cfg.RVD)))
-      else $error("AiCfg.IslandFpEn requires the matrix plane, a T2 queue, RVF and RVD");
+    // The island's float plane is the ISLAND's datapath: its operands are bytes
+    // in DRAM that the host writes with integer stores and its scales ride in the
+    // descriptor, so an integer-only core can drive it (WP-E, 2026-10-01). Only
+    // the core-attached T0 tile's float grants (FormatMask, below) need RVF/RVD.
+    assert (!(Cfg.AiCfg.IslandFpEn && (!Cfg.AiCfg.MatrixEn || Cfg.AiCfg.Queues == 0)))
+      else $error("AiCfg.IslandFpEn requires the matrix plane and a T2 queue");
     assert (!((Cfg.AiCfg.Int4En || Cfg.AiCfg.Sparse24En) && !Cfg.AiCfg.MatrixEn));
     // DMA-write invalidation needs the island (queues) and the cluster's CMO
     // engine, which g6lc_cluster generates under L2CmoEn OR this bit.

@@ -81,6 +81,8 @@ need=(
   verif/tb/ai_island/run-inval-queue.sh
   verif/tb/ai_island/tb_g6lc_ai_enq_arb.sv
   verif/tb/ai_island/run-enq-arb.sh
+  verif/tb/core/tb_g6lc_iq_cvxif_head.sv
+  verif/tb/core/run-iq-cvxif-head.sh
   verif/tb/ai_island/tb_g6lc_ai_dram_class2.sv
   verif/tb/ai_island/run-dram-class2.sh
   verif/tb/ai_island/tb_g6lc_ai_gemm_wide.sv
@@ -430,6 +432,13 @@ if command -v verilator >/dev/null 2>&1; then
     ok "tb_g6lc_ai_enq_arb (+ oracle negative, fixed-priority mutation)"
   else
     bad "run-enq-arb"
+  fi
+  # OoO: a CVXIF op issues only at the commit head (never speculative), so the
+  # coprocessor's issue-time side effects are safe under OoO (no-head mutation fails).
+  if bash verif/tb/core/run-iq-cvxif-head.sh; then
+    ok "tb_g6lc_iq_cvxif_head (+ oracle negative, no-head mutation)"
+  else
+    bad "run-iq-cvxif-head"
   fi
   if bash verif/tb/ai_island/run-dram-class2.sh; then
     ok "tb_g6lc_ai_dram_class2 (LPDDR5 refuses elaboration)"
