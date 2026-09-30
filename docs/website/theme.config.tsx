@@ -34,12 +34,12 @@ const config: DocsThemeConfig = {
     saturation: 72,
   },
   project: {
-    link: 'https://github.com/etcimon/cva6',
+    link: 'https://github.com/etcimon/GSys-LibreCore',
   },
   chat: {
-    link: 'https://github.com/etcimon/cva6/discussions',
+    link: 'https://github.com/etcimon/GSys-LibreCore/discussions',
   },
-  docsRepositoryBase: 'https://github.com/etcimon/cva6/tree/master/docs/website',
+  docsRepositoryBase: 'https://github.com/etcimon/GSys-LibreCore/tree/master/docs/website',
   banner: {
     key: 'librecore-modern-docs',
     content: (

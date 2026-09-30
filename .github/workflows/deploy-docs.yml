@@ -1,5 +1,9 @@
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
+#
+# Builds the Next.js + Nextra site under docs/website and publishes it to GitHub
+# Pages for https://github.com/etcimon/GSys-LibreCore, served at
+# https://etcimon.github.io/GSys-LibreCore/. Pull requests only build (no deploy).
 
 name: Deploy docs to GitHub Pages
 
@@ -7,45 +11,73 @@ on:
   push:
     branches:
       - master
-      - main
     paths:
       - 'docs/website/**'
       - 'README.md'
       - '.github/workflows/deploy-docs.yml'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'docs/website/**'
+      - '.github/workflows/deploy-docs.yml'
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
-  group: 'pages'
-  cancel-in-progress: true
+  group: pages-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  # Project Pages sites are served under /<repository-name>/.
+  DOCS_BASE_PATH: /${{ github.event.repository.name }}
 
 jobs:
-  deploy:
-    name: Build and deploy documentation
+  build:
+    name: Build static docs
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v1
+        uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      - name: Build static docs with Next.js
-        run: |
-          cd docs/website
-          bun install
-          bun run build
-
-      - name: Disable Jekyll processing
-        run: touch docs/website/dist/.nojekyll
-
-      - name: Deploy dist to gh-pages branch
-        uses: JamesIves/github-pages-deploy-action@v4
+      - name: Configure Pages
+        if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
         with:
-          branch: gh-pages
-          folder: docs/website/dist
-          clean: true
+          # Creates the Pages site (source = GitHub Actions) if it does not exist yet.
+          enablement: true
+
+      - name: Build static docs with Next.js
+        working-directory: docs/website
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          touch dist/.nojekyll
+
+      - name: Upload Pages artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/website/dist
+
+  deploy:
+    name: Deploy to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deploy
+        uses: actions/deploy-pages@v4

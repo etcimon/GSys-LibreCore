@@ -8,6 +8,10 @@
 [![Tooling: MIT](https://img.shields.io/badge/tooling-MIT-0a6b7c?style=flat-square)](LICENSE.MIT)
 [![Commercial licence](https://img.shields.io/badge/commercial_licence-available-cb007b?style=flat-square)](LICENSE.GSys-Commercial)
 [![Derived from CVA6](https://img.shields.io/badge/derived_from-OpenHW_CVA6-666?style=flat-square)](docs/heritage.md)
+[![Docs](https://img.shields.io/github/actions/workflow/status/etcimon/GSys-LibreCore/deploy-docs.yml?branch=master&label=docs&style=flat-square)](https://etcimon.github.io/GSys-LibreCore/)
+
+**Repository:** [github.com/etcimon/GSys-LibreCore](https://github.com/etcimon/GSys-LibreCore) ·
+**Documentation:** [etcimon.github.io/GSys-LibreCore](https://etcimon.github.io/GSys-LibreCore/)
 
 [Licensing](#licensing) · [Quick start](#quick-start) · [What's in the core](#what-is-in-the-core) ·
 [Build platform](#the-build-platform) · [Commercial licence](#commercial-licence--contact) ·
@@ -194,8 +198,8 @@ Also: [`NOTICE`](NOTICE) (Source Location + the product-marking requirement) ·
 The build platform installs its own toolchain. You need `git` and a shell; it fetches Bun itself.
 
 ```sh
-git clone --recurse-submodules <this-repo>
-cd librecore
+git clone --recurse-submodules https://github.com/etcimon/GSys-LibreCore.git
+cd GSys-LibreCore
 
 source ./setenv.sh          # Windows PowerShell:   . .\setenv.ps1
 g6lc-build status           # SoC target + toolchain + workspace, at a glance
@@ -442,7 +446,7 @@ Before opening a PR: read [`AGENTS.md` §0](AGENTS.md), then run `g6lc-build ver
 | `specs/` | hardware specification documents |
 | `riscv-compilers/`, `riscv-dev/` | agentic bootstrap scaffolds for third-party submodules (see below) |
 | `agents/`, `AGENTS*.md` | the agent-facing guide layer |
-| `docs/`, `docs/website/`, `tutorials/` | documentation — [`docs/heritage.md`](docs/heritage.md) and the rendered Next.js + Nextra docs site |
+| `docs/`, `docs/website/`, `tutorials/` | documentation — [`docs/heritage.md`](docs/heritage.md) and the Next.js + Nextra docs site, published to [etcimon.github.io/GSys-LibreCore](https://etcimon.github.io/GSys-LibreCore/) by `.github/workflows/deploy-docs.yml` |
 
 Files and directories under `core/` are for the core **only** and must not depend on the APU.
 

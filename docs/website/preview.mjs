@@ -4,7 +4,7 @@
 import { existsSync, statSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 
-const BASE_PATH = process.env.DOCS_BASE_PATH || '/librecore'
+const BASE_PATH = process.env.DOCS_BASE_PATH ?? '/GSys-LibreCore'
 const PORT = parseInt(process.env.PORT || '3000', 10)
 const ROOT = resolve(process.env.DOCS_DIST_DIR || 'dist')
 

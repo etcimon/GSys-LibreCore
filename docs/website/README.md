@@ -33,6 +33,20 @@ bun run dev
 
 The static export lands in `docs/website/dist/`.
 
+## Deployment
+
+`.github/workflows/deploy-docs.yml` builds this site on every push to `master`
+that touches `docs/website/**` and publishes it with the GitHub Pages actions
+(`configure-pages` → `upload-pages-artifact` → `deploy-pages`). The live site is
+<https://etcimon.github.io/GSys-LibreCore/>, sourced from
+<https://github.com/etcimon/GSys-LibreCore>.
+
+Project Pages sites are served under `/<repository-name>/`, so `next.config.mjs`
+defaults `basePath`/`assetPrefix` to `/GSys-LibreCore`. Set `DOCS_BASE_PATH`
+(empty for a custom-domain site root, or `/<fork-name>` on a fork) to deploy
+under a different root; the workflow derives it from the repository name and
+`preview.mjs` honours the same variable.
+
 ## Site map (top-level)
 
 | Section | Path | Focus |

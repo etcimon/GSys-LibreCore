@@ -15,9 +15,10 @@ const nextConfig = {
   reactStrictMode: true,
   output: 'export',
   distDir: 'dist',
-  // Brand-forward path; override with DOCS_BASE_PATH for alternate deploy roots.
-  basePath: process.env.DOCS_BASE_PATH || '/librecore',
-  assetPrefix: process.env.DOCS_BASE_PATH || '/librecore',
+  // GitHub Pages project path (https://etcimon.github.io/GSys-LibreCore/);
+  // override with DOCS_BASE_PATH for alternate deploy roots (empty string = site root).
+  basePath: process.env.DOCS_BASE_PATH ?? '/GSys-LibreCore',
+  assetPrefix: process.env.DOCS_BASE_PATH ?? '/GSys-LibreCore',
   images: {
     unoptimized: true,
   },
