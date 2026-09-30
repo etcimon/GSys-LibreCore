@@ -30,7 +30,7 @@ module tb_g6lc_ai_gemm_wide;
   localparam logic [63:0] C16  = 64'h0000_0010_0000_0010;
   localparam logic [63:0] C8   = 64'h0000_0008_0000_0008;
   localparam logic [63:0] SENT = 64'hDEAD_BEEF_DEAD_BEEF;
-  localparam int unsigned NWORDS = 1024;
+  localparam int unsigned NWORDS = 8192;   // 64 KiB: room for the K=512 streaming rows
 
   logic clk = 0;
   logic rst_n = 0;
@@ -51,23 +51,45 @@ module tb_g6lc_ai_gemm_wide;
   logic [15:0] lda0, ldb0, lda1, ldb1;
   logic [2:0]  nf0, nf1;
   logic [63:0] pa0, pb0, pc0, pa1, pb1, pc1;
+  logic [31:0] pmu_r0, pmu_r1, pmu_r2;
+  logic [3:0][31:0] pmu_ph0, pmu_ph1, pmu_ph2;
+  logic start2, ready2, done2, err2;
   g128_req_t req0_q, req0;
   g128_resp_t rsp0;
   g512_req_t req1_q, req1;
+  g512_req_t req2_q, req2;
   g512_resp_t rsp1;
+  g512_resp_t rsp2;
   // GEMM flops are X until reset. Keep the island port idle so the join
   // does not accept an X address.
   assign req0 = rst_n ? req0_q : '0;
   assign req1 = rst_n ? req1_q : '0;
-  logic init0, init1;
-  logic [7:0][31:0] ch_r0, ch_w0, ch_r1, ch_w1;
+  assign req2 = rst_n ? req2_q : '0;
+  assign cl2.aw_valid = 1'b0; assign cl2.w_valid = 1'b0; assign cl2.b_ready = 1'b1;
+  assign cl2.ar_valid = 1'b0; assign cl2.r_ready = 1'b1;
+  assign cl2.aw_id = '0; assign cl2.aw_addr = '0; assign cl2.aw_len = '0; assign cl2.aw_size = '0;
+  assign cl2.aw_burst = '0; assign cl2.aw_lock = '0; assign cl2.aw_cache = '0; assign cl2.aw_prot = '0;
+  assign cl2.aw_qos = '0; assign cl2.aw_region = '0; assign cl2.aw_atop = '0; assign cl2.aw_user = '0;
+  assign cl2.w_data = '0; assign cl2.w_strb = '0; assign cl2.w_last = '0; assign cl2.w_user = '0;
+  assign cl2.ar_id = '0; assign cl2.ar_addr = '0; assign cl2.ar_len = '0; assign cl2.ar_size = '0;
+  assign cl2.ar_burst = '0; assign cl2.ar_lock = '0; assign cl2.ar_cache = '0; assign cl2.ar_prot = '0;
+  assign cl2.ar_qos = '0; assign cl2.ar_region = '0; assign cl2.ar_user = '0;
+  logic init0, init1, init2;
+  logic [7:0][31:0] ch_r0, ch_w0, ch_r1, ch_w1, ch_r2, ch_w2;
 
   AXI_BUS #(.AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(DW), .AXI_ID_WIDTH(IW), .AXI_USER_WIDTH(UW))
       cl0 (), cl1 ();
   AXI_BUS #(.AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(128), .AXI_ID_WIDTH(IW), .AXI_USER_WIDTH(UW))
       is0 ();
   AXI_BUS #(.AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(512), .AXI_ID_WIDTH(IW), .AXI_USER_WIDTH(UW))
-      is1 ();
+      is1 (), is2 ();
+  // Instance 2: the V1 shape -- 512-bit island port on a 512-bit class-0 channel,
+  // 64-bit cluster port upsized (tb_g6lc_ai_dram_join_wide proved the path; this
+  // measures the island's stream through it).
+  AXI_BUS #(.AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(DW), .AXI_ID_WIDTH(IW), .AXI_USER_WIDTH(UW))
+      cl2 ();
+  AXI_BUS #(.AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(512), .AXI_ID_WIDTH(IW + 1), .AXI_USER_WIDTH(UW))
+      mst2 ();
   AXI_BUS #(.AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(DW), .AXI_ID_WIDTH(IW + 1), .AXI_USER_WIDTH(UW))
       mst0 (), mst1 ();
 
@@ -75,11 +97,13 @@ module tb_g6lc_ai_gemm_wide;
   `AXI_ASSIGN_TO_RESP(rsp0, is0)
   `AXI_ASSIGN_FROM_REQ(is1, req1)
   `AXI_ASSIGN_TO_RESP(rsp1, is1)
+  `AXI_ASSIGN_FROM_REQ(is2, req2)
+  `AXI_ASSIGN_TO_RESP(rsp2, is2)
 
   g6lc_ai_dram_join #(
       .AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(DW), .AXI_ID_WIDTH(IW), .AXI_USER_WIDTH(UW),
       .ISLAND_DATA_WIDTH(128), .MAX_AR_OUT(2),
-      .DRAM_BASE(DRAM), .DRAM_BYTES(64'h0000_1000), .FATAL_LOCK(1'b1)
+      .DRAM_BASE(DRAM), .DRAM_BYTES(64'h0001_0000), .FATAL_LOCK(1'b1)
   ) i_join0 (
       .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0), .init_done_i(init0),
       .cluster(cl0), .island(is0), .master(mst0)
@@ -93,7 +117,7 @@ module tb_g6lc_ai_gemm_wide;
       .slave(mst0), .init_done_o(init0), .ch_r_beats_o(ch_r0), .ch_w_beats_o(ch_w0)
   );
   g6lc_ai_gemm_seq #(
-      .AddrWidth(AW), .DataWidth(128), .IdWidth(IW), .MaxDim(16), .PeLanes(16),
+      .AddrWidth(AW), .DataWidth(128), .IdWidth(IW), .MaxDim(16), .MaxK(512), .PeLanes(16),
       .MaxAROut(2), .NrChannels(1), .ChanShift(6),
       .axi_req_t(g128_req_t), .axi_resp_t(g128_resp_t)
   ) i_gemm0 (
@@ -102,8 +126,8 @@ module tb_g6lc_ai_gemm_wide;
       .lda_i(lda0), .ldb_i(ldb0), .numfmt_i(nf0), .accumulate_i(1'b0), .ar_max_i(4'd0),
       .ptr_a_i(pa0), .ptr_b_i(pb0), .ptr_c_i(pc0),
       .ready_o(ready0), .done_o(done0), .err_o(err0),
-      .pmu_r_beats_o(), .pmu_w_beats_o(), .pmu_cycles_o(),
- .pmu_phase_o (), .pmu_stall_o (),
+      .pmu_r_beats_o(pmu_r0), .pmu_w_beats_o(), .pmu_cycles_o(),
+ .pmu_phase_o (pmu_ph0), .pmu_stall_o (),
       .reuse_b_i(1'b0), .reuse_b_epoch_i(32'd0), .reuse_b_invalidate_i(1'b1),
       .pmu_reuse_b_hit_o(),
       .reuse_a_i(1'b0), .reuse_a_epoch_i(32'd0), .reuse_a_invalidate_i(1'b1),
@@ -114,7 +138,7 @@ module tb_g6lc_ai_gemm_wide;
   g6lc_ai_dram_join #(
       .AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(DW), .AXI_ID_WIDTH(IW), .AXI_USER_WIDTH(UW),
       .ISLAND_DATA_WIDTH(512), .MAX_AR_OUT(2),
-      .DRAM_BASE(DRAM), .DRAM_BYTES(64'h0000_1000), .FATAL_LOCK(1'b1)
+      .DRAM_BASE(DRAM), .DRAM_BYTES(64'h0001_0000), .FATAL_LOCK(1'b1)
   ) i_join1 (
       .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0), .init_done_i(init1),
       .cluster(cl1), .island(is1), .master(mst1)
@@ -128,7 +152,7 @@ module tb_g6lc_ai_gemm_wide;
       .slave(mst1), .init_done_o(init1), .ch_r_beats_o(ch_r1), .ch_w_beats_o(ch_w1)
   );
   g6lc_ai_gemm_seq #(
-      .AddrWidth(AW), .DataWidth(512), .IdWidth(IW), .MaxDim(16), .PeLanes(64),
+      .AddrWidth(AW), .DataWidth(512), .IdWidth(IW), .MaxDim(16), .MaxK(512), .PeLanes(64),
       .MaxAROut(2), .NrChannels(1), .ChanShift(6),
       .axi_req_t(g512_req_t), .axi_resp_t(g512_resp_t)
   ) i_gemm1 (
@@ -137,13 +161,48 @@ module tb_g6lc_ai_gemm_wide;
       .lda_i(lda1), .ldb_i(ldb1), .numfmt_i(nf1), .accumulate_i(1'b0), .ar_max_i(4'd0),
       .ptr_a_i(pa1), .ptr_b_i(pb1), .ptr_c_i(pc1),
       .ready_o(ready1), .done_o(done1), .err_o(err1),
-      .pmu_r_beats_o(), .pmu_w_beats_o(), .pmu_cycles_o(),
- .pmu_phase_o (), .pmu_stall_o (),
+      .pmu_r_beats_o(pmu_r1), .pmu_w_beats_o(), .pmu_cycles_o(),
+ .pmu_phase_o (pmu_ph1), .pmu_stall_o (),
       .reuse_b_i(1'b0), .reuse_b_epoch_i(32'd0), .reuse_b_invalidate_i(1'b1),
       .pmu_reuse_b_hit_o(),
       .reuse_a_i(1'b0), .reuse_a_epoch_i(32'd0), .reuse_a_invalidate_i(1'b1),
       .pmu_reuse_a_hit_o(),
       .axi_req_o(req1_q), .axi_resp_i(rsp1)
+  );
+
+  g6lc_ai_dram_join #(
+      .AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(512), .CLUSTER_DATA_WIDTH(DW), .AXI_ID_WIDTH(IW),
+      .AXI_USER_WIDTH(UW), .ISLAND_DATA_WIDTH(512), .MAX_AR_OUT(2),
+      .DRAM_BASE(DRAM), .DRAM_BYTES(64'h0001_0000), .FATAL_LOCK(1'b1)
+  ) i_join2 (
+      .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0), .init_done_i(init2),
+      .cluster(cl2), .island(is2), .master(mst2)
+  );
+  g6lc_ai_dram_backend #(
+      .DramClass(0), .AXI_ID_WIDTH(IW + 1), .AXI_ADDR_WIDTH(AW), .AXI_DATA_WIDTH(512),
+      .AXI_USER_WIDTH(UW), .AXI_USER_EN(0), .NUM_WORDS(NWORDS / 8),
+      .NrChannels(1), .ChanShift(6), .MaxAROut(2)
+  ) i_mem2 (
+      .clk_i(clk), .rst_ni(rst_n), .rst_sram_ni(rst_n), .testmode_i(1'b0),
+      .slave(mst2), .init_done_o(init2), .ch_r_beats_o(ch_r2), .ch_w_beats_o(ch_w2)
+  );
+  g6lc_ai_gemm_seq #(
+      .AddrWidth(AW), .DataWidth(512), .IdWidth(IW), .MaxDim(16), .MaxK(512), .PeLanes(64),
+      .MaxAROut(2), .NrChannels(1), .ChanShift(6),
+      .axi_req_t(g512_req_t), .axi_resp_t(g512_resp_t)
+  ) i_gemm2 (
+      .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
+      .start_i(start2), .m_i(32'd1), .n_i(32'd16), .k_i(32'd512),
+      .lda_i(16'd512), .ldb_i(16'd512), .numfmt_i(3'd0), .accumulate_i(1'b0), .ar_max_i(4'd0),
+      .ptr_a_i(DRAM + 64'h4000), .ptr_b_i(DRAM + 64'h4400), .ptr_c_i(DRAM + 64'h6800),
+      .ready_o(ready2), .done_o(done2), .err_o(err2),
+      .pmu_r_beats_o(pmu_r2), .pmu_w_beats_o(), .pmu_cycles_o(),
+      .pmu_phase_o (pmu_ph2), .pmu_stall_o (),
+      .reuse_b_i(1'b0), .reuse_b_epoch_i(32'd0), .reuse_b_invalidate_i(1'b1),
+      .pmu_reuse_b_hit_o(),
+      .reuse_a_i(1'b0), .reuse_a_epoch_i(32'd0), .reuse_a_invalidate_i(1'b1),
+      .pmu_reuse_a_hit_o(),
+      .axi_req_o(req2_q), .axi_resp_i(rsp2)
   );
 
   task automatic idle_cl(input int which);
@@ -386,7 +445,7 @@ module tb_g6lc_ai_gemm_wide;
     m1 = 32'd2; n1 = 32'd4; k1 = 32'd16; lda1 = 16'd16; ldb1 = 16'd16;
     pa1 = PA; pb1 = PB; pc1 = PC;
     start0 = 0;
-    start1 = 0;
+    start1 = 0; start2 = 0;
     idle_cl(0);
     idle_cl(1);
     rst_n = 0;
@@ -462,6 +521,50 @@ module tb_g6lc_ai_gemm_wide;
       if (ch_w1[0] != w_before + 8)
         $fatal(1, "wide-store C channel beats %0d (before %0d): expected one 64 B beat = 8 channel beats", ch_w1[0], w_before);
       pc1 = PC;
+    end
+
+    // B-stream throughput at width (the V1 question): m=1 n=16 k=512 INT8, B rows of
+    // 512 B (8 beats at 512 bits, 32 at 128 bits), operands wherever (no golden). Report
+    // LB cycles per B beat on each port; the 512-bit path must not carry fewer bytes per
+    // cycle than the 128-bit one, and the 128-bit one must not be worse than 1.5 cycles/beat.
+    begin
+      int unsigned lb0, lb1, rb0, rb1;
+      m0 = 32'd1; n0 = 32'd16; k0 = 32'd512; lda0 = 16'd512; ldb0 = 16'd512; nf0 = 3'd0;
+      pa0 = DRAM + 64'h4000; pb0 = DRAM + 64'h4400; pc0 = DRAM + 64'h6800;
+      guard = 0; do begin @(posedge clk); guard++; end while (!ready0 && guard < 100);
+      @(negedge clk); start0 = 1; @(negedge clk); start0 = 0;
+      guard = 0; do begin @(posedge clk); guard++; end while (!done0 && guard < 40000);
+      if (!done0) $fatal(1, "128-bit K=512 stream timeout");
+      if (err0) $fatal(1, "128-bit K=512 stream err");
+      lb0 = pmu_ph0[1]; rb0 = pmu_r0;
+      m1 = 32'd1; n1 = 32'd16; k1 = 32'd512; lda1 = 16'd512; ldb1 = 16'd512; nf1 = 3'd0;
+      pa1 = DRAM + 64'h4000; pb1 = DRAM + 64'h4400; pc1 = DRAM + 64'h6800;
+      guard = 0; do begin @(posedge clk); guard++; end while (!ready1 && guard < 100);
+      @(negedge clk); start1 = 1; @(negedge clk); start1 = 0;
+      guard = 0; do begin @(posedge clk); guard++; end while (!done1 && guard < 40000);
+      if (!done1) $fatal(1, "512-bit K=512 stream timeout");
+      if (err1) $fatal(1, "512-bit K=512 stream err");
+      lb1 = pmu_ph1[1]; rb1 = pmu_r1;
+      $display("STREAM 128-bit: LB %0d cycles, %0d R beats (%0.2f cycles/beat, %0.1f B/cycle)",
+               lb0, rb0, real'(lb0) / real'(rb0), 16.0 * real'(rb0) / real'(lb0));
+      $display("STREAM 512-bit: LB %0d cycles, %0d R beats (%0.2f cycles/beat, %0.1f B/cycle)",
+               lb1, rb1, real'(lb1) / real'(rb1), 64.0 * real'(rb1) / real'(lb1));
+      // Both of the above sit on a 64-bit channel through the downsizer: 8 B/cycle is the
+      // channel, not the island. Instance 2 is the V1 shape (512-bit channel).
+      begin
+        int unsigned lb2, rb2;
+        guard = 0; do begin @(posedge clk); guard++; end while (!ready2 && guard < 100);
+        @(negedge clk); start2 = 1; @(negedge clk); start2 = 0;
+        guard = 0; do begin @(posedge clk); guard++; end while (!done2 && guard < 40000);
+        if (!done2) $fatal(1, "512-bit-channel K=512 stream timeout");
+        if (err2) $fatal(1, "512-bit-channel K=512 stream err");
+        lb2 = pmu_ph2[1]; rb2 = pmu_r2;
+        $display("STREAM 512-bit port on 512-bit channel: LB %0d cycles, %0d R beats (%0.2f cycles/beat, %0.1f B/cycle)",
+                 lb2, rb2, real'(lb2) / real'(rb2), 64.0 * real'(rb2) / real'(lb2));
+        if (64.0 * real'(rb2) / real'(lb2) < 32.0)
+          $fatal(1, "V1 island stream below 32 B/cycle on the 512-bit channel (%0.1f)", 64.0 * real'(rb2) / real'(lb2));
+      end
+      pc1 = PC; pc0 = PC;
     end
 
     arm_odd(0);

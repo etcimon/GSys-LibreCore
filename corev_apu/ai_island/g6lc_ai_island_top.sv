@@ -1391,6 +1391,11 @@ module g6lc_ai_island_top
   // pragma translate_off
   always @(posedge clk_i) begin
     // stderr (unbuffered): the g6lc64_ai harness may not flush stdout at exit.
+    // AI_START marks the engine start so a run cut before completion still shows
+    // whether the job was ever issued (and when).
+    if (rst_ni && gemm_start && gemm_ready && $test$plusargs("ai_pmu_trace"))
+      $fdisplay(32'h8000_0002, "AI_START fmt=%0d m=%0d n=%0d k=%0d flags=%h t=%0t",
+               gemm_numfmt, gemm_m, gemm_n, gemm_k, gemm_flags, $time);
     if (rst_ni && done_valid && $test$plusargs("ai_pmu_trace"))
       $fdisplay(32'h8000_0002, "AI_JOB ticket=%0d status=%0d fmt=%0d m=%0d n=%0d k=%0d flags=%h cycles=%0d la=%0d lb=%0d mac=%0d stc=%0d stall_ar=%0d stall_r=%0d stall_w=%0d r_beats=%0d w_beats=%0d",
                done_ticket, done_status, gemm_numfmt, gemm_m, gemm_n, gemm_k, gemm_flags,
