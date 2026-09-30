@@ -11,7 +11,8 @@ Handles all major build types:
   build.py full      [--spec FIXTURE] zealcli + browser + libwasm
   build.py test      [--spec FIXTURE] [--fs KIND] [--libwasm] [--settle N]
                      [--keywords k1,k2,...] [--no-emit-fs] [--disk PATH]
-  build.py check                      g6b.py check (independence + bun + cargo gates)
+  build.py check [--rust-only]        g6b.py check (independence + bun + cargo gates;
+                                      --rust-only skips the browser-ui bun lane)
   build.py all                       alias for full
 
 Auto-installs requirements as needed:
@@ -204,9 +205,12 @@ def build_full(spec: str | None) -> int:
     return 0
 
 
-def cmd_check() -> int:
-    """Delegate to g6b.py check (independence + bun + cargo gates)."""
-    return run([sys.executable, str(_TOOLS / "g6b.py"), "check"])
+def cmd_check(rest: list[str]) -> int:
+    """Delegate to g6b.py check (independence + bun + cargo gates).
+
+    Flags (e.g. ``--rust-only``) are forwarded unchanged.
+    """
+    return run([sys.executable, str(_TOOLS / "g6b.py"), "check", *rest])
 
 
 def _win_to_wsl(path: str) -> str:
@@ -592,7 +596,7 @@ def main() -> int:
         from guest_native import main as native_main
         return native_main(rest)
     if cmd == "check":
-        return cmd_check()
+        return cmd_check(rest)
     err(f"unknown command: {cmd}")
     print(__doc__)
     return 2

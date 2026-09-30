@@ -19,7 +19,7 @@
 // `set -e` previously exited 0 after those failures — a false PASS.
 
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 
 import type { HostOS, ShellKind } from "../config/schema.ts";
 import { detectOS } from "./os.ts";
@@ -187,7 +187,7 @@ export function gitRootFromBashPath(bashPath: string): string | null {
   const n = bashPath.replace(/\//g, "\\");
   // ...\Git\bin\bash.exe  or  ...\Git\usr\bin\bash.exe
   const m = n.match(/^(.*)\\Git\\(?:usr\\)?bin\\bash\.exe$/i);
-  if (m?.[1]) return join(m[1], "Git");
+  if (m?.[1]) return win32.join(m[1], "Git");
   // Fallback: walk up looking for usr\bin\dirname.exe
   let cur = dirname(bashPath);
   for (let i = 0; i < 4; i++) {

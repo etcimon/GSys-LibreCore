@@ -245,9 +245,11 @@ validates cleanly on a partially-provisioned host. The same suites run under
 CVA6_BUILD_RUN_HW=1 bun test     # run the default suite(s) for real
 ```
 
-Continuous integration ([`.github/workflows/build-platform.yml`](../.github/workflows/build-platform.yml))
-verifies the platform on Windows, Ubuntu and macOS, with an on-demand Ubuntu job
-that provisions the toolchain and runs the open-source smoke suites.
+Continuous integration ([`.github/workflows/ci.yml`](../.github/workflows/ci.yml))
+verifies the platform on Ubuntu and Windows and drives the fast package gates
+(RTL lint, sv-timing, g6lc_bios, g6lc_qemu, ai-tensor) through this CLI, with an
+on-demand Ubuntu job that provisions the toolchain and runs the open-source smoke
+suites. Lane table: repo-root `AGENTS-build.md` § Continuous integration.
 
 ## Status
 

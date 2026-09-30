@@ -30,7 +30,8 @@ export const g6bCommand: Command = {
     "  libwasm     Browser-ui + optional LDC 1.43.0-beta1 libwasm cell.\n" +
     "  full        zealcli + browser + libwasm (the dual build).\n" +
     "  test        Generic QEMU test with parameters (--fs, --spec, --libwasm, --settle, --keywords, --disk).\n" +
-    "  check       g6b.py check (independence + bun + cargo gates).\n" +
+    "  check       g6b.py check (independence + bun + cargo gates); --rust-only skips the\n" +
+    "              browser-ui bun lane (CI without the libwasm/svelte-d submodules or LDC).\n" +
     "  all         Alias for full.\n" +
     "\n" +
     "Auto-installs cargo/bun/LDC as needed; falls through to build-platform\n" +
@@ -46,6 +47,7 @@ export const g6bCommand: Command = {
     "bun run src/cli/index.ts g6b test --no-emit-fs --disk out/btrfs-key.img --keywords btrfs,STORE",
     "bun run src/cli/index.ts g6b zealcli --spec fixtures/g6lc64-zealcli.json",
     "bun run src/cli/index.ts g6b check",
+    "bun run src/cli/index.ts g6b check --rust-only",
   ],
   needsContext: true,
   async run(args) {

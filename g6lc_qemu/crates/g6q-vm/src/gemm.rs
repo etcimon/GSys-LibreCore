@@ -94,6 +94,7 @@ pub struct ResidentOperand {
 }
 
 impl ResidentOperand {
+    #[allow(clippy::too_many_arguments)]
     fn matches(
         &self,
         ptr: u64,
@@ -928,6 +929,7 @@ pub fn plan_va_turbo_tiles(
 /// at `ptr_b`. `ptr_c` is a scratch the tiles share; the returned `c` is the
 /// accumulated product. The default and the live 512-MAC records are refused.
 /// Exact reuse is enabled only when a planned tile can skip an operand.
+#[allow(clippy::too_many_arguments)]
 pub fn run_va_turbo_test_s8(
     model: &AiIslandModel,
     mem: &PhysMem,

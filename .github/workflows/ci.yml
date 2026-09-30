@@ -1,194 +1,437 @@
-# Copyright 2021 OpenHW Group
-# Licensed under the Apache License, Version 2.0, see LICENSE for details.
-# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Etienne Cimon
+# SPDX-License-Identifier: MIT
+#
+# ci — fast, broad gates for GSys LibreCore, driven through the build platform.
+#
+# Every job is meant to finish in minutes on a stock ubuntu-latest runner. Each
+# job provisions only what its lane needs (a handful of submodules, one Rust
+# toolchain, the pinned Verilator) and then runs the *package's own* green gate
+# through `./build.sh` (build-platform CLI) wherever a surface exists:
+#
+#   platform   build-platform typecheck + unit tests + offline CLI/timings lab (ubuntu, windows)
+#   rtl-lint   Verilator v5.008 --lint-only of the core / SMT2 / OoO / AI packages (`diag run`)
+#   sv-timing  sv-timing cargo tests + `test sv-timing-smoke` (timings compile of a fixture)
+#   bios       g6lc_bios `g6b check --rust-only` (spec-sync, independence, fmt, clippy, cargo test, bios-regress)
+#   qemu       g6lc_qemu `g6q check` (independence, fmt, clippy, cargo test)
+#   ai-tensor  ai-tensor `tensor doctor` + `tensor test` + python unit tests
+#   smoke      (workflow_dispatch only) heavy Verilator+Spike open-source smoke suites
+#
+# The heavy OpenHW regressions stay in openhw-cva6-ci-tier{1,2}.yml (dispatch).
+# Docs are built/deployed by deploy-docs.yml.
+#
+# Checkout is deliberately `submodules: false`: two nested pointers
+# (g6lc_bios/libwasm, g6lc_bios/svelte-d) are not published, so a recursive
+# checkout fails. Jobs init exactly the submodules they need.
 
-# Run functional regression checks
 name: ci
-on: [push, pull_request]
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      smoke:
+        description: "Also run the heavy open-source Verilator+Spike smoke suites"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NO_COLOR: "1"
+  # Never wait on the interactive "install missing managed tools?" prompt.
+  G6LC_NO_TOOL_PROMPT: "1"
+  # Rust lanes: no debuginfo / incremental — CI compiles once, tests once.
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  CARGO_TERM_COLOR: never
+  RUST_TOOLCHAIN: "1.85.0"
 
 jobs:
-  build-riscv-tests:
-    name: build-riscv-tests
-    runs-on: ubuntu-latest
-    env:
-      NUM_JOBS: 8
-    steps:
-    - uses: actions/checkout@v6
-      with:
-        submodules: recursive
-
-    - name: Get specific submodule hash
-      id: core-v-submodule-hash
-      run: |
-        cd verif/core-v-verif
-        echo "hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-
-    - name: Cache toolchain
-      id: cache-toolchain
-      uses: actions/cache@v5
-      env:
-          cache-name: cache-toolchain
-      with:
-          path: tools/riscv-toolchain/
-          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('ci/install-toolchain.sh') }}
-
-    - name: Cache verilator
-      id: cache-verilator
-      uses: actions/cache@v5
-      env:
-          cache-name: cache-verilator
-      with:
-          path: tools/verilator/
-          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('verif/regress/install-verilator.sh') }}
-
-    - name: Cache Spike
-      id: cache-spike
-      uses: actions/cache@v5
-      env:
-          cache-name: cache-spike
-      with:
-          path: tools/spike/
-          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('verif/regress/install-spike.sh')}}-${{ steps.core-v-submodule-hash.outputs.hash }}
-
-    - name: Prepare
-      run: |
-          ci/setup.sh
-
-
-  execute-riscv64-tests:
-    name: execute-riscv64-tests
-    runs-on: ubuntu-latest
-    env:
-      SPIKE_TANDEM: 1
+  # ---------------------------------------------------------------------------
+  platform:
+    name: platform (${{ matrix.os }})
     strategy:
+      fail-fast: false
       matrix:
-        testcase:  [ cv64a6_imafdc_tests ]
-        config:    [ cv64a6_imafdc_sv39_hpdcache, cv64a6_imafdc_sv39_hpdcache_wb, cv64a6_imafdc_sv39_wb, cv64a6_imafdc_sv39 ]
-        simulator: [ veri-testharness ]
-        include:
-          - testcase: dv-riscv-arch-test
-            config: cv64a6_imafdc_sv39_hpdcache
-            simulator: veri-testharness
-          - testcase: dv-riscv-arch-test
-            config: cv64a6_imafdc_sv39_hpdcache_wb
-            simulator: veri-testharness
-    needs:
-      build-riscv-tests
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
-    - uses: actions/checkout@v6
-      with:
-        submodules: recursive
+      - uses: actions/checkout@v4
 
-    - name: Get specific submodule hash
-      id: core-v-submodule-hash
-      run: |
-        cd verif/core-v-verif
-        echo "hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
-    - name: Cache toolchain
-      id: cache-toolchain
-      uses: actions/cache@v5
-      env:
-          cache-name: cache-toolchain
-      with:
-          path: tools/riscv-toolchain/
-          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('ci/install-toolchain.sh') }}
+      # devDependencies only (type packages); the runtime has zero dependencies
+      # and bun.lock is intentionally untracked here.
+      - name: Install dev dependencies
+        working-directory: build-platform
+        run: bun install
 
-    - name: Cache verilator
-      id: cache-verilator
-      uses: actions/cache@v5
-      env:
-          cache-name: cache-verilator
-      with:
-          path: tools/verilator/
-          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('verif/regress/install-verilator.sh') }}
+      - name: Typecheck
+        working-directory: build-platform
+        run: bunx tsc --noEmit
 
-    - name: Cache Spike
-      id: cache-spike
-      uses: actions/cache@v5
-      env:
-          cache-name: cache-spike
-      with:
-          path: tools/spike/
-          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('verif/regress/install-spike.sh')}}-${{ steps.core-v-submodule-hash.outputs.hash }}
+      - name: Unit tests
+        working-directory: build-platform
+        run: bun test
 
-    - name: Run Tests
-      run: |
-          set -x
-          export RISCV=$(pwd)/tools/riscv-toolchain/
-          source ci/install-prereq.sh
-          source verif/sim/setup-env.sh
-          DV_SIMULATORS=${{matrix.simulator}},spike DV_TARGET=${{matrix.config}} bash verif/regress/${{matrix.testcase}}.sh
+      # The bootstrap wrappers and the offline CLI surface. None of these touch
+      # the network or need EDA tools.
+      - name: Platform CLI (Linux)
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x build.sh
+          ./build.sh config
+          ./build.sh status
+          ./build.sh test --list
+          ./build.sh test --open-source --dry-run
+          ./build.sh diag list
+          ./build.sh diag run host
+          ./build.sh timings doctor
+          ./build.sh timings lab-run
 
-    - name: Upload Lint Report to Github
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{matrix.simulator}}.${{matrix.testcase}}.${{matrix.config}}
-        path: 'verif/sim/out*'
-        retention-days: 10
+      - name: Platform CLI (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\build.ps1 config
+          .\build.ps1 status
+          .\build.ps1 test --list
+          .\build.ps1 test --open-source --dry-run
+          .\build.ps1 diag list
+          .\build.ps1 timings doctor
+          .\build.ps1 timings lab-run
 
+      - name: Timings lab-run artifacts
+        shell: bash
+        run: |
+          lab=build-platform/workspace/build/sta-handoff/lab-run
+          for f in lab-report.md lab-report.json seeds.sdc opensta/paths.rpt correlate.json retune-proposal.md retune-proposal.json; do
+            test -f "$lab/$f" || { echo "missing $lab/$f"; exit 1; }
+          done
+          # Offline S3a: fixture inject must yield a numeric overlap_score (not null)
+          grep -Eq '"overlap_score"[[:space:]]*:[[:space:]]*[0-9]' "$lab/correlate.json"
+          grep -q 'cva6-fo4-retune-proposal' "$lab/retune-proposal.json"
+          head -n 40 "$lab/lab-report.md"
 
-  execute-riscv32-tests:
-    name: execute-riscv32-tests
+      - name: Doctor (informational)
+        if: runner.os != 'Windows'
+        continue-on-error: true
+        run: ./build.sh doctor
+
+  # ---------------------------------------------------------------------------
+  rtl-lint:
+    name: rtl-lint (Verilator v5.008)
     runs-on: ubuntu-latest
-    env:
-      SPIKE_TANDEM: 1
-    strategy:
-      matrix:
-        testcase:  [ dv-riscv-arch-test, cv32a6_tests ]
-        config:    [ cv32a65x ]
-        simulator: [ veri-testharness ]
-    needs:
-      build-riscv-tests
+    timeout-minutes: 30
     steps:
-    - uses: actions/checkout@v6
-      with:
-        submodules: recursive
+      - uses: actions/checkout@v4
 
-    - name: Get specific submodule hash
-      id: core-v-submodule-hash
-      run: |
-        cd verif/core-v-verif
-        echo "hash=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+      - name: Submodules for core/Flist.cva6
+        run: git submodule update --init --recursive --depth 1 core/cvfpu core/cache_subsystem/hpdcache
 
-    - name: Cache toolchain
-      id: cache-toolchain
-      uses: actions/cache@v5
-      env:
-          cache-name: cache-toolchain
-      with:
-          path: tools/riscv-toolchain/
-          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('ci/install-toolchain.sh') }}
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
-    - name: Cache verilator
-      id: cache-verilator
-      uses: actions/cache@v5
-      env:
-          cache-name: cache-verilator
-      with:
-          path: tools/verilator/
-          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('verif/regress/install-verilator.sh') }}
+      # The managed prefix the build platform expects (workspace/tooling/verilator-v5.008).
+      - name: Cache pinned Verilator
+        id: cache-verilator
+        uses: actions/cache@v4
+        with:
+          path: build-platform/workspace/tooling/verilator-v5.008
+          key: verilator-v5.008-${{ runner.os }}-${{ hashFiles('verif/regress/install-verilator.sh', 'verif/regress/verilator-v5.patch') }}
 
-    - name: Cache Spike
-      id: cache-spike
-      uses: actions/cache@v5
-      env:
-          cache-name: cache-spike
-      with:
-          path: tools/spike/
-          key: ${{ runner.os }}-build-${{ env.cache-name }}-${{ hashFiles('verif/regress/install-spike.sh')}}-${{ steps.core-v-submodule-hash.outputs.hash }}
+      # Same source, tag and patch as verif/regress/install-verilator.sh, minus
+      # its `make test` (the full Verilator regression is not our gate).
+      - name: Build pinned Verilator (cache miss)
+        if: steps.cache-verilator.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends autoconf bison flex help2man libfl-dev libfl2 zlib1g-dev
+          prefix="$PWD/build-platform/workspace/tooling/verilator-v5.008"
+          build="$RUNNER_TEMP/verilator-build"
+          git clone --branch v5.008 --depth 1 https://github.com/verilator/verilator.git "$build"
+          cd "$build"
+          git apply "$GITHUB_WORKSPACE/verif/regress/verilator-v5.patch" || true
+          autoconf
+          ./configure --prefix="$prefix"
+          make -j"$(nproc)"
+          make install
 
-    - name: Run Tests
-      run: |
-          set -x
-          export RISCV=$(pwd)/tools/riscv-toolchain/
-          source ci/install-prereq.sh
-          source verif/sim/setup-env.sh
-          DV_SIMULATORS=${{matrix.simulator}},spike DV_TARGET=${{matrix.config}} bash verif/regress/${{matrix.testcase}}.sh
+      - name: Point the gate at the managed Verilator
+        run: |
+          cat > build-platform/.config.local.ts <<'EOF'
+          // CI overlay: lint/elab tools come from the managed pinned Verilator prefix.
+          export default { verify: { suite: { root: "verilator-v5.008", version: "v5.008" } } };
+          EOF
+          ./build.sh tools install verilator
+          ./build.sh diag status
 
-    - name: Upload Lint Report to Github
-      uses: actions/upload-artifact@v4
-      with:
-        name: ${{matrix.simulator}}.${{matrix.testcase}}.${{matrix.config}}
-        path: 'verif/sim/out*'
-        retention-days: 10
+      # core = ISA red lines + firmware-accommodation scan + cv64a6_imafdc_sv39 /
+      # cv32a65x lint + formal-package presence. The named ids add the LibreCore
+      # packages (SMT2, integer OoO, two-core OoO coherence + L3, AI island).
+      - name: Diagnostics
+        run: |
+          ./build.sh diag run core \
+            diag-smt2-lint diag-smt2-comb-loops \
+            diag-ooo-int-lint diag-smt2-ooo-int-lint diag-ooo-int2-lint diag-ooo-int2-l3-lint diag-smt2-l3-lint \
+            diag-ai-lint
+
+      - name: Upload lint logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rtl-lint-logs
+          path: build-platform/workspace/build/diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  sv-timing:
+    name: sv-timing
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vendored sv-parser
+        run: git submodule update --init --depth 1 sv-timing/crates/sv-parser
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # `svt.py` only ever drives its contained toolchain under sv-timing/.tools.
+      - name: Cache contained toolchain
+        uses: actions/cache@v4
+        with:
+          path: sv-timing/.tools
+          key: svt-tools-${{ runner.os }}-${{ hashFiles('sv-timing/rust-toolchain.toml', 'sv-timing/requirements.txt') }}
+
+      - name: Cache cargo target
+        uses: actions/cache@v4
+        with:
+          path: sv-timing/target
+          key: svt-target-${{ runner.os }}-${{ hashFiles('sv-timing/Cargo.lock', 'sv-timing/rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: |
+            svt-target-${{ runner.os }}-${{ hashFiles('sv-timing/Cargo.lock', 'sv-timing/rust-toolchain.toml') }}-
+
+      - name: svt setup
+        working-directory: sv-timing
+        run: python tools/svt.py setup
+
+      - name: svt doctor
+        working-directory: sv-timing
+        run: python tools/svt.py doctor
+
+      - name: Package tests (cargo test)
+        working-directory: sv-timing
+        run: python tools/svt.py test
+
+      # Host adapter: build-platform `timings compile` of the fixture project
+      # through the package CLI, then the smoke assertions on the package.
+      - name: Host smoke (build-platform test sv-timing-smoke)
+        run: |
+          chmod +x build.sh
+          ./build.sh test sv-timing-smoke
+
+      # Known-red package hygiene at the time of writing (rustfmt drift, KD0
+      # symbol strings in test fixtures). Reported, not blocking, until fixed.
+      - name: svt check (informational)
+        continue-on-error: true
+        working-directory: sv-timing
+        run: python tools/svt.py check
+
+  # ---------------------------------------------------------------------------
+  bios:
+    name: bios (g6lc_bios)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history: git restore-mtime needs per-file commit times
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}
+        run: rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal --component rustfmt,clippy --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: g6lc_bios
+          cache-workspace-crates: true
+
+      # Cargo fingerprints unchanged crates by mtime; a fresh checkout defeats
+      # the cache unless mtimes are restored from git history.
+      - name: Restore source mtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git-restore-mtime
+          git restore-mtime
+
+      # kernel-spec submodules + botan RFC 8448 vectors (g6b-tls build.rs).
+      - name: spec-sync
+        working-directory: g6lc_bios
+        run: python tools/g6b.py spec-sync
+
+      # The browser-ui bun lane needs the libwasm/svelte-d submodules and LDC;
+      # the tracked browser-ui/out artifacts feed the cargo gates instead.
+      - name: g6b check --rust-only
+        run: |
+          chmod +x build.sh
+          ./build.sh g6b check --rust-only
+
+  # ---------------------------------------------------------------------------
+  qemu:
+    name: qemu (g6lc_qemu)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history: git restore-mtime needs per-file commit times
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}
+        run: rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal --component rustfmt,clippy --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: g6lc_qemu
+          cache-workspace-crates: true
+
+      - name: Restore source mtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git-restore-mtime
+          git restore-mtime
+
+      - name: g6q doctor
+        run: |
+          chmod +x build.sh
+          ./build.sh g6q doctor
+
+      - name: g6q check
+        run: ./build.sh g6q check
+
+  # ---------------------------------------------------------------------------
+  ai-tensor:
+    name: ai-tensor
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # full history: git restore-mtime needs per-file commit times
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python test deps
+        run: python -m pip install --quiet pytest numpy
+
+      - name: Rust ${{ env.RUST_TOOLCHAIN }}
+        run: rustup toolchain install ${{ env.RUST_TOOLCHAIN }} --profile minimal --component rustfmt,clippy --no-self-update
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ai-tensor
+          cache-workspace-crates: true
+
+      - name: Restore source mtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git-restore-mtime
+          git restore-mtime
+
+      - name: tensor doctor
+        run: |
+          chmod +x build.sh
+          ./build.sh tensor doctor
+
+      # cargo tests + golden-check + queue-soak via monorepo-soak/run-ai-tensor.sh
+      - name: tensor test
+        run: ./build.sh tensor test
+
+      - name: Python unit tests
+        working-directory: ai-tensor
+        env:
+          PYTHONPATH: python
+        run: python -m pytest -q -p no:cacheprovider python/tests
+
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: open-source smoke (heavy, on demand)
+    if: github.event_name == 'workflow_dispatch' && inputs.smoke
+    needs: [platform, rtl-lint]
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Submodules for simulation
+        run: git submodule update --init --recursive --depth 1 core/cvfpu core/cache_subsystem/hpdcache corev_apu/axi_mem_if corev_apu/register_interface corev_apu/riscv-dbg corev_apu/rv_plic corev_apu/tb/common_verification verif/core-v-verif
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Cache managed toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            build-platform/workspace/tooling
+            build-platform/workspace/.cache
+          key: ${{ runner.os }}-g6lc-tooling-${{ hashFiles('verif/regress/install-verilator.sh', 'verif/regress/install-spike.sh', '.config.ts') }}
+
+      - name: Provision open-source toolchain
+        run: |
+          chmod +x build.sh
+          ./build.sh setup --install --allow-system-install
+
+      - name: Run open-source smoke suites
+        env:
+          CVA6_BUILD_RUN_HW: "1"
+        run: ./build.sh test --group smoke

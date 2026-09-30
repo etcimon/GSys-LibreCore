@@ -57,9 +57,9 @@
 
 name: openhw-cva6-ci-tier2
 
+# GSys LibreCore: the nightly schedule is disabled — the fast gate is
+# .github/workflows/ci.yml; run this heavy upstream regression on demand.
 on:
-  schedule:
-    - cron: "0 22 * * *" # 22:00 UTC
   workflow_dispatch:
 
 concurrency:

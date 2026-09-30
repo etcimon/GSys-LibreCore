@@ -35,10 +35,11 @@
 
 name: openhw-cva6-ci-tier1
 
+# GSys LibreCore: the fast PR gate is .github/workflows/ci.yml (build-platform
+# lanes). This upstream Verilator+Spike tier builds the whole toolchain (~1 h)
+# and is kept for on-demand runs only. A recursive submodule checkout also
+# requires every nested pointer to be published (see ci.yml header).
 on:
-  pull_request:
-    branches:
-      - master
   workflow_dispatch:
 
 concurrency:

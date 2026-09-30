@@ -214,6 +214,38 @@ bun run src/cli/index.ts remote --remote-ssh ovh_calltorch --remote-ssh-pass pwr
 The command reads `~/.ssh/config` to resolve the host, user, and `IdentityFile`
 when they are not supplied on the command line.
 
+## Continuous integration (`.github/workflows/ci.yml`)
+
+CI is the same platform loop, run in parallel lanes on `ubuntu-latest` (plus a Windows leg for
+the platform itself). Every lane finishes in minutes, provisions **only** what it needs, and calls
+the package's own green gate through `./build.sh` where a surface exists:
+
+| Lane | Provisioning | Command(s) |
+|---|---|---|
+| `platform` (ubuntu, windows) | Bun | `bunx tsc --noEmit`, `bun test`, `config` / `status` / `test --list` / `test --open-source --dry-run` / `diag run host` / `timings doctor` / `timings lab-run` |
+| `rtl-lint` | submodules `core/cvfpu`, `core/cache_subsystem/hpdcache`; pinned Verilator v5.008 built into `build-platform/workspace/tooling/verilator-v5.008` (cached) | `diag run core diag-smt2-lint diag-smt2-comb-loops diag-ooo-int-lint diag-smt2-ooo-int-lint diag-ooo-int2-lint diag-ooo-int2-l3-lint diag-smt2-l3-lint diag-ai-lint` |
+| `sv-timing` | submodule `sv-timing/crates/sv-parser`; `svt.py setup` (contained toolchain, cached) | `svt.py test`, `test sv-timing-smoke`; `svt.py check` informational until rustfmt/KD0 drift is fixed |
+| `bios` | Rust 1.85.0; `g6b.py spec-sync` (kernel-spec + botan vectors) | `g6b check --rust-only` (browser-ui bun lane needs the libwasm/svelte-d submodules + LDC, so it stays local) |
+| `qemu` | Rust 1.85.0 | `g6q doctor`, `g6q check` |
+| `ai-tensor` | Rust 1.85.0; `pytest numpy` | `tensor doctor`, `tensor test`, `pytest ai-tensor/python/tests` |
+| `smoke` | `setup --install --allow-system-install` (Verilator + Spike + RISC-V GCC) | `test --group smoke` — **workflow_dispatch only** (`smoke: true`) |
+
+Design rules the workflow follows:
+
+- **Checkout is `submodules: false`.** Each lane inits the exact submodules it needs; a recursive
+  checkout drags in every nested pointer and dies on the first unpublished one.
+- **The gate's Verilator is the pinned v5.008.** Ubuntu's `verilator` 5.020 lints the core packages
+  but segfaults on the cluster lint top (`g6lc_ooo_int2*`, `*_l3`), so CI builds the pinned tag
+  (same source/patch as `verif/regress/install-verilator.sh`, minus its `make test`) and points the
+  gate at it through the gitignored overlay `build-platform/.config.local.ts`
+  (`verify.suite.root: "verilator-v5.008"`). `tools install verilator` then reports "already installed".
+- **Rust lanes cache with `Swatinem/rust-cache` + `git restore-mtime`.** The workspaces have no
+  crates.io dependencies (KD0), so the cache is only useful if unchanged workspace crates keep their
+  fingerprints — which needs source mtimes restored from git history.
+- **`G6LC_NO_TOOL_PROMPT=1`** so `test` never waits on the "install missing tools?" prompt.
+- Heavy upstream regressions (`openhw-cva6-ci-tier1/2.yml`) are `workflow_dispatch` only; docs are
+  built and published by `deploy-docs.yml`.
+
 ## Relationship to the rest of AGENTS governance
 
 - **Licensing**: `build-platform/` follows `AGENTS-licensing.md` (LicenseRef-Proprietary

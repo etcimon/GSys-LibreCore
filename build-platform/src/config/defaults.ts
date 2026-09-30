@@ -1828,6 +1828,12 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
                 "Pre-existing debt: the shared scoreboard still consults the A-path keep list. Owed artifact is a squash-window contract at the EX->commit boundary; tracked in AGENTS-todo.md.",
             },
             {
+              path: "core/smt/g6lc_issue_barrier.sv",
+              id: "RL-SQUASH-EXEMPT",
+              note:
+                "Recorded debt (2026-09-30): the SMT2 issue barrier consults the A-path keep list at five sites since e64864263 (dual-hart OpenSBI boot). Section E says the list must not migrate; the owed artifact is the squash-window contract that retires it together with core/scoreboard.sv. Do not extend. Tracked in AGENTS-todo.md.",
+            },
+            {
               path: "core/issue_read_operands.sv",
               id: "RL-SQUASH-EXEMPT",
               note:

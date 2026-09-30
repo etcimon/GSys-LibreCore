@@ -597,7 +597,7 @@ from tooling — claiming the RTL licence over machine-generated glue is a
 | Python venv provisioner (`python/venv.ts`) | **done** |
 | `setup --install` orchestration (+ post-setup tools probe) | **done** |
 | Regression catalog + suite selection + preflight | **done** |
-| Cross-OS CI (`.github/workflows/build-platform.yml`) | **done** |
+| CI lanes through the CLI (`.github/workflows/ci.yml`; see `AGENTS-build.md`) | **done** |
 | Windows VS Build Tools provisioning | **planned** (config flag present) |
 | SV source discovery change-detection wired into `build` | **done** |
 | U5 OoO formal tasks in `verify.formalTasks` | **done** |

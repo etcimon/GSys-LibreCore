@@ -249,7 +249,8 @@ def cmd_spec_sync(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_check(_: argparse.Namespace) -> int:
+def cmd_check(args: argparse.Namespace) -> int:
+    rust_only = bool(getattr(args, "rust_only", False))
     failed: list[str] = []
     log("--- spec-sync ---")
     if cmd_spec_sync(argparse.Namespace(check=True)) != 0:
@@ -271,7 +272,9 @@ def cmd_check(_: argparse.Namespace) -> int:
         ui = package_root() / "browser-ui"
         bun = shutil.which("bun")
         log("--- browser-ui ---")
-        if not bun:
+        if rust_only:
+            log("skipped (--rust-only); the tracked browser-ui/out artifacts feed the cargo gates")
+        elif not bun:
             err("bun not on PATH (browser-ui)")
             failed.append("browser-ui")
         else:
@@ -411,7 +414,12 @@ def cmd_regress(args: argparse.Namespace) -> int:
 def main() -> int:
     p = argparse.ArgumentParser(prog="g6b")
     sub = p.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("check")
+    chk = sub.add_parser("check", help="GREEN gate: spec-sync check + independence + bun + cargo")
+    chk.add_argument(
+        "--rust-only",
+        action="store_true",
+        help="skip the browser-ui bun test/build lane (CI without the libwasm/svelte-d submodules or LDC)",
+    )
     ss = sub.add_parser(
         "spec-sync",
         help="git submodule update --init for kernel-spec + botan fetch/pull for g6b-tls vectors",

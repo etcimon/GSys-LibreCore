@@ -302,10 +302,13 @@ unit = chr(10).join([
 assert proxy.l2_units_passed(unit, 0)
 assert not proxy.l2_units_passed(unit.replace("mshr_full=1", "mshr_full=0"), 0)
 assert not proxy.l2_units_passed(unit, 1)
-assert proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=0 mem=2", 0, 0)
-assert proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=1 mem=3", 0, 1)
-assert not proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=1 mem=3", 0, 0)
-assert not proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=1 mem=3", 1, 1)
+assert proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=0 tagsram=0 wu=0 mem=2", 0, 0)
+assert proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=1 tagsram=0 wu=0 mem=3", 0, 1)
+assert proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=1 tagsram=1 wu=1 mem=4", 0, 1, 1, 1)
+assert not proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=1 tagsram=0 wu=0 mem=3", 0, 0)
+assert not proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=1 tagsram=0 wu=0 mem=3", 0, 1, 1)
+assert not proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=1 tagsram=0 wu=0 mem=3", 1, 1)
+assert not proxy.l2_synth_passed("[l2-tb] SYNTH PASS rr=1 mem=3", 0, 1)
 print("L2 snapshot checks passed")
 `;
   const result = Bun.spawnSync([python, "-c", script, join(import.meta.dir, "../../verif/regress/remote/testharness_proxy.py")]);

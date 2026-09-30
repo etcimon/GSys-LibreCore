@@ -3852,6 +3852,7 @@ impl Hart {
     /// `ptr_b`. `ptr_c` is scratch; the returned product is accumulated here.
     /// A model that is not the 8-MAC 1024×512×16 tile is refused. Reuse is
     /// enabled only when a planned tile can skip an operand.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_va_turbo_doorbell(
         &mut self,
         mem: &mut PhysMem,
