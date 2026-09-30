@@ -44,7 +44,7 @@ export async function syncSubmodules(
     logger.step(index, enabled.length, `submodule ${id} → ${spec.path}`);
 
     if (options.dryRun) {
-      logger.info(`[dry-run] git submodule update --init ${depthArgs.join(" ")} -- ${spec.path}`);
+      logger.info(`[dry-run] git submodule update --init --checkout ${depthArgs.join(" ")} -- ${spec.path}`);
       if (spec.ref) logger.info(`[dry-run] git -C ${spec.path} checkout ${spec.ref}`);
       results.push({ id, path: spec.path, ref: spec.ref, ok: true, skipped: true });
       continue;
@@ -52,7 +52,9 @@ export async function syncSubmodules(
 
     const init = await run(
       "git",
-      ["submodule", "update", "--init", ...depthArgs, "--", spec.path],
+      // --checkout overrides `update = none`: the heavy vendored trees are marked lazy
+      // in .gitmodules so recursive checkouts skip them; an explicit sync must not.
+      ["submodule", "update", "--init", "--checkout", ...depthArgs, "--", spec.path],
       { cwd: repoRoot, logger, allowFailure: true },
     );
     let ok = init.ok;

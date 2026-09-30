@@ -18,6 +18,14 @@ clone_one() {
     return 0
   fi
   if git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    if git -C "$REPO" config -f .gitmodules --get "submodule.$path.path" >/dev/null 2>&1; then
+      # Already declared. These forks are `update = none` in .gitmodules (a
+      # recursive checkout skips ~1.9 GB it never compiles), so the explicit
+      # init here must say --checkout to override that.
+      echo "submodule update --init --checkout --depth 1 -> $path"
+      git -C "$REPO" submodule update --init --checkout --depth 1 -- "$path"
+      return 0
+    fi
     echo "submodule add --depth 1 -b $branch $url -> $path"
     git -C "$REPO" submodule add --depth 1 --branch "$branch" --force \
       "$url" "$path" || git clone --depth 1 --branch "$branch" "$url" "$dir"

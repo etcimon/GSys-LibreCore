@@ -55,33 +55,53 @@
 [submodule "corev_apu/fpga/src/gpio"]
 	path = corev_apu/fpga/src/gpio
 	url = https://github.com/pulp-platform/gpio.git
+# Lazy (update = none): 691 MB + 8 nested submodules; fetched only by
+# `g6lc-build vendor sync ara` (explicit --checkout). A recursive checkout skips it.
 [submodule "vendor/ara/upstream"]
 	path = vendor/ara/upstream
 	url = https://github.com/pulp-platform/ara.git
+	update = none
+	shallow = true
+# Lazy (update = none): the OpenWrt distribution trees and EDK2 (~1.9 GB, 13 nested
+# submodules under edk2) belong to the g6lc_qemu Linux/firmware flows (`g6q`, the
+# `linux` suites) and are fetched there with an explicit --checkout; a recursive
+# checkout of the monorepo skips them.
 [submodule "g6lc_qemu/linux-dist/openwrt"]
 	path = g6lc_qemu/linux-dist/openwrt
 	url = https://github.com/etcimon/openwrt.git
 	branch = openwrt-24.10
+	update = none
+	shallow = true
 [submodule "g6lc_qemu/linux-dist/openwrt-packages"]
 	path = g6lc_qemu/linux-dist/openwrt-packages
 	url = https://github.com/etcimon/openwrt-packages.git
 	branch = openwrt-24.10
+	update = none
+	shallow = true
 [submodule "g6lc_qemu/linux-dist/openwrt-luci"]
 	path = g6lc_qemu/linux-dist/openwrt-luci
 	url = https://github.com/etcimon/openwrt-luci.git
 	branch = openwrt-24.10
+	update = none
+	shallow = true
 [submodule "g6lc_qemu/linux-dist/openwrt-routing"]
 	path = g6lc_qemu/linux-dist/openwrt-routing
 	url = https://github.com/etcimon/openwrt-routing.git
 	branch = openwrt-24.10
+	update = none
+	shallow = true
 [submodule "g6lc_qemu/linux-dist/openwrt-telephony"]
 	path = g6lc_qemu/linux-dist/openwrt-telephony
 	url = https://github.com/etcimon/openwrt-telephony.git
 	branch = openwrt-24.10
+	update = none
+	shallow = true
 [submodule "g6lc_qemu/linux-dist/edk2"]
 	path = g6lc_qemu/linux-dist/edk2
 	url = https://github.com/etcimon/edk2.git
 	branch = master
+	update = none
+	shallow = true
 [submodule "vendor/litex/litedram"]
 	path = vendor/litex/litedram
 	url = https://github.com/enjoy-digital/litedram.git

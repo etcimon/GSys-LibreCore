@@ -82,7 +82,13 @@ command first. This keeps minimal checkouts minimal and makes network actions au
 
 ### 4.1 `submodule` (default for controllers/PHY)
 - First run: `git submodule add --force <url> <path>` then, if `ref` is set, `git -C <path> checkout <ref>`.
-- Later runs: `git submodule update --init [--depth 1] -- <path>` then `checkout <ref>`.
+- Later runs: `git submodule update --init --checkout [--depth 1] -- <path>` then `checkout <ref>`.
+  `--checkout` matters: heavy vendored trees (`vendor/ara/upstream`, the `g6lc_qemu/linux-dist/*`
+  forks) are declared `update = none` + `shallow = true` in `.gitmodules`, so a plain recursive
+  checkout (`git submodule update --init --recursive`, `actions/checkout` with
+  `submodules: recursive`) **skips** them — that is what keeps a full monorepo checkout at ~1 GB /
+  a couple of minutes instead of ~3.5 GB / 6 min — and only an explicit `--checkout` sync fetches
+  them. Add the same two keys when you register another large, lazily-used tree.
 - Preferred because controllers are **version-bumped and re-scanned** over their life; a submodule
   keeps the pin visible in `.gitmodules` + the gitlink and is trivial to `vendor update`.
 

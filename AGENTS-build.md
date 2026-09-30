@@ -232,8 +232,12 @@ the package's own green gate through `./build.sh` where a surface exists:
 
 Design rules the workflow follows:
 
-- **Checkout is `submodules: false`.** Each lane inits the exact submodules it needs; a recursive
-  checkout drags in every nested pointer and dies on the first unpublished one.
+- **Checkout is `submodules: false`.** Each lane inits the exact submodules it needs. A full
+  recursive checkout does work (every nested pointer is published, including the
+  `etcimon/postgres-pglite` fork under `g6lc_bios/pglite`), but the lazily-used heavy trees
+  (`vendor/ara/upstream`, `g6lc_qemu/linux-dist/*` — ~2.6 GB, 21 nested submodules, ~4 of the
+  ~6 minutes) are `update = none` in `.gitmodules`, so recursive inits skip them and the explicit
+  syncs (`vendor sync`, `linux-dist/init-submodules.sh`) pass `--checkout` (see `AGENTS-vendor.md` §4.1).
 - **The gate's Verilator is the pinned v5.008 with the repo's custom fixes.** Ubuntu's `verilator`
   5.020 lints the core packages but segfaults on the cluster lint top (`g6lc_ooo_int2*`, `*_l3`),
   and any stock tool lacks `verif/regress/verilator-*.patch`. CI therefore runs
