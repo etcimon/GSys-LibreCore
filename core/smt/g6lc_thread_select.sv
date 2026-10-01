@@ -372,8 +372,11 @@ module g6lc_thread_select
         reason_yield = 1'b0;
       end
 
-      // N1c bounded drain force. WFI is an immediate request; otherwise the
-      // no-commit counter must reach DF_MAX. One force per drain: while
+      // N1c bounded drain force. WFI is an immediate request once no commit
+      // is in flight (a committing WFI retires and the drain resolves on its
+      // own); otherwise the no-commit counter must reach DF_MAX, and the
+      // absolute bound backstops a sustained masked-commit stream. One force
+      // per drain: while
       // drain_forced_q is armed no further request is issued — a re-fired
       // force would keep flush_ctrl_id high and drain_ready_i could never
       // rise (the formal boundedness proof catches that livelock otherwise).
@@ -386,7 +389,7 @@ module g6lc_thread_select
 `else
       drain_force = DRAIN_FORCE_EN && drain_pending_q && !drain_ready_i &&
           drain_killable_i && !drain_forced_q && !drain_issued_q &&
-          (head_wfi_i ||
+          ((!commit_i && head_wfi_i) ||
            (!commit_i && (drain_force_cnt_q == DF_W'(DF_MAX)) &&
             head_plain_i) ||
            ((drain_abs_cnt_q == DF_ABS_W'(DF_ABS_MAX)) && head_plain_i));

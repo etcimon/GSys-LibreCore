@@ -3344,6 +3344,49 @@ and the `G6LC_MUT_STB_NO_HEAD_GATE` kernel control that attributes the
 Ring 32 remains **not adopted** until r9 lands; ring 16 stays the
 production geometry.
 
+**Addendum — reruns on the WFI-corrected tree.**
+
+- *r9/r4 (WFI leg on the completed head, 9162ea506):* ring-32 PASS at
+  **18,338,093** again — bit-identical cycles, `[smt-drain]` and
+  retirement vectors to r8 — and ring-16 at 18,297,733 with the same 3
+  `force_wfi`. So the E1 class change was not what fired the WFI leg.
+  Root cause: the T10g gate restructure had dropped `!commit_i` from the
+  WFI leg (N1c: `!commit_i && (head_wfi || …)`), so a WFI committing in
+  that very cycle — after which the hart halts and the drain resolves
+  by itself — was force-flushed. `!commit_i` restored on the WFI and
+  relative legs; the absolute leg alone is commit-independent.
+- *Kernel attribution (`G6LC_MUT_STB_NO_HEAD_GATE` r16 model
+  `068678dc`):* `mc_branchy` 3,603,095 with the mutant vs 3,603,105 N1d
+  → the +11 vs M1d is the store-buffer head-gate release (a liveness
+  release, kept); `ooo_ilp_chain` 1,345 and `ooo_mem_dep` 1,759 are
+  unchanged by the mutant → the −148/−53 improvements come from the
+  other N1d paths (CSR age order / kill / LSQ), not the head gate.
+- *r10/r5 (`!commit_i` restored on the WFI leg; models r16 `c5ef0059`,
+  r32 `92a39816`):* **ring-32 int2_l3 24M PASS at 18,338,328,
+  `strictDualPassed`, `force=0 force_wfi=0 force_abs=0 acnt=0` on both
+  cores** — the three root-cause fixes alone resolve the T10f wedge;
+  the drain bound is a never-firing backstop on this workload (the
+  absolute counter never approached its limit). Ring-16 int2_l3 PASS
+  at **18,297,379** (−2 vs the N1b anchor 18,297,381), `force=0` both
+  cores, RVFI hart00 `5056e553…` / hart02 `c3406211…`. Byte-identity
+  with N1b is **not expected**: the CSR age-order rule reorders issue
+  on every OpenSBI CSR burst and the head gate releases real stalls, so
+  the fixes are not inert on this boot (−2 cycles, retirement reorders
+  and one interrupt-service block shifted in a 31.9 M-line trace;
+  instruction streams otherwise identical). The ring-16 anchor is
+  **re-baselined to 18,297,379 / `5056e553…` / `c3406211…`**
+  (determinism of the tree: the r3/r4 pair on the previous cut was
+  byte-identical). The `smt2_ooo_int`, `smt2` and `int2` anchors
+  remain byte-identical (above). Local sby all tasks PASS / noforce×2
+  FAIL after the gate change; lint 0e; remote int2_l3 lint 29w/0e.
+
+**Decision.** Ring 32 now *boots* but at 18,338,328 > 18,297,379
+(+0.22 %) it still fails the ≤-anchor bar, and T10f's ring-32 kernel
+numbers (ilp/memdep ~2× ring 16) stand until M3b lands fast-squash —
+**ring 32 not adopted; ring 16 stays the production geometry.** The
+M7/M3b reopen preconditions (T9j) are unchanged except that the
+"stuck-drain hole" precondition is now closed by T10g.
+
 **Store unit note (audit, not fixed).** `store_unit` consumes `ex_i`
 whenever `state_q != IDLE` without provenance; the PTW-broadcast
 exposure is not reachable there today (a store translating holds the
