@@ -774,6 +774,26 @@ held-secondary fold code 125 is decoded via the `program exit code` line). On th
 `g6lc64_ooo` SB=16 overlay the historical stage-9 hang does **not** reproduce:
 `ooo_fp_cancel_tid_reuse` completes in 5,279 cycles Spike-exact.
 
+## FP on the mixed-residency path — per-hart frm/fflags/FS (FP-2)
+
+The two-hart directed test `verif/tests/custom/multicore/mc_fp_mixed.S` runs on the
+qualification-only FP variant of `g6lc64_smt2_ooo_int` (one physical core, two
+co-resident SMT harts, `SmtDrainedHandoff=0`, built with
+`+define+G6LC_OOO_FP_QUALIFY`). Phase A: hart 0 sets `frm=RTZ`, hart 1 `frm=RUP`, and
+both loop `fadd.d(1.0, 2^-60, DYN)` so the peer's ops issue inside each other's active
+windows — hart 0 must get `0x3FF0000000000000`, hart 1 `0x3FF0000000000001` every
+round. Phase B keeps hart 0 accruing NX while hart 1 clears `fflags` and runs exact
+ops (reads back 0). Phase C has hart 1 set `mstatus.FS=Off`, take exactly one
+illegal-instruction trap (`mcause=2`, handler advances `mepc`), restore FS=Initial,
+then read FS=Clean with no further FP op while hart 0's concurrent FP stream ends
+FS=Dirty and takes no trap. Distinct raw tohost codes identify each hart-specific
+failure (5/7 frm, 9/11 fflags, 13/15 trap count, 17/19 FS readback, 21 barrier);
+`ORACLE_NEGATIVE` flips hart 1's expected rounding result (code 3). The review
+mutation `G6LC_MUT_FPU_ACTIVE_FRM` (scalar active-hart frm restored) fails with
+hart 1's code — the detection doubles as the co-residency witness. Runs via
+`REVIEW_MC_DIRECTED_SRC=mc_fp_mixed.S` on `run_mc_int2_review.py`
+(`REVIEW_MC_MARCH=rv64imafdc_zicsr`, `REVIEW_MC_MABI=lp64d`, mask `11`).
+
 ## Historical misaligned-load tests (2026-09-20)
 
 `ooo_mem_min.S` stages32/33 are registered as `ooo_load_misaligned_trap` and

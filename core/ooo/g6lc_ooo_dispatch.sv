@@ -144,17 +144,10 @@ module g6lc_ooo_dispatch
   // (T6a) on the protected dual-hart OpenSBI/HSM profile; mixed residency
   // (drain gate off) is promoted to production on single-core packages by
   // T9d/M2 and stays qualification-gated on multi-core packages.
-`ifndef G6LC_OOO_FP_QUALIFY
-  if (CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff) begin : gen_err_ooo_fp_mh
-    // FP under mixed residency stays refused: the hart-tagged lazy-FS audit is
-    // the remaining work. Drained multi-hart FP and single-hart FP are the
-    // production legs (T9g/M4: Spike FP suite on the int2_l3 FP model, the
-    // fpu_wrap owner-lifetime proof g6lc_ooo_fp_owner, and the four-hart
-    // FP-residency kernel). G6LC_OOO_FP_QUALIFY re-opens the mixed leg for a
-    // qualification build only.
-    $error("OoO FP under mixed residency is unqualified: hart-tagged lazy-FS is open (T9g).");
-  end
-`endif
+  // FP under mixed residency is legal since FP-2: the issuing op's hart owns
+  // frm/fprec at the FPU input (ex_stage FPU_HART_CTX) and fflags/FS commit
+  // per hart — evidenced by mc_fp_mixed, the G6LC_MUT_FPU_ACTIVE_FRM mutation,
+  // the FP suite, and the mixed strict boot.
 
   // An LSQ store entry is the reservation of a store_buffer speculative-queue
   // slot held until commit; granting more credits than slots strands stores.

@@ -371,14 +371,20 @@ F/D execution + register file state (`#zf`, `#ext:d`): `core/fpu_wrap.sv` carrie
 owner table (`owner_live_q`/`owner_cancelled_q`) so an FP result may write back only while its
 `trans_id` still owns a live, uncancelled slot — proven at the writeback seam by
 `core/ooo/formal/g6lc_ooo_fp_owner.sby` (bmc depth 24 ≥ the S2 reuse window; the
-`G6LC_MUT_FP_NO_OWNER_LIVE` mutation fails at step 2). `check_cfg` now reads
-`assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.NrHarts > 1 && !Cfg.SmtDrainedHandoff))` under
-`G6LC_OOO_FP_QUALIFY` (single-hart FP on `g6lc64_ooo` and drained multi-hart FP on
-`g6lc64_ooo_int2_l3` are production legs; the same term — without the `ifndef` — lives in
-`g6lc_ooo_dispatch.sv` as `gen_err_ooo_fp_mh`), and `!FpPresent` is dropped from the `COH_OOO`
-legality term. FP under mixed residency stays refused (hart-tagged lazy-FS audit);
+`G6LC_MUT_FP_NO_OWNER_LIVE` mutation fails at step 2). `!FpPresent` is dropped from the
+`COH_OOO` legality term; single-hart FP on `g6lc64_ooo` and drained multi-hart FP on
+`g6lc64_ooo_int2_l3` are production legs (T9g). **FP under mixed residency is legal since FP-2
+(2026-10-01)**: the former `G6LC_OOO_FP_QUALIFY` leg of `check_cfg` and `gen_err_ooo_fp_mh` in
+`g6lc_ooo_dispatch.sv` are removed. The hart-tagged FP context is: `fs`/`vfs`/`frm` decoded per
+lane hart (`id_stage`, T6b-3a); `dirty_fp_state`/`fflags` committed per owning hart
+(`g6lc_smt_csr_bank`); per-hart FP rename maps/pools (`g6lc_rename`); and — the FP-2 fix — the
+FPU's dynamic rounding mode and Xf precision (`#frm`, `fcsr`) selected by the **issuing op's
+hart**, not the active hart: `issue_read_operands.fpu_hart_o` → `ex_stage`
+`fpu_frm_ctx = FPU_HART_CTX ? fpu_frm_b_i[fpu_hart_i] : fpu_frm_i` (same for `fprec`, bank
+`fprec_b_o`), `FPU_HART_CTX = FpPresent && NrHarts > 1 && !SmtDrainedHandoff` so the mux folds
+away on every drained or single-hart package. Review mutation `G6LC_MUT_FPU_ACTIVE_FRM`.
 `g6lc64_ooo_server` stays an opt-in/unqualified target (`COH_FILTERED` coherence).
-Evidence: `core/ooo/AGENTS-ooo-plan.md` T9g.
+Evidence: `core/ooo/AGENTS-ooo-plan.md` T9g, T11.
 
 ## Control-flow hold armed only by a pushed target (2026-09-23, SB=16 finding)
 

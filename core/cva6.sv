@@ -560,6 +560,9 @@ module cva6
   alu_bypass_t alu_bypass_id_ex;
   logic [CVA6Cfg.VLEN-1:0] pc_id_ex;
   logic [HART_ID_BITS-1:0] branch_hart_id_ex;
+  // FP-2: hart of the FPU op in EX — under mixed residency frm/fprec must
+  // come from the issuing op's hart, not the active one.
+  logic [HART_ID_BITS-1:0] fpu_hart_id_ex;
   logic zcmt_id_ex;
   logic is_compressed_instr_id_ex;
   logic [CVA6Cfg.NrIssuePorts-1:0][31:0] tinst_ex;
@@ -738,6 +741,7 @@ module cva6
   logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] debug_mode_b;
   riscv::xs_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] fs_b, vfs_b, vs_b;
   logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][2:0] frm_b;
+  logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][6:0] fprec_b;
   riscv::cbie_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] mcbie_b, scbie_b, hcbie_b;
   logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] mcbcfe_b, scbcfe_b, hcbcfe_b;
   logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] mcbze_b, scbze_b, hcbze_b;
@@ -2300,6 +2304,7 @@ module cva6
       .alu_bypass_o            (alu_bypass_id_ex),
       .pc_o                    (pc_id_ex),
       .branch_hart_o           (branch_hart_id_ex),
+      .fpu_hart_o              (fpu_hart_id_ex),
       .is_zcmt_o               (zcmt_id_ex),
       .is_compressed_instr_o   (is_compressed_instr_id_ex),
       .tinst_o                 (tinst_ex),
@@ -2496,6 +2501,9 @@ module cva6
       .fpu_rm_i                (fpu_rm_id_ex),
       .fpu_frm_i               (frm_csr_id_issue_ex),
       .fpu_prec_i              (fprec_csr_ex),
+      .fpu_hart_i              (fpu_hart_id_ex),
+      .fpu_frm_b_i             (frm_b),
+      .fpu_prec_b_i            (fprec_b),
       .fpu_trans_id_o          (fpu_trans_id_ex_id),
       .fpu_result_o            (fpu_result_ex_id),
       .fpu_valid_o             (fpu_valid_ex_id),
@@ -2714,6 +2722,7 @@ module cva6
       .vfs_b_o                 (vfs_b),
       .vs_b_o                  (vs_b),
       .frm_b_o                 (frm_b),
+      .fprec_b_o               (fprec_b),
       .mcbie_b_o               (mcbie_b),
       .scbie_b_o               (scbie_b),
       .hcbie_b_o               (hcbie_b),

@@ -120,6 +120,9 @@ module issue_stage
     output logic [1:0] fpu_fmt_o,
     // FPU rm field - EX_STAGE
     output logic [2:0] fpu_rm_o,
+    // FP-2: SMT hart of the FPU op in EX - EX_STAGE (mixed-residency
+    // frm/fprec select; the issuing op's hart owns both).
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] fpu_hart_o,
     // FPU early valid - EX_STAGE
     input logic fpu_early_valid_i,
     // ALU2 FU is valid - EX_STAGE
@@ -540,6 +543,7 @@ module issue_stage
       .fpu_valid_o,
       .fpu_fmt_o,
       .fpu_rm_o,
+      .fpu_hart_o,
       .fpu_early_valid_i,
       .alu2_valid_o,
       .csr_valid_o,

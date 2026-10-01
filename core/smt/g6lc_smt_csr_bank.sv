@@ -183,6 +183,9 @@ module g6lc_smt_csr_bank
     output riscv::xs_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] vfs_b_o,
     output riscv::xs_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] vs_b_o,
     output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][2:0] frm_b_o,
+    // FP-2: per-hart fprec — the scalar fprec_o tracks the active hart and
+    // would mis-select precision for a resident peer's issuing FPU op.
+    output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][6:0] fprec_b_o,
     output riscv::cbie_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] mcbie_b_o,
     output riscv::cbie_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] scbie_b_o,
     output riscv::cbie_t [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] hcbie_b_o,
@@ -349,6 +352,7 @@ module g6lc_smt_csr_bank
     assign vfs_b_o[0]        = vfs_o;
     assign vs_b_o[0]         = vs_o;
     assign frm_b_o[0]        = frm_o;
+    assign fprec_b_o[0]      = fprec_o;
     assign mcbie_b_o[0]      = mcbie_o;
     assign scbie_b_o[0]      = scbie_o;
     assign hcbie_b_o[0]      = hcbie_o;
@@ -588,6 +592,7 @@ module g6lc_smt_csr_bank
       assign vfs_b_o[h]        = vfs_b[h];
       assign vs_b_o[h]         = vs_b[h];
       assign frm_b_o[h]        = frm_b[h];
+      assign fprec_b_o[h]      = fprec_b[h];
       assign mcbie_b_o[h]      = mcbie_b[h];
       assign scbie_b_o[h]      = scbie_b[h];
       assign hcbie_b_o[h]      = hcbie_b[h];

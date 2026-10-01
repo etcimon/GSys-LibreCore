@@ -104,6 +104,9 @@ module issue_read_operands
     output logic [1:0] fpu_fmt_o,
     // FPU rm field - EX_STAGE
     output logic [2:0] fpu_rm_o,
+    // FP-2: SMT hart of the FPU op accepted this cycle - EX_STAGE; under
+    // mixed residency the issuing op's hart owns frm/fprec.
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] fpu_hart_o,
     // ALU2 FU is valid - EX_STAGE
     output logic [CVA6Cfg.NrIssuePorts-1:0] alu2_valid_o,
     // CSR is valid - EX_STAGE
@@ -192,6 +195,7 @@ module issue_read_operands
   logic [CVA6Cfg.NrIssuePorts-1:0] fpu_valid_n, fpu_valid_q;
   logic [1:0] fpu_fmt_n, fpu_fmt_q;
   logic [2:0] fpu_rm_n, fpu_rm_q;
+  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] fpu_hart_n, fpu_hart_q;
   logic [CVA6Cfg.NrIssuePorts-1:0] alu2_valid_n, alu2_valid_q;
   logic [CVA6Cfg.NrIssuePorts-1:0] lsu_valid_n, lsu_valid_q;
   logic [CVA6Cfg.NrIssuePorts-1:0] csr_valid_n, csr_valid_q;
@@ -327,6 +331,7 @@ module issue_read_operands
   assign fpu_valid_o = fpu_valid_q;
   assign fpu_fmt_o = fpu_fmt_q;
   assign fpu_rm_o = fpu_rm_q;
+  assign fpu_hart_o = fpu_hart_q;
   assign alu2_valid_o = alu2_valid_q;
   assign cvxif_valid_o = CVA6Cfg.CvxifEn ? cvxif_valid_q : '0;
   assign cvxif_off_instr_o = CVA6Cfg.CvxifEn ? cvxif_off_instr_q : '0;
@@ -1082,6 +1087,7 @@ module issue_read_operands
     fpu_valid_n    = '0;
     fpu_fmt_n      = '0;
     fpu_rm_n       = '0;
+    fpu_hart_n     = '0;
     alu2_valid_n   = '0;
     csr_valid_n    = '0;
     branch_valid_n = '0;
@@ -1115,10 +1121,12 @@ module issue_read_operands
               fpu_valid_n[i] = 1'b1;
               fpu_fmt_n      = orig_instr[i].rftype.fmt;  // fmt bits from instruction
               fpu_rm_n       = orig_instr[i].rftype.rm;  // rm bits from instruction
+              fpu_hart_n     = issue_instr_i[i].hart_id;  // FP-2: issuing hart owns frm/fprec
             end else if (issue_instr_i[i].fu == FPU_VEC && CVA6Cfg.FpPresent) begin
               fpu_valid_n[i] = 1'b1;
               fpu_fmt_n      = orig_instr[i].rvftype.vfmt;  // vfmt bits from instruction
               fpu_rm_n       = {2'b0, orig_instr[i].rvftype.repl};  // repl bit from instruction
+              fpu_hart_n     = issue_instr_i[i].hart_id;
             end
           end
         endcase
@@ -1164,6 +1172,7 @@ module issue_read_operands
       fpu_valid_q    <= '0;
       fpu_fmt_q      <= '0;
       fpu_rm_q       <= '0;
+      fpu_hart_q     <= '0;
       alu2_valid_q   <= '0;
       csr_valid_q    <= '0;
       branch_valid_q <= '0;
@@ -1175,6 +1184,7 @@ module issue_read_operands
       fpu_valid_q    <= fpu_valid_n;
       fpu_fmt_q      <= fpu_fmt_n;
       fpu_rm_q       <= fpu_rm_n;
+      fpu_hart_q     <= fpu_hart_n;
       alu2_valid_q   <= alu2_valid_n;
       csr_valid_q    <= csr_valid_n;
       branch_valid_q <= branch_valid_n;

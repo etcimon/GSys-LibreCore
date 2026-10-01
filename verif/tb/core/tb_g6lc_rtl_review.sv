@@ -4166,7 +4166,7 @@ module tb_g6lc_review_csrbank;
     .tvm_o(tvm_act),.tw_o(),.vtw_o(),.tsr_o(),.hu_o(),.debug_mode_o(),.single_step_o(),
     // T6b-3a: per-bank decode context + PMU inhibit; sampled in scenario 3.
     .tvm_b_o(tvm_b),.tw_b_o(tw_b),.vtw_b_o(vtw_b),.tsr_b_o(tsr_b),.hu_b_o(hu_b),
-    .debug_mode_b_o(),.fs_b_o(),.vfs_b_o(),.vs_b_o(),.frm_b_o(),
+    .debug_mode_b_o(),.fs_b_o(),.vfs_b_o(),.vs_b_o(),.frm_b_o(),.fprec_b_o(),
     .mcbie_b_o(),.scbie_b_o(),.hcbie_b_o(),.mcbcfe_b_o(),.scbcfe_b_o(),.hcbcfe_b_o(),
     .mcbze_b_o(),.scbze_b_o(),.hcbze_b_o(),.jvt_b_o(jvt_b),
     .mcountinhibit_b_o(),

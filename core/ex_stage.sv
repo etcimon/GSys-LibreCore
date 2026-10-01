@@ -154,6 +154,12 @@ module ex_stage
     input logic [2:0] fpu_frm_i,
     // FPU precision control - CSR_REGFILE
     input logic [6:0] fpu_prec_i,
+    // FP-2: hart of the FPU op in EX - ISSUE_STAGE; under mixed residency the
+    // issuing op's hart owns frm/fprec (the scalars track the active hart).
+    input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] fpu_hart_i,
+    // Per-hart frm/fprec banks - CSR_REGFILE
+    input logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][2:0] fpu_frm_b_i,
+    input logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][6:0] fpu_prec_b_i,
     // FPU transaction ID - ISSUE_STAGE
     output logic [CVA6Cfg.TRANS_ID_BITS-1:0] fpu_trans_id_o,
     // FPU result - ISSUE_STAGE
@@ -540,6 +546,24 @@ module ex_stage
         end
       end
 
+      // FP-2: mixed-residency frm/fprec. The scalar CSR outputs track the
+      // ACTIVE hart; when two harts are co-resident a peer's FPU op issued
+      // this cycle would otherwise be rounded/precisioned with the wrong
+      // hart's context. Constant-folds to the scalars wherever FPU ops can
+      // only belong to one hart (NrHarts==1 or drained handoff).
+      localparam bit FPU_HART_CTX = CVA6Cfg.FpPresent && CVA6Cfg.NrHarts > 1 &&
+                                    !CVA6Cfg.SmtDrainedHandoff;
+      logic [2:0] fpu_frm_ctx;
+      logic [6:0] fpu_prec_ctx;
+`ifdef G6LC_MUT_FPU_ACTIVE_FRM
+      // Review mutation: regress frm to the active hart — hart-tagged DYN
+      // rounding must then fail under mixed residency.
+      assign fpu_frm_ctx  = fpu_frm_i;
+`else
+      assign fpu_frm_ctx  = FPU_HART_CTX ? fpu_frm_b_i[fpu_hart_i] : fpu_frm_i;
+`endif
+      assign fpu_prec_ctx = FPU_HART_CTX ? fpu_prec_b_i[fpu_hart_i] : fpu_prec_i;
+
       fpu_wrap #(
           .CVA6Cfg(CVA6Cfg),
           .exception_t(exception_t),
@@ -554,8 +578,8 @@ module ex_stage
           .fu_data_i(fpu_data),
           .fpu_fmt_i,
           .fpu_rm_i,
-          .fpu_frm_i,
-          .fpu_prec_i,
+          .fpu_frm_i               (fpu_frm_ctx),
+          .fpu_prec_i              (fpu_prec_ctx),
           .fpu_trans_id_o(fpu_trans_id),
           .result_o(fpu_result),
           .fpu_valid_o(fpu_valid),

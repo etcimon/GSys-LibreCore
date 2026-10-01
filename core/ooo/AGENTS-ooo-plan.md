@@ -3392,3 +3392,89 @@ whenever `state_q != IDLE` without provenance; the PTW-broadcast
 exposure is not reachable there today (a store translating holds the
 bypass head, so no other data walk can be pending), but the seam is
 recorded for the mixed-residency work.
+
+### T11 — FP-2: FP under mixed residency — the hart-tagged FP context (2026-10-01)
+
+**Scope.** Close the M4 residual "mixed-residency FP (hart-tagged lazy-FS
+audit)" and decide the `G6LC_OOO_FP_QUALIFY` guard.
+
+**Audit (what already held).** Decode selects `fs`/`vfs`/`frm` per lane
+hart (`SMT_MIXED_DECODE`, T6b-3a); `dirty_fp_state` and `fflags` are routed
+by the committing hart (`g6lc_smt_csr_bank` `commit_sel`); the FPU never
+retires cross-hart on commit port 1 (T6b-4b); `g6lc_rename` keeps per-hart
+FP maps/pools/checkpoints (Phase 4). **The one defect:** the FPU's dynamic
+rounding mode and Xf precision were the ACTIVE hart's — `ex_stage.fpu_frm_i`
+← bank `frm_o`, `fpu_prec_i` ← `fprec_o` — while `fpu_wrap` latches
+`fpu_rm_d = fpu_frm_i` for `rm == DYN` at issue. Under mixed residency the
+issuing op's hart may differ from the active hart, so a peer's `DYN` op was
+rounded with the wrong `frm`. Inert on every production package (single
+hart, or drained handoff ⇒ issuing hart == active hart).
+
+**Fix.** `issue_read_operands` registers `fpu_hart_o` next to `fpu_rm_o`
+(the hart of the FPU op accepted); `g6lc_smt_csr_bank` exports `fprec_b_o`
+beside `frm_b_o`; `ex_stage` selects
+`FPU_HART_CTX ? fpu_frm_b_i[fpu_hart_i] : fpu_frm_i` (same for `fprec`) with
+`localparam FPU_HART_CTX = FpPresent && NrHarts > 1 && !SmtDrainedHandoff`,
+so the mux constant-folds away wherever FPU ops can belong to only one
+hart. Review mutation `G6LC_MUT_FPU_ACTIVE_FRM` restores the active-hart
+scalar. Timing: `sparse_ex` screen (ex_stage/fpu_wrap/issue_read_operands,
+`FPU_HART_CTX` live) worst FO4 **31.5 → 31.5** at budget 32 (+6 paths: the
+3/7-bit hart mux and the `fpu_hart` register).
+
+**Directed witness** `verif/tests/custom/multicore/mc_fp_mixed.S` (one
+core × two co-resident harts): hart 0 `frm=RTZ`, hart 1 `frm=RUP`, both
+loop `fadd.d(1.0, 2^-60, DYN)` ≥128× (exact 1.0 vs 1.0+ulp); fflags
+isolation (hart 0 holds NX, hart 1 clears and reads 0); FS isolation
+(hart 1 `FS=Off` → exactly one illegal-instruction trap, back to Clean with
+no FP op, while hart 0 ends Dirty with no trap). Distinct codes per
+hart/phase; `ORACLE_NEGATIVE` arm.
+
+**Evidence (mixed FP model = `g6lc64_smt2_ooo_int` + RVF/RVD + int2_l3
+FP/XF fields, tags `ooocoh-fp2-*`).**
+
+- `mc_fp_mixed` positive **PASS 6,143 cycles**, `ORACLE_NEGATIVE` detected
+  (code 3, 801 cycles); on `G6LC_MUT_FPU_ACTIVE_FRM` **FAILS code 7**
+  (hart-1 rounding, 930 cycles) — the mutation detection is also the
+  co-residency witness (hart 1's RUP ops issued inside hart 0's window).
+  Identical results (6,143 / code 7 @ 930) on the define-free model after
+  the guard lift (`…-nodef-r2`, `…-nodefmut-r1`).
+- FP suite on the mixed FP model (`…-fpsuite-r1`): stages 1–10 positives
+  retirement-exact, 11/11 negatives detected. **Stage 11 positive fails
+  (`tohost=11`, 21,798 cycles) — pre-existing on the integer
+  `g6lc64_smt2_ooo_int`**, not FP and not N1d: the same stage fails
+  identically (22,020 cycles) on the pre-N1d baseline `3ef1a0789` and on
+  HEAD, while it passes on `int2_l3`. s11 is the integer twin of stage 10
+  (fence / LCG branch / wrong-path `divu` / 64 adds) built to partition a
+  fetch-side committer-window loss; it is a mixed-residency finding owed
+  its own ticket (`AGENTS-todo.md`). The rest of the frozen integer probe
+  set (s4/s20/s32–s37, ilp, memdep) is **cycle-identical baseline vs
+  HEAD** on `smt2_ooo_int` — the N1d tranche is cycle-inert on the
+  single-core mixed profile.
+- Mixed strict OpenSBI boot on the FP model (`…-smt2intfp-osbi-r4`,
+  `rv64imafdc_zicsr_zifencei`): **`strictDualPassed`, 10,463,110 cycles**
+  (+3,522 / +0.03 % vs the integer anchor 10,459,588 — FPU decode/CSR
+  movement); `both_resident_cycles=97,405`,
+  `cross_hart_port1_commits=11,879`, `hol_residual=2,740`.
+- `mc_fp_smt` cannot run on this model (hard-coded four harts); it stays
+  green on the four-hart `int2_l3` FP model (`ooocoh-n1d-fpsmt-r1`,
+  3,777 cycles).
+- Inertness: int2_l3 ring-16 24M boot **18,297,379 / `5056e553…` /
+  `c3406211…` byte-identical**, `force=0`; local lint 0e on int2_l3,
+  smt2_ooo_int, smt2, ooo; remote lint int2_l3 29w/0e, smt2_ooo_int
+  29w/0e; synth `check -assert` clean (43w / 2w).
+
+**Decision — guard lifted.** The `ifndef G6LC_OOO_FP_QUALIFY` leg of
+`check_cfg` and `gen_err_ooo_fp_mh` in `g6lc_ooo_dispatch` are removed: FP
+under mixed residency is legal on single-core packages (multi-core mixed
+residency keeps `G6LC_OOO_SMT_MIXED_QUALIFY`, unchanged). No production
+package carries mixed FP yet — `g6lc64_smt2_ooo_int` stays integer; an FP
+variant is an adoption decision, not a legality one. The ten frozen
+`core/*/formal/*/src/config_pkg.sv` snapshots still carry the old leg
+(pinned evidence copies, deliberately untouched).
+
+**Remaining FP-OoO.** `g6lc64_ooo_server` qualification (a COH_FILTERED /
+four-core / 4-issue program, not an FP item — FP there is the drained leg
+already legal); the T5 core-level owner-mutation bar (the retention
+mutation is caught by the S2 leaf and the `g6lc_ooo_fp_owner` proof; the
+core-level inertness is structural at 32 scoreboard entries — recorded as
+the bar); `ai-chain14` FP suite rerun on the clean tree (AI program).

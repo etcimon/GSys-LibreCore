@@ -1226,9 +1226,13 @@ package config_pkg;
     // FP multi-hart is legal under the same drained handoff (T9g/M4): at a
     // switch the scoreboard is empty and `g6lc_rename` keeps per-hart FP
     // maps/pools, `dirty_fp_state` is attributed per committing hart in
-    // `g6lc_smt_csr_bank`, and `g6lc_lsq` is op-agnostic. FP with *mixed*
-    // residency stays refused by the `G6LC_OOO_FP_QUALIFY` leg below: the
-    // hart-tagged lazy-FS audit is the remaining work.
+    // `g6lc_smt_csr_bank`, and `g6lc_lsq` is op-agnostic. FP under *mixed*
+    // residency is legal since FP-2: `ex_stage` selects frm/fprec by the
+    // issuing op's hart (`FPU_HART_CTX`), decode picks fs/vfs/frm per lane
+    // hart (T6b-3a), and `dirty_fp_state`/`fflags` commit per owning hart —
+    // evidenced by `mc_fp_mixed` (per-hart RTZ/RUP + fflags + FS-Off trap
+    // isolation), the `G6LC_MUT_FPU_ACTIVE_FRM` mutation detection, the FP
+    // suite, and the mixed strict OpenSBI boot on the FP model.
     // Mixed residency is T6b: clearing the drain gate is legal only on an
     // OoO multi-hart configuration, and since the T9d/M2 promotion it is a
     // production feature on single-core packages (NrCores == 1) — mixed
@@ -1245,14 +1249,8 @@ package config_pkg;
     // G6LC_OOO_SMT_MIXED_QUALIFY define.
     assert (Cfg.SmtDrainedHandoff || Cfg.NrCores == 1);
 `endif
-`ifndef G6LC_OOO_FP_QUALIFY
-    // T9g/M4 lifted the FP guard for `NrHarts == 1 || SmtDrainedHandoff` —
-    // single-hart FP and drained multi-hart FP are production legs on the
-    // Spike suite + owner-lifetime proof + four-hart FP-residency evidence.
-    // FP under MIXED residency stays behind G6LC_OOO_FP_QUALIFY: a
-    // qualification build only, pending the hart-tagged lazy-FS audit.
-    assert (!(Cfg.OoOEn && Cfg.FpPresent && Cfg.NrHarts > 1 && !Cfg.SmtDrainedHandoff));
-`endif
+    // FP under mixed residency was lifted by FP-2 — see the comment above the
+    // drained-handoff assert for the per-hart frm/fflags/FS evidence chain.
     // The OoO FP writeback narrows the XLEN-wide writeback bus to FLen
     // (g6lc_ooo_dispatch: fprf_wdata = wb_data_i[FLen-1:0]), so an FP result
     // wider than the integer datapath cannot be delivered. RV32+D is legal
