@@ -52,6 +52,9 @@ ${CVA6_REPO_DIR}/corev_apu/l3_cache/g6lc_l3_inclusive_inv.sv
 ${CVA6_REPO_DIR}/corev_apu/l3_cache/g6lc_server_prefetcher.sv
 ${CVA6_REPO_DIR}/corev_apu/l3_cache/g6lc_l3_top.sv
 ${CVA6_REPO_DIR}/corev_apu/src/g6lc_cluster.sv
+// The cluster instantiates the island's sideband arbiter unconditionally;
+// the island's own compile list (Flist.ai_island) is not part of this seam.
+${CVA6_REPO_DIR}/corev_apu/ai_island/g6lc_ai_enq_arb.sv
 ${CVA6_REPO_DIR}/verif/tb/g6lc_cluster_lint_top.sv
 // Per-module typed lint/synth tops. These exist because several uncore modules
 // type their ports through `parameter type axi_req_t = logic` and cannot be

@@ -197,6 +197,7 @@ module g6lc_cluster
   logic        [NC-1:0][7:0]   core_sb_qid;
   logic        [NC-1:0][31:0]  core_sb_ticket;
   logic        [NC-1:0][CVA6Cfg.XLEN-1:0] core_sb_desc_ptr;
+  logic        [NC-1:0]        core_sb_gnt;
 
   // S4: multi-core SMT (N>1,T>1) secondary cores race OpenSBI's shared
   // lottery/stack (G1dg class *across cores*, not SMT). Hold c>0 clock-gated
@@ -314,7 +315,6 @@ module g6lc_cluster
 
   // Sideband enqueue arbiter (g6lc_ai_enq_arb): round-robin over the cores'
   // held kicks, one kick offered per cycle, ready back to the winner only.
-  logic [NC-1:0] core_sb_gnt;
   g6lc_ai_enq_arb #(
       .NC(NC), .QidW(8), .AddrW(CVA6Cfg.XLEN)
   ) i_ai_enq_arb (

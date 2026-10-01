@@ -283,6 +283,22 @@ module g6lc_ooo_dispatch
     end
   end
 
+  // Multi-port freelist free on all commit ports
+  logic [CVA6Cfg.NrCommitPorts-1:0] free_en;
+  logic [CVA6Cfg.NrCommitPorts-1:0][PRF_W-1:0] free_prd;
+  // A committing branch's checkpoint can never be unwound to again, so commit is
+  // what returns it to the pool. Commit is in program order, matching the order
+  // the checkpoints were taken.
+  logic [CVA6Cfg.NrCommitPorts-1:0] ckpt_retire;
+  logic [CVA6Cfg.NrCommitPorts-1:0] commit_wr, commit_arch;
+  logic [CVA6Cfg.NrCommitPorts-1:0][4:0] commit_rd;
+  logic [CVA6Cfg.NrCommitPorts-1:0][PRF_W-1:0] commit_prd;
+  // FP counterparts. Every `rd != 0` filter on the integer side is absent here
+  // on purpose: f0 is an ordinary register, so an f0 commit updates the
+  // architectural map and an f0 predecessor is freed like any other.
+  logic [CVA6Cfg.NrCommitPorts-1:0] ffree_en, commit_is_fpr;
+  logic [CVA6Cfg.NrCommitPorts-1:0][FPRF_W-1:0] ffree_prd, commit_fprd;
+
   // The FP PRF has NO commit-write mirror, and that is a conclusion rather than
   // an omission. The integer mirror exists only because commit_stage
   // SUBSTITUTES a value at commit — csr_rdata_i for CSR, amo_resp_i.result for
@@ -335,21 +351,6 @@ module g6lc_ooo_dispatch
   end
   //pragma translate_on
 
-  // Multi-port freelist free on all commit ports
-  logic [CVA6Cfg.NrCommitPorts-1:0] free_en;
-  logic [CVA6Cfg.NrCommitPorts-1:0][PRF_W-1:0] free_prd;
-  // A committing branch's checkpoint can never be unwound to again, so commit is
-  // what returns it to the pool. Commit is in program order, matching the order
-  // the checkpoints were taken.
-  logic [CVA6Cfg.NrCommitPorts-1:0] ckpt_retire;
-  logic [CVA6Cfg.NrCommitPorts-1:0] commit_wr, commit_arch;
-  logic [CVA6Cfg.NrCommitPorts-1:0][4:0] commit_rd;
-  logic [CVA6Cfg.NrCommitPorts-1:0][PRF_W-1:0] commit_prd;
-  // FP counterparts. Every `rd != 0` filter on the integer side is absent here
-  // on purpose: f0 is an ordinary register, so an f0 commit updates the
-  // architectural map and an f0 predecessor is freed like any other.
-  logic [CVA6Cfg.NrCommitPorts-1:0] ffree_en, commit_is_fpr;
-  logic [CVA6Cfg.NrCommitPorts-1:0][FPRF_W-1:0] ffree_prd, commit_fprd;
   always_comb begin
     for (int unsigned c = 0; c < CVA6Cfg.NrCommitPorts; c++) begin
       commit_arch[c] = commit_ack_i[c] && !cancelled_mask_i[commit_instr_i[c].trans_id];

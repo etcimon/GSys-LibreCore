@@ -40,6 +40,7 @@ cp "$ROOT/verif/tb/apu/rom_spin.hex" "$OUT/rom_spin.hex"
   "$ROOT/corev_apu/l3_cache/g6lc_l3_inclusive_inv.sv" \
   "$ROOT/corev_apu/src/ariane.sv" \
   "$ROOT/corev_apu/src/g6lc_cluster.sv" \
+  "$ROOT/corev_apu/ai_island/g6lc_ai_enq_arb.sv" \
   "$ROOT/corev_apu/apu/g6lc_apu_fwram.sv" \
   "$ROOT/verif/tb/apu/tb_g6lc_apu_cluster_fetch.sv" \
   "$ROOT/verif/tb/apu/g6lc_dram_peek64_stub.cpp" \
