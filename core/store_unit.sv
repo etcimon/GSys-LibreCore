@@ -96,6 +96,9 @@ module store_unit
     // T6b-4b: reclaim pointer (oldest live slot) — the store buffer's age
     // anchor. commit_tran_id_i stays the committing (port-0) tid.
     input logic [CVA6Cfg.TRANS_ID_BITS-1:0] oldest_live_tid_i,
+    // N1d: the commit head is an unpublished load — speculative-store
+    // stalls are futile while it pends (see store_buffer).
+    input logic head_phys_pending_i,
     // T6b: querying load's hart — speculative forwarding is same-hart only
     // under OoO multi-hart. Constant-0 otherwise.
     input logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] load_hart_i,
@@ -420,6 +423,7 @@ module store_unit
       .load_trans_id_i,
       .commit_trans_id_i(commit_tran_id_i),
       .oldest_live_tid_i,
+      .head_phys_pending_i,
       .load_hart_i,
       .st_hart_i            (st_hart_q),
       .dcache_wbuffer_empty_i,

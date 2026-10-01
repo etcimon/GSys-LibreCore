@@ -208,6 +208,12 @@ module issue_stage
     // for dispatch/IQ/LSQ and the store buffer. Aliases the port-0 commit
     // slot under legacy commit order.
     output logic [CVA6Cfg.TRANS_ID_BITS-1:0]                    reclaim_ptr_o,
+    // N1d: the port-0 commit head is an unpublished load (phys_pending is
+    // only ever set under COH_OOO, so this is constant 0 elsewhere). The
+    // store buffer releases its speculative-store stall while it is set —
+    // otherwise a load parked in WAIT_PAGE_OFFSET and the head it blocks
+    // circularly wait on each other through this LSU.
+    output logic head_phys_pending_o,
     // Information dedicated to RVFI - RVFI
     output logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.XLEN-1:0] rvfi_rs1_o,
     // Information dedicated to RVFI - RVFI
@@ -264,6 +270,10 @@ module issue_stage
   logic mem_violation;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_pending, phys_replay;
   assign ooo_phys_replay_o = |phys_replay;
+  // N1d: phys_pending is keyed by scoreboard slot == trans_id; commit
+  // port 0 presents commit_sel_slot[0] (the committing hart's head under
+  // per-hart heads, the global head otherwise).
+  assign head_phys_pending_o = phys_pending[rvfi_commit_pointer_o[0]];
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] mem_violation_id;
 
   // ---------------------------------------------------------

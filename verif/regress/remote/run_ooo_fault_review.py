@@ -87,8 +87,8 @@ def run_leaf():
         path = source / 'load_unit.sv'
         text = path.read_text()
         old, new = {
-            'kill': ("        if (ex_i.valid) begin\n          req_port_o.kill_req = 1'b1;\n        end\n",
-                     "        if (ex_i.valid) begin\n          req_port_o.kill_req = 1'b0;\n        end\n"),
+            'kill': ("        if (ex_i.valid && (!ex_ptw_i || flush_i ||\n                           cancelled_mask_i[ldbuf_q[ldbuf_last_id_q].trans_id])) begin\n          req_port_o.kill_req = 1'b1;\n",
+                     "        if (ex_i.valid && (!ex_ptw_i || flush_i ||\n                           cancelled_mask_i[ldbuf_q[ldbuf_last_id_q].trans_id])) begin\n          req_port_o.kill_req = 1'b0;\n"),
             'ex': ("        valid_o    = 1'b1;\n        ex_o.valid = 1'b1;\n      end\n    end\n",
                    "        valid_o    = 1'b1;\n        ex_o.valid = 1'b0;\n      end\n    end\n"),
         }[misalign_mutation]
@@ -99,8 +99,8 @@ def run_leaf():
     physical_faults = {
         'address': (17, 'assign phys_addr_o = paddr_i;', 'assign phys_addr_o = load_paddr_o;', 'LOAD_PA_OWNER'),
         'owner': (17, 'assign phys_id_o = owner_q;', 'assign phys_id_o = lsu_ctrl_i.trans_id;', 'LOAD_PA_OWNER'),
-        'cancel': (18, '!ex_i.valid && !flush_i && !cancelled_mask_i[owner_q];',
-                   '!ex_i.valid && !flush_i;', 'LOAD_PA_CANCEL'),
+        'cancel': (18, '!flush_i && !cancelled_mask_i[owner_q];',
+                   '!flush_i;', 'LOAD_PA_CANCEL'),
         'forward': (16, '(CVA6Cfg.CohPolicy != config_pkg::COH_OOO) &&', "1'b1 &&", 'LOAD_UNCERTIFIED_FORWARD'),
     }
     if physical_mutation:
@@ -111,6 +111,7 @@ def run_leaf():
         path.write_text(text.replace(old, new))
     pins = {'sources': hashes, 'before': before, 'queuedCancelMutation': mutation, 'misalignMutation': misalign_mutation,
             'physicalMutation': physical_mutation,
+            'exkillMutation': os.environ.get('FAULT_REVIEW_MUTATE_EXKILL') == '1',
             'compiledSources': {p.name: sha(p) for p in source.glob('*.sv')},
             'runnerSha256': sha(Path(__file__)),
             'compilerControlSha256': sha(Path('/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt')),
@@ -122,6 +123,12 @@ def run_leaf():
     # head must not wait for younger speculative stores under OoO.
     ni_gate = os.environ.get('FAULT_REVIEW_NI') == '1'
     physical = os.environ.get('FAULT_REVIEW_PHYSICAL') == '1'
+    # N1d mutation: rebuild the pre-fix unconditional SEND_TAG kill through the
+    # RTL-side G6LC_MUT_LSU_EXKILL ifdef; scenario 22 must then fail with
+    # LOAD_EXKILL_TAG (a surviving load's tag is dropped by a shared fault).
+    exkill_mutation = os.environ.get('FAULT_REVIEW_MUTATE_EXKILL') == '1'
+    if exkill_mutation:
+        physical = True
     for ooo, nload, mmu in ([(1, 4, 1)] if physical else [(1, 4, 0)] if before or mutation else [(1, 4, 1), (0, 4, 1)] if misalign_mutation or ni_gate else [(1, 2, 0), (1, 4, 1), (0, 4, 1)]):
         work = out / f'ooo{ooo}-loads{nload}-mmu{mmu}'
         work.mkdir()
@@ -129,6 +136,8 @@ def run_leaf():
         ports = ['-DG6LC_REVIEW_CANCEL_PORT'] if 'cancelled_mask_i' in (source / 'lsu_bypass.sv').read_text() else []
         if 'phys_valid_o' in (source / 'load_unit.sv').read_text():
             ports.append('-DG6LC_REVIEW_PHYS_PORT')
+        if exkill_mutation:
+            ports.append('-DG6LC_MUT_LSU_EXKILL')
         command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1',
                    '-Wno-fatal', '-Werror-LATCH', '-Werror-UNOPTFLAT', *ports,
                    '/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt',
@@ -144,14 +153,17 @@ def run_leaf():
         deps = '\n'.join(p.read_text() for p in model.glob('*.d'))
         if str(runtime / 'include/verilated_funcs.h') not in deps:
             raise ValueError('compiled runtime identity missing')
-        scenarios = [physical_faults[physical_mutation][0]] if physical_mutation else ([16] if before else list(range(16, 22))) if physical else [1] if mutation else [13] if misalign_mutation else [14, 15] if ni_gate else [0, 4, 6] if before else list(range(14)) if ooo and mmu else list(range(8)) + [10, 11] if ooo else [2, 3, 4, 5, 6, 13]
+        scenarios = [physical_faults[physical_mutation][0]] if physical_mutation else [22] if exkill_mutation else ([16] if before else list(range(16, 25))) if physical else [1] if mutation else [13] if misalign_mutation else [14, 15] if ni_gate else [0, 4, 6] if before else list(range(14)) if ooo and mmu else list(range(8)) + [10, 11] if ooo else [2, 3, 4, 5, 6, 13]
         for case in scenarios:
-            for negative in ([False] if before or mutation or misalign_mutation or physical_mutation else [False, True]):
+            for negative in ([False] if before or mutation or misalign_mutation or physical_mutation or exkill_mutation else [False, True]):
                 cmd = [str(model / 'review-test'), f'+scenario={case}'] + (['+oracle_negative'] if negative else [])
                 result = subprocess.run(cmd, cwd=work, capture_output=True, text=True, timeout=15)
                 text = result.stdout + result.stderr
                 (work / f'case{case}-negative{int(negative)}.log').write_text(text)
                 expected = (physical_faults[physical_mutation][3] if physical_mutation else
+                            'LOAD_EXKILL_TAG' if exkill_mutation or (physical and case == 22 and negative) else
+                            'LOAD_EXKILL_FOREIGN_ATTACH' if physical and case == 23 and negative else
+                            'LOAD_MISALIGN_EXCEPTION' if physical and case == 24 and negative else
                             'LOAD_PA_OWNER' if physical and case == 17 and negative else
                             'LOAD_UNCERTIFIED_FORWARD' if physical and before else
                             'LOAD_CANCEL_STALE_REQUEST' if (before and case == 0) or mutation else

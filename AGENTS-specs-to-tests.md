@@ -1036,6 +1036,25 @@ orphaned commit head, so the integration-level bound is still open; the discrimi
 gate-field instrumentation + gate relaxation are recorded in the plan.
 Evidence/tags: `core/ooo/AGENTS-ooo-plan.md` T10f.
 
+### Ring-32 wedge leaves + absolute drain bound (2026-09-30/10-01, N1d/T10g)
+
+`verif/tb/core/tb_g6lc_rtl_review.sv`: load-cancel scenario 20 restored to the
+own-fault form (kill + one exception writeback + no phys publish), 22 = foreign
+PTW fault (`ex_ptw=1`: tag delivered, PA published, no exception attached;
+`G6LC_MUT_LSU_EXKILL` → `LOAD_EXKILL_TAG`), 23 = foreign fault coincident with an
+older load's rvalid (`LOAD_EXKILL_FOREIGN_ATTACH`), 24 = misaligned FLW (FP sibling
+of 13); IQ scenario 11 `IQ_CSR_ORDER` (younger ready CSRs held behind an older
+waiting CSR, released in age order; `REVIEW_RTL_CSR_ORDER_FAULT=1`); store-recovery
+scenario 9 `STB_HEAD_GATE` (phys-pending head releases the speculative stall,
+committed stall stays; `REVIEW_RTL_MUT=stb_headgate`); LSQ scenario 36 (store PA on
+phys channel 1, aliasing load publication → `phys_replay`; negative `LSQ_PHYSICAL`).
+`core/smt/formal/g6lc_thread_select.sby` gains `abs`/`abs_cover`/`abs_noforce`:
+with `commit_i` free a pending drain on a plain head is forced within
+`16·SmtDrainForceCycles + K`; the noforce mutation fails both bounded properties.
+`run_smt_drain_review.py` compiles `g6lc_ooo_pkg`/`g6lc_iq` for the shared tb.
+Stall-anatomy dumps `[smt-stall]`/`[coh-stall]`/`[l2-stall]` (`+smt_stats`) are
+diagnostic, bounded, and not oracles. Evidence: `core/ooo/AGENTS-ooo-plan.md` T10g.
+
 ## Architectural resume and source-profile residual (2026-09-19)
 
 `tb_g6lc_restart.sv` / `run_restart_bank.py` now test retirement-owned PC banking:

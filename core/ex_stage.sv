@@ -131,6 +131,9 @@ module ex_stage
     // T6b-4b: reclaim pointer (oldest live slot) — the store buffer's age
     // anchor. commit_tran_id_i stays the committing (port-0) tid.
     input logic [CVA6Cfg.TRANS_ID_BITS-1:0] oldest_live_tid_i,
+    // N1d: the commit head is an unpublished load — speculative-store
+    // stalls are futile while it pends (see store_buffer).
+    input logic head_phys_pending_i,
     // TO_BE_COMPLETED - ACC_DISPATCHER
     input logic stall_st_pending_i,
     // TO_BE_COMPLETED - COMMIT_STAGE
@@ -662,6 +665,7 @@ module ex_stage
       .commit_ready_o         (lsu_commit_ready_o),
       .commit_tran_id_i,
       .oldest_live_tid_i,
+      .head_phys_pending_i,
       .resolved_branch_i      (resolved_branch),
       .enable_translation_i,
       .enable_g_translation_i,

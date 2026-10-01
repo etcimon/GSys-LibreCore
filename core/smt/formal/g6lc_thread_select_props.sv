@@ -19,6 +19,10 @@
 //   Cover witnesses: a timer force, a WFI force, and a full drain->switch.
 //   Negative control: +define+G6LC_MUT_DRAIN_NOFORCE drops the force in the
 //   DUT, so the bounded property must FAIL (P2 is load-bearing).
+//   T10f absolute bound (-DFORMAL_ABS tasks abs/abs_noforce/abs_cover):
+//   commit_i is a free input — an unbounded commit stream pins the relative
+//   counter, so a pending drain must still be forced by the absolute bound
+//   (16*FORCE) within 16*FORCE + K + slack cycles.
 //
 // The caller-side legality contract (head killable, commit tracked) is
 // assumed exactly as cva6.sv drives drain_killable_i/head_plain_i; the
@@ -36,7 +40,9 @@ module g6lc_thread_select_props #(
     // free environment variables
     input logic fetch_fire_i,
     input logic natural_ready_i,
-    input logic head_wfi_i
+    input logic head_wfi_i,
+    // T10f absolute-bound task only (-DFORMAL_ABS): commit stream is free.
+    input logic commit_free_i
 );
 `ifdef FORMAL
   function automatic config_pkg::cva6_cfg_t mk_cfg();
@@ -75,11 +81,15 @@ module g6lc_thread_select_props #(
   logic force_seen_q;
   logic [$clog2(K+2)-1:0] force_age_q;
 
+`ifdef FORMAL_ABS
+  assign commit_i         = commit_free_i;
+`else
   assign commit_i         = 1'b0;
+`endif
   assign drain_killable_i = 1'b1;
   assign head_plain_i     = 1'b1;
 
-  logic drain_force_o, drain_force_wfi_o, drain_forced_o, switch_o, quiesce_o;
+  logic drain_force_o, drain_force_wfi_o, drain_force_abs_o, drain_forced_o, switch_o, quiesce_o;
   logic [63:0] drain_force_pc_o;
   logic [HW-1:0] active_hart_o;
 
@@ -113,6 +123,7 @@ module g6lc_thread_select_props #(
       .head_pc_i           (64'h8000_0100),
       .drain_force_o       (drain_force_o),
       .drain_force_wfi_o   (drain_force_wfi_o),
+      .drain_force_abs_o   (drain_force_abs_o),
       .drain_forced_o      (drain_forced_o),
       .drain_force_pc_o    (drain_force_pc_o),
       .quiesce_o           (quiesce_o),
@@ -140,7 +151,14 @@ module g6lc_thread_select_props #(
   // pulse cycle) drops drain_forced_o so the bank never sees a stale
   // head-PC snapshot. P2 bookkeeping uses pending/forced age counters:
   // "hands off within the bound" <=> the age never overflows.
-  localparam int unsigned AW = $clog2(BOUND + 2);
+`ifdef FORMAL_ABS
+  // T10f: with commits free, the bound is the absolute counter (16 no-commit
+  // windows) plus the K-cycle flush latency and pipeline slack.
+  localparam int unsigned PBOUND = 16 * FORCE + K + 6;
+`else
+  localparam int unsigned PBOUND = BOUND;
+`endif
+  localparam int unsigned AW = $clog2(PBOUND + 2);
   localparam int unsigned FW = $clog2(K + 6);
   logic [AW-1:0] pend_age_q;
   logic [FW-1:0] forced_age_q;
@@ -152,7 +170,7 @@ module g6lc_thread_select_props #(
     end else begin
       if (!dut.gen_smt.drain_pending_q || switch_o)
         pend_age_q <= '0;
-      else if (pend_age_q != AW'(BOUND + 1))
+      else if (pend_age_q != AW'(PBOUND + 1))
         pend_age_q <= pend_age_q + 1'b1;
 
       if (!drain_forced_o || switch_o)
@@ -172,8 +190,9 @@ module g6lc_thread_select_props #(
       if ($past(drain_force_o && (drain_ready_i || commit_i)))
         assert (!drain_forced_o);
 
-      // P2: a pending drain hands off within FORCE + K (+ pipeline slack).
-      assert (pend_age_q <= AW'(BOUND));
+      // P2: a pending drain hands off within FORCE + K (+ pipeline slack);
+      // under FORMAL_ABS the bound is 16*FORCE + K + slack instead.
+      assert (pend_age_q <= AW'(PBOUND));
 
       // Forced bookkeeping: forced never outlives the K-bounded flush plus
       // the do_switch/switch_q pipeline.
@@ -195,6 +214,9 @@ module g6lc_thread_select_props #(
       cover (drain_force_wfi_o);                     // WFI force
       cover (switch_o);                              // full drain -> switch
       cover (drain_forced_o && switch_o);            // forced handoff
+`ifdef FORMAL_ABS
+      cover (drain_force_abs_o);                     // absolute-bound force
+`endif
     end
   end
 `endif

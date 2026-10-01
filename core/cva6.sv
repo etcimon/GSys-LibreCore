@@ -820,6 +820,7 @@ module cva6
   // N1c bounded drain force (drained handoff)
   logic                    smt_drain_force;
   logic                    smt_drain_force_wfi;
+  logic                    smt_drain_force_abs;
   logic                    smt_drain_forced;
   logic [CVA6Cfg.VLEN-1:0] smt_drain_force_pc;
   logic                    smt_drain_safe;
@@ -894,6 +895,9 @@ module cva6
   // U5 OoO PMU probes (0 when OoOEn=0)
   logic ooo_rename_stall, ooo_iq_full, ooo_rob_full, ooo_lsq_stall, ooo_stl_forward;
   logic ooo_phys_replay;
+  // N1d: the port-0 commit head is an unpublished load — the store buffer
+  // releases its speculative-store stall while it is set (see store_buffer).
+  logic ooo_head_phys_pending;
 
   // ----------------
   // DCache <-> *
@@ -1737,9 +1741,11 @@ module cva6
   // already bound to commit. WFI is the sole special case and forces
   // immediately: the hart wants to sleep, the peer must run, and re-executing
   // the WFI on the next activation reproduces the sleep.
+  // WFI keeps the committed-head form: a WFI head is never phys-masked, and
+  // once it commits the hart halts and the drain resolves without a flush.
   assign smt_head_wfi = commit_instr_id_commit[0].valid &&
                         commit_instr_id_commit[0].op == ariane_pkg::WFI;
-  assign smt_head_plain = commit_instr_id_commit[0].valid &&
+  assign smt_head_plain = sb_head_valid[smt_active_hart] &&
       !commit_instr_id_commit[0].ex.valid &&
       !ariane_pkg::is_amo(commit_instr_id_commit[0].op) &&
       (commit_instr_id_commit[0].fu != ariane_pkg::CSR) &&
@@ -1782,6 +1788,7 @@ module cva6
       .head_pc_i           (sb_head_pc[smt_active_hart]),
       .drain_force_o       (smt_drain_force),
       .drain_force_wfi_o   (smt_drain_force_wfi),
+      .drain_force_abs_o   (smt_drain_force_abs),
       .drain_forced_o      (smt_drain_forced),
       .drain_force_pc_o    (smt_drain_force_pc),
       .quiesce_o           (smt_quiesce),
@@ -1816,25 +1823,238 @@ module cva6
     longint unsigned ss_hist[8];   // <8,8-15,16-31,32-63,64-127,128-255,256-511,>=512
     longint unsigned ss_w_sb, ss_w_st, ss_w_flushid;
     longint unsigned ss_w_peer, ss_w_hold, ss_w_trap, ss_w_flush;
-    longint unsigned ss_force, ss_force_wfi;
-    longint unsigned ss_retired[SSNH];
+    longint unsigned ss_force, ss_force_wfi, ss_force_abs;
+    longint unsigned ss_retired[SSNH < 4 ? 4 : SSNH];  // padded: prints index 0..3
     longint unsigned ss_drop;
     longint unsigned ss_set_cycle;
     bit ss_prev_dp;
+    // N1d/T10g stall dump: when the resident hart retires nothing for
+    // SS_STALL_GAP cycles while a drain pends (each further SS_STALL_GAP
+    // crossing re-dumps, bounded to SS_DUMP_MAX per run) and again at
+    // final, dump the commit-head classification, the LSU/load-unit and
+    // WT miss-unit/wbuffer state that arbitrate drain_ready.
+    localparam longint unsigned SS_STALL_GAP = 65536;
+    localparam int unsigned    SS_DUMP_MAX   = 8;
+    longint unsigned ss_last_commit[SSNH];
+    int unsigned    ss_dump_cnt;
+    longint unsigned ss_dump_milestone;
+    // One-ticket-per-dump handshake to the OoO-only deep probe below (the
+    // generate scope there does not exist on in-order drained targets).
+    int unsigned    ss_dump_id;
     initial begin
       smt_stats_en = $test$plusargs("smt_stats");
       ss_cycle = 0; ss_switch = 0; ss_drain_req = 0; ss_drain_abort = 0;
       ss_drain_cyc = 0; ss_drain_max = 0; ss_set_cycle = 0; ss_prev_dp = 0;
       ss_w_sb = 0; ss_w_st = 0; ss_w_flushid = 0;
       ss_w_peer = 0; ss_w_hold = 0; ss_w_trap = 0; ss_w_flush = 0;
-      ss_force = 0; ss_force_wfi = 0;
+      ss_force = 0; ss_force_wfi = 0; ss_force_abs = 0;
       ss_drop = 0;
+      ss_dump_cnt = 0; ss_dump_milestone = 0; ss_dump_id = 0;
       for (int i = 0; i < 8; i++) ss_hist[i] = 0;
-      for (int h = 0; h < SSNH; h++) ss_retired[h] = 0;
+      for (int h = 0; h < SSNH; h++) begin
+        ss_retired[h] = 0;
+        ss_last_commit[h] = 0;
+      end
     end
     logic ss_dp, ss_drdy;
     assign ss_dp   = i_smt_thread_select.gen_smt.drain_pending_q;
     assign ss_drdy = smt_sb_empty && no_st_pending_commit && !flush_ctrl_id;
+
+    function automatic void ss_stall_dump(input string why);
+      automatic int unsigned hs;
+      automatic int unsigned ih[CVA6Cfg.NrHarts];
+      hs = issue_stage_i.i_scoreboard.commit_sel_slot[0];
+      for (int h = 0; h < CVA6Cfg.NrHarts; h++) ih[h] = 0;
+      for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
+        if (issue_stage_i.i_scoreboard.mem_q[s].issued &&
+            int'(issue_stage_i.i_scoreboard.mem_q[s].sbe.hart_id) < CVA6Cfg.NrHarts)
+          ih[int'(issue_stage_i.i_scoreboard.mem_q[s].sbe.hart_id)]++;
+      $display("[smt-stall] %s cyc=%0d hart=%0d gap=%0d dp=%0d drdy=%0d kill=%0d headv=%0d hwfi=%0d hplain=%0d fcnt=%0d forced=%0d sbem=%0d stp=%0d fid=%0d cmt=%0d sbn=%0d",
+               why, ss_cycle, smt_active_hart,
+               ss_cycle - ss_last_commit[smt_active_hart],
+               ss_dp, ss_drdy, smt_drain_safe,
+               sb_head_valid[smt_active_hart], smt_head_wfi, smt_head_plain,
+               i_smt_thread_select.gen_smt.drain_force_cnt_q,
+               i_smt_thread_select.gen_smt.drain_forced_q,
+               smt_sb_empty, no_st_pending_commit, flush_ctrl_id,
+               |commit_macro_ack,
+               issue_stage_i.i_scoreboard.sb_issued_cnt);
+      $display("[smt-stall] head slot=%0d hs0=%0d hs1=%0d pc=%h op=%0d fu=%0d cvld=%0d sbev=%0d issued=%0d canc=%0d exv=%0d repl=%0d ppend=%0d pmod=%0d hart=%0d ih={%0d,%0d}",
+               hs,
+               issue_stage_i.i_scoreboard.head_slot[0],
+               CVA6Cfg.NrHarts > 1 ? issue_stage_i.i_scoreboard.head_slot[1] : 0,
+               commit_instr_id_commit[0].pc, commit_instr_id_commit[0].op,
+               commit_instr_id_commit[0].fu, commit_instr_id_commit[0].valid,
+               issue_stage_i.i_scoreboard.mem_q[hs].sbe.valid,
+               issue_stage_i.i_scoreboard.mem_q[hs].issued,
+               issue_stage_i.i_scoreboard.mem_q[hs].cancelled,
+               commit_instr_id_commit[0].ex.valid,
+               issue_stage_i.i_scoreboard.mem_q[hs].replay,
+               issue_stage_i.i_scoreboard.phys_pending_i[hs],
+               issue_stage_i.i_scoreboard.phys_mod_i,
+               commit_instr_id_commit[0].hart_id,
+               ih[0], CVA6Cfg.NrHarts > 1 ? ih[1] : 0);
+      $display("[smt-stall] ldu st=%0d tid=%0d pvld=%0d paddr=%h dreq=%0d rvld=%0d | stu st=%0d | lsu_cmt=%0d lsu_rdy=%0d | wbem=%0d wbni=%0d",
+               int'(ex_stage_i.lsu_i.i_load_unit.state_q),
+               ex_stage_i.lsu_i.i_load_unit.load_trans_id_o,
+               ex_stage_i.lsu_i.i_load_unit.load_paddr_valid_o,
+               ex_stage_i.lsu_i.i_load_unit.load_paddr_o,
+               ex_stage_i.lsu_i.i_load_unit.req_port_o.data_req,
+               ex_stage_i.lsu_i.i_load_unit.req_port_i.data_rvalid,
+               int'(ex_stage_i.lsu_i.i_store_unit.state_q),
+               lsu_commit_commit_ex, lsu_commit_ready_ex_commit,
+               dcache_commit_wbuffer_empty, dcache_commit_wbuffer_not_ni);
+      // Missunit/wbuffer/adapter internals exist under gen_cache_wt; every
+      // NrHarts>1 && SmtDrainedHandoff config (this probe's gate) is WT.
+      $display("[smt-stall] dmu st=%0d mvld=%0d mpaddr=%h mid=%0d mport=%0d mcnt=%0d | wbv=%h | adp rvld=%0d d1st=%0d sinv=%0d",
+               int'(gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.state_q),
+               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_vld_q,
+               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_q.paddr,
+               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_q.id,
+               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_q.miss_port_idx,
+               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.cnt_q,
+               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_wbuffer.valid,
+               gen_cache_wt.i_cache_subsystem.i_adapter.dcache_rtrn_vld_q,
+               gen_cache_wt.i_cache_subsystem.i_adapter.dcache_first_q,
+               gen_cache_wt.i_cache_subsystem.i_adapter.self_inval_pend_q);
+      // N1d-2: slot-lifetime bitmaps + staging state. An issued slot with
+      // sbe.valid=0 is a zombie head (never wrote back); the iro vector
+      // shows which gate holds the in-flight op (operand vs FU credit vs
+      // downstream stall), and the store commit-queue head exposes a store
+      // whose grant/rvalid never completes.
+      begin
+        automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] iv, vv, cv, rv;
+        iv = '0; vv = '0; cv = '0; rv = '0;
+        for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++) begin
+          iv[s] = issue_stage_i.i_scoreboard.mem_q[s].issued;
+          vv[s] = issue_stage_i.i_scoreboard.mem_q[s].sbe.valid;
+          cv[s] = issue_stage_i.i_scoreboard.mem_q[s].cancelled;
+          rv[s] = issue_stage_i.i_scoreboard.mem_q[s].replay;
+        end
+        $display("[smt-stall] sbm iss=%h vld=%h canc=%h repl=%h", iv, vv, cv, rv);
+      end
+      $display("[smt-stall] dsp ivld=%b iack=%b pc=%h tid=%0d fu=%0d op=%0d hart=%0d | iro raw=%b rs1=%b rs2=%b rs3=%b fub=%b csr=%0d flu=%0d lsu=%0d mul=%0d casq=%0d lrsc=%0d st=%b",
+               issue_stage_i.issue_instr_valid_iro,
+               issue_stage_i.issue_ack_iro,
+               issue_stage_i.issue_instr_iro[0].pc,
+               issue_stage_i.issue_instr_iro[0].trans_id,
+               issue_stage_i.issue_instr_iro[0].fu,
+               issue_stage_i.issue_instr_iro[0].op,
+               issue_stage_i.issue_instr_iro[0].hart_id,
+               issue_stage_i.i_issue_read_operands.stall_raw,
+               issue_stage_i.i_issue_read_operands.stall_rs1,
+               issue_stage_i.i_issue_read_operands.stall_rs2,
+               issue_stage_i.i_issue_read_operands.stall_rs3,
+               issue_stage_i.i_issue_read_operands.fu_busy,
+               issue_stage_i.i_issue_read_operands.fus_busy[0].csr,
+               issue_stage_i.i_issue_read_operands.flu_ready_i,
+               issue_stage_i.i_issue_read_operands.lsu_ready_i,
+               issue_stage_i.i_issue_read_operands.mult_valid_q,
+               issue_stage_i.i_issue_read_operands.casq_stall,
+               issue_stage_i.i_issue_read_operands.lr_sc_pair_q,
+               issue_stage_i.i_issue_read_operands.stall_i);
+      $display("[smt-stall] stq ccnt=%0d crp=%0d cvld=%0d wrv=%0d cbo=%0d ctid=%0d caddr=%h scnt=%0d",
+               ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_status_cnt_q,
+               ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_read_pointer_q,
+               ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_queue_q[
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_read_pointer_q].valid,
+               ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_queue_q[
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_read_pointer_q].wait_rvalid,
+               ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_queue_q[
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_read_pointer_q].cbo_op,
+               ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_queue_q[
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_read_pointer_q].trans_id,
+               ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_queue_q[
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_read_pointer_q].address,
+               ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_status_cnt_q);
+      // N1d-3: spec-queue residency scan. A load parked in WAIT_PAGE_OFFSET
+      // holds on st_pipeline_busy (page_offset match + STQ live); the wedge
+      // needs the blocking entry's owner (hart/tid) and its drain status —
+      // a peer-hart zombie or an age-misjudged younger entry can never drain
+      // while the resident's commit head is the load itself.
+      begin
+        automatic logic [11:0] s_lpo;
+        s_lpo = ex_stage_i.lsu_i.i_store_unit.store_buffer_i.page_offset_i;
+        $display("[smt-stall] sqh scnt=%0d srp=%0d swp=%0d ccnt=%0d crp=%0d cwp=%0d oltid=%0d ldtid=%0d ldhart=%0d lpo=%h pom=%0d sbempty=%0d",
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_status_cnt_q,
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_read_pointer_q,
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_write_pointer_q,
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_status_cnt_q,
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_read_pointer_q,
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_write_pointer_q,
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.oldest_live_tid_i,
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.load_trans_id_i,
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.load_hart_i,
+                 s_lpo,
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.page_offset_matches_o,
+                 ex_stage_i.lsu_i.i_store_unit.store_buffer_i.store_buffer_empty_o);
+        for (int unsigned e = 0;
+             e < ex_stage_i.lsu_i.i_store_unit.store_buffer_i.DEPTH_SPEC; e++)
+          if (ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_queue_q[e].valid)
+            $display("[smt-stall] sqe i=%0d tid=%0d hart=%0d addr=%h cbo=%0d fk=%0d canc=%0d live=%0d m12=%0d",
+                     e,
+                     ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_queue_q[e].trans_id,
+                     ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_queue_q[e].hart,
+                     ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_queue_q[e].address,
+                     ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_queue_q[e].cbo_op,
+                     ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_queue_q[e].fwd_keep,
+                     ex_stage_i.lsu_i.i_store_unit.store_buffer_i.cancelled_mask_i[
+                       ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_queue_q[e].trans_id],
+                     ex_stage_i.lsu_i.i_store_unit.store_buffer_i.sb_live_i[
+                       ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_queue_q[e].trans_id],
+                     ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_queue_q[e].address[11:0] == s_lpo);
+        $display("[smt-stall] headtid=%0d",
+                 issue_stage_i.i_scoreboard.mem_q[hs].sbe.trans_id);
+      end
+      ss_dump_id = ss_dump_id + 1;
+    endfunction
+    // N1d-2: OoO-only deep anatomy. gen_full_ooo / the second csr_buffer
+    // entry do not exist on the in-order drained targets, so the references
+    // live in their own generate scope; it fires one cycle after each
+    // ss_stall_dump call (bounded transitively by SS_DUMP_MAX + final).
+    if (CVA6Cfg.OoOEn) begin : gen_ooo_stall_probe
+      function automatic void ss_ooo_dump(input int unsigned hs);
+        $display("[smt-stall] dspq rob=%0d iqf=%0d ldf=%0d stf=%0d iqv=%b iqa=%b",
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.rob_full,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.iq_full,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.ld_full,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.st_full,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.iq_issue_valid,
+                 issue_stage_i.gen_full_ooo.i_ooo_dispatch.iq_issue_ack);
+        $display("[smt-stall] csrb rdy=%0d cmt=%0d ctid=%0d t0v=%0d t0id=%0d t0a=%h t1v=%0d t1id=%0d t1a=%h",
+                 ex_stage_i.csr_ready,
+                 ex_stage_i.csr_commit_i,
+                 ex_stage_i.commit_tran_id_i,
+                 ex_stage_i.csr_buffer_i.tab_q[0].valid,
+                 ex_stage_i.csr_buffer_i.tab_q[0].tid,
+                 ex_stage_i.csr_buffer_i.tab_q[0].csr_address,
+                 ex_stage_i.csr_buffer_i.tab_q[1].valid,
+                 ex_stage_i.csr_buffer_i.tab_q[1].tid,
+                 ex_stage_i.csr_buffer_i.tab_q[1].csr_address);
+        for (int unsigned e = 0; e < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.DEPTH; e++)
+          if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].valid)
+            $display("[smt-stall] iq e=%0d tid=%0d pc=%h fu=%0d op=%0d hart=%0d rdy=%b%b%b sel=%0d%s",
+                     e,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.trans_id,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.pc,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.fu,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.op,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.hart_id,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].rs1_rdy,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].rs2_rdy,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].rs3_rdy,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ready[e],
+                     int'(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.trans_id) == hs
+                         ? " <== HEAD" : "");
+      endfunction
+      int unsigned ss_ooo_seen = 0;
+      always @(posedge clk_i) begin
+        if (smt_stats_en && ss_dump_id != ss_ooo_seen) begin
+          ss_ooo_seen = ss_dump_id;
+          ss_ooo_dump(issue_stage_i.i_scoreboard.commit_sel_slot[0]);
+        end
+      end
+    end
     always @(posedge clk_i) begin
       if (!rst_ni) begin
         ss_prev_dp <= 1'b0;
@@ -1884,38 +2104,60 @@ module cva6
         for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
           if (commit_ack[p] && commit_drop_id_commit[p])
             ss_drop = ss_drop + 1;
-          if (smt_retire_valid[p] && smt_retire_hart[p] < SSNH)
+          if (smt_retire_valid[p] && smt_retire_hart[p] < SSNH) begin
             ss_retired[smt_retire_hart[p]] = ss_retired[smt_retire_hart[p]] + 1;
+            ss_last_commit[smt_retire_hart[p]] = ss_cycle;
+          end
+        end
+        if (ss_dp && ss_dump_cnt < SS_DUMP_MAX) begin
+          if (!ss_prev_dp) ss_dump_milestone = 0;
+          if ((ss_cycle - ss_last_commit[smt_active_hart] >=
+               ss_dump_milestone + SS_STALL_GAP)) begin
+            ss_stall_dump("stall");
+            ss_dump_milestone = ss_dump_milestone + SS_STALL_GAP;
+            ss_dump_cnt = ss_dump_cnt + 1;
+          end
+        end else if (!ss_dp) begin
+          ss_dump_milestone = 0;
         end
         if (smt_drain_force) ss_force = ss_force + 1;
         if (smt_drain_force_wfi) ss_force_wfi = ss_force_wfi + 1;
+        if (smt_drain_force_abs) ss_force_abs = ss_force_abs + 1;
         if (ss_cycle % 1000000 == 0) begin
-          $display("[smt-drain] cyc=%0d req=%0d switches=%0d aborts=%0d drain_cyc=%0d max=%0d wait_sb=%0d wait_st=%0d wait_flushid=%0d wait_peer=%0d wait_hold=%0d wait_trap=%0d wait_flush=%0d force=%0d force_wfi=%0d hist={%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d} ret={%0d,%0d,%0d,%0d} drop=%0d",
+          $display("[smt-drain] cyc=%0d req=%0d switches=%0d aborts=%0d drain_cyc=%0d max=%0d wait_sb=%0d wait_st=%0d wait_flushid=%0d wait_peer=%0d wait_hold=%0d wait_trap=%0d wait_flush=%0d force=%0d force_wfi=%0d force_abs=%0d hist={%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d} ret={%0d,%0d,%0d,%0d} drop=%0d kill=%0d headv=%0d hwfi=%0d hplain=%0d fcnt=%0d acnt=%0d",
                    ss_cycle, ss_drain_req, ss_switch, ss_drain_abort,
                    ss_drain_cyc, ss_drain_max,
                    ss_w_sb, ss_w_st, ss_w_flushid, ss_w_peer, ss_w_hold,
-                   ss_w_trap, ss_w_flush, ss_force, ss_force_wfi,
+                   ss_w_trap, ss_w_flush, ss_force, ss_force_wfi, ss_force_abs,
                    ss_hist[0], ss_hist[1], ss_hist[2], ss_hist[3],
                    ss_hist[4], ss_hist[5], ss_hist[6], ss_hist[7],
                    ss_retired[0], SSNH > 1 ? ss_retired[1] : 0,
                    SSNH > 2 ? ss_retired[2] : 0, SSNH > 3 ? ss_retired[3] : 0,
-                   ss_drop);
+                   ss_drop, smt_drain_safe, sb_head_valid[smt_active_hart],
+                   smt_head_wfi, smt_head_plain,
+                   i_smt_thread_select.gen_smt.drain_force_cnt_q,
+                   i_smt_thread_select.gen_smt.drain_abs_cnt_q);
         end
         ss_prev_dp <= ss_dp;
       end
     end
     final begin
       if (smt_stats_en) begin
-        $display("[smt-drain] FINAL cyc=%0d req=%0d switches=%0d aborts=%0d drain_cyc=%0d max=%0d wait_sb=%0d wait_st=%0d wait_flushid=%0d wait_peer=%0d wait_hold=%0d wait_trap=%0d wait_flush=%0d force=%0d force_wfi=%0d hist={%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d} ret={%0d,%0d,%0d,%0d} drop=%0d",
+        $display("[smt-drain] FINAL cyc=%0d req=%0d switches=%0d aborts=%0d drain_cyc=%0d max=%0d wait_sb=%0d wait_st=%0d wait_flushid=%0d wait_peer=%0d wait_hold=%0d wait_trap=%0d wait_flush=%0d force=%0d force_wfi=%0d force_abs=%0d hist={%0d,%0d,%0d,%0d,%0d,%0d,%0d,%0d} ret={%0d,%0d,%0d,%0d} drop=%0d kill=%0d headv=%0d hwfi=%0d hplain=%0d fcnt=%0d acnt=%0d",
                  ss_cycle, ss_drain_req, ss_switch, ss_drain_abort,
                  ss_drain_cyc, ss_drain_max,
                  ss_w_sb, ss_w_st, ss_w_flushid, ss_w_peer, ss_w_hold,
-                 ss_w_trap, ss_w_flush, ss_force, ss_force_wfi,
+                 ss_w_trap, ss_w_flush, ss_force, ss_force_wfi, ss_force_abs,
                  ss_hist[0], ss_hist[1], ss_hist[2], ss_hist[3],
                  ss_hist[4], ss_hist[5], ss_hist[6], ss_hist[7],
                  ss_retired[0], SSNH > 1 ? ss_retired[1] : 0,
                  SSNH > 2 ? ss_retired[2] : 0, SSNH > 3 ? ss_retired[3] : 0,
-                 ss_drop);
+                 ss_drop, smt_drain_safe, sb_head_valid[smt_active_hart],
+                 smt_head_wfi, smt_head_plain,
+                 i_smt_thread_select.gen_smt.drain_force_cnt_q,
+                 i_smt_thread_select.gen_smt.drain_abs_cnt_q);
+        if (ss_dp || (ss_cycle - ss_last_commit[smt_active_hart]) >= SS_STALL_GAP)
+          ss_stall_dump("final");
       end
     end
   end
@@ -2134,6 +2376,7 @@ module cva6
       .rvfi_issue_pointer_o (rvfi_issue_pointer),
       .rvfi_commit_pointer_o(rvfi_commit_pointer),
       .reclaim_ptr_o         (sb_reclaim),
+      .head_phys_pending_o   (ooo_head_phys_pending),
       .rvfi_rs1_o           (rvfi_rs1),
       .rvfi_rs2_o           (rvfi_rs2),
       .rvfi_operand_valid_o (rvfi_operand_valid),
@@ -2242,6 +2485,7 @@ module cva6
       .lsu_commit_ready_o      (lsu_commit_ready_ex_commit),     // to commit
       .commit_tran_id_i        (lsu_commit_trans_id),            // from commit
       .oldest_live_tid_i       (sb_reclaim),
+      .head_phys_pending_i     (ooo_head_phys_pending),
       .stall_st_pending_i      (stall_st_pending_ex),
       .shared_tlb_flush_busy_o (shared_tlb_flush_busy_ex),
       .no_st_pending_o         (no_st_pending_ex),
@@ -2618,6 +2862,7 @@ module cva6
         .spec_cancel_i      (spec_cancel),
         .smt_drain_force_i  (smt_drain_force),
         .smt_drain_force_wfi_i (smt_drain_force_wfi),
+        .smt_drain_force_abs_i (smt_drain_force_abs),
         .ai_pmu_op_i        (ai_pmu_op_i),
         .ai_pmu_mma_i       (ai_pmu_mma_i),
         .ai_pmu_post_i      (ai_pmu_post_i),

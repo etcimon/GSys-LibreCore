@@ -42,6 +42,7 @@ module g6lc_thread_select
     input  logic [CVA6Cfg.VLEN-1:0] head_pc_i,   // oldest uncommitted PC
     output logic drain_force_o,     // pulse: flush the resident hart now
     output logic drain_force_wfi_o, // drain_force_o && head was WFI
+    output logic drain_force_abs_o, // drain_force_o from the absolute bound
     output logic drain_forced_o,    // a force is outstanding until switch_o
     output logic [CVA6Cfg.VLEN-1:0] drain_force_pc_o,
     output logic quiesce_o,
@@ -89,6 +90,7 @@ module g6lc_thread_select
     assign switch_on_starve_o  = 1'b0;
     assign drain_force_o       = 1'b0;
     assign drain_force_wfi_o   = 1'b0;
+    assign drain_force_abs_o   = 1'b0;
     assign drain_forced_o      = 1'b0;
     assign drain_force_pc_o    = '0;
     logic _unused_boot;
@@ -150,16 +152,26 @@ module g6lc_thread_select
     // is in flight, and never while drain_ready_i.
     localparam int unsigned DF_MAX = CVA6Cfg.SmtDrainForceCycles;
     localparam int unsigned DF_W   = (DF_MAX <= 1) ? 1 : $clog2(DF_MAX + 1);
+    // T10f: absolute bound derived from the relative one (16 no-commit
+    // windows). DF_MAX == 0 disables both legs via DRAIN_FORCE_EN.
+    localparam int unsigned DF_ABS_MAX = 16 * DF_MAX;
+    localparam int unsigned DF_ABS_W   = (DF_ABS_MAX <= 1) ? 1 : $clog2(DF_ABS_MAX + 1);
     localparam bit DRAIN_FORCE_EN  =
         CVA6Cfg.SmtDrainedHandoff && (DF_MAX != 0);
     logic [DF_W-1:0]   drain_force_cnt_q, drain_force_cnt_d;
+    logic [DF_ABS_W-1:0] drain_abs_cnt_q, drain_abs_cnt_d;
     logic              drain_forced_q, drain_forced_d;
+    // At most one force pulse per pending drain: the pulse already starts
+    // the resident flush, so a pulse-cycle resolution race that retires
+    // drain_forced_q early must not let the force re-arm.
+    logic              drain_issued_q, drain_issued_d;
     logic [CVA6Cfg.VLEN-1:0] drain_force_pc_q;
     // The force pulse is registered: drain_force_o feeds the controller's
     // flush legs, and flush_id closes a path into drain_ready_i. Sampling
     // the decision keeps drain_ready_i out of the force cone — there is no
     // same-cycle path from the flush back into drain_force_d.
     logic              drain_force, drain_force_q, drain_force_wfi_q;
+    logic              drain_force_abs_q;
 `else
     assign quiesce_o = 1'b0;
     logic _unused_drain;
@@ -373,15 +385,26 @@ module g6lc_thread_select
       drain_force = 1'b0;
 `else
       drain_force = DRAIN_FORCE_EN && drain_pending_q && !drain_ready_i &&
-          !commit_i && drain_killable_i && !drain_forced_q &&
+          drain_killable_i && !drain_forced_q && !drain_issued_q &&
           (head_wfi_i ||
-           ((drain_force_cnt_q == DF_W'(DF_MAX)) && head_plain_i));
+           (!commit_i && (drain_force_cnt_q == DF_W'(DF_MAX)) &&
+            head_plain_i) ||
+           ((drain_abs_cnt_q == DF_ABS_W'(DF_ABS_MAX)) && head_plain_i));
 `endif
       drain_force_cnt_d = drain_force_cnt_q;
       if (!drain_pending_q || drain_ready_i || commit_i || drain_force)
         drain_force_cnt_d = '0;
       else if (drain_force_cnt_q != DF_W'(DF_MAX))
         drain_force_cnt_d = drain_force_cnt_q + 1'b1;
+      // T10f: absolute bound. Counts every pending && !ready cycle — a commit
+      // does NOT reset it, so an unbounded stream of masked-commit cycles
+      // (phys_pending/phys_mod/cancelled heads) can no longer starve the
+      // relative leg forever.
+      drain_abs_cnt_d = drain_abs_cnt_q;
+      if (!drain_pending_q || drain_ready_i || drain_force)
+        drain_abs_cnt_d = '0;
+      else if (drain_abs_cnt_q != DF_ABS_W'(DF_ABS_MAX))
+        drain_abs_cnt_d = drain_abs_cnt_q + 1'b1;
       // Forced state must survive the do_switch cycle into the switch_q pulse
       // (the outgoing bank reads npc_alt at switch_i) and die with the switch
       // or with the drain itself. drain_force_q is the registered pulse; the
@@ -394,6 +417,13 @@ module g6lc_thread_select
       drain_forced_d = (drain_forced_q || drain_force) && drain_pending_q &&
                        !switch_q &&
                        !(drain_force_q && (drain_ready_i || commit_i));
+      // Once a pulse has been issued it is spent for this drain — the flush
+      // it starts still completes even when the forced bookkeeping above was
+      // dropped by the commit/ready race, and re-firing under a sustained
+      // commit stream would re-pulse flush_ctrl_id forever without ever
+      // letting drain_ready_i rise.
+      drain_issued_d = (drain_issued_q || drain_force) && drain_pending_q &&
+                       !switch_q;
 `endif
       // Hold wins over policy: no switch. Also *freeze* quantum/starve aging —
       // otherwise the parked primary's starve hits ST_MAX during peer bootrom
@@ -455,10 +485,13 @@ module g6lc_thread_select
         drain_peer_q <= '0;
         drain_reason_q <= '0;
         drain_force_cnt_q <= '0;
+        drain_abs_cnt_q <= '0;
         drain_forced_q <= 1'b0;
+        drain_issued_q <= 1'b0;
         drain_force_pc_q <= '0;
         drain_force_q <= 1'b0;
         drain_force_wfi_q <= 1'b0;
+        drain_force_abs_q <= 1'b0;
 `endif
         active_q         <= '0;
         pause_req_q      <= '0;
@@ -480,9 +513,17 @@ module g6lc_thread_select
         drain_peer_q <= drain_peer_d;
         drain_reason_q <= drain_reason_d;
         drain_force_cnt_q <= drain_force_cnt_d;
+        drain_abs_cnt_q <= drain_abs_cnt_d;
         drain_forced_q <= drain_forced_d;
+        drain_issued_q <= drain_issued_d;
         drain_force_q <= drain_force;
         drain_force_wfi_q <= drain_force && head_wfi_i;
+        // abs attribution is exclusive: a force whose WFI or relative leg
+        // was also armed counts as that leg, not the absolute bound.
+        drain_force_abs_q <= drain_force && head_plain_i && !head_wfi_i &&
+                             (drain_abs_cnt_q == DF_ABS_W'(DF_ABS_MAX)) &&
+                             (commit_i ||
+                              (drain_force_cnt_q != DF_W'(DF_MAX)));
         if (drain_force) drain_force_pc_q <= head_pc_i;
 `endif
         active_q         <= active_d;
@@ -515,11 +556,13 @@ module g6lc_thread_select
 `ifdef G6LC_FETCH_B
     assign drain_force_o       = drain_force_q;
     assign drain_force_wfi_o   = drain_force_wfi_q;
+    assign drain_force_abs_o   = drain_force_abs_q;
     assign drain_forced_o      = drain_forced_q;
     assign drain_force_pc_o    = drain_force_pc_q;
 `else
     assign drain_force_o       = 1'b0;
     assign drain_force_wfi_o   = 1'b0;
+    assign drain_force_abs_o   = 1'b0;
     assign drain_forced_o      = 1'b0;
     assign drain_force_pc_o    = '0;
 `endif

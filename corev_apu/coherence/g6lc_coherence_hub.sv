@@ -1214,6 +1214,85 @@ module g6lc_coherence_hub
         .inv_deq_seq_o   (inv_deq_seq)
     );
 
+    //pragma translate_off
+    // N1d/T10g hub stall dump (+smt_stats): birth-stamp AR/AW slots; when a
+    // slot outlives CS_STALL_GAP cycles it re-dumps per additional gap
+    // (bounded to CS_DUMP_MAX), and dumps again at final while any slot is
+    // live. The ring-32 boot hangs with a drain pending ~6 M cycles; this
+    // pinpoints whether a hub slot/held response is the wedge.
+    bit cs_en;
+    longint unsigned cs_cyc;
+    int unsigned cs_dump_cnt;
+    longint signed cs_ar_birth[OT_MAX], cs_aw_birth[OT_MAX];
+    function automatic void cs_stall_dump(input string why);
+      for (int unsigned s = 0; s < OT_MAX; s++) begin
+        if (ar_ot_q[s].valid)
+          $display("[coh-stall] %s cyc=%0d ar[%0d] core=%0d oid=%0d xr=%0d bdone=%0d bh=%0d rh=%0d line=%h owed=%0d invw=%h",
+                   why, cs_cyc, s, ar_ot_q[s].core, ar_ot_q[s].orig_id,
+                   ar_ot_q[s].expect_r, ar_ot_q[s].b_done, ar_ot_q[s].b_held,
+                   ar_ot_q[s].r_held, ar_ot_q[s].line_addr,
+                   inv_ot_q[s].inv_owed, inv_ot_q[s].inv_wait);
+        if (aw_ot_q[s].valid)
+          $display("[coh-stall] %s cyc=%0d aw[%0d] core=%0d oid=%0d xr=%0d bdone=%0d bh=%0d rh=%0d rl=%0d line=%h owed=%0d invw=%h invs=%0d",
+                   why, cs_cyc, s, aw_ot_q[s].core, aw_ot_q[s].orig_id,
+                   aw_ot_q[s].expect_r, aw_ot_q[s].b_done, aw_ot_q[s].b_held,
+                   aw_ot_q[s].r_held, aw_ot_q[s].r_last, aw_ot_q[s].line_addr,
+                   inv_ot_q[s].inv_owed, inv_ot_q[s].inv_wait,
+                   inv_ot_q[s].inv_settle);
+      end
+      for (int unsigned c = 0; c < NC; c++)
+        $display("[coh-stall] %s cyc=%0d inv[%0d] v=%0d rdy=%0d line=%h ways=%0d pendv=%0d pendline=%h enq=%0d deq=%0d",
+                 why, cs_cyc, c, inv_bus_o[c].valid, inv_bus_ready[c],
+                 inv_bus_o[c].line_addr, inv_bus_o[c].all_ways,
+                 inv_pend_q.valid, inv_pend_q.line_addr,
+                 inv_enq_seq[c], inv_deq_seq[c]);
+      $display("[coh-stall] %s cyc=%0d arh=%0d ahs=%0d aho=%0d awh=%0d aws=%0d awo=%0d awll=%h ifh=%h sigp=%0d",
+               why, cs_cyc, ar_hold_q, ar_hold_slot_q, ar_hold_owner_q,
+               aw_hold_q, aw_hold_slot_q, aw_hold_owner_q,
+               ar_wr_line_live, inv_fill_hold, sig_pending_q);
+    endfunction
+    initial begin
+      cs_en = $test$plusargs("smt_stats");
+      cs_cyc = 0; cs_dump_cnt = 0;
+      for (int s = 0; s < OT_MAX; s++) begin
+        cs_ar_birth[s] = -1; cs_aw_birth[s] = -1;
+      end
+    end
+    always @(posedge clk_i) begin
+      if (!rst_ni) begin
+        cs_cyc <= 0;
+        for (int s = 0; s < OT_MAX; s++) begin
+          cs_ar_birth[s] <= -1; cs_aw_birth[s] <= -1;
+        end
+      end else if (cs_en) begin
+        bit cs_fire;
+        cs_cyc <= cs_cyc + 1;
+        cs_fire = 0;
+        for (int s = 0; s < OT_MAX; s++) begin
+          if (ar_ot_q[s].valid && cs_ar_birth[s] < 0) cs_ar_birth[s] <= cs_cyc;
+          if (!ar_ot_q[s].valid) cs_ar_birth[s] <= -1;
+          if (aw_ot_q[s].valid && cs_aw_birth[s] < 0) cs_aw_birth[s] <= cs_cyc;
+          if (!aw_ot_q[s].valid) cs_aw_birth[s] <= -1;
+          if (cs_ar_birth[s] >= 0 && cs_cyc - cs_ar_birth[s] >= 65536) begin
+            cs_fire = 1;
+            cs_ar_birth[s] <= cs_cyc;
+          end
+          if (cs_aw_birth[s] >= 0 && cs_cyc - cs_aw_birth[s] >= 65536) begin
+            cs_fire = 1;
+            cs_aw_birth[s] <= cs_cyc;
+          end
+        end
+        if (cs_fire && cs_dump_cnt < 8) begin
+          cs_stall_dump("slot-age");
+          cs_dump_cnt <= cs_dump_cnt + 1;
+        end
+      end
+    end
+    final begin
+      if (cs_en) cs_stall_dump("final");
+    end
+    //pragma translate_on
+
   end
 
 endmodule

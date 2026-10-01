@@ -300,6 +300,55 @@ module g6lc_l2_wtrk #(
   end
   //pragma translate_on
 
+  // N1d/T10g entry-age dump (+smt_stats): a live write-tracker entry must
+  // never outlive ~65,536 cycles; birth-stamp each and dump the whole table
+  // on age (bounded to 8 dumps) and at final while anything is live.
+  //pragma translate_off
+`ifndef SYNTHESIS
+  bit                 pw_en;
+  longint unsigned    pw_cyc;
+  int unsigned        pw_dump_cnt;
+  longint signed      pw_birth[DEPTH];
+  function automatic void pw_dump(input string why);
+    for (int unsigned e = 0; e < DEPTH; e++)
+      if (valid_q[e])
+        $display("[l2-stall] %s %m cyc=%0d wtrk[%0d] id=%0d dsid=%0d line=%h bpend=%0d block=%0d",
+                 why, pw_cyc, e, ent_id_q[e], ent_dsid_q[e], ent_line_q[e],
+                 b_pend_q[e], ent_block_q[e]);
+  endfunction
+  initial begin
+    pw_en = $test$plusargs("smt_stats");
+    pw_cyc = 0; pw_dump_cnt = 0;
+    for (int e = 0; e < DEPTH; e++) pw_birth[e] = -1;
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      pw_cyc <= 0;
+      for (int e = 0; e < DEPTH; e++) pw_birth[e] <= -1;
+    end else if (pw_en) begin
+      bit pw_fire;
+      pw_cyc <= pw_cyc + 1;
+      pw_fire = 0;
+      for (int e = 0; e < DEPTH; e++) begin
+        if (valid_q[e] && pw_birth[e] < 0) pw_birth[e] <= pw_cyc;
+        if (!valid_q[e]) pw_birth[e] <= -1;
+        if (pw_birth[e] >= 0 && pw_cyc - pw_birth[e] >= 65536) begin
+          pw_fire = 1;
+          pw_birth[e] <= pw_cyc;
+        end
+      end
+      if (pw_fire && pw_dump_cnt < 8) begin
+        pw_dump("wtrk-age");
+        pw_dump_cnt <= pw_dump_cnt + 1;
+      end
+    end
+  end
+  final begin
+    if (pw_en && |valid_q) pw_dump("final");
+  end
+`endif
+  //pragma translate_on
+
 endmodule
 
 
@@ -413,5 +462,53 @@ module g6lc_l2_rdtrk #(
       end
     end
   end
+
+  // N1d/T10g entry-age dump (+smt_stats): a live bypass-read entry must
+  // never outlive ~65,536 cycles; birth-stamp each and dump the whole table
+  // on age (bounded to 8 dumps) and at final while anything is live.
+  //pragma translate_off
+`ifndef SYNTHESIS
+  bit                 pr_en;
+  longint unsigned    pr_cyc;
+  int unsigned        pr_dump_cnt;
+  longint signed      pr_birth[DEPTH];
+  function automatic void pr_dump(input string why);
+    for (int unsigned e = 0; e < DEPTH; e++)
+      if (valid_q[e])
+        $display("[l2-stall] %s %m cyc=%0d rdtrk[%0d] id=%0d",
+                 why, pr_cyc, e, ent_id_q[e]);
+  endfunction
+  initial begin
+    pr_en = $test$plusargs("smt_stats");
+    pr_cyc = 0; pr_dump_cnt = 0;
+    for (int e = 0; e < DEPTH; e++) pr_birth[e] = -1;
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      pr_cyc <= 0;
+      for (int e = 0; e < DEPTH; e++) pr_birth[e] <= -1;
+    end else if (pr_en) begin
+      bit pr_fire;
+      pr_cyc <= pr_cyc + 1;
+      pr_fire = 0;
+      for (int e = 0; e < DEPTH; e++) begin
+        if (valid_q[e] && pr_birth[e] < 0) pr_birth[e] <= pr_cyc;
+        if (!valid_q[e]) pr_birth[e] <= -1;
+        if (pr_birth[e] >= 0 && pr_cyc - pr_birth[e] >= 65536) begin
+          pr_fire = 1;
+          pr_birth[e] <= pr_cyc;
+        end
+      end
+      if (pr_fire && pr_dump_cnt < 8) begin
+        pr_dump("rdtrk-age");
+        pr_dump_cnt <= pr_dump_cnt + 1;
+      end
+    end
+  end
+  final begin
+    if (pr_en && |valid_q) pr_dump("final");
+  end
+`endif
+  //pragma translate_on
 
 endmodule

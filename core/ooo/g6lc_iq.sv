@@ -212,6 +212,7 @@ module g6lc_iq
     for (int unsigned e = 0; e < DEPTH; e++) begin
       automatic logic is_ld;
       automatic logic older_unresolved_st;
+      automatic logic older_csr_iq;
       automatic logic is_csr;
       automatic logic is_amo;
       automatic logic is_cvxif;
@@ -246,6 +247,21 @@ module g6lc_iq
       // side effects are global). Plain CSR accesses are covered by the
       // dual-entry csr_buffer's credit in issue_read_operands instead.
       is_csr = (q_chain[e].sbe.fu == CSR);
+      // N1d (T10g): CSR ops issue strictly in IQ age order, not just behind
+      // the csr_buffer's credit. The buffer's two entries are freed only by
+      // a commit, and commit is in-order — a younger CSR claiming a credit
+      // ahead of an older CSR still waiting in the queue leaves the older
+      // one unable to issue (csr_ready_i low): its sbe.valid never sets,
+      // the commit head never validates, and the buffered youngers can never
+      // commit — a circular wedge (ring-32 four-hart boot, OpenSBI CSR probe
+      // burst at 0x8000e9fa). IQ-age order guarantees every buffered CSR
+      // retires before any CSR still queued, so the head can never be
+      // starved by younger entries.
+      older_csr_iq = 1'b0;
+      for (int unsigned o = 0; o < DEPTH; o++)
+        if (q_chain[o].valid && q_chain[o].sbe.fu == CSR &&
+            (o != e) && older_q[o][e])
+          older_csr_iq = 1'b1;
       // An atomic also issues only at the commit head. The store unit holds
       // an issued AMO in a one-entry buffer and is not ready for any other
       // store until that AMO commits; an AMO issued ahead of an older store
@@ -274,6 +290,7 @@ module g6lc_iq
           !(is_cvxif && (q_chain[e].sbe.trans_id != commit_ptr_i)) &&
           !(is_ld && (mem_stall_i ||
                       (older_unresolved_st && !q_chain[e].may_bypass))) &&
+          !(is_csr && older_csr_iq) &&
           !(is_csr &&
             !(q_chain[e].sbe.op inside {CSR_READ, CSR_WRITE, CSR_SET, CSR_CLEAR}) &&
             (q_chain[e].sbe.trans_id != commit_ptr_i)) &&
@@ -466,6 +483,22 @@ module g6lc_iq
     always_ff @(posedge clk_i) begin
       if (rst_ni)
         ooo_iq_rank_unique: assert ($onehot0(grant[p]));
+    end
+    // N1d/T10g: a granted CSR never overtakes an older CSR still resident in
+    // the queue — the ordering rule that prevents the csr_buffer credit
+    // circle (younger CSRs consuming both credits ahead of an unissued older
+    // CSR whose commit must precede theirs).
+    for (genvar e = 0; e < DEPTH; e++) begin : gen_iq_csr_entry
+      for (genvar o = 0; o < DEPTH; o++) begin : gen_iq_csr_older
+        if (o != e) begin
+          always_ff @(posedge clk_i) begin
+            if (rst_ni)
+              ooo_iq_csr_order: assert (
+                  !(grant[p][e] && q_chain[e].valid && q_chain[e].sbe.fu == CSR &&
+                    q_chain[o].valid && q_chain[o].sbe.fu == CSR && older_q[o][e]));
+          end
+        end
+      end
     end
   end
   for (genvar a = 0; a < DEPTH; a++) begin : gen_iq_age_a

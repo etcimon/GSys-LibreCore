@@ -51,6 +51,13 @@ module store_buffer
     // commit_trans_id_i stays the *committing* tid (port-0 slot) for the
     // head-match gate below. Aliases commit_trans_id_i under legacy order.
     input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] oldest_live_tid_i,
+    // N1d: the commit head is an unpublished load (phys_pending — it needs
+    // this LSU to make progress). A speculative-queue stall can only clear
+    // through commit, so holding a younger load on it is a circular wait;
+    // release it and let the LSQ phys_replay scan arbitrate any true alias
+    // when the released load publishes its physical address. Constant 0
+    // unless the OoO physical-tracking policy (COH_OOO) is live.
+    input  logic                          head_phys_pending_i,
     // T6b: hart of the querying load. Under OoO multi-hart a load forwards
     // only from its OWN hart's speculative stores; a peer hart's store is not
     // visible until commit. Constant-0 otherwise (single hart / in-order).
@@ -142,6 +149,15 @@ module store_buffer
   localparam bit HART_OWN = 1'b0;
 `else
   localparam bit HART_OWN = CVA6Cfg.OoOEn && CVA6Cfg.NrHarts > 1;
+`endif
+
+`ifdef G6LC_MUT_STB_NO_HEAD_GATE
+  // Review-only mutation: drop the head-blocked liveness release — a
+  // phys-pending commit head no longer frees the speculative stall, so the
+  // N1d circular wait re-forms.
+  localparam bit HEAD_GATE_EN = 1'b0;
+`else
+  localparam bit HEAD_GATE_EN = 1'b1;
 `endif
 
   // the store queue has two parts:
@@ -572,6 +588,12 @@ module store_buffer
   // matching false-aliased stack SW vs FDT structure loads across pages and
   // either stalled forever or STQ-forwarded the wrong bytes (*nextoff=-11).
   logic page_offset_matches_now;
+  // N1d: while the commit head is an unpublished load, every speculative
+  // entry's drain waits on commit progress that itself waits on this LSU —
+  // a circular wait. Suppress the speculative stall terms only: the
+  // commit-queue and sticky terms drain autonomously and must still gate.
+  logic spec_stall_futile;
+  assign spec_stall_futile = HEAD_GATE_EN && head_phys_pending_i;
   logic [CVA6Cfg.PLEN-1:0] page_offset_sticky_pa_q;
   logic                    page_offset_sticky_v_q;
   logic                    page_offset_sticky_po_v_q;  // [11:0]-only sticky
@@ -621,7 +643,8 @@ module store_buffer
       // Age filter is load-bearing for LIVENESS here, not just for data:
       // commit is in-order, so an older load that stalls on a YOUNGER store
       // can never progress -- that store cannot commit until the load retires.
-      if (speculative_queue_q[i].valid &&
+      if (!spec_stall_futile &&
+          speculative_queue_q[i].valid &&
           spec_visible(speculative_queue_q[i].trans_id) &&
           ((speculative_queue_q[i].address[11:0] == page_offset_i) ||
            (CVA6Cfg.RVZiCboz &&
@@ -632,7 +655,7 @@ module store_buffer
         break;
       end
     end
-    if (valid_without_flush_i && spec_visible(trans_id_i) &&
+    if (!spec_stall_futile && valid_without_flush_i && spec_visible(trans_id_i) &&
         ((paddr_i[11:0] == page_offset_i) ||
          (CVA6Cfg.RVZiCboz && cbo_op_i == ariane_pkg::CBO_ZERO &&
           ((paddr_i[11:0] >> CBOZ_OFF_W) == (page_offset_i >> CBOZ_OFF_W))))) begin

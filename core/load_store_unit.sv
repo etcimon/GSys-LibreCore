@@ -93,6 +93,9 @@ module load_store_unit
     // T6b-4b: reclaim pointer (oldest live slot) — the store buffer's age
     // anchor. commit_tran_id_i stays the committing (port-0) tid.
     input logic [CVA6Cfg.TRANS_ID_BITS-1:0] oldest_live_tid_i,
+    // N1d: the commit head is an unpublished load — speculative-store
+    // stalls are futile while it pends (see store_buffer).
+    input logic head_phys_pending_i,
     // Result from branch unit - EX_STAGE
     input bp_resolve_t resolved_branch_i,
     // Enable virtual memory translation - TO_BE_COMPLETED
@@ -264,6 +267,7 @@ module load_store_unit
   logic        mmu_hlvx_inst;
   exception_t mmu_exception, cva6_mmu_exception, acc_mmu_exception;
   exception_t   pmp_exception;
+  logic         cva6_mmu_ex_ptw;
   icache_areq_t pmp_icache_areq_i;
   logic         pmp_translation_valid;
   logic dtlb_hit, cva6_dtlb_hit, acc_dtlb_hit;
@@ -339,6 +343,7 @@ module load_store_unit
         .lsu_valid_o    (pmp_translation_valid),
         .lsu_paddr_o    (lsu_paddr),
         .lsu_exception_o(pmp_exception),
+        .lsu_exception_ptw_o(cva6_mmu_ex_ptw),
 
         .priv_lvl_i      (priv_lvl_i),
         .v_i,
@@ -434,6 +439,7 @@ module load_store_unit
     assign dtlb_miss_o                         = 1'b0;
     assign dtlb_ppn                            = lsu_paddr[CVA6Cfg.PLEN-1:12];
     assign dtlb_hit                            = 1'b1;
+    assign cva6_mmu_ex_ptw                     = 1'b0;
 
   end
 
@@ -654,6 +660,7 @@ module load_store_unit
       .load_hart_i          (load_hart),
       .commit_tran_id_i,
       .oldest_live_tid_i,
+      .head_phys_pending_i,
       .dcache_wbuffer_empty_i,
       .page_offset_matches_o(page_offset_matches),
       .st_fwd_valid_o       (st_fwd_valid),
@@ -698,6 +705,7 @@ module load_store_unit
       .hlvx_inst_o          (ld_hlvx_inst),
       .paddr_i              (cva6_mmu_paddr),
       .ex_i                 (cva6_mmu_exception),
+      .ex_ptw_i             (cva6_mmu_ex_ptw),
       .dtlb_hit_i           (cva6_dtlb_hit),
       .dtlb_ppn_i           (cva6_dtlb_ppn),
       // to store unit

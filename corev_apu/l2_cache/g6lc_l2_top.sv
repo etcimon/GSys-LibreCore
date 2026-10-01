@@ -828,6 +828,7 @@ module g6lc_l2_top
       end
       //pragma translate_on
     end
+
   end else begin : gen_no_trk
     assign wtrk_full         = 1'b0;
     assign wtrk_empty        = 1'b1;
@@ -2108,6 +2109,75 @@ module g6lc_l2_top
   end else begin : gen_no_rr
     assign rr_victim_way = '0;
   end
+
+
+    //pragma translate_off
+`ifndef SYNTHESIS
+    // N1d/T10g L2 stall dump (+smt_stats): a single fill/tracker/FSM state
+    // must never outlive ~65,536 cycles; birth-stamp each and dump the FSM +
+    // handshakes + MSHR/tracker occupancy when one does (bounded to 8), and
+    // at final while anything is still live. %m distinguishes the L2 from the
+    // L3-as-L2 instance in stacked configs.
+    bit ls_en;
+    longint unsigned ls_cyc;
+    int unsigned ls_dump_cnt;
+    longint signed ls_fill_birth[MSHR_DEPTH];
+    longint unsigned ls_state_since;
+    function automatic void ls_stall_dump(input string why);
+      $display("[l2-stall] %s %m cyc=%0d st=%0d addr=%h id=%0d sintr=%0d winvp=%0d sar=%0d saw=%0d sw=%0d sarr=%0d sawr=%0d swr=%0d srv=%0d sbv=%0d srr=%0d sbr=%0d mar=%0d maw=%0d mw=%0d marr=%0d mawr=%0d mwr=%0d mrv=%0d mbv=%0d mrr=%0d mbr=%0d",
+               why, ls_cyc, state_q, addr_q, id_q, serve_intr_q,
+               wr_inval_pend_q,
+               slv_req_i.ar_valid, slv_req_i.aw_valid, slv_req_i.w_valid,
+               slv_resp_o.ar_ready, slv_resp_o.aw_ready, slv_resp_o.w_ready,
+               slv_resp_o.r_valid, slv_resp_o.b_valid,
+               slv_req_i.r_ready, slv_req_i.b_ready,
+               mst_req_o.ar_valid, mst_req_o.aw_valid, mst_req_o.w_valid,
+               mst_resp_i.ar_ready, mst_resp_i.aw_ready, mst_resp_i.w_ready,
+               mst_resp_i.r_valid, mst_resp_i.b_valid,
+               mst_req_o.r_ready, mst_req_o.b_ready);
+      for (int unsigned e = 0; e < MSHR_DEPTH; e++)
+        if (fill_act_q[e])
+          $display("[l2-stall] %s %m cyc=%0d mshr[%0d] st=%0d line=%h",
+                   why, ls_cyc, e, fill_state_q[e], fill_addr_q[e]);
+    endfunction
+    initial begin
+      ls_en = $test$plusargs("smt_stats");
+      ls_cyc = 0; ls_dump_cnt = 0; ls_state_since = 0;
+      for (int e = 0; e < MSHR_DEPTH; e++) ls_fill_birth[e] = -1;
+    end
+    always @(posedge clk_i) begin
+      if (!rst_ni) begin
+        ls_cyc <= 0; ls_state_since <= 0;
+        for (int e = 0; e < MSHR_DEPTH; e++) ls_fill_birth[e] <= -1;
+      end else if (ls_en) begin
+        bit ls_fire;
+        ls_cyc <= ls_cyc + 1;
+        if (state_q != state_d) ls_state_since <= ls_cyc;
+        ls_fire = 0;
+        for (int e = 0; e < MSHR_DEPTH; e++) begin
+          if (fill_act_q[e] && ls_fill_birth[e] < 0) ls_fill_birth[e] <= ls_cyc;
+          if (!fill_act_q[e]) ls_fill_birth[e] <= -1;
+          if (ls_fill_birth[e] >= 0 && ls_cyc - ls_fill_birth[e] >= 65536) begin
+            ls_fire = 1;
+            ls_fill_birth[e] <= ls_cyc;
+          end
+        end
+        if (ls_cyc - ls_state_since >= 65536) begin
+          ls_fire = 1;
+          ls_state_since <= ls_cyc;
+        end
+        if (ls_fire && ls_dump_cnt < 8) begin
+          ls_stall_dump("l2-age");
+          ls_dump_cnt <= ls_dump_cnt + 1;
+        end
+      end
+    end
+    final begin
+      if (ls_en && (|fill_act_q || !wtrk_empty || !rdtrk_empty))
+        ls_stall_dump("final");
+    end
+`endif
+    //pragma translate_on
 
   end  // gen_l2
 

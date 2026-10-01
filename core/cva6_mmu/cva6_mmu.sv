@@ -64,6 +64,7 @@ module cva6_mmu
     output logic lsu_valid_o,  // translation is valid
     output logic [CVA6Cfg.PLEN-1:0] lsu_paddr_o,  // translated address
     output exception_t lsu_exception_o,  // address translation threw an exception
+    output logic lsu_exception_ptw_o,  // lsu_exception_o came from the PTW-error branch
     // General control signals
     input riscv::priv_lvl_t priv_lvl_i,
     input logic v_i,
@@ -628,6 +629,7 @@ module cva6_mmu
 
     lsu_valid_o = lsu_req_q;
     lsu_exception_o = misaligned_ex_q;
+    lsu_exception_ptw_o = 1'b0;
 
     // mute misaligned exceptions if there is no request otherwise they will throw accidental exceptions
     misaligned_ex_n.valid = misaligned_ex_i.valid & lsu_req_i;
@@ -758,6 +760,11 @@ module cva6_mmu
       // ---------
       // watch out for exceptions
       if (ptw_active && !walking_instr) begin
+        // The PTW broadcast is not bound to the registered requester: the walk
+        // may belong to another LSU client whose request lost the port mux, so
+        // any exception raised here is foreign to a requester whose own
+        // translation already resolved.
+        lsu_exception_ptw_o = ptw_error | ptw_access_exception;
         // page table walker threw an exception
         if (ptw_error) begin
           // an error makes the translation valid

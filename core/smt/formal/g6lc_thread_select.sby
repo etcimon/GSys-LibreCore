@@ -8,20 +8,34 @@
 #   cover        — witnesses: timer force, WFI force, completed switch.
 #   mut_noforce  — negative control: G6LC_MUT_DRAIN_NOFORCE drops the force
 #                  and the bounded property must FAIL.
-# Expect: prove PASS, cover PASS, mut_noforce FAIL.
+#   abs          — T10f: commits are a free input (masked commit .valid stream);
+#                  the absolute bound 16*FORCE must still force a pending drain.
+#   abs_noforce  — same model under G6LC_MUT_DRAIN_NOFORCE: must FAIL.
+#   abs_cover    — witnesses the absolute-bound force pulse.
+# Expect: prove PASS, cover PASS, abs PASS, abs_cover PASS, mut_noforce FAIL,
+#         abs_noforce FAIL.
 
 [tasks]
 prove
 cover
 mut_noforce
+abs
+abs_noforce
+abs_cover
 
 [options]
 depth 24
 cover: depth 40
 mut_noforce: depth 24
+abs: depth 150
+abs_noforce: depth 150
+abs_cover: depth 150
 prove: mode prove
 cover: mode cover
 mut_noforce: mode bmc
+abs: mode prove
+abs_noforce: mode bmc
+abs_cover: mode cover
 
 [engines]
 smtbmc yices
@@ -30,6 +44,9 @@ smtbmc yices
 prove: read_slang --std 1800-2017 --top g6lc_thread_select_props -DFORMAL -DG6LC_FETCH_B config_pkg.sv g6lc_thread_select.sv g6lc_thread_select_props.sv
 cover: read_slang --std 1800-2017 --top g6lc_thread_select_props -DFORMAL -DFORMAL_COVER -DG6LC_FETCH_B config_pkg.sv g6lc_thread_select.sv g6lc_thread_select_props.sv
 mut_noforce: read_slang --std 1800-2017 --top g6lc_thread_select_props -DFORMAL -DG6LC_FETCH_B -DG6LC_MUT_DRAIN_NOFORCE config_pkg.sv g6lc_thread_select.sv g6lc_thread_select_props.sv
+abs: read_slang --std 1800-2017 --top g6lc_thread_select_props -DFORMAL -DFORMAL_ABS -DG6LC_FETCH_B config_pkg.sv g6lc_thread_select.sv g6lc_thread_select_props.sv
+abs_noforce: read_slang --std 1800-2017 --top g6lc_thread_select_props -DFORMAL -DFORMAL_ABS -DG6LC_FETCH_B -DG6LC_MUT_DRAIN_NOFORCE config_pkg.sv g6lc_thread_select.sv g6lc_thread_select_props.sv
+abs_cover: read_slang --std 1800-2017 --top g6lc_thread_select_props -DFORMAL -DFORMAL_ABS -DFORMAL_COVER -DG6LC_FETCH_B config_pkg.sv g6lc_thread_select.sv g6lc_thread_select_props.sv
 prep -top g6lc_thread_select_props
 flatten
 

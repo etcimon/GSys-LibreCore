@@ -260,6 +260,7 @@ module tb_g6lc_review_load_cancel;
   req_t req;
   resp_t resp='0;
   exception_t ex,ex_in='0;
+  logic ex_ptw=0;
   int scenario;
   bit negative,killed=0,seen_ex=0;
   logic [1:0] old_id,new_id;
@@ -277,7 +278,7 @@ module tb_g6lc_review_load_cancel;
     .valid_i(head.valid),.lsu_ctrl_i(head),.pop_ld_o(pop),.valid_o(wb),
     .trans_id_o(tid),.result_o(result),.ex_o(ex),.mbe_i(1'b0),
     .translation_req_o(),.vaddr_o(),.tinst_o(),.hs_ld_st_inst_o(),.hlvx_inst_o(),
-    .paddr_i(translated_pa),.ex_i(ex_in),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
+    .paddr_i(translated_pa),.ex_i(ex_in),.ex_ptw_i(ex_ptw),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
     .page_offset_o(),.load_paddr_o(),.load_paddr_valid_o(),.load_trans_id_o(),.load_hart_o(),
     .page_offset_matches_i(match_page),.store_buffer_empty_i(1'b0),.no_st_pending_i(nsp),
     .st_fwd_valid_i(fwd_valid),.st_fwd_data_i(64'h12345666),.st_fwd_be_i(8'hff),
@@ -401,6 +402,9 @@ module tb_g6lc_review_load_cancel;
       // completion.
       // The data cache answers a killed request with a dummy rvalid in the kill
       // cycle (wt_dcache_ctrl); an unkilled request returns its data later.
+      // N1d: the kill is conditional (squash or own misalignment only). This
+      // entry IS the misaligned one, so its tag still kills; the surviving-load
+      // case is pinned by scenario 22.
       13:begin
         resp.data_gnt=1;offer(3,LW);incoming.vaddr=64'h80001002;#2;
         if(!req.data_req)$fatal(1,"LOAD_MISALIGN_SETUP grant");
@@ -484,6 +488,9 @@ module tb_g6lc_review_load_cancel;
         tick();quiet();cancel='0;response(old_id,1,1);
       end
       20:begin
+        // A load's OWN fault at SEND_TAG (registered-path exception,
+        // ex_ptw=0) kills the tag exactly as upstream and still writes the
+        // exception back once on the dummy rvalid — no phys publish.
         resp.data_gnt=1;offer(1,LBU);old_id=req.data_id;tick();quiet();
         ex_in.valid=1;ex_in.cause=5;#2;
         if(phys_valid || !req.kill_req)$fatal(1,"LOAD_PA_FAULT");
@@ -496,6 +503,63 @@ module tb_g6lc_review_load_cancel;
         flush=1;#2;
         if(phys_valid)$fatal(1,"LOAD_PA_FLUSH");
         tick();flush=0;tick();response(old_id,1,0);
+      end
+      22:begin
+        // N1d (ring-32 wedge): a FOREIGN PTW-broadcast exception on the
+        // SEND_TAG cycle must not kill a surviving load's tag — the bypass
+        // entry was already popped at grant, so a kill drops the load
+        // silently: no result, no phys-valid pulse, no cancel; phys_pending
+        // then masks the commit head forever. The tag must deliver and the
+        // owner event must publish for the still-live entry, and the foreign
+        // fault must not attach an exception to this load. The negative arm
+        // inverts the kill expectation so the leaf fails on the pre-fix
+        // unconditional kill (G6LC_MUT_LSU_EXKILL reproduces it).
+        if(!COH || !MMU)$fatal(1,"LOAD_EXKILL_SCENARIO requires COH=1 MMU=1");
+        resp.data_gnt=1;offer(1,LBU);old_id=req.data_id;tick();quiet();
+        ex_in.valid=1;ex_in.cause=64'd13;ex_ptw=1;#2;   // foreign PTW page fault
+        if((req.kill_req^negative) || !req.tag_valid)
+          $fatal(1,"LOAD_EXKILL_TAG kill=%b tag=%b",req.kill_req,req.tag_valid);
+        if(!phys_valid || phys_id!=1 || phys_hart!=0 || phys_addr!=translated_pa)
+          $fatal(1,"LOAD_EXKILL_PHYS v=%b id=%0d h=%b pa=%h",phys_valid,phys_id,phys_hart,phys_addr);
+        if(wb && ex.valid)$fatal(1,"LOAD_EXKILL_FOREIGN_ATTACH");
+        tick();ex_in='0;ex_ptw=0;
+        response(old_id,1,1);
+      end
+      23:begin
+        // An OLDER load's rvalid coincident with a foreign PTW fault at
+        // SEND_TAG must complete without the exception attaching — the fault
+        // belongs to neither load's registered translation.
+        if(!COH || !MMU)$fatal(1,"LOAD_EXKILL_SCENARIO requires COH=1 MMU=1");
+        resp.data_gnt=1;offer(1,LBU);old_id=req.data_id;tick();quiet();tick();
+        offer(3,LBU);new_id=req.data_id;tick();quiet();
+        resp.data_rvalid=1;resp.data_rid=old_id;resp.data_rdata=64'h12345666;
+        ex_in.valid=1;ex_in.cause=64'd13;ex_ptw=1;#2;
+        if(req.kill_req || !req.tag_valid)
+          $fatal(1,"LOAD_EXKILL_TAG kill=%b tag=%b",req.kill_req,req.tag_valid);
+        if(!wb || tid!=3'd1 || (ex.valid!=negative))
+          $fatal(1,"LOAD_EXKILL_FOREIGN_ATTACH wb=%b ex=%b tid=%0d",wb,ex.valid,tid);
+        tick();resp.data_rvalid=0;ex_in='0;ex_ptw=0;
+        response(new_id,3,1);
+      end
+      24:begin
+        // FP sibling of 13: a misaligned FLW exercises the extended
+        // offset_misaligned / misaligned_entry_excepts path — an own fault
+        // still kills the tag and completes once with LD_ADDR_MISALIGNED.
+        resp.data_gnt=1;offer(3,FLW);incoming.vaddr=64'h80001002;#2;
+        if(!req.data_req)$fatal(1,"LOAD_MISALIGN_SETUP grant");
+        old_id=req.data_id;tick();quiet();
+        ex_in.valid=1;ex_in.cause=64'd4;ex_in.tval=64'h80001002;#1;
+        killed=req.kill_req;
+        resp.data_rvalid=killed;resp.data_rid=old_id;resp.data_rdata=64'hBAD0BAD0;#1;
+        if(wb && !ex.valid)$fatal(1,"LOAD_MISALIGN_DATA_COMPLETION tid=%0d data=%h",tid,result);
+        seen_ex=wb && ex.valid && ex.cause==64'd4 && ex.tval==64'h80001002 && tid==3'd3;
+        tick();ex_in='0;resp.data_rvalid=0;#2;
+        if(!killed)begin
+          resp.data_rvalid=1;resp.data_rid=old_id;resp.data_rdata=64'hBAD0BAD0;#2;
+          if(wb && !ex.valid)$fatal(1,"LOAD_MISALIGN_DATA_COMPLETION tid=%0d data=%h",tid,result);
+          tick();resp.data_rvalid=0;#2;
+        end
+        if(seen_ex!==!negative)$fatal(1,"LOAD_MISALIGN_EXCEPTION seen=%b killed=%b",seen_ex,killed);
       end
       default:$fatal(1,"LOAD_CANCEL_SCENARIO");
     endcase
@@ -741,6 +805,33 @@ module tb_g6lc_review_iq;
         ia='1;tick();ia='0;#2;
         commit_ptr=4'd0;
         offer_op(5,STORE,SD,0);expect_issue(1,"IQ_AMO_HEAD");
+      end
+      // N1d (T10g): a younger ready CSR must never be offered while an older
+      // CSR still waits in the IQ — the csr_buffer's two credits release only
+      // at in-order commit, so youngers claiming them first wedge the older
+      // CSR behind a full buffer (ring-32 four-hart boot hang).
+      11:begin
+        commit_ptr=4'd0;
+        // Older CSR still waiting on its rs1 producer (the wedge shape: the
+        // boot head csrrw fed by a just-retired load).
+        dv[0]=1;ds[0]='{fu:CSR,op:CSR_WRITE,trans_id:4'd3,hart_id:1'b0,pc:32'h100c};
+        di[0]=32'h13000003;p1[0]=4'd7;p2[0]=0;pd[0]=4'd3;r1[0]=0;r2[0]=1;
+        tick();clear_inputs();#2;
+        // Two younger ready CSRs stay gated behind the resident older one.
+        offer_op(5,CSR,CSR_WRITE,0);expect_issue(0,"IQ_CSR_ORDER");
+        offer_op(6,CSR,CSR_SET,0);expect_issue(0,"IQ_CSR_ORDER");
+        // A non-CSR entry is unaffected by the rule and drains the port.
+        offer_op(8,ALU,ADD,0);expect_issue(1,"IQ_CSR_ORDER");
+        if(is[0].trans_id!==4'd8)$fatal(1,"IQ_CSR_ORDER tid=%0d",is[0].trans_id);
+        ia='1;tick();ia='0;#2;
+        // Wake the older CSR: it takes the port ahead of the youngers.
+        wv=2'b01;wp[0]=4'd7;tick();wv='0;#2;
+        expect_issue(1,"IQ_CSR_ORDER");
+        if(is[0].trans_id!==4'd3)$fatal(1,"IQ_CSR_ORDER tid=%0d",is[0].trans_id);
+        ia='1;tick();ia='0;#2;
+        // Older CSR gone: the youngest CSR is now offered.
+        expect_issue(1,"IQ_CSR_ORDER");
+        if(is[0].trans_id!==4'd5)$fatal(1,"IQ_CSR_ORDER tid=%0d",is[0].trans_id);
       end
       default:$fatal(1,"IQ_SCENARIO");
     endcase
@@ -1942,6 +2033,18 @@ module tb_g6lc_review_lsq;
         if((preplay ^ (negative ? 16'h10 : 16'h0))!=((scenario==34)?16'h10:16'h0) || viol)
           $fatal(1,"LSQ_PHYSICAL");
       end
+      36:begin
+        // A released load's PUBLISHED physical address aliasing an older
+        // resolved store of the same hart must replay the load — the store's
+        // earlier resolution could not alias a PA that did not exist yet.
+        // Under PHYS_VALIDATE the store's addr_v arrives on phys channel 1.
+        st_alloc=1;ld_alloc=2;alloc_id[0]=1;alloc_id[1]=2;
+        drive();st_alloc=0;ld_alloc=0;
+        pv=2'b10;pid[1]=1;ph[1]=0;pa[1]=56'h9000;psz[1]=3;
+        drive();pv='0;pid='0;pa='0;
+        pv=2'b01;pid[0]=2;ph[0]=0;pa[0]=56'h9000;psz[0]=3;presample();
+        if((preplay ^ (negative ? 16'h4 : 16'h0))!=16'h4)$fatal(1,"LSQ_PHYSICAL");
+      end
       default:$fatal(1,"LSQ_SCENARIO");
     endcase
     $display("RTL_REVIEW_PASS lsq scenario=%0d",scenario);$finish;
@@ -2972,7 +3075,7 @@ module tb_g6lc_review_store_recovery;
   logic[55:0] address=56'h1010,load_address=56'h1010;
   logic[63:0] data=64'hAAAA,fwd_data;
   logic[7:0] fwd_be;
-  logic ready,commit_ready,empty,no_pending,fwd;
+  logic ready,commit_ready,empty,no_pending,fwd,pom,head_pending=0;
   req_t req; rsp_t rsp='0;
   int scenario;bit negative;
   always #5 clk=~clk;
@@ -2982,9 +3085,9 @@ module tb_g6lc_review_store_recovery;
     .stall_st_pending_i(1'b0),.no_st_pending_o(no_pending),.store_buffer_empty_o(empty),
     .page_offset_i(load_address[11:0]),.load_paddr_i(load_address),.load_paddr_valid_i(load_v),
     .load_trans_id_i(load_tid),.commit_trans_id_i(commit_tid),
-    .oldest_live_tid_i(commit_tid),
+    .oldest_live_tid_i(commit_tid),.head_phys_pending_i(head_pending),
     .load_hart_i(load_hart),.st_hart_i(st_hart),
-    .dcache_wbuffer_empty_i(1'b1),.page_offset_matches_o(),.st_fwd_valid_o(fwd),
+    .dcache_wbuffer_empty_i(1'b1),.page_offset_matches_o(pom),.st_fwd_valid_o(fwd),
     .st_fwd_data_o(fwd_data),.st_fwd_be_o(fwd_be),.commit_i(commit),
     .commit_ready_o(commit_ready),.ready_o(ready),.valid_i(valid),.valid_without_flush_i(valid),
     .paddr_i(address),.trans_id_i(tid),.rvfi_mem_paddr_o(),.data_i(data),.be_i(8'hff),
@@ -3080,6 +3183,29 @@ module tb_g6lc_review_store_recovery;
          req.data_wdata!=(negative?64'hAAAA:64'hBBBB))
         $fatal(1,"STB_HEAD_STALL tail order");
       rsp.data_gnt=0;
+    end else if(scenario==9)begin
+      // N1d: a speculative store that cannot drain (the commit head is an
+      // unpublished load waiting on this LSU) must not hold a younger load
+      // in WAIT_PAGE_OFFSET — the load is released to the cache path and
+      // the LSQ phys_replay scan arbitrates any true alias at its physical
+      // publication. Committed-queue stalls are autonomous and stay.
+      flush=1;drive();flush=0;drive();
+      valid=1;tid=3;address=56'h1010;data=64'h5A5A;drive();valid=0;
+      commit_tid=1;                     // port-0 head sits at tid 1
+      load_address=56'h2010;            // same [11:0], different page —
+                                        // the ring-32 wedge's false-alias shape
+      load_tid=6;load_v=1;#4;
+      if(pom!==1'b1)$fatal(1,"STB_HEAD_GATE spec entry must stall the load");
+      head_pending=1;#4;
+      if(pom!==negative)$fatal(1,"STB_HEAD_GATE head-pending stall not released");
+      head_pending=0;#4;
+      if(pom!==1'b1)$fatal(1,"STB_HEAD_GATE stall must return after release");
+      // Committed stores still gate under the same input: retire tid3 into
+      // the commit queue (MixCommit: the commit must name the spec head).
+      commit_tid=3;commit=1;drive();commit=0;
+      head_pending=1;#4;
+      if(pom!==1'b1)$fatal(1,"STB_HEAD_GATE committed stall released");
+      head_pending=0;drive();load_v=0;
     end else $fatal(1,"STORE_RECOVERY_SCENARIO");
     $display("RTL_REVIEW_PASS store_recovery scenario=%0d",scenario);$finish;
   end
@@ -3601,7 +3727,7 @@ module tb_g6lc_review_smt_drain;
     .clk_i(clk), .rst_ni(rst_n), .fetch_fire_i(fetch), .issue_fire_i(1'b0), .flush_i(flush),
     .hold_i(1'b0), .drain_ready_i(idle), .commit_i(1'b0), .drain_killable_i(1'b1),
     .head_wfi_i(1'b0), .head_plain_i(1'b1), .head_pc_i('0),
-    .drain_force_o(), .drain_force_wfi_o(), .drain_forced_o(), .drain_force_pc_o(),
+    .drain_force_o(), .drain_force_wfi_o(), .drain_force_abs_o(), .drain_forced_o(), .drain_force_pc_o(),
     .quiesce_o(quiesce), .id_uniss_i(1'b0),
     .iq_valid_i(1'b0), .t0_imm_i(1'b0), .trap_hold_i(trap_hold), .hart_ready_i(ready),
     .hart_dmiss_i('0), .hart_imiss_i('0), .hart_block_i('0), .active_hart_o(active),
@@ -3667,7 +3793,7 @@ module tb_g6lc_review_smt_drainforce;
   logic [$clog2(NH>1?NH:2)-1:0] active;
   logic commit=0, killable=1, wfi=0, plain=1;
   logic [63:0] headpc;
-  logic dforce, force_wfi, forced;
+  logic dforce, force_wfi, force_abs, forced;
   logic [63:0] forcepc;
   int scenario=0;
   bit negative;
@@ -3676,6 +3802,7 @@ module tb_g6lc_review_smt_drainforce;
     .hold_i(1'b0), .drain_ready_i(idle), .commit_i(commit), .drain_killable_i(killable),
     .head_wfi_i(wfi), .head_plain_i(plain), .head_pc_i(headpc),
     .drain_force_o(dforce), .drain_force_wfi_o(force_wfi),
+    .drain_force_abs_o(force_abs),
     .drain_forced_o(forced), .drain_force_pc_o(forcepc),
     .quiesce_o(quiesce), .id_uniss_i(1'b0),
     .iq_valid_i(1'b0), .t0_imm_i(1'b0), .trap_hold_i(1'b0), .hart_ready_i(ready),
@@ -3728,6 +3855,20 @@ module tb_g6lc_review_smt_drainforce;
       wait_force(FORCE+4,FORCE+2);
       if (force_wfi) $fatal(1,"SMT_DFORCE_WFI_FLAG");
       if (forcepc != headpc) $fatal(1,"SMT_DFORCE_PC got=%h",forcepc);
+      finish_switch();
+    end else if (scenario==3) begin
+      // T10f masked head: commit acks keep landing (the scoreboard masks the
+      // commit .valid of a phys_pending/phys_mod/cancelled head but the entry
+      // still classifies plain), so the relative no-commit counter is pinned
+      // and only the absolute bound can force the drain. The pulse-cycle
+      // commit also drops drain_forced_o — checked by not requiring it here.
+      commit=1;
+      arm_drain();
+      wait_force(2*16*FORCE+16, 16*FORCE+8);
+      if (force_wfi) $fatal(1,"SMT_DFORCE_WFI_FLAG");
+      if (!force_abs) $fatal(1,"SMT_DFORCE_ABS_FLAG");
+      if (forcepc != headpc) $fatal(1,"SMT_DFORCE_PC got=%h",forcepc);
+      commit=0;
       finish_switch();
     end else begin
       // Resident hart never commits: the no-commit counter bounds the drain.

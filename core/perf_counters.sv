@@ -96,6 +96,7 @@ module perf_counters
     input logic spec_cancel_i,
     input logic smt_drain_force_i,     // N1c bounded-drain force pulse
     input logic smt_drain_force_wfi_i, // force pulse whose resident head was WFI
+    input logic smt_drain_force_abs_i, // T10f force pulse from the absolute bound
     // Group 4: Xg6lcai AI matrix (tie 0 when AiCfg.MatrixEn=0 / no copro)
     input logic ai_pmu_op_i,      // any AI result_valid pulse
     input logic ai_pmu_mma_i,     // MMA complete pulse
@@ -314,6 +315,7 @@ module perf_counters
       // N1c bounded drain (g6lc_thread_select, drained handoff)
       event_group[h][3'd3][5'd6] = smt_drain_force_i && act;     // drain-force pulse
       event_group[h][3'd3][5'd7] = smt_drain_force_wfi_i && act; // force on WFI head
+      event_group[h][3'd3][5'd8] = smt_drain_force_abs_i && act; // absolute-bound force
 
       // Group 4: Xg6lcai AI (mhpmevent[7:5]==MHPMGrpAI). See ariane_pkg.
       if (CVA6Cfg.AiCfg.MatrixEn) begin

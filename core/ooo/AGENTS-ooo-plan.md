@@ -3184,4 +3184,168 @@ starve the bound; and expose `killable/head_valid/head_wfi/head_plain/
 cnt` in `[smt-drain]` so the next stall print discriminates mask (a)
 from (b) directly. Then re-run the ring-32 24M boot — it must complete
 with `smt_drain_force>0`, and all ring-16/anchor boots must stay
-byte-identical with force=0.
+byte-identical with force=0. **Implemented in T10g (below).**
+
+### T10g — N1d: ring-32 wedge root causes (LSU/IQ/STB) + construction-grade drain bound (2026-09-30/10-01)
+
+**Question.** T10f left two open items: *why* the ring-32 four-hart
+boot parks a resident hart with an uncommittable head (`wait_sb` ~6 M
+cycles, `force=0`), and how to make the N1c bound hold in production
+integration. N1d attacks both — the causes first (so the force is a
+safety net, not the mechanism the boot relies on), then the bound.
+
+**Instrumentation (all `translate_off`, `+smt_stats`, bounded to 8 dumps
++ final).** `core/cva6.sv` `[smt-stall]`: when the resident hart retires
+nothing for 65,536 cycles while a drain pends, dump the drain gate
+fields (`kill/headv/hwfi/hplain/fcnt/forced`), the commit-head
+classification (slot, pc, op/fu, `cvld/sbev/issued/canc/exv/repl`,
+`ppend/pmod`, per-hart issued counts), load/store unit + LSU commit
+handshake, WT miss-unit/wbuffer/adapter state, the speculative store
+queue with per-entry owner/tid/cancel/live/page-offset match, and (OoO
+targets only, own generate scope) dispatch/IQ occupancy + `csr_buffer`
+table. `corev_apu/coherence/g6lc_coherence_hub.sv` `[coh-stall]` and
+`corev_apu/l2_cache/g6lc_l2_{top,wtrk}.sv` `[l2-stall]` birth-stamp
+AR/AW slots, MSHR fills, write/read tracker entries and the L2 FSM and
+dump on a 65,536-cycle age. slang rejects task calls in `final`, so the
+dump bodies are `function automatic void`.
+
+**Root causes found (three, each with its own leaf + mutation).**
+
+1. *Shared PTW fault kills a surviving load* (`core/load_unit.sv`,
+   `core/cva6_mmu/cva6_mmu.sv`, `core/load_store_unit.sv`). At SEND_TAG
+   `ex_i` is this load's own fault only when it comes from the MMU's
+   registered-request path (misaligned / permission / PMP on
+   `lsu_req_q`); the PTW-error branch (`ptw_active && !walking_instr &&
+   ptw_error`) is broadcast to whoever is listening — a walk started by
+   an entry that was since cancelled (no flush under OoO cancel) or by
+   the other LSU client faults while a DTLB-hit load sits in SEND_TAG.
+   The old unconditional kill dropped that load silently (bypass entry
+   already popped, no result, no `phys_valid`, no cancel) and
+   `phys_pending` masked the commit head forever. Fix: `cva6_mmu`
+   exports `lsu_exception_ptw_o`; the load unit kills on
+   `ex_i.valid && (!ex_ptw_i || flush_i || cancelled)` — own faults kill
+   and write back exactly as upstream, a foreign PTW fault neither
+   kills nor attaches (`ex_o.valid` at SEND_TAG is gated `!ex_ptw_i`).
+   `phys_valid_o` publishes on any delivered tag. **The first N1d cut
+   (uncommitted) had dropped the kill for every live load and weakened
+   leaf scenario 20 to pass — that would have lost a live load's own
+   page fault (Linux demand paging); reverted here.** New assertion
+   `send_tag_kill_rvalid` pins the dummy-rvalid contract the exception
+   writeback relies on; `offset_misaligned` now covers FLD/FLW/FLH and
+   the HLV loads the LSU actually flags misaligned.
+2. *csr_buffer credit circle* (`core/ooo/g6lc_iq.sv`). Two younger CSR
+   ops could take both `csr_buffer` credits ahead of an older CSR still
+   waiting on its operand (the OpenSBI CSR probe burst at `0x8000e9fa`);
+   the older one can then never issue (`csr_ready_i` low), its
+   `sbe.valid` never sets, the head never validates, and the buffered
+   youngers can never commit. Rule: a CSR issues only when no older CSR
+   is resident in the IQ (`older_csr_iq`, age matrix), pinned by the
+   `ooo_iq_csr_order` assertion.
+3. *Speculative-store stall circular with an unpublished head*
+   (`core/store_buffer.sv` + `head_phys_pending` plumbed
+   issue_stage→cva6→ex_stage→load_store_unit→store_unit). A younger load
+   parked in WAIT_PAGE_OFFSET behind an older speculative store occupies
+   the load unit; the head load cannot publish its PA through the same
+   LSU, so the store can never commit and the load can never leave.
+   While the port-0 head is `phys_pending`, the speculative
+   page-offset stall terms are released (`spec_stall_futile`); the
+   committed-queue and sticky terms still gate. Soundness: the released
+   load publishes its PA at SEND_TAG and `g6lc_lsq` replays it against
+   any older same-hart store already resolved on the physical channel
+   (LSQ leaf scenario 36 pins that path). Constant 0 outside `COH_OOO`.
+
+**Bound made construction-grade (T10f next step)** — `core/cva6.sv`,
+`core/smt/g6lc_thread_select.sv`. (a) `smt_head_plain`/`smt_head_wfi`
+classify the head *entry* (`sb_head_valid[active]` + op/fu/ex class),
+not the masked `commit_instr[0].valid`, so a phys-pending/phys-mod/
+cancelled head no longer holds the force off. (b) A second, absolute
+counter (`DF_ABS_MAX = 16 * SmtDrainForceCycles`, derived localparam,
+disabled with the knob) counts every `pending && !ready` cycle, is not
+reset by `commit_i`, and fires the force at the bound while the head
+is plain — a committing poll loop can no longer starve the relative
+leg. (c) One force pulse per pending drain (`drain_issued_q`): the new
+`abs` proof produced a real counterexample — under a sustained commit
+stream the P1b race clause dropped `drain_forced_q` every pulse cycle
+and the force re-fired every other cycle, re-pulsing `flush_ctrl_id`
+so `drain_ready` could never rise. `drain_force_abs_o` → `[smt-drain]`
+`force_abs` + PMU group-3 event 8; the 1M/final prints now carry
+`kill/headv/hwfi/hplain/fcnt/acnt`.
+
+**Also repaired (HEAD lint, not N1d):** `g6lc_ooo_dispatch`
+`commit_is_fpr`/`commit_arch` used before declaration; `g6lc_cluster`
+`core_sb_gnt` likewise; `g6lc_ai_enq_arb.sv` missing from
+`Flist.cluster` and the ten `verif/tb/apu/run-cva6-*.sh` compile lists;
+five unconnected `ai_*` pins on `g6lc_cluster_lint_top`.
+
+**Local evidence.** Lint 0 errors (Verilator + slang) on
+`g6lc64_ooo_int2_l3`, `g6lc64_smt2`, `g6lc64_smt2_ooo_int`,
+`cv64a6_imafdc_sv39`. Leaves (WSL Verilator, runner recipes):
+load-cancel 13,16–24 pos/neg + `G6LC_MUT_LSU_EXKILL`→`LOAD_EXKILL_TAG`;
+IQ 0–11 at (2,8)/(2,16) incl. scenario 11 `IQ_CSR_ORDER`; store-recovery
+0–9 + `G6LC_MUT_STB_NO_HEAD_GATE`→`STB_HEAD_GATE`; LSQ physical 25–36
+(36 negative → `LSQ_PHYSICAL`); `smt_drainforce` 0–3 + noforce →
+`SMT_DFORCE_TIMEOUT`; `smt_drain` 4 geometries × 2. Formal
+`core/smt/formal/g6lc_thread_select.sby`: `prove`, `cover`, `abs`
+(bounded within `16·FORCE + K` under free commits), `abs_cover` PASS;
+`mut_noforce` and `abs_noforce` FAIL as designed.
+
+**Remote evidence (tags `ooocoh-n1d-*`, logs `remote-runs/<tag>/output`).**
+
+- *Gates* (lint + synth `check -assert`, 0 errors): int2_l3 31w/43w,
+  smt2_ooo_int 29w/2w, smt2 11w/31w, defaults 9+55w/5+32w — T10f +2/+1
+  SELRANGE from the extended `[smt-drain]` print (`ss_retired[2..3]` on
+  two-hart cores); the observer array is now padded to four entries
+  (local lint 0e on int2_l3/smt2); remote re-gate owed with the reruns.
+- *Leaves* (runner-native): `leaf-phys` 18/18 (load-cancel 16–24
+  pos+neg), `leaf-exkill` mutation detected, `leaf-full` 60/60,
+  `iq-default` 122/122 (IQ 80 incl. scenario 11), `iq-csrorder` 31/31,
+  `stb-review` 44/44 incl. `STB_HEAD_GATE`, `stb-mut` detected,
+  `lsq-phys` 24/24 (25–36, scenario 36 pos+neg), `lsqhart` PASS,
+  `drainleaf` PASS + noforce detected, `ageformal` prove/cover matched.
+  Remote sby could not run (no `yices`; z3 starves) — the local WSL
+  verdicts stand.
+- *Anchors unchanged*: `smt2_ooo_int` mixed r16 **10,459,588** (RVFI
+  `9eada327…` byte-identical); `g6lc64_smt2` **12,406,259** (RVFI
+  `e0858842…` byte-identical, `force=0 acnt=0`); `g6lc64_ooo_int2`
+  17,870,562 (RVFI hart00 `22ed7d44…` byte-identical to M4; the +1 in
+  the SUCCESS print is the `+smt_stats` observer's final-block
+  ordering, not retirement).
+- *FP (FP-1)*: FP suite on the int2_l3 FP r16 model **11 positives +
+  11 negatives all `qualified` / `retirementsMatch`** (the suite's .S
+  defines stages 1–11; T9g's "13" counted two `#error` stages);
+  `mc_fp_smt` positive 3,777 (anchor 3,774) / negative detected 961.
+- *Directed*: `mc_branchy` r16 3,603,105 (+11 vs M1d, negative arm
+  detected); `ooo_ilp_chain` 1,345 (−148 vs 1,493); `ooo_mem_dep` 1,759
+  (−53 vs 1,812) — attribution in the addendum below.
+- *FO4* (sv-timing, budget 32): `sparse_ooo_issue` **24.0** (was 30.0 —
+  the dispatch cone, not the new `older_csr_iq` scan, dominates);
+  `sparse_issue_lsu` **32.0** closes (the pre-existing store_unit↔
+  store_buffer bridge screened 39.5/66.0 open before); `sparse_smt_mixed_
+  commit` r16 31.0 (unchanged); `g6lc_thread_select` alone 23.0
+  (unchanged — the absolute counter adds no FO4).
+- *Boots*: see the addendum.
+
+**First boot pass (r8/r3) and the WFI-leg correction.** With
+`smt_head_wfi` also read from the unmasked entry, the ring-32 24M boot
+**PASSED at 18,338,093 cycles** (`strictDualPassed`, T10f: timeout) with
+`force=4`, all `force_wfi`, `force_abs=0` — but the ring-16 boot also
+fired `force_wfi` 3× and landed at 18,297,719 (+338, RVFI no longer
+`3a865954…`/`d7c2f025…`). A WFI head is never phys-masked and the drain
+resolves on its own once it commits, so the early force was gratuitous;
+the WFI leg went back to the completed-head form (`commit_instr[0].valid`)
+and only the plain leg classifies the unmasked entry. **Owed at this
+checkpoint (not yet run):** ring-32 int2_l3 24M rerun on the corrected
+tree (`…-r32-24M-L0-r9`; a pass with `force=0` proves the three
+root-cause fixes alone resolve the T10f wedge, a pass with
+`force_abs>0` proves the bound), ring-16 int2_l3 byte-identity rerun
+(`…-r16-24M-L0-r4`, expect 18,297,381 / `3a865954…` / `d7c2f025…`),
+and the `G6LC_MUT_STB_NO_HEAD_GATE` kernel control that attributes the
+`ooo_ilp_chain` −148 / `ooo_mem_dep` −53 / `mc_branchy` +11 deltas.
+Ring 32 remains **not adopted** until r9 lands; ring 16 stays the
+production geometry.
+
+**Store unit note (audit, not fixed).** `store_unit` consumes `ex_i`
+whenever `state_q != IDLE` without provenance; the PTW-broadcast
+exposure is not reachable there today (a store translating holds the
+bypass head, so no other data walk can be pending), but the seam is
+recorded for the mixed-residency work.

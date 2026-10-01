@@ -916,6 +916,32 @@ pending drain with `force=0` — the fire gate's head-class requirement
 bound is conditional rather than construction-grade in production integration; the
 recorded fix sketch is in the plan. Evidence: `core/ooo/AGENTS-ooo-plan.md` T10f.
 
+### Ring-32 wedge root causes + construction-grade drain bound (2026-09-30/10-01, N1d/T10g)
+
+Three defects behind the T10f ~6 M-cycle pending drain, each config-inert
+outside its envelope. (1) `core/cva6_mmu/cva6_mmu.sv` exports
+`lsu_exception_ptw_o` (the PTW-error branch is a broadcast, not the registered
+requester's result); `core/load_unit.sv` kills its SEND_TAG tag only on an own
+(registered-path) fault or flush/cancel, and attaches an exception at SEND_TAG
+only when `!ex_ptw_i` — a foreign walk fault no longer drops a live load and
+wedges `phys_pending`; own faults kill and write back exactly as upstream
+(`send_tag_kill_rvalid` pins the dummy-rvalid contract; `offset_misaligned`
+now covers FLD/FLW/FLH/HLV). (2) `core/ooo/g6lc_iq.sv`: CSR ops issue in
+IQ-age order (`older_csr_iq`) so younger CSRs cannot consume both
+`csr_buffer` credits ahead of an older unissued CSR. (3) `core/store_buffer.sv`
+(+ `head_phys_pending` plumbing through issue_stage/cva6/ex_stage/LSU): the
+speculative page-offset stall is released while the port-0 commit head is an
+unpublished load (`COH_OOO` only); committed/sticky terms unchanged. Bound:
+`core/cva6.sv` classifies the resident head from the scoreboard entry
+(`sb_head_valid` + op/fu/ex) instead of the masked commit valid;
+`core/smt/g6lc_thread_select.sv` adds an absolute counter
+(`16 · SmtDrainForceCycles`, derived, disabled with the knob) that a commit
+stream cannot reset, and one force pulse per pending drain (the re-fire under
+sustained commits was a formal-found livelock). `drain_force_abs_o` → PMU
+group 3 event 8 + `[smt-drain] force_abs`. No new clock/reset/latch/config
+field; one new MMU→LSU wire; all probes `translate_off`. Evidence:
+`core/ooo/AGENTS-ooo-plan.md` T10g.
+
 ## How to use
 
 1. Identify the spec chapter/`X.y` (via `agents/spec/INDEX.md`) your change touches.

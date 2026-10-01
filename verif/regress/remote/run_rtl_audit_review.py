@@ -231,6 +231,16 @@ def main():
         old=target+' commit_arch[c]'
         assert text.count(old)==1,'retirement fault site changed'
         path.write_text(text.replace(old,target+' commit_ack_i[c]'))
+    csr_order_fault=os.environ.get('REVIEW_RTL_CSR_ORDER_FAULT')=='1'
+    if csr_order_fault:
+        # N1d/T10g: removes the CSR IQ-age ordering rule, restoring the
+        # pre-fix semantics that wedged the ring-32 boot (younger CSRs claim
+        # both csr_buffer credits ahead of an older unissued CSR). Scenario
+        # 11 must then fail with IQ_CSR_ORDER.
+        path=source/'g6lc_iq.sv';text=path.read_text()
+        old='          !(is_csr && older_csr_iq) &&\n'
+        assert text.count(old)==1,'csr order fault injection site changed'
+        path.write_text(text.replace(old,''))
     hart_dispatch=os.environ.get('REVIEW_RTL_HART_DISPATCH')=='1'
     if hart_dispatch:
         # T6a qualified integer multi-hart OoO under the drained handoff, so the
@@ -283,7 +293,8 @@ def main():
     rtl=[str(source/name) for name in names if name!='g6lc_cluster.sv' and not name.endswith('.svh')]+[str(source/'incl.sv')]
     configurations=[]
     for np,d in ([(2,8)] if before else [(1,8),(2,8),(4,8),(2,16)]):
-        cases=[(0,None),(1,'IQ_VALID'),(2,'IQ_ISSUE'),(3,'IQ_CREDIT')] if before else [(n,None) for n in range(11)]
+        cases=[(0,None),(1,'IQ_VALID'),(2,'IQ_ISSUE'),(3,'IQ_CREDIT')] if before else [(n,None) for n in range(12)]
+        if csr_order_fault:cases=[(11,'IQ_CSR_ORDER')]
         configurations.append(('iq',f'n{np}-d{d}',[f'-GNP={np}',f'-GDEPTH={d}'],cases))
     for d,nw in ([(4,2)] if before else [(2,1),(4,2),(8,3)]):
         cases=[(0,None),(1,'MSHR_ADMISSION'),(2,'MSHR_ADMISSION'),(3,'MSHR_RETENTION'),(4,None)] if before else [(n,None) for n in range(5)]
@@ -299,9 +310,16 @@ def main():
     if os.environ.get('REVIEW_RTL_STORE_RECOVERY')=='1':
         # T6b-4b: scenario 8 (nh2-ooo1 only) — a store commits only as the
         # speculative-queue head (STB_HEAD_STALL); order stays head-first.
-        configurations=[('store_recovery',f'nh{h}-ooo{o}',['-DG6LC_FETCH_B',f'-GNH={h}',f'-GOOO={o}'],
-                         [(n,None) for n in range(9 if (h,o)==(2,1) else 6 if o else 4)])
-                        for h,o in ((1,0),(1,1),(2,1))]
+        # N1d: scenario 9 — a phys-pending commit head releases the
+        # speculative-store page-offset stall (the commit queue still gates).
+        if os.environ.get('REVIEW_RTL_MUT','')=='stb_headgate':
+            configurations=[('store_recovery','mut-headgate',
+                             ['-DG6LC_FETCH_B','-GNH=2','-GOOO=1','-DG6LC_MUT_STB_NO_HEAD_GATE'],
+                             [(9,'STB_HEAD_GATE')])]
+        else:
+            configurations=[('store_recovery',f'nh{h}-ooo{o}',['-DG6LC_FETCH_B',f'-GNH={h}',f'-GOOO={o}'],
+                             [(n,None) for n in range(10 if (h,o)==(2,1) else 6 if o else 4)]+([] if not o else [(9,None)]))
+                            for h,o in ((1,0),(1,1),(2,1))]
     elif os.environ.get('REVIEW_RTL_WFI')=='1':
         configurations=[('wfi',f'ooo{o}-a{a}',['-DG6LC_FETCH_B',f'-GOOO={o}',f'-GRVA_EN={a}'],
                          [(n,None) for n in range(7)]) for o in (0,1) for a in (0,1)]
@@ -335,7 +353,7 @@ def main():
         configurations=[('lsq','direct',[],[(n,None) for n in range(19)]),
                         ('lsq','nh2',['-GHARTS=2'],[(n,None) for n in range(25)])]
         if os.environ.get('REVIEW_RTL_PHYSICAL_LSQ')=='1':
-            configurations=[('lsq','physical',['-GHARTS=2','-GPHYS=1'],[(n,None) for n in range(25,36)])]
+            configurations=[('lsq','physical',['-GHARTS=2','-GPHYS=1'],[(n,None) for n in range(25,37)])]
     elif os.environ.get('REVIEW_RTL_CSRBUF')=='1':
         # Per-tid CSR address table: out-of-order issue, commit-order lookup,
         # ready as table credit, cancel/flush drop; depth-1 identity in order.
@@ -519,7 +537,7 @@ def main():
             assert str(Path(runtime_info['originalRoot'])/'include/verilated_funcs.h') not in dependencies
         exe=model/'review-test'
         trials=[(scenario,False,error) for scenario,error in cases]
-        if not before and not rename_fault and not credit_fault and not flush_fault and not leak_fault and not fp_zero_fault and not fp_commit_fault:
+        if not before and not rename_fault and not credit_fault and not flush_fault and not leak_fault and not fp_zero_fault and not fp_commit_fault and not csr_order_fault:
             # The nh2 geometry needs a bigger PRF (31 committed physicals per
             # hart), so the single-hart negatives are not comparable there; it
             # carries its own per-hart discriminators instead.
@@ -528,8 +546,11 @@ def main():
                        'STORE_RECOVERY_COMMITTED','STORE_RECOVERY_REPLAY',
                        'STORE_RECOVERY_YOUNGER_FWD','STORE_RECOVERY_PROGRAM_ORDER',
                        'STORE_RECOVERY_HART_PEER_FWD','STORE_RECOVERY_HART_OWN_FWD',
-                       'STB_HEAD_STALL')
-                trials += [(n,True,codes[n]) for n,_ in cases]
+                       'STB_HEAD_STALL','STB_HEAD_GATE')
+                # The mutation geometry runs only its expected-failure
+                # positive trial; oracle_negative gets no extra arm there.
+                if geometry!='mut-headgate':
+                    trials += [(n,True,codes[n]) for n,_ in cases]
             elif kind=='wfi':
                 trials += [(n,True,'WFI_RETIRE_RECOVERY') for n in range(7)]
             elif kind=='rename' and os.environ.get('REVIEW_RTL_RENAME_FP_SMT')=='1':
@@ -603,7 +624,7 @@ def main():
                              (2,True,'MMUCTX_MIR_H1_FAULT'),(3,True,'MMUCTX_EN_H0_CLEAN')]
             else:
                 trials.append((0,True,{'iq':'IQ_ISSUE','mshr':'MSHR_ADMISSION','decay':'TAGE_DECAY','incl':'L3_PAYLOAD','commit':'COMMIT4_TID'}[kind]))
-                if kind=='iq':trials+=[(5,True,'IQ_UNRESOLVED_GATE'),(6,True,'IQ_BYPASS'),(7,True,'IQ_RESOLVED_PASS'),(8,True,'IQ_STORE_OOO'),(9,True,'IQ_CSR_HEAD'),(10,True,'IQ_AMO_HEAD')]
+                if kind=='iq':trials+=[(5,True,'IQ_UNRESOLVED_GATE'),(6,True,'IQ_BYPASS'),(7,True,'IQ_RESOLVED_PASS'),(8,True,'IQ_STORE_OOO'),(9,True,'IQ_CSR_HEAD'),(10,True,'IQ_AMO_HEAD'),(11,True,'IQ_CSR_ORDER')]
                 if kind=='incl':trials+=[(1,True,'L3_EVICT_NO_BACKPRESSURE'),(2,True,'L3_EVICT_LOST_B')]
         for scenario,negative,error in trials:
             cmd=[str(exe),f'+scenario={scenario}']+(['+oracle_negative'] if negative else [])+(['+vcd'] if os.environ.get('REVIEW_RTL_TRACE')=='1' else [])

@@ -66,6 +66,9 @@ module load_unit
     input logic [CVA6Cfg.PLEN-1:0] paddr_i,
     // Excepted which appears before load - MMU
     input exception_t ex_i,
+    // ex_i came from the shared PTW-error broadcast rather than this load's
+    // own registered translation result - MMU
+    input logic ex_ptw_i,
     // Data TLB hit - MMU
     input logic dtlb_hit_i,
     // Physical page number from the DTLB - MMU
@@ -499,10 +502,25 @@ module load_unit
         // ----------
         // Exception
         // ----------
-        // if we got an exception we need to kill the request immediately
+        // N1d: ex_i (cva6_mmu_exception) is shared between LSU requesters.
+        // A registered-path exception (misaligned, permission, PMP) at
+        // SEND_TAG is this load's own fault and kills the tag as upstream did.
+        // A PTW-broadcast exception (ex_ptw_i) belongs to a different walk —
+        // this load already resolved its translation — so it must not kill a
+        // surviving load's tag; that would drop it silently: no result, no
+        // phys_valid, no cancel — phys_pending then masks the commit head
+        // forever. Flush/cancel still kill: the entry is being squashed.
+`ifdef G6LC_MUT_LSU_EXKILL
+        // MUTANT: unconditional kill on any shared exception (drops live loads)
         if (ex_i.valid) begin
           req_port_o.kill_req = 1'b1;
         end
+`else
+        if (ex_i.valid && (!ex_ptw_i || flush_i ||
+                           cancelled_mask_i[ldbuf_q[ldbuf_last_id_q].trans_id])) begin
+          req_port_o.kill_req = 1'b1;
+        end
+`endif
       end
 
       WAIT_FLUSH: begin
@@ -579,7 +597,7 @@ module load_unit
         hart_q <= '0;
         size_q <= '0;
       end else begin
-        pending_q <= ldbuf_w && !flush_i && !cancelled_mask_i[lsu_ctrl_i.trans_id];
+        pending_q <= ldbuf_w && !cancelled_mask_i[lsu_ctrl_i.trans_id];
         if (ldbuf_w) begin
           owner_q <= lsu_ctrl_i.trans_id;
           hart_q <= lsu_ctrl_i.hart;
@@ -587,8 +605,14 @@ module load_unit
         end
       end
     end
+    // N1d: publish on any tag that was actually delivered (not killed). The
+    // shared exception/flush suppressors dropped the one-shot phys event for
+    // loads whose scoreboard entry outlived the transient — the LSQ never
+    // re-reads it, so a dropped pulse is a permanent phys_pending wedge.
+    // Publishing for a dying entry is harmless: the LSQ capture is keyed on
+    // id+hart and the entry is torn down by cancel/flush regardless.
     assign phys_valid_o = pending_q && req_port_o.tag_valid && !req_port_o.kill_req &&
-                          !ex_i.valid && !flush_i && !cancelled_mask_i[owner_q];
+                          !flush_i && !cancelled_mask_i[owner_q];
     assign phys_addr_o = paddr_i;
     assign phys_id_o = owner_q;
     assign phys_hart_o = hart_q;
@@ -627,7 +651,7 @@ module load_unit
       // the output is also valid if we got an exception. An exception arrives one cycle after
       // dtlb_hit_i is asserted, i.e. when we are in SEND_TAG. Otherwise, the exception
       // corresponds to the next request that is already being translated (see below).
-      if (ex_i.valid && (state_q == SEND_TAG)) begin
+      if (ex_i.valid && !ex_ptw_i && (state_q == SEND_TAG)) begin
         valid_o    = 1'b1;
         ex_o.valid = 1'b1;
       end
@@ -811,20 +835,28 @@ module load_unit
   initial
     assert (CVA6Cfg.DcacheIdWidth >= REQ_ID_BITS)
     else $fatal(1, "DcacheIdWidth parameter is not wide enough to encode pending loads");
+  // True when this buffer entry is a misaligned load — mirrors the LSU's
+  // data_misaligned_detection coverage (integer, FP and hypervisor loads).
+  function automatic logic offset_misaligned(input ariane_pkg::fu_op op,
+                                             input logic [CVA6Cfg.XLEN_ALIGN_BYTES-1:0] off);
+    unique case (op)
+      ariane_pkg::LW, ariane_pkg::LWU, ariane_pkg::FLW,
+      ariane_pkg::HLV_W, ariane_pkg::HLV_WU, ariane_pkg::HLVX_WU:
+        return off[1:0] != 2'b00;
+      ariane_pkg::LH, ariane_pkg::LHU, ariane_pkg::FLH,
+      ariane_pkg::HLV_H, ariane_pkg::HLV_HU, ariane_pkg::HLVX_HU:
+        return off[0] != 1'b0;
+      ariane_pkg::LD, ariane_pkg::FLD, ariane_pkg::HLV_D:
+        return CVA6Cfg.IS_XLEN64 && |off;
+      default:
+        return 1'b0;
+    endcase
+  endfunction
   // A misaligned load is granted before its exception is known, so a
   // misaligned offset in the load buffer is legal. The contract is precise
   // delivery: the entry completes once, with the misaligned exception, and its
   // data return is killed rather than retired. The killed request is answered
   // by the data cache with a dummy rvalid in the kill cycle.
-  function automatic logic offset_misaligned(input ariane_pkg::fu_op op,
-                                             input logic [CVA6Cfg.XLEN_ALIGN_BYTES-1:0] off);
-    unique case (op)
-      ariane_pkg::LW, ariane_pkg::LWU: return off[1:0] != 2'b00;
-      ariane_pkg::LH, ariane_pkg::LHU: return off[0] != 1'b0;
-      ariane_pkg::LD:                  return CVA6Cfg.IS_XLEN64 && |off;
-      default:                         return 1'b0;
-    endcase
-  endfunction
   misaligned_entry_excepts :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
       ldbuf_w && offset_misaligned(ldbuf_wdata.operation, ldbuf_wdata.address_offset)
@@ -839,6 +871,13 @@ module load_unit
       valid_o && ex_o.valid && ex_o.cause == riscv::LD_ADDR_MISALIGNED
       |-> (CVA6Cfg.TvalEn ? ex_o.tval[CVA6Cfg.XLEN_ALIGN_BYTES-1:0] != '0 : ex_o.tval == '0))
   else $error("misaligned load tval does not follow TvalEn");
+  // A killed tag is always answered by a dummy rvalid for that same request —
+  // the exception writeback relies on it to retire exactly once.
+  send_tag_kill_rvalid :
+  assert property (@(posedge clk_i) disable iff (~rst_ni)
+      (state_q == SEND_TAG && req_port_o.kill_req)
+      |-> req_port_i.data_rvalid && (ldbuf_rindex == ldbuf_last_id_q))
+  else $error("SEND_TAG kill without the matching dummy data_rvalid");
   //pragma translate_on
 
 endmodule

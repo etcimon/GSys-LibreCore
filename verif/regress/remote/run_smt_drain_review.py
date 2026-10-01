@@ -17,7 +17,8 @@ def main():
     source = out / 'source'
     source.mkdir()
     names = ['config_pkg.sv', 'g6lc64_smt2_config_pkg.sv', 'riscv_pkg.sv', 'ariane_pkg.sv',
-             'g6lc_thread_select.sv', 'g6lc_core_types.svh', 'rvfi_types.svh',
+             'g6lc_ooo_pkg.sv', 'g6lc_thread_select.sv', 'g6lc_iq.sv',
+             'g6lc_core_types.svh', 'rvfi_types.svh',
              'tb_g6lc_rtl_review.sv']
     for name in names:
         shutil.copy2(data / name, source / name)
@@ -91,7 +92,7 @@ def main():
                 rc = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
             if rc:
                 raise RuntimeError(f'drainforce build failed: {work}')
-        for scenario in (0, 1, 2):
+        for scenario in (0, 1, 2, 3):
             log_path = work / f'fs{scenario}.log'
             with log_path.open('w') as log:
                 rc = subprocess.run([str(work / 'drainforce'), f'+scenario={scenario}'],
@@ -114,7 +115,7 @@ def main():
   input logic [cva6_config_pkg::cva6_cfg.NrHarts-1:0] hart_ready_i, hart_dmiss_i, hart_imiss_i, hart_block_i, pause_hint_i,
   output logic [$clog2(cva6_config_pkg::cva6_cfg.NrHarts)-1:0] active_hart_o,
   output logic switch_o, quiesce_o, t0_extra_o, switch_on_miss_o, switch_on_quantum_o, switch_on_starve_o,
-  output logic drain_force_o, drain_force_wfi_o, drain_forced_o,
+  output logic drain_force_o, drain_force_wfi_o, drain_force_abs_o, drain_forced_o,
   output logic [cva6_config_pkg::cva6_cfg.VLEN-1:0] drain_force_pc_o
 );
   function automatic config_pkg::cva6_cfg_t configuration();
