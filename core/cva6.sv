@@ -821,6 +821,7 @@ module cva6
                             ? lsu_chk_hart : smt_active_hart;
   logic                    smt_switch;
   logic                    smt_quiesce, smt_sb_empty;
+  logic                    ooo_drained_id;
   // N1c bounded drain force (drained handoff)
   logic                    smt_drain_force;
   logic                    smt_drain_force_wfi;
@@ -1783,8 +1784,14 @@ module cva6
       // drained backend (today's coarse handoff). With 0 the switch becomes a
       // fetch-slot policy and hart-tagged ownership (LSQ/store buffer/IQ) keeps
       // the two resident streams disjoint.
+      // T6a contract = SB empty + no stores pending + ROB/IQ/LSQ drained.
+      // The last three are now explicit at the seam (FP-3); the +smt_stats
+      // tail counters show they never outlive sb_empty on WT or HPDCACHE.
+      // The g6lc64_ooo_server switch-with-state-resident was the HPDCACHE
+      // wbuf grant skid, covered in cva6_hpdcache_wrapper (st_skid_q).
       .drain_ready_i       (CVA6Cfg.SmtDrainedHandoff ?
-                            (smt_sb_empty && no_st_pending_commit && !flush_ctrl_id) : 1'b1),
+                            (smt_sb_empty && no_st_pending_commit && !flush_ctrl_id &&
+                             ooo_drained_id) : 1'b1),
       .commit_i            (|commit_macro_ack),
       .drain_killable_i    (smt_drain_safe),
       .head_wfi_i          (smt_head_wfi),
@@ -1862,7 +1869,8 @@ module cva6
     end
     logic ss_dp, ss_drdy;
     assign ss_dp   = i_smt_thread_select.gen_smt.drain_pending_q;
-    assign ss_drdy = smt_sb_empty && no_st_pending_commit && !flush_ctrl_id;
+    assign ss_drdy = smt_sb_empty && no_st_pending_commit && !flush_ctrl_id &&
+                     ooo_drained_id;
 
     function automatic void ss_stall_dump(input string why);
       automatic int unsigned hs;
@@ -1908,19 +1916,9 @@ module cva6
                int'(ex_stage_i.lsu_i.i_store_unit.state_q),
                lsu_commit_commit_ex, lsu_commit_ready_ex_commit,
                dcache_commit_wbuffer_empty, dcache_commit_wbuffer_not_ni);
-      // Missunit/wbuffer/adapter internals exist under gen_cache_wt; every
-      // NrHarts>1 && SmtDrainedHandoff config (this probe's gate) is WT.
-      $display("[smt-stall] dmu st=%0d mvld=%0d mpaddr=%h mid=%0d mport=%0d mcnt=%0d | wbv=%h | adp rvld=%0d d1st=%0d sinv=%0d",
-               int'(gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.state_q),
-               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_vld_q,
-               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_q.paddr,
-               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_q.id,
-               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_q.miss_port_idx,
-               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.cnt_q,
-               gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_wbuffer.valid,
-               gen_cache_wt.i_cache_subsystem.i_adapter.dcache_rtrn_vld_q,
-               gen_cache_wt.i_cache_subsystem.i_adapter.dcache_first_q,
-               gen_cache_wt.i_cache_subsystem.i_adapter.self_inval_pend_q);
+      // The WT miss-unit/wbuffer/adapter line lives in gen_wt_stall_probe
+      // below (gen_cache_wt is absent on HPDCACHE drained targets such as
+      // g6lc64_ooo_server); it fires off the same ss_dump_id ticket.
       // N1d-2: slot-lifetime bitmaps + staging state. An issued slot with
       // sbe.valid=0 is a zombie head (never wrote back); the iro vector
       // shows which gate holds the in-flight op (operand vs FU credit vs
@@ -2056,6 +2054,53 @@ module cva6
         if (smt_stats_en && ss_dump_id != ss_ooo_seen) begin
           ss_ooo_seen = ss_dump_id;
           ss_ooo_dump(issue_stage_i.i_scoreboard.commit_sel_slot[0]);
+        end
+      end
+      // FP-3 tail counters: cycles where the legacy drain_ready triple
+      // (sb_empty && no_st_pending && !flush_id) already holds but ROB/IQ/LSQ
+      // are still resident — the window the ooo_drained_id conjunct closes.
+      int unsigned ss_tail_lsq = 0, ss_tail_rob = 0, ss_tail_iq = 0,
+                   ss_tail_any = 0;
+      always @(posedge clk_i) begin
+        if (smt_stats_en && rst_ni &&
+            smt_sb_empty && no_st_pending_commit && !flush_ctrl_id) begin
+          if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.lsq_busy)
+            ss_tail_lsq = ss_tail_lsq + 1;
+          if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rob.count_q != '0)
+            ss_tail_rob = ss_tail_rob + 1;
+          if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.count_q != '0)
+            ss_tail_iq = ss_tail_iq + 1;
+          if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.lsq_busy ||
+              issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rob.count_q != '0 ||
+              issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.count_q != '0)
+            ss_tail_any = ss_tail_any + 1;
+        end
+      end
+      final begin
+        if (smt_stats_en)
+          $display("[smt-drain] tail lsq=%0d rob=%0d iq=%0d any=%0d",
+                   ss_tail_lsq, ss_tail_rob, ss_tail_iq, ss_tail_any);
+      end
+    end
+    // FP-3a: the WT miss-unit/wbuffer/adapter anatomy. gen_cache_wt exists
+    // only for DCacheType == WT, so the references get their own scope
+    // (HPDCACHE drained targets dump the rest of the anatomy without it).
+    if (CVA6Cfg.DCacheType == config_pkg::WT) begin : gen_wt_stall_probe
+      int unsigned ss_wt_seen = 0;
+      always @(posedge clk_i) begin
+        if (smt_stats_en && ss_dump_id != ss_wt_seen) begin
+          ss_wt_seen = ss_dump_id;
+          $display("[smt-stall] dmu st=%0d mvld=%0d mpaddr=%h mid=%0d mport=%0d mcnt=%0d | wbv=%h | adp rvld=%0d d1st=%0d sinv=%0d",
+                   int'(gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.state_q),
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_vld_q,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_q.paddr,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_q.id,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.mshr_q.miss_port_idx,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_missunit.cnt_q,
+                   gen_cache_wt.i_cache_subsystem.i_wt_dcache.i_wt_dcache_wbuffer.valid,
+                   gen_cache_wt.i_cache_subsystem.i_adapter.dcache_rtrn_vld_q,
+                   gen_cache_wt.i_cache_subsystem.i_adapter.dcache_first_q,
+                   gen_cache_wt.i_cache_subsystem.i_adapter.self_inval_pend_q);
         end
       end
     end
@@ -2376,6 +2421,7 @@ module cva6
       .ooo_rob_full_o       (ooo_rob_full),
       .ooo_lsq_stall_o      (ooo_lsq_stall),
       .ooo_stl_forward_o    (ooo_stl_forward),
+      .ooo_drained_o        (ooo_drained_id),
       .ooo_phys_replay_o    (ooo_phys_replay),
       //RVFI
       .rvfi_issue_pointer_o (rvfi_issue_pointer),
@@ -3605,7 +3651,17 @@ module cva6
                         && !issue_stage_i.gen_full_ooo.i_ooo_dispatch.lsq_busy
                         && issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rob.count_q == '0
                         && issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.count_q == '0))
-    else $error("ooo_switch_drained: hart switch with OoO state resident");
+    else begin
+      $display("[ooo-switch-drained] hart=%0d sbem=%0d sbn=%0d stp=%0d lsqb=%0d rob=%0d iq=%0d fid=%0d miss=%0d quant=%0d starve=%0d forced=%0d",
+               smt_active_hart, smt_sb_empty, issue_stage_i.i_scoreboard.sb_issued_cnt,
+               no_st_pending_commit,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.lsq_busy,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_rob.count_q,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.count_q,
+               flush_ctrl_id, smt_switch_on_miss, smt_switch_on_quantum,
+               smt_switch_on_starve, smt_drain_forced);
+      $error("ooo_switch_drained: hart switch with OoO state resident");
+    end
   end
 
   // T6b-2b invariants on the per-access context split. Under the drained

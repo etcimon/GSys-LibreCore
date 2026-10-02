@@ -58,6 +58,9 @@ module g6lc_iq
     input  logic [CVA6Cfg.NrIssuePorts-1:0]               disp_rs3_ready_i,
     output logic [CVA6Cfg.NrIssuePorts-1:0]              disp_ack_o,
     output logic                                         full_o,
+    // Drained-handoff seam (T6a): the thread selector may switch only when
+    // empty_o holds.
+    output logic                                         empty_o,
     input  logic [NR_WB-1:0]                 wb_valid_i,
     input  logic [NR_WB-1:0][PRF_W-1:0]      wb_prd_i,
     input  logic [NR_WB-1:0]                 fwb_valid_i,
@@ -116,7 +119,8 @@ module g6lc_iq
   logic [CVA6Cfg.NrIssuePorts-1:0][DEPTH-1:0] grant;
   logic [DEPTH-1:0] valid_after;
 
-  assign full_o = (int'(count_q) + CVA6Cfg.NrIssuePorts > DEPTH);
+  assign full_o  = (int'(count_q) + CVA6Cfg.NrIssuePorts > DEPTH);
+  assign empty_o = (count_q == '0);
 
   // 1) Cancel squash + WB wakeup
   always_comb begin

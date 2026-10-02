@@ -31,6 +31,7 @@ module g6lc_ooo_rob_props #(
 `ifdef FORMAL
   logic [NR_ALLOC-1:0][ROB_W-1:0]  alloc_id_o;
   logic                            full_o;
+  logic                            empty_o;
   logic [NR_RETIRE-1:0]            retire_valid_o;
   logic [NR_RETIRE-1:0][ROB_W-1:0] retire_id_o;
   // entry_t = logic: payload ignored by occupancy invariants
@@ -58,6 +59,7 @@ module g6lc_ooo_rob_props #(
       .alloc_tid_i,
       .alloc_id_o,
       .full_o,
+      .empty_o,
       .complete_valid_i,
       .complete_tid_i,
       .complete_exc_i,
@@ -107,6 +109,8 @@ module g6lc_ooo_rob_props #(
       assert (count_w <= ROB_ENTRIES[ROB_W:0]);
       // full_o threshold matches RTL formula for NR_ALLOC ports.
       assert (full_o == (count_w > ROB_ENTRIES[ROB_W:0] - NR_ALLOC[ROB_W:0]));
+      // empty_o is the drained-handoff seam (FP-3d): exactly count==0.
+      assert (empty_o == (count_w == '0));
       // Circular-buffer occupancy identity.
       if (count_w != ROB_ENTRIES[ROB_W:0])
         assert (count_w == (ROB_W+1)'(dist_w));

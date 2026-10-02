@@ -21,7 +21,7 @@ module tb_g6lc_iq_cvxif_head;
   endfunction
   localparam config_pkg::cva6_cfg_t C = configuration();
   typedef struct packed {fu_t fu; fu_op op; logic [3:0] trans_id; logic hart_id; logic [31:0] pc;} sbe_t;
-  logic clk = 0, rst_n = 0, flush = 0, mem_stall = 0, full;
+  logic clk = 0, rst_n = 0, flush = 0, mem_stall = 0, full, empty;
   logic [15:0] cancel = '0, st_unresolved = '0, st_live = '0;
   logic [3:0] commit_ptr = '0;
   logic [NP-1:0] dv = '0, da, iv, ia = '0, r1 = '0, r2 = '0, bypass = '0;
@@ -39,7 +39,7 @@ module tb_g6lc_iq_cvxif_head;
     .disp_fprs1_i('0), .disp_fprs2_i('0), .disp_fprs3_i('0),
     .disp_fpr_rs1_i('0), .disp_fpr_rs2_i('0), .disp_fpr_rs3_i('0),
     .disp_rs3_ready_i('1), .fwb_valid_i('0), .fwb_prd_i('0),
-    .disp_rs1_ready_i(r1), .disp_rs2_ready_i(r2), .disp_may_bypass_i(bypass), .disp_ack_o(da), .full_o(full),
+    .disp_rs1_ready_i(r1), .disp_rs2_ready_i(r2), .disp_may_bypass_i(bypass), .disp_ack_o(da), .full_o(full), .empty_o(empty),
     .wb_valid_i(wv), .wb_prd_i(wp),
     .issue_sbe_o(is), .issue_orig_o(ii), .issue_prd_o(ip), .issue_valid_o(iv), .issue_ack_i(ia), .mem_stall_i(mem_stall),
     .st_live_mask_i(st_live), .st_unresolved_mask_i(st_unresolved), .st_hart_mask_i(st_live), .commit_ptr_i(commit_ptr), .sb_live_i('1));

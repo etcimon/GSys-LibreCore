@@ -111,6 +111,7 @@ module g6lc_ooo_backend
       .alloc_tid_i   ('0),
       .alloc_id_o    (),
       .full_o        (rob_full_o),
+      .empty_o       (),
       .complete_valid_i('0),
       .complete_tid_i  ('0),
       .complete_exc_i  ('0),

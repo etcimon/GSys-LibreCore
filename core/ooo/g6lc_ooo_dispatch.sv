@@ -92,6 +92,9 @@ module g6lc_ooo_dispatch
     output logic freelist_empty_o,
     output logic rob_full_o,
     output logic iq_full_o,
+    // T6a drained-handoff seam: the thread selector may switch only when
+    // this holds (ROB + IQ empty, LSQ not busy).
+    output logic ooo_drained_o,
     output logic lsq_stall_o,
     output logic rename_stall_o,
     output logic stl_forward_o,
@@ -220,6 +223,7 @@ module g6lc_ooo_dispatch
   end
 
   logic rob_full, iq_full, ld_full, st_full;
+  logic rob_empty, iq_empty;
   logic [$clog2(CVA6Cfg.LsqLoadEntries+1)-1:0] ld_free;
   logic [$clog2(CVA6Cfg.LsqStoreEntries+1)-1:0] st_free;
   logic store_pend, stl_fwd, stl_stall, lsq_busy, md_stall, md_predict, mem_stall;
@@ -239,6 +243,7 @@ module g6lc_ooo_dispatch
 
   assign rob_full_o = rob_full;
   assign iq_full_o  = iq_full;
+  assign ooo_drained_o = rob_empty && iq_empty && !lsq_busy;
   // LSQ pressure blocks unless the whole group fits: dispatch is all-or-nothing,
   // so admitting a group with more memory ops than free entries would leave the
   // surplus without a queue entry. Counts are registered state and the group size
@@ -569,6 +574,7 @@ module g6lc_ooo_dispatch
       .alloc_tid_i   (rob_alloc_tid),
       .alloc_id_o    (),
       .full_o        (rob_full),
+      .empty_o       (rob_empty),
       .complete_valid_i(wb_valid_i),
       .complete_tid_i  (rob_c_tid),
       .complete_exc_i  (wb_exc_i),
@@ -637,6 +643,7 @@ module g6lc_ooo_dispatch
       .fwb_prd_i       (fdata_wb_prd),
       .disp_ack_o      (dispatch_ack_o),
       .full_o          (iq_full),
+      .empty_o         (iq_empty),
       .wb_valid_i      (data_wb_valid),
       .wb_prd_i        (data_wb_prd),
       .issue_sbe_o     (issue_sbe_o),

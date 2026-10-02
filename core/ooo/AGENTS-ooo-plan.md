@@ -3474,7 +3474,121 @@ variant is an adoption decision, not a legality one. The ten frozen
 
 **Remaining FP-OoO.** `g6lc64_ooo_server` qualification (a COH_FILTERED /
 four-core / 4-issue program, not an FP item — FP there is the drained leg
-already legal); the T5 core-level owner-mutation bar (the retention
+already legal; first findings in T12); the T5 core-level owner-mutation bar (the retention
 mutation is caught by the S2 leaf and the `g6lc_ooo_fp_owner` proof; the
 core-level inertness is structural at 32 scoreboard entries — recorded as
 the bar); `ai-chain14` FP suite rerun on the clean tree (AI program).
+
+### T12 — FP-3: `g6lc64_ooo_server` brought back to elaboration and to a drained handoff that holds (2026-10-01/02)
+
+**Scope.** First look at the server profile (4 cores × 2 harts, 4-issue /
+4-commit, `HPDCACHE_WT`, `COH_FILTERED`, `L3En=1`, drained handoff) since
+the N1/FP work. Goal: establish where it stands, not to qualify it.
+
+**Finding 1 — the target did not elaborate (pre-existing).** The N1
+`[smt-stall]` dump (`252c698e8`, 2026-09-29) referenced
+`gen_cache_wt.*` unconditionally inside `gen_smt_stats`; `gen_cache_wt`
+exists only for `DCacheType == WT`, so every HPDCACHE drained target failed
+with 10 `Can't find definition of 'gen_cache_wt'`. The server has been
+lint-broken since, unnoticed because it is opt-in (`verify --target
+g6lc64_ooo_server`). Fix: the WT miss-unit/wbuffer/adapter line moved into
+its own `gen_wt_stall_probe` scope driven by the same `ss_dump_id` ticket as
+`gen_ooo_stall_probe`. Lint 0e on the server (288v) and unchanged on the
+anchors; the int2_l3 ring-16 `+smt_stats` boot prints the `dmu` line the
+same number of times as before (11 `[smt-stall]` lines) at **18,297,379**.
+Consequence recorded honestly: every "server" Verilator result that
+predates `252c698e8` (the I4dp 200M harness green in `AGENTS-todo.md`) was
+measured on a tree that no longer existed as a model.
+
+**Finding 2 — `ooo_switch_drained` fired at the first non-cooperative
+switch** (`[1300]`, reason `starve`, `forced=0`) on the server I4dp boot.
+Bisect by package overlay (`ooocoh-fp3-server-ovl{a,b}-*`): 2-issue /
+2-commit server still asserts identically (cycle 1362) — **not** the port
+width; server with `DCacheType=WT` (`HwPrefetch` off, required by
+`check_cfg`) runs 1,664 switches to the 50k cap with no assertion — **the
+d-cache backend is the differentiator**. The failure-branch display
+(`[ooo-switch-drained] … sbem=1 sbn=0 stp=0 lsqb=0 rob=0 iq=0 …`, read in
+the reactive region) and the new `+smt_stats` tail counters
+(`tail lsq=0 rob=0 iq=0 any=0` over 6 M server cycles and 24 M int2_l3
+cycles) pin the conjunct: not the ROB/IQ/LSQ tail — they never outlive
+`sb_empty` on either backend — but `no_st_pending_commit`, i.e.
+`wbuffer_empty`. Mechanism (hpdcache_ctrl: `wbuf_write_o` is a **st1**
+action, the wbuf entry is valid from the st1→st2 edge): a store granted on
+the store port at N leaves the store-buffer commit queue at N→N+1 while
+`wbuf_empty_o` stays 1 through N+1 — a one-cycle window in which the store
+is in no monitor. WT has no window (the wbuffer registers at grant). The
+drained-handoff decision landed in that window; the switch pulse one cycle
+later saw the store.
+
+**Fix (two seams).**
+- `cva6_hpdcache_wrapper.sv`: `st_skid_q` registers
+  `dcache_req_valid[store port] & ready`; `wbuffer_empty_o = wbuf_empty &
+  ~st_skid_q`. Covers the st0→st1 skid exactly; a store parked in the
+  replay table is ordered by the cache itself and is not a core-visible
+  pending store. Also tightens `fence`/`fence.i` completion by that cycle on
+  every HPDCACHE package (upstream `cv64a6_imafdc_sv39_hpdcache` lints
+  261w/0e; the slang stage has 3 pre-existing Zacas index errors from
+  `3801e8218`, unrelated).
+- `drain_ready_i` gains `ooo_drained_id` (`g6lc_ooo_dispatch.ooo_drained_o =
+  rob.empty_o && iq.empty_o && !lsq_busy`, constant 1 off the OoO path):
+  the T6a contract is now stated at the seam the selector consumes rather
+  than only in the witness assertion. Redundant on every measured
+  workload (tail counters 0) but cheap (two `count_q == 0` compares already
+  present, one AND) and it makes the contract construction-grade. FO4
+  screens over the selector cone unchanged (23.0 → 23.0, mixed_r16 31.0 →
+  31.0).
+- *Rejected on the way*: an emission-time re-check inside
+  `g6lc_thread_select` (`drain_emit_i`, suppressed-pulse rollback of
+  `active_q`, a formal fairness **assumption**). It made the server boot
+  by rejecting **every** drain at the emission edge (core 0: 1,772
+  requests, 0 switches, 1,772 aborts; cores 1–3: ≈207 k each) — a
+  selector that never switches is not a fix — and it weakened the
+  `g6lc_thread_select` proofs with an assumption. Reverted; the selector
+  and its sby/props are byte-identical to T10g.
+
+**Evidence (`ooocoh-fp3*`).**
+- Server I4dp 8-hart OpenSBI (`fp3e-server-i4dp-r2`, `+smt_stats`, 6 M
+  cap): **`*** SUCCESS *** (tohost=0)` at 6,000,000 cycles, zero
+  `ooo_switch_drained` assertions**; core 0 `req=1772 switches=1772
+  aborts=0 force=1` (plain `SmtDrainForceCycles` expiry; `force_wfi=0`,
+  `force_abs=0`), cores 1–3 ≈207,150 requests each, all switched, `force=0`;
+  reason mix quantum 622,199 / starve 1,021 / miss 0 / yield 0; tail
+  `0/0/0/0` on all cores. The 200 M-cycle I4dp cap is **not** re-run: the
+  8-logical-hart model runs ≈640–1,100 cycles/s on the builder (24 M
+  int2_l3 took 4,015 s), so 200 M is days — the 6 M evidence is what is
+  recorded; the old 200 M green stands only as a historical note.
+- Inertness: int2_l3 ring-16 24 M **18,297,379 / `5056e553…` /
+  `c3406211…` byte-identical** (WT — the wrapper is not elaborated),
+  `force=0`; local lint 0e on server / int2_l3 / smt2_ooo_int / smt2 / ooo;
+  remote lint int2_l3 29w/0e, server 36w/0e; remote synth int2_l3
+  `check -assert` clean 43w. Leaves: `smt_drain` 8/8, `smt_drainforce`
+  4/4, `review_iq` 80/80, `tb_g6lc_rob` (+mutant caught), dispatch TBs
+  36/36; sby `g6lc_thread_select` prove/cover/abs/abs_cover PASS,
+  noforce ×2 FAIL as designed; `g6lc_ooo_rob` PASS.
+- Server synth: `run_cluster_synth_review.py` 10/10 uncore tops pass
+  (coh_hub 2,151 c, snoop 582 c, l2_top 4,699 c, l3_top 7,787 c; 0
+  latches) in 255 s — this runner never elaborates the cva6 subtree, so it
+  is not core evidence; the core-level server synthesis is still owed.
+- Build note: Verilator 5.008 mis-splits `__Vilp` loop variables across
+  `DepSet` chunks on this model (58 TUs); the remote builds patch the
+  generated C++ (`static IData __Vilp;`) and compile `__Syms.cpp` at -O1.
+  Generated-code workaround only, no RTL/config change; a `.vlt`/make-level
+  form is owed if the server becomes a routine target.
+
+**FP on the server model (not qualified).** `mc_fp_smt` positive
+`held-secondary` (harts 4–7 parked under `BOOT_HOLD`; the test is written
+for four harts), negative detected. FP suite s1/s4 positives pass
+functionally but **`retirementsMatch=false` at index 2** — root cause is
+an RVFI probe gap, not FP: `cva6_rvfi.sv` stages `issue_q` instruction
+encodings for ports 0 and `NrIssuePorts-1` only, so on a 4-issue model
+dispatches on ports 1–2 carry `instr=0` (≈38 % of `trace_rvfi_hart_00.dasm`
+rows). Retirement qualification cannot pass on any `NrIssuePorts > 2`
+model until the probe is widened (tracked in `AGENTS-todo.md`). s9/s10
+hit the 2 M cap without a verdict; negatives not run.
+
+**Status.** `g6lc64_ooo_server` elaborates, lints, and runs its 8-hart
+firmware boot to 6 M cycles with the drained handoff holding by
+construction. It remains **opt-in / unqualified**: owed are the core-level
+synthesis, the RVFI 4-issue probe, a server-sized FP/`mc_fp_smt` variant
+(8 harts), the `COH_FILTERED` qualification program, and a Linux-class
+boot on a faster host or FPGA.

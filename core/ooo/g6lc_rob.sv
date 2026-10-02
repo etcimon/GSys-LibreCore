@@ -26,6 +26,9 @@ module g6lc_rob #(
     input  logic [NR_ALLOC-1:0][TID_W-1:0]         alloc_tid_i,
     output logic [NR_ALLOC-1:0][ROB_W-1:0]         alloc_id_o,
     output logic                                   full_o,
+    // Drained-handoff seam (T6a): the thread selector may switch only when
+    // empty_o holds.
+    output logic                                   empty_o,
     // Complete (writeback) — match by scoreboard trans_id
     input  logic [NR_COMPLETE-1:0]                 complete_valid_i,
     input  logic [NR_COMPLETE-1:0][TID_W-1:0]      complete_tid_i,
@@ -54,6 +57,7 @@ module g6lc_rob #(
   logic [ROB_W:0]   count_q, count_d;
 
   assign full_o = (count_q > ROB_ENTRIES[ROB_W:0] - NR_ALLOC[ROB_W:0]);
+  assign empty_o = (count_q == '0);
 
   always_comb begin
     automatic logic [ROB_W-1:0] rid, hid;

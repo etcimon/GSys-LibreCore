@@ -32,6 +32,7 @@ module tb_g6lc_rob;
   logic [NR_COMPLETE-1:0] complete_exc='0;
   logic [NR_RETIRE-1:0] retire_v;
   logic [15:0][NR_RETIRE-1:0] retire_e;
+  logic empty;
   logic [NR_RETIRE-1:0][ROB_W-1:0] retire_id;
   logic [NR_RETIRE-1:0] retire_ack='0;
   logic [NR_RETIRE-1:0][TID_W-1:0] retire_tid='0;
@@ -41,7 +42,7 @@ module tb_g6lc_rob;
       .NR_SB(NR_SB),.entry_t(logic[15:0])) dut (
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancelled),
     .alloc_valid_i(alloc_v),.alloc_entry_i(alloc_e),.alloc_tid_i(alloc_tid),
-    .alloc_id_o(alloc_id),.full_o(full),
+    .alloc_id_o(alloc_id),.full_o(full),.empty_o(empty),
     .complete_valid_i(complete_v),.complete_tid_i(complete_tid),
     .complete_exc_i(complete_exc),
     .retire_valid_o(retire_v),.retire_entry_o(retire_e),.retire_id_o(retire_id),

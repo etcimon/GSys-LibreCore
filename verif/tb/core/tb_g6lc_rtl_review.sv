@@ -662,7 +662,7 @@ module tb_g6lc_review_iq;
     .disp_fprs1_i('0),.disp_fprs2_i('0),.disp_fprs3_i('0),
     .disp_fpr_rs1_i('0),.disp_fpr_rs2_i('0),.disp_fpr_rs3_i('0),
     .disp_rs3_ready_i('1),.fwb_valid_i('0),.fwb_prd_i('0),
-    .disp_rs1_ready_i(r1),.disp_rs2_ready_i(r2),.disp_may_bypass_i(bypass),.disp_ack_o(da),.full_o(full),
+    .disp_rs1_ready_i(r1),.disp_rs2_ready_i(r2),.disp_may_bypass_i(bypass),.disp_ack_o(da),.full_o(full),.empty_o(),
     .wb_valid_i(wv),.wb_prd_i(wp),
     .issue_sbe_o(is),.issue_orig_o(ii),.issue_prd_o(ip),.issue_valid_o(iv),.issue_ack_i(ia),.mem_stall_i(mem_stall),
     .st_live_mask_i(st_live),.st_unresolved_mask_i(st_unresolved),.st_hart_mask_i(st_live),.commit_ptr_i(commit_ptr),.sb_live_i('1));
@@ -2109,7 +2109,7 @@ module tb_g6lc_review_dispatch;
     .commit_ack_i(cm_ack),.commit_instr_i(cm_instr),.commit_ptr_i(cp),
     .mispredict_i(mispredict),.mispredict_id_i(mis_id),
     .freelist_empty_o(),.rob_full_o(),.iq_full_o(),.lsq_stall_o(),.rename_stall_o(),.stl_forward_o(),
-    .mem_violation_o(),.mem_violation_id_o());
+    .mem_violation_o(),.mem_violation_id_o(),.ooo_drained_o());
   // Free-running clock. The clock must NOT be driven from the stimulus process:
   // the previous hand-rolled `tick` (clk=1;#2;clk=0;#2) made results depend on
   // the simulator's optimisation level, which destroyed the fixture's value as

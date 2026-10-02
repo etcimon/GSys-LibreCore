@@ -201,6 +201,9 @@ module issue_stage
     output logic ooo_rob_full_o,
     output logic ooo_lsq_stall_o,
     output logic ooo_stl_forward_o,
+    // T6a drained-handoff seam: the thread selector may switch only when this
+    // holds — ROB + IQ empty and the LSQ idle. Constant 1 off the OoO path.
+    output logic ooo_drained_o,
     // COH_OOO: a not-yet-retired load was marked for replay by a modification event
     output logic ooo_phys_replay_o,
     // Information dedicated to RVFI - RVFI
@@ -399,7 +402,8 @@ module issue_stage
         .rename_stall_o   (ooo_rename_stall_o),
         .stl_forward_o    (ooo_stl_forward_o),
         .mem_violation_o    (mem_violation),
-        .mem_violation_id_o (mem_violation_id)
+        .mem_violation_id_o (mem_violation_id),
+        .ooo_drained_o      (ooo_drained_o)
     );
   end else if (CVA6Cfg.SliceOoOEn) begin : gen_slice_ooo
     assign mem_violation    = 1'b0;
@@ -417,6 +421,7 @@ module issue_stage
     assign ooo_rob_full_o     = 1'b0;
     assign ooo_lsq_stall_o    = 1'b0;
     assign ooo_stl_forward_o  = 1'b0;
+    assign ooo_drained_o      = 1'b1;
     g6lc_slice_dispatch #(
         .CVA6Cfg(CVA6Cfg),
         .scoreboard_entry_t(scoreboard_entry_t)
@@ -456,6 +461,7 @@ module issue_stage
     assign ooo_rob_full_o     = 1'b0;
     assign ooo_lsq_stall_o    = 1'b0;
     assign ooo_stl_forward_o  = 1'b0;
+    assign ooo_drained_o      = 1'b1;
 
     // EXTRACT E1: CF / CSR / SP barriers in g6lc_issue_barrier (I4s/au, cont.33).
     // G1i unresolved_a0 hold-FAIL — reverted. Peer SMT still issues.
