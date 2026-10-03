@@ -30,6 +30,14 @@
 #define ROUNDS 6
 #endif
 
+// Logical harts the test accounts for. Default 4 (two cores x two threads).
+// At 8 (g6lc64_ooo_server: four cores) harts 4..7 are released exactly like
+// the inner four — hart 0 writes their msips — then park in WFI immediately
+// so the all-cores-retired verdict sees every hart retired, not clock-held.
+#ifndef MC_FP_SMT_NHARTS
+#define MC_FP_SMT_NHARTS 4
+#endif
+
   .equ CLINT_MSIP, 0x02000000
   .equ LINE,   0x80090000
   .equ READY,  0x80090100
@@ -72,6 +80,12 @@ _start:
   sw   t1, 4(t0)             // msip[1]: thread 1 of core 0
   sw   t1, 8(t0)             // msip[2]: core 1 boot hart (releases its gate)
   sw   t1, 12(t0)            // msip[3]: thread 1 of core 1
+#if MC_FP_SMT_NHARTS >= 8
+  sw   t1, 16(t0)            // msip[4]: core 2 boot hart (releases its gate)
+  sw   t1, 20(t0)            // msip[5]: thread 1 of core 2
+  sw   t1, 24(t0)            // msip[6]: core 3 boot hart (releases its gate)
+  sw   t1, 28(t0)            // msip[7]: thread 1 of core 3
+#endif
 1:
   // Clear a pending msip aimed at this hart, then arm MSIE so a peer msip
   // wakes this hart's wfi (wake needs mip & mie; mstatus.MIE stays 0 so the
@@ -81,6 +95,13 @@ _start:
   sw   zero, 0(t1)
   li   t2, 0x8
   csrw mie, t2
+
+#if MC_FP_SMT_NHARTS >= 8
+  // Harts >= MC_FP_SMT_NHARTS/2 exist only to retire on their own core: skip
+  // the FP context work and park for the rest of the run.
+  li   t2, 4
+  bge  s11, t2, park
+#endif
 
   // Enable the FPU and install the per-hart fcsr (frm = hart, fflags = 1<<hart).
   li   t0, MSTATUS_FS

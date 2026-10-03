@@ -765,7 +765,10 @@ detected (`FP_OWNER_CANCELLED_RESPONSE`). The four-hart directed test
 each hart fills f0–f31 with a hart-unique pattern and a unique `fcsr`, forces drained
 sibling handoffs with an in-flight `fdiv.d`/`fsqrt.d`, issues FP loads on a line the peer
 core is writing (COH_OOO replay), then re-verifies registers/fcsr/`mstatus.FS` per hart;
-the negative arm mutates the expected pattern and is detected. The Spike-ordered FP suite
+the negative arm mutates the expected pattern and is detected (anchor **3,831 cycles** since
+the FP-3 `ooo_drained` conjunct, was 3,777). `-DMC_FP_SMT_NHARTS=8` releases harts 4–7 and
+parks them so the all-cores-retired verdict is reachable on `g6lc64_ooo_server` (pass 7,062
+cycles, negative detected); the default image is byte-identical. The Spike-ordered FP suite
 (`ooo_fp_rename` incl. recovery/status arms, `ooo_fp_ooo` stages 1–11 positives and
 negatives) runs retirement-exact on the same model in single-active-hart mode
 (`FP_REVIEW_ACTIVE_TRACE`/`FP_REVIEW_HELD_OK`/`FP_REVIEW_PARK_FILTER` — the parked sibling's

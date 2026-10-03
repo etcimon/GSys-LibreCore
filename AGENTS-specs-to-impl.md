@@ -1162,3 +1162,14 @@ registering the entry (`hpdcache_ctrl` writes the wbuf at st1): `wbuffer_empty_o
 byte-identical. Found on `g6lc64_ooo_server`, which also regained elaboration (the N1
 `[smt-stall]` WT probe moved into `gen_wt_stall_probe`). The server remains opt-in/unqualified.
 Evidence: `core/ooo/AGENTS-ooo-plan.md` T12.
+
+## RVFI instruction capture per issue port (2026-10-02, T12 addendum)
+
+`core/id_stage.sv` carries the issue-aligned instruction encoding (`rvfi_instr`, compressed ops
+truncated to `[15:0]`) and RVC flag (`rvfi_is_compressed`) inside `issue_struct_t`, so they ride
+every ID→issue compaction and splice and leave on `rvfi_instr_o` / `rvfi_is_compressed_o`;
+`core/cva6_rvfi.sv` consumes them directly and no longer models the ID register with a two-slot
+shuffle (which was only right for `NrIssuePorts == 2`). RVFI-only consumers, pruned in synthesis.
+`core/issue_read_operands.sv` clamps the CASQ pair-high register-file index (`CASQ_HI_IDX`) so the
+`OPERANDS_PER_INSTR == 3`-guarded path is statically in bounds on two-operand regfiles.
+Evidence: `core/ooo/AGENTS-ooo-plan.md` T12 addendum.

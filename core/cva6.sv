@@ -924,6 +924,7 @@ module cva6
   lsu_ctrl_t rvfi_lsu_ctrl;
   logic [CVA6Cfg.PLEN-1:0] rvfi_mem_paddr;
   logic [CVA6Cfg.NrIssuePorts-1:0] rvfi_is_compressed;
+  logic [CVA6Cfg.NrIssuePorts-1:0][31:0] rvfi_instr_id;
   rvfi_probes_csr_t rvfi_csr;
 
   // Accelerator port
@@ -1441,6 +1442,7 @@ module cva6
       .issue_instr_ack_i  (issue_instr_issue_id),
 
       .rvfi_is_compressed_o(rvfi_is_compressed),
+      .rvfi_instr_o        (rvfi_instr_id),
 
       .priv_lvl_i          (priv_lvl),
       .v_i                 (v),
@@ -3518,10 +3520,9 @@ module cva6
 
 
   //RVFI INSTR
-  logic [CVA6Cfg.NrIssuePorts-1:0][31:0] rvfi_fetch_instr;
-  for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
-    assign rvfi_fetch_instr[i] = fetch_entry_if_id[i].instruction;
-  end
+  // Issue-aligned encodings come from id_stage's issue_q (rvfi_instr_id),
+  // which carries the fetch instruction through every compaction/splice —
+  // correct for any NrIssuePorts, unlike the previous fetch-stage probe.
 
   cva6_rvfi_probes #(
       .CVA6Cfg            (CVA6Cfg),
@@ -3537,7 +3538,7 @@ module cva6
       .flush_i            (flush_ctrl_if),
       .issue_instr_ack_i  (issue_instr_issue_id),
       .fetch_entry_valid_i(fetch_valid_if_id),
-      .instruction_i      (rvfi_fetch_instr),
+      .instruction_i      (rvfi_instr_id),
       .is_compressed_i    (rvfi_is_compressed),
 
       .issue_pointer_i (rvfi_issue_pointer),

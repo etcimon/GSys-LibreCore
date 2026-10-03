@@ -166,6 +166,10 @@ module issue_read_operands
 );
 
   localparam OPERANDS_PER_INSTR = CVA6Cfg.NrRgprPorts / CVA6Cfg.NrIssuePorts;
+  // CASQ pair-high index: only reachable when OPERANDS_PER_INSTR == 3 (the
+  // procedural guards on casq_active ensure that), but slang checks indices
+  // statically, so clamp the index to stay in bounds on narrower regfiles.
+  localparam int unsigned CASQ_HI_IDX = OPERANDS_PER_INSTR > 2 ? 2 : 0;
 
   typedef struct packed {
     logic none, load, store, alu, alu2, ctrl_flow, mult, csr, fpu, fpu_vec, cvxif, accel, aes;
@@ -1368,7 +1372,7 @@ module issue_read_operands
       end else begin
         // phase1: reread high halves
         raddr_pack[1] = issue_instr_i[0].rs2[4:0] | 5'b00001;  // rs2+1
-        raddr_pack[2] = issue_instr_i[0].result[4:0] | 5'b00001;  // rd+1
+        raddr_pack[CASQ_HI_IDX] = issue_instr_i[0].result[4:0] | 5'b00001;  // rd+1
         casq_phase_d = 1'b0;
       end
     end else begin
@@ -1401,11 +1405,11 @@ module issue_read_operands
         casq_phase_q <= casq_phase_d;
         if (!casq_phase_q) begin
           casq_new_lo_q <= rdata[1];
-          casq_exp_lo_q <= rdata[2];
+          casq_exp_lo_q <= rdata[CASQ_HI_IDX];
           casq_ready_q  <= 1'b0;
         end else begin
           casq_new_hi_q <= rdata[1];
-          casq_exp_hi_q <= rdata[2];
+          casq_exp_hi_q <= rdata[CASQ_HI_IDX];
           casq_ready_q  <= 1'b1;
         end
       end

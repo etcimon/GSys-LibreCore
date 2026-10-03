@@ -233,7 +233,6 @@ module cva6_rvfi
   logic [CVA6Cfg.NrIssuePorts-1:0] fetch_entry_valid;
   logic [CVA6Cfg.NrIssuePorts-1:0][31:0] instruction;
   logic [CVA6Cfg.NrIssuePorts-1:0] is_compressed;
-  logic [CVA6Cfg.NrIssuePorts-1:0][31:0] truncated;
 
   logic [CVA6Cfg.NrIssuePorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] issue_pointer;
   logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] commit_pointer;
@@ -371,66 +370,11 @@ module cva6_rvfi
 
   //ID STAGE
 
-  for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
-    assign truncated[i] = (is_compressed[i]) ? {16'b0, instruction[i][15:0]} : instruction[i];
-  end
-
-  typedef struct packed {
-    logic        valid;
-    logic [31:0] instr;
-    logic        is_compressed;
-  } issue_struct_t;
-  issue_struct_t [CVA6Cfg.NrIssuePorts-1:0] issue_n, issue_q;
-  logic took0;
-
-  always_comb begin
-    issue_n = issue_q;
-    took0   = 1'b0;
-
-    for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
-      if (issue_instr_ack[i]) begin
-        issue_n[i].valid = 1'b0;
-      end
-    end
-
-    if (!issue_n[CVA6Cfg.NrIssuePorts-1].valid) begin
-      issue_n[CVA6Cfg.NrIssuePorts-1].valid = fetch_entry_valid[0];
-      issue_n[CVA6Cfg.NrIssuePorts-1].instr = truncated[0];
-      issue_n[CVA6Cfg.NrIssuePorts-1].is_compressed = is_compressed[0];
-      took0 = 1'b1;
-    end
-
-    if (!issue_n[0].valid) begin
-      issue_n[0] = issue_n[CVA6Cfg.NrIssuePorts-1];
-      issue_n[CVA6Cfg.NrIssuePorts-1].valid = 1'b0;
-    end
-
-    if (!issue_n[CVA6Cfg.NrIssuePorts-1].valid) begin
-      if (took0) begin
-        issue_n[CVA6Cfg.NrIssuePorts-1].valid = fetch_entry_valid[CVA6Cfg.NrIssuePorts-1];
-        issue_n[CVA6Cfg.NrIssuePorts-1].instr = truncated[CVA6Cfg.NrIssuePorts-1];
-        issue_n[CVA6Cfg.NrIssuePorts-1].is_compressed = is_compressed[CVA6Cfg.NrIssuePorts-1];
-      end else begin
-        issue_n[CVA6Cfg.NrIssuePorts-1].valid = fetch_entry_valid[0];
-        issue_n[CVA6Cfg.NrIssuePorts-1].instr = truncated[0];
-        issue_n[CVA6Cfg.NrIssuePorts-1].is_compressed = is_compressed[0];
-      end
-    end
-
-    if (flush) begin
-      for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
-        issue_n[i].valid = 1'b0;
-      end
-    end
-  end
-
-  always_ff @(posedge clk_i or negedge rst_ni) begin
-    if (~rst_ni) begin
-      issue_q <= '0;
-    end else begin
-      issue_q <= issue_n;
-    end
-  end
+  // The per-port instruction encoding and RVC flag arrive issue-aligned from
+  // id_stage's issue register (rvfi_instr_o / rvfi_is_compressed_o), so no
+  // local capture model is needed. instr.issue_instr_ack and
+  // instr.fetch_entry_valid remain in the probe struct for compatibility but
+  // are no longer read here.
 
   //ISSUE STAGE
 
@@ -461,10 +405,10 @@ module cva6_rvfi
             lsu_rmask: '0,
             lsu_wmask: '0,
             lsu_wdata: '0,
-            instr: issue_q[i].instr,
+            instr: instruction[i],
             branch_valid: 1'b0,
             is_taken: 1'b0,
-            is_compressed: issue_q[i].is_compressed
+            is_compressed: is_compressed[i]
         };
       end
     end

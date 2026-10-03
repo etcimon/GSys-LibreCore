@@ -3592,3 +3592,62 @@ construction. It remains **opt-in / unqualified**: owed are the core-level
 synthesis, the RVFI 4-issue probe, a server-sized FP/`mc_fp_smt` variant
 (8 harts), the `COH_FILTERED` qualification program, and a Linux-class
 boot on a faster host or FPGA.
+
+**T12 addendum (2026-10-02) — probe and harness follow-through.**
+
+- *RVFI instruction capture is per-port now.* `cva6_rvfi.sv` modelled
+  id_stage's ID→issue register with a two-slot shuffle written for
+  `NrIssuePorts == 2`; on the 4-issue server ≈38 % of RVFI rows carried
+  `instr=0` and Spike retirement comparison failed at index 2. The encoding
+  and RVC flag now ride inside id_stage's `issue_struct_t` (`rvfi_instr`,
+  `rvfi_is_compressed`, set at every fill/splice, RVFI-only → pruned in
+  synthesis) and reach the probe issue-aligned (`rvfi_instr_o`); the RVFI
+  shuffle model is deleted. Equivalence: int2_l3 ring-16 24 M **18,297,379,
+  RVFI `5056e553…`/`c3406211…` byte-identical** — the new capture equals the
+  old model wherever the old one was right. Server FP suite s1/s4:
+  **`retirementsMatch=true`, `qualified=true`** (`ooocoh-rvfi-server-fpsuite-r1`).
+- *`mc_fp_smt` on eight logical harts.* `-DMC_FP_SMT_NHARTS=8` releases
+  harts 4–7 like the inner four and parks them, so the all-cores-retired
+  verdict is reachable on the server: positive **pass 7,062 cycles**, all
+  four cores retired, negative detected (`ooocoh-rvfi-server-fpsmt8-r2`).
+  Default-4 image byte-identical.
+- *`mc_fp_smt` anchor re-baselined 3,777 → **3,831** on the int2_l3 FP
+  model.* Attributed to the FP-3 `ooo_drained` conjunct in `drain_ready_i`
+  (the FP-3e model, pre-RVFI, already gives 3,831; the RVFI change is
+  cycle-neutral). On this directed test the ROB/IQ/LSQ tail does outlive
+  `sb_empty` at some drained switches — the OpenSBI boots showed none — so
+  the conjunct is not purely redundant; which term, and how often, is the
+  next data point (`+smt_stats` tail counters on the test).
+- *Slang Zacas index errors* (`issue_read_operands.sv` CASQ pair-high
+  `raddr_pack[2]`/`rdata[2]` on two-operand regfiles) clamped by
+  `CASQ_HI_IDX` under the existing `OPERANDS_PER_INSTR == 3` guard;
+  `cv64a6_imafdc_sv39_hpdcache` slang stage passes.
+- *`ai-chain14` rerun on the clean tree* (`ai14-suite-r1`, HEAD
+  `e905b07c7`, `work-ver-ai` rebuilt): **34/36 pass**, controls valid, the
+  nine cycle-15 deaths of the void run **do not reproduce**. Two real
+  fails, both pre-existing trap-loops (`cause=2` illegal instruction):
+  `mini_ai_dual_issue` @ `0x8000007a` (also failed in chain9) and
+  `ai_illegal_when_off` @ `0x8000003c`. Seven-format cold decode
+  (`ai14-bench-r2`) 7/7, fmt0 33,880 … fmt7 134,425 cycles, width-scaled.
+  AI-program items from here.
+- *Core-level server synthesis, one attempt.* `verify --synth --remote
+  --target g6lc64_ooo_server` first dies in slang (`g6lc_iq.sv:238` unroll
+  limit 4000 — `NR_SB_ENTRIES=64` × IQ depth; tool limit); with
+  `--unroll-limit=262144` elaboration, `hierarchy -check` and `proc` are
+  clean, then `opt -fast` dedup converges at ≈16 cells/min from 291,859
+  cells and was cut at 5.9 h before `check -assert`/`stat`. The cluster
+  top is not a practical synth unit for this profile; a core-only top (or
+  a per-block budget) is the owed form.
+- *s11 on `g6lc64_smt2_ooo_int` — mechanism located, fix pending.* Stock
+  mixed profile FAIL (`tohost=11`, 22,020 cycles, RTL retires 5,495 vs
+  Spike 5,263); the same ELF **passes on the drained overlay**
+  (`SmtDrainedHandoff:1`, 21,763 cycles, retirement-exact) and on
+  single-hart `g6lc64_ooo` (11,170). First divergence at index 50: RTL
+  **re-retires** `remu @0x80000258` plus the six `c.addi` at
+  `0x8000025c–0x80000266` — a 16-byte window, exactly one fetch parcel —
+  and Spike continues at `0x80000268`. ≈95 backward-PC replay windows
+  (64 `remu` retirements vs 32 `divu`), switches alternating every ≈66
+  cycles (reason `starve`). Already-retired instructions re-fetched and
+  re-executed on the non-drained path only: the mixed-residency restart
+  frontier (hart switch beat and/or peer restart on a partial flush) names
+  a parcel that was in fact delivered. Root cause and fix are T13.

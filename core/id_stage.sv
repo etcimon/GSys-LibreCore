@@ -86,6 +86,7 @@ module id_stage #(
     input logic [CVA6Cfg.NrIssuePorts-1:0] issue_instr_ack_i,
     // Information dedicated to RVFI - RVFI
     output logic [CVA6Cfg.NrIssuePorts-1:0] rvfi_is_compressed_o,
+    output logic [CVA6Cfg.NrIssuePorts-1:0][31:0] rvfi_instr_o,
     // Current privilege level - CSR_REGFILE
     input riscv::priv_lvl_t priv_lvl_i,
     // Current virtualization mode - CSR_REGFILE
@@ -186,6 +187,11 @@ module id_stage #(
     scoreboard_entry_t sbe;
     logic [31:0]       orig_instr;
     logic              is_ctrl_flow;
+    // RVFI-only: the issue-aligned instruction encoding (compressed ops
+    // truncated to [15:0]) and its RVC flag. Pure probe consumers, pruned
+    // in synthesis like rvfi_is_compressed_o.
+    logic [31:0]       rvfi_instr;
+    logic              rvfi_is_compressed;
   } issue_struct_t;
   issue_struct_t [CVA6Cfg.NrIssuePorts-1:0] issue_n, issue_q;
   // stall required for ZCMP ZCMT CVXIF
@@ -459,7 +465,11 @@ module id_stage #(
     end
   end
 
-  assign rvfi_is_compressed_o = is_compressed_rvc;
+  // Issue-aligned (registered at ID->issue fill), not fetch-aligned: the only
+  // consumer is the RVFI probe, which pairs it with the issued instruction.
+  for (genvar i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
+    assign rvfi_is_compressed_o[i] = issue_q[i].rvfi_is_compressed;
+  end
 
   // T6b-2b: under mixed residency each decode lane may hold a different hart's
   // instruction, so the interrupt-delivery check (irq lines, mie/mip/delegation
@@ -1072,6 +1082,7 @@ module id_stage #(
     assign issue_entry_valid_o[i] = issue_q[i].valid;
     assign is_ctrl_flow_o[i] = issue_q[i].is_ctrl_flow;
     assign orig_instr_o[i] = issue_q[i].orig_instr;
+    assign rvfi_instr_o[i] = issue_q[i].rvfi_instr;
   end
 
   if (CVA6Cfg.SuperscalarEn) begin
@@ -1136,7 +1147,9 @@ module id_stage #(
             decoded_instruction_valid[0],
             decoded_hd[0],
             orig_instr[0],
-            is_cf_hd[0]
+            is_cf_hd[0],
+            is_compressed_rvc[0] ? {16'b0, fetch_entry_i[0].instruction[15:0]} : fetch_entry_i[0].instruction,
+            is_compressed_rvc[0]
         };
         fetch_entry_ready_o[0] = 1'b1;
       end
@@ -1163,7 +1176,9 @@ module id_stage #(
             decoded_instruction_valid[0],
             decoded_hd[0],
             orig_instr[0],
-            is_cf_hd[0]
+            is_cf_hd[0],
+            is_compressed_rvc[0] ? {16'b0, fetch_entry_i[0].instruction[15:0]} : fetch_entry_i[0].instruction,
+            is_compressed_rvc[0]
         };
         fetch_entry_ready_o[0] = 1'b1;
       end
@@ -1189,7 +1204,9 @@ module id_stage #(
             decoded_instruction_valid[0],
             decoded_hd[0],
             orig_instr[0],
-            is_cf_hd[0]
+            is_cf_hd[0],
+            is_compressed_rvc[0] ? {16'b0, fetch_entry_i[0].instruction[15:0]} : fetch_entry_i[0].instruction,
+            is_compressed_rvc[0]
         };
         fetch_entry_ready_o[0] = 1'b1;
       end
@@ -1214,7 +1231,9 @@ module id_stage #(
             decoded_instruction_valid[0],
             decoded_hd[0],
             orig_instr[0],
-            is_cf_hd[0]
+            is_cf_hd[0],
+            is_compressed_rvc[0] ? {16'b0, fetch_entry_i[0].instruction[15:0]} : fetch_entry_i[0].instruction,
+            is_compressed_rvc[0]
         };
         fetch_entry_ready_o[0] = 1'b1;
       end
@@ -1235,7 +1254,9 @@ module id_stage #(
                 decoded_instruction_valid[rptr],
                 decoded_hd[rptr],
                 orig_instr[rptr],
-                is_cf_hd[rptr]
+                is_cf_hd[rptr],
+                is_compressed_rvc[rptr] ? {16'b0, fetch_entry_i[rptr].instruction[15:0]} : fetch_entry_i[rptr].instruction,
+                is_compressed_rvc[rptr]
             };
             rptr = rptr + 1;
             took_fetch = 1'b1;
@@ -1281,7 +1302,9 @@ module id_stage #(
             decoded_instruction_valid[0],
             decoded_hd[0],
             orig_instr[0],
-            is_cf_hd[0]
+            is_cf_hd[0],
+            is_compressed_rvc[0] ? {16'b0, fetch_entry_i[0].instruction[15:0]} : fetch_entry_i[0].instruction,
+            is_compressed_rvc[0]
         };
       end
 
