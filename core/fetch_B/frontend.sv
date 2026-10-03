@@ -919,11 +919,21 @@ module frontend
   // response only when its token matches. A kill (kill_s1 or kill_s2) with
   // nothing new accepted forgets the outstanding token, and a request accepted
   // in a kill cycle is itself unwanted, so a response the I$ still returns for
-  // a killed or redirected request is dropped by identity, not by address.
+  // a killed or redirected request is dropped by identity. Identity here is
+  // three conjuncts registered at accept next to want_token_q: the token, the
+  // requester hart, and the requested window. The hart conjunct kills a stale
+  // response that crossed an SMT switch — the switch ended that stream and the
+  // restart frontier assumes nothing of it survives pre-dispatch — and the
+  // window conjunct defeats a 2-bit token alias (a same-window stale response
+  // carries the same bytes, so this strictly tightens the rule). T13 m33: a
+  // parcel hart 1 requested for 0x8000010a landed during hart 0's window, was
+  // pushed tagged hart 0, and poisoned queue_oldest_pc[0] into the pc bank.
   // A prefetch response is dropped the same way by ownership: it only warms
   // the I$, and the demand for the same window later hits the warmed I$.
   logic [1:0] req_token_q, want_token_q;
   logic       want_valid_q, want_pf_q, icache_accept, kill_drop;
+  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] want_hart_q;
+  logic [CVA6Cfg.VLEN-1:0] want_addr_q;
   assign icache_accept = icache_dreq_o.req & icache_dreq_i.ready;
   assign icache_dreq_o.token = req_token_q;
   always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -932,6 +942,8 @@ module frontend
       want_token_q <= '0;
       want_valid_q <= 1'b0;
       want_pf_q    <= 1'b0;
+      want_hart_q  <= '0;
+      want_addr_q  <= '0;
     end else begin
       if (icache_accept) req_token_q <= req_token_q + 1'b1;
       if (kill_s2) begin
@@ -939,18 +951,46 @@ module frontend
         if (icache_accept) begin
           want_token_q <= req_token_q;
           want_pf_q    <= FtqEn && pf_req && !demand_req;
+          want_hart_q  <= smt_hart_i;
+          want_addr_q  <= icache_dreq_o.vaddr;
         end
       end else if (icache_accept) begin
         want_valid_q <= 1'b1;
         want_token_q <= req_token_q;
         want_pf_q    <= FtqEn && pf_req && !demand_req;
-      end else if (icache_dreq_i.valid && icache_dreq_i.token == want_token_q) begin
+        want_hart_q  <= smt_hart_i;
+        want_addr_q  <= icache_dreq_o.vaddr;
+      end else if (icache_dreq_i.valid && icache_dreq_i.token == want_token_q
+          && want_hart_q == smt_hart_i
+          && g6lc_fetch_pkg::same_win(CVA6Cfg,
+              64'(icache_dreq_i.vaddr), 64'(want_addr_q))) begin
+        // Only the truly-owned response discharges the want: an aliased stale
+        // response must not retire the token the wanted response still needs.
         want_valid_q <= 1'b0;
       end
     end
   end
   assign kill_drop = icache_dreq_i.valid
-      && !(want_valid_q && icache_dreq_i.token == want_token_q && !want_pf_q);
+      && !(want_valid_q && icache_dreq_i.token == want_token_q && !want_pf_q
+           && want_hart_q == smt_hart_i
+           && g6lc_fetch_pkg::same_win(CVA6Cfg,
+               64'(icache_dreq_i.vaddr), 64'(want_addr_q)));
+
+//pragma translate_off
+  // Leak witness: a response that rule 1 (token) alone would have accepted but
+  // that rule 2 (requester hart) or rule 3 (window) drops.
+  always @(posedge clk_i) begin
+    if (rst_ni && icache_dreq_i.valid
+        && want_valid_q && icache_dreq_i.token == want_token_q && !want_pf_q
+        && (want_hart_q != smt_hart_i
+            || !g6lc_fetch_pkg::same_win(CVA6Cfg,
+                64'(icache_dreq_i.vaddr), 64'(want_addr_q)))) begin
+      $display("[fetch-own] drop t=%0t token=%0d want_token=%0d hart=%0d want_hart=%0d vaddr=%h want_addr=%h",
+               $time, icache_dreq_i.token, want_token_q, smt_hart_i, want_hart_q,
+               icache_dreq_i.vaddr, want_addr_q);
+    end
+  end
+//pragma translate_on
 
   // I10: bank the accepted I$ address when switch kills it, not next_block.
   always_ff @(posedge clk_i or negedge rst_ni) begin

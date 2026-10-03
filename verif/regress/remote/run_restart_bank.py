@@ -63,6 +63,24 @@ def main():
         print(text)
         if not matched(run.returncode, text):
             raise RuntimeError('restart bank test failed')
+    if os.environ.get('RESTART_BANK_MUT') == '1':
+        # T13: rebuild with the retire-under-mixed mutation — the mixed
+        # frontier scenario (a) must fail with RESTART_MIXED_FRONTIER.
+        mut = list(command)
+        mut.insert(mut.index('-DG6LC_FETCH_B') + 1, '-DG6LC_MUT_PCBANK_RETIRE_MIXED')
+        mut[mut.index('--Mdir') + 1] = str(out / 'model-mut')
+        with (out / 'build-mut.log').open('w') as log:
+            b = subprocess.run(mut, stdout=log, stderr=subprocess.STDOUT, timeout=180)
+        if b.returncode:
+            print((out / 'build-mut.log').read_text()[-6000:])
+            raise RuntimeError('restart mut build failed')
+        run = subprocess.run([str(out / 'model-mut/restart-test')],
+                             capture_output=True, text=True, timeout=30)
+        text = run.stdout + run.stderr
+        (out / 'sim-mut-retire-mixed.log').write_text(text)
+        print(text)
+        if run.returncode == 0 or 'RESTART_MIXED_FRONTIER' not in text:
+            raise RuntimeError('restart mixed-retire mutation not caught')
     if not before and not fault:
         wrapper = source / 'pc_bank_synth.sv'
         wrapper.write_text('''module pc_bank_synth(

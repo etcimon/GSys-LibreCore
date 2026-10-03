@@ -3651,3 +3651,91 @@ boot on a faster host or FPGA.
   re-executed on the non-drained path only: the mixed-residency restart
   frontier (hart switch beat and/or peer restart on a partial flush) names
   a parcel that was in fact delivered. Root cause and fix are T13.
+
+### T13 — mixed-residency restart authority: switch-out frontier, not last retirement (2026-10-02)
+
+**Defect.** `g6lc_smt_pc_bank` under `G6LC_FETCH_B` fed every hart's bank
+from *retirements* (pc+4 / predicted target) and ignored the switch-time
+frontier (`npc_live_i`, computed by `gen_smt_restart_frontier`, was a dead
+input). Under the drained handoff that is exact: the scoreboard is empty at
+every switch, so the last retirement's successor is the next architectural
+instruction. Under mixed residency the switch kills IF/ID but the outgoing
+hart's scoreboard entries survive; if the hart is re-activated while it
+still holds live entries, the bank names the successor of its *last
+retirement* and the frontend refetches its still-live tail. s11 is the
+exact shape: a 64-cycle `divu` at the commit head stalls hart 0 → the
+selector switches away (`starve`) → the `divu` retires → hart 0 is
+re-activated with bank = `divu+4` while `remu` and six `c.addi` are live →
+all seven retire twice (T12 addendum: 64 `remu` vs 32 `divu`). A
+correctness defect on the production mixed profile `g6lc64_smt2_ooo_int`,
+masked on OpenSBI by its instruction mix.
+
+**Fix (three seams).**
+- *Bank authority* (`g6lc_smt_pc_bank.sv`): drained keeps the retirement
+  authority; mixed banks the switch-out frontier on `switch_i` and never
+  lets an inactive hart's retirements move it; redirects (own trap/set_pc,
+  inactive-hart mispredict and peer restart on port 2, N1c `npc_alt`) still
+  win. Review mutation `G6LC_MUT_PCBANK_RETIRE_MIXED` restores the old
+  writes under mixed.
+- *Instruction-granular tail* (`cva6.sv` `gen_switch_tail`): the
+  window-aligned fetch frontier (redirect pend / in-flight parcel / NPC
+  cursor) is not a legal restart PC — it can land inside a window-crossing
+  instruction (m34–m36 restarted at `0x80000200`/`0x800007c0`, `cause=2`).
+  The mixed frontier is therefore the next PC after the hart's youngest
+  *dispatched* instruction (`bp.predict_address` for a CF with
+  `bp.cf != NoCF`, else `pc + ilen`), re-armed by commit-side redirects and
+  resolved mispredicts, invalidated by a full flush (the commit redirect
+  already in the bank then owns the restart until the next dispatch). The
+  oldest undelivered pre-dispatch entry of the outgoing hart (per-hart
+  pending-FIFO head `queue_oldest_pc`, then the ID ports) overrides it,
+  and a same-cycle mispredict of the outgoing hart overrides both. The
+  not-taken-CF gate is the m33 fix: a not-taken `bnez` carried a stale
+  `predict_address` (`0x8000010a`, the peer's park loop) and armed hart 0's
+  tail with the peer's code.
+- *Fetch response ownership* (`fetch_B/frontend.sv`): identity is now
+  token **+ requester hart + requested window**, all registered at accept
+  (kill-cycle accepts included) and used both for `kill_drop` and for
+  discharging the want. The hart conjunct kills a response that crossed a
+  switch (that stream is dead: the restart frontier assumes nothing of it
+  survives pre-dispatch); the window conjunct defeats a 2-bit token alias.
+  Strictly tighter than the old token-only rule; `[fetch-own] drop` is the
+  translate_off leak witness. **Zero drops on every run below** — the
+  operative m33 failure was the tail arm, not an observed ownership leak;
+  the triple rule is defence in depth and is provably inert on the anchors.
+
+**Evidence (`ooocoh-t13c-*`, smt2_ooo_int models from this tree).**
+- s11 **PASS 18,444 cycles, retirement-exact vs Spike**; on
+  `G6LC_MUT_PCBANK_RETIRE_MIXED` it **fails `tohost=11` at 22,020** again.
+- Frozen integer set all PASS: m4 2,015 / m20 1,941 / m32 1,914 /
+  **m33 1,957** (was 2,020) / m34 1,915 / m35 1,926 / m36 1,926 /
+  m37 1,921 / ilp 1,243 / memdep 1,152 (ilp/dep +18 vs T12 — restart
+  frontier moved by the tail rule; retirement-exact).
+- Mixed FP model: FP suite **22/22** (s11 included); `mc_fp_mixed`
+  6,143 / negative detected. T6b mixed probe `RES0=0x1 RES1=0x1` at
+  3,064,005; negative detected.
+- `smt2_ooo_int` strict OpenSBI `+smt_mixed_stats`: **`strictDualPassed`,
+  10,459,588 — cycle-exact with the pre-T13 anchor** (`both_resident_cycles`
+  97,358, `cross_hart_port1_commits` 11,879, `[fetch-own]` 0) — the boot
+  never re-activated a hart with a live tail, which is why it never showed
+  the defect.
+- Drained inertness (bank authority unchanged; ownership rule live):
+  int2_l3 ring-16 24 M **18,297,379 / `5056e553…` / `c3406211…`
+  byte-identical**; `g6lc64_smt2` strict **12,406,273** = the contemporary
+  N1d reference run (`…-smt2-osbi-L0-r6`; the 12,406,259 figure is the
+  older anchor — that +14 predates T13). `[fetch-own]` 0 on both.
+- Leaves/formal: `tb_g6lc_restart` mixed scenarios (frontier banked on
+  switch-out, inactive retirements ignored, redirect2 wins, same-cycle
+  primary redirect wins, drained unchanged) PASS and the mutation arm
+  fails; `g6lc_fetch_restore` / `g6lc_fetch_hold` PASS,
+  `g6lc_fetch_smt` prove + cover PASS; lint 0e on smt2_ooo_int, smt2,
+  int2_l3, ooo_server, ooo, `cv64a6_imafdc_sv39`.
+- Side data point (FP-3 follow-through): `mc_fp_smt` `+smt_stats` on the
+  int2_l3 FP model — `tail lsq=0 rob=0 iq=0 any=0`, `wait_sb` 312–334
+  vs `wait_st` ≤ 3: the 3,777 → 3,831 delta is the store-buffer drain leg
+  of the full `drain_ready` contract, not the `ooo_drained` conjunct.
+
+**Timing.** The tail is one per-hart VLEN register written from the issue
+ports (NrIssuePorts-way mux) and the bank's switch-out write replaces a
+retirement write of the same width; the ownership rule adds a hart compare
+and a window compare to `kill_drop` (both registered operands). No screen
+changed; the frontier/bank path is not on a screened cone.

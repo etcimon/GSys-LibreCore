@@ -83,8 +83,34 @@ module g6lc_smt_pc_bank
         // npc_alt is the N1c forced-drain restart PC under FETCH_B and the
         // A-only t0 rewind elsewhere.
 `ifdef G6LC_FETCH_B
+`ifdef G6LC_MUT_PCBANK_RETIRE_MIXED
+        // Review mutation (T13): keep retirement-driven bank writes under
+        // mixed residency — the pre-T13 behaviour that let an inactive
+        // hart's surviving retirements move its bank backward past the
+        // switch-out frontier (s11 double retirement).
         for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++)
           if (retire_valid_i[p]) npc_bank_q[retire_hart_i[p]] <= retire_pc_i[p];
+`else
+        // T13: the bank authority depends on the handoff contract.
+        // Drained: the scoreboard is empty at every switch, so the last
+        // retirement IS the architectural frontier — the next instruction
+        // to execute is its successor, maintained by the retire writes.
+        // Mixed: the outgoing hart keeps live SB entries, so its frontier
+        // is the oldest killed pre-dispatch PC captured at switch-out in
+        // npc_live_i (smt_restart_pc); retirements of an inactive hart
+        // must never move the bank backward — a re-activated hart would
+        // otherwise refetch and double-retire its still-live tail (s11:
+        // remu + six c.addi re-retired behind a 64-cycle divu).
+        if (CVA6Cfg.SmtDrainedHandoff) begin
+          for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++)
+            if (retire_valid_i[p]) npc_bank_q[retire_hart_i[p]] <= retire_pc_i[p];
+        end else if (switch_i && npc_live_valid_i) begin
+          npc_bank_q[prev_hart_q] <= npc_live_i;
+        end
+`endif
+        // Redirects win over both authorities below: the active hart's own
+        // trap/set_pc (primary port) and an inactive hart's mispredict or
+        // peer flush restart (port 2) must still retarget the bank.
         if (redirect_valid_i)
           npc_bank_q[redirect_hart_i] <= redirect_pc_i;
         // T6b-2a: peer restart / inactive-hart mispredict. Targets a
@@ -112,6 +138,14 @@ module g6lc_smt_pc_bank
     assign restore_o = switch_i;
 `ifdef G6LC_FETCH_B
     assign npc_restore_o = npc_bank_q[active_hart_i];
+`ifndef G6LC_MUT_PCBANK_RETIRE_MIXED
+    // Whichever authority is inactive under this handoff mode still has its
+    // ports wired (constant consumers in cva6.sv); keep lint quiet.
+    logic _unused_bank_src;
+    assign _unused_bank_src = CVA6Cfg.SmtDrainedHandoff
+        ? (npc_live_valid_i | (|npc_live_i))
+        : ((|retire_valid_i) | (|retire_hart_i) | (|retire_pc_i));
+`endif
 `else
     assign npc_restore_o = (|npc_bank_q[active_hart_i]) ? npc_bank_q[active_hart_i]
                                                         : boot_addr_i;

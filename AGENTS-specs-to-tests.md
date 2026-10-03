@@ -1089,6 +1089,17 @@ synthesis reports27 generic cells, no latches or SCCs. Artifacts:
 `smt-retired-pc-{before,after,quality,fault}-20260919`. These checks supersede the old
 bank test's transport-snapshot contract for fetch_B's drained handoff.
 
+**Mixed-residency arm (2026-10-02, T13).** `tb_g6lc_restart.sv` gains `SmtDrainedHandoff=0`
+scenarios: the switch-out frontier is banked and an inactive hart's later retirements leave it
+alone; an inactive-hart redirect (port 2) replaces it; a same-cycle primary redirect wins over
+the frontier; the drained configuration keeps retirement authority. `G6LC_MUT_PCBANK_RETIRE_MIXED`
+(retire-fed bank under mixed, the pre-T13 behaviour) fails the first scenario and, at core level,
+fails `ooo_fp_ooo` stage 11 on `g6lc64_smt2_ooo_int` with `tohost=11` (double retirement of the
+`remu`/`c.addi` tail behind a 64-cycle `divu`) while the fixed tree is retirement-exact at
+18,444 cycles. Full frozen integer set + FP suite 22/22 + mixed strict boot cycle-exact; the
+fetch ownership rule (token + requester hart + window) emits zero `[fetch-own]` drops on every
+run and leaves the drained anchors byte-identical. Formal `g6lc_fetch_{restore,hold,smt}` PASS.
+
 The exact natural ELF6b2bad99... on model3b4fec56... reaches both initialized stacks
 and records325,919/5,447,462 retirements at8M cycles, but strictDualPassed remains
 false (`opensbi-architectural-pc-dual-20260919`). No supervisor payload completion.

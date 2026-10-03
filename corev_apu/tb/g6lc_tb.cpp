@@ -153,8 +153,8 @@ static const char *verilog_plusargs[] = {
     "smt_mixed_stats",
     // Duplicate-commit diagnostics probe (core/cva6.sv): per-cycle dump of the
     // commit/eret/flush/redirect chain over a fixed window. Same allowlist
-    // rule as above.
-    "smt_dup_trace",
+    // rule as above. The _lo/_hi pair overrides the probe's compiled-in window.
+    "smt_dup_trace", "smt_dup_lo", "smt_dup_hi",
     // L2/L3 tag/FSM event observer (corev_apu/tb/ariane_testharness.sv): writes
     // l2_trace.log for flop-vs-SRAM tag-path equivalence review. Same allowlist
     // rule as above: unlisted, HTIF rejects it and the observer never arms.

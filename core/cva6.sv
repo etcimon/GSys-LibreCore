@@ -1057,6 +1057,11 @@ module cva6
   logic [HART_ID_BITS-1:0] smt_outgoing_hart;
   logic [CVA6Cfg.VLEN-1:0] smt_npc_restore;
   logic                    smt_pc_restore;
+  // Declared ahead of gen_smt_restart_frontier (slang requires declaration
+  // before use); driven below with the rest of the commit-side redirects.
+  logic                    smt_arch_redirect_valid;
+  logic [HART_ID_BITS-1:0] smt_arch_redirect_hart;
+  logic [CVA6Cfg.VLEN-1:0] smt_arch_redirect_pc;
 
   logic g1fh_csr_a0;
   logic [CVA6Cfg.NrHarts-1:0] g1lq_v;
@@ -1132,6 +1137,76 @@ module cva6
     logic [7:0][7:0] decode_hart, queue_hart;
     logic [7:0][63:0] decode_pc, queue_pc;
     g6lc_fetch_pkg::restart_t selected;
+    // T13: instruction-granular next-fetch pc per hart — the restart point
+    // for an outgoing hart whose pre-dispatch stream is empty (every
+    // delivered instruction is already dispatched): next pc after its
+    // youngest dispatched instruction, a CF following the predicted
+    // target. The window-aligned fetch frontier (redirect pend / in-flight
+    // parcel / npc cursor) is not a legal restart PC: it can land inside a
+    // parcel-crossing instruction, and restoring from it decodes an
+    // illegal encoding (smt2_ooo_int m34–m36: restart pc=0x80000200 /
+    // 0x800007c0, cause=2, tohost=1337).
+    logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0] smt_tail_next_q;
+    logic [CVA6Cfg.NrHarts-1:0]                    smt_tail_valid_q;
+    logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0] smt_tail_next_d;
+    logic [CVA6Cfg.NrHarts-1:0]                    smt_tail_valid_d;
+    if (!CVA6Cfg.SmtDrainedHandoff) begin : gen_switch_tail
+      always_comb begin
+        smt_tail_next_d  = smt_tail_next_q;
+        smt_tail_valid_d = smt_tail_valid_q;
+        // The highest-index acked slot is the youngest dispatch this
+        // cycle; ports are presented in program order.
+        for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+          if (issue_entry_valid_id_issue[p] && issue_instr_issue_id[p]) begin
+            // A control-flow op is only allowed to arm the tail with its
+            // predicted target when the predictor marked the parcel taken
+            // (bp.cf != ariane_pkg::NoCF) — then predict_address is its own target.
+            // For a not-taken-predicted CF the parcel carries the NEXT
+            // downstream CF's predict (the branch-target FIFO head), a
+            // stream point unrelated to this op's successor and reachable
+            // from the shared predictor state of either hart (m33: a
+            // not-taken bnez@0x8000119c armed hart-0's tail with the parked
+            // peer's 0x8000010a; the banked restart re-executed the park
+            // self-branch). A not-taken CF's successor is pc+ilen.
+            smt_tail_next_d[issue_entry_id_issue[p].hart_id] =
+                (issue_entry_id_issue[p].fu == CTRL_FLOW &&
+                 issue_entry_id_issue[p].bp.cf != ariane_pkg::NoCF)
+                    ? issue_entry_id_issue[p].bp.predict_address
+                    : issue_entry_id_issue[p].pc + CVA6Cfg.VLEN'(
+                        issue_entry_id_issue[p].is_compressed ? 2 : 4);
+            smt_tail_valid_d[issue_entry_id_issue[p].hart_id] = 1'b1;
+          end
+        // Commit-level redirects and mispredicts re-arm the tail at their
+        // target: a hart that switches out before its first post-redirect
+        // dispatch still restarts on the right path. redirect2 is left
+        // out — a peer restart can carry a window-aligned frontier.
+        if (smt_arch_redirect_valid) begin
+          smt_tail_next_d[smt_arch_redirect_hart]  = smt_arch_redirect_pc;
+          smt_tail_valid_d[smt_arch_redirect_hart] = 1'b1;
+        end
+        if (resolved_branch.valid && resolved_branch.is_mispredict) begin
+          smt_tail_next_d[resolved_branch.hart_id]  = resolved_branch.target_address;
+          smt_tail_valid_d[resolved_branch.hart_id] = 1'b1;
+        end
+        // A full flush kills both harts' scoreboards; the commit redirect
+        // owns the restart until the next dispatch re-arms the tail.
+        if (flush_ctrl_id) smt_tail_valid_d = '0;
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          smt_tail_next_q  <= '0;
+          smt_tail_valid_q <= '0;
+        end else begin
+          smt_tail_next_q  <= smt_tail_next_d;
+          smt_tail_valid_q <= smt_tail_valid_d;
+        end
+      end
+    end else begin : gen_switch_tail_tied
+      assign smt_tail_next_q  = '0;
+      assign smt_tail_valid_q = '0;
+      assign smt_tail_next_d  = '0;
+      assign smt_tail_valid_d = '0;
+    end
     always_comb begin
       decode_valid = '0;
       queue_valid = '0;
@@ -1143,17 +1218,27 @@ module cva6
         decode_valid[p] = smt_switch && issue_entry_valid_id_issue[p];
         decode_hart[p] = 8'(issue_entry_id_issue[p].hart_id);
         decode_pc[p] = 64'(issue_entry_id_issue[p].pc);
-        queue_valid[p] = smt_switch && fetch_valid_if_id[p];
-        queue_hart[p] = 8'(fetch_entry_if_id[p].hart_id);
-        queue_pc[p] = 64'(fetch_entry_if_id[p].address);
       end
+      // The per-hart pending-FIFO head is the outgoing hart's oldest
+      // undelivered instruction; it subsumes the presented port slots
+      // (undelivered themselves) and reaches queued entries deeper than
+      // the NrIssuePorts port view.
+      queue_valid[0] = smt_switch && smt_queue_oldest_valid[smt_outgoing_hart];
+      queue_hart[0]  = 8'(smt_outgoing_hart);
+      queue_pc[0]    = 64'(smt_queue_oldest_pc[smt_outgoing_hart]);
       selected = g6lc_fetch_pkg::restart_frontier(
           CVA6Cfg.NrIssuePorts, 8'(smt_outgoing_hart),
           decode_valid, decode_hart, decode_pc, queue_valid, queue_hart, queue_pc,
-          // Mixed residency counts a killed pend/in-flight parcel as the
-          // outgoing hart's frontier; drained keeps the proven snap view.
-          '{valid: 1'b1, pc: 64'(CVA6Cfg.SmtDrainedHandoff
-                                 ? smt_npc_live : smt_fetch_frontier)},
+          // Drained keeps the proven snap view (its bank is retirement-fed
+          // anyway). Mixed banks the instruction-granular tail: the
+          // window-aligned fetch frontier is not a restart PC.
+          // T13: the selected frontier rides npc_live_i into i_smt_pc_bank
+          // and is banked at switch-out — it is the mixed-mode restart
+          // authority (inactive-hart retirements must not move the bank).
+          CVA6Cfg.SmtDrainedHandoff
+              ? '{valid: 1'b1, pc: 64'(smt_npc_live)}
+              : '{valid: smt_tail_valid_d[smt_outgoing_hart],
+                  pc: 64'(smt_tail_next_d[smt_outgoing_hart])},
           smt_switch && resolved_branch.valid && resolved_branch.is_mispredict,
           8'(resolved_branch.hart_id), 64'(resolved_branch.target_address));
     end
@@ -1171,9 +1256,6 @@ module cva6
   logic [CVA6Cfg.NrCommitPorts-1:0] smt_retire_valid;
   logic [CVA6Cfg.NrCommitPorts-1:0][HART_ID_BITS-1:0] smt_retire_hart;
   logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.VLEN-1:0] smt_retire_pc;
-  logic smt_arch_redirect_valid;
-  logic [HART_ID_BITS-1:0] smt_arch_redirect_hart;
-  logic [CVA6Cfg.VLEN-1:0] smt_arch_redirect_pc;
   // T6b-2a: mixed-residency recovery plumbing. The primary redirect port is
   // owned by the faulting/committing hart; the second port carries the peer
   // hart's flush restart or an inactive hart's mispredict. Constant-0 under
@@ -4030,6 +4112,8 @@ module cva6
       smt_dup_trace = $test$plusargs("smt_dup_trace");
       dup_lo = 901060;
       dup_hi = 901170;
+      void'($value$plusargs("smt_dup_lo=%0d", dup_lo));
+      void'($value$plusargs("smt_dup_hi=%0d", dup_hi));
     end
     always @(posedge clk_i) begin
       if (rst_ni && smt_dup_trace &&
@@ -4123,6 +4207,27 @@ module cva6
                  i_frontend.kill_s2, i_frontend.icache_valid_q,
                  i_frontend.icache_vaddr_q,
                  i_frontend.i_instr_queue.shamt);
+        // mixed-residency tail registers and the events that arm them
+        for (int p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+          if (issue_entry_valid_id_issue[p] && issue_instr_issue_id[p])
+            $display("[smt-dup] cyc=%0d tarm p=%0d eh=%0d epc=%h efu=%0d ecf=%0d epred=%h -> %h",
+                     issue_stage_i.i_scoreboard.smt_flow_cycle, p,
+                     issue_entry_id_issue[p].hart_id, issue_entry_id_issue[p].pc,
+                     issue_entry_id_issue[p].fu, issue_entry_id_issue[p].bp.cf,
+                     issue_entry_id_issue[p].bp.predict_address,
+                     (issue_entry_id_issue[p].fu == CTRL_FLOW &&
+                      issue_entry_id_issue[p].bp.cf != ariane_pkg::NoCF)
+                         ? issue_entry_id_issue[p].bp.predict_address
+                         : issue_entry_id_issue[p].pc + CVA6Cfg.VLEN'(
+                             issue_entry_id_issue[p].is_compressed ? 2 : 4));
+        $display("[smt-dup] cyc=%0d tail vq=%b%b q0=%h q1=%h | archa=%b ah=%0d apc=%h | flushb=%b",
+                 issue_stage_i.i_scoreboard.smt_flow_cycle,
+                 gen_smt_restart_frontier.smt_tail_valid_q[1],
+                 gen_smt_restart_frontier.smt_tail_valid_q[0],
+                 gen_smt_restart_frontier.smt_tail_next_q[0],
+                 gen_smt_restart_frontier.smt_tail_next_q[1],
+                 smt_arch_redirect_valid, smt_arch_redirect_hart,
+                 smt_arch_redirect_pc, flush_ctrl_id);
         // every scoreboard slot holding a copy of the suspect instruction
         for (int s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
           if (issue_stage_i.i_scoreboard.mem_q[s].sbe.pc == DupPc)

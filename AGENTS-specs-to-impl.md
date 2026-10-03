@@ -647,6 +647,19 @@ breadth remain unqualified. Directed cases, mutation controls and live-port bank
 synthesis pass; natural firmware now progresses past the former invalid resume but
 still exposes a separate shared-data visibility failure.
 
+**Mixed residency (2026-10-02, T13):** the retirement authority is exact only when the
+scoreboard is empty at the switch. Under `SmtDrainedHandoff=0` the outgoing hart keeps live
+scoreboard entries, so `g6lc_smt_pc_bank` now banks the **switch-out frontier** (`npc_live_i`
+from `gen_smt_restart_frontier`) and ignores an inactive hart's retirements; redirects still
+win. The frontier is instruction-granular (`core/cva6.sv` `gen_switch_tail`: next PC after the
+hart's youngest dispatched instruction — predicted target for a CF with `bp.cf != NoCF`, else
+`pc + ilen` — re-armed by redirects/mispredicts, cleared by a full flush) overridden by the
+oldest undelivered pre-dispatch entry (`queue_oldest_pc`, ID ports) and a same-cycle
+mispredict; a window-aligned fetch address is not a restart PC. `core/fetch_B/frontend.sv`
+response ownership is token + requester hart + requested window. Drained configurations are
+byte-identical. Evidence: `core/ooo/AGENTS-ooo-plan.md` T13 (s11 retirement-exact, mutation
+`G6LC_MUT_PCBANK_RETIRE_MIXED` detected, frozen set, FP 22/22, mixed boot cycle-exact).
+
 ## WT retained-copy freshness (2026-09-19)
 
 RVWMO load-value obligations outlive the normal write-buffer entry. A newer
