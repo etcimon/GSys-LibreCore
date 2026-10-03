@@ -68,6 +68,8 @@ fail:
   sw   a0, 0(t0)
 2: j 2b
 
+  .balign 4                  # mtvec base must be 4-aligned: an unaligned
+                             # target lands on the preceding `j .` self-loop
 trap_vec:
   csrr t0, mcause
   li   t1, 2

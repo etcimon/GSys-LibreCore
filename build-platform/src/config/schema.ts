@@ -632,6 +632,17 @@ export interface VerifyConfig {
    */
   synthSlangArgsByTarget: Record<string, string[]>;
   /**
+   * Per-target override of the yosys passes run after `read_slang` /
+   * `hierarchy -check`, replacing the default
+   * `["proc", "opt -fast", "check -assert", "stat"]`. Exists because
+   * `opt -fast`'s OPT_MERGE is asymptotic (≈11 merges/min from ~273k cells,
+   * never converging) on `g6lc64_ooo_server`, and the full `check -assert`
+   * on the un-merged netlist is OOM-killed (118 GB); the server runs
+   * `proc; opt_clean; stat; check -latchonly -assert` — the latch/SR check
+   * the smoke exists for, with the loop/driver check recorded as owed.
+   */
+  synthPassesByTarget: Record<string, string[]>;
+  /**
    * Config-package targets that must still elaborate. `AGENTS.md` §0.2 requires
    * minimal configs to keep elaborating, so the gate sweeps more than one.
    */

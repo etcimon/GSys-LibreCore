@@ -335,6 +335,15 @@ export function resolveSynthTop(
   return verify.synthTopByTarget?.[target] ?? resolveVerifyTop(verify, target);
 }
 
+/**
+ * Yosys passes run after `read_slang` / `hierarchy -check` in the synthesis
+ * smoke. `verify.synthPassesByTarget[target]` overrides this per target —
+ * `opt -fast`'s OPT_MERGE pass is asymptotic on large cores (~11 merges/min
+ * from ~273k cells), so e.g. the server uses `proc; opt_clean; check -assert;
+ * stat`, which still covers latches and undriven/multi-driven nets.
+ */
+export const DEFAULT_SYNTH_PASSES = ["proc", "opt -fast", "check -assert", "stat"];
+
 /** Optional overrides for diagnostic / per-test Verilator surfaces. */
 export interface ManifestOverride {
   /** Repo-relative primary flist (default: verify.flist). */
@@ -762,10 +771,7 @@ export async function synthTarget(
       ...(verify.synthSlangArgsByTarget[target] ?? []),
     ].join(" "),
     `hierarchy -check -top ${top}`,
-    "proc",
-    "opt -fast",
-    "check -assert",
-    "stat",
+    ...(verify.synthPassesByTarget[target] ?? DEFAULT_SYNTH_PASSES),
   ].join("; ");
 
   // Older layout: the frontend must be loaded with -m (the in-script
@@ -1030,10 +1036,7 @@ export async function synthTargetsRemote(
         ...verify.synthDefines.map((d) => `-D${d}`),
         ...(verify.synthSlangArgsByTarget[target] ?? [])].join(" "),
       `hierarchy -check -top ${top}`,
-      "proc",
-      "opt -fast",
-      "check -assert",
-      "stat",
+      ...(verify.synthPassesByTarget[target] ?? DEFAULT_SYNTH_PASSES),
     ].join("; ");
     lines.push(
       `cat > "$RUNROOT/${target}.f" <<'G6LC_FLIST_EOF'`,

@@ -3754,3 +3754,48 @@ server's core-level synthesis closure needs a different pass recipe (skip
 `g6lc64_ooo_int2_l3` synth is unchanged (43 w, 1,329 s). The Verilator
 5.008 `__Vilp` split-cfuncs workaround used for every server model is now
 a documented helper, `verif/regress/remote/patch_vilp.sh`.
+
+**T15 (2026-10-02/03) — server smoke policy, first COH_FILTERED evidence, AI trap-loops.**
+
+- *Server synthesis smoke.* `verify.synthPassesByTarget` replaces the pass
+  tail per target. On `g6lc64_ooo_server` even `proc; opt_clean; check
+  -assert` is infeasible on the 125 GB builder: the full check on the
+  un-merged 287 k-cell netlist falls back to the bit-level loop `TopoSort`
+  and is **OOM-killed at 118 GB** (17,188 s). The server smoke is therefore
+  `proc; opt_clean; stat; check -latchonly -assert` — **286,763 cells,
+  `$dlatch` 0, `$sr` 0, latch check clean, 2,934 s, 99.5 GB peak**; the
+  loop/driver check for this profile is owed on a larger host. int2_l3 is
+  unchanged (43 w clean, default passes).
+- *First `COH_FILTERED` directed evidence* (server model
+  `ooocoh-coh4-build-r1`, 4 cores × 2 harts, ≈930 cycles/s): cross-core
+  `mc_shared_line_coherence` with `PEER_HART` 2 / 4 / 6 (cores 1–3 under
+  the filter) **pass, negatives detected** (1,563 cycles each; sibling
+  `PEER_HART=1` 1,340); `mc_cbo_ewt` cross-core pass/neg (120,448 /
+  120,168); `mc_cas_lock_handoff` pass (16 AMOCAS); `mc_store_load_new_line`
+  pass/neg; `mc_hart1_store_visible`, `mc_shared_line_quiet`,
+  `mc_two_inval_backpressure`, `mc_inval_bp_stress` pass — but these four
+  have no peer knob and so exercise the SMT sibling (shared L1), not the
+  hub. Harness note: `REVIEW_MC_DIRECTED_MASK=11` means "all cores" on a
+  four-core model (mask width), use `0011`.
+- *New server defect — the fourth consumed L1-missing load never retires.*
+  `mc_l2_write_read`, `mc_l3_stride_scan` and `mc_shared_line_resident`
+  **hang** (exit 126, no exception, no tohost) at the 4th consecutive
+  L1-missing load whose result is consumed: l2wr `ld @0x8000004c` →
+  `0x801000c0` after `0x80100000/40/80` completed (cycle 14,954); l3scan
+  the same addresses at 49,769; slres `ld @0x800000ec` → `0x800a0bc0`
+  after `0x800a0000/940/280` (323,560). Reproducible 3/3 at 800 k and
+  6 M cycles; the same walk with dead loads (`mc_inval_bp_stress`, 4,096
+  misses) passes, and l2wr/l3scan pass on int2_l3. Bisection axes are the
+  int2_l3 → server deltas: `HPDCACHE_WT` (vs WT), `NrLoadBufEntries 24` /
+  `DcacheIdWidth 5`, `HwPrefetchEn` (4 streams), `NrIssuePorts 4`.
+  Tracked in `AGENTS-todo.md`; T16.
+- *AI-island trap-loops explained and fixed (test-side).*
+  `ai_illegal_when_off` and `mini_ai_dual_issue` took their *expected*
+  illegal-instruction trap, but `trap_vec:` followed a 2-byte `c.j .`
+  under `-march=rv64imafdc_zicsr`, landing on an odd halfword; `mtvec`
+  drops bit 1 (`csr_regfile.sv`: `{wdata[XLEN-1:2], 1'b0, …}`), so the
+  trap vectored into the preceding self-loop forever. `.balign 4` before
+  `trap_vec:` in both: `ai_illegal_when_off` **SUCCESS 491 cycles**,
+  `mini_ai_dual_issue` **SUCCESS 1,116 cycles** (A/B on the same model;
+  unfixed arms spin at `0x80000088` / `0x800000b8`). Not an AiCfg or core
+  defect; `ai-chain14` is 36/36 modulo this fix.

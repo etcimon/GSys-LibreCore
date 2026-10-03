@@ -80,6 +80,8 @@ fail_notrap:                    # illegal encoding did not trap: exit code 2 (to
   sw   a0, 0(t0)
 3: j 3b
 
+  .balign 4                  # mtvec base must be 4-aligned: an unaligned
+                             # target lands on the preceding `j .` self-loop
 trap_vec:
   csrr t0, mcause
   li   t1, 2

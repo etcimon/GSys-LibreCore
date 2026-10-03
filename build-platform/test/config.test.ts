@@ -7,7 +7,7 @@ import { expect, test } from "bun:test";
 
 import { loadConfig } from "../src/config/load.ts";
 import { deepMerge } from "../src/util/object.ts";
-import { resolveSynthTop } from "../src/tooling/eda.ts";
+import { DEFAULT_SYNTH_PASSES, resolveSynthTop } from "../src/tooling/eda.ts";
 
 test("config resolves and validates", async () => {
   const { config, repoRoot } = await loadConfig();
@@ -100,4 +100,26 @@ test("synth defaults override the server top and widen its unroll limit", async 
   expect(config.verify.synthSlangArgsByTarget.g6lc64_ooo_server).toContain(
     "--unroll-limit=262144",
   );
+});
+
+test("synth pass recipe: unmapped targets keep the default, the server drops opt -fast", async () => {
+  const { config } = await loadConfig();
+  // The default smoke is unchanged: proc → opt -fast → check -assert → stat.
+  expect(DEFAULT_SYNTH_PASSES).toEqual([
+    "proc",
+    "opt -fast",
+    "check -assert",
+    "stat",
+  ]);
+  expect(
+    config.verify.synthPassesByTarget.g6lc64_ooo_int2_l3 ?? DEFAULT_SYNTH_PASSES,
+  ).toBe(DEFAULT_SYNTH_PASSES);
+  // The server skips the asymptotic OPT_MERGE pass and the OOM-bound full
+  // check; stat is reported first and the latch/SR check still asserts.
+  expect(config.verify.synthPassesByTarget.g6lc64_ooo_server).toEqual([
+    "proc",
+    "opt_clean",
+    "stat",
+    "check -latchonly -assert",
+  ]);
 });

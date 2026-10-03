@@ -447,10 +447,14 @@ bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth]
   when set (synth may use a smaller unit than lint's `topByTarget`: the four-core
   `g6lc64_ooo_server` cluster synthesizes as the core-only `cva6`), and
   `verify.synthSlangArgsByTarget[target]` appends `read_slang` arguments (the server
-  needs `--unroll-limit=262144`). Known limit: on the server even the core-only top
-  is yosys-bound inside `opt -fast` `OPT_MERGE` (≈11 merges/min from ~273k cells, cut
-  at a 6 h cap) — per-block synthesis via `verif/regress/remote/run_cluster_synth_review.py`
-  is the practical evidence path there.
+  needs `--unroll-limit=262144`). `verify.synthPassesByTarget[target]` overrides the
+  pass tail after `hierarchy -check` — the server runs `proc; opt_clean; stat;
+  check -latchonly -assert` because `opt -fast`'s `OPT_MERGE` is asymptotic on it
+  (≈11 merges/min from ~273k cells, cut at a 6 h cap) and the full `check -assert`
+  on the un-merged 287k-cell netlist is OOM-killed at 118 GB (bit-level loop
+  TopoSort). Measured: 286,763 cells, `$dlatch`/`$sr` 0, 2,934 s, 99.5 GB peak. The
+  loop/driver check for the server is owed on a larger host; per-block synthesis via
+  `verif/regress/remote/run_cluster_synth_review.py` remains the uncore evidence path.
 - `--target <cfg>` narrows lint/synth to one config package.
 - `--tools` lists the OSS CAD Suite tools and exits `0`/`3` based on presence.
 - `--sim --qualification <profile>` switches the sim stage to **strict
