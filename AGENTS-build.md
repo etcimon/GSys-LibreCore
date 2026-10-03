@@ -253,6 +253,13 @@ Design rules the workflow follows:
 - **`G6LC_NO_TOOL_PROMPT=1`** so `test` never waits on the "install missing tools?" prompt.
 - Heavy upstream regressions (`openhw-cva6-ci-tier1/2.yml`) are `workflow_dispatch` only; docs are
   built and published by `deploy-docs.yml`.
+- **GitLab mirror** (`https://gitlab.com/etcimon/GSys-LibreCore`): the repo-root `.gitlab-ci.yml`
+  is the same six lanes for gitlab.com shared runners (2 vCPU; GitLab `cache:` for the Verilator
+  prefix, `sv-timing/.tools` + `target`, and the Rust `target/` dirs; `GIT_SUBMODULE_PATHS` per lane;
+  pipelines on the default branch, MRs, web and schedules, `interruptible`). The upstream
+  OpenHW/Thales pipeline — a private `$CI_PROJECT_NAMESPACE/setup-ci` include and VCS/Questa/Vivado
+  runners, which on gitlab.com failed at configuration with zero jobs — is kept verbatim at
+  `.gitlab-ci/openhw-thales-pipeline.yml` for a mirror that has that infrastructure.
 
 ## Relationship to the rest of AGENTS governance
 
