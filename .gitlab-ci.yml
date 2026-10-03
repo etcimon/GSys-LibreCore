@@ -197,7 +197,7 @@ sv-timing:
     - ./build.sh test sv-timing-smoke
     # Known-red package hygiene (rustfmt drift, KD0 symbol strings in test
     # fixtures). Reported, not blocking, until fixed.
-    - (cd sv-timing && python3 tools/svt.py check) || echo "svt check: informational failure (see log)"
+    - (cd sv-timing && python3 tools/svt.py check) || echo "svt check -- informational failure, see log above"
 
 # ---------------------------------------------------------------------------
 bios:
@@ -209,7 +209,7 @@ bios:
     policy: pull-push
   script:
     # kernel-spec submodules + botan RFC 8448 vectors (g6b-tls build.rs).
-    - (cd g6lc_bios && python3 tools/g6b.py spec-sync)
+    - cd g6lc_bios && python3 tools/g6b.py spec-sync && cd ..
     # Provisions the forked wasm-opt (g6b-kernel asyncify tests), then
     # independence, native/journal tests, fmt, clippy, cargo test, bios-regress.
     # The browser-ui bun lane needs the libwasm/svelte-d submodules and LDC;
@@ -241,4 +241,4 @@ ai-tensor:
     - ./build.sh tensor doctor
     # cargo tests + golden-check + queue-soak via monorepo-soak/run-ai-tensor.sh
     - ./build.sh tensor test
-    - (cd ai-tensor && PYTHONPATH=python python3 -m pytest -q -p no:cacheprovider python/tests)
+    - cd ai-tensor && PYTHONPATH=python python3 -m pytest -q -p no:cacheprovider python/tests
