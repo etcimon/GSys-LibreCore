@@ -618,6 +618,20 @@ export interface VerifyConfig {
    */
   topByTarget: Record<string, string>;
   /**
+   * Per-target synthesis top override. Lint keeps `topByTarget`; the synthesis
+   * stage may prefer a smaller unit. The four-core server cluster is not a
+   * practical yosys top (`opt -fast` converges at ≈16 cells/min from ~292k
+   * cells), so it synthesizes as a core-only unit; the uncore/cluster tops are
+   * covered by `verif/regress/remote/run_cluster_synth_review.py`.
+   */
+  synthTopByTarget: Record<string, string>;
+  /**
+   * Extra `read_slang` arguments appended to the synthesis invocation per
+   * target (e.g. the server's `g6lc_iq` unroll exceeds slang's default 4000
+   * tally and needs `--unroll-limit`). Lint is untouched.
+   */
+  synthSlangArgsByTarget: Record<string, string[]>;
+  /**
    * Config-package targets that must still elaborate. `AGENTS.md` §0.2 requires
    * minimal configs to keep elaborating, so the gate sweeps more than one.
    */

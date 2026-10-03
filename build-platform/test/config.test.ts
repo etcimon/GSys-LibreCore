@@ -7,6 +7,7 @@ import { expect, test } from "bun:test";
 
 import { loadConfig } from "../src/config/load.ts";
 import { deepMerge } from "../src/util/object.ts";
+import { resolveSynthTop } from "../src/tooling/eda.ts";
 
 test("config resolves and validates", async () => {
   const { config, repoRoot } = await loadConfig();
@@ -78,4 +79,25 @@ test("soc envelope matches AGENTS-configuration router class", async () => {
   expect(config.soc.targetFrequencyMHz).toBe(1250);
   expect(config.soc.targetVoltageV).toBe(0.8);
   expect(config.soc.process).toContain("12");
+});
+
+test("resolveSynthTop prefers synthTopByTarget, then topByTarget, then top", () => {
+  const verify = {
+    top: "cva6",
+    topByTarget: { lint_only: "g6lc_cluster_lint_top" },
+    synthTopByTarget: { synth_override: "cva6" },
+  };
+  expect(resolveSynthTop(verify, "synth_override")).toBe("cva6");
+  expect(resolveSynthTop(verify, "lint_only")).toBe("g6lc_cluster_lint_top");
+  expect(resolveSynthTop(verify, "unmapped")).toBe("cva6");
+});
+
+test("synth defaults override the server top and widen its unroll limit", async () => {
+  const { config } = await loadConfig();
+  expect(config.verify.synthTopByTarget.g6lc64_ooo_server).toBe("cva6");
+  // Lint keeps the cluster top; only synth reroutes to the core-only unit.
+  expect(config.verify.topByTarget.g6lc64_ooo_server).toBe("g6lc_cluster_lint_top");
+  expect(config.verify.synthSlangArgsByTarget.g6lc64_ooo_server).toContain(
+    "--unroll-limit=262144",
+  );
 });

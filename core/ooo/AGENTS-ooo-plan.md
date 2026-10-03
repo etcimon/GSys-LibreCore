@@ -3739,3 +3739,18 @@ ports (NrIssuePorts-way mux) and the bank's switch-out write replaces a
 retirement write of the same width; the ownership rule adds a hart compare
 and a window compare to `kill_drop` (both registered operands). No screen
 changed; the frontier/bank path is not on a screened cone.
+
+**T14 (2026-10-02) — server synthesis tooling, honest result.** `verify
+--synth` gained per-target synth tops and `read_slang` arguments
+(`synthTopByTarget`, `synthSlangArgsByTarget`; `g6lc64_ooo_server` →
+core-only `cva6`, `--unroll-limit=262144`). With them the server elaborates,
+`hierarchy -check` and `proc` are clean, and `opt -fast` converges… at
+≈11 merges/min inside `4.2 OPT_MERGE` from 273,783 cells — cut at the 6 h
+cap before `check -assert`/`stat`, exactly as the 292 k-cell cluster top
+was. The dedup wall is in the per-core structure of this profile (64
+scoreboard entries × 4 issue ports), not in cluster replication, so the
+server's core-level synthesis closure needs a different pass recipe (skip
+`opt_merge` for this target, or a per-block budget), not a smaller top.
+`g6lc64_ooo_int2_l3` synth is unchanged (43 w, 1,329 s). The Verilator
+5.008 `__Vilp` split-cfuncs workaround used for every server model is now
+a documented helper, `verif/regress/remote/patch_vilp.sh`.

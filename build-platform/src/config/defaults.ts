@@ -1540,6 +1540,19 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       g6lc64_server_math_l3: "g6lc_cluster_lint_top",
       g6lc64_stream8_l3: "g6lc_cluster_lint_top",
     },
+    // Synthesis still elaborates the cluster wiring via lint above, but the
+    // four-core server cluster is not a practical yosys unit (`opt -fast`
+    // ≈16 cells/min from ~292k cells), so its synth smoke runs the core-only
+    // top. The uncore/cluster tops are covered by
+    // verif/regress/remote/run_cluster_synth_review.py.
+    synthTopByTarget: {
+      g6lc64_ooo_server: "cva6",
+    },
+    // The server's g6lc_iq (NR_SB_ENTRIES=64 × issue-depth predicate loops)
+    // exhausts slang's default 4000-op unroll tally during read_slang.
+    synthSlangArgsByTarget: {
+      g6lc64_ooo_server: ["--unroll-limit=262144"],
+    },
     // Default gate: full-feature 64-bit + minimal 32-bit. Production-heavy
     // packages (g6lc64_ooo / ooo_server, server_math, smt2, spec_deep) are
     // opt-in so every PR stays fast:

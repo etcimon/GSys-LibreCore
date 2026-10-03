@@ -319,6 +319,22 @@ export function resolveVerifyTop(
   return verify.topByTarget?.[target] ?? verify.top;
 }
 
+/**
+ * Resolve the synthesis top: a per-target `synthTopByTarget` override when one
+ * exists (e.g. the server cluster synthesizes as the core-only `cva6` unit
+ * while lint keeps `g6lc_cluster_lint_top`), else the lint resolution.
+ */
+export function resolveSynthTop(
+  verify: {
+    top: string;
+    topByTarget?: Record<string, string>;
+    synthTopByTarget?: Record<string, string>;
+  },
+  target: string,
+): string {
+  return verify.synthTopByTarget?.[target] ?? resolveVerifyTop(verify, target);
+}
+
 /** Optional overrides for diagnostic / per-test Verilator surfaces. */
 export interface ManifestOverride {
   /** Repo-relative primary flist (default: verify.flist). */
@@ -732,7 +748,7 @@ export async function synthTarget(
   }
 
   const { verify } = ctx.config;
-  const top = resolveVerifyTop(verify, target);
+  const top = resolveSynthTop(verify, target);
   const manifest = writeFlatManifest(ctx, paths, target);
   const script = [
     // Unquoted on purpose: the slang frontend does not strip quotes from a
@@ -743,6 +759,7 @@ export async function synthTarget(
       `--top ${top}`,
       "--single-unit",
       ...verify.synthDefines.map((d) => `-D${d}`),
+      ...(verify.synthSlangArgsByTarget[target] ?? []),
     ].join(" "),
     `hierarchy -check -top ${top}`,
     "proc",
@@ -1003,14 +1020,15 @@ export async function synthTargetsRemote(
     } catch {
       return fail(`could not read the generated manifest for ${target}`);
     }
-    const top = resolveVerifyTop(verify, target);
+    const top = resolveSynthTop(verify, target);
     const script = [
       // Unquoted on purpose, as in the local route: the slang frontend does not
       // strip quotes from a command-file argument, and this string is passed to
       // yosys -p, so any quote here would reach slang literally. $RUNROOT is
       // expanded by the shell before yosys starts and holds no spaces.
       [`read_slang -f $RUNROOT/${target}.f`, `--top ${top}`, "--single-unit",
-        ...verify.synthDefines.map((d) => `-D${d}`)].join(" "),
+        ...verify.synthDefines.map((d) => `-D${d}`),
+        ...(verify.synthSlangArgsByTarget[target] ?? [])].join(" "),
       `hierarchy -check -top ${top}`,
       "proc",
       "opt -fast",

@@ -443,7 +443,14 @@ bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth]
 - `--formal` runs the SymbiYosys tasks listed in `verify.formalTasks`.
 - `--sim` runs the regression suites in `verify.simSuites`.
 - `--synth` runs a Yosys + yosys-slang synthesis smoke to catch inferred latches
-  and non-synthesizable constructs early.
+  and non-synthesizable constructs early. The top is `verify.synthTopByTarget[target]`
+  when set (synth may use a smaller unit than lint's `topByTarget`: the four-core
+  `g6lc64_ooo_server` cluster synthesizes as the core-only `cva6`), and
+  `verify.synthSlangArgsByTarget[target]` appends `read_slang` arguments (the server
+  needs `--unroll-limit=262144`). Known limit: on the server even the core-only top
+  is yosys-bound inside `opt -fast` `OPT_MERGE` (≈11 merges/min from ~273k cells, cut
+  at a 6 h cap) — per-block synthesis via `verif/regress/remote/run_cluster_synth_review.py`
+  is the practical evidence path there.
 - `--target <cfg>` narrows lint/synth to one config package.
 - `--tools` lists the OSS CAD Suite tools and exits `0`/`3` based on presence.
 - `--sim --qualification <profile>` switches the sim stage to **strict
