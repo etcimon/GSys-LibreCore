@@ -202,11 +202,34 @@ sv-timing:
 # ---------------------------------------------------------------------------
 bios:
   extends: .rust-lane
+  # Not the rust:*-bookworm image: g6b check installs the forked wasm-opt
+  # (etcimon/svelte-d release, built on Ubuntu 24.04, needs GLIBC_2.38) for the
+  # g6b-kernel asyncify tests, and Debian bookworm's glibc 2.36 cannot load it.
+  # Ubuntu 24.04 + rustup is the same host profile as the GitHub lane.
+  image: ubuntu:24.04
+  variables:
+    GIT_DEPTH: "0"
+    RUSTUP_HOME: $CI_PROJECT_DIR/.rustup
+    CARGO_HOME: $CI_PROJECT_DIR/.cargo
   cache:
-    key: bios-target-$CI_COMMIT_REF_SLUG
-    paths:
-      - g6lc_bios/target
-    policy: pull-push
+    - key: bios-rust-1.85
+      paths:
+        - .rustup
+        - .cargo/bin
+    - key: bios-target-$CI_COMMIT_REF_SLUG
+      paths:
+        - g6lc_bios/target
+      policy: pull-push
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq --no-install-recommends ca-certificates curl git git-restore-mtime unzip python3 python3-venv python3-pip build-essential pkg-config > /dev/null
+    - git restore-mtime
+    - *bun-bootstrap
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - command -v rustup >/dev/null 2>&1 || curl -fsSL https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none --profile minimal >/dev/null
+    - rustup toolchain install 1.85.0 --profile minimal --component rustfmt,clippy --no-self-update
+    - rustup default 1.85.0
+    - rustc --version && cargo --version
   script:
     # kernel-spec submodules + botan RFC 8448 vectors (g6b-tls build.rs).
     - cd g6lc_bios && python3 tools/g6b.py spec-sync && cd ..

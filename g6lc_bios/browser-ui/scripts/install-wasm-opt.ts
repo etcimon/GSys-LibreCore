@@ -48,8 +48,19 @@ const dest = join(home, "bin", exe);
  * tiny module by hand keeps the check independent of the browser-ui build, so
  * this cannot pass because some other artifact happens to exist.
  */
+/**
+ * Why the last `asyncifiesTryTable` probe failed, when it failed before
+ * producing a verdict: a binary that cannot start (missing GLIBC_2.38 on a
+ * Debian bookworm host, wrong arch) must not be reported as "not the fork".
+ */
+let lastProbeFailure = "";
+
 function asyncifiesTryTable(bin: string): boolean {
-  if (!existsSync(bin)) return false;
+  lastProbeFailure = "";
+  if (!existsSync(bin)) {
+    lastProbeFailure = `${bin} does not exist`;
+    return false;
+  }
   const tmp = mkdtempSync(join(tmpdir(), "g6b-wasmopt-"));
   try {
     const wat = join(tmp, "t.wat");
@@ -74,8 +85,22 @@ function asyncifiesTryTable(bin: string): boolean {
        "--pass-arg=asyncify-imports@env.libwasm_await__void", wat, "-o", out],
       { encoding: "utf8", shell: false, maxBuffer: 16 * 1024 * 1024 },
     );
-    return r.status === 0 && existsSync(out) && statSync(out).size > 8;
-  } catch {
+    if (r.error) {
+      lastProbeFailure = `wasm-opt could not be executed: ${String(r.error)}`;
+      return false;
+    }
+    if (r.status !== 0) {
+      const err = (r.stderr || "").trim().split(/\r?\n/).slice(0, 3).join(" | ");
+      lastProbeFailure = `wasm-opt exited ${r.status}${r.signal ? ` (${r.signal})` : ""}${err ? `: ${err}` : ""}`;
+      return false;
+    }
+    if (!existsSync(out) || statSync(out).size <= 8) {
+      lastProbeFailure = "wasm-opt produced no asyncified module";
+      return false;
+    }
+    return true;
+  } catch (e) {
+    lastProbeFailure = String(e);
     return false;
   } finally {
     rmSync(tmp, { recursive: true, force: true });
@@ -315,8 +340,14 @@ if (version && version < MIN_WASM_OPT_VERSION) {
 }
 if (!asyncifiesTryTable(installed)) {
   rmSync(installed, { force: true });
+  // A loader failure (e.g. "version `GLIBC_2.38' not found": the release is
+  // built on Ubuntu 24.04) is a host problem, not a wrong binary; say which.
+  const why = lastProbeFailure;
+  const hostProblem = /GLIBC|GLIBCXX|cannot execute|No such file|ENOENT|Exec format/i.test(why);
   throw new Error(
-    `installed wasm-opt cannot asyncify try_table, so it is not the svelte-d fork; refusing it`,
+    hostProblem
+      ? `installed wasm-opt cannot run on this host (${why}); the fork release is built on Ubuntu 24.04 (glibc >= 2.38) -- use such a host or build from source (--from-source)`
+      : `installed wasm-opt cannot asyncify try_table, so it is not the svelte-d fork; refusing it (${why})`,
   );
 }
 console.log("wasm-opt: installed");
