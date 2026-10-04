@@ -109,6 +109,7 @@ R   corev_apu/include/g6lc_*.svh
 R   corev_apu/ai_island/**
 # API-neutral graphics/APU substrate (P1+): transport, DMA and execution RTL.
 R   corev_apu/apu/**
+T   corev_apu/apu/tools/**
 
 # --- DE MINIMIS EXCLUSIONS (deliberately tier U, do not "fix") ----------------
 # These carry an Etienne Cimon modification but the delta is too small to support
@@ -162,6 +163,10 @@ U   g6lc_qemu/linux-dist/openwrt-luci/**
 U   g6lc_qemu/linux-dist/openwrt-routing/**
 U   g6lc_qemu/linux-dist/openwrt-telephony/**
 U   g6lc_qemu/linux-dist/edk2/**
+U   g6lc_qemu/linux-dist/ubuntu/kernel/**
+U   g6lc_qemu/linux-dist/ubuntu/kernel-noble/**
+U   specs/UnrealEngine/**
+U   specs/venus-protocol/**
 T   corev-mb/lib/**
 T   docs/**
 T   architecture/**

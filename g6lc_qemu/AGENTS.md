@@ -519,3 +519,14 @@ Every change must still pass `tools/check_independence.py`:
 - `fixtures/` are sufficient for `cargo test --workspace` and `python tools/g6q.py check`.
 
 If a feature cannot meet these invariants, it belongs outside the package (host adapter, remote builder, etc.) and must be called through the documented boundary: `tools/g6q.py`, `tools/ai_tensor_bridge.py`, `tools/g6q_remote.py`.
+
+## Optional Ubuntu kernel reference checkouts
+
+`linux-dist/ubuntu/{kernel,kernel-noble}` are pinned upstream-only sparse
+submodules, not generator inputs or build dependencies. See that directory's
+README and pins for identities and the separate stock/custom-development lanes.
+On Windows, use WSL Git and the README's narrow non-cone patterns before initial
+materialization: native checkout can reject reserved names, and selecting all
+`include/uapi/linux` creates case-collision artifacts. Do not disable Git path
+protections or force-reset pre-existing user changes. Ordinary submodule update
+skips these references; expansion and initialization are explicit actions.

@@ -11,4 +11,25 @@ ports    = "http://ports.ubuntu.com/ubuntu-ports"
 status   = "scaffolded"
 isa      = "../isa/g6lc64_smt2-march.txt"
 kernel   = "../isa/kernel-6.6.config"
-notes    = "Share RTL ISA with OpenWrt. Fork livecd-rootfs / ubuntu-image to etcimon when the image builder is stood up."
+notes    = "Historical custom-image/6.6 ISA-overlay development lane; not stock Ubuntu acceptance. See source references and stock_runtime below."
+
+[stock_runtime]
+status = "unverified"
+test_order = ["26.04.1", "24.04"]
+arch_order = ["amd64", "riscv64"]
+packages = "official-distribution-only"
+custom_runtime = false
+
+[kernel_resolute]
+path = "kernel"
+url = "https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/resolute"
+tag = "Ubuntu-7.0.0-27.27"
+commit = "01543ba213ac86680193399096806a6e265e1cdf"
+purpose = "source-reference-not-installed-runtime"
+
+[kernel_noble]
+path = "kernel-noble"
+url = "https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/noble"
+tag = "Ubuntu-6.8.0-90.91"
+commit = "28e5daf6ca5bdc7104d1d5877c7113e578c94e9e"
+purpose = "source-reference-not-installed-runtime"

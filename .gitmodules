@@ -133,3 +133,23 @@
 	path = g6lc_bios/pglite
 	url = https://github.com/etcimon/pglite.git
 	branch = main
+[submodule "specs/UnrealEngine"]
+	path = specs/UnrealEngine
+	url = https://github.com/EpicGames/UnrealEngine
+	update = none
+	shallow = true
+[submodule "g6lc_qemu/linux-dist/ubuntu/kernel"]
+	path = g6lc_qemu/linux-dist/ubuntu/kernel
+	url = https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/resolute
+	update = none
+	shallow = true
+[submodule "g6lc_qemu/linux-dist/ubuntu/kernel-noble"]
+	path = g6lc_qemu/linux-dist/ubuntu/kernel-noble
+	url = https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/noble
+	update = none
+	shallow = true
+[submodule "specs/venus-protocol"]
+	path = specs/venus-protocol
+	url = https://gitlab.freedesktop.org/virgl/venus-protocol.git
+	update = none
+	shallow = true

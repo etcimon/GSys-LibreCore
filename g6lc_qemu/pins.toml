@@ -122,6 +122,8 @@ arch     = "riscv64"
 status   = "scaffolded"
 path     = "g6lc_qemu/linux-dist/ubuntu"
 isa      = "g6lc_qemu/linux-dist/isa"
+reference_manifest = "g6lc_qemu/linux-dist/ubuntu/pins.toml"
+lane     = "custom-image-development-not-stock-acceptance"
 
 # ----------------------------------------------------------------- riscv toolchain ---
 [riscv_toolchain]

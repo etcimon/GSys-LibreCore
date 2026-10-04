@@ -1,0 +1,9 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+//
+// Lint waivers for the APU Venus decoder / object-table testbenches.
+// File-scoped: each entry records a PRE-EXISTING condition in a vendor
+// (tier-U, do not edit) source.
+
+`verilator_config
+lint_off -rule GENUNNAMED -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv"

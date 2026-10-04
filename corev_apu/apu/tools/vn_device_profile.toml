@@ -1,0 +1,111 @@
+# LibreCore APU Venus device profile — under construction, not advertised.
+# Values here seed APU_VN_PROFILE words consumed by reply programs (RCONST).
+# Nothing in this file is asserted to a stock client until the lane qualifies.
+
+[device]
+apiVersion = "1.1.0"
+driverVersion = 0
+vendorID = 0
+deviceID = 0
+deviceType = "OTHER"          # VK_PHYSICAL_DEVICE_TYPE_OTHER
+deviceName = "LibreCore APU (unqualified)"
+
+[features]
+# VkPhysicalDeviceFeatures members set true; everything else stays 0.
+fragmentStoresAndAtomics = true
+robustBufferAccess = true
+shaderStorageImageWriteWithoutFormat = false
+
+[limits]
+# VkPhysicalDeviceLimits members set non-zero; everything else stays 0.
+maxBoundDescriptorSets = 4
+maxImageDimension2D = 4096
+maxPushConstantsSize = 128
+maxComputeWorkGroupSize = [64, 64, 64]
+maxComputeWorkGroupInvocations = 64
+maxComputeSharedMemorySize = 16384
+minUniformBufferOffsetAlignment = 256
+minStorageBufferOffsetAlignment = 256
+nonCoherentAtomSize = 64
+maxViewports = 1
+maxColorAttachments = 4
+maxFramebufferWidth = 4096
+maxFramebufferHeight = 4096
+maxVertexInputAttributes = 16
+maxVertexInputBindings = 16
+
+[memory]
+# VkPhysicalDeviceMemoryProperties: heap 0 DEVICE_LOCAL, two types on heap 0.
+heap0_size = 0x10000000
+type0_flags = "DEVICE_LOCAL"
+type1_flags = "HOST_VISIBLE|HOST_COHERENT"
+
+[queue_family0]
+queueFlags = "GRAPHICS|COMPUTE|TRANSFER"
+queueCount = 1
+timestampValidBits = 64
+minImageTransferGranularity = [1, 1, 1]
+
+[formats]
+# name = optimalTiling feature names (linear/buffer mirror unless overridden).
+# Color formats get SAMPLED|COLOR_ATTACHMENT|BLIT_SRC|BLIT_DST|TRANSFER_SRC|TRANSFER_DST;
+# depth formats get SAMPLED|DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC|TRANSFER_DST.
+color = ["R8G8B8A8_UNORM", "B8G8R8A8_UNORM", "R16G16B16A16_SFLOAT", "R32_SFLOAT", "R32G32B32A32_SFLOAT"]
+depth = ["D32_SFLOAT", "D24_UNORM_S8_UINT"]
+
+[flag_masks]
+# FLAGS decode rejects any bit outside these masks (per field type).
+VkBufferUsageFlags = "TRANSFER_SRC|TRANSFER_DST|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER|UNIFORM_BUFFER|STORAGE_BUFFER|INDEX_BUFFER|VERTEX_BUFFER|INDIRECT_BUFFER"
+VkImageUsageFlags = "TRANSFER_SRC|TRANSFER_DST|SAMPLED|STORAGE|COLOR_ATTACHMENT|DEPTH_STENCIL_ATTACHMENT"
+
+[bounds]
+# ARRAY op faults above these counts. Keyed by the array's element struct name;
+# 'default' covers everything else. Blob bounds are in bytes keyed by field.
+VkSubmitInfo = 4            # submits <= 4
+VkCommandBuffer = 16        # command buffers per submit <= 16
+VkWriteDescriptorSet = 64   # descriptor writes <= 64 per call
+VkDescriptorSetLayoutBinding = 64
+VkAttachmentDescription = 8
+VkAttachmentDescription2 = 8
+VkAttachmentReference = 8
+VkAttachmentReference2 = 8
+VkSubpassDescription = 8
+VkSubpassDescription2 = 8
+VkClearAttachment = 8
+VkVertexInputBindingDescription = 16
+VkVertexInputAttributeDescription = 16
+VkMappedMemoryRange = 16    # memory ranges <= 16
+VkFence = 16                # fences <= 16
+VkDescriptorImageInfo = 64
+VkDescriptorBufferInfo = 64
+VkBufferView = 64
+VkDescriptorPoolSize = 64
+VkBufferCopy = 1024
+VkImageCopy = 256
+VkBufferImageCopy = 256
+VkImageBlit = 256
+VkImageResolve = 256
+VkClearRect = 256
+VkViewport = 16
+VkRect2D = 16
+VkSpecializationMapEntry = 1024
+VkGraphicsPipelineCreateInfo = 8
+VkComputePipelineCreateInfo = 8
+VkPipelineShaderStageCreateInfo = 8
+VkSubpassDependency = 64
+VkSubpassDependency2 = 64
+VkDescriptorSetLayout = 64
+VkDescriptorSet = 64
+VkBuffer = 16               # vkCmdBindVertexBuffers pBuffers
+VkDeviceSize = 16           # pOffsets pairs with pBuffers
+VkDescriptorPoolSizeGroup = 64
+uint32_t = 64               # generic u32 arrays (queue indices, offsets)
+default = 256
+
+[blob_bounds]
+# BLOB op byte-count ceilings keyed by member name; 'default' otherwise.
+pCode = 262144              # 65536 words of SPIR-V
+pData = 1048576             # vkCmdUpdateBuffer / query results staging
+pValues = 128               # vkCmdPushConstants <= maxPushConstantsSize
+pInitialData = 1048576      # pipeline cache data
+default = 1048576
