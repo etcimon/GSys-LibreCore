@@ -4246,6 +4246,217 @@ module cva6
     end
   end
 `endif
+
+  // T16 diagnostic probe (+ld_trace): where does the 4th consumed L1-missing
+  // load stall on the HPDCACHE server profile? Event lines (load-port
+  // handshakes, HPDCACHE miss/refill traffic) print whenever armed; the full
+  // per-cycle state dump is confined to [+ld_lo, +ld_hi] (default
+  // 14,800-15,100, the mc_l2_write_read hang window). Read-only, sim-only.
+  bit ld_trace;
+  int unsigned ld_lo, ld_hi, ld_cycle;
+  initial begin
+    ld_trace = $test$plusargs("ld_trace");
+    ld_lo = 14800;
+    ld_hi = 15100;
+    void'($value$plusargs("ld_lo=%0d", ld_lo));
+    void'($value$plusargs("ld_hi=%0d", ld_hi));
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) begin
+      ld_cycle = 0;
+    end else if (ld_trace) begin
+      ld_cycle = ld_cycle + 1;
+      // --- load-unit <-> D$ load port (index 1) events, always on when armed
+      if (dcache_req_ports_ex_cache[1].data_req && dcache_req_ports_cache_ex[1].data_gnt)
+        $display("[ld-trace] c=%0d h=%0d LU-REQ id=%0d idx=%h tid=%0d st=%0d ldbuf_v=%b",
+                 ld_cycle, hart_id_i[7:0], dcache_req_ports_ex_cache[1].data_id,
+                 dcache_req_ports_ex_cache[1].address_index,
+                 ex_stage_i.lsu_i.i_load_unit.load_trans_id_o,
+                 ex_stage_i.lsu_i.i_load_unit.state_q,
+                 ex_stage_i.lsu_i.i_load_unit.ldbuf_valid_q);
+      if (dcache_req_ports_ex_cache[1].tag_valid)
+        $display("[ld-trace] c=%0d h=%0d LU-TAG tag=%h kill=%b last_id=%0d",
+                 ld_cycle, hart_id_i[7:0], dcache_req_ports_ex_cache[1].address_tag,
+                 dcache_req_ports_ex_cache[1].kill_req,
+                 ex_stage_i.lsu_i.i_load_unit.ldbuf_last_id_q);
+      if (dcache_req_ports_cache_ex[1].data_rvalid)
+        $display("[ld-trace] c=%0d h=%0d LU-RSP rid=%0d rdata=%h ldbuf_v=%b ldbuf_tid=%0d",
+                 ld_cycle, hart_id_i[7:0], dcache_req_ports_cache_ex[1].data_rid,
+                 dcache_req_ports_cache_ex[1].data_rdata,
+                 ex_stage_i.lsu_i.i_load_unit.ldbuf_valid_q,
+                 ex_stage_i.lsu_i.i_load_unit.ldbuf_q[dcache_req_ports_cache_ex[1].data_rid].trans_id);
+      if (ex_stage_i.lsu_i.i_load_unit.valid_o)
+        $display("[ld-trace] c=%0d h=%0d LU-WB tid=%0d ex=%b", ld_cycle, hart_id_i[7:0],
+                 ex_stage_i.lsu_i.i_load_unit.trans_id_o,
+                 ex_stage_i.lsu_i.i_load_unit.ex_o.valid);
+      // --- per-cycle state inside the window
+      if (ld_cycle >= ld_lo && ld_cycle <= ld_hi) begin
+        $display("[ld-trace] c=%0d h=%0d LU st=%0d vin=%b pop=%b tid=%0d paddr_v=%b paddr=%h req=%b gnt=%b tagv=%b kill=%b rvalid=%b rid=%0d ldbuf_v=%b last=%0d flush=%b",
+                 ld_cycle, hart_id_i[7:0], ex_stage_i.lsu_i.i_load_unit.state_q,
+                 ex_stage_i.lsu_i.i_load_unit.valid_i, ex_stage_i.lsu_i.i_load_unit.pop_ld_o,
+                 ex_stage_i.lsu_i.i_load_unit.load_trans_id_o,
+                 ex_stage_i.lsu_i.i_load_unit.load_paddr_valid_o,
+                 ex_stage_i.lsu_i.i_load_unit.load_paddr_o,
+                 dcache_req_ports_ex_cache[1].data_req, dcache_req_ports_cache_ex[1].data_gnt,
+                 dcache_req_ports_ex_cache[1].tag_valid, dcache_req_ports_ex_cache[1].kill_req,
+                 dcache_req_ports_cache_ex[1].data_rvalid, dcache_req_ports_cache_ex[1].data_rid,
+                 ex_stage_i.lsu_i.i_load_unit.ldbuf_valid_q,
+                 ex_stage_i.lsu_i.i_load_unit.ldbuf_last_id_q, flush_ctrl_ex);
+        for (int i = 0; i < CVA6Cfg.NrLoadBufEntries; i++)
+          if (ex_stage_i.lsu_i.i_load_unit.ldbuf_valid_q[i])
+            $display("[ld-trace] c=%0d h=%0d LDBUF[%0d] tid=%0d off=%h op=%0d flushed=%b", ld_cycle,
+                     hart_id_i[7:0], i, ex_stage_i.lsu_i.i_load_unit.ldbuf_q[i].trans_id,
+                     ex_stage_i.lsu_i.i_load_unit.ldbuf_q[i].address_offset,
+                     ex_stage_i.lsu_i.i_load_unit.ldbuf_q[i].operation,
+                     ex_stage_i.lsu_i.i_load_unit.ldbuf_flushed_q[i]);
+        // scoreboard commit head (port 0) + issue pointer
+        $display("[ld-trace] c=%0d h=%0d SB head=%0d pc=%h issued=%b valid=%b fu=%0d op=%0d ex=%b cancelled=%b replay=%b phys_pending=%b phys_replay=%b issue_ptr=%0d ack=%b flush_id=%b",
+                 ld_cycle, hart_id_i[7:0], issue_stage_i.i_scoreboard.commit_pointer_q[0],
+                 issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.commit_pointer_q[0]].sbe.pc,
+                 issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.commit_pointer_q[0]].issued,
+                 issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.commit_pointer_q[0]].sbe.valid,
+                 issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.commit_pointer_q[0]].sbe.fu,
+                 issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.commit_pointer_q[0]].sbe.op,
+                 issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.commit_pointer_q[0]].sbe.ex.valid,
+                 issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.commit_pointer_q[0]].cancelled,
+                 issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.commit_pointer_q[0]].replay,
+                 issue_stage_i.phys_pending[issue_stage_i.i_scoreboard.commit_pointer_q[0]],
+                 issue_stage_i.phys_replay[issue_stage_i.i_scoreboard.commit_pointer_q[0]],
+                 issue_stage_i.i_scoreboard.issue_pointer_q, commit_ack, flush_ctrl_id);
+      end
+    end
+  end
+  if (CVA6Cfg.OoOEn) begin : gen_ld_trace_lsq
+    always @(posedge clk_i) begin
+      if (rst_ni && ld_trace && ld_cycle >= ld_lo && ld_cycle <= ld_hi) begin
+        // same derivation as g6lc_ooo_dispatch's LD_N
+        for (int i = 0; i < ((CVA6Cfg.LsqLoadEntries == 0) ? 8 : CVA6Cfg.LsqLoadEntries); i++)
+          if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].valid)
+            $display("[ld-trace] c=%0d h=%0d LSQ[%0d] id=%0d hart=%0d addr_v=%b addr=%h done=%b pc=%h",
+                     ld_cycle, hart_id_i[7:0], i,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].id,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].hart,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].addr_v,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].addr,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].done,
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].pc);
+      end
+    end
+  end
+  if (CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT ||
+      CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WB ||
+      CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT_WB) begin : gen_ld_trace_hpd
+    // adapter load port (requester 1), hpdcache core miss path, miss handler,
+    // MSHR and the memory read channel of the subsystem
+    always @(posedge clk_i) begin
+      if (rst_ni && ld_trace) begin
+        if (gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_valid[1] &&
+            gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_ready[1])
+          $display("[ld-trace] c=%0d h=%0d HPD-REQ tid=%0d off=%h abort=%b", ld_cycle, hart_id_i[7:0],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req[1].tid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req[1].addr_offset,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_abort[1]);
+        if (gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_abort[1])
+          $display("[ld-trace] c=%0d h=%0d HPD-ABORT tag=%h", ld_cycle, hart_id_i[7:0],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_tag[1]);
+        if (gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_rsp_valid[1])
+          $display("[ld-trace] c=%0d h=%0d HPD-RSP tid=%0d sid=%0d err=%b aborted=%b", ld_cycle,
+                   hart_id_i[7:0], gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_rsp[1].tid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_rsp[1].sid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_rsp[1].error,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_rsp[1].aborted);
+        // st1 MSHR check result (hit = pending miss on that line -> rtab)
+        if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_alloc ||
+            gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_alloc_and_link)
+          $display("[ld-trace] c=%0d h=%0d HPD-RTAB-ALLOC sid=%0d tid=%0d nline=%h link=%b deps mshr_hit=%b mshr_full=%b mshr_ready=%b wbuf_hit=%b wbuf_nr=%b dir_unav=%b dir_fetch=%b pend=%b rtab_full=%b",
+                   ld_cycle, hart_id_i[7:0],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_req.req.sid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_req.req.tid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_req_nline,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_alloc_and_link,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_deps.mshr_hit,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_deps.mshr_full,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_deps.mshr_ready,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_deps.wbuf_hit,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_deps.wbuf_not_ready,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_deps.dir_unavailable,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_deps.dir_fetch,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_rtab_deps.pend_trans,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.rtab_full);
+        if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st0_rtab_pop_try_valid &&
+            gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st0_rtab_pop_try_ready)
+          $display("[ld-trace] c=%0d h=%0d HPD-RTAB-POP", ld_cycle, hart_id_i[7:0]);
+        // MSHR allocation: the slot the hpdcache_mshr indexes vs. the mem id it emits
+        if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.miss_mshr_alloc)
+          $display("[ld-trace] c=%0d h=%0d MSHR-ALLOC nline=%h sid=%0d tid=%0d need_rsp=%b pf=%b -> alloc_set=%0d alloc_way=%0d full=%b valid_q=%b mshrSets=%0d mshrWays=%0d",
+                   ld_cycle, hart_id_i[7:0],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.miss_mshr_alloc_nline,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.miss_mshr_alloc_sid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.miss_mshr_alloc_tid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.miss_mshr_alloc_need_rsp,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.miss_mshr_alloc_is_prefetch,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.hpdcache_mshr_i.alloc_set,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.hpdcache_mshr_i.alloc_way_o,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.hpdcache_mshr_i.full_o,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.hpdcache_mshr_i.mshr_valid_q,
+                   // same derivation as cva6_hpdcache_subsystem::hpdcacheSetConfig
+                   (CVA6Cfg.NrLoadBufEntries < 16) ? 1 : CVA6Cfg.NrLoadBufEntries / 2,
+                   (CVA6Cfg.NrLoadBufEntries < 16) ? CVA6Cfg.NrLoadBufEntries : 2);
+        if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.miss_mshr_check &&
+            gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.miss_mshr_hit)
+          $display("[ld-trace] c=%0d h=%0d MSHR-HIT nline=%h", ld_cycle, hart_id_i[7:0],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.miss_mshr_check_nline);
+        // miss handler -> memory read request / response and the MSHR ack
+        if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mem_req_valid_o &&
+            gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mem_req_ready_i)
+          $display("[ld-trace] c=%0d h=%0d MEM-RD id=%0d addr=%h", ld_cycle, hart_id_i[7:0],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mem_req_o.mem_req_id,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mem_req_o.mem_req_addr);
+        if (gen_cache_hpd.i_cache_subsystem.dcache_read_resp_valid &&
+            gen_cache_hpd.i_cache_subsystem.dcache_read_resp_ready)
+          $display("[ld-trace] c=%0d h=%0d MEM-RSP id=%0d last=%b err=%0d", ld_cycle, hart_id_i[7:0],
+                   gen_cache_hpd.i_cache_subsystem.dcache_read_resp.mem_resp_r_id,
+                   gen_cache_hpd.i_cache_subsystem.dcache_read_resp.mem_resp_r_last,
+                   gen_cache_hpd.i_cache_subsystem.dcache_read_resp.mem_resp_r_error);
+        if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mshr_ack)
+          $display("[ld-trace] c=%0d h=%0d MSHR-ACK r_id=%0d set=%0d way=%0d -> entry need_rsp=%b sid=%0d tid=%0d tag=%h cache_set=%0d pf=%b core_rsp=%b",
+                   ld_cycle, hart_id_i[7:0],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.refill_fifo_resp_meta_rdata.r_id,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mshr_ack_set,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mshr_ack_way,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mshr_ack_need_rsp,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mshr_ack_src_id,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mshr_ack_req_id,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mshr_ack_cache_tag,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mshr_ack_cache_set,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mshr_ack_is_prefetch,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.refill_core_rsp_valid);
+        if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.refill_core_rsp_valid)
+          $display("[ld-trace] c=%0d h=%0d REFILL-RSP sid=%0d tid=%0d", ld_cycle, hart_id_i[7:0],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.refill_core_rsp_sid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.refill_core_rsp_tid);
+        if (ld_cycle >= ld_lo && ld_cycle <= ld_hi)
+          $display("[ld-trace] c=%0d h=%0d HPD st: req_v=%b rdy=%b rsp_v=%b mshr_empty=%b mshr_full=%b mshr_valid=%b rtab_empty=%b rtab_full=%b refill_busy=%b refill_req=%b miss_fsm=%0d refill_fsm=%0d mem_rd_v=%b mem_rd_rdy=%b rsp_meta_rok=%b",
+                   ld_cycle, hart_id_i[7:0],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_valid[1],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_ready[1],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_rsp_valid[1],
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.miss_mshr_empty,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.hpdcache_mshr_i.full_o,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.hpdcache_mshr_i.mshr_valid_q,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.rtab_empty,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.rtab_full,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.refill_busy,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.refill_req_valid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.miss_req_fsm_q,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.refill_fsm_q,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mem_req_valid_o,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mem_req_ready_i,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.refill_fifo_resp_meta_rok);
+      end
+    end
+  end
+
   initial begin
     assert (!(CVA6Cfg.SuperscalarEn && CVA6Cfg.EnableAccelerator))
     else $fatal(1, "Accelerator is not supported by superscalar pipeline");

@@ -214,10 +214,19 @@ module cva6_hpdcache_subsystem
     userCfg.dataSetsPerRam = CVA6Cfg.DCACHE_NUM_WORDS;
     userCfg.dataRamByteEnable = 1'b1;
     userCfg.accessWords = __maxu(CVA6Cfg.AxiDataWidth / userCfg.wordWidth, userCfg.reqWords);
-    userCfg.mshrSets = CVA6Cfg.NrLoadBufEntries < 16 ? 1 : CVA6Cfg.NrLoadBufEntries / 2;
+    // G6LC T16: the MSHR set count must be a power of two. HPDcache indexes the
+    // MSHR with nline[0 +: clog2(mshrSets)] and sizes the RAM at exactly
+    // mshrSets words, so a non-power-of-two count (NrLoadBufEntries=24 -> 12
+    // sets, 4 index bits) lets every line whose low nline bits are 12..15
+    // allocate a set that does not exist: the entry write is dropped and the
+    // refill ack reads word 0 — another miss's tid — so one load retires with
+    // a foreign line and the other never completes (g6lc64_ooo_server:
+    // the fourth consecutive consumed L1 miss hung mc_l2_write_read). Round
+    // the set count up; MEM_TID_WIDTH is checked against the rounded geometry.
+    userCfg.mshrSets = CVA6Cfg.NrLoadBufEntries < 16 ? 1 : 2 ** $clog2(CVA6Cfg.NrLoadBufEntries / 2);
     userCfg.mshrWays = CVA6Cfg.NrLoadBufEntries < 16 ? CVA6Cfg.NrLoadBufEntries : 2;
     userCfg.mshrWaysPerRamWord = CVA6Cfg.NrLoadBufEntries < 16 ? CVA6Cfg.NrLoadBufEntries : 2;
-    userCfg.mshrSetsPerRam = CVA6Cfg.NrLoadBufEntries < 16 ? 1 : CVA6Cfg.NrLoadBufEntries / 2;
+    userCfg.mshrSetsPerRam = userCfg.mshrSets;
     userCfg.mshrRamByteEnable = 1'b1;
     userCfg.mshrUseRegbank = (CVA6Cfg.NrLoadBufEntries < 16);
     userCfg.cbufEntries = CVA6Cfg.WtDcacheWbufDepth;
@@ -682,6 +691,13 @@ module cva6_hpdcache_subsystem
       ($clog2(HPDcacheCfg.u.mshrSets * HPDcacheCfg.u.mshrWays) + 1)) begin : gen_err_memtid_miss
     $error("MEM_TID_WIDTH too small: D$ miss ids would alias ICACHE_RDTXID and the ",
            "arbiter would deliver D$ refills to the I$");
+  end
+  //  G6LC T16: the MSHR is indexed by nline[0 +: clog2(sets)] and the slot id is
+  //  {way, set}; both silently alias unless sets and ways are powers of two.
+  if (((HPDcacheCfg.u.mshrSets & (HPDcacheCfg.u.mshrSets - 1)) != 0) ||
+      ((HPDcacheCfg.u.mshrWays & (HPDcacheCfg.u.mshrWays - 1)) != 0)) begin : gen_err_mshr_geometry
+    $error("HPDcache MSHR sets/ways must be powers of two: a non-power-of-two set ",
+           "count lets nline index a set that does not exist and misroutes refills");
   end
   if (CVA6Cfg.MEM_TID_WIDTH < ($clog2(HPDcacheCfg.u.wbufDirEntries) + 1)) begin : gen_err_memtid_wbuf
     $error("MEM_TID_WIDTH too small: D$ write ids would alias ICACHE_RDTXID");

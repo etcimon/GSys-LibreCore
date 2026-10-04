@@ -1186,3 +1186,16 @@ shuffle (which was only right for `NrIssuePorts == 2`). RVFI-only consumers, pru
 `core/issue_read_operands.sv` clamps the CASQ pair-high register-file index (`CASQ_HI_IDX`) so the
 `OPERANDS_PER_INSTR == 3`-guarded path is statically in bounds on two-operand regfiles.
 Evidence: `core/ooo/AGENTS-ooo-plan.md` T12 addendum.
+
+## HPDCACHE MSHR geometry must be a power of two (2026-10-03, T16)
+
+`core/cache_subsystem/cva6_hpdcache_subsystem.sv` derives the HPDcache MSHR geometry from
+`NrLoadBufEntries`; HPDcache indexes the MSHR with `nline[0 +: $clog2(sets)]` and sizes the RAM at
+`sets` words, so a non-power-of-two set count (the server's 24 entries → 12 sets) let one line in
+four allocate a set that does not exist, dropping the entry and acknowledging another miss's
+refill under its tid (a load retired with a foreign line; the other never completed — the server's
+"fourth consumed miss" hang and the corrupted-load trap of its boot hart). `mshrSets` is now
+`2 ** $clog2(NrLoadBufEntries / 2)` and `gen_err_mshr_geometry` refuses non-power-of-two sets or
+ways at elaboration. Upstream HPDCACHE packages (8 entries → 1 × 8) are unchanged. Loads/stores
+(`#ldst`) regain single-copy atomicity on the server profile. Evidence: `core/ooo/AGENTS-ooo-plan.md`
+T16.

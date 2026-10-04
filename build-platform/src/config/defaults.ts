@@ -1738,7 +1738,11 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       cv64a6_imafdc_sv39: 8,
       cv32a65x: 54,
       g6lc64_stream8: 7,
-      g6lc64_ooo_server: 4,
+      // Raised 4 -> 36 (2026-10-03): the +smt_stats drain/stall dumps in
+      // core/cva6.sv (N1d/T10g, translate_off) add WIDTH* warnings on every
+      // drained multi-hart target; the server had not elaborated since the
+      // probe landed (FP-3/T12), so the old count predates it. 0 errors.
+      g6lc64_ooo_server: 36,
       g6lc64_server_math: 7,
       // First full-core OoO configuration that legally elaborates: g6lc64_ooo
       // and _server both trip check_cfg (FpPresent / NrHarts>1), so this is the
@@ -1750,7 +1754,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // L3 variants: cluster top, same file set as int2 plus g6lc_l3_top inside
       // the cluster (non-inclusive 1 MiB). Baselines measured on the Phase 2
       // archive gates ooocoh-p2-gate-int2l3-r1 / ooocoh-p2-gate-smt2l3-r1.
-      g6lc64_ooo_int2_l3: 25,
+      // Raised 25 -> 29 (2026-10-03): same +smt_stats dump WIDTH* warnings as
+      // the server above (N1d/T10g); measured 29w/0e on every remote lint
+      // since the N1d gate (ooocoh-n1d-*, fp2, t13c, t16fix).
+      g6lc64_ooo_int2_l3: 29,
       g6lc64_smt2_l3: 5,
       // In-order two-core L3 packages (M6): cluster top, measured on the M6
       // archive gates ooocoh-m6-gate-s8l3-r1 / ooocoh-m6-gate-sml3-r1.

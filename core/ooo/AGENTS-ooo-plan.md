@@ -3799,3 +3799,61 @@ a documented helper, `verif/regress/remote/patch_vilp.sh`.
   `mini_ai_dual_issue` **SUCCESS 1,116 cycles** (A/B on the same model;
   unfixed arms spin at `0x80000088` / `0x800000b8`). Not an AiCfg or core
   defect; `ai-chain14` is 36/36 modulo this fix.
+
+### T16 — HPDCACHE MSHR geometry: non-power-of-two set count misrouted refills (2026-10-03)
+
+**Defect.** `cva6_hpdcache_subsystem.sv` derived `mshrSets = NrLoadBufEntries/2`
+and `mshrWays = 2` for `NrLoadBufEntries ≥ 16`; the server's 24 entries gave
+**12 sets**. HPDcache indexes the MSHR with `nline[0 +: $clog2(sets)]` (4 bits)
+and sizes its RAM at exactly `sets` words, so every line whose low nline bits
+are 12..15 — one 64 B line in four — allocated a set that does not exist: the
+entry write was dropped and the refill ack read RAM word 0 (set 0's entry),
+i.e. another miss's tid. With two misses outstanding, the younger load retired
+with the older load's line and the older never completed. Bisect (`ooocoh-t16-v*`,
+`mc_l2_write_read`): WT PASS; prefetch-off HANG (cycle-identical — the stride
+engines are tied off anyway); 2-issue HANG (cycle-identical); `NrLoadBufEntries`
+8 → PASS, 32 → PASS (power-of-two set counts); int2_l3 + HPDCACHE (8 entries,
+1×8) PASS. Anatomy (`+ld_trace`, `ooocoh-t16-probe`): 4th load tid 20 →
+`alloc_set=12` → `MEM-RD id=12`; 5th load tid 26 → set 0; `MSHR-ACK id=12`
+reads word 0 → `REFILL-RSP tid=3` → the 5th load writes back with the 4th's
+data; slot 0 (tid 20) valid forever, SB head `pc=0x8000004c` never retires,
+hpdcache `mshr_empty=1`. Verilator 5.008 returns element 0 on an out-of-range
+read (5.020 returns 0 — would have hung differently, not passed). No HPDcache
+assertion guards the geometry.
+
+**Fix.** `mshrSets = 2 ** $clog2(NrLoadBufEntries / 2)` (server → 16 × 2;
+`MEM_TID_WIDTH` 8 ≥ clog2(32)+1), `mshrSetsPerRam` follows, and a generate-time
+`gen_err_mshr_geometry` `$error` refuses non-power-of-two sets or ways
+(negative check: old formula + guard → slang exit 5 at the guard). Upstream
+HPDCACHE packages (`NrLoadBufEntries=8` → 1 × 8) are untouched (lint A/B
+identical, 260w/4s). A `+ld_trace` load round-trip anatomy probe
+(translate_off, plusarg-gated) stays in `cva6.sv`.
+
+**Evidence (`ooocoh-t16fix-*`, server model from this tree).**
+- Former hangs **pass**: `mc_l2_write_read` **126,744** (= the 32-entry
+  variant exactly), `mc_l3_stride_scan` **213,063**, `mc_shared_line_resident`
+  **324,255**. COH4 sweep cycle-identical to T15 except two retirement-exact
+  interleaving shifts (`mc_cas_lock_handoff` 4,262 vs 4,707 — lock-spin
+  iterations; `mc_inval_bp_stress` 267,527 vs 267,759).
+- FP suite s1/s4 `retirementsMatch=true`; `mc_fp_smt` 8-hart 7,061 / neg
+  1,805 (RVFI multisets identical).
+- **Correction to T12/FP-3e:** the 8-hart I4dp "`*** SUCCESS *** (tohost=0)`
+  at the 6 M cap" was a **hung boot masked by the harness cap** — hart 1 (the
+  lottery boot hart) took `cause=2` at cycle 54,100 from a non-text pc
+  (`0x80046e40`, a corrupted load — this defect) inside `fw_platform_init`
+  and parked in `_start_hang`; its retire count sat at 5,144 from 1 M to 6 M
+  while the other seven harts spun in `_wait_for_boot_hart`. On the fixed
+  model the boot hart is alive the whole run (848,809 retirements, ≈141 k per
+  1 M, still in the libfdt DTB walk at 6 M, IPC ≈ 0.14 sharing core 0),
+  **no trap, `force=0` on all cores**, tail 0/0/0/0. 6 M is simply too short
+  for eight harts; a 24 M run (`ooocoh-t16fix-i4dp-24M`) was left running on
+  the builder (≈8–10 h) — the result belongs in this section when harvested.
+- Lint 0e: server 288w/4s, `cv64a6_imafdc_sv39_hpdcache{,_wb}` 260w/4s,
+  int2_l3, smt2; remote int2_l3 29w/0e, server 36w/0e. The remote warning
+  baselines are raised to 29 / 36 (the N1d `+smt_stats` dump WIDTH*
+  warnings; the server count predates its elaboration break).
+
+**Lesson for the record.** "tohost = 0 at the cycle cap" is not a boot
+result; every server boot cited before this section must be read as
+"did not fail before the cap", and the harness verdict text now has to be
+checked for per-hart retirement progress before it is quoted.

@@ -171,6 +171,11 @@ static const char *verilog_plusargs[] = {
     // duration histogram, not-ready causes, per-hart retired and commit_drop
     // every 1M cycles and at final. Same allowlist rule as above.
     "smt_stats",
+    // T16 load round-trip anatomy probe (core/cva6.sv, translate_off): per-cycle
+    // load-unit / LSQ / scoreboard-head / HPDCACHE miss-path dump over the
+    // [ld_lo, ld_hi] window plus always-on handshake events. Same allowlist
+    // rule as above.
+    "ld_trace", "ld_lo", "ld_hi",
     // AI island per-job PMU record (corev_apu/ai_island/g6lc_ai_island_top.sv,
     // translate_off): one AI_JOB line per completed descriptor, harvested by
     // verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1.
