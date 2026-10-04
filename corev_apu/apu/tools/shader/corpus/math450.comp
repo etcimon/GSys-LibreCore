@@ -1,0 +1,57 @@
+#version 460
+// GLSL.std.450 math set — increment-4a revision: every operation is an
+// independent output component computed directly from loaded inputs
+// (no accumulator), packed into vec4 stores so the per-invocation SSA
+// register count stays inside ShaderRegs=256.  A per-op ULP difference
+// is therefore attributable to one micro-sequence instead of
+// accumulating across ~30 ops.  Word 32 (component 0 of the last vec4)
+// is a deliberate OpFMul+OpFAdd contraction candidate (a.y*b.z + a.w)
+// to detect whether lavapipe fuses mul+add into fma.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) buffer Src { vec4 src[]; };
+layout(set = 0, binding = 1) buffer Dst { vec4 dst[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec4 a = src[i];
+    vec4 b = src[i + 32u];
+    vec3 p = a.xyz;
+    vec3 q = b.xyz;
+    int si = int(trunc(a.x));
+    int sj = int(trunc(b.x));
+    uint ui = uint(abs(si));
+    uint uj = uint(abs(sj)) + 1u;
+    uint o = i * 9u;
+    // 0: sqrt        1: inversesqrt    2: length       3: distance
+    dst[o + 0u] = vec4(sqrt(abs(a.x)), inversesqrt(abs(b.x) + 0.25),
+                       length(p), distance(p, q));
+    // 4: normalize.x 5: cross.y       6: mix.x        7: clamp.x
+    vec4 m = mix(a, b, vec4(0.25));
+    dst[o + 1u] = vec4(normalize(p).x, cross(p, q).y,
+                       m.x, clamp(m, -1.0, 1.0).x);
+    // 8: step.x      9: smoothstep.z  10: fma         11: floor
+    dst[o + 2u] = vec4(step(b, a).x,
+                       smoothstep(vec4(0.0), vec4(2.0), m).z,
+                       fma(a.y, b.z, a.w), floor(a.y * b.z));
+    // 12: ceil       13: fract        14: round       15: trunc
+    dst[o + 3u] = vec4(ceil(a.z * b.w), fract(a.x * b.y),
+                       round(a.w * b.x), trunc(b.y * a.z));
+    // 16: abs        17: sign         18: fmin        19: fmax
+    dst[o + 4u] = vec4(abs(a.z), sign(b.y), min(a.w, b.w),
+                       max(a.w, b.w));
+    // 20: dot        21: smin         22: smax        23: sclamp
+    dst[o + 5u] = vec4(dot(p, q), float(min(si, sj)),
+                       float(max(si, -7)), float(clamp(si, -3, 9)));
+    // 24: umin       25: umax         26: uclamp      27: bit and
+    dst[o + 6u] = vec4(float(min(ui, uj)), float(max(ui, 2u)),
+                       float(clamp(ui, 1u, 8u)),
+                       uintBitsToFloat(floatBitsToUint(a.x) &
+                                       floatBitsToUint(b.x)));
+    // 28: bit or     29: bit xor      30: SToF        31: FToU
+    dst[o + 7u] = vec4(uintBitsToFloat(floatBitsToUint(a.y) |
+                                       floatBitsToUint(b.y)),
+                       uintBitsToFloat(floatBitsToUint(a.z) ^
+                                       floatBitsToUint(b.z)),
+                       float(si), uintBitsToFloat(uint(abs(b.w))));
+    // 32: a*b+c mul/add contraction candidate
+    dst[o + 8u] = vec4(a.y * b.z + a.w, 0.0, 0.0, 0.0);
+}

@@ -7,3 +7,6 @@ VNFRONT_SYNTH=1 bash /opt/testharness/repo/verif/tb/apu/run-apu-vnfront.sh
 VGCTL_SYNTH=1 bash /opt/testharness/repo/verif/tb/apu/run-apu-vgctl.sh
 VNPUMP_SYNTH=1 bash /opt/testharness/repo/verif/tb/apu/run-apu-vnpump.sh
 VGTOP_SYNTH=1 bash /opt/testharness/repo/verif/tb/apu/run-apu-vgtop.sh
+SHMOD_SYNTH=1 bash /opt/testharness/repo/verif/tb/apu/run-apu-shmod.sh
+SHWAVE_SYNTH=1 bash /opt/testharness/repo/verif/tb/apu/run-apu-shwave.sh
+SHCORE_SYNTH=1 bash /opt/testharness/repo/verif/tb/apu/run-apu-shcore.sh

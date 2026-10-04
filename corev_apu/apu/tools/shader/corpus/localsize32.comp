@@ -1,0 +1,8 @@
+#version 460
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) buffer Src { uint src[]; };
+layout(set = 0, binding = 1) buffer Dst { uint dst[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    dst[i] = src[i] + gl_LocalInvocationIndex;
+}

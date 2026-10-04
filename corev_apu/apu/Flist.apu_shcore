@@ -1,0 +1,7 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// ShaderCore composition (g6lc_apu_shcore): commit scanner + wave
+// engine on the cmdexec work-port record.
+-f ${CVA6_REPO_DIR}/corev_apu/apu/Flist.apu_shwave
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_shcore.sv

@@ -1,0 +1,351 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+// ShaderCore composition test (§7a): g6lc_apu_shcore wires the
+// commit scanner to the wave engine on the cmdexec work-port
+// record.  The wave TB (tb_g6lc_apu_shwave) already runs the full
+// corpus through this composition with vkCmdDispatch records; this
+// TB covers the composition-specific arms:
+//   1. a real vkCmdDispatch record on slot 0 (bufcopy_1 vector),
+//   2. a non-dispatch ctype completes APU_SH_DONE_UNSUPPORTED,
+//   3. vkCmdDispatchIndirect completes APU_SH_DONE_UNSUPPORTED
+//      (indirect group counts need a buffer read — 5-series),
+//   4. a work record held while busy is NOT dropped: work_ready_o
+//      stays low and the record is accepted once the in-flight
+//      dispatch completes,
+//   5. a second slot commits and dispatches independently,
+//   6. retire frees the slot and it commits again,
+//   7. a bad module faults at commit through the same port,
+//   8. Enable=0 stays quiet — monitored continuously.
+
+module tb_g6lc_apu_shcore;
+  import g6lc_apu_vn_pkg::*;
+  import g6lc_apu_sh_pkg::*;
+
+  localparam int unsigned MAXW = 262144;
+  localparam int unsigned MEMW = 131072;
+  string  shv;
+  int     checks, cases, fails;
+  longint cyc;
+
+  logic clk = 0, rst_n = 0;
+  always #5 clk = ~clk;
+  always_ff @(posedge clk) cyc <= cyc + 1;
+
+  logic         wr_en;  logic [2:0]  wr_slot;  logic [15:0] wr_addr;
+  logic [31:0]  wr_data;
+  logic         commit; apu_sh_commit_t commit_pl;
+  logic         c_busy; logic c_done; apu_sh_cpl_t c_done_pl;
+  logic         retire; logic [2:0]  retire_slot;
+  logic         work;   logic        work_ready;
+  logic [31:0]  work_ctype;
+  logic [8*32-1:0] work_imm;
+  logic [2:0]   disp_slot;
+  logic [16*113-1:0] binds;
+  logic [5:0]   push_n;
+  logic [1023:0] push;
+  logic         busy, done; apu_sh_done_t done_pl;
+  logic         mem_re, mem_we;
+  logic [63:0]  mem_addr, mem_wdata;
+  logic [7:0]   mem_wstrb;
+  logic [63:0]  mem_rdata;
+
+  logic         off_c_busy, off_c_done;
+  apu_sh_cpl_t  off_c_pl;
+  logic         off_ready, off_busy, off_done;
+  apu_sh_done_t off_pl;
+  logic         off_mem_re, off_mem_we;
+  logic [63:0]  off_mem_addr, off_mem_wdata;
+  logic [7:0]   off_mem_wstrb;
+
+  g6lc_apu_shcore #(.Enable(1)) dut (
+    .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
+    .wr_en_i(wr_en), .wr_slot_i(wr_slot), .wr_addr_i(wr_addr),
+    .wr_data_i(wr_data),
+    .commit_i(commit), .commit_pl_i(commit_pl),
+    .c_busy_o(c_busy), .c_done_o(c_done), .c_done_pl_o(c_done_pl),
+    .retire_i(retire), .retire_slot_i(retire_slot),
+    .work_i(work), .work_ready_o(work_ready),
+    .work_ctype_i(work_ctype), .work_imm_i(work_imm),
+    .disp_slot_i(disp_slot), .binds_i(binds),
+    .push_n_i(push_n), .push_i(push),
+    .busy_o(busy), .done_o(done), .done_pl_o(done_pl),
+    .mem_re_o(mem_re), .mem_we_o(mem_we), .mem_addr_o(mem_addr),
+    .mem_wdata_o(mem_wdata), .mem_wstrb_o(mem_wstrb),
+    .mem_rdata_i(mem_rdata));
+
+  g6lc_apu_shcore #(.Enable(0)) off (
+    .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
+    .wr_en_i(wr_en), .wr_slot_i(wr_slot), .wr_addr_i(wr_addr),
+    .wr_data_i(wr_data),
+    .commit_i(commit), .commit_pl_i(commit_pl),
+    .c_busy_o(off_c_busy), .c_done_o(off_c_done),
+    .c_done_pl_o(off_c_pl),
+    .retire_i(retire), .retire_slot_i(retire_slot),
+    .work_i(work), .work_ready_o(off_ready),
+    .work_ctype_i(work_ctype), .work_imm_i(work_imm),
+    .disp_slot_i(disp_slot), .binds_i(binds),
+    .push_n_i(push_n), .push_i(push),
+    .busy_o(off_busy), .done_o(off_done), .done_pl_o(off_pl),
+    .mem_re_o(off_mem_re), .mem_we_o(off_mem_we),
+    .mem_addr_o(off_mem_addr), .mem_wdata_o(off_mem_wdata),
+    .mem_wstrb_o(off_mem_wstrb), .mem_rdata_i(mem_rdata));
+
+  // continuous Enable=0 quiet monitor — sticky flag (fails is
+  // written from the initial process; counted once at the end)
+  logic off_bad;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) off_bad <= 1'b0;
+    else if (!off_bad &&
+             (off_c_busy | off_c_done | (|off_c_pl) |
+              off_ready | off_busy | off_done | (|off_pl) |
+              off_mem_re | off_mem_we | (|off_mem_addr) |
+              (|off_mem_wdata) | (|off_mem_wstrb))) begin
+      off_bad <= 1'b1;
+      $display("FAIL Enable=0 activity at cycle %0d", cyc);
+    end
+  end
+
+  // guest memory: 1-cycle 64-bit port, same model as the wave TB
+  logic [63:0] mem [0:MEMW-1];
+  always_ff @(posedge clk) begin
+    logic [63:0] wm;
+    if (mem_we) begin
+      wm = mem[mem_addr[16:3]];
+      for (int b = 0; b < 8; b++)
+        if (mem_wstrb[b]) wm[8*b +: 8] = mem_wdata[8*b +: 8];
+      mem[mem_addr[16:3]] <= wm;
+    end
+    if (mem_re) mem_rdata <= mem[mem_addr[16:3]];
+  end
+
+  logic [31:0] wbuf [MAXW];
+  logic [31:0] ebuf [MAXW];
+
+  task automatic cmp(input string nm, input logic [31:0] got,
+                     input logic [31:0] exp);
+    checks++;
+    if (got !== exp) begin
+      fails++;
+      $display("FAIL %s got=%08x exp=%08x", nm, got, exp);
+    end
+  endtask
+
+  task automatic wr_words(input int base, input int n, input int slot);
+    for (int i = 0; i < n; i++) begin
+      @(negedge clk);
+      wr_en = 1; wr_slot = slot[2:0]; wr_addr = i[15:0];
+      wr_data = wbuf[base + i];
+    end
+    @(negedge clk); wr_en = 0;
+  endtask
+
+  task automatic do_commit(input int nwords, input int slot,
+                           output apu_sh_cpl_t pl);
+    @(negedge clk);
+    commit = 1;
+    commit_pl = '{slot: slot[2:0], nwords: nwords[15:0]};
+    @(negedge clk); commit = 0;
+    for (int g = 0; g < 2000000; g++) begin
+      @(negedge clk);
+      if (c_done) break;
+    end
+    if (!c_done) begin
+      fails++; $display("FAIL commit timeout slot=%0d", slot);
+    end
+    pl = c_done_pl;
+  endtask
+
+  // present a work record; holds it until work_ready_o accepts it
+  task automatic put_work(input logic [31:0] ctype, input int gx,
+                          input int gy, input int gz, input int slot);
+    work = 1; work_ctype = ctype;
+    work_imm = '0;
+    work_imm[15:0]  = gx[15:0];
+    work_imm[47:32] = gy[15:0];
+    work_imm[79:64] = gz[15:0];
+    disp_slot = slot[2:0];
+  endtask
+
+  task automatic wait_done(input logic [31:0] ctype,
+                           output apu_sh_done_t pl);
+    // UNSUPPORTED replies pulse done the cycle after accept, so
+    // check before waiting another negedge
+    for (int g = 0; g < 20000000; g++) begin
+      if (done) break;
+      @(negedge clk);
+    end
+    if (!done) begin
+      fails++; $display("FAIL work timeout ctype=%0d", ctype);
+    end
+    pl = done_pl;
+  endtask
+
+  task automatic do_work(input logic [31:0] ctype, input int gx,
+                         input int gy, input int gz, input int slot,
+                         output apu_sh_done_t pl);
+    put_work(ctype, gx, gy, gz, slot);
+    // hold the record until work_ready_o accepts it
+    do @(negedge clk); while (!work_ready);
+    @(negedge clk); work = 0;
+    wait_done(ctype, pl);
+  endtask
+
+  task automatic retire_do(input int slot);
+    @(negedge clk); retire = 1; retire_slot = slot[2:0];
+    @(negedge clk); retire = 0;
+  endtask
+
+  // stage vector file + bindings + buffers for one slot
+  task automatic stage(input string file, input int slot,
+                       output int n, output int nb, output int np,
+                       output int gx, output int gy, output int gz);
+    int base;
+    $readmemh({shv, "/", file, ".hex"}, wbuf);
+    $readmemh({shv, "/", file, ".exp"}, ebuf);
+    n  = wbuf[0]; nb = wbuf[1]; np = wbuf[2];
+    gx = wbuf[3]; gy = wbuf[4]; gz = wbuf[5];
+    base = 8 + n;
+    binds = '0;
+    for (int b = 0; b < nb; b++) begin
+      logic [7:0] st, bd;
+      logic [31:0] sz;
+      logic [63:0] ad;
+      st = wbuf[base + b*4 + 0][7:0];
+      bd = wbuf[base + b*4 + 1][7:0];
+      sz = wbuf[base + b*4 + 2];
+      ad = {32'h0, wbuf[base + b*4 + 3]};
+      binds[b*113 +: 113] = {st, bd, ad, sz[31:0], 1'b1};
+    end
+    base += nb * 4;
+    push_n = np[5:0];
+    push = '0;
+    for (int i = 0; i < np && i < 32; i++)
+      push[i*32 +: 32] = wbuf[base + i];
+    base += np;
+    for (int b = 0; b < nb; b++) begin
+      logic [31:0] sz;
+      logic [63:0] ad;
+      sz = wbuf[8 + n + b*4 + 2];
+      ad = {32'h0, wbuf[8 + n + b*4 + 3]};
+      for (int w2 = 0; w2 < sz/4; w2++) begin
+        if ((ad + w2*4) & 7)
+          mem[(ad + w2*4) >> 3][63:32] = wbuf[base + w2];
+        else
+          mem[(ad + w2*4) >> 3][31:0] = wbuf[base + w2];
+      end
+      base += sz/4;
+    end
+  endtask
+
+  initial begin
+    int n, nb, np, gx, gy, gz;
+    int held;
+    apu_sh_cpl_t  cpl;
+    apu_sh_done_t dpl;
+    if (!$value$plusargs("shv=%s", shv)) shv = "verif/tb/apu/sh_vectors";
+    checks = 0; cases = 0; fails = 0; cyc = 0;
+    wr_en = 0; commit = 0; retire = 0; work = 0; work_ctype = 0;
+    work_imm = '0; disp_slot = 0; binds = '0; push_n = 0; push = '0;
+    for (int i = 0; i < MEMW; i++) mem[i] = '0;
+    mem_rdata = '0;
+    repeat (8) @(negedge clk); rst_n = 1;
+    repeat (4) @(negedge clk);
+
+    // 1. commit bufcopy_1 on slot 0, dispatch via vkCmdDispatch
+    cases++;
+    stage("bufcopy_1", 0, n, nb, np, gx, gy, gz);
+    wr_words(8, n, 0);
+    do_commit(n, 0, cpl);
+    cmp("s0.commit.ok", {31'h0, cpl.ok}, 1);
+    do_work(32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT), gx, gy, gz, 0, dpl);
+    cmp("s0.done.code", {24'h0, dpl.code}, APU_SH_DONE_OK);
+
+    // 2. non-dispatch ctype → UNSUPPORTED
+    cases++;
+    do_work(32'd999, 0, 0, 0, 0, dpl);
+    cmp("unsup.code", {24'h0, dpl.code}, APU_SH_DONE_UNSUPPORTED);
+
+    // 3. vkCmdDispatchIndirect → UNSUPPORTED in 4a (group counts live
+    //    in a buffer — reading them is a 5-series integration item)
+    cases++;
+    do_work(32'(APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT),
+            gx, gy, gz, 0, dpl);
+    cmp("ind.code", {24'h0, dpl.code}, APU_SH_DONE_UNSUPPORTED);
+
+    // 4. work held while busy: present a record during an in-flight
+    //    dispatch — work_ready_o must be low and the record must be
+    //    accepted afterwards (not dropped): a second done arrives.
+    cases++;
+    put_work(32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT), gx, gy, gz, 0);
+    do @(negedge clk); while (!work_ready);
+    @(negedge clk);
+    // the dispatch is now in flight; hold an UNSUPPORTED record and
+    // verify ready stays low while busy
+    work = 1; work_ctype = 32'd999; work_imm = '0;
+    held = 0;
+    for (int g = 0; g < 20000000; g++) begin
+      if (done) break;
+      if (busy) begin
+        checks++;
+        if (work_ready !== 1'b0) begin
+          fails++;
+          $display("FAIL work_ready_o high while busy");
+        end
+        held = 1;
+      end
+      @(negedge clk);
+    end
+    if (!done) begin
+      fails++; $display("FAIL held-work dispatch timeout");
+    end else begin
+      cmp("held.disp.code", {24'h0, done_pl.code}, APU_SH_DONE_OK);
+    end
+    checks++;
+    if (!held) begin
+      fails++; $display("FAIL busy window never observed");
+    end
+    // the held record must still be accepted → UNSUPPORTED done
+    do @(negedge clk); while (!work_ready);
+    @(negedge clk); work = 0;
+    wait_done(32'd999, dpl);
+    cmp("held.code", {24'h0, dpl.code}, APU_SH_DONE_UNSUPPORTED);
+
+    // 5. commit the same module on slot 1, dispatch there
+    cases++;
+    wr_words(8, n, 1);
+    do_commit(n, 1, cpl);
+    cmp("s1.commit.ok", {31'h0, cpl.ok}, 1);
+    do_work(32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT), gx, gy, gz, 1, dpl);
+    cmp("s1.done.code", {24'h0, dpl.code}, APU_SH_DONE_OK);
+
+    // 6. retire slot 0 then commit it again
+    cases++;
+    retire_do(0);
+    wr_words(8, n, 0);
+    do_commit(n, 0, cpl);
+    cmp("re.commit.ok", {31'h0, cpl.ok}, 1);
+
+    // 7. bad module faults at commit through the same port
+    cases++;
+    stage("bufcopy_bad_0", 2, n, nb, np, gx, gy, gz);
+    wr_words(8, n, 2);
+    do_commit(n, 2, cpl);
+    cmp("bad.commit.ok", {31'h0, cpl.ok}, 0);
+    cmp("bad.commit.code", {24'h0, cpl.fault.code}, ebuf[0]);
+    retire_do(2);
+
+    // 8. Enable=0 quiet (continuous monitor + final check)
+    checks++;
+    if (off_bad) begin
+      fails++; $display("FAIL Enable=0 not quiet");
+    end
+
+    $display("PASS tb_g6lc_apu_shcore cases=%0d checks=%0d cycles=%0d",
+             cases, checks, cyc);
+    if (fails) begin
+      $display("FAILURES=%0d", fails);
+      $fatal(1);
+    end
+    $finish;
+  end
+endmodule

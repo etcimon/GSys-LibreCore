@@ -135,6 +135,81 @@ No renderer extension is required **to initialize** — the check loop creates t
 | `VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf` (non-Windows) | `vn_physical_device.c:1040-1052`, `:1203-1207` | requires renderer `VK_EXT_external_memory_dma_buf` — the renderer handle type for exported `vn_renderer_bo`s |
 | WSI-only extras (`VN_USE_WSI_PLATFORM`/Android builds): swapchain family needs `semaphore_importable`; `ANDROID_native_buffer` also needs `fence_exportable`; `vn_device_fix_create_info` then auto-enables `EXT_image_drm_format_modifier` (+`KHR_image_format_list` if `renderer_version < 1.2`), `EXT_queue_family_foreign`, `EXT_external_memory_dma_buf` + `KHR_external_memory_fd`, `KHR_external_semaphore_fd`, `KHR_external_fence_fd`, `EXT_external_memory_acquire_unmodified` on the renderer device | `vn_physical_device.c:1212-1225`, `:1198-1200`; `vn_device.c:259-345` | not applicable to the non-WSI build — listed for completeness; the remaining `extra_exts` adds are conditioned on the renderer already advertising them |
 
+## ShaderCore vectors
+
+`corev_apu/apu/tools/shader/shader_vectors.py` emits per-case `verif/tb/apu/sh_vectors/<shader>_<seed>.{hex,exp,desc.json}` plus the raw oracle I/O.  Both `.hex` and `.exp` are `$readmemh` files, one 32-bit word per line, terminated by a `FFFFFFFF FFFFFFFF` sentinel so a testbench detects end-of-file without knowing the record count.
+
+`.hex` — dispatch input record:
+
+| word | field |
+|---|---|
+| 0 | `n_spv_words` — SPIR-V module length in words |
+| 1 | `n_bindings` |
+| 2 | `n_push_words` |
+| 3..5 | `gx`, `gy`, `gz` dispatch groups |
+| 6 | `flags` — bit0: module expected to commit-fault; bit1: mutated module (outputs must *differ* from the unmutated oracle) |
+| 7 | reserved |
+| 8 .. 8+n | SPIR-V module words |
+| +nb×4 | per binding `{set, binding, size_bytes, mem_addr}` |
+| +np | push-constant words |
+| +Σ sz/4 | per binding, in order: initial buffer words |
+
+`.exp` — expected results:
+
+| word | field |
+|---|---|
+| 0 | `expect_commit_fault` — fault code, 0 = commits (codes in `g6lc_apu_sh_pkg`, `APU_SH_FAULT_*`) |
+| 1 | `expect_fault_opcode` — offending opcode, 0 = none |
+| 2 | `expect_robust` — robustness clamp count (from `spirv_model.py`, not lavapipe) |
+| 3 | `expect_done` — 0 no work_done, 1 = `APU_SH_DONE_OK`, 2 = `APU_SH_DONE_FAULT` |
+| 4 | `n_bindings` |
+| +nb×4 | per binding `{binding, size_bytes, mem_addr, is_out}` |
+| +Σ sz/4 | per `is_out` binding: oracle (lavapipe) output words (buffer base `ADDR0 = 0x8000`, bindings 4 KiB apart) |
+| +Σ sz/4 | per `is_out` binding: `spirv_model.py` output words (Gate-1 reference) |
+| +Σ sz/4 | per `is_out` binding: per-word class — 0 = integer/bool (bit-exact), 1 = float (ULP-compared) |
+
+Mutated cases flip one arithmetic/composite opcode in place (word count preserved) and one `_bad_0` case per shader injects `OpSin` to fault at commit.
+
+`tb_g6lc_apu_shwave` applies two hard gates per case.  **Gate 1:** RTL output words and the robustness count must match `spirv_model.py` bit-exact — the model mirrors the RTL's exact micro-sequences, so any divergence is an RTL or model bug, never a tolerance.  **Gate 2:** RTL vs lavapipe oracle — class-0 (integer/bool) words bit-exact, class-1 (float) words within 2 ULP sign-aware (±0 equal, NaN==NaN); per-shader max ULP and 1/2-ULP counts are printed (`ULP <case> max= ulp1= ulp2=`).  There is no per-shader tolerance escape hatch: with the micro-sequences below matching lavapipe's NIR lowering, every corpus shader is bit-exact except `math450`'s `normalize.x`, which lands at 1 ULP (lavapipe `rsqrt` refinement vs our `1.0/sqrt` division — inside the §7a sqrt-class allowance).  The explicit `a*b+c` contraction probe (`OpFMul` then `OpFAdd`, output word 32 of each `math450` invocation) is bit-exact: **lavapipe does not contract to FMA** in this pipeline (Mesa 25.2.8 NIR lowers `ffma` to `fmul`+`fadd`).
+
+### ShaderCore arithmetic definitions
+
+Exact FP32 micro-sequences implemented by `g6lc_apu_shwave` and mirrored
+bit-for-bit by `spirv_model.py` (Gate 1).  `r(x)` denotes one
+round-to-nearest-even to binary32; `fma(a,b,c)` is single-rounded.
+Sequences were chosen to match Mesa 25.2.8 lavapipe's NIR lowering
+(`ffma` → `fmul`+`fadd`, `flrp` strict form, `fsat` clamp), so Gate-2
+float results are bit-exact or ≤1 ULP everywhere in the corpus.
+
+| op | RTL / model sequence |
+|---|---|
+| `OpFAdd`, `OpFSub` | `r(a+b)`, `r(a-b)` — fpnew_fma ADD with operand-A forced +1.0 (`ops[1]±ops[2]` slots) |
+| `OpFMul`, `OpVectorTimesScalar` | `r(a·b)` — fpnew_fma MUL |
+| `OpFDiv` | `r(a/b)` — fpnew_divsqrt_multi DIV (FP32, per lane, comp-iterated) |
+| `OpDot(v0,v1)` n comps | `m_c = r(v0_c·v1_c)` for all c, then right-leaning fold: `t = r(m_{n-1}·1.0)`; `t = r(m_c·1.0 + t)` for c = n-2..0 — matches lavapipe `fdotN` tree `(m_{n-1}+m_{n-2}+…+m_1)+m_0` |
+| `Sqrt` (31) | `r(√x)` — divsqrt SQRT |
+| `InverseSqrt` (32) | `r(1.0 / r(√x))` |
+| `Length` (66) | `r(√ dot(v,v))` with the `OpDot` fold above |
+| `Distance` (67) | `d = r(a-b)` per comp, then `r(√ dot(d,d))` |
+| `Cross` (68) | six independent `r(a_i·b_j)` products, three `r(t0_c − t1_c)` — no FMA |
+| `Normalize` (69) | `dot` fold → `r(√dot)` → `r(1.0/s)` → `r(v_c·r)` per comp |
+| `FMin` (37) / `FMax` (40) | fpnew_noncomp MIN/MAX (RNE/RTZ rnd select) |
+| `FClamp` (43) | `min(max(x, lo), hi)` — two noncomp ops |
+| `FMix` (46) | `r(x·r(1−t)) + r(y·t)` rounded once at the add — lavapipe `nir_lower_flrp` strict form |
+| `Step` (48) | `x < edge ? 0.0 : 1.0` via noncomp compare + select |
+| `SmoothStep` (49) | `t = min(max(r((x−e0)/(e1−e0)), 0), 1)`; `r(t · r(t · r(3.0 + r(−2.0·t))))` — lavapipe `nir_smoothstep` with `ffma` lowered |
+| `Fma` (50) | `r(r(a·b) + c)` — **two roundings**, matching lavapipe (which lowers `ffma`); the FPnew fused unit is used in FMADD mode only as a `·1.0` add for the dot fold, where it is exact |
+| `Floor/Ceil/Trunc/Round/RoundEven` (8,9,3,1,2) | `f2i`/`i2f` round-trip in the matching rounding mode; NaN and `|x| ≥ 2³¹` pass through |
+| `Fract` (10) | `r(x − floor(x))` |
+| `FAbs` (4) / `FSign` (6) | bit ops / ±1.0, ±0.0, NaN passthrough |
+| `SAbs`, `SSign`, `S/UMin/Max/Clamp` | integer compare + select (wrap to 32 bits) |
+| Integer `IDiv/UDiv/SRem/SMod/UMod` | iterative per-lane divider; div-by-0 returns q=0, r=0 (the observed lavapipe value); `SMod` takes the divisor's sign |
+
+Known 4a integration gaps (unchanged, 5-series follow-ups): the 64-bit
+memory port is fixed 1-cycle latency with no ready/valid; waves run one
+at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
+`APU_SH_DONE_UNSUPPORTED` rather than reading group counts from memory.
+
 ## Action classification (design doc 4c)
 
 `APU_VN_ACT[type]` is a packed `apu_vn_act_t` `{act_class[3:0], obj_kind[5:0], parent_qslot[2:0], cmdbuf_qslot[2:0], flags[7:0]}` (class in the most significant nibble).  `parent_qslot` is the first LOOKUP-role q slot, `cmdbuf_qslot` the q slot holding `commandBuffer` for RECORD/CB_* commands; both use `APU_VN_QSLOT_NONE` (all-ones) when absent.  `flags[0]` = `APU_VN_ACT_F_REPLY` (GENERATE_REPLY: the command has a reply program).

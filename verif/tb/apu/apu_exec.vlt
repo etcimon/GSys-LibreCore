@@ -6,3 +6,17 @@
 lint_off -file "*/core/cvfpu/src/*.sv"
 lint_off -rule UNOPTFLAT -file "*/vendor/pulp-platform/common_cells/src/lzc.sv"
 lint_off -rule BLKANDNBLK -file "*/core/cvfpu/src/fpnew_fma.sv"
+lint_off -rule BLKANDNBLK -file "*/core/cvfpu/src/fpnew_divsqrt_multi.sv"
+lint_off -rule BLKANDNBLK -file "*/core/cvfpu/src/fpnew_cast_multi.sv"
+lint_off -rule BLKANDNBLK -file "*/core/cvfpu/src/fpnew_noncomp.sv"
+lint_off -rule BLKANDNBLK -file "*/core/cvfpu/src/fpnew_divsqrt_th_32.sv"
+lint_off -rule SELRANGE -file "*/core/cvfpu/src/fpnew_divsqrt_multi.sv"
+lint_off -rule UNOPTFLAT -file "*/core/cvfpu/src/fpnew_fma.sv"
+lint_off -rule UNOPTFLAT -file "*/core/cvfpu/src/fpnew_divsqrt_th_32.sv"
+lint_off -rule UNOPTFLAT -file "*/core/cvfpu/src/fpnew_divsqrt_multi.sv"
+lint_off -rule UNOPTFLAT -file "*/core/cvfpu/src/fpnew_cast_multi.sv"
+lint_off -rule UNOPTFLAT -file "*/core/cvfpu/src/fpnew_noncomp.sv"
+lint_off -rule UNOPTFLAT -file "*/core/cvfpu/src/fpu_div_sqrt_mvp/hdl/control_mvp.sv"
+// tc_sram byte-write loop: delayed assign inside for (Verilator
+// limitation; generic tech cell, do not edit).
+lint_off -rule BLKLOOPINIT -file "*/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv"

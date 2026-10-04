@@ -1,0 +1,10 @@
+#version 460
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) buffer Src { uint src[]; };
+layout(set = 0, binding = 1) buffer Dst { uint dst[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint n = src.length();
+    int sh = int(src[i]) >> 2;
+    dst[i] = n + uint(sh) + (src[i] != 0u ? 1u : 0u);
+}

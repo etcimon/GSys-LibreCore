@@ -1,0 +1,15 @@
+#version 460
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) buffer Src { vec4 src[]; };
+layout(set = 0, binding = 1) buffer Dst { float dst[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec4 a = src[i];
+    vec4 b = src[i + 32u];
+    vec4 c = vec4(a.xy, b.wz);
+    vec2 d = c.yx;
+    vec4 e = vec4(d, b.z, a.w);
+    vec4 f = e;
+    f.z = a.x * 3.0;
+    dst[i] = f.x + f.y + f.z + f.w;
+}
