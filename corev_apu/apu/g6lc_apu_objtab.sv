@@ -489,6 +489,22 @@ module g6lc_apu_objtab
                 state_q        <= StMutWr;
               end
             end
+            APU_OBJTAB_OP_SETAUX: begin
+              if (res_st_q != ResOk) begin
+                cpl_q   <= '{status: res_status(res_st_q), handle: '0,
+                             entry: '0};
+                state_q <= StCpl;
+              end else begin
+                wr_ent_q     <= res_ent_q;
+                wr_ent_q.aux <= (res_ent_q.aux & ~64'(req_q.mask)) |
+                                (64'(req_q.value) & 64'(req_q.mask));
+                wr_slot_q    <= res_slot_q;
+                cpl_q        <= '{status: APU_OBJTAB_OK,
+                                  handle: {res_ent_q.gen, res_slot_q},
+                                  entry: res_ent_q};
+                state_q      <= StMutWr;
+              end
+            end
             APU_OBJTAB_OP_SETBIND: begin
               if (res_st_q != ResOk) begin
                 cpl_q   <= '{status: res_status(res_st_q), handle: '0,
@@ -562,7 +578,8 @@ module g6lc_apu_objtab
                         parent_slot: par_slot_q,
                         refcnt: 16'h0, pins: 8'h0, state: 32'h0,
                         bind_mem_slot: APU_OBJTAB_SLOT_NONE,
-                        bind_offset: 64'h0, size: 64'h0, ctx: req_q.ctx};
+                        bind_offset: 64'h0, size: 64'h0,
+                        aux: 64'h0, ctx: req_q.ctx};
           state_q  <= StAllocWrE;
         end
         StAllocWrE: begin

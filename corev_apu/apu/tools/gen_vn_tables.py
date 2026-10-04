@@ -88,6 +88,13 @@ REP_OPS = {'RTYPE': 1, 'RRESULT': 2, 'RU32': 3, 'RU64': 4, 'RHANDLE': 5,
            'RPTR': 6, 'RCONST': 7, 'RCHAIN': 8, 'RBLOB': 9, 'REXBUF': 10,
            'REND': 11, 'RRET': 12, 'REXEC': 13}
 SRC = {'IMM': 0, 'Q': 1, 'CNT': 2, 'CONST': 3, 'EXEC': 4}
+
+# action-table (4c): class enum order is the package's apu_vn_act_e.
+ACT_CLASSES = ['UNSUPPORTED', 'ALLOC', 'RETIRE', 'BIND', 'QUERY',
+               'CB_BEGIN', 'CB_END', 'CB_RESET', 'RECORD', 'SUBMIT',
+               'WAIT', 'POOL_RESET', 'MAP', 'NOP_OK', 'UPDATE']
+ACT_F_REPLY = 0x01          # flags bit: GENERATE_REPLY
+QSLOT_NONE = 0x7            # all-ones sentinel of a 3-bit qslot field
 ROLES = {'LOOKUP': 0, 'NEW': 1, 'RETIRE': 2, 'OPTIONAL': 3}
 
 MAX_Q, MAX_IMM, MAX_CNT, MAX_PRES, MAX_BLOB, MAX_CHAIN = 8, 16, 4, 8, 2, 8
@@ -344,7 +351,12 @@ class Model:
         if size == 4:
             self.emit('U32', self.imm_slot(scope), 0, var.name)
         elif size == 8:
-            self.emit('U64', self.q_slot(scope), 0, var.name)
+            # element-scope u64s discard like u32s: storing them in the
+            # q7 scratch would clobber the last in-element handle there
+            # (e.g. VkDescriptorBufferInfo.buffer) while leaving its
+            # kind/role behind.
+            self.emit('U64', DISCARD if scope else self.q_slot(scope),
+                      0, var.name)
         else:
             raise Unfit('scalar %s has odd size %d' % (var.name, size))
 
@@ -374,6 +386,8 @@ class Model:
         slot = self.q_slot(scope)
         self.emit('HANDLE', (slot << 3) | ROLES[role],
                   self.kind(base.name), '%s:%s' % (var.name, role))
+        if not scope:
+            self.q_info.append((slot, var.name, role))
         return slot
 
     def emit_member(self, parent, var, scope, partial):
@@ -644,6 +658,7 @@ class Model:
         self.pres_map = {}
         self.q_map = {}
         self.blob_map = {}
+        self.q_info = []      # (slot, var name, role) at top scope
         for var in ty.variables:
             self.emit_member(ty, var, False, False)
         # OBJ: the object kind this command allocates/retires, if any
@@ -668,10 +683,78 @@ class Model:
                                      ty.attrs['c_type']),
             'prog': self.prog,
             'reply_id': reply_id,
+            'obj_kind': obj_kind or 0,
+            'q_info': list(self.q_info),
+            'blob_map': dict(self.blob_map),
+            'act': self.act_record(name, obj_kind or 0, reply_id),
             'slots': {k: self.slot_cnt[k] for k in self.slot_cnt},
             'cnt': [n for _, n in []],
         }
         return self.prog
+
+    # ---- action classification (design doc 4c) ------------------------------
+
+    def act_class(self, name):
+        """Class name per the apu-vulkan-engine 4c table; name rules only."""
+        if name.startswith('vkCmd'):
+            return 'RECORD'
+        if name == 'vkBeginCommandBuffer':
+            return 'CB_BEGIN'
+        if name == 'vkEndCommandBuffer':
+            return 'CB_END'
+        if name == 'vkResetCommandBuffer':
+            return 'CB_RESET'
+        if name == 'vkQueueSubmit':
+            return 'SUBMIT'
+        if name in ('vkQueueWaitIdle', 'vkDeviceWaitIdle',
+                    'vkWaitForFences', 'vkGetFenceStatus',
+                    'vkResetFences'):
+            return 'WAIT'
+        if name in ('vkResetCommandPool', 'vkResetDescriptorPool'):
+            return 'POOL_RESET'
+        if name in ('vkMapMemory', 'vkUnmapMemory',
+                    'vkFlushMappedMemoryRanges',
+                    'vkInvalidateMappedMemoryRanges'):
+            return 'MAP'
+        if name in ('vkCreatePipelineCache', 'vkDestroyPipelineCache'):
+            return 'NOP_OK'
+        if name == 'vkUpdateDescriptorSets':
+            return 'UPDATE'
+        if name.startswith('vkBindBufferMemory') or \
+                name.startswith('vkBindImageMemory'):
+            return 'BIND'
+        if name.startswith('vkDestroy') or name.startswith('vkFree'):
+            return 'RETIRE'
+        if name.startswith('vkGetPhysicalDevice') or \
+                name.startswith('vkEnumerate') or \
+                'Requirements' in name or \
+                name in ('vkGetDeviceMemoryCommitment',
+                         'vkGetRenderAreaGranularity',
+                         'vkGetImageSubresourceLayout'):
+            return 'QUERY'
+        if name.startswith('vkCreate') or name.startswith('vkAllocate') \
+                or name.startswith('vkGetDeviceQueue'):
+            return 'ALLOC'
+        return 'UNSUPPORTED'
+
+    def act_record(self, name, obj_kind, reply_id):
+        """{class, obj_kind, parent_qslot, cmdbuf_qslot, flags} word."""
+        cls = self.act_class(name)
+        parent_q = next((s for s, _n, r in self.q_info if r == 'LOOKUP'),
+                        QSLOT_NONE)
+        cb_q = next((s for s, n, _r in self.q_info
+                     if n == 'commandBuffer'), QSLOT_NONE)
+        flags = ACT_F_REPLY if reply_id else 0
+        # flags[1]: encoded blob slot that carries the out ids for a
+        # blob-allocating command (AllocateDescriptorSets puts the out
+        # array in blob 1; AllocateCommandBuffers / Create*Pipelines in
+        # blob 0).  Derived from the reply program's first RBLOB.
+        blob_sel = next((op[1] & 1 for op in
+                         self.reply_progs.get(('reply', name), [])
+                         if op[0] == 'RBLOB'), 0)
+        flags |= blob_sel << 1
+        return {'class': cls, 'obj_kind': obj_kind, 'parent_q': parent_q,
+                'cb_q': cb_q, 'flags': flags}
 
     # ---- reply --------------------------------------------------------------
 
@@ -702,7 +785,23 @@ class Model:
                 ops.append(['RBLOB', self.blob_map.get(var.name, 0), 0,
                             var.name])
             else:
-                ops.append(['REXBUF', SRC['EXEC'], 0, var.name])
+                # b = payload bytes per element (1 for raw blobs); the
+                # reply emits u64 element/byte count then
+                # ceil(count*eb/4) words from the executor buffer
+                if var.is_blob():
+                    eb = 1
+                elif cat in (vkxml.VkType.STRUCT, vkxml.VkType.UNION):
+                    sw = self.struct_words(base) or 0
+                    # chainable elements carry an sType word and a NULL
+                    # pNext u64 in the reply stream
+                    # (vn_decode_<elem> per element); non-empty element
+                    # chains are not representable by REXBUF
+                    if base.s_type:
+                        sw += 3
+                    eb = 4 * sw
+                else:
+                    eb = self.scalar_bytes(base)
+                ops.append(['REXBUF', SRC['EXEC'], eb, var.name])
             return ops
         if var.ty.is_pointer():
             pres = self.pres_map.get(var.name, 0)
@@ -734,6 +833,14 @@ class Model:
     def reply_body(self, ty):
         """Body of a reply out-struct: RCONST profile block or REXEC."""
         words = self.profile_words(ty)
+        if words is None:
+            # *2 wrappers ({sType,pNext,single member}) around a
+            # profile struct reuse the member's profile block
+            mem = [v for v in ty.variables
+                   if v.name not in ('sType', 'pNext')]
+            if len(mem) == 1 and mem[0].ty.base.category in (
+                    vkxml.VkType.STRUCT, vkxml.VkType.UNION):
+                words = self.profile_words(mem[0].ty.base)
         if words is not None:
             idx = self.profile_block(words)
             return [['RCONST', 0, (idx | (len(words) << 16)), ty.name]]
@@ -756,12 +863,15 @@ class Model:
             st = self.stype_values.get(nty.s_type)
             if st is None:
                 continue
-            pkey = ('rbody', nty.name)
+            # reply chain bodies are keyed by (node, parent): Mesa's
+            # *_pnext walks the whole chain against the PARENT's
+            # candidate set, so a node's continuation must look the next
+            # recorded node up in this table (`tbl`), not a per-node one.
+            # RCHAIN is emitted unconditionally so the last body emits
+            # the u64(0) chain terminator.
+            pkey = ('rbody', nty.name, ty.name)
             if pkey not in self.reply_progs:
-                ops = []
-                if any(v.is_p_next() for v in nty.variables):
-                    ops.append(['RCHAIN', 0, self.rchain_tbl(nty),
-                                nty.name])
+                ops = [['RCHAIN', 0, tbl, nty.name]]
                 ops.extend(self.reply_body(nty))
                 ops.append(['RRET', 0, 0, ''])
                 self.reply_progs[pkey] = ops
@@ -800,11 +910,14 @@ class Model:
                 dim = int(str(dim_s), 0)
             except ValueError:
                 dim = self.const_int(dim_s)
+            # every static member array carries a u64 array_size(dim)
+            # marker before its elements on the wire (Mesa emits
+            # vn_encode_array_size(dim) in both directions)
             if cat in (vkxml.VkType.STRUCT, vkxml.VkType.UNION):
                 n = self.struct_words(base, depth)
-                return None if n is None else n * dim
+                return None if n is None else 2 + n * dim
             sz = self.scalar_bytes(base)
-            return (dim * sz + 3) // 4
+            return 2 + (dim * sz + 3) // 4
         if cat in (vkxml.VkType.STRUCT, vkxml.VkType.UNION):
             return self.struct_words(base, depth)
         sz = self.scalar_bytes(base)
@@ -837,9 +950,11 @@ class Model:
                         dim = self.const_int(dim_s)
                     seq = val if isinstance(val, list) else [0] * dim
                     seq = (seq + [0] * dim)[:dim]
-                    out += [self.num_word(v.ty.base, x) for x in seq]
+                    out += [dim, 0]
+                    for x in seq:
+                        out += self.num_words(v.ty.base, x)
                 else:
-                    out.append(self.num_word(v.ty.base, val))
+                    out += self.num_words(v.ty.base, val)
             return out
         if name == 'VkPhysicalDeviceSparseProperties':
             return [0] * 5
@@ -857,12 +972,12 @@ class Model:
                 for t in v.split('|'):
                     r |= mhf['VK_MEMORY_HEAP_' + t + '_BIT']
                 return r
-            words = [2,
+            words = [2, 32, 0,
                      mp(mem.get('type0_flags', 'DEVICE_LOCAL')), 0,
                      mp(mem.get('type1_flags',
                                 'HOST_VISIBLE|HOST_COHERENT')), 0]
             words += [0, 0] * 30
-            words += [1]
+            words += [1, 16, 0]
             size = int(mem.get('heap0_size', 0))
             words += [size & 0xFFFFFFFF, (size >> 32) & 0xFFFFFFFF,
                       mh('DEVICE_LOCAL')]
@@ -889,8 +1004,10 @@ class Model:
                         str(d.get('deviceType', 'OTHER'))]]
             nm = str(d.get('deviceName', '')).encode()[:255]
             nm += b'\0' * (256 - len(nm))
+            words += [256, 0]
             for i in range(0, 256, 4):
                 words.append(int.from_bytes(nm[i:i + 4], 'little'))
+            words += [16, 0]
             words += [0] * 4
             words += self.profile_words(
                 self.reg.type_table['VkPhysicalDeviceLimits'])
@@ -911,6 +1028,14 @@ class Model:
             import struct as _s
             return int.from_bytes(_s.pack('<f', float(val)), 'little')
         return int(val) & 0xFFFFFFFF
+
+    def num_words(self, base, val):
+        """Profile words for one scalar member: 2 words for 8-byte
+        types (VkDeviceSize et al.), else 1."""
+        if self.scalar_bytes(base) == 8:
+            v = int(val) & 0xFFFFFFFFFFFFFFFF
+            return [v & 0xFFFFFFFF, (v >> 32) & 0xFFFFFFFF]
+        return [self.num_word(base, val)]
 
     # ---- driver ---------------------------------------------------------------
 
@@ -1131,6 +1256,61 @@ def emit_sv(model, asm, profile):
     arr(32, 'APU_VN_PROFILE', '[0:APU_VN_PROFILE_WORDS-1]',
         model.profile_words_pool, lambda w: "32'h%08X" % w)
     A('')
+    # generated index widths (clog2 of each table's word count); RTL must
+    # index generated ROMs/tables through these, not hard-coded slices
+    A('  localparam int APU_VN_DEC_MPC_AW = '
+      '$clog2(APU_VN_DEC_ROM_WORDS);')
+    A('  localparam int APU_VN_REPLY_MPC_AW = '
+      '$clog2(APU_VN_REPLY_ROM_WORDS);')
+    A('  localparam int APU_VN_CHAIN_AW = $clog2(APU_VN_CHAIN_WORDS);')
+    A('  localparam int APU_VN_CONST_AW = $clog2(APU_VN_CONST_WORDS);')
+    A('  localparam int APU_VN_ARRMETA_AW = '
+      '$clog2(APU_VN_ARRMETA_WORDS);')
+    A('  localparam int APU_VN_BLOBMETA_AW = '
+      '$clog2(APU_VN_BLOBMETA_WORDS);')
+    A('  localparam int APU_VN_PROFILE_AW = '
+      '$clog2(APU_VN_PROFILE_WORDS);')
+    A('')
+    # action table (design doc 4c): one packed record per command type
+    A('  typedef enum logic [3:0] {')
+    for i, cls in enumerate(ACT_CLASSES):
+        A('    APU_VN_ACT_%s = %d%s'
+          % (cls, i, ',' if i < len(ACT_CLASSES) - 1 else ''))
+    A('  } apu_vn_act_e;')
+    A('  localparam logic [7:0] APU_VN_ACT_F_REPLY = 8\'h%02X;'
+      % ACT_F_REPLY)
+    A('  localparam logic [2:0] APU_VN_QSLOT_NONE = 3\'h7;')
+    A('  typedef struct packed {')
+    A('    apu_vn_act_e act_class;')
+    A('    logic [5:0]  obj_kind;')
+    A('    logic [2:0]  parent_qslot;')
+    A('    logic [2:0]  cmdbuf_qslot;')
+    A('    logic [7:0]  flags;')
+    A('  } apu_vn_act_t;')
+    act_words = []
+    act_notes = []
+    for t in range(max_type + 1):
+        if t in type_to_cmd:
+            a = model.cmd_info[type_to_cmd[t]]['act']
+            w = (ACT_CLASSES.index(a['class']) << 20) | \
+                ((a['obj_kind'] & 0x3F) << 14) | \
+                ((a['parent_q'] & 7) << 11) | \
+                ((a['cb_q'] & 7) << 8) | (a['flags'] & 0xFF)
+            act_words.append("24'h%06X" % w)
+            act_notes.append('%s kind=%d pq=%d cq=%d f=%02X'
+                             % (a['class'], a['obj_kind'], a['parent_q'],
+                                a['cb_q'], a['flags']))
+        else:
+            act_words.append("24'h000000")
+            act_notes.append('unsupported')
+    if act_words:
+        A('  localparam apu_vn_act_t APU_VN_ACT '
+          '[0:APU_VN_DEC_TYPE_MAX] = \'{')
+        for i, w in enumerate(act_words):
+            comma = ',' if i < len(act_words) - 1 else ''
+            A('    %s%s // %s' % (w, comma, act_notes[i]))
+        A('  };')
+    A('')
     # decode fault classes and the decoded-operation record
     A('  typedef enum logic [3:0] {')
     A('    APU_VN_FAULT_NONE = 0,')
@@ -1280,14 +1460,46 @@ def emit_md(model, asm, unfit):
       '+ all extensions advertised).  Result at last run: **480/480 '
       'instances byte-identical** (seeds 1 and 2, 4 instances/command).')
     A('')
+    A('## Action classification (design doc 4c)')
+    A('')
+    A('`APU_VN_ACT[type]` is a packed `apu_vn_act_t` '
+      '`{act_class[3:0], obj_kind[5:0], parent_qslot[2:0], '
+      'cmdbuf_qslot[2:0], flags[7:0]}` (class in the most significant '
+      'nibble).  `parent_qslot` is the first LOOKUP-role q slot, '
+      '`cmdbuf_qslot` the q slot holding `commandBuffer` for RECORD/'
+      'CB_* commands; both use `APU_VN_QSLOT_NONE` (all-ones) when '
+      'absent.  `flags[0]` = `APU_VN_ACT_F_REPLY` (GENERATE_REPLY: the '
+      'command has a reply program).')
+    A('')
+    by_cls = {}
+    for name, info in model.cmd_info.items():
+        by_cls.setdefault(info['act']['class'], []).append(name)
+    for cls in ACT_CLASSES:
+        names = by_cls.get(cls, [])
+        if not names:
+            continue
+        A('### %s (%d)' % (cls, len(names)))
+        A('')
+        for n in names:
+            a = model.cmd_info[n]['act']
+            A('- `%s` (kind=%d, parent_q=%s, cmdbuf_q=%s, flags=0x%02X)'
+              % (n, a['obj_kind'],
+                 'none' if a['parent_q'] == QSLOT_NONE else a['parent_q'],
+                 'none' if a['cb_q'] == QSLOT_NONE else a['cb_q'],
+                 a['flags']))
+        A('')
+    if 'UNSUPPORTED' in by_cls:
+        A('`UNSUPPORTED` commands reach the front-end and return '
+          '`VK_ERROR_FEATURE_NOT_PRESENT` (no reply program is run).')
+        A('')
     A('## Per-command maps')
     A('')
     for name, info in model.cmd_info.items():
         prog = info['prog']
         mpc = asm['entry_of_cmd'][name]
-        A('### %s — type %d, mpc %d..%d, reply %d'
+        A('### %s — type %d, mpc %d..%d, reply %d, act %s'
           % (name, info['type_id'], mpc, mpc + len(prog) - 1,
-             info['reply_id']))
+             info['reply_id'], info['act']['class']))
         A('')
         A('| op | a | b | note |')
         A('|---|---|---|---|')

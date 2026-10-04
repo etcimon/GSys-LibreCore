@@ -135,14 +135,14 @@ module g6lc_apu_vndec
     logic [7:0]    rom_op, rom_a;
     logic [31:0]   rom_b;
     assign rom_w  = 32'(mpc_q) < APU_VN_DEC_ROM_WORDS
-                    ? APU_VN_DEC_ROM[mpc_q[10:0]] : 48'h0;
+                    ? APU_VN_DEC_ROM[mpc_q[APU_VN_DEC_MPC_AW-1:0]] : 48'h0;
     assign rom_op = rom_w[47:40];
     assign rom_a  = rom_w[39:32];
     assign rom_b  = rom_w[31:0];
 
     logic [47:0]   chain_w;
     assign chain_w = 32'(scan_q) < APU_VN_CHAIN_WORDS
-                     ? APU_VN_CHAIN[scan_q[7:0]] : 48'h0;
+                     ? APU_VN_CHAIN[scan_q[APU_VN_CHAIN_AW-1:0]] : 48'h0;
 
     logic [15:0]   ent_mpc;
     // consumed in StHdrFlags: rdata there is the flags word, so the
@@ -154,7 +154,7 @@ module g6lc_apu_vndec
     logic [71:0]   blob_prod;
     logic [31:0]   blob_meta;
     assign blob_meta = rom_b < APU_VN_BLOBMETA_WORDS
-                       ? APU_VN_BLOBMETA[rom_b[2:0]] : 32'h0;
+                       ? APU_VN_BLOBMETA[rom_b[APU_VN_BLOBMETA_AW-1:0]] : 32'h0;
     assign blob_prod = 72'({cs_rdata_i, tmp_q}) * 72'(blob_meta[7:0]);
     logic [33:0] blob_wn;
     assign blob_wn = (blob_prod[33:0] + 34'd3) >> 2;
@@ -375,7 +375,7 @@ module g6lc_apu_vndec
                 rec_q.fault_val  <= 32'(mpc_q);
                 rec_q.words      <= pos_q;
                 state_q          <= StDone;
-              end else if (cs_rdata_i != APU_VN_CONST[rom_b[6:0]]) begin
+              end else if (cs_rdata_i != APU_VN_CONST[rom_b[APU_VN_CONST_AW-1:0]]) begin
                 rec_q.fault      <= APU_VN_FAULT_STYPE;
                 rec_q.fault_word <= pos_q - 16'd1;
                 rec_q.fault_val  <= cs_rdata_i;
@@ -390,7 +390,7 @@ module g6lc_apu_vndec
                 rec_q.fault_val  <= 32'(mpc_q);
                 rec_q.words      <= pos_q;
                 state_q          <= StDone;
-              end else if ((cs_rdata_i & ~APU_VN_CONST[rom_b[6:0]]) != 32'h0) begin
+              end else if ((cs_rdata_i & ~APU_VN_CONST[rom_b[APU_VN_CONST_AW-1:0]]) != 32'h0) begin
                 rec_q.fault      <= APU_VN_FAULT_FLAGS;
                 rec_q.fault_word <= pos_q - 16'd1;
                 rec_q.fault_val  <= cs_rdata_i;
@@ -408,7 +408,7 @@ module g6lc_apu_vndec
                 rec_q.fault_val  <= 32'(mpc_q);
                 rec_q.words      <= pos_q;
                 state_q          <= StDone;
-              end else if (cs_rdata_i != APU_VN_CONST[rom_b[6:0]]) begin
+              end else if (cs_rdata_i != APU_VN_CONST[rom_b[APU_VN_CONST_AW-1:0]]) begin
                 rec_q.fault      <= APU_VN_FAULT_STYPE;
                 rec_q.fault_word <= pos_q - 16'd1;
                 rec_q.fault_val  <= cs_rdata_i;
@@ -489,7 +489,7 @@ module g6lc_apu_vndec
                 rec_q.words      <= pos_q;
                 state_q          <= StDone;
               end else if ({cs_rdata_i, tmp_q} >
-                           64'(APU_VN_ARRMETA[rom_b[2:0]])) begin
+                           64'(APU_VN_ARRMETA[rom_b[APU_VN_ARRMETA_AW-1:0]])) begin
                 rec_q.fault      <= APU_VN_FAULT_BOUND;
                 rec_q.fault_word <= pos_q - 16'd2;
                 rec_q.fault_val  <= tmp_q;

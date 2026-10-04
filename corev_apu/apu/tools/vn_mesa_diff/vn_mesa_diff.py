@@ -52,6 +52,7 @@ def load_model():
     if unfit:
         print('unfit commands:', unfit, file=sys.stderr)
     model, asm = V.build_assembly(model)
+    model._asm = asm
     enc = V.Enc(model)
     commands = {t.name: t for t in
                 model.gen.supported_types[vkxml.VkType.COMMAND]}
@@ -90,6 +91,11 @@ class CEmit:
         self.types = types
         self.decls = []
         self.n = 0
+        self.writable = False   # reply-decode: out args must be non-const
+        self.cmdvars = {}
+
+    def _const(self, cond):
+        return '' if self.writable else ('const ' if cond else '')
 
     def fresh(self, hint):
         self.n += 1
@@ -132,7 +138,7 @@ class CEmit:
             return 'NULL'
         base = var.ty.base
         if var.is_blob():
-            const = 'const ' if var.ty.is_const_pointer() else ''
+            const = self._const(var.ty.is_const_pointer())
             name = self.fresh('blob')
             self.decls.append('%suint8_t %s[%d] = {%s};'
                               % (const, name, len(elems),
@@ -149,7 +155,7 @@ class CEmit:
         if var.has_c_string():
             return cstr(elems if isinstance(elems, str)
                         else bytes(elems).decode())
-        const = 'const ' if var.ty.is_const_pointer() else ''
+        const = self._const(var.ty.is_const_pointer())
         if isinstance(elems, str):
             elems = list(elems.encode())
         name = self.fresh('arr')
@@ -176,8 +182,9 @@ class CEmit:
                 parts.append('.%s=%s'
                              % (var.name,
                                 self.member_init(ty, var, node.get(var.name))))
-            self.decls.append('const %s %s = {%s};'
-                              % (ty.name, names[i], ','.join(parts)))
+            self.decls.append('%s%s %s = {%s};'
+                              % (self._const(True), ty.name, names[i],
+                                 ','.join(parts)))
         return '&%s' % names[0]
 
     def member_init(self, parent_ty, var, val):
@@ -196,7 +203,7 @@ class CEmit:
         if var.ty.is_pointer():
             if val is None or not self.m.gen.is_serializable(base):
                 return 'NULL'
-            const = 'const ' if var.ty.is_const_pointer() else ''
+            const = self._const(var.ty.is_const_pointer())
             name = self.fresh('p')
             if cat in (vkxml.VkType.STRUCT, vkxml.VkType.UNION):
                 self.decls.append('%s%s %s = %s;'
@@ -258,7 +265,7 @@ class CEmit:
             return 'NULL'
         if var.has_c_string():
             return cstr(val if isinstance(val, str) else bytes(val).decode())
-        const = 'const ' if var.ty.is_const_pointer() else ''
+        const = self._const(var.ty.is_const_pointer())
         name = self.fresh('p')
         if cat in (vkxml.VkType.STRUCT, vkxml.VkType.UNION):
             self.decls.append('%s%s %s = %s;'
@@ -273,6 +280,204 @@ class CEmit:
                               % (const, base.name, name,
                                  self.scalar_lit(base, val)))
         return '&%s' % name
+
+    # ---- reply decode/re-encode (vn_decode_vkX_reply) -----------------------
+
+    def command_reply_call(self, ty, args):
+        """Decls + the vn_decode_<cmd>_reply call."""
+        self.decls = []
+        self.arg_expr = {}
+        arg_exprs = []
+        for var in ty.variables:
+            val = args.get(var.name)
+            if var.ty.is_pointer():
+                expr = self.dyn_array(var, val) \
+                    if (var.is_dynamic_array() or var.is_blob()) \
+                    else self.ptr_arg(var, val)
+            else:
+                expr = self.member_init(ty, var, val)
+            self.arg_expr[var.name] = expr
+            arg_exprs.append(expr)
+        if ty.ret:
+            call = 'VkResult ret = vn_decode_%s_reply(&dec%s%s);' \
+                % (ty.name, ', ' if arg_exprs else '',
+                   ', '.join(arg_exprs))
+        else:
+            call = 'vn_decode_%s_reply(&dec%s%s); ' \
+                   'VkResult ret = VK_SUCCESS;' \
+                % (ty.name, ', ' if arg_exprs else '',
+                   ', '.join(arg_exprs))
+        return list(self.decls), call
+
+    def len_expr(self, var):
+        """C expr for the element count of an out array member."""
+        e = var.attrs['len_names'][0]
+        if '->' in e:
+            head, rest = e.split('->', 1)
+            he = self.arg_expr.get(head, head)
+            return '0' if he == 'NULL' else '(%s)->%s' % (he, rest)
+        v = self.cmdvars.get(e)
+        if v is not None and v.ty.is_pointer():
+            x = self.arg_expr.get(e, e)
+            return '0' if x == 'NULL' else '(%s ? *%s : 0)' % (x, x)
+        return self.arg_expr.get(e, e)
+
+    def reenc_member(self, var, m, out, depth):
+        """Re-encode one member value; m is a C lvalue for it."""
+        base = var.ty.base
+        cat = base.category
+        if var.ty.is_static_array():
+            dim = str(var.ty.static_array_size())
+            out.append('vn_encode_array_size(&enc2, %s);' % dim)
+            if cat in (vkxml.VkType.STRUCT, vkxml.VkType.UNION):
+                out.append('for (uint32_t _i = 0; _i < (%s); _i++) {'
+                           % dim)
+                if cat == vkxml.VkType.UNION:
+                    self.reenc_union(base, '(&(%s)[_i])' % m, out,
+                                     depth + 1)
+                else:
+                    self.reenc_members(base, '(&(%s)[_i])' % m, out,
+                                       depth + 1)
+                out.append('}')
+            elif base.name == 'char':
+                out.append('vn_encode_char_array(&enc2, %s, %s);'
+                           % (m, dim))
+            elif base.name == 'uint8_t':
+                out.append('vn_encode_uint8_t_array(&enc2, %s, %s);'
+                           % (m, dim))
+            else:
+                en = 'VkFlags' if cat == vkxml.VkType.BITMASK \
+                    else base.name
+                out.append('for (uint32_t _i = 0; _i < (%s); _i++) '
+                           'vn_encode_%s(&enc2, &(%s)[_i]);'
+                           % (dim, en, m))
+        elif cat == vkxml.VkType.UNION:
+            self.reenc_union(base, '(&(%s))' % m, out, depth + 1)
+        elif cat == vkxml.VkType.STRUCT:
+            self.reenc_members(base, '(&(%s))' % m, out, depth + 1)
+        else:
+            en = 'VkFlags' if cat == vkxml.VkType.BITMASK \
+                else base.name
+            out.append('vn_encode_%s(&enc2, &(%s));' % (en, m))
+
+    def reenc_union(self, base, xa, out, depth):
+        tag = vn_protocol.Gen.UNION_DEFAULT_TAGS.get(base.name)
+        if tag is None:
+            n = self.m.struct_words(base) or 0
+            out.append('vn_encode_blob_array(&enc2, %s, %d);'
+                       % (xa, n * 4))
+            return
+        out.append('vn_encode_uint32_t(&enc2, &(const uint32_t){%d});'
+                   % tag)
+        self.reenc_member(base.variables[tag],
+                          '(%s)->%s' % (xa, base.variables[tag].name),
+                          out, depth)
+
+    def reenc_members(self, ty, xa, out, depth=0):
+        """Member-level re-encode mirroring vn_decode_<ty> member order;
+        sType/pNext are handled by the caller (chain structure)."""
+        for var in ty.variables:
+            if var.name in ('sType', 'pNext'):
+                continue
+            self.reenc_member(var, '(%s)->%s' % (xa, var.name), out,
+                              depth)
+
+    def reenc_outstruct(self, base, x, out, depth):
+        """Re-encode a decoded out-struct: sType + flat pNext chain
+        (headers forward, bodies in reverse, matching Mesa's
+        vn_encode_<ty>_pnext_partial order) + member body."""
+        if base.s_type:
+            out.append('vn_encode_VkStructureType(&enc2, '
+                       '&(%s)->sType);' % x)
+        if base.s_type and any(v.is_p_next() for v in base.variables):
+            cands = [nty for nty in base.p_next
+                     if self.m.gen.is_serializable(nty)
+                     and self.m.core_le_11(nty)
+                     and nty.s_type in self.m.stype_values]
+            out.append('{ const VkBaseOutStructure *_pns[16]; '
+                       'uint32_t _pnn = 0;')
+            out.append('for (const VkBaseOutStructure *_p = '
+                       '(const void *)(%s)->pNext; _p && _pnn < 16; '
+                       '_p = _p->pNext) _pns[_pnn++] = _p;' % x)
+            out.append('for (uint32_t _i = 0; _i < _pnn; _i++) { '
+                       'vn_encode_simple_pointer(&enc2, _pns[_i]); '
+                       'vn_encode_VkStructureType(&enc2, '
+                       '&_pns[_i]->sType); }')
+            out.append('vn_encode_simple_pointer(&enc2, NULL);')
+            out.append('while (_pnn--) switch '
+                       '((int32_t)_pns[_pnn]->sType) {')
+            for nty in cands:
+                st = self.m.stype_values[nty.s_type]
+                out.append('case %d: { const %s *_q = '
+                           '(const %s *)(const void *)_pns[_pnn];'
+                           % (st, nty.name, nty.name))
+                self.reenc_members(nty, '_q', out, depth + 1)
+                out.append('} break;')
+            out.append('default: break; } }')
+        self.reenc_members(base, x, out, depth)
+
+    def reply_reenc(self, ty):
+        """C lines re-encoding every decoded out param, mirroring the
+        reply layout (presence word + body / array_size + elements)."""
+        out = []
+        for var in ty.variables:
+            if 'var_out' not in var.attrs:
+                continue
+            n = self.arg_expr[var.name]
+            base = var.ty.base
+            if var.is_blob():
+                cnt = self.len_expr(var)
+                out.append('vn_encode_array_size(&enc2, %s ? '
+                           '(size_t)(%s) : 0);' % (n, cnt))
+                out.append('if (%s) vn_encode_blob_array(&enc2, %s, %s);'
+                           % (n, n, cnt))
+            elif var.is_dynamic_array():
+                cnt = self.len_expr(var)
+                if n == 'NULL':
+                    out.append('vn_encode_array_size(&enc2, 0);')
+                    continue
+                out.append('vn_encode_array_size(&enc2, %s ? '
+                           '(size_t)(%s) : 0);' % (n, cnt))
+                if base.category in (vkxml.VkType.STRUCT,
+                                     vkxml.VkType.UNION):
+                    out.append('if (%s) for (uint32_t _i = 0; _i < (%s); '
+                               '_i++) {' % (n, cnt))
+                    if base.category == vkxml.VkType.UNION:
+                        self.reenc_union(base, '(&(%s)[_i])' % n, out, 0)
+                    else:
+                        self.reenc_outstruct(base, '(&(%s)[_i])' % n,
+                                             out, 0)
+                    out.append('}')
+                else:
+                    en = 'VkFlags' if base.category == \
+                        vkxml.VkType.BITMASK else base.name
+                    out.append('if (%s) for (uint32_t _i = 0; _i < '
+                               '(%s); _i++) vn_encode_%s(&enc2, '
+                               '&(%s)[_i]);' % (n, cnt, en, n))
+            else:
+                if base.category == vkxml.VkType.STRUCT:
+                    if n == 'NULL':
+                        out.append('vn_encode_simple_pointer(&enc2, '
+                                   'NULL);')
+                        continue
+                    out.append('if (vn_encode_simple_pointer(&enc2, '
+                               '%s)) {' % n)
+                    self.reenc_outstruct(base, n, out, 0)
+                    out.append('}')
+                elif base.category == vkxml.VkType.UNION:
+                    if n == 'NULL':
+                        out.append('vn_encode_simple_pointer(&enc2, '
+                                   'NULL);')
+                        continue
+                    out.append('if (vn_encode_simple_pointer(&enc2, '
+                               '%s)) {' % n)
+                    self.reenc_union(base, n, out, 0)
+                    out.append('}')
+                else:
+                    out.append('if (vn_encode_simple_pointer(&enc2, '
+                               '%s)) vn_encode_%s(&enc2, %s);'
+                               % (n, base.name, n))
+        return out
 
 
 PREAMBLE = '''\
@@ -322,6 +527,238 @@ def emit_harness(insts, commands, model, types):
         lines.append('   }\n')
     lines.append('   return 0;\n}\n')
     return ''.join(lines)
+
+
+REPLY_PREAMBLE = '''\
+/* Generated by vn_mesa_diff.py --reply. */
+#include <stdio.h>
+#include <string.h>
+#include "vn_cs.h"
+#include "vn_ring.h"
+#include "vn_protocol_driver.h"
+
+uint64_t vn_hid_log[256];
+uint32_t vn_hid_log_n;
+
+static void
+dump(struct vn_cs_encoder *enc, const char *cmd, int i)
+{
+   size_t k;
+   printf("// %s %d\\n", cmd, i);
+   for (k = 0; k + 4 <= enc->len; k += 4) {
+      uint32_t w;
+      memcpy(&w, enc->buf + k, 4);
+      printf("%08X\\n", w);
+   }
+   printf("// end\\n");
+}
+
+int
+main(void)
+{
+   static uint8_t buf[8u << 20];
+   struct vn_cs_encoder enc2;
+   struct vn_cs_decoder dec;
+'''
+
+
+def emit_reply_harness(insts, commands, model, types):
+    lines = [REPLY_PREAMBLE]
+    for inst in insts:
+        name = inst['cmd']
+        ty = commands[name]
+        em = CEmit(model, types)
+        em.writable = True
+        em.cmdvars = {v.name: v for v in ty.variables}
+        decls, call = em.command_reply_call(ty, inst['targs'])
+        rep = inst['rep']
+        lines.append('   {\n')
+        for d in decls:
+            lines.append('      %s\n' % d)
+        lines.append('      static const uint32_t rep[] = {%s};\n'
+                     % ','.join('0x%08Xu' % w for w in rep))
+        lines.append('      dec.buf = (const uint8_t *)rep; '
+                     'dec.len = sizeof(rep); dec.pos = 0; '
+                     'dec.fatal = false;\n')
+        lines.append('      vn_hid_log_n = 0;\n')
+        lines.append('      enc2.buf = buf; enc2.len = 0; '
+                     'enc2.cap = sizeof(buf);\n')
+        lines.append('      %s\n' % call)
+        lines.append('      printf("R %%s %%d %%08X %%d %%d\\n", "%s", '
+                     '%d, (uint32_t)ret, (int)dec.pos, '
+                     'dec.fatal ? 1 : 0);\n' % (name, inst['i']))
+        for line in em.reply_reenc(ty):
+            lines.append('      %s\n' % line)
+        lines.append('      dump(&enc2, "%s", %d);\n'
+                     % (name, inst['i']))
+        lines.append('   }\n')
+    lines.append('   return 0;\n}\n')
+    return ''.join(lines)
+
+
+def parse_reply_output(text):
+    """-> list of {'cmd','i','ret','pos','fatal','words'}."""
+    insts = []
+    cur = None
+    pending = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith('R '):
+            p = line.split()
+            pending = {'cmd': p[1], 'i': int(p[2]),
+                       'ret': int(p[3], 16), 'pos': int(p[4]),
+                       'fatal': int(p[5])}
+        elif line.startswith('// '):
+            parts = line[3:].split()
+            if parts and parts[0] == 'end':
+                if cur:
+                    insts.append(cur)
+                    cur = None
+            elif pending is not None:
+                cur = dict(pending)
+                cur['words'] = []
+                pending = None
+        elif re.fullmatch(r'[0-9a-fA-F]{8}', line) and cur is not None:
+            cur['words'].append(int(line, 16))
+    return insts
+
+
+def reply_diff(a, model, enc, types, commands, mesa_dir, vk_dir):
+    """Decode golden reply streams with Mesa's vn_decode_vkX_reply and
+    re-encode the decoded out params; compare with the golden bytes."""
+    asm = model._asm
+    sim = V.Sim(model, asm)
+    rep_sim = V.ReplySim(model, asm)
+    if a.session:
+        # Mesa-decode the generated session's golden replies: rebuild the
+        # session with the same seed and feed its replying instances to
+        # the reply harness below.
+        rng = random.Random(int(a.session[1]))
+        gen = V.ArgGen(model, rng)
+        cmds, _fm = V.build_session(model, asm, sim, rep_sim, enc, gen,
+                                    rng)
+        insts = []
+        for c in cmds:
+            out = c['out']
+            if out['rep']:
+                insts.append({'cmd': c['name'], 'i': len(insts),
+                              'targs': c['args'], 'rep': out['rep'],
+                              'result': out['result'], 'ty': c['ty'],
+                              'exec_w': []})
+        print('session %s: %d commands, %d replying'
+              % (a.session[0], len(cmds), len(insts)))
+    else:
+        rng = random.Random(a.seed)
+        insts = []
+        for cmd in model.cmd_progs:
+            info = model.cmd_info[cmd]
+            if not info['reply_id']:
+                continue
+            ty = commands[cmd]
+            for i in range(a.per_cmd):
+                g = V.ArgGen(model, rng)
+                args = g.gen_command(cmd)
+                args['_flags'] = 1   # VK_COMMAND_GENERATE_REPLY_BIT_EXT
+                if i == 1:
+                    # NULL-out arm: only params vk.xml marks optional at
+                    # the top pointer level may legally be NULL; forcing
+                    # a required out NULL produces an invalid call Mesa's
+                    # decoder handles differently (expected array_size 0)
+                    ov = next((v.name for v in ty.variables
+                               if 'var_out' in v.attrs
+                               and (v.attrs.get('optional') or ['false'])[0]
+                               == 'true'), None)
+                    if ov:
+                        args[ov] = None
+                if cmd == 'vkGetQueryPoolResults':
+                    args['dataSize'] = rng.randint(0, 16)
+                    args['pData'] = rng.randbytes(args['dataSize'])
+                words = enc.command(ty, args)
+                rec = sim.run(words)
+                if rec['fault']:
+                    continue
+                result = rng.getrandbits(32)
+                exec_w, rep = V.gen_reply_exec(
+                    model, asm, rep_sim, cmd, ty, words, rec, result, rng)
+                insts.append({'cmd': cmd, 'i': i, 'targs': args,
+                              'rep': rep, 'result': result, 'ty': ty,
+                              'exec_w': exec_w})
+    print('reply instances: %d' % len(insts))
+
+    c_text = emit_reply_harness(insts, commands, model, types)
+    c_path = a.out_dir / 'harness_reply_gen.c'
+    c_path.write_text(c_text)
+    print('wrote %s (%d lines)' % (c_path, c_text.count('\n')))
+
+    mode, gcc = find_gcc()
+    if not gcc:
+        print('FATAL: no gcc (local PATH or WSL) found')
+        return 2
+    print('gcc: %s (%s)' % (gcc, mode))
+    exe_path = a.out_dir / ('harness_reply.exe'
+                            if mode == 'local' else 'harness_reply')
+    r = compile_harness(mode, gcc, c_path, exe_path, mesa_dir, vk_dir,
+                        HERE)
+    (a.out_dir / 'compile_reply.log').write_text(r.stdout + r.stderr)
+    if r.returncode != 0:
+        print('COMPILE FAILED — see %s' % (a.out_dir / 'compile_reply.log'))
+        print((r.stdout + r.stderr)[-4000:])
+        return 2
+    r = run_harness(mode, exe_path)
+    (a.out_dir / 'harness_reply.hex').write_text(r.stdout)
+    if r.returncode != 0:
+        print('HARNESS RUN FAILED rc=%d' % r.returncode)
+        print(r.stderr[-2000:])
+        print(r.stdout[-2000:])
+        return 2
+    mesa_insts = parse_reply_output(r.stdout)
+    print('mesa reply instances parsed: %d' % len(mesa_insts))
+
+    per_cmd = {}
+    fails = []
+    for gi, mi in zip(insts, mesa_insts):
+        name = gi['cmd']
+        per_cmd.setdefault(name, [0, 0])
+        ty = gi['ty']
+        prefix = 1 + (1 if ty.ret else 0)
+        exp = gi['rep'][prefix:]
+        prob = []
+        if mi['cmd'] != name or mi['i'] != gi['i']:
+            prob.append('order')
+        if ty.ret and mi['ret'] != gi['result']:
+            prob.append('ret %08X!=%08X' % (mi['ret'], gi['result']))
+        if mi['pos'] != len(gi['rep']) * 4:
+            prob.append('pos %d!=%d' % (mi['pos'], len(gi['rep']) * 4))
+        if mi['fatal']:
+            prob.append('fatal')
+        if mi['words'] != exp:
+            k = next((k for k in range(max(len(exp), len(mi['words'])))
+                      if k >= len(exp) or k >= len(mi['words'])
+                      or exp[k] != mi['words'][k]), -1)
+            prob.append('reenc word %d golden=%s mesa=%s'
+                        % (k,
+                           '%08X' % exp[k] if k < len(exp) else '-',
+                           '%08X' % mi['words'][k]
+                           if k < len(mi['words']) else '-'))
+        if prob:
+            per_cmd[name][1] += 1
+            fails.append((name, gi['i'], prob))
+        else:
+            per_cmd[name][0] += 1
+    npass = sum(v[0] for v in per_cmd.values())
+    nfail = sum(v[1] for v in per_cmd.values())
+    for name in sorted(per_cmd):
+        p, f = per_cmd[name]
+        if f:
+            print('FAIL %s %d/%d' % (name, p, p + f))
+    for name, i, prob in fails[:20]:
+        print('  %s #%d: %s' % (name, i, '; '.join(prob)))
+    print('reply differential: %d pass, %d fail of %d'
+          % (npass, nfail, npass + nfail))
+    (a.out_dir / 'reply_diff.log').write_text(
+        '\n'.join('%s #%d: %s' % (n, i, '; '.join(p))
+                  for n, i, p in fails) + '\n')
+    return 1 if nfail else 0
 
 
 def wsl_path(p):
@@ -456,6 +893,12 @@ def main():
     ap.add_argument('--per-cmd', type=int, default=4)
     ap.add_argument('--command-set', type=Path, default=None)
     ap.add_argument('--keep-exe', action='store_true')
+    ap.add_argument('--reply', action='store_true',
+                    help='reply differential: Mesa vn_decode_vkX_reply '
+                         'on golden reply bytes + re-encode compare')
+    ap.add_argument('--session', nargs=2, metavar=('NAME', 'SEED'),
+                    help='with --reply: decode the generated session\'s '
+                         'replies instead of random instances')
     a = ap.parse_args()
 
     a.out_dir.mkdir(parents=True, exist_ok=True)
@@ -465,6 +908,10 @@ def main():
     model, enc, types, commands, command_set = load_model()
     if a.command_set:
         command_set = model.read_command_set(a.command_set)
+
+    if a.reply:
+        return reply_diff(a, model, enc, types, commands, mesa_dir,
+                          vk_dir)
 
     print('commands: %d, instances: %d'
           % (len(command_set), len(command_set) * a.per_cmd))

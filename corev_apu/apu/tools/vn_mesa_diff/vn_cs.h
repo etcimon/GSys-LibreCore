@@ -54,6 +54,9 @@ vn_cs_encoder_write(struct vn_cs_encoder *enc, size_t size,
 }
 
 struct vn_cs_decoder {
+   const uint8_t *buf;
+   size_t len;
+   size_t pos;
    bool fatal;
 };
 
@@ -67,16 +70,30 @@ static inline void
 vn_cs_decoder_read(struct vn_cs_decoder *dec, size_t size,
                    void *data, size_t data_size)
 {
-   (void)dec; (void)size; (void)data; (void)data_size;
-   abort();
+   assert(size % 4 == 0);
+   assert(data_size <= size);
+   if (dec->pos + size > dec->len) {
+      memset(data, 0, data_size);
+      vn_cs_decoder_set_fatal(dec);
+      return;
+   }
+   if (data && data_size)
+      memcpy(data, dec->buf + dec->pos, data_size);
+   dec->pos += size;
 }
 
 static inline void
 vn_cs_decoder_peek(struct vn_cs_decoder *dec, size_t size,
                    void *data, size_t data_size)
 {
-   (void)dec; (void)size; (void)data; (void)data_size;
-   abort();
+   assert(data_size <= size);
+   if (dec->pos + size > dec->len) {
+      memset(data, 0, data_size);
+      vn_cs_decoder_set_fatal(dec);
+      return;
+   }
+   if (data && data_size)
+      memcpy(data, dec->buf + dec->pos, data_size);
 }
 
 static inline uint64_t
@@ -86,10 +103,17 @@ vn_cs_handle_load_id(const void **val, VkObjectType obj_type)
    return (uint64_t)(uintptr_t)*val;
 }
 
+/* the reply harness additionally records every stored id so the
+ * differential can check decoded handle ids against the golden echo */
+extern uint64_t vn_hid_log[256];
+extern uint32_t vn_hid_log_n;
+
 static inline void
 vn_cs_handle_store_id(void **val, uint64_t id, VkObjectType obj_type)
 {
    (void)obj_type;
+   if (vn_hid_log_n < 256)
+      vn_hid_log[vn_hid_log_n++] = id;
    *val = (void *)(uintptr_t)id;
 }
 

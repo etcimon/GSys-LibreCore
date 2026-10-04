@@ -388,7 +388,7 @@ package g6lc_apu_vn_pkg;
     48'h03380000000A, // HANDLE a=56 b=0xA conversion:LOOKUP
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h020700000000, // U64 a=7 b=0x0 codeSize
+    48'h02FF00000000, // U64 a=255 b=0x0 codeSize
     48'h090100000003, // BLOB a=1 b=0x3 pCode
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h01FF00000000, // U32 a=255 b=0x0 domainOrigin
@@ -471,7 +471,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h040000000002, // PTR a=0 b=0x2 pFeatures
     48'h050000000003, // STYPE a=0 b=0x3 sType
-    48'h060000000016, // PNEXT a=0 b=0x16 pNext
+    48'h060000000010, // PNEXT a=0 b=0x10 pNext
     48'h0E0600000000, // END a=6 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h040000000004, // PTR a=0 b=0x4 pMemoryProperties
@@ -483,7 +483,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h040000000006, // PTR a=0 b=0x6 pMemoryProperties
     48'h050000000004, // STYPE a=0 b=0x4 sType
-    48'h06000000002A, // PNEXT a=0 b=0x2A pNext
+    48'h06000000001E, // PNEXT a=0 b=0x1E pNext
     48'h070000000001, // ARRAY a=0 b=0x1 memoryTypes
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h070100000002, // ARRAY a=1 b=0x2 memoryHeaps
@@ -500,7 +500,7 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 pQueueFamilyPropertyCount
     48'h070000000000, // ARRAY a=0 b=0x0 pQueueFamilyProperties
     48'h050000000005, // STYPE a=0 b=0x5 sType
-    48'h06000000002C, // PNEXT a=0 b=0x2C pNext
+    48'h060000000020, // PNEXT a=0 b=0x20 pNext
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0A00000000, // END a=10 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
@@ -511,12 +511,12 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 format
     48'h040000000002, // PTR a=0 b=0x2 pFormatProperties
     48'h050000000006, // STYPE a=0 b=0x6 sType
-    48'h06000000002D, // PNEXT a=0 b=0x2D pNext
+    48'h060000000021, // PNEXT a=0 b=0x21 pNext
     48'h0E0C00000000, // END a=12 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h040000000007, // PTR a=0 b=0x7 pImageFormatInfo
     48'h050000000007, // STYPE a=0 b=0x7 sType
-    48'h06000000002F, // PNEXT a=0 b=0x2F pNext
+    48'h060000000023, // PNEXT a=0 b=0x23 pNext
     48'h010000000000, // U32 a=0 b=0x0 format
     48'h010100000000, // U32 a=1 b=0x0 type
     48'h010200000000, // U32 a=2 b=0x0 tiling
@@ -524,7 +524,7 @@ package g6lc_apu_vn_pkg;
     48'h010400000000, // U32 a=4 b=0x0 flags
     48'h040100000002, // PTR a=1 b=0x2 pImageFormatProperties
     48'h050000000009, // STYPE a=0 b=0x9 sType
-    48'h060000000031, // PNEXT a=0 b=0x31 pNext
+    48'h060000000025, // PNEXT a=0 b=0x25 pNext
     48'h0E0D00000000, // END a=13 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h090000000000, // BLOB a=0 b=0x0 pLayerName
@@ -536,12 +536,12 @@ package g6lc_apu_vn_pkg;
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h04000000004C, // PTR a=0 b=0x4C pCreateInfo
     48'h05000000000A, // STYPE a=0 b=0xA sType
-    48'h060000000039, // PNEXT a=0 b=0x39 pNext
+    48'h06000000002B, // PNEXT a=0 b=0x2B pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 queueCreateInfoCount
     48'h070000000000, // ARRAY a=0 b=0x0 pQueueCreateInfos
     48'h05000000000B, // STYPE a=0 b=0xB sType
-    48'h060000000042, // PNEXT a=0 b=0x42 pNext
+    48'h060000000034, // PNEXT a=0 b=0x34 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 queueFamilyIndex
     48'h01FF00000000, // U32 a=255 b=0x0 queueCount
@@ -630,7 +630,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pQueueInfo
     48'h05000000000C, // STYPE a=0 b=0xC sType
-    48'h060000000043, // PNEXT a=0 b=0x43 pNext
+    48'h060000000035, // PNEXT a=0 b=0x35 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 queueFamilyIndex
     48'h010200000000, // U32 a=2 b=0x0 queueIndex
@@ -646,7 +646,7 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 submitCount
     48'h070000000003, // ARRAY a=0 b=0x3 pSubmits
     48'h05000000000D, // STYPE a=0 b=0xD sType
-    48'h060000000044, // PNEXT a=0 b=0x44 pNext
+    48'h060000000036, // PNEXT a=0 b=0x36 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 waitSemaphoreCount
     48'h090100000001, // BLOB a=1 b=0x1 pWaitSemaphores
     48'h090000000002, // BLOB a=0 b=0x2 pWaitDstStageMask
@@ -660,7 +660,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000004, // PTR a=0 b=0x4 pAllocateInfo
     48'h05000000000E, // STYPE a=0 b=0xE sType
-    48'h060000000047, // PNEXT a=0 b=0x47 pNext
+    48'h060000000039, // PNEXT a=0 b=0x39 pNext
     48'h020100000000, // U64 a=1 b=0x0 allocationSize
     48'h010000000000, // U32 a=0 b=0x0 memoryTypeIndex
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
@@ -680,20 +680,20 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 memoryRangeCount
     48'h070000000002, // ARRAY a=0 b=0x2 pMemoryRanges
     48'h05000000000F, // STYPE a=0 b=0xF sType
-    48'h06000000004B, // PNEXT a=0 b=0x4B pNext
+    48'h06000000003D, // PNEXT a=0 b=0x3D pNext
     48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
-    48'h020700000000, // U64 a=7 b=0x0 offset
-    48'h020700000000, // U64 a=7 b=0x0 size
+    48'h02FF00000000, // U64 a=255 b=0x0 offset
+    48'h02FF00000000, // U64 a=255 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E1600000000, // END a=22 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 memoryRangeCount
     48'h070000000002, // ARRAY a=0 b=0x2 pMemoryRanges
     48'h05000000000F, // STYPE a=0 b=0xF sType
-    48'h06000000004B, // PNEXT a=0 b=0x4B pNext
+    48'h06000000003D, // PNEXT a=0 b=0x3D pNext
     48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
-    48'h020700000000, // U64 a=7 b=0x0 offset
-    48'h020700000000, // U64 a=7 b=0x0 size
+    48'h02FF00000000, // U64 a=255 b=0x0 offset
+    48'h02FF00000000, // U64 a=255 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E1700000000, // END a=23 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
@@ -703,11 +703,11 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000003, // PTR a=0 b=0x3 pInfo
     48'h050000000010, // STYPE a=0 b=0x10 sType
-    48'h06000000004C, // PNEXT a=0 b=0x4C pNext
+    48'h06000000003E, // PNEXT a=0 b=0x3E pNext
     48'h030800000007, // HANDLE a=8 b=0x7 buffer:LOOKUP
     48'h040100000002, // PTR a=1 b=0x2 pMemoryRequirements
     48'h050000000011, // STYPE a=0 b=0x11 sType
-    48'h06000000004D, // PNEXT a=0 b=0x4D pNext
+    48'h06000000003F, // PNEXT a=0 b=0x3F pNext
     48'h0E1900000000, // END a=25 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP
@@ -716,11 +716,11 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000003, // PTR a=0 b=0x3 pInfo
     48'h050000000012, // STYPE a=0 b=0x12 sType
-    48'h060000000052, // PNEXT a=0 b=0x52 pNext
+    48'h060000000043, // PNEXT a=0 b=0x43 pNext
     48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP
     48'h040100000002, // PTR a=1 b=0x2 pMemoryRequirements
     48'h050000000011, // STYPE a=0 b=0x11 sType
-    48'h06000000004D, // PNEXT a=0 b=0x4D pNext
+    48'h06000000003F, // PNEXT a=0 b=0x3F pNext
     48'h0E1B00000000, // END a=27 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030800000007, // HANDLE a=8 b=0x7 buffer:LOOKUP
@@ -731,10 +731,10 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 bindInfoCount
     48'h070000000000, // ARRAY a=0 b=0x0 pBindInfos
     48'h050000000013, // STYPE a=0 b=0x13 sType
-    48'h060000000054, // PNEXT a=0 b=0x54 pNext
+    48'h060000000045, // PNEXT a=0 b=0x45 pNext
     48'h033800000007, // HANDLE a=56 b=0x7 buffer:LOOKUP
     48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
-    48'h020700000000, // U64 a=7 b=0x0 memoryOffset
+    48'h02FF00000000, // U64 a=255 b=0x0 memoryOffset
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E1D00000000, // END a=29 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
@@ -746,16 +746,16 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 bindInfoCount
     48'h070000000000, // ARRAY a=0 b=0x0 pBindInfos
     48'h050000000014, // STYPE a=0 b=0x14 sType
-    48'h060000000056, // PNEXT a=0 b=0x56 pNext
+    48'h060000000047, // PNEXT a=0 b=0x47 pNext
     48'h033800000006, // HANDLE a=56 b=0x6 image:LOOKUP
     48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
-    48'h020700000000, // U64 a=7 b=0x0 memoryOffset
+    48'h02FF00000000, // U64 a=255 b=0x0 memoryOffset
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E1F00000000, // END a=31 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000008, // PTR a=0 b=0x8 pCreateInfo
     48'h050000000015, // STYPE a=0 b=0x15 sType
-    48'h060000000059, // PNEXT a=0 b=0x59 pNext
+    48'h06000000004A, // PNEXT a=0 b=0x4A pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h020100000000, // U64 a=1 b=0x0 size
     48'h0A0100000016, // FLAGS a=1 b=0x16 usage
@@ -775,7 +775,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000007, // PTR a=0 b=0x7 pCreateInfo
     48'h050000000017, // STYPE a=0 b=0x17 sType
-    48'h06000000005B, // PNEXT a=0 b=0x5B pNext
+    48'h06000000004C, // PNEXT a=0 b=0x4C pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h030800000007, // HANDLE a=8 b=0x7 buffer:LOOKUP
     48'h010100000000, // U32 a=1 b=0x0 format
@@ -794,7 +794,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000011, // PTR a=0 b=0x11 pCreateInfo
     48'h050000000018, // STYPE a=0 b=0x18 sType
-    48'h06000000005C, // PNEXT a=0 b=0x5C pNext
+    48'h06000000004D, // PNEXT a=0 b=0x4D pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 imageType
     48'h010200000000, // U32 a=2 b=0x0 format
@@ -823,7 +823,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h04000000000F, // PTR a=0 b=0xF pCreateInfo
     48'h050000000019, // STYPE a=0 b=0x19 sType
-    48'h06000000005E, // PNEXT a=0 b=0x5E pNext
+    48'h06000000004F, // PNEXT a=0 b=0x4F pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP
     48'h010100000000, // U32 a=1 b=0x0 viewType
@@ -850,7 +850,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000012, // PTR a=0 b=0x12 pCreateInfo
     48'h05000000001A, // STYPE a=0 b=0x1A sType
-    48'h060000000061, // PNEXT a=0 b=0x61 pNext
+    48'h060000000052, // PNEXT a=0 b=0x52 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 magFilter
     48'h010200000000, // U32 a=2 b=0x0 minFilter
@@ -880,7 +880,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pCreateInfo
     48'h05000000001B, // STYPE a=0 b=0x1B sType
-    48'h060000000063, // PNEXT a=0 b=0x63 pNext
+    48'h060000000054, // PNEXT a=0 b=0x54 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h020100000000, // U64 a=1 b=0x0 codeSize
     48'h090000000003, // BLOB a=0 b=0x3 pCode
@@ -897,7 +897,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h04000000000B, // PTR a=0 b=0xB pCreateInfo
     48'h05000000001C, // STYPE a=0 b=0x1C sType
-    48'h060000000064, // PNEXT a=0 b=0x64 pNext
+    48'h060000000055, // PNEXT a=0 b=0x55 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 bindingCount
     48'h070000000004, // ARRAY a=0 b=0x4 pBindings
@@ -920,7 +920,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h04000000000B, // PTR a=0 b=0xB pCreateInfo
     48'h05000000001D, // STYPE a=0 b=0x1D sType
-    48'h060000000065, // PNEXT a=0 b=0x65 pNext
+    48'h060000000056, // PNEXT a=0 b=0x56 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 setLayoutCount
     48'h090000000001, // BLOB a=0 b=0x1 pSetLayouts
@@ -943,7 +943,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pCreateInfo
     48'h05000000001E, // STYPE a=0 b=0x1E sType
-    48'h060000000066, // PNEXT a=0 b=0x66 pNext
+    48'h060000000057, // PNEXT a=0 b=0x57 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h020100000000, // U64 a=1 b=0x0 initialDataSize
     48'h090000000000, // BLOB a=0 b=0x0 pInitialData
@@ -962,10 +962,10 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 createInfoCount
     48'h070000000005, // ARRAY a=0 b=0x5 pCreateInfos
     48'h05000000001F, // STYPE a=0 b=0x1F sType
-    48'h060000000067, // PNEXT a=0 b=0x67 pNext
+    48'h060000000058, // PNEXT a=0 b=0x58 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h050000000020, // STYPE a=0 b=0x20 sType
-    48'h060000000068, // PNEXT a=0 b=0x68 pNext
+    48'h060000000059, // PNEXT a=0 b=0x59 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 stage
     48'h033B0000000D, // HANDLE a=59 b=0xD module:OPTIONAL
@@ -975,9 +975,9 @@ package g6lc_apu_vn_pkg;
     48'h070100000006, // ARRAY a=1 b=0x6 pMapEntries
     48'h01FF00000000, // U32 a=255 b=0x0 constantID
     48'h01FF00000000, // U32 a=255 b=0x0 offset
-    48'h020700000000, // U64 a=7 b=0x0 size
+    48'h02FF00000000, // U64 a=255 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h020700000000, // U64 a=7 b=0x0 dataSize
+    48'h02FF00000000, // U64 a=255 b=0x0 dataSize
     48'h090000000000, // BLOB a=0 b=0x0 pData
     48'h03380000000F, // HANDLE a=56 b=0xF layout:LOOKUP
     48'h033B00000011, // HANDLE a=59 b=0x11 basePipelineHandle:OPTIONAL
@@ -992,12 +992,12 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 createInfoCount
     48'h070000000005, // ARRAY a=0 b=0x5 pCreateInfos
     48'h050000000021, // STYPE a=0 b=0x21 sType
-    48'h06000000006A, // PNEXT a=0 b=0x6A pNext
+    48'h06000000005B, // PNEXT a=0 b=0x5B pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 stageCount
     48'h070100000005, // ARRAY a=1 b=0x5 pStages
     48'h050000000020, // STYPE a=0 b=0x20 sType
-    48'h060000000068, // PNEXT a=0 b=0x68 pNext
+    48'h060000000059, // PNEXT a=0 b=0x59 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 stage
     48'h033B0000000D, // HANDLE a=59 b=0xD module:OPTIONAL
@@ -1005,12 +1005,12 @@ package g6lc_apu_vn_pkg;
     48'h040700000004, // PTR a=7 b=0x4 pSpecializationInfo
     48'h01FF00000000, // U32 a=255 b=0x0 mapEntryCount
     48'h090000000004, // BLOB a=0 b=0x4 pMapEntries
-    48'h020700000000, // U64 a=7 b=0x0 dataSize
+    48'h02FF00000000, // U64 a=255 b=0x0 dataSize
     48'h090100000000, // BLOB a=1 b=0x0 pData
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040700000010, // PTR a=7 b=0x10 pVertexInputState
     48'h050000000022, // STYPE a=0 b=0x22 sType
-    48'h06000000006B, // PNEXT a=0 b=0x6B pNext
+    48'h06000000005C, // PNEXT a=0 b=0x5C pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 vertexBindingDescriptionCount
     48'h070100000002, // ARRAY a=1 b=0x2 pVertexBindingDescriptions
@@ -1027,18 +1027,18 @@ package g6lc_apu_vn_pkg;
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040700000005, // PTR a=7 b=0x5 pInputAssemblyState
     48'h050000000023, // STYPE a=0 b=0x23 sType
-    48'h06000000006C, // PNEXT a=0 b=0x6C pNext
+    48'h06000000005D, // PNEXT a=0 b=0x5D pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 topology
     48'h01FF00000000, // U32 a=255 b=0x0 primitiveRestartEnable
     48'h040700000004, // PTR a=7 b=0x4 pTessellationState
     48'h050000000024, // STYPE a=0 b=0x24 sType
-    48'h06000000006D, // PNEXT a=0 b=0x6D pNext
+    48'h06000000005E, // PNEXT a=0 b=0x5E pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 patchControlPoints
     48'h040700000013, // PTR a=7 b=0x13 pViewportState
     48'h050000000025, // STYPE a=0 b=0x25 sType
-    48'h06000000006F, // PNEXT a=0 b=0x6F pNext
+    48'h060000000060, // PNEXT a=0 b=0x60 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 viewportCount
     48'h070100000002, // ARRAY a=1 b=0x2 pViewports
@@ -1058,7 +1058,7 @@ package g6lc_apu_vn_pkg;
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h04070000000D, // PTR a=7 b=0xD pRasterizationState
     48'h050000000026, // STYPE a=0 b=0x26 sType
-    48'h060000000070, // PNEXT a=0 b=0x70 pNext
+    48'h060000000061, // PNEXT a=0 b=0x61 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 depthClampEnable
     48'h01FF00000000, // U32 a=255 b=0x0 rasterizerDiscardEnable
@@ -1072,7 +1072,7 @@ package g6lc_apu_vn_pkg;
     48'h01FF00000000, // U32 a=255 b=0x0 lineWidth
     48'h040700000009, // PTR a=7 b=0x9 pMultisampleState
     48'h050000000027, // STYPE a=0 b=0x27 sType
-    48'h060000000071, // PNEXT a=0 b=0x71 pNext
+    48'h060000000062, // PNEXT a=0 b=0x62 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 rasterizationSamples
     48'h01FF00000000, // U32 a=255 b=0x0 sampleShadingEnable
@@ -1082,7 +1082,7 @@ package g6lc_apu_vn_pkg;
     48'h01FF00000000, // U32 a=255 b=0x0 alphaToOneEnable
     48'h040700000018, // PTR a=7 b=0x18 pDepthStencilState
     48'h050000000028, // STYPE a=0 b=0x28 sType
-    48'h060000000072, // PNEXT a=0 b=0x72 pNext
+    48'h060000000063, // PNEXT a=0 b=0x63 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 depthTestEnable
     48'h01FF00000000, // U32 a=255 b=0x0 depthWriteEnable
@@ -1107,7 +1107,7 @@ package g6lc_apu_vn_pkg;
     48'h01FF00000000, // U32 a=255 b=0x0 maxDepthBounds
     48'h040700000011, // PTR a=7 b=0x11 pColorBlendState
     48'h050000000029, // STYPE a=0 b=0x29 sType
-    48'h060000000073, // PNEXT a=0 b=0x73 pNext
+    48'h060000000064, // PNEXT a=0 b=0x64 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 logicOpEnable
     48'h01FF00000000, // U32 a=255 b=0x0 logicOp
@@ -1125,7 +1125,7 @@ package g6lc_apu_vn_pkg;
     48'h090100000005, // BLOB a=1 b=0x5 blendConstants
     48'h040700000005, // PTR a=7 b=0x5 pDynamicState
     48'h05000000002A, // STYPE a=0 b=0x2A sType
-    48'h060000000074, // PNEXT a=0 b=0x74 pNext
+    48'h060000000065, // PNEXT a=0 b=0x65 pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 dynamicStateCount
     48'h090000000002, // BLOB a=0 b=0x2 pDynamicStates
@@ -1147,7 +1147,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000031, // PTR a=0 b=0x31 pCreateInfo
     48'h05000000002B, // STYPE a=0 b=0x2B sType
-    48'h060000000075, // PNEXT a=0 b=0x75 pNext
+    48'h060000000066, // PNEXT a=0 b=0x66 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 attachmentCount
     48'h070000000005, // ARRAY a=0 b=0x5 pAttachments
@@ -1203,12 +1203,12 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000047, // PTR a=0 b=0x47 pCreateInfo
     48'h05000000002C, // STYPE a=0 b=0x2C sType
-    48'h060000000078, // PNEXT a=0 b=0x78 pNext
+    48'h060000000069, // PNEXT a=0 b=0x69 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 attachmentCount
     48'h070000000005, // ARRAY a=0 b=0x5 pAttachments
     48'h05000000002D, // STYPE a=0 b=0x2D sType
-    48'h060000000079, // PNEXT a=0 b=0x79 pNext
+    48'h06000000006A, // PNEXT a=0 b=0x6A pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 format
     48'h01FF00000000, // U32 a=255 b=0x0 samples
@@ -1222,14 +1222,14 @@ package g6lc_apu_vn_pkg;
     48'h010200000000, // U32 a=2 b=0x0 subpassCount
     48'h070100000005, // ARRAY a=1 b=0x5 pSubpasses
     48'h05000000002E, // STYPE a=0 b=0x2E sType
-    48'h06000000007A, // PNEXT a=0 b=0x7A pNext
+    48'h06000000006B, // PNEXT a=0 b=0x6B pNext
     48'h01FF00000000, // U32 a=255 b=0x0 flags
     48'h01FF00000000, // U32 a=255 b=0x0 pipelineBindPoint
     48'h01FF00000000, // U32 a=255 b=0x0 viewMask
     48'h01FF00000000, // U32 a=255 b=0x0 inputAttachmentCount
     48'h070200000005, // ARRAY a=2 b=0x5 pInputAttachments
     48'h05000000002F, // STYPE a=0 b=0x2F sType
-    48'h06000000007B, // PNEXT a=0 b=0x7B pNext
+    48'h06000000006C, // PNEXT a=0 b=0x6C pNext
     48'h01FF00000000, // U32 a=255 b=0x0 attachment
     48'h01FF00000000, // U32 a=255 b=0x0 layout
     48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
@@ -1237,21 +1237,21 @@ package g6lc_apu_vn_pkg;
     48'h01FF00000000, // U32 a=255 b=0x0 colorAttachmentCount
     48'h070200000005, // ARRAY a=2 b=0x5 pColorAttachments
     48'h05000000002F, // STYPE a=0 b=0x2F sType
-    48'h06000000007B, // PNEXT a=0 b=0x7B pNext
+    48'h06000000006C, // PNEXT a=0 b=0x6C pNext
     48'h01FF00000000, // U32 a=255 b=0x0 attachment
     48'h01FF00000000, // U32 a=255 b=0x0 layout
     48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h070200000005, // ARRAY a=2 b=0x5 pResolveAttachments
     48'h05000000002F, // STYPE a=0 b=0x2F sType
-    48'h06000000007B, // PNEXT a=0 b=0x7B pNext
+    48'h06000000006C, // PNEXT a=0 b=0x6C pNext
     48'h01FF00000000, // U32 a=255 b=0x0 attachment
     48'h01FF00000000, // U32 a=255 b=0x0 layout
     48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040700000005, // PTR a=7 b=0x5 pDepthStencilAttachment
     48'h05000000002F, // STYPE a=0 b=0x2F sType
-    48'h06000000007B, // PNEXT a=0 b=0x7B pNext
+    48'h06000000006C, // PNEXT a=0 b=0x6C pNext
     48'h01FF00000000, // U32 a=255 b=0x0 attachment
     48'h01FF00000000, // U32 a=255 b=0x0 layout
     48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
@@ -1261,7 +1261,7 @@ package g6lc_apu_vn_pkg;
     48'h010300000000, // U32 a=3 b=0x0 dependencyCount
     48'h070200000004, // ARRAY a=2 b=0x4 pDependencies
     48'h050000000030, // STYPE a=0 b=0x30 sType
-    48'h06000000007C, // PNEXT a=0 b=0x7C pNext
+    48'h06000000006D, // PNEXT a=0 b=0x6D pNext
     48'h01FF00000000, // U32 a=255 b=0x0 srcSubpass
     48'h01FF00000000, // U32 a=255 b=0x0 dstSubpass
     48'h01FF00000000, // U32 a=255 b=0x0 srcStageMask
@@ -1286,7 +1286,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000009, // PTR a=0 b=0x9 pCreateInfo
     48'h050000000031, // STYPE a=0 b=0x31 sType
-    48'h06000000007D, // PNEXT a=0 b=0x7D pNext
+    48'h06000000006E, // PNEXT a=0 b=0x6E pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h030800000012, // HANDLE a=8 b=0x12 renderPass:LOOKUP
     48'h010100000000, // U32 a=1 b=0x0 attachmentCount
@@ -1307,7 +1307,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000009, // PTR a=0 b=0x9 pCreateInfo
     48'h050000000032, // STYPE a=0 b=0x32 sType
-    48'h06000000007E, // PNEXT a=0 b=0x7E pNext
+    48'h06000000006F, // PNEXT a=0 b=0x6F pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 maxSets
     48'h010200000000, // U32 a=2 b=0x0 poolSizeCount
@@ -1332,7 +1332,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pAllocateInfo
     48'h050000000033, // STYPE a=0 b=0x33 sType
-    48'h06000000007F, // PNEXT a=0 b=0x7F pNext
+    48'h060000000070, // PNEXT a=0 b=0x70 pNext
     48'h030800000014, // HANDLE a=8 b=0x14 descriptorPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 descriptorSetCount
     48'h090000000001, // BLOB a=0 b=0x1 pSetLayouts
@@ -1349,7 +1349,7 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 descriptorWriteCount
     48'h070000000004, // ARRAY a=0 b=0x4 pDescriptorWrites
     48'h050000000034, // STYPE a=0 b=0x34 sType
-    48'h060000000080, // PNEXT a=0 b=0x80 pNext
+    48'h060000000071, // PNEXT a=0 b=0x71 pNext
     48'h033800000015, // HANDLE a=56 b=0x15 dstSet:LOOKUP
     48'h01FF00000000, // U32 a=255 b=0x0 dstBinding
     48'h01FF00000000, // U32 a=255 b=0x0 dstArrayElement
@@ -1362,15 +1362,15 @@ package g6lc_apu_vn_pkg;
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h070100000004, // ARRAY a=1 b=0x4 pBufferInfo
     48'h033B00000007, // HANDLE a=59 b=0x7 buffer:OPTIONAL
-    48'h020700000000, // U64 a=7 b=0x0 offset
-    48'h020700000000, // U64 a=7 b=0x0 range
+    48'h02FF00000000, // U64 a=255 b=0x0 offset
+    48'h02FF00000000, // U64 a=255 b=0x0 range
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h090100000001, // BLOB a=1 b=0x1 pTexelBufferView
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010100000000, // U32 a=1 b=0x0 descriptorCopyCount
     48'h070100000000, // ARRAY a=1 b=0x0 pDescriptorCopies
     48'h050000000035, // STYPE a=0 b=0x35 sType
-    48'h060000000081, // PNEXT a=0 b=0x81 pNext
+    48'h060000000072, // PNEXT a=0 b=0x72 pNext
     48'h033800000015, // HANDLE a=56 b=0x15 srcSet:LOOKUP
     48'h01FF00000000, // U32 a=255 b=0x0 srcBinding
     48'h01FF00000000, // U32 a=255 b=0x0 srcArrayElement
@@ -1383,7 +1383,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000004, // PTR a=0 b=0x4 pCreateInfo
     48'h050000000036, // STYPE a=0 b=0x36 sType
-    48'h060000000082, // PNEXT a=0 b=0x82 pNext
+    48'h060000000073, // PNEXT a=0 b=0x73 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 queueFamilyIndex
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
@@ -1403,7 +1403,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pAllocateInfo
     48'h050000000037, // STYPE a=0 b=0x37 sType
-    48'h060000000083, // PNEXT a=0 b=0x83 pNext
+    48'h060000000074, // PNEXT a=0 b=0x74 pNext
     48'h030800000016, // HANDLE a=8 b=0x16 commandPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 level
     48'h010100000000, // U32 a=1 b=0x0 commandBufferCount
@@ -1419,11 +1419,11 @@ package g6lc_apu_vn_pkg;
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h04000000000C, // PTR a=0 b=0xC pBeginInfo
     48'h050000000038, // STYPE a=0 b=0x38 sType
-    48'h060000000084, // PNEXT a=0 b=0x84 pNext
+    48'h060000000075, // PNEXT a=0 b=0x75 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h040100000008, // PTR a=1 b=0x8 pInheritanceInfo
     48'h050000000039, // STYPE a=0 b=0x39 sType
-    48'h060000000086, // PNEXT a=0 b=0x86 pNext
+    48'h060000000077, // PNEXT a=0 b=0x77 pNext
     48'h030B00000012, // HANDLE a=11 b=0x12 renderPass:OPTIONAL
     48'h010100000000, // U32 a=1 b=0x0 subpass
     48'h031300000013, // HANDLE a=19 b=0x13 framebuffer:OPTIONAL
@@ -1526,7 +1526,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h04000000000E, // PTR a=0 b=0xE pRenderPassBegin
     48'h05000000003A, // STYPE a=0 b=0x3A sType
-    48'h060000000087, // PNEXT a=0 b=0x87 pNext
+    48'h060000000078, // PNEXT a=0 b=0x78 pNext
     48'h030800000012, // HANDLE a=8 b=0x12 renderPass:LOOKUP
     48'h031000000013, // HANDLE a=16 b=0x13 framebuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 x
@@ -1544,7 +1544,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h04000000000E, // PTR a=0 b=0xE pRenderPassBegin
     48'h05000000003A, // STYPE a=0 b=0x3A sType
-    48'h060000000087, // PNEXT a=0 b=0x87 pNext
+    48'h060000000078, // PNEXT a=0 b=0x78 pNext
     48'h030800000012, // HANDLE a=8 b=0x12 renderPass:LOOKUP
     48'h031000000013, // HANDLE a=16 b=0x13 framebuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 x
@@ -1559,7 +1559,7 @@ package g6lc_apu_vn_pkg;
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040100000003, // PTR a=1 b=0x3 pSubpassBeginInfo
     48'h05000000003B, // STYPE a=0 b=0x3B sType
-    48'h060000000089, // PNEXT a=0 b=0x89 pNext
+    48'h06000000007A, // PNEXT a=0 b=0x7A pNext
     48'h010500000000, // U32 a=5 b=0x0 contents
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1570,7 +1570,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h040000000002, // PTR a=0 b=0x2 pSubpassEndInfo
     48'h05000000003C, // STYPE a=0 b=0x3C sType
-    48'h06000000008A, // PNEXT a=0 b=0x8A pNext
+    48'h06000000007B, // PNEXT a=0 b=0x7B pNext
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 srcStageMask
@@ -1579,26 +1579,26 @@ package g6lc_apu_vn_pkg;
     48'h010300000000, // U32 a=3 b=0x0 memoryBarrierCount
     48'h070000000000, // ARRAY a=0 b=0x0 pMemoryBarriers
     48'h05000000003D, // STYPE a=0 b=0x3D sType
-    48'h06000000008B, // PNEXT a=0 b=0x8B pNext
+    48'h06000000007C, // PNEXT a=0 b=0x7C pNext
     48'h01FF00000000, // U32 a=255 b=0x0 srcAccessMask
     48'h01FF00000000, // U32 a=255 b=0x0 dstAccessMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010400000000, // U32 a=4 b=0x0 bufferMemoryBarrierCount
     48'h070100000000, // ARRAY a=1 b=0x0 pBufferMemoryBarriers
     48'h05000000003E, // STYPE a=0 b=0x3E sType
-    48'h06000000008C, // PNEXT a=0 b=0x8C pNext
+    48'h06000000007D, // PNEXT a=0 b=0x7D pNext
     48'h01FF00000000, // U32 a=255 b=0x0 srcAccessMask
     48'h01FF00000000, // U32 a=255 b=0x0 dstAccessMask
     48'h01FF00000000, // U32 a=255 b=0x0 srcQueueFamilyIndex
     48'h01FF00000000, // U32 a=255 b=0x0 dstQueueFamilyIndex
     48'h033800000007, // HANDLE a=56 b=0x7 buffer:LOOKUP
-    48'h020700000000, // U64 a=7 b=0x0 offset
-    48'h020700000000, // U64 a=7 b=0x0 size
+    48'h02FF00000000, // U64 a=255 b=0x0 offset
+    48'h02FF00000000, // U64 a=255 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010500000000, // U32 a=5 b=0x0 imageMemoryBarrierCount
     48'h070200000000, // ARRAY a=2 b=0x0 pImageMemoryBarriers
     48'h05000000003F, // STYPE a=0 b=0x3F sType
-    48'h06000000008D, // PNEXT a=0 b=0x8D pNext
+    48'h06000000007E, // PNEXT a=0 b=0x7E pNext
     48'h01FF00000000, // U32 a=255 b=0x0 srcAccessMask
     48'h01FF00000000, // U32 a=255 b=0x0 dstAccessMask
     48'h01FF00000000, // U32 a=255 b=0x0 oldLayout
@@ -1618,9 +1618,9 @@ package g6lc_apu_vn_pkg;
     48'h031000000007, // HANDLE a=16 b=0x7 dstBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 regionCount
     48'h070000000006, // ARRAY a=0 b=0x6 pRegions
-    48'h020700000000, // U64 a=7 b=0x0 srcOffset
-    48'h020700000000, // U64 a=7 b=0x0 dstOffset
-    48'h020700000000, // U64 a=7 b=0x0 size
+    48'h02FF00000000, // U64 a=255 b=0x0 srcOffset
+    48'h02FF00000000, // U64 a=255 b=0x0 dstOffset
+    48'h02FF00000000, // U64 a=255 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1655,7 +1655,7 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 dstImageLayout
     48'h010100000000, // U32 a=1 b=0x0 regionCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRegions
-    48'h020700000000, // U64 a=7 b=0x0 bufferOffset
+    48'h02FF00000000, // U64 a=255 b=0x0 bufferOffset
     48'h01FF00000000, // U32 a=255 b=0x0 bufferRowLength
     48'h01FF00000000, // U32 a=255 b=0x0 bufferImageHeight
     48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
@@ -1676,7 +1676,7 @@ package g6lc_apu_vn_pkg;
     48'h031000000007, // HANDLE a=16 b=0x7 dstBuffer:LOOKUP
     48'h010100000000, // U32 a=1 b=0x0 regionCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRegions
-    48'h020700000000, // U64 a=7 b=0x0 bufferOffset
+    48'h02FF00000000, // U64 a=255 b=0x0 bufferOffset
     48'h01FF00000000, // U32 a=255 b=0x0 bufferRowLength
     48'h01FF00000000, // U32 a=255 b=0x0 bufferImageHeight
     48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
@@ -1813,7 +1813,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000003, // PTR a=0 b=0x3 pCreateInfo
     48'h050000000040, // STYPE a=0 b=0x40 sType
-    48'h06000000008E, // PNEXT a=0 b=0x8E pNext
+    48'h06000000007F, // PNEXT a=0 b=0x7F pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pFence
@@ -1841,7 +1841,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000003, // PTR a=0 b=0x3 pCreateInfo
     48'h050000000041, // STYPE a=0 b=0x41 sType
-    48'h060000000090, // PNEXT a=0 b=0x90 pNext
+    48'h060000000081, // PNEXT a=0 b=0x81 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pSemaphore
@@ -1856,7 +1856,7 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000006, // PTR a=0 b=0x6 pCreateInfo
     48'h050000000042, // STYPE a=0 b=0x42 sType
-    48'h060000000092, // PNEXT a=0 b=0x92 pNext
+    48'h060000000083, // PNEXT a=0 b=0x83 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 queryType
     48'h010200000000, // U32 a=2 b=0x0 queryCount
@@ -1936,79 +1936,79 @@ package g6lc_apu_vn_pkg;
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceProperties
     48'h060000000001, // RPTR a=0 b=0x1 pProperties
-    48'h070000C00000, // RCONST a=0 b=0xC00000 VkPhysicalDeviceProperties
+    48'h070000D90000, // RCONST a=0 b=0xD90000 VkPhysicalDeviceProperties
     48'h0B0000000000, // REND a=0 b=0x0 
-    48'h080000000010, // RCHAIN a=0 b=0x10 VkPhysicalDeviceIDProperties
-    48'h0D040000000C, // REXEC a=4 b=0xC VkPhysicalDeviceIDProperties
+    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDeviceIDProperties
+    48'h0D0400000012, // REXEC a=4 b=0x12 VkPhysicalDeviceIDProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000011, // RCHAIN a=0 b=0x11 VkPhysicalDeviceMultiviewProperties
+    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDeviceMultiviewProperties
     48'h0D0400000002, // REXEC a=4 b=0x2 VkPhysicalDeviceMultiviewProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000012, // RCHAIN a=0 b=0x12 VkPhysicalDeviceSubgroupProperties
+    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDeviceSubgroupProperties
     48'h0D0400000004, // REXEC a=4 b=0x4 VkPhysicalDeviceSubgroupProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000013, // RCHAIN a=0 b=0x13 VkPhysicalDevicePointClippingProperties
+    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDevicePointClippingProperties
     48'h0D0400000001, // REXEC a=4 b=0x1 VkPhysicalDevicePointClippingProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000014, // RCHAIN a=0 b=0x14 VkPhysicalDeviceProtectedMemoryProperties
-    48'h0700000100C0, // RCONST a=0 b=0x100C0 VkPhysicalDeviceProtectedMemoryProperties
+    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDeviceProtectedMemoryProperties
+    48'h0700000100D9, // RCONST a=0 b=0x100D9 VkPhysicalDeviceProtectedMemoryProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000015, // RCHAIN a=0 b=0x15 VkPhysicalDeviceMaintenance3Properties
+    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDeviceMaintenance3Properties
     48'h0D0400000003, // REXEC a=4 b=0x3 VkPhysicalDeviceMaintenance3Properties
     48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceProperties2
     48'h060000000003, // RPTR a=0 b=0x3 pProperties
     48'h030300000002, // RU32 a=3 b=0x2 sType
     48'h080000000009, // RCHAIN a=0 b=0x9 pProperties
-    48'h0D04000000C9, // REXEC a=4 b=0xC9 VkPhysicalDeviceProperties2
+    48'h070000D90000, // RCONST a=0 b=0xD90000 VkPhysicalDeviceProperties2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceFeatures
     48'h060000000001, // RPTR a=0 b=0x1 pFeatures
-    48'h0700003700C1, // RCONST a=0 b=0x3700C1 VkPhysicalDeviceFeatures
+    48'h0700003700DA, // RCONST a=0 b=0x3700DA VkPhysicalDeviceFeatures
     48'h0B0000000000, // REND a=0 b=0x0 
-    48'h080000000024, // RCHAIN a=0 b=0x24 VkPhysicalDeviceVariablePointersFeatures
-    48'h0700000200F8, // RCONST a=0 b=0x200F8 VkPhysicalDeviceVariablePointersFeatures
+    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDeviceVariablePointersFeatures
+    48'h070000020111, // RCONST a=0 b=0x20111 VkPhysicalDeviceVariablePointersFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000025, // RCHAIN a=0 b=0x25 VkPhysicalDeviceMultiviewFeatures
-    48'h0700000300FA, // RCONST a=0 b=0x300FA VkPhysicalDeviceMultiviewFeatures
+    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDeviceMultiviewFeatures
+    48'h070000030113, // RCONST a=0 b=0x30113 VkPhysicalDeviceMultiviewFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000026, // RCHAIN a=0 b=0x26 VkPhysicalDevice16BitStorageFeatures
-    48'h0700000400FD, // RCONST a=0 b=0x400FD VkPhysicalDevice16BitStorageFeatures
+    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDevice16BitStorageFeatures
+    48'h070000040116, // RCONST a=0 b=0x40116 VkPhysicalDevice16BitStorageFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000027, // RCHAIN a=0 b=0x27 VkPhysicalDeviceSamplerYcbcrConversionFeatures
-    48'h0700000100C0, // RCONST a=0 b=0x100C0 VkPhysicalDeviceSamplerYcbcrConversionFeatures
+    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDeviceSamplerYcbcrConversionFeatures
+    48'h0700000100D9, // RCONST a=0 b=0x100D9 VkPhysicalDeviceSamplerYcbcrConversionFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000028, // RCHAIN a=0 b=0x28 VkPhysicalDeviceProtectedMemoryFeatures
-    48'h0700000100C0, // RCONST a=0 b=0x100C0 VkPhysicalDeviceProtectedMemoryFeatures
+    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDeviceProtectedMemoryFeatures
+    48'h0700000100D9, // RCONST a=0 b=0x100D9 VkPhysicalDeviceProtectedMemoryFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000029, // RCHAIN a=0 b=0x29 VkPhysicalDeviceShaderDrawParametersFeatures
-    48'h0700000100C0, // RCONST a=0 b=0x100C0 VkPhysicalDeviceShaderDrawParametersFeatures
+    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDeviceShaderDrawParametersFeatures
+    48'h0700000100D9, // RCONST a=0 b=0x100D9 VkPhysicalDeviceShaderDrawParametersFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceFeatures2
     48'h060000000003, // RPTR a=0 b=0x3 pFeatures
     48'h030300000003, // RU32 a=3 b=0x3 sType
-    48'h08000000001D, // RCHAIN a=0 b=0x1D pFeatures
-    48'h0D0400000037, // REXEC a=4 b=0x37 VkPhysicalDeviceFeatures2
+    48'h080000000017, // RCHAIN a=0 b=0x17 pFeatures
+    48'h0700003700DA, // RCONST a=0 b=0x3700DA VkPhysicalDeviceFeatures2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceMemoryProperties
     48'h060000000001, // RPTR a=0 b=0x1 pMemoryProperties
-    48'h070000720101, // RCONST a=0 b=0x720101 VkPhysicalDeviceMemoryProperties
+    48'h07000076011A, // RCONST a=0 b=0x76011A VkPhysicalDeviceMemoryProperties
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceMemoryProperties2
     48'h060000000003, // RPTR a=0 b=0x3 pMemoryProperties
     48'h030300000004, // RU32 a=3 b=0x4 sType
-    48'h08000000002B, // RCHAIN a=0 b=0x2B pMemoryProperties
-    48'h0D0400000072, // REXEC a=4 b=0x72 VkPhysicalDeviceMemoryProperties2
+    48'h08000000001F, // RCHAIN a=0 b=0x1F pMemoryProperties
+    48'h07000076011A, // RCONST a=0 b=0x76011A VkPhysicalDeviceMemoryProperties2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceQueueFamilyProperties
     48'h060000000001, // RPTR a=0 b=0x1 pQueueFamilyPropertyCount
     48'h030400000000, // RU32 a=4 b=0x0 pQueueFamilyPropertyCount
-    48'h0A0400000000, // REXBUF a=4 b=0x0 pQueueFamilyProperties
+    48'h0A0400000018, // REXBUF a=4 b=0x18 pQueueFamilyProperties
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceQueueFamilyProperties2
     48'h060000000001, // RPTR a=0 b=0x1 pQueueFamilyPropertyCount
     48'h030400000000, // RU32 a=4 b=0x0 pQueueFamilyPropertyCount
-    48'h0A0400000000, // REXBUF a=4 b=0x0 pQueueFamilyProperties
+    48'h0A0400000024, // REXBUF a=4 b=0x24 pQueueFamilyProperties
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceFormatProperties
     48'h060000000001, // RPTR a=0 b=0x1 pFormatProperties
@@ -2017,27 +2017,27 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceFormatProperties2
     48'h060000000003, // RPTR a=0 b=0x3 pFormatProperties
     48'h030300000006, // RU32 a=3 b=0x6 sType
-    48'h08000000002E, // RCHAIN a=0 b=0x2E pFormatProperties
+    48'h080000000022, // RCHAIN a=0 b=0x22 pFormatProperties
     48'h0D0400000003, // REXEC a=4 b=0x3 VkFormatProperties2
     48'h0B0000000000, // REND a=0 b=0x0 
-    48'h080000000037, // RCHAIN a=0 b=0x37 VkExternalImageFormatProperties
+    48'h080000000028, // RCHAIN a=0 b=0x28 VkExternalImageFormatProperties
     48'h0D0400000003, // REXEC a=4 b=0x3 VkExternalImageFormatProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000038, // RCHAIN a=0 b=0x38 VkSamplerYcbcrConversionImageFormatProperties
+    48'h080000000028, // RCHAIN a=0 b=0x28 VkSamplerYcbcrConversionImageFormatProperties
     48'h0D0400000001, // REXEC a=4 b=0x1 VkSamplerYcbcrConversionImageFormatProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceImageFormatProperties2
     48'h020000000000, // RRESULT a=0 b=0x0 
     48'h060100000003, // RPTR a=1 b=0x3 pImageFormatProperties
     48'h030300000009, // RU32 a=3 b=0x9 sType
-    48'h080000000034, // RCHAIN a=0 b=0x34 pImageFormatProperties
+    48'h080000000028, // RCHAIN a=0 b=0x28 pImageFormatProperties
     48'h0D0400000008, // REXEC a=4 b=0x8 VkImageFormatProperties2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkEnumerateDeviceExtensionProperties
     48'h020000000000, // RRESULT a=0 b=0x0 
     48'h060000000001, // RPTR a=0 b=0x1 pPropertyCount
     48'h030400000000, // RU32 a=4 b=0x0 pPropertyCount
-    48'h0A0400000000, // REXBUF a=4 b=0x0 pProperties
+    48'h0A040000010C, // REXBUF a=4 b=0x10C pProperties
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkCreateDevice
     48'h020000000000, // RRESULT a=0 b=0x0 
@@ -2076,13 +2076,13 @@ package g6lc_apu_vn_pkg;
     48'h060000000001, // RPTR a=0 b=0x1 pMemoryRequirements
     48'h0D0400000005, // REXEC a=4 b=0x5 VkMemoryRequirements
     48'h0B0000000000, // REND a=0 b=0x0 
-    48'h080000000051, // RCHAIN a=0 b=0x51 VkMemoryDedicatedRequirements
-    48'h0700000200F8, // RCONST a=0 b=0x200F8 VkMemoryDedicatedRequirements
+    48'h080000000041, // RCHAIN a=0 b=0x41 VkMemoryDedicatedRequirements
+    48'h070000020111, // RCONST a=0 b=0x20111 VkMemoryDedicatedRequirements
     48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetBufferMemoryRequirements2
     48'h060100000003, // RPTR a=1 b=0x3 pMemoryRequirements
     48'h030300000011, // RU32 a=3 b=0x11 sType
-    48'h08000000004F, // RCHAIN a=0 b=0x4F pMemoryRequirements
+    48'h080000000041, // RCHAIN a=0 b=0x41 pMemoryRequirements
     48'h0D0400000005, // REXEC a=4 b=0x5 VkMemoryRequirements2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetImageMemoryRequirements
@@ -2092,7 +2092,7 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetImageMemoryRequirements2
     48'h060100000003, // RPTR a=1 b=0x3 pMemoryRequirements
     48'h030300000011, // RU32 a=3 b=0x11 sType
-    48'h08000000004F, // RCHAIN a=0 b=0x4F pMemoryRequirements
+    48'h080000000041, // RCHAIN a=0 b=0x41 pMemoryRequirements
     48'h0D0400000005, // REXEC a=4 b=0x5 VkMemoryRequirements2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkBindBufferMemory
@@ -2237,11 +2237,11 @@ package g6lc_apu_vn_pkg;
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetQueryPoolResults
     48'h020000000000, // RRESULT a=0 b=0x0 
-    48'h0A0400000000, // REXBUF a=4 b=0x0 pData
+    48'h0A0400000001, // REXBUF a=4 b=0x1 pData
     48'h0B0000000000 // REND a=0 b=0x0 
   };
 
-  localparam int APU_VN_CHAIN_WORDS = 147;
+  localparam int APU_VN_CHAIN_WORDS = 132;
   localparam logic [47:0] APU_VN_CHAIN [0:APU_VN_CHAIN_WORDS-1] = '{
     48'h0, // terminator
     48'h0, // terminator
@@ -2258,12 +2258,6 @@ package g6lc_apu_vn_pkg;
     48'h00183B9C9308, // sType=1000117000 mpc=24
     48'h001B3B9D006A, // sType=1000145002 mpc=27
     48'h001E3B9D5A40, // sType=1000168000 mpc=30
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
     48'h0, // terminator
     48'h00063B9C9EC0, // sType=1000120000 mpc=6
     48'h00073B9B9909, // sType=1000053001 mpc=7
@@ -2284,12 +2278,6 @@ package g6lc_apu_vn_pkg;
     48'h0, // terminator
     48'h0, // terminator
     48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
     48'h000C3B9BDF58, // sType=1000071000 mpc=12
     48'h0, // terminator
     48'h000E3B9BDF59, // sType=1000071001 mpc=14
@@ -2297,8 +2285,6 @@ package g6lc_apu_vn_pkg;
     48'h0, // terminator
     48'h00613B9BDF59, // sType=1000071001 mpc=97
     48'h00643B9D2B65, // sType=1000156005 mpc=100
-    48'h0, // terminator
-    48'h0, // terminator
     48'h0, // terminator
     48'h00103B9BB078, // sType=1000059000 mpc=16
     48'h00483B9C9EC0, // sType=1000120000 mpc=72
@@ -2323,7 +2309,6 @@ package g6lc_apu_vn_pkg;
     48'h006E3B9CBA18, // sType=1000127000 mpc=110
     48'h0, // terminator
     48'h00993B9CBA18, // sType=1000127000 mpc=153
-    48'h0, // terminator
     48'h0, // terminator
     48'h006F3B9D2B63, // sType=1000156003 mpc=111
     48'h0, // terminator
@@ -2425,11 +2410,12 @@ package g6lc_apu_vn_pkg;
     32'h04000010, 32'h00000404, 32'h00002001, 32'h04000000
   };
 
-  localparam int APU_VN_PROFILE_WORDS = 371;
+  localparam int APU_VN_PROFILE_WORDS = 400;
   localparam logic [31:0] APU_VN_PROFILE [0:APU_VN_PROFILE_WORDS-1] = '{
     32'h20400000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h7262694C, 32'h726F4365, 32'h50412065,
-    32'h75282055, 32'h6175716E, 32'h6966696C, 32'h00296465,
+    32'h00000000, 32'h00000100, 32'h00000000, 32'h7262694C,
+    32'h726F4365, 32'h50412065, 32'h75282055, 32'h6175716E,
+    32'h6966696C, 32'h00296465, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -2443,56 +2429,51 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000010,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00001000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000080, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000004, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000004, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000010, 32'h00000010,
+    32'h00000010, 32'h00000010, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00004000, 32'h00000003,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00004000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000040, 32'h00000040, 32'h00000040, 32'h00000040,
+    32'h00000040, 32'h00000003, 32'h00000000, 32'h00000040,
+    32'h00000040, 32'h00000040, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000001,
+    32'h00000000, 32'h00000001, 32'h00000002, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000002, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000100,
-    32'h00000100, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000100, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00001000, 32'h00001000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000004,
+    32'h00000000, 32'h00000000, 32'h00001000, 32'h00001000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000004, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000002, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000002, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000040, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000001, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000001,
+    32'h00000000, 32'h00000000, 32'h00000001, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000002, 32'h00000001, 32'h00000000,
-    32'h00000006, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000001, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -2501,14 +2482,8 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000001, 32'h10000000,
-    32'h00000000, 32'h00000001, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000002, 32'h00000020,
+    32'h00000000, 32'h00000001, 32'h00000000, 32'h00000006,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -2519,7 +2494,396 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000001, 32'h00000010, 32'h00000000,
+    32'h10000000, 32'h00000000, 32'h00000001, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000
+  };
+
+  localparam int APU_VN_DEC_MPC_AW = $clog2(APU_VN_DEC_ROM_WORDS);
+  localparam int APU_VN_REPLY_MPC_AW = $clog2(APU_VN_REPLY_ROM_WORDS);
+  localparam int APU_VN_CHAIN_AW = $clog2(APU_VN_CHAIN_WORDS);
+  localparam int APU_VN_CONST_AW = $clog2(APU_VN_CONST_WORDS);
+  localparam int APU_VN_ARRMETA_AW = $clog2(APU_VN_ARRMETA_WORDS);
+  localparam int APU_VN_BLOBMETA_AW = $clog2(APU_VN_BLOBMETA_WORDS);
+  localparam int APU_VN_PROFILE_AW = $clog2(APU_VN_PROFILE_WORDS);
+
+  typedef enum logic [3:0] {
+    APU_VN_ACT_UNSUPPORTED = 0,
+    APU_VN_ACT_ALLOC = 1,
+    APU_VN_ACT_RETIRE = 2,
+    APU_VN_ACT_BIND = 3,
+    APU_VN_ACT_QUERY = 4,
+    APU_VN_ACT_CB_BEGIN = 5,
+    APU_VN_ACT_CB_END = 6,
+    APU_VN_ACT_CB_RESET = 7,
+    APU_VN_ACT_RECORD = 8,
+    APU_VN_ACT_SUBMIT = 9,
+    APU_VN_ACT_WAIT = 10,
+    APU_VN_ACT_POOL_RESET = 11,
+    APU_VN_ACT_MAP = 12,
+    APU_VN_ACT_NOP_OK = 13,
+    APU_VN_ACT_UPDATE = 14
+  } apu_vn_act_e;
+  localparam logic [7:0] APU_VN_ACT_F_REPLY = 8'h01;
+  localparam logic [2:0] APU_VN_QSLOT_NONE = 3'h7;
+  typedef struct packed {
+    apu_vn_act_e act_class;
+    logic [5:0]  obj_kind;
+    logic [2:0]  parent_qslot;
+    logic [2:0]  cmdbuf_qslot;
+    logic [7:0]  flags;
+  } apu_vn_act_t;
+  localparam apu_vn_act_t APU_VN_ACT [0:APU_VN_DEC_TYPE_MAX] = '{
+    24'h107F01, // ALLOC kind=1 pq=7 cq=7 f=01
+    24'h207F00, // RETIRE kind=1 pq=7 cq=7 f=00
+    24'h408701, // QUERY kind=2 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h10C701, // ALLOC kind=3 pq=0 cq=7 f=01
+    24'h20FF00, // RETIRE kind=3 pq=7 cq=7 f=00
+    24'h000000, // unsupported
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h110701, // ALLOC kind=4 pq=0 cq=7 f=01
+    24'h900701, // SUBMIT kind=0 pq=0 cq=7 f=01
+    24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
+    24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
+    24'h120701, // ALLOC kind=8 pq=0 cq=7 f=01
+    24'h220700, // RETIRE kind=8 pq=0 cq=7 f=00
+    24'h000000, // unsupported
+    24'hC00700, // MAP kind=0 pq=0 cq=7 f=00
+    24'hC00701, // MAP kind=0 pq=0 cq=7 f=01
+    24'hC00701, // MAP kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h300701, // BIND kind=0 pq=0 cq=7 f=01
+    24'h300701, // BIND kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h114701, // ALLOC kind=5 pq=0 cq=7 f=01
+    24'h214700, // RETIRE kind=5 pq=0 cq=7 f=00
+    24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
+    24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
+    24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
+    24'h160701, // ALLOC kind=24 pq=0 cq=7 f=01
+    24'h260700, // RETIRE kind=24 pq=0 cq=7 f=00
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h164701, // ALLOC kind=25 pq=0 cq=7 f=01
+    24'h264700, // RETIRE kind=25 pq=0 cq=7 f=00
+    24'h000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
+    24'h11C701, // ALLOC kind=7 pq=0 cq=7 f=01
+    24'h21C700, // RETIRE kind=7 pq=0 cq=7 f=00
+    24'h124701, // ALLOC kind=9 pq=0 cq=7 f=01
+    24'h224700, // RETIRE kind=9 pq=0 cq=7 f=00
+    24'h118701, // ALLOC kind=6 pq=0 cq=7 f=01
+    24'h218700, // RETIRE kind=6 pq=0 cq=7 f=00
+    24'h000000, // unsupported
+    24'h12C701, // ALLOC kind=11 pq=0 cq=7 f=01
+    24'h22C700, // RETIRE kind=11 pq=0 cq=7 f=00
+    24'h134701, // ALLOC kind=13 pq=0 cq=7 f=01
+    24'h234700, // RETIRE kind=13 pq=0 cq=7 f=00
+    24'hD40701, // NOP_OK kind=16 pq=0 cq=7 f=01
+    24'hD40700, // NOP_OK kind=16 pq=0 cq=7 f=00
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h144701, // ALLOC kind=17 pq=0 cq=7 f=01
+    24'h144701, // ALLOC kind=17 pq=0 cq=7 f=01
+    24'h244700, // RETIRE kind=17 pq=0 cq=7 f=00
+    24'h13C701, // ALLOC kind=15 pq=0 cq=7 f=01
+    24'h23C700, // RETIRE kind=15 pq=0 cq=7 f=00
+    24'h130701, // ALLOC kind=12 pq=0 cq=7 f=01
+    24'h230700, // RETIRE kind=12 pq=0 cq=7 f=00
+    24'h138701, // ALLOC kind=14 pq=0 cq=7 f=01
+    24'h238700, // RETIRE kind=14 pq=0 cq=7 f=00
+    24'h150701, // ALLOC kind=20 pq=0 cq=7 f=01
+    24'h250700, // RETIRE kind=20 pq=0 cq=7 f=00
+    24'hB00701, // POOL_RESET kind=0 pq=0 cq=7 f=01
+    24'h154703, // ALLOC kind=21 pq=0 cq=7 f=03
+    24'h254701, // RETIRE kind=21 pq=0 cq=7 f=01
+    24'hE00700, // UPDATE kind=0 pq=0 cq=7 f=00
+    24'h14C701, // ALLOC kind=19 pq=0 cq=7 f=01
+    24'h24C700, // RETIRE kind=19 pq=0 cq=7 f=00
+    24'h148701, // ALLOC kind=18 pq=0 cq=7 f=01
+    24'h248700, // RETIRE kind=18 pq=0 cq=7 f=00
+    24'h000000, // unsupported
+    24'h158701, // ALLOC kind=22 pq=0 cq=7 f=01
+    24'h258700, // RETIRE kind=22 pq=0 cq=7 f=00
+    24'hB00701, // POOL_RESET kind=0 pq=0 cq=7 f=01
+    24'h15C701, // ALLOC kind=23 pq=0 cq=7 f=01
+    24'h25C700, // RETIRE kind=23 pq=0 cq=7 f=00
+    24'h500001, // CB_BEGIN kind=0 pq=0 cq=0 f=01
+    24'h600001, // CB_END kind=0 pq=0 cq=0 f=01
+    24'h700001, // CB_RESET kind=0 pq=0 cq=0 f=01
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h000000, // unsupported
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h000000, // unsupported
+    24'h300701, // BIND kind=0 pq=0 cq=7 f=01
+    24'h300701, // BIND kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h110701, // ALLOC kind=4 pq=0 cq=7 f=01
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h148701, // ALLOC kind=18 pq=0 cq=7 f=01
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h000000, // unsupported
+    24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000, // unsupported
+    24'h000000 // unsupported
   };
 
   typedef enum logic [3:0] {

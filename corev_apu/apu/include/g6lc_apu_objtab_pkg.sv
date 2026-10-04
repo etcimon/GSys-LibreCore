@@ -24,7 +24,8 @@ package g6lc_apu_objtab_pkg;
     APU_OBJTAB_OP_UNPIN     = 4'd4,
     APU_OBJTAB_OP_SETSTATE  = 4'd5,
     APU_OBJTAB_OP_SETBIND   = 4'd6,
-    APU_OBJTAB_OP_RESET_CTX = 4'd7
+    APU_OBJTAB_OP_RESET_CTX = 4'd7,
+    APU_OBJTAB_OP_SETAUX    = 4'd8
   } apu_objtab_op_e;
 
   typedef enum logic [3:0] {
@@ -63,6 +64,7 @@ package g6lc_apu_objtab_pkg;
     logic [15:0] bind_mem_slot;  // 16'hFFFF = unbound
     logic [63:0] bind_offset;
     logic [63:0] size;
+    logic [63:0] aux;          // user state (cmdrec buf idx in [7:0])
     logic [7:0]  ctx;
   } apu_objtab_entry_t;
 

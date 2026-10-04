@@ -171,17 +171,94 @@ context in bounded time. Handle `{gen[15:0], slot}`; `gen` wraps past 0, so a st
 after 65,535 reuses of one slot still misses. Parent `refcnt` keeps a DEVICE alive while
 its BUFFERs exist (Vulkan validity, enforced in hardware rather than trusted).
 
+### 4b. Reply builder `g6lc_apu_vnrep` (interface of record, increment 3)
+
+Runs `APU_VN_REPLY_ROM` from `APU_VN_REPLY_ENTRY[op.reply_prog]` and writes words into
+the command's WRITE window through one write port (`rep_we_o`, `rep_addr_o`,
+`rep_wdata_o`, word-addressed from `rep_base_i`, bounded by `rep_len_i`). Inputs:
+`op_i` (the decoded record; `RHANDLE`/`RBLOB`/`RPTR` echo `q[]`, blobs and presence
+from it — Venus replies echo the driver-chosen ids), `result_i` (`VkResult` from the
+sequencer), and an **exec word buffer** `exec_w_i[0..63]` filled by the sequencer for
+`SRC=EXEC` fields (memory requirements, fence status, query counts). Ops: `RTYPE`,
+`RRESULT`, `RU32/RU64 src` (`CONST` pool or `EXEC` buffer, sequential cursor), `RHANDLE
+slot`, `RPTR pres,skip` (presence echo; absent → skip the pointee program), `RCONST
+idx,count` (profile block), `RCHAIN tbl` (recursive headers-then-reversed-bodies shape of
+§4), `RBLOB slot` (echo the CS blob words through a CS read port), `REXBUF` (words from
+the exec buffer, count from `exec_n_i`), `REXEC n` (n struct words from the exec buffer),
+`RRET`, `REND`. `GENERATE_REPLY` clear → no bytes, `rep_words_o = 0`. Overrun of
+`rep_len_i` → `fault_o` and the command fails with `VK_ERROR_UNKNOWN`-class result,
+never a partial reply. Exit for the increment: a Mesa **C decode harness**
+(`vn_decode_vk*_reply` from the vendored headers) decodes the golden reply bytes of
+every replying command in the set to the expected values, and the RTL matches the
+golden words.
+
+### 4c. Action table `APU_VN_ACT[type]` (generated classification)
+
+The sequencer needs one small per-command record, emitted by the generator from
+names and vk.xml, not hand-written per command:
+
+| Class | Rule | Sequencer behaviour |
+|---|---|---|
+| `ALLOC` | `vkCreate*`, `vkAllocateMemory`, `vkAllocateCommandBuffers`, `vkAllocateDescriptorSets`, `vkGetDeviceQueue*` | `ObjTab.ALLOC(OBJ kind, NEW id, parent = first LOOKUP handle)`; `DUP`→`VK_ERROR_UNKNOWN`, `FULL`→`VK_ERROR_OUT_OF_DEVICE_MEMORY` |
+| `RETIRE` | `vkDestroy*`, `vkFree*` | `ObjTab.RETIRE`; `PINNED`/`BUSY_CHILDREN` → `VK_ERROR_UNKNOWN` (validity violation, never silently ignored) |
+| `BIND` | `vkBind{Buffer,Image}Memory*` | `ObjTab.SETBIND(resource, memory, offset)` |
+| `QUERY` | `vkGetPhysicalDevice*`, `vkEnumerate*`, `vkGet*Requirements*`, `vkGetDeviceMemoryCommitment`, `vkGetRenderAreaGranularity`, `vkGetImageSubresourceLayout` | LOOKUPs only; reply from profile/exec buffer |
+| `CB_BEGIN` / `CB_END` / `CB_RESET` | `vkBeginCommandBuffer`, `vkEndCommandBuffer`, `vkResetCommandBuffer` | `CmdRec.BEGIN/END/RESET`; `ObjTab.SETSTATE` lifecycle bits (`INITIAL→RECORDING→EXECUTABLE→PENDING`) |
+| `RECORD` | `vkCmd*` | requires `RECORDING`; `CmdRec.APPEND(resolved record)`; a `vkCmd*` on a non-recording buffer → `VK_ERROR_UNKNOWN` and the buffer becomes `INVALID` |
+| `SUBMIT` | `vkQueueSubmit` | every listed buffer must be `EXECUTABLE`; `PIN` them, enqueue `{fence, buffers}` to the executor |
+| `WAIT` | `vkQueueWaitIdle`, `vkDeviceWaitIdle`, `vkWaitForFences`, `vkGetFenceStatus`, `vkResetFences` | read/clear fence state; waits complete only when the executor's `done_seq` has passed the submit's seq |
+| `POOL_RESET` | `vkResetCommandPool`, `vkResetDescriptorPool` | `CmdRec.RESET` for every buffer of the pool (pool = parent in `ObjTab`) |
+| `MAP` | `vkMapMemory` (excluded), `vkUnmapMemory`, `vkFlush/InvalidateMappedMemoryRanges` | LOOKUP + no-op on a HOST_COHERENT type; the aperture is HOST_VISIBLE SHM |
+| `NOP_OK` | `vkCreatePipelineCache`-class, `vkDestroyPipelineCache` | ALLOC/RETIRE of a stateless object |
+
+Everything not classified is `UNSUPPORTED` → `VK_ERROR_FEATURE_NOT_PRESENT` and a
+diagnostic record; the generator lists the fallout so the set is tightened, never
+widened by accident. Generated membership (2026-10-04, 120 commands): ALLOC 25, RETIRE
+21, BIND 4, QUERY 17, CB_BEGIN/END/RESET 1/1/1, RECORD 35, SUBMIT 1, WAIT 5, POOL_RESET
+2, MAP 3, NOP_OK 2, `UPDATE` 1 (`vkUpdateDescriptorSets` — LOOKUPs of the set and the
+written buffers/views; descriptor contents are consumed by the shader core in increment
+4), UNSUPPORTED 1 (`vkGetQueryPoolResults` — needs executor query data; stays refused
+until queries execute).
+
 ## 6. CmdRec and the submit-time executor
 
-`vkCmd*` are **recorded**, not executed, at decode: `CmdRec` appends fixed-width records
-`{op[7:0], cmdbuf_slot, args...}` into a per-CMDBUF region of a `tc_sram` arena
-(`CmdRecWords`), bounded per buffer; `vkEndCommandBuffer` seals; `vkResetCommandBuffer` /
-pool reset frees. `vkQueueSubmit` enqueues sealed buffers behind a fence/timeline record;
-the executor walks records in order, resolves handles **at execution time** through
-`ObjTab` (so a destroyed object between record and submit faults truthfully), and
-dispatches to engines. Pipeline barriers become engine fences plus cache maintenance;
-`vkQueueWaitIdle`/`vkWaitForFences` observe the executor's completion counters. A submit
-cannot retire objects pinned by in-flight records (`PIN` at submit, `UNPIN` at retire).
+`vkCmd*` are **recorded**, not executed, at decode. Increment-3 interfaces:
+
+- **`g6lc_apu_cmdrec`** (`Enable`, `NumBufs` default 16, `RecsPerBuf` default 64): one
+  `tc_sram` arena of `NumBufs × RecsPerBuf` fixed 16-word records, each the resolved
+  decode `{type, flags, slot[0..3] (ObjTab slots of the first four handles, with kinds),
+  imm[0..7]}` — the record *is* the decoded op, so the executor dispatches by `type`
+  without a second encoding. Ops: `BEGIN(buf)`, `APPEND(buf, record)` → `FULL` at
+  `RecsPerBuf`, `END(buf)` seals, `RESET(buf)`, `READ(buf, idx)` for the executor,
+  `COUNT(buf)`. Per-buffer region table in flops `{count[7:0], recording, sealed}`.
+  The buffer index lives in the CMDBUF's `ObjTab.aux`.
+- **`g6lc_apu_cmdexec`** (`Enable`, `Fences` default 16): submit FIFO `{seq, fence_slot,
+  buf list ≤ 4}`; walks each buffer's records in order; state records (`BindPipeline`,
+  `BindDescriptorSets`, `BindVertexBuffers`, `BindIndexBuffer`, `SetViewport`,
+  `SetScissor`, `PushConstants`, `Begin/End/NextSubpass`) update the executor's state
+  registers; work records (`Draw*`, `Dispatch*`, `Copy*`, `Fill/Update/Clear*`,
+  `Blit/Resolve`) are issued on one **work port** `work_valid_o/ready_i/work_o
+  {type, state snapshot, record}` with a completion `work_done_i` — the shader core,
+  raster and Xfer engines of increments 4–5 attach there; `PipelineBarrier` waits for
+  `work_done` of everything issued; every record's handles are re-resolved through
+  `ObjTab.LOOKUP` at execution time, so a destroyed object between record and submit
+  faults the submission (`done_seq` advances with `status = DEVICE_LOST` recorded on the
+  fence) instead of using stale state. `done_seq_o` and per-fence `signaled` bits feed
+  the `WAIT` class. `PIN` at submit, `UNPIN` when the buffer's records have all
+  completed.
+- **`g6lc_apu_vnfront`**: the sequencer tying `vndec → ACT → ObjTab → CmdRec/cmdexec →
+  vnrep`: `start(cs_base, cs_len, rep_base, rep_len)` → `done(result, rep_words,
+  fault)`. One command at a time; the queue path (`avn`/`qdn`, existing) feeds it and
+  publishes the used element after `done`.
+
+Exit for the increment: a **generated session** (Python: valid Vulkan ordering —
+instance → physical device queries → device → queue → memory/buffers → shader module
+→ layouts/pipeline → descriptor pool/set/update → command pool → allocate → begin →
+bind/dispatch/draw → end → submit → wait → destroys in reverse) runs through
+`vnfront` with every reply decoded by the Mesa C harness, `ObjTab` ending empty, the
+executor having issued exactly the recorded work in order, plus the negative arms:
+`vkCmd*` before begin, submit of an unsealed buffer, destroy of a pinned (submitted)
+buffer, destroy of a device with live children, stale handle after destroy.
 
 ## 7. ShaderCore — direct SPIR-V execution, SIMT
 
@@ -269,6 +346,6 @@ rectangle, not a limit. `Xfer` handles copies/clears/blits and MSAA resolve.
 |---|---|---|
 | 1 (done 2026-10-01) | references, source matrix, six-boundary review | plan §2 |
 | 2 (RTL done 2026-10-03, uncommitted) | `specs/venus-protocol` lazy pin `9fa07f3` (Mesa 26.0.8 vendored headers regenerate identically except the `70991d4` strict-aliasing cast; `pin-validate.log`); `gen_vn_tables.py`, `vn_golden.py`, `vn_mesa_diff/` (C harness against Mesa's own `vn_encode_vk*`), `g6lc_apu_vn_pkg.sv` for **120 commands** (0 unfit; `vkMapMemory` excluded — `void**` out-param is not serialized); `g6lc_apu_vndec`; `g6lc_apu_objtab` 256 slots + 512-bucket directory | Mesa C differential **480/480 PASS** on two seeds (120 cmds × 4 instances); remote `tb_g6lc_apu_vndec` **2421 cases / 161,074 checks** incl. 7 mutation classes; `tb_g6lc_apu_objtab` **8 cases / 2,222 checks** incl. 2000 random ops vs reference model; `Enable=0` **0 cells** both; `vndec` Enable=1 27,108 cells / 2,383 flops (ROM 1,648×48 b in logic — above the 10 k target, see follow-ups); `objtab` 1,902 control flops + two retained `$mem_v2` (256×entry, 512×82 b; 105,545 flops when flop-mapped by the generic flow); no latches; 0 lint warnings. Found and fixed by the TBs: entry-table index keyed off the flags word, directory bucket clobber on parent resolve, parent entry captured one cycle early. Follow-ups: 2 cycles/word (U32 ops take StOp→StW1), index widths `mpc_q[10:0]`/`scan_q[7:0]`/`rom_b[6:0]` must come from generated `*_AW` params before the ROM grows, ROM → `tc_sram`-initialised or compressed |
-| 3 | `CmdRec` + `cmdexec` skeleton (record/seal/submit/fence) on the queue path; retire `bru`-style flags | two recorded draws + one dispatch execute in order; destroy-between-record-and-submit faults |
+| 3 (RTL done 2026-10-04, standalone) | `g6lc_apu_vnrep` reply builder (§4b), `APU_VN_ACT` action table (§4c), `g6lc_apu_cmdrec` (16×64 16-word records in `tc_sram`), `g6lc_apu_cmdexec` (submit FIFO, re-resolution by `{gen,slot}`, PIN/UNPIN, work port, fences), `g6lc_apu_vnfront` sequencer; `vn_golden.py` reply encoder + `--session`; Mesa C **reply-decode** harness | Reply differential against Mesa `vn_decode_vk*_reply`: **248/248** per-command, **64/64** session. Remote TBs: `vndec_rep` 499 / 10,496; `cmdrec` 2,110 / 2,105; `cmdexec` 6 / 22; `vnfront` **104 commands / 1,395 checks** over the §6 positive session plus the five negative arms (Cmd outside recording, submit of unsealed, free of pending CB → PINNED, destroy device with child → BUSY_CHILDREN, stale handle), ObjTab empty at the end. `Enable=0` 0 cells everywhere; no latches; 0 lint. Enable=1: vnrep 15,205 cells / 1,765 ff (316-word ROM in logic); cmdrec 1,578,368 / 525,499 — the 64 KiB arena flop-mapped by the generic flow (one retained `$mem_v2`), control logic not separable until a small-parameter screen is added; cmdexec 4,583 / 1,663; vnfront 63,256 / 8,595; objtab now 384,612 / 124,151 (entry grew). Found by the TBs: `SETBIND` sent kind 0; Verilator 5.008 reads an unpacked-array input port as zeros (flattened). Follow-ups: `REXEC` chain bodies for chained property structs (session only exercises `RCONST` bodies), `vkGetQueryPoolResults`, small-parameter synth screen for cmdrec, wire `vnfront` behind `avn`/`qdn` on the queue path. Not in `g6lc_apu_sys`; no graphics executed — the work port is acked by the TB |
 | 4 | ShaderCore commit scanner + vec4 FP32 compute path + MatHelper | stock `glslang` compute SPIR-V runs with data mutation; helper on/off identical under `NoContraction` |
 | 5 | Raster TBDR + Xfer + sampler | G0 64×64 readback through the stock client; UE SM5 profile queries answered from the profile ROM |
