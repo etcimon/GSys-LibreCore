@@ -92,7 +92,8 @@ SRC = {'IMM': 0, 'Q': 1, 'CNT': 2, 'CONST': 3, 'EXEC': 4}
 # action-table (4c): class enum order is the package's apu_vn_act_e.
 ACT_CLASSES = ['UNSUPPORTED', 'ALLOC', 'RETIRE', 'BIND', 'QUERY',
                'CB_BEGIN', 'CB_END', 'CB_RESET', 'RECORD', 'SUBMIT',
-               'WAIT', 'POOL_RESET', 'MAP', 'NOP_OK', 'UPDATE']
+               'WAIT', 'POOL_RESET', 'MAP', 'NOP_OK', 'UPDATE',
+               'TRANSPORT']
 ACT_F_REPLY = 0x01          # flags bit: GENERATE_REPLY
 QSLOT_NONE = 0x7            # all-ones sentinel of a 3-bit qslot field
 ROLES = {'LOOKUP': 0, 'NEW': 1, 'RETIRE': 2, 'OPTIONAL': 3}
@@ -139,6 +140,7 @@ class Model:
         self.cmd_info = {}
         self.profile_words_pool = []
         self.profile_words_idx = {}
+        self.cur_transport = False
 
     # ---- registry helpers ---------------------------------------------------
 
@@ -156,7 +158,9 @@ class Model:
 
     def _api_consts(self):
         """VK_MAX_* / VK_*_SIZE style constants -> int.  vkxml skips
-        <enums type="constants"> groups, so parse them here."""
+        <enums type="constants"> groups, so parse them here.  Extension
+        <require> enums (SPEC_VERSION values, *_EXTENSION_NAME) are also
+        collected."""
         import xml.etree.ElementTree as ET
         out = {}
         for xf in ('vk.xml', 'VK_EXT_command_serialization.xml',
@@ -168,6 +172,14 @@ class Model:
                         k, v = vkxml.VkEnums._parse_enum(e)
                         out[k] = int(str(v), 0)
                     except (ValueError, AssertionError, KeyError):
+                        pass
+            for ext in root.iter('extension'):
+                for e in ext.iterfind('require/enum'):
+                    if 'value' not in e.attrib or 'offset' in e.attrib:
+                        continue
+                    try:
+                        out[e.attrib['name']] = int(e.attrib['value'], 0)
+                    except ValueError:
                         pass
         for ty in self.reg.type_table.values():
             if ty.category == ty.ENUM and ty.enums is not None:
@@ -298,6 +310,13 @@ class Model:
 
     def _alloc(self, what):
         """Persistent-scope slot allocation; raises Unfit on overflow."""
+        # TRANSPORT commands carry no slot data at all: the record is
+        # only the validation/length carrier (type/fault/words/chain);
+        # the pump re-parses argument words from the stream itself
+        # (6b).  This is what lets e.g. vkCreateRingMESA (eleven u64
+        # operands) fit the slot budget.
+        if self.cur_transport and what in ('q', 'imm', 'pres'):
+            return DISCARD if what != 'pres' else 0xFF
         m = {'q': MAX_Q, 'imm': MAX_IMM, 'pres': MAX_PRES,
              'blob': MAX_BLOB}[what]
         cur = self.slot_cnt[what]
@@ -599,7 +618,13 @@ class Model:
         entries = []           # (stype, ('body',name,partial))
         self.chain_list.append({'key': key, 'entries': entries})
         for nty in parent.p_next:
-            if not self.gen.is_serializable(nty) or not self.core_le_11(nty):
+            # core <= 1.1 candidates plus VK_MESA_venus_protocol chain
+            # nodes (VkRingMonitorInfoMESA/VkRingPriorityInfoMESA on
+            # VkRingCreateInfoMESA, VkImportMemoryResourceInfoMESA on
+            # VkMemoryAllocateInfo, ...) — Mesa's own pnext tables
+            # accept them on these parents.
+            if not self.gen.is_serializable(nty) or not \
+                    (self.core_le_11(nty) or nty.name.endswith('MESA')):
                 continue
             st = self.stype_values.get(nty.s_type)
             if st is None:
@@ -648,6 +673,7 @@ class Model:
                   self.gen.supported_types[vkxml.VkType.COMMAND]
                   if t.name == name)
         self.cur_cmd = name
+        self.cur_transport = self.act_class(name) == 'TRANSPORT'
         self.prog = []
         self.slot_cnt = {'q': 0, 'imm': 0, 'pres': 0, 'blob': 0}
         self.depth = 0
@@ -696,6 +722,19 @@ class Model:
 
     def act_class(self, name):
         """Class name per the apu-vulkan-engine 4c table; name rules only."""
+        # transport (6b): the pump executes these itself, not vnfront;
+        # checked before the vkCreate/vkDestroy prefixes catch the ring
+        # commands.  vkGetMemoryResourcePropertiesMESA is a real QUERY.
+        if name == 'vkGetMemoryResourcePropertiesMESA':
+            return 'QUERY'
+        if name in ('vkSetReplyCommandStreamMESA',
+                    'vkSeekReplyCommandStreamMESA',
+                    'vkExecuteCommandStreamsMESA',
+                    'vkCreateRingMESA', 'vkDestroyRingMESA',
+                    'vkNotifyRingMESA', 'vkWriteRingExtraMESA',
+                    'vkSubmitVirtqueueSeqnoMESA',
+                    'vkWaitVirtqueueSeqnoMESA', 'vkWaitRingSeqnoMESA'):
+            return 'TRANSPORT'
         if name.startswith('vkCmd'):
             return 'RECORD'
         if name == 'vkBeginCommandBuffer':
@@ -858,7 +897,8 @@ class Model:
         entries = []
         self.chain_list.append({'key': key, 'entries': entries})
         for nty in ty.p_next:
-            if not self.gen.is_serializable(nty) or not self.core_le_11(nty):
+            if not self.gen.is_serializable(nty) or not \
+                    (self.core_le_11(nty) or nty.name.endswith('MESA')):
                 continue
             st = self.stype_values.get(nty.s_type)
             if st is None:
@@ -1023,6 +1063,29 @@ class Model:
                 return [0] * n
         return None
 
+    def capset_words(self):
+        """struct virgl_renderer_capset_venus (Mesa 26.0.8
+        src/virtio/virtio-gpu/venus_hw.h): 7 fixed u32 fields with
+        vk_extension_mask1[32] between supports_blob_id_0 and
+        allow_vk_wait_syncs -> 40 words / 160 bytes."""
+        import re
+        c = self.profile.get('capset_venus', {})
+        m = re.search(r'VK_MAKE_API_VERSION\((\d+),\s*(\d+),\s*(\d+),'
+                      r'\s*(\d+)\)', self.reg.vk_xml_version)
+        variant, maj, mnr, pt = (int(x) for x in m.groups())
+        vkxml_ver = (variant << 29) | (maj << 22) | (mnr << 12) | pt
+        mask = [0] * 32
+        mask[0] = int(c.get('vk_extension_mask1_bit0_valid', 1)) & 1
+        return [int(c.get('wire_format_version', 1)),
+                vkxml_ver,
+                self.api_consts['VK_EXT_COMMAND_SERIALIZATION_SPEC_'
+                                 'VERSION'],
+                self.api_consts['VK_MESA_VENUS_PROTOCOL_SPEC_VERSION'],
+                int(c.get('supports_blob_id_0', 1))] + mask + [
+                int(c.get('allow_vk_wait_syncs', 1)),
+                int(c.get('supports_multiple_timelines', 1)),
+                int(c.get('use_guest_vram', 0))]
+
     def num_word(self, base, val):
         if base.name == 'float':
             import struct as _s
@@ -1065,6 +1128,11 @@ class Model:
                 unfit[name] = str(e)
             except Exception as e:  # keep diagnosing the whole set
                 unfit[name] = 'error: %r' % e
+        # pseudo-kinds for the transport layer (§6b): virtio context
+        # objects and mapped blob shmem entries in ObjTab.  Registered
+        # last so all vk.xml handle kinds keep their ids.
+        self.kind('ApuVirtioCtx')
+        self.kind('ApuBlobShmem')
         return unfit
 
     # ---- ROM assembly ---------------------------------------------------------
@@ -1255,6 +1323,13 @@ def emit_sv(model, asm, profile):
       % len(model.profile_words_pool))
     arr(32, 'APU_VN_PROFILE', '[0:APU_VN_PROFILE_WORDS-1]',
         model.profile_words_pool, lambda w: "32'h%08X" % w)
+    A('')
+    # Venus capset (6b): virgl_renderer_capset_venus from Mesa 26.0.8
+    # venus_hw.h — 40 words / 160 bytes, served by vgctl on GET_CAPSET.
+    cap = model.capset_words()
+    A('  localparam int APU_VN_CAPSET_WORDS = %d;' % len(cap))
+    arr(32, 'APU_VN_CAPSET', '[0:APU_VN_CAPSET_WORDS-1]',
+        cap, lambda w: "32'h%08X" % w)
     A('')
     # generated index widths (clog2 of each table's word count); RTL must
     # index generated ROMs/tables through these, not hard-coded slices

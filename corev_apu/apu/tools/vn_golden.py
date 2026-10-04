@@ -1382,6 +1382,7 @@ class FrontModel:
 
     SLOTS = 256
     CB_BUFS = 16
+    FENCES = 16
 
     def __init__(self, model, asm):
         self.m = model
@@ -1393,9 +1394,13 @@ class FrontModel:
         self.gens = [0] * self.SLOTS
         self.idmap = {}
         self.live_cnt = 0
+        self.ctx = 0
         self.cb_alloc = [0] * self.CB_BUFS
         self.cb_pool = [0] * self.CB_BUFS
         self.cb_hnd = [0] * self.CB_BUFS
+        # executor fence arena: vkCreateFence claims an index into
+        # aux[7:0]; ObjTab slots are global, not per-kind
+        self.falloc = [0] * self.FENCES
         self.recs = [[] for _ in range(self.CB_BUFS)]
         self.rec_state = [0] * self.CB_BUFS   # 0 none,1 recording,2 sealed
         self.pushed = 0
@@ -1448,7 +1453,7 @@ class FrontModel:
         self.gens[slot] = g
         self.ent[slot] = {'id': idv, 'kind': kind, 'gen': g,
                           'parent': par, 'refcnt': 0, 'pins': 0,
-                          'state': 0, 'aux': 0, 'ctx': 0}
+                          'state': 0, 'aux': 0, 'ctx': self.ctx}
         self.idmap[idv] = slot
         self.live_cnt += 1
         if par >= 0:
@@ -1581,30 +1586,48 @@ class FrontModel:
                         out['result'] = self._err(st)
             elif ek == 'ENUMEXT':
                 ew[0] = ew[1] = 0
+            elif ek == 'MRES':
+                # vkGetMemoryResourcePropertiesMESA: memoryTypeBits = 3
+                ew[0] = 3
 
         elif cls == 'ALLOC':
             new = next((i for i in range(8)
                         if rec['qv'] >> i & 1 and rec['role'][i] == 1), -1)
             par = hnd[act['parent_q']] if act['parent_q'] != 7 else 0
             if new >= 0:
-                st, h, slot = self.alloc(rec['q'][new], obj_kind, par)
-                if st != 'OK':
-                    out['result'] = self._err(st)
-                elif ct in (session['T']['vkCreateBuffer'],
-                            session['T']['vkCreateImage']):
-                    if ct == session['T']['vkCreateBuffer']:
-                        ds = next((i for i in range(8)
-                                   if rec['qv'] >> i & 1
-                                   and not rec['kind'][i]), -1)
-                        sz = rec['q'][ds] if ds >= 0 else 0
-                        blocks = (sz + 255) >> 8
-                    else:
-                        sz = rec['imm'][3] * rec['imm'][4] * 4
-                        blocks = (sz + 4095) >> 12
-                    st2, _s2 = self.setaux(h, 0xFFFFFF00,
-                                           (blocks & 0xFFFFFF) << 8)
-                    if st2 != 'OK':
-                        out['result'] = VK_ERR_UNKNOWN
+                # executor fence index -> aux[7:0] (arena-free check
+                # happens before the ObjTab alloc, mirroring the front)
+                fidx = -1
+                if obj_kind == KIND['VkFence']:
+                    fidx = next((i for i in range(self.FENCES)
+                                 if not self.falloc[i]), -1)
+                if obj_kind == KIND['VkFence'] and fidx < 0:
+                    out['result'] = VK_ERR_OOM
+                else:
+                    st, h, slot = self.alloc(rec['q'][new], obj_kind, par)
+                    if st != 'OK':
+                        out['result'] = self._err(st)
+                    elif obj_kind == KIND['VkFence']:
+                        st2, _ = self.setaux(h, 0xFF, fidx)
+                        if st2 != 'OK':
+                            out['result'] = VK_ERR_UNKNOWN
+                        else:
+                            self.falloc[fidx] = 1
+                    elif ct in (session['T']['vkCreateBuffer'],
+                                session['T']['vkCreateImage']):
+                        if ct == session['T']['vkCreateBuffer']:
+                            ds = next((i for i in range(8)
+                                       if rec['qv'] >> i & 1
+                                       and not rec['kind'][i]), -1)
+                            sz = rec['q'][ds] if ds >= 0 else 0
+                            blocks = (sz + 255) >> 8
+                        else:
+                            sz = rec['imm'][3] * rec['imm'][4] * 4
+                            blocks = (sz + 4095) >> 12
+                        st2, _s2 = self.setaux(h, 0xFFFFFF00,
+                                               (blocks & 0xFFFFFF) << 8)
+                        if st2 != 'OK':
+                            out['result'] = VK_ERR_UNKNOWN
             else:
                 slot = (act['flags'] >> 1) & 1
                 for idv in blob_ids(slot):
@@ -1633,7 +1656,7 @@ class FrontModel:
             ids = ([rec['q'][rt]] if rt >= 0 else blob_ids(0))
             for idv in ids:
                 aux = 0
-                if obj_kind == KIND['VkCommandBuffer']:
+                if obj_kind in (KIND['VkCommandBuffer'], KIND['VkFence']):
                     st, s, e = self.resolve(idv, obj_kind)
                     if st != 'OK':
                         out['result'] = VK_ERR_UNKNOWN
@@ -1648,6 +1671,8 @@ class FrontModel:
                     self.cb_alloc[aux] = 0
                     self.cb_pool[aux] = 0
                     self.cb_hnd[aux] = 0
+                elif obj_kind == KIND['VkFence'] and aux < self.FENCES:
+                    self.falloc[aux] = 0
 
         elif cls == 'BIND':
             rs, ms = lu[1], lu[2]
@@ -1724,8 +1749,10 @@ class FrontModel:
                        if rec['qv'] >> i & 1 and rec['role'][i] == 3
                        and rec['q'][i]), -1)
             fslot = -1
-            if fs >= 0 and hnd[fs] & 0xFFFF < 16:
-                fslot = hnd[fs] & 0xFFFF
+            if fs >= 0:
+                fe = ent_of(fs)
+                if fe is not None and (fe['aux'] & 0xFF) < self.FENCES:
+                    fslot = fe['aux'] & 0xFF
             cbs = []
             pins = []
             ok = True
@@ -1779,10 +1806,10 @@ class FrontModel:
                     mask = 0
                     for idv in blob_ids(0):
                         st, s, e = self.resolve(idv, KIND['VkFence'])
-                        if st != 'OK' or s >= 16:
+                        if st != 'OK' or (e['aux'] & 0xFF) >= self.FENCES:
                             out['result'] = VK_ERR_UNKNOWN
                             break
-                        mask |= 1 << s
+                        mask |= 1 << (e['aux'] & 0xFF)
                     else:
                         if self.fence_lost & mask:
                             out['result'] = VK_ERR_LOST
@@ -1795,14 +1822,15 @@ class FrontModel:
             elif wt == 'clr':
                 for idv in blob_ids(0):
                     st, s, e = self.resolve(idv, KIND['VkFence'])
-                    if st != 'OK' or s >= 16:
+                    if st != 'OK' or (e['aux'] & 0xFF) >= self.FENCES:
                         out['result'] = VK_ERR_UNKNOWN
                         break
-                    self.fence_sig &= ~(1 << s)
+                    self.fence_sig &= ~(1 << (e['aux'] & 0xFF))
             else:
                 fs = lu[1]
-                s = hnd[fs] & 0xFFFF
-                if s >= 16:
+                fe = ent_of(fs)
+                s = fe['aux'] & 0xFF if fe is not None else 0xFF
+                if s >= self.FENCES:
                     out['result'] = VK_ERR_UNKNOWN
                 elif self.fence_lost >> s & 1:
                     out['result'] = VK_ERR_LOST
@@ -1853,6 +1881,8 @@ class FrontModel:
             return 'ENUMPD'
         if name == 'vkEnumerateDeviceExtensionProperties':
             return 'ENUMEXT'
+        if name == 'vkGetMemoryResourcePropertiesMESA':
+            return 'MRES'
         return 'NONE'
 
     def is_work(self, ct):
@@ -2288,12 +2318,1109 @@ def write_session(name, cmds, fm):
     return insts
 
 
+# ---------------------------------------------------------------------------
+# §6b transport: virtio-gpu control queue + Venus ring guest-script vectors
+# ---------------------------------------------------------------------------
+
+# virtio-gpu UAPI ids (pinned Resolute linux/virtio_gpu.h)
+VG_GET_CAPSET_INFO   = 0x0107
+VG_GET_CAPSET        = 0x0108
+VG_RESOURCE_UNREF    = 0x0102
+VG_RESOURCE_CREATE_BLOB = 0x010B
+VG_CTX_CREATE        = 0x0200
+VG_CTX_DESTROY       = 0x0201
+VG_CTX_ATTACH        = 0x0202
+VG_CTX_DETACH        = 0x0203
+VG_SUBMIT_3D         = 0x0207
+VG_MAP_BLOB          = 0x0208
+VG_UNMAP_BLOB        = 0x0209
+VG_RESP_NODATA       = 0x1100
+VG_RESP_CAPSET_INFO  = 0x1102
+VG_RESP_CAPSET       = 0x1103
+VG_RESP_MAP_INFO     = 0x1106
+VG_ERR_UNSPEC        = 0x1200
+VG_ERR_RESOURCE      = 0x1203
+VG_ERR_CTX           = 0x1204
+VG_ERR_PARAM         = 0x1205
+VG_FLAG_FENCE        = 0x01
+VG_BLOB_HOST3D       = 0x02
+VG_BLOB_MAPPABLE     = 0x01
+VG_MAP_WC            = 0x03
+VG_CAPSET_VENUS      = 4
+
+# tape opcodes (.hex): the TB replays this guest script
+TP_END       = 0   # no operands
+TP_MEMW      = 1   # [n][addr_lo][addr_hi][w0..]   write guest RAM words
+TP_CHAIN     = 2   # [nd][per-desc: alo ahi len dflags]..[flags][flo][fhi][ctx][ridx]
+TP_APW       = 3   # [n][ap_off_lo][ap_off_hi][w0..] write aperture words
+TP_WAIT_HEAD = 4   # [ring][target_lo][target_hi][timeout]
+TP_WAIT_IDLE = 5   # [ring][timeout]   poll ring.status for the IDLE bit
+TP_CHECK     = 6   # [what][a0][a1]    consume .exp record(s) (a0,a1 = aux)
+TP_DELAY     = 7   # [cycles]          idle the TB clock this long
+
+# CHECK 'what' selectors
+CK_HEAD   = 0      # a0=ring
+CK_STATUS = 1      # a0=ring
+CK_REPLY  = 2      # a0=nwords, a1=aperture byte offset of reply window start
+CK_LIVE   = 3
+CK_EXTRA  = 4      # a0=ring, a1=extra region byte offset
+CK_TAIL   = 5      # a0=ring  (guest-side tail store visible in aperture)
+
+# .exp record kinds (8 words each, sentinel FFFFFFFF FFFFFFFF)
+EK_RESP   = 1      # {kind, used_len, resp_type, nbody, 0,0,0,0}
+EK_BODY   = 2      # {kind, w0, w1, w2, w3, w4, w5, w6}   7 payload words
+EK_HEAD   = 3      # {kind, ring, exp_head, 0,0,0,0,0}
+EK_STATUS = 4      # {kind, ring, exp_status, 0,0,0,0,0}
+EK_REPLY  = 5      # {kind, idx, exp_word, 0,0,0,0,0}
+EK_LIVE   = 6      # {kind, exp_live, 0,0,0,0,0,0}
+EK_EXTRA  = 7      # {kind, ring, byte_off, exp_word, 0,0,0,0}
+EK_FENCE  = 8      # {kind, fence_lo, fence_hi, ring_idx, 0,0,0,0}
+EK_TAIL   = 9      # {kind, ring, exp_tail, 0,0,0,0,0}
+
+# ring status bits (VK_MESA_venus_protocol.xml VkRingStatusFlagsMESA)
+RING_IDLE  = 1
+RING_FATAL = 2
+RING_ALIVE = 4
+
+# aperture geometry (§6b): APU_SHM_BASE window, 4 KiB pages, 1 MiB
+APU_SHM_BASE = 0x82000000
+AP_PAGE      = 0x1000
+AP_WORDS     = 0x40000          # 1 MiB / 4
+
+# guest RAM layout for the script
+GREQ  = 0x00004000              # request payload scratch (reused)
+GRESP = 0x00010000              # response windows (0x100 stride each)
+
+# the stock ring layout: vn_ring_get_layout(4096, 0) -- Mesa
+# vn_ring.c struct layout {alignas(64) u32 head, tail, status; u8 buffer[]}
+RING_HEAD_OFF   = 0
+RING_TAIL_OFF   = 64
+RING_STATUS_OFF = 128
+RING_BUF_OFF    = 192
+
+
+def le64(v):
+    return [v & 0xFFFFFFFF, (v >> 32) & 0xFFFFFFFF]
+
+
+def vg_hdr(ty, flags=0, fence=0, ctx=0, ring_idx=0):
+    """virtio_gpu_ctrl_hdr = 24 bytes / 6 words."""
+    return [ty, flags, fence & 0xFFFFFFFF, (fence >> 32) & 0xFFFFFFFF,
+            ctx, ring_idx]
+
+
+class TransportModel:
+    """Device-side model of vgctl + vnpump + aperture + ObjTab extras.
+
+    Mirrors the §6b engines: control-queue responses, the aperture page
+    allocator, the ring table, the reply stream, and the transport
+    commands themselves.  `gmem` shadows guest RAM (execbuffers live
+    there); `ap` shadows the device aperture (blobs live there).
+    """
+
+    def __init__(self, model, asm, sim, rep_sim):
+        self.m = model
+        self.asm = asm
+        self.sim = sim
+        self.rep_sim = rep_sim
+        self.ap = [0] * AP_WORDS
+        self.ap_pages = [0] * (AP_WORDS // (AP_PAGE // 4))
+        self.gmem = {}
+        self.blobs = {}                   # res_id -> dict
+        self.ctxs = {}                    # ctx_id -> dict
+        self.rings = [None] * 4
+        self.ring_of = {}                 # handle -> slot
+        self.reply = None                 # {base_w, size, pos}
+        self.rep_log = []                 # (ap_byte_off, words) per reply
+        self.exec_log = []                # (name, out) per replying cmd
+        self.vq_seqno = 0
+        self.stream_err = 0               # execbuf stream error flag
+        self.T = {i['type_id']: n for n, i in model.cmd_info.items()}
+        self.ACT = {i['type_id']: i['act']['class']
+                    for n, i in model.cmd_info.items()}
+
+    # ---- aperture allocator (first-fit, 4 KiB pages) ---------------------
+    def ap_alloc(self, size):
+        pages = (size + AP_PAGE - 1) // AP_PAGE
+        run = 0
+        for i, used in enumerate(self.ap_pages):
+            run = 0 if used else run + 1
+            if run == pages:
+                base = (i - pages + 1) * (AP_PAGE // 4)
+                for j in range(i - pages + 1, i + 1):
+                    self.ap_pages[j] = 1
+                return base
+        return -1
+
+    def ap_free(self, base_w, size):
+        b = base_w // (AP_PAGE // 4)
+        for j in range(b, b + (size + AP_PAGE - 1) // AP_PAGE):
+            self.ap_pages[j] = 0
+
+    # ---- shared helpers ---------------------------------------------------
+    def blob_of(self, rid):
+        b = self.blobs.get(rid)
+        return b if b is not None and b['mapped'] else None
+
+    def gmem_slice(self, byte_addr, nbytes):
+        return [self.gmem.get((byte_addr >> 2) + i, 0)
+                for i in range(nbytes // 4)]
+
+    def reply_put(self, rep):
+        """Append a front reply at the reply cursor (word writes)."""
+        if not rep or self.reply is None:
+            return
+        base_w = self.reply['base_w'] + (self.reply['pos'] >> 2)
+        for i, w in enumerate(rep):
+            self.ap[base_w + i] = w
+        self.rep_log.append((base_w << 2, list(rep)))
+        self.reply['pos'] += len(rep) * 4
+
+    # ---- command-stream executor ------------------------------------------
+    def exec_stream(self, get_words, nbytes, fm, ses, log, ctx,
+                    ring=None, depth=0):
+        """Execute `nbytes` of Venus command stream.  `get_words(off, n)`
+        returns n words starting at byte offset `off` inside the stream.
+        For rings, `ring` advances head-wise per command; linear streams
+        (execbuffers, ExecuteCommandStreams windows) pass ring=None.
+        Returns (consumed_bytes, fatal)."""
+        pos = 0
+        fatal = False
+        while pos * 4 < nbytes and not fatal:
+            words = get_words(pos, (nbytes - pos * 4) // 4)
+            rec = self.sim.run(words)
+            name = self.T.get(rec['type'], '?')
+            if rec['fault']:
+                fatal = True
+                break
+            cmdw = words[:rec['words']]
+            if self.ACT.get(rec['type']) == 'TRANSPORT':
+                fatal = self.t_cmd(name, cmdw, rec, fm, ses, log, ctx,
+                                   depth)
+            else:
+                out = fm.step(name, None, cmdw, rec, self.rep_sim, ses)
+                self.reply_put(out['rep'])
+                if out['rep']:
+                    self.exec_log.append((name, out))
+            # vn_ring advances head only after the command's reply and
+            # side effects complete; a fatal error leaves head at the
+            # faulting command
+            if fatal:
+                break
+            pos += rec['words']
+            if ring is not None:
+                ring['head'] = ring['head0'] + pos * 4
+                self.ap[ring['head_base_w']] = ring['head'] & 0xFFFFFFFF
+                log.append('ring%d %s head=%d'
+                           % (ring['slot'], name, ring['head']))
+        return pos * 4, fatal
+
+    def drain_ring(self, ring, fm, ses, log):
+        """Consume [head, tail) of one ring (models vnpump's poll)."""
+        if ring['fatal']:
+            return
+        tail = self.ap[ring['tail_base_w']] & 0xFFFFFFFF
+        if tail <= ring['head']:
+            return
+        ring['head0'] = ring['head']
+        h0 = ring['head0']
+        mask = ring['buf_size'] - 1
+
+        def get(off, n, h0=h0):
+            return [self.ap[ring['buf_base_w'] +
+                            (((h0 + off * 4 + i * 4) & mask) >> 2)]
+                    for i in range(n)]
+
+        _cons, fatal = self.exec_stream(get, tail - ring['head'],
+                                        fm, ses, log, ring['ctx'],
+                                        ring=ring)
+        if fatal:
+            ring['fatal'] = True
+            self.ap[ring['status_base_w']] |= RING_FATAL
+            log.append('ring%d FATAL head=%d'
+                       % (ring['slot'], ring['head']))
+        ring['idle_count'] = 0
+
+    # ---- transport commands ------------------------------------------------
+    def t_cmd(self, name, w, rec, fm, ses, log, ctx, depth):
+        """Execute one TRANSPORT command; w = raw command words.
+        Returns True on a fatal stream error."""
+
+        def u64(i):
+            return w[i] | (w[i + 1] << 32)
+
+        if name == 'vkSetReplyCommandStreamMESA':
+            # 0:type 1:flags 2-3:presence64 4:rid 5-6:offset 7-8:size
+            rid, off, size = w[4], u64(5), u64(7)
+            b = self.blob_of(rid)
+            if b is None or off + size > b['size']:
+                return True
+            self.reply = {'base_w': b['base_w'] + (off >> 2),
+                          'size': size, 'pos': 0}
+        elif name == 'vkSeekReplyCommandStreamMESA':
+            pos = u64(2)
+            if self.reply is None or pos > self.reply['size']:
+                return True
+            self.reply['pos'] = pos
+        elif name == 'vkExecuteCommandStreamsMESA':
+            if depth:
+                return True           # nesting depth 1 only
+            n = w[2]
+            pos_of = 5 + 5 * n + 2    # streams end + array_size u64
+            positions = [u64(pos_of + 2 * i) for i in range(n)]
+            for i in range(n):
+                s = 5 + 5 * i
+                rid, off, size = w[s], u64(s + 1), u64(s + 3)
+                b = self.blob_of(rid)
+                if b is None or off + size > b['size']:
+                    return True
+                if self.reply is not None:
+                    self.reply['pos'] = positions[i]
+                bw = b['base_w'] + (off >> 2)
+
+                def getw(o, nn, bw=bw):
+                    return [self.ap[bw + o + j] for j in range(nn)]
+                _c, fatal = self.exec_stream(getw, size, fm, ses, log,
+                                             ctx, depth=depth + 1)
+                if fatal:
+                    return True
+        elif name == 'vkCreateRingMESA':
+            # 0:type 1:flags 2-3:ring 4-5:pres64 6:sType
+            # 7..: chain (2 + 4n words), then self fields at 9+4n
+            cn = len(rec['chain'])
+            f = 9 + 4 * cn
+            (flags, rid, off, size, idle, head_o, tail_o, stat_o,
+             buf_o, buf_s, ext_o, ext_s) = (
+                w[f], w[f + 1], u64(f + 2), u64(f + 4), u64(f + 6),
+                u64(f + 8), u64(f + 10), u64(f + 12), u64(f + 14),
+                u64(f + 16), u64(f + 18), u64(f + 20))
+            handle = u64(2)
+            b = self.blob_of(rid)
+            if (b is None or handle in self.ring_of
+                    or all(r is not None for r in self.rings)
+                    or off + size > b['size']
+                    or buf_s == 0 or (buf_s & (buf_s - 1))
+                    or buf_o + buf_s > size
+                    or head_o + 4 > size or tail_o + 4 > size
+                    or stat_o + 4 > size
+                    or ext_o + ext_s > size):
+                return True
+            slot = next(i for i, r in enumerate(self.rings) if r is None)
+            base_w = b['base_w'] + (off >> 2)
+            ring = {'slot': slot, 'handle': handle, 'rid': rid,
+                    'ctx': ctx, 'idle_to': idle, 'head': 0,
+                    'head_base_w': base_w + (head_o >> 2),
+                    'tail_base_w': base_w + (tail_o >> 2),
+                    'status_base_w': base_w + (stat_o >> 2),
+                    'buf_base_w': base_w + (buf_o >> 2),
+                    'buf_size': buf_s,
+                    'extra_base_w': base_w + (ext_o >> 2),
+                    'extra_size': ext_s, 'fatal': False,
+                    'idle_count': 0}
+            self.rings[slot] = ring
+            self.ring_of[handle] = slot
+            # device publishes ALIVE at create (head/tail already 0)
+            self.ap[ring['status_base_w']] = RING_ALIVE
+        elif name == 'vkDestroyRingMESA':
+            handle = u64(2)
+            slot = self.ring_of.pop(handle, None)
+            if slot is None:
+                return True
+            self.rings[slot] = None
+        elif name == 'vkNotifyRingMESA':
+            handle = u64(2)
+            slot = self.ring_of.get(handle)
+            if slot is None:
+                return True
+            r = self.rings[slot]
+            self.ap[r['status_base_w']] &= ~RING_IDLE
+            r['idle_count'] = 0
+        elif name == 'vkWriteRingExtraMESA':
+            handle, off, val = u64(2), u64(4), w[6]
+            slot = self.ring_of.get(handle)
+            if slot is None:
+                return True
+            r = self.rings[slot]
+            if off + 4 > r['extra_size']:
+                return True
+            self.ap[r['extra_base_w'] + (off >> 2)] = val
+        elif name == 'vkSubmitVirtqueueSeqnoMESA':
+            if u64(4) > self.vq_seqno:
+                self.vq_seqno = u64(4)
+        elif name == 'vkWaitVirtqueueSeqnoMESA':
+            if u64(2) > self.vq_seqno:
+                return True            # model: never blocks in fixture
+        elif name == 'vkWaitRingSeqnoMESA':
+            handle, sq = u64(2), u64(4)
+            slot = self.ring_of.get(handle)
+            if slot is None or self.rings[slot]['head'] < sq:
+                return True
+        else:
+            return True                # unhandled transport command
+        return False
+
+
+# ---------------------------------------------------------------------------
+# guest-script builder (§6b exit scenario) + vector emission
+# ---------------------------------------------------------------------------
+
+RING0_H = 0x100          # ring handle values the driver picks
+RING1_H = 0x101
+RING2_H = 0x102
+RING3_H = 0x103
+
+RES_RING0  = 100         # resource ids
+RES_REPLY  = 101
+RES_RING1  = 102
+RES_EXEC   = 103
+
+CTX_ID = 4
+
+RING0_SIZE = RING_BUF_OFF + 2048              # 2240
+RING1_SIZE = RING_BUF_OFF + 4096 + 256        # +extra
+EXEC_SIZE  = 4096
+REPLY_SIZE = 16384
+IDLE_TO    = 300                              # idleTimeout cycles
+
+
+def build_transport(model, asm, sim, rep_sim, enc, gen, rng):
+    """Build the §6b guest-script tape + .exp records.
+
+    Returns (tape_words, exp_records, doc).  The tape is a self-
+    delimiting op stream; .exp records are fixed 8-word expectations
+    consumed in order by the TB.  See g6lc_apu_vn_tables.md for the
+    op/record formats."""
+    tm = TransportModel(model, asm, sim, rep_sim)
+    tm.rep_log = []
+    fm = FrontModel(model, asm)
+    for t in model.reg.type_table.values():
+        if t.category == vkxml.VkType.HANDLE:
+            KIND[t.name] = model.kind(t.name)
+    ses = {'T': {n: i['type_id'] for n, i in model.cmd_info.items()}}
+    capset = list(model.capset_words())
+    supported = {t.name: t for t in
+                 model.gen.supported_types[vkxml.VkType.COMMAND]}
+
+    tape = []
+    exp = []
+    doc = {'steps': [], 'log': []}
+    log = doc['log']
+
+    def W(*ws):
+        tape.extend(ws)
+
+    def rec(k, *v):
+        exp.append([k] + list(v) + [0] * (7 - len(v)))
+
+    def note(msg):
+        doc['steps'].append(msg)
+
+    def memw(addr, words):
+        W(TP_MEMW, len(words), addr & 0xFFFFFFFF,
+          (addr >> 32) & 0xFFFFFFFF, *words)
+        for i, w in enumerate(words):
+            tm.gmem[(addr >> 2) + i] = w
+
+    def apw(off, words):
+        W(TP_APW, len(words), off & 0xFFFFFFFF, (off >> 32) & 0xFFFFFFFF,
+          *words)
+        for i, w in enumerate(words):
+            tm.ap[(off >> 2) + i] = w
+
+    resp_n = [0]
+
+    def chain(descs, flags, fence, ctx, ridx, exp_type, exp_body, used):
+        W(TP_CHAIN, len(descs))
+        for (a, l, wr) in descs:
+            W(a & 0xFFFFFFFF, (a >> 32) & 0xFFFFFFFF, l, wr)
+        W(flags, fence & 0xFFFFFFFF, (fence >> 32) & 0xFFFFFFFF,
+          ctx, ridx)
+        rec(EK_RESP, used, exp_type, len(exp_body))
+        for w_ in exp_body:
+            rec(EK_BODY, w_)
+        if flags & VG_FLAG_FENCE:
+            rec(EK_FENCE, fence & 0xFFFFFFFF,
+                (fence >> 32) & 0xFFFFFFFF, ridx)
+
+    def submit(ty, body, ctx=0, fence=0, ridx=0,
+               exp_type=VG_RESP_NODATA, exp_body=None, payload=None,
+               used_override=None):
+        """One control-queue request.  Response = 6-word hdr + body."""
+        exp_body = exp_body or []
+        req = vg_hdr(ty, VG_FLAG_FENCE if fence else 0, fence, ctx, ridx)
+        req += body
+        if payload:
+            req += payload
+        memw(GREQ, req)
+        resp_addr = GRESP + resp_n[0] * 0x100
+        resp_n[0] += 1
+        resp_words = 6 + len(exp_body)
+        used = (len(req) * 4 + resp_words * 4 if used_override is None
+                else used_override)
+        chain([(GREQ, len(req) * 4, 0), (resp_addr, resp_words * 4, 1)],
+              VG_FLAG_FENCE if fence else 0, fence, ctx, ridx,
+              exp_type, exp_body, used)
+
+    def vka(name, **args):
+        a = gen.gen_command(name)
+        a.update(args)
+        if model.cmd_info[name]['act']['flags'] & 1:
+            a['_flags'] = 1
+        return enc.command(supported[name], a), a
+
+    def vk(name, **args):
+        return vka(name, **args)[0]
+
+    # ---- ring guest-side ops -------------------------------------------------
+    def ring_bind_guest(slot):
+        r = tm.rings[slot]
+        r['cur'] = 0
+        r['blob_byte'] = tm.blobs[r['rid']]['base_w'] << 2
+
+    def ring_put(r, words):
+        cur = r['cur']
+        off = cur & (r['buf_size'] - 1)
+        blob_off = (r['buf_base_w'] << 2) + off
+        n = len(words) * 4
+        if off + n <= r['buf_size']:
+            apw(blob_off, words)
+        else:
+            s = (r['buf_size'] - off) // 4
+            apw(blob_off, words[:s])
+            apw(r['buf_base_w'] << 2, words[s:])
+        r['cur'] = (cur + n) & 0xFFFFFFFF
+
+    def tail_store(r):
+        apw(r['tail_base_w'] << 2, [r['cur'] & 0xFFFFFFFF])
+
+    def check_status(slot):
+        r = tm.rings[slot]
+        W(TP_CHECK, CK_STATUS, slot, 0)
+        rec(EK_STATUS, slot, tm.ap[r['status_base_w']])
+
+    def check_live():
+        W(TP_CHECK, CK_LIVE, 0, 0)
+        rec(EK_LIVE, fm.live_cnt + len(tm.blobs) + len(tm.ctxs))
+
+    def check_extra(slot, off):
+        r = tm.rings[slot]
+        W(TP_CHECK, CK_EXTRA, slot, off)
+        rec(EK_EXTRA, slot, off,
+            tm.ap[r['extra_base_w'] + (off >> 2)])
+
+    def wait_head(slot):
+        r = tm.rings[slot]
+        W(TP_WAIT_HEAD, slot, r['head_base_w'] << 2, r['head'], 400000)
+        rec(EK_HEAD, slot, r['head'])
+
+    def wait_status(slot, mask, want):
+        r = tm.rings[slot]
+        W(TP_WAIT_IDLE, slot, r['status_base_w'] << 2, mask, want,
+          400000)
+        rec(EK_STATUS, slot, tm.ap[r['status_base_w']])
+
+    def wait_idle(slot, want):
+        wait_status(slot, RING_IDLE, want)
+
+    def delay(cycles):
+        W(TP_DELAY, cycles)
+        for rr in tm.rings:
+            if rr is None or rr['fatal']:
+                continue
+            rr['idle_count'] += cycles
+            if rr['idle_count'] >= rr['idle_to']:
+                tm.ap[rr['status_base_w']] |= RING_IDLE
+
+    def flush_replies():
+        for off, rep in tm.rep_log:
+            W(TP_CHECK, CK_REPLY, len(rep), off)
+            for i, w in enumerate(rep):
+                rec(EK_REPLY, i, w)
+        tm.rep_log.clear()
+
+    def execbuf(words, ctx=CTX_ID, fence=0):
+        """SUBMIT_3D a command stream; the model executes it now."""
+        submit(VG_SUBMIT_3D, [len(words) * 4, 0], ctx=ctx, fence=fence,
+               exp_type=VG_RESP_NODATA, payload=words)
+        base = GREQ + 8 * 4
+
+        def get(o, n, b=base):
+            return tm.gmem_slice(b + o * 4, n * 4)
+        _c, fatal = tm.exec_stream(get, len(words) * 4, fm, ses, log, ctx)
+        return fatal
+
+    # ------------------------------------------------------------------ #
+    # Phase A: control-queue init (Mesa virtgpu_init order)                 #
+    # ------------------------------------------------------------------ #
+    note('A1 GET_CAPSET_INFO idx 0')
+    submit(VG_GET_CAPSET_INFO, [0, 0], exp_type=VG_RESP_CAPSET_INFO,
+           exp_body=[VG_CAPSET_VENUS, len(capset) * 4, 0, 0])
+
+    note('A2 GET_CAPSET id 4')
+    submit(VG_GET_CAPSET, [VG_CAPSET_VENUS, 0],
+           exp_type=VG_RESP_CAPSET, exp_body=capset)
+
+    note('A3 CTX_CREATE ctx=4 context_init=4 name=librecore-vn')
+    nmb = b'librecore-vn\x00'
+    nb = list(nmb) + [0] * (64 - len(nmb))
+    name_words = [nb[4 * i] | (nb[4 * i + 1] << 8) | (nb[4 * i + 2] << 16)
+                  | (nb[4 * i + 3] << 24) for i in range(16)]
+    tm.ctxs[CTX_ID] = {'id': CTX_ID}
+    fm.ctx = CTX_ID
+    submit(VG_CTX_CREATE, [len(nmb) - 1, VG_CAPSET_VENUS] + name_words,
+           ctx=CTX_ID, exp_type=VG_RESP_NODATA)
+
+    def create_blob(rid, size):
+        tm.blobs[rid] = {'base_w': tm.ap_alloc(size), 'size': size,
+                         'mapped': False, 'ctx': CTX_ID}
+        submit(VG_RESOURCE_CREATE_BLOB,
+               [rid, VG_BLOB_HOST3D, VG_BLOB_MAPPABLE, 0, 0, 0,
+                size & 0xFFFFFFFF, (size >> 32) & 0xFFFFFFFF],
+               ctx=CTX_ID, exp_type=VG_RESP_NODATA)
+
+    def map_blob(rid):
+        tm.blobs[rid]['mapped'] = True
+        submit(VG_MAP_BLOB, [rid, 0, 0, 0], ctx=CTX_ID,
+               exp_type=VG_RESP_MAP_INFO, exp_body=[VG_MAP_WC, 0])
+
+    note('A4 blobs: ring0 4288, reply 16KiB, ring1 4544(+extra), exec 4KiB')
+    create_blob(RES_RING0, RING0_SIZE)
+    create_blob(RES_REPLY, REPLY_SIZE)
+    create_blob(RES_RING1, RING1_SIZE)
+    create_blob(RES_EXEC, EXEC_SIZE)
+    map_blob(RES_RING0)
+    map_blob(RES_REPLY)
+    map_blob(RES_RING1)
+    map_blob(RES_EXEC)
+
+    note('A5 CTX_ATTACH reply blob')
+    submit(VG_CTX_ATTACH, [RES_REPLY, 0], ctx=CTX_ID,
+           exp_type=VG_RESP_NODATA)
+
+    # guest memsets the ring blobs
+    apw(tm.blobs[RES_RING0]['base_w'] << 2, [0] * (RING0_SIZE // 4))
+    apw(tm.blobs[RES_RING1]['base_w'] << 2, [0] * (RING1_SIZE // 4))
+
+    note('A6 SUBMIT_3D[vkCreateRingMESA ring0 + RingMonitorInfo]')
+    mon = {'_ty': model.reg.type_table['VkRingMonitorInfoMESA'],
+           'sType': 'VK_STRUCTURE_TYPE_RING_MONITOR_INFO_MESA',
+           'pNext': [], 'maxReportingPeriodMicroseconds': 1000}
+    rc = vk('vkCreateRingMESA', ring=RING0_H,
+            pCreateInfo={'_ty': None,
+                         'sType': 'VK_STRUCTURE_TYPE_RING_CREATE_INFO_MESA',
+                         'pNext': [mon], 'flags': 0,
+                         'resourceId': RES_RING0, 'offset': 0,
+                         'size': RING0_SIZE, 'idleTimeout': IDLE_TO,
+                         'headOffset': RING_HEAD_OFF,
+                         'tailOffset': RING_TAIL_OFF,
+                         'statusOffset': RING_STATUS_OFF,
+                         'bufferOffset': RING_BUF_OFF, 'bufferSize': 2048,
+                         'extraOffset': RING_BUF_OFF + 2048,
+                         'extraSize': 0})
+    assert not execbuf(rc, fence=0x11), 'ring0 create failed in model'
+    r0 = tm.rings[tm.ring_of[RING0_H]]
+    ring_bind_guest(r0['slot'])
+    tm.rep_cursor = 0
+    W(TP_CHECK, CK_STATUS, r0['slot'], 0)
+    rec(EK_STATUS, r0['slot'], RING_ALIVE)
+    check_live()
+    note('ring0 created slot=%d' % r0['slot'])
+
+    # ------------------------------------------------------------------ #
+    # Phase B: increment-3 session through ring0                             #
+    # ------------------------------------------------------------------ #
+    I = {k: 0x4000_0000_1000 + i * 0x1000_0001 for i, k in enumerate(
+        ('inst', 'pd', 'dev', 'queue', 'mem', 'buf', 'img', 'sm', 'dsl',
+         'pl', 'pipe', 'dp', 'ds', 'cp', 'cb', 'fen'))}
+
+    def st(tyname, **kw):
+        a = gen.gen_struct(model.reg.type_table[tyname])
+        a.update(kw)
+        return a
+
+    session = [
+        ('vkCreateInstance', dict(pInstance=I['inst'])),
+        ('vkEnumeratePhysicalDevices', dict(
+            instance=I['inst'], pPhysicalDeviceCount=1,
+            pPhysicalDevices=[I['pd']])),
+        ('vkGetPhysicalDeviceProperties', dict(
+            physicalDevice=I['pd'],
+            pProperties=st('VkPhysicalDeviceProperties'))),
+        ('vkGetPhysicalDeviceProperties2', dict(
+            physicalDevice=I['pd'],
+            pProperties=st('VkPhysicalDeviceProperties2',
+                           pNext=[st('VkPhysicalDeviceSubgroup'
+                                     'Properties')]))),
+        ('vkGetPhysicalDeviceMemoryProperties2', dict(
+            physicalDevice=I['pd'],
+            pMemoryProperties=st(
+                'VkPhysicalDeviceMemoryProperties2'))),
+        ('vkCreateDevice', dict(
+            physicalDevice=I['pd'],
+            pCreateInfo=st(
+                'VkDeviceCreateInfo', queueCreateInfoCount=1,
+                pQueueCreateInfos=[st(
+                    'VkDeviceQueueCreateInfo', queueFamilyIndex=0,
+                    queueCount=1, pQueuePriorities=[0x3F800000])],
+                pEnabledFeatures=None, enabledExtensionCount=0,
+                ppEnabledExtensionNames=[], enabledLayerCount=0,
+                ppEnabledLayerNames=[]),
+            pDevice=I['dev'])),
+        ('vkGetDeviceQueue', dict(
+            device=I['dev'], queueFamilyIndex=0, queueIndex=0,
+            pQueue=I['queue'])),
+        ('vkAllocateMemory', dict(
+            device=I['dev'],
+            pAllocateInfo=st('VkMemoryAllocateInfo',
+                             allocationSize=0x100000,
+                             memoryTypeIndex=1),
+            pMemory=I['mem'])),
+        ('vkCreateBuffer', dict(
+            device=I['dev'],
+            pCreateInfo=st('VkBufferCreateInfo', size=4096, usage=0x61,
+                           sharingMode=0, queueFamilyIndexCount=0,
+                           pQueueFamilyIndices=[]),
+            pBuffer=I['buf'])),
+        ('vkGetBufferMemoryRequirements', dict(
+            device=I['dev'], buffer=I['buf'],
+            pMemoryRequirements=st('VkMemoryRequirements'))),
+        ('vkBindBufferMemory', dict(
+            device=I['dev'], buffer=I['buf'], memory=I['mem'],
+            memoryOffset=0)),
+        ('vkGetMemoryResourcePropertiesMESA', dict(
+            device=I['dev'], resourceId=RES_RING0,
+            pMemoryResourceProperties=st(
+                'VkMemoryResourcePropertiesMESA'))),
+        # transport interlude 1: seqno commands on ring0
+        ('vkSubmitVirtqueueSeqnoMESA',
+         dict(ring=RING0_H, seqno=0x3000)),
+        ('vkWaitVirtqueueSeqnoMESA', dict(seqno=0)),
+        ('vkWaitRingSeqnoMESA', dict(ring=RING0_H, seqno=0)),
+        ('vkCreateShaderModule', dict(
+            device=I['dev'],
+            pCreateInfo=st('VkShaderModuleCreateInfo', codeSize=16,
+                           pCode=[0x07230203, 0x00010000, 0, 1]),
+            pShaderModule=I['sm'])),
+        ('vkCreateDescriptorSetLayout', dict(
+            device=I['dev'],
+            pCreateInfo=st(
+                'VkDescriptorSetLayoutCreateInfo', bindingCount=1,
+                pBindings=[st(
+                    'VkDescriptorSetLayoutBinding', binding=0,
+                    descriptorType=7, descriptorCount=1,
+                    stageFlags=0x20, pImmutableSamplers=[])]),
+            pSetLayout=I['dsl'])),
+        ('vkCreatePipelineLayout', dict(
+            device=I['dev'],
+            pCreateInfo=st('VkPipelineLayoutCreateInfo',
+                           setLayoutCount=1, pSetLayouts=[I['dsl']],
+                           pushConstantRangeCount=0,
+                           pPushConstantRanges=[]),
+            pPipelineLayout=I['pl'])),
+        ('vkCreateComputePipelines', dict(
+            device=I['dev'], pipelineCache=0, createInfoCount=1,
+            pCreateInfos=[st(
+                'VkComputePipelineCreateInfo',
+                stage=st('VkPipelineShaderStageCreateInfo',
+                         stage=0x20, module=I['sm'], pName='main',
+                         pSpecializationInfo=None),
+                layout=I['pl'], basePipelineHandle=0,
+                basePipelineIndex=0)],
+            pPipelines=[I['pipe']])),
+        ('vkCreateDescriptorPool', dict(
+            device=I['dev'],
+            pCreateInfo=st('VkDescriptorPoolCreateInfo', maxSets=1,
+                           poolSizeCount=1,
+                           pPoolSizes=[st('VkDescriptorPoolSize', type=7,
+                                          descriptorCount=1)]),
+            pDescriptorPool=I['dp'])),
+        ('vkAllocateDescriptorSets', dict(
+            device=I['dev'],
+            pAllocateInfo=st('VkDescriptorSetAllocateInfo',
+                             descriptorPool=I['dp'],
+                             descriptorSetCount=1,
+                             pSetLayouts=[I['dsl']]),
+            pDescriptorSets=[I['ds']])),
+        ('vkUpdateDescriptorSets', dict(
+            device=I['dev'], descriptorWriteCount=1,
+            pDescriptorWrites=[st(
+                'VkWriteDescriptorSet', dstSet=I['ds'], dstBinding=0,
+                dstArrayElement=0, descriptorCount=1, descriptorType=7,
+                pImageInfo=[], pTexelBufferView=[],
+                pBufferInfo=[st('VkDescriptorBufferInfo',
+                                buffer=I['buf'], offset=0,
+                                range=4096)])],
+            descriptorCopyCount=0, pDescriptorCopies=[])),
+        ('vkCreateCommandPool', dict(
+            device=I['dev'],
+            pCreateInfo=st('VkCommandPoolCreateInfo',
+                           queueFamilyIndex=0),
+            pCommandPool=I['cp'])),
+        ('vkAllocateCommandBuffers', dict(
+            device=I['dev'],
+            pAllocateInfo=st('VkCommandBufferAllocateInfo',
+                             commandPool=I['cp'], level=0,
+                             commandBufferCount=1),
+            pCommandBuffers=[I['cb']])),
+        ('vkBeginCommandBuffer', dict(
+            commandBuffer=I['cb'],
+            pBeginInfo=st('VkCommandBufferBeginInfo', flags=0,
+                          pInheritanceInfo=None))),
+        ('vkCmdBindPipeline', dict(
+            commandBuffer=I['cb'], pipelineBindPoint=1,
+            pipeline=I['pipe'])),
+        ('vkCmdBindDescriptorSets', dict(
+            commandBuffer=I['cb'], pipelineBindPoint=1, layout=I['pl'],
+            firstSet=0, descriptorSetCount=1, pDescriptorSets=[I['ds']],
+            dynamicOffsetCount=0, pDynamicOffsets=[])),
+        ('vkCmdDispatch', dict(
+            commandBuffer=I['cb'], groupCountX=1, groupCountY=1,
+            groupCountZ=1)),
+        ('vkEndCommandBuffer', dict(commandBuffer=I['cb'])),
+        ('vkCreateFence', dict(
+            device=I['dev'],
+            pCreateInfo=st('VkFenceCreateInfo', flags=0),
+            pFence=I['fen'])),
+        ('vkQueueSubmit', dict(
+            queue=I['queue'], submitCount=1,
+            pSubmits=[st('VkSubmitInfo', waitSemaphoreCount=0,
+                         pWaitSemaphores=[], pWaitDstStageMask=[],
+                         commandBufferCount=1, pCommandBuffers=[I['cb']],
+                         signalSemaphoreCount=0,
+                         pSignalSemaphores=[])],
+            fence=I['fen'])),
+        ('vkDeviceWaitIdle', dict(device=I['dev'])),
+        ('vkWaitForFences', dict(
+            device=I['dev'], fenceCount=1, pFences=[I['fen']],
+            waitAll=1, timeout=0xFFFFFFFFFFFFFFFF)),
+        ('vkGetFenceStatus', dict(device=I['dev'], fence=I['fen'])),
+    ]
+    # teardown happens through the ring too (RETIRE through the transport)
+    teardown = [
+        ('vkDestroyFence', dict(device=I['dev'], fence=I['fen'])),
+        ('vkFreeCommandBuffers', dict(
+            device=I['dev'], commandPool=I['cp'], commandBufferCount=1,
+            pCommandBuffers=[I['cb']])),
+        ('vkDestroyCommandPool', dict(device=I['dev'],
+                                      commandPool=I['cp'])),
+        ('vkFreeDescriptorSets', dict(
+            device=I['dev'], descriptorPool=I['dp'],
+            descriptorSetCount=1, pDescriptorSets=[I['ds']])),
+        ('vkDestroyDescriptorPool', dict(device=I['dev'],
+                                         descriptorPool=I['dp'])),
+        ('vkDestroyPipeline', dict(device=I['dev'], pipeline=I['pipe'])),
+        ('vkDestroyPipelineLayout', dict(device=I['dev'],
+                                         pipelineLayout=I['pl'])),
+        ('vkDestroyDescriptorSetLayout', dict(
+            device=I['dev'], descriptorSetLayout=I['dsl'])),
+        ('vkDestroyShaderModule', dict(device=I['dev'],
+                                       shaderModule=I['sm'])),
+        ('vkDestroyBuffer', dict(device=I['dev'], buffer=I['buf'])),
+        ('vkFreeMemory', dict(device=I['dev'], memory=I['mem'])),
+        ('vkDestroyDevice', dict(device=I['dev'])),
+        ('vkDestroyInstance', dict(instance=I['inst'])),
+    ]
+    session = session + teardown
+
+    # ring1: extra region + WriteRingExtra coverage (before batches)
+    note('B0 SUBMIT_3D[vkCreateRingMESA ring1 +extra 256]')
+    rc1 = vk('vkCreateRingMESA', ring=RING1_H,
+             pCreateInfo={'_ty': None,
+                          'sType': 'VK_STRUCTURE_TYPE_RING_CREATE_INFO'
+                                   '_MESA',
+                          'pNext': [mon], 'flags': 0,
+                          'resourceId': RES_RING1, 'offset': 0,
+                          'size': RING1_SIZE, 'idleTimeout': IDLE_TO,
+                          'headOffset': RING_HEAD_OFF,
+                          'tailOffset': RING_TAIL_OFF,
+                          'statusOffset': RING_STATUS_OFF,
+                          'bufferOffset': RING_BUF_OFF, 'bufferSize': 4096,
+                          'extraOffset': RING_BUF_OFF + 4096,
+                          'extraSize': 256})
+    assert not execbuf(rc1), 'ring1 create failed'
+    r1 = tm.rings[tm.ring_of[RING1_H]]
+    ring_bind_guest(r1['slot'])
+
+    note('B: session through ring0, batches wrap the 4 KiB buffer')
+    r = tm.rings[r0['slot']]
+    cmds_words = [(n, k) + vka(n, **k) for n, k in session]
+
+    # reply-window sizing: replay the session once on a scratch
+    # FrontModel so each SetReply slot covers the command's real reply
+    # size — a fixed stride lets the long property replies overwrite
+    # the next window (the guest owns the window layout)
+    dry = FrontModel(model, asm)
+    dry.ctx = CTX_ID
+    sized = []
+    for (name, kw, w, a) in cmds_words:
+        drec = sim.run(w)
+        nb = len(dry.step(name, None, w, drec, rep_sim, ses)['rep']) * 4
+        sized.append((name, kw, w, a, nb))
+    cmds_words = sized
+
+    batch_no = 0
+    i = 0
+    n = len(cmds_words)
+    rep_q = []
+    seek_used = False
+    while i < n:
+        # assemble a batch <= 340 words (guest keeps space headroom)
+        batch = []
+        bw = 0
+        while i < n and bw < 220:
+            batch.append(cmds_words[i])
+            bw += len(cmds_words[i][2])
+            i += 1
+        if batch_no >= 1:
+            # park the ring, check IDLE, then notify with the submit
+            delay(IDLE_TO * 2)
+            wait_idle(r['slot'], RING_IDLE)
+        for (name, kw, w, a, nb) in batch:
+            replies = bool(model.cmd_info[name]['act']['flags'] & 1)
+            if replies:
+                rep_q.append((name, a))
+                stride = max(512, (nb + 63) & ~63)
+                if not seek_used and batch_no >= 1:
+                    stride += 64     # one explicit SeekReply, below
+                rp = tm.rep_cursor
+                if rp + stride > REPLY_SIZE:
+                    ring_put(r, vk('vkSeekReplyCommandStreamMESA',
+                                   position=0))
+                    tm.rep_cursor = rp = 0
+                ring_put(r, vk('vkSetReplyCommandStreamMESA',
+                               pStream={'_ty': None,
+                                        'resourceId': RES_REPLY,
+                                        'offset': rp,
+                                        'size': REPLY_SIZE - rp}))
+                if not seek_used and batch_no >= 1:
+                    # positive SeekReply coverage: land this reply 64
+                    # bytes into its window
+                    ring_put(r, vk('vkSeekReplyCommandStreamMESA',
+                                   position=64))
+                    seek_used = True
+            ring_put(r, w)
+            if replies:
+                tm.rep_cursor += stride
+        tail_store(r)
+        if batch_no >= 1:
+            # driver sees IDLE -> vkNotifyRingMESA via execbuffer
+            nf = vk('vkNotifyRingMESA', ring=RING0_H,
+                    seqno=r['cur'], flags=0)
+            execbuf(nf)
+        tm.drain_ring(r, fm, ses, log)
+        wait_head(r['slot'])
+        flush_replies()
+        batch_no += 1
+
+    # WriteRingExtra positive on ring1 (sent through ring0)
+    note('B+ WriteRingExtra ring1 offset 0 via ring0')
+    ring_put(r, vk('vkWriteRingExtraMESA', ring=RING1_H, offset=0,
+                   value=0xDEADBEEF))
+    tail_store(r)
+    tm.drain_ring(r, fm, ses, log)
+    wait_head(r['slot'])
+    check_extra(r1['slot'], 0)
+    flush_replies()
+
+    # ExecuteCommandStreams positive: two commands in the exec blob
+    note('B+ ExecuteCommandStreams via exec blob window')
+    sw2 = vk('vkSetReplyCommandStreamMESA',
+             pStream={'_ty': None, 'resourceId': RES_REPLY,
+                      'offset': tm.rep_cursor,
+                      'size': REPLY_SIZE - tm.rep_cursor})
+    g2, g2a = vka('vkGetBufferMemoryRequirements', device=I['dev'],
+                  buffer=I['buf'],
+                  pMemoryRequirements=st('VkMemoryRequirements'))
+    rep_q.append(('vkGetBufferMemoryRequirements', g2a))
+    exec_stream = sw2 + g2
+    apw(tm.blobs[RES_EXEC]['base_w'] << 2, exec_stream)
+    exw = vk('vkExecuteCommandStreamsMESA',
+             streamCount=1,
+             pStreams=[{'_ty': None, 'resourceId': RES_EXEC,
+                        'offset': 0, 'size': len(exec_stream) * 4}],
+             pReplyPositions=[0],
+             dependencyCount=0, pDependencies=[], flags=0)
+    ring_put(r, exw)
+    tail_store(r)
+    tm.drain_ring(r, fm, ses, log)
+    wait_head(r['slot'])
+    flush_replies()
+    tm.rep_cursor += 512
+    check_live()
+
+    # ------------------------------------------------------------------ #
+    # Phase C: negative arms                                                 #
+    # ------------------------------------------------------------------ #
+    note('C1 CTX_CREATE context_init=5 -> ERR_INVALID_PARAMETER')
+    submit(VG_CTX_CREATE, [4, 5] + name_words, ctx=7,
+           exp_type=VG_ERR_PARAM)
+
+    note('C2 CREATE_BLOB blob_id=1 -> ERR_INVALID_PARAMETER')
+    submit(VG_RESOURCE_CREATE_BLOB,
+           [200, VG_BLOB_HOST3D, VG_BLOB_MAPPABLE, 0, 1, 0,
+            4096, 0], ctx=CTX_ID, exp_type=VG_ERR_PARAM)
+
+    note('C3 unknown ctrl type -> ERR_UNSPEC')
+    submit(0x0999, [0, 0], exp_type=VG_ERR_UNSPEC)
+
+    note('C4 SUBMIT_3D size > payload -> ERR_UNSPEC')
+    # request hdr says size=64 but the desc ends after the 8-word struct
+    req = vg_hdr(VG_SUBMIT_3D, 0, 0, CTX_ID, 0) + [64, 0]
+    memw(GREQ, req)
+    resp_addr = GRESP + resp_n[0] * 0x100
+    resp_n[0] += 1
+    chain([(GREQ, len(req) * 4, 0), (resp_addr, 24, 1)],
+          0, 0, CTX_ID, 0, VG_ERR_UNSPEC, [], len(req) * 4 + 24)
+
+    note('C5 ring2: decode fault -> FATAL, head stops')
+    rc2 = vk('vkCreateRingMESA', ring=RING2_H,
+             pCreateInfo={'_ty': None,
+                          'sType': 'VK_STRUCTURE_TYPE_RING_CREATE_INFO'
+                                   '_MESA',
+                          'pNext': [mon], 'flags': 0,
+                          'resourceId': RES_RING1, 'offset': 0,
+                          'size': RING1_SIZE, 'idleTimeout': IDLE_TO,
+                          'headOffset': RING_HEAD_OFF,
+                          'tailOffset': RING_TAIL_OFF,
+                          'statusOffset': RING_STATUS_OFF,
+                          'bufferOffset': RING_BUF_OFF, 'bufferSize': 4096,
+                          'extraOffset': RING_BUF_OFF + 4096,
+                          'extraSize': 256})
+    # destroy ring1 first so slot frees for the negative-arm rings
+    dr1 = vk('vkDestroyRingMESA', ring=RING1_H)
+    assert not execbuf(dr1), 'ring1 destroy failed'
+    assert not execbuf(rc2), 'ring2 create failed'
+    r2 = tm.rings[tm.ring_of[RING2_H]]
+    ring_bind_guest(r2['slot'])
+    W(TP_CHECK, CK_STATUS, r2['slot'], 0)
+    rec(EK_STATUS, r2['slot'], RING_ALIVE)
+
+    # good command then a corrupt one (bad sType) then a tail command
+    good = vk('vkWaitRingSeqnoMESA', ring=RING2_H, seqno=0)
+    bad = list(vk('vkGetBufferMemoryRequirements', device=I['dev'],
+                  buffer=I['buf'],
+                  pMemoryRequirements=st('VkMemoryRequirements')))
+    bad[0] = 0x0000DEAD            # unknown command type -> decode fault
+    tailcmd = vk('vkWaitRingSeqnoMESA', ring=RING2_H, seqno=0)
+    ring_put(r2, good)
+    exp_head = len(good) * 4
+    ring_put(r2, bad)
+    ring_put(r2, tailcmd)
+    tail_store(r2)
+    tm.drain_ring(r2, fm, ses, log)
+    # head must stop at the faulting command; the tape checks are
+    # zero-time so wait for the drain to publish head, then FATAL
+    wait_head(r2['slot'])
+    wait_status(r2['slot'], RING_FATAL, RING_FATAL)
+    note('ring2 FATAL head=%d' % r2['head'])
+
+    note('C6 ring3: nested ExecuteCommandStreams -> FATAL')
+    dr2 = vk('vkDestroyRingMESA', ring=RING2_H)
+    assert not execbuf(dr2), 'ring2 destroy failed'
+    rc3 = vk('vkCreateRingMESA', ring=RING3_H,
+             pCreateInfo={'_ty': None,
+                          'sType': 'VK_STRUCTURE_TYPE_RING_CREATE_INFO'
+                                   '_MESA',
+                          'pNext': [mon], 'flags': 0,
+                          'resourceId': RES_RING1, 'offset': 0,
+                          'size': RING1_SIZE, 'idleTimeout': IDLE_TO,
+                          'headOffset': RING_HEAD_OFF,
+                          'tailOffset': RING_TAIL_OFF,
+                          'statusOffset': RING_STATUS_OFF,
+                          'bufferOffset': RING_BUF_OFF, 'bufferSize': 4096,
+                          'extraOffset': RING_BUF_OFF + 4096,
+                          'extraSize': 256})
+    assert not execbuf(rc3), 'ring3 create failed'
+    r3 = tm.rings[tm.ring_of[RING3_H]]
+    ring_bind_guest(r3['slot'])
+    # exec blob holds a nested ExecuteCommandStreamsMESA command
+    nested = vk('vkExecuteCommandStreamsMESA',
+                streamCount=1,
+                pStreams=[{'_ty': None, 'resourceId': RES_EXEC,
+                           'offset': 0, 'size': 8}],
+                pReplyPositions=[0],
+                dependencyCount=0, pDependencies=[], flags=0)
+    apw(tm.blobs[RES_EXEC]['base_w'] << 2, nested)
+    outer = vk('vkExecuteCommandStreamsMESA',
+               streamCount=1,
+               pStreams=[{'_ty': None, 'resourceId': RES_EXEC,
+                          'offset': 0, 'size': len(nested) * 4}],
+               pReplyPositions=[0],
+               dependencyCount=0, pDependencies=[], flags=0)
+    ring_put(r3, outer)
+    tail_store(r3)
+    tm.drain_ring(r3, fm, ses, log)
+    # head never advances (fault at the outer command): wait on the
+    # FATAL status bit for the drain to complete, then check head
+    wait_status(r3['slot'], RING_FATAL, RING_FATAL)
+    W(TP_CHECK, CK_HEAD, r3['slot'], 0)
+    rec(EK_HEAD, r3['slot'], 0)
+    dr3 = vk('vkDestroyRingMESA', ring=RING3_H)
+    assert not execbuf(dr3), 'ring3 destroy failed'
+    note('ring3 nested-exec FATAL, destroyed')
+
+    # ------------------------------------------------------------------ #
+    # Phase D: teardown                                                      #
+    # ------------------------------------------------------------------ #
+    note('D RESOURCE_UNREF exec blob, CTX_DESTROY ctx=4 -> live 0')
+    eb = tm.blobs.pop(RES_EXEC)
+    tm.ap_free(eb['base_w'], EXEC_SIZE)
+    submit(VG_RESOURCE_UNREF, [RES_EXEC, 0], ctx=CTX_ID,
+           exp_type=VG_RESP_NODATA)
+    dr0 = vk('vkDestroyRingMESA', ring=RING0_H)
+    assert not execbuf(dr0), 'ring0 destroy failed'
+    submit(VG_CTX_DESTROY, [], ctx=CTX_ID, exp_type=VG_RESP_NODATA)
+    # model ctx destroy: RESET_CTX retires every ctx-4 entry
+    tm.blobs.clear()
+    tm.ctxs.clear()
+    tm.ap_pages = [0] * len(tm.ap_pages)
+    fm.reset_ctx(CTX_ID)
+    check_live()
+    note('teardown complete')
+
+    W(TP_END)
+    # pair golden replies with their commands for the Mesa decode harness
+    insts = []
+    for (name, a), (_n, out) in zip(rep_q, tm.exec_log):
+        assert name == _n, '%s vs %s' % (name, _n)
+        insts.append({'cmd': name, 'i': len(insts), 'targs': a,
+                      'rep': out['rep'], 'result': out['result'],
+                      'ty': supported[name], 'exec_w': []})
+    doc['reply_insts'] = insts
+    assert len(tm.exec_log) == len(rep_q),         'reply pairing: %d != %d' % (len(tm.exec_log), len(rep_q))
+    return tape, exp, doc
+
+
+def write_transport(name, tape, exp, doc):
+    """Emit NAME.hex (tape), NAME.exp (8-word records), NAME.json."""
+    hex_lines = []
+    for i, w in enumerate(tape):
+        hex_lines.append('%08X' % w)
+    exp_lines = []
+    for r in exp:
+        exp_lines += ['%08X' % (v & 0xFFFFFFFF) for v in r]
+    exp_lines += ['FFFFFFFF', 'FFFFFFFF']
+    VEC_DIR.mkdir(parents=True, exist_ok=True)
+    (VEC_DIR / (name + '.hex')).write_text(
+        '\n'.join(hex_lines) + '\n', encoding='utf-8')
+    (VEC_DIR / (name + '.exp')).write_text(
+        '\n'.join(exp_lines) + '\n', encoding='utf-8')
+    import json as _json
+    (VEC_DIR / (name + '.json')).write_text(
+        _json.dumps({'steps': doc['steps'], 'log': doc['log'],
+                     'tape_words': len(tape), 'exp_records': len(exp)},
+                    indent=1), encoding='utf-8')
+    print('transport: %d tape words, %d exp records, %d steps'
+          % (len(tape), len(exp), len(doc['steps'])))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--selftest', action='store_true')
     ap.add_argument('--vectors', nargs=2, metavar=('NAME', 'SEED'))
     ap.add_argument('--reply-vectors', nargs=2, metavar=('NAME', 'SEED'))
     ap.add_argument('--session', nargs=2, metavar=('NAME', 'SEED'))
+    ap.add_argument('--transport', nargs=2, metavar=('NAME', 'SEED'))
     ap.add_argument('--print', dest='print_cmd', metavar='CMD')
     ap.add_argument('--dump-json', metavar='FILE',
                     help='write every generated instance (args+words) as '
@@ -2541,6 +3668,16 @@ def main():
         print('wrote %s session to %s: %d commands, %d sub-sessions, '
               '%d replying, %d non-OK'
               % (name, VEC_DIR, len(cmds), nreset + 1, len(insts), nerr))
+        return 0
+
+    if args.transport:
+        name, seed = args.transport
+        rng = random.Random(int(seed))
+        gen = ArgGen(model, rng)
+        rep_sim = ReplySim(model, asm)
+        tape, exp, doc = build_transport(model, asm, sim, rep_sim, enc,
+                                         gen, rng)
+        write_transport(name, tape, exp, doc)
         return 0
 
     ap.print_help()

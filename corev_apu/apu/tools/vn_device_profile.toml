@@ -58,10 +58,25 @@ depth = ["D32_SFLOAT", "D24_UNORM_S8_UINT"]
 VkBufferUsageFlags = "TRANSFER_SRC|TRANSFER_DST|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER|UNIFORM_BUFFER|STORAGE_BUFFER|INDEX_BUFFER|VERTEX_BUFFER|INDIRECT_BUFFER"
 VkImageUsageFlags = "TRANSFER_SRC|TRANSFER_DST|SAMPLED|STORAGE|COLOR_ATTACHMENT|DEPTH_STENCIL_ATTACHMENT"
 
+[capset_venus]
+# struct virgl_renderer_capset_venus (Mesa 26.0.8 src/virtio/virtio-gpu/
+# venus_hw.h): 10 u32 + vk_extension_mask1[32] = 40 words / 160 bytes.
+# Emitted as APU_VN_CAPSET_WORDS / APU_VN_CAPSET[] in the package.
+wire_format_version = 1
+supports_blob_id_0 = 1
+allow_vk_wait_syncs = 1
+supports_multiple_timelines = 1
+use_guest_vram = 0
+# vk_extension_mask1[0] bit0 = "mask valid"; no renderer extensions claimed.
+vk_extension_mask1_bit0_valid = 1
+
 [bounds]
 # ARRAY op faults above these counts. Keyed by the array's element struct name;
 # 'default' covers everything else. Blob bounds are in bytes keyed by field.
 VkSubmitInfo = 4            # submits <= 4
+VkCommandStreamDescriptionMESA = 8   # streams per ExecuteCommandStreams
+VkCommandStreamDependencyMESA = 8    # dependencies per ExecuteCommandStreams
+size_t = 8                  # pReplyPositions
 VkCommandBuffer = 16        # command buffers per submit <= 16
 VkWriteDescriptorSet = 64   # descriptor writes <= 64 per call
 VkDescriptorSetLayoutBinding = 64

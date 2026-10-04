@@ -260,6 +260,93 @@ executor having issued exactly the recorded work in order, plus the negative arm
 `vkCmd*` before begin, submit of an unsealed buffer, destroy of a pinned (submitted)
 buffer, destroy of a device with live children, stale handle after destroy.
 
+## 6b. Transport: virtio-gpu control processor and the Venus ring pump (increment 3b)
+
+Source of truth, read for this section: Mesa 26.0.8 `src/virtio/vulkan/vn_renderer_virtgpu.c`,
+`vn_ring.c`, `src/virtio/virtio-gpu/venus_hw.h`; the pinned Resolute
+`include/uapi/linux/virtio_gpu.h`; venus-protocol `xmls/VK_MESA_venus_protocol.xml`.
+
+**What the stock driver does at init** (`virtgpu_init_*`): requires kernel params
+`3D_FEATURES`, `CAPSET_QUERY_FIX`, `RESOURCE_BLOB`, `CONTEXT_INIT`, and `HOST_VISIBLE`
+(or `GUEST_VRAM`); `GET_CAPS` for capset 4 (Venus) into `struct
+virgl_renderer_capset_venus`; `CONTEXT_INIT(capset 4)`; shmem = `RESOURCE_CREATE_BLOB
+(blob_mem HOST3D, flags MAPPABLE, blob_id 0, size)` + `RESOURCE_MAP_BLOB` → mmap. The
+capset must carry `wire_format_version 1`, the generator's `vk_xml_version`,
+`vk_ext_command_serialization_spec_version`, `vk_mesa_venus_protocol_spec_version`,
+`supports_blob_id_0 = 1`, `vk_extension_mask1[0] bit0 = 1` with the claimed renderer
+extensions, `allow_vk_wait_syncs = 1`, `supports_multiple_timelines = 1` (asserted by the
+driver), `use_guest_vram = 0` (blobs live in the device aperture). The capset is **profile
+data**, generated into the package, not hand-coded words; the existing `vcap` leaf's
+constants (`vk_xml 1.1.0`, protocol spec 1, `supports_multiple_timelines 0`,
+`use_guest_vram 1`) do not satisfy this driver and are superseded.
+
+**Ring protocol** (`vn_ring.c`): the driver creates a ring with `vkCreateRingMESA(ring_id,
+{resourceId, offset, size, idleTimeout, headOffset, tailOffset, statusOffset,
+bufferOffset, bufferSize, extraOffset, extraSize, pNext: RingMonitorInfo
+[RingPriorityInfo]})` sent as a `SUBMIT_3D` execbuffer; `bufferSize` is a power of two.
+Commands are written contiguously into `buffer[(cur & mask)…]` with wrap, then `tail` is
+stored (seq_cst) as the running byte count `cur` (u32, wraps); if `status & IDLE` the
+driver sends `vkNotifyRingMESA(ring, seqno, 0)` through `SUBMIT_3D`. The device consumes
+`[head, tail)` as one command stream — each command's length is whatever `vndec`
+consumed (`words`) — and stores `head = consumed byte count` with release semantics
+**after** that command's side effects and reply bytes are visible; the driver waits on
+`head ≥ seqno` (`vn_ring_wait_seqno`). Status bits: `IDLE` (bit0, set by the device when
+it parks after `idleTimeout`; cleared when it resumes), `FATAL` (bit1), `ALIVE` (bit2,
+watchdog, period from `RingMonitorInfo`). Before every replying command the driver sends
+`vkSetReplyCommandStreamMESA({resourceId, offset, size})` on the same ring; the reply is
+written at that window's start (`vkSeekReplyCommandStreamMESA(position)` moves the
+cursor). Large streams arrive by `vkExecuteCommandStreamsMESA(streams[], replyPositions[],
+deps, flags)`: each stream is a `{resourceId, offset, size}` window executed in order with
+the reply cursor seeked to `pReplyPositions[i]`. `vkWriteRingExtraMESA(ring, offset,
+value)` writes into the extra region. `vkSubmitVirtqueueSeqnoMESA` /
+`vkWaitVirtqueueSeqnoMESA` / `vkWaitRingSeqnoMESA` order the virtqueue and ring timelines.
+
+**Engines (interfaces of record):**
+
+- **`g6lc_apu_vgctl`** — virtio-gpu control-queue processor. Input: one descriptor chain
+  (header words + optional payload + WRITE response window) from the existing `avn` walker
+  through checked DMA; output: response written to the WRITE window, then the existing
+  elem → `used.idx` → ISR publication. Handles exactly: `GET_CAPSET_INFO` (`RESP_OK_CAPSET_INFO`
+  for index 0 → id 4, max_version 0, max_size = capset bytes), `GET_CAPSET` (`RESP_OK_CAPSET`
+  with the generated capset words), `CTX_CREATE` (`context_init & 0xff` must be 4, else
+  `RESP_ERR_INVALID_PARAMETER`; `ObjTab.ALLOC(kind CONTEXT, ctx_id)`), `CTX_DESTROY`
+  (`RESET_CTX`), `CTX_ATTACH/DETACH_RESOURCE`, `RESOURCE_CREATE_BLOB` (HOST3D + MAPPABLE +
+  blob_id 0 → aperture allocation `ObjTab.ALLOC(kind BLOB, resource_id)` with
+  `bind_offset/size` in the SHM window; any other `blob_mem`/`blob_id` →
+  `RESP_ERR_INVALID_PARAMETER` until exported memory exists), `RESOURCE_MAP_BLOB`
+  (`RESP_OK_MAP_INFO`, `map_info = VIRTIO_GPU_MAP_CACHE_WC`), `RESOURCE_UNMAP_BLOB`,
+  `RESOURCE_UNREF` (RETIRE), `SUBMIT_3D` (`size` bytes of execbuffer → the pump's
+  **transport stream** path). Header `flags & FENCE` → response `fence_id` echoed and
+  the fence retired on the `ring_idx` timeline after completion; `ctx_id` scopes blob and
+  ring lookups. Struct layouts are the UAPI ones (`ctrl_hdr` 24 bytes: type, flags,
+  fence_id, ctx_id, ring_idx, pad). Unknown type → `RESP_ERR_UNSPEC`; truncated chain →
+  no response bytes beyond the header, used length truthful.
+- **`g6lc_apu_vnpump`** — Venus stream executor. Owns ≤ 4 ring descriptors (geometry
+  from `vkCreateRingMESA`; `DestroyRing` frees), the reply-stream state `{blob slot,
+  base, size, pos}`, and a word port into the aperture memory (`ap_re/we/addr/rdata/
+  wdata`). Executes a **stream** `{base, bytes}` by running `vnfront` per command with
+  the CS port translated through `base + ((cur + i) & mask)` for rings (linear for
+  execbuffers and `ExecuteCommandStreams` windows); transport-class commands
+  (`APU_VN_ACT_TRANSPORT`: the eleven MESA commands above) are executed by the pump
+  itself, not by `vnfront`. Per ring: poll `tail` while active, park with `IDLE` after
+  `idleTimeout` cycles of no work, wake on `NotifyRing`, store `head` after each command,
+  `FATAL` on a decode fault (the ring is then dead until `DestroyRing`). Virtqueue seqno
+  counter for `Submit/WaitVirtqueueSeqno`; `WaitRingSeqno` blocks the transport stream
+  until that ring's `head ≥ seqno`.
+- Aperture: the `ShmEn` window (`APU_SHM_BASE`, 1 MiB today) backed in the TB by a
+  `tc_sram`-style word model; blob allocation is a first-fit over 4 KiB pages with a
+  bitmap (`ObjTab` holds offset/size). The DRAM-backed aperture is a later increment.
+
+Exit for 3b: a TB **guest model** that performs exactly Mesa's init on the control
+queue (capset → context init → two blobs → map → `SUBMIT_3D[vkCreateRingMESA]`), then
+drives the increment-3 session **through the ring** the way `vn_ring_submit_command`
+does (`SetReplyCommandStream` before each replying command, tail store, `NotifyRing`
+when idle, wait on `head`), checks every reply in the reply blob with the Mesa decode
+harness, checks `head == tail` and `IDLE` at the end, every virtqueue element published
+in order with truthful lengths, and the negative arms: wrong capset id on `CTX_CREATE`,
+blob with `blob_id ≠ 0`, ring command stream with a decode fault → `FATAL` and no head
+advance past it, `SUBMIT_3D` with `size` larger than the chain.
+
 ## 7. ShaderCore — direct SPIR-V execution, SIMT
 
 The strict endpoint forbids a software compiler, so the hardware executes SPIR-V itself.
@@ -347,5 +434,6 @@ rectangle, not a limit. `Xfer` handles copies/clears/blits and MSAA resolve.
 | 1 (done 2026-10-01) | references, source matrix, six-boundary review | plan §2 |
 | 2 (RTL done 2026-10-03, uncommitted) | `specs/venus-protocol` lazy pin `9fa07f3` (Mesa 26.0.8 vendored headers regenerate identically except the `70991d4` strict-aliasing cast; `pin-validate.log`); `gen_vn_tables.py`, `vn_golden.py`, `vn_mesa_diff/` (C harness against Mesa's own `vn_encode_vk*`), `g6lc_apu_vn_pkg.sv` for **120 commands** (0 unfit; `vkMapMemory` excluded — `void**` out-param is not serialized); `g6lc_apu_vndec`; `g6lc_apu_objtab` 256 slots + 512-bucket directory | Mesa C differential **480/480 PASS** on two seeds (120 cmds × 4 instances); remote `tb_g6lc_apu_vndec` **2421 cases / 161,074 checks** incl. 7 mutation classes; `tb_g6lc_apu_objtab` **8 cases / 2,222 checks** incl. 2000 random ops vs reference model; `Enable=0` **0 cells** both; `vndec` Enable=1 27,108 cells / 2,383 flops (ROM 1,648×48 b in logic — above the 10 k target, see follow-ups); `objtab` 1,902 control flops + two retained `$mem_v2` (256×entry, 512×82 b; 105,545 flops when flop-mapped by the generic flow); no latches; 0 lint warnings. Found and fixed by the TBs: entry-table index keyed off the flags word, directory bucket clobber on parent resolve, parent entry captured one cycle early. Follow-ups: 2 cycles/word (U32 ops take StOp→StW1), index widths `mpc_q[10:0]`/`scan_q[7:0]`/`rom_b[6:0]` must come from generated `*_AW` params before the ROM grows, ROM → `tc_sram`-initialised or compressed |
 | 3 (RTL done 2026-10-04, standalone) | `g6lc_apu_vnrep` reply builder (§4b), `APU_VN_ACT` action table (§4c), `g6lc_apu_cmdrec` (16×64 16-word records in `tc_sram`), `g6lc_apu_cmdexec` (submit FIFO, re-resolution by `{gen,slot}`, PIN/UNPIN, work port, fences), `g6lc_apu_vnfront` sequencer; `vn_golden.py` reply encoder + `--session`; Mesa C **reply-decode** harness | Reply differential against Mesa `vn_decode_vk*_reply`: **248/248** per-command, **64/64** session. Remote TBs: `vndec_rep` 499 / 10,496; `cmdrec` 2,110 / 2,105; `cmdexec` 6 / 22; `vnfront` **104 commands / 1,395 checks** over the §6 positive session plus the five negative arms (Cmd outside recording, submit of unsealed, free of pending CB → PINNED, destroy device with child → BUSY_CHILDREN, stale handle), ObjTab empty at the end. `Enable=0` 0 cells everywhere; no latches; 0 lint. Enable=1: vnrep 15,205 cells / 1,765 ff (316-word ROM in logic); cmdrec 1,578,368 / 525,499 — the 64 KiB arena flop-mapped by the generic flow (one retained `$mem_v2`), control logic not separable until a small-parameter screen is added; cmdexec 4,583 / 1,663; vnfront 63,256 / 8,595; objtab now 384,612 / 124,151 (entry grew). Found by the TBs: `SETBIND` sent kind 0; Verilator 5.008 reads an unpacked-array input port as zeros (flattened). Follow-ups: `REXEC` chain bodies for chained property structs (session only exercises `RCONST` bodies), `vkGetQueryPoolResults`, small-parameter synth screen for cmdrec, wire `vnfront` behind `avn`/`qdn` on the queue path. Not in `g6lc_apu_sys`; no graphics executed — the work port is acked by the TB |
+| 3b (RTL done 2026-10-04, standalone) | `g6lc_apu_vgctl` (virtio-gpu control queue: capset/ctx/blob/map/submit per §6b), `g6lc_apu_vnpump` (rings, reply stream, `ExecuteCommandStreams`, seqnos; 11 `TRANSPORT` commands), `g6lc_apu_vgtop` composition with the response → used elem → `used.idx` → ISR order; generated capset (40 words, `vk_xml 1.4.334`, `supports_multiple_timelines 1`, `use_guest_vram 0`); `vn_golden.py --transport` guest script | Mesa encode differential **524/524** (incl. the MESA transport commands), transport reply differential **29/29**. Remote: `vgctl` 15 / 73, `vnpump` 28 / 89 (non-pow2 `bufferSize`, offsets outside the blob, truncated/unknown stream, exec window outside blob, nested `ExecuteCommandStreams`, front fault → `FATAL` with head frozen), `vgtop` **28 / 2,129** (Mesa-shaped init → session through the ring → teardown, ObjTab empty; `context_init ≠ 4`, `blob_id ≠ 0`, unknown ctrl, oversize `SUBMIT_3D`, decode fault, nested exec). `Enable=0` 0 cells everywhere. Enable=1: vgctl 20,403 / 1,815; vnpump 132,640 / 14,626 (contains a `vnfront`); vgtop 2,025,925 / 634,998 (arena + objtab flop-mapped); cmdrec control logic isolated by the `-GNumBufs=2 -GRecsPerBuf=4` screen: **14,789 cells / 5,157 ff**. Port note: descriptor arrays and ring observability are packed vectors because Verilator 5.008 reads unpacked-array ports as zero. Follow-ups: drop the `g6lc_apu_pkg` import (only `APU_SHM_BASE`) so the engines do not depend on the concurrently edited package; record the capset layout and the driver-checked requirement list in the tables doc; real guest-memory AXI path and the DRAM-backed aperture; `g6lc_apu_sys` attach |
 | 4 | ShaderCore commit scanner + vec4 FP32 compute path + MatHelper | stock `glslang` compute SPIR-V runs with data mutation; helper on/off identical under `NoContraction` |
 | 5 | Raster TBDR + Xfer + sampler | G0 64×64 readback through the stock client; UE SM5 profile queries answered from the profile ROM |

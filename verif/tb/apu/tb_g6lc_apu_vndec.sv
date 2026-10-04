@@ -5,6 +5,7 @@
 // filled by $readmemh with a two-region layout:
 //   [0,65535)   : ue_sm5_core.hex CS words (comment lines skipped)
 //   [65536,...) : ue_sm5_core.exp records, REC_W=78 words each
+//   (2641 records + sentinel after the transport commands joined the set)
 // .exp record (documented in g6lc_apu_vn_tables.md):
 //   0: cs_base  1: cs_len  2: type  3: flags
 //   4..19:  q[i] lo/hi pairs   20..27: qkind  28..35: qrole  36: qv
@@ -27,7 +28,7 @@ module tb_g6lc_apu_vndec;
   apu_vn_op_t op, off_op;
   logic off_busy, off_done, off_re; logic [15:0] off_addr;
 
-  logic [31:0] cs [0:262143];
+  logic [31:0] cs [0:524287];
   int errors = 0, checks = 0, cycles = 0, cases = 0;
 
   g6lc_apu_vndec #(.Enable(1'b1)) i_on (
@@ -110,8 +111,12 @@ module tb_g6lc_apu_vndec;
     for (int i = 0; i < 2; i++)
       check($sformatf("blob%0d", i),
             op.blob[i] === {16'(ev(r,58+2*i)), 17'(ev(r,59+2*i))});
-    for (int i = 0; i < 8; i++)
+    for (int i = 0; i < 8; i++) begin
+      if (op.chain[i] !== 8'(ev(r,63+i)))
+        $display("     rec %0d chain%0d got=%02x exp=%08x", r, i,
+                 op.chain[i], ev(r,63+i));
       check($sformatf("chain%0d", i), op.chain[i] === 8'(ev(r,63+i)));
+    end
   endtask
 
   logic [31:0] base_w, len_w;

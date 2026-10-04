@@ -647,6 +647,14 @@ def reply_diff(a, model, enc, types, commands, mesa_dir, vk_dir):
                               'exec_w': []})
         print('session %s: %d commands, %d replying'
               % (a.session[0], len(cmds), len(insts)))
+    elif a.transport:
+        rng = random.Random(int(a.transport[1]))
+        gen = V.ArgGen(model, rng)
+        _tape, _exp, doc = V.build_transport(model, asm, sim, rep_sim,
+                                             enc, gen, rng)
+        insts = doc['reply_insts']
+        print('transport %s: %d tape words, %d replying'
+              % (a.transport[0], len(_tape), len(insts)))
     else:
         rng = random.Random(a.seed)
         insts = []
@@ -899,6 +907,9 @@ def main():
     ap.add_argument('--session', nargs=2, metavar=('NAME', 'SEED'),
                     help='with --reply: decode the generated session\'s '
                          'replies instead of random instances')
+    ap.add_argument('--transport', nargs=2, metavar=('NAME', 'SEED'),
+                    help='with --reply: decode the generated transport '
+                         'guest script\'s ring replies')
     a = ap.parse_args()
 
     a.out_dir.mkdir(parents=True, exist_ok=True)

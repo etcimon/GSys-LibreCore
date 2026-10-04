@@ -56,12 +56,14 @@ module g6lc_apu_objtab
   input  apu_objtab_req_t req_i,
   output logic            cpl_valid_o,
   input  logic            cpl_ready_i,
-  output apu_objtab_cpl_t cpl_o
+  output apu_objtab_cpl_t cpl_o,
+  output logic [15:0]     live_o   // popcount of the live bitmap (§6b CK_LIVE)
 );
   if (!Enable) begin : gen_off
     assign req_ready_o = 1'b0;
     assign cpl_valid_o = 1'b0;
     assign cpl_o       = '0;
+    assign live_o      = '0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | req_valid_i | cpl_ready_i |
                     (|req_i);
@@ -119,6 +121,7 @@ module g6lc_apu_objtab
     logic [SlotBits:0]  scan_q;
     logic [15:0]        pinned_q;
     logic [Slots-1:0]   live_q;
+    assign live_o = 16'($countones(live_q));
 
     // ---- SRAM ports --------------------------------------------------------
     logic                  ent_req, ent_we;
@@ -705,7 +708,8 @@ module g6lc_apu_objtab_fixture
   input  apu_objtab_req_t req_i,
   output logic            cpl_valid_o,
   input  logic            cpl_ready_i,
-  output apu_objtab_cpl_t cpl_o
+  output apu_objtab_cpl_t cpl_o,
+  output logic [15:0]     live_o
 );
   g6lc_apu_objtab #(.Enable(Enable), .Slots(Slots)) i_dut (.*);
 endmodule

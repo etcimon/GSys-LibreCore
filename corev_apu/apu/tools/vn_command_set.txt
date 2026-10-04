@@ -135,3 +135,18 @@ vkCmdBeginQuery
 vkCmdEndQuery
 vkCmdWriteTimestamp
 vkGetQueryPoolResults
+
+# VK_MESA_venus_protocol transport (executed by the pump, not the
+# front-end; APU_VN_ACT_TRANSPORT).  Operand slots are DISCARDed for
+# these commands — the pump re-parses argument words from the stream.
+vkSetReplyCommandStreamMESA
+vkSeekReplyCommandStreamMESA
+vkExecuteCommandStreamsMESA
+vkCreateRingMESA
+vkDestroyRingMESA
+vkNotifyRingMESA
+vkWriteRingExtraMESA
+vkGetMemoryResourcePropertiesMESA
+vkSubmitVirtqueueSeqnoMESA
+vkWaitVirtqueueSeqnoMESA
+vkWaitRingSeqnoMESA

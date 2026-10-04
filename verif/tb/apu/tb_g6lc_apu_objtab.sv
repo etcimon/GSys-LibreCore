@@ -21,11 +21,12 @@ module tb_g6lc_apu_objtab;
   g6lc_apu_objtab #(.Enable(1'b1), .Slots(Slots)) i_on (
     .clk_i(clk), .rst_ni, .testmode_i(testmode),
     .req_valid_i(req_v), .req_ready_o(req_rdy), .req_i(req),
-    .cpl_valid_o(cpl_v), .cpl_ready_i(cpl_r), .cpl_o(cpl));
+    .cpl_valid_o(cpl_v), .cpl_ready_i(cpl_r), .cpl_o(cpl), .live_o());
   g6lc_apu_objtab_fixture #(.Enable(1'b0), .Slots(Slots)) i_off (
     .clk_i(clk), .rst_ni, .testmode_i(testmode),
     .req_valid_i(req_v), .req_ready_o(off_rdy), .req_i(req),
-    .cpl_valid_o(off_v), .cpl_ready_i(cpl_r), .cpl_o(off_cpl));
+    .cpl_valid_o(off_v), .cpl_ready_i(cpl_r), .cpl_o(off_cpl),
+    .live_o());
 
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;

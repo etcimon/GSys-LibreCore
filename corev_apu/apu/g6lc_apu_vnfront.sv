@@ -73,6 +73,7 @@ module g6lc_apu_vnfront
   input  logic [15:0]        cs_len_i,
   input  logic [15:0]        rep_base_i,
   input  logic [15:0]        rep_len_i,
+  input  logic [7:0]         ctx_i,      // ObjTab ctx tag for this stream
   // shared command-stream read port (front reads blob ids while the
   // engines are idle)
   output logic               cs_re_o,
@@ -192,6 +193,11 @@ module g6lc_apu_vnfront
     logic [CbBufs-1:0]   cb_alloc_q;
     logic [31:0]         cb_pool_q [CbBufs];
     logic [31:0]         cb_hnd_q  [CbBufs];
+    // fence arena: vkCreateFence claims an executor fence index into
+    // aux[7:0] (ObjTab slots are global, not per-kind); wait/status/
+    // submit resolve the index back out of the entry's aux
+    logic [Fences-1:0]   falloc_q;
+    logic                aux_fence_q;  // aux_free_q targets falloc_q
 
     // ---- engines -----------------------------------------------------
     logic        dec_start, dec_re, dec_done, dec_busy;
@@ -268,9 +274,14 @@ module g6lc_apu_vnfront
         if (!cb_alloc_q[i]) return 8'(i);
       return 8'hFF;
     endfunction
+    function automatic logic [7:0] fence_free();
+      for (int i = 0; i < Fences; i++)
+        if (!falloc_q[i]) return 8'(i);
+      return 8'hFF;
+    endfunction
 
     localparam int ExecNone = 0, ExecBufReq = 1, ExecImgReq = 2,
-                 ExecEnumPd = 3, ExecEnumExt = 4;
+                 ExecEnumPd = 3, ExecEnumExt = 4, ExecMres = 5;
     function automatic int exec_kind(input logic [31:0] t);
       case (t)
         APU_VN_TYPE_VK_GET_BUFFER_MEMORY_REQUIREMENTS_EXT,
@@ -283,6 +294,8 @@ module g6lc_apu_vnfront
           return ExecEnumPd;
         APU_VN_TYPE_VK_ENUMERATE_DEVICE_EXTENSION_PROPERTIES_EXT:
           return ExecEnumExt;
+        APU_VN_TYPE_VK_GET_MEMORY_RESOURCE_PROPERTIES_MESA_EXT:
+          return ExecMres;
         default: return ExecNone;
       endcase
     endfunction
@@ -332,7 +345,7 @@ module g6lc_apu_vnfront
         aux_size_q <= '0;
         sub_q <= '0; rec_q <= '0; rhi_q <= '0;
         fmask_q <= '0; wall_q <= 1'b0; pushed_q <= '0;
-        cb_alloc_q <= '0;
+        cb_alloc_q <= '0; falloc_q <= '0; aux_fence_q <= 1'b0;
         for (int i = 0; i < CbBufs; i++) begin
           cb_pool_q[i] <= '0; cb_hnd_q[i] <= '0;
         end
@@ -381,9 +394,21 @@ module g6lc_apu_vnfront
                                 $clog2(APU_VN_DEC_TYPE_MAX+1)-1:0]]
                                 .cmdbuf_qslot};
               end else if (exec_kind(dec_op.cmd_type) == ExecBufReq ||
-                           exec_kind(dec_op.cmd_type) == ExecImgReq) begin
+                           exec_kind(dec_op.cmd_type) == ExecImgReq ||
+                           dec_op.cmd_type ==
+                           APU_VN_TYPE_VK_GET_FENCE_STATUS_EXT) begin
                 automatic int ls = lu_slot(dec_op, 1);
                 watch_q <= ls < 0 ? 4'hF : 4'(ls);
+              end else if (dec_op.cmd_type ==
+                           APU_VN_TYPE_VK_QUEUE_SUBMIT_EXT) begin
+                // watch the OPTIONAL fence slot so ent_q.aux carries
+                // the executor fence index at submit time
+                automatic int fs = -1;
+                for (int i = 0; i < 8; i++)
+                  if (dec_op.qv[i] &&
+                      dec_op.qrole[i] == APU_VN_ROLE_OPTIONAL &&
+                      dec_op.q[i] != 64'h0) fs = i;
+                watch_q <= fs < 0 ? 4'hF : 4'(fs);
               end else begin
                 watch_q <= 4'hF;
               end
@@ -460,6 +485,12 @@ module g6lc_apu_vnfront
                     exec_w_q[1*32 +: 32] <= '0;
                     state_q     <= StRep;
                   end
+                  ExecMres: begin
+                    // vkGetMemoryResourcePropertiesMESA:
+                    // memoryTypeBits = 3 (types 0+1 from the profile)
+                    exec_w_q[0*32 +: 32] <= 32'd3;
+                    state_q     <= StRep;
+                  end
                   default: state_q <= StRep;
                 endcase
               end
@@ -490,7 +521,9 @@ module g6lc_apu_vnfront
                   blob_done_q <= StRep;
                   state_q     <= StBlobRd;
                 end else if (act_q.obj_kind ==
-                             6'(APU_VN_KIND_VK_COMMAND_BUFFER)) begin
+                             6'(APU_VN_KIND_VK_COMMAND_BUFFER) ||
+                             act_q.obj_kind ==
+                             6'(APU_VN_KIND_VK_FENCE)) begin
                   // pre-LOOKUP: aux[7:0] frees the arena bit
                   otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
                                id: op_q.q[
@@ -520,7 +553,7 @@ module g6lc_apu_vnfront
                              kind: op_q.qkind[rs],
                              mem_id: {32'h0, hnd_q[ms]},
                              offset: os < 0 ? 64'h0 : op_q.q[os],
-                             default: '0};
+                             ctx: ctx_i, default: '0};
                   ot_ret_q <= StRetCpl;   // same status mapping
                   state_q  <= StOtReq;
                 end
@@ -539,8 +572,8 @@ module g6lc_apu_vnfront
                 blob_n_q    <= 5'(op_q.blob[1].words >> 1);
                 sub_q       <= '{fence_idx:
                                 (fs >= 0 &&
-                                 hnd_q[fs][15:0] < 16'(Fences))
-                                ? 5'(hnd_q[fs][15:0]) : FENCE_NONE,
+                                 ent_q.aux[7:0] < 8'(Fences))
+                                ? 5'(ent_q.aux[7:0]) : FENCE_NONE,
                                 nbufs: '0, crec: '0, chndl: '0};
                 blob_ret_q  <= StElemSub;
                 blob_done_q <= StSubPush;
@@ -567,10 +600,10 @@ module g6lc_apu_vnfront
                   APU_VN_TYPE_VK_GET_FENCE_STATUS_EXT: begin
                     automatic int fs = lu_slot(op_q, 1);
                     if (fs < 0 ||
-                        hnd_q[fs][15:0] >= 16'(Fences)) begin
+                        ent_q.aux[7:0] >= 8'(Fences)) begin
                       result_q <= APU_VK_ERROR_UNKNOWN;
                     end else begin
-                      automatic int fsb = int'(hnd_q[fs][
+                      automatic int fsb = int'(ent_q.aux[
                                           $clog2(Fences)-1:0]);
                       result_q <= ex_fence_lost_i[fsb]
                           ? APU_VK_ERROR_DEVICE_LOST
@@ -632,24 +665,34 @@ module g6lc_apu_vnfront
             automatic int ps = act_q.parent_qslot != APU_VN_QSLOT_NONE
                                ? int'(act_q.parent_qslot) : -1;
             automatic int ds = data_slot(op_q);
-            // created size -> aux[31:8] blocks (ObjTab.ALLOC ignores
-            // req.size); buffers in 256B units, images in 4KiB units
-            if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_BUFFER_EXT)
-              aux_size_q <= 24'((ds < 0 ? 64'h0 : op_q.q[ds]) +
-                                64'd255 >> 8);
-            else if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_IMAGE_EXT)
-              aux_size_q <= 24'((64'(op_q.imm[3]) * 64'(op_q.imm[4]) *
-                                64'd4 + 64'd4095) >> 12);
-            else
-              aux_size_q <= '0;
-            otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
-                       id: op_q.q[ns],
-                       kind: act_q.obj_kind,
-                       parent_id: ps < 0 ? 64'h0
-                                         : {32'h0, hnd_q[ps]},
-                       default: '0};
-            ot_ret_q <= StAllocCpl;
-            state_q  <= StOtReq;
+            if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_FENCE_EXT &&
+                fence_free() == 8'hFF) begin
+              result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
+              state_q  <= StRep;
+            end else begin
+              // created size -> aux[31:8] blocks (ObjTab.ALLOC ignores
+              // req.size); buffers in 256B units, images in 4KiB units
+              if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_BUFFER_EXT)
+                aux_size_q <= 24'((ds < 0 ? 64'h0 : op_q.q[ds]) +
+                                  64'd255 >> 8);
+              else if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_IMAGE_EXT)
+                aux_size_q <= 24'((64'(op_q.imm[3]) * 64'(op_q.imm[4]) *
+                                  64'd4 + 64'd4095) >> 12);
+              else
+                aux_size_q <= '0;
+              // executor fence index -> aux[7:0] via SETAUX (are_i_q
+              // carries it to StAllocAux)
+              if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_FENCE_EXT)
+                are_i_q <= 5'(fence_free());
+              otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
+                         id: op_q.q[ns],
+                         kind: act_q.obj_kind,
+                         parent_id: ps < 0 ? 64'h0
+                                           : {32'h0, hnd_q[ps]},
+                         ctx: ctx_i, default: '0};
+              ot_ret_q <= StAllocCpl;
+              state_q  <= StOtReq;
+            end
           end
           StAllocCpl: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
@@ -664,7 +707,17 @@ module g6lc_apu_vnfront
                          kind: act_q.obj_kind,
                          mask: 32'hFFFF_FF00,
                          value: {aux_size_q, 8'h0},
-                         default: '0};
+                         ctx: ctx_i, default: '0};
+              ot_ret_q <= StAllocAux;
+              state_q  <= StOtReq;
+            end else if (op_q.cmd_type ==
+                         APU_VN_TYPE_VK_CREATE_FENCE_EXT) begin
+              otr_q <= '{op: APU_OBJTAB_OP_SETAUX,
+                         id: {32'h0, ot_cpl_i.handle},
+                         kind: act_q.obj_kind,
+                         mask: 32'hFF,
+                         value: {27'h0, are_i_q},
+                         ctx: ctx_i, default: '0};
               ot_ret_q <= StAllocAux;
               state_q  <= StOtReq;
             end else begin
@@ -674,6 +727,8 @@ module g6lc_apu_vnfront
           StAllocAux: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK)
               result_q <= APU_VK_ERROR_UNKNOWN;
+            else if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_FENCE_EXT)
+              falloc_q[are_i_q[$clog2(Fences)-1:0]] <= 1'b1;
             state_q <= StRep;
           end
 
@@ -697,7 +752,7 @@ module g6lc_apu_vnfront
                                     ? 64'h0
                                     : {32'h0,
                                        hnd_q[int'(act_q.parent_qslot)]},
-                         default: '0};
+                         ctx: ctx_i, default: '0};
               ot_ret_q <= StElemAllocCpl;
               state_q  <= StOtReq;
             end
@@ -714,7 +769,7 @@ module g6lc_apu_vnfront
                          kind: act_q.obj_kind,
                          mask: 32'hFF,
                          value: {27'h0, are_i_q},
-                         default: '0};
+                         ctx: ctx_i, default: '0};
               ot_ret_q <= StElemAuxCpl;
               state_q  <= StOtReq;
             end else begin
@@ -747,7 +802,7 @@ module g6lc_apu_vnfront
                                   APU_VN_QSLOT_NONE ? 64'h0
                                   : {32'h0,
                                      hnd_q[int'(act_q.parent_qslot)]},
-                       default: '0};
+                       ctx: ctx_i, default: '0};
             ot_ret_q <= StElemPdCpl;
             state_q  <= StOtReq;
           end
@@ -766,7 +821,7 @@ module g6lc_apu_vnfront
             otr_q <= '{op: APU_OBJTAB_OP_LOOKUP,
                        id: blob_id_q,
                        kind: 6'(APU_VN_KIND_VK_COMMAND_BUFFER),
-                       default: '0};
+                       ctx: ctx_i, default: '0};
             ot_ret_q <= StElemSubCpl;
             state_q  <= StOtReq;
           end
@@ -791,17 +846,17 @@ module g6lc_apu_vnfront
           StElemFenc: begin
             otr_q <= '{op: APU_OBJTAB_OP_LOOKUP,
                        id: blob_id_q,
-                       kind: 6'(APU_VN_KIND_VK_FENCE), default: '0};
+                       kind: 6'(APU_VN_KIND_VK_FENCE), ctx: ctx_i, default: '0};
             ot_ret_q <= StElemFencCpl;
             state_q  <= StOtReq;
           end
           StElemFencCpl: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
-                ot_cpl_i.handle[15:0] >= 16'(Fences)) begin
+                ot_cpl_i.entry.aux[7:0] >= 8'(Fences)) begin
               result_q <= APU_VK_ERROR_UNKNOWN;
               state_q  <= StRep;
             end else begin
-              fmask_q[ot_cpl_i.handle[$clog2(Fences)-1:0]] <= 1'b1;
+              fmask_q[ot_cpl_i.entry.aux[$clog2(Fences)-1:0]] <= 1'b1;
               blob_i_q <= blob_i_q + 5'd1;
               state_q  <= StBlobRd;
             end
@@ -814,7 +869,7 @@ module g6lc_apu_vnfront
                              APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT
                              ? 6'(APU_VN_KIND_VK_DESCRIPTOR_SET)
                              : 6'(APU_VN_KIND_VK_BUFFER),
-                       default: '0};
+                       ctx: ctx_i, default: '0};
             ot_ret_q <= StElemRecCpl;
             state_q  <= StOtReq;
           end
@@ -839,7 +894,7 @@ module g6lc_apu_vnfront
           // ---- blob retire (vkFreeCommandBuffers/DescriptorSets) ----------
           StElemRetL: begin
             otr_q <= '{op: APU_OBJTAB_OP_LOOKUP, id: blob_id_q,
-                       kind: act_q.obj_kind, default: '0};
+                       kind: act_q.obj_kind, ctx: ctx_i, default: '0};
             ot_ret_q <= StElemRetR;
             state_q  <= StOtReq;
           end
@@ -881,7 +936,11 @@ module g6lc_apu_vnfront
               state_q  <= StRep;
             end else begin
               aux_free_q   <= ot_cpl_i.entry.aux[7:0];
-              aux_free_v_q <= ot_cpl_i.entry.aux[7:0] < 8'(CbBufs);
+              aux_fence_q  <= act_q.obj_kind ==
+                              6'(APU_VN_KIND_VK_FENCE);
+              aux_free_v_q <= ot_cpl_i.entry.aux[7:0] <
+                              (act_q.obj_kind == 6'(APU_VN_KIND_VK_FENCE)
+                               ? 8'(Fences) : 8'(CbBufs));
               otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
                            id: op_q.q[
                                role_slot(op_q, APU_VN_ROLE_RETIRE)],
@@ -894,9 +953,13 @@ module g6lc_apu_vnfront
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               result_q <= err_of(ot_cpl_i.status);
             end else if (aux_free_v_q) begin
-              cb_alloc_q[aux_free_q[$clog2(CbBufs)-1:0]] <= 1'b0;
-              cb_pool_q [aux_free_q[$clog2(CbBufs)-1:0]] <= '0;
-              cb_hnd_q  [aux_free_q[$clog2(CbBufs)-1:0]] <= '0;
+              if (aux_fence_q)
+                falloc_q[aux_free_q[$clog2(Fences)-1:0]] <= 1'b0;
+              else begin
+                cb_alloc_q[aux_free_q[$clog2(CbBufs)-1:0]] <= 1'b0;
+                cb_pool_q [aux_free_q[$clog2(CbBufs)-1:0]] <= '0;
+                cb_hnd_q  [aux_free_q[$clog2(CbBufs)-1:0]] <= '0;
+              end
               aux_free_v_q <= 1'b0;
             end
             state_q <= StRep;
@@ -971,7 +1034,7 @@ module g6lc_apu_vnfront
                                 ? APU_CB_RECORDING
                                 : act_q.act_class == APU_VN_ACT_CB_END
                                   ? APU_CB_EXECUTABLE : 32'h0,
-                         default: '0};
+                         ctx: ctx_i, default: '0};
               ot_ret_q <= StCbSetCpl;
               state_q  <= StOtReq;
             end
@@ -1143,6 +1206,7 @@ module g6lc_apu_vnfront_fixture
   input  logic [15:0]        cs_len_i,
   input  logic [15:0]        rep_base_i,
   input  logic [15:0]        rep_len_i,
+  input  logic [7:0]         ctx_i,
   output logic               cs_re_o,
   output logic [15:0]        cs_addr_o,
   input  logic [31:0]        cs_rdata_i,

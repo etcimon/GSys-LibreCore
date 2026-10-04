@@ -1,0 +1,21 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
++incdir+${CVA6_REPO_DIR}/corev_apu/apu/include
+${CVA6_REPO_DIR}/core/include/config_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/include/g6lc_apu_cfg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vn_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objtab_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdrec_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdexec_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vnfront_pkg.sv
+${CVA6_REPO_DIR}/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vndec.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnrep.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_objtab.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_cmdrec.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_cmdexec.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnfront.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgctl.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnpump.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgtop.sv

@@ -104,7 +104,8 @@ module tb_g6lc_apu_cmdexec;
   g6lc_apu_objtab #(.Enable(1'b1), .Slots(Slots)) i_obj (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(ot_vld), .req_ready_o(ot_rdy), .req_i(ot_req),
-    .cpl_valid_o(ot_cvld), .cpl_ready_i(ot_crdy), .cpl_o(ot_cpl));
+    .cpl_valid_o(ot_cvld), .cpl_ready_i(ot_crdy), .cpl_o(ot_cpl),
+    .live_o());
 
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;

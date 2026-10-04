@@ -65,6 +65,15 @@ for en in 0 1; do
   fi
   echo "SYNTH OK Enable=$en"
 done
+# small-parameter screen (NumBufs=2, RecsPerBuf=4): exposes the control
+# logic separately from the record arena
+yp="read_slang -f $ROOT/corev_apu/apu/Flist.apu_cmdrec --top g6lc_apu_cmdrec_fixture -GEnable=1 -GNumBufs=2 -GRecsPerBuf=4; hierarchy -top g6lc_apu_cmdrec_fixture; flatten; proc; opt; memory_collect; check -assert; stat; synth -top g6lc_apu_cmdrec_fixture -noabc; check -assert; stat; select -assert-none t:\$dlatch t:\$_DLATCH_*"
+if ! "$YOSYS" -Q -T -p "$yp" > "$OUT/synth-small.log" 2>&1; then
+  echo "SYNTH FAILED Enable=1 NumBufs=2 RecsPerBuf=4"
+  tail -n 40 "$OUT/synth-small.log"
+  exit 1
+fi
+echo "SYNTH OK Enable=1 NumBufs=2 RecsPerBuf=4"
 python3 - "$OUT" <<'PY'
 import re, sys, pathlib
 out = pathlib.Path(sys.argv[1])
@@ -86,6 +95,15 @@ for en in (0, 1):
     print(f"SYNTH Enable={en} cells={cells.group(1) if cells else '?'} "
           f"ffs={ffs} problems={','.join(probs) or '0'} latch=none "
           f"retained_mem={mem_n} ({';'.join(f'{n} {k}' for n,k in mem) or 'none'}) {tag}")
+text = pathlib.Path(f"{out}/synth-small.log").read_text(errors="replace")
+gate = re.split(r"\d+\. Printing statistics\.", text)[-1]
+cells = re.search(r"Number of cells:\s+(\d+)", gate) or \
+        re.search(r"^\s+(\d+) cells\b", gate, re.M)
+ffs = sum(int(n) for n, _ in re.findall(r"^\s+(\d+)\s+(\$_DFF\w*)", gate, re.M))
+mem = re.findall(r"^\s+(\d+)\s+(\$mem\S*)", gate, re.M)
+print(f"SYNTH Enable=1 NumBufs=2 RecsPerBuf=4 "
+      f"cells={cells.group(1) if cells else '?'} ffs={ffs} "
+      f"retained_mem={sum(int(n) for n,_ in mem)}")
 print("RETAINED_MEM_ASSERT " + ("PASS" if ok else "FAIL"))
 sys.exit(0 if ok else 1)
 PY

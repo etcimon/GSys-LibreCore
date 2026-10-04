@@ -85,7 +85,7 @@ module tb_g6lc_apu_vnfront;
   i_front (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .start_i(f_start), .cs_base_i(f_base), .cs_len_i(f_len),
-    .rep_base_i(REP_BASE), .rep_len_i(REP_LEN),
+    .rep_base_i(REP_BASE), .rep_len_i(REP_LEN), .ctx_i(8'h0),
     .cs_re_o(cs_re), .cs_addr_o(cs_addr), .cs_rdata_i(cs_rdata),
     .rep_we_o(rep_we), .rep_addr_o(rep_addr), .rep_wdata_o(rep_wdata),
     .ot_req_valid_o(fot_v), .ot_req_ready_i(fot_r), .ot_req_o(fot_req),
@@ -105,7 +105,7 @@ module tb_g6lc_apu_vnfront;
   i_off (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .start_i(f_start), .cs_base_i(f_base), .cs_len_i(f_len),
-    .rep_base_i(REP_BASE), .rep_len_i(REP_LEN),
+    .rep_base_i(REP_BASE), .rep_len_i(REP_LEN), .ctx_i(8'h0),
     .cs_re_o(o_csre), .cs_addr_o(o_addr), .cs_rdata_i(cs_rdata),
     .rep_we_o(o_repwe), .rep_addr_o(o_raddr), .rep_wdata_o(o_wdata),
     .ot_req_valid_o(o_otv), .ot_req_ready_i(1'b0), .ot_req_o(o_otreq),
@@ -193,7 +193,8 @@ module tb_g6lc_apu_vnfront;
   g6lc_apu_objtab #(.Enable(1'b1), .Slots(Slots)) i_obj (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(ot_vld), .req_ready_o(ot_rdy), .req_i(ot_req),
-    .cpl_valid_o(ot_cvld), .cpl_ready_i(1'b1), .cpl_o(ot_cpl));
+    .cpl_valid_o(ot_cvld), .cpl_ready_i(1'b1), .cpl_o(ot_cpl),
+    .live_o());
   g6lc_apu_cmdrec #(.Enable(1'b1), .NumBufs(16), .RecsPerBuf(64))
   i_rec (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
