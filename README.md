@@ -2,7 +2,7 @@
 
 # GSys LibreCore
 
-**A source-available, Linux-capable RISC-V application-class processor — and the agentic build platform that carries it from core to silicon.**
+**A source-available, Linux-capable RISC-V application-class super-processor — and the super-intelligence agentic custom-build platform that carries it from core to silicon through bios and pytorch to any GHz desired.**
 
 <img src="superprocessor.jpg" alt="GSys LibreCore — artistic rendering of a RISC-V processor die" width="760"/>
 
