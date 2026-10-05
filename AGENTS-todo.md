@@ -68,6 +68,23 @@ Priors: `architecture/uncore/apu-graphics.md`, `corev_apu/apu/AGENTS-impl-interp
   `shcore` 9 / 18,533; two 4b compute sessions through `vgtop` (`loopfor_1`,
   `barrier_reduce_1`, Gate 1 + Gate 2 clean); small synth screens green, default
   geometry skipped. Then the aperture/sys attach.
+- [x] **3c-i / 3c-ii landed (2026-10-05, `32668990c`, `7822b1672`)**: apu_mp
+  word ports, apmem, vqwalk, vgsys; 31 sessions through real virtqueues/AXI
+  with window assertions, 12 negative arms; `ApuCfg.VenusEn` attach (`ApuVenus`:
+  FeatureVirgl published, capset 1 refused, NumCapsets 1, SHM id 1 aperture, no
+  hart/mailbox); driver-model TB probes virtio_mmio/virtio_gpu
+  register-for-register, 11 sessions + 5 arms; legacy feature words/FF
+  identical. Catalog frozen (`133327577`/`755776ae0`).
+- [ ] 3d: bare-metal virtio-gpu probe on the CVA6 hart (G6LC_APU testharness,
+  `ApuVenus`), then stock Ubuntu riscv64 kernel + Mesa boot on the proxy:
+  `vulkaninfo` enumerates, one compute dispatch matches the oracle,
+  `VenusEn=0` fails. DTS: `reserved-memory` for the aperture,
+  `dma-coherent`/Zicbom decision (§12.1 F6).
+- [ ] Increment 5 per §12.3 C: Xfer → images/sampler with memory-resident
+  descriptors (F5) → TBDR raster/ROP → UE SM5 profile ROM; G0/A5 via Zink.
+- [ ] §12.3 D/E: shwave 1 IPC + ShaderCores, DramChannels by profile,
+  virtio-pci endpoint function (F4), scanout/dma-buf WSI; UE 5.8.3 SM5 on
+  26.04.1/24.04; CS2 requirement pin.
 
 ## AI execution-contract continuation (2026-09-28)
 

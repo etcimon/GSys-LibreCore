@@ -550,6 +550,10 @@ isolation, full advertised conformance, formal safety/liveness, full SoC
 coexistence or physical qualification follows. Disabled and generic synthesis
 results are per-fixture only. No architectural coverage status below is promoted.
 
+2026-10-05: the Venus hardware backend is attached behind `ApuCfg.VenusEn`
+(`ApuVenus`) — `g6lc_apu_vgsys` inside `g6lc_apu_sys.gen_venus`. Evidence and
+remaining gates: `uncore/apu-vulkan-engine.md` §11 rows 3c-i/3c-ii and §12.
+
 ## Non-ISA L2 replacement experiment
 
 **N/A for ISA certification; bounded leaf diagnostics only.** Default-off

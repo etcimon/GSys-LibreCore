@@ -1974,6 +1974,12 @@ stock-driver GLES2 proof.
 Remote results are recorded in `AGENTS-todo.md` under P1 SG walker / storage /
 used-ring and P2 testharness firmware RAM I$ fills. None of these tests is a stock-driver GLES2 or renderer proof.
 
+2026-10-05: the live Venus hardware backend is covered by `verif/tb/apu/run-apu-vgsys.sh`
+(32 sessions + 12 negative arms through real split virtqueues and a window-asserting
+AXI4 slave) and `verif/tb/apu/run-apu-sys-venus.sh` (11 sessions + 5 arms through the
+SoC seam, driver-model virtio_mmio/virtio_gpu register-for-register probe under
+`ApuVenus`). Evidence: `architecture/uncore/apu-vulkan-engine.md` §11 rows 3c-i/3c-ii.
+
 ### APU completion review regression (2026-09-15)
 
 Against `d74010111`, added tests first reproduce twelve source-tag failures,

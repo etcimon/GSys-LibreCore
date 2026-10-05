@@ -51,11 +51,26 @@ MatHelper port onto the AI dot PEs, tile-based raster. The per-command leaf
 paragraphs below (from `g6lc_apu_vnenc` onward) are a catalog census of fixed-shape
 diagnostics; they are retained as wire-fact/vector sources, not as the engine.
 
+**State 2026-10-05:** the VenusEn attach landed (`32668990c` 3c-i,
+`7822b1672` 3c-ii): `ApuVenus` is a legal `apu_cfg_t` literal, `g6lc_apu_sys`
+grows a `gen_venus` branch instantiating `g6lc_apu_vgsys` behind the existing
+backend seam, and the device feature word is `64'h0000_0101_0000_0019` with
+`NumCapsets = 1` and SHM id 1 = the `APU_SHM_BASE` DRAM aperture. The
+real-memory path is live: `apmem` (5-port mp arbiter → one AXI4 master),
+`vqwalk` (split-ring walker), `vgsys`; 31 sessions ran through real
+virtqueues/AXI with in-window assertions. G0/A5 are retargeted to Zink-on-Venus
+per `apu-vulkan-engine.md` §12.1 F2. The per-command paragraphs that follow
+are the frozen catalog (see `corev_apu/apu/AGENTS-impl-interplays.md` §2 note).
+
 The preferred feasibility candidate is stock virtio-gpu/Mesa Venus with hardware
 protocol/object/shader semantics. It is NOT proven. Custom service/compiler
 firmware remains a diagnostic/legacy lane, not compliance with the final
 no-custom-runtime constraint. No CPU/host-GPU renderer, frozen shader or expected
-color recognizer can supply acceptance pixels. The bounded SPIR-V-subset
+color recognizer can supply acceptance pixels.
+
+### Frozen catalog census (diagnostic/vector material; not the engine)
+
+The bounded SPIR-V-subset
 prototype (`g6lc_apu_spirv`, `SpirvEn`) is that experiment: immutable 128-word
 store, data-dependent add/mul, ApuOff quiet, diagnostic bytes+IRQ TB client.
 It is not a Venus frontend and is not wired into `g6lc_apu_sys`. The reusable

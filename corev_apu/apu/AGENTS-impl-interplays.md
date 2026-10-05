@@ -53,6 +53,10 @@ A leaf that only names another texel of the clear word does not get a new tree; 
 
 ## 2. Two planes (the root split)
 
+> **Frozen 2026-10-05 (commits 133327577 / 755776ae0).** The `g6lc_apu_vgpu_*` /
+> `bru`/`qbn`/`qtb` forest below is diagnostic/vector material; it is not
+> instantiated and will not grow. The live engine arborescence is §16.
+
 ```text
 guest Mesa / BIOS virtio-gpu
     ==> gpu@0x40001000  PLIC 9     control@0x40002000     fwram@0x90000000
@@ -715,6 +719,7 @@ GuestNextWalk (gnw)               --? avail; not in ApuSys
 CapsetInfo (nfo) / CapsetGet (cap) / OpcodeList (ols)
                                   still refused / count 0
 ExecCluster (exec)                FPnew lane; no virgl grant
+FeatureVirgl                      published only under VenusEn (ApuVenus); capset 1 refused; NumCapsets = 1
 HdmiScanout                       other device, HdmiEn, 0x8ef00000
 ai_island                         other device, MatrixEn, PLIC 8
 ```
@@ -831,6 +836,13 @@ venus-protocol vk.xml, one decoder for the whole command set) `-->` `ObjTab`
 leaves (`chain`, `cdma`, `avn`, `vnring`, `avu`, `uir`, `qdn`, `hvis`, `vcap`,
 `tdma`) are the reusable primitives those engines sit between. Catalog leaves
 stay as frozen vector sources; nothing here is instantiated in `g6lc_apu_sys` yet.
+
+**Consolidation committed (2026-10-05).** The consolidation is now on the tree:
+`32668990c` (3c-i: apu_mp word ports, `apmem`, `vqwalk`, `vgsys`) and
+`7822b1672` (3c-ii: `ApuCfg.VenusEn` attach inside `g6lc_apu_sys` — the §16
+arborescence below is instantiated RTL). The controlling sequence is
+`architecture/uncore/apu-vulkan-engine.md` §12; the catalog census above and
+this inventory remain the frozen record.
 
 ### Source-review inventory, 2026-10-01
 
@@ -3723,3 +3735,37 @@ behind graphics-owned interfaces and explicit coherence/precision tests; no
 mandatory MatrixEn, custom descriptors, UIO daemon or game plugin. HDMI remains
 a separate consumer of a completed common surface. `ApuOff`, all graphics gates
 and `FeatureVirgl` legality are unchanged by this source-review increment.
+
+## 16. Engine arborescence (live, 3c-ii)
+
+```text
+ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
+    --> AxiLiteTransport (g6lc_apu_axi_lite)
+        --> VirtioTop --> VirtioMmio      ==> notify levels out / used event + ISR in
+        [VenusEn: no ApuControl; be_* seam]
+    --> VenusSystem (g6lc_apu_vgsys)
+        --> VirtqueueWalker (vqwalk)      ==> avail/desc/used beats (dom 0)
+            <-> VenusTop (vgtop)          chain_* in, cpl held handshake back
+        --> VenusTop (vgtop)
+            --> ControlQueue (vgctl)      <-> ObjTab, vgpages          mp CTL
+            --> RingPump (vnpump)                                        mp PUMP
+                --> Front (vnfront)
+                    --> Decoder (vndec)  --> ReplyBuilder (vnrep)
+                    <-> ObjTab (objtab) <-> ObjPay (objpay) <-> CmdRec (cmdrec)
+                <-> CmdExec (cmdexec)    work port
+                    --> ShaderCore (shcore) --> ModuleScanner (shmod) --> WaveEngine (shwave)   mp SH
+            --> PageAllocator (vgpages)
+        --> MemoryPort (apmem)            5 x apu_mp fixed priority ==> one AXI4 master (dma_req_o)
+    ==> guest RAM window {DmaWindowBase, DmaWindowBytes} / aperture {APU_SHM_BASE, APU_SHM_BYTES}
+```
+
+### What §16 still waits on (§12.3 phases B–D)
+
+| Waiting on | Phase | Exit |
+|---|---|---|
+| 3d bare-metal probe + stock riscv64 boot | B | kernel probe sequence + Venus init on the `G6LC_APU` testharness, then stock Ubuntu + Mesa on the proxy: `vulkaninfo` enumerates, one compute dispatch matches the oracle, `VenusEn=0` fails |
+| Xfer / sampler / raster | C | copies/clears/blits via checked DMA, images/formats/sampler, TBDR raster + ROP into `tc_sram` tiles; G0/A5 via Zink |
+| Memory-resident descriptors (F5) | C | descriptor sets fetched from device memory (objpay/aperture) by the LSU with dynamic indices; ObjTab validation at descriptor-write time + generation check — not the 16-entry flop bind table |
+| `shwave` 1 IPC + `ShaderCores` | D | per-wave throughput 1 IPC; multi-core dispatch via the cluster pattern; `DramChannels` by profile |
+| virtio-pci endpoint function (F4) | D | five virtio-pci capabilities + shared-memory capability over a BAR into the aperture |
+| Scanout / WSI | D | `RESOURCE_UUID`/dma-buf export (G2) |
