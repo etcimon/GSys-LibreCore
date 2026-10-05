@@ -4194,10 +4194,17 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     size=len(vec['push']) * 4,
                     pValues=b''.join(struct.pack('<I', w)
                                      for w in vec['push']))))
-            seg_a2 += [
-                ('vkCmdDispatch', dict(
+            if variant == 'worksink':
+                # non-dispatch work record: the record issues on the
+                # cmdexec work port — a WorkSink=0 backend answers it
+                # UNSUPPORTED one cycle later -> DEVICE_LOST
+                seg_a2.append(('vkCmdDispatchIndirect', dict(
+                    commandBuffer=V['cb'], buffer=bufs[0], offset=0)))
+            else:
+                seg_a2.append(('vkCmdDispatch', dict(
                     commandBuffer=V['cb'], groupCountX=vec['gx'],
-                    groupCountY=vec['gy'], groupCountZ=vec['gz'])),
+                    groupCountY=vec['gy'], groupCountZ=vec['gz'])))
+            seg_a2 += [
                 ('vkEndCommandBuffer', dict(commandBuffer=V['cb'])),
                 ('vkCreateFence', dict(
                     device=V['dev'],
@@ -4236,7 +4243,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
 
             # ---- §7a gates at the aperture ---------------------------- #
             lost = variant in ('lostbuf', 'baddesc', 'nopipe',
-                               'bindoob')
+                               'bindoob', 'worksink')
             if not lost:
                 if variant == 'descoob':
                     # oracle = spirv_model run with binding 1's view
@@ -4889,7 +4896,7 @@ def main():
     ap.add_argument('--variant', default='',
                     help='compute-session negative arm: spec, modgone, '
                          'lostbuf, baddesc, nopipe, pgfull, badmem, '
-                         'bindoob, descoob')
+                         'bindoob, descoob, worksink')
     ap.add_argument('--print', dest='print_cmd', metavar='CMD')
     ap.add_argument('--dump-json', metavar='FILE',
                     help='write every generated instance (args+words) as '

@@ -72,7 +72,9 @@ module g6lc_apu_fw
     .used_valid_i, .used_qid_i, .used_context_i, .used_fence_i, .used_len_i,
     .used_ready_o, .cfg_display_event_i, .mbox_req_o(mbox_req), .mbox_rsp_i(mbox_rsp),
     .guest_hold_i(1'b0), .guest_epoch_i('0), .ctrl_hold_i(1'b0), .ctrl_epoch_i('0),
-    .epoch_o()
+    .epoch_o(),
+    .be_notify_pending_o(), .be_notify_clear_i('0),
+    .be_reset_ack_i(1'b0), .be_queue_stop_ack_i('0)
   );
 
   if (!ExecEn) begin : gen_off

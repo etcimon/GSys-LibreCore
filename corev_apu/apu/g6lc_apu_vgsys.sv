@@ -57,7 +57,12 @@ module g6lc_apu_vgsys
   parameter int unsigned ShaderMembers = 256,
   parameter int unsigned ScratchBytes  = 1024,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0010_0000
+  parameter int unsigned ShaderBudget  = 32'h0010_0000,
+  // 1: non-dispatch cmdexec records go to the external work_* port (TB
+  // sink).  0 (§6c F1 SoC seam): refuse them truthfully — answered
+  // APU_SH_DONE_UNSUPPORTED one cycle after accept, so cmdexec marks
+  // the submission DEVICE_LOST exactly like an unsupported dispatch.
+  parameter bit          WorkSink = 1'b1
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -217,6 +222,37 @@ module g6lc_apu_vgsys
       .bus_fault_o(vw_fault), .idle_o(vw_idle),
       .last_avail_o(last_avail_o));
 
+    // ---- work port ---------------------------------------------------
+    logic              ws_v, ws_rdy, ws_done;
+    apu_cmdexec_work_t ws_work;
+    apu_sh_done_t      ws_done_pl;
+
+    if (WorkSink) begin : gen_ws_ext
+      assign work_valid_o = ws_v;
+      assign work_o       = ws_work;
+      assign ws_rdy       = work_ready_i;
+      assign ws_done      = work_done_i;
+      assign ws_done_pl   = work_done_pl_i;
+    end else begin : gen_ws_refuse
+      // One outstanding refusal: ready while no done is pending, the
+      // registered pulse carries the same payload shcore emits for a
+      // DispatchIndirect record (UNSUPPORTED -> DEVICE_LOST).
+      logic refuse_q;
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) refuse_q <= 1'b0;
+        else         refuse_q <= ws_v && ws_rdy;
+      end
+      assign work_valid_o = 1'b0;
+      assign work_o       = '0;
+      assign ws_rdy       = !refuse_q;
+      assign ws_done      = refuse_q;
+      assign ws_done_pl   = '{code: APU_SH_DONE_UNSUPPORTED, wave: '0,
+                             pc: '0, robust: '0, work_id: '0};
+      logic unused_ws;
+      assign unused_ws = work_ready_i | work_done_i | (|work_done_pl_i) |
+                         (|ws_work);
+    end
+
     // ---- engine composition ------------------------------------------
     // vgtop mp[0..2] map onto apmem ports CTL=2, PUMP=3, SH=4.
     g6lc_apu_vgtop #(
@@ -238,9 +274,9 @@ module g6lc_apu_vgsys
       .mp_req_o(mp_req[APU_MP_SH:APU_MP_CTL]),
       .mp_rsp_valid_i(mp_rsp_valid[APU_MP_SH:APU_MP_CTL]),
       .mp_rsp_i(mp_rsp[APU_MP_SH:APU_MP_CTL]),
-      .work_valid_o(work_valid_o), .work_ready_i(work_ready_i),
-      .work_o(work_o),
-      .work_done_i(work_done_i), .work_done_pl_i(work_done_pl_i),
+      .work_valid_o(ws_v), .work_ready_i(ws_rdy),
+      .work_o(ws_work),
+      .work_done_i(ws_done), .work_done_pl_i(ws_done_pl),
       .done_o(done_o), .busy_o(vg_busy),
       .fence_pulse_o(fence_pulse_o), .fence_id_o(fence_id_o),
       .fence_ring_o(fence_ring_o),
@@ -328,7 +364,8 @@ module g6lc_apu_vgsys_fixture
   parameter int unsigned ShaderMembers = 256,
   parameter int unsigned ScratchBytes  = 1024,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0010_0000
+  parameter int unsigned ShaderBudget  = 32'h0010_0000,
+  parameter bit          WorkSink = 1'b1
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -382,5 +419,6 @@ module g6lc_apu_vgsys_fixture
     .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),
     .ShaderWords(ShaderWords), .ShaderInit(ShaderInit),
     .ShaderMembers(ShaderMembers), .ScratchBytes(ScratchBytes),
-    .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget)) i_dut (.*);
+    .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget),
+    .WorkSink(WorkSink)) i_dut (.*);
 endmodule

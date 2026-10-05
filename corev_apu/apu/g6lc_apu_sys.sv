@@ -5,7 +5,12 @@
 // Memory alone, exec alone, or both under g6lc_apu_sched.
 // g6lc_apu_axi_lite stays transport-only. Default-off.
 
-// Interplay: guest AXI-Lite ==> VirtioMmio; mailbox <-> ApuMem XOR ExecCluster. Private vgpu leaves --? this module. See AGENTS-impl-interplays.md.
+// Interplay: guest AXI-Lite ==> VirtioMmio; mailbox <-> ApuMem XOR ExecCluster;
+// VenusEn: notify ==> vgsys(vqwalk --> vgtop, apmem ==> AXI) ==> used/ISR.
+// Private vgpu leaves --? this module. See AGENTS-impl-interplays.md.
+// Timing impact: the Venus seam adds no combinational path — notify levels
+// and used/reset/stop handshakes are registered in both directions
+// (notify_pending_q/vqwalk clr_q, used_valid held, reset_done/idle FSMs).
 module g6lc_apu_sys
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;
@@ -51,6 +56,7 @@ module g6lc_apu_sys
   input  logic [31:0] ctrl_epoch_i,
   output logic [31:0] epoch_o
 );
+  localparam bit VenusEn = ApuCfg.Enable && ApuCfg.VenusEn;
   localparam bit MemEn = ApuCfg.Enable &&
       (ApuCfg.MaxResources != 0 || ApuCfg.MaxCmdBytes != 0 ||
        ApuCfg.SgEn || ApuCfg.DmaReadEn || ApuCfg.DmaWriteEn);
@@ -60,6 +66,17 @@ module g6lc_apu_sys
   apu_reg_rsp_t mbox_rsp;
   logic svc_idle, reset_req, lite_irq;
   logic [APU_NUM_QUEUES-1:0] stop_req;
+  // backend seam wires: Venus drives them from vgsys, the firmware
+  // branches pass the sys-level used_*/backend_* ports through and tie
+  // the rest
+  logic [APU_NUM_QUEUES-1:0] be_notify_pend, be_notify_clr, be_stop_ack;
+  logic be_reset_ack, be_reset_done;
+  logic [APU_NUM_QUEUES-1:0] be_idle;
+  logic be_used_v, be_used_rdy;
+  logic [31:0] be_used_qid, be_used_ctx, be_used_len;
+  logic [63:0] be_used_fence;
+  logic unused_be_np;
+  assign unused_be_np = |be_notify_pend;
 
   assign backend_reset_req_o = reset_req;
   assign backend_queue_stop_req_o = stop_req;
@@ -80,14 +97,82 @@ module g6lc_apu_sys
     .control_aw_authorized_i, .control_ar_authorized_i,
     .guest_irq_o, .control_irq_o(lite_irq), .vq_state_o, .queue_enable_o,
     .backend_reset_req_o(reset_req), .backend_queue_stop_req_o(stop_req),
-    .backend_reset_done_i,
-    .backend_idle_i(backend_idle_i & {APU_NUM_QUEUES{svc_idle}}),
-    .used_valid_i, .used_qid_i, .used_context_i, .used_fence_i, .used_len_i,
-    .used_ready_o, .cfg_display_event_i, .mbox_req_o(mbox_req), .mbox_rsp_i(mbox_rsp),
-    .guest_hold_i, .guest_epoch_i, .ctrl_hold_i, .ctrl_epoch_i, .epoch_o
+    .backend_reset_done_i(be_reset_done),
+    .backend_idle_i(be_idle & {APU_NUM_QUEUES{svc_idle}}),
+    .used_valid_i(be_used_v), .used_qid_i(be_used_qid),
+    .used_context_i(be_used_ctx), .used_fence_i(be_used_fence),
+    .used_len_i(be_used_len), .used_ready_o(be_used_rdy),
+    .cfg_display_event_i, .mbox_req_o(mbox_req), .mbox_rsp_i(mbox_rsp),
+    .guest_hold_i, .guest_epoch_i, .ctrl_hold_i, .ctrl_epoch_i, .epoch_o,
+    .be_notify_pending_o(be_notify_pend), .be_notify_clear_i(be_notify_clr),
+    .be_reset_ack_i(be_reset_ack), .be_queue_stop_ack_i(be_stop_ack)
   );
 
-  if (MemEn && ExecWant) begin : gen_both
+  if (VenusEn) begin : gen_venus
+    // §6c F1: the generated-Venus hardware backend behind the virtio-mmio
+    // seam — real split-virtqueue walking on guest memory, the aperture
+    // exposed as SHM id 1. No firmware, no mailbox, no external work sink.
+    logic [APU_NUM_QUEUES-1:0] vg_notify_clr;
+    logic                    vg_reset_done, vg_idle;
+
+    g6lc_apu_vgsys #(
+      .Enable(1'b1), .WorkSink(1'b0)
+    ) i_vgsys (
+      .clk_i, .rst_ni, .testmode_i,
+      .vq0_i(vq_state_o[0]), .vq1_i(vq_state_o[1]),
+      .queue_enable_i(queue_enable_o),
+      .notify_i(be_notify_pend), .notify_clear_o(vg_notify_clr),
+      .used_valid_o(be_used_v), .used_qid_o(be_used_qid),
+      .used_len_o(be_used_len), .used_ready_i(be_used_rdy),
+      .last_avail_o(),
+      .reset_req_i(reset_req), .reset_done_o(vg_reset_done),
+      .idle_o(vg_idle), .bus_fault_o(bus_fault_o),
+      .dma_req_o(dma_req_o), .dma_rsp_i(dma_rsp_i),
+      .guest_base_i(ApuCfg.DmaWindowBase),
+      .guest_bytes_i(ApuCfg.DmaWindowBytes),
+      .ap_base_i(APU_SHM_BASE), .ap_bytes_i(APU_SHM_BYTES),
+      .fault_cnt_o(),
+      .work_valid_o(), .work_ready_i(1'b0), .work_o(),
+      .work_done_i(1'b0), .work_done_pl_i('0),
+      .done_o(), .fence_pulse_o(), .fence_id_o(), .fence_ring_o(),
+      .ring_active_o(), .ring_status_o(), .ring_head_o(),
+      .ring_extra_w_o(), .objtab_live_o(),
+      .dbg_ot_valid_i(1'b0), .dbg_ot_ready_o(), .dbg_ot_req_i('0),
+      .dbg_ot_cpl_valid_o(), .dbg_ot_cpl_ready_i(1'b0), .dbg_ot_cpl_o()
+    );
+    assign be_notify_clr = vg_notify_clr;
+    assign be_reset_ack  = vg_reset_done;
+    assign be_reset_done = vg_reset_done;
+    assign be_idle       = {APU_NUM_QUEUES{vg_idle}};
+    assign be_stop_ack   = stop_req & {APU_NUM_QUEUES{vg_idle}};
+    assign be_used_ctx   = '0;
+    assign be_used_fence = '0;
+    assign used_ready_o  = 1'b0;
+    assign svc_idle      = vg_idle;
+    // mailbox window answers SLVERR outright — mbox_req_o.valid is
+    // gated off in the lite, so a `ready: mbox_req.valid` rsp would
+    // hang a control access instead of completing it.
+    assign mbox_rsp = '{rdata: '0, error: 1'b1, ready: 1'b1};
+    // the firmware backend input ports do not feed this backend
+    logic unused_venus;
+    assign unused_venus = used_valid_i | (|used_qid_i) | (|used_context_i) |
+                          (|used_fence_i) | (|used_len_i) |
+                          backend_reset_done_i | (|backend_idle_i) |
+                          (|mbox_req.addr) | mbox_req.write |
+                          (|mbox_req.wdata) | (|mbox_req.wstrb) |
+                          mbox_req.valid;
+  end else if (MemEn && ExecWant) begin : gen_both
+    assign be_used_v    = used_valid_i;
+    assign be_used_qid  = used_qid_i;
+    assign be_used_ctx  = used_context_i;
+    assign be_used_fence= used_fence_i;
+    assign be_used_len  = used_len_i;
+    assign used_ready_o = be_used_rdy;
+    assign be_notify_clr = '0;
+    assign be_reset_ack  = 1'b0;
+    assign be_stop_ack   = '0;
+    assign be_reset_done = backend_reset_done_i;
+    assign be_idle       = backend_idle_i;
     g6lc_apu_sched #(
       .ApuCfg(ApuCfg), .Enable(1'b1),
       .dma_req_t(dma_req_t), .dma_rsp_t(dma_rsp_t)
@@ -99,6 +184,17 @@ module g6lc_apu_sys
       .dma_req_o, .dma_rsp_i
     );
   end else if (MemEn) begin : gen_mem
+    assign be_used_v    = used_valid_i;
+    assign be_used_qid  = used_qid_i;
+    assign be_used_ctx  = used_context_i;
+    assign be_used_fence= used_fence_i;
+    assign be_used_len  = used_len_i;
+    assign used_ready_o = be_used_rdy;
+    assign be_notify_clr = '0;
+    assign be_reset_ack  = 1'b0;
+    assign be_stop_ack   = '0;
+    assign be_reset_done = backend_reset_done_i;
+    assign be_idle       = backend_idle_i;
     logic cmd_held;
     logic mem_idle;
     apu_mem_op_e op;
@@ -147,6 +243,17 @@ module g6lc_apu_sys
       .axi_req_o(dma_req_o), .axi_rsp_i(dma_rsp_i)
     );
   end else if (ExecWant) begin : gen_exec
+    assign be_used_v    = used_valid_i;
+    assign be_used_qid  = used_qid_i;
+    assign be_used_ctx  = used_context_i;
+    assign be_used_fence= used_fence_i;
+    assign be_used_len  = used_len_i;
+    assign used_ready_o = be_used_rdy;
+    assign be_notify_clr = '0;
+    assign be_reset_ack  = 1'b0;
+    assign be_stop_ack   = '0;
+    assign be_reset_done = backend_reset_done_i;
+    assign be_idle       = backend_idle_i;
     apu_mem_op_e op;
     apu_exec_job_t job;
     apu_map_cpl_t cpl;
@@ -176,6 +283,17 @@ module g6lc_apu_sys
       .idle_o(exec_idle)
     );
   end else begin : gen_off
+    assign be_used_v    = used_valid_i;
+    assign be_used_qid  = used_qid_i;
+    assign be_used_ctx  = used_context_i;
+    assign be_used_fence= used_fence_i;
+    assign be_used_len  = used_len_i;
+    assign used_ready_o = be_used_rdy;
+    assign be_notify_clr = '0;
+    assign be_reset_ack  = 1'b0;
+    assign be_stop_ack   = '0;
+    assign be_reset_done = backend_reset_done_i;
+    assign be_idle       = backend_idle_i;
     assign svc_idle = 1'b1;
     assign bus_fault_o = 1'b0;
     assign dma_req_o = '0;

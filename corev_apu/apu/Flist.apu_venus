@@ -1,0 +1,52 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// Venus backend leaf for the SoC-facing flist (§6c F1, 3c-ii):
+// the Flist.apu_vgsys closure minus what the Flist.apu_mem chain and
+// the including flist already supply — config_pkg, cf_math_pkg, lzc,
+// rr_arb_tree, axi_pkg, g6lc_apu_pkg, g6lc_apu_bus_pkg,
+// g6lc_apu_cfg_pkg, tc_sram, and fpnew_pkg/classifier/rounding/fma.
+// Include this after Flist.apu_mem and the fpnew_* sources.
++incdir+${CVA6_REPO_DIR}/corev_apu/apu/include
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/clk/rtl/gated_clk_cell.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fdsu/rtl/pa_fdsu_ctrl.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fdsu/rtl/pa_fdsu_ff1.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fdsu/rtl/pa_fdsu_pack_single.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fdsu/rtl/pa_fdsu_prepare.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fdsu/rtl/pa_fdsu_round_single.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fdsu/rtl/pa_fdsu_special.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fdsu/rtl/pa_fdsu_srt_single.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fdsu/rtl/pa_fdsu_top.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fpu/rtl/pa_fpu_dp.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fpu/rtl/pa_fpu_frbus.v
+${CVA6_REPO_DIR}/core/cvfpu/vendor/opene906/E906_RTL_FACTORY/gen_rtl/fpu/rtl/pa_fpu_src_type.v
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_divsqrt_th_32.sv
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_cast_multi.sv
+${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_noncomp.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vn_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_sh_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_shmod.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_shwave.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_shcore.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objtab_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objpay_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdrec_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdexec_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vnfront_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vgpages_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_mp_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vndec.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnrep.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_objtab.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_objpay.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_cmdrec.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_cmdexec.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnfront.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgpages.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgctl.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnpump.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgtop.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_apmem.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vqwalk.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgsys.sv

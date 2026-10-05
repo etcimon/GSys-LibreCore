@@ -10,6 +10,10 @@ ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_pkg.sv
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_classifier.sv
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_rounding.sv
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_fma.sv
+// Venus backend stack (§6c F1): g6lc_apu_sys references g6lc_apu_vgsys
+// in a generate; the leaf lists the Flist.apu_vgsys closure minus the
+// packages the Flist.apu_mem chain and the fpnew_* lines above supply.
+-f ${CVA6_REPO_DIR}/corev_apu/apu/Flist.apu_venus
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_exec.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_exec_bind.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_grant.sv

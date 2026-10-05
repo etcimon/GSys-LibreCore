@@ -20,6 +20,7 @@ module tb_g6lc_apu_vgsys;
   import g6lc_apu_bus_pkg::*;
   import g6lc_apu_mp_pkg::*;
   import g6lc_apu_vn_pkg::*;
+  import g6lc_apu_vnfront_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
@@ -47,25 +48,46 @@ module tb_g6lc_apu_vgsys;
   int errors = 0, checks = 0, cycles = 0, cases = 0;
 
   // ---- DUT signals -----------------------------------------------------
+  // i_ws0 mirrors the same outputs under w_*; the observation wires
+  // mux on ws_arm_q so every task/check is transparent to which
+  // instance is live.
   g6lc_apu_pkg::apu_vq_state_t vq0, vq1;
-  logic [1:0]      qen = '0, notify = '0, nclr;
-  logic            u_v;
-  logic [31:0]     u_qid, u_len;
+  logic [1:0]      qen = '0, notify = '0;
+  logic [1:0]      d_nclr, nclr;
+  logic            d_uv, u_v;
+  logic [31:0]     d_uqid, u_qid, d_ulen, u_len;
   logic            u_rdy = 1'b1;
-  logic [1:0][15:0] last_av;
-  logic            rreq = 0, rdone, idle, bfault;
-  logic [31:0]     fcnt;
+  logic [1:0][15:0] d_lav, last_av;
+  logic            rreq = 0, d_rdone, rdone, d_idle, idle, d_bf, bfault;
+  logic [31:0]     d_fcnt, fcnt;
   logic            w_v;
   logic            w_r;
   apu_cmdexec_work_t w_o;
   logic            w_done = 0;
-  logic            d_done, f_pulse;
-  logic [63:0]     f_id;
-  logic [7:0]      f_ring;
-  logic [Rings-1:0]       r_active;
-  logic [Rings-1:0][31:0] r_status, r_head;
-  logic [Rings-1:0][17:0] r_extra;
-  logic [15:0]     ot_live;
+  logic            d_done, d_fpu, f_pulse;
+  logic [63:0]     d_fid, f_id;
+  logic [7:0]      d_fring, f_ring;
+  logic [Rings-1:0]       d_ra, r_active;
+  logic [Rings-1:0][31:0] d_rs, r_status, d_rh, r_head;
+  logic [Rings-1:0][17:0] d_re, r_extra;
+  logic [15:0]     d_liv, ot_live;
+  assign nclr     = d_nclr | w_nclr;
+  assign u_v      = ws_arm_q ? w_uv   : d_uv;
+  assign u_qid    = ws_arm_q ? w_uqid : d_uqid;
+  assign u_len    = ws_arm_q ? w_ulen : d_ulen;
+  assign last_av  = ws_arm_q ? w_lav  : d_lav;
+  assign rdone    = ws_arm_q ? w_rdone : d_rdone;
+  assign idle     = ws_arm_q ? w_idle : d_idle;
+  assign bfault   = d_bf | w_bf;
+  assign fcnt     = ws_arm_q ? w_fcnt : d_fcnt;
+  assign f_pulse  = d_fpu | w_fp;
+  assign f_id     = ws_arm_q ? w_fid  : d_fid;
+  assign f_ring   = ws_arm_q ? w_fring : d_fring;
+  assign r_active = ws_arm_q ? w_ra : d_ra;
+  assign r_status = ws_arm_q ? w_rs : d_rs;
+  assign r_head   = ws_arm_q ? w_rh : d_rh;
+  assign r_extra  = ws_arm_q ? w_re : d_re;
+  assign ot_live  = ws_arm_q ? w_liv : d_liv;
   apu_dma_axi_req_t  areq;
   apu_dma_axi_resp_t arsp;
   logic [63:0]     ap_bytes = 64'h100000;
@@ -75,29 +97,88 @@ module tb_g6lc_apu_vgsys;
   logic            dot_cv;
   apu_objtab_cpl_t dot_cpl;
 
+  // WorkSink=0 arm flag: gates i_dut inert and muxes the AXI slave onto
+  // i_ws0 for the +vec=neg_worksink0 run only.
+  logic            ws_arm_q = 1'b0;
+  wire vw_cv = ws_arm_q ? i_ws0.gen_on.vw_chain_v
+                        : i_dut.gen_on.vw_chain_v;
+  wire vw_cr = ws_arm_q ? i_ws0.gen_on.vw_chain_rdy
+                        : i_dut.gen_on.vw_chain_rdy;
+  wire [255:0] vgp_free =
+      ws_arm_q ? i_ws0.gen_on.i_top.gen_on.i_vgp.gen_on.free_q
+               : i_dut.gen_on.i_top.gen_on.i_vgp.gen_on.free_q;
+  wire [255:0] pay_free =
+      ws_arm_q ? i_ws0.gen_on.i_top.gen_on.i_pay.gen_on.free_q
+               : i_dut.gen_on.i_top.gen_on.i_pay.gen_on.free_q;
+
   g6lc_apu_vgsys #(.Enable(1'b1), .Rings(Rings)) i_dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .vq0_i(vq0), .vq1_i(vq1),
-    .queue_enable_i(qen), .notify_i(notify), .notify_clear_o(nclr),
-    .used_valid_o(u_v), .used_qid_o(u_qid), .used_len_o(u_len),
-    .used_ready_i(u_rdy), .last_avail_o(last_av),
-    .reset_req_i(rreq), .reset_done_o(rdone),
-    .idle_o(idle), .bus_fault_o(bfault),
+    .queue_enable_i(ws_arm_q ? 2'b00 : qen),
+    .notify_i(ws_arm_q ? 2'b00 : notify), .notify_clear_o(d_nclr),
+    .used_valid_o(d_uv), .used_qid_o(d_uqid), .used_len_o(d_ulen),
+    .used_ready_i(u_rdy), .last_avail_o(d_lav),
+    .reset_req_i(ws_arm_q ? 1'b0 : rreq), .reset_done_o(d_rdone),
+    .idle_o(d_idle), .bus_fault_o(d_bf),
     .dma_req_o(areq), .dma_rsp_i(arsp),
     .guest_base_i(GB), .guest_bytes_i(64'h100000),
     .ap_base_i(AB), .ap_bytes_i(ap_bytes),
-    .fault_cnt_o(fcnt),
+    .fault_cnt_o(d_fcnt),
     .work_valid_o(w_v), .work_ready_i(w_r), .work_o(w_o),
     .work_done_i(w_done), .work_done_pl_i('0),
     .done_o(d_done),
-    .fence_pulse_o(f_pulse), .fence_id_o(f_id), .fence_ring_o(f_ring),
-    .ring_active_o(r_active), .ring_status_o(r_status),
-    .ring_head_o(r_head), .ring_extra_w_o(r_extra),
-    .objtab_live_o(ot_live),
+    .fence_pulse_o(d_fpu), .fence_id_o(d_fid), .fence_ring_o(d_fring),
+    .ring_active_o(d_ra), .ring_status_o(d_rs),
+    .ring_head_o(d_rh), .ring_extra_w_o(d_re),
+    .objtab_live_o(d_liv),
     .dbg_ot_valid_i(1'b0), .dbg_ot_ready_o(dot_r),
     .dbg_ot_req_i(dot_req),
     .dbg_ot_cpl_valid_o(dot_cv), .dbg_ot_cpl_ready_i(1'b0),
     .dbg_ot_cpl_o(dot_cpl));
+
+  // WorkSink=0 twin (§6c F1): same queues, refuses non-dispatch work
+  // UNSUPPORTED -> DEVICE_LOST.  Inert outside the ws0 arm (i_dut owns
+  // the queue inputs; this one still sees them but ws_arm_q muxes the
+  // AXI slave away from i_dut, not onto a second live path).
+  logic [1:0]      w_nclr;
+  logic [1:0][15:0] w_lav;
+  logic            w_uv, w_rdone, w_idle, w_bf, w_wv, w_dn, w_fp;
+  logic [31:0]     w_uqid, w_ulen, w_fcnt;
+  logic [63:0]     w_fid;
+  logic [7:0]      w_fring;
+  logic [Rings-1:0]       w_ra;
+  logic [Rings-1:0][31:0] w_rs, w_rh;
+  logic [Rings-1:0][17:0] w_re;
+  logic [15:0]     w_liv;
+  logic            w_dotr, w_dotcv;
+  apu_dma_axi_req_t w_areq;
+  apu_cmdexec_work_t w_wo;
+  apu_objtab_cpl_t w_dotcpl;
+
+  g6lc_apu_vgsys #(.Enable(1'b1), .Rings(Rings), .WorkSink(1'b0)) i_ws0 (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .vq0_i(vq0), .vq1_i(vq1),
+    .queue_enable_i(ws_arm_q ? qen : 2'b00),
+    .notify_i(ws_arm_q ? notify : 2'b00), .notify_clear_o(w_nclr),
+    .used_valid_o(w_uv), .used_qid_o(w_uqid), .used_len_o(w_ulen),
+    .used_ready_i(u_rdy), .last_avail_o(w_lav),
+    .reset_req_i(ws_arm_q ? rreq : 1'b0), .reset_done_o(w_rdone),
+    .idle_o(w_idle), .bus_fault_o(w_bf),
+    .dma_req_o(w_areq), .dma_rsp_i(arsp),
+    .guest_base_i(GB), .guest_bytes_i(64'h100000),
+    .ap_base_i(AB), .ap_bytes_i(ap_bytes),
+    .fault_cnt_o(w_fcnt),
+    .work_valid_o(w_wv), .work_ready_i(1'b0), .work_o(w_wo),
+    .work_done_i(1'b0), .work_done_pl_i('0),
+    .done_o(w_dn),
+    .fence_pulse_o(w_fp), .fence_id_o(w_fid), .fence_ring_o(w_fring),
+    .ring_active_o(w_ra), .ring_status_o(w_rs),
+    .ring_head_o(w_rh), .ring_extra_w_o(w_re),
+    .objtab_live_o(w_liv),
+    .dbg_ot_valid_i(1'b0), .dbg_ot_ready_o(w_dotr),
+    .dbg_ot_req_i(dot_req),
+    .dbg_ot_cpl_valid_o(w_dotcv), .dbg_ot_cpl_ready_i(1'b0),
+    .dbg_ot_cpl_o(w_dotcpl));
 
   // Enable=0 fixture: all outputs quiet, idle_o high
   logic [1:0]      o_nclr;
@@ -218,6 +299,8 @@ module tb_g6lc_apu_vgsys;
   // and r_valid — lets a queue drop land while an R is in flight
   int unsigned axi_rd_dly = 0;
   int unsigned rd_wait    = 0;
+  // slave request port mux: i_ws0 owns the bus only during the ws0 arm
+  wire apu_dma_axi_req_t sm_areq = ws_arm_q ? w_areq : areq;
 
   function automatic logic [7:0] rd8(input logic [63:0] a);
     logic [63:0] o;
@@ -263,16 +346,16 @@ module tb_g6lc_apu_vgsys;
       aw_s <= 0; w_s <= 0; b_vld <= 0; waw <= '0; ww <= '0;
       wr_pend <= 0; rd_pend <= 0; rd_wait <= 0;
     end else begin
-      if (areq.ar_valid && arsp.ar_ready) begin
-        win_check(areq.ar.addr, "AR");
+      if (sm_areq.ar_valid && arsp.ar_ready) begin
+        win_check(sm_areq.ar.addr, "AR");
         if (rd_pend || wr_pend)
           $fatal(1, "AXI: AR accepted while a transaction is pending");
         rd_pend <= 1;
         ar_n++;
         r_act  <= 1;
         rd_wait <= axi_rd_dly;
-        r_addr <= areq.ar.addr;
-        if (rdone) post_rst_axi++;
+        r_addr <= sm_areq.ar.addr;
+        if (rdone || w_rdone) post_rst_axi++;
       end
       if (r_act && !r_vld && rd_wait != 0) begin
         rd_wait <= rd_wait - 1;
@@ -283,33 +366,33 @@ module tb_g6lc_apu_vgsys;
         for (int b = 0; b < 8; b++)
           rch.data[8*b +: 8] <= rd8((r_addr & ~64'h7) + 64'(b));
       end
-      if (r_vld && areq.r_ready) begin
+      if (r_vld && sm_areq.r_ready) begin
         r_n++;
         rd_pend <= 0;
         r_vld <= 0; r_act <= 0;
       end
-      if (areq.aw_valid && arsp.aw_ready) begin
-        win_check(areq.aw.addr, "AW");
+      if (sm_areq.aw_valid && arsp.aw_ready) begin
+        win_check(sm_areq.aw.addr, "AW");
         if (rd_pend || aw_s)
           $fatal(1, "AXI: second outstanding transaction (AW)");
         wr_pend <= 1;
         aw_n++;
-        aw_s <= 1; waw <= areq.aw;
-        if (rdone) post_rst_axi++;
+        aw_s <= 1; waw <= sm_areq.aw;
+        if (rdone || w_rdone) post_rst_axi++;
       end
-      if (areq.w_valid && arsp.w_ready) begin
+      if (sm_areq.w_valid && arsp.w_ready) begin
         if (rd_pend || w_s)
           $fatal(1, "AXI: second outstanding transaction (W)");
         wr_pend <= 1;
         w_n++;
-        w_s <= 1; ww <= areq.w;
+        w_s <= 1; ww <= sm_areq.w;
       end
       if (aw_s && w_s && !b_vld) begin
         for (int b = 0; b < 8; b++)
           if (ww.strb[b]) wr8(waw.addr + 64'(b), ww.data[8*b +: 8]);
         b_vld <= 1;
       end
-      if (b_vld && areq.b_ready) begin
+      if (b_vld && sm_areq.b_ready) begin
         wr_pend <= 0;
         b_vld <= 0; aw_s <= 0; w_s <= 0;
         b_log[b_n % 4096] <= waw.addr;
@@ -380,7 +463,7 @@ module tb_g6lc_apu_vgsys;
   // chain hand-off observation (neg_cursor asserts this stays 0 for q1)
   logic chain_seen = 0;
   always @(posedge clk)
-    if (i_dut.gen_on.vw_chain_v && i_dut.gen_on.vw_chain_rdy)
+    if (vw_cv && vw_cr)
       chain_seen <= 1'b1;
 
   always #5 clk = ~clk;
@@ -747,11 +830,10 @@ module tb_g6lc_apu_vgsys;
                               ot_live, expm[ep + 1]));
               ep += 8;
               check(rec_kind() == 11, "EK_PAGES kind");
-              check($countones(i_dut.gen_on.i_top.gen_on.i_vgp.gen_on.free_q)
+              check($countones(vgp_free)
                     == int'(expm[ep + 1]),
                     $sformatf("CK_PAGES got=%0d exp=%0d",
-                              $countones(
-                                i_dut.gen_on.i_top.gen_on.i_vgp.gen_on.free_q),
+                              $countones(vgp_free),
                               expm[ep + 1]));
               ep += 8;
             end
@@ -805,7 +887,7 @@ module tb_g6lc_apu_vgsys;
       endcase
     end
     // teardown
-    check(i_dut.gen_on.i_top.gen_on.i_pay.gen_on.free_q === '0,
+    check(pay_free === '0,
           "objpay chunks drained");
   endtask
 
@@ -1173,6 +1255,48 @@ module tb_g6lc_apu_vgsys;
     check_axi_bal();
   endtask
 
+  // WorkSink=0 (the §6c-ii SoC seam): i_ws0 owns the queues and the
+  // AXI slave.  A session whose submit carries a non-dispatch record
+  // gets refused UNSUPPORTED one cycle after accept -> cmdexec marks
+  // the submission DEVICE_LOST (flost_q plus the 0xFFFF_FFFC vk
+  // result visible in the guest response), the chain still publishes,
+  // nothing hangs, and the following session passes.
+  task automatic neg_worksink0();
+    int unsigned pubs0;
+    pubs0 = u_count;
+    // worksink variant: the submit's CB records a vkCmdDispatchIndirect
+    // — a non-dispatch CLS_WORK record the WorkSink=0 backend refuses.
+    // The tape's own expectations are truthful: the wait-class replies
+    // expect the 0xFFFF_FFC DEVICE_LOST result (CK_REPLY).
+    $readmemh("vn_vectors/ue_ws0_bufcopy_1.hex", tape, 0);
+    $readmemh("vn_vectors/ue_ws0_bufcopy_1.exp", expm, 0);
+    tp = 0; ep = 0;
+    play_tape();
+    repeat (200) @(posedge clk);
+    check(u_count > pubs0, "worksink0: chains still publish");
+    check(|i_ws0.gen_on.i_top.gen_on.i_exec.gen_on.flost_q,
+          "worksink0: cmdexec fence lost (DEVICE_LOST)");
+    check_axi_bal();
+    // next session passes: after DEVICE_LOST the driver reinitialises
+    // — a backend reset clears the fence-lost state (it is in the
+    // engine reset domain), then a fresh transport session replays.
+    rreq = 1'b1;
+    begin
+      int unsigned tr = 0;
+      while (!w_rdone && tr < 100_000) begin @(posedge clk); tr++; end
+      check(w_rdone, "worksink0: reset_done after lost session");
+    end
+    rreq = 1'b0;
+    repeat (8) @(posedge clk);
+    vq_init(64'h100000);
+    $readmemh("vn_vectors/ue_sm5_transport.hex", tape, 0);
+    $readmemh("vn_vectors/ue_sm5_transport.exp", expm, 0);
+    tp = 0; ep = 0;
+    play_tape();
+    check_axi_bal();
+    cases++;
+  endtask
+
   // --------------------------------------------------------------------------
   initial begin
     string vname;
@@ -1212,6 +1336,10 @@ module tb_g6lc_apu_vgsys;
     end else if (vname == "neg_resp_oob") begin
       vq_init(64'h100000);
       neg_resp_oob();
+    end else if (vname == "neg_worksink0") begin
+      ws_arm_q = 1'b1;             // i_ws0 owns queues + AXI slave
+      vq_init(64'h100000);
+      neg_worksink0();
     end else begin
       vq_init(64'h100000);
       $readmemh({"vn_vectors/", vname, ".hex"}, tape, 0);

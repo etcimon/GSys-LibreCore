@@ -29,7 +29,7 @@ vver="$("$VERILATOR" --version | grep -o '[0-9][0-9.]*' | head -1)"
 if awk -v v="$vver" 'BEGIN{split(v,a,"."); exit !(a[1]>5||(a[1]==5&&a[2]>=16))}'; then
   VLTS+=("$ROOT/verif/tb/apu/apu_vn.vlt")
 fi
-if ! "$VERILATOR" --binary --timing --assert -Wall \
+if ! "$VERILATOR" --binary --timing --assert -Wall -j "$(nproc)" \
   -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
   -Wno-BLKSEQ \
   -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
@@ -61,7 +61,7 @@ ue_cneg_pgfull_1 ue_cneg_badmem_1 ue_cneg_bindoob_1 \
 ue_cneg_descoob_1"
 NEGATIVES="neg_next_loop neg_desc_oob neg_buf_oob neg_aperture \
 neg_used_oob neg_reset neg_cursor neg_batch neg_flush neg_qdrop \
-neg_resp_oob"
+neg_resp_oob neg_worksink0"
 
 cfail=0
 : > "$OUT/sessions.log"

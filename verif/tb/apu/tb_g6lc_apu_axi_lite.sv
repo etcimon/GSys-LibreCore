@@ -51,7 +51,9 @@ module g6lc_apu_axi_fixture
   g6lc_apu_axi_lite #(.ApuCfg(test_apu_cfg()), .CoreCfg(test_core_cfg())) i_dut (
     .*,
     .mbox_req_o(mbox_req),
-    .mbox_rsp_i(mbox_rsp)
+    .mbox_rsp_i(mbox_rsp),
+    .be_notify_pending_o(), .be_notify_clear_i('0),
+    .be_reset_ack_i(1'b0), .be_queue_stop_ack_i('0)
   );
 endmodule
 

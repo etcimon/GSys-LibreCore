@@ -47,7 +47,15 @@ module g6lc_apu_axi_lite
   input  logic [31:0] guest_epoch_i,
   input  logic ctrl_hold_i,
   input  logic [31:0] ctrl_epoch_i,
-  output logic [31:0] epoch_o
+  output logic [31:0] epoch_o,
+  // §6c F1 Venus backend seam. Under ApuCfg.VenusEn the control block is
+  // not elaborated and g6lc_apu_sys carries these handshakes straight to
+  // g6lc_apu_vgsys: doorbell levels out, clears and reset/queue-stop
+  // acknowledgments back in. Tied off for the firmware backends.
+  output logic [APU_NUM_QUEUES-1:0] be_notify_pending_o,
+  input  logic [APU_NUM_QUEUES-1:0] be_notify_clear_i,
+  input  logic                      be_reset_ack_i,
+  input  logic [APU_NUM_QUEUES-1:0] be_queue_stop_ack_i
 );
   apu_tagged_axi_req_t tagged_req [2];
   apu_tagged_axi_resp_t tagged_rsp [2];
@@ -59,7 +67,8 @@ module g6lc_apu_axi_lite
   `ifndef SYNTHESIS
   initial begin
     assert (apu_soc_legal(ApuCfg, CoreCfg)) else $fatal(1, "APU AXI: illegal SoC configuration");
-    assert (!ApuCfg.Enable || ApuCfg.FirmwareHart != APU_FW_HART_UNASSIGNED)
+    assert (!ApuCfg.Enable || ApuCfg.VenusEn ||
+            ApuCfg.FirmwareHart != APU_FW_HART_UNASSIGNED)
       else $fatal(1, "APU AXI: protected service hart must be assigned");
     assert ($bits(guest_req_i.aw.addr) == 64 && $bits(guest_req_i.w.data) == 32)
       else $fatal(1, "APU AXI: requires 64-bit address / 32-bit data AXI-Lite");
@@ -102,7 +111,8 @@ module g6lc_apu_axi_lite
 
   if (!ApuCfg.Enable) begin : gen_off
     logic unused_mbox;
-    assign unused_mbox = |mbox_rsp_i;
+    assign unused_mbox = |mbox_rsp_i | (|be_notify_clear_i) | be_reset_ack_i |
+                         (|be_queue_stop_ack_i);
     assign epoch = '0;
     for (genvar p = 0; p < 2; p++) begin : gen_resp
       assign reg_rsp[p] = '{rdata: '0, error: 1'b0, ready: reg_req[p].valid};
@@ -117,6 +127,7 @@ module g6lc_apu_axi_lite
     assign backend_queue_stop_req_o = '0;
     assign used_ready_o = 1'b0;
     assign mbox_req_o = '0;
+    assign be_notify_pending_o = '0;
   end else begin : gen_on
     logic [31:0] epoch_q;
     logic epoch_exhausted_q, epoch_event;
@@ -169,7 +180,8 @@ module g6lc_apu_axi_lite
       control_reg_req.wstrb = reg_req[1].wstrb;
       control_reg_req.valid = reg_req[1].valid && control_allowed && !mbox_sel;
       mbox_req_o = control_reg_req;
-      mbox_req_o.valid = reg_req[1].valid && control_allowed && mbox_sel;
+      mbox_req_o.valid = !ApuCfg.VenusEn && reg_req[1].valid &&
+                         control_allowed && mbox_sel;
       reg_rsp[0] = '{rdata: '0, error: 1'b1, ready: reg_req[0].valid};
       if (guest_hit) reg_rsp[0] = '{rdata: guest_data, error: guest_error, ready: guest_valid};
       reg_rsp[1] = '{rdata: '0, error: 1'b1, ready: reg_req[1].valid};
@@ -193,15 +205,39 @@ module g6lc_apu_axi_lite
       .last_used_context_o(last_context), .last_used_fence_o(last_fence),
       .last_used_len_o(last_len), .cfg_display_event_i, .debug_status_o(device_status)
     );
-    g6lc_apu_control i_control (
-      .clk_i, .rst_ni, .testmode_i, .req_i(control_reg_req), .rsp_o(control_reg_rsp),
-      .epoch_i(epoch), .device_status_i(device_status), .vq_state_i(vq_state_o),
-      .queue_enable_i(queue_enable_o), .notify_pending_i(notify_pending),
-      .notify_clear_o(notify_clear), .reset_req_i(backend_reset_req_o),
-      .reset_ack_o(reset_ack), .queue_stop_req_i(backend_queue_stop_req_o),
-      .queue_stop_ack_o(stop_ack), .backend_reset_done_i, .backend_idle_i,
-      .last_used_qid_i(last_qid), .last_used_context_i(last_context),
-      .last_used_fence_i(last_fence), .last_used_len_i(last_len), .irq_o(fw_irq)
-    );
+    if (ApuCfg.VenusEn) begin : gen_venus
+      // F1: no g6lc_apu_control — the Venus hardware backend owns the
+      // notify/reset/queue-stop seam directly. The control window and
+      // the mailbox window answer SLVERR (mbox_req_o.valid is gated
+      // off above), the firmware IRQ stays low.
+      assign notify_clear = be_notify_clear_i;
+      assign reset_ack    = be_reset_ack_i;
+      assign stop_ack     = be_queue_stop_ack_i;
+      assign control_reg_rsp = '{rdata: '0, error: 1'b1,
+                                 ready: control_reg_req.valid};
+      assign fw_irq = 1'b0;
+      assign be_notify_pending_o = notify_pending;
+      logic unused_venus;
+      assign unused_venus = (|control_reg_req.addr) | control_reg_req.write |
+                            (|control_reg_req.wdata) | (|control_reg_req.wstrb) |
+                            (|device_status) | (|last_qid) | (|last_context) |
+                            (|last_len) | (|last_fence) | reset_pulse |
+                            backend_reset_done_i | (|backend_idle_i);
+    end else begin : gen_ctl
+      assign be_notify_pending_o = '0;
+      logic unused_be;
+      assign unused_be = (|be_notify_clear_i) | be_reset_ack_i |
+                         (|be_queue_stop_ack_i);
+      g6lc_apu_control i_control (
+        .clk_i, .rst_ni, .testmode_i, .req_i(control_reg_req), .rsp_o(control_reg_rsp),
+        .epoch_i(epoch), .device_status_i(device_status), .vq_state_i(vq_state_o),
+        .queue_enable_i(queue_enable_o), .notify_pending_i(notify_pending),
+        .notify_clear_o(notify_clear), .reset_req_i(backend_reset_req_o),
+        .reset_ack_o(reset_ack), .queue_stop_req_i(backend_queue_stop_req_o),
+        .queue_stop_ack_o(stop_ack), .backend_reset_done_i, .backend_idle_i,
+        .last_used_qid_i(last_qid), .last_used_context_i(last_context),
+        .last_used_fence_i(last_fence), .last_used_len_i(last_len), .irq_o(fw_irq)
+      );
+    end
   end
 endmodule
