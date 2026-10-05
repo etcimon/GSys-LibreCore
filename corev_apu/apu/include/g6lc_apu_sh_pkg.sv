@@ -144,6 +144,27 @@ package g6lc_apu_sh_pkg;
     logic [31:0] work_id;
   } apu_sh_done_t;
 
+  // ---- slot manager (§7b/5a-ii) --------------------------------------
+  // Module/pipeline slot ownership.  ALLOC returns a free slot with
+  // users=1 (none free -> ok=0); REF increments users (ok=0 when the
+  // slot is dead); UNREF decrements (ok=0 on underflow) and retires
+  // the slot internally when users reaches 0.
+  typedef enum logic [1:0] {
+    APU_SH_SM_ALLOC = 2'd0,
+    APU_SH_SM_REF   = 2'd1,
+    APU_SH_SM_UNREF = 2'd2
+  } apu_sh_sm_op_e;
+
+  typedef struct packed {
+    apu_sh_sm_op_e op;
+    logic [2:0]    slot;    // REF/UNREF target; unused for ALLOC
+  } apu_sh_sm_req_t;
+
+  typedef struct packed {
+    logic          ok;
+    logic [2:0]    slot;    // ALLOC result
+  } apu_sh_sm_cpl_t;
+
   // ---- shmod read port table select ----------------------------------
   typedef enum logic [3:0] {
     APU_SH_TBL_PROG   = 4'd0,   // program words

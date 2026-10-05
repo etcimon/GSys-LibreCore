@@ -4,7 +4,9 @@
 ${CVA6_REPO_DIR}/core/include/config_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/include/g6lc_apu_cfg_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vn_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_sh_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vgpages_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objtab_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objpay_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdrec_pkg.sv

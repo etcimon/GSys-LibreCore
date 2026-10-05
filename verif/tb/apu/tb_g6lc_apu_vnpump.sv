@@ -33,6 +33,8 @@ module tb_g6lc_apu_vnpump;
   import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
+  import g6lc_apu_vgpages_pkg::*;
+  import g6lc_apu_sh_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
 
   localparam int unsigned GMW   = 32'h40000;   // 1 MiB guest RAM
@@ -121,6 +123,15 @@ module tb_g6lc_apu_vnpump;
     .cr_pay_ready_i(1'b0),
     .op_req_valid_o(op_v), .op_req_ready_i(1'b0), .op_req_o(op_req),
     .op_cpl_valid_i(1'b0), .op_cpl_ready_o(), .op_cpl_i('0),
+    // §7b/5a-ii pass-throughs: no shader-module/pipeline or memory
+    // commands in this tape, so the backends stay idle.
+    .sm_req_o(), .sm_req_pl_o(),
+    .sm_cpl_i(1'b0), .sm_cpl_pl_i('0),
+    .sh_wr_en_o(), .sh_wr_slot_o(), .sh_wr_addr_o(), .sh_wr_data_o(),
+    .sh_commit_o(), .sh_commit_pl_o(),
+    .sh_c_done_i(1'b0), .sh_c_done_pl_i('0),
+    .pg_req_valid_o(), .pg_req_ready_i(1'b0), .pg_req_o(),
+    .pg_cpl_valid_i(1'b0), .pg_cpl_ready_o(), .pg_cpl_i('0),
     .ex_submit_valid_o(ex_sv), .ex_submit_ready_i(1'b1),
     .ex_submit_o(ex_s),
     .ex_done_seq_i(16'h0), .ex_fence_signaled_i(16'h0),
@@ -134,6 +145,10 @@ module tb_g6lc_apu_vnpump;
   logic        z_apre, z_apwe, z_gmre, z_otv, z_otcr;
   logic        z_crv, z_crcr, z_exsv;
   logic        z_cpayv, z_opv;
+  logic        z_smv, z_shw, z_shc, z_pgv, z_pgcr;
+  apu_sh_sm_req_t   z_smpl;
+  apu_sh_commit_t   z_shpl;
+  apu_vgpages_req_t z_pgreq;
   logic [3:0]       z_ract;
   logic [3:0][31:0] z_rstat, z_rhead;
   g6lc_apu_vnpump #(.Enable(1'b0), .Rings(4)) dut_off (
@@ -153,6 +168,13 @@ module tb_g6lc_apu_vnpump;
     .cr_pay_ready_i(1'b0),
     .op_req_valid_o(z_opv), .op_req_ready_i(1'b0), .op_req_o(),
     .op_cpl_valid_i(1'b0), .op_cpl_ready_o(), .op_cpl_i('0),
+    .sm_req_o(z_smv), .sm_req_pl_o(z_smpl),
+    .sm_cpl_i(1'b0), .sm_cpl_pl_i('0),
+    .sh_wr_en_o(z_shw), .sh_wr_slot_o(), .sh_wr_addr_o(),
+    .sh_wr_data_o(), .sh_commit_o(z_shc), .sh_commit_pl_o(z_shpl),
+    .sh_c_done_i(1'b0), .sh_c_done_pl_i('0),
+    .pg_req_valid_o(z_pgv), .pg_req_ready_i(1'b0), .pg_req_o(z_pgreq),
+    .pg_cpl_valid_i(1'b0), .pg_cpl_ready_o(z_pgcr), .pg_cpl_i('0),
     .ex_submit_valid_o(z_exsv), .ex_submit_ready_i(1'b1),
     .ex_submit_o(),
     .ex_done_seq_i(16'h0), .ex_fence_signaled_i(16'h0),
@@ -454,7 +476,9 @@ module tb_g6lc_apu_vnpump;
     repeat (4) @(posedge clk);
     check(!z_rdy && !z_done && !z_fault && !z_busy && !z_apre &&
           !z_apwe && !z_gmre && !z_otv && !z_crv && !z_exsv &&
-          !z_cpayv && !z_opv,
+          !z_cpayv && !z_opv && !z_smv && !z_shw && !z_shc &&
+          !z_pgv && !z_pgcr && z_smpl == '0 && z_shpl == '0 &&
+          z_pgreq == '0,
           "Enable=0 quiet");
 
     // ---- seed the four fixture blobs ----------------------------------

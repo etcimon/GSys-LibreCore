@@ -268,6 +268,15 @@ module tb_g6lc_apu_objtab;
     void'(m_alloc(64'hB000_0000_0000_0002, 6'd5, 64'h0, 8'd2, slot, gen));
     xpect("stale GEN", mkr(APU_OBJTAB_OP_LOOKUP, h1, 6'd5, 0, 0, 0, 0,
                             0, 0, 0), APU_OBJTAB_GEN);
+    // READSLOT: by slot, no gen check; returns the live entry
+    op(mkr(APU_OBJTAB_OP_READSLOT, 64'(slot), 6'd0, 0, 0, 0, 0, 0, 0, 0),
+       c);
+    check("readslot live", c.status == APU_OBJTAB_OK &&
+                           int'(c.handle[15:0]) == slot &&
+                           int'(c.handle[31:16]) == gen);
+    op(mkr(APU_OBJTAB_OP_READSLOT, 64'(Slots + 3), 6'd0, 0, 0, 0, 0, 0,
+           0, 0), c);
+    check("readslot range", c.status == APU_OBJTAB_MISS);
     cases++;
 
     // ---- PIN / UNPIN ----
@@ -285,6 +294,8 @@ module tb_g6lc_apu_objtab;
     me_live[slot] = 0;
     void'(m_probe(id, hb, rb));
     md_t[hb] = 1;
+    xpect("readslot dead", mkr(APU_OBJTAB_OP_READSLOT, 64'(slot), 6'd0,
+                               0, 0, 0, 0, 0, 0, 0), APU_OBJTAB_MISS);
     cases++;
 
     // ---- parent / child ----

@@ -68,6 +68,11 @@ module g6lc_apu_vnrep
   input  logic [31:0] result_i,
   input  logic [64*32-1:0] exec_w_i,
   input  logic [6:0]  exec_n_i,
+  // §7b/5a-ii: per-element null-echo mask for the RBLOB out-id echo
+  // of a multi-create (vkCreateComputePipelines).  Element i masked
+  // -> its two id payload words echo 0 (VK_NULL_HANDLE).  Driven by
+  // vnfront; zero for every other command.
+  input  logic [31:0] rep_null_mask_i,
   input  logic [15:0] rep_base_i,
   input  logic [15:0] rep_len_i,
   input  logic [15:0] cs_base_i,   // command base: blob.off is
@@ -99,6 +104,7 @@ module g6lc_apu_vnrep
     assign unused_op = op_i;
     assign unused = clk_i | rst_ni | start_i | cs_rdata_i[0] |
                     (|result_i) | (|exec_n_i) | (|exec_w_i) |
+                    (|rep_null_mask_i) |
                     (|rep_base_i) | (|rep_len_i) | (|cs_rdata_i) |
                     (|cs_base_i);
   end else begin : gen_on
@@ -146,6 +152,9 @@ module g6lc_apu_vnrep
     logic [7:0]    aux_q;         // RPTR skip / REXBUF element bytes
     logic [15:0]   blob_off_q;    // CS read address cursor
     logic          blob_first_q;  // StBlob read-ahead marker
+    logic [15:0]   blob_em_q;     // emitted-word index in this blob
+    logic [4:0]    blob_el;       // blob element index (emitted word/2)
+                                  // (0 = count hi; payload starts at 1)
     logic [15:0]   ret_stk_q [8];
     logic [3:0]    ret_sp_q;
     logic          fault_q;
@@ -158,6 +167,7 @@ module g6lc_apu_vnrep
     assign rom_w = 32'(mpc_q) < APU_VN_REPLY_ROM_WORDS
                    ? APU_VN_REPLY_ROM[
                        mpc_q[APU_VN_REPLY_MPC_AW-1:0]] : 48'h0;
+    assign blob_el = 5'((blob_em_q >> 1) - 16'd1);
     logic [7:0]    rom_op;
     logic [7:0]    rom_a;
     logic [31:0]   rom_b;
@@ -288,7 +298,12 @@ module g6lc_apu_vnrep
           cs_re_o     = blob_first_q || cnt_q != 16'h0;
           cs_addr_o   = blob_off_q;
           rep_we_o    = ~blob_first_q && wpos_ok;
-          rep_wdata_o = cs_rdata_i;
+          // payload words (emission index >= 2, after the u64 count
+          // pair) echo VK_NULL_HANDLE for elements marked in
+          // rep_null_mask_i: element i's two id words emit at 2+2i
+          rep_wdata_o = (blob_em_q >= 16'd2 &&
+                         rep_null_mask_i[blob_el])
+                        ? 32'h0 : cs_rdata_i;
         end
         StChainScan: begin
           // u64(1) presence lo word on a table match
@@ -332,6 +347,7 @@ module g6lc_apu_vnrep
         aux_q        <= '0;
         blob_off_q   <= '0;
         blob_first_q <= 1'b0;
+        blob_em_q    <= '0;
         ret_stk_q    <= '{default: '0};
         ret_sp_q     <= '0;
         fault_q      <= 1'b0;
@@ -456,6 +472,7 @@ module g6lc_apu_vnrep
                   cnt_q        <= 16'(op_q.blob[rom_a[0]].words)
                                   + 16'd1;
                   blob_first_q <= 1'b1;
+                  blob_em_q    <= '0;
                   state_q      <= StBlob;
                 end
                 R_REXBUF: begin
@@ -598,6 +615,7 @@ module g6lc_apu_vnrep
             end else begin
               wpos_q     <= wpos_q + 16'd1;
               blob_off_q <= blob_off_q + 16'd1;
+              blob_em_q  <= blob_em_q + 16'd1;
               if (cnt_q == 16'h0) begin
                 mpc_q   <= mpc_q + 16'd1;
                 state_q <= StOp;
@@ -685,6 +703,7 @@ module g6lc_apu_vnrep_fixture
   input  logic [31:0] result_i,
   input  logic [64*32-1:0] exec_w_i,
   input  logic [6:0]  exec_n_i,
+  input  logic [31:0] rep_null_mask_i,
   input  logic [15:0] rep_base_i,
   input  logic [15:0] rep_len_i,
   input  logic [15:0] cs_base_i,

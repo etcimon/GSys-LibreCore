@@ -47,6 +47,8 @@ module tb_g6lc_apu_vnfront;
   import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
+  import g6lc_apu_sh_pkg::*;
+  import g6lc_apu_vgpages_pkg::*;
 
   parameter int unsigned ObjPayWords = 16384;
 
@@ -89,6 +91,22 @@ module tb_g6lc_apu_vnfront;
   logic               fop_v, fop_r, fop_cv;
   apu_objpay_req_t    fop_req;
   apu_objpay_cpl_t    fop_cpl;
+  // §7b/5a-ii: front ShaderCore staging + slot manager + vgpages
+  logic               fsm_req;
+  apu_sh_sm_req_t     fsm_pl;
+  apu_sh_sm_cpl_t     sm_cpl_pl;
+  logic               sm_cpl;
+  logic               fsh_wr;
+  logic [2:0]         fsh_slot;
+  logic [15:0]        fsh_addr;
+  logic [31:0]        fsh_data;
+  logic               fsh_commit;
+  apu_sh_commit_t     fsh_cpl;
+  logic               sh_c_done;
+  apu_sh_cpl_t        sh_c_pl;
+  logic               fpg_v, fpg_r, fpg_cv;
+  apu_vgpages_req_t   fpg_req;
+  apu_vgpages_cpl_t   fpg_cpl;
   // Enable=0 fixture
   logic               o_csre, o_repwe, o_otv, o_crcv, o_subv, o_busy,
                       o_done;
@@ -102,6 +120,10 @@ module tb_g6lc_apu_vnfront;
   logic               o_payv, o_opv;
   logic [31:0]        o_payd;
   apu_objpay_req_t    o_opreq;
+  logic               o_smreq, o_shwr, o_shcom, o_pgv;
+  apu_sh_sm_req_t     o_smpl;
+  apu_sh_commit_t     o_shcpl;
+  apu_vgpages_req_t   o_pgreq;
 
   g6lc_apu_vnfront #(.Enable(1'b1), .Fences(Fences), .CbBufs(16))
   i_front (
@@ -122,6 +144,16 @@ module tb_g6lc_apu_vnfront;
     .op_req_o(fop_req),
     .op_cpl_valid_i(fop_cv), .op_cpl_ready_o(),
     .op_cpl_i(fop_cpl),
+    .sm_req_o(fsm_req), .sm_req_pl_o(fsm_pl),
+    .sm_cpl_i(sm_cpl), .sm_cpl_pl_i(sm_cpl_pl),
+    .sh_wr_en_o(fsh_wr), .sh_wr_slot_o(fsh_slot),
+    .sh_wr_addr_o(fsh_addr), .sh_wr_data_o(fsh_data),
+    .sh_commit_o(fsh_commit), .sh_commit_pl_o(fsh_cpl),
+    .sh_c_done_i(sh_c_done), .sh_c_done_pl_i(sh_c_pl),
+    .pg_req_valid_o(fpg_v), .pg_req_ready_i(fpg_r),
+    .pg_req_o(fpg_req),
+    .pg_cpl_valid_i(fpg_cv), .pg_cpl_ready_o(),
+    .pg_cpl_i(fpg_cpl),
     .ex_submit_valid_o(fsub_v), .ex_submit_ready_i(fsub_r),
     .ex_submit_o(fsub),
     .ex_done_seq_i(f_dseq), .ex_fence_signaled_i(f_fsig),
@@ -145,6 +177,15 @@ module tb_g6lc_apu_vnfront;
     .op_req_valid_o(o_opv), .op_req_ready_i(1'b0),
     .op_req_o(o_opreq),
     .op_cpl_valid_i(1'b0), .op_cpl_ready_o(), .op_cpl_i('0),
+    .sm_req_o(o_smreq), .sm_req_pl_o(o_smpl),
+    .sm_cpl_i(1'b0), .sm_cpl_pl_i('0),
+    .sh_wr_en_o(o_shwr), .sh_wr_slot_o(), .sh_wr_addr_o(),
+    .sh_wr_data_o(),
+    .sh_commit_o(o_shcom), .sh_commit_pl_o(o_shcpl),
+    .sh_c_done_i(1'b0), .sh_c_done_pl_i('0),
+    .pg_req_valid_o(o_pgv), .pg_req_ready_i(1'b0),
+    .pg_req_o(o_pgreq),
+    .pg_cpl_valid_i(1'b0), .pg_cpl_ready_o(), .pg_cpl_i('0),
     .ex_submit_valid_o(o_subv), .ex_submit_ready_i(1'b0),
     .ex_submit_o(o_sub),
     .ex_done_seq_i('0), .ex_fence_signaled_i('0), .ex_fence_lost_i('0),
@@ -157,9 +198,17 @@ module tb_g6lc_apu_vnfront;
   apu_objtab_req_t    xot_req;
   logic               xcr_v, xcr_r, xcr_cv;
   apu_cmdrec_req_t    xcr_req;
-  logic               w_v, w_r;
+  logic               xop_v, xop_r, xop_cv;
+  apu_objpay_req_t    xop_req;
+  apu_objpay_cpl_t    xop_cpl;
+  logic               w_v, w_r, w_v_sh;
   apu_cmdexec_work_t  w_o;
-  logic               w_done = 1'b0;
+  logic               w_done;
+  apu_sh_done_t       w_done_pl;
+  logic [2:0]         xdisp_slot;
+  logic [16*113-1:0]  xbinds;
+  logic [5:0]         xpush_n;
+  logic [1023:0]      xpush;
 
   g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences)) i_exec (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
@@ -168,8 +217,12 @@ module tb_g6lc_apu_vnfront;
     .cr_cpl_valid_i(xcr_cv), .cr_cpl_ready_o(), .cr_cpl_i(cr_cpl),
     .ot_req_valid_o(xot_v), .ot_req_ready_i(xot_r), .ot_req_o(xot_req),
     .ot_cpl_valid_i(xot_cv), .ot_cpl_ready_o(), .ot_cpl_i(ot_cpl),
+    .op_req_valid_o(xop_v), .op_req_ready_i(xop_r), .op_req_o(xop_req),
+    .op_cpl_valid_i(xop_cv), .op_cpl_ready_o(), .op_cpl_i(xop_cpl),
     .work_valid_o(w_v), .work_ready_i(w_r), .work_o(w_o),
-    .work_done_i(w_done),
+    .work_done_i(w_done), .work_done_pl_i(w_done_pl),
+    .disp_slot_o(xdisp_slot), .binds_o(xbinds),
+    .push_n_o(xpush_n), .push_o(xpush),
     .done_seq_o(f_dseq),
     .fence_signaled_o(f_fsig), .fence_lost_o(f_flost),
     .fence_clr_i(f_fclr));
@@ -236,11 +289,76 @@ module tb_g6lc_apu_vnfront;
     .pay_valid_i(fpay_v), .pay_data_i(fpay_d),
     .pay_ready_o(fpay_r));
 
-  // objpay: single master (the front)
+  // §7b/5a-ii: objpay shared front(0)/exec(1), same grant scheme
+  logic               op_vld, op_rdy, op_cvld;
+  apu_objpay_req_t    op_req;
+  apu_objpay_cpl_t    op_cpl;
+  logic               op_busy = 1'b0, op_own = 1'b0;
+  wire   op_take = op_vld && op_rdy;
+  wire   op_sel  = op_busy ? op_own : ~fop_v;
+  assign op_vld = op_sel ? xop_v : fop_v;
+  assign op_req = op_sel ? xop_req : fop_req;
+  assign fop_r  = !op_sel && op_rdy;
+  assign xop_r  =  op_sel && op_rdy;
+  assign fop_cv = op_cvld && op_busy && !op_own;
+  assign xop_cv = op_cvld && op_busy &&  op_own;
+  assign fop_cpl = op_cpl;
+  assign xop_cpl = op_cpl;
+  always @(posedge clk or negedge rst_ni)
+    if (!rst_ni) begin op_busy <= 1'b0; op_own <= 1'b0; end
+    else if (op_take) begin op_busy <= 1'b1; op_own <= op_sel; end
+    else if (op_cvld) op_busy <= 1'b0;
+
   g6lc_apu_objpay #(.Enable(1'b1), .PayWords(ObjPayWords)) i_pay (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
-    .req_valid_i(fop_v), .req_ready_o(fop_r), .req_i(fop_req),
-    .cpl_valid_o(fop_cv), .cpl_ready_i(1'b1), .cpl_o(fop_cpl));
+    .req_valid_i(op_vld), .req_ready_o(op_rdy), .req_i(op_req),
+    .cpl_valid_o(op_cvld), .cpl_ready_i(1'b1), .cpl_o(op_cpl));
+
+  // §7b/5a-ii: real vgpages (front is the only master in this TB)
+  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(256), .PageBytes(4096))
+  i_vgp (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .req_valid_i(fpg_v), .req_ready_o(fpg_r), .req_i(fpg_req),
+    .cpl_valid_o(fpg_cv), .cpl_ready_i(1'b1), .cpl_o(fpg_cpl));
+
+  // §7b/5a-ii: real ShaderCore -- front drives module staging/commit
+  // and the slot manager, exec drives the work port + dispatch
+  // sideband; done feeds the executor's completion input
+  logic [63:0] shm_addr, shm_wdata, shm_rdata;
+  logic        shm_re, shm_we;
+  logic [7:0]  shm_wstrb;
+  // functional geometry: real corpus modules need default ShaderWords
+  // (the synth small screen rejects every vector module)
+  g6lc_apu_shcore #(.Enable(1'b1)) i_shc (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .wr_en_i(fsh_wr), .wr_slot_i(fsh_slot),
+    .wr_addr_i(fsh_addr), .wr_data_i(fsh_data),
+    .commit_i(fsh_commit), .commit_pl_i(fsh_cpl),
+    .c_busy_o(), .c_done_o(sh_c_done), .c_done_pl_o(sh_c_pl),
+    .retire_i(1'b0), .retire_slot_i(3'h0),
+    .sm_req_i(fsm_req), .sm_req_pl_i(fsm_pl),
+    .sm_cpl_o(sm_cpl), .sm_cpl_pl_o(sm_cpl_pl),
+    .work_i(w_v_sh), .work_ready_o(w_r_sh),
+    .work_ctype_i(w_o.ctype), .work_imm_i(w_o.rec.imm),
+    .disp_slot_i(xdisp_slot), .binds_i(xbinds),
+    .push_n_i(xpush_n), .push_i(xpush),
+    .busy_o(), .done_o(w_done), .done_pl_o(w_done_pl),
+    .mem_re_o(shm_re), .mem_we_o(shm_we), .mem_addr_o(shm_addr),
+    .mem_wdata_o(shm_wdata), .mem_wstrb_o(shm_wstrb),
+    .mem_rdata_i(shm_rdata));
+
+  // shader-side aperture: byte-addressed SHM window, 1-cycle read
+  localparam int SHAPB = 1 << 21;
+  logic [7:0] shmem [SHAPB];
+  always @(posedge clk) begin
+    if (shm_re)
+      for (int b = 0; b < 8; b++)
+        shm_rdata[b*8 +: 8] <= shmem[shm_addr[20:0] + 21'(b)];
+    if (shm_we)
+      for (int b = 0; b < 8; b++)
+        if (shm_wstrb[b]) shmem[shm_addr[20:0] + 21'(b)] <=
+                          shm_wdata[b*8 +: 8];
+  end
 
   // ---- memories --------------------------------------------------------
   logic [31:0] cs   [65536];
@@ -258,23 +376,22 @@ module tb_g6lc_apu_vnfront;
     if (o_csre || o_repwe || o_otv || o_crcv || o_subv || o_busy ||
         o_done || o_fclr !== '0 || o_result !== '0 ||
         o_payv || o_opv || o_payd !== '0 || o_opreq !== '0 ||
+        o_smreq || o_smpl !== '0 || o_shwr || o_shcom ||
+        o_shcpl !== '0 || o_pgv || o_pgreq !== '0 ||
         o_rwords !== '0 || o_fault !== '0)
       $fatal(1, "disabled vnfront active");
   end
 
-  // ---- work port --------------------------------------------------------
+  // ---- work port (exec -> real shcore; TB gates the pass-through) ---
   logic        work_gate = 1'b0;
+  logic        w_r_sh;
   logic [31:0] ew_q [256];
   int          ew_head = 0, ew_tail = 0;
-  int          pend = 0, dtimer = 0;
-  assign w_r = !work_gate && (cycles % 5) != 4;
+  wire         work_pass = !work_gate && (cycles % 5) != 4;
+  assign w_v_sh = w_v && work_pass;
+  assign w_r    = w_r_sh && work_pass;
 
   always @(posedge clk) begin
-    if (!rst_ni) begin
-      pend   <= 0;
-      dtimer <= 0;
-      w_done <= 1'b0;
-    end else begin
     if (w_v && w_r) begin
       checks++;
       if (ew_head == ew_tail) begin
@@ -286,18 +403,6 @@ module tb_g6lc_apu_vnfront;
                  w_o.ctype, ew_q[ew_head]);
       end
       ew_head = ew_head + 1;
-      pend   <= pend + 1;
-    end
-    w_done <= 1'b0;
-    if (dtimer != 0) begin
-      dtimer <= dtimer - 1;
-      if (dtimer == 1) begin
-        w_done <= 1'b1;
-        pend   <= pend - 1 + (w_v && w_r ? 1 : 0);
-      end
-    end else if (pend != 0) begin
-      dtimer <= 3;
-    end
     end
   end
 
@@ -314,7 +419,8 @@ module tb_g6lc_apu_vnfront;
     return expm[rec * RECW + w];
   endfunction
 
-  // ---- debug: backend transaction trace (OT_TRACE=1) -------------------
+  // ---- debug: backend transaction trace (+define+VNFRONT_TRACE) ------
+`ifdef VNFRONT_TRACE
   always @(posedge clk) begin
     if (ot_take)
       $display("OT req own=%0d op=%0d id=%x kind=%0d pid=%x",
@@ -329,7 +435,22 @@ module tb_g6lc_apu_vnfront;
     if (cr_cvld)
       $display("CR cpl own=%0d st=%0d cnt=%0d", cr_own, cr_cpl.status,
                cr_cpl.count);
+    if (fsh_wr)
+      $display("SH wr slot=%0d addr=%04x data=%08x", fsh_slot, fsh_addr,
+               fsh_data);
+    if (fsh_commit)
+      $display("SH commit slot=%0d nwords=%0d", fsh_cpl.slot,
+               fsh_cpl.nwords);
+    if (sh_c_done)
+      $display("SH cpl ok=%0d fault=%08x entry=%08x regs=%0d vars=%0d",
+               sh_c_pl.ok, sh_c_pl.fault, sh_c_pl.entry,
+               sh_c_pl.n_regs, sh_c_pl.n_vars);
+    if (fsm_req)
+      $display("SM req op=%0d slot=%0d", fsm_pl.op, fsm_pl.slot);
+    if (sm_cpl)
+      $display("SM cpl ok=%0d slot=%0d", sm_cpl_pl.ok, sm_cpl_pl.slot);
   end
+`endif
 
   task automatic check(input string name, input logic ok);
     checks++;
@@ -366,6 +487,7 @@ module tb_g6lc_apu_vnfront;
     for (int i = 0; i < $size(expm); i++) expm[i] = '0;
     for (int i = 0; i < $size(paym); i++) paym[i] = '0;
     for (int i = 0; i < $size(repm); i++) repm[i] = '0;
+    for (int i = 0; i < SHAPB; i++) shmem[i] = '0;
     $readmemh($sformatf("vn_vectors/%s.hex", ses), cs, 0);
     $readmemh($sformatf("vn_vectors/%s.exp", ses), expm, 0);
     $readmemh($sformatf("vn_vectors/%s.pay", ses), paym, 0);

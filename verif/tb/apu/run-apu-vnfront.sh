@@ -23,13 +23,17 @@ fi
 rm -rf "$OUT"
 mkdir -p "$OUT"
 # GENUNNAMED does not exist before Verilator 5.016; gate the waiver.
-VLTS=("$ROOT/verif/tb/apu/apu_axi.vlt")
+# apu_exec.vlt waives the vendored FPnew lint noise (the session TB now
+# composes the real ShaderCore).
+VLTS=("$ROOT/verif/tb/apu/apu_axi.vlt"
+      "$ROOT/verif/tb/apu/apu_exec.vlt")
 vver="$("$VERILATOR" --version | grep -o '[0-9][0-9.]*' | head -1)"
 if awk -v v="$vver" 'BEGIN{split(v,a,"."); exit !(a[1]>5||(a[1]==5&&a[2]>=16))}'; then
   VLTS+=("$ROOT/verif/tb/apu/apu_vn.vlt")
 fi
 if ! "$VERILATOR" --binary --timing --assert -Wall \
-  -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-BLKSEQ \
+  -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
+  -Wno-BLKSEQ \
   -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
   "${VLTS[@]}" \
   -f "$ROOT/corev_apu/apu/Flist.apu_vnfront" \
@@ -61,7 +65,8 @@ fi
 # ue_sm5_payfull session (regenerate with
 #   vn_golden.py --payfull-session ue_sm5_payfull 1 --paywords 512)
 if ! "$VERILATOR" --binary --timing --assert -Wall \
-  -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-BLKSEQ \
+  -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
+  -Wno-BLKSEQ \
   -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
   "${VLTS[@]}" \
   -f "$ROOT/corev_apu/apu/Flist.apu_vnfront" \

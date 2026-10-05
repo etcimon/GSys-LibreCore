@@ -45,6 +45,8 @@ module g6lc_apu_vnpump
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
+  import g6lc_apu_sh_pkg::*;
+  import g6lc_apu_vgpages_pkg::*;
 #(
   parameter bit          Enable  = 1'b0,
   parameter int unsigned Rings   = 4,
@@ -104,6 +106,26 @@ module g6lc_apu_vnpump
   input  logic            op_cpl_valid_i,
   output logic            op_cpl_ready_o,
   input  apu_objpay_cpl_t op_cpl_i,
+  // ShaderCore slot/stage/commit pass-through (vnfront inside, §7b)
+  output logic               sm_req_o,
+  output apu_sh_sm_req_t     sm_req_pl_o,
+  input  logic               sm_cpl_i,
+  input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
+  output logic               sh_wr_en_o,
+  output logic [2:0]         sh_wr_slot_o,
+  output logic [15:0]        sh_wr_addr_o,
+  output logic [31:0]        sh_wr_data_o,
+  output logic               sh_commit_o,
+  output apu_sh_commit_t     sh_commit_pl_o,
+  input  logic               sh_c_done_i,
+  input  apu_sh_cpl_t        sh_c_done_pl_i,
+  // aperture page allocator pass-through (vnfront inside, §7b)
+  output logic               pg_req_valid_o,
+  input  logic               pg_req_ready_i,
+  output apu_vgpages_req_t   pg_req_o,
+  input  logic               pg_cpl_valid_i,
+  output logic               pg_cpl_ready_o,
+  input  apu_vgpages_cpl_t   pg_cpl_i,
   // cmdexec pass-through (vnfront inside)
   output logic               ex_submit_valid_o,
   input  logic               ex_submit_ready_i,
@@ -137,6 +159,12 @@ module g6lc_apu_vnpump
     assign cr_pay_valid_o = 1'b0; assign cr_pay_data_o = '0;
     assign op_req_valid_o = 1'b0; assign op_req_o = '0;
     assign op_cpl_ready_o = 1'b0;
+    assign sm_req_o = 1'b0;        assign sm_req_pl_o = '0;
+    assign sh_wr_en_o = 1'b0;      assign sh_wr_slot_o = '0;
+    assign sh_wr_addr_o = '0;      assign sh_wr_data_o = '0;
+    assign sh_commit_o = 1'b0;     assign sh_commit_pl_o = '0;
+    assign pg_req_valid_o = 1'b0;  assign pg_req_o = '0;
+    assign pg_cpl_ready_o = 1'b0;
     assign ex_submit_valid_o = 1'b0; assign ex_submit_o = '0;
     assign ex_fence_clr_o = '0;
     assign busy_o = 1'b0;
@@ -154,6 +182,9 @@ module g6lc_apu_vnpump
                     cr_req_ready_i | cr_cpl_valid_i | (|cr_cpl_i) |
                     cr_pay_ready_i |
                     op_req_ready_i | op_cpl_valid_i | (|op_cpl_i) |
+                    sm_cpl_i | (|sm_cpl_pl_i) |
+                    sh_c_done_i | (|sh_c_done_pl_i) |
+                    pg_req_ready_i | pg_cpl_valid_i | (|pg_cpl_i) |
                     ex_submit_ready_i | (|ex_done_seq_i) |
                     (|ex_fence_signaled_i) | (|ex_fence_lost_i) |
                     (|xs_desc_i[0]) | (|xs_desc_i[1]) |
@@ -281,6 +312,16 @@ module g6lc_apu_vnpump
       .op_req_o(fr_op_req),
       .op_cpl_valid_i(op_cpl_valid_i), .op_cpl_ready_o(fr_op_cpl_rdy),
       .op_cpl_i(op_cpl_i),
+      .sm_req_o(sm_req_o), .sm_req_pl_o(sm_req_pl_o),
+      .sm_cpl_i(sm_cpl_i), .sm_cpl_pl_i(sm_cpl_pl_i),
+      .sh_wr_en_o(sh_wr_en_o), .sh_wr_slot_o(sh_wr_slot_o),
+      .sh_wr_addr_o(sh_wr_addr_o), .sh_wr_data_o(sh_wr_data_o),
+      .sh_commit_o(sh_commit_o), .sh_commit_pl_o(sh_commit_pl_o),
+      .sh_c_done_i(sh_c_done_i), .sh_c_done_pl_i(sh_c_done_pl_i),
+      .pg_req_valid_o(pg_req_valid_o), .pg_req_ready_i(pg_req_ready_i),
+      .pg_req_o(pg_req_o),
+      .pg_cpl_valid_i(pg_cpl_valid_i), .pg_cpl_ready_o(pg_cpl_ready_o),
+      .pg_cpl_i(pg_cpl_i),
       .ex_submit_valid_o(ex_submit_valid_o),
       .ex_submit_ready_i(ex_submit_ready_i),
       .ex_submit_o(ex_submit_o),
@@ -924,6 +965,8 @@ module g6lc_apu_vnpump_fixture
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
+  import g6lc_apu_sh_pkg::*;
+  import g6lc_apu_vgpages_pkg::*;
 #(
   parameter bit          Enable  = 1'b0,
   parameter int unsigned Rings   = 4,
@@ -973,6 +1016,24 @@ module g6lc_apu_vnpump_fixture
   input  logic            op_cpl_valid_i,
   output logic            op_cpl_ready_o,
   input  apu_objpay_cpl_t op_cpl_i,
+  output logic               sm_req_o,
+  output apu_sh_sm_req_t     sm_req_pl_o,
+  input  logic               sm_cpl_i,
+  input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
+  output logic               sh_wr_en_o,
+  output logic [2:0]         sh_wr_slot_o,
+  output logic [15:0]        sh_wr_addr_o,
+  output logic [31:0]        sh_wr_data_o,
+  output logic               sh_commit_o,
+  output apu_sh_commit_t     sh_commit_pl_o,
+  input  logic               sh_c_done_i,
+  input  apu_sh_cpl_t        sh_c_done_pl_i,
+  output logic               pg_req_valid_o,
+  input  logic               pg_req_ready_i,
+  output apu_vgpages_req_t   pg_req_o,
+  input  logic               pg_cpl_valid_i,
+  output logic               pg_cpl_ready_o,
+  input  apu_vgpages_cpl_t   pg_cpl_i,
   output logic               ex_submit_valid_o,
   input  logic               ex_submit_ready_i,
   output apu_cmdexec_submit_t ex_submit_o,

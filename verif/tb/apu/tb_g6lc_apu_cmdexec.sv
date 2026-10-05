@@ -14,7 +14,9 @@ module tb_g6lc_apu_cmdexec;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
+  import g6lc_apu_sh_pkg::*;
 
   localparam int Fences = 16;
   localparam int Slots  = 64;
@@ -44,6 +46,17 @@ module tb_g6lc_apu_cmdexec;
   apu_cmdexec_work_t  ow_o;
   apu_cmdrec_req_t    oxcr_req;
   apu_objtab_req_t    oxot_req;
+  // §7b/5a-ii: ObjPay port + shcore dispatch sideband.  No bound
+  // descriptor sets in this TB, so the ObjPay request is never driven;
+  // work_done carries a constant OK payload.
+  logic               xop_v, oop_v, xop_cr, oop_cr;
+  apu_objpay_req_t    xop_req, oop_req;
+  apu_sh_done_t       w_done_pl;
+  logic [2:0]         dslot, odslot;
+  logic [16*113-1:0]  dbinds, odbinds;
+  logic [5:0]         dpushn, odpushn;
+  logic [1023:0]      dpush, odpush;
+  assign w_done_pl = '{code: APU_SH_DONE_OK, default: '0};
 
   g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences)) i_dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
@@ -52,8 +65,12 @@ module tb_g6lc_apu_cmdexec;
     .cr_cpl_valid_i(xcr_cv), .cr_cpl_ready_o(xcr_cr), .cr_cpl_i(xcr_cpl),
     .ot_req_valid_o(xot_v), .ot_req_ready_i(xot_r), .ot_req_o(xot_req),
     .ot_cpl_valid_i(xot_cv), .ot_cpl_ready_o(xot_cr), .ot_cpl_i(xot_cpl),
+    .op_req_valid_o(xop_v), .op_req_ready_i(1'b1), .op_req_o(xop_req),
+    .op_cpl_valid_i(1'b0), .op_cpl_ready_o(xop_cr), .op_cpl_i('0),
     .work_valid_o(w_v), .work_ready_i(w_r), .work_o(w_o),
-    .work_done_i(w_done),
+    .work_done_i(w_done), .work_done_pl_i(w_done_pl),
+    .disp_slot_o(dslot), .binds_o(dbinds),
+    .push_n_o(dpushn), .push_o(dpush),
     .done_seq_o(done_seq),
     .fence_signaled_o(fsig), .fence_lost_o(flost),
     .fence_clr_i(fclr));
@@ -64,8 +81,12 @@ module tb_g6lc_apu_cmdexec;
     .cr_cpl_valid_i(xcr_cv), .cr_cpl_ready_o(oxcr_cr), .cr_cpl_i(xcr_cpl),
     .ot_req_valid_o(oxot_v), .ot_req_ready_i(xot_r), .ot_req_o(oxot_req),
     .ot_cpl_valid_i(xot_cv), .ot_cpl_ready_o(oxot_cr), .ot_cpl_i(xot_cpl),
+    .op_req_valid_o(oop_v), .op_req_ready_i(1'b1), .op_req_o(oop_req),
+    .op_cpl_valid_i(1'b0), .op_cpl_ready_o(oop_cr), .op_cpl_i('0),
     .work_valid_o(ow_v), .work_ready_i(w_r), .work_o(ow_o),
-    .work_done_i(w_done),
+    .work_done_i(w_done), .work_done_pl_i(w_done_pl),
+    .disp_slot_o(odslot), .binds_o(odbinds),
+    .push_n_o(odpushn), .push_o(odpush),
     .done_seq_o(odone),
     .fence_signaled_o(ofsig), .fence_lost_o(oflost),
     .fence_clr_i(fclr));
@@ -115,8 +136,11 @@ module tb_g6lc_apu_cmdexec;
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;
   always @(negedge clk) if (ow_v || oxcr_v || oxcr_cr || oxot_v ||
-                            oxot_cr || odone !== '0 || ofsig !== '0 ||
-                            oflost !== '0 || osub_r)
+                            oxot_cr || oop_v || oop_cr || osub_r ||
+                            odone !== '0 || ofsig !== '0 ||
+                            oflost !== '0 || odslot !== '0 ||
+                            odbinds !== '0 || odpushn !== '0 ||
+                            odpush !== '0)
     $fatal(1, "disabled cmdexec active");
 
   // ---- work port model ----------------------------------------------
@@ -368,8 +392,12 @@ module tb_g6lc_apu_cmdexec;
       pr.imm[2] = 32'd8;   // size bytes
       cr_op(APU_CMDREC_OP_APPEND, 5, 0, pr, 16'd2);
     end
+    // §7b/5a-ii: a DISPATCH here would enter the full descriptor
+    // assembly (the CAFE dset handles resolve to nothing); probe the
+    // snap through a non-dispatch work record instead.  Dispatch
+    // assembly itself is covered end-to-end in tb_g6lc_apu_vgtop.
     cr_op(APU_CMDREC_OP_APPEND, 5, 0,
-          mkrec(APU_VN_TYPE_VK_CMD_DISPATCH_EXT, 0, 0, 32'h4));
+          mkrec(APU_VN_TYPE_VK_CMD_DRAW_EXT, 0, 0, 32'h4));
     cr_op(APU_CMDREC_OP_END, 5, 0, '0);
     tb_drv = 1'b0;
     begin

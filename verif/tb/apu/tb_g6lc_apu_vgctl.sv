@@ -12,6 +12,7 @@ module tb_g6lc_apu_vgctl;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_vgpages_pkg::*;
 
   localparam int unsigned GMW = 32'h40000;
   logic clk = 0, rst_ni = 0;
@@ -45,6 +46,8 @@ module tb_g6lc_apu_vgctl;
     .mem_wdata_o(m_wdata), .mem_rdata_i(m_rdata),
     .ot_req_valid_o(ot_v), .ot_req_ready_i(ot_r), .ot_req_o(ot_req),
     .ot_cpl_valid_i(ot_cv), .ot_cpl_ready_o(ot_cr), .ot_cpl_i(ot_cpl),
+    .pg_req_valid_o(pg_v), .pg_req_ready_i(pg_r), .pg_req_o(pg_req),
+    .pg_cpl_valid_i(pg_cv), .pg_cpl_ready_o(pg_cr), .pg_cpl_i(pg_cpl),
     .xs_valid_o(xs_v), .xs_ready_i(1'b0),
     .xs_desc_o(xs_d), .xs_ndesc_o(xs_n), .xs_off_o(xs_off),
     .xs_bytes_o(xs_bytes), .xs_ctx_o(xs_ctx),
@@ -57,6 +60,15 @@ module tb_g6lc_apu_vgctl;
     .req_valid_i(ot_v), .req_ready_o(ot_r), .req_i(ot_req),
     .cpl_valid_o(ot_cv), .cpl_ready_i(ot_cr), .cpl_o(ot_cpl),
     .live_o());
+
+  // §7b: the page allocator lives outside vgctl now
+  logic            pg_v, pg_r, pg_cv, pg_cr;
+  apu_vgpages_req_t pg_req;
+  apu_vgpages_cpl_t pg_cpl;
+  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(64)) i_pages (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .req_valid_i(pg_v), .req_ready_o(pg_r), .req_i(pg_req),
+    .cpl_valid_o(pg_cv), .cpl_ready_i(pg_cr), .cpl_o(pg_cpl));
 
   logic [31:0] gmem [GMW];
   always @(posedge clk) begin
@@ -215,14 +227,16 @@ module tb_g6lc_apu_vgctl;
     exp_resp(APU_VG_ERR_PARAM);
     check(used_len == 24 + 24, "truncated used_len");
 
-    // ---- C3: CREATE_BLOB blob_id != 0 -> ERR_PARAM ---------------------------
+    // ---- C3: CREATE_BLOB blob_id != 0, unknown memory -> ERR_RID -----
+    // 5a-ii: blob_id != 0 resolves a VkDeviceMemory object of that id;
+    // no such object here -> the resource-refusal path (ERR_RID).
     wr(0, 32'h010B); wr(4, 4);
     wr(6, 20); wr(7, APU_VG_BLOB_HOST3D);
     wr(8, APU_VG_BLOB_MAPPABLE); wr(9, 0);
-    wr(10, 0); wr(11, 1);          // blob_id = 1
+    wr(10, 0); wr(11, 1);          // blob_id = 1<<32 (unknown memory)
     wr(12, 32'h1000); wr(13, 0);
     run_chain(14, 24);
-    exp_resp(APU_VG_ERR_PARAM);
+    exp_resp(APU_VG_ERR_RID);
 
     // ---- C4: CTX_CREATE context_init = 5 -> ERR_PARAM ------------------------
     wr(0, 32'h0200); wr(4, 7);

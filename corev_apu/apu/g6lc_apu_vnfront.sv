@@ -94,6 +94,8 @@ module g6lc_apu_vnfront
   import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
+  import g6lc_apu_sh_pkg::*;
+  import g6lc_apu_vgpages_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
   parameter int unsigned Fences = 16,
@@ -145,6 +147,26 @@ module g6lc_apu_vnfront
   input  logic               op_cpl_valid_i,
   output logic               op_cpl_ready_o,
   input  apu_objpay_cpl_t    op_cpl_i,
+  // ShaderCore slot manager + module staging + commit (§7b/5a-ii)
+  output logic               sm_req_o,
+  output apu_sh_sm_req_t     sm_req_pl_o,
+  input  logic               sm_cpl_i,
+  input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
+  output logic               sh_wr_en_o,
+  output logic [2:0]         sh_wr_slot_o,
+  output logic [15:0]        sh_wr_addr_o,
+  output logic [31:0]        sh_wr_data_o,
+  output logic               sh_commit_o,
+  output apu_sh_commit_t     sh_commit_pl_o,
+  input  logic               sh_c_done_i,
+  input  apu_sh_cpl_t        sh_c_done_pl_i,
+  // aperture page allocator (§7b/5a-ii, arbitrated in vgtop)
+  output logic               pg_req_valid_o,
+  input  logic               pg_req_ready_i,
+  output apu_vgpages_req_t   pg_req_o,
+  input  logic               pg_cpl_valid_i,
+  output logic               pg_cpl_ready_o,
+  input  apu_vgpages_cpl_t   pg_cpl_i,
   // cmdexec submit + fence interface
   output logic               ex_submit_valid_o,
   input  logic               ex_submit_ready_i,
@@ -171,6 +193,12 @@ module g6lc_apu_vnfront
     assign cr_pay_valid_o = 1'b0; assign cr_pay_data_o = '0;
     assign op_req_valid_o = 1'b0; assign op_req_o = '0;
     assign op_cpl_ready_o = 1'b0;
+    assign sm_req_o = 1'b0;        assign sm_req_pl_o = '0;
+    assign sh_wr_en_o = 1'b0;      assign sh_wr_slot_o = '0;
+    assign sh_wr_addr_o = '0;      assign sh_wr_data_o = '0;
+    assign sh_commit_o = 1'b0;     assign sh_commit_pl_o = '0;
+    assign pg_req_valid_o = 1'b0;  assign pg_req_o = '0;
+    assign pg_cpl_ready_o = 1'b0;
     assign ex_submit_valid_o = 1'b0; assign ex_submit_o = '0;
     assign ex_fence_clr_o = '0;
     assign busy_o = 1'b0;         assign done_o = 1'b0;
@@ -182,6 +210,9 @@ module g6lc_apu_vnfront
                     (|ot_cpl_i) | cr_req_ready_i | cr_cpl_valid_i |
                     (|cr_cpl_i) | cr_pay_ready_i | op_req_ready_i |
                     op_cpl_valid_i | (|op_cpl_i) |
+                    sm_cpl_i | (|sm_cpl_pl_i) |
+                    sh_c_done_i | (|sh_c_done_pl_i) |
+                    pg_req_ready_i | pg_cpl_valid_i | (|pg_cpl_i) |
                     ex_submit_ready_i | (|ex_done_seq_i) |
                     (|ex_fence_signaled_i) | (|ex_fence_lost_i) |
                     (|cs_base_i) | (|cs_len_i) | (|rep_base_i) |
@@ -200,6 +231,7 @@ module g6lc_apu_vnfront
       StElemRec, StElemRecCpl,
       StElemRetL, StElemRetR, StElemRetCpl, StElemRetPay,
       StAllocGo, StAllocCpl, StAllocAux, StRetCpl, StRetPre,
+      StBindMemCk,
       StCbGo, StCbCrCpl, StCbSetCpl,
       StRecFill, StRecApp, StAppendCpl,
       StSubPush, StSubState, StSubStateNext,
@@ -216,12 +248,23 @@ module g6lc_apu_vnfront
       StUpdBufGo, StUpdBufCpl, StUpdWr, StUpdWrC, StUpdInfoNext,
       StPayProd, StPayResLo, StPayResHi, StPayResCpl, StPayCapW,
       StPaySend,
+      // §7b/5a-ii: slot manager, module staging, pipeline commit,
+      // aperture pages
+      StSmReq, StSmCpl,
+      StShRd, StShWr, StShCommit, StShCWait,
+      StPgReq, StPgCpl,
+      StShModObj, StShModCpl,
+      StPipeH0, StPipeH1, StPipeH2, StPipeH3, StPipeH4,
+      StPipeLay0, StPipeModCpl, StPipeLayCpl, StPipeAllocC,
+      StPipeAuxC, StPipeAuxCpl, StPipeAuxHiC, StPipeFail,
+      StRetSm,
       StRep, StRepKick, StRepWait, StDone
     } state_e;
     state_e              state_q, ot_ret_q, cr_ret_q, cs_ret_q;
     state_e              blob_ret_q, blob_done_q;
     state_e              op_ret_q, stg_ret_q, auxhi_ret_q,
                          pro_ret_q, pay_done_q;
+    state_e              sm_ret_q, sh_ret_q, shc_ret_q, pg_ret_q;
 
     logic [15:0]         cs_base_q, cs_len_q, rep_base_q, rep_len_q;
     apu_vn_op_t          op_q;
@@ -262,7 +305,6 @@ module g6lc_apu_vnfront
     logic [31:0]         hnd_pay_q;    // object {gen,slot} for SETAUXHI
     logic                payf_q;       // retire frees a payload extent
     logic [15:0]         payf_base_q, payf_words_q;
-    logic                pay_att_q;    // pipeline payload already parked
 
     // descriptor-set allocation element chain
     logic [31:0]         lay_lo_q;     // staged layout id low word
@@ -291,6 +333,28 @@ module g6lc_apu_vnfront
     logic [31:0]         pay_word_q;   // current cr_pay_data_o
     logic [15:0]         pay_nset_q;   // BindDS resolved-handle count
     logic                pay_bind_q;   // stream mode: resolve sets
+
+    // §7b/5a-ii: ShaderCore slot manager / staging / commit + pages
+    apu_sh_sm_op_e       sm_op_q;
+    logic [2:0]          sm_slot_q;
+    logic                sm_ok_q;
+    logic [2:0]          sm_rslot_q;
+    logic [15:0]         shw_i_q;      // pCode stream cursor
+    logic [15:0]         shw_n_q;      // pCode word count
+    logic [2:0]          sh_slot_q;    // committed/alloc'd slot
+    logic [15:0]         sh_nw_q;      // module nwords
+    logic                shc_ok_q;     // commit result
+    apu_vgpages_op_e     pg_op_q;
+    logic [31:0]         pg_base_q, pg_bytes_q;
+    logic                pg_ok_q;
+    logic [31:0]         pg_res_q;
+    logic [31:0]         rep_null_mask_q; // failed-element null echo
+    // vkCreateComputePipelines element state (5-word staged payload)
+    logic [63:0]         pl_modid_q, pl_layid_q;
+    logic                pl_spec_q;
+    logic [31:0]         pl_layh_q;    // layout {gen,slot}
+    logic                pl_errv_q;    // first error latched
+    logic [31:0]         auxhi_val_q;  // generic SETAUXHI value
 
     logic [4:0]          blob_i_q;     // current blob element
     logic [4:0]          blob_n_q;     // element count
@@ -347,6 +411,7 @@ module g6lc_apu_vnfront
       .clk_i(clk_i), .rst_ni(rst_ni),
       .start_i(rep_start), .op_i(op_q), .result_i(result_q),
       .exec_w_i(exec_w_q), .exec_n_i(7'd64),
+      .rep_null_mask_i(rep_null_mask_q),
       .rep_base_i(rep_base_q), .rep_len_i(rep_len_q),
       .cs_base_i(cs_base_q),
       .cs_re_o(rep_re), .cs_addr_o(rep_addr), .cs_rdata_i(cs_rdata_i),
@@ -437,10 +502,19 @@ module g6lc_apu_vnfront
     // §7b: object kinds that carry an ObjPay payload extent in
     // aux[63:32] = {base[15:0], words[15:0]}
     function automatic logic is_pay_kind(input logic [5:0] k);
+      // §7b/5a-ii: pipelines no longer park an ObjPay extent — the
+      // staged payload is consumed at creation and the object keeps
+      // {slot, layout} in aux instead
       return k == 6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT) ||
              k == 6'(APU_VN_KIND_VK_PIPELINE_LAYOUT) ||
-             k == 6'(APU_VN_KIND_VK_PIPELINE) ||
              k == 6'(APU_VN_KIND_VK_DESCRIPTOR_SET);
+    endfunction
+    // 5a-ii: kinds whose retire needs a pre-LOOKUP (aux carries a
+    // ShaderCore slot or a vgpages extent)
+    function automatic logic is_auxret_kind(input logic [5:0] k);
+      return k == 6'(APU_VN_KIND_VK_SHADER_MODULE) ||
+             k == 6'(APU_VN_KIND_VK_PIPELINE) ||
+             k == 6'(APU_VN_KIND_VK_DEVICE_MEMORY);
     endfunction
     // prepend words ahead of the staged payload copy
     function automatic int prepend_n(input logic [5:0] k);
@@ -456,6 +530,11 @@ module g6lc_apu_vnfront
       op_req_valid_o = 1'b0;    op_req_o = '0;
       cr_pay_valid_o = 1'b0;    cr_pay_data_o = '0;
       ex_submit_valid_o = 1'b0; ex_submit_o = '0;
+      sm_req_o = 1'b0;          sm_req_pl_o = '0;
+      sh_wr_en_o = 1'b0;        sh_wr_slot_o = '0;
+      sh_wr_addr_o = '0;        sh_wr_data_o = '0;
+      sh_commit_o = 1'b0;       sh_commit_pl_o = '0;
+      pg_req_valid_o = 1'b0;    pg_req_o = '0;
       front_re = 1'b0;          front_addr = '0;
       dec_start = 1'b0;         rep_start = 1'b0;
       stg_req = 1'b0;           stg_we = 1'b0;
@@ -478,6 +557,20 @@ module g6lc_apu_vnfront
         StPaySend: begin cr_pay_valid_o = 1'b1;
                          cr_pay_data_o  = pay_word_q;            end
         StCsRd:    begin front_re = 1'b1; front_addr = csa_q;     end
+        StSmReq:   begin sm_req_o = 1'b1;
+                         sm_req_pl_o = '{op: sm_op_q,
+                                        slot: sm_slot_q};       end
+        StShWr:    begin sh_wr_en_o   = 1'b1;
+                         sh_wr_slot_o = sh_slot_q;
+                         sh_wr_addr_o = shw_i_q;
+                         sh_wr_data_o = csw_q;                   end
+        StShCommit: begin sh_commit_o = 1'b1;
+                         sh_commit_pl_o = '{slot: sh_slot_q,
+                                           nwords: sh_nw_q};     end
+        StPgReq:   begin pg_req_valid_o = 1'b1;
+                         pg_req_o = '{op: pg_op_q,
+                                     base: pg_base_q,
+                                     bytes: pg_bytes_q};         end
         StSubPush: begin ex_submit_valid_o = 1'b1;
                          ex_submit_o = sub_q;                     end
         StDec:     dec_start = 1'b1;
@@ -487,6 +580,7 @@ module g6lc_apu_vnfront
     end
 
     assign op_cpl_ready_o = 1'b1;
+    assign pg_cpl_ready_o = 1'b1;
 
     // ---- sequential ---------------------------------------------------
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -513,7 +607,7 @@ module g6lc_apu_vnfront
         prepend_n_q <= '0;
         for (int i = 0; i < 2; i++) prepend_w_q[i] <= '0;
         hnd_pay_q <= '0; payf_q <= 1'b0;
-        payf_base_q <= '0; payf_words_q <= '0; pay_att_q <= 1'b0;
+        payf_base_q <= '0; payf_words_q <= '0;
         lay_lo_q <= '0; lay_base_q <= '0; lay_words_q <= '0;
         lay_nbind_q <= '0; lay_type_q <= '0;
         ent_j_q <= '0; ent_k_q <= '0; entw_q <= '0;
@@ -525,6 +619,16 @@ module g6lc_apu_vnfront
         dset_base_q <= '0; dset_words_q <= '0; upd_idx_q <= '0;
         pay_send_q <= '0; pay_send_n_q <= '0; pay_word_q <= '0;
         pay_nset_q <= '0; pay_bind_q <= 1'b0;
+        sm_op_q <= APU_SH_SM_ALLOC; sm_slot_q <= '0;
+        sm_ok_q <= 1'b0; sm_rslot_q <= '0;
+        shw_i_q <= '0; shw_n_q <= '0;
+        sh_slot_q <= '0; sh_nw_q <= '0; shc_ok_q <= 1'b0;
+        pg_op_q <= APU_VGPAGES_OP_ALLOC;
+        pg_base_q <= '0; pg_bytes_q <= '0;
+        pg_ok_q <= 1'b0; pg_res_q <= '0;
+        rep_null_mask_q <= '0;
+        pl_modid_q <= '0; pl_layid_q <= '0; pl_spec_q <= 1'b0;
+        pl_layh_q <= '0; pl_errv_q <= 1'b0; auxhi_val_q <= '0;
         blob_i_q <= '0; blob_n_q <= '0; blob_sel_q <= 1'b0;
         blob_id_q <= '0;
         are_i_q <= '0; aux_free_q <= '0; aux_free_v_q <= 1'b0;
@@ -555,8 +659,9 @@ module g6lc_apu_vnfront
             rep_len_q  <= rep_len_i;
             fault_q <= '0; rep_words_q <= '0; rep_skip_q <= 1'b0;
             result_q <= APU_VK_SUCCESS;
+            rep_null_mask_q <= '0;
             stg_n_q <= '0; pay_ovf_q <= 1'b0;
-            pay_att_q <= 1'b0; payf_q <= 1'b0;
+            payf_q <= 1'b0;
             for (int i = 0; i < 8; i++) hnd_q[i] <= '0;
             for (int i = 0; i < 64; i++)
               exec_w_q[32*i +: 32] <= APU_VN_PROFILE[i];
@@ -602,6 +707,13 @@ module g6lc_apu_vnfront
                            APU_VN_TYPE_VK_GET_FENCE_STATUS_EXT) begin
                 automatic int ls = lu_slot(dec_op, 1);
                 watch_q <= ls < 0 ? 4'hF : 4'(ls);
+              end else if (APU_VN_ACT[dec_op.cmd_type[
+                      $clog2(APU_VN_DEC_TYPE_MAX+1)-1:0]].act_class
+                           == APU_VN_ACT_BIND) begin
+                // watch the bound resource so ent_q.size is its
+                // declared size for the SETBIND below
+                automatic int rs = lu_slot(dec_op, 1);
+                watch_q <= rs < 0 ? 4'hF : 4'(rs);
               end else if (dec_op.cmd_type ==
                            APU_VN_TYPE_VK_QUEUE_SUBMIT_EXT) begin
                 // watch the OPTIONAL fence slot so ent_q.aux carries
@@ -730,6 +842,24 @@ module g6lc_apu_vnfront
                                   default: '0};
                     op_ret_q <= StPayAlcCpl;
                     state_q  <= StOpReq;
+                  end else if (act_q.obj_kind ==
+                               6'(APU_VN_KIND_VK_SHADER_MODULE)) begin
+                    // §7b/5a-ii: claim a ShaderCore slot, then stream
+                    // blob[0] (pCode) from the CS into wr_* for it
+                    sm_op_q   <= APU_SH_SM_ALLOC;
+                    sm_slot_q <= '0;
+                    sm_ret_q  <= StShModObj;
+                    state_q   <= StSmReq;
+                  end else if (act_q.obj_kind ==
+                               6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
+                    // §7b/5a-ii: aperture pages first; the object is
+                    // created only if pages exist
+                    automatic int ds = data_slot(op_q);
+                    pg_op_q    <= APU_VGPAGES_OP_ALLOC;
+                    pg_base_q  <= '0;
+                    pg_bytes_q <= ds < 0 ? 32'h0 : 32'(op_q.q[ds]);
+                    pg_ret_q   <= StAllocGo;
+                    state_q    <= StPgReq;
                   end else begin
                     state_q <= StAllocGo;
                   end
@@ -747,22 +877,18 @@ module g6lc_apu_vnfront
                 end else if (act_q.obj_kind ==
                              6'(APU_VN_KIND_VK_PIPELINE) &&
                              op_q.pay_words != 16'h0) begin
-                  // §7b: the pipeline payload extent is allocated and
-                  // filled before the element loop; the first created
-                  // pipeline object parks {base,words} in aux[63:32]
-                  prepend_n_q <= '0;
-                  op_words_q  <= 16'(op_q.pay_words);
+                  // §7b/5a-ii: per-element {module id, spec, layout id}
+                  // in the staging SRAM; out-ids in the flags[1] blob.
+                  // No ObjPay extent — the object keeps {slot,layout}
+                  // in aux and failed elements echo VK_NULL_HANDLE.
                   blob_sel_q  <= act_q.flags[1];
                   blob_i_q    <= '0;
                   blob_n_q    <= 5'(op_q.blob[act_q.flags[1]].words
                                     >> 1);
-                  blob_ret_q  <= StElemAlloc;
+                  pl_errv_q   <= 1'b0;
+                  blob_ret_q  <= StPipeH0;
                   blob_done_q <= StRep;
-                  opr_q    <= '{op: APU_OBJPAY_OP_ALLOC,
-                                words: 32'(op_q.pay_words),
-                                default: '0};
-                  op_ret_q <= StPayAlcCpl;
-                  state_q  <= StOpReq;
+                  state_q     <= StBlobRd;
                 end else begin
                   // act flags[1] names the blob slot holding the
                   // out ids (vkAllocateDescriptorSets emits its
@@ -790,7 +916,8 @@ module g6lc_apu_vnfront
                              6'(APU_VN_KIND_VK_COMMAND_BUFFER) ||
                              act_q.obj_kind ==
                              6'(APU_VN_KIND_VK_FENCE) ||
-                             is_pay_kind(act_q.obj_kind)) begin
+                             is_pay_kind(act_q.obj_kind) ||
+                             is_auxret_kind(act_q.obj_kind)) begin
                   // pre-LOOKUP: aux[7:0] frees the arena bit for
                   // CB/FENCE; aux[63:32] frees the ObjPay extent for
                   // payload kinds
@@ -812,18 +939,17 @@ module g6lc_apu_vnfront
               APU_VN_ACT_BIND: begin
                 automatic int rs = lu_slot(op_q, 1);
                 automatic int ms = lu_slot(op_q, 2);
-                automatic int os = data_slot(op_q);
                 if (rs < 0 || ms < 0) begin
                   result_q <= APU_VK_ERROR_UNKNOWN;
                   state_q  <= StRep;
                 end else begin
-                  otr_q <= '{op: APU_OBJTAB_OP_SETBIND,
-                             id: {32'h0, hnd_q[rs]},
-                             kind: op_q.qkind[rs],
-                             mem_id: {32'h0, hnd_q[ms]},
-                             offset: os < 0 ? 64'h0 : op_q.q[os],
-                             ctx: ctx_i, default: '0};
-                  ot_ret_q <= StRetCpl;   // same status mapping
+                  // §7b: fetch the memory entry first — a bind whose
+                  // memoryOffset + resource size overruns the memory's
+                  // extent is invalid usage and is refused
+                  otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                               id: {32'h0, hnd_q[ms]},
+                               kind: op_q.qkind[ms], default: '0};
+                  ot_ret_q <= StBindMemCk;
                   state_q  <= StOtReq;
                 end
               end
@@ -947,6 +1073,12 @@ module g6lc_apu_vnfront
                 fence_free() == 8'hFF) begin
               result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
               state_q  <= StRep;
+            end else if (act_q.obj_kind ==
+                         6'(APU_VN_KIND_VK_DEVICE_MEMORY) &&
+                         !pg_ok_q) begin
+              // §7b/5a-ii: vgpages FULL -> OOM, no object created
+              result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
+              state_q  <= StRep;
             end else begin
               // created size -> aux[31:8] blocks (ObjTab.ALLOC ignores
               // req.size); buffers in 256B units, images in 4KiB units
@@ -967,6 +1099,9 @@ module g6lc_apu_vnfront
                          kind: act_q.obj_kind,
                          parent_id: ps < 0 ? 64'h0
                                            : {32'h0, hnd_q[ps]},
+                         // §7b/5a-ii: entry.size feeds descriptor
+                         // dispatch (buffer size) and the memory FREE
+                         size: ds < 0 ? 64'h0 : op_q.q[ds],
                          ctx: ctx_i, default: '0};
               ot_ret_q <= StAllocCpl;
               state_q  <= StOtReq;
@@ -983,6 +1118,18 @@ module g6lc_apu_vnfront
                               default: '0};
                 op_ret_q <= StRep;
                 state_q  <= StOpReq;
+              end else if (act_q.obj_kind ==
+                           6'(APU_VN_KIND_VK_SHADER_MODULE)) begin
+                // release the held ShaderCore slot
+                sm_op_q  <= APU_SH_SM_UNREF;
+                sm_ret_q <= StRep;
+                state_q  <= StSmReq;
+              end else if (act_q.obj_kind ==
+                           6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
+                // release the held aperture pages
+                pg_op_q  <= APU_VGPAGES_OP_FREE;
+                pg_ret_q <= StRep;
+                state_q  <= StPgReq;
               end else begin
                 state_q <= StRep;
               end
@@ -1008,9 +1155,28 @@ module g6lc_apu_vnfront
                          ctx: ctx_i, default: '0};
               ot_ret_q <= StAllocAux;
               state_q  <= StOtReq;
+            end else if (act_q.obj_kind ==
+                         6'(APU_VN_KIND_VK_SHADER_MODULE)) begin
+              // §7b/5a-ii: aux[2:0]=slot, aux[31:16]=nwords
+              otr_q <= '{op: APU_OBJTAB_OP_SETAUX,
+                         id: {32'h0, ot_cpl_i.handle},
+                         kind: act_q.obj_kind,
+                         mask: 32'hFFFF_0007,
+                         value: {sh_nw_q, 13'h0, sh_slot_q},
+                         ctx: ctx_i, default: '0};
+              ot_ret_q <= StAllocAux;
+              state_q  <= StOtReq;
+            end else if (act_q.obj_kind ==
+                         6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
+              // §7b/5a-ii: aux[63:32] = aperture page base
+              hnd_pay_q   <= ot_cpl_i.handle;
+              auxhi_val_q <= pg_res_q;
+              auxhi_ret_q <= StRep;
+              state_q     <= StAuxSet;
             end else if (is_pay_kind(act_q.obj_kind)) begin
               // §7b: copy staging -> ObjPay, then SETAUXHI {base,words}
               hnd_pay_q   <= ot_cpl_i.handle;
+              auxhi_val_q <= {op_base_q, op_words_q};
               pay_i_q     <= '0;
               pay_done_q  <= StAuxSet;
               auxhi_ret_q <= StRep;
@@ -1055,18 +1221,7 @@ module g6lc_apu_vnfront
           StElemAllocCpl: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               result_q <= err_of(ot_cpl_i.status);
-              if (act_q.obj_kind == 6'(APU_VN_KIND_VK_PIPELINE) &&
-                  !pay_att_q && op_q.pay_words != 16'h0) begin
-                // no pipeline took the extent: release it
-                opr_q    <= '{op: APU_OBJPAY_OP_FREE,
-                              addr: {16'h0, op_base_q},
-                              words: {16'h0, op_words_q},
-                              default: '0};
-                op_ret_q <= StRep;
-                state_q  <= StOpReq;
-              end else begin
-                state_q <= StRep;
-              end
+              state_q <= StRep;
             end else if (act_q.obj_kind ==
                          6'(APU_VN_KIND_VK_COMMAND_BUFFER)) begin
               cb_hnd_q[are_i_q[$clog2(CbBufs)-1:0]] <= ot_cpl_i.handle;
@@ -1078,16 +1233,6 @@ module g6lc_apu_vnfront
                          ctx: ctx_i, default: '0};
               ot_ret_q <= StElemAuxCpl;
               state_q  <= StOtReq;
-            end else if (act_q.obj_kind ==
-                         6'(APU_VN_KIND_VK_PIPELINE) &&
-                         !pay_att_q && op_q.pay_words != 16'h0) begin
-              // §7b: the first created pipeline parks the payload
-              // extent {base,words} in aux[63:32]
-              pay_att_q   <= 1'b1;
-              hnd_pay_q   <= ot_cpl_i.handle;
-              auxhi_ret_q <= StBlobRd;
-              blob_i_q    <= blob_i_q + 5'd1;
-              state_q     <= StAuxSet;
             end else begin
               blob_i_q <= blob_i_q + 5'd1;
               state_q  <= StBlobRd;
@@ -1290,12 +1435,30 @@ module g6lc_apu_vnfront
               payf_q       <= is_pay_kind(act_q.obj_kind);
               payf_base_q  <= ot_cpl_i.entry.aux[63:48];
               payf_words_q <= ot_cpl_i.entry.aux[47:32];
-              otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
-                           id: op_q.q[
-                               role_slot(op_q, APU_VN_ROLE_RETIRE)],
-                           kind: act_q.obj_kind, default: '0};
-              ot_ret_q <= StRetCpl;
-              state_q  <= StOtReq;
+              if (act_q.obj_kind ==
+                  6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
+                // §7b/5a-ii: hold the aperture extent for the
+                // post-retire FREE
+                pg_base_q  <= ot_cpl_i.entry.aux[63:32];
+                pg_bytes_q <= 32'(ot_cpl_i.entry.size);
+              end
+              if (act_q.obj_kind ==
+                  6'(APU_VN_KIND_VK_SHADER_MODULE) ||
+                  act_q.obj_kind == 6'(APU_VN_KIND_VK_PIPELINE)) begin
+                // §7b/5a-ii: release the ShaderCore slot reference
+                // first, then retire the object
+                sm_op_q   <= APU_SH_SM_UNREF;
+                sm_slot_q <= ot_cpl_i.entry.aux[2:0];
+                sm_ret_q  <= StRetSm;
+                state_q   <= StSmReq;
+              end else begin
+                otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
+                             id: op_q.q[
+                                 role_slot(op_q, APU_VN_ROLE_RETIRE)],
+                             kind: act_q.obj_kind, default: '0};
+                ot_ret_q <= StRetCpl;
+                state_q  <= StOtReq;
+              end
             end
           end
           StRetCpl: begin
@@ -1321,9 +1484,45 @@ module g6lc_apu_vnfront
                               default: '0};
                 op_ret_q <= StRep;
                 state_q  <= StOpReq;
+              end else if (act_q.obj_kind ==
+                           6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
+                // §7b/5a-ii: vkFreeMemory returns its aperture pages
+                pg_op_q    <= APU_VGPAGES_OP_FREE;
+                pg_ret_q   <= StRep;
+                state_q    <= StPgReq;
               end else begin
                 state_q <= StRep;
               end
+            end
+          end
+          // §7b: BIND's memory LOOKUP — refuse memoryOffset + resource
+          // size past the memory's extent (invalid usage)
+          StBindMemCk: begin
+            automatic int rs = lu_slot(op_q, 1);
+            automatic int ms = lu_slot(op_q, 2);
+            automatic int os = data_slot(op_q);
+            automatic logic [63:0] moff =
+                os < 0 ? 64'h0 : op_q.q[os];
+            // subtractive form: refuses memoryOffset + size past the
+            // memory extent without 64-bit wraparound in the sum
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                moff > ot_cpl_i.entry.size ||
+                ent_q.size > ot_cpl_i.entry.size - moff) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else begin
+              otr_q <= '{op: APU_OBJTAB_OP_SETBIND,
+                         id: {32'h0, hnd_q[rs]},
+                         kind: op_q.qkind[rs],
+                         mem_id: {32'h0, hnd_q[ms]},
+                         offset: moff,
+                         // ent_q = the bound resource (watched
+                         // above): keep its declared size as the
+                         // bound extent for §7b dispatch
+                         size: ent_q.size,
+                         ctx: ctx_i, default: '0};
+              ot_ret_q <= StRetCpl;   // same status mapping
+              state_q  <= StOtReq;
             end
           end
 
@@ -1523,7 +1722,7 @@ module g6lc_apu_vnfront
                          id: {32'h0, hnd_pay_q},
                          kind: act_q.obj_kind,
                          mask: 32'hFFFF_FFFF,
-                         value: {op_base_q, op_words_q},
+                         value: auxhi_val_q,
                          ctx: ctx_i, default: '0};
             ot_ret_q <= StAuxHiCpl;
             state_q  <= StOtReq;
@@ -1637,6 +1836,7 @@ module g6lc_apu_vnfront
           StDSetFill: begin
             if (ent_j_q >= lay_nbind_q) begin
               blob_i_q    <= blob_i_q + 5'd1;
+              auxhi_val_q <= {op_base_q, op_words_q};
               auxhi_ret_q <= StBlobRd;
               state_q     <= StAuxSet;
             end else begin
@@ -1980,6 +2180,218 @@ module g6lc_apu_vnfront
             state_q <= StPoolLoop;
           end
 
+          // ---- §7b/5a-ii: ShaderCore slot manager --------------------
+          StSmReq:  state_q <= StSmCpl;
+          StSmCpl: if (sm_cpl_i) begin
+            sm_ok_q    <= sm_cpl_pl_i.ok;
+            sm_rslot_q <= sm_cpl_pl_i.slot;
+            state_q    <= sm_ret_q;
+          end
+
+          // ---- §7b/5a-ii: aperture page allocator --------------------
+          StPgReq: if (pg_req_ready_i) state_q <= StPgCpl;
+          StPgCpl: if (pg_cpl_valid_i) begin
+            pg_ok_q  <= pg_cpl_i.status == APU_VGPAGES_OK;
+            pg_res_q <= pg_cpl_i.base;
+            state_q  <= pg_ret_q;
+          end
+
+          // ---- §7b/5a-ii: vkCreateShaderModule ------------------------
+          // sm ALLOC completion -> pCode staging (blob[0])
+          StShModObj: begin
+            if (!sm_ok_q) begin
+              result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
+              state_q  <= StRep;
+            end else begin
+              sh_slot_q <= sm_rslot_q;
+              sh_nw_q   <= 16'(op_q.blob[0].words);
+              shw_i_q   <= '0;
+              shw_n_q   <= 16'(op_q.blob[0].words);
+              if (op_q.blob[0].words == 17'h0) begin
+                state_q <= StShModCpl;
+              end else begin
+                state_q <= StShRd;
+              end
+            end
+          end
+          // stream blob[0] words: CS read (StCsRd->StCsCap->csw_q),
+          // then a sh_wr pulse in StShWr
+          StShRd: begin
+            csa_q    <= cs_base_q + op_q.blob[0].off + shw_i_q;
+            cs_ret_q <= StShWr;
+            state_q  <= StCsRd;
+          end
+          StShWr: begin
+            shw_i_q <= shw_i_q + 16'd1;
+            state_q <= (shw_i_q + 16'd1 >= shw_n_q)
+                       ? StShModCpl : StShRd;
+          end
+          // staging done: ObjTab.ALLOC the module object
+          StShModCpl: begin
+            automatic int ns = role_slot(op_q, APU_VN_ROLE_NEW);
+            automatic int ps = act_q.parent_qslot != APU_VN_QSLOT_NONE
+                               ? int'(act_q.parent_qslot) : -1;
+            otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
+                       id: op_q.q[ns],
+                       kind: act_q.obj_kind,
+                       parent_id: ps < 0 ? 64'h0
+                                         : {32'h0, hnd_q[ps]},
+                       ctx: ctx_i, default: '0};
+            ot_ret_q <= StAllocCpl;
+            state_q  <= StOtReq;
+          end
+          // ---- §7b/5a-ii: vkCreateComputePipelines element -----------
+          // staged payload: 5 words per element {module id(2),
+          // spec presence(1), layout id(2)} at staging offset 5*i
+          StPipeH0: begin
+            stg_i_q   <= StgBits'({2'b0, blob_i_q} * 3'd5);
+            stg_ret_q <= StPipeH1;
+            state_q   <= StStgRd;
+          end
+          StPipeH1: begin
+            pl_modid_q[31:0] <= stg_word_q;
+            stg_i_q <= stg_i_q + 1'b1;
+            stg_ret_q <= StPipeH2;
+            state_q   <= StStgRd;
+          end
+          StPipeH2: begin
+            pl_modid_q[63:32] <= stg_word_q;
+            stg_i_q <= stg_i_q + 1'b1;
+            stg_ret_q <= StPipeH3;
+            state_q   <= StStgRd;
+          end
+          StPipeH3: begin
+            pl_spec_q <= stg_word_q != 32'h0;
+            stg_i_q <= stg_i_q + 1'b1;
+            stg_ret_q <= StPipeH4;
+            state_q   <= StStgRd;
+          end
+          StPipeH4: begin
+            pl_layid_q[31:0] <= stg_word_q;
+            stg_i_q <= stg_i_q + 1'b1;
+            stg_ret_q <= StPipeLay0;
+            state_q   <= StStgRd;
+          end
+          StPipeLay0: begin
+            pl_layid_q[63:32] <= stg_word_q;
+            if (pl_spec_q) begin
+              state_q <= StPipeFail;
+            end else begin
+              // LOOKUP the shader module -> {slot, nwords} in aux
+              otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                           id: pl_modid_q,
+                           kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StPipeModCpl;
+              state_q  <= StOtReq;
+            end
+          end
+          StPipeModCpl: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              state_q <= StPipeFail;
+            end else begin
+              sh_slot_q <= ot_cpl_i.entry.aux[2:0];
+              sh_nw_q   <= ot_cpl_i.entry.aux[31:16];
+              otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                           id: pl_layid_q,
+                           kind: 6'(APU_VN_KIND_VK_PIPELINE_LAYOUT),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StPipeLayCpl;
+              state_q  <= StOtReq;
+            end
+          end
+          StPipeLayCpl: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              state_q <= StPipeFail;
+            end else begin
+              pl_layh_q <= ot_cpl_i.handle;
+              state_q   <= StShCommit;
+            end
+          end
+          // commit the module's code into its slot; wait sh_c_done
+          StShCommit: state_q <= StShCWait;
+          StShCWait: if (sh_c_done_i) begin
+            shc_ok_q <= sh_c_done_pl_i.ok;
+            if (!sh_c_done_pl_i.ok) begin
+              state_q <= StPipeFail;
+            end else begin
+              // commit ok: the pipeline holds a slot reference
+              sm_op_q   <= APU_SH_SM_REF;
+              sm_ret_q  <= StPipeAllocC;
+              state_q   <= StSmReq;
+            end
+          end
+          // REF ok -> ObjTab.ALLOC the pipeline object
+          StPipeAllocC: begin
+            if (!sm_ok_q) begin
+              state_q <= StPipeFail;
+            end else begin
+              otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
+                         id: blob_id_q,
+                         kind: act_q.obj_kind,
+                         parent_id: act_q.parent_qslot ==
+                                    APU_VN_QSLOT_NONE
+                                    ? 64'h0
+                                    : {32'h0,
+                                       hnd_q[int'(act_q.parent_qslot)]},
+                         ctx: ctx_i, default: '0};
+              ot_ret_q <= StPipeAuxC;
+              state_q  <= StOtReq;
+            end
+          end
+          StPipeAuxC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              // no object: release the reference we just took
+              sm_op_q  <= APU_SH_SM_UNREF;
+              sm_ret_q <= StPipeFail;
+              state_q  <= StSmReq;
+            end else begin
+              hnd_pay_q <= ot_cpl_i.handle;
+              otr_q <= '{op: APU_OBJTAB_OP_SETAUX,
+                         id: {32'h0, ot_cpl_i.handle},
+                         kind: act_q.obj_kind,
+                         mask: 32'h7,
+                         value: {29'h0, sh_slot_q},
+                         ctx: ctx_i, default: '0};
+              ot_ret_q <= StPipeAuxCpl;
+              state_q  <= StOtReq;
+            end
+          end
+          StPipeAuxCpl: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              state_q <= StPipeFail;
+            end else begin
+              // aux[63:32] = pipeline-layout handle {gen,slot}
+              auxhi_val_q <= pl_layh_q;
+              auxhi_ret_q <= StPipeAuxHiC;
+              state_q     <= StAuxSet;
+            end
+          end
+          StPipeAuxHiC: begin
+            blob_i_q <= blob_i_q + 5'd1;
+            state_q  <= StBlobRd;
+          end
+          // failed element: first error + VK_NULL_HANDLE echo
+          StPipeFail: begin
+            if (!pl_errv_q) begin
+              pl_errv_q <= 1'b1;
+              result_q  <= APU_VK_ERROR_UNKNOWN;
+            end
+            rep_null_mask_q[blob_i_q] <= 1'b1;
+            blob_i_q <= blob_i_q + 5'd1;
+            state_q  <= StBlobRd;
+          end
+
+          // ---- §7b/5a-ii: retire continuation after sm UNREF ----------
+          StRetSm: begin
+            otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
+                         id: op_q.q[
+                             role_slot(op_q, APU_VN_ROLE_RETIRE)],
+                         kind: act_q.obj_kind, default: '0};
+            ot_ret_q <= StRetCpl;
+            state_q  <= StOtReq;
+          end
+
           // ---- reply --------------------------------------------------------
           StRep: begin
             if (rep_skip_q || !op_q.cmd_flags[0] ||
@@ -2013,6 +2425,8 @@ module g6lc_apu_vnfront_fixture
   import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
+  import g6lc_apu_sh_pkg::*;
+  import g6lc_apu_vgpages_pkg::*;
 #(parameter bit Enable = 1'b0,
   parameter int unsigned Fences = 16,
   parameter int unsigned CbBufs = 16,
@@ -2053,6 +2467,24 @@ module g6lc_apu_vnfront_fixture
   input  logic               op_cpl_valid_i,
   output logic               op_cpl_ready_o,
   input  apu_objpay_cpl_t    op_cpl_i,
+  output logic               sm_req_o,
+  output apu_sh_sm_req_t     sm_req_pl_o,
+  input  logic               sm_cpl_i,
+  input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
+  output logic               sh_wr_en_o,
+  output logic [2:0]         sh_wr_slot_o,
+  output logic [15:0]        sh_wr_addr_o,
+  output logic [31:0]        sh_wr_data_o,
+  output logic               sh_commit_o,
+  output apu_sh_commit_t     sh_commit_pl_o,
+  input  logic               sh_c_done_i,
+  input  apu_sh_cpl_t        sh_c_done_pl_i,
+  output logic               pg_req_valid_o,
+  input  logic               pg_req_ready_i,
+  output apu_vgpages_req_t   pg_req_o,
+  input  logic               pg_cpl_valid_i,
+  output logic               pg_cpl_ready_o,
+  input  apu_vgpages_cpl_t   pg_cpl_i,
   output logic               ex_submit_valid_o,
   input  logic               ex_submit_ready_i,
   output apu_cmdexec_submit_t ex_submit_o,

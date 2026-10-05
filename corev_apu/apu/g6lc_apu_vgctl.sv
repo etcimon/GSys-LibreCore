@@ -11,10 +11,14 @@
 // Supported commands (UAPI values in g6lc_apu_vg_pkg): GET_CAPSET_INFO
 // (index 0 -> Venus capset, generated APU_VN_CAPSET words),
 // GET_CAPSET, CTX_CREATE (context_init & 0xff must be 4), CTX_DESTROY,
-// CTX_ATTACH/DETACH_RESOURCE, RESOURCE_CREATE_BLOB (HOST3D|MAPPABLE,
-// blob_id 0 only -> 4 KiB-page aperture allocation + ObjTab BLOB entry
-// with bind_offset/size), RESOURCE_MAP_BLOB (RESP_OK_MAP_INFO,
-// VIRTIO_GPU_MAP_CACHE_WC), RESOURCE_UNMAP_BLOB, RESOURCE_UNREF,
+// CTX_ATTACH/DETACH_RESOURCE, RESOURCE_CREATE_BLOB (HOST3D|MAPPABLE;
+// blob_id 0 -> 4 KiB-page aperture allocation + ObjTab BLOB entry
+// with bind_offset/size; blob_id != 0 resolves a VkDeviceMemory
+// object of that driver id and maps the resource onto the memory's
+// aperture extent, aux[0]=1 marking it memory-backed so UNREF does
+// not free the pages — the memory object owns them),
+// RESOURCE_MAP_BLOB (RESP_OK_MAP_INFO, VIRTIO_GPU_MAP_CACHE_WC, the
+// window-relative offset), RESOURCE_UNMAP_BLOB, RESOURCE_UNREF,
 // SUBMIT_3D (execbuffer handoff; `size` beyond the chain payload is
 // RESP_ERR_UNSPEC).  Unknown type -> RESP_ERR_UNSPEC; a chain too
 // short for the declared request gets a header-only response and a
@@ -22,9 +26,11 @@
 // and pulses fence_done_o after the command completes (after the pump
 // finishes for SUBMIT_3D).
 //
-// Aperture allocator: ShmPages x 4 KiB pages over APU_VG_SHM_BASE,
-// first-fit bitmap.  ObjTab kind APU_VN_KIND_APU_BLOB_SHMEM entries
-// carry bind_offset = APU_VG_SHM_BASE + page*4KiB and size.
+// Aperture pages come from the shared g6lc_apu_vgpages allocator
+// (pg_* port, grant-arbitrated in vgtop with the vnfront
+// vkAllocateMemory path).  ObjTab kind APU_VN_KIND_APU_BLOB_SHMEM
+// entries carry bind_offset = APU_VG_SHM_BASE + window offset and
+// size.
 //
 // Timing impact: one guest-mem word or one ObjTab transaction per
 // micro-step; the page scan is a single 256-entry first-fit cone.
@@ -37,9 +43,9 @@ module g6lc_apu_vgctl
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_vgpages_pkg::*;
 #(
-  parameter bit          Enable   = 1'b0,
-  parameter int unsigned ShmPages = 256     // APU aperture 1 MiB / 4 KiB
+  parameter bit          Enable   = 1'b0
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -62,6 +68,13 @@ module g6lc_apu_vgctl
   input  logic            ot_cpl_valid_i,
   output logic            ot_cpl_ready_o,
   input  apu_objtab_cpl_t ot_cpl_i,
+  // aperture page allocator port (§7b/5a-ii, arbitrated in vgtop)
+  output logic             pg_req_valid_o,
+  input  logic             pg_req_ready_i,
+  output apu_vgpages_req_t pg_req_o,
+  input  logic             pg_cpl_valid_i,
+  output logic             pg_cpl_ready_o,
+  input  apu_vgpages_cpl_t pg_cpl_i,
   // pump handoff: SUBMIT_3D execbuffer stream (guest memory)
   output logic            xs_valid_o,
   input  logic            xs_ready_i,
@@ -82,7 +95,6 @@ module g6lc_apu_vgctl
 );
   localparam int unsigned REQW   = 64;    // request staging words
   localparam int unsigned RESPW  = 48;    // response staging words
-  localparam int unsigned PAGE_W = $clog2(ShmPages);
   // request sizes in 32-bit words (UAPI struct = 6-word hdr + body)
   function automatic logic [8:0] req_words(input logic [31:0] ty);
     case (ty)
@@ -107,6 +119,8 @@ module g6lc_apu_vgctl
     assign mem_addr_o = '0;      assign mem_wdata_o = '0;
     assign ot_req_valid_o = 1'b0; assign ot_req_o = '0;
     assign ot_cpl_ready_o = 1'b0;
+    assign pg_req_valid_o = 1'b0; assign pg_req_o = '0;
+    assign pg_cpl_ready_o = 1'b0;
     assign xs_valid_o = 1'b0;    assign xs_desc_o = '{default: '0};
     assign xs_ndesc_o = '0;      assign xs_off_o = '0;
     assign xs_bytes_o = '0;      assign xs_ctx_o = '0;
@@ -118,6 +132,7 @@ module g6lc_apu_vgctl
     assign unused = clk_i | rst_ni | testmode_i | chain_valid_i |
                     (|chain_n_i) | (|chain_desc_i[0]) | mem_rdata_i |
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
+                    pg_req_ready_i | pg_cpl_valid_i | (|pg_cpl_i) |
                     xs_ready_i | xs_done_i | xs_fault_i |
                     (|chain_desc_i[1]) | (|chain_desc_i[2]) |
                     (|chain_desc_i[3]);
@@ -125,7 +140,8 @@ module g6lc_apu_vgctl
     typedef enum logic [4:0] {
       StIdle, StRdDesc, StRdFire, StRdCap, StHdr, StBody,
       StDispatch, StOtReq, StOtCpl, StBindReq, StBindCpl,
-      StPageScan, StXsFire, StXsWait,
+      StMemReq, StMemCpl, StAuxReq, StAuxCpl,
+      StPgReq, StPgCpl, StXsFire, StXsWait,
       StWrPrep, StWrFind, StWrFire, StWrCap, StDone, StFence
     } state_e;
     state_e state_q;
@@ -149,11 +165,14 @@ module g6lc_apu_vgctl
     logic [63:0]  rfence_q;
     logic         trunc_q;       // chain short of the declared request
     logic [31:0]  payload_b_q;   // SUBMIT_3D payload bytes handed off
-    logic [ShmPages-1:0] page_q;
-    logic [PAGE_W:0]   scan_q;
-    logic [PAGE_W-1:0] free_q;   // first page of the found run
-    logic [PAGE_W:0]   run_q;    // pages still needed in the run
     logic [63:0]  blob_addr_q, blob_size_q;
+    // §7b: blob_id != 0 maps a DEVICE_MEMORY object; aux[0] marks the
+    // blob memory-backed so UNREF leaves the pages to the memory.
+    logic         blob_mem_q;
+    // page-allocator in-flight op
+    apu_vgpages_op_e pg_op_q;
+    logic [31:0]  pg_base_q, pg_bytes_q;
+    state_e       pg_ret_q;
 
     // bytes remaining in current read desc
     logic [31:0] rd_rem;
@@ -179,12 +198,22 @@ module g6lc_apu_vgctl
 
     // ---- ObjTab port -------------------------------------------------------
     logic ot_fire;
-    assign ot_fire = state_q == StOtReq || state_q == StBindReq;
+    assign ot_fire = state_q == StOtReq || state_q == StBindReq ||
+                     state_q == StMemReq || state_q == StAuxReq;
     assign ot_req_valid_o = ot_fire;
-    assign ot_cpl_ready_o = state_q == StOtCpl || state_q == StBindCpl;
+    assign ot_cpl_ready_o = state_q == StOtCpl || state_q == StBindCpl ||
+                            state_q == StMemCpl || state_q == StAuxCpl;
     always_comb begin
       ot_req_o = apu_objtab_req_t'('0);
       unique case (state_q)
+        StMemReq: ot_req_o = '{op: APU_OBJTAB_OP_LOOKUP,
+            id: {req_ram[11], req_ram[10]},      // blob_id = memory id
+            kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY), default: '0};
+        StAuxReq: ot_req_o = '{op: APU_OBJTAB_OP_SETAUX,
+            id: APU_VG_ID_TAG | {32'h0, req_ram[6]},
+            kind: 6'(APU_VN_KIND_APU_BLOB_SHMEM),
+            mask: 32'h1, value: 32'h1,           // aux[0] = memory-backed
+            default: '0};
         StOtReq: begin
           unique case (rtype_q)
             APU_VG_CTX_CREATE: ot_req_o = '{op: APU_OBJTAB_OP_ALLOC,
@@ -213,6 +242,12 @@ module g6lc_apu_vgctl
       endcase
     end
 
+    // ---- page-allocator port ----------------------------------------------
+    assign pg_req_valid_o = state_q == StPgReq;
+    assign pg_cpl_ready_o = state_q == StPgCpl;
+    assign pg_req_o = '{op: pg_op_q, base: pg_base_q,
+                       bytes: pg_bytes_q};
+
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         state_q <= StIdle;
@@ -223,8 +258,9 @@ module g6lc_apu_vgctl
         resp_left_q <= '0; used_q <= '0; need_q <= '0;
         rtype_q <= '0; rflags_q <= '0; rctx_q <= '0; rring_q <= '0;
         rfence_q <= '0; trunc_q <= 1'b0; payload_b_q <= '0;
-        page_q <= '0; scan_q <= '0; free_q <= '0; run_q <= '0;
-        blob_addr_q <= '0; blob_size_q <= '0;
+        blob_addr_q <= '0; blob_size_q <= '0; blob_mem_q <= 1'b0;
+        pg_op_q <= APU_VGPAGES_OP_ALLOC; pg_base_q <= '0;
+        pg_bytes_q <= '0; pg_ret_q <= StIdle;
         for (int i = 0; i < REQW; i++) req_ram[i] <= '0;
         for (int i = 0; i < RESPW; i++) resp_ram[i] <= '0;
       end else begin
@@ -345,17 +381,23 @@ module g6lc_apu_vgctl
                 APU_VG_CREATE_BLOB: begin
                   if (req_ram[7] != APU_VG_BLOB_HOST3D ||
                       (req_ram[8] & APU_VG_BLOB_MAPPABLE) == 32'h0 ||
-                      {req_ram[11], req_ram[10]} != 64'h0 ||
                       {req_ram[13], req_ram[12]} == 64'h0) begin
                     resp_ram[0] <= APU_VG_ERR_PARAM;
                     state_q <= StWrPrep;
+                  end else if ({req_ram[11], req_ram[10]} != 64'h0) begin
+                    // blob_id != 0: resolve the VkDeviceMemory of that
+                    // driver id; the resource maps onto its aperture
+                    // extent (LOOKUP -> ALLOC -> SETBIND -> aux[0]).
+                    blob_mem_q <= 1'b1;
+                    state_q    <= StMemReq;
                   end else begin
+                    blob_mem_q  <= 1'b0;
                     blob_size_q <= {req_ram[13], req_ram[12]};
-                    scan_q <= '0;
-                    free_q <= '0;
-                    run_q <= (PAGE_W + 1)'(
-                        ({req_ram[13], req_ram[12]} + 64'd4095) >> 12);
-                    state_q <= StPageScan;
+                    pg_op_q     <= APU_VGPAGES_OP_ALLOC;
+                    pg_base_q   <= '0;
+                    pg_bytes_q  <= req_ram[12];
+                    pg_ret_q    <= StOtReq;
+                    state_q     <= StPgReq;
                   end
                 end
                 APU_VG_MAP_BLOB, APU_VG_UNMAP_BLOB, APU_VG_UNREF: begin
@@ -380,34 +422,50 @@ module g6lc_apu_vgctl
             end
           end
 
-          // ---- aperture first-fit page scan -------------------------------
-          // free_q = candidate run start; scan_q walks pages; run_q =
-          // pages still needed to satisfy the allocation.
-          StPageScan: begin
-            if (run_q == '0) begin
-              // run found: mark the pages and allocate the ObjTab entry
-              blob_addr_q <= APU_VG_SHM_BASE + (64'(free_q) << 12);
-              for (int i = 0; i < ShmPages; i++)
-                if (i >= free_q &&
-                    64'(i) < 64'(free_q) +
-                    ((blob_size_q + 64'd4095) >> 12))
-                  page_q[i] <= 1'b1;
-              state_q <= StOtReq;
-            end else if (scan_q >= (PAGE_W + 1)'(ShmPages)) begin
-              resp_ram[0] <= APU_VG_ERR_PARAM;   // aperture exhausted
-              state_q <= StWrPrep;
-            end else if (page_q[scan_q[PAGE_W-1:0]]) begin
-              free_q <= PAGE_W'(scan_q) + 1'b1;
-              scan_q <= scan_q + 1'b1;
-            end else begin
-              if ((PAGE_W + 2)'(scan_q) + 10'd1 - (PAGE_W + 2)'(free_q)
-                  >= (PAGE_W + 2)'(run_q)) begin
-                run_q <= '0;               // found: commit next cycle
+          // ---- aperture page allocator (§7b) -------------------------
+          StPgReq: if (pg_req_ready_i) state_q <= StPgCpl;
+          StPgCpl: begin
+            if (pg_cpl_valid_i) begin
+              if (pg_op_q == APU_VGPAGES_OP_ALLOC) begin
+                if (pg_cpl_i.status == APU_VGPAGES_OK) begin
+                  // window-relative byte offset -> SHM window address
+                  blob_addr_q <= APU_VG_SHM_BASE +
+                                 64'(pg_cpl_i.base);
+                  state_q <= pg_ret_q;
+                end else begin
+                  resp_ram[0] <= APU_VG_ERR_PARAM;  // aperture exhausted
+                  state_q <= StWrPrep;
+                end
               end else begin
-                scan_q <= scan_q + 1'b1;
+                state_q <= pg_ret_q;                // FREE result ignored
               end
             end
           end
+
+          // ---- blob_id != 0: memory-object resolve -------------------
+          StMemReq: if (ot_req_ready_i) state_q <= StMemCpl;
+          StMemCpl: begin
+            if (ot_cpl_valid_i) begin
+              if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+                resp_ram[0] <= APU_VG_ERR_RID;   // unknown memory id
+                state_q <= StWrPrep;
+              end else if ({req_ram[13], req_ram[12]} >
+                           ot_cpl_i.entry.size) begin
+                resp_ram[0] <= APU_VG_ERR_PARAM; // blob larger than mem
+                state_q <= StWrPrep;
+              end else begin
+                // map onto the memory's aperture extent
+                blob_addr_q <= APU_VG_SHM_BASE +
+                               ot_cpl_i.entry.aux[63:32];
+                blob_size_q <= ot_cpl_i.entry.size;
+                state_q     <= StOtReq;          // ALLOC the blob entry
+              end
+            end
+          end
+
+          // mark the blob memory-backed so UNREF skips the page free
+          StAuxReq: if (ot_req_ready_i) state_q <= StAuxCpl;
+          StAuxCpl: if (ot_cpl_valid_i) state_q <= StWrPrep;
 
           // ---- ObjTab transactions ------------------------------------------
           // the request holds valid until the table is ready: the
@@ -427,7 +485,9 @@ module g6lc_apu_vgctl
                   else if (rtype_q == APU_VG_MAP_BLOB) begin
                     resp_ram[0] <= APU_VG_RESP_MAP_INFO;
                     resp_ram[6] <= APU_VG_MAP_WC;
-                    resp_ram[7] <= 32'd0;
+                    // window-relative byte offset of the mapped extent
+                    resp_ram[7] <= 32'(ot_cpl_i.entry.bind_offset -
+                                       APU_VG_SHM_BASE);
                     resp_n_q <= 9'd8;
                   end
                   state_q <= StWrPrep;
@@ -441,20 +501,22 @@ module g6lc_apu_vgctl
                   end
                 end
                 APU_VG_UNREF: begin
-                  if (ot_cpl_i.status == APU_OBJTAB_OK) begin
-                    // free the blob's aperture pages
-                    for (int i = 0; i < ShmPages; i++)
-                      if (64'(i) >= ((ot_cpl_i.entry.bind_offset -
-                                     APU_VG_SHM_BASE) >> 12) &&
-                          64'(i) < ((ot_cpl_i.entry.bind_offset -
-                                     APU_VG_SHM_BASE +
-                                     ot_cpl_i.entry.size + 64'd4095)
-                                    >> 12))
-                        page_q[i] <= 1'b0;
-                  end else begin
+                  if (ot_cpl_i.status != APU_OBJTAB_OK) begin
                     resp_ram[0] <= APU_VG_ERR_RID;
+                    state_q <= StWrPrep;
+                  end else if (ot_cpl_i.entry.aux[0]) begin
+                    // memory-backed blob: the pages belong to the
+                    // DEVICE_MEMORY object (freed at vkFreeMemory)
+                    state_q <= StWrPrep;
+                  end else begin
+                    // blob-owned pages: return them to the allocator
+                    pg_op_q    <= APU_VGPAGES_OP_FREE;
+                    pg_base_q  <= 32'(ot_cpl_i.entry.bind_offset -
+                                      APU_VG_SHM_BASE);
+                    pg_bytes_q <= ot_cpl_i.entry.size[31:0];
+                    pg_ret_q   <= StWrPrep;
+                    state_q    <= StPgReq;
                   end
-                  state_q <= StWrPrep;
                 end
                 default: state_q <= StWrPrep;   // CTX_DESTROY (RESET_CTX)
               endcase
@@ -463,9 +525,14 @@ module g6lc_apu_vgctl
           StBindReq: if (ot_req_ready_i) state_q <= StBindCpl;
           StBindCpl: begin
             if (ot_cpl_valid_i) begin
-              if (ot_cpl_i.status != APU_OBJTAB_OK)
+              if (ot_cpl_i.status != APU_OBJTAB_OK) begin
                 resp_ram[0] <= APU_VG_ERR_RID;
-              state_q <= StWrPrep;
+                state_q <= StWrPrep;
+              end else if (rtype_q == APU_VG_CREATE_BLOB && blob_mem_q) begin
+                state_q <= StAuxReq;   // mark memory-backed (aux[0])
+              end else begin
+                state_q <= StWrPrep;
+              end
             end
           end
 

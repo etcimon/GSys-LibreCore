@@ -53,6 +53,12 @@ module g6lc_apu_shcore
   output apu_sh_cpl_t  c_done_pl_o,
   input  logic         retire_i,
   input  logic [2:0]   retire_slot_i,
+  // slot manager (§7b): module/pipeline slot ownership.  sm_req_i is a
+  // one-cycle request pulse; sm_cpl_o pulses on the next cycle.
+  input  logic         sm_req_i,
+  input  apu_sh_sm_req_t sm_req_pl_i,
+  output logic         sm_cpl_o,
+  output apu_sh_sm_cpl_t sm_cpl_pl_o,
   // cmdexec work-port record: {ctype[31:0], imm[0..2]=gx,gy,gz}
   input  logic         work_i,
   output logic         work_ready_o,
@@ -78,6 +84,7 @@ module g6lc_apu_shcore
   if (!Enable) begin : gen_off
     assign c_busy_o = 1'b0;    assign c_done_o = 1'b0;
     assign c_done_pl_o = '0;
+    assign sm_cpl_o = 1'b0;    assign sm_cpl_pl_o = '0;
     assign work_ready_o = 1'b0;
     assign busy_o = 1'b0;      assign done_o = 1'b0;
     assign done_pl_o = '0;
@@ -88,7 +95,8 @@ module g6lc_apu_shcore
     assign unused = clk_i | rst_ni | testmode_i | wr_en_i |
                     (|wr_slot_i) | (|wr_addr_i) | (|wr_data_i) |
                     commit_i | (|commit_pl_i) | retire_i |
-                    (|retire_slot_i) | work_i | (|work_ctype_i) |
+                    (|retire_slot_i) | sm_req_i | (|sm_req_pl_i) |
+                    work_i | (|work_ctype_i) |
                     (|work_imm_i) | (|disp_slot_i) | (|binds_i) |
                     (|push_n_i) | (|push_i) | (|mem_rdata_i);
   end else begin : gen_on
@@ -113,6 +121,81 @@ module g6lc_apu_shcore
 
     wire is_dispatch = (work_ctype_i ==
                         32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT));
+
+    // ---- slot manager (§7b): users-per-slot ownership ------------------
+    // ALLOC picks the lowest users==0 slot; REF/UNREF adjust a slot's
+    // users; reaching 0 retires the slot internally through the same
+    // retire port path as retire_i.
+    // users indexed over the full 3-bit slot space; slots beyond
+    // ShaderSlots always read users=0 (dead -> REF/UNREF refuse,
+    // ALLOC never picks them)
+    logic [7:0]  users_q [8];
+    logic        sm_cpl_v_q;
+    apu_sh_sm_cpl_t sm_cpl_q;
+    logic        sm_retire_q;
+    logic [2:0]  sm_retire_slot_q;
+    logic        sm_free_any;
+    logic [2:0]  sm_free_idx;
+
+    always_comb begin
+      sm_free_any = 1'b0;
+      sm_free_idx = '0;
+      for (int i = 0; i < ShaderSlots; i++)
+        if (!sm_free_any && users_q[i] == 8'h0) begin
+          sm_free_any = 1'b1;
+          sm_free_idx = 3'(i);
+        end
+    end
+
+    assign sm_cpl_o    = sm_cpl_v_q;
+    assign sm_cpl_pl_o = sm_cpl_q;
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        for (int i = 0; i < 8; i++) users_q[i] <= '0;
+        sm_cpl_v_q <= 1'b0; sm_cpl_q <= '0;
+        sm_retire_q <= 1'b0; sm_retire_slot_q <= '0;
+      end else begin
+        sm_cpl_v_q  <= 1'b0;
+        sm_retire_q <= 1'b0;
+        if (sm_req_i) begin
+          sm_cpl_v_q <= 1'b1;
+          unique case (sm_req_pl_i.op)
+            APU_SH_SM_ALLOC: begin
+              if (sm_free_any) begin
+                users_q[sm_free_idx] <= 8'd1;
+                sm_cpl_q <= '{ok: 1'b1, slot: sm_free_idx};
+              end else begin
+                sm_cpl_q <= '{ok: 1'b0, slot: '0};
+              end
+            end
+            APU_SH_SM_REF: begin
+              if (users_q[sm_req_pl_i.slot] != 8'h0 &&
+                  users_q[sm_req_pl_i.slot] != 8'hFF) begin
+                users_q[sm_req_pl_i.slot] <=
+                  users_q[sm_req_pl_i.slot] + 8'd1;
+                sm_cpl_q <= '{ok: 1'b1, slot: sm_req_pl_i.slot};
+              end else begin
+                sm_cpl_q <= '{ok: 1'b0, slot: sm_req_pl_i.slot};
+              end
+            end
+            default: begin // APU_SH_SM_UNREF
+              if (users_q[sm_req_pl_i.slot] != 8'h0) begin
+                users_q[sm_req_pl_i.slot] <=
+                  users_q[sm_req_pl_i.slot] - 8'd1;
+                sm_cpl_q <= '{ok: 1'b1, slot: sm_req_pl_i.slot};
+                if (users_q[sm_req_pl_i.slot] == 8'd1) begin
+                  sm_retire_q      <= 1'b1;
+                  sm_retire_slot_q <= sm_req_pl_i.slot;
+                end
+              end else begin
+                sm_cpl_q <= '{ok: 1'b0, slot: sm_req_pl_i.slot};
+              end
+            end
+          endcase
+        end
+      end
+    end
 
     // valid/ready: the record is consumed only when the accept FSM is
     // idle and nothing is in flight; a work_i held while !ready is
@@ -165,7 +248,8 @@ module g6lc_apu_shcore
       .wr_en_i, .wr_slot_i, .wr_addr_i, .wr_data_i,
       .commit_i, .commit_pl_i,
       .busy_o(c_busy_o), .done_o(c_done_o), .done_pl_o(c_done_pl_o),
-      .retire_i, .retire_slot_i,
+      .retire_i(retire_i | sm_retire_q),
+      .retire_slot_i(sm_retire_q ? sm_retire_slot_q : retire_slot_i),
       .rd_slot_i(rd_slot), .prog_addr_i(prog_addr),
       .prog_data_o(prog_data),
       .type_id_i(type_id), .type_data_o(type_data),
@@ -239,6 +323,10 @@ module g6lc_apu_shcore_fixture
   output apu_sh_cpl_t  c_done_pl_o,
   input  logic         retire_i,
   input  logic [2:0]   retire_slot_i,
+  input  logic         sm_req_i,
+  input  apu_sh_sm_req_t sm_req_pl_i,
+  output logic         sm_cpl_o,
+  output apu_sh_sm_cpl_t sm_cpl_pl_o,
   input  logic         work_i,
   output logic         work_ready_o,
   input  logic [31:0]  work_ctype_i,

@@ -36,6 +36,8 @@ module tb_g6lc_apu_shcore;
   logic         commit; apu_sh_commit_t commit_pl;
   logic         c_busy; logic c_done; apu_sh_cpl_t c_done_pl;
   logic         retire; logic [2:0]  retire_slot;
+  logic         sm_req; apu_sh_sm_req_t sm_pl;
+  logic         sm_cpl; apu_sh_sm_cpl_t sm_cpl_pl;
   logic         work;   logic        work_ready;
   logic [31:0]  work_ctype;
   logic [8*32-1:0] work_imm;
@@ -64,6 +66,8 @@ module tb_g6lc_apu_shcore;
     .commit_i(commit), .commit_pl_i(commit_pl),
     .c_busy_o(c_busy), .c_done_o(c_done), .c_done_pl_o(c_done_pl),
     .retire_i(retire), .retire_slot_i(retire_slot),
+    .sm_req_i(sm_req), .sm_req_pl_i(sm_pl),
+    .sm_cpl_o(sm_cpl), .sm_cpl_pl_o(sm_cpl_pl),
     .work_i(work), .work_ready_o(work_ready),
     .work_ctype_i(work_ctype), .work_imm_i(work_imm),
     .disp_slot_i(disp_slot), .binds_i(binds),
@@ -73,6 +77,7 @@ module tb_g6lc_apu_shcore;
     .mem_wdata_o(mem_wdata), .mem_wstrb_o(mem_wstrb),
     .mem_rdata_i(mem_rdata));
 
+  logic off_sm_cpl; apu_sh_sm_cpl_t off_sm_pl;
   g6lc_apu_shcore #(.Enable(0)) off (
     .clk_i(clk), .rst_ni(rst_n), .testmode_i(1'b0),
     .wr_en_i(wr_en), .wr_slot_i(wr_slot), .wr_addr_i(wr_addr),
@@ -81,6 +86,8 @@ module tb_g6lc_apu_shcore;
     .c_busy_o(off_c_busy), .c_done_o(off_c_done),
     .c_done_pl_o(off_c_pl),
     .retire_i(retire), .retire_slot_i(retire_slot),
+    .sm_req_i(sm_req), .sm_req_pl_i(sm_pl),
+    .sm_cpl_o(off_sm_cpl), .sm_cpl_pl_o(off_sm_pl),
     .work_i(work), .work_ready_o(off_ready),
     .work_ctype_i(work_ctype), .work_imm_i(work_imm),
     .disp_slot_i(disp_slot), .binds_i(binds),
@@ -97,6 +104,7 @@ module tb_g6lc_apu_shcore;
     if (!rst_n) off_bad <= 1'b0;
     else if (!off_bad &&
              (off_c_busy | off_c_done | (|off_c_pl) |
+              off_sm_cpl | (|off_sm_pl) |
               off_ready | off_busy | off_done | (|off_pl) |
               off_mem_re | off_mem_we | (|off_mem_addr) |
               (|off_mem_wdata) | (|off_mem_wstrb))) begin
@@ -195,6 +203,20 @@ module tb_g6lc_apu_shcore;
     @(negedge clk); retire = 0;
   endtask
 
+  // one slot-manager request; cpl pulses on the accept cycle's next
+  // clock, visible at the second negedge
+  task automatic sm_op(input apu_sh_sm_op_e op, input int slot,
+                       output apu_sh_sm_cpl_t pl);
+    @(negedge clk);
+    sm_req = 1; sm_pl = '{op: op, slot: slot[2:0]};
+    @(negedge clk);
+    sm_req = 0; pl = sm_cpl_pl;
+    checks++;
+    if (sm_cpl !== 1'b1) begin
+      fails++; $display("FAIL sm no completion op=%0d", op);
+    end
+  endtask
+
   // stage vector file + bindings + buffers for one slot
   task automatic stage(input string file, input int slot,
                        output int n, output int nb, output int np,
@@ -245,6 +267,7 @@ module tb_g6lc_apu_shcore;
     if (!$value$plusargs("shv=%s", shv)) shv = "verif/tb/apu/sh_vectors";
     checks = 0; cases = 0; fails = 0; cyc = 0;
     wr_en = 0; commit = 0; retire = 0; work = 0; work_ctype = 0;
+    sm_req = 0; sm_pl = '0;
     work_imm = '0; disp_slot = 0; binds = '0; push_n = 0; push = '0;
     for (int i = 0; i < MEMW; i++) mem[i] = '0;
     mem_rdata = '0;
@@ -334,7 +357,32 @@ module tb_g6lc_apu_shcore;
     cmp("bad.commit.code", {24'h0, cpl.fault.code}, ebuf[0]);
     retire_do(2);
 
-    // 8. Enable=0 quiet (continuous monitor + final check)
+    // 8. slot manager (§7b): ALLOC/REF/UNREF lifecycle, retire-at-0
+    //    reuse, underflow/dead-ref refusal, full pool
+    cases++;
+    begin
+      apu_sh_sm_cpl_t spl;
+      sm_op(APU_SH_SM_ALLOC, 0, spl);
+      cmp("sm.alloc0.ok",   {31'h0, spl.ok}, 1);
+      cmp("sm.alloc0.slot", {29'h0, spl.slot}, 0);
+      sm_op(APU_SH_SM_REF, 0, spl);
+      cmp("sm.ref.ok",      {31'h0, spl.ok}, 1);
+      sm_op(APU_SH_SM_UNREF, 0, spl);          // users 2 -> 1
+      sm_op(APU_SH_SM_ALLOC, 0, spl);
+      cmp("sm.alloc1.slot", {29'h0, spl.slot}, 1);
+      sm_op(APU_SH_SM_UNREF, 0, spl);          // users 1 -> 0: retire
+      sm_op(APU_SH_SM_UNREF, 0, spl);
+      cmp("sm.underflow",   {31'h0, spl.ok}, 0);
+      sm_op(APU_SH_SM_REF, 0, spl);
+      cmp("sm.refdead",     {31'h0, spl.ok}, 0);
+      // fill the pool: slots 0,2..7 get users=1 (slot 1 still held)
+      for (int s = 0; s < 7; s++) sm_op(APU_SH_SM_ALLOC, 0, spl);
+      sm_op(APU_SH_SM_ALLOC, 0, spl);
+      cmp("sm.full",        {31'h0, spl.ok}, 0);
+      for (int s = 0; s < 8; s++) sm_op(APU_SH_SM_UNREF, s, spl);
+    end
+
+    // 9. Enable=0 quiet (continuous monitor + final check)
     checks++;
     if (off_bad) begin
       fails++; $display("FAIL Enable=0 not quiet");

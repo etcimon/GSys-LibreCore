@@ -27,7 +27,9 @@ module g6lc_apu_cmdexec
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
+  import g6lc_apu_sh_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
   parameter int unsigned Fences = 16
@@ -50,10 +52,24 @@ module g6lc_apu_cmdexec
   input  logic               ot_cpl_valid_i,
   output logic               ot_cpl_ready_o,
   input  apu_objtab_cpl_t    ot_cpl_i,
+  // §7b/5a-ii: ObjPay port (descriptor-set storage reads during
+  // dispatch assembly; grant-arbitrated with vnfront in vgtop)
+  output logic               op_req_valid_o,
+  input  logic               op_req_ready_i,
+  output apu_objpay_req_t    op_req_o,
+  input  logic               op_cpl_valid_i,
+  output logic               op_cpl_ready_o,
+  input  apu_objpay_cpl_t    op_cpl_i,
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,
   input  logic               work_done_i,
+  input  apu_sh_done_t       work_done_pl_i,
+  // §7b/5a-ii: shcore dispatch sideband (valid with work_o)
+  output logic [2:0]         disp_slot_o,
+  output logic [16*113-1:0]  binds_o,
+  output logic [5:0]         push_n_o,
+  output logic [1023:0]      push_o,
   output logic [15:0]        done_seq_o,
   output logic [Fences-1:0]  fence_signaled_o,
   output logic [Fences-1:0]  fence_lost_o,
@@ -67,8 +83,15 @@ module g6lc_apu_cmdexec
     assign ot_req_valid_o  = 1'b0;
     assign ot_req_o        = '0;
     assign ot_cpl_ready_o  = 1'b0;
+    assign op_req_valid_o  = 1'b0;
+    assign op_req_o        = '0;
+    assign op_cpl_ready_o  = 1'b0;
     assign work_valid_o    = 1'b0;
     assign work_o          = '0;
+    assign disp_slot_o     = '0;
+    assign binds_o         = '0;
+    assign push_n_o        = '0;
+    assign push_o          = '0;
     assign done_seq_o      = '0;
     assign fence_signaled_o = '0;
     assign fence_lost_o    = '0;
@@ -76,18 +99,26 @@ module g6lc_apu_cmdexec
     assign unused = clk_i | rst_ni | testmode_i | submit_valid_i |
                     cr_req_ready_i | cr_cpl_valid_i | (|cr_cpl_i) |
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
-                    work_ready_i | work_done_i | (|fence_clr_i) |
-                    (|submit_i);
+                    op_req_ready_i | op_cpl_valid_i | (|op_cpl_i) |
+                    work_ready_i | work_done_i | (|work_done_pl_i) |
+                    (|fence_clr_i) | (|submit_i);
   end else begin : gen_on
     localparam int unsigned Fifo = 4;
     localparam logic [4:0]   FENCE_NONE = 5'd31;
 
-    typedef enum logic [4:0] {
+    typedef enum logic [5:0] {
       StIdle, StPinReq, StPinCpl, StCntReq, StCntCpl,
       StRdReq, StRdCpl, StResReq, StResCpl, StDispatch,
       StWork, StDrain, StUnpReq, StUnpCpl, StNextBuf,
       StBufDone, StFinalDrain, StDone,
-      StPayReq, StPayCpl
+      StPayReq, StPayCpl,
+      // §7b/5a-ii: dispatch assembly
+      StDsPipeReq, StDsPipeCpl,
+      StDsSetCk, StDsSetCkN, StDsSetReq, StDsSetCpl,
+      StDsBndRd, StDsBndCpl, StDsBufChk,
+      StDsBufReq, StDsBufCpl,
+      StDsMemReq, StDsMemCpl,
+      StDsIssue, StDsDone
     } state_e;
     state_e              state_q;
     // submit FIFO (flops)
@@ -101,14 +132,30 @@ module g6lc_apu_cmdexec
     logic [7:0]          rec_n_q;       // record count
     apu_cmdrec_rec_t     rec_q;         // current record
     logic [2:0]          h_i_q;         // handle resolve cursor
-    logic [3:0]          pay_i_q;       // §7b arena read cursor
-    logic [3:0]          pay_n_q;       // §7b arena reads left
+    logic [5:0]          pay_i_q;       // §7b arena read cursor
+    logic [5:0]          pay_n_q;       // §7b arena reads left
+    logic                pay_push_q;    // walk feeds the push shadow
+    logic [5:0]          pay_dst_q;     // push shadow word offset
     logic [3:0]          pinned_q;      // per-buffer pin success
     logic                lost_q;        // DEVICE_LOST on this submit
     logic [7:0]          outst_q;       // outstanding work items
     logic [15:0]         done_seq_q;
     logic [Fences-1:0]   fsig_q, flost_q;
     apu_cmdexec_state_t  snap_q;
+    // §7b/5a-ii: dispatch assembly state
+    logic [2:0]          ds_slot_q;     // resolved module slot
+    logic [1:0]          ds_set_q;      // set index 0..3
+    logic [15:0]         ds_base_q, ds_words_q; // set storage extent
+    logic [15:0]         ds_j_q;        // binding position cursor
+    logic [1:0]          ds_k_q;        // entry word cursor 0..3
+    logic [3:0][31:0]    ds_ent_q;      // {handle,off,rng,type|unsup}
+    logic [4:0]          ds_n_q;        // bind-table count (<=16)
+    logic [63:0]         ds_eoff_q;     // bind_offset + descriptor offset
+    logic [63:0]         ds_bsz_q;      // buffer size
+    logic [15:0]         ds_memslot_q;  // bound memory slot
+    logic [16*113-1:0]   binds_q;       // {set,binding,base,size,valid}×16
+    logic [1023:0]       push_sh_q;     // 32-word push shadow
+    logic [5:0]          push_max_q;    // highest written word + 1
 
     // ---- record classification --------------------------------------
     function automatic apu_cmdexec_cls_e rec_cls(logic [31:0] t);
@@ -162,12 +209,19 @@ module g6lc_apu_cmdexec
     assign fence_lost_o   = flost_q;
     assign cr_cpl_ready_o = 1'b1;
     assign ot_cpl_ready_o = 1'b1;
+    assign op_cpl_ready_o = 1'b1;
+    assign disp_slot_o    = ds_slot_q;
+    assign binds_o        = binds_q;
+    assign push_n_o       = push_max_q;
+    assign push_o         = push_sh_q;
 
     always_comb begin
       cr_req_valid_o = 1'b0;
       cr_req_o       = '0;
       ot_req_valid_o = 1'b0;
       ot_req_o       = '0;
+      op_req_valid_o = 1'b0;
+      op_req_o       = '0;
       work_valid_o   = 1'b0;
       work_o         = '0;
       case (state_q)
@@ -200,10 +254,53 @@ module g6lc_apu_cmdexec
         end
         StPayReq: begin
           cr_req_valid_o = 1'b1;
+          // the PushConstants arena payload keeps the offset+size
+          // header words (pay[0..1]); the values start at +2
           cr_req_o       = '{op: APU_CMDREC_OP_PAYREAD,
                              cbuf: cur_q.crec[buf_i_q[1:0]],
-                             idx: 16'(rec_q.imm[7] + 32'(pay_i_q)),
+                             idx: 16'(rec_q.imm[7] + 32'(pay_i_q) +
+                                      (pay_push_q ? 32'd2 : 32'd0)),
                              default: '0};
+        end
+        StDsPipeReq: begin
+          ot_req_valid_o = 1'b1;
+          ot_req_o       = '{op: APU_OBJTAB_OP_LOOKUP,
+                             id: {32'h0, snap_q.pipeline},
+                             kind: 6'(APU_VN_KIND_VK_PIPELINE),
+                             default: '0};
+        end
+        StDsSetReq: begin
+          ot_req_valid_o = 1'b1;
+          ot_req_o       = '{op: APU_OBJTAB_OP_LOOKUP,
+                             id: {32'h0, snap_q.dset[ds_set_q]},
+                             kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
+                             default: '0};
+        end
+        StDsBndRd: begin
+          op_req_valid_o = 1'b1;
+          op_req_o       = '{op: APU_OBJPAY_OP_READ,
+                             addr: {16'h0, ds_base_q} +
+                                   (32'(ds_j_q) << 2) + 32'(ds_k_q),
+                             default: '0};
+        end
+        StDsBufReq: begin
+          ot_req_valid_o = 1'b1;
+          ot_req_o       = '{op: APU_OBJTAB_OP_LOOKUP,
+                             id: {32'h0, ds_ent_q[0]},
+                             kind: 6'(APU_VN_KIND_VK_BUFFER),
+                             default: '0};
+        end
+        StDsMemReq: begin
+          ot_req_valid_o = 1'b1;
+          // §7b: READSLOT must be live && kind == VkDeviceMemory
+          ot_req_o       = '{op: APU_OBJTAB_OP_READSLOT,
+                             id: {48'h0, ds_memslot_q},
+                             kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                             default: '0};
+        end
+        StDsIssue: begin
+          work_valid_o = 1'b1;
+          work_o       = '{ctype: rec_q.ctype, snap: snap_q, rec: rec_q};
         end
         StUnpReq: begin
           ot_req_valid_o = pinned_q[buf_i_q[1:0]];
@@ -244,9 +341,29 @@ module g6lc_apu_cmdexec
         fsig_q      <= '0;
         flost_q     <= '0;
         snap_q      <= '0;
+        ds_slot_q   <= '0;
+        ds_set_q    <= '0;
+        ds_base_q   <= '0;
+        ds_words_q  <= '0;
+        ds_j_q      <= '0;
+        ds_k_q      <= '0;
+        ds_ent_q    <= '0;
+        ds_n_q      <= '0;
+        ds_eoff_q   <= '0;
+        ds_bsz_q    <= '0;
+        ds_memslot_q <= '0;
+        binds_q     <= '0;
+        push_sh_q   <= '0;
+        push_max_q  <= '0;
+        pay_push_q  <= 1'b0;
+        pay_dst_q   <= '0;
       end else begin
-        // work completions retire outstanding items
+        // work completions retire outstanding items; a non-OK done
+        // code (§7b/5a-ii: FAULT/BUDGET/UNSUPPORTED from shcore)
+        // marks the submission lost
         if (work_done_i && outst_q != 8'h0) outst_q <= outst_q - 8'h1;
+        if (work_done_i && work_done_pl_i.code != 8'(APU_SH_DONE_OK))
+          lost_q <= 1'b1;
         // fence clear mask (vkResetFences)
         fsig_q  <= fsig_q & ~fence_clr_i;
         flost_q <= flost_q & ~fence_clr_i;
@@ -341,10 +458,19 @@ module g6lc_apu_cmdexec
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
-              snap_q.dset[2'(rec_q.imm[1] + {28'h0, pay_i_q})] <=
-                  cr_cpl_i.pdata;
-              pay_i_q <= pay_i_q + 4'd1;
-              state_q <= pay_i_q + 4'd1 >= pay_n_q
+              if (pay_push_q) begin
+                // §7b: merge the PushConstants payload into the
+                // 32-word shadow at the imm[1] word offset
+                push_sh_q[32*(pay_dst_q + pay_i_q) +: 32] <=
+                    cr_cpl_i.pdata;
+                if (pay_dst_q + pay_i_q + 6'd1 > push_max_q)
+                  push_max_q <= pay_dst_q + pay_i_q + 6'd1;
+              end else begin
+                snap_q.dset[2'(rec_q.imm[1] + {26'h0, pay_i_q})] <=
+                    cr_cpl_i.pdata;
+              end
+              pay_i_q <= pay_i_q + 6'd1;
+              state_q <= pay_i_q + 6'd1 >= pay_n_q
                          ? StNextBuf : StPayReq;
             end
           end
@@ -359,8 +485,10 @@ module g6lc_apu_cmdexec
                   APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT: begin
                     // §7b: resolved set handles live in the payload
                     // arena at imm[7]; write firstSet..firstSet+count-1
-                    pay_i_q <= '0;
-                    pay_n_q <= 4'(rec_q.imm[1] < 32'd4
+                    pay_i_q    <= '0;
+                    pay_push_q <= 1'b0;
+                    pay_dst_q  <= '0;
+                    pay_n_q    <= 6'(rec_q.imm[1] < 32'd4
                                   ? (rec_q.imm[2] < 32'd4 - rec_q.imm[1]
                                      ? rec_q.imm[2] : 32'd4 - rec_q.imm[1])
                                   : 32'd0);
@@ -378,6 +506,18 @@ module g6lc_apu_cmdexec
                     // imm[7] = payload arena base (forced by cmdrec)
                     snap_q.push_base <= rec_q.imm[7][15:0];
                     snap_q.push_len  <= rec_q.imm[2][15:0];
+                    // §7b/5a-ii: merge the arena words into the push
+                    // shadow at the imm[1] byte offset (word units),
+                    // clamped to the 32-word shadow
+                    pay_i_q    <= '0;
+                    pay_push_q <= 1'b1;
+                    pay_dst_q  <= 6'(rec_q.imm[1] >> 2);
+                    pay_n_q    <= rec_q.imm[1] >= 32'd128
+                                  ? 6'd0
+                                  : (rec_q.imm[2] >> 2) >
+                                    32'd32 - (rec_q.imm[1] >> 2)
+                                    ? 6'(32'd32 - (rec_q.imm[1] >> 2))
+                                    : 6'(rec_q.imm[2] >> 2);
                   end
                   APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT,
                   APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_2_EXT: begin
@@ -391,12 +531,31 @@ module g6lc_apu_cmdexec
                     snap_q.rp_active <= 1'b0;
                   default: ;
                 endcase
-                state_q <= rec_q.ctype ==
-                               APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT &&
-                           rec_q.imm[1] < 32'd4 && rec_q.imm[2] != 32'h0
-                           ? StPayReq : StNextBuf;
+                state_q <=
+                    (rec_q.ctype ==
+                         APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT &&
+                     rec_q.imm[1] < 32'd4 && rec_q.imm[2] != 32'h0) ||
+                    (rec_q.ctype ==
+                         APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT &&
+                     rec_q.imm[1] < 32'd128 && rec_q.imm[2] >= 32'd4)
+                    ? StPayReq : StNextBuf;
               end
-              APU_CMDEXEC_CLS_WORK:     state_q <= StWork;
+              APU_CMDEXEC_CLS_WORK: begin
+                if (rec_q.ctype ==
+                    32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT)) begin
+                  // §7b/5a-ii: no bound pipeline -> DEVICE_LOST, no
+                  // dispatch is issued
+                  if (snap_q.pipeline == 32'h0) begin
+                    lost_q  <= 1'b1;
+                    state_q <= StUnpReq;
+                  end else begin
+                    binds_q <= '0;
+                    state_q <= StDsPipeReq;
+                  end
+                end else begin
+                  state_q <= StWork;
+                end
+              end
               APU_CMDEXEC_CLS_BARRIER:  state_q <= StDrain;
               default:                  state_q <= StNextBuf;
             endcase
@@ -405,6 +564,149 @@ module g6lc_apu_cmdexec
             outst_q <= outst_q + 8'h1 -
                        ((work_done_i && outst_q != 8'h0) ? 8'h1 : 8'h0);
             state_q <= StNextBuf;
+          end
+
+          // ---- §7b/5a-ii: dispatch assembly --------------------------
+          // pipeline -> {slot, layout}
+          StDsPipeReq: if (ot_req_ready_i) state_q <= StDsPipeCpl;
+          StDsPipeCpl: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              ds_slot_q <= ot_cpl_i.entry.aux[2:0];
+              ds_set_q  <= '0;
+              ds_n_q    <= '0;
+              state_q   <= StDsSetCk;
+            end
+          end
+          // sets 0..3 from snap.dset: null entries are skipped
+          StDsSetCk: begin
+            if (ds_set_q == 2'd3) begin
+              state_q <= snap_q.dset[2'd3] == 32'h0
+                         ? StDsIssue : StDsSetReq;
+            end else if (snap_q.dset[ds_set_q] == 32'h0) begin
+              ds_set_q <= ds_set_q + 2'd1;
+            end else begin
+              state_q <= StDsSetReq;
+            end
+          end
+          // zero-binding set: advance without a binding loop
+          StDsSetCkN: begin
+            if (ds_set_q == 2'd3) begin
+              state_q <= StDsIssue;
+            end else begin
+              ds_set_q <= ds_set_q + 2'd1;
+              state_q  <= StDsSetCk;
+            end
+          end
+          StDsSetReq: if (ot_req_ready_i) state_q <= StDsSetCpl;
+          StDsSetCpl: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              // aux[63:32] = {objpay base, words}; entries are 4 words
+              ds_base_q  <= ot_cpl_i.entry.aux[63:48];
+              ds_words_q <= ot_cpl_i.entry.aux[47:32];
+              ds_j_q     <= '0;
+              ds_k_q     <= '0;
+              state_q    <= ot_cpl_i.entry.aux[47:32] == 16'h0
+                            ? StDsSetCkN : StDsBndRd;
+            end
+          end
+          // per binding: 4-word entry {handle, offset, range, type|unsup}
+          StDsBndRd:  if (op_req_ready_i) state_q <= StDsBndCpl;
+          StDsBndCpl: if (op_cpl_valid_i) begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              ds_ent_q[ds_k_q] <= op_cpl_i.rdata;
+              if (ds_k_q == 2'd3) begin
+                ds_k_q  <= '0;
+                state_q <= StDsBufChk;
+              end else begin
+                ds_k_q  <= ds_k_q + 2'd1;
+                state_q <= StDsBndRd;
+              end
+            end
+          end
+          StDsBufChk: begin
+            // unsupported flag (word3 bit31), unbound handle, or a
+            // full bind table -> DEVICE_LOST
+            if (ds_ent_q[3][31] || ds_ent_q[0] == 32'h0 ||
+                ds_n_q == 5'd16) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              state_q <= StDsBufReq;
+            end
+          end
+          // buffer -> {bind_mem_slot, bind_offset, size}
+          StDsBufReq: if (ot_req_ready_i) state_q <= StDsBufCpl;
+          StDsBufCpl: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else if (ot_cpl_i.entry.bind_mem_slot == 16'hFFFF) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              ds_memslot_q <= ot_cpl_i.entry.bind_mem_slot;
+              ds_eoff_q    <= ot_cpl_i.entry.bind_offset +
+                              {32'h0, ds_ent_q[1]};
+              ds_bsz_q     <= ot_cpl_i.entry.size;
+              state_q      <= StDsMemReq;
+            end
+          end
+          // memory slot -> aperture base in aux[63:32]
+          StDsMemReq: if (ot_req_ready_i) state_q <= StDsMemCpl;
+          StDsMemCpl: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              automatic logic [63:0] base =
+                  {32'h0, ot_cpl_i.entry.aux[63:32]} + ds_eoff_q;
+              // bind extent = min(range, buffer.size-eoff,
+              // memory.size-eoff): a buffer bound past its memory's
+              // end must not let the shader reach the next
+              // allocation's pages (defence in depth — BIND also
+              // refuses such binds)
+              automatic logic [63:0] rem_b =
+                  ds_eoff_q >= ds_bsz_q ? 64'h0
+                                        : ds_bsz_q - ds_eoff_q;
+              automatic logic [63:0] rem_m =
+                  ds_eoff_q >= ot_cpl_i.entry.size
+                  ? 64'h0 : ot_cpl_i.entry.size - ds_eoff_q;
+              automatic logic [63:0] rem   =
+                  rem_b < rem_m ? rem_b : rem_m;
+              automatic logic [31:0] sz   =
+                  {32'h0, ds_ent_q[2]} < rem ? ds_ent_q[2]
+                                             : 32'(rem);
+              binds_q[16'(ds_n_q) * 113 +: 113] <=
+                  {8'(ds_set_q), 8'(ds_j_q[7:0]), base, sz, 1'b1};
+              ds_n_q <= ds_n_q + 5'd1;
+              if (ds_j_q + 16'd1 >= {2'h0, ds_words_q[15:2]}) begin
+                // set's binding list done: advance or issue
+                if (ds_set_q == 2'd3) begin
+                  state_q <= StDsIssue;
+                end else begin
+                  ds_set_q <= ds_set_q + 2'd1;
+                  state_q  <= StDsSetCk;
+                end
+              end else begin
+                ds_j_q  <= ds_j_q + 16'd1;
+                state_q <= StDsBndRd;
+              end
+            end
+          end
+          // issue on the shcore work port; wait work_done
+          StDsIssue: if (work_ready_i) state_q <= StDsDone;
+          StDsDone: if (work_done_i) begin
+            state_q <= lost_q || work_done_pl_i.code !=
+                       8'(APU_SH_DONE_OK) ? StUnpReq : StNextBuf;
           end
           StDrain: if (outst_q == 8'h0 ||
                        (outst_q == 8'h1 && work_done_i)) begin
@@ -468,7 +770,9 @@ module g6lc_apu_cmdexec_fixture
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
+  import g6lc_apu_sh_pkg::*;
 #(parameter bit Enable = 1'b0,
   parameter int unsigned Fences = 16) (
   input  logic               clk_i,
@@ -489,10 +793,21 @@ module g6lc_apu_cmdexec_fixture
   input  logic               ot_cpl_valid_i,
   output logic               ot_cpl_ready_o,
   input  apu_objtab_cpl_t    ot_cpl_i,
+  output logic               op_req_valid_o,
+  input  logic               op_req_ready_i,
+  output apu_objpay_req_t    op_req_o,
+  input  logic               op_cpl_valid_i,
+  output logic               op_cpl_ready_o,
+  input  apu_objpay_cpl_t    op_cpl_i,
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,
   input  logic               work_done_i,
+  input  apu_sh_done_t       work_done_pl_i,
+  output logic [2:0]         disp_slot_o,
+  output logic [16*113-1:0]  binds_o,
+  output logic [5:0]         push_n_o,
+  output logic [1023:0]      push_o,
   output logic [15:0]        done_seq_o,
   output logic [Fences-1:0]  fence_signaled_o,
   output logic [Fences-1:0]  fence_lost_o,

@@ -112,6 +112,8 @@ module g6lc_apu_objtab
     logic [15:0]        res_slot_q;
     apu_objtab_entry_t  res_ent_q;
     logic               res_hdl_q;    // resolution came via handle
+    logic               res_nogen_q;  // skip the generation check
+                                      // (READSLOT)
     // operation working registers
     logic [15:0]        hit_slot_q;
     apu_objtab_entry_t  wr_ent_q;
@@ -280,6 +282,7 @@ module g6lc_apu_objtab
         input state_e      ret);
       res_id_q     <= id;
       res_hnd_q    <= hnd_en;
+      res_nogen_q  <= 1'b0;
       res_knd_q    <= knd_en;
       res_alloc_q  <= alloc;
       res_ret_q    <= ret;
@@ -312,6 +315,7 @@ module g6lc_apu_objtab
         res_st_q <= ResMiss; res_bucket_q <= '0; res_bkv_q <= 1'b0;
         alloc_bucket_q <= '0;
         res_slot_q <= '0; res_ent_q <= '0; res_hdl_q <= 1'b0;
+        res_nogen_q <= 1'b0;
         hit_slot_q <= '0; wr_ent_q <= '0; wr_slot_q <= '0;
         par_ent_q <= '0; par_slot_q <= '0;
         scan_q <= '0; pinned_q <= '0; live_q <= '0;
@@ -330,6 +334,25 @@ module g6lc_apu_objtab
             scan_q   <= '0;
             pinned_q <= '0;
             state_q  <= StScanRd;
+          end else if (req_i.op == APU_OBJTAB_OP_READSLOT) begin
+            // §7b/5a-ii: direct slot read, no generation check; a dead
+            // slot reports MISS (ResMiss -> APU_OBJTAB_MISS).  The kind
+            // check is enforced when the caller supplies a nonzero kind
+            // (dispatch requires kind == VkDeviceMemory).
+            res_id_q    <= req_i.id;
+            res_hnd_q   <= 1'b0;
+            res_nogen_q <= 1'b1;
+            res_knd_q   <= req_i.kind != 6'h0;
+            res_alloc_q <= 1'b0;
+            res_ret_q   <= StAfter;
+            res_hdl_q   <= 1'b1;
+            if (req_i.id[15:0] >= 16'(Slots)) begin
+              res_st_q <= ResMiss;
+              state_q  <= StAfter;
+            end else begin
+              res_slot_q <= req_i.id[15:0];
+              state_q    <= StResEntRd;
+            end
           end else begin
             res_start(req_i.id,
                       req_i.op != APU_OBJTAB_OP_ALLOC,
@@ -374,8 +397,11 @@ module g6lc_apu_objtab
         StResEntCmp: begin
           res_ent_q <= ent_rdata_t;
           if (res_hdl_q) begin
-            if (!ent_rdata_t.live || ent_rdata_t.gen != res_id_q[31:16]) begin
-              res_st_q <= ResGen;
+            if (!ent_rdata_t.live ||
+                (!res_nogen_q &&
+                 ent_rdata_t.gen != res_id_q[31:16])) begin
+              // READSLOT reports a dead slot as MISS, not GEN
+              res_st_q <= res_nogen_q ? ResMiss : ResGen;
               state_q  <= res_ret_q;
             end else if (res_knd_q && ent_rdata_t.kind != req_q.kind) begin
               res_st_q <= ResKind;
@@ -426,7 +452,7 @@ module g6lc_apu_objtab
                 state_q        <= StAllocSlot;
               end
             end
-            APU_OBJTAB_OP_LOOKUP: begin
+            APU_OBJTAB_OP_LOOKUP, APU_OBJTAB_OP_READSLOT: begin
               if (res_st_q == ResOk)
                 cpl_q <= '{status: APU_OBJTAB_OK,
                            handle: {res_ent_q.gen, res_slot_q},
@@ -587,7 +613,7 @@ module g6lc_apu_objtab
                         parent_slot: par_slot_q,
                         refcnt: 16'h0, pins: 8'h0, state: 32'h0,
                         bind_mem_slot: APU_OBJTAB_SLOT_NONE,
-                        bind_offset: 64'h0, size: 64'h0,
+                        bind_offset: 64'h0, size: req_q.size,
                         aux: 64'h0, ctx: req_q.ctx};
           state_q  <= StAllocWrE;
         end

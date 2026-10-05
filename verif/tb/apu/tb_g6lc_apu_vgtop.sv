@@ -71,6 +71,11 @@ module tb_g6lc_apu_vgtop;
   logic            w_v, w_done = 0;
   logic            w_r;
   apu_cmdexec_work_t w_o;
+  // §7b/5a-ii: ShaderCore 64-bit aperture port
+  logic            sh_re, sh_we;
+  logic [63:0]     sh_addr, sh_wdata;
+  logic [7:0]      sh_wstrb;
+  logic [63:0]     sh_rdata;
   logic            d_done, irq;
   logic [31:0]     isr;
   logic            isr_ack = 0;
@@ -99,7 +104,10 @@ module tb_g6lc_apu_vgtop;
     .ap_we_o(ap_we), .ap_waddr_o(ap_waddr),
     .ap_wdata_o(ap_wdata), .ap_rdata_i(ap_rdata),
     .work_valid_o(w_v), .work_ready_i(w_r), .work_o(w_o),
-    .work_done_i(w_done),
+    .work_done_i(w_done), .work_done_pl_i('0),
+    .sh_mem_re_o(sh_re), .sh_mem_we_o(sh_we),
+    .sh_mem_addr_o(sh_addr), .sh_mem_wdata_o(sh_wdata),
+    .sh_mem_wstrb_o(sh_wstrb), .sh_mem_rdata_i(sh_rdata),
     .done_o(d_done), .irq_o(irq), .isr_o(isr), .isr_ack_i(isr_ack),
     .fence_pulse_o(f_pulse), .fence_id_o(f_id), .fence_ring_o(f_ring),
     .ring_active_o(r_active), .ring_status_o(r_status),
@@ -113,6 +121,9 @@ module tb_g6lc_apu_vgtop;
   // Enable=0 fixture: all outputs must stay quiet
   logic            o_chr, o_mre, o_mwe, o_are, o_awe, o_wv, o_dn, o_iq,
                    o_fp, o_dotr, o_dotcv;
+  logic            o_shre, o_shwe;
+  logic [63:0]     o_shaddr, o_shwd;
+  logic [7:0]      o_shws;
   logic [31:0]     o_isr;
   logic [63:0]     o_maddr, o_fid;
   logic [31:0]     o_mwd;
@@ -139,7 +150,10 @@ module tb_g6lc_apu_vgtop;
     .ap_we_o(o_awe), .ap_waddr_o(o_awaddr),
     .ap_wdata_o(o_awd), .ap_rdata_i('0),
     .work_valid_o(o_wv), .work_ready_i(1'b0), .work_o(o_wo),
-    .work_done_i(1'b0),
+    .work_done_i(1'b0), .work_done_pl_i('0),
+    .sh_mem_re_o(o_shre), .sh_mem_we_o(o_shwe),
+    .sh_mem_addr_o(o_shaddr), .sh_mem_wdata_o(o_shwd),
+    .sh_mem_wstrb_o(o_shws), .sh_mem_rdata_i('0),
     .done_o(o_dn), .irq_o(o_iq), .isr_o(o_isr), .isr_ack_i(1'b0),
     .fence_pulse_o(o_fp), .fence_id_o(o_fid2), .fence_ring_o(o_fring),
     .ring_active_o(o_ra), .ring_status_o(o_rs), .ring_head_o(o_rh),
@@ -173,6 +187,26 @@ module tb_g6lc_apu_vgtop;
   always @(posedge clk) begin
     if (ap_we) apm[ap_waddr] <= ap_wdata;
     if (ap_re) ap_rdata <= apm[ap_raddr];
+  end
+
+  // §7b/5a-ii: ShaderCore 64-bit aperture service — same backing
+  // store as the 32-bit ap_* window (guest buffer writes must be
+  // visible to the shader; unification with the ring/reply memory
+  // is 3c).  Fixed 1-cycle reads, byte-strobed writes.
+  always @(posedge clk) begin
+    if (sh_re) begin
+      for (int b = 0; b < 8; b++) begin
+        automatic int unsigned a = sh_addr[20:0] + b;
+        sh_rdata[b*8 +: 8] <= apm[(a >> 2) % APW][8*(a[1:0]) +: 8];
+      end
+    end
+    if (sh_we) begin
+      for (int b = 0; b < 8; b++) begin
+        automatic int unsigned a = sh_addr[20:0] + b;
+        if (sh_wstrb[b])
+          apm[(a >> 2) % APW][8*(a[1:0]) +: 8] <= sh_wdata[b*8 +: 8];
+      end
+    end
   end
 
   // ---- work port: accept after 2 cycles, done pulse 3 later ----------------
@@ -220,7 +254,9 @@ module tb_g6lc_apu_vgtop;
   always @(posedge clk) cycles++;
   always @(negedge clk) begin
     if (o_mre || o_mwe || o_are || o_awe || o_wv || o_dn || o_iq ||
-        o_fp || o_dotcv || o_chr || (|o_isr) || o_liv !== '0)
+        o_fp || o_dotcv || o_chr || o_shre || o_shwe ||
+        (|o_shaddr) || (|o_shwd) || (|o_shws) ||
+        (|o_isr) || o_liv !== '0)
       $fatal(1, "disabled vgtop active");
     if (cycles > MAXCYC) $fatal(1, "watchdog");
   end
@@ -229,6 +265,27 @@ module tb_g6lc_apu_vgtop;
   int unsigned tp, ep;            // tape / exp cursors
   int unsigned pub_id = 0;        // avail ids / used-elem slots
   int unsigned fc0;               // fence-pulse count at chain submit
+
+  // §7a Gate-2 float compare (same rule as tb_g6lc_apu_shwave):
+  // sign-aware ULP distance; ±0 equal; NaN==NaN.
+  function automatic int unsigned ulpd(input logic [31:0] a,
+                                       input logic [31:0] b);
+    logic [31:0] d;
+    begin
+      if (a === b) return 0;
+      if ((a & 32'h7FFF_FFFF) == 0 && (b & 32'h7FFF_FFFF) == 0)
+        return 0;
+      if (a[30:23] == 8'hFF && a[22:0] != 0 &&
+          b[30:23] == 8'hFF && b[22:0] != 0)
+        return 0;
+      if (a[31] != b[31]) return 32'h7FFF_FFFF;
+      d = (a > b) ? a - b : b - a;
+      return int'(d);
+    end
+  endfunction
+
+  int unsigned g1_n = 0, g1_bad = 0, g2_n = 0;
+  int unsigned ulp1 = 0, ulp2 = 0, maxulp = 0;
 
   task automatic check(input bit ok, input string msg);
     checks++;
@@ -390,8 +447,11 @@ module tb_g6lc_apu_vgtop;
 
   // -------------------------------------------------------------------------
   initial begin
-    $readmemh("vn_vectors/ue_sm5_transport.hex", tape, 0);
-    $readmemh("vn_vectors/ue_sm5_transport.exp", expm, 0);
+    string vname = "ue_sm5_transport";
+    if ($value$plusargs("vec=%s", vname))
+      $display("compute-session tape: %s", vname);
+    $readmemh({"vn_vectors/", vname, ".hex"}, tape, 0);
+    $readmemh({"vn_vectors/", vname, ".exp"}, expm, 0);
     for (int i = 0; i < GMW; i++) gmem[i] = '0;
     for (int i = 0; i < APW; i++) apm[i] = '0;
     tp = 0; ep = 0;
@@ -494,11 +554,19 @@ module tb_g6lc_apu_vgtop;
                            apm[((a1 >> 2) + i) % APW]);
               end
             end
-            3: begin // CK_LIVE
+            3: begin // CK_LIVE (+ EK_PAGES allocated aperture pages)
               check(rec_kind() == 6, "EK_LIVE kind");
               check(ot_live == 16'(expm[ep + 1]),
                     $sformatf("CK_LIVE got=%0d exp=%0d",
                               ot_live, expm[ep + 1]));
+              ep += 8;
+              check(rec_kind() == 11, "EK_PAGES kind");
+              check($countones(i_dut.gen_on.i_vgp.gen_on.free_q) ==
+                    int'(expm[ep + 1]),
+                    $sformatf("CK_PAGES got=%0d exp=%0d",
+                              $countones(
+                                  i_dut.gen_on.i_vgp.gen_on.free_q),
+                              expm[ep + 1]));
               ep += 8;
             end
             4: begin // CK_EXTRA [ring][byte off]
@@ -511,6 +579,41 @@ module tb_g6lc_apu_vgtop;
                               expm[ep + 3]));
               ep += 8;
             end
+            6: begin // CK_APR [nwords][ap byte off] — §7a gates
+              // EK_APRCHK {off, model_word, oracle_word, cls}
+              for (int i = 0; i < a0; i++) begin
+                automatic logic [31:0] got =
+                    apm[((a1 >> 2) + i) % APW];
+                automatic int unsigned u;
+                check(rec_kind() == 10, "EK_APRCHK kind");
+                check(expm[ep + 1] == a1 + 4 * i,
+                      "EK_APRCHK offset");
+                // Gate 1: bit-exact vs the spirv_model words
+                g1_n++;
+                if (got != expm[ep + 2]) g1_bad++;
+                check(got == expm[ep + 2],
+                      $sformatf("G1 off=%0x got=%08x exp=%08x",
+                                a1 + 4 * i, got, expm[ep + 2]));
+                // Gate 2: oracle compare — cls 0 int/bool exact,
+                // cls 1 float <= 2 ULP
+                g2_n++;
+                if (expm[ep + 4] == 0) begin
+                  check(got == expm[ep + 3],
+                        $sformatf("G2i off=%0x got=%08x exp=%08x",
+                                  a1 + 4 * i, got, expm[ep + 3]));
+                end else begin
+                  u = ulpd(got, expm[ep + 3]);
+                  if (u == 1) ulp1++;
+                  else if (u == 2) ulp2++;
+                  if (u > maxulp && u != 32'h7FFF_FFFF) maxulp = u;
+                  if (u == 32'h7FFF_FFFF) maxulp = 32'h7FFF_FFFF;
+                  check(u <= 2,
+                        $sformatf("G2f off=%0x got=%08x exp=%08x ulp=%0d",
+                                  a1 + 4 * i, got, expm[ep + 3], u));
+                end
+                ep += 8;
+              end
+            end
             default: $fatal(1, "unknown CHECK %0d", what);
           endcase
         end
@@ -522,11 +625,17 @@ module tb_g6lc_apu_vgtop;
       endcase
     end
 
-    // teardown: ObjTab empty is checked by the last CK_LIVE (exp 0)
-    if (errors == 0)
+    // teardown: ObjTab live count and the allocated-page count are
+    // checked by the last CK_LIVE; ObjPay chunks must all be freed too
+    check(i_dut.gen_on.i_pay.gen_on.free_q === '0,
+          "objpay chunks drained");
+    if (errors == 0) begin
+      if (g1_n != 0)
+        $display("PASS-COMPUTE g1=%0d g2=%0d ulp1=%0d ulp2=%0d maxulp=%0d cycles=%0d",
+                 g1_n, g2_n, ulp1, ulp2, maxulp, cycles);
       $display("PASS tb_g6lc_apu_vgtop cases=%0d checks=%0d cycles=%0d",
                cases, checks, cycles);
-    else
+    end else
       $display("FAIL tb_g6lc_apu_vgtop cases=%0d checks=%0d errors=%0d",
                cases, checks, errors);
     $finish;

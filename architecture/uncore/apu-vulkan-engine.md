@@ -564,6 +564,65 @@ dispatch without a bound pipeline → `DEVICE_LOST`. This is the plan's feasibil
 prototype minus a real guest: stock-shaped bytes in, hardware execution of a
 runtime-selected module, data-dependent output, failure when disabled.
 
+### 7c. Control flow, barriers and matrix ops (increment 4b; interface of record 2026-10-05)
+
+Stability-first divergence model for the one-instruction-at-a-time wave engine. glslang
+without optimization keeps locals in `Function` variables, so `OpPhi` appears only from
+`?:`/`&&`/`||`; `if`/`switch` arrive as `OpSelectionMerge` + `OpBranchConditional`/
+`OpSwitch`, loops as `OpLoopMerge M C` with a header, a continue block and a back-edge.
+The scanner's block table (label → pc, already built) is the only metadata needed.
+
+- **Per-wave control state** (flops, `MaxWaves` copies): `pc`, `mask[LAN]`, `prev_blk[LAN]`
+  (label of the block each lane came from, for `OpPhi`), `target[LAN]` (per-lane branch
+  target pc at a divergent branch), and a **reconvergence stack** of depth `CfDepth`
+  (default 8; overflow → `APU_SH_DONE_FAULT`) with entries `{kind: SEL|LOOP, merge_pc,
+  resume_mask, pending_mask, cont_pc}`.
+- **Divergent branch** (`OpBranchConditional`/`OpSwitch` under an `OpSelectionMerge M`):
+  compute each active lane's `target`; if all equal → uniform jump. Otherwise push `{SEL,
+  M, resume = mask, pending = mask}` and fall into the **pending-lane rule**: pick the lowest
+  pending lane, `mask = pending lanes with the same target`, `pending &= ~mask`, `pc =
+  target`. Reaching the label `M` with a `SEL` entry on top re-applies the rule until
+  `pending == 0`, then pops and `mask = resume`. One rule serves if/else and n-way switch.
+- **Loops** (`OpLoopMerge M C`): push `{LOOP, M, resume = mask, pending = 0, cont_pc = C}`.
+  Any branch whose target is `M` removes those lanes from `mask` (they wait at the merge);
+  a branch to `C` or the header proceeds with the remaining lanes (divergent branches
+  inside the body are nested `SEL` entries, whose merge blocks lie inside the loop). When
+  `mask` becomes zero at a branch → `pc = M`, `mask = resume`, pop. `OpBranch` to the header
+  is the back-edge; no iteration limit beyond `ShaderBudget`.
+- **`OpReturn` under divergence**: clears the returning lanes from `mask` and from every
+  stack entry's `resume`/`pending`; when `mask == 0`, unwind to the first entry with work,
+  else the wave is done. `OpKill`/`OpUnreachable` fault in compute.
+- **`OpPhi`**: per lane, select the operand whose parent label equals `prev_blk[lane]`;
+  `prev_blk` is written for the active lanes at every taken branch. Phi operands are read
+  through the regular register map (values from the predecessor are final there because
+  blocks execute to completion before the mask switches).
+- **Barriers**: `OpControlBarrier` makes the wave yield; a per-workgroup scheduler runs the
+  workgroup's waves round-robin at instruction granularity (each wave has its own control
+  state and RF rows; the RF is already wave-indexed). The barrier releases when every live
+  wave of the workgroup has arrived (`arrived` bitmask); a wave that finishes (`OpReturn`
+  of all lanes) counts as arrived forever. `OpMemoryBarrier` is a no-op in the
+  one-core, write-through 4b model (recorded; revisit with caches). Workgroup slab accesses
+  are already ordered by the single LSU.
+- **Matrix ops** without MatHelper: `OpMatrixTimesScalar` (per column), `OpVectorTimesMatrix`,
+  `OpMatrixTimesVector`, `OpMatrixTimesMatrix`, `OpOuterProduct`, `OpTranspose` as
+  micro-sequences over the §7a `OpDot` definition (products then right-leaning fold), so
+  Gate 1 stays bit-exact against `spirv_model.py` with the same sequences. Matrices live
+  as `cols` consecutive vec4 registers (regmap allocates `cols` slots per matrix id).
+- **MatHelper (§8)**: `MatHelperEn` adds a dot-product port to the lane ALU backed by
+  `g6lc_ai_pe_dot_float_pipe`. Policy: a result id decorated `NoContraction` **never** uses
+  the helper; otherwise `OpDot`/matrix ops may. Verification per §8: helper off is the
+  Gate-1 reference; helper on must be bit-identical to helper off for `NoContraction`
+  ids and within a documented ULP bound (measured, per op) elsewhere; `MatrixEn=0`/
+  `MatHelperEn=0` elaborates no AI cells in the shader core.
+- **Corpus 4b** (stock GLSL, no optimizer): if/else chains, nested if in loop, `for` with
+  `break`/`continue`, `while` with data-dependent trip counts, `switch` with fallthrough and
+  `default`, `?:`/`&&`/`||` (phi), early `return` under divergence, `barrier()` with
+  `shared` prefix sum and reduction (LocalSize 32/64), mat2/mat3/mat4 × vector/matrix,
+  `outerProduct`, `transpose`, plus `precise` (`NoContraction`) variants of the dot/matrix
+  shaders. Gates as §7a; model extended with the same reconvergence semantics (it is an
+  interpreter, so it executes lanes independently — the test is that lockstep execution
+  reproduces independent-lane results).
+
 ## 8. MatHelper — AI island arithmetic behind a graphics-owned port
 
 `g6lc_ai_pe_dot_float_pipe` (FP8/FP16/BF16/FP32 lanes, block-floating-point reduction,
@@ -621,5 +680,5 @@ rectangle, not a limit. `Xfer` handles copies/clears/blits and MSAA resolve.
 | 4a (RTL done 2026-10-04, standalone) | `g6lc_apu_sh_pkg`, `g6lc_apu_shmod` (commit scanner: program + type/const/member/decor/var/regmap/init/block/entry `tc_sram` tables, §7a fault rules), `g6lc_apu_shwave` (8 lanes × vec4, one wave / one instruction multi-cycle FSM, `fpnew_fma` ×32, `fpnew_divsqrt_multi`/`cast_multi`/`noncomp` ×8, shared integer divider per lane, lane-serial LSU with robustBufferAccess, `WaitBound` + `ShaderBudget` faults), `g6lc_apu_shcore` (composition on the cmdexec work-record format, `work_ready`, `DispatchIndirect` → `UNSUPPORTED`); tier-T `tools/shader/`: 15 stock GLSL 4.60 compute shaders compiled by `glslang` 15.1.0 (`-V --target-env vulkan1.1`, no optimizer), `spirv_scan.py` (scanner model), `spirv_model.py` (reference interpreter), `vk_compute_oracle.c` (lavapipe, Mesa 25.2.8), `shader_vectors.py` → 75 vectors (15 × 3 seeds + 15 mutated + 15 unsupported-opcode) | Remote 5.008 + local 5.020 identical: `shmod` **38 / 384,389** (tables vs model; MAGIC/CAP/BOUND/TWO_ENTRY/LOCALSIZE/REGS/OPCODE faults), `shwave` **75 / 13,457, ulp1=26 ulp2=0 maxulp=1** (Gate 1 bit-exact incl. robust counts; Gate 2: 14 shaders exact, `math450` 1 ULP on `normalize.x` only — lavapipe rsqrt refinement vs `1/√`), `shcore` 7 / 1,974 (unsupported record, held work, re-commit after retire, commit fault through the port, continuous `Enable=0` monitor). Real glslang output: 1,650 instructions, 75 distinct opcodes, all inside §7a. `Enable=0` 0 cells; small screen (`-GShaderRegs=16 -GMaxWaves=1 -GSlabBytes=1024 -GScratchBytes=64 …`): shmod 385,217 / 112,532 (16 `$mem_v2`), shwave 957,502 / 50,709 (14), shcore 1,283,832 / 144,512 (29); no latches; default-geometry synth deferred (>60 min remote). Throughput ~10–40 cycles/instruction (by design in 4a). Found by the TBs: the first-pass blanket 1-ULP compare masked three composite sequences that differed from Mesa's lowering (`OpDot`, `FMix`, `Fma`, `SmoothStep`) — fixed in RTL + model together. Follow-ups: memory port is fixed 1-cycle with no ready/valid (needs the checked-DMA handshake before 3c/5); one wave at a time (4b round-robin + barriers); `DispatchIndirect`; `NoContraction`/MatHelper single-rounded forms; default-geometry synthesis and the register-file area (256 × 8 × 8 × 128 b) |
 | 4b | control flow (`BranchConditional/Selection/LoopMerge/Phi/Switch`), barriers + round-robin waves, matrix ops + MatHelper, `NoContraction` | glslang loops/ifs corpus under the two gates; helper on/off identical under `NoContraction` |
 | 5a-i (RTL done 2026-10-05, standalone) | §7b capture half: `[keep.*]` lists in `vn_device_profile.toml` → `KEEP = a[7]` on `U32/U64/HANDLE/BLOB/PTR` ROM ops (generator asserts bit 7 free; discard marker now `0x7F`), `vndec` payload port `pay_valid/pay_data` + `pay_words` (fault-gated emission), generated "Payload layouts" doc section; `g6lc_apu_objpay` (16 384-word `tc_sram`, 64-word chunks, first-fit bitmap); `vnfront` staging `tc_sram` (1 024 words, overflow → `APU_VN_FAULT_PAYLOAD` FATAL), layout/pipeline-layout/pipeline payloads parked in objpay via `aux[63:32]`, descriptor-set storage `{handle{gen,slot}, offset, range, type \| unsupported<<31}` filled by `vkUpdateDescriptorSets` with record-time `LOOKUP`, `cmdrec` payload arena (`PayWordsPerBuf` 256) for `PushConstants`/`BindDescriptorSets` (resolved set handles), `cmdexec` state `dset[3:0]` + `push_base/len`; `vn_golden.py` payload expectations + `.pay` checkpoint vectors | Mesa C differential request **524/524**, reply session **97/97**, transport **29/29** (unchanged by capture — device-side only). Remote: `vndec` 2,641 / 182,958 (payload word-for-word), `objpay` 5 / 2,419, `cmdrec` 2,141 / 2,132, `cmdexec` 7 / 29, `vnfront` **172 / 2,213** (`ue_sm5_session`: 11 sub-sessions, objpay drained to zero at teardown) + 11 / 442 (`ue_sm5_payfull`, `ObjPayWords=512`: FULL → `OUT_OF_DEVICE_MEMORY`, staging overflow → FATAL, destroyed-buffer / out-of-range `dstBinding` → unsupported entry, `pValues` > 128 B → `VK_ERROR_UNKNOWN` + INVALID), `vgctl`/`vnpump`/`vgtop` unchanged counts. `Enable=0` 0 cells; no latches. Enable=1: objpay 52,156 / 16,539 (1 retained mem); vnfront 172,409 / 42,538 (small screen 72,543 / 10,858); cmdrec small screen 18,235 / 6,283; vgtop 4,154,838 / 1,325,072 (generic flop-mapped arenas; small screen 2,576,862 / 815,925). Notes: a single `vkCreateDescriptorSetLayout` cannot exceed 257 payload words under the 64-binding profile bound, so staging overflow is driven by multi-write updates; `vgtop` needs `read_slang --unroll-limit 8192`. Follow-ups: 5a-ii below; `vgtop` default geometry is now dominated by four flop-mapped SRAM arenas — the memory-macro mapping, not logic, decides its area |
-| 5a-ii | §7b execution half: shader module → `shmod` slot at create, scan at `vkCreateComputePipelines` (`VK_ERROR_UNKNOWN` + null echo on fault), slot `users` ownership, `READSLOT`, dispatch assembly in `cmdexec`, `shcore` on the `vgtop` work port, `vkAllocateMemory` in the aperture + `blob_id = memory id` mapping | Mesa-shaped compute session through `vgtop` reproduces the lavapipe oracle under the §7a gates, plus the §7b negative arms |
+| 5a-ii (RTL done 2026-10-05, standalone) | §7b execution half: `shcore` slot manager (`ALLOC/REF/UNREF`, module +1 / pipeline +1, retire at 0), `vkCreateShaderModule` streams `pCode` into a `shmod` slot, `vkCreateComputePipelines` consumes the parked payload → `commit` scan (fault or `pSpecializationInfo` → `VK_ERROR_UNKNOWN` + `VK_NULL_HANDLE` echo via `vnrep.rep_null_mask_i`), `ObjTab.READSLOT`, `g6lc_apu_vgpages` factored out of `vgctl` (ctl + front grants in `vgtop`), `vkAllocateMemory` → aperture pages in `aux[63:32]`, `RESOURCE_CREATE_BLOB blob_id ≠ 0` → `LOOKUP(DEVICE_MEMORY)` → mapped onto its extent (oversize → `ERR_PARAM`, unknown → `ERR_RID`), `cmdexec` dispatch assembly (pipeline → sets → entries → buffer → memory → bind table `{set, pos, base, size = min(range, buffer − off, memory − off)}`, push words from the payload arena; any MISS/GEN/unsupported/unbound/no-pipeline or shcore `code ≠ OK` → `DEVICE_LOST`, work not issued), `vnfront` BIND refuses `memoryOffset + size > memory.size` (wrap-safe subtractive form), `shcore` instantiated in `vgtop` with its memory port exposed as `sh_mem_*`; `vn_golden.py --compute-session` (three segments: allocate/map, submit/wait, teardown with real `RESOURCE_UNREF`) | **First stock-shaped bytes → hardware execution → oracle match**: 17 positive compute sessions through the control queue and ring (`tb_g6lc_apu_vgtop --compute`), **Gate 1 bit-exact and Gate 2 max 1 ULP** on all, 18–81 k cycles per session; 10 negative sessions all refuse as specified (bad module, module destroyed before dispatch still executes, buffer destroyed after update → `DEVICE_LOST`, spec info, unsupported descriptor type, no pipeline, pages FULL, unknown `blob_id`, bind past memory → `VK_ERROR_UNKNOWN`, descriptor range past buffer → clamped + robust, model-only oracle). ObjTab, objpay and vgpages all drain to zero at teardown. Mesa differentials 524/524, 100/100, 29/29. Remote: `vgtop` 32 / 2,216 + 27 sessions, `vnfront` 179 / 2,257, `vgpages` 5 / 1,448, `objtab` 8 / 2,225. `Enable=0` 0 cells; no latches. Enable=1: cmdexec 25,169 / 4,868; vgpages 1,641 / 85; vnpump 245,115 / 49,083; vgtop small screen 3,880,719 / 963,785 (default geometry deferred). Review finding fixed before commit: the first bind-table clamp ignored the memory extent. Still standalone: TB aperture model, fixed-latency shader memory port, one wave at a time, no control flow, `DispatchIndirect` unsupported — not Vulkan or graphics qualification |
 | 5 | Raster TBDR + Xfer + sampler | G0 64×64 readback through the stock client; UE SM5 profile queries answered from the profile ROM |
